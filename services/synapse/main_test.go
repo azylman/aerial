@@ -777,7 +777,7 @@ func (m *mockOutboundDispatcher) DiscordInteractionCalls() []*discordgo.Interact
 }
 
 func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp OutboundDispatcher, riverInserter ...RiverInserter) *RouterServer {
-	if client == nil && cfg.GitHubAPIURL == "" && cfg.InfisicalURL == "" && cfg.KubeAPIServer == "" {
+	if client == nil && cfg.GitHubAPIURL == "" && cfg.KubeAPIServer == "" {
 		client = &http.Client{Transport: &zeroCallTransport{}}
 	}
 	srv := NewRouterServer(cfg, client, riverInserter...)
@@ -2195,13 +2195,6 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("writeJSON code = %d, want 500", rec.Code)
 	}
-
-	done := make(chan struct{})
-	runBackgroundSync("test_panic", func(ctx context.Context) error {
-		defer close(done)
-		panic("simulated panic")
-	})
-	<-done
 }
 
 func TestRunServerLifecycle(t *testing.T) {

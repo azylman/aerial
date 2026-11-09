@@ -18,47 +18,38 @@ import (
 
 // Config holds runtime configuration for synapse.
 type Config struct {
-	Port                  string
-	InfisicalURL          string
-	InfisicalClientID     string
-	InfisicalClientSecret string
-	InfisicalProjectID    string
-	InfisicalEnvironment  string
-	KubeAPIServer         string
-	KubeToken             string
-	GitHubToken           string
-	GitHubAPIURL          string
-	PostgresURL           string
-	FluxReceiverURL       string
-	BrainURL              string
-	EriURL                string
-	VanadisURL            string
-	HaroURL               string
-	SystemChannelID       string
-	DiscordToken          string
-	AutoUpdatePRAuthors   []string
-	BotID                 string
-	DefaultOwner          bool
-	WebhookForwardURLs    map[string]string
+	Port                string
+	KubeAPIServer       string
+	KubeToken           string
+	GitHubToken         string
+	GitHubAPIURL        string
+	PostgresURL         string
+	FluxReceiverURL     string
+	BrainURL            string
+	EriURL              string
+	VanadisURL          string
+	HaroURL             string
+	SystemChannelID     string
+	DiscordToken        string
+	AutoUpdatePRAuthors []string
+	BotID               string
+	DefaultOwner        bool
+	WebhookForwardURLs  map[string]string
 }
 
 // RouterYAMLConfig defines the declarative file schema for services/synapse/synapse.yaml.
 type RouterYAMLConfig struct {
-	Port                 string            `yaml:"port"`
-	InfisicalURL         string            `yaml:"infisical_url"`
-	InfisicalClientID    string            `yaml:"infisical_client_id"`
-	InfisicalProjectID   string            `yaml:"infisical_project_id"`
-	InfisicalEnvironment string            `yaml:"infisical_environment"`
-	FluxReceiverURL      string            `yaml:"flux_receiver_url"`
-	EriURL               string            `yaml:"eri_url"`
-	VanadisURL           string            `yaml:"vanadis_url"`
-	HaroURL              string            `yaml:"haro_url"`
-	SystemChannelID      string            `yaml:"system_channel_id"`
-	SystemChannel        string            `yaml:"system_channel"`
-	AutoUpdatePRAuthors  []string          `yaml:"auto_update_pr_authors"`
-	BotID                string            `yaml:"bot_id"`
-	DefaultOwner         bool              `yaml:"default_owner"`
-	WebhookForwardURLs   map[string]string `yaml:"webhook_forward_urls"`
+	Port                string            `yaml:"port"`
+	FluxReceiverURL     string            `yaml:"flux_receiver_url"`
+	EriURL              string            `yaml:"eri_url"`
+	VanadisURL          string            `yaml:"vanadis_url"`
+	HaroURL             string            `yaml:"haro_url"`
+	SystemChannelID     string            `yaml:"system_channel_id"`
+	SystemChannel       string            `yaml:"system_channel"`
+	AutoUpdatePRAuthors []string          `yaml:"auto_update_pr_authors"`
+	BotID               string            `yaml:"bot_id"`
+	DefaultOwner        bool              `yaml:"default_owner"`
+	WebhookForwardURLs  map[string]string `yaml:"webhook_forward_urls"`
 }
 
 var (
@@ -164,28 +155,23 @@ func LoadConfig(configPath string) Config {
 	kubeToken := os.Getenv("KUBE_TOKEN")
 
 	return Config{
-		Port:                  firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
-		InfisicalURL:          strings.TrimRight(firstNonEmpty(os.Getenv("INFISICAL_URL"), fileCfg.InfisicalURL, "http://infisical.aerial"), "/"),
-		InfisicalClientID:     firstNonEmpty(os.Getenv("INFISICAL_CLIENT_ID"), fileCfg.InfisicalClientID),
-		InfisicalClientSecret: os.Getenv("INFISICAL_CLIENT_SECRET"),
-		InfisicalProjectID:    firstNonEmpty(os.Getenv("INFISICAL_PROJECT_ID"), fileCfg.InfisicalProjectID),
-		InfisicalEnvironment:  firstNonEmpty(os.Getenv("INFISICAL_ENVIRONMENT"), fileCfg.InfisicalEnvironment, "default"),
-		KubeAPIServer:         strings.TrimRight(kubeServer, "/"),
-		KubeToken:             kubeToken,
-		GitHubToken:           os.Getenv("GITHUB_PAT"),
-		GitHubAPIURL:          strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
-		PostgresURL:           pgURL,
-		FluxReceiverURL:       strings.TrimRight(firstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
-		BrainURL:              strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
-		EriURL:                strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
-		VanadisURL:            strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL, "http://vanadis.aerial"), "/"),
-		HaroURL:               strings.TrimRight(firstNonEmpty(os.Getenv("HARO_URL"), fileCfg.HaroURL, "http://haro.aerial"), "/"),
-		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
-		DiscordToken:          os.Getenv("DISCORD_TOKEN"),
-		AutoUpdatePRAuthors:   autoUpdateAuthors,
-		BotID:                 botID,
-		DefaultOwner:          defaultOwner,
-		WebhookForwardURLs:    normalizeWebhookForwardURLs(fileCfg.WebhookForwardURLs),
+		Port:                firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
+		KubeAPIServer:       strings.TrimRight(kubeServer, "/"),
+		KubeToken:           kubeToken,
+		GitHubToken:         os.Getenv("GITHUB_PAT"),
+		GitHubAPIURL:        strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
+		PostgresURL:         pgURL,
+		FluxReceiverURL:     strings.TrimRight(firstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
+		BrainURL:            strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
+		EriURL:              strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
+		VanadisURL:          strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL, "http://vanadis.aerial"), "/"),
+		HaroURL:             strings.TrimRight(firstNonEmpty(os.Getenv("HARO_URL"), fileCfg.HaroURL, "http://haro.aerial"), "/"),
+		SystemChannelID:     strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
+		DiscordToken:        os.Getenv("DISCORD_TOKEN"),
+		AutoUpdatePRAuthors: autoUpdateAuthors,
+		BotID:               botID,
+		DefaultOwner:        defaultOwner,
+		WebhookForwardURLs:  normalizeWebhookForwardURLs(fileCfg.WebhookForwardURLs),
 	}
 }
 
