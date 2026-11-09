@@ -84,7 +84,9 @@ type SessionStore interface {
 
 // SessionSummary encapsulates macro-level session summaries, embeddings, and sync metadata.
 type SessionSummary struct {
+	Stack                string    `json:"stack,omitempty"`
 	SessionID            string    `json:"session_id"`
+	Engine               string    `json:"engine,omitempty"`
 	ThreadID             string    `json:"thread_id"`
 	Summary              string    `json:"summary"`
 	Embedding            []float32 `json:"embedding,omitempty"`
@@ -100,6 +102,7 @@ type SessionSummary struct {
 // SessionSyncState tracks ingestion progress and modification times for disk-to-DB reconciliation.
 type SessionSyncState struct {
 	SessionID       string    `json:"session_id"`
+	Engine          string    `json:"engine"`
 	LastMtime       time.Time `json:"last_mtime"`
 	LastIndexedStep int       `json:"last_indexed_step"`
 	IsSettled       bool      `json:"is_settled"`
@@ -107,23 +110,31 @@ type SessionSyncState struct {
 
 // TranscriptStep captures granular execution step details and tool receipts.
 type TranscriptStep struct {
-	SessionID string    `json:"session_id"`
-	StepIndex int       `json:"step_index"`
-	StepType  string    `json:"step_type"`
-	ToolName  string    `json:"tool_name"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
-	RankScore float64   `json:"rank_score,omitempty"`
+	Stack      string    `json:"stack,omitempty"`
+	SessionID  string    `json:"session_id"`
+	Engine     string    `json:"engine,omitempty"`
+	StepIndex  int       `json:"step_index"`
+	StepType   string    `json:"step_type"`
+	ToolName   string    `json:"tool_name"`
+	ToolKind   string    `json:"tool_kind,omitempty"`
+	ToolCallID string    `json:"tool_call_id,omitempty"`
+	Content    string    `json:"content"`
+	CreatedAt  time.Time `json:"created_at"`
+	RankScore  float64   `json:"rank_score,omitempty"`
 }
 
-// TranscriptStore handles persistence, reconciliation, and search for session summaries and transcript steps.
+// TranscriptStore handles persistence, reconciliation, and search for session summaries and transcript steps
+// in a transcript index shared across stacks. Writes (sync states, upserts, inserts, backfills) are scoped to
+// the store's own stack; reads take a stack filter where empty matches every stack.
 type TranscriptStore interface {
 	GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error)
 	UpsertSessionSummary(ctx context.Context, summary SessionSummary) error
+	SetSessionEngine(ctx context.Context, sessionID, engine string) error
 	BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error
-	SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error)
-	SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]TranscriptStep, error)
-	GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) ([]TranscriptStep, error)
+	BackfillToolKinds(ctx context.Context, mapper func(toolName string) string) (int64, error)
+	SearchSessionSummaries(ctx context.Context, stack string, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error)
+	SearchTranscriptSteps(ctx context.Context, stack, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]TranscriptStep, error)
+	GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) ([]TranscriptStep, error)
 }
 
 // Store unifies all repository capabilities under a single interface.
@@ -131,6 +142,5 @@ type Store interface {
 	MessageStore
 	DispatchStore
 	SessionStore
-	TranscriptStore
 	AcquireLeaderLock(ctx context.Context) (func(), error)
 }

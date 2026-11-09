@@ -95,33 +95,7 @@ func SyncTranscripts(
 		return stats, fmt.Errorf("load session sync states: %w", err)
 	}
 
-	discovered := make(map[string]string)
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		sessionID := entry.Name()
-		if strings.HasPrefix(sessionID, ".") {
-			continue
-		}
-
-		transcriptPath := findTranscriptFile(targetBrainDir, sessionID)
-		if transcriptPath != "" {
-			discovered[sessionID] = transcriptPath
-		}
-	}
-
-	// Also discover Claude sessions from Claude project directories
-	var claudeBases []string
-	if opts.ClaudeProjectsDir != "" {
-		claudeBases = append(claudeBases, opts.ClaudeProjectsDir)
-	}
-	claudeBases = append(claudeBases,
-		filepath.Clean(filepath.Join(targetBrainDir, "..", "claude", "projects")),
-		filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "claude", "projects")),
-		filepath.Clean(filepath.Join(targetBrainDir, "..", ".claude", "projects")),
-	)
-	discoverClaudeProjectSessions(claudeBases, discovered)
+	discovered := discoverSessions(targetBrainDir, entries, opts.ClaudeProjectsDir)
 
 	// Deterministic ordering of sessions
 	sessionIDs := make([]string, 0, len(discovered))
@@ -138,7 +112,8 @@ func SyncTranscripts(
 		default:
 		}
 
-		transcriptPath := discovered[sessionID]
+		found := discovered[sessionID]
+		transcriptPath := found.path
 		fi, err := os.Stat(transcriptPath)
 		if err != nil {
 			continue
@@ -149,6 +124,11 @@ func SyncTranscripts(
 		state, exists := syncStates[sessionID]
 		if exists && !mtime.Truncate(time.Millisecond).After(state.LastMtime.Truncate(time.Millisecond)) {
 			stats.SkippedUnchanged++
+			if state.Engine == "" {
+				if err := store.SetSessionEngine(ctx, sessionID, found.engine); err != nil {
+					log.Printf("[Transcript] SetSessionEngine error for session %s: %v", sessionID, err)
+				}
+			}
 			continue
 		}
 
@@ -156,7 +136,7 @@ func SyncTranscripts(
 			break
 		}
 
-		if err := syncSingleSession(ctx, store, sessionID, transcriptPath, mtime, state, exists, embedder, llmFunc, opts, &stats); err != nil {
+		if err := syncSingleSession(ctx, store, sessionID, found.engine, transcriptPath, mtime, state, exists, embedder, llmFunc, opts, &stats); err != nil {
 			stats.Errors++
 			log.Printf("[Transcript] Error syncing session %s: %v", sessionID, err)
 		} else {
@@ -164,11 +144,74 @@ func SyncTranscripts(
 		}
 	}
 
+	backfillToolKinds(ctx, store, opts.MCPServers)
 	stats.Duration = time.Since(start)
 	return stats, nil
 }
 
-func scanClaudeProjDir(projDir string, discovered map[string]string) {
+// discoverSessions maps every session ID found under the brain dir (agy) and the Claude project
+// dirs (Claude Code) to its transcript path and engine. Brain-dir entries win on ID collisions.
+func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjectsDir string) map[string]discoveredSession {
+	discovered := make(map[string]discoveredSession)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		sessionID := entry.Name()
+		if strings.HasPrefix(sessionID, ".") {
+			continue
+		}
+
+		if transcriptPath := findTranscriptFile(targetBrainDir, sessionID); transcriptPath != "" {
+			discovered[sessionID] = discoveredSession{path: transcriptPath, engine: engineForPath(targetBrainDir, transcriptPath)}
+		}
+	}
+
+	// Also discover Claude sessions from Claude project directories
+	var claudeBases []string
+	if claudeProjectsDir != "" {
+		claudeBases = append(claudeBases, claudeProjectsDir)
+	}
+	claudeBases = append(claudeBases,
+		filepath.Clean(filepath.Join(targetBrainDir, "..", "claude", "projects")),
+		filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "claude", "projects")),
+		filepath.Clean(filepath.Join(targetBrainDir, "..", ".claude", "projects")),
+	)
+	discoverClaudeProjectSessions(claudeBases, discovered)
+
+	return discovered
+}
+
+// discoveredSession locates a session transcript on disk and the engine that wrote it.
+type discoveredSession struct {
+	path   string
+	engine string
+}
+
+// engineForPath attributes transcripts inside the brain dir to agy and everything else
+// (Claude project dirs) to Claude Code.
+func engineForPath(brainDir, transcriptPath string) string {
+	if strings.HasPrefix(filepath.Clean(transcriptPath), filepath.Clean(brainDir)+string(filepath.Separator)) {
+		return EngineAgy
+	}
+	return EngineClaude
+}
+
+// backfillToolKinds normalizes tool_kind for local-stack steps ingested before normalization existed.
+func backfillToolKinds(ctx context.Context, store db.TranscriptStore, mcpServers []string) {
+	updated, err := store.BackfillToolKinds(ctx, func(toolName string) string {
+		return NormalizeToolKind(toolName, mcpServers)
+	})
+	if err != nil {
+		log.Printf("[Transcript] BackfillToolKinds error: %v", err)
+		return
+	}
+	if updated > 0 {
+		log.Printf("[Transcript] Backfilled tool_kind on %d steps", updated)
+	}
+}
+
+func scanClaudeProjDir(projDir string, discovered map[string]discoveredSession) {
 	files, err := os.ReadDir(projDir)
 	if err != nil {
 		return
@@ -182,12 +225,12 @@ func scanClaudeProjDir(projDir string, discovered map[string]string) {
 			continue
 		}
 		if _, exists := discovered[sessionID]; !exists {
-			discovered[sessionID] = filepath.Join(projDir, f.Name())
+			discovered[sessionID] = discoveredSession{path: filepath.Join(projDir, f.Name()), engine: EngineClaude}
 		}
 	}
 }
 
-func discoverClaudeProjectSessions(claudeBases []string, discovered map[string]string) {
+func discoverClaudeProjectSessions(claudeBases []string, discovered map[string]discoveredSession) {
 	seenClaudeBase := make(map[string]bool)
 	for _, base := range claudeBases {
 		if seenClaudeBase[base] {
@@ -607,12 +650,14 @@ func buildTranscriptStepsToInsert(
 		stepTime := parseTranscriptTimestamp(raw.CreatedAt, mtime)
 
 		stepsToInsert = append(stepsToInsert, db.TranscriptStep{
-			SessionID: sessionID,
-			StepIndex: raw.StepIndex,
-			StepType:  raw.Type,
-			ToolName:  raw.ToolName,
-			Content:   clipped,
-			CreatedAt: stepTime,
+			SessionID:  sessionID,
+			StepIndex:  raw.StepIndex,
+			StepType:   raw.Type,
+			ToolName:   raw.ToolName,
+			ToolKind:   NormalizeToolKind(raw.ToolName, opts.MCPServers),
+			ToolCallID: raw.ToolCallID,
+			Content:    clipped,
+			CreatedAt:  stepTime,
 		})
 	}
 	return stepsToInsert
@@ -750,7 +795,7 @@ func insertTranscriptSteps(
 func syncSingleSession(
 	ctx context.Context,
 	store db.TranscriptStore,
-	sessionID, transcriptPath string,
+	sessionID, engine, transcriptPath string,
 	mtime time.Time,
 	state db.SessionSyncState,
 	exists bool,
@@ -769,6 +814,7 @@ func syncSingleSession(
 	summaryRecord, hasSummaryRecord, shouldSummarize := buildSessionSummaryRecord(
 		ctx, sessionID, mtime, state, exists, st, watermark, embedder, llmFunc, opts,
 	)
+	summaryRecord.Engine = engine
 
 	// 1. Ensure parent session summary exists before inserting child transcript steps to satisfy foreign key.
 	if hasSummaryRecord {

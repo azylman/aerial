@@ -2,9 +2,11 @@ package transcript
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,6 +36,22 @@ func NewOllamaEmbedder(cfg *config.Config, roots ...string) EmbedderFunc {
 	return func(ctx context.Context, text string) ([]float32, error) {
 		return client.GenerateEmbedding(ctx, text, false, 1)
 	}
+}
+
+// configuredMCPServerNames returns the sorted, de-duplicated MCP server names across every
+// mcp_servers category, used to split agy mcp_<server>_<tool> tool names.
+func configuredMCPServerNames(cur *config.ConfigData) []string {
+	if cur == nil {
+		return nil
+	}
+	var names []string
+	for _, group := range []map[string]json.RawMessage{cur.McpServers.Common, cur.McpServers.Discord, cur.McpServers.Voice, cur.McpServers.Ephemeral} {
+		for name := range group {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
 }
 
 // RunTranscriptSync executes a single synchronization sweep across brain session transcripts.
@@ -79,6 +97,10 @@ func RunTranscriptSync(ctx context.Context, store db.TranscriptStore, cfg *confi
 		} else if homeDir := strings.TrimSpace(cfg.GeminiHomeDir()); homeDir != "" {
 			opts.ClaudeProjectsDir = filepath.Join(homeDir, ".claude", "projects")
 		}
+	}
+
+	if cfg != nil {
+		opts.MCPServers = configuredMCPServerNames(cfg.Current())
 	}
 
 	stats, err := SyncTranscripts(syncCtx, store, targetBrainDir, embedder, llmFunc, opts)

@@ -836,7 +836,7 @@ func handleTranscriptSteps(store db.TranscriptStore) http.HandlerFunc {
 			contextWindow = c
 		}
 
-		res, err := transcript.GetTranscriptStepWindow(r.Context(), store, session, step, contextWindow)
+		res, err := transcript.GetTranscriptStepWindow(r.Context(), store, "", session, step, contextWindow)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1370,7 +1370,7 @@ func handleInternalGuardScan() http.HandlerFunc {
 	}
 }
 
-func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
+func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool *queue.WorkerPool, embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
 	_ = searchPaths
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
@@ -1395,12 +1395,12 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
-	mux.HandleFunc("/transcripts/search", handleTranscriptSearch(store, embedder))
-	mux.HandleFunc("/api/transcripts/search", handleTranscriptSearch(store, embedder))
-	mux.HandleFunc("/transcripts/stats", handleTranscriptStats(store))
-	mux.HandleFunc("/api/transcripts/stats", handleTranscriptStats(store))
-	mux.HandleFunc("/transcripts/steps", handleTranscriptSteps(store))
-	mux.HandleFunc("/api/transcripts/steps", handleTranscriptSteps(store))
+	mux.HandleFunc("/transcripts/search", handleTranscriptSearch(txStore, embedder))
+	mux.HandleFunc("/api/transcripts/search", handleTranscriptSearch(txStore, embedder))
+	mux.HandleFunc("/transcripts/stats", handleTranscriptStats(txStore))
+	mux.HandleFunc("/api/transcripts/stats", handleTranscriptStats(txStore))
+	mux.HandleFunc("/transcripts/steps", handleTranscriptSteps(txStore))
+	mux.HandleFunc("/api/transcripts/steps", handleTranscriptSteps(txStore))
 	mux.HandleFunc("/tasks", handleTasks(store, pool))
 	var llmFn func(context.Context, string, string) (string, error)
 	if pool != nil {

@@ -958,7 +958,7 @@ func TestSyncTranscripts_ClaudeScenarios(t *testing.T) {
 			}
 
 			if tc.wantStoredTools != nil {
-				stored, err := store.GetTranscriptStepRange(ctx, tc.sessionID, 0, 1000)
+				stored, err := store.GetTranscriptStepRange(ctx, "", tc.sessionID, 0, 1000)
 				if err != nil {
 					t.Fatalf("GetTranscriptStepRange failed: %v", err)
 				}
@@ -1014,6 +1014,165 @@ func TestSyncTranscripts_ClaudeScenarios(t *testing.T) {
 				if tc.secondPassSteps > 0 && stats2.StepsInserted != tc.secondPassSteps {
 					t.Fatalf("second pass StepsInserted = %d, want %d", stats2.StepsInserted, tc.secondPassSteps)
 				}
+			}
+		})
+	}
+}
+
+func TestSyncTranscripts_EngineAndToolKinds(t *testing.T) {
+	t.Parallel()
+
+	agyMCP := strings.Join([]string{
+		`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Turn on the lights"}`,
+		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","tool_calls":[{"name":"mcp_home_assistant_turn_on","args":{"entity":"light.desk"}}]}`,
+		`{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:03Z","tool_calls":[{"name":"view_file","args":{"Path":"/etc/hosts"}}]}`,
+	}, "\n") + "\n"
+	claudeBash := strings.Join([]string{
+		`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Inspect disk usage"}}`,
+		`{"type":"assistant","timestamp":"2026-10-01T10:00:02Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_disk","name":"Bash","input":{"command":"df -h"}}]}}`,
+		`{"type":"user","timestamp":"2026-10-01T10:00:05Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_disk","is_error":false,"content":"/dev/sda1 50G 20G 30G"}]}}`,
+	}, "\n") + "\n"
+	future := time.Now().Add(time.Hour).UTC()
+
+	tests := []struct {
+		name         string
+		brainFiles   []sessionFileFixture
+		claudeFiles  []sessionFileFixture
+		priorSummary *db.SessionSummary
+		priorSteps   []db.TranscriptStep
+		mcpServers   []string
+		failMethod   string
+		session      string
+		wantEngine   string
+		wantKinds    []string // "tool_name=tool_kind|tool_call_id" per stored step with a tool name
+	}{
+		{
+			name:       "agy session records engine and longest-prefix mcp kind",
+			brainFiles: []sessionFileFixture{{sessionID: "sess-agy-kinds", content: agyMCP, age: time.Hour}},
+			mcpServers: []string{"home", "home_assistant"},
+			session:    "sess-agy-kinds",
+			wantEngine: "agy",
+			wantKinds:  []string{"mcp_home_assistant_turn_on=mcp:home_assistant|", "view_file=read|"},
+		},
+		{
+			name:        "claude session records engine, kind and tool call id",
+			claudeFiles: []sessionFileFixture{{sessionID: "sess-claude-kinds", content: claudeBash, age: time.Hour}},
+			session:     "sess-claude-kinds",
+			wantEngine:  "claude",
+			wantKinds:   []string{"Bash=shell|", "Bash=shell|toolu_disk"},
+		},
+		{
+			name:         "unchanged legacy session gets its engine stamped and kinds backfilled",
+			brainFiles:   []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}},
+			priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true},
+			priorSteps:   []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}},
+			session:      "sess-legacy",
+			wantEngine:   "agy",
+			wantKinds:    []string{"run_command=shell|"},
+		},
+		{
+			name:         "engine stamp failure is logged and the sweep completes",
+			brainFiles:   []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}},
+			priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true},
+			priorSteps:   []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}},
+			failMethod:   "SetSessionEngine",
+			session:      "sess-legacy",
+			wantKinds:    []string{"run_command=shell|"},
+		},
+		{
+			name:         "backfill failure is logged and leaves kinds empty",
+			brainFiles:   []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}},
+			priorSummary: &db.SessionSummary{SessionID: "sess-legacy", Engine: "agy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true},
+			priorSteps:   []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}},
+			failMethod:   "BackfillToolKinds",
+			session:      "sess-legacy",
+			wantEngine:   "agy",
+			wantKinds:    []string{"run_command=|"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			tmp := t.TempDir()
+			brainDir := filepath.Join(tmp, "brain")
+			projDir := filepath.Join(tmp, "claude", "projects", "-test-project")
+			for _, dir := range []string{brainDir, projDir} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			}
+			store := dbtest.NewFakeStore()
+			if tc.priorSummary != nil {
+				if err := store.UpsertSessionSummary(ctx, *tc.priorSummary); err != nil {
+					t.Fatalf("seed summary: %v", err)
+				}
+				if err := store.BatchInsertTranscriptSteps(ctx, tc.priorSteps); err != nil {
+					t.Fatalf("seed steps: %v", err)
+				}
+			}
+			for _, f := range tc.brainFiles {
+				writeTranscriptFile(t, brainDir, f.sessionID, f.content, time.Now().Add(-f.age))
+			}
+			for _, f := range tc.claudeFiles {
+				p := filepath.Join(projDir, f.sessionID+".jsonl")
+				if err := os.WriteFile(p, []byte(f.content), 0o644); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				mtime := time.Now().Add(-f.age).Truncate(time.Second)
+				if err := os.Chtimes(p, mtime, mtime); err != nil {
+					t.Fatalf("chtimes: %v", err)
+				}
+			}
+
+			if tc.failMethod != "" {
+				store.FailNext(tc.failMethod, errors.New("simulated "+tc.failMethod+" failure"))
+			}
+			opts := SyncOptions{BrainDir: brainDir, BatchLimit: 10, IdleThreshold: 10 * time.Minute, HeadLimit: 1000, TailLimit: 1000, MCPServers: tc.mcpServers}
+			if _, err := SyncTranscripts(ctx, store, brainDir, nil, nil, opts); err != nil {
+				t.Fatalf("SyncTranscripts: %v", err)
+			}
+
+			states, err := store.GetSessionSyncStates(ctx)
+			if err != nil {
+				t.Fatalf("GetSessionSyncStates: %v", err)
+			}
+			if got := states[tc.session].Engine; got != tc.wantEngine {
+				t.Errorf("engine = %q, want %q", got, tc.wantEngine)
+			}
+			stored, err := store.GetTranscriptStepRange(ctx, "", tc.session, 0, 1000)
+			if err != nil {
+				t.Fatalf("GetTranscriptStepRange: %v", err)
+			}
+			var gotKinds []string
+			for _, st := range stored {
+				if st.ToolName != "" {
+					gotKinds = append(gotKinds, st.ToolName+"="+st.ToolKind+"|"+st.ToolCallID)
+				}
+			}
+			if !slices.Equal(gotKinds, tc.wantKinds) {
+				t.Errorf("kinds = %q, want %q", gotKinds, tc.wantKinds)
+			}
+		})
+	}
+}
+
+func TestEngineForPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, brainDir, path, want string
+	}{
+		{name: "agy transcript inside brain dir", brainDir: "/data/brain", path: "/data/brain/sess-1/.system_generated/logs/transcript.jsonl", want: "agy"},
+		{name: "brain dir with trailing slash", brainDir: "/data/brain/", path: "/data/brain/sess-1.jsonl", want: "agy"},
+		{name: "claude project transcript resolved for a brain entry", brainDir: "/data/brain", path: "/data/claude/projects/-proj/sess-1.jsonl", want: "claude"},
+		{name: "sibling dir sharing the brain prefix", brainDir: "/data/brain", path: "/data/brain-old/sess-1.jsonl", want: "claude"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := engineForPath(tc.brainDir, tc.path); got != tc.want {
+				t.Errorf("engineForPath(%q, %q) = %q, want %q", tc.brainDir, tc.path, got, tc.want)
 			}
 		})
 	}

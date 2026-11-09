@@ -49,7 +49,7 @@ func searchSessionSummariesHelper(
 	ctx context.Context,
 	store db.TranscriptStore,
 	embedder EmbedderFunc,
-	query string,
+	stack, query string,
 	limit int,
 ) ([]db.SessionSummary, error) {
 	var embedding []float32
@@ -58,7 +58,7 @@ func searchSessionSummariesHelper(
 			embedding = emb
 		}
 	}
-	return store.SearchSessionSummaries(ctx, embedding, query, limit, 0.0)
+	return store.SearchSessionSummaries(ctx, stack, embedding, query, limit, 0.0)
 }
 
 // ExecuteTranscriptSearch executes a transcript search with full SearchOptions.
@@ -104,7 +104,7 @@ func ExecuteTranscriptSearch(
 
 	// 1. Session Summaries Search
 	if (normalizedMode == "sessions" || normalizedMode == "auto") && trimmedQuery != "" {
-		sessions, err := searchSessionSummariesHelper(ctx, store, embedder, trimmedQuery, limit)
+		sessions, err := searchSessionSummariesHelper(ctx, store, embedder, opts.Stack, trimmedQuery, limit)
 		if err != nil {
 			return SearchResult{}, fmt.Errorf("search session summaries: %w", err)
 		}
@@ -116,7 +116,7 @@ func ExecuteTranscriptSearch(
 
 	// 2. Transcript Steps Search
 	if normalizedMode == "steps" || normalizedMode == "auto" {
-		steps, err := store.SearchTranscriptSteps(ctx, trimmedQuery, sessID, opts.ToolFilter, limit, opts.Since)
+		steps, err := store.SearchTranscriptSteps(ctx, opts.Stack, trimmedQuery, sessID, opts.ToolFilter, limit, opts.Since)
 		if err != nil {
 			return SearchResult{}, fmt.Errorf("search transcript steps: %w", err)
 		}
@@ -128,10 +128,11 @@ func ExecuteTranscriptSearch(
 }
 
 // GetTranscriptStepWindow fetches a step and its surrounding context window from the transcript store.
+// An empty stack matches the session on any stack.
 func GetTranscriptStepWindow(
 	ctx context.Context,
 	store db.TranscriptStore,
-	sessionID string,
+	stack, sessionID string,
 	stepIndex, contextWindow int,
 ) (StepWindowResult, error) {
 	if store == nil {
@@ -154,7 +155,7 @@ func GetTranscriptStepWindow(
 	startStep := max(0, stepIndex-contextWindow)
 	endStep := stepIndex + contextWindow
 
-	steps, err := store.GetTranscriptStepRange(ctx, strings.TrimSpace(sessionID), startStep, endStep)
+	steps, err := store.GetTranscriptStepRange(ctx, strings.TrimSpace(stack), strings.TrimSpace(sessionID), startStep, endStep)
 	if err != nil {
 		return StepWindowResult{}, fmt.Errorf("get transcript step range: %w", err)
 	}

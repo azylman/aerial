@@ -1008,12 +1008,16 @@ func (f *FakeStore) SetSessionInfo(s db.SessionInfo) {
 	f.withLock(func() { f.sessions[s.ThreadID] = clonePtr(&s) })
 }
 
+// FakeTranscriptStack labels every transcript row the FakeStore writes; the fake models a single
+// stack's view, so reads filtered to any other stack return nothing.
+const FakeTranscriptStack = "fake"
+
 func (f *FakeStore) GetSessionSyncStates(ctx context.Context) (map[string]db.SessionSyncState, error) {
 	return withFakeLock(f, "GetSessionSyncStates", func() (map[string]db.SessionSyncState, error) {
 		res := make(map[string]db.SessionSyncState, len(f.sessionSummaries))
 		for id, s := range f.sessionSummaries {
 			if s != nil {
-				res[id] = db.SessionSyncState{SessionID: id, LastMtime: s.LastMtime, LastIndexedStep: s.LastIndexedStep, IsSettled: s.IsSettled}
+				res[id] = db.SessionSyncState{SessionID: id, Engine: s.Engine, LastMtime: s.LastMtime, LastIndexedStep: s.LastIndexedStep, IsSettled: s.IsSettled}
 			}
 		}
 		return res, nil
@@ -1021,6 +1025,7 @@ func (f *FakeStore) GetSessionSyncStates(ctx context.Context) (map[string]db.Ses
 }
 
 func updateExistingSessionSummary(existing *db.SessionSummary, summary db.SessionSummary, now time.Time) {
+	setIf(&existing.Engine, summary.Engine)
 	setIf(&existing.ThreadID, summary.ThreadID)
 	setIf(&existing.Summary, summary.Summary)
 	if len(summary.Embedding) > 0 {
@@ -1057,6 +1062,7 @@ func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary db.Session
 			return nil
 		}
 		cp := summary
+		cp.Stack = FakeTranscriptStack
 		if cp.CreatedAt.IsZero() {
 			cp.CreatedAt = now
 		}
@@ -1064,6 +1070,55 @@ func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary db.Session
 		f.sessionSummaries[summary.SessionID] = cloneSessionSummary(&cp)
 		return nil
 	})
+}
+
+func (f *FakeStore) SetSessionEngine(ctx context.Context, sessionID, engine string) error {
+	return f.withLockErr("SetSessionEngine", func() error {
+		sessionID, engine = strings.TrimSpace(sessionID), strings.TrimSpace(engine)
+		if sessionID == "" || engine == "" {
+			return fmt.Errorf("session ID and engine cannot be empty")
+		}
+		if existing := f.sessionSummaries[sessionID]; existing != nil {
+			existing.Engine = engine
+		}
+		return nil
+	})
+}
+
+func (f *FakeStore) BackfillToolKinds(ctx context.Context, mapper func(string) string) (int64, error) {
+	return withFakeLock(f, "BackfillToolKinds", func() (int64, error) {
+		if mapper == nil {
+			return 0, fmt.Errorf("tool kind mapper cannot be nil")
+		}
+		var updated int64
+		for _, steps := range f.transcriptSteps {
+			for i := range steps {
+				if steps[i].ToolKind != "" || steps[i].ToolName == "" {
+					continue
+				}
+				if kind := mapper(steps[i].ToolName); kind != "" {
+					steps[i].ToolKind = kind
+					updated++
+				}
+			}
+		}
+		return updated, nil
+	})
+}
+
+// fakeStackMatches reports whether a read filtered to stack can see the fake's single stack.
+func fakeStackMatches(stack string) bool {
+	stack = strings.TrimSpace(stack)
+	return stack == "" || stack == FakeTranscriptStack
+}
+
+// readStep decorates a stored step with its session's engine, as the SQL join does.
+func (f *FakeStore) readStep(s db.TranscriptStep) db.TranscriptStep {
+	if sm := f.sessionSummaries[s.SessionID]; sm != nil {
+		s.Engine = sm.Engine
+	}
+	s.RankScore = 1.0
+	return s
 }
 
 func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []db.TranscriptStep) error {
@@ -1074,6 +1129,7 @@ func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []db.T
 				continue
 			}
 			cp := s
+			cp.Stack = FakeTranscriptStack
 			if cp.CreatedAt.IsZero() {
 				cp.CreatedAt = now
 			}
@@ -1085,11 +1141,11 @@ func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []db.T
 	})
 }
 
-func (f *FakeStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]db.SessionSummary, error) {
+func (f *FakeStore) SearchSessionSummaries(ctx context.Context, stack string, embedding []float32, queryText string, limit int, minScore float64) ([]db.SessionSummary, error) {
 	return withFakeLock(f, "SearchSessionSummaries", func() ([]db.SessionSummary, error) {
 		hasEmbedding, queryText := len(embedding) == db.ExpectedEmbeddingDim, strings.TrimSpace(queryText)
 		hasText := queryText != ""
-		if !hasEmbedding && !hasText {
+		if (!hasEmbedding && !hasText) || !fakeStackMatches(stack) {
 			return nil, nil
 		}
 		limit = defaultVal(limit, 10)
@@ -1152,14 +1208,14 @@ func matchesTranscriptStep(s db.TranscriptStep, toolFilter string, sinceTime tim
 	return true
 }
 
-func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]db.TranscriptStep, error) {
+func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, stack, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]db.TranscriptStep, error) {
 	return withFakeLock(f, "SearchTranscriptSteps", func() ([]db.TranscriptStep, error) {
 		queryText, sessionFilter, toolFilter = strings.TrimSpace(queryText), strings.TrimSpace(sessionFilter), strings.TrimSpace(toolFilter)
 		var sinceTime time.Time
 		if len(since) > 0 {
 			sinceTime = since[0]
 		}
-		if queryText == "" && sessionFilter == "" && toolFilter == "" && sinceTime.IsZero() {
+		if (queryText == "" && sessionFilter == "" && toolFilter == "" && sinceTime.IsZero()) || !fakeStackMatches(stack) {
 			return nil, nil
 		}
 		limit = defaultVal(limit, 20)
@@ -1175,9 +1231,7 @@ func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessio
 				if !matchesTranscriptStep(s, toolFilter, sinceTime, queryText, qLower, words) {
 					continue
 				}
-				cp := s
-				cp.RankScore = 1.0
-				matched = append(matched, cp)
+				matched = append(matched, f.readStep(s))
 			}
 		}
 
@@ -1195,10 +1249,10 @@ func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessio
 	})
 }
 
-func (f *FakeStore) GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) ([]db.TranscriptStep, error) {
+func (f *FakeStore) GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) ([]db.TranscriptStep, error) {
 	return withFakeLock(f, "GetTranscriptStepRange", func() ([]db.TranscriptStep, error) {
 		sessionID = strings.TrimSpace(sessionID)
-		if sessionID == "" {
+		if sessionID == "" || !fakeStackMatches(stack) {
 			return nil, nil
 		}
 		if startStep < 0 {
@@ -1214,9 +1268,7 @@ func (f *FakeStore) GetTranscriptStepRange(ctx context.Context, sessionID string
 		var matched []db.TranscriptStep
 		for _, s := range steps {
 			if s.StepIndex >= startStep && s.StepIndex <= endStep {
-				cp := s
-				cp.RankScore = 1.0
-				matched = append(matched, cp)
+				matched = append(matched, f.readStep(s))
 			}
 		}
 		sort.Slice(matched, func(i, j int) bool { return matched[i].StepIndex < matched[j].StepIndex })

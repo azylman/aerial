@@ -1,0 +1,433 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"slices"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/azylman/aerial/services/eri/pkg/config"
+)
+
+const (
+	testDSNStackA = "postgres://aerial@pg.internal:5432/stack_a?sslmode=disable"
+	testDSNStackB = "postgres://aerial@pg.internal:5432/stack_b?sslmode=disable"
+)
+
+// testOpener serves pre-opened fixture pools by DSN and counts opens.
+type testOpener struct {
+	pools map[string]*sql.DB
+	opens int
+}
+
+func (o *testOpener) open(dsn string) (*sql.DB, error) {
+	pool, ok := o.pools[dsn]
+	if !ok {
+		return nil, fmt.Errorf("unknown dsn %s", dsn)
+	}
+	o.opens++
+	return pool, nil
+}
+
+// testKindMapper is a deterministic stand-in for transcript.NormalizeToolKind.
+func testKindMapper(name string) string {
+	switch name {
+	case "Bash", "run_command":
+		return "shell"
+	case "unmapped_tool":
+		return ""
+	default:
+		return "other"
+	}
+}
+
+func TestResolveTranscriptTarget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		databaseURL string
+		tc          config.TranscriptsConfig
+		want        TranscriptTarget
+		wantErr     string
+	}{
+		{name: "no block keeps own db and stack", databaseURL: "postgres://u:p@h:5432/alpha?sslmode=disable", want: TranscriptTarget{DSN: "postgres://u:p@h:5432/alpha?sslmode=disable", Stack: "alpha"}},
+		{name: "shared database swaps path and keeps own stack", databaseURL: "postgres://u:p@h:5432/beta?sslmode=disable", tc: config.TranscriptsConfig{Database: "alpha"}, want: TranscriptTarget{DSN: "postgres://u:p@h:5432/alpha?sslmode=disable", Stack: "beta"}},
+		{name: "explicit stack overrides db name", databaseURL: "postgres://u:p@h:5432/beta", tc: config.TranscriptsConfig{Database: "alpha", Stack: " custom "}, want: TranscriptTarget{DSN: "postgres://u:p@h:5432/alpha", Stack: "custom"}},
+		{name: "database equal to own name keeps dsn verbatim", databaseURL: "postgres://u:p@h:5432/alpha?sslmode=disable", tc: config.TranscriptsConfig{Database: "alpha"}, want: TranscriptTarget{DSN: "postgres://u:p@h:5432/alpha?sslmode=disable", Stack: "alpha"}},
+		{name: "explicit stack without database path", databaseURL: "postgres://u:p@h:5432", tc: config.TranscriptsConfig{Stack: "solo"}, want: TranscriptTarget{DSN: "postgres://u:p@h:5432", Stack: "solo"}},
+		{name: "empty url", databaseURL: "  ", wantErr: "database URL cannot be empty"},
+		{name: "unparseable url", databaseURL: "postgres://u:p@h:bad port/alpha", wantErr: "parse database URL"},
+		{name: "no database name and no stack", databaseURL: "postgres://u:p@h:5432", wantErr: "cannot derive stack"},
+		{name: "schemeless dsn cannot swap", databaseURL: "/tmp/fixture/local.db", tc: config.TranscriptsConfig{Database: "alpha"}, wantErr: "must be a URL"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTranscriptTarget(tc.databaseURL, tc.tc)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("got %+v err=%v, want %+v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestRoutedTranscriptStore_HotReload applies config snapshots in order to one routed store and
+// asserts where each write lands, which stack labels it, and how many shared pools were opened.
+func TestRoutedTranscriptStore_HotReload(t *testing.T) {
+	primary, shared := initTestSQLiteDB(t), initTestSQLiteDB(t)
+	opener := &testOpener{pools: map[string]*sql.DB{"postgres://aerial@pg.internal:5432/shared_tx?sslmode=disable": shared}}
+	cfg := config.NewFromData(&config.ConfigData{DatabaseURL: testDSNStackA})
+	store := NewRoutedTranscriptStore(cfg, primary, opener.open)
+	dbs := map[string]*sql.DB{"primary": primary, "shared": shared}
+
+	steps := []struct {
+		name        string
+		databaseURL string
+		transcripts config.TranscriptsConfig
+		wantDB      string
+		wantStack   string
+		wantOpens   int
+		wantErr     string
+	}{
+		{name: "own db by default", databaseURL: testDSNStackA, wantDB: "primary", wantStack: "stack_a"},
+		{name: "reload to shared db opens a pool", databaseURL: testDSNStackA, transcripts: config.TranscriptsConfig{Database: "shared_tx"}, wantDB: "shared", wantStack: "stack_a", wantOpens: 1},
+		{name: "shared pool is cached", databaseURL: testDSNStackA, transcripts: config.TranscriptsConfig{Database: "shared_tx"}, wantDB: "shared", wantStack: "stack_a", wantOpens: 1},
+		{name: "explicit stack label", databaseURL: testDSNStackA, transcripts: config.TranscriptsConfig{Database: "shared_tx", Stack: "custom"}, wantDB: "shared", wantStack: "custom", wantOpens: 1},
+		{name: "naming own db reuses primary", databaseURL: testDSNStackA, transcripts: config.TranscriptsConfig{Database: "stack_a"}, wantDB: "primary", wantStack: "stack_a", wantOpens: 1},
+		{name: "open failure surfaces", databaseURL: testDSNStackA, transcripts: config.TranscriptsConfig{Database: "missing"}, wantOpens: 1, wantErr: "open shared transcript database"},
+		{name: "unresolvable target surfaces", databaseURL: "postgres://aerial@pg.internal:5432", wantOpens: 1, wantErr: "cannot derive stack"},
+	}
+	for i, st := range steps {
+		t.Run(st.name, func(t *testing.T) {
+			cfg.Update(&config.ConfigData{DatabaseURL: st.databaseURL, Transcripts: st.transcripts})
+			sessionID := fmt.Sprintf("sess-%d", i)
+			err := store.UpsertSessionSummary(context.Background(), SessionSummary{SessionID: sessionID, Engine: "agy"})
+			if opener.opens != st.wantOpens {
+				t.Errorf("opens = %d, want %d", opener.opens, st.wantOpens)
+			}
+			if st.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), st.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", st.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("upsert failed: %v", err)
+			}
+			var gotStack string
+			if err := dbs[st.wantDB].QueryRow("SELECT stack FROM session_summaries WHERE session_id = ?", sessionID).Scan(&gotStack); err != nil {
+				t.Fatalf("row missing from %s db: %v", st.wantDB, err)
+			}
+			if gotStack != st.wantStack {
+				t.Errorf("stack = %q, want %q", gotStack, st.wantStack)
+			}
+		})
+	}
+
+	closer, ok := store.(interface{ Close() error })
+	if !ok {
+		t.Fatal("routed store should implement Close")
+	}
+	if err := closer.Close(); err != nil {
+		t.Errorf("Close returned %v", err)
+	}
+}
+
+func TestRoutedTranscriptStore_Unavailable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		cfg     *config.Config
+		wantErr string
+	}{
+		{name: "nil config", wantErr: "config cannot be nil"},
+		{name: "no opener for shared db", cfg: config.NewFromData(&config.ConfigData{DatabaseURL: testDSNStackB, Transcripts: config.TranscriptsConfig{Database: "stack_a"}}), wantErr: "no opener configured"},
+		{name: "nil primary pool", cfg: config.NewFromData(&config.ConfigData{DatabaseURL: testDSNStackB}), wantErr: ErrNilDatabase.Error()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := NewRoutedTranscriptStore(tc.cfg, nil, nil)
+			ctx := context.Background()
+			errs := map[string]error{
+				"GetSessionSyncStates":       c1(s.GetSessionSyncStates(ctx)),
+				"UpsertSessionSummary":       s.UpsertSessionSummary(ctx, SessionSummary{SessionID: "s"}),
+				"SetSessionEngine":           s.SetSessionEngine(ctx, "s", "agy"),
+				"BatchInsertTranscriptSteps": s.BatchInsertTranscriptSteps(ctx, []TranscriptStep{{SessionID: "s"}}),
+				"BackfillToolKinds":          c1(s.BackfillToolKinds(ctx, testKindMapper)),
+				"SearchSessionSummaries":     c1(s.SearchSessionSummaries(ctx, "", nil, "q", 1, 0)),
+				"SearchTranscriptSteps":      c1(s.SearchTranscriptSteps(ctx, "", "q", "", "", 1)),
+				"GetTranscriptStepRange":     c1(s.GetTranscriptStepRange(ctx, "", "s", 0, 1)),
+			}
+			for op, err := range errs {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("%s: expected error containing %q, got %v", op, tc.wantErr, err)
+				}
+			}
+		})
+	}
+}
+
+// newSharedStackPair returns two routed stores for different stacks that share one fixture DB,
+// mirroring two bots pointed at the same transcripts.database.
+func newSharedStackPair(t *testing.T) (shared *sql.DB, a, b TranscriptStore) {
+	t.Helper()
+	shared = initTestSQLiteDB(t)
+	opener := &testOpener{pools: map[string]*sql.DB{testDSNStackA: shared}}
+	cfgA := config.NewFromData(&config.ConfigData{DatabaseURL: testDSNStackA})
+	cfgB := config.NewFromData(&config.ConfigData{DatabaseURL: testDSNStackB, Transcripts: config.TranscriptsConfig{Database: "stack_a"}})
+	a = NewRoutedTranscriptStore(cfgA, shared, opener.open)
+	b = NewRoutedTranscriptStore(cfgB, initTestSQLiteDB(t), opener.open)
+	return shared, a, b
+}
+
+// seedSharedStacks writes the same session ID from both stacks plus a stack-local session each.
+func seedSharedStacks(t *testing.T, a, b TranscriptStore) {
+	t.Helper()
+	ctx := context.Background()
+	base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	for _, w := range []struct {
+		store   TranscriptStore
+		session string
+		engine  string
+		tool    string
+	}{
+		{a, "dup-sess", "agy", "run_command"},
+		{a, "a-only", "", "Bash"},
+		{b, "dup-sess", "claude", "Bash"},
+		{b, "b-only", "claude", "unmapped_tool"},
+	} {
+		if err := w.store.UpsertSessionSummary(ctx, SessionSummary{SessionID: w.session, Engine: w.engine, Summary: "deploy " + w.session, LastIndexedStep: 1, LastMtime: base}); err != nil {
+			t.Fatalf("seed upsert %s: %v", w.session, err)
+		}
+		steps := []TranscriptStep{
+			{SessionID: w.session, StepIndex: 0, StepType: "user_message", Content: "deploy please", CreatedAt: base},
+			{SessionID: w.session, StepIndex: 1, StepType: "tool_call", ToolName: w.tool, ToolCallID: "call-" + w.session, Content: "kubectl apply", CreatedAt: base.Add(time.Minute)},
+		}
+		if err := w.store.BatchInsertTranscriptSteps(ctx, steps); err != nil {
+			t.Fatalf("seed steps %s: %v", w.session, err)
+		}
+	}
+}
+
+func TestSharedTranscripts_SyncStatesScopedToStack(t *testing.T) {
+	_, a, b := newSharedStackPair(t)
+	seedSharedStacks(t, a, b)
+	tests := []struct {
+		name        string
+		store       TranscriptStore
+		wantEngines map[string]string
+	}{
+		{name: "stack a sees only its sessions", store: a, wantEngines: map[string]string{"dup-sess": "agy", "a-only": ""}},
+		{name: "stack b sees only its sessions", store: b, wantEngines: map[string]string{"dup-sess": "claude", "b-only": "claude"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			states, err := tc.store.GetSessionSyncStates(context.Background())
+			if err != nil {
+				t.Fatalf("GetSessionSyncStates: %v", err)
+			}
+			got := make(map[string]string, len(states))
+			for id, st := range states {
+				got[id] = st.Engine
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tc.wantEngines) {
+				t.Errorf("engines = %v, want %v", got, tc.wantEngines)
+			}
+		})
+	}
+}
+
+func TestSharedTranscripts_SearchStepsSpanStacks(t *testing.T) {
+	_, a, b := newSharedStackPair(t)
+	seedSharedStacks(t, a, b)
+	tests := []struct {
+		name       string
+		reader     TranscriptStore
+		stack      string
+		session    string
+		wantStacks []string
+	}{
+		{name: "unfiltered read from a sees both stacks", reader: a, session: "dup-sess", wantStacks: []string{"stack_a", "stack_a", "stack_b", "stack_b"}},
+		{name: "unfiltered read from b sees both stacks", reader: b, session: "dup-sess,a-only", wantStacks: []string{"stack_a", "stack_a", "stack_a", "stack_a", "stack_b", "stack_b"}},
+		{name: "stack filter narrows to one stack", reader: a, stack: "stack_b", session: "dup-sess,b-only", wantStacks: []string{"stack_b", "stack_b", "stack_b", "stack_b"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			steps, err := tc.reader.SearchTranscriptSteps(context.Background(), tc.stack, "", tc.session, "", 50)
+			if err != nil {
+				t.Fatalf("SearchTranscriptSteps: %v", err)
+			}
+			var gotStacks []string
+			for _, st := range steps {
+				gotStacks = append(gotStacks, st.Stack)
+			}
+			sort.Strings(gotStacks)
+			if !slices.Equal(gotStacks, tc.wantStacks) {
+				t.Errorf("stacks=%v, want %v", gotStacks, tc.wantStacks)
+			}
+		})
+	}
+}
+
+func TestSharedTranscripts_StepRangeSpansStacks(t *testing.T) {
+	_, a, b := newSharedStackPair(t)
+	seedSharedStacks(t, a, b)
+	tests := []struct {
+		name        string
+		stack       string
+		session     string
+		wantRows    []string
+		wantEngines []string
+	}{
+		{name: "empty stack returns every stack's steps", session: "dup-sess", wantRows: []string{"stack_a/0", "stack_a/1", "stack_b/0", "stack_b/1"}, wantEngines: []string{"agy", "agy", "claude", "claude"}},
+		{name: "stack filter returns one stack", stack: "stack_b", session: "dup-sess", wantRows: []string{"stack_b/0", "stack_b/1"}, wantEngines: []string{"claude", "claude"}},
+		{name: "stack without the session is empty", stack: "stack_a", session: "b-only"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			steps, err := a.GetTranscriptStepRange(context.Background(), tc.stack, tc.session, 0, 5)
+			if err != nil {
+				t.Fatalf("GetTranscriptStepRange: %v", err)
+			}
+			var gotRows, gotEngines []string
+			for _, st := range steps {
+				gotRows = append(gotRows, fmt.Sprintf("%s/%d", st.Stack, st.StepIndex))
+				gotEngines = append(gotEngines, st.Engine)
+			}
+			if !slices.Equal(gotRows, tc.wantRows) || !slices.Equal(gotEngines, tc.wantEngines) {
+				t.Errorf("rows=%v engines=%v, want rows=%v engines=%v", gotRows, gotEngines, tc.wantRows, tc.wantEngines)
+			}
+		})
+	}
+}
+
+func TestSharedTranscripts_BackfillToolKindsScopedToStack(t *testing.T) {
+	tests := []struct {
+		name        string
+		backfillB   bool
+		wantUpdated int64
+		wantKinds   map[string]string
+	}{
+		{name: "backfill from a leaves b untouched", wantUpdated: 2, wantKinds: map[string]string{"stack_a/dup-sess": "shell|call-dup-sess", "stack_a/a-only": "shell|call-a-only", "stack_b/dup-sess": "|call-dup-sess", "stack_b/b-only": "|call-b-only"}},
+		{name: "backfill from b skips unmapped names", backfillB: true, wantUpdated: 1, wantKinds: map[string]string{"stack_a/dup-sess": "|call-dup-sess", "stack_a/a-only": "|call-a-only", "stack_b/dup-sess": "shell|call-dup-sess", "stack_b/b-only": "|call-b-only"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			shared, a, b := newSharedStackPair(t)
+			seedSharedStacks(t, a, b)
+			writer := a
+			if tc.backfillB {
+				writer = b
+			}
+			updated, err := writer.BackfillToolKinds(context.Background(), testKindMapper)
+			if err != nil || updated != tc.wantUpdated {
+				t.Fatalf("updated=%d err=%v, want %d", updated, err, tc.wantUpdated)
+			}
+			got := readStackKeyed(t, shared, "SELECT stack, session_id, tool_kind || '|' || tool_call_id FROM transcript_steps WHERE step_index = 1")
+			if fmt.Sprint(got) != fmt.Sprint(tc.wantKinds) {
+				t.Errorf("kinds = %v, want %v", got, tc.wantKinds)
+			}
+		})
+	}
+}
+
+func TestSQLTranscriptStore_SetSessionEngine(t *testing.T) {
+	tests := []struct {
+		name        string
+		session     string
+		engine      string
+		wantErr     string
+		wantEngines map[string]string
+	}{
+		{name: "stamps only the own-stack row", session: "a-only", engine: "claude", wantEngines: map[string]string{"stack_a/a-only": "claude", "stack_a/dup-sess": "agy", "stack_b/dup-sess": "claude", "stack_b/b-only": "claude"}},
+		{name: "same id on another stack is untouched", session: "dup-sess", engine: "claude", wantEngines: map[string]string{"stack_a/a-only": "", "stack_a/dup-sess": "claude", "stack_b/dup-sess": "claude", "stack_b/b-only": "claude"}},
+		{name: "empty engine rejected", session: "a-only", engine: " ", wantErr: "cannot be empty"},
+		{name: "empty session rejected", engine: "agy", wantErr: "cannot be empty"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			shared, a, b := newSharedStackPair(t)
+			seedSharedStacks(t, a, b)
+			err := a.SetSessionEngine(context.Background(), tc.session, tc.engine)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SetSessionEngine: %v", err)
+			}
+			got := readStackKeyed(t, shared, "SELECT stack, session_id, engine FROM session_summaries")
+			if fmt.Sprint(got) != fmt.Sprint(tc.wantEngines) {
+				t.Errorf("engines = %v, want %v", got, tc.wantEngines)
+			}
+		})
+	}
+}
+
+// readStackKeyed maps "stack/session_id" to the third selected column.
+func readStackKeyed(t *testing.T, database *sql.DB, query string) map[string]string {
+	t.Helper()
+	rows, err := database.Query(query)
+	if err != nil {
+		t.Fatalf("query %q: %v", query, err)
+	}
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var stack, session, value string
+		if err := rows.Scan(&stack, &session, &value); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got[stack+"/"+session] = value
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	return got
+}
+
+// TestSQLTranscriptStore_ExactScanTx drives the PostgreSQL-only exact-scan transaction against the
+// wire mock: BEGIN and SET LOCAL succeed over the simple protocol, so failures surface from the
+// begin (cancelled context) or the query (client-side encode error) and the tx is rolled back.
+func TestSQLTranscriptStore_ExactScanTx(t *testing.T) {
+	addr := startMockPostgres(t)
+	pg, err := Open(fmt.Sprintf("postgres://mock:mock@%s/stack_a?sslmode=disable", addr))
+	if err != nil {
+		t.Fatalf("Open mock postgres: %v", err)
+	}
+	t.Cleanup(func() { _ = pg.Close() })
+	store := NewSQLTranscriptStore(pg, "stack_a")
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		arg     any
+		wantErr string
+	}{
+		{name: "begin failure", ctx: cancelled, arg: "x", wantErr: "begin exact-scan search tx"},
+		{name: "query failure rolls back", ctx: context.Background(), arg: make(chan int), wantErr: "search session summaries query failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := store.querySessionSummaries(tc.ctx, true, "SELECT $1::text", tc.arg)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}

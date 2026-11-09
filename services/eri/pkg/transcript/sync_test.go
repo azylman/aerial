@@ -2,9 +2,11 @@ package transcript
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -196,6 +198,36 @@ func TestStartTranscriptSync_TableDriven(t *testing.T) {
 				case <-time.After(2 * time.Second):
 					t.Fatalf("timed out waiting for transcript sync tick %d", i+1)
 				}
+			}
+		})
+	}
+}
+
+func TestConfiguredMCPServerNames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cur  *config.ConfigData
+		want []string
+	}{
+		{name: "nil snapshot", cur: nil, want: nil},
+		{name: "no servers", cur: &config.ConfigData{}, want: nil},
+		{
+			name: "union across categories sorted and deduplicated",
+			cur: &config.ConfigData{McpServers: config.TargetMcpConfig{
+				Common:    map[string]json.RawMessage{"github": nil, "home_assistant": nil},
+				Discord:   map[string]json.RawMessage{"discord": nil, "github": nil},
+				Voice:     map[string]json.RawMessage{"home": nil},
+				Ephemeral: map[string]json.RawMessage{"docket": nil},
+			}},
+			want: []string{"discord", "docket", "github", "home", "home_assistant"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := configuredMCPServerNames(tc.cur); !slices.Equal(got, tc.want) {
+				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
 	}

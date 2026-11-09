@@ -186,7 +186,9 @@ CREATE INDEX IF NOT EXISTS idx_facts_fts ON facts USING gin(fts_tokens);
 
 -- Session Summaries Table
 CREATE TABLE IF NOT EXISTS session_summaries (
-    session_id TEXT PRIMARY KEY,
+    stack TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    engine TEXT NOT NULL DEFAULT '',
     thread_id TEXT NOT NULL DEFAULT '',
     summary TEXT NOT NULL DEFAULT '',
     fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', summary)) STORED,
@@ -196,9 +198,11 @@ CREATE TABLE IF NOT EXISTS session_summaries (
     summary_step_watermark INT NOT NULL DEFAULT -1,
     is_settled BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (stack, session_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_session_summaries_stack_mtime ON session_summaries(stack, last_mtime);
 CREATE INDEX IF NOT EXISTS idx_session_summaries_fts ON session_summaries USING GIN(fts_tokens);
 CREATE INDEX IF NOT EXISTS idx_session_summaries_mtime ON session_summaries(last_mtime);
 CREATE INDEX IF NOT EXISTS idx_session_summaries_thread ON session_summaries(thread_id);
@@ -206,18 +210,23 @@ CREATE INDEX IF NOT EXISTS idx_session_summaries_embedding ON session_summaries 
 
 -- Transcript Steps Table
 CREATE TABLE IF NOT EXISTS transcript_steps (
-    session_id TEXT NOT NULL REFERENCES session_summaries(session_id) ON DELETE CASCADE,
+    stack TEXT NOT NULL,
+    session_id TEXT NOT NULL,
     step_index INT NOT NULL,
     step_type TEXT NOT NULL DEFAULT '',
     tool_name TEXT NOT NULL DEFAULT '',
+    tool_kind TEXT NOT NULL DEFAULT '',
+    tool_call_id TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL DEFAULT '',
     fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', LEFT(content, 50000))) STORED,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (session_id, step_index)
+    PRIMARY KEY (stack, session_id, step_index),
+    FOREIGN KEY (stack, session_id) REFERENCES session_summaries(stack, session_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_transcript_steps_fts ON transcript_steps USING GIN(fts_tokens);
 CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_name);
+CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool_kind ON transcript_steps(tool_kind);
 
 -- Pull Request and Deployment Registry Table
 CREATE TABLE IF NOT EXISTS pr_registry (

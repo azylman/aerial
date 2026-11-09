@@ -532,7 +532,7 @@ func TestHandleDirectMessage(t *testing.T) {
 		pool := queue.New(nil, queue.WorkerPoolConfig{
 			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		})
-		mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), pool, nil)
+		mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), dbtest.NewFakeStore(), pool, nil)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`)))
 		if w.Code != http.StatusOK {
@@ -642,7 +642,7 @@ func TestHandleStatusWidget(t *testing.T) {
 			}
 			var w *httptest.ResponseRecorder
 			if tc.useMux {
-				mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), tc.pool, nil)
+				mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), dbtest.NewFakeStore(), tc.pool, nil)
 				w = httptest.NewRecorder()
 				mux.ServeHTTP(w, httptest.NewRequest(tc.method, path, r))
 			} else {
@@ -749,7 +749,7 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 	})
 
 	t.Run("mux endpoints", func(t *testing.T) {
-		mux := SetupBrainMuxWithEmbedder(fake, nil, nil)
+		mux := SetupBrainMuxWithEmbedder(fake, fake, nil, nil)
 		for _, path := range []string{"/api/transcripts/search?q=test", "/api/transcripts/stats", "/api/transcripts/steps?session=sess-mux-1&step=0"} {
 			if w := runHTTP(mux.ServeHTTP, http.MethodGet, path, nil); w.Code != http.StatusOK {
 				t.Errorf("expected 200 for %s, got %d", path, w.Code)
@@ -766,15 +766,15 @@ func (e *errTranscriptStore) GetSessionSyncStates(ctx context.Context) (map[stri
 	return nil, errors.New("simulated sync states db error")
 }
 
-func (e *errTranscriptStore) SearchTranscriptSteps(ctx context.Context, query, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]db.TranscriptStep, error) {
+func (e *errTranscriptStore) SearchTranscriptSteps(ctx context.Context, stack, query, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]db.TranscriptStep, error) {
 	return nil, errors.New("simulated search transcript steps error")
 }
 
-func (e *errTranscriptStore) SearchSessionSummaries(ctx context.Context, queryEmbedding []float32, textQuery string, limit int, threshold float64) ([]db.SessionSummary, error) {
+func (e *errTranscriptStore) SearchSessionSummaries(ctx context.Context, stack string, queryEmbedding []float32, textQuery string, limit int, threshold float64) ([]db.SessionSummary, error) {
 	return nil, errors.New("simulated search session summaries error")
 }
 
-func (e *errTranscriptStore) GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) ([]db.TranscriptStep, error) {
+func (e *errTranscriptStore) GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) ([]db.TranscriptStep, error) {
 	return nil, errors.New("simulated get transcript step range error")
 }
 
@@ -1230,7 +1230,7 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 	tmpHome := t.TempDir()
-	mux := SetupBrainMuxWithEmbedder(store, pool, nil, tmpHome)
+	mux := SetupBrainMuxWithEmbedder(store, store, pool, nil, tmpHome)
 
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/health", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /health, got %d", w.Code)

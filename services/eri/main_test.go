@@ -103,6 +103,7 @@ func WithSkipEnvironmentSync() ReloadOption {
 func WithStore(store db.Store) BrainAppOption {
 	return func(o *brainAppOptions) {
 		o.store = store
+		o.txStore, _ = store.(db.TranscriptStore)
 	}
 }
 
@@ -1543,7 +1544,7 @@ func TestStartLeaderHandoff_Scenarios(t *testing.T) {
 			pool.Start()
 			defer pool.Stop()
 
-			errCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, pool, nil, ephemPool, cfg, cfg.Current())
+			errCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, store, pool, nil, ephemPool, cfg, cfg.Current())
 			<-lockEntered
 
 			if tc.holdThenUnblk {

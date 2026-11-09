@@ -74,6 +74,7 @@ func TestLoadConfig_Ingestion(t *testing.T) {
 		wantVanadisURL string
 		wantHaroURL    string
 		wantCovenURL   string
+		wantTx         TranscriptsConfig
 		wantErr        bool
 		errContains    string
 	}{
@@ -206,6 +207,9 @@ synapse_url: "  http://synapse.internal:4020///  "
 vanadis_url: "http://vanadis.internal:4025/  "
 haro_url: "  http://haro.internal:4026  "
 coven_url: "http://coven.internal:4027/"
+transcripts:
+  database: "  shared_db  "
+  stack: " stack-b "
 channels:
   default:
     mode: "threads"
@@ -216,6 +220,7 @@ channels:
 			wantVanadisURL: "http://vanadis.internal:4025",
 			wantHaroURL:    "http://haro.internal:4026",
 			wantCovenURL:   "http://coven.internal:4027",
+			wantTx:         TranscriptsConfig{Database: "shared_db", Stack: "stack-b"},
 		},
 	}
 
@@ -260,6 +265,9 @@ channels:
 			}
 			if tc.wantCovenURL != "" && cur.CovenURL != tc.wantCovenURL {
 				t.Errorf("CovenURL = %q, want %q", cur.CovenURL, tc.wantCovenURL)
+			}
+			if cur.Transcripts != tc.wantTx {
+				t.Errorf("Transcripts = %+v, want %+v", cur.Transcripts, tc.wantTx)
 			}
 		})
 	}

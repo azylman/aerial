@@ -198,6 +198,14 @@ type VoiceConfig struct {
 	AmbientContext   *AmbientContextConfig `yaml:"ambient_context,omitempty" json:"ambient_context,omitempty"`
 }
 
+// TranscriptsConfig points the transcript index at a shared database. Database names the
+// logical DB holding the shared transcript tables (empty keeps the stack's own DatabaseURL DB);
+// Stack labels the rows this instance writes (empty defaults to its own DatabaseURL DB name).
+type TranscriptsConfig struct {
+	Database string `yaml:"database,omitempty" json:"database,omitempty"`
+	Stack    string `yaml:"stack,omitempty" json:"stack,omitempty"`
+}
+
 type ConfigData struct {
 	Model                     string                   `yaml:"model" json:"model"`
 	Timezone                  string                   `yaml:"timezone" json:"timezone"`
@@ -241,6 +249,7 @@ type ConfigData struct {
 	VanadisURL                string                   `yaml:"vanadis_url" json:"vanadis_url"`
 	HaroURL                   string                   `yaml:"haro_url" json:"haro_url"`
 	CovenURL                  string                   `yaml:"coven_url" json:"coven_url"`
+	Transcripts               TranscriptsConfig        `yaml:"transcripts,omitempty" json:"transcripts,omitempty"`
 }
 
 func normalizePrewarmedTargets(targets []string) []string {
@@ -377,6 +386,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		VanadisURL                string                   `yaml:"vanadis_url"`
 		HaroURL                   string                   `yaml:"haro_url"`
 		CovenURL                  string                   `yaml:"coven_url"`
+		Transcripts               TranscriptsConfig        `yaml:"transcripts"`
 	}
 
 	var raw rawConfigHelper
@@ -402,6 +412,10 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.VanadisURL = strings.TrimRight(strings.TrimSpace(raw.VanadisURL), "/")
 	c.HaroURL = strings.TrimRight(strings.TrimSpace(raw.HaroURL), "/")
 	c.CovenURL = strings.TrimRight(strings.TrimSpace(raw.CovenURL), "/")
+	c.Transcripts = TranscriptsConfig{
+		Database: strings.TrimSpace(raw.Transcripts.Database),
+		Stack:    strings.TrimSpace(raw.Transcripts.Stack),
+	}
 	c.APIKey = raw.APIKey
 	c.HarnessAPIKey = raw.HarnessAPIKey
 	c.SystemPrompt = raw.SystemPrompt
