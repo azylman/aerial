@@ -1171,6 +1171,8 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 	var observedDir string
 	var stagedFileContent []byte
 	var stagedFileExistsDuringRun bool
+	var observedDirPerm os.FileMode
+	var stagedFilePerm os.FileMode
 
 	stagingLLM := handleInternalLLM(func(ctx context.Context, model, p string) (string, error) {
 		observedPrompt = p
@@ -1178,7 +1180,13 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 			rest := after
 			lines := strings.Split(rest, "\n")
 			observedDir = strings.TrimSpace(lines[0])
+			if info, err := os.Stat(observedDir); err == nil {
+				observedDirPerm = info.Mode().Perm()
+			}
 			stagedPath := filepath.Join(observedDir, "test.txt")
+			if info, err := os.Stat(stagedPath); err == nil {
+				stagedFilePerm = info.Mode().Perm()
+			}
 			if data, err := os.ReadFile(stagedPath); err == nil {
 				stagedFileExistsDuringRun = true
 				stagedFileContent = data
@@ -1236,6 +1244,12 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 	}
 	if string(stagedFileContent) != "attachment content" {
 		t.Errorf("expected staged content %q, got %q", "attachment content", string(stagedFileContent))
+	}
+	if observedDirPerm != 0o755 {
+		t.Errorf("expected staged directory perm 0755, got %#o", observedDirPerm)
+	}
+	if stagedFilePerm != 0o644 {
+		t.Errorf("expected staged file perm 0644, got %#o", stagedFilePerm)
 	}
 	if !strings.Contains(observedPrompt, "<ATTACHMENTS>") {
 		t.Errorf("expected observed prompt to contain <ATTACHMENTS>, got %q", observedPrompt)
