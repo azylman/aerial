@@ -390,29 +390,41 @@ func TestSharedTranscripts_StepRangeSpansStacks(t *testing.T) {
 
 func TestSharedTranscripts_BackfillToolKindsScopedToStack(t *testing.T) {
 	tests := []struct {
-		name        string
-		backfillB   bool
-		wantUpdated int64
-		wantKinds   map[string]string
+		name         string
+		writerStack  string
+		batchSize    int
+		extraSteps   int
+		wantUpdated  int64
+		wantKinds    map[string]string
+		wantUnmapped map[string]string
 	}{
-		{name: "backfill from a leaves b untouched", wantUpdated: 2, wantKinds: map[string]string{"stack_a/dup-sess": "shell|call-dup-sess", "stack_a/a-only": "shell|call-a-only", "stack_b/dup-sess": "|call-dup-sess", "stack_b/b-only": "|call-b-only"}},
-		{name: "backfill from b skips unmapped names", backfillB: true, wantUpdated: 1, wantKinds: map[string]string{"stack_a/dup-sess": "|call-dup-sess", "stack_a/a-only": "|call-a-only", "stack_b/dup-sess": "shell|call-dup-sess", "stack_b/b-only": "|call-b-only"}},
+		{name: "backfill from a leaves b untouched", writerStack: "stack_a", batchSize: 2000, wantUpdated: 2, wantKinds: map[string]string{"stack_a/dup-sess": "shell|call-dup-sess", "stack_a/a-only": "shell|call-a-only", "stack_b/dup-sess": "|call-dup-sess", "stack_b/b-only": "|call-b-only"}, wantUnmapped: map[string]string{"stack_b/unmapped": "2"}},
+		{name: "backfill from b skips unmapped names", writerStack: "stack_b", batchSize: 2000, wantUpdated: 1, wantKinds: map[string]string{"stack_a/dup-sess": "|call-dup-sess", "stack_a/a-only": "|call-a-only", "stack_b/dup-sess": "shell|call-dup-sess", "stack_b/b-only": "|call-b-only"}, wantUnmapped: map[string]string{"stack_a/unmapped": "2", "stack_b/unmapped": "1"}},
+		{name: "small batches drain every local row and leave b untouched", writerStack: "stack_a", batchSize: 2, extraSteps: 5, wantUpdated: 7, wantKinds: map[string]string{"stack_a/dup-sess": "shell|call-dup-sess", "stack_a/a-only": "shell|call-a-only", "stack_b/dup-sess": "|call-dup-sess", "stack_b/b-only": "|call-b-only"}, wantUnmapped: map[string]string{"stack_b/unmapped": "2"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			shared, a, b := newSharedStackPair(t)
 			seedSharedStacks(t, a, b)
-			writer := a
-			if tc.backfillB {
-				writer = b
+			base := time.Date(2026, 11, 1, 13, 0, 0, 0, time.UTC)
+			extra := make([]TranscriptStep, 0, tc.extraSteps)
+			for i := range tc.extraSteps {
+				extra = append(extra, TranscriptStep{SessionID: "a-only", StepIndex: 2 + i, StepType: "tool_call", ToolName: "Bash", Content: "kubectl get pods", CreatedAt: base})
 			}
-			updated, err := writer.BackfillToolKinds(context.Background(), testKindMapper)
+			if err := a.BatchInsertTranscriptSteps(context.Background(), extra); err != nil {
+				t.Fatalf("seed extra steps: %v", err)
+			}
+			updated, err := NewSQLTranscriptStore(shared, tc.writerStack).backfillToolKinds(context.Background(), testKindMapper, tc.batchSize, time.Minute)
 			if err != nil || updated != tc.wantUpdated {
 				t.Fatalf("updated=%d err=%v, want %d", updated, err, tc.wantUpdated)
 			}
 			got := readStackKeyed(t, shared, "SELECT stack, session_id, tool_kind || '|' || tool_call_id FROM transcript_steps WHERE step_index = 1")
 			if fmt.Sprint(got) != fmt.Sprint(tc.wantKinds) {
 				t.Errorf("kinds = %v, want %v", got, tc.wantKinds)
+			}
+			unmapped := readStackKeyed(t, shared, "SELECT stack, 'unmapped', COUNT(*) FROM transcript_steps WHERE tool_kind = '' AND tool_name <> '' GROUP BY stack")
+			if fmt.Sprint(unmapped) != fmt.Sprint(tc.wantUnmapped) {
+				t.Errorf("unmapped = %v, want %v", unmapped, tc.wantUnmapped)
 			}
 		})
 	}

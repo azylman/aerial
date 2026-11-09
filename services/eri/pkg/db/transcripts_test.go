@@ -629,18 +629,25 @@ func TestSQLTranscriptStore_WriteGuardsAndFailures(t *testing.T) {
 		queryErr   error
 		execErr    error
 		namesSQL   string
+		batchSize  int
+		budget     time.Duration
+		batchRows  []int64
 		wantErr    string
 		wantUpdate int64
 	}{
-		{name: "read-only store rejects backfill", wantErr: "stack cannot be empty"},
-		{name: "names query failure", stack: "stack-a", queryErr: errors.New("names down"), wantErr: "query unmapped tool names"},
-		{name: "names scan failure", stack: "stack-a", namesSQL: "SELECT 1, 2", wantErr: "scan unmapped tool names"},
-		{name: "update failure", stack: "stack-a", namesSQL: "SELECT 'Bash'", execErr: errors.New("update down"), wantErr: `backfill tool kind for "Bash"`},
-		{name: "unmapped names skipped and mapped counted", stack: "stack-a", namesSQL: "SELECT 'unmapped_tool' UNION ALL SELECT 'Bash'", wantUpdate: 3},
+		{name: "read-only store rejects backfill", batchSize: 2000, budget: time.Minute, wantErr: "stack cannot be empty"},
+		{name: "non-positive batch size rejected", stack: "stack-a", budget: time.Minute, wantErr: "batch size must be positive"},
+		{name: "names query failure", stack: "stack-a", batchSize: 2000, budget: time.Minute, queryErr: errors.New("names down"), wantErr: "query unmapped tool names"},
+		{name: "names scan failure", stack: "stack-a", batchSize: 2000, budget: time.Minute, namesSQL: "SELECT 1, 2", wantErr: "scan unmapped tool names"},
+		{name: "update failure", stack: "stack-a", batchSize: 2000, budget: time.Minute, namesSQL: "SELECT 'Bash'", execErr: errors.New("update down"), wantErr: `backfill tool kind for "Bash"`},
+		{name: "unmapped names skipped and mapped counted", stack: "stack-a", batchSize: 2000, budget: time.Minute, namesSQL: "SELECT 'unmapped_tool' UNION ALL SELECT 'Bash'", batchRows: []int64{3}, wantUpdate: 3},
+		{name: "full batches repeat until a short batch then next name", stack: "stack-a", batchSize: 2, budget: time.Minute, namesSQL: "SELECT 'run_command' UNION ALL SELECT 'Bash'", batchRows: []int64{2, 2, 1, 1}, wantUpdate: 6},
+		{name: "zero budget issues no update and succeeds", stack: "stack-a", batchSize: 2000, namesSQL: "SELECT 'run_command'", batchRows: []int64{5}, wantUpdate: 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			var execs int
 			mock := testMockDBTX{
 				queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 					if tc.queryErr != nil {
@@ -652,10 +659,15 @@ func TestSQLTranscriptStore_WriteGuardsAndFailures(t *testing.T) {
 					if tc.execErr != nil {
 						return nil, tc.execErr
 					}
-					return testCustomResult{rows: 3}, nil
+					res := testCustomResult{}
+					if execs < len(tc.batchRows) {
+						res.rows = tc.batchRows[execs]
+					}
+					execs++
+					return res, nil
 				},
 			}
-			updated, err := NewSQLTranscriptStore(mock, tc.stack).BackfillToolKinds(context.Background(), testKindMapper)
+			updated, err := NewSQLTranscriptStore(mock, tc.stack).backfillToolKinds(context.Background(), testKindMapper, tc.batchSize, tc.budget)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
