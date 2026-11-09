@@ -7,8 +7,9 @@ import { type PollFetcher, syncResource } from './hooks/usePollingSync';
 import { type TabId, useConsoleStore } from './store/store';
 
 // Everything the console fetches before React's first commit. main.tsx calls startBoot right
-// after reading the route, so the active view's chunk and its data download in parallel with the
-// first render instead of in a chunk -> commit -> effect -> fetch waterfall. The shell and the
+// after reading the route, so the active view's chunk and its data download in parallel (main.tsx
+// then waits for the chunk alone before rendering) instead of in a chunk -> commit -> effect ->
+// fetch waterfall. The shell and the
 // views poll through these same fetcher instances, and syncResource joins a call made while a
 // request is in flight, so a mount-time poll shares boot's request rather than repeating it.
 
@@ -16,15 +17,34 @@ type ViewModule = { readonly default: ComponentType };
 
 export const loadBuildsView = () => import('./features/builds/BuildsView');
 
+const loadedViews: Partial<Record<TabId, ComponentType>> = {};
+
+/** Wraps a view's loader so its default export is recorded once the import resolves. */
+function recordingLoader(tab: TabId, load: () => Promise<ViewModule>): () => Promise<ViewModule> {
+  return () =>
+    load().then((mod) => {
+      loadedViews[tab] = mod.default;
+      return mod;
+    });
+}
+
 // Each view is its own chunk. The loaders are shared by boot, React.lazy and the idle prefetch,
-// so a prefetched view's module is already evaluated when its tab is first opened.
+// so a prefetched view's module is already evaluated when its tab is first opened, and whichever
+// of them resolves a view first makes it available synchronously through loadedView.
 export const VIEW_LOADERS: Readonly<Record<TabId, () => Promise<ViewModule>>> = {
-  telemetry: () => import('./features/telemetry/TelemetryView'),
-  tasks: () => import('./features/tasks/TasksView'),
-  schedules: () => import('./features/schedules/SchedulesView'),
-  memory: () => import('./features/memory/MemoryView'),
-  builds: loadBuildsView,
+  telemetry: recordingLoader('telemetry', () => import('./features/telemetry/TelemetryView')),
+  tasks: recordingLoader('tasks', () => import('./features/tasks/TasksView')),
+  schedules: recordingLoader('schedules', () => import('./features/schedules/SchedulesView')),
+  memory: recordingLoader('memory', () => import('./features/memory/MemoryView')),
+  builds: recordingLoader('builds', loadBuildsView),
 };
+
+/**
+ * A view's component once its VIEW_LOADERS import has resolved, else undefined. React.lazy only
+ * learns of a module after its own promise settles in a later microtask, so it suspends on its
+ * first render even when the chunk is already here; rendering this instead never suspends.
+ */
+export const loadedView = (tab: TabId): ComponentType | undefined => loadedViews[tab];
 
 export const pollStatus = syncResource(
   fetchStatus,

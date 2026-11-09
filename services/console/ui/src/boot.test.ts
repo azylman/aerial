@@ -1,3 +1,4 @@
+import { type ComponentType } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startBoot, statusPolledOn, VIEW_LOADERS } from './boot';
 import { TAB_IDS } from './hooks/useHashRoute';
@@ -74,5 +75,36 @@ describe('startBoot', () => {
     expect(loaded).toEqual([tab]);
     await settled;
     expect(useConsoleStore.getState().schedules.list.error).toBe('down');
+  });
+});
+
+const LOADED_STUB: ComponentType = () => null;
+
+interface LoadedViewRow {
+  name: string;
+  load: 'none' | 'resolve' | 'reject';
+  want: ComponentType | undefined;
+}
+
+describe('loadedView', () => {
+  afterEach(() => {
+    vi.doUnmock('./features/memory/MemoryView');
+    vi.resetModules();
+  });
+
+  it.each<LoadedViewRow>([
+    { name: 'undefined before the view loads', load: 'none', want: undefined },
+    { name: 'the view component once its loader resolves', load: 'resolve', want: LOADED_STUB },
+    { name: 'undefined after a rejected import', load: 'reject', want: undefined },
+  ])('$name', async ({ load, want }) => {
+    vi.resetModules();
+    vi.doMock('./features/memory/MemoryView', () => {
+      if (load === 'reject') throw new Error('chunk failed');
+      return { default: LOADED_STUB };
+    });
+    const boot = await import('./boot');
+    if (load === 'resolve') await boot.VIEW_LOADERS.memory();
+    if (load === 'reject') await expect(boot.VIEW_LOADERS.memory()).rejects.toThrow();
+    expect(boot.loadedView('memory')).toBe(want);
   });
 });

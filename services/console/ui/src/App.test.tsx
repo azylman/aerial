@@ -164,6 +164,33 @@ describe('App', () => {
   });
 });
 
+describe('first commit', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    stubFetch();
+  });
+  afterEach(() => {
+    cleanup();
+    vi.resetModules();
+    vi.unstubAllGlobals();
+  });
+
+  // Fresh modules per row, so no earlier test has already resolved the view's React.lazy wrapper.
+  it.each(['telemetry', 'tasks', 'schedules', 'memory', 'builds'] as const)(
+    '%s renders on the first commit once its module has resolved',
+    async (tab) => {
+      const [fresh, freshBoot, route] = await Promise.all([import('./App'), import('./boot'), import('./hooks/useHashRoute')]);
+      // What main.tsx does: start boot, wait for the active view's module, then render.
+      window.history.replaceState(null, '', `/console/next/#${tab}`);
+      void freshBoot.startBoot(route.initRouteFromLocation());
+      await freshBoot.VIEW_LOADERS[tab]();
+      render(<fresh.App />);
+      // No flush: a suspended first commit would show the null Suspense fallback (no panel) here.
+      expect(screen.getAllByRole('tabpanel').map((p) => p.id)).toEqual([`${tab}-view`]);
+    },
+  );
+});
+
 // ---- fully seeded walk and cross-feature isolation (fixtures shared with the parity suite) ----
 
 const STATUS = JSON.parse(statusRaw) as ClusterResponse;
