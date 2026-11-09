@@ -76,7 +76,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum(increase(aerial_brain_tokens_total{type=\"total\", channel=~\"$channel\"}[5h])) or vector(0)",
+          "expr": "sum(increase(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel=~\"$channel\"}[5h])) or vector(0)",
           "instant": true,
           "refId": "A"
         }
@@ -140,7 +140,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum(increase(aerial_brain_tokens_total{type=\"total\", channel=~\"$channel\"}[24h])) or vector(0)",
+          "expr": "sum(increase(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel=~\"$channel\"}[24h])) or vector(0)",
           "instant": true,
           "refId": "A"
         }
@@ -204,7 +204,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum(increase(aerial_brain_tokens_total{type=\"total\", channel=~\"$channel\"}[7d])) or vector(0)",
+          "expr": "sum(increase(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel=~\"$channel\"}[7d])) or vector(0)",
           "instant": true,
           "refId": "A"
         }
@@ -264,7 +264,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum(increase(aerial_brain_tokens_total{type=\"total\", channel=~\"$channel\"}[1y])) or sum(aerial_brain_tokens_total{type=\"total\", channel=~\"$channel\"}) or vector(0)",
+          "expr": "sum(increase(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel=~\"$channel\"}[1y])) or sum(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel=~\"$channel\"}) or vector(0)",
           "instant": true,
           "refId": "A"
         }
@@ -341,7 +341,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum by (channel) (rate(aerial_brain_tokens_total{type=\"total\", channel!=\"\", channel=~\"$channel\"}[5m])) * 60",
+          "expr": "sum by (channel) (rate(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel!=\"\", channel=~\"$channel\"}[5m])) * 60",
           "legendFormat": "{{channel}}",
           "refId": "A"
         }
@@ -406,7 +406,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum by (channel) (rate(aerial_brain_tokens_total{type=\"total\", channel!=\"\", channel=~\"$channel\"}[5m])) * 60",
+          "expr": "sum by (channel) (rate(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel!=\"\", channel=~\"$channel\"}[5m])) * 60",
           "legendFormat": "{{channel}}",
           "refId": "A"
         }
@@ -484,7 +484,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum by (channel) (increase(aerial_brain_tokens_total{type=\"total\", channel!=\"\", channel=~\"$channel\"}[24h]))",
+          "expr": "sum by (channel) (increase(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel!=\"\", channel=~\"$channel\"}[24h]))",
           "instant": true,
           "legendFormat": "{{channel}}",
           "refId": "A"
@@ -551,7 +551,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum by (channel) (increase(aerial_brain_tokens_total{type=\"total\", channel!=\"\", channel=~\"$channel\"}[1y])) or sum by (channel) (aerial_brain_tokens_total{type=\"total\", channel!=\"\", channel=~\"$channel\"})",
+          "expr": "sum by (channel) (increase(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel!=\"\", channel=~\"$channel\"}[1y])) or sum by (channel) (aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel!=\"\", channel=~\"$channel\"})",
           "instant": true,
           "legendFormat": "{{channel}}",
           "refId": "A"
@@ -633,19 +633,19 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum by (channel) (increase(aerial_brain_tokens_total{type=\"total\", channel!=\"\", channel=~\"$channel\"}[24h]))",
+          "expr": "sum by (channel) (increase(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel!=\"\", channel=~\"$channel\"}[24h]))",
           "format": "table",
           "instant": true,
           "refId": "A"
         },
         {
-          "expr": "sum by (channel) (increase(aerial_brain_tokens_total{type=\"total\", channel!=\"\", channel=~\"$channel\"}[7d]))",
+          "expr": "sum by (channel) (increase(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel!=\"\", channel=~\"$channel\"}[7d]))",
           "format": "table",
           "instant": true,
           "refId": "B"
         },
         {
-          "expr": "sum by (channel) (increase(aerial_brain_tokens_total{type=\"total\", channel!=\"\", channel=~\"$channel\"}[1y])) or sum by (channel) (aerial_brain_tokens_total{type=\"total\", channel!=\"\", channel=~\"$channel\"})",
+          "expr": "sum by (channel) (increase(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel!=\"\", channel=~\"$channel\"}[1y])) or sum by (channel) (aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel!=\"\", channel=~\"$channel\"})",
           "format": "table",
           "instant": true,
           "refId": "C"
@@ -744,15 +744,15 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum by (model) (increase(aerial_brain_tokens_total{type=\"total\", channel=~\"$channel\"}[24h]))",
+          "expr": "sum by (job, model) (increase(aerial_brain_tokens_total{job=~\"$job\", type=\"total\", channel=~\"$channel\"}[24h]))",
           "instant": true,
-          "legendFormat": "{{model}} (24h total)",
+          "legendFormat": "{{job}} / {{model}} (24h total)",
           "refId": "A"
         },
         {
-          "expr": "sum by (model, type) (increase(aerial_brain_tokens_total{type!=\"total\", channel=~\"$channel\"}[7d]))",
+          "expr": "sum by (job, model, type) (increase(aerial_brain_tokens_total{job=~\"$job\", type!=\"total\", channel=~\"$channel\"}[7d]))",
           "instant": true,
-          "legendFormat": "{{model}} {{type}} (7d)",
+          "legendFormat": "{{job}} / {{model}} {{type}} (7d)",
           "refId": "B"
         }
       ],
@@ -966,6 +966,29 @@
   ],
   "templating": {
     "list": [
+      {
+        "allValue": ".+",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "VictoriaMetrics"
+        },
+        "definition": "label_values(aerial_brain_tokens_total, job)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Instance / Engine",
+        "multi": true,
+        "name": "job",
+        "query": "label_values(aerial_brain_tokens_total, job)",
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
       {
         "allValue": ".+",
         "current": {
