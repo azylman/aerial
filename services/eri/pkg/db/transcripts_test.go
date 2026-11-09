@@ -119,6 +119,21 @@ func TestTranscriptStore_BatchInsertTranscriptSteps(t *testing.T) {
 			}
 		}
 
+		dirty := []TranscriptStep{{SessionID: "sess-steps-1", StepIndex: 4, StepType: "tool_result", Content: "a\x00b\xff"}}
+		if err := store.BatchInsertTranscriptSteps(ctx, dirty); err != nil {
+			t.Fatalf("BatchInsertTranscriptSteps with dirty text failed: %v", err)
+		}
+		if got, err := store.GetTranscriptStepRange(ctx, "", "sess-steps-1", 4, 4); err != nil || len(got) != 1 || got[0].Content != "ab\uFFFD" {
+			t.Fatalf("dirty step stored as %+v (err: %v), want content %q", got, err, "ab\uFFFD")
+		}
+		if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-steps-1", Summary: "fix\x00ed\xfe"}); err != nil {
+			t.Fatalf("UpsertSessionSummary with dirty text failed: %v", err)
+		}
+		var storedSummary string
+		if err := store.(*SQLTranscriptStore).db.QueryRowContext(ctx, "SELECT summary FROM session_summaries WHERE session_id = 'sess-steps-1'").Scan(&storedSummary); err != nil || storedSummary != "fixed\uFFFD" {
+			t.Fatalf("dirty summary stored as %q (err: %v), want %q", storedSummary, err, "fixed\uFFFD")
+		}
+
 		if err := store.BatchInsertTranscriptSteps(ctx, nil); err != nil {
 			t.Errorf("expected nil error for nil slice")
 		}
@@ -159,6 +174,7 @@ func TestTranscriptStore_SearchTranscriptSteps_SessionFilterAndSince(t *testing.
 
 	_ = store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-multi-1", ThreadID: "th-1", Summary: "Sess 1"})
 	_ = store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-multi-2", ThreadID: "th-2", Summary: "Sess 2"})
+	_ = store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-mcp", ThreadID: "th-3", Summary: "Sess mcp"})
 
 	now := time.Now().UTC().Truncate(time.Second)
 	steps := []TranscriptStep{
@@ -166,6 +182,9 @@ func TestTranscriptStore_SearchTranscriptSteps_SessionFilterAndSince(t *testing.
 		{SessionID: "sess-multi-1", StepIndex: 1, StepType: "tool_call", ToolName: "tool-a", Content: "Call 1", CreatedAt: now.Add(-2 * time.Minute)},
 		{SessionID: "sess-multi-2", StepIndex: 0, StepType: "tool_call", ToolName: "tool-b", Content: "Call 2", CreatedAt: now.Add(-1 * time.Minute)},
 		{SessionID: "sess-multi-2", StepIndex: 1, StepType: "model_response", Content: "Resp 2", CreatedAt: now},
+		{SessionID: "sess-mcp", StepIndex: 0, StepType: "tool_call", ToolName: "mcp__github__get_me", ToolKind: "mcp:github", Content: "gh", CreatedAt: now.Add(-6 * time.Minute)},
+		{SessionID: "sess-mcp", StepIndex: 1, StepType: "tool_call", ToolName: "mcp_docket_create", ToolKind: "mcp:docket", Content: "docket", CreatedAt: now.Add(-5 * time.Minute)},
+		{SessionID: "sess-mcp", StepIndex: 2, StepType: "tool_call", ToolName: "mcpx", ToolKind: "other", Content: "lookalike", CreatedAt: now.Add(-4 * time.Minute)},
 	}
 	if err := store.BatchInsertTranscriptSteps(ctx, steps); err != nil {
 		t.Fatalf("BatchInsertTranscriptSteps failed: %v", err)
@@ -216,6 +235,22 @@ func TestTranscriptStore_SearchTranscriptSteps_SessionFilterAndSince(t *testing.
 			wantCount:     1,
 			wantFirstSess: "sess-multi-2",
 			wantFirstStep: 1,
+		},
+		{
+			name:          "bare mcp matches every mcp server kind",
+			toolFilter:    "mcp",
+			limit:         10,
+			wantCount:     2,
+			wantFirstSess: "sess-mcp",
+			wantFirstStep: 1,
+		},
+		{
+			name:          "mcp server kind matches one server",
+			toolFilter:    "mcp:github",
+			limit:         10,
+			wantCount:     1,
+			wantFirstSess: "sess-mcp",
+			wantFirstStep: 0,
 		},
 		{
 			name:      "empty query and filters returns nil",
@@ -440,6 +475,8 @@ func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
 		{name: "with text", query: "build command", sess: "sess-1", tool: "run_command", limit: 15, scanSQL: mockScanQuery, wantPatterns: []string{"t.fts_tokens @@ websearch_to_tsquery", "rank_score"}, wantLen: 1},
 		{name: "filters only", sess: "sess-1", tool: "run_command", limit: 10, scanSQL: mockScanQuery, wantPatterns: []string{"1.0 AS rank_score"}, wantLen: 1},
 		{name: "stack filter", stack: "stack-b", sess: "sess-1", limit: 10, scanSQL: mockScanQuery, wantPatterns: []string{"t.stack = $1", "t.session_id = $2"}, wantLen: 1},
+		{name: "bare mcp family filter", tool: " mcp ", limit: 10, scanSQL: mockScanQuery, wantPatterns: []string{"t.tool_kind LIKE $1", "LIMIT $2"}, wantLen: 1},
+		{name: "mcp server filter", tool: "mcp:github", limit: 10, scanSQL: mockScanQuery, wantPatterns: []string{"(t.tool_kind = $1 OR t.tool_name = $1)"}, wantLen: 1},
 		{name: "query error", query: "test", limit: 10, queryErr: errors.New("simulated transcript steps query failure"), wantErrMsg: "search transcript steps query failed"},
 		{name: "scan error", query: "test", limit: 10, scanSQL: "SELECT 's-pg-1' AS session_id", wantErrMsg: "scan transcript step result"},
 	} {
@@ -632,6 +669,71 @@ func TestSQLTranscriptStore_WriteGuardsAndFailures(t *testing.T) {
 	}
 }
 
+func TestSQLTranscriptStore_BackfillSessionEngines_MockDB(t *testing.T) {
+	t.Parallel()
+	dbMem := initTestSQLiteDB(t)
+	tests := []struct {
+		name       string
+		stack      string
+		queryErr   error
+		execErr    error
+		rowsSQL    string
+		wantErr    string
+		wantUpdate int64
+		wantExecs  []string
+	}{
+		{name: "read-only store rejects backfill", wantErr: "stack cannot be empty"},
+		{name: "rows query failure", stack: "stack-a", queryErr: errors.New("rows down"), wantErr: "query unlabeled session tool names"},
+		{name: "rows scan failure", stack: "stack-a", rowsSQL: "SELECT 1", wantErr: "scan unlabeled session tool name"},
+		{name: "update failure", stack: "stack-a", rowsSQL: "SELECT 's1', 'Bash'", execErr: errors.New("update down"), wantErr: `backfill engine "claude"`},
+		{
+			name:       "groups sessions per inferred engine and skips unknown",
+			stack:      "stack-a",
+			rowsSQL:    "SELECT 's1', 'Bash' UNION ALL SELECT 's2', 'run_command' UNION ALL SELECT 's3', 'mystery' UNION ALL SELECT 's4', 'Bash' UNION ALL SELECT 's4', 'Read'",
+			wantUpdate: 4,
+			wantExecs:  []string{"claude|stack-a|s1,s4", "agy|stack-a|s2"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var execs []string
+			mock := testMockDBTX{
+				queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+					if tc.queryErr != nil {
+						return nil, tc.queryErr
+					}
+					return dbMem.QueryContext(ctx, tc.rowsSQL)
+				},
+				execFn: func(ctx context.Context, query string, args ...any) (sql.Result, error) {
+					if tc.execErr != nil {
+						return nil, tc.execErr
+					}
+					ids := make([]string, 0, len(args)-2)
+					for _, a := range args[2:] {
+						ids = append(ids, fmt.Sprint(a))
+					}
+					execs = append(execs, fmt.Sprintf("%v|%v|%s", args[0], args[1], strings.Join(ids, ",")))
+					return testCustomResult{rows: 2}, nil
+				},
+			}
+			updated, err := NewSQLTranscriptStore(mock, tc.stack).BackfillSessionEngines(context.Background(), testEngineInfer)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil || updated != tc.wantUpdate {
+				t.Fatalf("updated=%d err=%v, want %d", updated, err, tc.wantUpdate)
+			}
+			if fmt.Sprint(execs) != fmt.Sprint(tc.wantExecs) {
+				t.Errorf("execs = %q, want %q", execs, tc.wantExecs)
+			}
+		})
+	}
+}
+
 func TestSQLTranscriptStore_ReadOnlyGuardsAndExecFailures(t *testing.T) {
 	t.Parallel()
 	s, ctx := newTestTranscriptStore(t, ""), context.Background()
@@ -647,6 +749,9 @@ func TestSQLTranscriptStore_ReadOnlyGuardsAndExecFailures(t *testing.T) {
 	}
 	if steps, err := s.GetTranscriptStepRange(ctx, "", "missing", 0, 1); err != nil || len(steps) != 0 {
 		t.Errorf("read-only store should still read: steps=%v err=%v", steps, err)
+	}
+	if _, err := newTestTranscriptStore(t, "stack-a").BackfillSessionEngines(ctx, nil); err == nil || !strings.Contains(err.Error(), "inference func cannot be nil") {
+		t.Errorf("expected nil infer rejection, got %v", err)
 	}
 	if _, err := newTestTranscriptStore(t, "stack-a").BackfillToolKinds(ctx, nil); err == nil || !strings.Contains(err.Error(), "mapper cannot be nil") {
 		t.Errorf("expected nil mapper rejection, got %v", err)

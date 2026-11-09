@@ -69,9 +69,10 @@ Every step stores its raw `tool_name` plus a normalized `tool_kind`. A `--tool` 
 - `skill`: `Skill`
 - `task`: `TodoWrite`
 - `mcp:<server>`: any MCP tool of that server (`mcp__github__create_pull_request`, `mcp_github_create_pull_request` → `mcp:github`)
+- `mcp`: on its own, every MCP tool from any server
 - `other`: any unrecognized tool
 
-Examples: `--tool shell` finds both Claude `Bash` and agy `run_command` steps; `--tool mcp:github` finds GitHub MCP calls from either engine; `--tool Bash` still matches only raw `Bash` steps.
+Examples: `--tool shell` finds both Claude `Bash` and agy `run_command` steps; `--tool mcp:github` finds GitHub MCP calls from either engine; `--tool mcp` finds every MCP call from any server; `--tool Bash` still matches only raw `Bash` steps.
 
 ### Result Labels
 Every session and step result is prefixed with a `[stack/engine]` label showing which bot and engine wrote it (e.g. `[aerial/claude]`, `[aerial/agy]`); an unknown part prints as `?`. Step badges show `tool_name · tool_kind`, e.g. `- [aerial/agy] **[run_command · shell]** Step #5 in [d3a1a377...](conversation://...)`.

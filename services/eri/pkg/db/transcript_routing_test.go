@@ -33,6 +33,18 @@ func (o *testOpener) open(dsn string) (*sql.DB, error) {
 	return pool, nil
 }
 
+// testEngineInfer is a deterministic stand-in for transcript.InferEngine.
+func testEngineInfer(names []string) string {
+	switch {
+	case slices.Contains(names, "Bash"):
+		return "claude"
+	case slices.Contains(names, "run_command"):
+		return "agy"
+	default:
+		return ""
+	}
+}
+
 // testKindMapper is a deterministic stand-in for transcript.NormalizeToolKind.
 func testKindMapper(name string) string {
 	switch name {
@@ -165,6 +177,7 @@ func TestRoutedTranscriptStore_Unavailable(t *testing.T) {
 				"SetSessionEngine":           s.SetSessionEngine(ctx, "s", "agy"),
 				"BatchInsertTranscriptSteps": s.BatchInsertTranscriptSteps(ctx, []TranscriptStep{{SessionID: "s"}}),
 				"BackfillToolKinds":          c1(s.BackfillToolKinds(ctx, testKindMapper)),
+				"BackfillSessionEngines":     c1(s.BackfillSessionEngines(ctx, testEngineInfer)),
 				"SearchSessionSummaries":     c1(s.SearchSessionSummaries(ctx, "", nil, "q", 1, 0)),
 				"SearchTranscriptSteps":      c1(s.SearchTranscriptSteps(ctx, "", "q", "", "", 1)),
 				"GetTranscriptStepRange":     c1(s.GetTranscriptStepRange(ctx, "", "s", 0, 1)),
@@ -400,6 +413,36 @@ func TestSharedTranscripts_BackfillToolKindsScopedToStack(t *testing.T) {
 			got := readStackKeyed(t, shared, "SELECT stack, session_id, tool_kind || '|' || tool_call_id FROM transcript_steps WHERE step_index = 1")
 			if fmt.Sprint(got) != fmt.Sprint(tc.wantKinds) {
 				t.Errorf("kinds = %v, want %v", got, tc.wantKinds)
+			}
+		})
+	}
+}
+
+func TestSharedTranscripts_BackfillSessionEnginesScopedToStack(t *testing.T) {
+	tests := []struct {
+		name        string
+		backfillB   bool
+		wantUpdated int64
+		wantEngines map[string]string
+	}{
+		{name: "backfill from a labels its unlabeled session only", wantUpdated: 1, wantEngines: map[string]string{"stack_a/a-only": "claude", "stack_a/dup-sess": "agy", "stack_b/dup-sess": "claude", "stack_b/b-only": "claude"}},
+		{name: "backfill from b never touches a", backfillB: true, wantUpdated: 0, wantEngines: map[string]string{"stack_a/a-only": "", "stack_a/dup-sess": "agy", "stack_b/dup-sess": "claude", "stack_b/b-only": "claude"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			shared, a, b := newSharedStackPair(t)
+			seedSharedStacks(t, a, b)
+			writer := a
+			if tc.backfillB {
+				writer = b
+			}
+			updated, err := writer.BackfillSessionEngines(context.Background(), testEngineInfer)
+			if err != nil || updated != tc.wantUpdated {
+				t.Fatalf("updated=%d err=%v, want %d", updated, err, tc.wantUpdated)
+			}
+			got := readStackKeyed(t, shared, "SELECT stack, session_id, engine FROM session_summaries")
+			if fmt.Sprint(got) != fmt.Sprint(tc.wantEngines) {
+				t.Errorf("engines = %v, want %v", got, tc.wantEngines)
 			}
 		})
 	}

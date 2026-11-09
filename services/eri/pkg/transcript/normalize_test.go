@@ -69,3 +69,31 @@ func TestNormalizeToolKind(t *testing.T) {
 		})
 	}
 }
+
+func TestInferEngine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		toolNames []string
+		want      string
+	}{
+		{"claude tools only", []string{"Bash", "Read", "TodoWrite"}, "claude"},
+		{"agy tools only", []string{"run_command", "view_file"}, "agy"},
+		{"claude mcp double underscore", []string{"mcp__github__create_issue", "unknown_tool"}, "claude"},
+		{"agy mcp single underscore", []string{"mcp_docket_create"}, "agy"},
+		{"mixed engines", []string{"Bash", "run_command"}, ""},
+		{"mixed mcp styles", []string{"mcp__github__get_me", "mcp_docket_create"}, ""},
+		{"empty", nil, ""},
+		{"unknown names only", []string{"browser_click", "mystery"}, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := InferEngine(tc.toolNames); got != tc.want {
+				t.Fatalf("InferEngine(%q) = %q, want %q", tc.toolNames, got, tc.want)
+			}
+		})
+	}
+}
