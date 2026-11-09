@@ -82,6 +82,19 @@ spec:
     exporter:
       endpoint: openobserve.default.svc.cluster.local:5080
 ---
+apiVersion: gateway.nginx.org/v1alpha2
+kind: NginxProxy
+metadata:
+  name: edge-gateway-proxy-config
+  namespace: default
+spec:
+  kubernetes:
+    service:
+      type: ClusterIP
+  telemetry:
+    exporter:
+      endpoint: openobserve.default.svc.cluster.local:5080
+---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
@@ -116,6 +129,11 @@ metadata:
   namespace: default
 spec:
   gatewayClassName: nginx
+  infrastructure:
+    parametersRef:
+      group: gateway.nginx.org
+      kind: NginxProxy
+      name: edge-gateway-proxy-config
   listeners:
     - allowedRoutes:
         namespaces:
