@@ -678,6 +678,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: agentsview
   name: agentsview
@@ -689,7 +691,10 @@ spec:
     matchLabels:
       app.kubernetes.io/name: agentsview
   strategy:
-    type: Recreate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
@@ -698,6 +703,7 @@ spec:
       containers:
         - command:
             - agentsview
+            - pg
             - serve
             - --host=0.0.0.0
             - --port=8080
@@ -706,11 +712,24 @@ spec:
             - name: PORT
               value: "8080"
             - name: HOME
-              value: /data
+              value: /tmp
             - name: AGENTSVIEW_DATA_DIR
-              value: /data/agentsview
-            - name: CLAUDE_PROJECTS_DIR
-              value: /data/claude/projects
+              value: /tmp/agentsview
+            - name: AGENTSVIEW_MODE
+              value: pg-serve
+            - name: AGENTSVIEW_PG_ALLOW_INSECURE
+              value: "true"
+            - name: AGENTSVIEW_PG_SCHEMA
+              value: agentsview
+            - name: AGENTSVIEW_PG_MACHINE
+              value: calibarn
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: postgres-secret
+            - name: AGENTSVIEW_PG_URL
+              value: postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/aerial?sslmode=disable
           image: ghcr.io/azylman/agentsview:latest
           imagePullPolicy: Always
           name: agentsview
@@ -719,10 +738,77 @@ spec:
               name: http
               protocol: TCP
           volumeMounts:
+            - mountPath: /tmp
+              name: tmp-data
+      nodeSelector:
+        compute-tier: performance
+      securityContext:
+        runAsGroup: 1000
+        runAsUser: 1000
+      volumes:
+        - emptyDir: {}
+          name: tmp-data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
+  labels:
+    app.kubernetes.io/name: agentsview-sync
+  name: agentsview-sync
+  namespace: default
+spec:
+  minReadySeconds: 10
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentsview-sync
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentsview-sync
+    spec:
+      containers:
+        - command:
+            - /bin/sh
+            - -c
+            - flock /data/agentsview/db.write.lock true && exec agentsview pg push --watch --debounce=5s --no-vectors
+          env:
+            - name: HOME
+              value: /data
+            - name: AGENTSVIEW_DATA_DIR
+              value: /data/agentsview
+            - name: CLAUDE_PROJECTS_DIR
+              value: /data/claude/projects
+            - name: AGENTSVIEW_NO_DAEMON
+              value: "1"
+            - name: AGENTSVIEW_MODE
+              value: serve
+            - name: AGENTSVIEW_PG_ALLOW_INSECURE
+              value: "true"
+            - name: AGENTSVIEW_PG_SCHEMA
+              value: agentsview
+            - name: AGENTSVIEW_PG_MACHINE
+              value: calibarn
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: postgres-secret
+            - name: AGENTSVIEW_PG_URL
+              value: postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/aerial?sslmode=disable
+          image: ghcr.io/azylman/agentsview:latest
+          imagePullPolicy: Always
+          name: agentsview-sync
+          volumeMounts:
             - mountPath: /data
               name: brain-data
       nodeSelector:
         compute-tier: performance
+        kubernetes.io/hostname: calibarn
       securityContext:
         runAsGroup: 1000
         runAsUser: 1000
