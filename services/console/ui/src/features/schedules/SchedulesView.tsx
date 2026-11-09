@@ -1,9 +1,10 @@
-import { memo, type RefObject, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CronSchedule, OneShotSchedule, ScheduleRun, ScheduleSummaryMetrics } from '../../api/types';
 import { Glyph } from '../../components/Glyph';
 import { Icon } from '../../components/Icon';
 import { useSearchShortcutTarget } from '../../hooks/useKeyboardShortcuts';
 import { usePollingSync } from '../../hooks/usePollingSync';
+import { HighlightQuery } from '../../lib/search';
 import { type ConsoleState, useConsoleStore } from '../../store/store';
 import '../../styles/controls.css';
 import '../../styles/sections.css';
@@ -200,11 +201,10 @@ interface GridProps {
   readonly phase: ListPhase;
   readonly crons: readonly CronSchedule[];
   readonly oneShots: readonly OneShotSchedule[];
-  readonly query: string;
   readonly onRetry: () => void;
 }
 
-const ScheduleGrid = memo(function ScheduleGrid({ phase, crons, oneShots, query, onRetry }: GridProps) {
+const ScheduleGrid = memo(function ScheduleGrid({ phase, crons, oneShots, onRetry }: GridProps) {
   const error = useConsoleStore(selectListError);
   let body;
   if (phase === 'loading') body = <SchedulesSkeleton />;
@@ -221,10 +221,10 @@ const ScheduleGrid = memo(function ScheduleGrid({ phase, crons, oneShots, query,
     body = (
       <>
         {crons.map((cron) => (
-          <CronCard key={cron.id} cron={cron} query={query} />
+          <CronCard key={cron.id} cron={cron} />
         ))}
         {oneShots.map((oneShot) => (
-          <OneShotCard key={oneShot.id} oneShot={oneShot} query={query} />
+          <OneShotCard key={oneShot.id} oneShot={oneShot} />
         ))}
       </>
     );
@@ -236,13 +236,7 @@ const ScheduleGrid = memo(function ScheduleGrid({ phase, crons, oneShots, query,
   );
 });
 
-const RunsList = memo(function RunsList({
-  runs,
-  query,
-}: {
-  readonly runs: readonly ScheduleRun[];
-  readonly query: string;
-}) {
+const RunsList = memo(function RunsList({ runs }: { readonly runs: readonly ScheduleRun[] }) {
   const loaded = useConsoleStore(selectRunsLoaded);
   return (
     <div className="runs-feed-container" id="runs-feed-container" aria-live="polite">
@@ -253,7 +247,7 @@ const RunsList = memo(function RunsList({
           hint="Schedule execution history and outcome logs will appear here."
         />
       ) : (
-        runs.map((run) => <RunCard key={run.id} run={run} query={query} />)
+        runs.map((run) => <RunCard key={run.id} run={run} />)
       )}
     </div>
   );
@@ -331,9 +325,12 @@ const SectionTitle = memo(function SectionTitle({
 });
 
 /**
- * Port of #schedules-view. Pill and search are local state; the filtered lists derive from the
- * deferred search text, so a keystroke paints the input immediately and the card list catches up
- * as a background render. Cards are memoized per schedule and countdowns are 1s-clock leaves.
+ * Port of #schedules-view. Pill and search are local state and a keystroke filters and paints in
+ * the same frame as the input. That stays cheap because cards are memoized per schedule (keyed by
+ * id, so a card that stays visible keeps its DOM) and take no query prop: the query reaches only
+ * their highlight leaves through HighlightQuery, and matching runs against cached haystacks. A
+ * deferred query would cost a second render and frame per keystroke, which measured slower than
+ * the render it defers. Countdowns are 1s-clock leaves.
  */
 export default function SchedulesView() {
   usePollingSync(syncSchedules, SCHEDULES_POLL_MS, true);
@@ -342,7 +339,7 @@ export default function SchedulesView() {
 
   const [filter, setFilter] = useState<ScheduleFilter>('ALL');
   const [search, setSearch] = useState('');
-  const query = normalizeQuery(useDeferredValue(search));
+  const query = normalizeQuery(search);
   const inputRef = useRef<HTMLInputElement>(null);
   const clearSearch = useCallback(() => setSearch(''), []);
   useSearchShortcutTarget('schedules', inputRef, clearSearch);
@@ -356,7 +353,7 @@ export default function SchedulesView() {
   const visibleRuns = useMemo(() => filterRuns(runs, query), [runs, query]);
 
   return (
-    <>
+    <HighlightQuery value={query}>
       {phase === 'stale' ? (
         <div className="reconnect-banner">
           <span className="reconnect-icon">
@@ -389,7 +386,7 @@ export default function SchedulesView() {
             <SectionTitle icon="alarm" title="ACTIVE SCHEDULED ROUTINES" />
             <ActiveBadge />
           </div>
-          <ScheduleGrid phase={phase} crons={visibleCrons} oneShots={visibleOneShots} query={query} onRetry={refresh} />
+          <ScheduleGrid phase={phase} crons={visibleCrons} oneShots={visibleOneShots} onRetry={refresh} />
         </section>
       ) : null}
 
@@ -399,9 +396,9 @@ export default function SchedulesView() {
             <SectionTitle icon="clipboard" title="EXECUTION RUN AUDIT LOG" />
             <span className="section-badge">{visibleRuns.length} RUNS</span>
           </div>
-          <RunsList runs={visibleRuns} query={query} />
+          <RunsList runs={visibleRuns} />
         </section>
       ) : null}
-    </>
+    </HighlightQuery>
   );
 }
