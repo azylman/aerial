@@ -10,7 +10,7 @@ import type { BrowserContextOptions } from '@playwright/test';
 export type ViewId = 'telemetry' | 'tasks' | 'schedules' | 'memory' | 'builds';
 
 /** Views (and their drawers) the React UI does not ship yet; rows needing them are skipped. */
-export const PENDING_VIEWS: readonly ViewId[] = ['telemetry', 'tasks', 'schedules', 'memory', 'builds'];
+export const PENDING_VIEWS: readonly ViewId[] = ['schedules', 'memory', 'builds'];
 
 export interface Viewport {
   readonly name: string;
@@ -91,17 +91,36 @@ export const MASKED_SELECTORS: readonly string[] = [
   '.brand-badge',
   '.tab-icon',
   '.title-icon',
-  '.drawer-icon',
-  '.drawer-close',
+  // Scoped to the open drawer: the vanilla drawer stays laid out (visibility: hidden) while closed.
+  '.diagnostic-drawer.active .drawer-icon',
+  '.diagnostic-drawer.active .drawer-close',
   '.search-icon',
   '.refresh-icon',
   '.reconnect-icon',
   '.gitsync-pill > span:first-child',
+  // Badges and pills whose vanilla text starts or ends with an emoji/status glyph (⚡ ⏳ 🔄 💬 📦
+  // 🕒 🚨 ✓ ✕ ○). The glyph sits inside the badge text, so the whole badge box is the glyph region;
+  // its text is still asserted through the row expectations.
+  '#tasks-count-badge',
+  '#tasks-view-badge',
+  '#deploy-count-badge',
+  '.task-trigger-badge',
+  '.task-retry-badge',
+  '.task-status-pill',
+  '.task-inspect-btn.active',
+  '.timer-text',
+  '.deploy-repo-badge',
+  '.deploy-commit-time',
+  '.deploy-stage-badge',
+  '.step-status-badge',
+  '.matrix-chip',
+  '.compact-badge',
 ];
 
 /**
  * Applied to both UIs only while screenshotting: hides the moving scanline, fixes the masked glyph
- * boxes' size, and drops UA focus rings, whose colours follow `color-scheme` (the React console
+ * boxes' size (glyph-bearing badges get one fixed box, so an emoji's advance or taller line box
+ * cannot shift the content after the badge), and drops UA focus rings, whose colours follow `color-scheme` (the React console
  * declares `dark` per the Task #4 polish; the vanilla page is light-scheme), so a keyboard-focused
  * control would otherwise differ by design.
  */
@@ -116,6 +135,13 @@ export const STABILIZE_CSS = `
 .drawer-close {
   display: inline-flex !important; width: 32px !important; height: 32px !important;
   padding: 0 !important; overflow: hidden !important;
+}
+#tasks-count-badge, #tasks-view-badge, #deploy-count-badge, .task-trigger-badge, .task-retry-badge,
+.task-status-pill, .task-inspect-btn.active, .timer-text, .deploy-repo-badge, .deploy-commit-time,
+.deploy-stage-badge, .step-status-badge, .matrix-chip, .compact-badge {
+  display: inline-flex !important; flex: none !important; width: 8em !important; max-width: none !important;
+  height: 2em !important; box-sizing: border-box !important; align-items: center !important;
+  white-space: nowrap !important; overflow: hidden !important;
 }
 `;
 
@@ -144,6 +170,60 @@ const SHELL_COUNTS: readonly CountExpectation[] = [
   { selector: '.dock-chip', count: 6 },
   { selector: '.dock-chip.active', count: 1 },
   { selector: '.ping-dot.custom', count: 1 },
+];
+
+/** status.json services: 15 healthy, aerial-vision and aerial-prospera degraded, aerial-kernel-mcp down. */
+const SERVICES_HEALTHY = '15 / 18';
+/** dep-console-1 (building) is the only full card; its steps are CI, BUILD, PULL, SWAP. */
+const PIPELINE_STEPS = ['CI', 'BUILD', 'PULL', 'SWAP'];
+
+const TELEMETRY_COUNTS: readonly CountExpectation[] = [
+  { selector: '#telemetry-view .service-card', count: 18 },
+  { selector: '#telemetry-view .badge.healthy', count: 15 },
+  { selector: '#telemetry-view .badge.degraded', count: 2 },
+  { selector: '#telemetry-view .badge.down', count: 1 },
+  // 6 deployments: index 0 renders full; eri (live, index 1) and every later index render compact.
+  { selector: '#telemetry-view .deploy-card', count: 1 },
+  { selector: '#telemetry-view .deploy-card-compact', count: 5 },
+  { selector: '#telemetry-view .step-panel', count: 4 },
+  { selector: '#telemetry-view .step-panel.step-completed', count: 1 },
+  { selector: '#telemetry-view .step-panel.step-active', count: 1 },
+  { selector: '#telemetry-view .step-panel.step-pending', count: 2 },
+  { selector: '#telemetry-view .deploy-timer-badge', count: 4 },
+  { selector: '#telemetry-view .section-badge.failed', count: 1 },
+  { selector: '#telemetry-view .task-card', count: 5 },
+];
+
+/**
+ * status.json active_tasks: 3 PROCESSING (one retried once), 2 PENDING; their summaries (the
+ * titles a row shows) are "working" and "queued". Scoped to the tasks view: the vanilla page keeps
+ * a second copy of the queue in the hidden telemetry panel.
+ */
+const TASK_COUNTS: readonly CountExpectation[] = [
+  { selector: '#tasks-view .task-card', count: 5 },
+  { selector: '#tasks-view .task-card.processing', count: 3 },
+  { selector: '#tasks-view .task-card.pending', count: 2 },
+  { selector: '#tasks-view .task-prompt-box:text-is("> working")', count: 3 },
+  { selector: '#tasks-view .task-prompt-box:text-is("> queued")', count: 2 },
+  { selector: '#tasks-view .task-author:text-is("pilot")', count: 3 },
+  { selector: '#tasks-view .task-author:text-is("scheduler")', count: 2 },
+  { selector: '#tasks-view .task-retry-badge', count: 1 },
+  { selector: '#tasks-view .deploy-timer-badge', count: 3 },
+  { selector: '#tasks-view .task-trigger-badge[data-trigger="cron"]', count: 1 },
+  { selector: '#tasks-view .task-trigger-badge[data-trigger="discord"]', count: 2 },
+];
+const TASK_TEXTS = ['LIVE DISPATCH STREAM', 'RECENT TASK EXECUTION HISTORY', '3 / 4 WORKERS', '3 PROCESSING TURNS', '2 TURNS'];
+
+/** aerial-vision: degraded, 43871s uptime -> 12h 11m. */
+const DRAWER_TEXTS = [
+  'DIAGNOSTICS // AERIAL-VISION',
+  'SERVICE NAME',
+  'HEALTH STATUS',
+  'UPTIME CONTEXT',
+  'DISCOVERY NODE',
+  'aerial-net:internal (Docker Bridge)',
+  '[TELEMETRY LOG STREAM]',
+  '> Service node aerial-vision initialized via Docker Supervisor.',
 ];
 
 export const PARITY_ROWS: readonly ParityRow[] = [
@@ -199,6 +279,71 @@ export const PARITY_ROWS: readonly ParityRow[] = [
       badges: BADGES_ALL,
       texts: ['GIT SYNC: BEHIND (Δ 1m 15s)'],
       counts: [{ selector: '.gitsync-pill.lagging', count: 1 }],
+    },
+    region: 'viewport',
+  },
+  {
+    name: 'telemetry: services grid, pipeline and task queue',
+    start: '#telemetry',
+    requires: ['telemetry'],
+    steps: [],
+    expect: {
+      hash: '#telemetry',
+      activeTab: 'TELEMETRY',
+      badges: BADGES_ALL,
+      texts: [
+        'LIVE AGENT EXECUTION QUEUE',
+        'DEPLOYMENT PIPELINE',
+        'ACTIVE STACK COMPONENTS',
+        SERVICES_HEALTHY,
+        'aerial-vision',
+        'aerial-kernel-mcp',
+        'DEGRADED',
+        'DOWN',
+        ...PIPELINE_STEPS,
+        'STARTED: 11:57:00 AM',
+        '"feat(console/ui): app shell and parity suite"',
+        'eri • fix(eri): retry transient ingress errors',
+      ],
+      counts: TELEMETRY_COUNTS,
+    },
+    region: 'viewport',
+  },
+  {
+    name: 'tasks: live dispatch stream lists every active task',
+    start: '#tasks',
+    requires: ['tasks'],
+    steps: [],
+    expect: {
+      hash: '#tasks',
+      activeTab: 'ACTIVE TASKS',
+      badges: BADGES_ALL,
+      texts: TASK_TEXTS,
+      counts: TASK_COUNTS,
+    },
+    region: 'viewport',
+  },
+  {
+    name: 'telemetry: clicking a degraded service opens its diagnostics drawer',
+    start: '#telemetry',
+    requires: ['telemetry'],
+    // Opening scrolls the card into view; Home brings both pages back to the top so the blurred
+    // backdrop compares the same region of each page.
+    steps: [
+      { kind: 'openDrawer', text: 'aerial-vision' },
+      { kind: 'press', key: 'Home' },
+    ],
+    expect: {
+      hash: '#telemetry',
+      activeTab: 'TELEMETRY',
+      badges: BADGES_ALL,
+      texts: DRAWER_TEXTS,
+      counts: [
+        // The React drawer opens through a document view transition; wait until it has settled.
+        { selector: 'html:not(:active-view-transition)', count: 1 },
+        { selector: '.diagnostic-drawer.active', count: 1 },
+        { selector: '.diagnostic-drawer.active .diag-item', count: 4 },
+      ],
     },
     region: 'viewport',
   },

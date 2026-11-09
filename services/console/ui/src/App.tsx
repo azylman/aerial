@@ -2,6 +2,7 @@ import { type ComponentType, lazy, Suspense, useDeferredValue, useEffect } from 
 import { fetchBuilds, fetchFacts, fetchSchedules, fetchStatus } from './api/api';
 import { Drawer, type DrawerPanels } from './components/Drawer';
 import { Header } from './components/Header';
+import { ServiceDiagnostics } from './features/telemetry/ServiceDiagnostics';
 import { tabButtonId, tabPanelId } from './components/TabBar';
 import { useHashRoute } from './hooks/useHashRoute';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -29,9 +30,10 @@ const VIEWS: Readonly<Record<TabId, ComponentType>> = {
   builds: lazy(VIEW_LOADERS.builds),
 };
 
-// Drawer bodies ship with the telemetry (service) and build queue (build) views.
+// The service body is tiny and opens from the telemetry view, so it ships in the main chunk and
+// never suspends the drawer. The build body ships with the build queue view.
 const PendingDrawerBody = (): null => null;
-const DRAWER_PANELS: DrawerPanels = { service: PendingDrawerBody, build: PendingDrawerBody };
+const DRAWER_PANELS: DrawerPanels = { service: ServiceDiagnostics, build: PendingDrawerBody };
 
 const STATUS_POLL_MS = 5000;
 
