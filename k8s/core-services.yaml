@@ -776,12 +776,12 @@ spec:
         - command:
             - /bin/sh
             - -c
-            - flock /data/agentsview/db.write.lock true && exec agentsview pg push --watch --debounce=5s --no-vectors
+            - mkdir -p /tmp/agentsview && cp /data/agentsview/config.toml /tmp/agentsview/config.toml && exec agentsview pg push --watch --debounce=5s --no-vectors
           env:
             - name: HOME
-              value: /data
+              value: /tmp
             - name: AGENTSVIEW_DATA_DIR
-              value: /data/agentsview
+              value: /tmp/agentsview
             - name: CLAUDE_PROJECTS_DIR
               value: /data/claude/projects
             - name: AGENTSVIEW_NO_DAEMON
@@ -807,6 +807,9 @@ spec:
           volumeMounts:
             - mountPath: /data
               name: brain-data
+              readOnly: true
+            - mountPath: /tmp
+              name: tmp-data
       nodeSelector:
         compute-tier: performance
         kubernetes.io/hostname: calibarn
@@ -818,6 +821,8 @@ spec:
             path: /var/lib/docker/volumes/aerial-brain-data/_data
             type: Directory
           name: brain-data
+        - emptyDir: {}
+          name: tmp-data
 ---
 apiVersion: v1
 kind: Service
