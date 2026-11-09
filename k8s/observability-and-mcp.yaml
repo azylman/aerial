@@ -479,6 +479,7 @@ spec:
             - -loggerFormat=json
             - -promscrape.config=/etc/victoriametrics/prometheus.yml
             - -promscrape.config.strictParse=false
+            - -vmalert.proxyURL=http://vmalert:8880
           envFrom:
             - secretRef:
                 name: victoriametrics-secret
