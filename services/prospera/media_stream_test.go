@@ -213,7 +213,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 	}
 	tokenMgr := NewStreamTokenManager(time.Now)
 
-	sessionMgr := NewCallSessionManager(cfg, nil, twilioClient, consultClient, tokenMgr,
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: cfg}, nil, twilioClient, consultClient, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -432,7 +432,7 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 	}
 
 	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(cfg, nil, nil, nil, tokenMgr,
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: cfg}, nil, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -486,17 +486,17 @@ func TestCallSessionManager_SessionRegistryAndAccessors(t *testing.T) {
 	t.Parallel()
 
 	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(&Config{}, nil, nil, nil, tokenMgr,
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, nil, nil, nil, tokenMgr,
 		WithPacerInterval(5*time.Millisecond),
 	)
 
-	defaultMgr := NewCallSessionManager(&Config{}, nil, nil, nil, nil)
+	defaultMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, nil, nil, nil, nil)
 	if defaultMgr.ActiveCount() != 0 {
 		t.Error("expected 0 active sessions")
 	}
 
 	store := setUpTestStore(t)
-	mgrWithStore := NewCallSessionManager(&Config{}, store, nil, nil, tokenMgr)
+	mgrWithStore := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr)
 	sessActive := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "call-steer-store"})
 	mgrWithStore.registerSession("call-steer-store", sessActive)
 	_ = mgrWithStore.SteerCall("call-steer-store", "be polite", "guidance")
@@ -598,7 +598,7 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 	}
 
 	bargeStore := setUpTestStore(t)
-	sessionMgr := NewCallSessionManager(&Config{}, bargeStore, nil, consultClient, tokenMgr,
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, bargeStore, nil, consultClient, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -779,7 +779,7 @@ func TestCallSessionManager_HandleAMDWebhookByProviderSID(t *testing.T) {
 
 	store := setUpTestStore(t)
 	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(&Config{}, store, nil, nil, tokenMgr)
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr)
 	callLookup := "call-lookup-test"
 	provLookup := "CA_lookup_prov_123"
 	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
@@ -826,7 +826,7 @@ func TestMediaStream_StopEvent(t *testing.T) {
 
 	store := setUpTestStore(t)
 	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(&Config{}, store, nil, nil, tokenMgr,
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -888,7 +888,7 @@ func TestCallSessionManager_WaitForSession(t *testing.T) {
 	t.Parallel()
 
 	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(&Config{}, nil, nil, nil, tokenMgr,
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, nil, nil, nil, tokenMgr,
 		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
 			return nil, nil
 		}),
@@ -951,7 +951,7 @@ func TestHandleMediaWebSocket_WithStoreCall(t *testing.T) {
 	}, 5)
 
 	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(&Config{}, store, nil, nil, tokenMgr,
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -1043,7 +1043,7 @@ func TestHandleMediaWebSocket_InboundMode(t *testing.T) {
 	})
 
 	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(&Config{}, store, nil, nil, tokenMgr,
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -1146,7 +1146,7 @@ func TestHandleMediaWebSocket_NotifyMode(t *testing.T) {
 	}, 5)
 
 	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(&Config{}, store, nil, nil, tokenMgr,
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -1403,7 +1403,7 @@ func TestMediaStreamSession_DisconnectedAMDActions(t *testing.T) {
 func TestMediaStreamSession_RecordingWAVAndManager(t *testing.T) {
 	t.Parallel()
 
-	mgr := NewCallSessionManager(&Config{}, nil, nil, nil, nil)
+	mgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, nil, nil, nil, nil)
 	if wav := mgr.GetRecordingWAV("missing"); wav != nil {
 		t.Fatalf("expected nil wav for missing call, got %d bytes", len(wav))
 	}

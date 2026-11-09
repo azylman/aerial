@@ -17,6 +17,7 @@ PR_DESCRIPTION.md
 /services/synapse/synapse
 /services/vanadis/vanadis
 /services/eri/eri
+/services/prospera/prospera
 /services/eri/transcript-search
 
 # Console React UI build output and local toolchain (built in Docker / by the gates)

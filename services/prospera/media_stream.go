@@ -20,7 +20,7 @@ type SessionManagerOption func(*CallSessionManager)
 // CallSessionManager coordinates active Twilio Media Stream <-> Gemini Live sessions.
 type CallSessionManager struct {
 	mu             sync.RWMutex
-	cfg            *Config
+	cfgSrc         ConfigSource
 	store          Store
 	twilioClient   TwilioClient
 	consultClient  ContextConsultClient
@@ -35,7 +35,7 @@ type CallSessionManager struct {
 
 // NewCallSessionManager initializes a CallSessionManager.
 func NewCallSessionManager(
-	cfg *Config,
+	cfgSrc ConfigSource,
 	store Store,
 	twilioClient TwilioClient,
 	consultClient ContextConsultClient,
@@ -47,7 +47,7 @@ func NewCallSessionManager(
 	}
 
 	m := &CallSessionManager{
-		cfg:            cfg,
+		cfgSrc:         cfgSrc,
 		store:          store,
 		twilioClient:   twilioClient,
 		consultClient:  consultClient,
@@ -243,7 +243,7 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 	sess := NewMediaStreamSession(MediaStreamSessionConfig{
 		CallID:           callID,
 		TwilioConn:       conn,
-		Config:           m.cfg,
+		Config:           m.cfgSrc.Current(), // the call keeps this snapshot for its lifetime
 		Store:            m.store,
 		TwilioClient:     m.twilioClient,
 		ConsultClient:    m.consultClient,

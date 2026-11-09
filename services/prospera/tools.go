@@ -14,7 +14,7 @@ import (
 
 // ToolHandler coordinates execution of Prospera MCP tools.
 type ToolHandler struct {
-	cfg        *Config
+	cfgSrc     ConfigSource
 	store      Store
 	twilio     TwilioClient
 	sessionMgr *CallSessionManager
@@ -22,9 +22,9 @@ type ToolHandler struct {
 }
 
 // NewToolHandler creates a new ToolHandler.
-func NewToolHandler(cfg *Config, store Store, twilio TwilioClient, sessionMgr *CallSessionManager, reporter *Reporter) *ToolHandler {
+func NewToolHandler(cfgSrc ConfigSource, store Store, twilio TwilioClient, sessionMgr *CallSessionManager, reporter *Reporter) *ToolHandler {
 	return &ToolHandler{
-		cfg:        cfg,
+		cfgSrc:     cfgSrc,
 		store:      store,
 		twilio:     twilio,
 		sessionMgr: sessionMgr,
@@ -131,9 +131,10 @@ type EnsurePhoneNumberOutput struct {
 
 // InitiateCall executes the initiate_call tool.
 func (h *ToolHandler) InitiateCall(ctx context.Context, args InitiateCallArgs) (InitiateCallOutput, error) {
+	cfg := h.cfgSrc.Current()
 	fromNumber := ""
-	if h.cfg != nil {
-		fromNumber = h.cfg.TwilioFromNumber
+	if cfg != nil {
+		fromNumber = cfg.TwilioFromNumber
 	}
 
 	if strings.TrimSpace(args.Mode) != "" {
@@ -146,8 +147,8 @@ func (h *ToolHandler) InitiateCall(ctx context.Context, args InitiateCallArgs) (
 	}
 
 	channelID := args.DiscordChannelID
-	if channelID == "" && h.cfg != nil {
-		channelID = h.cfg.DefaultDiscordChannel
+	if channelID == "" && cfg != nil {
+		channelID = cfg.DefaultDiscordChannel
 	}
 	if channelID == "" {
 		channelID = "prospera"
@@ -169,8 +170,8 @@ func (h *ToolHandler) InitiateCall(ctx context.Context, args InitiateCallArgs) (
 	}
 
 	maxConcurrent := 5
-	if h.cfg != nil && h.cfg.MaxConcurrentCalls > 0 {
-		maxConcurrent = h.cfg.MaxConcurrentCalls
+	if cfg != nil && cfg.MaxConcurrentCalls > 0 {
+		maxConcurrent = cfg.MaxConcurrentCalls
 	}
 
 	if err := h.store.CreateOutboundCall(ctx, call, maxConcurrent); err != nil {
@@ -180,8 +181,8 @@ func (h *ToolHandler) InitiateCall(ctx context.Context, args InitiateCallArgs) (
 	twimlURL := ""
 	statusURL := ""
 	amdURL := ""
-	if h.cfg != nil && h.cfg.PublicWebhookBaseURL != "" {
-		baseURL := strings.TrimRight(h.cfg.PublicWebhookBaseURL, "/")
+	if cfg != nil && cfg.PublicWebhookBaseURL != "" {
+		baseURL := strings.TrimRight(cfg.PublicWebhookBaseURL, "/")
 		twimlURL = fmt.Sprintf("%s/api/webhooks/twilio/voice?call_id=%s", baseURL, url.QueryEscape(callID))
 		statusURL = fmt.Sprintf("%s/api/webhooks/twilio/status?call_id=%s", baseURL, url.QueryEscape(callID))
 		amdURL = fmt.Sprintf("%s/api/webhooks/twilio/amd?call_id=%s", baseURL, url.QueryEscape(callID))
@@ -329,14 +330,15 @@ func (h *ToolHandler) ListCalls(ctx context.Context, args ListCallsArgs) (ListCa
 
 // SendSMS executes the send_sms tool.
 func (h *ToolHandler) SendSMS(ctx context.Context, args SendSMSArgs) (SendSMSOutput, error) {
+	cfg := h.cfgSrc.Current()
 	normTo, err := NormalizeE164(args.To)
 	if err != nil {
 		return SendSMSOutput{}, fmt.Errorf("send_sms: invalid to number: %w", err)
 	}
 
 	from := strings.TrimSpace(args.From)
-	if from == "" && h.cfg != nil {
-		from = h.cfg.TwilioFromNumber
+	if from == "" && cfg != nil {
+		from = cfg.TwilioFromNumber
 	}
 	if from == "" {
 		return SendSMSOutput{}, fmt.Errorf("send_sms: from number is required")
@@ -405,9 +407,10 @@ func (h *ToolHandler) EnsurePhoneNumber(ctx context.Context, args EnsurePhoneNum
 		areaCode = "510"
 	}
 
+	cfg := h.cfgSrc.Current()
 	webhookBaseURL := ""
-	if h.cfg != nil && h.cfg.PublicWebhookBaseURL != "" {
-		webhookBaseURL = strings.TrimRight(h.cfg.PublicWebhookBaseURL, "/") + "/api/webhooks"
+	if cfg != nil && cfg.PublicWebhookBaseURL != "" {
+		webhookBaseURL = strings.TrimRight(cfg.PublicWebhookBaseURL, "/") + "/api/webhooks"
 	}
 
 	number, err := h.twilio.EnsurePhoneNumber(ctx, areaCode, webhookBaseURL)

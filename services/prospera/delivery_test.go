@@ -422,7 +422,7 @@ func TestFlushLiveTranscript(t *testing.T) {
 				DefaultDiscordChannel: "prospera",
 			}
 
-			reporter := NewReporter(cfg, store, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()))
+			reporter := NewReporter(staticConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()))
 			err := reporter.FlushLiveTranscript(context.Background(), tc.call.CallID)
 
 			if (err != nil) != tc.wantErr {
@@ -552,8 +552,7 @@ func TestDeliverCallReport(t *testing.T) {
 				DefaultDiscordChannel: "prospera",
 			}
 
-			reporter := NewReporter(
-				cfg,
+			reporter := NewReporter(staticConfig{cfg: cfg},
 				store,
 				&mockTwilioForDelivery{},
 				WithReporterHTTPClient(srv.Client()),
@@ -670,7 +669,7 @@ func TestProcessVoicemailRecording(t *testing.T) {
 				downloadErr: tc.downloadErr,
 			}
 
-			reporter := NewReporter(cfg, store, twilioMock, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
+			reporter := NewReporter(staticConfig{cfg: cfg}, store, twilioMock, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
 			err := reporter.ProcessVoicemailRecording(context.Background(), call.CallID, "https://api.twilio.com/recording.wav")
 
 			if (err != nil) != tc.wantErr {
@@ -740,7 +739,7 @@ func TestDeliverInboundSMS(t *testing.T) {
 				DefaultDiscordChannel: "prospera",
 			}
 
-			reporter := NewReporter(cfg, store, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()))
+			reporter := NewReporter(staticConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()))
 			err := reporter.DeliverInboundSMS(context.Background(), tc.msg)
 
 			if (err != nil) != tc.wantErr {
@@ -762,13 +761,13 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 
 	t.Run("flush live transcript error cases", func(t *testing.T) {
 		t.Parallel()
-		nilStoreReporter := NewReporter(&Config{BrainURL: "http://brain"}, nil, &mockTwilioForDelivery{})
+		nilStoreReporter := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain"}}, nil, &mockTwilioForDelivery{})
 		if err := nilStoreReporter.FlushLiveTranscript(context.Background(), "call-1"); err == nil {
 			t.Fatal("expected error with nil store")
 		}
 
 		store := newMockStoreForDelivery()
-		reporter := NewReporter(&Config{BrainURL: "http://brain"}, store, &mockTwilioForDelivery{})
+		reporter := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain"}}, store, &mockTwilioForDelivery{})
 		if err := reporter.FlushLiveTranscript(context.Background(), "call-nonexistent"); err == nil {
 			t.Fatal("expected error with nonexistent call")
 		}
@@ -787,13 +786,13 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 
 	t.Run("deliver call report error cases", func(t *testing.T) {
 		t.Parallel()
-		nilStoreReporter := NewReporter(&Config{BrainURL: "http://brain"}, nil, &mockTwilioForDelivery{})
+		nilStoreReporter := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain"}}, nil, &mockTwilioForDelivery{})
 		if err := nilStoreReporter.DeliverCallReport(context.Background(), "call-1"); err == nil {
 			t.Fatal("expected error with nil store")
 		}
 
 		store := newMockStoreForDelivery()
-		reporter := NewReporter(&Config{BrainURL: "http://brain"}, store, &mockTwilioForDelivery{})
+		reporter := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain"}}, store, &mockTwilioForDelivery{})
 		if err := reporter.DeliverCallReport(context.Background(), "call-nonexistent"); err == nil {
 			t.Fatal("expected error with nonexistent call")
 		}
@@ -808,10 +807,10 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 		}))
 		defer discordSrv.Close()
 
-		fallbackReporter := NewReporter(&Config{
+		fallbackReporter := NewReporter(staticConfig{cfg: &Config{
 			BrainURL:              discordSrv.URL,
 			DefaultDiscordChannel: "prospera",
-		}, store, &mockTwilioForDelivery{}, WithReporterHTTPClient(discordSrv.Client()))
+		}}, store, &mockTwilioForDelivery{}, WithReporterHTTPClient(discordSrv.Client()))
 		if err := fallbackReporter.DeliverCallReport(context.Background(), "call-fallback-sum"); err != nil {
 			t.Fatalf("unexpected error in fallback report: %v", err)
 		}
@@ -819,13 +818,13 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 
 	t.Run("process voicemail recording error cases", func(t *testing.T) {
 		t.Parallel()
-		nilStoreReporter := NewReporter(&Config{BrainURL: "http://brain"}, nil, &mockTwilioForDelivery{})
+		nilStoreReporter := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain"}}, nil, &mockTwilioForDelivery{})
 		if err := nilStoreReporter.ProcessVoicemailRecording(context.Background(), "call-1", "https://rec"); err == nil {
 			t.Fatal("expected error with nil store")
 		}
 
 		store := newMockStoreForDelivery()
-		reporter := NewReporter(&Config{BrainURL: "http://brain"}, store, &mockTwilioForDelivery{})
+		reporter := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain"}}, store, &mockTwilioForDelivery{})
 		if err := reporter.ProcessVoicemailRecording(context.Background(), "call-nonexistent", "https://rec"); err == nil {
 			t.Fatal("expected error with nonexistent call")
 		}
@@ -836,7 +835,7 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 			ReportStatus: "awaiting_recording",
 		})
 		failTwilio := &mockTwilioForDelivery{downloadErr: errors.New("download timeout")}
-		failReporter := NewReporter(&Config{BrainURL: "http://brain"}, store, failTwilio)
+		failReporter := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain"}}, store, failTwilio)
 		if err := failReporter.ProcessVoicemailRecording(context.Background(), "call-dl-err", "https://rec"); err == nil {
 			t.Fatal("expected error when download fails")
 		}
@@ -851,9 +850,9 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 			CallID:       "call-discord-fail",
 			ReportStatus: "awaiting_recording",
 		})
-		discordFailReporter := NewReporter(&Config{
+		discordFailReporter := NewReporter(staticConfig{cfg: &Config{
 			BrainURL: discordFailSrv.URL,
-		}, store, &mockTwilioForDelivery{audioData: []byte("wav")}, WithReporterHTTPClient(discordFailSrv.Client()))
+		}}, store, &mockTwilioForDelivery{audioData: []byte("wav")}, WithReporterHTTPClient(discordFailSrv.Client()))
 		if err := discordFailReporter.ProcessVoicemailRecording(context.Background(), "call-discord-fail", "https://rec"); err == nil {
 			t.Fatal("expected error when discord delivery fails")
 		}
@@ -861,7 +860,7 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 
 	t.Run("deliver inbound sms without brain url", func(t *testing.T) {
 		t.Parallel()
-		reporter := NewReporter(&Config{BrainURL: ""}, nil, &mockTwilioForDelivery{})
+		reporter := NewReporter(staticConfig{cfg: &Config{BrainURL: ""}}, nil, &mockTwilioForDelivery{})
 		err := reporter.DeliverInboundSMS(context.Background(), VoiceMessage{
 			MessageSID: "SM1",
 			Body:       "test",
@@ -899,8 +898,8 @@ func TestDelivery_GeminiSummaryBranches(t *testing.T) {
 				GeminiAPIKey:        "test-key",
 				GeminiFallbackModel: "gemini-2.5-flash",
 			}
-			rep := NewReporter(cfg, nil, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
-			res, err := rep.generateGeminiSummary(context.Background(), "test prompt")
+			rep := NewReporter(staticConfig{cfg: cfg}, nil, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
+			res, err := rep.generateGeminiSummary(context.Background(), rep.cfgSrc.Current(), "test prompt")
 			if tc.wantErr && err == nil {
 				t.Fatalf("%s: expected error, got nil", tc.name)
 			}
@@ -934,8 +933,8 @@ func TestDelivery_WhisperBranches(t *testing.T) {
 			t.Cleanup(srv.Close)
 
 			cfg := &Config{WhisperURL: srv.URL}
-			rep := NewReporter(cfg, nil, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
-			res, err := rep.transcribeViaWhisper(context.Background(), []byte("audio"))
+			rep := NewReporter(staticConfig{cfg: cfg}, nil, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
+			res, err := rep.transcribeViaWhisper(context.Background(), rep.cfgSrc.Current(), []byte("audio"))
 			if tc.wantErr && err == nil {
 				t.Fatalf("%s: expected error, got nil", tc.name)
 			}
@@ -970,8 +969,8 @@ func TestDelivery_GeminiFlashBranches(t *testing.T) {
 			t.Cleanup(srv.Close)
 
 			cfg := &Config{GeminiAPIKey: "test-key"}
-			rep := NewReporter(cfg, nil, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
-			res, err := rep.transcribeViaGeminiFlash(context.Background(), []byte("audio"), "audio/wav")
+			rep := NewReporter(staticConfig{cfg: cfg}, nil, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
+			res, err := rep.transcribeViaGeminiFlash(context.Background(), rep.cfgSrc.Current(), []byte("audio"), "audio/wav")
 			if tc.wantErr && err == nil {
 				t.Fatalf("%s: expected error, got nil", tc.name)
 			}
@@ -984,7 +983,7 @@ func TestDelivery_GeminiFlashBranches(t *testing.T) {
 
 func TestDelivery_ReporterNilStoreAndNotFound(t *testing.T) {
 	t.Parallel()
-	repNil := NewReporter(&Config{BrainURL: "http://brain.local"}, nil, &mockTwilioForDelivery{})
+	repNil := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain.local"}}, nil, &mockTwilioForDelivery{})
 	if err := repNil.FlushLiveTranscript(context.Background(), "c1"); err == nil {
 		t.Fatal("expected err on nil store")
 	}
@@ -996,7 +995,7 @@ func TestDelivery_ReporterNilStoreAndNotFound(t *testing.T) {
 	}
 
 	store := newMockStoreForDelivery()
-	rep := NewReporter(&Config{BrainURL: "http://brain.local"}, store, &mockTwilioForDelivery{})
+	rep := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain.local"}}, store, &mockTwilioForDelivery{})
 	if err := rep.FlushLiveTranscript(context.Background(), "c-missing"); err == nil {
 		t.Fatal("expected err on missing call")
 	}
@@ -1028,15 +1027,15 @@ func TestDelivery_WebhookAndStoreErrorPropagation(t *testing.T) {
 			return nil, errors.New("network drop")
 		}),
 	}
-	rFail := NewReporter(&Config{BrainURL: "http://brain.local"}, nil, nil, WithReporterHTTPClient(failingClient))
-	if err := rFail.postDiscordMessage(context.Background(), "c1", "", "msg", nil); err == nil {
+	rFail := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain.local"}}, nil, nil, WithReporterHTTPClient(failingClient))
+	if err := rFail.postDiscordMessage(context.Background(), rFail.cfgSrc.Current(), "c1", "", "msg", nil); err == nil {
 		t.Fatal("expected postDiscordMessage network error")
 	}
 
 	// 2. FlushLiveTranscript speaker roles and store error
 	storeErr := newMockStoreForDelivery()
 	storeErr.opErr = errors.New("db error")
-	rStoreErr := NewReporter(&Config{BrainURL: "http://brain.local"}, storeErr, nil)
+	rStoreErr := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain.local"}}, storeErr, nil)
 	if err := rStoreErr.FlushLiveTranscript(context.Background(), "c1"); err == nil {
 		t.Fatal("expected get call error")
 	}
@@ -1057,10 +1056,10 @@ func TestDelivery_WebhookAndStoreErrorPropagation(t *testing.T) {
 			{Role: "prospera", Text: "agent turn"},
 		},
 	}, 5)
-	rRoles := NewReporter(&Config{
+	rRoles := NewReporter(staticConfig{cfg: &Config{
 		BrainURL:              "http://brain.local",
 		DefaultDiscordChannel: "prospera",
-	}, storeRoles, nil, WithReporterHTTPClient(&http.Client{
+	}}, storeRoles, nil, WithReporterHTTPClient(&http.Client{
 		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -1073,24 +1072,24 @@ func TestDelivery_WebhookAndStoreErrorPropagation(t *testing.T) {
 	}
 
 	// 4. generateGeminiSummary nil config and empty key
-	rNilCfg := NewReporter(nil, nil, nil)
-	if _, err := rNilCfg.generateGeminiSummary(context.Background(), "p"); err == nil {
+	rNilCfg := NewReporter(staticConfig{cfg: nil}, nil, nil)
+	if _, err := rNilCfg.generateGeminiSummary(context.Background(), rNilCfg.cfgSrc.Current(), "p"); err == nil {
 		t.Fatal("expected error on nil cfg")
 	}
-	rEmptyKey := NewReporter(&Config{GeminiAPIKey: ""}, nil, nil)
-	if _, err := rEmptyKey.generateGeminiSummary(context.Background(), "p"); err == nil {
+	rEmptyKey := NewReporter(staticConfig{cfg: &Config{GeminiAPIKey: ""}}, nil, nil)
+	if _, err := rEmptyKey.generateGeminiSummary(context.Background(), rEmptyKey.cfgSrc.Current(), "p"); err == nil {
 		t.Fatal("expected error on empty key")
 	}
-	if _, err := rEmptyKey.transcribeAudio(context.Background(), []byte("a"), "audio/wav"); err == nil {
+	if _, err := rEmptyKey.transcribeAudio(context.Background(), rEmptyKey.cfgSrc.Current(), []byte("a"), "audio/wav"); err == nil {
 		t.Fatal("expected error when no backends configured")
 	}
 
 	// 5. DeliverInboundSMS mark delivered error
 	storeSMS := newMockStoreForDelivery()
 	storeSMS.opErr = errors.New("mark err")
-	rSMS := NewReporter(&Config{
+	rSMS := NewReporter(staticConfig{cfg: &Config{
 		BrainURL: "http://brain.local",
-	}, storeSMS, nil, WithReporterHTTPClient(&http.Client{
+	}}, storeSMS, nil, WithReporterHTTPClient(&http.Client{
 		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -1103,29 +1102,37 @@ func TestDelivery_WebhookAndStoreErrorPropagation(t *testing.T) {
 	}
 
 	// 6. transcribeViaWhisper and transcribeViaGeminiFlash transport error
-	rFailTransport := NewReporter(&Config{
+	rFailTransport := NewReporter(staticConfig{cfg: &Config{
 		WhisperURL:   "http://whisper.local",
 		GeminiAPIKey: "key-123",
-	}, nil, nil, WithReporterHTTPClient(failingClient))
-	if _, err := rFailTransport.transcribeViaWhisper(context.Background(), []byte("audio")); err == nil {
+	}}, nil, nil, WithReporterHTTPClient(failingClient))
+	if _, err := rFailTransport.transcribeViaWhisper(context.Background(), rFailTransport.cfgSrc.Current(), []byte("audio")); err == nil {
 		t.Fatal("expected whisper transport error")
 	}
-	if _, err := rFailTransport.transcribeViaGeminiFlash(context.Background(), []byte("audio"), "audio/wav"); err == nil {
+	if _, err := rFailTransport.transcribeViaGeminiFlash(context.Background(), rFailTransport.cfgSrc.Current(), []byte("audio"), "audio/wav"); err == nil {
 		t.Fatal("expected flash transport error")
 	}
 }
 
-func TestReporter_ResolveDiscordChannel(t *testing.T) {
+func TestResolveDiscordChannel(t *testing.T) {
 	t.Parallel()
-	rWithCustom := NewReporter(&Config{DefaultDiscordChannel: "custom-chan"}, nil, nil)
-	if got := rWithCustom.resolveDiscordChannel(""); got != "custom-chan" {
-		t.Fatalf("resolveDiscordChannel with custom = %q, want custom-chan", got)
+	tests := []struct {
+		name      string
+		cfg       *Config
+		channelID string
+		want      string
+	}{
+		{name: "configured default", cfg: &Config{DefaultDiscordChannel: "custom-chan"}, want: "custom-chan"},
+		{name: "explicit channel wins", cfg: &Config{DefaultDiscordChannel: "custom-chan"}, channelID: "specific-chan", want: "specific-chan"},
+		{name: "nil config falls back", cfg: nil, want: "prospera"},
+		{name: "empty default falls back", cfg: &Config{}, want: "prospera"},
 	}
-	if got := rWithCustom.resolveDiscordChannel("specific-chan"); got != "specific-chan" {
-		t.Fatalf("resolveDiscordChannel with specific = %q, want specific-chan", got)
-	}
-	rNilCfg := NewReporter(nil, nil, nil)
-	if got := rNilCfg.resolveDiscordChannel(""); got != "prospera" {
-		t.Fatalf("resolveDiscordChannel with nil cfg = %q, want prospera", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := resolveDiscordChannel(tc.cfg, tc.channelID); got != tc.want {
+				t.Fatalf("resolveDiscordChannel() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

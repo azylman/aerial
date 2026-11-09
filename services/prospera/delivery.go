@@ -45,7 +45,7 @@ func BuildPostCallSummaryPrompt(call *VoiceCall) string {
 
 // Reporter coordinates live transcript batching, post-call reports, voicemail transcription, and SMS delivery.
 type Reporter struct {
-	cfg               *Config
+	cfgSrc            ConfigSource
 	store             Store
 	twilio            TwilioClient
 	httpClient        *http.Client
@@ -64,9 +64,9 @@ func WithReporterRecordingProvider(fn func(callID string) []byte) ReporterOption
 }
 
 // NewReporter creates a new Reporter.
-func NewReporter(cfg *Config, store Store, twilio TwilioClient, opts ...ReporterOption) *Reporter {
+func NewReporter(cfgSrc ConfigSource, store Store, twilio TwilioClient, opts ...ReporterOption) *Reporter {
 	r := &Reporter{
-		cfg:        cfg,
+		cfgSrc:     cfgSrc,
 		store:      store,
 		twilio:     twilio,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
@@ -90,18 +90,19 @@ type discordMessageRequest struct {
 	Attachments []discordAttachmentPayload `json:"attachments,omitempty"`
 }
 
-func (r *Reporter) resolveDiscordChannel(channelID string) string {
+// resolveDiscordChannel returns channelID, falling back to the configured default channel.
+func resolveDiscordChannel(cfg *Config, channelID string) string {
 	if channelID != "" {
 		return channelID
 	}
-	if r.cfg != nil && r.cfg.DefaultDiscordChannel != "" {
-		return r.cfg.DefaultDiscordChannel
+	if cfg != nil && cfg.DefaultDiscordChannel != "" {
+		return cfg.DefaultDiscordChannel
 	}
 	return "prospera"
 }
 
-func (r *Reporter) postDiscordMessage(ctx context.Context, channelID, threadID, content string, attachments []discordAttachmentPayload) error {
-	if r.cfg == nil || strings.TrimSpace(r.cfg.BrainURL) == "" {
+func (r *Reporter) postDiscordMessage(ctx context.Context, cfg *Config, channelID, threadID, content string, attachments []discordAttachmentPayload) error {
+	if cfg == nil || strings.TrimSpace(cfg.BrainURL) == "" {
 		return fmt.Errorf("reporter: brain url is not configured")
 	}
 
@@ -117,7 +118,7 @@ func (r *Reporter) postDiscordMessage(ctx context.Context, channelID, threadID, 
 		return fmt.Errorf("reporter: marshal discord payload: %w", err)
 	}
 
-	endpoint := strings.TrimRight(r.cfg.BrainURL, "/") + "/discord/message"
+	endpoint := strings.TrimRight(cfg.BrainURL, "/") + "/discord/message"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("reporter: new discord request: %w", err)
@@ -143,6 +144,7 @@ func (r *Reporter) postDiscordMessage(ctx context.Context, channelID, threadID, 
 
 // FlushLiveTranscript batches unsent transcript turns and delivers them to Discord.
 func (r *Reporter) FlushLiveTranscript(ctx context.Context, callID string) error {
+	cfg := r.cfgSrc.Current()
 	if r.store == nil {
 		return fmt.Errorf("reporter: store is nil")
 	}
@@ -186,8 +188,8 @@ func (r *Reporter) FlushLiveTranscript(ctx context.Context, callID string) error
 		return nil
 	}
 
-	channel := r.resolveDiscordChannel(call.DiscordChannelID)
-	if err := r.postDiscordMessage(ctx, channel, call.DiscordThreadID, content, nil); err != nil {
+	channel := resolveDiscordChannel(cfg, call.DiscordChannelID)
+	if err := r.postDiscordMessage(ctx, cfg, channel, call.DiscordThreadID, content, nil); err != nil {
 		return err
 	}
 
@@ -199,6 +201,7 @@ func (r *Reporter) FlushLiveTranscript(ctx context.Context, callID string) error
 
 // DeliverCallReport generates a post-call summary using Gemini with tools: [] and posts it to Discord.
 func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
+	cfg := r.cfgSrc.Current()
 	if r.store == nil {
 		return fmt.Errorf("reporter: store is nil")
 	}
@@ -225,7 +228,7 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 	}
 
 	prompt := BuildPostCallSummaryPrompt(call)
-	summary, err := r.generateGeminiSummary(ctx, prompt)
+	summary, err := r.generateGeminiSummary(ctx, cfg, prompt)
 	if err != nil || strings.TrimSpace(summary) == "" {
 		summary = fmt.Sprintf("Call %s ended with state %q (reason: %q). Total turns: %d.", call.CallID, call.State, call.EndReason, len(call.Transcript))
 	}
@@ -235,7 +238,7 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 		withNumber = call.FromNumber
 	}
 
-	channel := r.resolveDiscordChannel(call.DiscordChannelID)
+	channel := resolveDiscordChannel(cfg, call.DiscordChannelID)
 	msgContent := fmt.Sprintf("📋 **Call Summary (%s)**\n**Direction**: %s | **With**: %s\n**State**: %s | **End Reason**: %s\n\n%s",
 		call.CallID, call.Direction, withNumber, call.State, call.EndReason, summary)
 
@@ -252,7 +255,7 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 		}
 	}
 
-	if postErr := r.postDiscordMessage(ctx, channel, call.DiscordThreadID, msgContent, attachments); postErr != nil {
+	if postErr := r.postDiscordMessage(ctx, cfg, channel, call.DiscordThreadID, msgContent, attachments); postErr != nil {
 		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{"processing"}, "failed", "discord post failed: "+postErr.Error()); transErr != nil {
 			log.Printf("reporter: transition report status to failed: %v", transErr)
 		}
@@ -271,12 +274,12 @@ func resolveRESTModel(cfg *Config) string {
 	return "gemini-2.5-flash"
 }
 
-func (r *Reporter) generateGeminiSummary(ctx context.Context, prompt string) (string, error) {
-	if r.cfg == nil || strings.TrimSpace(r.cfg.GeminiAPIKey) == "" {
+func (r *Reporter) generateGeminiSummary(ctx context.Context, cfg *Config, prompt string) (string, error) {
+	if cfg == nil || strings.TrimSpace(cfg.GeminiAPIKey) == "" {
 		return "", fmt.Errorf("reporter: gemini api key not configured")
 	}
 
-	model := resolveRESTModel(r.cfg)
+	model := resolveRESTModel(cfg)
 
 	reqBody := map[string]any{
 		"contents": []map[string]any{
@@ -298,7 +301,7 @@ func (r *Reporter) generateGeminiSummary(ctx context.Context, prompt string) (st
 	if r.geminiBaseURL != "" {
 		baseURL = r.geminiBaseURL
 	}
-	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", strings.TrimRight(baseURL, "/"), model, r.cfg.GeminiAPIKey)
+	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", strings.TrimRight(baseURL, "/"), model, cfg.GeminiAPIKey)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return "", fmt.Errorf("reporter: new gemini request: %w", err)
@@ -342,6 +345,7 @@ func (r *Reporter) generateGeminiSummary(ctx context.Context, prompt string) (st
 
 // ProcessVoicemailRecording handles a completed Tier 3 voicemail recording.
 func (r *Reporter) ProcessVoicemailRecording(ctx context.Context, callID, recordingURL string) error {
+	cfg := r.cfgSrc.Current()
 	if r.store == nil {
 		return fmt.Errorf("reporter: store is nil")
 	}
@@ -377,12 +381,12 @@ func (r *Reporter) ProcessVoicemailRecording(ctx context.Context, callID, record
 		contentType = "audio/wav"
 	}
 
-	transcript, tErr := r.transcribeAudio(ctx, audioBytes, contentType)
+	transcript, tErr := r.transcribeAudio(ctx, cfg, audioBytes, contentType)
 	if tErr != nil || strings.TrimSpace(transcript) == "" {
 		transcript = "(Voicemail transcription unavailable)"
 	}
 
-	channel := r.resolveDiscordChannel(call.DiscordChannelID)
+	channel := resolveDiscordChannel(cfg, call.DiscordChannelID)
 	att := discordAttachmentPayload{
 		Filename:      "voicemail.wav",
 		ContentType:   contentType,
@@ -392,7 +396,7 @@ func (r *Reporter) ProcessVoicemailRecording(ctx context.Context, callID, record
 	msgContent := fmt.Sprintf("📼 **Voicemail Received**\n**From**: %s | **Call ID**: %s\n**Transcript**:\n> %s",
 		call.FromNumber, call.CallID, transcript)
 
-	if err := r.postDiscordMessage(ctx, channel, call.DiscordThreadID, msgContent, []discordAttachmentPayload{att}); err != nil {
+	if err := r.postDiscordMessage(ctx, cfg, channel, call.DiscordThreadID, msgContent, []discordAttachmentPayload{att}); err != nil {
 		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{"processing"}, "failed", "discord post failed: "+err.Error()); transErr != nil {
 			log.Printf("reporter: transition status to failed: %v", transErr)
 		}
@@ -405,18 +409,18 @@ func (r *Reporter) ProcessVoicemailRecording(ctx context.Context, callID, record
 	return nil
 }
 
-func (r *Reporter) transcribeAudio(ctx context.Context, audioBytes []byte, contentType string) (string, error) {
+func (r *Reporter) transcribeAudio(ctx context.Context, cfg *Config, audioBytes []byte, contentType string) (string, error) {
 	// First attempt: Whisper STT endpoint
-	if r.cfg != nil && strings.TrimSpace(r.cfg.WhisperURL) != "" {
-		text, err := r.transcribeViaWhisper(ctx, audioBytes)
+	if cfg != nil && strings.TrimSpace(cfg.WhisperURL) != "" {
+		text, err := r.transcribeViaWhisper(ctx, cfg, audioBytes)
 		if err == nil && strings.TrimSpace(text) != "" {
 			return text, nil
 		}
 	}
 
 	// Fallback attempt: Gemini Flash inline audio transcription
-	if r.cfg != nil && strings.TrimSpace(r.cfg.GeminiAPIKey) != "" {
-		text, err := r.transcribeViaGeminiFlash(ctx, audioBytes, contentType)
+	if cfg != nil && strings.TrimSpace(cfg.GeminiAPIKey) != "" {
+		text, err := r.transcribeViaGeminiFlash(ctx, cfg, audioBytes, contentType)
 		if err == nil && strings.TrimSpace(text) != "" {
 			return text, nil
 		}
@@ -425,7 +429,7 @@ func (r *Reporter) transcribeAudio(ctx context.Context, audioBytes []byte, conte
 	return "", fmt.Errorf("reporter: all transcription backends failed")
 }
 
-func (r *Reporter) transcribeViaWhisper(ctx context.Context, audioBytes []byte) (string, error) {
+func (r *Reporter) transcribeViaWhisper(ctx context.Context, cfg *Config, audioBytes []byte) (string, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -443,7 +447,7 @@ func (r *Reporter) transcribeViaWhisper(ctx context.Context, audioBytes []byte) 
 		return "", err
 	}
 
-	endpoint := strings.TrimRight(r.cfg.WhisperURL, "/") + "/v1/audio/transcriptions"
+	endpoint := strings.TrimRight(cfg.WhisperURL, "/") + "/v1/audio/transcriptions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &body)
 	if err != nil {
 		return "", err
@@ -469,8 +473,8 @@ func (r *Reporter) transcribeViaWhisper(ctx context.Context, audioBytes []byte) 
 	return res.Text, nil
 }
 
-func (r *Reporter) transcribeViaGeminiFlash(ctx context.Context, audioBytes []byte, contentType string) (string, error) {
-	model := resolveRESTModel(r.cfg)
+func (r *Reporter) transcribeViaGeminiFlash(ctx context.Context, cfg *Config, audioBytes []byte, contentType string) (string, error) {
+	model := resolveRESTModel(cfg)
 
 	b64Data := base64.StdEncoding.EncodeToString(audioBytes)
 	reqBody := map[string]any{
@@ -501,7 +505,7 @@ func (r *Reporter) transcribeViaGeminiFlash(ctx context.Context, audioBytes []by
 	if r.geminiBaseURL != "" {
 		baseURL = r.geminiBaseURL
 	}
-	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", strings.TrimRight(baseURL, "/"), model, r.cfg.GeminiAPIKey)
+	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", strings.TrimRight(baseURL, "/"), model, cfg.GeminiAPIKey)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return "", err
@@ -541,7 +545,8 @@ func (r *Reporter) transcribeViaGeminiFlash(ctx context.Context, audioBytes []by
 
 // DeliverInboundSMS formats an inbound SMS/MMS and delivers it to Discord.
 func (r *Reporter) DeliverInboundSMS(ctx context.Context, msg VoiceMessage) error {
-	channel := r.resolveDiscordChannel("")
+	cfg := r.cfgSrc.Current()
+	channel := resolveDiscordChannel(cfg, "")
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "💬 **Inbound SMS Received**\n**From**: %s | **To**: %s\n\n%s", msg.FromNumber, msg.ToNumber, msg.Body)
@@ -552,7 +557,7 @@ func (r *Reporter) DeliverInboundSMS(ctx context.Context, msg VoiceMessage) erro
 		}
 	}
 
-	if err := r.postDiscordMessage(ctx, channel, "", sb.String(), nil); err != nil {
+	if err := r.postDiscordMessage(ctx, cfg, channel, "", sb.String(), nil); err != nil {
 		return err
 	}
 

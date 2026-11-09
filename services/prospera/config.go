@@ -47,6 +47,12 @@ type Config struct {
 	AllowFrom             []string
 }
 
+// ConfigSource yields the live configuration snapshot. Callers read Current()
+// once per request, call, or batch and must never mutate the returned value.
+type ConfigSource interface {
+	Current() *Config
+}
+
 // ProsperaYAMLConfig defines the declarative file schema for prospera.yaml.
 type ProsperaYAMLConfig struct {
 	Port                  string `yaml:"port"`
