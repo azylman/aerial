@@ -757,29 +757,71 @@ func startLeaderHandoff(
 	return errCh, stopHandoff, releaseLock
 }
 
+// reloadTrigger runs git-sync webhook reloads on a single background worker,
+// coalescing bursts of requests. pending holds at most one queued reload: a
+// Trigger that arrives while one is already pending is dropped, because the
+// queued reload will read the newest files anyway. A burst of webhook calls
+// therefore costs at most one extra reload after the one in flight.
+type reloadTrigger struct {
+	pending chan struct{}
+	done    chan struct{}
+}
+
+// newReloadTrigger starts the reload worker. The worker calls reloadConfig for
+// each pending request until ctx is cancelled, then closes done. A request
+// still pending at cancellation is discarded rather than reloaded mid-shutdown.
+func newReloadTrigger(ctx context.Context, reloadConfig func(string)) *reloadTrigger {
+	t := &reloadTrigger{pending: make(chan struct{}, 1), done: make(chan struct{})}
+	go func() {
+		defer close(t.done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.pending:
+				if ctx.Err() != nil {
+					return
+				}
+				reloadConfig("git-sync webhook")
+			}
+		}
+	}()
+	return t
+}
+
+// Trigger queues a reload without blocking; it is a no-op when one is already
+// pending.
+func (t *reloadTrigger) Trigger() {
+	select {
+	case t.pending <- struct{}{}:
+	default:
+	}
+}
+
 // handleGitSyncReload serves the git-sync sidecar webhook mounted by
-// registerGitSyncReload.
-// eri runs two git-sync sidecars (aerial rules/skills and aerial-config) that
-// may fire at the same moment, so reloads are serialized. reloadConfig already
-// retains the last known good config on failure, so the handler always answers
-// 200: git-sync retries non-success responses for the same commit forever, and
-// re-reading an unchanged bad file can never succeed.
-func handleGitSyncReload(reloadConfig func(string)) http.Handler {
-	var mu sync.Mutex
+// registerGitSyncReload. A full reload (config, rules, skills, MCP config,
+// daemon pool MarkDirty) takes 1-3s, but git-sync's webhook has a 1s default
+// timeout and retries every few seconds until it sees its configured success
+// status. Reloading on the request path therefore made every call time out and
+// every retry run another reload that recycled warm daemons. The handler only
+// queues a coalesced reload on trigger and answers 200 immediately. eri runs
+// two git-sync sidecars (aerial rules/skills and aerial-config) that may fire at
+// the same moment; the trigger's single worker serializes their reloads, and
+// reloadConfig retains the last known good config on failure, so there is no
+// error to report back to git-sync.
+func handleGitSyncReload(trigger *reloadTrigger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		mu.Lock()
-		reloadConfig("git-sync webhook")
-		mu.Unlock()
-		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
+		trigger.Trigger()
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 	})
 }
 
 // registerGitSyncReload mounts the git-sync webhook on mux. The endpoint
-// triggers a full config reload, so it must stay reachable only from the
+// queues a full config reload, so it must stay reachable only from the
 // in-pod sidecars over loopback. The method-qualified pattern makes the mux
 // answer 405 for anything but POST.
-func registerGitSyncReload(mux *http.ServeMux, reloadConfig func(string)) {
-	mux.Handle("POST /-/reload", httpkit.LoopbackOnly(handleGitSyncReload(reloadConfig)))
+func registerGitSyncReload(mux *http.ServeMux, trigger *reloadTrigger) {
+	mux.Handle("POST /-/reload", httpkit.LoopbackOnly(handleGitSyncReload(trigger)))
 }
 
 func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, reloadConfig func(string)) func() {
@@ -975,7 +1017,15 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}
 	mux := SetupBrainMuxWithEmbedder(store, txStore, pool, embedder, sessionMgr.Roots()...)
-	registerGitSyncReload(mux, reloadConfig)
+	// Stop the git-sync reload worker and wait out any in-flight reload before
+	// the deferred pool and Discord teardown above run.
+	reloadCtx, stopReloads := context.WithCancel(ctx)
+	gitSyncReloads := newReloadTrigger(reloadCtx, reloadConfig)
+	defer func() {
+		stopReloads()
+		<-gitSyncReloads.done
+	}()
+	registerGitSyncReload(mux, gitSyncReloads)
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cur.Port)
