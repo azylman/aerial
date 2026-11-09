@@ -333,6 +333,51 @@ spec:
           volumeMounts:
             - mountPath: /share
               name: share
+        - command:
+            - /bin/sh
+            - -ec
+            - |
+              umask 077
+              install -d -o 1000 -g 1000 -m 0700 /data/ssh
+              if [ ! -s /data/ssh/id_ed25519 ] && [ -s /ssh-secret/id_ed25519 ]; then
+                tmp=$(mktemp /data/ssh/.id_ed25519.XXXXXX)
+                printf '%s\n' "$(cat /ssh-secret/id_ed25519)" > "$tmp"
+                if ssh-keygen -y -f "$tmp" >/dev/null 2>&1; then
+                  chown 1000:1000 "$tmp"
+                  chmod 0600 "$tmp"
+                  mv "$tmp" /data/ssh/id_ed25519
+                  echo "ssh-bootstrap: restored private key from secret"
+                else
+                  rm -f "$tmp"
+                  echo "ssh-bootstrap: WARNING secret key failed validation; skipped"
+                fi
+              fi
+              if [ -f /share/aerial-config/ssh/config ]; then
+                install -o 1000 -g 1000 -m 0600 /share/aerial-config/ssh/config /data/ssh/config
+              else
+                echo "ssh-bootstrap: no ssh config in aerial-config; skipped"
+              fi
+          image: ghcr.io/azylman/aerial-eri:${TAG_AERIAL_ERI:=latest}
+          name: ssh-bootstrap
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+          securityContext:
+            runAsGroup: 0
+            runAsUser: 0
+          volumeMounts:
+            - mountPath: /data
+              name: brain-data
+            - mountPath: /share
+              name: share
+              readOnly: true
+            - mountPath: /ssh-secret
+              name: ssh-key
+              readOnly: true
       nodeSelector:
         compute-tier: performance
         kubernetes.io/hostname: calibarn
@@ -359,6 +404,14 @@ spec:
             defaultMode: 256
             optional: true
             secretName: eri-secret
+        - name: ssh-key
+          secret:
+            defaultMode: 256
+            items:
+              - key: SSH_PRIVATE_KEY
+                path: id_ed25519
+            optional: true
+            secretName: eri-ssh-key
 ---
 apiVersion: v1
 kind: Service
