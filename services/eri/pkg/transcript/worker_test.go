@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -806,6 +807,8 @@ func TestSyncTranscripts_ClaudeScenarios(t *testing.T) {
 		wantSettled          bool
 		wantSkippedUnchanged int
 		secondPassSteps      int
+		wantStoredTools      []string // persisted tool_name per stored step, in step order
+		wantToolResults      []string // parsed TOOL steps as "tool_call_id|tool_name|status|content"
 	}{
 		{
 			name:      "claude transcript with prompt thinking tool use tool result and reply",
@@ -843,6 +846,40 @@ func TestSyncTranscripts_ClaudeScenarios(t *testing.T) {
 				`{"type":"assistant","timestamp":"2026-10-01T10:00:06Z","message":{"role":"assistant","content":[{"type":"text","text":"Extra resolution step"}]}}`,
 			}, "\n") + "\n",
 			secondPassSteps: 4,
+		},
+		{
+			name:      "claude parallel tool calls paired to shuffled tool results by id",
+			sessionID: "sess-claude-parallel",
+			content: strings.Join([]string{
+				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Survey the repo"}}`,
+				`{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"Bash","input":{"command":"ls"}}]}}`,
+				`{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_b","name":"Read","input":{"file_path":"go.mod"}}]}}`,
+				`{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_c","name":"Grep","input":{"pattern":"TODO"}}]}}`,
+				`{"type":"user","timestamp":"2026-10-01T10:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_c","content":"main.go:12: TODO"},{"type":"tool_result","tool_use_id":"toolu_a","content":"go.mod main.go"},{"type":"tool_result","tool_use_id":"toolu_b","is_error":true,"content":[{"type":"text","text":"permission denied"}]}]}}`,
+				`{"type":"assistant","timestamp":"2026-10-01T10:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"Survey complete."}]}}`,
+			}, "\n") + "\n",
+			wantSteps:       8,
+			wantSummaries:   1,
+			wantSettled:     true,
+			wantStoredTools: []string{"", "Bash", "Read", "Grep", "Grep", "Bash", "Read", ""},
+			wantToolResults: []string{
+				"toolu_c|Grep|DONE|main.go:12: TODO",
+				"toolu_a|Bash|DONE|go.mod main.go",
+				"toolu_b|Read|ERROR|permission denied",
+			},
+		},
+		{
+			name:      "claude tool result with unknown tool use id keeps empty name",
+			sessionID: "sess-claude-unknown-id",
+			content: strings.Join([]string{
+				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Resume work"}}`,
+				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_gone","content":"stale output"}]}}`,
+			}, "\n") + "\n",
+			wantSteps:       2,
+			wantSummaries:   1,
+			wantSettled:     true,
+			wantStoredTools: []string{"", ""},
+			wantToolResults: []string{"toolu_gone||DONE|stale output"},
 		},
 		{
 			name:      "claude transcript with unparseable or ambient messages skipped",
@@ -918,6 +955,35 @@ func TestSyncTranscripts_ClaudeScenarios(t *testing.T) {
 			}
 			if stats.SummariesGenerated != tc.wantSummaries {
 				t.Fatalf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
+			}
+
+			if tc.wantStoredTools != nil {
+				stored, err := store.GetTranscriptStepRange(ctx, tc.sessionID, 0, 1000)
+				if err != nil {
+					t.Fatalf("GetTranscriptStepRange failed: %v", err)
+				}
+				gotTools := make([]string, 0, len(stored))
+				for _, s := range stored {
+					gotTools = append(gotTools, s.ToolName)
+				}
+				if !slices.Equal(gotTools, tc.wantStoredTools) {
+					t.Fatalf("stored tool names = %q, want %q", gotTools, tc.wantStoredTools)
+				}
+			}
+			if tc.wantToolResults != nil {
+				scan, err := scanSessionTranscriptFile(filePath, nil)
+				if err != nil {
+					t.Fatalf("scanSessionTranscriptFile failed: %v", err)
+				}
+				var gotResults []string
+				for _, s := range scan.parsedSteps {
+					if s.Type == "TOOL" {
+						gotResults = append(gotResults, strings.Join([]string{s.ToolCallID, s.ToolName, s.Status, s.Content}, "|"))
+					}
+				}
+				if !slices.Equal(gotResults, tc.wantToolResults) {
+					t.Fatalf("parsed tool results = %q, want %q", gotResults, tc.wantToolResults)
+				}
 			}
 
 			states, err := store.GetSessionSyncStates(ctx)

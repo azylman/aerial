@@ -25,11 +25,16 @@ type rawTranscriptStep struct {
 	ToolName  string        `json:"tool_name"`
 	ToolCalls []rawToolCall `json:"tool_calls"`
 	Thinking  string        `json:"thinking"`
+	// ToolCallID pairs a Claude tool_result step with its originating tool_use block.
+	// It is never decoded from agy lines so agy pending-name association is unchanged.
+	ToolCallID string `json:"-"`
 }
 
 type rawToolCall struct {
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args"`
+	// ID is the Claude tool_use block id; never decoded from agy lines.
+	ID string `json:"-"`
 }
 
 // normalizeSyncOptions validates and populates default sync options and targets.
@@ -242,6 +247,8 @@ type transcriptScanState struct {
 	firstStepTime    time.Time
 	dialogueLines    []string
 	pendingToolNames []string
+	// claudeToolNames maps Claude tool_use ids to tool names so tool_result blocks resolve by id.
+	claudeToolNames map[string]string
 }
 
 func parseTranscriptTimestamp(rawTime string, fallback time.Time) time.Time {
@@ -257,10 +264,19 @@ func parseTranscriptTimestamp(rawTime string, fallback time.Time) time.Time {
 	return fallback
 }
 
+// isIDPairedStep reports whether a step carries Claude tool ids, in which case tool names are
+// resolved by id at parse time and the positional pending-name queue must not be touched.
+func isIDPairedStep(raw rawTranscriptStep) bool {
+	return raw.ToolCallID != "" || (len(raw.ToolCalls) > 0 && raw.ToolCalls[0].ID != "")
+}
+
 func resolveStepToolAssociation(raw rawTranscriptStep, pendingToolNames []string) (effectiveToolName string, nextPending []string) {
 	effectiveToolName = raw.ToolName
 	if effectiveToolName == "" && len(raw.ToolCalls) > 0 {
 		effectiveToolName = raw.ToolCalls[0].Name
+	}
+	if isIDPairedStep(raw) {
+		return effectiveToolName, pendingToolNames
 	}
 	if raw.Type == "GENERIC" || raw.Type == "TOOL" || raw.Type == "RUN_COMMAND" {
 		if len(pendingToolNames) > 0 {
@@ -331,6 +347,7 @@ type claudeContentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text"`
 	Thinking  string          `json:"thinking"`
+	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Input     json.RawMessage `json:"input"`
 	Content   json.RawMessage `json:"content"`
@@ -386,37 +403,38 @@ func (st *transcriptScanState) parseClaudeUserEntry(claude claudeEntry) bool {
 
 func (st *transcriptScanState) parseClaudeToolResultBlocks(blocks []claudeContentBlock, timestamp string) bool {
 	var isToolResult bool
-	var toolContents []string
-	var isError bool
 	for _, b := range blocks {
-		if b.Type == "tool_result" {
-			isToolResult = true
-			if b.IsError {
-				isError = true
-			}
-			text := extractClaudeBlockText(b.Content)
-			if text != "" {
-				toolContents = append(toolContents, text)
-			}
+		if b.Type != "tool_result" {
+			continue
 		}
+		isToolResult = true
+		status := "DONE"
+		if b.IsError {
+			status = "ERROR"
+		}
+		st.recordStep(rawTranscriptStep{
+			StepIndex:  st.maxStepIndex + 1,
+			Source:     "TOOL",
+			Type:       "TOOL",
+			Status:     status,
+			CreatedAt:  timestamp,
+			Content:    extractClaudeBlockText(b.Content),
+			ToolName:   st.claudeToolNames[b.ToolUseID],
+			ToolCallID: b.ToolUseID,
+		})
 	}
-	if !isToolResult {
-		return false
+	return isToolResult
+}
+
+// registerClaudeToolUse records a tool_use block's id so later tool_result blocks resolve its name.
+func (st *transcriptScanState) registerClaudeToolUse(b claudeContentBlock) {
+	if b.ID == "" {
+		return
 	}
-	status := "DONE"
-	if isError {
-		status = "ERROR"
+	if st.claudeToolNames == nil {
+		st.claudeToolNames = make(map[string]string)
 	}
-	raw := rawTranscriptStep{
-		StepIndex: st.maxStepIndex + 1,
-		Source:    "TOOL",
-		Type:      "TOOL",
-		Status:    status,
-		CreatedAt: timestamp,
-		Content:   strings.Join(toolContents, "\n"),
-	}
-	st.recordStep(raw)
-	return true
+	st.claudeToolNames[b.ID] = b.Name
 }
 
 func (st *transcriptScanState) parseClaudeAssistantEntry(claude claudeEntry) bool {
@@ -440,7 +458,9 @@ func (st *transcriptScanState) parseClaudeAssistantEntry(claude claudeEntry) boo
 				toolCalls = append(toolCalls, rawToolCall{
 					Name: b.Name,
 					Args: b.Input,
+					ID:   b.ID,
 				})
+				st.registerClaudeToolUse(b)
 			}
 		}
 
