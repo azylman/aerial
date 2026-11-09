@@ -928,8 +928,11 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(cfg, cur, sessionMgr, appOpts.processSpawner)
 	defer closeAllBrainPools(allPools)
 
-	if cur.GetEngine() == "agy" {
-		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()))
+	switch cur.GetEngine() {
+	case "agy":
+		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()), metrics.RecordUsageJSON)
+	case "claude":
+		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultClaudeUsageRunner(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), testing.Testing()), metrics.RecordClaudeUsageJSON)
 	}
 
 	cls := classifier.New(cfg, classifier.WithProcessPool(ephemeralPool))
