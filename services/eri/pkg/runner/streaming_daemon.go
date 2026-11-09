@@ -1333,16 +1333,19 @@ func populateUsage(res *TurnResult, raw map[string]any) {
 	getInt("total_tokens", &res.Usage.TotalTokens)
 
 	// Claude token usage mapping:
-	// sum input_tokens + cache_creation_input_tokens + cache_read_input_tokens into InputTokens,
-	// with cache_read_input_tokens in CacheReadTokens and InputTokens + OutputTokens in TotalTokens.
+	// add cache_creation_input_tokens (uncached input written to cache) to InputTokens,
+	// assign cache_read_input_tokens (cached input read) to CacheReadTokens without inflating InputTokens,
+	// and default TotalTokens to InputTokens + OutputTokens when total_tokens is omitted.
 	var cacheCreation, cacheRead int
 	getInt("cache_creation_input_tokens", &cacheCreation)
 	getInt("cache_read_input_tokens", &cacheRead)
-	if cacheCreation > 0 || cacheRead > 0 {
-		res.Usage.InputTokens += cacheCreation + cacheRead
-		if cacheRead > 0 {
-			res.Usage.CacheReadTokens = cacheRead
-		}
+	if cacheCreation > 0 {
+		res.Usage.InputTokens += cacheCreation
+	}
+	if cacheRead > 0 {
+		res.Usage.CacheReadTokens = cacheRead
+	}
+	if res.Usage.TotalTokens == 0 && (res.Usage.InputTokens > 0 || res.Usage.OutputTokens > 0) {
 		res.Usage.TotalTokens = res.Usage.InputTokens + res.Usage.OutputTokens
 	}
 }
