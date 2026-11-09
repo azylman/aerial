@@ -1608,8 +1608,6 @@ spec:
     spec:
       containers:
         - env:
-            - name: PORT
-              value: "8080"
             - name: CONFIG_PATH
               value: /share/aerial-config/services/prospera/prospera.yaml
           envFrom:
@@ -1622,6 +1620,12 @@ spec:
             - containerPort: 8080
               name: http
               protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
           resources:
             limits:
               cpu: 500m
@@ -1640,6 +1644,7 @@ spec:
             - --root=/share/.sync/aerial-config
             - --link=/share/aerial-config
             - --period=30s
+            - --webhook-url=http://127.0.0.1:8080/-/reload
           env:
             - name: GIT_CONFIG_COUNT
               value: "1"

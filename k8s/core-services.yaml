@@ -251,6 +251,7 @@ spec:
             - --root=/share/.sync/aerial
             - --link=/share/aerial
             - --period=10s
+            - --webhook-url=http://127.0.0.1:8080/-/reload
           env:
             - name: GIT_CONFIG_COUNT
               value: "1"
@@ -294,6 +295,7 @@ spec:
             - --root=/share/.sync/aerial-config
             - --link=/share/aerial-config
             - --period=10s
+            - --webhook-url=http://127.0.0.1:8080/-/reload
           env:
             - name: GIT_CONFIG_COUNT
               value: "1"
@@ -1241,6 +1243,7 @@ spec:
             - --root=/share/.sync/aerial-config
             - --link=/share/aerial-config
             - --period=30s
+            - --webhook-url=http://127.0.0.1:4020/-/reload
           env:
             - name: GIT_CONFIG_COUNT
               value: "1"
