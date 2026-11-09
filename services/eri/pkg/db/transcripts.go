@@ -273,41 +273,91 @@ func (s *SQLTranscriptStore) BatchInsertTranscriptSteps(ctx context.Context, ste
 	return nil
 }
 
+const (
+	// toolKindBackfillBatchSize bounds the rows rewritten by one tool_kind backfill UPDATE so each
+	// statement commits quickly despite the STORED fts_tokens recompute and index churn per row.
+	toolKindBackfillBatchSize = 2000
+	// toolKindBackfillBudget caps the wall time one BackfillToolKinds call spends issuing batches.
+	toolKindBackfillBudget = 20 * time.Second
+	// toolKindBackfillStatementTimeout bounds each individual discovery query or batch UPDATE.
+	toolKindBackfillStatementTimeout = 10 * time.Second
+)
+
 // BackfillToolKinds fills tool_kind for local-stack steps ingested before normalization existed,
-// issuing one UPDATE per distinct unmapped tool_name. It returns the number of rows updated.
+// committing bounded batches per distinct unmapped tool_name until the backlog drains or the
+// per-call budget elapses. It returns the number of rows updated; partial progress is not an error.
 func (s *SQLTranscriptStore) BackfillToolKinds(ctx context.Context, mapper func(string) string) (updated int64, err error) {
-	defer recordTranscriptQuery("backfill_tool_kinds", time.Now(), &err)
+	return s.backfillToolKinds(ctx, mapper, toolKindBackfillBatchSize, toolKindBackfillBudget)
+}
+
+func (s *SQLTranscriptStore) backfillToolKinds(ctx context.Context, mapper func(string) string, batchSize int, budget time.Duration) (updated int64, err error) {
+	start := time.Now()
+	defer recordTranscriptQuery("backfill_tool_kinds", start, &err)
 	if err := s.checkWriter(); err != nil {
 		return 0, err
 	}
 	if mapper == nil {
 		return 0, fmt.Errorf("tool kind mapper cannot be nil")
 	}
-	queryCtx, cancel := withTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	rows, err := s.db.QueryContext(queryCtx, `SELECT DISTINCT tool_name FROM transcript_steps WHERE stack = $1 AND tool_kind = '' AND tool_name <> ''`, s.stack)
-	if err != nil {
-		return 0, fmt.Errorf("query unmapped tool names: %w", err)
+	if batchSize <= 0 {
+		return 0, fmt.Errorf("tool kind backfill batch size must be positive")
 	}
-	names, err := scanNonEmptyStrings(rows)
+	names, err := s.unmappedToolNames(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("scan unmapped tool names: %w", err)
+		return 0, err
 	}
+	deadline := start.Add(budget)
 	for _, name := range names {
 		kind := mapper(name)
 		if kind == "" {
 			continue
 		}
-		res, err := s.db.ExecContext(queryCtx, `UPDATE transcript_steps SET tool_kind = $1 WHERE stack = $2 AND tool_kind = '' AND tool_name = $3`, kind, s.stack, name)
-		if err != nil {
-			return updated, fmt.Errorf("backfill tool kind for %q: %w", name, err)
-		}
-		if n, err := res.RowsAffected(); err == nil {
+		for {
+			if !time.Now().Before(deadline) {
+				return updated, nil
+			}
+			n, err := s.backfillToolKindBatch(ctx, kind, name, batchSize)
+			if err != nil {
+				return updated, fmt.Errorf("backfill tool kind for %q: %w", name, err)
+			}
 			updated += n
+			if n < int64(batchSize) {
+				break
+			}
 		}
 	}
 	return updated, nil
+}
+
+// unmappedToolNames lists the distinct local-stack tool names whose steps still lack a tool_kind.
+func (s *SQLTranscriptStore) unmappedToolNames(ctx context.Context) ([]string, error) {
+	queryCtx, cancel := withTimeout(ctx, toolKindBackfillStatementTimeout)
+	defer cancel()
+	rows, err := s.db.QueryContext(queryCtx, `SELECT DISTINCT tool_name FROM transcript_steps WHERE stack = $1 AND tool_kind = '' AND tool_name <> ''`, s.stack)
+	if err != nil {
+		return nil, fmt.Errorf("query unmapped tool names: %w", err)
+	}
+	names, err := scanNonEmptyStrings(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan unmapped tool names: %w", err)
+	}
+	return names, nil
+}
+
+// backfillToolKindBatch maps at most limit unmapped local-stack steps named name to kind in one
+// self-committing statement, returning the rows it rewrote.
+func (s *SQLTranscriptStore) backfillToolKindBatch(ctx context.Context, kind, name string, limit int) (int64, error) {
+	execCtx, cancel := withTimeout(ctx, toolKindBackfillStatementTimeout)
+	defer cancel()
+	res, err := s.db.ExecContext(execCtx, `UPDATE transcript_steps SET tool_kind = $1 WHERE (stack, session_id, step_index) IN (SELECT stack, session_id, step_index FROM transcript_steps WHERE stack = $2 AND tool_kind = '' AND tool_name = $3 LIMIT $4)`, kind, s.stack, name, limit)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return n, nil
 }
 
 // sessionEngineBatchSize bounds the session IDs bound into one engine backfill UPDATE.
