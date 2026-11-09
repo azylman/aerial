@@ -1,6 +1,13 @@
 import { render } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { Highlight, highlightSegments, type HighlightSegment } from './search';
+import {
+  effectiveQuery,
+  Highlight,
+  HighlightQuery,
+  highlightSegments,
+  type HighlightSegment,
+  QueryHighlight,
+} from './search';
 
 const plain = (text: string): HighlightSegment => ({ text, match: false });
 const hit = (text: string): HighlightSegment => ({ text, match: true });
@@ -16,6 +23,8 @@ describe('highlightSegments', () => {
     { name: 'regex specials are literal', text: 'cost (a+b)*2', query: '(a+b)*', want: [plain('cost '), hit('(a+b)*'), plain('2')] },
     { name: 'html-looking text stays raw', text: '<b>&amp;</b>', query: '&', want: [plain('<b>'), hit('&'), plain('amp;</b>')] },
     { name: 'no match', text: 'quiet', query: 'zero', want: [plain('quiet')] },
+    { name: 'reused matcher after a new query', text: 'zero quiet', query: 'zero', want: [hit('zero'), plain(' quiet')] },
+    { name: 'regex specials in a reused slot', text: 'a.b', query: '.', want: [plain('a'), hit('.'), plain('b')] },
   ])('$name', ({ text, query, want }) => {
     expect(highlightSegments(text, query)).toEqual(want);
   });
@@ -33,5 +42,41 @@ describe('Highlight', () => {
     expect(marks.map((m) => m.textContent)).toEqual(wantMarks);
     expect(marks.every((m) => m.className === 'cyber-highlight')).toBe(true);
     expect(container.querySelector('script')).toBeNull();
+  });
+});
+
+describe('effectiveQuery', () => {
+  it.each([
+    { name: 'empty query', text: 'Daily standup', query: '', want: '' },
+    { name: 'match keeps the query', text: 'Daily Standup', query: 'stand', want: 'stand' },
+    { name: 'no match collapses to empty', text: 'Daily standup', query: 'kiosk', want: '' },
+    { name: 'regex specials are literal', text: 'cost (a+b)', query: '(a+b)', want: '(a+b)' },
+    { name: 'special that would match anything as a regex', text: 'abc', query: '.', want: '' },
+  ])('$name', ({ text, query, want }) => {
+    expect(effectiveQuery(text, query)).toBe(want);
+  });
+});
+
+describe('QueryHighlight', () => {
+  // The leaves read the query from HighlightQuery: a context change re-highlights them in place.
+  it.each([
+    { name: 'query matching one leaf', query: 'garden', wantMarks: ['garden'] },
+    { name: 'query matching neither leaf', query: 'kiosk', wantMarks: [] },
+    { name: 'query matching both leaves', query: 'e', wantMarks: ['e', 'e', 'e', 'e', 'e'] },
+  ])('$name', ({ query, wantMarks }) => {
+    const tree = (q: string) => (
+      <HighlightQuery value={q}>
+        <p>
+          <QueryHighlight text="Check the garden" />
+        </p>
+        <p>
+          <QueryHighlight text="Water the basil" />
+        </p>
+      </HighlightQuery>
+    );
+    const { container, rerender } = render(tree(''));
+    rerender(tree(query));
+    expect([...container.querySelectorAll('mark.cyber-highlight')].map((m) => m.textContent)).toEqual(wantMarks);
+    expect(container.textContent).toBe('Check the gardenWater the basil');
   });
 });

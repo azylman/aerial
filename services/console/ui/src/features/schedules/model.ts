@@ -27,11 +27,54 @@ const EMPTY_ONE_SHOTS: readonly OneShotSchedule[] = Object.freeze([]);
 /** The search term as every matcher and highlighter sees it. */
 export const normalizeQuery = (raw: string): string => raw.toLowerCase().trim();
 
-const anyIncludes = (query: string, fields: readonly (string | undefined)[]): boolean =>
-  fields.some((field) => (field ?? '').toLowerCase().includes(query));
+// Joins the searchable fields so one includes() per item answers "does any field contain the
+// query". The separator never occurs in a query (inputs are single-line), so no match can span
+// two fields.
+const FIELD_SEPARATOR = '\u0000';
+
+/**
+ * Builds a matcher over the lowercased fields of an item. Each item's haystack is computed once
+ * and cached on the (reconciled) item object, so keystrokes only run includes(); a poll that
+ * changes an item replaces its object and with it the cache entry.
+ */
+function fieldMatcher<T extends object>(
+  fields: (item: T) => readonly (string | undefined)[],
+): (item: T, query: string) => boolean {
+  const haystacks = new WeakMap<T, string>();
+  return (item, query) => {
+    let haystack = haystacks.get(item);
+    if (haystack === undefined) {
+      haystack = fields(item)
+        .map((field) => (field ?? '').toLowerCase())
+        .join(FIELD_SEPARATOR);
+      haystacks.set(item, haystack);
+    }
+    return haystack.includes(query);
+  };
+}
 
 /** The value the cron card shows as TARGET (and the field search matches as the channel). */
 export const cronTarget = (cron: CronSchedule): string => cron.channel_id || cron.target_id || '';
+
+const cronMatches = fieldMatcher((c: CronSchedule) => [
+  c.title_prefix,
+  c.cron_expr,
+  c.cron_description,
+  c.prompt,
+  cronTarget(c),
+  c.timezone,
+  c.id,
+]);
+const oneShotMatches = fieldMatcher((s: OneShotSchedule) => [s.prompt, s.thread_id, s.id]);
+const runMatches = fieldMatcher((r: ScheduleRun) => [
+  r.prompt,
+  r.title,
+  r.schedule_id,
+  r.thread_id,
+  r.target_id,
+  r.status,
+  r.error,
+]);
 
 /** Crons visible under `filter` whose title, expression, description, prompt, channel, timezone or id contain `query`. */
 export function filterCrons(
@@ -41,9 +84,7 @@ export function filterCrons(
 ): readonly CronSchedule[] {
   if (filter === 'ONE_SHOT') return EMPTY_CRONS;
   if (!query) return crons;
-  return crons.filter((c) =>
-    anyIncludes(query, [c.title_prefix, c.cron_expr, c.cron_description, c.prompt, cronTarget(c), c.timezone, c.id]),
-  );
+  return crons.filter((c) => cronMatches(c, query));
 }
 
 /** One-shots visible under `filter` whose prompt, thread or id contain `query`. */
@@ -54,15 +95,13 @@ export function filterOneShots(
 ): readonly OneShotSchedule[] {
   if (filter === 'CRON') return EMPTY_ONE_SHOTS;
   if (!query) return oneShots;
-  return oneShots.filter((s) => anyIncludes(query, [s.prompt, s.thread_id, s.id]));
+  return oneShots.filter((s) => oneShotMatches(s, query));
 }
 
 /** Runs whose prompt, title, schedule, thread, target, status or error contain `query`. */
 export function filterRuns(runs: readonly ScheduleRun[], query: string): readonly ScheduleRun[] {
   if (!query) return runs;
-  return runs.filter((r) =>
-    anyIncludes(query, [r.prompt, r.title, r.schedule_id, r.thread_id, r.target_id, r.status, r.error]),
-  );
+  return runs.filter((r) => runMatches(r, query));
 }
 
 /** The schedules grid is hidden on the run audit log pill. */
