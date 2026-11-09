@@ -76,7 +76,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "aerial_brain_active_workers",
+          "expr": "sum(aerial_brain_active_workers)",
           "refId": "A"
         }
       ],
@@ -138,7 +138,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "aerial_brain_queue_depth",
+          "expr": "max(aerial_brain_queue_depth)",
           "refId": "A"
         }
       ],
@@ -314,7 +314,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "synapse_discord_gateway_latency_seconds * 1000",
+          "expr": "max(synapse_discord_gateway_latency_seconds) * 1000",
           "refId": "A"
         }
       ],
@@ -377,7 +377,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "aerial_brain_daemons_active",
+          "expr": "sum(aerial_brain_daemons_active)",
           "refId": "A",
           "legendFormat": null
         }
@@ -1160,12 +1160,12 @@
       "targets": [
         {
           "expr": "synapse_discord_gateway_latency_seconds * 1000",
-          "legendFormat": "Gateway Heartbeat Latency (ms)",
+          "legendFormat": "{{job}}: Gateway Heartbeat Latency (ms)",
           "refId": "A"
         },
         {
           "expr": "aerial_brain_discord_typing_sessions_active",
-          "legendFormat": "Active Typing Loops",
+          "legendFormat": "{{job}}: Active Typing Loops",
           "refId": "B"
         }
       ],
@@ -1586,7 +1586,7 @@
           },
           "editorMode": "code",
           "expr": "aerial_brain_daemons_active",
-          "legendFormat": "Active AGY Daemons",
+          "legendFormat": "{{job}}: Active AGY Daemons",
           "range": true,
           "refId": "A"
         },
@@ -1597,7 +1597,7 @@
           },
           "editorMode": "code",
           "expr": "aerial_brain_daemon_memory_bytes / 1048576",
-          "legendFormat": "Daemon RSS Memory (MiB)",
+          "legendFormat": "{{job}}: Daemon RSS Memory (MiB)",
           "range": true,
           "refId": "B"
         },
@@ -1607,8 +1607,8 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "sum by (reason) (rate(aerial_brain_session_rotations_total[5m])) * 60",
-          "legendFormat": "Rotations/min ({{reason}})",
+          "expr": "sum by (job, reason) (rate(aerial_brain_session_rotations_total[5m])) * 60",
+          "legendFormat": "{{job}}: Rotations/min ({{reason}})",
           "range": true,
           "refId": "C"
         },
@@ -1619,7 +1619,7 @@
           },
           "editorMode": "code",
           "expr": "aerial_brain_task_timeouts_total",
-          "legendFormat": "Task Timeouts",
+          "legendFormat": "{{job}}: Task Timeouts",
           "range": true,
           "refId": "D"
         }
