@@ -36,3 +36,7 @@ coverage.*
 venv/
 dist/
 build/
+
+# Console React UI: built inside the Dockerfile's node stage, never copied in from the host
+services/console/ui/dist/
+services/console/ui/coverage/

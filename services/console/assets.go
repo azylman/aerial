@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -21,6 +22,16 @@ type StaticAsset struct {
 	ETag        string
 	ContentType string
 }
+
+// The React console is built by Vite into static/next (see Dockerfile). Everything under
+// next/assets/ carries a content hash in its filename, so it is cached forever; next/index.html
+// is the SPA shell served for every extensionless client-side route under next/.
+const (
+	nextIndexPath    = "next/index.html"
+	nextAssetsPrefix = "next/assets/"
+	immutableCache   = "public, max-age=31536000, immutable"
+	revalidateCache  = "no-cache, must-revalidate"
+)
 
 type AssetRegistry struct {
 	mu     sync.RWMutex
@@ -141,6 +152,10 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ar.mu.RLock()
 	asset, exists := ar.assets[reqPath]
+	if !exists && isNextClientRoute(reqPath) {
+		reqPath = nextIndexPath
+		asset, exists = ar.assets[reqPath]
+	}
 	ar.mu.RUnlock()
 	if !exists {
 		http.NotFound(w, r)
@@ -148,13 +163,13 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Bifurcated Cache Policy:
-	// - index.html / unversioned: no-cache, must-revalidate + ETag
-	// - Versioned assets (?v=...): public, max-age=31536000, immutable + ETag
-	isVersioned := r.URL.Query().Get("v") != "" && reqPath != "index.html"
-	if isVersioned {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	// - index.html shells / unversioned: no-cache, must-revalidate + ETag
+	// - Versioned assets (?v=...) and Vite content-hashed next/assets/*: immutable + ETag
+	isVersioned := r.URL.Query().Get("v") != "" && path.Base(reqPath) != "index.html"
+	if isVersioned || strings.HasPrefix(reqPath, nextAssetsPrefix) {
+		w.Header().Set("Cache-Control", immutableCache)
 	} else {
-		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		w.Header().Set("Cache-Control", revalidateCache)
 	}
 
 	w.Header().Set("ETag", asset.ETag)
@@ -172,4 +187,13 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpkit.WriteResponse(w, r, "console", asset.Data)
+}
+
+// isNextClientRoute reports whether a missing path is a React console deep link that should
+// receive the SPA shell: under next/, extensionless, and not a (stale) hashed asset request,
+// which must 404 rather than hand the browser HTML for a module script.
+func isNextClientRoute(reqPath string) bool {
+	return strings.HasPrefix(reqPath, "next/") &&
+		!strings.HasPrefix(reqPath, nextAssetsPrefix) &&
+		path.Ext(reqPath) == ""
 }

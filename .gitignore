@@ -15,3 +15,8 @@ PR_DESCRIPTION.md
 
 # Go build outputs from running `go build` inside a service directory
 /services/synapse/synapse
+
+# Console React UI build output and local toolchain (built in Docker / by the gates)
+/services/console/ui/node_modules/
+/services/console/ui/dist/
+/services/console/ui/coverage/

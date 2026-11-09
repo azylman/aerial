@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -549,9 +550,21 @@ func SetupConsoleMux(cfg ConsoleConfig, assetReg *AssetRegistry) http.Handler {
 	if assetReg != nil {
 		mux.HandleFunc("/", assetReg.ServeHTTP)
 		mux.Handle("/console/", http.StripPrefix("/console", http.HandlerFunc(assetReg.ServeHTTP)))
+		mux.HandleFunc("/next", redirectToTrailingSlash("/next/"))
+		mux.HandleFunc("/console/next", redirectToTrailingSlash("/console/next/"))
 	}
 
 	return securityHeadersMiddleware(mux)
+}
+
+// redirectToTrailingSlash returns a handler that permanently redirects the React console root
+// (/next, /console/next) to its fixed trailing-slash form so the SPA resolves against its Vite
+// base ('/console/next/'). Only the query string is carried over from the request.
+func redirectToTrailingSlash(target string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		dest := url.URL{Path: target, RawQuery: r.URL.Query().Encode()}
+		http.Redirect(w, r, dest.String(), http.StatusMovedPermanently)
+	}
 }
 
 // RunConsoleServer starts the GitHub poller, creates the asset registry, and listens on the configured port.

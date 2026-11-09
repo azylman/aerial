@@ -423,6 +423,29 @@ if [ -f "services/console/app.test.js" ] && { [ -z "$TARGET_SERVICE" ] || [ "$TA
     fi
 fi
 
+# Measure React console UI coverage (services/console/ui). Vitest enforces the 95% lines/branches/
+# functions/statements thresholds from vite.config.ts and exits non-zero when any is missed.
+CONSOLE_UI_STATUS="SKIPPED"
+if [ -f "services/console/ui/package.json" ] && { [ -z "$TARGET_SERVICE" ] || [ "$TARGET_SERVICE" = "services/console" ] || [ "$TARGET_SERVICE" = "console" ]; }; then
+    if command -v npm >/dev/null 2>&1; then
+        ui_exit=0
+        ui_out=$( (
+            cd services/console/ui
+            if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+                npm ci --no-audit --no-fund
+            fi
+            npm run --silent test:coverage
+        ) 2>&1) || ui_exit=$?
+        if [ "$ui_exit" -eq 0 ]; then
+            CONSOLE_UI_STATUS="PASS"
+        else
+            CONSOLE_UI_STATUS="FAIL"
+            echo "$ui_out" >&2
+            record_violation "Console React UI tests failed or coverage is below threshold (${COVERAGE_THRESHOLD}%) in services/console/ui"
+        fi
+    fi
+fi
+
 # Print Console Table
 if [ -z "$TARGET_SERVICE" ] || [ "$SUMMARY_MODE" -eq 1 ]; then
     printf "\n%bMonorepo Test Coverage Summary%b\n" "$BOLD" "$NC"
@@ -463,9 +486,14 @@ if [ -z "$TARGET_SERVICE" ] || [ "$SUMMARY_MODE" -eq 1 ]; then
             printf "%bPermet HUD Frontend Coverage: %s%% lines, %s%% branches, %s%% funcs [Floor: %s%%] - FAIL%b\n" "$RED" "$FRONTEND_LINE_PCT" "$FRONTEND_BRANCH_PCT" "$FRONTEND_FUNCS_PCT" "$COVERAGE_THRESHOLD" "$NC"
         fi
     fi
+    if [ "$CONSOLE_UI_STATUS" = "PASS" ]; then
+        printf "%bConsole React UI Coverage: Vitest thresholds met [Floor: %s%%] - PASS%b\n" "$GREEN" "$COVERAGE_THRESHOLD" "$NC"
+    elif [ "$CONSOLE_UI_STATUS" = "FAIL" ]; then
+        printf "%bConsole React UI Coverage: Vitest thresholds or tests failed [Floor: %s%%] - FAIL%b\n" "$RED" "$COVERAGE_THRESHOLD" "$NC"
+    fi
     printf "\n"
 else
-    if [ -z "$VIOLATIONS" ] && [ "$GLOBAL_GO_STATUS" = "PASS" ] && [ "$FRONTEND_STATUS" != "FAIL" ]; then
+    if [ -z "$VIOLATIONS" ] && [ "$GLOBAL_GO_STATUS" = "PASS" ] && [ "$FRONTEND_STATUS" != "FAIL" ] && [ "$CONSOLE_UI_STATUS" != "FAIL" ]; then
         printf "\n%bCoverage (%s): %s%% (%d/%d statements) [Floor: %s%%] - PASS%b\n\n" "$GREEN" "$TARGET_SERVICE" "$GLOBAL_GO_PCT" "$COVERED_GO_STMTS" "$TOTAL_GO_STMTS" "$COVERAGE_THRESHOLD" "$NC"
     else
         printf "\n%bCoverage (%s): %s%% (%d/%d statements) [Floor: %s%%] - FAIL%b\n\n" "$RED" "$TARGET_SERVICE" "$GLOBAL_GO_PCT" "$COVERED_GO_STMTS" "$TOTAL_GO_STMTS" "$COVERAGE_THRESHOLD" "$NC"
@@ -483,6 +511,7 @@ generate_markdown_summary() {
 | :--- | :---: | :---: | :---: |
 | **Global Go Backend Statement Coverage** | **${GLOBAL_GO_PCT}%** (${COVERED_GO_STMTS}/${TOTAL_GO_STMTS} stmts) | \`>= ${COVERAGE_THRESHOLD}%\` | $([ "$GLOBAL_GO_STATUS" = "PASS" ] && echo "✅ PASS" || echo "❌ FAIL") |
 | **Permet HUD Frontend Logic Coverage** | **${FRONTEND_LINE_PCT}%** lines (${FRONTEND_BRANCH_PCT}% branch, ${FRONTEND_FUNCS_PCT}% func) | \`>= ${COVERAGE_THRESHOLD}%\` | $([ "$FRONTEND_STATUS" = "PASS" ] && echo "✅ PASS" || echo "❌ FAIL") |
+| **Console React UI Coverage (Vitest)** | lines, branches, functions, statements | \`>= ${COVERAGE_THRESHOLD}%\` | $(case "$CONSOLE_UI_STATUS" in PASS) echo "✅ PASS" ;; FAIL) echo "❌ FAIL" ;; *) echo "⏭️ SKIPPED" ;; esac) |
 
 ### 📦 Package-Level Statement Coverage Breakdown
 
