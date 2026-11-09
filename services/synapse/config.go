@@ -108,28 +108,101 @@ func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []s
 	return sysChan, botID, autoUpdateAuthors
 }
 
-// LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
-func LoadConfig(configPath string) Config {
-	var fileCfg RouterYAMLConfig
-	targetPath := strings.TrimSpace(configPath)
-	if targetPath != "" {
-		if fi, err := os.Stat(targetPath); err != nil || fi.Size() == 0 {
-			targetPath = ""
-		}
-	}
-	if targetPath == "" {
-		if fi, err := os.Stat(synapseFallbackConfigPath); err == nil && fi.Size() > 0 {
-			targetPath = synapseFallbackConfigPath
-		}
-	}
-	if targetPath != "" {
-		if data, err := os.ReadFile(targetPath); err == nil {
-			if err := yaml.Unmarshal(data, &fileCfg); err != nil {
-				log.Printf("[Synapse] Warning: failed to parse yaml config at %s: %v", targetPath, err)
-			}
-		}
-	}
+// ConfigSource yields the live synapse configuration snapshot. Callers read
+// Current() once per request, call, or worker tick and never mutate it.
+type ConfigSource interface {
+	Current() *Config
+}
 
+// LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
+// A YAML file that fails to parse is logged and ignored so startup always proceeds.
+func LoadConfig(configPath string) Config {
+	fileCfg, err := readRouterYAML(configPath)
+	if err != nil {
+		log.Printf("[Synapse] Warning: %v", err)
+	}
+	return buildConfig(fileCfg)
+}
+
+// LoadConfigStrict resolves configuration exactly like LoadConfig but returns
+// an error when the resolved YAML file exists and cannot be read or parsed.
+// Hot reloads use it so a bad commit never replaces the last known good config.
+func LoadConfigStrict(configPath string) (Config, error) {
+	fileCfg, err := readRouterYAML(configPath)
+	if err != nil {
+		return Config{}, err
+	}
+	return buildConfig(fileCfg), nil
+}
+
+// LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
+func LoadConfigFromEnv() Config {
+	return LoadConfig(os.Getenv("CONFIG_PATH"))
+}
+
+// loadConfigFromEnvStrict is the hot-reload loader: it re-reads CONFIG_PATH
+// through LoadConfigStrict so a malformed file keeps the last known good config.
+func loadConfigFromEnvStrict() (*Config, error) {
+	cfg, err := LoadConfigStrict(os.Getenv("CONFIG_PATH"))
+	if err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// synapseRestartRequired reports whether moving from old to next changes a
+// field that is bound once at startup (listener, database pool, Discord
+// gateway session, outbound dispatcher and registry clients) and therefore
+// can only take effect through a graceful process restart.
+func synapseRestartRequired(old, next *Config) bool {
+	return old.Port != next.Port ||
+		old.PostgresURL != next.PostgresURL ||
+		old.DiscordToken != next.DiscordToken ||
+		old.BotID != next.BotID ||
+		old.BrainURL != next.BrainURL ||
+		old.FluxReceiverURL != next.FluxReceiverURL ||
+		old.KubeAPIServer != next.KubeAPIServer ||
+		old.KubeToken != next.KubeToken ||
+		old.VanadisURL != next.VanadisURL ||
+		old.HaroURL != next.HaroURL
+}
+
+// resolveRouterYAMLPath returns the YAML file to read: configPath when it is a
+// non-empty file, otherwise the fallback path when that is a non-empty file.
+func resolveRouterYAMLPath(configPath string) string {
+	if targetPath := strings.TrimSpace(configPath); targetPath != "" {
+		if fi, err := os.Stat(targetPath); err == nil && fi.Size() > 0 {
+			return targetPath
+		}
+	}
+	if fi, err := os.Stat(synapseFallbackConfigPath); err == nil && fi.Size() > 0 {
+		return synapseFallbackConfigPath
+	}
+	return ""
+}
+
+// readRouterYAML reads the resolved YAML file. It returns whatever fields
+// decoded alongside any read or parse error so LoadConfig can keep its
+// warn-and-continue semantics while LoadConfigStrict rejects the file.
+func readRouterYAML(configPath string) (RouterYAMLConfig, error) {
+	var fileCfg RouterYAMLConfig
+	targetPath := resolveRouterYAMLPath(configPath)
+	if targetPath == "" {
+		return fileCfg, nil
+	}
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		return fileCfg, fmt.Errorf("failed to read yaml config at %s: %w", targetPath, err)
+	}
+	if err := yaml.Unmarshal(data, &fileCfg); err != nil {
+		return fileCfg, fmt.Errorf("failed to parse yaml config at %s: %w", targetPath, err)
+	}
+	return fileCfg, nil
+}
+
+// buildConfig layers environment overrides and the aerial config fallback on
+// top of the decoded YAML file.
+func buildConfig(fileCfg RouterYAMLConfig) Config {
 	autoUpdateAuthors := dedupeTrimmedStrings(fileCfg.AutoUpdatePRAuthors)
 	sysChan := firstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
 	var aerialBotID string
@@ -173,11 +246,6 @@ func LoadConfig(configPath string) Config {
 		DefaultOwner:        defaultOwner,
 		WebhookForwardURLs:  normalizeWebhookForwardURLs(fileCfg.WebhookForwardURLs),
 	}
-}
-
-// LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
-func LoadConfigFromEnv() Config {
-	return LoadConfig(os.Getenv("CONFIG_PATH"))
 }
 
 func randomNonce() string {

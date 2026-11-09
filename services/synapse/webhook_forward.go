@@ -159,11 +159,15 @@ func (s *RouterServer) forwardRawWebhook(ctx context.Context, targetBaseURL, req
 }
 
 func (s *RouterServer) forwardRawWebhookToPeers(ctx context.Context, reqPath string, headers http.Header, body []byte) {
-	if s == nil || len(s.cfg.WebhookForwardURLs) == 0 {
+	if s == nil {
 		return
 	}
-	for botID, baseURL := range s.cfg.WebhookForwardURLs {
-		if strings.EqualFold(strings.TrimSpace(botID), strings.TrimSpace(s.cfg.BotID)) {
+	cfg := s.cfgSrc.Current()
+	if len(cfg.WebhookForwardURLs) == 0 {
+		return
+	}
+	for botID, baseURL := range cfg.WebhookForwardURLs {
+		if strings.EqualFold(strings.TrimSpace(botID), strings.TrimSpace(cfg.BotID)) {
 			continue
 		}
 		s.forwardRawWebhook(ctx, baseURL, reqPath, headers, body)
@@ -171,13 +175,17 @@ func (s *RouterServer) forwardRawWebhookToPeers(ctx context.Context, reqPath str
 }
 
 func (s *RouterServer) forwardRawWebhookToBot(ctx context.Context, botID, reqPath string, headers http.Header, body []byte) {
-	if s == nil || len(s.cfg.WebhookForwardURLs) == 0 {
+	if s == nil {
 		return
 	}
-	if strings.EqualFold(strings.TrimSpace(botID), strings.TrimSpace(s.cfg.BotID)) {
+	cfg := s.cfgSrc.Current()
+	if len(cfg.WebhookForwardURLs) == 0 {
 		return
 	}
-	for peerID, baseURL := range s.cfg.WebhookForwardURLs {
+	if strings.EqualFold(strings.TrimSpace(botID), strings.TrimSpace(cfg.BotID)) {
+		return
+	}
+	for peerID, baseURL := range cfg.WebhookForwardURLs {
 		if strings.EqualFold(strings.TrimSpace(peerID), strings.TrimSpace(botID)) {
 			s.forwardRawWebhook(ctx, baseURL, reqPath, headers, body)
 			return
@@ -200,7 +208,7 @@ func (s *RouterServer) teeGitHubPREvent(ctx context.Context, reqPath string, fwd
 	}
 	meta := ParseAerialPRMetadata(p.PullRequest.Body)
 	if meta.BotID != "" {
-		if !strings.EqualFold(meta.BotID, s.cfg.BotID) {
+		if !strings.EqualFold(meta.BotID, s.cfgSrc.Current().BotID) {
 			s.forwardRawWebhookToBot(ctx, meta.BotID, reqPath, fwdHeaders, body)
 		}
 	} else if !s.isPROwnedLocally(ctx, p.Repository.FullName, p.Number) {
@@ -272,7 +280,10 @@ func (s *RouterServer) teeGitHubWorkflowRunEvent(ctx context.Context, reqPath st
 }
 
 func (s *RouterServer) teeGitHubWebhook(ctx context.Context, reqPath string, r *http.Request, event string, body []byte) {
-	if s == nil || len(s.cfg.WebhookForwardURLs) == 0 {
+	if s == nil {
+		return
+	}
+	if len(s.cfgSrc.Current().WebhookForwardURLs) == 0 {
 		return
 	}
 	fwdHeaders := make(http.Header)

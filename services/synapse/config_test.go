@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -163,6 +164,7 @@ func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 		wantBotID        string
 		wantDefaultOwner bool
 		wantForwardURLs  map[string]string
+		wantStrictErr    bool
 	}{
 		{
 			name: "yaml config without overrides",
@@ -257,9 +259,23 @@ eri_url: "http://brain.custom:8088"
 			wantAuthors: []string{"fallback-author"},
 		},
 		{
-			name:      "invalid yaml logs warning and uses defaults",
-			localYAML: "invalid: [yaml",
-			wantPort:  "4020",
+			name:          "invalid yaml logs warning and uses defaults, strict load errors",
+			localYAML:     "invalid: [yaml",
+			wantPort:      "4020",
+			wantStrictErr: true,
+		},
+		{
+			name:          "type-mismatched yaml keeps decoded fields, strict load errors",
+			localYAML:     "port: \"4099\"\nwebhook_forward_urls: [\"not-a-map\"]\n",
+			wantPort:      "4099",
+			wantStrictErr: true,
+		},
+		{
+			name:          "invalid fallback yaml errors in strict load",
+			useEmptyPath:  true,
+			fallbackYAML:  "port: [4088\n",
+			wantPort:      "4020",
+			wantStrictErr: true,
 		},
 		{
 			name:             "bot_id and default_owner loaded from local yaml",
@@ -350,6 +366,13 @@ eri_url: "http://brain.custom:8088"
 			}
 
 			cfg := LoadConfig(targetPath)
+			strictCfg, strictErr := LoadConfigStrict(targetPath)
+			if (strictErr != nil) != tc.wantStrictErr {
+				t.Errorf("LoadConfigStrict() err = %v, wantStrictErr %v", strictErr, tc.wantStrictErr)
+			}
+			if strictErr == nil && !reflect.DeepEqual(strictCfg, cfg) {
+				t.Errorf("LoadConfigStrict() = %+v, want LoadConfig result %+v", strictCfg, cfg)
+			}
 			for _, check := range []struct{ got, want, field string }{
 				{cfg.Port, tc.wantPort, "Port"},
 				{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
@@ -683,4 +706,67 @@ func TestNormalizeWebhookForwardURLs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSynapseRestartRequired(t *testing.T) {
+	t.Parallel()
+	base := Config{
+		Port:                "4020",
+		PostgresURL:         "postgres://a@db/aerial",
+		DiscordToken:        "tok",
+		BotID:               "aerial",
+		BrainURL:            "http://eri:8080",
+		EriURL:              "http://eri:8080",
+		FluxReceiverURL:     "http://flux/hook",
+		KubeAPIServer:       "https://10.0.0.1:443",
+		KubeToken:           "kube",
+		VanadisURL:          "http://vanadis",
+		HaroURL:             "http://haro",
+		SystemChannelID:     "111",
+		AutoUpdatePRAuthors: []string{"a"},
+		WebhookForwardURLs:  map[string]string{"marida": "http://marida:4020"},
+	}
+	tests := []struct {
+		name string
+		next Config
+		want bool
+	}{
+		{name: "identical config", next: base, want: false},
+		{name: "system channel changes live", next: withField(base, Config{SystemChannelID: "222"}), want: false},
+		{name: "auto-update authors change live", next: withField(base, Config{AutoUpdatePRAuthors: []string{"b"}}), want: false},
+		{name: "webhook forward urls change live", next: withField(base, Config{WebhookForwardURLs: map[string]string{"x": "http://x"}}), want: false},
+		{name: "default owner changes live", next: withField(base, Config{DefaultOwner: true}), want: false},
+		{name: "port requires restart", next: withField(base, Config{Port: "4021"}), want: true},
+		{name: "postgres url requires restart", next: withField(base, Config{PostgresURL: "postgres://b@db/aerial"}), want: true},
+		{name: "discord token requires restart", next: withField(base, Config{DiscordToken: "tok2"}), want: true},
+		{name: "bot id requires restart", next: withField(base, Config{BotID: "marida"}), want: true},
+		{name: "eri url requires restart", next: withField(base, Config{BrainURL: "http://eri2:8080", EriURL: "http://eri2:8080"}), want: true},
+		{name: "flux receiver url requires restart", next: withField(base, Config{FluxReceiverURL: "http://flux2/hook"}), want: true},
+		{name: "kube api server requires restart", next: withField(base, Config{KubeAPIServer: "https://10.0.0.2:443"}), want: true},
+		{name: "kube token requires restart", next: withField(base, Config{KubeToken: "kube2"}), want: true},
+		{name: "vanadis url requires restart", next: withField(base, Config{VanadisURL: "http://vanadis2"}), want: true},
+		{name: "haro url requires restart", next: withField(base, Config{HaroURL: "http://haro2"}), want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			old := base
+			next := tc.next
+			if got := synapseRestartRequired(&old, &next); got != tc.want {
+				t.Errorf("synapseRestartRequired() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// withField returns base with every non-zero field of overlay copied over it.
+func withField(base, overlay Config) Config {
+	dst := reflect.ValueOf(&base).Elem()
+	src := reflect.ValueOf(overlay)
+	for i := range src.NumField() {
+		if !src.Field(i).IsZero() {
+			dst.Field(i).Set(src.Field(i))
+		}
+	}
+	return base
 }

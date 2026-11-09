@@ -43,9 +43,9 @@ func TestHandleGitHubWebhook(t *testing.T) {
 			t.Parallel()
 			var srv *RouterServer
 			if tc.river != nil {
-				srv = NewRouterServer(Config{}, nil, tc.river)
+				srv = NewRouterServer(fixedConfig(Config{}), nil, tc.river)
 			} else {
-				srv = NewRouterServer(Config{}, nil)
+				srv = NewRouterServer(fixedConfig(Config{}), nil)
 			}
 			routes := srv.Routes()
 
@@ -1169,7 +1169,7 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	srv := NewRouterServer(Config{GitHubAPIURL: ts.URL}, ts.Client())
+	srv := NewRouterServer(fixedConfig(Config{GitHubAPIURL: ts.URL}), ts.Client())
 
 	cases := []struct {
 		name    string
@@ -1500,7 +1500,7 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 				resolveTargetID:         "1555405874565091380",
 				resolveBranch:           "feat/test",
 			}
-			srv := NewRouterServer(Config{GitHubAPIURL: ts.URL}, ts.Client())
+			srv := NewRouterServer(fixedConfig(Config{GitHubAPIURL: ts.URL}), ts.Client())
 			if disp != nil {
 				srv.SetDispatcher(disp)
 			}
@@ -2234,7 +2234,7 @@ func TestResolvePRFromCommitSHA(t *testing.T) {
 			if tc.apiURL != "" {
 				apiURL = tc.apiURL
 			}
-			srv := NewRouterServer(Config{GitHubAPIURL: apiURL, GitHubToken: "secret"}, ts.Client())
+			srv := NewRouterServer(fixedConfig(Config{GitHubAPIURL: apiURL, GitHubToken: "secret"}), ts.Client())
 			if tc.preCacheRepo != "" && tc.preCacheSHA != "" {
 				srv.recordCommitSHAPR(tc.preCacheRepo, tc.preCacheSHA, tc.preCachePR, tc.preCacheBr)
 			}

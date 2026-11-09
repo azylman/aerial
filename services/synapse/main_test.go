@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -780,7 +781,7 @@ func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp 
 	if client == nil && cfg.GitHubAPIURL == "" && cfg.KubeAPIServer == "" {
 		client = &http.Client{Transport: &zeroCallTransport{}}
 	}
-	srv := NewRouterServer(cfg, client, riverInserter...)
+	srv := NewRouterServer(fixedConfig(cfg), client, riverInserter...)
 	if reg != nil {
 		if pgReg, ok := reg.(*PostgresPRRegistry); ok && pgReg != nil {
 			if pgReg.vanadisURL == "http://vanadis.aerial" && pgReg.haroURL == "http://haro.aerial" {
@@ -1620,7 +1621,7 @@ func TestIsWaitingForImageBuild(t *testing.T) {
 				}
 				return
 			}
-			srv := NewRouterServer(Config{}, nil)
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
 			switch {
 			case tc.mockReg:
 				srv.SetRegistry(&mockPRRegistry{})
@@ -2160,7 +2161,7 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 				return tc.mockCountErr
 			}
 
-			srv := NewRouterServer(Config{Port: "4020"}, nil)
+			srv := NewRouterServer(fixedConfig(Config{Port: "4020"}), nil)
 			mockQ := &mockQueueStatsQuerier{
 				rows: &mockPgxRows{
 					rows: []mockRowData{
@@ -2195,19 +2196,36 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 	}
 }
 
+func newTestReloadable(initial, next Config) *httpkit.Reloadable[Config] {
+	return httpkit.NewReloadable(&initial, func() (*Config, error) {
+		reloaded := next
+		return &reloaded, nil
+	}, synapseRestartRequired)
+}
+
 func TestRunServerLifecycle(t *testing.T) {
 	tests := []struct {
-		name         string
-		config       Config
-		preCancel    bool
-		isRunApp     bool
-		wantErr      bool
-		wantGraceful bool
+		name             string
+		config           Config
+		reloadConfig     *Config
+		preCancel        bool
+		isRunApp         bool
+		wantErr          bool
+		wantGraceful     bool
+		wantReloadStatus httpkit.ReloadStatus
 	}{
 		{
-			name:         "runServer start and graceful cancel shutdown",
-			config:       Config{Port: "0"},
-			wantGraceful: true,
+			name:             "runServer start, loopback reload, and graceful cancel shutdown",
+			config:           Config{Port: "0"},
+			wantGraceful:     true,
+			wantReloadStatus: httpkit.ReloadUnchanged,
+		},
+		{
+			name:             "runServer live reload applies non-restart field",
+			config:           Config{Port: "0"},
+			reloadConfig:     &Config{Port: "0", SystemChannelID: "123456789012345678"},
+			wantGraceful:     true,
+			wantReloadStatus: httpkit.ReloadApplied,
 		},
 		{
 			name:    "runServer invalid port -1 returns error",
@@ -2219,6 +2237,12 @@ func TestRunServerLifecycle(t *testing.T) {
 			config:    Config{Port: "0"},
 			preCancel: true,
 			isRunApp:  true,
+		},
+		{
+			name:         "runApp exits cleanly when reload requires restart",
+			config:       Config{Port: "0"},
+			reloadConfig: &Config{Port: "4021"},
+			isRunApp:     true,
 		},
 		{
 			name:    "runServer invalid postgres url returns error",
@@ -2240,6 +2264,12 @@ func TestRunServerLifecycle(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			next := tc.config
+			if tc.reloadConfig != nil {
+				next = *tc.reloadConfig
+			}
+			cfgSrc := newTestReloadable(tc.config, next)
+
 			if tc.wantGraceful {
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
@@ -2247,18 +2277,39 @@ func TestRunServerLifecycle(t *testing.T) {
 				done := make(chan error, 1)
 
 				go func() {
-					done <- runServer(ctx, tc.config, func(addr string) {
+					done <- runServer(ctx, cfgSrc, func(addr string) {
 						ready <- addr
 					})
 				}()
 
+				var addr string
 				select {
-				case addr := <-ready:
+				case addr = <-ready:
 					if addr == "" {
 						t.Errorf("expected non-empty listening address")
 					}
 				case <-time.After(2 * time.Second):
 					t.Fatalf("timeout waiting for server to start")
+				}
+
+				_, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					t.Fatalf("SplitHostPort(%q): %v", addr, err)
+				}
+				resp, err := http.Post("http://"+net.JoinHostPort("127.0.0.1", port)+"/-/reload", "application/json", nil)
+				if err != nil {
+					t.Fatalf("POST /-/reload: %v", err)
+				}
+				var got struct {
+					Status httpkit.ReloadStatus `json:"status"`
+				}
+				decodeErr := json.NewDecoder(resp.Body).Decode(&got)
+				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusOK || decodeErr != nil || got.Status != tc.wantReloadStatus {
+					t.Errorf("POST /-/reload = %d %q (decode err %v), want 200 %q", resp.StatusCode, got.Status, decodeErr, tc.wantReloadStatus)
+				}
+				if gotSys := cfgSrc.Current().SystemChannelID; gotSys != next.SystemChannelID {
+					t.Errorf("SystemChannelID after reload = %q, want %q", gotSys, next.SystemChannelID)
 				}
 
 				cancel()
@@ -2280,14 +2331,19 @@ func TestRunServerLifecycle(t *testing.T) {
 				} else {
 					defer cancelC()
 				}
-				err := runApp(ctxC, tc.config)
+				if tc.reloadConfig != nil {
+					if status, err := cfgSrc.Reload(); status != httpkit.ReloadRestarting || err != nil {
+						t.Fatalf("Reload() = %q, %v; want %q", status, err, httpkit.ReloadRestarting)
+					}
+				}
+				err := runApp(ctxC, cfgSrc)
 				if (err != nil) != tc.wantErr && !errors.Is(err, http.ErrServerClosed) {
 					t.Errorf("unexpected error from runApp: %v", err)
 				}
 				return
 			}
 
-			err := runServer(context.Background(), tc.config, nil)
+			err := runServer(context.Background(), cfgSrc, nil)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("runServer() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -3881,7 +3937,7 @@ func TestSetupRiverWorkerPool(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := NewRouterServer(Config{}, nil)
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
 			pool, rc, err := setupRiverWorkerPool(ctx, srv, Config{PostgresURL: tc.postgresURL})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("setupRiverWorkerPool() err = %v, wantErr = %v", err, tc.wantErr)
@@ -3898,3 +3954,9 @@ func TestSetupRiverWorkerPool(t *testing.T) {
 		})
 	}
 }
+
+type fixedConfigSource struct{ cfg Config }
+
+func (f *fixedConfigSource) Current() *Config { return &f.cfg }
+
+func fixedConfig(cfg Config) ConfigSource { return &fixedConfigSource{cfg: cfg} }

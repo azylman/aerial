@@ -129,6 +129,21 @@ func ExtractCIFailureDetails(rawLog string) string {
 	return strings.Join(result, "\n")
 }
 
+// newGitHubRequest builds an authenticated GitHub REST request against the
+// live config snapshot's API URL and token.
+func (s *RouterServer) newGitHubRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	cfg := s.cfgSrc.Current()
+	req, err := http.NewRequestWithContext(ctx, method, firstNonEmpty(cfg.GitHubAPIURL, "https://api.github.com")+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if cfg.GitHubToken != "" {
+		req.Header.Set("Authorization", "token "+cfg.GitHubToken)
+	}
+	return req, nil
+}
+
 func (s *RouterServer) fetchCheckJobFailureLogs(ctx context.Context, repo string, jobID int64) string {
 	if s == nil || s.httpClient == nil {
 		return ""
@@ -140,14 +155,9 @@ func (s *RouterServer) fetchCheckJobFailureLogs(ctx context.Context, repo string
 	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	apiURL := firstNonEmpty(s.cfg.GitHubAPIURL, "https://api.github.com")
-	reqURL := fmt.Sprintf("%s/repos/%s/actions/jobs/%d/logs", apiURL, cleanRepo, jobID)
-	req, err := http.NewRequestWithContext(timeoutCtx, http.MethodGet, reqURL, nil)
+	req, err := s.newGitHubRequest(timeoutCtx, http.MethodGet, fmt.Sprintf("/repos/%s/actions/jobs/%d/logs", cleanRepo, jobID), nil)
 	if err != nil {
 		return ""
-	}
-	if s.cfg.GitHubToken != "" {
-		req.Header.Set("Authorization", "token "+s.cfg.GitHubToken)
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
