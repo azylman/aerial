@@ -1448,18 +1448,6 @@ body::after {
     box-shadow: 0 0 8px var(--neon-green);
 }
 
-.pulse-dot.healthy::after {
-    content: '';
-    position: absolute;
-    top: -4px;
-    left: -4px;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    border: 1.5px solid var(--neon-green);
-    animation: pulse-ring 2s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
-}
-
 .pulse-dot.unhealthy {
     background-color: var(--neon-red);
     box-shadow: 0 0 8px var(--neon-red);

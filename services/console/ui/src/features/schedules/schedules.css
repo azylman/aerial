@@ -138,6 +138,9 @@
   color: var(--neon-magenta);
   border: 1px solid var(--neon-magenta);
   box-shadow: 0 0 12px var(--neon-magenta);
+}
+
+html.motion-ready .schedule-countdown-badge.countdown-triggering {
   animation: pulse-trigger 0.8s infinite alternate;
 }
 

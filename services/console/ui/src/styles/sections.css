@@ -149,6 +149,9 @@
     border-radius: 50%;
     background-color: var(--neon-magenta);
     box-shadow: 0 0 6px var(--neon-magenta);
+}
+
+html.motion-ready .pulse-indicator {
     animation: blink-dot 1s infinite alternate;
 }
 
@@ -186,18 +189,6 @@
     box-shadow: 0 0 8px var(--neon-green);
 }
 
-.pulse-dot.healthy::after {
-    content: '';
-    position: absolute;
-    top: -4px;
-    left: -4px;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    border: 1.5px solid var(--neon-green);
-    animation: pulse-ring 2s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
-}
-
 .pulse-dot.unhealthy {
     background-color: var(--neon-red);
     box-shadow: 0 0 8px var(--neon-red);
@@ -212,6 +203,9 @@
     height: 16px;
     border-radius: 50%;
     border: 1.5px solid var(--neon-red);
+}
+
+html.motion-ready .pulse-dot.unhealthy::after {
     animation: pulse-ring 1.5s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
 }
 
