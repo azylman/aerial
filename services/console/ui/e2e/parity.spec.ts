@@ -1,7 +1,9 @@
 // Runner for the parity table (e2e/parity.ts). For every row x viewport it loads the vanilla and
 // the React UI against identical fixtures and a pinned clock, replays the row's steps, asserts the
 // row's expectations plus zero console/page errors and zero unexpected API calls on each, then
-// pixel-compares the two screenshots with the masked selectors painted out.
+// compares the compared region's normalized visible text (which catches words running together, a
+// shift too small for the pixel gate) and pixel-compares the two screenshots with the masked
+// selectors painted out.
 
 import { type Browser, expect, type Page, test } from '@playwright/test';
 import { compareShots } from './compare.ts';
@@ -9,9 +11,11 @@ import { FIXTURE_NOW } from './constants.ts';
 import { serveFixtures } from './fixtures.ts';
 import {
   CONTEXT_OPTIONS,
+  describeTextMismatch,
   type Expectation,
   MASKED_SELECTORS,
   MAX_DIFF_PERCENT,
+  normalizeParityText,
   PARITY_ROWS,
   PENDING_VIEWS,
   type ParityRow,
@@ -22,6 +26,7 @@ import {
   UIS,
   type Viewport,
   VIEWPORTS,
+  VIRTUALIZED_ITEMS,
 } from './parity.ts';
 
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -48,6 +53,9 @@ async function runStep(page: Page, step: Step): Promise<void> {
     case 'press':
       await page.keyboard.press(step.key);
       return;
+    case 'scrollTop':
+      await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: 'instant' }));
+      return;
   }
 }
 
@@ -67,6 +75,50 @@ async function assertExpectation(page: Page, want: Expectation): Promise<void> {
   }
 }
 
+/**
+ * Text of the compared region: the header for shell rows, else the open drawer or the active view.
+ * VIRTUALIZED_ITEMS entirely outside the viewport are left out (React does not mount them). They
+ * are hidden with `visibility`, which leaves layout and scroll position untouched, only while
+ * innerText is read.
+ */
+async function regionText(page: Page, region: Region): Promise<string> {
+  const drawer = page.locator('.diagnostic-drawer.active');
+  const scope =
+    region === 'shell' ? page.locator('.hud-header') : (await drawer.count()) > 0 ? drawer : page.locator('.view-panel.active');
+  const text = await scope.evaluate((root: HTMLElement, itemSelector: string) => {
+    const offscreen = [...root.querySelectorAll(itemSelector)].filter((el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.height > 0 && (rect.bottom <= 0 || rect.top >= window.innerHeight);
+    });
+    // Transitions are off while hiding and while restoring: the vanilla copy buttons'
+    // `transition: all` would otherwise keep them visible, then animate them back.
+    const style = document.createElement('style');
+    style.textContent = [
+      '[data-parity-offscreen], [data-parity-offscreen] * { visibility: hidden !important; transition: none !important; }',
+      '[data-parity-restore], [data-parity-restore] * { transition: none !important; }',
+    ].join('\n');
+    document.head.append(style);
+    for (const el of offscreen) el.setAttribute('data-parity-offscreen', '');
+    try {
+      return root.innerText;
+    } finally {
+      for (const el of offscreen) {
+        el.removeAttribute('data-parity-offscreen');
+        el.setAttribute('data-parity-restore', '');
+      }
+      void root.offsetHeight; // apply the restored visibility before transitions come back
+      for (const el of offscreen) el.removeAttribute('data-parity-restore');
+      style.remove();
+    }
+  }, VIRTUALIZED_ITEMS);
+  return normalizeParityText(text);
+}
+
+interface UiResult {
+  readonly text: string;
+  readonly shot: Buffer;
+}
+
 async function capture(page: Page, region: Region): Promise<Buffer> {
   await page.mouse.move(0, 0);
   // Masks are scoped to the compared region: a masked element elsewhere on the page (e.g. in a
@@ -83,7 +135,7 @@ async function capture(page: Page, region: Region): Promise<Buffer> {
   return region === 'shell' ? scope.screenshot(options) : page.screenshot(options);
 }
 
-async function runUi(browser: Browser, ui: UiTarget, row: ParityRow, viewport: Viewport): Promise<Buffer> {
+async function runUi(browser: Browser, ui: UiTarget, row: ParityRow, viewport: Viewport): Promise<UiResult> {
   const context = await browser.newContext({ ...CONTEXT_OPTIONS, viewport: { width: viewport.width, height: viewport.height } });
   try {
     const page = await context.newPage();
@@ -98,11 +150,12 @@ async function runUi(browser: Browser, ui: UiTarget, row: ParityRow, viewport: V
     await page.goto(`${ui.path}${row.start}`);
     for (const step of row.steps) await runStep(page, step);
     await assertExpectation(page, row.expect);
+    const text = await regionText(page, row.region);
     const shot = await capture(page, row.region);
 
     expect(errors, `${ui.name} console/page errors`).toEqual([]);
     expect(unexpected, `${ui.name} requests without a fixture`).toEqual([]);
-    return shot;
+    return { text, shot };
   } finally {
     await context.close();
   }
@@ -120,11 +173,12 @@ for (const viewport of VIEWPORTS) {
         const react = await runUi(browser, UIS[1] as UiTarget, row, viewport);
 
         const slug = `${viewport.name}-${slugify(row.name)}`;
-        const result = compareShots(slug, vanilla, react, viewport.width * viewport.height);
+        const result = compareShots(slug, vanilla.shot, react.shot, viewport.width * viewport.height);
         testInfo.annotations.push({
           type: 'pixel-diff',
           description: `${result.percent.toFixed(3)}% (${result.diffPixels}px; vanilla ${result.sizes.vanilla}, react ${result.sizes.react})`,
         });
+        expect.soft(describeTextMismatch(vanilla.text, react.text), 'region text').toBeNull();
         expect(result.sizes.react, 'screenshot size').toBe(result.sizes.vanilla);
         expect(result.percent, `pixel diff, see ${result.files.diff}`).toBeLessThanOrEqual(MAX_DIFF_PERCENT);
       });

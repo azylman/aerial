@@ -48,7 +48,9 @@ export type Step =
   | { readonly kind: 'type'; readonly placeholder: string; readonly text: string }
   | { readonly kind: 'pill'; readonly label: string }
   | { readonly kind: 'openDrawer'; readonly text: string }
-  | { readonly kind: 'press'; readonly key: string };
+  | { readonly kind: 'press'; readonly key: string }
+  /** Jumps the page to its top-left corner at once (no smooth or keyboard scroll animation). */
+  | { readonly kind: 'scrollTop' };
 
 export interface CountExpectation {
   readonly selector: string;
@@ -178,7 +180,7 @@ export const STABILIZE_CSS = `
 .schedule-cron-human {
   display: block !important; height: 1.5em !important; white-space: nowrap !important; overflow: hidden !important;
 }
-.search-clear-btn {
+.search-clear-btn:not([style*="display: none"]) {
   display: inline-flex !important; width: 24px !important; height: 24px !important; padding: 0 !important;
   overflow: hidden !important;
 }
@@ -191,6 +193,59 @@ export const STABILIZE_CSS = `
 
 /** Fail threshold: unmasked differing pixels as a share of the viewport. */
 export const MAX_DIFF_PERCENT = 0.5;
+
+// ---- Text parity ----
+//
+// The pixel gate tolerates a few words' worth of shift, so words running together (a missing
+// space between inline spans) can slip under it. Each row therefore also compares the compared
+// region's visible innerText in both UIs, after removing only the glyphs React renders as SVG.
+
+/**
+ * Emoji and symbol glyphs the vanilla text carries where React renders an SVG icon (the full
+ * emoji -> icon table in src/components/Icon.tsx), plus variation selectors.
+ */
+const SVG_GLYPHS = /[⚡🎯⏰🧠🛠🚀📋🔍⟳🔄↗⬇✓✕×⏱⏳💬📦🟢🟡🚨⚠○⊘🩺🕒📅🌌⚙▾▸\uFE0E\uFE0F]/gu;
+
+/**
+ * Items of the one list React windows (the memory archive, src/components/VirtualList.tsx): React
+ * mounts only the rows near the viewport while the vanilla grid renders every card, so the text
+ * comparison leaves out these items when they sit entirely outside the viewport. Nothing else is
+ * clipped, so text at the viewport edge elsewhere is still compared in full.
+ */
+export const VIRTUALIZED_ITEMS = '.fact-card';
+
+/** Canonical form of a region's innerText for the vanilla/React text comparison. */
+export function normalizeParityText(text: string): string {
+  return text.replace(SVG_GLYPHS, '').replace(/\s+/g, ' ').trim();
+}
+
+const CONTEXT_BEFORE = 20;
+const CONTEXT_AFTER = 40;
+
+function wordOffset(words: readonly string[], index: number): number {
+  return words.slice(0, index).reduce((offset, word) => offset + word.length + 1, 0);
+}
+
+/**
+ * Compares two normalized texts word by word. Returns null when equal, otherwise a message naming
+ * the first differing word and about 60 characters of context from each side.
+ */
+export function describeTextMismatch(vanilla: string, react: string): string | null {
+  if (vanilla === react) return null;
+  const a = vanilla.split(' ');
+  const b = react.split(' ');
+  let i = 0;
+  while (a[i] === b[i]) i++;
+  const context = (text: string, words: readonly string[]): string => {
+    const at = wordOffset(words, i);
+    return JSON.stringify(text.slice(Math.max(0, at - CONTEXT_BEFORE), at + CONTEXT_AFTER));
+  };
+  return [
+    `text differs at word ${i + 1}: vanilla ${JSON.stringify(a[i] ?? '<end>')}, react ${JSON.stringify(b[i] ?? '<end>')}`,
+    `  vanilla: ${context(vanilla, a)}`,
+    `  react:   ${context(react, b)}`,
+  ].join('\n');
+}
 
 // ---- Fixture-derived literals ----
 
@@ -221,7 +276,15 @@ const SERVICES_HEALTHY = '15 / 18';
 /** dep-console-1 (building) is the only full card; its steps are CI, BUILD, PULL, SWAP. */
 const PIPELINE_STEPS = ['CI', 'BUILD', 'PULL', 'SWAP'];
 
+/**
+ * Every deploy timer started minutes before FIXTURE_NOW (status.json), so none reads 00:00s. The
+ * vanilla markup renders 00:00s until its 1s live-timer tick, so waiting for this keeps the text
+ * comparison from catching the vanilla page mid-update.
+ */
+const DEPLOY_TIMERS_TICKED: CountExpectation = { selector: '#telemetry-view .deploy-timer-badge .timer-text:has-text("00:00s")', count: 0 };
+
 const TELEMETRY_COUNTS: readonly CountExpectation[] = [
+  DEPLOY_TIMERS_TICKED,
   { selector: '#telemetry-view .service-card', count: 18 },
   { selector: '#telemetry-view .badge.healthy', count: 15 },
   { selector: '#telemetry-view .badge.degraded', count: 2 },
@@ -302,7 +365,10 @@ const schedulesExpect = (texts: readonly string[], counts: readonly CountExpecta
   activeTab: 'SCHEDULES',
   badges: BADGES_NO_STATUS,
   texts: [...SCHEDULE_HEADINGS, ...texts],
-  counts,
+  // The earliest trigger (schedules.json: a cron due 11:58, 2 min before FIXTURE_NOW) reads OVERDUE.
+  // The vanilla summary shows NO UPCOMING until its 1s ticker first runs with data, so waiting for
+  // the overdue state keeps the text comparison from catching it mid-update.
+  counts: [...counts, { selector: '#schedules-next-trigger.countdown-overdue', count: 1 }],
 });
 
 /** Grid and feed headings with their badges at the default (ALL, no search) state. */
@@ -442,21 +508,15 @@ const ALL_BUILD_CARDS = buildCards(4, 6, 10, 3, 2);
 /**
  * Rows with steps end on one deterministic offset. Playwright scrolls an element differently on
  * each retry of a click (end, center, start; horizontally too, the mobile page is a little wider
- * than the viewport), keyboard scrolling is animated, and the vanilla page needs retries while its
- * panel fades in, so a pill click or a fill can leave the two pages at different offsets. Each row
- * therefore clicks its results label (`label`, static text: this also blurs the search box),
- * presses Home, clicks the label again (its stability check waits out the animated scroll; every
- * scroll Playwright may apply leaves the header tab above the fold or at the top) and re-selects
- * BUILD QUEUE from the keyboard. Focusing the tab is a native, retry-free scroll that centers it
- * when it is not fully in view, which brings both pages to the very top (a pointer click could
- * retry on the tab's hover transition and align it to the viewport edge instead). Re-selecting
- * keeps pill and search state.
+ * than the viewport) and the vanilla page needs retries while its panel fades in, so a pill click
+ * or a fill can leave the two pages at different offsets. Each row therefore clicks its results
+ * label (`label`, static text: this also blurs the search box), then jumps both pages to the very
+ * top. (Pressing Home and re-focusing a header tab raced the animated keyboard scroll and left
+ * the pages at different offsets on some runs.)
  */
 const settleBuilds = (label: string): readonly Step[] => [
   { kind: 'openDrawer', text: label },
-  { kind: 'press', key: 'Home' },
-  { kind: 'openDrawer', text: label },
-  { kind: 'keyTab', tab: 'BUILD QUEUE', key: 'Enter' },
+  { kind: 'scrollTop' },
 ];
 
 /**
@@ -582,7 +642,7 @@ export const PARITY_ROWS: readonly ParityRow[] = [
       activeTab: 'TELEMETRY',
       badges: BADGES_ALL,
       texts: ['GIT SYNC: BEHIND (Δ 1m 15s)'],
-      counts: [{ selector: '.gitsync-pill.lagging', count: 1 }],
+      counts: [{ selector: '.gitsync-pill.lagging', count: 1 }, DEPLOY_TIMERS_TICKED],
     },
     region: 'viewport',
   },

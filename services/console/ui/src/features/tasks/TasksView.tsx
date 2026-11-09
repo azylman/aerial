@@ -15,7 +15,9 @@ const QueueKpis = memo(function QueueKpis() {
     <>
       <div className="summary-card">
         <span className="summary-label">Queue Concurrency</span>
+        {' '}
         <span className={kpis.workersClass}>{kpis.workers}</span>
+        {' '}
         <span className="summary-sub">{kpis.workersSub}</span>
       </div>
       <div className="summary-card">

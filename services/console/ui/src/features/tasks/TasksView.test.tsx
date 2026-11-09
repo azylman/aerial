@@ -191,4 +191,15 @@ describe('TasksView', () => {
     expect(container.querySelectorAll('.task-card')).toHaveLength(wantCards);
     expect(screen.getByText('ONLINE')).toBeTruthy();
   });
+
+  it('separates each summary card label, value and sub-label with one space', () => {
+    const { container } = render(<TasksView />);
+    seed([]);
+    expect([...container.querySelectorAll('.summary-card')].map((c) => c.textContent)).toEqual([
+      'Queue Concurrency 0 / 4 WORKERS REAL-TIME DISPATCH',
+      'Queued Backlog 0 TURNS FIFO DISPATCH READY',
+      'Active Channel Funnel ONLINE DISCORD GATEWAY OK',
+      'Engine Architecture AGY DUAL-ENGINE OLLAMA + GEMINI 3.8',
+    ]);
+  });
 });
