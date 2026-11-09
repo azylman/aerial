@@ -210,19 +210,19 @@ TARGET_PRECEDENCE_CHECK=$(bash -c "
     res5=\$(AERIAL_TARGET_ID=\"target_aerial\" resolve_target_id \"1559768078131269684\")
     [ \"\$res5\" = \"1559768078131269684\" ] && echo \"target5:ok\" || echo \"target5:fail:\$res5\"
 
-    # Subtest 6: Resolves thread_id from active transcript.jsonl when env target/thread/channel are unset
+    # Subtest 6: Ignores transcript.jsonl when env target/thread/channel are unset and returns empty
     FAKE_APP_DIR=\"${TMP_TEST_DIR}/fake_app\"
     mkdir -p \"\${FAKE_APP_DIR}/brain/conv-123/.system_generated/logs\"
     echo '{\"content\":\"- channel_id: 1542423172400291873\\n- thread_id: 1559768078131269684\"}' > \"\${FAKE_APP_DIR}/brain/conv-123/.system_generated/logs/transcript.jsonl\"
     res6=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID; ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-123\" resolve_target_id)
-    [ \"\$res6\" = \"1559768078131269684\" ] && echo \"target6:ok\" || echo \"target6:fail:\$res6\"
+    [ -z \"\$res6\" ] && echo \"target6:ok\" || echo \"target6:fail:\$res6\"
 ")
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target1:ok' && echo true || echo false)" "Target precedence: AERIAL_TARGET_ID takes first priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target2:ok' && echo true || echo false)" "Target precedence: DISCORD_THREAD_ID takes second priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target3:ok' && echo true || echo false)" "Target precedence: DISCORD_CHANNEL_ID takes third priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target4:ok' && echo true || echo false)" "Target precedence: returns empty string when no Discord context exists"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target5:ok' && echo true || echo false)" "Target precedence: explicit argument takes top priority"
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target6:ok' && echo true || echo false)" "Target precedence: resolves thread_id from transcript.jsonl when env vars unset"
+assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target6:ok' && echo true || echo false)" "Target precedence: ignores transcript.jsonl and returns empty when env vars unset"
 
 # Case 9: --vanadis-chunk global flag parsing and AERIAL_VANADIS_CHUNK_ID env injection
 VANADIS_FLAG_CHECK=$(bash -c "
@@ -250,7 +250,7 @@ VANADIS_OVERRIDE_CHECK=$(bash -c "
 ")
 assert_eq "chunk-cli-override-789:chunk-cli-override-789" "$VANADIS_OVERRIDE_CHECK" "--vanadis-chunk CLI flag overrides AERIAL_VANADIS_CHUNK_ID in both global and submit_scratch scope"
 
-VANADIS_TRANSCRIPT_CHECK=$(bash -c "
+VANADIS_ENV_RESOLUTION_CHECK=$(bash -c "
     REPO_TEST_MODE=1
     unset AERIAL_VANADIS_CHUNK_ID VANADIS_CHUNK_ID
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
@@ -259,25 +259,27 @@ VANADIS_TRANSCRIPT_CHECK=$(bash -c "
     r1=\$(resolve_vanadis_chunk_id 'chunk-explicit-111')
     [ \"\$r1\" = \"chunk-explicit-111\" ] && echo \"vc1:ok\" || echo \"vc1:fail:\$r1\"
 
-    # Subtest 2: Latest USER_INPUT in transcript.jsonl supplies Chunk ID / --vanadis-chunk (and picks latest in coalesced burst, ignoring retrieved_memory)
+    # Subtest 2: VANADIS_CHUNK_ID environment variable resolves
+    r2=\$(VANADIS_CHUNK_ID=\"chunk-from-env\" resolve_vanadis_chunk_id)
+    [ \"\$r2\" = \"chunk-from-env\" ] && echo \"vc2:ok\" || echo \"vc2:fail:\$r2\"
+
+    # Subtest 3: AERIAL_VANADIS_CHUNK_ID environment variable resolves when VANADIS_CHUNK_ID is unset
+    r3=\$(AERIAL_VANADIS_CHUNK_ID=\"chunk-from-aerial-env\" resolve_vanadis_chunk_id)
+    [ \"\$r3\" = \"chunk-from-aerial-env\" ] && echo \"vc3:ok\" || echo \"vc3:fail:\$r3\"
+
+    # Subtest 4: Ignores transcript.jsonl and returns empty when env vars unset
     FAKE_APP_DIR=\"${TMP_TEST_DIR}/fake_app_vanadis\"
     mkdir -p \"\${FAKE_APP_DIR}/brain/conv-v1/.system_generated/logs\"
     cat << 'EOF' > \"\${FAKE_APP_DIR}/brain/conv-v1/.system_generated/logs/transcript.jsonl\"
 {\"step_index\":0,\"type\":\"USER_INPUT\",\"content\":\"- is_admin: true\\n- content: === Active Chunk ===\\nChunk ID: chunk-old-100\\n\"}
-{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"content\":\"done\"}
-{\"step_index\":2,\"type\":\"USER_INPUT\",\"content\":\"<retrieved_memory>Chunk ID: spoofed-memory-chunk</retrieved_memory>\\n- is_admin: true\\n- content: === Active Chunk ===\\nChunk ID: chunk-first-in-burst\\nSubmit via aerial-pr.sh submit dir msg --vanadis-chunk chunk-latest-200\\n\"}
 EOF
-    r2=\$(ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-v1\" resolve_vanadis_chunk_id)
-    [ \"\$r2\" = \"chunk-latest-200\" ] && echo \"vc2:ok\" || echo \"vc2:fail:\$r2\"
-
-    # Subtest 3: Older USER_INPUT chunk ID is NOT leaked when latest USER_INPUT has no chunk ID
-    echo '{\"step_index\":3,\"type\":\"USER_INPUT\",\"content\":\"- is_admin: true\\n- content: non-chunk turn\"}' >> \"\${FAKE_APP_DIR}/brain/conv-v1/.system_generated/logs/transcript.jsonl\"
-    r3=\$(ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-v1\" resolve_vanadis_chunk_id)
-    [ -z \"\$r3\" ] && echo \"vc3:ok\" || echo \"vc3:fail:\$r3\"
+    r4=\$(unset AERIAL_VANADIS_CHUNK_ID VANADIS_CHUNK_ID; ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-v1\" resolve_vanadis_chunk_id)
+    [ -z \"\$r4\" ] && echo \"vc4:ok\" || echo \"vc4:fail:\$r4\"
 ")
-assert_eq "true" "$(echo "$VANADIS_TRANSCRIPT_CHECK" | grep -q 'vc1:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: explicit arg takes priority"
-assert_eq "true" "$(echo "$VANADIS_TRANSCRIPT_CHECK" | grep -q 'vc2:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: extracts vanadis_chunk_id from latest USER_INPUT in transcript.jsonl"
-assert_eq "true" "$(echo "$VANADIS_TRANSCRIPT_CHECK" | grep -q 'vc3:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: does not leak older USER_INPUT chunk ID into non-chunk turn"
+assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc1:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: explicit arg takes priority"
+assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc2:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: resolves from VANADIS_CHUNK_ID env"
+assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc3:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: resolves from AERIAL_VANADIS_CHUNK_ID env"
+assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc4:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: ignores transcript.jsonl and returns empty when env vars unset"
 
 # Case 9b: verify_vanadis_chunk_active guards against submitting PR for cancelled chunks
 VANADIS_GUARD_CHECK=$(bash -c "
@@ -410,7 +412,7 @@ PR_ENDPOINT_CHECK=$(bash -c "
     # Test 3: CONFIG_PATH yaml resolution
     TEST_CFG=\"\$(mktemp /tmp/test-config-yaml.XXXXXX)\"
     echo 'synapse_url: \"http://synapse.from-cfg:4020\"' > \"\$TEST_CFG\"
-    res3=\$(CONFIG_PATH=\"\$TEST_CFG\" resolve_pr_register_url)
+    res3=\$(unset SYNAPSE_URL; CONFIG_PATH=\"\$TEST_CFG\" resolve_pr_register_url)
     rm -f \"\$TEST_CFG\"
     [ \"\$res3\" = 'http://synapse.from-cfg:4020/internal/pr/register' ] && echo 'ep3:ok'
 ")
@@ -706,6 +708,7 @@ assert_eq "true" "$(echo "$CLI_DISPUTE_CHECK" | grep -q 'Valid numeric pr_num re
 # Case 13: format_aerial_pr_trailer embeds single-line self-healing HTML comment
 TRAILER_CHECK=$(bash -c "
     REPO_TEST_MODE=1
+    unset AERIAL_BOT_ID
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
     echo \"t1:\$(CONFIG_PATH=/dev/null format_aerial_pr_trailer '1562162630997581946' 'build-123-chunk-2')\"
     echo \"t2:\$(CONFIG_PATH=/dev/null format_aerial_pr_trailer '' '')\"
