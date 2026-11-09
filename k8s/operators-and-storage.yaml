@@ -1052,10 +1052,10 @@ spec:
         universalAuthCredentials:
           clientId:
             key: INFISICAL_CLIENT_ID
-            name: shared-secrets
+            name: infisical-universal-auth
           clientSecret:
             key: INFISICAL_CLIENT_SECRET
-            name: shared-secrets
+            name: infisical-universal-auth
       secretsScope:
         projectSlug: aerial-8-jn8
         environmentSlug: default
