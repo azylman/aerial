@@ -1371,26 +1371,25 @@ spec:
         app.kubernetes.io/name: github-mcp
     spec:
       containers:
-        - env:
-            - name: PORT
-              value: "8080"
-          envFrom:
-            - secretRef:
-                name: github-mcp-secret
-          image: ghcr.io/azylman/aerial-github-mcp:${TAG_AERIAL_GITHUB_MCP:=latest}
+        - image: ghcr.io/azylman/aerial-github-mcp:${TAG_AERIAL_GITHUB_MCP:=latest}
           imagePullPolicy: Always
           name: github-mcp
           ports:
             - containerPort: 8080
               name: http
               protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            periodSeconds: 10
+            tcpSocket:
+              port: http
           resources:
             limits:
               cpu: 500m
-              memory: 2Gi
+              memory: 512Mi
             requests:
               cpu: 50m
-              memory: 256Mi
+              memory: 64Mi
           volumeMounts:
             - mountPath: /config/config.yaml
               name: config
