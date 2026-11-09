@@ -799,19 +799,23 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 			log.Printf("[synapse] [dispatcher] warning dispatching %s direct message: %v", label, err)
 		}
 	}
-	if opt.chunkID != "" && !strings.Contains(prompt, "Chunk ID: "+opt.chunkID) {
-		prompt += "\nChunk ID: " + opt.chunkID
-	}
 	if opt.silent {
-		if normTarget := NormalizeDiscordTargetID(targetID); IsValidDiscordSnowflake(normTarget) && !strings.Contains(prompt, "thread_id: "+normTarget) {
-			prompt += "\nthread_id: " + normTarget
+		var normTarget string
+		if nt := NormalizeDiscordTargetID(targetID); IsValidDiscordSnowflake(nt) {
+			normTarget = nt
+		}
+		var cID string
+		if rawCID := strings.TrimSpace(opt.chunkID); isValidVanadisChunkID(rawCID) {
+			cID = rawCID
 		}
 		req := DispatchRequest{
-			Source: "webhook",
-			Prompt: prompt,
-			Effort: firstNonEmpty(opt.effort, "medium"),
+			Source:         "webhook",
+			Prompt:         prompt,
+			Effort:         firstNonEmpty(opt.effort, "medium"),
+			TargetID:       normTarget,
+			VanadisChunkID: cID,
 		}
-		if cID := strings.TrimSpace(opt.chunkID); isValidVanadisChunkID(cID) {
+		if cID != "" {
 			req.SessionID = "vanadis-" + cID
 		}
 		if err := s.dispatcher.DispatchBackground(ctx, req); err != nil {

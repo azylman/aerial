@@ -370,6 +370,7 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			req: DispatchRequest{
 				Source:       "heartbeat",
 				SessionID:    "heartbeat-hb-1",
+				TargetID:     "123456789",
 				Prompt:       "echo test",
 				Effort:       "low",
 				SkipIfActive: true,
@@ -1105,6 +1106,11 @@ func TestTicker_EvaluateDueSchedules_Scenarios(t *testing.T) {
 			totalDispatched := len(mock.dispatched) + len(mock.dispatchedRequests)
 			if totalDispatched != tc.wantDispatched {
 				t.Fatalf("dispatched count = %d, want %d", totalDispatched, tc.wantDispatched)
+			}
+			if tc.setupHeartbeat != nil && len(mock.dispatchedRequests) > 0 {
+				if mock.dispatchedRequests[0].TargetID != tc.setupHeartbeat.TargetID {
+					t.Errorf("dispatchedRequest TargetID = %q, want %q", mock.dispatchedRequests[0].TargetID, tc.setupHeartbeat.TargetID)
+				}
 			}
 
 			if tc.wantRunStatus != "" {

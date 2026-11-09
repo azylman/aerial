@@ -733,11 +733,13 @@ func (w *ExecuteChunkWorker) Work(ctx context.Context, job *river.Job[ExecuteChu
 
 // BrainDispatchRequest represents the JSON payload dispatched to Brain's POST /dispatch endpoint.
 type BrainDispatchRequest struct {
-	ID        string `json:"id,omitempty"`
-	Source    string `json:"source"`
-	SessionID string `json:"session_id,omitempty"`
-	Prompt    string `json:"prompt"`
-	Effort    string `json:"effort,omitempty"`
+	ID             string `json:"id,omitempty"`
+	Source         string `json:"source"`
+	SessionID      string `json:"session_id,omitempty"`
+	TargetID       string `json:"target_id,omitempty"`
+	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+	Prompt         string `json:"prompt"`
+	Effort         string `json:"effort,omitempty"`
 }
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task for widget rendering.
@@ -962,10 +964,12 @@ func (s *VanadisServer) dispatchChunkTurn(ctx context.Context, build VanadisBuil
 	}
 	chunk := chunks[activeIdx]
 	return s.dispatchBrainDispatch(ctx, BrainDispatchRequest{
-		Source:    "vanadis",
-		SessionID: "vanadis-" + strings.TrimSpace(chunk.ID),
-		Prompt:    notice + prompt,
-		Effort:    capChunkEffort(chunk.Effort),
+		Source:         "vanadis",
+		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
+		TargetID:       strings.TrimSpace(build.ThreadID),
+		VanadisChunkID: strings.TrimSpace(chunk.ID),
+		Prompt:         notice + prompt,
+		Effort:         capChunkEffort(chunk.Effort),
 	})
 }
 

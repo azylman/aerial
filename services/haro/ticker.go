@@ -40,6 +40,7 @@ type DispatchRequest struct {
 	ID           string `json:"id,omitempty"`
 	Source       string `json:"source"`
 	SessionID    string `json:"session_id,omitempty"`
+	TargetID     string `json:"target_id,omitempty"`
 	Prompt       string `json:"prompt"`
 	Effort       string `json:"effort,omitempty"`
 	SkipIfActive bool   `json:"skip_if_active,omitempty"`
@@ -453,6 +454,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 		ID:           runID,
 		Source:       "heartbeat",
 		SessionID:    sessionKey,
+		TargetID:     strings.TrimSpace(hb.TargetID),
 		Prompt:       wrappedPrompt,
 		Effort:       hb.Effort,
 		SkipIfActive: true,
