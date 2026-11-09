@@ -168,6 +168,7 @@ kind: DaemonSet
 metadata:
   annotations:
     deprecated.daemonset.template.generation: "1"
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: fluent-bit
   name: fluent-bit
@@ -184,7 +185,7 @@ spec:
       containers:
         - envFrom:
             - secretRef:
-                name: shared-secrets
+                name: fluent-bit-secret
           image: cr.fluentbit.io/fluent/fluent-bit:3.2.4
           name: fluent-bit
           volumeMounts:
@@ -435,6 +436,8 @@ metadata:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: victoriametrics
   name: victoriametrics
@@ -461,7 +464,7 @@ spec:
             - -promscrape.config.strictParse=false
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: victoriametrics-secret
           image: victoriametrics/victoria-metrics:v1.155.0
           name: victoriametrics
           ports:
@@ -496,7 +499,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
           restartPolicy: Always
@@ -613,6 +616,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: grafana
   name: grafana
@@ -645,7 +650,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
-                  name: shared-secrets
+                  name: postgres-secret
             - name: GF_USERS_ALLOW_SIGN_UP
               value: "false"
             - name: GF_AUTH_ANONYMOUS_ENABLED
@@ -702,7 +707,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial
           restartPolicy: Always
@@ -738,7 +743,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
           restartPolicy: Always
@@ -791,6 +796,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: openobserve
   name: openobserve
@@ -815,7 +822,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: OPENOBSERVE_ROOT_USER_PASSWORD
-                  name: shared-secrets
+                  name: openobserve-secret
             - name: ZO_DATA_DIR
               value: /data
             - name: ZO_DATA_WAL_DIR
@@ -836,7 +843,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
-                  name: shared-secrets
+                  name: openobserve-secret
             - name: ZO_BASE_URI
               value: /openobserve
             - name: ZO_TELEMETRY
@@ -1086,6 +1093,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: discord-mcp
   name: discord-mcp
@@ -1111,7 +1120,7 @@ spec:
               value: "8080"
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: discord-mcp-secret
           image: ghcr.io/azylman/aerial-discord-mcp:${TAG_AERIAL_DISCORD_MCP:=latest}
           imagePullPolicy: Always
           name: discord-mcp
@@ -1154,6 +1163,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: github-mcp
   name: github-mcp
@@ -1179,7 +1190,7 @@ spec:
               value: "8080"
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: github-mcp-secret
           image: ghcr.io/azylman/aerial-github-mcp:${TAG_AERIAL_GITHUB_MCP:=latest}
           imagePullPolicy: Always
           name: github-mcp
@@ -1222,6 +1233,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: infisical-mcp
   name: infisical-mcp
@@ -1247,7 +1260,7 @@ spec:
               value: "8080"
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: infisical-mcp-secret
           image: ghcr.io/azylman/aerial-infisical-mcp:${TAG_AERIAL_INFISICAL_MCP:=latest}
           imagePullPolicy: Always
           name: infisical-mcp
@@ -1371,9 +1384,6 @@ spec:
         - env:
             - name: PORT
               value: "8080"
-          envFrom:
-            - secretRef:
-                name: shared-secrets
           image: ghcr.io/azylman/aerial-kernel-mcp:${TAG_AERIAL_KERNEL_MCP:=latest}
           imagePullPolicy: Always
           name: kernel-mcp
@@ -1416,6 +1426,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: prospera
   name: prospera
@@ -1443,7 +1455,7 @@ spec:
               value: /share/aerial-config/services/prospera/prospera.yaml
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: prospera-secret
           image: ghcr.io/azylman/aerial-prospera:${TAG_AERIAL_PROSPERA:=latest}
           imagePullPolicy: Always
           name: prospera
@@ -1475,7 +1487,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
           restartPolicy: Always
@@ -1520,6 +1532,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: docket-store
   name: docket-store
@@ -1547,7 +1561,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
-                  name: shared-secrets
+                  name: postgres-secret
           image: ghcr.io/cloudnative-pg/postgresql:18
           name: init-docket-db
       containers:
@@ -1560,7 +1574,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
-                  name: shared-secrets
+                  name: postgres-secret
             - name: VIKUNJA_DATABASE_TYPE
               value: postgres
             - name: VIKUNJA_DATABASE_HOST
@@ -1575,7 +1589,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
-                  name: shared-secrets
+                  name: postgres-secret
           image: vikunja/vikunja:latest
           name: docket-store
           ports:
@@ -1615,6 +1629,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: docket-mcp
   name: docket-mcp
@@ -1645,7 +1661,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
-                  name: shared-secrets
+                  name: postgres-secret
           image: ghcr.io/cloudnative-pg/postgresql:18
           name: init-docket-schema
           volumeMounts:
@@ -1662,7 +1678,7 @@ spec:
               value: "docket"
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: postgres-secret
           image: ghcr.io/azylman/aerial-docket-mcp:${TAG_AERIAL_DOCKET_MCP:=latest}
           name: docket-mcp
           ports:
