@@ -1487,11 +1487,24 @@ spec:
                 name: infisical-mcp-secret
           image: ghcr.io/azylman/aerial-infisical-mcp:${TAG_AERIAL_INFISICAL_MCP:=latest}
           imagePullPolicy: Always
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /_healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
           name: infisical-mcp
           ports:
             - containerPort: 8080
               name: http
               protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /_readyz
+              port: http
+            periodSeconds: 10
           resources:
             limits:
               cpu: 500m
