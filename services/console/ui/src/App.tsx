@@ -1,5 +1,5 @@
 import { Activity, type ComponentType, lazy, Suspense, useDeferredValue, useEffect, useState } from 'react';
-import { loadBuildsView, pollStatus, statusPolledOn, VIEW_LOADERS } from './boot';
+import { loadBuildsView, loadedView, pollStatus, statusPolledOn, VIEW_LOADERS } from './boot';
 import { Drawer, type DrawerPanels } from './components/Drawer';
 import { Header } from './components/Header';
 import { ServiceDiagnostics } from './features/telemetry/ServiceDiagnostics';
@@ -10,6 +10,7 @@ import { usePollingSync } from './hooks/usePollingSync';
 import type { TabId } from './store/store';
 import './styles/base.css';
 
+// The fallback path for views whose module has not resolved yet (see ViewPanel).
 const VIEWS: Readonly<Record<TabId, ComponentType>> = {
   telemetry: lazy(VIEW_LOADERS.telemetry),
   tasks: lazy(VIEW_LOADERS.tasks),
@@ -52,7 +53,10 @@ function useShellData(activeTab: TabId): void {
 }
 
 function ViewPanel({ tab, visible }: { readonly tab: TabId; readonly visible: boolean }) {
-  const View = VIEWS[tab];
+  // An already-loaded view renders directly so it never suspends; otherwise React.lazy loads it
+  // under the shared Suspense boundary. The choice is fixed per panel: switching a mounted lazy
+  // view to its resolved component would change the element type and remount (and reset) it.
+  const [View] = useState<ComponentType>(() => loadedView(tab) ?? VIEWS[tab]);
   return (
     <Activity mode={visible ? 'visible' : 'hidden'}>
       <div
