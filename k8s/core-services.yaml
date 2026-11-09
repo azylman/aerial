@@ -707,6 +707,7 @@ spec:
             - serve
             - --host=0.0.0.0
             - --port=8080
+            - --public-url=http://localhost
             - --write-timeout=2m
           env:
             - name: PORT
