@@ -23,10 +23,9 @@ const (
 	EngineClaude = "claude"
 )
 
-// toolKindByName maps engine-native tool names to normalized kinds. Claude Code and agy
-// tool names do not collide, so a single lookup table serves both engines.
-var toolKindByName = map[string]string{
-	// Claude Code
+// claudeToolKinds maps Claude Code tool names to normalized kinds. Claude Code and agy tool
+// names do not collide, so a name's table also identifies the engine that emitted it.
+var claudeToolKinds = map[string]string{
 	"Bash":         ToolKindShell,
 	"BashOutput":   ToolKindShell,
 	"KillShell":    ToolKindShell,
@@ -44,7 +43,10 @@ var toolKindByName = map[string]string{
 	"Task":         ToolKindSubagent,
 	"Skill":        ToolKindSkill,
 	"TodoWrite":    ToolKindTask,
-	// agy
+}
+
+// agyToolKinds maps agy tool names to normalized kinds.
+var agyToolKinds = map[string]string{
 	"run_command":                ToolKindShell,
 	"send_command_input":         ToolKindShell,
 	"read_terminal":              ToolKindShell,
@@ -72,7 +74,10 @@ func NormalizeToolKind(toolName string, mcpServers []string) string {
 	if toolName == "" {
 		return ""
 	}
-	if kind, ok := toolKindByName[toolName]; ok {
+	if kind, ok := claudeToolKinds[toolName]; ok {
+		return kind
+	}
+	if kind, ok := agyToolKinds[toolName]; ok {
 		return kind
 	}
 	if strings.HasPrefix(toolName, "browser_") {
@@ -110,4 +115,28 @@ func agyMCPServer(rest string, mcpServers []string) string {
 		return ""
 	}
 	return server
+}
+
+// InferEngine guesses which engine produced a session from its stored tool names, for sessions
+// whose raw log is gone. Claude Code tools and mcp__ names count as claude; agy tools and mcp_
+// (single underscore) names count as agy. It returns "" unless exactly one engine matched.
+func InferEngine(toolNames []string) string {
+	var claude, agy bool
+	for _, name := range toolNames {
+		_, isClaude := claudeToolKinds[name]
+		_, isAgy := agyToolKinds[name]
+		switch {
+		case isClaude || strings.HasPrefix(name, "mcp__"):
+			claude = true
+		case isAgy || strings.HasPrefix(name, "mcp_"):
+			agy = true
+		}
+	}
+	switch {
+	case claude && !agy:
+		return EngineClaude
+	case agy && !claude:
+		return EngineAgy
+	}
+	return ""
 }

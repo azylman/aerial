@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +19,9 @@ const (
 	DefaultSparseWeight  = 0.30
 	DefaultRRFK          = 60.0
 )
+
+// MCPToolFamily is the bare tool filter that matches every normalized mcp:<server> tool kind.
+const MCPToolFamily = "mcp"
 
 func optionalVectorArg(emb []float32) any {
 	if len(emb) == ExpectedEmbeddingDim {
@@ -192,7 +196,7 @@ func (s *SQLTranscriptStore) UpsertSessionSummary(ctx context.Context, summary S
 		is_settled = CASE WHEN EXCLUDED.is_settled THEN TRUE WHEN EXCLUDED.last_indexed_step > session_summaries.summary_step_watermark AND session_summaries.summary_step_watermark >= 0 THEN FALSE ELSE session_summaries.is_settled END,
 		updated_at = EXCLUDED.updated_at;`
 
-	_, err = s.db.ExecContext(queryCtx, query, s.stack, summary.SessionID, summary.Engine, summary.ThreadID, summary.Summary, optionalVectorArg(summary.Embedding), summary.LastIndexedStep, mtimeVal, summary.SummaryStepWatermark, summary.IsSettled, createdAt, now)
+	_, err = s.db.ExecContext(queryCtx, query, s.stack, summary.SessionID, summary.Engine, summary.ThreadID, sanitizeTranscriptText(summary.Summary), optionalVectorArg(summary.Embedding), summary.LastIndexedStep, mtimeVal, summary.SummaryStepWatermark, summary.IsSettled, createdAt, now)
 	if err != nil {
 		return fmt.Errorf("upsert session summary failed: %w", err)
 	}
@@ -256,7 +260,7 @@ func (s *SQLTranscriptStore) BatchInsertTranscriptSteps(ctx context.Context, ste
 				placeholders[k] = fmt.Sprintf("$%d", j*cols+k+1)
 			}
 			valStrings = append(valStrings, "("+strings.Join(placeholders, ", ")+")")
-			valArgs = append(valArgs, s.stack, st.SessionID, st.StepIndex, st.StepType, st.ToolName, st.ToolKind, st.ToolCallID, st.Content, createdAt)
+			valArgs = append(valArgs, s.stack, st.SessionID, st.StepIndex, st.StepType, st.ToolName, st.ToolKind, st.ToolCallID, sanitizeTranscriptText(st.Content), createdAt)
 		}
 
 		query := fmt.Sprintf(`INSERT INTO transcript_steps (stack, session_id, step_index, step_type, tool_name, tool_kind, tool_call_id, content, created_at)
@@ -304,6 +308,94 @@ func (s *SQLTranscriptStore) BackfillToolKinds(ctx context.Context, mapper func(
 		}
 	}
 	return updated, nil
+}
+
+// sessionEngineBatchSize bounds the session IDs bound into one engine backfill UPDATE.
+const sessionEngineBatchSize = 500
+
+// BackfillSessionEngines labels local-stack sessions whose engine is still empty, typically
+// older sessions whose raw logs are gone, using infer over each session's distinct tool names.
+// It returns the number of sessions updated.
+func (s *SQLTranscriptStore) BackfillSessionEngines(ctx context.Context, infer func(toolNames []string) string) (updated int64, err error) {
+	defer recordTranscriptQuery("backfill_session_engines", time.Now(), &err)
+	if err := s.checkWriter(); err != nil {
+		return 0, err
+	}
+	if infer == nil {
+		return 0, fmt.Errorf("engine inference func cannot be nil")
+	}
+	queryCtx, cancel := withTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(queryCtx, `SELECT DISTINCT s.session_id, t.tool_name FROM session_summaries s
+		JOIN transcript_steps t ON t.stack = s.stack AND t.session_id = s.session_id
+		WHERE s.stack = $1 AND s.engine = '' AND t.tool_name <> ''
+		ORDER BY s.session_id, t.tool_name`, s.stack)
+	if err != nil {
+		return 0, fmt.Errorf("query unlabeled session tool names: %w", err)
+	}
+	toolNames, order, err := scanSessionToolNames(rows)
+	if err != nil {
+		return 0, err
+	}
+	byEngine := make(map[string][]string)
+	var engines []string
+	for _, sessionID := range order {
+		engine := infer(toolNames[sessionID])
+		if engine == "" {
+			continue
+		}
+		if _, seen := byEngine[engine]; !seen {
+			engines = append(engines, engine)
+		}
+		byEngine[engine] = append(byEngine[engine], sessionID)
+	}
+	for _, engine := range engines {
+		for batch := range slices.Chunk(byEngine[engine], sessionEngineBatchSize) {
+			args := []any{engine, s.stack}
+			placeholders := make([]string, len(batch))
+			for i, sessionID := range batch {
+				args = append(args, sessionID)
+				placeholders[i] = fmt.Sprintf("$%d", len(args))
+			}
+			query := `UPDATE session_summaries SET engine = $1 WHERE stack = $2 AND engine = '' AND session_id IN (` + strings.Join(placeholders, ", ") + `)`
+			res, err := s.db.ExecContext(queryCtx, query, args...)
+			if err != nil {
+				return updated, fmt.Errorf("backfill engine %q: %w", engine, err)
+			}
+			if n, err := res.RowsAffected(); err == nil {
+				updated += n
+			}
+		}
+	}
+	return updated, nil
+}
+
+// scanSessionToolNames groups (session_id, tool_name) rows by session, preserving first-seen order.
+func scanSessionToolNames(rows *sql.Rows) (map[string][]string, []string, error) {
+	defer rows.Close()
+	toolNames := make(map[string][]string)
+	var order []string
+	for rows.Next() {
+		var sessionID, toolName string
+		if err := rows.Scan(&sessionID, &toolName); err != nil {
+			return nil, nil, fmt.Errorf("scan unlabeled session tool name: %w", err)
+		}
+		if _, seen := toolNames[sessionID]; !seen {
+			order = append(order, sessionID)
+		}
+		toolNames[sessionID] = append(toolNames[sessionID], toolName)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate unlabeled session tool names: %w", err)
+	}
+	return toolNames, order, nil
+}
+
+// sanitizeTranscriptText strips NUL bytes and replaces invalid UTF-8 so Postgres text columns
+// accept the value; one dirty step must not reject its whole insert batch.
+func sanitizeTranscriptText(s string) string {
+	return strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", ""), "\uFFFD")
 }
 
 const sessionSummaryColumns = `s.stack, s.session_id, s.engine, s.thread_id, s.summary, s.last_indexed_step, s.last_mtime,
@@ -450,7 +542,11 @@ func buildSearchTranscriptStepsQuery(stack, queryText, sessionFilter, toolFilter
 		}
 	}
 
-	if toolFilter != "" {
+	if toolFilter == MCPToolFamily {
+		// Bare "mcp" is a family filter over every mcp:<server> kind.
+		args = append(args, MCPToolFamily+":%")
+		whereClauses = append(whereClauses, fmt.Sprintf("t.tool_kind LIKE $%d", len(args)))
+	} else if toolFilter != "" {
 		// Normalized kinds (shell, mcp:<server>, ...) and engine-native names never collide, so one
 		// value matches either column: "shell" finds Bash and run_command, "Bash" finds only Bash.
 		args = append(args, toolFilter)

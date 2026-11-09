@@ -1077,7 +1077,27 @@ func TestSyncTranscripts_EngineAndToolKinds(t *testing.T) {
 			priorSteps:   []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}},
 			failMethod:   "SetSessionEngine",
 			session:      "sess-legacy",
+			wantEngine:   "agy", // the engine backfill still labels it from its stored tool names
 			wantKinds:    []string{"run_command=shell|"},
+		},
+		{
+			name:         "session without a raw log gets its engine inferred from tool steps",
+			priorSummary: &db.SessionSummary{SessionID: "sess-orphan", LastIndexedStep: 1, LastMtime: future, SummaryStepWatermark: 1, IsSettled: true},
+			priorSteps: []db.TranscriptStep{
+				{SessionID: "sess-orphan", StepIndex: 0, StepType: "assistant", ToolName: "Bash", Content: "ls"},
+				{SessionID: "sess-orphan", StepIndex: 1, StepType: "assistant", ToolName: "mcp__github__get_me", Content: "{}"},
+			},
+			session:    "sess-orphan",
+			wantEngine: "claude",
+			wantKinds:  []string{"Bash=shell|", "mcp__github__get_me=mcp:github|"},
+		},
+		{
+			name:         "engine backfill failure is logged and leaves the engine empty",
+			priorSummary: &db.SessionSummary{SessionID: "sess-orphan", LastIndexedStep: 0, LastMtime: future, SummaryStepWatermark: 0, IsSettled: true},
+			priorSteps:   []db.TranscriptStep{{SessionID: "sess-orphan", StepIndex: 0, StepType: "assistant", ToolName: "Bash", Content: "ls"}},
+			failMethod:   "BackfillSessionEngines",
+			session:      "sess-orphan",
+			wantKinds:    []string{"Bash=shell|"},
 		},
 		{
 			name:         "backfill failure is logged and leaves kinds empty",

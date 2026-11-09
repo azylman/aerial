@@ -154,6 +154,14 @@ func (r *routedTranscriptStore) BackfillToolKinds(ctx context.Context, mapper fu
 	return s.BackfillToolKinds(ctx, mapper)
 }
 
+func (r *routedTranscriptStore) BackfillSessionEngines(ctx context.Context, infer func([]string) string) (int64, error) {
+	s, err := r.resolve()
+	if err != nil {
+		return 0, err
+	}
+	return s.BackfillSessionEngines(ctx, infer)
+}
+
 func (r *routedTranscriptStore) SearchSessionSummaries(ctx context.Context, stack string, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error) {
 	s, err := r.resolve()
 	if err != nil {

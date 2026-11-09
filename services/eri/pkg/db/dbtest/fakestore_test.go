@@ -1084,6 +1084,20 @@ func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 	if updated, err := store.BackfillToolKinds(ctx, mapper); err != nil || updated != 1 {
 		t.Fatalf("BackfillToolKinds updated=%d err=%v, want 1", updated, err)
 	}
+	mustOK(t, store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-u", Summary: "docket work"}), "UpsertSessionSummary unlabeled")
+	mustOK(t, store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
+		{SessionID: "sess-u", StepIndex: 0, ToolName: "mcp_docket_create", ToolKind: "mcp:docket"},
+		{SessionID: "sess-u", StepIndex: 1, ToolName: "run_command", ToolKind: "shell"},
+		{SessionID: "sess-u", StepIndex: 2, ToolName: "run_command", ToolKind: "shell"},
+	}), "BatchInsertTranscriptSteps unlabeled")
+	var inferredFrom []string
+	infer := func(names []string) string {
+		inferredFrom = names
+		return "agy"
+	}
+	if updated, err := store.BackfillSessionEngines(ctx, infer); err != nil || updated != 1 || !slices.Equal(inferredFrom, []string{"mcp_docket_create", "run_command"}) {
+		t.Fatalf("BackfillSessionEngines updated=%d names=%q err=%v, want 1 from distinct sorted names", updated, inferredFrom, err)
+	}
 
 	tests := []struct {
 		name        string
@@ -1092,10 +1106,11 @@ func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 		wantEngine  string
 		wantSummary int
 		wantShell   int
+		wantMCP     int
 		wantStats   []db.TranscriptStackStats
 	}{
-		{name: "all stacks", wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 1, wantShell: 1, wantStats: []db.TranscriptStackStats{{Stack: FakeTranscriptStack, Sessions: 1, Steps: 4}}},
-		{name: "own stack", stack: FakeTranscriptStack, wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 1, wantShell: 1, wantStats: []db.TranscriptStackStats{{Stack: FakeTranscriptStack, Sessions: 1, Steps: 4}}},
+		{name: "all stacks", wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 2, wantShell: 3, wantMCP: 1, wantStats: []db.TranscriptStackStats{{Stack: FakeTranscriptStack, Sessions: 2, Steps: 7}}},
+		{name: "own stack", stack: FakeTranscriptStack, wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 2, wantShell: 3, wantMCP: 1, wantStats: []db.TranscriptStackStats{{Stack: FakeTranscriptStack, Sessions: 2, Steps: 7}}},
 		{name: "other stack sees nothing", stack: "elsewhere"},
 	}
 	for _, tc := range tests {
@@ -1124,14 +1139,20 @@ func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 			if shell, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "", "shell", 10); len(shell) != tc.wantShell {
 				t.Errorf("SearchTranscriptSteps(tool=shell) len = %d, want %d", len(shell), tc.wantShell)
 			}
+			if mcp, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "", "mcp", 10); len(mcp) != tc.wantMCP {
+				t.Errorf("SearchTranscriptSteps(tool=mcp) len = %d, want %d", len(mcp), tc.wantMCP)
+			}
 			if stats, err := store.GetTranscriptStats(ctx, tc.stack); err != nil || !slices.Equal(stats, tc.wantStats) {
 				t.Errorf("GetTranscriptStats = %+v err=%v, want %+v", stats, err, tc.wantStats)
 			}
 		})
 	}
 
-	if states, err := store.GetSessionSyncStates(ctx); err != nil || states["sess-e"].Engine != "claude" {
-		t.Errorf("sync state engine = %+v err=%v, want claude", states["sess-e"], err)
+	if states, err := store.GetSessionSyncStates(ctx); err != nil || states["sess-e"].Engine != "claude" || states["sess-u"].Engine != "agy" {
+		t.Errorf("sync state engines = %+v err=%v, want sess-e claude and sess-u agy", states, err)
+	}
+	if _, err := store.BackfillSessionEngines(ctx, nil); err == nil {
+		t.Error("expected error for nil infer")
 	}
 	if err := store.SetSessionEngine(ctx, "", "agy"); err == nil {
 		t.Error("expected error for empty session ID")

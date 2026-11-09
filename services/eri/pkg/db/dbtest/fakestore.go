@@ -1106,6 +1106,32 @@ func (f *FakeStore) BackfillToolKinds(ctx context.Context, mapper func(string) s
 	})
 }
 
+func (f *FakeStore) BackfillSessionEngines(ctx context.Context, infer func([]string) string) (int64, error) {
+	return withFakeLock(f, "BackfillSessionEngines", func() (int64, error) {
+		if infer == nil {
+			return 0, fmt.Errorf("engine inference func cannot be nil")
+		}
+		var updated int64
+		for sessionID, sm := range f.sessionSummaries {
+			if sm.Engine != "" {
+				continue
+			}
+			var names []string
+			for _, st := range f.transcriptSteps[sessionID] {
+				if st.ToolName != "" && !slices.Contains(names, st.ToolName) {
+					names = append(names, st.ToolName)
+				}
+			}
+			slices.Sort(names)
+			if engine := infer(names); engine != "" {
+				sm.Engine = engine
+				updated++
+			}
+		}
+		return updated, nil
+	})
+}
+
 // GetTranscriptStats counts the fake's single stack; it reports nothing when the index is empty
 // or the stack filter excludes it.
 func (f *FakeStore) GetTranscriptStats(ctx context.Context, stack string) ([]db.TranscriptStackStats, error) {
@@ -1210,8 +1236,20 @@ func parseAllowedSessions(filter string) map[string]bool {
 	return allowed
 }
 
+// matchesToolFilter mirrors the SQL tool filter: bare "mcp" matches any mcp:<server> kind, any
+// other value matches the normalized kind or the engine-native name.
+func matchesToolFilter(s db.TranscriptStep, toolFilter string) bool {
+	switch toolFilter {
+	case "":
+		return true
+	case db.MCPToolFamily:
+		return strings.HasPrefix(s.ToolKind, db.MCPToolFamily+":")
+	}
+	return s.ToolKind == toolFilter || s.ToolName == toolFilter
+}
+
 func matchesTranscriptStep(s db.TranscriptStep, toolFilter string, sinceTime time.Time, queryText, qLower string, words []string) bool {
-	if toolFilter != "" && s.ToolKind != toolFilter && s.ToolName != toolFilter {
+	if !matchesToolFilter(s, toolFilter) {
 		return false
 	}
 	if !sinceTime.IsZero() && !s.CreatedAt.After(sinceTime) {

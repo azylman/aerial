@@ -145,6 +145,7 @@ func SyncTranscripts(
 	}
 
 	backfillToolKinds(ctx, store, opts.MCPServers)
+	backfillSessionEngines(ctx, store)
 	stats.Duration = time.Since(start)
 	return stats, nil
 }
@@ -208,6 +209,19 @@ func backfillToolKinds(ctx context.Context, store db.TranscriptStore, mcpServers
 	}
 	if updated > 0 {
 		log.Printf("[Transcript] Backfilled tool_kind on %d steps", updated)
+	}
+}
+
+// backfillSessionEngines labels local-stack sessions that never got an engine (their raw log was
+// gone before engines were recorded) by inferring it from their stored tool names.
+func backfillSessionEngines(ctx context.Context, store db.TranscriptStore) {
+	updated, err := store.BackfillSessionEngines(ctx, InferEngine)
+	if err != nil {
+		log.Printf("[Transcript] BackfillSessionEngines error: %v", err)
+		return
+	}
+	if updated > 0 {
+		log.Printf("[Transcript] Backfilled engine on %d sessions", updated)
 	}
 }
 
