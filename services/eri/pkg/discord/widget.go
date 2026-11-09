@@ -48,6 +48,11 @@ const WidgetSinkMessageThreshold = 4
 // when counting non-widget messages toward WidgetSinkMessageThreshold.
 const WidgetSinkQueryLimit = 20
 
+// WidgetSinkIdleThreshold is how long a thread must be idle (measured from the newest regular
+// message after a status widget) before the next widget update re-posts a buried widget at the
+// bottom of the thread, even when fewer than WidgetSinkMessageThreshold messages sit below it.
+const WidgetSinkIdleThreshold = 45 * time.Minute
+
 // DiscordWidgetSender defines the interface required by DeliverStatusWidget to send, edit, query, and delete Discord messages.
 type DiscordWidgetSender interface {
 	ChannelMessageSendComplex(channelID string, data *discordgo.MessageSend, options ...discordgo.RequestOption) (*discordgo.Message, error)
@@ -56,21 +61,29 @@ type DiscordWidgetSender interface {
 	ChannelMessageDelete(channelID, messageID string, options ...discordgo.RequestOption) error
 }
 
-func shouldSinkWidget(s DiscordWidgetSender, channelID, messageID string, opts ...discordgo.RequestOption) bool {
+// shouldSinkWidget reports whether the status widget messageID is buried enough to re-post: either
+// WidgetSinkMessageThreshold regular messages sit below it, or at least one does and the newest of
+// them is at least WidgetSinkIdleThreshold older than now. Other Components V2 widgets never count.
+func shouldSinkWidget(s DiscordWidgetSender, channelID, messageID string, now time.Time, opts ...discordgo.RequestOption) bool {
 	msgs, err := s.ChannelMessages(channelID, WidgetSinkQueryLimit, "", messageID, "", opts...)
 	if err != nil {
 		return false
 	}
 	nonWidgetCount := 0
+	var newest time.Time
 	for _, m := range msgs {
-		if m != nil && m.ID != messageID && m.Flags&discordgo.MessageFlagsIsComponentsV2 == 0 {
-			nonWidgetCount++
-			if nonWidgetCount >= WidgetSinkMessageThreshold {
-				return true
-			}
+		if m == nil || m.ID == messageID || m.Flags&discordgo.MessageFlagsIsComponentsV2 != 0 {
+			continue
+		}
+		nonWidgetCount++
+		if nonWidgetCount >= WidgetSinkMessageThreshold {
+			return true
+		}
+		if m.Timestamp.After(newest) {
+			newest = m.Timestamp
 		}
 	}
-	return false
+	return !newest.IsZero() && now.Sub(newest) >= WidgetSinkIdleThreshold
 }
 
 // AccentColor returns the hex color integer for the given status string.
@@ -405,8 +418,8 @@ func trySinkStatusWidget(s DiscordWidgetSender, channelID, trimmedMsgID string, 
 	return created.ID, true
 }
 
-func updateExistingStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, trimmedMsgID string, components []discordgo.MessageComponent, opts ...discordgo.RequestOption) (string, error) {
-	if !req.SkipSink && shouldSinkWidget(s, req.ChannelID, trimmedMsgID, opts...) {
+func updateExistingStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, trimmedMsgID string, components []discordgo.MessageComponent, now time.Time, opts ...discordgo.RequestOption) (string, error) {
+	if !req.SkipSink && shouldSinkWidget(s, req.ChannelID, trimmedMsgID, now, opts...) {
 		if id, ok := trySinkStatusWidget(s, req.ChannelID, trimmedMsgID, components, opts...); ok {
 			return id, nil
 		}
@@ -457,7 +470,7 @@ func DeliverStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, now tim
 
 	trimmedMsgID := strings.TrimSpace(req.MessageID)
 	if trimmedMsgID != "" {
-		return updateExistingStatusWidget(s, req, trimmedMsgID, components, opts...)
+		return updateExistingStatusWidget(s, req, trimmedMsgID, components, now, opts...)
 	}
 
 	// New message
