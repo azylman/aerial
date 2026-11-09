@@ -191,6 +191,92 @@ describe('first commit', () => {
   );
 });
 
+type Shown = readonly [selectedTab: string | undefined, visiblePanel: string | undefined];
+
+/** The selected tab button and the visible panel, read from the DOM as each commit lands. */
+function shown(): Shown {
+  return [
+    document.querySelector('[role="tab"][aria-selected="true"]')?.id.replace(/^tab-|-btn$/g, ''),
+    // Activity hides a panel (display: none) in the commit that hides it; the panel's own props
+    // (its `active` class) update later at offscreen priority, so the class would lag a commit.
+    [...document.querySelectorAll<HTMLElement>('[role="tabpanel"]')]
+      .find((p) => p.style.display !== 'none')
+      ?.id.replace(/-view$/, ''),
+  ];
+}
+
+describe('tab switch commits', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    stubFetch();
+  });
+  afterEach(() => {
+    cleanup();
+    vi.resetModules();
+    vi.unstubAllGlobals();
+  });
+
+  // Fresh modules per row, so only the `loaded` views have resolved when the clicks land.
+  it.each<{ name: string; loaded: readonly TabId[]; clicks: readonly TabId[]; want: readonly Shown[] }>([
+    { name: 'a loaded tab swaps in the same commit', loaded: ['memory'], clicks: ['memory'], want: [['memory', 'memory']] },
+    {
+      name: 'an unloaded tab keeps the old view until its module resolves',
+      loaded: [],
+      clicks: ['memory'],
+      want: [
+        ['memory', 'telemetry'],
+        ['memory', 'memory'],
+      ],
+    },
+    {
+      name: 'a loaded tab clicked while another loads is not overtaken by it',
+      loaded: ['builds'],
+      clicks: ['memory', 'builds'],
+      want: [
+        ['memory', 'telemetry'],
+        ['builds', 'builds'],
+      ],
+    },
+    {
+      name: 'two unloaded tabs clicked in a row end on the last',
+      loaded: [],
+      clicks: ['memory', 'builds'],
+      want: [
+        ['memory', 'telemetry'],
+        ['builds', 'telemetry'],
+        ['builds', 'builds'],
+      ],
+    },
+  ])('$name', async ({ loaded, clicks, want }) => {
+    const [fresh, freshBoot, route] = await Promise.all([import('./App'), import('./boot'), import('./hooks/useHashRoute')]);
+    window.history.replaceState(null, '', '/console/next/#telemetry');
+    route.initRouteFromLocation();
+    await Promise.all(['telemetry' as const, ...loaded].map((tab) => freshBoot.VIEW_LOADERS[tab]()));
+    const commits: Shown[] = [];
+    const onRender: ProfilerOnRenderCallback = () => {
+      const now = shown();
+      const last = commits.at(-1);
+      if (last === undefined || last[0] !== now[0] || last[1] !== now[1]) commits.push(now);
+    };
+    render(
+      <Profiler id="app" onRender={onRender}>
+        <fresh.App />
+      </Profiler>,
+    );
+    commits.length = 0;
+    for (const tab of clicks) {
+      // A synchronous act commits the click without letting a pending view import resolve.
+      act(() => {
+        window.location.hash = `#${tab}`;
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+      });
+    }
+    await flush();
+    expect(commits).toEqual(want);
+    expect(screen.getAllByRole('tabpanel').map((p) => p.id)).toEqual([`${clicks.at(-1)}-view`]);
+  });
+});
+
 // ---- fully seeded walk and cross-feature isolation (fixtures shared with the parity suite) ----
 
 const STATUS = JSON.parse(statusRaw) as ClusterResponse;
