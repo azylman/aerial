@@ -87,7 +87,15 @@ func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.
 	}
 	cmd := exec.CommandContext(ctx, bin, BuildDaemonArgs(cfg)...)
 	ConfigureProcessGroup(cmd)
-	cmd.Dir, cmd.Env = cfg.Cwd, cfg.Env
+	cmd.Dir = cfg.Cwd
+	cmd.Env = cfg.Env
+	if len(cmd.Env) == 0 {
+		cmd.Env = BuildAgyEnv(AgyEnvInput{
+			HomeDir:     cfg.GeminiHomeDir,
+			TargetID:    cfg.ThreadID,
+			TurnEnvFile: cfg.TurnEnvFile,
+		})
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

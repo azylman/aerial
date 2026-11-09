@@ -224,8 +224,95 @@ func TestBuildAgyEnv(t *testing.T) {
 			[]string{"GIT_TERMINAL_PROMPT=0"},
 			[]string{"AERIAL_TARGET_ID="},
 		},
+		{
+			AgyEnvInput{VanadisChunkID: "build-1794202576-chunk-2", TurnEnvFile: "/data/.gemini/turn_env/default.sh"},
+			[]string{"AERIAL_VANADIS_CHUNK_ID=build-1794202576-chunk-2", "BASH_ENV=/data/.gemini/turn_env/default.sh"},
+			nil,
+		},
 	} {
 		assertContainsAndOmits(t, strings.Join(BuildAgyEnv(tc.input), "\n"), tc.contains, tc.notContains, tc.input)
+	}
+}
+
+func TestSanitizeDaemonTargetKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", "default"},
+		{"   ", "default"},
+		{"discord-12345", "discord-12345"},
+		{"stateful_medium:discord-12345", "stateful_medium_discord-12345"},
+		{"worker:0.1-alpha", "worker_0.1-alpha"},
+		{"foo@bar/baz#qux", "foo_bar_baz_qux"},
+	}
+	for _, tc := range tests {
+		if got := SanitizeDaemonTargetKey(tc.in); got != tc.want {
+			t.Errorf("SanitizeDaemonTargetKey(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestFormatTurnEnvFileContent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		targetID       string
+		vanadisChunkID string
+		wantContains   []string
+	}{
+		{
+			name:           "populated target and chunk",
+			targetID:       "discord-123456",
+			vanadisChunkID: "build-1-chunk-2",
+			wantContains: []string{
+				"unset BASH_ENV\n",
+				"export AERIAL_TARGET_ID='123456'\n",
+				"export AERIAL_VANADIS_CHUNK_ID='build-1-chunk-2'\n",
+			},
+		},
+		{
+			name:           "empty target and chunk",
+			targetID:       "",
+			vanadisChunkID: "",
+			wantContains: []string{
+				"unset BASH_ENV\n",
+				"unset AERIAL_TARGET_ID\n",
+				"unset AERIAL_VANADIS_CHUNK_ID\n",
+			},
+		},
+		{
+			name:           "headless worker target normalized to unset",
+			targetID:       "dispatch-999",
+			vanadisChunkID: "",
+			wantContains: []string{
+				"unset BASH_ENV\n",
+				"unset AERIAL_TARGET_ID\n",
+				"unset AERIAL_VANADIS_CHUNK_ID\n",
+			},
+		},
+		{
+			name:           "escaping single quotes",
+			targetID:       "foo'bar",
+			vanadisChunkID: "chunk'escaped'test",
+			wantContains: []string{
+				"unset BASH_ENV\n",
+				"export AERIAL_TARGET_ID='foo'\\''bar'\n",
+				"export AERIAL_VANADIS_CHUNK_ID='chunk'\\''escaped'\\''test'\n",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatTurnEnvFileContent(tc.targetID, tc.vanadisChunkID)
+			for _, exp := range tc.wantContains {
+				if !strings.Contains(got, exp) {
+					t.Errorf("FormatTurnEnvFileContent(%q, %q) missing %q; got:\n%s", tc.targetID, tc.vanadisChunkID, exp, got)
+				}
+			}
+		})
 	}
 }
 

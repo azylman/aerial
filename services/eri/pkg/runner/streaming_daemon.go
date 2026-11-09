@@ -48,6 +48,8 @@ type TurnContext struct {
 	ChannelInstructions string // Deprecated: Use ScopeInstructions
 	CoordinationContext string
 	ThreadSummary       string
+	TargetID            string
+	VanadisChunkID      string
 	Sink                TurnSink
 	CreatedAt           time.Time
 	Ctx                 context.Context
@@ -376,6 +378,29 @@ func marshalPromptPayload(isClaude bool, payloadPrompt string) ([]byte, error) {
 	return json.Marshal(streamInputPayload{Event: "user", Message: streamInputMessage{Content: payloadPrompt}})
 }
 
+func (d *StreamingDaemon) syncTurnEnvFile(turnCtx *TurnContext) error {
+	turnEnvFile := strings.TrimSpace(d.cfg.TurnEnvFile)
+	if turnEnvFile == "" {
+		return nil
+	}
+	targetID := d.cfg.ThreadID
+	var vanadisChunkID string
+	if turnCtx != nil {
+		if strings.TrimSpace(turnCtx.TargetID) != "" {
+			targetID = turnCtx.TargetID
+		}
+		vanadisChunkID = turnCtx.VanadisChunkID
+	}
+	if err := os.MkdirAll(filepath.Dir(turnEnvFile), 0o755); err != nil {
+		return fmt.Errorf("failed creating turn env directory: %w", err)
+	}
+	content := FormatTurnEnvFileContent(targetID, vanadisChunkID)
+	if err := os.WriteFile(turnEnvFile, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("failed writing turn env file: %w", err)
+	}
+	return nil
+}
+
 func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	d.stdinMu.Lock()
 	defer d.stdinMu.Unlock()
@@ -407,6 +432,10 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 		return fmt.Errorf("failed to marshal turn prompt: %w", err)
 	}
 	encoded = append(encoded, '\n')
+
+	if err := d.syncTurnEnvFile(turnCtx); err != nil {
+		return err
+	}
 
 	d.inflightMu.Lock()
 	d.inflight = append(d.inflight, turnCtx)
@@ -445,6 +474,11 @@ func (d *StreamingDaemon) Close() error {
 		closeStreamQuietly(d.stdin, "stdin")
 		closeStreamQuietly(d.stdout, "stdout")
 		closeStreamQuietly(d.stderrCloser, "stderr")
+		if turnEnvFile := strings.TrimSpace(d.cfg.TurnEnvFile); turnEnvFile != "" {
+			if err := os.Remove(turnEnvFile); err != nil && !os.IsNotExist(err) {
+				log.Printf("[StreamingDaemon] Warning: failed to remove turn env file %q: %v", turnEnvFile, err)
+			}
+		}
 		if d.handle != nil {
 			if err := d.handle.Kill(); err != nil {
 				log.Printf("[StreamingDaemon] Warning: failed to kill process handle: %v", err)

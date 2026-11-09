@@ -762,8 +762,12 @@ func TestUnifiedProcessPool_GeminiHomeDirInjection(t *testing.T) {
 					t.Fatalf("expected .gemini to exist as directory")
 				}
 				envStr := strings.Join(capturedEnv, "\n")
-				if !strings.Contains(envStr, "HOME="+targetHome) || !strings.Contains(envStr, "GEMINI_CLI_HOME="+targetHome) || !strings.Contains(envStr, "TZ=America/Los_Angeles") {
-					t.Errorf("expected HOME, GEMINI_CLI_HOME, TZ in daemon env, got %s", envStr)
+				expectedTurnEnv := filepath.Join(targetHome, ".gemini", "turn_env", "kiosk.sh")
+				if !strings.Contains(envStr, "HOME="+targetHome) || !strings.Contains(envStr, "GEMINI_CLI_HOME="+targetHome) || !strings.Contains(envStr, "TZ=America/Los_Angeles") || !strings.Contains(envStr, "BASH_ENV="+expectedTurnEnv) {
+					t.Errorf("expected HOME, GEMINI_CLI_HOME, TZ, BASH_ENV in daemon env, got %s", envStr)
+				}
+				if daemon.cfg.TurnEnvFile != expectedTurnEnv {
+					t.Errorf("expected TurnEnvFile %q, got %q", expectedTurnEnv, daemon.cfg.TurnEnvFile)
 				}
 			}
 		})
