@@ -1508,10 +1508,10 @@ spec:
           resources:
             limits:
               cpu: 500m
-              memory: 1536Mi
+              memory: 256Mi
             requests:
               cpu: 50m
-              memory: 256Mi
+              memory: 96Mi
           volumeMounts:
             - mountPath: /config/config.yaml
               name: config
