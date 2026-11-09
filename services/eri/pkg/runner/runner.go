@@ -397,6 +397,8 @@ func IsQuotaPause(errDetail, stderr string) bool {
 		strings.Contains(combined, "exhausted your capacity on this model") ||
 		strings.Contains(combined, "brain bucket resets in") ||
 		strings.Contains(combined, "claude ai usage limit reached") ||
+		strings.Contains(combined, "you've hit your limit") ||
+		strings.Contains(combined, "you’ve hit your limit") ||
 		strings.Contains(combined, "rate_limit_error") {
 		return true
 	}
