@@ -188,6 +188,13 @@ spec:
                 name: fluent-bit-secret
           image: cr.fluentbit.io/fluent/fluent-bit:3.2.4
           name: fluent-bit
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /var/log
               name: varlog
@@ -282,6 +289,13 @@ spec:
               hostPort: 9100
               name: metrics
               protocol: TCP
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           volumeMounts:
             - mountPath: /host/proc
               name: proc
@@ -489,6 +503,13 @@ spec:
             - containerPort: 8428
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
           volumeMounts:
             - mountPath: /victoria-metrics-data
               name: storage
@@ -520,6 +541,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -603,6 +631,13 @@ spec:
             - containerPort: 8880
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /etc/vmalert/rules
               name: rules
@@ -711,6 +746,13 @@ spec:
             - containerPort: 3000
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
           volumeMounts:
             - mountPath: /local/provisioning/datasources/victoriametrics.yml
               name: prov-ds
@@ -734,6 +776,13 @@ spec:
                   name: postgres-secret
           image: ghcr.io/cloudnative-pg/postgresql:18
           name: init-grafana-db
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
         - args:
             - --repo=https://github.com/azylman/aerial.git
             - --ref=main
@@ -756,6 +805,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -792,6 +848,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -902,6 +965,13 @@ spec:
             - containerPort: 5080
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
           volumeMounts:
             - mountPath: /data
               name: data
@@ -1119,6 +1189,13 @@ spec:
             - containerPort: 8080
               name: mcp
               protocol: TCP
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
       serviceAccountName: kubernetes-mcp-sa
 ---
 apiVersion: v1
@@ -1174,6 +1251,13 @@ spec:
             - containerPort: 8080
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /config/config.yaml
               name: config
@@ -1244,6 +1328,13 @@ spec:
             - containerPort: 8080
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 2Gi
+            requests:
+              cpu: 50m
+              memory: 256Mi
           volumeMounts:
             - mountPath: /config/config.yaml
               name: config
@@ -1314,6 +1405,13 @@ spec:
             - containerPort: 8080
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 1536Mi
+            requests:
+              cpu: 50m
+              memory: 256Mi
           volumeMounts:
             - mountPath: /config/config.yaml
               name: config
@@ -1384,6 +1482,14 @@ spec:
             - containerPort: 8080
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 2Gi
+            requests:
+              cpu: 50m
+              memory: 256Mi
+
 ---
 apiVersion: v1
 kind: Service
@@ -1437,6 +1543,13 @@ spec:
             - containerPort: 8080
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /config/config.yaml
               name: config
@@ -1509,6 +1622,13 @@ spec:
             - containerPort: 8080
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /share
               name: share
@@ -1536,6 +1656,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -1613,6 +1740,13 @@ spec:
                   name: postgres-secret
           image: ghcr.io/cloudnative-pg/postgresql:18
           name: init-docket-db
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
       containers:
         - env:
             - name: VIKUNJA_SERVICE_PUBLICURL
@@ -1645,6 +1779,13 @@ spec:
             - containerPort: 3456
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
           volumeMounts:
             - mountPath: /app/vikunja/files
               name: files
@@ -1713,6 +1854,13 @@ spec:
                   name: postgres-secret
           image: ghcr.io/cloudnative-pg/postgresql:18
           name: init-docket-schema
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           volumeMounts:
             - mountPath: /config/docket-schema.sql
               name: config
@@ -1734,6 +1882,13 @@ spec:
             - containerPort: 8080
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /config/config.yaml
               name: config
