@@ -779,7 +779,7 @@ spec:
         - command:
             - /bin/sh
             - -c
-            - mkdir -p /tmp/agentsview && cp /data/agentsview/config.toml /tmp/agentsview/config.toml && : > /tmp/agentsview/pg-watch.log && { tail -F /tmp/agentsview/pg-watch.log & exec agentsview pg push --watch --debounce=5s --no-vectors; }
+            - "mkdir -p /tmp/agentsview && cp /data/agentsview/config.toml /tmp/agentsview/config.toml && touch /tmp/agentsview/pg-watch.log && { tail -F /tmp/agentsview/pg-watch.log & exec agentsview pg push --watch --debounce=5s --no-vectors; }"
           env:
             - name: HOME
               value: /data
