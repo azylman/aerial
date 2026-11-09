@@ -9,7 +9,9 @@ import {
   useState,
   ViewTransition,
 } from 'react';
-import { type DrawerState, useConsoleStore } from '../store/store';
+import type { BuildDetailAPIResponse } from '../api/types';
+import { buildDrawerLabel } from '../store/selectors';
+import { type ConsoleState, type DrawerState, useConsoleStore } from '../store/store';
 import { Icon } from './Icon';
 import './Drawer.css';
 
@@ -20,9 +22,22 @@ export type DrawerPanels = {
   readonly [K in OpenDrawer['kind']]: ComponentType<{ readonly target: Extract<OpenDrawer, { readonly kind: K }> }>;
 };
 
-/** Header text, ported from openDiagnosticDrawer and openBuildDetailDrawer. */
-export function drawerTitle(drawer: OpenDrawer): string {
-  return drawer.kind === 'service' ? `DIAGNOSTICS // ${drawer.name.toUpperCase()}` : `BUILD // ${drawer.id.toUpperCase()}`;
+/**
+ * Header text, ported from openDiagnosticDrawer and openBuildDetailDrawer. A build drawer shows
+ * its id until the build's detail payload arrives, then the build's title.
+ */
+export function drawerTitle(drawer: OpenDrawer, buildDetail: BuildDetailAPIResponse | null): string {
+  return drawer.kind === 'service'
+    ? `DIAGNOSTICS // ${drawer.name.toUpperCase()}`
+    : `BUILD // ${buildDrawerLabel(buildDetail, drawer.id).toUpperCase()}`;
+}
+
+const selectBuildDetail = (s: ConsoleState): BuildDetailAPIResponse | null => s.builds.detail.data;
+
+/** The header reads the build detail slice, so only it re-renders when a detail poll lands. */
+function DrawerHeading({ drawer, id }: { readonly drawer: OpenDrawer; readonly id: string }) {
+  const title = useConsoleStore((s) => drawerTitle(drawer, drawer.kind === 'build' ? selectBuildDetail(s) : null));
+  return <h3 id={id}>{title}</h3>;
 }
 
 const closeDrawer = (): void => useConsoleStore.getState().closeDrawer();
@@ -44,11 +59,12 @@ function DrawerPanel({ drawer, panels }: { readonly drawer: OpenDrawer; readonly
   const titleId = useId();
   const panelRef = useRef<HTMLElement>(null);
 
-  // Focus moves into the dialog on open and returns to whatever opened it on close.
+  // Focus moves into the dialog on open and returns to whatever opened it on close, without
+  // scrolling the page: closing leaves the page where the user left it.
   useLayoutEffect(() => {
     const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     panelRef.current?.focus();
-    return () => trigger?.focus();
+    return () => trigger?.focus({ preventScroll: true });
   }, []);
 
   useEffect(() => {
@@ -75,7 +91,7 @@ function DrawerPanel({ drawer, panels }: { readonly drawer: OpenDrawer; readonly
           <span className="drawer-icon">
             <Icon name="bolt" size={16} />
           </span>
-          <h3 id={titleId}>{drawerTitle(drawer)}</h3>
+          <DrawerHeading drawer={drawer} id={titleId} />
         </div>
         <button type="button" className="drawer-close" aria-label="Close drawer" onClick={closeDrawer}>
           <Icon name="x" size={22} />

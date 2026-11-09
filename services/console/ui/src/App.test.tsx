@@ -1,6 +1,19 @@
 import { act, cleanup, render, screen } from '@testing-library/react';
+import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { App, statusPolledOn } from './App';
+import buildsRaw from '../e2e/fixtures/builds.json?raw';
+import factsRaw from '../e2e/fixtures/facts.json?raw';
+import runsRaw from '../e2e/fixtures/schedule-runs.json?raw';
+import schedulesRaw from '../e2e/fixtures/schedules.json?raw';
+import statusRaw from '../e2e/fixtures/status.json?raw';
+import type {
+  BuildsAPIResponse,
+  ClusterResponse,
+  FactsAPIResponse,
+  ScheduleRunsAPIResponse,
+  SchedulesAPIResponse,
+} from './api/types';
+import { App, statusPolledOn, VIEW_LOADERS } from './App';
 import { initRouteFromLocation } from './hooks/useHashRoute';
 import { useConsoleStore } from './store/store';
 
@@ -137,5 +150,146 @@ describe('App', () => {
     await act(async () => screen.getByRole('tab', { name: /MEMORY ARCHIVE/ }).click());
     expect(screen.getAllByRole('tabpanel').map((p) => p.id)).toEqual(['memory-view']);
     unmount();
+  });
+});
+
+// ---- fully seeded walk and cross-feature isolation (fixtures shared with the parity suite) ----
+
+const STATUS = JSON.parse(statusRaw) as ClusterResponse;
+const SCHEDULES = JSON.parse(schedulesRaw) as SchedulesAPIResponse;
+const RUNS = JSON.parse(runsRaw) as ScheduleRunsAPIResponse;
+const FACTS = JSON.parse(factsRaw) as FactsAPIResponse;
+const BUILDS = JSON.parse(buildsRaw) as BuildsAPIResponse;
+
+const FIXTURE_BODIES: Readonly<Record<string, string>> = {
+  '/console/api/status': statusRaw,
+  '/console/api/schedules': schedulesRaw,
+  '/console/api/schedules/runs?limit=50&offset=0': runsRaw,
+  '/console/api/facts': factsRaw,
+  '/console/api/builds': buildsRaw,
+};
+
+function seedAll(): void {
+  const s = useConsoleStore.getState();
+  s.setCluster(structuredClone(STATUS));
+  s.setSchedules(structuredClone(SCHEDULES));
+  s.setScheduleRuns(structuredClone(RUNS));
+  s.setFacts(structuredClone(FACTS));
+  s.setBuilds(structuredClone(BUILDS));
+}
+
+describe('App with a fully seeded store', () => {
+  beforeEach(() => {
+    useConsoleStore.setState(useConsoleStore.getInitialState(), true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => Promise.resolve(new Response(FIXTURE_BODIES[url] ?? '{}', { status: url in FIXTURE_BODIES ? 200 : 404 }))),
+    );
+    vi.useFakeTimers({ now: Date.parse('2026-11-08T12:00:00Z'), toFake: ['setInterval', 'clearInterval', 'Date'] });
+    seedAll();
+  });
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('walks all five tabs by hash, mounting exactly one view at a time', async () => {
+    window.history.replaceState(null, '', '/console/next/#telemetry');
+    initRouteFromLocation();
+    render(<App />);
+    const walk = [
+      { hash: '#telemetry', panel: 'telemetry-view', heading: 'LIVE AGENT EXECUTION QUEUE' },
+      { hash: '#tasks', panel: 'tasks-view', heading: 'LIVE DISPATCH STREAM' },
+      { hash: '#schedules', panel: 'schedules-view', heading: 'ACTIVE SCHEDULED ROUTINES' },
+      { hash: '#memory', panel: 'memory-view', heading: 'TOTAL MEMORY NODES' },
+      { hash: '#builds', panel: 'builds-view', heading: 'RUNNING BUILDS' },
+    ];
+    for (const step of walk) {
+      await act(async () => {
+        window.location.hash = step.hash;
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+      });
+      await flush();
+      expect(screen.getAllByRole('tabpanel').map((p) => p.id)).toEqual([step.panel]);
+      expect(screen.getByRole('tab', { selected: true }).id).toBe(`tab-${step.panel.replace('-view', '')}-btn`);
+      expect(screen.getByText(step.heading)).toBeTruthy();
+    }
+    // The build drawer body ships in the builds chunk and opens from a card.
+    await act(async () => screen.getByText('Console React rewrite #1').click());
+    await flush();
+    expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
+    expect(screen.getByText('ORDERED BUILD CHUNKS (3)')).toBeTruthy();
+  });
+});
+
+const TASK_0 = STATUS.active_tasks[0];
+/** Each payload differs from the seeded fixture in data its own feature renders. */
+const ISOLATION: readonly {
+  name: string;
+  action: 'setCluster' | 'setSchedules' | 'setFacts' | 'setBuilds';
+  data: ClusterResponse | SchedulesAPIResponse | FactsAPIResponse | BuildsAPIResponse;
+  owners: readonly string[];
+}[] = [
+  {
+    name: 'status',
+    action: 'setCluster',
+    data: { ...STATUS, active_tasks: STATUS.active_tasks.map((t) => (t === TASK_0 ? { ...t, summary: 'changed summary' } : t)) },
+    owners: ['telemetry', 'tasks'],
+  },
+  {
+    name: 'schedules',
+    action: 'setSchedules',
+    data: { ...SCHEDULES, crons: SCHEDULES.crons.map((c, i) => (i === 0 ? { ...c, title: 'Renamed cron' } : c)) },
+    owners: ['schedules'],
+  },
+  {
+    name: 'memory',
+    action: 'setFacts',
+    data: { ...FACTS, facts: FACTS.facts.map((f, i) => (i === 0 ? { ...f, fact_text: 'Rewritten fact' } : f)) },
+    owners: ['memory'],
+  },
+  {
+    name: 'builds',
+    action: 'setBuilds',
+    data: { ...BUILDS, builds: BUILDS.builds.map((b, i) => (i === 0 ? { ...b, title: 'Renamed build' } : b)) },
+    owners: ['builds'],
+  },
+];
+const FEATURES = ['telemetry', 'tasks', 'schedules', 'memory', 'builds'] as const;
+
+describe('cross-feature isolation', () => {
+  beforeEach(() => {
+    useConsoleStore.setState(useConsoleStore.getInitialState(), true);
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)));
+    vi.useFakeTimers({ now: Date.parse('2026-11-08T12:00:00Z'), toFake: ['setInterval', 'clearInterval', 'Date'] });
+    seedAll();
+  });
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(ISOLATION)('updating $name re-renders only its own feature', async ({ action, data, owners }) => {
+    const views = await Promise.all(FEATURES.map((f) => VIEW_LOADERS[f]()));
+    const renders: string[] = [];
+    const onRender: ProfilerOnRenderCallback = (id) => renders.push(id);
+    render(
+      <>
+        {views.map((m, i) => (
+          <Profiler key={FEATURES[i]} id={FEATURES[i] ?? ''} onRender={onRender}>
+            <m.default />
+          </Profiler>
+        ))}
+      </>,
+    );
+    renders.length = 0;
+    act(() => {
+      const s = useConsoleStore.getState();
+      // The table's action names the setter; `data` matches that setter's payload type.
+      (s[action] as (d: typeof data) => void)(structuredClone(data));
+    });
+    expect([...new Set(renders)].sort()).toEqual([...owners].sort());
   });
 });

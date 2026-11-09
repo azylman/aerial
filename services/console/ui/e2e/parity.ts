@@ -10,7 +10,7 @@ import type { BrowserContextOptions } from '@playwright/test';
 export type ViewId = 'telemetry' | 'tasks' | 'schedules' | 'memory' | 'builds';
 
 /** Views (and their drawers) the React UI does not ship yet; rows needing them are skipped. */
-export const PENDING_VIEWS: readonly ViewId[] = ['builds'];
+export const PENDING_VIEWS: readonly ViewId[] = [];
 
 export interface Viewport {
   readonly name: string;
@@ -129,6 +129,16 @@ export const MASKED_SELECTORS: readonly string[] = [
   '.fact-importance-gauge',
   '.fact-footer > span:first-child',
   '.fact-copy-btn',
+  // Builds: status badges (⚡ ⏳ ✓ ✕ ⊘), the duration badge (⏱), chunk PR links (↗) and the
+  // instructions disclosure chevron (▸). Drawer parts are scoped to the open drawer, like the
+  // drawer chrome above; card parts only while no drawer is open, since masks paint over the
+  // drawer backdrop and the card a click scrolled into view sits a few pixels apart in the two
+  // pages before STABILIZE_CSS evens out the glyph boxes.
+  'body:not(:has(.diagnostic-drawer.active)) .build-card .build-status-badge',
+  'body:not(:has(.diagnostic-drawer.active)) .build-duration-badge',
+  '.diagnostic-drawer.active .build-status-badge',
+  '.diagnostic-drawer.active .chunk-pr-link',
+  '.diagnostic-drawer.active .chunk-instructions-chevron',
 ];
 
 /**
@@ -148,7 +158,7 @@ export const STABILIZE_CSS = `
 .scanline { display: none !important; }
 :focus-visible { outline: none !important; }
 .tab-icon, .title-icon, .drawer-icon, .search-icon, .refresh-icon, .reconnect-icon,
-.gitsync-pill > span:first-child {
+.gitsync-pill > span:first-child, .chunk-instructions-chevron {
   display: inline-flex !important; flex: none !important; width: 16px !important; height: 16px !important;
   overflow: hidden !important; align-items: center !important; justify-content: center !important;
 }
@@ -160,7 +170,7 @@ export const STABILIZE_CSS = `
 .task-status-pill, .task-inspect-btn.active, .timer-text, .deploy-repo-badge, .deploy-commit-time,
 .deploy-stage-badge, .step-status-badge, .matrix-chip, .compact-badge,
 #schedules-next-trigger, .schedule-countdown-badge, .schedule-type-badge, .prompt-copy-btn, .run-status-chip,
-.run-duration-badge {
+.run-duration-badge, .build-status-badge, .build-duration-badge, .chunk-pr-link {
   display: inline-flex !important; flex: none !important; width: 8em !important; max-width: none !important;
   height: 2em !important; box-sizing: border-box !important; align-items: center !important;
   white-space: nowrap !important; overflow: hidden !important;
@@ -354,6 +364,171 @@ const memoryExpect = (texts: readonly string[], activePill: string): Expectation
     { selector: `#memory-view .cat-pill.active:has-text("${activePill}")`, count: 1 },
   ],
 });
+
+/**
+ * builds.json: 25 builds. By queue bucket 4 running, 6 queued (build #5 reports `running` but every
+ * chunk is still pending) and 15 completed (10 completed, 3 failed, 2 cancelled); 53 of 94 chunks
+ * are done. Build #1 (running, chunks merged/merged/in_progress) started 11:10am, 50m before the
+ * pinned clock; build #11 ran 1:10am-1:28am. Counts are scoped to the builds view: the vanilla page
+ * keeps every other view in the DOM.
+ */
+const BUILDS_SEARCH = "SEARCH BUILDS, REPOS, OBJECTIVES (PRESS '/' TO FOCUS)...";
+const BUILD_HEADINGS = [
+  'RUNNING BUILDS',
+  'ACTIVE PIPELINES',
+  'QUEUED BUILDS',
+  'PENDING DISPATCH',
+  'COMPLETED BUILDS',
+  'FINISHED RUNS',
+  'CHUNK PROGRESS',
+  '53/94',
+  'COMPLETED / TOTAL',
+];
+const BUILD_METRIC_COUNTS: readonly CountExpectation[] = [
+  { selector: '#builds-running-count:text-is("4")', count: 1 },
+  { selector: '#builds-queued-count:text-is("6")', count: 1 },
+  { selector: '#builds-completed-count:text-is("15")', count: 1 },
+  { selector: '#builds-view .cat-pill', count: 4 },
+  { selector: '#builds-view .cat-pill:has-text("ALL") .pill-count:text-is("25")', count: 1 },
+  { selector: '#builds-view .cat-pill:has-text("RUNNING") .pill-count:text-is("4")', count: 1 },
+  { selector: '#builds-view .cat-pill:has-text("QUEUED") .pill-count:text-is("6")', count: 1 },
+  { selector: '#builds-view .cat-pill:has-text("COMPLETED") .pill-count:text-is("15")', count: 1 },
+];
+
+/** Card counts per status badge: running, queued, completed, failed, cancelled. */
+const buildCards = (running: number, queued: number, completed: number, failed: number, cancelled: number): readonly CountExpectation[] => [
+  { selector: '#builds-view .build-card', count: running + queued + completed + failed + cancelled },
+  { selector: '#builds-view .build-status-badge.status-running', count: running },
+  { selector: '#builds-view .build-status-badge.status-queued', count: queued },
+  { selector: '#builds-view .build-status-badge.status-completed', count: completed },
+  { selector: '#builds-view .build-status-badge.status-failed', count: failed },
+  { selector: '#builds-view .build-status-badge.status-cancelled', count: cancelled },
+];
+
+const buildsExpect = (
+  texts: readonly string[],
+  activePill: string,
+  cards: readonly CountExpectation[],
+  extra: readonly CountExpectation[] = [],
+): Expectation => ({
+  hash: '#builds',
+  activeTab: 'BUILD QUEUE',
+  badges: BADGES_NO_STATUS,
+  texts: [...BUILD_HEADINGS, ...texts],
+  counts: [
+    ...BUILD_METRIC_COUNTS,
+    { selector: `#builds-view .cat-pill.active:has-text("${activePill}")`, count: 1 },
+    ...cards,
+    ...extra,
+  ],
+});
+
+/** The default queue: build #1's card (stats, start, live duration) and a finished card's end time. */
+const BUILDS_DEFAULT_TEXTS = [
+  'SHOWING 25 / 25 BUILDS',
+  'Console React rewrite #1',
+  'START: 11/8 11:10am',
+  '2 / 3 CHUNKS',
+  '67%',
+  'Console React rewrite #11',
+  'END: 1:28am',
+];
+const BUILDS_DEFAULT_COUNTS: readonly CountExpectation[] = [
+  { selector: '#builds-view .build-card[data-build-id="build-1794100000-c046de69"] .build-duration-badge:has-text("50m 0s")', count: 1 },
+  { selector: '#builds-view .build-card[data-build-id="build-1794111110-2f3c2784"] .build-duration-badge:has-text("18m 0s")', count: 1 },
+];
+const ALL_BUILD_CARDS = buildCards(4, 6, 10, 3, 2);
+
+/**
+ * Rows with steps end on one deterministic offset. Playwright scrolls an element differently on
+ * each retry of a click (end, center, start; horizontally too, the mobile page is a little wider
+ * than the viewport), keyboard scrolling is animated, and the vanilla page needs retries while its
+ * panel fades in, so a pill click or a fill can leave the two pages at different offsets. Each row
+ * therefore clicks its results label (`label`, static text: this also blurs the search box),
+ * presses Home, clicks the label again (its stability check waits out the animated scroll; every
+ * scroll Playwright may apply leaves the header tab above the fold or at the top) and re-selects
+ * BUILD QUEUE from the keyboard. Focusing the tab is a native, retry-free scroll that centers it
+ * when it is not fully in view, which brings both pages to the very top (a pointer click could
+ * retry on the tab's hover transition and align it to the viewport edge instead). Re-selecting
+ * keeps pill and search state.
+ */
+const settleBuilds = (label: string): readonly Step[] => [
+  { kind: 'openDrawer', text: label },
+  { kind: 'press', key: 'Home' },
+  { kind: 'openDrawer', text: label },
+  { kind: 'keyTab', tab: 'BUILD QUEUE', key: 'Enter' },
+];
+
+/**
+ * Opens build #1 from its card, waits for the fetched detail (the header switches from the id to
+ * the title) and expands the first chunk's instructions from the keyboard: clicking the header
+ * sets the focus starting point in both drawers, then Tab walks the close button, the first
+ * chunk's PR link and its INSTRUCTIONS disclosure, and Enter opens it. An open drawer pins the
+ * page (the React drawer contains overscroll), so the row first settles both pages at the top
+ * (see settleBuilds); the card click then scrolls both the same way on its first attempt.
+ */
+const OPEN_BUILD_ONE: readonly Step[] = [
+  ...settleBuilds('SHOWING 25 / 25 BUILDS'),
+  { kind: 'openDrawer', text: 'Console React rewrite #1' },
+  { kind: 'openDrawer', text: 'BUILD // CONSOLE REACT REWRITE #1' },
+  { kind: 'press', key: 'Tab' },
+  { kind: 'press', key: 'Tab' },
+  { kind: 'press', key: 'Tab' },
+  { kind: 'press', key: 'Enter' },
+];
+
+/**
+ * build-details.json for build #1: tier 1, three chunks (two merged with PRs #1500 and #1501 in
+ * azylman/aerial and azylman/aerial-config, one in progress in azylman/mirrormere), each with
+ * markdown instructions: an h2, a bullet list with bold and inline code, and a fenced code block.
+ */
+const BUILD_DRAWER_TEXTS = [
+  'BUILD // CONSOLE REACT REWRITE #1',
+  'TIER 1',
+  'build-1794100000-c046de69',
+  'OBJECTIVE',
+  'Ship console react rewrite with tests and docs.',
+  'SHARED BUILD CONTEXT',
+  'Layout: services/console/ui is a standalone Vite project.',
+  '2 / 3 CHUNKS COMPLETED',
+  'ORDERED BUILD CHUNKS (3)',
+  'Scaffold for Console React rewrite',
+  'Port logic for Console React rewrite',
+  'Shell for Console React rewrite',
+  'MERGED',
+  'IN_PROGRESS',
+  'low',
+  'azylman/mirrormere',
+  'Objective',
+  'Implement chunk 1.',
+  'keep the budget',
+  'add tests',
+  'const ok = true;',
+  'TARGET FILES',
+  'services/console/ui/src/file1.ts',
+  'TARGET SYMBOLS',
+  'symbol1',
+  'ACCEPTANCE CRITERIA',
+  'Coverage stays at 95%',
+];
+const BUILD_DRAWER_COUNTS: readonly CountExpectation[] = [
+  // The React drawer opens through a document view transition; wait until it has settled.
+  { selector: 'html:not(:active-view-transition)', count: 1 },
+  { selector: '.diagnostic-drawer.active', count: 1 },
+  { selector: '.diagnostic-drawer.active .chunk-card', count: 3 },
+  { selector: '.diagnostic-drawer.active .chunk-status-badge.chunk-status-merged', count: 2 },
+  { selector: '.diagnostic-drawer.active .chunk-status-badge.chunk-status-in_progress', count: 1 },
+  { selector: '.diagnostic-drawer.active .chunk-pr-link', count: 2 },
+  { selector: '.diagnostic-drawer.active .chunk-pr-link[href="https://github.com/azylman/aerial/pull/1500"]', count: 1 },
+  { selector: '.diagnostic-drawer.active .chunk-pr-link[href="https://github.com/azylman/aerial-config/pull/1501"]', count: 1 },
+  { selector: '.diagnostic-drawer.active .chunk-instructions-details', count: 3 },
+  { selector: '.diagnostic-drawer.active .chunk-instructions-details[open]', count: 1 },
+  { selector: '.diagnostic-drawer.active .chunk-instructions-details[open] h2.md-heading', count: 1 },
+  { selector: '.diagnostic-drawer.active .chunk-instructions-details[open] ul.md-list > li', count: 2 },
+  { selector: '.diagnostic-drawer.active .chunk-instructions-details[open] pre.md-code-block', count: 1 },
+  { selector: '.diagnostic-drawer.active .chunk-tag.file-tag', count: 6 },
+  { selector: '.diagnostic-drawer.active .chunk-tag.symbol-tag', count: 3 },
+];
 
 export const PARITY_ROWS: readonly ParityRow[] = [
   {
@@ -642,6 +817,112 @@ export const PARITY_ROWS: readonly ParityRow[] = [
     // Clicking the results count waits for the list before End.
     steps: [{ kind: 'openDrawer', text: 'SHOWING 150 / 150 NODES' }, ...settleMemory(LAST_ROW_ALL)],
     expect: memoryExpect(['SHOWING 150 / 150 NODES', 'NODE #1099', FIRST_FACT], 'ALL'),
+    region: 'viewport',
+  },
+  {
+    name: 'builds: default view shows metrics, pills and every build card',
+    start: '#builds',
+    requires: ['builds'],
+    steps: [],
+    expect: buildsExpect(BUILDS_DEFAULT_TEXTS, 'ALL', ALL_BUILD_CARDS, BUILDS_DEFAULT_COUNTS),
+    region: 'viewport',
+  },
+  {
+    name: 'builds: running pill',
+    start: '#builds',
+    requires: ['builds'],
+    steps: [{ kind: 'pill', label: 'RUNNING' }, ...settleBuilds('SHOWING 4 / 25 BUILDS')],
+    expect: buildsExpect(['SHOWING 4 / 25 BUILDS', 'Console React rewrite #1', 'Memory decay tuning #4'], 'RUNNING', buildCards(4, 0, 0, 0, 0)),
+    region: 'viewport',
+  },
+  {
+    name: 'builds: queued pill',
+    start: '#builds',
+    requires: ['builds'],
+    steps: [{ kind: 'pill', label: 'QUEUED' }, ...settleBuilds('SHOWING 6 / 25 BUILDS')],
+    expect: buildsExpect(['SHOWING 6 / 25 BUILDS', 'Synapse webhook hardening #5', '0 / 3 CHUNKS'], 'QUEUED', buildCards(0, 6, 0, 0, 0)),
+    region: 'viewport',
+  },
+  {
+    name: 'builds: completed pill includes failed and cancelled builds',
+    start: '#builds',
+    requires: ['builds'],
+    steps: [{ kind: 'pill', label: 'COMPLETED' }, ...settleBuilds('SHOWING 15 / 25 BUILDS')],
+    expect: buildsExpect(['SHOWING 15 / 25 BUILDS', 'Console React rewrite #11', 'END: 1:28am'], 'COMPLETED', buildCards(0, 0, 10, 3, 2)),
+    region: 'viewport',
+  },
+  {
+    name: 'builds: all pill after another pill',
+    start: '#builds',
+    requires: ['builds'],
+    // With its count: the hidden vanilla schedules and memory views also have an "ALL" pill.
+    steps: [
+      { kind: 'pill', label: 'QUEUED' },
+      { kind: 'pill', label: 'ALL 25' },
+      ...settleBuilds('SHOWING 25 / 25 BUILDS'),
+    ],
+    expect: buildsExpect(BUILDS_DEFAULT_TEXTS, 'ALL', ALL_BUILD_CARDS),
+    region: 'viewport',
+  },
+  {
+    // "kiosk" matches the five "Kiosk widget refresh #N" builds (title and objective).
+    name: 'builds: search narrows the queue',
+    start: '#builds',
+    requires: ['builds'],
+    steps: [{ kind: 'type', placeholder: BUILDS_SEARCH, text: 'kiosk' }, ...settleBuilds('SHOWING 5 / 25 BUILDS')],
+    expect: buildsExpect(['SHOWING 5 / 25 BUILDS', 'Kiosk widget refresh #3', 'Kiosk widget refresh #23'], 'ALL', buildCards(1, 1, 2, 1, 0)),
+    region: 'viewport',
+  },
+  {
+    // "sidecars" only appears in chunk repos (azylman/aerial-sidecars), so this proves repo search.
+    name: 'builds: search matches chunk repos and Escape clears it',
+    start: '#builds',
+    requires: ['builds'],
+    steps: [
+      // Clicking the results count waits for the 19 matches; filling again re-focuses the input.
+      { kind: 'type', placeholder: BUILDS_SEARCH, text: 'sidecars' },
+      { kind: 'openDrawer', text: 'SHOWING 19 / 25 BUILDS' },
+      { kind: 'type', placeholder: BUILDS_SEARCH, text: 'sidecars' },
+      { kind: 'press', key: 'Escape' },
+      // Waits for the full list (React renders the cleared search as a deferred update).
+      ...settleBuilds('SHOWING 25 / 25 BUILDS'),
+    ],
+    expect: buildsExpect(BUILDS_DEFAULT_TEXTS, 'ALL', ALL_BUILD_CARDS),
+    region: 'viewport',
+  },
+  {
+    name: 'builds: clicking a multi-chunk build opens its detail drawer with rendered markdown',
+    start: '#builds',
+    requires: ['builds'],
+    steps: OPEN_BUILD_ONE,
+    expect: buildsExpect(BUILD_DRAWER_TEXTS, 'ALL', ALL_BUILD_CARDS, BUILD_DRAWER_COUNTS),
+    region: 'viewport',
+  },
+  {
+    name: 'builds: Escape closes the build drawer',
+    start: '#builds',
+    requires: ['builds'],
+    steps: [...OPEN_BUILD_ONE, { kind: 'press', key: 'Escape' }],
+    expect: buildsExpect(BUILDS_DEFAULT_TEXTS, 'ALL', ALL_BUILD_CARDS, [
+      { selector: 'html:not(:active-view-transition)', count: 1 },
+      { selector: '.diagnostic-drawer.active', count: 0 },
+    ]),
+    // Closing leaves each page wherever its card click scrolled it (the vanilla page's click may
+    // need retries while the drawer fades out), so this row compares the header: any drawer or
+    // backdrop left behind would paint over it.
+    region: 'shell',
+  },
+  {
+    name: 'walk: every tab in order with no console or page errors',
+    start: '',
+    requires: ['telemetry', 'tasks', 'schedules', 'memory', 'builds'],
+    steps: [
+      { kind: 'clickTab', tab: 'ACTIVE TASKS' },
+      { kind: 'clickTab', tab: 'SCHEDULES' },
+      { kind: 'clickTab', tab: 'MEMORY ARCHIVE' },
+      { kind: 'clickTab', tab: 'BUILD QUEUE' },
+    ],
+    expect: { ...buildsExpect(BUILDS_DEFAULT_TEXTS, 'ALL', ALL_BUILD_CARDS), badges: BADGES_ALL },
     region: 'viewport',
   },
 ];

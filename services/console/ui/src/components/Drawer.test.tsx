@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { BuildDetailAPIResponse, VanadisBuildDTO } from '../api/types';
 import { useConsoleStore } from '../store/store';
 import { Drawer, type DrawerPanels, drawerTitle, type OpenDrawer } from './Drawer';
 
@@ -8,12 +9,32 @@ const PANELS: DrawerPanels = {
   build: ({ target }) => <p>build body {target.id}</p>,
 };
 
+const build = (id: string, title: string): VanadisBuildDTO => ({
+  id,
+  thread_id: 't',
+  tier: 1,
+  title,
+  objective: '',
+  status: 'running',
+  created_at: '2026-11-08T11:00:00Z',
+  updated_at: '2026-11-08T11:00:00Z',
+});
+const detail = (id: string, title: string, key: 'build' | 'entry' = 'build'): BuildDetailAPIResponse => ({
+  status: 'ok',
+  chunks: [],
+  [key]: build(id, title),
+});
+
 describe('drawerTitle', () => {
-  it.each<{ drawer: OpenDrawer; want: string }>([
-    { drawer: { kind: 'service', name: 'aerial-eri' }, want: 'DIAGNOSTICS // AERIAL-ERI' },
-    { drawer: { kind: 'build', id: 'build-17-ab' }, want: 'BUILD // BUILD-17-AB' },
-  ])('$want', ({ drawer, want }) => {
-    expect(drawerTitle(drawer)).toBe(want);
+  it.each<{ name: string; drawer: OpenDrawer; detail: BuildDetailAPIResponse | null; want: string }>([
+    { name: 'service', drawer: { kind: 'service', name: 'aerial-eri' }, detail: null, want: 'DIAGNOSTICS // AERIAL-ERI' },
+    { name: 'build before its detail', drawer: { kind: 'build', id: 'build-17-ab' }, detail: null, want: 'BUILD // BUILD-17-AB' },
+    { name: 'build with its detail', drawer: { kind: 'build', id: 'b-1' }, detail: detail('b-1', 'Ship it #1'), want: 'BUILD // SHIP IT #1' },
+    { name: 'legacy entry key', drawer: { kind: 'build', id: 'b-1' }, detail: detail('b-1', 'Old', 'entry'), want: 'BUILD // OLD' },
+    { name: 'untitled build', drawer: { kind: 'build', id: 'b-1' }, detail: detail('b-1', ''), want: 'BUILD // B-1' },
+    { name: 'another build\'s detail', drawer: { kind: 'build', id: 'b-2' }, detail: detail('b-1', 'Ship it #1'), want: 'BUILD // B-2' },
+  ])('$name', ({ drawer, detail: d, want }) => {
+    expect(drawerTitle(drawer, d)).toBe(want);
   });
 });
 
@@ -51,6 +72,14 @@ describe('Drawer', () => {
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     expect(screen.getByText(wantBody)).toBeTruthy();
     expect(document.activeElement).toBe(dialog);
+  });
+
+  it('retitles an open build drawer when its detail lands', () => {
+    render(<Drawer panels={PANELS} />);
+    act(() => useConsoleStore.getState().openDrawer({ kind: 'build', id: 'b-1' }));
+    expect(screen.getByRole('dialog', { name: 'BUILD // B-1' })).toBeTruthy();
+    act(() => useConsoleStore.getState().setBuildDetail(detail('b-1', 'Ship it #1')));
+    expect(screen.getByRole('dialog', { name: 'BUILD // SHIP IT #1' })).toBeTruthy();
   });
 
   it('shows a drawer that was already open when it mounted', () => {
