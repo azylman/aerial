@@ -204,16 +204,21 @@ func resolveCancelReason(reason, buildID, dispatchID string) string {
 }
 
 type DispatchRequest struct {
-	ID           string `json:"id,omitempty"`
-	Source       string `json:"source"`
-	SessionID    string `json:"session_id,omitempty"`
-	Prompt       string `json:"prompt"`
-	Effort       string `json:"effort,omitempty"`
-	Model        string `json:"model,omitempty"`
-	SkipIfActive bool   `json:"skip_if_active,omitempty"`
+	ID             string `json:"id,omitempty"`
+	Source         string `json:"source"`
+	SessionID      string `json:"session_id,omitempty"`
+	TargetID       string `json:"target_id,omitempty"`
+	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+	Prompt         string `json:"prompt"`
+	Effort         string `json:"effort,omitempty"`
+	Model          string `json:"model,omitempty"`
+	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
 }
 
-func validateDispatchRequest(req DispatchRequest) error {
+func validateDispatchRequest(req *DispatchRequest) error {
+	if req == nil {
+		return errors.New("Invalid payload: request cannot be nil")
+	}
 	source := strings.ToLower(strings.TrimSpace(req.Source))
 	if source != "heartbeat" && source != "vanadis" && source != "webhook" {
 		return errors.New("Invalid payload: 'source' must be 'heartbeat', 'vanadis', or 'webhook'")
@@ -231,6 +236,8 @@ func validateDispatchRequest(req DispatchRequest) error {
 	if effort != "" && effort != "low" && effort != "medium" && effort != "high" {
 		return errors.New("Invalid payload: 'effort' must be 'low', 'medium', or 'high'")
 	}
+	req.TargetID = runner.NormalizeEnvTargetID(req.TargetID)
+	req.VanadisChunkID = strings.TrimSpace(req.VanadisChunkID)
 	return nil
 }
 
@@ -246,7 +253,7 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		if err := validateDispatchRequest(req); err != nil {
+		if err := validateDispatchRequest(&req); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -280,16 +287,18 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		d := db.Dispatch{
-			ID:        dispatchID,
-			Source:    strings.ToLower(strings.TrimSpace(req.Source)),
-			SessionID: sessionID,
-			Prompt:    req.Prompt,
-			Summary:   db.CleanTaskSummary(req.Prompt),
-			Effort:    strings.ToLower(strings.TrimSpace(req.Effort)),
-			Model:     strings.TrimSpace(req.Model),
-			Status:    db.StatusPending,
-			CreatedAt: time.Now().UTC(),
-			UpdatedAt: time.Now().UTC(),
+			ID:             dispatchID,
+			Source:         strings.ToLower(strings.TrimSpace(req.Source)),
+			SessionID:      sessionID,
+			TargetID:       req.TargetID,
+			VanadisChunkID: req.VanadisChunkID,
+			Prompt:         req.Prompt,
+			Summary:        db.CleanTaskSummary(req.Prompt),
+			Effort:         strings.ToLower(strings.TrimSpace(req.Effort)),
+			Model:          strings.TrimSpace(req.Model),
+			Status:         db.StatusPending,
+			CreatedAt:      time.Now().UTC(),
+			UpdatedAt:      time.Now().UTC(),
 		}
 
 		insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)

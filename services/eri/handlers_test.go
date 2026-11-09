@@ -281,36 +281,41 @@ func TestHandlePrompt_SkipIfActive(t *testing.T) {
 
 func TestHandleDispatch(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		method     string
-		store      db.Store
-		body       string
-		wantStatus int
-		wantSubstr string
-		checkID    string
+		name               string
+		method             string
+		store              db.Store
+		body               string
+		wantStatus         int
+		wantSubstr         string
+		checkID            string
+		wantTargetID       string
+		wantVanadisChunkID string
 	}{
-		{"method not allowed", http.MethodGet, dbtest.NewFakeStore(), "", http.StatusMethodNotAllowed, "Method not allowed", ""},
-		{"nil store", http.MethodPost, nil, `{"source":"heartbeat","prompt":"test"}`, http.StatusInternalServerError, "Database store not configured", ""},
-		{"invalid json", http.MethodPost, dbtest.NewFakeStore(), `{bad`, http.StatusBadRequest, "Invalid JSON payload", ""},
-		{"missing source", http.MethodPost, dbtest.NewFakeStore(), `{"prompt":"test"}`, http.StatusBadRequest, "'source' must be 'heartbeat', 'vanadis', or 'webhook'", ""},
-		{"invalid source", http.MethodPost, dbtest.NewFakeStore(), `{"source":"unknown","prompt":"test"}`, http.StatusBadRequest, "'source' must be 'heartbeat', 'vanadis', or 'webhook'", ""},
-		{"empty prompt", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":" "}`, http.StatusBadRequest, "'prompt' field is required", ""},
-		{"numeric session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"1234567890"}`, http.StatusBadRequest, "cannot be a numeric snowflake", ""},
-		{"discord prefix session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"discord-123"}`, http.StatusBadRequest, "cannot be a numeric snowflake", ""},
-		{"invalid chars session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"bad:session"}`, http.StatusBadRequest, "cannot be a numeric snowflake", ""},
-		{"invalid effort rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","effort":"ultra"}`, http.StatusBadRequest, "'effort' must be 'low', 'medium', or 'high'", ""},
-		{"valid stateful accepted", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-1","source":"heartbeat","session_id":"heartbeat-1","prompt":"run check","effort":"low"}`, http.StatusAccepted, `"status":"accepted"`, "disp-1"},
-		{"valid ephemeral accepted", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-2","source":"vanadis","prompt":"execute build"}`, http.StatusAccepted, `"status":"accepted"`, "disp-2"},
+		{"method not allowed", http.MethodGet, dbtest.NewFakeStore(), "", http.StatusMethodNotAllowed, "Method not allowed", "", "", ""},
+		{"nil store", http.MethodPost, nil, `{"source":"heartbeat","prompt":"test"}`, http.StatusInternalServerError, "Database store not configured", "", "", ""},
+		{"invalid json", http.MethodPost, dbtest.NewFakeStore(), `{bad`, http.StatusBadRequest, "Invalid JSON payload", "", "", ""},
+		{"missing source", http.MethodPost, dbtest.NewFakeStore(), `{"prompt":"test"}`, http.StatusBadRequest, "'source' must be 'heartbeat', 'vanadis', or 'webhook'", "", "", ""},
+		{"invalid source", http.MethodPost, dbtest.NewFakeStore(), `{"source":"unknown","prompt":"test"}`, http.StatusBadRequest, "'source' must be 'heartbeat', 'vanadis', or 'webhook'", "", "", ""},
+		{"empty prompt", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":" "}`, http.StatusBadRequest, "'prompt' field is required", "", "", ""},
+		{"numeric session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"1234567890"}`, http.StatusBadRequest, "cannot be a numeric snowflake", "", "", ""},
+		{"discord prefix session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"discord-123"}`, http.StatusBadRequest, "cannot be a numeric snowflake", "", "", ""},
+		{"invalid chars session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"bad:session"}`, http.StatusBadRequest, "cannot be a numeric snowflake", "", "", ""},
+		{"invalid effort rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","effort":"ultra"}`, http.StatusBadRequest, "'effort' must be 'low', 'medium', or 'high'", "", "", ""},
+		{"valid stateful accepted", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-1","source":"heartbeat","session_id":"heartbeat-1","prompt":"run check","effort":"low"}`, http.StatusAccepted, `"status":"accepted"`, "disp-1", "", ""},
+		{"valid ephemeral accepted", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-2","source":"vanadis","prompt":"execute build"}`, http.StatusAccepted, `"status":"accepted"`, "disp-2", "", ""},
+		{"valid with target_id normalized and chunk_id propagated", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-norm-1","source":"vanadis","prompt":"execute chunk","target_id":"discord-987654321012345678","vanadis_chunk_id":"  build-42-chunk-1  "}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-1", "987654321012345678", "build-42-chunk-1"},
+		{"valid with pooled target_id normalized", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-norm-2","source":"vanadis","prompt":"execute chunk","target_id":"stateful_medium:discord-11223344","vanadis_chunk_id":"build-42-chunk-2"}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-2", "11223344", "build-42-chunk-2"},
+		{"headless target_id blanked", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-norm-3","source":"heartbeat","prompt":"pulse","target_id":"heartbeat-hb-1","vanadis_chunk_id":""}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-3", "", ""},
 		{"has active dispatch turn error", http.MethodPost, func() db.Store {
 			s := dbtest.NewFakeStore()
 			s.FailNext("HasActiveDispatchTurn", errors.New("simulated error"))
 			return s
-		}(), `{"source":"heartbeat","prompt":"test","skip_if_active":true}`, http.StatusInternalServerError, "Failed to check active turn", ""},
+		}(), `{"source":"heartbeat","prompt":"test","skip_if_active":true}`, http.StatusInternalServerError, "Failed to check active turn", "", "", ""},
 		{"insert dispatch error", http.MethodPost, func() db.Store {
 			s := dbtest.NewFakeStore()
 			s.FailNext("InsertDispatch", errors.New("simulated error"))
 			return s
-		}(), `{"source":"heartbeat","prompt":"test"}`, http.StatusInternalServerError, "Failed to persist dispatch", ""},
+		}(), `{"source":"heartbeat","prompt":"test"}`, http.StatusInternalServerError, "Failed to persist dispatch", "", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := runHTTP(handleDispatch(tc.store, nil), tc.method, "/dispatch", strings.NewReader(tc.body))
@@ -321,6 +326,12 @@ func TestHandleDispatch(t *testing.T) {
 				d, err := tc.store.GetDispatch(context.Background(), tc.checkID)
 				if err != nil || d == nil {
 					t.Fatalf("failed to retrieve dispatch %s: %v", tc.checkID, err)
+				}
+				if d.TargetID != tc.wantTargetID {
+					t.Errorf("got target_id %q, want %q", d.TargetID, tc.wantTargetID)
+				}
+				if d.VanadisChunkID != tc.wantVanadisChunkID {
+					t.Errorf("got vanadis_chunk_id %q, want %q", d.VanadisChunkID, tc.wantVanadisChunkID)
 				}
 			}
 		})

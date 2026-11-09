@@ -15,6 +15,8 @@ type Dispatch struct {
 	Source          string    `json:"source"`
 	SessionID       string    `json:"session_id,omitempty"`
 	ConversationID  string    `json:"conversation_id,omitempty"`
+	TargetID        string    `json:"target_id,omitempty"`
+	VanadisChunkID  string    `json:"vanadis_chunk_id,omitempty"`
 	Prompt          string    `json:"prompt"`
 	Summary         string    `json:"summary"`
 	Effort          string    `json:"effort,omitempty"`
@@ -34,13 +36,14 @@ type Dispatch struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
-const dispatchSelectCols = "id, COALESCE(row_id, 0) AS row_id, source, session_id, conversation_id, prompt, COALESCE(summary, '') AS summary, COALESCE(effort, '') AS effort, COALESCE(model, '') AS model, status, retry_count, restart_count, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, created_at, updated_at"
+const dispatchSelectCols = "id, COALESCE(row_id, 0) AS row_id, source, session_id, conversation_id, COALESCE(target_id, '') AS target_id, COALESCE(vanadis_chunk_id, '') AS vanadis_chunk_id, prompt, COALESCE(summary, '') AS summary, COALESCE(effort, '') AS effort, COALESCE(model, '') AS model, status, retry_count, restart_count, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, created_at, updated_at"
 
 func scanDispatch(scanner interface{ Scan(dest ...any) error }) (Dispatch, error) {
 	var d Dispatch
 	var errMsg, respText sql.NullString
 	if err := scanner.Scan(
 		&d.ID, &d.RowID, &d.Source, &d.SessionID, &d.ConversationID,
+		&d.TargetID, &d.VanadisChunkID,
 		&d.Prompt, &d.Summary, &d.Effort, &d.Model, &d.Status,
 		&d.RetryCount, &d.RestartCount, &errMsg, &respText,
 		&d.DurationMs, &d.InputTokens, &d.OutputTokens, &d.ThinkingTokens, &d.CacheReadTokens, &d.TotalTokens,
@@ -101,6 +104,7 @@ func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) error {
 
 	query := `INSERT INTO dispatches (
 		id, source, session_id, conversation_id,
+		target_id, vanadis_chunk_id,
 		prompt, summary, effort, model, status,
 		retry_count, restart_count, error_message, response_text,
 		duration_ms, input_tokens, output_tokens,
@@ -108,15 +112,17 @@ func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) error {
 		created_at, updated_at
 	) VALUES (
 		$1, $2, $3, $4,
-		$5, $6, $7, $8, $9,
-		$10, $11, $12, $13,
-		$14, $15, $16,
-		$17, $18, $19,
-		$20, $21
+		$5, $6,
+		$7, $8, $9, $10, $11,
+		$12, $13, $14, $15,
+		$16, $17, $18,
+		$19, $20, $21,
+		$22, $23
 	) ON CONFLICT (id) DO NOTHING;`
 
 	return s.execWithTimeout(ctx, query,
 		d.ID, d.Source, d.SessionID, d.ConversationID,
+		d.TargetID, d.VanadisChunkID,
 		d.Prompt, d.Summary, d.Effort, d.Model, d.Status,
 		d.RetryCount, d.RestartCount, d.ErrorMessage, d.ResponseText,
 		d.DurationMs, d.InputTokens, d.OutputTokens,

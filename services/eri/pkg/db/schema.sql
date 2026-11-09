@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS dispatches (
     source TEXT NOT NULL DEFAULT '',
     session_id TEXT NOT NULL DEFAULT '',
     conversation_id TEXT NOT NULL DEFAULT '',
+    target_id TEXT NOT NULL DEFAULT '',
+    vanadis_chunk_id TEXT NOT NULL DEFAULT '',
     prompt TEXT NOT NULL DEFAULT '',
     summary TEXT NOT NULL DEFAULT '',
     effort TEXT NOT NULL DEFAULT '',
