@@ -170,6 +170,7 @@ type memoryVanadisStore struct {
 	builds                                                                                      map[string]VanadisBuild
 	chunks                                                                                      map[string][]VanadisChunk
 	createErr, getErr, listErr, updateChunkErr, updateBuildErr, appendChunksErr, removeChunkErr error
+	stallNudges                                                                                 map[string]int
 }
 
 func newMemoryVanadisStore() *memoryVanadisStore {
@@ -541,6 +542,7 @@ func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID stri
 					StatusMessageID:  b.StatusMessageID,
 					MergedChunkIndex: list[i].ChunkIndex,
 					MergedChunkTitle: list[i].Title,
+					ChunkMode:        list[i].Mode,
 					NextChunkIndex:   -1,
 					BuildCompleted:   b.Status == "completed",
 				}
@@ -593,6 +595,26 @@ func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID stri
 		}
 	}
 	return nil, ErrChunkNotFound
+}
+
+func (m *memoryVanadisStore) ClaimStalledChunk(_ context.Context, chunkID string) (StalledChunkVerdict, *VanadisBuild, *VanadisChunk, error) {
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].ID != chunkID {
+				continue
+			}
+			b, c := m.builds[bID], list[i]
+			verdict := judgeStalledChunk(c, b.Status, m.stallNudges[chunkID])
+			if verdict == StalledChunkVerdictNudge {
+				if m.stallNudges == nil {
+					m.stallNudges = make(map[string]int)
+				}
+				m.stallNudges[chunkID]++
+			}
+			return verdict, &b, &c, nil
+		}
+	}
+	return "", nil, nil, ErrChunkNotFound
 }
 
 func (m *memoryVanadisStore) FailChunk(_ context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
@@ -1101,7 +1123,8 @@ func TestFormatChunkPrompt(t *testing.T) {
 		"4. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all file edits, tests, and verification directly in this turn.",
 		"5. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID \"build-999-chunk-2\" in the task description) rather than expanding the active PR's scope.",
 		"6. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk build-999-chunk-2`",
-		"7. Terminate turn immediately after submission.",
+		"7. The turn may ONLY end after `aerial-pr.sh submit` has succeeded or the vanadis MCP tool fail_chunk has been called with chunk_id \"build-999-chunk-2\". Run long downloads, installs (e.g. Playwright/Chromium), builds, and tests in the foreground with a long timeout—never background them and end the turn \"waiting for X\". If a dependency genuinely cannot be installed, either call fail_chunk with the reason, or skip only that verification step, state it in `PR_DESCRIPTION.md`, and submit.",
+		"8. Terminate turn immediately after submission.",
 	} {
 		if !strings.Contains(p1, want) {
 			t.Fatalf("prompt for chunk 1 missing %q:\n%s", want, p1)
@@ -1116,7 +1139,9 @@ func TestFormatChunkPrompt(t *testing.T) {
 	}
 	for _, want := range []string{
 		"=== Action Chunk Execution Contract ===",
-		"6. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID \"build-999-chunk-act\" in the task description) rather than expanding the active chunk's scope.",
+		"5. Ending the turn is treated as successful completion: NEVER end it while work is still pending in the background (downloads, installs, builds, deploys, or waits)—run long operations in the foreground with a long timeout and confirm the outcome before ending the turn.",
+		"6. If an unrecoverable blocker prevents completion, call the vanadis MCP tool fail_chunk with chunk_id \"build-999-chunk-act\" and the failure reason, and end the turn.",
+		"7. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID \"build-999-chunk-act\" in the task description) rather than expanding the active chunk's scope.",
 	} {
 		if !strings.Contains(pAction, want) {
 			t.Fatalf("action chunk prompt missing %q:\n%s", want, pAction)
