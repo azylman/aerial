@@ -689,10 +689,7 @@ spec:
     matchLabels:
       app.kubernetes.io/name: agentsview
   strategy:
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
-    type: RollingUpdate
+    type: Recreate
   template:
     metadata:
       labels:
@@ -708,6 +705,8 @@ spec:
           env:
             - name: PORT
               value: "8080"
+            - name: HOME
+              value: /data
             - name: AGENTSVIEW_DATA_DIR
               value: /data/agentsview
             - name: CLAUDE_PROJECTS_DIR
@@ -724,6 +723,9 @@ spec:
               name: brain-data
       nodeSelector:
         compute-tier: performance
+      securityContext:
+        runAsGroup: 1000
+        runAsUser: 1000
       volumes:
         - hostPath:
             path: /var/lib/docker/volumes/aerial-brain-data/_data
