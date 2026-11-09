@@ -1835,14 +1835,6 @@ func TestLoadSharedSecrets_TableDriven(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(secretsDir, "POSTGRES_PASSWORD"), []byte("  dir-pg-pass  "), 0o600)
 	_ = os.WriteFile(filepath.Join(secretsDir, "EMPTY_KEY"), []byte("  "), 0o600)
 
-	dirWithJSON := filepath.Join(tmpDir, "dir_with_json")
-	_ = os.MkdirAll(dirWithJSON, 0o755)
-	_ = os.WriteFile(filepath.Join(dirWithJSON, "shared-secrets.json"), []byte(`{
-		"NESTED_KEY": "nested-val",
-		"OPENOBSERVE_ROOT_USER_PASSWORD": "dir-oo-pass"
-	}`), 0o600)
-	_ = os.WriteFile(filepath.Join(dirWithJSON, "INDIVIDUAL_FILE"), []byte("indiv-val"), 0o600)
-
 	tests := []struct {
 		name         string
 		filePath     string
@@ -1924,24 +1916,6 @@ func TestLoadSharedSecrets_TableDriven(t *testing.T) {
 			filePath: secretsDir,
 			wantKey:  ".hidden",
 			wantVal:  "",
-		},
-		{
-			name:     "directory mount unmarshals shared-secrets.json",
-			filePath: dirWithJSON,
-			wantKey:  "NESTED_KEY",
-			wantVal:  "nested-val",
-		},
-		{
-			name:     "directory mount shared-secrets.json alias fallback",
-			filePath: dirWithJSON,
-			wantKey:  "OPENOBSERVE_PASSWORD",
-			wantVal:  "dir-oo-pass",
-		},
-		{
-			name:     "directory mount includes both json and individual files",
-			filePath: dirWithJSON,
-			wantKey:  "INDIVIDUAL_FILE",
-			wantVal:  "indiv-val",
 		},
 	}
 

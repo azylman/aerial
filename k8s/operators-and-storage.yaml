@@ -1065,6 +1065,28 @@ spec:
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
+  name: infisical-universal-auth
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: INFISICAL_CLIENT_ID
+      secretKey: INFISICAL_CLIENT_ID
+    - remoteRef:
+        key: INFISICAL_CLIENT_SECRET
+      secretKey: INFISICAL_CLIENT_SECRET
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+    deletionPolicy: Retain
+    name: infisical-universal-auth
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
   name: shared-secrets
   namespace: default
 spec:
@@ -1077,7 +1099,7 @@ spec:
     kind: SecretStore
     name: infisical
   target:
-    creationPolicy: Merge
+    creationPolicy: Owner
     deletionPolicy: Retain
     name: shared-secrets
 ---
@@ -1176,15 +1198,6 @@ spec:
     - remoteRef:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
-    - remoteRef:
-        key: INFISICAL_CLIENT_ID
-      secretKey: INFISICAL_CLIENT_ID
-    - remoteRef:
-        key: INFISICAL_CLIENT_SECRET
-      secretKey: INFISICAL_CLIENT_SECRET
-    - remoteRef:
-        key: INFISICAL_PROJECT_ID
-      secretKey: INFISICAL_PROJECT_ID
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
@@ -1272,12 +1285,6 @@ spec:
     - remoteRef:
         key: ENCRYPTION_KEY
       secretKey: ENCRYPTION_KEY
-    - remoteRef:
-        key: INFISICAL_AUTH_SECRET
-      secretKey: INFISICAL_AUTH_SECRET
-    - remoteRef:
-        key: INFISICAL_ENCRYPTION_KEY
-      secretKey: INFISICAL_ENCRYPTION_KEY
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
