@@ -105,18 +105,7 @@ type reloadResponse struct {
 // git-sync retries non-success responses for the same commit forever, and
 // retrying an unchanged bad file can never succeed.
 func (r *Reloadable[T]) Handler(service string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if !isLoopbackRemote(req.RemoteAddr) {
-			log.Printf("%s: config reload rejected from non-loopback address %q", service, req.RemoteAddr)
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-
+	reload := LoopbackOnly(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		status, err := r.Reload()
 		resp := reloadResponse{Status: status}
 		switch {
@@ -131,6 +120,29 @@ func (r *Reloadable[T]) Handler(service string) http.Handler {
 			log.Printf("%s: config reload requested, no changes", service)
 		}
 		WriteJSON(w, http.StatusOK, resp)
+	}))
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		reload.ServeHTTP(w, req)
+	})
+}
+
+// LoopbackOnly wraps next so that only requests whose RemoteAddr is a
+// loopback IP reach it; every other caller gets 403. It guards in-pod
+// sidecar endpoints (such as the git-sync reload webhook) that must never be
+// reachable from the pod network.
+func LoopbackOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if !isLoopbackRemote(req.RemoteAddr) {
+			log.Printf("httpkit: rejected non-loopback request to %s from %q", req.URL.Path, req.RemoteAddr)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, req)
 	})
 }
 
