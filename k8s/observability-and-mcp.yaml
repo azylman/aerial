@@ -1011,11 +1011,12 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: aerial-kubernetes-mcp
-# Read-only by design: cluster state changes go through git and Flux. The one
-# write is deleting pods, which only restarts them; their controller recreates
-# them from the git-defined spec, so nothing drifts. Secrets, serviceaccounts/token,
-# pods/exec, nodes/proxy and all RBAC resources are excluded on purpose to
-# prevent credential reads and privilege escalation.
+# Read-only by design for git-managed specs: cluster state changes go through git
+# and Flux. Scoped write operations are limited to deleting pods/jobs (so their
+# controller or Flux recreates them cleanly from git) and updating aerial-image-tags
+# + triggering Flux reconciliation in flux-system (via Role/aerial-kubernetes-mcp-flux).
+# Secrets, serviceaccounts/token, pods/exec, nodes/proxy and all RBAC resources
+# are excluded on purpose to prevent credential reads and privilege escalation.
 rules:
   - apiGroups:
       - ""
@@ -1064,6 +1065,12 @@ rules:
       - get
       - list
       - watch
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - delete
   - apiGroups:
       - autoscaling
     resources:
@@ -1151,6 +1158,55 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: aerial-kubernetes-mcp
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-mcp-sa
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aerial-kubernetes-mcp-flux
+  namespace: flux-system
+rules:
+  - apiGroups:
+      - ""
+    resourceNames:
+      - aerial-image-tags
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - kustomize.toolkit.fluxcd.io
+    resources:
+      - kustomizations
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+  - apiGroups:
+      - source.toolkit.fluxcd.io
+    resources:
+      - gitrepositories
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aerial-kubernetes-mcp-flux-binding
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aerial-kubernetes-mcp-flux
 subjects:
   - kind: ServiceAccount
     name: kubernetes-mcp-sa
