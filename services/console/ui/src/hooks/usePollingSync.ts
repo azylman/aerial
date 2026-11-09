@@ -56,20 +56,34 @@ interface SharedRequest {
  * Calls made while a request is in flight join it instead of issuing another, so the boot
  * prefetch, the shell and a freshly mounted view all share one network request. Each caller's
  * signal only stops that caller waiting; the request itself is aborted once every joined caller
- * has aborted. Nothing is cached: a call after the request settled fetches again.
+ * has aborted. A call within `freshMs` of the last request succeeding resolves without fetching,
+ * so a caller that mounts just after another's request settled (the shell right after boot's
+ * prefetch) reuses that result; failed and aborted requests never count as fresh. With the default
+ * freshMs of 0 nothing is reused: a call after the request settled fetches again.
  */
 export function syncResource<T>(
   fetch: (signal: AbortSignal) => Promise<T>,
   onData: (data: T) => void,
   onError: (message: string) => void,
+  freshMs = 0,
 ): PollFetcher {
   let shared: SharedRequest | null = null;
+  let succeededAt: number | null = null;
+
+  const fresh = (): boolean => {
+    if (succeededAt === null) return false;
+    const age = Date.now() - succeededAt;
+    return age >= 0 && age < freshMs;
+  };
 
   const run = async (request: SharedRequest): Promise<void> => {
     const { signal } = request.controller;
     try {
       const data = await fetch(signal);
-      if (!signal.aborted) onData(data);
+      if (!signal.aborted) {
+        succeededAt = Date.now();
+        onData(data);
+      }
     } catch (err) {
       if (!signal.aborted) onError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -79,7 +93,7 @@ export function syncResource<T>(
 
   return (signal) =>
     new Promise<void>((resolve) => {
-      if (signal.aborted) {
+      if (signal.aborted || (shared === null && fresh())) {
         resolve();
         return;
       }

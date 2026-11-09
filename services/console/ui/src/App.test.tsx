@@ -77,11 +77,16 @@ function boot(path: string): void {
   void startBoot(initRouteFromLocation());
 }
 
+// Each test starts an hour after the last, so boot's shared status poll never treats a previous
+// test's response as fresh.
+let testClock = Date.UTC(2026, 10, 9);
+
 describe('App', () => {
   beforeEach(() => {
     useConsoleStore.setState(useConsoleStore.getInitialState(), true);
     stubFetch();
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] });
+    testClock += 3_600_000;
+    vi.useFakeTimers({ now: testClock, toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] });
   });
   afterEach(() => {
     cleanup();
@@ -120,6 +125,17 @@ describe('App', () => {
       'upstream down',
     ]);
     expect(screen.getByText('LVL 5 // ACTIVE')).toBeTruthy();
+  });
+
+  it('reuses a boot status request that settled before App mounted', async () => {
+    boot('/console/next/');
+    await flush();
+    expect(count('/console/api/status')).toBe(1);
+    render(<App />);
+    await flush();
+    expect(count('/console/api/status')).toBe(1);
+    await act(async () => vi.advanceTimersByTime(5000));
+    expect(count('/console/api/status')).toBe(2);
   });
 
   it('polls status every 5s on telemetry and stops when leaving for schedules', async () => {
