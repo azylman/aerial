@@ -4,38 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
-
-// SearchTranscripts queries past session summaries and execution steps.
-// Supported modes:
-//   - "sessions": Hybrid RRF via store.SearchSessionSummaries
-//   - "steps": FTS via store.SearchTranscriptSteps
-//   - "auto" (default): Searches both sessions and steps
-func SearchTranscripts(
-	ctx context.Context,
-	store db.TranscriptStore,
-	embedder EmbedderFunc,
-	query, mode, sessionFilter, toolFilter string,
-	limit int,
-	since ...time.Time,
-) (SearchResult, error) {
-	var sinceTime time.Time
-	if len(since) > 0 {
-		sinceTime = since[0]
-	}
-	return ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{
-		Query:         query,
-		Mode:          mode,
-		SessionFilter: sessionFilter,
-		SessionID:     sessionFilter,
-		ToolFilter:    toolFilter,
-		Limit:         limit,
-		Since:         sinceTime,
-	})
-}
 
 func normalizeSearchMode(mode string) string {
 	normalized := strings.ToLower(strings.TrimSpace(mode))
@@ -61,7 +32,14 @@ func searchSessionSummariesHelper(
 	return store.SearchSessionSummaries(ctx, stack, embedding, query, limit, 0.0)
 }
 
-// ExecuteTranscriptSearch executes a transcript search with full SearchOptions.
+// ExecuteTranscriptSearch queries past session summaries and execution steps across the shared index.
+// Supported modes:
+//   - "sessions": Hybrid RRF via store.SearchSessionSummaries
+//   - "steps": FTS via store.SearchTranscriptSteps
+//   - "auto" (default): Searches both sessions and steps
+//
+// An empty opts.Stack searches every stack. opts.ToolFilter matches either a normalized tool kind
+// (shell, read, mcp:<server>, ...) or an engine-native tool name (Bash, run_command, ...).
 func ExecuteTranscriptSearch(
 	ctx context.Context,
 	store db.TranscriptStore,

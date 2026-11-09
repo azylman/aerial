@@ -168,6 +168,7 @@ func TestRoutedTranscriptStore_Unavailable(t *testing.T) {
 				"SearchSessionSummaries":     c1(s.SearchSessionSummaries(ctx, "", nil, "q", 1, 0)),
 				"SearchTranscriptSteps":      c1(s.SearchTranscriptSteps(ctx, "", "q", "", "", 1)),
 				"GetTranscriptStepRange":     c1(s.GetTranscriptStepRange(ctx, "", "s", 0, 1)),
+				"GetTranscriptStats":         c1(s.GetTranscriptStats(ctx, "")),
 			}
 			for op, err := range errs {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -275,6 +276,68 @@ func TestSharedTranscripts_SearchStepsSpanStacks(t *testing.T) {
 			sort.Strings(gotStacks)
 			if !slices.Equal(gotStacks, tc.wantStacks) {
 				t.Errorf("stacks=%v, want %v", gotStacks, tc.wantStacks)
+			}
+		})
+	}
+}
+
+func TestSharedTranscripts_ToolFilterMatchesKindOrName(t *testing.T) {
+	_, a, b := newSharedStackPair(t)
+	seedSharedStacks(t, a, b)
+	for _, w := range []TranscriptStore{a, b} {
+		if _, err := w.BackfillToolKinds(context.Background(), testKindMapper); err != nil {
+			t.Fatalf("BackfillToolKinds: %v", err)
+		}
+	}
+	tests := []struct {
+		name     string
+		stack    string
+		tool     string
+		wantRows []string
+	}{
+		{name: "kind spans engines and stacks", tool: "shell", wantRows: []string{"stack_a/a-only/Bash", "stack_a/dup-sess/run_command", "stack_b/dup-sess/Bash"}},
+		{name: "raw name matches only that tool", tool: "Bash", wantRows: []string{"stack_a/a-only/Bash", "stack_b/dup-sess/Bash"}},
+		{name: "kind with stack filter", stack: "stack_a", tool: "shell", wantRows: []string{"stack_a/a-only/Bash", "stack_a/dup-sess/run_command"}},
+		{name: "unmapped raw name still matches", tool: "unmapped_tool", wantRows: []string{"stack_b/b-only/unmapped_tool"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			steps, err := b.SearchTranscriptSteps(context.Background(), tc.stack, "", "", tc.tool, 50)
+			if err != nil {
+				t.Fatalf("SearchTranscriptSteps: %v", err)
+			}
+			var gotRows []string
+			for _, st := range steps {
+				gotRows = append(gotRows, fmt.Sprintf("%s/%s/%s", st.Stack, st.SessionID, st.ToolName))
+			}
+			sort.Strings(gotRows)
+			if !slices.Equal(gotRows, tc.wantRows) {
+				t.Errorf("rows=%v, want %v", gotRows, tc.wantRows)
+			}
+		})
+	}
+}
+
+func TestSharedTranscripts_StatsPerStack(t *testing.T) {
+	_, a, b := newSharedStackPair(t)
+	seedSharedStacks(t, a, b)
+	tests := []struct {
+		name      string
+		stack     string
+		wantStats []TranscriptStackStats
+	}{
+		{name: "empty stack counts every stack", wantStats: []TranscriptStackStats{{Stack: "stack_a", Sessions: 2, Steps: 4}, {Stack: "stack_b", Sessions: 2, Steps: 4}}},
+		{name: "stack filter counts one stack", stack: "stack_b", wantStats: []TranscriptStackStats{{Stack: "stack_b", Sessions: 2, Steps: 4}}},
+		{name: "unknown stack is empty", stack: "missing"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := a.GetTranscriptStats(context.Background(), tc.stack)
+			if err != nil {
+				t.Fatalf("GetTranscriptStats: %v", err)
+			}
+			if !slices.Equal(got, tc.wantStats) {
+				t.Errorf("stats=%+v, want %+v", got, tc.wantStats)
 			}
 		})
 	}

@@ -3,11 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,7 +15,6 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
@@ -35,7 +32,7 @@ func TestParseCLIArgs(t *testing.T) {
 		wantStep    int
 		wantContext int
 		wantJSON    bool
-		wantDirect  bool
+		wantStack   string
 		wantURL     string
 		wantErrSub  string
 		wantErrIs   error
@@ -72,22 +69,22 @@ func TestParseCLIArgs(t *testing.T) {
 				"search",
 				"--query", "memory leak",
 				"--mode", "steps",
-				"--tool", "run_command",
+				"--tool", "shell",
+				"--stack", "stack-b",
 				"--session", "sess-123",
 				"--limit", "25",
 				"--json",
-				"--direct-db",
 			},
 			wantCmd:     "search",
 			wantQuery:   "memory leak",
 			wantMode:    "steps",
-			wantTool:    "run_command",
+			wantTool:    "shell",
+			wantStack:   "stack-b",
 			wantSession: "sess-123",
 			wantLimit:   25,
 			wantStep:    -1,
 			wantContext: 2,
 			wantJSON:    true,
-			wantDirect:  true,
 		},
 		{
 			name: "SubcommandGetWithFlags",
@@ -96,17 +93,17 @@ func TestParseCLIArgs(t *testing.T) {
 				"--session", "sess-123",
 				"--step", "4",
 				"--context", "5",
+				"--stack=stack-a",
 				"--json",
-				"--direct-db",
 			},
 			wantCmd:     "get",
 			wantMode:    "auto",
 			wantSession: "sess-123",
+			wantStack:   "stack-a",
 			wantLimit:   10,
 			wantStep:    4,
 			wantContext: 5,
 			wantJSON:    true,
-			wantDirect:  true,
 		},
 		{
 			name:        "SubcommandGetShorthandAndPositional",
@@ -244,9 +241,9 @@ func TestParseCLIArgs(t *testing.T) {
 			if cfg.Command != tc.wantCmd || cfg.Query != tc.wantQuery || cfg.Mode != tc.wantMode ||
 				cfg.Tool != tc.wantTool || cfg.Session != tc.wantSession || cfg.Limit != tc.wantLimit ||
 				cfg.Step != tc.wantStep || cfg.Context != tc.wantContext || cfg.JSON != tc.wantJSON ||
-				cfg.DirectDB != tc.wantDirect || (tc.wantURL != "" && cfg.BaseURL != tc.wantURL) {
-				t.Errorf("unexpected cfg: %+v, want cmd=%q query=%q mode=%q tool=%q session=%q limit=%d step=%d ctx=%d json=%v direct=%v url=%q",
-					cfg, tc.wantCmd, tc.wantQuery, tc.wantMode, tc.wantTool, tc.wantSession, tc.wantLimit, tc.wantStep, tc.wantContext, tc.wantJSON, tc.wantDirect, tc.wantURL)
+				cfg.Stack != tc.wantStack || (tc.wantURL != "" && cfg.BaseURL != tc.wantURL) {
+				t.Errorf("unexpected cfg: %+v, want cmd=%q query=%q mode=%q tool=%q session=%q limit=%d step=%d ctx=%d json=%v stack=%q url=%q",
+					cfg, tc.wantCmd, tc.wantQuery, tc.wantMode, tc.wantTool, tc.wantSession, tc.wantLimit, tc.wantStep, tc.wantContext, tc.wantJSON, tc.wantStack, tc.wantURL)
 			}
 		})
 	}
@@ -271,6 +268,8 @@ func TestFormatSearchResults(t *testing.T) {
 			Mode:  "auto",
 			Sessions: []db.SessionSummary{
 				{
+					Stack:     "stack-a",
+					Engine:    "claude",
 					SessionID: "11112222-3333-4444-5555-666677778888",
 					ThreadID:  "th-100",
 					Summary:   "Triaged Gemini 429 quota exhaustion and tuned backoff.",
@@ -282,9 +281,12 @@ func TestFormatSearchResults(t *testing.T) {
 			},
 			Steps: []db.TranscriptStep{
 				{
+					Stack:     "stack-b",
+					Engine:    "agy",
 					SessionID: "11112222-3333-4444-5555-666677778888",
 					StepIndex: 5,
 					ToolName:  "run_command",
+					ToolKind:  "shell",
 					Content:   "docker logs aerial-brain --tail 50\nline 2 of logs",
 					CreatedAt: now,
 				},
@@ -308,8 +310,15 @@ func TestFormatSearchResults(t *testing.T) {
 		if !strings.Contains(out, "### 💬 Transcript Execution Steps (2 matches)") {
 			t.Errorf("missing steps header: %s", out)
 		}
-		if !strings.Contains(out, "**[run_command]** Step #5") {
-			t.Errorf("missing tool badge: %s", out)
+		for _, want := range []string{
+			"- [stack-a/claude] Session [11112222...]",
+			"- [?/?] Session [short]",
+			"- [stack-b/agy] **[run_command · shell]** Step #5",
+			"- [?/?] **[PLANNER_RESPONSE]** Step #12",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in: %s", want, out)
+			}
 		}
 		if !strings.Contains(out, "... [truncated]") {
 			t.Errorf("expected truncation for long content: %s", out)
@@ -346,8 +355,11 @@ func TestFormatStepWindow(t *testing.T) {
 				Steps: []db.TranscriptStep{
 					{
 						SessionID: "12345678-abcd-ef01-2345-6789abcdef01",
+						Stack:     "stack-a",
+						Engine:    "agy",
 						StepIndex: 4,
 						ToolName:  "run_command",
+						ToolKind:  "shell",
 						Content:   "single line command",
 						CreatedAt: now,
 					},
@@ -362,9 +374,9 @@ func TestFormatStepWindow(t *testing.T) {
 			},
 			wantSubstrs: []string{
 				"Transcript Step Window for Session [12345678...](conversation://12345678-abcd-ef01-2345-6789abcdef01)",
-				"  **[run_command]** Step #4",
+				"  [stack-a/agy] **[run_command · shell]** Step #4",
 				"*Content:* single line command",
-				"▶ **[tool_call]** Step #5",
+				"▶ [?/?] **[tool_call]** Step #5",
 				"line 1\n  line 2",
 			},
 		},
@@ -391,7 +403,7 @@ func TestFormatStepWindow(t *testing.T) {
 			},
 			wantSubstrs: []string{
 				"[short](conversation://short)",
-				"▶ **[STEP]** Step #1",
+				"▶ [?/?] **[STEP]** Step #1",
 				strings.Repeat("x", 700),
 				"... [truncated]",
 			},
@@ -433,9 +445,12 @@ func TestRunCLI_HTTPGet(t *testing.T) {
 			Context:    ctxWindow,
 			Steps: []db.TranscriptStep{
 				{
+					Stack:     r.URL.Query().Get("stack"),
+					Engine:    "agy",
 					SessionID: sess,
 					StepIndex: step,
 					ToolName:  "run_command",
+					ToolKind:  "shell",
 					Content:   "go test ./...",
 					CreatedAt: now,
 				},
@@ -456,6 +471,17 @@ func TestRunCLI_HTTPGet(t *testing.T) {
 		}
 	})
 
+	t.Run("GetForwardsStackFilter", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "2", "--stack", "stack-b", "--url", server.URL}, &buf)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(buf.String(), "[stack-b/agy] **[run_command · shell]** Step #2") {
+			t.Errorf("expected stack-labelled step, got: %s", buf.String())
+		}
+	})
+
 	t.Run("GetSuccessJSON", func(t *testing.T) {
 		var buf bytes.Buffer
 		err := runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "2", "--json", "--url", server.URL}, &buf)
@@ -471,49 +497,11 @@ func TestRunCLI_HTTPGet(t *testing.T) {
 		}
 	})
 
-	t.Run("DirectDBFallbackErrorWhenNoPostgres", func(t *testing.T) {
-		t.Setenv("POSTGRES_URL", "unsupported://localhost/invalid")
+	t.Run("GetHTTPErrorSurfacesWithoutFallback", func(t *testing.T) {
 		var buf bytes.Buffer
 		err := runCLI(context.Background(), []string{"get", "--session", "error", "--step", "0", "--url", server.URL}, &buf)
-		if err == nil {
-			t.Fatal("expected direct DB fallback error")
-		}
-	})
-
-	t.Run("DirectDBSuccessWithMock", func(t *testing.T) {
-		fake := dbtest.NewFakeStore()
-		_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{SessionID: "sess-direct"})
-		_ = fake.BatchInsertTranscriptSteps(context.Background(), []db.TranscriptStep{
-			{SessionID: "sess-direct", StepIndex: 1, Content: "direct step content", CreatedAt: now},
-		})
-
-		oldFn := newDirectStoreFn
-		defer func() { newDirectStoreFn = oldFn }()
-		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
-			return fake, func() {}, nil
-		}
-
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"get", "--session", "sess-direct", "--step", "1", "--direct-db"}, &buf)
-		if err != nil {
-			t.Fatalf("unexpected error on direct DB get: %v", err)
-		}
-		if !strings.Contains(buf.String(), "direct step content") {
-			t.Errorf("expected direct step content, got: %s", buf.String())
-		}
-	})
-
-	t.Run("DirectDBErrorWithMock", func(t *testing.T) {
-		oldFn := newDirectStoreFn
-		defer func() { newDirectStoreFn = oldFn }()
-		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
-			return nil, nil, errors.New("simulated store open failure")
-		}
-
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"get", "--session", "sess-direct", "--step", "1", "--direct-db"}, &buf)
-		if err == nil || !strings.Contains(err.Error(), "direct DB get failed") {
-			t.Fatalf("expected direct DB error, got: %v", err)
+		if err == nil || !strings.Contains(err.Error(), "get failed: HTTP 500") {
+			t.Fatalf("expected HTTP 500 get error, got: %v", err)
 		}
 	})
 
@@ -538,10 +526,16 @@ func TestRunCLI_HTTPStats(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"total_sessions": 5032,
-			"status":         "ok",
-		})
+		stacks := []db.TranscriptStackStats{{Stack: "stack-a", Sessions: 5000, Steps: 90000}, {Stack: "stack-b", Sessions: 32, Steps: 400}}
+		if r.URL.Query().Get("stack") == "stack-b" {
+			stacks = stacks[1:]
+		}
+		resp := statsResponse{Stacks: stacks, Status: "ok"}
+		for _, st := range stacks {
+			resp.TotalSessions += st.Sessions
+			resp.TotalSteps += st.Steps
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -551,9 +545,20 @@ func TestRunCLI_HTTPStats(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		out := buf.String()
-		if !strings.Contains(out, "Total Indexed Sessions: 5032") {
-			t.Errorf("unexpected output: %s", out)
+		want := "📊 Aerial Transcript Index Stats:\n- Total Indexed Sessions: 5032\n- Total Indexed Steps: 90400\n" +
+			"  - [stack-a] 5000 sessions, 90000 steps\n  - [stack-b] 32 sessions, 400 steps\n- Status: ok\n"
+		if out := buf.String(); out != want {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+	})
+
+	t.Run("StackFilter", func(t *testing.T) {
+		var buf bytes.Buffer
+		if err := runCLI(context.Background(), []string{"stats", "--stack", "stack-b", "--url", server.URL}, &buf); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if out := buf.String(); !strings.Contains(out, "Total Indexed Sessions: 32") || strings.Contains(out, "stack-a") {
+			t.Errorf("expected only stack-b stats, got: %s", out)
 		}
 	})
 
@@ -591,6 +596,8 @@ func TestRunCLI_HTTPSearch(t *testing.T) {
 			Mode:  r.URL.Query().Get("mode"),
 			Sessions: []db.SessionSummary{
 				{
+					Stack:     r.URL.Query().Get("stack"),
+					Engine:    "claude",
 					SessionID: "sess-abc",
 					Summary:   "Found matching session",
 				},
@@ -635,46 +642,21 @@ func TestRunCLI_HTTPSearch(t *testing.T) {
 		}
 	})
 
-	t.Run("DirectDBFallbackErrorWhenNoPostgres", func(t *testing.T) {
-		t.Setenv("POSTGRES_URL", "unsupported://localhost/invalid")
+	t.Run("SearchHTTPErrorSurfacesWithoutFallback", func(t *testing.T) {
 		var buf bytes.Buffer
 		err := runCLI(context.Background(), []string{"search", "error", "--url", server.URL}, &buf)
-		if err == nil {
-			t.Fatal("expected error on HTTP error + invalid direct DB fallback")
+		if err == nil || !strings.Contains(err.Error(), "search failed: HTTP 500") {
+			t.Fatalf("expected HTTP 500 search error, got: %v", err)
 		}
 	})
 
-	t.Run("DirectDBSearchSuccessAndFallback", func(t *testing.T) {
-		oldFn := newDirectStoreFn
-		defer func() { newDirectStoreFn = oldFn }()
-
-		fake := dbtest.NewFakeStore()
-		_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{
-			SessionID: "sess-direct-1",
-			Summary:   "Direct DB matched session",
-		})
-		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
-			return fake, func() {}, nil
-		}
-
-		// Direct DB flag explicit
+	t.Run("SearchForwardsStackFilter", func(t *testing.T) {
 		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"search", "Direct", "--direct-db"}, &buf)
-		if err != nil {
-			t.Fatalf("unexpected error on direct DB search: %v", err)
+		if err := runCLI(context.Background(), []string{"search", "docker", "--stack", "stack-b", "--url", server.URL}, &buf); err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(buf.String(), "Direct DB matched session") {
-			t.Errorf("unexpected output: %s", buf.String())
-		}
-
-		// Direct DB fallback when HTTP fails
-		buf.Reset()
-		err = runCLI(context.Background(), []string{"search", "Direct", "--url", "http://127.0.0.1:59999"}, &buf)
-		if err != nil {
-			t.Fatalf("unexpected error on direct DB fallback: %v", err)
-		}
-		if !strings.Contains(buf.String(), "Direct DB matched session") {
-			t.Errorf("unexpected output: %s", buf.String())
+		if !strings.Contains(buf.String(), "- [stack-b/claude] Session [sess-abc]") {
+			t.Errorf("expected stack-labelled session, got: %s", buf.String())
 		}
 	})
 
@@ -831,29 +813,7 @@ func TestRunMain(t *testing.T) {
 	})
 }
 
-func TestDirectStoreAndRunCLIEdges(t *testing.T) {
-	t.Run("DefaultNewDirectStoreFnError", func(t *testing.T) {
-		_, _, err := newDirectStoreFn("invalid-scheme://localhost")
-		if err == nil {
-			t.Fatal("expected error from default newDirectStoreFn with invalid scheme")
-		}
-	})
-
-	t.Run("RunCLI_DirectDBError", func(t *testing.T) {
-		oldFn := newDirectStoreFn
-		defer func() { newDirectStoreFn = oldFn }()
-
-		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
-			return nil, nil, fmt.Errorf("simulated direct DB error")
-		}
-
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"search", "test", "--direct-db"}, &buf)
-		if err == nil || !strings.Contains(err.Error(), "direct DB search failed") {
-			t.Fatalf("expected direct DB error, got: %v", err)
-		}
-	})
-
+func TestRunCLIEdges(t *testing.T) {
 	t.Run("RunCLI_ParseError", func(t *testing.T) {
 		var buf bytes.Buffer
 		err := runCLI(context.Background(), []string{"--invalid-flag"}, &buf)
@@ -897,75 +857,6 @@ func TestDirectStoreAndRunCLIEdges(t *testing.T) {
 		err = runCLI(context.Background(), []string{"search", "test", "--json", "--url", server.URL}, badWriter)
 		if err == nil {
 			t.Errorf("expected error on failing writer for search json")
-		}
-	})
-
-	t.Run("ExecuteSearchDirectDB_DefaultEnv", func(t *testing.T) {
-		oldFn := newDirectStoreFn
-		defer func() { newDirectStoreFn = oldFn }()
-
-		calledWithURL := ""
-		closedCalled := false
-		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
-			calledWithURL = pgURL
-			fake := dbtest.NewFakeStore()
-			return fake, func() { closedCalled = true }, nil
-		}
-
-		t.Setenv("POSTGRES_URL", "")
-		cfg := CLIConfig{
-			Command:  "search",
-			Query:    "hello",
-			Mode:     "auto",
-			DirectDB: true,
-		}
-		res, err := executeSearchDirectDB(context.Background(), cfg)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !closedCalled {
-			t.Errorf("expected closeFn to be called")
-		}
-		if !strings.Contains(calledWithURL, "aerial-postgres:5432") {
-			t.Errorf("expected default postgres url, got %s", calledWithURL)
-		}
-		if res.Query != "hello" {
-			t.Errorf("unexpected query in res: %+v", res)
-		}
-	})
-
-	t.Run("ExecuteGetDirectDB_DefaultEnv", func(t *testing.T) {
-		oldFn := newDirectStoreFn
-		defer func() { newDirectStoreFn = oldFn }()
-
-		calledWithURL := ""
-		closedCalled := false
-		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
-			calledWithURL = pgURL
-			fake := dbtest.NewFakeStore()
-			return fake, func() { closedCalled = true }, nil
-		}
-
-		t.Setenv("POSTGRES_URL", "")
-		cfg := CLIConfig{
-			Command:  "get",
-			Session:  "sess-direct-get",
-			Step:     1,
-			Context:  2,
-			DirectDB: true,
-		}
-		res, err := executeGetDirectDB(context.Background(), cfg)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !closedCalled {
-			t.Errorf("expected closeFn to be called")
-		}
-		if res.SessionID != "sess-direct-get" {
-			t.Errorf("expected session sess-direct-get, got %s", res.SessionID)
-		}
-		if !strings.Contains(calledWithURL, "aerial-postgres:5432") {
-			t.Errorf("expected default postgres url, got %s", calledWithURL)
 		}
 	})
 }
@@ -1082,30 +973,4 @@ func TestJSONMarshalIndentErrors(t *testing.T) {
 			t.Fatalf("expected marshal error in get json, got %v", err)
 		}
 	})
-}
-
-func TestNewDirectStoreFnSuccess(t *testing.T) {
-	oldInit := openDBFn
-	defer func() { openDBFn = oldInit }()
-
-	sqlDB, err := sql.Open("pgx", "postgres://user:pass@127.0.0.1:5432/aerial?sslmode=disable")
-	if err != nil {
-		t.Fatalf("failed creating test sql.DB: %v", err)
-	}
-
-	openDBFn = func(dsn string) (*sql.DB, error) {
-		return sqlDB, nil
-	}
-
-	store, closeFn, err := newDirectStoreFn("postgres://mock")
-	if err != nil {
-		t.Fatalf("unexpected error from newDirectStoreFn: %v", err)
-	}
-	if store == nil {
-		t.Fatal("expected non-nil store")
-	}
-	if closeFn == nil {
-		t.Fatal("expected non-nil closeFn")
-	}
-	closeFn()
 }

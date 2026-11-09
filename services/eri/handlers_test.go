@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -675,6 +676,9 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 		SessionID: "sess-mux-1",
 		Summary:   "Triaged container restart in aerial",
 	})
+	_ = fake.BatchInsertTranscriptSteps(context.Background(), []db.TranscriptStep{
+		{SessionID: "sess-mux-1", StepIndex: 0, StepType: "tool_call", ToolName: "Bash", ToolKind: "shell", Content: "kubectl rollout restart"},
+	})
 	errStore := &errTranscriptStore{FakeStore: dbtest.NewFakeStore()}
 	embedderCalled := false
 	embedder := func(ctx context.Context, text string) ([]float32, error) {
@@ -737,14 +741,63 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 		}
 	})
 
-	t.Run("stats success", func(t *testing.T) {
-		w := runHTTP(handleTranscriptStats(fake), http.MethodGet, "/api/transcripts/stats", nil)
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	for _, tc := range []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{"stats all stacks", "/api/transcripts/stats", `{"stacks":[{"stack":"fake","sessions":1,"steps":1}],"status":"ok","total_sessions":1,"total_steps":1}`},
+		{"stats filtered to other stack", "/api/transcripts/stats?stack=elsewhere", `{"stacks":[],"status":"ok","total_sessions":0,"total_steps":0}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := runHTTP(handleTranscriptStats(fake), http.MethodGet, tc.target, nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+			}
+			if got := strings.TrimSpace(w.Body.String()); got != tc.want {
+				t.Fatalf("stats body = %s, want %s", got, tc.want)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name       string
+		target     string
+		wantStacks []string
+	}{
+		{"steps all stacks", "/api/transcripts/steps?session=sess-mux-1&step=0", []string{"fake"}},
+		{"steps own stack", "/api/transcripts/steps?session=sess-mux-1&step=0&stack=fake", []string{"fake"}},
+		{"steps other stack is empty", "/api/transcripts/steps?session=sess-mux-1&step=0&stack=elsewhere", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := runHTTP(handleTranscriptSteps(fake), http.MethodGet, tc.target, nil)
+			var res transcript.StepWindowResult
+			if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || w.Code != http.StatusOK {
+				t.Fatalf("got %d %s err=%v", w.Code, w.Body.String(), err)
+			}
+			gotStacks := make([]string, 0, len(res.Steps))
+			for _, st := range res.Steps {
+				gotStacks = append(gotStacks, st.Stack)
+			}
+			if !slices.Equal(gotStacks, tc.wantStacks) {
+				t.Errorf("step stacks = %v, want %v", gotStacks, tc.wantStacks)
+			}
+		})
+	}
+
+	t.Run("search tool kind matches native name", func(t *testing.T) {
+		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&tool=shell", nil)
+		var res transcript.SearchResult
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || len(res.Steps) != 1 || res.Steps[0].ToolName != "Bash" || res.Steps[0].ToolKind != "shell" || res.Steps[0].Stack != "fake" {
+			t.Fatalf("unexpected steps: %d %+v err=%v", w.Code, res, err)
 		}
-		var stats map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &stats); err != nil || stats["total_sessions"] != float64(1) || stats["status"] != "ok" {
-			t.Fatalf("unexpected stats: %+v, err: %v", stats, err)
+	})
+
+	t.Run("search filtered to other stack", func(t *testing.T) {
+		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?q=container&stack=elsewhere", nil)
+		var res transcript.SearchResult
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || w.Code != http.StatusOK || res.Total != 0 {
+			t.Fatalf("expected empty 200 result, got %d %+v err=%v", w.Code, res, err)
 		}
 	})
 
@@ -762,8 +815,8 @@ type errTranscriptStore struct {
 	*dbtest.FakeStore
 }
 
-func (e *errTranscriptStore) GetSessionSyncStates(ctx context.Context) (map[string]db.SessionSyncState, error) {
-	return nil, errors.New("simulated sync states db error")
+func (e *errTranscriptStore) GetTranscriptStats(ctx context.Context, stack string) ([]db.TranscriptStackStats, error) {
+	return nil, errors.New("simulated transcript stats error")
 }
 
 func (e *errTranscriptStore) SearchTranscriptSteps(ctx context.Context, stack, query, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]db.TranscriptStep, error) {

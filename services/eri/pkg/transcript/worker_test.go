@@ -388,9 +388,9 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 					}
 				}
 				if tc.wantSummaryText != "" {
-					res, err := SearchTranscripts(ctx, store, embedder, tc.wantSummaryText, "sessions", "", "", 10)
+					res, err := ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{Query: tc.wantSummaryText, Mode: "sessions", Limit: 10})
 					if err != nil || len(res.Sessions) == 0 {
-						t.Fatalf("SearchTranscripts(%q) err=%v, sessions=%d", tc.wantSummaryText, err, len(res.Sessions))
+						t.Fatalf("ExecuteTranscriptSearch(%q) err=%v, sessions=%d", tc.wantSummaryText, err, len(res.Sessions))
 					}
 					if res.Sessions[0].Summary != tc.wantSummaryText {
 						t.Errorf("summary = %q, want %q", res.Sessions[0].Summary, tc.wantSummaryText)

@@ -300,6 +300,7 @@ func newSearchTestStore(t *testing.T, seedCase int) *dbtest.FakeStore {
 				StepIndex: 1,
 				StepType:  "TOOL",
 				ToolName:  "run_command",
+				ToolKind:  "shell",
 				Content:   "go run ./scripts/migrate.go --up",
 			},
 		})
@@ -334,7 +335,7 @@ func newSearchTestStore(t *testing.T, seedCase int) *dbtest.FakeStore {
 	return store
 }
 
-func TestSearchTranscripts(t *testing.T) {
+func TestExecuteTranscriptSearch(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -345,6 +346,7 @@ func TestSearchTranscripts(t *testing.T) {
 		cancelCtx    bool
 		nilCtx       bool
 		embedderType string
+		stack        string
 		query        string
 		mode         string
 		sessionID    string
@@ -396,6 +398,27 @@ func TestSearchTranscripts(t *testing.T) {
 			wantSessions: 0,
 			wantSteps:    1,
 			wantTotal:    1,
+		},
+		{
+			name:         "tool kind filter matches native tool name",
+			seedCase:     2,
+			query:        "migrate.go",
+			mode:         "steps",
+			toolName:     "shell",
+			limit:        5,
+			wantSessions: 0,
+			wantSteps:    1,
+			wantTotal:    1,
+		},
+		{
+			name:         "stack filter excludes other stacks",
+			seedCase:     3,
+			embedderType: "dummy",
+			stack:        "elsewhere",
+			query:        "pgvector",
+			mode:         "auto",
+			limit:        10,
+			wantMode:     "auto",
 		},
 		{
 			name:         "mode auto searches both sessions and steps with embedder",
@@ -495,7 +518,14 @@ func TestSearchTranscripts(t *testing.T) {
 				}
 			}
 
-			res, err := SearchTranscripts(ctx, store, embedder, tc.query, tc.mode, tc.sessionID, tc.toolName, tc.limit)
+			res, err := ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{
+				Stack:         tc.stack,
+				Query:         tc.query,
+				Mode:          tc.mode,
+				SessionFilter: tc.sessionID,
+				ToolFilter:    tc.toolName,
+				Limit:         tc.limit,
+			})
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil")
@@ -506,22 +536,20 @@ func TestSearchTranscripts(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("SearchTranscripts() unexpected error: %v", err)
+				t.Fatalf("ExecuteTranscriptSearch() unexpected error: %v", err)
 			}
 
 			if tc.wantMode != "" && res.Mode != tc.wantMode {
 				t.Errorf("expected Mode %q, got %q", tc.wantMode, res.Mode)
 			}
-			if tc.wantSessions != 0 || tc.wantSteps != 0 || tc.wantTotal != 0 {
-				if len(res.Sessions) != tc.wantSessions {
-					t.Errorf("expected %d sessions, got %d", tc.wantSessions, len(res.Sessions))
-				}
-				if len(res.Steps) != tc.wantSteps {
-					t.Errorf("expected %d steps, got %d", tc.wantSteps, len(res.Steps))
-				}
-				if res.Total != tc.wantTotal {
-					t.Errorf("expected Total %d, got %d", tc.wantTotal, res.Total)
-				}
+			if len(res.Sessions) != tc.wantSessions {
+				t.Errorf("expected %d sessions, got %d", tc.wantSessions, len(res.Sessions))
+			}
+			if len(res.Steps) != tc.wantSteps {
+				t.Errorf("expected %d steps, got %d", tc.wantSteps, len(res.Steps))
+			}
+			if res.Total != tc.wantTotal {
+				t.Errorf("expected Total %d, got %d", tc.wantTotal, res.Total)
 			}
 			if tc.mode == "steps" && tc.sessionID != "" && len(res.Steps) > 0 {
 				if res.Steps[0].SessionID != tc.sessionID {
