@@ -192,6 +192,7 @@ type BrainAppOption func(*brainAppOptions)
 
 type brainAppOptions struct {
 	store          db.Store
+	txStore        db.TranscriptStore
 	processSpawner runner.DaemonSpawner
 	hupChan        <-chan os.Signal
 	onReload       func(source string)
@@ -695,6 +696,7 @@ func setupDiscordFunnel(
 func startLeaderHandoff(
 	ctx context.Context,
 	store db.Store,
+	txStore db.TranscriptStore,
 	pool *queue.WorkerPool,
 	allPools []runner.AgentPool,
 	ephemeralPool interface {
@@ -733,7 +735,7 @@ func startLeaderHandoff(
 			rawLLM = ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer")
 		}
 		syncLLM := buildSyncLLM(rawLLM, cur.LowEffortModel, cur.Model)
-		transcript.StartTranscriptSync(leaderCtx, store, cfg, "", syncLLM, 5*time.Minute)
+		transcript.StartTranscriptSync(leaderCtx, txStore, cfg, "", syncLLM, 5*time.Minute)
 	}()
 
 	stopHandoff := func() {
@@ -933,8 +935,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}
 
 	var store db.Store
+	var txStore db.TranscriptStore
 	if appOpts.store != nil {
-		store = appOpts.store
+		store, txStore = appOpts.store, appOpts.txStore
 	} else {
 		database, err := openDefaultDB(cfg)
 		if err != nil {
@@ -946,9 +949,13 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 			}
 		}()
 		store = db.NewSQLStore(database)
+		// Built once; resolves the shared transcript index JIT from cfg so hot-reloads retarget it.
+		txStore = db.NewRoutedTranscriptStore(cfg, database, db.Open)
 		defer func() {
-			if closer, ok := store.(io.Closer); ok {
-				_ = closer.Close()
+			for _, s := range []any{txStore, store} {
+				if closer, ok := s.(io.Closer); ok {
+					_ = closer.Close()
+				}
 			}
 		}()
 	}
@@ -1008,7 +1015,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 			return txEmbedder.GenerateEmbedding(eCtx, text, false, 1)
 		}
 	}
-	mux := SetupBrainMuxWithEmbedder(store, pool, embedder, sessionMgr.Roots()...)
+	mux := SetupBrainMuxWithEmbedder(store, txStore, pool, embedder, sessionMgr.Roots()...)
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cur.Port)
@@ -1021,7 +1028,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	leaderErrCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, pool, allPools, ephemeralPool, cfg, cur)
+	leaderErrCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, txStore, pool, allPools, ephemeralPool, cfg, cur)
 	releaseLeaderLock = releaseLock
 	defer stopHandoff()
 

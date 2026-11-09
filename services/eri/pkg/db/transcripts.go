@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -54,7 +55,7 @@ func scanSessionSummaries(rows *sql.Rows) ([]SessionSummary, error) {
 	return scanRows(rows, func(r *sql.Rows) (SessionSummary, error) {
 		var sm SessionSummary
 		var rawMtime, rawCreatedAt, rawUpdatedAt any
-		if err := r.Scan(&sm.SessionID, &sm.ThreadID, &sm.Summary, &sm.LastIndexedStep,
+		if err := r.Scan(&sm.Stack, &sm.SessionID, &sm.Engine, &sm.ThreadID, &sm.Summary, &sm.LastIndexedStep,
 			&rawMtime, &sm.SummaryStepWatermark, &sm.IsSettled,
 			&rawCreatedAt, &rawUpdatedAt, &sm.Score); err != nil {
 			return SessionSummary{}, fmt.Errorf("scan session summary result: %w", err)
@@ -76,8 +77,8 @@ func scanTranscriptSteps(rows *sql.Rows) ([]TranscriptStep, error) {
 	return scanRows(rows, func(r *sql.Rows) (TranscriptStep, error) {
 		var step TranscriptStep
 		var rawCreatedAt any
-		if err := r.Scan(&step.SessionID, &step.StepIndex, &step.StepType, &step.ToolName,
-			&step.Content, &rawCreatedAt, &step.RankScore); err != nil {
+		if err := r.Scan(&step.Stack, &step.SessionID, &step.Engine, &step.StepIndex, &step.StepType, &step.ToolName,
+			&step.ToolKind, &step.Content, &rawCreatedAt, &step.RankScore); err != nil {
 			return TranscriptStep{}, fmt.Errorf("scan transcript step result: %w", err)
 		}
 		if t, ok := ParseDBTime(rawCreatedAt); ok {
@@ -87,15 +88,46 @@ func scanTranscriptSteps(rows *sql.Rows) ([]TranscriptStep, error) {
 	})
 }
 
-func (s *SQLStore) GetSessionSyncStates(ctx context.Context) (results map[string]SessionSyncState, err error) {
-	defer recordTranscriptQuery("get_session_sync_states", time.Now(), &err)
+// SQLTranscriptStore persists transcript rows into a (possibly shared) transcript index.
+// Writes are always scoped to stack; reads take an explicit stack filter where empty means all stacks.
+type SQLTranscriptStore struct {
+	db    DBTX
+	stack string
+}
+
+// NewSQLTranscriptStore binds a transcript store to database, writing rows labeled with stack.
+// An empty stack yields a read-only store.
+func NewSQLTranscriptStore(database DBTX, stack string) *SQLTranscriptStore {
+	return &SQLTranscriptStore{db: database, stack: strings.TrimSpace(stack)}
+}
+
+func (s *SQLTranscriptStore) checkDB() error {
+	if s == nil || isDBTXNil(s.db) {
+		return ErrNilDatabase
+	}
+	return nil
+}
+
+// checkWriter guards stack-scoped writes: a read-only store (empty stack) can search but never write.
+func (s *SQLTranscriptStore) checkWriter() error {
 	if err := s.checkDB(); err != nil {
+		return err
+	}
+	if s.stack == "" {
+		return fmt.Errorf("transcript store stack cannot be empty for stack-scoped writes")
+	}
+	return nil
+}
+
+func (s *SQLTranscriptStore) GetSessionSyncStates(ctx context.Context) (results map[string]SessionSyncState, err error) {
+	defer recordTranscriptQuery("get_session_sync_states", time.Now(), &err)
+	if err := s.checkWriter(); err != nil {
 		return nil, err
 	}
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	rows, err := s.db.QueryContext(queryCtx, `SELECT session_id, last_mtime, last_indexed_step, is_settled FROM session_summaries`)
+	rows, err := s.db.QueryContext(queryCtx, `SELECT session_id, engine, last_mtime, last_indexed_step, is_settled FROM session_summaries WHERE stack = $1`, s.stack)
 	if err != nil {
 		return nil, fmt.Errorf("query session sync states: %w", err)
 	}
@@ -104,19 +136,19 @@ func (s *SQLStore) GetSessionSyncStates(ctx context.Context) (results map[string
 	results = make(map[string]SessionSyncState)
 	for rows.Next() {
 		var (
-			id        string
-			rawMtime  any
-			lastStep  int
-			isSettled bool
+			id, engine string
+			rawMtime   any
+			lastStep   int
+			isSettled  bool
 		)
-		if err := rows.Scan(&id, &rawMtime, &lastStep, &isSettled); err != nil {
+		if err := rows.Scan(&id, &engine, &rawMtime, &lastStep, &isSettled); err != nil {
 			return nil, fmt.Errorf("scan session sync state: %w", err)
 		}
 		var mtime time.Time
 		if t, ok := ParseDBTime(rawMtime); ok {
 			mtime = t
 		}
-		results[id] = SessionSyncState{SessionID: id, LastMtime: mtime, LastIndexedStep: lastStep, IsSettled: isSettled}
+		results[id] = SessionSyncState{SessionID: id, Engine: engine, LastMtime: mtime, LastIndexedStep: lastStep, IsSettled: isSettled}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate session sync states: %w", err)
@@ -124,9 +156,9 @@ func (s *SQLStore) GetSessionSyncStates(ctx context.Context) (results map[string
 	return results, nil
 }
 
-func (s *SQLStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) (err error) {
+func (s *SQLTranscriptStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) (err error) {
 	defer recordTranscriptQuery("upsert_session_summary", time.Now(), &err)
-	if err := s.checkDB(); err != nil {
+	if err := s.checkWriter(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(summary.SessionID) == "" {
@@ -146,10 +178,11 @@ func (s *SQLStore) UpsertSessionSummary(ctx context.Context, summary SessionSumm
 	}
 
 	query := `INSERT INTO session_summaries (
-		session_id, thread_id, summary, embedding, last_indexed_step, last_mtime,
+		stack, session_id, engine, thread_id, summary, embedding, last_indexed_step, last_mtime,
 		summary_step_watermark, is_settled, created_at, updated_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	ON CONFLICT (session_id) DO UPDATE SET
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	ON CONFLICT (stack, session_id) DO UPDATE SET
+		engine = CASE WHEN EXCLUDED.engine != '' THEN EXCLUDED.engine ELSE session_summaries.engine END,
 		thread_id = CASE WHEN EXCLUDED.thread_id != '' THEN EXCLUDED.thread_id ELSE session_summaries.thread_id END,
 		summary = CASE WHEN EXCLUDED.summary != '' THEN EXCLUDED.summary ELSE session_summaries.summary END,
 		embedding = CASE WHEN EXCLUDED.embedding IS NOT NULL THEN EXCLUDED.embedding ELSE session_summaries.embedding END,
@@ -159,16 +192,34 @@ func (s *SQLStore) UpsertSessionSummary(ctx context.Context, summary SessionSumm
 		is_settled = CASE WHEN EXCLUDED.is_settled THEN TRUE WHEN EXCLUDED.last_indexed_step > session_summaries.summary_step_watermark AND session_summaries.summary_step_watermark >= 0 THEN FALSE ELSE session_summaries.is_settled END,
 		updated_at = EXCLUDED.updated_at;`
 
-	_, err = s.db.ExecContext(queryCtx, query, summary.SessionID, summary.ThreadID, summary.Summary, optionalVectorArg(summary.Embedding), summary.LastIndexedStep, mtimeVal, summary.SummaryStepWatermark, summary.IsSettled, createdAt, now)
+	_, err = s.db.ExecContext(queryCtx, query, s.stack, summary.SessionID, summary.Engine, summary.ThreadID, summary.Summary, optionalVectorArg(summary.Embedding), summary.LastIndexedStep, mtimeVal, summary.SummaryStepWatermark, summary.IsSettled, createdAt, now)
 	if err != nil {
 		return fmt.Errorf("upsert session summary failed: %w", err)
 	}
 	return nil
 }
 
-func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) (err error) {
+// SetSessionEngine stamps the engine on an existing local-stack session without touching its sync state.
+func (s *SQLTranscriptStore) SetSessionEngine(ctx context.Context, sessionID, engine string) (err error) {
+	defer recordTranscriptQuery("set_session_engine", time.Now(), &err)
+	if err := s.checkWriter(); err != nil {
+		return err
+	}
+	sessionID, engine = strings.TrimSpace(sessionID), strings.TrimSpace(engine)
+	if sessionID == "" || engine == "" {
+		return fmt.Errorf("session ID and engine cannot be empty")
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := s.db.ExecContext(queryCtx, `UPDATE session_summaries SET engine = $1 WHERE stack = $2 AND session_id = $3`, engine, s.stack, sessionID); err != nil {
+		return fmt.Errorf("set session engine failed: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLTranscriptStore) BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) (err error) {
 	defer recordTranscriptQuery("batch_insert_transcript_steps", time.Now(), &err)
-	if err := s.checkDB(); err != nil {
+	if err := s.checkWriter(); err != nil {
 		return err
 	}
 	if len(steps) == 0 {
@@ -187,12 +238,12 @@ func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []Trans
 	queryCtx, cancel := withTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	const batchSize = 100
+	const batchSize, cols = 100, 9
 	for i := 0; i < len(validSteps); i += batchSize {
 		end := min(i+batchSize, len(validSteps))
 		chunk := validSteps[i:end]
 		valStrings := make([]string, 0, len(chunk))
-		valArgs := make([]any, 0, len(chunk)*6)
+		valArgs := make([]any, 0, len(chunk)*cols)
 		now := time.Now().UTC()
 
 		for j, st := range chunk {
@@ -200,13 +251,16 @@ func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []Trans
 			if createdAt.IsZero() {
 				createdAt = now
 			}
-			p := j * 6
-			valStrings = append(valStrings, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)", p+1, p+2, p+3, p+4, p+5, p+6))
-			valArgs = append(valArgs, st.SessionID, st.StepIndex, st.StepType, st.ToolName, st.Content, createdAt)
+			placeholders := make([]string, cols)
+			for k := range placeholders {
+				placeholders[k] = fmt.Sprintf("$%d", j*cols+k+1)
+			}
+			valStrings = append(valStrings, "("+strings.Join(placeholders, ", ")+")")
+			valArgs = append(valArgs, s.stack, st.SessionID, st.StepIndex, st.StepType, st.ToolName, st.ToolKind, st.ToolCallID, st.Content, createdAt)
 		}
 
-		query := fmt.Sprintf(`INSERT INTO transcript_steps (session_id, step_index, step_type, tool_name, content, created_at)
-		VALUES %s ON CONFLICT (session_id, step_index) DO NOTHING;`, strings.Join(valStrings, ", "))
+		query := fmt.Sprintf(`INSERT INTO transcript_steps (stack, session_id, step_index, step_type, tool_name, tool_kind, tool_call_id, content, created_at)
+		VALUES %s ON CONFLICT (stack, session_id, step_index) DO NOTHING;`, strings.Join(valStrings, ", "))
 
 		if _, err := s.db.ExecContext(queryCtx, query, valArgs...); err != nil {
 			return fmt.Errorf("batch insert transcript steps chunk failed: %w", err)
@@ -215,11 +269,52 @@ func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []Trans
 	return nil
 }
 
-func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) (results []SessionSummary, err error) {
+// BackfillToolKinds fills tool_kind for local-stack steps ingested before normalization existed,
+// issuing one UPDATE per distinct unmapped tool_name. It returns the number of rows updated.
+func (s *SQLTranscriptStore) BackfillToolKinds(ctx context.Context, mapper func(string) string) (updated int64, err error) {
+	defer recordTranscriptQuery("backfill_tool_kinds", time.Now(), &err)
+	if err := s.checkWriter(); err != nil {
+		return 0, err
+	}
+	if mapper == nil {
+		return 0, fmt.Errorf("tool kind mapper cannot be nil")
+	}
+	queryCtx, cancel := withTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(queryCtx, `SELECT DISTINCT tool_name FROM transcript_steps WHERE stack = $1 AND tool_kind = '' AND tool_name <> ''`, s.stack)
+	if err != nil {
+		return 0, fmt.Errorf("query unmapped tool names: %w", err)
+	}
+	names, err := scanNonEmptyStrings(rows)
+	if err != nil {
+		return 0, fmt.Errorf("scan unmapped tool names: %w", err)
+	}
+	for _, name := range names {
+		kind := mapper(name)
+		if kind == "" {
+			continue
+		}
+		res, err := s.db.ExecContext(queryCtx, `UPDATE transcript_steps SET tool_kind = $1 WHERE stack = $2 AND tool_kind = '' AND tool_name = $3`, kind, s.stack, name)
+		if err != nil {
+			return updated, fmt.Errorf("backfill tool kind for %q: %w", name, err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			updated += n
+		}
+	}
+	return updated, nil
+}
+
+const sessionSummaryColumns = `s.stack, s.session_id, s.engine, s.thread_id, s.summary, s.last_indexed_step, s.last_mtime,
+			s.summary_step_watermark, s.is_settled, s.created_at, s.updated_at`
+
+func (s *SQLTranscriptStore) SearchSessionSummaries(ctx context.Context, stack string, embedding []float32, queryText string, limit int, minScore float64) (results []SessionSummary, err error) {
 	defer recordTranscriptQuery("search_session_summaries", time.Now(), &err)
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
+	stack = strings.TrimSpace(stack)
 	hasEmbedding, queryText := len(embedding) == ExpectedEmbeddingDim, strings.TrimSpace(queryText)
 	if !hasEmbedding && queryText == "" {
 		return nil, nil
@@ -235,61 +330,104 @@ func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float
 
 	candidateLimit := max(limit*3, 30)
 
+	// $1 is always the stack filter (empty matches every stack) so all variants share one predicate.
+	const stackPred = "($1 = '' OR ss.stack = $1)"
 	var query string
-	var rows *sql.Rows
+	var args []any
 
 	switch {
 	case hasEmbedding && queryText != "":
 		query = `WITH vector_hits AS (
-			SELECT session_id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank
-			FROM session_summaries WHERE embedding IS NOT NULL ORDER BY embedding <=> $1 LIMIT $2
+			SELECT ss.stack, ss.session_id, ROW_NUMBER() OVER (ORDER BY ss.embedding <=> $2) AS rank
+			FROM session_summaries ss WHERE ss.embedding IS NOT NULL AND ` + stackPred + ` ORDER BY ss.embedding <=> $2 LIMIT $3
 		), text_hits AS (
-			SELECT session_id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $3)) DESC) AS rank
-			FROM session_summaries WHERE fts_tokens @@ websearch_to_tsquery('simple', $3) LIMIT $2
+			SELECT ss.stack, ss.session_id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(ss.fts_tokens, websearch_to_tsquery('simple', $4)) DESC) AS rank
+			FROM session_summaries ss WHERE ss.fts_tokens @@ websearch_to_tsquery('simple', $4) AND ` + stackPred + ` LIMIT $3
 		)
-		SELECT s.session_id, s.thread_id, s.summary, s.last_indexed_step, s.last_mtime, 
-			s.summary_step_watermark, s.is_settled, s.created_at, s.updated_at,
+		SELECT ` + sessionSummaryColumns + `,
 			((COALESCE(0.5 / (60.0 + v.rank), 0.0) + COALESCE(0.5 / (60.0 + t.rank), 0.0)) * 60.0) AS score
-		FROM vector_hits v FULL OUTER JOIN text_hits t ON v.session_id = t.session_id
-		JOIN session_summaries s ON s.session_id = COALESCE(v.session_id, t.session_id)
-		WHERE ((COALESCE(0.5 / (60.0 + v.rank), 0.0) + COALESCE(0.5 / (60.0 + t.rank), 0.0)) * 60.0) >= $4
-		ORDER BY score DESC LIMIT $5;`
-		rows, err = s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), candidateLimit, queryText, minScore, limit)
+		FROM vector_hits v FULL OUTER JOIN text_hits t ON v.stack = t.stack AND v.session_id = t.session_id
+		JOIN session_summaries s ON s.stack = COALESCE(v.stack, t.stack) AND s.session_id = COALESCE(v.session_id, t.session_id)
+		WHERE ((COALESCE(0.5 / (60.0 + v.rank), 0.0) + COALESCE(0.5 / (60.0 + t.rank), 0.0)) * 60.0) >= $5
+		ORDER BY score DESC LIMIT $6;`
+		args = []any{stack, pgvector.NewVector(embedding), candidateLimit, queryText, minScore, limit}
 	case hasEmbedding:
 		query = `WITH candidates AS (
-			SELECT session_id, thread_id, summary, last_indexed_step, last_mtime, 
-				summary_step_watermark, is_settled, created_at, updated_at, (1.0 - (embedding <=> $1)) AS similarity
-			FROM session_summaries WHERE embedding IS NOT NULL ORDER BY embedding <=> $1 LIMIT $2
+			SELECT ss.stack, ss.session_id, (1.0 - (ss.embedding <=> $2)) AS similarity
+			FROM session_summaries ss WHERE ss.embedding IS NOT NULL AND ` + stackPred + ` ORDER BY ss.embedding <=> $2 LIMIT $3
 		)
-		SELECT session_id, thread_id, summary, last_indexed_step, last_mtime, 
-			summary_step_watermark, is_settled, created_at, updated_at, similarity AS score
-		FROM candidates WHERE similarity >= $3 ORDER BY similarity DESC LIMIT $4;`
-		rows, err = s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), candidateLimit, minScore, limit)
+		SELECT ` + sessionSummaryColumns + `, c.similarity AS score
+		FROM candidates c JOIN session_summaries s ON s.stack = c.stack AND s.session_id = c.session_id
+		WHERE c.similarity >= $4 ORDER BY c.similarity DESC LIMIT $5;`
+		args = []any{stack, pgvector.NewVector(embedding), candidateLimit, minScore, limit}
 	default:
 		query = `WITH text_hits AS (
-			SELECT session_id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $1)) DESC) AS rank
-			FROM session_summaries WHERE fts_tokens @@ websearch_to_tsquery('simple', $1) LIMIT $2
+			SELECT ss.stack, ss.session_id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(ss.fts_tokens, websearch_to_tsquery('simple', $2)) DESC) AS rank
+			FROM session_summaries ss WHERE ss.fts_tokens @@ websearch_to_tsquery('simple', $2) AND ` + stackPred + ` LIMIT $3
 		)
-		SELECT s.session_id, s.thread_id, s.summary, s.last_indexed_step, s.last_mtime, 
-			s.summary_step_watermark, s.is_settled, s.created_at, s.updated_at, (1.0 / (60.0 + t.rank) * 60.0) AS score
-		FROM text_hits t JOIN session_summaries s ON s.session_id = t.session_id
-		WHERE (1.0 / (60.0 + t.rank) * 60.0) >= $3 ORDER BY score DESC LIMIT $4;`
-		rows, err = s.db.QueryContext(queryCtx, query, queryText, candidateLimit, minScore, limit)
+		SELECT ` + sessionSummaryColumns + `, (1.0 / (60.0 + t.rank) * 60.0) AS score
+		FROM text_hits t JOIN session_summaries s ON s.stack = t.stack AND s.session_id = t.session_id
+		WHERE (1.0 / (60.0 + t.rank) * 60.0) >= $4 ORDER BY score DESC LIMIT $5;`
+		args = []any{stack, queryText, candidateLimit, minScore, limit}
 	}
 
+	return s.querySessionSummaries(queryCtx, hasEmbedding && stack != "", query, args...)
+}
+
+// querySessionSummaries runs a summary search. When exactScan is set on PostgreSQL it disables index
+// scans for the transaction so the HNSW candidate cap cannot starve a stack-filtered vector query.
+func (s *SQLTranscriptStore) querySessionSummaries(ctx context.Context, exactScan bool, query string, args ...any) ([]SessionSummary, error) {
+	sqlDB, ok := s.db.(*sql.DB)
+	if !exactScan || !ok || !isPostgresDriver(sqlDB.Driver()) {
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("search session summaries query failed: %w", err)
+		}
+		return scanSessionSummaries(rows)
+	}
+	tx, err := sqlDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin exact-scan search tx: %w", err)
+	}
+	results, err := queryExactSessionSummaries(ctx, tx, query, args...)
+	if err != nil {
+		return nil, errors.Join(err, tx.Rollback())
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit exact-scan search tx: %w", err)
+	}
+	return results, nil
+}
+
+func queryExactSessionSummaries(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]SessionSummary, error) {
+	if _, err := tx.ExecContext(ctx, "SET LOCAL enable_indexscan = off"); err != nil {
+		return nil, fmt.Errorf("disable index scan for exact search: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search session summaries query failed: %w", err)
 	}
 	return scanSessionSummaries(rows)
 }
 
-func buildSearchTranscriptStepsQuery(queryText, sessionFilter, toolFilter string, limit int, sinceTime time.Time) (string, []any) {
+const transcriptStepFrom = `FROM transcript_steps t JOIN session_summaries s ON s.stack = t.stack AND s.session_id = t.session_id`
+
+func transcriptStepSelect(rankExpr string) string {
+	return "SELECT t.stack, t.session_id, s.engine, t.step_index, t.step_type, t.tool_name, t.tool_kind, t.content, t.created_at, " + rankExpr + " AS rank_score " + transcriptStepFrom
+}
+
+func buildSearchTranscriptStepsQuery(stack, queryText, sessionFilter, toolFilter string, limit int, sinceTime time.Time) (string, []any) {
 	var whereClauses []string
 	var args []any
 
 	if queryText != "" {
 		args = append(args, queryText)
-		whereClauses = append(whereClauses, fmt.Sprintf("fts_tokens @@ websearch_to_tsquery('simple', $%d)", len(args)))
+		whereClauses = append(whereClauses, fmt.Sprintf("t.fts_tokens @@ websearch_to_tsquery('simple', $%d)", len(args)))
+	}
+
+	if stack != "" {
+		args = append(args, stack)
+		whereClauses = append(whereClauses, fmt.Sprintf("t.stack = $%d", len(args)))
 	}
 
 	if sessionFilter != "" {
@@ -301,39 +439,39 @@ func buildSearchTranscriptStepsQuery(queryText, sessionFilter, toolFilter string
 		}
 		if len(sessions) == 1 {
 			args = append(args, sessions[0])
-			whereClauses = append(whereClauses, fmt.Sprintf("session_id = $%d", len(args)))
+			whereClauses = append(whereClauses, fmt.Sprintf("t.session_id = $%d", len(args)))
 		} else if len(sessions) > 1 {
 			placeholders := make([]string, len(sessions))
 			for i, sid := range sessions {
 				args = append(args, sid)
 				placeholders[i] = fmt.Sprintf("$%d", len(args))
 			}
-			whereClauses = append(whereClauses, fmt.Sprintf("session_id IN (%s)", strings.Join(placeholders, ", ")))
+			whereClauses = append(whereClauses, fmt.Sprintf("t.session_id IN (%s)", strings.Join(placeholders, ", ")))
 		}
 	}
 
 	if toolFilter != "" {
 		args = append(args, toolFilter)
-		whereClauses = append(whereClauses, fmt.Sprintf("tool_name = $%d", len(args)))
+		whereClauses = append(whereClauses, fmt.Sprintf("t.tool_name = $%d", len(args)))
 	}
 
 	if !sinceTime.IsZero() {
 		args = append(args, sinceTime)
-		whereClauses = append(whereClauses, fmt.Sprintf("created_at > $%d", len(args)))
+		whereClauses = append(whereClauses, fmt.Sprintf("t.created_at > $%d", len(args)))
 	}
 
 	var selectClause string
 	var orderClause string
 
 	if queryText != "" {
-		selectClause = "SELECT session_id, step_index, step_type, tool_name, content, created_at, ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $1)) AS rank_score FROM transcript_steps"
-		orderClause = "ORDER BY rank_score DESC, created_at DESC"
+		selectClause = transcriptStepSelect("ts_rank_cd(t.fts_tokens, websearch_to_tsquery('simple', $1))")
+		orderClause = "ORDER BY rank_score DESC, t.created_at DESC"
 	} else {
-		selectClause = "SELECT session_id, step_index, step_type, tool_name, content, created_at, 1.0 AS rank_score FROM transcript_steps"
+		selectClause = transcriptStepSelect("1.0")
 		if !sinceTime.IsZero() {
-			orderClause = "ORDER BY created_at ASC, step_index ASC"
+			orderClause = "ORDER BY t.created_at ASC, t.step_index ASC"
 		} else {
-			orderClause = "ORDER BY created_at DESC"
+			orderClause = "ORDER BY t.created_at DESC"
 		}
 	}
 
@@ -346,11 +484,12 @@ func buildSearchTranscriptStepsQuery(queryText, sessionFilter, toolFilter string
 	return query, args
 }
 
-func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) (results []TranscriptStep, err error) {
+func (s *SQLTranscriptStore) SearchTranscriptSteps(ctx context.Context, stack, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) (results []TranscriptStep, err error) {
 	defer recordTranscriptQuery("search_transcript_steps", time.Now(), &err)
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
+	stack = strings.TrimSpace(stack)
 	queryText, sessionFilter, toolFilter = strings.TrimSpace(queryText), strings.TrimSpace(sessionFilter), strings.TrimSpace(toolFilter)
 	var sinceTime time.Time
 	if len(since) > 0 {
@@ -365,7 +504,7 @@ func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, session
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	query, args := buildSearchTranscriptStepsQuery(queryText, sessionFilter, toolFilter, limit, sinceTime)
+	query, args := buildSearchTranscriptStepsQuery(stack, queryText, sessionFilter, toolFilter, limit, sinceTime)
 
 	rows, err := s.db.QueryContext(queryCtx, query, args...)
 	if err != nil {
@@ -374,12 +513,12 @@ func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, session
 	return scanTranscriptSteps(rows)
 }
 
-func (s *SQLStore) GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) (results []TranscriptStep, err error) {
+func (s *SQLTranscriptStore) GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) (results []TranscriptStep, err error) {
 	defer recordTranscriptQuery("get_transcript_step_range", time.Now(), &err)
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
-	sessionID = strings.TrimSpace(sessionID)
+	stack, sessionID = strings.TrimSpace(stack), strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return nil, nil
 	}
@@ -392,11 +531,10 @@ func (s *SQLStore) GetTranscriptStepRange(ctx context.Context, sessionID string,
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	query := `SELECT session_id, step_index, step_type, tool_name, content, created_at, 1.0 AS rank_score
-FROM transcript_steps
-WHERE session_id = $1 AND step_index BETWEEN $2 AND $3
-ORDER BY step_index ASC;`
-	rows, err := s.db.QueryContext(queryCtx, query, sessionID, startStep, endStep)
+	query := transcriptStepSelect("1.0") + `
+WHERE t.session_id = $1 AND t.step_index BETWEEN $2 AND $3 AND ($4 = '' OR t.stack = $4)
+ORDER BY t.stack ASC, t.step_index ASC;`
+	rows, err := s.db.QueryContext(queryCtx, query, sessionID, startStep, endStep, stack)
 	if err != nil {
 		return nil, fmt.Errorf("get transcript step range query failed: %w", err)
 	}

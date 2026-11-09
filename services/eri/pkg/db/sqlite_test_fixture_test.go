@@ -95,7 +95,9 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_status_created_at ON dispatches(status
 CREATE INDEX IF NOT EXISTS idx_dispatches_session_status ON dispatches(session_id, status);
 CREATE INDEX IF NOT EXISTS idx_dispatches_session_row_id ON dispatches(session_id, row_id);
 CREATE TABLE IF NOT EXISTS session_summaries (
-    session_id TEXT PRIMARY KEY,
+    stack TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    engine TEXT NOT NULL DEFAULT '',
     thread_id TEXT NOT NULL DEFAULT '',
     summary TEXT NOT NULL DEFAULT '',
     embedding BLOB,
@@ -104,20 +106,26 @@ CREATE TABLE IF NOT EXISTS session_summaries (
     summary_step_watermark INTEGER NOT NULL DEFAULT -1,
     is_settled BOOLEAN NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (stack, session_id)
 );
+CREATE INDEX IF NOT EXISTS idx_session_summaries_stack_mtime ON session_summaries(stack, last_mtime);
 CREATE INDEX IF NOT EXISTS idx_session_summaries_mtime ON session_summaries(last_mtime);
 CREATE INDEX IF NOT EXISTS idx_session_summaries_thread ON session_summaries(thread_id);
 CREATE TABLE IF NOT EXISTS transcript_steps (
+    stack TEXT NOT NULL,
     session_id TEXT NOT NULL,
     step_index INTEGER NOT NULL,
     step_type TEXT NOT NULL DEFAULT '',
     tool_name TEXT NOT NULL DEFAULT '',
+    tool_kind TEXT NOT NULL DEFAULT '',
+    tool_call_id TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (session_id, step_index),
-    FOREIGN KEY (session_id) REFERENCES session_summaries(session_id) ON DELETE CASCADE
+    PRIMARY KEY (stack, session_id, step_index),
+    FOREIGN KEY (stack, session_id) REFERENCES session_summaries(stack, session_id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool_kind ON transcript_steps(tool_kind);
 CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_name);`
 
 func initSchemaSQLite(database *sql.DB) error {

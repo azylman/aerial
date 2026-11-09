@@ -489,7 +489,7 @@ func TestRunCLI_HTTPGet(t *testing.T) {
 
 		oldFn := newDirectStoreFn
 		defer func() { newDirectStoreFn = oldFn }()
-		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
+		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
 			return fake, func() {}, nil
 		}
 
@@ -506,7 +506,7 @@ func TestRunCLI_HTTPGet(t *testing.T) {
 	t.Run("DirectDBErrorWithMock", func(t *testing.T) {
 		oldFn := newDirectStoreFn
 		defer func() { newDirectStoreFn = oldFn }()
-		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
+		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
 			return nil, nil, errors.New("simulated store open failure")
 		}
 
@@ -653,7 +653,7 @@ func TestRunCLI_HTTPSearch(t *testing.T) {
 			SessionID: "sess-direct-1",
 			Summary:   "Direct DB matched session",
 		})
-		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
+		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
 			return fake, func() {}, nil
 		}
 
@@ -843,7 +843,7 @@ func TestDirectStoreAndRunCLIEdges(t *testing.T) {
 		oldFn := newDirectStoreFn
 		defer func() { newDirectStoreFn = oldFn }()
 
-		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
+		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
 			return nil, nil, fmt.Errorf("simulated direct DB error")
 		}
 
@@ -906,7 +906,7 @@ func TestDirectStoreAndRunCLIEdges(t *testing.T) {
 
 		calledWithURL := ""
 		closedCalled := false
-		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
+		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
 			calledWithURL = pgURL
 			fake := dbtest.NewFakeStore()
 			return fake, func() { closedCalled = true }, nil
@@ -940,7 +940,7 @@ func TestDirectStoreAndRunCLIEdges(t *testing.T) {
 
 		calledWithURL := ""
 		closedCalled := false
-		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
+		newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
 			calledWithURL = pgURL
 			fake := dbtest.NewFakeStore()
 			return fake, func() { closedCalled = true }, nil

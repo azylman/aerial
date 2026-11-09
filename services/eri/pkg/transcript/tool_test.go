@@ -699,7 +699,7 @@ func TestGetTranscriptStepWindow(t *testing.T) {
 				}
 			}
 
-			res, err := GetTranscriptStepWindow(ctx, store, tc.sessionID, tc.stepIndex, tc.context)
+			res, err := GetTranscriptStepWindow(ctx, store, "", tc.sessionID, tc.stepIndex, tc.context)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil")

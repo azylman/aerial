@@ -464,10 +464,10 @@ func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {
 	}
 	steps := []db.TranscriptStep{{SessionID: "sess-1", StepIndex: 0, StepType: "user", Content: "launch aerial"}, {SessionID: "sess-1", StepIndex: 1, StepType: "assistant", ToolName: "fly", Content: "flying aerial"}}
 	mustOK(t, s.BatchInsertTranscriptSteps(ctx, steps), "BatchInsertTranscriptSteps")
-	if stepResults, _ := s.SearchTranscriptSteps(ctx, "aerial", "sess-1", "", 10); len(stepResults) != 2 {
+	if stepResults, _ := s.SearchTranscriptSteps(ctx, "", "aerial", "sess-1", "", 10); len(stepResults) != 2 {
 		t.Errorf("SearchTranscriptSteps = %d, want 2", len(stepResults))
 	}
-	if summaries, _ := s.SearchSessionSummaries(ctx, nil, "debug", 10, 0.0); len(summaries) != 1 {
+	if summaries, _ := s.SearchSessionSummaries(ctx, "", nil, "debug", 10, 0.0); len(summaries) != 1 {
 		t.Errorf("SearchSessionSummaries = %d, want 1", len(summaries))
 	}
 }
@@ -577,7 +577,7 @@ func TestTranscriptStore_FakeStore_BatchInsertTranscriptSteps(t *testing.T) {
 		t.Fatalf("BatchInsertTranscriptSteps failed: %v", err)
 	}
 
-	results, err := store.SearchTranscriptSteps(ctx, "", "sess-steps-1", "", 10)
+	results, err := store.SearchTranscriptSteps(ctx, "", "", "sess-steps-1", "", 10)
 	if err != nil || len(results) != 3 {
 		t.Fatalf("expected 3 steps, got %d (err: %v)", len(results), err)
 	}
@@ -590,7 +590,7 @@ func TestTranscriptStore_FakeStore_BatchInsertTranscriptSteps(t *testing.T) {
 		t.Fatalf("BatchInsertTranscriptSteps with duplicates failed: %v", err)
 	}
 
-	resultsAfter, err := store.SearchTranscriptSteps(ctx, "", "sess-steps-1", "", 10)
+	resultsAfter, err := store.SearchTranscriptSteps(ctx, "", "", "sess-steps-1", "", 10)
 	if err != nil || len(resultsAfter) != 4 {
 		t.Fatalf("expected 4 steps total, got %d (err: %v)", len(resultsAfter), err)
 	}
@@ -641,7 +641,7 @@ func TestTranscriptStore_SearchSessionSummaries(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			results, err := store.SearchSessionSummaries(ctx, tc.emb, tc.query, tc.limit, tc.minScore)
+			results, err := store.SearchSessionSummaries(ctx, "", tc.emb, tc.query, tc.limit, tc.minScore)
 			if err != nil {
 				t.Fatalf("SearchSessionSummaries failed: %v", err)
 			}
@@ -660,7 +660,7 @@ func TestTranscriptStore_SearchSessionSummaries(t *testing.T) {
 	if err := store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: ""}); err == nil {
 		t.Errorf("expected error for empty sessionID on FakeStore")
 	}
-	if resScored, err := store.SearchSessionSummaries(ctx, embVector, "vector", -1, -0.5); err != nil || len(resScored) == 0 {
+	if resScored, err := store.SearchSessionSummaries(ctx, "", embVector, "vector", -1, -0.5); err != nil || len(resScored) == 0 {
 		t.Errorf("expected results with default limit, got %d (err: %v)", len(resScored), err)
 	}
 
@@ -674,7 +674,7 @@ func TestTranscriptStore_SearchSessionSummaries(t *testing.T) {
 		case "UpsertSessionSummary":
 			callErr = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "s"})
 		case "SearchSessionSummaries":
-			_, callErr = store.SearchSessionSummaries(ctx, nil, "q", 5, 0.1)
+			_, callErr = store.SearchSessionSummaries(ctx, "", nil, "q", 5, 0.1)
 		}
 		if !errors.Is(callErr, simErr) {
 			t.Errorf("expected simulated error for %s, got %v", m, callErr)
@@ -718,7 +718,7 @@ func TestTranscriptStore_SearchTranscriptSteps(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := store.SearchTranscriptSteps(ctx, tc.query, tc.session, tc.tool, tc.limit, tc.since)
+			res, err := store.SearchTranscriptSteps(ctx, "", tc.query, tc.session, tc.tool, tc.limit, tc.since)
 			if err != nil {
 				t.Fatalf("SearchTranscriptSteps failed: %v", err)
 			}
@@ -739,7 +739,7 @@ func TestTranscriptStore_SearchTranscriptSteps(t *testing.T) {
 		})
 	}
 
-	if allMatched, err := store.SearchTranscriptSteps(ctx, "ingress", "", "", -1); err != nil || len(allMatched) == 0 {
+	if allMatched, err := store.SearchTranscriptSteps(ctx, "", "ingress", "", "", -1); err != nil || len(allMatched) == 0 {
 		t.Errorf("expected steps with default limit, got %d, err: %v", len(allMatched), err)
 	}
 }
@@ -784,7 +784,7 @@ func TestTranscriptStore_FakeStore_GetTranscriptStepRange(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := store.GetTranscriptStepRange(ctx, tc.session, tc.startStep, tc.endStep)
+			got, err := store.GetTranscriptStepRange(ctx, "", tc.session, tc.startStep, tc.endStep)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -1056,5 +1056,76 @@ func TestFakeStore_GetActiveRecentThreadIDs_StrippingDiscordPrefix(t *testing.T)
 	found2 := slices.Contains(threadIDs, "998877665544332211")
 	if !found1 || !found2 {
 		t.Errorf("GetActiveRecentThreadIDs missing stripped thread IDs: got %v", threadIDs)
+	}
+}
+
+func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewFakeStore()
+	mustOK(t, store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-e", Summary: "engine session"}), "UpsertSessionSummary")
+	mustOK(t, store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
+		{SessionID: "sess-e", StepIndex: 0, ToolName: "Bash"},
+		{SessionID: "sess-e", StepIndex: 1, ToolName: "unmapped_tool"},
+		{SessionID: "sess-e", StepIndex: 2, ToolName: "Read", ToolKind: "read"},
+		{SessionID: "sess-e", StepIndex: 3},
+	}), "BatchInsertTranscriptSteps")
+	mustOK(t, store.SetSessionEngine(ctx, "sess-e", "claude"), "SetSessionEngine")
+	mustOK(t, store.SetSessionEngine(ctx, "sess-missing", "claude"), "SetSessionEngine on missing session")
+	mapper := func(name string) string {
+		if name == "Bash" {
+			return "shell"
+		}
+		return ""
+	}
+	if updated, err := store.BackfillToolKinds(ctx, mapper); err != nil || updated != 1 {
+		t.Fatalf("BackfillToolKinds updated=%d err=%v, want 1", updated, err)
+	}
+
+	tests := []struct {
+		name        string
+		stack       string
+		wantKinds   []string
+		wantEngine  string
+		wantSummary int
+	}{
+		{name: "all stacks", wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 1},
+		{name: "own stack", stack: FakeTranscriptStack, wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 1},
+		{name: "other stack sees nothing", stack: "elsewhere"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			steps, err := store.GetTranscriptStepRange(ctx, tc.stack, "sess-e", 0, 10)
+			if err != nil {
+				t.Fatalf("GetTranscriptStepRange: %v", err)
+			}
+			var kinds []string
+			for _, st := range steps {
+				kinds = append(kinds, st.ToolKind)
+				if st.Engine != tc.wantEngine || st.Stack != FakeTranscriptStack {
+					t.Errorf("step %d engine=%q stack=%q, want %q/%q", st.StepIndex, st.Engine, st.Stack, tc.wantEngine, FakeTranscriptStack)
+				}
+			}
+			if !slices.Equal(kinds, tc.wantKinds) {
+				t.Errorf("kinds = %q, want %q", kinds, tc.wantKinds)
+			}
+			if found, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "sess-e", "", 10); len(found) != len(tc.wantKinds) {
+				t.Errorf("SearchTranscriptSteps len = %d, want %d", len(found), len(tc.wantKinds))
+			}
+			if sums, _ := store.SearchSessionSummaries(ctx, tc.stack, nil, "engine", 10, 0); len(sums) != tc.wantSummary {
+				t.Errorf("SearchSessionSummaries len = %d, want %d", len(sums), tc.wantSummary)
+			}
+		})
+	}
+
+	if states, err := store.GetSessionSyncStates(ctx); err != nil || states["sess-e"].Engine != "claude" {
+		t.Errorf("sync state engine = %+v err=%v, want claude", states["sess-e"], err)
+	}
+	if err := store.SetSessionEngine(ctx, "", "agy"); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+	if _, err := store.BackfillToolKinds(ctx, nil); err == nil {
+		t.Error("expected error for nil mapper")
 	}
 }

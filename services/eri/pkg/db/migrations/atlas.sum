@@ -1,4 +1,4 @@
-h1:sUqGhSaGAX8X2csx234lpoVFWtN5VOBeB1ivnGmU+bo=
+h1:dnKLm9Gc69FjzE+rM6Ed4GSBY4KxMija0P+5BQEK7IY=
 20261001221347_baseline.sql h1:uwrTrII8CWvC/4E6FLZx5vGvYuO48AxqjCh+Wi/43kg=
 20261002155428_add_pr_registry.sql h1:tfYt/SDhTn/o/uTIcpHMD+XnpPELqiYySBkrwS+imJQ=
 20261002164500_add_river_queue.sql h1:TOtzV6uJrR9mibPzmVN8RRQ7fVAS95WmFLTvMQ9vETk=
@@ -26,3 +26,4 @@ h1:sUqGhSaGAX8X2csx234lpoVFWtN5VOBeB1ivnGmU+bo=
 20261107200500_add_turn_telemetry_columns.sql h1:ZqBgIutg99KQwIp+7EF5hHtIKuW7+Jibg9jTA91USIo=
 20261108192000_add_vanadis_chunk_stall_nudges.sql h1:yhQ6DQ4KkFFKeDjpol6ToQx6Mq/kU5juUEOgp37v51g=
 20261109054013_add_dispatch_target_and_chunk_id.sql h1:2eLIfyzB57MkuAwmkDkvoCFDexczXntvv1cclTrKDEI=
+20261109074712_stack_scoped_transcripts.sql h1:5HbqmWBpq91kCFbcDSxrEV7+dYl+Nrb0uwN4xuZNgMo=

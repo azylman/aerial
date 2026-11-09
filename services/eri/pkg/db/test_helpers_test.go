@@ -60,3 +60,8 @@ func assertStoreUnavailable(t *testing.T, s Store) {
 	requireErr(t, c1(s.CancelPendingDispatches(ctx, "d1", "b1", "r")), "CancelPendingDispatches")
 	requireErr(t, c1(s.GetPendingOrProcessingDispatches(ctx, 10)), "GetPendingOrProcessingDispatches")
 }
+
+func newTestTranscriptStore(t testing.TB, stack string) *SQLTranscriptStore {
+	t.Helper()
+	return NewSQLTranscriptStore(initTestSQLiteDB(t), stack)
+}

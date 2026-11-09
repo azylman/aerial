@@ -21,6 +21,8 @@ type SyncOptions struct {
 	HeadLimit         int           `json:"head_limit"`
 	TailLimit         int           `json:"tail_limit"`
 	ClaudeProjectsDir string        `json:"claude_projects_dir,omitempty"`
+	// MCPServers lists configured MCP server names used to normalize agy mcp_<server>_<tool> names.
+	MCPServers []string `json:"mcp_servers,omitempty"`
 }
 
 // SyncStats records metrics from a transcript synchronization execution.
@@ -36,6 +38,8 @@ type SyncStats struct {
 
 // SearchOptions configures parameters for transcript search.
 type SearchOptions struct {
+	// Stack restricts results to one stack's rows; empty searches every stack.
+	Stack         string    `json:"stack,omitempty"`
 	Query         string    `json:"query"`
 	Mode          string    `json:"mode"`
 	SessionFilter string    `json:"session_filter,omitempty"`

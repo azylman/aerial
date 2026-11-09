@@ -335,12 +335,12 @@ var (
 	jsonMarshalIndent = json.MarshalIndent
 )
 
-var newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
+var newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
 	sqlDB, err := openDBFn(pgURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("postgres connect failed: %w", err)
 	}
-	return db.NewSQLStore(sqlDB), func() {
+	return db.NewSQLTranscriptStore(sqlDB, ""), func() {
 		if err := sqlDB.Close(); err != nil {
 			return
 		}
@@ -381,7 +381,7 @@ func executeGetDirectDB(ctx context.Context, cfg CLIConfig) (transcript.StepWind
 	}
 	defer closeFn()
 
-	return transcript.GetTranscriptStepWindow(ctx, store, cfg.Session, cfg.Step, cfg.Context)
+	return transcript.GetTranscriptStepWindow(ctx, store, "", cfg.Session, cfg.Step, cfg.Context)
 }
 
 func writeCLIOutput(out io.Writer, asJSON bool, payload any, formatted string) error {
