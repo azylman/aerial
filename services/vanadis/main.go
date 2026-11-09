@@ -273,6 +273,7 @@ type VanadisStore interface {
 	AttachChunkPR(ctx context.Context, chunkID string, prNumber int, repo string) (string, error)
 	AdvanceChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error)
 	CompleteActionChunk(ctx context.Context, chunkID string) (*VanadisAdvancementResult, error)
+	ClaimStalledChunk(ctx context.Context, chunkID string) (StalledChunkVerdict, *VanadisBuild, *VanadisChunk, error)
 	FailChunk(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error)
 	FailChunkByPR(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, failed bool, err error)
 	UpdateBuild(ctx context.Context, buildID string, req UpdateBuildRequest) (*VanadisBuild, error)
@@ -647,7 +648,7 @@ func formatPromptRemainingChunks(sb *strings.Builder, remaining []VanadisChunk, 
 
 func formatPromptContract(sb *strings.Builder, active VanadisChunk, activeRepo, shareRoot string) {
 	if active.Mode == "action" {
-		fmt.Fprintf(sb, "=== Action Chunk Execution Contract ===\n1. Execute the operational instructions directly in this turn, adhering to the Build Objective and Shared Build Context.\n2. Iterate and diagnose until all acceptance criteria are verified.\n3. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all operational steps directly in this turn.\n4. End turn normally on success: the eri harness automatically marks the action chunk completed and advances the build.\n5. If an unrecoverable blocker prevents completion, call the vanadis MCP tool fail_chunk with chunk_id %q and the failure reason, and end the turn.\n6. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID %q in the task description) rather than expanding the active chunk's scope.\n", active.ID, active.ID)
+		fmt.Fprintf(sb, "=== Action Chunk Execution Contract ===\n1. Execute the operational instructions directly in this turn, adhering to the Build Objective and Shared Build Context.\n2. Iterate and diagnose until all acceptance criteria are verified.\n3. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all operational steps directly in this turn.\n4. End turn normally on success: the eri harness automatically marks the action chunk completed and advances the build.\n5. Ending the turn is treated as successful completion: NEVER end it while work is still pending in the background (downloads, installs, builds, deploys, or waits)—run long operations in the foreground with a long timeout and confirm the outcome before ending the turn.\n6. If an unrecoverable blocker prevents completion, call the vanadis MCP tool fail_chunk with chunk_id %q and the failure reason, and end the turn.\n7. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID %q in the task description) rather than expanding the active chunk's scope.\n", active.ID, active.ID)
 		return
 	}
 	fmt.Fprintf(sb, "=== Mandatory Execution Contract ===\n1. Initialize a fresh scratch workspace off `origin/main`: `/share/aerial/scripts/aerial-pr.sh init %s`\n2. Implement ONLY this chunk following TDD, optimizing all design and implementation choices for the `Build Objective` and `Shared Build Context` so the change achieves the objective in substance and integrates cleanly and idiomatically into the existing architecture without superficial workarounds, dead scaffolding, or bolted-on catch-all blocks, run package tests and `./scripts/verify.sh --staged` (if coverage is below 95%%, run `./scripts/check-coverage.sh --service <svc> --check --gaps` in a single pass rather than manual `go test -coverprofile` loops), and write `PR_DESCRIPTION.md`.\n   If any detail in chunk `Instructions` is ambiguous, underspecified, or conflicts with the `Build Objective`, the `Build Objective` takes precedence—adapt the implementation to satisfy the `Build Objective`.\n3. Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches: resolve live symbol line offsets first and `view_file` ONLY those targeted `StartLine`–`EndLine` slices instead of reading entire files from line 1.\n", activeRepo)
@@ -657,7 +658,7 @@ func formatPromptContract(sb *strings.Builder, active VanadisChunk, activeRepo, 
 			fmt.Fprintf(sb, "   Run after init: `%s`\n", grepCmd)
 		}
 	}
-	fmt.Fprintf(sb, "4. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all file edits, tests, and verification directly in this turn.\n5. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID %q in the task description) rather than expanding the active PR's scope.\n6. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n7. Terminate turn immediately after submission.\n", active.ID, active.ID)
+	fmt.Fprintf(sb, "4. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all file edits, tests, and verification directly in this turn.\n5. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID %q in the task description) rather than expanding the active PR's scope.\n6. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n7. The turn may ONLY end after `aerial-pr.sh submit` has succeeded or the vanadis MCP tool fail_chunk has been called with chunk_id %q. Run long downloads, installs (e.g. Playwright/Chromium), builds, and tests in the foreground with a long timeout—never background them and end the turn \"waiting for X\". If a dependency genuinely cannot be installed, either call fail_chunk with the reason, or skip only that verification step, state it in `PR_DESCRIPTION.md`, and submit.\n8. Terminate turn immediately after submission.\n", active.ID, active.ID, active.ID)
 }
 
 func formatChunkPromptWithShareRoot(build VanadisBuild, chunks []VanadisChunk, activeIdx int, shareRoot string) (string, error) {
@@ -942,17 +943,7 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 		chunks[activeIdx].StartedAt = now
 	}
 	chunks[activeIdx].UpdatedAt = now
-	prompt, err := FormatChunkPrompt(*build, chunks, activeIdx)
-	if err != nil {
-		return fmt.Errorf("format chunk prompt: %w", err)
-	}
-	reqPayload := BrainDispatchRequest{
-		Source:    "vanadis",
-		SessionID: "vanadis-" + strings.TrimSpace(chunk.ID),
-		Prompt:    prompt,
-		Effort:    capChunkEffort(chunk.Effort),
-	}
-	if err := s.dispatchBrainDispatch(ctx, reqPayload); err != nil {
+	if err := s.dispatchChunkTurn(ctx, *build, chunks, activeIdx, ""); err != nil {
 		if isFinalAttempt {
 			s.handleFinalDispatchFailure(ctx, build, chunk, len(chunks), err)
 		}
@@ -960,6 +951,22 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 	}
 	RecordChunkTotal("dispatched")
 	return nil
+}
+
+// dispatchChunkTurn renders the chunk prompt (optionally prefixed by a harness notice) and dispatches it to Brain
+// on the chunk's dedicated session with the capped chunk effort.
+func (s *VanadisServer) dispatchChunkTurn(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, activeIdx int, notice string) error {
+	prompt, err := FormatChunkPrompt(build, chunks, activeIdx)
+	if err != nil {
+		return fmt.Errorf("format chunk prompt: %w", err)
+	}
+	chunk := chunks[activeIdx]
+	return s.dispatchBrainDispatch(ctx, BrainDispatchRequest{
+		Source:    "vanadis",
+		SessionID: "vanadis-" + strings.TrimSpace(chunk.ID),
+		Prompt:    notice + prompt,
+		Effort:    capChunkEffort(chunk.Effort),
+	})
 }
 
 func (s *VanadisServer) dispatchBrainDispatch(ctx context.Context, payload BrainDispatchRequest) error {

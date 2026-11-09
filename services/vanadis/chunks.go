@@ -44,6 +44,7 @@ type VanadisAdvancementResult struct {
 	StatusMessageID  string                `json:"status_message_id,omitempty"`
 	MergedChunkIndex int                   `json:"merged_chunk_index"`
 	MergedChunkTitle string                `json:"merged_chunk_title"`
+	ChunkMode        string                `json:"chunk_mode,omitempty"`
 	NextChunkIndex   int                   `json:"next_chunk_index"`
 	BuildCompleted   bool                  `json:"build_completed"`
 	Chunks           []VanadisChunkSummary `json:"chunks,omitempty"`
@@ -1109,6 +1110,12 @@ func (s *VanadisServer) handleCompleteChunk(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		writeStoreErr(w, err)
 		return
+	}
+	if res != nil && res.ChunkMode == "pr" {
+		if err := s.ProcessStalledChunkCheck(r.Context(), req.ChunkID); err != nil {
+			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("stalled chunk check for %s failed: %v", req.ChunkID, err))
+			return
+		}
 	}
 	if res == nil || !res.Advanced {
 		buildID := ""

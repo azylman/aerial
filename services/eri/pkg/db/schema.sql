@@ -400,6 +400,7 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
     acceptance_criteria TEXT[] NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'pending',
     pr_number INTEGER,
+    stall_nudges INTEGER NOT NULL DEFAULT 0,
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -3605,5 +3607,179 @@ func TestPostgresVanadisStore_RemoveChunk(t *testing.T) {
 				t.Fatalf("got %d remaining chunks, want %d", len(remaining), tc.wantRemainLen)
 			}
 		})
+	}
+}
+
+func TestPostgresVanadisStore_ClaimStalledChunk(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                                  string
+		chunkID, mode, status, buildStatus    string
+		prNumber, nudges                      int
+		beginErr, scanErr, execErr, commitErr error
+		wantVerdict                           StalledChunkVerdict
+		wantErr                               error
+		wantAnyErr, wantNudgeExec             bool
+	}{
+		{name: "pr chunk without pr first stall nudges", chunkID: "c1", mode: "pr", status: "running", buildStatus: "running", wantVerdict: StalledChunkVerdictNudge, wantNudgeExec: true},
+		{name: "pr chunk without pr second stall fails", chunkID: "c1", mode: "pr", status: "running", buildStatus: "running", nudges: 1, wantVerdict: StalledChunkVerdictFail},
+		{name: "pr opened chunk is not stalled", chunkID: "c1", mode: "pr", status: "pr_opened", buildStatus: "running", prNumber: 42, wantVerdict: StalledChunkVerdictNone},
+		{name: "running chunk with linked pr is not stalled", chunkID: "c1", mode: "pr", status: "running", buildStatus: "running", prNumber: 42, wantVerdict: StalledChunkVerdictNone},
+		{name: "action chunk is never stalled", chunkID: "c1", mode: "action", status: "running", buildStatus: "running", wantVerdict: StalledChunkVerdictNone},
+		{name: "build not running is not stalled", chunkID: "c1", mode: "pr", status: "running", buildStatus: "failed", wantVerdict: StalledChunkVerdictNone},
+		{name: "empty chunk id rejected", chunkID: "  ", wantAnyErr: true},
+		{name: "begin error", chunkID: "c1", beginErr: errors.New("begin boom"), wantAnyErr: true},
+		{name: "missing chunk", chunkID: "c1", scanErr: pgx.ErrNoRows, wantErr: ErrChunkNotFound},
+		{name: "select error", chunkID: "c1", scanErr: errors.New("select boom"), wantAnyErr: true},
+		{name: "nudge update error", chunkID: "c1", mode: "pr", status: "running", buildStatus: "running", execErr: errors.New("exec boom"), wantAnyErr: true, wantNudgeExec: true},
+		{name: "nudge commit error", chunkID: "c1", mode: "pr", status: "running", buildStatus: "running", commitErr: errors.New("commit boom"), wantAnyErr: true, wantNudgeExec: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var nudgeExecs []any
+			tx := &mockTx{
+				commitErr: tc.commitErr,
+				queryRowFn: func(context.Context, string, ...any) pgx.Row {
+					return &genericMockRow{scanFn: func(dest ...any) error {
+						if tc.scanErr != nil {
+							return tc.scanErr
+						}
+						*dest[0].(*string), *dest[1].(*string), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string) = tc.chunkID, "b1", tc.mode, "Stalled", tc.status
+						*dest[6].(*int), *dest[7].(*int) = tc.prNumber, tc.nudges
+						*dest[8].(*string), *dest[9].(*string), *dest[10].(*string), *dest[11].(*string) = "b1", "thread-1", "Objective", tc.buildStatus
+						return nil
+					}}
+				},
+				execFn: func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+					if strings.Contains(sql, "stall_nudges = stall_nudges + 1") {
+						nudgeExecs = append(nudgeExecs, args...)
+					}
+					return pgconn.NewCommandTag("UPDATE 1"), tc.execErr
+				},
+			}
+			store := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, tc.beginErr }})
+			verdict, build, chunk, err := store.ClaimStalledChunk(context.Background(), tc.chunkID)
+			if gotNudge := len(nudgeExecs) == 1 && nudgeExecs[0] == "c1"; gotNudge != tc.wantNudgeExec {
+				t.Fatalf("nudge exec = %v (args %v), want %v", gotNudge, nudgeExecs, tc.wantNudgeExec)
+			}
+			if tc.wantErr != nil || tc.wantAnyErr {
+				if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) {
+					t.Fatalf("err = %v, want %v (any=%v)", err, tc.wantErr, tc.wantAnyErr)
+				}
+				return
+			}
+			if err != nil || verdict != tc.wantVerdict || build == nil || build.ID != "b1" || build.ThreadID != "thread-1" || chunk == nil || chunk.ID != "c1" {
+				t.Fatalf("got verdict=%q build=%+v chunk=%+v err=%v, want verdict %q", verdict, build, chunk, err, tc.wantVerdict)
+			}
+		})
+	}
+	var nilStore *PostgresVanadisStore
+	if _, _, _, err := nilStore.ClaimStalledChunk(context.Background(), "c1"); err == nil {
+		t.Fatal("expected error for nil store")
+	}
+}
+
+const wantStallNotice = "[VANADIS CHUNK STALLED]\nYour previous turn for chunk c-stall ended without a successful `aerial-pr.sh submit` and without calling the vanadis MCP tool fail_chunk, so no PR was linked. This is the single stall retry: reuse the existing scratch workspace from your prior attempt if it still exists instead of re-initializing, finish the remaining implementation and verification in the foreground, then submit with `--vanadis-chunk c-stall` or call fail_chunk with the blocker. If this turn also ends without either, the chunk and build will be failed.\n\n"
+
+func TestProcessStalledChunkCheck(t *testing.T) {
+	t.Parallel()
+	if NewVanadisServer(Config{}, nil, nil, nil).ProcessStalledChunkCheck(context.Background(), "c-stall") == nil {
+		t.Fatal("expected error when store is nil")
+	}
+	tests := []struct {
+		name                         string
+		claimID, status, buildStatus string
+		prNumber, priorNudges        int
+		dispatchCode                 int
+		wantNotices                  []string
+		wantSessions                 []string
+		wantChunkStatus              string
+		wantBuildStatus              string
+		wantWakeTails                []string
+	}{
+		{name: "first stall re-dispatches with notice", claimID: "c-stall", status: "running", buildStatus: "running", dispatchCode: http.StatusAccepted, wantNotices: []string{wantStallNotice}, wantSessions: []string{"vanadis-c-stall"}, wantChunkStatus: "running", wantBuildStatus: "running"},
+		{name: "second stall fails chunk and wakes thread", claimID: "c-stall", status: "running", buildStatus: "running", priorNudges: 1, dispatchCode: http.StatusAccepted, wantChunkStatus: "failed", wantBuildStatus: "failed", wantWakeTails: []string{"Chunk 1/1 (Stalled Chunk) failed: chunk stalled twice: its turn ended without submitting a PR or calling fail_chunk, both on the original dispatch and on the stall re-dispatch"}},
+		{name: "re-dispatch failure fails chunk", claimID: "c-stall", status: "running", buildStatus: "running", dispatchCode: http.StatusInternalServerError, wantNotices: []string{wantStallNotice}, wantSessions: []string{"vanadis-c-stall"}, wantChunkStatus: "failed", wantBuildStatus: "failed", wantWakeTails: []string{"Chunk 1/1 (Stalled Chunk) failed: chunk stalled (turn ended without submitting a PR or calling fail_chunk) and the stall re-dispatch failed: /dispatch returned status 500:"}},
+		{name: "linked pr is left alone", claimID: "c-stall", status: "pr_opened", buildStatus: "running", prNumber: 9, dispatchCode: http.StatusAccepted, wantChunkStatus: "pr_opened", wantBuildStatus: "running"},
+		{name: "missing chunk is skipped", claimID: "c-gone", status: "running", buildStatus: "running", dispatchCode: http.StatusAccepted, wantChunkStatus: "running", wantBuildStatus: "running"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			var notices, sessions, wakeTails []string
+			brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				switch r.URL.Path {
+				case "/dispatch":
+					var req BrainDispatchRequest
+					_ = json.NewDecoder(r.Body).Decode(&req)
+					notice, _, _ := strings.Cut(req.Prompt, "[VANADIS BUILD CHUNK EXECUTION]")
+					notices, sessions = append(notices, notice), append(sessions, req.SessionID)
+					w.WriteHeader(tc.dispatchCode)
+				case "/prompt":
+					var p map[string]string
+					_ = json.NewDecoder(r.Body).Decode(&p)
+					wakeTails = append(wakeTails, p["prompt"][strings.LastIndex(p["prompt"], "\n")+1:])
+					w.WriteHeader(http.StatusAccepted)
+				default:
+					w.WriteHeader(http.StatusOK)
+				}
+			}))
+			defer brain.Close()
+			store := newMemoryVanadisStore()
+			c := mkChunk("c-stall", "b-stall", 0, "Stalled Chunk", "do it", "low", tc.status)
+			c.PRNumber = tc.prNumber
+			_ = store.CreateBuild(context.Background(), mkBuild("b-stall", "123456789012345678", "T", "O", tc.buildStatus), []VanadisChunk{c})
+			store.stallNudges = map[string]int{"c-stall": tc.priorNudges}
+			srv := NewVanadisServer(Config{BrainURL: brain.URL, SynapseURL: brain.URL}, store, &mockRiverInserter{}, brain.Client())
+			if err := srv.ProcessStalledChunkCheck(context.Background(), tc.claimID); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			b, chunks, _ := store.GetBuild(context.Background(), "b-stall")
+			mu.Lock()
+			defer mu.Unlock()
+			if !reflect.DeepEqual(notices, tc.wantNotices) || !reflect.DeepEqual(sessions, tc.wantSessions) {
+				t.Fatalf("dispatches notices=%q sessions=%v, want notices=%q sessions=%v", notices, sessions, tc.wantNotices, tc.wantSessions)
+			}
+			if !reflect.DeepEqual(wakeTails, tc.wantWakeTails) {
+				t.Fatalf("wake tails = %q, want %q", wakeTails, tc.wantWakeTails)
+			}
+			if chunks[0].Status != tc.wantChunkStatus || b.Status != tc.wantBuildStatus {
+				t.Fatalf("chunk=%q build=%q, want chunk=%q build=%q", chunks[0].Status, b.Status, tc.wantChunkStatus, tc.wantBuildStatus)
+			}
+		})
+	}
+}
+
+func TestServer_CompleteChunkRunsStallCheck(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var dispatches []string
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/dispatch" {
+			var req BrainDispatchRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			dispatches = append(dispatches, req.SessionID)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer brain.Close()
+	store := newMemoryVanadisStore()
+	_ = store.CreateBuild(context.Background(), mkBuild("b-done", "123456789012345678", "T", "O", "running"), []VanadisChunk{mkChunk("c-done", "b-done", 0, "Done", "do it", "", "running")})
+	mux := SetupMux(NewVanadisServer(Config{BrainURL: brain.URL, SynapseURL: brain.URL}, store, &mockRiverInserter{}, brain.Client()))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/chunks/complete", strings.NewReader(`{"chunk_id":"c-done"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(dispatches, []string{"vanadis-c-done"}) {
+		t.Fatalf("dispatches = %v, want [vanadis-c-done]", dispatches)
 	}
 }
