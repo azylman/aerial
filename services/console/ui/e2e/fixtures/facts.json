@@ -1,0 +1,958 @@
+{
+  "facts": [
+    {
+      "id": 1000,
+      "fact_text": "Prefers oat milk in lattes (#1)",
+      "reinforce_count": 11,
+      "last_reinforced_at": "2026-11-05T15:00:00.000Z",
+      "created_at": "2026-07-07T12:00:00.000Z"
+    },
+    {
+      "id": 1001,
+      "fact_text": "The kiosk display sleeps at 11 PM (#2)",
+      "reinforce_count": 0,
+      "created_at": "2026-05-04T12:00:00.000Z"
+    },
+    {
+      "id": 1002,
+      "fact_text": "Weekly meal prep happens on Sundays (#3)",
+      "reinforce_count": 1,
+      "created_at": "2026-04-05T12:00:00.000Z"
+    },
+    {
+      "id": 1003,
+      "fact_text": "Grafana alerts route to the system channel (#4)",
+      "reinforce_count": 5,
+      "last_reinforced_at": "2026-10-31T19:00:00.000Z",
+      "created_at": "2026-09-07T12:00:00.000Z"
+    },
+    {
+      "id": 1004,
+      "fact_text": "The garden irrigation runs at 6 AM (#5)",
+      "reinforce_count": 0,
+      "created_at": "2026-01-25T12:00:00.000Z"
+    },
+    {
+      "id": 1005,
+      "fact_text": "Uses dark mode everywhere (#6)",
+      "reinforce_count": 0,
+      "created_at": "2026-04-06T12:00:00.000Z"
+    },
+    {
+      "id": 1006,
+      "fact_text": "Avoids cumin in recipes (#7)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-11-03T01:00:00.000Z",
+      "created_at": "2026-06-21T12:00:00.000Z"
+    },
+    {
+      "id": 1007,
+      "fact_text": "The NAS backup completes around 3 AM (#8)",
+      "reinforce_count": 1,
+      "created_at": "2026-11-02T12:00:00.000Z"
+    },
+    {
+      "id": 1008,
+      "fact_text": "Standup digest should stay under 200 words (#9)",
+      "reinforce_count": 1,
+      "created_at": "2026-02-09T12:00:00.000Z"
+    },
+    {
+      "id": 1009,
+      "fact_text": "Builds ship through the Vanadis queue (#10)",
+      "reinforce_count": 3,
+      "last_reinforced_at": "2026-11-02T04:00:00.000Z",
+      "created_at": "2026-07-13T12:00:00.000Z"
+    },
+    {
+      "id": 1010,
+      "fact_text": "Prefers oat milk in lattes (#11)",
+      "reinforce_count": 1,
+      "created_at": "2026-08-27T12:00:00.000Z"
+    },
+    {
+      "id": 1011,
+      "fact_text": "The kiosk display sleeps at 11 PM (#12)",
+      "reinforce_count": 0,
+      "created_at": "2026-05-07T12:00:00.000Z"
+    },
+    {
+      "id": 1012,
+      "fact_text": "Weekly meal prep happens on Sundays (#13)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-11-07T18:00:00.000Z",
+      "created_at": "2026-05-24T12:00:00.000Z"
+    },
+    {
+      "id": 1013,
+      "fact_text": "Grafana alerts route to the system channel (#14)",
+      "reinforce_count": 1,
+      "created_at": "2026-04-22T12:00:00.000Z"
+    },
+    {
+      "id": 1014,
+      "fact_text": "The garden irrigation runs at 6 AM (#15)",
+      "reinforce_count": 0,
+      "created_at": "2026-10-05T12:00:00.000Z"
+    },
+    {
+      "id": 1015,
+      "fact_text": "Uses dark mode everywhere (#16)",
+      "reinforce_count": 11,
+      "last_reinforced_at": "2026-11-05T14:00:00.000Z",
+      "created_at": "2026-09-26T12:00:00.000Z"
+    },
+    {
+      "id": 1016,
+      "fact_text": "Avoids cumin in recipes (#17)",
+      "reinforce_count": 1,
+      "created_at": "2025-12-16T12:00:00.000Z"
+    },
+    {
+      "id": 1017,
+      "fact_text": "The NAS backup completes around 3 AM (#18)",
+      "reinforce_count": 0,
+      "created_at": "2026-11-02T12:00:00.000Z"
+    },
+    {
+      "id": 1018,
+      "fact_text": "Standup digest should stay under 200 words (#19)",
+      "reinforce_count": 9,
+      "last_reinforced_at": "2026-11-08T05:00:00.000Z",
+      "created_at": "2026-01-25T12:00:00.000Z"
+    },
+    {
+      "id": 1019,
+      "fact_text": "Builds ship through the Vanadis queue (#20)",
+      "reinforce_count": 1,
+      "created_at": "2025-11-11T12:00:00.000Z"
+    },
+    {
+      "id": 1020,
+      "fact_text": "Prefers oat milk in lattes (#21)",
+      "reinforce_count": 0,
+      "created_at": "2026-05-08T12:00:00.000Z"
+    },
+    {
+      "id": 1021,
+      "fact_text": "The kiosk display sleeps at 11 PM (#22)",
+      "reinforce_count": 6,
+      "last_reinforced_at": "2026-11-03T03:00:00.000Z",
+      "created_at": "2025-11-29T12:00:00.000Z"
+    },
+    {
+      "id": 1022,
+      "fact_text": "Weekly meal prep happens on Sundays (#23)",
+      "reinforce_count": 1,
+      "created_at": "2026-07-17T12:00:00.000Z"
+    },
+    {
+      "id": 1023,
+      "fact_text": "Grafana alerts route to the system channel (#24)",
+      "reinforce_count": 0,
+      "created_at": "2025-12-11T12:00:00.000Z"
+    },
+    {
+      "id": 1024,
+      "fact_text": "The garden irrigation runs at 6 AM (#25)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-11-03T18:00:00.000Z",
+      "created_at": "2025-12-10T12:00:00.000Z"
+    },
+    {
+      "id": 1025,
+      "fact_text": "Uses dark mode everywhere (#26)",
+      "reinforce_count": 0,
+      "created_at": "2026-03-19T12:00:00.000Z"
+    },
+    {
+      "id": 1026,
+      "fact_text": "Avoids cumin in recipes (#27)",
+      "reinforce_count": 1,
+      "created_at": "2026-03-03T12:00:00.000Z"
+    },
+    {
+      "id": 1027,
+      "fact_text": "The NAS backup completes around 3 AM (#28)",
+      "reinforce_count": 12,
+      "last_reinforced_at": "2026-11-04T05:00:00.000Z",
+      "created_at": "2026-04-01T12:00:00.000Z"
+    },
+    {
+      "id": 1028,
+      "fact_text": "Standup digest should stay under 200 words (#29)",
+      "reinforce_count": 0,
+      "created_at": "2026-02-28T12:00:00.000Z"
+    },
+    {
+      "id": 1029,
+      "fact_text": "Builds ship through the Vanadis queue (#30)",
+      "reinforce_count": 0,
+      "created_at": "2026-09-14T12:00:00.000Z"
+    },
+    {
+      "id": 1030,
+      "fact_text": "Prefers oat milk in lattes (#31)",
+      "reinforce_count": 12,
+      "last_reinforced_at": "2026-11-03T05:00:00.000Z",
+      "created_at": "2025-11-17T12:00:00.000Z"
+    },
+    {
+      "id": 1031,
+      "fact_text": "The kiosk display sleeps at 11 PM (#32)",
+      "reinforce_count": 1,
+      "created_at": "2026-04-01T12:00:00.000Z"
+    },
+    {
+      "id": 1032,
+      "fact_text": "Weekly meal prep happens on Sundays (#33)",
+      "reinforce_count": 1,
+      "created_at": "2026-08-04T12:00:00.000Z"
+    },
+    {
+      "id": 1033,
+      "fact_text": "Grafana alerts route to the system channel (#34)",
+      "reinforce_count": 5,
+      "last_reinforced_at": "2026-11-04T09:00:00.000Z",
+      "created_at": "2026-05-08T12:00:00.000Z"
+    },
+    {
+      "id": 1034,
+      "fact_text": "The garden irrigation runs at 6 AM (#35)",
+      "reinforce_count": 0,
+      "created_at": "2026-01-09T12:00:00.000Z"
+    },
+    {
+      "id": 1035,
+      "fact_text": "Uses dark mode everywhere (#36)",
+      "reinforce_count": 1,
+      "created_at": "2026-02-22T12:00:00.000Z"
+    },
+    {
+      "id": 1036,
+      "fact_text": "Avoids cumin in recipes (#37)",
+      "reinforce_count": 12,
+      "last_reinforced_at": "2026-11-01T01:00:00.000Z",
+      "created_at": "2026-03-14T12:00:00.000Z"
+    },
+    {
+      "id": 1037,
+      "fact_text": "The NAS backup completes around 3 AM (#38)",
+      "reinforce_count": 0,
+      "created_at": "2026-02-10T12:00:00.000Z"
+    },
+    {
+      "id": 1038,
+      "fact_text": "Standup digest should stay under 200 words (#39)",
+      "reinforce_count": 1,
+      "created_at": "2026-09-15T12:00:00.000Z"
+    },
+    {
+      "id": 1039,
+      "fact_text": "Builds ship through the Vanadis queue (#40)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-11-05T18:00:00.000Z",
+      "created_at": "2026-10-04T12:00:00.000Z"
+    },
+    {
+      "id": 1040,
+      "fact_text": "Prefers oat milk in lattes (#41)",
+      "reinforce_count": 1,
+      "created_at": "2026-03-21T12:00:00.000Z"
+    },
+    {
+      "id": 1041,
+      "fact_text": "The kiosk display sleeps at 11 PM (#42)",
+      "reinforce_count": 1,
+      "created_at": "2026-07-27T12:00:00.000Z"
+    },
+    {
+      "id": 1042,
+      "fact_text": "Weekly meal prep happens on Sundays (#43)",
+      "reinforce_count": 5,
+      "last_reinforced_at": "2026-11-05T10:00:00.000Z",
+      "created_at": "2026-01-28T12:00:00.000Z"
+    },
+    {
+      "id": 1043,
+      "fact_text": "Grafana alerts route to the system channel (#44)",
+      "reinforce_count": 1,
+      "created_at": "2026-05-03T12:00:00.000Z"
+    },
+    {
+      "id": 1044,
+      "fact_text": "The garden irrigation runs at 6 AM (#45)",
+      "reinforce_count": 0,
+      "created_at": "2026-06-25T12:00:00.000Z"
+    },
+    {
+      "id": 1045,
+      "fact_text": "Uses dark mode everywhere (#46)",
+      "reinforce_count": 5,
+      "last_reinforced_at": "2026-11-02T23:00:00.000Z",
+      "created_at": "2026-01-04T12:00:00.000Z"
+    },
+    {
+      "id": 1046,
+      "fact_text": "Avoids cumin in recipes (#47)",
+      "reinforce_count": 1,
+      "created_at": "2026-05-01T12:00:00.000Z"
+    },
+    {
+      "id": 1047,
+      "fact_text": "The NAS backup completes around 3 AM (#48)",
+      "reinforce_count": 0,
+      "created_at": "2026-04-23T12:00:00.000Z"
+    },
+    {
+      "id": 1048,
+      "fact_text": "Standup digest should stay under 200 words (#49)",
+      "reinforce_count": 7,
+      "last_reinforced_at": "2026-11-03T12:00:00.000Z",
+      "created_at": "2025-11-13T12:00:00.000Z"
+    },
+    {
+      "id": 1049,
+      "fact_text": "Builds ship through the Vanadis queue (#50)",
+      "reinforce_count": 0,
+      "created_at": "2025-11-16T12:00:00.000Z"
+    },
+    {
+      "id": 1050,
+      "fact_text": "Prefers oat milk in lattes (#51)",
+      "reinforce_count": 1,
+      "created_at": "2026-07-30T12:00:00.000Z"
+    },
+    {
+      "id": 1051,
+      "fact_text": "The kiosk display sleeps at 11 PM (#52)",
+      "reinforce_count": 8,
+      "last_reinforced_at": "2026-10-31T06:00:00.000Z",
+      "created_at": "2026-02-03T12:00:00.000Z"
+    },
+    {
+      "id": 1052,
+      "fact_text": "Weekly meal prep happens on Sundays (#53)",
+      "reinforce_count": 0,
+      "created_at": "2026-05-23T12:00:00.000Z"
+    },
+    {
+      "id": 1053,
+      "fact_text": "Grafana alerts route to the system channel (#54)",
+      "reinforce_count": 0,
+      "created_at": "2026-08-13T12:00:00.000Z"
+    },
+    {
+      "id": 1054,
+      "fact_text": "The garden irrigation runs at 6 AM (#55)",
+      "reinforce_count": 6,
+      "last_reinforced_at": "2026-11-04T17:00:00.000Z",
+      "created_at": "2026-03-28T12:00:00.000Z"
+    },
+    {
+      "id": 1055,
+      "fact_text": "Uses dark mode everywhere (#56)",
+      "reinforce_count": 1,
+      "created_at": "2026-11-05T12:00:00.000Z"
+    },
+    {
+      "id": 1056,
+      "fact_text": "Avoids cumin in recipes (#57)",
+      "reinforce_count": 0,
+      "created_at": "2025-12-12T12:00:00.000Z"
+    },
+    {
+      "id": 1057,
+      "fact_text": "The NAS backup completes around 3 AM (#58)",
+      "reinforce_count": 2,
+      "last_reinforced_at": "2026-11-04T10:00:00.000Z",
+      "created_at": "2026-06-13T12:00:00.000Z"
+    },
+    {
+      "id": 1058,
+      "fact_text": "Standup digest should stay under 200 words (#59)",
+      "reinforce_count": 1,
+      "created_at": "2026-09-25T12:00:00.000Z"
+    },
+    {
+      "id": 1059,
+      "fact_text": "Builds ship through the Vanadis queue (#60)",
+      "reinforce_count": 1,
+      "created_at": "2026-01-02T12:00:00.000Z"
+    },
+    {
+      "id": 1060,
+      "fact_text": "Prefers oat milk in lattes (#61)",
+      "reinforce_count": 5,
+      "last_reinforced_at": "2026-11-04T16:00:00.000Z",
+      "created_at": "2026-02-04T12:00:00.000Z"
+    },
+    {
+      "id": 1061,
+      "fact_text": "The kiosk display sleeps at 11 PM (#62)",
+      "reinforce_count": 1,
+      "created_at": "2026-09-07T12:00:00.000Z"
+    },
+    {
+      "id": 1062,
+      "fact_text": "Weekly meal prep happens on Sundays (#63)",
+      "reinforce_count": 1,
+      "created_at": "2026-02-22T12:00:00.000Z"
+    },
+    {
+      "id": 1063,
+      "fact_text": "Grafana alerts route to the system channel (#64)",
+      "reinforce_count": 3,
+      "last_reinforced_at": "2026-11-03T10:00:00.000Z",
+      "created_at": "2026-05-24T12:00:00.000Z"
+    },
+    {
+      "id": 1064,
+      "fact_text": "The garden irrigation runs at 6 AM (#65)",
+      "reinforce_count": 1,
+      "created_at": "2026-05-09T12:00:00.000Z"
+    },
+    {
+      "id": 1065,
+      "fact_text": "Uses dark mode everywhere (#66)",
+      "reinforce_count": 1,
+      "created_at": "2026-04-29T12:00:00.000Z"
+    },
+    {
+      "id": 1066,
+      "fact_text": "Avoids cumin in recipes (#67)",
+      "reinforce_count": 9,
+      "last_reinforced_at": "2026-10-31T19:00:00.000Z",
+      "created_at": "2026-03-28T12:00:00.000Z"
+    },
+    {
+      "id": 1067,
+      "fact_text": "The NAS backup completes around 3 AM (#68)",
+      "reinforce_count": 1,
+      "created_at": "2026-10-09T12:00:00.000Z"
+    },
+    {
+      "id": 1068,
+      "fact_text": "Standup digest should stay under 200 words (#69)",
+      "reinforce_count": 0,
+      "created_at": "2025-11-24T12:00:00.000Z"
+    },
+    {
+      "id": 1069,
+      "fact_text": "Builds ship through the Vanadis queue (#70)",
+      "reinforce_count": 2,
+      "last_reinforced_at": "2026-11-01T00:00:00.000Z",
+      "created_at": "2025-11-16T12:00:00.000Z"
+    },
+    {
+      "id": 1070,
+      "fact_text": "Prefers oat milk in lattes (#71)",
+      "reinforce_count": 1,
+      "created_at": "2026-01-24T12:00:00.000Z"
+    },
+    {
+      "id": 1071,
+      "fact_text": "The kiosk display sleeps at 11 PM (#72)",
+      "reinforce_count": 0,
+      "created_at": "2026-06-23T12:00:00.000Z"
+    },
+    {
+      "id": 1072,
+      "fact_text": "Weekly meal prep happens on Sundays (#73)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-10-30T14:00:00.000Z",
+      "created_at": "2026-04-21T12:00:00.000Z"
+    },
+    {
+      "id": 1073,
+      "fact_text": "Grafana alerts route to the system channel (#74)",
+      "reinforce_count": 0,
+      "created_at": "2026-07-05T12:00:00.000Z"
+    },
+    {
+      "id": 1074,
+      "fact_text": "The garden irrigation runs at 6 AM (#75)",
+      "reinforce_count": 0,
+      "created_at": "2026-01-28T12:00:00.000Z"
+    },
+    {
+      "id": 1075,
+      "fact_text": "Uses dark mode everywhere (#76)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-11-03T14:00:00.000Z",
+      "created_at": "2026-09-14T12:00:00.000Z"
+    },
+    {
+      "id": 1076,
+      "fact_text": "Avoids cumin in recipes (#77)",
+      "reinforce_count": 0,
+      "created_at": "2026-04-11T12:00:00.000Z"
+    },
+    {
+      "id": 1077,
+      "fact_text": "The NAS backup completes around 3 AM (#78)",
+      "reinforce_count": 0,
+      "created_at": "2026-07-03T12:00:00.000Z"
+    },
+    {
+      "id": 1078,
+      "fact_text": "Standup digest should stay under 200 words (#79)",
+      "reinforce_count": 3,
+      "last_reinforced_at": "2026-11-07T00:00:00.000Z",
+      "created_at": "2025-12-13T12:00:00.000Z"
+    },
+    {
+      "id": 1079,
+      "fact_text": "Builds ship through the Vanadis queue (#80)",
+      "reinforce_count": 0,
+      "created_at": "2026-07-18T12:00:00.000Z"
+    },
+    {
+      "id": 1080,
+      "fact_text": "Prefers oat milk in lattes (#81)",
+      "reinforce_count": 0,
+      "created_at": "2025-11-11T12:00:00.000Z"
+    },
+    {
+      "id": 1081,
+      "fact_text": "The kiosk display sleeps at 11 PM (#82)",
+      "reinforce_count": 10,
+      "last_reinforced_at": "2026-11-06T01:00:00.000Z",
+      "created_at": "2026-10-04T12:00:00.000Z"
+    },
+    {
+      "id": 1082,
+      "fact_text": "Weekly meal prep happens on Sundays (#83)",
+      "reinforce_count": 0,
+      "created_at": "2026-01-05T12:00:00.000Z"
+    },
+    {
+      "id": 1083,
+      "fact_text": "Grafana alerts route to the system channel (#84)",
+      "reinforce_count": 1,
+      "created_at": "2026-01-08T12:00:00.000Z"
+    },
+    {
+      "id": 1084,
+      "fact_text": "The garden irrigation runs at 6 AM (#85)",
+      "reinforce_count": 8,
+      "last_reinforced_at": "2026-10-30T00:00:00.000Z",
+      "created_at": "2026-07-12T12:00:00.000Z"
+    },
+    {
+      "id": 1085,
+      "fact_text": "Uses dark mode everywhere (#86)",
+      "reinforce_count": 1,
+      "created_at": "2026-03-07T12:00:00.000Z"
+    },
+    {
+      "id": 1086,
+      "fact_text": "Avoids cumin in recipes (#87)",
+      "reinforce_count": 0,
+      "created_at": "2026-05-17T12:00:00.000Z"
+    },
+    {
+      "id": 1087,
+      "fact_text": "The NAS backup completes around 3 AM (#88)",
+      "reinforce_count": 9,
+      "last_reinforced_at": "2026-11-07T19:00:00.000Z",
+      "created_at": "2026-09-13T12:00:00.000Z"
+    },
+    {
+      "id": 1088,
+      "fact_text": "Standup digest should stay under 200 words (#89)",
+      "reinforce_count": 0,
+      "created_at": "2026-01-21T12:00:00.000Z"
+    },
+    {
+      "id": 1089,
+      "fact_text": "Builds ship through the Vanadis queue (#90)",
+      "reinforce_count": 1,
+      "created_at": "2025-12-07T12:00:00.000Z"
+    },
+    {
+      "id": 1090,
+      "fact_text": "Prefers oat milk in lattes (#91)",
+      "reinforce_count": 10,
+      "last_reinforced_at": "2026-11-08T09:00:00.000Z",
+      "created_at": "2026-05-17T12:00:00.000Z"
+    },
+    {
+      "id": 1091,
+      "fact_text": "The kiosk display sleeps at 11 PM (#92)",
+      "reinforce_count": 0,
+      "created_at": "2026-09-25T12:00:00.000Z"
+    },
+    {
+      "id": 1092,
+      "fact_text": "Weekly meal prep happens on Sundays (#93)",
+      "reinforce_count": 0,
+      "created_at": "2026-10-16T12:00:00.000Z"
+    },
+    {
+      "id": 1093,
+      "fact_text": "Grafana alerts route to the system channel (#94)",
+      "reinforce_count": 7,
+      "last_reinforced_at": "2026-11-07T05:00:00.000Z",
+      "created_at": "2026-01-24T12:00:00.000Z"
+    },
+    {
+      "id": 1094,
+      "fact_text": "The garden irrigation runs at 6 AM (#95)",
+      "reinforce_count": 1,
+      "created_at": "2026-07-08T12:00:00.000Z"
+    },
+    {
+      "id": 1095,
+      "fact_text": "Uses dark mode everywhere (#96)",
+      "reinforce_count": 1,
+      "created_at": "2026-11-02T12:00:00.000Z"
+    },
+    {
+      "id": 1096,
+      "fact_text": "Avoids cumin in recipes (#97)",
+      "reinforce_count": 8,
+      "last_reinforced_at": "2026-11-02T22:00:00.000Z",
+      "created_at": "2026-03-31T12:00:00.000Z"
+    },
+    {
+      "id": 1097,
+      "fact_text": "The NAS backup completes around 3 AM (#98)",
+      "reinforce_count": 0,
+      "created_at": "2026-02-06T12:00:00.000Z"
+    },
+    {
+      "id": 1098,
+      "fact_text": "Standup digest should stay under 200 words (#99)",
+      "reinforce_count": 1,
+      "created_at": "2026-02-21T12:00:00.000Z"
+    },
+    {
+      "id": 1099,
+      "fact_text": "Builds ship through the Vanadis queue (#100)",
+      "reinforce_count": 12,
+      "last_reinforced_at": "2026-11-04T17:00:00.000Z",
+      "created_at": "2026-01-27T12:00:00.000Z"
+    },
+    {
+      "id": 1100,
+      "fact_text": "Prefers oat milk in lattes (#101)",
+      "reinforce_count": 1,
+      "created_at": "2026-07-11T12:00:00.000Z"
+    },
+    {
+      "id": 1101,
+      "fact_text": "The kiosk display sleeps at 11 PM (#102)",
+      "reinforce_count": 0,
+      "created_at": "2026-04-30T12:00:00.000Z"
+    },
+    {
+      "id": 1102,
+      "fact_text": "Weekly meal prep happens on Sundays (#103)",
+      "reinforce_count": 2,
+      "last_reinforced_at": "2026-11-04T16:00:00.000Z",
+      "created_at": "2026-04-20T12:00:00.000Z"
+    },
+    {
+      "id": 1103,
+      "fact_text": "Grafana alerts route to the system channel (#104)",
+      "reinforce_count": 1,
+      "created_at": "2026-10-30T12:00:00.000Z"
+    },
+    {
+      "id": 1104,
+      "fact_text": "The garden irrigation runs at 6 AM (#105)",
+      "reinforce_count": 0,
+      "created_at": "2026-11-01T12:00:00.000Z"
+    },
+    {
+      "id": 1105,
+      "fact_text": "Uses dark mode everywhere (#106)",
+      "reinforce_count": 11,
+      "last_reinforced_at": "2026-11-03T06:00:00.000Z",
+      "created_at": "2026-05-27T12:00:00.000Z"
+    },
+    {
+      "id": 1106,
+      "fact_text": "Avoids cumin in recipes (#107)",
+      "reinforce_count": 0,
+      "created_at": "2026-09-03T12:00:00.000Z"
+    },
+    {
+      "id": 1107,
+      "fact_text": "The NAS backup completes around 3 AM (#108)",
+      "reinforce_count": 1,
+      "created_at": "2026-03-05T12:00:00.000Z"
+    },
+    {
+      "id": 1108,
+      "fact_text": "Standup digest should stay under 200 words (#109)",
+      "reinforce_count": 11,
+      "last_reinforced_at": "2026-11-06T12:00:00.000Z",
+      "created_at": "2026-09-14T12:00:00.000Z"
+    },
+    {
+      "id": 1109,
+      "fact_text": "Builds ship through the Vanadis queue (#110)",
+      "reinforce_count": 1,
+      "created_at": "2026-06-12T12:00:00.000Z"
+    },
+    {
+      "id": 1110,
+      "fact_text": "Prefers oat milk in lattes (#111)",
+      "reinforce_count": 0,
+      "created_at": "2025-11-28T12:00:00.000Z"
+    },
+    {
+      "id": 1111,
+      "fact_text": "The kiosk display sleeps at 11 PM (#112)",
+      "reinforce_count": 5,
+      "last_reinforced_at": "2026-11-03T08:00:00.000Z",
+      "created_at": "2026-08-19T12:00:00.000Z"
+    },
+    {
+      "id": 1112,
+      "fact_text": "Weekly meal prep happens on Sundays (#113)",
+      "reinforce_count": 1,
+      "created_at": "2026-03-21T12:00:00.000Z"
+    },
+    {
+      "id": 1113,
+      "fact_text": "Grafana alerts route to the system channel (#114)",
+      "reinforce_count": 1,
+      "created_at": "2025-12-12T12:00:00.000Z"
+    },
+    {
+      "id": 1114,
+      "fact_text": "The garden irrigation runs at 6 AM (#115)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-11-07T01:00:00.000Z",
+      "created_at": "2026-06-18T12:00:00.000Z"
+    },
+    {
+      "id": 1115,
+      "fact_text": "Uses dark mode everywhere (#116)",
+      "reinforce_count": 1,
+      "created_at": "2025-12-19T12:00:00.000Z"
+    },
+    {
+      "id": 1116,
+      "fact_text": "Avoids cumin in recipes (#117)",
+      "reinforce_count": 0,
+      "created_at": "2026-08-17T12:00:00.000Z"
+    },
+    {
+      "id": 1117,
+      "fact_text": "The NAS backup completes around 3 AM (#118)",
+      "reinforce_count": 8,
+      "last_reinforced_at": "2026-11-03T21:00:00.000Z",
+      "created_at": "2026-06-15T12:00:00.000Z"
+    },
+    {
+      "id": 1118,
+      "fact_text": "Standup digest should stay under 200 words (#119)",
+      "reinforce_count": 1,
+      "created_at": "2026-11-06T12:00:00.000Z"
+    },
+    {
+      "id": 1119,
+      "fact_text": "Builds ship through the Vanadis queue (#120)",
+      "reinforce_count": 0,
+      "created_at": "2026-03-01T12:00:00.000Z"
+    },
+    {
+      "id": 1120,
+      "fact_text": "Prefers oat milk in lattes (#121)",
+      "reinforce_count": 11,
+      "last_reinforced_at": "2026-11-04T12:00:00.000Z",
+      "created_at": "2026-07-31T12:00:00.000Z"
+    },
+    {
+      "id": 1121,
+      "fact_text": "The kiosk display sleeps at 11 PM (#122)",
+      "reinforce_count": 1,
+      "created_at": "2026-09-24T12:00:00.000Z"
+    },
+    {
+      "id": 1122,
+      "fact_text": "Weekly meal prep happens on Sundays (#123)",
+      "reinforce_count": 1,
+      "created_at": "2026-08-11T12:00:00.000Z"
+    },
+    {
+      "id": 1123,
+      "fact_text": "Grafana alerts route to the system channel (#124)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-11-08T05:00:00.000Z",
+      "created_at": "2025-12-18T12:00:00.000Z"
+    },
+    {
+      "id": 1124,
+      "fact_text": "The garden irrigation runs at 6 AM (#125)",
+      "reinforce_count": 1,
+      "created_at": "2026-03-27T12:00:00.000Z"
+    },
+    {
+      "id": 1125,
+      "fact_text": "Uses dark mode everywhere (#126)",
+      "reinforce_count": 1,
+      "created_at": "2026-01-05T12:00:00.000Z"
+    },
+    {
+      "id": 1126,
+      "fact_text": "Avoids cumin in recipes (#127)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-11-03T20:00:00.000Z",
+      "created_at": "2026-05-17T12:00:00.000Z"
+    },
+    {
+      "id": 1127,
+      "fact_text": "The NAS backup completes around 3 AM (#128)",
+      "reinforce_count": 0,
+      "created_at": "2026-06-09T12:00:00.000Z"
+    },
+    {
+      "id": 1128,
+      "fact_text": "Standup digest should stay under 200 words (#129)",
+      "reinforce_count": 0,
+      "created_at": "2025-11-14T12:00:00.000Z"
+    },
+    {
+      "id": 1129,
+      "fact_text": "Builds ship through the Vanadis queue (#130)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-10-30T09:00:00.000Z",
+      "created_at": "2026-03-10T12:00:00.000Z"
+    },
+    {
+      "id": 1130,
+      "fact_text": "Prefers oat milk in lattes (#131)",
+      "reinforce_count": 1,
+      "created_at": "2026-05-22T12:00:00.000Z"
+    },
+    {
+      "id": 1131,
+      "fact_text": "The kiosk display sleeps at 11 PM (#132)",
+      "reinforce_count": 1,
+      "created_at": "2026-05-11T12:00:00.000Z"
+    },
+    {
+      "id": 1132,
+      "fact_text": "Weekly meal prep happens on Sundays (#133)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-11-06T02:00:00.000Z",
+      "created_at": "2026-06-19T12:00:00.000Z"
+    },
+    {
+      "id": 1133,
+      "fact_text": "Grafana alerts route to the system channel (#134)",
+      "reinforce_count": 0,
+      "created_at": "2026-04-01T12:00:00.000Z"
+    },
+    {
+      "id": 1134,
+      "fact_text": "The garden irrigation runs at 6 AM (#135)",
+      "reinforce_count": 1,
+      "created_at": "2026-10-02T12:00:00.000Z"
+    },
+    {
+      "id": 1135,
+      "fact_text": "Uses dark mode everywhere (#136)",
+      "reinforce_count": 4,
+      "last_reinforced_at": "2026-11-06T19:00:00.000Z",
+      "created_at": "2025-12-20T12:00:00.000Z"
+    },
+    {
+      "id": 1136,
+      "fact_text": "Avoids cumin in recipes (#137)",
+      "reinforce_count": 1,
+      "created_at": "2025-11-25T12:00:00.000Z"
+    },
+    {
+      "id": 1137,
+      "fact_text": "The NAS backup completes around 3 AM (#138)",
+      "reinforce_count": 0,
+      "created_at": "2026-10-21T12:00:00.000Z"
+    },
+    {
+      "id": 1138,
+      "fact_text": "Standup digest should stay under 200 words (#139)",
+      "reinforce_count": 2,
+      "last_reinforced_at": "2026-11-06T18:00:00.000Z",
+      "created_at": "2026-10-17T12:00:00.000Z"
+    },
+    {
+      "id": 1139,
+      "fact_text": "Builds ship through the Vanadis queue (#140)",
+      "reinforce_count": 0,
+      "created_at": "2026-10-12T12:00:00.000Z"
+    },
+    {
+      "id": 1140,
+      "fact_text": "Prefers oat milk in lattes (#141)",
+      "reinforce_count": 0,
+      "created_at": "2026-09-03T12:00:00.000Z"
+    },
+    {
+      "id": 1141,
+      "fact_text": "The kiosk display sleeps at 11 PM (#142)",
+      "reinforce_count": 2,
+      "last_reinforced_at": "2026-11-05T16:00:00.000Z",
+      "created_at": "2026-10-14T12:00:00.000Z"
+    },
+    {
+      "id": 1142,
+      "fact_text": "Weekly meal prep happens on Sundays (#143)",
+      "reinforce_count": 0,
+      "created_at": "2026-10-30T12:00:00.000Z"
+    },
+    {
+      "id": 1143,
+      "fact_text": "Grafana alerts route to the system channel (#144)",
+      "reinforce_count": 1,
+      "created_at": "2026-10-22T12:00:00.000Z"
+    },
+    {
+      "id": 1144,
+      "fact_text": "The garden irrigation runs at 6 AM (#145)",
+      "reinforce_count": 9,
+      "last_reinforced_at": "2026-11-04T04:00:00.000Z",
+      "created_at": "2026-05-06T12:00:00.000Z"
+    },
+    {
+      "id": 1145,
+      "fact_text": "Uses dark mode everywhere (#146)",
+      "reinforce_count": 1,
+      "created_at": "2026-06-17T12:00:00.000Z"
+    },
+    {
+      "id": 1146,
+      "fact_text": "Avoids cumin in recipes (#147)",
+      "reinforce_count": 0,
+      "created_at": "2026-01-13T12:00:00.000Z"
+    },
+    {
+      "id": 1147,
+      "fact_text": "The NAS backup completes around 3 AM (#148)",
+      "reinforce_count": 5,
+      "last_reinforced_at": "2026-10-29T17:00:00.000Z",
+      "created_at": "2026-01-17T12:00:00.000Z"
+    },
+    {
+      "id": 1148,
+      "fact_text": "Standup digest should stay under 200 words (#149)",
+      "reinforce_count": 1,
+      "created_at": "2026-08-12T12:00:00.000Z"
+    },
+    {
+      "id": 1149,
+      "fact_text": "Builds ship through the Vanadis queue (#150)",
+      "reinforce_count": 1,
+      "created_at": "2026-02-15T12:00:00.000Z"
+    }
+  ],
+  "total": 150,
+  "limit": 500,
+  "offset": 0,
+  "status": "ok"
+}

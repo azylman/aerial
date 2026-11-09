@@ -325,6 +325,50 @@ jobs:
           done
           echo "Timed out waiting for roborev after 600s; releasing held failure status."
 
+  console-e2e:
+    name: Console UI Parity Suite
+    needs: changes
+    if: github.event_name != 'push' || inputs.force_all == true
+    runs-on: [self-hosted, ci]
+    steps:
+      - name: Checkout Repository
+        if: needs.changes.outputs.console == 'true'
+        uses: actions/checkout@v7
+
+      - name: Build Console Binary For The Suite
+        if: needs.changes.outputs.console == 'true'
+        working-directory: services/console
+        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/aerial-console-e2e" .
+
+      # Vanilla /console/ vs React /console/next/ pixel and behaviour parity (services/console/ui/e2e).
+      # Runs inside the Playwright image whose tag matches the pinned @playwright/test, so browsers
+      # and system libraries come from the image (no apt installs on runners). Sources are copied in
+      # with docker cp rather than bind-mounted, which keeps the job independent of the docker host.
+      - name: Run Parity Suite In Playwright Image
+        if: needs.changes.outputs.console == 'true'
+        run: |
+          set -u
+          PW_VERSION=$(node -p "require('./services/console/ui/package.json').devDependencies['@playwright/test']")
+          CID=$(docker create --ipc=host -e CI=1 -e CONSOLE_E2E_BIN=/work/aerial-console-e2e -w /work/ui \
+            "mcr.microsoft.com/playwright:v${PW_VERSION}-noble" \
+            sh -c 'npm ci --no-audit --no-fund && npm run build && npm run e2e')
+          docker cp services/console/. "$CID:/work/"
+          docker cp "$RUNNER_TEMP/aerial-console-e2e" "$CID:/work/aerial-console-e2e"
+          STATUS=0
+          docker start -a "$CID" || STATUS=$?
+          mkdir -p services/console/ui/e2e
+          docker cp "$CID:/work/ui/e2e/artifacts" services/console/ui/e2e/ 2>/dev/null || true
+          docker rm -f "$CID" >/dev/null
+          exit "$STATUS"
+
+      - name: Upload Parity Artifacts
+        if: failure() && needs.changes.outputs.console == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: console-parity-artifacts
+          path: services/console/ui/e2e/artifacts
+          if-no-files-found: ignore
+
   build-and-push:
     name: Build & Push Images to GHCR (${{ matrix.service }})
     needs: changes
@@ -544,7 +588,7 @@ jobs:
 
   build-gate:
     name: CI Gate
-    needs: [changes, test, lint, roborev, build-and-push]
+    needs: [changes, test, lint, console-e2e, roborev, build-and-push]
     if: always()
     runs-on: [self-hosted, ci]
     env:

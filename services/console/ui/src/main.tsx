@@ -1,18 +1,18 @@
-import { StrictMode } from 'react';
+import { startTransition, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { App } from './App';
+import { initRouteFromLocation } from './hooks/useHashRoute';
 
-function App() {
-  return (
-    <main className="hud-container">
-      <h1>AERIAL // CONSOLE</h1>
-    </main>
-  );
-}
+initRouteFromLocation();
 
 const root = document.getElementById('root');
 if (root === null) throw new Error('console: #root mount point missing from index.html');
-createRoot(root).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+// Rendering inside a transition lets the first paint wait for the active view's lazy chunk
+// instead of committing an empty Suspense fallback whose reveal React would then throttle.
+startTransition(() => {
+  createRoot(root).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+});

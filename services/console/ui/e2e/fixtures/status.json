@@ -1,0 +1,494 @@
+{
+  "system_time": "2026-11-08T12:00:00.000Z",
+  "cluster_status": "degraded",
+  "active_tasks_count": 5,
+  "active_tasks": [
+    {
+      "id": "task-1",
+      "thread_id": "100000000000000001",
+      "session_id": "session-994a9fa4",
+      "author_name": "pilot",
+      "prompt": "Task 1: draft the weekly plan",
+      "summary": "working",
+      "status": "PROCESSING",
+      "retry_count": 0,
+      "trigger_type": "discord",
+      "created_at": "2026-11-08T11:58:00.000Z",
+      "started_at": "2026-11-08T11:59:00.000Z"
+    },
+    {
+      "id": "task-2",
+      "thread_id": "100000000000000002",
+      "session_id": "session-58afd2a8",
+      "author_name": "scheduler",
+      "prompt": "Task 2: check the build queue",
+      "summary": "working",
+      "status": "PROCESSING",
+      "retry_count": 0,
+      "trigger_type": "cron",
+      "created_at": "2026-11-08T11:56:00.000Z",
+      "started_at": "2026-11-08T11:58:00.000Z"
+    },
+    {
+      "id": "task-3",
+      "thread_id": "100000000000000003",
+      "session_id": "session-c5ca03a8",
+      "author_name": "pilot",
+      "prompt": "Task 3: rotate the staging secrets",
+      "summary": "working",
+      "status": "PROCESSING",
+      "retry_count": 1,
+      "trigger_type": "reminder",
+      "created_at": "2026-11-08T11:54:00.000Z",
+      "started_at": "2026-11-08T11:57:00.000Z"
+    },
+    {
+      "id": "task-4",
+      "thread_id": "100000000000000004",
+      "session_id": "session-a71877a0",
+      "author_name": "scheduler",
+      "prompt": "Task 4: rotate the staging secrets",
+      "summary": "queued",
+      "status": "PENDING",
+      "retry_count": 0,
+      "trigger_type": "http",
+      "created_at": "2026-11-08T11:52:00.000Z",
+      "started_at": "2026-11-08T11:56:00.000Z"
+    },
+    {
+      "id": "task-5",
+      "thread_id": "100000000000000005",
+      "session_id": "session-de8a5db2",
+      "author_name": "pilot",
+      "prompt": "Task 5: draft the weekly plan",
+      "summary": "queued",
+      "status": "PENDING",
+      "retry_count": 0,
+      "trigger_type": "discord",
+      "created_at": "2026-11-08T11:50:00.000Z",
+      "started_at": "2026-11-08T11:55:00.000Z"
+    }
+  ],
+  "services": [
+    {
+      "name": "aerial-eri",
+      "status": "healthy",
+      "uptime_seconds": 3600,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-haro",
+      "status": "healthy",
+      "uptime_seconds": 7261,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-coven",
+      "status": "healthy",
+      "uptime_seconds": 10922,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-vanadis",
+      "status": "healthy",
+      "uptime_seconds": 14583,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-synapse",
+      "status": "healthy",
+      "uptime_seconds": 18244,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-console",
+      "status": "healthy",
+      "uptime_seconds": 21905,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-docs",
+      "status": "healthy",
+      "uptime_seconds": 25566,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-homepage",
+      "status": "healthy",
+      "uptime_seconds": 29227,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-postgres",
+      "status": "healthy",
+      "uptime_seconds": 32888,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-senses",
+      "status": "healthy",
+      "uptime_seconds": 36549,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-pjev",
+      "status": "healthy",
+      "uptime_seconds": 40210,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-vision",
+      "status": "degraded",
+      "uptime_seconds": 43871,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-prospera",
+      "status": "degraded",
+      "uptime_seconds": 47532,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-discord-mcp",
+      "status": "healthy",
+      "uptime_seconds": 51193,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-docket-mcp",
+      "status": "healthy",
+      "uptime_seconds": 54854,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-github-mcp",
+      "status": "healthy",
+      "uptime_seconds": 58515,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-kubernetes-mcp",
+      "status": "healthy",
+      "uptime_seconds": 62176,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    },
+    {
+      "name": "aerial-kernel-mcp",
+      "status": "down",
+      "uptime_seconds": 0,
+      "last_check_time": "2026-11-08T11:59:55.000Z"
+    }
+  ],
+  "deployments": [
+    {
+      "id": "dep-console-1",
+      "service": "console",
+      "repository": "azylman/aerial",
+      "commit": "a1b2c3d",
+      "commit_msg": "feat(console/ui): app shell and parity suite",
+      "commit_time": "2026-11-08T11:56:00.000Z",
+      "stage": "building",
+      "progress": 45,
+      "steps": [
+        {
+          "name": "CI",
+          "icon": "🧪",
+          "status": "completed"
+        },
+        {
+          "name": "BUILD",
+          "icon": "🛠️",
+          "status": "active"
+        },
+        {
+          "name": "PULL",
+          "icon": "⬇️",
+          "status": "pending"
+        },
+        {
+          "name": "SWAP",
+          "icon": "🔄",
+          "status": "pending"
+        }
+      ],
+      "matrix_jobs": [
+        {
+          "name": "console",
+          "status": "completed",
+          "conclusion": "success",
+          "duration": "48s",
+          "type": "ci"
+        },
+        {
+          "name": "lint",
+          "status": "completed",
+          "conclusion": "success",
+          "duration": "31s",
+          "type": "ci"
+        },
+        {
+          "name": "aerial-console",
+          "status": "active",
+          "type": "container"
+        },
+        {
+          "name": "aerial-eri",
+          "status": "pending",
+          "type": "container"
+        }
+      ],
+      "html_url": "https://github.com/azylman/aerial/actions/runs/1",
+      "started_at": "2026-11-08T11:57:00.000Z"
+    },
+    {
+      "id": "dep-eri-1",
+      "service": "eri",
+      "repository": "azylman/aerial",
+      "commit": "b2c3d4e",
+      "commit_msg": "fix(eri): retry transient ingress errors",
+      "commit_time": "2026-11-08T11:00:00.000Z",
+      "stage": "live",
+      "progress": 100,
+      "steps": [
+        {
+          "name": "CI",
+          "icon": "🧪",
+          "status": "completed"
+        },
+        {
+          "name": "BUILD",
+          "icon": "🛠️",
+          "status": "completed"
+        },
+        {
+          "name": "PULL",
+          "icon": "⬇️",
+          "status": "completed"
+        },
+        {
+          "name": "SWAP",
+          "icon": "🔄",
+          "status": "completed"
+        }
+      ],
+      "started_at": "2026-11-08T11:01:40.000Z"
+    },
+    {
+      "id": "dep-haro-1",
+      "service": "haro",
+      "repository": "azylman/aerial",
+      "commit": "c3d4e5f",
+      "commit_msg": "feat(haro): heartbeat jitter",
+      "commit_time": "2026-11-08T11:45:00.000Z",
+      "stage": "awaiting_pull",
+      "progress": 70,
+      "steps": [
+        {
+          "name": "CI",
+          "icon": "🧪",
+          "status": "completed"
+        },
+        {
+          "name": "BUILD",
+          "icon": "🛠️",
+          "status": "completed"
+        },
+        {
+          "name": "PULL",
+          "icon": "⬇️",
+          "status": "active"
+        },
+        {
+          "name": "SWAP",
+          "icon": "🔄",
+          "status": "pending"
+        }
+      ],
+      "started_at": "2026-11-08T11:45:50.000Z"
+    },
+    {
+      "id": "dep-coven-1",
+      "service": "coven",
+      "repository": "azylman/aerial",
+      "commit": "d4e5f60",
+      "commit_msg": "refactor(coven): decay batches",
+      "commit_time": "2026-11-08T11:30:00.000Z",
+      "stage": "failed",
+      "progress": 30,
+      "steps": [
+        {
+          "name": "CI",
+          "icon": "🧪",
+          "status": "failed"
+        },
+        {
+          "name": "BUILD",
+          "icon": "🛠️",
+          "status": "pending"
+        },
+        {
+          "name": "PULL",
+          "icon": "⬇️",
+          "status": "pending"
+        },
+        {
+          "name": "SWAP",
+          "icon": "🔄",
+          "status": "pending"
+        }
+      ],
+      "started_at": "2026-11-08T11:30:50.000Z"
+    },
+    {
+      "id": "dep-synapse-1",
+      "service": "synapse",
+      "repository": "azylman/aerial",
+      "commit": "e5f6071",
+      "commit_msg": "chore(synapse): bump river",
+      "commit_time": "2026-11-08T11:55:00.000Z",
+      "stage": "swapping",
+      "progress": 90,
+      "steps": [
+        {
+          "name": "CI",
+          "icon": "🧪",
+          "status": "completed"
+        },
+        {
+          "name": "BUILD",
+          "icon": "🛠️",
+          "status": "completed"
+        },
+        {
+          "name": "PULL",
+          "icon": "⬇️",
+          "status": "completed"
+        },
+        {
+          "name": "SWAP",
+          "icon": "🔄",
+          "status": "active"
+        }
+      ],
+      "started_at": "2026-11-08T11:55:20.000Z"
+    },
+    {
+      "id": "dep-docs-1",
+      "service": "docs",
+      "repository": "azylman/aerial-config",
+      "commit": "f607182",
+      "commit_msg": "docs: runbook refresh",
+      "commit_time": "2026-11-08T10:00:00.000Z",
+      "stage": "live",
+      "progress": 100,
+      "steps": [
+        {
+          "name": "CI",
+          "icon": "🧪",
+          "status": "completed"
+        },
+        {
+          "name": "BUILD",
+          "icon": "🛠️",
+          "status": "completed"
+        },
+        {
+          "name": "PULL",
+          "icon": "⬇️",
+          "status": "completed"
+        },
+        {
+          "name": "SWAP",
+          "icon": "🔄",
+          "status": "completed"
+        }
+      ],
+      "started_at": "2026-11-08T10:01:40.000Z"
+    }
+  ],
+  "quick_launch_links": [
+    {
+      "name": "Console",
+      "url": "/console/",
+      "icon": "🛰️",
+      "target": "_self",
+      "is_core": true
+    },
+    {
+      "name": "Grafana",
+      "url": "/grafana/",
+      "icon": "📈",
+      "description": "Telemetry dashboards",
+      "is_core": true
+    },
+    {
+      "name": "Docs",
+      "url": "/docs/",
+      "icon": "📚",
+      "is_core": true
+    },
+    {
+      "name": "Agentsview",
+      "url": "/agentsview/",
+      "icon": "🔭",
+      "is_core": true
+    },
+    {
+      "name": "Homepage",
+      "url": "/",
+      "icon": "🏠",
+      "target": "_self",
+      "is_core": true
+    },
+    {
+      "name": "Home Assistant",
+      "url": "http://homeassistant.example.test:8123/",
+      "icon": "🏡",
+      "description": "Smart home",
+      "is_custom": true
+    }
+  ],
+  "git_sync": {
+    "status": "lagging",
+    "max_lag_seconds": 75,
+    "last_sync_time": "2026-11-08T11:58:45.000Z",
+    "repos": {
+      "aerial": {
+        "repo": "aerial",
+        "github_repo": "azylman/aerial",
+        "disk_commit": "a1b2c3d",
+        "disk_commit_time": "2026-11-08T11:53:20.000Z",
+        "remote_commit": "b2c3d4e",
+        "remote_commit_time": "2026-11-08T11:54:35.000Z",
+        "time_lag_seconds": 75,
+        "sync_status": "lagging",
+        "last_sync_time": "2026-11-08T11:58:45.000Z"
+      },
+      "aerial-config": {
+        "repo": "aerial-config",
+        "github_repo": "azylman/aerial-config",
+        "disk_commit": "f607182",
+        "disk_commit_time": "2026-11-08T10:00:00.000Z",
+        "remote_commit": "f607182",
+        "remote_commit_time": "2026-11-08T10:00:00.000Z",
+        "time_lag_seconds": 0,
+        "sync_status": "synced",
+        "last_sync_time": "2026-11-08T11:59:50.000Z"
+      }
+    },
+    "reconciliation": {
+      "active": true,
+      "state": "pulling",
+      "stage": "pulling",
+      "trigger": "image_poll",
+      "target_services": [
+        "console"
+      ],
+      "commit_sha": "a1b2c3d",
+      "started_at": "2026-11-08T11:59:30.000Z",
+      "completed_at": "0001-01-01T00:00:00Z"
+    }
+  },
+  "ongoing_deploy": "console",
+  "is_deploying": true
+}

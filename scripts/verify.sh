@@ -482,6 +482,28 @@ run_console_ui() {
     )
 }
 
+# Console browser parity suite (services/console/ui/e2e): vanilla vs React UI on the real console
+# binary. Runs only when a Playwright Chromium can actually launch here; otherwise it prints a skip
+# notice and the CI "Console UI Parity Suite" job enforces it. Needs Go to build the binary.
+run_console_e2e() {
+    ui_dir="$REPO_ROOT/services/console/ui"
+    [ -f "$ui_dir/playwright.config.ts" ] || return 0
+    if ! has_cmd npm || ! has_cmd go; then
+        echo "⚠️  [Aerial Verify] npm or go not found; skipping console parity suite (CI job enforces it)." >&2
+        return 0
+    fi
+    if ! (cd "$ui_dir" && node -e "require('@playwright/test').chromium.launch().then(b => b.close()).catch(() => process.exit(1))" >/dev/null 2>&1); then
+        echo "⚠️  [Aerial Verify] No launchable Playwright Chromium; skipping console parity suite (run 'npx playwright install chromium'; the CI job enforces it)." >&2
+        return 0
+    fi
+    echo "   [console-e2e] parity suite in services/console/ui..."
+    (
+        cd "$ui_dir"
+        npm run --silent build
+        npm run --silent e2e
+    )
+}
+
 run_json_syntax() {
     file="$1"
     if [ -f "$file" ]; then
@@ -672,6 +694,11 @@ if [ "$MODE" = "staged" ]; then
         run_console_ui
     fi
 
+    # Browser parity suite whenever either UI changes
+    if echo "$CHANGED_FILES" | grep -q -E "^services/console/(ui|static)/"; then
+        run_console_e2e
+    fi
+
     # Check docs service JS syntax
     if echo "$CHANGED_FILES" | grep -q -E "^(services/)?docs-service/"; then
         run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
@@ -729,6 +756,7 @@ run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyb
 run_node_syntax "services/homepage/lib/merge.js"
 run_node_syntax "services/homepage/prepare-config.js"
 run_console_ui
+run_console_e2e
 for jf in services/grafana/dashboards/*.json; do
     run_json_syntax "$jf"
 done

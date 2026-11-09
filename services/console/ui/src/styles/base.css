@@ -1,0 +1,517 @@
+/* App shell styles ported from static/style.css: tokens, page background, header, tab bar,
+   quick-launch dock and view panels. Class names, palette and layout are unchanged so the React
+   console renders pixel-identical chrome; feature views carry their own CSS files. */
+:root {
+    color-scheme: dark;
+    --font-main: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --font-heading: 'Space Grotesk', sans-serif;
+    
+    /* Bento Purple Cyber Tokens */
+    --bg-dark: #06050a;
+    --bg-base: #06050a;
+    --bg-surface: rgba(48, 26, 82, 0.88);
+    --bg-elevated: rgba(64, 34, 108, 0.92);
+    --card-bg: rgba(48, 26, 82, 0.88);
+    --card-elevated: rgba(64, 34, 108, 0.92);
+    --card-border: rgba(168, 85, 247, 0.38);
+    --card-border-hover: rgba(192, 132, 252, 0.7);
+    --border-glow: rgba(168, 85, 247, 0.38);
+    --border-glow-bright: rgba(192, 132, 252, 0.7);
+    
+    --neon-cyan: #00f0ff;
+    --neon-magenta: #ff2a85;
+    --neon-purple: #c084fc;
+    --neon-green: #05ffa1;
+    --neon-red: #ff3366;
+    --neon-amber: #ffb703;
+    
+    --permet-cyan: #00f0ff;
+    --permet-crimson: #ff2a85;
+    --permet-emerald: #05ffa1;
+    --permet-amber: #ffb703;
+    --permet-purple: #c084fc;
+    
+    --text-primary: #ffffff;
+    --text-muted: #d8b4fe;
+    --text-dim: #9d8dbb;
+    --text-secondary: #d8b4fe;
+    
+    --accent-glow: 0 12px 36px rgba(0, 0, 0, 0.7), 0 0 16px rgba(147, 51, 234, 0.2);
+    --card-radius: 16px;
+    --glass-backdrop: blur(16px);
+}
+
+/* The page is never captured as a view-transition group: only named elements (the drawer)
+   animate, so opening a drawer does not snapshot and cross-fade the whole HUD. */
+:root {
+    view-transition-name: none;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: var(--bg-base);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    min-height: 100vh;
+    padding: 24px 16px;
+    overflow-x: hidden;
+    position: relative;
+}
+
+/* --- ANIMATED BACKGROUND CIRCUIT TRACES & AMBIENT ENERGY --- */
+body::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: var(--bg-base);
+    background-image: 
+        radial-gradient(ellipse 70% 50% at 50% 0%, rgba(192, 132, 252, 0.07), transparent 75%),
+        radial-gradient(ellipse 60% 40% at 85% 70%, rgba(0, 240, 255, 0.04), transparent 70%),
+        url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'><path d='M0 20 H40 L60 40 H120 M60 40 V80 L40 100 H0 M60 80 H100 L120 100 M90 0 V30 M30 90 V120' fill='none' stroke='rgba(168,85,247,0.12)' stroke-width='1.5'/><circle cx='40' cy='20' r='3' fill='rgba(192,132,252,0.30)'><animate attributeName='r' values='2.6;4.2;2.6' dur='4s' begin='0.8s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0.45;0.25' dur='4s' begin='0.8s' repeatCount='indefinite'/></circle><circle cx='40' cy='20' r='3' fill='none' stroke='rgba(192,132,252,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;7;3' dur='4s' begin='0.8s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0;0.30' dur='4s' begin='0.8s' repeatCount='indefinite'/></circle><circle cx='100' cy='40' r='3.5' fill='rgba(0,240,255,0.35)'><animate attributeName='r' values='3.2;4.8;3.2' dur='3.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0.50;0.30' dur='3.2s' repeatCount='indefinite'/></circle><circle cx='100' cy='40' r='3.5' fill='none' stroke='rgba(0,240,255,0.30)' stroke-width='0.8'><animate attributeName='r' values='3.5;7.5;3.5' dur='3.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0;0.30' dur='3.2s' repeatCount='indefinite'/></circle><circle cx='60' cy='80' r='3' fill='rgba(255,42,133,0.30)'><animate attributeName='r' values='2.6;4.2;2.6' dur='3.6s' begin='1.6s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0.45;0.25' dur='3.6s' begin='1.6s' repeatCount='indefinite'/></circle><circle cx='60' cy='80' r='3' fill='none' stroke='rgba(255,42,133,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;7;3' dur='3.6s' begin='1.6s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0;0.25' dur='3.6s' begin='1.6s' repeatCount='indefinite'/></circle><circle cx='40' cy='100' r='3' fill='rgba(168,85,247,0.30)'><animate attributeName='r' values='2.5;3.8;2.5' dur='4.4s' begin='2.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.20;0.40;0.20' dur='4.4s' begin='2.2s' repeatCount='indefinite'/></circle><circle cx='40' cy='100' r='3' fill='none' stroke='rgba(168,85,247,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;6.5;3' dur='4.4s' begin='2.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.20;0;0.20' dur='4.4s' begin='2.2s' repeatCount='indefinite'/></circle></svg>");
+    background-size: 100% 100%, 100% 100%, 120px 120px;
+    background-repeat: no-repeat, no-repeat, repeat;
+    pointer-events: none;
+    z-index: 0;
+    animation: circuit-flow 90s linear infinite, circuit-glow-breathe 12s ease-in-out infinite;
+    will-change: background-position, opacity;
+}
+
+body::after {
+    content: '';
+    position: fixed;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(circle at center, rgba(168, 85, 247, 0.04) 0%, rgba(0, 240, 255, 0.02) 35%, transparent 65%);
+    pointer-events: none;
+    z-index: 0;
+    animation: circuit-energy-surge 18s ease-in-out infinite alternate;
+}
+
+@keyframes circuit-flow {
+    0% {
+        background-position: 0 0, 0 0, 0 0;
+    }
+    100% {
+        background-position: 0 0, 0 0, 120px 120px;
+    }
+}
+
+@keyframes circuit-glow-breathe {
+    0%, 100% {
+        filter: drop-shadow(0 0 0px transparent);
+        opacity: 0.65;
+    }
+    50% {
+        filter: drop-shadow(0 0 2px rgba(192, 132, 252, 0.25));
+        opacity: 0.80;
+    }
+}
+
+@keyframes circuit-energy-surge {
+    0% {
+        transform: translate(-3%, -3%) scale(0.96);
+        opacity: 0.45;
+    }
+    50% {
+        transform: translate(2%, 3%) scale(1.04);
+        opacity: 0.8;
+    }
+    100% {
+        transform: translate(-1%, 2%) scale(1.0);
+        opacity: 0.5;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body::before,
+    body::after,
+    .scanline {
+        animation: none !important;
+    }
+}
+
+/* --- SCANLINE & GRID OVERLAYS --- */
+.scanline {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 3px;
+    background: linear-gradient(90deg, transparent, rgba(0, 240, 255, 0.4), transparent);
+    animation: scan 8s linear infinite;
+    pointer-events: none;
+    z-index: 100;
+}
+
+@keyframes scan {
+    0% { top: -10px; }
+    100% { top: 100vh; }
+}
+
+
+/* --- HUD CONTAINER --- */
+.hud-container {
+    position: relative;
+    z-index: 1;
+    max-width: 1440px;
+    margin: 0 auto;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+/* --- PERMET HUD HEADER --- */
+.hud-header {
+    background: var(--bg-surface);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border-glow);
+    border-radius: var(--card-radius);
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    box-shadow: var(--accent-glow);
+    position: relative;
+    overflow: hidden;
+    margin-bottom: 0.5rem;
+}
+
+.hud-header::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, #c084fc, #00f0ff, transparent);
+}
+
+.header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.brand-block {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.brand-badge {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    background: rgba(168, 85, 247, 0.15);
+    border: 1px solid #c084fc;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    color: #c084fc;
+    box-shadow: 0 0 12px rgba(168, 85, 247, 0.3);
+    animation: pulse 2s infinite ease-in-out;
+}
+
+.brand-text h1 {
+    font-family: var(--font-heading);
+    font-size: 1.25rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #ffffff;
+}
+
+.brand-text h1 .version {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    background: rgba(0, 240, 255, 0.15);
+    color: var(--permet-cyan);
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid rgba(0, 240, 255, 0.3);
+}
+
+.brand-text .sub {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    letter-spacing: 0.08em;
+}
+
+/* Permet Gauge */
+.permet-gauge {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 180px;
+}
+
+.permet-gauge-header {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-weight: 700;
+}
+
+.permet-label {
+    color: var(--text-secondary);
+}
+
+.permet-value {
+    color: #c084fc;
+    text-shadow: 0 0 8px rgba(192, 132, 252, 0.5);
+}
+
+.permet-bar-bg {
+    height: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 3px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.permet-bar-fill {
+    height: 100%;
+    width: 88%;
+    background: linear-gradient(90deg, #c084fc, #00f0ff);
+    box-shadow: 0 0 10px rgba(0, 240, 255, 0.8);
+    border-radius: 3px;
+    animation: laserGlow 3s infinite alternate;
+}
+
+/* Primary View Tabs */
+.hud-view-tabs,
+.hud-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--border-glow);
+    padding-bottom: 14px;
+    flex-wrap: wrap;
+}
+
+.view-tab-btn,
+.nav-btn {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-glow);
+    border-radius: 10px;
+    padding: 8px 16px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    min-height: 40px;
+    text-decoration: none;
+}
+
+.view-tab-btn:hover,
+.nav-btn:hover {
+    background: rgba(168, 85, 247, 0.18);
+    border-color: var(--permet-purple);
+    color: var(--text-primary);
+    transform: translateY(-1px);
+}
+
+.view-tab-btn.active,
+.nav-btn.active {
+    background: rgba(168, 85, 247, 0.25);
+    border-color: var(--permet-purple);
+    color: #ffffff;
+    box-shadow: 0 0 16px rgba(168, 85, 247, 0.35);
+}
+
+.tab-badge {
+    background: rgba(0, 0, 0, 0.4);
+    padding: 2px 7px;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    color: var(--permet-cyan);
+    border: 1px solid rgba(0, 240, 255, 0.3);
+}
+
+/* Tactical Quick-Launch Dock */
+.quick-launch-dock {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    width: 100%;
+}
+
+.dock-chip {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-glow);
+    color: var(--text-primary);
+    text-decoration: none;
+    padding: 7px 12px;
+    border-radius: 8px;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    white-space: nowrap;
+    min-height: 38px;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    position: relative;
+}
+
+.dock-chip:hover {
+    border-color: #c084fc;
+    background: rgba(168, 85, 247, 0.18);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(168, 85, 247, 0.25);
+}
+
+.dock-chip.active {
+    border-color: #c084fc;
+    box-shadow: 0 0 12px rgba(192, 132, 252, 0.3);
+    background: rgba(168, 85, 247, 0.2);
+}
+
+.dock-chip .ping-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--permet-emerald);
+    box-shadow: 0 0 8px var(--permet-emerald);
+    animation: pulse 2s infinite;
+}
+
+.dock-chip .ping-dot.custom {
+    background: var(--permet-amber);
+    box-shadow: 0 0 8px var(--permet-amber);
+}
+
+
+/* Shell polish: SVG icons sit on the text line like the emoji they replace, live counts do not
+   jitter, and flex text children may shrink. */
+.tab-icon,
+.brand-badge {
+    line-height: 1;
+}
+
+.tab-icon {
+    display: inline-flex;
+}
+
+.tab-badge,
+.permet-value {
+    font-variant-numeric: tabular-nums;
+}
+
+.brand-text,
+.dock-chip > span:last-child {
+    min-width: 0;
+}
+
+/* View Panels with strict active visibility */
+.view-panel {
+    display: none;
+    flex-direction: column;
+    gap: 20px;
+    animation: fadeIn 0.25s ease-in-out;
+}
+
+.view-panel.active {
+    display: flex !important;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(0.95); }
+}
+
+@keyframes laserGlow {
+    0% { box-shadow: 0 0 8px rgba(0, 240, 255, 0.6); }
+    100% { box-shadow: 0 0 16px rgba(255, 42, 133, 0.8); }
+}
+
+/* Later rule in style.css: the panel fade that actually wins. */
+
+.view-panel {
+    animation: panelFadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes panelFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+
+@media (max-width: 768px) {
+    body {
+        padding: 1rem 0.75rem;
+    }
+    body::before {
+        background-size: 100% 100%, 100% 100%, 90px 90px;
+        animation: circuit-flow-mobile 70s linear infinite, circuit-glow-breathe 12s ease-in-out infinite;
+    }
+    .hud-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1rem;
+        padding: 14px 14px;
+    }
+    .quick-launch-dock {
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+    .dock-chip {
+        padding: 6px 10px;
+        font-size: 0.72rem;
+        min-height: 34px;
+        gap: 6px;
+    }
+    .hud-view-tabs,
+    .hud-nav {
+        width: 100%;
+        gap: 6px;
+        flex-wrap: wrap;
+        padding-bottom: 4px;
+    }
+    .view-tab-btn,
+    .nav-btn {
+        padding: 6px 12px;
+        font-size: 0.72rem;
+    }
+}
+
+@keyframes circuit-flow-mobile {
+    0% {
+        background-position: 0 0, 0 0, 0 0;
+    }
+    100% {
+        background-position: 0 0, 0 0, 90px 90px;
+    }
+}

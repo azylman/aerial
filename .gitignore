@@ -20,3 +20,4 @@ PR_DESCRIPTION.md
 /services/console/ui/node_modules/
 /services/console/ui/dist/
 /services/console/ui/coverage/
+/services/console/ui/e2e/artifacts/

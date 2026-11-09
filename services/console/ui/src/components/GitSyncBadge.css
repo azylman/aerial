@@ -1,0 +1,40 @@
+/* GitSync Latency Pill (ported from static/style.css) */
+.gitsync-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 700;
+    border: 1px solid var(--permet-emerald);
+    background: rgba(5, 255, 161, 0.1);
+    color: var(--permet-emerald);
+    box-shadow: 0 0 12px rgba(5, 255, 161, 0.2);
+    transition: all 0.3s ease;
+}
+
+.gitsync-pill.lagging {
+    border-color: var(--permet-amber);
+    background: rgba(255, 183, 3, 0.1);
+    color: var(--permet-amber);
+    box-shadow: 0 0 12px rgba(255, 183, 3, 0.2);
+}
+
+.gitsync-pill.error {
+    border-color: var(--permet-crimson);
+    background: rgba(255, 51, 102, 0.1);
+    color: var(--permet-crimson);
+    box-shadow: 0 0 12px rgba(255, 51, 102, 0.2);
+}
+
+.gitsync-pill .gitsync-icon {
+    display: inline-flex;
+    font-size: 0.8rem;
+}
+
+.gitsync-pill .gitsync-text {
+    min-width: 0;
+    font-variant-numeric: tabular-nums;
+}
