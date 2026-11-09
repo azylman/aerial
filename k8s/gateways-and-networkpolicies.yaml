@@ -56,22 +56,6 @@ spec:
         sub_filter 'endpoint:"/api/v1/' 'endpoint:"/status/api/v1/';
         sub_filter '"/api/v1/' '"/status/api/v1/';
 ---
-apiVersion: gateway.nginx.org/v1alpha1
-kind: SnippetsFilter
-metadata:
-  name: agentsview-subfilter
-  namespace: default
-spec:
-  snippets:
-    - context: http.server.location
-      value: |
-        proxy_set_header Accept-Encoding "";
-        sub_filter_types text/javascript application/javascript text/css;
-        sub_filter_once off;
-        sub_filter 'src="/assets/' 'src="/agentsview/assets/';
-        sub_filter 'href="/assets/' 'href="/agentsview/assets/';
-        sub_filter 'href="/favicon.svg"' 'href="/agentsview/favicon.svg"';
----
 apiVersion: gateway.nginx.org/v1alpha2
 kind: NginxProxy
 metadata:
@@ -338,15 +322,7 @@ spec:
       filters:
         - urlRewrite:
             hostname: localhost
-            path:
-              type: ReplacePrefixMatch
-              replacePrefixMatch: /
           type: URLRewrite
-        - extensionRef:
-            group: gateway.nginx.org
-            kind: SnippetsFilter
-            name: agentsview-subfilter
-          type: ExtensionRef
       matches:
         - path:
             type: PathPrefix
@@ -360,6 +336,9 @@ spec:
       filters:
         - urlRewrite:
             hostname: localhost
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /agentsview/assets/
           type: URLRewrite
       matches:
         - path:
@@ -550,6 +529,23 @@ spec:
       filters:
         - urlRewrite:
             hostname: localhost
+          type: URLRewrite
+      matches:
+        - path:
+            type: PathPrefix
+            value: /agentsview/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: agentsview
+          port: 8080
+          weight: 1
+      filters:
+        - urlRewrite:
+            hostname: localhost
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /agentsview/
           type: URLRewrite
       matches:
         - path:
@@ -947,15 +943,7 @@ spec:
       filters:
         - urlRewrite:
             hostname: localhost
-            path:
-              type: ReplacePrefixMatch
-              replacePrefixMatch: /
           type: URLRewrite
-        - extensionRef:
-            group: gateway.nginx.org
-            kind: SnippetsFilter
-            name: agentsview-subfilter
-          type: ExtensionRef
       matches:
         - path:
             type: PathPrefix
@@ -969,6 +957,9 @@ spec:
       filters:
         - urlRewrite:
             hostname: localhost
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /agentsview/assets/
           type: URLRewrite
       matches:
         - path:
