@@ -1,221 +1,14 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"encoding/pem"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
-
-func TestInfisicalWebhookPayload_Getters(t *testing.T) {
-	t.Parallel()
-	type dataStruct = struct {
-		WorkspaceID string `json:"workspaceId"`
-		ProjectID   string `json:"projectId"`
-		Environment string `json:"environment"`
-	}
-	tests := []struct {
-		name     string
-		payload  InfisicalWebhookPayload
-		fallback string
-		wantWS   string
-		wantEnv  string
-	}{
-		{name: "workspace id from payload field", payload: InfisicalWebhookPayload{WorkspaceID: "ws-1"}, fallback: "fb", wantWS: "ws-1", wantEnv: "fb"},
-		{name: "project id from payload field", payload: InfisicalWebhookPayload{ProjectID: "proj-1"}, fallback: "fb", wantWS: "proj-1", wantEnv: "fb"},
-		{name: "workspace id from nested data", payload: InfisicalWebhookPayload{Data: &dataStruct{WorkspaceID: "ws-data"}}, fallback: "fb", wantWS: "ws-data", wantEnv: "fb"},
-		{name: "project id from nested data", payload: InfisicalWebhookPayload{Data: &dataStruct{ProjectID: "proj-data"}}, fallback: "fb", wantWS: "proj-data", wantEnv: "fb"},
-		{name: "environment from payload field", payload: InfisicalWebhookPayload{Environment: "prod"}, fallback: "fb", wantWS: "fb", wantEnv: "prod"},
-		{name: "environment from nested data", payload: InfisicalWebhookPayload{Data: &dataStruct{Environment: "staging"}}, fallback: "fb", wantWS: "fb", wantEnv: "staging"},
-		{name: "fallback when fields empty", payload: InfisicalWebhookPayload{}, fallback: "fb", wantWS: "fb", wantEnv: "fb"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if gotWS := tc.payload.GetWorkspaceID(tc.fallback); gotWS != tc.wantWS {
-				t.Errorf("GetWorkspaceID() = %q, want %q", gotWS, tc.wantWS)
-			}
-			if gotEnv := tc.payload.GetEnvironment(tc.fallback); gotEnv != tc.wantEnv {
-				t.Errorf("GetEnvironment() = %q, want %q", gotEnv, tc.wantEnv)
-			}
-		})
-	}
-}
-
-func TestHandleInfisicalAndGenericWebhooks(t *testing.T) {
-	t.Parallel()
-	routes := NewRouterServer(Config{}, nil).Routes()
-
-	cases := []struct {
-		name, path, wantTargetSec, wantTargetVar, wantEnv, wantMsg string
-		body                                                       io.Reader
-		wantStatus                                                 int
-	}{
-		{name: "infisical valid payload", path: "/webhooks/infisical", body: strings.NewReader(`{"event":"secrets.modified"}`), wantStatus: http.StatusAccepted, wantTargetSec: TargetK8sSecret, wantTargetVar: TargetK8sSecret},
-		{name: "infisical malformed json", path: "/webhooks/infisical", body: strings.NewReader(`{not valid json}`), wantStatus: http.StatusBadRequest},
-		{name: "infisical body read error", path: "/webhooks/infisical", body: errReader{}, wantStatus: http.StatusBadRequest},
-		{name: "generic standard sync", path: "/webhooks/generic", body: strings.NewReader(`{"environment":"prod"}`), wantStatus: http.StatusAccepted, wantTargetSec: TargetK8sSecret, wantTargetVar: TargetK8sSecret},
-		{name: "generic empty body allowed", path: "/webhooks/generic", body: strings.NewReader(""), wantStatus: http.StatusAccepted},
-		{name: "generic direct secrets map", path: "/webhooks/generic", body: strings.NewReader(`{"secrets":{"KEY1":"VAL1"}}`), wantStatus: http.StatusAccepted, wantTargetSec: TargetK8sSecret, wantTargetVar: TargetK8sSecret, wantMsg: "Direct secret sync scheduled"},
-		{name: "generic explicit workspace and env", path: "/webhooks/generic", body: strings.NewReader(`{"workspaceId":"custom-ws","environment":"dev"}`), wantStatus: http.StatusAccepted, wantTargetSec: TargetK8sSecret, wantTargetVar: TargetK8sSecret, wantEnv: "dev"},
-		{name: "generic bad json", path: "/webhooks/generic", body: strings.NewReader(`{invalid`), wantStatus: http.StatusBadRequest},
-		{name: "generic body read error", path: "/webhooks/generic", body: errReader{}, wantStatus: http.StatusBadRequest},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			rec := doHTTPRequest(routes, http.MethodPost, tc.path, tc.body, nil)
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("expected status %d, got %d", tc.wantStatus, rec.Code)
-			}
-			if tc.wantTargetSec != "" || tc.wantTargetVar != "" || tc.wantEnv != "" || tc.wantMsg != "" {
-				var resp map[string]any
-				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-					t.Fatalf("failed to parse response: %v", err)
-				}
-				if tc.wantTargetSec != "" && resp["targetSecret"] != tc.wantTargetSec {
-					t.Errorf("expected targetSecret %q, got %v", tc.wantTargetSec, resp["targetSecret"])
-				}
-				if tc.wantTargetVar != "" && resp["targetVariable"] != tc.wantTargetVar {
-					t.Errorf("expected targetVariable %q, got %v", tc.wantTargetVar, resp["targetVariable"])
-				}
-				if tc.wantEnv != "" && resp["environment"] != tc.wantEnv {
-					t.Errorf("expected environment %q, got %v", tc.wantEnv, resp["environment"])
-				}
-				if tc.wantMsg != "" && resp["message"] != tc.wantMsg {
-					t.Errorf("expected message %q, got %v", tc.wantMsg, resp["message"])
-				}
-			}
-		})
-	}
-}
-
-func TestSyncSecrets(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name          string
-		cfgOverride   *Config
-		loginStatus   int
-		loginBody     string
-		secretsStatus int
-		secretsBody   string
-		k8sPutStatus  int
-		k8sPostStatus int
-		cnpgPutStatus int
-		unreachable   bool
-		wantErr       bool
-		wantK8sPuts   int32
-		wantK8sPosts  int32
-	}{
-		{name: "successful full sync flow", loginStatus: http.StatusOK, loginBody: `{"accessToken":"mock-jwt-token"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"API_KEY","secretValue":"secret123"}]}`, k8sPutStatus: http.StatusOK, wantK8sPuts: 1},
-		{name: "missing infisical credentials", cfgOverride: &Config{}, wantErr: true},
-		{name: "login 500 server error", loginStatus: http.StatusInternalServerError, loginBody: "server error", wantErr: true},
-		{name: "login invalid json response", loginStatus: http.StatusOK, loginBody: "{invalid-json", wantErr: true},
-		{name: "login empty token string", loginStatus: http.StatusOK, loginBody: `{"accessToken":""}`, wantErr: true},
-		{name: "login fallback token field", loginStatus: http.StatusOK, loginBody: `{"token":"fallback-token"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, k8sPutStatus: http.StatusOK, wantK8sPuts: 1},
-		{name: "secrets fetch 502 bad gateway", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusBadGateway, wantErr: true},
-		{name: "secrets fetch invalid json", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: "{invalid-secrets", wantErr: true},
-		{name: "k8s put 201 created", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`, k8sPutStatus: http.StatusCreated, wantK8sPuts: 1},
-		{name: "k8s put 404 falls back to post 201 created", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`, k8sPutStatus: http.StatusNotFound, k8sPostStatus: http.StatusCreated, wantK8sPuts: 1, wantK8sPosts: 1},
-		{name: "k8s put 404 post fails 500", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`, k8sPutStatus: http.StatusNotFound, k8sPostStatus: http.StatusInternalServerError, wantErr: true, wantK8sPuts: 1, wantK8sPosts: 1},
-		{name: "missing kube api server", cfgOverride: &Config{InfisicalClientID: "cid", InfisicalClientSecret: "csec", InfisicalURL: "http://mock"}, loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, wantErr: true},
-		{name: "k8s put 500 internal server error", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, k8sPutStatus: http.StatusInternalServerError, wantErr: true, wantK8sPuts: 1},
-		{name: "sync with postgres password upserts shared and cnpg secrets", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"POSTGRES_PASSWORD","secretValue":"supersecret"}]}`, k8sPutStatus: http.StatusOK, wantK8sPuts: 2},
-		{name: "cnpg secret put failure returns error", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"POSTGRES_PASSWORD","secretValue":"supersecret"}]}`, k8sPutStatus: http.StatusOK, cnpgPutStatus: http.StatusInternalServerError, wantErr: true, wantK8sPuts: 2},
-		{name: "unreachable client connections", unreachable: true, wantErr: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if tc.unreachable {
-				badClientServer := NewRouterServer(Config{
-					InfisicalURL:          "http://127.0.0.1:1",
-					InfisicalClientID:     "cid",
-					InfisicalClientSecret: "csec",
-					KubeAPIServer:         "http://127.0.0.1:1",
-				}, &http.Client{Transport: &zeroCallTransport{}, Timeout: 50 * time.Millisecond})
-
-				if err := badClientServer.SyncSecrets(ctx, "ws", "env"); err == nil {
-					t.Errorf("SyncSecrets() expected error on unreachable, got nil")
-				}
-				if _, err := badClientServer.fetchInfisicalSecrets(ctx, "tok", "ws", "env"); err == nil {
-					t.Errorf("fetchInfisicalSecrets() expected error on unreachable, got nil")
-				}
-				if err := badClientServer.upsertK8sSecret(ctx, map[string]string{"A": "B"}); err == nil {
-					t.Errorf("upsertK8sSecret() expected error on unreachable, got nil")
-				}
-				return
-			}
-
-			var k8sPutCount atomic.Int32
-			var k8sPostCount atomic.Int32
-			cnpgStatus := tc.cnpgPutStatus
-			if cnpgStatus == 0 {
-				cnpgStatus = http.StatusOK
-			}
-			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				switch {
-				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/universal-auth/login":
-					w.WriteHeader(tc.loginStatus)
-					_, _ = w.Write([]byte(tc.loginBody))
-				case r.Method == http.MethodGet && r.URL.Path == "/api/v3/secrets/raw":
-					w.WriteHeader(tc.secretsStatus)
-					_, _ = w.Write([]byte(tc.secretsBody))
-				case r.Method == http.MethodPut && r.URL.Path == "/api/v1/namespaces/default/secrets/shared-secrets":
-					k8sPutCount.Add(1)
-					w.WriteHeader(tc.k8sPutStatus)
-				case r.Method == http.MethodPut && r.URL.Path == "/api/v1/namespaces/default/secrets/postgres-aerial-role":
-					k8sPutCount.Add(1)
-					w.WriteHeader(cnpgStatus)
-				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/default/secrets":
-					k8sPostCount.Add(1)
-					w.WriteHeader(tc.k8sPostStatus)
-				default:
-					http.NotFound(w, r)
-				}
-			}))
-			defer mockServer.Close()
-
-			cfg := Config{
-				InfisicalURL:          mockServer.URL,
-				InfisicalClientID:     "client-id",
-				InfisicalClientSecret: "client-secret",
-				InfisicalProjectID:    "proj-123",
-				InfisicalEnvironment:  "prod",
-				KubeAPIServer:         mockServer.URL,
-				KubeToken:             "test-kube-token",
-			}
-			if tc.cfgOverride != nil {
-				cfg = *tc.cfgOverride
-			}
-
-			srv := NewRouterServer(cfg, mockServer.Client())
-			err := srv.SyncSecrets(ctx, "proj-123", "prod")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("SyncSecrets() err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if gotPuts := k8sPutCount.Load(); gotPuts != tc.wantK8sPuts {
-				t.Errorf("k8s PUT count = %d, want %d", gotPuts, tc.wantK8sPuts)
-			}
-			if gotPosts := k8sPostCount.Load(); gotPosts != tc.wantK8sPosts {
-				t.Errorf("k8s POST count = %d, want %d", gotPosts, tc.wantK8sPosts)
-			}
-		})
-	}
-}
 
 func TestLoadK8sCertPool(t *testing.T) {
 	t.Parallel()
@@ -260,7 +53,7 @@ func TestLoadK8sCertPool(t *testing.T) {
 	}
 }
 
-func TestGetKubeToken(t *testing.T) {
+func TestGetKubeServiceAccountToken(t *testing.T) {
 	tempDir := t.TempDir()
 	tokenFile := filepath.Join(tempDir, "sa-token")
 	_ = os.WriteFile(tokenFile, []byte("  projected-sa-token  \n"), 0o600)
@@ -269,23 +62,22 @@ func TestGetKubeToken(t *testing.T) {
 	t.Cleanup(func() { kubeTokenPath = origTokenPath })
 
 	tests := []struct {
-		name      string
-		cfgToken  string
-		tokenPath string
-		wantToken string
+		name          string
+		explicitToken string
+		tokenPath     string
+		wantToken     string
 	}{
-		{name: "returns config token when set", cfgToken: "explicit-token", tokenPath: tokenFile, wantToken: "explicit-token"},
-		{name: "reads from token file when config token empty", cfgToken: "", tokenPath: tokenFile, wantToken: "projected-sa-token"},
-		{name: "returns empty string when token file missing", cfgToken: "", tokenPath: filepath.Join(tempDir, "missing-token"), wantToken: ""},
+		{name: "returns explicit token when set", explicitToken: "explicit-token", tokenPath: tokenFile, wantToken: "explicit-token"},
+		{name: "reads from token file when explicit token empty", explicitToken: "", tokenPath: tokenFile, wantToken: "projected-sa-token"},
+		{name: "returns empty string when token file missing", explicitToken: "", tokenPath: filepath.Join(tempDir, "missing-token"), wantToken: ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			kubeTokenPath = tc.tokenPath
-			srv := &RouterServer{cfg: Config{KubeToken: tc.cfgToken}}
-			got := srv.getKubeToken()
+			got := getKubeServiceAccountToken(tc.explicitToken)
 			if got != tc.wantToken {
-				t.Errorf("getKubeToken() = %q, want %q", got, tc.wantToken)
+				t.Errorf("getKubeServiceAccountToken() = %q, want %q", got, tc.wantToken)
 			}
 		})
 	}
@@ -343,11 +135,7 @@ func TestGetK8sHTTPClient(t *testing.T) {
 			if tc.hasHTTPClient {
 				customClient = &http.Client{Transport: &zeroCallTransport{}, Timeout: 42 * time.Millisecond}
 			}
-			srv := &RouterServer{
-				cfg:        Config{KubeAPIServer: tc.apiServer},
-				httpClient: customClient,
-			}
-			client := srv.getK8sHTTPClient()
+			client := getK8sHTTPClient(tc.apiServer, customClient)
 			if tc.wantCustom {
 				if client != customClient {
 					t.Fatalf("expected custom client to be returned, got %v", client)

@@ -876,36 +876,6 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: synapse-secret-writer
-  namespace: default
-rules:
-  - apiGroups:
-      - ""
-    resources:
-      - secrets
-    verbs:
-      - get
-      - create
-      - update
-      - patch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: synapse-secret-writer-binding
-  namespace: default
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: synapse-secret-writer
-subjects:
-  - kind: ServiceAccount
-    name: synapse-sa
-    namespace: default
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
   name: synapse-flux-reconciler
   namespace: flux-system
 rules:
@@ -1023,10 +993,6 @@ spec:
               value: /share/aerial-config/services/synapse/synapse.yaml
             - name: ERI_URL
               value: http://eri.aerial
-            - name: INFISICAL_URL
-              value: http://infisical.aerial
-            - name: INFISICAL_ENVIRONMENT
-              value: default
             - name: VANADIS_URL
               value: http://vanadis.aerial
             - name: HARO_URL

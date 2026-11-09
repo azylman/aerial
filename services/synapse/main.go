@@ -75,35 +75,16 @@ func readWebhookBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]
 	return body, true
 }
 
-//nolint:unparam
-func readWebhookJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, allowEmpty bool, dst any) bool {
+func readWebhookJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) bool {
 	body, ok := readWebhookBody(w, r, maxBytes)
 	if !ok {
 		return false
-	}
-	if len(body) == 0 && allowEmpty {
-		return true
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
 		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
 		return false
 	}
 	return true
-}
-
-func runBackgroundSync(name string, fn func(ctx context.Context) error) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[synapse] PANIC recovered in %s: %v", name, r)
-			}
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := fn(ctx); err != nil {
-			log.Printf("[synapse] Background %s failed: %v", name, err)
-		}
-	}()
 }
 
 // Routes initializes and returns the HTTP mux for the service.
@@ -114,8 +95,6 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("POST /internal/pr/register", s.handlePRRegister)
 	mux.HandleFunc("POST /internal/widget/sync", s.handleInternalWidgetSync)
-	mux.HandleFunc("POST /webhooks/infisical", s.handleInfisicalWebhook)
-	mux.HandleFunc("POST /webhooks/generic", s.handleGenericWebhook)
 	mux.HandleFunc("POST /api/webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("POST /webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("POST /api/webhooks/flux", s.handleFluxWebhook)
@@ -161,7 +140,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req PRRegisterRequest
-	if !readWebhookJSON(w, r, 1<<20, false, &req) {
+	if !readWebhookJSON(w, r, 1<<20, &req) {
 		return
 	}
 
@@ -232,7 +211,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 
 func (s *RouterServer) handleInternalWidgetSync(w http.ResponseWriter, r *http.Request) {
 	var req WidgetSyncArgs
-	if !readWebhookJSON(w, r, 1<<20, false, &req) {
+	if !readWebhookJSON(w, r, 1<<20, &req) {
 		return
 	}
 	if buildID := strings.TrimSpace(req.BuildID); buildID != "" {
@@ -1429,8 +1408,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("[synapse] Server listening on %s (Infisical: %s, KubeAPIServer: %s, TargetSecret: %s)",
-			ln.Addr().String(), cfg.InfisicalURL, cfg.KubeAPIServer, TargetK8sSecret)
+		log.Printf("[synapse] Server listening on %s (KubeAPIServer: %s)",
+			ln.Addr().String(), cfg.KubeAPIServer)
 		if err := httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err
 		}
