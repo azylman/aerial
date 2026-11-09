@@ -1731,6 +1731,9 @@ func TestServer_HeartbeatSkipping_MockHTTPBrainServer(t *testing.T) {
 	if receivedReq.SessionID != "heartbeat-hb-skip-1" {
 		t.Errorf("expected receivedReq.SessionID to be 'heartbeat-hb-skip-1', got %q", receivedReq.SessionID)
 	}
+	if receivedReq.TargetID != "123456789012345678" {
+		t.Errorf("expected receivedReq.TargetID to be '123456789012345678', got %q", receivedReq.TargetID)
+	}
 
 	// Verify next_run_at was advanced into the future
 	updatedHB, err := GetHeartbeatSchedule(ctx, db, "hb-skip-1")

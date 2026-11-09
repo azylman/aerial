@@ -713,10 +713,12 @@ type PromptRequest struct {
 }
 
 type DispatchRequest struct {
-	Source    string `json:"source"`
-	SessionID string `json:"session_id,omitempty"`
-	Prompt    string `json:"prompt"`
-	Effort    string `json:"effort,omitempty"`
+	Source         string `json:"source"`
+	SessionID      string `json:"session_id,omitempty"`
+	TargetID       string `json:"target_id,omitempty"`
+	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+	Prompt         string `json:"prompt"`
+	Effort         string `json:"effort,omitempty"`
 }
 
 type DirectMessageRequest struct {

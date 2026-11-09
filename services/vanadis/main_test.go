@@ -1227,7 +1227,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	if err := worker.Work(ctx, job); err != nil {
 		t.Fatalf("unexpected worker error: %v", err)
 	}
-	if len(gotPrompts) != 1 || gotPrompts[0].Source != "vanadis" || gotPrompts[0].SessionID != "vanadis-c-1" || gotPrompts[0].Effort != "medium" || !strings.Contains(gotPrompts[0].Prompt, "Chunk ID: c-1") {
+	if len(gotPrompts) != 1 || gotPrompts[0].Source != "vanadis" || gotPrompts[0].SessionID != "vanadis-c-1" || gotPrompts[0].TargetID != "thread-777" || gotPrompts[0].VanadisChunkID != "c-1" || gotPrompts[0].Effort != "medium" || !strings.Contains(gotPrompts[0].Prompt, "Chunk ID: c-1") {
 		t.Fatalf("unexpected dispatched prompts: %+v", gotPrompts)
 	}
 	brainStatus = http.StatusBadGateway

@@ -3708,7 +3708,7 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var mu sync.Mutex
-			var notices, sessions, wakeTails []string
+			var notices, sessions, wakeTails, targetIDs, chunkIDs []string
 			brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
@@ -3718,6 +3718,7 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 					_ = json.NewDecoder(r.Body).Decode(&req)
 					notice, _, _ := strings.Cut(req.Prompt, "[VANADIS BUILD CHUNK EXECUTION]")
 					notices, sessions = append(notices, notice), append(sessions, req.SessionID)
+					targetIDs, chunkIDs = append(targetIDs, req.TargetID), append(chunkIDs, req.VanadisChunkID)
 					w.WriteHeader(tc.dispatchCode)
 				case "/prompt":
 					var p map[string]string
@@ -3744,6 +3745,11 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 			if !reflect.DeepEqual(notices, tc.wantNotices) || !reflect.DeepEqual(sessions, tc.wantSessions) {
 				t.Fatalf("dispatches notices=%q sessions=%v, want notices=%q sessions=%v", notices, sessions, tc.wantNotices, tc.wantSessions)
 			}
+			if tc.name == "first stall re-dispatches with notice" {
+				if !reflect.DeepEqual(targetIDs, []string{"123456789012345678"}) || !reflect.DeepEqual(chunkIDs, []string{"c-stall"}) {
+					t.Fatalf("dispatches targetIDs=%v chunkIDs=%v, want [123456789012345678], [c-stall]", targetIDs, chunkIDs)
+				}
+			}
 			if !reflect.DeepEqual(wakeTails, tc.wantWakeTails) {
 				t.Fatalf("wake tails = %q, want %q", wakeTails, tc.wantWakeTails)
 			}
@@ -3757,13 +3763,15 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 func TestServer_CompleteChunkRunsStallCheck(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
-	var dispatches []string
+	var dispatches, targetIDs, chunkIDs []string
 	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/dispatch" {
 			var req BrainDispatchRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			mu.Lock()
 			dispatches = append(dispatches, req.SessionID)
+			targetIDs = append(targetIDs, req.TargetID)
+			chunkIDs = append(chunkIDs, req.VanadisChunkID)
 			mu.Unlock()
 		}
 		w.WriteHeader(http.StatusAccepted)
@@ -3781,5 +3789,8 @@ func TestServer_CompleteChunkRunsStallCheck(t *testing.T) {
 	defer mu.Unlock()
 	if !reflect.DeepEqual(dispatches, []string{"vanadis-c-done"}) {
 		t.Fatalf("dispatches = %v, want [vanadis-c-done]", dispatches)
+	}
+	if !reflect.DeepEqual(targetIDs, []string{"123456789012345678"}) || !reflect.DeepEqual(chunkIDs, []string{"c-done"}) {
+		t.Fatalf("targetIDs = %v chunkIDs = %v, want [123456789012345678], [c-done]", targetIDs, chunkIDs)
 	}
 }

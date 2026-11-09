@@ -311,13 +311,6 @@ resolve_target_id() {
     if [ -n "${AERIAL_TARGET_ID:-}" ]; then echo "${AERIAL_TARGET_ID}"; return; fi
     if [ -n "${DISCORD_THREAD_ID:-}" ]; then echo "${DISCORD_THREAD_ID}"; return; fi
     if [ -n "${DISCORD_CHANNEL_ID:-}" ]; then echo "${DISCORD_CHANNEL_ID}"; return; fi
-    local tfile="${ANTIGRAVITY_APP_DATA_DIR:-}/brain/${ANTIGRAVITY_CONVERSATION_ID:-}/.system_generated/logs/transcript.jsonl"
-    if [ -f "$tfile" ]; then
-        local tid
-        tid=$(head -n 1 "$tfile" 2>/dev/null | grep -oE 'thread_id: [0-9]{17,20}' | head -n 1 | awk '{print $2}' || true)
-        [ -z "$tid" ] && tid=$(head -n 1 "$tfile" 2>/dev/null | grep -oE 'channel_id: [0-9]{17,20}' | head -n 1 | awk '{print $2}' || true)
-        if [ -n "$tid" ]; then echo "$tid"; return; fi
-    fi
     echo ""
 }
 
@@ -325,12 +318,6 @@ resolve_vanadis_chunk_id() {
     if [ -n "${1:-}" ]; then echo "$1"; return; fi
     if [ -n "${VANADIS_CHUNK_ID:-}" ]; then echo "${VANADIS_CHUNK_ID}"; return; fi
     if [ -n "${AERIAL_VANADIS_CHUNK_ID:-}" ]; then echo "${AERIAL_VANADIS_CHUNK_ID}"; return; fi
-    local tfile="${ANTIGRAVITY_APP_DATA_DIR:-}/brain/${ANTIGRAVITY_CONVERSATION_ID:-}/.system_generated/logs/transcript.jsonl"
-    if [ -f "$tfile" ]; then
-        local cid
-        cid=$(grep -E '"type":[[:space:]]*"USER_INPUT"' "$tfile" 2>/dev/null | tail -n 1 | sed 's/.*<\/retrieved_memory>//' | grep -oE -- '(Chunk ID:|--vanadis-chunk(=|[[:space:]]+)|- vanadis_chunk_id:)[[:space:]]*[^\\"[:space:]]+' | tail -n 1 | sed -E 's/^(Chunk ID:|--vanadis-chunk=|--vanadis-chunk|- vanadis_chunk_id:)[[:space:]]*//' || true)
-        if [ -n "$cid" ]; then echo "$cid"; return; fi
-    fi
     echo ""
 }
 
