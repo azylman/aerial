@@ -225,7 +225,13 @@ spec:
     synchronizeReplicas:
       enabled: true
     updateInterval: 30
-  resources: {}
+  resources:
+    limits:
+      cpu: "2"
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
   smartShutdownTimeout: 180
   startDelay: 3600
   stopDelay: 1800
@@ -360,6 +366,13 @@ spec:
       spec:
         containers:
           - name: listener
+            resources:
+              limits:
+                cpu: 100m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 32Mi
         nodeSelector:
           kubernetes.io/hostname: calibarn
     maxRunners: 6
@@ -446,6 +459,13 @@ spec:
       spec:
         containers:
           - name: listener
+            resources:
+              limits:
+                cpu: 100m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 32Mi
         nodeSelector:
           kubernetes.io/hostname: calibarn
     maxRunners: 16
@@ -514,6 +534,13 @@ spec:
       spec:
         containers:
           - name: listener
+            resources:
+              limits:
+                cpu: 100m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 32Mi
         nodeSelector:
           kubernetes.io/hostname: calibarn
     maxRunners: 4
@@ -600,6 +627,13 @@ spec:
       spec:
         containers:
           - name: listener
+            resources:
+              limits:
+                cpu: 100m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 32Mi
         nodeSelector:
           kubernetes.io/hostname: calibarn
     maxRunners: 10
@@ -668,6 +702,13 @@ spec:
       spec:
         containers:
           - name: listener
+            resources:
+              limits:
+                cpu: 100m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 32Mi
         nodeSelector:
           kubernetes.io/hostname: calibarn
     maxRunners: 4
@@ -754,6 +795,13 @@ spec:
       spec:
         containers:
           - name: listener
+            resources:
+              limits:
+                cpu: 100m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 32Mi
         nodeSelector:
           kubernetes.io/hostname: calibarn
     maxRunners: 8
@@ -822,6 +870,13 @@ spec:
       spec:
         containers:
           - name: listener
+            resources:
+              limits:
+                cpu: 100m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 32Mi
         nodeSelector:
           kubernetes.io/hostname: calibarn
     maxRunners: 2
@@ -908,6 +963,13 @@ spec:
       spec:
         containers:
           - name: listener
+            resources:
+              limits:
+                cpu: 100m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 32Mi
         nodeSelector:
           kubernetes.io/hostname: calibarn
     maxRunners: 2

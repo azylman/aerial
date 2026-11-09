@@ -225,6 +225,13 @@ spec:
               port: 8080
             initialDelaySeconds: 2
             periodSeconds: 5
+          resources:
+            limits:
+              cpu: "4"
+              memory: 6Gi
+            requests:
+              cpu: 500m
+              memory: 2Gi
           volumeMounts:
             - mountPath: /share
               name: share
@@ -260,6 +267,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -296,6 +310,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -400,6 +421,13 @@ spec:
             - containerPort: 4025
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /share
               name: share
@@ -427,6 +455,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -463,6 +498,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -520,6 +562,13 @@ spec:
           image: ghcr.io/azylman/aerial-sidecar-migrator:${TAG_AERIAL_SIDECAR_MIGRATOR:=latest}
           imagePullPolicy: Always
           name: migrate-sidecars
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
       imagePullSecrets:
         - name: ghcr-creds
       initContainers:
@@ -539,6 +588,13 @@ spec:
           image: ghcr.io/azylman/aerial-migrator:${TAG_AERIAL_MIGRATOR:=latest}
           imagePullPolicy: Always
           name: migrate-core
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
       restartPolicy: OnFailure
 ---
 apiVersion: v1
@@ -604,6 +660,13 @@ spec:
             - containerPort: 4008
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /share
               name: share
@@ -631,6 +694,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -738,6 +808,13 @@ spec:
             - containerPort: 8080
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 50m
+              memory: 128Mi
           volumeMounts:
             - mountPath: /tmp
               name: tmp-data
@@ -804,6 +881,13 @@ spec:
           image: ghcr.io/azylman/agentsview:latest
           imagePullPolicy: Always
           name: agentsview-sync
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 50m
+              memory: 256Mi
           volumeMounts:
             - mountPath: /data
               name: brain-data
@@ -820,6 +904,13 @@ spec:
                   name: postgres-secret
           image: ghcr.io/cloudnative-pg/postgresql:18
           name: reconcile-agentsview-owner
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
       nodeSelector:
         compute-tier: performance
         kubernetes.io/hostname: calibarn
@@ -896,6 +987,13 @@ spec:
             - containerPort: 4005
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /share
               name: share
@@ -923,6 +1021,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -1117,6 +1222,13 @@ spec:
             - containerPort: 4020
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /share
               name: share
@@ -1144,6 +1256,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -1246,6 +1365,13 @@ spec:
             - containerPort: 8084
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /config/console.yaml
               name: config
@@ -1319,6 +1445,13 @@ spec:
             - containerPort: 3001
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           volumeMounts:
             - mountPath: /share
               name: share
@@ -1346,6 +1479,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -1382,6 +1522,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -1456,6 +1603,13 @@ spec:
             - containerPort: 80
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           volumeMounts:
             - mountPath: /share
               name: share
@@ -1483,6 +1637,13 @@ spec:
                   name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
           restartPolicy: Always
           startupProbe:
             exec:
@@ -1552,6 +1713,13 @@ spec:
             - containerPort: 6379
               name: valkey
               protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
 ---
 apiVersion: v1
 kind: Service
@@ -1613,6 +1781,13 @@ spec:
             - containerPort: 8080
               name: http
               protocol: TCP
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+            requests:
+              cpu: 100m
+              memory: 512Mi
 ---
 apiVersion: v1
 kind: Service
