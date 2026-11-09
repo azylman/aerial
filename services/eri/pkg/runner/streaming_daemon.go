@@ -395,10 +395,10 @@ func (d *StreamingDaemon) syncTurnEnvFile(turnCtx *TurnContext) error {
 		return fmt.Errorf("failed creating turn env directory: %w", err)
 	}
 	content := FormatTurnEnvFileContent(targetID, vanadisChunkID)
-	if err := os.WriteFile(turnEnvFile, []byte(content), 0o600); err != nil {
+	if err := os.WriteFile(turnEnvFile, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed writing turn env file: %w", err)
 	}
-	return nil
+	return os.Chmod(turnEnvFile, 0o644)
 }
 
 func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {

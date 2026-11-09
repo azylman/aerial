@@ -1289,6 +1289,12 @@ func TestStreamingDaemon_Claude_ErrorHandling(t *testing.T) {
 func TestStreamingDaemon_TurnEnvFile(t *testing.T) {
 	tempDir := t.TempDir()
 	envFile := filepath.Join(tempDir, "turn_env", "test-daemon.sh")
+	if err := os.MkdirAll(filepath.Dir(envFile), 0o755); err != nil {
+		t.Fatalf("failed creating turn_env dir: %v", err)
+	}
+	if err := os.WriteFile(envFile, []byte("legacy\n"), 0o600); err != nil {
+		t.Fatalf("failed pre-seeding 0600 turn env file: %v", err)
+	}
 
 	cfg := DaemonConfig{
 		SessionID:   "00000000-0000-0000-0000-000000000305",
@@ -1314,6 +1320,11 @@ func TestStreamingDaemon_TurnEnvFile(t *testing.T) {
 	data1, err := os.ReadFile(envFile)
 	if err != nil {
 		t.Fatalf("failed reading turn env file: %v", err)
+	}
+	if info, statErr := os.Stat(envFile); statErr != nil {
+		t.Fatalf("failed stating turn env file: %v", statErr)
+	} else if gotPerm := info.Mode().Perm(); gotPerm != 0o644 {
+		t.Errorf("expected turn env file permissions 0644, got %04o", gotPerm)
 	}
 	content1 := string(data1)
 	if !strings.Contains(content1, "unset BASH_ENV\n") ||
