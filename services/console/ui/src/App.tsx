@@ -1,4 +1,4 @@
-import { Activity, type ComponentType, lazy, Suspense, useDeferredValue, useEffect, useState } from 'react';
+import { Activity, type ComponentType, lazy, Suspense, useEffect, useState } from 'react';
 import { loadBuildsView, loadedView, pollStatus, statusPolledOn, VIEW_LOADERS } from './boot';
 import { Drawer, type DrawerPanels } from './components/Drawer';
 import { Header } from './components/Header';
@@ -72,7 +72,7 @@ function ViewPanel({ tab, visible }: { readonly tab: TabId; readonly visible: bo
 }
 
 /**
- * Tabs in first-visit order. A tab joins once it is the deferred view tab, so its tree is built
+ * Tabs in first-visit order. A tab joins once it is the shown view tab, so its tree is built
  * once and kept: switching back reveals it instead of rebuilding it.
  */
 function useVisitedTabs(viewTab: TabId): readonly TabId[] {
@@ -86,12 +86,39 @@ function useVisitedTabs(viewTab: TabId): readonly TabId[] {
   return visited;
 }
 
+/**
+ * The tab whose view is shown. A tab whose module has loaded is adopted during render, so the tab
+ * bar and the view swap land in one commit. A not-yet-loaded tab keeps the old view on screen
+ * while its chunk downloads and is adopted once it resolves (or fails, so React.lazy surfaces the
+ * error), and only if it is still the requested tab: rapid clicks never land on a stale one.
+ */
+function useViewTab(activeTab: TabId): TabId {
+  const [viewTab, setViewTab] = useState(activeTab);
+  const adoptNow = activeTab !== viewTab && loadedView(activeTab) !== undefined;
+  if (adoptNow) {
+    // Adjusting state during render (not in an effect) keeps the swap in the tab bar's commit.
+    setViewTab(activeTab);
+  }
+  useEffect(() => {
+    if (loadedView(activeTab) !== undefined) return;
+    let requested = true;
+    const adopt = () => {
+      if (requested) setViewTab(activeTab);
+    };
+    VIEW_LOADERS[activeTab]().then(adopt, adopt);
+    return () => {
+      requested = false;
+    };
+  }, [activeTab]);
+  return adoptNow ? activeTab : viewTab;
+}
+
 export function App() {
   const activeTab = useHashRoute();
-  // The tab button flips immediately; the view swap renders as a deferred (transition) update.
-  // All panels share one already-revealed Suspense boundary, so first opening a not-yet-loaded
-  // chunk keeps the old view on screen until the new one is ready instead of flashing a fallback.
-  const viewTab = useDeferredValue(activeTab);
+  // The tab button flips immediately and, once the view's module is loaded, the view swaps in the
+  // same commit. All panels share one already-revealed Suspense boundary; useViewTab only adopts a
+  // tab once its module is here, so first opening a chunk never flashes the fallback.
+  const viewTab = useViewTab(activeTab);
   const visited = useVisitedTabs(viewTab);
   useKeyboardShortcuts(activeTab);
   useShellData(activeTab);
