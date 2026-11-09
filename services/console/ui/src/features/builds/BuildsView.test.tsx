@@ -187,8 +187,11 @@ describe('BuildsView data', () => {
   });
 
   it('SYNC BUILDS refetches now and records failures', async () => {
-    seed(payload());
+    // The mount poll settles first: a click while it is in flight joins it instead.
+    seed(payload([QUEUED]));
+    fetchMock.mockImplementation(() => json(payload([QUEUED, DONE])));
     render(<BuildsView />);
+    await act(() => vi.waitFor(() => expect(titles()).toEqual(['Synapse hooks', 'Docs pass'])));
     fetchMock.mockImplementation(() => json({ error: 'vanadis down' }, 502));
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /SYNC BUILDS/ }));

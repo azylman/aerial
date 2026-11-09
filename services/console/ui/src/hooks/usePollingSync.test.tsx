@@ -134,3 +134,69 @@ describe('syncResource', () => {
     expect(errors).toEqual(wantErrors);
   });
 });
+
+/** A typed fetch whose requests stay in flight until the test settles them. */
+function deferredFetch() {
+  const signals: AbortSignal[] = [];
+  const settles: Array<{ resolve: (v: string) => void; reject: (e: Error) => void }> = [];
+  const fetch = (signal: AbortSignal): Promise<string> => {
+    signals.push(signal);
+    return new Promise<string>((resolve, reject) => settles.push({ resolve, reject }));
+  };
+  return { fetch, signals, settles };
+}
+
+interface JoinRow {
+  name: string;
+  /** Concurrent callers, each with its own AbortController. */
+  callers: number;
+  /** Callers aborted before they call. */
+  preAborted: number[];
+  /** Callers aborted while the request is in flight. */
+  abort: number[];
+  /** How the first request settles; null leaves it in flight. */
+  settle: 'resolve' | 'reject' | null;
+  /** Make one more call once the callers above are done. */
+  callAgain: boolean;
+  wantFetches: number;
+  wantFirstAborted: boolean;
+  wantPendingBeforeSettle: number;
+  wantData: string[];
+  wantErrors: string[];
+}
+
+describe('syncResource request sharing', () => {
+  it.each<JoinRow>([
+    { name: 'concurrent callers join one request', callers: 3, preAborted: [], abort: [], settle: 'resolve', callAgain: false, wantFetches: 1, wantFirstAborted: false, wantPendingBeforeSettle: 3, wantData: ['payload'], wantErrors: [] },
+    { name: 'a joined failure is recorded once', callers: 2, preAborted: [], abort: [], settle: 'reject', callAgain: false, wantFetches: 1, wantFirstAborted: false, wantPendingBeforeSettle: 2, wantData: [], wantErrors: ['HTTP 503'] },
+    { name: 'one caller aborting stops only its wait', callers: 2, preAborted: [], abort: [0], settle: 'resolve', callAgain: false, wantFetches: 1, wantFirstAborted: false, wantPendingBeforeSettle: 1, wantData: ['payload'], wantErrors: [] },
+    { name: 'every caller aborting aborts the request', callers: 2, preAborted: [], abort: [1, 0], settle: 'resolve', callAgain: false, wantFetches: 1, wantFirstAborted: true, wantPendingBeforeSettle: 0, wantData: [], wantErrors: [] },
+    { name: 'a call after settle fetches again', callers: 1, preAborted: [], abort: [], settle: 'resolve', callAgain: true, wantFetches: 2, wantFirstAborted: false, wantPendingBeforeSettle: 1, wantData: ['payload'], wantErrors: [] },
+    { name: 'a call after every caller aborted starts afresh', callers: 1, preAborted: [], abort: [0], settle: null, callAgain: true, wantFetches: 2, wantFirstAborted: true, wantPendingBeforeSettle: 0, wantData: [], wantErrors: [] },
+    { name: 'an already-aborted caller never fetches', callers: 1, preAborted: [0], abort: [], settle: null, callAgain: false, wantFetches: 0, wantFirstAborted: false, wantPendingBeforeSettle: 0, wantData: [], wantErrors: [] },
+  ])('$name', async ({ callers, preAborted, abort, settle, callAgain, wantFetches, wantFirstAborted, wantPendingBeforeSettle, wantData, wantErrors }) => {
+    const { fetch, signals, settles } = deferredFetch();
+    const data: string[] = [];
+    const errors: string[] = [];
+    const poll = syncResource(fetch, (d) => data.push(d), (e) => errors.push(e));
+
+    const controllers = Array.from({ length: callers }, () => new AbortController());
+    for (const i of preAborted) controllers[i]?.abort();
+    let settledCount = 0;
+    const calls = controllers.map((c) => poll(c.signal).then(() => void (settledCount += 1)));
+    for (const i of abort) controllers[i]?.abort();
+    // Callers that aborted (or never joined) stop waiting without the request settling.
+    await Promise.all(calls.filter((_, i) => abort.includes(i) || preAborted.includes(i)));
+    expect(callers - settledCount).toBe(wantPendingBeforeSettle);
+
+    if (settle === 'resolve') settles[0]?.resolve('payload');
+    if (settle === 'reject') settles[0]?.reject(new Error('HTTP 503'));
+    if (settle !== null) await Promise.all(calls);
+    if (callAgain) void poll(new AbortController().signal);
+
+    expect(signals).toHaveLength(wantFetches);
+    expect(signals[0]?.aborted ?? false).toBe(wantFirstAborted);
+    expect(data).toEqual(wantData);
+    expect(errors).toEqual(wantErrors);
+  });
+});

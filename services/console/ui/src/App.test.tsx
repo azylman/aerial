@@ -13,7 +13,8 @@ import type {
   ScheduleRunsAPIResponse,
   SchedulesAPIResponse,
 } from './api/types';
-import { App, statusPolledOn, VIEW_LOADERS } from './App';
+import { App } from './App';
+import { startBoot, VIEW_LOADERS } from './boot';
 import { initRouteFromLocation } from './hooks/useHashRoute';
 import { useConsoleStore } from './store/store';
 
@@ -51,17 +52,11 @@ async function flush(): Promise<void> {
   });
 }
 
-describe('statusPolledOn', () => {
-  it.each([
-    { tab: 'telemetry', want: true },
-    { tab: 'tasks', want: true },
-    { tab: 'schedules', want: false },
-    { tab: 'memory', want: false },
-    { tab: 'builds', want: false },
-  ] as const)('$tab -> $want', ({ tab, want }) => {
-    expect(statusPolledOn(tab)).toBe(want);
-  });
-});
+/** What main.tsx does before rendering: seed the route, then start boot's chunk and fetches. */
+function boot(path: string): void {
+  window.history.replaceState(null, '', path);
+  void startBoot(initRouteFromLocation());
+}
 
 describe('App', () => {
   beforeEach(() => {
@@ -80,8 +75,7 @@ describe('App', () => {
     { name: 'tasks deep link', hash: '#tasks', wantPanel: 'tasks-view', wantHash: '#tasks', wantStatus: 1 },
     { name: 'memory deep link skips status', hash: '#memory', wantPanel: 'memory-view', wantHash: '#memory', wantStatus: 0 },
   ])('$name mounts only the active view and loads badge data once', async ({ hash, wantPanel, wantHash, wantStatus }) => {
-    window.history.replaceState(null, '', `/console/next/${hash}`);
-    initRouteFromLocation();
+    boot(`/console/next/${hash}`);
     render(<App />);
     await flush();
 
@@ -96,8 +90,7 @@ describe('App', () => {
 
   it('records upstream failures per resource and keeps the shell up', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('{"error":"upstream down"}', { status: 503 }))));
-    window.history.replaceState(null, '', '/console/next/');
-    initRouteFromLocation();
+    boot('/console/next/');
     render(<App />);
     await flush();
     const s = useConsoleStore.getState();
@@ -111,8 +104,7 @@ describe('App', () => {
   });
 
   it('polls status every 5s on telemetry and stops when leaving for schedules', async () => {
-    window.history.replaceState(null, '', '/console/next/');
-    initRouteFromLocation();
+    boot('/console/next/');
     render(<App />);
     await flush();
     await act(async () => vi.advanceTimersByTime(5000));

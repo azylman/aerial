@@ -224,9 +224,19 @@ describe('SchedulesView list lifecycle', () => {
   it.each([
     { name: 'retry button', button: 'RETRY SYNCHRONIZATION' },
     { name: 'sync button', button: 'SYNC SCHEDULES' },
-  ])('$name polls schedules and runs again', ({ button }) => {
+  ])('$name polls schedules and runs again', async ({ button }) => {
+    // The mount polls settle first (schedules failing): a click while they are in flight joins them.
+    fetchMock.mockImplementation((url) =>
+      url.startsWith('/api/schedules/runs') ? json(200, runs()) : json(503, { error: 'Brain offline' }),
+    );
     render(<SchedulesView />);
-    act(() => useConsoleStore.getState().failSchedules('Brain offline'));
+    await act(() =>
+      vi.waitFor(() => {
+        const { list, runs: feed } = useConsoleStore.getState().schedules;
+        expect([list.error, feed.data === null]).toEqual(['Brain offline', false]);
+      }),
+    );
+    fetchMock.mockImplementation(pending);
     fetchMock.mockClear();
     fireEvent.click(screen.getByRole('button', { name: new RegExp(button) }));
     fireEvent.click(screen.getByRole('button', { name: new RegExp(button) }));
