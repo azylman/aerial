@@ -64,7 +64,12 @@ body {
     position: relative;
 }
 
-/* --- ANIMATED BACKGROUND CIRCUIT TRACES & AMBIENT ENERGY --- */
+/* --- ANIMATED BACKGROUND CIRCUIT TRACES & AMBIENT ENERGY ---
+   Every always-on background loop animates only transform and opacity, so the compositor runs it
+   without repainting the page each frame. body::before holds the base colour and the ambient
+   gradients; the .circuit-traces div (first child of <body> in index.html) holds the circuit tile.
+   That layer extends one tile above and to the left of the viewport and flows by translating across
+   one tile, so at rest its tile lines up with the viewport origin and the loop is seamless. */
 body::before {
     content: '';
     position: fixed;
@@ -73,19 +78,37 @@ body::before {
     width: 100%;
     height: 100%;
     background-color: var(--bg-base);
-    background-image: 
+    background-image:
         radial-gradient(ellipse 70% 50% at 50% 0%, rgba(192, 132, 252, 0.07), transparent 75%),
-        radial-gradient(ellipse 60% 40% at 85% 70%, rgba(0, 240, 255, 0.04), transparent 70%),
-        url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'><path d='M0 20 H40 L60 40 H120 M60 40 V80 L40 100 H0 M60 80 H100 L120 100 M90 0 V30 M30 90 V120' fill='none' stroke='rgba(168,85,247,0.12)' stroke-width='1.5'/><circle cx='40' cy='20' r='3' fill='rgba(192,132,252,0.30)'><animate attributeName='r' values='2.6;4.2;2.6' dur='4s' begin='0.8s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0.45;0.25' dur='4s' begin='0.8s' repeatCount='indefinite'/></circle><circle cx='40' cy='20' r='3' fill='none' stroke='rgba(192,132,252,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;7;3' dur='4s' begin='0.8s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0;0.30' dur='4s' begin='0.8s' repeatCount='indefinite'/></circle><circle cx='100' cy='40' r='3.5' fill='rgba(0,240,255,0.35)'><animate attributeName='r' values='3.2;4.8;3.2' dur='3.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0.50;0.30' dur='3.2s' repeatCount='indefinite'/></circle><circle cx='100' cy='40' r='3.5' fill='none' stroke='rgba(0,240,255,0.30)' stroke-width='0.8'><animate attributeName='r' values='3.5;7.5;3.5' dur='3.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0;0.30' dur='3.2s' repeatCount='indefinite'/></circle><circle cx='60' cy='80' r='3' fill='rgba(255,42,133,0.30)'><animate attributeName='r' values='2.6;4.2;2.6' dur='3.6s' begin='1.6s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0.45;0.25' dur='3.6s' begin='1.6s' repeatCount='indefinite'/></circle><circle cx='60' cy='80' r='3' fill='none' stroke='rgba(255,42,133,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;7;3' dur='3.6s' begin='1.6s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0;0.25' dur='3.6s' begin='1.6s' repeatCount='indefinite'/></circle><circle cx='40' cy='100' r='3' fill='rgba(168,85,247,0.30)'><animate attributeName='r' values='2.5;3.8;2.5' dur='4.4s' begin='2.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.20;0.40;0.20' dur='4.4s' begin='2.2s' repeatCount='indefinite'/></circle><circle cx='40' cy='100' r='3' fill='none' stroke='rgba(168,85,247,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;6.5;3' dur='4.4s' begin='2.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.20;0;0.20' dur='4.4s' begin='2.2s' repeatCount='indefinite'/></circle></svg>");
-    background-size: 100% 100%, 100% 100%, 120px 120px;
-    background-repeat: no-repeat, no-repeat, repeat;
+        radial-gradient(ellipse 60% 40% at 85% 70%, rgba(0, 240, 255, 0.04), transparent 70%);
+    background-size: 100% 100%, 100% 100%;
+    background-repeat: no-repeat, no-repeat;
     pointer-events: none;
     z-index: 0;
-    will-change: background-position, opacity;
+    will-change: opacity;
 }
 
 html.motion-ready body::before {
-    animation: circuit-flow 90s linear infinite, circuit-glow-breathe 12s ease-in-out infinite;
+    animation: circuit-glow-breathe 12s ease-in-out infinite;
+}
+
+.circuit-traces {
+    --circuit-tile: 120px;
+    position: fixed;
+    top: calc(-1 * var(--circuit-tile));
+    left: calc(-1 * var(--circuit-tile));
+    right: 0;
+    bottom: 0;
+    background-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'><path d='M0 20 H40 L60 40 H120 M60 40 V80 L40 100 H0 M60 80 H100 L120 100 M90 0 V30 M30 90 V120' fill='none' stroke='rgba(168,85,247,0.12)' stroke-width='1.5'/><circle cx='40' cy='20' r='2.6' fill='rgba(192,132,252,0.30)' opacity='0.25'/><circle cx='40' cy='20' r='3' fill='none' stroke='rgba(192,132,252,0.25)' stroke-width='0.8' opacity='0.30'/><circle cx='100' cy='40' r='3.2' fill='rgba(0,240,255,0.35)' opacity='0.30'/><circle cx='100' cy='40' r='3.5' fill='none' stroke='rgba(0,240,255,0.30)' stroke-width='0.8' opacity='0.30'/><circle cx='60' cy='80' r='2.6' fill='rgba(255,42,133,0.30)' opacity='0.25'/><circle cx='60' cy='80' r='3' fill='none' stroke='rgba(255,42,133,0.25)' stroke-width='0.8' opacity='0.25'/><circle cx='40' cy='100' r='2.5' fill='rgba(168,85,247,0.30)' opacity='0.20'/><circle cx='40' cy='100' r='3' fill='none' stroke='rgba(168,85,247,0.25)' stroke-width='0.8' opacity='0.20'/></svg>");
+    background-size: var(--circuit-tile) var(--circuit-tile);
+    background-repeat: repeat;
+    pointer-events: none;
+    z-index: 0;
+    will-change: transform, opacity;
+}
+
+html.motion-ready .circuit-traces {
+    animation: circuit-trace-flow 90s linear infinite, circuit-glow-breathe 12s ease-in-out infinite;
 }
 
 body::after {
@@ -104,22 +127,21 @@ html.motion-ready body::after {
     animation: circuit-energy-surge 18s ease-in-out infinite alternate;
 }
 
-@keyframes circuit-flow {
+/* Moves the traces layer by exactly one tile, read from its --circuit-tile. */
+@keyframes circuit-trace-flow {
     0% {
-        background-position: 0 0, 0 0, 0 0;
+        transform: translate(0, 0);
     }
     100% {
-        background-position: 0 0, 0 0, 120px 120px;
+        transform: translate(var(--circuit-tile), var(--circuit-tile));
     }
 }
 
 @keyframes circuit-glow-breathe {
     0%, 100% {
-        filter: drop-shadow(0 0 0px transparent);
         opacity: 0.65;
     }
     50% {
-        filter: drop-shadow(0 0 2px rgba(192, 132, 252, 0.25));
         opacity: 0.80;
     }
 }
@@ -142,7 +164,9 @@ html.motion-ready body::after {
 @media (prefers-reduced-motion: reduce) {
     body::before,
     body::after,
-    .scanline {
+    .circuit-traces,
+    .scanline,
+    .permet-bar-fill::after {
         animation: none !important;
     }
 }
@@ -164,8 +188,8 @@ html.motion-ready .scanline {
 }
 
 @keyframes scan {
-    0% { top: -10px; }
-    100% { top: 100vh; }
+    0% { transform: translateY(-10px); }
+    100% { transform: translateY(100vh); }
 }
 
 
@@ -302,6 +326,7 @@ html.motion-ready .brand-badge {
 }
 
 .permet-bar-fill {
+    position: relative;
     height: 100%;
     width: 88%;
     background: linear-gradient(90deg, #c084fc, #00f0ff);
@@ -309,7 +334,19 @@ html.motion-ready .brand-badge {
     border-radius: 3px;
 }
 
-html.motion-ready .permet-bar-fill {
+/* The magenta laser glow sits on its own layer and fades in by opacity, so the loop never repaints
+   a box-shadow. Invisible at rest. */
+.permet-bar-fill::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    opacity: 0;
+    box-shadow: 0 0 16px rgba(255, 42, 133, 0.8);
+}
+
+html.motion-ready .permet-bar-fill::after {
     animation: laserGlow 3s infinite alternate;
 }
 
@@ -471,8 +508,8 @@ html.motion-ready .dock-chip .ping-dot {
 }
 
 @keyframes laserGlow {
-    0% { box-shadow: 0 0 8px rgba(0, 240, 255, 0.6); }
-    100% { box-shadow: 0 0 16px rgba(255, 42, 133, 0.8); }
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 /* Later rule in style.css: the panel fade that actually wins. */
@@ -491,12 +528,12 @@ html.motion-ready .dock-chip .ping-dot {
     body {
         padding: 1rem 0.75rem;
     }
-    body::before {
-        background-size: 100% 100%, 100% 100%, 90px 90px;
+    .circuit-traces {
+        --circuit-tile: 90px;
     }
 
-    html.motion-ready body::before {
-        animation: circuit-flow-mobile 70s linear infinite, circuit-glow-breathe 12s ease-in-out infinite;
+    html.motion-ready .circuit-traces {
+        animation: circuit-trace-flow 70s linear infinite, circuit-glow-breathe 12s ease-in-out infinite;
     }
     .hud-header {
         flex-direction: column;
@@ -525,14 +562,5 @@ html.motion-ready .dock-chip .ping-dot {
     .nav-btn {
         padding: 6px 12px;
         font-size: 0.72rem;
-    }
-}
-
-@keyframes circuit-flow-mobile {
-    0% {
-        background-position: 0 0, 0 0, 0 0;
-    }
-    100% {
-        background-position: 0 0, 0 0, 90px 90px;
     }
 }
