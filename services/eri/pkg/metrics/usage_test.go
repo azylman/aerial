@@ -22,13 +22,13 @@ func TestClaudeUsageToGroups(t *testing.T) {
 		wantErr       bool
 	}{
 		{name: "live fixture", payload: claudeUsageFixture, want: []QuotaGroup{{Name: "Claude", Buckets: []QuotaBucket{
-			{ID: "claude-five-hour", Window: "5h", ResetTime: "2026-11-09T19:59:59Z", RemainingFraction: 0.44},
 			{ID: "claude-seven-day", Window: "weekly", ResetTime: "2026-11-14T02:59:59Z", RemainingFraction: 0.81},
+			{ID: "claude-five-hour", Window: "5h", ResetTime: "2026-11-09T19:59:59Z", RemainingFraction: 0.44},
 		}}}},
 		{name: "all windows with clamping and bad reset", payload: `{"five_hour":{"utilization":120,"resets_at":"2026-11-09T12:00:00-08:00"},"seven_day":{"utilization":-5,"resets_at":"bogus"},"seven_day_opus":{"utilization":50,"resets_at":null},"seven_day_sonnet":{"utilization":null,"resets_at":"2026-11-14T02:59:59Z"}}`, want: []QuotaGroup{{Name: "Claude", Buckets: []QuotaBucket{
-			{ID: "claude-five-hour", Window: "5h", ResetTime: "2026-11-09T20:00:00Z", RemainingFraction: 0},
 			{ID: "claude-seven-day", Window: "weekly", ResetTime: "", RemainingFraction: 1},
 			{ID: "claude-seven-day-opus", Window: "weekly-opus", ResetTime: "", RemainingFraction: 0.5},
+			{ID: "claude-five-hour", Window: "5h", ResetTime: "2026-11-09T20:00:00Z", RemainingFraction: 0},
 		}}}},
 		{name: "sonnet only", payload: `{"seven_day_sonnet":{"utilization":25,"resets_at":"2026-11-14T02:59:59Z"}}`, want: []QuotaGroup{{Name: "Claude", Buckets: []QuotaBucket{
 			{ID: "claude-seven-day-sonnet", Window: "weekly-sonnet", ResetTime: "2026-11-14T02:59:59Z", RemainingFraction: 0.75},
