@@ -645,7 +645,10 @@ spec:
     matchLabels:
       app.kubernetes.io/name: grafana
   strategy:
-    type: Recreate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
   template:
     metadata:
       labels:
@@ -656,7 +659,20 @@ spec:
             - name: GF_PATHS_PROVISIONING
               value: /local/provisioning
             - name: GF_DATABASE_TYPE
-              value: sqlite3
+              value: "postgres"
+            - name: GF_DATABASE_HOST
+              value: "postgres:5432"
+            - name: GF_DATABASE_NAME
+              value: "grafana"
+            - name: GF_DATABASE_USER
+              value: "aerial"
+            - name: GF_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: postgres-secret
+            - name: GF_DATABASE_SSL_MODE
+              value: "disable"
             - name: GF_SERVER_ROOT_URL
               value: '%(protocol)s://%(domain)s:%(http_port)s/grafana/'
             - name: GF_SERVER_SERVE_FROM_SUB_PATH
@@ -705,6 +721,18 @@ spec:
               name: share
               readOnly: true
       initContainers:
+        - command:
+            - /bin/sh
+            - -c
+            - psql -h postgres -U aerial -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'grafana'" | grep -q 1 || psql -h postgres -U aerial -d postgres -c "CREATE DATABASE grafana;"
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: postgres-secret
+          image: ghcr.io/cloudnative-pg/postgresql:18
+          name: init-grafana-db
         - args:
             - --repo=https://github.com/azylman/aerial.git
             - --ref=main
@@ -1561,7 +1589,10 @@ spec:
     matchLabels:
       app.kubernetes.io/name: docket-store
   strategy:
-    type: Recreate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
   template:
     metadata:
       labels:
