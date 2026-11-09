@@ -910,6 +910,10 @@ func stageInternalLLMAttachments(atts []InternalLLMAttachment) (string, string, 
 	if err != nil {
 		return "", "", http.StatusInternalServerError, fmt.Errorf("failed to create temporary staging directory: %w", err)
 	}
+	if err := os.Chmod(tmpDir, 0o755); err != nil {
+		cleanTempDir(tmpDir)
+		return "", "", http.StatusInternalServerError, fmt.Errorf("failed to set permissions on temporary staging directory: %w", err)
+	}
 
 	stagedFiles := make([]stagedAttachmentFile, 0, len(atts))
 	for _, a := range atts {
@@ -922,9 +926,13 @@ func stageInternalLLMAttachments(atts []InternalLLMAttachment) (string, string, 
 			return "", "", http.StatusBadGateway, err
 		}
 		targetPath := filepath.Join(tmpDir, att.Filename)
-		if err := os.WriteFile(targetPath, att.Data, 0o600); err != nil {
+		if err := os.WriteFile(targetPath, att.Data, 0o644); err != nil {
 			cleanTempDir(tmpDir)
 			return "", "", http.StatusInternalServerError, fmt.Errorf("failed to stage attachment %q: %w", att.Filename, err)
+		}
+		if err := os.Chmod(targetPath, 0o644); err != nil {
+			cleanTempDir(tmpDir)
+			return "", "", http.StatusInternalServerError, fmt.Errorf("failed to set permissions on staged attachment %q: %w", att.Filename, err)
 		}
 		stagedFiles = append(stagedFiles, stagedAttachmentFile{
 			path:     targetPath,
