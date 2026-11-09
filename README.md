@@ -18,7 +18,7 @@ Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 - **Persistence & Vector Memory**: **CloudNativePG (PostgreSQL 18 + pgvector)** — 2-instance high-availability cluster for multi-turn conversation state, strict 1-to-1 single-service table ownership, native `:9187` Prometheus metrics, and hybrid RRF semantic memory (`coven`).
 - **Schema Migrations**: **Ariga Atlas** — Declarative schema migrations, automated diffing, and checksum validation via Kubernetes batch jobs.
 - **Idempotent, Guaranteed Event Handling**: **Webhooks + River Queue** — Transactional PostgreSQL-backed Go job queue powering strictly idempotent Discord ingress (`discord_ingress`, `discord_interaction`), webhook processing, event dispatch (`synapse`), and multi-chunk build orchestration (`vanadis`).
-- **Secrets Management**: **Infisical + Valkey 9** — Centralized secret governance syncing secrets into Kubernetes Secrets (`shared-secrets`) with zero plaintext disk persistence.
+- **Secrets Management**: **Infisical + Valkey 9 + External Secrets Operator** — Centralized secret governance syncing scoped per-service Kubernetes Secrets and the `shared-secrets` redaction pool with zero plaintext disk persistence.
 - **Observability & Telemetry**:
   - **Metrics**: **VictoriaMetrics** (TSDB `:8428`) + **`vmalert`** (`:8880`) + **Grafana** (telemetry HUDs `:3000`) + Prometheus Exporters (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**)
   - **Logs**: **Fluent Bit** (DaemonSet collection & transforms) + **OpenObserve** (structured SQL log analytics `:5080`)
