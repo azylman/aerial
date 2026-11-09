@@ -791,18 +791,6 @@ func Reload(activeCfg *Config) error {
 	return ReloadWithSupplier(activeCfg, New)
 }
 
-func loadSharedSecretsJSON(data []byte, dst map[string]string) {
-	var raw map[string]string
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return
-	}
-	for k, v := range raw {
-		if val := strings.TrimSpace(v); val != "" {
-			dst[k] = val
-		}
-	}
-}
-
 func loadSharedSecretsDir(dirPath string, dst map[string]string) {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
@@ -823,10 +811,6 @@ func loadSharedSecretsDir(dirPath string, dst map[string]string) {
 			continue
 		}
 		trimmed := strings.TrimSpace(string(data))
-		if name == "shared-secrets.json" && strings.HasPrefix(trimmed, "{") {
-			loadSharedSecretsJSON([]byte(trimmed), dst)
-			continue
-		}
 		if trimmed != "" {
 			dst[name] = trimmed
 		}
