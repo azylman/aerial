@@ -123,6 +123,7 @@ type claudeUsageResponse struct {
 }
 
 // ClaudeUsageToGroups maps an Anthropic OAuth usage payload onto the shared QuotaGroup contract.
+// Buckets are ordered weekly windows first, then 5h, matching the agy /usage payload order.
 func ClaudeUsageToGroups(raw []byte) ([]QuotaGroup, error) {
 	var resp claudeUsageResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
@@ -132,10 +133,10 @@ func ClaudeUsageToGroups(raw []byte) ([]QuotaGroup, error) {
 		id, window string
 		w          *claudeUsageWindow
 	}{
-		{"claude-five-hour", "5h", resp.FiveHour},
 		{"claude-seven-day", "weekly", resp.SevenDay},
 		{"claude-seven-day-opus", "weekly-opus", resp.SevenDayOpus},
 		{"claude-seven-day-sonnet", "weekly-sonnet", resp.SevenDaySonnet},
+		{"claude-five-hour", "5h", resp.FiveHour},
 	}
 	var buckets []QuotaBucket
 	for _, win := range windows {
