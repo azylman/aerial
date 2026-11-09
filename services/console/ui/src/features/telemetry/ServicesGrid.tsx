@@ -1,6 +1,7 @@
 import { type KeyboardEvent, memo } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { formatUptime } from '../../lib/formatters';
+import { useFirstPassLimit } from '../../hooks/useFirstPassLimit';
 import { useConsoleStore } from '../../store/store';
 import { healthyCountText } from './model';
 import { selectService, selectServices } from './selectors';
@@ -48,12 +49,16 @@ export const ServiceCard = memo(function ServiceCard({ name }: { readonly name: 
   );
 });
 
+/** About one screen of service cards; the rest arrive right after the first paint. */
+const FIRST_PASS_SERVICES = 20;
+
 /** The grid only tracks the list of names, so it re-renders when services appear or vanish. */
 export const ServicesGrid = memo(function ServicesGrid() {
   const names = useConsoleStore(useShallow((s) => selectServices(s).map((svc) => svc.name)));
+  const shown = useFirstPassLimit(names.length, FIRST_PASS_SERVICES);
   return (
     <div className="services-grid">
-      {names.map((name) => (
+      {names.slice(0, shown).map((name) => (
         <ServiceCard key={name} name={name} />
       ))}
     </div>
