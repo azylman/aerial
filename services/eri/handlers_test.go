@@ -1064,7 +1064,6 @@ func TestNormalizeRoute(t *testing.T) {
 		{"/metrics", "/metrics"},
 		{"/voice/ask", "/voice/ask"},
 		{"/api/voice/ask", "/voice/ask"},
-		{"/internal/mcp/openobserve", "/internal/mcp"},
 		{"/internal/github-api/repos/azylman/aerial/pulls", "/internal/github-api"},
 		{"/internal/github-git/azylman/aerial.git/info/refs", "/internal/github-git"},
 		{"/unknown/path", "unmatched"},
@@ -1840,114 +1839,6 @@ func TestHandleInternalDiscordInteraction(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestHandleInternalMCPProxy(t *testing.T) {
-	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/fail" {
-			http.Error(w, "upstream fail", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("X-Custom-Resp", "mock-value")
-		w.Header().Set("Content-Type", "application/json")
-		if r.Header.Get("Accept") == "text/event-stream" {
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			if f, ok := w.(http.Flusher); ok {
-				_, _ = w.Write([]byte("event: mcp\ndata: ok\n\n"))
-				f.Flush()
-			}
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"path":%q,"query":%q,"auth":%q}`, r.URL.Path, r.URL.RawQuery, r.Header.Get("Authorization"))
-	}))
-	defer mockUpstream.Close()
-
-	cfgData := config.DefaultConfigData()
-	cfgData.McpServers.Common = map[string]json.RawMessage{
-		"mock-server": json.RawMessage(fmt.Sprintf(`{"serverUrl":%q,"headers":{"Authorization":"Bearer mock-token"}}`, mockUpstream.URL+"/base")),
-	}
-	cfg := config.NewFromData(cfgData)
-
-	tests := []struct {
-		name        string
-		path        string
-		method      string
-		body        string
-		headers     []string
-		wantStatus  int
-		wantSubstr  string
-		wantHeader  string
-		wantHeaderV string
-	}{
-		{
-			name:       "missing server name returns 404",
-			path:       "/internal/mcp/",
-			method:     http.MethodGet,
-			wantStatus: http.StatusNotFound,
-			wantSubstr: "MCP server name required",
-		},
-		{
-			name:       "server not found returns 404",
-			path:       "/internal/mcp/unknown-server",
-			method:     http.MethodGet,
-			wantStatus: http.StatusNotFound,
-			wantSubstr: "not found",
-		},
-		{
-			name:        "successful proxy with subpath and query",
-			path:        "/internal/mcp/mock-server/sub?foo=bar",
-			method:      http.MethodPost,
-			body:        `{"test":true}`,
-			headers:     []string{"Content-Type", "application/json", "Mcp-Session-Id", "sess-1"},
-			wantStatus:  http.StatusOK,
-			wantSubstr:  `"query":"foo=bar"`,
-			wantHeader:  "X-Custom-Resp",
-			wantHeaderV: "mock-value",
-		},
-		{
-			name:       "streaming SSE response",
-			path:       "/internal/mcp/mock-server/events",
-			method:     http.MethodGet,
-			headers:    []string{"Accept", "text/event-stream"},
-			wantStatus: http.StatusOK,
-			wantSubstr: "event: mcp",
-		},
-	}
-
-	handler := handleInternalMCPProxy(cfg)
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var bodyReader io.Reader
-			if tc.body != "" {
-				bodyReader = strings.NewReader(tc.body)
-			}
-			w := runHTTP(handler, tc.method, tc.path, bodyReader, tc.headers...)
-			if w.Code != tc.wantStatus {
-				t.Fatalf("got status=%d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("expected substr %q in body: %s", tc.wantSubstr, w.Body.String())
-			}
-			if tc.wantHeader != "" && w.Header().Get(tc.wantHeader) != tc.wantHeaderV {
-				t.Errorf("header %q = %q, want %q", tc.wantHeader, w.Header().Get(tc.wantHeader), tc.wantHeaderV)
-			}
-		})
-	}
-
-	t.Run("upstream network error returns 502", func(t *testing.T) {
-		errCfgData := config.DefaultConfigData()
-		errCfgData.McpServers.Common = map[string]json.RawMessage{
-			"unreachable": json.RawMessage(`{"serverUrl":"http://127.0.0.1:0/mcp"}`),
-		}
-		errCfg := config.NewFromData(errCfgData)
-		h := handleInternalMCPProxy(errCfg)
-		w := runHTTP(h, http.MethodGet, "/internal/mcp/unreachable", nil)
-		if w.Code != http.StatusBadGateway {
-			t.Fatalf("expected 502, got %d", w.Code)
-		}
-	})
 }
 
 func TestHandleInternalGitHubAPIProxy(t *testing.T) {

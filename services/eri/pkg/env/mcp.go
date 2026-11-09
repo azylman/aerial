@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
@@ -33,157 +32,6 @@ func loadOpenObserveMCPServer(cur *config.ConfigData, mergedServers map[string]a
 			"Authorization": "Basic " + authVal,
 		},
 	}
-}
-
-func hasAuthorizationHeader(headers any) bool {
-	switch h := headers.(type) {
-	case map[string]string:
-		for k := range h {
-			if strings.EqualFold(k, "Authorization") {
-				return true
-			}
-		}
-	case map[string]any:
-		for k := range h {
-			if strings.EqualFold(k, "Authorization") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func injectGitHubAuthHeader(cur *config.ConfigData, mergedServers map[string]any) {
-	if cur == nil || cur.GitHubPAT == "" {
-		return
-	}
-	val, ok := mergedServers["github"]
-	if !ok {
-		return
-	}
-	srvMap, ok := val.(map[string]any)
-	if !ok {
-		return
-	}
-	headers, ok := srvMap["headers"]
-	if !ok || headers == nil {
-		srvMap["headers"] = map[string]string{
-			"Authorization": "Bearer " + cur.GitHubPAT,
-		}
-		mergedServers["github"] = srvMap
-		return
-	}
-	if hasAuthorizationHeader(headers) {
-		return
-	}
-	switch h := headers.(type) {
-	case map[string]string:
-		h["Authorization"] = "Bearer " + cur.GitHubPAT
-		srvMap["headers"] = h
-	case map[string]any:
-		h["Authorization"] = "Bearer " + cur.GitHubPAT
-		srvMap["headers"] = h
-	}
-	mergedServers["github"] = srvMap
-}
-
-// SanitizeMCPServersForDisk scrubs credentials from MCP servers for writing to disk,
-// rewriting servers with headers or secret-bearing URLs through the eri loopback proxy.
-func SanitizeMCPServersForDisk(servers map[string]any, loopbackPort string) {
-	port := strings.TrimPrefix(strings.TrimSpace(loopbackPort), ":")
-	if port == "" || port == "0" {
-		port = "8088"
-	}
-	for name, val := range servers {
-		srvMap, ok := val.(map[string]any)
-		if !ok {
-			continue
-		}
-		needsProxy := false
-		if h, ok := srvMap["headers"].(map[string]string); ok && len(h) > 0 {
-			needsProxy = true
-		} else if h, ok := srvMap["headers"].(map[string]any); ok && len(h) > 0 {
-			needsProxy = true
-		}
-		if !needsProxy {
-			if rawURL, ok := srvMap["serverUrl"].(string); ok && rawURL != "" && sanitizer.SanitizeString(rawURL) != rawURL {
-				needsProxy = true
-			} else if rawURL, ok := srvMap["server_url"].(string); ok && rawURL != "" && sanitizer.SanitizeString(rawURL) != rawURL {
-				needsProxy = true
-			}
-		}
-		if needsProxy {
-			delete(srvMap, "headers")
-			delete(srvMap, "server_url")
-			srvMap["serverUrl"] = fmt.Sprintf("http://127.0.0.1:%s/internal/mcp/%s", port, name)
-			servers[name] = srvMap
-		}
-	}
-}
-
-// ResolveUpstreamMCPServer builds the unredacted server map from cfg and returns the upstream URL and headers for serverName.
-func ResolveUpstreamMCPServer(cfg *config.Config, serverName string) (serverURL string, headers map[string]string, ok bool) {
-	if cfg == nil || serverName == "" {
-		return "", nil, false
-	}
-	cur := cfg.Current()
-
-	mergedServers := make(map[string]any)
-	loadOpenObserveMCPServer(cur, mergedServers)
-
-	loadFileBasedMCPServers(cur.DataDir, cur.MCPConfig, mergedServers)
-
-	targetMaps := []map[string]json.RawMessage{
-		cur.McpServers.Common,
-		cur.McpServers.Discord,
-		cur.McpServers.Voice,
-		cur.McpServers.Ephemeral,
-	}
-	for _, srvMap := range targetMaps {
-		for k, v := range srvMap {
-			var parsedVal any
-			if err := json.Unmarshal(v, &parsedVal); err == nil {
-				mergedServers[k] = parsedVal
-			} else {
-				mergedServers[k] = v
-			}
-		}
-	}
-
-	injectGitHubAuthHeader(cur, mergedServers)
-
-	val, found := mergedServers[serverName]
-	if !found {
-		return "", nil, false
-	}
-
-	srvMap, ok := val.(map[string]any)
-	if !ok {
-		return "", nil, false
-	}
-
-	var rawURL string
-	if u, ok := srvMap["serverUrl"].(string); ok {
-		rawURL = u
-	} else if u, ok := srvMap["server_url"].(string); ok {
-		rawURL = u
-	}
-	if rawURL == "" {
-		return "", nil, false
-	}
-
-	hMap := make(map[string]string)
-	if h, ok := srvMap["headers"].(map[string]string); ok {
-		maps.Copy(hMap, h)
-	} else if h, ok := srvMap["headers"].(map[string]any); ok {
-		for k, v := range h {
-			if sv, ok := v.(string); ok {
-				hMap[k] = sv
-			}
-		}
-	}
-
-	return rawURL, hMap, true
 }
 
 func loadFileBasedMCPServers(dataDir, fallbackConfig string, mergedServers map[string]any) {
@@ -284,6 +132,8 @@ func overlayConfigMCPServers(cfg *config.Config, target RuleTarget, mergedServer
 }
 
 // LoadTargetMCPConfig constructs the merged MCP configuration partitioned for target runtime.
+// Server URLs and headers are emitted verbatim so agents connect to MCP servers directly
+// with the credentials declared in config.
 func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget) json.RawMessage {
 	mergedServers := make(map[string]any)
 
@@ -293,16 +143,6 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 
 	// Overlay custom MCP servers from config.yaml
 	overlayConfigMCPServers(cfg, target, mergedServers)
-
-	if cfg != nil {
-		injectGitHubAuthHeader(cfg.Current(), mergedServers)
-	}
-
-	var loopbackPort string
-	if cfg != nil {
-		loopbackPort = cfg.Current().Port
-	}
-	SanitizeMCPServersForDisk(mergedServers, loopbackPort)
 
 	finalConfig := map[string]any{
 		"mcpServers": mergedServers,
@@ -381,7 +221,8 @@ func (p *Provisioner) EnsureTargetClaudeMcpConfig(claudeDir string, rawConfig js
 	return p.writeAtomic(targetPath, string(claudeConfig))
 }
 
-// SyncMCP loads and synchronizes target-partitioned mcp_config.json into:
+// SyncMCP writes target-partitioned agy and Claude Code mcp_config.json files, carrying each
+// server's upstream URL and headers as declared, into:
 // 1. Primary ~/.gemini/config/mcp_config.json
 // 2. Discord runtime <dataDir>/runtimes/discord/.gemini/config/mcp_config.json
 // 3. Voice runtime <dataDir>/runtimes/voice/.gemini/config/mcp_config.json
