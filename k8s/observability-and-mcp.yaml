@@ -1015,8 +1015,9 @@ metadata:
 # and Flux. Scoped write operations are limited to deleting pods/jobs (so their
 # controller or Flux recreates them cleanly from git) and updating aerial-image-tags
 # + triggering Flux reconciliation in flux-system (via Role/aerial-kubernetes-mcp-flux).
-# Secrets, serviceaccounts/token, pods/exec, nodes/proxy and all RBAC resources
-# are excluded on purpose to prevent credential reads and privilege escalation.
+# pods/exec is granted only in the default namespace (via Role/aerial-kubernetes-mcp-exec)
+# for live in-pod diagnostics. Secrets, serviceaccounts/token, nodes/proxy and all RBAC
+# resources are excluded on purpose to prevent credential reads and privilege escalation.
 rules:
   - apiGroups:
       - ""
@@ -1207,6 +1208,37 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: aerial-kubernetes-mcp-flux
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-mcp-sa
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aerial-kubernetes-mcp-exec
+  namespace: default
+# In-pod diagnostics (ps, reading generated runtime config files) for workloads in
+# the default namespace only. create covers SPDY and websocket exec; get covers
+# clusters that still authorize websocket upgrades with get.
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods/exec
+    verbs:
+      - get
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aerial-kubernetes-mcp-exec-binding
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aerial-kubernetes-mcp-exec
 subjects:
   - kind: ServiceAccount
     name: kubernetes-mcp-sa

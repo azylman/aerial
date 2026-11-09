@@ -1368,26 +1368,6 @@ spec:
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: github-mcp-secret
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: GITHUB_PAT
-      secretKey: GITHUB_PAT
-    - remoteRef:
-        key: GITHUB_PAT
-      secretKey: GITHUB_PERSONAL_ACCESS_TOKEN
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Owner
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
   name: infisical-mcp-secret
   namespace: default
 spec:
