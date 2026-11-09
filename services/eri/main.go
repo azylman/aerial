@@ -23,6 +23,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/eri/pkg/ambient"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -756,72 +757,29 @@ func startLeaderHandoff(
 	return errCh, stopHandoff, releaseLock
 }
 
-// resolveGitSyncTarget returns the evaluated symlink target or git commit/modtime for a directory,
-// allowing detection of git-sync commit flips or worktree switches.
-func resolveGitSyncTarget(path string) string {
-	if target, err := os.Readlink(path); err == nil {
-		return target
-	}
-	headPath := filepath.Join(path, ".git", "HEAD")
-	if data, err := os.ReadFile(headPath); err == nil {
-		head := strings.TrimSpace(string(data))
-		if refTarget, ok := strings.CutPrefix(head, "ref: "); ok {
-			refPath := filepath.Join(path, ".git", refTarget)
-			if refData, err := os.ReadFile(refPath); err == nil {
-				return strings.TrimSpace(string(refData))
-			}
-		}
-		return head
-	}
-	if fi, err := os.Stat(path); err == nil {
-		return fmt.Sprintf("%d-%d", fi.ModTime().UnixNano(), fi.Size())
-	}
-	return ""
+// handleGitSyncReload serves the git-sync sidecar webhook mounted by
+// registerGitSyncReload.
+// eri runs two git-sync sidecars (aerial rules/skills and aerial-config) that
+// may fire at the same moment, so reloads are serialized. reloadConfig already
+// retains the last known good config on failure, so the handler always answers
+// 200: git-sync retries non-success responses for the same commit forever, and
+// re-reading an unchanged bad file can never succeed.
+func handleGitSyncReload(reloadConfig func(string)) http.Handler {
+	var mu sync.Mutex
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		reloadConfig("git-sync webhook")
+		mu.Unlock()
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
+	})
 }
 
-var (
-	aerialShareRoot = "/share/aerial"
-	configShareRoot = "/share/aerial-config"
-)
-
-func pollGitSyncTargets(lastAerial, lastConfig string, reloadConfig func(string)) (string, string) {
-	currentAerial := resolveGitSyncTarget(aerialShareRoot)
-	currentConfig := resolveGitSyncTarget(configShareRoot)
-
-	aerialChanged := currentAerial != "" && lastAerial != "" && currentAerial != lastAerial
-	configChanged := currentConfig != "" && lastConfig != "" && currentConfig != lastConfig
-
-	if aerialChanged || configChanged {
-		log.Printf("[git-sync] Detected checkout change (aerial: %s -> %s, config: %s -> %s), triggering reload",
-			lastAerial, currentAerial, lastConfig, currentConfig)
-		reloadConfig("git-sync")
-		return currentAerial, currentConfig
-	}
-
-	if lastAerial == "" && currentAerial != "" {
-		lastAerial = currentAerial
-	}
-	if lastConfig == "" && currentConfig != "" {
-		lastConfig = currentConfig
-	}
-	return lastAerial, lastConfig
-}
-
-func startGitSyncWatcher(ctx context.Context, reloadConfig func(string)) {
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
-
-	lastAerial := resolveGitSyncTarget(aerialShareRoot)
-	lastConfig := resolveGitSyncTarget(configShareRoot)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			lastAerial, lastConfig = pollGitSyncTargets(lastAerial, lastConfig, reloadConfig)
-		}
-	}
+// registerGitSyncReload mounts the git-sync webhook on mux. The endpoint
+// triggers a full config reload, so it must stay reachable only from the
+// in-pod sidecars over loopback. The method-qualified pattern makes the mux
+// answer 405 for anything but POST.
+func registerGitSyncReload(mux *http.ServeMux, reloadConfig func(string)) {
+	mux.Handle("POST /-/reload", httpkit.LoopbackOnly(handleGitSyncReload(reloadConfig)))
 }
 
 func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, reloadConfig func(string)) func() {
@@ -854,8 +812,6 @@ func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, rel
 			}
 		}
 	}()
-
-	go startGitSyncWatcher(hupCtx, reloadConfig)
 
 	return func() {
 		if stopHup != nil {
@@ -1019,6 +975,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}
 	mux := SetupBrainMuxWithEmbedder(store, txStore, pool, embedder, sessionMgr.Roots()...)
+	registerGitSyncReload(mux, reloadConfig)
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cur.Port)

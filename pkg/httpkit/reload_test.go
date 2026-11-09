@@ -190,8 +190,6 @@ func TestReloadable_Handler(t *testing.T) {
 		{name: "bad config still 200", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", loadErr: errors.New("yaml: line 3: bad"), wantCode: http.StatusOK, wantStatus: "lkgc_retained", wantErrBody: "yaml: line 3: bad", wantPort: "8080"},
 		{name: "restart field change", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", nextCfg: &testCfg{Port: "9090", Model: "a"}, wantCode: http.StatusOK, wantStatus: "restarting", wantPort: "8080"},
 		{name: "pod network rejected", method: http.MethodPost, remoteAddr: "10.42.0.9:5555", nextCfg: &testCfg{Port: "8080", Model: "b"}, wantCode: http.StatusForbidden, wantPort: "8080"},
-		{name: "unparseable remote rejected", method: http.MethodPost, remoteAddr: "garbage", nextCfg: &testCfg{Port: "8080", Model: "b"}, wantCode: http.StatusForbidden, wantPort: "8080"},
-		{name: "hostname remote rejected", method: http.MethodPost, remoteAddr: "localhost:5555", nextCfg: &testCfg{Port: "8080", Model: "b"}, wantCode: http.StatusForbidden, wantPort: "8080"},
 		{name: "get not allowed", method: http.MethodGet, remoteAddr: "127.0.0.1:5555", nextCfg: &testCfg{Port: "8080", Model: "b"}, wantCode: http.StatusMethodNotAllowed, wantPort: "8080"},
 	}
 
@@ -224,6 +222,49 @@ func TestReloadable_Handler(t *testing.T) {
 			errVal, hasErr := body["error"]
 			if errVal != tc.wantErrBody || hasErr != (tc.wantErrBody != "") {
 				t.Errorf("body error = %q (present %v), want %q", errVal, hasErr, tc.wantErrBody)
+			}
+		})
+	}
+}
+
+func TestLoopbackOnly(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		remoteAddr string
+		wantCode   int
+		wantBody   string
+	}{
+		{name: "ipv4 loopback passes", remoteAddr: "127.0.0.1:5555", wantCode: http.StatusTeapot, wantBody: "inner"},
+		{name: "ipv4 loopback range passes", remoteAddr: "127.0.0.2:5555", wantCode: http.StatusTeapot, wantBody: "inner"},
+		{name: "ipv6 loopback passes", remoteAddr: "[::1]:5555", wantCode: http.StatusTeapot, wantBody: "inner"},
+		{name: "pod network rejected", remoteAddr: "10.42.0.9:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
+		{name: "ipv6 non-loopback rejected", remoteAddr: "[fd00::1]:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
+		{name: "unparseable remote rejected", remoteAddr: "garbage", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
+		{name: "hostname remote rejected", remoteAddr: "localhost:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
+		{name: "empty remote rejected", remoteAddr: "", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
+	}
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = w.Write([]byte("inner"))
+	})
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodPost, "/-/reload", nil)
+			req.RemoteAddr = tc.remoteAddr
+			rec := httptest.NewRecorder()
+
+			LoopbackOnly(inner).ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantCode {
+				t.Errorf("code = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if got := rec.Body.String(); got != tc.wantBody {
+				t.Errorf("body = %q, want %q", got, tc.wantBody)
 			}
 		})
 	}

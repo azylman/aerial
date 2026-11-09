@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -272,102 +273,71 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 			t.Fatalf("expected worker pool engine claude and bin /opt/anthropic/bin/claude, got %q, %q", workerSpawnedEngine, workerSpawnedClaudeBin)
 		}
 	})
+}
 
-	t.Run("git-sync target resolution and change detection", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		subDirA := filepath.Join(tmpDir, "revA")
-		subDirB := filepath.Join(tmpDir, "revB")
-		_ = os.MkdirAll(subDirA, 0o755)
-		_ = os.MkdirAll(subDirB, 0o755)
+type recordingReloader struct {
+	mu      sync.Mutex
+	sources []string
+}
 
-		symlinkPath := filepath.Join(tmpDir, "current")
-		if err := os.Symlink(subDirA, symlinkPath); err != nil {
-			t.Fatalf("failed to create test symlink: %v", err)
+func (r *recordingReloader) reload(source string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sources = append(r.sources, source)
+}
+
+func (r *recordingReloader) count(source string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, s := range r.sources {
+		if s == source {
+			n++
 		}
+	}
+	return n
+}
 
-		targetA := resolveGitSyncTarget(symlinkPath)
-		if targetA != subDirA {
-			t.Errorf("expected targetA %q, got %q", subDirA, targetA)
-		}
+func TestRegisterGitSyncReload(t *testing.T) {
+	t.Parallel()
 
-		_ = os.Remove(symlinkPath)
-		if err := os.Symlink(subDirB, symlinkPath); err != nil {
-			t.Fatalf("failed to update test symlink: %v", err)
-		}
+	tests := []struct {
+		name       string
+		method     string
+		remoteAddr string
+		wantCode   int
+		wantBody   string
+		wantReload bool
+	}{
+		{name: "ipv4 loopback post reloads", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"reloaded\"}", wantReload: true},
+		{name: "ipv6 loopback post reloads", method: http.MethodPost, remoteAddr: "[::1]:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"reloaded\"}", wantReload: true},
+		{name: "pod network rejected", method: http.MethodPost, remoteAddr: "10.42.0.9:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
+		{name: "get not allowed", method: http.MethodGet, remoteAddr: "127.0.0.1:5555", wantCode: http.StatusMethodNotAllowed, wantBody: "Method Not Allowed\n"},
+	}
 
-		targetB := resolveGitSyncTarget(symlinkPath)
-		if targetB != subDirB {
-			t.Errorf("expected targetB %q, got %q", subDirB, targetB)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &recordingReloader{}
+			mux := http.NewServeMux()
+			registerGitSyncReload(mux, rec.reload)
+			req := httptest.NewRequest(tc.method, "/-/reload", nil)
+			req.RemoteAddr = tc.remoteAddr
+			w := httptest.NewRecorder()
 
-		// Plain git repository (.git/HEAD) resolution
-		gitRepoDir := filepath.Join(tmpDir, "plain-repo")
-		gitHeadDir := filepath.Join(gitRepoDir, ".git")
-		_ = os.MkdirAll(filepath.Join(gitHeadDir, "refs", "heads"), 0o755)
-		_ = os.WriteFile(filepath.Join(gitHeadDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644)
-		_ = os.WriteFile(filepath.Join(gitHeadDir, "refs", "heads", "main"), []byte("commit-sha-12345\n"), 0o644)
+			mux.ServeHTTP(w, req)
 
-		repoTarget := resolveGitSyncTarget(gitRepoDir)
-		if repoTarget != "commit-sha-12345" {
-			t.Errorf("expected resolved git ref target commit-sha-12345, got %q", repoTarget)
-		}
-
-		// Detached HEAD case
-		detachedDir := filepath.Join(tmpDir, "detached-repo")
-		detachedGit := filepath.Join(detachedDir, ".git")
-		_ = os.MkdirAll(detachedGit, 0o755)
-		_ = os.WriteFile(filepath.Join(detachedGit, "HEAD"), []byte("commit-sha-detached\n"), 0o644)
-		detachedTarget := resolveGitSyncTarget(detachedDir)
-		if detachedTarget != "commit-sha-detached" {
-			t.Errorf("expected detached git target, got %q", detachedTarget)
-		}
-
-		// Exercise pollGitSyncTargets branches
-		oldAerialRoot := aerialShareRoot
-		oldConfigRoot := configShareRoot
-		defer func() {
-			aerialShareRoot = oldAerialRoot
-			configShareRoot = oldConfigRoot
-		}()
-		aerialShareRoot = symlinkPath
-		configShareRoot = filepath.Join(tmpDir, "does-not-exist")
-
-		var pollReloads []string
-		pollReloadFn := func(src string) {
-			pollReloads = append(pollReloads, src)
-		}
-		// Populate initial last targets
-		lA, lC := pollGitSyncTargets("", "", pollReloadFn)
-		if lA != targetB {
-			t.Errorf("expected lA %q, got %q", targetB, lA)
-		}
-
-		// No change when initial last matches current
-		pollGitSyncTargets(lA, lC, pollReloadFn)
-		if len(pollReloads) != 0 {
-			t.Errorf("expected no reload on initial target, got %v", pollReloads)
-		}
-		// Change detected when target is different
-		pollGitSyncTargets("differentA", lC, pollReloadFn)
-		if len(pollReloads) != 1 || pollReloads[0] != "git-sync" {
-			t.Errorf("expected git-sync reload, got %v", pollReloads)
-		}
-
-		// Also test config change branch
-		configShareRoot = symlinkPath
-		pollGitSyncTargets(lA, "differentC", pollReloadFn)
-		if len(pollReloads) != 2 || pollReloads[1] != "git-sync" {
-			t.Errorf("expected git-sync reload on config change, got %v", pollReloads)
-		}
-
-		// Plain directory without .git (stat fallback)
-		statDir := filepath.Join(tmpDir, "plain-dir")
-		_ = os.MkdirAll(statDir, 0o755)
-		statTarget := resolveGitSyncTarget(statDir)
-		if statTarget == "" {
-			t.Errorf("expected non-empty statTarget for plain directory")
-		}
-	})
+			if w.Code != tc.wantCode {
+				t.Errorf("code = %d, want %d", w.Code, tc.wantCode)
+			}
+			if got := w.Body.String(); got != tc.wantBody {
+				t.Errorf("body = %q, want %q", got, tc.wantBody)
+			}
+			if got := rec.count("git-sync webhook") == 1; got != tc.wantReload {
+				t.Errorf("reloaded via git-sync webhook = %v, want %v (sources %v)", got, tc.wantReload, rec.sources)
+			}
+		})
+	}
 }
 
 func TestDefaultPaths(t *testing.T) {
