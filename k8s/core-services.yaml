@@ -766,10 +766,7 @@ spec:
     matchLabels:
       app.kubernetes.io/name: agentsview-sync
   strategy:
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
-    type: RollingUpdate
+    type: Recreate
   template:
     metadata:
       labels:
@@ -779,12 +776,12 @@ spec:
         - command:
             - /bin/sh
             - -c
-            - "mkdir -p /tmp/agentsview && cp /data/agentsview/config.toml /tmp/agentsview/config.toml && touch /tmp/agentsview/pg-watch.log && { tail -F /tmp/agentsview/pg-watch.log & exec agentsview pg push --watch --debounce=5s --no-vectors; }"
+            - "touch /data/agentsview/pg-watch.log && { tail -F /data/agentsview/pg-watch.log & exec agentsview pg push --watch --debounce=5s --no-vectors; }"
           env:
             - name: HOME
               value: /data
             - name: AGENTSVIEW_DATA_DIR
-              value: /tmp/agentsview
+              value: /data/agentsview
             - name: CLAUDE_PROJECTS_DIR
               value: /data/claude/projects
             - name: AGENTSVIEW_NO_DAEMON
@@ -810,8 +807,19 @@ spec:
           volumeMounts:
             - mountPath: /data
               name: brain-data
-            - mountPath: /tmp
-              name: tmp-data
+      initContainers:
+        - command:
+            - /bin/sh
+            - -c
+            - "psql -h postgres -U aerial -d aerial -c \"UPDATE agentsview.sessions SET owner_marker = '', machine = 'local' WHERE owner_marker != '';\""
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: postgres-secret
+          image: ghcr.io/cloudnative-pg/postgresql:18
+          name: reconcile-agentsview-owner
       nodeSelector:
         compute-tier: performance
         kubernetes.io/hostname: calibarn
@@ -823,8 +831,6 @@ spec:
             path: /var/lib/docker/volumes/aerial-brain-data/_data
             type: Directory
           name: brain-data
-        - emptyDir: {}
-          name: tmp-data
 ---
 apiVersion: v1
 kind: Service
