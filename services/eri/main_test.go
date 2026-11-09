@@ -275,29 +275,6 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 	})
 }
 
-type recordingReloader struct {
-	mu      sync.Mutex
-	sources []string
-}
-
-func (r *recordingReloader) reload(source string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sources = append(r.sources, source)
-}
-
-func (r *recordingReloader) count(source string) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	n := 0
-	for _, s := range r.sources {
-		if s == source {
-			n++
-		}
-	}
-	return n
-}
-
 func TestRegisterGitSyncReload(t *testing.T) {
 	t.Parallel()
 
@@ -307,10 +284,10 @@ func TestRegisterGitSyncReload(t *testing.T) {
 		remoteAddr string
 		wantCode   int
 		wantBody   string
-		wantReload bool
+		wantQueued bool
 	}{
-		{name: "ipv4 loopback post reloads", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"reloaded\"}", wantReload: true},
-		{name: "ipv6 loopback post reloads", method: http.MethodPost, remoteAddr: "[::1]:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"reloaded\"}", wantReload: true},
+		{name: "ipv4 loopback post queues", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"queued\"}", wantQueued: true},
+		{name: "ipv6 loopback post queues", method: http.MethodPost, remoteAddr: "[::1]:5555", wantCode: http.StatusOK, wantBody: "{\"status\":\"queued\"}", wantQueued: true},
 		{name: "pod network rejected", method: http.MethodPost, remoteAddr: "10.42.0.9:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
 		{name: "get not allowed", method: http.MethodGet, remoteAddr: "127.0.0.1:5555", wantCode: http.StatusMethodNotAllowed, wantBody: "Method Not Allowed\n"},
 	}
@@ -318,9 +295,10 @@ func TestRegisterGitSyncReload(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			rec := &recordingReloader{}
+			// No worker drains pending, so it shows whether the handler queued a reload.
+			trigger := &reloadTrigger{pending: make(chan struct{}, 1)}
 			mux := http.NewServeMux()
-			registerGitSyncReload(mux, rec.reload)
+			registerGitSyncReload(mux, trigger)
 			req := httptest.NewRequest(tc.method, "/-/reload", nil)
 			req.RemoteAddr = tc.remoteAddr
 			w := httptest.NewRecorder()
@@ -333,8 +311,71 @@ func TestRegisterGitSyncReload(t *testing.T) {
 			if got := w.Body.String(); got != tc.wantBody {
 				t.Errorf("body = %q, want %q", got, tc.wantBody)
 			}
-			if got := rec.count("git-sync webhook") == 1; got != tc.wantReload {
-				t.Errorf("reloaded via git-sync webhook = %v, want %v (sources %v)", got, tc.wantReload, rec.sources)
+			if got := len(trigger.pending) == 1; got != tc.wantQueued {
+				t.Errorf("queued = %v, want %v", got, tc.wantQueued)
+			}
+		})
+	}
+}
+
+// blockingReloader records each reload on started and then blocks until
+// release is closed.
+type blockingReloader struct {
+	started chan string
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (b *blockingReloader) reload(source string) {
+	b.calls.Add(1)
+	b.started <- source
+	<-b.release
+}
+
+func TestReloadTrigger(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		burst              int
+		cancelDuringReload bool
+		wantReloads        int32
+	}{
+		{name: "single trigger reloads once", burst: 0, wantReloads: 1},
+		{name: "trigger during reload runs one follow-up", burst: 1, wantReloads: 2},
+		{name: "burst during reload coalesces into one follow-up", burst: 5, wantReloads: 2},
+		{name: "cancel during reload drops pending follow-up", burst: 3, cancelDuringReload: true, wantReloads: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			rec := &blockingReloader{started: make(chan string, 8), release: make(chan struct{})}
+			trigger := newReloadTrigger(ctx, rec.reload)
+
+			trigger.Trigger()
+			if got := <-rec.started; got != "git-sync webhook" {
+				t.Errorf("source = %q, want %q", got, "git-sync webhook")
+			}
+			for range tc.burst {
+				trigger.Trigger()
+			}
+			if tc.cancelDuringReload {
+				cancel()
+			}
+			close(rec.release)
+			for range tc.wantReloads - 1 {
+				<-rec.started
+			}
+			cancel()
+			<-trigger.done
+			// With the worker stopped, Trigger must neither block nor reload.
+			trigger.Trigger()
+
+			if got := rec.calls.Load(); got != tc.wantReloads {
+				t.Errorf("reloads = %d, want %d", got, tc.wantReloads)
 			}
 		})
 	}
