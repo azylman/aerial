@@ -12,6 +12,8 @@ import './styles/base.css';
 
 type ViewModule = { readonly default: ComponentType };
 
+const loadBuilds = () => import('./features/builds/BuildsView');
+
 // Each view is its own chunk. The loaders are shared by React.lazy and the idle prefetch below,
 // so a prefetched view's module is already evaluated when its tab is first opened.
 export const VIEW_LOADERS: Readonly<Record<TabId, () => Promise<ViewModule>>> = {
@@ -19,7 +21,7 @@ export const VIEW_LOADERS: Readonly<Record<TabId, () => Promise<ViewModule>>> = 
   tasks: () => import('./features/tasks/TasksView'),
   schedules: () => import('./features/schedules/SchedulesView'),
   memory: () => import('./features/memory/MemoryView'),
-  builds: () => import('./features/builds/BuildsView'),
+  builds: loadBuilds,
 };
 
 const VIEWS: Readonly<Record<TabId, ComponentType>> = {
@@ -31,9 +33,10 @@ const VIEWS: Readonly<Record<TabId, ComponentType>> = {
 };
 
 // The service body is tiny and opens from the telemetry view, so it ships in the main chunk and
-// never suspends the drawer. The build body ships with the build queue view.
-const PendingDrawerBody = (): null => null;
-const DRAWER_PANELS: DrawerPanels = { service: ServiceDiagnostics, build: PendingDrawerBody };
+// never suspends the drawer. The build body (and its markdown renderer) ships with the build
+// queue view, which is where builds are opened from and which the idle prefetch already warms.
+const BuildDrawerBody = lazy(() => loadBuilds().then((m) => ({ default: m.BuildDetailPanel })));
+const DRAWER_PANELS: DrawerPanels = { service: ServiceDiagnostics, build: BuildDrawerBody };
 
 const STATUS_POLL_MS = 5000;
 
@@ -52,7 +55,7 @@ const loadFacts = syncResource(
   (data) => useConsoleStore.getState().setFacts(data),
   (error) => useConsoleStore.getState().failFacts(error),
 );
-const loadBuilds = syncResource(
+const loadBuildQueue = syncResource(
   fetchBuilds,
   (data) => useConsoleStore.getState().setBuilds(data),
   (error) => useConsoleStore.getState().failBuilds(error),
@@ -87,7 +90,7 @@ function useShellData(activeTab: TabId): void {
     const controller = new AbortController();
     void loadSchedules(controller.signal);
     void loadFacts(controller.signal);
-    void loadBuilds(controller.signal);
+    void loadBuildQueue(controller.signal);
     return () => controller.abort();
   }, []);
 }

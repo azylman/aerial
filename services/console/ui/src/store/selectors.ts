@@ -1,4 +1,5 @@
 import type {
+  BuildDetailAPIResponse,
   BuildsAPIResponse,
   ClusterResponse,
   FactsAPIResponse,
@@ -6,6 +7,7 @@ import type {
   QuickLaunchLink,
   SchedulesAPIResponse,
   ServiceStatus,
+  VanadisBuildDTO,
 } from '../api/types';
 import { formatGitSyncDelta, parseValidTimestampMs } from '../lib/formatters';
 
@@ -22,6 +24,24 @@ export const memoryBadgeCount = (facts: FactsAPIResponse | null): number => fact
 
 export const buildsBadgeCount = (builds: BuildsAPIResponse | null): number =>
   builds === null ? 0 : builds.running_count + builds.queued_count;
+
+/**
+ * The build a detail payload describes (`build`, or the legacy `entry` key), only when it is the
+ * build with `id`: the detail slice holds the last fetched build, which may be a different one.
+ */
+export function buildFromDetail(detail: BuildDetailAPIResponse | null, id: string): VanadisBuildDTO | undefined {
+  const build = detail?.build ?? detail?.entry;
+  return build?.id === id ? build : undefined;
+}
+
+/**
+ * Build drawer header label (openBuildDetailDrawer): the build id until its detail arrives, then
+ * the build's title (falling back to its id).
+ */
+export function buildDrawerLabel(detail: BuildDetailAPIResponse | null, id: string): string {
+  const build = buildFromDetail(detail, id);
+  return build === undefined ? id : build.title || build.id;
+}
 
 export type PermetTone = 'idle' | 'optimal' | 'stable' | 'warning';
 
