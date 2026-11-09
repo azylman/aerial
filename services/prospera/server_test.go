@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 func generateTwilioSignature(authToken, fullURL string, form url.Values) string {
@@ -51,10 +53,10 @@ func setupTestServer() (*Server, *mockStoreForDelivery, *Config) {
 		contentType: "audio/wav",
 	}
 	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(cfg, store, twilioMock, nil, tokenMgr)
-	reporter := NewReporter(cfg, store, twilioMock)
+	sessionMgr := NewCallSessionManager(staticConfig{cfg: cfg}, store, twilioMock, nil, tokenMgr)
+	reporter := NewReporter(staticConfig{cfg: cfg}, store, twilioMock)
 
-	server := NewServer(cfg, store, twilioMock, tokenMgr, sessionMgr, reporter)
+	server := NewServer(newTestConfigSource(cfg), store, twilioMock, tokenMgr, sessionMgr, reporter)
 	return server, store, cfg
 }
 
@@ -841,7 +843,7 @@ func TestServer_UnnormalizedPhonesAndReporterErrors(t *testing.T) {
 
 	// 3. Status completed with failing reporter
 	serverFailRep, storeFail, cfgFail := setupTestServer()
-	serverFailRep.reporter = NewReporter(&Config{BrainURL: ""}, storeFail, nil)
+	serverFailRep.reporter = NewReporter(staticConfig{cfg: &Config{BrainURL: ""}}, storeFail, nil)
 	muxFail := serverFailRep.Routes()
 	_ = storeFail.CreateOutboundCall(context.Background(), VoiceCall{
 		CallID:          "call-stat-failrep",
@@ -1093,4 +1095,63 @@ func TestServer_Wait(t *testing.T) {
 	server, _, _ := setupTestServer()
 	server.triggerPostCallReportIfPending(context.Background(), "call-nonexistent")
 	server.Wait()
+}
+
+func TestServer_ReloadEndpointSwapsLiveConfig(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		reloadedCfg  *Config
+		wantStatus   string
+		wantSMSFrom  string
+		wantRestarts bool
+	}{
+		{
+			name:        "live field applied to next tool call",
+			reloadedCfg: &Config{Port: "4019", TwilioFromNumber: "+15105550222"},
+			wantStatus:  `"status":"reloaded"`,
+			wantSMSFrom: "+15105550222",
+		},
+		{
+			name:         "restart field keeps serving old snapshot",
+			reloadedCfg:  &Config{Port: "5000", TwilioFromNumber: "+15105550222"},
+			wantStatus:   `"status":"restarting"`,
+			wantSMSFrom:  "+15105550100",
+			wantRestarts: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfgSrc := httpkit.NewReloadable(&Config{Port: "4019", TwilioFromNumber: "+15105550100"},
+				func() (*Config, error) { return tc.reloadedCfg, nil }, prosperaRestartRequired)
+			twilioMock := &mockTwilioForDelivery{}
+			server := NewServer(cfgSrc, newMockStoreForDelivery(), twilioMock, nil, nil, nil)
+
+			req := httptest.NewRequest(http.MethodPost, "/-/reload", nil)
+			req.RemoteAddr = "127.0.0.1:5555"
+			rec := httptest.NewRecorder()
+			server.Routes().ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.wantStatus) {
+				t.Fatalf("reload = %d %s, want 200 containing %s", rec.Code, rec.Body.String(), tc.wantStatus)
+			}
+
+			if _, err := server.toolHandler.SendSMS(context.Background(), SendSMSArgs{To: "+15105550199", Body: "hi"}); err != nil {
+				t.Fatalf("SendSMS() error = %v", err)
+			}
+			if twilioMock.lastSendSMSFrom != tc.wantSMSFrom {
+				t.Errorf("SMS from = %q, want %q", twilioMock.lastSendSMSFrom, tc.wantSMSFrom)
+			}
+			select {
+			case <-cfgSrc.RestartRequested():
+				if !tc.wantRestarts {
+					t.Error("restart requested unexpectedly")
+				}
+			default:
+				if tc.wantRestarts {
+					t.Error("restart not requested")
+				}
+			}
+		})
+	}
 }

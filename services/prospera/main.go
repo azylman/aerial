@@ -51,10 +51,13 @@ func flushActiveSessions(ctx context.Context, sessionMgr *CallSessionManager, re
 }
 
 // RunApp bootstraps and runs the Prospera service HTTP server with graceful shutdown.
-func RunApp(ctx context.Context, cfg *Config) error {
-	if cfg == nil {
+// Startup-bound settings (listen port, database, Twilio credentials, consult
+// endpoints) are read once here; everything else is read per request from cfgSrc.
+func RunApp(ctx context.Context, cfgSrc *httpkit.Reloadable[Config]) error {
+	if cfgSrc == nil {
 		return fmt.Errorf("app: config cannot be nil")
 	}
+	cfg := cfgSrc.Current()
 	port := strings.TrimSpace(cfg.Port)
 	if port == "" {
 		return fmt.Errorf("app: port cannot be empty")
@@ -76,10 +79,10 @@ func RunApp(ctx context.Context, cfg *Config) error {
 
 	tokenMgr := NewStreamTokenManager(time.Now)
 	consultClient := NewHTTPContextConsultClient(cfg.GoogleMCPURL, cfg.CovenURL)
-	sessionMgr := NewCallSessionManager(cfg, store, twilioClient, consultClient, tokenMgr)
-	reporter := NewReporter(cfg, store, twilioClient, WithReporterRecordingProvider(sessionMgr.GetRecordingWAV))
+	sessionMgr := NewCallSessionManager(cfgSrc, store, twilioClient, consultClient, tokenMgr)
+	reporter := NewReporter(cfgSrc, store, twilioClient, WithReporterRecordingProvider(sessionMgr.GetRecordingWAV))
 
-	server := NewServer(cfg, store, twilioClient, tokenMgr, sessionMgr, reporter)
+	server := NewServer(cfgSrc, store, twilioClient, tokenMgr, sessionMgr, reporter)
 
 	httpServer := &http.Server{
 		Addr:              ":" + port,
@@ -124,6 +127,18 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	}
 }
 
+// prosperaRestartRequired reports whether next changes a setting that RunApp
+// binds once at startup (listen port, database, Twilio client credentials,
+// consult client endpoints) and therefore can only take effect after a restart.
+func prosperaRestartRequired(old, next *Config) bool {
+	return old.Port != next.Port ||
+		old.DatabaseURL != next.DatabaseURL ||
+		old.TwilioAccountSID != next.TwilioAccountSID ||
+		old.TwilioAuthToken != next.TwilioAuthToken ||
+		old.GoogleMCPURL != next.GoogleMCPURL ||
+		old.CovenURL != next.CovenURL
+}
+
 var (
 	configPath   = DefaultConfigPath
 	loadConfigFn = LoadConfig
@@ -138,11 +153,21 @@ func main() {
 		exitFn("failed to load config: %v", err)
 		return
 	}
+	cfgSrc := httpkit.NewReloadable(cfg, func() (*Config, error) {
+		return loadConfigFn(resolvedPath)
+	}, prosperaRestartRequired)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		select {
+		case <-cfgSrc.RestartRequested():
+			stop()
+		case <-ctx.Done():
+		}
+	}()
 
-	if err := runAppFn(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := runAppFn(ctx, cfgSrc); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		exitFn("prospera exited with error: %v", err)
 	}
 }

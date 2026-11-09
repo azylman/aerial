@@ -15,9 +15,16 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// ReloadableConfigSource is a ConfigSource that also serves the loopback-only
+// git-sync reload webhook. *httpkit.Reloadable[Config] satisfies it.
+type ReloadableConfigSource interface {
+	ConfigSource
+	Handler(service string) http.Handler
+}
+
 // Server encapsulates the Prospera HTTP router, webhook handlers, and Streamable HTTP MCP server.
 type Server struct {
-	cfg           *Config
+	cfgSrc        ReloadableConfigSource
 	store         Store
 	twilio        TwilioClient
 	tokenMgr      *StreamTokenManager
@@ -36,18 +43,18 @@ func (s *Server) Wait() {
 
 // NewServer initializes a new Server.
 func NewServer(
-	cfg *Config,
+	cfgSrc ReloadableConfigSource,
 	store Store,
 	twilio TwilioClient,
 	tokenMgr *StreamTokenManager,
 	sessionMgr *CallSessionManager,
 	reporter *Reporter,
 ) *Server {
-	if cfg == nil {
-		panic("server: config cannot be nil")
+	if cfgSrc == nil {
+		panic("server: config source cannot be nil")
 	}
 
-	toolHandler := NewToolHandler(cfg, store, twilio, sessionMgr, reporter)
+	toolHandler := NewToolHandler(cfgSrc, store, twilio, sessionMgr, reporter)
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "prospera",
 		Version: "1.0.0",
@@ -62,7 +69,7 @@ func NewServer(
 	})
 
 	return &Server{
-		cfg:           cfg,
+		cfgSrc:        cfgSrc,
 		store:         store,
 		twilio:        twilio,
 		tokenMgr:      tokenMgr,
@@ -79,6 +86,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.Handle("POST /-/reload", s.cfgSrc.Handler("prospera"))
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("prospera"))
 
 	mcpBridge := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -107,14 +115,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
 		"service": "prospera",
-		"port":    s.cfg.Port,
+		"port":    s.cfgSrc.Current().Port,
 	})
 }
 
-func (s *Server) validateTwilioRequest(w http.ResponseWriter, r *http.Request) bool {
-	fullURL := strings.TrimRight(s.cfg.PublicWebhookBaseURL, "/") + r.URL.RequestURI()
+func validateTwilioRequest(cfg *Config, w http.ResponseWriter, r *http.Request) bool {
+	fullURL := strings.TrimRight(cfg.PublicWebhookBaseURL, "/") + r.URL.RequestURI()
 	sig := r.Header.Get("X-Twilio-Signature")
-	if !ValidateTwilioSignature(s.cfg.TwilioAuthToken, fullURL, r.PostForm, sig) {
+	if !ValidateTwilioSignature(cfg.TwilioAuthToken, fullURL, r.PostForm, sig) {
 		http.Error(w, "invalid twilio signature", http.StatusForbidden)
 		return false
 	}
@@ -165,7 +173,8 @@ func (s *Server) handleTwilioVoice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid form data", http.StatusBadRequest)
 		return
 	}
-	if !s.validateTwilioRequest(w, r) {
+	cfg := s.cfgSrc.Current()
+	if !validateTwilioRequest(cfg, w, r) {
 		return
 	}
 
@@ -175,14 +184,14 @@ func (s *Server) handleTwilioVoice(w http.ResponseWriter, r *http.Request) {
 	existingCall := s.resolveAndBindCall(r.Context(), r, callSid)
 
 	if direction == "outbound-api" || (existingCall != nil && existingCall.Direction == "outbound") {
-		s.handleOutboundVoiceConnect(w, existingCall)
+		s.handleOutboundVoiceConnect(cfg, w, existingCall)
 		return
 	}
 
-	s.handleInboundVoiceRouting(w, r, callSid)
+	s.handleInboundVoiceRouting(cfg, w, r, callSid)
 }
 
-func (s *Server) handleOutboundVoiceConnect(w http.ResponseWriter, existingCall *VoiceCall) {
+func (s *Server) handleOutboundVoiceConnect(cfg *Config, w http.ResponseWriter, existingCall *VoiceCall) {
 	if existingCall == nil || existingCall.CallID == "" {
 		http.Error(w, "outbound call not found", http.StatusNotFound)
 		return
@@ -192,12 +201,12 @@ func (s *Server) handleOutboundVoiceConnect(w http.ResponseWriter, existingCall 
 		http.Error(w, "failed to issue stream token", http.StatusInternalServerError)
 		return
 	}
-	wsURL := fmt.Sprintf("%s/api/webhooks/twilio/stream/%s", toWSS(s.cfg.PublicWebhookBaseURL), token)
+	wsURL := fmt.Sprintf("%s/api/webhooks/twilio/stream/%s", toWSS(cfg.PublicWebhookBaseURL), token)
 	twiml := GenerateConnectStreamTwiML(wsURL)
 	writeXML(w, twiml)
 }
 
-func (s *Server) handleInboundVoiceRouting(w http.ResponseWriter, r *http.Request, callSid string) {
+func (s *Server) handleInboundVoiceRouting(cfg *Config, w http.ResponseWriter, r *http.Request, callSid string) {
 	fromRaw := r.PostForm.Get("From")
 	toRaw := r.PostForm.Get("To")
 	normFrom, errFrom := NormalizeE164(fromRaw)
@@ -208,15 +217,15 @@ func (s *Server) handleInboundVoiceRouting(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Tier 1: AllowFrom allowlist
-	for _, a := range s.cfg.AllowFrom {
+	for _, a := range cfg.AllowFrom {
 		if normA, err := NormalizeE164(a); err == nil && normA == normFrom {
-			s.connectInboundStream(r.Context(), w, callSid, normFrom, normTo, nil)
+			s.connectInboundStream(r.Context(), cfg, w, callSid, normFrom, normTo, nil)
 			return
 		}
 	}
 
 	// Tier 2: 7-day callback window
-	window := time.Duration(s.cfg.CallbackWindowMinutes) * time.Minute
+	window := time.Duration(cfg.CallbackWindowMinutes) * time.Minute
 	if window <= 0 {
 		window = 10080 * time.Minute
 	}
@@ -229,15 +238,15 @@ func (s *Server) handleInboundVoiceRouting(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if recentCall != nil {
-		s.connectInboundStream(r.Context(), w, callSid, normFrom, normTo, recentCall)
+		s.connectInboundStream(r.Context(), cfg, w, callSid, normFrom, normTo, recentCall)
 		return
 	}
 
 	// Tier 3: Unknown caller -> Voicemail recording
-	s.routeVoicemailRecording(r.Context(), w, callSid, normFrom, normTo)
+	s.routeVoicemailRecording(r.Context(), cfg, w, callSid, normFrom, normTo)
 }
 
-func (s *Server) connectInboundStream(ctx context.Context, w http.ResponseWriter, callSid, normFrom, normTo string, callbackOf *VoiceCall) {
+func (s *Server) connectInboundStream(ctx context.Context, cfg *Config, w http.ResponseWriter, callSid, normFrom, normTo string, callbackOf *VoiceCall) {
 	callID := "call-in-" + uuid.NewString()
 	c := VoiceCall{
 		CallID:           callID,
@@ -246,7 +255,7 @@ func (s *Server) connectInboundStream(ctx context.Context, w http.ResponseWriter
 		State:            "in-progress",
 		FromNumber:       normFrom,
 		ToNumber:         normTo,
-		DiscordChannelID: s.cfg.DefaultDiscordChannel,
+		DiscordChannelID: cfg.DefaultDiscordChannel,
 		ReportStatus:     "pending",
 		StartedAt:        time.Now().UTC(),
 		UpdatedAt:        time.Now().UTC(),
@@ -277,12 +286,12 @@ func (s *Server) connectInboundStream(ctx context.Context, w http.ResponseWriter
 		http.Error(w, "failed to issue stream token", http.StatusInternalServerError)
 		return
 	}
-	wsURL := fmt.Sprintf("%s/api/webhooks/twilio/stream/%s", toWSS(s.cfg.PublicWebhookBaseURL), token)
+	wsURL := fmt.Sprintf("%s/api/webhooks/twilio/stream/%s", toWSS(cfg.PublicWebhookBaseURL), token)
 	twiml := GenerateConnectStreamTwiML(wsURL)
 	writeXML(w, twiml)
 }
 
-func (s *Server) routeVoicemailRecording(ctx context.Context, w http.ResponseWriter, callSid, normFrom, normTo string) {
+func (s *Server) routeVoicemailRecording(ctx context.Context, cfg *Config, w http.ResponseWriter, callSid, normFrom, normTo string) {
 	callID := "call-in-" + uuid.NewString()
 	c := VoiceCall{
 		CallID:           callID,
@@ -291,7 +300,7 @@ func (s *Server) routeVoicemailRecording(ctx context.Context, w http.ResponseWri
 		State:            "in-progress",
 		FromNumber:       normFrom,
 		ToNumber:         normTo,
-		DiscordChannelID: s.cfg.DefaultDiscordChannel,
+		DiscordChannelID: cfg.DefaultDiscordChannel,
 		ReportStatus:     "awaiting_recording",
 		StartedAt:        time.Now().UTC(),
 		UpdatedAt:        time.Now().UTC(),
@@ -302,7 +311,7 @@ func (s *Server) routeVoicemailRecording(ctx context.Context, w http.ResponseWri
 		}
 	}
 	greeting := "Please leave a message after the tone."
-	vmCallbackURL := fmt.Sprintf("%s/api/webhooks/twilio/voicemail?call_id=%s", strings.TrimRight(s.cfg.PublicWebhookBaseURL, "/"), callID)
+	vmCallbackURL := fmt.Sprintf("%s/api/webhooks/twilio/voicemail?call_id=%s", strings.TrimRight(cfg.PublicWebhookBaseURL, "/"), callID)
 	twiml := GenerateVoicemailTwiML(greeting, vmCallbackURL)
 	writeXML(w, twiml)
 }
@@ -320,7 +329,8 @@ func (s *Server) handleTwilioAMD(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid form data", http.StatusBadRequest)
 		return
 	}
-	if !s.validateTwilioRequest(w, r) {
+	cfg := s.cfgSrc.Current()
+	if !validateTwilioRequest(cfg, w, r) {
 		return
 	}
 
@@ -358,7 +368,8 @@ func (s *Server) handleTwilioStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid form data", http.StatusBadRequest)
 		return
 	}
-	if !s.validateTwilioRequest(w, r) {
+	cfg := s.cfgSrc.Current()
+	if !validateTwilioRequest(cfg, w, r) {
 		return
 	}
 
@@ -400,7 +411,8 @@ func (s *Server) handleTwilioVoicemail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid form data", http.StatusBadRequest)
 		return
 	}
-	if !s.validateTwilioRequest(w, r) {
+	cfg := s.cfgSrc.Current()
+	if !validateTwilioRequest(cfg, w, r) {
 		return
 	}
 
@@ -426,7 +438,8 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid form data", http.StatusBadRequest)
 		return
 	}
-	if !s.validateTwilioRequest(w, r) {
+	cfg := s.cfgSrc.Current()
+	if !validateTwilioRequest(cfg, w, r) {
 		return
 	}
 
