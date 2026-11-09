@@ -1,0 +1,146 @@
+/* Diagnostic drawer chrome (ported from static/style.css). The host only mounts while open, so
+   the vanilla `.active` end state is the resting style; enter/exit run as view transitions. */
+.drawer-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    z-index: 200;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+}
+
+.drawer-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.diagnostic-drawer {
+    position: fixed;
+    top: 5vh;
+    bottom: auto;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    width: 92%;
+    max-width: 960px;
+    height: auto;
+    max-height: 90vh;
+    background: rgba(10, 14, 23, 0.96);
+    border: 1px solid var(--neon-cyan);
+    border-radius: 16px;
+    backdrop-filter: blur(20px);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.75), 0 0 40px rgba(0, 242, 254, 0.25);
+    z-index: 201;
+    display: flex;
+    flex-direction: column;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    overscroll-behavior: contain;
+    outline: none;
+}
+
+.diagnostic-drawer.active {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+}
+
+.drawer-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.25rem 1.5rem;
+    border-bottom: 1px solid rgba(0, 242, 254, 0.2);
+    flex-shrink: 0;
+}
+
+.drawer-title {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    min-width: 0;
+}
+
+.drawer-title h3 {
+    font-family: var(--font-heading);
+    color: #fff;
+    font-size: 1.2rem;
+    letter-spacing: 1px;
+    min-width: 0;
+}
+
+.drawer-icon {
+    display: inline-flex;
+}
+
+.drawer-close {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1.8rem;
+    cursor: pointer;
+    transition: color 0.2s;
+    display: inline-flex;
+}
+
+.drawer-close:hover {
+    color: var(--neon-magenta);
+}
+
+.drawer-body {
+    padding: 1.5rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    flex: 1 1 auto;
+    min-height: 0;
+    font-size: 0.85rem;
+    line-height: 1.6;
+}
+
+/* View-transition enter/exit: same curve and distance as the vanilla .active transition. */
+::view-transition-group(.drawer-slide),
+::view-transition-group(.drawer-fade) {
+    animation-duration: 0.35s;
+}
+
+::view-transition-new(.drawer-slide):only-child {
+    animation: drawer-slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+::view-transition-old(.drawer-slide):only-child {
+    animation: drawer-slide-out 0.3s ease both;
+}
+
+::view-transition-new(.drawer-fade):only-child {
+    animation: drawer-fade 0.3s ease both;
+}
+
+::view-transition-old(.drawer-fade):only-child {
+    animation: drawer-fade 0.3s ease both reverse;
+}
+
+@keyframes drawer-slide-in {
+    from { opacity: 0; transform: translateY(20px); }
+}
+
+@keyframes drawer-slide-out {
+    to { opacity: 0; transform: translateY(20px); }
+}
+
+@keyframes drawer-fade {
+    from { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    ::view-transition-group(*),
+    ::view-transition-old(*),
+    ::view-transition-new(*) {
+        animation: none !important;
+    }
+}
