@@ -3258,6 +3258,24 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantSyncOK:  true,
 		},
 		{
+			name:        "structured vanadis_chunk_id populated directly",
+			dispatch:    db.Dispatch{SessionID: "vanadis-other-chunk", VanadisChunkID: "build-200-chunk-1"},
+			wantChunkID: "build-200-chunk-1",
+			wantBuildID: "build-200",
+			wantIdx:     -1,
+			wantPayload: `{"build_id":"build-200"}`,
+			wantSyncOK:  true,
+		},
+		{
+			name:        "structured target_id with build prefix fallback",
+			dispatch:    db.Dispatch{SessionID: "dispatch-123", TargetID: "build-300-chunk-2"},
+			wantChunkID: "build-300-chunk-2",
+			wantBuildID: "build-300",
+			wantIdx:     -1,
+			wantPayload: `{"build_id":"build-300"}`,
+			wantSyncOK:  true,
+		},
+		{
 			name:        "unrelated dispatch returns empty",
 			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "Run daily summary"},
 			wantChunkID: "",
@@ -3268,10 +3286,14 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 		},
 	}
 
+	if c, b, idx := extractVanadisDispatchInfo(nil); c != "" || b != "" || idx != -1 {
+		t.Fatalf("extractVanadisDispatchInfo(nil) = (%q, %q, %d), want (\"\", \"\", -1)", c, b, idx)
+	}
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			chunkID, buildID, idx := extractVanadisDispatchInfo(tc.dispatch)
+			chunkID, buildID, idx := extractVanadisDispatchInfo(&tc.dispatch)
 			if chunkID != tc.wantChunkID || buildID != tc.wantBuildID || idx != tc.wantIdx {
 				t.Fatalf("extractVanadisDispatchInfo() = (%q, %q, %d), want (%q, %q, %d)",
 					chunkID, buildID, idx, tc.wantChunkID, tc.wantBuildID, tc.wantIdx)
@@ -3280,6 +3302,66 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			if ok != tc.wantSyncOK || payload != tc.wantPayload {
 				t.Fatalf("extractDispatchWidgetSyncPayload() = (%q, %v), want (%q, %v)",
 					payload, ok, tc.wantPayload, tc.wantSyncOK)
+			}
+		})
+	}
+}
+
+func TestBuildLeaseTurnContext(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name               string
+		te                 *turnExecution
+		wantTargetID       string
+		wantVanadisChunkID string
+	}{
+		{
+			name: "discord turn populates target ID from threadID",
+			te: &turnExecution{
+				threadID: "discord-11223344",
+				lease:    &testSessionLease{sessionID: "sess-1"},
+			},
+			wantTargetID:       "11223344",
+			wantVanadisChunkID: "",
+		},
+		{
+			name: "dispatch turn populates target ID and chunk ID",
+			te: &turnExecution{
+				threadID: "dispatch-1",
+				dispatch: &db.Dispatch{
+					ID:             "d-1",
+					TargetID:       "discord-55667788",
+					VanadisChunkID: "build-10-chunk-1",
+				},
+				lease: &testSessionLease{sessionID: "sess-2"},
+			},
+			wantTargetID:       "55667788",
+			wantVanadisChunkID: "build-10-chunk-1",
+		},
+		{
+			name: "dispatch turn with empty target ID falls back to thread ID",
+			te: &turnExecution{
+				threadID: "discord-998877",
+				dispatch: &db.Dispatch{
+					ID:             "d-2",
+					VanadisChunkID: "build-20-chunk-2",
+				},
+				lease: &testSessionLease{sessionID: "sess-3"},
+			},
+			wantTargetID:       "998877",
+			wantVanadisChunkID: "build-20-chunk-2",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := tc.te.buildLeaseTurnContext(context.Background(), "model-a", "prompt-a", nil)
+			if ctx.TargetID != tc.wantTargetID {
+				t.Errorf("TargetID = %q, want %q", ctx.TargetID, tc.wantTargetID)
+			}
+			if ctx.VanadisChunkID != tc.wantVanadisChunkID {
+				t.Errorf("VanadisChunkID = %q, want %q", ctx.VanadisChunkID, tc.wantVanadisChunkID)
 			}
 		})
 	}

@@ -29,6 +29,7 @@ type DaemonConfig struct {
 	Cwd                     string
 	Env                     []string
 	GeminiHomeDir           string
+	TurnEnvFile             string
 	Timeout                 time.Duration
 	TranscriptRescuer       func(convID string, since time.Time) string
 	MemoryRetriever         MemoryRetriever

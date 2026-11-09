@@ -259,16 +259,23 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 	}
 
 	daemonEnv := filterVanadisChunkEnv(cfg.Env)
+	var turnEnvFile string
 	if home := strings.TrimSpace(cfg.GeminiHomeDir); home != "" {
 		geminiDir := filepath.Join(home, ".gemini")
 		if err := os.MkdirAll(geminiDir, 0o755); err != nil {
 			return DaemonConfig{}, fmt.Errorf("failed to create runtime home directory %q: %w", geminiDir, err)
 		}
+		turnEnvDir := filepath.Join(geminiDir, "turn_env")
+		if err := os.MkdirAll(turnEnvDir, 0o755); err != nil {
+			return DaemonConfig{}, fmt.Errorf("failed to create turn env directory %q: %w", turnEnvDir, err)
+		}
+		turnEnvFile = filepath.Join(turnEnvDir, SanitizeDaemonTargetKey(targetKey)+".sh")
 		daemonEnv = BuildAgyEnv(AgyEnvInput{
-			BaseEnv:  cfg.Env,
-			HomeDir:  home,
-			TargetID: targetKey,
-			Timezone: cfg.Timezone,
+			BaseEnv:     cfg.Env,
+			HomeDir:     home,
+			TargetID:    targetKey,
+			TurnEnvFile: turnEnvFile,
+			Timezone:    cfg.Timezone,
 		})
 	}
 
@@ -281,7 +288,7 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 		Engine: cfg.Engine, ClaudeBin: cfg.ClaudeBin, ResumeSession: resumeSession,
 		ThreadID: targetKey, SessionID: trimmedSess, InitialTurnCount: initTurnCount,
 		Model: cfg.Model, AgyBin: cfg.AgyBin, Cwd: cfg.Cwd, Env: daemonEnv,
-		GeminiHomeDir: cfg.GeminiHomeDir, Timeout: cfg.HandshakeTimeout,
+		GeminiHomeDir: cfg.GeminiHomeDir, TurnEnvFile: turnEnvFile, Timeout: cfg.HandshakeTimeout,
 		TranscriptRescuer: cfg.TranscriptRescuer, MemoryRetriever: cfg.MemoryRetriever,
 		AmbientContextRetriever: cfg.AmbientContextRetriever,
 	}, nil

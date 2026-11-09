@@ -461,7 +461,7 @@ func (te *turnExecution) releaseActivePoolLease() {
 }
 
 func (p *WorkerPool) setupVanadisChunkTurn(d db.Dispatch, te *turnExecution) func() {
-	chunkID, buildID, chunkIdx := extractVanadisDispatchInfo(d)
+	chunkID, buildID, chunkIdx := extractVanadisDispatchInfo(&d)
 	if chunkID == "" {
 		return func() {}
 	}
@@ -585,10 +585,23 @@ func extractDispatchWidgetSyncPayload(prompt, buildID string) (string, bool) {
 	return "", false
 }
 
-func extractVanadisDispatchInfo(d db.Dispatch) (chunkID, buildID string, chunkIdx int) {
+func extractVanadisDispatchInfo(d *db.Dispatch) (chunkID, buildID string, chunkIdx int) {
+	if d == nil {
+		return "", "", -1
+	}
 	chunkIdx = -1
-	if after, ok := strings.CutPrefix(d.SessionID, "vanadis-"); ok {
-		chunkID = strings.TrimSpace(after)
+	if chunk := strings.TrimSpace(d.VanadisChunkID); chunk != "" {
+		chunkID = chunk
+	}
+	if chunkID == "" {
+		if t := runner.NormalizeEnvTargetID(d.TargetID); strings.HasPrefix(t, "build-") || strings.HasPrefix(t, "pr-") {
+			chunkID = t
+		}
+	}
+	if chunkID == "" {
+		if after, ok := strings.CutPrefix(d.SessionID, "vanadis-"); ok {
+			chunkID = strings.TrimSpace(after)
+		}
 	}
 	if chunkID == "" {
 		if m := vanadisChunkIDPromptRegex.FindStringSubmatch(d.Prompt); len(m) >= 2 {
@@ -965,6 +978,15 @@ func (te *turnExecution) buildLeaseTurnContext(runCtx context.Context, currentMo
 			memParts = append(memParts, bt)
 		}
 	}
+	targetID := runner.NormalizeEnvTargetID(te.threadID)
+	var vanadisChunkID string
+	if te.isDispatch() && te.dispatch != nil {
+		if dispTarget := runner.NormalizeEnvTargetID(te.dispatch.TargetID); dispTarget != "" {
+			targetID = dispTarget
+		}
+		chunkID, _, _ := extractVanadisDispatchInfo(te.dispatch)
+		vanadisChunkID = chunkID
+	}
 	return &runner.TurnContext{
 		TurnID:              uuid.New().String(),
 		SessionID:           sessIDToSend,
@@ -974,6 +996,8 @@ func (te *turnExecution) buildLeaseTurnContext(runCtx context.Context, currentMo
 		ScopeInstructions:   scopeInst,
 		ChannelInstructions: scopeInst,
 		CoordinationContext: te.injectedHookContext,
+		TargetID:            targetID,
+		VanadisChunkID:      vanadisChunkID,
 		Sink:                sink,
 		CreatedAt:           time.Now(),
 		Ctx:                 runCtx,

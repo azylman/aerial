@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1281,5 +1283,72 @@ func TestStreamingDaemon_Claude_ErrorHandling(t *testing.T) {
 	}
 	if dTools.recordToolStart(-1, false, "read_file", "native") {
 		t.Errorf("expected duplicate unindexed tool start false")
+	}
+}
+
+func TestStreamingDaemon_TurnEnvFile(t *testing.T) {
+	tempDir := t.TempDir()
+	envFile := filepath.Join(tempDir, "turn_env", "test-daemon.sh")
+
+	cfg := DaemonConfig{
+		SessionID:   "00000000-0000-0000-0000-000000000305",
+		ThreadID:    "discord-fallback-123",
+		TurnEnvFile: envFile,
+	}
+	h := startTestStreamingDaemon(t, cfg, "", true)
+
+	// Turn 1: explicit TargetID and VanadisChunkID
+	sink1 := newMockTurnSink()
+	turn1 := &TurnContext{
+		TurnID:         "t1",
+		TargetID:       "discord-987654",
+		VanadisChunkID: "build-abc-chunk-1",
+		Prompt:         "turn 1",
+		Sink:           sink1,
+		CreatedAt:      time.Now(),
+	}
+	if err := h.daemon.Send("turn 1", turn1); err != nil {
+		t.Fatalf("send turn 1 failed: %v", err)
+	}
+
+	data1, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("failed reading turn env file: %v", err)
+	}
+	content1 := string(data1)
+	if !strings.Contains(content1, "unset BASH_ENV\n") ||
+		!strings.Contains(content1, "export AERIAL_TARGET_ID='987654'\n") ||
+		!strings.Contains(content1, "export AERIAL_VANADIS_CHUNK_ID='build-abc-chunk-1'\n") {
+		t.Errorf("unexpected turn 1 env file content:\n%s", content1)
+	}
+
+	// Turn 2: empty TargetID falls back to cfg.ThreadID, empty VanadisChunkID unsets
+	sink2 := newMockTurnSink()
+	turn2 := &TurnContext{
+		TurnID:    "t2",
+		Prompt:    "turn 2",
+		Sink:      sink2,
+		CreatedAt: time.Now(),
+	}
+	if err := h.daemon.Send("turn 2", turn2); err != nil {
+		t.Fatalf("send turn 2 failed: %v", err)
+	}
+
+	data2, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("failed reading turn env file for turn 2: %v", err)
+	}
+	content2 := string(data2)
+	if !strings.Contains(content2, "export AERIAL_TARGET_ID='fallback-123'\n") ||
+		!strings.Contains(content2, "unset AERIAL_VANADIS_CHUNK_ID\n") {
+		t.Errorf("unexpected turn 2 env file content:\n%s", content2)
+	}
+
+	// Verify Close removes turn env file
+	if err := h.daemon.Close(); err != nil {
+		t.Fatalf("daemon close failed: %v", err)
+	}
+	if _, statErr := os.Stat(envFile); !os.IsNotExist(statErr) {
+		t.Errorf("expected turn env file to be removed after Close(), got stat error: %v", statErr)
 	}
 }

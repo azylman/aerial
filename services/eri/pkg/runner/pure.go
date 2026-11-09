@@ -11,12 +11,14 @@ import (
 
 // AgyEnvInput holds environment configuration parameters.
 type AgyEnvInput struct {
-	BaseEnv  []string
-	HomeDir  string
-	APIKey   string
-	TargetID string
-	Timezone string
-	ExtraEnv []string
+	BaseEnv        []string
+	HomeDir        string
+	APIKey         string
+	TargetID       string
+	VanadisChunkID string
+	TurnEnvFile    string
+	Timezone       string
+	ExtraEnv       []string
 }
 
 func filterEnvKeys(env []string, excluded ...string) []string {
@@ -156,10 +158,66 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 	if t := NormalizeEnvTargetID(input.TargetID); t != "" {
 		cmdEnv = append(cmdEnv, "AERIAL_TARGET_ID="+t)
 	}
+	if chunkID := strings.TrimSpace(input.VanadisChunkID); chunkID != "" {
+		cmdEnv = append(cmdEnv, "AERIAL_VANADIS_CHUNK_ID="+chunkID)
+	}
+	if turnEnvFile := strings.TrimSpace(input.TurnEnvFile); turnEnvFile != "" {
+		cmdEnv = append(cmdEnv, "BASH_ENV="+turnEnvFile)
+	}
 	if tz := strings.TrimSpace(input.Timezone); tz != "" {
 		cmdEnv = append(cmdEnv, "TZ="+tz)
 	}
 	return append(cmdEnv, input.ExtraEnv...)
+}
+
+// SanitizeDaemonTargetKey replaces any rune not in [a-zA-Z0-9._-] with '_',
+// defaulting empty strings to "default".
+func SanitizeDaemonTargetKey(targetKey string) string {
+	trimmed := strings.TrimSpace(targetKey)
+	if trimmed == "" {
+		return "default"
+	}
+	var sb strings.Builder
+	for _, r := range trimmed {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteRune('_')
+		}
+	}
+	out := sb.String()
+	if out == "" {
+		return "default"
+	}
+	return out
+}
+
+// FormatTurnEnvFileContent formats the per-daemon turn environment file sourced by BASH_ENV.
+// It unsets BASH_ENV first so nested bash invocations do not re-source the file and clobber
+// local overrides, followed by exporting or unsetting AERIAL_TARGET_ID and AERIAL_VANADIS_CHUNK_ID.
+func FormatTurnEnvFileContent(targetID, vanadisChunkID string) string {
+	var sb strings.Builder
+	sb.WriteString("unset BASH_ENV\n")
+
+	normTarget := NormalizeEnvTargetID(targetID)
+	if normTarget != "" {
+		sb.WriteString("export AERIAL_TARGET_ID='")
+		sb.WriteString(strings.ReplaceAll(normTarget, "'", `'\''`))
+		sb.WriteString("'\n")
+	} else {
+		sb.WriteString("unset AERIAL_TARGET_ID\n")
+	}
+
+	cleanChunk := strings.TrimSpace(vanadisChunkID)
+	if cleanChunk != "" {
+		sb.WriteString("export AERIAL_VANADIS_CHUNK_ID='")
+		sb.WriteString(strings.ReplaceAll(cleanChunk, "'", `'\''`))
+		sb.WriteString("'\n")
+	} else {
+		sb.WriteString("unset AERIAL_VANADIS_CHUNK_ID\n")
+	}
+
+	return sb.String()
 }
 
 // ParseInitEvent extracts conversation ID from an NDJSON line containing {"event":"init"}.
