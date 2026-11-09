@@ -1,4 +1,4 @@
-h1:nmAdsXtpITF4Hnqyv37CaTNOY82iKdgzzd7nFv/Ds/U=
+h1:S0KNRSG5EkC+32OeevSh5Lt3gfjNOYMu66W95Ah7GBQ=
 20261001221347_baseline.sql h1:uwrTrII8CWvC/4E6FLZx5vGvYuO48AxqjCh+Wi/43kg=
 20261002155428_add_pr_registry.sql h1:tfYt/SDhTn/o/uTIcpHMD+XnpPELqiYySBkrwS+imJQ=
 20261002164500_add_river_queue.sql h1:TOtzV6uJrR9mibPzmVN8RRQ7fVAS95WmFLTvMQ9vETk=
@@ -24,3 +24,4 @@ h1:nmAdsXtpITF4Hnqyv37CaTNOY82iKdgzzd7nFv/Ds/U=
 20261031064337_add_event_triggers_persistent.sql h1:tKCr/o2ar50JJLEJSQyDdKZoOl9oLW/DRqpUrx+4I2U=
 20261107114200_add_vanadis_chunk_mode.sql h1:qydNROq46fBevSqCotYue8YydbK8MRnzvjDhBxW+bWA=
 20261107200500_add_turn_telemetry_columns.sql h1:ZqBgIutg99KQwIp+7EF5hHtIKuW7+Jibg9jTA91USIo=
+20261108192000_add_vanadis_chunk_stall_nudges.sql h1:yhQ6DQ4KkFFKeDjpol6ToQx6Mq/kU5juUEOgp37v51g=

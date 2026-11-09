@@ -102,6 +102,7 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 		StatusMessageID:  b.StatusMessageID,
 		MergedChunkIndex: c.ChunkIndex,
 		MergedChunkTitle: c.Title,
+		ChunkMode:        c.Mode,
 		NextChunkIndex:   -1,
 		BuildCompleted:   b.Status == "completed",
 	}
