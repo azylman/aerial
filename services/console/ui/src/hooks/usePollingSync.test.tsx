@@ -165,6 +165,37 @@ interface JoinRow {
   wantErrors: string[];
 }
 
+interface FreshRow {
+  name: string;
+  freshMs: number;
+  first: 'resolve' | 'reject';
+  waitMs: number;
+  wantFetches: number;
+}
+
+describe('syncResource freshness', () => {
+  beforeEach(() => vi.useFakeTimers({ toFake: ['Date'] }));
+  afterEach(() => vi.useRealTimers());
+
+  it.each<FreshRow>([
+    { name: 'a call inside freshMs after success reuses it', freshMs: 2000, first: 'resolve', waitMs: 1999, wantFetches: 1 },
+    { name: 'a call after freshMs fetches', freshMs: 2000, first: 'resolve', waitMs: 2000, wantFetches: 2 },
+    { name: 'a call inside freshMs after failure fetches', freshMs: 2000, first: 'reject', waitMs: 10, wantFetches: 2 },
+    { name: 'freshMs 0 always fetches', freshMs: 0, first: 'resolve', waitMs: 0, wantFetches: 2 },
+  ])('$name', async ({ freshMs, first, waitMs, wantFetches }) => {
+    const urls: string[] = [];
+    const fetch = (): Promise<string> => {
+      urls.push('/api/x');
+      return urls.length === 1 && first === 'reject' ? Promise.reject(new Error('HTTP 503')) : Promise.resolve('payload');
+    };
+    const poll = syncResource(fetch, () => undefined, () => undefined, freshMs);
+    await poll(new AbortController().signal);
+    vi.advanceTimersByTime(waitMs);
+    await poll(new AbortController().signal);
+    expect(urls).toHaveLength(wantFetches);
+  });
+});
+
 describe('syncResource request sharing', () => {
   it.each<JoinRow>([
     { name: 'concurrent callers join one request', callers: 3, preAborted: [], abort: [], settle: 'resolve', callAgain: false, wantFetches: 1, wantFirstAborted: false, wantPendingBeforeSettle: 3, wantData: ['payload'], wantErrors: [] },
