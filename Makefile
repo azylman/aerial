@@ -1,4 +1,4 @@
-.PHONY: all test lint tidy build help
+.PHONY: all test lint tidy build help console-ui
 .DEFAULT_GOAL := help
 
 SERVICES := services/eri services/haro mcp/discord-mcp mcp/kernel-mcp services/console services/coven services/vanadis services/synapse services/prospera pkg
@@ -16,6 +16,7 @@ test: ## Run unit tests across all Go microservices and Frontend
 		echo "=== Testing Permet HUD Frontend ==="; \
 		node --test services/console/*.test.js || exit 1; \
 	fi
+	@$(MAKE) --no-print-directory console-ui
 
 lint: ## Run golangci-lint across all Go microservices and Frontend
 	@for svc in $(SERVICES); do \
@@ -29,6 +30,18 @@ lint: ## Run golangci-lint across all Go microservices and Frontend
 	@if command -v node >/dev/null 2>&1 && [ -f "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js" ]; then \
 		echo "=== Linting Docsify Custom Plugin Syntax ==="; \
 		node --check services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js || exit 1; \
+	fi
+
+CONSOLE_UI := services/console/ui
+
+console-ui: ## Typecheck, coverage-test and build the React console UI (services/console/ui)
+	@if command -v npm >/dev/null 2>&1 && [ -f "$(CONSOLE_UI)/package.json" ]; then \
+		echo "=== Testing Console React UI ==="; \
+		cd $(CONSOLE_UI) && \
+		{ { [ -d node_modules ] && [ ! package-lock.json -nt node_modules/.package-lock.json ]; } || npm ci --no-audit --no-fund; } && \
+		npm run --silent typecheck && \
+		npm run --silent test:coverage && \
+		npm run --silent build || exit 1; \
 	fi
 
 tidy: ## Run go mod tidy across all Go microservices

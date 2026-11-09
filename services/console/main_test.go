@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
@@ -1055,6 +1056,67 @@ func TestConsole_CloseWarnAndDisconnect(t *testing.T) {
 	unzipped, readErr := io.ReadAll(gzReader)
 	if readErr != nil || string(unzipped) != `{"status":"ok"}` {
 		t.Errorf("unexpected gzip body %q (err=%v)", string(unzipped), readErr)
+	}
+}
+
+func TestSetupConsoleMux_StaticRouting(t *testing.T) {
+	reg, err := NewAssetRegistry(fstest.MapFS{
+		"index.html":               {Data: []byte(`<link href="style.css"><h1>vanilla</h1>`)},
+		"style.css":                {Data: []byte(`body{}`)},
+		"next/index.html":          {Data: []byte(`<div id="root"></div>`)},
+		"next/assets/index-Zz9.js": {Data: []byte(`export{}`)},
+	}, "abc123")
+	if err != nil {
+		t.Fatalf("NewAssetRegistry failed: %v", err)
+	}
+	ts := httptest.NewServer(SetupConsoleMux(ConsoleConfig{}, reg))
+	defer ts.Close()
+	client := ts.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	tests := []struct {
+		name           string
+		path           string
+		wantCode       int
+		wantLocation   string
+		wantCache      string
+		wantBodySubstr string
+	}{
+		{name: "console_next_redirects_to_slash", path: "/console/next", wantCode: http.StatusMovedPermanently, wantLocation: "/console/next/"},
+		{name: "root_next_redirects_to_slash", path: "/next", wantCode: http.StatusMovedPermanently, wantLocation: "/next/"},
+		{name: "redirect_preserves_query", path: "/console/next?tab=memory", wantCode: http.StatusMovedPermanently, wantLocation: "/console/next/?tab=memory"},
+		{name: "console_next_shell", path: "/console/next/", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},
+		{name: "root_next_deep_link_shell", path: "/next/schedules", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},
+		{name: "console_next_hashed_asset", path: "/console/next/assets/index-Zz9.js", wantCode: http.StatusOK, wantCache: "public, max-age=31536000, immutable", wantBodySubstr: `export{}`},
+		{name: "vanilla_console_index_unchanged", path: "/console/", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<link href="style.css?v=abc123">`},
+		{name: "vanilla_root_index_unchanged", path: "/", wantCode: http.StatusOK, wantBodySubstr: `<h1>vanilla</h1>`},
+		{name: "api_routes_still_win", path: "/console/health", wantCode: http.StatusOK, wantBodySubstr: "OK"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := client.Get(ts.URL + tc.path)
+			if err != nil {
+				t.Fatalf("GET %s failed: %v", tc.path, err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body failed: %v", err)
+			}
+			if resp.StatusCode != tc.wantCode {
+				t.Fatalf("GET %s status = %d, want %d", tc.path, resp.StatusCode, tc.wantCode)
+			}
+			if got := resp.Header.Get("Location"); got != tc.wantLocation {
+				t.Errorf("Location = %q, want %q", got, tc.wantLocation)
+			}
+			if tc.wantCache != "" && resp.Header.Get("Cache-Control") != tc.wantCache {
+				t.Errorf("Cache-Control = %q, want %q", resp.Header.Get("Cache-Control"), tc.wantCache)
+			}
+			if !strings.Contains(string(body), tc.wantBodySubstr) {
+				t.Errorf("body = %q, want substring %q", body, tc.wantBodySubstr)
+			}
+		})
 	}
 }
 

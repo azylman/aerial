@@ -284,6 +284,15 @@ jobs:
         run: |
           node --check services/console/static/app.js
 
+      - name: Console React UI Gates (typecheck, coverage, build)
+        if: needs.changes.outputs.console == 'true'
+        working-directory: services/console/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm run test:coverage
+          npm run build
+
       - name: Lint Docsify Custom Plugins
         if: needs.changes.outputs.docs == 'true'
         run: |

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 type errorFS struct{}
@@ -133,8 +134,31 @@ func TestZeroPersonalDataAndHardcodedIPs(t *testing.T) {
 	}
 }
 
+// staticWithNextFS overlays a built React console (as the Dockerfile copies ui/dist to
+// static/next) onto the real vanilla static directory.
+func staticWithNextFS(t *testing.T) fs.FS {
+	t.Helper()
+	fsys := fstest.MapFS{
+		"next/index.html":                {Data: []byte(`<div id="root"></div><script type="module" src="/console/next/assets/index-Ab12Cd34.js"></script>`)},
+		"next/assets/index-Ab12Cd34.js":  {Data: []byte(`console.log("next")`)},
+		"next/assets/index-Ef56Gh78.css": {Data: []byte(`:root{color-scheme:dark}`)},
+	}
+	entries, err := os.ReadDir("static")
+	if err != nil {
+		t.Fatalf("failed to read static dir: %v", err)
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join("static", e.Name()))
+		if err != nil {
+			t.Fatalf("failed to read static/%s: %v", e.Name(), err)
+		}
+		fsys[e.Name()] = &fstest.MapFile{Data: data}
+	}
+	return fsys
+}
+
 func TestAssetRegistry_ServeHTTP(t *testing.T) {
-	staticFS := os.DirFS("static")
+	staticFS := staticWithNextFS(t)
 
 	defaultReg, err := NewAssetRegistry(staticFS, "testcommit123")
 	if err != nil {
@@ -270,11 +294,96 @@ func TestAssetRegistry_ServeHTTP(t *testing.T) {
 			wantContentTypeSubstr: "icon",
 		},
 		{
+			name:                  "next_index_served_verbatim_no_cache",
+			method:                "GET",
+			path:                  "/next/",
+			wantCode:              http.StatusOK,
+			wantContentTypeSubstr: "text/html",
+			wantCacheSubstr:       "no-cache",
+			wantBodySubstr:        []string{`src="/console/next/assets/index-Ab12Cd34.js"></script>`},
+		},
+		{
+			name:            "next_index_html_explicit_console_prefix",
+			method:          "GET",
+			path:            "/console/next/index.html",
+			wantCode:        http.StatusOK,
+			wantCacheSubstr: "no-cache",
+			wantBodySubstr:  []string{`<div id="root"></div>`},
+		},
+		{
+			name:                  "next_hashed_js_immutable",
+			method:                "GET",
+			path:                  "/console/next/assets/index-Ab12Cd34.js",
+			wantCode:              http.StatusOK,
+			wantContentTypeSubstr: "javascript",
+			wantCacheSubstr:       "public, max-age=31536000, immutable",
+			wantBodySubstr:        []string{`console.log("next")`},
+		},
+		{
+			name:                  "next_hashed_css_immutable",
+			method:                "GET",
+			path:                  "/next/assets/index-Ef56Gh78.css",
+			wantCode:              http.StatusOK,
+			wantContentTypeSubstr: "text/css",
+			wantCacheSubstr:       "public, max-age=31536000, immutable",
+		},
+		{
+			name:          "next_hashed_asset_304",
+			method:        "GET",
+			path:          "/next/assets/index-Ab12Cd34.js",
+			matchETagPath: "/next/assets/index-Ab12Cd34.js",
+			wantCode:      http.StatusNotModified,
+			wantEmptyBody: true,
+		},
+		{
+			name:                  "next_spa_fallback_deep_link",
+			method:                "GET",
+			path:                  "/console/next/memory",
+			wantCode:              http.StatusOK,
+			wantContentTypeSubstr: "text/html",
+			wantCacheSubstr:       "no-cache",
+			wantBodySubstr:        []string{`<div id="root"></div>`},
+		},
+		{
+			name:            "next_spa_fallback_ignores_version_param",
+			method:          "GET",
+			path:            "/next/builds/abc?v=deadbeef",
+			wantCode:        http.StatusOK,
+			wantCacheSubstr: "no-cache",
+			wantBodySubstr:  []string{`<div id="root"></div>`},
+		},
+		{
+			name:     "next_missing_file_with_extension_404",
+			method:   "GET",
+			path:     "/next/missing.js",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name:     "next_missing_hashed_asset_404_not_html",
+			method:   "GET",
+			path:     "/console/next/assets/index-Stale999",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name:     "spa_fallback_scoped_to_next",
+			method:   "GET",
+			path:     "/memory",
+			wantCode: http.StatusNotFound,
+		},
+		{
 			name:         "fallback_on_empty_dir_fs",
 			emptyFS:      true,
 			versionToken: "dev",
 			method:       "GET",
 			path:         "/",
+			wantCode:     http.StatusNotFound,
+		},
+		{
+			name:         "next_fallback_404_when_ui_not_built",
+			emptyFS:      true,
+			versionToken: "dev",
+			method:       "GET",
+			path:         "/next/telemetry",
 			wantCode:     http.StatusNotFound,
 		},
 	}

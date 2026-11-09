@@ -461,6 +461,27 @@ run_node_test() {
     fi
 }
 
+# React console UI (services/console/ui): install when node_modules is missing or stale, then
+# typecheck, run Vitest with its 95% coverage thresholds, and production-build with Vite.
+run_console_ui() {
+    ui_dir="$REPO_ROOT/services/console/ui"
+    [ -f "$ui_dir/package.json" ] || return 0
+    if ! has_cmd npm; then
+        echo "⚠️  [Aerial Verify] npm not found; skipping console UI gates (CI lint job enforces them)." >&2
+        return 0
+    fi
+    echo "   [console-ui] typecheck, test:coverage and build in services/console/ui..."
+    (
+        cd "$ui_dir"
+        if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+            npm ci --no-audit --no-fund
+        fi
+        npm run --silent typecheck
+        npm run --silent test:coverage
+        npm run --silent build
+    )
+}
+
 run_json_syntax() {
     file="$1"
     if [ -f "$file" ]; then
@@ -646,6 +667,11 @@ if [ "$MODE" = "staged" ]; then
         fi
     fi
 
+    # Check React console UI (typecheck, coverage-gated tests, production build)
+    if echo "$CHANGED_FILES" | grep -q -E "^services/console/ui/"; then
+        run_console_ui
+    fi
+
     # Check docs service JS syntax
     if echo "$CHANGED_FILES" | grep -q -E "^(services/)?docs-service/"; then
         run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
@@ -702,6 +728,7 @@ run_node_syntax "services/console/static/app.js"
 run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
 run_node_syntax "services/homepage/lib/merge.js"
 run_node_syntax "services/homepage/prepare-config.js"
+run_console_ui
 for jf in services/grafana/dashboards/*.json; do
     run_json_syntax "$jf"
 done

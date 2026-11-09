@@ -17,6 +17,24 @@ updates:
         patterns:
           - "*"
 
+  - package-ecosystem: "npm"
+    directory: "/services/console/ui"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    versioning-strategy: increase
+    groups:
+      console-ui-npm:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      console-ui-npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
   - package-ecosystem: "gomod"
     directories:
       - "/pkg"
