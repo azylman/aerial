@@ -1,5 +1,6 @@
-/* Diagnostic drawer chrome (ported from static/style.css). The host only mounts while open, so
-   the vanilla `.active` end state is the resting style; enter/exit run as view transitions. */
+/* Diagnostic drawer chrome (ported from static/style.css). Like vanilla, the overlay and panel
+   stay mounted and `.active` toggles open/closed; the transitions only touch transform, opacity
+   and visibility, so they run on the compositor. */
 .drawer-overlay {
     position: fixed;
     top: 0;
@@ -35,6 +36,7 @@
     backdrop-filter: blur(20px);
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.75), 0 0 40px rgba(0, 242, 254, 0.25);
     z-index: 201;
+    transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease, visibility 0.3s ease;
     display: flex;
     flex-direction: column;
     opacity: 0;
@@ -103,44 +105,9 @@
     line-height: 1.6;
 }
 
-/* View-transition enter/exit: same curve and distance as the vanilla .active transition. */
-::view-transition-group(.drawer-slide),
-::view-transition-group(.drawer-fade) {
-    animation-duration: 0.35s;
-}
-
-::view-transition-new(.drawer-slide):only-child {
-    animation: drawer-slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-::view-transition-old(.drawer-slide):only-child {
-    animation: drawer-slide-out 0.3s ease both;
-}
-
-::view-transition-new(.drawer-fade):only-child {
-    animation: drawer-fade 0.3s ease both;
-}
-
-::view-transition-old(.drawer-fade):only-child {
-    animation: drawer-fade 0.3s ease both reverse;
-}
-
-@keyframes drawer-slide-in {
-    from { opacity: 0; transform: translateY(20px); }
-}
-
-@keyframes drawer-slide-out {
-    to { opacity: 0; transform: translateY(20px); }
-}
-
-@keyframes drawer-fade {
-    from { opacity: 0; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-    ::view-transition-group(*),
-    ::view-transition-old(*),
-    ::view-transition-new(*) {
-        animation: none !important;
+    .drawer-overlay,
+    .diagnostic-drawer {
+        transition: none;
     }
 }

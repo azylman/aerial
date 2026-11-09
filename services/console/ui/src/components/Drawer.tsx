@@ -1,13 +1,12 @@
 import {
   type ComponentType,
-  startTransition,
   Suspense,
+  type TransitionEvent,
   useEffect,
   useId,
   useLayoutEffect,
   useRef,
   useState,
-  ViewTransition,
 } from 'react';
 import type { BuildDetailAPIResponse } from '../api/types';
 import { buildDrawerLabel } from '../store/selectors';
@@ -55,19 +54,44 @@ function DrawerBody({ drawer, panels }: { readonly drawer: OpenDrawer; readonly 
   }
 }
 
-function DrawerPanel({ drawer, panels }: { readonly drawer: OpenDrawer; readonly panels: DrawerPanels }) {
+const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
+const prefersReducedMotion = (): boolean => window.matchMedia?.(REDUCED_MOTION).matches === true;
+
+function DrawerPanel({
+  drawer,
+  open,
+  panels,
+  onClosed,
+}: {
+  readonly drawer: OpenDrawer | null;
+  readonly open: boolean;
+  readonly panels: DrawerPanels;
+  readonly onClosed: () => void;
+}) {
   const titleId = useId();
   const panelRef = useRef<HTMLElement>(null);
+  const triggerRef = useRef<HTMLElement | null>(null);
 
   // Focus moves into the dialog on open and returns to whatever opened it on close, without
-  // scrolling the page: closing leaves the page where the user left it.
+  // scrolling the page: closing leaves the page where the user left it. The restore runs as a
+  // layout effect, not a cleanup: cleanups run before React's own post-commit focus restore,
+  // which would hand focus straight back to the still-mounted panel.
   useLayoutEffect(() => {
-    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    panelRef.current?.focus();
-    return () => trigger?.focus({ preventScroll: true });
-  }, []);
+    if (open) {
+      // StrictMode re-runs this on mount with the panel already focused; keep the real trigger.
+      const active = document.activeElement;
+      if (active !== panelRef.current) triggerRef.current = active instanceof HTMLElement ? active : null;
+      panelRef.current?.focus();
+      return;
+    }
+    // The shell stays mounted, so let go of focus even when there is no trigger to return to.
+    panelRef.current?.blur();
+    triggerRef.current?.focus({ preventScroll: true });
+    triggerRef.current = null;
+  }, [open]);
 
   useEffect(() => {
+    if (!open) return;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
@@ -75,63 +99,77 @@ function DrawerPanel({ drawer, panels }: { readonly drawer: OpenDrawer; readonly
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [open]);
+
+  // The close transition has finished (or was cut short) once the panel's own opacity settles.
+  // React only gives transitionend a TransitionEvent interface, so read the native property name.
+  const onTransitionDone = (event: TransitionEvent<HTMLElement>): void => {
+    if (event.target === event.currentTarget && event.nativeEvent.propertyName === 'opacity') onClosed();
+  };
 
   return (
     <aside
       ref={panelRef}
-      className="diagnostic-drawer active"
+      className={open ? 'diagnostic-drawer active' : 'diagnostic-drawer'}
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
+      aria-hidden={open ? undefined : true}
       tabIndex={-1}
+      onTransitionEnd={onTransitionDone}
+      onTransitionCancel={onTransitionDone}
     >
       <div className="drawer-header">
         <div className="drawer-title">
           <span className="drawer-icon">
             <Icon name="bolt" size={16} />
           </span>
-          <DrawerHeading drawer={drawer} id={titleId} />
+          {drawer ? <DrawerHeading drawer={drawer} id={titleId} /> : <h3 id={titleId} />}
         </div>
         <button type="button" className="drawer-close" aria-label="Close drawer" onClick={closeDrawer}>
           <Icon name="x" size={22} />
         </button>
       </div>
       <div className="drawer-body">
-        <Suspense fallback={null}>
-          <DrawerBody drawer={drawer} panels={panels} />
-        </Suspense>
+        {drawer && (
+          <Suspense fallback={null}>
+            <DrawerBody drawer={drawer} panels={panels} />
+          </Suspense>
+        )}
       </div>
     </aside>
   );
 }
 
+const selectDrawer = (s: ConsoleState): DrawerState => s.drawer;
+
 /**
- * The single drawer host. Any code opens or closes a drawer through the store's drawer slice;
- * the host mirrors that slice into local state inside startTransition, which is what lets
- * <ViewTransition> run the enter/exit animation on the compositor instead of animating layout.
- * Closed drawers are unmounted, so they cost nothing while hidden.
+ * The single drawer host, built like the vanilla drawer: the overlay and panel shell stay mounted
+ * and the store's drawer slice toggles their `.active` class in the same commit, so open and close
+ * are a class flip plus a compositor-only CSS transition. Opening renders the new target's body at
+ * once; closing keeps the last body painted until the panel's fade ends, then drops it, so a
+ * closed drawer renders no body and costs nothing while hidden.
  */
 export function Drawer({ panels }: { readonly panels: DrawerPanels }) {
-  const [shown, setShown] = useState<DrawerState>(() => useConsoleStore.getState().drawer);
+  const drawer = useConsoleStore(selectDrawer);
+  const [prev, setPrev] = useState(drawer);
+  const [closing, setClosing] = useState<OpenDrawer | null>(null);
+  if (drawer !== prev) {
+    setPrev(drawer);
+    // Reopening while the close transition runs drops the outgoing body for the new one.
+    setClosing(drawer.kind === 'closed' && prev.kind !== 'closed' ? prev : null);
+  }
 
-  useEffect(() => {
-    const show = (next: DrawerState): void => startTransition(() => setShown(next));
-    show(useConsoleStore.getState().drawer);
-    return useConsoleStore.subscribe((state, prev) => {
-      if (state.drawer !== prev.drawer) show(state.drawer);
-    });
-  }, []);
+  // Reduced motion turns the transition off, so no transitionend would ever arrive.
+  useLayoutEffect(() => {
+    if (closing && prefersReducedMotion()) setClosing(null);
+  }, [closing]);
 
-  if (shown.kind === 'closed') return null;
+  const open = drawer.kind !== 'closed';
   return (
     <>
-      <ViewTransition enter="drawer-fade" exit="drawer-fade" default="none">
-        <div className="drawer-overlay active" aria-hidden="true" onClick={closeDrawer} />
-      </ViewTransition>
-      <ViewTransition enter="drawer-slide" exit="drawer-slide" default="none">
-        <DrawerPanel drawer={shown} panels={panels} />
-      </ViewTransition>
+      <div className={open ? 'drawer-overlay active' : 'drawer-overlay'} aria-hidden="true" onClick={closeDrawer} />
+      <DrawerPanel drawer={open ? drawer : closing} open={open} panels={panels} onClosed={() => setClosing(null)} />
     </>
   );
 }
