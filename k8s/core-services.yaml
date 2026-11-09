@@ -777,6 +777,7 @@ spec:
             - serve
             - --host=0.0.0.0
             - --port=8080
+            - --base-path=/agentsview
             - --public-url=http://localhost
             - --write-timeout=2m
           env:
