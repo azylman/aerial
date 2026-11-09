@@ -175,6 +175,8 @@ spec:
               name: share
             - mountPath: /data
               name: brain-data
+            - mountPath: /data/ssh
+              name: ssh-state
             - mountPath: /local/antigravity-oauth-token
               name: oauth-token
               readOnly: true
@@ -316,6 +318,8 @@ spec:
           volumeMounts:
             - mountPath: /data
               name: brain-data
+            - mountPath: /data/ssh
+              name: ssh-state
             - mountPath: /share
               name: share
               readOnly: true
@@ -356,6 +360,10 @@ spec:
                 path: id_ed25519
             optional: true
             secretName: eri-ssh-key
+        - emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+          name: ssh-state
 ---
 apiVersion: v1
 kind: Service
