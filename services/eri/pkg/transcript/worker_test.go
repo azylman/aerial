@@ -1109,6 +1109,16 @@ func TestSyncTranscripts_EngineAndToolKinds(t *testing.T) {
 			wantEngine:   "agy",
 			wantKinds:    []string{"run_command=|"},
 		},
+		{
+			name:         "migrated purge failure is logged and the sweep completes",
+			brainFiles:   []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}},
+			priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true},
+			priorSteps:   []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}},
+			failMethod:   "PurgeMigratedLocalTranscripts",
+			session:      "sess-legacy",
+			wantEngine:   "agy",
+			wantKinds:    []string{"run_command=shell|"},
+		},
 	}
 
 	for _, tc := range tests {

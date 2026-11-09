@@ -178,6 +178,7 @@ func TestRoutedTranscriptStore_Unavailable(t *testing.T) {
 				"BatchInsertTranscriptSteps": s.BatchInsertTranscriptSteps(ctx, []TranscriptStep{{SessionID: "s"}}),
 				"BackfillToolKinds":          c1(s.BackfillToolKinds(ctx, testKindMapper)),
 				"BackfillSessionEngines":     c1(s.BackfillSessionEngines(ctx, testEngineInfer)),
+				"PurgeMigrated":              c1(s.PurgeMigratedLocalTranscripts(ctx)),
 				"SearchSessionSummaries":     c1(s.SearchSessionSummaries(ctx, "", nil, "q", 1, 0)),
 				"SearchTranscriptSteps":      c1(s.SearchTranscriptSteps(ctx, "", "q", "", "", 1)),
 				"GetTranscriptStepRange":     c1(s.GetTranscriptStepRange(ctx, "", "s", 0, 1)),
@@ -457,6 +458,99 @@ func TestSharedTranscripts_BackfillSessionEnginesScopedToStack(t *testing.T) {
 				t.Errorf("engines = %v, want %v", got, tc.wantEngines)
 			}
 		})
+	}
+}
+
+// TestSharedTranscripts_PurgeMigratedLocal seeds a primary DB holding stack_a rows written before the
+// index moved to shared_tx, then purges: only stack_a sessions already in the shared index are deleted
+// (with their steps), and the shared index itself is never modified.
+func TestSharedTranscripts_PurgeMigratedLocal(t *testing.T) {
+	const sharedDSN = "postgres://aerial@pg.internal:5432/shared_tx?sslmode=disable"
+	allLocal := map[string]string{"stack_a/s1": "2", "stack_a/s2": "2", "stack_a/s3": "2", "stack_a/s4": "2", "stack_z/s1": "2"}
+	survivors := map[string]string{"stack_a/s4": "2", "stack_z/s1": "2"}
+	tests := []struct {
+		name        string
+		transcripts config.TranscriptsConfig
+		batchSize   int
+		budget      time.Duration
+		breakLocal  string
+		breakShared string
+		wantDeleted int64
+		wantErr     string
+		wantLocal   map[string]string
+	}{
+		{name: "deletes only sessions present in the shared index", transcripts: config.TranscriptsConfig{Database: "shared_tx"}, batchSize: 500, budget: time.Minute, wantDeleted: 3, wantLocal: survivors},
+		{name: "small batches page through every local session", transcripts: config.TranscriptsConfig{Database: "shared_tx"}, batchSize: 1, budget: time.Minute, wantDeleted: 3, wantLocal: survivors},
+		{name: "index in primary db is a no-op", batchSize: 500, budget: time.Minute, wantLocal: allLocal},
+		{name: "zero budget deletes nothing", transcripts: config.TranscriptsConfig{Database: "shared_tx"}, batchSize: 500, wantLocal: allLocal},
+		{name: "non-positive batch size rejected", transcripts: config.TranscriptsConfig{Database: "shared_tx"}, budget: time.Minute, wantErr: "batch size must be positive"},
+		{name: "unopenable shared index surfaces", transcripts: config.TranscriptsConfig{Database: "missing"}, batchSize: 500, budget: time.Minute, wantErr: "open shared transcript database"},
+		{name: "failing delete returns wrapped error", transcripts: config.TranscriptsConfig{Database: "shared_tx"}, batchSize: 500, budget: time.Minute, breakLocal: "DROP TABLE transcript_steps", wantErr: "purge migrated local transcripts: delete transcript steps"},
+		{name: "failing local page query returns wrapped error", transcripts: config.TranscriptsConfig{Database: "shared_tx"}, batchSize: 500, budget: time.Minute, breakLocal: "ALTER TABLE session_summaries RENAME TO gone", wantErr: "purge migrated local transcripts: query session ids"},
+		{name: "failing shared lookup returns wrapped error", transcripts: config.TranscriptsConfig{Database: "shared_tx"}, batchSize: 500, budget: time.Minute, breakShared: "ALTER TABLE session_summaries RENAME TO gone", wantErr: "purge migrated local transcripts: query existing session ids"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			primary, shared := initTestSQLiteDB(t), initTestSQLiteDB(t)
+			seedTranscriptSessions(t, primary, "stack_a", "s1", "s2", "s3", "s4")
+			seedTranscriptSessions(t, primary, "stack_z", "s1")
+			seedTranscriptSessions(t, shared, "stack_a", "s1", "s2", "s3")
+			seedTranscriptSessions(t, shared, "stack_z", "s4")
+			sharedBefore := readStackKeyed(t, shared, stepCountsQuery)
+			for database, stmt := range map[*sql.DB]string{primary: tc.breakLocal, shared: tc.breakShared} {
+				if stmt == "" {
+					continue
+				}
+				if _, err := database.Exec(stmt); err != nil {
+					t.Fatalf("break fixture with %q: %v", stmt, err)
+				}
+			}
+			opener := &testOpener{pools: map[string]*sql.DB{sharedDSN: shared}}
+			cfg := config.NewFromData(&config.ConfigData{DatabaseURL: testDSNStackA, Transcripts: tc.transcripts})
+			store := NewRoutedTranscriptStore(cfg, primary, opener.open).(*routedTranscriptStore)
+
+			deleted, err := store.purgeMigratedLocalTranscripts(context.Background(), tc.batchSize, tc.budget)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil || deleted != tc.wantDeleted {
+				t.Fatalf("deleted=%d err=%v, want %d", deleted, err, tc.wantDeleted)
+			}
+			if got := readStackKeyed(t, primary, stepCountsQuery); fmt.Sprint(got) != fmt.Sprint(tc.wantLocal) {
+				t.Errorf("local sessions = %v, want %v", got, tc.wantLocal)
+			}
+			if got := readStackKeyed(t, primary, "SELECT stack, session_id, COUNT(*) FROM transcript_steps GROUP BY stack, session_id"); fmt.Sprint(got) != fmt.Sprint(tc.wantLocal) {
+				t.Errorf("local steps = %v, want %v", got, tc.wantLocal)
+			}
+			if got := readStackKeyed(t, shared, stepCountsQuery); fmt.Sprint(got) != fmt.Sprint(sharedBefore) {
+				t.Errorf("shared index changed: %v, want %v", got, sharedBefore)
+			}
+		})
+	}
+}
+
+// stepCountsQuery maps each session summary to its stored step count.
+const stepCountsQuery = "SELECT s.stack, s.session_id, COUNT(t.step_index) FROM session_summaries s LEFT JOIN transcript_steps t ON t.stack = s.stack AND t.session_id = s.session_id GROUP BY s.stack, s.session_id"
+
+// seedTranscriptSessions writes one summary and two steps per session ID under stack into database.
+func seedTranscriptSessions(t *testing.T, database *sql.DB, stack string, sessionIDs ...string) {
+	t.Helper()
+	store := NewSQLTranscriptStore(database, stack)
+	base := time.Date(2026, 11, 1, 13, 0, 0, 0, time.UTC)
+	for _, id := range sessionIDs {
+		if err := store.UpsertSessionSummary(context.Background(), SessionSummary{SessionID: id, Engine: "agy", LastMtime: base}); err != nil {
+			t.Fatalf("seed summary %s/%s: %v", stack, id, err)
+		}
+		steps := []TranscriptStep{
+			{SessionID: id, StepIndex: 0, StepType: "user", Content: "hello", CreatedAt: base},
+			{SessionID: id, StepIndex: 1, StepType: "tool_call", ToolName: "Bash", Content: "ls", CreatedAt: base},
+		}
+		if err := store.BatchInsertTranscriptSteps(context.Background(), steps); err != nil {
+			t.Fatalf("seed steps %s/%s: %v", stack, id, err)
+		}
 	}
 }
 

@@ -146,6 +146,7 @@ func SyncTranscripts(
 
 	backfillToolKinds(ctx, store, opts.MCPServers)
 	backfillSessionEngines(ctx, store)
+	purgeMigratedLocalTranscripts(ctx, store)
 	stats.Duration = time.Since(start)
 	return stats, nil
 }
@@ -222,6 +223,19 @@ func backfillSessionEngines(ctx context.Context, store db.TranscriptStore) {
 	}
 	if updated > 0 {
 		log.Printf("[Transcript] Backfilled engine on %d sessions", updated)
+	}
+}
+
+// purgeMigratedLocalTranscripts reclaims transcript rows stranded in the stack's primary DB after its
+// index moved to a shared database; failures are logged and never fail the sweep.
+func purgeMigratedLocalTranscripts(ctx context.Context, store db.TranscriptStore) {
+	purged, err := store.PurgeMigratedLocalTranscripts(ctx)
+	if err != nil {
+		log.Printf("[Transcript] PurgeMigratedLocalTranscripts error: %v", err)
+		return
+	}
+	if purged > 0 {
+		log.Printf("[Transcript] Purged %d migrated local transcript sessions", purged)
 	}
 }
 

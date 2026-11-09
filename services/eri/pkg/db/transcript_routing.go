@@ -73,33 +73,40 @@ func NewRoutedTranscriptStore(cfg *config.Config, primary *sql.DB, open func(str
 }
 
 func (r *routedTranscriptStore) resolve() (*SQLTranscriptStore, error) {
+	index, _, err := r.resolveIndex()
+	return index, err
+}
+
+// resolveIndex returns the store for the live transcript index plus, when that index lives outside
+// the primary DB, a store over the same stack's rows still sitting in the primary DB (nil otherwise).
+func (r *routedTranscriptStore) resolveIndex() (index, local *SQLTranscriptStore, err error) {
 	if r.cfg == nil {
-		return nil, fmt.Errorf("transcripts: config cannot be nil")
+		return nil, nil, fmt.Errorf("transcripts: config cannot be nil")
 	}
 	cur := r.cfg.Current()
 	if cur == nil {
-		return nil, fmt.Errorf("transcripts: config snapshot is nil")
+		return nil, nil, fmt.Errorf("transcripts: config snapshot is nil")
 	}
 	target, err := ResolveTranscriptTarget(cur.DatabaseURL, cur.Transcripts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if target.DSN == strings.TrimSpace(cur.DatabaseURL) {
-		return NewSQLTranscriptStore(r.primary, target.Stack), nil
+		return NewSQLTranscriptStore(r.primary, target.Stack), nil, nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	pool, ok := r.pools[target.DSN]
 	if !ok {
 		if r.open == nil {
-			return nil, fmt.Errorf("transcripts: no opener configured for shared transcript database")
+			return nil, nil, fmt.Errorf("transcripts: no opener configured for shared transcript database")
 		}
 		if pool, err = r.open(target.DSN); err != nil {
-			return nil, fmt.Errorf("transcripts: open shared transcript database: %w", err)
+			return nil, nil, fmt.Errorf("transcripts: open shared transcript database: %w", err)
 		}
 		r.pools[target.DSN] = pool
 	}
-	return NewSQLTranscriptStore(pool, target.Stack), nil
+	return NewSQLTranscriptStore(pool, target.Stack), NewSQLTranscriptStore(r.primary, target.Stack), nil
 }
 
 // Close releases every lazily opened shared pool; the primary pool belongs to the caller.
@@ -160,6 +167,56 @@ func (r *routedTranscriptStore) BackfillSessionEngines(ctx context.Context, infe
 		return 0, err
 	}
 	return s.BackfillSessionEngines(ctx, infer)
+}
+
+const (
+	// migratedPurgeBatchSize bounds the local session IDs checked and deleted per page.
+	migratedPurgeBatchSize = 500
+	// migratedPurgeBudget caps the wall time one purge call spends paging local sessions.
+	migratedPurgeBudget = 20 * time.Second
+)
+
+// PurgeMigratedLocalTranscripts reclaims this stack's transcript rows stranded in its primary DB after
+// transcripts.database moved the index elsewhere, deleting only sessions the shared index already holds.
+func (r *routedTranscriptStore) PurgeMigratedLocalTranscripts(ctx context.Context) (int64, error) {
+	return r.purgeMigratedLocalTranscripts(ctx, migratedPurgeBatchSize, migratedPurgeBudget)
+}
+
+func (r *routedTranscriptStore) purgeMigratedLocalTranscripts(ctx context.Context, batchSize int, budget time.Duration) (deleted int64, err error) {
+	start := time.Now()
+	defer recordTranscriptQuery("purge_migrated_local_transcripts", start, &err)
+	shared, local, err := r.resolveIndex()
+	if err != nil {
+		return 0, err
+	}
+	if local == nil {
+		return shared.PurgeMigratedLocalTranscripts(ctx)
+	}
+	if batchSize <= 0 {
+		return 0, fmt.Errorf("migrated transcript purge batch size must be positive")
+	}
+	deadline := start.Add(budget)
+	cursor := ""
+	for time.Now().Before(deadline) {
+		ids, err := local.sessionIDsAfter(ctx, cursor, batchSize)
+		if err != nil {
+			return deleted, fmt.Errorf("purge migrated local transcripts: %w", err)
+		}
+		if len(ids) == 0 {
+			return deleted, nil
+		}
+		cursor = ids[len(ids)-1]
+		migrated, err := shared.existingSessionIDs(ctx, ids)
+		if err != nil {
+			return deleted, fmt.Errorf("purge migrated local transcripts: %w", err)
+		}
+		n, err := local.deleteSessions(ctx, migrated)
+		if err != nil {
+			return deleted, fmt.Errorf("purge migrated local transcripts: %w", err)
+		}
+		deleted += n
+	}
+	return deleted, nil
 }
 
 func (r *routedTranscriptStore) SearchSessionSummaries(ctx context.Context, stack string, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error) {

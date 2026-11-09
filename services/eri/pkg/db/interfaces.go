@@ -133,6 +133,10 @@ type TranscriptStore interface {
 	BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error
 	BackfillToolKinds(ctx context.Context, mapper func(toolName string) string) (int64, error)
 	BackfillSessionEngines(ctx context.Context, infer func(toolNames []string) string) (int64, error)
+	// PurgeMigratedLocalTranscripts deletes this stack's transcript rows left in its own primary DB
+	// after the index moved to another database, but only sessions already present in that index.
+	// It returns the number of local sessions deleted and is a no-op when the index is the primary DB.
+	PurgeMigratedLocalTranscripts(ctx context.Context) (int64, error)
 	SearchSessionSummaries(ctx context.Context, stack string, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error)
 	SearchTranscriptSteps(ctx context.Context, stack, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]TranscriptStep, error)
 	GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) ([]TranscriptStep, error)
