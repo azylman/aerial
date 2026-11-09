@@ -10,7 +10,7 @@ import type { BrowserContextOptions } from '@playwright/test';
 export type ViewId = 'telemetry' | 'tasks' | 'schedules' | 'memory' | 'builds';
 
 /** Views (and their drawers) the React UI does not ship yet; rows needing them are skipped. */
-export const PENDING_VIEWS: readonly ViewId[] = ['memory', 'builds'];
+export const PENDING_VIEWS: readonly ViewId[] = ['builds'];
 
 export interface Viewport {
   readonly name: string;
@@ -125,6 +125,10 @@ export const MASKED_SELECTORS: readonly string[] = [
   '.run-status-chip',
   '.run-duration-badge',
   '.search-clear-btn',
+  // Memory: the fact card gauge (⚡ Nx), age (⏱ Nd AGO) and copy button (📋 COPY).
+  '.fact-importance-gauge',
+  '.fact-footer > span:first-child',
+  '.fact-copy-btn',
 ];
 
 /**
@@ -133,6 +137,12 @@ export const MASKED_SELECTORS: readonly string[] = [
  * cannot shift the content after the badge), and drops UA focus rings, whose colours follow `color-scheme` (the React console
  * declares `dark` per the Task #4 polish; the vanilla page is light-scheme), so a keyboard-focused
  * control would otherwise differ by design.
+ *
+ * The memory fact-card boxes get a box shorter than their natural line box, so stabilizing can only
+ * shrink a card, never grow it. The archive is long and React mounts only the cards near the
+ * viewport: a page scrolled to its end stays pinned to the bottom edge when cards shrink (in both
+ * UIs), but growth would push the vanilla page's off-screen cards down while React's unmounted rows
+ * keep their measured size.
  */
 export const STABILIZE_CSS = `
 .scanline { display: none !important; }
@@ -161,6 +171,11 @@ export const STABILIZE_CSS = `
 .search-clear-btn {
   display: inline-flex !important; width: 24px !important; height: 24px !important; padding: 0 !important;
   overflow: hidden !important;
+}
+.fact-importance-gauge, .fact-footer > span:first-child, .fact-copy-btn {
+  display: inline-flex !important; flex: none !important; width: 8em !important; max-width: none !important;
+  height: 1.5em !important; padding-top: 0 !important; padding-bottom: 0 !important; box-sizing: border-box !important;
+  align-items: center !important; white-space: nowrap !important; overflow: hidden !important;
 }
 `;
 
@@ -289,6 +304,56 @@ const SCHEDULES_DEFAULT_TEXTS = [
   'SHOWING 40 / 40 ACTIVE ROUTINES',
   'Morning standup digest 1',
 ];
+
+/**
+ * facts.json: 150 facts, 50 reinforced (2-12x) and 100 base, mean 2.79x. In importance order the
+ * first card is NODE #1099 (12x, "... Vanadis queue (#100)"), the first base card NODE #1118 and the
+ * last card NODE #1019 ("... Vanadis queue (#20)"). Counts compare the reported totals, never
+ * rendered cards: the React archive mounts only the cards near the viewport.
+ */
+const MEMORY_SEARCH = "SEARCH FACTS OR NODE IDS (PRESS '/' TO FOCUS)...";
+const MEMORY_HEADINGS = [
+  'TOTAL MEMORY NODES',
+  '150',
+  '50 REINFORCED',
+  'PERMET SYNAPSE STORE',
+  'OPTIMAL',
+  'SYNCED 12:00:00 PM',
+  'AVG REINFORCEMENTS',
+  '2.79x',
+  'VECTOR EMBEDDING MODEL',
+];
+// Rows with steps end on one deterministic offset. A pill click can leave the vanilla page
+// anywhere (its grid re-renders under the pointer and Playwright scrolls to retry the click), so
+// each row presses End, clicks the cards of the last row it shows, last card first, and then
+// re-selects the active tab, which Playwright scrolls into view from below at the same place in
+// both identical headers. The first click waits until the card exists, is visible and has stopped
+// moving: React mounts it only once its window reaches the end, so this also proves the window
+// follows the scroll and drops nothing. The two further clicks give the vanilla page (150 live
+// cards, slow frames) time to run out an End scroll animation that can start after the first
+// click already found its card, which would otherwise carry on past the tab click.
+const settleMemory = (lastRow: readonly [string, string, string]): readonly Step[] => [
+  { kind: 'press', key: 'End' },
+  { kind: 'openDrawer', text: lastRow[2] },
+  { kind: 'openDrawer', text: lastRow[0] },
+  { kind: 'openDrawer', text: lastRow[1] },
+  { kind: 'clickTab', tab: 'MEMORY ARCHIVE' },
+];
+/** The last row of each list (three columns on desktop; the last three cards on mobile). */
+const LAST_ROW_ALL = ['NODE #1128', 'NODE #1080', 'NODE #1019'] as const;
+const LAST_ROW_REINFORCED = ['NODE #1102', 'NODE #1057', 'NODE #1069'] as const;
+const FIRST_FACT = 'Builds ship through the Vanadis queue (#100)';
+
+const memoryExpect = (texts: readonly string[], activePill: string): Expectation => ({
+  hash: '#memory',
+  activeTab: 'MEMORY ARCHIVE',
+  badges: BADGES_NO_STATUS,
+  texts: [...MEMORY_HEADINGS, ...texts],
+  counts: [
+    { selector: '#memory-view .cat-pill', count: 3 },
+    { selector: `#memory-view .cat-pill.active:has-text("${activePill}")`, count: 1 },
+  ],
+});
 
 export const PARITY_ROWS: readonly ParityRow[] = [
   {
@@ -496,6 +561,87 @@ export const PARITY_ROWS: readonly ParityRow[] = [
       ...settleScroll('run-050'),
     ],
     expect: schedulesExpect(SCHEDULES_DEFAULT_TEXTS, scheduleCounts(28, 12, 50, 0)),
+    region: 'viewport',
+  },
+  {
+    name: 'memory: default view shows metrics and the most reinforced facts first',
+    start: '#memory',
+    requires: ['memory'],
+    steps: [],
+    expect: memoryExpect(['SHOWING 150 / 150 NODES', 'NODE #1099', FIRST_FACT, 'NODE #1027'], 'ALL'),
+    region: 'viewport',
+  },
+  {
+    name: 'memory: reinforced pill',
+    start: '#memory',
+    requires: ['memory'],
+    steps: [{ kind: 'pill', label: 'REINFORCED' }, ...settleMemory(LAST_ROW_REINFORCED)],
+    expect: memoryExpect(['SHOWING 50 / 150 NODES', 'NODE #1099', FIRST_FACT], 'REINFORCED'),
+    region: 'viewport',
+  },
+  {
+    name: 'memory: base pill',
+    start: '#memory',
+    requires: ['memory'],
+    // The base list ends on the same three cards as the full list.
+    steps: [{ kind: 'pill', label: 'BASE' }, ...settleMemory(LAST_ROW_ALL)],
+    expect: memoryExpect(['SHOWING 100 / 150 NODES', 'NODE #1118', 'Standup digest should stay under 200 words (#119)'], 'BASE'),
+    region: 'viewport',
+  },
+  {
+    name: 'memory: all pill after another pill',
+    start: '#memory',
+    requires: ['memory'],
+    steps: [
+      { kind: 'pill', label: 'BASE' },
+      // With its count: the hidden vanilla schedules view also has an "ALL" pill, earlier in the page.
+      { kind: 'pill', label: 'ALL 150' },
+      ...settleMemory(LAST_ROW_ALL),
+    ],
+    expect: memoryExpect(['SHOWING 150 / 150 NODES', 'NODE #1099', FIRST_FACT], 'ALL'),
+    region: 'viewport',
+  },
+  {
+    // "oat milk" matches the 15 "Prefers oat milk in lattes" facts, NODE #1030 (12x) first.
+    name: 'memory: search narrows the archive and highlights matches',
+    start: '#memory',
+    requires: ['memory'],
+    // No keyboard scroll here: clicking the results count (below the fold on mobile) scrolls both
+    // pages to the same place and moves focus out of the input, then the tab brings both to the top.
+    steps: [
+      { kind: 'type', placeholder: MEMORY_SEARCH, text: 'oat milk' },
+      { kind: 'openDrawer', text: 'SHOWING 15 / 150 NODES' },
+      { kind: 'clickTab', tab: 'MEMORY ARCHIVE' },
+    ],
+    expect: memoryExpect(['SHOWING 15 / 150 NODES', 'NODE #1030', 'oat milk'], 'ALL'),
+    region: 'viewport',
+  },
+  {
+    name: 'memory: Escape clears the search',
+    start: '#memory',
+    requires: ['memory'],
+    steps: [
+      { kind: 'type', placeholder: MEMORY_SEARCH, text: 'oat milk' },
+      { kind: 'press', key: 'Escape' },
+      // Waits for the full list (React renders the cleared search as a deferred update).
+      { kind: 'openDrawer', text: 'SHOWING 150 / 150 NODES' },
+      ...settleMemory(LAST_ROW_ALL),
+    ],
+    expect: memoryExpect(['SHOWING 150 / 150 NODES', 'NODE #1099', FIRST_FACT], 'ALL'),
+    region: 'viewport',
+  },
+  {
+    // The last card is reachable (see settleMemory), and scrolling back up re-mounts the first
+    // cards in place. The row is compared at the top: at the very bottom the React page's height
+    // still includes estimates for rows it never mounted, so its fractional height (and with it the
+    // sub-pixel phase of every row) cannot match the vanilla page's to the pixel even though the
+    // layout is the same.
+    name: 'memory: scrolling to the bottom reaches the last fact and back',
+    start: '#memory',
+    requires: ['memory'],
+    // Clicking the results count waits for the list before End.
+    steps: [{ kind: 'openDrawer', text: 'SHOWING 150 / 150 NODES' }, ...settleMemory(LAST_ROW_ALL)],
+    expect: memoryExpect(['SHOWING 150 / 150 NODES', 'NODE #1099', FIRST_FACT], 'ALL'),
     region: 'viewport',
   },
 ];

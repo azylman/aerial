@@ -1,0 +1,153 @@
+/* Memory archive (ported verbatim from static/style.css: memory toolbar, cards grid and fact
+   cards). The card grid itself is a VirtualList laid out to match .memory-grid exactly. */
+/* --- MEMORY TOOLBAR --- */
+.memory-toolbar-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    backdrop-filter: var(--glass-backdrop);
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    margin-bottom: 1.25rem;
+    flex-wrap: wrap;
+}
+
+/* --- MEMORY CARDS GRID --- */
+/* Skeleton, empty and error states still render into the plain grid. */
+.memory-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 1.25rem;
+    margin-bottom: 2rem;
+}
+
+/* The virtualized card grid: columns and the 1.25rem gap come from MemoryView's VirtualList props. */
+.memory-list {
+    margin-bottom: 2rem;
+}
+
+/* FACT CARD */
+.fact-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    backdrop-filter: var(--glass-backdrop);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 1rem;
+    position: relative;
+    overflow: hidden;
+    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    min-width: 0;
+}
+
+.fact-card:hover {
+    border-color: var(--neon-cyan);
+    transform: translateY(-3px);
+    box-shadow: 0 10px 30px -5px rgba(0, 242, 254, 0.25);
+}
+
+/* HIGH IMPORTANCE (PERMET OVERDRIVE) */
+.fact-card.high-importance {
+    border-color: rgba(255, 0, 127, 0.4);
+}
+
+.fact-card.high-importance:hover {
+    border-color: var(--neon-magenta);
+    box-shadow: 0 10px 30px -5px rgba(255, 0, 127, 0.3);
+}
+
+.fact-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.fact-category-tag {
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.6px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(0, 242, 254, 0.1);
+    color: var(--neon-cyan);
+    border: 1px solid rgba(0, 242, 254, 0.3);
+    text-transform: uppercase;
+}
+
+.fact-category-tag.cat-system_config {
+    background: rgba(0, 242, 254, 0.15);
+    border-color: var(--neon-cyan);
+    color: var(--neon-cyan);
+}
+
+.fact-importance-gauge {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: var(--text-muted);
+}
+
+.fact-body {
+    font-size: 0.88rem;
+    line-height: 1.55;
+    color: var(--text-primary);
+    overflow-wrap: break-word;
+    word-break: break-word;
+    white-space: pre-wrap;
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.fact-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    padding-top: 0.75rem;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+}
+
+.fact-copy-btn {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--text-muted);
+    border-radius: 6px;
+    padding: 0.3rem 0.65rem;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.fact-copy-btn:hover {
+    background: rgba(0, 242, 254, 0.15);
+    border-color: var(--neon-cyan);
+    color: #fff;
+}
+
+.fact-copy-btn.copied {
+    background: rgba(0, 255, 135, 0.2);
+    border-color: var(--neon-green);
+    color: var(--neon-green);
+}
+
+/* Inline styles in the vanilla renderFactsSkeleton template, as classes. */
+.skeleton-node-title { width: 32%; height: 18px; }
+.skeleton-node-body { width: 100%; height: 50px; margin: 12px 0; }
+.skeleton-node-meta { width: 48%; height: 14px; }
+
+/* React polish: live numbers do not jitter. */
+.fact-importance-gauge,
+.fact-footer,
+.results-telemetry-bar {
+    font-variant-numeric: tabular-nums;
+}
