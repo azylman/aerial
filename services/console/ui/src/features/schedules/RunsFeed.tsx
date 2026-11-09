@@ -3,7 +3,7 @@ import type { ScheduleRun } from '../../api/types';
 import { Glyph } from '../../components/Glyph';
 import { useLiveNow } from '../../hooks/useLiveNow';
 import { formatDuration, formatTimeAgo } from '../../lib/formatters';
-import { Highlight } from '../../lib/search';
+import { QueryHighlight } from '../../lib/search';
 import { linkableThread, runStatus } from './model';
 
 /** Relative start time; a leaf on the shared 1s clock so the run card itself never re-renders on a tick. */
@@ -11,8 +11,8 @@ const RunAge = memo(function RunAge({ at }: { readonly at: string }) {
   return <span className="run-time-badge">{formatTimeAgo(at, useLiveNow())}</span>;
 });
 
-/** One execution run (renderScheduleRuns), memoized on the reconciled run and the query. */
-export const RunCard = memo(function RunCard({ run, query }: { readonly run: ScheduleRun; readonly query: string }) {
+/** One execution run (renderScheduleRuns), memoized on the reconciled run; highlights follow HighlightQuery. */
+export const RunCard = memo(function RunCard({ run }: { readonly run: ScheduleRun }) {
   const status = runStatus(run.status);
   const thread = linkableThread(run.thread_id);
   return (
@@ -23,7 +23,7 @@ export const RunCard = memo(function RunCard({ run, query }: { readonly run: Sch
             <Glyph name={status.icon} /> {status.label}
           </span>
           <span className="run-title">
-            <Highlight text={run.title || run.schedule_id || 'Schedule Run'} query={query} />
+            <QueryHighlight text={run.title || run.schedule_id || 'Schedule Run'} />
           </span>
           <span className="run-type-tag">{(run.schedule_type || 'cron').toUpperCase()}</span>
         </div>
@@ -38,13 +38,13 @@ export const RunCard = memo(function RunCard({ run, query }: { readonly run: Sch
       </div>
       <div className="run-prompt-preview">
         <div className="run-prompt-text">
-          <Highlight text={run.prompt || ''} query={query} />
+          <QueryHighlight text={run.prompt || ''} />
         </div>
         {run.error ? (
           <div className="run-error-box">
             <span className="run-error-label">ERROR:</span>{' '}
             <span className="run-error-text">
-              <Highlight text={run.error} query={query} />
+              <QueryHighlight text={run.error} />
             </span>
           </div>
         ) : null}

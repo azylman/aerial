@@ -537,6 +537,41 @@ describe('SchedulesView filters', () => {
     expect(screen.queryByRole('button', { name: 'Clear search' })).toBeNull();
   });
 
+  // A query change reaches only the toolbar (search, clear and sync icons) and the highlight
+  // leaves: cards that stay visible keep their DOM node and their bodies do not re-render.
+  it.each([
+    {
+      name: 'narrowing',
+      from: 'g',
+      to: 'garden',
+      wantIds: ['cron-b', 'once-a'],
+      wantMarks: ['Garden', 'garden', 'garden'],
+    },
+    {
+      name: 'same normalized query',
+      from: 'garden',
+      to: '  GARDEN ',
+      wantIds: ['cron-b', 'once-a'],
+      wantMarks: ['Garden', 'garden', 'garden'],
+    },
+  ])('$name keeps visible cards in place', ({ from, to, wantIds, wantMarks }) => {
+    const { container } = render(<SchedulesView />);
+    seed(schedules(), runs());
+    const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'Search schedules' });
+    fireEvent.change(input, { target: { value: from } });
+    const cardFor = (id: string) =>
+      [...container.querySelectorAll('.schedule-card')].find((el) => el.textContent?.includes(`ID: ${id}`));
+    const before = cardFor('cron-b');
+    iconRenders.length = 0;
+    fireEvent.change(input, { target: { value: to } });
+    expect({
+      ids: ids(container),
+      sameNode: cardFor('cron-b') === before,
+      marks: texts(container, '#schedules-grid mark.cyber-highlight'),
+      icons: iconRenders,
+    }).toEqual({ ids: wantIds, sameNode: true, marks: wantMarks, icons: ['search', 'x', 'refresh'] });
+  });
+
   it("'/' focuses the search box and Escape clears it", () => {
     function Harness() {
       useKeyboardShortcuts('schedules');

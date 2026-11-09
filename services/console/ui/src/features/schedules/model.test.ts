@@ -110,6 +110,40 @@ describe('filterCrons', () => {
   });
 });
 
+// The per-item haystacks are cached on the reconciled objects: a poll that replaces an object is
+// matched on its new fields in both directions (a new match appears, a stale match is dropped),
+// and a query can never match across the boundary between two fields.
+describe('cached haystacks', () => {
+  const garden = cron('c-1', { prompt: 'Check the garden' });
+  const renamed = { ...garden, prompt: 'Check the kiosk' };
+  const shot = once('o-1', { prompt: 'Water the basil' });
+  const shotMoved = { ...shot, thread_id: '123456' };
+  const failed = run('r-1', { status: 'failed' });
+  const failedFixed = { ...failed, status: 'completed' };
+  it.each([
+    { name: 'cron object replaced by a poll', lists: [[garden], [renamed]], query: 'kiosk', want: [[], ['c-1']] },
+    { name: 'cron match lost after a poll', lists: [[garden], [renamed]], query: 'garden', want: [['c-1'], []] },
+    {
+      name: 'cron query spanning two fields',
+      lists: [[cron('c-2', { title_prefix: 'ab', cron_expr: 'cd' })]],
+      query: 'bc',
+      want: [[]],
+    },
+  ])('$name', ({ lists, query, want }) => {
+    expect(lists.map((list) => ids(filterCrons(list, 'ALL', query)))).toEqual(want);
+  });
+  it.each([
+    { name: 'one-shot object replaced by a poll', lists: [[shot], [shotMoved]], query: '123456', want: [[], ['o-1']] },
+  ])('$name', ({ lists, query, want }) => {
+    expect(lists.map((list) => ids(filterOneShots(list, 'ALL', query)))).toEqual(want);
+  });
+  it.each([
+    { name: 'run object replaced by a poll', lists: [[failed], [failedFixed]], query: 'failed', want: [['r-1'], []] },
+  ])('$name', ({ lists, query, want }) => {
+    expect(lists.map((list) => ids(filterRuns(list, query)))).toEqual(want);
+  });
+});
+
 describe('filterOneShots', () => {
   it.each([
     { name: 'no query keeps all', filter: 'ALL', query: '', want: ['o-prompt', 'o-thread', 'o-plain'] },
