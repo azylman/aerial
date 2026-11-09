@@ -46,10 +46,16 @@ export const VIEW_LOADERS: Readonly<Record<TabId, () => Promise<ViewModule>>> = 
  */
 export const loadedView = (tab: TabId): ComponentType | undefined => loadedViews[tab];
 
+/**
+ * Boot's status request settles before App mounts, so a 2s freshness window lets the shell's first
+ * poll reuse it instead of fetching again; it is below App's 5s poll interval, so every interval
+ * tick still fetches.
+ */
 export const pollStatus = syncResource(
   fetchStatus,
   (data) => useConsoleStore.getState().setCluster(data),
   (error) => useConsoleStore.getState().failCluster(error),
+  2000,
 );
 
 /** Tabs whose content reads /api/status (the header gauge and dock read it too). */
