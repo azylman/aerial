@@ -1091,10 +1091,6 @@ spec:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: edge-gateway
-    - group: gateway.networking.k8s.io
-      kind: Gateway
-      name: lan-gateway
-      sectionName: https
   rules:
     - filters:
         - requestRedirect:
