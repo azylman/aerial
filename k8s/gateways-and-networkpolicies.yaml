@@ -363,6 +363,33 @@ spec:
     - backendRefs:
         - group: ""
           kind: Service
+          name: vision
+          port: 8095
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /ui/
+          type: URLRewrite
+      matches:
+        - path:
+            type: PathPrefix
+            value: /visits/
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /visits/
+            statusCode: 302
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /visits
+    - backendRefs:
+        - group: ""
+          kind: Service
           name: aura-farming
           port: 8080
           weight: 1
@@ -984,6 +1011,33 @@ spec:
     - backendRefs:
         - group: ""
           kind: Service
+          name: vision
+          port: 8095
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /ui/
+          type: URLRewrite
+      matches:
+        - path:
+            type: PathPrefix
+            value: /visits/
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /visits/
+            statusCode: 302
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /visits
+    - backendRefs:
+        - group: ""
+          kind: Service
           name: aura-farming
           port: 8080
           weight: 1
@@ -1126,6 +1180,7 @@ spec:
                   - grafana
                   - openobserve
                   - aura-farming
+                  - vision
                   - gatus
     - ports:
         - port: 443
