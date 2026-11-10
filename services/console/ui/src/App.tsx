@@ -1,5 +1,5 @@
 import { Activity, type ComponentType, lazy, Suspense, useEffect, useState } from 'react';
-import { loadBuildsView, loadedView, pollStatus, statusPolledOn, VIEW_LOADERS } from './boot';
+import { loadBuildsView, loadedBuildDetailPanel, loadedView, pollStatus, statusPolledOn, VIEW_LOADERS } from './boot';
 import { Drawer, type DrawerPanels } from './components/Drawer';
 import { Header } from './components/Header';
 import { ServiceDiagnostics } from './features/telemetry/ServiceDiagnostics';
@@ -22,7 +22,12 @@ const VIEWS: Readonly<Record<TabId, ComponentType>> = {
 // The service body is tiny and opens from the telemetry view, so it ships in the main chunk and
 // never suspends the drawer. The build body (and its markdown renderer) ships with the build
 // queue view, which is where builds are opened from and which the idle prefetch already warms.
-const BuildDrawerBody = lazy(() => loadBuildsView().then((m) => ({ default: m.BuildDetailPanel })));
+// Like ViewPanel, an already-loaded body renders directly so the first open never suspends.
+const LazyBuildDrawerBody = lazy(() => loadBuildsView().then((m) => ({ default: m.BuildDetailPanel })));
+const BuildDrawerBody: DrawerPanels['build'] = (props) => {
+  const [Panel] = useState<DrawerPanels['build']>(() => loadedBuildDetailPanel() ?? LazyBuildDrawerBody);
+  return <Panel {...props} />;
+};
 const DRAWER_PANELS: DrawerPanels = { service: ServiceDiagnostics, build: BuildDrawerBody };
 
 const STATUS_POLL_MS = 5000;

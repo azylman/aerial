@@ -108,3 +108,27 @@ describe('loadedView', () => {
     expect(boot.loadedView('memory')).toBe(want);
   });
 });
+
+interface LoadedBuildDetailPanelRow {
+  name: string;
+  load: 'none' | 'loadBuildsView' | 'VIEW_LOADERS.builds';
+  wantLoaded: boolean;
+}
+
+describe('loadedBuildDetailPanel', () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it.each<LoadedBuildDetailPanelRow>([
+    { name: 'undefined before the builds chunk loads', load: 'none', wantLoaded: false },
+    { name: 'the drawer body once loadBuildsView resolves', load: 'loadBuildsView', wantLoaded: true },
+    { name: 'the drawer body once the builds view loader resolves', load: 'VIEW_LOADERS.builds', wantLoaded: true },
+  ])('$name', async ({ load, wantLoaded }) => {
+    vi.resetModules();
+    const [boot, buildsView] = await Promise.all([import('./boot'), import('./features/builds/BuildsView')]);
+    if (load === 'loadBuildsView') await boot.loadBuildsView();
+    if (load === 'VIEW_LOADERS.builds') await boot.VIEW_LOADERS.builds();
+    expect(boot.loadedBuildDetailPanel()).toBe(wantLoaded ? buildsView.BuildDetailPanel : undefined);
+  });
+});

@@ -1,5 +1,6 @@
 import { type ComponentType } from 'react';
 import { fetchStatus } from './api/api';
+import type { DrawerPanels } from './components/Drawer';
 import { syncBuilds } from './features/builds/data';
 import { syncFacts } from './features/memory/data';
 import { syncScheduleRuns, syncSchedules } from './features/schedules/data';
@@ -15,7 +16,19 @@ import { type TabId, useConsoleStore } from './store/store';
 
 type ViewModule = { readonly default: ComponentType };
 
-export const loadBuildsView = () => import('./features/builds/BuildsView');
+type BuildsViewModule = typeof import('./features/builds/BuildsView');
+
+const loaded: { buildDetailPanel?: DrawerPanels['build'] } = {};
+
+/** The builds chunk's loader; records its drawer body once the import resolves (see loadedView). */
+export const loadBuildsView = (): Promise<BuildsViewModule> =>
+  import('./features/builds/BuildsView').then((mod) => {
+    loaded.buildDetailPanel = mod.BuildDetailPanel;
+    return mod;
+  });
+
+/** The build drawer body once the builds chunk has resolved, else undefined; like loadedView. */
+export const loadedBuildDetailPanel = (): DrawerPanels['build'] | undefined => loaded.buildDetailPanel;
 
 const loadedViews: Partial<Record<TabId, ComponentType>> = {};
 
