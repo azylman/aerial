@@ -61,7 +61,7 @@ export const pollStatus = syncResource(
 /** Tabs whose content reads /api/status (the header gauge and dock read it too). */
 export const statusPolledOn = (tab: TabId): boolean => tab === 'telemetry' || tab === 'tasks';
 
-/** Like the vanilla UI, schedules, facts and builds load once at boot so every tab badge has a count. */
+/** Schedules, facts and builds load once at boot so every tab badge has a count. */
 const SHELL_LOADS: readonly PollFetcher[] = [syncSchedules, syncFacts, syncBuilds];
 
 /**

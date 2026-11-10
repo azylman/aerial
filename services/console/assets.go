@@ -7,8 +7,6 @@ import (
 	"io/fs"
 	"net/http"
 	"path"
-	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,14 +21,14 @@ type StaticAsset struct {
 	ContentType string
 }
 
-// The React console is built by Vite into static/next (see Dockerfile). Everything under
-// next/assets/ carries a content hash in its filename, so it is cached forever; next/index.html
-// is the SPA shell served for every extensionless client-side route under next/.
+// The React console is built by Vite straight into the static root (see Dockerfile): index.html
+// is the SPA shell served for every extensionless client-side route, and everything under assets/
+// carries a content hash in its filename, so it is cached forever.
 const (
-	nextIndexPath    = "next/index.html"
-	nextAssetsPrefix = "next/assets/"
-	immutableCache   = "public, max-age=31536000, immutable"
-	revalidateCache  = "no-cache, must-revalidate"
+	indexPath       = "index.html"
+	assetsPrefix    = "assets/"
+	immutableCache  = "public, max-age=31536000, immutable"
+	revalidateCache = "no-cache, must-revalidate"
 )
 
 type AssetRegistry struct {
@@ -38,86 +36,34 @@ type AssetRegistry struct {
 	assets map[string]StaticAsset
 }
 
-func buildAssetMap(fsys fs.FS, versionToken string) (map[string]StaticAsset, error) {
+func buildAssetMap(fsys fs.FS) (map[string]StaticAsset, error) {
 	assets := make(map[string]StaticAsset)
-
-	// 1. Compute content hashes for individual assets
-	var appJSHash, styleCSSHash string
-	if data, err := fs.ReadFile(fsys, "app.js"); err == nil {
-		h := sha256.Sum256(data)
-		appJSHash = hex.EncodeToString(h[:])
-	}
-	if data, err := fs.ReadFile(fsys, "style.css"); err == nil {
-		h := sha256.Sum256(data)
-		styleCSSHash = hex.EncodeToString(h[:])
-	}
-
-	// Determine asset version strings to inject
-	jsVersion := versionToken
-	cssVersion := versionToken
-	if versionToken == "" || versionToken == "latest" || versionToken == "dev" || versionToken == "unknown" {
-		if len(appJSHash) >= 10 {
-			jsVersion = appJSHash[:10]
-		} else {
-			jsVersion = "v1"
-		}
-		if len(styleCSSHash) >= 10 {
-			cssVersion = styleCSSHash[:10]
-		} else {
-			cssVersion = "v1"
-		}
-	}
-
-	// 2. Walk the filesystem and populate registry
-	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(fsys, ".", func(name string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
-
-		rawBytes, err := fs.ReadFile(fsys, path)
+		data, err := fs.ReadFile(fsys, name)
 		if err != nil {
 			return err
 		}
-
-		cleanPath := filepath.ToSlash(path)
-		cleanPath = strings.TrimPrefix(cleanPath, "./")
-
-		var finalBytes []byte
-		if cleanPath == "index.html" {
-			htmlStr := string(rawBytes)
-			reJS := regexp.MustCompile(`src="app\.js(?:\?[^"]*)?"`)
-			htmlStr = reJS.ReplaceAllString(htmlStr, fmt.Sprintf(`src="app.js?v=%s"`, jsVersion))
-
-			reCSS := regexp.MustCompile(`href="style\.css(?:\?[^"]*)?"`)
-			htmlStr = reCSS.ReplaceAllString(htmlStr, fmt.Sprintf(`href="style.css?v=%s"`, cssVersion))
-
-			finalBytes = []byte(htmlStr)
-		} else {
-			finalBytes = rawBytes
-		}
-
-		hash := sha256.Sum256(finalBytes)
+		hash := sha256.Sum256(data)
 		hashStr := hex.EncodeToString(hash[:])
-		etag := fmt.Sprintf(`"%s"`, hashStr[:16])
-
-		assets[cleanPath] = StaticAsset{
-			Data:        finalBytes,
+		assets[name] = StaticAsset{
+			Data:        data,
 			Hash:        hashStr,
-			ETag:        etag,
-			ContentType: GetMimeType(cleanPath),
+			ETag:        fmt.Sprintf(`"%s"`, hashStr[:16]),
+			ContentType: GetMimeType(name),
 		}
-
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-
 	return assets, nil
 }
 
-func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
-	assets, err := buildAssetMap(fsys, versionToken)
+func NewAssetRegistry(fsys fs.FS) (*AssetRegistry, error) {
+	assets, err := buildAssetMap(fsys)
 	if err != nil {
 		return nil, err
 	}
@@ -126,8 +72,8 @@ func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
 	}, nil
 }
 
-func (ar *AssetRegistry) Reload(fsys fs.FS, versionToken string) error {
-	built, err := buildAssetMap(fsys, versionToken)
+func (ar *AssetRegistry) Reload(fsys fs.FS) error {
+	built, err := buildAssetMap(fsys)
 	if err != nil {
 		return err
 	}
@@ -146,14 +92,14 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	reqPath := strings.TrimPrefix(r.URL.Path, "/console")
 	reqPath = strings.TrimPrefix(reqPath, "/")
-	if reqPath == "" || reqPath == "index.html" {
-		reqPath = "index.html"
+	if reqPath == "" {
+		reqPath = indexPath
 	}
 
 	ar.mu.RLock()
 	asset, exists := ar.assets[reqPath]
-	if !exists && isNextClientRoute(reqPath) {
-		reqPath = nextIndexPath
+	if !exists && isClientRoute(reqPath) {
+		reqPath = indexPath
 		asset, exists = ar.assets[reqPath]
 	}
 	ar.mu.RUnlock()
@@ -162,11 +108,9 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bifurcated Cache Policy:
-	// - index.html shells / unversioned: no-cache, must-revalidate + ETag
-	// - Versioned assets (?v=...) and Vite content-hashed next/assets/*: immutable + ETag
-	isVersioned := r.URL.Query().Get("v") != "" && path.Base(reqPath) != "index.html"
-	if isVersioned || strings.HasPrefix(reqPath, nextAssetsPrefix) {
+	// Vite content-hashed assets/* never change under the same name; everything else (the SPA
+	// shell, favicons) revalidates against its ETag.
+	if strings.HasPrefix(reqPath, assetsPrefix) {
 		w.Header().Set("Cache-Control", immutableCache)
 	} else {
 		w.Header().Set("Cache-Control", revalidateCache)
@@ -189,11 +133,9 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	httpkit.WriteResponse(w, r, "console", asset.Data)
 }
 
-// isNextClientRoute reports whether a missing path is a React console deep link that should
-// receive the SPA shell: under next/, extensionless, and not a (stale) hashed asset request,
-// which must 404 rather than hand the browser HTML for a module script.
-func isNextClientRoute(reqPath string) bool {
-	return strings.HasPrefix(reqPath, "next/") &&
-		!strings.HasPrefix(reqPath, nextAssetsPrefix) &&
-		path.Ext(reqPath) == ""
+// isClientRoute reports whether a missing path is a console deep link that should receive the
+// SPA shell: extensionless and not a (stale) hashed asset request, which must 404 rather than
+// hand the browser HTML for a module script.
+func isClientRoute(reqPath string) bool {
+	return !strings.HasPrefix(reqPath, assetsPrefix) && path.Ext(reqPath) == ""
 }

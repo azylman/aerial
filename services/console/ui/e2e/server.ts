@@ -1,5 +1,5 @@
 // Playwright webServer: runs the real console Go binary with the same static layout as the Docker
-// image (static/ plus the Vite build at static/next/). Run `npm run build` first.
+// image (the favicons in static/ with the Vite build copied over them). Run `npm run build` first.
 //
 // The binary is built from services/console unless CONSOLE_E2E_BIN points at a prebuilt one (CI
 // builds it on the runner, then runs the suite inside the Playwright image, which has no Go).
@@ -23,7 +23,7 @@ if (!existsSync(join(DIST, 'index.html'))) {
 
 const work = mkdtempSync(join(tmpdir(), 'console-e2e-'));
 cpSync(join(CONSOLE_DIR, 'static'), join(work, 'static'), { recursive: true });
-cpSync(DIST, join(work, 'static', 'next'), { recursive: true });
+cpSync(DIST, join(work, 'static'), { recursive: true });
 
 let bin = process.env['CONSOLE_E2E_BIN'] ?? '';
 if (bin === '') {

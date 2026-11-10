@@ -1,8 +1,8 @@
 import { defineConfig } from '@playwright/test';
 import { BASE_URL } from './e2e/constants.ts';
 
-// Browser parity suite: vanilla /console/ vs React /console/next/ served by the real console
-// binary (e2e/server.ts). Run `npm run build` first; CI runs it in the Playwright image.
+// Browser e2e suite: the React console at /console/ served by the real console binary
+// (e2e/server.ts). Run `npm run build` first; CI runs it in the Playwright image.
 export default defineConfig({
   testDir: './e2e',
   testMatch: '*.spec.ts',

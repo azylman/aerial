@@ -575,7 +575,7 @@ func TestResolveStaticDir(t *testing.T) {
 		wantDir    string
 	}{
 		{
-			name:       "default_candidates_finds_static",
+			name:       "default_candidates_fallback_to_static",
 			candidates: nil,
 			wantDir:    "static",
 		},
@@ -1061,11 +1061,9 @@ func TestConsole_CloseWarnAndDisconnect(t *testing.T) {
 
 func TestSetupConsoleMux_StaticRouting(t *testing.T) {
 	reg, err := NewAssetRegistry(fstest.MapFS{
-		"index.html":               {Data: []byte(`<link href="style.css"><h1>vanilla</h1>`)},
-		"style.css":                {Data: []byte(`body{}`)},
-		"next/index.html":          {Data: []byte(`<div id="root"></div>`)},
-		"next/assets/index-Zz9.js": {Data: []byte(`export{}`)},
-	}, "abc123")
+		"index.html":          {Data: []byte(`<div id="root"></div>`)},
+		"assets/index-Zz9.js": {Data: []byte(`export{}`)},
+	})
 	if err != nil {
 		t.Fatalf("NewAssetRegistry failed: %v", err)
 	}
@@ -1082,14 +1080,19 @@ func TestSetupConsoleMux_StaticRouting(t *testing.T) {
 		wantCache      string
 		wantBodySubstr string
 	}{
-		{name: "console_next_redirects_to_slash", path: "/console/next", wantCode: http.StatusMovedPermanently, wantLocation: "/console/next/"},
-		{name: "root_next_redirects_to_slash", path: "/next", wantCode: http.StatusMovedPermanently, wantLocation: "/next/"},
-		{name: "redirect_preserves_query", path: "/console/next?tab=memory", wantCode: http.StatusMovedPermanently, wantLocation: "/console/next/?tab=memory"},
-		{name: "console_next_shell", path: "/console/next/", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},
-		{name: "root_next_deep_link_shell", path: "/next/schedules", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},
-		{name: "console_next_hashed_asset", path: "/console/next/assets/index-Zz9.js", wantCode: http.StatusOK, wantCache: "public, max-age=31536000, immutable", wantBodySubstr: `export{}`},
-		{name: "vanilla_console_index_unchanged", path: "/console/", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<link href="style.css?v=abc123">`},
-		{name: "vanilla_root_index_unchanged", path: "/", wantCode: http.StatusOK, wantBodySubstr: `<h1>vanilla</h1>`},
+		{name: "legacy_console_next_bare", path: "/console/next", wantCode: http.StatusMovedPermanently, wantLocation: "/console/"},
+		{name: "legacy_console_next_slash", path: "/console/next/", wantCode: http.StatusMovedPermanently, wantLocation: "/console/"},
+		{name: "legacy_console_next_deep_query", path: "/console/next/memory?x=1", wantCode: http.StatusMovedPermanently, wantLocation: "/console/memory?x=1"},
+		{name: "legacy_root_next_bare", path: "/next", wantCode: http.StatusMovedPermanently, wantLocation: "/"},
+		{name: "legacy_root_next_slash_query", path: "/next/?tab=memory", wantCode: http.StatusMovedPermanently, wantLocation: "/?tab=memory"},
+		{name: "legacy_root_next_deep", path: "/next/builds/abc", wantCode: http.StatusMovedPermanently, wantLocation: "/builds/abc"},
+		{name: "legacy_root_next_nested_next", path: "/next/next/x", wantCode: http.StatusMovedPermanently, wantLocation: "/next/x"},
+		{name: "console_shell", path: "/console/", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},
+		{name: "root_shell", path: "/", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},
+		{name: "console_deep_link_shell", path: "/console/schedules", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},
+		{name: "console_hashed_asset", path: "/console/assets/index-Zz9.js", wantCode: http.StatusOK, wantCache: "public, max-age=31536000, immutable", wantBodySubstr: `export{}`},
+		{name: "root_hashed_asset", path: "/assets/index-Zz9.js", wantCode: http.StatusOK, wantCache: "public, max-age=31536000, immutable", wantBodySubstr: `export{}`},
+		{name: "nextgen_route_not_legacy", path: "/console/nextgen", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},
 		{name: "api_routes_still_win", path: "/console/health", wantCode: http.StatusOK, wantBodySubstr: "OK"},
 	}
 
