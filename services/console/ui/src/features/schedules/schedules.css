@@ -189,8 +189,7 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
   color: var(--text-muted);
 }
 
-.schedule-meta-bar code,
-.schedule-card-footer code {
+.schedule-meta-bar code {
   background: rgba(0, 0, 0, 0.4);
   color: var(--neon-cyan);
   padding: 1px 5px;
@@ -445,13 +444,6 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
   color: var(--text-dim);
 }
 
-.run-card-footer code {
-  background: rgba(0, 0, 0, 0.4);
-  color: var(--neon-cyan);
-  padding: 1px 5px;
-  border-radius: 3px;
-  border: 1px solid rgba(0, 242, 254, 0.2);
-}
 
 .run-thread-link {
   color: var(--neon-cyan);

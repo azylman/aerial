@@ -6,7 +6,7 @@ import { formatCronExpression } from '../../lib/cron';
 import { formatTimestamp } from '../../lib/formatters';
 import { QueryHighlight } from '../../lib/search';
 import { CountdownBadge } from './Countdown';
-import { cronTarget, linkableThread } from './model';
+import { linkableThread } from './model';
 
 // Cron and one-shot cards (renderScheduleCards). Each card is memoized on its reconciled schedule
 // object alone, so polls that leave a schedule unchanged skip it and a keystroke only reaches its
@@ -64,16 +64,10 @@ export const CronCard = memo(function CronCard({ cron }: { readonly cron: CronSc
         <span className="schedule-meta-item">
           <strong>CRON:</strong> <code>{cron.cron_expr}</code>
         </span>
-        <span className="schedule-meta-item">
-          <strong>TARGET:</strong> <code>{cronTarget(cron) || 'N/A'}</code>
-        </span>
       </div>
       <PromptBox text={cron.prompt || ''} />
       <div className="schedule-card-footer">
         <span>NEXT: {formatTimestamp(cron.next_run_at)}</span>
-        <span className="schedule-id-chip">
-          ID: <code>{cron.id}</code>
-        </span>
       </div>
     </div>
   );
@@ -117,9 +111,6 @@ export const OneShotCard = memo(function OneShotCard({ oneShot }: { readonly one
       <PromptBox text={oneShot.prompt || ''} />
       <div className="schedule-card-footer">
         <span>RUN AT: {formatTimestamp(oneShot.run_at)}</span>
-        <span className="schedule-id-chip">
-          ID: <code>{oneShot.id}</code>
-        </span>
       </div>
     </div>
   );
