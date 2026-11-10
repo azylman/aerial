@@ -376,6 +376,23 @@ spec:
         - path:
             type: PathPrefix
             value: /visits/
+    # ReplacePrefixMatch rewrites allow exactly one PathPrefix match per rule (Gateway API CEL).
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: vision
+          port: 8095
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /ui/
+          type: URLRewrite
+      matches:
+        - path:
+            type: PathPrefix
+            value: /episodes/
     - filters:
         - requestRedirect:
             path:
@@ -1024,6 +1041,23 @@ spec:
         - path:
             type: PathPrefix
             value: /visits/
+    # ReplacePrefixMatch rewrites allow exactly one PathPrefix match per rule (Gateway API CEL).
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: vision
+          port: 8095
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /ui/
+          type: URLRewrite
+      matches:
+        - path:
+            type: PathPrefix
+            value: /episodes/
     - filters:
         - requestRedirect:
             path:
