@@ -776,3 +776,110 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		})
 	}
 }
+
+func TestDocketHandlers(t *testing.T) {
+	t.Parallel()
+	mockDocket := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		switch {
+		case r.URL.Path == "/api/tasks" && q.Get("status") == "bogus":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid status"}`))
+		case r.URL.Path == "/api/tasks" && q.Get("status") == "badjson":
+			_, _ = w.Write([]byte(`{"not":"an array"}`))
+		case r.URL.Path == "/api/tasks" && q.Get("status") == "wont_do":
+			_, _ = w.Write([]byte(`null`))
+		case r.URL.Path == "/api/tasks":
+			// Echo the forwarded query as the title so rows can assert what reached upstream.
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": 1, "title": "query:" + r.URL.RawQuery, "status": "open", "parent_id": 9, "blocked_by": []int{2}}})
+		case r.URL.Path == "/api/search" && q.Get("q") == "boom":
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":"search backend down"}`))
+		case r.URL.Path == "/api/search" && q.Get("q") == "nothing":
+			_, _ = w.Write([]byte(`null`))
+		case r.URL.Path == "/api/search":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": 3, "title": "query:" + r.URL.RawQuery, "status": "open", "score": 0.5}})
+		case r.URL.Path == "/api/tasks/7":
+			_, _ = w.Write([]byte(`{"id":7,"title":"Root task","status":"open","description":"Body text","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-03T03:04:05Z","parent":{"id":1,"title":"Epic","status":"open"},"subtasks":[{"id":8,"title":"Child","status":"completed"}],"blocked_by":[{"id":5,"title":"Blocker","status":"open"}],"blocks":[{"id":6,"title":"Blocked","status":"open"}],"related":[{"id":4,"title":"Sibling","status":"wont_do"}],"comments":[{"id":11,"author":"bot","comment":"First note","created_at":"2026-01-02T05:00:00Z"}]}`))
+		case r.URL.Path == "/api/tasks/404":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"task 404 not found"}`))
+		case r.URL.Path == "/api/tasks/405":
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/api/tasks/500":
+			w.WriteHeader(http.StatusBadGateway)
+		case r.URL.Path == "/api/tasks/13":
+			_, _ = w.Write([]byte(`{broken`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(mockDocket.Close)
+
+	deadDocket := httptest.NewServer(http.NotFoundHandler())
+	deadURL := deadDocket.URL
+	deadDocket.Close()
+
+	tests := []struct {
+		name         string
+		docketURL    string
+		method       string
+		target       string
+		wantStatus   int
+		wantBody     string
+		wantContains []string
+	}{
+		{name: "Tasks_DefaultQuery", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks", wantStatus: http.StatusOK, wantBody: `{"status":"ok","tasks":[{"id":1,"title":"query:","status":"open","parent_id":9,"blocked_by":[2]}]}`},
+		{name: "Tasks_ConsolePrefix_ForwardsOnlyStatus", docketURL: mockDocket.URL, method: http.MethodGet, target: "/console/api/docket/tasks?status=all&q=x&limit=3", wantStatus: http.StatusOK, wantBody: `{"status":"ok","tasks":[{"id":1,"title":"query:status=all","status":"open","parent_id":9,"blocked_by":[2]}]}`},
+		{name: "Tasks_NullNormalizedToEmpty", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks?status=wont_do", wantStatus: http.StatusOK, wantBody: `{"status":"ok","tasks":[]}`},
+		{name: "Tasks_UpstreamBadRequestPassedThrough", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks?status=bogus", wantStatus: http.StatusBadRequest, wantBody: `{"status":"error","tasks":[],"error":"Upstream docket error occurred"}`},
+		{name: "Tasks_UndecodableUpstream", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks?status=badjson", wantStatus: http.StatusBadGateway, wantBody: `{"status":"error","tasks":[],"error":"Failed to decode upstream docket response"}`},
+		{name: "Tasks_Unreachable", docketURL: deadURL, method: http.MethodGet, target: "/api/docket/tasks", wantStatus: http.StatusServiceUnavailable, wantBody: `{"status":"degraded","tasks":[],"error":"Docket service unreachable. Retrying..."}`},
+		{name: "Tasks_NotConfigured", docketURL: "", method: http.MethodGet, target: "/api/docket/tasks", wantStatus: http.StatusServiceUnavailable, wantBody: `{"status":"degraded","tasks":[],"error":"docket not configured"}`},
+		{name: "Tasks_InvalidBaseURL", docketURL: "http://docket:\x7f80", method: http.MethodGet, target: "/api/docket/tasks", wantStatus: http.StatusInternalServerError, wantContains: []string{"Invalid upstream URL configuration"}},
+		{name: "Tasks_MethodNotAllowed", docketURL: mockDocket.URL, method: http.MethodPost, target: "/api/docket/tasks", wantStatus: http.StatusMethodNotAllowed, wantContains: []string{"Method Not Allowed"}},
+		{name: "Search_ForwardsQueryStatusLimit", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/search?q=auth+flow&status=all&limit=5&offset=2", wantStatus: http.StatusOK, wantBody: `{"status":"ok","results":[{"id":3,"title":"query:limit=5\u0026q=auth+flow\u0026status=all","status":"open","score":0.5}]}`},
+		{name: "Search_ConsolePrefix_NullNormalizedToEmpty", docketURL: mockDocket.URL, method: http.MethodGet, target: "/console/api/docket/search?q=nothing", wantStatus: http.StatusOK, wantBody: `{"status":"ok","results":[]}`},
+		{name: "Search_EmptyQuery", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/search?q=+", wantStatus: http.StatusBadRequest, wantBody: `{"status":"error","results":[],"error":"invalid docket request: search query q is required"}`},
+		{name: "Search_QueryTooLong", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/search?q=" + strings.Repeat("z", 201), wantStatus: http.StatusBadRequest, wantBody: `{"status":"error","results":[],"error":"invalid docket request: search query q exceeds 200 characters"}`},
+		{name: "Search_UpstreamErrorPassedThrough", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/search?q=boom", wantStatus: http.StatusBadGateway, wantBody: `{"status":"error","results":[],"error":"Upstream docket error occurred"}`},
+		{name: "Search_Unreachable", docketURL: deadURL, method: http.MethodGet, target: "/api/docket/search?q=x", wantStatus: http.StatusServiceUnavailable, wantBody: `{"status":"degraded","results":[],"error":"Docket service unreachable. Retrying..."}`},
+		{name: "Search_NotConfigured", docketURL: " ", method: http.MethodGet, target: "/api/docket/search?q=x", wantStatus: http.StatusServiceUnavailable, wantBody: `{"status":"degraded","results":[],"error":"docket not configured"}`},
+		{name: "Search_InvalidBaseURL", docketURL: "http://docket:\x7f80", method: http.MethodGet, target: "/api/docket/search?q=x", wantStatus: http.StatusInternalServerError, wantContains: []string{"Invalid upstream URL configuration"}},
+		{name: "Search_MethodNotAllowed", docketURL: mockDocket.URL, method: http.MethodPut, target: "/api/docket/search?q=x", wantStatus: http.StatusMethodNotAllowed, wantContains: []string{"Method Not Allowed"}},
+		{name: "Detail_HydratedTask", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks/7", wantStatus: http.StatusOK, wantBody: `{"status":"ok","task":{"id":7,"title":"Root task","status":"open","description":"Body text","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-03T03:04:05Z","parent":{"id":1,"title":"Epic","status":"open"},"subtasks":[{"id":8,"title":"Child","status":"completed"}],"blocks":[{"id":6,"title":"Blocked","status":"open"}],"blocked_by":[{"id":5,"title":"Blocker","status":"open"}],"related":[{"id":4,"title":"Sibling","status":"wont_do"}],"comments":[{"id":11,"author":"bot","comment":"First note","created_at":"2026-01-02T05:00:00Z"}]}}`},
+		{name: "Detail_ConsolePrefix", docketURL: mockDocket.URL, method: http.MethodGet, target: "/console/api/docket/tasks/7", wantStatus: http.StatusOK, wantContains: []string{`"status":"ok"`, `"title":"Root task"`}},
+		{name: "Detail_UpstreamNotFoundTextPassedThrough", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks/404", wantStatus: http.StatusNotFound, wantBody: `{"status":"error","error":"task 404 not found"}`},
+		{name: "Detail_UpstreamNotFoundWithoutBody", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks/405", wantStatus: http.StatusNotFound, wantBody: `{"status":"error","error":"Task not found"}`},
+		{name: "Detail_UpstreamErrorWithoutBody", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks/500", wantStatus: http.StatusBadGateway, wantBody: `{"status":"error","error":"Upstream docket error occurred"}`},
+		{name: "Detail_UndecodableUpstream", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks/13", wantStatus: http.StatusBadGateway, wantBody: `{"status":"error","error":"Failed to decode upstream docket response"}`},
+		{name: "Detail_NonNumericID", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks/abc", wantStatus: http.StatusBadRequest, wantBody: `{"status":"error","error":"invalid docket request: task ID \"abc\" must be a positive integer"}`},
+		{name: "Detail_EmptyID", docketURL: mockDocket.URL, method: http.MethodGet, target: "/console/api/docket/tasks/", wantStatus: http.StatusBadRequest, wantBody: `{"status":"error","error":"invalid docket request: task ID \"\" must be a positive integer"}`},
+		{name: "Detail_Unreachable", docketURL: deadURL, method: http.MethodGet, target: "/api/docket/tasks/7", wantStatus: http.StatusServiceUnavailable, wantBody: `{"status":"degraded","error":"Docket service unreachable. Retrying..."}`},
+		{name: "Detail_NotConfigured", docketURL: "", method: http.MethodGet, target: "/api/docket/tasks/abc", wantStatus: http.StatusServiceUnavailable, wantBody: `{"status":"degraded","error":"docket not configured"}`},
+		{name: "Detail_InvalidBaseURL", docketURL: "http://docket:\x7f80", method: http.MethodGet, target: "/api/docket/tasks/7", wantStatus: http.StatusInternalServerError, wantContains: []string{"Invalid upstream URL configuration"}},
+		{name: "Detail_MethodNotAllowed", docketURL: mockDocket.URL, method: http.MethodDelete, target: "/api/docket/tasks/7", wantStatus: http.StatusMethodNotAllowed, wantContains: []string{"Method Not Allowed"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := SetupConsoleMux(ConsoleConfig{DocketURL: tc.docketURL}, nil)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.target, nil))
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+			body := strings.TrimSpace(rr.Body.String())
+			if tc.wantBody != "" && body != tc.wantBody {
+				t.Errorf("body mismatch\n got: %s\nwant: %s", body, tc.wantBody)
+			}
+			for _, sub := range tc.wantContains {
+				if !strings.Contains(body, sub) {
+					t.Errorf("body %s missing %q", body, sub)
+				}
+			}
+		})
+	}
+}

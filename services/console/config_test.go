@@ -230,6 +230,7 @@ memory_url: "http://coven.aerial"
 hangar_url: "http://hangar.aerial"
 haro_url: "http://haro.aerial"
 vanadis_url: "http://vanadis.aerial"
+docket_url: " http://docket-mcp.aerial "
 nomad_addr: "http://nomad.cluster:4646"
 github_repos:
   - "azylman/aerial"
@@ -307,6 +308,7 @@ github_repos:
 		wantMemoryURL     string
 		wantHaroURL       string
 		wantVanadisURL    string
+		wantDocketURL     string
 		wantGHRepo        string
 		wantGHRepos       []string
 		wantGHToken       string
@@ -325,6 +327,7 @@ github_repos:
 			wantMemoryURL:  "http://coven.aerial",
 			wantHaroURL:    "http://haro.aerial",
 			wantVanadisURL: "http://vanadis.aerial",
+			wantDocketURL:  "http://docket-mcp.aerial",
 			wantGHRepo:     "azylman/aerial",
 			wantGHRepos:    []string{"azylman/aerial", "azylman/aerial-config"},
 			wantGHToken:    "pat-12345",
@@ -515,6 +518,9 @@ github_repos:
 			}
 			if tc.wantVanadisURL != "" && cfg.VanadisURL != tc.wantVanadisURL {
 				t.Errorf("VanadisURL = %q, want %q", cfg.VanadisURL, tc.wantVanadisURL)
+			}
+			if tc.wantDocketURL != "" && cfg.DocketURL != tc.wantDocketURL {
+				t.Errorf("DocketURL = %q, want %q", cfg.DocketURL, tc.wantDocketURL)
 			}
 			if tc.wantGHRepo != "" && cfg.GHRepo != tc.wantGHRepo {
 				t.Errorf("GHRepo = %q, want %q", cfg.GHRepo, tc.wantGHRepo)

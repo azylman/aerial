@@ -19,6 +19,7 @@ PR_DESCRIPTION.md
 /services/eri/eri
 /services/prospera/prospera
 /services/eri/transcript-search
+/services/console/console
 
 # Console React UI build output and local toolchain (built in Docker / by the gates)
 /services/console/ui/node_modules/
