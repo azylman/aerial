@@ -1,5 +1,7 @@
+import { StrictMode } from 'react';
 import { act, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createMotionGate, MotionGateContext } from '../lib/motionGate';
 import { firstPassCount, useFirstPassLimit } from './useFirstPassLimit';
 
 describe('firstPassCount', () => {
@@ -69,5 +71,105 @@ describe('useFirstPassLimit', () => {
     expect(vi.getTimerCount()).toBe(1);
     unmount();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('useFirstPassLimit with a motion gate', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({
+      toFake: ['requestAnimationFrame', 'cancelAnimationFrame', 'setTimeout', 'clearTimeout'],
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // The gate opens right after the first commit (main.tsx opens it later still, two paints in);
+  // each action is followed by the expected `started` state.
+  it.each<{
+    name: string;
+    total: number;
+    strict: boolean;
+    steps: ReadonlyArray<readonly ['step' | 'unmount', boolean]>;
+    mounted: boolean;
+  }>([
+    {
+      name: 'holds motion until the frame after the fill has painted',
+      total: 8,
+      strict: false,
+      mounted: false,
+      // frame of the limited pass, its paint (fill commits), frame of the fill, its paint.
+      steps: [
+        ['step', false],
+        ['step', false],
+        ['step', false],
+        ['step', true],
+      ],
+    },
+    {
+      name: 'keeps holds balanced under StrictMode',
+      total: 8,
+      strict: true,
+      mounted: false,
+      steps: [
+        ['step', false],
+        ['step', false],
+        ['step', false],
+        ['step', true],
+      ],
+    },
+    { name: 'takes no hold when it mounts empty', total: 0, strict: false, mounted: true, steps: [] },
+    {
+      name: 'releases its hold when unmounted before the fill',
+      total: 8,
+      strict: false,
+      mounted: false,
+      steps: [
+        ['step', false],
+        ['unmount', true],
+      ],
+    },
+  ])('$name', ({ total, strict, mounted, steps }) => {
+    let started = false;
+    const gate = createMotionGate(() => {
+      started = true;
+    });
+    const probe = (
+      <MotionGateContext value={gate}>
+        <Probe total={total} />
+      </MotionGateContext>
+    );
+    const { unmount } = render(strict ? <StrictMode>{probe}</StrictMode> : probe);
+    gate.open();
+    expect(started).toBe(mounted);
+    for (const [action, want] of steps) {
+      if (action === 'step') step();
+      else unmount();
+      expect([action, started]).toEqual([action, want]);
+    }
+  });
+
+  it('takes its hold once an empty list gets items and keeps it until that fill paints', () => {
+    let started = false;
+    const gate = createMotionGate(() => {
+      started = true;
+    });
+    const tree = (total: number) => (
+      <MotionGateContext value={gate}>
+        <Probe total={total} />
+      </MotionGateContext>
+    );
+    const { rerender, unmount } = render(tree(0));
+    rerender(tree(9));
+    gate.open();
+    expect(started).toBe(false);
+    step();
+    step();
+    step();
+    expect(started).toBe(false);
+    step();
+    expect(started).toBe(true);
+    unmount();
   });
 });
