@@ -8,7 +8,8 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { BuildDetailAPIResponse } from '../api/types';
+import type { BuildDetailAPIResponse, DocketTaskLookup } from '../api/types';
+import { taskDrawerTitle } from '../features/docket/model';
 import { buildDrawerLabel } from '../store/selectors';
 import { type ConsoleState, type DrawerState, useConsoleStore } from '../store/store';
 import { Icon } from './Icon';
@@ -22,20 +23,33 @@ export type DrawerPanels = {
 };
 
 /**
- * Header text, ported from openDiagnosticDrawer and openBuildDetailDrawer. A build drawer shows
- * its id until the build's detail payload arrives, then the build's title.
+ * Header text, ported from openDiagnosticDrawer and openBuildDetailDrawer. A build or task drawer
+ * shows its id until that target's detail payload arrives, then its title too.
  */
-export function drawerTitle(drawer: OpenDrawer, buildDetail: BuildDetailAPIResponse | null): string {
-  return drawer.kind === 'service'
-    ? `DIAGNOSTICS // ${drawer.name.toUpperCase()}`
-    : `BUILD // ${buildDrawerLabel(buildDetail, drawer.id).toUpperCase()}`;
+export function drawerTitle(
+  drawer: OpenDrawer,
+  buildDetail: BuildDetailAPIResponse | null,
+  taskDetail: DocketTaskLookup | null,
+): string {
+  switch (drawer.kind) {
+    case 'service':
+      return `DIAGNOSTICS // ${drawer.name.toUpperCase()}`;
+    case 'build':
+      return `BUILD // ${buildDrawerLabel(buildDetail, drawer.id).toUpperCase()}`;
+    case 'task':
+      return taskDrawerTitle(drawer.id, taskDetail);
+  }
 }
 
-const selectBuildDetail = (s: ConsoleState): BuildDetailAPIResponse | null => s.builds.detail.data;
-
-/** The header reads the build detail slice, so only it re-renders when a detail poll lands. */
+/** The header reads only the open target's detail slice, so only it re-renders when a poll lands. */
 function DrawerHeading({ drawer, id }: { readonly drawer: OpenDrawer; readonly id: string }) {
-  const title = useConsoleStore((s) => drawerTitle(drawer, drawer.kind === 'build' ? selectBuildDetail(s) : null));
+  const title = useConsoleStore((s: ConsoleState) =>
+    drawerTitle(
+      drawer,
+      drawer.kind === 'build' ? s.builds.detail.data : null,
+      drawer.kind === 'task' ? s.docket.detail.data : null,
+    ),
+  );
   return <h3 id={id}>{title}</h3>;
 }
 
@@ -49,6 +63,10 @@ function DrawerBody({ drawer, panels }: { readonly drawer: OpenDrawer; readonly 
     }
     case 'build': {
       const Panel = panels.build;
+      return <Panel target={drawer} />;
+    }
+    case 'task': {
+      const Panel = panels.task;
       return <Panel target={drawer} />;
     }
   }

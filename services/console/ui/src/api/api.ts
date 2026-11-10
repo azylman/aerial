@@ -2,6 +2,10 @@ import type {
   BuildDetailAPIResponse,
   BuildsAPIResponse,
   ClusterResponse,
+  DocketSearchAPIResponse,
+  DocketStatusFilter,
+  DocketTaskDetailAPIResponse,
+  DocketTasksAPIResponse,
   FactsAPIResponse,
   ScheduleRunsAPIResponse,
   SchedulesAPIResponse,
@@ -59,3 +63,12 @@ export const fetchBuilds = (signal: AbortSignal): Promise<BuildsAPIResponse> => 
 
 export const fetchBuildDetail = (id: string, signal: AbortSignal): Promise<BuildDetailAPIResponse> =>
   getJSON(`/api/builds/${encodeURIComponent(id)}`, signal);
+
+export const fetchDocketTasks = (status: DocketStatusFilter, signal: AbortSignal): Promise<DocketTasksAPIResponse> =>
+  getJSON(`/api/docket/tasks?${new URLSearchParams({ status }).toString()}`, signal);
+
+export const searchDocket = (q: string, status: DocketStatusFilter, signal: AbortSignal): Promise<DocketSearchAPIResponse> =>
+  getJSON(`/api/docket/search?${new URLSearchParams({ q, status }).toString()}`, signal);
+
+export const fetchDocketTask = (id: number, signal: AbortSignal): Promise<DocketTaskDetailAPIResponse> =>
+  getJSON(`/api/docket/tasks/${id}`, signal);

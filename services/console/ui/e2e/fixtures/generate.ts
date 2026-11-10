@@ -13,6 +13,12 @@ import type {
   ClusterResponse,
   CronSchedule,
   DeploymentStatus,
+  DocketSearchAPIResponse,
+  DocketStatusFilter,
+  DocketTaskCommentDTO,
+  DocketTaskDetailAPIResponse,
+  DocketTasksAPIResponse,
+  DocketTaskSummaryDTO,
   FactItem,
   FactsAPIResponse,
   OneShotSchedule,
@@ -331,6 +337,120 @@ const buildDetails: Record<string, BuildDetailAPIResponse> = Object.fromEntries(
   }),
 );
 
+// ---- /api/docket/tasks, /api/docket/tasks/{id}, /api/docket/search ----
+//
+// 30 tasks, ids 201-230, built without the PRNG so they never shift the fixtures above. Status:
+// every i % 5 === 3 is completed (6), every i % 10 === 9 is won't-do (3), the other 21 are open.
+// Tasks 207-230 are subtasks of 201-206 (parent 201 + i % 6); blocks and related edges are listed.
+
+const DOCKET_TOPICS = ['Kiosk widget refresh', 'Scheduler heartbeat jitter', 'Memory decay tuning', 'Console task tab', 'Webhook retry budget', 'Backup audit trail'];
+const DOCKET_BLOCKS: readonly (readonly [number, number])[] = [
+  [207, 208],
+  [207, 209],
+  [208, 210],
+  [213, 214],
+  [219, 214],
+  [221, 222],
+  [225, 226],
+];
+const DOCKET_RELATED: readonly (readonly [number, number])[] = [
+  [201, 213],
+  [207, 219],
+  [210, 222],
+];
+
+interface DocketNode {
+  readonly id: number;
+  readonly title: string;
+  readonly status: string;
+  readonly parentId: number | undefined;
+  readonly created: number;
+}
+
+const docketNodes: DocketNode[] = Array.from({ length: 30 }, (_, i) => ({
+  id: 201 + i,
+  title: `${DOCKET_TOPICS[i % 6] as string} step ${Math.floor(i / 6) + 1}`,
+  status: i % 5 === 3 ? 'completed' : i % 10 === 9 ? 'wont_do' : 'open',
+  parentId: i >= 6 ? 201 + (i % 6) : undefined,
+  created: -86400 * (30 - i),
+}));
+const docketById = new Map(docketNodes.map((n) => [n.id, n]));
+const edgeIds = (edges: readonly (readonly [number, number])[], from: 0 | 1, id: number): number[] =>
+  edges.filter((e) => e[from] === id).map((e) => e[from === 0 ? 1 : 0]);
+
+function docketSummary(n: DocketNode): DocketTaskSummaryDTO {
+  const blockedBy = edgeIds(DOCKET_BLOCKS, 1, n.id);
+  const blocks = edgeIds(DOCKET_BLOCKS, 0, n.id);
+  return {
+    id: n.id,
+    title: n.title,
+    status: n.status,
+    ...(n.parentId === undefined ? {} : { parent_id: n.parentId }),
+    ...(blockedBy.length > 0 ? { blocked_by: blockedBy } : {}),
+    ...(blocks.length > 0 ? { blocks } : {}),
+  };
+}
+const summaryOf = (id: number): DocketTaskSummaryDTO => docketSummary(docketById.get(id) as DocketNode);
+
+const DOCKET_STATUSES: readonly DocketStatusFilter[] = ['open', 'completed', 'wont_do', 'all'];
+const docketTasks: Record<string, DocketTasksAPIResponse> = Object.fromEntries(
+  DOCKET_STATUSES.map((status) => [
+    status,
+    { status: 'ok', tasks: docketNodes.filter((n) => status === 'all' || n.status === status).map(docketSummary) },
+  ]),
+);
+
+function docketComments(n: DocketNode, i: number): DocketTaskCommentDTO[] {
+  if (i % 4 !== 0) return [];
+  return [
+    { id: n.id * 10 + 1, author: 'aerial', comment: `Started on **${n.title}**.`, created_at: iso(-7200) },
+    { id: n.id * 10 + 2, author: 'operator', comment: 'Looks good, ship it with `tests`.', created_at: iso(-1800) },
+  ];
+}
+
+const docketDetails: Record<string, DocketTaskDetailAPIResponse> = Object.fromEntries(
+  docketNodes.map((n, i) => {
+    const subtasks = docketNodes.filter((c) => c.parentId === n.id).map(docketSummary);
+    const blocks = edgeIds(DOCKET_BLOCKS, 0, n.id).map(summaryOf);
+    const blockedBy = edgeIds(DOCKET_BLOCKS, 1, n.id).map(summaryOf);
+    const related = [...edgeIds(DOCKET_RELATED, 0, n.id), ...edgeIds(DOCKET_RELATED, 1, n.id)].map(summaryOf);
+    const comments = docketComments(n, i);
+    return [
+      String(n.id),
+      {
+        status: 'ok',
+        task: {
+          id: n.id,
+          title: n.title,
+          status: n.status,
+          description: `## Goal\n\nDeliver ${n.title.toLowerCase()}.\n\n- keep it **read-only**\n- add \`tests\``,
+          created_at: iso(n.created),
+          updated_at: iso(n.created + 3600),
+          ...(n.status === 'open' ? {} : { closed_at: iso(n.created + 7200) }),
+          ...(n.parentId === undefined ? {} : { parent: summaryOf(n.parentId) }),
+          ...(subtasks.length > 0 ? { subtasks } : {}),
+          ...(blocks.length > 0 ? { blocks } : {}),
+          ...(blockedBy.length > 0 ? { blocked_by: blockedBy } : {}),
+          ...(related.length > 0 ? { related } : {}),
+          ...(comments.length > 0 ? { comments } : {}),
+        },
+      },
+    ];
+  }),
+);
+
+// "kiosk" over open tasks: the four open Kiosk widget refresh steps, best match first.
+const docketSearch: Record<string, DocketSearchAPIResponse> = {
+  'q=kiosk&status=open': {
+    status: 'ok',
+    results: [213, 201, 225, 207].map((id, rank) => {
+      const n = docketById.get(id) as DocketNode;
+      const score = Math.round((0.92 - rank * 0.07) * 100) / 100;
+      return { id, title: n.title, status: n.status, ...(n.parentId === undefined ? {} : { parent_id: n.parentId }), score };
+    }),
+  },
+};
+
 const OUT = import.meta.dirname;
 const write = (name: string, value: unknown): void => writeFileSync(join(OUT, name), `${JSON.stringify(value, null, 2)}\n`);
 
@@ -340,3 +460,6 @@ write('schedule-runs.json', scheduleRuns);
 write('facts.json', factsResponse);
 write('builds.json', builds);
 write('build-details.json', buildDetails);
+write('docket-tasks.json', docketTasks);
+write('docket-task-details.json', docketDetails);
+write('docket-search.json', docketSearch);

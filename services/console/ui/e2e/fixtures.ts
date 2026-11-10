@@ -5,6 +5,9 @@
 import type { Page, Route } from '@playwright/test';
 import buildDetails from './fixtures/build-details.json' with { type: 'json' };
 import builds from './fixtures/builds.json' with { type: 'json' };
+import docketSearch from './fixtures/docket-search.json' with { type: 'json' };
+import docketTaskDetails from './fixtures/docket-task-details.json' with { type: 'json' };
+import docketTasks from './fixtures/docket-tasks.json' with { type: 'json' };
 import facts from './fixtures/facts.json' with { type: 'json' };
 import scheduleRuns from './fixtures/schedule-runs.json' with { type: 'json' };
 import schedules from './fixtures/schedules.json' with { type: 'json' };
@@ -16,15 +19,29 @@ const FIXED: Readonly<Record<string, unknown>> = {
   '/console/api/schedules/runs': scheduleRuns,
   '/console/api/facts': facts,
   '/console/api/builds': builds,
+  // Docket list and search answer per query string (pathname + search), like the real proxy.
+  '/console/api/docket/tasks?status=open': docketTasks.open,
+  '/console/api/docket/tasks?status=completed': docketTasks.completed,
+  '/console/api/docket/tasks?status=wont_do': docketTasks.wont_do,
+  '/console/api/docket/tasks?status=all': docketTasks.all,
+  '/console/api/docket/search?q=kiosk&status=open': docketSearch['q=kiosk&status=open'],
 };
 
-const DETAILS: Readonly<Record<string, unknown>> = buildDetails;
-const DETAIL_PREFIX = '/console/api/builds/';
+const DETAIL_ROUTES: readonly (readonly [prefix: string, bodies: Readonly<Record<string, unknown>>])[] = [
+  ['/console/api/builds/', buildDetails],
+  ['/console/api/docket/tasks/', docketTaskDetails],
+];
 
-/** Fixture body for an API pathname, or undefined when the suite has none. */
-export function fixtureFor(pathname: string): unknown {
+/**
+ * Fixture body for an API URL, or undefined when the suite has none. An exact pathname + query
+ * entry wins, then the bare pathname (queries ignored), then a per-id detail route.
+ */
+export function fixtureFor(pathname: string, search = ''): unknown {
+  if (pathname + search in FIXED) return FIXED[pathname + search];
   if (pathname in FIXED) return FIXED[pathname];
-  if (pathname.startsWith(DETAIL_PREFIX)) return DETAILS[decodeURIComponent(pathname.slice(DETAIL_PREFIX.length))];
+  for (const [prefix, bodies] of DETAIL_ROUTES) {
+    if (pathname.startsWith(prefix)) return bodies[decodeURIComponent(pathname.slice(prefix.length))];
+  }
   return undefined;
 }
 
@@ -32,10 +49,10 @@ export function fixtureFor(pathname: string): unknown {
 export async function serveFixtures(page: Page): Promise<string[]> {
   const unexpected: string[] = [];
   await page.route('**/console/api/**', async (route: Route) => {
-    const { pathname } = new URL(route.request().url());
-    const body = fixtureFor(pathname);
+    const { pathname, search } = new URL(route.request().url());
+    const body = fixtureFor(pathname, search);
     if (body === undefined) {
-      unexpected.push(`${route.request().method()} ${pathname}`);
+      unexpected.push(`${route.request().method()} ${pathname}${search}`);
       await route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"no fixture"}' });
       return;
     }

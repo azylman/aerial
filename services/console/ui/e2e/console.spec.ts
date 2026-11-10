@@ -28,6 +28,9 @@ async function runStep(page: Page, step: Step): Promise<void> {
     case 'openDrawer':
       await page.getByText(step.text, { exact: true }).first().click();
       return;
+    case 'click':
+      await page.locator(step.selector).first().click();
+      return;
     case 'press':
       await page.keyboard.press(step.key);
       return;

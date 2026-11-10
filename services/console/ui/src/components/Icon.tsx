@@ -4,7 +4,7 @@
 //   ⚡ bolt  🎯 target  ⏰ alarm  🧠 brain  🛠️ wrench  🚀 rocket  📋 clipboard  🔍 search  ⟳ refresh
 //   🔄 sync  ↗ external  ⬇️ arrow-down  ✓ check  ✕/× x  ⏱ timer  ⏳ hourglass  💬 chat  📦 package
 //   🟢/🟡 dot  🚨/⚠️ alert  ○ circle  ⊘ ban  🩺 pulse  🕒 clock  📅 calendar  🌌 sparkle  ⚙️ gear
-//   ▾ chevron-down  ▸ chevron-right
+//   ▾ chevron-down  ▸ chevron-right  ☑ checklist (docket)
 
 const PATHS = {
   alarm: 'M12 21a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM12 9v4l2 2M5 3 2 6M22 6l-3-3',
@@ -17,6 +17,7 @@ const PATHS = {
   calendar: 'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM16 2v4M8 2v4M3 10h18',
   chat: 'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z',
   check: 'M20 6 9 17l-5-5',
+  checklist: 'M10 6h11M10 12h11M10 18h11M3 6l1.5 1.5L7 5M3 12l1.5 1.5L7 11M3 18l1.5 1.5L7 17',
   'chevron-down': 'M6 9l6 6 6-6',
   'chevron-right': 'M9 6l6 6-6 6',
   circle: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z',

@@ -1,5 +1,14 @@
 import { Activity, type ComponentType, lazy, Suspense, useEffect, useState } from 'react';
-import { loadBuildsView, loadedBuildDetailPanel, loadedView, pollStatus, statusPolledOn, VIEW_LOADERS } from './boot';
+import {
+  loadBuildsView,
+  loadDocketView,
+  loadedBuildDetailPanel,
+  loadedTaskDetailPanel,
+  loadedView,
+  pollStatus,
+  statusPolledOn,
+  VIEW_LOADERS,
+} from './boot';
 import { Drawer, type DrawerPanels } from './components/Drawer';
 import { Header } from './components/Header';
 import { ServiceDiagnostics } from './features/telemetry/ServiceDiagnostics';
@@ -17,6 +26,7 @@ const VIEWS: Readonly<Record<TabId, ComponentType>> = {
   schedules: lazy(VIEW_LOADERS.schedules),
   memory: lazy(VIEW_LOADERS.memory),
   builds: lazy(VIEW_LOADERS.builds),
+  docket: lazy(VIEW_LOADERS.docket),
 };
 
 // The service body is tiny and opens from the telemetry view, so it ships in the main chunk and
@@ -28,7 +38,13 @@ const BuildDrawerBody: DrawerPanels['build'] = (props) => {
   const [Panel] = useState<DrawerPanels['build']>(() => loadedBuildDetailPanel() ?? LazyBuildDrawerBody);
   return <Panel {...props} />;
 };
-const DRAWER_PANELS: DrawerPanels = { service: ServiceDiagnostics, build: BuildDrawerBody };
+// The task body ships with the docket view the same way.
+const LazyTaskDrawerBody = lazy(() => loadDocketView().then((m) => ({ default: m.TaskDetailPanel })));
+const TaskDrawerBody: DrawerPanels['task'] = (props) => {
+  const [Panel] = useState<DrawerPanels['task']>(() => loadedTaskDetailPanel() ?? LazyTaskDrawerBody);
+  return <Panel {...props} />;
+};
+const DRAWER_PANELS: DrawerPanels = { service: ServiceDiagnostics, build: BuildDrawerBody, task: TaskDrawerBody };
 
 const STATUS_POLL_MS = 5000;
 
