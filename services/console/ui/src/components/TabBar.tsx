@@ -7,7 +7,7 @@ interface TabMeta {
   readonly id: TabId;
   readonly label: string;
   readonly icon: IconName;
-  /** Badge count selector; `null` for tabs without a badge (telemetry). */
+  /** Badge count selector; `null` for tabs without a badge (telemetry, docket). */
   readonly badge: ((state: ConsoleState) => number) | null;
 }
 
@@ -18,6 +18,7 @@ export const TABS: readonly TabMeta[] = [
   { id: 'schedules', label: 'SCHEDULES', icon: 'alarm', badge: (s) => schedulesBadgeCount(s.schedules.list.data) },
   { id: 'memory', label: 'MEMORY ARCHIVE', icon: 'brain', badge: (s) => memoryBadgeCount(s.memory.facts.data) },
   { id: 'builds', label: 'BUILD QUEUE', icon: 'wrench', badge: (s) => buildsBadgeCount(s.builds.list.data) },
+  { id: 'docket', label: 'DOCKET', icon: 'checklist', badge: null },
 ];
 
 export const tabButtonId = (tab: TabId): string => `tab-${tab}-btn`;

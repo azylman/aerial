@@ -17,8 +17,9 @@ import { type TabId, useConsoleStore } from './store/store';
 type ViewModule = { readonly default: ComponentType };
 
 type BuildsViewModule = typeof import('./features/builds/BuildsView');
+type DocketViewModule = typeof import('./features/docket/DocketView');
 
-const loaded: { buildDetailPanel?: DrawerPanels['build'] } = {};
+const loaded: { buildDetailPanel?: DrawerPanels['build']; taskDetailPanel?: DrawerPanels['task'] } = {};
 
 /** The builds chunk's loader; records its drawer body once the import resolves (see loadedView). */
 export const loadBuildsView = (): Promise<BuildsViewModule> =>
@@ -29,6 +30,16 @@ export const loadBuildsView = (): Promise<BuildsViewModule> =>
 
 /** The build drawer body once the builds chunk has resolved, else undefined; like loadedView. */
 export const loadedBuildDetailPanel = (): DrawerPanels['build'] | undefined => loaded.buildDetailPanel;
+
+/** The docket chunk's loader; records its task drawer body once the import resolves. */
+export const loadDocketView = (): Promise<DocketViewModule> =>
+  import('./features/docket/DocketView').then((mod) => {
+    loaded.taskDetailPanel = mod.TaskDetailPanel;
+    return mod;
+  });
+
+/** The task drawer body once the docket chunk has resolved, else undefined; like loadedView. */
+export const loadedTaskDetailPanel = (): DrawerPanels['task'] | undefined => loaded.taskDetailPanel;
 
 const loadedViews: Partial<Record<TabId, ComponentType>> = {};
 
@@ -50,6 +61,7 @@ export const VIEW_LOADERS: Readonly<Record<TabId, () => Promise<ViewModule>>> = 
   schedules: recordingLoader('schedules', () => import('./features/schedules/SchedulesView')),
   memory: recordingLoader('memory', () => import('./features/memory/MemoryView')),
   builds: recordingLoader('builds', loadBuildsView),
+  docket: recordingLoader('docket', loadDocketView),
 };
 
 /**
@@ -79,7 +91,8 @@ const SHELL_LOADS: readonly PollFetcher[] = [syncSchedules, syncFacts, syncBuild
 
 /**
  * Each view's own first polls beyond the shell loads: SchedulesView also polls the run feed, and
- * BuildsView's queue poll is the shell's syncBuilds load.
+ * BuildsView's queue poll is the shell's syncBuilds load. DocketView fetches nothing at boot: its
+ * list poll depends on the pill, so it starts when the view mounts.
  */
 const VIEW_POLLS: Readonly<Record<TabId, readonly PollFetcher[]>> = {
   telemetry: [],
@@ -87,6 +100,7 @@ const VIEW_POLLS: Readonly<Record<TabId, readonly PollFetcher[]>> = {
   schedules: [syncScheduleRuns],
   memory: [],
   builds: [],
+  docket: [],
 };
 
 /**

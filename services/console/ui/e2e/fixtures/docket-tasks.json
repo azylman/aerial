@@ -1,0 +1,446 @@
+{
+  "open": {
+    "status": "ok",
+    "tasks": [
+      {
+        "id": 201,
+        "title": "Kiosk widget refresh step 1",
+        "status": "open"
+      },
+      {
+        "id": 202,
+        "title": "Scheduler heartbeat jitter step 1",
+        "status": "open"
+      },
+      {
+        "id": 203,
+        "title": "Memory decay tuning step 1",
+        "status": "open"
+      },
+      {
+        "id": 205,
+        "title": "Webhook retry budget step 1",
+        "status": "open"
+      },
+      {
+        "id": 206,
+        "title": "Backup audit trail step 1",
+        "status": "open"
+      },
+      {
+        "id": 207,
+        "title": "Kiosk widget refresh step 2",
+        "status": "open",
+        "parent_id": 201,
+        "blocks": [
+          208,
+          209
+        ]
+      },
+      {
+        "id": 208,
+        "title": "Scheduler heartbeat jitter step 2",
+        "status": "open",
+        "parent_id": 202,
+        "blocked_by": [
+          207
+        ],
+        "blocks": [
+          210
+        ]
+      },
+      {
+        "id": 211,
+        "title": "Webhook retry budget step 2",
+        "status": "open",
+        "parent_id": 205
+      },
+      {
+        "id": 212,
+        "title": "Backup audit trail step 2",
+        "status": "open",
+        "parent_id": 206
+      },
+      {
+        "id": 213,
+        "title": "Kiosk widget refresh step 3",
+        "status": "open",
+        "parent_id": 201,
+        "blocks": [
+          214
+        ]
+      },
+      {
+        "id": 215,
+        "title": "Memory decay tuning step 3",
+        "status": "open",
+        "parent_id": 203
+      },
+      {
+        "id": 216,
+        "title": "Console task tab step 3",
+        "status": "open",
+        "parent_id": 204
+      },
+      {
+        "id": 217,
+        "title": "Webhook retry budget step 3",
+        "status": "open",
+        "parent_id": 205
+      },
+      {
+        "id": 218,
+        "title": "Backup audit trail step 3",
+        "status": "open",
+        "parent_id": 206
+      },
+      {
+        "id": 221,
+        "title": "Memory decay tuning step 4",
+        "status": "open",
+        "parent_id": 203,
+        "blocks": [
+          222
+        ]
+      },
+      {
+        "id": 222,
+        "title": "Console task tab step 4",
+        "status": "open",
+        "parent_id": 204,
+        "blocked_by": [
+          221
+        ]
+      },
+      {
+        "id": 223,
+        "title": "Webhook retry budget step 4",
+        "status": "open",
+        "parent_id": 205
+      },
+      {
+        "id": 225,
+        "title": "Kiosk widget refresh step 5",
+        "status": "open",
+        "parent_id": 201,
+        "blocks": [
+          226
+        ]
+      },
+      {
+        "id": 226,
+        "title": "Scheduler heartbeat jitter step 5",
+        "status": "open",
+        "parent_id": 202,
+        "blocked_by": [
+          225
+        ]
+      },
+      {
+        "id": 227,
+        "title": "Memory decay tuning step 5",
+        "status": "open",
+        "parent_id": 203
+      },
+      {
+        "id": 228,
+        "title": "Console task tab step 5",
+        "status": "open",
+        "parent_id": 204
+      }
+    ]
+  },
+  "completed": {
+    "status": "ok",
+    "tasks": [
+      {
+        "id": 204,
+        "title": "Console task tab step 1",
+        "status": "completed"
+      },
+      {
+        "id": 209,
+        "title": "Memory decay tuning step 2",
+        "status": "completed",
+        "parent_id": 203,
+        "blocked_by": [
+          207
+        ]
+      },
+      {
+        "id": 214,
+        "title": "Scheduler heartbeat jitter step 3",
+        "status": "completed",
+        "parent_id": 202,
+        "blocked_by": [
+          213,
+          219
+        ]
+      },
+      {
+        "id": 219,
+        "title": "Kiosk widget refresh step 4",
+        "status": "completed",
+        "parent_id": 201,
+        "blocks": [
+          214
+        ]
+      },
+      {
+        "id": 224,
+        "title": "Backup audit trail step 4",
+        "status": "completed",
+        "parent_id": 206
+      },
+      {
+        "id": 229,
+        "title": "Webhook retry budget step 5",
+        "status": "completed",
+        "parent_id": 205
+      }
+    ]
+  },
+  "wont_do": {
+    "status": "ok",
+    "tasks": [
+      {
+        "id": 210,
+        "title": "Console task tab step 2",
+        "status": "wont_do",
+        "parent_id": 204,
+        "blocked_by": [
+          208
+        ]
+      },
+      {
+        "id": 220,
+        "title": "Scheduler heartbeat jitter step 4",
+        "status": "wont_do",
+        "parent_id": 202
+      },
+      {
+        "id": 230,
+        "title": "Backup audit trail step 5",
+        "status": "wont_do",
+        "parent_id": 206
+      }
+    ]
+  },
+  "all": {
+    "status": "ok",
+    "tasks": [
+      {
+        "id": 201,
+        "title": "Kiosk widget refresh step 1",
+        "status": "open"
+      },
+      {
+        "id": 202,
+        "title": "Scheduler heartbeat jitter step 1",
+        "status": "open"
+      },
+      {
+        "id": 203,
+        "title": "Memory decay tuning step 1",
+        "status": "open"
+      },
+      {
+        "id": 204,
+        "title": "Console task tab step 1",
+        "status": "completed"
+      },
+      {
+        "id": 205,
+        "title": "Webhook retry budget step 1",
+        "status": "open"
+      },
+      {
+        "id": 206,
+        "title": "Backup audit trail step 1",
+        "status": "open"
+      },
+      {
+        "id": 207,
+        "title": "Kiosk widget refresh step 2",
+        "status": "open",
+        "parent_id": 201,
+        "blocks": [
+          208,
+          209
+        ]
+      },
+      {
+        "id": 208,
+        "title": "Scheduler heartbeat jitter step 2",
+        "status": "open",
+        "parent_id": 202,
+        "blocked_by": [
+          207
+        ],
+        "blocks": [
+          210
+        ]
+      },
+      {
+        "id": 209,
+        "title": "Memory decay tuning step 2",
+        "status": "completed",
+        "parent_id": 203,
+        "blocked_by": [
+          207
+        ]
+      },
+      {
+        "id": 210,
+        "title": "Console task tab step 2",
+        "status": "wont_do",
+        "parent_id": 204,
+        "blocked_by": [
+          208
+        ]
+      },
+      {
+        "id": 211,
+        "title": "Webhook retry budget step 2",
+        "status": "open",
+        "parent_id": 205
+      },
+      {
+        "id": 212,
+        "title": "Backup audit trail step 2",
+        "status": "open",
+        "parent_id": 206
+      },
+      {
+        "id": 213,
+        "title": "Kiosk widget refresh step 3",
+        "status": "open",
+        "parent_id": 201,
+        "blocks": [
+          214
+        ]
+      },
+      {
+        "id": 214,
+        "title": "Scheduler heartbeat jitter step 3",
+        "status": "completed",
+        "parent_id": 202,
+        "blocked_by": [
+          213,
+          219
+        ]
+      },
+      {
+        "id": 215,
+        "title": "Memory decay tuning step 3",
+        "status": "open",
+        "parent_id": 203
+      },
+      {
+        "id": 216,
+        "title": "Console task tab step 3",
+        "status": "open",
+        "parent_id": 204
+      },
+      {
+        "id": 217,
+        "title": "Webhook retry budget step 3",
+        "status": "open",
+        "parent_id": 205
+      },
+      {
+        "id": 218,
+        "title": "Backup audit trail step 3",
+        "status": "open",
+        "parent_id": 206
+      },
+      {
+        "id": 219,
+        "title": "Kiosk widget refresh step 4",
+        "status": "completed",
+        "parent_id": 201,
+        "blocks": [
+          214
+        ]
+      },
+      {
+        "id": 220,
+        "title": "Scheduler heartbeat jitter step 4",
+        "status": "wont_do",
+        "parent_id": 202
+      },
+      {
+        "id": 221,
+        "title": "Memory decay tuning step 4",
+        "status": "open",
+        "parent_id": 203,
+        "blocks": [
+          222
+        ]
+      },
+      {
+        "id": 222,
+        "title": "Console task tab step 4",
+        "status": "open",
+        "parent_id": 204,
+        "blocked_by": [
+          221
+        ]
+      },
+      {
+        "id": 223,
+        "title": "Webhook retry budget step 4",
+        "status": "open",
+        "parent_id": 205
+      },
+      {
+        "id": 224,
+        "title": "Backup audit trail step 4",
+        "status": "completed",
+        "parent_id": 206
+      },
+      {
+        "id": 225,
+        "title": "Kiosk widget refresh step 5",
+        "status": "open",
+        "parent_id": 201,
+        "blocks": [
+          226
+        ]
+      },
+      {
+        "id": 226,
+        "title": "Scheduler heartbeat jitter step 5",
+        "status": "open",
+        "parent_id": 202,
+        "blocked_by": [
+          225
+        ]
+      },
+      {
+        "id": 227,
+        "title": "Memory decay tuning step 5",
+        "status": "open",
+        "parent_id": 203
+      },
+      {
+        "id": 228,
+        "title": "Console task tab step 5",
+        "status": "open",
+        "parent_id": 204
+      },
+      {
+        "id": 229,
+        "title": "Webhook retry budget step 5",
+        "status": "completed",
+        "parent_id": 205
+      },
+      {
+        "id": 230,
+        "title": "Backup audit trail step 5",
+        "status": "wont_do",
+        "parent_id": 206
+      }
+    ]
+  }
+}

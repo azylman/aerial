@@ -2,6 +2,8 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import buildsRaw from '../e2e/fixtures/builds.json?raw';
+import docketDetailsRaw from '../e2e/fixtures/docket-task-details.json?raw';
+import docketTasksRaw from '../e2e/fixtures/docket-tasks.json?raw';
 import factsRaw from '../e2e/fixtures/facts.json?raw';
 import runsRaw from '../e2e/fixtures/schedule-runs.json?raw';
 import schedulesRaw from '../e2e/fixtures/schedules.json?raw';
@@ -36,6 +38,7 @@ vi.mock('./features/tasks/TasksView', (orig) => countingView('tasks', orig));
 vi.mock('./features/schedules/SchedulesView', (orig) => countingView('schedules', orig));
 vi.mock('./features/memory/MemoryView', (orig) => countingView('memory', orig));
 vi.mock('./features/builds/BuildsView', (orig) => countingView('builds', orig));
+vi.mock('./features/docket/DocketView', (orig) => countingView('docket', orig));
 
 const BODIES: Readonly<Record<string, unknown>> = {
   '/console/api/status': {
@@ -192,7 +195,7 @@ describe('first commit', () => {
   });
 
   // Fresh modules per row, so no earlier test has already resolved the view's React.lazy wrapper.
-  it.each(['telemetry', 'tasks', 'schedules', 'memory', 'builds'] as const)(
+  it.each(['telemetry', 'tasks', 'schedules', 'memory', 'builds', 'docket'] as const)(
     '%s renders on the first commit once its module has resolved',
     async (tab) => {
       const [fresh, freshBoot, route] = await Promise.all([import('./App'), import('./boot'), import('./hooks/useHashRoute')]);
@@ -307,6 +310,8 @@ const FIXTURE_BODIES: Readonly<Record<string, string>> = {
   '/console/api/schedules/runs?limit=50&offset=0': runsRaw,
   '/console/api/facts': factsRaw,
   '/console/api/builds': buildsRaw,
+  '/console/api/docket/tasks?status=open': JSON.stringify((JSON.parse(docketTasksRaw) as Record<string, unknown>)['open']),
+  '/console/api/docket/tasks/201': JSON.stringify((JSON.parse(docketDetailsRaw) as Record<string, unknown>)['201']),
 };
 
 function seedAll(): void {
@@ -347,7 +352,19 @@ describe('App with a fully seeded store', () => {
     expect(screen.getByText('ORDERED BUILD CHUNKS (3)')).toBeTruthy();
   });
 
-  it('walks all five tabs by hash, mounting exactly one view at a time', async () => {
+  // The task body ships in the docket chunk, yet the drawer opens from any tab.
+  it('opens a task drawer from another tab before the docket chunk has loaded', async () => {
+    window.history.replaceState(null, '', '/console/next/#telemetry');
+    initRouteFromLocation();
+    render(<App />);
+    await flush();
+    await act(async () => useConsoleStore.getState().openDrawer({ kind: 'task', id: 201 }));
+    await flush();
+    expect(screen.getByRole('dialog', { name: 'TASK // #201 KIOSK WIDGET REFRESH STEP 1' })).toBeTruthy();
+    expect(screen.getByText('COMMENTS (2)')).toBeTruthy();
+  });
+
+  it('walks all six tabs by hash, mounting exactly one view at a time', async () => {
     window.history.replaceState(null, '', '/console/next/#telemetry');
     initRouteFromLocation();
     render(<App />);
@@ -357,6 +374,7 @@ describe('App with a fully seeded store', () => {
       { hash: '#schedules', panel: 'schedules-view', heading: 'ACTIVE SCHEDULED ROUTINES' },
       { hash: '#memory', panel: 'memory-view', heading: 'TOTAL MEMORY NODES' },
       { hash: '#builds', panel: 'builds-view', heading: 'RUNNING BUILDS' },
+      { hash: '#docket', panel: 'docket-view', heading: '21 TASKS' },
     ];
     for (const step of walk) {
       await act(async () => {
@@ -368,7 +386,13 @@ describe('App with a fully seeded store', () => {
       expect(screen.getByRole('tab', { selected: true }).id).toBe(`tab-${step.panel.replace('-view', '')}-btn`);
       expect(screen.getByText(step.heading)).toBeTruthy();
     }
-    // The build drawer body ships in the builds chunk and opens from a card.
+    // The task drawer body ships in the docket chunk and opens from a card.
+    await act(async () => screen.getByText('Kiosk widget refresh step 1').click());
+    await flush();
+    expect(screen.getByRole('dialog', { name: 'TASK // #201 KIOSK WIDGET REFRESH STEP 1' })).toBeTruthy();
+    expect(screen.getByText('COMMENTS (2)')).toBeTruthy();
+    // Back on the builds tab, the build drawer body ships in the builds chunk and opens from a card.
+    await goTo('#builds');
     await act(async () => screen.getByText('Console React rewrite #1').click());
     await flush();
     expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();

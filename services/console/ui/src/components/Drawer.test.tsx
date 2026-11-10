@@ -1,13 +1,14 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BuildDetailAPIResponse, VanadisBuildDTO } from '../api/types';
+import type { BuildDetailAPIResponse, DocketTaskLookup, VanadisBuildDTO } from '../api/types';
 import { useConsoleStore } from '../store/store';
 import { Drawer, type DrawerPanels, drawerTitle, type OpenDrawer } from './Drawer';
 
 const PANELS: DrawerPanels = {
   service: ({ target }) => <p>service body {target.name}</p>,
   build: ({ target }) => <p>build body {target.id}</p>,
+  task: ({ target }) => <p>task body {target.id}</p>,
 };
 
 const build = (id: string, title: string): VanadisBuildDTO => ({
@@ -26,16 +27,26 @@ const detail = (id: string, title: string, key: 'build' | 'entry' = 'build'): Bu
   [key]: build(id, title),
 });
 
+const lookup = (id: number, title: string | null): DocketTaskLookup => ({
+  id,
+  task: title === null ? null : { id, title, status: 'open', created_at: '2026-11-08T11:00:00Z', updated_at: '2026-11-08T11:00:00Z' },
+});
+
 describe('drawerTitle', () => {
-  it.each<{ name: string; drawer: OpenDrawer; detail: BuildDetailAPIResponse | null; want: string }>([
+  it.each<{ name: string; drawer: OpenDrawer; detail: BuildDetailAPIResponse | null; task?: DocketTaskLookup; want: string }>([
     { name: 'service', drawer: { kind: 'service', name: 'aerial-eri' }, detail: null, want: 'DIAGNOSTICS // AERIAL-ERI' },
     { name: 'build before its detail', drawer: { kind: 'build', id: 'build-17-ab' }, detail: null, want: 'BUILD // BUILD-17-AB' },
     { name: 'build with its detail', drawer: { kind: 'build', id: 'b-1' }, detail: detail('b-1', 'Ship it #1'), want: 'BUILD // SHIP IT #1' },
     { name: 'legacy entry key', drawer: { kind: 'build', id: 'b-1' }, detail: detail('b-1', 'Old', 'entry'), want: 'BUILD // OLD' },
     { name: 'untitled build', drawer: { kind: 'build', id: 'b-1' }, detail: detail('b-1', ''), want: 'BUILD // B-1' },
     { name: 'another build\'s detail', drawer: { kind: 'build', id: 'b-2' }, detail: detail('b-1', 'Ship it #1'), want: 'BUILD // B-2' },
-  ])('$name', ({ drawer, detail: d, want }) => {
-    expect(drawerTitle(drawer, d)).toBe(want);
+    { name: 'task before its detail', drawer: { kind: 'task', id: 7 }, detail: null, want: 'TASK // #7' },
+    { name: 'task with its detail', drawer: { kind: 'task', id: 7 }, detail: null, task: lookup(7, 'Fix the widget'), want: 'TASK // #7 FIX THE WIDGET' },
+    { name: 'untitled task', drawer: { kind: 'task', id: 7 }, detail: null, task: lookup(7, ''), want: 'TASK // #7' },
+    { name: 'another task\'s detail', drawer: { kind: 'task', id: 8 }, detail: null, task: lookup(7, 'Fix the widget'), want: 'TASK // #8' },
+    { name: 'missing task', drawer: { kind: 'task', id: 7 }, detail: null, task: lookup(7, null), want: 'TASK // #7' },
+  ])('$name', ({ drawer, detail: d, task, want }) => {
+    expect(drawerTitle(drawer, d, task ?? null)).toBe(want);
   });
 });
 
@@ -48,6 +59,7 @@ type Step =
   | { readonly close: 'escape' | 'button' | 'overlay' | 'store' }
   | { readonly key: string }
   | { readonly detail: BuildDetailAPIResponse }
+  | { readonly task: DocketTaskLookup }
   | { readonly transition: 'transitionend' | 'transitioncancel'; readonly property: string; readonly on: 'panel' | 'child' };
 
 interface Row {
@@ -63,6 +75,7 @@ interface Row {
 
 const SERVICE: OpenDrawer = { kind: 'service', name: 'haro' };
 const BUILD: OpenDrawer = { kind: 'build', id: 'b-42' };
+const TASK: OpenDrawer = { kind: 'task', id: 42 };
 const PANEL_FADE: Step = { transition: 'transitionend', property: 'opacity', on: 'panel' };
 
 /** jsdom has no TransitionEvent, so build a bubbling Event carrying the property name. */
@@ -86,6 +99,8 @@ function runStep(step: Step, container: HTMLElement): void {
     fireEvent.keyDown(window, { key: step.key });
   } else if ('detail' in step) {
     useConsoleStore.getState().setBuildDetail(step.detail);
+  } else if ('task' in step) {
+    useConsoleStore.getState().setDocketTask(step.task);
   } else {
     const target = step.on === 'panel' ? panel : (panel.querySelector('.drawer-close') as Element);
     dispatchTransition(target, step.transition, step.property);
@@ -111,6 +126,23 @@ describe('Drawer', () => {
       wantActive: true,
       wantTitle: 'BUILD // SHIP IT #1',
       wantBody: 'build body b-42',
+      wantFocus: 'dialog',
+    },
+    { name: 'opens the task panel', steps: [{ open: TASK }], wantActive: true, wantTitle: 'TASK // #42', wantBody: 'task body 42', wantFocus: 'dialog' },
+    {
+      name: 'retitles an open task drawer when its detail lands',
+      steps: [{ open: TASK }, { task: lookup(42, 'Wire the tab') }],
+      wantActive: true,
+      wantTitle: 'TASK // #42 WIRE THE TAB',
+      wantBody: 'task body 42',
+      wantFocus: 'dialog',
+    },
+    {
+      name: 'retargets an open task drawer',
+      steps: [{ open: TASK }, { open: { kind: 'task', id: 9 } }],
+      wantActive: true,
+      wantTitle: 'TASK // #9',
+      wantBody: 'task body 9',
       wantFocus: 'dialog',
     },
     { name: 'shows a drawer already open at mount', preopen: BUILD, steps: [], wantActive: true, wantTitle: 'BUILD // B-42', wantBody: 'build body b-42', wantFocus: 'dialog' },

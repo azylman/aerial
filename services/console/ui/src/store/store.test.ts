@@ -52,11 +52,15 @@ describe('fault', () => {
 });
 
 type SliceName = keyof ConsoleState;
-const SLICES: readonly SliceName[] = ['status', 'schedules', 'memory', 'builds', 'drawer', 'ui'];
+const SLICES: readonly SliceName[] = ['status', 'schedules', 'memory', 'builds', 'docket', 'drawer', 'ui'];
 
 const CLUSTER = { system_time: 't1', services: [{ name: 'eri', status: 'healthy' }] };
 const RUNS = { status: 'ok', total: 1, limit: 50, offset: 0, runs: [{ id: 'r1', status: 'success' }] };
 const ok = <T>(data: T): Resource<T> => ({ data, error: null });
+const EMPTY = { data: null, error: null };
+const TASKS = { status: 'ok', tasks: [{ id: 3, title: 'a', status: 'open' }] };
+const HITS = { status: 'ok', results: [{ id: 3, title: 'a', status: 'open', score: 0.9 }] };
+const LOOKUP = { id: 3, task: null };
 
 interface ActionRow {
   name: string;
@@ -85,6 +89,16 @@ const actionRows: ActionRow[] = [
   { name: 'failBuilds', seed: {}, action: 'failBuilds', arg: 'boom', wantNotified: true, wantSlice: 'builds', wantValue: { list: { data: null, error: 'boom' }, detail: { data: null, error: null } } },
   { name: 'setBuildDetail', seed: {}, action: 'setBuildDetail', arg: { status: 'ok', chunks: [] }, wantNotified: true, wantSlice: 'builds', wantValue: { list: { data: null, error: null }, detail: ok({ status: 'ok', chunks: [] }) } },
   { name: 'failBuildDetail', seed: {}, action: 'failBuildDetail', arg: 'Build not found', wantNotified: true, wantSlice: 'builds', wantValue: { list: { data: null, error: null }, detail: { data: null, error: 'Build not found' } } },
+  { name: 'setDocketTasks', seed: {}, action: 'setDocketTasks', arg: TASKS, wantNotified: true, wantSlice: 'docket', wantValue: { list: ok(TASKS), search: EMPTY, detail: EMPTY } },
+  { name: 'failDocketTasks keeps stale data', seed: { docket: { list: ok(TASKS), search: EMPTY, detail: EMPTY } }, action: 'failDocketTasks', arg: 'HTTP 503', wantNotified: true, wantSlice: 'docket', wantValue: { list: { data: TASKS, error: 'HTTP 503' }, search: EMPTY, detail: EMPTY } },
+  { name: 'setDocketSearch', seed: {}, action: 'setDocketSearch', arg: HITS, wantNotified: true, wantSlice: 'docket', wantValue: { list: EMPTY, search: ok(HITS), detail: EMPTY } },
+  { name: 'failDocketSearch', seed: {}, action: 'failDocketSearch', arg: 'boom', wantNotified: true, wantSlice: 'docket', wantValue: { list: EMPTY, search: { data: null, error: 'boom' }, detail: EMPTY } },
+  { name: 'setDocketTask', seed: {}, action: 'setDocketTask', arg: LOOKUP, wantNotified: true, wantSlice: 'docket', wantValue: { list: EMPTY, search: EMPTY, detail: ok(LOOKUP) } },
+  { name: 'setDocketTask with equal data is silent', seed: { docket: { list: EMPTY, search: EMPTY, detail: ok(LOOKUP) } }, action: 'setDocketTask', arg: LOOKUP, wantNotified: false, wantSlice: 'docket', wantValue: { list: EMPTY, search: EMPTY, detail: ok(LOOKUP) } },
+  { name: 'failDocketTask', seed: {}, action: 'failDocketTask', arg: 'down', wantNotified: true, wantSlice: 'docket', wantValue: { list: EMPTY, search: EMPTY, detail: { data: null, error: 'down' } } },
+  { name: 'openDrawer task', seed: {}, action: 'openDrawer', arg: { kind: 'task', id: 3 }, wantNotified: true, wantSlice: 'drawer', wantValue: { kind: 'task', id: 3 } },
+  { name: 'openDrawer same task is silent', seed: { drawer: { kind: 'task', id: 3 } }, action: 'openDrawer', arg: { kind: 'task', id: 3 }, wantNotified: false, wantSlice: 'drawer', wantValue: { kind: 'task', id: 3 } },
+  { name: 'openDrawer other task', seed: { drawer: { kind: 'task', id: 3 } }, action: 'openDrawer', arg: { kind: 'task', id: 4 }, wantNotified: true, wantSlice: 'drawer', wantValue: { kind: 'task', id: 4 } },
   { name: 'openDrawer service', seed: {}, action: 'openDrawer', arg: { kind: 'service', name: 'eri' }, wantNotified: true, wantSlice: 'drawer', wantValue: { kind: 'service', name: 'eri' } },
   { name: 'openDrawer same service is silent', seed: { drawer: { kind: 'service', name: 'eri' } }, action: 'openDrawer', arg: { kind: 'service', name: 'eri' }, wantNotified: false, wantSlice: 'drawer', wantValue: { kind: 'service', name: 'eri' } },
   { name: 'openDrawer other service', seed: { drawer: { kind: 'service', name: 'eri' } }, action: 'openDrawer', arg: { kind: 'service', name: 'haro' }, wantNotified: true, wantSlice: 'drawer', wantValue: { kind: 'service', name: 'haro' } },
@@ -122,12 +136,13 @@ describe('useConsoleStore actions', () => {
   });
 
   it('starts on telemetry with every resource empty and the drawer closed', () => {
-    const { status, schedules, memory, builds, drawer, ui } = useConsoleStore.getState();
-    expect({ status, schedules, memory, builds, drawer, ui }).toEqual({
+    const { status, schedules, memory, builds, docket, drawer, ui } = useConsoleStore.getState();
+    expect({ status, schedules, memory, builds, docket, drawer, ui }).toEqual({
       status: { cluster: { data: null, error: null } },
       schedules: { list: { data: null, error: null }, runs: { data: null, error: null } },
       memory: { facts: { data: null, error: null } },
       builds: { list: { data: null, error: null }, detail: { data: null, error: null } },
+      docket: { list: { data: null, error: null }, search: { data: null, error: null }, detail: { data: null, error: null } },
       drawer: { kind: 'closed' },
       ui: { activeTab: 'telemetry' },
     });

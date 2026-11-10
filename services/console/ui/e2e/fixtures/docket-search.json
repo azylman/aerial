@@ -1,0 +1,34 @@
+{
+  "q=kiosk&status=open": {
+    "status": "ok",
+    "results": [
+      {
+        "id": 213,
+        "title": "Kiosk widget refresh step 3",
+        "status": "open",
+        "parent_id": 201,
+        "score": 0.92
+      },
+      {
+        "id": 201,
+        "title": "Kiosk widget refresh step 1",
+        "status": "open",
+        "score": 0.85
+      },
+      {
+        "id": 225,
+        "title": "Kiosk widget refresh step 5",
+        "status": "open",
+        "parent_id": 201,
+        "score": 0.78
+      },
+      {
+        "id": 207,
+        "title": "Kiosk widget refresh step 2",
+        "status": "open",
+        "parent_id": 201,
+        "score": 0.71
+      }
+    ]
+  }
+}

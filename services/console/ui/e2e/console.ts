@@ -30,6 +30,8 @@ export type Step =
   | { readonly kind: 'type'; readonly placeholder: string; readonly text: string }
   | { readonly kind: 'pill'; readonly label: string }
   | { readonly kind: 'openDrawer'; readonly text: string }
+  /** Clicks the first element matching a CSS selector (for controls whose text is not unique). */
+  | { readonly kind: 'click'; readonly selector: string }
   | { readonly kind: 'press'; readonly key: string }
   /** Jumps the page to its top-left corner at once (no smooth or keyboard scroll animation). */
   | { readonly kind: 'scrollTop' }
@@ -78,7 +80,7 @@ const BRAND = ['PERMET COMMAND HUD // TACTICAL GATEWAY', 'PERMET SCORE'];
 const DOCK = ['🛰️ Console', '📈 Grafana', '📚 Docs', '🔭 Agentsview', '🏠 Homepage', '🏡 Home Assistant'];
 
 const SHELL_COUNTS: readonly CountExpectation[] = [
-  { selector: '.view-tab-btn', count: 5 },
+  { selector: '.view-tab-btn', count: 6 },
   { selector: '.tab-badge', count: 4 },
   { selector: '.dock-chip', count: 6 },
   { selector: '.dock-chip.active', count: 1 },
@@ -376,6 +378,30 @@ const BUILD_DRAWER_COUNTS: readonly CountExpectation[] = [
   { selector: '.diagnostic-drawer.active .chunk-tag.symbol-tag', count: 3 },
 ];
 
+// ---- Docket (docket-*.json: 30 tasks, ids 201-230; 21 open, 6 completed, 3 won't do) ----
+
+const DOCKET_SEARCH = "SEARCH TASKS (PRESS '/' TO FOCUS)...";
+
+/** The docket tab never polls status, so ACTIVE TASKS stays 0; the tab itself has no badge. */
+const docketExpect = (texts: readonly string[], counts: readonly CountExpectation[]): Expectation => ({
+  hash: '#docket',
+  activeTab: 'DOCKET',
+  badges: BADGES_NO_STATUS,
+  texts: ['DOCKET', ...texts],
+  counts: [
+    { selector: '.view-tab-btn', count: 6 },
+    { selector: '#tab-docket-btn .tab-badge', count: 0 },
+    { selector: '.docket-pills .cat-pill.active', count: 1 },
+    ...counts,
+  ],
+});
+
+/** Opens task #207 from its card and waits for its detail (the header gains the title). */
+const OPEN_TASK_207: readonly Step[] = [
+  { kind: 'openDrawer', text: 'Kiosk widget refresh step 2' },
+  { kind: 'openDrawer', text: 'TASK // #207 KIOSK WIDGET REFRESH STEP 2' },
+];
+
 export const CONSOLE_ROWS: readonly ConsoleRow[] = [
   {
     name: 'shell: bare URL lands on telemetry',
@@ -405,7 +431,7 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
       badges: BADGES_NO_STATUS,
       texts: [...BRAND, PERMET_STATIC],
       counts: [
-        { selector: '.view-tab-btn', count: 5 },
+        { selector: '.view-tab-btn', count: 6 },
         { selector: '.dock-chip', count: 0 },
       ],
     },
@@ -696,5 +722,54 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
       { kind: 'clickTab', tab: 'BUILD QUEUE' },
     ],
     expect: { ...buildsExpect(BUILDS_DEFAULT_TEXTS, 'ALL', ALL_BUILD_CARDS), badges: BADGES_ALL },
+  },
+  {
+    // Newest first: #230 is won't do and #229 completed, so #228 leads; #208, #222 and #226 are blocked.
+    name: 'docket: deep link lists open tasks newest first with blocked counts',
+    start: '#docket',
+    steps: [],
+    expect: docketExpect(['21 TASKS', 'Console task tab step 5', 'BLOCKED BY 1'], [
+      { selector: '.docket-card', count: 21 },
+      { selector: '.docket-card:first-child[data-task-id="228"]', count: 1 },
+      { selector: '.docket-blocked', count: 3 },
+      { selector: '.docket-pills .cat-pill.active:has-text("OPEN")', count: 1 },
+    ]),
+  },
+  {
+    name: 'docket: status pills filter the list',
+    start: '#docket',
+    steps: [
+      { kind: 'pill', label: 'COMPLETED' },
+      { kind: 'openDrawer', text: '6 TASKS' },
+      { kind: 'pill', label: 'ALL' },
+    ],
+    expect: docketExpect(['30 TASKS'], [
+      { selector: '.docket-card', count: 30 },
+      { selector: '.docket-card:first-child[data-task-id="230"]', count: 1 },
+      { selector: '.docket-status-wont_do', count: 3 },
+      { selector: '.docket-status-completed', count: 6 },
+    ]),
+  },
+  {
+    name: 'docket: search shows ranked results instead of the list',
+    start: '#docket',
+    steps: [{ kind: 'type', placeholder: DOCKET_SEARCH, text: 'kiosk' }],
+    expect: docketExpect(['4 RESULTS', 'Kiosk widget refresh step 3'], [
+      { selector: '.docket-card', count: 4 },
+      { selector: '.docket-card:first-child[data-task-id="213"]', count: 1 },
+    ]),
+  },
+  {
+    name: 'docket: a task drawer shows its graph and a node retargets it',
+    start: '#docket',
+    steps: [...OPEN_TASK_207, { kind: 'click', selector: '.diagnostic-drawer.active .docket-graph-parent .docket-node' }],
+    expect: docketExpect(['TASK // #201 KIOSK WIDGET REFRESH STEP 1', 'Deliver kiosk widget refresh step 1.', 'SUBTASKS', 'RELATED', 'COMMENTS (2)', 'operator', '30m AGO'], [
+      { selector: '.diagnostic-drawer.active', count: 1 },
+      { selector: '.diagnostic-drawer.active .docket-graph-parent', count: 0 },
+      { selector: '.diagnostic-drawer.active .docket-graph-subtasks .docket-node', count: 4 },
+      { selector: '.diagnostic-drawer.active .docket-graph-related .docket-node', count: 1 },
+      { selector: '.diagnostic-drawer.active .docket-comment', count: 2 },
+      { selector: '.diagnostic-drawer.active h2.md-heading', count: 1 },
+    ]),
   },
 ];

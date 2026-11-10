@@ -4,7 +4,7 @@ import { type TabId, useConsoleStore } from '../store/store';
 // Port of navigateTab/setupTabs from static/app.js: every tab owns `#<id>`, unknown or empty
 // hashes land on telemetry, and the hash is rewritten to the canonical form on load.
 
-export const TAB_IDS = ['telemetry', 'tasks', 'schedules', 'memory', 'builds'] as const satisfies readonly TabId[];
+export const TAB_IDS = ['telemetry', 'tasks', 'schedules', 'memory', 'builds', 'docket'] as const satisfies readonly TabId[];
 
 export const DEFAULT_TAB: TabId = 'telemetry';
 

@@ -11,6 +11,7 @@ describe('statusPolledOn', () => {
     { tab: 'schedules', want: false },
     { tab: 'memory', want: false },
     { tab: 'builds', want: false },
+    { tab: 'docket', want: false },
   ] as const)('$tab -> $want', ({ tab, want }) => {
     expect(statusPolledOn(tab)).toBe(want);
   });
@@ -68,6 +69,7 @@ describe('startBoot', () => {
     },
     { tab: 'memory', wantRequests: ['/console/api/schedules', '/console/api/facts', '/console/api/builds'] },
     { tab: 'builds', wantRequests: ['/console/api/schedules', '/console/api/facts', '/console/api/builds'] },
+    { tab: 'docket', wantRequests: ['/console/api/schedules', '/console/api/facts', '/console/api/builds'] },
   ])('$tab starts its view chunk and first fetches before any render', async ({ tab, wantRequests }) => {
     const settled = startBoot(tab);
     // Every request and the chunk download are issued synchronously, before React renders.
@@ -130,5 +132,29 @@ describe('loadedBuildDetailPanel', () => {
     if (load === 'loadBuildsView') await boot.loadBuildsView();
     if (load === 'VIEW_LOADERS.builds') await boot.VIEW_LOADERS.builds();
     expect(boot.loadedBuildDetailPanel()).toBe(wantLoaded ? buildsView.BuildDetailPanel : undefined);
+  });
+});
+
+interface LoadedTaskDetailPanelRow {
+  name: string;
+  load: 'none' | 'loadDocketView' | 'VIEW_LOADERS.docket';
+  wantLoaded: boolean;
+}
+
+describe('loadedTaskDetailPanel', () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it.each<LoadedTaskDetailPanelRow>([
+    { name: 'undefined before the docket chunk loads', load: 'none', wantLoaded: false },
+    { name: 'the drawer body once loadDocketView resolves', load: 'loadDocketView', wantLoaded: true },
+    { name: 'the drawer body once the docket view loader resolves', load: 'VIEW_LOADERS.docket', wantLoaded: true },
+  ])('$name', async ({ load, wantLoaded }) => {
+    vi.resetModules();
+    const [boot, docketView] = await Promise.all([import('./boot'), import('./features/docket/DocketView')]);
+    if (load === 'loadDocketView') await boot.loadDocketView();
+    if (load === 'VIEW_LOADERS.docket') await boot.VIEW_LOADERS.docket();
+    expect(boot.loadedTaskDetailPanel()).toBe(wantLoaded ? docketView.TaskDetailPanel : undefined);
   });
 });

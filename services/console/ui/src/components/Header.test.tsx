@@ -57,7 +57,7 @@ describe('Header', () => {
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('AERIAL v3.0');
     expect(screen.getByText('PERMET COMMAND HUD // TACTICAL GATEWAY')).toBeTruthy();
     expect(screen.getByText('LVL 5 // ACTIVE')).toBeTruthy();
-    expect(badges()).toEqual({ TELEMETRY: null, 'ACTIVE TASKS': '0', SCHEDULES: '0', 'MEMORY ARCHIVE': '0', 'BUILD QUEUE': '0' });
+    expect(badges()).toEqual({ TELEMETRY: null, 'ACTIVE TASKS': '0', SCHEDULES: '0', 'MEMORY ARCHIVE': '0', 'BUILD QUEUE': '0', DOCKET: null });
     expect(screen.queryByRole('navigation', { name: 'Tactical Gateway Launcher' })).toBeNull();
     const telemetry = screen.getByRole('tab', { name: /TELEMETRY/ });
     expect(telemetry.getAttribute('aria-selected')).toBe('true');
@@ -73,7 +73,7 @@ describe('Header', () => {
       s.setFacts(FACTS);
       s.setBuilds(BUILDS);
     });
-    expect(badges()).toEqual({ TELEMETRY: null, 'ACTIVE TASKS': '2', SCHEDULES: '40', 'MEMORY ARCHIVE': '150', 'BUILD QUEUE': '5' });
+    expect(badges()).toEqual({ TELEMETRY: null, 'ACTIVE TASKS': '2', SCHEDULES: '40', 'MEMORY ARCHIVE': '150', 'BUILD QUEUE': '5', DOCKET: null });
     const score = screen.getByText('LVL 3 // STABLE');
     expect(score.getAttribute('style')).toContain('var(--neon-amber)');
 

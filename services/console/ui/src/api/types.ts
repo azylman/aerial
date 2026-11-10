@@ -267,3 +267,80 @@ export interface BuildDetailAPIResponse {
   readonly entry?: VanadisBuildDTO;
   readonly error?: string;
 }
+
+// ---- Docket (read-only task tracker, proxied from docket-mcp) ----
+
+/** docket-mcp's TaskSummary: one graph node with its edge ids. */
+export interface DocketTaskSummaryDTO {
+  readonly id: number;
+  readonly title: string;
+  readonly status: string;
+  readonly parent_id?: number;
+  readonly blocked_by?: readonly number[];
+  readonly blocks?: readonly number[];
+}
+
+/** docket-mcp's ScoredTaskSummary: one semantic search hit. */
+export interface DocketScoredTaskDTO {
+  readonly id: number;
+  readonly title: string;
+  readonly status: string;
+  readonly parent_id?: number;
+  readonly score: number;
+}
+
+/** docket-mcp's TaskComment. */
+export interface DocketTaskCommentDTO {
+  readonly id: number;
+  readonly author?: string;
+  readonly comment: string;
+  readonly created_at: IsoTimestamp;
+}
+
+/** docket-mcp's HydratedTask: one task with its neighbours and comments. */
+export interface DocketTaskDTO {
+  readonly id: number;
+  readonly title: string;
+  readonly status: string;
+  readonly description?: string;
+  readonly created_at: IsoTimestamp;
+  readonly updated_at: IsoTimestamp;
+  readonly closed_at?: IsoTimestamp;
+  readonly parent?: DocketTaskSummaryDTO;
+  readonly subtasks?: readonly DocketTaskSummaryDTO[];
+  readonly blocks?: readonly DocketTaskSummaryDTO[];
+  readonly blocked_by?: readonly DocketTaskSummaryDTO[];
+  readonly related?: readonly DocketTaskSummaryDTO[];
+  readonly comments?: readonly DocketTaskCommentDTO[];
+}
+
+/** The `status` query value both list and search accept. */
+export type DocketStatusFilter = 'open' | 'completed' | 'wont_do' | 'all';
+
+export interface DocketTasksAPIResponse {
+  readonly status: string;
+  readonly tasks: readonly DocketTaskSummaryDTO[];
+  readonly error?: string;
+}
+
+export interface DocketSearchAPIResponse {
+  readonly status: string;
+  readonly results: readonly DocketScoredTaskDTO[];
+  readonly error?: string;
+}
+
+export interface DocketTaskDetailAPIResponse {
+  readonly status: string;
+  readonly task?: DocketTaskDTO;
+  readonly error?: string;
+}
+
+/**
+ * Client-side result of one task-detail fetch: the requested id and its task, or `task: null`
+ * when the console answered 404 for it. Carrying the id lets the drawer tell "not found" for this
+ * task apart from a stale lookup of the task it showed before.
+ */
+export interface DocketTaskLookup {
+  readonly id: number;
+  readonly task: DocketTaskDTO | null;
+}
