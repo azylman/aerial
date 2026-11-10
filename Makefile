@@ -12,10 +12,6 @@ test: ## Run unit tests across all Go microservices and Frontend
 		echo "=== Testing $$svc ==="; \
 		(cd $$svc && go test -v ./...) || exit 1; \
 	done
-	@if command -v node >/dev/null 2>&1 && [ -f "services/console/app.test.js" ]; then \
-		echo "=== Testing Permet HUD Frontend ==="; \
-		node --test services/console/*.test.js || exit 1; \
-	fi
 	@$(MAKE) --no-print-directory console-ui
 
 lint: ## Run golangci-lint across all Go microservices and Frontend
@@ -23,10 +19,6 @@ lint: ## Run golangci-lint across all Go microservices and Frontend
 		echo "=== Linting $$svc ==="; \
 		(cd $$svc && golangci-lint run ./...) || exit 1; \
 	done
-	@if command -v node >/dev/null 2>&1 && [ -f "services/console/static/app.js" ]; then \
-		echo "=== Linting Permet HUD Frontend Syntax ==="; \
-		node --check services/console/static/app.js || exit 1; \
-	fi
 	@if command -v node >/dev/null 2>&1 && [ -f "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js" ]; then \
 		echo "=== Linting Docsify Custom Plugin Syntax ==="; \
 		node --check services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js || exit 1; \

@@ -8,7 +8,7 @@ import type {
 } from './types';
 
 /**
- * Port of getApiBase() from static/app.js: the console is mounted under /console behind the LAN
+ * API prefix for the page's mount point: the console is served under /console behind the LAN
  * gateway and at the root when hit directly, and both prefixes route to the same API handlers.
  */
 export function apiBase(pathname: string): string {

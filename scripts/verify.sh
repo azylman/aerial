@@ -482,21 +482,21 @@ run_console_ui() {
     )
 }
 
-# Console browser parity suite (services/console/ui/e2e): vanilla vs React UI on the real console
+# Console browser e2e suite (services/console/ui/e2e): the React console on the real console
 # binary. Runs only when a Playwright Chromium can actually launch here; otherwise it prints a skip
 # notice and the CI "Console UI Parity Suite" job enforces it. Needs Go to build the binary.
 run_console_e2e() {
     ui_dir="$REPO_ROOT/services/console/ui"
     [ -f "$ui_dir/playwright.config.ts" ] || return 0
     if ! has_cmd npm || ! has_cmd go; then
-        echo "⚠️  [Aerial Verify] npm or go not found; skipping console parity suite (CI job enforces it)." >&2
+        echo "⚠️  [Aerial Verify] npm or go not found; skipping console e2e suite (CI job enforces it)." >&2
         return 0
     fi
     if ! (cd "$ui_dir" && node -e "require('@playwright/test').chromium.launch().then(b => b.close()).catch(() => process.exit(1))" >/dev/null 2>&1); then
-        echo "⚠️  [Aerial Verify] No launchable Playwright Chromium; skipping console parity suite (run 'npx playwright install chromium'; the CI job enforces it)." >&2
+        echo "⚠️  [Aerial Verify] No launchable Playwright Chromium; skipping console e2e suite (run 'npx playwright install chromium'; the CI job enforces it)." >&2
         return 0
     fi
-    echo "   [console-e2e] parity suite in services/console/ui..."
+    echo "   [console-e2e] e2e suite in services/console/ui..."
     (
         cd "$ui_dir"
         npm run --silent build
@@ -681,20 +681,12 @@ if [ "$MODE" = "staged" ]; then
         run_atlas_validate
     fi
 
-    # Check console JS syntax & frontend coverage gate
-    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?console/"; then
-        run_node_syntax "services/console/static/app.js"
-        if echo "$CHANGED_FILES" | grep -q -E "^(services/)?console/.*\.js$" && [ -f "$SCRIPT_DIR/check-coverage.sh" ]; then
-            sh "$SCRIPT_DIR/check-coverage.sh" --check --service console
-        fi
-    fi
-
     # Check React console UI (typecheck, coverage-gated tests, production build)
     if echo "$CHANGED_FILES" | grep -q -E "^services/console/ui/"; then
         run_console_ui
     fi
 
-    # Browser parity suite whenever either UI changes
+    # Console browser e2e suite whenever the UI or the static files served with it change
     if echo "$CHANGED_FILES" | grep -q -E "^services/console/(ui|static)/"; then
         run_console_e2e
     fi
@@ -751,7 +743,6 @@ check_docker_compose
 run_atlas_validate
 
 echo "=== 2. Frontend & Script Syntax Checks ==="
-run_node_syntax "services/console/static/app.js"
 run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
 run_node_syntax "services/homepage/lib/merge.js"
 run_node_syntax "services/homepage/prepare-config.js"
@@ -765,10 +756,6 @@ echo "=== 3. Unit Test Suites ==="
 for svc in $GO_SERVICES; do
     run_go_test "$svc"
 done
-
-if [ -f "services/console/app.test.js" ]; then
-    run_node_test "services/console" "*.test.js"
-fi
 
 if [ -d "services/homepage/test" ]; then
     run_node_test "services/homepage" "test/*.test.js"

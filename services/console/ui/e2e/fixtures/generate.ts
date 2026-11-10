@@ -1,8 +1,8 @@
-// Regenerates the committed parity-suite fixtures: `node e2e/fixtures/generate.ts`.
+// Regenerates the committed e2e-suite fixtures: `node e2e/fixtures/generate.ts`.
 //
 // Output is fully deterministic (fixed clock, seeded PRNG) and typed against src/api/types.ts, so
-// a wire-type change that the fixtures no longer satisfy fails `npm run typecheck`. Both the
-// vanilla UI and the React UI are served these exact payloads by e2e/fixtures.ts.
+// a wire-type change that the fixtures no longer satisfy fails `npm run typecheck`. The console
+// is served these exact payloads by e2e/fixtures.ts.
 
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
