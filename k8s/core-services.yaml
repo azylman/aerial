@@ -1453,6 +1453,8 @@ spec:
           env:
             - name: PORT
               value: "3001"
+            - name: CONFIG_PATH
+              value: /local/homepage-service/homepage.yaml
           envFrom:
             - secretRef:
                 name: homepage-secret
@@ -1472,6 +1474,12 @@ spec:
           volumeMounts:
             - mountPath: /share
               name: share
+              readOnly: true
+            - mountPath: /local/user-homepage
+              name: homepage-user-config
+              readOnly: true
+            - mountPath: /local/homepage-service
+              name: homepage-service-config
               readOnly: true
       initContainers:
         - args:
@@ -1517,54 +1525,17 @@ spec:
           volumeMounts:
             - mountPath: /share
               name: share
-        - args:
-            - --repo=https://github.com/azylman/aerial-config.git
-            - --ref=main
-            - --root=/share/.sync/aerial-config
-            - --link=/share/aerial-config
-            - --period=30s
-          env:
-            - name: GIT_CONFIG_COUNT
-              value: "1"
-            - name: GIT_CONFIG_KEY_0
-              value: safe.directory
-            - name: GIT_CONFIG_VALUE_0
-              value: '*'
-            - name: GITSYNC_USERNAME
-              value: x-access-token
-            - name: GITSYNC_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: GITHUB_PAT
-                  name: git-sync-secret
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          name: git-sync-aerial-config
-          resources:
-            limits:
-              cpu: 200m
-              memory: 256Mi
-            requests:
-              cpu: 10m
-              memory: 32Mi
-          restartPolicy: Always
-          startupProbe:
-            exec:
-              command:
-                - git
-                - -C
-                - /share/aerial-config
-                - rev-parse
-                - HEAD
-            failureThreshold: 60
-            periodSeconds: 1
-          volumeMounts:
-            - mountPath: /share
-              name: share
       securityContext:
         fsGroup: 65533
       volumes:
         - emptyDir: {}
           name: share
+        - configMap:
+            name: homepage-user-config
+          name: homepage-user-config
+        - configMap:
+            name: homepage-service-config
+          name: homepage-service-config
 ---
 apiVersion: v1
 kind: Service
