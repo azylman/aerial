@@ -424,6 +424,27 @@ func TestAssembleTurnPrompt(t *testing.T) {
 			input:        TurnPromptInput{Burst: []db.Message{{AuthorName: "alice", Content: "turn on lights", CreatedAt: now}}, ScopeInstructions: "Spoken brevity for touch-kiosk-kitchen."},
 			wantContains: []string{"<SCOPE_INSTRUCTIONS>", "Spoken brevity for touch-kiosk-kitchen."},
 		},
+		{
+			name: "Thread history formatting uses thread header and previous session context",
+			input: TurnPromptInput{
+				Burst:                  []db.Message{{AuthorName: "alice", Content: "continue refactor", CreatedAt: now}},
+				LookbackHistory:        []HistoryMessage{{AuthorName: "alice", Role: "User", Content: "prior thread task", CreatedAt: now.Add(-5 * time.Hour)}},
+				IsThread:               true,
+				IsColdStart:            true,
+				PreviousSessionID:      "sess-prev-uuid-123",
+				PreviousSessionContext: "Previous turn delivered the initial patch",
+			},
+			wantContains: []string{
+				"Prior messages from this thread for context:",
+				"prior thread task",
+				"<PREVIOUS_SESSION>",
+				"Previous conversation ID: sess-prev-uuid-123",
+				"Last assistant response from prior session:\nPrevious turn delivered the initial patch",
+			},
+			wantExcludes: []string{
+				"CRITICAL: The following messages are historical Discord chatter",
+			},
+		},
 	}
 
 	for _, tc := range tests {

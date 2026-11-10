@@ -620,16 +620,18 @@ func fillBurstWakeInfos(n, wakeIdx int, score, threshold float64, wakeReason, ot
 
 // TurnPromptInput collects pre-fetched context components for deterministic prompt assembly.
 type TurnPromptInput struct {
-	Burst               []db.Message
-	ThreadSummary       string
-	LookbackHistory     []HistoryMessage
-	PreviousSessionID   string
-	IsColdStart         bool
-	ScopeInstructions   string
-	ChannelInstructions string // Deprecated: Use ScopeInstructions
-	InjectedHookContext string
-	AmbientContext      string
-	Timezone            string
+	Burst                  []db.Message
+	ThreadSummary          string
+	LookbackHistory        []HistoryMessage
+	PreviousSessionID      string
+	PreviousSessionContext string
+	IsColdStart            bool
+	IsThread               bool
+	ScopeInstructions      string
+	ChannelInstructions    string // Deprecated: Use ScopeInstructions
+	InjectedHookContext    string
+	AmbientContext         string
+	Timezone               string
 }
 
 // AssembleTurnPrompt deterministically composes the turn prompt in exact top-to-bottom document order.
@@ -639,12 +641,18 @@ func AssembleTurnPrompt(input TurnPromptInput) string {
 		basePrompt = prependPromptLayer(basePrompt, wrapPromptTag(input.ThreadSummary, "<THREAD_SUMMARY>", "</THREAD_SUMMARY>"))
 	}
 	if len(input.LookbackHistory) > 0 {
-		if formattedHist := FormatChannelHistory(input.LookbackHistory, input.Timezone); formattedHist != "" {
+		var formattedHist string
+		if input.IsThread {
+			formattedHist = FormatThreadHistory(input.LookbackHistory, input.Timezone)
+		} else {
+			formattedHist = FormatChannelHistory(input.LookbackHistory, input.Timezone)
+		}
+		if formattedHist != "" {
 			basePrompt = prependPromptLayer(basePrompt, formattedHist)
 		}
 	}
 	if input.IsColdStart && strings.TrimSpace(input.PreviousSessionID) != "" {
-		if prevBlock := FormatPreviousSession(input.PreviousSessionID); prevBlock != "" {
+		if prevBlock := FormatPreviousSession(input.PreviousSessionID, input.PreviousSessionContext); prevBlock != "" {
 			basePrompt = prependPromptLayer(basePrompt, prevBlock)
 		}
 	}
