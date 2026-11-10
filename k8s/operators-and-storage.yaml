@@ -152,11 +152,11 @@ spec:
     podAntiAffinityType: required
   bootstrap:
     initdb:
-      database: app
+      database: aerial
       encoding: UTF8
       localeCType: C
       localeCollate: C
-      owner: app
+      owner: aerial
   enablePDB: true
   enableSuperuserAccess: false
   failoverDelay: 0
