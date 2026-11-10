@@ -169,16 +169,17 @@ func TestRun(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		files        map[string]string
-		baselineJSON string
-		readOnlyBase bool
-		customArgs   []string
-		targetArgs   []string
-		relTargets   []string
-		wantCode     int
-		wantOut      string
-		wantErr      string
+		name              string
+		files             map[string]string
+		baselineJSON      string
+		readOnlyBase      bool
+		customArgs        []string
+		targetArgs        []string
+		relTargets        []string
+		wantBaselineFiles map[string]int
+		wantCode          int
+		wantOut           string
+		wantErr           string
 	}{
 		{
 			name: "healthy repository passes with missing baseline file",
@@ -431,6 +432,49 @@ type SmallB struct {
 			wantCode:   1,
 			wantErr:    "ratchet violation(s) detected",
 		},
+		{
+			name: "test file length exceeding ceiling fails check without baseline",
+			files: map[string]string{
+				"pkg/ok.go":       "package pkg\n",
+				"pkg/big_test.go": buildLargeGoSource(1505, 0),
+			},
+			wantCode: 1,
+			wantErr:  "pkg/big_test.go: file length 1505 exceeds limit 1500 (ceiling 1500)",
+		},
+		{
+			name: "grandfathered test file length passes check with baseline",
+			files: map[string]string{
+				"pkg/ok.go":       "package pkg\n",
+				"pkg/big_test.go": buildLargeGoSource(1510, 0),
+			},
+			baselineJSON: `{"files":{"pkg/big_test.go":{"lines":1510}}}`,
+			wantCode:     0,
+			wantOut:      "Checked 1 Go file(s)",
+		},
+		{
+			name: "update mode records test file length outliers into baseline",
+			files: map[string]string{
+				"pkg/ok.go":         "package pkg\n",
+				"pkg/clean_test.go": "package pkg\n",
+				"pkg/big_test.go":   buildLargeGoSource(1505, 0),
+			},
+			customArgs: []string{"-update"},
+			wantBaselineFiles: map[string]int{
+				"pkg/big_test.go": 1505,
+			},
+			wantCode: 0,
+			wantOut:  "(1 files, 0 functions)",
+		},
+		{
+			name: "syntax error in test file fails update mode",
+			files: map[string]string{
+				"pkg/ok.go":       "package pkg\n",
+				"pkg/bad_test.go": "package pkg\nfunc (",
+			},
+			customArgs: []string{"-update"},
+			wantCode:   1,
+			wantErr:    "code-health: analyze:",
+		},
 	}
 
 	for _, tc := range tests {
@@ -478,6 +522,20 @@ type SmallB struct {
 			}
 			if tc.wantErr != "" && !strings.Contains(stderr.String(), tc.wantErr) {
 				t.Errorf("stderr %q does not contain %q", stderr.String(), tc.wantErr)
+			}
+			if tc.wantBaselineFiles != nil {
+				base, err := loadBaseline(basePath)
+				if err != nil {
+					t.Fatalf("load written baseline: %v", err)
+				}
+				if len(base.Files) != len(tc.wantBaselineFiles) {
+					t.Errorf("baseline files count = %d, want %d: %v", len(base.Files), len(tc.wantBaselineFiles), base.Files)
+				}
+				for k, wantLines := range tc.wantBaselineFiles {
+					if gotLines := base.Files[k].Lines; gotLines != wantLines {
+						t.Errorf("baseline file %q lines = %d, want %d", k, gotLines, wantLines)
+					}
+				}
 			}
 		})
 	}
@@ -646,7 +704,7 @@ func TestJ_CoverageGaps() {}
 				filePath = filepath.Join(dir, "does_not_exist_test.go")
 			}
 
-			violations, err := analyzeTestFile(filePath, "sample_test.go")
+			_, violations, err := analyzeTestFile(filePath, "sample_test.go")
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("analyzeTestFile() error = %v, wantErr = %v", err, tc.wantErr)
 			}

@@ -94,20 +94,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if *updateMode {
-		return runUpdate(absRoot, *baselinePath, targets, stdout, stderr)
-	}
-
 	testTargets, err := collectTestTargets(absRoot, explicit)
 	if err != nil {
 		writef(stderr, "code-health: collect test targets: %v\n", err)
 		return 1
 	}
+
+	if *updateMode {
+		return runUpdate(absRoot, *baselinePath, targets, testTargets, stdout, stderr)
+	}
+
 	return runCheck(absRoot, *baselinePath, targets, testTargets, stdout, stderr)
 }
 
-func runUpdate(absRoot, baselinePath string, targets []string, stdout, stderr io.Writer) int {
-	base, err := buildBaseline(absRoot, targets)
+func runUpdate(absRoot, baselinePath string, targets, testTargets []string, stdout, stderr io.Writer) int {
+	base, err := buildBaseline(absRoot, targets, testTargets)
 	if err != nil {
 		writef(stderr, "code-health: analyze: %v\n", err)
 		return 1
@@ -256,7 +257,7 @@ func loadBaseline(path string) (Baseline, error) {
 	return b, err
 }
 
-func buildBaseline(absRoot string, targets []string) (Baseline, error) {
+func buildBaseline(absRoot string, targets, testTargets []string) (Baseline, error) {
 	b := Baseline{
 		Files:     make(map[string]FileMetrics),
 		Functions: make(map[string]FuncMetrics),
@@ -276,6 +277,15 @@ func buildBaseline(absRoot string, targets []string) (Baseline, error) {
 			if entry, ok := outlierFuncMetrics(m); ok {
 				b.Functions[rel+"::"+fnName] = entry
 			}
+		}
+	}
+	for _, rel := range testTargets {
+		fm, _, err := analyzeTestFile(filepath.Join(absRoot, filepath.FromSlash(rel)), rel)
+		if err != nil {
+			return b, err
+		}
+		if fm.Lines > maxFileLines {
+			b.Files[rel] = fm
 		}
 	}
 	return b, nil
@@ -317,9 +327,13 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline) 
 	violations = append(violations, checkStructCloneViolations(allStructSigs)...)
 
 	for _, rel := range testTargets {
-		testViolations, err := analyzeTestFile(filepath.Join(absRoot, filepath.FromSlash(rel)), rel)
+		fm, testViolations, err := analyzeTestFile(filepath.Join(absRoot, filepath.FromSlash(rel)), rel)
 		if err != nil {
 			return nil, err
+		}
+		fileLimit := max(maxFileLines, base.Files[rel].Lines)
+		if fm.Lines > fileLimit {
+			violations = append(violations, fmt.Sprintf("%s: file length %d exceeds limit %d (ceiling %d)", rel, fm.Lines, fileLimit, maxFileLines))
 		}
 		violations = append(violations, testViolations...)
 	}
@@ -453,6 +467,14 @@ func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string
 	return violations
 }
 
+func countLines(src []byte) int {
+	lines := bytes.Count(src, []byte("\n")) + 1
+	if len(src) > 0 && src[len(src)-1] == '\n' {
+		lines--
+	}
+	return lines
+}
+
 func analyzeFile(fullPath, rel string) (FileMetrics, map[string]FuncMetrics, []funcCloneSig, []structCloneSig, bool, []string, error) {
 	src, err := os.ReadFile(fullPath)
 	if err != nil {
@@ -461,10 +483,7 @@ func analyzeFile(fullPath, rel string) (FileMetrics, map[string]FuncMetrics, []f
 	if isGeneratedSource(src) {
 		return FileMetrics{}, nil, nil, nil, true, nil, nil
 	}
-	lines := bytes.Count(src, []byte("\n")) + 1
-	if len(src) > 0 && src[len(src)-1] == '\n' {
-		lines--
-	}
+	lines := countLines(src)
 
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, fullPath, src, parser.ParseComments)
@@ -728,19 +747,19 @@ func checkNolintComment(raw string) string {
 	return ""
 }
 
-func analyzeTestFile(fullPath, rel string) ([]string, error) {
+func analyzeTestFile(fullPath, rel string) (FileMetrics, []string, error) {
 	src, err := os.ReadFile(fullPath)
 	if err != nil {
-		return nil, err
+		return FileMetrics{}, nil, err
 	}
 	if isGeneratedSource(src) {
-		return nil, nil
+		return FileMetrics{}, nil, nil
 	}
 
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, fullPath, src, parser.ParseComments)
 	if err != nil {
-		return nil, err
+		return FileMetrics{}, nil, err
 	}
 
 	var violations []string
@@ -763,7 +782,7 @@ func analyzeTestFile(fullPath, rel string) ([]string, error) {
 		return inspectTestNode(n, fset, rel, &violations)
 	})
 
-	return violations, nil
+	return FileMetrics{Lines: countLines(src)}, violations, nil
 }
 
 func inspectTestNode(n ast.Node, fset *token.FileSet, rel string, violations *[]string) bool {
