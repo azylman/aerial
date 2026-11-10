@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -768,6 +769,128 @@ func TestLoadConfig(t *testing.T) {
 			}
 			if tc.wantOllamaModel != "" && cfg.Ollama.Model != tc.wantOllamaModel {
 				t.Fatalf("Ollama.Model = %q; want %q", cfg.Ollama.Model, tc.wantOllamaModel)
+			}
+		})
+	}
+}
+
+func TestParseTaskListQuery(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		raw     string
+		want    TaskListQuery
+		wantErr string
+	}{
+		{name: "defaults to open", raw: "", want: TaskListQuery{Status: "open"}},
+		{name: "completed accepted", raw: "status=completed", want: TaskListQuery{Status: "completed"}},
+		{name: "wont_do accepted", raw: "status=wont_do", want: TaskListQuery{Status: "wont_do"}},
+		{name: "all accepted", raw: "status=all", want: TaskListQuery{Status: "all"}},
+		{name: "unknown status rejected", raw: "status=pending", wantErr: `invalid status "pending"`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			values, err := url.ParseQuery(tc.raw)
+			if err != nil {
+				t.Fatalf("ParseQuery: %v", err)
+			}
+			got, err := ParseTaskListQuery(values)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseTaskSearchQuery(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		raw     string
+		want    TaskSearchQuery
+		wantErr string
+	}{
+		{name: "defaults status and limit", raw: "q=deploy", want: TaskSearchQuery{Query: "deploy", Status: "open", Limit: 20}},
+		{name: "explicit status and limit", raw: "q=deploy&status=all&limit=5", want: TaskSearchQuery{Query: "deploy", Status: "all", Limit: 5}},
+		{name: "limit clamped to 50", raw: "q=deploy&limit=500", want: TaskSearchQuery{Query: "deploy", Status: "open", Limit: 50}},
+		{name: "limit of one accepted", raw: "q=x&limit=1", want: TaskSearchQuery{Query: "x", Status: "open", Limit: 1}},
+		{name: "missing q rejected", raw: "status=open", wantErr: "parameter 'q' is required"},
+		{name: "blank q rejected", raw: "q=%20%20", wantErr: "parameter 'q' is required"},
+		{name: "bad status rejected", raw: "q=x&status=nope", wantErr: `invalid status "nope"`},
+		{name: "non-numeric limit rejected", raw: "q=x&limit=ten", wantErr: `invalid limit "ten"`},
+		{name: "zero limit rejected", raw: "q=x&limit=0", wantErr: `invalid limit "0"`},
+		{name: "negative limit rejected", raw: "q=x&limit=-3", wantErr: `invalid limit "-3"`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			values, err := url.ParseQuery(tc.raw)
+			if err != nil {
+				t.Fatalf("ParseQuery: %v", err)
+			}
+			got, err := ParseTaskSearchQuery(values)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseTaskID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		raw     string
+		want    int64
+		wantErr string
+	}{
+		{name: "positive id accepted", raw: "42", want: 42},
+		{name: "empty rejected", raw: "", wantErr: `invalid task id ""`},
+		{name: "zero rejected", raw: "0", wantErr: `invalid task id "0"`},
+		{name: "negative rejected", raw: "-7", wantErr: `invalid task id "-7"`},
+		{name: "non-numeric rejected", raw: "abc", wantErr: `invalid task id "abc"`},
+		{name: "nested path rejected", raw: "4/comments", wantErr: `invalid task id "4/comments"`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseTaskID(tc.raw)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %d, want %d", got, tc.want)
 			}
 		})
 	}
