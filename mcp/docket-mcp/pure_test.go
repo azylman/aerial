@@ -242,39 +242,65 @@ func TestHydrateTask(t *testing.T) {
 	comment := VikunjaComment{ID: 7, Comment: "hi", Created: created}
 	comment.Author.Username = "aerial"
 
+	parentOfRoot := int64(1)
+	root := int64(10)
+	neighbors := map[int64]TaskNode{
+		1:  {ID: 1, Title: "Parent", Status: "open", SubtaskIDs: []int64{10}},
+		12: {ID: 12, Title: "Sub B", Status: "wont_do", ParentID: &root, Blocks: []int64{20}},
+		11: {ID: 11, Title: "Sub A", Status: "open", ParentID: &root},
+		20: {ID: 20, Title: "Blocked", Status: "open", BlockedBy: []int64{10, 12}},
+		30: {ID: 30, Title: "Blocker", Status: "completed", ParentID: &parentOfRoot, Blocks: []int64{10}},
+	}
+
 	tests := []struct {
-		name        string
-		task        VikunjaTask
-		comments    []VikunjaComment
-		resolutions map[int64]string
-		want        HydratedTask
+		name      string
+		task      VikunjaTask
+		status    string
+		comments  []VikunjaComment
+		neighbors map[int64]TaskNode
+		want      HydratedTask
 	}{
 		{
-			name:        "neighbors summarized in vikunja order with resolved status",
-			task:        full,
-			comments:    []VikunjaComment{comment},
-			resolutions: map[int64]string{10: "wont_do", 12: "wont_do"},
+			name:      "present neighbors get full summaries and absent ones fall back to embedded rows",
+			task:      full,
+			status:    "wont_do",
+			comments:  []VikunjaComment{comment},
+			neighbors: neighbors,
 			want: HydratedTask{
 				ID: 10, Title: "Root", Status: "wont_do", Description: "desc", CreatedAt: created, UpdatedAt: doneAt, ClosedAt: &doneAt,
 				Parent:    &TaskSummary{ID: 1, Title: "Parent", Status: "open"},
-				Subtasks:  []TaskSummary{{ID: 12, Title: "Sub B", Status: "wont_do"}, {ID: 11, Title: "Sub A", Status: "open"}},
-				Blocks:    []TaskSummary{{ID: 20, Title: "Blocked", Status: "open"}},
-				BlockedBy: []TaskSummary{{ID: 30, Title: "Blocker", Status: "completed"}},
+				Subtasks:  []TaskSummary{{ID: 12, Title: "Sub B", Status: "wont_do", ParentID: &root, Blocks: []int64{20}}, {ID: 11, Title: "Sub A", Status: "open", ParentID: &root}},
+				Blocks:    []TaskSummary{{ID: 20, Title: "Blocked", Status: "open", BlockedBy: []int64{10, 12}}},
+				BlockedBy: []TaskSummary{{ID: 30, Title: "Blocker", Status: "completed", ParentID: &parentOfRoot, Blocks: []int64{10}}},
 				Related:   []TaskSummary{{ID: 40, Title: "Rel", Status: "open"}},
 				Comments:  []TaskComment{{ID: 7, Author: "aerial", Comment: "hi", CreatedAt: created}},
 			},
 		},
 		{
-			name: "task without relations or comments",
-			task: VikunjaTask{ID: 5, Title: "Lone", Created: created, Updated: created},
-			want: HydratedTask{ID: 5, Title: "Lone", Status: "open", CreatedAt: created, UpdatedAt: created},
+			name:   "no neighbor nodes falls back to embedded rows with done status",
+			task:   full,
+			status: "completed",
+			want: HydratedTask{
+				ID: 10, Title: "Root", Status: "completed", Description: "desc", CreatedAt: created, UpdatedAt: doneAt, ClosedAt: &doneAt,
+				Parent:    &TaskSummary{ID: 1, Title: "Parent", Status: "open"},
+				Subtasks:  []TaskSummary{{ID: 12, Title: "Sub B", Status: "completed"}, {ID: 11, Title: "Sub A", Status: "open"}},
+				Blocks:    []TaskSummary{{ID: 20, Title: "Blocked", Status: "open"}},
+				BlockedBy: []TaskSummary{{ID: 30, Title: "Blocker", Status: "completed"}},
+				Related:   []TaskSummary{{ID: 40, Title: "Rel", Status: "open"}},
+			},
+		},
+		{
+			name:   "task without relations or comments",
+			task:   VikunjaTask{ID: 5, Title: "Lone", Created: created, Updated: created},
+			status: "open",
+			want:   HydratedTask{ID: 5, Title: "Lone", Status: "open", CreatedAt: created, UpdatedAt: created},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := HydrateTask(tc.task, tc.comments, tc.resolutions)
+			got := HydrateTask(tc.task, tc.status, tc.comments, tc.neighbors)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("HydrateTask() = %+v, want %+v", got, tc.want)
 			}

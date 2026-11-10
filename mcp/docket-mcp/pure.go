@@ -302,20 +302,24 @@ func taskToNode(t VikunjaTask, resolution string) TaskNode {
 	return node
 }
 
-// HydrateTask builds the full task view from a fetched task, its comments, and
-// stored resolutions. Neighbor summaries come from Vikunja's embedded related
-// tasks in Vikunja order, carrying only id, title, and status.
-func HydrateTask(task VikunjaTask, comments []VikunjaComment, resolutions map[int64]string) HydratedTask {
+// HydrateTask builds the full task view from a fetched task, its own status,
+// comments, and the graph nodes of its neighbors. Neighbor order follows
+// Vikunja's embedded related tasks; a neighbor missing from neighbors (deleted
+// or outside the project) falls back to its embedded id, title, and status.
+func HydrateTask(task VikunjaTask, status string, comments []VikunjaComment, neighbors map[int64]TaskNode) HydratedTask {
 	summarize := func(t VikunjaTask) TaskSummary {
-		return TaskSummary{ID: t.ID, Title: t.Title, Status: ResolveTaskStatus(t.Done, resolutions[t.ID])}
+		if node, ok := neighbors[t.ID]; ok {
+			return summarizeNode(node)
+		}
+		return TaskSummary{ID: t.ID, Title: t.Title, Status: ResolveTaskStatus(t.Done, "")}
 	}
 	summarizeAll := func(kind string) []TaskSummary {
-		neighbors := task.RelatedTasks[kind]
-		if len(neighbors) == 0 {
+		related := task.RelatedTasks[kind]
+		if len(related) == 0 {
 			return nil
 		}
-		out := make([]TaskSummary, 0, len(neighbors))
-		for _, t := range neighbors {
+		out := make([]TaskSummary, 0, len(related))
+		for _, t := range related {
 			out = append(out, summarize(t))
 		}
 		return out
@@ -324,7 +328,7 @@ func HydrateTask(task VikunjaTask, comments []VikunjaComment, resolutions map[in
 	hydrated := HydratedTask{
 		ID:          task.ID,
 		Title:       task.Title,
-		Status:      ResolveTaskStatus(task.Done, resolutions[task.ID]),
+		Status:      status,
 		Description: task.Description,
 		CreatedAt:   task.Created,
 		UpdatedAt:   task.Updated,
@@ -903,4 +907,16 @@ var Tools = []Tool{
 			Required: []string{"id", "resolution", "reason"},
 		},
 	},
+}
+
+// summarizeNode projects a graph node onto its compact summary.
+func summarizeNode(node TaskNode) TaskSummary {
+	return TaskSummary{
+		ID:        node.ID,
+		Title:     node.Title,
+		Status:    node.Status,
+		ParentID:  node.ParentID,
+		BlockedBy: node.BlockedBy,
+		Blocks:    node.Blocks,
+	}
 }

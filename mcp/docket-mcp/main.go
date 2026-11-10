@@ -316,17 +316,6 @@ func (s *Server) listTasks(ctx context.Context, status string, parentID *int64) 
 	return summaries, nil
 }
 
-func summarizeNode(node TaskNode) TaskSummary {
-	return TaskSummary{
-		ID:        node.ID,
-		Title:     node.Title,
-		Status:    node.Status,
-		ParentID:  node.ParentID,
-		BlockedBy: node.BlockedBy,
-		Blocks:    node.Blocks,
-	}
-}
-
 func (s *Server) toolSearch(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
 	var args struct {
 		Query  string `json:"query"`
@@ -395,11 +384,11 @@ func (s *Server) showTask(ctx context.Context, id int64) (HydratedTask, error) {
 	if err != nil {
 		return HydratedTask{}, fmt.Errorf("failed to fetch task %d: %w", id, err)
 	}
-	projectID, err := s.vikunja.GetDefaultProject(ctx)
+	src, err := s.newNodeSource(ctx)
 	if err != nil {
-		return HydratedTask{}, fmt.Errorf("failed to get default project: %w", err)
+		return HydratedTask{}, err
 	}
-	if task.ProjectID != projectID {
+	if task.ProjectID != src.projectID {
 		return HydratedTask{}, fmt.Errorf("task %d %w", id, ErrTaskNotFound)
 	}
 
@@ -408,18 +397,28 @@ func (s *Server) showTask(ctx context.Context, id int64) (HydratedTask, error) {
 		comments = nil
 	}
 
-	ids := []int64{task.ID}
+	neighbors := make(map[int64]TaskNode)
 	for _, related := range task.RelatedTasks {
 		for _, t := range related {
-			ids = append(ids, t.ID)
+			if _, seen := neighbors[t.ID]; seen {
+				continue
+			}
+			node, ok, err := src.Node(ctx, t.ID)
+			if err != nil {
+				return HydratedTask{}, err
+			}
+			if ok {
+				neighbors[t.ID] = node
+			}
 		}
 	}
-	resolutions, err := s.store.FetchTaskResolutions(ctx, ids)
-	if err != nil {
-		resolutions = map[int64]string{}
+
+	var resolution string
+	if resolutions, err := s.store.FetchTaskResolutions(ctx, []int64{task.ID}); err == nil {
+		resolution = resolutions[task.ID]
 	}
 
-	return HydrateTask(*task, comments, resolutions), nil
+	return HydrateTask(*task, ResolveTaskStatus(task.Done, resolution), comments, neighbors), nil
 }
 
 // validateCreateRelations checks that every referenced task exists and that the
