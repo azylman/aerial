@@ -2,6 +2,7 @@ import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useDocumentVisible } from './useDocumentVisible';
 import { useLiveNow } from './useLiveNow';
+import { TabActiveContext } from './useTabActive';
 
 let hidden = false;
 
@@ -74,6 +75,40 @@ describe('useLiveNow', () => {
     const { unmount } = render(<Clock label="a" />);
     expect(vi.getTimerCount()).toBe(0);
     unmount();
+  });
+});
+
+function TabClock({ active }: { readonly active: boolean }) {
+  return (
+    <TabActiveContext value={active}>
+      <Clock label="tab" />
+    </TabActiveContext>
+  );
+}
+
+describe('useLiveNow inside a tab panel', () => {
+  beforeEach(() => {
+    hidden = false;
+    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+    vi.useFakeTimers({ now: START });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it('idles while its tab is hidden, then reads the current time and ticks once shown', () => {
+    const { getByTestId, rerender } = render(<TabClock active={false} />);
+    // Hidden: not a listener, so the shared interval never starts and no tick re-renders it.
+    const before = getByTestId('tab').textContent;
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => vi.advanceTimersByTime(5000));
+    expect(getByTestId('tab').textContent).toBe(before);
+    rerender(<TabClock active />);
+    expect(getByTestId('tab').textContent).toBe(String(START + 5000));
+    act(() => vi.advanceTimersByTime(1000));
+    expect(getByTestId('tab').textContent).toBe(String(START + 6000));
   });
 });
 

@@ -4,6 +4,7 @@ import { Glyph } from '../../components/Glyph';
 import { Icon } from '../../components/Icon';
 import { VirtualList } from '../../components/VirtualList';
 import { useSearchShortcutTarget } from '../../hooks/useKeyboardShortcuts';
+import { useTabActive } from '../../hooks/useTabActive';
 import { type ConsoleState, useConsoleStore } from '../../store/store';
 import '../../styles/controls.css';
 import '../../styles/sections.css';
@@ -278,10 +279,13 @@ export default function MemoryView() {
   const refresh = useManualSync(touchSynced);
 
   // The shell's boot load failed: opening the tab retries it (fetchFacts on enter until loaded).
+  // The view stays mounted while hidden, so "opening" is each switch to an active tab.
+  const tabActive = useTabActive();
   useEffect(() => {
+    if (!tabActive) return;
     const { data: cached, error: failed } = useConsoleStore.getState().memory.facts;
     if (cached === null && failed !== null) refresh();
-  }, [refresh]);
+  }, [refresh, tabActive]);
 
   const [category, setCategory] = useState<FactCategory>('ALL');
   const [search, setSearch] = useState('');

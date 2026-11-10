@@ -4,6 +4,7 @@ import { Icon } from '../../components/Icon';
 import { useFirstPassLimit } from '../../hooks/useFirstPassLimit';
 import { useSearchShortcutTarget } from '../../hooks/useKeyboardShortcuts';
 import { usePollingSync } from '../../hooks/usePollingSync';
+import { useTabActive } from '../../hooks/useTabActive';
 import { type ConsoleState, useConsoleStore } from '../../store/store';
 import '../../styles/controls.css';
 import '../../styles/sections.css';
@@ -230,7 +231,7 @@ const BuildGrid = memo(function BuildGrid({ builds }: { readonly builds: readonl
  * build, so an unchanged poll renders nothing and a changed build re-renders only its own card.
  */
 export default function BuildsView() {
-  usePollingSync(syncBuilds, BUILDS_POLL_MS, true);
+  usePollingSync(syncBuilds, BUILDS_POLL_MS, useTabActive());
   const refresh = useManualSync();
 
   const [filter, setFilter] = useState<BuildFilter>('ALL');

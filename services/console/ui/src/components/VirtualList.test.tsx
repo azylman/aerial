@@ -10,6 +10,7 @@ import {
   windowRange,
   withHeights,
 } from './VirtualList';
+import { TabActiveContext } from '../hooks/useTabActive';
 
 // One fake ResizeObserver per list: tests deliver entries through `resize`.
 class FakeResizeObserver {
@@ -91,6 +92,25 @@ describe('VirtualList window', () => {
     });
     expect(positions()).toEqual(want);
     expect(screen.getAllByRole('listitem')[0]?.getAttribute('aria-setsize')).toBe('150');
+  });
+
+  it.each([
+    { name: 'a shown tab follows the scroll', tabs: [true], want: range(48, 61) },
+    { name: 'a hidden tab ignores the scroll', tabs: [false], want: [] },
+    { name: 'revealing the tab re-windows at the current position', tabs: [false, true], want: range(48, 61) },
+  ])('$name', ({ tabs, want }) => {
+    const inTab = (active: boolean | undefined) => (
+      <TabActiveContext value={active ?? true}>
+        <VirtualList items={ITEMS} getKey={ident} estimateHeight={100} overscan={3} renderItem={renderItem} ariaLabel="Facts" />
+      </TabActiveContext>
+    );
+    const { rerender } = render(inTab(tabs[0]));
+    act(() => {
+      geometry.top = -5000;
+      window.dispatchEvent(new Event('scroll'));
+    });
+    for (const active of tabs.slice(1)) rerender(inTab(active));
+    expect(screen.queryAllByRole('listitem').map((el) => Number(el.getAttribute('aria-posinset')))).toEqual(want);
   });
 
   it('pads for the unmounted rows from estimates and measured heights', () => {

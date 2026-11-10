@@ -39,7 +39,6 @@
     
     --accent-glow: 0 12px 36px rgba(0, 0, 0, 0.7), 0 0 16px rgba(147, 51, 234, 0.2);
     --card-radius: 16px;
-    --glass-backdrop: blur(16px);
 }
 
 /* The page is never captured as a view-transition group: only named elements (the drawer)
@@ -487,14 +486,23 @@ html.motion-ready .dock-chip .ping-dot {
 
 /* View Panels with strict active visibility */
 .view-panel {
-    display: none;
+    display: flex;
     flex-direction: column;
     gap: 20px;
     animation: fadeIn 0.25s ease-in-out;
 }
 
-.view-panel.active {
-    display: flex !important;
+/* Visited but inactive panels keep their cached layout and skip rendering: revealing one costs a
+   paint, not a full re-layout. content-visibility: hidden also drops the subtree from the
+   accessibility tree and find-in-page, as display: none did. */
+.view-panel:not(.active) {
+    content-visibility: hidden;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    pointer-events: none;
+    animation: none;
 }
 
 @keyframes fadeIn {

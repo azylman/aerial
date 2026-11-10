@@ -17,7 +17,6 @@
     border: 1px solid rgba(0, 242, 254, 0.25);
     border-radius: 12px;
     padding: 1.25rem 1.5rem;
-    backdrop-filter: var(--glass-backdrop);
     box-shadow: 0 0 20px rgba(0, 242, 254, 0.08);
     position: relative;
     overflow: hidden;
@@ -237,7 +236,6 @@ html.motion-ready .task-card-laser {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    backdrop-filter: var(--glass-backdrop);
     color: var(--text-muted);
     font-size: 0.85rem;
     letter-spacing: 1px;

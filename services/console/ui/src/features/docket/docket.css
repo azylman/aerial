@@ -7,7 +7,6 @@
     border-radius: 12px;
     padding: 0.85rem 1rem;
     margin-bottom: 1.25rem;
-    backdrop-filter: var(--glass-backdrop);
 }
 
 .docket-toolbar .cyber-input,

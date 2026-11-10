@@ -6,7 +6,6 @@
   border: 1px solid var(--card-border);
   border-radius: 12px;
   padding: 1rem 1.25rem;
-  backdrop-filter: var(--glass-backdrop);
   display: flex;
   gap: 1rem;
   align-items: center;
@@ -31,7 +30,6 @@
   border: 1px solid var(--card-border);
   border-radius: 12px;
   padding: 1.25rem;
-  backdrop-filter: var(--glass-backdrop);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -290,7 +288,6 @@ html.motion-ready .schedule-countdown-badge.countdown-triggering {
   border: 1px solid var(--card-border);
   border-radius: 10px;
   padding: 1rem 1.25rem;
-  backdrop-filter: var(--glass-backdrop);
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
