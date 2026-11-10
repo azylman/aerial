@@ -460,7 +460,6 @@ func (p *WorkerPool) buildChunkStepDeliveryRequestLocked(chunkID, activeStep str
 	}
 
 	deliveryReq := cloneStatusWidgetRequest(req, false)
-	deliveryReq.SkipSink = true
 	deliveryReq.Chunks[chunkIdx].ActiveStep = activeStep
 	for i := range deliveryReq.Chunks {
 		if i != chunkIdx && isWidgetChunkInProgress(deliveryReq.Chunks[i].Status) {
@@ -506,16 +505,28 @@ func (p *WorkerPool) FlushChunkActiveStep(chunkID, turnID, stepText string) erro
 		return nil
 	}
 
-	sess := p.DiscordSession()
+	return p.deliverChunkStepWidget(*deliveryReq)
+}
+
+// deliverChunkStepWidget delivers a step edit and records the returned message ID so a sunk card stays tracked.
+// Callers must hold widgetDeliveryMu.
+func (p *WorkerPool) deliverChunkStepWidget(req discord.StatusWidgetRequest) error {
+	var msgID string
+	var err error
 	if p.cfg.WidgetDeliveryFunc != nil {
-		_, err := p.cfg.WidgetDeliveryFunc(*deliveryReq)
+		msgID, err = p.cfg.WidgetDeliveryFunc(req)
+	} else {
+		sess := p.DiscordSession()
+		if sess == nil {
+			return errors.New("discord session is not connected")
+		}
+		msgID, err = discord.DeliverStatusWidget(sess, req, time.Now())
+	}
+	if err != nil {
 		return err
 	}
-	if sess == nil {
-		return errors.New("discord session is not connected")
-	}
-	_, err := discord.DeliverStatusWidget(sess, *deliveryReq, time.Now())
-	return err
+	p.recordDeliveredWidgetMessageID(req.ID, msgID)
+	return nil
 }
 
 func (p *WorkerPool) finishChunkStepTurnLocked(chunkID, turnID string) (*discord.StatusWidgetRequest, bool) {
@@ -557,16 +568,10 @@ func (p *WorkerPool) FinishChunkStepTurn(chunkID, turnID string) {
 		return
 	}
 
-	sess := p.DiscordSession()
-	if p.cfg.WidgetDeliveryFunc != nil {
-		if _, err := p.cfg.WidgetDeliveryFunc(*deliveryReq); err != nil {
-			log.Printf("[WorkerPool] Warning delivering finish chunk step widget: %v", err)
-		}
+	if p.cfg.WidgetDeliveryFunc == nil && p.DiscordSession() == nil {
 		return
 	}
-	if sess != nil {
-		if _, err := discord.DeliverStatusWidget(sess, *deliveryReq, time.Now()); err != nil {
-			log.Printf("[WorkerPool] Warning delivering finish chunk step widget: %v", err)
-		}
+	if err := p.deliverChunkStepWidget(*deliveryReq); err != nil {
+		log.Printf("[WorkerPool] Warning delivering finish chunk step widget: %v", err)
 	}
 }

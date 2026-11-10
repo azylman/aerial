@@ -447,6 +447,12 @@ func waitForSingleflightFollowers(t *testing.T, callerSubstr string, followers i
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		n := runtime.Stack(buf, true)
+		// Under full-package t.Parallel() load the all-goroutine dump can exceed the buffer and silently
+		// truncate away the follower stacks; grow until the dump fits.
+		for n == len(buf) {
+			buf = make([]byte, 2*len(buf))
+			n = runtime.Stack(buf, true)
+		}
 		stacks := strings.Split(string(buf[:n]), "\n\n")
 		waiting := 0
 		for _, st := range stacks {
