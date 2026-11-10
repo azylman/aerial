@@ -1499,7 +1499,6 @@ function renderScheduleCards() {
         const highlightedPrompt = query ? highlightSearch(rawPrompt, query) : escapeHtml(rawPrompt);
         const humanCron = cron.cron_description || formatCronExpression(cron.cron_expr, cron.timezone);
         const countdown = formatCountdown(cron.next_run_at);
-        const targetId = cron.channel_id || cron.target_id || 'N/A';
 
         cardsHTML += `
             <div class="schedule-card cron-card">
@@ -1519,7 +1518,6 @@ function renderScheduleCards() {
                 </div>
                 <div class="schedule-meta-bar">
                     <span class="schedule-meta-item"><strong>CRON:</strong> <code>${escapeHtml(cron.cron_expr)}</code></span>
-                    <span class="schedule-meta-item"><strong>TARGET:</strong> <code>${escapeHtml(targetId)}</code></span>
                 </div>
                 <div class="schedule-prompt-wrap">
                     <div class="schedule-prompt-header">
@@ -1532,7 +1530,6 @@ function renderScheduleCards() {
                 </div>
                 <div class="schedule-card-footer">
                     <span>NEXT: ${formatTimestamp(cron.next_run_at)}</span>
-                    <span class="schedule-id-chip">ID: <code>${escapeHtml(cron.id)}</code></span>
                 </div>
             </div>
         `;
@@ -1580,7 +1577,6 @@ function renderScheduleCards() {
                 </div>
                 <div class="schedule-card-footer">
                     <span>RUN AT: ${formatTimestamp(s.run_at)}</span>
-                    <span class="schedule-id-chip">ID: <code>${escapeHtml(s.id)}</code></span>
                 </div>
             </div>
         `;
@@ -1634,7 +1630,7 @@ function renderScheduleRuns() {
     }
 
     feedContainer.innerHTML = matchingRuns.map((run, idx) => {
-        const rawTitle = run.title || run.schedule_id || 'Schedule Run';
+        const rawTitle = run.title || 'Schedule Run';
         const highlightedTitle = query ? highlightSearch(rawTitle, query) : escapeHtml(rawTitle);
         const rawPrompt = run.prompt || '';
         const highlightedPrompt = query ? highlightSearch(rawPrompt, query) : escapeHtml(rawPrompt);
@@ -1661,10 +1657,10 @@ function renderScheduleRuns() {
         const durationStr = formatDuration(run.duration_ms);
         const timeAgo = formatTimeAgo(run.started_at || run.triggered_at);
 
-        let threadMarkup = '';
+        let footer = '';
         if (run.thread_id && /^\d+$/.test(run.thread_id.trim())) {
             const safeThread = escapeHtml(run.thread_id.trim());
-            threadMarkup = ` • <a href="/agentsview/?thread=${safeThread}" class="run-thread-link" target="_blank" rel="noopener">THREAD #${safeThread.slice(0, 8)} ↗</a>`;
+            footer = `<div class="run-card-footer"><a href="/agentsview/?thread=${safeThread}" class="run-thread-link" target="_blank" rel="noopener">THREAD #${safeThread.slice(0, 8)} ↗</a></div>`;
         }
 
         let errorBox = '';
@@ -1694,14 +1690,7 @@ function renderScheduleRuns() {
                     <div class="run-prompt-text">${highlightedPrompt}</div>
                     ${errorBox}
                 </div>
-                <div class="run-card-footer">
-                    <div class="run-meta-left">
-                        <span>TARGET: <code>${escapeHtml(run.target_id || run.thread_id || 'N/A')}</code>${threadMarkup}</span>
-                    </div>
-                    <div class="run-meta-right">
-                        <span>RUN ID: <code>${escapeHtml(String(run.id))}</code></span>
-                    </div>
-                </div>
+                ${footer}
             </div>
         `;
     }).join('');

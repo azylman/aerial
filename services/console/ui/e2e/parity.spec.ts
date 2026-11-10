@@ -56,6 +56,11 @@ async function runStep(page: Page, step: Step): Promise<void> {
     case 'scrollTop':
       await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: 'instant' }));
       return;
+    case 'scrollBottom':
+      await page.evaluate(() =>
+        window.scrollTo({ top: document.scrollingElement!.scrollHeight, left: 0, behavior: 'instant' }),
+      );
+      return;
   }
 }
 

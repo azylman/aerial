@@ -50,7 +50,8 @@ export type Step =
   | { readonly kind: 'openDrawer'; readonly text: string }
   | { readonly kind: 'press'; readonly key: string }
   /** Jumps the page to its top-left corner at once (no smooth or keyboard scroll animation). */
-  | { readonly kind: 'scrollTop' };
+  | { readonly kind: 'scrollTop' }
+  | { readonly kind: 'scrollBottom' };
 
 export interface CountExpectation {
   readonly selector: string;
@@ -341,14 +342,10 @@ const DRAWER_TEXTS = [
 // Rows with steps end with a deterministic scroll. Clicking a pill or filling the search scrolls
 // it into view, and that offset depends on what was rendered above it at that instant (the
 // vanilla NEXT TRIGGER only fills in on its 1s ticker, which can wrap it onto a second line).
-// So each row then clicks the id chip of the last card it shows (the runner's click-by-text
-// step; chips have no handler, so this only scrolls far down) and re-selects the active SCHEDULES
-// tab: the tab is now off screen, Playwright scrolls it into view, and its position in the
-// identical header fixes the final offset. Re-selecting the tab keeps pill and search state.
-const settleScroll = (lastChip: string): readonly Step[] => [
-  { kind: 'openDrawer', text: lastChip },
-  { kind: 'clickTab', tab: 'SCHEDULES' },
-];
+// So each row then scrolls to the bottom of the page and re-selects the active SCHEDULES tab:
+// the tab is now off screen, Playwright scrolls it into view, and its position in the identical
+// header fixes the final offset. Re-selecting the tab keeps pill and search state.
+const settleScroll = (): readonly Step[] => [{ kind: 'scrollBottom' }, { kind: 'clickTab', tab: 'SCHEDULES' }];
 const SCHEDULES_SEARCH = "SEARCH SCHEDULES, PROMPTS, TARGET IDs (PRESS '/' TO FOCUS)...";
 const SCHEDULE_HEADINGS = ['ACTIVE CRONS', 'PENDING ONCE', 'NEXT TRIGGER', '24H SUCCESS RATE', '94.0%', '50 RUNS LOGGED (24H)'];
 
@@ -728,7 +725,7 @@ export const PARITY_ROWS: readonly ParityRow[] = [
     requires: ['schedules'],
     steps: [
       { kind: 'pill', label: 'CRON ROUTINES' },
-      ...settleScroll('cron-28'),
+      ...settleScroll(),
     ],
     expect: schedulesExpect(['SHOWING 28 / 40 ACTIVE ROUTINES', '40 ACTIVE'], scheduleCounts(28, 0, 0, 0)),
     region: 'viewport',
@@ -739,7 +736,7 @@ export const PARITY_ROWS: readonly ParityRow[] = [
     requires: ['schedules'],
     steps: [
       { kind: 'pill', label: 'ONE-SHOT' },
-      ...settleScroll('once-12'),
+      ...settleScroll(),
     ],
     expect: schedulesExpect(
       ['SHOWING 12 / 40 ACTIVE ROUTINES', 'ONE-TIME REMINDER', 'Reminder 1: water the basil'],
@@ -753,7 +750,7 @@ export const PARITY_ROWS: readonly ParityRow[] = [
     requires: ['schedules'],
     steps: [
       { kind: 'pill', label: 'RUN AUDIT LOG' },
-      ...settleScroll('run-050'),
+      ...settleScroll(),
     ],
     expect: schedulesExpect(['EXECUTION RUN AUDIT LOG', '50 RUNS'], scheduleCounts(0, 0, 50, 0)),
     region: 'viewport',
@@ -765,7 +762,7 @@ export const PARITY_ROWS: readonly ParityRow[] = [
     steps: [
       { kind: 'pill', label: 'ONE-SHOT' },
       { kind: 'pill', label: 'ALL' },
-      ...settleScroll('run-050'),
+      ...settleScroll(),
     ],
     expect: schedulesExpect(SCHEDULES_DEFAULT_TEXTS, scheduleCounts(28, 12, 50, 0)),
     region: 'viewport',
@@ -778,7 +775,7 @@ export const PARITY_ROWS: readonly ParityRow[] = [
     requires: ['schedules'],
     steps: [
       { kind: 'type', placeholder: SCHEDULES_SEARCH, text: 'plant' },
-      ...settleScroll('run-046'),
+      ...settleScroll(),
     ],
     expect: schedulesExpect(['SHOWING 4 / 40 ACTIVE ROUTINES', '6 RUNS', 'Plant'], scheduleCounts(4, 0, 6, 20)),
     region: 'viewport',
@@ -790,7 +787,7 @@ export const PARITY_ROWS: readonly ParityRow[] = [
     steps: [
       { kind: 'type', placeholder: SCHEDULES_SEARCH, text: 'plant' },
       { kind: 'press', key: 'Escape' },
-      ...settleScroll('run-050'),
+      ...settleScroll(),
     ],
     expect: schedulesExpect(SCHEDULES_DEFAULT_TEXTS, scheduleCounts(28, 12, 50, 0)),
     region: 'viewport',

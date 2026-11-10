@@ -89,7 +89,7 @@ const RUNS: readonly ScheduleRun[] = [
   run('run-2', { error: 'timeout talking to brain', status: 'failed' }),
   run('run-3', {
     title: '',
-    schedule_id: '',
+    schedule_id: 'cron-z',
     thread_id: '',
     target_id: '',
     schedule_type: '',
@@ -321,10 +321,10 @@ describe('SchedulesView content', () => {
         countdown: ['in 10m 0s'],
         title: ['Morning standup digest'],
         human: ['Every day at 9:00 AM'],
-        meta: ['CRON: 0 9 * * *', 'TARGET: 3000cron-a'],
+        meta: ['CRON: 0 9 * * *'],
         link: null,
         prompt: '\n                        Run routine cron-a\n                    ',
-        footer: ['NEXT: Nov 8 12:10:00 PM', 'ID: cron-a'],
+        footer: ['NEXT: Nov 8 12:10:00 PM'],
       },
       {
         className: 'schedule-card cron-card',
@@ -333,10 +333,10 @@ describe('SchedulesView content', () => {
         countdown: ['in 10m 0s'],
         title: ['Garden check'],
         human: ['Every day at 9:00 AM'],
-        meta: ['CRON: 0 9 * * *', 'TARGET: 3000cron-b'],
+        meta: ['CRON: 0 9 * * *'],
         link: null,
         prompt: '\n                        Check the garden sensors\n                    ',
-        footer: ['NEXT: Nov 8 12:10:00 PM', 'ID: cron-b'],
+        footer: ['NEXT: Nov 8 12:10:00 PM'],
       },
       {
         className: 'schedule-card cron-card',
@@ -345,10 +345,10 @@ describe('SchedulesView content', () => {
         countdown: ['in 10m 0s'],
         title: ['RECURRING ROUTINE'],
         human: ['Every 15 minutes'],
-        meta: ['CRON: */15 * * * *', 'TARGET: N/A'],
+        meta: ['CRON: */15 * * * *'],
         link: null,
         prompt: '\n                        Run routine cron-c\n                    ',
-        footer: ['NEXT: Nov 8 12:10:00 PM', 'ID: cron-c'],
+        footer: ['NEXT: Nov 8 12:10:00 PM'],
       },
       {
         className: 'schedule-card oneshot-card',
@@ -360,7 +360,7 @@ describe('SchedulesView content', () => {
         meta: ['THREAD: #40000000 ↗'],
         link: '/agentsview/?thread=400000000000000000',
         prompt: '\n                        Water the garden basil\n                    ',
-        footer: ['RUN AT: Nov 8 12:30:00 PM', 'ID: once-a'],
+        footer: ['RUN AT: Nov 8 12:30:00 PM'],
       },
       {
         className: 'schedule-card oneshot-card',
@@ -372,7 +372,7 @@ describe('SchedulesView content', () => {
         meta: ['THREAD: not-a-thread'],
         link: null,
         prompt: '\n                        Reminder once-b\n                    ',
-        footer: ['RUN AT: Nov 8 12:30:00 PM', 'ID: once-b'],
+        footer: ['RUN AT: Nov 8 12:30:00 PM'],
       },
     ]);
 
@@ -381,7 +381,7 @@ describe('SchedulesView content', () => {
       header: texts(el as HTMLElement, '.run-header-left > span, .run-header-right > span'),
       chip: el.querySelector('.run-status-chip')?.className,
       error: texts(el as HTMLElement, '.run-error-box'),
-      footer: texts(el as HTMLElement, '.run-card-footer span'),
+      footer: el.querySelector('.run-card-footer')?.innerHTML ?? null,
     });
     expect([...container.querySelectorAll('.run-card')].map(runCard)).toEqual([
       {
@@ -389,21 +389,21 @@ describe('SchedulesView content', () => {
         header: ['RUNNING', 'Run run-1', 'CRON', '1h AGO'],
         chip: 'run-status-chip chip-running',
         error: [],
-        footer: ['TARGET: 200 • THREAD #60000000 ↗', 'RUN ID: run-1'],
+        footer: '<a href="/agentsview/?thread=600000000000000000" class="run-thread-link" target="_blank" rel="noopener">THREAD #60000000 ↗</a>',
       },
       {
         className: 'run-card run-failed',
         header: ['FAILED', 'Run run-2', 'CRON', '25.6s', '1h AGO'],
         chip: 'run-status-chip chip-failed',
         error: ['ERROR: timeout talking to brain'],
-        footer: ['TARGET: 200 • THREAD #60000000 ↗', 'RUN ID: run-2'],
+        footer: '<a href="/agentsview/?thread=600000000000000000" class="run-thread-link" target="_blank" rel="noopener">THREAD #60000000 ↗</a>',
       },
       {
         className: 'run-card run-completed',
         header: ['COMPLETED', 'Schedule Run', 'CRON', '25.6s', '1h AGO'],
         chip: 'run-status-chip chip-completed',
         error: [],
-        footer: ['TARGET: N/A', 'RUN ID: run-3'],
+        footer: null,
       },
     ]);
   });
@@ -435,7 +435,10 @@ describe('SchedulesView content', () => {
   });
 });
 
-const ids = (container: HTMLElement): string[] => texts(container, '.schedule-id-chip code');
+// Schedule cards no longer show their id, so identify each one by its (fixture-unique) prompt.
+const PROMPT_IDS = new Map([...CRONS, ...ONE_SHOTS].map((s) => [s.prompt, s.id]));
+const ids = (container: HTMLElement): string[] =>
+  texts(container, '.schedule-prompt-body').map((prompt) => PROMPT_IDS.get(prompt) ?? prompt);
 
 describe('SchedulesView filters', () => {
   it.each([
@@ -581,7 +584,7 @@ describe('SchedulesView filters', () => {
     const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'Search schedules' });
     fireEvent.change(input, { target: { value: from } });
     const cardFor = (id: string) =>
-      [...container.querySelectorAll('.schedule-card')].find((el) => el.textContent?.includes(`ID: ${id}`));
+      [...container.querySelectorAll('.schedule-card')].find((el) => PROMPT_IDS.get(el.querySelector('.schedule-prompt-body')?.textContent?.trim() ?? '') === id);
     const before = cardFor('cron-b');
     iconRenders.length = 0;
     fireEvent.change(input, { target: { value: to } });

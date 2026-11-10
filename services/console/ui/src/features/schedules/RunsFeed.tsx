@@ -23,7 +23,7 @@ export const RunCard = memo(function RunCard({ run }: { readonly run: ScheduleRu
             <Glyph name={status.icon} /> {status.label}
           </span>
           <span className="run-title">
-            <QueryHighlight text={run.title || run.schedule_id || 'Schedule Run'} />
+            <QueryHighlight text={run.title || 'Schedule Run'} />
           </span>
           <span className="run-type-tag">{(run.schedule_type || 'cron').toUpperCase()}</span>
         </div>
@@ -49,26 +49,13 @@ export const RunCard = memo(function RunCard({ run }: { readonly run: ScheduleRu
           </div>
         ) : null}
       </div>
-      <div className="run-card-footer">
-        <div className="run-meta-left">
-          <span>
-            TARGET: <code>{run.target_id || run.thread_id || 'N/A'}</code>
-            {thread === null ? null : (
-              <>
-                {' • '}
-                <a href={`/agentsview/?thread=${thread}`} className="run-thread-link" target="_blank" rel="noopener">
-                  THREAD #{thread.slice(0, 8)} ↗
-                </a>
-              </>
-            )}
-          </span>
+      {thread === null ? null : (
+        <div className="run-card-footer">
+          <a href={`/agentsview/?thread=${thread}`} className="run-thread-link" target="_blank" rel="noopener">
+            THREAD #{thread.slice(0, 8)} ↗
+          </a>
         </div>
-        <div className="run-meta-right">
-          <span>
-            RUN ID: <code>{String(run.id)}</code>
-          </span>
-        </div>
-      </div>
+      )}
     </div>
   );
 });
