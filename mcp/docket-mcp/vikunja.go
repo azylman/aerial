@@ -249,26 +249,34 @@ func (c *VikunjaClient) CreateProject(ctx context.Context, title string) (*Vikun
 	return &proj, nil
 }
 
-// ListProjectTasks fetches all tasks within a project handling pagination.
+// vikunjaPageSize is the largest page Vikunja serves; it caps per_page at this value.
+const vikunjaPageSize = 50
+
+// ListProjectTasks fetches every task within a project, page by page. Paging stops
+// only on an empty page or a page that adds no unseen task (a server ignoring the
+// page param), never on a short page, since Vikunja may cap pages below per_page.
 func (c *VikunjaClient) ListProjectTasks(ctx context.Context, projectID int64) ([]VikunjaTask, error) {
 	var allTasks []VikunjaTask
-	page := 1
-	for {
+	seen := make(map[int64]bool)
+	for page := 1; ; page++ {
 		var pageTasks []VikunjaTask
-		path := fmt.Sprintf("/api/v1/projects/%d/tasks?page=%d&per_page=200", projectID, page)
+		path := fmt.Sprintf("/api/v1/projects/%d/tasks?page=%d&per_page=%d", projectID, page, vikunjaPageSize)
 		if err := c.doJSON(ctx, http.MethodGet, path, nil, &pageTasks); err != nil {
 			return nil, err
 		}
-		if len(pageTasks) == 0 {
-			break
+		added := 0
+		for _, t := range pageTasks {
+			if seen[t.ID] {
+				continue
+			}
+			seen[t.ID] = true
+			allTasks = append(allTasks, t)
+			added++
 		}
-		allTasks = append(allTasks, pageTasks...)
-		if len(pageTasks) < 200 {
-			break
+		if added == 0 {
+			return allTasks, nil
 		}
-		page++
 	}
-	return allTasks, nil
 }
 
 // GetTask fetches full details of a specific task.

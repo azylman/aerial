@@ -6,11 +6,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -107,6 +107,54 @@ type VikunjaRelationRecord struct {
 	RelationKind string
 }
 
+// fakeVikunjaMaxPerPage caps fake list pages below the client's page size, as
+// Vikunja does, so the small fixture spans several pages.
+const fakeVikunjaMaxPerPage = 4
+
+// fixtureTasks is the single task fixture behind both the fake list and get
+// endpoints. Relations name neighbor ids; embedded neighbors get the
+// neighbor's title and done flag, as Vikunja's get endpoint returns them.
+func fixtureTasks() []VikunjaTask {
+	rel := func(ids ...int64) []VikunjaTask {
+		out := make([]VikunjaTask, len(ids))
+		for i, id := range ids {
+			out[i] = VikunjaTask{ID: id}
+		}
+		return out
+	}
+	stamp := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	tasks := []VikunjaTask{
+		{ID: 1, Title: "Top Task 1", RelatedTasks: map[string][]VikunjaTask{"subtask": rel(2), "blocking": rel(3)}},
+		{ID: 2, Title: "Subtask 2", RelatedTasks: map[string][]VikunjaTask{"parenttask": rel(1)}},
+		{ID: 3, Title: "Task 3", RelatedTasks: map[string][]VikunjaTask{"blocked": rel(1)}},
+		{ID: 4, Title: "Independent Task 4", RelatedTasks: map[string][]VikunjaTask{"related": rel(1)}},
+		{ID: 5, Title: "Completed Task 5", Done: true},
+		{ID: 6, Title: "Task 6", RelatedTasks: map[string][]VikunjaTask{"subtask": rel(7)}},
+		{ID: 7, Title: "Subtask 7", RelatedTasks: map[string][]VikunjaTask{"parenttask": rel(6)}},
+		{ID: 75, Title: "High Task 75", RelatedTasks: map[string][]VikunjaTask{"blocking": rel(76)}},
+		{ID: 76, Title: "Task 76", RelatedTasks: map[string][]VikunjaTask{"blocked": rel(75)}},
+		{ID: 888, Title: "Task 888"},
+		{ID: 60, Title: "Foreign Task 60", ProjectID: 2},
+	}
+	byID := make(map[int64]VikunjaTask, len(tasks))
+	for i := range tasks {
+		if tasks[i].ProjectID == 0 {
+			tasks[i].ProjectID = 1
+		}
+		tasks[i].Description = "Task description"
+		tasks[i].Created, tasks[i].Updated = stamp, stamp
+		byID[tasks[i].ID] = tasks[i]
+	}
+	for _, task := range tasks {
+		for _, neighbors := range task.RelatedTasks {
+			for j, n := range neighbors {
+				neighbors[j] = VikunjaTask{ID: n.ID, Title: byID[n.ID].Title, Done: byID[n.ID].Done, ProjectID: byID[n.ID].ProjectID}
+			}
+		}
+	}
+	return tasks
+}
+
 func setupTestEnvironment(t *testing.T) (*Server, *http.ServeMux, *fakeVikunjaServerState) {
 	t.Helper()
 	state := &fakeVikunjaServerState{}
@@ -126,71 +174,25 @@ func setupTestEnvironment(t *testing.T) (*Server, *http.ServeMux, *fakeVikunjaSe
 		_ = json.NewEncoder(w).Encode(VikunjaProject{ID: 1, Title: "Docket"})
 	})
 
+	tasks := fixtureTasks()
+	byID := make(map[int64]VikunjaTask, len(tasks))
+	var projectTasks []VikunjaTask
+	for _, task := range tasks {
+		byID[task.ID] = task
+		if task.ProjectID == 1 {
+			projectTasks = append(projectTasks, task)
+		}
+	}
+
 	vikunjaMux.HandleFunc("/api/v1/projects/1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
-			tasks := []VikunjaTask{
-				{
-					ID:    1,
-					Title: "Top Task 1",
-					Done:  false,
-					RelatedTasks: map[string][]VikunjaTask{
-						"subtask":  {{ID: 2}},
-						"blocking": {{ID: 3}},
-					},
-				},
-				{
-					ID:    2,
-					Title: "Subtask 2",
-					Done:  false,
-					RelatedTasks: map[string][]VikunjaTask{
-						"parenttask": {{ID: 1}},
-					},
-				},
-				{
-					ID:    3,
-					Title: "Task 3",
-					Done:  false,
-					RelatedTasks: map[string][]VikunjaTask{
-						"blocked": {{ID: 1}},
-					},
-				},
-				{
-					ID:    4,
-					Title: "Independent Task 4",
-					Done:  false,
-					RelatedTasks: map[string][]VikunjaTask{
-						"related": {{ID: 1}},
-					},
-				},
-				{
-					ID:    5,
-					Title: "Completed Task 5",
-					Done:  true,
-				},
-				{
-					ID:    6,
-					Title: "Task 6",
-					Done:  false,
-					RelatedTasks: map[string][]VikunjaTask{
-						"subtask": {{ID: 7}},
-					},
-				},
-				{
-					ID:    7,
-					Title: "Subtask 7",
-					Done:  false,
-					RelatedTasks: map[string][]VikunjaTask{
-						"parenttask": {{ID: 6}},
-					},
-				},
-				{
-					ID:    888,
-					Title: "Task 888",
-					Done:  false,
-				},
-			}
-			_ = json.NewEncoder(w).Encode(tasks)
+			perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+			perPage = min(perPage, fakeVikunjaMaxPerPage)
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			lo := min((page-1)*perPage, len(projectTasks))
+			hi := min(page*perPage, len(projectTasks))
+			_ = json.NewEncoder(w).Encode(append([]VikunjaTask{}, projectTasks[lo:hi]...))
 			return
 		}
 		var created VikunjaTask
@@ -226,6 +228,11 @@ func setupTestEnvironment(t *testing.T) (*Server, *http.ServeMux, *fakeVikunjaSe
 				_, _ = w.Write([]byte(`{"error":"relation failed"}`))
 				return
 			}
+			if r.Method == http.MethodDelete {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{}`))
+				return
+			}
 			var relReq VikunjaRelationReq
 			_ = json.NewDecoder(r.Body).Decode(&relReq)
 			if relReq.OtherTaskID == 888 {
@@ -250,19 +257,14 @@ func setupTestEnvironment(t *testing.T) (*Server, *http.ServeMux, *fakeVikunjaSe
 			return
 		}
 		if r.Method == http.MethodGet {
-			parts := strings.Split(strings.Trim(path, "/"), "/")
-			taskID, _ := strconv.ParseInt(parts[len(parts)-1], 10, 64)
-			if taskID == 0 {
-				taskID = 1
+			taskID, _ := strconv.ParseInt(strings.TrimPrefix(path, "/api/v1/tasks/"), 10, 64)
+			task, ok := byID[taskID]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"message":"The task does not exist."}`))
+				return
 			}
-			_ = json.NewEncoder(w).Encode(VikunjaTask{
-				ID:          taskID,
-				Title:       fmt.Sprintf("Task %d", taskID),
-				Description: "Task description",
-				Done:        false,
-				Created:     time.Now().UTC(),
-				Updated:     time.Now().UTC(),
-			})
+			_ = json.NewEncoder(w).Encode(task)
 			return
 		}
 		if r.Method == http.MethodPost {
@@ -390,14 +392,17 @@ func TestServer_HTTPRoutesTable(t *testing.T) {
 		},
 		{name: "tasks list defaults to open", method: http.MethodGet, path: "/api/tasks", wantStatus: http.StatusOK, wantSubstr: `{"id":2,"title":"Subtask 2","status":"open","parent_id":1}`, wantCacheControl: "no-cache"},
 		{name: "tasks list status all includes completed", method: http.MethodGet, path: "/api/tasks?status=all", wantStatus: http.StatusOK, wantSubstr: `{"id":5,"title":"Completed Task 5","status":"completed"}`, wantCacheControl: "no-cache"},
+		{name: "tasks list pages past the vikunja page cap", method: http.MethodGet, path: "/api/tasks", wantStatus: http.StatusOK, wantSubstr: `{"id":76,"title":"Task 76","status":"open","blocked_by":[75]}`, wantCacheControl: "no-cache"},
 		{name: "tasks list with no matches returns empty array", method: http.MethodGet, path: "/api/tasks?status=wont_do", wantStatus: http.StatusOK, wantSubstr: `[]`, wantCacheControl: "no-cache"},
 		{name: "tasks list bad status returns 400", method: http.MethodGet, path: "/api/tasks?status=bogus", wantStatus: http.StatusBadRequest, wantSubstr: `{"error":"invalid status \"bogus\"`, wantCacheControl: "no-cache"},
 		{name: "tasks list POST returns 405", method: http.MethodPost, path: "/api/tasks", wantStatus: http.StatusMethodNotAllowed, wantSubstr: `{"error":"method not allowed"}`, wantCacheControl: "no-cache"},
-		{name: "task detail hydrates relations and comments", method: http.MethodGet, path: "/api/tasks/2", wantStatus: http.StatusOK, wantSubstr: `"parent":{"id":1,"title":"Top Task 1","status":"open","blocks":[3]}`, wantCacheControl: "no-cache"},
+		{name: "task detail hydrates relations and comments", method: http.MethodGet, path: "/api/tasks/2", wantStatus: http.StatusOK, wantSubstr: `"parent":{"id":1,"title":"Top Task 1","status":"open"}`, wantCacheControl: "no-cache"},
+		{name: "task detail above first page hydrates embedded neighbors", method: http.MethodGet, path: "/api/tasks/75", wantStatus: http.StatusOK, wantSubstr: `"blocks":[{"id":76,"title":"Task 76","status":"open"}]`, wantCacheControl: "no-cache"},
 		{name: "task detail includes comments", method: http.MethodGet, path: "/api/tasks/1", wantStatus: http.StatusOK, wantSubstr: `"comment":"Initial comment"`, wantCacheControl: "no-cache"},
 		{name: "task detail non-numeric id returns 400", method: http.MethodGet, path: "/api/tasks/abc", wantStatus: http.StatusBadRequest, wantSubstr: `invalid task id \"abc\"`, wantCacheControl: "no-cache"},
 		{name: "task detail missing id returns 400", method: http.MethodGet, path: "/api/tasks/", wantStatus: http.StatusBadRequest, wantSubstr: `invalid task id \"\"`, wantCacheControl: "no-cache"},
-		{name: "task detail outside project graph returns 404", method: http.MethodGet, path: "/api/tasks/999", wantStatus: http.StatusNotFound, wantSubstr: `{"error":"task 999 not found in project graph"}`, wantCacheControl: "no-cache"},
+		{name: "task detail in another project returns 404", method: http.MethodGet, path: "/api/tasks/60", wantStatus: http.StatusNotFound, wantSubstr: `{"error":"task 60 not found in project graph"}`, wantCacheControl: "no-cache"},
+		{name: "task detail unknown to vikunja returns 404", method: http.MethodGet, path: "/api/tasks/999", wantStatus: http.StatusNotFound, wantSubstr: "failed to fetch task 999: vikunja API returned status 404", wantCacheControl: "no-cache"},
 		{name: "task detail upstream failure returns 502", method: http.MethodGet, path: "/api/tasks/888", wantStatus: http.StatusBadGateway, wantSubstr: "failed to fetch task 888", wantCacheControl: "no-cache"},
 		{name: "task detail DELETE returns 405", method: http.MethodDelete, path: "/api/tasks/1", wantStatus: http.StatusMethodNotAllowed, wantSubstr: "method not allowed", wantCacheControl: "no-cache"},
 		{name: "search returns scored hits with parent ids", method: http.MethodGet, path: "/api/search?q=subtask&limit=5", wantStatus: http.StatusOK, wantSubstr: `{"id":2,"title":"Subtask 2","status":"open","parent_id":1,"score":0.85}`, wantCacheControl: "no-cache"},
@@ -564,335 +569,83 @@ func TestServer_MCPMethodsTable(t *testing.T) {
 func TestServer_ToolsExecutionTable(t *testing.T) {
 	t.Parallel()
 
-	_, mux, _ := setupTestEnvironment(t)
+	type rel = VikunjaRelationRecord
 
 	tests := []struct {
-		name       string
-		toolName   string
-		args       string
-		wantSubstr string
-		wantError  bool
+		name          string
+		toolName      string
+		args          string
+		wantSubstr    string
+		wantError     bool
+		wantRelations []VikunjaRelationRecord
 	}{
-		{
-			name:       "ready top level tasks",
-			toolName:   "ready",
-			args:       `{}`,
-			wantSubstr: `"id":1`,
-			wantError:  false,
-		},
-		{
-			name:       "ready scoped parent tasks",
-			toolName:   "ready",
-			args:       `{"parent_id":1}`,
-			wantSubstr: `"id":2`,
-			wantError:  false,
-		},
-		{
-			name:       "list open tasks",
-			toolName:   "list",
-			args:       `{"status":"open"}`,
-			wantSubstr: `"id":1`,
-			wantError:  false,
-		},
-		{
-			name:       "list all tasks",
-			toolName:   "list",
-			args:       `{"status":"all"}`,
-			wantSubstr: `"id":5`,
-			wantError:  false,
-		},
-		{
-			name:       "list scoped by parent",
-			toolName:   "list",
-			args:       `{"status":"open","parent_id":1}`,
-			wantSubstr: `"id":2`,
-			wantError:  false,
-		},
-		{
-			name:       "search tasks success",
-			toolName:   "search",
-			args:       `{"query":"test","status":"open","limit":5}`,
-			wantSubstr: `"id":1`,
-			wantError:  false,
-		},
-		{
-			name:       "search missing query error",
-			toolName:   "search",
-			args:       `{"query":""}`,
-			wantSubstr: "parameter 'query' is required",
-			wantError:  true,
-		},
-		{
-			name:       "show task details",
-			toolName:   "show",
-			args:       `{"id":1}`,
-			wantSubstr: `"description":"Task description"`,
-			wantError:  false,
-		},
-		{
-			name:       "show task with comments failure",
-			toolName:   "show",
-			args:       `{"id":5}`,
-			wantSubstr: `"id":5`,
-			wantError:  false,
-		},
-		{
-			name:       "show task with parent",
-			toolName:   "show",
-			args:       `{"id":2}`,
-			wantSubstr: `"parent":{"id":1`,
-			wantError:  false,
-		},
-		{
-			name:       "show task with related",
-			toolName:   "show",
-			args:       `{"id":4}`,
-			wantSubstr: `"related":[{"id":1`,
-			wantError:  false,
-		},
-		{
-			name:       "show task with parent and blocked_by",
-			toolName:   "show",
-			args:       `{"id":3}`,
-			wantSubstr: `"blocked_by":[{"id":1`,
-			wantError:  false,
-		},
-		{
-			name:       "show invalid id error",
-			toolName:   "show",
-			args:       `{"id":-1}`,
-			wantSubstr: "must be a positive integer",
-			wantError:  true,
-		},
-		{
-			name:       "show task not found in graph",
-			toolName:   "show",
-			args:       `{"id":999}`,
-			wantSubstr: "not found in project graph",
-			wantError:  true,
-		},
-		{
-			name:       "create task success",
-			toolName:   "create",
-			args:       `{"title":"New Task","description":"A brand new task","blocks":[4]}`,
-			wantSubstr: `"title":"New Task"`,
-			wantError:  false,
-		},
-		{
-			name:       "create task with parent, blocked_by, and related",
-			toolName:   "create",
-			args:       `{"title":"All Relations","parent_id":1,"blocked_by":[4],"related":[2]}`,
-			wantSubstr: `"parent_id":1,"blocked_by":[4]`,
-			wantError:  false,
-		},
-		{
-			name:       "create with invalid parent_id",
-			toolName:   "create",
-			args:       `{"title":"Bad Parent","parent_id":999}`,
-			wantSubstr: "parent task 999 not found",
-			wantError:  true,
-		},
-		{
-			name:       "create with invalid blocks",
-			toolName:   "create",
-			args:       `{"title":"Bad Blocks","blocks":[999]}`,
-			wantSubstr: "blocked task 999 not found",
-			wantError:  true,
-		},
-		{
-			name:       "create with invalid related",
-			toolName:   "create",
-			args:       `{"title":"Bad Rel","related":[999]}`,
-			wantSubstr: "related task 999 not found",
-			wantError:  true,
-		},
-		{
-			name:       "create empty title error",
-			toolName:   "create",
-			args:       `{"title":""}`,
-			wantSubstr: "cannot be empty",
-			wantError:  true,
-		},
-		{
-			name:       "create nonexistent blocker error",
-			toolName:   "create",
-			args:       `{"title":"Task","blocked_by":[999]}`,
-			wantSubstr: "blocker task 999 not found",
-			wantError:  true,
-		},
-		{
-			name:       "update task success",
-			toolName:   "update",
-			args:       `{"id":1,"title":"Updated Title"}`,
-			wantSubstr: `"title":"Updated Title"`,
-			wantError:  false,
-		},
-		{
-			name:       "update invalid id error",
-			toolName:   "update",
-			args:       `{"id":0}`,
-			wantSubstr: "must be a positive integer",
-			wantError:  true,
-		},
-		{
-			name:       "comment task success",
-			toolName:   "comment",
-			args:       `{"id":1,"text":"Nice progress"}`,
-			wantSubstr: "comment added to task 1",
-			wantError:  false,
-		},
-		{
-			name:       "comment missing text error",
-			toolName:   "comment",
-			args:       `{"id":1,"text":""}`,
-			wantSubstr: "required",
-			wantError:  true,
-		},
-		{
-			name:       "link tasks blocks success",
-			toolName:   "link",
-			args:       `{"id":4,"target_id":2,"type":"blocks"}`,
-			wantSubstr: "created",
-			wantError:  false,
-		},
-		{
-			name:       "link create error",
-			toolName:   "link",
-			args:       `{"id":4,"target_id":888,"type":"blocks"}`,
-			wantSubstr: "failed to create relation",
-			wantError:  true,
-		},
-		{
-			name:       "link remove error",
-			toolName:   "link",
-			args:       `{"id":4,"target_id":888,"type":"blocks","remove":true}`,
-			wantSubstr: "failed to remove relation",
-			wantError:  true,
-		},
-		{
-			name:       "link invalid id error",
-			toolName:   "link",
-			args:       `{"id":0,"target_id":2,"type":"blocks"}`,
-			wantSubstr: "must be positive integers",
-			wantError:  true,
-		},
-		{
-			name:       "close invalid id error",
-			toolName:   "close",
-			args:       `{"id":0,"resolution":"completed","reason":"done"}`,
-			wantSubstr: "must be a positive integer",
-			wantError:  true,
-		},
-		{
-			name:       "link tasks parent success",
-			toolName:   "link",
-			args:       `{"id":4,"target_id":1,"type":"parent"}`,
-			wantSubstr: "created",
-			wantError:  false,
-		},
-		{
-			name:       "link tasks related success",
-			toolName:   "link",
-			args:       `{"id":4,"target_id":2,"type":"related"}`,
-			wantSubstr: "created",
-			wantError:  false,
-		},
-		{
-			name:       "link self-link rejected",
-			toolName:   "link",
-			args:       `{"id":1,"target_id":1,"type":"parent"}`,
-			wantSubstr: "self-link cycle",
-			wantError:  true,
-		},
-		{
-			name:       "link cycle rejected",
-			toolName:   "link",
-			args:       `{"id":1,"target_id":2,"type":"parent"}`,
-			wantSubstr: "cycle detected",
-			wantError:  true,
-		},
-		{
-			name:       "link remove relation",
-			toolName:   "link",
-			args:       `{"id":1,"target_id":2,"type":"parent","remove":true}`,
-			wantSubstr: "removed",
-			wantError:  false,
-		},
-		{
-			name:       "link invalid relation type",
-			toolName:   "link",
-			args:       `{"id":1,"target_id":2,"type":"invalid"}`,
-			wantSubstr: "invalid relation type",
-			wantError:  true,
-		},
-		{
-			name:       "close completed rejected with open subtask",
-			toolName:   "close",
-			args:       `{"id":1,"resolution":"completed","reason":"done"}`,
-			wantSubstr: "open subtasks: [2]",
-			wantError:  true,
-		},
-		{
-			name:       "close completed success on leaf task",
-			toolName:   "close",
-			args:       `{"id":4,"resolution":"completed","reason":"verified"}`,
-			wantSubstr: `"status":"completed"`,
-			wantError:  false,
-		},
-		{
-			name:       "close wont_do cascades",
-			toolName:   "close",
-			args:       `{"id":6,"resolution":"wont_do","reason":"abandoned"}`,
-			wantSubstr: `"status":"wont_do"`,
-			wantError:  false,
-		},
-		{
-			name:       "close wont_do rejected when blocking open task",
-			toolName:   "close",
-			args:       `{"id":1,"resolution":"wont_do","reason":"abandoned"}`,
-			wantSubstr: "blocks open tasks: [3]",
-			wantError:  true,
-		},
-		{
-			name:       "close invalid resolution error",
-			toolName:   "close",
-			args:       `{"id":1,"resolution":"invalid","reason":"why"}`,
-			wantSubstr: "invalid resolution",
-			wantError:  true,
-		},
-		{
-			name:       "close empty reason error",
-			toolName:   "close",
-			args:       `{"id":1,"resolution":"completed","reason":""}`,
-			wantSubstr: "cannot be empty",
-			wantError:  true,
-		},
-		{
-			name:       "ready invalid arguments",
-			toolName:   "ready",
-			args:       `{"parent_id":"not-an-integer"}`,
-			wantSubstr: "invalid arguments",
-			wantError:  true,
-		},
-		{
-			name:       "list invalid arguments",
-			toolName:   "list",
-			args:       `{"parent_id":"not-an-integer"}`,
-			wantSubstr: "invalid arguments",
-			wantError:  true,
-		},
-		{
-			name:       "unknown tool returns error",
-			toolName:   "unknown_tool",
-			args:       `{}`,
-			wantSubstr: "Unknown tool: unknown_tool",
-			wantError:  true,
-		},
+		{name: "ready top level tasks", toolName: "ready", args: `{}`, wantSubstr: `"id":1`},
+		{name: "ready includes tasks past first page", toolName: "ready", args: `{}`, wantSubstr: `{"id":75,"title":"High Task 75","status":"open"}`},
+		{name: "ready scoped parent tasks", toolName: "ready", args: `{"parent_id":1}`, wantSubstr: `"id":2`},
+		{name: "list open tasks", toolName: "list", args: `{"status":"open"}`, wantSubstr: `"id":1`},
+		{name: "list all tasks", toolName: "list", args: `{"status":"all"}`, wantSubstr: `"id":5`},
+		{name: "list includes tasks past first page", toolName: "list", args: `{"status":"open"}`, wantSubstr: `{"id":76,"title":"Task 76","status":"open","blocked_by":[75]}`},
+		{name: "list scoped by parent", toolName: "list", args: `{"status":"open","parent_id":1}`, wantSubstr: `"id":2`},
+		{name: "search tasks success", toolName: "search", args: `{"query":"test","status":"open","limit":5}`, wantSubstr: `"id":1`},
+		{name: "search missing query error", toolName: "search", args: `{"query":""}`, wantSubstr: "parameter 'query' is required", wantError: true},
+		{name: "show task details", toolName: "show", args: `{"id":1}`, wantSubstr: `"description":"Task description"`},
+		{name: "show task with comments failure", toolName: "show", args: `{"id":5}`, wantSubstr: `{"id":5,"title":"Completed Task 5","status":"completed"`},
+		{name: "show task with parent", toolName: "show", args: `{"id":2}`, wantSubstr: `"parent":{"id":1,"title":"Top Task 1","status":"open"}`},
+		{name: "show task with related", toolName: "show", args: `{"id":4}`, wantSubstr: `"related":[{"id":1`},
+		{name: "show task with blocked_by", toolName: "show", args: `{"id":3}`, wantSubstr: `"blocked_by":[{"id":1`},
+		{name: "show task above first page", toolName: "show", args: `{"id":75}`, wantSubstr: `"blocks":[{"id":76,"title":"Task 76","status":"open"}]`},
+		{name: "show invalid id error", toolName: "show", args: `{"id":-1}`, wantSubstr: "must be a positive integer", wantError: true},
+		{name: "show task in another project not found", toolName: "show", args: `{"id":60}`, wantSubstr: "task 60 not found in project graph", wantError: true},
+		{name: "show task unknown to vikunja", toolName: "show", args: `{"id":999}`, wantSubstr: "failed to fetch task 999", wantError: true},
+		{name: "create task success", toolName: "create", args: `{"title":"New Task","description":"A brand new task","blocks":[4]}`, wantSubstr: `"title":"New Task"`, wantRelations: []rel{{100, 4, "blocking"}}},
+		{name: "create task with parent, blocked_by, and related", toolName: "create", args: `{"title":"All Relations","parent_id":1,"blocked_by":[4],"related":[2]}`, wantSubstr: `"parent_id":1,"blocked_by":[4]`, wantRelations: []rel{{100, 1, "parenttask"}, {4, 100, "blocking"}, {100, 2, "related"}}},
+		{name: "create blocked by task above first page", toolName: "create", args: `{"title":"After 75","blocked_by":[75],"blocks":[3]}`, wantSubstr: `"blocked_by":[75],"blocks":[3]`, wantRelations: []rel{{100, 3, "blocking"}, {75, 100, "blocking"}}},
+		{name: "create forming blocking cycle rejected", toolName: "create", args: `{"title":"Cycle","blocks":[1],"blocked_by":[3]}`, wantSubstr: "cycle detected: task 1 already transitively blocks task 3", wantError: true},
+		{name: "create with invalid parent_id", toolName: "create", args: `{"title":"Bad Parent","parent_id":999}`, wantSubstr: "parent task 999 not found", wantError: true},
+		{name: "create with invalid blocks", toolName: "create", args: `{"title":"Bad Blocks","blocks":[999]}`, wantSubstr: "blocked task 999 not found", wantError: true},
+		{name: "create with invalid related", toolName: "create", args: `{"title":"Bad Rel","related":[999]}`, wantSubstr: "related task 999 not found", wantError: true},
+		{name: "create with blocker in another project", toolName: "create", args: `{"title":"Foreign","blocked_by":[60]}`, wantSubstr: "blocker task 60 not found", wantError: true},
+		{name: "create nonexistent blocker error", toolName: "create", args: `{"title":"Task","blocked_by":[999]}`, wantSubstr: "blocker task 999 not found", wantError: true},
+		{name: "create blocker fetch failure", toolName: "create", args: `{"title":"Task","blocked_by":[888]}`, wantSubstr: "failed to fetch task 888", wantError: true},
+		{name: "create empty title error", toolName: "create", args: `{"title":""}`, wantSubstr: "cannot be empty", wantError: true},
+		{name: "update task success", toolName: "update", args: `{"id":1,"title":"Updated Title"}`, wantSubstr: `"title":"Updated Title"`},
+		{name: "update invalid id error", toolName: "update", args: `{"id":0}`, wantSubstr: "must be a positive integer", wantError: true},
+		{name: "comment task success", toolName: "comment", args: `{"id":1,"text":"Nice progress"}`, wantSubstr: "comment added to task 1"},
+		{name: "comment missing text error", toolName: "comment", args: `{"id":1,"text":""}`, wantSubstr: "required", wantError: true},
+		{name: "link tasks blocks success", toolName: "link", args: `{"id":4,"target_id":2,"type":"blocks"}`, wantSubstr: "created", wantRelations: []rel{{4, 2, "blocking"}}},
+		{name: "link blocks to task above first page", toolName: "link", args: `{"id":4,"target_id":75,"type":"blocks"}`, wantSubstr: "relation blocks between task 4 and 75 created", wantRelations: []rel{{4, 75, "blocking"}}},
+		{name: "link blocks cycle above first page rejected", toolName: "link", args: `{"id":76,"target_id":75,"type":"blocks"}`, wantSubstr: "cycle detected: task 75 already transitively blocks task 76", wantError: true},
+		{name: "link blocks cycle check fetch failure", toolName: "link", args: `{"id":4,"target_id":888,"type":"blocks"}`, wantSubstr: "failed to fetch task 888", wantError: true},
+		{name: "link create error", toolName: "link", args: `{"id":4,"target_id":888,"type":"related"}`, wantSubstr: "failed to create relation", wantError: true},
+		{name: "link remove error", toolName: "link", args: `{"id":4,"target_id":888,"type":"blocks","remove":true}`, wantSubstr: "failed to remove relation", wantError: true},
+		{name: "link invalid id error", toolName: "link", args: `{"id":0,"target_id":2,"type":"blocks"}`, wantSubstr: "must be positive integers", wantError: true},
+		{name: "link tasks parent success", toolName: "link", args: `{"id":4,"target_id":1,"type":"parent"}`, wantSubstr: "created", wantRelations: []rel{{4, 1, "parenttask"}}},
+		{name: "link tasks related success", toolName: "link", args: `{"id":4,"target_id":2,"type":"related"}`, wantSubstr: "created", wantRelations: []rel{{4, 2, "related"}}},
+		{name: "link self-link rejected", toolName: "link", args: `{"id":1,"target_id":1,"type":"parent"}`, wantSubstr: "self-link cycle", wantError: true},
+		{name: "link cycle rejected", toolName: "link", args: `{"id":1,"target_id":2,"type":"parent"}`, wantSubstr: "cycle detected: task 1 is already an ancestor of task 2", wantError: true},
+		{name: "link remove relation", toolName: "link", args: `{"id":1,"target_id":2,"type":"parent","remove":true}`, wantSubstr: "removed"},
+		{name: "link invalid relation type", toolName: "link", args: `{"id":1,"target_id":2,"type":"invalid"}`, wantSubstr: "invalid relation type", wantError: true},
+		{name: "close invalid id error", toolName: "close", args: `{"id":0,"resolution":"completed","reason":"done"}`, wantSubstr: "must be a positive integer", wantError: true},
+		{name: "close completed rejected with open subtask", toolName: "close", args: `{"id":1,"resolution":"completed","reason":"done"}`, wantSubstr: "open subtasks: [2]", wantError: true},
+		{name: "close completed rejected with open blocker", toolName: "close", args: `{"id":76,"resolution":"completed","reason":"done"}`, wantSubstr: "open blockers: [75]", wantError: true},
+		{name: "close completed success on leaf task", toolName: "close", args: `{"id":4,"resolution":"completed","reason":"verified"}`, wantSubstr: `{"id":4,"title":"Independent Task 4","status":"completed"}`},
+		{name: "close above first page unblocks dependent", toolName: "close", args: `{"id":75,"resolution":"completed","reason":"shipped"}`, wantSubstr: `{"id":75,"title":"High Task 75","status":"completed","unblocked_ids":[76]}`},
+		{name: "close wont_do cascades", toolName: "close", args: `{"id":6,"resolution":"wont_do","reason":"abandoned"}`, wantSubstr: `{"id":6,"title":"Task 6","status":"wont_do"}`},
+		{name: "close wont_do rejected when blocking open task", toolName: "close", args: `{"id":1,"resolution":"wont_do","reason":"abandoned"}`, wantSubstr: "blocks open tasks: [3]", wantError: true},
+		{name: "close task in another project not found", toolName: "close", args: `{"id":60,"resolution":"completed","reason":"done"}`, wantSubstr: "task 60 not found in graph", wantError: true},
+		{name: "close task unknown to vikunja not found", toolName: "close", args: `{"id":999,"resolution":"wont_do","reason":"done"}`, wantSubstr: "task 999 not found in graph", wantError: true},
+		{name: "close fetch failure", toolName: "close", args: `{"id":888,"resolution":"completed","reason":"done"}`, wantSubstr: "failed to fetch task 888", wantError: true},
+		{name: "close invalid resolution error", toolName: "close", args: `{"id":1,"resolution":"invalid","reason":"why"}`, wantSubstr: "invalid resolution", wantError: true},
+		{name: "close empty reason error", toolName: "close", args: `{"id":1,"resolution":"completed","reason":""}`, wantSubstr: "cannot be empty", wantError: true},
+		{name: "ready invalid arguments", toolName: "ready", args: `{"parent_id":"not-an-integer"}`, wantSubstr: "invalid arguments", wantError: true},
+		{name: "list invalid arguments", toolName: "list", args: `{"parent_id":"not-an-integer"}`, wantSubstr: "invalid arguments", wantError: true},
+		{name: "unknown tool returns error", toolName: "unknown_tool", args: `{}`, wantSubstr: "Unknown tool: unknown_tool", wantError: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			_, mux, state := setupTestEnvironment(t)
 			payload := map[string]any{
 				"jsonrpc": "2.0",
 				"id":      100,
@@ -908,13 +661,23 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			w := httptest.NewRecorder()
 			mux.ServeHTTP(w, req)
 
-			body := w.Body.String()
-			escapedSubstr := strings.ReplaceAll(tc.wantSubstr, `"`, `\"`)
-			if !strings.Contains(body, tc.wantSubstr) && !strings.Contains(body, escapedSubstr) {
-				t.Fatalf("body = %q, want substring %q", body, tc.wantSubstr)
+			var resp struct {
+				Result ToolCallResult `json:"result"`
 			}
-			if tc.wantError && !strings.Contains(body, `"isError":true`) && !strings.Contains(body, `"error"`) {
-				t.Fatalf("expected isError:true in response: %s", body)
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || len(resp.Result.Content) != 1 {
+				t.Fatalf("unexpected response %q (err %v)", w.Body.String(), err)
+			}
+			text := resp.Result.Content[0].Text
+			if !strings.Contains(text, tc.wantSubstr) {
+				t.Fatalf("result = %q, want substring %q", text, tc.wantSubstr)
+			}
+			if resp.Result.IsError != tc.wantError {
+				t.Fatalf("isError = %v, want %v (result %q)", resp.Result.IsError, tc.wantError, text)
+			}
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if !slices.Equal(state.recordedRelations, tc.wantRelations) {
+				t.Fatalf("recorded relations = %+v, want %+v", state.recordedRelations, tc.wantRelations)
 			}
 		})
 	}
@@ -966,61 +729,6 @@ func TestServer_ErrorBranchesTable(t *testing.T) {
 				t.Fatalf("%s: expected isErr=true, got result %q", tc.name, res)
 			}
 		})
-	}
-}
-
-func TestServer_CloseGraphFallback(t *testing.T) {
-	t.Parallel()
-
-	callCount := 0
-	var mu sync.Mutex
-
-	vikunjaMux := http.NewServeMux()
-	vikunjaMux.HandleFunc("/api/v1/projects", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]VikunjaProject{{ID: 1, Title: "Docket"}})
-	})
-	vikunjaMux.HandleFunc("/api/v1/projects/1/tasks", func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		callCount++
-		c := callCount
-		mu.Unlock()
-		if c > 1 {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"list tasks failed on reload"}`))
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		tasks := []VikunjaTask{{ID: 10, Title: "Task 10", Done: false}}
-		_ = json.NewEncoder(w).Encode(tasks)
-	})
-	vikunjaMux.HandleFunc("/api/v1/tasks/10", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(VikunjaTask{ID: 10, Title: "Task 10", Done: true})
-	})
-	vikunjaMux.HandleFunc("/api/v1/tasks/10/comments", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
-	})
-
-	server := httptest.NewServer(vikunjaMux)
-	t.Cleanup(server.Close)
-
-	cfg := &Config{
-		VikunjaURL:       server.URL,
-		DefaultProjectID: 1,
-	}
-	vkClient := NewVikunjaClient(cfg, server.Client())
-	setTestToken(vkClient, "test-jwt")
-	store := newMemoryTaskStore()
-
-	srv := NewServer(cfg, vkClient, store, nil)
-	res, isErr := srv.executeTool(context.Background(), "close", json.RawMessage(`{"id":10,"resolution":"completed","reason":"done"}`))
-	if isErr {
-		t.Fatalf("expected close fallback to succeed, got error: %s", res)
-	}
-	if !strings.Contains(res, `"status":"completed"`) {
-		t.Fatalf("expected completed status in result: %s", res)
 	}
 }
 

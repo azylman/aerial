@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func int64Ptr(v int64) *int64 {
@@ -73,126 +78,220 @@ func TestResolveTaskStatus(t *testing.T) {
 	}
 }
 
+// mapNodeSource is an in-memory NodeSource; absent ids report ok=false.
+type mapNodeSource map[int64]TaskNode
+
+func (m mapNodeSource) Node(_ context.Context, id int64) (TaskNode, bool, error) {
+	n, ok := m[id]
+	return n, ok, nil
+}
+
+// failingNodeSource fails every fetch, proving a code path fetches nothing when it succeeds.
+type failingNodeSource struct{}
+
+func (failingNodeSource) Node(_ context.Context, id int64) (TaskNode, bool, error) {
+	return TaskNode{}, false, errors.New("fetch failed")
+}
+
+func cycleGraph() mapNodeSource {
+	return mapNodeSource{
+		1:  {ID: 1, SubtaskIDs: []int64{2, 3}, Blocks: []int64{4, 8}},
+		2:  {ID: 2, ParentID: int64Ptr(1), SubtaskIDs: []int64{5}},
+		3:  {ID: 3, ParentID: int64Ptr(1)},
+		4:  {ID: 4, BlockedBy: []int64{1}, Blocks: []int64{6}},
+		5:  {ID: 5, ParentID: int64Ptr(2)},
+		6:  {ID: 6, BlockedBy: []int64{4, 8}},
+		7:  {ID: 7},
+		8:  {ID: 8, BlockedBy: []int64{1}, Blocks: []int64{6}},
+		10: {ID: 10, ParentID: int64Ptr(11)},
+		11: {ID: 11, ParentID: int64Ptr(12)},
+		12: {ID: 12, ParentID: int64Ptr(13)},
+		13: {ID: 13},
+		20: {ID: 20, ParentID: int64Ptr(21)},
+		21: {ID: 21, ParentID: int64Ptr(20)},
+		30: {ID: 30, Blocks: []int64{99}},
+	}
+}
+
 func TestDetectGraphCycle(t *testing.T) {
 	t.Parallel()
 
-	nodes := map[int64]TaskNode{
-		1: {ID: 1, SubtaskIDs: []int64{2, 3}, Blocks: []int64{4, 8}},
-		2: {ID: 2, ParentID: int64Ptr(1), SubtaskIDs: []int64{5}},
-		3: {ID: 3, ParentID: int64Ptr(1), SubtaskIDs: []int64{5}}, // Diamond: 2 and 3 both have 5
-		4: {ID: 4, BlockedBy: []int64{1}, Blocks: []int64{6}},
-		5: {ID: 5, ParentID: int64Ptr(2)},
-		6: {ID: 6, BlockedBy: []int64{4}},
-		7: {ID: 7},
-		8: {ID: 8, Blocks: []int64{6}}, // Diamond blocks: 4 and 8 both block 6
-	}
+	nodes := cycleGraph()
 
 	tests := []struct {
 		name     string
-		nodes    map[int64]TaskNode
+		src      NodeSource
 		sourceID int64
 		targetID int64
 		edgeType string
 		wantErr  string
 	}{
+		{name: "self-link rejected", src: nodes, sourceID: 1, targetID: 1, edgeType: "parent", wantErr: "self-link cycle: task 1 cannot link to itself"},
+		{name: "valid parent link", src: nodes, sourceID: 7, targetID: 1, edgeType: "parent"},
+		{name: "parent cycle direct child linking to parent", src: nodes, sourceID: 1, targetID: 2, edgeType: "parent", wantErr: "cycle detected: task 1 is already an ancestor of task 2"},
+		{name: "parent cycle deep descendant linking to ancestor", src: nodes, sourceID: 1, targetID: 5, edgeType: "parent", wantErr: "cycle detected: task 1 is already an ancestor of task 5"},
+		{name: "parent cycle through multi-level chain", src: nodes, sourceID: 13, targetID: 10, edgeType: "parent", wantErr: "cycle detected: task 13 is already an ancestor of task 10"},
+		{name: "parent link to sibling subtree is valid", src: nodes, sourceID: 3, targetID: 5, edgeType: "parent"},
+		{name: "parent walk terminates on corrupt parent loop", src: nodes, sourceID: 7, targetID: 20, edgeType: "parent"},
+		{name: "parent target missing from source", src: nodes, sourceID: 1, targetID: 99, edgeType: "parent"},
+		{name: "parent fetch failure propagates", src: failingNodeSource{}, sourceID: 1, targetID: 2, edgeType: "parent", wantErr: "fetch failed"},
+		{name: "valid blocks link", src: nodes, sourceID: 7, targetID: 1, edgeType: "blocks"},
+		{name: "blocks cycle direct", src: nodes, sourceID: 4, targetID: 1, edgeType: "blocks", wantErr: "cycle detected: task 1 already transitively blocks task 4"},
+		{name: "blocks cycle through diamond", src: nodes, sourceID: 6, targetID: 1, edgeType: "blocks", wantErr: "cycle detected: task 1 already transitively blocks task 6"},
+		{name: "blocks walk past node missing from source", src: nodes, sourceID: 7, targetID: 30, edgeType: "blocks"},
+		{name: "blocks fetch failure propagates", src: failingNodeSource{}, sourceID: 4, targetID: 1, edgeType: "blocks", wantErr: "fetch failed"},
+		{name: "related never fetches", src: failingNodeSource{}, sourceID: 1, targetID: 6, edgeType: "related"},
+		{name: "unknown edge type rejected", src: nodes, sourceID: 1, targetID: 7, edgeType: "invalid_edge", wantErr: `unknown edge type: "invalid_edge"`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertErrString(t, DetectGraphCycle(context.Background(), tc.src, tc.sourceID, tc.targetID, tc.edgeType), tc.wantErr)
+		})
+	}
+}
+
+func TestDetectCreateCycle(t *testing.T) {
+	t.Parallel()
+
+	nodes := cycleGraph()
+
+	tests := []struct {
+		name      string
+		src       NodeSource
+		blocks    []int64
+		blockedBy []int64
+		wantErr   string
+	}{
+		{name: "no relations", src: failingNodeSource{}},
+		{name: "blocks only never fetches", src: failingNodeSource{}, blocks: []int64{1}},
+		{name: "blocked_by only never fetches", src: failingNodeSource{}, blockedBy: []int64{1}},
+		{name: "unrelated blocks and blockers", src: nodes, blocks: []int64{6}, blockedBy: []int64{7}},
+		{name: "blocked task directly blocks blocker", src: nodes, blocks: []int64{4}, blockedBy: []int64{6}, wantErr: "cycle detected: task 4 already transitively blocks task 6"},
+		{name: "blocked task transitively blocks blocker through diamond", src: nodes, blocks: []int64{7, 1}, blockedBy: []int64{3, 6}, wantErr: "cycle detected: task 1 already transitively blocks task 6"},
+		{name: "same id in both lists", src: nodes, blocks: []int64{7}, blockedBy: []int64{7}, wantErr: "cycle detected: task 7 already transitively blocks task 7"},
+		{name: "blocker reachable only against edge direction", src: nodes, blocks: []int64{6}, blockedBy: []int64{1}},
+		{name: "fetch failure propagates", src: failingNodeSource{}, blocks: []int64{1}, blockedBy: []int64{6}, wantErr: "fetch failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertErrString(t, DetectCreateCycle(context.Background(), tc.src, tc.blocks, tc.blockedBy), tc.wantErr)
+		})
+	}
+}
+
+func TestLoadCloseNeighborhood(t *testing.T) {
+	t.Parallel()
+
+	nodes := mapNodeSource{
+		1: {ID: 1, SubtaskIDs: []int64{2}, BlockedBy: []int64{9}},
+		2: {ID: 2, ParentID: int64Ptr(1), SubtaskIDs: []int64{3, 404}, Blocks: []int64{4, 405}},
+		3: {ID: 3, ParentID: int64Ptr(2)},
+		4: {ID: 4, BlockedBy: []int64{2, 5}},
+		5: {ID: 5, BlockedBy: []int64{6}},
+		6: {ID: 6},
+		7: {ID: 7, ParentID: int64Ptr(8)},
+		8: {ID: 8, SubtaskIDs: []int64{7}},
+		9: {ID: 9, BlockedBy: []int64{10}},
+	}
+
+	tests := []struct {
+		name    string
+		src     NodeSource
+		id      int64
+		wantIDs []int64
+		wantErr string
+	}{
+		{name: "subtree plus blockers and co-blockers of blocked tasks", src: nodes, id: 1, wantIDs: []int64{1, 2, 3, 4, 5, 9}},
+		{name: "leaf excludes parent and siblings", src: nodes, id: 7, wantIDs: []int64{7}},
+		{name: "missing task reports not found", src: nodes, id: 99, wantErr: "task 99 not found in graph"},
+		{name: "fetch failure propagates", src: failingNodeSource{}, id: 1, wantErr: "fetch failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := loadCloseNeighborhood(context.Background(), tc.src, tc.id)
+			assertErrString(t, err, tc.wantErr)
+			gotIDs := slices.Sorted(maps.Keys(got))
+			if !slices.Equal(gotIDs, tc.wantIDs) {
+				t.Fatalf("neighborhood ids = %v, want %v", gotIDs, tc.wantIDs)
+			}
+		})
+	}
+}
+
+func TestHydrateTask(t *testing.T) {
+	t.Parallel()
+
+	created := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	doneAt := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	full := VikunjaTask{
+		ID: 10, Title: "Root", Description: "desc", Done: true, DoneAt: &doneAt, Created: created, Updated: doneAt, ProjectID: 1,
+		RelatedTasks: map[string][]VikunjaTask{
+			"parenttask": {{ID: 1, Title: "Parent"}, {ID: 2, Title: "Second Parent"}},
+			"subtask":    {{ID: 12, Title: "Sub B", Done: true}, {ID: 11, Title: "Sub A"}},
+			"blocking":   {{ID: 20, Title: "Blocked"}},
+			"blocked":    {{ID: 30, Title: "Blocker", Done: true}},
+			"related":    {{ID: 40, Title: "Rel"}},
+		},
+	}
+	comment := VikunjaComment{ID: 7, Comment: "hi", Created: created}
+	comment.Author.Username = "aerial"
+
+	tests := []struct {
+		name        string
+		task        VikunjaTask
+		comments    []VikunjaComment
+		resolutions map[int64]string
+		want        HydratedTask
+	}{
 		{
-			name:     "self-link rejected",
-			nodes:    nodes,
-			sourceID: 1,
-			targetID: 1,
-			edgeType: "parent",
-			wantErr:  "self-link cycle: task 1 cannot link to itself",
+			name:        "neighbors summarized in vikunja order with resolved status",
+			task:        full,
+			comments:    []VikunjaComment{comment},
+			resolutions: map[int64]string{10: "wont_do", 12: "wont_do"},
+			want: HydratedTask{
+				ID: 10, Title: "Root", Status: "wont_do", Description: "desc", CreatedAt: created, UpdatedAt: doneAt, ClosedAt: &doneAt,
+				Parent:    &TaskSummary{ID: 1, Title: "Parent", Status: "open"},
+				Subtasks:  []TaskSummary{{ID: 12, Title: "Sub B", Status: "wont_do"}, {ID: 11, Title: "Sub A", Status: "open"}},
+				Blocks:    []TaskSummary{{ID: 20, Title: "Blocked", Status: "open"}},
+				BlockedBy: []TaskSummary{{ID: 30, Title: "Blocker", Status: "completed"}},
+				Related:   []TaskSummary{{ID: 40, Title: "Rel", Status: "open"}},
+				Comments:  []TaskComment{{ID: 7, Author: "aerial", Comment: "hi", CreatedAt: created}},
+			},
 		},
 		{
-			name:     "valid parent link",
-			nodes:    nodes,
-			sourceID: 7,
-			targetID: 1,
-			edgeType: "parent",
-			wantErr:  "",
-		},
-		{
-			name:     "parent cycle direct child linking to parent",
-			nodes:    nodes,
-			sourceID: 1,
-			targetID: 2,
-			edgeType: "parent",
-			wantErr:  "cycle detected: task 1 is already an ancestor of task 2",
-		},
-		{
-			name:     "parent cycle deep descendant linking to ancestor",
-			nodes:    nodes,
-			sourceID: 1,
-			targetID: 5,
-			edgeType: "parent",
-			wantErr:  "cycle detected: task 1 is already an ancestor of task 5",
-		},
-		{
-			name:     "parent search drains diamond queue without cycle",
-			nodes:    nodes,
-			sourceID: 1,
-			targetID: 7,
-			edgeType: "parent",
-			wantErr:  "",
-		},
-		{
-			name:     "valid blocks link",
-			nodes:    nodes,
-			sourceID: 7,
-			targetID: 1,
-			edgeType: "blocks",
-			wantErr:  "",
-		},
-		{
-			name:     "blocks cycle direct",
-			nodes:    nodes,
-			sourceID: 4,
-			targetID: 1,
-			edgeType: "blocks",
-			wantErr:  "cycle detected: task 1 already transitively blocks task 4",
-		},
-		{
-			name:     "blocks cycle transitive",
-			nodes:    nodes,
-			sourceID: 6,
-			targetID: 1,
-			edgeType: "blocks",
-			wantErr:  "cycle detected: task 1 already transitively blocks task 6",
-		},
-		{
-			name:     "related edges never produce cycles",
-			nodes:    nodes,
-			sourceID: 1,
-			targetID: 6,
-			edgeType: "related",
-			wantErr:  "",
-		},
-		{
-			name:     "unknown edge type rejected",
-			nodes:    nodes,
-			sourceID: 1,
-			targetID: 7,
-			edgeType: "invalid_edge",
-			wantErr:  `unknown edge type: "invalid_edge"`,
+			name: "task without relations or comments",
+			task: VikunjaTask{ID: 5, Title: "Lone", Created: created, Updated: created},
+			want: HydratedTask{ID: 5, Title: "Lone", Status: "open", CreatedAt: created, UpdatedAt: created},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := DetectGraphCycle(tc.nodes, tc.sourceID, tc.targetID, tc.edgeType)
-			if tc.wantErr == "" && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
-				}
+			got := HydrateTask(tc.task, tc.comments, tc.resolutions)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("HydrateTask() = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func assertErrString(t *testing.T, err error, wantErr string) {
+	t.Helper()
+	if wantErr == "" {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("error = %v, want substring %q", err, wantErr)
 	}
 }
 
