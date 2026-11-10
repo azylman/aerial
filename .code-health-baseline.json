@@ -1,7 +1,52 @@
 {
   "files": {
+    "services/coven/memory_test.go": {
+      "lines": 9015
+    },
+    "services/eri/handlers_test.go": {
+      "lines": 2019
+    },
+    "services/eri/main_test.go": {
+      "lines": 1598
+    },
+    "services/eri/pkg/config/config_test.go": {
+      "lines": 2105
+    },
+    "services/eri/pkg/env/env_test.go": {
+      "lines": 1741
+    },
+    "services/eri/pkg/queue/queue_test.go": {
+      "lines": 5806
+    },
+    "services/eri/pkg/queue/worker_test.go": {
+      "lines": 1957
+    },
+    "services/eri/pkg/runner/unified_pool_test.go": {
+      "lines": 1732
+    },
+    "services/haro/scheduler_test.go": {
+      "lines": 2803
+    },
+    "services/haro/server_test.go": {
+      "lines": 1872
+    },
     "services/synapse/github.go": {
-      "lines": 1681
+      "lines": 1672
+    },
+    "services/synapse/github_test.go": {
+      "lines": 3800
+    },
+    "services/synapse/main_test.go": {
+      "lines": 3962
+    },
+    "services/synapse/workers_test.go": {
+      "lines": 1580
+    },
+    "services/vanadis/chunks_test.go": {
+      "lines": 3796
+    },
+    "services/vanadis/main_test.go": {
+      "lines": 1897
     }
   }
 }

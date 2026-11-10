@@ -8,6 +8,9 @@ mkdir -p /root/.gemini/antigravity-cli /root/.roborev
 if [ -d "/root/.gemini/antigravity-cli/brain" ]; then
   find /root/.gemini/antigravity-cli/brain -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} + 2>/dev/null || true
 fi
+if [ -d "/root/.gemini/antigravity-cli/conversations" ]; then
+  find /root/.gemini/antigravity-cli/conversations -mindepth 1 -maxdepth 1 -mtime +14 -exec rm -rf {} + 2>/dev/null || true
+fi
 chmod 0700 /root/.gemini/antigravity-cli /root/.roborev
 
 # Pre-populate global /root/.roborev/config.toml with cluster-wide review guidelines,
@@ -27,7 +30,10 @@ exclude_patterns = [
   "*.lock",
   "package-lock.json",
   "pnpm-lock.yaml",
-  "web/static/ui/**"
+  "web/static/ui/**",
+  "migrations/*.sql",
+  "**/migrations/*.sql",
+  "**/__fixtures__/*.json"
 ]
 
 [ci]
@@ -50,7 +56,7 @@ Global Aerial Stack & Cluster Invariants (applies across all repositories):
 1. Security & Secrets: Zero plaintext tokens, API keys, passwords, or GitHub PATs in code, configs, logs, or git configs. Zero imperative SQL DDL (ALTER TABLE, DROP TABLE) in application code (must use declarative schema.sql + Atlas migrations). Prevent command injection, SSRF, XSS, and path traversal on untrusted inputs.
 2. Concurrency & Reliability: Zero data races, unclosed HTTP response bodies, or leaked goroutines/tickers/timers. Zero arbitrary time.Sleep calls in tests or production plumbing.
 3. Architecture & Testing: Functional Core / Imperative Shell. Go unit tests must use homogeneous table-driven loops without closure fields on table structs (run, check, setup, runnerFn, opts, etc.) or catch-all Test*Coverage* names.
-4. Internal Cluster & Runtime Coverage Topology: All services run inside a private NixOS k3s Kubernetes cluster (*.aerial, *.lan, postgres, synapse, eri, vanadis, haro, coven) behind NGINX Gateway Fabric (lan-gateway and edge-gateway) that never exposes /debug/*. Outbound internal cluster DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/github-runner/entrypoint.sh and k8s/operators-and-storage.yaml, retaining GITHUB_PAT for ./run.sh in roborev-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,roborev) while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses. Mounting /var/run/docker.sock and /cache in ci-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,ci, which strip GITHUB_PAT via env -u GITHUB_PAT ./run.sh) while roborev-runner-* scale sets use isolated per-pod /root/.roborev storage synced to in-cluster PostgreSQL via /local/postgres-password without docker.sock, and mount /var/lib/aerial/roborev-cache/brain at /root/.gemini/antigravity-cli/brain on calibarn for persistent review session reuse, is an intentional cluster invariant.
+4. Internal Cluster & Runtime Coverage Topology: All services run inside a private NixOS k3s Kubernetes cluster (*.aerial, *.lan, postgres, synapse, eri, vanadis, haro, coven) behind NGINX Gateway Fabric (lan-gateway and edge-gateway) that never exposes /debug/*. Outbound internal cluster DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/github-runner/entrypoint.sh and k8s/operators-and-storage.yaml, retaining GITHUB_PAT for ./run.sh in roborev-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,roborev) while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses. Mounting /var/run/docker.sock and /cache in ci-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,ci, which strip GITHUB_PAT via env -u GITHUB_PAT ./run.sh) while roborev-runner-* scale sets mount /cache (/var/lib/aerial/ci-cache), /var/lib/aerial/roborev-cache/brain, and /var/lib/aerial/roborev-cache/conversations at /cache, /root/.gemini/antigravity-cli/brain, and /root/.gemini/antigravity-cli/conversations on calibarn for warm build/test caches and persistent review session reuse, is an intentional cluster invariant.
 5. Prior Review Consistency (<prior-range-reviews>): When <prior-range-reviews> is present in the prompt, treat any file, function, or code block that was already reviewed in an ancestor commit on this branch and NOT modified between the prior reviewed commit and HEAD as previously approved. Do NOT raise new findings on untouched code that passed an earlier review on the same branch unless a newly modified line directly broke a caller/callee contract with that code. If a prior finding was fixed, verify the fix and do not re-flag it or invent tangential style/nitpick findings in the same area.
 """
 EOF
@@ -236,6 +242,16 @@ set -euo pipefail
 
 /usr/local/bin/sync-gemini-settings || true
 
+if [ -d "/cache" ]; then
+  mkdir -p /cache/go-build /cache/go-mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm
+  export GOCACHE="/cache/go-build"
+  export GOMODCACHE="/cache/go-mod"
+  export PIP_CACHE_DIR="/cache/pip"
+  export GOLANGCI_LINT_CACHE="/cache/golangci-lint"
+  export CARGO_TARGET_DIR="/cache/cargo-target"
+  export NPM_CONFIG_CACHE="/cache/npm"
+fi
+
 if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
   orig_args=("$@")
   shift 2
@@ -377,15 +393,22 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
     trap 'rm -f "${raw_out}" "${body_out}" "${formatted_out}"' EXIT
 
     set +e
+    env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon start >/dev/null 2>&1 || true
+
     if [ -s "/root/.roborev/postgres-password" ]; then
-      env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1 || true
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1; then
+          break
+        fi
+        sleep 1
+      done
     fi
 
     if [ -s "/root/.roborev/reviews.db" ]; then
       python3 -c "
 import sqlite3
 try:
-    conn = sqlite3.connect('/root/.roborev/reviews.db')
+    conn = sqlite3.connect('/root/.roborev/reviews.db', timeout=30.0)
     cur = conn.cursor()
     cur.execute(\"SELECT value FROM sync_state WHERE key = 'machine_id'\")
     row = cur.fetchone()
@@ -397,7 +420,6 @@ except Exception:
     pass
 " >/dev/null 2>&1 || true
     fi
-    env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon start >/dev/null 2>&1 || true
 
     # Attach synced placeholder repository rows onto the active checkout path for <prior-range-reviews>.
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
@@ -587,7 +609,7 @@ RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,roborev}"
 echo "${PATH}" > /actions-runner/.path
 
 if [ -d "/cache" ]; then
-  mkdir -p /cache/go-build /cache/go-mod /cache/pip /cache/golangci-lint /cache/cargo-target
+  mkdir -p /cache/go-build /cache/go-mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm
   export GOCACHE="/cache/go-build"
   export GOMODCACHE="/cache/go-mod"
   export PIP_CACHE_DIR="/cache/pip"
@@ -595,6 +617,7 @@ if [ -d "/cache" ]; then
   export RUSTUP_HOME="/usr/local/rustup"
   export CARGO_HOME="/usr/local/cargo"
   export CARGO_TARGET_DIR="/cache/cargo-target"
+  export NPM_CONFIG_CACHE="/cache/npm"
 
   cat >> /actions-runner/.env <<EOF
 GOCACHE=/cache/go-build
@@ -604,6 +627,7 @@ GOLANGCI_LINT_CACHE=/cache/golangci-lint
 RUSTUP_HOME=/usr/local/rustup
 CARGO_HOME=/usr/local/cargo
 CARGO_TARGET_DIR=/cache/cargo-target
+NPM_CONFIG_CACHE=/cache/npm
 EOF
 fi
 
