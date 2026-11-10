@@ -332,12 +332,13 @@ func TestServer_HTTPRoutesTable(t *testing.T) {
 	_, mux, _ := setupTestEnvironment(t)
 
 	tests := []struct {
-		name       string
-		method     string
-		path       string
-		body       string
-		wantStatus int
-		wantSubstr string
+		name             string
+		method           string
+		path             string
+		body             string
+		wantStatus       int
+		wantSubstr       string
+		wantCacheControl string
 	}{
 		{
 			name:       "health GET returns 200",
@@ -387,6 +388,23 @@ func TestServer_HTTPRoutesTable(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 			wantSubstr: "Empty request body",
 		},
+		{name: "tasks list defaults to open", method: http.MethodGet, path: "/api/tasks", wantStatus: http.StatusOK, wantSubstr: `{"id":2,"title":"Subtask 2","status":"open","parent_id":1}`, wantCacheControl: "no-cache"},
+		{name: "tasks list status all includes completed", method: http.MethodGet, path: "/api/tasks?status=all", wantStatus: http.StatusOK, wantSubstr: `{"id":5,"title":"Completed Task 5","status":"completed"}`, wantCacheControl: "no-cache"},
+		{name: "tasks list with no matches returns empty array", method: http.MethodGet, path: "/api/tasks?status=wont_do", wantStatus: http.StatusOK, wantSubstr: `[]`, wantCacheControl: "no-cache"},
+		{name: "tasks list bad status returns 400", method: http.MethodGet, path: "/api/tasks?status=bogus", wantStatus: http.StatusBadRequest, wantSubstr: `{"error":"invalid status \"bogus\"`, wantCacheControl: "no-cache"},
+		{name: "tasks list POST returns 405", method: http.MethodPost, path: "/api/tasks", wantStatus: http.StatusMethodNotAllowed, wantSubstr: `{"error":"method not allowed"}`, wantCacheControl: "no-cache"},
+		{name: "task detail hydrates relations and comments", method: http.MethodGet, path: "/api/tasks/2", wantStatus: http.StatusOK, wantSubstr: `"parent":{"id":1,"title":"Top Task 1","status":"open","blocks":[3]}`, wantCacheControl: "no-cache"},
+		{name: "task detail includes comments", method: http.MethodGet, path: "/api/tasks/1", wantStatus: http.StatusOK, wantSubstr: `"comment":"Initial comment"`, wantCacheControl: "no-cache"},
+		{name: "task detail non-numeric id returns 400", method: http.MethodGet, path: "/api/tasks/abc", wantStatus: http.StatusBadRequest, wantSubstr: `invalid task id \"abc\"`, wantCacheControl: "no-cache"},
+		{name: "task detail missing id returns 400", method: http.MethodGet, path: "/api/tasks/", wantStatus: http.StatusBadRequest, wantSubstr: `invalid task id \"\"`, wantCacheControl: "no-cache"},
+		{name: "task detail outside project graph returns 404", method: http.MethodGet, path: "/api/tasks/999", wantStatus: http.StatusNotFound, wantSubstr: `{"error":"task 999 not found in project graph"}`, wantCacheControl: "no-cache"},
+		{name: "task detail upstream failure returns 502", method: http.MethodGet, path: "/api/tasks/888", wantStatus: http.StatusBadGateway, wantSubstr: "failed to fetch task 888", wantCacheControl: "no-cache"},
+		{name: "task detail DELETE returns 405", method: http.MethodDelete, path: "/api/tasks/1", wantStatus: http.StatusMethodNotAllowed, wantSubstr: "method not allowed", wantCacheControl: "no-cache"},
+		{name: "search returns scored hits with parent ids", method: http.MethodGet, path: "/api/search?q=subtask&limit=5", wantStatus: http.StatusOK, wantSubstr: `{"id":2,"title":"Subtask 2","status":"open","parent_id":1,"score":0.85}`, wantCacheControl: "no-cache"},
+		{name: "search empty q returns 400", method: http.MethodGet, path: "/api/search?q=", wantStatus: http.StatusBadRequest, wantSubstr: "parameter 'q' is required", wantCacheControl: "no-cache"},
+		{name: "search bad limit returns 400", method: http.MethodGet, path: "/api/search?q=x&limit=zero", wantStatus: http.StatusBadRequest, wantSubstr: `invalid limit \"zero\"`, wantCacheControl: "no-cache"},
+		{name: "search bad status returns 400", method: http.MethodGet, path: "/api/search?q=x&status=closed", wantStatus: http.StatusBadRequest, wantSubstr: `invalid status \"closed\"`, wantCacheControl: "no-cache"},
+		{name: "search PUT returns 405", method: http.MethodPut, path: "/api/search?q=x", wantStatus: http.StatusMethodNotAllowed, wantSubstr: "method not allowed", wantCacheControl: "no-cache"},
 	}
 
 	for _, tc := range tests {
@@ -406,6 +424,63 @@ func TestServer_HTTPRoutesTable(t *testing.T) {
 				t.Fatalf("status = %d, want %d", w.Code, tc.wantStatus)
 			}
 			if tc.wantSubstr != "" && !strings.Contains(w.Body.String(), tc.wantSubstr) {
+				t.Fatalf("body = %q, want substring %q", w.Body.String(), tc.wantSubstr)
+			}
+			if tc.wantCacheControl != "" {
+				if got := w.Header().Get("Cache-Control"); got != tc.wantCacheControl {
+					t.Fatalf("Cache-Control = %q, want %q", got, tc.wantCacheControl)
+				}
+				if got := w.Header().Get("Content-Type"); got != "application/json" {
+					t.Fatalf("Content-Type = %q, want application/json", got)
+				}
+			}
+		})
+	}
+}
+
+// TestServer_RESTUpstreamErrorsTable verifies REST error mapping when Vikunja and the task store fail.
+func TestServer_RESTUpstreamErrorsTable(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/tasks/404" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"not found"}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"server error"}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	cfg := &Config{VikunjaURL: upstream.URL, VikunjaUsername: "user", VikunjaPassword: "pwd"}
+	vkClient := NewVikunjaClient(cfg, upstream.Client())
+	setTestToken(vkClient, "dummy")
+	store := newMemoryTaskStore()
+	store.searchErr = errors.New("search db failed")
+	mux := NewHTTPMux(NewServer(cfg, vkClient, store, nil))
+
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantSubstr string
+	}{
+		{name: "list graph failure returns 502", path: "/api/tasks", wantStatus: http.StatusBadGateway, wantSubstr: "failed to get default project"},
+		{name: "detail vikunja 500 returns 502", path: "/api/tasks/1", wantStatus: http.StatusBadGateway, wantSubstr: "failed to fetch task 1"},
+		{name: "detail vikunja 404 returns 404", path: "/api/tasks/404", wantStatus: http.StatusNotFound, wantSubstr: "vikunja API returned status 404"},
+		{name: "search store failure returns 502", path: "/api/search?q=anything", wantStatus: http.StatusBadGateway, wantSubstr: `{"error":"search db failed"}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body %q)", w.Code, tc.wantStatus, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.wantSubstr) {
 				t.Fatalf("body = %q, want substring %q", w.Body.String(), tc.wantSubstr)
 			}
 		})

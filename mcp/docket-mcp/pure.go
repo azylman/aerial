@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -175,6 +176,75 @@ type HydratedTask struct {
 	BlockedBy   []TaskSummary `json:"blocked_by,omitempty"`
 	Related     []TaskSummary `json:"related,omitempty"`
 	Comments    []TaskComment `json:"comments,omitempty"`
+}
+
+// Search result limits applied to REST search requests.
+const (
+	defaultRESTSearchLimit = 20
+	maxRESTSearchLimit     = 50
+)
+
+// TaskListQuery is the validated query for GET /api/tasks.
+type TaskListQuery struct {
+	Status string
+}
+
+// TaskSearchQuery is the validated query for GET /api/search.
+type TaskSearchQuery struct {
+	Query  string
+	Status string
+	Limit  int
+}
+
+// ParseTaskListQuery validates REST list query parameters.
+func ParseTaskListQuery(values url.Values) (TaskListQuery, error) {
+	status, err := parseTaskStatusFilter(values.Get("status"))
+	if err != nil {
+		return TaskListQuery{}, err
+	}
+	return TaskListQuery{Status: status}, nil
+}
+
+// ParseTaskSearchQuery validates REST search query parameters, defaulting
+// status to open and clamping limit to [1, 50] (default 20).
+func ParseTaskSearchQuery(values url.Values) (TaskSearchQuery, error) {
+	query := strings.TrimSpace(values.Get("q"))
+	if query == "" {
+		return TaskSearchQuery{}, fmt.Errorf("parameter 'q' is required")
+	}
+	status, err := parseTaskStatusFilter(values.Get("status"))
+	if err != nil {
+		return TaskSearchQuery{}, err
+	}
+	limit := defaultRESTSearchLimit
+	if raw := values.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return TaskSearchQuery{}, fmt.Errorf("invalid limit %q: must be a positive integer", raw)
+		}
+		limit = min(n, maxRESTSearchLimit)
+	}
+	return TaskSearchQuery{Query: query, Status: status, Limit: limit}, nil
+}
+
+// ParseTaskID validates a REST path task id as a positive integer.
+func ParseTaskID(raw string) (int64, error) {
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("invalid task id %q: must be a positive integer", raw)
+	}
+	return id, nil
+}
+
+func parseTaskStatusFilter(raw string) (string, error) {
+	switch raw {
+	case "":
+		return "open", nil
+	case "open", "completed", "wont_do", "all":
+		return raw, nil
+	default:
+		return "", fmt.Errorf("invalid status %q: must be one of open, completed, wont_do, all", raw)
+	}
 }
 
 // ClosedTaskResult encapsulates the result of closing a task.

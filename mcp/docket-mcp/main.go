@@ -243,6 +243,9 @@ func (s *Server) toolReady(ctx context.Context, argsRaw json.RawMessage) (string
 	return string(data), false
 }
 
+// ErrTaskNotFound reports that a task id is absent from the project graph.
+var ErrTaskNotFound = errors.New("not found in project graph")
+
 func (s *Server) toolList(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
 	var args struct {
 		Status   string `json:"status"`
@@ -255,37 +258,55 @@ func (s *Server) toolList(ctx context.Context, argsRaw json.RawMessage) (string,
 		}
 	}
 
-	nodes, err := s.loadGraph(ctx)
+	summaries, err := s.listTasks(ctx, args.Status, args.ParentID)
 	if err != nil {
 		return err.Error(), true
 	}
 
+	return marshalToolResult(summaries, "task list")
+}
+
+// marshalToolResult encodes a tool payload as JSON text, naming what failed on error.
+func marshalToolResult(v any, what string) (string, bool) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("failed to marshal %s: %v", what, err), true
+	}
+	return string(data), false
+}
+
+// listTasks returns graph tasks matching status (or "all") and, when set, parentID, sorted by id.
+func (s *Server) listTasks(ctx context.Context, status string, parentID *int64) ([]TaskSummary, error) {
+	nodes, err := s.loadGraph(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	var summaries []TaskSummary
 	for _, node := range nodes {
-		if args.Status != "all" && node.Status != args.Status {
+		if status != "all" && node.Status != status {
 			continue
 		}
-		if args.ParentID != nil {
-			if node.ParentID == nil || *node.ParentID != *args.ParentID {
+		if parentID != nil {
+			if node.ParentID == nil || *node.ParentID != *parentID {
 				continue
 			}
 		}
-		summaries = append(summaries, TaskSummary{
-			ID:        node.ID,
-			Title:     node.Title,
-			Status:    node.Status,
-			ParentID:  node.ParentID,
-			BlockedBy: node.BlockedBy,
-			Blocks:    node.Blocks,
-		})
+		summaries = append(summaries, summarizeNode(node))
 	}
 	slices.SortFunc(summaries, func(a, b TaskSummary) int { return cmp.Compare(a.ID, b.ID) })
+	return summaries, nil
+}
 
-	data, err := json.Marshal(summaries)
-	if err != nil {
-		return fmt.Sprintf("failed to marshal task list: %v", err), true
+func summarizeNode(node TaskNode) TaskSummary {
+	return TaskSummary{
+		ID:        node.ID,
+		Title:     node.Title,
+		Status:    node.Status,
+		ParentID:  node.ParentID,
+		BlockedBy: node.BlockedBy,
+		Blocks:    node.Blocks,
 	}
-	return string(data), false
 }
 
 func (s *Server) toolSearch(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
@@ -300,16 +321,26 @@ func (s *Server) toolSearch(ctx context.Context, argsRaw json.RawMessage) (strin
 		return "parameter 'query' is required", true
 	}
 
+	results, err := s.searchTasks(ctx, args.Query, args.Status, args.Limit)
+	if err != nil {
+		return err.Error(), true
+	}
+
+	return marshalToolResult(results, "search results")
+}
+
+// searchTasks runs hybrid RRF search and enriches hits with graph parent ids when the graph loads.
+func (s *Server) searchTasks(ctx context.Context, query, status string, limit int) ([]ScoredTaskSummary, error) {
 	var emb []float32
 	if s.ollamaClient != nil {
-		if genEmb, err := s.ollamaClient.GenerateEmbedding(ctx, args.Query, true, 3); err == nil {
+		if genEmb, err := s.ollamaClient.GenerateEmbedding(ctx, query, true, 3); err == nil {
 			emb = genEmb
 		}
 	}
 
-	results, err := s.store.SearchTasksRRF(ctx, emb, args.Query, args.Status, args.Limit)
+	results, err := s.store.SearchTasksRRF(ctx, emb, query, status, limit)
 	if err != nil {
-		return err.Error(), true
+		return nil, err
 	}
 
 	nodes, err := s.loadGraph(ctx)
@@ -320,12 +351,7 @@ func (s *Server) toolSearch(ctx context.Context, argsRaw json.RawMessage) (strin
 			}
 		}
 	}
-
-	data, err := json.Marshal(results)
-	if err != nil {
-		return fmt.Sprintf("failed to marshal search results: %v", err), true
-	}
-	return string(data), false
+	return results, nil
 }
 
 func (s *Server) toolShow(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
@@ -336,36 +362,40 @@ func (s *Server) toolShow(ctx context.Context, argsRaw json.RawMessage) (string,
 		return "parameter 'id' must be a positive integer", true
 	}
 
-	task, err := s.vikunja.GetTask(ctx, args.ID)
+	hydrated, err := s.showTask(ctx, args.ID)
 	if err != nil {
-		return fmt.Sprintf("failed to fetch task %d: %v", args.ID, err), true
+		return err.Error(), true
 	}
 
-	comments, err := s.vikunja.ListComments(ctx, args.ID)
+	return marshalToolResult(hydrated, "hydrated task")
+}
+
+// showTask hydrates a task with its description, relations, and comments.
+// It wraps ErrTaskNotFound when id is absent from the project graph.
+func (s *Server) showTask(ctx context.Context, id int64) (HydratedTask, error) {
+	task, err := s.vikunja.GetTask(ctx, id)
+	if err != nil {
+		return HydratedTask{}, fmt.Errorf("failed to fetch task %d: %w", id, err)
+	}
+
+	comments, err := s.vikunja.ListComments(ctx, id)
 	if err != nil {
 		comments = nil
 	}
 
 	nodes, err := s.loadGraph(ctx)
 	if err != nil {
-		return err.Error(), true
+		return HydratedTask{}, err
 	}
 
-	node, exists := nodes[args.ID]
+	node, exists := nodes[id]
 	if !exists {
-		return fmt.Sprintf("task %d not found in project graph", args.ID), true
+		return HydratedTask{}, fmt.Errorf("task %d %w", id, ErrTaskNotFound)
 	}
 
 	makeSummary := func(id int64) TaskSummary {
 		if n, ok := nodes[id]; ok {
-			return TaskSummary{
-				ID:        n.ID,
-				Title:     n.Title,
-				Status:    n.Status,
-				ParentID:  n.ParentID,
-				BlockedBy: n.BlockedBy,
-				Blocks:    n.Blocks,
-			}
+			return summarizeNode(n)
 		}
 		return TaskSummary{ID: id}
 	}
@@ -405,12 +435,7 @@ func (s *Server) toolShow(ctx context.Context, argsRaw json.RawMessage) (string,
 			CreatedAt: c.Created,
 		})
 	}
-
-	data, err := json.Marshal(hydrated)
-	if err != nil {
-		return fmt.Sprintf("failed to marshal hydrated task: %v", err), true
-	}
-	return string(data), false
+	return hydrated, nil
 }
 
 func validateCreateRelations(nodes map[int64]TaskNode, parentID *int64, blocks, blockedBy, related []int64) error {
@@ -768,12 +793,103 @@ func (s *Server) toolClose(ctx context.Context, argsRaw json.RawMessage) (string
 	return string(data), false
 }
 
+// HandleTasks serves GET /api/tasks?status=... as a JSON task list.
+func (s *Server) HandleTasks(w http.ResponseWriter, r *http.Request) {
+	if !requireGET(w, r) {
+		return
+	}
+	q, err := ParseTaskListQuery(r.URL.Query())
+	if err != nil {
+		writeRESTError(w, http.StatusBadRequest, err)
+		return
+	}
+	tasks, err := s.listTasks(r.Context(), q.Status, nil)
+	if err != nil {
+		writeRESTError(w, restErrorStatus(err), err)
+		return
+	}
+	if tasks == nil {
+		tasks = []TaskSummary{}
+	}
+	writeRESTJSON(w, tasks)
+}
+
+// HandleTaskDetail serves GET /api/tasks/{id} as a hydrated task.
+func (s *Server) HandleTaskDetail(w http.ResponseWriter, r *http.Request) {
+	if !requireGET(w, r) {
+		return
+	}
+	id, err := ParseTaskID(strings.TrimPrefix(r.URL.Path, "/api/tasks/"))
+	if err != nil {
+		writeRESTError(w, http.StatusBadRequest, err)
+		return
+	}
+	task, err := s.showTask(r.Context(), id)
+	if err != nil {
+		writeRESTError(w, restErrorStatus(err), err)
+		return
+	}
+	writeRESTJSON(w, task)
+}
+
+// HandleSearch serves GET /api/search?q=...&status=...&limit=... as scored hits.
+func (s *Server) HandleSearch(w http.ResponseWriter, r *http.Request) {
+	if !requireGET(w, r) {
+		return
+	}
+	q, err := ParseTaskSearchQuery(r.URL.Query())
+	if err != nil {
+		writeRESTError(w, http.StatusBadRequest, err)
+		return
+	}
+	results, err := s.searchTasks(r.Context(), q.Query, q.Status, q.Limit)
+	if err != nil {
+		writeRESTError(w, restErrorStatus(err), err)
+		return
+	}
+	if results == nil {
+		results = []ScoredTaskSummary{}
+	}
+	writeRESTJSON(w, results)
+}
+
+func requireGET(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodGet {
+		return true
+	}
+	w.Header().Set("Allow", http.MethodGet)
+	writeRESTError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+	return false
+}
+
+// restErrorStatus maps missing tasks to 404 and every other upstream failure to 502.
+func restErrorStatus(err error) int {
+	var statusErr *HTTPStatusError
+	if errors.Is(err, ErrTaskNotFound) || (errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound) {
+		return http.StatusNotFound
+	}
+	return http.StatusBadGateway
+}
+
+func writeRESTJSON(w http.ResponseWriter, data any) {
+	w.Header().Set("Cache-Control", "no-cache")
+	httpkit.WriteJSON(w, http.StatusOK, data)
+}
+
+func writeRESTError(w http.ResponseWriter, status int, err error) {
+	w.Header().Set("Cache-Control", "no-cache")
+	httpkit.WriteJSON(w, status, map[string]string{"error": err.Error()})
+}
+
 // NewHTTPMux registers HTTP endpoints for docket-mcp.
 func NewHTTPMux(srv *Server) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", srv.HandleHealth)
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("docket-mcp"))
 	mux.HandleFunc("/mcp", srv.HandleMCPStreamable)
+	mux.HandleFunc("/api/tasks", srv.HandleTasks)
+	mux.HandleFunc("/api/tasks/", srv.HandleTaskDetail)
+	mux.HandleFunc("/api/search", srv.HandleSearch)
 	mux.HandleFunc("/", srv.HandleMCPStreamable)
 	return mux
 }
