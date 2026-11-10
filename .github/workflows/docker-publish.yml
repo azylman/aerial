@@ -279,11 +279,6 @@ jobs:
             )
           done
 
-      - name: Lint Permet HUD Frontend Syntax
-        if: needs.changes.outputs.console == 'true'
-        run: |
-          node --check services/console/static/app.js
-
       - name: Console React UI Gates (typecheck, coverage, build)
         if: needs.changes.outputs.console == 'true'
         working-directory: services/console/ui
@@ -340,11 +335,11 @@ jobs:
         working-directory: services/console
         run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/aerial-console-e2e" .
 
-      # Vanilla /console/ vs React /console/next/ pixel and behaviour parity (services/console/ui/e2e).
+      # Browser regression suite for the React console at /console/ (services/console/ui/e2e).
       # Runs inside the Playwright image whose tag matches the pinned @playwright/test, so browsers
       # and system libraries come from the image (no apt installs on runners). Sources are copied in
       # with docker cp rather than bind-mounted, which keeps the job independent of the docker host.
-      - name: Run Parity Suite In Playwright Image
+      - name: Run Console E2E Suite In Playwright Image
         if: needs.changes.outputs.console == 'true'
         run: |
           set -u
@@ -361,11 +356,11 @@ jobs:
           docker rm -f "$CID" >/dev/null
           exit "$STATUS"
 
-      - name: Upload Parity Artifacts
+      - name: Upload Console E2E Artifacts
         if: failure() && needs.changes.outputs.console == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: console-parity-artifacts
+          name: console-e2e-artifacts
           path: services/console/ui/e2e/artifacts
           if-no-files-found: ignore
 

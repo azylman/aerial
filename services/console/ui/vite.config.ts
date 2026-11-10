@@ -1,10 +1,10 @@
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
-// The React console is served side by side with the vanilla UI under /console/next/.
-// Vite content-hashes everything under assets/, which the Go AssetRegistry serves immutable.
+// The React console is the console UI, served at /console/. Vite content-hashes everything
+// under assets/, which the Go AssetRegistry serves immutable.
 export default defineConfig({
-  base: '/console/next/',
+  base: '/console/',
   plugins: [react()],
   build: {
     target: 'es2023',
@@ -16,7 +16,7 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    include: ['src/**/*.test.{ts,tsx}', 'e2e/**/*.test.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
     restoreMocks: true,
     coverage: {
       provider: 'v8',

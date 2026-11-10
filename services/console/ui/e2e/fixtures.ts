@@ -1,4 +1,4 @@
-// Serves the committed fixtures for every /console/api/** request both UIs make, and stubs the
+// Serves the committed fixtures for every /console/api/** request the console makes, and stubs the
 // web-font CSS so rendering never depends on the network. Any API path without a fixture is
 // answered 404 and recorded, so a UI that starts calling something new fails loudly.
 

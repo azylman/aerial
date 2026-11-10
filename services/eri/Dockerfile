@@ -102,7 +102,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libespeak-ng-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Playwright Chromium runtime libs + CI-matching fonts for the console parity suite (turns run without root, so they can't apt-get at runtime)
+# Playwright Chromium runtime libs + CI-matching fonts for the console e2e suite (turns run without root, so they can't apt-get at runtime)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2t64 \
     libatk-bridge2.0-0t64 \

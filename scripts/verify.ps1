@@ -215,25 +215,6 @@ function Run-NodeCheck($relPath) {
     }
 }
 
-function Run-NodeTest($relDir, $testPattern) {
-    $fullDir = Join-Path $repoRoot $relDir
-    if (Test-Path $fullDir) {
-        Write-Host "   [node --test] Testing in $relDir ($testPattern)..." -ForegroundColor DarkCyan
-        if ($hasNode) {
-            Push-Location $fullDir
-            try {
-                & node --test $testPattern
-                if ($LASTEXITCODE -ne 0) { throw "Node unit tests failed in $relDir" }
-            } finally {
-                Pop-Location
-            }
-        } elseif ($hasDocker) {
-            docker run --rm -v "${fullDir}:/app" -w /app node:22 sh -c "node --test $testPattern"
-            if ($LASTEXITCODE -ne 0) { throw "Node unit tests (docker) failed in $relDir" }
-        }
-    }
-}
-
 function Check-Gofmt($stagedFiles) {
     if (-not $hasGo) { return }
     $unformatted = @()
@@ -301,10 +282,6 @@ if ($Staged) {
         }
     }
 
-    if ($stagedFiles | Where-Object { $_ -like "services/console/*" -or $_ -like "console/*" }) {
-        Run-NodeCheck "services/console/static/app.js"
-    }
-
     if ($stagedFiles | Where-Object { $_ -like "services/docs-service/*" -or $_ -like "docs-service/*" }) {
         Run-NodeCheck "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
     }
@@ -325,16 +302,11 @@ foreach ($svc in $goServices) {
 }
 
 Write-Host "=== 2. Frontend & Script Syntax Checks ===" -ForegroundColor Yellow
-Run-NodeCheck "services/console/static/app.js"
 Run-NodeCheck "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
 
 Write-Host "=== 3. Unit Test Suites ===" -ForegroundColor Yellow
 foreach ($svc in $goServices) {
     Run-GoTest $svc
-}
-
-if (Test-Path (Join-Path $repoRoot "services/console/app.test.js")) {
-    Run-NodeTest "services/console" "*.test.js"
 }
 
 Write-Host "=== 4. Test Coverage Gating ===" -ForegroundColor Yellow

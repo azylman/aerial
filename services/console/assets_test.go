@@ -20,9 +20,6 @@ func (errorFS) Open(name string) (fs.File, error) {
 
 func TestStaticAssetsIntegrity(t *testing.T) {
 	requiredFiles := []string{
-		"static/index.html",
-		"static/style.css",
-		"static/app.js",
 		"static/favicon.ico",
 		"static/favicon.png",
 		"static/favicon-32x32.png",
@@ -42,414 +39,81 @@ func TestStaticAssetsIntegrity(t *testing.T) {
 	}
 }
 
-func TestAppJSDeclaredFunctions(t *testing.T) {
-	data, err := os.ReadFile("static/app.js")
-	if err != nil {
-		t.Fatalf("failed to read static/app.js: %v", err)
-	}
-	contentStr := string(data)
-
-	requiredFunctions := []string{
-		"function formatAgentsviewSessionUrl",
-		"function parseValidTimestampMs",
-		"function formatElapsedTicker",
-		"function escapeHtml",
-		"function formatUptime",
-		"function getTriggerBadge",
-		"function renderActiveTasks",
-		"function renderDeployments",
-		"function renderServicesGrid",
-		"async function fetchStatus",
-	}
-
-	for _, fn := range requiredFunctions {
-		if !strings.Contains(contentStr, fn) {
-			t.Errorf("critical function definition missing in app.js: %q", fn)
-		}
-	}
-}
-
-func TestIndexHTMLRequiredDOMBindings(t *testing.T) {
-	data, err := os.ReadFile("static/index.html")
-	if err != nil {
-		t.Fatalf("failed to read static/index.html: %v", err)
-	}
-	htmlStr := string(data)
-
-	requiredIDs := []string{
-		`id="quick-launch-dock"`,
-		`id="tasks-count-badge"`,
-		`id="active-tasks-container"`,
-		`id="deployments-container"`,
-		`id="deploy-count-badge"`,
-		`id="gitsync-badge"`,
-		`id="services-grid"`,
-		`id="active-count"`,
-		`id="permet-score-val"`,
-		`id="permet-bar-fill"`,
-		`id="tab-telemetry-btn"`,
-		`id="tab-tasks-btn"`,
-		`id="tab-schedules-btn"`,
-		`id="tab-memory-btn"`,
-	}
-
-	for _, idAttr := range requiredIDs {
-		if !strings.Contains(htmlStr, idAttr) {
-			t.Errorf("required DOM ID binding missing in index.html: %q", idAttr)
-		}
-	}
-
-	requiredHeadElements := []string{
-		`href="favicon-32x32.png"`,
-		`href="favicon-16x16.png"`,
-		`href="favicon.ico"`,
-		`href="apple-touch-icon.png"`,
-		`name="theme-color" content="#06050a"`,
-		`name="apple-mobile-web-app-title" content="Aerial HUD"`,
-	}
-	for _, el := range requiredHeadElements {
-		if !strings.Contains(htmlStr, el) {
-			t.Errorf("required head element missing in index.html: %q", el)
-		}
-	}
-}
-
-func TestZeroPersonalDataAndHardcodedIPs(t *testing.T) {
-	files := []string{"static/app.js", "static/index.html", "static/style.css"}
-
-	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatalf("failed to read %s: %v", f, err)
-		}
-		str := string(data)
-
-		// Assert zero private LAN IP leaks
-		if strings.Contains(str, "192.168.") {
-			t.Errorf("found private LAN IP (192.168.x.x) in %s", f)
-		}
-		if strings.Contains(str, "10.0.") {
-			t.Errorf("found private LAN IP (10.0.x.x) in %s", f)
-		}
-	}
-}
-
-// staticWithNextFS overlays a built React console (as the Dockerfile copies ui/dist to
-// static/next) onto the real vanilla static directory.
-func staticWithNextFS(t *testing.T) fs.FS {
-	t.Helper()
-	fsys := fstest.MapFS{
-		"next/index.html":                {Data: []byte(`<div id="root"></div><script type="module" src="/console/next/assets/index-Ab12Cd34.js"></script>`)},
-		"next/assets/index-Ab12Cd34.js":  {Data: []byte(`console.log("next")`)},
-		"next/assets/index-Ef56Gh78.css": {Data: []byte(`:root{color-scheme:dark}`)},
-	}
-	entries, err := os.ReadDir("static")
-	if err != nil {
-		t.Fatalf("failed to read static dir: %v", err)
-	}
-	for _, e := range entries {
-		data, err := os.ReadFile(filepath.Join("static", e.Name()))
-		if err != nil {
-			t.Fatalf("failed to read static/%s: %v", e.Name(), err)
-		}
-		fsys[e.Name()] = &fstest.MapFile{Data: data}
-	}
-	return fsys
+// builtConsoleFS mirrors the image's /app/static: the favicons from static/ plus the Vite dist
+// (SPA shell and content-hashed assets/) copied over them by the Dockerfile.
+var builtConsoleFS = fstest.MapFS{
+	"index.html":                {Data: []byte(`<div id="root"></div><script type="module" src="/console/assets/index-Ab12Cd34.js"></script>`)},
+	"assets/index-Ab12Cd34.js":  {Data: []byte(`console.log("console")`)},
+	"assets/index-Ef56Gh78.css": {Data: []byte(`:root{color-scheme:dark}`)},
+	"favicon-32x32.png":         {Data: []byte{0, 0, 1, 0}},
+	"apple-touch-icon.png":      {Data: []byte("\x89PNG")},
 }
 
 func TestAssetRegistry_ServeHTTP(t *testing.T) {
-	staticFS := staticWithNextFS(t)
-
-	defaultReg, err := NewAssetRegistry(staticFS, "testcommit123")
+	t.Parallel()
+	builtReg, err := NewAssetRegistry(builtConsoleFS)
 	if err != nil {
 		t.Fatalf("failed to create AssetRegistry: %v", err)
 	}
-
-	fallbackReg, err := NewAssetRegistry(staticFS, "")
+	emptyReg, err := NewAssetRegistry(fstest.MapFS{})
 	if err != nil {
-		t.Fatalf("failed to create AssetRegistry with fallback: %v", err)
+		t.Fatalf("failed to create empty AssetRegistry: %v", err)
 	}
 
 	tests := []struct {
-		name                  string
-		versionToken          string
-		method                string
-		path                  string
-		matchETagPath         string
-		weakETag              string
-		emptyFS               bool
-		wantCode              int
-		wantContentTypeSubstr string
-		wantCacheSubstr       string
-		wantBodySubstr        []string
-		wantEmptyBody         bool
+		name            string
+		reg             *AssetRegistry
+		method          string
+		path            string
+		ifNoneMatch     string
+		wantCode        int
+		wantContentType string
+		wantCache       string
+		wantETag        string
+		wantBody        string
 	}{
-		{
-			name:            "serves_index_html_root",
-			method:          "GET",
-			path:            "/",
-			wantCode:        http.StatusOK,
-			wantCacheSubstr: "no-cache",
-			wantBodySubstr:  []string{"app.js?v=testcommit123", "style.css?v=testcommit123"},
-		},
-		{
-			name:           "empty_version_token_fallback",
-			versionToken:   "EMPTY",
-			method:         "GET",
-			path:           "/",
-			wantCode:       http.StatusOK,
-			wantBodySubstr: []string{"app.js?v=", "style.css?v="},
-		},
-		{
-			name:          "304_not_modified_matching_etag",
-			method:        "GET",
-			path:          "/app.js",
-			matchETagPath: "/app.js",
-			wantCode:      http.StatusNotModified,
-			wantEmptyBody: true,
-		},
-		{
-			name:          "304_not_modified_weak_etag",
-			method:        "GET",
-			path:          "/style.css",
-			matchETagPath: "/style.css",
-			weakETag:      "W/",
-			wantCode:      http.StatusNotModified,
-		},
-		{
-			name:            "immutable_cache_control_version_param",
-			method:          "GET",
-			path:            "/app.js?v=testcommit123",
-			wantCode:        http.StatusOK,
-			wantCacheSubstr: "immutable",
-		},
-		{
-			name:                  "head_request_headers_empty_body",
-			method:                "HEAD",
-			path:                  "/app.js",
-			wantCode:              http.StatusOK,
-			wantContentTypeSubstr: "javascript",
-			wantEmptyBody:         true,
-		},
-		{
-			name:     "returns_404_nonexistent_asset",
-			method:   "GET",
-			path:     "/nonexistent.js",
-			wantCode: http.StatusNotFound,
-		},
-		{
-			name:     "returns_405_post_request",
-			method:   "POST",
-			path:     "/app.js",
-			wantCode: http.StatusMethodNotAllowed,
-		},
-		{
-			name:                  "serves_favicon_ico",
-			method:                "GET",
-			path:                  "/favicon.ico",
-			wantCode:              http.StatusOK,
-			wantContentTypeSubstr: "icon",
-		},
-		{
-			name:          "serves_favicon_ico_304",
-			method:        "GET",
-			path:          "/favicon.ico",
-			matchETagPath: "/favicon.ico",
-			wantCode:      http.StatusNotModified,
-			wantEmptyBody: true,
-		},
-		{
-			name:                  "serves_favicon_png",
-			method:                "GET",
-			path:                  "/favicon.png",
-			wantCode:              http.StatusOK,
-			wantContentTypeSubstr: "image/png",
-		},
-		{
-			name:                  "serves_favicon_32x32_png",
-			method:                "GET",
-			path:                  "/favicon-32x32.png",
-			wantCode:              http.StatusOK,
-			wantContentTypeSubstr: "image/png",
-		},
-		{
-			name:                  "serves_favicon_16x16_png",
-			method:                "GET",
-			path:                  "/favicon-16x16.png",
-			wantCode:              http.StatusOK,
-			wantContentTypeSubstr: "image/png",
-		},
-		{
-			name:                  "serves_apple_touch_icon_png",
-			method:                "GET",
-			path:                  "/apple-touch-icon.png",
-			wantCode:              http.StatusOK,
-			wantContentTypeSubstr: "image/png",
-		},
-		{
-			name:                  "serves_favicon_console_prefix",
-			method:                "GET",
-			path:                  "/console/favicon.ico",
-			wantCode:              http.StatusOK,
-			wantContentTypeSubstr: "icon",
-		},
-		{
-			name:                  "next_index_served_verbatim_no_cache",
-			method:                "GET",
-			path:                  "/next/",
-			wantCode:              http.StatusOK,
-			wantContentTypeSubstr: "text/html",
-			wantCacheSubstr:       "no-cache",
-			wantBodySubstr:        []string{`src="/console/next/assets/index-Ab12Cd34.js"></script>`},
-		},
-		{
-			name:            "next_index_html_explicit_console_prefix",
-			method:          "GET",
-			path:            "/console/next/index.html",
-			wantCode:        http.StatusOK,
-			wantCacheSubstr: "no-cache",
-			wantBodySubstr:  []string{`<div id="root"></div>`},
-		},
-		{
-			name:                  "next_hashed_js_immutable",
-			method:                "GET",
-			path:                  "/console/next/assets/index-Ab12Cd34.js",
-			wantCode:              http.StatusOK,
-			wantContentTypeSubstr: "javascript",
-			wantCacheSubstr:       "public, max-age=31536000, immutable",
-			wantBodySubstr:        []string{`console.log("next")`},
-		},
-		{
-			name:                  "next_hashed_css_immutable",
-			method:                "GET",
-			path:                  "/next/assets/index-Ef56Gh78.css",
-			wantCode:              http.StatusOK,
-			wantContentTypeSubstr: "text/css",
-			wantCacheSubstr:       "public, max-age=31536000, immutable",
-		},
-		{
-			name:          "next_hashed_asset_304",
-			method:        "GET",
-			path:          "/next/assets/index-Ab12Cd34.js",
-			matchETagPath: "/next/assets/index-Ab12Cd34.js",
-			wantCode:      http.StatusNotModified,
-			wantEmptyBody: true,
-		},
-		{
-			name:                  "next_spa_fallback_deep_link",
-			method:                "GET",
-			path:                  "/console/next/memory",
-			wantCode:              http.StatusOK,
-			wantContentTypeSubstr: "text/html",
-			wantCacheSubstr:       "no-cache",
-			wantBodySubstr:        []string{`<div id="root"></div>`},
-		},
-		{
-			name:            "next_spa_fallback_ignores_version_param",
-			method:          "GET",
-			path:            "/next/builds/abc?v=deadbeef",
-			wantCode:        http.StatusOK,
-			wantCacheSubstr: "no-cache",
-			wantBodySubstr:  []string{`<div id="root"></div>`},
-		},
-		{
-			name:     "next_missing_file_with_extension_404",
-			method:   "GET",
-			path:     "/next/missing.js",
-			wantCode: http.StatusNotFound,
-		},
-		{
-			name:     "next_missing_hashed_asset_404_not_html",
-			method:   "GET",
-			path:     "/console/next/assets/index-Stale999",
-			wantCode: http.StatusNotFound,
-		},
-		{
-			name:     "spa_fallback_scoped_to_next",
-			method:   "GET",
-			path:     "/memory",
-			wantCode: http.StatusNotFound,
-		},
-		{
-			name:         "fallback_on_empty_dir_fs",
-			emptyFS:      true,
-			versionToken: "dev",
-			method:       "GET",
-			path:         "/",
-			wantCode:     http.StatusNotFound,
-		},
-		{
-			name:         "next_fallback_404_when_ui_not_built",
-			emptyFS:      true,
-			versionToken: "dev",
-			method:       "GET",
-			path:         "/next/telemetry",
-			wantCode:     http.StatusNotFound,
-		},
+		{name: "root_shell", reg: builtReg, method: "GET", path: "/", wantCode: http.StatusOK, wantContentType: "text/html; charset=utf-8", wantCache: "no-cache, must-revalidate", wantETag: `"06c6880aaf6bbd18"`, wantBody: `<div id="root"></div><script type="module" src="/console/assets/index-Ab12Cd34.js"></script>`},
+		{name: "console_prefix_shell", reg: builtReg, method: "GET", path: "/console/", wantCode: http.StatusOK, wantContentType: "text/html; charset=utf-8", wantCache: "no-cache, must-revalidate", wantETag: `"06c6880aaf6bbd18"`, wantBody: `<div id="root"></div><script type="module" src="/console/assets/index-Ab12Cd34.js"></script>`},
+		{name: "explicit_index_html", reg: builtReg, method: "GET", path: "/console/index.html", wantCode: http.StatusOK, wantContentType: "text/html; charset=utf-8", wantCache: "no-cache, must-revalidate", wantETag: `"06c6880aaf6bbd18"`, wantBody: `<div id="root"></div><script type="module" src="/console/assets/index-Ab12Cd34.js"></script>`},
+		{name: "hashed_js_immutable", reg: builtReg, method: "GET", path: "/console/assets/index-Ab12Cd34.js", wantCode: http.StatusOK, wantContentType: "text/javascript; charset=utf-8", wantCache: "public, max-age=31536000, immutable", wantETag: `"7ef459c7e6b1475d"`, wantBody: `console.log("console")`},
+		{name: "hashed_css_immutable_root", reg: builtReg, method: "GET", path: "/assets/index-Ef56Gh78.css", wantCode: http.StatusOK, wantContentType: "text/css; charset=utf-8", wantCache: "public, max-age=31536000, immutable", wantETag: `"df0a81bf0e43dd5d"`, wantBody: `:root{color-scheme:dark}`},
+		{name: "favicon_revalidates", reg: builtReg, method: "GET", path: "/console/favicon-32x32.png", wantCode: http.StatusOK, wantContentType: "image/png", wantCache: "no-cache, must-revalidate", wantETag: `"6b1e73a0094b7b81"`, wantBody: "\x00\x00\x01\x00"},
+		{name: "hashed_asset_304", reg: builtReg, method: "GET", path: "/assets/index-Ab12Cd34.js", ifNoneMatch: `"7ef459c7e6b1475d"`, wantCode: http.StatusNotModified, wantContentType: "text/javascript; charset=utf-8", wantCache: "public, max-age=31536000, immutable", wantETag: `"7ef459c7e6b1475d"`},
+		{name: "shell_304_weak_etag", reg: builtReg, method: "GET", path: "/console/", ifNoneMatch: `W/"06c6880aaf6bbd18"`, wantCode: http.StatusNotModified, wantContentType: "text/html; charset=utf-8", wantCache: "no-cache, must-revalidate", wantETag: `"06c6880aaf6bbd18"`},
+		{name: "head_headers_without_body", reg: builtReg, method: "HEAD", path: "/apple-touch-icon.png", wantCode: http.StatusOK, wantContentType: "image/png", wantCache: "no-cache, must-revalidate", wantETag: `"0f4636c78f65d363"`},
+		{name: "spa_deep_link_console", reg: builtReg, method: "GET", path: "/console/memory", wantCode: http.StatusOK, wantContentType: "text/html; charset=utf-8", wantCache: "no-cache, must-revalidate", wantETag: `"06c6880aaf6bbd18"`, wantBody: `<div id="root"></div><script type="module" src="/console/assets/index-Ab12Cd34.js"></script>`},
+		{name: "spa_deep_link_nested_root", reg: builtReg, method: "GET", path: "/builds/abc?tab=chunks", wantCode: http.StatusOK, wantContentType: "text/html; charset=utf-8", wantCache: "no-cache, must-revalidate", wantETag: `"06c6880aaf6bbd18"`, wantBody: `<div id="root"></div><script type="module" src="/console/assets/index-Ab12Cd34.js"></script>`},
+		{name: "stale_hashed_asset_404", reg: builtReg, method: "GET", path: "/console/assets/index-Stale999", wantCode: http.StatusNotFound, wantContentType: "text/plain; charset=utf-8", wantBody: "404 page not found\n"},
+		{name: "missing_file_with_extension_404", reg: builtReg, method: "GET", path: "/missing.js", wantCode: http.StatusNotFound, wantContentType: "text/plain; charset=utf-8", wantBody: "404 page not found\n"},
+		{name: "post_rejected", reg: builtReg, method: "POST", path: "/console/", wantCode: http.StatusMethodNotAllowed, wantContentType: "text/plain; charset=utf-8", wantBody: "Method Not Allowed\n"},
+		{name: "unbuilt_ui_shell_404", reg: emptyReg, method: "GET", path: "/console/", wantCode: http.StatusNotFound, wantContentType: "text/plain; charset=utf-8", wantBody: "404 page not found\n"},
+		{name: "unbuilt_ui_deep_link_404", reg: emptyReg, method: "GET", path: "/telemetry", wantCode: http.StatusNotFound, wantContentType: "text/plain; charset=utf-8", wantBody: "404 page not found\n"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			reg := defaultReg
-			if tc.versionToken == "EMPTY" {
-				reg = fallbackReg
-			} else if tc.emptyFS {
-				emptyReg, err := NewAssetRegistry(os.DirFS(t.TempDir()), tc.versionToken)
-				if err != nil {
-					t.Fatalf("NewAssetRegistry failed on empty dir: %v", err)
-				}
-				if emptyReg == nil {
-					t.Fatalf("expected non-nil asset registry")
-				}
-				reg = emptyReg
-			}
-
+			t.Parallel()
 			req := httptest.NewRequest(tc.method, tc.path, nil)
-			if tc.matchETagPath != "" {
-				probeReq := httptest.NewRequest(http.MethodGet, tc.matchETagPath, nil)
-				probeRec := httptest.NewRecorder()
-				reg.ServeHTTP(probeRec, probeReq)
-				etag := probeRec.Header().Get("ETag")
-				if etag == "" {
-					t.Fatalf("expected non-empty ETag for probe on %s", tc.matchETagPath)
-				}
-				if tc.weakETag != "" {
-					etag = tc.weakETag + etag
-				}
-				req.Header.Set("If-None-Match", etag)
+			if tc.ifNoneMatch != "" {
+				req.Header.Set("If-None-Match", tc.ifNoneMatch)
 			}
-
 			rec := httptest.NewRecorder()
-			reg.ServeHTTP(rec, req)
+			tc.reg.ServeHTTP(rec, req)
 
 			if rec.Code != tc.wantCode {
-				t.Fatalf("expected status %d, got %d", tc.wantCode, rec.Code)
+				t.Fatalf("status = %d, want %d", rec.Code, tc.wantCode)
 			}
-			if tc.wantCode == http.StatusOK && tc.path == "/" {
-				if rec.Header().Get("ETag") == "" {
-					t.Errorf("expected ETag header to be set")
-				}
+			if got := rec.Header().Get("Content-Type"); got != tc.wantContentType {
+				t.Errorf("Content-Type = %q, want %q", got, tc.wantContentType)
 			}
-			if tc.wantCacheSubstr != "" {
-				cc := rec.Header().Get("Cache-Control")
-				if !strings.Contains(cc, tc.wantCacheSubstr) {
-					t.Errorf("expected Cache-Control to contain %q, got %q", tc.wantCacheSubstr, cc)
-				}
+			if got := rec.Header().Get("Cache-Control"); got != tc.wantCache {
+				t.Errorf("Cache-Control = %q, want %q", got, tc.wantCache)
 			}
-			if tc.wantContentTypeSubstr != "" {
-				ct := rec.Header().Get("Content-Type")
-				if !strings.Contains(ct, tc.wantContentTypeSubstr) {
-					t.Errorf("expected Content-Type to contain %q, got %q", tc.wantContentTypeSubstr, ct)
-				}
+			if got := rec.Header().Get("ETag"); got != tc.wantETag {
+				t.Errorf("ETag = %q, want %q", got, tc.wantETag)
 			}
-			if tc.wantEmptyBody && rec.Body.Len() != 0 {
-				t.Errorf("expected empty body, got %d bytes", rec.Body.Len())
-			}
-			bodyStr := rec.Body.String()
-			for _, sub := range tc.wantBodySubstr {
-				if !strings.Contains(bodyStr, sub) {
-					t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
-				}
+			if got := rec.Body.String(); got != tc.wantBody {
+				t.Errorf("body = %q, want %q", got, tc.wantBody)
 			}
 		})
 	}
@@ -461,7 +125,7 @@ func TestAssetRegistry_Reload(t *testing.T) {
 		t.Fatalf("failed to create initial index.html: %v", err)
 	}
 
-	reg, err := NewAssetRegistry(os.DirFS(initialDir), "v1")
+	reg, err := NewAssetRegistry(os.DirFS(initialDir))
 	if err != nil {
 		t.Fatalf("NewAssetRegistry failed: %v", err)
 	}
@@ -474,21 +138,18 @@ func TestAssetRegistry_Reload(t *testing.T) {
 	tests := []struct {
 		name          string
 		fsys          fs.FS
-		versionToken  string
 		wantErr       bool
 		wantBodyMatch string
 	}{
 		{
 			name:          "successful_reload_updates_content",
 			fsys:          os.DirFS(updatedDir),
-			versionToken:  "v2",
 			wantErr:       false,
 			wantBodyMatch: "<h1>Reloaded</h1>",
 		},
 		{
 			name:          "unreadable_fs_retains_existing_content",
 			fsys:          errorFS{},
-			versionToken:  "v3",
 			wantErr:       true,
 			wantBodyMatch: "<h1>Reloaded</h1>",
 		},
@@ -496,7 +157,7 @@ func TestAssetRegistry_Reload(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := reg.Reload(tc.fsys, tc.versionToken)
+			err := reg.Reload(tc.fsys)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("Reload() error = %v, wantErr %v", err, tc.wantErr)
 			}
