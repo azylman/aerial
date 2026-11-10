@@ -3041,6 +3041,9 @@ func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
 		expectFlushErr        bool
 		expectFlushDelivered  bool
 		expectFinishDelivered bool
+		deliveredMsgID        string
+		wantCachedMsgID       string
+		wantFinishReqMsgID    string
 	}{
 		{
 			name:           "nil pool returns error on flush",
@@ -3051,14 +3054,15 @@ func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
 			expectFlushErr: true,
 		},
 		{
-			name:           "nil session returns error on flush",
-			noSession:      true,
-			chunkID:        "c-nosess",
-			turnID:         "t-nosess",
-			stepText:       "step 1",
-			seedWidget:     true,
-			chunkStatus:    "running",
-			expectFlushErr: true,
+			name:            "nil session returns error on flush",
+			noSession:       true,
+			chunkID:         "c-nosess",
+			turnID:          "t-nosess",
+			stepText:        "step 1",
+			seedWidget:      true,
+			chunkStatus:     "running",
+			expectFlushErr:  true,
+			wantCachedMsgID: "msg-c-nosess",
 		},
 		{
 			name:     "empty chunkID or turnID is no-op",
@@ -3092,6 +3096,21 @@ func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
 			chunkStatus:           "running",
 			expectFlushDelivered:  true,
 			expectFinishDelivered: true,
+			wantCachedMsgID:       "msg-c-run",
+			wantFinishReqMsgID:    "msg-c-run",
+		},
+		{
+			name:                  "sunk step edit records new message ID for later edits",
+			chunkID:               "c-sunk",
+			turnID:                "t-sunk",
+			stepText:              "⚡ Executing `go build ./...`...",
+			seedWidget:            true,
+			chunkStatus:           "running",
+			expectFlushDelivered:  true,
+			expectFinishDelivered: true,
+			deliveredMsgID:        "msg-sunk-new",
+			wantCachedMsgID:       "msg-sunk-new",
+			wantFinishReqMsgID:    "msg-sunk-new",
 		},
 		{
 			name:                  "failed chunk during CI remediation flushes and finishes cleanly",
@@ -3135,6 +3154,9 @@ func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
 					deliveredMu.Lock()
 					deliveredReqs = append(deliveredReqs, req)
 					deliveredMu.Unlock()
+					if tc.deliveredMsgID != "" {
+						return tc.deliveredMsgID, nil
+					}
 					if req.MessageID != "" {
 						return req.MessageID, nil
 					}
@@ -3170,14 +3192,33 @@ func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
 			p.FinishChunkStepTurn(tc.chunkID, tc.turnID)
 
 			deliveredMu.Lock()
-			count := len(deliveredReqs)
+			reqs := append([]discord.StatusWidgetRequest(nil), deliveredReqs...)
 			deliveredMu.Unlock()
+			count := len(reqs)
 
 			if tc.expectFlushDelivered && count == 0 {
 				t.Fatalf("expected at least 1 delivered request")
 			}
 			if tc.expectFinishDelivered && count < 2 {
 				t.Fatalf("expected at least 2 delivered requests (flush + finish), got %d", count)
+			}
+			for i, req := range reqs {
+				if req.SkipSink {
+					t.Errorf("delivered step request %d has SkipSink=true, want false so buried cards can sink", i)
+				}
+			}
+			if tc.wantFinishReqMsgID != "" {
+				if got := reqs[count-1].MessageID; got != tc.wantFinishReqMsgID {
+					t.Errorf("finish delivery MessageID = %q, want %q", got, tc.wantFinishReqMsgID)
+				}
+			}
+			if tc.wantCachedMsgID != "" {
+				p.widgetMu.Lock()
+				got := p.widgetsByID["build-"+tc.chunkID].MessageID
+				p.widgetMu.Unlock()
+				if got != tc.wantCachedMsgID {
+					t.Errorf("cached widget MessageID = %q, want %q", got, tc.wantCachedMsgID)
+				}
 			}
 		})
 	}
@@ -4236,7 +4277,7 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 					deliveredWidgetsMu.Lock()
 					deliveredWidgets = append(deliveredWidgets, req)
 					deliveredWidgetsMu.Unlock()
-					if req.SkipSink && len(req.Chunks) > 0 && strings.Contains(req.Chunks[0].ActiveStep, "Executing") {
+					if len(req.Chunks) > 0 && strings.Contains(req.Chunks[0].ActiveStep, "Executing") {
 						select {
 						case widgetDeliveredCh <- struct{}{}:
 						default:
@@ -4352,21 +4393,22 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 				stepsSeen := 0
 				hasFinalClear := false
 				for i, w := range deliveredWidgets {
-					t.Logf("widget[%d]: SkipSink=%v Chunks=%+v", i, w.SkipSink, w.Chunks)
-					if w.SkipSink && len(w.Chunks) > 0 {
-						if strings.Contains(w.Chunks[0].ActiveStep, "Executing `git`") {
-							stepsSeen++
-						}
-						if w.Chunks[0].ActiveStep == "" {
-							hasFinalClear = true
-						}
+					t.Logf("widget[%d]: Chunks=%+v", i, w.Chunks)
+					if len(w.Chunks) == 0 {
+						continue
+					}
+					if strings.Contains(w.Chunks[0].ActiveStep, "Executing `git`") {
+						stepsSeen++
+					}
+					if stepsSeen > 0 && w.Chunks[0].ActiveStep == "" {
+						hasFinalClear = true
 					}
 				}
 				deliveredWidgetsMu.Unlock()
 				if stepsSeen == 0 {
 					summaries := make([]string, 0, len(deliveredWidgets))
 					for _, w := range deliveredWidgets {
-						summaries = append(summaries, fmt.Sprintf("(SkipSink=%v, Chunks=%+v)", w.SkipSink, w.Chunks))
+						summaries = append(summaries, fmt.Sprintf("(Chunks=%+v)", w.Chunks))
 					}
 					t.Fatalf("expected at least one widget delivery with active step 'Executing `git`', saw %d widget updates: %s", len(deliveredWidgets), strings.Join(summaries, "; "))
 				}
