@@ -152,11 +152,11 @@ spec:
     podAntiAffinityType: required
   bootstrap:
     initdb:
-      database: aerial
+      database: app
       encoding: UTF8
       localeCType: C
       localeCollate: C
-      owner: aerial
+      owner: app
   enablePDB: true
   enableSuperuserAccess: false
   failoverDelay: 0
@@ -1128,6 +1128,9 @@ spec:
         password: "{{ .POSTGRES_PASSWORD }}"
         username: aerial
       metadata:
+        annotations:
+          # Bump to make CNPG re-apply the managed role password from this secret.
+          aerial.io/role-password-resync: "2026-11-10"
         labels:
           cnpg.io/reload: "true"
       type: kubernetes.io/basic-auth
