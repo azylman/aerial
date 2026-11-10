@@ -157,6 +157,7 @@ type ConsoleConfig struct {
 	KubeAPIServer string
 	VanadisURL    string
 	HaroURL       string
+	DocketURL     string
 }
 
 // ConsoleYAMLConfig defines the declarative file schema for console.yaml.
@@ -169,6 +170,7 @@ type ConsoleYAMLConfig struct {
 	KubeAPIServer string   `yaml:"kube_api_server"`
 	VanadisURL    string   `yaml:"vanadis_url"`
 	HaroURL       string   `yaml:"haro_url"`
+	DocketURL     string   `yaml:"docket_url"`
 }
 
 // LoadConfig loads configuration from path using os.Getenv.
@@ -278,5 +280,6 @@ func LoadConfigFile(path string, lookup func(string) string) (ConsoleConfig, err
 		KubeAPIServer: kubeAPIServer,
 		VanadisURL:    vanadisURL,
 		HaroURL:       haroURL,
+		DocketURL:     strings.TrimSpace(ycfg.DocketURL),
 	}, nil
 }

@@ -1331,6 +1331,7 @@ data:
     memory_url: "http://coven.aerial"
     haro_url: "http://haro.aerial"
     vanadis_url: "http://vanadis.aerial"
+    docket_url: "http://docket-mcp.aerial"
     github_repos:
       - "azylman/aerial"
       - "azylman/aerial-sidecars"

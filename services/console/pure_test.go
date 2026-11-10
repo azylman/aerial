@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -1295,5 +1296,110 @@ func TestBuildDeploymentSteps(t *testing.T) {
 	}
 	if steps[0].Status != "active" {
 		t.Errorf("expected step 0 status active, got %s", steps[0].Status)
+	}
+}
+
+func TestBuildDocketTasksUpstreamURL_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		baseURL string
+		query   url.Values
+		wantURL string
+		wantErr bool
+	}{
+		{name: "empty base URL", baseURL: "  ", wantErr: true},
+		{name: "control character in base URL", baseURL: "http://docket:\x7f80", wantErr: true},
+		{name: "nil query omits status", baseURL: "http://docket.local/", query: nil, wantURL: "http://docket.local/api/tasks"},
+		{name: "status forwarded and other params dropped", baseURL: "http://docket.local", query: url.Values{"status": {" completed "}, "q": {"x"}, "limit": {"5"}}, wantURL: "http://docket.local/api/tasks?status=completed"},
+		{name: "blank status omitted", baseURL: "http://docket.local", query: url.Values{"status": {"  "}}, wantURL: "http://docket.local/api/tasks"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := BuildDocketTasksUpstreamURL(tc.baseURL, tc.query)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.wantURL {
+				t.Errorf("url = %q, want %q", got, tc.wantURL)
+			}
+		})
+	}
+}
+
+func TestBuildDocketSearchUpstreamURL_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		baseURL        string
+		query          url.Values
+		wantURL        string
+		wantErr        bool
+		wantBadRequest bool
+	}{
+		{name: "empty base URL", baseURL: "", query: url.Values{"q": {"x"}}, wantErr: true},
+		{name: "missing q is a bad request", baseURL: "http://docket.local", query: url.Values{}, wantErr: true, wantBadRequest: true},
+		{name: "whitespace q is a bad request", baseURL: "http://docket.local", query: url.Values{"q": {"   "}}, wantErr: true, wantBadRequest: true},
+		{name: "q over 200 characters is a bad request", baseURL: "http://docket.local", query: url.Values{"q": {strings.Repeat("a", 201)}}, wantErr: true, wantBadRequest: true},
+		{name: "q of exactly 200 multibyte characters accepted", baseURL: "http://docket.local", query: url.Values{"q": {strings.Repeat("é", 200)}}, wantURL: "http://docket.local/api/search?q=" + strings.Repeat("%C3%A9", 200)},
+		{name: "q only", baseURL: "http://docket.local/", query: url.Values{"q": {" flaky test "}}, wantURL: "http://docket.local/api/search?q=flaky+test"},
+		{name: "q status and limit forwarded, extras dropped", baseURL: "http://docket.local", query: url.Values{"q": {"auth"}, "status": {"all"}, "limit": {"10"}, "offset": {"3"}}, wantURL: "http://docket.local/api/search?limit=10&q=auth&status=all"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := BuildDocketSearchUpstreamURL(tc.baseURL, tc.query)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if errors.Is(err, errInvalidDocketRequest) != tc.wantBadRequest {
+				t.Errorf("bad-request classification = %v, want %v (err %v)", !tc.wantBadRequest, tc.wantBadRequest, err)
+			}
+			if got != tc.wantURL {
+				t.Errorf("url = %q, want %q", got, tc.wantURL)
+			}
+		})
+	}
+}
+
+func TestBuildDocketTaskDetailUpstreamURL_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		baseURL        string
+		requestPath    string
+		wantURL        string
+		wantID         string
+		wantErr        bool
+		wantBadRequest bool
+	}{
+		{name: "empty base URL", baseURL: "", requestPath: "/api/docket/tasks/7", wantErr: true},
+		{name: "control character in base URL", baseURL: "http://docket:\x7f80", requestPath: "/api/docket/tasks/7", wantErr: true},
+		{name: "bare prefix", baseURL: "http://docket.local", requestPath: "/api/docket/tasks/42", wantURL: "http://docket.local/api/tasks/42", wantID: "42"},
+		{name: "console prefix with trailing slash base", baseURL: "http://docket.local/", requestPath: "/console/api/docket/tasks/42", wantURL: "http://docket.local/api/tasks/42", wantID: "42"},
+		{name: "leading zeros canonicalized", baseURL: "http://docket.local", requestPath: "/api/docket/tasks/007", wantURL: "http://docket.local/api/tasks/7", wantID: "7"},
+		{name: "unexpected prefix", baseURL: "http://docket.local", requestPath: "/api/builds/7", wantErr: true, wantBadRequest: true},
+		{name: "empty id", baseURL: "http://docket.local", requestPath: "/api/docket/tasks/", wantErr: true, wantBadRequest: true},
+		{name: "zero id", baseURL: "http://docket.local", requestPath: "/api/docket/tasks/0", wantErr: true, wantBadRequest: true},
+		{name: "signed id", baseURL: "http://docket.local", requestPath: "/api/docket/tasks/+7", wantErr: true, wantBadRequest: true},
+		{name: "non-numeric id", baseURL: "http://docket.local", requestPath: "/api/docket/tasks/abc", wantErr: true, wantBadRequest: true},
+		{name: "nested path", baseURL: "http://docket.local", requestPath: "/api/docket/tasks/7/comments", wantErr: true, wantBadRequest: true},
+		{name: "overflowing id", baseURL: "http://docket.local", requestPath: "/api/docket/tasks/99999999999999999999", wantErr: true, wantBadRequest: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotURL, gotID, err := BuildDocketTaskDetailUpstreamURL(tc.baseURL, tc.requestPath)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if errors.Is(err, errInvalidDocketRequest) != tc.wantBadRequest {
+				t.Errorf("bad-request classification = %v, want %v (err %v)", !tc.wantBadRequest, tc.wantBadRequest, err)
+			}
+			if gotURL != tc.wantURL || gotID != tc.wantID {
+				t.Errorf("got (%q, %q), want (%q, %q)", gotURL, gotID, tc.wantURL, tc.wantID)
+			}
+		})
 	}
 }

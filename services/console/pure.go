@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"mime"
 	"net/url"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var sensitiveKeys = []string{
@@ -270,6 +272,80 @@ func BuildVanadisBuildDetailUpstreamURL(vanadisBaseURL string, requestPath strin
 	}
 
 	return target.String(), buildID, nil
+}
+
+// errInvalidDocketRequest marks client-side request validation failures (bad task ID or
+// search parameters) so docket handlers can answer 400 instead of a configuration error.
+var errInvalidDocketRequest = errors.New("invalid docket request")
+
+// maxDocketSearchQueryLen bounds the free-text search query forwarded to docket-mcp.
+const maxDocketSearchQueryLen = 200
+
+// copyNonEmptyParams copies the trimmed, non-empty values of keys from in to out.
+func copyNonEmptyParams(out, in url.Values, keys ...string) {
+	for _, key := range keys {
+		if v := strings.TrimSpace(in.Get(key)); v != "" {
+			out.Set(key, v)
+		}
+	}
+}
+
+// BuildDocketTasksUpstreamURL constructs the docket-mcp /api/tasks URL, forwarding only status.
+func BuildDocketTasksUpstreamURL(docketBaseURL string, inQuery url.Values) (string, error) {
+	target, err := parseUpstreamURL(docketBaseURL, "docket base URL is empty", "/api/tasks")
+	if err != nil {
+		return "", err
+	}
+	outQuery := url.Values{}
+	copyNonEmptyParams(outQuery, inQuery, "status")
+	target.RawQuery = outQuery.Encode()
+	return target.String(), nil
+}
+
+// BuildDocketSearchUpstreamURL constructs the docket-mcp /api/search URL, forwarding q, status and limit.
+// An empty query or one longer than maxDocketSearchQueryLen characters wraps errInvalidDocketRequest.
+func BuildDocketSearchUpstreamURL(docketBaseURL string, inQuery url.Values) (string, error) {
+	target, err := parseUpstreamURL(docketBaseURL, "docket base URL is empty", "/api/search")
+	if err != nil {
+		return "", err
+	}
+	q := strings.TrimSpace(inQuery.Get("q"))
+	if q == "" {
+		return "", fmt.Errorf("%w: search query q is required", errInvalidDocketRequest)
+	}
+	if utf8.RuneCountInString(q) > maxDocketSearchQueryLen {
+		return "", fmt.Errorf("%w: search query q exceeds %d characters", errInvalidDocketRequest, maxDocketSearchQueryLen)
+	}
+	outQuery := url.Values{}
+	outQuery.Set("q", q)
+	copyNonEmptyParams(outQuery, inQuery, "status", "limit")
+	target.RawQuery = outQuery.Encode()
+	return target.String(), nil
+}
+
+// BuildDocketTaskDetailUpstreamURL extracts a positive decimal task ID from requestPath
+// (/api/docket/tasks/<id>, optionally under /console) and constructs the docket-mcp /api/tasks/<id> URL.
+// Malformed or missing IDs wrap errInvalidDocketRequest.
+func BuildDocketTaskDetailUpstreamURL(docketBaseURL, requestPath string) (targetURL string, id string, err error) {
+	baseParsed, err := parseUpstreamURL(docketBaseURL, "docket base URL is empty", "")
+	if err != nil {
+		return "", "", err
+	}
+
+	rawID, ok := strings.CutPrefix(strings.TrimPrefix(requestPath, "/console"), "/api/docket/tasks/")
+	if !ok {
+		return "", "", fmt.Errorf("%w: unexpected request path %q", errInvalidDocketRequest, requestPath)
+	}
+	if rawID == "" || strings.Trim(rawID, "0123456789") != "" {
+		return "", "", fmt.Errorf("%w: task ID %q must be a positive integer", errInvalidDocketRequest, rawID)
+	}
+	n, convErr := strconv.ParseInt(rawID, 10, 64)
+	if convErr != nil || n <= 0 {
+		return "", "", fmt.Errorf("%w: task ID %q must be a positive integer", errInvalidDocketRequest, rawID)
+	}
+
+	id = strconv.FormatInt(n, 10)
+	return baseParsed.String() + "/api/tasks/" + id, id, nil
 }
 
 // CalculateClusterStatus computes cluster health from a slice of ServiceStatus items.

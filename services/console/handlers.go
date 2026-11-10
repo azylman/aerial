@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -445,5 +446,220 @@ func buildDetailHandler(vanadisBaseURL string) http.HandlerFunc {
 		}
 
 		writeJSON(w, r, http.StatusOK, data)
+	}
+}
+
+// DocketTaskSummaryDTO mirrors docket-mcp's TaskSummary.
+type DocketTaskSummaryDTO struct {
+	ID        int64   `json:"id"`
+	Title     string  `json:"title"`
+	Status    string  `json:"status"`
+	ParentID  *int64  `json:"parent_id,omitempty"`
+	BlockedBy []int64 `json:"blocked_by,omitempty"`
+	Blocks    []int64 `json:"blocks,omitempty"`
+}
+
+// DocketScoredTaskDTO mirrors docket-mcp's ScoredTaskSummary.
+type DocketScoredTaskDTO struct {
+	ID       int64   `json:"id"`
+	Title    string  `json:"title"`
+	Status   string  `json:"status"`
+	ParentID *int64  `json:"parent_id,omitempty"`
+	Score    float64 `json:"score"`
+}
+
+// DocketTaskCommentDTO mirrors docket-mcp's TaskComment.
+type DocketTaskCommentDTO struct {
+	ID        int64     `json:"id"`
+	Author    string    `json:"author,omitempty"`
+	Comment   string    `json:"comment"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// DocketTaskDTO mirrors docket-mcp's HydratedTask.
+type DocketTaskDTO struct {
+	ID          int64                  `json:"id"`
+	Title       string                 `json:"title"`
+	Status      string                 `json:"status"`
+	Description string                 `json:"description,omitempty"`
+	CreatedAt   time.Time              `json:"created_at"`
+	UpdatedAt   time.Time              `json:"updated_at"`
+	ClosedAt    *time.Time             `json:"closed_at,omitempty"`
+	Parent      *DocketTaskSummaryDTO  `json:"parent,omitempty"`
+	Subtasks    []DocketTaskSummaryDTO `json:"subtasks,omitempty"`
+	Blocks      []DocketTaskSummaryDTO `json:"blocks,omitempty"`
+	BlockedBy   []DocketTaskSummaryDTO `json:"blocked_by,omitempty"`
+	Related     []DocketTaskSummaryDTO `json:"related,omitempty"`
+	Comments    []DocketTaskCommentDTO `json:"comments,omitempty"`
+}
+
+// DocketTasksAPIResponse is the console envelope for GET /api/docket/tasks.
+type DocketTasksAPIResponse struct {
+	Status string                 `json:"status"`
+	Tasks  []DocketTaskSummaryDTO `json:"tasks"`
+	Error  string                 `json:"error,omitempty"`
+}
+
+// UnmarshalJSON decodes docket-mcp's bare task-summary array into the envelope's Tasks.
+func (d *DocketTasksAPIResponse) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, &d.Tasks)
+}
+
+// DocketSearchAPIResponse is the console envelope for GET /api/docket/search.
+type DocketSearchAPIResponse struct {
+	Status  string                `json:"status"`
+	Results []DocketScoredTaskDTO `json:"results"`
+	Error   string                `json:"error,omitempty"`
+}
+
+// UnmarshalJSON decodes docket-mcp's bare scored-hit array into the envelope's Results.
+func (d *DocketSearchAPIResponse) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, &d.Results)
+}
+
+// DocketTaskDetailAPIResponse is the console envelope for GET /api/docket/tasks/{id}.
+type DocketTaskDetailAPIResponse struct {
+	Status string         `json:"status"`
+	Task   *DocketTaskDTO `json:"task,omitempty"`
+	Error  string         `json:"error,omitempty"`
+}
+
+const (
+	docketUnreachableMsg   = "Docket service unreachable. Retrying..."
+	docketNotConfiguredMsg = "docket not configured"
+)
+
+// Singleton tuned HTTP client for upstream docket-mcp communication.
+var docketHTTPClient = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   2 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          20,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 4 * time.Second,
+	},
+}
+
+// rejectDocketRequest answers 405 for non-GET methods and 503 degraded when docket_url is
+// unset, reporting whether the request was already answered.
+func rejectDocketRequest[T any](w http.ResponseWriter, r *http.Request, docketBaseURL string, makeErrPayload func(status, errMsg string) T) bool {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		http.Error(w, `{"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
+		return true
+	}
+	if strings.TrimSpace(docketBaseURL) == "" {
+		writeJSON(w, r, http.StatusServiceUnavailable, makeErrPayload("degraded", docketNotConfiguredMsg))
+		return true
+	}
+	return false
+}
+
+func docketTasksErrPayload(status, errMsg string) DocketTasksAPIResponse {
+	return DocketTasksAPIResponse{Status: status, Tasks: []DocketTaskSummaryDTO{}, Error: errMsg}
+}
+
+func docketSearchErrPayload(status, errMsg string) DocketSearchAPIResponse {
+	return DocketSearchAPIResponse{Status: status, Results: []DocketScoredTaskDTO{}, Error: errMsg}
+}
+
+func docketTasksHandler(docketBaseURL string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if rejectDocketRequest(w, r, docketBaseURL, docketTasksErrPayload) {
+			return
+		}
+		targetURL, err := BuildDocketTasksUpstreamURL(docketBaseURL, r.URL.Query())
+		serveUpstreamGET(
+			w, r, docketHTTPClient, "docket", docketUnreachableMsg, targetURL, err,
+			docketTasksErrPayload,
+			func(d *DocketTasksAPIResponse) {
+				d.Status = "ok"
+				if d.Tasks == nil {
+					d.Tasks = []DocketTaskSummaryDTO{}
+				}
+			},
+		)
+	}
+}
+
+func docketSearchHandler(docketBaseURL string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if rejectDocketRequest(w, r, docketBaseURL, docketSearchErrPayload) {
+			return
+		}
+		targetURL, err := BuildDocketSearchUpstreamURL(docketBaseURL, r.URL.Query())
+		if errors.Is(err, errInvalidDocketRequest) {
+			writeJSON(w, r, http.StatusBadRequest, docketSearchErrPayload("error", err.Error()))
+			return
+		}
+		serveUpstreamGET(
+			w, r, docketHTTPClient, "docket", docketUnreachableMsg, targetURL, err,
+			docketSearchErrPayload,
+			func(d *DocketSearchAPIResponse) {
+				d.Status = "ok"
+				if d.Results == nil {
+					d.Results = []DocketScoredTaskDTO{}
+				}
+			},
+		)
+	}
+}
+
+func docketTaskDetailErrPayload(status, errMsg string) DocketTaskDetailAPIResponse {
+	return DocketTaskDetailAPIResponse{Status: status, Error: errMsg}
+}
+
+func handleDocketTaskDetailFetchError(w http.ResponseWriter, r *http.Request, targetURL string, statusCode int, upstreamErrMsg string, fetchErr error) {
+	if statusCode == 0 {
+		log.Printf("[Console] Upstream docket detail request failed (%s): %v", targetURL, fetchErr)
+		writeJSON(w, r, http.StatusServiceUnavailable, docketTaskDetailErrPayload("degraded", docketUnreachableMsg))
+		return
+	}
+	if statusCode != http.StatusOK {
+		log.Printf("[Console] Upstream docket detail returned status %d", statusCode)
+		errMsg := "Upstream docket error occurred"
+		if statusCode == http.StatusNotFound {
+			errMsg = "Task not found"
+		}
+		if upstreamErrMsg != "" {
+			errMsg = upstreamErrMsg
+		}
+		writeJSON(w, r, statusCode, docketTaskDetailErrPayload("error", errMsg))
+		return
+	}
+	writeJSON(w, r, http.StatusBadGateway, docketTaskDetailErrPayload("error", "Failed to decode upstream docket response"))
+}
+
+func docketTaskDetailHandler(docketBaseURL string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if rejectDocketRequest(w, r, docketBaseURL, docketTaskDetailErrPayload) {
+			return
+		}
+
+		targetURL, _, err := BuildDocketTaskDetailUpstreamURL(docketBaseURL, r.URL.Path)
+		if errors.Is(err, errInvalidDocketRequest) {
+			writeJSON(w, r, http.StatusBadRequest, docketTaskDetailErrPayload("error", err.Error()))
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+		var task DocketTaskDTO
+		statusCode, upstreamErrMsg, fetchErr := fetchUpstreamJSON(r.Context(), docketHTTPClient, targetURL, &task)
+		if fetchErr != nil {
+			handleDocketTaskDetailFetchError(w, r, targetURL, statusCode, upstreamErrMsg, fetchErr)
+			return
+		}
+
+		writeJSON(w, r, http.StatusOK, DocketTaskDetailAPIResponse{Status: "ok", Task: &task})
 	}
 }
