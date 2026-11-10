@@ -868,8 +868,8 @@ type InternalLLMAttachment struct {
 }
 
 func validateInternalLLMAttachments(atts []InternalLLMAttachment) error {
-	if len(atts) > delivery.MaxAttachmentsPerMessage {
-		return fmt.Errorf("attachments count %d exceeds maximum of %d", len(atts), delivery.MaxAttachmentsPerMessage)
+	if len(atts) > delivery.MaxInternalLLMAttachments {
+		return fmt.Errorf("attachments count %d exceeds maximum of %d", len(atts), delivery.MaxInternalLLMAttachments)
 	}
 	seen := make(map[string]bool, len(atts))
 	for _, a := range atts {

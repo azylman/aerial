@@ -21,6 +21,11 @@ import (
 const (
 	MaxAttachmentsPerMessage = 10
 	MaxAttachmentSizeBytes   = 8 * 1024 * 1024 // 8 MB
+
+	// MaxInternalLLMAttachments caps attachments on eri's /internal/llm
+	// endpoint. It is independent of Discord's per-message file cap
+	// (MaxAttachmentsPerMessage) since these files go to the model, not Discord.
+	MaxInternalLLMAttachments = 32
 )
 
 var (
