@@ -1067,7 +1067,8 @@ jq -n --arg short "$COMMIT1_SHORT" --arg full "$COMMIT1_SHA" '[{user:{login:"own
 jq -n --arg head "$COMMIT2_SHA" --arg base "$BASE_SHA" '{repository:{full_name:"owneruser/aerial"},pull_request:{number:99,head:{ref:"feat/test-rebuttal",sha:$head},base:{sha:$base}}}' > "$STATE_DIR/event.json"
 
 curl() { cat "$STATE_DIR/comments.json"; }
-export -f curl
+psql() { printf '2026-11-10T22:00:00.000000Z 0|2026-11-10T22:00:01.000000Z 0|2026-11-10T22:00:02.000000Z 0\n'; }
+export -f curl psql
 export CALL_LOG STATE_DIR GH_TOKEN='mock_token' GITHUB_REPOSITORY='owneruser/aerial' GITHUB_EVENT_PATH="$STATE_DIR/event.json"
 
 out_followup=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough)
@@ -1084,10 +1085,13 @@ import sqlite3
 conn = sqlite3.connect('$STATE_DIR/reviews.db')
 cur = conn.cursor()
 cur.execute('SELECT id, source_machine_id FROM review_jobs ORDER BY id')
-print(cur.fetchall())
+jobs = cur.fetchall()
+cur.execute('SELECT key, value FROM sync_state WHERE key IN (\"telemetry.setup_finished\", \"last_job_cursor\", \"last_review_cursor\", \"last_response_id\") ORDER BY key')
+cursors = cur.fetchall()
+print(jobs, cursors)
 conn.close()
 ")
-if [[ "$aligned_rows" == "[(1, 'local-runner-mach'), (2, 'remote-mach-2'), (3, 'remote-mach-3')]" ]]; then
+if [[ "$aligned_rows" == "[(1, 'local-runner-mach'), (2, 'remote-mach-2'), (3, 'remote-mach-3')] [('last_job_cursor', '2026-11-10T22:00:00.000000Z 0'), ('last_response_id', '2026-11-10T22:00:02.000000Z 0'), ('last_review_cursor', '2026-11-10T22:00:01.000000Z 0'), ('telemetry.setup_finished', '1')]" ]]; then
   echo 'align_source_machine_id:ok'
 fi
 

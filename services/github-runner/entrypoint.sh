@@ -393,11 +393,40 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
     trap 'rm -f "${raw_out}" "${body_out}" "${formatted_out}"' EXIT
 
     set +e
-    env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon start >/dev/null 2>&1 || true
+    if [ -s "/root/.roborev/postgres-password" ]; then
+      # Pre-seed sync cursors for the current branch to avoid full-history scans. Note: roborev's PullResponses
+      # filters and orders strictly by PostgreSQL server-assigned inserted_at rather than client created_at.
+      cursor_row=$(PGPASSWORD=$(tr -d '\r\n' < /root/.roborev/postgres-password) psql -h postgres -p 5432 -U aerial -d aerial -v branch="${branch}" -tA -F'|' <<'SQL' 2>/dev/null || true
+SELECT
+  COALESCE((SELECT to_char((MIN(updated_at) - interval '1 minute') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0' FROM roborev.review_jobs WHERE branch = :'branch' AND :'branch' <> ''), to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0'),
+  COALESCE((SELECT to_char((MIN(r.updated_at) - interval '1 minute') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0' FROM roborev.reviews r JOIN roborev.review_jobs j ON j.uuid = r.job_uuid WHERE j.branch = :'branch' AND :'branch' <> ''), to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0'),
+  COALESCE((SELECT to_char((MIN(resp.inserted_at) - interval '1 minute') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0' FROM roborev.responses resp JOIN roborev.review_jobs j ON j.uuid = resp.job_uuid WHERE j.branch = :'branch' AND :'branch' <> ''), to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0');
+SQL
+      )
+      IFS='|' read -r seed_job_cursor seed_review_cursor seed_resp_cursor <<< "${cursor_row}"
+      python3 - "${seed_job_cursor:-}" "${seed_review_cursor:-}" "${seed_resp_cursor:-}" <<'PY' >/dev/null 2>&1 || true
+import sqlite3, sys
+conn = sqlite3.connect('/root/.roborev/reviews.db', timeout=30.0)
+cur = conn.cursor()
+cur.execute("CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+for k, v in [
+    ("telemetry.setup_finished", "1"),
+    ("last_job_cursor", sys.argv[1]),
+    ("last_review_cursor", sys.argv[2]),
+    ("last_response_id", sys.argv[3]),
+]:
+    if v:
+        cur.execute("INSERT OR IGNORE INTO sync_state (key, value) VALUES (?, ?)", (k, v))
+conn.commit()
+conn.close()
+PY
+    fi
+
+    ROBOREV_SYNC_CURSOR_LOOKBACK=0s env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon start >/dev/null 2>&1 || true
 
     if [ -s "/root/.roborev/postgres-password" ]; then
       for _ in 1 2 3 4 5 6 7 8 9 10; do
-        if env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1; then
+        if ROBOREV_SYNC_CURSOR_LOOKBACK=0s env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1; then
           break
         fi
         sleep 1
