@@ -5,6 +5,7 @@ import { Icon } from '../../components/Icon';
 import { useFirstPassLimit } from '../../hooks/useFirstPassLimit';
 import { useSearchShortcutTarget } from '../../hooks/useKeyboardShortcuts';
 import { usePollingSync } from '../../hooks/usePollingSync';
+import { useTabActive } from '../../hooks/useTabActive';
 import { HighlightQuery } from '../../lib/search';
 import { type ConsoleState, useConsoleStore } from '../../store/store';
 import '../../styles/controls.css';
@@ -343,8 +344,9 @@ const SectionTitle = memo(function SectionTitle({
  * the render it defers. Countdowns are 1s-clock leaves.
  */
 export default function SchedulesView() {
-  usePollingSync(syncSchedules, SCHEDULES_POLL_MS, true);
-  usePollingSync(syncScheduleRuns, SCHEDULES_POLL_MS, true);
+  const tabActive = useTabActive();
+  usePollingSync(syncSchedules, SCHEDULES_POLL_MS, tabActive);
+  usePollingSync(syncScheduleRuns, SCHEDULES_POLL_MS, tabActive);
   const refresh = useManualSync();
 
   const [filter, setFilter] = useState<ScheduleFilter>('ALL');

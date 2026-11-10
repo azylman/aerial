@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useTabActive } from '../hooks/useTabActive';
 import './VirtualList.css';
 
 // Windowed list for long collections (the memory archive). Only the rows intersecting the
@@ -193,7 +194,11 @@ export function VirtualList<T>({
     });
   }
 
+  // A hidden tab panel keeps the list mounted (content-visibility: hidden); its geometry is
+  // meaningless there, so it listens only while its tab is shown and re-windows on reveal.
+  const tabActive = useTabActive();
   useEffect(() => {
+    if (!tabActive) return undefined;
     const ro = observer.current;
     const el = listRef.current;
     if (ro !== null && el !== null) ro.observe(el);
@@ -204,10 +209,13 @@ export function VirtualList<T>({
       window.removeEventListener('resize', sync);
       if (ro !== null && el !== null) ro.unobserve(el);
     };
-  }, [sync]);
+  }, [sync, tabActive]);
 
-  // A new layout (items, columns or measurements changed) moves rows: re-window before paint.
-  useLayoutEffect(sync, [layout, sync]);
+  // A new layout (items, columns or measurements changed) moves rows, and a revealed tab moves
+  // the list back into flow: re-window before paint.
+  useLayoutEffect(() => {
+    if (tabActive) sync();
+  }, [layout, sync, tabActive]);
 
   const observeRow = useCallback((el: HTMLDivElement | null) => {
     const ro = observer.current;

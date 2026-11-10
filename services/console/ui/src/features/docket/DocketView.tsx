@@ -3,6 +3,7 @@ import type { DocketScoredTaskDTO, DocketStatusFilter } from '../../api/types';
 import { Icon } from '../../components/Icon';
 import { useSearchShortcutTarget } from '../../hooks/useKeyboardShortcuts';
 import { usePollingSync } from '../../hooks/usePollingSync';
+import { useTabActive } from '../../hooks/useTabActive';
 import { type ConsoleState, useConsoleStore } from '../../store/store';
 import '../../styles/controls.css';
 import { syncDocketSearch, syncDocketTasks } from './data';
@@ -131,10 +132,10 @@ function TaskCards({
   );
 }
 
-/** One pill's task list, polled while shown; keyed by pill so a switch fetches at once. */
+/** One pill's task list, polled while its tab and pill are shown; keyed by pill so a switch fetches at once. */
 function TaskList({ filter }: { readonly filter: DocketStatusFilter }) {
   const poll = useMemo(() => syncDocketTasks(filter), [filter]);
-  usePollingSync(poll, DOCKET_POLL_MS, true);
+  usePollingSync(poll, DOCKET_POLL_MS, useTabActive());
   const { data, error } = useConsoleStore(selectList);
   const tasks = useMemo(() => visibleTasks(data, filter), [data, filter]);
   return <TaskCards tasks={tasks} loaded={data !== null} error={error} searching={false} />;

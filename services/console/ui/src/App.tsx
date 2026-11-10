@@ -1,4 +1,4 @@
-import { Activity, type ComponentType, lazy, Suspense, useEffect, useState } from 'react';
+import { type ComponentType, lazy, Suspense, useEffect, useState } from 'react';
 import {
   loadBuildsView,
   loadDocketView,
@@ -16,6 +16,7 @@ import { tabButtonId, tabPanelId } from './components/TabBar';
 import { useHashRoute } from './hooks/useHashRoute';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { usePollingSync } from './hooks/usePollingSync';
+import { TabActiveContext } from './hooks/useTabActive';
 import type { TabId } from './store/store';
 import './styles/base.css';
 
@@ -78,17 +79,20 @@ function ViewPanel({ tab, visible }: { readonly tab: TabId; readonly visible: bo
   // under the shared Suspense boundary. The choice is fixed per panel: switching a mounted lazy
   // view to its resolved component would change the element type and remount (and reset) it.
   const [View] = useState<ComponentType>(() => loadedView(tab) ?? VIEWS[tab]);
+  // A hidden panel stays laid out (content-visibility: hidden in base.css), so revealing it skips
+  // a full re-layout; its polling and live clocks idle on the TabActiveContext signal instead.
   return (
-    <Activity mode={visible ? 'visible' : 'hidden'}>
-      <div
-        id={tabPanelId(tab)}
-        className={visible ? 'view-panel active' : 'view-panel'}
-        role="tabpanel"
-        aria-labelledby={tabButtonId(tab)}
-      >
+    <div
+      id={tabPanelId(tab)}
+      className={visible ? 'view-panel active' : 'view-panel'}
+      role="tabpanel"
+      aria-labelledby={tabButtonId(tab)}
+      aria-hidden={visible ? undefined : true}
+    >
+      <TabActiveContext value={visible}>
         <View />
-      </div>
-    </Activity>
+      </TabActiveContext>
+    </div>
   );
 }
 
@@ -145,8 +149,8 @@ export function App() {
   useShellData(activeTab);
   useIdlePrefetch();
 
-  // Hidden Activity trees keep their DOM and state but unmount their effects, which stops a
-  // hidden view's polling and its search shortcut registration until it is shown again.
+  // Visited panels stay mounted with their layout cached; hidden ones idle their polling and live
+  // clocks through TabActiveContext (see ViewPanel).
   return (
     <>
       <div className="scanline" />

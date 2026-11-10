@@ -10,7 +10,6 @@
     justify-content: space-between;
     align-items: center;
     gap: 1rem;
-    backdrop-filter: var(--glass-backdrop);
 }
 
 .builds-grid-section {
@@ -29,7 +28,6 @@
     border: 1px solid var(--card-border);
     border-radius: 12px;
     padding: 1.25rem;
-    backdrop-filter: var(--glass-backdrop);
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -517,7 +515,6 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    backdrop-filter: var(--glass-backdrop);
     color: var(--text-muted);
     font-size: 0.85rem;
     letter-spacing: 1px;

@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { useTabActive } from './useTabActive';
 
 // One shared 1s clock for every live ticker in the console. The interval exists only while at
 // least one component is subscribed AND the document is visible, so idle and hidden tabs pay
@@ -45,9 +46,17 @@ function subscribe(listener: () => void): () => void {
   };
 }
 
+/** Inactive tabs read the clock without listening, so they neither re-render per tick nor keep the interval alive. */
+function subscribeInactive(): () => void {
+  return () => undefined;
+}
+
 const getSnapshot = (): number => now;
 
-/** Current epoch milliseconds, re-rendering the caller once per second while visible. */
+/**
+ * Current epoch milliseconds, re-rendering the caller once per second while the document and its
+ * tab panel are visible. Reactivating a tab resubscribes and reads the current time.
+ */
 export function useLiveNow(): number {
-  return useSyncExternalStore(subscribe, getSnapshot);
+  return useSyncExternalStore(useTabActive() ? subscribe : subscribeInactive, getSnapshot);
 }

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { TabActiveContext } from '../../hooks/useTabActive';
 import type { FactItem, FactsAPIResponse } from '../../api/types';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useConsoleStore } from '../../store/store';
@@ -203,15 +204,24 @@ describe('MemoryView actions', () => {
   });
 
   it.each([
-    { name: 'retries a failed boot load on open', data: null, error: 'Brain offline', wantFetches: 1 },
-    { name: 'does not refetch loaded facts on open', data: payload(), error: null, wantFetches: 0 },
-    { name: 'leaves an in-flight boot load alone', data: null, error: null, wantFetches: 0 },
-  ])('$name', ({ data, error, wantFetches }) => {
+    { name: 'retries a failed boot load on open', data: null, error: 'Brain offline', tabs: [true], wantFetches: 1 },
+    { name: 'does not refetch loaded facts on open', data: payload(), error: null, tabs: [true], wantFetches: 0 },
+    { name: 'leaves an in-flight boot load alone', data: null, error: null, tabs: [true], wantFetches: 0 },
+    { name: 'waits while its tab is hidden', data: null, error: 'Brain offline', tabs: [false], wantFetches: 0 },
+    { name: 'retries once its hidden tab is shown', data: null, error: 'Brain offline', tabs: [false, true], wantFetches: 1 },
+  ])('$name', ({ data, error, tabs, wantFetches }) => {
     act(() => {
       if (data !== null) useConsoleStore.getState().setFacts(data);
       if (error !== null) useConsoleStore.getState().failFacts(error);
     });
-    render(<MemoryView />);
+    const inTab = (active: boolean | undefined) => (
+      <TabActiveContext value={active ?? true}>
+        <MemoryView />
+      </TabActiveContext>
+    );
+    const { rerender } = render(inTab(tabs[0]));
+    for (const active of tabs.slice(1)) rerender(inTab(active));
     expect(fetchMock).toHaveBeenCalledTimes(wantFetches);
   });
+
 });

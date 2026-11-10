@@ -21,7 +21,7 @@ import { initRouteFromLocation } from './hooks/useHashRoute';
 import { type TabId, useConsoleStore } from './store/store';
 
 // Each feature view is wrapped (not replaced) so a test can count how often its tree is built:
-// the state initializer runs once per mount and never on a re-render or an Activity reveal.
+// the state initializer runs once per mount and never on a re-render or a tab reveal.
 const viewMounts = vi.hoisted(() => new Map<string, number>());
 async function countingView(tab: TabId, original: () => Promise<{ default: () => unknown }>) {
   const mod = await original();
@@ -216,11 +216,7 @@ type Shown = readonly [selectedTab: string | undefined, visiblePanel: string | u
 function shown(): Shown {
   return [
     document.querySelector('[role="tab"][aria-selected="true"]')?.id.replace(/^tab-|-btn$/g, ''),
-    // Activity hides a panel (display: none) in the commit that hides it; the panel's own props
-    // (its `active` class) update later at offscreen priority, so the class would lag a commit.
-    [...document.querySelectorAll<HTMLElement>('[role="tabpanel"]')]
-      .find((p) => p.style.display !== 'none')
-      ?.id.replace(/-view$/, ''),
+    document.querySelector('[role="tabpanel"].active')?.id.replace(/-view$/, ''),
   ];
 }
 
@@ -323,6 +319,16 @@ function seedAll(): void {
   s.setBuilds(structuredClone(BUILDS));
 }
 
+async function goTo(hash: string): Promise<void> {
+  await act(async () => {
+    window.location.hash = hash;
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+  });
+  await flush();
+}
+
+const SCHEDULE_POLLS = ['/console/api/schedules', '/console/api/schedules/runs?limit=50&offset=0'];
+
 describe('App with a fully seeded store', () => {
   beforeEach(() => {
     useConsoleStore.setState(useConsoleStore.getInitialState(), true);
@@ -398,18 +404,7 @@ describe('App with a fully seeded store', () => {
     expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
     expect(screen.getByText('ORDERED BUILD CHUNKS (3)')).toBeTruthy();
   });
-
 });
-
-async function goTo(hash: string): Promise<void> {
-  await act(async () => {
-    window.location.hash = hash;
-    window.dispatchEvent(new HashChangeEvent('hashchange'));
-  });
-  await flush();
-}
-
-const SCHEDULE_POLLS = ['/console/api/schedules', '/console/api/schedules/runs?limit=50&offset=0'];
 
 describe('visited views stay mounted', () => {
   let fetched: string[] = [];
@@ -468,7 +463,7 @@ describe('visited views stay mounted', () => {
     const panels = [...document.querySelectorAll<HTMLElement>('[role="tabpanel"]')];
     expect(panels.map((p) => p.id)).toEqual(wantPanels);
     expect(panels.filter((p) => p.classList.contains('active')).map((p) => p.id)).toEqual([wantVisible]);
-    expect(panels.filter((p) => p.style.display !== 'none').map((p) => p.id)).toEqual([wantVisible]);
+    expect(panels.filter((p) => p.getAttribute('aria-hidden') !== 'true').map((p) => p.id)).toEqual([wantVisible]);
     // Hidden panels are out of the accessibility tree; only the active one is a reachable tabpanel.
     expect(screen.getAllByRole('tabpanel').map((p) => p.id)).toEqual([wantVisible]);
     expect(panels.map((p) => p.getAttribute('aria-labelledby'))).toEqual(
@@ -477,27 +472,34 @@ describe('visited views stay mounted', () => {
     expect(wantIds.map((id) => document.querySelectorAll(id).length)).toEqual(wantIds.map(() => 1));
   });
 
-  it('stops a hidden schedules view polling and resumes it when shown again', async () => {
-    window.history.replaceState(null, '', '/console/next/#schedules');
+  it.each([
+    { name: 'schedules', tab: 'schedules', urls: SCHEDULE_POLLS, cadenceMs: 10_000 },
+    { name: 'builds', tab: 'builds', urls: ['/console/api/builds'], cadenceMs: 5000 },
+    { name: 'docket', tab: 'docket', urls: ['/console/api/docket/tasks?status=open'], cadenceMs: 30_000 },
+  ] as const)('stops a hidden $name view polling and resumes it when shown again', async ({ tab, urls, cadenceMs }) => {
+    window.history.replaceState(null, '', `/console/next/#${tab}`);
     initRouteFromLocation();
     render(<App />);
     await flush();
-    const polls = (): number[] => SCHEDULE_POLLS.map((url) => fetched.filter((f) => f === url).length);
-    expect(polls()).toEqual([1, 1]);
-    await act(async () => vi.advanceTimersByTime(10_000));
-    expect(polls()).toEqual([2, 2]);
+    const polls = (): number[] => urls.map((url) => fetched.filter((f) => f === url).length);
+    const times = (n: number): number[] => urls.map(() => n);
+    expect(polls()).toEqual(times(1));
+    await act(async () => vi.advanceTimersByTime(cadenceMs));
+    expect(polls()).toEqual(times(2));
 
     await goTo('#memory');
     await act(async () => vi.advanceTimersByTime(30_000));
-    expect(polls()).toEqual([2, 2]);
+    expect(polls()).toEqual(times(2));
 
-    // Revealing runs the effects again: an immediate poll, then the 10s cadence.
-    await goTo('#schedules');
-    expect(polls()).toEqual([3, 3]);
-    await act(async () => vi.advanceTimersByTime(10_000));
-    expect(polls()).toEqual([4, 4]);
-    expect(viewMounts.get('schedules')).toBe(1);
+    // Showing the tab again enables polling: an immediate poll, then the usual cadence, all on
+    // the view mounted the first time.
+    await goTo(`#${tab}`);
+    expect(polls()).toEqual(times(3));
+    await act(async () => vi.advanceTimersByTime(cadenceMs));
+    expect(polls()).toEqual(times(4));
+    expect(viewMounts.get(tab)).toBe(1);
   });
+
 
   it.each([
     { name: 'memory search after leaving schedules', walk: ['#schedules', '#memory'], want: 'memory-search-input' },
