@@ -375,35 +375,18 @@ spec:
       matches:
         - path:
             type: PathPrefix
-            value: /visits/
-    # ReplacePrefixMatch rewrites allow exactly one PathPrefix match per rule (Gateway API CEL).
-    - backendRefs:
-        - group: ""
-          kind: Service
-          name: vision
-          port: 8095
-          weight: 1
-      filters:
-        - urlRewrite:
-            path:
-              type: ReplacePrefixMatch
-              replacePrefixMatch: /ui/
-          type: URLRewrite
-      matches:
-        - path:
-            type: PathPrefix
             value: /episodes/
     - filters:
         - requestRedirect:
             path:
               type: ReplaceFullPath
-              replaceFullPath: /visits/
+              replaceFullPath: /episodes/
             statusCode: 302
           type: RequestRedirect
       matches:
         - path:
             type: Exact
-            value: /visits
+            value: /episodes
     - backendRefs:
         - group: ""
           kind: Service
@@ -1040,35 +1023,18 @@ spec:
       matches:
         - path:
             type: PathPrefix
-            value: /visits/
-    # ReplacePrefixMatch rewrites allow exactly one PathPrefix match per rule (Gateway API CEL).
-    - backendRefs:
-        - group: ""
-          kind: Service
-          name: vision
-          port: 8095
-          weight: 1
-      filters:
-        - urlRewrite:
-            path:
-              type: ReplacePrefixMatch
-              replacePrefixMatch: /ui/
-          type: URLRewrite
-      matches:
-        - path:
-            type: PathPrefix
             value: /episodes/
     - filters:
         - requestRedirect:
             path:
               type: ReplaceFullPath
-              replaceFullPath: /visits/
+              replaceFullPath: /episodes/
             statusCode: 302
           type: RequestRedirect
       matches:
         - path:
             type: Exact
-            value: /visits
+            value: /episodes
     - backendRefs:
         - group: ""
           kind: Service
