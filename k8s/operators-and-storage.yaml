@@ -157,6 +157,8 @@ spec:
       localeCType: C
       localeCollate: C
       owner: aerial
+      secret:
+        name: postgres-aerial-role
   enablePDB: true
   enableSuperuserAccess: false
   failoverDelay: 0
