@@ -144,7 +144,7 @@ data:
         Match         kube.*
         Host          openobserve.default.svc.cluster.local
         Port          5080
-        URI           /api/default/docker_logs/_json
+        URI           /openobserve/api/default/docker_logs/_json
         Format        json
         Header        Content-Type application/json
         http_user     admin@aerial.local
