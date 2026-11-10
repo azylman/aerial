@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -266,18 +267,109 @@ func ResolveTaskStatus(done bool, resolution string) string {
 	return "completed"
 }
 
-// DetectGraphCycle checks if adding a directed edge would introduce a cycle.
-func DetectGraphCycle(nodes map[int64]TaskNode, sourceID, targetID int64, edgeType string) error {
+// NodeSource resolves task graph nodes on demand. ok=false means the task does
+// not exist or lies outside Docket's project; err means an upstream failure.
+type NodeSource interface {
+	Node(ctx context.Context, id int64) (TaskNode, bool, error)
+}
+
+// taskToNode converts a Vikunja task and its stored resolution into a graph node.
+func taskToNode(t VikunjaTask, resolution string) TaskNode {
+	node := TaskNode{
+		ID:          t.ID,
+		Title:       t.Title,
+		Description: t.Description,
+		Done:        t.Done,
+		Resolution:  resolution,
+		Status:      ResolveTaskStatus(t.Done, resolution),
+	}
+	if parents := t.RelatedTasks["parenttask"]; len(parents) > 0 {
+		pID := parents[0].ID
+		node.ParentID = &pID
+	}
+	for _, sub := range t.RelatedTasks["subtask"] {
+		node.SubtaskIDs = append(node.SubtaskIDs, sub.ID)
+	}
+	for _, blk := range t.RelatedTasks["blocking"] {
+		node.Blocks = append(node.Blocks, blk.ID)
+	}
+	for _, bkd := range t.RelatedTasks["blocked"] {
+		node.BlockedBy = append(node.BlockedBy, bkd.ID)
+	}
+	for _, rel := range t.RelatedTasks["related"] {
+		node.Related = append(node.Related, rel.ID)
+	}
+	return node
+}
+
+// HydrateTask builds the full task view from a fetched task, its comments, and
+// stored resolutions. Neighbor summaries come from Vikunja's embedded related
+// tasks in Vikunja order, carrying only id, title, and status.
+func HydrateTask(task VikunjaTask, comments []VikunjaComment, resolutions map[int64]string) HydratedTask {
+	summarize := func(t VikunjaTask) TaskSummary {
+		return TaskSummary{ID: t.ID, Title: t.Title, Status: ResolveTaskStatus(t.Done, resolutions[t.ID])}
+	}
+	summarizeAll := func(kind string) []TaskSummary {
+		neighbors := task.RelatedTasks[kind]
+		if len(neighbors) == 0 {
+			return nil
+		}
+		out := make([]TaskSummary, 0, len(neighbors))
+		for _, t := range neighbors {
+			out = append(out, summarize(t))
+		}
+		return out
+	}
+
+	hydrated := HydratedTask{
+		ID:          task.ID,
+		Title:       task.Title,
+		Status:      ResolveTaskStatus(task.Done, resolutions[task.ID]),
+		Description: task.Description,
+		CreatedAt:   task.Created,
+		UpdatedAt:   task.Updated,
+		ClosedAt:    task.DoneAt,
+		Subtasks:    summarizeAll("subtask"),
+		Blocks:      summarizeAll("blocking"),
+		BlockedBy:   summarizeAll("blocked"),
+		Related:     summarizeAll("related"),
+	}
+	if parents := task.RelatedTasks["parenttask"]; len(parents) > 0 {
+		p := summarize(parents[0])
+		hydrated.Parent = &p
+	}
+	for _, c := range comments {
+		hydrated.Comments = append(hydrated.Comments, TaskComment{
+			ID:        c.ID,
+			Author:    c.Author.Username,
+			Comment:   c.Comment,
+			CreatedAt: c.Created,
+		})
+	}
+	return hydrated
+}
+
+// DetectGraphCycle checks if adding a directed edge would introduce a cycle,
+// fetching only the nodes along the walked path.
+func DetectGraphCycle(ctx context.Context, src NodeSource, sourceID, targetID int64, edgeType string) error {
 	if sourceID == targetID {
 		return fmt.Errorf("self-link cycle: task %d cannot link to itself", sourceID)
 	}
 	switch edgeType {
 	case "parent":
-		if isSubtreeDescendant(nodes, sourceID, targetID) {
+		isAncestor, err := hasAncestor(ctx, src, targetID, sourceID)
+		if err != nil {
+			return err
+		}
+		if isAncestor {
 			return fmt.Errorf("cycle detected: task %d is already an ancestor of task %d", sourceID, targetID)
 		}
 	case "blocks":
-		if isReachableAlongBlocks(nodes, targetID, sourceID) {
+		_, reached, err := firstReachableAlongBlocks(ctx, src, targetID, map[int64]bool{sourceID: true})
+		if err != nil {
+			return err
+		}
+		if reached {
 			return fmt.Errorf("cycle detected: task %d already transitively blocks task %d", targetID, sourceID)
 		}
 	case "related":
@@ -288,44 +380,161 @@ func DetectGraphCycle(nodes map[int64]TaskNode, sourceID, targetID int64, edgeTy
 	return nil
 }
 
-func isSubtreeDescendant(nodes map[int64]TaskNode, ancestorID, candidateID int64) bool {
-	visited := make(map[int64]bool)
-	queue := []int64{ancestorID}
-	for len(queue) > 0 {
-		curr := queue[0]
-		queue = queue[1:]
-		if curr == candidateID && curr != ancestorID {
-			return true
+// DetectCreateCycle checks whether a new task blocked by blockedBy and blocking
+// blocks would close a blocking cycle. New tasks cannot form parent cycles.
+func DetectCreateCycle(ctx context.Context, src NodeSource, blocks, blockedBy []int64) error {
+	if len(blocks) == 0 || len(blockedBy) == 0 {
+		return nil
+	}
+	blockers := make(map[int64]bool, len(blockedBy))
+	for _, a := range blockedBy {
+		blockers[a] = true
+	}
+	for _, b := range blocks {
+		a, reached, err := firstReachableAlongBlocks(ctx, src, b, blockers)
+		if err != nil {
+			return err
 		}
-		if visited[curr] {
-			continue
-		}
-		visited[curr] = true
-		if node, ok := nodes[curr]; ok {
-			queue = append(queue, node.SubtaskIDs...)
+		if reached {
+			return fmt.Errorf("cycle detected: task %d already transitively blocks task %d", b, a)
 		}
 	}
-	return false
+	return nil
 }
 
-func isReachableAlongBlocks(nodes map[int64]TaskNode, startID, targetID int64) bool {
+// hasAncestor walks up the parent chain from startID and reports whether ancestorID is on it.
+func hasAncestor(ctx context.Context, src NodeSource, startID, ancestorID int64) (bool, error) {
 	visited := make(map[int64]bool)
+	for curr := startID; !visited[curr]; {
+		visited[curr] = true
+		node, ok, err := src.Node(ctx, curr)
+		if err != nil {
+			return false, err
+		}
+		if !ok || node.ParentID == nil {
+			return false, nil
+		}
+		if *node.ParentID == ancestorID {
+			return true, nil
+		}
+		curr = *node.ParentID
+	}
+	return false, nil
+}
+
+// firstReachableAlongBlocks runs a BFS from startID along Blocks edges and returns
+// the first task in targets it reaches. Target tasks are never fetched.
+func firstReachableAlongBlocks(ctx context.Context, src NodeSource, startID int64, targets map[int64]bool) (int64, bool, error) {
+	visited := map[int64]bool{startID: true}
 	queue := []int64{startID}
 	for len(queue) > 0 {
 		curr := queue[0]
 		queue = queue[1:]
-		if curr == targetID {
-			return true
+		if targets[curr] {
+			return curr, true, nil
 		}
-		if visited[curr] {
+		node, ok, err := src.Node(ctx, curr)
+		if err != nil {
+			return 0, false, err
+		}
+		if !ok {
 			continue
 		}
-		visited[curr] = true
-		if node, ok := nodes[curr]; ok {
-			queue = append(queue, node.Blocks...)
+		for _, next := range node.Blocks {
+			if !visited[next] {
+				visited[next] = true
+				queue = append(queue, next)
+			}
 		}
 	}
-	return false
+	return 0, false, nil
+}
+
+// loadCloseNeighborhood fetches exactly the nodes closing id can observe: the task
+// and its descendants, their blockers and blocked tasks, and every blocker of
+// those blocked tasks (to judge whether they become unblocked).
+func loadCloseNeighborhood(ctx context.Context, src NodeSource, id int64) (map[int64]TaskNode, error) {
+	nb := neighborhood{src: src, nodes: make(map[int64]TaskNode)}
+	subtree, err := nb.loadSubtree(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range subtree {
+		if _, err := nb.fetchAll(ctx, node.BlockedBy); err != nil {
+			return nil, err
+		}
+		blocked, err := nb.fetchAll(ctx, node.Blocks)
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range blocked {
+			if _, err := nb.fetchAll(ctx, b.BlockedBy); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return nb.nodes, nil
+}
+
+// neighborhood accumulates nodes fetched from a NodeSource, fetching each id once.
+type neighborhood struct {
+	src   NodeSource
+	nodes map[int64]TaskNode
+}
+
+func (nb *neighborhood) fetch(ctx context.Context, id int64) (TaskNode, bool, error) {
+	if n, ok := nb.nodes[id]; ok {
+		return n, true, nil
+	}
+	n, ok, err := nb.src.Node(ctx, id)
+	if err != nil || !ok {
+		return TaskNode{}, false, err
+	}
+	nb.nodes[id] = n
+	return n, true, nil
+}
+
+// fetchAll fetches ids and returns the nodes that exist.
+func (nb *neighborhood) fetchAll(ctx context.Context, ids []int64) ([]TaskNode, error) {
+	var found []TaskNode
+	for _, id := range ids {
+		n, ok, err := nb.fetch(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			found = append(found, n)
+		}
+	}
+	return found, nil
+}
+
+// loadSubtree fetches rootID and all its descendants breadth-first.
+func (nb *neighborhood) loadSubtree(ctx context.Context, rootID int64) ([]TaskNode, error) {
+	root, ok, err := nb.fetch(ctx, rootID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("task %d not found in graph", rootID)
+	}
+	subtree := []TaskNode{root}
+	visited := map[int64]bool{rootID: true}
+	for i := 0; i < len(subtree); i++ {
+		var children []int64
+		for _, sid := range subtree[i].SubtaskIDs {
+			if !visited[sid] {
+				visited[sid] = true
+				children = append(children, sid)
+			}
+		}
+		found, err := nb.fetchAll(ctx, children)
+		if err != nil {
+			return nil, err
+		}
+		subtree = append(subtree, found...)
+	}
+	return subtree, nil
 }
 
 func isTaskReady(node TaskNode, nodes map[int64]TaskNode) bool {

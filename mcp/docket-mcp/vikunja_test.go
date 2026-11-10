@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -252,27 +253,26 @@ func TestVikunjaClient_ListProjectTasks(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		serverErr bool
-		wantCount int
-		wantErr   string
+		name       string
+		totalTasks int
+		maxPerPage int
+		ignorePage bool
+		serverErr  bool
+		wantCount  int
+		wantErr    string
 	}{
-		{
-			name:      "multi-page pagination",
-			wantCount: 400,
-		},
-		{
-			name:      "server error propagates",
-			serverErr: true,
-			wantErr:   "status 500",
-		},
+		{name: "120 tasks capped at 50 per page returns all", totalTasks: 120, maxPerPage: 50, wantCount: 120},
+		{name: "server capping pages at 20 still returns all", totalTasks: 120, maxPerPage: 20, wantCount: 120},
+		{name: "exact multiple of page size returns all", totalTasks: 100, maxPerPage: 50, wantCount: 100},
+		{name: "empty project returns no tasks", totalTasks: 0, maxPerPage: 50, wantCount: 0},
+		{name: "server ignoring page param terminates after one page", totalTasks: 120, maxPerPage: 50, ignorePage: true, wantCount: 50},
+		{name: "server error propagates", serverErr: true, wantErr: "status 500"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			var callCount atomic.Int32
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				if tc.serverErr {
@@ -280,24 +280,17 @@ func TestVikunjaClient_ListProjectTasks(t *testing.T) {
 					_, _ = w.Write([]byte(`{"error":"list failure"}`))
 					return
 				}
-				c := callCount.Add(1)
-				if c == 1 {
-					tasks := make([]VikunjaTask, 200)
-					for i := range tasks {
-						tasks[i] = VikunjaTask{ID: int64(i + 1), Title: "Task"}
-					}
-					_ = json.NewEncoder(w).Encode(tasks)
-					return
+				perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+				perPage = min(perPage, tc.maxPerPage)
+				page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+				if tc.ignorePage {
+					page = 1
 				}
-				if c == 2 {
-					tasks := make([]VikunjaTask, 200)
-					for i := range tasks {
-						tasks[i] = VikunjaTask{ID: int64(201 + i), Title: "Task"}
-					}
-					_ = json.NewEncoder(w).Encode(tasks)
-					return
+				tasks := []VikunjaTask{}
+				for id := (page-1)*perPage + 1; id <= min(page*perPage, tc.totalTasks); id++ {
+					tasks = append(tasks, VikunjaTask{ID: int64(id), Title: "Task"})
 				}
-				_ = json.NewEncoder(w).Encode([]VikunjaTask{})
+				_ = json.NewEncoder(w).Encode(tasks)
 			})
 
 			ts := httptest.NewServer(handler)
@@ -307,17 +300,22 @@ func TestVikunjaClient_ListProjectTasks(t *testing.T) {
 			setTestToken(client, "dummy")
 
 			tasks, err := client.ListProjectTasks(context.Background(), 1)
-			if tc.wantErr == "" && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
 				}
 				return
 			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if len(tasks) != tc.wantCount {
 				t.Fatalf("task count = %d, want %d", len(tasks), tc.wantCount)
+			}
+			for i, task := range tasks {
+				if task.ID != int64(i+1) {
+					t.Fatalf("tasks[%d].ID = %d, want %d", i, task.ID, i+1)
+				}
 			}
 		})
 	}

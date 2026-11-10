@@ -161,37 +161,55 @@ func (s *Server) loadGraph(ctx context.Context) (map[int64]TaskNode, error) {
 
 	nodes := make(map[int64]TaskNode, len(tasks))
 	for _, t := range tasks {
-		res := resMap[t.ID]
-		node := TaskNode{
-			ID:          t.ID,
-			Title:       t.Title,
-			Description: t.Description,
-			Done:        t.Done,
-			Resolution:  res,
-			Status:      ResolveTaskStatus(t.Done, res),
-		}
-
-		if len(t.RelatedTasks) > 0 {
-			if parents := t.RelatedTasks["parenttask"]; len(parents) > 0 {
-				pID := parents[0].ID
-				node.ParentID = &pID
-			}
-			for _, sub := range t.RelatedTasks["subtask"] {
-				node.SubtaskIDs = append(node.SubtaskIDs, sub.ID)
-			}
-			for _, blk := range t.RelatedTasks["blocking"] {
-				node.Blocks = append(node.Blocks, blk.ID)
-			}
-			for _, bkd := range t.RelatedTasks["blocked"] {
-				node.BlockedBy = append(node.BlockedBy, bkd.ID)
-			}
-			for _, rel := range t.RelatedTasks["related"] {
-				node.Related = append(node.Related, rel.ID)
-			}
-		}
-		nodes[t.ID] = node
+		nodes[t.ID] = taskToNode(t, resMap[t.ID])
 	}
 	return nodes, nil
+}
+
+// vikunjaNodeSource resolves graph nodes one Vikunja task fetch at a time,
+// memoizing within a single request.
+type vikunjaNodeSource struct {
+	vikunja   *VikunjaClient
+	store     TaskStore
+	projectID int64
+	cache     map[int64]TaskNode
+}
+
+func (s *Server) newNodeSource(ctx context.Context) (*vikunjaNodeSource, error) {
+	projectID, err := s.vikunja.GetDefaultProject(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get default project: %w", err)
+	}
+	return &vikunjaNodeSource{vikunja: s.vikunja, store: s.store, projectID: projectID, cache: make(map[int64]TaskNode)}, nil
+}
+
+// Node implements NodeSource; tasks missing from Vikunja or outside the project report ok=false.
+func (src *vikunjaNodeSource) Node(ctx context.Context, id int64) (TaskNode, bool, error) {
+	if node, ok := src.cache[id]; ok {
+		return node, true, nil
+	}
+	task, err := src.vikunja.GetTask(ctx, id)
+	if err != nil {
+		if isVikunjaNotFound(err) {
+			return TaskNode{}, false, nil
+		}
+		return TaskNode{}, false, fmt.Errorf("failed to fetch task %d: %w", id, err)
+	}
+	if task.ProjectID != src.projectID {
+		return TaskNode{}, false, nil
+	}
+	var resolution string
+	if resMap, err := src.store.FetchTaskResolutions(ctx, []int64{id}); err == nil {
+		resolution = resMap[id]
+	}
+	node := taskToNode(*task, resolution)
+	src.cache[id] = node
+	return node, true, nil
+}
+
+func isVikunjaNotFound(err error) bool {
+	var statusErr *HTTPStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound
 }
 
 func (s *Server) executeTool(ctx context.Context, name string, argsRaw json.RawMessage) (string, bool) {
@@ -371,11 +389,18 @@ func (s *Server) toolShow(ctx context.Context, argsRaw json.RawMessage) (string,
 }
 
 // showTask hydrates a task with its description, relations, and comments.
-// It wraps ErrTaskNotFound when id is absent from the project graph.
+// It wraps ErrTaskNotFound when id belongs to another project.
 func (s *Server) showTask(ctx context.Context, id int64) (HydratedTask, error) {
 	task, err := s.vikunja.GetTask(ctx, id)
 	if err != nil {
 		return HydratedTask{}, fmt.Errorf("failed to fetch task %d: %w", id, err)
+	}
+	projectID, err := s.vikunja.GetDefaultProject(ctx)
+	if err != nil {
+		return HydratedTask{}, fmt.Errorf("failed to get default project: %w", err)
+	}
+	if task.ProjectID != projectID {
+		return HydratedTask{}, fmt.Errorf("task %d %w", id, ErrTaskNotFound)
 	}
 
 	comments, err := s.vikunja.ListComments(ctx, id)
@@ -383,83 +408,43 @@ func (s *Server) showTask(ctx context.Context, id int64) (HydratedTask, error) {
 		comments = nil
 	}
 
-	nodes, err := s.loadGraph(ctx)
-	if err != nil {
-		return HydratedTask{}, err
-	}
-
-	node, exists := nodes[id]
-	if !exists {
-		return HydratedTask{}, fmt.Errorf("task %d %w", id, ErrTaskNotFound)
-	}
-
-	makeSummary := func(id int64) TaskSummary {
-		if n, ok := nodes[id]; ok {
-			return summarizeNode(n)
+	ids := []int64{task.ID}
+	for _, related := range task.RelatedTasks {
+		for _, t := range related {
+			ids = append(ids, t.ID)
 		}
-		return TaskSummary{ID: id}
+	}
+	resolutions, err := s.store.FetchTaskResolutions(ctx, ids)
+	if err != nil {
+		resolutions = map[int64]string{}
 	}
 
-	hydrated := HydratedTask{
-		ID:          task.ID,
-		Title:       task.Title,
-		Status:      node.Status,
-		Description: task.Description,
-		CreatedAt:   task.Created,
-		UpdatedAt:   task.Updated,
-		ClosedAt:    task.DoneAt,
-	}
-
-	if node.ParentID != nil {
-		p := makeSummary(*node.ParentID)
-		hydrated.Parent = &p
-	}
-	for _, sid := range node.SubtaskIDs {
-		hydrated.Subtasks = append(hydrated.Subtasks, makeSummary(sid))
-	}
-	for _, bid := range node.Blocks {
-		hydrated.Blocks = append(hydrated.Blocks, makeSummary(bid))
-	}
-	for _, bkd := range node.BlockedBy {
-		hydrated.BlockedBy = append(hydrated.BlockedBy, makeSummary(bkd))
-	}
-	for _, rel := range node.Related {
-		hydrated.Related = append(hydrated.Related, makeSummary(rel))
-	}
-
-	for _, c := range comments {
-		hydrated.Comments = append(hydrated.Comments, TaskComment{
-			ID:        c.ID,
-			Author:    c.Author.Username,
-			Comment:   c.Comment,
-			CreatedAt: c.Created,
-		})
-	}
-	return hydrated, nil
+	return HydrateTask(*task, comments, resolutions), nil
 }
 
-func validateCreateRelations(nodes map[int64]TaskNode, parentID *int64, blocks, blockedBy, related []int64) error {
+// validateCreateRelations checks that every referenced task exists and that the
+// new task's blocking edges would not close a cycle.
+func validateCreateRelations(ctx context.Context, src NodeSource, parentID *int64, blocks, blockedBy, related []int64) error {
+	type ref struct {
+		role string
+		ids  []int64
+	}
+	refs := []ref{{"blocked", blocks}, {"blocker", blockedBy}, {"related", related}}
 	if parentID != nil {
-		if _, ok := nodes[*parentID]; !ok {
-			return fmt.Errorf("parent task %d not found", *parentID)
+		refs = append([]ref{{"parent", []int64{*parentID}}}, refs...)
+	}
+	for _, r := range refs {
+		for _, id := range r.ids {
+			_, ok, err := src.Node(ctx, id)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("%s task %d not found", r.role, id)
+			}
 		}
 	}
-	for _, id := range blocks {
-		if _, ok := nodes[id]; !ok {
-			return fmt.Errorf("blocked task %d not found", id)
-		}
-	}
-	for _, id := range blockedBy {
-		if _, ok := nodes[id]; !ok {
-			return fmt.Errorf("blocker task %d not found", id)
-		}
-	}
-	for _, id := range related {
-		if _, ok := nodes[id]; !ok {
-			return fmt.Errorf("related task %d not found", id)
-		}
-	}
-	return nil
+	return DetectCreateCycle(ctx, src, blocks, blockedBy)
 }
 
 func (s *Server) wireCreateRelations(ctx context.Context, taskID int64, parentID *int64, blocks, blockedBy, related []int64) {
@@ -498,21 +483,16 @@ func (s *Server) toolCreate(ctx context.Context, argsRaw json.RawMessage) (strin
 		return "parameter 'title' cannot be empty", true
 	}
 
-	projectID, err := s.vikunja.GetDefaultProject(ctx)
-	if err != nil {
-		return fmt.Sprintf("failed to resolve project: %v", err), true
-	}
-
-	nodes, err := s.loadGraph(ctx)
+	src, err := s.newNodeSource(ctx)
 	if err != nil {
 		return err.Error(), true
 	}
 
-	if err := validateCreateRelations(nodes, args.ParentID, args.Blocks, args.BlockedBy, args.Related); err != nil {
+	if err := validateCreateRelations(ctx, src, args.ParentID, args.Blocks, args.BlockedBy, args.Related); err != nil {
 		return err.Error(), true
 	}
 
-	task, err := s.vikunja.CreateTask(ctx, projectID, args.Title, args.Description)
+	task, err := s.vikunja.CreateTask(ctx, src.projectID, args.Title, args.Description)
 	if err != nil {
 		return fmt.Sprintf("failed to create task: %v", err), true
 	}
@@ -654,13 +634,14 @@ func (s *Server) toolLink(ctx context.Context, argsRaw json.RawMessage) (string,
 		return fmt.Sprintf("relation %s between task %d and %d removed", args.Type, args.ID, args.TargetID), false
 	}
 
-	nodes, err := s.loadGraph(ctx)
-	if err != nil {
-		return err.Error(), true
-	}
-
-	if err := DetectGraphCycle(nodes, args.ID, args.TargetID, args.Type); err != nil {
-		return err.Error(), true
+	if args.Type != "related" {
+		src, err := s.newNodeSource(ctx)
+		if err != nil {
+			return err.Error(), true
+		}
+		if err := DetectGraphCycle(ctx, src, args.ID, args.TargetID, args.Type); err != nil {
+			return err.Error(), true
+		}
 	}
 
 	if err := s.vikunja.CreateRelation(ctx, args.ID, args.TargetID, kind); err != nil {
@@ -738,7 +719,11 @@ func (s *Server) toolClose(ctx context.Context, argsRaw json.RawMessage) (string
 		return fmt.Sprintf("invalid resolution: %q (must be 'completed' or 'wont_do')", args.Resolution), true
 	}
 
-	nodesBefore, err := s.loadGraph(ctx)
+	src, err := s.newNodeSource(ctx)
+	if err != nil {
+		return err.Error(), true
+	}
+	nodesBefore, err := loadCloseNeighborhood(ctx, src, args.ID)
 	if err != nil {
 		return err.Error(), true
 	}
@@ -761,24 +746,17 @@ func (s *Server) toolClose(ctx context.Context, argsRaw json.RawMessage) (string
 		}
 	}
 
-	nodesAfter, err := s.loadGraph(ctx)
-	if err != nil {
-		nodesAfter = make(map[int64]TaskNode, len(nodesBefore))
-		maps.Copy(nodesAfter, nodesBefore)
-		for _, cid := range closedIDs {
-			if n, ok := nodesAfter[cid]; ok {
-				n.Status = args.Resolution
-				n.Done = true
-				nodesAfter[cid] = n
-			}
+	nodesAfter := maps.Clone(nodesBefore)
+	for _, cid := range closedIDs {
+		if n, ok := nodesAfter[cid]; ok {
+			n.Status = args.Resolution
+			n.Done = true
+			nodesAfter[cid] = n
 		}
 	}
 
 	unblocked := ComputeUnblockedIDs(nodesBefore, nodesAfter, closedIDs)
-	title := ""
-	if n, ok := nodesBefore[args.ID]; ok {
-		title = n.Title
-	}
+	title := nodesBefore[args.ID].Title
 
 	res := ClosedTaskResult{
 		ID:           args.ID,
@@ -864,8 +842,7 @@ func requireGET(w http.ResponseWriter, r *http.Request) bool {
 
 // restErrorStatus maps missing tasks to 404 and every other upstream failure to 502.
 func restErrorStatus(err error) int {
-	var statusErr *HTTPStatusError
-	if errors.Is(err, ErrTaskNotFound) || (errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound) {
+	if errors.Is(err, ErrTaskNotFound) || isVikunjaNotFound(err) {
 		return http.StatusNotFound
 	}
 	return http.StatusBadGateway
