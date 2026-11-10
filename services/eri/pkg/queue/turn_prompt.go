@@ -381,6 +381,10 @@ func (te *turnExecution) buildTurnPrompt() {
 	summary, lookbackMsgs := te.buildColdStartLookback(snap, isColdStart, isChannelMode, getTurnHistory)
 
 	prevID := te.resolveColdStartPreviousSessionID(isColdStart)
+	var prevContext string
+	if isColdStart && prevID != "" && te.pool != nil && te.pool.sessionMgr != nil {
+		prevContext = te.pool.sessionMgr.ExtractResponseSince(prevID, time.Time{})
+	}
 
 	instructions := config.LoadScopeInstructions(te.effectiveName)
 	if instructions != "" {
@@ -400,16 +404,20 @@ func (te *turnExecution) buildTurnPrompt() {
 		}
 	}
 
+	isThread := te.isThread || (snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID)
+
 	te.turnPrompt = AssembleTurnPrompt(TurnPromptInput{
-		AmbientContext:      ambientCtx,
-		Burst:               te.burst,
-		ThreadSummary:       summary,
-		LookbackHistory:     lookbackMsgs,
-		PreviousSessionID:   prevID,
-		IsColdStart:         isColdStart,
-		ChannelInstructions: instructions,
-		InjectedHookContext: te.injectedHookContext,
-		Timezone:            tz,
+		AmbientContext:         ambientCtx,
+		Burst:                  te.burst,
+		ThreadSummary:          summary,
+		LookbackHistory:        lookbackMsgs,
+		PreviousSessionID:      prevID,
+		PreviousSessionContext: prevContext,
+		IsColdStart:            isColdStart,
+		IsThread:               isThread,
+		ChannelInstructions:    instructions,
+		InjectedHookContext:    te.injectedHookContext,
+		Timezone:               tz,
 	})
 }
 
@@ -417,6 +425,9 @@ func latestHistoryMessageID(histMsgs []HistoryMessage) string {
 	var latestMsgID string
 	var maxTime time.Time
 	for _, m := range histMsgs {
+		if m.CreatedAt.IsZero() {
+			continue
+		}
 		if m.CreatedAt.After(maxTime) || latestMsgID == "" {
 			maxTime, latestMsgID = m.CreatedAt, m.ID
 		}
@@ -443,7 +454,7 @@ func (te *turnExecution) resolveThreadColdStartSummary(getTurnHistory func(int) 
 	cachedSum, lastMsgID := te.getThreadSummary(te.threadID)
 	histMsgs := getTurnHistory(100)
 	if len(histMsgs) == 0 {
-		return ""
+		return cachedSum
 	}
 	latestMsgID := latestHistoryMessageID(histMsgs)
 	if cachedSum != "" && lastMsgID != "" && lastMsgID == latestMsgID {
@@ -453,10 +464,14 @@ func (te *turnExecution) resolveThreadColdStartSummary(getTurnHistory func(int) 
 	llmFn, flashModel := te.resolveSummarizerLLMAndModel()
 	sumCtx, sumCancel := context.WithTimeout(te.pool.ctx, DefaultThreadSummaryTimeout)
 	defer sumCancel()
-	newSum, sumErr := SummarizeThreadHistoryWithGroup(sumCtx, te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs)
+	var opts []ThreadSummaryOption
+	if cachedSum != "" && lastMsgID != "" {
+		opts = append(opts, WithPriorSummary(cachedSum, lastMsgID))
+	}
+	newSum, sumErr := SummarizeThreadHistoryWithGroup(sumCtx, te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs, opts...)
 	if sumErr != nil {
 		log.Printf("[WorkerPool] Warning: Thread history summarization failed for thread %s: %v. Falling back to raw lookback.", te.threadID, sumErr)
-		return ""
+		return cachedSum
 	}
 	if newSum != "" {
 		te.saveThreadSummary(te.threadID, newSum, latestMsgID)

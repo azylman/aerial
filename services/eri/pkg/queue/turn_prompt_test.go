@@ -496,6 +496,120 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	}
 }
 
+func TestResolveThreadColdStartSummary_IncrementalAndFallback(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name          string
+		cachedSum     string
+		cachedMsgID   string
+		histMsgs      []HistoryMessage
+		llmOut        string
+		llmErr        error
+		wantSummary   string
+		wantLLMCalled bool
+		wantSaved     bool
+	}{
+		{
+			name:        "empty history returns cached summary",
+			cachedSum:   "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
+			cachedMsgID: "msg-1",
+			histMsgs:    nil,
+			wantSummary: "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
+		},
+		{
+			name:        "all zero-timestamp history returns cached summary",
+			cachedSum:   "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
+			cachedMsgID: "msg-1",
+			histMsgs: []HistoryMessage{
+				{ID: "msg-zero", Content: "zero", CreatedAt: time.Time{}},
+			},
+			wantSummary: "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
+		},
+		{
+			name:          "llm error falls back to cached summary",
+			cachedSum:     "<THREAD_SUMMARY>Fallback Cached</THREAD_SUMMARY>",
+			cachedMsgID:   "msg-old",
+			histMsgs:      []HistoryMessage{{ID: "msg-new", Content: "new work", CreatedAt: now}},
+			llmErr:        errors.New("flash rate limit"),
+			wantSummary:   "<THREAD_SUMMARY>Fallback Cached</THREAD_SUMMARY>",
+			wantLLMCalled: true,
+		},
+		{
+			name:          "llm error without cached summary falls back to empty",
+			cachedSum:     "",
+			cachedMsgID:   "",
+			histMsgs:      []HistoryMessage{{ID: "msg-new", Content: "new work", CreatedAt: now}},
+			llmErr:        errors.New("flash rate limit"),
+			wantSummary:   "",
+			wantLLMCalled: true,
+		},
+		{
+			name:          "incremental update generates new summary and saves watermark",
+			cachedSum:     "<THREAD_SUMMARY>Old Summary</THREAD_SUMMARY>",
+			cachedMsgID:   "msg-1",
+			histMsgs:      []HistoryMessage{{ID: "msg-1", Content: "1", CreatedAt: now.Add(-time.Hour)}, {ID: "msg-2", Content: "2", CreatedAt: now}},
+			llmOut:        "<THREAD_SUMMARY>New Incremental Summary</THREAD_SUMMARY>",
+			wantSummary:   "<THREAD_SUMMARY>New Incremental Summary</THREAD_SUMMARY>",
+			wantLLMCalled: true,
+			wantSaved:     true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var llmCalled atomic.Bool
+
+			store := setupTestStore(t)
+			if tc.cachedSum != "" {
+				_ = store.SaveThreadSummary(context.Background(), "th-test", tc.cachedSum, tc.cachedMsgID)
+			}
+
+			pool := &WorkerPool{
+				ctx: context.Background(),
+				cfg: WorkerPoolConfig{
+					Store: store,
+					LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
+						llmCalled.Store(true)
+						if tc.llmErr != nil {
+							return "", tc.llmErr
+						}
+						return tc.llmOut, nil
+					},
+				},
+			}
+
+			te := &turnExecution{
+				pool:     pool,
+				threadID: "th-test",
+			}
+
+			// Hook saveThreadSummary tracking if needed via db.Store wrapper or verify in store
+			got := te.resolveThreadColdStartSummary(func(int) []HistoryMessage {
+				return tc.histMsgs
+			})
+
+			if got != tc.wantSummary {
+				t.Errorf("resolveThreadColdStartSummary() = %q, want %q", got, tc.wantSummary)
+			}
+			if called := llmCalled.Load(); called != tc.wantLLMCalled {
+				t.Errorf("llmCalled = %t, want %t", called, tc.wantLLMCalled)
+			}
+			if tc.wantSaved {
+				sum, msgID, err := store.GetThreadSummary(context.Background(), "th-test")
+				if err != nil || sum != tc.wantSummary {
+					t.Errorf("saved thread summary = %q, err = %v; want %q", sum, err, tc.wantSummary)
+				}
+				if msgID == "" {
+					t.Errorf("expected non-empty watermark message ID in store")
+				}
+			}
+		})
+	}
+}
+
 func TestWorker_BurstHelpers_LowEffort(t *testing.T) {
 	t.Parallel()
 	burstTests := []struct {
