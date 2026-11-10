@@ -1203,11 +1203,15 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 	})
 	nilLLM := handleInternalLLM(nil)
 
-	manyAtts := make([]string, 0, 11)
-	for i := range 11 {
-		manyAtts = append(manyAtts, fmt.Sprintf(`{"url":"%s/file.txt","filename":"file%d.txt"}`, attSrv.URL, i))
+	attsJSON := func(n int) string {
+		atts := make([]string, 0, n)
+		for i := range n {
+			atts = append(atts, fmt.Sprintf(`{"url":"%s/file.txt","filename":"file%d.txt"}`, attSrv.URL, i))
+		}
+		return fmt.Sprintf(`{"prompt":"inspect","attachments":[%s]}`, strings.Join(atts, ","))
 	}
-	tooManyAttsJSON := fmt.Sprintf(`{"prompt":"inspect","attachments":[%s]}`, strings.Join(manyAtts, ","))
+	elevenAttsJSON := attsJSON(11)
+	tooManyAttsJSON := attsJSON(33)
 
 	for _, tc := range []struct {
 		name       string
@@ -1228,6 +1232,7 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 		{"duplicate attachment filename", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/file.txt","filename":"dup.txt"},{"url":"%s/file.txt","filename":"DUP.TXT"}]}`, attSrv.URL, attSrv.URL), http.StatusBadRequest},
 		{"disallowed attachment url", http.MethodPost, okLLM, `{"prompt":"test","attachments":[{"url":"http://evil.com/file.txt","filename":"test.txt"}]}`, http.StatusBadRequest},
 		{"invalid traversal attachment filename", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/file.txt","filename":"../test.txt"}]}`, attSrv.URL), http.StatusBadRequest},
+		{"eleven attachments accepted", http.MethodPost, okLLM, elevenAttsJSON, http.StatusOK},
 		{"exceeds max attachments", http.MethodPost, okLLM, tooManyAttsJSON, http.StatusBadRequest},
 		{"upstream 404 fetch error", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/notfound","filename":"nf.txt"}]}`, attSrv.URL), http.StatusBadGateway},
 		{"upstream 500 fetch error", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/servererror","filename":"err.txt"}]}`, attSrv.URL), http.StatusBadGateway},
