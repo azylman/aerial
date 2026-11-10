@@ -334,6 +334,19 @@ describe('App with a fully seeded store', () => {
     vi.unstubAllGlobals();
   });
 
+  // Runs before the walk below opens a build, so the drawer body's React.lazy wrapper has never
+  // been rendered (and so has not resolved) in this file yet.
+  it('opens the build drawer without suspending once the builds chunk has loaded', async () => {
+    window.history.replaceState(null, '', '/console/next/#builds');
+    initRouteFromLocation();
+    await VIEW_LOADERS.builds();
+    render(<App />);
+    // One synchronous act, no flush: a suspended body would leave the null Suspense fallback here.
+    act(() => screen.getByText('Console React rewrite #1').click());
+    expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
+    expect(screen.getByText('ORDERED BUILD CHUNKS (3)')).toBeTruthy();
+  });
+
   it('walks all five tabs by hash, mounting exactly one view at a time', async () => {
     window.history.replaceState(null, '', '/console/next/#telemetry');
     initRouteFromLocation();
@@ -361,6 +374,7 @@ describe('App with a fully seeded store', () => {
     expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
     expect(screen.getByText('ORDERED BUILD CHUNKS (3)')).toBeTruthy();
   });
+
 });
 
 async function goTo(hash: string): Promise<void> {
