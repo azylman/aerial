@@ -750,6 +750,7 @@ PUSH_REBASED_CHECK=$(bash -c "
     echo 'v1' > \"\$WORK_DIR/feat.txt\"
     git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'feat v1'
     git -C \"\$WORK_DIR\" push -q -u origin feat/existing-pr
+    V1_SHA=\$(git -C \"\$WORK_DIR\" rev-parse HEAD)
 
     echo 'upstream-v2' > \"\$UPSTREAM_DIR/up.txt\"
     git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream v2'
@@ -760,7 +761,8 @@ PUSH_REBASED_CHECK=$(bash -c "
     git add feat.txt
     rebase_staged_changes main 'feat v2' 2>/dev/null
     git commit -q -m 'feat v2'
-    if push_scratch_branch feat/existing-pr 2>/dev/null; then
+    V2_SHA=\$(git rev-parse HEAD)
+    if push_scratch_branch feat/existing-pr 2>/dev/null && git merge-base --is-ancestor \"\$V1_SHA\" \"\$V2_SHA\"; then
         echo 'push_rebased:ok'
     else
         echo 'push_rebased:fail'
@@ -781,7 +783,8 @@ PUSH_REBASED_CHECK=$(bash -c "
     git add feat.txt
     rebase_staged_changes main 'feat v3' 2>/dev/null
     git commit -q -m 'feat v3'
-    if push_scratch_branch feat/existing-pr 2>/dev/null && [ \"\${PUSH_UPDATED_EXISTING}\" = \"1\" ]; then
+    V3_SHA=\$(git rev-parse HEAD)
+    if push_scratch_branch feat/existing-pr 2>/dev/null && [ \"\${PUSH_UPDATED_EXISTING}\" = \"1\" ] && git merge-base --is-ancestor \"\$V2_SHA\" \"\$V3_SHA\"; then
         echo 'push_single_branch:ok'
     else
         echo 'push_single_branch:fail'
@@ -958,6 +961,7 @@ EOF
     echo 'branch-content' > \"\$SEED_DIR/file.txt\"
     git -C \"\$SEED_DIR\" add file.txt && git -C \"\$SEED_DIR\" commit -q -m 'branch commit'
     git -C \"\$SEED_DIR\" push -q -u origin feat/existing-ci-branch
+    INITIAL_BRANCH_SHA=\$(git -C \"\$SEED_DIR\" rev-parse HEAD)
 
     export GITHUB_PAT='mock_pat'
     export AERIAL_REPO_URL_OVERRIDE=\"\$REMOTE_DIR\"
@@ -993,17 +997,93 @@ EOF
         export -f curl
         submit_scratch \"\$cloned_dir\" 'fix: address roborev finding' 2>/dev/null
     )
-    if echo \"\$remed_submit_out\" | jq -e '.status == \"submitted\" and .pr_number == 88' >/dev/null 2>&1 && [ ! -d \"\$cloned_dir\" ]; then
+    REMED1_SHA=\$(echo \"\$remed_submit_out\" | jq -r '.commit_sha // empty')
+    if echo \"\$remed_submit_out\" | jq -e '.status == \"submitted\" and .pr_number == 88' >/dev/null 2>&1 && \
+       [ ! -d \"\$cloned_dir\" ] && \
+       git -C \"\$REMOTE_DIR\" merge-base --is-ancestor \"\$INITIAL_BRANCH_SHA\" \"\$REMED1_SHA\"; then
         echo 'init_branch_submit:ok'
     else
         echo \"init_branch_submit:fail:\$remed_submit_out\"
     fi
     rm -rf \"\$cloned_dir\"
+
+    # Second remediation submit without origin/main advancing appends direct child commit
+    init_json2=\$(init_scratch aerial --branch feat/existing-ci-branch)
+    cloned_dir2=\$(echo \"\$init_json2\" | jq -r '.scratch_dir')
+    echo 'branch-content-fixed-2' > \"\$cloned_dir2/file.txt\"
+    remed_submit_out2=\$(
+        curl() {
+            if [[ \"\$*\" == *'/pulls?state=open'* ]]; then
+                printf '[{\"number\":88,\"title\":\"feat: existing branch\",\"body\":\"Existing PR body\",\"html_url\":\"https://github.com/azylman/aerial/pull/88\",\"node_id\":\"PR_kwDO88\"}]'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                printf '{\"status\":\"registered\"}'
+            fi
+        }
+        export -f curl
+        submit_scratch \"\$cloned_dir2\" 'fix: second roborev finding' 2>/dev/null
+    )
+    REMED2_SHA=\$(echo \"\$remed_submit_out2\" | jq -r '.commit_sha // empty')
+    REMED2_PARENT=\$(git -C \"\$REMOTE_DIR\" rev-parse \"\${REMED2_SHA}^1\" 2>/dev/null || echo '')
+    if [ \"\$REMED2_PARENT\" = \"\$REMED1_SHA\" ]; then
+        echo 'init_branch_submit_direct_child:ok'
+    else
+        echo \"init_branch_submit_direct_child:fail:\$REMED2_PARENT:\$REMED1_SHA\"
+    fi
+    rm -rf \"\$cloned_dir2\"
+
+    # Third remediation submit: clean index but HEAD has a new merge commit ahead of remote branch
+    init_json3=\$(init_scratch aerial --branch feat/existing-ci-branch)
+    cloned_dir3=\$(echo \"\$init_json3\" | jq -r '.scratch_dir')
+    echo 'main-v3' > \"\$SEED_DIR/main_v3.txt\"
+    git -C \"\$SEED_DIR\" checkout -q main
+    git -C \"\$SEED_DIR\" add main_v3.txt && git -C \"\$SEED_DIR\" commit -q -m 'main advance v3'
+    git -C \"\$SEED_DIR\" push -q origin main
+
+    git -C \"\$cloned_dir3\" fetch -q origin \"+refs/heads/main:refs/remotes/origin/main\"
+    git -C \"\$cloned_dir3\" merge --no-edit -q origin/main
+    remed_submit_out3=\$(
+        curl() {
+            if [[ \"\$*\" == *'/pulls?state=open'* ]]; then
+                printf '[{\"number\":88,\"title\":\"feat: existing branch\",\"body\":\"Existing PR body\",\"html_url\":\"https://github.com/azylman/aerial/pull/88\",\"node_id\":\"PR_kwDO88\"}]'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                printf '{\"status\":\"registered\"}'
+            fi
+        }
+        export -f curl
+        submit_scratch \"\$cloned_dir3\" 'merge latest main' 2>/dev/null
+    )
+    REMED3_SHA=\$(echo \"\$remed_submit_out3\" | jq -r '.commit_sha // empty')
+    REMOTE_BRANCH_SHA=\$(git -C \"\$REMOTE_DIR\" rev-parse refs/heads/feat/existing-ci-branch 2>/dev/null || echo '')
+    if echo \"\$remed_submit_out3\" | jq -e '.status == \"submitted\"' >/dev/null 2>&1 && \
+       [ \"\$REMOTE_BRANCH_SHA\" = \"\$REMED3_SHA\" ] && \
+       [ ! -d \"\$cloned_dir3\" ]; then
+        echo 'clean_index_head_ahead_submit:ok'
+    else
+        echo \"clean_index_head_ahead_submit:fail:\$remed_submit_out3\"
+    fi
+
+    # Fourth check: when HEAD is not ahead of remote branch and index is clean, reports no_changes
+    init_json4=\$(init_scratch aerial --branch feat/existing-ci-branch)
+    cloned_dir4=\$(echo \"\$init_json4\" | jq -r '.scratch_dir')
+    no_change_out=\$(submit_scratch \"\$cloned_dir4\" -b 'no changes body' 2>/dev/null)
+    if echo \"\$no_change_out\" | jq -e '.status == \"no_changes\"' >/dev/null 2>&1; then
+        echo 'clean_index_no_changes:ok'
+    else
+        echo \"clean_index_no_changes:fail:\$no_change_out\"
+    fi
+    rm -rf \"\$cloned_dir4\"
 ")
 assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'tree_cache_hit:ok' && echo true || echo false)" "run_preflight_verification skips duplicate verify.sh when .aerial-verified-tree matches"
 assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'tree_cache_invalidated:ok' && echo true || echo false)" "run_preflight_verification re-runs verify.sh when unstaged changes exist"
 assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch:ok' && echo true || echo false)" "init_scratch --branch clones, tracks origin/main, and stays on existing PR branch"
-assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch_submit:ok' && echo true || echo false)" "submit_scratch rebases and updates PR cleanly from init_scratch --branch checkout"
+assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch_submit:ok' && echo true || echo false)" "submit_scratch merges advanced origin/main and preserves commit ancestry on existing PR branch"
+assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch_submit_direct_child:ok' && echo true || echo false)" "submit_scratch appends direct child commit on existing PR branch when origin/main is unchanged"
+assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'clean_index_head_ahead_submit:ok' && echo true || echo false)" "submit_scratch pushes merge commit when index is clean but HEAD is ahead of remote"
+assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'clean_index_no_changes:ok' && echo true || echo false)" "submit_scratch reports no_changes when index is clean and HEAD equals remote"
 
 # Case 17: github-runner roborev wrapper repo move + roborev-override rebuttal backfill and head short-circuit
 ROBOREV_WRAPPER_CHECK=$(SCRIPT_DIR="$SCRIPT_DIR" bash -s << 'CASE17_EOF'
@@ -1109,6 +1189,187 @@ CASE17_EOF
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper moves placeholder repo and backfills prior roborev-override rebuttals before review --wait"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'head_shortcircuit:ok' && echo true || echo false)" "github-runner roborev wrapper skips duplicate comment and short-circuits Review Passed when override matches current HEAD"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'align_source_machine_id:ok' && echo true || echo false)" "github-runner roborev wrapper aligns review_jobs.source_machine_id on synced rows with non-empty session_id to local machine_id"
+
+# Case 18: rebase_staged_changes commit failure guard and non-ancestor / multi-merge remote branch updates
+REBASE_ROBUSTNESS_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-robust-remote.XXXXXX)
+    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-robust-up.XXXXXX)
+    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-robust-work.XXXXXX)
+    trap 'rm -rf \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\" \"\$WORK_DIR\"' EXIT
+
+    git init -q --bare \"\$REMOTE_DIR\"
+    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
+    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
+    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
+    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
+    echo 'init' > \"\$UPSTREAM_DIR/init.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'init'
+    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
+
+    git clone -q -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
+    git -C \"\$WORK_DIR\" config user.name 'Tester'
+    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR\" checkout -q -b feat/robust-branch
+    echo 'c1' > \"\$WORK_DIR/c1.txt\"
+    git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'c1'
+    git -C \"\$WORK_DIR\" push -q -u origin feat/robust-branch
+    C1_SHA=\$(git -C \"\$WORK_DIR\" rev-parse HEAD)
+
+    # 1. Commit failure guard in rebase_staged_changes: pre-commit hook failure must abort and preserve workspace
+    echo 'm2' > \"\$UPSTREAM_DIR/m2.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'm2'
+    git -C \"\$UPSTREAM_DIR\" push -q origin main
+    M2_SHA=\$(git -C \"\$UPSTREAM_DIR\" rev-parse HEAD)
+
+    mkdir -p \"\$WORK_DIR/.git/hooks\"
+    cat << 'HOOK_EOF' > \"\$WORK_DIR/.git/hooks/pre-commit\"
+#!/bin/sh
+exit 1
+HOOK_EOF
+    chmod +x \"\$WORK_DIR/.git/hooks/pre-commit\"
+
+    cd \"\$WORK_DIR\"
+    echo 'feat-hook-fail' > feat_fail.txt
+    git add feat_fail.txt
+    CLEANUP_TRACKER=\"\$WORK_DIR\"
+    SCRATCH_DIR_CLEANUP=\"\$CLEANUP_TRACKER\"
+    if ! rebase_staged_changes main 'temp commit' 2>/dev/null; then
+        if [ -z \"\$SCRATCH_DIR_CLEANUP\" ] && [ -f \"feat_fail.txt\" ]; then
+            echo 'commit_guard_aborts:ok'
+        else
+            echo 'commit_guard_aborts:fail'
+        fi
+    else
+        echo 'commit_guard_aborts:unexpected_success'
+    fi
+    rm -f \"\$WORK_DIR/.git/hooks/pre-commit\"
+    git reset --hard HEAD -q
+    git clean -fd -q
+
+    # 2. Scenario 1: Remote branch received newer commits after workspace checked out (remote_branch_sha not ancestor of head_sha)
+    AGENT_DIR=\$(mktemp -d /tmp/aerial-pr-robust-agent.XXXXXX)
+    git clone -q -b feat/robust-branch \"\$REMOTE_DIR\" \"\$AGENT_DIR\"
+    git -C \"\$AGENT_DIR\" config user.name 'Tester'
+    git -C \"\$AGENT_DIR\" config user.email 'tester@example.com'
+
+    # Remote branch advances to C2
+    echo 'c2' > \"\$WORK_DIR/c2.txt\"
+    git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'c2'
+    git -C \"\$WORK_DIR\" push -q origin feat/robust-branch
+    C2_SHA=\$(git -C \"\$WORK_DIR\" rev-parse HEAD)
+
+    # Local workspace in AGENT_DIR (at C1) makes edits and rebases
+    cd \"\$AGENT_DIR\"
+    echo 'agent-edit' > agent.txt
+    git add agent.txt
+    rebase_staged_changes main 'agent commit' 2>/dev/null
+    git commit -q -m 'agent commit'
+    AGENT_HEAD=\$(git rev-parse HEAD)
+    if git merge-base --is-ancestor \"\$C2_SHA\" \"\$AGENT_HEAD\" && [ -f \"c2.txt\" ] && [ -f \"agent.txt\" ]; then
+        echo 'remote_ahead_preserved:ok'
+    else
+        echo 'remote_ahead_preserved:fail'
+    fi
+    rm -rf \"\$AGENT_DIR\"
+
+    # 3. Scenario 2: Preserved workspace with prior upstream merge when upstream advances again
+    # In WORK_DIR, merge M2 into branch
+    cd \"\$WORK_DIR\"
+    echo 'feat-v1' > feat.txt
+    git add feat.txt
+    rebase_staged_changes main 'feat v1' 2>/dev/null
+    MC1_SHA=\$(git rev-parse HEAD)
+
+    # Upstream advances to M3, updating m2.txt as well
+    echo 'm3' > \"\$UPSTREAM_DIR/m3.txt\"
+    echo 'm2-v2' > \"\$UPSTREAM_DIR/m2.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'm3'
+    git -C \"\$UPSTREAM_DIR\" push -q origin main
+    M3_SHA=\$(git -C \"\$UPSTREAM_DIR\" rev-parse HEAD)
+
+    # Retry in preserved workspace with new edit; must not sweep M2 into diff or produce conflict
+    echo 'feat-v1-fixed' > feat.txt
+    git add feat.txt
+    rebase_staged_changes main 'feat v1 fixed' 2>/dev/null
+    git commit -q -m 'feat v1 fixed'
+    FINAL_HEAD=\$(git rev-parse HEAD)
+
+    if git merge-base --is-ancestor \"\$C2_SHA\" \"\$FINAL_HEAD\" && \
+       git merge-base --is-ancestor \"\$MC1_SHA\" \"\$FINAL_HEAD\" && \
+       git merge-base --is-ancestor \"\$M3_SHA\" \"\$FINAL_HEAD\" && \
+       [ \"\$(cat feat.txt)\" = 'feat-v1-fixed' ] && \
+       [ \"\$(cat m2.txt)\" = 'm2-v2' ]; then
+        echo 'prior_merge_retry_clean:ok'
+    else
+        echo 'prior_merge_retry_clean:fail'
+    fi
+
+    # 4. Scenario 3: Non-ancestor branch with prior merge (diverged first-parent history)
+    AGENT_DIR2=\$(mktemp -d /tmp/aerial-pr-robust-agent2.XXXXXX)
+    git clone -q -b feat/robust-branch \"\$REMOTE_DIR\" \"\$AGENT_DIR2\"
+    git -C \"\$AGENT_DIR2\" config user.name 'Tester'
+    git -C \"\$AGENT_DIR2\" config user.email 'tester@example.com'
+
+    # In AGENT_DIR2, merge main (M3) into branch
+    cd \"\$AGENT_DIR2\"
+    echo 'agent2-feat' > agent2.txt
+    git add agent2.txt
+    rebase_staged_changes main 'agent2 feat' 2>/dev/null
+
+    # Remote branch advances with an independent commit C3
+    echo 'c3' > \"\$WORK_DIR/c3.txt\"
+    git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'c3'
+    git -C \"\$WORK_DIR\" push -q origin feat/robust-branch
+    C3_SHA=\$(git -C \"\$WORK_DIR\" rev-parse HEAD)
+
+    # In AGENT_DIR2, add a staged edit and rebase onto origin/feat/robust-branch
+    cd \"\$AGENT_DIR2\"
+    echo 'agent2-feat-v2' > agent2.txt
+    git add agent2.txt
+    rebase_staged_changes main 'agent2 feat v2' 2>/dev/null
+    git commit -q -m 'agent2 feat v2'
+    AGENT2_HEAD=\$(git rev-parse HEAD)
+
+    if git merge-base --is-ancestor \"\$C3_SHA\" \"\$AGENT2_HEAD\" && \
+       [ -f \"c3.txt\" ] && \
+       [ \"\$(cat agent2.txt)\" = 'agent2-feat-v2' ]; then
+        echo 'non_ancestor_prior_merge:ok'
+    else
+        echo 'non_ancestor_prior_merge:fail'
+    fi
+    cd \"\$WORK_DIR\"
+    rm -rf \"\$AGENT_DIR2\"
+
+    # 5. Stale tracking ref cleanup when remote branch is pruned
+    STALE_DIR=\$(mktemp -d /tmp/aerial-pr-stale.XXXXXX)
+    git clone -q -b feat/robust-branch \"\$REMOTE_DIR\" \"\$STALE_DIR\"
+    git -C \"\$STALE_DIR\" config user.name 'Tester'
+    git -C \"\$STALE_DIR\" config user.email 'tester@example.com'
+
+    # Delete remote branch from bare repo
+    git -C \"\$REMOTE_DIR\" branch -D feat/robust-branch >/dev/null 2>&1
+
+    cd \"\$STALE_DIR\"
+    rebase_staged_changes main 'stale test' 2>/dev/null || true
+    local_stale_ref=\$(git rev-parse --verify -q refs/remotes/origin/feat/robust-branch 2>/dev/null || echo '')
+
+    push_scratch_branch 'feat/new-from-stale' 2>/dev/null || true
+
+    if [ -z \"\$local_stale_ref\" ] && [ \"\$PUSH_UPDATED_EXISTING\" -eq 0 ]; then
+        echo 'stale_ref_cleared:ok'
+    else
+        echo 'stale_ref_cleared:fail'
+    fi
+    cd \"\$WORK_DIR\"
+    rm -rf \"\$STALE_DIR\"
+")
+assert_eq "true" "$(echo "$REBASE_ROBUSTNESS_CHECK" | grep -q 'commit_guard_aborts:ok' && echo true || echo false)" "rebase_staged_changes fails closed, clears cleanup trap, and preserves workspace when commit fails"
+assert_eq "true" "$(echo "$REBASE_ROBUSTNESS_CHECK" | grep -q 'remote_ahead_preserved:ok' && echo true || echo false)" "rebase_staged_changes merges onto newer remote branch commits without reverting them"
+assert_eq "true" "$(echo "$REBASE_ROBUSTNESS_CHECK" | grep -q 'prior_merge_retry_clean:ok' && echo true || echo false)" "rebase_staged_changes preserves prior merge commits on retry when upstream advances again"
+assert_eq "true" "$(echo "$REBASE_ROBUSTNESS_CHECK" | grep -q 'non_ancestor_prior_merge:ok' && echo true || echo false)" "rebase_staged_changes preserves local edits across diverged non-ancestor remote branches with prior merges"
+assert_eq "true" "$(echo "$REBASE_ROBUSTNESS_CHECK" | grep -q 'stale_ref_cleared:ok' && echo true || echo false)" "rebase_staged_changes and push_scratch_branch clear stale tracking refs when remote branch is absent"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
