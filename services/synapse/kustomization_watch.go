@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -120,29 +121,113 @@ func decodeKustomizationList(body []byte, namespace string) ([]kustomizationObse
 	return observations, list.Metadata.ResourceVersion, nil
 }
 
-// kustomizationSink receives the level-triggered state of every watched Kustomization.
-type kustomizationSink interface {
+// rolloutSink receives the level-triggered state of every watched Kustomization, and reports whether
+// any PR still waits on a Kustomization so workload changes know when to re-evaluate.
+type rolloutSink interface {
 	applyKustomizationList(ctx context.Context, namespace string, observations []kustomizationObservation) error
 	applyKustomizationStatus(ctx context.Context, obs kustomizationObservation) error
 	applyKustomizationDeleted(ctx context.Context, ref fluxKustomizationRef) error
+	hasPendingRollouts(ctx context.Context) (bool, error)
 }
 
-// KustomizationWatcher runs the informer loop over one namespace's Kustomizations: LIST, apply the
-// full list, WATCH from the list resourceVersion, and re-LIST whenever the stream ends or expires.
-type KustomizationWatcher struct {
+// kubeWatchSource is one kube collection driven by the informer loop: list applies the full state and
+// returns its resourceVersion, watch streams changes from it, and apply handles one change event.
+type kubeWatchSource interface {
+	String() string
+	list(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink) (string, error)
+	watch(ctx context.Context, kube *DefaultOutboundDispatcher, resourceVersion string) (io.ReadCloser, error)
+	apply(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink, eventType string, object json.RawMessage) error
+}
+
+// kustomizationSource watches one namespace's Kustomizations and applies each observation.
+type kustomizationSource struct {
+	namespace string
+}
+
+func (k kustomizationSource) String() string { return k.namespace + " kustomizations" }
+
+func (k kustomizationSource) list(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink) (string, error) {
+	observations, resourceVersion, err := kube.ListKustomizations(ctx, k.namespace)
+	if err != nil {
+		return "", err
+	}
+	if err := sink.applyKustomizationList(ctx, k.namespace, observations); err != nil {
+		return "", fmt.Errorf("apply kustomization list: %w", err)
+	}
+	return resourceVersion, nil
+}
+
+func (k kustomizationSource) watch(ctx context.Context, kube *DefaultOutboundDispatcher, resourceVersion string) (io.ReadCloser, error) {
+	return kube.WatchKustomizations(ctx, k.namespace, resourceVersion)
+}
+
+func (k kustomizationSource) apply(ctx context.Context, _ *DefaultOutboundDispatcher, sink rolloutSink, eventType string, object json.RawMessage) error {
+	var obj fluxKustomizationObject
+	if err := json.Unmarshal(object, &obj); err != nil {
+		return fmt.Errorf("decode %s kustomization: %w", eventType, err)
+	}
+	obs := obj.observation(k.namespace)
+	if eventType == "DELETED" {
+		return sink.applyKustomizationDeleted(ctx, obs.Ref)
+	}
+	return sink.applyKustomizationStatus(ctx, obs)
+}
+
+// workloadSource watches the Flux-managed workloads at path. A Kustomization that is already Ready emits
+// no further event, so every workload change re-lists flux-system Kustomizations while a rollout is
+// pending, letting a request gated on workload rollout complete once its workloads become available.
+type workloadSource struct {
+	path string
+}
+
+func (w workloadSource) String() string { return w.path }
+
+func (w workloadSource) list(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink) (string, error) {
+	resourceVersion, err := kube.ListFluxWorkloadsVersion(ctx, w.path)
+	if err != nil {
+		return "", err
+	}
+	return resourceVersion, w.recheck(ctx, kube, sink)
+}
+
+func (w workloadSource) watch(ctx context.Context, kube *DefaultOutboundDispatcher, resourceVersion string) (io.ReadCloser, error) {
+	return kube.WatchFluxWorkloads(ctx, w.path, resourceVersion)
+}
+
+func (w workloadSource) apply(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink, eventType string, _ json.RawMessage) error {
+	if eventType == "DELETED" {
+		return nil
+	}
+	return w.recheck(ctx, kube, sink)
+}
+
+func (w workloadSource) recheck(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink) error {
+	pending, err := sink.hasPendingRollouts(ctx)
+	if err != nil || !pending {
+		return err
+	}
+	if _, err := (kustomizationSource{namespace: fluxSystemNamespace}).list(ctx, kube, sink); err != nil {
+		return fmt.Errorf("re-evaluate rollouts: %w", err)
+	}
+	return nil
+}
+
+// kubeWatcher runs the informer loop over one source: LIST and apply the full state, WATCH from the
+// list resourceVersion, and re-LIST whenever the stream ends or expires.
+type kubeWatcher struct {
 	kube       *DefaultOutboundDispatcher
-	sink       kustomizationSink
-	namespace  string
+	sink       rolloutSink
+	source     kubeWatchSource
 	retryDelay time.Duration
 }
 
-// NewKustomizationWatcher constructs a watcher; retryDelay is the initial backoff after a failure.
-func NewKustomizationWatcher(kube *DefaultOutboundDispatcher, sink kustomizationSink, namespace string, retryDelay time.Duration) *KustomizationWatcher {
-	return &KustomizationWatcher{kube: kube, sink: sink, namespace: namespace, retryDelay: retryDelay}
+// newKubeWatcher constructs a watcher; retryDelay is the initial backoff after a failure.
+func newKubeWatcher(kube *DefaultOutboundDispatcher, sink rolloutSink, source kubeWatchSource, retryDelay time.Duration) *kubeWatcher {
+	return &kubeWatcher{kube: kube, sink: sink, source: source, retryDelay: retryDelay}
 }
 
 // Run loops until ctx is cancelled. A finished or expired watch re-lists immediately; failures back off.
-func (w *KustomizationWatcher) Run(ctx context.Context) {
+func (w *kubeWatcher) Run(ctx context.Context) {
 	delay := w.retryDelay
 	for ctx.Err() == nil {
 		err := w.listAndWatch(ctx)
@@ -153,7 +238,7 @@ func (w *KustomizationWatcher) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		log.Printf("[synapse] [flux-watch] error watching %s kustomizations (retrying in %s): %v", w.namespace, delay, err)
+		log.Printf("[synapse] [flux-watch] error watching %s (retrying in %s): %v", w.source, delay, err)
 		select {
 		case <-time.After(delay):
 			delay = advanceBackoffDelay(delay, true)
@@ -163,15 +248,12 @@ func (w *KustomizationWatcher) Run(ctx context.Context) {
 	}
 }
 
-func (w *KustomizationWatcher) listAndWatch(ctx context.Context) error {
-	observations, resourceVersion, err := w.kube.ListKustomizations(ctx, w.namespace)
+func (w *kubeWatcher) listAndWatch(ctx context.Context) error {
+	resourceVersion, err := w.source.list(ctx, w.kube, w.sink)
 	if err != nil {
 		return err
 	}
-	if err := w.sink.applyKustomizationList(ctx, w.namespace, observations); err != nil {
-		return fmt.Errorf("apply kustomization list: %w", err)
-	}
-	stream, err := w.kube.WatchKustomizations(ctx, w.namespace, resourceVersion)
+	stream, err := w.source.watch(ctx, w.kube, resourceVersion)
 	if err != nil {
 		return err
 	}
@@ -185,7 +267,7 @@ type kubeWatchEvent struct {
 }
 
 // consume applies watch events until the stream ends (nil), expires (errWatchExpired) or fails.
-func (w *KustomizationWatcher) consume(ctx context.Context, stream io.Reader) error {
+func (w *kubeWatcher) consume(ctx context.Context, stream io.Reader) error {
 	dec := json.NewDecoder(stream)
 	for {
 		var evt kubeWatchEvent
@@ -204,18 +286,10 @@ func (w *KustomizationWatcher) consume(ctx context.Context, stream io.Reader) er
 	}
 }
 
-func (w *KustomizationWatcher) applyEvent(ctx context.Context, evt kubeWatchEvent) error {
+func (w *kubeWatcher) applyEvent(ctx context.Context, evt kubeWatchEvent) error {
 	switch evt.Type {
 	case "ADDED", "MODIFIED", "DELETED":
-		var obj fluxKustomizationObject
-		if err := json.Unmarshal(evt.Object, &obj); err != nil {
-			return fmt.Errorf("decode %s kustomization: %w", evt.Type, err)
-		}
-		obs := obj.observation(w.namespace)
-		if evt.Type == "DELETED" {
-			return w.sink.applyKustomizationDeleted(ctx, obs.Ref)
-		}
-		return w.sink.applyKustomizationStatus(ctx, obs)
+		return w.source.apply(ctx, w.kube, w.sink, evt.Type, evt.Object)
 	case "ERROR":
 		var status struct {
 			Code    int    `json:"code"`
@@ -230,21 +304,31 @@ func (w *KustomizationWatcher) applyEvent(ctx context.Context, evt kubeWatchEven
 	}
 }
 
-// startKustomizationWatcher runs the Kustomization rollout watcher when PR state is durable and the kube
-// API is configured. The returned stop function cancels it and waits for it to exit; it is idempotent.
+// rolloutWatchSources are the collections the rollout watcher follows: flux-system Kustomizations and
+// every Flux-managed workload kind whose rollout gates a deploy.
+func rolloutWatchSources() []kubeWatchSource {
+	sources := make([]kubeWatchSource, 0, 1+len(rolloutWorkloadKinds))
+	sources = append(sources, kustomizationSource{namespace: fluxSystemNamespace})
+	for _, k := range rolloutWorkloadKinds {
+		sources = append(sources, workloadSource{path: k.Path})
+	}
+	return sources
+}
+
+// startKustomizationWatcher runs the Kustomization rollout watchers when PR state is durable and the kube
+// API is configured. The returned stop function cancels them and waits for them to exit; it is idempotent.
 func (s *RouterServer) startKustomizationWatcher(ctx context.Context, kube *DefaultOutboundDispatcher) func() {
 	if s.registry == nil || kube == nil || kube.kubeAPIServer == "" {
 		return func() {}
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		NewKustomizationWatcher(kube, s, fluxSystemNamespace, kube.retryDelay).Run(ctx)
-	}()
+	var wg sync.WaitGroup
+	for _, source := range rolloutWatchSources() {
+		wg.Go(func() { newKubeWatcher(kube, s, source, kube.retryDelay).Run(ctx) })
+	}
 	return func() {
 		cancel()
-		<-done
+		wg.Wait()
 	}
 }
 
@@ -279,6 +363,25 @@ func (t trackedRollout) pendingRequest(ref fluxKustomizationRef) (kustomizationR
 		return kustomizationRequest{}, false
 	}
 	return req, true
+}
+
+// hasPending reports whether any recorded request is still waiting to be deployed.
+func (t trackedRollout) hasPending() bool {
+	for name, req := range t.Requests {
+		if _, pending := t.pendingRequest(fluxKustomizationRef{Namespace: cmp.Or(req.Namespace, fluxSystemNamespace), Name: name}); pending {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPendingRollouts reports whether any deploying PR still waits on a recorded Kustomization request.
+func (s *RouterServer) hasPendingRollouts(ctx context.Context) (bool, error) {
+	rollouts, err := s.trackedRollouts(ctx)
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(rollouts, trackedRollout.hasPending), nil
 }
 
 func (s *RouterServer) trackedRollouts(ctx context.Context) ([]trackedRollout, error) {
@@ -346,13 +449,18 @@ func (s *RouterServer) applyKustomizationDeleted(ctx context.Context, ref fluxKu
 	return errors.Join(errs...)
 }
 
-// applyObservation acts on each pending request for obs. Lost requests are repaired with one PATCH
-// carrying the latest recorded value, which covers every earlier request. A returned error means some
-// PR is still deploying with work left undone; the watcher then backs off and re-lists, because a
-// Kustomization already in its final state emits no further event to retry on.
+// applyObservation acts on each pending request for obs. A request Flux has applied completes only once
+// the Kustomization's workloads running the PR's image have rolled out; the workloads are listed at most
+// once per call. Lost requests are repaired with one PATCH carrying the latest recorded value, which
+// covers every earlier request. A returned error means some PR is still deploying with work left undone;
+// the watcher then backs off and re-lists, because a Kustomization already in its final state emits no
+// further event to retry on.
 func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedRollout, obs kustomizationObservation) error {
 	repatchAt := ""
 	var errs []error
+	var workloads []workloadRollout
+	var listErr error
+	listed := false
 	for _, t := range rollouts {
 		req, pending := t.pendingRequest(obs.Ref)
 		if !pending {
@@ -360,7 +468,15 @@ func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedR
 		}
 		switch action := kustomizationRequestAction(req, obs); action.Kind {
 		case kustomizationMarkDeployed:
-			errs = append(errs, s.completeKustomizationRequest(ctx, t.PR, obs.Ref.Name))
+			if !listed {
+				listed = true
+				if workloads, listErr = s.dispatcher.ListKustomizationWorkloads(ctx, obs.Ref); listErr != nil {
+					errs = append(errs, fmt.Errorf("list workloads of %s/%s: %w", obs.Ref.Namespace, obs.Ref.Name, listErr))
+				}
+			}
+			if listErr == nil {
+				errs = append(errs, s.gateKustomizationRequest(ctx, t.PR, obs.Ref.Name, workloads))
+			}
 		case kustomizationFail:
 			errs = append(errs, s.failKustomizationRollout(ctx, t.PR, obs.Ref.Name, action.Reason))
 		case kustomizationRepatch:
@@ -377,6 +493,22 @@ func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedR
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// gateKustomizationRequest completes an applied Kustomization request once the workloads running the
+// PR's commit image have rolled out, fails it when one of them failed, and otherwise leaves it pending
+// for the workload watcher to re-evaluate.
+func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr DeployingPR, name string, workloads []workloadRollout) error {
+	done, failed, reason := commitRolloutStatus(workloads, firstNonEmpty(pr.MergeSHA, pr.HeadSHA))
+	switch {
+	case failed:
+		return s.failKustomizationRollout(ctx, pr, name, reason)
+	case done:
+		return s.completeKustomizationRequest(ctx, pr, name)
+	default:
+		log.Printf("[synapse] [flux-watch] waiting for rollout of %s for %s#%d: %s", name, pr.Repo, pr.PRNumber, reason)
+		return nil
+	}
 }
 
 // completeKustomizationRequest records one handled Kustomization; only the call that flips the PR to
