@@ -1424,8 +1424,6 @@ spec:
               value: "3001"
             - name: CONFIG_PATH
               value: /local/homepage-service/homepage.yaml
-            - name: HOMEPAGE_ALLOWED_HOSTS
-              value: "${HOMEPAGE_ALLOWED_HOSTS:=*}"
           envFrom:
             - secretRef:
                 name: homepage-secret

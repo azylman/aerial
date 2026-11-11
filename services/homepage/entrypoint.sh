@@ -43,6 +43,11 @@ if [ -f /config/runtime.env ]; then
     set +a
 fi
 
+# Ensure HOMEPAGE_ALLOWED_HOSTS defaults to '*' if not specified
+if [ -z "${HOMEPAGE_ALLOWED_HOSTS:-}" ]; then
+    export HOMEPAGE_ALLOWED_HOSTS="*"
+fi
+
 # Pass through arguments or default to server.js
 if [ $# -eq 0 ]; then
     set -- node server.js
