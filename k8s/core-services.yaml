@@ -181,15 +181,12 @@ spec:
               name: oauth-token
               readOnly: true
               subPath: antigravity-oauth-token
-            - mountPath: /mnt/nas
-              name: nas-share
-              readOnly: true
             - mountPath: /secrets
               name: shared-secrets
               readOnly: true
       initContainers:
         - args:
-            - --repo=https://github.com/azylman/aerial.git
+            - --repo=${AERIAL_REPO_URL:=https://github.com/azylman/aerial.git}
             - --ref=main
             - --root=/share/.sync/aerial
             - --link=/share/aerial
@@ -233,7 +230,7 @@ spec:
             - mountPath: /share
               name: share
         - args:
-            - --repo=https://github.com/azylman/aerial-config.git
+            - --repo=${AERIAL_CONFIG_REPO_URL:=https://github.com/azylman/aerial-config.git}
             - --ref=main
             - --root=/share/.sync/aerial-config
             - --link=/share/aerial-config
@@ -281,6 +278,7 @@ spec:
             - -ec
             - |
               umask 077
+              chown 1000:1000 /data
               install -d -o 1000 -g 1000 -m 0700 /data/ssh
               key=/data/ssh/id_ed25519
               if [ -s /ssh-secret/id_ed25519 ]; then
@@ -329,9 +327,6 @@ spec:
             - mountPath: /ssh-secret
               name: ssh-key
               readOnly: true
-      nodeSelector:
-        compute-tier: performance
-        kubernetes.io/hostname: calibarn
       securityContext:
         fsGroup: 65533
       shareProcessNamespace: true
@@ -340,12 +335,8 @@ spec:
           name: share
         - hostPath:
             path: /var/lib/aerial/brain-data
-            type: Directory
+            type: DirectoryOrCreate
           name: brain-data
-        - name: nas-share
-          persistentVolumeClaim:
-            claimName: nas-share
-            readOnly: true
         - name: oauth-token
           secret:
             defaultMode: 384
@@ -448,7 +439,7 @@ spec:
               readOnly: true
       initContainers:
         - args:
-            - --repo=https://github.com/azylman/aerial.git
+            - --repo=${AERIAL_REPO_URL:=https://github.com/azylman/aerial.git}
             - --ref=main
             - --root=/share/.sync/aerial
             - --link=/share/aerial
@@ -491,7 +482,7 @@ spec:
             - mountPath: /share
               name: share
         - args:
-            - --repo=https://github.com/azylman/aerial-config.git
+            - --repo=${AERIAL_CONFIG_REPO_URL:=https://github.com/azylman/aerial-config.git}
             - --ref=main
             - --root=/share/.sync/aerial-config
             - --link=/share/aerial-config
@@ -533,8 +524,6 @@ spec:
           volumeMounts:
             - mountPath: /share
               name: share
-      nodeSelector:
-        kubernetes.io/hostname: calibarn
       securityContext:
         fsGroup: 65533
       volumes:
@@ -565,34 +554,6 @@ spec:
             - file:///migrations
             - --url
             - postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/aerial?sslmode=disable
-            - --revisions-schema
-            - sidecars
-          env:
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
-          image: ghcr.io/azylman/aerial-sidecar-migrator:${TAG_AERIAL_SIDECAR_MIGRATOR:=latest}
-          imagePullPolicy: Always
-          name: migrate-sidecars
-          resources:
-            limits:
-              cpu: 500m
-              memory: 256Mi
-            requests:
-              cpu: 25m
-              memory: 64Mi
-      imagePullSecrets:
-        - name: ghcr-creds
-      initContainers:
-        - args:
-            - migrate
-            - apply
-            - --dir
-            - file:///migrations
-            - --url
-            - postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/aerial?sslmode=disable
           env:
             - name: POSTGRES_PASSWORD
               valueFrom:
@@ -609,6 +570,29 @@ spec:
             requests:
               cpu: 25m
               memory: 64Mi
+      imagePullSecrets:
+        - name: ghcr-creds
+      initContainers:
+        - command:
+            - /bin/sh
+            - -c
+            - |
+              for db in aerial openobserve infisical; do psql -h postgres -U aerial -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '$db'" | grep -q 1 || psql -h postgres -U aerial -d postgres -c "CREATE DATABASE $db;"; done && psql -h postgres -U aerial -d aerial -c "CREATE EXTENSION IF NOT EXISTS vector;"
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: postgres-secret
+          image: ghcr.io/cloudnative-pg/postgresql:18
+          name: init-aerial-db
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
       restartPolicy: OnFailure
 ---
 apiVersion: v1
@@ -687,7 +671,7 @@ spec:
               readOnly: true
       initContainers:
         - args:
-            - --repo=https://github.com/azylman/aerial-config.git
+            - --repo=${AERIAL_CONFIG_REPO_URL:=https://github.com/azylman/aerial-config.git}
             - --ref=main
             - --root=/share/.sync/aerial-config
             - --link=/share/aerial-config
@@ -729,8 +713,6 @@ spec:
           volumeMounts:
             - mountPath: /share
               name: share
-      nodeSelector:
-        kubernetes.io/hostname: calibarn
       securityContext:
         fsGroup: 65533
       volumes:
@@ -808,7 +790,7 @@ spec:
             - name: AGENTSVIEW_PG_SCHEMA
               value: agentsview
             - name: AGENTSVIEW_PG_MACHINE
-              value: calibarn
+              value: ${AGENTSVIEW_PG_MACHINE:=local}
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -833,8 +815,6 @@ spec:
           volumeMounts:
             - mountPath: /tmp
               name: tmp-data
-      nodeSelector:
-        compute-tier: performance
       securityContext:
         runAsGroup: 1000
         runAsUser: 1000
@@ -868,7 +848,7 @@ spec:
         - command:
             - /bin/sh
             - -c
-            - "touch /data/agentsview/pg-watch.log && { tail -F /data/agentsview/pg-watch.log & exec agentsview pg push --watch --debounce=5s --no-vectors; }"
+            - "mkdir -p /data/agentsview && touch /data/agentsview/pg-watch.log && { tail -F /data/agentsview/pg-watch.log & exec agentsview pg push --watch --debounce=5s --no-vectors; }"
           env:
             - name: HOME
               value: /data
@@ -885,7 +865,7 @@ spec:
             - name: AGENTSVIEW_PG_SCHEMA
               value: agentsview
             - name: AGENTSVIEW_PG_MACHINE
-              value: calibarn
+              value: ${AGENTSVIEW_PG_MACHINE:=local}
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -910,7 +890,7 @@ spec:
         - command:
             - /bin/sh
             - -c
-            - "psql -h postgres -U aerial -d aerial -c \"UPDATE agentsview.sessions SET owner_marker = '', machine = 'local' WHERE owner_marker != '';\""
+            - "psql -h postgres -U aerial -d aerial -c \"DO \\$\\$ BEGIN IF to_regclass('agentsview.sessions') IS NOT NULL THEN UPDATE agentsview.sessions SET owner_marker = '', machine = '${AGENTSVIEW_PG_MACHINE:=local}' WHERE owner_marker != ''; END IF; END \\$\\$;\""
           env:
             - name: PGPASSWORD
               valueFrom:
@@ -926,16 +906,13 @@ spec:
             requests:
               cpu: 10m
               memory: 32Mi
-      nodeSelector:
-        compute-tier: performance
-        kubernetes.io/hostname: calibarn
       securityContext:
         runAsGroup: 1000
         runAsUser: 1000
       volumes:
         - hostPath:
             path: /var/lib/aerial/brain-data
-            type: Directory
+            type: DirectoryOrCreate
           name: brain-data
 ---
 apiVersion: v1
@@ -1015,7 +992,7 @@ spec:
               readOnly: true
       initContainers:
         - args:
-            - --repo=https://github.com/azylman/aerial-config.git
+            - --repo=${AERIAL_CONFIG_REPO_URL:=https://github.com/azylman/aerial-config.git}
             - --ref=main
             - --root=/share/.sync/aerial-config
             - --link=/share/aerial-config
@@ -1057,8 +1034,6 @@ spec:
           volumeMounts:
             - mountPath: /share
               name: share
-      nodeSelector:
-        kubernetes.io/hostname: calibarn
       securityContext:
         fsGroup: 65533
       volumes:
@@ -1250,7 +1225,7 @@ spec:
               readOnly: true
       initContainers:
         - args:
-            - --repo=https://github.com/azylman/aerial-config.git
+            - --repo=${AERIAL_CONFIG_REPO_URL:=https://github.com/azylman/aerial-config.git}
             - --ref=main
             - --root=/share/.sync/aerial-config
             - --link=/share/aerial-config
@@ -1293,8 +1268,6 @@ spec:
           volumeMounts:
             - mountPath: /share
               name: share
-      nodeSelector:
-        kubernetes.io/hostname: calibarn
       securityContext:
         fsGroup: 65533
       volumes:
@@ -1333,9 +1306,7 @@ data:
     vanadis_url: "http://vanadis.aerial"
     docket_url: "http://docket-mcp.aerial"
     github_repos:
-      - "azylman/aerial"
-      - "azylman/aerial-sidecars"
-      - "azylman/aerial-config"
+      - "${AERIAL_GITHUB_REPO:=azylman/aerial}"
 kind: ConfigMap
 metadata:
   name: console-config
@@ -1393,8 +1364,6 @@ spec:
             - mountPath: /config/console.yaml
               name: config
               subPath: console.yaml
-      nodeSelector:
-        compute-tier: performance
       serviceAccountName: console-sa
       volumes:
         - configMap:
@@ -1455,9 +1424,12 @@ spec:
               value: "3001"
             - name: CONFIG_PATH
               value: /local/homepage-service/homepage.yaml
+            - name: HOMEPAGE_ALLOWED_HOSTS
+              value: "${HOMEPAGE_ALLOWED_HOSTS:=*}"
           envFrom:
             - secretRef:
                 name: homepage-secret
+                optional: true
           image: ghcr.io/gethomepage/homepage:v2.7.0
           name: homepage
           ports:
@@ -1483,7 +1455,7 @@ spec:
               readOnly: true
       initContainers:
         - args:
-            - --repo=https://github.com/azylman/aerial.git
+            - --repo=${AERIAL_REPO_URL:=https://github.com/azylman/aerial.git}
             - --ref=main
             - --root=/share/.sync/aerial
             - --link=/share/aerial
@@ -1532,9 +1504,11 @@ spec:
           name: share
         - configMap:
             name: homepage-user-config
+            optional: true
           name: homepage-user-config
         - configMap:
             name: homepage-service-config
+            optional: true
           name: homepage-service-config
 ---
 apiVersion: v1
@@ -1604,7 +1578,7 @@ spec:
               readOnly: true
       initContainers:
         - args:
-            - --repo=https://github.com/azylman/aerial-config.git
+            - --repo=${AERIAL_CONFIG_REPO_URL:=https://github.com/azylman/aerial-config.git}
             - --ref=main
             - --root=/share/.sync/aerial-config
             - --link=/share/aerial-config

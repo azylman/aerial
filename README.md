@@ -409,42 +409,154 @@ Aerial uses an automated, event-driven GitOps continuous deployment pipeline:
 
 ---
 
-## 6. Quickstart Setup
+## 6. Turnkey Single-Node k3s Quickstart
 
-### Prerequisites
-- Kubernetes cluster (k3s on NixOS 26.05 recommended) & Flux CD CLI
-- Google Account for OAuth authentication (recommended to avoid API key rate limits) OR Gemini API Key
-- Discord Bot Token (with Message Content and Server Members intents enabled)
-- GitHub Personal Access Token (for private configuration repository synchronization)
+Aerial is designed to boot out-of-the-box on a single vanilla k3s node with no custom node labels, hardware affinity, or external dependencies.
 
-### Step 1: Create Your Private Configuration Repository
-1. Create a private repository on GitHub (e.g. `your-username/my-aerial-config`).
-2. Copy or fork the template files from [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example) into your private repository.
-3. Customize `config.yaml` and persona rules in `rules/` as desired.
+### Step 1: Install Single-Node k3s & Prepare Storage
+Install vanilla k3s with Traefik disabled (NGINX Gateway Fabric provides ingress routing) and create the hostPath directory for persistent agent data:
 
-### Step 2: Clone Aerial Engine
 ```bash
-git clone https://github.com/azylman/aerial.git
-cd aerial
+# 1. Install single-node k3s without Traefik
+curl -sfL https://get.k3s.io | sh -s - --disable traefik
+
+# 2. Configure kubeconfig access
+mkdir -p ~/.kube
+sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+sudo chown $(id -u):$(id -g) ~/.kube/config
+export KUBECONFIG=~/.kube/config
+
+# 3. Create hostPath directory for eri & agentsview agent memory and session data
+sudo install -d -o 1000 -g 1000 /var/lib/aerial/brain-data
 ```
 
-### Step 3: Configure Infisical Secrets & Kubernetes Secrets
-Secrets and credentials can be managed through Infisical and synced automatically to Kubernetes Secrets, or initialized directly via `kubectl` when cold-booting a cluster:
+### Step 2: Install Cluster Operators
+Aerial relies on standard Kubernetes operators for persistence, secrets, and ingress (Reloader and runner controllers are managed declaratively via Flux CD):
+
 ```bash
-# Create shared secrets namespace and credentials:
+# 1. CloudNativePG (PostgreSQL 18 + pgvector operator)
+kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.28/releases/cnpg-1.28.4.yaml
+
+# 2. External Secrets Operator (Infisical secret synchronization)
+helm repo add external-secrets https://charts.external-secrets.io
+helm repo update
+helm upgrade --install external-secrets external-secrets/external-secrets \
+  --namespace external-secrets --create-namespace
+
+# 3. NGINX Gateway Fabric (Gateway API implementation)
+kubectl kustomize "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v2.4.2" | kubectl apply -f -
+helm upgrade --install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
+  --namespace nginx-gateway --create-namespace
+```
+
+### Step 3: Fork Configuration & Bootstrap Secrets
+1. Fork [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example) to create your private `aerial-config` repository (e.g. `your-username/my-aerial-config`).
+2. Customize `config.yaml` with your Discord administrator ID (`admin_users`) and persona instructions.
+3. Bootstrap cluster secrets. Pre-create the initial Kubernetes secrets so that CloudNativePG and microservices boot without waiting for Infisical sync:
+
+```bash
+# Set your core tokens and generate initial service credentials
+export DISCORD_BOT_TOKEN="your-discord-bot-token"
+export GITHUB_PAT="your-github-pat"
+export POSTGRES_PASSWORD="$(openssl rand -hex 16)"
+export AUTH_SECRET="$(openssl rand -hex 16)"
+export ENCRYPTION_KEY="$(openssl rand -hex 16)"
+
+# 1. CloudNativePG PostgreSQL credentials
+kubectl create secret generic postgres-aerial-role \
+  --type=kubernetes.io/basic-auth \
+  --from-literal=username=aerial \
+  --from-literal=password="$POSTGRES_PASSWORD"
+
+kubectl create secret generic postgres-secret \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
+
+# 2. Git-sync and ingress credentials
+kubectl create secret generic git-sync-secret \
+  --from-literal=GITHUB_PAT="$GITHUB_PAT"
+
+kubectl create secret generic synapse-secret \
+  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  --from-literal=GITHUB_PAT="$GITHUB_PAT"
+
+kubectl create secret generic coven-secret \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  --from-literal=GITHUB_PAT="$GITHUB_PAT"
+
+kubectl create secret generic eri-secret \
+  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  --from-literal=GITHUB_PAT="$GITHUB_PAT" \
+  --from-literal=GEMINI_HARNESS_API_KEY=""
+
+kubectl create secret generic discord-mcp-secret \
+  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
+  --from-literal=DISCORD_TOKEN="$DISCORD_BOT_TOKEN"
+
+# 3. Observability, runner, and MCP service secrets
+kubectl create secret generic openobserve-secret \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  --from-literal=OPENOBSERVE_ROOT_USER_PASSWORD="$POSTGRES_PASSWORD"
+
+kubectl create secret generic fluent-bit-secret \
+  --from-literal=OPENOBSERVE_ROOT_USER_PASSWORD="$POSTGRES_PASSWORD"
+
+kubectl create secret generic victoriametrics-secret \
+  --from-literal=HA_METRICS_TOKEN=""
+
+kubectl create secret generic prospera-secret \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  --from-literal=GEMINI_HARNESS_API_KEY="" \
+  --from-literal=TWILIO_AUTH_TOKEN=""
+
+kubectl create secret generic roborev-runner-secret \
+  --from-literal=GITHUB_PAT="$GITHUB_PAT" \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
+
+# 4. Infisical bootstrap (if using Infisical for secret governance)
+kubectl create secret generic infisical-secret \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  --from-literal=AUTH_SECRET="$AUTH_SECRET" \
+  --from-literal=ENCRYPTION_KEY="$ENCRYPTION_KEY"
+
+kubectl create secret generic infisical-universal-auth \
+  --from-literal=INFISICAL_CLIENT_ID="" \
+  --from-literal=INFISICAL_CLIENT_SECRET=""
+
+kubectl create secret generic infisical-mcp-secret \
+  --from-literal=INFISICAL_CLIENT_ID="" \
+  --from-literal=INFISICAL_CLIENT_SECRET=""
+
 kubectl create secret generic shared-secrets \
-  --from-literal=DISCORD_BOT_TOKEN="your-discord-bot-token" \
-  --from-literal=GITHUB_PAT="your-github-pat" \
-  --from-literal=POSTGRES_PASSWORD="securepassword"
+  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
+  --from-literal=GITHUB_PAT="$GITHUB_PAT" \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
 ```
 
-### Step 4: Deploy Kubernetes Stack via Flux CD / Kustomize
-Core manifests are defined in `k8s/*.yaml` and reconciled by Flux CD:
+### Step 4: Deploy Kubernetes Stack via Flux CD
+Deploy the stack using Flux CD to reconcile `azylman/aerial` (`aerial-core`) and your private configuration repository (`aerial-config`):
+
 ```bash
-# Apply Kustomization manifests directly or let Flux reconcile:
-kubectl apply -k k8s/
+# 1. Install Flux CLI and controllers
+curl -s https://fluxcd.io/install.sh | sudo bash
+flux install
+
+# 2. Configure Git authentication for your private configuration repository
+flux create secret git github-auth \
+  --namespace flux-system \
+  --url=https://github.com/your-username/my-aerial-config.git \
+  --username=git \
+  --password="$GITHUB_PAT"
+
+# 3. Apply your private config repository's Flux manifests from a local clone
+# (In your fork's k8s/ directory, Kustomization/aerial-core sets:
+#    postBuild:
+#      substitute:
+#        AERIAL_CONFIG_REPO_URL: "https://github.com/your-username/my-aerial-config.git")
+git clone https://github.com/your-username/my-aerial-config.git
+kubectl apply -k my-aerial-config/k8s
 ```
-On boot, `eri` mounts `/share/aerial` and `/share/aerial-config` populated continuously by `git-sync` initContainers and sidecars.
 
 ### Step 5: Authenticate via Google OAuth (Recommended)
 By default, `eri` runs `agy` in Google OAuth / subscription mode:
@@ -453,37 +565,74 @@ By default, `eri` runs `agy` in Google OAuth / subscription mode:
    kubectl exec -it deployment/eri -c eri -- agy
    ```
 2. Copy the displayed Google OAuth login URL into your web browser and sign in.
-3. Paste the authorization code back into the terminal prompt and hit Enter.
+3. Paste the authorization code back into the terminal prompt and press Enter.
 4. Press `Ctrl+C` to exit once authenticated. `eri` stores the OAuth session token in `/data` and automatically refreshes access tokens in the background.
 
-### Step 6: Verify Health
+### Step 6: Verify Pod Readiness & Service Health
+Verify all core services are running and passing readiness healthchecks:
+
 ```bash
+# Check pod rollout status
 kubectl get pods -o wide
-kubectl logs -f deployment/eri -c eri
+
+# Check core microservice health endpoints
+kubectl exec deployment/eri -c eri -- curl -sf http://localhost:8080/health
+kubectl exec deployment/haro -- wget -qO- http://localhost:4005/health
+kubectl exec deployment/coven -- wget -qO- http://localhost:4008/health
+kubectl exec deployment/vanadis -- curl -sf http://localhost:4025/health
+kubectl exec deployment/synapse -- curl -sf http://localhost:4020/health
+kubectl exec deployment/console -- wget -qO- http://localhost:8084/health
 ```
+
+Once running, access the web dashboards directly via port 80 on your node's IP or hostname:
+- Root Landing Portal: `http://<node-ip>/`
+- Operator Console: `http://<node-ip>/console/`
+- System Telemetry (Grafana): `http://<node-ip>/grafana/`
+- SQL Log Analytics (OpenObserve): `http://<node-ip>/openobserve/`
+- Agent Transcripts (AgentsView): `http://<node-ip>/agentsview/`
+- Living Documentation (Docsify): `http://<node-ip>/docs/`
 
 ---
 
-## 7. Operational Commands & Endpoints
+## 7. Multi-Node Clustering & High-Availability Overrides
+
+While `azylman/aerial`'s base `k8s/*.yaml` manifests are completely single-node compatible and host-agnostic, multi-node homelab clusters layer site-specific overrides declaratively in `azylman/aerial-config/k8s/cluster-overrides.yaml` using Flux Kustomization `spec.patches`.
+
+### How Cluster Overrides Work
+1. **Separation of Base & Site Overrides**: Base manifests in `aerial/k8s/` define minimal, portable single-node defaults (single-instance PostgreSQL, no `nodeSelector` constraints, HTTP-only Gateway routes).
+2. **Declarative Patching via Flux**: In your private `aerial-config` repository, `Kustomization/aerial-core` applies patches targeting specific resources to layer multi-node and high-availability features without forking base manifests:
+   - **PostgreSQL High Availability**: Scaling `Cluster/postgres` to `spec.instances: 2` with dedicated `affinity` and anti-affinity rules across storage nodes.
+   - **Hardware & Node Pinning**: Attaching `nodeSelector` rules (e.g. scheduling GPU workloads like `senses` and `pjev` on GPU nodes, database storage on NVMe nodes, or kiosk displays on touch kiosks).
+   - **Custom TLS & Ingress**: Patching `Gateway/lan-gateway` with Let's Encrypt `spec.listeners` for HTTPS and private domain certificates, along with custom domain `HTTPRoute` rules.
+   - **Storage Mounts**: Adding SMB or NFS CSI volumes (e.g. `nas-share`) for persistent shared storage across worker nodes.
+   - **Resource Adoption & Zero-Downtime Handoff**: Moved cluster resources annotate `metadata.annotations["kustomize.toolkit.fluxcd.io/prune"]: "disabled"` to allow safe ownership transitions between GitOps Kustomizations.
+
+---
+
+## 8. Operational Commands & Endpoints
 
 | Action / Service | URL / Command |
 | :--- | :--- |
-| Root Landing Portal (`homepage`) | `http://homepage.aerial/` |
-| Operator Console (`console`) | `http://console.aerial/` |
-| Documentation (`docs`) | `http://docs.aerial/` |
-| Agent Transcripts (`agentsview`) | `http://agentsview.aerial/` |
-| System Telemetry (`grafana`) | `http://grafana.aerial/` |
+| Root Landing Portal (`homepage`) | `http://<node-ip>/` or `http://homepage.aerial/` |
+| Operator Console (`console`) | `http://<node-ip>/console/` or `http://console.aerial/` |
+| Documentation (`docs`) | `http://<node-ip>/docs/` or `http://docs.aerial/` |
+| Agent Transcripts (`agentsview`) | `http://<node-ip>/agentsview/` or `http://agentsview.aerial/` |
+| System Telemetry (`grafana`) | `http://<node-ip>/grafana/` or `http://grafana.aerial/` |
+| Structured Log Analytics (`openobserve`) | `http://<node-ip>/openobserve/` or `http://openobserve.aerial/` |
 | `eri` Prometheus Metrics | `http://eri.aerial:8080/metrics` |
 | `eri` Healthcheck | `http://eri.aerial:8080/health` |
 | `synapse` Healthcheck | `http://synapse.aerial:4020/health` |
-| List all cluster pods | `kubectl get pods` |
+| `haro` Healthcheck | `http://haro.aerial:4005/health` |
+| `coven` Healthcheck | `http://coven.aerial:4008/health` |
+| `vanadis` Healthcheck | `http://vanadis.aerial:4025/health` |
+| List all cluster pods | `kubectl get pods -o wide` |
 | View pod logs | `kubectl logs -f <pod-name>` |
 | Reconcile Flux CD Kustomization | `flux reconcile kustomization aerial-core` |
 | Check Flux CD status | `flux get kustomizations` |
 
 ---
 
-## 8. Security & Best Practices
+## 9. Security & Best Practices
 
 - **Multi-User Security & Admin Privilege Enforcement**: In shared or multi-user channels, messages from users are automatically checked against `admin_users` in `config.yaml`. Only authorized admins (`is_admin: true`) can modify system instructions, edit system configuration (`config.yaml`), manage Kubernetes workloads, or alter cron schedules.
 - **Fail-Closed Default-Deny Server Containment**: Set `channels.default.mode: "ignore"` to contain Aerial exclusively to allowlisted channels on shared Discord servers.
