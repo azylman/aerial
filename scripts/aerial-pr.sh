@@ -425,18 +425,14 @@ PUSH_UPDATED_EXISTING=0
 push_scratch_branch() {
     local branch="$1"
     PUSH_UPDATED_EXISTING=0
-    local remote_sha=""
     if git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null 2>&1; then
-        remote_sha=$(git rev-parse --verify -q "refs/remotes/origin/${branch}" 2>/dev/null || echo "")
-        if [ -n "$remote_sha" ]; then
-            PUSH_UPDATED_EXISTING=1
-        fi
-    else
-        git update-ref -d "refs/remotes/origin/${branch}" 2>/dev/null || true
+        PUSH_UPDATED_EXISTING=1
     fi
     if git push -u origin "$branch" >/dev/null 2>&1; then
         return 0
     fi
+    local remote_sha
+    remote_sha=$(git rev-parse --verify -q "refs/remotes/origin/${branch}" 2>/dev/null || echo "")
     if { [ -n "$remote_sha" ] && git push --force-with-lease="refs/heads/${branch}:${remote_sha}" -u origin "$branch" >/dev/null 2>&1; } || \
        git push --force-with-lease -u origin "$branch" >/dev/null 2>&1; then
         PUSH_UPDATED_EXISTING=1
@@ -472,9 +468,6 @@ format_aerial_pr_trailer() {
 rebase_staged_changes() {
     local target_branch="${1:-$DEFAULT_BRANCH}"
     local msg="${2:-chore: temporary rebase commit}"
-    if [ -z "${msg//[[:space:]]/}" ]; then
-        msg="chore: temporary rebase commit"
-    fi
     if ! git fetch origin "+refs/heads/${target_branch}:refs/remotes/origin/${target_branch}" >/dev/null 2>&1; then
         echo "⚠️ [aerial-pr] Warning: Could not fetch origin/${target_branch}; proceeding with current base." >&2
         return 0
@@ -487,211 +480,31 @@ rebase_staged_changes() {
     fi
     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
     if [ -n "$current_branch" ] && [ "$current_branch" != "$target_branch" ] && [ "$current_branch" != "HEAD" ]; then
-        if git fetch origin "+refs/heads/${current_branch}:refs/remotes/origin/${current_branch}" >/dev/null 2>&1; then
-            remote_branch_sha=$(git rev-parse --verify -q "refs/remotes/origin/${current_branch}" 2>/dev/null || echo "")
-        else
-            git update-ref -d "refs/remotes/origin/${current_branch}" 2>/dev/null || true
-        fi
+        git fetch origin "+refs/heads/${current_branch}:refs/remotes/origin/${current_branch}" >/dev/null 2>&1 || true
+        remote_branch_sha=$(git rev-parse --verify -q "refs/remotes/origin/${current_branch}" 2>/dev/null || echo "")
     fi
     if [ -n "$remote_branch_sha" ]; then
-        if git merge-base --is-ancestor "$remote_branch_sha" "$head_sha" 2>/dev/null; then
-            local latest_merge=""
-            latest_merge=$(git rev-list --merges -n 1 "${remote_branch_sha}..${head_sha}" 2>/dev/null || echo "")
-            local local_base="${latest_merge:-$remote_branch_sha}"
-            if [ "$head_sha" != "$local_base" ]; then
-                git reset --soft "$local_base" >/dev/null 2>&1
-            fi
-            if git merge-base --is-ancestor "$upstream_sha" "$local_base" 2>/dev/null; then
-                return 0
-            fi
-
-            local had_staged=0 temp_sha="" pre_commit_sha=""
-            if ! git diff --cached --quiet; then
-                had_staged=1
-                pre_commit_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-                if ! git commit -q -m "$msg" >/dev/null 2>&1; then
-                    echo "ERROR: Failed to create temporary commit for staged changes. Aborting submit." >&2
-                    if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                        echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                        SCRATCH_DIR_CLEANUP=""
-                    fi
-                    return 1
-                fi
-                temp_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-                if [ -z "$temp_sha" ] || [ "$temp_sha" = "$pre_commit_sha" ]; then
-                    echo "ERROR: Temporary commit did not advance HEAD. Aborting submit." >&2
-                    if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                        echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                        SCRATCH_DIR_CLEANUP=""
-                    fi
-                    return 1
-                fi
-            fi
-
-            if ! git reset --hard "$local_base" >/dev/null 2>&1; then
-                echo "ERROR: Failed to reset working tree to base ${local_base:0:7}. Aborting submit." >&2
-                if [ "$had_staged" -eq 1 ] && [ -n "$temp_sha" ]; then
-                    git reset --soft "$temp_sha" >/dev/null 2>&1 || true
-                fi
-                if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                    echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                    SCRATCH_DIR_CLEANUP=""
-                fi
-                return 1
-            fi
-
-            local need_upstream_merge=0
-            if ! git merge-base --is-ancestor "$upstream_sha" "$local_base" 2>/dev/null; then
-                need_upstream_merge=1
-            fi
-
-            if { [ "$need_upstream_merge" -eq 1 ] && ! git merge --no-edit -q "origin/${target_branch}" >/dev/null 2>&1; } || \
-               { [ "$had_staged" -eq 1 ] && ! git cherry-pick -n "$temp_sha" >/dev/null 2>&1; }; then
-                git cherry-pick --abort >/dev/null 2>&1 || true
-                git merge --abort >/dev/null 2>&1 || true
-                if [ "$had_staged" -eq 1 ] && [ -n "$temp_sha" ]; then
-                    git reset --hard "$temp_sha" >/dev/null 2>&1 || true
-                    git reset --soft "$local_base" >/dev/null 2>&1 || true
-                else
-                    git reset --hard "$local_base" >/dev/null 2>&1 || true
-                fi
-                echo "ERROR: Failed to merge origin/${target_branch} into ${current_branch} due to merge conflicts. Aborting submit." >&2
-                if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                    echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                    SCRATCH_DIR_CLEANUP=""
-                fi
-                return 1
-            fi
-
-            if [ "$need_upstream_merge" -eq 1 ]; then
-                echo "🔄 [aerial-pr] Merged latest origin/${target_branch} (${upstream_sha:0:7}) into ${current_branch}." >&2
-            else
-                echo "🔄 [aerial-pr] Rebased staged changes onto latest origin/${current_branch} (${remote_branch_sha:0:7})." >&2
-            fi
-            return 0
-        else
-            local branch_base="" commit
-            for commit in $(git rev-list --first-parent "$head_sha" 2>/dev/null); do
-                if git merge-base --is-ancestor "$commit" "$remote_branch_sha" 2>/dev/null; then
-                    branch_base="$commit"
-                    break
-                fi
-            done
-            if [ -z "$branch_base" ]; then
-                echo "ERROR: Branch ${current_branch} has diverged with no common ancestor with origin/${current_branch}. Aborting submit." >&2
-                if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                    echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                    SCRATCH_DIR_CLEANUP=""
-                fi
-                return 1
-            fi
-
-            local start_head="$head_sha" had_staged=0 temp_sha="" pre_commit_sha="" tip="$head_sha"
-            if ! git diff --cached --quiet; then
-                had_staged=1
-                pre_commit_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-                if ! git commit -q -m "$msg" >/dev/null 2>&1; then
-                    echo "ERROR: Failed to create temporary commit for staged changes. Aborting submit." >&2
-                    if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                        echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                        SCRATCH_DIR_CLEANUP=""
-                    fi
-                    return 1
-                fi
-                temp_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-                if [ -z "$temp_sha" ] || [ "$temp_sha" = "$pre_commit_sha" ]; then
-                    echo "ERROR: Temporary commit did not advance HEAD. Aborting submit." >&2
-                    if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                        echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                        SCRATCH_DIR_CLEANUP=""
-                    fi
-                    return 1
-                fi
-                tip="$temp_sha"
-            fi
-
-            local commits_to_apply=""
-            commits_to_apply=$(git rev-list --first-parent --no-merges --reverse "${branch_base}..${tip}" 2>/dev/null || true)
-
-            if ! git reset --hard "$remote_branch_sha" >/dev/null 2>&1; then
-                echo "ERROR: Failed to reset working tree to base ${remote_branch_sha:0:7}. Aborting submit." >&2
-                if [ "$had_staged" -eq 1 ] && [ -n "$temp_sha" ]; then
-                    git reset --hard "$temp_sha" >/dev/null 2>&1 || true
-                    git reset --soft "$start_head" >/dev/null 2>&1 || true
-                fi
-                if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                    echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                    SCRATCH_DIR_CLEANUP=""
-                fi
-                return 1
-            fi
-
-            local need_upstream_merge=0
-            if ! git merge-base --is-ancestor "$upstream_sha" "$remote_branch_sha" 2>/dev/null; then
-                need_upstream_merge=1
-            fi
-
-            local apply_failed=0
-            if [ "$need_upstream_merge" -eq 1 ] && ! git merge --no-edit -q "origin/${target_branch}" >/dev/null 2>&1; then
-                apply_failed=1
-            fi
-
-            if [ "$apply_failed" -eq 0 ]; then
-                for c in $commits_to_apply; do
-                    if ! git cherry-pick -n "$c" >/dev/null 2>&1; then
-                        apply_failed=1
-                        break
-                    fi
-                done
-            fi
-
-            if [ "$apply_failed" -ne 0 ]; then
-                git cherry-pick --abort >/dev/null 2>&1 || true
-                git merge --abort >/dev/null 2>&1 || true
-                if [ "$had_staged" -eq 1 ] && [ -n "$temp_sha" ]; then
-                    git reset --hard "$temp_sha" >/dev/null 2>&1 || true
-                    git reset --soft "$start_head" >/dev/null 2>&1 || true
-                else
-                    git reset --hard "$start_head" >/dev/null 2>&1 || true
-                fi
-                echo "ERROR: Failed to rebase local commits onto origin/${current_branch} due to merge conflicts. Aborting submit." >&2
-                if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                    echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                    SCRATCH_DIR_CLEANUP=""
-                fi
-                return 1
-            fi
-
-            if [ "$need_upstream_merge" -eq 1 ]; then
-                echo "🔄 [aerial-pr] Merged latest origin/${target_branch} (${upstream_sha:0:7}) into ${current_branch}." >&2
-            else
-                echo "🔄 [aerial-pr] Rebased staged changes onto latest origin/${current_branch} (${remote_branch_sha:0:7})." >&2
-            fi
+        [ "$head_sha" != "$remote_branch_sha" ] && git reset --soft "$remote_branch_sha" >/dev/null 2>&1
+        git merge-base --is-ancestor "$upstream_sha" "$remote_branch_sha" 2>/dev/null && return 0
+        local temp_sha=""
+        if ! git diff --cached --quiet; then
+            git commit -q -m "$msg" >/dev/null 2>&1 && temp_sha=$(git rev-parse HEAD)
+            git reset --hard "$remote_branch_sha" >/dev/null 2>&1
+        fi
+        if git merge --no-edit -q "origin/${target_branch}" >/dev/null 2>&1 && \
+           { [ -z "$temp_sha" ] || git cherry-pick -n "$temp_sha" >/dev/null 2>&1; }; then
+            echo "🔄 [aerial-pr] Merged latest origin/${target_branch} (${upstream_sha:0:7}) into ${current_branch}." >&2
             return 0
         fi
+        git cherry-pick --abort >/dev/null 2>&1 || true
+        git merge --abort >/dev/null 2>&1 || true
+        [ -n "$temp_sha" ] && git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$remote_branch_sha" >/dev/null 2>&1
+        return 1
     fi
-    local had_staged=0 pre_commit_sha=""
+    local had_staged=0
     if ! git diff --cached --quiet; then
         had_staged=1
-        pre_commit_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-        if ! git commit -q -m "$msg" >/dev/null 2>&1; then
-            echo "ERROR: Failed to create temporary commit for staged changes. Aborting submit." >&2
-            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                SCRATCH_DIR_CLEANUP=""
-            fi
-            return 1
-        fi
-        local new_head_sha
-        new_head_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-        if [ -z "$new_head_sha" ] || [ "$new_head_sha" = "$pre_commit_sha" ]; then
-            echo "ERROR: Temporary commit did not advance HEAD. Aborting submit." >&2
-            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                SCRATCH_DIR_CLEANUP=""
-            fi
-            return 1
-        fi
+        git commit -q -m "$msg" >/dev/null 2>&1
     fi
     if ! git rebase "origin/${target_branch}" >/dev/null 2>&1; then
         git rebase --abort >/dev/null 2>&1 || true
@@ -1004,26 +817,9 @@ submit_scratch() {
     if ! rebase_staged_changes "$DEFAULT_BRANCH" "$commit_msg"; then
         exit 1
     fi
-
-    local branch
-    branch=$(git rev-parse --abbrev-ref HEAD)
-    local remote_branch_ref="refs/remotes/origin/${branch}"
-    local remote_branch_sha=""
-    remote_branch_sha=$(git rev-parse --verify -q "$remote_branch_ref" 2>/dev/null || echo "")
-    local current_head_sha
-    current_head_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-    local head_ahead_of_remote=0
-    if [ -n "$remote_branch_sha" ]; then
-        if [ "$current_head_sha" != "$remote_branch_sha" ] && git merge-base --is-ancestor "$remote_branch_sha" "$current_head_sha" 2>/dev/null; then
-            head_ahead_of_remote=1
-        fi
-    fi
-
     if git diff --cached --quiet; then
-        if [ "$head_ahead_of_remote" -eq 0 ]; then
-            echo "{\"status\":\"no_changes\",\"message\":\"No modifications remaining after rebasing onto origin/${DEFAULT_BRANCH}.\"}"
-            exit 0
-        fi
+        echo "{\"status\":\"no_changes\",\"message\":\"No modifications remaining after rebasing onto origin/${DEFAULT_BRANCH}.\"}"
+        exit 0
     fi
 
     # 4. Pre-flight verification (universal contract: run repo-defined staged verify suite on combined tree)
@@ -1032,10 +828,10 @@ submit_scratch() {
     fi
 
     # 5. Commit (preserves complete multi-line commit message in git history)
-    if ! git diff --cached --quiet; then
-        git commit -m "$commit_msg" >/dev/null
-    fi
+    git commit -m "$commit_msg" >/dev/null
 
+    local branch
+    branch=$(git rev-parse --abbrev-ref HEAD)
     local commit_sha
     commit_sha=$(git rev-parse HEAD)
 
@@ -1107,7 +903,6 @@ submit_scratch() {
                 "${del_auth_args[@]}" \
                 -H "Accept: application/vnd.github.v3+json" \
                 "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
-            git update-ref -d "refs/remotes/origin/${branch}" 2>/dev/null || true
         fi
         # Prevent trap from nuking the local workspace so code can be recovered
         if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
