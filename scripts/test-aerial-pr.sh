@@ -1079,10 +1079,30 @@ if ! grep -q "comment --commenter" "$CALL_LOG" && grep -q "close 43" "$CALL_LOG"
    echo "$out_head" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)"; then
   echo 'head_shortcircuit:ok'
 fi
+
+AGY_WRAPPER="$TEST_ROOT/agy-wrapper.sh"
+MOCK_AGY_REAL="$TEST_ROOT/agy.real"
+AGY_LOG="$TEST_ROOT/agy.log"
+awk '/^  cat > \/usr\/local\/bin\/agy <<'\''EOF'\''$/ { flag=1; next } flag && /^EOF$/ { flag=0; exit } flag { print }' "$ENTRYPOINT_FILE" \
+  | sed "s|/usr/local/bin/agy.real|$MOCK_AGY_REAL|g" > "$AGY_WRAPPER"
+printf '#!/usr/bin/env bash\necho "$*" >> "%s"\n' "$AGY_LOG" > "$MOCK_AGY_REAL"
+chmod +x "$AGY_WRAPPER" "$MOCK_AGY_REAL"
+
+"$AGY_WRAPPER" --output-format stream-json --print-timeout 30m --add-dir /repo --prompt "--version in prompt"
+"$AGY_WRAPPER" --version
+"$AGY_WRAPPER" models
+"$AGY_WRAPPER" --model gemini-4-argon-medium --print "explicit"
+if grep -q "^--model gemini-4-argon-low --output-format stream-json --print-timeout 30m --add-dir /repo --prompt --version in prompt$" "$AGY_LOG" &&
+   grep -q "^--version$" "$AGY_LOG" &&
+   grep -q "^models$" "$AGY_LOG" &&
+   grep -q "^--model gemini-4-argon-medium --print explicit$" "$AGY_LOG"; then
+  echo 'agy_model_pin:ok'
+fi
 CASE17_EOF
 )
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper passes ROBOREV_SYNC_BRANCH and backfills prior roborev-override rebuttals before review --wait"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'head_shortcircuit:ok' && echo true || echo false)" "github-runner roborev wrapper skips duplicate comment and short-circuits Review Passed when override matches current HEAD"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'agy_model_pin:ok' && echo true || echo false)" "github-runner agy wrapper pins --model gemini-4-argon-low on headless invocations while preserving --version, subcommands, and explicit --model"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
