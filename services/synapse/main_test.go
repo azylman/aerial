@@ -616,6 +616,8 @@ type mockOutboundDispatcher struct {
 	kustomizationsByImage   map[string][]fluxKustomizationRef
 	workloads               []workloadRollout
 	workloadsErr            error
+	configMaps              []configMapChange
+	configMapsErr           error
 }
 
 func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {

@@ -732,6 +732,7 @@ type OutboundDispatcher interface {
 	PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (workloadName string, err error)
 	ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef, requestedAt string) error
 	ListKustomizationWorkloads(ctx context.Context, ref fluxKustomizationRef) ([]workloadRollout, error)
+	ListKustomizationConfigMaps(ctx context.Context, ref fluxKustomizationRef) ([]configMapChange, error)
 	ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error)
 	DispatchPrompt(ctx context.Context, req PromptRequest) error
 	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
@@ -1063,9 +1064,27 @@ var rolloutWorkloadKinds = []struct{ Kind, Path string }{
 // fluxManagedSelector selects every object applied by any Flux Kustomization.
 const fluxManagedSelector = fluxKustomizationNameLabel
 
+// kustomizationSelector selects every object applied by ref.
+func kustomizationSelector(ref fluxKustomizationRef) url.Values {
+	return url.Values{"labelSelector": {fluxKustomizationNameLabel + "=" + ref.Name + "," + fluxKustomizationNamespaceLabel + "=" + ref.Namespace}}
+}
+
+// ListKustomizationConfigMaps lists when each ConfigMap applied by ref last changed.
+func (d *DefaultOutboundDispatcher) ListKustomizationConfigMaps(ctx context.Context, ref fluxKustomizationRef) ([]configMapChange, error) {
+	body, err := d.kubeJSON(ctx, http.MethodGet, "/api/v1/configmaps?"+kustomizationSelector(ref).Encode(), "", nil)
+	if err != nil {
+		return nil, fmt.Errorf("list %s configmaps: %w", ref.Name, err)
+	}
+	changes, err := decodeConfigMapChanges(body)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s configmaps: %w", ref.Name, err)
+	}
+	return changes, nil
+}
+
 // ListKustomizationWorkloads lists the Deployments, StatefulSets and DaemonSets applied by ref.
 func (d *DefaultOutboundDispatcher) ListKustomizationWorkloads(ctx context.Context, ref fluxKustomizationRef) ([]workloadRollout, error) {
-	query := url.Values{"labelSelector": {fluxKustomizationNameLabel + "=" + ref.Name + "," + fluxKustomizationNamespaceLabel + "=" + ref.Namespace}}
+	query := kustomizationSelector(ref)
 	var workloads []workloadRollout
 	for _, k := range rolloutWorkloadKinds {
 		body, err := d.kubeJSON(ctx, http.MethodGet, k.Path+"?"+query.Encode(), "", nil)

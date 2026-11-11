@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -204,6 +206,10 @@ func (m *mockOutboundDispatcher) ListKustomizationWorkloads(ctx context.Context,
 	return m.workloads, m.workloadsErr
 }
 
+func (m *mockOutboundDispatcher) ListKustomizationConfigMaps(ctx context.Context, ref fluxKustomizationRef) ([]configMapChange, error) {
+	return m.configMaps, m.configMapsErr
+}
+
 // rolloutOutcome is the observable effect of a watcher apply call on registry and dispatcher fakes.
 type rolloutOutcome struct {
 	marks       []string
@@ -246,24 +252,48 @@ func observeRollout(t *testing.T, reg *mockPRRegistry, disp *mockOutboundDispatc
 	}
 }
 
+const (
+	sha42Commit  = "GET /repos/azylman/aerial/git/commits/sha-42"
+	sha42Compare = "GET /repos/azylman/aerial/compare/sha-42...sha-50"
+)
+
+// newRolloutRouter builds a router whose GitHub API serves the trackedPR merge commits (all merged at
+// 10:00:00 UTC on the fixture day), overlaid with overrides.
+func newRolloutRouter(t *testing.T, reg PRRegistryUpdater, disp OutboundDispatcher, overrides map[string]kubeRoute) (*kubeFixture, *RouterServer) {
+	t.Helper()
+	routes := map[string]kubeRoute{
+		"GET /repos/azylman/aerial/git/commits/sha-41": {body: `{"sha":"sha-41","committer":{"date":"2026-11-08T10:00:00Z"}}`},
+		sha42Commit: {body: `{"sha":"sha-42","committer":{"date":"2026-11-08T10:00:00Z"}}`},
+	}
+	maps.Copy(routes, overrides)
+	fixture, ts := newKubeFixture(t, routes)
+	return fixture, newTestRouter(Config{GitHubAPIURL: ts.URL}, ts.Client(), reg, disp)
+}
+
 func TestApplyKustomizationStatus(t *testing.T) {
 	t.Parallel()
 	ready := readyCond("True", "ReconciliationSucceeded", "")
 	twoTargets := map[string]string{"aerial-core": reqT1, "marida-core": reqT1}
 
 	tests := []struct {
-		name         string
-		prs          []DeployingPR
-		listErr      error
-		markRes      bool
-		markErr      error
-		dispatchErr  error
-		patchErr     error
-		workloads    []workloadRollout
-		workloadsErr error
-		obs          kustomizationObservation
-		want         rolloutOutcome
-		wantErr      bool
+		name          string
+		prs           []DeployingPR
+		listErr       error
+		markRes       bool
+		markErr       error
+		dispatchErr   error
+		patchErr      error
+		workloads     []workloadRollout
+		workloadsErr  error
+		configMaps    []configMapChange
+		configMapsErr error
+		sourceRepo    string
+		sourceErr     error
+		github        map[string]kubeRoute
+		revision      string
+		obs           kustomizationObservation
+		want          rolloutOutcome
+		wantErr       bool
 	}{
 		{name: "two-target PR stays deploying after the first kustomization", prs: []DeployingPR{trackedPR(42, twoTargets)}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}}},
 		{name: "two-target PR dispatches exactly one wake on the second kustomization", prs: []DeployingPR{trackedPR(42, twoTargets, "aerial-core")}, markRes: true, obs: kobs("marida-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"marida-core"}, prompts: 1, promptSub: "deployment completed for job marida-core on azylman/aerial (PR #42, commit: sha-42)"}},
@@ -285,14 +315,31 @@ func TestApplyKustomizationStatus(t *testing.T) {
 		{name: "unhealthy workload on another image does not block the deploy", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, markRes: true, workloads: []workloadRollout{deployRollout("haro", "ghcr.io/azylman/aerial-haro:sha-7", 3, 3, 1, 0, 0, 2, true)}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}, prompts: 1}},
 		{name: "each PR is gated on its own merge-SHA workloads", prs: []DeployingPR{trackedPR(41, map[string]string{"aerial-core": reqT1}), trackedPR(42, map[string]string{"aerial-core": reqT1})}, markRes: true, workloads: []workloadRollout{deployRollout("synapse", sha42Image, 3, 3, 1, 1, 0, 2, false)}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}, prompts: 1, promptSub: "PR #41"}},
 		{name: "workload list failure is returned and leaves every PR deploying", prs: []DeployingPR{trackedPR(41, map[string]string{"aerial-core": reqT1}), trackedPR(42, map[string]string{"aerial-core": reqT1})}, workloadsErr: errors.New("forbidden"), obs: kobs("aerial-core", reqT1, reqT1, false, ready), wantErr: true},
+		{name: "manifest-only change waits for its rollout", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, workloads: []workloadRollout{withChange(deployRollout("haro", "ghcr.io/azylman/aerial-haro:sha-7", 3, 3, 1, 1, 0, 2, false), rolloutClock(10, 1, 0), nil)}, obs: kobs("aerial-core", reqT1, reqT1, false, ready)},
+		{name: "manifest-only change deploys once rolled out", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, markRes: true, workloads: []workloadRollout{withChange(deployRollout("haro", "ghcr.io/azylman/aerial-haro:sha-7", 3, 3, 1, 1, 1, 1, false), rolloutClock(10, 1, 0), nil)}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}, prompts: 1}},
+		{name: "configmap change waits for the reloader restart", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, workloads: []workloadRollout{withChange(deployRollout("haro", "ghcr.io/azylman/aerial-haro:sha-7", 3, 3, 1, 1, 1, 1, false), rolloutClock(9, 0, 0), map[string]string{"reloader.stakater.com/auto": "true"}, "haro-config")}, configMaps: []configMapChange{{Namespace: "default", Name: "haro-config", ChangedAt: time.Now().Add(-time.Minute)}}, obs: kobs("aerial-core", reqT1, reqT1, false, ready)},
+		{name: "applied revision behind the merge commit waits", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, sourceRepo: "azylman/aerial", revision: "main@sha1:sha-50", github: map[string]kubeRoute{sha42Compare: {body: `{"status":"behind"}`}}, obs: kobs("aerial-core", reqT1, reqT1, false, ready)},
+		{name: "applied revision diverged from the merge commit waits", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, sourceRepo: "azylman/aerial", revision: "main@sha1:sha-50", github: map[string]kubeRoute{sha42Compare: {body: `{"status":"diverged"}`}}, obs: kobs("aerial-core", reqT1, reqT1, false, ready)},
+		{name: "unapplied revision waits", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, sourceRepo: "azylman/aerial", obs: kobs("aerial-core", reqT1, reqT1, false, ready)},
+		{name: "applied revision ahead of the merge commit deploys", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, markRes: true, sourceRepo: "azylman/aerial", revision: "main@sha1:sha-50", github: map[string]kubeRoute{sha42Compare: {body: `{"status":"ahead"}`}}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}, prompts: 1}},
+		{name: "applied revision identical to the merge commit deploys", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, markRes: true, sourceRepo: "azylman/aerial", revision: "main@sha1:sha-50", github: map[string]kubeRoute{sha42Compare: {body: `{"status":"identical"}`}}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}, prompts: 1}},
+		{name: "applied merge commit deploys without a compare", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, markRes: true, sourceRepo: "Azylman/Aerial", revision: "main@sha1:sha-42", obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}, prompts: 1}},
+		{name: "kustomization sourced from another repo skips the revision check", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, markRes: true, sourceRepo: "azylman/aerial-config", revision: "main@sha1:cfg-9", obs: kobs("aerial-core", reqT1, reqT1, false, ready), want: rolloutOutcome{marks: []string{"aerial-core"}, prompts: 1}},
+		{name: "PR without a merge commit waits", prs: []DeployingPR{{Repo: "azylman/aerial", PRNumber: 45, Metadata: map[string]any{kustomizationRequestsKey: map[string]any{"aerial-core": map[string]any{"namespace": "flux-system", "requested_at": reqT1}}}}}, obs: kobs("aerial-core", reqT1, reqT1, false, ready)},
+		{name: "compare failure is returned so the watcher re-lists", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, sourceRepo: "azylman/aerial", revision: "main@sha1:sha-50", obs: kobs("aerial-core", reqT1, reqT1, false, ready), wantErr: true},
+		{name: "merge commit lookup failure is returned so the watcher re-lists", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, github: map[string]kubeRoute{sha42Commit: {status: http.StatusBadGateway, body: `{}`}}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), wantErr: true},
+		{name: "merge commit without a committer date is returned", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, github: map[string]kubeRoute{sha42Commit: {body: `{"sha":"sha-42"}`}}, obs: kobs("aerial-core", reqT1, reqT1, false, ready), wantErr: true},
+		{name: "configmap list failure is returned and leaves the PR deploying", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, configMapsErr: errors.New("forbidden"), obs: kobs("aerial-core", reqT1, reqT1, false, ready), wantErr: true},
+		{name: "source resolution failure is returned and leaves the PR deploying", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, sourceErr: errors.New("forbidden"), obs: kobs("aerial-core", reqT1, reqT1, false, ready), wantErr: true},
 		{name: "re-patch failure is returned so the watcher re-lists", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1})}, patchErr: errors.New("forbidden"), obs: kobs("aerial-core", reqT0, reqT0, false, ready), want: rolloutOutcome{repatchAts: []string{reqT1}}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			reg := &mockPRRegistry{listDeployingPRs: tc.prs, listDeployingErr: tc.listErr, markKustomizationsRes: tc.markRes, markKustomizationsErr: tc.markErr, deployFailedUpdated: true}
-			disp := &mockOutboundDispatcher{dispatchErr: tc.dispatchErr, reconcileErrs: map[string]error{"aerial-core": tc.patchErr}, workloads: tc.workloads, workloadsErr: tc.workloadsErr}
-			srv := newTestRouter(Config{}, nil, reg, disp)
+			disp := &mockOutboundDispatcher{dispatchErr: tc.dispatchErr, reconcileErrs: map[string]error{"aerial-core": tc.patchErr}, workloads: tc.workloads, workloadsErr: tc.workloadsErr, configMaps: tc.configMaps, configMapsErr: tc.configMapsErr, sourceRepo: tc.sourceRepo, sourceRepoErr: tc.sourceErr}
+			_, srv := newRolloutRouter(t, reg, disp, tc.github)
+			tc.obs.LastAppliedRevision = tc.revision
 			if err := srv.applyKustomizationStatus(context.Background(), tc.obs); (err != nil) != tc.wantErr {
 				t.Fatalf("applyKustomizationStatus() err = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -327,7 +374,7 @@ func TestApplyKustomizationList(t *testing.T) {
 			t.Parallel()
 			reg := &mockPRRegistry{listDeployingPRs: tc.prs, listDeployingErr: tc.listErr, deployFailedUpdated: true}
 			disp := &mockOutboundDispatcher{dispatchErr: tc.dispatchErr}
-			srv := newTestRouter(Config{}, nil, reg, disp)
+			_, srv := newRolloutRouter(t, reg, disp, nil)
 			if err := srv.applyKustomizationList(context.Background(), "flux-system", tc.observations); (err != nil) != tc.wantErr {
 				t.Fatalf("applyKustomizationList() err = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -800,6 +847,196 @@ func TestHandleFluxWebhookSourceRepo(t *testing.T) {
 			}
 			if got := river.insertedDeployJobs[0].Event.Repo; got != tc.wantRepo {
 				t.Errorf("repo = %q, want %q", got, tc.wantRepo)
+			}
+		})
+	}
+}
+
+func TestDecodeKustomizationList(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		body    string
+		want    []kustomizationObservation
+		wantRV  string
+		wantErr bool
+	}{
+		{
+			name:   "source ref defaults to the kustomization namespace and the applied revision is kept",
+			body:   `{"metadata":{"resourceVersion":"12"},"items":[{"metadata":{"name":"aerial-core","annotations":{"reconcile.fluxcd.io/requestedAt":"t1"}},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}},"status":{"lastHandledReconcileAt":"t1","lastAppliedRevision":"main@sha1:abc","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"stack","namespace":"apps"},"spec":{"suspend":true,"sourceRef":{"kind":"GitRepository","name":"stack","namespace":"sources"}}}]}`,
+			wantRV: "12",
+			want: []kustomizationObservation{
+				{Ref: fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}, RequestedAt: "t1", LastHandledReconcileAt: "t1", LastAppliedRevision: "main@sha1:abc", SourceRef: fluxSourceRef{Kind: "GitRepository", Name: "aerial", Namespace: "flux-system"}, Conditions: []fluxCondition{{Type: "Ready", Status: "True"}}},
+				{Ref: fluxKustomizationRef{Namespace: "apps", Name: "stack"}, Suspended: true, SourceRef: fluxSourceRef{Kind: "GitRepository", Name: "stack", Namespace: "sources"}},
+			},
+		},
+		{name: "malformed list", body: `{"items":`, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, rv, err := decodeKustomizationList([]byte(tc.body), "flux-system")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("decodeKustomizationList() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if rv != tc.wantRV || !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("decodeKustomizationList() = (%+v, %q), want (%+v, %q)", got, rv, tc.want, tc.wantRV)
+			}
+		})
+	}
+}
+
+func TestRevisionIncludes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		revision     string
+		routes       map[string]kubeRoute
+		want         bool
+		wantErr      bool
+		wantRequests int
+	}{
+		{name: "empty revision includes nothing", wantRequests: 0},
+		{name: "the commit itself", revision: "sha-42", want: true},
+		{name: "ahead verdict is cached", revision: "sha-50", routes: map[string]kubeRoute{sha42Compare: {body: `{"status":"ahead"}`}}, want: true, wantRequests: 1},
+		{name: "behind verdict is cached", revision: "sha-50", routes: map[string]kubeRoute{sha42Compare: {body: `{"status":"behind"}`}}, wantRequests: 1},
+		{name: "compare failure is not cached", revision: "sha-50", routes: map[string]kubeRoute{sha42Compare: {status: http.StatusNotFound, body: `{}`}}, wantErr: true, wantRequests: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture, srv := newRolloutRouter(t, nil, nil, tc.routes)
+			for range 2 {
+				got, err := srv.revisionIncludes(context.Background(), "azylman/aerial", tc.revision, "sha-42")
+				if got != tc.want || (err != nil) != tc.wantErr {
+					t.Fatalf("revisionIncludes() = (%v, %v), want (%v, wantErr %v)", got, err, tc.want, tc.wantErr)
+				}
+			}
+			if n := len(fixture.Requests()); n != tc.wantRequests {
+				t.Errorf("github requests = %d (%v), want %d", n, fixture.Requests(), tc.wantRequests)
+			}
+			if tc.wantRequests > 0 {
+				if q := fixture.Query(sha42Compare); q != "per_page=1" {
+					t.Errorf("compare query = %q, want per_page=1", q)
+				}
+			}
+		})
+	}
+}
+
+func TestCommitTime(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		routes       map[string]kubeRoute
+		want         time.Time
+		wantErr      bool
+		wantRequests int
+	}{
+		{name: "committer date is cached", want: rolloutClock(10, 0, 0), wantRequests: 1},
+		{name: "lookup failure is not cached", routes: map[string]kubeRoute{sha42Commit: {status: http.StatusInternalServerError, body: `{}`}}, wantErr: true, wantRequests: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture, srv := newRolloutRouter(t, nil, nil, tc.routes)
+			for range 2 {
+				got, err := srv.commitTime(context.Background(), "azylman/aerial", "sha-42")
+				if !got.Equal(tc.want) || (err != nil) != tc.wantErr {
+					t.Fatalf("commitTime() = (%v, %v), want (%v, wantErr %v)", got, err, tc.want, tc.wantErr)
+				}
+			}
+			if n := len(fixture.Requests()); n != tc.wantRequests {
+				t.Errorf("github requests = %d (%v), want %d", n, fixture.Requests(), tc.wantRequests)
+			}
+		})
+	}
+}
+
+func TestRunRolloutRechecks(t *testing.T) {
+	t.Parallel()
+	list := kubeRoute{body: `{"metadata":{"resourceVersion":"3"},"items":[{"metadata":{"name":"aerial-core","namespace":"flux-system"}}]}`}
+	tests := []struct {
+		name         string
+		pending      bool
+		ticks        int
+		lists        []kubeRoute
+		wantRequests []string
+		wantEvents   []string
+	}{
+		{name: "every tick re-lists kustomizations while a rollout is pending", pending: true, ticks: 2, lists: []kubeRoute{list, list}, wantRequests: []string{"LIST kustomizations", "LIST kustomizations"}, wantEvents: []string{"pending? true", "list flux-system [aerial-core]", "pending? true", "list flux-system [aerial-core]"}},
+		{name: "ticks without pending rollouts list nothing", ticks: 2, wantEvents: []string{"pending? false", "pending? false"}},
+		{name: "a failed re-list is logged and the next tick retries", pending: true, ticks: 2, lists: []kubeRoute{{status: http.StatusInternalServerError, body: `boom`}, list}, wantRequests: []string{"LIST kustomizations", "LIST kustomizations"}, wantEvents: []string{"pending? true", "pending? true", "list flux-system [aerial-core]"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := &watchFixture{lists: tc.lists, cancel: func() {}}
+			ts := httptest.NewServer(fixture)
+			defer ts.Close()
+			disp := NewDefaultOutboundDispatcher("", ts.Client())
+			disp.SetKubeConfig(ts.URL, "test-token")
+			sink := &recordingSink{pending: tc.pending}
+			ticks := make(chan time.Time, tc.ticks)
+			for range tc.ticks {
+				ticks <- time.Time{}
+			}
+			close(ticks)
+
+			runRolloutRechecks(t.Context(), disp, sink, ticks)
+
+			if got := fixture.requests; !slices.Equal(got, tc.wantRequests) {
+				t.Errorf("requests = %v, want %v", got, tc.wantRequests)
+			}
+			if !slices.Equal(sink.events, tc.wantEvents) {
+				t.Errorf("events = %q, want %q", sink.events, tc.wantEvents)
+			}
+		})
+	}
+}
+
+func TestDefaultOutboundDispatcher_ListKustomizationConfigMaps(t *testing.T) {
+	t.Parallel()
+	const configMapsPath = "GET /api/v1/configmaps"
+	tests := []struct {
+		name    string
+		noKube  bool
+		routes  map[string]kubeRoute
+		want    []configMapChange
+		wantErr string
+	}{
+		{
+			name:   "decodes the last non-subresource write of each configmap",
+			routes: map[string]kubeRoute{configMapsPath: {body: `{"items":[{"metadata":{"name":"eri-config","namespace":"default","managedFields":[{"manager":"kustomize-controller","operation":"Apply","time":"2026-11-08T10:01:00Z"},{"manager":"other","operation":"Update","subresource":"status","time":"2026-11-08T10:05:00Z"}]}},{"metadata":{"name":"bare","namespace":"apps"}}]}`}},
+			want:   []configMapChange{{Namespace: "default", Name: "eri-config", ChangedAt: rolloutClock(10, 1, 0)}, {Namespace: "apps", Name: "bare"}},
+		},
+		{name: "list failure returns error", routes: map[string]kubeRoute{configMapsPath: {status: http.StatusForbidden, body: `forbidden`}}, wantErr: "list aerial-core configmaps"},
+		{name: "malformed list returns error", routes: map[string]kubeRoute{configMapsPath: {body: `{"items":`}}, wantErr: "decode aerial-core configmaps"},
+		{name: "unconfigured kube API returns error", noKube: true, wantErr: "kube api server not configured"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture, ts := newKubeFixture(t, tc.routes)
+			disp := NewDefaultOutboundDispatcher("", ts.Client())
+			if !tc.noKube {
+				disp.SetKubeConfig(ts.URL, "test-token")
+			}
+			got, err := disp.ListKustomizationConfigMaps(context.Background(), fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("configmaps = %+v, want %+v", got, tc.want)
+			}
+			if !tc.noKube {
+				if q := fixture.Query(configMapsPath); q != "labelSelector=kustomize.toolkit.fluxcd.io%2Fname%3Daerial-core%2Ckustomize.toolkit.fluxcd.io%2Fnamespace%3Dflux-system" {
+					t.Errorf("configmaps query = %q", q)
+				}
 			}
 		})
 	}
