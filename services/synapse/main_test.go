@@ -614,6 +614,8 @@ type mockOutboundDispatcher struct {
 	widgetReturnMsgID       string
 	widgetCalls             []StatusWidgetRequest
 	kustomizationsByImage   map[string][]fluxKustomizationRef
+	workloads               []workloadRollout
+	workloadsErr            error
 }
 
 func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
@@ -649,14 +651,6 @@ func (m *mockOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageR
 	}
 	_, _, workload := resolveImageTag(req.Repo, req.Image)
 	return workload, nil
-}
-
-func (m *mockOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef, requestedAt string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.reconcileCalls = append(m.reconcileCalls, ref)
-	m.reconcileRequestedAts = append(m.reconcileRequestedAts, requestedAt)
-	return m.reconcileErrs[ref.Name]
 }
 
 func (m *mockOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error) {

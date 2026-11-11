@@ -731,6 +731,7 @@ type OutboundDispatcher interface {
 	DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]fluxKustomizationRef, error)
 	PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (workloadName string, err error)
 	ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef, requestedAt string) error
+	ListKustomizationWorkloads(ctx context.Context, ref fluxKustomizationRef) ([]workloadRollout, error)
 	ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error)
 	DispatchPrompt(ctx context.Context, req PromptRequest) error
 	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
@@ -1051,6 +1052,58 @@ var workloadListPaths = []string{
 	"/apis/batch/v1/cronjobs",
 }
 
+// rolloutWorkloadKinds are the workload kinds whose rollout gates a deploy, with their cluster-wide
+// list endpoints. Jobs and CronJobs have no rollout to wait for.
+var rolloutWorkloadKinds = []struct{ Kind, Path string }{
+	{Kind: "Deployment", Path: "/apis/apps/v1/deployments"},
+	{Kind: "StatefulSet", Path: "/apis/apps/v1/statefulsets"},
+	{Kind: "DaemonSet", Path: "/apis/apps/v1/daemonsets"},
+}
+
+// fluxManagedSelector selects every object applied by any Flux Kustomization.
+const fluxManagedSelector = fluxKustomizationNameLabel
+
+// ListKustomizationWorkloads lists the Deployments, StatefulSets and DaemonSets applied by ref.
+func (d *DefaultOutboundDispatcher) ListKustomizationWorkloads(ctx context.Context, ref fluxKustomizationRef) ([]workloadRollout, error) {
+	query := url.Values{"labelSelector": {fluxKustomizationNameLabel + "=" + ref.Name + "," + fluxKustomizationNamespaceLabel + "=" + ref.Namespace}}
+	var workloads []workloadRollout
+	for _, k := range rolloutWorkloadKinds {
+		body, err := d.kubeJSON(ctx, http.MethodGet, k.Path+"?"+query.Encode(), "", nil)
+		if err != nil {
+			return nil, fmt.Errorf("list %s workloads: %w", ref.Name, err)
+		}
+		decoded, err := decodeWorkloadRollouts(k.Kind, body)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s: %w", k.Path, err)
+		}
+		workloads = append(workloads, decoded...)
+	}
+	return workloads, nil
+}
+
+// ListFluxWorkloadsVersion lists the Flux-managed workloads at path and returns only the list
+// resourceVersion, the starting point for WatchFluxWorkloads.
+func (d *DefaultOutboundDispatcher) ListFluxWorkloadsVersion(ctx context.Context, path string) (string, error) {
+	body, err := d.kubeJSON(ctx, http.MethodGet, path+"?"+url.Values{"labelSelector": {fluxManagedSelector}}.Encode(), "", nil)
+	if err != nil {
+		return "", fmt.Errorf("list flux workloads: %w", err)
+	}
+	var list struct {
+		Metadata struct {
+			ResourceVersion string `json:"resourceVersion"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		return "", fmt.Errorf("decode %s: %w", path, err)
+	}
+	return list.Metadata.ResourceVersion, nil
+}
+
+// WatchFluxWorkloads opens a kube watch stream of the Flux-managed workloads at path from resourceVersion.
+func (d *DefaultOutboundDispatcher) WatchFluxWorkloads(ctx context.Context, path, resourceVersion string) (io.ReadCloser, error) {
+	return d.watchKube(ctx, path, url.Values{"labelSelector": {fluxManagedSelector}}, resourceVersion)
+}
+
 func (d *DefaultOutboundDispatcher) listWorkloadImages(ctx context.Context) ([]workloadImageRef, error) {
 	var workloads []workloadImageRef
 	for _, path := range workloadListPaths {
@@ -1155,14 +1208,20 @@ func (d *DefaultOutboundDispatcher) ListKustomizations(ctx context.Context, name
 }
 
 // WatchKustomizations opens a kube watch stream of namespace's Kustomizations from resourceVersion.
-// The stream has no client timeout; the API server ends it, after which the caller re-lists.
-// A 410 Gone response returns errWatchExpired.
 func (d *DefaultOutboundDispatcher) WatchKustomizations(ctx context.Context, namespace, resourceVersion string) (io.ReadCloser, error) {
+	return d.watchKube(ctx, kustomizationPath(fluxKustomizationRef{Namespace: namespace}), url.Values{}, resourceVersion)
+}
+
+// watchKube opens a kube watch stream of the collection at path, filtered by query, from
+// resourceVersion. The stream has no client timeout; the API server ends it, after which the caller
+// re-lists. A 410 Gone response returns errWatchExpired.
+func (d *DefaultOutboundDispatcher) watchKube(ctx context.Context, path string, query url.Values, resourceVersion string) (io.ReadCloser, error) {
 	if d.kubeAPIServer == "" {
 		return nil, errors.New("kube api server not configured")
 	}
-	query := url.Values{"watch": {"1"}, "allowWatchBookmarks": {"true"}, "resourceVersion": {resourceVersion}}
-	path := kustomizationPath(fluxKustomizationRef{Namespace: namespace})
+	query.Set("watch", "1")
+	query.Set("allowWatchBookmarks", "true")
+	query.Set("resourceVersion", resourceVersion)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.kubeAPIServer+path+"?"+query.Encode(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("create kube watch %s request: %w", path, err)

@@ -330,6 +330,143 @@ func decodeWorkloadImageRefs(body []byte) ([]workloadImageRef, error) {
 	return refs, nil
 }
 
+// workloadRollout is the rollout state of one Deployment, StatefulSet or DaemonSet. Replicas is
+// spec.replicas (1 when unset) and StatusReplicas is status.replicas, which still counts old pods.
+type workloadRollout struct {
+	Kind, Namespace, Name                                           string
+	Images                                                          []string
+	Generation, ObservedGeneration                                  int64
+	Replicas, UpdatedReplicas, AvailableReplicas, StatusReplicas    int32
+	UpdateRevision, CurrentRevision                                 string
+	DesiredNumberScheduled, UpdatedNumberScheduled, NumberAvailable int32
+	ProgressDeadlineExceeded                                        bool
+}
+
+// kubeRolloutList decodes an apps/v1 Deployment, StatefulSet or DaemonSet list with rollout status.
+type kubeRolloutList struct {
+	Items []struct {
+		Metadata struct {
+			Name       string `json:"name"`
+			Namespace  string `json:"namespace"`
+			Generation int64  `json:"generation"`
+		} `json:"metadata"`
+		Spec struct {
+			Replicas *int32 `json:"replicas"`
+			Template struct {
+				Spec kubePodSpec `json:"spec"`
+			} `json:"template"`
+		} `json:"spec"`
+		Status struct {
+			ObservedGeneration     int64           `json:"observedGeneration"`
+			Replicas               int32           `json:"replicas"`
+			UpdatedReplicas        int32           `json:"updatedReplicas"`
+			AvailableReplicas      int32           `json:"availableReplicas"`
+			UpdateRevision         string          `json:"updateRevision"`
+			CurrentRevision        string          `json:"currentRevision"`
+			DesiredNumberScheduled int32           `json:"desiredNumberScheduled"`
+			UpdatedNumberScheduled int32           `json:"updatedNumberScheduled"`
+			NumberAvailable        int32           `json:"numberAvailable"`
+			Conditions             []fluxCondition `json:"conditions"`
+		} `json:"status"`
+	} `json:"items"`
+}
+
+// decodeWorkloadRollouts decodes a workload list of kind (list items carry no kind of their own).
+func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error) {
+	var list kubeRolloutList
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, err
+	}
+	workloads := make([]workloadRollout, 0, len(list.Items))
+	for _, item := range list.Items {
+		st := item.Status
+		workloads = append(workloads, workloadRollout{
+			Kind:                   kind,
+			Namespace:              item.Metadata.Namespace,
+			Name:                   item.Metadata.Name,
+			Images:                 item.Spec.Template.Spec.images(),
+			Generation:             item.Metadata.Generation,
+			ObservedGeneration:     st.ObservedGeneration,
+			Replicas:               *cmp.Or(item.Spec.Replicas, new(int32(1))),
+			UpdatedReplicas:        st.UpdatedReplicas,
+			AvailableReplicas:      st.AvailableReplicas,
+			StatusReplicas:         st.Replicas,
+			UpdateRevision:         st.UpdateRevision,
+			CurrentRevision:        st.CurrentRevision,
+			DesiredNumberScheduled: st.DesiredNumberScheduled,
+			UpdatedNumberScheduled: st.UpdatedNumberScheduled,
+			NumberAvailable:        st.NumberAvailable,
+			ProgressDeadlineExceeded: slices.ContainsFunc(st.Conditions, func(c fluxCondition) bool {
+				return c.Type == "Progressing" && c.Status == "False" && c.Reason == "ProgressDeadlineExceeded"
+			}),
+		})
+	}
+	return workloads, nil
+}
+
+// imageTag returns the tag of an image reference, ignoring any digest and registry port; "" when untagged.
+func imageTag(image string) string {
+	ref, _, _ := strings.Cut(strings.TrimSpace(image), "@")
+	name := ref[strings.LastIndex(ref, "/")+1:]
+	_, tag, _ := strings.CutLast(name, ":")
+	return tag
+}
+
+func (w workloadRollout) String() string {
+	return w.Kind + " " + w.Namespace + "/" + w.Name
+}
+
+// workloadRolloutComplete reports whether the workload controller has observed its latest spec and
+// every desired pod runs the current template and is available, with no old pods left.
+func workloadRolloutComplete(w workloadRollout) (done, failed bool, reason string) {
+	if w.ObservedGeneration < w.Generation {
+		return false, false, fmt.Sprintf("generation %d not yet observed", w.Generation)
+	}
+	switch w.Kind {
+	case "Deployment":
+		if w.ProgressDeadlineExceeded {
+			return false, true, "progress deadline exceeded"
+		}
+		done = w.UpdatedReplicas == w.Replicas && w.AvailableReplicas == w.Replicas && w.StatusReplicas == w.Replicas
+		reason = fmt.Sprintf("%d/%d updated, %d/%d available, %d total", w.UpdatedReplicas, w.Replicas, w.AvailableReplicas, w.Replicas, w.StatusReplicas)
+	case "StatefulSet":
+		done = w.UpdateRevision == w.CurrentRevision && w.AvailableReplicas == w.Replicas
+		reason = fmt.Sprintf("revision %s of %s, %d/%d available", w.CurrentRevision, w.UpdateRevision, w.AvailableReplicas, w.Replicas)
+	case "DaemonSet":
+		done = w.UpdatedNumberScheduled == w.DesiredNumberScheduled && w.NumberAvailable == w.DesiredNumberScheduled
+		reason = fmt.Sprintf("%d/%d updated, %d/%d available", w.UpdatedNumberScheduled, w.DesiredNumberScheduled, w.NumberAvailable, w.DesiredNumberScheduled)
+	default:
+		return false, false, "unsupported workload kind"
+	}
+	if done {
+		return true, false, ""
+	}
+	return false, false, reason
+}
+
+// commitRolloutStatus gates a deploy on the workloads running commitSHA's image: done when none run it
+// or all of them have rolled out, failed when any of them failed, otherwise pending with the reason
+// naming each workload still rolling out. Workloads on other images never affect the result.
+func commitRolloutStatus(workloads []workloadRollout, commitSHA string) (done, failed bool, reason string) {
+	var pending []string
+	for _, w := range workloads {
+		if commitSHA == "" || !slices.ContainsFunc(w.Images, func(image string) bool { return imageTag(image) == commitSHA }) {
+			continue
+		}
+		wDone, wFailed, wReason := workloadRolloutComplete(w)
+		switch {
+		case wFailed:
+			return false, true, w.String() + ": " + wReason
+		case !wDone:
+			pending = append(pending, w.String()+" ("+wReason+")")
+		}
+	}
+	if len(pending) > 0 {
+		return false, false, strings.Join(pending, "; ")
+	}
+	return true, false, ""
+}
+
 // imageRepositoryBasename strips registry, path, tag and digest from an image reference.
 func imageRepositoryBasename(image string) string {
 	ref := strings.TrimSpace(image)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -733,6 +734,168 @@ func TestKustomizationsForImages(t *testing.T) {
 			t.Parallel()
 			if got := kustomizationsForImages(tc.workloads, tc.imageNames); !slices.Equal(got, tc.want) {
 				t.Errorf("kustomizationsForImages() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+const (
+	rolloutSHA   = "0123abcd"
+	synapseImage = "ghcr.io/azylman/aerial-synapse:" + rolloutSHA
+)
+
+// deployRollout builds a Deployment rollout state.
+func deployRollout(name, image string, gen, observed int64, replicas, updated, available, total int32, deadline bool) workloadRollout {
+	return workloadRollout{Kind: "Deployment", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: replicas, UpdatedReplicas: updated, AvailableReplicas: available, StatusReplicas: total, ProgressDeadlineExceeded: deadline}
+}
+
+// stsRollout builds a StatefulSet rollout state.
+func stsRollout(name, image string, gen, observed int64, replicas, available int32, updateRev, currentRev string) workloadRollout {
+	return workloadRollout{Kind: "StatefulSet", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: replicas, AvailableReplicas: available, UpdateRevision: updateRev, CurrentRevision: currentRev}
+}
+
+// dsRollout builds a DaemonSet rollout state.
+func dsRollout(name, image string, gen, observed int64, desired, updated, available int32) workloadRollout {
+	return workloadRollout{Kind: "DaemonSet", Namespace: "kube-system", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, DesiredNumberScheduled: desired, UpdatedNumberScheduled: updated, NumberAvailable: available}
+}
+
+func TestImageTag(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{name: "plain tag", image: "ghcr.io/azylman/aerial-synapse:abc123", want: "abc123"},
+		{name: "registry with port and tag", image: "registry.lan:5000/aerial/haro:def456", want: "def456"},
+		{name: "registry with port untagged", image: "registry.lan:5000/aerial/haro"},
+		{name: "tag with digest", image: "ghcr.io/azylman/aerial-synapse:abc123@sha256:beef", want: "abc123"},
+		{name: "digest only", image: "ghcr.io/azylman/aerial-synapse@sha256:beef"},
+		{name: "untagged", image: "busybox"},
+		{name: "bare name with tag", image: "postgres:18", want: "18"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := imageTag(tc.image); got != tc.want {
+				t.Errorf("imageTag(%q) = %q, want %q", tc.image, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecodeWorkloadRollouts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		kind    string
+		body    string
+		want    []workloadRollout
+		wantErr bool
+	}{
+		{
+			name: "deployment defaults replicas to one and detects the progress deadline",
+			kind: "Deployment",
+			body: `{"items":[{"metadata":{"name":"synapse","namespace":"default","generation":4},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:0123abcd"}],"initContainers":[{"image":"busybox"}]}}},"status":{"observedGeneration":4,"replicas":2,"updatedReplicas":1,"availableReplicas":1,"conditions":[{"type":"Available","status":"True"},{"type":"Progressing","status":"False","reason":"ProgressDeadlineExceeded"}]}}]}`,
+			want: []workloadRollout{{Kind: "Deployment", Namespace: "default", Name: "synapse", Images: []string{"ghcr.io/azylman/aerial-synapse:0123abcd", "busybox"}, Generation: 4, ObservedGeneration: 4, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1, StatusReplicas: 2, ProgressDeadlineExceeded: true}},
+		},
+		{
+			name: "deployment progressing normally",
+			kind: "Deployment",
+			body: `{"items":[{"metadata":{"name":"haro","namespace":"default","generation":2},"spec":{"replicas":3,"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-haro:0123abcd"}]}}},"status":{"observedGeneration":2,"replicas":3,"updatedReplicas":3,"availableReplicas":3,"conditions":[{"type":"Progressing","status":"True","reason":"NewReplicaSetAvailable"}]}}]}`,
+			want: []workloadRollout{{Kind: "Deployment", Namespace: "default", Name: "haro", Images: []string{"ghcr.io/azylman/aerial-haro:0123abcd"}, Generation: 2, ObservedGeneration: 2, Replicas: 3, UpdatedReplicas: 3, AvailableReplicas: 3, StatusReplicas: 3}},
+		},
+		{
+			name: "statefulset revisions",
+			kind: "StatefulSet",
+			body: `{"items":[{"metadata":{"name":"db","namespace":"default","generation":7},"spec":{"replicas":2,"template":{"spec":{"containers":[{"image":"postgres:18"}]}}},"status":{"observedGeneration":7,"replicas":2,"availableReplicas":2,"updateRevision":"db-2","currentRevision":"db-1"}}]}`,
+			want: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "db", Images: []string{"postgres:18"}, Generation: 7, ObservedGeneration: 7, Replicas: 2, AvailableReplicas: 2, StatusReplicas: 2, UpdateRevision: "db-2", CurrentRevision: "db-1"}},
+		},
+		{
+			name: "daemonset scheduling counts",
+			kind: "DaemonSet",
+			body: `{"items":[{"metadata":{"name":"fluent-bit","namespace":"kube-system","generation":3},"spec":{"template":{"spec":{"containers":[{"image":"fluent/fluent-bit:4"}]}}},"status":{"observedGeneration":3,"desiredNumberScheduled":3,"updatedNumberScheduled":2,"numberAvailable":3}}]}`,
+			want: []workloadRollout{{Kind: "DaemonSet", Namespace: "kube-system", Name: "fluent-bit", Images: []string{"fluent/fluent-bit:4"}, Generation: 3, ObservedGeneration: 3, Replicas: 1, DesiredNumberScheduled: 3, UpdatedNumberScheduled: 2, NumberAvailable: 3}},
+		},
+		{name: "empty list", kind: "Deployment", body: `{"items":[]}`, want: []workloadRollout{}},
+		{name: "malformed list", kind: "Deployment", body: `{"items":`, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := decodeWorkloadRollouts(tc.kind, []byte(tc.body))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("decodeWorkloadRollouts() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("decodeWorkloadRollouts() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkloadRolloutComplete(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		workload   workloadRollout
+		wantDone   bool
+		wantFailed bool
+		wantReason string
+	}{
+		{name: "deployment rolled out", workload: deployRollout("synapse", synapseImage, 3, 3, 2, 2, 2, 2, false), wantDone: true},
+		{name: "deployment with old replicas still present", workload: deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 2, false), wantReason: "1/1 updated, 1/1 available, 2 total"},
+		{name: "deployment new replica unavailable", workload: deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 1, false), wantReason: "1/1 updated, 0/1 available, 1 total"},
+		{name: "deployment with stale observed generation", workload: deployRollout("synapse", synapseImage, 4, 3, 1, 1, 1, 1, false), wantReason: "generation 4 not yet observed"},
+		{name: "deployment progress deadline exceeded", workload: deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, true), wantFailed: true, wantReason: "progress deadline exceeded"},
+		{name: "deployment deadline from a previous generation is not yet a failure", workload: deployRollout("synapse", synapseImage, 4, 3, 1, 1, 0, 2, true), wantReason: "generation 4 not yet observed"},
+		{name: "statefulset rolled out", workload: stsRollout("db", synapseImage, 2, 2, 2, 2, "db-2", "db-2"), wantDone: true},
+		{name: "statefulset with old revision pods", workload: stsRollout("db", synapseImage, 2, 2, 2, 2, "db-2", "db-1"), wantReason: "revision db-1 of db-2, 2/2 available"},
+		{name: "statefulset unavailable", workload: stsRollout("db", synapseImage, 2, 2, 2, 1, "db-2", "db-2"), wantReason: "revision db-2 of db-2, 1/2 available"},
+		{name: "statefulset with stale observed generation", workload: stsRollout("db", synapseImage, 3, 2, 2, 2, "db-2", "db-2"), wantReason: "generation 3 not yet observed"},
+		{name: "daemonset rolled out", workload: dsRollout("agent", synapseImage, 5, 5, 3, 3, 3), wantDone: true},
+		{name: "daemonset with old pods scheduled", workload: dsRollout("agent", synapseImage, 5, 5, 3, 2, 3), wantReason: "2/3 updated, 3/3 available"},
+		{name: "daemonset unavailable", workload: dsRollout("agent", synapseImage, 5, 5, 3, 3, 2), wantReason: "3/3 updated, 2/3 available"},
+		{name: "daemonset with stale observed generation", workload: dsRollout("agent", synapseImage, 6, 5, 3, 3, 3), wantReason: "generation 6 not yet observed"},
+		{name: "unsupported kind", workload: workloadRollout{Kind: "Job"}, wantReason: "unsupported workload kind"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			done, failed, reason := workloadRolloutComplete(tc.workload)
+			if done != tc.wantDone || failed != tc.wantFailed || reason != tc.wantReason {
+				t.Errorf("workloadRolloutComplete() = (%v, %v, %q), want (%v, %v, %q)", done, failed, reason, tc.wantDone, tc.wantFailed, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestCommitRolloutStatus(t *testing.T) {
+	t.Parallel()
+	const otherImage = "ghcr.io/azylman/aerial-haro:feedface"
+	tests := []struct {
+		name       string
+		workloads  []workloadRollout
+		commitSHA  string
+		wantDone   bool
+		wantFailed bool
+		wantReason string
+	}{
+		{name: "no workloads is done", commitSHA: rolloutSHA, wantDone: true},
+		{name: "no matching workloads is done", workloads: []workloadRollout{deployRollout("haro", otherImage, 2, 2, 1, 1, 1, 1, false)}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "matching workload pending", workloads: []workloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, false), dsRollout("agent", synapseImage, 5, 5, 3, 2, 3)}, commitSHA: rolloutSHA, wantReason: "Deployment default/synapse (1/1 updated, 0/1 available, 2 total); DaemonSet kube-system/agent (2/3 updated, 3/3 available)"},
+		{name: "matching workloads done", workloads: []workloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), stsRollout("db", "ghcr.io/azylman/aerial-db:"+rolloutSHA+"@sha256:beef", 2, 2, 1, 1, "db-2", "db-2")}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "unrelated unhealthy workload does not block", workloads: []workloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), deployRollout("haro", otherImage, 2, 2, 1, 0, 0, 2, true)}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "matching workload failed", workloads: []workloadRollout{deployRollout("haro", otherImage, 2, 2, 1, 0, 0, 1, false), deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, true)}, commitSHA: rolloutSHA, wantFailed: true, wantReason: "Deployment default/synapse: progress deadline exceeded"},
+		{name: "matching init container image gates", workloads: []workloadRollout{{Kind: "Deployment", Namespace: "default", Name: "eri", Images: []string{"busybox", synapseImage}, Generation: 1, ObservedGeneration: 1, Replicas: 1, StatusReplicas: 1}}, commitSHA: rolloutSHA, wantReason: "Deployment default/eri (0/1 updated, 0/1 available, 1 total)"},
+		{name: "empty commit matches no untagged image", workloads: []workloadRollout{deployRollout("cache", "valkey", 1, 1, 1, 0, 0, 1, false)}, wantDone: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			done, failed, reason := commitRolloutStatus(tc.workloads, tc.commitSHA)
+			if done != tc.wantDone || failed != tc.wantFailed || reason != tc.wantReason {
+				t.Errorf("commitRolloutStatus() = (%v, %v, %q), want (%v, %v, %q)", done, failed, reason, tc.wantDone, tc.wantFailed, tc.wantReason)
 			}
 		})
 	}

@@ -1135,6 +1135,7 @@ rules:
       - daemonsets
     verbs:
       - list
+      - watch
   - apiGroups:
       - batch
     resources:
