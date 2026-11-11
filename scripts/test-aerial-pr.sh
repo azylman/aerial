@@ -750,6 +750,7 @@ PUSH_REBASED_CHECK=$(bash -c "
     echo 'v1' > \"\$WORK_DIR/feat.txt\"
     git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'feat v1'
     git -C \"\$WORK_DIR\" push -q -u origin feat/existing-pr
+    V1_SHA=\$(git -C \"\$WORK_DIR\" rev-parse HEAD)
 
     echo 'upstream-v2' > \"\$UPSTREAM_DIR/up.txt\"
     git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream v2'
@@ -760,7 +761,8 @@ PUSH_REBASED_CHECK=$(bash -c "
     git add feat.txt
     rebase_staged_changes main 'feat v2' 2>/dev/null
     git commit -q -m 'feat v2'
-    if push_scratch_branch feat/existing-pr 2>/dev/null; then
+    V2_SHA=\$(git rev-parse HEAD)
+    if push_scratch_branch feat/existing-pr 2>/dev/null && git merge-base --is-ancestor \"\$V1_SHA\" \"\$V2_SHA\"; then
         echo 'push_rebased:ok'
     else
         echo 'push_rebased:fail'
@@ -781,7 +783,8 @@ PUSH_REBASED_CHECK=$(bash -c "
     git add feat.txt
     rebase_staged_changes main 'feat v3' 2>/dev/null
     git commit -q -m 'feat v3'
-    if push_scratch_branch feat/existing-pr 2>/dev/null && [ \"\${PUSH_UPDATED_EXISTING}\" = \"1\" ]; then
+    V3_SHA=\$(git rev-parse HEAD)
+    if push_scratch_branch feat/existing-pr 2>/dev/null && [ \"\${PUSH_UPDATED_EXISTING}\" = \"1\" ] && git merge-base --is-ancestor \"\$V2_SHA\" \"\$V3_SHA\"; then
         echo 'push_single_branch:ok'
     else
         echo 'push_single_branch:fail'
