@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/bwmarrin/discordgo"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -586,191 +585,6 @@ func (m *mockPRRegistry) RecordPRJobState(ctx context.Context, jobName, jobState
 	return m.recordJobStateRepo, m.recordJobStatePRNum, m.recordJobStateUpdated, nil
 }
 
-type mockOutboundDispatcher struct {
-	mu                      sync.Mutex
-	gitPushCalls            []GitPushEventRequest
-	promoteCalls            []ImageReadyEventRequest
-	reconcileCalls          []fluxKustomizationRef
-	reconcileRequestedAts   []string
-	promptCalls             []PromptRequest
-	dispatchCalls           []DispatchRequest
-	directMessageCalls      []DirectMessageRequest
-	discordMessageCalls     []DiscordMessageIngressRequest
-	discordInteractionCalls []*discordgo.Interaction
-	gitPushErr              error
-	promoteErr              error
-	discoverErr             error
-	reconcileErrs           map[string]error
-	sourceRepo              string
-	sourceRepoErr           error
-	promptErr               error
-	dispatchErr             error
-	directMessageErr        error
-	discordMessageErr       error
-	discordMessageFailCount int
-	discordMessageAttempts  int
-	discordInteractionErr   error
-	widgetErr               error
-	widgetReturnMsgID       string
-	widgetCalls             []StatusWidgetRequest
-	kustomizationsByImage   map[string][]fluxKustomizationRef
-	workloads               []workloadRollout
-	workloadsErr            error
-	configMaps              []configMapChange
-	configMapsErr           error
-}
-
-func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
-	m.mu.Lock()
-	m.gitPushCalls = append(m.gitPushCalls, req)
-	m.mu.Unlock()
-	return m.gitPushErr
-}
-
-func (m *mockOutboundDispatcher) DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]fluxKustomizationRef, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.discoverErr != nil {
-		return nil, m.discoverErr
-	}
-	var refs []fluxKustomizationRef
-	for _, name := range imageNames {
-		for _, ref := range m.kustomizationsByImage[name] {
-			if !slices.Contains(refs, ref) {
-				refs = append(refs, ref)
-			}
-		}
-	}
-	return refs, nil
-}
-
-func (m *mockOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.promoteCalls = append(m.promoteCalls, req)
-	if m.promoteErr != nil {
-		return "", m.promoteErr
-	}
-	_, _, workload := resolveImageTag(req.Repo, req.Image)
-	return workload, nil
-}
-
-func (m *mockOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error) {
-	return m.sourceRepo, m.sourceRepoErr
-}
-
-func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
-	m.mu.Lock()
-	m.promptCalls = append(m.promptCalls, req)
-	m.mu.Unlock()
-	return m.promptErr
-}
-
-func (m *mockOutboundDispatcher) DispatchBackground(ctx context.Context, req DispatchRequest) error {
-	m.mu.Lock()
-	m.dispatchCalls = append(m.dispatchCalls, req)
-	m.mu.Unlock()
-	return m.dispatchErr
-}
-
-func (m *mockOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
-	m.mu.Lock()
-	m.directMessageCalls = append(m.directMessageCalls, req)
-	m.mu.Unlock()
-	return m.directMessageErr
-}
-
-func (m *mockOutboundDispatcher) GitPushCalls() []GitPushEventRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]GitPushEventRequest(nil), m.gitPushCalls...)
-}
-
-func (m *mockOutboundDispatcher) PromoteCalls() []ImageReadyEventRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]ImageReadyEventRequest(nil), m.promoteCalls...)
-}
-
-func (m *mockOutboundDispatcher) ReconcileCalls() []fluxKustomizationRef {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]fluxKustomizationRef(nil), m.reconcileCalls...)
-}
-
-func (m *mockOutboundDispatcher) PromptCalls() []PromptRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]PromptRequest(nil), m.promptCalls...)
-}
-
-func (m *mockOutboundDispatcher) DispatchCalls() []DispatchRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]DispatchRequest(nil), m.dispatchCalls...)
-}
-
-func (m *mockOutboundDispatcher) DirectMessageCalls() []DirectMessageRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]DirectMessageRequest(nil), m.directMessageCalls...)
-}
-
-func (m *mockOutboundDispatcher) DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error) {
-	m.mu.Lock()
-	m.widgetCalls = append(m.widgetCalls, payload)
-	msgID := m.widgetReturnMsgID
-	err := m.widgetErr
-	m.mu.Unlock()
-	return msgID, err
-}
-
-func (m *mockOutboundDispatcher) WidgetCalls() []StatusWidgetRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]StatusWidgetRequest(nil), m.widgetCalls...)
-}
-
-func (m *mockOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error {
-	m.mu.Lock()
-	m.discordMessageCalls = append(m.discordMessageCalls, req)
-	m.discordMessageAttempts++
-	if m.discordMessageFailCount > 0 {
-		if m.discordMessageAttempts <= m.discordMessageFailCount {
-			err := m.discordMessageErr
-			if err == nil {
-				err = errors.New("transient error")
-			}
-			m.mu.Unlock()
-			return err
-		}
-		m.mu.Unlock()
-		return nil
-	}
-	err := m.discordMessageErr
-	m.mu.Unlock()
-	return err
-}
-
-func (m *mockOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
-	m.mu.Lock()
-	m.discordInteractionCalls = append(m.discordInteractionCalls, interaction)
-	m.mu.Unlock()
-	return m.discordInteractionErr
-}
-
-func (m *mockOutboundDispatcher) DiscordMessageCalls() []DiscordMessageIngressRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]DiscordMessageIngressRequest(nil), m.discordMessageCalls...)
-}
-
-func (m *mockOutboundDispatcher) DiscordInteractionCalls() []*discordgo.Interaction {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]*discordgo.Interaction(nil), m.discordInteractionCalls...)
-}
-
 func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp OutboundDispatcher, riverInserter ...RiverInserter) *RouterServer {
 	if client == nil && cfg.GitHubAPIURL == "" && cfg.KubeAPIServer == "" {
 		client = &http.Client{Transport: &zeroCallTransport{}}
@@ -837,6 +651,8 @@ func TestProcessDeployEvent(t *testing.T) {
 		wantDMs            int
 		wantDMSubstr       string
 		wantPromptSubs     []string
+		wantRequested      []string
+		wantReconciles     []fluxKustomizationRef
 	}{
 		{
 			name: "deploy_started ignored without PR number or targetID",
@@ -1388,6 +1204,87 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantTargetID: "1555405874565091380",
 			wantPrompts:  1,
 		},
+		{
+			name: "sync_success on a Flux-sourced repo defers completion to the kustomization watcher",
+			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-config-only", 1640, "1555405874565091380", "success", ""),
+			reg:  &mockPRRegistry{suppressVanadisRes: true},
+			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
+				"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}, {Namespace: "flux-system", Name: "aerial-config-apps"}},
+			}},
+			wantPR:             1640,
+			wantTargetID:       "1555405874565091380",
+			wantDeployingCalls: 1,
+			wantRequested:      []string{"aerial-config", "aerial-config-apps"},
+			wantReconciles:     []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-config"}, {Namespace: "flux-system", Name: "aerial-config-apps"}},
+		},
+		{
+			name: "sync_success with empty targetID on a Flux-sourced repo defers instead of advancing Vanadis",
+			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-config-only-2", 1641, "", "success", ""),
+			reg:  &mockPRRegistry{},
+			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
+				"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}},
+			}},
+			wantPR:             1641,
+			wantDeployingCalls: 1,
+			wantRequested:      []string{"aerial-config"},
+			wantReconciles:     []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-config"}},
+		},
+		{
+			name: "sync_success on a repo with no Flux source completes as deployed",
+			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/mirrormere", "sha-no-flux", 1642, "1555405874565091380", "success", ""),
+			reg:  &mockPRRegistry{},
+			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
+				"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}},
+			}},
+			wantPR:           1642,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 1,
+			wantPrompts:      1,
+			wantPromptSubs:   []string{"Continuous Delivery deployment completed for job git-sync on azylman/mirrormere (PR #1642, commit: sha-no-flux)."},
+		},
+		{
+			name:         "sync_success with image build pending stays synced without discovering kustomizations",
+			evt:          DeployEvent{Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"}, Repo: "azylman/aerial", CommitSHA: "sha-image-pending", PRNumber: 1643, TargetID: "1555405874565091380", Status: "success"},
+			reg:          &mockPRRegistry{},
+			disp:         &mockOutboundDispatcher{repoDiscoverErr: errors.New("unexpected discovery while images are pending")},
+			wantPR:       1643,
+			wantTargetID: "1555405874565091380",
+		},
+		{
+			name:    "sync_success kustomization discovery error propagates",
+			evt:     mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-discover-err", 1644, "1555405874565091380", "success", ""),
+			reg:     &mockPRRegistry{},
+			disp:    &mockOutboundDispatcher{repoDiscoverErr: errors.New("kube api down")},
+			wantErr: true,
+		},
+		{
+			name: "sync_success kustomization request record error propagates",
+			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-record-err", 1645, "1555405874565091380", "success", ""),
+			reg:  &mockPRRegistry{kustomizationRequestErr: errors.New("db down")},
+			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
+				"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "sync_success deploying transition error propagates",
+			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-deploying-err", 1646, "1555405874565091380", "success", ""),
+			reg:  &mockPRRegistry{deployingErr: errors.New("db down")},
+			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
+				"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "sync_success reconcile patch error propagates after requests are recorded",
+			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-patch-err", 1647, "1555405874565091380", "success", ""),
+			reg:  &mockPRRegistry{},
+			disp: &mockOutboundDispatcher{
+				repoKustomizations: map[string][]fluxKustomizationRef{"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}}},
+				reconcileErrs:      map[string]error{"aerial-config": errors.New("patch forbidden")},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -1437,8 +1334,21 @@ func TestProcessDeployEvent(t *testing.T) {
 				if len(tc.reg.advanceVanadisCalls) != tc.wantAdvanceCalls {
 					t.Errorf("advanceVanadisCalls = %d, want %d", len(tc.reg.advanceVanadisCalls), tc.wantAdvanceCalls)
 				}
+				var requested []string
+				for _, call := range tc.reg.kustomizationRequestCalls {
+					for name := range call {
+						requested = append(requested, name)
+					}
+				}
+				slices.Sort(requested)
+				if !slices.Equal(requested, tc.wantRequested) {
+					t.Errorf("recorded kustomization requests = %v, want %v", requested, tc.wantRequested)
+				}
 			}
 			if tc.disp != nil {
+				if got := tc.disp.ReconcileCalls(); !slices.Equal(got, tc.wantReconciles) {
+					t.Errorf("reconcile calls = %v, want %v", got, tc.wantReconciles)
+				}
 				dms := tc.disp.DirectMessageCalls()
 				if len(dms) != tc.wantDMs {
 					t.Errorf("DMs = %d, want %d", len(dms), tc.wantDMs)

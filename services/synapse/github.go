@@ -225,6 +225,9 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	if hasExpected {
 		return nil
 	}
+	if deferred, err := s.deferPRToWatcher(ctx, repo, prNum); deferred || err != nil {
+		return err
+	}
 	s.setPRWidgetState(ctx, repo, prNum, "deployed", "")
 	s.recordDeploySuccessDispatched(repo, "git-merge", headSHA, prNum)
 	if err := s.advanceVanadisChunk(ctx, repo, prNum); err != nil {
@@ -334,28 +337,6 @@ func (s *RouterServer) promoteWorkflowRunImages(ctx context.Context, images []st
 		})
 	}
 	wg.Wait()
-	return errors.Join(errs...)
-}
-
-// newKustomizationRequests builds the reconcile request recorded for each ref, all requested at now.
-func newKustomizationRequests(refs []fluxKustomizationRef, now time.Time) map[string]kustomizationRequest {
-	requestedAt := now.Format(time.RFC3339Nano)
-	requests := make(map[string]kustomizationRequest, len(refs))
-	for _, ref := range refs {
-		requests[ref.Name] = kustomizationRequest{Namespace: ref.Namespace, RequestedAt: requestedAt}
-	}
-	return requests
-}
-
-// reconcileImageKustomizations patches each ref with its recorded request; one failure never skips the rest.
-func (s *RouterServer) reconcileImageKustomizations(ctx context.Context, refs []fluxKustomizationRef, requests map[string]kustomizationRequest) error {
-	var errs []error
-	for _, ref := range refs {
-		if err := s.dispatcher.ReconcileKustomization(ctx, ref, requests[ref.Name].RequestedAt); err != nil {
-			log.Printf("[synapse] [dispatcher] error reconciling kustomization %s/%s: %v", ref.Namespace, ref.Name, err)
-			errs = append(errs, err)
-		}
-	}
 	return errors.Join(errs...)
 }
 

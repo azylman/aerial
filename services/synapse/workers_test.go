@@ -1455,6 +1455,70 @@ func TestDefaultOutboundDispatcher_ReconcileKustomization(t *testing.T) {
 	}
 }
 
+func TestDefaultOutboundDispatcher_DiscoverRepoKustomizations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const (
+		configGitGet = "GET /apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/aerial-config"
+		aerialGitGet = "GET /apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/aerial"
+		appsGitGet   = "GET /apis/source.toolkit.fluxcd.io/v1/namespaces/apps/gitrepositories/stack"
+		kustList     = `{"items":[` +
+			`{"metadata":{"name":"zeta-config"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial-config"}}},` +
+			`{"metadata":{"name":"aerial-core"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}}},` +
+			`{"metadata":{"name":"alpha-config"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial-config"}}},` +
+			`{"metadata":{"name":"paused-config"},"spec":{"suspend":true,"sourceRef":{"kind":"GitRepository","name":"aerial-config"}}},` +
+			`{"metadata":{"name":"stack"},"spec":{"sourceRef":{"kind":"GitRepository","name":"stack","namespace":"apps"}}},` +
+			`{"metadata":{"name":"charts"},"spec":{"sourceRef":{"kind":"OCIRepository","name":"charts"}}}]}`
+	)
+	sourceRoutes := map[string]kubeRoute{
+		kubeKustomizations: {body: kustList},
+		configGitGet:       {body: `{"spec":{"url":"https://github.com/Azylman/Aerial-Config.git"}}`},
+		aerialGitGet:       {body: `{"spec":{"url":"ssh://git@github.com/azylman/aerial"}}`},
+		appsGitGet:         {body: `{"spec":{"url":"git@github.com:acme/stack.git"}}`},
+	}
+
+	tests := []struct {
+		name      string
+		apiServer bool
+		repo      string
+		routes    map[string]kubeRoute
+		want      []fluxKustomizationRef
+		wantErr   string
+	}{
+		{name: "matches every unsuspended kustomization of the repo sorted", apiServer: true, repo: "azylman/aerial-config", routes: sourceRoutes, want: []fluxKustomizationRef{{Namespace: "flux-system", Name: "alpha-config"}, {Namespace: "flux-system", Name: "zeta-config"}}},
+		{name: "bare repo name normalizes to the default owner", apiServer: true, repo: "aerial", routes: sourceRoutes, want: []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}}},
+		{name: "cross-namespace source resolves in its own namespace", apiServer: true, repo: "acme/stack", routes: sourceRoutes, want: []fluxKustomizationRef{{Namespace: "flux-system", Name: "stack"}}},
+		{name: "repo with no flux source finds nothing", apiServer: true, repo: "azylman/mirrormere", routes: sourceRoutes},
+		{name: "kube api not configured finds nothing", repo: "azylman/aerial-config"},
+		{name: "empty repo finds nothing", apiServer: true, repo: " ", routes: sourceRoutes},
+		{name: "kustomization list failure", apiServer: true, repo: "azylman/aerial-config", wantErr: "list kustomizations"},
+		{name: "malformed kustomization list", apiServer: true, repo: "azylman/aerial-config", routes: map[string]kubeRoute{kubeKustomizations: {body: `{`}}, wantErr: "decode kustomization list"},
+		{name: "gitrepository get failure", apiServer: true, repo: "azylman/aerial-config", routes: map[string]kubeRoute{kubeKustomizations: {body: kustList}}, wantErr: "get gitrepository flux-system/aerial-config"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, ts := newKubeFixture(t, tc.routes)
+			disp := NewDefaultOutboundDispatcher("", ts.Client())
+			if tc.apiServer {
+				disp.SetKubeConfig(ts.URL, "test-token")
+			}
+			got, err := disp.DiscoverRepoKustomizations(ctx, tc.repo)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("refs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDefaultOutboundDispatcher_ResolveFluxSourceRepo(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

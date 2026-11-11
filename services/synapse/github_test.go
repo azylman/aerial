@@ -131,6 +131,7 @@ type ghEventCase struct {
 	wantRecordCheckCalls int
 	wantRecordCheckState string
 	wantUpdatedBranchHit string
+	wantReconciles       []fluxKustomizationRef
 }
 
 func TestProcessGitHubEvent(t *testing.T) {
@@ -788,6 +789,21 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantPR:  221, wantAdvanceCalls: 1, wantPrompts: 0,
 		},
 		{
+			name: "workflow_run on main for a Flux-sourced repo hands completion to the kustomization watcher", event: "workflow_run", delivery: "del-wf-aerial-config-flux",
+			payload:        `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge222","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial-config"}}`,
+			reg:            &mockPRRegistry{resolvePRNum: 222, resolveBranch: "feat/config-only", resolveTargetID: "1562162630997581946", hasExpectedRes: false, suppressVanadisRes: true},
+			disp:           &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}}}},
+			wantPR:         222,
+			wantReconciles: []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-config"}},
+		},
+		{
+			name: "workflow_run on main kustomization discovery error propagates", event: "workflow_run", delivery: "del-wf-aerial-config-discover-err",
+			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge223","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial-config"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 223, resolveBranch: "feat/config-only", resolveTargetID: "1562162630997581946", hasExpectedRes: false},
+			disp:    &mockOutboundDispatcher{repoDiscoverErr: errors.New("kube api down")},
+			wantErr: true,
+		},
+		{
 			name: "workflow_run on main completeNoDeployWorkflowRun HasExpectedDeployJobs error propagates", event: "workflow_run", delivery: "del-wf-mirrormere-has-expected-err",
 			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge221","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 221, resolveBranch: "feat/ui-no-deploy", resolveTargetID: "1562162630997581946", hasExpectedErr: errors.New("simulated has expected deploy jobs error")},
@@ -1050,6 +1066,9 @@ func TestProcessGitHubEvent(t *testing.T) {
 					if tc.wantPR != 0 && gitPushes[0].PRNumber != tc.wantPR {
 						t.Errorf("git push PRNumber = %d, want %d", gitPushes[0].PRNumber, tc.wantPR)
 					}
+				}
+				if got := tc.disp.ReconcileCalls(); !slices.Equal(got, tc.wantReconciles) {
+					t.Errorf("reconcile calls = %v, want %v", got, tc.wantReconciles)
 				}
 				dispatches := tc.disp.DispatchCalls()
 				if len(dispatches) != tc.wantDispatches {
@@ -3197,325 +3216,6 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 			}
 			if !tc.wantRegistered && len(reg.ensureCalls) > 0 {
 				t.Fatalf("expected PR NOT to be registered, but EnsurePRRegistered was called %d times", len(reg.ensureCalls))
-			}
-		})
-	}
-}
-
-func TestIsPROwnedLocally(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		nilServer  bool
-		nilReg     bool
-		prNum      int
-		targetID   string
-		branch     string
-		resolveErr error
-		wantOwned  bool
-	}{
-		{name: "nil server", nilServer: true, prNum: 101, wantOwned: false},
-		{name: "nil registry", nilReg: true, prNum: 101, wantOwned: false},
-		{name: "prNum zero", prNum: 0, targetID: "12345", wantOwned: false},
-		{name: "prNum negative", prNum: -1, targetID: "12345", wantOwned: false},
-		{name: "resolve error", prNum: 101, resolveErr: errors.New("db error"), wantOwned: false},
-		{name: "empty target and branch", prNum: 101, targetID: "", branch: "", wantOwned: false},
-		{name: "whitespace target and branch", prNum: 101, targetID: "   ", branch: "\t", wantOwned: false},
-		{name: "non-empty targetID", prNum: 101, targetID: "123456789012345678", wantOwned: true},
-		{name: "non-empty branch", prNum: 101, branch: "feat/foo", wantOwned: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if tc.nilServer {
-				var srv *RouterServer
-				if got := srv.isPROwnedLocally(context.Background(), "azylman/aerial", tc.prNum); got != tc.wantOwned {
-					t.Fatalf("isPROwnedLocally got %v, want %v", got, tc.wantOwned)
-				}
-				return
-			}
-			var reg PRRegistryUpdater
-			if !tc.nilReg {
-				reg = &mockPRRegistry{
-					resolveTargetID: tc.targetID,
-					resolveBranch:   tc.branch,
-					resolveErr:      tc.resolveErr,
-				}
-			}
-			srv := newTestRouter(Config{}, nil, reg, nil)
-			if got := srv.isPROwnedLocally(context.Background(), "azylman/aerial", tc.prNum); got != tc.wantOwned {
-				t.Fatalf("isPROwnedLocally got %v, want %v", got, tc.wantOwned)
-			}
-		})
-	}
-}
-
-func TestDispatchWorkflowRunImages_Ownership(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		prNum          int
-		defaultOwner   bool
-		forwardURLs    map[string]string
-		nilReg         bool
-		ownedLocally   bool
-		wantDispatched int
-	}{
-		{
-			name:           "prNum > 0, locally owned, not default owner -> promotes",
-			prNum:          101,
-			defaultOwner:   false,
-			ownedLocally:   true,
-			wantDispatched: 1,
-		},
-		{
-			name:           "prNum > 0, unowned locally, default owner with empty forward URLs -> promotes",
-			prNum:          102,
-			defaultOwner:   true,
-			forwardURLs:    nil,
-			ownedLocally:   false,
-			wantDispatched: 1,
-		},
-		{
-			name:           "prNum > 0, unowned locally, default owner with peer forward URLs -> skipped",
-			prNum:          103,
-			defaultOwner:   true,
-			forwardURLs:    map[string]string{"coven": "http://coven.local"},
-			ownedLocally:   false,
-			wantDispatched: 0,
-		},
-		{
-			name:           "prNum > 0, unowned locally, not default owner -> skipped",
-			prNum:          104,
-			defaultOwner:   false,
-			ownedLocally:   false,
-			wantDispatched: 0,
-		},
-		{
-			name:           "prNum == 0, default owner -> promotes",
-			prNum:          0,
-			defaultOwner:   true,
-			wantDispatched: 1,
-		},
-		{
-			name:           "prNum == 0, not default owner with registry -> skipped",
-			prNum:          0,
-			defaultOwner:   false,
-			wantDispatched: 0,
-		},
-		{
-			name:           "prNum == 0, not default owner with nil registry -> promotes",
-			prNum:          0,
-			defaultOwner:   false,
-			nilReg:         true,
-			wantDispatched: 1,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.Contains(r.URL.Path, "/actions/runs/") {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`{
-						"total_count": 1,
-						"jobs": [
-							{
-								"id": 1,
-								"name": "Build & Push Container Images (eri)",
-								"status": "completed",
-								"conclusion": "success"
-							}
-						]
-					}`))
-					return
-				}
-				w.WriteHeader(http.StatusNotFound)
-			}))
-			defer mockServer.Close()
-
-			var reg PRRegistryUpdater
-			if !tc.nilReg {
-				reg = &mockPRRegistry{
-					resolveTargetID: "123456789012345678",
-				}
-				if !tc.ownedLocally {
-					reg = &mockPRRegistry{}
-				}
-			}
-			disp := &mockOutboundDispatcher{
-				kustomizationsByImage: map[string][]fluxKustomizationRef{"aerial-eri": {{Namespace: "flux-system", Name: "aerial-core"}}},
-			}
-			cfg := Config{
-				GitHubAPIURL:       mockServer.URL,
-				DefaultOwner:       tc.defaultOwner,
-				WebhookForwardURLs: tc.forwardURLs,
-			}
-			srv := newTestRouter(cfg, mockServer.Client(), reg, disp)
-
-			err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 1, "main", "success", "sha123", "target-123", tc.prNum)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(disp.PromoteCalls()) != tc.wantDispatched {
-				t.Fatalf("got %d promote calls, want %d", len(disp.PromoteCalls()), tc.wantDispatched)
-			}
-		})
-	}
-}
-
-func TestDispatchGitPush_Ownership(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		defaultOwner   bool
-		targetID       string
-		ref            string
-		sha            string
-		wantDispatched bool
-	}{
-		{
-			name:           "default owner without targetID -> dispatches",
-			defaultOwner:   true,
-			targetID:       "",
-			ref:            "refs/heads/main",
-			sha:            "abc1234",
-			wantDispatched: true,
-		},
-		{
-			name:           "not default owner without targetID -> skipped",
-			defaultOwner:   false,
-			targetID:       "",
-			ref:            "refs/heads/main",
-			sha:            "abc1234",
-			wantDispatched: false,
-		},
-		{
-			name:           "not default owner with targetID -> dispatches",
-			defaultOwner:   false,
-			targetID:       "123456789012345678",
-			ref:            "refs/heads/main",
-			sha:            "abc1234",
-			wantDispatched: true,
-		},
-		{
-			name:           "non-main ref -> skipped regardless of ownership",
-			defaultOwner:   true,
-			targetID:       "123456789012345678",
-			ref:            "refs/heads/feature",
-			sha:            "abc1234",
-			wantDispatched: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			disp := &mockOutboundDispatcher{}
-			cfg := Config{
-				DefaultOwner: tc.defaultOwner,
-			}
-			srv := newTestRouter(cfg, nil, nil, disp)
-
-			err := srv.dispatchGitPush(context.Background(), "azylman/aerial", tc.ref, tc.sha, tc.targetID, 0)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if (len(disp.GitPushCalls()) > 0) != tc.wantDispatched {
-				t.Fatalf("gitPushCalls = %d, wantDispatched = %v", len(disp.GitPushCalls()), tc.wantDispatched)
-			}
-		})
-	}
-}
-
-func TestCheckOpenPRConflicts_Ownership(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name            string
-		defaultOwner    bool
-		ownedPRs        map[int]bool
-		wantUpdateCalls int
-		wantUpdatedPR   int
-	}{
-		{
-			name:            "default owner checks first eligible PR",
-			defaultOwner:    true,
-			ownedPRs:        nil,
-			wantUpdateCalls: 1,
-			wantUpdatedPR:   10,
-		},
-		{
-			name:            "non-default owner skips unowned PR and updates owned PR",
-			defaultOwner:    false,
-			ownedPRs:        map[int]bool{20: true},
-			wantUpdateCalls: 1,
-			wantUpdatedPR:   20,
-		},
-		{
-			name:            "non-default owner skips all when none owned",
-			defaultOwner:    false,
-			ownedPRs:        map[int]bool{},
-			wantUpdateCalls: 0,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var mu sync.Mutex
-			var updateCalls []int
-			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.Contains(r.URL.Path, "/pulls") && r.Method == http.MethodGet {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`[
-						{"number": 10, "draft": false, "user": {"login": "azylman"}, "head": {"ref": "branch-10", "sha": "sha10"}},
-						{"number": 20, "draft": false, "user": {"login": "azylman"}, "head": {"ref": "branch-20", "sha": "sha20"}}
-					]`))
-					return
-				}
-				if strings.Contains(r.URL.Path, "/update-branch") && r.Method == http.MethodPut {
-					parts := strings.Split(r.URL.Path, "/")
-					for i, p := range parts {
-						if p == "pulls" && i+1 < len(parts) {
-							var num int
-							fmt.Sscanf(parts[i+1], "%d", &num)
-							mu.Lock()
-							updateCalls = append(updateCalls, num)
-							mu.Unlock()
-						}
-					}
-					w.WriteHeader(http.StatusOK)
-					return
-				}
-				w.WriteHeader(http.StatusNotFound)
-			}))
-			defer mockServer.Close()
-
-			reg := &ownedMapRegistry{ownedPRs: tc.ownedPRs}
-			cfg := Config{
-				GitHubAPIURL:        mockServer.URL,
-				DefaultOwner:        tc.defaultOwner,
-				AutoUpdatePRAuthors: []string{"azylman"},
-			}
-			srv := newTestRouter(cfg, mockServer.Client(), reg, nil)
-
-			err := srv.checkOpenPRConflicts(context.Background(), "azylman/aerial")
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			if len(updateCalls) != tc.wantUpdateCalls {
-				t.Fatalf("updateCalls len = %d, want %d", len(updateCalls), tc.wantUpdateCalls)
-			}
-			if tc.wantUpdateCalls > 0 && updateCalls[0] != tc.wantUpdatedPR {
-				t.Fatalf("updated PR = %d, want %d", updateCalls[0], tc.wantUpdatedPR)
 			}
 		})
 	}
