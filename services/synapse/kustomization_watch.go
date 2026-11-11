@@ -10,6 +10,7 @@ import (
 	"log"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -26,6 +27,8 @@ type kustomizationObservation struct {
 	Suspended              bool
 	RequestedAt            string
 	LastHandledReconcileAt string
+	LastAppliedRevision    string
+	SourceRef              fluxSourceRef
 	Conditions             []fluxCondition
 }
 
@@ -187,7 +190,7 @@ func (w workloadSource) list(ctx context.Context, kube *DefaultOutboundDispatche
 	if err != nil {
 		return "", err
 	}
-	return resourceVersion, w.recheck(ctx, kube, sink)
+	return resourceVersion, recheckPendingRollouts(ctx, kube, sink)
 }
 
 func (w workloadSource) watch(ctx context.Context, kube *DefaultOutboundDispatcher, resourceVersion string) (io.ReadCloser, error) {
@@ -198,10 +201,12 @@ func (w workloadSource) apply(ctx context.Context, kube *DefaultOutboundDispatch
 	if eventType == "DELETED" {
 		return nil
 	}
-	return w.recheck(ctx, kube, sink)
+	return recheckPendingRollouts(ctx, kube, sink)
 }
 
-func (w workloadSource) recheck(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink) error {
+// recheckPendingRollouts re-lists flux-system Kustomizations while any PR rollout is pending, so requests
+// gated on workload rollout re-evaluate against current state.
+func recheckPendingRollouts(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink) error {
 	pending, err := sink.hasPendingRollouts(ctx)
 	if err != nil || !pending {
 		return err
@@ -210,6 +215,24 @@ func (w workloadSource) recheck(ctx context.Context, kube *DefaultOutboundDispat
 		return fmt.Errorf("re-evaluate rollouts: %w", err)
 	}
 	return nil
+}
+
+// runRolloutRechecks re-evaluates pending rollouts on every tick until ctx ends or ticks closes, so
+// time-based outcomes such as a Reloader restart timeout fire even when no watched object changes.
+func runRolloutRechecks(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink, ticks <-chan time.Time) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
+			if err := recheckPendingRollouts(ctx, kube, sink); err != nil && ctx.Err() == nil {
+				log.Printf("[synapse] [flux-watch] error re-checking pending rollouts: %v", err)
+			}
+		}
+	}
 }
 
 // kubeWatcher runs the informer loop over one source: LIST and apply the full state, WATCH from the
@@ -326,6 +349,11 @@ func (s *RouterServer) startKustomizationWatcher(ctx context.Context, kube *Defa
 	for _, source := range rolloutWatchSources() {
 		wg.Go(func() { newKubeWatcher(kube, s, source, kube.retryDelay).Run(ctx) })
 	}
+	ticker := time.NewTicker(rolloutRecheckInterval)
+	wg.Go(func() {
+		defer ticker.Stop()
+		runRolloutRechecks(ctx, kube, s, ticker.C)
+	})
 	return func() {
 		cancel()
 		wg.Wait()
@@ -450,17 +478,17 @@ func (s *RouterServer) applyKustomizationDeleted(ctx context.Context, ref fluxKu
 }
 
 // applyObservation acts on each pending request for obs. A request Flux has applied completes only once
-// the Kustomization's workloads running the PR's image have rolled out; the workloads are listed at most
-// once per call. Lost requests are repaired with one PATCH carrying the latest recorded value, which
-// covers every earlier request. A returned error means some PR is still deploying with work left undone;
-// the watcher then backs off and re-lists, because a Kustomization already in its final state emits no
-// further event to retry on.
+// everything the PR changed in the Kustomization is live (see gateKustomizationRequest); its workloads,
+// ConfigMaps and source repo are loaded at most once per call. Lost requests are repaired with one PATCH
+// carrying the latest recorded value, which covers every earlier request. A returned error means some PR
+// is still deploying with work left undone; the watcher then backs off and re-lists, because a
+// Kustomization already in its final state emits no further event to retry on.
 func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedRollout, obs kustomizationObservation) error {
 	repatchAt := ""
 	var errs []error
-	var workloads []workloadRollout
-	var listErr error
-	listed := false
+	var state kustomizationRolloutState
+	var loadErr error
+	loaded := false
 	for _, t := range rollouts {
 		req, pending := t.pendingRequest(obs.Ref)
 		if !pending {
@@ -468,14 +496,14 @@ func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedR
 		}
 		switch action := kustomizationRequestAction(req, obs); action.Kind {
 		case kustomizationMarkDeployed:
-			if !listed {
-				listed = true
-				if workloads, listErr = s.dispatcher.ListKustomizationWorkloads(ctx, obs.Ref); listErr != nil {
-					errs = append(errs, fmt.Errorf("list workloads of %s/%s: %w", obs.Ref.Namespace, obs.Ref.Name, listErr))
+			if !loaded {
+				loaded = true
+				if state, loadErr = s.loadKustomizationRollout(ctx, obs); loadErr != nil {
+					errs = append(errs, loadErr)
 				}
 			}
-			if listErr == nil {
-				errs = append(errs, s.gateKustomizationRequest(ctx, t.PR, obs.Ref.Name, workloads))
+			if loadErr == nil {
+				errs = append(errs, s.gateKustomizationRequest(ctx, t.PR, obs, state))
 			}
 		case kustomizationFail:
 			errs = append(errs, s.failKustomizationRollout(ctx, t.PR, obs.Ref.Name, action.Reason))
@@ -495,11 +523,59 @@ func (s *RouterServer) applyObservation(ctx context.Context, rollouts []trackedR
 	return errors.Join(errs...)
 }
 
-// gateKustomizationRequest completes an applied Kustomization request once the workloads running the
-// PR's commit image have rolled out, fails it when one of them failed, and otherwise leaves it pending
-// for the workload watcher to re-evaluate.
-func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr DeployingPR, name string, workloads []workloadRollout) error {
-	done, failed, reason := commitRolloutStatus(workloads, firstNonEmpty(pr.MergeSHA, pr.HeadSHA))
+// kustomizationRolloutState is the live cluster state of one applied Kustomization that gates PR deploys.
+type kustomizationRolloutState struct {
+	Workloads  []workloadRollout
+	ConfigMaps []configMapChange
+	SourceRepo string
+}
+
+// loadKustomizationRollout lists obs's workloads and ConfigMaps and resolves the owner/repo of its
+// GitRepository source ("" for any other source kind).
+func (s *RouterServer) loadKustomizationRollout(ctx context.Context, obs kustomizationObservation) (kustomizationRolloutState, error) {
+	workloads, err := s.dispatcher.ListKustomizationWorkloads(ctx, obs.Ref)
+	if err != nil {
+		return kustomizationRolloutState{}, fmt.Errorf("list workloads of %s/%s: %w", obs.Ref.Namespace, obs.Ref.Name, err)
+	}
+	configMaps, err := s.dispatcher.ListKustomizationConfigMaps(ctx, obs.Ref)
+	if err != nil {
+		return kustomizationRolloutState{}, fmt.Errorf("list configmaps of %s/%s: %w", obs.Ref.Namespace, obs.Ref.Name, err)
+	}
+	sourceRepo, err := s.dispatcher.ResolveFluxSourceRepo(ctx, FluxInvolvedObject{Kind: obs.SourceRef.Kind, Name: obs.SourceRef.Name, Namespace: obs.SourceRef.Namespace})
+	if err != nil {
+		return kustomizationRolloutState{}, fmt.Errorf("resolve source of %s/%s: %w", obs.Ref.Namespace, obs.Ref.Name, err)
+	}
+	return kustomizationRolloutState{Workloads: workloads, ConfigMaps: configMaps, SourceRepo: sourceRepo}, nil
+}
+
+// gateKustomizationRequest completes an applied Kustomization request once the PR's change is live:
+// when the Kustomization's source is the PR's repo, Flux must have applied the merge commit or a
+// descendant of it, and every workload the change reached must have rolled out (prRolloutStatus, with
+// the merge commit time as the change cutoff). It fails the PR when a rollout failed and otherwise
+// leaves it pending for the watchers and the periodic recheck to re-evaluate.
+func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr DeployingPR, obs kustomizationObservation, state kustomizationRolloutState) error {
+	name := obs.Ref.Name
+	commitSHA := firstNonEmpty(pr.MergeSHA, pr.HeadSHA)
+	if commitSHA == "" {
+		log.Printf("[synapse] [flux-watch] waiting on %s for %s#%d: no merge commit recorded", name, pr.Repo, pr.PRNumber)
+		return nil
+	}
+	if state.SourceRepo != "" && strings.EqualFold(normalizeRepo(state.SourceRepo), normalizeRepo(pr.Repo)) {
+		applied := cleanRevisionSHA(obs.LastAppliedRevision)
+		live, err := s.revisionIncludes(ctx, pr.Repo, applied, commitSHA)
+		if err != nil {
+			return fmt.Errorf("check applied revision of %s for %s#%d: %w", name, pr.Repo, pr.PRNumber, err)
+		}
+		if !live {
+			log.Printf("[synapse] [flux-watch] waiting for %s to apply %s for %s#%d (applied %q)", name, commitSHA, pr.Repo, pr.PRNumber, applied)
+			return nil
+		}
+	}
+	since, err := s.commitTime(ctx, pr.Repo, commitSHA)
+	if err != nil {
+		return fmt.Errorf("resolve merge time of %s#%d: %w", pr.Repo, pr.PRNumber, err)
+	}
+	done, failed, reason := prRolloutStatus(prRolloutInput{Workloads: state.Workloads, ConfigMaps: state.ConfigMaps, CommitSHA: commitSHA, Since: since, Now: time.Now()})
 	switch {
 	case failed:
 		return s.failKustomizationRollout(ctx, pr, name, reason)
@@ -509,6 +585,94 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 		log.Printf("[synapse] [flux-watch] waiting for rollout of %s for %s#%d: %s", name, pr.Repo, pr.PRNumber, reason)
 		return nil
 	}
+}
+
+// gitHistoryCache memoizes the GitHub facts the rollout gate needs. Both are immutable: a commit's
+// time never changes, and neither does whether one SHA descends from another.
+type gitHistoryCache struct {
+	mu          sync.Mutex
+	commitTimes map[string]time.Time
+	includes    map[string]bool
+}
+
+func (c *gitHistoryCache) commitTime(key string) (time.Time, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	at, ok := c.commitTimes[key]
+	return at, ok
+}
+
+func (c *gitHistoryCache) storeCommitTime(key string, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.commitTimes == nil {
+		c.commitTimes = make(map[string]time.Time)
+	}
+	c.commitTimes[key] = at
+}
+
+func (c *gitHistoryCache) includesVerdict(key string) (verdict, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	verdict, ok = c.includes[key]
+	return verdict, ok
+}
+
+func (c *gitHistoryCache) storeIncludesVerdict(key string, verdict bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.includes == nil {
+		c.includes = make(map[string]bool)
+	}
+	c.includes[key] = verdict
+}
+
+// commitTime returns the committer date of sha in repo, which for a merge commit is when it merged.
+func (s *RouterServer) commitTime(ctx context.Context, repo, sha string) (time.Time, error) {
+	repo = normalizeRepo(repo)
+	key := repo + "@" + sha
+	if at, ok := s.gitHistory.commitTime(key); ok {
+		return at, nil
+	}
+	var commit struct {
+		Committer struct {
+			Date time.Time `json:"date"`
+		} `json:"committer"`
+	}
+	if err := s.getGitHubJSON(ctx, "/repos/"+repo+"/git/commits/"+url.PathEscape(sha), 1<<20, &commit); err != nil {
+		return time.Time{}, fmt.Errorf("get commit %s: %w", sha, err)
+	}
+	if commit.Committer.Date.IsZero() {
+		return time.Time{}, fmt.Errorf("commit %s has no committer date", sha)
+	}
+	s.gitHistory.storeCommitTime(key, commit.Committer.Date)
+	return commit.Committer.Date, nil
+}
+
+// revisionIncludes reports whether revision is commit or a descendant of it in repo; an empty revision
+// includes nothing.
+func (s *RouterServer) revisionIncludes(ctx context.Context, repo, revision, commit string) (bool, error) {
+	if revision == "" {
+		return false, nil
+	}
+	if revision == commit {
+		return true, nil
+	}
+	repo = normalizeRepo(repo)
+	key := repo + "@" + commit + "..." + revision
+	if verdict, ok := s.gitHistory.includesVerdict(key); ok {
+		return verdict, nil
+	}
+	var comparison struct {
+		Status string `json:"status"`
+	}
+	path := "/repos/" + repo + "/compare/" + url.PathEscape(commit) + "..." + url.PathEscape(revision) + "?per_page=1"
+	if err := s.getGitHubJSON(ctx, path, 16<<20, &comparison); err != nil {
+		return false, fmt.Errorf("compare %s...%s: %w", commit, revision, err)
+	}
+	verdict := comparison.Status == "identical" || comparison.Status == "ahead"
+	s.gitHistory.storeIncludesVerdict(key, verdict)
+	return verdict, nil
 }
 
 // completeKustomizationRequest records one handled Kustomization; only the call that flips the PR to

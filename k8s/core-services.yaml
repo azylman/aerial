@@ -1128,6 +1128,12 @@ metadata:
   name: synapse-workload-reader
 rules:
   - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - list
+  - apiGroups:
       - apps
     resources:
       - deployments

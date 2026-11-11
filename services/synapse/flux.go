@@ -276,13 +276,64 @@ type workloadImageRef struct {
 	Images []string
 }
 
+// kubeNameRef is any kube reference object identified by name (configMapKeyRef, configMapRef, configMap volume).
+type kubeNameRef struct {
+	Name string `json:"name"`
+}
+
 type kubeContainer struct {
 	Image string `json:"image"`
+	Env   []struct {
+		ValueFrom struct {
+			ConfigMapKeyRef *kubeNameRef `json:"configMapKeyRef"`
+		} `json:"valueFrom"`
+	} `json:"env"`
+	EnvFrom []struct {
+		ConfigMapRef *kubeNameRef `json:"configMapRef"`
+	} `json:"envFrom"`
+}
+
+type kubeVolume struct {
+	ConfigMap *kubeNameRef `json:"configMap"`
+	Projected struct {
+		Sources []struct {
+			ConfigMap *kubeNameRef `json:"configMap"`
+		} `json:"sources"`
+	} `json:"projected"`
 }
 
 type kubePodSpec struct {
 	Containers     []kubeContainer `json:"containers"`
 	InitContainers []kubeContainer `json:"initContainers"`
+	Volumes        []kubeVolume    `json:"volumes"`
+}
+
+// configMapRefs returns the sorted, de-duplicated names of the ConfigMaps the pod spec consumes through
+// env valueFrom, envFrom, configMap volumes and projected volume sources.
+func (p kubePodSpec) configMapRefs() []string {
+	var refs []*kubeNameRef
+	for _, c := range slices.Concat(p.Containers, p.InitContainers) {
+		for _, e := range c.Env {
+			refs = append(refs, e.ValueFrom.ConfigMapKeyRef)
+		}
+		for _, e := range c.EnvFrom {
+			refs = append(refs, e.ConfigMapRef)
+		}
+	}
+	for _, v := range p.Volumes {
+		refs = append(refs, v.ConfigMap)
+		for _, src := range v.Projected.Sources {
+			refs = append(refs, src.ConfigMap)
+		}
+	}
+	var names []string
+	for _, ref := range refs {
+		if ref != nil && ref.Name != "" {
+			names = append(names, ref.Name)
+		}
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
 }
 
 func (p kubePodSpec) images() []string {
@@ -330,11 +381,43 @@ func decodeWorkloadImageRefs(body []byte) ([]workloadImageRef, error) {
 	return refs, nil
 }
 
+// kubeManagedField is one metadata.managedFields entry; Subresource is set for status and scale writes.
+type kubeManagedField struct {
+	Time        time.Time `json:"time"`
+	Subresource string    `json:"subresource"`
+}
+
+// kubeObjectMeta is the object metadata the rollout gate reads from workloads and ConfigMaps.
+type kubeObjectMeta struct {
+	Name          string             `json:"name"`
+	Namespace     string             `json:"namespace"`
+	Generation    int64              `json:"generation"`
+	Annotations   map[string]string  `json:"annotations"`
+	ManagedFields []kubeManagedField `json:"managedFields"`
+}
+
+// changedAt is the latest time any manager wrote the object itself (not a subresource), so controller
+// status updates never count as a change; zero when no entry carries a time.
+func (m kubeObjectMeta) changedAt() time.Time {
+	var latest time.Time
+	for _, f := range m.ManagedFields {
+		if f.Subresource == "" && f.Time.After(latest) {
+			latest = f.Time
+		}
+	}
+	return latest
+}
+
 // workloadRollout is the rollout state of one Deployment, StatefulSet or DaemonSet. Replicas is
 // spec.replicas (1 when unset) and StatusReplicas is status.replicas, which still counts old pods.
+// ChangedAt is the last non-status write (see kubeObjectMeta.changedAt) and ConfigMapRefs the ConfigMaps
+// its pod template consumes.
 type workloadRollout struct {
 	Kind, Namespace, Name                                           string
 	Images                                                          []string
+	ChangedAt                                                       time.Time
+	Annotations                                                     map[string]string
+	ConfigMapRefs                                                   []string
 	Generation, ObservedGeneration                                  int64
 	Replicas, UpdatedReplicas, AvailableReplicas, StatusReplicas    int32
 	UpdateRevision, CurrentRevision                                 string
@@ -345,12 +428,8 @@ type workloadRollout struct {
 // kubeRolloutList decodes an apps/v1 Deployment, StatefulSet or DaemonSet list with rollout status.
 type kubeRolloutList struct {
 	Items []struct {
-		Metadata struct {
-			Name       string `json:"name"`
-			Namespace  string `json:"namespace"`
-			Generation int64  `json:"generation"`
-		} `json:"metadata"`
-		Spec struct {
+		Metadata kubeObjectMeta `json:"metadata"`
+		Spec     struct {
 			Replicas *int32 `json:"replicas"`
 			Template struct {
 				Spec kubePodSpec `json:"spec"`
@@ -385,6 +464,9 @@ func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error)
 			Namespace:              item.Metadata.Namespace,
 			Name:                   item.Metadata.Name,
 			Images:                 item.Spec.Template.Spec.images(),
+			ChangedAt:              item.Metadata.changedAt(),
+			Annotations:            item.Metadata.Annotations,
+			ConfigMapRefs:          item.Spec.Template.Spec.configMapRefs(),
 			Generation:             item.Metadata.Generation,
 			ObservedGeneration:     st.ObservedGeneration,
 			Replicas:               *cmp.Or(item.Spec.Replicas, new(int32(1))),
@@ -444,13 +526,97 @@ func workloadRolloutComplete(w workloadRollout) (done, failed bool, reason strin
 	return false, false, reason
 }
 
-// commitRolloutStatus gates a deploy on the workloads running commitSHA's image: done when none run it
-// or all of them have rolled out, failed when any of them failed, otherwise pending with the reason
-// naming each workload still rolling out. Workloads on other images never affect the result.
-func commitRolloutStatus(workloads []workloadRollout, commitSHA string) (done, failed bool, reason string) {
+const (
+	// rolloutChangeSkew tolerates clock skew between GitHub's merge timestamp and the kube API server.
+	rolloutChangeSkew = 30 * time.Second
+	// reloaderRestartTimeout bounds how long a Reloader-enabled workload may lag a changed ConfigMap.
+	reloaderRestartTimeout = 5 * time.Minute
+	// rolloutRecheckInterval re-evaluates pending rollouts without kube events, so timeouts fire.
+	rolloutRecheckInterval = 30 * time.Second
+
+	reloaderAutoAnnotation          = "reloader.stakater.com/auto"
+	reloaderConfigMapAutoAnnotation = "configmap.reloader.stakater.com/auto"
+	reloaderConfigMapAnnotation     = "configmap.reloader.stakater.com/reload"
+)
+
+// configMapChange is when a Flux-managed ConfigMap was last written (see kubeObjectMeta.changedAt).
+type configMapChange struct {
+	Namespace, Name string
+	ChangedAt       time.Time
+}
+
+// decodeConfigMapChanges decodes a ConfigMap list into the last change of each ConfigMap.
+func decodeConfigMapChanges(body []byte) ([]configMapChange, error) {
+	var list struct {
+		Items []struct {
+			Metadata kubeObjectMeta `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, err
+	}
+	changes := make([]configMapChange, 0, len(list.Items))
+	for _, item := range list.Items {
+		changes = append(changes, configMapChange{Namespace: item.Metadata.Namespace, Name: item.Metadata.Name, ChangedAt: item.Metadata.changedAt()})
+	}
+	return changes, nil
+}
+
+// prRolloutInput is everything one Kustomization contributes to a PR's deployed decision. Since is the
+// merge commit time: anything written at or after it (less rolloutChangeSkew) may carry the PR's change.
+type prRolloutInput struct {
+	Workloads  []workloadRollout
+	ConfigMaps []configMapChange
+	CommitSHA  string
+	Since, Now time.Time
+}
+
+// reloadsOn reports whether Reloader restarts w when ConfigMap name changes: auto mode covers the
+// ConfigMaps its pod template consumes, the reload annotation names ConfigMaps explicitly.
+func (w workloadRollout) reloadsOn(name string) bool {
+	auto := w.Annotations[reloaderAutoAnnotation] == "true" || w.Annotations[reloaderConfigMapAutoAnnotation] == "true"
+	if auto && slices.Contains(w.ConfigMapRefs, name) {
+		return true
+	}
+	for listed := range strings.SplitSeq(w.Annotations[reloaderConfigMapAnnotation], ",") {
+		if strings.TrimSpace(listed) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// prRolloutStatus gates a PR deploy on every workload its change reached: workloads running the
+// commit's image, workloads written since the merge (manifest edits), and Reloader-enabled workloads
+// consuming a ConfigMap written since the merge, which must restart after that ConfigMap changed. Done
+// when all of them have rolled out; failed when one failed or Reloader has not restarted it within
+// reloaderRestartTimeout; otherwise pending with the reason naming each workload still rolling out.
+// Workloads nothing changed never affect the result.
+func prRolloutStatus(in prRolloutInput) (done, failed bool, reason string) {
+	cutoff := in.Since.Add(-rolloutChangeSkew)
+	changed := func(at time.Time) bool { return !at.IsZero() && !at.Before(cutoff) }
 	var pending []string
-	for _, w := range workloads {
-		if commitSHA == "" || !slices.ContainsFunc(w.Images, func(image string) bool { return imageTag(image) == commitSHA }) {
+	for _, w := range in.Workloads {
+		gated := changed(w.ChangedAt) || (in.CommitSHA != "" && slices.ContainsFunc(w.Images, func(image string) bool { return imageTag(image) == in.CommitSHA }))
+		var awaitingRestart []string
+		for _, cm := range in.ConfigMaps {
+			if cm.Namespace != w.Namespace || !changed(cm.ChangedAt) || !w.reloadsOn(cm.Name) {
+				continue
+			}
+			gated = true
+			if !w.ChangedAt.Before(cm.ChangedAt) {
+				continue
+			}
+			if in.Now.Sub(cm.ChangedAt) > reloaderRestartTimeout {
+				return false, true, fmt.Sprintf("%s: not restarted by Reloader within %s of ConfigMap %s/%s changing", w, reloaderRestartTimeout, cm.Namespace, cm.Name)
+			}
+			awaitingRestart = append(awaitingRestart, cm.Namespace+"/"+cm.Name)
+		}
+		if !gated {
+			continue
+		}
+		if len(awaitingRestart) > 0 {
+			pending = append(pending, w.String()+" (awaiting Reloader restart for ConfigMap "+strings.Join(awaitingRestart, ", ")+")")
 			continue
 		}
 		wDone, wFailed, wReason := workloadRolloutComplete(w)
@@ -538,6 +704,7 @@ type fluxKustomizationObject struct {
 	} `json:"spec"`
 	Status struct {
 		LastHandledReconcileAt string          `json:"lastHandledReconcileAt"`
+		LastAppliedRevision    string          `json:"lastAppliedRevision"`
 		Conditions             []fluxCondition `json:"conditions"`
 	} `json:"status"`
 }
@@ -552,12 +719,18 @@ func (k fluxKustomizationObject) substitutesImageTags() bool {
 }
 
 // observation projects the fields the rollout watcher acts on; namespace defaults to defaultNamespace.
+// The source ref namespace defaults to the Kustomization's own, as in Flux.
 func (k fluxKustomizationObject) observation(defaultNamespace string) kustomizationObservation {
+	namespace := cmp.Or(k.Metadata.Namespace, defaultNamespace)
+	source := k.Spec.SourceRef
+	source.Namespace = cmp.Or(source.Namespace, namespace)
 	return kustomizationObservation{
-		Ref:                    fluxKustomizationRef{Namespace: cmp.Or(k.Metadata.Namespace, defaultNamespace), Name: k.Metadata.Name},
+		Ref:                    fluxKustomizationRef{Namespace: namespace, Name: k.Metadata.Name},
 		Suspended:              k.Spec.Suspend,
 		RequestedAt:            k.Metadata.Annotations[fluxReconcileRequestedAtAnnotation],
 		LastHandledReconcileAt: k.Status.LastHandledReconcileAt,
+		LastAppliedRevision:    k.Status.LastAppliedRevision,
+		SourceRef:              source,
 		Conditions:             k.Status.Conditions,
 	}
 }

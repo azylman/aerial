@@ -817,6 +817,12 @@ func TestDecodeWorkloadRollouts(t *testing.T) {
 			body: `{"items":[{"metadata":{"name":"fluent-bit","namespace":"kube-system","generation":3},"spec":{"template":{"spec":{"containers":[{"image":"fluent/fluent-bit:4"}]}}},"status":{"observedGeneration":3,"desiredNumberScheduled":3,"updatedNumberScheduled":2,"numberAvailable":3}}]}`,
 			want: []workloadRollout{{Kind: "DaemonSet", Namespace: "kube-system", Name: "fluent-bit", Images: []string{"fluent/fluent-bit:4"}, Generation: 3, ObservedGeneration: 3, Replicas: 1, DesiredNumberScheduled: 3, UpdatedNumberScheduled: 2, NumberAvailable: 3}},
 		},
+		{
+			name: "change time skips subresource writes and configmap refs cover every source",
+			kind: "Deployment",
+			body: `{"items":[{"metadata":{"name":"eri","namespace":"default","generation":5,"annotations":{"reloader.stakater.com/auto":"true"},"managedFields":[{"manager":"kustomize-controller","operation":"Apply","time":"2026-11-08T10:01:00Z"},{"manager":"kube-controller-manager","operation":"Update","subresource":"status","time":"2026-11-08T10:09:00Z"},{"manager":"reloader","operation":"Update","time":"2026-11-08T10:02:00Z"},{"manager":"kubectl","operation":"Update"}]},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-eri:0123abcd","env":[{"name":"A","valueFrom":{"configMapKeyRef":{"name":"eri-flags","key":"a"}}},{"name":"B","value":"b"},{"name":"C","valueFrom":{"secretKeyRef":{"name":"eri-secret","key":"c"}}}],"envFrom":[{"configMapRef":{"name":"eri-env"}},{"secretRef":{"name":"eri-secret"}}]}],"initContainers":[{"image":"busybox","envFrom":[{"configMapRef":{"name":"eri-env"}}]}],"volumes":[{"name":"cfg","configMap":{"name":"eri-config"}},{"name":"data","emptyDir":{}},{"name":"bundle","projected":{"sources":[{"configMap":{"name":"ca-bundle"}},{"secret":{"name":"eri-secret"}}]}}]}}},"status":{"observedGeneration":5,"replicas":1,"updatedReplicas":1,"availableReplicas":1}}]}`,
+			want: []workloadRollout{{Kind: "Deployment", Namespace: "default", Name: "eri", Images: []string{"ghcr.io/azylman/aerial-eri:0123abcd", "busybox"}, ChangedAt: rolloutClock(10, 2, 0), Annotations: map[string]string{"reloader.stakater.com/auto": "true"}, ConfigMapRefs: []string{"ca-bundle", "eri-config", "eri-env", "eri-flags"}, Generation: 5, ObservedGeneration: 5, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1, StatusReplicas: 1}},
+		},
 		{name: "empty list", kind: "Deployment", body: `{"items":[]}`, want: []workloadRollout{}},
 		{name: "malformed list", kind: "Deployment", body: `{"items":`, wantErr: true},
 	}
@@ -870,32 +876,66 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 	}
 }
 
-func TestCommitRolloutStatus(t *testing.T) {
+// rolloutClock returns 2026-11-08 at hh:mm:ss UTC, the day of the rollout fixtures.
+func rolloutClock(hh, mm, ss int) time.Time {
+	return time.Date(2026, time.November, 8, hh, mm, ss, 0, time.UTC)
+}
+
+// withChange sets when w last changed, its annotations and the ConfigMaps its pod template consumes.
+func withChange(w workloadRollout, changedAt time.Time, annotations map[string]string, configMapRefs ...string) workloadRollout {
+	w.ChangedAt, w.Annotations, w.ConfigMapRefs = changedAt, annotations, configMapRefs
+	return w
+}
+
+func TestPRRolloutStatus(t *testing.T) {
 	t.Parallel()
 	const otherImage = "ghcr.io/azylman/aerial-haro:feedface"
+	since := rolloutClock(10, 0, 0)
+	auto := map[string]string{"reloader.stakater.com/auto": "true"}
+	eriDone := deployRollout("eri", otherImage, 2, 2, 1, 1, 1, 1, false)
+	eriRolling := deployRollout("eri", otherImage, 2, 2, 1, 1, 0, 2, false)
+	eriConfig := []configMapChange{{Namespace: "default", Name: "eri-config", ChangedAt: rolloutClock(10, 1, 0)}}
 	tests := []struct {
 		name       string
 		workloads  []workloadRollout
+		configMaps []configMapChange
 		commitSHA  string
+		now        time.Time
 		wantDone   bool
 		wantFailed bool
 		wantReason string
 	}{
 		{name: "no workloads is done", commitSHA: rolloutSHA, wantDone: true},
-		{name: "no matching workloads is done", workloads: []workloadRollout{deployRollout("haro", otherImage, 2, 2, 1, 1, 1, 1, false)}, commitSHA: rolloutSHA, wantDone: true},
-		{name: "matching workload pending", workloads: []workloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, false), dsRollout("agent", synapseImage, 5, 5, 3, 2, 3)}, commitSHA: rolloutSHA, wantReason: "Deployment default/synapse (1/1 updated, 0/1 available, 2 total); DaemonSet kube-system/agent (2/3 updated, 3/3 available)"},
-		{name: "matching workloads done", workloads: []workloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), stsRollout("db", "ghcr.io/azylman/aerial-db:"+rolloutSHA+"@sha256:beef", 2, 2, 1, 1, "db-2", "db-2")}, commitSHA: rolloutSHA, wantDone: true},
-		{name: "unrelated unhealthy workload does not block", workloads: []workloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), deployRollout("haro", otherImage, 2, 2, 1, 0, 0, 2, true)}, commitSHA: rolloutSHA, wantDone: true},
-		{name: "matching workload failed", workloads: []workloadRollout{deployRollout("haro", otherImage, 2, 2, 1, 0, 0, 1, false), deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, true)}, commitSHA: rolloutSHA, wantFailed: true, wantReason: "Deployment default/synapse: progress deadline exceeded"},
-		{name: "matching init container image gates", workloads: []workloadRollout{{Kind: "Deployment", Namespace: "default", Name: "eri", Images: []string{"busybox", synapseImage}, Generation: 1, ObservedGeneration: 1, Replicas: 1, StatusReplicas: 1}}, commitSHA: rolloutSHA, wantReason: "Deployment default/eri (0/1 updated, 0/1 available, 1 total)"},
-		{name: "empty commit matches no untagged image", workloads: []workloadRollout{deployRollout("cache", "valkey", 1, 1, 1, 0, 0, 1, false)}, wantDone: true},
+		{name: "image match pending", workloads: []workloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, false), dsRollout("agent", synapseImage, 5, 5, 3, 2, 3)}, commitSHA: rolloutSHA, wantReason: "Deployment default/synapse (1/1 updated, 0/1 available, 2 total); DaemonSet kube-system/agent (2/3 updated, 3/3 available)"},
+		{name: "image match done", workloads: []workloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), stsRollout("db", "ghcr.io/azylman/aerial-db:"+rolloutSHA+"@sha256:beef", 2, 2, 1, 1, "db-2", "db-2")}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "image match failed", workloads: []workloadRollout{deployRollout("haro", otherImage, 2, 2, 1, 0, 0, 1, false), deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, true)}, commitSHA: rolloutSHA, wantFailed: true, wantReason: "Deployment default/synapse: progress deadline exceeded"},
+		{name: "image match on an init container gates", workloads: []workloadRollout{{Kind: "Deployment", Namespace: "default", Name: "eri", Images: []string{"busybox", synapseImage}, Generation: 1, ObservedGeneration: 1, Replicas: 1, StatusReplicas: 1}}, commitSHA: rolloutSHA, wantReason: "Deployment default/eri (0/1 updated, 0/1 available, 1 total)"},
+		{name: "manifest-only change pending", workloads: []workloadRollout{withChange(deployRollout("haro", otherImage, 3, 3, 1, 1, 0, 2, false), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantReason: "Deployment default/haro (1/1 updated, 0/1 available, 2 total)"},
+		{name: "manifest-only change with unobserved generation pending", workloads: []workloadRollout{withChange(deployRollout("haro", otherImage, 4, 3, 1, 1, 1, 1, false), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantReason: "Deployment default/haro (generation 4 not yet observed)"},
+		{name: "manifest-only change done", workloads: []workloadRollout{withChange(deployRollout("haro", otherImage, 3, 3, 1, 1, 1, 1, false), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "manifest-only change failed", workloads: []workloadRollout{withChange(deployRollout("haro", otherImage, 3, 3, 1, 1, 0, 2, true), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantFailed: true, wantReason: "Deployment default/haro: progress deadline exceeded"},
+		{name: "untouched broken workload ignored", workloads: []workloadRollout{withChange(deployRollout("haro", otherImage, 2, 2, 1, 0, 0, 2, true), rolloutClock(9, 0, 0), nil), deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false)}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "change exactly at the skew boundary gates", workloads: []workloadRollout{withChange(deployRollout("haro", otherImage, 3, 3, 1, 1, 0, 2, false), rolloutClock(9, 59, 30), nil)}, commitSHA: rolloutSHA, wantReason: "Deployment default/haro (1/1 updated, 0/1 available, 2 total)"},
+		{name: "change just before the skew boundary ignored", workloads: []workloadRollout{withChange(deployRollout("haro", otherImage, 3, 3, 1, 1, 0, 2, true), rolloutClock(9, 59, 29), nil)}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "unknown change time and empty commit ignored", workloads: []workloadRollout{deployRollout("cache", "valkey", 1, 1, 1, 0, 0, 1, false)}, wantDone: true},
+		{name: "reloader pending restart", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 3, 0), wantReason: "Deployment default/eri (awaiting Reloader restart for ConfigMap default/eri-config)"},
+		{name: "reloader restarted and rolling out", workloads: []workloadRollout{withChange(eriRolling, rolloutClock(10, 1, 5), auto, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 3, 0), wantReason: "Deployment default/eri (1/1 updated, 0/1 available, 2 total)"},
+		{name: "reloader restarted and rolled out", workloads: []workloadRollout{withChange(eriDone, rolloutClock(10, 1, 0), auto, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 30, 0), wantDone: true},
+		{name: "reloader restart timeout fails", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 6, 1), wantFailed: true, wantReason: "Deployment default/eri: not restarted by Reloader within 5m0s of ConfigMap default/eri-config changing"},
+		{name: "reloader restart at exactly the timeout still pending", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 6, 0), wantReason: "Deployment default/eri (awaiting Reloader restart for ConfigMap default/eri-config)"},
+		{name: "reloader reload annotation names the configmap", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), map[string]string{"configmap.reloader.stakater.com/reload": "eri-flags, eri-config"})}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 3, 0), wantReason: "Deployment default/eri (awaiting Reloader restart for ConfigMap default/eri-config)"},
+		{name: "reloader configmap auto annotation gates", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), map[string]string{"configmap.reloader.stakater.com/auto": "true"}, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 3, 0), wantReason: "Deployment default/eri (awaiting Reloader restart for ConfigMap default/eri-config)"},
+		{name: "reloader auto workload not consuming the configmap ignored", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-flags")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 30, 0), wantDone: true},
+		{name: "consumer without reloader ignored", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), nil, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 30, 0), wantDone: true},
+		{name: "configmap in another namespace ignored", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-config")}, configMaps: []configMapChange{{Namespace: "apps", Name: "eri-config", ChangedAt: rolloutClock(10, 1, 0)}}, commitSHA: rolloutSHA, now: rolloutClock(10, 30, 0), wantDone: true},
+		{name: "configmap changed before the merge ignored", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-config")}, configMaps: []configMapChange{{Namespace: "default", Name: "eri-config", ChangedAt: rolloutClock(9, 30, 0)}}, commitSHA: rolloutSHA, now: rolloutClock(10, 30, 0), wantDone: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			done, failed, reason := commitRolloutStatus(tc.workloads, tc.commitSHA)
+			done, failed, reason := prRolloutStatus(prRolloutInput{Workloads: tc.workloads, ConfigMaps: tc.configMaps, CommitSHA: tc.commitSHA, Since: since, Now: tc.now})
 			if done != tc.wantDone || failed != tc.wantFailed || reason != tc.wantReason {
-				t.Errorf("commitRolloutStatus() = (%v, %v, %q), want (%v, %v, %q)", done, failed, reason, tc.wantDone, tc.wantFailed, tc.wantReason)
+				t.Errorf("prRolloutStatus() = (%v, %v, %q), want (%v, %v, %q)", done, failed, reason, tc.wantDone, tc.wantFailed, tc.wantReason)
 			}
 		})
 	}
