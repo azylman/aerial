@@ -57,6 +57,9 @@ type VanadisChunkPRLookup struct {
 	BuildID            string `json:"build_id,omitempty"`
 	Effort             string `json:"effort,omitempty"`
 	HasRemainingChunks bool   `json:"has_remaining_chunks"`
+	// NextChunkMode is the mode ("pr" or "action") of the chunk AdvanceChunkByPR
+	// would start once this chunk merges, or "" when the build would complete.
+	NextChunkMode string `json:"next_chunk_mode,omitempty"`
 }
 
 // AttachChunkPRRequest represents the payload for POST /chunks/attach-pr.
@@ -208,44 +211,6 @@ func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*V
 		return nil, nil, fmt.Errorf("query build %s for chunk %s: %w", c.BuildID, chunkID, err)
 	}
 	return &c, &b, nil
-}
-
-// GetChunkByPR looks up a chunk and its parent build for a given repo and pr_number.
-func (s *PostgresVanadisStore) GetChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error) {
-	if s == nil || s.db == nil {
-		return nil, errors.New("database connection is nil")
-	}
-	candidates := repoMatchCandidates(repo)
-	if len(candidates) == 0 || prNumber <= 0 {
-		return &VanadisChunkPRLookup{Matched: false}, nil
-	}
-	const query = `
-		SELECT c.id, c.build_id, COALESCE(NULLIF(c.effort, ''), 'medium'),
-		       EXISTS (
-		           SELECT 1 FROM vanadis_chunks c2
-		           WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index
-		       )
-		FROM vanadis_chunks c
-		JOIN vanadis_builds b ON c.build_id = b.id
-		WHERE c.repo = ANY($1) AND c.pr_number = $2 AND b.status != 'cancelled'
-		ORDER BY c.updated_at DESC
-		LIMIT 1;`
-	var chunkID, buildID, effort string
-	var hasRemaining bool
-	err := s.db.QueryRow(ctx, query, candidates, prNumber).Scan(&chunkID, &buildID, &effort, &hasRemaining)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return &VanadisChunkPRLookup{Matched: false}, nil
-		}
-		return nil, fmt.Errorf("query chunk by pr %s#%d: %w", repo, prNumber, err)
-	}
-	return &VanadisChunkPRLookup{
-		Matched:            true,
-		ChunkID:            chunkID,
-		BuildID:            buildID,
-		Effort:             capChunkEffort(effort),
-		HasRemainingChunks: hasRemaining,
-	}, nil
 }
 
 // AttachChunkPR links a PR number and repository to a chunk, returning the build's thread ID.

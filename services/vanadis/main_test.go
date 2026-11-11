@@ -309,12 +309,10 @@ func (m *memoryVanadisStore) GetChunkByPR(_ context.Context, repo string, prNumb
 		}
 		for _, c := range list {
 			if reposMatch(c.Repo, repo) && c.PRNumber == prNumber {
-				hasRemaining := false
+				hasRemaining := slices.ContainsFunc(list, func(c2 VanadisChunk) bool { return c2.ChunkIndex > c.ChunkIndex })
+				summaries := make([]VanadisChunkSummary, 0, len(list))
 				for _, c2 := range list {
-					if c2.ChunkIndex > c.ChunkIndex {
-						hasRemaining = true
-						break
-					}
+					summaries = append(summaries, VanadisChunkSummary{ID: c2.ID, ChunkIndex: c2.ChunkIndex, Mode: c2.Mode, Status: c2.Status})
 				}
 				return &VanadisChunkPRLookup{
 					Matched:            true,
@@ -322,6 +320,7 @@ func (m *memoryVanadisStore) GetChunkByPR(_ context.Context, repo string, prNumb
 					BuildID:            bID,
 					Effort:             capChunkEffort(c.Effort),
 					HasRemainingChunks: hasRemaining,
+					NextChunkMode:      nextChunkModeAfter(summaries, c.ID, c.ChunkIndex),
 				}, nil
 			}
 		}

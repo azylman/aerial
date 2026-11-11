@@ -98,7 +98,7 @@ type PRRegistryUpdater interface {
 	ListDeployingPRs(ctx context.Context) ([]DeployingPR, error)
 	AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error)
 	ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error)
-	IsFinalVanadisChunk(ctx context.Context, repo string, prNumber int) (bool, error)
+	AdvancesVanadisChunkOnMerge(ctx context.Context, repo string, prNumber int) (bool, error)
 	FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error)
 	FailVanadisChunkDetailsByPR(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, failed bool, err error)
 	IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error)
@@ -818,6 +818,15 @@ type vanadisChunkPRLookup struct {
 	BuildID            string `json:"build_id,omitempty"`
 	Effort             string `json:"effort,omitempty"`
 	HasRemainingChunks bool   `json:"has_remaining_chunks"`
+	NextChunkMode      string `json:"next_chunk_mode,omitempty"`
+}
+
+// advancesOnMerge reports whether a merged chunk PR may start the next chunk
+// immediately. Only a following PR chunk qualifies: action chunks, the final
+// chunk, and lookups from vanadis versions that predate next_chunk_mode all
+// wait for deploy so live work never runs ahead of the merged code.
+func advancesOnMerge(lookup *vanadisChunkPRLookup) bool {
+	return lookup != nil && lookup.Matched && lookup.NextChunkMode == "pr"
 }
 
 func isTransientVanadisStatus(code int) bool {
@@ -976,15 +985,12 @@ func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context
 	return true, nil
 }
 
-func (r *PostgresPRRegistry) IsFinalVanadisChunk(ctx context.Context, repo string, prNumber int) (bool, error) {
+func (r *PostgresPRRegistry) AdvancesVanadisChunkOnMerge(ctx context.Context, repo string, prNumber int) (bool, error) {
 	lookup, err := r.getChunkByPR(ctx, repo, prNumber)
 	if err != nil {
 		return false, err
 	}
-	if lookup == nil || !lookup.Matched {
-		return false, nil
-	}
-	return !lookup.HasRemainingChunks, nil
+	return advancesOnMerge(lookup), nil
 }
 
 func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {

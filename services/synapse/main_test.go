@@ -202,9 +202,8 @@ type mockPRRegistry struct {
 	suppressVanadisCalls []prCall
 	suppressVanadisRes   bool
 	suppressVanadisErr   error
-	finalVanadisCalls    []prCall
-	finalVanadisRes      bool
-	finalVanadisErr      error
+	mergeAdvanceRes      bool
+	mergeAdvanceErr      error
 
 	failVanadisCalls   []prCall
 	failVanadisRes     bool
@@ -453,12 +452,11 @@ func (m *mockPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, re
 	return m.suppressVanadisRes || (m.advanceVanadisRes != nil && m.advanceVanadisRes.Matched), nil
 }
 
-func (m *mockPRRegistry) IsFinalVanadisChunk(ctx context.Context, repo string, prNumber int) (bool, error) {
-	m.finalVanadisCalls = append(m.finalVanadisCalls, prCall{repo: repo, prNumber: prNumber})
-	if err := m.checkErr(m.finalVanadisErr); err != nil {
+func (m *mockPRRegistry) AdvancesVanadisChunkOnMerge(ctx context.Context, repo string, prNumber int) (bool, error) {
+	if err := m.checkErr(m.mergeAdvanceErr); err != nil {
 		return false, err
 	}
-	return m.finalVanadisRes || (m.advanceVanadisRes != nil && m.advanceVanadisRes.Matched && m.advanceVanadisRes.BuildCompleted), nil
+	return m.mergeAdvanceRes, nil
 }
 
 func (m *mockPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
@@ -1080,23 +1078,31 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantDeployingCalls: 1,
 		},
 		{
-			name: "sync_success with expected_jobs advances Vanadis while suppressing merged widget",
+			name: "sync_success with expected_jobs advances Vanadis when next chunk is a pr",
 			evt: DeployEvent{
 				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"coven", "db-migrate"},
 				Repo: "azylman/aerial", CommitSHA: "sha_sync_exp", PRNumber: 973, TargetID: "1555405874565091380", Status: "success",
 			},
-			reg:              &mockPRRegistry{},
+			reg:              &mockPRRegistry{mergeAdvanceRes: true},
 			disp:             &mockOutboundDispatcher{},
 			wantPR:           973,
 			wantTargetID:     "1555405874565091380",
 			wantAdvanceCalls: 1,
 		},
 		{
-			name:             "sync_success with registry expected jobs and empty targetID advances Vanadis",
+			name:             "sync_success with registry expected jobs and empty targetID advances Vanadis when next chunk is a pr",
 			evt:              mkDeployEvt("sync_success", "git-sync", "azylman/aerial", "sha_sync_reg_exp", 974, "", "success", ""),
-			reg:              &mockPRRegistry{recordExpectedRes: true},
+			reg:              &mockPRRegistry{recordExpectedRes: true, mergeAdvanceRes: true},
 			wantPR:           974,
 			wantAdvanceCalls: 1,
+		},
+		{
+			name: "sync_success with expected_jobs defers Vanadis advancement when next chunk is an action", evt: DeployEvent{Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"}, Repo: "azylman/aerial", CommitSHA: "sha_sync_action_next", PRNumber: 981, TargetID: "1555405874565091380", Status: "success"},
+			reg: &mockPRRegistry{advanceVanadisRes: &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-action-next", ThreadID: "1555405874565091380", NextChunkIndex: 1}}, disp: &mockOutboundDispatcher{}, wantPR: 981, wantTargetID: "1555405874565091380",
+		},
+		{
+			name: "deploy_success advances Vanadis when next chunk is an action", evt: mkDeployEvt("deploy_success", "eri", "azylman/aerial", "sha_deploy_action_next", 982, "1555405874565091380", "success", ""),
+			reg: &mockPRRegistry{suppressVanadisRes: true, advanceVanadisRes: &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-action-next", ThreadID: "1555405874565091380", NextChunkIndex: 1}}, disp: &mockOutboundDispatcher{}, wantPR: 982, wantTargetID: "1555405874565091380", wantAdvanceCalls: 1,
 		},
 		{
 			name:             "sync_success tolerates RecordExpectedJobs error and advances when no expected jobs",
@@ -1111,10 +1117,7 @@ func TestProcessDeployEvent(t *testing.T) {
 		},
 		{
 			name: "sync_success with expected_jobs on final Vanadis chunk defers advancement until deploy_success",
-			evt: DeployEvent{
-				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"},
-				Repo: "azylman/aerial", CommitSHA: "sha_final_defer", PRNumber: 976, TargetID: "1555405874565091380", Status: "success",
-			},
+			evt:  DeployEvent{Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"}, Repo: "azylman/aerial", CommitSHA: "sha_final_defer", PRNumber: 976, TargetID: "1555405874565091380", Status: "success"},
 			reg: &mockPRRegistry{
 				advanceVanadisRes: &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-final", ThreadID: "1555405874565091380", BuildCompleted: true},
 			},
@@ -1129,7 +1132,6 @@ func TestProcessDeployEvent(t *testing.T) {
 			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial", "sha_final_empty_tid", 977, "", "success", ""),
 			reg: &mockPRRegistry{
 				recordExpectedRes: true,
-				finalVanadisRes:   true,
 			},
 			wantPR:           977,
 			wantAdvanceCalls: 0,
@@ -1162,13 +1164,13 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantPromptSubs:   []string{"Vanadis build build-final-deploy completed"},
 		},
 		{
-			name: "sync_success with expected_jobs IsFinalVanadisChunk error propagates",
+			name: "sync_success with expected_jobs AdvancesVanadisChunkOnMerge error propagates",
 			evt: DeployEvent{
 				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"},
 				Repo: "azylman/aerial", CommitSHA: "sha_final_err", PRNumber: 980, TargetID: "1555405874565091380", Status: "success",
 			},
 			reg: &mockPRRegistry{
-				finalVanadisErr: errors.New("vanadis final check err"),
+				mergeAdvanceErr: errors.New("vanadis merge gate err"),
 			},
 			disp:    &mockOutboundDispatcher{},
 			wantErr: true,
@@ -1806,7 +1808,6 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		branch              string
 		suppressVanadis     bool
 		suppressVanadisErr  error
-		finalVanadis        bool
 		advanceVanadisRes   *VanadisAdvancementResult
 		wantTargetID        string
 		wantErr             bool
@@ -1897,7 +1898,6 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			isDeploymentSuccess: true,
 			targetID:            validSnowflake,
 			suppressVanadis:     true,
-			finalVanadis:        true,
 			advanceVanadisRes: &VanadisAdvancementResult{
 				Matched:  true,
 				Advanced: false,
@@ -1926,7 +1926,6 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 					resolveErr:         tc.resolveErr,
 					suppressVanadisRes: tc.suppressVanadis,
 					suppressVanadisErr: tc.suppressVanadisErr,
-					finalVanadisRes:    tc.finalVanadis,
 					advanceVanadisRes:  tc.advanceVanadisRes,
 				}
 			}
@@ -2533,9 +2532,8 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 				}
 			}
 			if tc.useNilRegistry || tc.prNumber <= 0 {
-				finalChunk, err := srv.isFinalVanadisChunk(ctx, "azylman/aerial", tc.prNumber)
-				if err != nil || finalChunk {
-					t.Errorf("expected isFinalVanadisChunk false for guard case")
+				if err := srv.advanceVanadisChunkOnMerge(ctx, "azylman/aerial", tc.prNumber); err != nil {
+					t.Errorf("expected advanceVanadisChunkOnMerge nil error for guard case, got %v", err)
 				}
 				vanadisPR, err := srv.isVanadisPR(ctx, "azylman/aerial", tc.prNumber)
 				if err != nil || vanadisPR {

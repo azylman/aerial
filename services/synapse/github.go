@@ -1213,7 +1213,7 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 			return err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		if err := s.advanceNonFinalVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+		if err := s.advanceVanadisChunkOnMerge(ctx, res.Repo, res.PRNumber); err != nil {
 			return err
 		}
 		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
@@ -1494,7 +1494,7 @@ func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *Resolv
 			return err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		if err := s.advanceNonFinalVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+		if err := s.advanceVanadisChunkOnMerge(ctx, res.Repo, res.PRNumber); err != nil {
 			return err
 		}
 	}
