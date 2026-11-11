@@ -213,7 +213,7 @@ cat > /usr/local/bin/sync-gemini-settings <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_DEFAULTS='{"model": "gemini-4-argon-high", "trustedWorkspaces": ["/app", "/actions-runner"], "useG1Credits": true}'
+BASE_DEFAULTS='{"model": "gemini-4-argon-low", "trustedWorkspaces": ["/app", "/actions-runner"], "useG1Credits": true}'
 PERMS_FILE="/root/.gemini/antigravity-cli/permissions.json"
 TARGET_SETTINGS="/root/.gemini/antigravity-cli/settings.json"
 TMP_SETTINGS="/root/.gemini/antigravity-cli/.settings.json.tmp.$$"
@@ -233,6 +233,40 @@ fi
 EOF
 chmod 0755 /usr/local/bin/sync-gemini-settings
 /usr/local/bin/sync-gemini-settings
+
+if [ -x /usr/local/bin/agy ] && [ ! -e /usr/local/bin/agy.real ]; then
+  mv /usr/local/bin/agy /usr/local/bin/agy.real
+  cat > /usr/local/bin/agy <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == -* ]]; then
+  inject_model=1
+  skip_next=0
+  for arg in "$@"; do
+    if [[ "${skip_next}" -eq 1 ]]; then
+      skip_next=0
+      continue
+    fi
+    case "${arg}" in
+      --prompt|--print|-p|--add-dir|--agent|--conversation|--effort|--input-format|--json-schema|--log-file|--mode|--output-format|--print-timeout|--project|--settings)
+        skip_next=1
+        ;;
+      --model|--model=*|--version|-v|--help|-h)
+        inject_model=0
+        break
+        ;;
+    esac
+  done
+  if [[ "${inject_model}" -eq 1 ]]; then
+    exec /usr/local/bin/agy.real --model "${AGY_DEFAULT_MODEL:-gemini-4-argon-low}" "$@"
+  fi
+fi
+
+exec /usr/local/bin/agy.real "$@"
+EOF
+  chmod 0755 /usr/local/bin/agy
+fi
 
 if [ -x /usr/local/bin/roborev ] && [ ! -e /usr/local/bin/roborev.real ]; then
   mv /usr/local/bin/roborev /usr/local/bin/roborev.real
