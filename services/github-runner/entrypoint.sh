@@ -213,7 +213,7 @@ cat > /usr/local/bin/sync-gemini-settings <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_DEFAULTS='{"model": "gemini-4-argon-high", "trustedWorkspaces": ["/app", "/actions-runner"], "useG1Credits": true}'
+BASE_DEFAULTS='{"model": "gemini-4-argon-low", "trustedWorkspaces": ["/app", "/actions-runner"], "useG1Credits": true}'
 PERMS_FILE="/root/.gemini/antigravity-cli/permissions.json"
 TARGET_SETTINGS="/root/.gemini/antigravity-cli/settings.json"
 TMP_SETTINGS="/root/.gemini/antigravity-cli/.settings.json.tmp.$$"
@@ -233,6 +233,40 @@ fi
 EOF
 chmod 0755 /usr/local/bin/sync-gemini-settings
 /usr/local/bin/sync-gemini-settings
+
+if [ -x /usr/local/bin/agy ] && [ ! -e /usr/local/bin/agy.real ]; then
+  mv /usr/local/bin/agy /usr/local/bin/agy.real
+  cat > /usr/local/bin/agy <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == -* ]]; then
+  inject_model=1
+  skip_next=0
+  for arg in "$@"; do
+    if [[ "${skip_next}" -eq 1 ]]; then
+      skip_next=0
+      continue
+    fi
+    case "${arg}" in
+      --prompt|--print|-p|--add-dir|--agent|--conversation|--effort|--input-format|--json-schema|--log-file|--mode|--output-format|--print-timeout|--project|--settings)
+        skip_next=1
+        ;;
+      --model|--model=*|--version|-v|--help|-h)
+        inject_model=0
+        break
+        ;;
+    esac
+  done
+  if [[ "${inject_model}" -eq 1 ]]; then
+    exec /usr/local/bin/agy.real --model "${AGY_DEFAULT_MODEL:-gemini-4-argon-low}" "$@"
+  fi
+fi
+
+exec /usr/local/bin/agy.real "$@"
+EOF
+  chmod 0755 /usr/local/bin/agy
+fi
 
 if [ -x /usr/local/bin/roborev ] && [ ! -e /usr/local/bin/roborev.real ]; then
   mv /usr/local/bin/roborev /usr/local/bin/roborev.real
@@ -393,68 +427,15 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
     trap 'rm -f "${raw_out}" "${body_out}" "${formatted_out}"' EXIT
 
     set +e
-    if [ -s "/root/.roborev/postgres-password" ]; then
-      # Pre-seed sync cursors for the current branch to avoid full-history scans. Note: roborev's PullResponses
-      # filters and orders strictly by PostgreSQL server-assigned inserted_at rather than client created_at.
-      cursor_row=$(PGPASSWORD=$(tr -d '\r\n' < /root/.roborev/postgres-password) psql -h postgres -p 5432 -U aerial -d aerial -v branch="${branch}" -tA -F'|' <<'SQL' 2>/dev/null || true
-SELECT
-  COALESCE((SELECT to_char((MIN(updated_at) - interval '1 minute') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0' FROM roborev.review_jobs WHERE branch = :'branch' AND :'branch' <> ''), to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0'),
-  COALESCE((SELECT to_char((MIN(r.updated_at) - interval '1 minute') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0' FROM roborev.reviews r JOIN roborev.review_jobs j ON j.uuid = r.job_uuid WHERE j.branch = :'branch' AND :'branch' <> ''), to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0'),
-  COALESCE((SELECT to_char((MIN(resp.inserted_at) - interval '1 minute') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0' FROM roborev.responses resp JOIN roborev.review_jobs j ON j.uuid = resp.job_uuid WHERE j.branch = :'branch' AND :'branch' <> ''), to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || ' 0');
-SQL
-      )
-      IFS='|' read -r seed_job_cursor seed_review_cursor seed_resp_cursor <<< "${cursor_row}"
-      python3 - "${seed_job_cursor:-}" "${seed_review_cursor:-}" "${seed_resp_cursor:-}" <<'PY' >/dev/null 2>&1 || true
-import sqlite3, sys
-conn = sqlite3.connect('/root/.roborev/reviews.db', timeout=30.0)
-cur = conn.cursor()
-cur.execute("CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-for k, v in [
-    ("telemetry.setup_finished", "1"),
-    ("last_job_cursor", sys.argv[1]),
-    ("last_review_cursor", sys.argv[2]),
-    ("last_response_id", sys.argv[3]),
-]:
-    if v:
-        cur.execute("INSERT OR IGNORE INTO sync_state (key, value) VALUES (?, ?)", (k, v))
-conn.commit()
-conn.close()
-PY
-    fi
-
-    ROBOREV_SYNC_CURSOR_LOOKBACK=0s env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon start >/dev/null 2>&1 || true
+    ROBOREV_SYNC_BRANCH="${branch:-__none__}" env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon start >/dev/null 2>&1 || true
 
     if [ -s "/root/.roborev/postgres-password" ]; then
       for _ in 1 2 3 4 5 6 7 8 9 10; do
-        if ROBOREV_SYNC_CURSOR_LOOKBACK=0s env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1; then
+        if ROBOREV_SYNC_BRANCH="${branch:-__none__}" env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1; then
           break
         fi
         sleep 1
       done
-    fi
-
-    if [ -s "/root/.roborev/reviews.db" ]; then
-      python3 -c "
-import sqlite3
-try:
-    conn = sqlite3.connect('/root/.roborev/reviews.db', timeout=30.0)
-    cur = conn.cursor()
-    cur.execute(\"SELECT value FROM sync_state WHERE key = 'machine_id'\")
-    row = cur.fetchone()
-    if row and row[0]:
-        cur.execute(\"UPDATE review_jobs SET source_machine_id = ? WHERE session_id IS NOT NULL AND session_id != ''\", (row[0],))
-        conn.commit()
-    conn.close()
-except Exception:
-    pass
-" >/dev/null 2>&1 || true
-    fi
-
-    # Attach synced placeholder repository rows onto the active checkout path for <prior-range-reviews>.
-    repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-    repo_short_name=$(basename "${repo_root}")
-    if [[ -n "${repo_short_name}" && -n "${repo_root}" ]]; then
-      (cd /tmp && env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real repo move "${repo_short_name}" "${repo_root}" >/dev/null 2>&1) || true
     fi
 
     # Backfill ## roborev-override PR comments into native roborev responses and close overridden reviews.

@@ -425,10 +425,12 @@ PUSH_UPDATED_EXISTING=0
 push_scratch_branch() {
     local branch="$1"
     PUSH_UPDATED_EXISTING=0
+    if git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null 2>&1; then
+        PUSH_UPDATED_EXISTING=1
+    fi
     if git push -u origin "$branch" >/dev/null 2>&1; then
         return 0
     fi
-    git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null 2>&1 || true
     local remote_sha
     remote_sha=$(git rev-parse --verify -q "refs/remotes/origin/${branch}" 2>/dev/null || echo "")
     if { [ -n "$remote_sha" ] && git push --force-with-lease="refs/heads/${branch}:${remote_sha}" -u origin "$branch" >/dev/null 2>&1; } || \
@@ -470,11 +472,34 @@ rebase_staged_changes() {
         echo "⚠️ [aerial-pr] Warning: Could not fetch origin/${target_branch}; proceeding with current base." >&2
         return 0
     fi
-    local head_sha upstream_sha
+    local head_sha upstream_sha current_branch remote_branch_sha=""
     head_sha=$(git rev-parse --verify -q HEAD 2>/dev/null || echo "")
     upstream_sha=$(git rev-parse --verify -q "refs/remotes/origin/${target_branch}" 2>/dev/null || echo "")
     if [ -z "$upstream_sha" ] || [ "$head_sha" = "$upstream_sha" ]; then
         return 0
+    fi
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if [ -n "$current_branch" ] && [ "$current_branch" != "$target_branch" ] && [ "$current_branch" != "HEAD" ]; then
+        git fetch origin "+refs/heads/${current_branch}:refs/remotes/origin/${current_branch}" >/dev/null 2>&1 || true
+        remote_branch_sha=$(git rev-parse --verify -q "refs/remotes/origin/${current_branch}" 2>/dev/null || echo "")
+    fi
+    if [ -n "$remote_branch_sha" ]; then
+        [ "$head_sha" != "$remote_branch_sha" ] && git reset --soft "$remote_branch_sha" >/dev/null 2>&1
+        git merge-base --is-ancestor "$upstream_sha" "$remote_branch_sha" 2>/dev/null && return 0
+        local temp_sha=""
+        if ! git diff --cached --quiet; then
+            git commit -q -m "$msg" >/dev/null 2>&1 && temp_sha=$(git rev-parse HEAD)
+            git reset --hard "$remote_branch_sha" >/dev/null 2>&1
+        fi
+        if git merge --no-edit -q "origin/${target_branch}" >/dev/null 2>&1 && \
+           { [ -z "$temp_sha" ] || git cherry-pick -n "$temp_sha" >/dev/null 2>&1; }; then
+            echo "🔄 [aerial-pr] Merged latest origin/${target_branch} (${upstream_sha:0:7}) into ${current_branch}." >&2
+            return 0
+        fi
+        git cherry-pick --abort >/dev/null 2>&1 || true
+        git merge --abort >/dev/null 2>&1 || true
+        [ -n "$temp_sha" ] && git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$remote_branch_sha" >/dev/null 2>&1
+        return 1
     fi
     local had_staged=0
     if ! git diff --cached --quiet; then
