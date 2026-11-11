@@ -327,11 +327,16 @@ func (w *kubeWatcher) applyEvent(ctx context.Context, evt kubeWatchEvent) error 
 	}
 }
 
-// rolloutWatchSources are the collections the rollout watcher follows: flux-system Kustomizations and
-// every Flux-managed workload kind whose rollout gates a deploy.
+// rolloutKustomizationNamespaces are the namespaces whose Kustomizations the rollout watcher follows.
+var rolloutKustomizationNamespaces = []string{fluxSystemNamespace}
+
+// rolloutWatchSources are the collections the rollout watcher follows: the Kustomizations of
+// rolloutKustomizationNamespaces and every Flux-managed workload kind whose rollout gates a deploy.
 func rolloutWatchSources() []kubeWatchSource {
-	sources := make([]kubeWatchSource, 0, 1+len(rolloutWorkloadKinds))
-	sources = append(sources, kustomizationSource{namespace: fluxSystemNamespace})
+	sources := make([]kubeWatchSource, 0, len(rolloutKustomizationNamespaces)+len(rolloutWorkloadKinds))
+	for _, namespace := range rolloutKustomizationNamespaces {
+		sources = append(sources, kustomizationSource{namespace: namespace})
+	}
 	for _, k := range rolloutWorkloadKinds {
 		sources = append(sources, workloadSource{path: k.Path})
 	}
@@ -752,4 +757,71 @@ func formatKustomizationRolloutStatus(cleanStatus string, meta map[string]any) (
 		lines = append(lines, fmt.Sprintf("`%s`: %s", name, state))
 	}
 	return strings.Join(lines, "\n"), true
+}
+
+// deferSyncToWatcher defers a sync_success with no image build pending to the Kustomization watcher: a
+// git fetch is not an apply, so a Flux-sourced repo's PR completes only once its change rolled out.
+func (s *RouterServer) deferSyncToWatcher(ctx context.Context, evt DeployEvent, syncHasExpected bool) (bool, error) {
+	if evt.Event != "sync_success" || syncHasExpected {
+		return false, nil
+	}
+	return s.deferPRToWatcher(ctx, evt.Repo, evt.PRNumber)
+}
+
+// deferPRToWatcher hands completion of a PR without pending image builds to the Kustomization watcher
+// when repo is the GitRepository source of any watched Kustomization: neither a git fetch nor CI
+// finishing means Flux applied the change or that the workloads it changed rolled out. It marks the PR
+// deploying, durably records a reconcile request per Kustomization before patching any of them (as
+// dispatchWorkflowRunImages does), and reports whether the watcher now owns the PR. Re-recording is safe:
+// requests are replaced wholesale and the watcher gates on the merge commit being applied. Repos with no
+// Flux source are not deferred.
+func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum int) (bool, error) {
+	if s.registry == nil || s.dispatcher == nil || prNum <= 0 {
+		return false, nil
+	}
+	refs, err := s.dispatcher.DiscoverRepoKustomizations(ctx, repo)
+	if err != nil {
+		return false, fmt.Errorf("discover kustomizations for %s: %w", repo, err)
+	}
+	if len(refs) == 0 {
+		return false, nil
+	}
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		names = append(names, ref.Name)
+	}
+	if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, names); err != nil {
+		return false, fmt.Errorf("transition pr %s#%d deploying: %w", repo, prNum, err)
+	}
+	requests := newKustomizationRequests(refs, time.Now().UTC())
+	if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
+		return false, fmt.Errorf("record kustomization requests for %s#%d: %w", repo, prNum, err)
+	}
+	log.Printf("[synapse] [deploy] deferring completion of %s#%d to the kustomization watcher (%s)", repo, prNum, strings.Join(names, ", "))
+	if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
+		log.Printf("[synapse] [widget] warning syncing deploying widget for %s#%d: %v", repo, prNum, err)
+	}
+	return true, s.reconcileImageKustomizations(ctx, refs, requests)
+}
+
+// newKustomizationRequests builds the reconcile request recorded for each ref, all requested at now.
+func newKustomizationRequests(refs []fluxKustomizationRef, now time.Time) map[string]kustomizationRequest {
+	requestedAt := now.Format(time.RFC3339Nano)
+	requests := make(map[string]kustomizationRequest, len(refs))
+	for _, ref := range refs {
+		requests[ref.Name] = kustomizationRequest{Namespace: ref.Namespace, RequestedAt: requestedAt}
+	}
+	return requests
+}
+
+// reconcileImageKustomizations patches each ref with its recorded request; one failure never skips the rest.
+func (s *RouterServer) reconcileImageKustomizations(ctx context.Context, refs []fluxKustomizationRef, requests map[string]kustomizationRequest) error {
+	var errs []error
+	for _, ref := range refs {
+		if err := s.dispatcher.ReconcileKustomization(ctx, ref, requests[ref.Name].RequestedAt); err != nil {
+			log.Printf("[synapse] [dispatcher] error reconciling kustomization %s/%s: %v", ref.Namespace, ref.Name, err)
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }

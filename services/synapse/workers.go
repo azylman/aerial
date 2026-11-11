@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -734,6 +735,7 @@ type OutboundDispatcher interface {
 	ListKustomizationWorkloads(ctx context.Context, ref fluxKustomizationRef) ([]workloadRollout, error)
 	ListKustomizationConfigMaps(ctx context.Context, ref fluxKustomizationRef) ([]configMapChange, error)
 	ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error)
+	DiscoverRepoKustomizations(ctx context.Context, repo string) ([]fluxKustomizationRef, error)
 	DispatchPrompt(ctx context.Context, req PromptRequest) error
 	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
 	DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error)
@@ -1199,6 +1201,12 @@ func (d *DefaultOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, o
 		source = k.Spec.SourceRef
 		source.Namespace = cmp.Or(source.Namespace, namespace)
 	}
+	return d.gitRepositorySlug(ctx, source)
+}
+
+// gitRepositorySlug GETs the GitRepository behind source and returns the owner/repo of its spec.url;
+// any other source kind resolves to "".
+func (d *DefaultOutboundDispatcher) gitRepositorySlug(ctx context.Context, source fluxSourceRef) (string, error) {
 	if source.Kind != "GitRepository" || source.Name == "" {
 		return "", nil
 	}
@@ -1215,6 +1223,41 @@ func (d *DefaultOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, o
 		return "", fmt.Errorf("decode gitrepository %s/%s: %w", source.Namespace, source.Name, err)
 	}
 	return gitRepoSlug(repo.Spec.URL), nil
+}
+
+// DiscoverRepoKustomizations returns the sorted Kustomizations, in the namespaces the rollout watcher
+// follows, whose GitRepository source is repo. Each distinct source is fetched once. Suspended
+// Kustomizations are skipped: they apply nothing, and the watcher would fail a PR waiting on one.
+func (d *DefaultOutboundDispatcher) DiscoverRepoKustomizations(ctx context.Context, repo string) ([]fluxKustomizationRef, error) {
+	repo = normalizeRepo(repo)
+	if d.kubeAPIServer == "" || repo == "" {
+		return nil, nil
+	}
+	slugs := make(map[fluxSourceRef]string)
+	var refs []fluxKustomizationRef
+	for _, namespace := range rolloutKustomizationNamespaces {
+		observations, _, err := d.ListKustomizations(ctx, namespace)
+		if err != nil {
+			return nil, err
+		}
+		for _, obs := range observations {
+			if obs.Suspended {
+				continue
+			}
+			slug, ok := slugs[obs.SourceRef]
+			if !ok {
+				if slug, err = d.gitRepositorySlug(ctx, obs.SourceRef); err != nil {
+					return nil, err
+				}
+				slugs[obs.SourceRef] = slug
+			}
+			if slug != "" && strings.EqualFold(normalizeRepo(slug), repo) {
+				refs = append(refs, obs.Ref)
+			}
+		}
+	}
+	slices.SortFunc(refs, compareKustomizationRefs)
+	return refs, nil
 }
 
 // ListKustomizations lists the Kustomizations of namespace and returns them with the list resourceVersion.

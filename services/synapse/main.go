@@ -1070,6 +1070,9 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 	}
 
 	syncHasExpected := s.recordDeploySyncExpectedJobs(ctx, evt)
+	if deferred, err := s.deferSyncToWatcher(ctx, evt, syncHasExpected); deferred || err != nil {
+		return &evt, err
+	}
 
 	if !s.isValidAlertTarget(evt.TargetID) || s.dispatcher == nil {
 		if evt.Event == "sync_success" && evt.PRNumber > 0 {
