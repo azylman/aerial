@@ -1008,7 +1008,7 @@ assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'tree_cache_in
 assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch:ok' && echo true || echo false)" "init_scratch --branch clones, tracks origin/main, and stays on existing PR branch"
 assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch_submit:ok' && echo true || echo false)" "submit_scratch rebases and updates PR cleanly from init_scratch --branch checkout"
 
-# Case 17: github-runner roborev wrapper repo move + roborev-override rebuttal backfill and head short-circuit
+# Case 17: github-runner roborev wrapper ROBOREV_SYNC_BRANCH propagation + roborev-override rebuttal backfill and head short-circuit
 ROBOREV_WRAPPER_CHECK=$(SCRIPT_DIR="$SCRIPT_DIR" bash -s << 'CASE17_EOF'
 set -euo pipefail
 TEST_ROOT=$(mktemp -d /tmp/roborev-wrapper-test.XXXXXX)
@@ -1023,26 +1023,13 @@ REPO_DIR="$TEST_ROOT/aerial"
 mkdir -p "$STATE_DIR" "$REPO_DIR"
 
 awk '/^  cat > \/usr\/local\/bin\/roborev <<'\''EOF'\''$/ { flag=1; next } flag && /^EOF$/ { flag=0; exit } flag { print }' "$ENTRYPOINT_FILE" \
-  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/usr/local/bin/sync-gemini-settings|$MOCK_SYNC_SETTINGS|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g; s|/root/.roborev/reviews.db|$STATE_DIR/reviews.db|g" > "$WRAPPER_SCRIPT"
+  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/usr/local/bin/sync-gemini-settings|$MOCK_SYNC_SETTINGS|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g" > "$WRAPPER_SCRIPT"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$MOCK_SYNC_SETTINGS"
 printf 'secret-pw\n' > "$STATE_DIR/postgres-password"
 
-python3 -c "
-import sqlite3
-conn = sqlite3.connect('$STATE_DIR/reviews.db')
-cur = conn.cursor()
-cur.execute('CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT)')
-cur.execute('INSERT INTO sync_state VALUES (\"machine_id\", \"local-runner-mach\")')
-cur.execute('CREATE TABLE review_jobs (id INT PRIMARY KEY, source_machine_id TEXT, session_id TEXT)')
-cur.execute('INSERT INTO review_jobs VALUES (1, \"remote-mach-1\", \"sess-100\")')
-cur.execute('INSERT INTO review_jobs VALUES (2, \"remote-mach-2\", \"\")')
-cur.execute('INSERT INTO review_jobs VALUES (3, \"remote-mach-3\", NULL)')
-conn.commit()
-conn.close()
-"
 cat << 'MOCK_EOF' > "$MOCK_REAL"
 #!/usr/bin/env bash
-echo "$*" >> "${CALL_LOG}"
+echo "[branch=${ROBOREV_SYNC_BRANCH:-}] $*" >> "${CALL_LOG}"
 case "${1:-}" in
   list) cat "${STATE_DIR}/jobs.json" ;;
   show) cat "${STATE_DIR}/show.json" ;;
@@ -1070,32 +1057,17 @@ jq -n --arg short "$COMMIT1_SHORT" --arg full "$COMMIT1_SHA" '[{user:{login:"own
 jq -n --arg head "$COMMIT2_SHA" --arg base "$BASE_SHA" '{repository:{full_name:"owneruser/aerial"},pull_request:{number:99,head:{ref:"feat/test-rebuttal",sha:$head},base:{sha:$base}}}' > "$STATE_DIR/event.json"
 
 curl() { cat "$STATE_DIR/comments.json"; }
-psql() { printf '2026-11-10T22:00:00.000000Z 0|2026-11-10T22:00:01.000000Z 0|2026-11-10T22:00:02.000000Z 0\n'; }
-export -f curl psql
+export -f curl
 export CALL_LOG STATE_DIR GH_TOKEN='mock_token' GITHUB_REPOSITORY='owneruser/aerial' GITHUB_EVENT_PATH="$STATE_DIR/event.json"
 
 out_followup=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough)
-if grep -q "repo move aerial $REPO_DIR" "$CALL_LOG" &&
+if grep -q "\[branch=feat/test-rebuttal\] daemon start" "$CALL_LOG" &&
+   grep -q "\[branch=feat/test-rebuttal\] sync now" "$CALL_LOG" &&
    grep -q "comment --commenter owneruser --job 42 Intentional design choice for chunk 1." "$CALL_LOG" &&
    grep -q "close 42" "$CALL_LOG" &&
    grep -q "review --wait --branch=feat/test-rebuttal --base=${BASE_SHA}" "$CALL_LOG" &&
    echo "$out_followup" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)"; then
   echo 'backfill_followup:ok'
-fi
-
-aligned_rows=$(python3 -c "
-import sqlite3
-conn = sqlite3.connect('$STATE_DIR/reviews.db')
-cur = conn.cursor()
-cur.execute('SELECT id, source_machine_id FROM review_jobs ORDER BY id')
-jobs = cur.fetchall()
-cur.execute('SELECT key, value FROM sync_state WHERE key IN (\"telemetry.setup_finished\", \"last_job_cursor\", \"last_review_cursor\", \"last_response_id\") ORDER BY key')
-cursors = cur.fetchall()
-print(jobs, cursors)
-conn.close()
-")
-if [[ "$aligned_rows" == "[(1, 'local-runner-mach'), (2, 'remote-mach-2'), (3, 'remote-mach-3')] [('last_job_cursor', '2026-11-10T22:00:00.000000Z 0'), ('last_response_id', '2026-11-10T22:00:02.000000Z 0'), ('last_review_cursor', '2026-11-10T22:00:01.000000Z 0'), ('telemetry.setup_finished', '1')]" ]]; then
-  echo 'align_source_machine_id:ok'
 fi
 
 : > "$CALL_LOG"
@@ -1109,9 +1081,8 @@ if ! grep -q "comment --commenter" "$CALL_LOG" && grep -q "close 43" "$CALL_LOG"
 fi
 CASE17_EOF
 )
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper moves placeholder repo and backfills prior roborev-override rebuttals before review --wait"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper passes ROBOREV_SYNC_BRANCH and backfills prior roborev-override rebuttals before review --wait"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'head_shortcircuit:ok' && echo true || echo false)" "github-runner roborev wrapper skips duplicate comment and short-circuits Review Passed when override matches current HEAD"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'align_source_machine_id:ok' && echo true || echo false)" "github-runner roborev wrapper aligns review_jobs.source_machine_id on synced rows with non-empty session_id to local machine_id"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
