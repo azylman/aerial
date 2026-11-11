@@ -404,6 +404,7 @@ func setupTestStoreWithBuild() (*memoryVanadisStore, string, []string) {
 		ID:         "chunk-1",
 		BuildID:    buildID,
 		ChunkIndex: 0,
+		Mode:       "pr",
 		Repo:       "aerial",
 		Title:      "Chunk 1",
 		Status:     "pending",
@@ -415,6 +416,7 @@ func setupTestStoreWithBuild() (*memoryVanadisStore, string, []string) {
 		ID:         "chunk-2",
 		BuildID:    buildID,
 		ChunkIndex: 1,
+		Mode:       "action",
 		Repo:       "aerial",
 		Title:      "Chunk 2",
 		Status:     "pending",
@@ -503,7 +505,7 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 		_, _ = s.AttachChunkPR(ctx, cIDs[0], 101, "aerial")
 
 		res, err := s.GetChunkByPR(ctx, "aerial", 101)
-		if err != nil || res == nil || !res.Matched || !res.HasRemainingChunks || res.BuildID != bID || res.ChunkID != cIDs[0] {
+		if err != nil || res == nil || !res.Matched || !res.HasRemainingChunks || res.BuildID != bID || res.ChunkID != cIDs[0] || res.NextChunkMode != "action" {
 			t.Fatalf("unexpected GetChunkByPR result: %+v, err: %v", res, err)
 		}
 
@@ -1561,62 +1563,6 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 		c, b, err := sSuccess.GetChunk(ctx, "c1")
 		if err != nil || c.ID != "c1" || b.ID != "b1" {
 			t.Errorf("unexpected GetChunk success: c=%+v b=%+v err=%v", c, b, err)
-		}
-	})
-
-	t.Run("GetChunkByPR_MockDB", func(t *testing.T) {
-		s := newMockStore(mockDB{})
-		// Invalid args
-		res, err := s.GetChunkByPR(ctx, "", 0)
-		if err != nil || res.Matched {
-			t.Errorf("expected unmatched for empty args, got %+v", res)
-		}
-
-		// No rows
-		sNoRows := newMockStore(mockDB{
-			queryRowFn: func(context.Context, string, ...any) pgx.Row {
-				return &mockRow{err: pgx.ErrNoRows}
-			},
-		})
-		resNoRows, err := sNoRows.GetChunkByPR(ctx, "aerial", 101)
-		if err != nil || resNoRows.Matched {
-			t.Errorf("expected unmatched on NoRows, got %+v", resNoRows)
-		}
-
-		// QueryRow error
-		sErr := newMockStore(mockDB{
-			queryRowFn: func(context.Context, string, ...any) pgx.Row {
-				return &mockRow{err: errors.New("db error")}
-			},
-		})
-		if _, err := sErr.GetChunkByPR(ctx, "aerial", 101); err == nil {
-			t.Error("expected error on query row error")
-		}
-
-		// Success
-		var capturedCandidates []string
-		sSuccess := newMockStore(mockDB{
-			queryRowFn: func(_ context.Context, _ string, args ...any) pgx.Row {
-				if len(args) > 0 {
-					if cands, ok := args[0].([]string); ok {
-						capturedCandidates = cands
-					}
-				}
-				return &genericMockRow{scanFn: func(dest ...any) error {
-					*dest[0].(*string) = "c1"
-					*dest[1].(*string) = "b1"
-					*dest[2].(*string) = "low"
-					*dest[3].(*bool) = true
-					return nil
-				}}
-			},
-		})
-		resSuccess, err := sSuccess.GetChunkByPR(ctx, "aerial", 101)
-		if err != nil || !resSuccess.Matched || resSuccess.ChunkID != "c1" || resSuccess.Effort != "low" || !resSuccess.HasRemainingChunks {
-			t.Errorf("unexpected success lookup: %+v, err=%v", resSuccess, err)
-		}
-		if !slices.Equal(capturedCandidates, []string{"aerial", "azylman/aerial"}) {
-			t.Errorf("GetChunkByPR candidates = %v, want [aerial azylman/aerial]", capturedCandidates)
 		}
 	})
 

@@ -912,6 +912,30 @@ func TestPostgresPRRegistry_VanadisClientOptions(t *testing.T) {
 	}
 }
 
+func TestAdvancesOnMerge(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		lookup *vanadisChunkPRLookup
+		want   bool
+	}{
+		{name: "nil lookup waits for deploy", lookup: nil, want: false},
+		{name: "unmatched waits for deploy", lookup: &vanadisChunkPRLookup{Matched: false, NextChunkMode: "pr"}, want: false},
+		{name: "next chunk is a pr advances on merge", lookup: &vanadisChunkPRLookup{Matched: true, HasRemainingChunks: true, NextChunkMode: "pr"}, want: true},
+		{name: "next chunk is an action waits for deploy", lookup: &vanadisChunkPRLookup{Matched: true, HasRemainingChunks: true, NextChunkMode: "action"}, want: false},
+		{name: "final chunk waits for deploy", lookup: &vanadisChunkPRLookup{Matched: true}, want: false},
+		{name: "old vanadis without next mode waits for deploy", lookup: &vanadisChunkPRLookup{Matched: true, HasRemainingChunks: true}, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := advancesOnMerge(tc.lookup); got != tc.want {
+				t.Errorf("advancesOnMerge() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -949,8 +973,8 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			wantBool:       false,
 		},
 		{
-			name:           "IsFinalVanadisChunk typed nil registry returns false",
-			method:         "IsFinalVanadisChunk",
+			name:           "AdvancesVanadisChunkOnMerge typed nil registry returns false",
+			method:         "AdvancesVanadisChunkOnMerge",
 			useNilRegistry: true,
 			wantBool:       false,
 		},
@@ -974,8 +998,8 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			emptyGuard: true,
 		},
 		{
-			name:       "IsFinalVanadisChunk empty guard",
-			method:     "IsFinalVanadisChunk",
+			name:       "AdvancesVanadisChunkOnMerge empty guard",
+			method:     "AdvancesVanadisChunkOnMerge",
 			emptyGuard: true,
 		},
 		{
@@ -1055,38 +1079,52 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			wantErr:        true,
 		},
 
-		// IsFinalVanadisChunk
+		// AdvancesVanadisChunkOnMerge
 		{
-			name:       "IsFinalVanadisChunk returns false on match with remaining chunks",
-			method:     "IsFinalVanadisChunk",
+			name:       "AdvancesVanadisChunkOnMerge returns true when next chunk is a pr",
+			method:     "AdvancesVanadisChunkOnMerge",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","has_remaining_chunks":true,"next_chunk_mode":"pr"}`,
+			wantBool:   true,
+		},
+		{
+			name:       "AdvancesVanadisChunkOnMerge returns false when next chunk is an action",
+			method:     "AdvancesVanadisChunkOnMerge",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","has_remaining_chunks":true,"next_chunk_mode":"action"}`,
+			wantBool:   false,
+		},
+		{
+			name:       "AdvancesVanadisChunkOnMerge returns false on last chunk",
+			method:     "AdvancesVanadisChunkOnMerge",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","has_remaining_chunks":false}`,
+			wantBool:   false,
+		},
+		{
+			name:       "AdvancesVanadisChunkOnMerge returns false for old vanadis without next_chunk_mode",
+			method:     "AdvancesVanadisChunkOnMerge",
 			httpStatus: http.StatusOK,
 			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","has_remaining_chunks":true}`,
 			wantBool:   false,
 		},
 		{
-			name:       "IsFinalVanadisChunk returns true when no remaining chunks",
-			method:     "IsFinalVanadisChunk",
+			name:       "AdvancesVanadisChunkOnMerge returns false when not matched",
+			method:     "AdvancesVanadisChunkOnMerge",
 			httpStatus: http.StatusOK,
-			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","has_remaining_chunks":false}`,
-			wantBool:   true,
-		},
-		{
-			name:       "IsFinalVanadisChunk returns false when not matched",
-			method:     "IsFinalVanadisChunk",
-			httpStatus: http.StatusOK,
-			httpBody:   `{"matched":false}`,
+			httpBody:   `{"matched":false,"next_chunk_mode":"pr"}`,
 			wantBool:   false,
 		},
 		{
-			name:       "IsFinalVanadisChunk returns error on 500",
-			method:     "IsFinalVanadisChunk",
+			name:       "AdvancesVanadisChunkOnMerge returns error on 500",
+			method:     "AdvancesVanadisChunkOnMerge",
 			httpStatus: http.StatusInternalServerError,
 			httpBody:   `{"error":"fail"}`,
 			wantErr:    true,
 		},
 		{
-			name:       "IsFinalVanadisChunk returns error on invalid json",
-			method:     "IsFinalVanadisChunk",
+			name:       "AdvancesVanadisChunkOnMerge returns error on invalid json",
+			method:     "AdvancesVanadisChunkOnMerge",
 			httpStatus: http.StatusOK,
 			httpBody:   `{invalid-json`,
 			wantErr:    true,
@@ -1344,13 +1382,13 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 				if !tc.wantErr && sup != tc.wantBool {
 					t.Errorf("got %v, want %v", sup, tc.wantBool)
 				}
-			case "IsFinalVanadisChunk":
-				finalChunk, err := reg.IsFinalVanadisChunk(ctx, repo, prNum)
+			case "AdvancesVanadisChunkOnMerge":
+				advance, err := reg.AdvancesVanadisChunkOnMerge(ctx, repo, prNum)
 				if (err != nil) != tc.wantErr {
-					t.Fatalf("IsFinalVanadisChunk() err = %v, wantErr = %v", err, tc.wantErr)
+					t.Fatalf("AdvancesVanadisChunkOnMerge() err = %v, wantErr = %v", err, tc.wantErr)
 				}
-				if !tc.wantErr && finalChunk != tc.wantBool {
-					t.Errorf("got %v, want %v", finalChunk, tc.wantBool)
+				if !tc.wantErr && advance != tc.wantBool {
+					t.Errorf("got %v, want %v", advance, tc.wantBool)
 				}
 			case "ResolveVanadisChunkForPR":
 				matched, _, effort, err := reg.ResolveVanadisChunkForPR(ctx, repo, prNum)

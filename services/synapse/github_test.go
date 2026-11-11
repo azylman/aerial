@@ -308,7 +308,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 		{
 			name: "pull_request closed and merged transitions registry", event: "pull_request", delivery: "del-pr-merged",
 			payload: `{"action":"closed","number":515,"pull_request":{"number":515,"head":{"ref":"feat/decouple","sha":"head111"},"merged":true,"merge_commit_sha":"merge111"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{mergedTargetID: "target-merged-1"},
+			reg:     &mockPRRegistry{mergeAdvanceRes: true, mergedTargetID: "target-merged-1"},
 			wantPR:  515, wantMergeSHA: "merge111", wantTargetID: "target-merged-1", wantMergedCalls: 1, wantAdvanceCalls: 1,
 		},
 		{
@@ -571,20 +571,20 @@ func TestProcessGitHubEvent(t *testing.T) {
 		{
 			name: "push to main with resolved PR backfills merge SHA", event: "push", delivery: "del-push-main",
 			payload: `{"ref":"refs/heads/main","after":"pushsha999","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"pushsha999","message":"feat: merge pr"}}`,
-			reg:     &mockPRRegistry{backfillTargetID: "target-backfill"},
+			reg:     &mockPRRegistry{mergeAdvanceRes: true, backfillTargetID: "target-backfill"},
 			wantPR:  522, wantMergeSHA: "pushsha999", wantBackfillCalls: 1, wantAdvanceCalls: 1,
 		},
 		{
 			name: "push to main falls back to squash commit message when SHA lookup misses", event: "push", delivery: "del-push-msg-fallback",
 			payload: `{"ref":"refs/heads/main","after":"unindexedsha898","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"unindexedsha898","message":"refactor(runner): compact streaming daemon (chunk 3/5) (#898)\n\nDetailed body"}}`,
-			reg:     &mockPRRegistry{backfillTargetID: "1559768078131269684"},
+			reg:     &mockPRRegistry{mergeAdvanceRes: true, backfillTargetID: "1559768078131269684"},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  898, wantMergeSHA: "unindexedsha898", wantTargetID: "1559768078131269684", wantSource: "commit_message", wantBackfillCalls: 1, wantAdvanceCalls: 1, wantGitPushes: 1,
 		},
 		{
 			name: "push to main falls back to merge commit message when SHA lookup misses", event: "push", delivery: "del-push-merge-msg-fallback",
 			payload: `{"ref":"refs/heads/main","after":"unindexedsha899","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"unindexedsha899","message":"Merge pull request #899 from azylman/feat/test\n\nMerge body"}}`,
-			reg:     &mockPRRegistry{backfillTargetID: "1559768078131269684"},
+			reg:     &mockPRRegistry{mergeAdvanceRes: true, backfillTargetID: "1559768078131269684"},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  899, wantMergeSHA: "unindexedsha899", wantTargetID: "1559768078131269684", wantSource: "commit_message", wantBackfillCalls: 1, wantAdvanceCalls: 1, wantGitPushes: 1,
 		},
@@ -620,13 +620,13 @@ func TestProcessGitHubEvent(t *testing.T) {
 		{
 			name: "push local PR resolution priority avoids GitHub API", event: "push", delivery: "del-push-local",
 			payload:        `{"ref":"refs/heads/main","after":"localsha123","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"localsha123","message":"feat: merged commit"}}`,
-			reg:            &mockPRRegistry{resolvePRNum: 530, resolveBranch: "feat/local-resolved", resolveTargetID: "thread-local-530"},
+			reg:            &mockPRRegistry{mergeAdvanceRes: true, resolvePRNum: 530, resolveBranch: "feat/local-resolved", resolveTargetID: "thread-local-530"},
 			spyNoGitHubHit: true, wantPR: 530, wantTargetID: "thread-local-530", wantMergeSHA: "localsha123", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
 		},
 		{
 			name: "push to main triggers DispatchGitPush", event: "push", delivery: "del-push-main-disp",
 			payload: `{"ref":"refs/heads/main","after":"maincommit123","repository":{"full_name":"azylman/aerial"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 542, resolveBranch: "main", resolveTargetID: "1555405874565091380"},
+			reg:     &mockPRRegistry{mergeAdvanceRes: true, resolvePRNum: 542, resolveBranch: "main", resolveTargetID: "1555405874565091380"},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  542, wantTargetID: "1555405874565091380", wantGitPushes: 1, wantBackfillCalls: 1, wantAdvanceCalls: 1,
 		},
@@ -654,7 +654,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 		{
 			name: "pull_request closed and merged suppresses direct message", event: "pull_request", delivery: "del-pr-merge-disp",
 			payload: `{"action":"closed","number":542,"pull_request":{"number":542,"merged":true,"head":{"ref":"feat/batch1","sha":"head542"},"merge_commit_sha":"merge542"},"repository":{"full_name":"azylman/aerial"}}`,
-			reg:     &mockPRRegistry{mergedTargetID: "1555405874565091380"},
+			reg:     &mockPRRegistry{mergeAdvanceRes: true, mergedTargetID: "1555405874565091380"},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  542, wantAction: "closed", wantMergedCalls: 1, wantAdvanceCalls: 1, wantDMs: 0,
 		},
@@ -689,21 +689,21 @@ func TestProcessGitHubEvent(t *testing.T) {
 		{
 			name: "merged non-final PR on azylman/mirrormere updates merged status and advances Vanadis chunk", event: "pull_request", delivery: "del-pr-mirrormere",
 			payload: `{"action":"closed","number":210,"pull_request":{"number":210,"head":{"ref":"feat/ui","sha":"head210"},"merged":true,"merge_commit_sha":"merge210"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{mergedTargetID: "1562162630997581946"},
+			reg:     &mockPRRegistry{mergeAdvanceRes: true, mergedTargetID: "1562162630997581946"},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  210, wantMergedCalls: 1, wantAdvanceCalls: 1, wantPrompts: 0,
 		},
 		{
-			name: "merged final Vanadis PR on azylman/mirrormere defers Vanadis advance until terminal deploy", event: "pull_request", delivery: "del-pr-mirrormere-final",
+			name: "merged Vanadis PR not followed by a pr chunk on azylman/mirrormere defers Vanadis advance until deploy", event: "pull_request", delivery: "del-pr-mirrormere-final",
 			payload: `{"action":"closed","number":210,"pull_request":{"number":210,"head":{"ref":"feat/ui","sha":"head210"},"merged":true,"merge_commit_sha":"merge210"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{mergedTargetID: "1562162630997581946", finalVanadisRes: true},
+			reg:     &mockPRRegistry{mergedTargetID: "1562162630997581946"},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  210, wantMergedCalls: 1, wantAdvanceCalls: 0, wantPrompts: 0,
 		},
 		{
-			name: "merged PR on azylman/mirrormere advance Vanadis error propagates", event: "pull_request", delivery: "del-pr-mirrormere-adv-err",
+			name: "merged PR on azylman/mirrormere merge gate lookup error propagates", event: "pull_request", delivery: "del-pr-mirrormere-gate-err",
 			payload: `{"action":"closed","number":210,"pull_request":{"number":210,"head":{"ref":"feat/ui","sha":"head210"},"merged":true,"merge_commit_sha":"merge210"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{mergedTargetID: "1562162630997581946", advanceVanadisErr: errors.New("simulated advance error")},
+			reg:     &mockPRRegistry{mergedTargetID: "1562162630997581946", mergeAdvanceErr: errors.New("simulated vanadis lookup error")},
 			disp:    &mockOutboundDispatcher{},
 			wantErr: true,
 		},
@@ -730,19 +730,19 @@ func TestProcessGitHubEvent(t *testing.T) {
 		{
 			name: "push to azylman/aerial-sidecars backfills merge_sha and advances non-final Vanadis chunk", event: "push", delivery: "del-push-sidecars",
 			payload: `{"ref":"refs/heads/main","after":"sidecarsha1","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha1","message":"feat: merged sidecar (#310)"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 310, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars"},
+			reg:     &mockPRRegistry{mergeAdvanceRes: true, resolvePRNum: 310, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars"},
 			wantPR:  310, wantMergeSHA: "sidecarsha1", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
 		},
 		{
-			name: "push to azylman/aerial-sidecars defers Vanadis advance for final chunk", event: "push", delivery: "del-push-sidecars-final",
+			name: "push to azylman/aerial-sidecars defers Vanadis advance when next chunk is not a pr", event: "push", delivery: "del-push-sidecars-final",
 			payload: `{"ref":"refs/heads/main","after":"sidecarsha1","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha1","message":"feat: merged sidecar (#310)"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 310, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars", finalVanadisRes: true},
+			reg:     &mockPRRegistry{resolvePRNum: 310, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars"},
 			wantPR:  310, wantMergeSHA: "sidecarsha1", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 0,
 		},
 		{
 			name: "push to azylman/aerial-sidecars advance Vanadis error propagates", event: "push", delivery: "del-push-sidecars-adv-err",
 			payload: `{"ref":"refs/heads/main","after":"sidecarsha1","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha1","message":"feat: merged sidecar (#310)"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 310, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars", advanceVanadisErr: errors.New("simulated advance error")},
+			reg:     &mockPRRegistry{mergeAdvanceRes: true, resolvePRNum: 310, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars", advanceVanadisErr: errors.New("simulated advance error")},
 			wantErr: true,
 		},
 		{

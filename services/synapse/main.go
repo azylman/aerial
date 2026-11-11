@@ -725,19 +725,17 @@ func (s *RouterServer) isVanadisPR(ctx context.Context, repo string, prNum int) 
 	return s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
 }
 
-func (s *RouterServer) isFinalVanadisChunk(ctx context.Context, repo string, prNum int) (bool, error) {
-	if s.registry == nil || prNum <= 0 {
-		return false, nil
+// advanceVanadisChunkOnMerge starts the next chunk on merge only when it is a
+// PR chunk; every other case waits for the deploy path to advance the build.
+func (s *RouterServer) advanceVanadisChunkOnMerge(ctx context.Context, repo string, prNumber int) error {
+	if s.registry == nil || prNumber <= 0 {
+		return nil
 	}
-	return s.registry.IsFinalVanadisChunk(ctx, repo, prNum)
-}
-
-func (s *RouterServer) advanceNonFinalVanadisChunk(ctx context.Context, repo string, prNumber int) error {
-	finalChunk, err := s.isFinalVanadisChunk(ctx, repo, prNumber)
+	advance, err := s.registry.AdvancesVanadisChunkOnMerge(ctx, repo, prNumber)
 	if err != nil {
 		return err
 	}
-	if finalChunk {
+	if !advance {
 		return nil
 	}
 	return s.advanceVanadisChunk(ctx, repo, prNumber)
@@ -748,12 +746,12 @@ func (s *RouterServer) advanceVanadisChunkOnSync(ctx context.Context, repo strin
 		return nil
 	}
 	if syncHasExpected {
-		finalChunk, err := s.isFinalVanadisChunk(ctx, repo, prNumber)
+		advance, err := s.registry.AdvancesVanadisChunkOnMerge(ctx, repo, prNumber)
 		if err != nil {
 			return err
 		}
-		if finalChunk {
-			log.Printf("[synapse] [vanadis] deferring final chunk advancement on sync_success for %s#%d until deploy_success", repo, prNumber)
+		if !advance {
+			log.Printf("[synapse] [vanadis] deferring chunk advancement on sync_success for %s#%d until deploy_success", repo, prNumber)
 			return nil
 		}
 	}
