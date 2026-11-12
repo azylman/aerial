@@ -125,6 +125,15 @@ data:
         Skip_Long_Lines   On
         Refresh_Interval  10
 
+    [INPUT]
+        Name              systemd
+        Tag               node.journal
+        Path              /var/log/journal
+        DB                /var/log/flb_journal.db
+        Read_From_Tail    On
+        Strip_Underscores On
+        Mem_Buf_Limit     50MB
+
     [FILTER]
         Name                kubernetes
         Match               kube.*
@@ -143,6 +152,17 @@ data:
         Host          openobserve.default.svc.cluster.local
         Port          5080
         URI           /openobserve/api/default/docker_logs/_json
+        Format        json
+        Header        Content-Type application/json
+        http_user     admin@aerial.local
+        http_passwd   ${OPENOBSERVE_ROOT_USER_PASSWORD}
+
+    [OUTPUT]
+        Name          http
+        Match         node.*
+        Host          openobserve.default.svc.cluster.local
+        Port          5080
+        URI           /openobserve/api/default/node_logs/_json
         Format        json
         Header        Content-Type application/json
         http_user     admin@aerial.local
@@ -201,6 +221,9 @@ spec:
               readOnly: true
             - mountPath: /fluent-bit/etc/
               name: config
+            - mountPath: /etc/machine-id
+              name: etcmachineid
+              readOnly: true
       serviceAccountName: fluent-bit-sa
       tolerations:
         - operator: Exists
@@ -217,6 +240,10 @@ spec:
             defaultMode: 420
             name: fluent-bit-config
           name: config
+        - hostPath:
+            path: /etc/machine-id
+            type: File
+          name: etcmachineid
   updateStrategy:
     rollingUpdate:
       maxSurge: 0
