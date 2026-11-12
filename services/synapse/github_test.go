@@ -3146,7 +3146,10 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 		botID          string
 		defaultOwner   bool
 		prBody         string
+		action         string
+		merged         bool
 		wantRegistered bool
+		wantClosed     bool
 	}{
 		{
 			name:           "matching bot_id registered",
@@ -3183,6 +3186,16 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 			prBody:         "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\"} -->",
 			wantRegistered: false,
 		},
+		{
+			name:           "closed unmerged pr skips registration and marks pr closed",
+			botID:          "aerial",
+			defaultOwner:   true,
+			prBody:         "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"aerial\"} -->",
+			action:         "closed",
+			merged:         false,
+			wantRegistered: false,
+			wantClosed:     true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -3194,17 +3207,22 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 				DefaultOwner: tc.defaultOwner,
 			}
 			srv := newTestRouter(cfg, nil, reg, nil)
+			action := tc.action
+			if action == "" {
+				action = "opened"
+			}
 			res := &ResolvedGitHubEvent{
 				Repo:     "azylman/aerial",
 				PRNumber: 101,
 				Branch:   "feat/something",
 				HeadSHA:  "sha101",
-				Action:   "opened",
+				Action:   action,
 			}
 			pr := GitHubPullRequest{
 				Number: 101,
 				Title:  "Test PR",
 				Body:   tc.prBody,
+				Merged: tc.merged,
 			}
 
 			err := srv.handlePullRequestRegistryAction(context.Background(), res, pr)
@@ -3216,6 +3234,12 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 			}
 			if !tc.wantRegistered && len(reg.ensureCalls) > 0 {
 				t.Fatalf("expected PR NOT to be registered, but EnsurePRRegistered was called %d times", len(reg.ensureCalls))
+			}
+			if tc.wantClosed && len(reg.closedUnmergedCalls) == 0 {
+				t.Fatalf("expected PR to be marked closed unmerged, but UpdatePRClosedUnmerged was not called")
+			}
+			if !tc.wantClosed && len(reg.closedUnmergedCalls) > 0 {
+				t.Fatalf("expected PR NOT to be marked closed unmerged, but UpdatePRClosedUnmerged was called %d times", len(reg.closedUnmergedCalls))
 			}
 		})
 	}

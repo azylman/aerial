@@ -239,10 +239,10 @@ func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, chunkID string
 	var threadID string
 	var err error
 	if len(candidates) > 0 {
-		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = ANY($3) AND c.status != 'cancelled' AND b.status != 'cancelled' RETURNING b.thread_id;`
+		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = ANY($3) AND c.status != 'cancelled' AND b.status NOT IN ('cancelled', 'completed') RETURNING b.thread_id;`
 		err = s.db.QueryRow(ctx, qWithRepo, prNumber, chunkID, candidates).Scan(&threadID)
 	} else {
-		const qNoRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.status != 'cancelled' AND b.status != 'cancelled' RETURNING b.thread_id;`
+		const qNoRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.status != 'cancelled' AND b.status NOT IN ('cancelled', 'completed') RETURNING b.thread_id;`
 		err = s.db.QueryRow(ctx, qNoRepo, prNumber, chunkID).Scan(&threadID)
 	}
 	if err != nil {
@@ -264,7 +264,7 @@ func (s *PostgresVanadisStore) resolveAttachChunkPRError(ctx context.Context, ch
 		return fmt.Errorf("%w: chunk %s or parent build is cancelled", ErrBuildConflict, chunkID)
 	}
 	var isCancelled bool
-	cancErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.id = $1 AND (c.status = 'cancelled' OR b.status = 'cancelled'));`, chunkID).Scan(&isCancelled)
+	cancErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.id = $1 AND (c.status = 'cancelled' OR b.status IN ('cancelled', 'completed')));`, chunkID).Scan(&isCancelled)
 	if cancErr == nil && isCancelled {
 		return fmt.Errorf("%w: chunk %s or parent build is cancelled", ErrBuildConflict, chunkID)
 	}

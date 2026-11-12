@@ -2659,6 +2659,15 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			wantDispatched: false,
 		},
 		{
+			name:           "Postgres superseded Vanadis chunk PR with chunk id in metadata suppresses standalone widget",
+			repo:           "azylman/aerial",
+			prNumber:       103,
+			prDBStatus:     "open",
+			prDBMetadata:   `{"vanadis_chunk_id":"chunk-superseded"}`,
+			vanadisMatch:   false,
+			wantDispatched: false,
+		},
+		{
 			name:         "Postgres Vanadis chunk dispatch error",
 			repo:         "azylman/aerial",
 			prNumber:     102,
@@ -3864,3 +3873,31 @@ type fixedConfigSource struct{ cfg Config }
 func (f *fixedConfigSource) Current() *Config { return &f.cfg }
 
 func fixedConfig(cfg Config) ConfigSource { return &fixedConfigSource{cfg: cfg} }
+
+func TestHasMetadataVanadisChunkID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{name: "empty string", input: "", expected: false},
+		{name: "whitespace only", input: "   ", expected: false},
+		{name: "invalid json", input: "{invalid", expected: false},
+		{name: "valid json without field", input: `{"foo":"bar"}`, expected: false},
+		{name: "valid json with empty chunk id", input: `{"vanadis_chunk_id":""}`, expected: false},
+		{name: "valid json with whitespace chunk id", input: `{"vanadis_chunk_id":"   "}`, expected: false},
+		{name: "valid json with valid chunk id", input: `{"vanadis_chunk_id":"chunk-superseded"}`, expected: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := hasMetadataVanadisChunkID(tc.input)
+			if got != tc.expected {
+				t.Errorf("hasMetadataVanadisChunkID(%q) = %v, want %v", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
