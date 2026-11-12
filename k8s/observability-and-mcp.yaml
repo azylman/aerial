@@ -980,6 +980,8 @@ spec:
               value: "false"
             - name: ZO_AUTO_QUERY_ENABLED
               value: "true"
+            - name: ZO_INGEST_ALLOWED_UPTO
+              value: "24"
           image: public.ecr.aws/zinclabs/openobserve:v1.1.2
           name: openobserve
           ports:
