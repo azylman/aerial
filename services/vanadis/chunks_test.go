@@ -481,22 +481,49 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 	})
 
 	t.Run("AttachChunkPR_Errors", func(t *testing.T) {
-		s, _, cIDs := setupTestStoreWithBuild()
-		_, _ = s.AttachChunkPR(ctx, cIDs[0], 101, "aerial")
-
-		_, err := s.AttachChunkPR(ctx, cIDs[0], 101, "other-repo")
-		if err == nil {
-			t.Error("expected error attaching mismatched repo to chunk")
+		tests := []struct {
+			name        string
+			chunkID     string
+			repo        string
+			buildStatus string
+			chunkStatus string
+			wantErr     error
+			wantSubstr  string
+		}{
+			{name: "mismatched repo", chunkID: "chunk-1", repo: "other-repo", wantSubstr: "does not match"},
+			{name: "chunk not found", chunkID: "missing", repo: "aerial", wantErr: ErrChunkNotFound},
+			{name: "empty chunk ID", chunkID: "", repo: "aerial", wantSubstr: "chunk id and valid pr number are required"},
+			{name: "parent build completed returns ErrBuildConflict", chunkID: "chunk-1", repo: "aerial", buildStatus: "completed", wantErr: ErrBuildConflict},
+			{name: "parent build cancelled returns ErrBuildConflict", chunkID: "chunk-1", repo: "aerial", buildStatus: "cancelled", wantErr: ErrBuildConflict},
+			{name: "chunk cancelled returns ErrBuildConflict", chunkID: "chunk-1", repo: "aerial", chunkStatus: "cancelled", wantErr: ErrBuildConflict},
 		}
 
-		_, err = s.AttachChunkPR(ctx, "missing", 101, "aerial")
-		if !errors.Is(err, ErrChunkNotFound) {
-			t.Errorf("expected ErrChunkNotFound, got %v", err)
-		}
-
-		_, err = s.AttachChunkPR(ctx, "", 101, "aerial")
-		if err == nil {
-			t.Error("expected error on empty chunk ID")
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				s, bID, cIDs := setupTestStoreWithBuild()
+				_, _ = s.AttachChunkPR(ctx, cIDs[0], 101, "aerial")
+				if tc.buildStatus != "" {
+					b := s.builds[bID]
+					b.Status = tc.buildStatus
+					s.builds[bID] = b
+				}
+				if tc.chunkStatus != "" {
+					list := s.chunks[bID]
+					for i := range list {
+						if list[i].ID == tc.chunkID {
+							list[i].Status = tc.chunkStatus
+						}
+					}
+					s.chunks[bID] = list
+				}
+				_, err := s.AttachChunkPR(ctx, tc.chunkID, 101, tc.repo)
+				if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+					t.Errorf("expected error %v, got %v", tc.wantErr, err)
+				}
+				if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
+					t.Errorf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+			})
 		}
 	})
 
@@ -1620,54 +1647,44 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 			t.Errorf("expected mismatch error, got %v", err)
 		}
 
-		// Cancelled chunk or build with repo returns ErrBuildConflict
-		sCancelledWithRepo := newMockStore(mockDB{
-			queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
-				if strings.Contains(sql, "SELECT mode") {
-					return &genericMockRow{scanFn: func(dest ...any) error {
-						*dest[0].(*string) = "pr"
-						return nil
-					}}
-				}
-				if strings.Contains(sql, "c.status = 'cancelled'") {
-					return &genericMockRow{scanFn: func(dest ...any) error {
-						*dest[0].(*bool) = true
-						return nil
-					}}
-				}
-				if strings.Contains(sql, "SELECT EXISTS") {
-					return &genericMockRow{scanFn: func(dest ...any) error {
-						*dest[0].(*bool) = true
-						return nil
-					}}
-				}
-				return &mockRow{err: pgx.ErrNoRows}
-			},
-		})
-		if _, err := sCancelledWithRepo.AttachChunkPR(ctx, "c1", 101, "aerial"); !errors.Is(err, ErrBuildConflict) {
-			t.Errorf("expected ErrBuildConflict for cancelled chunk, got %v", err)
+		// Conflict scenarios: cancelled chunk/build or completed parent build returns ErrBuildConflict
+		conflictTests := []struct {
+			name        string
+			repo        string
+			isCancelled bool
+			wantErr     error
+		}{
+			{name: "cancelled chunk or build with repo returns ErrBuildConflict", repo: "aerial", isCancelled: true, wantErr: ErrBuildConflict},
+			{name: "completed parent build with repo returns ErrBuildConflict", repo: "aerial", isCancelled: true, wantErr: ErrBuildConflict},
+			{name: "cancelled chunk or build without repo returns ErrBuildConflict", repo: "", isCancelled: true, wantErr: ErrBuildConflict},
 		}
-
-		// Cancelled chunk or build without repo returns ErrBuildConflict
-		sCancelledNoRepo := newMockStore(mockDB{
-			queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
-				if strings.Contains(sql, "SELECT mode") {
-					return &genericMockRow{scanFn: func(dest ...any) error {
-						*dest[0].(*string) = "pr"
-						return nil
-					}}
-				}
-				if strings.Contains(sql, "SELECT EXISTS") {
-					return &genericMockRow{scanFn: func(dest ...any) error {
-						*dest[0].(*bool) = true
-						return nil
-					}}
-				}
-				return &mockRow{err: pgx.ErrNoRows}
-			},
-		})
-		if _, err := sCancelledNoRepo.AttachChunkPR(ctx, "c1", 101, ""); !errors.Is(err, ErrBuildConflict) {
-			t.Errorf("expected ErrBuildConflict for cancelled chunk without repo, got %v", err)
+		for _, tc := range conflictTests {
+			sConflict := newMockStore(mockDB{
+				queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
+					if strings.Contains(sql, "SELECT mode") {
+						return &genericMockRow{scanFn: func(dest ...any) error {
+							*dest[0].(*string) = "pr"
+							return nil
+						}}
+					}
+					if strings.Contains(sql, "c.status = 'cancelled'") {
+						return &genericMockRow{scanFn: func(dest ...any) error {
+							*dest[0].(*bool) = tc.isCancelled
+							return nil
+						}}
+					}
+					if strings.Contains(sql, "SELECT EXISTS") {
+						return &genericMockRow{scanFn: func(dest ...any) error {
+							*dest[0].(*bool) = true
+							return nil
+						}}
+					}
+					return &mockRow{err: pgx.ErrNoRows}
+				},
+			})
+			if _, err := sConflict.AttachChunkPR(ctx, "c1", 101, tc.repo); !errors.Is(err, tc.wantErr) {
+				t.Errorf("%s: expected ErrBuildConflict, got %v", tc.name, err)
+			}
 		}
 
 		// General error

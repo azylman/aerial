@@ -290,8 +290,7 @@ func (m *memoryVanadisStore) GetChunk(_ context.Context, chunkID string) (*Vanad
 }
 
 func reposMatch(a, b string) bool {
-	b = normalizeRepo(b)
-	if b == "" {
+	if b = normalizeRepo(b); b == "" {
 		return false
 	}
 	return slices.Contains(repoMatchCandidates(a), b)
@@ -329,14 +328,15 @@ func (m *memoryVanadisStore) GetChunkByPR(_ context.Context, repo string, prNumb
 }
 
 func (m *memoryVanadisStore) AttachChunkPR(_ context.Context, chunkID string, prNumber int, repo string) (string, error) {
-	chunkID = strings.TrimSpace(chunkID)
-	repo = normalizeRepo(repo)
-	if chunkID == "" || prNumber <= 0 {
+	if chunkID, repo = strings.TrimSpace(chunkID), normalizeRepo(repo); chunkID == "" || prNumber <= 0 {
 		return "", errors.New("chunk id and valid pr number are required")
 	}
 	for bID, list := range m.chunks {
 		for i := range list {
 			if list[i].ID == chunkID {
+				if list[i].Status == "cancelled" || m.builds[bID].Status == "cancelled" || m.builds[bID].Status == "completed" {
+					return "", ErrBuildConflict
+				}
 				if repo != "" && !reposMatch(list[i].Repo, repo) {
 					return "", fmt.Errorf("chunk %s repo %q does not match %q", chunkID, list[i].Repo, repo)
 				}

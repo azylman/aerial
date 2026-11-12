@@ -1249,7 +1249,7 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 	} else if meta.BotID == "" && !cfg.DefaultOwner {
 		shouldRegister = false
 	}
-	if shouldRegister && s.registry != nil && (meta.TargetID != "" || meta.VanadisChunkID != "") {
+	if shouldRegister && s.registry != nil && (meta.TargetID != "" || meta.VanadisChunkID != "") && (res.Action != "closed" || pr.Merged) {
 		// Self-heal DB registration only; initial Discord widget delivery on opened is owned by Brain's /internal/pr/register to avoid duplicate message creation races.
 		resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, pr.Title, meta.TargetID, meta.VanadisChunkID)
 		if err != nil {

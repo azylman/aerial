@@ -609,6 +609,16 @@ func prWidgetBanner(status, banner string) string {
 	return ""
 }
 
+func hasMetadataVanadisChunkID(metadataJSON string) bool {
+	var meta struct {
+		VanadisChunkID string `json:"vanadis_chunk_id"`
+	}
+	if strings.TrimSpace(metadataJSON) == "" || json.Unmarshal([]byte(metadataJSON), &meta) != nil {
+		return false
+	}
+	return strings.TrimSpace(meta.VanadisChunkID) != ""
+}
+
 func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, allowSweep bool) error {
 	prQuery := `SELECT target_id, title, status, status_message_id, created_at, updated_at, COALESCE(metadata->>'banner', ''), COALESCE((metadata->'ci_checks')::text, '{}'), COALESCE(metadata::text, '{}'), COALESCE(branch, '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
 	var targetID, title, prStatus, prMsgID, prBanner, ciChecksJSON, metadataJSON, branch string
@@ -633,7 +643,7 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 	if err != nil {
 		return err
 	}
-	if matched {
+	if matched || hasMetadataVanadisChunkID(metadataJSON) {
 		return nil
 	}
 
