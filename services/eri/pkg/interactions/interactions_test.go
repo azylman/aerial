@@ -203,7 +203,7 @@ func TestApplicationCommandsAndHelpers(t *testing.T) {
 	}{
 		{"CmdDefCount", "cmd_len", "", 0, 0, "", false, 6},
 		{"CmdDef_status", "cmd_opts", "status", 0, 0, "", false, 0},
-		{"CmdDef_quota", "cmd_opts", "quota", 0, 0, "", false, 0},
+		{"CmdDef_quota", "cmd_opts", "quota", 0, 0, "", false, 1},
 		{"CmdDef_rotate", "cmd_opts", "rotate", 0, 0, "", false, 2},
 		{"CmdDef_interrupt", "cmd_opts", "interrupt", 0, 0, "", false, 2},
 		{"CmdDef_mode", "cmd_opts", "mode", 0, 0, "", false, 2},
@@ -789,6 +789,53 @@ func TestRouter_HandleSync(t *testing.T) {
 				t.Errorf("expected method %s, got %s", tc.wantMethod, reqs[0].Method)
 			}
 			_ = cmds
+		})
+	}
+}
+
+func TestRouter_QuotaVisibilityAndAccess(t *testing.T) {
+	const ephemeral = `"flags":64`
+	tests := []struct {
+		name          string
+		userID        string
+		opts          []*discordgo.ApplicationCommandInteractionDataOption
+		wantEphemeral bool
+		wantSubstr    string
+	}{
+		{"AdminDefaultPrivate", "admin-123", nil, true, "No quota telemetry"},
+		{"AdminPublicTrue", "admin-123", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("public", discordgo.ApplicationCommandOptionBoolean, true)}, false, "No quota telemetry"},
+		{"AdminPublicFalse", "admin-123", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("public", discordgo.ApplicationCommandOptionBoolean, false)}, true, "No quota telemetry"},
+		{"NonAdminDefaultPrivate", "guest-9", nil, true, "No quota telemetry"},
+		{"NonAdminPublicTrue", "guest-9", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("public", discordgo.ApplicationCommandOptionBoolean, true)}, false, "No quota telemetry"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router, _, transport, session := setupTestRouter("admin-123", 0)
+			router.Handle(session, mkCmd("int-qv", "chan-1", tc.userID, "quota", tc.opts...))
+			reqs := transport.Requests()
+			if len(reqs) != 1 {
+				t.Fatalf("expected 1 request, got %d", len(reqs))
+			}
+			body := string(reqs[0].Body)
+			if !strings.Contains(body, tc.wantSubstr) || strings.Contains(body, "Unauthorized") {
+				t.Errorf("unexpected response: %s", body)
+			}
+			if got := strings.Contains(body, ephemeral); got != tc.wantEphemeral {
+				t.Errorf("ephemeral = %v, want %v; body: %s", got, tc.wantEphemeral, body)
+			}
+		})
+	}
+}
+
+func TestRouter_NonAdminStillBlockedFromOtherCommands(t *testing.T) {
+	for _, name := range []string{"status", "rotate", "interrupt", "mode", "ignore_bots"} {
+		t.Run(name, func(t *testing.T) {
+			router, _, transport, session := setupTestRouter("admin-123", 0)
+			router.Handle(session, mkCmd("int-na", "chan-1", "guest-9", name))
+			reqs := transport.Requests()
+			if len(reqs) != 1 || !strings.Contains(string(reqs[0].Body), "Unauthorized") {
+				t.Fatalf("expected Unauthorized for /%s, got %v", name, reqs)
+			}
 		})
 	}
 }
