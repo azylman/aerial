@@ -102,6 +102,8 @@ func toolsCall(tool string) string {
 
 const toolsList = `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`
 
+const pingReply = `{"jsonrpc":"2.0","id":7,"result":{}}`
+
 func TestTraceProxy(t *testing.T) {
 	t.Parallel()
 	twoTurns := []activeTurn{{daemon: "p1/discord-1", target: "discord", conversation: "conv-1", span: 1}, {daemon: "p1/discord-2", target: "discord", conversation: "conv-2", span: 2}}
@@ -170,6 +172,21 @@ func TestTraceProxy(t *testing.T) {
 			name:  "turn in another target does not count",
 			turns: []activeTurn{{daemon: "p2/ephemeral:worker-0", target: "ephemeral", span: 3}},
 			calls: []proxyCall{{body: toolsCall("create")}},
+		},
+		{
+			name:  "claude ping reply joins no turn",
+			turns: twoTurns,
+			calls: []proxyCall{{daemonHeader: "p1/discord-2", body: pingReply}, {daemonHeader: "p1/discord-2", body: toolsList, wantParent: 2}},
+		},
+		{
+			name:  "agy ping reply joins no sole turn",
+			turns: twoTurns[:1],
+			calls: []proxyCall{{body: pingReply}, {body: toolsList, wantParent: 1}},
+		},
+		{
+			name:  "empty body joins no turn",
+			turns: twoTurns,
+			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: ""}},
 		},
 	}
 	for _, tc := range tests {
