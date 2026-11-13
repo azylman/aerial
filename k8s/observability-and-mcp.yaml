@@ -33,7 +33,7 @@ kind: PersistentVolumeClaim
 metadata:
   annotations:
     volume.kubernetes.io/storage-provisioner: rancher.io/local-path
-  name: victorialogs-pvc
+  name: victorialogs-data
   namespace: default
 spec:
   accessModes:
@@ -48,7 +48,7 @@ kind: PersistentVolumeClaim
 metadata:
   annotations:
     volume.kubernetes.io/storage-provisioner: rancher.io/local-path
-  name: victoriatraces-pvc
+  name: victoriatraces-data
   namespace: default
 spec:
   accessModes:
@@ -869,7 +869,7 @@ spec:
       volumes:
         - name: storage
           persistentVolumeClaim:
-            claimName: victorialogs-pvc
+            claimName: victorialogs-data
         - name: auth
           secret:
             secretName: victoria-admin-secret
@@ -966,7 +966,7 @@ spec:
       volumes:
         - name: storage
           persistentVolumeClaim:
-            claimName: victoriatraces-pvc
+            claimName: victoriatraces-data
         - name: auth
           secret:
             secretName: victoria-admin-secret
