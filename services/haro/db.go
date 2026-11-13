@@ -127,7 +127,7 @@ func openDB(dsn string) (*sql.DB, error) {
 		return sqliteTestInitHook(trimmed)
 	}
 	if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
-		return nil, fmt.Errorf("db: unsupported database scheme in %q: only postgres:// or postgresql:// supported", trimmed)
+		return nil, fmt.Errorf("db: unsupported database scheme in %q: only postgres:// or postgresql:// supported", RedactDSN(trimmed))
 	}
 
 	var database *sql.DB
@@ -157,7 +157,7 @@ func openDB(dsn string) (*sql.DB, error) {
 	database.SetConnMaxLifetime(30 * time.Minute)
 	database.SetConnMaxIdleTime(5 * time.Minute)
 
-	log.Printf("[Scheduler DB] PostgreSQL initialized successfully at %s", trimmed)
+	log.Printf("[Scheduler DB] PostgreSQL initialized successfully at %s", RedactDSN(trimmed))
 	return database, nil
 }
 

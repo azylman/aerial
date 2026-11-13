@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -460,4 +461,19 @@ func FormatOneShotSchedulesJSON(raw []OneShotSchedule) []OneShotScheduleJSON {
 		})
 	}
 	return oneShots
+}
+
+// RedactDSN returns a log-safe form of a database DSN: query string and fragment
+// are dropped, any userinfo password is masked, and unparseable or host-less
+// inputs (including libpq key=value DSNs) collapse to "[redacted]".
+func RedactDSN(dsn string) string {
+	u, err := url.Parse(strings.TrimSpace(dsn))
+	if err != nil || u.Host == "" {
+		return "[redacted]"
+	}
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.Redacted()
 }

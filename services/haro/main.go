@@ -61,7 +61,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, cfg.DatabaseURL)
+		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, RedactDSN(cfg.DatabaseURL))
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
