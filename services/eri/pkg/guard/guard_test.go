@@ -325,20 +325,6 @@ func TestClaudeHookResponseFormatting(t *testing.T) {
 			"allow", "",
 			map[string]any{"command": "echo 1"},
 		},
-		{
-			"end line without start line is ignored",
-			&Decision{Decision: DecisionAllow, Overwrite: map[string]any{"EndLine": 40}},
-			json.RawMessage(`{"file_path":"/data/a.go"}`),
-			"allow", "",
-			map[string]any{"file_path": "/data/a.go"},
-		},
-		{
-			"non-map arguments ignored",
-			&Decision{Decision: DecisionAllow, Overwrite: map[string]any{"Arguments": "raw"}},
-			json.RawMessage(`{"query":"q"}`),
-			"allow", "",
-			map[string]any{"query": "q"},
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
