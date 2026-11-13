@@ -441,7 +441,6 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	if !te.acquirePoolAndLease() {
 		return
 	}
-	defer te.markTurnActive()()
 	defer func() {
 		if te.lease != nil {
 			if relErr := te.lease.Release(); relErr != nil {
@@ -565,7 +564,6 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 		return
 	}
 	defer te.releaseActivePoolLease()
-	defer te.markTurnActive()()
 
 	cleanupChunk := p.setupVanadisChunkTurn(d, te)
 	defer cleanupChunk()

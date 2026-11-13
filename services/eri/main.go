@@ -994,7 +994,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		HaroURL:          cur.HaroURL,
 		SynapseURL:       cur.SynapseURL,
 		VanadisURL:       cur.VanadisURL,
-		ActiveTurns:      runner.NewActiveTurnRegistry(),
 		AgentName:        appOpts.agentName,
 	})
 	pool.HoldUntilLeader()

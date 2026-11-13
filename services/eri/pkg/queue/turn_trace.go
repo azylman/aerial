@@ -128,25 +128,11 @@ func turnSpanEndAttributes(model string, usage runner.AgyUsage, status string) [
 	return attrs
 }
 
-func applyWorkerPoolTracingDefaults(cfg *WorkerPoolConfig) {
-	if cfg.ActiveTurns == nil {
-		cfg.ActiveTurns = runner.NewActiveTurnRegistry()
-	}
-}
-
 func (p *WorkerPool) tracer() trace.Tracer {
 	if p == nil || p.cfg.TracerProvider == nil {
 		return otel.GetTracerProvider().Tracer(runner.TracerScope)
 	}
 	return p.cfg.TracerProvider.Tracer(runner.TracerScope)
-}
-
-// ActiveTurns exposes the registry mapping each daemon (by lease key) to its active turn's span context.
-func (p *WorkerPool) ActiveTurns() *runner.ActiveTurnRegistry {
-	if p == nil {
-		return nil
-	}
-	return p.cfg.ActiveTurns
 }
 
 // beginTurnTrace opens the turn's root span and returns the context carrying it.
@@ -166,18 +152,6 @@ func (te *turnExecution) endTurnSpan() {
 		te.turnSpan.SetStatus(codes.Error, te.turnStatus)
 	}
 	te.turnSpan.End()
-}
-
-// markTurnActive publishes the turn's span context for the daemon serving its lease and
-// returns the matching cleanup.
-func (te *turnExecution) markTurnActive() func() {
-	registry := te.pool.ActiveTurns()
-	if registry == nil || te.turnSpan == nil {
-		return func() {}
-	}
-	daemonID := te.leaseKey()
-	registry.Set(daemonID, te.turnSpan.SpanContext())
-	return func() { registry.Clear(daemonID) }
 }
 
 // startChildSpan starts a child of the turn span on base, keeping base's cancellation.

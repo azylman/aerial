@@ -117,9 +117,8 @@ type WorkerPoolConfig struct {
 	VoiceStreamRunnerFunc            func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (reply string, convID string, err error)
 	AmbientResolver                  func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error)
 	CreateThreadFunc                 func(channelID, title string) (string, error)
-	TracerProvider                   trace.TracerProvider       // turn spans; nil uses the global provider
-	ActiveTurns                      *runner.ActiveTurnRegistry // daemon lease key -> active turn span; nil gets a private registry
-	AgentName                        string                     // stack persona recorded as gen_ai.agent.name
+	TracerProvider                   trace.TracerProvider // turn spans; nil uses the global provider
+	AgentName                        string               // stack persona recorded as gen_ai.agent.name
 }
 
 type queueItem struct {
@@ -450,7 +449,6 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		cfg.LLMFunc = resolveDefaultSummarizerLLM(pools)
 	}
 
-	applyWorkerPoolTracingDefaults(&cfg)
 	parentCtx := cfg.ParentContext
 	if parentCtx == nil {
 		parentCtx = context.Background()
