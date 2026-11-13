@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"maps"
 	"os"
 	"slices"
@@ -116,6 +117,7 @@ type WorkerPoolConfig struct {
 	AmbientResolver                  func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error)
 	CreateThreadFunc                 func(channelID, title string) (string, error)
 	TracerProvider                   trace.TracerProvider       // turn spans; nil uses the global provider
+	Logger                           *slog.Logger               // turn-scoped log lines; nil uses slog.Default()
 	AgentName                        string                     // stack persona recorded as gen_ai.agent.name
 	ActiveTurns                      *runner.ActiveTurnRegistry // daemons' active turn spans for the MCP trace proxy; nil gets a private registry
 }

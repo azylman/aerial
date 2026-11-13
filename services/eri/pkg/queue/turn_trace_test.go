@@ -2,10 +2,14 @@ package queue
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -210,12 +215,14 @@ func TestProcessBurst_EmitsTurnTrace(t *testing.T) {
 			defer procPool.Close()
 
 			sig := rootEndSignal{SpanRecorder: tracetest.NewSpanRecorder(), done: make(chan struct{})}
+			logs := &syncBuffer{}
 			pool := New(newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData }), WorkerPoolConfig{
 				ProcessPool:    procPool,
 				SessionManager: session.New(tmpHome, tempData),
 				Store:          store,
 				TimeoutMinutes: 1,
 				TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sig)),
+				Logger:         slog.New(tracing.SlogHandler(slog.NewJSONHandler(logs, nil))),
 				AgentName:      "aerial",
 			})
 			defer pool.Stop()
@@ -257,8 +264,30 @@ func TestProcessBurst_EmitsTurnTrace(t *testing.T) {
 			if root.Status().Code == codes.Error {
 				t.Errorf("root status = %v, want ok", root.Status())
 			}
+			wantLog := fmt.Sprintf(`"msg":"[WorkerPool] 1 message(s) in thread %s completed successfully on attempt 1/3","trace_id":"%s"`, threadID, root.SpanContext().TraceID())
+			if !strings.Contains(logs.String(), wantLog) {
+				t.Errorf("turn log lines lack the turn trace_id; want %s in:\n%s", wantLog, logs.String())
+			}
 		})
 	}
+}
+
+// syncBuffer is a goroutine-safe log sink.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func TestProcessBurst_RegistersActiveTurnDuringExecution(t *testing.T) {

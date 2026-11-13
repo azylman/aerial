@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math/rand"
 	"net/http"
 	"os"
@@ -167,7 +166,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 
 	isSilent := te.isDispatch()
 	if !isSilent && strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
-		log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
+		te.logf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
 		return false, "agent produced empty response"
 	}
 
@@ -184,9 +183,9 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	te.handleDispatchSessionRotation()
 
 	if te.isDispatch() {
-		log.Printf("[WorkerPool] Dispatch %s (session: %s) completed successfully on attempt %d/%d", te.dispatch.ID, te.threadID, attempt, maxAttempts)
+		te.logf("[WorkerPool] Dispatch %s (session: %s) completed successfully on attempt %d/%d", te.dispatch.ID, te.threadID, attempt, maxAttempts)
 	} else {
-		log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
+		te.logf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
 	}
 	return true, ""
 }
@@ -273,7 +272,7 @@ func (te *turnExecution) deliverDiscordSuccess(cleanText string, attachments []*
 	}
 	if deliveryErr != nil {
 		span.SetStatus(codes.Error, "delivery failed")
-		log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
+		te.logf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
 	}
 }
 
@@ -298,7 +297,7 @@ func (te *turnExecution) handleDispatchSessionRotation() {
 	}
 	newTurns, err := te.incrementSessionTurnCount(te.threadID)
 	if err == nil && newTurns >= session.DefaultMaxSessionTurns {
-		log.Printf("[WorkerPool] Dispatch session %s reached %d turns >= max %d. Rotating session.", te.threadID, newTurns, session.DefaultMaxSessionTurns)
+		te.logf("[WorkerPool] Dispatch session %s reached %d turns >= max %d. Rotating session.", te.threadID, newTurns, session.DefaultMaxSessionTurns)
 		te.rotateSessionID(te.threadID, "")
 	}
 }
@@ -309,7 +308,7 @@ func (te *turnExecution) deliverQuotaNotice(pauseMsg string, logPrefix string) {
 	}
 	deliveryTarget := te.threadID
 	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, pauseMsg); err != nil {
-		log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logPrefix, te.threadID, err)
+		te.logf("[WorkerPool] Failed to deliver %s for thread %s: %v", logPrefix, te.threadID, err)
 	}
 }
 
@@ -341,7 +340,7 @@ func (te *turnExecution) retryCapacityBlip(errDetail string, resetDur time.Durat
 			te.finalizeInterruptedTurn(currentModel)
 			return false
 		}
-		log.Printf("[WorkerPool] Context cancelled during capacity blip backoff for thread %s", te.threadID)
+		te.logf("[WorkerPool] Context cancelled during capacity blip backoff for thread %s", te.threadID)
 		te.stopIndicators()
 		te.cancelBurstOnShutdown("pending", false)
 		return false
@@ -349,11 +348,11 @@ func (te *turnExecution) retryCapacityBlip(errDetail string, resetDur time.Durat
 }
 
 func (te *turnExecution) handleCapacityBlip(errDetail string, resetDur time.Duration, currentModel string, attempt, maxAttempts int) bool {
-	log.Printf("[WorkerPool] Capacity blip detected for thread %s on attempt %d/%d (reset=%v): %s.", te.threadID, attempt, maxAttempts, resetDur, errDetail)
+	te.logf("[WorkerPool] Capacity blip detected for thread %s on attempt %d/%d (reset=%v): %s.", te.threadID, attempt, maxAttempts, resetDur, errDetail)
 	if attempt < maxAttempts {
 		return te.retryCapacityBlip(errDetail, resetDur, currentModel, attempt)
 	}
-	log.Printf("[WorkerPool] Capacity blip retry budget exhausted for thread %s after %d attempts", te.threadID, maxAttempts)
+	te.logf("[WorkerPool] Capacity blip retry budget exhausted for thread %s after %d attempts", te.threadID, maxAttempts)
 	te.stopIndicators()
 	reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, sanitizeErrorText(errDetail))
 	metrics.RecordRunnerError("capacity_exhausted", currentModel)
@@ -373,7 +372,7 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	if te.stopTyping != nil {
 		te.stopTyping()
 	}
-	log.Printf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
+	te.logf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
 	isAlreadyRetry := te.isQuotaRetry()
 	jitterSec := 5 + rand.Intn(16)
 	runAt := time.Now().UTC().Add(resetDur).Add(30 * time.Second).Add(time.Duration(jitterSec) * time.Second)
@@ -392,7 +391,7 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 		}
 		if err := te.createOneShotSchedule(oneShot); err == nil {
 			scheduled = true
-			log.Printf("[WorkerPool] Scheduled one-shot retry %s for thread %s", oneShotID, te.threadID)
+			te.logf("[WorkerPool] Scheduled one-shot retry %s for thread %s", oneShotID, te.threadID)
 		}
 	}
 	metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
@@ -411,7 +410,7 @@ func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, exitCode int,
 	}
 	detectionSource := "stderr_signature"
 	if *autoResumeCount >= MaxYieldTrapAutoResumes {
-		log.Printf("[YieldTrap] Circuit breaker tripped for thread %s in session %s after %d auto-resumptions (source=%s). Delivering final output.",
+		te.logf("[YieldTrap] Circuit breaker tripped for thread %s in session %s after %d auto-resumptions (source=%s). Delivering final output.",
 			te.threadID, te.currentSessionID, *autoResumeCount, detectionSource)
 		metrics.RecordYieldTrap("circuit_breaker", detectionSource, currentModel)
 		metrics.RecordRunnerError("yield_trap_circuit_breaker", currentModel)
@@ -428,7 +427,7 @@ func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, exitCode int,
 	if *promptToSend != YieldTrapResumePrompt && !strings.Contains(*promptToSend, "<SYSTEM_MESSAGE>") {
 		*promptToSend = YieldTrapResumePrompt
 	}
-	log.Printf("[YieldTrap] Intercepted background command exit for thread %s in session %s (auto-resume %d/%d, source=%s, taskCount=%d): suppressing intermediate waiting output and auto-resuming turn.",
+	te.logf("[YieldTrap] Intercepted background command exit for thread %s in session %s (auto-resume %d/%d, source=%s, taskCount=%d): suppressing intermediate waiting output and auto-resuming turn.",
 		te.threadID, te.currentSessionID, *autoResumeCount, MaxYieldTrapAutoResumes, detectionSource, taskCount)
 	metrics.RecordYieldTrap("resumed", detectionSource, currentModel)
 	metrics.RecordRunnerError("yield_trap_intercepted", currentModel)
@@ -556,7 +555,7 @@ func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr,
 	notif := buildFailureNotice(te.pool.cfg, agyBin, apiKey, errDetail, stderr, descPrefix)
 	deliveryTarget := te.threadID
 	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, notif); err != nil {
-		log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logLabel, te.threadID, err)
+		te.logf("[WorkerPool] Failed to deliver %s for thread %s: %v", logLabel, te.threadID, err)
 	}
 }
 
@@ -580,7 +579,7 @@ func (te *turnExecution) turnTelemetry() []db.TurnTelemetry {
 func (te *turnExecution) updateMessageStatus(id, status, errorMsg string, telemetry ...db.TurnTelemetry) {
 	if s := te.store(); s != nil {
 		if err := s.UpdateMessageStatus(context.Background(), id, status, errorMsg, telemetry...); err != nil {
-			log.Printf("[Worker] Warning updating message %s status to %s: %v", id, status, err)
+			te.logf("[Worker] Warning updating message %s status to %s: %v", id, status, err)
 		}
 	}
 }
@@ -588,7 +587,7 @@ func (te *turnExecution) updateMessageStatus(id, status, errorMsg string, teleme
 func (te *turnExecution) updateMessageCompleted(id, responseText string, telemetry ...db.TurnTelemetry) {
 	if s := te.store(); s != nil {
 		if err := s.UpdateMessageCompleted(context.Background(), id, responseText, te.currentSessionID, telemetry...); err != nil {
-			log.Printf("[Worker] Warning updating message %s completed: %v", id, err)
+			te.logf("[Worker] Warning updating message %s completed: %v", id, err)
 		}
 	}
 }
@@ -596,7 +595,7 @@ func (te *turnExecution) updateMessageCompleted(id, responseText string, telemet
 func (te *turnExecution) updateDispatchCompleted(id, responseText string, telemetry ...db.TurnTelemetry) {
 	if s := te.store(); s != nil {
 		if err := s.UpdateDispatchCompleted(context.Background(), id, responseText, te.currentSessionID, telemetry...); err != nil {
-			log.Printf("[Worker] Warning updating dispatch %s completed: %v", id, err)
+			te.logf("[Worker] Warning updating dispatch %s completed: %v", id, err)
 		}
 	}
 }
@@ -604,7 +603,7 @@ func (te *turnExecution) updateDispatchCompleted(id, responseText string, teleme
 func (te *turnExecution) updateDispatchStatus(id, status, errorMsg string, telemetry ...db.TurnTelemetry) {
 	if s := te.store(); s != nil {
 		if err := s.UpdateDispatchStatus(context.Background(), id, status, errorMsg, telemetry...); err != nil {
-			log.Printf("[Worker] Warning updating dispatch %s status to %s: %v", id, status, err)
+			te.logf("[Worker] Warning updating dispatch %s status to %s: %v", id, status, err)
 		}
 	}
 }

@@ -3,7 +3,6 @@ package queue
 import (
 	"context"
 	"fmt"
-	"log"
 	"slices"
 	"strings"
 	"time"
@@ -19,7 +18,7 @@ func (te *turnExecution) getThreadSummary(threadID string) (string, string) {
 	if s := te.store(); s != nil {
 		sum, msgID, err := s.GetThreadSummary(context.Background(), threadID)
 		if err != nil {
-			log.Printf("[WorkerPool] Warning getting thread summary for %s: %v", threadID, err)
+			te.logf("[WorkerPool] Warning getting thread summary for %s: %v", threadID, err)
 		}
 		return sum, msgID
 	}
@@ -29,7 +28,7 @@ func (te *turnExecution) getThreadSummary(threadID string) (string, string) {
 func (te *turnExecution) saveThreadSummary(threadID, summary, lastMsgID string) {
 	if s := te.store(); s != nil {
 		if err := s.SaveThreadSummary(context.Background(), threadID, summary, lastMsgID); err != nil {
-			log.Printf("[WorkerPool] Warning: Failed to save thread summary to DB for thread %s: %v", threadID, err)
+			te.logf("[WorkerPool] Warning: Failed to save thread summary to DB for thread %s: %v", threadID, err)
 		}
 	}
 }
@@ -132,7 +131,7 @@ func (te *turnExecution) getRecentThreadMessages(threadID string, limit int) ([]
 
 	discordMsgs, err := fetchDiscordChannelMessagesWithRetry(te.poolCtx(), dg, threadID, beforeID, limit)
 	if err != nil {
-		log.Printf("[Worker] Discord ChannelMessages failed for thread %s after %d attempts: %v", threadID, historyFetchMaxAttempts, err)
+		te.logf("[Worker] Discord ChannelMessages failed for thread %s after %d attempts: %v", threadID, historyFetchMaxAttempts, err)
 		return nil, err
 	}
 
@@ -187,7 +186,7 @@ func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
 		return cfg
 	}
 	if attempt > 1 {
-		log.Printf("[WorkerPool] Resolving attempt %d config for thread %s", attempt, te.threadID)
+		te.logf("[WorkerPool] Resolving attempt %d config for thread %s", attempt, te.threadID)
 	}
 	te.pool.mu.Lock()
 	cfg.model, cfg.lowEffortModel, cfg.mediumEffortModel = te.pool.cfg.Model, te.pool.cfg.LowEffortModel, te.pool.cfg.MediumEffortModel
@@ -283,11 +282,11 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 		te.leaseSessionID = targetSess
 		if allowPersist {
 			if !te.isEphemeral && targetSess != te.previousSessionID && targetSess != te.currentSessionID {
-				log.Printf("[Queue] Synchronizing active session for thread %s: %s -> %s", te.threadID, te.currentSessionID, targetSess)
+				te.logf("[Queue] Synchronizing active session for thread %s: %s -> %s", te.threadID, te.currentSessionID, targetSess)
 				te.currentSessionID = targetSess
 				te.saveSessionID(te.threadID, targetSess)
 			} else if te.isEphemeral && targetSess != te.currentSessionID {
-				log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with ephemeral session %s", te.currentSessionID, te.threadID, targetSess)
+				te.logf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with ephemeral session %s", te.currentSessionID, te.threadID, targetSess)
 			}
 		}
 	}
@@ -310,7 +309,7 @@ func (te *turnExecution) fetchTurnHistory(fetchCtx context.Context, limit int) [
 		turnHistory, err = FetchRecentThreadHistory(fetchCtx, te.pool.getDiscordSession(), te.threadID, limit)
 	}
 	if err != nil {
-		log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", te.threadID, err)
+		te.logf("[WorkerPool] Warning: History fetch failed for thread %s: %v", te.threadID, err)
 	}
 	return turnHistory
 }
@@ -324,7 +323,7 @@ func (te *turnExecution) resolveColdStartPreviousSessionID(isColdStart bool) str
 		prevID = te.getPreviousSessionID(te.threadID)
 	}
 	if prevID != "" {
-		log.Printf("[WorkerPool] Injected previous session identifier (%s) into prompt for thread %s", prevID, te.threadID)
+		te.logf("[WorkerPool] Injected previous session identifier (%s) into prompt for thread %s", prevID, te.threadID)
 	}
 	return prevID
 }
@@ -335,12 +334,12 @@ func (te *turnExecution) resolveAmbientPromptContext() string {
 	}
 	actx, ambErr := te.pool.cfg.AmbientResolver(te.poolCtx(), te.policy.AmbientContext)
 	if ambErr != nil {
-		log.Printf("[WorkerPool] Warning resolving ambient context for channel %s: %v", te.effectiveName, ambErr)
+		te.logf("[WorkerPool] Warning resolving ambient context for channel %s: %v", te.effectiveName, ambErr)
 		return ""
 	}
 	trimmed := strings.TrimSpace(actx)
 	if trimmed != "" {
-		log.Printf("[WorkerPool] Injected ambient context into prompt for #%s", te.effectiveName)
+		te.logf("[WorkerPool] Injected ambient context into prompt for #%s", te.effectiveName)
 		return trimmed
 	}
 	return ""
@@ -388,10 +387,10 @@ func (te *turnExecution) buildTurnPrompt() {
 
 	instructions := config.LoadScopeInstructions(te.effectiveName)
 	if instructions != "" {
-		log.Printf("[WorkerPool] Injected channel instructions for #%s into prompt", te.effectiveName)
+		te.logf("[WorkerPool] Injected channel instructions for #%s into prompt", te.effectiveName)
 	}
 	if te.injectedHookContext != "" {
-		log.Printf("[WorkerPool] Injected coordination context into prompt for thread %s", te.threadID)
+		te.logf("[WorkerPool] Injected coordination context into prompt for thread %s", te.threadID)
 	}
 
 	ambientCtx := te.resolveAmbientPromptContext()
@@ -458,7 +457,7 @@ func (te *turnExecution) resolveThreadColdStartSummary(getTurnHistory func(int) 
 	}
 	latestMsgID := latestHistoryMessageID(histMsgs)
 	if cachedSum != "" && lastMsgID != "" && lastMsgID == latestMsgID {
-		log.Printf("[WorkerPool] Using cached thread summary for thread %s (watermark msg: %s)", te.threadID, lastMsgID)
+		te.logf("[WorkerPool] Using cached thread summary for thread %s (watermark msg: %s)", te.threadID, lastMsgID)
 		return cachedSum
 	}
 	llmFn, flashModel := te.resolveSummarizerLLMAndModel()
@@ -470,7 +469,7 @@ func (te *turnExecution) resolveThreadColdStartSummary(getTurnHistory func(int) 
 	}
 	newSum, sumErr := SummarizeThreadHistoryWithGroup(sumCtx, te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs, opts...)
 	if sumErr != nil {
-		log.Printf("[WorkerPool] Warning: Thread history summarization failed for thread %s: %v. Falling back to raw lookback.", te.threadID, sumErr)
+		te.logf("[WorkerPool] Warning: Thread history summarization failed for thread %s: %v. Falling back to raw lookback.", te.threadID, sumErr)
 		return cachedSum
 	}
 	if newSum != "" {
@@ -483,7 +482,7 @@ func (te *turnExecution) resolveColdStartLookbackMessages(isColdStart, isChannel
 	if !te.isEphemeral && (isColdStart || isChannelMode) {
 		lookbackMsgs := getTurnHistory(10)
 		if len(lookbackMsgs) > 0 {
-			log.Printf("[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
+			te.logf("[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
 		}
 		return lookbackMsgs
 	}
@@ -496,7 +495,7 @@ func (te *turnExecution) buildColdStartLookback(snap ChannelSnapshot, isColdStar
 	if isThreadColdStart {
 		summary = te.resolveThreadColdStartSummary(getTurnHistory)
 		if summary != "" {
-			log.Printf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", te.threadID)
+			te.logf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", te.threadID)
 		}
 	}
 
@@ -573,7 +572,7 @@ func (te *turnExecution) buildDispatchPrompt() string {
 		if s := te.store(); s != nil {
 			rec, err := s.GetRecentSessionDispatches(te.poolCtx(), d.SessionID, 10)
 			if err != nil {
-				log.Printf("[WorkerPool] Warning getting recent session dispatches for %s: %v", d.SessionID, err)
+				te.logf("[WorkerPool] Warning getting recent session dispatches for %s: %v", d.SessionID, err)
 			} else {
 				recent = rec
 			}

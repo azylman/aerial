@@ -2,6 +2,8 @@ package queue
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -208,4 +210,18 @@ func (te *turnExecution) clearActiveTurn() {
 		te.pool.ActiveTurns().Clear(te.activeTurnDaemon)
 		te.activeTurnDaemon = ""
 	}
+}
+
+// logf logs a turn-scoped line through slog with the turn span in context, so eri's JSON log
+// line carries trace_id and span_id and Grafana's trace-to-logs link finds it.
+func (te *turnExecution) logf(format string, args ...any) {
+	ctx := context.Background()
+	if te != nil && te.turnSpan != nil {
+		ctx = trace.ContextWithSpan(ctx, te.turnSpan)
+	}
+	logger := slog.Default()
+	if te != nil && te.pool != nil && te.pool.cfg.Logger != nil {
+		logger = te.pool.cfg.Logger
+	}
+	logger.InfoContext(ctx, fmt.Sprintf(format, args...))
 }
