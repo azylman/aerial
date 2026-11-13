@@ -633,16 +633,17 @@ func TestDispatchStore_SQLite(t *testing.T) {
 
 	// 1. Insert & Get
 	d1 := Dispatch{
-		ID:        "disp-1",
-		Source:    "heartbeat",
-		SessionID: "heartbeat-hb-1",
-		Prompt:    "Prompt for dispatch 1",
+		ID:          "disp-1",
+		Source:      "heartbeat",
+		SessionID:   "heartbeat-hb-1",
+		Prompt:      "Prompt for dispatch 1",
+		Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 	}
 	mustOK(t, store.InsertDispatch(ctx, d1), "InsertDispatch disp-1")
 
 	got, err := store.GetDispatch(ctx, "disp-1")
 	mustOK(t, err, "GetDispatch disp-1")
-	if got == nil || got.ID != "disp-1" || got.Status != StatusPending || got.Summary == "" {
+	if got == nil || got.ID != "disp-1" || got.Status != StatusPending || got.Summary == "" || got.Traceparent != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
 		t.Fatalf("unexpected dispatch retrieved: %+v", got)
 	}
 

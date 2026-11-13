@@ -184,6 +184,9 @@ spec:
             - mountPath: /secrets
               name: shared-secrets
               readOnly: true
+            - mountPath: /config/tracing
+              name: tracing-config
+              readOnly: true
       initContainers:
         - args:
             - --repo=${AERIAL_REPO_URL:=https://github.com/azylman/aerial.git}
@@ -362,6 +365,10 @@ spec:
             medium: Memory
             sizeLimit: 1Mi
           name: ssh-state
+        - configMap:
+            name: tracing-config
+            optional: true
+          name: tracing-config
 ---
 apiVersion: v1
 kind: Service

@@ -24,6 +24,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/ambient"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -865,7 +866,7 @@ func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, rel
 
 func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, model string, asyncErrCh ...<-chan error) error {
 	srv := &http.Server{
-		Handler:           metricsMiddleware(mux),
+		Handler:           tracing.Middleware("eri", metricsMiddleware(mux)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -1045,6 +1046,30 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	return serveBrainHTTP(ctx, ln, mux, cur.Model, leaderErrCh)
 }
 
+// tracingConfigPath is mounted from the optional tracing-config ConfigMap; absent means tracing is off.
+const tracingConfigPath = "/config/tracing/tracing.yaml"
+
+// setupTracing installs the global tracer provider and propagator. Config errors are logged and
+// leave tracing disabled (propagation only). The returned func flushes pending spans.
+func setupTracing(ctx context.Context, path string) func() {
+	tcfg, err := tracing.LoadConfig(path)
+	if err != nil {
+		log.Printf("[Tracing] Invalid tracing config, running with tracing disabled: %v", err)
+		tcfg = tracing.Config{}
+	}
+	shutdown, err := tracing.Setup(ctx, "eri", tcfg)
+	if err != nil {
+		log.Printf("[Tracing] Setup failed, running with tracing disabled: %v", err)
+	}
+	return func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(flushCtx); err != nil {
+			log.Printf("[Tracing] Shutdown failed: %v", err)
+		}
+	}
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -1077,8 +1102,11 @@ func main() {
 		cancel()
 	}()
 
+	shutdownTracing := setupTracing(ctx, tracingConfigPath)
+
 	err = RunBrainApp(ctx, cfg)
 	cancel()
+	shutdownTracing()
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Server failed: %v", err)
 	}
