@@ -44,6 +44,7 @@ func TestTracingTurnSink(t *testing.T) {
 		want     []wantSpan
 		innerOK  int // tool callbacks the inner sink must still receive
 		noLeakOf string
+		wantUse  AgyUsage // usage reported by Usage once the turn closes
 	}{
 		{
 			name: "single tool",
@@ -58,6 +59,7 @@ func TestTracingTurnSink(t *testing.T) {
 			},
 			innerOK:  2,
 			noLeakOf: "secret-arg",
+			wantUse:  AgyUsage{InputTokens: 120, OutputTokens: 30, CacheReadTokens: 80, CacheCreationTokens: 20},
 		},
 		{
 			name: "parallel tools correlate by call id",
@@ -126,6 +128,7 @@ func TestTracingTurnSink(t *testing.T) {
 		{
 			name:    "failed turn carries consumed usage",
 			turnErr: &TurnError{Err: errors.New("daemon closed while turn was in-flight"), Usage: AgyUsage{InputTokens: 900, OutputTokens: 40, CacheReadTokens: 5000, CacheCreationTokens: 850}},
+			wantUse: AgyUsage{InputTokens: 900, OutputTokens: 40, CacheReadTokens: 5000, CacheCreationTokens: 850},
 			want: []wantSpan{
 				{name: "chat", parent: "turn", code: codes.Error, desc: "daemon closed while turn was in-flight", attrs: []attribute.KeyValue{AttrGenAIUsageInputTokens.Int(900), AttrGenAIUsageOutputTokens.Int(40), AttrGenAIUsageCacheRead.Int(5000), AttrGenAIUsageCacheCreation.Int(850)}},
 			},
@@ -170,6 +173,9 @@ func TestTracingTurnSink(t *testing.T) {
 			}
 			sink.OnResult(&TurnResult{}) // late duplicate terminal callbacks must not re-end spans
 			turn.End()
+			if use, ok := sink.Usage(context.Background()); !ok || use != tc.wantUse {
+				t.Errorf("Usage() = %+v, %t; want %+v, true", use, ok, tc.wantUse)
+			}
 
 			ended := rec.Ended()
 			names := map[string]string{}
