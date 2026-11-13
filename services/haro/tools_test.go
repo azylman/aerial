@@ -13,6 +13,7 @@ import (
 
 func TestMain_Execution(t *testing.T) {
 	oldRun, oldExit, oldPath := runAppFn, exitFn, configPath
+	t.Cleanup(installTestTracing)
 	defer func() {
 		runAppFn, exitFn, configPath = oldRun, oldExit, oldPath
 	}()

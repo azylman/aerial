@@ -328,6 +328,9 @@ func TestHandleGatewayMessageCreate(t *testing.T) {
 				if len(river.insertedDiscordJobs) != tc.wantEnqueued {
 					t.Errorf("insertedDiscordJobs = %d, want %d", len(river.insertedDiscordJobs), tc.wantEnqueued)
 				}
+				for _, job := range river.insertedDiscordJobs {
+					assertRootTraceparent(t, job.Traceparent)
+				}
 			} else if !tc.nilServer {
 				calls := disp.DiscordMessageCalls()
 				if len(calls) != tc.wantProcessed {
@@ -426,6 +429,9 @@ func TestHandleGatewayInteractionCreate(t *testing.T) {
 			if tc.hasRiver {
 				if len(river.insertedInteractJobs) != tc.wantEnqueued {
 					t.Errorf("insertedInteractJobs = %d, want %d", len(river.insertedInteractJobs), tc.wantEnqueued)
+				}
+				for _, job := range river.insertedInteractJobs {
+					assertRootTraceparent(t, job.Traceparent)
 				}
 			} else if !tc.nilServer {
 				calls := disp.DiscordInteractionCalls()

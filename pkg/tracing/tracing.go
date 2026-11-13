@@ -11,11 +11,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"go.opentelemetry.io/otel"
@@ -105,6 +107,59 @@ func Setup(ctx context.Context, service string, cfg Config) (func(context.Contex
 	)
 	otel.SetTracerProvider(tp)
 	return tp.Shutdown, nil
+}
+
+// DefaultConfigPath is where every traced service reads its config, mounted from the optional
+// tracing-config ConfigMap; an absent file means tracing is off.
+const DefaultConfigPath = "/config/tracing/tracing.yaml"
+
+// Init loads the config at path and runs Setup for service. Config and setup errors are logged
+// and leave the service with propagation only. It returns the effective config (Enabled is false
+// unless spans are actually exported) and a func that flushes pending spans on shutdown.
+func Init(ctx context.Context, service, path string) (Config, func()) {
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		log.Printf("[Tracing] Invalid tracing config, running with tracing disabled: %v", err)
+		cfg = Config{}
+	}
+	shutdown, err := Setup(ctx, service, cfg)
+	if err != nil {
+		log.Printf("[Tracing] Setup failed, running with tracing disabled: %v", err)
+		cfg.Enabled = false
+	}
+	return cfg, func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(flushCtx); err != nil {
+			log.Printf("[Tracing] Shutdown failed: %v", err)
+		}
+	}
+}
+
+// Tracer returns the global tracer for Aerial's instrumentation scope.
+func Tracer() trace.Tracer {
+	return otel.Tracer(ScopeName)
+}
+
+// Client returns a copy of c (a zero client when nil) whose transport is wrapped with Transport,
+// keeping its timeout and other settings.
+func Client(c *http.Client) *http.Client {
+	var out http.Client
+	if c != nil {
+		out = *c
+	}
+	out.Transport = Transport(out.Transport)
+	return &out
+}
+
+// ContextWithTraceparent returns ctx carrying the remote span context parsed from a W3C
+// traceparent value persisted on queued work (see Traceparent). Empty or malformed values
+// return ctx unchanged.
+func ContextWithTraceparent(ctx context.Context, traceparent string) context.Context {
+	if traceparent == "" {
+		return ctx
+	}
+	return propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": traceparent})
 }
 
 // Traceparent renders the span context carried by ctx as a W3C traceparent header value,

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -94,14 +95,14 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /health", s.handleHealthz)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
-	mux.HandleFunc("POST /internal/pr/register", s.handlePRRegister)
-	mux.HandleFunc("POST /internal/widget/sync", s.handleInternalWidgetSync)
-	mux.HandleFunc("POST /api/webhooks/github", s.handleGitHubWebhook)
-	mux.HandleFunc("POST /webhooks/github", s.handleGitHubWebhook)
-	mux.HandleFunc("POST /api/webhooks/flux", s.handleFluxWebhook)
-	mux.HandleFunc("POST /webhooks/flux", s.handleFluxWebhook)
-	mux.HandleFunc("POST /api/webhooks/events", s.handleEventsWebhook)
-	mux.HandleFunc("POST /webhooks/events", s.handleEventsWebhook)
+	mux.Handle("POST /internal/pr/register", tracedIngress(s.handlePRRegister))
+	mux.Handle("POST /internal/widget/sync", tracedIngress(s.handleInternalWidgetSync))
+	mux.Handle("POST /api/webhooks/github", tracedIngress(s.handleGitHubWebhook))
+	mux.Handle("POST /webhooks/github", tracedIngress(s.handleGitHubWebhook))
+	mux.Handle("POST /api/webhooks/flux", tracedIngress(s.handleFluxWebhook))
+	mux.Handle("POST /webhooks/flux", tracedIngress(s.handleFluxWebhook))
+	mux.Handle("POST /api/webhooks/events", tracedIngress(s.handleEventsWebhook))
+	mux.Handle("POST /webhooks/events", tracedIngress(s.handleEventsWebhook))
 	coverageFlush := httpkit.HandleCoverageFlush("synapse")
 	mux.HandleFunc("POST /debug/coverage/flush", coverageFlush)
 	mux.HandleFunc("GET /debug/coverage/flush", coverageFlush)
@@ -1488,9 +1489,11 @@ func main() {
 	cfgSrc := httpkit.NewReloadable(&cfg, loadConfigFromEnvStrict, synapseRestartRequired)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	_, flushTracing := tracing.Init(ctx, "synapse", tracing.DefaultConfigPath)
 
 	err := runApp(ctx, cfgSrc)
 	cancel()
+	flushTracing()
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("[synapse] Error: %v", err)
 	}

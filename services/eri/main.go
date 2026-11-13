@@ -1085,32 +1085,13 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	return serveBrainHTTP(ctx, ln, mux, cur.Model, leaderErrCh)
 }
 
-// tracingConfigPath is mounted from the optional tracing-config ConfigMap; absent means tracing is off.
-const tracingConfigPath = "/config/tracing/tracing.yaml"
-
-// setupTracing installs the global tracer provider and propagator. Config errors are logged and
-// leave tracing disabled (propagation only). It returns a BrainAppOption naming the turn agent
-// after the config's stack (the persona recorded as gen_ai.agent.name) and switching on the MCP
-// trace proxy when tracing is enabled, and a func that flushes pending spans.
+// setupTracing installs the global tracer provider and propagator from the config at path
+// (see tracing.Init). It returns a BrainAppOption naming the turn agent after the config's stack
+// (the persona recorded as gen_ai.agent.name) and switching on the MCP trace proxy when tracing
+// is enabled, and a func that flushes pending spans.
 func setupTracing(ctx context.Context, path string) (BrainAppOption, func()) {
-	tcfg, err := tracing.LoadConfig(path)
-	if err != nil {
-		log.Printf("[Tracing] Invalid tracing config, running with tracing disabled: %v", err)
-		tcfg = tracing.Config{}
-	}
-	shutdown, err := tracing.Setup(ctx, "eri", tcfg)
-	if err != nil {
-		log.Printf("[Tracing] Setup failed, running with tracing disabled: %v", err)
-	}
-	enabled := tcfg.Enabled && err == nil
-	withTracing := func(o *brainAppOptions) { o.agentName, o.tracingEnabled = tcfg.Stack, enabled }
-	return withTracing, func() {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := shutdown(flushCtx); err != nil {
-			log.Printf("[Tracing] Shutdown failed: %v", err)
-		}
-	}
+	tcfg, flush := tracing.Init(ctx, "eri", path)
+	return func(o *brainAppOptions) { o.agentName, o.tracingEnabled = tcfg.Stack, tcfg.Enabled }, flush
 }
 
 func main() {
@@ -1145,7 +1126,7 @@ func main() {
 		cancel()
 	}()
 
-	withTracing, shutdownTracing := setupTracing(ctx, tracingConfigPath)
+	withTracing, shutdownTracing := setupTracing(ctx, tracing.DefaultConfigPath)
 
 	err = RunBrainApp(ctx, cfg, withTracing)
 	cancel()

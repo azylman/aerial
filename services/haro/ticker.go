@@ -14,7 +14,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type PromptDispatchRequest struct {
@@ -66,10 +70,31 @@ type HTTPPromptDispatcher struct {
 func NewHTTPPromptDispatcher(brainURL string) *HTTPPromptDispatcher {
 	return &HTTPPromptDispatcher{
 		brainURL: strings.TrimRight(strings.TrimSpace(brainURL), "/"),
-		httpClient: &http.Client{
+		// Traced so each eri turn joins the trace of the schedule or trigger that fired it.
+		httpClient: tracing.Client(&http.Client{
 			Timeout: 15 * time.Second,
-		},
+		}),
 	}
+}
+
+// traceFire runs one schedule, heartbeat or event-trigger dispatch under its own span, so the
+// eri turn it starts joins a trace that begins where the work began. Inside an inbound request
+// (event triggers) the span continues the caller's trace. Only the schedule type and id are
+// recorded; dispatch errors set a generic status since their text can echo eri responses.
+func traceFire[R any](ctx context.Context, scheduleType, scheduleID string, dispatch func(context.Context) (R, error)) (R, error) {
+	ctx, span := tracing.Tracer().Start(ctx, "haro.fire "+scheduleType,
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("haro.schedule.type", scheduleType),
+			attribute.String("haro.schedule.id", scheduleID),
+		),
+	)
+	defer span.End()
+	resp, err := dispatch(ctx)
+	if err != nil {
+		span.SetStatus(codes.Error, "dispatch failed")
+	}
+	return resp, err
 }
 
 func postBrainJSON[Req any, Resp any](ctx context.Context, d *HTTPPromptDispatcher, path, opLabel string, req Req) (Resp, error) {
@@ -248,7 +273,9 @@ func (t *Ticker) processDueCron(ctx context.Context, c CronSchedule, now time.Ti
 		Effort:    c.Effort,
 	}
 	dispatchStart := time.Now()
-	resp, dispatchErr := t.dispatcher.DispatchPrompt(ctx, req)
+	resp, dispatchErr := traceFire(ctx, "cron", c.ID, func(ctx context.Context) (PromptDispatchResponse, error) {
+		return t.dispatcher.DispatchPrompt(ctx, req)
+	})
 	RecordScheduleDispatchDuration("cron", time.Since(dispatchStart).Seconds())
 	completedAt := time.Now().UTC()
 	durationMs := completedAt.Sub(now).Milliseconds()
@@ -348,7 +375,9 @@ func (t *Ticker) processDueOneShot(ctx context.Context, s OneShotSchedule, now t
 		Effort:    s.Effort,
 	}
 	dispatchStart := time.Now()
-	resp, dispatchErr := t.dispatcher.DispatchPrompt(ctx, req)
+	resp, dispatchErr := traceFire(ctx, "one_shot", s.ID, func(ctx context.Context) (PromptDispatchResponse, error) {
+		return t.dispatcher.DispatchPrompt(ctx, req)
+	})
 	RecordScheduleDispatchDuration("one_shot", time.Since(dispatchStart).Seconds())
 	completedAt := time.Now().UTC()
 	durationMs := completedAt.Sub(now).Milliseconds()
@@ -460,7 +489,9 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 		SkipIfActive: true,
 	}
 	dispatchStart := time.Now()
-	resp, dispatchErr := t.dispatcher.Dispatch(ctx, req)
+	resp, dispatchErr := traceFire(ctx, "heartbeat", hb.ID, func(ctx context.Context) (DispatchResponse, error) {
+		return t.dispatcher.Dispatch(ctx, req)
+	})
 	RecordScheduleDispatchDuration("heartbeat", time.Since(dispatchStart).Seconds())
 	if dispatchErr == nil && resp.Status == "skipped_active" {
 		RecordScheduleRun("heartbeat", "skipped_active")

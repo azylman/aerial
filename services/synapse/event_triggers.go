@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // ClaimedEventTrigger represents an event trigger claimed and fired atomically via Haro.
@@ -45,7 +46,8 @@ func WithHaroClient(haroURL string, client *http.Client) func(*PostgresPRRegistr
 			r.haroURL = strings.TrimRight(haroURL, "/")
 		}
 		if client != nil {
-			r.httpClient = client
+			// Wrapped here so injected clients keep traceparent propagation to vanadis/haro.
+			r.httpClient = tracing.Client(client)
 		}
 	}
 }

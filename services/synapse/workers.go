@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
@@ -549,6 +550,9 @@ type DiscordIngressArgs struct {
 	BotUserID string             `json:"bot_user_id,omitempty"`
 	RoleNames map[string]string  `json:"role_names,omitempty"`
 	Message   *discordgo.Message `json:"message"`
+	// Traceparent is the W3C trace context of the gateway receive span, so the worker posting
+	// to eri continues the trace begun when the event arrived. Not part of job uniqueness.
+	Traceparent string `json:"traceparent,omitempty"`
 }
 
 func (DiscordIngressArgs) Kind() string { return "discord_ingress" }
@@ -580,7 +584,10 @@ func (w *DiscordIngressWorker) NextRetry(*river.Job[DiscordIngressArgs]) time.Ti
 	return time.Now().Add(5 * time.Second)
 }
 
-func (w *DiscordIngressWorker) Work(ctx context.Context, job *river.Job[DiscordIngressArgs]) error {
+func (w *DiscordIngressWorker) Work(ctx context.Context, job *river.Job[DiscordIngressArgs]) (err error) {
+	ctx, span := tracing.Tracer().Start(tracing.ContextWithTraceparent(ctx, job.Args.Traceparent), "process "+QueueDiscordIngress, discordJobSpanOptions(QueueDiscordIngress)...)
+	defer span.End()
+	defer func() { markDiscordJobSpan(span, err) }()
 	return observeRiverJob(job, QueueDiscordIngress, func() error {
 		if w.server == nil {
 			return errors.New("router server not configured on worker")
@@ -626,6 +633,8 @@ func (w *DiscordIngressWorker) Work(ctx context.Context, job *river.Job[DiscordI
 type DiscordInteractionArgs struct {
 	InteractionID string                 `json:"interaction_id" river:"unique"`
 	Interaction   *discordgo.Interaction `json:"interaction"`
+	// Traceparent is the W3C trace context of the gateway receive span (see DiscordIngressArgs).
+	Traceparent string `json:"traceparent,omitempty"`
 }
 
 func (DiscordInteractionArgs) Kind() string { return "discord_interaction" }
@@ -651,7 +660,10 @@ func (w *DiscordInteractionWorker) Timeout(*river.Job[DiscordInteractionArgs]) t
 	return 5 * time.Second
 }
 
-func (w *DiscordInteractionWorker) Work(ctx context.Context, job *river.Job[DiscordInteractionArgs]) error {
+func (w *DiscordInteractionWorker) Work(ctx context.Context, job *river.Job[DiscordInteractionArgs]) (err error) {
+	ctx, span := tracing.Tracer().Start(tracing.ContextWithTraceparent(ctx, job.Args.Traceparent), "process "+QueueDiscordInteraction, discordJobSpanOptions(QueueDiscordInteraction)...)
+	defer span.End()
+	defer func() { markDiscordJobSpan(span, err) }()
 	return observeRiverJob(job, QueueDiscordInteraction, func() error {
 		if w.server == nil {
 			return errors.New("router server not configured on worker")
@@ -764,11 +776,13 @@ func NewDefaultOutboundDispatcher(brainURL string, client *http.Client) *Default
 		discordMsgClient = &http.Client{Timeout: 20 * time.Second}
 		discordInteractionClient = &http.Client{Timeout: 2500 * time.Millisecond}
 	}
+	// Every eri call (prompt, dispatch, widget, Discord ingress) gets a client span and carries
+	// traceparent so eri's turn joins the trace started at the gateway or webhook.
 	return &DefaultOutboundDispatcher{
 		brainURL:                 strings.TrimRight(brainURL, "/"),
-		httpClient:               client,
-		discordMsgClient:         discordMsgClient,
-		discordInteractionClient: discordInteractionClient,
+		httpClient:               tracing.Client(client),
+		discordMsgClient:         tracing.Client(discordMsgClient),
+		discordInteractionClient: tracing.Client(discordInteractionClient),
 		retryDelay:               1500 * time.Millisecond,
 		maxAttempts:              6,
 	}

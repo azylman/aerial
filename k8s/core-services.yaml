@@ -438,6 +438,9 @@ spec:
             - mountPath: /share
               name: share
               readOnly: true
+            - mountPath: /config/tracing
+              name: tracing-config
+              readOnly: true
       initContainers:
         - args:
             - --repo=${AERIAL_REPO_URL:=https://github.com/azylman/aerial.git}
@@ -530,6 +533,10 @@ spec:
       volumes:
         - emptyDir: {}
           name: share
+        - configMap:
+            name: tracing-config
+            optional: true
+          name: tracing-config
 ---
 apiVersion: batch/v1
 kind: Job
@@ -991,6 +998,9 @@ spec:
             - mountPath: /share
               name: share
               readOnly: true
+            - mountPath: /config/tracing
+              name: tracing-config
+              readOnly: true
       initContainers:
         - args:
             - --repo=${AERIAL_CONFIG_REPO_URL:=https://github.com/azylman/aerial-config.git}
@@ -1040,6 +1050,10 @@ spec:
       volumes:
         - emptyDir: {}
           name: share
+        - configMap:
+            name: tracing-config
+            optional: true
+          name: tracing-config
 ---
 apiVersion: v1
 kind: Service
@@ -1231,6 +1245,9 @@ spec:
             - mountPath: /share
               name: share
               readOnly: true
+            - mountPath: /config/tracing
+              name: tracing-config
+              readOnly: true
       initContainers:
         - args:
             - --repo=${AERIAL_CONFIG_REPO_URL:=https://github.com/azylman/aerial-config.git}
@@ -1281,6 +1298,10 @@ spec:
       volumes:
         - emptyDir: {}
           name: share
+        - configMap:
+            name: tracing-config
+            optional: true
+          name: tracing-config
 ---
 apiVersion: v1
 kind: Service

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // RunApp bootstraps the scheduler MCP HTTP server with graceful shutdown.
@@ -93,9 +94,9 @@ var (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})))
+	}))))
 
 	resolvedPath := ResolveConfigPath(configPath)
 	cfg, err := LoadConfig(resolvedPath)
@@ -106,8 +107,11 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	_, flushTracing := tracing.Init(ctx, "haro", tracing.DefaultConfigPath)
 
-	if err := runAppFn(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err = runAppFn(ctx, cfg)
+	flushTracing()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		exitFn("Server failure: %v", err)
 	}
 }
