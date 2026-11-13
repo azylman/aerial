@@ -763,7 +763,7 @@ func (te *turnExecution) resolveExecutionPool() (runner.AgentPool, PoolKey, erro
 	if altKey := (PoolKey{Ephemeral: true, Effort: k.Effort}); te.pool.Pool(altKey) != nil {
 		return te.pool.Pool(altKey), k, nil
 	}
-	log.Printf("[Worker] Notice: pool for %+v is nil, falling back to primary processPool for thread %s", k, te.threadID)
+	te.logf("[Worker] Notice: pool for %+v is nil, falling back to primary processPool for thread %s", k, te.threadID)
 	return te.pool.Pool(PoolKey{Ephemeral: false, Effort: "high"}), k, nil
 }
 
