@@ -247,9 +247,11 @@ func TestActiveTurnRegistry(t *testing.T) {
 			if tc.clear {
 				r.Clear(tc.daemonID)
 			}
-			sc, ok := r.Get(tc.daemonID)
+			r.mu.RLock()
+			sc, ok := r.turns[tc.daemonID]
+			r.mu.RUnlock()
 			if ok != tc.wantOK || (ok && !sc.Equal(valid)) {
-				t.Errorf("Get(%q) = (%v, %v), want ok=%v", tc.daemonID, sc, ok, tc.wantOK)
+				t.Errorf("turns[%q] = (%v, %v), want ok=%v", tc.daemonID, sc, ok, tc.wantOK)
 			}
 		})
 	}

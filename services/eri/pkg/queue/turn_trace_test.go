@@ -203,14 +203,12 @@ func TestProcessBurst_EmitsTurnTrace(t *testing.T) {
 			defer procPool.Close()
 
 			sig := rootEndSignal{SpanRecorder: tracetest.NewSpanRecorder(), done: make(chan struct{})}
-			registry := runner.NewActiveTurnRegistry()
 			pool := New(newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData }), WorkerPoolConfig{
 				ProcessPool:    procPool,
 				SessionManager: session.New(tmpHome, tempData),
 				Store:          store,
 				TimeoutMinutes: 1,
 				TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sig)),
-				ActiveTurns:    registry,
 				AgentName:      "aerial",
 			})
 			defer pool.Stop()
@@ -251,9 +249,6 @@ func TestProcessBurst_EmitsTurnTrace(t *testing.T) {
 			}
 			if root.Status().Code == codes.Error {
 				t.Errorf("root status = %v, want ok", root.Status())
-			}
-			if _, active := registry.Get(db.DiscordSessionID(threadID)); active {
-				t.Errorf("active turn registry not cleared after turn end")
 			}
 		})
 	}

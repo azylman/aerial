@@ -9,6 +9,7 @@ import (
 // ActiveTurnRegistry maps a daemon (identified by the pool lease key that owns it) to the
 // span context of the turn it is currently executing, so out-of-band traffic from that
 // daemon (e.g. MCP requests) can be parented under the turn. Safe for concurrent use.
+// The read side lands with its first consumer, the loopback MCP proxy.
 type ActiveTurnRegistry struct {
 	mu    sync.RWMutex
 	turns map[string]trace.SpanContext
@@ -37,15 +38,4 @@ func (r *ActiveTurnRegistry) Clear(daemonID string) {
 	r.mu.Lock()
 	delete(r.turns, daemonID)
 	r.mu.Unlock()
-}
-
-// Get returns the active turn span context for daemonID.
-func (r *ActiveTurnRegistry) Get(daemonID string) (trace.SpanContext, bool) {
-	if r == nil {
-		return trace.SpanContext{}, false
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	sc, ok := r.turns[daemonID]
-	return sc, ok
 }
