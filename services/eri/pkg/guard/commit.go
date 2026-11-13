@@ -863,6 +863,9 @@ func CheckCommit(toolName string, args ToolArgs) *Decision {
 func CheckOutboundSecrets(toolName string, args ToolArgs) *Decision {
 	rawLower := strings.ToLower(strings.TrimSpace(toolName))
 	cleanName := normalizeToolName(toolName)
+	if isInfisicalMCPCall(toolName, args) {
+		return &Decision{Decision: DecisionAllow}
+	}
 	var textToScan string
 
 	switch {
@@ -896,4 +899,22 @@ func CheckOutboundSecrets(toolName string, args ToolArgs) *Decision {
 	}
 
 	return &Decision{Decision: DecisionAllow}
+}
+
+// infisicalMCPServer is the server name the Infisical MCP is registered under on both stacks.
+const infisicalMCPServer = "infisical"
+
+// isInfisicalMCPCall reports whether a tool call targets the Infisical MCP server, whose whole
+// purpose is reading and writing secrets (every call carries the registered project ID), so the
+// outbound secret scan would deny all of them. The server segment must match exactly.
+func isInfisicalMCPCall(toolName string, args ToolArgs) bool {
+	if isClaudeMCPToolName(toolName) {
+		parts := strings.Split(strings.TrimSpace(toolName), "__")
+		return strings.EqualFold(strings.Join(parts[1:len(parts)-1], "__"), infisicalMCPServer)
+	}
+	if normalizeToolName(toolName) != "call_mcp_tool" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(args.ServerName), infisicalMCPServer) ||
+		strings.EqualFold(strings.TrimSpace(args.ServerNameLower), infisicalMCPServer)
 }
