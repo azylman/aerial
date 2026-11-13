@@ -423,6 +423,7 @@ func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, exitCode int,
 	accumulatedUsage.ThinkingTokens += resp.Usage.ThinkingTokens
 	accumulatedUsage.CacheReadTokens += resp.Usage.CacheReadTokens
 	accumulatedUsage.TotalTokens += resp.Usage.TotalTokens
+	accumulatedUsage.CacheCreationTokens += resp.Usage.CacheCreationTokens
 
 	if *promptToSend != YieldTrapResumePrompt && !strings.Contains(*promptToSend, "<SYSTEM_MESSAGE>") {
 		*promptToSend = YieldTrapResumePrompt

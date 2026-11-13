@@ -30,6 +30,7 @@ func TestTurnResolver_Resolve(t *testing.T) {
 		{name: "EmptyResult", res: &TurnResult{Response: ""}, sessionID: "conv-empty", wantTransient: true, wantDetail: "daemon turn completed with empty response"},
 		{name: "WhitespaceOnly", res: &TurnResult{Response: "   \n\t  "}, sessionID: "conv-ws", wantTransient: true, wantDetail: "daemon turn completed with empty response"},
 		{name: "DaemonError", err: errors.New("daemon connection dropped unexpectedly"), sessionID: "conv-crash", wantTransient: true, wantDetail: "daemon connection dropped unexpectedly"},
+		{name: "FailedTurnKeepsConsumedUsage", err: &TurnError{Err: errors.New("daemon closed while turn was in-flight"), Usage: TokenUsage{InputTokens: 40, OutputTokens: 2, TotalTokens: 42}}, sessionID: "conv-killed", wantTransient: true, wantDetail: "daemon closed while turn was in-flight", wantTotalTokens: 42},
 	}
 
 	for _, tc := range tests {

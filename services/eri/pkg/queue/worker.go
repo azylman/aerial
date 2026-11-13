@@ -1422,6 +1422,7 @@ func (te *turnExecution) executeWithRetries() {
 			accumulatedUsage.ThinkingTokens += outcome.Usage.ThinkingTokens
 			accumulatedUsage.CacheReadTokens += outcome.Usage.CacheReadTokens
 			accumulatedUsage.TotalTokens += outcome.Usage.TotalTokens
+			accumulatedUsage.CacheCreationTokens += outcome.Usage.CacheCreationTokens
 			te.turnTokenUsage = accumulatedUsage
 
 			promptToSend = te.turnPrompt

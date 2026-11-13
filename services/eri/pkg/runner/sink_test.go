@@ -239,8 +239,12 @@ func TestBufferingTurnSink_ErrorAndDeltaRescue(t *testing.T) {
 		inErr         error
 		wantResp      string
 		wantErr       error
+		wantTokens    int
 	}{
-		{false, "Recoverable substantive text before daemon crash.", errRes, "Recoverable substantive text before daemon crash.", nil}, {true, "Some text", errHard, "", errHard}, {false, "[Tool Call Requested]: uncompleted tool", errAbort, "", errAbort},
+		{false, "Recoverable substantive text before daemon crash.", errRes, "Recoverable substantive text before daemon crash.", nil, 0},
+		{true, "Some text", errHard, "", errHard, 0},
+		{false, "[Tool Call Requested]: uncompleted tool", errAbort, "", errAbort, 0},
+		{false, "Text streamed before the daemon was killed.", &TurnError{Err: errHard, Usage: AgyUsage{InputTokens: 30, OutputTokens: 5, TotalTokens: 35}}, "Text streamed before the daemon was killed.", nil, 35},
 	} {
 		var hookErr error
 		var completedRes *TurnResult
@@ -256,7 +260,7 @@ func TestBufferingTurnSink_ErrorAndDeltaRescue(t *testing.T) {
 			if res != nil || !errors.Is(err, tc.wantErr) || (tc.disableRescue && !errors.Is(hookErr, tc.wantErr)) {
 				t.Errorf("expected error %v, got res=%v, err=%v, hookErr=%v", tc.wantErr, res, err, hookErr)
 			}
-		} else if err != nil || res == nil || res.Response != tc.wantResp || completedRes == nil || completedRes.Response != tc.wantResp {
+		} else if err != nil || res == nil || res.Response != tc.wantResp || res.Usage.TotalTokens != tc.wantTokens || completedRes == nil || completedRes.Response != tc.wantResp {
 			t.Errorf("expected rescued response %q, got res=%v, err=%v, completed=%v", tc.wantResp, res, err, completedRes)
 		}
 	}

@@ -124,6 +124,13 @@ func TestTracingTurnSink(t *testing.T) {
 			innerOK: 2,
 		},
 		{
+			name:    "failed turn carries consumed usage",
+			turnErr: &TurnError{Err: errors.New("daemon closed while turn was in-flight"), Usage: AgyUsage{InputTokens: 900, OutputTokens: 40, CacheReadTokens: 5000, CacheCreationTokens: 850}},
+			want: []wantSpan{
+				{name: "chat", parent: "turn", code: codes.Error, desc: "daemon closed while turn was in-flight", attrs: []attribute.KeyValue{AttrGenAIUsageInputTokens.Int(900), AttrGenAIUsageOutputTokens.Int(40), AttrGenAIUsageCacheRead.Int(5000), AttrGenAIUsageCacheCreation.Int(850)}},
+			},
+		},
+		{
 			name: "error status is redacted",
 			events: []sinkEvent{
 				{start: true, call: ToolCall{ID: "toolu_x", Name: "Bash"}},

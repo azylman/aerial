@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,24 @@ func parseClaudeModelAndEffort(model, explicitEffort string) (string, string) {
 		}
 	}
 	return trimmedModel, effort
+}
+
+// TurnError is a turn failure that still consumed tokens: Usage covers the model calls the
+// engine completed before the turn failed.
+type TurnError struct {
+	Err   error
+	Usage AgyUsage
+}
+
+func (e *TurnError) Error() string { return e.Err.Error() }
+func (e *TurnError) Unwrap() error { return e.Err }
+
+// UsageFromError returns the token usage carried by a TurnError in err's chain.
+func UsageFromError(err error) (AgyUsage, bool) {
+	if te, ok := errors.AsType[*TurnError](err); ok {
+		return te.Usage, true
+	}
+	return AgyUsage{}, false
 }
 
 type TurnResult struct {
