@@ -151,18 +151,20 @@ func (te *turnExecution) finalizeInterruptedTurn(currentModel string) {
 	te.stopIndicators()
 	metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
 
-	// If this turn was a dispatch that was already marked terminal (FAILED) by CancelPendingDispatches,
-	// do not overwrite the status/error_message in the database.
-	if te.isDispatch() && te.store() != nil {
-		if d, err := te.store().GetDispatch(context.Background(), te.dispatch.ID); err == nil && d != nil && d.Status == db.StatusFailed {
-			return
-		}
-	}
-
 	reason := InterruptedByOperatorReason
 	if customReason := te.getInterruptReason(); customReason != "" {
 		reason = customReason
 	}
+
+	// If this turn was a dispatch that was already marked terminal (FAILED) by CancelPendingDispatches,
+	// do not overwrite the status/error_message in the database; still record the cancelled outcome.
+	if te.isDispatch() && te.store() != nil {
+		if d, err := te.store().GetDispatch(context.Background(), te.dispatch.ID); err == nil && d != nil && d.Status == db.StatusFailed {
+			te.markTurnCancelled(reason)
+			return
+		}
+	}
+
 	te.failBurstWithStatus("cancelled", reason, currentModel)
 }
 
