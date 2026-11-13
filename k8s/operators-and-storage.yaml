@@ -677,6 +677,23 @@ spec:
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
+  name: victoria-admin-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: VICTORIA_ADMIN_AUTH_KEY
+      secretKey: VICTORIA_ADMIN_AUTH_KEY
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
   name: homepage-secret
   namespace: default
 spec:

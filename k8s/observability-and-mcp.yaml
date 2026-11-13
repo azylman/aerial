@@ -29,6 +29,36 @@ spec:
   storageClassName: local-path
 ---
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    volume.kubernetes.io/storage-provisioner: rancher.io/local-path
+  name: victorialogs-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    volume.kubernetes.io/storage-provisioner: rancher.io/local-path
+  name: victoriatraces-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi
+  storageClassName: local-path
+---
+apiVersion: v1
 data:
   dashboards.yml: |
     apiVersion: 1
@@ -67,8 +97,37 @@ data:
           httpMethod: POST
           timeInterval: "15s"
         editable: false
+  victorialogs.yml: |
+    apiVersion: 1
+    datasources:
+      - name: VictoriaLogs
+        uid: victorialogs
+        type: victoriametrics-logs-datasource
+        access: proxy
+        url: http://victorialogs:9428
+        editable: false
+  victoriatraces.yml: |
+    apiVersion: 1
+    datasources:
+      - name: VictoriaTraces
+        uid: victoriatraces
+        type: jaeger
+        access: proxy
+        url: http://victoriatraces:10428/select/jaeger
+        jsonData:
+          tracesToLogsV2:
+            datasourceUid: victorialogs
+            spanStartTimeShift: "-5m"
+            spanEndTimeShift: "5m"
+            filterByTraceID: true
+            customQuery: true
+            query: 'trace_id:"$${__trace.traceId}"'
+        editable: false
 kind: ConfigMap
 metadata:
+  annotations:
+    # Grafana's $${__trace.traceId} placeholder must reach Grafana untouched.
+    kustomize.toolkit.fluxcd.io/substitute: disabled
   name: grafana-provisioning
   namespace: default
 ---
@@ -114,6 +173,11 @@ data:
         Flush         1
         Log_Level     info
         Parsers_File  parsers.conf
+        storage.path              /var/log/flb-storage/
+        storage.sync              normal
+        storage.checksum          off
+        storage.max_chunks_up     128
+        storage.backlog.mem_limit 50M
 
     [INPUT]
         Name              tail
@@ -124,6 +188,7 @@ data:
         Mem_Buf_Limit     50MB
         Skip_Long_Lines   On
         Refresh_Interval  10
+        storage.type      filesystem
 
     [INPUT]
         Name              systemd
@@ -133,6 +198,7 @@ data:
         Read_From_Tail    On
         Strip_Underscores On
         Mem_Buf_Limit     50MB
+        storage.type      filesystem
 
     [FILTER]
         Name                kubernetes
@@ -167,6 +233,32 @@ data:
         Header        Content-Type application/json
         http_user     admin@aerial.local
         http_passwd   ${OPENOBSERVE_ROOT_USER_PASSWORD}
+
+    [OUTPUT]
+        Name                     http
+        Match                    kube.*
+        Host                     victorialogs.default.svc.cluster.local
+        Port                     9428
+        URI                      /insert/jsonline?_stream_fields=kubernetes.namespace_name,kubernetes.container_name&_msg_field=log,msg,message,MESSAGE&_time_field=date
+        Format                   json_lines
+        Json_date_key            date
+        Json_date_format         iso8601
+        Compress                 gzip
+        Retry_Limit              no_limits
+        storage.total_limit_size 5G
+
+    [OUTPUT]
+        Name                     http
+        Match                    node.*
+        Host                     victorialogs.default.svc.cluster.local
+        Port                     9428
+        URI                      /insert/jsonline?_stream_fields=SYSLOG_IDENTIFIER&_msg_field=MESSAGE,log,msg,message&_time_field=date
+        Format                   json_lines
+        Json_date_key            date
+        Json_date_format         iso8601
+        Compress                 gzip
+        Retry_Limit              no_limits
+        storage.total_limit_size 1G
   parsers.conf: |
     [PARSER]
         Name        cri
@@ -397,6 +489,29 @@ data:
           - record: aerial_anomaly_score:zscore
             expr: |
               zscore_over_time(aerial_brain_runner_errors_total[2h])
+  ingestion-rules.yml: |
+    groups:
+      - name: observability_ingestion
+        interval: 1m
+        rules:
+          - alert: VictoriaLogsIngestionStalled
+            expr: |
+              sum(increase(vl_rows_ingested_total{job="victorialogs"}[15m])) == 0
+              or absent(vl_rows_ingested_total{job="victorialogs"})
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: VictoriaLogs has ingested no log rows for 15 minutes
+          - alert: VictoriaTracesIngestionStalled
+            expr: |
+              sum(increase(vt_rows_ingested_total{job="victoriatraces"}[15m])) == 0
+              or absent(vt_rows_ingested_total{job="victoriatraces"})
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: VictoriaTraces has ingested no spans for 15 minutes
 kind: ConfigMap
 metadata:
   name: vmalert-rules
@@ -646,6 +761,7 @@ spec:
             - -remoteWrite.url=http://victoriametrics:8428
             - -evaluationInterval=30s
             - -loggerFormat=json
+            - -notifier.blackhole
           image: victoriametrics/vmalert:v1.155.0
           name: vmalert
           ports:
@@ -685,6 +801,201 @@ spec:
       targetPort: 8880
   selector:
     app.kubernetes.io/name: vmalert
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
+  labels:
+    app.kubernetes.io/name: victorialogs
+  name: victorialogs
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: victorialogs
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: victorialogs
+    spec:
+      containers:
+        - args:
+            - -httpListenAddr=:9428
+            - -storageDataPath=/storage
+            - -retentionPeriod=60d
+            - -retention.maxDiskSpaceUsageBytes=90GiB
+            - -loggerFormat=json
+            - -deleteAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
+            - -forceMergeAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
+            - -pprofAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
+          image: victoriametrics/victoria-logs:v1.53.0
+          name: victorialogs
+          ports:
+            - containerPort: 9428
+              name: http
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 10
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /storage
+              name: storage
+            - mountPath: /etc/victoria-auth
+              name: auth
+              readOnly: true
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: victorialogs-pvc
+        - name: auth
+          secret:
+            secretName: victoria-admin-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    prometheus.io/port: "9428"
+    prometheus.io/scrape: "true"
+  name: victorialogs
+  namespace: default
+spec:
+  ports:
+    - name: http
+      port: 9428
+      protocol: TCP
+      targetPort: 9428
+    - name: http-default
+      port: 80
+      protocol: TCP
+      targetPort: 9428
+  selector:
+    app.kubernetes.io/name: victorialogs
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
+  labels:
+    app.kubernetes.io/name: victoriatraces
+  name: victoriatraces
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: victoriatraces
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: victoriatraces
+    spec:
+      containers:
+        - args:
+            - -httpListenAddr=:10428
+            - -storageDataPath=/storage
+            - -retentionPeriod=30d
+            - -retention.maxDiskSpaceUsageBytes=25GiB
+            - -loggerFormat=json
+            - -otlpGRPCListenAddr=:4317
+            - -deleteAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
+            - -forceMergeAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
+            - -pprofAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
+          image: victoriametrics/victoria-traces:v0.13.0
+          name: victoriatraces
+          ports:
+            - containerPort: 10428
+              name: http
+              protocol: TCP
+            - containerPort: 4317
+              name: otlp-grpc
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 10
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /storage
+              name: storage
+            - mountPath: /etc/victoria-auth
+              name: auth
+              readOnly: true
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: victoriatraces-pvc
+        - name: auth
+          secret:
+            secretName: victoria-admin-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    prometheus.io/port: "10428"
+    prometheus.io/scrape: "true"
+  name: victoriatraces
+  namespace: default
+spec:
+  ports:
+    - name: http
+      port: 10428
+      protocol: TCP
+      targetPort: 10428
+    - name: http-default
+      port: 80
+      protocol: TCP
+      targetPort: 10428
+    - appProtocol: grpc
+      name: otlp-grpc
+      port: 4317
+      protocol: TCP
+      targetPort: 4317
+  selector:
+    app.kubernetes.io/name: victoriatraces
   type: ClusterIP
 ---
 apiVersion: apps/v1
@@ -761,6 +1072,8 @@ spec:
               value: console
             - name: GF_LOG_CONSOLE_FORMAT
               value: json
+            - name: GF_PLUGINS_PREINSTALL_SYNC
+              value: victoriametrics-logs-datasource@0.34.0
           image: grafana/grafana:13.3.0
           name: grafana
           ports:
@@ -778,6 +1091,12 @@ spec:
             - mountPath: /local/provisioning/datasources/victoriametrics.yml
               name: prov-ds
               subPath: victoriametrics.yml
+            - mountPath: /local/provisioning/datasources/victorialogs.yml
+              name: prov-ds
+              subPath: victorialogs.yml
+            - mountPath: /local/provisioning/datasources/victoriatraces.yml
+              name: prov-ds
+              subPath: victoriatraces.yml
             - mountPath: /local/provisioning/dashboards/dashboards.yml
               name: prov-db
               subPath: dashboards.yml
@@ -1645,6 +1964,132 @@ spec:
       targetPort: 8080
   selector:
     app.kubernetes.io/name: victoriametrics-mcp
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: victorialogs-mcp
+  name: victorialogs-mcp
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: victorialogs-mcp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: victorialogs-mcp
+    spec:
+      containers:
+        - env:
+            - name: MCP_SERVER_MODE
+              value: http
+            - name: MCP_LISTEN_ADDR
+              value: 0.0.0.0:8080
+            - name: VL_INSTANCE_ENTRYPOINT
+              value: http://victorialogs:9428
+          image: ghcr.io/victoriametrics/mcp-victorialogs:1.9.0
+          name: victorialogs-mcp
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 2Gi
+            requests:
+              cpu: 50m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victorialogs-mcp
+  namespace: default
+spec:
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-default
+      port: 80
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    app.kubernetes.io/name: victorialogs-mcp
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: victoriatraces-mcp
+  name: victoriatraces-mcp
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: victoriatraces-mcp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: victoriatraces-mcp
+    spec:
+      containers:
+        - env:
+            - name: MCP_SERVER_MODE
+              value: http
+            - name: MCP_LISTEN_ADDR
+              value: 0.0.0.0:8080
+            - name: VT_INSTANCE_ENTRYPOINT
+              value: http://victoriatraces:10428
+          image: ghcr.io/victoriametrics-community/mcp-victoriatraces:1.5.0
+          name: victoriatraces-mcp
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 2Gi
+            requests:
+              cpu: 50m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoriatraces-mcp
+  namespace: default
+spec:
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-default
+      port: 80
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    app.kubernetes.io/name: victoriatraces-mcp
   type: ClusterIP
 ---
 apiVersion: apps/v1

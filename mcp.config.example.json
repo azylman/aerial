@@ -24,6 +24,12 @@
     "victoriametrics": {
       "serverUrl": "http://victoriametrics-mcp.aerial/mcp"
     },
+    "victorialogs": {
+      "serverUrl": "http://victorialogs-mcp.aerial/mcp"
+    },
+    "victoriatraces": {
+      "serverUrl": "http://victoriatraces-mcp.aerial/mcp"
+    },
     "kernel": {
       "serverUrl": "http://kernel-mcp.aerial/mcp"
     },
