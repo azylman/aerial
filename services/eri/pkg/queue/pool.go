@@ -94,9 +94,7 @@ type WorkerPoolConfig struct {
 	Pools                                                                        map[PoolKey]runner.AgentPool
 	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool runner.AgentPool
 	Classifier                                                                   *classifier.Classifier
-	HaroURL                                                                      string
-	SynapseURL                                                                   string
-	VanadisURL                                                                   string
+	HaroURL, SynapseURL, VanadisURL                                              string
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc                       func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -117,8 +115,9 @@ type WorkerPoolConfig struct {
 	VoiceStreamRunnerFunc            func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (reply string, convID string, err error)
 	AmbientResolver                  func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error)
 	CreateThreadFunc                 func(channelID, title string) (string, error)
-	TracerProvider                   trace.TracerProvider // turn spans; nil uses the global provider
-	AgentName                        string               // stack persona recorded as gen_ai.agent.name
+	TracerProvider                   trace.TracerProvider       // turn spans; nil uses the global provider
+	AgentName                        string                     // stack persona recorded as gen_ai.agent.name
+	ActiveTurns                      *runner.ActiveTurnRegistry // daemons' active turn spans for the MCP trace proxy; nil gets a private registry
 }
 
 type queueItem struct {
@@ -442,6 +441,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	resolvedAppCfg, isExplicitAppCfg := resolveDefaultAppConfig(appCfg, cfg)
 	applyWorkerPoolTimingDefaults(&cfg)
 	applyWorkerPoolHookDefaults(&cfg)
+	cfg.ActiveTurns = activeTurnRegistryOrNew(cfg.ActiveTurns)
 	applyWorkerPoolServiceDefaults(resolvedAppCfg, &cfg)
 
 	pools := initWorkerPools(resolvedAppCfg, isExplicitAppCfg, cfg, cfg.SessionManager, cfg.Store)

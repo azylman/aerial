@@ -30,18 +30,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestInitializeBrainEnvironment(t *testing.T) {
+func TestSyncBrainEnvironment(t *testing.T) {
 	tests := []struct {
 		name                     string
-		nilConfig                bool
 		precreateCLIConfigAsFile bool
 		wantErr                  bool
 	}{
-		{
-			name:      "nil config",
-			nilConfig: true,
-			wantErr:   false,
-		},
 		{
 			name:    "success fresh and idempotent",
 			wantErr: false,
@@ -56,32 +50,31 @@ func TestInitializeBrainEnvironment(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var cfg *config.Config
-			if !tc.nilConfig {
-				tmpDir := t.TempDir()
-				if tc.precreateCLIConfigAsFile {
-					conflict := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
-					_ = os.MkdirAll(filepath.Dir(conflict), 0o755)
-					_ = os.WriteFile(conflict, []byte("file-not-dir"), 0o644)
-					cfg = newTestConfig(func(d *config.ConfigData) {
-						d.DataDir = tmpDir
-						d.GeminiHomeDir = tmpDir
-					})
-				} else {
-					cfg = newTestConfig(func(d *config.ConfigData) {
-						d.Model = "gemini-2.5-flash"
-						d.GeminiHomeDir = t.TempDir()
-						d.DataDir = t.TempDir()
-						d.APIKey = "test-api-key"
-						d.SystemPrompt = "test prompt"
-					})
-				}
+			tmpDir := t.TempDir()
+			if tc.precreateCLIConfigAsFile {
+				conflict := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
+				_ = os.MkdirAll(filepath.Dir(conflict), 0o755)
+				_ = os.WriteFile(conflict, []byte("file-not-dir"), 0o644)
+				cfg = newTestConfig(func(d *config.ConfigData) {
+					d.DataDir = tmpDir
+					d.GeminiHomeDir = tmpDir
+				})
+			} else {
+				cfg = newTestConfig(func(d *config.ConfigData) {
+					d.Model = "gemini-2.5-flash"
+					d.GeminiHomeDir = t.TempDir()
+					d.DataDir = t.TempDir()
+					d.APIKey = "test-api-key"
+					d.SystemPrompt = "test prompt"
+				})
 			}
-			err := InitializeBrainEnvironment(context.Background(), cfg)
+			provisioner := env.NewFromConfig(cfg)
+			err := syncBrainEnvironment(context.Background(), provisioner, cfg)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("wantErr=%v, got err=%v", tc.wantErr, err)
 			}
 			if tc.name == "success fresh and idempotent" {
-				if err := InitializeBrainEnvironment(context.Background(), cfg); err != nil {
+				if err := syncBrainEnvironment(context.Background(), provisioner, cfg); err != nil {
 					t.Fatalf("unexpected error on idempotent second call: %v", err)
 				}
 			}

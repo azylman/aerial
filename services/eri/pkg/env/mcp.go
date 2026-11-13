@@ -107,8 +107,9 @@ func overlayConfigMCPServers(cfg *config.Config, target RuleTarget, mergedServer
 }
 
 // LoadTargetMCPConfig constructs the merged MCP configuration partitioned for target runtime.
-// Server URLs and headers are emitted verbatim so agents connect to MCP servers directly
-// with the credentials declared in config.
+// Headers are emitted verbatim with the credentials declared in config. Server URLs are too,
+// unless MCP tracing is enabled (WithMCPProxy): then HTTP servers point at eri's loopback
+// proxy, which forwards to the original URL.
 func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget) json.RawMessage {
 	mergedServers := make(map[string]any)
 
@@ -118,6 +119,9 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 
 	// Overlay custom MCP servers from config.yaml
 	overlayConfigMCPServers(cfg, target, mergedServers)
+	if p != nil {
+		p.mcpProxy.rewrite(target, mergedServers)
+	}
 
 	finalConfig := map[string]any{
 		"mcpServers": mergedServers,
@@ -191,7 +195,7 @@ func (p *Provisioner) EnsureTargetClaudeMcpConfig(claudeDir string, rawConfig js
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create claude directory %s: %w", claudeDir, err)
 	}
-	claudeConfig := ConvertMCPConfigForClaude(rawConfig)
+	claudeConfig := p.mcpProxy.withDaemonHeader(ConvertMCPConfigForClaude(rawConfig))
 	targetPath := filepath.Join(claudeDir, "mcp_config.json")
 	return p.writeAtomic(targetPath, string(claudeConfig))
 }

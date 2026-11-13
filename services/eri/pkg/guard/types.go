@@ -243,3 +243,31 @@ func (a *ToolArgs) AdoptClaudeMCPCall(toolName string, raw json.RawMessage) {
 		a.Arguments = raw
 	}
 }
+
+// TraceAnnouncement tells eri's MCP trace proxy which daemon is about to call an MCP tool so
+// the proxied request can be parented under that daemon's turn. It carries names only, never
+// tool arguments.
+type TraceAnnouncement struct {
+	DaemonID       string `json:"daemon_id"`
+	ConversationID string `json:"conversation_id"`
+	Server         string `json:"server"`
+	Tool           string `json:"tool"`
+}
+
+// NewTraceAnnouncement builds the announcement for an agy call_mcp_tool PreToolUse payload;
+// ok is false when the payload does not name both an MCP server and tool.
+func NewTraceAnnouncement(payload Payload, daemonID string) (TraceAnnouncement, bool) {
+	args := ParseArgs(payload.ToolCall.Args)
+	args.AdoptClaudeMCPCall(payload.ToolCall.Name, payload.ToolCall.Args)
+	server, tool := args.ServerName, args.ToolName
+	if server == "" {
+		server = args.ServerNameLower
+	}
+	if tool == "" {
+		tool = args.ToolNameLower
+	}
+	if server == "" || tool == "" {
+		return TraceAnnouncement{}, false
+	}
+	return TraceAnnouncement{DaemonID: daemonID, ConversationID: payload.ConversationID, Server: server, Tool: tool}, true
+}

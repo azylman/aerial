@@ -45,6 +45,7 @@ type turnExecution struct {
 	turnTokenUsage                                                                              runner.TokenUsage
 	turnModel                                                                                   string
 	turnSpan                                                                                    trace.Span
+	activeTurnDaemon                                                                            string // daemon registered in ActiveTurnRegistry for this turn
 	turnCtx                                                                                     context.Context
 	turnCancel                                                                                  context.CancelFunc
 	interrupted                                                                                 atomic.Bool
@@ -448,6 +449,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 			}
 		}
 	}()
+	defer te.markTurnActive()()
 
 	if !te.runPreTurnHook() {
 		return
@@ -564,6 +566,7 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 		return
 	}
 	defer te.releaseActivePoolLease()
+	defer te.markTurnActive()()
 
 	cleanupChunk := p.setupVanadisChunkTurn(d, te)
 	defer cleanupChunk()
@@ -1152,6 +1155,7 @@ func (te *turnExecution) handleSessionCorruptionRetry(attempt, maxAttempts int, 
 	oldLease := te.lease
 	te.lease = nil
 	te.activeSessionMu.Unlock()
+	te.clearActiveTurn()
 	if oldLease != nil {
 		if relErr := oldLease.Release(); relErr != nil {
 			log.Printf("[WorkerPool] Warning releasing lease on corruption reset for %s: %v", te.threadID, relErr)
@@ -1172,6 +1176,7 @@ func (te *turnExecution) handleSessionCorruptionRetry(attempt, maxAttempts int, 
 			te.activeSessionMu.Lock()
 			te.lease, te.leaseSessionID, te.isEphemeral, te.currentSessionID = newLease, newLease.SessionID(), te.isEphemeral || newLease.IsEphemeral(), newLease.SessionID()
 			te.activeSessionMu.Unlock()
+			te.registerActiveTurn()
 		}
 	}
 	return te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel)

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -31,24 +32,31 @@ type PoolConfig struct {
 	OnSessionRotated                                              func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error
 	GetSessionRecord                                              func(ctx context.Context, targetKey string) (SessionRecord, error)
 	MaxSessionTurns, MinSessionTurns, EmergencyRotationMultiplier int
+	// MCPProxyPort is eri's HTTP port when MCP tracing is enabled ("" when disabled); daemons
+	// then get ERI_DAEMON_ID and ERI_HOOK_ENDPOINT so the loopback MCP proxy can find their turn.
+	MCPProxyPort string
 }
+
+// poolSeq numbers pools so daemon IDs stay unique across pools sharing a runtime home and key.
+var poolSeq atomic.Int64
 
 // UnifiedProcessPool manages pinned daemons and singleflight pre-warming.
 type UnifiedProcessPool struct {
-	cfg         PoolConfig
-	spawner     DaemonSpawner
-	daemons     map[string]*StreamingDaemon
-	prewarming  map[string]bool
-	targetLocks map[string]*targetLock
-	mu          sync.RWMutex
-	targetMu    sync.Mutex
-	sf          singleflight.Group
-	bgWg        sync.WaitGroup
-	closed      bool
-	closeOnce   sync.Once
-	closeErr    error
-	ctx         context.Context
-	cancel      context.CancelFunc
+	cfg            PoolConfig
+	spawner        DaemonSpawner
+	daemons        map[string]*StreamingDaemon
+	prewarming     map[string]bool
+	targetLocks    map[string]*targetLock
+	mu             sync.RWMutex
+	targetMu       sync.Mutex
+	sf             singleflight.Group
+	bgWg           sync.WaitGroup
+	closed         bool
+	closeOnce      sync.Once
+	closeErr       error
+	ctx            context.Context
+	cancel         context.CancelFunc
+	daemonIDPrefix string
 }
 
 var (
@@ -71,14 +79,30 @@ func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProces
 	}
 	cfg.Model, cfg.DefaultModel = resolvedModel, resolvedModel
 	return &UnifiedProcessPool{
-		cfg:         cfg,
-		spawner:     spawner,
-		daemons:     make(map[string]*StreamingDaemon),
-		prewarming:  make(map[string]bool),
-		targetLocks: make(map[string]*targetLock),
-		ctx:         ctx,
-		cancel:      cancel,
+		cfg:            cfg,
+		spawner:        spawner,
+		daemons:        make(map[string]*StreamingDaemon),
+		prewarming:     make(map[string]bool),
+		targetLocks:    make(map[string]*targetLock),
+		ctx:            ctx,
+		cancel:         cancel,
+		daemonIDPrefix: fmt.Sprintf("p%d", poolSeq.Add(1)),
 	}
+}
+
+// mcpTarget is the runtime home's directory name (runtimes/<target>), which names the
+// target-partitioned MCP config the pool's daemons read.
+func (p *UnifiedProcessPool) mcpTarget() string {
+	if home := strings.TrimSpace(p.cfg.GeminiHomeDir); home != "" {
+		return filepath.Base(home)
+	}
+	return ""
+}
+
+// daemonID is the stable ERI_DAEMON_ID of targetKey's daemon in this pool. Rotations reuse
+// it: a target key runs one daemon (and one turn) at a time under its target lock.
+func (p *UnifiedProcessPool) daemonID(targetKey string) string {
+	return p.daemonIDPrefix + "/" + targetKey
 }
 
 func (p *UnifiedProcessPool) isClosed() bool {
@@ -271,11 +295,13 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 		}
 		turnEnvFile = filepath.Join(turnEnvDir, SanitizeDaemonTargetKey(targetKey)+".sh")
 		daemonEnv = BuildAgyEnv(AgyEnvInput{
-			BaseEnv:     cfg.Env,
-			HomeDir:     home,
-			TargetID:    targetKey,
-			TurnEnvFile: turnEnvFile,
-			Timezone:    cfg.Timezone,
+			BaseEnv:      cfg.Env,
+			HomeDir:      home,
+			TargetID:     targetKey,
+			TurnEnvFile:  turnEnvFile,
+			Timezone:     cfg.Timezone,
+			DaemonID:     p.daemonID(targetKey),
+			MCPProxyPort: cfg.MCPProxyPort,
 		})
 	}
 
@@ -877,7 +903,15 @@ type unifiedSessionLease struct {
 	mu                               sync.RWMutex
 }
 
-var _ SessionLease = (*unifiedSessionLease)(nil)
+var (
+	_ SessionLease    = (*unifiedSessionLease)(nil)
+	_ ActiveTurnOwner = (*unifiedSessionLease)(nil)
+)
+
+// ActiveTurn identifies the daemon executing this lease's turns.
+func (l *unifiedSessionLease) ActiveTurn() ActiveTurn {
+	return ActiveTurn{DaemonID: l.pool.daemonID(l.targetKey), Target: l.pool.mcpTarget(), ConversationID: l.SessionID()}
+}
 
 func (l *unifiedSessionLease) SessionID() string {
 	l.mu.RLock()

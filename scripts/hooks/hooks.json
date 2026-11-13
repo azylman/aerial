@@ -87,5 +87,19 @@
         ]
       }
     ]
+  },
+  "trace-announce": {
+    "PreToolUse": [
+      {
+        "matcher": "call_mcp_tool",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hook-guard trace",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

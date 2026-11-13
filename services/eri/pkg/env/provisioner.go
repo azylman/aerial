@@ -25,6 +25,7 @@ type Provisioner struct {
 	configRulesDir       string
 	hooksDir             string
 	oauthTokenSourcePath string
+	mcpProxy             *MCPProxyRoutes
 
 	mu sync.Mutex
 }
@@ -69,6 +70,15 @@ func NewFromConfig(cfg *config.Config) *Provisioner {
 		return New("", "")
 	}
 	return New(cfg.GeminiHomeDir(), cfg.DataDir())
+}
+
+// WithMCPProxy routes the agents' HTTP MCP servers through eri's tracing proxy; nil (tracing
+// disabled) writes MCP configs verbatim.
+func (p *Provisioner) WithMCPProxy(routes *MCPProxyRoutes) *Provisioner {
+	if p != nil {
+		p.mcpProxy = routes
+	}
+	return p
 }
 
 func (p *Provisioner) runtimeHomeDir(t RuleTarget) string {
