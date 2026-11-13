@@ -7,6 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/tracing"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // AgyEnvInput holds environment configuration parameters.
@@ -376,27 +380,31 @@ func injectRetrievedContext(ctx context.Context, prompt, memQuery string, amb Am
 		ctx = context.Background()
 	}
 	payloadPrompt := prompt
-	fetch := func(tag, name string, to time.Duration, run func(context.Context) (string, error)) {
+	tracer := trace.SpanFromContext(ctx).TracerProvider().Tracer(TracerScope)
+	fetch := func(tag, name, spanName string, to time.Duration, run func(context.Context) (string, error)) {
 		if run == nil || strings.Contains(prompt, tag) {
 			return
 		}
 		c, cancel := context.WithTimeout(ctx, to)
 		defer cancel()
+		c, span := tracer.Start(c, spanName)
+		defer span.End()
 		if block, err := run(c); err != nil {
+			span.SetStatus(codes.Error, tracing.Redact(err.Error()))
 			log.Printf("%s Warning: %s failed: %v", logPrefix, name, err)
 		} else if b := strings.TrimSpace(block); b != "" {
 			payloadPrompt = b + "\n\n" + payloadPrompt
 		}
 	}
 	if amb != nil {
-		fetch("<ambient_context>", "AmbientContextRetriever", ambTimeout, amb)
+		fetch("<ambient_context>", "AmbientContextRetriever", "ambient_context.retrieve", ambTimeout, amb)
 	}
 	if mem != nil {
 		q := strings.TrimSpace(memQuery)
 		if q == "" {
 			q = prompt
 		}
-		fetch("<retrieved_memory>", "MemoryRetriever", memTimeout, func(c context.Context) (string, error) { return mem(c, q) })
+		fetch("<retrieved_memory>", "MemoryRetriever", "memory.retrieve", memTimeout, func(c context.Context) (string, error) { return mem(c, q) })
 	}
 	return payloadPrompt
 }

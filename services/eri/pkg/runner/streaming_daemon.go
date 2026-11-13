@@ -23,12 +23,29 @@ import (
 type TurnSink interface {
 	OnTurnStarted()
 	OnThinking()
-	OnToolCall(toolName, commandName string)
-	OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string)
+	OnToolCall(call ToolCall)
+	OnToolCompleted(call ToolCall, mcpServer string, duration time.Duration, status string)
 	OnSkillActivated(skillName, source string)
 	OnTextDelta(delta string)
 	OnResult(res *TurnResult)
 	OnError(err error)
+}
+
+// ToolCall identifies one tool invocation within a turn so sinks can correlate a call's
+// start with its completion, including concurrent parallel calls of the same tool.
+type ToolCall struct {
+	// ID is the engine-supplied call ID (Claude tool_use id, agy step index). Empty when the
+	// engine supplies none; sinks then correlate FIFO per tool name.
+	ID string
+	// ParentID is the ID of the enclosing subagent call when this call runs inside one.
+	ParentID string
+	// Name is the tool name. Completions carry the canonical (MCP-resolved) name.
+	Name string
+	// Command is a human-readable detail for status displays. It may echo tool arguments,
+	// so it must never be attached to spans or logs.
+	Command string
+	// Subagent marks calls that spawn a subagent (Claude Agent/Task, agy invoke_subagent).
+	Subagent bool
 }
 
 // StepAwareSink is an optional interface that TurnSinks can implement
@@ -86,9 +103,14 @@ func (b *tailBuffer) String() string {
 
 type inFlightToolCall struct {
 	stepIndex int
-	toolName  string
+	call      ToolCall
 	mcpServer string
 	startedAt time.Time
+}
+
+// completion is the ToolCall reported to sinks when this call ends: same identity, canonical name.
+func (r inFlightToolCall) completion() ToolCall {
+	return ToolCall{ID: r.call.ID, ParentID: r.call.ParentID, Name: r.call.Name, Subagent: r.call.Subagent}
 }
 
 // StreamingDaemon manages a long-lived streaming agy subprocess, its lifecycle state,
@@ -554,7 +576,7 @@ func (d *StreamingDaemon) handleStdoutEOF(err error) {
 
 	for _, rec := range dangling {
 		if len(remaining) > 0 && remaining[0] != nil && remaining[0].Sink != nil {
-			remaining[0].Sink.OnToolCompleted(rec.toolName, rec.mcpServer, time.Since(rec.startedAt), "aborted")
+			remaining[0].Sink.OnToolCompleted(rec.completion(), rec.mcpServer, time.Since(rec.startedAt), "aborted")
 		}
 	}
 	for _, turn := range remaining {
@@ -588,7 +610,27 @@ type stepUpdateFields struct {
 	hasStepIdx    bool
 	isToolStart   bool
 	isToolEnd     bool
+	isSubagent    bool
 	toolEndStatus string
+}
+
+// toolCall builds the sink identity of an agy tool step. agy has no call IDs, so the step
+// index stands in when present; otherwise sinks correlate FIFO per tool name.
+func (f stepUpdateFields) toolCall(name string) ToolCall {
+	call := ToolCall{Name: name, Subagent: f.isSubagent || isAgySubagentTool(f.toolName)}
+	if f.hasStepIdx {
+		call.ID = fmt.Sprintf("step-%d", f.stepIdx)
+	}
+	return call
+}
+
+func isAgySubagentTool(toolName string) bool {
+	return strings.TrimPrefix(strings.TrimSpace(toolName), "mcp_") == "invoke_subagent"
+}
+
+// isClaudeSubagentTool reports whether a Claude tool_use spawns a subagent.
+func isClaudeSubagentTool(toolName string) bool {
+	return toolName == "Agent" || toolName == "Task"
 }
 
 func extractToolInfoParams(su map[string]any) map[string]any {
@@ -693,6 +735,7 @@ func applyStepUpdateSubmap(f *stepUpdateFields, su map[string]any) {
 	case "ERROR":
 		f.toolEndStatus = "error"
 	}
+	f.isSubagent = typ == "subagent"
 	if typ == "tool_call" || typ == "tool" || typ == "subagent" {
 		f.isToolStart = f.toolEndStatus == ""
 		f.isToolEnd = f.toolEndStatus != ""
@@ -768,7 +811,8 @@ func extractActivatedSkill(toolName string, toolParams map[string]any, cmdName s
 	return "", false
 }
 
-func (d *StreamingDaemon) recordToolStart(stepIdx int, hasStepIdx bool, canonicalTool, mcpServer string) bool {
+// recordToolStart registers call (whose Name is the canonical tool name) as in flight.
+func (d *StreamingDaemon) recordToolStart(stepIdx int, hasStepIdx bool, call ToolCall, mcpServer string) bool {
 	var isNewToolStart bool
 	d.inflightMu.Lock()
 	defer d.inflightMu.Unlock()
@@ -777,19 +821,19 @@ func (d *StreamingDaemon) recordToolStart(stepIdx int, hasStepIdx bool, canonica
 	}
 	if hasStepIdx {
 		if _, exists := d.inFlightTools[stepIdx]; !exists {
-			d.inFlightTools[stepIdx] = inFlightToolCall{stepIndex: stepIdx, toolName: canonicalTool, mcpServer: mcpServer, startedAt: time.Now()}
+			d.inFlightTools[stepIdx] = inFlightToolCall{stepIndex: stepIdx, call: call, mcpServer: mcpServer, startedAt: time.Now()}
 			isNewToolStart = true
 		}
 	} else {
 		alreadyInFlight := false
 		for _, rec := range d.inFlightTools {
-			if rec.toolName == canonicalTool {
+			if rec.call.Name == call.Name {
 				alreadyInFlight = true
 				break
 			}
 		}
 		if !alreadyInFlight {
-			d.inFlightTools[-1] = inFlightToolCall{stepIndex: -1, toolName: canonicalTool, mcpServer: mcpServer, startedAt: time.Now()}
+			d.inFlightTools[-1] = inFlightToolCall{stepIndex: -1, call: call, mcpServer: mcpServer, startedAt: time.Now()}
 			isNewToolStart = true
 		}
 	}
@@ -799,7 +843,7 @@ func (d *StreamingDaemon) recordToolStart(stepIdx int, hasStepIdx bool, canonica
 func matchFallbackInFlightTool(tools map[int]inFlightToolCall, toolName string, params map[string]any) (int, inFlightToolCall, bool) {
 	cTool, _ := ExtractMCPToolInfo(toolName, params)
 	for idx, rec := range tools {
-		if rec.toolName == toolName || rec.toolName == cTool || toolName == "call_mcp_tool" || len(tools) == 1 {
+		if rec.call.Name == toolName || rec.call.Name == cTool || toolName == "call_mcp_tool" || len(tools) == 1 {
 			return idx, rec, true
 		}
 	}
@@ -885,7 +929,7 @@ func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map
 		var mcpServer string
 		canonicalTool, mcpServer = ExtractMCPToolInfo(f.toolName, f.toolParams)
 		activatedSkill, hasSkill = extractActivatedSkill(f.toolName, f.toolParams, f.cmdName)
-		isNewToolStart = d.recordToolStart(f.stepIdx, f.hasStepIdx, canonicalTool, mcpServer)
+		isNewToolStart = d.recordToolStart(f.stepIdx, f.hasStepIdx, f.toolCall(canonicalTool), mcpServer)
 	} else if f.isToolEnd || (f.hasStepIdx && f.toolEndStatus != "") {
 		completedRecord, hasCompletedRecord, isToolEnd = d.recordToolEnd(f)
 	}
@@ -898,13 +942,15 @@ func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map
 		} else if canonicalTool == cmdForSink {
 			cmdForSink = ""
 		}
-		activeTurn.Sink.OnToolCall(toolForSink, cmdForSink)
+		call := f.toolCall(toolForSink)
+		call.Command = cmdForSink
+		activeTurn.Sink.OnToolCall(call)
 	}
 	if isNewToolStart && hasSkill {
 		activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
 	}
 	if isToolEnd && hasCompletedRecord {
-		activeTurn.Sink.OnToolCompleted(completedRecord.toolName, completedRecord.mcpServer, time.Since(completedRecord.startedAt), f.toolEndStatus)
+		activeTurn.Sink.OnToolCompleted(completedRecord.completion(), completedRecord.mcpServer, time.Since(completedRecord.startedAt), f.toolEndStatus)
 	}
 	if delta := extractStepTextDelta(raw, f.su); delta != "" {
 		activeTurn.Sink.OnTextDelta(delta)
@@ -1067,7 +1113,7 @@ func (d *StreamingDaemon) handleResultEvent(raw map[string]any) {
 
 	for _, rec := range dangling {
 		if activeTurn != nil && activeTurn.Sink != nil {
-			activeTurn.Sink.OnToolCompleted(rec.toolName, rec.mcpServer, time.Since(rec.startedAt), "aborted")
+			activeTurn.Sink.OnToolCompleted(rec.completion(), rec.mcpServer, time.Since(rec.startedAt), "aborted")
 		}
 	}
 
@@ -1186,6 +1232,8 @@ func (d *StreamingDaemon) handleClaudeAssistantEvent(activeTurn *TurnContext, ra
 	if !ok {
 		return
 	}
+	// Messages emitted by a subagent carry the tool_use id of the Agent/Task call that spawned it.
+	parentToolUseID := extractFirstString(raw, "parent_tool_use_id")
 
 	for _, block := range contents {
 		bMap, ok := block.(map[string]any)
@@ -1223,7 +1271,8 @@ func (d *StreamingDaemon) handleClaudeAssistantEvent(activeTurn *TurnContext, ra
 		cmdDetail := ExtractToolDetail(toolName, inputMap, "")
 		activatedSkill, hasSkill := extractActivatedSkill(toolName, inputMap, cmdDetail)
 
-		isNewStart := d.recordToolStart(stepIdx, true, canonicalTool, mcpServer)
+		call := ToolCall{ID: toolID, ParentID: parentToolUseID, Name: canonicalTool, Subagent: isClaudeSubagentTool(toolName)}
+		isNewStart := d.recordToolStart(stepIdx, true, call, mcpServer)
 		if isNewStart && activeTurn.Sink != nil {
 			toolForSink := canonicalTool
 			cmdForSink := cmdDetail
@@ -1232,7 +1281,8 @@ func (d *StreamingDaemon) handleClaudeAssistantEvent(activeTurn *TurnContext, ra
 			} else if canonicalTool == cmdForSink {
 				cmdForSink = ""
 			}
-			activeTurn.Sink.OnToolCall(toolForSink, cmdForSink)
+			call.Name, call.Command = toolForSink, cmdForSink
+			activeTurn.Sink.OnToolCall(call)
 			if hasSkill {
 				activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
 			}
@@ -1280,7 +1330,7 @@ func (d *StreamingDaemon) handleClaudeUserEvent(activeTurn *TurnContext, raw map
 		}
 		rec, hasRec, isEnd := d.recordToolEnd(fields)
 		if isEnd && hasRec && activeTurn.Sink != nil {
-			activeTurn.Sink.OnToolCompleted(rec.toolName, rec.mcpServer, time.Since(rec.startedAt), status)
+			activeTurn.Sink.OnToolCompleted(rec.completion(), rec.mcpServer, time.Since(rec.startedAt), status)
 		}
 	}
 }
@@ -1375,6 +1425,7 @@ func populateUsage(res *TurnResult, raw map[string]any) {
 	getInt("cache_read_input_tokens", &cacheRead)
 	if cacheCreation > 0 {
 		res.Usage.InputTokens += cacheCreation
+		res.Usage.CacheCreationTokens = cacheCreation
 	}
 	if cacheRead > 0 {
 		res.Usage.CacheReadTokens = cacheRead

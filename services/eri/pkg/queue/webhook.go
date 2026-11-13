@@ -12,10 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // WakeRequest contains payload data sent to the on_wake ingress webhook.
@@ -95,11 +97,11 @@ func NewDefaultWebhookDispatcher() *DefaultWebhookDispatcher {
 func NewWebhookDispatcherWithClient(client *http.Client) *DefaultWebhookDispatcher {
 	if client == nil {
 		client = &http.Client{
-			Transport: &http.Transport{
+			Transport: tracing.Transport(&http.Transport{
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 20,
 				IdleConnTimeout:     90 * time.Second,
-			},
+			}),
 		}
 	}
 	return &DefaultWebhookDispatcher{client: client}
@@ -303,7 +305,12 @@ func (te *turnExecution) runPreTurnHook() bool {
 	}
 	preReq := buildPreTurnRequest(te)
 	dispatcher, poolCtx := te.resolveWebhookDispatcher()
-	preResp, err := dispatcher.CallPreTurnHook(poolCtx, te.policy.Hooks.PreTurn, preReq)
+	hookCtx, span := te.startChildSpan(poolCtx, spanPreTurn)
+	preResp, err := dispatcher.CallPreTurnHook(hookCtx, te.policy.Hooks.PreTurn, preReq)
+	if err != nil {
+		span.SetStatus(codes.Error, "pre_turn hook failed")
+	}
+	span.End()
 	if err != nil {
 		action := te.policy.Hooks.PreTurn.GetOnTimeout("drop")
 		switch action {

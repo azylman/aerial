@@ -3,6 +3,7 @@ package tracing
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -421,6 +422,45 @@ func TestTransportErrorMessage(t *testing.T) {
 			t.Parallel()
 			if got := transportErrorMessage(tc.err); got != tc.want {
 				t.Errorf("transportErrorMessage = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSlogHandler(t *testing.T) {
+	t.Parallel()
+	tid, _ := trace.TraceIDFromHex(parentTraceID)
+	sid, _ := trace.SpanIDFromHex(parentSpanID)
+	spanCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled}))
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		group   string
+		want    []string
+		wantNot []string
+	}{
+		{name: "active span adds ids", ctx: spanCtx, want: []string{`"trace_id":"` + parentTraceID + `"`, `"span_id":"` + parentSpanID + `"`, `"k":"v"`}},
+		{name: "no span leaves record untouched", ctx: context.Background(), want: []string{`"k":"v"`}, wantNot: []string{"trace_id", "span_id"}},
+		{name: "groups are preserved", ctx: spanCtx, group: "g", want: []string{`"g":{`, `"trace_id":"` + parentTraceID + `"`}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var buf strings.Builder
+			h := SlogHandler(slog.NewJSONHandler(&buf, nil)).WithAttrs([]slog.Attr{slog.String("k", "v")})
+			if tc.group != "" {
+				h = h.WithGroup(tc.group)
+			}
+			slog.New(h).InfoContext(tc.ctx, "msg")
+			for _, w := range tc.want {
+				if !strings.Contains(buf.String(), w) {
+					t.Errorf("log %s missing %s", buf.String(), w)
+				}
+			}
+			for _, w := range tc.wantNot {
+				if strings.Contains(buf.String(), w) {
+					t.Errorf("log %s unexpectedly has %s", buf.String(), w)
+				}
 			}
 		})
 	}

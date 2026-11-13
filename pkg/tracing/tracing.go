@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -272,4 +273,28 @@ func MCPRequestAttrs(body []byte) []attribute.KeyValue {
 // before a string becomes a span status or attribute.
 func Redact(s string) string {
 	return sanitizer.SanitizeString(s)
+}
+
+// SlogHandler wraps h so every record logged with a context carrying a valid span gains
+// trace_id and span_id attributes, joining logs to traces.
+func SlogHandler(h slog.Handler) slog.Handler {
+	return slogHandler{Handler: h}
+}
+
+type slogHandler struct{ slog.Handler }
+
+func (h slogHandler) Handle(ctx context.Context, r slog.Record) error {
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		r = r.Clone()
+		r.AddAttrs(slog.String("trace_id", sc.TraceID().String()), slog.String("span_id", sc.SpanID().String()))
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h slogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return slogHandler{Handler: h.Handler.WithAttrs(attrs)}
+}
+
+func (h slogHandler) WithGroup(name string) slog.Handler {
+	return slogHandler{Handler: h.Handler.WithGroup(name)}
 }

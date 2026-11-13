@@ -198,6 +198,7 @@ type brainAppOptions struct {
 	processSpawner runner.DaemonSpawner
 	hupChan        <-chan os.Signal
 	onReload       func(source string)
+	agentName      string
 }
 
 func extractMCPServers(cur *config.ConfigData, includeDiscord bool) []runner.MCPServerConfig {
@@ -993,6 +994,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		HaroURL:          cur.HaroURL,
 		SynapseURL:       cur.SynapseURL,
 		VanadisURL:       cur.VanadisURL,
+		AgentName:        appOpts.agentName,
 	})
 	pool.HoldUntilLeader()
 	pool.Start()
@@ -1050,8 +1052,10 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 const tracingConfigPath = "/config/tracing/tracing.yaml"
 
 // setupTracing installs the global tracer provider and propagator. Config errors are logged and
-// leave tracing disabled (propagation only). The returned func flushes pending spans.
-func setupTracing(ctx context.Context, path string) func() {
+// leave tracing disabled (propagation only). It returns a BrainAppOption naming the turn agent
+// after the config's stack (the persona recorded as gen_ai.agent.name) and a func that flushes
+// pending spans.
+func setupTracing(ctx context.Context, path string) (BrainAppOption, func()) {
 	tcfg, err := tracing.LoadConfig(path)
 	if err != nil {
 		log.Printf("[Tracing] Invalid tracing config, running with tracing disabled: %v", err)
@@ -1061,7 +1065,8 @@ func setupTracing(ctx context.Context, path string) func() {
 	if err != nil {
 		log.Printf("[Tracing] Setup failed, running with tracing disabled: %v", err)
 	}
-	return func() {
+	withAgentName := func(o *brainAppOptions) { o.agentName = tcfg.Stack }
+	return withAgentName, func() {
 		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := shutdown(flushCtx); err != nil {
@@ -1071,9 +1076,9 @@ func setupTracing(ctx context.Context, path string) func() {
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})))
+	}))))
 
 	cfg, err := config.New()
 	if err != nil {
@@ -1102,9 +1107,9 @@ func main() {
 		cancel()
 	}()
 
-	shutdownTracing := setupTracing(ctx, tracingConfigPath)
+	withAgentName, shutdownTracing := setupTracing(ctx, tracingConfigPath)
 
-	err = RunBrainApp(ctx, cfg)
+	err = RunBrainApp(ctx, cfg, withAgentName)
 	cancel()
 	shutdownTracing()
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {

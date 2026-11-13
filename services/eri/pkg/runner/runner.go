@@ -103,6 +103,8 @@ type AgyUsage struct {
 	ThinkingTokens  int `json:"thinking_tokens"`
 	CacheReadTokens int `json:"cache_read_tokens"`
 	TotalTokens     int `json:"total_tokens"`
+	// CacheCreationTokens is the share of InputTokens written to the prompt cache (Claude).
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
 }
 
 type TokenUsage = AgyUsage

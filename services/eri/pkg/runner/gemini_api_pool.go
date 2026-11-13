@@ -814,7 +814,7 @@ func (s *GeminiAPISession) executeSingleToolCall(ctx context.Context, dispatcher
 		}
 	}
 	if turn != nil && turn.Sink != nil {
-		turn.Sink.OnToolCall(fc.Name, argsDesc)
+		turn.Sink.OnToolCall(ToolCall{Name: fc.Name, Command: argsDesc, Subagent: isAgySubagentTool(fc.Name)})
 	}
 	start := time.Now()
 	var (
@@ -832,7 +832,7 @@ func (s *GeminiAPISession) executeSingleToolCall(ctx context.Context, dispatcher
 	}
 	canonicalTool, mcpServer := ExtractMCPToolInfo(fc.Name, fc.Args)
 	if turn != nil && turn.Sink != nil {
-		turn.Sink.OnToolCompleted(canonicalTool, mcpServer, time.Since(start), status)
+		turn.Sink.OnToolCompleted(ToolCall{Name: canonicalTool, Subagent: isAgySubagentTool(fc.Name)}, mcpServer, time.Since(start), status)
 	}
 	respMap := map[string]any{"output": toolOutput}
 	if execErr != nil {

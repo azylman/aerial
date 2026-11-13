@@ -29,6 +29,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/bwmarrin/discordgo"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -116,6 +117,8 @@ type WorkerPoolConfig struct {
 	VoiceStreamRunnerFunc            func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (reply string, convID string, err error)
 	AmbientResolver                  func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error)
 	CreateThreadFunc                 func(channelID, title string) (string, error)
+	TracerProvider                   trace.TracerProvider // turn spans; nil uses the global provider
+	AgentName                        string               // stack persona recorded as gen_ai.agent.name
 }
 
 type queueItem struct {

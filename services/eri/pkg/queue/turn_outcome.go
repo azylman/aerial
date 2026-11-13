@@ -23,6 +23,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type oneShotScheduleRequest struct {
@@ -161,6 +162,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
 	resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
 	resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
+	resp.Usage.CacheCreationTokens += accumulatedUsage.CacheCreationTokens
 	te.turnTokenUsage, te.turnDurationMs = resp.Usage, time.Since(te.execStart).Milliseconds()
 
 	isSilent := te.isDispatch()
@@ -258,6 +260,8 @@ func (te *turnExecution) resolveReplyToMessageID(deliveryTarget string) string {
 func (te *turnExecution) deliverDiscordSuccess(cleanText string, attachments []*delivery.Attachment) {
 	deliveryTarget := te.threadID
 	replyToID := te.resolveReplyToMessageID(deliveryTarget)
+	_, span := te.startChildSpan(te.poolCtx(), spanDeliver)
+	defer span.End()
 	var deliveryErr error
 	switch {
 	case te.pool.cfg.ReplyDeliveryWithAttachmentsFunc != nil:
@@ -268,6 +272,7 @@ func (te *turnExecution) deliverDiscordSuccess(cleanText string, attachments []*
 		deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText)
 	}
 	if deliveryErr != nil {
+		span.SetStatus(codes.Error, "delivery failed")
 		log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
 	}
 }
