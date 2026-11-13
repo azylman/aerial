@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -204,7 +205,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/schedules/oneshot", s.handleScheduleOneShot)
 	mux.HandleFunc("/event-triggers/check", s.handleCheckEventTriggers)
 	mux.HandleFunc("/event-triggers/claim", s.handleClaimEventTriggers)
-	mux.HandleFunc("/event-triggers/fire", s.handleFireEventTriggers)
+	// Continues the trace of the webhook (synapse) that fired the event.
+	mux.Handle("/event-triggers/fire", tracing.Middleware("haro", http.HandlerFunc(s.handleFireEventTriggers)))
 
 	mcpBridge := http.HandlerFunc(s.handleMCP)
 	mux.Handle("/mcp", mcpBridge)
@@ -532,10 +534,12 @@ func (s *Server) handleFireEventTriggers(w http.ResponseWriter, r *http.Request)
 	for _, trig := range triggers {
 		prompt := FormatEventTriggerPrompt(req.ContextHeader, trig.Prompt)
 		start := time.Now()
-		_, dispErr := s.dispatcher.DispatchPrompt(r.Context(), PromptDispatchRequest{
-			ChannelID: trig.ChannelID,
-			Prompt:    prompt,
-			Effort:    trig.Effort,
+		_, dispErr := traceFire(r.Context(), "event_watch", trig.ID, func(ctx context.Context) (PromptDispatchResponse, error) {
+			return s.dispatcher.DispatchPrompt(ctx, PromptDispatchRequest{
+				ChannelID: trig.ChannelID,
+				Prompt:    prompt,
+				Effort:    trig.Effort,
+			})
 		})
 		RecordScheduleDispatchDuration("event_watch", time.Since(start).Seconds())
 		if dispErr != nil {

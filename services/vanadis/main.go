@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -784,7 +785,8 @@ func NewVanadisServer(cfg Config, store VanadisStore, riverClient RiverInserter,
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
-	return &VanadisServer{cfg: cfg, httpClient: httpClient, store: store, riverClient: riverClient}
+	// Traced so eri turns join the chunk dispatch span (and widget/wake posts carry traceparent).
+	return &VanadisServer{cfg: cfg, httpClient: tracing.Client(httpClient), store: store, riverClient: riverClient}
 }
 
 // SetStore updates the VanadisStore backing the server.
@@ -953,29 +955,6 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 	}
 	RecordChunkTotal("dispatched")
 	return nil
-}
-
-// dispatchChunkTurn renders the chunk prompt (optionally prefixed by a harness notice) and dispatches it to Brain
-// on the chunk's dedicated session with the capped chunk effort.
-func (s *VanadisServer) dispatchChunkTurn(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, activeIdx int, notice string) error {
-	prompt, err := FormatChunkPrompt(build, chunks, activeIdx)
-	if err != nil {
-		return fmt.Errorf("format chunk prompt: %w", err)
-	}
-	chunk := chunks[activeIdx]
-	return s.dispatchBrainDispatch(ctx, BrainDispatchRequest{
-		Source:         "vanadis",
-		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
-		TargetID:       strings.TrimSpace(build.ThreadID),
-		VanadisChunkID: strings.TrimSpace(chunk.ID),
-		Prompt:         notice + prompt,
-		Effort:         capChunkEffort(chunk.Effort),
-	})
-}
-
-func (s *VanadisServer) dispatchBrainDispatch(ctx context.Context, payload BrainDispatchRequest) error {
-	_, err := s.postBrainJSON(ctx, "/dispatch", payload, 64<<10)
-	return err
 }
 
 func normalizeDiscordThreadID(s string) string {
@@ -1489,9 +1468,11 @@ func RunApp(ctx context.Context, cfg Config) error { return runServer(ctx, cfg, 
 func main() {
 	cfg := LoadConfigFromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	_, flushTracing := tracing.Init(ctx, "vanadis", tracing.DefaultConfigPath)
 
 	err := RunApp(ctx, cfg)
 	cancel()
+	flushTracing()
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("[vanadis] Error: %v", err)
 	}

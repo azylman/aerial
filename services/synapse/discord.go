@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -252,15 +253,18 @@ func enqueueDiscordMessage(ctx context.Context, server *RouterServer, s *discord
 	}
 	roleNames := extractMentionRoleNames(s, m.GuildID, m.MentionRoles, refRoles)
 
-	args := DiscordIngressArgs{
-		MessageID: m.ID,
-		BotUserID: botUserID,
-		RoleNames: roleNames,
-		Message:   m,
-	}
-
 	enqueueCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
+	enqueueCtx, span := tracing.Tracer().Start(enqueueCtx, "discord.gateway MESSAGE_CREATE", gatewaySpanOptions(m.ChannelID)...)
+	defer span.End()
+
+	args := DiscordIngressArgs{
+		MessageID:   m.ID,
+		BotUserID:   botUserID,
+		RoleNames:   roleNames,
+		Message:     m,
+		Traceparent: tracing.Traceparent(enqueueCtx),
+	}
 
 	if server.riverClient != nil {
 		if err := server.insertRiverJob(enqueueCtx, args); err != nil {
@@ -477,13 +481,16 @@ func handleGatewayInteractionCreate(ctx context.Context, server *RouterServer, i
 		return
 	}
 
+	enqueueCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	enqueueCtx, span := tracing.Tracer().Start(enqueueCtx, "discord.gateway INTERACTION_CREATE", gatewaySpanOptions(i.ChannelID)...)
+	defer span.End()
+
 	args := DiscordInteractionArgs{
 		InteractionID: i.ID,
 		Interaction:   i.Interaction,
+		Traceparent:   tracing.Traceparent(enqueueCtx),
 	}
-
-	enqueueCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-	defer cancel()
 
 	if server.riverClient != nil {
 		if err := server.insertRiverJob(enqueueCtx, args); err != nil {

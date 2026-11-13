@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -142,7 +143,7 @@ func NewPostgresPRRegistry(pool pgxQueryExecer, opts ...func(*PostgresPRRegistry
 		pool:              pool,
 		vanadisURL:        "http://vanadis.aerial",
 		haroURL:           "http://haro.aerial",
-		httpClient:        &http.Client{Timeout: 10 * time.Second},
+		httpClient:        tracing.Client(&http.Client{Timeout: 10 * time.Second}),
 		vanadisRetryDelay: 500 * time.Millisecond,
 	}
 	for _, opt := range opts {

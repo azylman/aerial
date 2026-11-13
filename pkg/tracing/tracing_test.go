@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
@@ -147,6 +149,102 @@ func TestSetup(t *testing.T) {
 			h.ServeHTTP(httptest.NewRecorder(), req)
 			if (seen == parentTraceID) != tc.wantForwards {
 				t.Errorf("trace id in handler = %q, want forwarded=%v", seen, tc.wantForwards)
+			}
+		})
+	}
+}
+
+func TestInit(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	tests := []struct {
+		name        string
+		path        string
+		wantEnabled bool
+		wantStack   string
+	}{
+		{name: "missing file runs disabled", path: filepath.Join(dir, "absent.yaml")},
+		{name: "malformed yaml runs disabled", path: write("bad.yaml", "enabled: [")},
+		{name: "enabled config exports", path: write("ok.yaml", "enabled: true\nendpoint: http://127.0.0.1:1/v1/traces\nstack: marida\n"), wantEnabled: true, wantStack: "marida"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, flush := Init(context.Background(), "haro", tc.path)
+			// Nothing is sampled-and-ended here, so the flush never reaches the dead endpoint.
+			defer flush()
+			if cfg.Enabled != tc.wantEnabled || cfg.Stack != tc.wantStack {
+				t.Errorf("Init cfg = %+v, want enabled=%v stack=%q", cfg, tc.wantEnabled, tc.wantStack)
+			}
+			// Left unended so nothing is ever queued for export to the dead endpoint.
+			if _, span := Tracer().Start(context.Background(), "probe"); span.SpanContext().IsValid() != tc.wantEnabled {
+				t.Errorf("Tracer span valid = %v, want %v", span.SpanContext().IsValid(), tc.wantEnabled)
+			}
+			if got := Traceparent(otel.GetTextMapPropagator().Extract(context.Background(), propagation.MapCarrier{"traceparent": parentTraceparent})); got != parentTraceparent {
+				t.Errorf("global propagator did not round-trip traceparent: %q", got)
+			}
+		})
+	}
+}
+
+func TestContextWithTraceparent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		traceparent string
+		wantTraceID string
+	}{
+		{name: "empty leaves context untouched", traceparent: "", wantTraceID: "00000000000000000000000000000000"},
+		{name: "malformed is ignored", traceparent: "00-nothex-00f067aa0ba902b7-01", wantTraceID: "00000000000000000000000000000000"},
+		{name: "valid becomes remote parent", traceparent: parentTraceparent, wantTraceID: parentTraceID},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sc := trace.SpanContextFromContext(ContextWithTraceparent(context.Background(), tc.traceparent))
+			if sc.TraceID().String() != tc.wantTraceID {
+				t.Errorf("trace id = %s, want %s", sc.TraceID(), tc.wantTraceID)
+			}
+			if sc.IsValid() && !sc.IsRemote() {
+				t.Error("span context should be remote")
+			}
+		})
+	}
+}
+
+func TestClient(t *testing.T) {
+	t.Parallel()
+	base := &http.Transport{}
+	tests := []struct {
+		name        string
+		in          *http.Client
+		wantTimeout time.Duration
+		wantBase    http.RoundTripper
+	}{
+		{name: "nil client gets default transport", in: nil, wantBase: http.DefaultTransport},
+		{name: "settings and base transport are kept", in: &http.Client{Timeout: 7 * time.Second, Transport: base}, wantTimeout: 7 * time.Second, wantBase: base},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := Client(tc.in)
+			if got == tc.in {
+				t.Fatal("Client must return a copy")
+			}
+			if tc.in != nil && tc.in.Transport != tc.wantBase {
+				t.Error("input client transport was mutated")
+			}
+			rt, ok := got.Transport.(*transport)
+			if !ok {
+				t.Fatalf("transport = %T, want *transport", got.Transport)
+			}
+			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase {
+				t.Errorf("timeout %v base %T, want %v %T", got.Timeout, rt.base, tc.wantTimeout, tc.wantBase)
 			}
 		})
 	}
