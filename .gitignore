@@ -17,6 +17,9 @@ PR_DESCRIPTION.md
 /services/synapse/synapse
 /services/vanadis/vanadis
 /services/eri/eri
+/mcp/discord-mcp/discord-mcp
+/mcp/docket-mcp/docket-mcp
+/mcp/kernel-mcp/kernel-mcp
 /services/prospera/prospera
 /services/eri/transcript-search
 /services/console/console

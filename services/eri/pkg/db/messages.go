@@ -19,42 +19,44 @@ const (
 )
 
 type Message struct {
-	ID                string    `json:"id"`
-	RowID             int64     `json:"row_id,omitempty"`
-	ThreadID          string    `json:"thread_id"`
-	GuildID           string    `json:"guild_id"`
-	AuthorID          string    `json:"author_id"`
-	AuthorName        string    `json:"author_name"`
-	Content           string    `json:"content"`
-	Summary           string    `json:"summary"`
-	Status            string    `json:"status"`
-	RetryCount        int       `json:"retry_count"`
-	RestartCount      int       `json:"restart_count"`
-	Effort            string    `json:"effort"`
-	ErrorMessage      string    `json:"error_message,omitempty"`
-	ResponseText      string    `json:"response_text,omitempty"`
-	ConversationID    string    `json:"conversation_id,omitempty"`
-	ChannelID         string    `json:"channel_id,omitempty"`
-	ChannelName       string    `json:"channel_name,omitempty"`
-	ThreadName        string    `json:"thread_name,omitempty"`
-	AuthorGlobalName  string    `json:"author_global_name,omitempty"`
-	AuthorBot         bool      `json:"author_bot,omitempty"`
-	IsAdmin           bool      `json:"is_admin,omitempty"`
-	Mentions          []string  `json:"mentions,omitempty"`
-	MentionUserIDs    []string  `json:"mention_user_ids,omitempty"`
-	MentionRoleIDs    []string  `json:"mention_role_ids,omitempty"`
-	ReplyingToAuthor  string    `json:"replying_to_author,omitempty"`
-	ReplyingToContent string    `json:"replying_to_content,omitempty"`
-	Attachments       []string  `json:"attachments,omitempty"`
-	Model             string    `json:"model,omitempty"`
-	DurationMs        int64     `json:"duration_ms,omitempty"`
-	InputTokens       int       `json:"input_tokens,omitempty"`
-	OutputTokens      int       `json:"output_tokens,omitempty"`
-	ThinkingTokens    int       `json:"thinking_tokens,omitempty"`
-	CacheReadTokens   int       `json:"cache_read_tokens,omitempty"`
-	TotalTokens       int       `json:"total_tokens,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                string   `json:"id"`
+	RowID             int64    `json:"row_id,omitempty"`
+	ThreadID          string   `json:"thread_id"`
+	GuildID           string   `json:"guild_id"`
+	AuthorID          string   `json:"author_id"`
+	AuthorName        string   `json:"author_name"`
+	Content           string   `json:"content"`
+	Summary           string   `json:"summary"`
+	Status            string   `json:"status"`
+	RetryCount        int      `json:"retry_count"`
+	RestartCount      int      `json:"restart_count"`
+	Effort            string   `json:"effort"`
+	ErrorMessage      string   `json:"error_message,omitempty"`
+	ResponseText      string   `json:"response_text,omitempty"`
+	ConversationID    string   `json:"conversation_id,omitempty"`
+	ChannelID         string   `json:"channel_id,omitempty"`
+	ChannelName       string   `json:"channel_name,omitempty"`
+	ThreadName        string   `json:"thread_name,omitempty"`
+	AuthorGlobalName  string   `json:"author_global_name,omitempty"`
+	AuthorBot         bool     `json:"author_bot,omitempty"`
+	IsAdmin           bool     `json:"is_admin,omitempty"`
+	Mentions          []string `json:"mentions,omitempty"`
+	MentionUserIDs    []string `json:"mention_user_ids,omitempty"`
+	MentionRoleIDs    []string `json:"mention_role_ids,omitempty"`
+	ReplyingToAuthor  string   `json:"replying_to_author,omitempty"`
+	ReplyingToContent string   `json:"replying_to_content,omitempty"`
+	Attachments       []string `json:"attachments,omitempty"`
+	Model             string   `json:"model,omitempty"`
+	DurationMs        int64    `json:"duration_ms,omitempty"`
+	InputTokens       int      `json:"input_tokens,omitempty"`
+	OutputTokens      int      `json:"output_tokens,omitempty"`
+	ThinkingTokens    int      `json:"thinking_tokens,omitempty"`
+	CacheReadTokens   int      `json:"cache_read_tokens,omitempty"`
+	TotalTokens       int      `json:"total_tokens,omitempty"`
+	// Traceparent is the W3C trace context of the ingress request that queued this turn.
+	Traceparent string    `json:"traceparent,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 func (m Message) HasStructuredFields() bool {
@@ -106,7 +108,7 @@ func (m Message) BodyText() string {
 	return m.Content
 }
 
-const messageSelectCols = "id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, '') AS summary, status, retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(conversation_id, '') AS conversation_id, COALESCE(channel_id, '') AS channel_id, COALESCE(channel_name, '') AS channel_name, COALESCE(thread_name, '') AS thread_name, COALESCE(author_global_name, '') AS author_global_name, COALESCE(author_bot, false) AS author_bot, COALESCE(is_admin, false) AS is_admin, mentions, mention_user_ids, mention_role_ids, COALESCE(replying_to_author, '') AS replying_to_author, COALESCE(replying_to_content, '') AS replying_to_content, attachments, COALESCE(model, '') AS model, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, created_at, updated_at"
+const messageSelectCols = "id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, '') AS summary, status, retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(conversation_id, '') AS conversation_id, COALESCE(channel_id, '') AS channel_id, COALESCE(channel_name, '') AS channel_name, COALESCE(thread_name, '') AS thread_name, COALESCE(author_global_name, '') AS author_global_name, COALESCE(author_bot, false) AS author_bot, COALESCE(is_admin, false) AS is_admin, mentions, mention_user_ids, mention_role_ids, COALESCE(replying_to_author, '') AS replying_to_author, COALESCE(replying_to_content, '') AS replying_to_content, attachments, COALESCE(model, '') AS model, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, COALESCE(traceparent, '') AS traceparent, created_at, updated_at"
 
 // InsertMessage stores a new message in the database.
 func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
@@ -138,7 +140,7 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		author_bot, is_admin, mentions, mention_user_ids,
 		mention_role_ids, replying_to_author, replying_to_content, attachments,
 		model, duration_ms, input_tokens, output_tokens,
-		thinking_tokens, cache_read_tokens, total_tokens,
+		thinking_tokens, cache_read_tokens, total_tokens, traceparent,
 		created_at, updated_at
 	) VALUES (
 		$1, $2, $3, $4, $5,
@@ -148,8 +150,8 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		$19, $20, $21, $22,
 		$23, $24, $25, $26,
 		$27, $28, $29, $30,
-		$31, $32, $33,
-		$34, $35
+		$31, $32, $33, $34,
+		$35, $36
 	) ON CONFLICT (id) DO NOTHING;`,
 		msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName,
 		msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount,
@@ -158,7 +160,7 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		msg.AuthorBot, msg.IsAdmin, pgutil.FormatPGTextArray(msg.Mentions), pgutil.FormatPGTextArray(msg.MentionUserIDs),
 		pgutil.FormatPGTextArray(msg.MentionRoleIDs), msg.ReplyingToAuthor, msg.ReplyingToContent, pgutil.FormatPGTextArray(msg.Attachments),
 		msg.Model, msg.DurationMs, msg.InputTokens, msg.OutputTokens,
-		msg.ThinkingTokens, msg.CacheReadTokens, msg.TotalTokens,
+		msg.ThinkingTokens, msg.CacheReadTokens, msg.TotalTokens, msg.Traceparent,
 		msg.CreatedAt, msg.UpdatedAt,
 	)
 	return err
@@ -179,6 +181,7 @@ func scanMessage(scanner interface{ Scan(dest ...any) error }, autoCleanSummary 
 		&pgutil.PGStringSlice{Dest: &m.Attachments},
 		&m.Model,
 		&m.DurationMs, &m.InputTokens, &m.OutputTokens, &m.ThinkingTokens, &m.CacheReadTokens, &m.TotalTokens,
+		&m.Traceparent,
 		&m.CreatedAt, &m.UpdatedAt,
 	); err != nil {
 		return Message{}, err

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -470,16 +471,17 @@ func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, stor
 		effort = policy.GetEffort()
 	}
 	msg := db.Message{
-		ID:         msgID,
-		ThreadID:   targetThreadID,
-		GuildID:    resolvedGuildID,
-		AuthorID:   authorID,
-		AuthorName: authorName,
-		Content:    rawContent,
-		Effort:     effort,
-		Status:     db.StatusPending,
-		CreatedAt:  createdAt,
-		UpdatedAt:  time.Now().UTC(),
+		ID:          msgID,
+		ThreadID:    targetThreadID,
+		GuildID:     resolvedGuildID,
+		AuthorID:    authorID,
+		AuthorName:  authorName,
+		Content:     rawContent,
+		Effort:      effort,
+		Status:      db.StatusPending,
+		Traceparent: tracing.Traceparent(ctx),
+		CreatedAt:   createdAt,
+		UpdatedAt:   time.Now().UTC(),
 	}
 	populateDiscordMessageFields(s, m, &msg, extraRoleNames...)
 	if store != nil {

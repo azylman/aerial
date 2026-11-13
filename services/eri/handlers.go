@@ -20,6 +20,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/sanitizer"
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
@@ -149,20 +150,21 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		msg := db.Message{
-			ID:         msgID,
-			ThreadID:   channelID,
-			GuildID:    "",
-			AuthorID:   "http-client",
-			AuthorName: "HTTP Client",
-			IsAdmin:    true,
-			Content:    req.Prompt,
-			Summary:    db.CleanTaskSummary(req.Prompt),
-			Status:     db.StatusPending,
-			Effort:     effort,
-			ChannelID:  channelID,
-			Model:      model,
-			CreatedAt:  time.Now().UTC(),
-			UpdatedAt:  time.Now().UTC(),
+			ID:          msgID,
+			ThreadID:    channelID,
+			GuildID:     "",
+			AuthorID:    "http-client",
+			AuthorName:  "HTTP Client",
+			IsAdmin:     true,
+			Content:     req.Prompt,
+			Summary:     db.CleanTaskSummary(req.Prompt),
+			Status:      db.StatusPending,
+			Effort:      effort,
+			ChannelID:   channelID,
+			Model:       model,
+			Traceparent: tracing.Traceparent(r.Context()),
+			CreatedAt:   time.Now().UTC(),
+			UpdatedAt:   time.Now().UTC(),
 		}
 
 		if store == nil {
@@ -297,6 +299,7 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			Effort:         strings.ToLower(strings.TrimSpace(req.Effort)),
 			Model:          strings.TrimSpace(req.Model),
 			Status:         db.StatusPending,
+			Traceparent:    tracing.Traceparent(r.Context()),
 			CreatedAt:      time.Now().UTC(),
 			UpdatedAt:      time.Now().UTC(),
 		}
