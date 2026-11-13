@@ -22,7 +22,13 @@ type AgyEnvInput struct {
 	VanadisChunkID string
 	TurnEnvFile    string
 	Timezone       string
-	ExtraEnv       []string
+	// DaemonID is exported as ERI_DAEMON_ID when MCPProxyPort is set; it keys the daemon's
+	// turns in ActiveTurnRegistry.
+	DaemonID string
+	// MCPProxyPort is eri's HTTP port when MCP tracing is enabled ("" disables it). It adds
+	// ERI_DAEMON_ID and the loopback ERI_HOOK_ENDPOINT used by `hook-guard trace`.
+	MCPProxyPort string
+	ExtraEnv     []string
 }
 
 func filterEnvKeys(env []string, excluded ...string) []string {
@@ -169,7 +175,24 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 	if tz := strings.TrimSpace(input.Timezone); tz != "" {
 		cmdEnv = append(cmdEnv, "TZ="+tz)
 	}
+	cmdEnv = append(cmdEnv, mcpTraceEnv(input.MCPProxyPort, input.DaemonID)...)
 	return append(cmdEnv, input.ExtraEnv...)
+}
+
+// MCPProxyAnnouncePath is the loopback route `hook-guard trace` posts MCP call announcements to.
+const MCPProxyAnnouncePath = "/internal/mcp-proxy/announce"
+
+// mcpTraceEnv returns the daemon env that lets the loopback MCP proxy attribute MCP calls to
+// this daemon's turn; empty when tracing is disabled (no proxy port) or the daemon has no ID.
+func mcpTraceEnv(port, daemonID string) []string {
+	port, daemonID = strings.TrimSpace(port), strings.TrimSpace(daemonID)
+	if port == "" || daemonID == "" {
+		return nil
+	}
+	return []string{
+		"ERI_DAEMON_ID=" + daemonID,
+		"ERI_HOOK_ENDPOINT=http://127.0.0.1:" + port + MCPProxyAnnouncePath,
+	}
 }
 
 // SanitizeDaemonTargetKey replaces any rune not in [a-zA-Z0-9._-] with '_',

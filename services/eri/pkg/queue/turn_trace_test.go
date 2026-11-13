@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -164,7 +165,9 @@ func (r rootEndSignal) OnEnd(s sdktrace.ReadOnlySpan) {
 	}
 }
 
-func agyToolTurnSpawner() *mockDaemonSpawner {
+// agyToolTurnSpawner fakes an agy daemon that runs one tool per turn; onTurn (optional) runs
+// while each turn is executing, before the result is emitted.
+func agyToolTurnSpawner(onTurn func()) *mockDaemonSpawner {
 	return &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			inR, inW := io.Pipe()
@@ -175,6 +178,9 @@ func agyToolTurnSpawner() *mockDaemonSpawner {
 				_, _ = fmt.Fprintf(outW, `{"event":"init","conversation_id":%q}`+"\n", "c1111111-2222-3333-4444-555555555555")
 				scanner := bufio.NewScanner(inR)
 				for scanner.Scan() {
+					if onTurn != nil {
+						onTurn()
+					}
 					_, _ = outW.Write([]byte(`{"event":"step_update","step_update":{"step_index":1,"type":"tool_call","tool_name":"run_command"}}` + "\n"))
 					_, _ = outW.Write([]byte(`{"event":"step_update","step_update":{"step_index":1,"type":"tool_call","state":"DONE"}}` + "\n"))
 					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"done","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}` + "\n"))
@@ -199,7 +205,7 @@ func TestProcessBurst_EmitsTurnTrace(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
-			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, agyToolTurnSpawner())
+			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, agyToolTurnSpawner(nil))
 			defer procPool.Close()
 
 			sig := rootEndSignal{SpanRecorder: tracetest.NewSpanRecorder(), done: make(chan struct{})}
@@ -249,6 +255,70 @@ func TestProcessBurst_EmitsTurnTrace(t *testing.T) {
 			}
 			if root.Status().Code == codes.Error {
 				t.Errorf("root status = %v, want ok", root.Status())
+			}
+		})
+	}
+}
+
+func TestProcessBurst_RegistersActiveTurnDuringExecution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{name: "discord runtime turn", target: "discord"},
+		{name: "ephemeral runtime turn", target: "ephemeral"},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+			registry := runner.NewActiveTurnRegistry()
+			duringTurn := make(chan trace.SpanContext, 1)
+			spawner := agyToolTurnSpawner(func() {
+				sc, _ := registry.SoleTurnInTarget(tc.target)
+				duringTurn <- sc
+			})
+			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+				DefaultModel:  "gemini-2.5-flash",
+				GeminiHomeDir: filepath.Join(tempData, "runtimes", tc.target),
+			}, spawner)
+			defer procPool.Close()
+
+			sig := rootEndSignal{SpanRecorder: tracetest.NewSpanRecorder(), done: make(chan struct{})}
+			pool := New(newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData }), WorkerPoolConfig{
+				ProcessPool:    procPool,
+				SessionManager: session.New(tmpHome, tempData),
+				Store:          store,
+				TimeoutMinutes: 1,
+				TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sig)),
+				ActiveTurns:    registry,
+			})
+			defer pool.Stop()
+			if pool.ActiveTurns() != registry {
+				t.Fatalf("ActiveTurns() is not the injected registry")
+			}
+
+			msg := db.Message{ID: fmt.Sprintf("active-msg-%d", i), ThreadID: fmt.Sprintf("active-thread-%d", i), Content: "hi", Status: db.StatusPending, CreatedAt: time.Now()}
+			_ = store.InsertMessage(context.Background(), msg)
+			pool.Enqueue(msg)
+			select {
+			case <-sig.done:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("turn span never ended")
+			}
+
+			var root sdktrace.ReadOnlySpan
+			for _, s := range sig.Ended() {
+				if s.Name() == runner.OperationInvokeAgent {
+					root = s
+				}
+			}
+			if got := <-duringTurn; !got.Equal(root.SpanContext()) {
+				t.Errorf("registered span during turn = %v, want turn root %v", got.SpanID(), root.SpanContext().SpanID())
+			}
+			if sc, ok := registry.SoleTurnInTarget(tc.target); ok {
+				t.Errorf("turn still registered after completion: %v", sc.SpanID())
 			}
 		})
 	}

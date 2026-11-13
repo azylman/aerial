@@ -289,7 +289,18 @@ type interchangeableSessionLease struct {
 	once       sync.Once
 }
 
-var _ SessionLease = (*interchangeableSessionLease)(nil)
+var (
+	_ SessionLease    = (*interchangeableSessionLease)(nil)
+	_ ActiveTurnOwner = (*interchangeableSessionLease)(nil)
+)
+
+// ActiveTurn forwards the worker daemon's identity; zero when the inner lease has none.
+func (l *interchangeableSessionLease) ActiveTurn() ActiveTurn {
+	if owner, ok := l.inner.(ActiveTurnOwner); ok {
+		return owner.ActiveTurn()
+	}
+	return ActiveTurn{}
+}
 
 func (l *interchangeableSessionLease) SessionID() string {
 	if l == nil || l.inner == nil {

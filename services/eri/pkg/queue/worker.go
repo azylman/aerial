@@ -448,6 +448,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 			}
 		}
 	}()
+	defer te.markTurnActive()()
 
 	if !te.runPreTurnHook() {
 		return
@@ -564,6 +565,7 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 		return
 	}
 	defer te.releaseActivePoolLease()
+	defer te.markTurnActive()()
 
 	cleanupChunk := p.setupVanadisChunkTurn(d, te)
 	defer cleanupChunk()

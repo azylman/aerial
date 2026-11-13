@@ -44,7 +44,11 @@ func InitializeBrainEnvironment(ctx context.Context, cfg *config.Config) error {
 	if cfg == nil {
 		return nil
 	}
-	provisioner := env.NewFromConfig(cfg)
+	return syncBrainEnvironment(ctx, env.NewFromConfig(cfg), cfg)
+}
+
+// syncBrainEnvironment provisions rules, skills, hooks and MCP configs with provisioner.
+func syncBrainEnvironment(ctx context.Context, provisioner *env.Provisioner, cfg *config.Config) error {
 	if err := provisioner.Sync(ctx, cfg); err != nil {
 		log.Printf("Warning: env sync error: %v", err)
 		return err
@@ -199,6 +203,7 @@ type brainAppOptions struct {
 	hupChan        <-chan os.Signal
 	onReload       func(source string)
 	agentName      string
+	tracingEnabled bool
 }
 
 func extractMCPServers(cur *config.ConfigData, includeDiscord bool) []runner.MCPServerConfig {
@@ -570,6 +575,7 @@ func buildBrainProcessPools(
 	cur *config.ConfigData,
 	sessionMgr *session.Manager,
 	spawner runner.DaemonSpawner,
+	mcpProxyPort string,
 ) (map[queue.PoolKey]runner.AgentPool, *runner.InterchangeablePool, runner.AgentPool, []runner.AgentPool, []string, string) {
 	lowEffortModel, mediumEffortModel := resolveBrainModelDefaults(cur)
 	runtimeBase := cur.DataDir
@@ -603,6 +609,7 @@ func buildBrainProcessPools(
 			TranscriptRescuer: sessionMgr.ExtractResponseSince,
 			SessionManager:    sessionMgr,
 			PrewarmedTargets:  prewarmed,
+			MCPProxyPort:      mcpProxyPort,
 		}
 		if home == discordHome {
 			pcfg.MemoryRetriever = memoryRetriever
@@ -865,9 +872,41 @@ func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, rel
 	}
 }
 
+// mcpTraceRoutes returns the MCP proxy routes and port daemons are pointed at: with tracing on,
+// agents reach their HTTP MCP servers through eri's loopback trace proxy, which parents each
+// call under the turn of the daemon making it. Both are zero when tracing is off.
+func mcpTraceRoutes(tracingEnabled bool, port string) (*env.MCPProxyRoutes, string) {
+	if !tracingEnabled {
+		return nil, ""
+	}
+	return env.NewMCPProxyRoutes(port), port
+}
+
+// registerMCPTraceProxy mounts the loopback MCP trace proxy when tracing routes exist.
+func registerMCPTraceProxy(mux *http.ServeMux, routes *env.MCPProxyRoutes, turns *runner.ActiveTurnRegistry) {
+	if routes == nil {
+		return
+	}
+	mcp.NewTraceProxy(mcp.TraceProxyConfig{Upstreams: routes, Turns: turns}).Register(mux)
+}
+
+// brainHandler wraps mux with request metrics and server spans, except for the loopback MCP
+// trace proxy: its requests are agents' MCP calls, which the proxy itself parents under the
+// calling turn, so a server span there would only add an orphan root trace per call.
+func brainHandler(mux http.Handler) http.Handler {
+	traced := tracing.Middleware("eri", metricsMiddleware(mux))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, env.MCPProxyPathPrefix) {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		traced.ServeHTTP(w, r)
+	})
+}
+
 func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, model string, asyncErrCh ...<-chan error) error {
 	srv := &http.Server{
-		Handler:           tracing.Middleware("eri", metricsMiddleware(mux)),
+		Handler:           brainHandler(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -929,8 +968,11 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 	config.RegisterConfigTokens(cfg)
 
-	provisioner := env.NewFromConfig(cfg)
-	if err := InitializeBrainEnvironment(ctx, cfg); err != nil {
+	mcpRoutes, mcpProxyPort := mcpTraceRoutes(appOpts.tracingEnabled, cur.Port)
+	activeTurns := runner.NewActiveTurnRegistry()
+
+	provisioner := env.NewFromConfig(cfg).WithMCPProxy(mcpRoutes)
+	if err := syncBrainEnvironment(ctx, provisioner, cfg); err != nil {
 		log.Printf("Warning initializing brain environment: %v", err)
 	}
 
@@ -969,7 +1011,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(cfg, cur, sessionMgr, appOpts.processSpawner)
+	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(cfg, cur, sessionMgr, appOpts.processSpawner, mcpProxyPort)
 	defer closeAllBrainPools(allPools)
 
 	switch cur.GetEngine() {
@@ -995,6 +1037,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		SynapseURL:       cur.SynapseURL,
 		VanadisURL:       cur.VanadisURL,
 		AgentName:        appOpts.agentName,
+		ActiveTurns:      activeTurns,
 	})
 	pool.HoldUntilLeader()
 	pool.Start()
@@ -1029,6 +1072,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		<-gitSyncReloads.done
 	}()
 	registerGitSyncReload(mux, gitSyncReloads)
+	registerMCPTraceProxy(mux, mcpRoutes, activeTurns)
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cur.Port)
@@ -1053,8 +1097,8 @@ const tracingConfigPath = "/config/tracing/tracing.yaml"
 
 // setupTracing installs the global tracer provider and propagator. Config errors are logged and
 // leave tracing disabled (propagation only). It returns a BrainAppOption naming the turn agent
-// after the config's stack (the persona recorded as gen_ai.agent.name) and a func that flushes
-// pending spans.
+// after the config's stack (the persona recorded as gen_ai.agent.name) and switching on the MCP
+// trace proxy when tracing is enabled, and a func that flushes pending spans.
 func setupTracing(ctx context.Context, path string) (BrainAppOption, func()) {
 	tcfg, err := tracing.LoadConfig(path)
 	if err != nil {
@@ -1065,8 +1109,9 @@ func setupTracing(ctx context.Context, path string) (BrainAppOption, func()) {
 	if err != nil {
 		log.Printf("[Tracing] Setup failed, running with tracing disabled: %v", err)
 	}
-	withAgentName := func(o *brainAppOptions) { o.agentName = tcfg.Stack }
-	return withAgentName, func() {
+	enabled := tcfg.Enabled && err == nil
+	withTracing := func(o *brainAppOptions) { o.agentName, o.tracingEnabled = tcfg.Stack, enabled }
+	return withTracing, func() {
 		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := shutdown(flushCtx); err != nil {
@@ -1107,9 +1152,9 @@ func main() {
 		cancel()
 	}()
 
-	withAgentName, shutdownTracing := setupTracing(ctx, tracingConfigPath)
+	withTracing, shutdownTracing := setupTracing(ctx, tracingConfigPath)
 
-	err = RunBrainApp(ctx, cfg, withAgentName)
+	err = RunBrainApp(ctx, cfg, withTracing)
 	cancel()
 	shutdownTracing()
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {

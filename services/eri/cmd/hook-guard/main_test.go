@@ -61,6 +61,13 @@ func TestRunCLI(t *testing.T) {
 			wantCode: 0,
 		},
 		{
+			name:       "trace subcommand allows",
+			args:       []string{"hook-guard", "trace"},
+			input:      agyMCPCall,
+			wantOutput: `{"decision":"allow"}`,
+			wantCode:   0,
+		},
+		{
 			name:       "help flag outputs usage",
 			args:       []string{"hook-guard", "--help"},
 			input:      "",

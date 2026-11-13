@@ -161,3 +161,34 @@ func (te *turnExecution) startChildSpan(base context.Context, name string) (cont
 	}
 	return te.pool.tracer().Start(base, name) //nolint:spancheck // the caller owns and ends the span
 }
+
+// activeTurnRegistryOrNew gives a pool without an injected registry a private one.
+func activeTurnRegistryOrNew(r *runner.ActiveTurnRegistry) *runner.ActiveTurnRegistry {
+	if r == nil {
+		return runner.NewActiveTurnRegistry()
+	}
+	return r
+}
+
+// ActiveTurns returns the registry mapping daemons to the span of the turn they are executing.
+func (p *WorkerPool) ActiveTurns() *runner.ActiveTurnRegistry {
+	if p == nil {
+		return nil
+	}
+	return p.cfg.ActiveTurns
+}
+
+// markTurnActive registers the leased daemon's turn span in the pool's ActiveTurnRegistry so
+// the loopback MCP proxy parents the daemon's MCP calls under this turn, and returns the func
+// that clears it. Call it after the lease-release defer is registered so the turn is cleared
+// before the lease (and the daemon) can be handed to the next turn.
+func (te *turnExecution) markTurnActive() func() {
+	owner, ok := te.lease.(runner.ActiveTurnOwner)
+	if !ok || te.turnSpan == nil {
+		return func() {}
+	}
+	turn := owner.ActiveTurn()
+	registry := te.pool.ActiveTurns()
+	registry.Set(turn, te.turnSpan.SpanContext())
+	return func() { registry.Clear(turn.DaemonID) }
+}

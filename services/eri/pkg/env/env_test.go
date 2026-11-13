@@ -1589,18 +1589,6 @@ func TestSkillsProvisioning(t *testing.T) {
 	}
 }
 
-func TestDefaultCanonicalHooksJSON(t *testing.T) {
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(defaultCanonicalHooksJSON), &parsed); err != nil {
-		t.Fatalf("defaultCanonicalHooksJSON is not valid JSON: %v", err)
-	}
-	for _, expected := range []string{"share-guard", "schedule-guard", "commit-guard"} {
-		if _, ok := parsed[expected]; !ok {
-			t.Errorf("expected %q in defaultCanonicalHooksJSON", expected)
-		}
-	}
-}
-
 func TestSyncHooks(t *testing.T) {
 	tests := []struct {
 		name             string

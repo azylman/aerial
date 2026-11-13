@@ -227,6 +227,21 @@ func TestBuildAgyEnv(t *testing.T) {
 			[]string{"AERIAL_VANADIS_CHUNK_ID=build-1794202576-chunk-2", "BASH_ENV=/data/.gemini/turn_env/default.sh"},
 			nil,
 		},
+		{
+			AgyEnvInput{DaemonID: "p3/discord-1", MCPProxyPort: "8080"},
+			[]string{"ERI_DAEMON_ID=p3/discord-1", "ERI_HOOK_ENDPOINT=http://127.0.0.1:8080/internal/mcp-proxy/announce"},
+			nil,
+		},
+		{
+			AgyEnvInput{DaemonID: "p3/discord-1"},
+			[]string{"GIT_TERMINAL_PROMPT=0"},
+			[]string{"ERI_DAEMON_ID=", "ERI_HOOK_ENDPOINT="},
+		},
+		{
+			AgyEnvInput{MCPProxyPort: "8080"},
+			[]string{"GIT_TERMINAL_PROMPT=0"},
+			[]string{"ERI_DAEMON_ID=", "ERI_HOOK_ENDPOINT="},
+		},
 	} {
 		assertContainsAndOmits(t, strings.Join(BuildAgyEnv(tc.input), "\n"), tc.contains, tc.notContains, tc.input)
 	}
