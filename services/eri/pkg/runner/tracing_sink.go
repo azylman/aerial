@@ -154,10 +154,14 @@ func (s *TracingTurnSink) OnResult(res *TurnResult) {
 
 func (s *TracingTurnSink) OnError(err error) {
 	msg := ""
+	var usage []attribute.KeyValue
 	if err != nil {
 		msg = tracing.Redact(err.Error())
 	}
-	s.closeTurn(codes.Error, msg, nil)
+	if u, ok := UsageFromError(err); ok {
+		usage = UsageAttributes(u)
+	}
+	s.closeTurn(codes.Error, msg, usage)
 	if s.inner != nil {
 		s.inner.OnError(err)
 	}

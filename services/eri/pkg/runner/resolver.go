@@ -35,6 +35,9 @@ func (r *TurnResolver) Resolve(ctx context.Context, res *TurnResult, err error, 
 		}
 	}
 
+	if res == nil {
+		outcome.Usage, _ = UsageFromError(err)
+	}
 	errDetail := "unknown execution failure"
 	if err != nil {
 		errDetail = err.Error()

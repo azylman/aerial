@@ -72,6 +72,7 @@ type TurnContext struct {
 	Ctx                 context.Context
 	lastStepIndex       int
 	hasSeenStep         bool
+	streamUsage         map[string]AgyUsage // assistant message ID -> latest usage; guarded by the daemon's inflightMu
 }
 
 // tailBuffer is a thread-safe ring buffer capturing the trailing N bytes written to it.
@@ -519,7 +520,7 @@ func (d *StreamingDaemon) Close() error {
 
 		for _, turn := range remaining {
 			if turn != nil && turn.Sink != nil {
-				turn.Sink.OnError(errors.New("daemon closed while turn was in-flight"))
+				d.failTurn(turn, errors.New("daemon closed while turn was in-flight"))
 			}
 		}
 	})
@@ -547,7 +548,9 @@ func (d *StreamingDaemon) tryRescueTurnOnEOF(turn *TurnContext) bool {
 		return false
 	}
 	log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after unexpected EOF", d.SessionID())
-	turn.Sink.OnResult(&TurnResult{ConversationID: d.SessionID(), Response: strings.TrimSpace(rescued), Duration: time.Since(turn.CreatedAt)})
+	res := &TurnResult{ConversationID: d.SessionID(), Response: strings.TrimSpace(rescued), Duration: time.Since(turn.CreatedAt)}
+	d.fillStreamUsage(turn, res)
+	turn.Sink.OnResult(res)
 	return true
 }
 
@@ -584,7 +587,7 @@ func (d *StreamingDaemon) handleStdoutEOF(err error) {
 			continue
 		}
 		if !d.tryRescueTurnOnEOF(turn) {
-			turn.Sink.OnError(d.formatEOFErr(err))
+			d.failTurn(turn, d.formatEOFErr(err))
 		}
 	}
 }
@@ -1051,6 +1054,7 @@ func (d *StreamingDaemon) tryRescueTurnOnResult(activeTurn *TurnContext, raw map
 	recordStreamErrorMetric(errMsg, currentModel, false)
 	res := &TurnResult{ConversationID: d.SessionID(), Response: strings.TrimSpace(rescued), Stderr: errMsg, Duration: time.Since(activeTurn.CreatedAt)}
 	populateUsage(res, raw)
+	d.fillStreamUsage(activeTurn, res)
 	activeTurn.Sink.OnResult(res)
 	return true
 }
@@ -1064,7 +1068,7 @@ func (d *StreamingDaemon) handleResultError(activeTurn *TurnContext, respStr, st
 		if errMsg == "" {
 			errMsg = "daemon execution failed"
 		}
-		activeTurn.Sink.OnError(errors.New(errMsg))
+		d.failTurn(activeTurn, errors.New(errMsg))
 		return true
 	}
 	if errMsg != "" {
@@ -1097,6 +1101,7 @@ func (d *StreamingDaemon) deliverResultToSink(activeTurn *TurnContext, raw map[s
 
 	res := &TurnResult{ConversationID: d.SessionID(), Response: respStr, Stderr: errMsg, Duration: time.Since(activeTurn.CreatedAt)}
 	populateUsage(res, raw)
+	d.fillStreamUsage(activeTurn, res)
 	activeTurn.Sink.OnResult(res)
 }
 
@@ -1228,6 +1233,7 @@ func (d *StreamingDaemon) handleClaudeAssistantEvent(activeTurn *TurnContext, ra
 	if !ok || msg == nil {
 		return
 	}
+	d.recordStreamUsage(activeTurn, msg)
 	contents, ok := msg["content"].([]any)
 	if !ok {
 		return
@@ -1387,52 +1393,6 @@ func extractResponseString(raw map[string]any) string {
 		}
 	}
 	return ""
-}
-
-func populateUsage(res *TurnResult, raw map[string]any) {
-	if res == nil || raw == nil {
-		return
-	}
-	var usageObj map[string]any
-	if u, ok := raw["usage"].(map[string]any); ok {
-		usageObj = u
-	}
-	if resObj, ok := raw["result"].(map[string]any); ok {
-		if u, ok := resObj["usage"].(map[string]any); ok {
-			usageObj = u
-		}
-	}
-	if usageObj == nil {
-		return
-	}
-	getInt := func(k string, dst *int) {
-		if v, ok := usageObj[k].(float64); ok {
-			*dst = int(v)
-		}
-	}
-	getInt("input_tokens", &res.Usage.InputTokens)
-	getInt("output_tokens", &res.Usage.OutputTokens)
-	getInt("thinking_tokens", &res.Usage.ThinkingTokens)
-	getInt("cache_read_tokens", &res.Usage.CacheReadTokens)
-	getInt("total_tokens", &res.Usage.TotalTokens)
-
-	// Claude token usage mapping:
-	// add cache_creation_input_tokens (uncached input written to cache) to InputTokens,
-	// assign cache_read_input_tokens (cached input read) to CacheReadTokens without inflating InputTokens,
-	// and default TotalTokens to InputTokens + OutputTokens when total_tokens is omitted.
-	var cacheCreation, cacheRead int
-	getInt("cache_creation_input_tokens", &cacheCreation)
-	getInt("cache_read_input_tokens", &cacheRead)
-	if cacheCreation > 0 {
-		res.Usage.InputTokens += cacheCreation
-		res.Usage.CacheCreationTokens = cacheCreation
-	}
-	if cacheRead > 0 {
-		res.Usage.CacheReadTokens = cacheRead
-	}
-	if res.Usage.TotalTokens == 0 && (res.Usage.InputTokens > 0 || res.Usage.OutputTokens > 0) {
-		res.Usage.TotalTokens = res.Usage.InputTokens + res.Usage.OutputTokens
-	}
 }
 
 func recordStreamErrorMetric(errMsg, model string, recordProcessErr bool) {

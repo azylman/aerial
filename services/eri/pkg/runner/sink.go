@@ -204,6 +204,7 @@ func (s *BufferingTurnSink) OnError(err error) {
 		if !s.cfg.DisableDeltaRescue && (IsSubstantiveResponse(accumulated) || emitted) {
 			log.Printf("[BufferingTurnSink] Notice: recovering substantive response from streamed deltas despite error: %v", err)
 			res := &TurnResult{Response: accumulated}
+			res.Usage, _ = UsageFromError(err)
 			runHook(s.cfg.OnComplete, res)
 			s.resCh <- res
 			return
