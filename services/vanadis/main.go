@@ -1043,7 +1043,7 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 		mux.Handle("GET /metrics", promhttp.Handler())
 	}
 	coverageFlush := httpkit.HandleCoverageFlush("vanadis")
-	mcpHandler := server.newMCPHandler()
+	mcpHandler := tracing.Middleware("vanadis", server.newMCPHandler()).ServeHTTP
 	for p, h := range map[string]http.HandlerFunc{
 		"GET /health": server.handleHealth, "GET /healthz": server.handleHealth,
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,

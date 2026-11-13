@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 var (
@@ -538,7 +539,7 @@ func NewHTTPMux(srv *Server) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", srv.HandleHealth)
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("kernel-mcp"))
-	mux.HandleFunc("/mcp", srv.HandleMCPStreamable)
+	mux.Handle("/mcp", tracing.Middleware("kernel-mcp", http.HandlerFunc(srv.HandleMCPStreamable)))
 	return mux
 }
 
@@ -590,8 +591,11 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	_, flushTracing := tracing.Init(ctx, "kernel-mcp", tracing.DefaultConfigPath)
 
-	if err := runServerFn(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err = runServerFn(ctx, cfg)
+	flushTracing()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		exitFn("[kernel-mcp] Server error: %v", err)
 	}
 }

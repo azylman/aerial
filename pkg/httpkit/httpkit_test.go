@@ -9,9 +9,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type mockCloser struct {
@@ -316,6 +320,9 @@ func TestServeMCPStream_TableDriven(t *testing.T) {
 		wantStatus     int
 		wantBodySubstr string
 		wantHeaderCT   string
+		startSpan      string
+		wantSpanName   string
+		wantSpanAttrs  map[string]string
 	}{
 		{
 			name:           "get readiness banner",
@@ -347,11 +354,46 @@ func TestServeMCPStream_TableDriven(t *testing.T) {
 			wantStatus:     http.StatusOK,
 			wantBodySubstr: "invoked:list",
 		},
+		{
+			name:           "tools/call annotates active span without arguments",
+			method:         http.MethodPost,
+			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"scheduler_list","arguments":{"note":"ghp_leak123"}}}`,
+			oldToolPrefix:  "scheduler_",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: "invoked:list",
+			startSpan:      "POST /mcp",
+			wantSpanName:   "mcp tools/call",
+			wantSpanAttrs:  map[string]string{"mcp.method.name": "tools/call", "gen_ai.tool.name": "list"},
+		},
+		{
+			name:           "non-tool method sets method only",
+			method:         http.MethodPost,
+			body:           `{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"clientInfo":{"name":"agy"}}}`,
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: "stream-handled",
+			startSpan:      "POST /mcp",
+			wantSpanName:   "mcp initialize",
+			wantSpanAttrs:  map[string]string{"mcp.method.name": "initialize"},
+		},
+		{
+			name:           "unparseable body leaves span untouched",
+			method:         http.MethodPost,
+			body:           `not json`,
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: "stream-handled",
+			startSpan:      "POST /mcp",
+			wantSpanName:   "POST /mcp",
+			wantSpanAttrs:  map[string]string{},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
+			sr := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+			t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
 			streamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, _ := io.ReadAll(r.Body)
@@ -366,8 +408,34 @@ func TestServeMCPStream_TableDriven(t *testing.T) {
 
 			req := httptest.NewRequest(tc.method, "/mcp", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
+			if tc.startSpan != "" {
+				ctx, span := tp.Tracer("test").Start(req.Context(), tc.startSpan)
+				req = req.WithContext(ctx)
+				ServeMCPStream(rec, req, streamHandler, tc.readyBanner, tc.oldToolPrefix, tc.newToolPrefix)
+				span.End()
+			} else {
+				ServeMCPStream(rec, req, streamHandler, tc.readyBanner, tc.oldToolPrefix, tc.newToolPrefix)
+			}
 
-			ServeMCPStream(rec, req, streamHandler, tc.readyBanner, tc.oldToolPrefix, tc.newToolPrefix)
+			spans := sr.Ended()
+			if tc.startSpan == "" && len(spans) != 0 {
+				t.Errorf("ServeMCPStream without an active span recorded %d spans, want 0", len(spans))
+			}
+			if tc.startSpan != "" {
+				if len(spans) != 1 {
+					t.Fatalf("recorded %d spans, want 1", len(spans))
+				}
+				if spans[0].Name() != tc.wantSpanName {
+					t.Errorf("span name = %q, want %q", spans[0].Name(), tc.wantSpanName)
+				}
+				got := map[string]string{}
+				for _, kv := range spans[0].Attributes() {
+					got[string(kv.Key)] = kv.Value.AsString()
+				}
+				if !reflect.DeepEqual(got, tc.wantSpanAttrs) {
+					t.Errorf("span attrs = %v, want %v", got, tc.wantSpanAttrs)
+				}
+			}
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("ServeMCPStream status = %d, want %d", rec.Code, tc.wantStatus)

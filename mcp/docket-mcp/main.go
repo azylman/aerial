@@ -21,6 +21,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/ollama"
+	"github.com/azylman/aerial/pkg/tracing"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -862,11 +863,11 @@ func NewHTTPMux(srv *Server) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", srv.HandleHealth)
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("docket-mcp"))
-	mux.HandleFunc("/mcp", srv.HandleMCPStreamable)
+	mux.Handle("/mcp", tracing.Middleware("docket-mcp", http.HandlerFunc(srv.HandleMCPStreamable)))
 	mux.HandleFunc("/api/tasks", srv.HandleTasks)
 	mux.HandleFunc("/api/tasks/", srv.HandleTaskDetail)
 	mux.HandleFunc("/api/search", srv.HandleSearch)
-	mux.HandleFunc("/", srv.HandleMCPStreamable)
+	mux.Handle("/", tracing.Middleware("docket-mcp", http.HandlerFunc(srv.HandleMCPStreamable)))
 	return mux
 }
 
@@ -924,8 +925,11 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	_, flushTracing := tracing.Init(ctx, "docket-mcp", tracing.DefaultConfigPath)
 
-	if err := runServerFn(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err = runServerFn(ctx, cfg)
+	flushTracing()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		exitFn("[docket-mcp] Server exited with error: %v", err)
 	}
 }

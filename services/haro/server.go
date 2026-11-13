@@ -208,7 +208,7 @@ func (s *Server) Routes() http.Handler {
 	// Continues the trace of the webhook (synapse) that fired the event.
 	mux.Handle("/event-triggers/fire", tracing.Middleware("haro", http.HandlerFunc(s.handleFireEventTriggers)))
 
-	mcpBridge := http.HandlerFunc(s.handleMCP)
+	mcpBridge := tracing.Middleware("haro", http.HandlerFunc(s.handleMCP))
 	mux.Handle("/mcp", mcpBridge)
 	mux.Handle("/sse", mcpBridge)
 	mux.Handle("/", mcpBridge)

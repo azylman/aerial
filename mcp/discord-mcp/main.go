@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 
 	"gopkg.in/yaml.v3"
 )
@@ -136,8 +137,8 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 		httpkit.WriteResponse(w, r, "discord-mcp", BuildHealthResponse("aerial-discord-mcp", DefaultBlockedToolList))
 	})
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("discord-mcp"))
-	mux.Handle("/mcp", proxyHandler)
-	mux.Handle("/", proxyHandler)
+	mux.Handle("/mcp", tracing.Middleware("discord-mcp", proxyHandler))
+	mux.Handle("/", tracing.Middleware("discord-mcp", proxyHandler))
 
 	srv := &http.Server{
 		Addr:              ":" + port,
@@ -265,8 +266,11 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	_, flushTracing := tracing.Init(ctx, "discord-mcp", tracing.DefaultConfigPath)
 
-	if err := runProxyApp(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err = runProxyApp(ctx, cfg)
+	flushTracing()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		exitFn("[Discord-MCP] Error: %v", err)
 	}
 }

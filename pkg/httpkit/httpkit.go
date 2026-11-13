@@ -3,6 +3,7 @@ package httpkit
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,9 @@ import (
 	"runtime/coverage"
 	"strings"
 	"syscall"
+
+	"github.com/azylman/aerial/pkg/tracing"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -209,6 +213,7 @@ func ServeMCPStream(w http.ResponseWriter, r *http.Request, streamHandler http.H
 	if oldToolPrefix != "" {
 		bodyBytes = NormalizeMCPToolPrefix(bodyBytes, oldToolPrefix, newToolPrefix)
 	}
+	AnnotateMCPSpan(r.Context(), bodyBytes)
 
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	r.ContentLength = int64(len(bodyBytes))
@@ -221,6 +226,22 @@ func ServeMCPStream(w http.ResponseWriter, r *http.Request, streamHandler http.H
 	if streamHandler != nil {
 		streamHandler.ServeHTTP(w, r)
 	}
+}
+
+// AnnotateMCPSpan names the span active in ctx "mcp <method>" and tags it with the JSON-RPC
+// method and, for tools/call, the tool name. Arguments never reach the span; a missing or
+// non-recording span and unparseable bodies are no-ops.
+func AnnotateMCPSpan(ctx context.Context, body []byte) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() {
+		return
+	}
+	attrs := tracing.MCPRequestAttrs(body)
+	if len(attrs) == 0 {
+		return
+	}
+	span.SetName("mcp " + attrs[0].Value.AsString())
+	span.SetAttributes(attrs...)
 }
 
 // BuildPostgresDSN constructs a PostgreSQL connection DSN from environment lookup and optional defaultDB.

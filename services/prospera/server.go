@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -89,9 +90,9 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /-/reload", s.cfgSrc.Handler("prospera"))
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("prospera"))
 
-	mcpBridge := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mcpBridge := tracing.Middleware("prospera", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpkit.ServeMCPStream(w, r, s.streamHandler, "Prospera Voice Subsystem MCP Server Ready\n", "", "")
-	})
+	}))
 	mux.Handle("/mcp", mcpBridge)
 
 	mux.HandleFunc("POST /api/webhooks/twilio/voice", s.handleTwilioVoice)
