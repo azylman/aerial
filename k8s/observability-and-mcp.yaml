@@ -831,6 +831,7 @@ spec:
             - -retentionPeriod=60d
             - -retention.maxDiskSpaceUsageBytes=90GiB
             - -loggerFormat=json
+            - -delete.enable
             - -deleteAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
             - -forceMergeAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
             - -pprofAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
