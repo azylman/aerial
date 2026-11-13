@@ -71,12 +71,46 @@ func sumUsage(usages iter.Seq[AgyUsage]) AgyUsage {
 	return total
 }
 
-// recordStreamUsage keeps the latest usage reported for each assistant message of the turn.
-// Claude repeats a message's usage on every content block it streams, so keying by message ID
-// counts each model call once.
+// recordStreamUsage merges the usage reported for one assistant message (msg carries "id" and
+// "usage") into the turn. Claude repeats a message's usage on every content block it streams with
+// the output count frozen at message_start; only message_delta carries the final output count. So
+// usage is keyed by message ID (each model call counts once) and merged field by field keeping the
+// largest value.
 func (d *StreamingDaemon) recordStreamUsage(turn *TurnContext, msg map[string]any) {
-	usageObj, ok := msg["usage"].(map[string]any)
-	id := extractFirstString(msg, "id")
+	d.mergeStreamUsage(turn, extractFirstString(msg, "id"), msg)
+}
+
+// recordStreamEventUsage tracks usage from Claude stream_event messages: message_start names the
+// message being streamed (per parent tool call, since subagent streams interleave) and message_delta
+// reports its final usage without repeating the ID.
+func (d *StreamingDaemon) recordStreamEventUsage(turn *TurnContext, parentToolUseID string, ev map[string]any) {
+	switch extractFirstString(ev, "type") {
+	case "message_start":
+		msg, ok := ev["message"].(map[string]any)
+		if !ok {
+			return
+		}
+		id := extractFirstString(msg, "id")
+		if id == "" {
+			return
+		}
+		d.inflightMu.Lock()
+		if turn.streamMessageByParent == nil {
+			turn.streamMessageByParent = make(map[string]string)
+		}
+		turn.streamMessageByParent[parentToolUseID] = id
+		d.inflightMu.Unlock()
+		d.mergeStreamUsage(turn, id, msg)
+	case "message_delta":
+		d.inflightMu.Lock()
+		id := turn.streamMessageByParent[parentToolUseID]
+		d.inflightMu.Unlock()
+		d.mergeStreamUsage(turn, id, ev)
+	}
+}
+
+func (d *StreamingDaemon) mergeStreamUsage(turn *TurnContext, id string, holder map[string]any) {
+	usageObj, ok := holder["usage"].(map[string]any)
 	if !ok || id == "" {
 		return
 	}
@@ -89,7 +123,20 @@ func (d *StreamingDaemon) recordStreamUsage(turn *TurnContext, msg map[string]an
 	if turn.streamUsage == nil {
 		turn.streamUsage = make(map[string]AgyUsage)
 	}
-	turn.streamUsage[id] = usage
+	turn.streamUsage[id] = maxUsage(turn.streamUsage[id], usage)
+}
+
+// maxUsage merges two usage reports for the same model call, keeping the largest value per field.
+func maxUsage(a, b AgyUsage) AgyUsage {
+	m := AgyUsage{
+		InputTokens:         max(a.InputTokens, b.InputTokens),
+		OutputTokens:        max(a.OutputTokens, b.OutputTokens),
+		ThinkingTokens:      max(a.ThinkingTokens, b.ThinkingTokens),
+		CacheReadTokens:     max(a.CacheReadTokens, b.CacheReadTokens),
+		CacheCreationTokens: max(a.CacheCreationTokens, b.CacheCreationTokens),
+	}
+	m.TotalTokens = max(a.TotalTokens, b.TotalTokens, m.InputTokens+m.OutputTokens)
+	return m
 }
 
 // streamUsageTotal returns the usage of every model call streamed so far in turn.

@@ -72,7 +72,10 @@ type TurnContext struct {
 	Ctx                 context.Context
 	lastStepIndex       int
 	hasSeenStep         bool
-	streamUsage         map[string]AgyUsage // assistant message ID -> latest usage; guarded by the daemon's inflightMu
+	streamUsage         map[string]AgyUsage // assistant message ID -> merged usage; guarded by the daemon's inflightMu
+	// streamMessageByParent maps a parent tool call ID ("" for the main agent) to the message it is
+	// streaming, so message_delta usage lands on the right message; guarded by inflightMu.
+	streamMessageByParent map[string]string
 }
 
 // tailBuffer is a thread-safe ring buffer capturing the trailing N bytes written to it.
@@ -1205,6 +1208,7 @@ func (d *StreamingDaemon) handleClaudeStreamEvent(activeTurn *TurnContext, raw m
 	if !ok || ev == nil {
 		return
 	}
+	d.recordStreamEventUsage(activeTurn, extractFirstString(raw, "parent_tool_use_id"), ev)
 	switch extractFirstString(ev, "type") {
 	case "message_start":
 		d.mu.Lock()
