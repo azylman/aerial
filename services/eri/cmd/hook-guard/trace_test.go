@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -10,9 +9,9 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
-
-	"github.com/azylman/aerial/services/eri/pkg/guard"
 )
+
+const claudeMCPCall = `{"session_id":"sess-9","hook_event_name":"PreToolUse","tool_name":"mcp__docket__create","tool_input":{"title":"secret plan"}}`
 
 const agyMCPCall = `{"conversationId":"conv-1","toolCall":{"name":"call_mcp_tool","args":{"ServerName":"docket","ToolName":"create","Arguments":{"title":"secret plan"}}}}`
 
@@ -45,6 +44,7 @@ func TestRunTrace(t *testing.T) {
 		stdinErr  bool // stdin read fails
 		failWrite bool // stdout write fails
 		wantPost  string
+		wantOut   string // "" means the agy allow decision
 	}{
 		{name: "posts names only and allows", endpoint: "ok", daemonID: "p1/discord-1", stdin: agyMCPCall, wantPost: wantPost},
 		{name: "non-2xx still allows", endpoint: "fail", daemonID: "p1/discord-1", stdin: agyMCPCall, wantPost: wantPost},
@@ -53,6 +53,11 @@ func TestRunTrace(t *testing.T) {
 		{name: "unset endpoint does nothing", endpoint: "", daemonID: "p1/discord-1", stdin: agyMCPCall},
 		{name: "malformed stdin allows without posting", endpoint: "ok", stdin: `{not json`},
 		{name: "payload without server allows without posting", endpoint: "ok", stdin: `{"toolCall":{"name":"call_mcp_tool","args":{}}}`},
+		{
+			name: "claude mcp call announces and allows in claude schema", endpoint: "ok", daemonID: "p1/discord-1", stdin: claudeMCPCall,
+			wantPost: `POST /internal/mcp-proxy/announce {"daemon_id":"p1/discord-1","conversation_id":"sess-9","server":"docket","tool":"create"}`,
+			wantOut:  `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}` + "\n",
+		},
 		{name: "unreadable stdin allows without posting", endpoint: "ok", stdinErr: true},
 		{name: "invalid endpoint allows without posting", endpoint: "badurl", stdin: agyMCPCall},
 		{name: "stdout failure exits non-zero", endpoint: "ok", daemonID: "p1/discord-1", stdin: agyMCPCall, failWrite: true, wantPost: wantPost},
@@ -97,9 +102,12 @@ func TestRunTrace(t *testing.T) {
 			if wantCode := map[bool]int{false: 0, true: 1}[tc.failWrite]; code != wantCode {
 				t.Errorf("exit code = %d, want %d", code, wantCode)
 			}
-			var decision guard.Decision
-			if err := json.Unmarshal(out.Bytes(), &decision); !tc.failWrite && (err != nil || decision.Decision != guard.DecisionAllow || out.String() != "{\"decision\":\"allow\"}\n") {
-				t.Errorf("stdout = %q, want only the allow decision", out.String())
+			wantOut := tc.wantOut
+			if wantOut == "" {
+				wantOut = "{\"decision\":\"allow\"}\n"
+			}
+			if !tc.failWrite && out.String() != wantOut {
+				t.Errorf("stdout = %q, want only the allow decision %q", out.String(), wantOut)
 			}
 			var posted string
 			select {

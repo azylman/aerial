@@ -139,37 +139,46 @@ func RunCLI(args []string, r io.Reader, w io.Writer) int {
 	return 0
 }
 
-// runTrace announces an agy MCP tool call to eri's trace proxy and always allows it. Every
-// failure (no endpoint, malformed payload, refused connection, timeout, non-2xx) is logged to
-// stderr and otherwise ignored: tracing must never block or alter a tool call, and stdout
-// carries only the allow decision.
+// runTrace announces an MCP tool call to eri's trace proxy and always allows it, in the hook
+// output schema of the engine that invoked it. Every failure (no endpoint, malformed payload,
+// refused connection, timeout, non-2xx) is logged to stderr and otherwise ignored: tracing
+// must never block or alter a tool call, and stdout carries only the allow decision.
 func runTrace(r io.Reader, w io.Writer, getenv func(string) string, client *http.Client) int {
-	if err := announceMCPCall(r, getenv, client); err != nil {
+	endpoint := strings.TrimSpace(getenv("ERI_HOOK_ENDPOINT"))
+	payload, err := readHookPayload(r)
+	if err == nil && endpoint != "" {
+		err = announceMCPCall(payload, endpoint, strings.TrimSpace(getenv("ERI_DAEMON_ID")), client)
+	}
+	if err != nil && endpoint != "" {
 		log.Printf("hook-guard trace: announcement skipped: %v", err)
 	}
-	if err := json.NewEncoder(w).Encode(guard.Decision{Decision: guard.DecisionAllow}); err != nil {
+	var out any = guard.Decision{Decision: guard.DecisionAllow}
+	if payload.IsClaude() {
+		out = guard.FormatClaudeResponse(&guard.Decision{Decision: guard.DecisionAllow}, nil)
+	}
+	if err := json.NewEncoder(w).Encode(out); err != nil {
 		return 1
 	}
 	return 0
 }
 
-// announceMCPCall posts the server and tool names of the call on r to ERI_HOOK_ENDPOINT. It is
-// a no-op when the endpoint is unset (tracing disabled).
-func announceMCPCall(r io.Reader, getenv func(string) string, client *http.Client) error {
-	endpoint := strings.TrimSpace(getenv("ERI_HOOK_ENDPOINT"))
-	if endpoint == "" {
-		return nil
-	}
+// readHookPayload parses a PreToolUse payload from r.
+func readHookPayload(r io.Reader) (guard.Payload, error) {
+	var payload guard.Payload
 	data, err := io.ReadAll(r)
 	if err != nil {
-		return fmt.Errorf("read payload: %w", err)
+		return payload, fmt.Errorf("read payload: %w", err)
 	}
-	var payload guard.Payload
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return fmt.Errorf("parse payload: %w", err)
+		return guard.Payload{}, fmt.Errorf("parse payload: %w", err)
 	}
+	return payload, nil
+}
+
+// announceMCPCall posts the server and tool names of payload's MCP call to endpoint.
+func announceMCPCall(payload guard.Payload, endpoint, daemonID string, client *http.Client) error {
 	payload.Normalize()
-	announcement, ok := guard.NewTraceAnnouncement(payload, strings.TrimSpace(getenv("ERI_DAEMON_ID")))
+	announcement, ok := guard.NewTraceAnnouncement(payload, daemonID)
 	if !ok {
 		return errors.New("payload names no MCP server and tool")
 	}

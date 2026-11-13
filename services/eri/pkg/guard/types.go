@@ -258,6 +258,7 @@ type TraceAnnouncement struct {
 // ok is false when the payload does not name both an MCP server and tool.
 func NewTraceAnnouncement(payload Payload, daemonID string) (TraceAnnouncement, bool) {
 	args := ParseArgs(payload.ToolCall.Args)
+	args.AdoptClaudeMCPCall(payload.ToolCall.Name, payload.ToolCall.Args)
 	server, tool := args.ServerName, args.ToolName
 	if server == "" {
 		server = args.ServerNameLower

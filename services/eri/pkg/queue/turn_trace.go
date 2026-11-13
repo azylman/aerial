@@ -183,12 +183,29 @@ func (p *WorkerPool) ActiveTurns() *runner.ActiveTurnRegistry {
 // that clears it. Call it after the lease-release defer is registered so the turn is cleared
 // before the lease (and the daemon) can be handed to the next turn.
 func (te *turnExecution) markTurnActive() func() {
+	te.registerActiveTurn()
+	return te.clearActiveTurn
+}
+
+// registerActiveTurn registers the current lease's daemon under the turn span. It runs again
+// when the turn swaps leases mid-flight (session corruption retry), since the replacement may be
+// a different daemon or conversation.
+func (te *turnExecution) registerActiveTurn() {
+	te.clearActiveTurn()
 	owner, ok := te.lease.(runner.ActiveTurnOwner)
 	if !ok || te.turnSpan == nil {
-		return func() {}
+		return
 	}
 	turn := owner.ActiveTurn()
-	registry := te.pool.ActiveTurns()
-	registry.Set(turn, te.turnSpan.SpanContext())
-	return func() { registry.Clear(turn.DaemonID) }
+	te.pool.ActiveTurns().Set(turn, te.turnSpan.SpanContext())
+	te.activeTurnDaemon = turn.DaemonID
+}
+
+// clearActiveTurn removes the turn's registration. It must run before the registered lease is
+// released, or a turn that takes over the daemon could have its fresh entry cleared.
+func (te *turnExecution) clearActiveTurn() {
+	if te.activeTurnDaemon != "" {
+		te.pool.ActiveTurns().Clear(te.activeTurnDaemon)
+		te.activeTurnDaemon = ""
+	}
 }

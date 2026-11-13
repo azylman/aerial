@@ -17,6 +17,7 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
@@ -319,6 +320,52 @@ func TestProcessBurst_RegistersActiveTurnDuringExecution(t *testing.T) {
 			}
 			if sc, ok := registry.SoleTurnInTarget(tc.target); ok {
 				t.Errorf("turn still registered after completion: %v", sc.SpanID())
+			}
+		})
+	}
+}
+
+// TestSessionCorruptionRetry_ReregistersActiveTurn proves the registry follows the turn onto
+// the replacement lease: the interchangeable pool hands the retry a different worker daemon.
+func TestSessionCorruptionRetry_ReregistersActiveTurn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		workers int
+	}{
+		{name: "replacement lease on another worker daemon", workers: 2},
+		{name: "replacement lease on the same daemon", workers: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			home := filepath.Join(t.TempDir(), "runtimes", "ephemeral")
+			procPool := runner.NewInterchangeablePool(
+				runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash", GeminiHomeDir: home}, agyToolTurnSpawner(nil)),
+				runner.InterchangeablePoolConfig{WorkerCount: tc.workers, KeyPrefix: "ephemeral:worker"})
+			defer procPool.Close()
+			pool := New(nil, WorkerPoolConfig{Store: dbtest.NewFakeStore(), RetryDelayOverride: time.Nanosecond})
+			lease, err := procPool.AcquireLease(context.Background(), "dispatch-1")
+			if err != nil {
+				t.Fatalf("AcquireLease: %v", err)
+			}
+			_, span := sdktrace.NewTracerProvider().Tracer("test").Start(context.Background(), runner.OperationInvokeAgent)
+			te := &turnExecution{pool: pool, threadID: "dispatch-1", burst: []db.Message{{ID: "m-1", ThreadID: "dispatch-1"}}, activePool: procPool, lease: lease, turnSpan: span}
+			unmark := te.markTurnActive()
+			oldDaemon := lease.(runner.ActiveTurnOwner).ActiveTurn().DaemonID
+
+			te.handleSessionCorruptionRetry(1, 2, "", "", "corrupted", "", "model-1")
+			newDaemon := te.lease.(runner.ActiveTurnOwner).ActiveTurn().DaemonID
+			if got, ok := pool.ActiveTurns().Get(newDaemon); !ok || !got.Equal(span.SpanContext()) {
+				t.Errorf("replacement daemon %q not registered under the turn span", newDaemon)
+			}
+			if _, ok := pool.ActiveTurns().Get(oldDaemon); ok && oldDaemon != newDaemon {
+				t.Errorf("released daemon %q still registered", oldDaemon)
+			}
+			unmark()
+			_ = te.lease.Release()
+			if _, ok := pool.ActiveTurns().SoleTurnInTarget("ephemeral"); ok {
+				t.Errorf("turn still registered after clear")
 			}
 		})
 	}
