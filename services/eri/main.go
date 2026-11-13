@@ -201,11 +201,6 @@ type brainAppOptions struct {
 	agentName      string
 }
 
-// WithAgentName sets the stack persona recorded as gen_ai.agent.name on turn spans.
-func WithAgentName(name string) BrainAppOption {
-	return func(o *brainAppOptions) { o.agentName = name }
-}
-
 func extractMCPServers(cur *config.ConfigData, includeDiscord bool) []runner.MCPServerConfig {
 	serverMap := make(map[string]runner.MCPServerConfig)
 	if cur != nil {
@@ -1058,9 +1053,10 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 const tracingConfigPath = "/config/tracing/tracing.yaml"
 
 // setupTracing installs the global tracer provider and propagator. Config errors are logged and
-// leave tracing disabled (propagation only). It returns the effective config and a func that
-// flushes pending spans.
-func setupTracing(ctx context.Context, path string) (tracing.Config, func()) {
+// leave tracing disabled (propagation only). It returns a BrainAppOption naming the turn agent
+// after the config's stack (the persona recorded as gen_ai.agent.name) and a func that flushes
+// pending spans.
+func setupTracing(ctx context.Context, path string) (BrainAppOption, func()) {
 	tcfg, err := tracing.LoadConfig(path)
 	if err != nil {
 		log.Printf("[Tracing] Invalid tracing config, running with tracing disabled: %v", err)
@@ -1070,7 +1066,8 @@ func setupTracing(ctx context.Context, path string) (tracing.Config, func()) {
 	if err != nil {
 		log.Printf("[Tracing] Setup failed, running with tracing disabled: %v", err)
 	}
-	return tcfg, func() {
+	withAgentName := func(o *brainAppOptions) { o.agentName = tcfg.Stack }
+	return withAgentName, func() {
 		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := shutdown(flushCtx); err != nil {
@@ -1111,9 +1108,9 @@ func main() {
 		cancel()
 	}()
 
-	tracingCfg, shutdownTracing := setupTracing(ctx, tracingConfigPath)
+	withAgentName, shutdownTracing := setupTracing(ctx, tracingConfigPath)
 
-	err = RunBrainApp(ctx, cfg, WithAgentName(tracingCfg.Stack))
+	err = RunBrainApp(ctx, cfg, withAgentName)
 	cancel()
 	shutdownTracing()
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {

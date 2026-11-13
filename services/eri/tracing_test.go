@@ -21,12 +21,14 @@ import (
 // TestSetupTracing mutates the global propagator, so it is not parallel.
 func TestSetupTracing(t *testing.T) {
 	tests := []struct {
-		name    string
-		content string // "" means the config file is absent
+		name      string
+		content   string // "" means the config file is absent
+		wantAgent string
 	}{
 		{name: "missing config runs disabled", content: ""},
-		{name: "malformed config runs disabled", content: "enabled: [true\n"},
-		{name: "enabled without endpoint runs disabled", content: "enabled: true\n"},
+		{name: "malformed config runs disabled", content: "enabled: [true\nstack: marida\n"},
+		{name: "enabled without endpoint runs disabled", content: "enabled: true\nstack: marida\n"},
+		{name: "stack names the turn agent", content: "enabled: false\nstack: marida\n", wantAgent: "marida"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -37,8 +39,13 @@ func TestSetupTracing(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			_, shutdown := setupTracing(context.Background(), path)
+			withAgentName, shutdown := setupTracing(context.Background(), path)
 			shutdown()
+			var opts brainAppOptions
+			withAgentName(&opts)
+			if opts.agentName != tc.wantAgent {
+				t.Errorf("agent name = %q, want %q", opts.agentName, tc.wantAgent)
+			}
 			if fields := otel.GetTextMapPropagator().Fields(); !slices.Contains(fields, "traceparent") {
 				t.Errorf("propagator fields = %v, want traceparent", fields)
 			}
@@ -121,28 +128,6 @@ channels:
 			}
 			if got := storedTraceparent(t, store, tc.rowID); got != tc.want {
 				t.Errorf("stored traceparent = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestWithAgentName(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "stack persona", in: "marida", want: "marida"},
-		{name: "unset stack", in: "", want: ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var opts brainAppOptions
-			WithAgentName(tc.in)(&opts)
-			if opts.agentName != tc.want {
-				t.Errorf("agentName = %q, want %q", opts.agentName, tc.want)
 			}
 		})
 	}
