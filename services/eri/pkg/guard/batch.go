@@ -622,24 +622,16 @@ func shapeReadFileRange(target string, startLine, endLine int, priorRecords []To
 	return start, end, start != startLine
 }
 
-func overwriteReadRange(d *Decision, isClaude bool, start, end int) {
-	if isClaude {
-		d.Overwrite = map[string]any{"offset": start, "limit": end - start + 1}
-	} else {
-		d.Overwrite = map[string]any{"StartLine": start, "EndLine": end}
-	}
+func overwriteReadRange(d *Decision, start, end int) {
+	d.Overwrite = map[string]any{"StartLine": start, "EndLine": end}
 }
 
-func overwriteCommandLine(d *Decision, isClaude bool, cmdLine string) {
+func overwriteCommandLine(d *Decision, cmdLine string) {
 	rewritten := shapeGitStatus(stripGoTestVerbose(cmdLine))
 	if rewritten == cmdLine {
 		return
 	}
-	if isClaude {
-		d.Overwrite = map[string]any{"command": rewritten}
-	} else {
-		d.Overwrite = map[string]any{"CommandLine": rewritten}
-	}
+	d.Overwrite = map[string]any{"CommandLine": rewritten}
 }
 
 // CheckBatch evaluates tool batching and thrash invariants using the active state directory and system time.
@@ -878,9 +870,9 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		opportunisticGC(dir, now)
 		decision = &Decision{Decision: DecisionAllow}
 		if readOverwritten {
-			overwriteReadRange(decision, payload.IsClaude(), effStart, effEnd)
+			overwriteReadRange(decision, effStart, effEnd)
 		} else if normalizedTool == "run_command" || normalizedTool == "bash" {
-			overwriteCommandLine(decision, payload.IsClaude(), args.CommandLine)
+			overwriteCommandLine(decision, args.CommandLine)
 		}
 		return nil
 	})

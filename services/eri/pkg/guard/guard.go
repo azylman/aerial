@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"maps"
 )
 
 // Mode represents the guard operating mode.
@@ -27,7 +28,12 @@ func IsInvocationMode(mode string) bool {
 }
 
 // FormatClaudeResponse formats a Decision into Claude Code's hook output schema.
-func FormatClaudeResponse(decision *Decision) ClaudeHookResponse {
+//
+// Guards emit overwrites as a sparse map of canonical Antigravity keys, which agy
+// merges field-by-field into the tool call. Claude Code instead replaces
+// tool_input wholesale with updatedInput, so this adapter is the single place
+// that merges the translated overwrite into a copy of the original toolInput.
+func FormatClaudeResponse(decision *Decision, toolInput json.RawMessage) ClaudeHookResponse {
 	resp := ClaudeHookResponse{
 		HookSpecificOutput: ClaudeHookSpecificOutput{
 			HookEventName:      "PreToolUse",
@@ -43,25 +49,44 @@ func FormatClaudeResponse(decision *Decision) ClaudeHookResponse {
 		return resp
 	}
 	if len(decision.Overwrite) > 0 {
-		resp.HookSpecificOutput.UpdatedInput = make(map[string]any, len(decision.Overwrite))
-		for k, v := range decision.Overwrite {
-			switch k {
-			case "CommandLine":
-				resp.HookSpecificOutput.UpdatedInput["command"] = v
-			case "StartLine":
-				resp.HookSpecificOutput.UpdatedInput["offset"] = v
-			case "EndLine":
-				if start, ok := decision.Overwrite["StartLine"].(int); ok {
-					if end, okEnd := v.(int); okEnd && end >= start {
-						resp.HookSpecificOutput.UpdatedInput["limit"] = end - start + 1
-					}
-				}
-			default:
-				resp.HookSpecificOutput.UpdatedInput[k] = v
-			}
-		}
+		resp.HookSpecificOutput.UpdatedInput = mergeClaudeOverwrite(toolInput, decision.Overwrite)
 	}
 	return resp
+}
+
+// mergeClaudeOverwrite applies canonical agy overwrite keys onto a copy of the
+// original Claude tool_input, translating key names to Claude's schema.
+func mergeClaudeOverwrite(toolInput json.RawMessage, overwrite map[string]any) map[string]any {
+	merged := map[string]any{}
+	if len(toolInput) > 0 {
+		var original map[string]any
+		if err := json.Unmarshal(toolInput, &original); err == nil && original != nil {
+			merged = original
+		}
+	}
+	for k, v := range overwrite {
+		switch k {
+		case "CommandLine":
+			merged["command"] = v
+		case "StartLine":
+			merged["offset"] = v
+		case "EndLine":
+			if start, ok := overwrite["StartLine"].(int); ok {
+				if end, okEnd := v.(int); okEnd && end >= start {
+					merged["limit"] = end - start + 1
+				}
+			}
+		case "Arguments":
+			if args, ok := v.(map[string]any); ok {
+				maps.Copy(merged, args)
+			}
+		case "WaitMsBeforeAsync":
+			// agy-only async threshold; Claude's Bash schema has no equivalent.
+		default:
+			merged[k] = v
+		}
+	}
+	return merged
 }
 
 // Process reads an Antigravity PreToolUse hook payload from r, evaluates guards per mode,
@@ -71,7 +96,7 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 	var isClaude bool
 	writeAllow := func() error {
 		if isClaude {
-			return json.NewEncoder(w).Encode(FormatClaudeResponse(&Decision{Decision: DecisionAllow}))
+			return json.NewEncoder(w).Encode(FormatClaudeResponse(&Decision{Decision: DecisionAllow}, nil))
 		}
 		if IsInvocationMode(mode) {
 			return json.NewEncoder(w).Encode(InvocationResponse{})
@@ -112,7 +137,7 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 	default:
 		decision := evaluateGuardMode(payload, args, mode)
 		if isClaude {
-			return json.NewEncoder(w).Encode(FormatClaudeResponse(decision))
+			return json.NewEncoder(w).Encode(FormatClaudeResponse(decision, payload.ToolInput))
 		}
 		return json.NewEncoder(w).Encode(decision)
 	}
