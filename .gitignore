@@ -22,6 +22,7 @@ PR_DESCRIPTION.md
 /mcp/kernel-mcp/kernel-mcp
 /services/prospera/prospera
 /services/eri/transcript-search
+/services/eri/hook-guard
 /services/console/console
 
 # Console React UI build output and local toolchain (built in Docker / by the gates)
