@@ -23,7 +23,8 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`github-mcp`**: Native Streamable HTTP MCP server for GitHub repository, PR, and issue operations.
   - **`infisical-mcp`**: Native Streamable HTTP MCP server for Infisical secret management and rotation.
   - **`victoriametrics-mcp`**: Streamable HTTP MCP server for TSDB metric querying and alert rule inspection.
-  - **`openobserve`**: Native Streamable HTTP MCP server for telemetry, structured log exploration, and SQL search.
+  - **`victorialogs-mcp`**: Streamable HTTP MCP server for LogsQL log search, stats, and field discovery against VictoriaLogs.
+  - **`victoriatraces-mcp`**: Streamable HTTP MCP server for trace search, span timings, and service dependencies against VictoriaTraces.
   - **`kernel-mcp`**: Headless browser automation and web interaction microservice.
 
 - **Web, Gateway & Ingress Services**:
@@ -36,11 +37,13 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`edge-gateway`**: NGINX Gateway Fabric ingress gateway (`HTTPRoute`s on `:4021`) exposing secure external tunnel webhooks into the cluster mesh.
 
 - **Observability, AI Inference & Supporting Services**:
-  - **`fluent-bit`**: High-performance log collector DaemonSet shipping container stdout/stderr into OpenObserve.
+  - **`fluent-bit`**: High-performance log collector DaemonSet shipping container stdout/stderr and node journald logs into VictoriaLogs.
   - **`kubelet-cadvisor`**: Node and container resource metrics collected via Kubelet cAdvisor (CPU, memory, network, disk).
   - **`node-exporter`**: Host telemetry collector gathering CPU, memory, storage, thermals, and OS metrics.
   - **`cnpg-metrics`**: CloudNativePG native Prometheus metrics (`:9187`) collecting PostgreSQL connection pools, transactions, and replication stats.
   - **`victoriametrics`**: Single-node Prometheus-compatible TSDB (`:8428`) storing system metrics with modular scrape configs.
+  - **`victorialogs`**: Log store (`:9428`, 60-day retention) for container and journald logs, queried with LogsQL. LAN-only (never on the edge gateway).
+  - **`victoriatraces`**: OTLP trace store (`:10428`, 30-day retention) receiving gateway and service spans. LAN-only (never on the edge gateway).
   - **`vmalert`**: Alert rule evaluator (`:8880`) assessing recording and alerting anomaly rules against VictoriaMetrics.
   - **`grafana`**: Cyberpunk-themed visual telemetry dashboards.
   - **`senses`**: Unified Rust CUDA ONNX Runtime service handling speech recognition (NeMo Parakeet TDT 0.6B v2 STT), voice synthesis (Kokoro-82M TTS), vector embeddings (BAAI/bge-small-en-v1.5), speaker verification (ECAPA-TDNN), and object detection (YOLO11n).

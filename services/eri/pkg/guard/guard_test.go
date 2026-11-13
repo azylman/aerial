@@ -146,6 +146,9 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"safe output redirect in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe > /data/scratch/output.txt", "Cwd": "/data"}}}`, false, 0, "", ""},
 		{"claude read small span expanded", "batch", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": "/data/main.go", "offset": 10, "limit": 3}}`, false, 0, "", "/data/main.go"},
 		{"claude short mcp tool allowed", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__short", "tool_input": {}}`, false, 0, "", ""},
+		{"claude victorialogs unbounded query denied", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__victorialogs__query", "tool_input": {"query": "* | limit 10"}}`, true, 0, "", ""},
+		{"claude victorialogs bounded query allowed", "search", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__victorialogs__query", "tool_input": {"query": "kubernetes.container_name:eri | limit 10", "start": "2026-11-12T00:00:00Z", "end": "2026-11-12T01:00:00Z"}}`, false, 0, "", ""},
+		{"claude mcp tool call scanned for outbound secrets", "commit", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__github__add_issue_comment", "tool_input": {"body": "` + testPAT + `"}}`, true, 0, "", ""},
 		{"claude mcp tool name normalized", "batch", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__server__bash", "tool_input": {"command": "git status"}}`, false, 0, "git status -sb", ""},
 	}
 

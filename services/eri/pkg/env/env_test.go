@@ -1107,9 +1107,6 @@ func TestMCPProvisioning(t *testing.T) {
 		name               string
 		target             RuleTarget
 		withPAT            bool
-		withOpenObs        bool
-		defaultOOUrl       bool
-		defaultOOOrg       bool
 		withFileConf       bool
 		withCustomSrv      bool
 		withRawNonObj      bool
@@ -1125,33 +1122,26 @@ func TestMCPProvisioning(t *testing.T) {
 		wantScheduler      bool
 		wantDiscord        bool
 		wantGitHub         bool
-		wantOpenObs        bool
 		wantURL            map[string]string
 		wantHeaders        map[string]map[string]any // nil value asserts no headers key
 	}{
 		{
-			name: "discord target with github and openobserve", target: TargetDiscord, withPAT: true, withOpenObs: true, wantScheduler: true, wantDiscord: true, wantGitHub: true, wantOpenObs: true,
-			wantURL:     map[string]string{"openobserve": "http://openobserve:5080/openobserve/api/custom_org/mcp", "github": "http://github-mcp:4003/mcp"},
-			wantHeaders: map[string]map[string]any{"openobserve": {"Authorization": "Basic YWRtaW46cGFzc3dvcmQ="}, "github": nil},
-		},
-		{
-			name: "openobserve with default org", target: TargetDiscord, withOpenObs: true, defaultOOOrg: true, wantScheduler: true, wantDiscord: true, wantGitHub: true, wantOpenObs: true,
-			wantURL:     map[string]string{"openobserve": "http://openobserve:5080/openobserve/api/default/mcp"},
-			wantHeaders: map[string]map[string]any{"openobserve": {"Authorization": "Basic YWRtaW46cGFzc3dvcmQ="}},
+			name: "discord target with github", target: TargetDiscord, withPAT: true, wantScheduler: true, wantDiscord: true, wantGitHub: true,
+			wantURL:     map[string]string{"github": "http://github-mcp:4003/mcp"},
+			wantHeaders: map[string]map[string]any{"github": nil},
 		},
 		{
 			name: "config server headers pass through verbatim", target: TargetVoice, withHeaderSrv: true, wantScheduler: true, wantGitHub: true,
 			wantURL:     map[string]string{"ubereats": "https://mcp.example.com/mcp?key=abc"},
 			wantHeaders: map[string]map[string]any{"ubereats": {"Authorization": "Bearer tok-123", "X-Tenant": "home"}},
 		},
-		{name: "voice target isolates scheduler and excludes discord services", target: TargetVoice, withPAT: true, withOpenObs: true, wantScheduler: true, wantGitHub: true},
+		{name: "voice target isolates scheduler and excludes discord services", target: TargetVoice, withPAT: true, wantScheduler: true, wantGitHub: true},
 		{name: "ephemeral target excludes scheduler and discord services", target: TargetEphemeral},
 		{name: "ephemeral target includes ephemeral servers", target: TargetEphemeral, withEphemeralSrv: true},
 		{name: "discord target overlays file-based mcp configuration", target: TargetDiscord, withFileConf: true, wantScheduler: true, wantDiscord: true, wantGitHub: true},
 		{name: "overlay custom mcp servers across targets", target: TargetVoice, withCustomSrv: true, wantScheduler: true, wantGitHub: true},
 		{name: "overlay custom mcp server with raw non-object value", target: TargetDiscord, withRawNonObj: true, wantScheduler: true, wantDiscord: true, wantGitHub: true},
 		{name: "overlay custom mcp server with invalid json raw value", target: TargetDiscord, withRawInvalidJSON: true},
-		{name: "openobserve with empty url is skipped", target: TargetDiscord, withOpenObs: true, defaultOOUrl: true, wantScheduler: true, wantDiscord: true, wantGitHub: true, wantOpenObs: false},
 		{name: "cfg.Current().MCPConfig string fallback", target: TargetDiscord, withMCPCfgStr: true, wantScheduler: true, wantDiscord: true, wantGitHub: true},
 		{name: "EnsureTargetMcpConfig handles raw JSON string and invalid paths", strRaw: true, blockDir: true},
 		{name: "SyncMCP error bubbles up when primary config write fails", syncFail: true},
@@ -1178,21 +1168,6 @@ func TestMCPProvisioning(t *testing.T) {
 				}
 				if tc.withPAT {
 					c.GitHubPAT = "ghp_12345678901234567890"
-				}
-				if tc.withOpenObs {
-					c.OpenObserveUser = "admin"
-					c.OpenObservePassword = "password"
-					switch {
-					case tc.defaultOOUrl:
-						c.OpenObserveURL = ""
-						c.OpenObserveOrg = ""
-					case tc.defaultOOOrg:
-						c.OpenObserveOrg = ""
-						c.OpenObserveURL = "http://openobserve:5080/openobserve"
-					default:
-						c.OpenObserveOrg = "custom_org"
-						c.OpenObserveURL = "http://openobserve:5080/openobserve/" // test slash trim
-					}
 				}
 				if tc.withCustomSrv {
 					if c.McpServers.Common == nil {
@@ -1309,9 +1284,6 @@ func TestMCPProvisioning(t *testing.T) {
 			}
 			if (servers["github"] != nil) != tc.wantGitHub {
 				t.Errorf("github presence = %v, want %v", servers["github"] != nil, tc.wantGitHub)
-			}
-			if (servers["openobserve"] != nil) != tc.wantOpenObs {
-				t.Errorf("openobserve presence = %v, want %v", servers["openobserve"] != nil, tc.wantOpenObs)
 			}
 			for name, want := range tc.wantURL {
 				srv, _ := servers[name].(map[string]any)

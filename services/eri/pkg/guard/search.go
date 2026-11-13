@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type toolIndexArgs struct {
@@ -48,129 +49,11 @@ func parseRawJSONMap(raw json.RawMessage) map[string]any {
 	return nil
 }
 
-var sqlWildcardReplacer = strings.NewReplacer("*", " * ", ",", " , ", ".", " . ", "(", " ( ", ")", " ) ", ";", " ; ")
-
-func skipSQLSingleQuote(sqlStr string, i int) int {
-	for i++; i < len(sqlStr); i++ {
-		if sqlStr[i] == '\'' {
-			if i+1 < len(sqlStr) && sqlStr[i+1] == '\'' {
-				i++
-				continue
-			}
-			return i
-		}
-	}
-	return len(sqlStr)
-}
-
-func stripSQLQuotesAndComments(sqlStr string) string {
-	var b strings.Builder
-	for i := 0; i < len(sqlStr); i++ {
-		if sqlStr[i] == '\'' {
-			i = skipSQLSingleQuote(sqlStr, i)
-			b.WriteByte(' ')
-			continue
-		}
-		if sqlStr[i] == '-' && i+1 < len(sqlStr) && sqlStr[i+1] == '-' {
-			for i < len(sqlStr) && sqlStr[i] != '\n' {
-				i++
-			}
-			b.WriteByte(' ')
-			continue
-		}
-		b.WriteByte(sqlStr[i])
-	}
-	return b.String()
-}
-
-func hasSelectWildcard(sqlStr string) bool {
-	cleaned := strings.ToLower(stripSQLQuotesAndComments(sqlStr))
-	tokens := strings.Fields(sqlWildcardReplacer.Replace(cleaned))
-	for i, tok := range tokens {
-		if tok == "*" && i > 0 {
-			switch tokens[i-1] {
-			case "select", "distinct", ",", ".":
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func mapField(m map[string]any, key string) map[string]any {
-	if v, ok := m[key].(map[string]any); ok {
-		return v
-	}
-	return nil
-}
-
 func stringField(m map[string]any, key string) string {
 	if v, ok := m[key].(string); ok {
 		return v
 	}
 	return ""
-}
-
-func hasExcessiveSearchSQLLimit(sqlStr string, queryMap map[string]any) bool {
-	if sz, ok := queryMap["size"].(float64); ok && sz > MaxSelectLimitRows {
-		return true
-	}
-	cleaned := strings.ToLower(stripSQLQuotesAndComments(sqlStr))
-	tokens := strings.Fields(sqlWildcardReplacer.Replace(cleaned))
-	for i, tok := range tokens {
-		if tok == "limit" && i+1 < len(tokens) {
-			if n, err := strconv.Atoi(tokens[i+1]); err == nil && n > MaxSelectLimitRows {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func shapeSearchSQLOptions(reqBody, queryMap map[string]any) bool {
-	changed := false
-	if queryMap != nil {
-		if sz, ok := queryMap["size"].(float64); !ok || sz <= 0 {
-			queryMap["size"] = MaxSelectLimitRows
-			changed = true
-		}
-	}
-	agentOpts := mapField(reqBody, "agent_options")
-	fmtVal := strings.ToLower(strings.TrimSpace(stringField(agentOpts, "output_format")))
-	if fmtVal == "csv" || fmtVal == "md_table" {
-		agentOpts["output_format"] = "json"
-		changed = true
-	}
-	return changed
-}
-
-func inspectOpenObserveSearchSQL(raw json.RawMessage) *Decision {
-	root := parseRawJSONMap(raw)
-	reqBody := mapField(root, "request_body")
-	if reqBody == nil {
-		return &Decision{Decision: DecisionAllow}
-	}
-	queryMap := mapField(reqBody, "query")
-	sqlStr := stringField(queryMap, "sql")
-	if hasSelectWildcard(sqlStr) {
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   "Wildcard SELECT * is prohibited in openobserve SearchSQL. Select explicit columns such as: SELECT _timestamp, service, level, message FROM docker_logs ...",
-		}
-	}
-	if hasExcessiveSearchSQLLimit(sqlStr, queryMap) {
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   "openobserve SearchSQL limit exceeds maximum allowed rows (50). Use LIMIT <= 50 (and query.size <= 50) to prevent context bloat.",
-		}
-	}
-	if shapeSearchSQLOptions(reqBody, queryMap) {
-		return &Decision{
-			Decision:  DecisionAllow,
-			Overwrite: map[string]any{"Arguments": root},
-		}
-	}
-	return &Decision{Decision: DecisionAllow}
 }
 
 func inspectDiscordSearchMessages(raw json.RawMessage) *Decision {
@@ -245,16 +128,14 @@ func inspectVictoriaMetricsSeries(raw json.RawMessage) *Decision {
 	return &Decision{Decision: DecisionAllow}
 }
 
-func inspectMCPToolCall(args ToolArgs) *Decision {
+func inspectMCPToolCall(args ToolArgs, now time.Time) *Decision {
 	mcpTool := strings.ToLower(strings.Trim(strings.TrimSpace(args.ToolName), `"`))
-	switch mcpTool {
-	case "streamschema":
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   "openobserve StreamSchema is blocked because docker_logs contains 28,000+ historical dynamic attribute fields. Query openobserve SearchSQL directly using canonical columns: _timestamp, service, level, message, stream, container_name, host (never use SELECT *).",
+	if isVictoriaLogsServer(args) {
+		if d := inspectVictoriaLogsQuery(mcpTool, args.Arguments, now); d != nil {
+			return d
 		}
-	case "searchsql":
-		return inspectOpenObserveSearchSQL(args.Arguments)
+	}
+	switch mcpTool {
 	case "discord_search_messages":
 		return inspectDiscordSearchMessages(args.Arguments)
 	case "get_file_contents":
@@ -453,8 +334,8 @@ func CheckSearch(toolName string, args ToolArgs) *Decision {
 // CheckSearchWithSQL evaluates search and psql commands using the provided SQLDescriber.
 func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) *Decision {
 	normalizedName := normalizeToolName(toolName)
-	if normalizedName == "call_mcp_tool" {
-		return inspectMCPToolCall(args)
+	if normalizedName == "call_mcp_tool" || isClaudeMCPToolName(toolName) {
+		return inspectMCPToolCall(args, time.Now())
 	}
 	if normalizedName != "run_command" && normalizedName != "bash" && normalizedName != "grep_search" && normalizedName != "find_by_name" {
 		return &Decision{Decision: DecisionAllow}

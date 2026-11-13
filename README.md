@@ -4,7 +4,7 @@ An autonomous AI agent and configurable homelab operations platform engineered f
 
 Aerial is built from the ground up around end-to-end configurability across both the agent and the platform. While Aerial herself is tailored through pluggable execution backends (such as `agy-cli` or Gemini CLI), domain-specific skills, and modular persona rules, the underlying platform is equally extensible—orchestrating user-defined containers, declarative Kubernetes workloads, and persistent scheduled pipelines. While interfacing with her through Discord or Voice, Aerial actively commands compute across storage servers, local GPU inference nodes, and touch kiosks—executing complex multi-turn workflows, authoring and deploying her own code, and operating your homelab fleet.
 
-**Observability, CI/CD, reliability, and extensibility are first-class invariants.** Deployments are fully automated through event-driven push GitOps with Flux CD and `synapse` that continuously reconciles Kubernetes Kustomizations and proactively self-heals failing CI builds or deployment rollbacks, backed by a turnkey telemetry matrix featuring VictoriaMetrics TSDB, `vmalert`, Fluent Bit log streaming to OpenObserve, and pre-provisioned Grafana dashboards. The system guarantees operational resilience through dynamic CoreDNS service discovery, centralized secret governance via Infisical and Valkey, read-only container mounts, and Last Known Good Configuration (LKGC) fallbacks, while staying fully extensible via custom skills, declarative Kubernetes manifests, and Streamable HTTP MCP microservices.
+**Observability, CI/CD, reliability, and extensibility are first-class invariants.** Deployments are fully automated through event-driven push GitOps with Flux CD and `synapse` that continuously reconciles Kubernetes Kustomizations and proactively self-heals failing CI builds or deployment rollbacks, backed by a turnkey telemetry matrix featuring VictoriaMetrics TSDB, `vmalert`, Fluent Bit log streaming to VictoriaLogs, OpenTelemetry traces in VictoriaTraces, and pre-provisioned Grafana dashboards. The system guarantees operational resilience through dynamic CoreDNS service discovery, centralized secret governance via Infisical and Valkey, read-only container mounts, and Last Known Good Configuration (LKGC) fallbacks, while staying fully extensible via custom skills, declarative Kubernetes manifests, and Streamable HTTP MCP microservices.
 
 ---
 
@@ -21,7 +21,8 @@ Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 - **Secrets Management**: **Infisical + Valkey 9 + External Secrets Operator** — Centralized secret governance syncing scoped per-service Kubernetes Secrets and the `shared-secrets` redaction pool with zero plaintext disk persistence.
 - **Observability & Telemetry**:
   - **Metrics**: **VictoriaMetrics** (TSDB `:8428`) + **`vmalert`** (`:8880`) + **Grafana** (telemetry HUDs `:3000`) + Prometheus Exporters (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**)
-  - **Logs**: **Fluent Bit** (DaemonSet collection & transforms) + **OpenObserve** (structured SQL log analytics `:5080`)
+  - **Logs**: **Fluent Bit** (DaemonSet collection & transforms) + **VictoriaLogs** (LogsQL log analytics `:9428`, 60-day retention)
+  - **Traces**: **VictoriaTraces** (OTLP trace store `:10428`, 30-day retention)
 - **Agent Protocols & Extensibility**: **Model Context Protocol (MCP)** — Streamable HTTP microservices providing modular tool boundaries across the platform.
 - **Edge AI & Speech**: **NeMo Parakeet TDT 0.6B v2 STT** + **Kokoro-82M TTS** over Wyoming protocol (`senses` on GPU `:8880`/`:10300`), **BAAI/bge-small-en-v1.5** vector embeddings (`senses`), and local quantized GGUF ambient triage (`pjev` `/v1/systemone` `:8000`).
 
@@ -30,7 +31,7 @@ Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 ## 1. System Architecture & Topology
 
 Aerial separates generic platform orchestration from private homelab state using a decoupled **Two-Repository Architecture**:
-- **Engine Repo (`azylman/aerial`)**: Autonomous agent execution core (`eri`), scheduling & event watch orchestrator (`haro`), semantic memory & skill synthesis (`coven`), multi-chunk build orchestrator (`vanadis`), Discord Gateway & webhook router (`synapse`), shared Go packages (`pkg/`), declarative Kubernetes manifests (`k8s/*.yaml`), turnkey telemetry stack (VictoriaMetrics, OpenObserve, Grafana), PostgreSQL 18 persistence, CoreDNS service discovery, and outbound MCP microservices.
+- **Engine Repo (`azylman/aerial`)**: Autonomous agent execution core (`eri`), scheduling & event watch orchestrator (`haro`), semantic memory & skill synthesis (`coven`), multi-chunk build orchestrator (`vanadis`), Discord Gateway & webhook router (`synapse`), shared Go packages (`pkg/`), declarative Kubernetes manifests (`k8s/*.yaml`), turnkey telemetry stack (VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana), PostgreSQL 18 persistence, CoreDNS service discovery, and outbound MCP microservices.
 - **User Config Repo (e.g. `your-username/your-aerial-config`)**: Declarative user Kubernetes manifests (`k8s/*.yaml`), custom skills and automation runbooks (`custom-skills/`), modular telemetry scrapes (`victoriametrics/`), platform options (`config.yaml`), modular persona and runtime rules (`rules/`), and Discord channel policies (`channels/`). Starter template available at [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example).
 
 ```text
@@ -76,7 +77,7 @@ Aerial separates generic platform orchestration from private homelab state using
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
 │ Haro Scheduler MCP (:4005)   │ Coven Memory MCP (:4008)     │ VictoriaMetrics TSDB (:8428)  │
 │ Kubernetes MCP (:8080)       │ Infisical Secrets (:8080)    │ vmalert Recording/Alerts:8880 │
-│ GitHub Operations MCP (:8080)│ Discord REST MCP (:8080)     │ OpenObserve Telemetry (:5080) │
+│ GitHub Operations MCP (:8080)│ Discord REST MCP (:8080)     │ VictoriaLogs (:9428)          │
 │ Kernel Browser MCP (:8080)   │ VictoriaMetrics MCP (:8080)  │ Grafana Cyberpunk HUD (:3000) │
 │ Prospera Phone Agent (:8080) │ Vanadis Build Queue (:4025)  │ Fluent Bit Log DaemonSet      │
 │ Docket Issue Tracker (:8080) │                              │                               │
@@ -243,7 +244,8 @@ By default, `eri` automatically mounts built-in MCP servers across runtimes:
 - **`vanadis`** (`http://vanadis.aerial/mcp` - Autonomous multi-chunk build queue orchestrator)
 - **`discord`** (`http://discord-mcp.aerial/mcp` - Outbound Discord messaging & thread tools)
 - **`github`** (`http://github-mcp.aerial/mcp` - GitHub repository, PR, and issue operations with PAT auth)
-- **`openobserve`** (`http://openobserve.aerial:5080/openobserve/api/default/mcp` - Native telemetry, log exploration, and SQL search)
+- **`victorialogs`** (`http://victorialogs-mcp.aerial/mcp` - LogsQL log search, stats, and field discovery)
+- **`victoriatraces`** (`http://victoriatraces-mcp.aerial/mcp` - Trace search, span timings, and service dependencies)
 - **`docket`** (`http://docket-mcp.aerial/mcp` - Issue tracking, DAG dependencies, and hybrid RRF task search backed by Vikunja and PostgreSQL 18)
 
 Additional cluster MCP microservices (`kubernetes-mcp` on `http://kubernetes-mcp.aerial/mcp`, `infisical-mcp` on `http://infisical-mcp.aerial/mcp`, `victoriametrics-mcp` on `http://victoriametrics-mcp.aerial/mcp`, and `kernel-mcp` on `http://kernel-mcp.aerial/mcp`) can be enabled per target runtime in `config.yaml`.
@@ -325,8 +327,8 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 │ • coven (:4008)            │ • Dynamic 15s Scrape Engine │ • Cyberpunk Permet Theme   │
 │ • vanadis (:4025)          │ • Pod & cAdvisor Scrapes    │ • Core Telemetry Dashboard │
 │ • CloudNativePG (:9187)    │ vmalert (:8880)             │ • SQLite Storage Backend   │
-│ • Kubelet / cAdvisor       │ • MAD Anomaly Detection     │ • openobserve (:5080)      │
-│ • node-exporter (:9100)    │ • Alert Rules Evaluation    │   Structured SQL Logs      │
+│ • Kubelet / cAdvisor       │ • MAD Anomaly Detection     │ • victorialogs (:9428)     │
+│ • node-exporter (:9100)    │ • Alert Rules Evaluation    │   LogsQL Logs (LAN-only)   │
 └────────────────────────────┴─────────────────────────────┴────────────────────────────┘
 ```
 
@@ -391,7 +393,9 @@ Aerial uses an automated, event-driven GitOps continuous deployment pipeline:
 | **`kernel-mcp`** | `8080` | Headless browser automation and web interaction microservice. |
 | **`docket-mcp`** | `8080` | Native Streamable HTTP MCP server (`http://docket-mcp.aerial/mcp`) for issue tracking, DAG triage, and hybrid RRF task search backed by Vikunja and PostgreSQL 18. |
 | **`docket-store`** | `3456` | Vikunja issue tracking API service scheduled on `quiet-zero` backed by PostgreSQL 18 (`postgres:5432/docket`). |
-| **`openobserve`** | `5080` | Cloud-native log analytics and Streamable HTTP MCP server (`/openobserve/api/default/mcp`) for structured log exploration and SQL search. |
+| **`victorialogs`** | `9428` | VictoriaLogs log store (60-day retention) ingesting Fluent Bit container and journald logs, queried with LogsQL. LAN-only; never exposed on the edge gateway. |
+| **`victoriatraces`** | `10428` | VictoriaTraces OTLP trace store (30-day retention) receiving gateway and service spans. LAN-only; never exposed on the edge gateway. |
+| **`victorialogs-mcp`** / **`victoriatraces-mcp`** | `8080` | Streamable HTTP MCP servers for LogsQL log search and trace lookup. |
 | **`senses`** | `8880` / `10300` | Unified Rust CUDA ONNX Runtime inference service serving NeMo Parakeet TDT 0.6B v2 STT, Kokoro-82M TTS, BAAI/bge-small embeddings, and speaker verification. |
 | **`pjev`** | `8000` | Local CUDA GGUF LLM inference service serving `/v1/systemone` ambient triage. |
 | **`homepage`** | `3000` | Root landing portal and service discovery HUD. |
@@ -400,7 +404,7 @@ Aerial uses an automated, event-driven GitOps continuous deployment pipeline:
 | **`docs`** | `8080` | Living documentation portal rendering Markdown and Mermaid diagrams via Docsify. |
 | **`lan-gateway`** | `80` / `443` | NGINX Gateway Fabric ingress controller routing dynamic internal services and web dashboards. |
 | **`edge-gateway`** | `4021` | Ingress gateway routing external Cloudflare tunnel webhooks into the local cluster mesh. |
-| **`fluent-bit`** | DaemonSet | High-performance log collector shipping container stdout/stderr to OpenObserve. |
+| **`fluent-bit`** | DaemonSet | High-performance log collector shipping container stdout/stderr and journald logs to VictoriaLogs. |
 | **`node-exporter`** | `9100` | Node Exporter host telemetry gathering host CPU loads, memory, storage, thermals, and network metrics. |
 | **`victoriametrics`** | `8428` | VictoriaMetrics single-node TSDB scraping Prometheus metrics from all pods and nodes with 5-year retention and dynamic `scrape.d/` config. |
 | **`vmalert`** | `8880` | Prometheus-compatible alerting engine evaluating anomaly detection and metric threshold rules. |
@@ -495,13 +499,6 @@ kubectl create secret generic discord-mcp-secret \
   --from-literal=DISCORD_TOKEN="$DISCORD_BOT_TOKEN"
 
 # 3. Observability, runner, and MCP service secrets
-kubectl create secret generic openobserve-secret \
-  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  --from-literal=OPENOBSERVE_ROOT_USER_PASSWORD="$POSTGRES_PASSWORD"
-
-kubectl create secret generic fluent-bit-secret \
-  --from-literal=OPENOBSERVE_ROOT_USER_PASSWORD="$POSTGRES_PASSWORD"
-
 kubectl create secret generic victoriametrics-secret \
   --from-literal=HA_METRICS_TOKEN=""
 
@@ -588,7 +585,7 @@ Once running, access the web dashboards directly via port 80 on your node's IP o
 - Root Landing Portal: `http://<node-ip>/`
 - Operator Console: `http://<node-ip>/console/`
 - System Telemetry (Grafana): `http://<node-ip>/grafana/`
-- SQL Log Analytics (OpenObserve): `http://<node-ip>/openobserve/`
+- Logs and Traces: Grafana Explore (VictoriaLogs and VictoriaTraces datasources)
 - Agent Transcripts (AgentsView): `http://<node-ip>/agentsview/`
 - Living Documentation (Docsify): `http://<node-ip>/docs/`
 
@@ -618,7 +615,7 @@ While `azylman/aerial`'s base `k8s/*.yaml` manifests are completely single-node 
 | Documentation (`docs`) | `http://<node-ip>/docs/` or `http://docs.aerial/` |
 | Agent Transcripts (`agentsview`) | `http://<node-ip>/agentsview/` or `http://agentsview.aerial/` |
 | System Telemetry (`grafana`) | `http://<node-ip>/grafana/` or `http://grafana.aerial/` |
-| Structured Log Analytics (`openobserve`) | `http://<node-ip>/openobserve/` or `http://openobserve.aerial/` |
+| Logs and Traces (`victorialogs`, `victoriatraces`) | Grafana Explore, or LAN-only vmui at `http://victorialogs.aerial/select/vmui/` and `http://victoriatraces.aerial/select/vmui/` |
 | `eri` Prometheus Metrics | `http://eri.aerial:8080/metrics` |
 | `eri` Healthcheck | `http://eri.aerial:8080/health` |
 | `synapse` Healthcheck | `http://synapse.aerial:4020/health` |

@@ -315,6 +315,13 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 			errSubstr: "failed to load configuration from any path",
 		},
 		{
+			name: "stale openobserve keys are ignored",
+			files: []string{
+				"stale.yaml:model: gemini-stale-keys\nopenobserve_url: http://openobserve:5080/openobserve\nopenobserve_org: default\nopenobserve_user: root@example.com\nchannels:\n  default:\n    mode: threads\n",
+			},
+			wantModel: "gemini-stale-keys",
+		},
+		{
 			name: "corrupted primary on-disk lkgc fallback succeeds",
 			files: []string{
 				"primary.yaml:model: [broken",
@@ -886,8 +893,6 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 		wantModel        string
 		wantTZ           string
 		wantChan         string
-		wantOrg          string
-		wantUser         string
 		wantDiscordToken string
 		wantIdle         time.Duration
 		wantMaxDur       time.Duration
@@ -904,8 +909,6 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 				"SYSTEM_CHANNEL_ID":            "alerts",
 				"ENGINE":                       "claude",
 				"CLAUDE_BIN":                   "/usr/local/bin/claude",
-				"OPENOBSERVE_ORG":              "custom-org",
-				"OPENOBSERVE_USER":             "root@domain.com",
 				"DAEMON_IDLE_TIMEOUT":          "15m",
 				"MAX_BACKGROUND_TASK_DURATION": "45m",
 				"OLLAMA_NUM_CTX":               "8192",
@@ -918,8 +921,6 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 			wantModel:  "gemini-custom",
 			wantTZ:     "UTC",
 			wantChan:   "alerts",
-			wantOrg:    "custom-org",
-			wantUser:   "root@domain.com",
 			wantIdle:   15 * time.Minute,
 			wantMaxDur: 45 * time.Minute,
 			wantCtx:    8192,
@@ -966,12 +967,6 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 			}
 			if tc.wantChan != "" && data.SystemChannel != tc.wantChan {
 				t.Errorf("SystemChannel = %q, want %q", data.SystemChannel, tc.wantChan)
-			}
-			if tc.wantOrg != "" && data.OpenObserveOrg != tc.wantOrg {
-				t.Errorf("OpenObserveOrg = %q, want %q", data.OpenObserveOrg, tc.wantOrg)
-			}
-			if tc.wantUser != "" && data.OpenObserveUser != tc.wantUser {
-				t.Errorf("OpenObserveUser = %q, want %q", data.OpenObserveUser, tc.wantUser)
 			}
 			if tc.wantDiscordToken != "" && data.DiscordToken != tc.wantDiscordToken {
 				t.Errorf("DiscordToken = %q, want %q", data.DiscordToken, tc.wantDiscordToken)
@@ -1810,7 +1805,6 @@ func TestLoadSharedSecrets_TableDriven(t *testing.T) {
 	_ = os.WriteFile(validJSON, []byte(`{
 		"FOO": "  bar  ",
 		"DISCORD_BOT_TOKEN": "bot-tok-123",
-		"OPENOBSERVE_ROOT_USER_PASSWORD": "oo-pass-456",
 		"1PASSWORD_SERVICE_ACCOUNT_TOKEN": "op-tok-789",
 		"GEMINI_HARNESS_API_KEY": "harness-key-abc",
 		"UNIFI_PASS": "unifi-pass-def"
@@ -1868,12 +1862,6 @@ func TestLoadSharedSecrets_TableDriven(t *testing.T) {
 			filePath: validJSON,
 			wantKey:  "DISCORD_TOKEN",
 			wantVal:  "bot-tok-123",
-		},
-		{
-			name:     "openobserve root password alias fallback",
-			filePath: validJSON,
-			wantKey:  "OPENOBSERVE_PASSWORD",
-			wantVal:  "oo-pass-456",
 		},
 		{
 			name:     "1password service account alias fallback",

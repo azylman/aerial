@@ -55,8 +55,6 @@ var exactSecretKeys = map[string]struct{}{
 	"DATABASE_URL":                    {},
 	"POSTGRES_PASSWORD":               {},
 	"HA_TOKEN":                        {},
-	"OPENOBSERVE_PASSWORD":            {},
-	"OPENOBSERVE_ROOT_USER_PASSWORD":  {},
 	"UNIFI_PASS":                      {},
 	"UNIFI_PASSWORD":                  {},
 	"OP_SERVICE_ACCOUNT_TOKEN":        {},

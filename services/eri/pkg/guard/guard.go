@@ -128,6 +128,7 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 	payload.Normalize()
 
 	args := ParseArgs(payload.ToolCall.Args)
+	args.AdoptClaudeMCPCall(payload.ToolCall.Name, payload.ToolCall.Args)
 
 	switch mode {
 	case string(ModeInv), "invocation":

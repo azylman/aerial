@@ -140,17 +140,6 @@ spec:
         - requestRedirect:
             path:
               type: ReplaceFullPath
-              replaceFullPath: /openobserve/
-            statusCode: 301
-          type: RequestRedirect
-      matches:
-        - path:
-            type: Exact
-            value: /openobserve
-    - filters:
-        - requestRedirect:
-            path:
-              type: ReplaceFullPath
               replaceFullPath: /agentsview/
             statusCode: 301
           type: RequestRedirect
@@ -202,16 +191,6 @@ spec:
         - path:
             type: PathPrefix
             value: /grafana/
-    - backendRefs:
-        - group: ""
-          kind: Service
-          name: openobserve
-          port: 5080
-          weight: 1
-      matches:
-        - path:
-            type: PathPrefix
-            value: /openobserve/
     - backendRefs:
         - group: ""
           kind: Service
@@ -309,7 +288,6 @@ spec:
                   - console
                   - agentsview
                   - grafana
-                  - openobserve
                   - aura-farming
                   - vision
                   - gatus
