@@ -32,12 +32,6 @@
     },
     "kernel": {
       "serverUrl": "http://kernel-mcp.aerial/mcp"
-    },
-    "openobserve": {
-      "headers": {
-        "Authorization": "Basic YWRtaW5AYWVyaWFsLmxvY2FsOkFlcmlhbCFMb2dzMjAyNiM="
-      },
-      "serverUrl": "http://openobserve.aerial:5080/openobserve/api/default/mcp"
     }
   }
 }

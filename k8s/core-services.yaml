@@ -120,12 +120,6 @@ spec:
                   key: GITHUB_PAT
                   name: eri-secret
                   optional: true
-            - name: OPENOBSERVE_ROOT_USER_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: OPENOBSERVE_ROOT_USER_PASSWORD
-                  name: eri-secret
-                  optional: true
             - name: HA_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -584,7 +578,7 @@ spec:
             - /bin/sh
             - -c
             - |
-              for db in aerial openobserve infisical; do psql -h postgres -U aerial -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '$db'" | grep -q 1 || psql -h postgres -U aerial -d postgres -c "CREATE DATABASE $db;"; done && psql -h postgres -U aerial -d aerial -c "CREATE EXTENSION IF NOT EXISTS vector;"
+              for db in aerial infisical; do psql -h postgres -U aerial -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '$db'" | grep -q 1 || psql -h postgres -U aerial -d postgres -c "CREATE DATABASE $db;"; done && psql -h postgres -U aerial -d aerial -c "CREATE EXTENSION IF NOT EXISTS vector;"
           env:
             - name: PGPASSWORD
               valueFrom:

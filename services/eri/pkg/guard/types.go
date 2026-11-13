@@ -224,3 +224,22 @@ func ParseArgs(raw json.RawMessage) ToolArgs {
 	args.Normalize()
 	return args
 }
+
+// AdoptClaudeMCPCall fills the canonical agy call_mcp_tool fields (ServerName, ToolName, Arguments)
+// from a Claude mcp__<server>__<tool> invocation, whose tool_input is the raw MCP argument object.
+// Fields already set by the payload are left untouched.
+func (a *ToolArgs) AdoptClaudeMCPCall(toolName string, raw json.RawMessage) {
+	if a == nil || !isClaudeMCPToolName(toolName) {
+		return
+	}
+	parts := strings.Split(strings.TrimSpace(toolName), "__")
+	if a.ServerName == "" {
+		a.ServerName = strings.Join(parts[1:len(parts)-1], "__")
+	}
+	if a.ToolName == "" {
+		a.ToolName = parts[len(parts)-1]
+	}
+	if len(a.Arguments) == 0 {
+		a.Arguments = raw
+	}
+}

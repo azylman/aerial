@@ -1,7 +1,7 @@
 ---
 name: incident-triage
 description: >-
-  Forensic runbook and telemetry triage workflow whenever asked to investigate why an Aerial turn, task, service, or workflow failed, duplicated, timed out, misrouted, or was unexpectedly silenced (e.g. "what happened here", "why did you reply there", "why didn't you respond"), or when asked about system performance, latency, durations, voice TTFR, or timings (e.g. "how long did this take", "investigate latency", "why was voice slow"). Strictly relies on generic core stack telemetry (VictoriaMetrics MCP, OpenObserve MCP, PostgreSQL, Kubernetes MCP, Discord API).
+  Forensic runbook and telemetry triage workflow whenever asked to investigate why an Aerial turn, task, service, or workflow failed, duplicated, timed out, misrouted, or was unexpectedly silenced (e.g. "what happened here", "why did you reply there", "why didn't you respond"), or when asked about system performance, latency, durations, voice TTFR, or timings (e.g. "how long did this take", "investigate latency", "why was voice slow"). Strictly relies on generic core stack telemetry (VictoriaMetrics MCP, VictoriaLogs MCP, VictoriaTraces MCP, PostgreSQL, Kubernetes MCP, Discord API).
 ---
 
 # Aerial Incident Triage & Forensic Runbook
@@ -13,8 +13,8 @@ This skill defines the standardized operational protocol for diagnosing runtime 
 ## 1. Principles & Boundaries
 
 - **Zero-Guessing Invariant**: Never guess why an action occurred or failed. Every conclusion MUST be backed by immutable telemetry: TSDB metrics, structured log entries, or database records.
-- **Two-Repository Boundary**: This skill is strictly generic and core-contained. It relies exclusively on generic core stack components (`eri`, `synapse`, `victoriametrics`, `openobserve`, CloudNativePG `postgres`, `fluent-bit`, Kubernetes API, Discord API). Note that `synapse` ingests Discord Gateway events into River before dispatching to `eri`. It MUST NEVER hardcode non-core service names, user-config overlays (`ha-mcp`, `google`, `ubereats`), custom sidecars, or private channel IDs. Services outside the core stack are discovered dynamically at runtime.
-- **Metric-First Hierarchy**: Always query metrics first via VictoriaMetrics to pinpoint exact microsecond timestamps and duration boundaries before querying logs. Never jump directly to dumping raw container logs via Kubernetes MCP unless observability services are offline.
+- **Two-Repository Boundary**: This skill is strictly generic and core-contained. It relies exclusively on generic core stack components (`eri`, `synapse`, `victoriametrics`, `victorialogs`, `victoriatraces`, CloudNativePG `postgres`, `fluent-bit`, Kubernetes API, Discord API). Note that `synapse` ingests Discord Gateway events into River before dispatching to `eri`. It MUST NEVER hardcode non-core service names, user-config overlays (`ha-mcp`, `google`, `ubereats`), custom sidecars, or private channel IDs. Services outside the core stack are discovered dynamically at runtime.
+- **Metric-First Hierarchy**: Always query metrics first via VictoriaMetrics to pinpoint exact timestamps and duration boundaries before querying logs. Never jump directly to dumping raw container logs via Kubernetes MCP unless observability services are offline.
 - **Strictly Zero Host Memory Inspection**: Never inspect host memory (`/proc/meminfo`, system memory heuristics). Container memory is observed strictly through cAdvisor metrics (`container_memory_rss`) in VictoriaMetrics.
 - **Silent Multi-Step Execution**: Perform all diagnostic queries silently without intermediate play-by-play status chatter.
 - **Handoff Contract**: `incident-triage` is Phase 0 (Forensics & Root Cause Identification). Once the root-cause failure mode and offending code path are isolated, if code changes are needed in `aerial`, hand off immediately to:
@@ -45,9 +45,8 @@ When an investigation involves non-core features, external clients, or user-spac
   - Match user intent to the discovered pod or service names and dynamically bind `<target_services>`.
   - Strictly DO NOT hardcode non-core pod or container names into this runbook or prompt templates.
 - **Coordinate & Snowflake Extraction (Discord Context)**:
-  - If a Discord message link is provided (`https://discord.com/channels/<guild_id>/<channel_id>/<message_id>`), derive the microsecond timestamp via snowflake math:
-    - `timestamp_ms = (int(message_id) >> 22) + 1420070400000`
-    - `timestamp_us = timestamp_ms * 1000`
+  - If a Discord message link is provided (`https://discord.com/channels/<guild_id>/<channel_id>/<message_id>`), derive the timestamp via snowflake math:
+    - `timestamp_ms = (int(message_id) >> 22) + 1420070400000` (unix milliseconds; convert to RFC3339 UTC for VictoriaLogs `start`/`end`, pass as-is to VictoriaTraces `start`/`end`)
   - For Discord turns, check the CloudNativePG `postgres` messages table using vertical output via `kubectl exec` or `kubernetes-mcp:pods_exec`:
     ```bash
     kubectl exec -i -c postgres $(kubectl get pods -l cnpg.io/cluster=postgres,role=primary -o jsonpath='{.items[0].metadata.name}') -- psql -U aerial -d aerial -x -c "
@@ -68,7 +67,7 @@ When an investigation involves non-core features, external clients, or user-spac
 
 VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metrics from all containers, including Prometheus application endpoints and cAdvisor container metrics.
 
-- **Metric-First Invariant**: Always query metrics before inspecting log streams. Metrics isolate exact microsecond event timestamps and anomaly durations in <1 second (~200 tokens), preventing context bloat.
+- **Metric-First Invariant**: Always query metrics before inspecting log streams. Metrics isolate exact event timestamps and anomaly durations in <1 second (~200 tokens), preventing context bloat.
 - **Never Guess PromQL Expressions or Metric Types**:
   - Prometheus metrics can be Gauges, Counters (requiring `rate(...)`), or Histograms.
   - **The Histogram Trap**: Histograms (such as voice TTFR, runner durations, classifier timings) DO NOT have bare time series. Querying `aerial_brain_voice_ttfr_duration_seconds` directly returns an empty vector `[]`. Histograms only exist as `_bucket`, `_sum`, and `_count`.
@@ -107,33 +106,37 @@ VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metri
   - Use metric spikes, latency jumps, or error increments to pinpoint the event timestamp `t_event`.
   - Center a 2 to 5 minute time window around `t_event` for log correlation: `t_start = t_event - 2m` and `t_end = t_event + 3m`.
 
-### Phase 3: Scoped Log Forensics (OpenObserve MCP)
+### Phase 3: Scoped Log Forensics (VictoriaLogs MCP)
 
-Once the event timestamp `t_event` and `<target_services>` are pinpointed from metrics:
+Once the event timestamp `t_event` and `<target_services>` are pinpointed from metrics, query VictoriaLogs with LogsQL via `victorialogs:query`. Container logs carry dotted Kubernetes fields (`kubernetes.namespace_name`, `kubernetes.container_name`, `kubernetes.pod_name`) and the message in `_msg`; node journald logs carry `SYSLOG_IDENTIFIER` (e.g. `k3s`, `kernel`). Log streams are keyed on `kubernetes.namespace_name` + `kubernetes.container_name` (containers) and `SYSLOG_IDENTIFIER` (nodes), so filter on those first.
 
-- **Targeted Log Query (`openobserve:SearchSQL`)**:
-  - Query OpenObserve stream `docker_logs` parameterized by service using explicit canonical columns (`_timestamp, service, level, message, stream, container_name, host`):
-    ```sql
-    SELECT _timestamp, service, level, message 
-    FROM docker_logs 
-    WHERE service IN ('eri', '<target_services>')
-      AND _timestamp >= <start_time_us> AND _timestamp <= <end_time_us>
-    ORDER BY _timestamp ASC 
-    LIMIT 50;
-    ```
-- **Context Protection (`LIMIT 50` & JSON Output)**:
-  - Default strictly to `LIMIT 50` (and `size: 50`) to capture complete lifecycles without token bloat.
-  - Never call `StreamSchema` or `SELECT *` on `docker_logs`, and do not set `agent_options.output_format` to `"csv"` or `"md_table"` (OpenObserve v1.0.4's MCP wrapper drops hits in non-JSON modes).
-  - If the log stream is noisy, narrow the query by filtering on severity or keywords:
-    - `AND level IN ('warn', 'error', 'fatal', 'panic')`
-    - `AND (message LIKE '%error%' OR message LIKE '%timeout%' OR message LIKE '%disconnect%')`
+- **Bounded Time Range (guard-enforced)**: Every `query`, `hits`, `facets`, `stats_query`, and `stats_query_range` call needs an explicit window of at most 7 days, either `start`/`end` arguments (RFC3339, e.g. `t_event - 2m` to `t_event + 3m`) or a `_time:` filter in the query (`_time:15m`, `_time:[2026-01-02T10:00:00Z, 2026-01-02T10:05:00Z)`). Unbounded `*` over all history is rejected.
+- **Row Cap (guard-enforced)**: Raw-row queries must end in `| limit N` with N <= 100 (default to 50). Aggregations via `| stats` are exempt.
+- **Targeted Log Query**:
+  ```
+  query: kubernetes.container_name:in(eri, <target_services>) | fields _time, kubernetes.container_name, level, _msg | sort by (_time) | limit 50
+  start: <t_start RFC3339>
+  end:   <t_end RFC3339>
+  ```
+- **Narrow Noisy Streams**: add severity or phrase filters before the pipes, e.g. `kubernetes.container_name:eri level:in(WARN, ERROR) | limit 50` or `kubernetes.container_name:synapse ("timeout" OR "disconnect") | limit 50`. Use `_stream:{kubernetes.container_name="eri"}` for the fastest stream-only filter.
+- **Counts & Shapes Without Rows**: use stats pipes instead of pulling rows, e.g. `_time:1h kubernetes.container_name:eri level:ERROR | stats by (kubernetes.pod_name) count() errors`, or `victorialogs:hits` with a `step` for error-rate timelines. `victorialogs:stats_query` needs a `time` argument plus a `_time:` filter in the query.
+- **Field Discovery**: when unsure of a field name, call `victorialogs:field_names` or `victorialogs:stream_field_values` (field `kubernetes.container_name`) over a short window instead of guessing.
 - **Tracing Across Service Boundaries**:
   - Correlate timestamps across `eri`, `synapse`, and `<target_services>` to determine whether latency or failure originated in `synapse`, `eri`, or an external component.
+
+### Phase 3b: Trace Lookup (VictoriaTraces MCP)
+
+When the question is about latency or where time went in a request path, read span timings from VictoriaTraces:
+
+- **Discover traced services**: `victoriatraces:services` (gateways appear as `ngf:<namespace>:<gateway>`), then `victoriatraces:service_operations` for span names.
+- **Find the request's trace**: `victoriatraces:traces` with `service`, `start`/`end` in unix milliseconds around `t_event`, a small `limit` (5 to 20), and optionally `operation` or `minDuration` (e.g. `2s`) to isolate slow requests that fed the turn.
+- **Read span durations**: open one trace with `victoriatraces:trace` and walk its spans by duration to find the slowest hop (gateway, upstream service, or external call). Report human-readable durations, not trace IDs.
+- If no traced service covers the path in question, say so and fall back to log timestamps and VictoriaMetrics histograms.
 
 ### Phase 4: Raw Pod Logs (Kubernetes MCP)
 
 - **Strict Last-Resort Fallback**:
-  - Query raw pod logs via `kubernetes-mcp:pods_log` ONLY if OpenObserve or Fluent Bit is unreachable, crashed, or experiencing ingestion delays.
+  - Query raw pod logs via `kubernetes-mcp:pods_log` ONLY if VictoriaLogs or Fluent Bit is unreachable, crashed, or experiencing ingestion delays.
   - NEVER dump unbounded log streams into the context window.
   - Always specify strict line limits (`tail: 50` or `tail: 100`) and target specific pods/containers.
 
@@ -158,18 +161,18 @@ Deliver the post-mortem directly to the user in clean Markdown (strictly < 1,800
 
 - **Direct Conclusion First**: State what happened, the failure mode (mapped from the 8-Point Core Failure Taxonomy in Phase 5), why it happened, and the remediation or handoff step (`systematic-debugging` or `self-improvement` when a code fix is warranted).
 - **Proportional Explanation Standard**: Scale response structure to the question. Answer routine status or root-cause queries in 1–3 concise sentences or a short bulleted list rather than forcing rigid multi-header forensic boilerplate.
-- **Telemetry Abstraction Invariant**: Every conclusion must remain grounded in verified telemetry from VictoriaMetrics, OpenObserve, and PostgreSQL per Section 1 (`Zero-Guessing Invariant`). However, translate low-level telemetry into high-level explanations—never dump unrequested ephemeral identifiers (database migration timestamp filenames, Kubernetes pod template hashes, Discord message snowflakes, internal database row UUIDs, raw log lines, or exact microsecond timestamps). Reserve specific identifiers for actionable engineering coordinates (service names, canonical source file paths, PR/Task numbers, and human-readable durations) or when explicitly requested by the user.
+- **Telemetry Abstraction Invariant**: Every conclusion must remain grounded in verified telemetry from VictoriaMetrics, VictoriaLogs, VictoriaTraces, and PostgreSQL per Section 1 (`Zero-Guessing Invariant`). However, translate low-level telemetry into high-level explanations—never dump unrequested ephemeral identifiers (database migration timestamp filenames, Kubernetes pod template hashes, Discord message snowflakes, internal database row UUIDs, raw log lines, or exact sub-second timestamps). Reserve specific identifiers for actionable engineering coordinates (service names, canonical source file paths, PR/Task numbers, and human-readable durations) or when explicitly requested by the user.
 
 ---
 
 ## 5. Red Flags & Anti-Patterns
 
-- **NEVER** dump raw container logs via Kubernetes MCP without querying VictoriaMetrics and OpenObserve first.
-- **NEVER** guess or speculate without running metric queries or checking OpenObserve logs.
+- **NEVER** dump raw container logs via Kubernetes MCP without querying VictoriaMetrics and VictoriaLogs first.
+- **NEVER** guess or speculate without running metric queries or checking VictoriaLogs.
 - **NEVER** hardcode non-core service names in skill files or prompts; use `kubernetes-mcp:pods_list` for dynamic discovery.
 - **NEVER** inspect host memory directly (`/proc/meminfo`); inspect container cAdvisor metrics via VictoriaMetrics.
-- **NEVER** use `log.*` column prefixes in OpenObserve (Fluent Bit promotes fields directly to top-level).
-- **NEVER** pass milliseconds to OpenObserve `_timestamp` (must be converted to microseconds: `ms * 1000`).
+- **NEVER** run a LogsQL query without a bounded time range (<= 7 days) or pull raw rows without `| limit N` (N <= 100).
+- **NEVER** put `kubernetes.pod_name` in `_stream:{...}` filters (pod names are not stream fields; filter them as regular fields).
 - **NEVER** query a Prometheus histogram by its bare metric name (histograms only exist as `_bucket`, `_sum`, and `_count`; bare names return empty vectors `[]`).
 - **NEVER** guess PromQL formulas without checking Grafana dashboards (`/share/aerial/services/grafana/dashboards/*.json`, `/share/aerial-config/services/grafana/dashboards/*.json`) or running `victoriametrics:series` first.
 - **NEVER** touch production code without reproducing the failure via a failing unit test in `services/eri/pkg/...` first.

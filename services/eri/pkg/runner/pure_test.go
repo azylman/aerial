@@ -147,8 +147,6 @@ func TestBuildAgyEnv(t *testing.T) {
 		"DATABASE_URL=s10",
 		"POSTGRES_PASSWORD=s11",
 		"ha_token=s12",
-		"OPENOBSERVE_PASSWORD=s13",
-		"OPENOBSERVE_ROOT_USER_PASSWORD=s14",
 		"unifi_pass=s15",
 		"UNIFI_PASSWORD=s16",
 		"op_service_account_token=s17",

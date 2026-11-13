@@ -3,7 +3,6 @@ package env
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,25 +13,6 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
-
-func loadOpenObserveMCPServer(cur *config.ConfigData, mergedServers map[string]any) {
-	if cur == nil || cur.OpenObserveUser == "" || cur.OpenObservePassword == "" || cur.OpenObserveURL == "" {
-		return
-	}
-	ooURL := cur.OpenObserveURL
-	ooOrg := cur.OpenObserveOrg
-	if ooOrg == "" {
-		ooOrg = "default"
-	}
-	mcpEndpoint := fmt.Sprintf("%s/api/%s/mcp", strings.TrimSuffix(ooURL, "/"), ooOrg)
-	authVal := base64.StdEncoding.EncodeToString([]byte(cur.OpenObserveUser + ":" + cur.OpenObservePassword))
-	mergedServers["openobserve"] = map[string]any{
-		"serverUrl": mcpEndpoint,
-		"headers": map[string]string{
-			"Authorization": "Basic " + authVal,
-		},
-	}
-}
 
 func loadFileBasedMCPServers(dataDir, fallbackConfig string, mergedServers map[string]any) {
 	configPaths := []string{
@@ -70,11 +50,6 @@ func loadFileBasedMCPServers(dataDir, fallbackConfig string, mergedServers map[s
 }
 
 func (p *Provisioner) loadDiscordBaseMCPServers(cfg *config.Config, mergedServers map[string]any) {
-	if cfg != nil {
-		cur := cfg.Current()
-		loadOpenObserveMCPServer(cur, mergedServers)
-	}
-
 	dataDir := ""
 	if p != nil {
 		dataDir = p.dataDir

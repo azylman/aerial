@@ -72,8 +72,6 @@ volumes:
     name: aerial-postgres-18-data
   aerial-victoriametrics-data:
     name: aerial-victoriametrics-data
-  aerial-openobserve-data:
-    name: aerial-openobserve-data
   aerial-vector-data:
     name: aerial-vector-data
   aerial-nomad-server-data:

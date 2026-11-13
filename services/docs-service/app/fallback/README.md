@@ -68,8 +68,10 @@ Single-Node Prometheus TSDB"]
 Anomaly Alert Rule Evaluator"]
         Grafana["grafana (:3000)
 Visual Telemetry Dashboards"]
-        OpenObserve["openobserve (:5080)
-Structured Log Analytics"]
+        VLogs["victorialogs (:9428)
+LogsQL Log Store"]
+        VTraces["victoriatraces (:10428)
+OTLP Trace Store"]
         FluentBit["fluent-bit
 Container Log Forwarder"]
         NodeExp["node-exporter (:9100)
@@ -88,7 +90,8 @@ Kubelet Container Metrics"]
     LanGW --> Docs
     LanGW --> Agentsview
     LanGW --> Grafana
-    LanGW --> OpenObserve
+    LanGW --> VLogs
+    LanGW --> VTraces
 
     %% Core interactions
     Eri --> Haro
@@ -113,7 +116,10 @@ Kubelet Container Metrics"]
     Victoria -->|Scrapes| Synapse
     VMAlert --> Victoria
     Grafana -->|PromQL| Victoria
-    FluentBit -->|Ships Logs| OpenObserve
+    FluentBit -->|Ships Logs| VLogs
+    LanGW -->|OTLP Spans| VTraces
+    Grafana -->|LogsQL| VLogs
+    Grafana -->|Traces| VTraces
 ```
 
 ---

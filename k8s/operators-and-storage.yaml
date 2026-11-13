@@ -553,9 +553,6 @@ spec:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
     - remoteRef:
-        key: OPENOBSERVE_ROOT_USER_PASSWORD
-      secretKey: OPENOBSERVE_ROOT_USER_PASSWORD
-    - remoteRef:
         key: HA_TOKEN
       secretKey: HA_TOKEN
     - remoteRef:
@@ -613,43 +610,6 @@ spec:
     - remoteRef:
         key: ENCRYPTION_KEY
       secretKey: ENCRYPTION_KEY
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Owner
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: openobserve-secret
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: OPENOBSERVE_ROOT_USER_PASSWORD
-      secretKey: OPENOBSERVE_ROOT_USER_PASSWORD
-    - remoteRef:
-        key: POSTGRES_PASSWORD
-      secretKey: POSTGRES_PASSWORD
-  refreshInterval: 1m
-  secretStoreRef:
-    kind: SecretStore
-    name: infisical
-  target:
-    creationPolicy: Owner
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: fluent-bit-secret
-  namespace: default
-spec:
-  data:
-    - remoteRef:
-        key: OPENOBSERVE_ROOT_USER_PASSWORD
-      secretKey: OPENOBSERVE_ROOT_USER_PASSWORD
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore

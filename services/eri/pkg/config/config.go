@@ -224,10 +224,6 @@ type ConfigData struct {
 	SystemPrompt              string                   `yaml:"system_prompt" json:"system_prompt"`
 	DiscordToken              string                   `yaml:"discord_token" json:"discord_token"`
 	GitHubPAT                 string                   `yaml:"github_pat" json:"github_pat"`
-	OpenObserveURL            string                   `yaml:"openobserve_url,omitempty" json:"openobserve_url,omitempty"`
-	OpenObserveOrg            string                   `yaml:"openobserve_org,omitempty" json:"openobserve_org,omitempty"`
-	OpenObserveUser           string                   `yaml:"openobserve_user,omitempty" json:"openobserve_user,omitempty"`
-	OpenObservePassword       string                   `yaml:"openobserve_password,omitempty" json:"openobserve_password,omitempty"`
 	Ollama                    OllamaConfig             `yaml:"ollama" json:"ollama"`
 	LowEffortModel            string                   `yaml:"low_effort_model" json:"low_effort_model"`
 	MediumEffortModel         string                   `yaml:"medium_effort_model" json:"medium_effort_model"`
@@ -363,10 +359,6 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		SystemPrompt              string                   `yaml:"system_prompt"`
 		DiscordToken              string                   `yaml:"discord_token"`
 		GitHubPAT                 string                   `yaml:"github_pat"`
-		OpenObserveURL            string                   `yaml:"openobserve_url"`
-		OpenObserveOrg            string                   `yaml:"openobserve_org"`
-		OpenObserveUser           string                   `yaml:"openobserve_user"`
-		OpenObservePassword       string                   `yaml:"openobserve_password"`
 		Ollama                    OllamaConfig             `yaml:"ollama"`
 		LowEffortModel            string                   `yaml:"low_effort_model"`
 		MediumEffortModel         string                   `yaml:"medium_effort_model"`
@@ -421,10 +413,6 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.SystemPrompt = raw.SystemPrompt
 	c.DiscordToken = raw.DiscordToken
 	c.GitHubPAT = raw.GitHubPAT
-	c.OpenObserveURL = raw.OpenObserveURL
-	c.OpenObserveOrg = raw.OpenObserveOrg
-	c.OpenObserveUser = raw.OpenObserveUser
-	c.OpenObservePassword = raw.OpenObservePassword
 	c.Ollama = raw.Ollama
 	c.LowEffortModel = strings.TrimSpace(raw.LowEffortModel)
 	c.MediumEffortModel = strings.TrimSpace(raw.MediumEffortModel)
@@ -850,7 +838,6 @@ func LoadSharedSecrets(path string) map[string]string {
 
 	aliases := [][2]string{
 		{"DISCORD_TOKEN", "DISCORD_BOT_TOKEN"},
-		{"OPENOBSERVE_PASSWORD", "OPENOBSERVE_ROOT_USER_PASSWORD"},
 		{"OP_SERVICE_ACCOUNT_TOKEN", "1PASSWORD_SERVICE_ACCOUNT_TOKEN"},
 		{"UNIFI_PASSWORD", "UNIFI_PASS"},
 	}
@@ -950,10 +937,6 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	overrideEnvStr(&data.GeminiHomeDir, lookup, "GEMINI_HOME", "GEMINI_HOME_DIR")
 	overrideEnvStr(&data.DataDir, lookup, "DATA_DIR")
 	overrideEnvStr(&data.MCPConfig, lookup, "MCP_CONFIG")
-	overrideEnvStr(&data.OpenObserveURL, lookup, "OPENOBSERVE_URL")
-	overrideEnvStr(&data.OpenObserveOrg, lookup, "OPENOBSERVE_ORG")
-	overrideEnvStr(&data.OpenObserveUser, lookup, "OPENOBSERVE_USER")
-	overrideEnvStr(&data.OpenObservePassword, lookup, "OPENOBSERVE_PASSWORD")
 	overrideEnvDuration(&data.DaemonIdleTimeout, lookup, "DAEMON_IDLE_TIMEOUT", false)
 	overrideEnvDuration(&data.MaxBackgroundTaskDuration, lookup, "MAX_BACKGROUND_TASK_DURATION", false)
 }
