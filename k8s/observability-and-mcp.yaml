@@ -834,7 +834,7 @@ spec:
             - -deleteAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
             - -forceMergeAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
             - -pprofAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
-          image: victoriametrics/victoria-logs:v1.53.0
+          image: quay.io/victoriametrics/victoria-logs:v1.53.0
           name: victorialogs
           ports:
             - containerPort: 9428
@@ -928,7 +928,7 @@ spec:
             - -deleteAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
             - -forceMergeAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
             - -pprofAuthKey=file:///etc/victoria-auth/VICTORIA_ADMIN_AUTH_KEY
-          image: victoriametrics/victoria-traces:v0.13.0
+          image: quay.io/victoriametrics/victoria-traces:v0.13.0
           name: victoriatraces
           ports:
             - containerPort: 10428
