@@ -17,6 +17,8 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type wakeInfo = WakeInfo
@@ -41,6 +43,8 @@ type turnExecution struct {
 	stopTyping                                                                                  func()
 	hookMetadata                                                                                map[string]any
 	turnTokenUsage                                                                              runner.TokenUsage
+	turnModel                                                                                   string
+	turnSpan                                                                                    trace.Span
 	turnCtx                                                                                     context.Context
 	turnCancel                                                                                  context.CancelFunc
 	interrupted                                                                                 atomic.Bool
@@ -305,8 +309,11 @@ func (te *turnExecution) runPostTurnHook() {
 		postReq := buildPostTurnRequest(te)
 		ctx, cancel := context.WithTimeout(context.Background(), te.policy.Hooks.PostTurn.GetTimeout())
 		defer cancel()
+		ctx, span := te.startChildSpan(ctx, spanPostTurn)
+		defer span.End()
 		dispatcher, _ := te.resolveWebhookDispatcher()
 		if _, err := dispatcher.CallPostTurnHook(ctx, te.policy.Hooks.PostTurn, postReq); err != nil {
+			span.SetStatus(codes.Error, "post_turn hook failed")
 			log.Printf("[WorkerPool] Warning: post_turn hook failed for thread %s: %v", te.threadID, err)
 		}
 	}
@@ -384,23 +391,29 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	scopeLock.Lock()
 	defer scopeLock.Unlock()
 
-	turnCtx, turnCancel := context.WithCancel(p.ctx)
+	execStart := time.Now().UTC()
+	triggerType := resolveBurstTriggerType(burst[0])
+	spanCtx, turnSpan := p.beginTurnTrace(burstTraceItems(burst), threadID, triggerType, execStart)
+	turnCtx, turnCancel := context.WithCancel(spanCtx)
 	defer turnCancel()
 
 	te := &turnExecution{
 		pool:        p,
 		burst:       burst,
 		threadID:    threadID,
-		triggerType: resolveBurstTriggerType(burst[0]),
-		execStart:   time.Now().UTC(),
+		triggerType: triggerType,
+		execStart:   execStart,
 		wakeIdx:     -1,
 		isEphemeral: false,
 		stopTyping:  func() {},
 		turnCtx:     turnCtx,
 		turnCancel:  turnCancel,
+		turnSpan:    turnSpan,
 	}
 	p.registerActiveTurn(scopeKey, te)
 	defer p.unregisterActiveTurn(scopeKey, te)
+	// Registered before post_turn so the hook span lands inside the turn span.
+	defer te.endTurnSpan()
 
 	// Synchronous post_turn hook:
 	// Go defers execute LIFO. By placing post_turn right after scopeLock.Lock() / defer scopeLock.Unlock(),
@@ -428,6 +441,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	if !te.acquirePoolAndLease() {
 		return
 	}
+	defer te.markTurnActive()()
 	defer func() {
 		if te.lease != nil {
 			if relErr := te.lease.Release(); relErr != nil {
@@ -517,24 +531,29 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 		leaseKey = "dispatch-" + d.ID
 	}
 
-	turnCtx, turnCancel := context.WithCancel(p.ctx)
+	execStart := time.Now().UTC()
+	triggerType := "dispatch:" + d.Source
+	spanCtx, turnSpan := p.beginTurnTrace([]queuedTurnItem{{traceparent: d.Traceparent, createdAt: d.CreatedAt}}, leaseKey, triggerType, execStart)
+	turnCtx, turnCancel := context.WithCancel(spanCtx)
 	defer turnCancel()
 
 	te := &turnExecution{
 		pool:        p,
 		dispatch:    &d,
 		threadID:    leaseKey,
-		triggerType: "dispatch:" + d.Source,
-		execStart:   time.Now().UTC(),
+		triggerType: triggerType,
+		execStart:   execStart,
 		wakeIdx:     -1,
 		isEphemeral: isEphem,
 		stopTyping:  func() {},
 		turnCtx:     turnCtx,
 		turnCancel:  turnCancel,
+		turnSpan:    turnSpan,
 	}
 
 	p.registerActiveTurn(scopeKey, te)
 	defer p.unregisterActiveTurn(scopeKey, te)
+	defer te.endTurnSpan()
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -546,6 +565,7 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 		return
 	}
 	defer te.releaseActivePoolLease()
+	defer te.markTurnActive()()
 
 	cleanupChunk := p.setupVanadisChunkTurn(d, te)
 	defer cleanupChunk()
@@ -987,6 +1007,7 @@ func (te *turnExecution) buildLeaseTurnContext(runCtx context.Context, currentMo
 		chunkID, _, _ := extractVanadisDispatchInfo(te.dispatch)
 		vanadisChunkID = chunkID
 	}
+	te.turnModel = currentModel
 	return &runner.TurnContext{
 		TurnID:              uuid.New().String(),
 		SessionID:           sessIDToSend,
@@ -1021,7 +1042,7 @@ func (te *turnExecution) executeLeaseAttempt(currentModel, promptToSend string, 
 		if te.statusUpdater != nil {
 			te.statusUpdater.MarkTurnStarted()
 		}
-		sink := newDiscordTurnSink(te.statusUpdater)
+		sink := runner.NewTracingTurnSink(runCtx, newDiscordTurnSink(te.statusUpdater))
 		turnCtx := te.buildLeaseTurnContext(runCtx, currentModel, promptToSend, sink)
 		turnRes, execErr := te.lease.Execute(runCtx, turnCtx)
 		outcome, stderr := te.resolveTurnOutcome(runCtx, turnRes, execErr)

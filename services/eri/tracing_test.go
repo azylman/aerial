@@ -37,7 +37,7 @@ func TestSetupTracing(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			shutdown := setupTracing(context.Background(), path)
+			_, shutdown := setupTracing(context.Background(), path)
 			shutdown()
 			if fields := otel.GetTextMapPropagator().Fields(); !slices.Contains(fields, "traceparent") {
 				t.Errorf("propagator fields = %v, want traceparent", fields)
@@ -121,6 +121,28 @@ channels:
 			}
 			if got := storedTraceparent(t, store, tc.rowID); got != tc.want {
 				t.Errorf("stored traceparent = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWithAgentName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "stack persona", in: "marida", want: "marida"},
+		{name: "unset stack", in: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var opts brainAppOptions
+			WithAgentName(tc.in)(&opts)
+			if opts.agentName != tc.want {
+				t.Errorf("agentName = %q, want %q", opts.agentName, tc.want)
 			}
 		})
 	}

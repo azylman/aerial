@@ -68,12 +68,17 @@ func NewThrowawayTurnSink() *ThrowawayTurnSink {
 	return &ThrowawayTurnSink{resCh: make(chan string, 1), errCh: make(chan error, 1)}
 }
 
-func (s *ThrowawayTurnSink) OnTurnStarted()                                         { _ = s }
-func (s *ThrowawayTurnSink) OnThinking()                                            { _ = s }
-func (s *ThrowawayTurnSink) OnToolCall(_, _ string)                                 { _ = s }
-func (s *ThrowawayTurnSink) OnToolCompleted(_, _ string, _ time.Duration, _ string) { _ = s }
-func (s *ThrowawayTurnSink) OnSkillActivated(_, _ string)                           { _ = s }
-func (s *ThrowawayTurnSink) OnTextDelta(_ string)                                   { _ = s }
+func (s *ThrowawayTurnSink) OnTurnStarted() { _ = s }
+
+func (s *ThrowawayTurnSink) OnThinking() { _ = s }
+
+func (s *ThrowawayTurnSink) OnToolCall(_ ToolCall) { _ = s }
+
+func (s *ThrowawayTurnSink) OnToolCompleted(_ ToolCall, _ string, _ time.Duration, _ string) { _ = s }
+
+func (s *ThrowawayTurnSink) OnSkillActivated(_, _ string) { _ = s }
+
+func (s *ThrowawayTurnSink) OnTextDelta(_ string) { _ = s }
 
 func (s *ThrowawayTurnSink) OnResult(res *TurnResult) {
 	s.once.Do(func() {
@@ -146,17 +151,17 @@ func (s *BufferingTurnSink) OnStepStarted(stepIndex int) {
 	runHook(s.cfg.OnStepStarted, stepIndex)
 }
 
-func (s *BufferingTurnSink) OnToolCall(toolName, commandName string) {
+func (s *BufferingTurnSink) OnToolCall(call ToolCall) {
 	s.resetIntermediateBuffer()
-	runHook2(s.cfg.OnToolCall, toolName, commandName)
+	runHook2(s.cfg.OnToolCall, call.Name, call.Command)
 }
 
-func (s *BufferingTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
+func (s *BufferingTurnSink) OnToolCompleted(call ToolCall, mcpServer string, duration time.Duration, status string) {
 	if status != "aborted" {
 		s.resetIntermediateBuffer()
 	}
 	if s.cfg.OnToolCompleted != nil {
-		s.cfg.OnToolCompleted(toolName, mcpServer, duration, status)
+		s.cfg.OnToolCompleted(call.Name, mcpServer, duration, status)
 	}
 }
 

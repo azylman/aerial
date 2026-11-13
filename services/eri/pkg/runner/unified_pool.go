@@ -933,18 +933,18 @@ func (s *leaseTurnSinkWrapper) OnStepStarted(idx int) {
 	}
 }
 
-func (s *leaseTurnSinkWrapper) OnToolCall(tool, cmd string) {
+func (s *leaseTurnSinkWrapper) OnToolCall(call ToolCall) {
 	if s.inner != nil {
-		s.inner.OnToolCall(tool, cmd)
+		s.inner.OnToolCall(call)
 	}
-	s.buf.OnToolCall(tool, cmd)
+	s.buf.OnToolCall(call)
 }
 
-func (s *leaseTurnSinkWrapper) OnToolCompleted(tool, mcp string, d time.Duration, status string) {
+func (s *leaseTurnSinkWrapper) OnToolCompleted(call ToolCall, mcp string, d time.Duration, status string) {
 	if s.inner != nil {
-		s.inner.OnToolCompleted(tool, mcp, d, status)
+		s.inner.OnToolCompleted(call, mcp, d, status)
 	}
-	s.buf.OnToolCompleted(tool, mcp, d, status)
+	s.buf.OnToolCompleted(call, mcp, d, status)
 }
 
 func (s *leaseTurnSinkWrapper) OnSkillActivated(skill, src string) {

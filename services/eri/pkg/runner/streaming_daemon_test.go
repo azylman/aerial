@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,8 @@ type mockTurnSink struct {
 	thinking             int
 	stepStarts           []int
 	toolCalls            []string
+	calls                []ToolCall
+	completions          []ToolCall
 	completedTools       []string
 	completedToolDetails []mockCompletedTool
 	activatedSkills      []string
@@ -71,13 +74,27 @@ func (s *mockTurnSink) OnStepStarted(idx int) {
 	s.stepStarts = append(s.stepStarts, idx)
 }
 
-func (s *mockTurnSink) OnToolCall(tool, cmd string) {
+func (s *mockTurnSink) OnToolCall(call ToolCall) {
+	s.recordToolCall(call.Name, call.Command)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, call)
+}
+
+func (s *mockTurnSink) recordToolCall(tool, cmd string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.toolCalls = append(s.toolCalls, tool+":"+cmd)
 }
 
-func (s *mockTurnSink) OnToolCompleted(tool, srv string, d time.Duration, st string) {
+func (s *mockTurnSink) OnToolCompleted(call ToolCall, srv string, d time.Duration, st string) {
+	s.recordToolCompleted(call.Name, srv, d, st)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.completions = append(s.completions, call)
+}
+
+func (s *mockTurnSink) recordToolCompleted(tool, srv string, d time.Duration, st string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.completedTools = append(s.completedTools, tool+":"+srv+":"+st)
@@ -797,6 +814,84 @@ func TestExtractResponseStringAndPopulateUsage(t *testing.T) {
 		},
 	})
 	assertUsage(resClaude, 120, 50, 170, 10)
+	if resClaude.Usage.CacheCreationTokens != 20 {
+		t.Errorf("CacheCreationTokens = %d, want 20", resClaude.Usage.CacheCreationTokens)
+	}
+}
+
+func TestStreamingDaemon_ToolCallIdentity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		engine          string
+		lines           []string
+		wantCalls       []ToolCall
+		wantCompletions []ToolCall
+	}{
+		{
+			name:   "claude subagent children carry parent_tool_use_id",
+			engine: "claude",
+			lines: []string{
+				`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"research"}}]}}`,
+				`{"type":"assistant","parent_tool_use_id":"toolu_agent","message":{"content":[{"type":"tool_use","id":"toolu_a","name":"Grep","input":{"pattern":"x"}},{"type":"tool_use","id":"toolu_b","name":"Grep","input":{"pattern":"y"}}]}}`,
+				`{"type":"user","parent_tool_use_id":"toolu_agent","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_b","is_error":true}]}}`,
+				`{"type":"user","parent_tool_use_id":"toolu_agent","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a"}]}}`,
+				`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_agent"}]}}`,
+			},
+			wantCalls: []ToolCall{
+				{ID: "toolu_agent", Name: "Agent", Subagent: true},
+				{ID: "toolu_a", ParentID: "toolu_agent", Name: "Grep"},
+				{ID: "toolu_b", ParentID: "toolu_agent", Name: "Grep"},
+			},
+			wantCompletions: []ToolCall{
+				{ID: "toolu_b", ParentID: "toolu_agent", Name: "Grep"},
+				{ID: "toolu_a", ParentID: "toolu_agent", Name: "Grep"},
+				{ID: "toolu_agent", Name: "Agent", Subagent: true},
+			},
+		},
+		{
+			name:   "agy steps use step index ids and subagent step type",
+			engine: "",
+			lines: []string{
+				`{"event":"step_update","step_update":{"step_index":3,"type":"subagent","tool_name":"invoke_subagent"}}`,
+				`{"event":"step_update","step_update":{"step_index":4,"type":"tool_call","tool_name":"grep_search"}}`,
+				`{"event":"step_update","step_update":{"step_index":4,"type":"tool_call","state":"DONE"}}`,
+				`{"event":"step_update","step_update":{"step_index":3,"type":"subagent","state":"ERROR"}}`,
+			},
+			wantCalls: []ToolCall{
+				{ID: "step-3", Name: "invoke_subagent", Subagent: true},
+				{ID: "step-4", Name: "grep_search"},
+			},
+			wantCompletions: []ToolCall{
+				{ID: "step-4", Name: "grep_search"},
+				{ID: "step-3", Name: "invoke_subagent", Subagent: true},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := DaemonConfig{Engine: tc.engine, SessionID: "99999999-8888-7777-6666-000000000001", ClaudeBin: "claude", GeminiHomeDir: t.TempDir()}
+			h := startTestStreamingDaemon(t, cfg, "", true)
+			defer h.daemon.Close()
+			sink := newMockTurnSink()
+			turn := &TurnContext{TurnID: "identity", Prompt: "p", Sink: sink, CreatedAt: time.Now()}
+			if err := h.daemon.Send(turn.Prompt, turn); err != nil {
+				t.Fatalf("send failed: %v", err)
+			}
+			for _, line := range tc.lines {
+				h.daemon.dispatchNDJSONLine(line)
+			}
+			sink.mu.Lock()
+			defer sink.mu.Unlock()
+			if !reflect.DeepEqual(sink.calls, tc.wantCalls) {
+				t.Errorf("calls = %+v, want %+v", sink.calls, tc.wantCalls)
+			}
+			if !reflect.DeepEqual(sink.completions, tc.wantCompletions) {
+				t.Errorf("completions = %+v, want %+v", sink.completions, tc.wantCompletions)
+			}
+		})
+	}
 }
 
 func TestStreamingDaemon_OnTurnFinishedCallback(t *testing.T) {
@@ -1037,8 +1132,8 @@ func TestStreamingDaemon_StepAwareDeltaPurging(t *testing.T) {
 	mockSink := newMockTurnSink()
 	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{
 		OnStepStarted:   mockSink.OnStepStarted,
-		OnToolCall:      mockSink.OnToolCall,
-		OnToolCompleted: mockSink.OnToolCompleted,
+		OnToolCall:      mockSink.recordToolCall,
+		OnToolCompleted: mockSink.recordToolCompleted,
 		OnTextDelta:     mockSink.OnTextDelta,
 		OnComplete:      mockSink.OnResult,
 		OnError:         mockSink.OnError,
@@ -1278,10 +1373,10 @@ func TestStreamingDaemon_Claude_ErrorHandling(t *testing.T) {
 
 	// Verify recordToolStart unindexed duplicate
 	dTools := &StreamingDaemon{inFlightTools: make(map[int]inFlightToolCall)}
-	if !dTools.recordToolStart(-1, false, "read_file", "native") {
+	if !dTools.recordToolStart(-1, false, ToolCall{Name: "read_file"}, "native") {
 		t.Errorf("expected initial unindexed tool start true")
 	}
-	if dTools.recordToolStart(-1, false, "read_file", "native") {
+	if dTools.recordToolStart(-1, false, ToolCall{Name: "read_file"}, "native") {
 		t.Errorf("expected duplicate unindexed tool start false")
 	}
 }

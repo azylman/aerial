@@ -18,8 +18,8 @@ func TestThrowawayTurnSink(t *testing.T) {
 	s := NewThrowawayTurnSink()
 	s.OnTurnStarted()
 	s.OnThinking()
-	s.OnToolCall("bash", "ls")
-	s.OnToolCompleted("bash", "native", time.Millisecond, "ok")
+	s.OnToolCall(ToolCall{Name: "bash", Command: "ls"})
+	s.OnToolCompleted(ToolCall{Name: "bash"}, "native", time.Millisecond, "ok")
 	s.OnSkillActivated("sk", "src")
 	s.OnTextDelta("txt")
 	s.OnResult(&TurnResult{Response: "res"})
@@ -102,8 +102,8 @@ func TestBufferingTurnSink_LifecycleAndHooks(t *testing.T) {
 	})
 	sink.OnTurnStarted()
 	sink.OnThinking()
-	sink.OnToolCall("bash", "echo test")
-	sink.OnToolCompleted("bash", "native", 50*time.Millisecond, "ok")
+	sink.OnToolCall(ToolCall{Name: "bash", Command: "echo test"})
+	sink.OnToolCompleted(ToolCall{Name: "bash"}, "native", 50*time.Millisecond, "ok")
 	sink.OnSkillActivated("self-improvement", "discord")
 	sink.OnTextDelta("Hello ")
 	sink.OnTextDelta("world!")
@@ -123,7 +123,7 @@ func TestBufferingTurnSink_LifecycleAndHooks(t *testing.T) {
 		t.Fatalf("Wait or OnComplete mismatch: (%v, %v)", res, err)
 	}
 	nilSink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
-	nilSink.OnToolCompleted("bash", "native", 10*time.Millisecond, "ok")
+	nilSink.OnToolCompleted(ToolCall{Name: "bash"}, "native", 10*time.Millisecond, "ok")
 	nilSink.OnSkillActivated("self-improvement", "discord")
 }
 
@@ -176,15 +176,15 @@ func TestBufferingTurnSink_ToolResetPurgesBuffer(t *testing.T) {
 		}
 		feed(tc.pre)
 		if tc.call {
-			sink.OnToolCall("run_command", "bash")
+			sink.OnToolCall(ToolCall{Name: "run_command", Command: "bash"})
 		}
 		feed(tc.mid)
 		if tc.doneStatus != "" && tc.doneStatus != "aborted" {
-			sink.OnToolCompleted("run_command", "native", 100*time.Millisecond, tc.doneStatus)
+			sink.OnToolCompleted(ToolCall{Name: "run_command"}, "native", 100*time.Millisecond, tc.doneStatus)
 		}
 		feed(tc.post)
 		if tc.doneStatus == "aborted" {
-			sink.OnToolCompleted("invoke_subagent", "native", 100*time.Millisecond, tc.doneStatus)
+			sink.OnToolCompleted(ToolCall{Name: "invoke_subagent"}, "native", 100*time.Millisecond, tc.doneStatus)
 		}
 		if tc.res != "" {
 			sink.OnResult(&TurnResult{Response: tc.res})

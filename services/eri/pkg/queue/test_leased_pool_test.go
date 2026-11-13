@@ -301,18 +301,18 @@ func (s *testTurnSinkWrapper) OnStepStarted(idx int) {
 	s.buf.OnStepStarted(idx)
 }
 
-func (s *testTurnSinkWrapper) OnToolCall(t, c string) {
+func (s *testTurnSinkWrapper) OnToolCall(call runner.ToolCall) {
 	if s.inner != nil {
-		s.inner.OnToolCall(t, c)
+		s.inner.OnToolCall(call)
 	}
-	s.buf.OnToolCall(t, c)
+	s.buf.OnToolCall(call)
 }
 
-func (s *testTurnSinkWrapper) OnToolCompleted(t, m string, d time.Duration, st string) {
+func (s *testTurnSinkWrapper) OnToolCompleted(call runner.ToolCall, m string, d time.Duration, st string) {
 	if s.inner != nil {
-		s.inner.OnToolCompleted(t, m, d, st)
+		s.inner.OnToolCompleted(call, m, d, st)
 	}
-	s.buf.OnToolCompleted(t, m, d, st)
+	s.buf.OnToolCompleted(call, m, d, st)
 }
 
 func (s *testTurnSinkWrapper) OnSkillActivated(sk, src string) {
@@ -369,7 +369,7 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 	if turn != nil && turn.Sink != nil {
 		turn.Sink.OnTurnStarted()
 		if !strings.Contains(prompt, "Chunk ID:") {
-			turn.Sink.OnToolCall("processing", "")
+			turn.Sink.OnToolCall(runner.ToolCall{Name: "processing"})
 		}
 	}
 	timeout := s.pool.cfg.TimeoutMinutes
@@ -394,7 +394,7 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 	if turn != nil && turn.Sink != nil {
 		watchdogOpts.StepUpdateHandler = func(event *runner.StepUpdateEvent) {
 			if event != nil && event.Type == "tool_call" {
-				turn.Sink.OnToolCall(event.ToolName, event.ResolvedToolDetail())
+				turn.Sink.OnToolCall(runner.ToolCall{Name: event.ToolName, Command: event.ResolvedToolDetail()})
 			}
 		}
 	}
