@@ -512,6 +512,7 @@ func TestCheckCommit(t *testing.T) {
 		tool       string
 		cmd        string
 		arguments  string
+		server     string
 		cwd        string
 		mockDiff   string
 		emptyTree  bool
@@ -541,6 +542,13 @@ func TestCheckCommit(t *testing.T) {
 		{name: "mcp tool with lowercase tool_name and server_name denied", tool: "call_mcp_tool", cmd: "", arguments: `{"server_name":"github","tool_name":"get_file","arguments":{"token":"` + testPAT + `"}}`, cwd: "/workspace", wantDeny: true, wantReason: "GitHubPAT"},
 		{name: "mcp tool with uppercase ToolName and ServerName denied", tool: "call_mcp_tool", cmd: "", arguments: `{"ServerName":"github","ToolName":"get_file","Arguments":{"token":"` + testPAT + `"}}`, cwd: "/workspace", wantDeny: true, wantReason: "GitHubPAT"},
 		{name: "unrelated tool allowed", tool: "read_file", cmd: "", cwd: "/workspace"},
+		{name: "claude infisical delete-secret with registered secret allowed", tool: "mcp__infisical__delete-secret", arguments: `{"projectId":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1"},
+		{name: "claude infisical mixed case allowed", tool: "MCP__Infisical__get-secret", arguments: `{"projectId":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1"},
+		{name: "agy call_mcp_tool infisical server allowed", tool: "call_mcp_tool", server: " Infisical ", arguments: `{"projectId":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1"},
+		{name: "claude docket call with registered secret denied", tool: "mcp__docket__create", arguments: `{"body":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1", wantDeny: true, wantReason: "InfisicalSecret"},
+		{name: "claude infisical lookalike server denied", tool: "mcp__infisical-proxy__get-secret", arguments: `{"projectId":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1", wantDeny: true, wantReason: "InfisicalSecret"},
+		{name: "agy infisical lookalike server denied", tool: "call_mcp_tool", server: "my-infisical", arguments: `{"projectId":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1", wantDeny: true, wantReason: "InfisicalSecret"},
+		{name: "bash with registered secret still denied", tool: "Bash", cmd: "echo proj-registered-secret-1", secret: "proj-registered-secret-1", wantDeny: true, wantReason: "InfisicalSecret"},
 	}
 
 	for _, tc := range tests {
@@ -564,7 +572,9 @@ func TestCheckCommit(t *testing.T) {
 				return tc.mockDiff, nil
 			}
 
-			dec := CheckCommit(tc.tool, ToolArgs{CommandLine: tc.cmd, Arguments: []byte(tc.arguments), Cwd: cwd})
+			args := ToolArgs{CommandLine: tc.cmd, Arguments: []byte(tc.arguments), ServerName: tc.server, Cwd: cwd}
+			args.AdoptClaudeMCPCall(tc.tool, []byte(tc.arguments))
+			dec := CheckCommit(tc.tool, args)
 			if tc.wantDeny && dec.Decision != DecisionDeny {
 				t.Fatalf("expected deny, got %v", dec)
 			}
