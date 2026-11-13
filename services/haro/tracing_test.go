@@ -38,12 +38,10 @@ func TestPostBrainJSON_Traceparent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
-		path       string
 		withParent bool
 	}{
-		{name: "prompt continues the fire span's trace", path: "/prompt", withParent: true},
-		{name: "dispatch continues the fire span's trace", path: "/dispatch", withParent: true},
-		{name: "starts a trace when the caller has none", path: "/prompt"},
+		{name: "continues the fire span's trace", withParent: true},
+		{name: "starts a trace when the caller has none"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,7 +57,7 @@ func TestPostBrainJSON_Traceparent(t *testing.T) {
 			if tc.withParent {
 				ctx = parentCtx
 			}
-			if _, err := postBrainJSON[DispatchRequest, DispatchResponse](ctx, NewHTTPPromptDispatcher(srv.URL), tc.path, "dispatch", DispatchRequest{Source: "heartbeat"}); err != nil {
+			if _, err := postBrainJSON[DispatchRequest, DispatchResponse](ctx, NewHTTPPromptDispatcher(srv.URL), "/dispatch", "dispatch", DispatchRequest{Source: "heartbeat"}); err != nil {
 				t.Fatalf("postBrainJSON: %v", err)
 			}
 			id := traceparentTraceID(got)

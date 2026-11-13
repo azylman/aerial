@@ -225,3 +225,30 @@ func TestDiscordInteractionWorker_ResumesGatewayTrace(t *testing.T) {
 		})
 	}
 }
+
+func TestRegistryHaroClient_Traceparent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		injectClient bool // production passes the router's plain client via WithHaroClient
+	}{
+		{name: "injected client is wrapped and propagates", injectClient: true},
+		{name: "default client propagates"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := newTraceparentServer(t, 0, `{"status":"ok","matched":true}`)
+			var client *http.Client
+			if tc.injectClient {
+				client = srv.Client()
+			}
+			reg := NewPostgresPRRegistry(nil, WithHaroClient(srv.URL, client))
+			ctx, parentTraceID := recordedParent(t)
+			if matched, err := reg.CheckEventTriggers(ctx, "flux", []string{"aerial"}, "deployed"); err != nil || !matched {
+				t.Fatalf("CheckEventTriggers = %v, %v", matched, err)
+			}
+			assertTraceIDs(t, srv.traceIDs(), 1, parentTraceID, true)
+		})
+	}
+}

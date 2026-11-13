@@ -46,12 +46,10 @@ func TestPostBrainJSON_Traceparent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
-		path       string
 		withParent bool
 	}{
-		{name: "dispatch continues the caller's trace", path: "/dispatch", withParent: true},
-		{name: "wake prompt continues the caller's trace", path: "/prompt", withParent: true},
-		{name: "starts a trace when the caller has none", path: "/dispatch"},
+		{name: "dispatch continues the caller's trace", withParent: true},
+		{name: "starts a trace when the caller has none"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,7 +62,7 @@ func TestPostBrainJSON_Traceparent(t *testing.T) {
 				ctx = parentCtx
 			}
 			s := NewVanadisServer(Config{BrainURL: srv.URL}, nil, nil, srv.Client())
-			if _, err := s.postBrainJSON(ctx, tc.path, BrainDispatchRequest{Source: "vanadis"}, 0); err != nil {
+			if _, err := s.postBrainJSON(ctx, "/dispatch", BrainDispatchRequest{Source: "vanadis"}, 0); err != nil {
 				t.Fatalf("postBrainJSON: %v", err)
 			}
 			sc := traceparentContext(got)

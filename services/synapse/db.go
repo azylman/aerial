@@ -164,7 +164,8 @@ func WithVanadisClient(vanadisURL string, client *http.Client) func(*PostgresPRR
 			r.vanadisURL = strings.TrimRight(vanadisURL, "/")
 		}
 		if client != nil {
-			r.httpClient = client
+			// Wrapped here so injected clients keep traceparent propagation to vanadis/haro.
+			r.httpClient = tracing.Client(client)
 		}
 	}
 }
