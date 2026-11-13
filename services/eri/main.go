@@ -40,13 +40,6 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-func InitializeBrainEnvironment(ctx context.Context, cfg *config.Config) error {
-	if cfg == nil {
-		return nil
-	}
-	return syncBrainEnvironment(ctx, env.NewFromConfig(cfg), cfg)
-}
-
 // syncBrainEnvironment provisions rules, skills, hooks and MCP configs with provisioner.
 func syncBrainEnvironment(ctx context.Context, provisioner *env.Provisioner, cfg *config.Config) error {
 	if err := provisioner.Sync(ctx, cfg); err != nil {
