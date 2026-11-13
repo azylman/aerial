@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -87,7 +88,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/context", s.handleContext)
 	mux.HandleFunc("/consolidate", s.handleConsolidate)
 
-	mcpBridge := http.HandlerFunc(s.handleMCP)
+	mcpBridge := tracing.Middleware("coven", http.HandlerFunc(s.handleMCP))
 	mux.Handle("/mcp", mcpBridge)
 	mux.Handle("/sse", mcpBridge)
 	mux.Handle("/", mcpBridge)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // RunApp bootstraps the coven MCP HTTP server with graceful shutdown.
@@ -117,8 +118,11 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	_, flushTracing := tracing.Init(ctx, "coven", tracing.DefaultConfigPath)
 
-	if err := runAppFn(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err = runAppFn(ctx, cfg)
+	flushTracing()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		exitFn("Server failure: %v", err)
 	}
 }

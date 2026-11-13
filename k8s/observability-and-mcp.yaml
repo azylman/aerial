@@ -1565,6 +1565,9 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /config/tracing
+              name: tracing-config
+              readOnly: true
             - mountPath: /config/config.yaml
               name: config
               subPath: discord-mcp.yaml
@@ -1572,6 +1575,10 @@ spec:
               name: config
               subPath: discord-mcp.yaml
       volumes:
+        - configMap:
+            name: tracing-config
+            optional: true
+          name: tracing-config
         - configMap:
             defaultMode: 420
             name: mcp-configs
@@ -1995,6 +2002,9 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /config/tracing
+              name: tracing-config
+              readOnly: true
             - mountPath: /config/config.yaml
               name: config
               subPath: kernel-mcp.yaml
@@ -2002,6 +2012,10 @@ spec:
               name: config
               subPath: kernel-mcp.yaml
       volumes:
+        - configMap:
+            name: tracing-config
+            optional: true
+          name: tracing-config
         - configMap:
             defaultMode: 420
             name: mcp-configs
@@ -2078,6 +2092,9 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /config/tracing
+              name: tracing-config
+              readOnly: true
             - mountPath: /share
               name: share
               readOnly: true
@@ -2129,6 +2146,10 @@ spec:
       securityContext:
         fsGroup: 65533
       volumes:
+        - configMap:
+            name: tracing-config
+            optional: true
+          name: tracing-config
         - emptyDir: {}
           name: share
 ---
@@ -2337,6 +2358,9 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
+            - mountPath: /config/tracing
+              name: tracing-config
+              readOnly: true
             - mountPath: /config/config.yaml
               name: config
               subPath: docket-mcp.yaml
@@ -2347,6 +2371,10 @@ spec:
               name: config
               subPath: docket-schema.sql
       volumes:
+        - configMap:
+            name: tracing-config
+            optional: true
+          name: tracing-config
         - configMap:
             defaultMode: 420
             name: mcp-configs

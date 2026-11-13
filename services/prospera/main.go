@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 var transcriptBatchInterval = 5 * time.Second
@@ -167,7 +168,11 @@ func main() {
 		}
 	}()
 
-	if err := runAppFn(ctx, cfgSrc); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	_, flushTracing := tracing.Init(ctx, "prospera", tracing.DefaultConfigPath)
+
+	err = runAppFn(ctx, cfgSrc)
+	flushTracing()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		exitFn("prospera exited with error: %v", err)
 	}
 }

@@ -171,8 +171,10 @@ func Traceparent(ctx context.Context) string {
 }
 
 // Middleware extracts inbound trace context and wraps next in a server span named
-// "<METHOD> <route pattern>" once the mux has routed the request (operation when no
-// route matched). Attributes never include the URL path or query string.
+// "<METHOD> <route pattern>" (operation when no route matched). When Middleware wraps a
+// handler the mux already routed, the span is named up front so next may rename it (e.g.
+// "mcp tools/call"); when it wraps a whole mux, the name is set after routing. Attributes
+// never include the URL path or query string.
 func Middleware(operation string, next http.Handler) http.Handler {
 	return newMiddleware(otel.GetTracerProvider(), otel.GetTextMapPropagator(), operation, next)
 }
@@ -181,17 +183,20 @@ func newMiddleware(tp trace.TracerProvider, prop propagation.TextMapPropagator, 
 	tracer := tp.Tracer(ScopeName)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
-		ctx, span := tracer.Start(ctx, operation,
-			trace.WithSpanKind(trace.SpanKindServer),
-			trace.WithAttributes(attribute.String("http.request.method", r.Method)),
-		)
+		name, attrs := operation, []attribute.KeyValue{attribute.String("http.request.method", r.Method)}
+		preRouted := routeFromPattern(r.Pattern)
+		if preRouted != "" {
+			name = r.Method + " " + preRouted
+			attrs = append(attrs, attribute.String("http.route", preRouted))
+		}
+		ctx, span := tracer.Start(ctx, name, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(attrs...))
 		defer span.End()
 
 		rec := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		req := r.WithContext(ctx)
 		next.ServeHTTP(rec, req)
 
-		if route := routeFromPattern(req.Pattern); route != "" {
+		if route := routeFromPattern(req.Pattern); preRouted == "" && route != "" {
 			span.SetName(r.Method + " " + route)
 			span.SetAttributes(attribute.String("http.route", route))
 		}

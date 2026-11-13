@@ -278,6 +278,8 @@ func TestMiddleware(t *testing.T) {
 		pattern     string
 		target      string
 		traceparent string
+		preRouted   string
+		rename      string
 		status      int
 		wantName    string
 		wantRoute   string
@@ -300,6 +302,14 @@ func TestMiddleware(t *testing.T) {
 			name: "unmatched keeps operation name", pattern: "/prompt", target: "/nope", status: http.StatusNotFound,
 			wantName: "eri",
 		},
+		{
+			name: "pre-routed handler rename sticks", pattern: "/mcp", target: "/mcp", preRouted: "/mcp", rename: "mcp tools/call",
+			status: http.StatusOK, wantName: "mcp tools/call", wantRoute: "/mcp",
+		},
+		{
+			name: "post-routed name replaces handler rename", pattern: "/mcp", target: "/mcp", rename: "mcp tools/call",
+			status: http.StatusOK, wantName: "POST /mcp", wantRoute: "/mcp",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -309,9 +319,13 @@ func TestMiddleware(t *testing.T) {
 			mux := http.NewServeMux()
 			mux.HandleFunc(tc.pattern, func(w http.ResponseWriter, r *http.Request) {
 				handlerTP = Traceparent(r.Context())
+				if tc.rename != "" {
+					trace.SpanFromContext(r.Context()).SetName(tc.rename)
+				}
 				w.WriteHeader(tc.status)
 			})
 			req := httptest.NewRequest(http.MethodPost, tc.target, nil)
+			req.Pattern = tc.preRouted
 			if tc.traceparent != "" {
 				req.Header.Set("Traceparent", tc.traceparent)
 			}

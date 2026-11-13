@@ -51,6 +51,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
 		return
 	}
+	httpkit.AnnotateMCPSpan(r.Context(), bodyBytes)
 
 	// 1. Check if the request is attempting to call a blocked tool
 	isBlocked, reqID, toolName, err := IsBlockedToolCall(bodyBytes, p.blockedTools)
