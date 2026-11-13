@@ -69,6 +69,8 @@ type TracingTurnSink struct {
 	chat   trace.Span
 	open   []*openToolSpan // start order, for FIFO correlation of ID-less calls
 	closed bool
+	usage  AgyUsage      // usage recorded on the chat span; set when the turn closes
+	done   chan struct{} // closed once the turn has closed
 }
 
 var (
@@ -83,7 +85,21 @@ func NewTracingTurnSink(turnCtx context.Context, inner TurnSink) *TracingTurnSin
 		turnCtx = context.Background()
 	}
 	turn := trace.SpanFromContext(turnCtx)
-	return &TracingTurnSink{inner: inner, tracer: turn.TracerProvider().Tracer(TracerScope), turn: turn}
+	return &TracingTurnSink{inner: inner, tracer: turn.TracerProvider().Tracer(TracerScope), turn: turn, done: make(chan struct{})}
+}
+
+// Usage waits until the turn has closed (on its result, its error, or daemon death) or ctx is
+// done, and returns the token usage recorded on the chat span. ok is false if the turn had not
+// closed in time.
+func (s *TracingTurnSink) Usage(ctx context.Context) (usage AgyUsage, ok bool) {
+	select {
+	case <-s.done:
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.usage, true
+	case <-ctx.Done():
+		return AgyUsage{}, false
+	}
 }
 
 // startUnder starts a span named name as a child of parent.
@@ -142,9 +158,9 @@ func (s *TracingTurnSink) OnTextDelta(delta string) {
 }
 
 func (s *TracingTurnSink) OnResult(res *TurnResult) {
-	var usage []attribute.KeyValue
+	var usage *AgyUsage
 	if res != nil {
-		usage = UsageAttributes(res.Usage)
+		usage = &res.Usage
 	}
 	s.closeTurn(codes.Unset, "", usage)
 	if s.inner != nil {
@@ -154,12 +170,12 @@ func (s *TracingTurnSink) OnResult(res *TurnResult) {
 
 func (s *TracingTurnSink) OnError(err error) {
 	msg := ""
-	var usage []attribute.KeyValue
+	var usage *AgyUsage
 	if err != nil {
 		msg = tracing.Redact(err.Error())
 	}
 	if u, ok := UsageFromError(err); ok {
-		usage = UsageAttributes(u)
+		usage = &u
 	}
 	s.closeTurn(codes.Error, msg, usage)
 	if s.inner != nil {
@@ -265,17 +281,24 @@ func (s *TracingTurnSink) indexFIFOLocked(name string) int {
 }
 
 // closeTurn ends every still-open tool span (innermost first) and the chat span. It runs
-// once: on the turn result, the turn error, or daemon death (which surfaces as OnError).
-func (s *TracingTurnSink) closeTurn(code codes.Code, msg string, usage []attribute.KeyValue) {
+// once: on the turn result, the turn error, or daemon death (which surfaces as OnError). A nil
+// usage leaves the chat span without usage attributes.
+func (s *TracingTurnSink) closeTurn(code codes.Code, msg string, usage *AgyUsage) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return
 	}
 	s.closed = true
+	if usage != nil {
+		s.usage = *usage
+	}
 	open, chat := s.open, s.chat
 	s.open, s.chat = nil, nil
 	s.mu.Unlock()
+	if s.done != nil {
+		defer close(s.done)
+	}
 
 	for _, ts := range slices.Backward(open) {
 		finishToolSpan(ts, toolStatusAbortedOnTurnClose)
@@ -283,7 +306,9 @@ func (s *TracingTurnSink) closeTurn(code codes.Code, msg string, usage []attribu
 	if chat == nil {
 		chat = s.startUnder(s.turn, OperationChat, AttrGenAIOperationName.String(OperationChat))
 	}
-	chat.SetAttributes(usage...)
+	if usage != nil {
+		chat.SetAttributes(UsageAttributes(*usage)...)
+	}
 	if code == codes.Error {
 		chat.SetStatus(codes.Error, msg)
 	}

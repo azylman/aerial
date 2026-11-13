@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -395,6 +396,34 @@ func TestSessionCorruptionRetry_ReregistersActiveTurn(t *testing.T) {
 			_ = te.lease.Release()
 			if _, ok := pool.ActiveTurns().SoleTurnInTarget("ephemeral"); ok {
 				t.Errorf("turn still registered after clear")
+			}
+		})
+	}
+}
+
+func TestLateSinkUsage(t *testing.T) {
+	t.Parallel()
+	killed := runner.AgyUsage{InputTokens: 34606, OutputTokens: 198, CacheReadTokens: 391188, CacheCreationTokens: 34588, TotalTokens: 34804}
+	closedOnKill := runner.NewTracingTurnSink(context.Background(), nil)
+	closedOnKill.OnError(&runner.TurnError{Err: errors.New("daemon closed while turn was in-flight"), Usage: killed})
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests := []struct {
+		name string
+		sink *runner.TracingTurnSink
+		ctx  context.Context
+		want runner.TokenUsage
+	}{
+		{"no attempt ran", nil, context.Background(), runner.TokenUsage{}},
+		{"killed turn reports consumed usage", closedOnKill, context.Background(), killed},
+		{"turn never closed before the grace ran out", runner.NewTracingTurnSink(context.Background(), nil), cancelled, runner.TokenUsage{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			te := &turnExecution{traceSink: tc.sink}
+			if got := te.lateSinkUsage(tc.ctx); got != tc.want {
+				t.Errorf("lateSinkUsage = %+v, want %+v", got, tc.want)
 			}
 		})
 	}

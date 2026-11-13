@@ -144,12 +144,33 @@ func (p *WorkerPool) beginTurnTrace(items []queuedTurnItem, conversationID, trig
 	})
 }
 
+// turnSinkCloseGrace bounds how long a turn that ended without usage waits for the daemon to
+// report its failure. A cancelled or interrupted turn returns before the killed daemon reports,
+// and that report carries the tokens the turn already consumed.
+const turnSinkCloseGrace = 2 * time.Second
+
+// lateSinkUsage returns the usage the latest attempt's trace sink recorded once its turn closes,
+// or zero if there is no sink or ctx ends first.
+func (te *turnExecution) lateSinkUsage(ctx context.Context) runner.TokenUsage {
+	if te.traceSink == nil {
+		return runner.TokenUsage{}
+	}
+	usage, _ := te.traceSink.Usage(ctx)
+	return usage
+}
+
 // endTurnSpan records model, usage and outcome on the root span and ends it.
 func (te *turnExecution) endTurnSpan() {
 	if te.turnSpan == nil {
 		return
 	}
-	te.turnSpan.SetAttributes(turnSpanEndAttributes(te.turnModel, te.turnTokenUsage, te.turnStatus)...)
+	usage := te.turnTokenUsage
+	if usage == (runner.TokenUsage{}) {
+		ctx, cancel := context.WithTimeout(context.Background(), turnSinkCloseGrace)
+		usage = te.lateSinkUsage(ctx)
+		cancel()
+	}
+	te.turnSpan.SetAttributes(turnSpanEndAttributes(te.turnModel, usage, te.turnStatus)...)
 	if te.turnStatus != "" && te.turnStatus != "success" {
 		te.turnSpan.SetStatus(codes.Error, te.turnStatus)
 	}

@@ -43,6 +43,7 @@ type turnExecution struct {
 	stopTyping                                                                                  func()
 	hookMetadata                                                                                map[string]any
 	turnTokenUsage                                                                              runner.TokenUsage
+	traceSink                                                                                   *runner.TracingTurnSink // latest attempt's sink; reports usage of turns cut short
 	turnModel                                                                                   string
 	turnSpan                                                                                    trace.Span
 	activeTurnDaemon                                                                            string // daemon registered in ActiveTurnRegistry for this turn
@@ -1044,6 +1045,7 @@ func (te *turnExecution) executeLeaseAttempt(currentModel, promptToSend string, 
 			te.statusUpdater.MarkTurnStarted()
 		}
 		sink := runner.NewTracingTurnSink(runCtx, newDiscordTurnSink(te.statusUpdater))
+		te.traceSink = sink
 		turnCtx := te.buildLeaseTurnContext(runCtx, currentModel, promptToSend, sink)
 		turnRes, execErr := te.lease.Execute(runCtx, turnCtx)
 		outcome, stderr := te.resolveTurnOutcome(runCtx, turnRes, execErr)
