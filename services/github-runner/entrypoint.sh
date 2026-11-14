@@ -72,12 +72,19 @@ exclude_patterns = [
   "pnpm-lock.yaml",
   "web/static/ui/**",
   "migrations/*.sql",
+  "db/migrations/*.sql",
+  "scratch-service/migrations/*.sql",
+  "services/eri/pkg/db/migrations/*.sql",
   "**/migrations/*.sql",
+  "vision/web/src/__fixtures__/*.json",
   "**/__fixtures__/*.json"
 ]
 
 [ci]
+agents = ["claude-code"]
 review_types = ["default", "test-value"]
+min_severity = "medium"
+upsert_comments = true
 
 [review]
 default_panel = "ci"
@@ -124,12 +131,19 @@ exclude_patterns = [
   "pnpm-lock.yaml",
   "web/static/ui/**",
   "migrations/*.sql",
+  "db/migrations/*.sql",
+  "scratch-service/migrations/*.sql",
+  "services/eri/pkg/db/migrations/*.sql",
   "**/migrations/*.sql",
+  "vision/web/src/__fixtures__/*.json",
   "**/__fixtures__/*.json"
 ]
 
 [ci]
+agents = ["gemini"]
 review_types = ["default", "test-value"]
+min_severity = "medium"
+upsert_comments = true
 
 [review]
 default_panel = "ci"
