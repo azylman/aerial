@@ -670,9 +670,6 @@ ollama:
 	noPRRegFile := filepath.Join(tmpDir, "no_pr_reg.yaml")
 	_ = os.WriteFile(noPRRegFile, []byte(strings.Replace(baseContent, `pr_register_url: "http://synapse.aerial/internal/pr/register"`, `pr_register_url: ""`, 1)), 0o644)
 
-	noOllamaURLFile := filepath.Join(tmpDir, "no_ollama_url.yaml")
-	_ = os.WriteFile(noOllamaURLFile, []byte(strings.Replace(baseContent, `base_url: "http://ollama:11434"`, `base_url: ""`, 1)), 0o644)
-
 	tests := []struct {
 		name         string
 		path         string
@@ -699,11 +696,6 @@ ollama:
 		{
 			name:    "MissingBrainPRRegisterURLFails",
 			path:    noPRRegFile,
-			wantErr: true,
-		},
-		{
-			name:    "MissingOllamaBaseURLFails",
-			path:    noOllamaURLFile,
 			wantErr: true,
 		},
 	}

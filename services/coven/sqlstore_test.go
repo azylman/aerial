@@ -193,38 +193,34 @@ func TestSQLStore_FetchBrainJSON(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotAuthHeader string
-			var srv *httptest.Server
-			if !tc.emptyURL {
-				srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					gotAuthHeader = r.Header.Get("Authorization")
-					w.WriteHeader(tc.serverCode)
-					_, _ = w.Write([]byte(tc.serverBody))
-				}))
-				defer srv.Close()
-			}
+			var srvCalls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				srvCalls++
+				gotAuthHeader = r.Header.Get("Authorization")
+				w.WriteHeader(tc.serverCode)
+				_, _ = w.Write([]byte(tc.serverBody))
+			}))
+			defer srv.Close()
 
-			brainURL := ""
-			var client *http.Client
-			if srv != nil {
-				brainURL = srv.URL
-				client = srv.Client()
+			brainURL := srv.URL
+			if tc.emptyURL {
+				brainURL = ""
 			}
 
 			store := &SQLStore{
 				brainURL:   brainURL,
-				httpClient: client,
+				httpClient: srv.Client(),
 				brainToken: tc.token,
 			}
 			var dst struct {
 				Val string `json:"val"`
 			}
-			fetchURL := ""
-			if srv != nil {
-				fetchURL = srv.URL + "/test"
-			}
-			err := store.fetchBrainJSON(ctx, fetchURL, "test", &dst)
+			err := store.fetchBrainJSON(ctx, srv.URL+"/test", "test", &dst)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("fetchBrainJSON() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.emptyURL && srvCalls != 0 {
+				t.Errorf("server calls = %d, want 0 on unconfigured brain URL", srvCalls)
 			}
 			if !tc.wantErr {
 				if dst.Val != tc.wantVal {

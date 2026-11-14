@@ -875,8 +875,8 @@ func TestOllamaClient_GenerateEmbedding(t *testing.T) {
 		{name: "RetrySucceedsOnSecondAttempt", handlerCodes: []int{http.StatusInternalServerError, http.StatusOK}, handlerBodies: []string{`temporary error`, `{"embedding": [0.1, 0.2]}`}, input: "retry query", isQuery: true, prefix: "q: ", maxRetries: 2, retryDelay: 1 * time.Millisecond, wantVecLen: 2},
 		{name: "NegativeRetriesClampedAndFails", handlerCodes: []int{http.StatusInternalServerError}, handlerBodies: []string{`temporary error`}, input: "query", maxRetries: -1, wantErr: true},
 		{name: "ContextCanceledError", handlerCodes: []int{http.StatusInternalServerError}, handlerBodies: []string{`err`}, input: "query", maxRetries: 1, cancelCtx: true, wantErr: true},
-		{name: "EmptyTextInputError", input: "", wantErr: true, handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{}`}},
-		{name: "UnconfiguredBaseURLError", input: "test text", wantErr: true, emptyBaseURL: true},
+		{name: "EmptyTextInputError", input: "", wantErr: true, errSubstr: "text cannot be empty", handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{}`}},
+		{name: "UnconfiguredBaseURLError", input: "test text", wantErr: true, errSubstr: "ollama base URL is not configured", emptyBaseURL: true},
 		{name: "Non200Error", handlerCodes: []int{http.StatusInternalServerError}, handlerBodies: []string{`internal server error`}, input: "test text", wantErr: true},
 		{name: "InvalidJSONResponse", handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{bad json`}, input: "test text", wantErr: true},
 		{name: "OllamaErrorResponse", handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{"error": "model not found"}`}, input: "test text", wantErr: true},
@@ -901,6 +901,7 @@ type ollamaEmbeddingTestCase struct {
 	retryDelay    time.Duration
 	cancelCtx     bool
 	wantErr       bool
+	errSubstr     string
 	wantVecLen    int
 	expectPrompt  string
 	emptyBaseURL  bool
@@ -950,6 +951,11 @@ func runOllamaEmbeddingCase(t *testing.T, tc ollamaEmbeddingTestCase) {
 	vec, err := client.GenerateEmbedding(ctx, tc.input, tc.isQuery, tc.maxRetries)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("GenerateEmbedding() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr && tc.errSubstr != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
+			t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
+		}
 	}
 	if !tc.wantErr && len(vec) != tc.wantVecLen {
 		t.Errorf("len(vec) = %d, want %d", len(vec), tc.wantVecLen)

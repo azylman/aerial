@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -16,15 +15,6 @@ const DefaultConfigPath = "/config/coven.yaml"
 
 // DefaultPort is the fallback port when unspecified.
 const DefaultPort = "4008"
-
-// DefaultBrainURL is the fallback internal brain HTTP base URL.
-const DefaultBrainURL = "http://eri.aerial"
-
-// DefaultBrainLLMURL is the fallback brain LLM proxy URL.
-const DefaultBrainLLMURL = "http://eri.aerial/internal/llm"
-
-// DefaultOllamaURL is the fallback Ollama API base URL.
-const DefaultOllamaURL = "http://ollama:11434"
 
 // DefaultOllamaModel is the default embedding model.
 const DefaultOllamaModel = "all-minilm"
@@ -43,9 +33,6 @@ const DefaultConfigRepoOwner = "azylman"
 
 // DefaultConfigRepoName is the default repository name of the configuration repository.
 const DefaultConfigRepoName = "aerial-config"
-
-// DefaultBrainPRRegisterURL is the default internal brain PR registration endpoint.
-const DefaultBrainPRRegisterURL = "http://synapse.aerial/internal/pr/register"
 
 var systemChannelIDRegex = regexp.MustCompile(`^[0-9]{17,20}$`)
 
@@ -172,7 +159,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 	ollamaBaseURL := strings.TrimSpace(ycfg.Ollama.BaseURL)
 	if ollamaBaseURL == "" {
-		return nil, errors.New("missing required configuration: ollama.base_url")
+		return nil, fmt.Errorf("config: ollama.base_url is required in %s", cleanPath)
 	}
 	ollamaModel := strings.TrimSpace(ycfg.Ollama.Model)
 	if ollamaModel == "" {
