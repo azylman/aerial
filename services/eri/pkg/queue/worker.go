@@ -37,6 +37,7 @@ type turnExecution struct {
 	turnDurationMs                                                                              int64
 	lease                                                                                       runner.SessionLease
 	isCold, isEphemeral, isThread, isQuotaPaused, turnAttempted                                 bool
+	summarizeThread                                                                             bool // channel is a summarized Discord thread (set by buildTurnPrompt)
 	policy                                                                                      config.ChannelPolicy
 	wakeInfos                                                                                   []wakeInfo
 	statusUpdater                                                                               *StatusUpdater
@@ -51,6 +52,7 @@ type turnExecution struct {
 	turnCtx                                                                                     context.Context
 	turnCancel                                                                                  context.CancelFunc
 	interrupted                                                                                 atomic.Bool
+	finalized                                                                                   atomic.Bool // burst committed as completed; interrupts only cancel post-turn work
 	interruptReason                                                                             string
 }
 
@@ -473,6 +475,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	te.buildTurnPrompt(promptCtx)
 	promptSpan.End()
 	te.executeWithRetries()
+	te.refreshThreadSummaryAtTurnEnd(te.turnCtxValue())
 }
 
 func (te *turnExecution) releaseActivePoolLease() {

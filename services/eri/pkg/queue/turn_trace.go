@@ -25,6 +25,9 @@ const (
 	spanLease     = "session.lease"
 	spanPrompt    = "prompt.build"
 
+	// spanTurnSummaryRefresh wraps the thread summary refresh run after a successful thread turn delivered.
+	spanTurnSummaryRefresh = "turn.summary_refresh"
+
 	// Child spans of prompt.build: every step that can block while the prompt is assembled.
 	spanPromptChannelSnapshot  = "prompt.channel_snapshot"
 	spanPromptHistoryFetch     = "prompt.history_fetch"
