@@ -229,7 +229,8 @@ func (te *turnExecution) lateSinkUsage(ctx context.Context) runner.TokenUsage {
 // turnStatusUnknown marks an attempted turn that ended without any path assigning its outcome.
 const turnStatusUnknown = "unknown"
 
-// endTurnSpan records model, usage and outcome on the root span and ends it.
+// endTurnSpan records model, usage and outcome (plus the prompt and response when the pool
+// captures content) on the root span and ends it.
 func (te *turnExecution) endTurnSpan() {
 	if te.turnSpan == nil {
 		return
@@ -244,6 +245,9 @@ func (te *turnExecution) endTurnSpan() {
 	if status == "" && te.turnAttempted {
 		// An attempted turn must end with an outcome; surface any path that forgot to assign one.
 		status = turnStatusUnknown
+	}
+	if te.pool != nil && te.pool.cfg.TraceContent {
+		te.turnSpan.SetAttributes(runner.ContentAttributes(te.sentPrompt, te.turnResponseText)...)
 	}
 	finishTurnSpan(te.turnSpan, te.turnModel, usage, status)
 }

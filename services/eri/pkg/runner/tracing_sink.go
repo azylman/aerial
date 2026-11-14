@@ -96,7 +96,8 @@ func newClaimTimer(d time.Duration) (<-chan time.Time, func() bool) {
 // (carrying usage) and one execute_tool span per tool call, nested under a child
 // invoke_agent span when the call runs inside a subagent. Every callback is forwarded to
 // the inner sink unchanged. Span attributes carry only tool names, call IDs, MCP server
-// names and redacted statuses, never tool arguments or response text.
+// names and redacted statuses: tool arguments are never recorded, and prompt/response text
+// only on invoke_agent spans when tracing's capture_content is on (see ContentAttributes).
 type TracingTurnSink struct {
 	inner    TurnSink
 	tracer   trace.Tracer
@@ -422,4 +423,14 @@ func (s *TracingTurnSink) closeTurn(code codes.Code, msg string, usage *AgyUsage
 		chat.SetStatus(codes.Error, msg)
 	}
 	chat.End()
+}
+
+// ContentAttributes renders a run's prompt and response as the redacted, size-capped
+// gen_ai.input.messages and gen_ai.output.messages attributes. Callers add them to an
+// invoke_agent span only when tracing's capture_content is on.
+func ContentAttributes(prompt, response string) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		tracing.ContentAttr(tracing.AttrGenAIInputMessages, tracing.RoleUser, prompt),
+		tracing.ContentAttr(tracing.AttrGenAIOutputMessages, tracing.RoleAssistant, response),
+	}
 }

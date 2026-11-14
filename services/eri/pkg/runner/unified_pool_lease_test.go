@@ -345,7 +345,9 @@ func verifyHandshakeRetryPool(ctx context.Context, t *testing.T, pinnedSessID st
 		skipInitOnAttempt: 1,
 		onSpawn:           func(cfg DaemonConfig) { retryAttempts.Add(1) },
 	})
-	retryPool := NewUnifiedProcessPool(PoolConfig{HandshakeTimeout: 5 * time.Millisecond}, retryMock)
+	// Attempt 1 never sends init and always times out; the timeout must still leave attempt 2
+	// room to hand-shake on a loaded -race CI runner (5ms flaked there).
+	retryPool := NewUnifiedProcessPool(PoolConfig{HandshakeTimeout: 250 * time.Millisecond}, retryMock)
 	defer retryPool.Close()
 	if dRetry, rErr := retryPool.GetOrCreate(ctx, "thread-handshake-retry", ""); rErr != nil || dRetry == nil || retryAttempts.Load() != 2 {
 		t.Fatalf("expected handshake timeout retry: d=%v err=%v attempts=%d", dRetry, rErr, retryAttempts.Load())

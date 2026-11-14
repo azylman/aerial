@@ -190,6 +190,48 @@ func TestTurnSpanEndAttributes(t *testing.T) {
 	}
 }
 
+func TestEndTurnSpanContent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		capture    bool // WorkerPoolConfig.TraceContent
+		wantInput  string
+		wantOutput string
+	}{
+		{
+			name: "capture on records prompt and response", capture: true,
+			wantInput:  `[{"role":"user","parts":[{"type":"text","content":"what's the weather?"}]}]`,
+			wantOutput: `[{"role":"assistant","parts":[{"type":"text","content":"sunny"}]}]`,
+		},
+		{name: "capture off records no content"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+			_, span := tp.Tracer("test").Start(context.Background(), "invoke_agent")
+			te := &turnExecution{
+				pool:     &WorkerPool{cfg: WorkerPoolConfig{TraceContent: tc.capture}},
+				turnSpan: span, sentPrompt: "what's the weather?", turnResponseText: "sunny",
+				turnStatus: "success", turnTokenUsage: runner.TokenUsage{InputTokens: 1},
+			}
+			te.endTurnSpan()
+			ended := rec.Ended()
+			if len(ended) != 1 {
+				t.Fatalf("ended spans = %d, want 1", len(ended))
+			}
+			have := attrMap(ended[0].Attributes())
+			if got := have[tracing.AttrGenAIInputMessages].AsString(); got != tc.wantInput {
+				t.Errorf("input = %q, want %q", got, tc.wantInput)
+			}
+			if got := have[tracing.AttrGenAIOutputMessages].AsString(); got != tc.wantOutput {
+				t.Errorf("output = %q, want %q", got, tc.wantOutput)
+			}
+		})
+	}
+}
+
 // rootEndSignal forwards ended spans to rec and closes done when the turn's root span ends.
 type rootEndSignal struct {
 	*tracetest.SpanRecorder

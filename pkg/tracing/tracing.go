@@ -2,8 +2,10 @@
 //
 // Services load their settings with LoadConfig, install the global tracer provider and
 // W3C TraceContext propagator with Setup, wrap inbound handlers with Middleware and
-// outbound clients with Transport. Span attributes never carry request content: no
-// prompts, responses, tool arguments, credentials, URL paths or query strings.
+// outbound clients with Transport. Span attributes never carry request content: no tool
+// arguments, credentials, URL paths or query strings. Prompt and response text is recorded
+// only when an operator sets capture_content, and then only through ContentAttr, which
+// redacts and caps it.
 package tracing
 
 import (
@@ -40,6 +42,16 @@ const (
 	AttrStack         = attribute.Key("aerial.stack")
 	AttrMCPMethodName = attribute.Key("mcp.method.name")
 	AttrGenAIToolName = attribute.Key("gen_ai.tool.name")
+	// AttrGenAIInputMessages and AttrGenAIOutputMessages carry captured prompt and response
+	// text (see ContentAttr); they are only set when Config.CaptureContent is on.
+	AttrGenAIInputMessages  = attribute.Key("gen_ai.input.messages")
+	AttrGenAIOutputMessages = attribute.Key("gen_ai.output.messages")
+)
+
+// Message roles accepted by ContentAttr.
+const (
+	RoleUser      = "user"
+	RoleAssistant = "assistant"
 )
 
 // Config is the content of /config/tracing/tracing.yaml.
@@ -48,6 +60,9 @@ type Config struct {
 	Endpoint    string  `yaml:"endpoint"`
 	SampleRatio float64 `yaml:"sample_ratio"`
 	Stack       string  `yaml:"stack"`
+	// CaptureContent records redacted, size-capped prompt and response text on agent spans.
+	// Off by default: span content is otherwise limited to names, sizes and usage.
+	CaptureContent bool `yaml:"capture_content"`
 }
 
 // LoadConfig reads a tracing config file. A missing file yields a disabled Config and no
@@ -360,6 +375,51 @@ func MCPRequestAttrs(body []byte) []attribute.KeyValue {
 // before a string becomes a span status or attribute.
 func Redact(s string) string {
 	return sanitizer.SanitizeString(s)
+}
+
+// MaxContentRunes caps the text ContentAttr records, truncation marker included.
+const MaxContentRunes = 16384
+
+const (
+	truncatedPrefix = "[truncated]…"
+	truncatedSuffix = "…[truncated]"
+)
+
+// ContentAttr returns key set to text as OpenTelemetry gen_ai message JSON
+// ([{"role":role,"parts":[{"type":"text","content":text}]}]). The text is redacted first, then
+// capped at MaxContentRunes: user input keeps its tail (prompts put history first and the request
+// last), anything else keeps its head.
+func ContentAttr(key attribute.Key, role, text string) attribute.KeyValue {
+	type part struct {
+		Type    string `json:"type"`
+		Content string `json:"content"`
+	}
+	type message struct {
+		Role  string `json:"role"`
+		Parts []part `json:"parts"`
+	}
+	var buf strings.Builder
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // keep Discord mentions like <@123> readable
+	if err := enc.Encode([]message{{Role: role, Parts: []part{{Type: "text", Content: capContent(role, Redact(text))}}}}); err != nil {
+		return key.String("") // unreachable: string-only structs always encode
+	}
+	return key.String(strings.TrimSuffix(buf.String(), "\n"))
+}
+
+// capContent truncates text to MaxContentRunes runes, keeping the tail of user input and the
+// head of everything else.
+func capContent(role, text string) string {
+	runes := []rune(text)
+	if len(runes) <= MaxContentRunes {
+		return text
+	}
+	if role == RoleUser {
+		keep := MaxContentRunes - len([]rune(truncatedPrefix))
+		return truncatedPrefix + string(runes[len(runes)-keep:])
+	}
+	keep := MaxContentRunes - len([]rune(truncatedSuffix))
+	return string(runes[:keep]) + truncatedSuffix
 }
 
 // SlogHandler wraps h so every record logged with a context carrying a valid span gains

@@ -507,9 +507,13 @@ func TestInterchangeablePool_ExecuteEphemeralSpans(t *testing.T) {
 			attribute.String("gen_ai.request.model", "claude-sonnet-5-5"), attribute.String("gen_ai.provider.name", "anthropic"),
 		}, u...)
 	}
+	promptAttr := attribute.String("gen_ai.input.messages", `[{"role":"user","parts":[{"type":"text","content":"describe this frame"}]}]`)
+	captionAttr := attribute.String("gen_ai.output.messages", `[{"role":"assistant","parts":[{"type":"text","content":"a caption"}]}]`)
+	emptyReplyAttr := attribute.String("gen_ai.output.messages", `[{"role":"assistant","parts":[{"type":"text","content":""}]}]`)
 	tests := []struct {
 		name       string
 		poolClosed bool
+		capture    bool // pool records prompt/response content
 		reply      string
 		wantResp   string
 		wantErr    string
@@ -520,6 +524,20 @@ func TestInterchangeablePool_ExecuteEphemeralSpans(t *testing.T) {
 			wantSpans: []wantEphemeralSpan{
 				{name: "invoke_agent", parent: "caller", attrs: agentAttrs(usage)},
 				{name: "chat", parent: "invoke_agent", attrs: append([]attribute.KeyValue{attribute.String("gen_ai.operation.name", "chat")}, usage...)},
+			},
+		},
+		{
+			name: "captured content on success", capture: true, reply: okReply, wantResp: "a caption",
+			wantSpans: []wantEphemeralSpan{
+				{name: "invoke_agent", parent: "caller", attrs: append(agentAttrs(usage), promptAttr, captionAttr)},
+				{name: "chat", parent: "invoke_agent", attrs: append([]attribute.KeyValue{attribute.String("gen_ai.operation.name", "chat")}, usage...)},
+			},
+		},
+		{
+			name: "captured content on error keeps the prompt", capture: true, reply: errReply, wantErr: "model overloaded",
+			wantSpans: []wantEphemeralSpan{
+				{name: "invoke_agent", parent: "caller", attrs: append(agentAttrs(zeroUsage), promptAttr, emptyReplyAttr), statusCode: codes.Error, statusDesc: "model overloaded"},
+				{name: "chat", parent: "invoke_agent", attrs: []attribute.KeyValue{attribute.String("gen_ai.operation.name", "chat")}, statusCode: codes.Error, statusDesc: "model overloaded"},
 			},
 		},
 		{
@@ -541,6 +559,7 @@ func TestInterchangeablePool_ExecuteEphemeralSpans(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			pool, _ := newTestInterchangeablePool(t, 1, "", "claude-sonnet-5-5", replySpawner(tc.reply))
+			pool.capture = tc.capture
 			if tc.poolClosed {
 				_ = pool.Close()
 			}
