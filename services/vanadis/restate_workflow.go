@@ -446,14 +446,23 @@ func reloadWorkflowDAG(ctx restate.WorkflowContext, srv *VanadisServer, buildID 
 		})
 	}
 	if err == nil && newSnap != nil {
+		newOrder := make([]string, 0, len(newSnap.Chunks))
+		newIDs := make(map[string]bool, len(newSnap.Chunks))
 		for _, c := range newSnap.Chunks {
+			newOrder = append(newOrder, c.ID)
+			newIDs[c.ID] = true
 			if _, exists := chunkStates[c.ID]; !exists {
-				*chunkOrder = append(*chunkOrder, c.ID)
 				chunkStates[c.ID] = &workflowChunkRuntimeState{chunk: c}
 			} else {
 				chunkStates[c.ID].chunk = c
 			}
 		}
+		for cid := range chunkStates {
+			if !newIDs[cid] {
+				delete(chunkStates, cid)
+			}
+		}
+		*chunkOrder = newOrder
 	}
 	if ctx == nil {
 		return nil
@@ -489,6 +498,9 @@ func processChunkAwakeable(ctx restate.WorkflowContext, srv *VanadisServer, buil
 
 		status, err := handleAwakeableOutcome(ctx, srv, buildID, cs, eventType, val, awkErr)
 		if status == "failed" {
+			if err == nil {
+				err = fmt.Errorf("chunk %s %s awakeable resolved to %s", cs.chunk.ID, eventType, val)
+			}
 			return true, err
 		}
 		return true, nil

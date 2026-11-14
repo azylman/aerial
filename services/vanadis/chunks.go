@@ -1300,9 +1300,6 @@ func (s *VanadisServer) recoverBuildOnPRSync(ctx context.Context, build *Vanadis
 }
 
 func (s *VanadisServer) dispatchAndPersistWidget(ctx context.Context, buildID, existingMsgID string, req StatusWidgetRequest) error {
-	if req.SkipSink {
-		return nil
-	}
 	respBody, err := s.postBrainJSON(ctx, "/discord/widget", req, 4<<10)
 	if err != nil {
 		return fmt.Errorf("dispatch vanadis widget: %w", err)

@@ -533,7 +533,8 @@ func TestBuildWorkflow_DirectExecution(t *testing.T) {
 	assert.True(t, csAction.launched)
 
 	// 6. cancelWorkflowBuild with nil ctx
-	order := []string{"c-pr", "c-act"}
+	order := make([]string, 0, 3)
+	order = append(order, "c-pr", "c-act")
 	states := map[string]*workflowChunkRuntimeState{
 		"c-pr":  {chunk: cRun[0], runtimeReady: true},
 		"c-act": {chunk: cRun[1], runtimeReady: false},
@@ -544,8 +545,12 @@ func TestBuildWorkflow_DirectExecution(t *testing.T) {
 	assert.Equal(t, 1, resCancel.CompletedChunks)
 
 	// 7. reloadWorkflowDAG with nil ctx
+	order = append(order, "c-del")
+	states["c-del"] = &workflowChunkRuntimeState{chunk: VanadisChunk{ID: "c-del"}}
 	prom := reloadWorkflowDAG(nil, srv, "b-run", &order, states, 1)
 	assert.Nil(t, prom)
+	assert.NotContains(t, states, "c-del")
+	assert.NotContains(t, order, "c-del")
 
 	// 8. handleAwakeableOutcome with nil ctx
 	cs := states["c-act"]

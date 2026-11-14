@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -118,10 +119,9 @@ func TestFormatKustomizationRolloutStatus(t *testing.T) {
 func TestFormatChunkActiveStep(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		chunk   VanadisChunk
-		want    string
-		wantSub string
+		name  string
+		chunk VanadisChunk
+		want  string
 	}{
 		{
 			name: "pr_opened with checks",
@@ -193,11 +193,8 @@ func TestFormatChunkActiveStep(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := FormatChunkActiveStep(tc.chunk)
-			if tc.want != "" && got != tc.want {
-				t.Fatalf("FormatChunkActiveStep() = %q, want %q", tc.want, tc.want)
-			}
-			if tc.wantSub != "" && !strings.Contains(got, tc.wantSub) {
-				t.Fatalf("FormatChunkActiveStep() = %q, want substring %q", got, tc.wantSub)
+			if got != tc.want {
+				t.Fatalf("FormatChunkActiveStep() = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -438,15 +435,21 @@ func (s *errVanadisStore) UpdateBuildStatusMessageID(ctx context.Context, buildI
 }
 
 type widgetMockMsgWithErrors struct {
-	payload []byte
-	ackErr  error
-	termErr error
+	payload   []byte
+	ackErr    error
+	termErr   error
+	delivered uint64
 }
 
-func (m *widgetMockMsgWithErrors) Data() []byte                     { return m.payload }
-func (m *widgetMockMsgWithErrors) Subject() string                  { return "aerial.coalesced.vanadis_widget.test" }
-func (m *widgetMockMsgWithErrors) Header() nats.Header              { return nil }
-func (m *widgetMockMsgWithErrors) NumDelivered() uint64             { return 1 }
+func (m *widgetMockMsgWithErrors) Data() []byte        { return m.payload }
+func (m *widgetMockMsgWithErrors) Subject() string     { return "aerial.coalesced.vanadis_widget.test" }
+func (m *widgetMockMsgWithErrors) Header() nats.Header { return nil }
+func (m *widgetMockMsgWithErrors) NumDelivered() uint64 {
+	if m.delivered > 0 {
+		return m.delivered
+	}
+	return 1
+}
 func (m *widgetMockMsgWithErrors) Ack() error                       { return m.ackErr }
 func (m *widgetMockMsgWithErrors) Nak() error                       { return nil }
 func (m *widgetMockMsgWithErrors) NakWithDelay(time.Duration) error { return nil }
@@ -516,6 +519,23 @@ func TestHandleCoalescedWidgetMessage_StoreError_And_AckErrors(t *testing.T) {
 		ackErr:  errors.New("ack err"),
 	}
 	assert.NoError(t, srvSuccess.HandleCoalescedWidgetMessage(ctx, msgSuccessAckErr))
+
+	// Dispatch fail with term error when NumDelivered >= 3
+	ts500Fail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts500Fail.Close()
+	srvFail := &VanadisServer{
+		cfg:        Config{BrainURL: ts500Fail.URL},
+		store:      storeMissing,
+		httpClient: ts500Fail.Client(),
+	}
+	msgDispatchTermErr := &widgetMockMsgWithErrors{
+		payload:   []byte(`{"build_id":"b-ack"}`),
+		termErr:   errors.New("term error"),
+		delivered: 3,
+	}
+	assert.Error(t, srvFail.HandleCoalescedWidgetMessage(ctx, msgDispatchTermErr))
 }
 
 func TestHandleSyncPRWidget_ErrorBranches(t *testing.T) {
@@ -620,6 +640,21 @@ func TestChunksEvents_And_PersistWidget_RemainingGaps(t *testing.T) {
 	errPersist := srvPersist.dispatchAndPersistWidget(ctx, "b1", "", StatusWidgetRequest{Title: "test"})
 	assert.NoError(t, errPersist)
 
-	// Case D: SkipSink returns nil immediately
-	assert.NoError(t, srvPersist.dispatchAndPersistWidget(ctx, "b1", "", StatusWidgetRequest{SkipSink: true}))
+	// Case D: SkipSink sends widget with skip_sink: true
+	var receivedBody []byte
+	tsSkipSink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"message_id":"msg-skip"}`))
+	}))
+	defer tsSkipSink.Close()
+
+	srvSkipSink := &VanadisServer{
+		cfg:        Config{BrainURL: tsSkipSink.URL},
+		store:      &errVanadisStore{},
+		httpClient: tsSkipSink.Client(),
+	}
+	errSkipSink := srvSkipSink.dispatchAndPersistWidget(ctx, "b1", "", StatusWidgetRequest{Title: "quiet", SkipSink: true})
+	assert.NoError(t, errSkipSink)
+	assert.Contains(t, string(receivedBody), `"skip_sink":true`)
 }
