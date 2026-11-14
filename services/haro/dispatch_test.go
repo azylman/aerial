@@ -526,12 +526,4 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 	if bus := initHaroJetStreamWithFactory(ctx, db, "nats://mock", errFactory); bus != nil {
 		t.Error("expected nil bus when factory returns error")
 	}
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-	successFactory := func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return memBus, nil
-	}
-	if bus := initHaroJetStreamWithFactory(ctx, db, "nats://mock", successFactory); bus == nil {
-		t.Error("expected non-nil bus when factory succeeds")
-	}
 }

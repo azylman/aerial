@@ -300,6 +300,43 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 			wantWake:   true,
 			wantStatus: "failed",
 		},
+		{
+			name: "redelivered completed action chunk re-enqueues next running chunk",
+			seedBuild: &VanadisBuild{
+				ID:        "b-redeliver",
+				ThreadID:  "th-redeliver",
+				Status:    "running",
+				Objective: "Multi chunk build",
+				CreatedAt: now,
+			},
+			seedChunks: []VanadisChunk{
+				{
+					ID:         "c-redeliver-0",
+					BuildID:    "b-redeliver",
+					ChunkIndex: 0,
+					Mode:       "action",
+					Status:     "completed",
+					Title:      "Already Completed Step",
+				},
+				{
+					ID:         "c-redeliver-1",
+					BuildID:    "b-redeliver",
+					ChunkIndex: 1,
+					Mode:       "action",
+					Status:     "running",
+					Title:      "Running Next Step Needs Enqueue",
+				},
+			},
+			event: &pubsub.DispatchOutcomeEvent{
+				DispatchID:     "disp-redeliver",
+				VanadisChunkID: "c-redeliver-0",
+				Status:         "completed",
+			},
+			wantErr:       false,
+			wantNextQueue: true,
+			wantNextIndex: 1,
+			wantStatus:    "completed",
+		},
 	}
 
 	for _, tc := range tests {

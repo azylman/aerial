@@ -10,6 +10,27 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
+func (s *VanadisServer) retryNextRunningChunkEnqueue(ctx context.Context, res *VanadisAdvancementResult) error {
+	if res == nil || res.ChunkMode != "action" || res.BuildStatus != "running" {
+		return nil
+	}
+	_, chunks, err := s.store.GetBuild(ctx, res.BuildID)
+	if err != nil {
+		log.Printf("[vanadis] get build %s on retry enqueue error: %v", res.BuildID, err)
+		return err
+	}
+	for _, next := range chunks {
+		if next.ChunkIndex > res.MergedChunkIndex && next.Status == "running" {
+			if err := s.insertRiverJob(ctx, ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: next.ChunkIndex}); err != nil {
+				log.Printf("[vanadis] failed to re-enqueue running chunk %d for build %s on redelivery: %v", next.ChunkIndex, res.BuildID, err)
+				return err
+			}
+			break
+		}
+	}
+	return nil
+}
+
 func (s *VanadisServer) handleCompletedDispatchOutcome(ctx context.Context, ev pubsub.DispatchOutcomeEvent) error {
 	res, err := s.store.CompleteActionChunk(ctx, ev.VanadisChunkID)
 	if err != nil {
@@ -26,7 +47,7 @@ func (s *VanadisServer) handleCompletedDispatchOutcome(ctx context.Context, ev p
 		}
 	}
 	if res == nil || !res.Advanced {
-		return nil
+		return s.retryNextRunningChunkEnqueue(ctx, res)
 	}
 	RecordChunkTotal("completed")
 	s.syncBuildWidget(ctx, res.BuildID, "")
