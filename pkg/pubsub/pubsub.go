@@ -29,6 +29,7 @@ const (
 	SubjectAerialDispatchPrefix  = "aerial.dispatch."
 	SubjectAerialEventsPrefix    = "aerial.events."
 	SubjectAerialTurnPrefix      = "aerial.turn."
+	SubjectAerialPRPrefix        = "aerial.pr."
 	SubjectAerialJobsPrefix      = "aerial.jobs."
 	SubjectAerialCoalescedPrefix = "aerial.coalesced."
 	SubjectAerialTurnCompleted   = "aerial.turn.completed"
@@ -112,6 +113,36 @@ type TurnCompletedEvent struct {
 	ConversationID string    `json:"conversation_id,omitempty"`
 	Source         string    `json:"source"`
 	CompletedAt    time.Time `json:"completed_at"`
+}
+
+// PRRolloutState tracks Kubernetes / GitOps rollout progress across jobs and Kustomizations.
+type PRRolloutState struct {
+	ExpectedJobs          []string          `json:"expected_jobs,omitempty"`
+	StartedJobs           []string          `json:"started_jobs,omitempty"`
+	DeployedJobs          []string          `json:"deployed_jobs,omitempty"`
+	JobStates             map[string]string `json:"job_states,omitempty"`
+	KustomizationStatuses map[string]string `json:"kustomization_statuses,omitempty"`
+}
+
+// PRLifecycleEvent represents pull request and deployment lifecycle transitions on aerial.pr.<event>.
+type PRLifecycleEvent struct {
+	Event        string          `json:"event"`
+	Repo         string          `json:"repo"`
+	PRNumber     int             `json:"pr_number"`
+	Branch       string          `json:"branch,omitempty"`
+	HeadSHA      string          `json:"head_sha,omitempty"`
+	MergeSHA     string          `json:"merge_sha,omitempty"`
+	Title        string          `json:"title,omitempty"`
+	TargetID     string          `json:"target_id,omitempty"`
+	Status       string          `json:"status,omitempty"`
+	CheckName    string          `json:"check_name,omitempty"`
+	CheckState   string          `json:"check_state,omitempty"`
+	CheckURL     string          `json:"check_url,omitempty"`
+	JobName      string          `json:"job_name,omitempty"`
+	Details      string          `json:"details,omitempty"`
+	RolloutState *PRRolloutState `json:"rollout_state,omitempty"`
+	Quiet        bool            `json:"quiet,omitempty"`
+	OccurredAt   time.Time       `json:"occurred_at"`
 }
 
 // EnsureCoreStreams ensures the three core streams exist with their specified topologies.
@@ -253,7 +284,7 @@ func (b *JetStreamBus) EnsureCoreStreams(ctx context.Context) error {
 		{
 			Name:        StreamAerialEvents,
 			Description: "Multi-consumer pub/sub fan-out stream",
-			Subjects:    []string{"aerial.dispatch.>", "aerial.events.>", "aerial.turn.>"},
+			Subjects:    []string{"aerial.dispatch.>", "aerial.events.>", "aerial.turn.>", "aerial.pr.>"},
 			Retention:   nats.LimitsPolicy,
 			Storage:     nats.FileStorage,
 			MaxAge:      72 * time.Hour,

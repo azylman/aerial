@@ -622,6 +622,15 @@ func TestSchemaContainsVoiceTables(t *testing.T) {
 		{name: "idx_voice_calls_state", targetText: "idx_voice_calls_state"},
 		{name: "idx_voice_messages_created", targetText: "idx_voice_messages_created"},
 		{name: "e164 regex check", targetText: "CHECK (from_number ~ '^\\+[1-9][0-9]{1,14}$')"},
+		{name: "vanadis_builds quiet column", targetText: "quiet BOOLEAN NOT NULL DEFAULT FALSE"},
+		{name: "vanadis_chunks depends_on column", targetText: "depends_on TEXT[] NOT NULL DEFAULT '{}'"},
+		{name: "vanadis_chunks ci_fail_count column", targetText: "ci_fail_count INTEGER NOT NULL DEFAULT 0"},
+		{name: "vanadis_chunks ci_checks column", targetText: "ci_checks JSONB NOT NULL DEFAULT '{}'::jsonb"},
+		{name: "vanadis_chunks rollout_state column", targetText: "rollout_state JSONB NOT NULL DEFAULT '{}'::jsonb"},
+		{name: "vanadis_chunks banner column", targetText: "banner TEXT NOT NULL DEFAULT ''"},
+		{name: "vanadis_chunks merge_awakeable_id column", targetText: "merge_awakeable_id TEXT NOT NULL DEFAULT ''"},
+		{name: "vanadis_chunks deploy_awakeable_id column", targetText: "deploy_awakeable_id TEXT NOT NULL DEFAULT ''"},
+		{name: "idx_vanadis_chunks_repo_pr", targetText: "CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_repo_pr ON vanadis_chunks (repo, pr_number) WHERE pr_number IS NOT NULL;"},
 	}
 
 	for _, tc := range tests {

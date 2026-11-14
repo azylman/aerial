@@ -2,10 +2,12 @@ package pubsub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -390,6 +392,69 @@ func TestEnsureCoreStreams(t *testing.T) {
 
 	if err := EnsureCoreStreams(context.Background(), nil); err == nil {
 		t.Error("EnsureCoreStreams with nil bus expected error, got nil")
+	}
+
+	// Verify JetStream stream config subjects for AERIAL_EVENTS
+	mjs := &mockJetStream{
+		existingStreams: make(map[string]*nats.StreamInfo),
+	}
+	jsBus := newJetStreamBusWithContext(nil, mjs)
+	if err := jsBus.EnsureCoreStreams(context.Background()); err != nil {
+		t.Fatalf("jsBus.EnsureCoreStreams failed: %v", err)
+	}
+	eventsStream, ok := mjs.existingStreams[StreamAerialEvents]
+	if !ok {
+		t.Fatalf("stream %s not found in mockJetStream", StreamAerialEvents)
+	}
+	wantSubjects := []string{"aerial.dispatch.>", "aerial.events.>", "aerial.turn.>", "aerial.pr.>"}
+	if !slices.Equal(eventsStream.Config.Subjects, wantSubjects) {
+		t.Errorf("AERIAL_EVENTS subjects = %v, want %v", eventsStream.Config.Subjects, wantSubjects)
+	}
+
+	// Verify PRLifecycleEvent serialization roundtrip
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	event := PRLifecycleEvent{
+		Event:      "ci_failed",
+		Repo:       "azylman/aerial",
+		PRNumber:   1234,
+		Branch:     "feat/restate",
+		HeadSHA:    "abc1234",
+		MergeSHA:   "def5678",
+		Title:      "Add Restate DAG",
+		TargetID:   "build-1",
+		Status:     "failure",
+		CheckName:  "verify",
+		CheckState: "failed",
+		CheckURL:   "https://ci.example/1",
+		JobName:    "build-go",
+		Details:    "tests failed",
+		RolloutState: &PRRolloutState{
+			ExpectedJobs:          []string{"build-go"},
+			StartedJobs:           []string{"build-go"},
+			DeployedJobs:          []string{},
+			JobStates:             map[string]string{"build-go": "failed"},
+			KustomizationStatuses: map[string]string{"aerial": "ready"},
+		},
+		Quiet:      true,
+		OccurredAt: now,
+	}
+	data, err := serializePayload(event)
+	if err != nil {
+		t.Fatalf("serializePayload failed: %v", err)
+	}
+	var roundtrip PRLifecycleEvent
+	if err := json.Unmarshal(data, &roundtrip); err != nil {
+		t.Fatalf("unmarshal PRLifecycleEvent failed: %v", err)
+	}
+	if roundtrip.Event != event.Event || roundtrip.Repo != event.Repo || roundtrip.PRNumber != event.PRNumber ||
+		roundtrip.Branch != event.Branch || roundtrip.HeadSHA != event.HeadSHA || roundtrip.MergeSHA != event.MergeSHA ||
+		roundtrip.Title != event.Title || roundtrip.TargetID != event.TargetID || roundtrip.Status != event.Status ||
+		roundtrip.CheckName != event.CheckName || roundtrip.CheckState != event.CheckState || roundtrip.CheckURL != event.CheckURL ||
+		roundtrip.JobName != event.JobName || roundtrip.Details != event.Details || !roundtrip.Quiet ||
+		!roundtrip.OccurredAt.Equal(event.OccurredAt) || roundtrip.RolloutState == nil ||
+		len(roundtrip.RolloutState.ExpectedJobs) != 1 || roundtrip.RolloutState.JobStates["build-go"] != "failed" ||
+		roundtrip.RolloutState.KustomizationStatuses["aerial"] != "ready" {
+		t.Errorf("roundtrip mismatch: got %+v, want %+v", roundtrip, event)
 	}
 }
 

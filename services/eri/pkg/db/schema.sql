@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS vanadis_builds (
     shared_context TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'running',
     status_message_id TEXT NOT NULL DEFAULT '',
+    quiet BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -302,6 +303,13 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
     status TEXT NOT NULL DEFAULT 'pending',
     pr_number INTEGER,
     stall_nudges INTEGER NOT NULL DEFAULT 0,
+    depends_on TEXT[] NOT NULL DEFAULT '{}',
+    ci_fail_count INTEGER NOT NULL DEFAULT 0,
+    ci_checks JSONB NOT NULL DEFAULT '{}'::jsonb,
+    rollout_state JSONB NOT NULL DEFAULT '{}'::jsonb,
+    banner TEXT NOT NULL DEFAULT '',
+    merge_awakeable_id TEXT NOT NULL DEFAULT '',
+    deploy_awakeable_id TEXT NOT NULL DEFAULT '',
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -311,7 +319,7 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_build_status ON vanadis_chunks (build_id, status);
-CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_pr_number ON vanadis_chunks (repo, pr_number) WHERE pr_number IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_repo_pr ON vanadis_chunks (repo, pr_number) WHERE pr_number IS NOT NULL;
 
 -- Procedural Skill Candidates Staging Table
 CREATE TABLE IF NOT EXISTS procedural_candidates (
