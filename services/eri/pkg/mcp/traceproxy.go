@@ -119,9 +119,10 @@ type TraceProxyConfig struct {
 }
 
 // TraceProxy is eri's loopback MCP proxy. Agents' HTTP MCP servers point at it when tracing
-// is enabled; it parents each request under the calling daemon's active turn span, injects
-// traceparent and forwards the request unchanged (headers, body, streamed response) to the
-// upstream URL held in memory.
+// is enabled; it parents each agent-initiated JSON-RPC request (one carrying a method) under
+// the calling daemon's active turn span and injects traceparent. Methodless traffic (ping
+// replies, empty bodies, the SSE GET stream) gets no span. Every request is
+// forwarded unchanged (headers, body, streamed response) to the upstream URL held in memory.
 type TraceProxy struct {
 	upstreams     UpstreamResolver
 	turns         ActiveTurns
@@ -207,15 +208,15 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	var span trace.Span
-	if sc, ok := p.owner(target, server, r.Header.Get(env.DaemonHeader), method, tool); ok {
-		name := method
-		if name == "" {
-			name = r.Method
+	// Methodless requests (responses to server pings, empty POSTs, the standalone SSE GET)
+	// are client housekeeping, not agent work, so they never join a turn.
+	if method != "" {
+		if sc, ok := p.owner(target, server, r.Header.Get(env.DaemonHeader), method, tool); ok {
+			ctx, span = p.tracer.Start(trace.ContextWithSpanContext(ctx, sc), "mcp "+server+" "+method,
+				trace.WithSpanKind(trace.SpanKindClient),
+				trace.WithAttributes(append(attrs, attrMCPServer.String(server))...))
+			defer span.End()
 		}
-		ctx, span = p.tracer.Start(trace.ContextWithSpanContext(ctx, sc), "mcp "+server+" "+name,
-			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithAttributes(append(attrs, attrMCPServer.String(server))...))
-		defer span.End()
 	}
 
 	rp := &httputil.ReverseProxy{
