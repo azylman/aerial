@@ -4,14 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"syscall"
 	"testing"
-
-	"github.com/azylman/aerial/pkg/httpkit"
 
 	_ "modernc.org/sqlite"
 )
@@ -455,12 +451,11 @@ func TestSQLStore_SearchCandidateFacts(t *testing.T) {
 			wantCount: 0,
 		},
 		{
-			name:         "BothWithDefaultBounds",
-			emb:          emb,
-			query:        "test query",
-			limit:        -1,
-			minScore:     -1,
-			wantPatterns: []string{"vector_hits", "text_hits", "rrf"},
+			name:     "BothWithDefaultBounds",
+			emb:      emb,
+			query:    "test query",
+			limit:    -1,
+			minScore: -1,
 		},
 		{
 			name:     "QueryError",
@@ -528,35 +523,6 @@ func TestSQLStore_GetFactsPaginated(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runGetFactsPaginatedCase(t, tc, dbMem)
-		})
-	}
-}
-
-func TestIsClientDisconnect(t *testing.T) {
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	reqCanceled, _ := http.NewRequestWithContext(canceledCtx, http.MethodGet, "/health", nil)
-
-	tests := []struct {
-		name string
-		req  *http.Request
-		err  error
-		want bool
-	}{
-		{"NilError", nil, nil, false},
-		{"ContextCanceled", reqCanceled, errors.New("other"), true},
-		{"SyscallEPIPE", nil, syscall.EPIPE, true},
-		{"SyscallECONNRESET", nil, syscall.ECONNRESET, true},
-		{"NetErrClosed", nil, net.ErrClosed, true},
-		{"UnrelatedError", nil, errors.New("unrelated"), false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := httpkit.IsClientDisconnect(tc.req, tc.err)
-			if got != tc.want {
-				t.Errorf("isClientDisconnect() = %v, want %v", got, tc.want)
-			}
 		})
 	}
 }

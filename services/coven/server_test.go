@@ -348,16 +348,11 @@ func TestFactTime_Scan(t *testing.T) {
 }
 
 func TestEscapeSQLLikeAndHelpers(t *testing.T) {
-	RegisterSQLiteTestHook(nil)
 	ctx, cancel := withTimeout(nil, 1*time.Second)
 	defer cancel()
 	if ctx == nil {
 		t.Fatal("expected non-nil context from withTimeout(nil)")
 	}
-	httpkit.CloseWarn(nil, "nil")
-	httpkit.CloseWarn(mockCloser{err: errors.New("close err")}, "mock")
-	httpkit.WriteResponse(httptest.NewRecorder(), nil, "coven", []byte("ok"))
-	httpkit.WriteResponse(&mockErrWriter{err: errors.New("write err")}, nil, "coven", []byte("fail"))
 
 	if got := EscapeSQLLike("a%b_c\\d"); got != "a\\%b\\_c\\\\d" {
 		t.Errorf("EscapeSQLLike() = %q", got)

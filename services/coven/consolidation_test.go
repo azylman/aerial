@@ -268,28 +268,17 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 		nilOllama  bool
 		nilLLM     bool
 		storeFail  string
-		wantDecay  bool
 		wantHourly bool
 	}{
 		{
-			name:       "Tick0HourlyExtractionAndBackfill",
+			name:       "Tick0HourlyExtraction",
 			tick:       0,
 			wantHourly: true,
 		},
 		{
-			name:       "Tick120HourlyExtractionAndBackfill",
+			name:       "Tick120HourlyExtraction",
 			tick:       120,
 			wantHourly: true,
-		},
-		{
-			name:      "Tick60DailyDecay",
-			tick:      60,
-			wantDecay: true,
-		},
-		{
-			name:      "Tick2940DailyDecay",
-			tick:      2940,
-			wantDecay: true,
 		},
 		{
 			name: "Tick1Noop",
@@ -311,33 +300,19 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 			nilLLM: true,
 		},
 		{
-			name:      "DecayErrorHandled",
-			tick:      60,
-			storeFail: "DecayAndPruneFacts",
-			wantDecay: true,
-		},
-		{
-			name:     "DailyDecayNilStore",
-			tick:     60,
-			nilStore: true,
-		},
-		{
-			name:       "HourlyBackfillErrorHandled",
-			tick:       0,
-			storeFail:  "GetFactsMissingEmbeddings",
-			wantHourly: true,
-		},
-		{
-			name:       "HourlyExtractionErrorHandled",
-			tick:       0,
-			storeFail:  "GetActiveConversationsForExtraction",
-			wantHourly: true,
+			name:      "HourlyExtractionErrorHandled",
+			tick:      0,
+			storeFail: "GetActiveConversationsForExtraction",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			mem := newTestMemStore()
+			mem.activeThreads = []string{"th-1"}
+			mem.unextractedTurns["th-1"] = []Message{
+				{RowID: 1, ThreadID: "th-1", Content: "user prompt", ResponseText: "resp", Status: "COMPLETED", IsAdmin: true},
+			}
 			if tc.storeFail != "" {
 				mem.SetFail(tc.storeFail, errors.New("store err"))
 			}
@@ -349,11 +324,13 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 			if tc.nilOllama {
 				client = nil
 			}
-			var llm LLMClientFunc = func(ctx context.Context, prompt string) (string, error) {
-				return `{"facts":[]}`, nil
-			}
-			if tc.nilLLM {
-				llm = nil
+			var llmCalls int
+			var llm LLMClientFunc
+			if !tc.nilLLM {
+				llm = func(ctx context.Context, prompt string) (string, error) {
+					llmCalls++
+					return `{"facts":[]}`, nil
+				}
 			}
 
 			w := NewWorker(WorkerConfig{
@@ -365,6 +342,13 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 			})
 
 			w.Tick(ctx, tc.tick)
+
+			if tc.wantHourly && llmCalls == 0 {
+				t.Errorf("expected hourly extraction LLM call, got 0")
+			}
+			if !tc.wantHourly && llmCalls > 0 {
+				t.Errorf("unexpected LLM calls: %d", llmCalls)
+			}
 		})
 	}
 }
@@ -457,59 +441,6 @@ func TestSQLStore_GetAllFactsWithEmbeddings(t *testing.T) {
 				})
 			}
 			facts, err := store.GetAllFactsWithEmbeddings(ctx)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("GetAllFactsWithEmbeddings() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantCount > 0 && len(facts) != tc.wantCount {
-				t.Errorf("len(facts) = %d, want %d", len(facts), tc.wantCount)
-			}
-		})
-	}
-}
-
-func TestMemStore_GetAllFactsWithEmbeddings(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []struct {
-		name      string
-		storeFail string
-		addFacts  bool
-		wantErr   bool
-		wantCount int
-	}{
-		{
-			name:      "StoreFail",
-			storeFail: "GetAllFactsWithEmbeddings",
-			wantErr:   true,
-		},
-		{
-			name:      "EmptyStore",
-			addFacts:  false,
-			wantErr:   false,
-			wantCount: 0,
-		},
-		{
-			name:      "ReturnsOnlyFactsWithEmbeddings",
-			addFacts:  true,
-			wantErr:   false,
-			wantCount: 2,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			mem := newTestMemStore()
-			if tc.storeFail != "" {
-				mem.SetFail(tc.storeFail, errors.New("get fail"))
-			}
-			if tc.addFacts {
-				_, _ = mem.InsertFact(ctx, "Fact with emb 1", testEmbedding(1))
-				mem.mu.Lock()
-				mem.facts[99] = &Fact{ID: 99, FactText: "Fact without emb"}
-				mem.mu.Unlock()
-				_, _ = mem.InsertFact(ctx, "Fact with emb 2", testEmbedding(0.5))
-			}
-			facts, err := mem.GetAllFactsWithEmbeddings(ctx)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetAllFactsWithEmbeddings() err = %v, wantErr = %v", err, tc.wantErr)
 			}

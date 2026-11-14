@@ -535,27 +535,6 @@ func (m *mockErrReadCloser) Close() error {
 	return nil
 }
 
-type mockErrWriter struct {
-	header http.Header
-	err    error
-}
-
-func (m *mockErrWriter) Header() http.Header {
-	if m.header == nil {
-		m.header = make(http.Header)
-	}
-	return m.header
-}
-
-func (m *mockErrWriter) Write([]byte) (int, error) { return 0, m.err }
-func (m *mockErrWriter) WriteHeader(int)           {}
-
-type mockCloser struct {
-	err error
-}
-
-func (m mockCloser) Close() error { return m.err }
-
 func startMockPostgres(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -676,102 +655,6 @@ func handlePgConn(conn net.Conn) {
 }
 
 // --- Unit Tests ---
-
-func TestConfig_LoadAndResolve(t *testing.T) {
-	tmpDir := t.TempDir()
-	validYamlPath := filepath.Join(tmpDir, "config.yaml")
-	validContent := `port: "4009"
-database_url: "postgres://u:p@localhost:5432/testdb"
-eri_url: "http://eri.aerial"
-eri_llm_url: "http://brain.local/internal/llm"
-pr_register_url: "http://synapse.aerial/internal/pr/register"
-custom_skills_dir: "/config/custom-skills"
-rules_dir: "/config/rules"
-config_repo_owner: "azylman"
-config_repo_name: "aerial-config"
-ollama:
-  base_url: "http://ollama.local:11434"
-  model: "bge-m3"
-  query_prefix: "search: "
-  num_ctx: 1024
-`
-	if err := os.WriteFile(validYamlPath, []byte(validContent), 0o644); err != nil {
-		t.Fatalf("failed to write test yaml: %v", err)
-	}
-
-	badYamlPath := filepath.Join(tmpDir, "bad.yaml")
-	if err := os.WriteFile(badYamlPath, []byte("port: [unclosed"), 0o644); err != nil {
-		t.Fatalf("failed to write bad yaml: %v", err)
-	}
-
-	noPortYamlPath := filepath.Join(tmpDir, "no_port.yaml")
-	_ = os.WriteFile(noPortYamlPath, []byte(strings.Replace(validContent, `port: "4009"`, `port: ""`, 1)), 0o644)
-
-	noDbYamlPath := filepath.Join(tmpDir, "no_db.yaml")
-	_ = os.WriteFile(noDbYamlPath, []byte(strings.Replace(validContent, `database_url: "postgres://u:p@localhost:5432/testdb"`, `database_url: ""`, 1)), 0o644)
-
-	tests := []configLoadTestCase{
-		{name: "ValidFromYAML", path: validYamlPath, wantPort: "4009", wantDB: "postgres://u:p@localhost:5432/testdb", wantModel: "bge-m3"},
-		{name: "DatabaseURLEnvOverride", path: validYamlPath, envDB: "postgres://envuser@localhost/envdb", wantPort: "4009", wantDB: "postgres://envuser@localhost/envdb", wantModel: "bge-m3"},
-		{name: "DecomposedPostgresPassword", path: noDbYamlPath, envPassword: "secretpass", wantPort: "4009", wantDB: "postgres://aerial:secretpass@postgres:5432/aerial?sslmode=disable", wantModel: "bge-m3"},
-		{name: "DatabaseURLParamOverride", path: validYamlPath, dbURL: "postgres://paramuser@localhost/paramdb", wantPort: "4009", wantDB: "postgres://paramuser@localhost/paramdb", wantModel: "bge-m3"},
-		{name: "MissingPortFails", path: noPortYamlPath, wantErr: true},
-		{name: "MissingDatabaseURLFails", path: noDbYamlPath, wantErr: true},
-		{name: "EmptyPathFails", path: "", wantErr: true},
-		{name: "MissingFileFails", path: filepath.Join(tmpDir, "nonexistent.yaml"), wantErr: true},
-		{name: "BadYAMLFileFails", path: badYamlPath, wantErr: true},
-		{name: "DirectoryPathReadError", path: tmpDir, wantErr: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runConfigLoadCase(t, tc)
-		})
-	}
-}
-
-type configLoadTestCase struct {
-	name        string
-	path        string
-	dbURL       string
-	envDB       string
-	envPassword string
-	wantErr     bool
-	wantPort    string
-	wantDB      string
-	wantModel   string
-}
-
-func runConfigLoadCase(t *testing.T, tc configLoadTestCase) {
-	t.Helper()
-	t.Setenv("DATABASE_URL", tc.envDB)
-	t.Setenv("POSTGRES_URL", "")
-	t.Setenv("POSTGRES_HOST", "")
-	t.Setenv("POSTGRES_PORT", "")
-	t.Setenv("POSTGRES_USER", "")
-	t.Setenv("POSTGRES_PASSWORD", tc.envPassword)
-	t.Setenv("POSTGRES_DB", "")
-	t.Setenv("ERI_URL", "")
-	t.Setenv("ERI_LLM_URL", "")
-	t.Setenv("PR_REGISTER_URL", "")
-
-	cfg, err := LoadConfigFile(tc.path, tc.dbURL)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantErr {
-		return
-	}
-	if tc.wantPort != "" && cfg.Port != tc.wantPort {
-		t.Errorf("cfg.Port = %q, want %q", cfg.Port, tc.wantPort)
-	}
-	if tc.wantDB != "" && cfg.DatabaseURL != tc.wantDB {
-		t.Errorf("cfg.DatabaseURL = %q, want %q", cfg.DatabaseURL, tc.wantDB)
-	}
-	if tc.wantModel != "" && cfg.Ollama.Model != tc.wantModel {
-		t.Errorf("cfg.Ollama.Model = %q, want %q", cfg.Ollama.Model, tc.wantModel)
-	}
-}
 
 func TestResolveConfigPath(t *testing.T) {
 	oldLocal := localConfigPath

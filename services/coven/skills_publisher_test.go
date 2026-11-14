@@ -856,8 +856,52 @@ func TestGitHubSkillPublisher_PublishSkillChanges(t *testing.T) {
 					t.Errorf("discordMsgCalls = %d, want %d", discordMsgCalls, tc.wantDiscordCalls)
 				}
 			}
-			_ = publisher.NotifyShortFriction(ctx, "test alert")
-			_ = publisher.NotifyShortFriction(ctx, "")
+		})
+	}
+}
+
+func TestGitHubSkillPublisher_NotifyShortFriction(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		channelID  string
+		content    string
+		respStatus int
+		clientErr  bool
+		wantErr    bool
+	}{
+		{name: "EmptyChannelIDNoop", channelID: "", content: "alert", wantErr: false},
+		{name: "EmptyContentNoop", channelID: "ch-1", content: "   ", wantErr: false},
+		{name: "Success200", channelID: "ch-1", content: "alert", respStatus: http.StatusOK, wantErr: false},
+		{name: "ServerError500", channelID: "ch-1", content: "alert", respStatus: http.StatusInternalServerError, wantErr: true},
+		{name: "ClientError", channelID: "ch-1", content: "alert", clientErr: true, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.respStatus != 0 {
+					w.WriteHeader(tc.respStatus)
+				}
+			}))
+			defer server.Close()
+
+			targetURL := server.URL
+			if tc.clientErr {
+				targetURL = "http://127.0.0.1:0/bad"
+			}
+
+			p := &GitHubSkillPublisher{
+				systemChannelID: tc.channelID,
+				brainURL:        targetURL,
+				httpClient:      server.Client(),
+			}
+
+			err := p.NotifyShortFriction(ctx, tc.content)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("NotifyShortFriction() err = %v, wantErr = %v", err, tc.wantErr)
+			}
 		})
 	}
 }
