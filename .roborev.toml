@@ -1,5 +1,6 @@
-agent = "gemini"
-review_agent = "gemini"
+agent = "claude-code"
+review_agent = "claude-code"
+model = "opus"
 review_reasoning = "thorough"
 default_branch = "main"
 
@@ -20,7 +21,7 @@ Repo-Specific Invariants (appended to global Aerial cluster guidelines in ~/.rob
 """
 
 [ci]
-agents = ["gemini"]
+agents = ["claude-code"]
 review_types = ["default", "test-value"]
 reasoning = "thorough"
 min_severity = "medium"
