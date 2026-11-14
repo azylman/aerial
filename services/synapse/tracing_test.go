@@ -231,11 +231,11 @@ func TestDiscordInteractionWorker_ResumesGatewayTrace(t *testing.T) {
 	}
 }
 
-func TestRegistryHaroClient_Traceparent(t *testing.T) {
+func TestRegistryVanadisClient_Traceparent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name         string
-		injectClient bool // production passes the router's plain client via WithHaroClient
+		injectClient bool
 	}{
 		{name: "injected client is wrapped and propagates", injectClient: true},
 		{name: "default client propagates"},
@@ -243,15 +243,15 @@ func TestRegistryHaroClient_Traceparent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := newTraceparentServer(t, 0, `{"status":"ok","matched":true}`)
+			srv := newTraceparentServer(t, 0, `{"build_id":"b1","chunk_id":"c1","failed":true}`)
 			var client *http.Client
 			if tc.injectClient {
 				client = srv.Client()
 			}
-			reg := NewPostgresPRRegistry(nil, WithHaroClient(srv.URL, client))
+			reg := NewPostgresPRRegistry(nil, WithVanadisClient(srv.URL, client))
 			ctx, parentTraceID := recordedParent(t)
-			if matched, err := reg.CheckEventTriggers(ctx, "flux", []string{"aerial"}, "deployed"); err != nil || !matched {
-				t.Fatalf("CheckEventTriggers = %v, %v", matched, err)
+			if _, _, failed, err := reg.FailVanadisChunkDetailsByPR(ctx, "azylman/aerial", 1); err != nil || !failed {
+				t.Fatalf("FailVanadisChunkDetailsByPR = %v, %v", failed, err)
 			}
 			assertTraceIDs(t, srv.traceIDs(), 1, parentTraceID, true)
 		})

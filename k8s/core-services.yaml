@@ -1225,8 +1225,6 @@ spec:
               value: http://eri.aerial
             - name: VANADIS_URL
               value: http://vanadis.aerial
-            - name: HARO_URL
-              value: http://haro.aerial
             - name: FLUX_RECEIVER_URL
               value: http://notification-controller.flux-system.svc.cluster.local/
             - name: DISCORD_TOKEN

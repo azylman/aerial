@@ -756,9 +756,6 @@ func riverWorkerCases() []riverWorkerCase {
 		{name: "WidgetSyncWorker valid job", workerType: "widget", wantProcessed: "success"},
 		{name: "WidgetSyncWorker nil server error", workerType: "widget", nilServer: true, wantErr: true, wantProcessed: "error"},
 		{name: "WidgetSyncWorker downstream dispatch error", workerType: "widget", downstreamErr: true, wantErr: true, wantProcessed: "error"},
-		{name: "EventTriggerWebhookWorker valid job", workerType: "event_trigger", wantProcessed: "success"},
-		{name: "EventTriggerWebhookWorker nil server error", workerType: "event_trigger", nilServer: true, wantErr: true, wantProcessed: "error"},
-		{name: "EventTriggerWebhookWorker downstream fire error", workerType: "event_trigger", downstreamErr: true, wantErr: true, wantProcessed: "error"},
 		{name: "MergeConflictWorker valid job", workerType: "merge_conflict", wantProcessed: "success"},
 		{name: "MergeConflictWorker nil server error", workerType: "merge_conflict", nilServer: true, wantErr: true, wantProcessed: "error"},
 		{name: "MergeConflictWorker downstream dispatch error", workerType: "merge_conflict", downstreamErr: true, wantErr: true, wantProcessed: "error"},
@@ -784,8 +781,6 @@ func resolveRiverWorkerQueueAndKind(workerType string) (string, string) {
 		return river.QueueDefault, "deploy_webhook"
 	case workerType == "widget":
 		return QueueWidgetSync, "widget_sync"
-	case workerType == "event_trigger":
-		return river.QueueDefault, "event_trigger_webhook"
 	case workerType == "merge_conflict":
 		return QueueMergeConflict, "merge_conflict"
 	case strings.HasPrefix(workerType, "discord_ingress"):
@@ -849,21 +844,6 @@ func executeWidgetOrTriggerWorker(ctx context.Context, srv *RouterServer, tc riv
 			Args: WidgetSyncArgs{
 				Repo:     "azylman/aerial",
 				PRNumber: 552,
-			},
-		}
-		return true, w.Work(ctx, job)
-	case "event_trigger":
-		w := &EventTriggerWebhookWorker{server: srv}
-		if tc.nilServer {
-			w.server = nil
-		}
-		job := &river.Job[EventTriggerWebhookArgs]{
-			JobRow: &rivertype.JobRow{ID: 601, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
-			Args: EventTriggerWebhookArgs{
-				Source:        "custom_source",
-				Targets:       []string{"device.alpha"},
-				EventType:     "ready",
-				ContextHeader: "External event",
 			},
 		}
 		return true, w.Work(ctx, job)
@@ -997,9 +977,6 @@ func runRiverWorkerCase(ctx context.Context, t *testing.T, tc riverWorkerCase) {
 		mockDisp.promptErr = errors.New("503 downstream failure")
 		mockDisp.widgetErr = errors.New("503 downstream failure")
 		mockDisp.dispatchErr = errors.New("503 downstream failure")
-		if tc.workerType == "event_trigger" {
-			mockReg.claimTriggersErr = errors.New("502 haro fire failure")
-		}
 	}
 	srv := newTestRouter(Config{
 		SystemChannelID: "100000000000000001",
@@ -1081,12 +1058,6 @@ func riverJobArgsCases() []riverJobArgsCase {
 			wantQueue:    QueueWidgetSync,
 			wantByArgs:   true,
 			wantByStates: []rivertype.JobState{rivertype.JobStateAvailable, rivertype.JobStatePending, rivertype.JobStateRunning, rivertype.JobStateRetryable, rivertype.JobStateScheduled},
-			wantAttempts: 5,
-		},
-		{
-			name:         "EventTriggerWebhookArgs",
-			args:         EventTriggerWebhookArgs{Source: "custom_source", Targets: []string{"device.alpha"}, EventType: "ready"},
-			wantKind:     "event_trigger_webhook",
 			wantAttempts: 5,
 		},
 		{

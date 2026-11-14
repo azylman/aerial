@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -28,7 +27,6 @@ type Config struct {
 	BrainURL            string
 	EriURL              string
 	VanadisURL          string
-	HaroURL             string
 	NATSURL             string
 	SystemChannelID     string
 	DiscordToken        string
@@ -44,7 +42,6 @@ type RouterYAMLConfig struct {
 	FluxReceiverURL     string            `yaml:"flux_receiver_url"`
 	EriURL              string            `yaml:"eri_url"`
 	VanadisURL          string            `yaml:"vanadis_url"`
-	HaroURL             string            `yaml:"haro_url"`
 	NATSURL             string            `yaml:"nats_url"`
 	SystemChannelID     string            `yaml:"system_channel_id"`
 	SystemChannel       string            `yaml:"system_channel"`
@@ -166,7 +163,6 @@ func synapseRestartRequired(old, next *Config) bool {
 		old.KubeAPIServer != next.KubeAPIServer ||
 		old.KubeToken != next.KubeToken ||
 		old.VanadisURL != next.VanadisURL ||
-		old.HaroURL != next.HaroURL ||
 		old.NATSURL != next.NATSURL
 }
 
@@ -241,7 +237,6 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		BrainURL:            strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
 		EriURL:              strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
 		VanadisURL:          strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL), "/"),
-		HaroURL:             strings.TrimRight(firstNonEmpty(os.Getenv("HARO_URL"), fileCfg.HaroURL), "/"),
 		NATSURL:             firstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
 		SystemChannelID:     strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
 		DiscordToken:        os.Getenv("DISCORD_TOKEN"),
@@ -425,12 +420,4 @@ func truncatePromptRunes(s string, maxRunes int) string {
 		return s
 	}
 	return string(runes[:maxRunes]) + "... (truncated)"
-}
-
-func readBodyString(r io.Reader) string {
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return ""
-	}
-	return string(body)
 }

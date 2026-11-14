@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -14,20 +12,8 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/google/uuid"
 )
-
-// ClaimedEventTrigger represents an event trigger claimed and fired atomically via Haro.
-type ClaimedEventTrigger struct {
-	ID        string `json:"id"`
-	ChannelID string `json:"channel_id"`
-	Source    string `json:"source"`
-	Target    string `json:"target"`
-	EventType string `json:"event_type"`
-	Prompt    string `json:"prompt"`
-	Effort    string `json:"effort"`
-}
 
 // EventWebhookRequest represents an inbound generic event trigger webhook payload.
 type EventWebhookRequest struct {
@@ -39,99 +25,55 @@ type EventWebhookRequest struct {
 	Details       string   `json:"details,omitempty"`
 }
 
-// WithHaroClient configures the Haro URL and HTTP client for PostgresPRRegistry.
-func WithHaroClient(haroURL string, client *http.Client) func(*PostgresPRRegistry) {
-	return func(r *PostgresPRRegistry) {
-		if r == nil {
-			return
-		}
-		if haroURL != "" {
-			r.haroURL = strings.TrimRight(haroURL, "/")
-		}
-		if client != nil {
-			// Wrapped here so injected clients keep traceparent propagation to vanadis/haro.
-			r.httpClient = tracing.Client(client)
-		}
+func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Request) {
+	body, ok := readWebhookBody(w, r, 1<<20)
+	if !ok {
+		return
 	}
-}
+	if s != nil && s.cfgSrc != nil && len(s.cfgSrc.Current().WebhookForwardURLs) > 0 {
+		reqPath := r.URL.RequestURI()
+		if reqPath == "" {
+			reqPath = r.URL.Path
+		}
+		s.forwardRawWebhookToPeers(r.Context(), reqPath, r.Header, body)
+	}
 
-func (r *PostgresPRRegistry) getHaroClient() (*http.Client, string) {
-	if r == nil {
-		return &http.Client{Timeout: 10 * time.Second}, ""
+	var req EventWebhookRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
+		return
 	}
-	client := r.httpClient
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+	source := strings.ToLower(strings.TrimSpace(req.Source))
+	eventType := strings.ToLower(strings.TrimSpace(req.EventType))
+	targets := dedupeTrimmedStrings(append([]string{req.Target}, req.Targets...))
+	if source == "" || eventType == "" || len(targets) == 0 {
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
+		return
 	}
-	return client, strings.TrimRight(r.haroURL, "/")
-}
 
-func (r *PostgresPRRegistry) postHaroEventTriggers(ctx context.Context, path, op string, source string, targets []string, eventType, contextHeader string, dst any) (bool, error) {
-	source, eventType = strings.TrimSpace(source), strings.TrimSpace(eventType)
-	cleanTargets := dedupeTrimmedStrings(targets)
-	if r == nil || len(cleanTargets) == 0 || source == "" || eventType == "" {
-		return false, nil
+	contextHeader := strings.TrimSpace(req.ContextHeader)
+	if contextHeader == "" {
+		contextHeader = fmt.Sprintf("External %s event %s on %s", source, eventType, strings.Join(targets, ", "))
+		if details := strings.TrimSpace(req.Details); details != "" {
+			contextHeader += ": " + details
+		}
 	}
-	client, hURL := r.getHaroClient()
-	if hURL == "" {
-		return false, errors.New("haro URL is not configured")
+
+	if s == nil || s.bus == nil {
+		httpkit.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event bus not initialized"})
+		return
 	}
-	payload := map[string]any{
+
+	if err := s.evaluateEventTriggers(r.Context(), source, eventType, targets, contextHeader); err != nil {
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to evaluate triggers"})
+		return
+	}
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
+		"status":     "accepted",
 		"source":     source,
-		"targets":    cleanTargets,
+		"targets":    targets,
 		"event_type": eventType,
-	}
-	if strings.TrimSpace(contextHeader) != "" {
-		payload["context_header"] = strings.TrimSpace(contextHeader)
-	}
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return false, fmt.Errorf("marshal %s request: %w", op, err)
-	}
-	err = r.doHTTPWithRetry(ctx, client, op, func() (*http.Request, error) {
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, hURL+path, bytes.NewReader(bodyBytes))
-		if reqErr != nil {
-			return nil, reqErr
-		}
-		req.Header.Set("Content-Type", "application/json")
-		return req, nil
-	}, func(resp *http.Response) error {
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("%s: unexpected status %d: %s", op, resp.StatusCode, readBodyString(io.LimitReader(resp.Body, 1024)))
-		}
-		if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
-			return fmt.Errorf("decode %s response: %w", op, err)
-		}
-		return nil
 	})
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// CheckEventTriggers performs a lightweight read-only check on Haro to see if any active trigger matches.
-func (r *PostgresPRRegistry) CheckEventTriggers(ctx context.Context, source string, targets []string, eventType string) (bool, error) {
-	var res struct {
-		Matched bool `json:"matched"`
-	}
-	ok, err := r.postHaroEventTriggers(ctx, "/event-triggers/check", "check event triggers", source, targets, eventType, "", &res)
-	if !ok || err != nil {
-		return false, err
-	}
-	return res.Matched, nil
-}
-
-// FireEventTriggers atomically claims and dispatches matching event triggers via Haro HTTP API.
-func (r *PostgresPRRegistry) FireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) ([]ClaimedEventTrigger, error) {
-	var res struct {
-		Triggers []ClaimedEventTrigger `json:"triggers"`
-	}
-	ok, err := r.postHaroEventTriggers(ctx, "/event-triggers/fire", "fire event triggers", source, targets, eventType, contextHeader, &res)
-	if !ok || err != nil {
-		return nil, err
-	}
-	return res.Triggers, nil
 }
 
 // FailVanadisChunkDetailsByPR marks a Vanadis chunk as failed by PR and returns the build ID and chunk ID.
@@ -173,185 +115,42 @@ func sanitizeSubjectToken(token string) string {
 }
 
 func (s *RouterServer) fireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) {
-	if len(targets) == 0 {
+	if s == nil || len(targets) == 0 {
 		return
 	}
 	cleanTargets := dedupeTrimmedStrings(targets)
 	if len(cleanTargets) == 0 {
 		return
 	}
-	if s != nil && s.bus != nil {
-		if err := s.evaluateEventTriggers(ctx, source, eventType, cleanTargets, contextHeader); err != nil {
-			log.Printf("[synapse] [event-triggers] error evaluating triggers for %s %v %s: %v", source, cleanTargets, eventType, err)
-		}
-		return
-	}
-	if s != nil && s.registry != nil {
-		if _, err := s.registry.FireEventTriggers(ctx, source, cleanTargets, eventType, contextHeader); err != nil {
-			log.Printf("[synapse] [event-triggers] error firing triggers for %s %v %s: %v", source, cleanTargets, eventType, err)
-		}
+	if err := s.evaluateEventTriggers(ctx, source, eventType, cleanTargets, contextHeader); err != nil {
+		log.Printf("[synapse] [event-triggers] error evaluating triggers for %s %v %s: %v", source, cleanTargets, eventType, err)
 	}
 }
 
-// evaluateEventTriggers evaluates incoming event triggers by publishing to AERIAL_EVENTS on JetStream,
-// falling back to legacy Haro HTTP /event-triggers/check and River workers only on failure or when bus is nil.
+// evaluateEventTriggers evaluates incoming event triggers by publishing to AERIAL_EVENTS on JetStream.
 func (s *RouterServer) evaluateEventTriggers(ctx context.Context, source, eventType string, targets []string, contextHeader string) error {
 	source, eventType = strings.TrimSpace(source), strings.TrimSpace(eventType)
 	cleanTargets := dedupeTrimmedStrings(targets)
 	if len(cleanTargets) == 0 || source == "" || eventType == "" {
 		return nil
 	}
-
-	if s != nil && s.bus != nil {
-		ev := pubsub.ExternalEvent{
-			EventID:       uuid.New().String(),
-			Source:        source,
-			EventType:     eventType,
-			Targets:       cleanTargets,
-			ContextHeader: contextHeader,
-			OccurredAt:    time.Now().UTC(),
-		}
-		cleanSource := sanitizeSubjectToken(source)
-		cleanEventType := sanitizeSubjectToken(eventType)
-		subject := fmt.Sprintf("aerial.events.%s.%s", cleanSource, cleanEventType)
-		msgID := fmt.Sprintf("event:%s:%s:%s", cleanSource, cleanEventType, ev.EventID)
-		pubErr := s.bus.Publish(ctx, subject, msgID, ev)
-		if pubErr == nil {
-			return nil
-		}
-		log.Printf("[synapse] [event-triggers] Warning: jetstream publish failed for %s (%s): %v, falling back to legacy path", subject, msgID, pubErr)
+	if s == nil || s.bus == nil {
+		return errors.New("event bus not initialized")
 	}
 
-	if s != nil && s.registry != nil {
-		matched, checkErr := s.registry.CheckEventTriggers(ctx, source, cleanTargets, eventType)
-		if checkErr == nil && !matched {
-			return nil
-		}
-		if checkErr != nil {
-			log.Printf("[synapse] [events] warning: haro pre-check failed for %s %v %s (failing open to river): %v", source, cleanTargets, eventType, checkErr)
-		}
-	}
-
-	jobArgs := EventTriggerWebhookArgs{
+	ev := pubsub.ExternalEvent{
+		EventID:       uuid.New().String(),
 		Source:        source,
+		EventType:     eventType,
 		Targets:       cleanTargets,
-		EventType:     eventType,
 		ContextHeader: contextHeader,
+		OccurredAt:    time.Now().UTC(),
 	}
-	if s != nil && s.riverClient != nil {
-		return s.insertRiverJob(ctx, jobArgs)
-	}
-	return s.ProcessEventTriggerWebhook(ctx, jobArgs)
-}
-
-func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Request) {
-	body, ok := readWebhookBody(w, r, 1<<20)
-	if !ok {
-		return
-	}
-	if len(s.cfgSrc.Current().WebhookForwardURLs) > 0 {
-		reqPath := r.URL.RequestURI()
-		if reqPath == "" {
-			reqPath = r.URL.Path
-		}
-		s.forwardRawWebhookToPeers(r.Context(), reqPath, r.Header, body)
-	}
-
-	var req EventWebhookRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
-		return
-	}
-	source := strings.ToLower(strings.TrimSpace(req.Source))
-	eventType := strings.ToLower(strings.TrimSpace(req.EventType))
-	targets := dedupeTrimmedStrings(append([]string{req.Target}, req.Targets...))
-	if source == "" || eventType == "" || len(targets) == 0 {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
-		return
-	}
-
-	contextHeader := strings.TrimSpace(req.ContextHeader)
-	if contextHeader == "" {
-		contextHeader = fmt.Sprintf("External %s event %s on %s", source, eventType, strings.Join(targets, ", "))
-		if details := strings.TrimSpace(req.Details); details != "" {
-			contextHeader += ": " + details
-		}
-	}
-
-	if s != nil && s.bus != nil {
-		if err := s.evaluateEventTriggers(r.Context(), source, eventType, targets, contextHeader); err != nil {
-			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to evaluate triggers"})
-			return
-		}
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-			"status":     "accepted",
-			"source":     source,
-			"targets":    targets,
-			"event_type": eventType,
-		})
-		return
-	}
-
-	if s.registry != nil {
-		matched, checkErr := s.registry.CheckEventTriggers(r.Context(), source, targets, eventType)
-		if checkErr == nil && !matched {
-			httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-				"status":     "dropped",
-				"matched":    false,
-				"source":     source,
-				"event_type": eventType,
-			})
-			return
-		}
-		if checkErr != nil {
-			log.Printf("[synapse] [events] warning: haro pre-check failed for %s %v %s (failing open to river): %v", source, targets, eventType, checkErr)
-		}
-	}
-
-	jobArgs := EventTriggerWebhookArgs{
-		Source:        source,
-		Targets:       targets,
-		EventType:     eventType,
-		ContextHeader: contextHeader,
-	}
-	if s.riverClient != nil {
-		if err := s.insertRiverJob(r.Context(), jobArgs); err != nil {
-			log.Printf("[synapse] [events] ERROR: failed to insert event job into river: %v", err)
-			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
-			return
-		}
-		httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
-			"status":     "accepted",
-			"source":     source,
-			"targets":    targets,
-			"event_type": eventType,
-		})
-		return
-	}
-
-	if err := s.ProcessEventTriggerWebhook(r.Context(), jobArgs); err != nil {
-		httpkit.WriteJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":     "accepted",
-		"source":     source,
-		"targets":    targets,
-		"event_type": eventType,
-	})
-}
-
-// ProcessEventTriggerWebhook fires matching event triggers via Haro, returning any error so River retries.
-func (s *RouterServer) ProcessEventTriggerWebhook(ctx context.Context, args EventTriggerWebhookArgs) error {
-	if s == nil || s.registry == nil {
-		return nil
-	}
-	cleanTargets := dedupeTrimmedStrings(args.Targets)
-	if len(cleanTargets) == 0 || strings.TrimSpace(args.Source) == "" || strings.TrimSpace(args.EventType) == "" {
-		return nil
-	}
-	_, err := s.registry.FireEventTriggers(ctx, args.Source, cleanTargets, args.EventType, args.ContextHeader)
-	return err
+	cleanSource := sanitizeSubjectToken(source)
+	cleanEventType := sanitizeSubjectToken(eventType)
+	subject := fmt.Sprintf("aerial.events.%s.%s", cleanSource, cleanEventType)
+	msgID := fmt.Sprintf("event:%s:%s:%s", cleanSource, cleanEventType, ev.EventID)
+	return s.bus.Publish(ctx, subject, msgID, ev)
 }
 
 func (s *RouterServer) evaluateFluxEventTriggers(ctx context.Context, evt DeployEvent) {

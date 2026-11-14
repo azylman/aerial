@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/azylman/aerial/pkg/tracing"
@@ -26,7 +27,10 @@ import (
 // LLMClientFunc defines the interface function for sending prompts to an LLM.
 type LLMClientFunc func(ctx context.Context, prompt string) (string, error)
 
-var extractionMutex sync.Mutex
+var (
+	extractionMutex          sync.Mutex
+	extractionRerunRequested atomic.Bool
+)
 
 // ExtractedFactItem represents a structured fact extracted by the LLM.
 type ExtractedFactItem struct {
@@ -154,37 +158,48 @@ func ExtractActiveConversationFacts(ctx context.Context, store Store, client Oll
 	}
 
 	if !extractionMutex.TryLock() {
-		log.Printf("[Memory] Hourly fact extraction already running, skipping overlapping execution.")
-		RecordOperation("extract", "success", time.Since(start).Seconds())
-		return nil
-	}
-	defer extractionMutex.Unlock()
-
-	threadIDs, err := store.GetActiveConversationsForExtraction(ctx, activeHours)
-	if err != nil {
-		RecordOperation("extract", "error", time.Since(start).Seconds())
-		return fmt.Errorf("failed to get active conversations: %w", err)
-	}
-
-	if len(threadIDs) == 0 {
-		log.Printf("[Memory] No active conversations requiring fact extraction.")
+		extractionRerunRequested.Store(true)
+		log.Printf("[Memory] Fact extraction already running; flagged for follow-up pass.")
 		RecordOperation("extract", "success", time.Since(start).Seconds())
 		return nil
 	}
 
-	log.Printf("[Memory] Starting hourly fact extraction for %d active conversation threads...", len(threadIDs))
+	for {
+		extractionRerunRequested.Store(false)
 
-	for _, tid := range threadIDs {
-		select {
-		case <-ctx.Done():
+		threadIDs, err := store.GetActiveConversationsForExtraction(ctx, activeHours)
+		if err != nil {
+			extractionMutex.Unlock()
 			RecordOperation("extract", "error", time.Since(start).Seconds())
-			return ctx.Err()
-		default:
+			return fmt.Errorf("failed to get active conversations: %w", err)
 		}
 
-		if err := processThreadFacts(ctx, store, client, llmFunc, tid); err != nil {
-			log.Printf("[Memory] Error extracting facts for thread %s: %v", tid, err)
+		if len(threadIDs) > 0 {
+			log.Printf("[Memory] Starting hourly fact extraction for %d active conversation threads...", len(threadIDs))
+
+			for _, tid := range threadIDs {
+				select {
+				case <-ctx.Done():
+					extractionMutex.Unlock()
+					RecordOperation("extract", "error", time.Since(start).Seconds())
+					return ctx.Err()
+				default:
+				}
+
+				if err := processThreadFacts(ctx, store, client, llmFunc, tid); err != nil {
+					log.Printf("[Memory] Error extracting facts for thread %s: %v", tid, err)
+				}
+			}
+		} else {
+			log.Printf("[Memory] No active conversations requiring fact extraction.")
 		}
+
+		extractionMutex.Unlock()
+		if extractionRerunRequested.Load() && extractionMutex.TryLock() {
+			log.Printf("[Memory] Re-running fact extraction pass due to inbound turn completed event.")
+			continue
+		}
+		break
 	}
 
 	RecordOperation("extract", "success", time.Since(start).Seconds())

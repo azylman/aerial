@@ -807,24 +807,6 @@ func buildEventTriggerFilterArgs(source string, targets []string, eventType stri
 	return strings.Join(placeholders, ", "), args, true
 }
 
-// CheckEventTriggers reports whether at least one matching event trigger exists without deleting it.
-func CheckEventTriggers(ctx context.Context, database *sql.DB, source string, targets []string, eventType string) (bool, error) {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return false, err
-	}
-	placeholders, args, ok := buildEventTriggerFilterArgs(source, targets, eventType)
-	if !ok {
-		return false, nil
-	}
-	rawQuery := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s))`, placeholders)
-	var matched bool
-	if err := database.QueryRowContext(ctx, rawQuery, args...).Scan(&matched); err != nil {
-		return false, err
-	}
-	return matched, nil
-}
-
 var isSQLiteDBFn = isSQLiteDB
 
 func isSQLiteDB(db *sql.DB) bool {

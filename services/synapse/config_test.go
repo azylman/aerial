@@ -148,8 +148,8 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				t.Setenv(k, v)
 			}
 			cfg := LoadConfigFromEnv()
-			if tc.wantEmptyURL && (cfg.VanadisURL != "" || cfg.HaroURL != "") {
-				t.Errorf("VanadisURL=%q HaroURL=%q, want both empty when unset", cfg.VanadisURL, cfg.HaroURL)
+			if tc.wantEmptyURL && cfg.VanadisURL != "" {
+				t.Errorf("VanadisURL=%q, want empty when unset", cfg.VanadisURL)
 			}
 			for _, check := range []struct{ got, want, field string }{
 				{cfg.Port, tc.wantPort, "Port"},
@@ -554,12 +554,6 @@ func TestStringAndRepoHelpers(t *testing.T) {
 		})
 	}
 
-	if got := readBodyString(errReader{}); got != "" {
-		t.Errorf("readBodyString(errReader) = %q, want empty", got)
-	}
-	if got := readBodyString(strings.NewReader("")); got != "" {
-		t.Errorf("readBodyString(empty) = %q, want empty", got)
-	}
 	if n := len(randomNonce()); n != 32 {
 		t.Errorf("len(randomNonce()) = %d, want 32", n)
 	}
@@ -771,7 +765,6 @@ func TestSynapseRestartRequired(t *testing.T) {
 		KubeAPIServer:       "https://10.0.0.1:443",
 		KubeToken:           "kube",
 		VanadisURL:          "http://vanadis",
-		HaroURL:             "http://haro",
 		SystemChannelID:     "111",
 		AutoUpdatePRAuthors: []string{"a"},
 		WebhookForwardURLs:  map[string]string{"marida": "http://marida:4020"},
@@ -795,7 +788,6 @@ func TestSynapseRestartRequired(t *testing.T) {
 		{name: "kube api server requires restart", next: withField(base, Config{KubeAPIServer: "https://10.0.0.2:443"}), want: true},
 		{name: "kube token requires restart", next: withField(base, Config{KubeToken: "kube2"}), want: true},
 		{name: "vanadis url requires restart", next: withField(base, Config{VanadisURL: "http://vanadis2"}), want: true},
-		{name: "haro url requires restart", next: withField(base, Config{HaroURL: "http://haro2"}), want: true},
 		{name: "nats url requires restart", next: withField(base, Config{NATSURL: "nats://nats2:4222"}), want: true},
 	}
 	for _, tc := range tests {

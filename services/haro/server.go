@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"log"
@@ -215,10 +214,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/schedules", s.handleSchedules)
 	mux.HandleFunc("/schedules/runs", s.handleScheduleRuns)
 	mux.HandleFunc("/schedules/oneshot", s.handleScheduleOneShot)
-	mux.HandleFunc("/event-triggers/check", s.handleCheckEventTriggers)
-	mux.HandleFunc("/event-triggers/claim", s.handleClaimEventTriggers)
-	// Continues the trace of the webhook (synapse) that fired the event.
-	mux.Handle("/event-triggers/fire", tracing.Middleware("haro", http.HandlerFunc(s.handleFireEventTriggers)))
 
 	mcpBridge := tracing.Middleware("haro", http.HandlerFunc(s.handleMCP))
 	mux.Handle("/mcp", mcpBridge)
@@ -258,18 +253,6 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/schedules/oneshot" {
 		s.handleScheduleOneShot(w, r)
-		return
-	}
-	if r.URL.Path == "/event-triggers/check" {
-		s.handleCheckEventTriggers(w, r)
-		return
-	}
-	if r.URL.Path == "/event-triggers/claim" {
-		s.handleClaimEventTriggers(w, r)
-		return
-	}
-	if r.URL.Path == "/event-triggers/fire" {
-		s.handleFireEventTriggers(w, r)
 		return
 	}
 
@@ -459,74 +442,6 @@ func (s *Server) handleScheduleOneShot(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-type eventTriggerActionRequest struct {
-	Source        string   `json:"source"`
-	Target        string   `json:"target,omitempty"`
-	Targets       []string `json:"targets,omitempty"`
-	EventType     string   `json:"event_type"`
-	ContextHeader string   `json:"context_header,omitempty"`
-}
-
-func (s *Server) parseEventTriggerActionRequest(w http.ResponseWriter, r *http.Request) (eventTriggerActionRequest, bool) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return eventTriggerActionRequest{}, false
-	}
-	if s.handler == nil || s.handler.db == nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
-		return eventTriggerActionRequest{}, false
-	}
-	var req eventTriggerActionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
-		return eventTriggerActionRequest{}, false
-	}
-	req.Source = strings.ToLower(strings.TrimSpace(req.Source))
-	req.EventType = strings.ToLower(strings.TrimSpace(req.EventType))
-	rawTargets := append([]string{req.Target}, req.Targets...)
-	var cleanTargets []string
-	for _, t := range rawTargets {
-		if clean := strings.TrimSpace(t); clean != "" {
-			cleanTargets = append(cleanTargets, clean)
-		}
-	}
-	req.Targets = cleanTargets
-	if req.Source == "" || req.EventType == "" || len(req.Targets) == 0 {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "source, event_type, and targets are required"})
-		return eventTriggerActionRequest{}, false
-	}
-	return req, true
-}
-
-func (s *Server) handleEventTriggerQuery(w http.ResponseWriter, r *http.Request, respKey string, fn func(context.Context, *sql.DB, string, []string, string) (any, error)) {
-	req, ok := s.parseEventTriggerActionRequest(w, r)
-	if !ok {
-		return
-	}
-	res, err := fn(r.Context(), s.handler.db, req.Source, req.Targets, req.EventType)
-	if err != nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status": "ok",
-		respKey:  res,
-	})
-}
-
-func (s *Server) handleCheckEventTriggers(w http.ResponseWriter, r *http.Request) {
-	s.handleEventTriggerQuery(w, r, "matched", func(ctx context.Context, db *sql.DB, source string, targets []string, eventType string) (any, error) {
-		return CheckEventTriggers(ctx, db, source, targets, eventType)
-	})
-}
-
-func (s *Server) handleClaimEventTriggers(w http.ResponseWriter, r *http.Request) {
-	s.handleEventTriggerQuery(w, r, "triggers", func(ctx context.Context, db *sql.DB, source string, targets []string, eventType string) (any, error) {
-		return ClaimEventTriggers(ctx, db, source, targets, eventType)
-	})
-}
-
 func (s *Server) recoverFailedEventTrigger(ctx context.Context, trig EventTrigger) {
 	bgCtx := context.WithoutCancel(ctx)
 	if !trig.Persistent {
@@ -581,40 +496,4 @@ func (s *Server) HandleExternalEvent(ctx context.Context, ev pubsub.ExternalEven
 		}
 	}
 	return nil
-}
-
-func (s *Server) handleFireEventTriggers(w http.ResponseWriter, r *http.Request) {
-	req, ok := s.parseEventTriggerActionRequest(w, r)
-	if !ok {
-		return
-	}
-	if s.dispatcher == nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "dispatcher not initialized"})
-		return
-	}
-	triggers, err := ClaimEventTriggers(r.Context(), s.handler.db, req.Source, req.Targets, req.EventType)
-	if err != nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	fired := make([]EventTrigger, 0, len(triggers))
-	var firstDispatchErr error
-	for _, trig := range triggers {
-		if dispErr := s.fireClaimedTrigger(r.Context(), trig, req.ContextHeader); dispErr != nil {
-			if firstDispatchErr == nil {
-				firstDispatchErr = dispErr
-			}
-			continue
-		}
-		fired = append(fired, trig)
-	}
-	if firstDispatchErr != nil {
-		httpkit.WriteJSON(w, http.StatusBadGateway, map[string]string{"error": firstDispatchErr.Error()})
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":   "ok",
-		"fired":    len(fired),
-		"triggers": fired,
-	})
 }

@@ -108,8 +108,6 @@ type PRRegistryUpdater interface {
 	RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
 	HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error)
 	RecordPRJobState(ctx context.Context, jobName, jobState string) (repo string, prNumber int, updated bool, err error)
-	CheckEventTriggers(ctx context.Context, source string, targets []string, eventType string) (bool, error)
-	FireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) ([]ClaimedEventTrigger, error)
 	AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error
 	RecordKustomizationRequests(ctx context.Context, repo string, prNumber int, requests map[string]kustomizationRequest) error
 	MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (transitioned bool, err error)
@@ -128,7 +126,6 @@ type pgxQueryExecer interface {
 type PostgresPRRegistry struct {
 	pool              pgxQueryExecer
 	vanadisURL        string
-	haroURL           string
 	httpClient        *http.Client
 	vanadisRetryDelay time.Duration
 	vanadisRetrySleep func(ctx context.Context, d time.Duration) error
