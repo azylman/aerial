@@ -1,4 +1,4 @@
-h1:knzOR8FKZVhRzQG7AkjtUmUVzZtM44pL9KZb9h9ynh4=
+h1:gfLPwG1Jzfa6ScwIBAXYHxnhOXb3aHP9Eq0jdLqObpg=
 20261001221347_baseline.sql h1:uwrTrII8CWvC/4E6FLZx5vGvYuO48AxqjCh+Wi/43kg=
 20261002155428_add_pr_registry.sql h1:tfYt/SDhTn/o/uTIcpHMD+XnpPELqiYySBkrwS+imJQ=
 20261002164500_add_river_queue.sql h1:TOtzV6uJrR9mibPzmVN8RRQ7fVAS95WmFLTvMQ9vETk=
@@ -30,3 +30,4 @@ h1:knzOR8FKZVhRzQG7AkjtUmUVzZtM44pL9KZb9h9ynh4=
 20261112235500_add_turn_traceparent.sql h1:nIHcjF6cleFKnXrtJAWwksUDll05Smf1Zpf4q7BMDLI=
 20261114002600_add_event_triggers_updated_at.sql h1:5GcPEnHEeoa169L4mpMhjhaKWyaa2U+ciC0aeR4fxqE=
 20261114010000_add_heartbeat_schedules_last_completed_at.sql h1:seqi3scOitfDQlAC9147bakoPMOyQfC43+nWqTdqxUw=
+20261114095500_drop_river_queue_tables.sql h1:QPxg795PzsyWi6syEUmMOgqMLCc+gkmZUCKXxJ5IQ1A=

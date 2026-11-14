@@ -802,6 +802,24 @@ func TestSynapseRestartRequired(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFromEnvStrict(t *testing.T) {
+	tmpDir := t.TempDir()
+	validYAML := filepath.Join(tmpDir, "valid.yaml")
+	if err := os.WriteFile(validYAML, []byte("port: \"5050\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	t.Setenv("PORT", "")
+	t.Setenv("CONFIG_PATH", validYAML)
+	cfg, err := loadConfigFromEnvStrict()
+	if err != nil {
+		t.Fatalf("loadConfigFromEnvStrict() err = %v", err)
+	}
+	if cfg == nil || cfg.Port != "5050" {
+		t.Errorf("cfg.Port = %v, want 5050", cfg)
+	}
+}
+
 // withField returns base with every non-zero field of overlay copied over it.
 func withField(base, overlay Config) Config {
 	dst := reflect.ValueOf(&base).Elem()

@@ -13,15 +13,16 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/riverqueue/river"
-	"github.com/riverqueue/river/rivertype"
 )
 
 // --- Shared Test Mocks & Helpers ---
 
 type mockRiverInserter struct {
+	pubsub.Bus
+
 	mu                     sync.Mutex
 	insertedJobs           []GitHubWebhookArgs
 	insertedDeployJobs     []DeployWebhookArgs
@@ -29,36 +30,54 @@ type mockRiverInserter struct {
 	insertedConflictJobs   []MergeConflictArgs
 	insertedDiscordJobs    []DiscordIngressArgs
 	insertedInteractJobs   []DiscordInteractionArgs
-	insertedOpts           []*river.InsertOpts
-	skipDuplicate          bool
 	err                    error
 }
 
-func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error) {
+func (m *mockRiverInserter) Publish(ctx context.Context, subject, msgID string, data any) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.err != nil {
-		return nil, m.err
+		return m.err
 	}
-	m.insertedOpts = append(m.insertedOpts, opts)
-	switch a := args.(type) {
+	switch a := data.(type) {
 	case GitHubWebhookArgs:
 		m.insertedJobs = append(m.insertedJobs, a)
+	case *GitHubWebhookArgs:
+		if a != nil {
+			m.insertedJobs = append(m.insertedJobs, *a)
+		}
 	case DeployWebhookArgs:
 		m.insertedDeployJobs = append(m.insertedDeployJobs, a)
+	case *DeployWebhookArgs:
+		if a != nil {
+			m.insertedDeployJobs = append(m.insertedDeployJobs, *a)
+		}
 	case WidgetSyncArgs:
 		m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, a)
+	case *WidgetSyncArgs:
+		if a != nil {
+			m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, *a)
+		}
 	case MergeConflictArgs:
 		m.insertedConflictJobs = append(m.insertedConflictJobs, a)
+	case *MergeConflictArgs:
+		if a != nil {
+			m.insertedConflictJobs = append(m.insertedConflictJobs, *a)
+		}
 	case DiscordIngressArgs:
 		m.insertedDiscordJobs = append(m.insertedDiscordJobs, a)
+	case *DiscordIngressArgs:
+		if a != nil {
+			m.insertedDiscordJobs = append(m.insertedDiscordJobs, *a)
+		}
 	case DiscordInteractionArgs:
 		m.insertedInteractJobs = append(m.insertedInteractJobs, a)
+	case *DiscordInteractionArgs:
+		if a != nil {
+			m.insertedInteractJobs = append(m.insertedInteractJobs, *a)
+		}
 	}
-	return &rivertype.JobInsertResult{
-		Job:                      &rivertype.JobRow{ID: 1},
-		UniqueSkippedAsDuplicate: m.skipDuplicate,
-	}, nil
+	return nil
 }
 
 type errReader struct{}
@@ -544,11 +563,11 @@ func (m *mockPRRegistry) RecordPRJobState(ctx context.Context, jobName, jobState
 	return m.recordJobStateRepo, m.recordJobStatePRNum, m.recordJobStateUpdated, nil
 }
 
-func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp OutboundDispatcher, riverInserter ...RiverInserter) *RouterServer {
+func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp OutboundDispatcher, bus ...pubsub.Bus) *RouterServer {
 	if client == nil && cfg.GitHubAPIURL == "" && cfg.KubeAPIServer == "" {
 		client = &http.Client{Transport: &zeroCallTransport{}}
 	}
-	srv := NewRouterServer(fixedConfig(cfg), client, riverInserter...)
+	srv := NewRouterServer(fixedConfig(cfg), client)
 	if reg != nil {
 		if pgReg, ok := reg.(*PostgresPRRegistry); ok && pgReg != nil {
 			if pgReg.vanadisURL == "" {
@@ -562,8 +581,8 @@ func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp 
 	if disp != nil {
 		srv.SetDispatcher(disp)
 	}
-	if len(riverInserter) > 0 && riverInserter[0] != nil {
-		srv.SetRiverClient(riverInserter[0])
+	if len(bus) > 0 && bus[0] != nil {
+		srv.SetEventBus(bus[0])
 	}
 	return srv
 }

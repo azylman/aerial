@@ -12,7 +12,7 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
-func resolveJetStreamJobCoords(args riverJobArgsWithOpts) (string, string) {
+func resolveJetStreamJobCoords(args any) (string, string) {
 	switch a := args.(type) {
 	case GitHubWebhookArgs:
 		return "aerial.jobs.synapse.github", "github:" + a.Delivery
@@ -148,7 +148,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 	defer func() { markDiscordJobSpan(span, err) }()
 
 	if termJobIfExhausted(msg, maxDeliverDiscordIngress, "discord ingress") {
-		RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "max_retries_exhausted")
+		RecordJobDropped(QueueDiscordIngress, "discord_ingress", "max_retries_exhausted")
 		return nil
 	}
 
@@ -173,7 +173,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 			isStale = true
 		}
 		if isStale {
-			RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "ttl_expired")
+			RecordJobDropped(QueueDiscordIngress, "discord_ingress", "ttl_expired")
 			if termErr := msg.Term(); termErr != nil {
 				log.Printf("[synapse] [jetstream] warning: error terming expired discord ingress job: %v", termErr)
 			}
@@ -184,13 +184,13 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 			return nil
 		}
 		if is4xxClientError(pErr) {
-			RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "client_4xx")
+			RecordJobDropped(QueueDiscordIngress, "discord_ingress", "client_4xx")
 			if termErr := msg.Term(); termErr != nil {
 				log.Printf("[synapse] [jetstream] warning: error terming client 4xx discord ingress job: %v", termErr)
 			}
 			return nil
 		}
-		RecordJobRetry(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "discord_ingress_backoff")
+		RecordJobRetry(QueueDiscordIngress, "discord_ingress", "discord_ingress_backoff")
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():

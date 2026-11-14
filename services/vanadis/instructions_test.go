@@ -10,7 +10,7 @@ import (
 )
 
 func TestServerInstructions(t *testing.T) {
-	ts := httptest.NewServer(NewVanadisServer(Config{Port: "0"}, newMemoryVanadisStore(), nil, nil).Routes())
+	ts := httptest.NewServer(NewVanadisServer(Config{Port: "0"}, newMemoryVanadisStore(), nil).Routes())
 	t.Cleanup(ts.Close)
 
 	tests := []struct {

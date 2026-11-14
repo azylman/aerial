@@ -938,6 +938,7 @@ type mockJetStream struct {
 	streamInfoErr   error
 	addStreamErr    error
 	updateStreamErr error
+	consumerInfoErr error
 	existingStreams map[string]*nats.StreamInfo
 	publishedMsgs   []*nats.Msg
 	onPublish       func(msg *nats.Msg)
@@ -1018,6 +1019,20 @@ func (m *mockJetStream) UpdateStream(cfg *nats.StreamConfig, opts ...nats.JSOpt)
 	info := &nats.StreamInfo{Config: *cfg}
 	m.existingStreams[cfg.Name] = info
 	return info, nil
+}
+
+func (m *mockJetStream) ConsumerInfo(stream, consumer string, opts ...nats.JSOpt) (*nats.ConsumerInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.consumerInfoErr != nil {
+		return nil, m.consumerInfoErr
+	}
+	return &nats.ConsumerInfo{
+		Stream:        stream,
+		Name:          consumer,
+		NumPending:    7,
+		NumAckPending: 3,
+	}, nil
 }
 
 func (m *mockJetStream) setPublishErr(err error) {
@@ -1335,5 +1350,36 @@ func TestJetStreamBus_DispatchAndMessageSettlement(t *testing.T) {
 	busNilNC := &JetStreamBus{}
 	if err := busNilNC.Close(); err != nil {
 		t.Errorf("Close with nil nc failed: %v", err)
+	}
+}
+
+func TestJetStreamBus_ConsumerStats(t *testing.T) {
+	t.Parallel()
+
+	var nilJSBus *JetStreamBus
+	if _, _, err := nilJSBus.ConsumerStats(context.Background(), "stream", "consumer"); err == nil {
+		t.Error("expected error from nil bus ConsumerStats")
+	}
+
+	memBusStats := NewMemoryBus()
+	defer memBusStats.Close()
+	if p, inf, err := memBusStats.ConsumerStats(context.Background(), "stream", "consumer"); err != nil || p != 0 || inf != 0 {
+		t.Errorf("MemoryBus.ConsumerStats = (%d, %d, %v), want (0, 0, nil)", p, inf, err)
+	}
+
+	mjs := &mockJetStream{
+		existingStreams: make(map[string]*nats.StreamInfo),
+	}
+	bus := newJetStreamBusWithContext(nil, mjs)
+
+	if p, inf, err := bus.ConsumerStats(context.Background(), "stream", "consumer"); err != nil || p != 7 || inf != 3 {
+		t.Errorf("ConsumerStats with ctx = (%d, %d, %v), want (7, 3, nil)", p, inf, err)
+	}
+	if p, inf, err := bus.ConsumerStats(nil, "stream", "consumer"); err != nil || p != 7 || inf != 3 {
+		t.Errorf("ConsumerStats with nil ctx = (%d, %d, %v), want (7, 3, nil)", p, inf, err)
+	}
+	mjs.consumerInfoErr = errors.New("simulated consumer info err")
+	if _, _, err := bus.ConsumerStats(context.Background(), "stream", "consumer"); err == nil {
+		t.Error("expected error from bus.ConsumerStats with consumerInfoErr")
 	}
 }

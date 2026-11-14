@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -10,8 +11,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/bwmarrin/discordgo"
-	"github.com/riverqueue/river"
-	"github.com/riverqueue/river/rivertype"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -214,17 +213,21 @@ func TestDiscordInteractionWorker_ResumesGatewayTrace(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			srv := newTraceparentServer(t, 0, `{"status":"ok"}`)
-			w := &DiscordInteractionWorker{server: newTestRouter(Config{}, nil, nil, NewDefaultOutboundDispatcher(srv.URL, srv.Client()))}
-			job := &river.Job[DiscordInteractionArgs]{
-				JobRow: &rivertype.JobRow{ID: 1, Attempt: 1, MaxAttempts: 1},
-				Args: DiscordInteractionArgs{
-					InteractionID: "inter-traced",
-					Interaction:   &discordgo.Interaction{ID: "inter-traced", Type: discordgo.InteractionApplicationCommand},
-					Traceparent:   tc.traceparent,
-				},
+			router := newTestRouter(Config{}, nil, nil, NewDefaultOutboundDispatcher(srv.URL, srv.Client()))
+			argsBytes, err := json.Marshal(DiscordInteractionArgs{
+				InteractionID: "inter-traced",
+				Interaction:   &discordgo.Interaction{ID: "inter-traced", Type: discordgo.InteractionApplicationCommand},
+				Traceparent:   tc.traceparent,
+			})
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
 			}
-			if err := w.Work(context.Background(), job); err != nil {
-				t.Fatalf("Work: %v", err)
+			msg := &synapseMemoryMsg{
+				data:    argsBytes,
+				subject: "aerial.jobs.synapse.discord_interaction",
+			}
+			if err := router.HandleDiscordInteractionJob(context.Background(), msg); err != nil {
+				t.Fatalf("HandleDiscordInteractionJob: %v", err)
 			}
 			assertTraceIDs(t, srv.traceIDs(), 1, persistedTraceID, tc.continuesParent)
 		})

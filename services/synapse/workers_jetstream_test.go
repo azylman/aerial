@@ -41,7 +41,7 @@ func TestResolveJetStreamJobCoords(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		args        riverJobArgsWithOpts
+		args        any
 		wantSubject string
 		wantPrefix  string
 	}{
@@ -161,49 +161,41 @@ func initInsertRiverJobBus(ctx context.Context, busErr error, busReceived chan s
 	return memBus
 }
 
-func TestInsertRiverJobWithJetStream(t *testing.T) {
+func TestPublishJetStreamJob(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
 	tests := []struct {
-		name          string
-		hasBus        bool
-		busErr        error
-		hasRiver      bool
-		args          riverJobArgsWithOpts
-		wantErr       bool
-		wantRiverCall bool
+		name    string
+		hasBus  bool
+		busErr  error
+		args    any
+		wantErr bool
 	}{
 		{
-			name:     "publishes to jetstream when bus available",
-			hasBus:   true,
-			hasRiver: true,
-			args:     GitHubWebhookArgs{Delivery: "d1"},
-			wantErr:  false,
+			name:    "publishes to jetstream when bus available",
+			hasBus:  true,
+			args:    GitHubWebhookArgs{Delivery: "d1"},
+			wantErr: false,
 		},
 		{
-			name:          "falls back to river when bus publish fails",
-			hasBus:        true,
-			busErr:        errors.New("nats down"),
-			hasRiver:      true,
-			args:          GitHubWebhookArgs{Delivery: "d2"},
-			wantErr:       false,
-			wantRiverCall: true,
+			name:    "returns error when bus publish fails",
+			hasBus:  true,
+			busErr:  errors.New("nats down"),
+			args:    GitHubWebhookArgs{Delivery: "d2"},
+			wantErr: true,
 		},
 		{
-			name:          "falls back to river when bus nil",
-			hasBus:        false,
-			hasRiver:      true,
-			args:          GitHubWebhookArgs{Delivery: "d3"},
-			wantErr:       false,
-			wantRiverCall: true,
+			name:    "returns error when bus nil",
+			hasBus:  false,
+			args:    GitHubWebhookArgs{Delivery: "d3"},
+			wantErr: true,
 		},
 		{
-			name:     "returns error when both bus and river nil",
-			hasBus:   false,
-			hasRiver: false,
-			args:     GitHubWebhookArgs{Delivery: "d6"},
-			wantErr:  true,
+			name:    "returns error for unsupported job args",
+			hasBus:  true,
+			args:    "invalid args string",
+			wantErr: true,
 		},
 	}
 
@@ -211,11 +203,6 @@ func TestInsertRiverJobWithJetStream(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			srv := &RouterServer{}
-			var mockRiver *mockRiverInserter
-			if tc.hasRiver {
-				mockRiver = &mockRiverInserter{}
-				srv.SetRiverClient(mockRiver)
-			}
 			busReceived := make(chan struct{}, 1)
 			if tc.hasBus {
 				memBus := initInsertRiverJobBus(ctx, tc.busErr, busReceived)
@@ -223,21 +210,15 @@ func TestInsertRiverJobWithJetStream(t *testing.T) {
 				srv.SetEventBus(memBus)
 			}
 
-			err := srv.insertRiverJob(ctx, tc.args)
+			err := srv.publishJetStreamJob(ctx, tc.args)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("insertRiverJob() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantRiverCall && (mockRiver == nil || len(mockRiver.insertedJobs) == 0) {
-				t.Errorf("expected river insert call, got none")
+				t.Fatalf("publishJetStreamJob() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.hasBus && tc.busErr == nil && !tc.wantErr {
 				select {
 				case <-busReceived:
 				case <-time.After(2 * time.Second):
 					t.Errorf("expected bus to receive published job")
-				}
-				if mockRiver != nil && len(mockRiver.insertedJobs) > 0 {
-					t.Errorf("expected zero river calls when bus succeeded, got %d", len(mockRiver.insertedJobs))
 				}
 			}
 		})
@@ -645,7 +626,7 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		args   riverJobArgsWithOpts
+		args   any
 		signal <-chan struct{}
 	}{
 		{
@@ -688,13 +669,113 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		if err := srv.insertRiverJob(ctx, tc.args); err != nil {
-			t.Fatalf("insertRiverJob(%s) error: %v", tc.name, err)
+		if err := srv.publishJetStreamJob(ctx, tc.args); err != nil {
+			t.Fatalf("publishJetStreamJob(%s) error: %v", tc.name, err)
 		}
 		select {
 		case <-tc.signal:
 		case <-time.After(2 * time.Second):
 			t.Fatalf("timed out waiting for %s job consumer", tc.name)
 		}
+	}
+}
+
+func TestJobArgsKindsAndResolveJobQueueAndKind(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		args      any
+		wantKind  string
+		wantQueue string
+	}{
+		{
+			name:      "GitHubWebhookArgs value",
+			args:      GitHubWebhookArgs{},
+			wantKind:  "github_webhook",
+			wantQueue: QueueDefault,
+		},
+		{
+			name:      "GitHubWebhookArgs pointer",
+			args:      &GitHubWebhookArgs{},
+			wantKind:  "github_webhook",
+			wantQueue: QueueDefault,
+		},
+		{
+			name:      "DeployWebhookArgs value",
+			args:      DeployWebhookArgs{},
+			wantKind:  "deploy_webhook",
+			wantQueue: QueueDefault,
+		},
+		{
+			name:      "DeployWebhookArgs pointer",
+			args:      &DeployWebhookArgs{},
+			wantKind:  "deploy_webhook",
+			wantQueue: QueueDefault,
+		},
+		{
+			name:      "WidgetSyncArgs value",
+			args:      WidgetSyncArgs{},
+			wantKind:  "widget_sync",
+			wantQueue: QueueWidgetSync,
+		},
+		{
+			name:      "WidgetSyncArgs pointer",
+			args:      &WidgetSyncArgs{},
+			wantKind:  "widget_sync",
+			wantQueue: QueueWidgetSync,
+		},
+		{
+			name:      "MergeConflictArgs value",
+			args:      MergeConflictArgs{},
+			wantKind:  "merge_conflict",
+			wantQueue: QueueMergeConflict,
+		},
+		{
+			name:      "MergeConflictArgs pointer",
+			args:      &MergeConflictArgs{},
+			wantKind:  "merge_conflict",
+			wantQueue: QueueMergeConflict,
+		},
+		{
+			name:      "DiscordIngressArgs value",
+			args:      DiscordIngressArgs{},
+			wantKind:  "discord_ingress",
+			wantQueue: QueueDiscordIngress,
+		},
+		{
+			name:      "DiscordIngressArgs pointer",
+			args:      &DiscordIngressArgs{},
+			wantKind:  "discord_ingress",
+			wantQueue: QueueDiscordIngress,
+		},
+		{
+			name:      "DiscordInteractionArgs value",
+			args:      DiscordInteractionArgs{},
+			wantKind:  "discord_interaction",
+			wantQueue: QueueDiscordInteraction,
+		},
+		{
+			name:      "DiscordInteractionArgs pointer",
+			args:      &DiscordInteractionArgs{},
+			wantKind:  "discord_interaction",
+			wantQueue: QueueDiscordInteraction,
+		},
+		{
+			name:      "unknown args fallback",
+			args:      "unexpected payload",
+			wantKind:  "unknown",
+			wantQueue: QueueDefault,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotQueue, gotKind := resolveJobQueueAndKind(tc.args)
+			if gotQueue != tc.wantQueue || gotKind != tc.wantKind {
+				t.Errorf("resolveJobQueueAndKind(%T) = (%q, %q), want (%q, %q)", tc.args, gotQueue, gotKind, tc.wantQueue, tc.wantKind)
+			}
+		})
 	}
 }

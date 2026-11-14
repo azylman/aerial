@@ -12,9 +12,9 @@ func (s *RouterServer) enqueueMergeConflict(ctx context.Context, args MergeConfl
 		return nil
 	}
 	args.Repo = normalizeRepo(args.Repo)
-	if s.bus != nil || s.riverClient != nil {
-		if err := s.insertRiverJob(ctx, args); err != nil {
-			log.Printf("[synapse] [github] error enqueuing merge conflict into river: %v", err)
+	if s.bus != nil {
+		if err := s.publishJetStreamJob(ctx, args); err != nil {
+			log.Printf("[synapse] [github] error enqueuing merge conflict into jetstream: %v", err)
 			return fmt.Errorf("enqueue merge conflict: %w", err)
 		}
 		return nil

@@ -849,7 +849,7 @@ func TestHandleFluxWebhookSourceRepo(t *testing.T) {
 			}
 			srv := newTestRouter(Config{}, nil, nil, disp)
 			river := &mockRiverInserter{}
-			srv.SetRiverClient(river)
+			srv.SetEventBus(river)
 			req := httptest.NewRequest(http.MethodPost, "/webhooks/flux", strings.NewReader(tc.payload))
 			w := httptest.NewRecorder()
 			srv.Routes().ServeHTTP(w, req)

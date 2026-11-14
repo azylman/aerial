@@ -266,9 +266,9 @@ func enqueueDiscordMessage(ctx context.Context, server *RouterServer, s *discord
 		Traceparent: tracing.Traceparent(enqueueCtx),
 	}
 
-	if server.bus != nil || server.riverClient != nil {
-		if err := server.insertRiverJob(enqueueCtx, args); err != nil {
-			log.Printf("[synapse] [discord] failed to enqueue message %s to queue: %v", m.ID, err)
+	if server.bus != nil {
+		if err := server.publishJetStreamJob(enqueueCtx, args); err != nil {
+			log.Printf("[synapse] [discord] failed to publish message %s to jetstream: %v", m.ID, err)
 		}
 	} else {
 		if err := server.ProcessDiscordIngress(enqueueCtx, args); err != nil {
@@ -390,7 +390,7 @@ func isCatchUpMessageEligible(m *discordgo.Message, botUserID, minSnowflake stri
 		return false
 	}
 	if !m.Timestamp.IsZero() && (m.Timestamp.Before(now.Add(-discordCatchUpStaleTTL)) || now.Sub(m.Timestamp) > discordCatchUpStaleTTL) {
-		RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "catchup_stale_ttl")
+		RecordJobDropped(QueueDiscordIngress, "discord_ingress", "catchup_stale_ttl")
 		return false
 	}
 	if compareDiscordSnowflakes(m.ID, minSnowflake) <= 0 {
@@ -492,9 +492,9 @@ func handleGatewayInteractionCreate(ctx context.Context, server *RouterServer, i
 		Traceparent:   tracing.Traceparent(enqueueCtx),
 	}
 
-	if server.bus != nil || server.riverClient != nil {
-		if err := server.insertRiverJob(enqueueCtx, args); err != nil {
-			log.Printf("[synapse] [discord] failed to enqueue interaction %s to queue: %v", i.ID, err)
+	if server.bus != nil {
+		if err := server.publishJetStreamJob(enqueueCtx, args); err != nil {
+			log.Printf("[synapse] [discord] failed to publish interaction %s to jetstream: %v", i.ID, err)
 		}
 	} else {
 		if err := server.ProcessDiscordInteraction(enqueueCtx, args); err != nil {

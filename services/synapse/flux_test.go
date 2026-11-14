@@ -166,7 +166,7 @@ func runHandleFluxWebhookCase(t *testing.T, tc handleFluxWebhookCase) {
 		if tc.riverFail {
 			mockRiver.err = errors.New("river insert failed")
 		}
-		srv.SetRiverClient(mockRiver)
+		srv.SetEventBus(mockRiver)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, tc.endpoint, strings.NewReader(tc.payload))

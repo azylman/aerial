@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -652,8 +653,6 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 		httpkit.WriteMetaDirFn = oldMetaFn
 	})
 
-	RecordUniqueSkipped("")
-	RecordUniqueSkipped("test_kind_metric")
 	RecordJobEnqueued("", "", "")
 	RecordJobRetry("", "", "")
 	RecordJobDropped("", "", "")
@@ -683,8 +682,6 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			path:     "/metrics",
 			wantCode: http.StatusOK,
 			wantBodySubs: []string{
-				"synapse_unique_skipped_total",
-				`kind="test_kind_metric"`,
 				"synapse_queue_depth",
 				"synapse_queue_oldest_age_seconds",
 				"synapse_discord_gateway_latency_seconds 0.042",
@@ -730,15 +727,13 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			}
 
 			srv := NewRouterServer(fixedConfig(Config{Port: "4020"}), nil)
-			mockQ := &mockQueueStatsQuerier{
-				rows: &mockPgxRows{
-					rows: []mockRowData{
-						{queue: "default", state: "available", count: 4, oldestAge: 33.5},
-					},
+			mockQ := &mockConsumerStatsQuerier{
+				stats: map[string][2]int64{
+					"AERIAL_JOBS/synapse-github": {4, 1},
 				},
 			}
 			if tc.queueStatsErr {
-				mockQ.queryErr = errors.New("simulated queue query error")
+				mockQ.err = errors.New("simulated queue query error")
 			}
 			srv.SetQueueStats(mockQ)
 			srv.SetGatewayLatencyFn(func() time.Duration {
@@ -761,6 +756,28 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 	httpkit.WriteJSON(rec, http.StatusOK, make(chan int))
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("writeJSON code = %d, want 500", rec.Code)
+	}
+}
+
+func TestConsumerStatsQuerier(t *testing.T) {
+	t.Parallel()
+	var nilSrv *RouterServer
+	if nilSrv.consumerStatsQuerier() != nil {
+		t.Errorf("expected nil for nil server")
+	}
+	srv := NewRouterServer(fixedConfig(Config{}), nil)
+	if srv.consumerStatsQuerier() != nil {
+		t.Errorf("expected nil when no stats or bus configured")
+	}
+	memBus := pubsub.NewMemoryBus()
+	srv.SetEventBus(memBus)
+	if srv.consumerStatsQuerier() == nil {
+		t.Errorf("expected bus stats querier when bus implements consumerStatsQuerier")
+	}
+	mockQ := &mockConsumerStatsQuerier{}
+	srv.SetQueueStats(mockQ)
+	if srv.consumerStatsQuerier() != mockQ {
+		t.Errorf("expected queueStats override")
 	}
 }
 
@@ -806,11 +823,6 @@ func TestRunServerLifecycle(t *testing.T) {
 		{
 			name:    "runServer invalid postgres url returns error",
 			config:  Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"},
-			wantErr: true,
-		},
-		{
-			name:    "runServer river start connection error",
-			config:  Config{Port: "0", PostgresURL: "postgres://fake:fake@127.0.0.1:54329/fakedb?sslmode=disable"},
 			wantErr: true,
 		},
 		{

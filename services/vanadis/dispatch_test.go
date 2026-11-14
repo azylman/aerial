@@ -62,7 +62,7 @@ func runPostBrainJSONTraceCase(t *testing.T, tc postBrainJSONTraceCase) {
 	if tc.wantErr {
 		brainURL = tc.brainURL
 	}
-	s := NewVanadisServer(Config{BrainURL: brainURL}, nil, nil, srv.Client())
+	s := NewVanadisServer(Config{BrainURL: brainURL}, nil, srv.Client())
 	res, err := s.postBrainJSON(ctx, "/dispatch", BrainDispatchRequest{Source: "vanadis"}, 0)
 	if tc.wantErr {
 		if err == nil {
@@ -113,7 +113,7 @@ func runDispatchChunkTurnSpanCase(t *testing.T, tc dispatchChunkTurnSpanCase) {
 	srv := brainStub(t, tc.status, &got)
 	build := mkBuild("build-trace", "1555000111", "Trace Build", "Trace Build", "")
 	chunks := []VanadisChunk{mkChunk("build-trace-chunk-1", "build-trace", 0, "Task 1", "Do it", "", "running")}
-	s := NewVanadisServer(Config{BrainURL: srv.URL}, nil, nil, srv.Client())
+	s := NewVanadisServer(Config{BrainURL: srv.URL}, nil, srv.Client())
 	if err := s.dispatchChunkTurn(context.Background(), build, chunks, 0, ""); (err != nil) != tc.wantErr {
 		t.Fatalf("dispatchChunkTurn err = %v, wantErr %v", err, tc.wantErr)
 	}

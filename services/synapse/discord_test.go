@@ -239,7 +239,7 @@ func runGatewayMessageCreateCase(ctx context.Context, t *testing.T, tc gatewayMe
 	if !tc.nilServer {
 		srv = newTestRouter(Config{}, nil, nil, disp)
 		if tc.hasRiver {
-			srv.SetRiverClient(river)
+			srv.SetEventBus(river)
 		}
 	}
 
@@ -379,7 +379,7 @@ func runGatewayInteractionCreateCase(ctx context.Context, t *testing.T, tc gatew
 	if !tc.nilServer {
 		srv = newTestRouter(Config{}, nil, nil, disp)
 		if tc.hasRiver {
-			srv.SetRiverClient(river)
+			srv.SetEventBus(river)
 		}
 	}
 
@@ -932,7 +932,7 @@ func runDiscordCatchUpSweepCase(ctx context.Context, t *testing.T, tc sweepTestC
 	if !tc.nilServer {
 		srv = newTestRouter(Config{}, nil, nil, disp)
 		if tc.hasRiver {
-			srv.SetRiverClient(river)
+			srv.SetEventBus(river)
 		}
 	}
 
