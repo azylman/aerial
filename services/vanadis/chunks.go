@@ -88,7 +88,8 @@ type SyncChunkPRWidgetRequest struct {
 
 // CompleteChunkRequest represents the payload for POST /chunks/complete.
 type CompleteChunkRequest struct {
-	ChunkID string `json:"chunk_id"`
+	ChunkID    string `json:"chunk_id"`
+	DispatchID string `json:"dispatch_id,omitempty"`
 }
 
 // FailChunkRequest represents the payload for POST /chunks/fail.
@@ -188,7 +189,7 @@ func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*V
 	if chunkID == "" {
 		return nil, nil, errors.New("chunk id cannot be empty")
 	}
-	const chunkQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE id = $1;`
+	const chunkQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE id = $1;`
 	rows, err := s.db.Query(ctx, chunkQuery, chunkID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query chunk %s: %w", chunkID, err)
@@ -565,7 +566,7 @@ func lockRunningBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) (
 		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, b.Status)
 	}
 
-	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE;`
+	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE;`
 	rows, err := tx.Query(ctx, chunksQuery, buildID)
 	if err != nil {
 		return nil, fmt.Errorf("lock chunks for build %s: %w", buildID, err)
@@ -1077,7 +1078,7 @@ func (s *VanadisServer) handleCompleteChunk(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if res != nil && res.ChunkMode == "pr" {
-		if err := s.ProcessStalledChunkCheck(r.Context(), req.ChunkID); err != nil {
+		if err := s.ProcessStalledChunkCheck(r.Context(), req.ChunkID, req.DispatchID); err != nil {
 			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("stalled chunk check for %s failed: %v", req.ChunkID, err))
 			return
 		}

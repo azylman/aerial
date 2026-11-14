@@ -1253,21 +1253,23 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name          string
-		nilServer     bool
-		isEnqueue     bool
-		hasRiver      bool
-		hasDispatcher bool
-		args          MergeConflictArgs
-		wantEnqueued  int
-		wantPrompts   int
+		name           string
+		nilServer      bool
+		isEnqueue      bool
+		hasRiver       bool
+		hasDispatcher  bool
+		wantDispatchID string
+		args           MergeConflictArgs
+		wantEnqueued   int
+		wantPrompts    int
 	}{
 		{name: "ProcessMergeConflict nil server", nilServer: true},
 		{name: "enqueueMergeConflict nil server", nilServer: true, isEnqueue: true},
 		{
 			name: "ProcessMergeConflict valid dispatch", hasDispatcher: true,
-			args:        MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-1", PRNumber: 543, TargetID: "1555405874565091380"},
-			wantPrompts: 1,
+			wantDispatchID: "conflict-azylman-aerial-543-sha-conflict-1",
+			args:           MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-1", PRNumber: 543, TargetID: "1555405874565091380"},
+			wantPrompts:    1,
 		},
 		{
 			name: "enqueueMergeConflict with river client enqueues", isEnqueue: true, hasRiver: true,
@@ -1276,8 +1278,9 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 		},
 		{
 			name: "enqueueMergeConflict without river client dispatches directly", isEnqueue: true, hasDispatcher: true,
-			args:        MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-3", PRNumber: 545, TargetID: "1555405874565091380"},
-			wantPrompts: 1,
+			wantDispatchID: "conflict-azylman-aerial-545-sha-conflict-3",
+			args:           MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-3", PRNumber: 545, TargetID: "1555405874565091380"},
+			wantPrompts:    1,
 		},
 	}
 
@@ -1310,8 +1313,16 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 				}
 			}
 			if tc.hasDispatcher {
-				if len(disp.DispatchCalls()) != tc.wantPrompts {
-					t.Errorf("DispatchCalls = %d, want %d", len(disp.DispatchCalls()), tc.wantPrompts)
+				calls := disp.DispatchCalls()
+				if len(calls) != tc.wantPrompts {
+					t.Errorf("DispatchCalls = %d, want %d", len(calls), tc.wantPrompts)
+				} else if len(calls) > 0 {
+					if tc.wantDispatchID != "" && calls[0].ID != tc.wantDispatchID {
+						t.Errorf("DispatchCalls[0].ID = %q, want %q", calls[0].ID, tc.wantDispatchID)
+					}
+					if !calls[0].SkipIfActive {
+						t.Errorf("DispatchCalls[0].SkipIfActive = false, want true")
+					}
 				}
 			}
 		})

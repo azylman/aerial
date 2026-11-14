@@ -47,13 +47,17 @@ func withTimeout(ctx context.Context, d time.Duration) (context.Context, context
 const defaultExecTimeout = 5 * time.Second
 
 func (s *SQLStore) execWithTimeout(ctx context.Context, query string, args ...any) error {
+	_, err := s.execResultWithTimeout(ctx, query, args...)
+	return err
+}
+
+func (s *SQLStore) execResultWithTimeout(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	if err := s.checkDB(); err != nil {
-		return err
+		return nil, err
 	}
 	queryCtx, cancel := withTimeout(ctx, defaultExecTimeout)
 	defer cancel()
-	_, err := s.db.ExecContext(queryCtx, query, args...)
-	return err
+	return s.db.ExecContext(queryCtx, query, args...)
 }
 
 func scanNonEmptyStrings(rows *sql.Rows) ([]string, error) {

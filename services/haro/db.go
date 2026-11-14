@@ -798,7 +798,7 @@ func claimEventTriggersSQLite(ctx context.Context, database *sql.DB, placeholder
 		}
 	}()
 
-	selectQuery := fmt.Sprintf(`SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) ORDER BY created_at ASC`, placeholders)
+	selectQuery := fmt.Sprintf(`SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND (persistent = FALSE OR (updated_at IS NULL OR updated_at < datetime('now', '-5 seconds'))) ORDER BY created_at ASC`, placeholders)
 	rows, qErr := tx.QueryContext(ctx, selectQuery, args...)
 	if qErr != nil {
 		return nil, qErr
@@ -811,6 +811,11 @@ func claimEventTriggersSQLite(ctx context.Context, database *sql.DB, placeholder
 	deleteQuery := fmt.Sprintf(`DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE`, placeholders)
 	if _, dErr := tx.ExecContext(ctx, deleteQuery, args...); dErr != nil {
 		return nil, dErr
+	}
+
+	updateQuery := fmt.Sprintf(`UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE AND (updated_at IS NULL OR updated_at < datetime('now', '-5 seconds'))`, placeholders)
+	if _, uErr := tx.ExecContext(ctx, updateQuery, args...); uErr != nil {
+		return nil, uErr
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -836,9 +841,9 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 
 	rawQuery := fmt.Sprintf(`WITH deleted AS (
 		DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
-	), kept AS (
-		SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE
-	) SELECT id, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM deleted UNION ALL SELECT id, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM kept ORDER BY created_at ASC`, placeholders, placeholders)
+	), updated_persistent AS (
+		UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE AND (updated_at IS NULL OR updated_at < CURRENT_TIMESTAMP - INTERVAL '5 seconds') RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
+	) SELECT id, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM deleted UNION ALL SELECT id, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM updated_persistent ORDER BY created_at ASC`, placeholders, placeholders)
 	rows, err := database.QueryContext(ctx, rawQuery, args...)
 	if err != nil {
 		return nil, err

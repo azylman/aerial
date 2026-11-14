@@ -36,7 +36,7 @@ func TestDispatchPersistence_TargetAndChunkID(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := store.InsertDispatch(ctx, tc.dispatch); err != nil {
+			if _, err := store.InsertDispatch(ctx, tc.dispatch); err != nil {
 				t.Fatalf("InsertDispatch failed: %v", err)
 			}
 
@@ -77,5 +77,37 @@ func TestDispatchPersistence_TargetAndChunkID(t *testing.T) {
 				t.Errorf("pending VanadisChunkID = %q, want %q", found.VanadisChunkID, tc.wantVanadisChunkID)
 			}
 		})
+	}
+}
+
+func TestInsertDispatch_IdempotentDuplicate(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
+	d := Dispatch{
+		ID:     "disp-idempotent-1",
+		Source: "vanadis",
+		Prompt: "chunk execution",
+		Status: StatusPending,
+	}
+
+	inserted, err := store.InsertDispatch(ctx, d)
+	if err != nil {
+		t.Fatalf("first InsertDispatch failed: %v", err)
+	}
+	if !inserted {
+		t.Fatalf("first InsertDispatch returned inserted=false, want true")
+	}
+
+	// Re-inserting the same dispatch ID must succeed idempotently (ON CONFLICT DO NOTHING) and report inserted=false
+	insertedAgain, err := store.InsertDispatch(ctx, d)
+	if err != nil {
+		t.Fatalf("second InsertDispatch with duplicate ID failed: %v", err)
+	}
+	if insertedAgain {
+		t.Fatalf("second InsertDispatch returned inserted=true, want false")
 	}
 }

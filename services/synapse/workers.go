@@ -673,9 +673,6 @@ func (w *DiscordInteractionWorker) Work(ctx context.Context, job *river.Job[Disc
 }
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
-// Note: eri's BuildStatusWidgetComponents (services/eri/pkg/discord/widget.go) renders
-// chunk status badges, repo tags, titles, PR links, and runtime durations only; it does
-// not display per-job deploying_jobs lists.
 type StatusWidgetChunk struct {
 	Index       int       `json:"index"`
 	Repo        string    `json:"repo"`
@@ -726,12 +723,14 @@ type PromptRequest struct {
 }
 
 type DispatchRequest struct {
+	ID             string `json:"id,omitempty"`
 	Source         string `json:"source"`
 	SessionID      string `json:"session_id,omitempty"`
 	TargetID       string `json:"target_id,omitempty"`
 	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
 	Prompt         string `json:"prompt"`
 	Effort         string `json:"effort,omitempty"`
+	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
 }
 
 type DirectMessageRequest struct {

@@ -509,7 +509,7 @@ func (p *WorkerPool) setupVanadisChunkTurn(d db.Dispatch, te *turnExecution) fun
 		}
 		p.FinishChunkStepTurn(widgetCtx, chunkID, d.ID)
 		if d.Source == "vanadis" && (p.ctx == nil || p.ctx.Err() == nil) && !te.isInterrupted() {
-			p.notifyVanadisChunkOutcome(chunkID, te.turnStatus, te.turnError)
+			p.notifyVanadisChunkOutcome(chunkID, te.turnStatus, te.turnError, d.ID)
 		}
 	}
 }

@@ -82,8 +82,8 @@ func (r *mockRows) Scan(dest ...any) error {
 			*dest[0].(*string), *dest[1].(*int), *dest[2].(*string), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*int), *dest[7].(*sql.NullTime), *dest[8].(*sql.NullTime), *dest[9].(*time.Time) = c.ID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.UpdatedAt
 			return nil
 		}
-		if len(dest) == 17 {
-			*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*[]string), *dest[8].(*[]string), *dest[9].(*string), *dest[10].(*[]string), *dest[11].(*string), *dest[12].(*int), *dest[13].(*sql.NullTime), *dest[14].(*sql.NullTime), *dest[15].(*time.Time), *dest[16].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
+		if len(dest) == 18 {
+			*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*[]string), *dest[8].(*[]string), *dest[9].(*string), *dest[10].(*[]string), *dest[11].(*string), *dest[12].(*int), *dest[13].(*int), *dest[14].(*sql.NullTime), *dest[15].(*sql.NullTime), *dest[16].(*time.Time), *dest[17].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
 			return nil
 		}
 	}
@@ -599,19 +599,33 @@ func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID stri
 	return res, nil
 }
 
-func (m *memoryVanadisStore) ClaimStalledChunk(_ context.Context, chunkID string) (StalledChunkVerdict, *VanadisBuild, *VanadisChunk, error) {
+func (m *memoryVanadisStore) ClaimStalledChunk(_ context.Context, chunkID string, dispatchID ...string) (StalledChunkVerdict, *VanadisBuild, *VanadisChunk, error) {
 	for bID, list := range m.chunks {
 		for i := range list {
 			if list[i].ID != chunkID {
 				continue
 			}
 			b, c := m.builds[bID], list[i]
-			verdict := judgeStalledChunk(c, b.Status, m.stallNudges[chunkID])
+			nudges := m.stallNudges[chunkID]
+			var dispID string
+			if len(dispatchID) > 0 {
+				dispID = strings.TrimSpace(dispatchID[0])
+			}
+			if dispID != "" {
+				expectedDispID := fmt.Sprintf("vanadis-%s-turn-%d", c.ID, nudges)
+				if dispID != expectedDispID {
+					return StalledChunkVerdictNoop, &b, &c, nil
+				}
+			}
+			verdict := judgeStalledChunk(c, b.Status, nudges)
 			if verdict == StalledChunkVerdictNudge {
 				if m.stallNudges == nil {
 					m.stallNudges = make(map[string]int)
 				}
 				m.stallNudges[chunkID]++
+				list[i].StallNudges = m.stallNudges[chunkID]
+				c.StallNudges = list[i].StallNudges
+				m.chunks[bID] = list
 			}
 			return verdict, &b, &c, nil
 		}

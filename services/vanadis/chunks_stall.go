@@ -16,6 +16,8 @@ type StalledChunkVerdict string
 const (
 	// StalledChunkVerdictNone means the chunk is not stalled (PR linked, failed, not a PR chunk, or build stopped).
 	StalledChunkVerdictNone StalledChunkVerdict = "none"
+	// StalledChunkVerdictNoop means the dispatch id does not match the active turn (duplicate delivery).
+	StalledChunkVerdictNoop StalledChunkVerdict = "noop"
 	// StalledChunkVerdictNudge means the chunk stalled for the first time and must be re-dispatched once.
 	StalledChunkVerdictNudge StalledChunkVerdict = "nudge"
 	// StalledChunkVerdictFail means the chunk stalled again after its single re-dispatch and must be failed.
@@ -30,11 +32,11 @@ const stalledChunkFailReason = "chunk stalled twice: its turn ended without subm
 // the chunk synchronously (via synapse's PR registration) before the turn can end, so a chunk still running with no
 // PR at this point never submitted. It is re-dispatched once with a stall notice, or failed (marking the build
 // failed and waking the thread) if it has already been nudged.
-func (s *VanadisServer) ProcessStalledChunkCheck(ctx context.Context, chunkID string) error {
+func (s *VanadisServer) ProcessStalledChunkCheck(ctx context.Context, chunkID string, dispatchID ...string) error {
 	if s == nil || s.store == nil {
 		return errors.New("vanadis store not configured")
 	}
-	verdict, build, chunk, err := s.store.ClaimStalledChunk(ctx, chunkID)
+	verdict, build, chunk, err := s.store.ClaimStalledChunk(ctx, chunkID, dispatchID...)
 	if errors.Is(err, ErrChunkNotFound) || errors.Is(err, ErrBuildNotFound) {
 		log.Printf("[vanadis] stalled check: chunk %s no longer exists, skipping", chunkID)
 		return nil
@@ -75,7 +77,7 @@ func (s *VanadisServer) redispatchStalledChunk(ctx context.Context, buildID, chu
 
 // ClaimStalledChunk atomically judges whether a PR-mode chunk stalled (still running with no linked PR in a running
 // build) and, on its first stall, records the nudge so a second stall yields StalledChunkVerdictFail.
-func (s *PostgresVanadisStore) ClaimStalledChunk(ctx context.Context, chunkID string) (StalledChunkVerdict, *VanadisBuild, *VanadisChunk, error) {
+func (s *PostgresVanadisStore) ClaimStalledChunk(ctx context.Context, chunkID string, dispatchID ...string) (StalledChunkVerdict, *VanadisBuild, *VanadisChunk, error) {
 	if s == nil || s.db == nil {
 		return "", nil, nil, errors.New("database connection is nil")
 	}
@@ -109,6 +111,17 @@ func (s *PostgresVanadisStore) ClaimStalledChunk(ctx context.Context, chunkID st
 	}
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("lock stalled chunk %s: %w", chunkID, err)
+	}
+
+	var dispID string
+	if len(dispatchID) > 0 {
+		dispID = strings.TrimSpace(dispatchID[0])
+	}
+	if dispID != "" {
+		expectedDispID := fmt.Sprintf("vanadis-%s-turn-%d", c.ID, nudges)
+		if dispID != expectedDispID {
+			return StalledChunkVerdictNoop, &b, &c, nil
+		}
 	}
 
 	verdict := judgeStalledChunk(c, b.Status, nudges)

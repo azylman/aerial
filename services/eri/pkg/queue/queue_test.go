@@ -805,10 +805,10 @@ func TestWorkerPool_HoldUntilLeaderAndRecovery_Isolation(t *testing.T) {
 
 	orphanDisp := db.Dispatch{ID: "disp-orphan", Source: "vanadis", Prompt: "p1", Status: db.StatusProcessing, CreatedAt: now.Add(-45 * time.Second), UpdatedAt: now.Add(-45 * time.Second), RestartCount: DefaultMaxRestarts}
 	heldDisp := db.Dispatch{ID: "disp-held", Source: "heartbeat", Prompt: "p2", Status: db.StatusPending, CreatedAt: now, UpdatedAt: now}
-	if err := store.InsertDispatch(ctx, orphanDisp); err != nil {
+	if _, err := store.InsertDispatch(ctx, orphanDisp); err != nil {
 		t.Fatalf("insert orphanDisp: %v", err)
 	}
-	if err := store.InsertDispatch(ctx, heldDisp); err != nil {
+	if _, err := store.InsertDispatch(ctx, heldDisp); err != nil {
 		t.Fatalf("insert heldDisp: %v", err)
 	}
 
@@ -4345,7 +4345,7 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 				CreatedAt: time.Now().UTC(),
 				UpdatedAt: time.Now().UTC(),
 			}
-			_ = store.InsertDispatch(context.Background(), disp)
+			_, _ = store.InsertDispatch(context.Background(), disp)
 			pool.EnqueueDispatch(disp)
 
 			select {
@@ -4426,7 +4426,7 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 	store := dbtest.NewFakeStore()
 	ctx := context.Background()
 
-	_ = store.InsertDispatch(ctx, db.Dispatch{
+	_, _ = store.InsertDispatch(ctx, db.Dispatch{
 		ID:        "prev-run-1",
 		Source:    "heartbeat",
 		SessionID: "heartbeat-rot",
@@ -4466,7 +4466,7 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
-	_ = store.InsertDispatch(ctx, disp)
+	_, _ = store.InsertDispatch(ctx, disp)
 	pool.EnqueueDispatch(disp)
 
 	select {
@@ -4529,7 +4529,7 @@ func TestDispatchExecution_ScopeLockIsolation(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = store.InsertDispatch(context.Background(), disp)
+	_, _ = store.InsertDispatch(context.Background(), disp)
 	pool.EnqueueDispatch(disp)
 
 	<-dispatchRunning
@@ -4559,21 +4559,21 @@ func TestRecoverInterrupted_Dispatches(t *testing.T) {
 	store := dbtest.NewFakeStore()
 	ctx := context.Background()
 
-	_ = store.InsertDispatch(ctx, db.Dispatch{
+	_, _ = store.InsertDispatch(ctx, db.Dispatch{
 		ID:        "disp-rec-pending",
 		Source:    "heartbeat",
 		SessionID: "heartbeat-rec-1",
 		Prompt:    "pending prompt",
 		Status:    db.StatusPending,
 	})
-	_ = store.InsertDispatch(ctx, db.Dispatch{
+	_, _ = store.InsertDispatch(ctx, db.Dispatch{
 		ID:        "disp-rec-processing",
 		Source:    "vanadis",
 		SessionID: "",
 		Prompt:    "processing prompt",
 		Status:    db.StatusProcessing,
 	})
-	_ = store.InsertDispatch(ctx, db.Dispatch{
+	_, _ = store.InsertDispatch(ctx, db.Dispatch{
 		ID:           "disp-rec-poison",
 		Source:       "webhook",
 		SessionID:    "webhook-poison",
@@ -4683,7 +4683,7 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 				Prompt:    tc.prompt,
 				Status:    db.StatusPending,
 			}
-			_ = store.InsertDispatch(ctx, disp)
+			_, _ = store.InsertDispatch(ctx, disp)
 
 			exhausted := make(chan struct{})
 			var attempts atomic.Int32
@@ -4796,6 +4796,7 @@ func TestWorkerPool_NotifyVanadisChunkOutcome(t *testing.T) {
 	tests := []struct {
 		name         string
 		chunkID      string
+		dispatchID   string
 		turnStatus   string
 		turnError    string
 		emptyURL     bool
@@ -4831,6 +4832,15 @@ func TestWorkerPool_NotifyVanadisChunkOutcome(t *testing.T) {
 			turnStatus:   "success",
 			wantEndpoint: "/chunks/complete",
 			wantBody:     map[string]string{"chunk_id": "c-success"},
+			wantCalls:    1,
+		},
+		{
+			name:         "success notifies chunks complete with dispatch ID",
+			chunkID:      "c-success-disp",
+			dispatchID:   "disp-vanadis-999",
+			turnStatus:   "success",
+			wantEndpoint: "/chunks/complete",
+			wantBody:     map[string]string{"chunk_id": "c-success-disp", "dispatch_id": "disp-vanadis-999"},
 			wantCalls:    1,
 		},
 		{
@@ -4928,7 +4938,11 @@ func TestWorkerPool_NotifyVanadisChunkOutcome(t *testing.T) {
 			}
 
 			pool := &WorkerPool{ctx: poolCtx, cancel: cancelPool, cfg: WorkerPoolConfig{VanadisURL: url}}
-			pool.notifyVanadisChunkOutcome(tc.chunkID, tc.turnStatus, tc.turnError)
+			if tc.dispatchID != "" {
+				pool.notifyVanadisChunkOutcome(tc.chunkID, tc.turnStatus, tc.turnError, tc.dispatchID)
+			} else {
+				pool.notifyVanadisChunkOutcome(tc.chunkID, tc.turnStatus, tc.turnError)
+			}
 
 			reqsMu.Lock()
 			defer reqsMu.Unlock()
@@ -5104,7 +5118,7 @@ func TestBuildDispatchPrompt(t *testing.T) {
 			store := setupTestStore(t)
 			for i, summary := range tc.recent {
 				d := db.Dispatch{ID: fmt.Sprintf("%s-%d", tc.sessionID, i), SessionID: tc.sessionID, Status: db.StatusCompleted, Summary: summary, CreatedAt: runAt}
-				if err := store.InsertDispatch(context.Background(), d); err != nil {
+				if _, err := store.InsertDispatch(context.Background(), d); err != nil {
 					t.Fatalf("seed dispatch: %v", err)
 				}
 			}
@@ -5149,7 +5163,7 @@ func TestCancelBurstOnShutdown_Dispatch(t *testing.T) {
 			store := dbtest.NewFakeStore()
 			ctx := context.Background()
 			interruptedDisp := db.Dispatch{ID: "disp-interrupted-" + tc.name, Status: db.StatusProcessing}
-			_ = store.InsertDispatch(ctx, interruptedDisp)
+			_, _ = store.InsertDispatch(ctx, interruptedDisp)
 
 			pool := New(nil, WorkerPoolConfig{Store: store})
 			defer pool.Stop()
@@ -5610,7 +5624,7 @@ func TestTurnExecution_HandleQuotaPause_Dispatch(t *testing.T) {
 			store := dbtest.NewFakeStore()
 			ctx := context.Background()
 			if tc.dispatch != nil {
-				_ = store.InsertDispatch(ctx, *tc.dispatch)
+				_, _ = store.InsertDispatch(ctx, *tc.dispatch)
 			}
 			pool := New(nil, WorkerPoolConfig{Store: store})
 			defer pool.Stop()

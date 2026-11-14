@@ -55,7 +55,7 @@ type MessageStore interface {
 
 // DispatchStore handles headless background dispatch execution.
 type DispatchStore interface {
-	InsertDispatch(ctx context.Context, d Dispatch) error
+	InsertDispatch(ctx context.Context, d Dispatch) (bool, error)
 	GetDispatch(ctx context.Context, id string) (*Dispatch, error)
 	ClaimPendingDispatch(ctx context.Context, id string) (bool, error)
 	UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error

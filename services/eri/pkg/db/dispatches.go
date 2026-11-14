@@ -84,12 +84,12 @@ func (s *SQLStore) execDispatchUpdate(ctx context.Context, id, query string, arg
 	return s.execWithTimeout(ctx, query, args...)
 }
 
-func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) error {
+func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) (bool, error) {
 	if err := s.checkDB(); err != nil {
-		return err
+		return false, err
 	}
 	if strings.TrimSpace(d.ID) == "" {
-		return fmt.Errorf("dispatch id cannot be empty")
+		return false, fmt.Errorf("dispatch id cannot be empty")
 	}
 	if d.Status == "" {
 		d.Status = StatusPending
@@ -123,7 +123,7 @@ func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) error {
 		$23, $24
 	) ON CONFLICT (id) DO NOTHING;`
 
-	return s.execWithTimeout(ctx, query,
+	res, err := s.execResultWithTimeout(ctx, query,
 		d.ID, d.Source, d.SessionID, d.ConversationID,
 		d.TargetID, d.VanadisChunkID,
 		d.Prompt, d.Summary, d.Effort, d.Model, d.Status,
@@ -132,6 +132,14 @@ func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) error {
 		d.ThinkingTokens, d.CacheReadTokens, d.TotalTokens, d.Traceparent,
 		d.CreatedAt, d.UpdatedAt,
 	)
+	if err != nil {
+		return false, err
+	}
+	ra, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return ra > 0, nil
 }
 
 func (s *SQLStore) GetDispatch(ctx context.Context, id string) (*Dispatch, error) {

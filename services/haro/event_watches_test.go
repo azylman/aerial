@@ -291,8 +291,7 @@ func testClaimEventTriggers(ctx context.Context, t *testing.T, db *sql.DB) {
 		wantIDs   []string
 	}{
 		{"first claim returns both persistent and non-persistent", "camera", []string{"garage"}, "person_arrived", 2, []string{"et-5", "et-6"}},
-		{"second claim retains persistent and deletes non-persistent", "camera", []string{"garage"}, "person_arrived", 1, []string{"et-5"}},
-		{"third claim still retains persistent", "camera", []string{"garage"}, "person_arrived", 1, []string{"et-5"}},
+		{"second claim within debounce window suppresses duplicate persistent trigger", "camera", []string{"garage"}, "person_arrived", 0, nil},
 	}
 	for _, tc := range claimTests {
 		t.Run("claim_"+tc.name, func(t *testing.T) {
@@ -309,6 +308,17 @@ func testClaimEventTriggers(ctx context.Context, t *testing.T, db *sql.DB) {
 				}
 			}
 		})
+	}
+
+	if _, err := db.ExecContext(ctx, "UPDATE event_triggers SET updated_at = datetime('now', '-10 seconds') WHERE id = 'et-5'"); err != nil {
+		t.Fatalf("failed to age updated_at: %v", err)
+	}
+	claimed, err := ClaimEventTriggers(ctx, db, "camera", []string{"garage"}, "person_arrived")
+	if err != nil {
+		t.Fatalf("ClaimEventTriggers after debounce failed: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != "et-5" {
+		t.Fatalf("ClaimEventTriggers after debounce count = %d, want 1 with et-5", len(claimed))
 	}
 }
 

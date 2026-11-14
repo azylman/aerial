@@ -694,9 +694,8 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 }
 
 type vanadisPromptOpts struct {
-	silent  bool
-	chunkID string
-	effort  string
+	silent, skipIfActive        bool
+	chunkID, effort, dispatchID string
 }
 
 func resolvePostgresVanadisOpts(ctx context.Context, pgReg *PostgresPRRegistry, repo string, prNum int, opts *vanadisPromptOpts) {
@@ -804,26 +803,28 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 	if !opt.silent && !s.isValidAlertTarget(targetID) {
 		return nil
 	}
-	if !opt.silent && dmMsg != "" && s.isValidAlertTarget(targetID) {
+	if !opt.silent && dmMsg != "" {
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: dmMsg}); err != nil {
 			log.Printf("[synapse] [dispatcher] warning dispatching %s direct message: %v", label, err)
 		}
 	}
 	if opt.silent {
-		var normTarget string
-		if nt := NormalizeDiscordTargetID(targetID); IsValidDiscordSnowflake(nt) {
-			normTarget = nt
+		normTarget := NormalizeDiscordTargetID(targetID)
+		if !IsValidDiscordSnowflake(normTarget) {
+			normTarget = ""
 		}
-		var cID string
-		if rawCID := strings.TrimSpace(opt.chunkID); isValidVanadisChunkID(rawCID) {
-			cID = rawCID
+		cID := strings.TrimSpace(opt.chunkID)
+		if !isValidVanadisChunkID(cID) {
+			cID = ""
 		}
 		req := DispatchRequest{
+			ID:             opt.dispatchID,
 			Source:         "webhook",
 			Prompt:         prompt,
 			Effort:         firstNonEmpty(opt.effort, "medium"),
 			TargetID:       normTarget,
 			VanadisChunkID: cID,
+			SkipIfActive:   opt.skipIfActive,
 		}
 		if cID != "" {
 			req.SessionID = "vanadis-" + cID
@@ -1038,10 +1039,7 @@ func (s *RouterServer) isWaitingForImageBuild(ctx context.Context, repo string, 
 	}
 	checks := extractChecksFromJSONOrMetadata("", meta)
 	checkJobs, passedBuildJobs, total, passed, failed := analyzeBuildChecks(checks)
-	_ = passedBuildJobs
-	_ = total
-	_ = passed
-	_ = failed
+	_ = total + passed + failed + len(passedBuildJobs)
 	return len(checkJobs) > 0
 }
 
@@ -1309,9 +1307,10 @@ func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, rep
 	cleanBranch := firstNonEmpty(strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/"), "<branch>")
 	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', merge origin/main to resolve conflicts, verify locally, and push to update the PR via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", prNum, repo, branch, headSHA, shortRepo, cleanBranch)
 	opts := s.vanadisPromptOpts(ctx, repo, prNum)
-	opts.silent = true
-	if opts.effort == "" {
-		opts.effort = "medium"
+	opts.silent, opts.skipIfActive, opts.effort = true, true, firstNonEmpty(opts.effort, "medium")
+	opts.dispatchID = fmt.Sprintf("conflict-%s-%d", strings.ReplaceAll(repo, "/", "-"), prNum)
+	if cleanSHA := strings.TrimSpace(headSHA); cleanSHA != "" {
+		opts.dispatchID += "-" + cleanSHA
 	}
 	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", "", prompt, opts)
 }
