@@ -57,6 +57,24 @@ func subscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) erro
 	return nil
 }
 
+var subscribeRetryInterval = 5 * time.Second
+
+func retrySubscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) {
+	ticker := time.NewTicker(subscribeRetryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := subscribeCovenTurns(ctx, b, worker); err == nil {
+				log.Println("[Coven] Subscribed coven-turns durable consumer to aerial.turn.completed on retry")
+				return
+			}
+		}
+	}
+}
+
 func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {
@@ -69,7 +87,8 @@ func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL 
 	}
 	if worker != nil {
 		if subErr := subscribeCovenTurns(ctx, b, worker); subErr != nil {
-			log.Printf("[Coven] warning: failed initial coven-turns subscription: %v", subErr)
+			log.Printf("[Coven] warning: failed initial coven-turns subscription: %v; will retry in background", subErr)
+			go retrySubscribeCovenTurns(ctx, b, worker)
 		}
 	}
 	return b

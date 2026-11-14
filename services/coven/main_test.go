@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -275,7 +276,7 @@ func (b *brokenBus) Subscribe(ctx context.Context, subject, durable string, hand
 }
 
 func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if bus := initCovenJetStream(ctx, nil, ""); bus != nil {
 		t.Error("expected nil bus for empty natsURL")
@@ -329,6 +330,61 @@ func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
 	}
 	if wrapped.lastErr != nil {
 		t.Errorf("expected nil error on bad json unmarshal to avoid poison redelivery loop, got %v", wrapped.lastErr)
+	}
+}
+
+type retrySubscribeBus struct {
+	pubsub.Bus
+
+	attempts  atomic.Int32
+	onSuccess chan struct{}
+}
+
+func (r *retrySubscribeBus) EnsureCoreStreams(ctx context.Context) error {
+	return r.Bus.EnsureCoreStreams(ctx)
+}
+
+func (r *retrySubscribeBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	if r.attempts.Add(1) == 1 {
+		return nil, errors.New("initial subscribe failure")
+	}
+	sub, err := r.Bus.Subscribe(ctx, subject, durable, handler)
+	if err == nil && r.onSuccess != nil {
+		select {
+		case r.onSuccess <- struct{}{}:
+		default:
+		}
+	}
+	return sub, err
+}
+
+func TestCoven_RetrySubscribeCovenTurns(t *testing.T) {
+	origInterval := subscribeRetryInterval
+	defer func() { subscribeRetryInterval = origInterval }()
+	subscribeRetryInterval = 5 * time.Millisecond
+
+	ctx := t.Context()
+
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+
+	retryBus := &retrySubscribeBus{
+		Bus:       memBus,
+		onSuccess: make(chan struct{}, 1),
+	}
+
+	worker := NewWorker(WorkerConfig{})
+	bus := initCovenJetStreamWithFactory(ctx, worker, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return retryBus, nil
+	})
+	if bus == nil {
+		t.Fatal("expected non-nil bus")
+	}
+
+	select {
+	case <-retryBus.onSuccess:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for background retry to subscribe coven-turns")
 	}
 }
 
