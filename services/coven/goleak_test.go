@@ -8,6 +8,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	installTestTracing()
 	goleak.VerifyTestMain(m, goleak.Cleanup(func(exitCode int) {
 		http.DefaultClient.CloseIdleConnections()
 		if tr, ok := http.DefaultTransport.(*http.Transport); ok {

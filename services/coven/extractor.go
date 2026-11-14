@@ -15,6 +15,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azylman/aerial/pkg/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // LLMClientFunc defines the interface function for sending prompts to an LLM.
@@ -59,6 +64,8 @@ func HTTPBrainLLMClient(brainLLMURL string, httpClient *http.Client) LLMClientFu
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 120 * time.Second}
 	}
+	// eri's /internal/llm is internal, so traceparent is propagated and its span joins ours.
+	httpClient = tracing.Client(httpClient)
 	cleanURL := strings.TrimSpace(brainLLMURL)
 	if cleanURL == "" {
 		cleanURL = DefaultBrainLLMURL
@@ -494,10 +501,17 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 		return fmt.Errorf("database is nil")
 	}
 
+	// Scheduled extraction has no inbound request, so each thread gets a deliberate root span
+	// that the outbound LLM call attaches to.
+	ctx, span := tracing.Tracer().Start(ctx, "coven.extract", trace.WithNewRoot())
+	defer span.End()
+
 	turns, err := store.GetUnextractedAdminTurns(ctx, threadID)
 	if err != nil {
+		span.SetStatus(codes.Error, "get unextracted turns failed")
 		return fmt.Errorf("failed to get unextracted turns for thread %s: %w", threadID, err)
 	}
+	span.SetAttributes(attribute.Int("aerial.coven.batch_size", len(turns)))
 
 	maxRowID, err := resolveThreadTurnWatermark(ctx, store, threadID, turns)
 	if err != nil {
