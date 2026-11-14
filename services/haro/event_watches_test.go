@@ -672,10 +672,7 @@ func verifyDispatchedPrompt(t *testing.T, disp *mockDispatcher, wantChannel, wan
 	}
 }
 
-func TestHandleExternalEvent_Scenarios(t *testing.T) {
-	db := setupTestDB(t)
-	ctx := context.Background()
-
+func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-ext-1",
 		ChannelID: "100000000000000001",
@@ -685,7 +682,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		Prompt:    "Vehicle in driveway",
 		Effort:    "low",
 	})
-
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-ext-fail",
 		ChannelID: "100000000000000001",
@@ -695,7 +691,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		Prompt:    "Motion in backyard",
 		Effort:    "low",
 	})
-
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-ext-healthcheck",
 		ChannelID: "100000000000000001",
@@ -705,7 +700,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		Prompt:    "Healthcheck ping",
 		Effort:    "low",
 	})
-
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:         "trig-ext-fail-persistent",
 		ChannelID:  "100000000000000001",
@@ -716,6 +710,13 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		Effort:     "low",
 		Persistent: true,
 	})
+}
+
+func TestHandleExternalEvent_Scenarios(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	seedExternalEventTriggers(ctx, db)
 
 	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
 	if err != nil {
@@ -728,6 +729,7 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 	mockDispOK := &mockDispatcher{response: PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-1"}}
 	serverOK := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDispOK)
 	serverFail := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDispFail)
+	serverNoDisp := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db))
 
 	tests := []struct {
 		name                 string
@@ -767,6 +769,14 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		{
 			name:      "dispatch failure recovers trigger to db and returns nil to avoid redelivery storm",
 			server:    serverFail,
+			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"backyard"}},
+			wantErr:   false,
+			checkDBID: "trig-ext-fail",
+			wantInDB:  true,
+		},
+		{
+			name:      "nil dispatcher recovers trigger to db and returns nil to avoid redelivery storm",
+			server:    serverNoDisp,
 			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"backyard"}},
 			wantErr:   false,
 			checkDBID: "trig-ext-fail",
@@ -814,6 +824,9 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			}
 		})
 	}
+
+	serverClosed.recoverFailedEventTrigger(ctx, EventTrigger{ID: "trig-fail-rec", Persistent: false})
+	serverClosed.recoverFailedEventTrigger(ctx, EventTrigger{ID: "trig-fail-rec-p", Persistent: true})
 }
 
 type ackSubscribeBus struct {
