@@ -616,14 +616,6 @@ func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Mes
 	return nil
 }
 
-// HandleDispatchOutcome handles dispatch outcome messages on the Ticker instance.
-func (t *Ticker) HandleDispatchOutcome(ctx context.Context, msg pubsub.Message) error {
-	if t == nil {
-		return errors.New("ticker is nil")
-	}
-	return HandleDispatchOutcome(ctx, t.db, msg)
-}
-
 func (t *Ticker) Start(ctx context.Context) {
 	if t == nil {
 		return

@@ -412,13 +412,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 14, 2, 0, 0, 0, time.UTC)
 
-	// 1. Ticker nil returns error
-	var nilTicker *Ticker
-	if err := nilTicker.HandleDispatchOutcome(ctx, &memoryMsg{}); err == nil {
-		t.Error("expected error for nil ticker, got nil")
-	}
-
-	// 2. HandleDispatchOutcome database == nil or msg == nil
+	// 1. HandleDispatchOutcome database == nil or msg == nil
 	if err := HandleDispatchOutcome(ctx, nil, &memoryMsg{}); err == nil {
 		t.Error("expected error for nil database")
 	}
@@ -426,7 +420,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 		t.Error("expected error for nil msg")
 	}
 
-	// 2b. Database error during GetScheduleRun returns error
+	// 2. Database error during GetScheduleRun returns error
 	closedDB := setupTestDB(t)
 	closedDB.Close()
 	failEvBytes, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "run-on-closed-db", Status: "completed"})
@@ -441,43 +435,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 		t.Errorf("expected nil for empty dispatch id, got %v", err)
 	}
 
-	// 4. Valid ticker HandleDispatchOutcome delegates properly and updates a seeded run
-	runTicker := ScheduleRun{
-		ID:           "run-ticker-delegation",
-		ScheduleID:   "hb-delegation",
-		ScheduleType: "heartbeat",
-		TargetID:     "1234567890",
-		ThreadID:     "thread-hb-del",
-		Title:        "Del Title",
-		Prompt:       "Del Prompt",
-		Status:       "running",
-		StartedAt:    now,
-	}
-	if err := CreateScheduleRun(ctx, db, runTicker); err != nil {
-		t.Fatalf("CreateScheduleRun failed: %v", err)
-	}
-	evDel := pubsub.DispatchOutcomeEvent{
-		DispatchID:  "run-ticker-delegation",
-		Status:      "completed",
-		StartedAt:   now,
-		CompletedAt: now.Add(2 * time.Second),
-		DurationMs:  2000,
-	}
-	delBytes, _ := json.Marshal(evDel)
-	dispatcher := NewHTTPPromptDispatcher("http://localhost:8080")
-	ticker := NewTicker(db, dispatcher, 30*time.Second)
-	if err := ticker.HandleDispatchOutcome(ctx, &memoryMsg{data: delBytes}); err != nil {
-		t.Fatalf("ticker.HandleDispatchOutcome failed: %v", err)
-	}
-	loadedDelRun, err := GetScheduleRun(ctx, db, "run-ticker-delegation")
-	if err != nil {
-		t.Fatalf("GetScheduleRun failed: %v", err)
-	}
-	if loadedDelRun.Status != "completed" {
-		t.Errorf("expected run-ticker-delegation status = completed, got %q", loadedDelRun.Status)
-	}
-
-	// 5. Fallback durationMs and startedAt from run.StartedAt when ev.StartedAt is zero
+	// 4. Fallback durationMs and startedAt from run.StartedAt when ev.StartedAt is zero
 	hb := HeartbeatSchedule{
 		ID:          "hb-fallback-1",
 		TargetID:    "1234567890",
