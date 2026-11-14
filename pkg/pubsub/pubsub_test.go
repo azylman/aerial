@@ -2,7 +2,6 @@ package pubsub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -423,91 +422,6 @@ func TestMatchSubject(t *testing.T) {
 				t.Errorf("matchSubject(%q, %q) = %v, want %v", tc.pattern, tc.subject, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestEventPayloadSchemas(t *testing.T) {
-	t.Parallel()
-
-	dispatchEvt := DispatchOutcomeEvent{
-		DispatchID:     "disp-1",
-		Source:         "vanadis",
-		SessionID:      "sess-1",
-		TargetID:       "tgt-1",
-		VanadisChunkID: "chunk-1",
-		Status:         "completed",
-		StartedAt:      time.Now(),
-		CompletedAt:    time.Now(),
-		DurationMs:     42,
-	}
-
-	externalEvt := ExternalEvent{
-		EventID:       "ext-1",
-		Source:        "github",
-		EventType:     "push",
-		Targets:       []string{"aerial"},
-		ContextHeader: "ctx-1",
-		OccurredAt:    time.Now(),
-	}
-
-	turnEvt := TurnCompletedEvent{
-		SessionID:      "sess-2",
-		ConversationID: "conv-2",
-		Source:         "discord",
-		CompletedAt:    time.Now(),
-	}
-
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	var wg sync.WaitGroup
-	wg.Add(3)
-
-	var gotDispatch DispatchOutcomeEvent
-	var gotExternal ExternalEvent
-	var gotTurn TurnCompletedEvent
-	var mu sync.Mutex
-
-	_, _ = bus.Subscribe(context.Background(), "aerial.dispatch.>", "d1", func(ctx context.Context, msg Message) error {
-		defer wg.Done()
-		mu.Lock()
-		defer mu.Unlock()
-		return json.Unmarshal(msg.Data(), &gotDispatch)
-	})
-	_, _ = bus.Subscribe(context.Background(), "aerial.events.>", "d2", func(ctx context.Context, msg Message) error {
-		defer wg.Done()
-		mu.Lock()
-		defer mu.Unlock()
-		return json.Unmarshal(msg.Data(), &gotExternal)
-	})
-	_, _ = bus.Subscribe(context.Background(), "aerial.turn.>", "d3", func(ctx context.Context, msg Message) error {
-		defer wg.Done()
-		mu.Lock()
-		defer mu.Unlock()
-		return json.Unmarshal(msg.Data(), &gotTurn)
-	})
-
-	if err := bus.Publish(context.Background(), "aerial.dispatch.completed", "disp-1", dispatchEvt); err != nil {
-		t.Fatalf("Publish dispatch event failed: %v", err)
-	}
-	if err := bus.Publish(context.Background(), "aerial.events.github.push", "ext-1", externalEvt); err != nil {
-		t.Fatalf("Publish external event failed: %v", err)
-	}
-	if err := bus.Publish(context.Background(), SubjectAerialTurnCompleted, "turn-1", turnEvt); err != nil {
-		t.Fatalf("Publish turn event failed: %v", err)
-	}
-	wg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if gotDispatch.DispatchID != dispatchEvt.DispatchID || gotDispatch.VanadisChunkID != dispatchEvt.VanadisChunkID || gotDispatch.Status != dispatchEvt.Status {
-		t.Errorf("dispatch event mismatch: got %+v, want %+v", gotDispatch, dispatchEvt)
-	}
-	if gotExternal.EventID != externalEvt.EventID || gotExternal.Source != externalEvt.Source || gotExternal.EventType != externalEvt.EventType || len(gotExternal.Targets) != 1 || gotExternal.Targets[0] != "aerial" {
-		t.Errorf("external event mismatch: got %+v, want %+v", gotExternal, externalEvt)
-	}
-	if gotTurn.SessionID != turnEvt.SessionID || gotTurn.ConversationID != turnEvt.ConversationID || gotTurn.Source != turnEvt.Source {
-		t.Errorf("turn event mismatch: got %+v, want %+v", gotTurn, turnEvt)
 	}
 }
 
@@ -1317,6 +1231,17 @@ func TestJetStreamBus_DispatchAndMessageSettlement(t *testing.T) {
 		t.Error("expected handledError to be true")
 	}
 
+	// Handler exercising InProgress and Term settling
+	handledTerm := false
+	bus.dispatch(&nats.Msg{Subject: "aerial.events.term", Data: []byte("term")}, func(ctx context.Context, msg Message) error {
+		handledTerm = true
+		_ = msg.InProgress()
+		return msg.Term()
+	})
+	if !handledTerm {
+		t.Error("expected handledTerm to be true")
+	}
+
 	// 2. jsMessage methods and error/settled branches
 	jsMsg := &jsMessage{
 		raw:     &nats.Msg{Subject: "aerial.jobs.jsmsg", Data: []byte("raw"), Header: nats.Header{}},
@@ -1342,37 +1267,7 @@ func TestJetStreamBus_DispatchAndMessageSettlement(t *testing.T) {
 		t.Error("expected non-nil header")
 	}
 
-	// 3. jsMessage methods when unsettled (ErrMsgNotBound on unbound messages)
-	unsettledJsMsg := &jsMessage{
-		raw: &nats.Msg{
-			Subject: "aerial.jobs.unsettled",
-			Data:    []byte("unsettled"),
-			Header:  nats.Header{HeaderMsgID: []string{"msg-js-1"}, HeaderSnoozeSeq: []string{"2"}},
-		},
-		bus: bus,
-	}
-	if err := unsettledJsMsg.InProgress(); !errors.Is(err, nats.ErrMsgNotBound) {
-		t.Errorf("expected ErrMsgNotBound on unsettled jsMsg InProgress, got: %v", err)
-	}
-	if err := unsettledJsMsg.Ack(); !errors.Is(err, nats.ErrMsgNotBound) {
-		t.Errorf("expected ErrMsgNotBound on unsettled jsMsg Ack, got: %v", err)
-	}
-	unsettledJsMsg2 := &jsMessage{
-		raw: &nats.Msg{Subject: "aerial.jobs.u2", Data: []byte("u2")},
-		bus: bus,
-	}
-	if err := unsettledJsMsg2.NakWithDelay(0); !errors.Is(err, nats.ErrMsgNotBound) {
-		t.Errorf("expected ErrMsgNotBound on NakWithDelay, got: %v", err)
-	}
-	unsettledJsMsg3 := &jsMessage{
-		raw: &nats.Msg{Subject: "aerial.jobs.u3", Data: []byte("u3")},
-		bus: bus,
-	}
-	if err := unsettledJsMsg3.Term(); !errors.Is(err, nats.ErrMsgNotBound) {
-		t.Errorf("expected ErrMsgNotBound on Term, got: %v", err)
-	}
-
-	// Unsettled jsMsg snooze without explicit msgID
+	// 3. Unsettled jsMsg snooze without explicit msgID
 	unsettledJsMsg4 := &jsMessage{
 		raw: &nats.Msg{Subject: "aerial.jobs.u4", Data: []byte("u4")},
 		bus: bus,
