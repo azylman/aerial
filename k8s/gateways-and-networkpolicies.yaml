@@ -317,7 +317,6 @@ spec:
                 values:
                   - synapse
                   - docs
-                  - eri
                   - kernel-browser
                   - homepage
                   - console
@@ -404,3 +403,34 @@ spec:
   policyTypes:
     - Ingress
     - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: eri-ingress-netpol
+  namespace: default
+spec:
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - synapse
+                  - vanadis
+                  - haro
+                  - coven
+                  - console
+                  - prospera
+                  - victoriametrics
+                  - vision
+                  - gatus
+                  - scratch-service
+                  - mirrormere-core
+                  - eri
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: eri
+  policyTypes:
+    - Ingress
