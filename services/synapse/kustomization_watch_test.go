@@ -45,7 +45,7 @@ func trackedPR(prNumber int, requests map[string]string, deployed ...string) Dep
 		done = append(done, name)
 	}
 	return DeployingPR{
-		Repo: "azylman/aerial", PRNumber: prNumber, MergeSHA: fmt.Sprintf("sha-%d", prNumber), TargetID: "1555405874565091380",
+		Repo: "azylman/aerial", PRNumber: prNumber, MergeSHA: fmt.Sprintf("sha-%d", prNumber), TargetID: "100000000000000001",
 		Metadata: map[string]any{kustomizationRequestsKey: reqs, deployedKustomizationsKey: done},
 	}
 }

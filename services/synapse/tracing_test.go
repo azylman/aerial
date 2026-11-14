@@ -136,7 +136,7 @@ func runTraceparentDispatchCase(t *testing.T, target string, withParent bool, fa
 			t.Fatalf("postDiscordInternalJSON: %v", err)
 		}
 	case "widget":
-		if msgID, err := d.DispatchWidget(ctx, StatusWidgetRequest{ChannelID: "1555405874565091380", ID: "widget-1"}); err != nil || msgID != "msg-widget" {
+		if msgID, err := d.DispatchWidget(ctx, StatusWidgetRequest{ChannelID: "100000000000000001", ID: "widget-1"}); err != nil || msgID != "msg-widget" {
 			t.Fatalf("DispatchWidget = %q, %v", msgID, err)
 		}
 	}

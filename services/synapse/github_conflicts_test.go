@@ -321,7 +321,7 @@ func runDispatchWorkflowRunCase(ctx context.Context, t *testing.T, tc dispatchWo
 		kustomizationRequestErr: tc.recordErr,
 		hasExpectedErr:          tc.hasExpectedErr,
 		suppressVanadisRes:      tc.suppressVanadis,
-		resolveTargetID:         "1555405874565091380",
+		resolveTargetID:         "100000000000000001",
 		resolveBranch:           "feat/test",
 	}
 	srv := NewRouterServer(fixedConfig(Config{GitHubAPIURL: ts.URL}), ts.Client())
@@ -332,9 +332,9 @@ func runDispatchWorkflowRunCase(ctx context.Context, t *testing.T, tc dispatchWo
 
 	var err error
 	if tc.isGitPush {
-		err = srv.dispatchGitPush(ctx, "azylman/aerial", tc.ref, tc.commit, "1555405874565091380", 1)
+		err = srv.dispatchGitPush(ctx, "azylman/aerial", tc.ref, tc.commit, "100000000000000001", 1)
 	} else {
-		err = srv.dispatchWorkflowRunImages(ctx, "azylman/aerial", 12345, tc.headBranch, tc.conclusion, "sha123", "1555405874565091380", 42)
+		err = srv.dispatchWorkflowRunImages(ctx, "azylman/aerial", 12345, tc.headBranch, tc.conclusion, "sha123", "100000000000000001", 42)
 	}
 
 	if (err != nil) != tc.wantErr {
@@ -709,7 +709,7 @@ func runCheckOpenPRConflictsCase(ctx context.Context, t *testing.T, tc checkOpen
 	if !tc.useNilRegistry {
 		mockReg = &mockPRRegistry{
 			conflictErr:      tc.conflictErr,
-			conflictTargetID: "1555405874565091380",
+			conflictTargetID: "100000000000000001",
 			conflictUpdated:  true,
 			closedErr:        tc.closedErr,
 		}
