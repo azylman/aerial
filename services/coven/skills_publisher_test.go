@@ -16,35 +16,21 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestValidateCompiledSkillMarkdown(t *testing.T) {
-	validMarkdown := `---
-name: custom-workflow
-description: This is a robust description with at least twenty characters.
----
-# Custom Workflow Title
-Detailed procedure description goes here with step-by-step instructions.
-`
-	targetSkill := &DiskSkill{
-		Name:        "custom-workflow",
-		Domain:      "discord",
-		RelPath:     "custom-skills/discord/custom-workflow/SKILL.md",
-		RawContent:  validMarkdown,
-		Description: "This is a robust description with at least twenty characters.",
-	}
-	existingSkills := []DiskSkill{*targetSkill}
+type validateCompiledSkillMarkdownCase struct {
+	name           string
+	action         string
+	domain         string
+	rawMarkdown    string
+	target         *DiskSkill
+	existingSkills []DiskSkill
+	wantName       string
+	wantRelPath    string
+	wantErr        bool
+	errContains    string
+}
 
-	tests := []struct {
-		name           string
-		action         string
-		domain         string
-		rawMarkdown    string
-		target         *DiskSkill
-		existingSkills []DiskSkill
-		wantName       string
-		wantRelPath    string
-		wantErr        bool
-		errContains    string
-	}{
+func validateCompiledSkillMarkdownCases(validMarkdown string, targetSkill *DiskSkill, existingSkills []DiskSkill) []validateCompiledSkillMarkdownCase {
+	return []validateCompiledSkillMarkdownCase{
 		{
 			name:           "ValidCreateDiscordDomain",
 			action:         "CREATE",
@@ -196,25 +182,48 @@ Body text that is at least 100 bytes long so length check passes.
 			errContains: "unsupported action",
 		},
 	}
+}
 
-	for _, tc := range tests {
+func runValidateCompiledSkillMarkdownCase(t *testing.T, tc validateCompiledSkillMarkdownCase) {
+	t.Helper()
+	name, relPath, _, err := ValidateCompiledSkillMarkdown(tc.action, tc.domain, tc.rawMarkdown, tc.target, tc.existingSkills)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ValidateCompiledSkillMarkdown() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr {
+		if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+			t.Errorf("error %q does not contain %q", err.Error(), tc.errContains)
+		}
+		return
+	}
+	if name != tc.wantName {
+		t.Errorf("name = %q, want %q", name, tc.wantName)
+	}
+	if relPath != tc.wantRelPath {
+		t.Errorf("relPath = %q, want %q", relPath, tc.wantRelPath)
+	}
+}
+
+func TestValidateCompiledSkillMarkdown(t *testing.T) {
+	validMarkdown := `---
+name: custom-workflow
+description: This is a robust description with at least twenty characters.
+---
+# Custom Workflow Title
+Detailed procedure description goes here with step-by-step instructions.
+`
+	targetSkill := &DiskSkill{
+		Name:        "custom-workflow",
+		Domain:      "discord",
+		RelPath:     "custom-skills/discord/custom-workflow/SKILL.md",
+		RawContent:  validMarkdown,
+		Description: "This is a robust description with at least twenty characters.",
+	}
+	existingSkills := []DiskSkill{*targetSkill}
+
+	for _, tc := range validateCompiledSkillMarkdownCases(validMarkdown, targetSkill, existingSkills) {
 		t.Run(tc.name, func(t *testing.T) {
-			name, relPath, _, err := ValidateCompiledSkillMarkdown(tc.action, tc.domain, tc.rawMarkdown, tc.target, tc.existingSkills)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ValidateCompiledSkillMarkdown() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
-					t.Errorf("error %q does not contain %q", err.Error(), tc.errContains)
-				}
-				return
-			}
-			if name != tc.wantName {
-				t.Errorf("name = %q, want %q", name, tc.wantName)
-			}
-			if relPath != tc.wantRelPath {
-				t.Errorf("relPath = %q, want %q", relPath, tc.wantRelPath)
-			}
+			runValidateCompiledSkillMarkdownCase(t, tc)
 		})
 	}
 }
@@ -408,169 +417,213 @@ type mockGitHubServerConfig struct {
 	discordMsgCalls  *int
 }
 
+func handleMockGitGet(w http.ResponseWriter, r *http.Request, cfg mockGitHubServerConfig) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	path := r.URL.Path
+	switch {
+	case strings.HasSuffix(path, "/pulls"):
+		if cfg.failListPRs {
+			http.Error(w, `{"message":"failed to list PRs"}`, http.StatusInternalServerError)
+			return true
+		}
+		var prs []map[string]any
+		for i, ref := range cfg.openPRRefs {
+			prs = append(prs, map[string]any{
+				"number": i + 1,
+				"head": map[string]string{
+					"ref": ref,
+					"sha": "head-sha-123",
+				},
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(prs)
+		return true
+
+	case strings.HasSuffix(path, "/git/ref/heads/main"):
+		if cfg.failGetMainRef {
+			http.Error(w, `{"message":"not found"}`, http.StatusInternalServerError)
+			return true
+		}
+		sha := "main-sha-123"
+		if cfg.emptyMainRefSHA {
+			sha = ""
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"object": map[string]string{"sha": sha, "type": "commit"},
+		})
+		return true
+
+	case strings.Contains(path, "/git/commits/"):
+		if cfg.failGetCommit {
+			http.Error(w, `{"message":"commit error"}`, http.StatusInternalServerError)
+			return true
+		}
+		treeSHA := "base-tree-456"
+		if cfg.emptyBaseTreeSHA {
+			treeSHA = ""
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"sha":  "main-sha-123",
+			"tree": map[string]string{"sha": treeSHA},
+		})
+		return true
+	}
+	return false
+}
+
+func handleMockGitPost(w http.ResponseWriter, r *http.Request, cfg mockGitHubServerConfig) bool {
+	path := r.URL.Path
+	if r.Method == http.MethodDelete && strings.Contains(path, "/git/refs/heads/") {
+		if cfg.failDeleteRef {
+			http.Error(w, `{"message":"del error"}`, http.StatusInternalServerError)
+			return true
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
+
+	if r.Method != http.MethodPost {
+		return false
+	}
+
+	switch {
+	case strings.HasSuffix(path, "/git/trees"):
+		if cfg.failCreateTree {
+			http.Error(w, `{"message":"tree error"}`, http.StatusInternalServerError)
+			return true
+		}
+		treeSHA := "new-tree-789"
+		if cfg.emptyTreeSHA {
+			treeSHA = ""
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"sha": treeSHA})
+		return true
+
+	case strings.HasSuffix(path, "/git/commits"):
+		if cfg.failCreateCommit {
+			http.Error(w, `{"message":"commit error"}`, http.StatusInternalServerError)
+			return true
+		}
+		commitSHA := "new-commit-abc"
+		if cfg.emptyCommitSHA {
+			commitSHA = ""
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"sha": commitSHA})
+		return true
+
+	case strings.HasSuffix(path, "/git/refs"):
+		if cfg.failCreateRef {
+			http.Error(w, `{"message":"ref error"}`, http.StatusInternalServerError)
+			return true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"ref": "refs/heads/branch"})
+		return true
+
+	case strings.HasSuffix(path, "/pulls"):
+		if cfg.failCreatePR {
+			http.Error(w, `{"message":"pr error"}`, http.StatusInternalServerError)
+			return true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number":  42,
+			"node_id": "PR_kwDO123",
+		})
+		return true
+	}
+	return false
+}
+
+func handleMockInternalPost(w http.ResponseWriter, r *http.Request, cfg mockGitHubServerConfig) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	switch r.URL.Path {
+	case "/graphql":
+		if cfg.autoMergeCalls != nil {
+			*cfg.autoMergeCalls++
+		}
+		if cfg.failAutoMerge {
+			http.Error(w, `{"errors":[{"message":"automerge error"}]}`, http.StatusInternalServerError)
+			return true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"enablePullRequestAutoMerge": map[string]any{},
+			},
+		})
+		return true
+
+	case "/internal/pr/register":
+		if cfg.brainRegCalls != nil {
+			*cfg.brainRegCalls++
+		}
+		if cfg.failBrainReg {
+			http.Error(w, `{"error":"registration failed"}`, http.StatusInternalServerError)
+			return true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
+		return true
+
+	case "/discord/message":
+		if cfg.discordMsgCalls != nil {
+			*cfg.discordMsgCalls++
+		}
+		if cfg.failBrainReg {
+			http.Error(w, `{"error":"discord message failed"}`, http.StatusInternalServerError)
+			return true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "sent"})
+		return true
+	}
+	return false
+}
+
 func newMockGitHubServer(t *testing.T, cfg mockGitHubServerConfig) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		switch {
-		case r.Method == http.MethodGet && strings.HasSuffix(path, "/pulls"):
-			if cfg.failListPRs {
-				http.Error(w, `{"message":"failed to list PRs"}`, http.StatusInternalServerError)
-				return
-			}
-			var prs []map[string]any
-			for i, ref := range cfg.openPRRefs {
-				prs = append(prs, map[string]any{
-					"number": i + 1,
-					"head": map[string]string{
-						"ref": ref,
-						"sha": "head-sha-123",
-					},
-				})
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(prs)
-
-		case r.Method == http.MethodGet && strings.HasSuffix(path, "/git/ref/heads/main"):
-			if cfg.failGetMainRef {
-				http.Error(w, `{"message":"not found"}`, http.StatusInternalServerError)
-				return
-			}
-			sha := "main-sha-123"
-			if cfg.emptyMainRefSHA {
-				sha = ""
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"object": map[string]string{"sha": sha, "type": "commit"},
-			})
-
-		case r.Method == http.MethodGet && strings.Contains(path, "/git/commits/"):
-			if cfg.failGetCommit {
-				http.Error(w, `{"message":"commit error"}`, http.StatusInternalServerError)
-				return
-			}
-			treeSHA := "base-tree-456"
-			if cfg.emptyBaseTreeSHA {
-				treeSHA = ""
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"sha":  "main-sha-123",
-				"tree": map[string]string{"sha": treeSHA},
-			})
-
-		case r.Method == http.MethodPost && strings.HasSuffix(path, "/git/trees"):
-			if cfg.failCreateTree {
-				http.Error(w, `{"message":"tree error"}`, http.StatusInternalServerError)
-				return
-			}
-			treeSHA := "new-tree-789"
-			if cfg.emptyTreeSHA {
-				treeSHA = ""
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{"sha": treeSHA})
-
-		case r.Method == http.MethodPost && strings.HasSuffix(path, "/git/commits"):
-			if cfg.failCreateCommit {
-				http.Error(w, `{"message":"commit error"}`, http.StatusInternalServerError)
-				return
-			}
-			commitSHA := "new-commit-abc"
-			if cfg.emptyCommitSHA {
-				commitSHA = ""
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{"sha": commitSHA})
-
-		case r.Method == http.MethodPost && strings.HasSuffix(path, "/git/refs"):
-			if cfg.failCreateRef {
-				http.Error(w, `{"message":"ref error"}`, http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{"ref": "refs/heads/branch"})
-
-		case r.Method == http.MethodDelete && strings.Contains(path, "/git/refs/heads/"):
-			if cfg.failDeleteRef {
-				http.Error(w, `{"message":"del error"}`, http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-
-		case r.Method == http.MethodPost && strings.HasSuffix(path, "/pulls"):
-			if cfg.failCreatePR {
-				http.Error(w, `{"message":"pr error"}`, http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"number":  42,
-				"node_id": "PR_kwDO123",
-			})
-
-		case r.Method == http.MethodPost && path == "/graphql":
-			if cfg.autoMergeCalls != nil {
-				*cfg.autoMergeCalls++
-			}
-			if cfg.failAutoMerge {
-				http.Error(w, `{"errors":[{"message":"automerge error"}]}`, http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"data": map[string]any{
-					"enablePullRequestAutoMerge": map[string]any{},
-				},
-			})
-
-		case r.Method == http.MethodPost && path == "/internal/pr/register":
-			if cfg.brainRegCalls != nil {
-				*cfg.brainRegCalls++
-			}
-			if cfg.failBrainReg {
-				http.Error(w, `{"error":"registration failed"}`, http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
-
-		case r.Method == http.MethodPost && path == "/discord/message":
-			if cfg.discordMsgCalls != nil {
-				*cfg.discordMsgCalls++
-			}
-			if cfg.failBrainReg {
-				http.Error(w, `{"error":"discord message failed"}`, http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "sent"})
-
-		default:
-			http.NotFound(w, r)
+		if handleMockGitGet(w, r, cfg) {
+			return
 		}
+		if handleMockGitPost(w, r, cfg) {
+			return
+		}
+		if handleMockInternalPost(w, r, cfg) {
+			return
+		}
+		http.NotFound(w, r)
 	}))
 }
 
-func TestGitHubSkillPublisher_PublishSkillChanges(t *testing.T) {
-	ctx := context.Background()
+type publishSkillChangesCase struct {
+	name               string
+	token              string
+	repo               string
+	channelID          string
+	changes            []SkillFileChange
+	serverCfg          mockGitHubServerConfig
+	wantPR             int
+	wantErr            bool
+	errSubstr          string
+	checkCalls         bool
+	wantAutoMergeCalls int
+	wantBrainRegCalls  int
+	wantDiscordCalls   int
+}
 
-	tests := []struct {
-		name               string
-		token              string
-		repo               string
-		channelID          string
-		changes            []SkillFileChange
-		serverCfg          mockGitHubServerConfig
-		wantPR             int
-		wantErr            bool
-		errSubstr          string
-		checkCalls         bool
-		wantAutoMergeCalls int
-		wantBrainRegCalls  int
-		wantDiscordCalls   int
-	}{
+func publishSkillChangesCases() []publishSkillChangesCase {
+	return []publishSkillChangesCase{
 		{
 			name:      "MissingToken",
 			token:     "",
@@ -807,55 +860,69 @@ func TestGitHubSkillPublisher_PublishSkillChanges(t *testing.T) {
 			wantDiscordCalls:   1,
 		},
 	}
+}
 
-	for _, tc := range tests {
+func assertPublishSkillChangesCalls(t *testing.T, autoMerge, brainReg, discordMsg int, tc publishSkillChangesCase) {
+	t.Helper()
+	if autoMerge != tc.wantAutoMergeCalls {
+		t.Errorf("autoMergeCalls = %d, want %d", autoMerge, tc.wantAutoMergeCalls)
+	}
+	if brainReg != tc.wantBrainRegCalls {
+		t.Errorf("brainRegCalls = %d, want %d", brainReg, tc.wantBrainRegCalls)
+	}
+	if discordMsg != tc.wantDiscordCalls {
+		t.Errorf("discordMsgCalls = %d, want %d", discordMsg, tc.wantDiscordCalls)
+	}
+}
+
+func runPublishSkillChangesCase(ctx context.Context, t *testing.T, tc publishSkillChangesCase) {
+	t.Helper()
+	var autoMergeCalls, brainRegCalls, discordMsgCalls int
+	cfg := tc.serverCfg
+	cfg.autoMergeCalls = &autoMergeCalls
+	cfg.brainRegCalls = &brainRegCalls
+	cfg.discordMsgCalls = &discordMsgCalls
+
+	server := newMockGitHubServer(t, cfg)
+	defer server.Close()
+
+	fixedTime := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	publisher := NewGitHubSkillPublisher(GitHubSkillPublisherConfig{
+		Token:              tc.token,
+		Owner:              "azylman",
+		Repo:               tc.repo,
+		BrainURL:           server.URL,
+		BrainPRRegisterURL: server.URL + "/internal/pr/register",
+		SystemChannelID:    tc.channelID,
+		BaseURL:            server.URL,
+		HTTPClient:         server.Client(),
+		Now:                func() time.Time { return fixedTime },
+	})
+
+	prNum, err := publisher.PublishSkillChanges(ctx, tc.changes)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("PublishSkillChanges() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr {
+		if tc.errSubstr != "" && !strings.Contains(err.Error(), tc.errSubstr) {
+			t.Errorf("err = %q, want substring %q", err.Error(), tc.errSubstr)
+		}
+		return
+	}
+	if prNum != tc.wantPR {
+		t.Errorf("prNum = %d, want %d", prNum, tc.wantPR)
+	}
+	if tc.checkCalls {
+		assertPublishSkillChangesCalls(t, autoMergeCalls, brainRegCalls, discordMsgCalls, tc)
+	}
+}
+
+func TestGitHubSkillPublisher_PublishSkillChanges(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range publishSkillChangesCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			var autoMergeCalls, brainRegCalls, discordMsgCalls int
-			cfg := tc.serverCfg
-			cfg.autoMergeCalls = &autoMergeCalls
-			cfg.brainRegCalls = &brainRegCalls
-			cfg.discordMsgCalls = &discordMsgCalls
-
-			server := newMockGitHubServer(t, cfg)
-			defer server.Close()
-
-			fixedTime := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
-			publisher := NewGitHubSkillPublisher(GitHubSkillPublisherConfig{
-				Token:              tc.token,
-				Owner:              "azylman",
-				Repo:               tc.repo,
-				BrainURL:           server.URL,
-				BrainPRRegisterURL: server.URL + "/internal/pr/register",
-				SystemChannelID:    tc.channelID,
-				BaseURL:            server.URL,
-				HTTPClient:         server.Client(),
-				Now:                func() time.Time { return fixedTime },
-			})
-
-			prNum, err := publisher.PublishSkillChanges(ctx, tc.changes)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("PublishSkillChanges() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				if tc.errSubstr != "" && !strings.Contains(err.Error(), tc.errSubstr) {
-					t.Errorf("err = %q, want substring %q", err.Error(), tc.errSubstr)
-				}
-				return
-			}
-			if prNum != tc.wantPR {
-				t.Errorf("prNum = %d, want %d", prNum, tc.wantPR)
-			}
-			if tc.checkCalls {
-				if autoMergeCalls != tc.wantAutoMergeCalls {
-					t.Errorf("autoMergeCalls = %d, want %d", autoMergeCalls, tc.wantAutoMergeCalls)
-				}
-				if brainRegCalls != tc.wantBrainRegCalls {
-					t.Errorf("brainRegCalls = %d, want %d", brainRegCalls, tc.wantBrainRegCalls)
-				}
-				if discordMsgCalls != tc.wantDiscordCalls {
-					t.Errorf("discordMsgCalls = %d, want %d", discordMsgCalls, tc.wantDiscordCalls)
-				}
-			}
+			runPublishSkillChangesCase(ctx, t, tc)
 		})
 	}
 }
@@ -927,49 +994,32 @@ func (m *mockSkillPublisher) NotifyShortFriction(ctx context.Context, content st
 	return m.alertErr
 }
 
-func TestConsolidateProceduralSkills(t *testing.T) {
-	ctx := context.Background()
+type consolidateProceduralSkillsCase struct {
+	name                    string
+	lockExtraction          bool
+	nilStore                bool
+	nilPublisher            bool
+	nilLLM                  bool
+	storeFailOp             string
+	cands                   []ProceduralCandidate
+	customSkillsDir         string
+	llmResp                 string
+	llmErr                  error
+	pubPR                   int
+	pubErr                  error
+	alertErr                error
+	wantPR                  int
+	wantErr                 bool
+	wantMarkConsolidate     bool
+	wantMarkSkipped         bool
+	wantChangesLen          int
+	wantAlertsLen           int
+	wantConsolidatedIndices []int
+	wantPendingIndices      []int
+}
 
-	validSkillMD := `---
-name: ha-ops
-description: Home assistant operations workflow and automation routines.
----
-# Home Assistant Operations
-Procedure steps for configuring automations and entities properly.
-`
-	validNewSkillMD := `---
-name: new-flow
-description: Novel procedure for orchestrating automated deployments.
----
-# New Flow Procedure
-1. First step in the procedural execution pipeline.
-2. Second step in the procedural execution pipeline.
-3. Third step in the procedural execution pipeline.
-`
-
-	tests := []struct {
-		name                    string
-		lockExtraction          bool
-		nilStore                bool
-		nilPublisher            bool
-		nilLLM                  bool
-		storeFailOp             string
-		cands                   []ProceduralCandidate
-		customSkillsDir         string
-		llmResp                 string
-		llmErr                  error
-		pubPR                   int
-		pubErr                  error
-		alertErr                error
-		wantPR                  int
-		wantErr                 bool
-		wantMarkConsolidate     bool
-		wantMarkSkipped         bool
-		wantChangesLen          int
-		wantAlertsLen           int
-		wantConsolidatedIndices []int
-		wantPendingIndices      []int
-	}{
+func consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD string) []consolidateProceduralSkillsCase {
+	return []consolidateProceduralSkillsCase{
 		{
 			name:           "ExtractionMutexLockedReturnsZero",
 			lockExtraction: true,
@@ -1124,28 +1174,16 @@ description: Novel procedure for orchestrating automated deployments.
 			wantPendingIndices:      []int{1},
 		},
 		{
-			name: "ShortFrictionAlertBatchNotifiedAndMarkedSkipped",
-			cands: []ProceduralCandidate{
-				{ID: 81, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 82, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 83, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 84, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 85, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-			},
+			name:            "ShortFrictionAlertBatchNotifiedAndMarkedSkipped",
+			cands:           makeProceduralCandidateBatch(81, 5),
 			wantPR:          0,
 			wantErr:         false,
 			wantMarkSkipped: true,
 			wantAlertsLen:   1,
 		},
 		{
-			name: "ShortFrictionAlertErrorRetainsPending",
-			cands: []ProceduralCandidate{
-				{ID: 91, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 92, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 93, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 94, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 95, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-			},
+			name:               "ShortFrictionAlertErrorRetainsPending",
+			cands:              makeProceduralCandidateBatch(91, 5),
 			alertErr:           errors.New("alert post failed"),
 			wantPR:             0,
 			wantErr:            false,
@@ -1153,123 +1191,167 @@ description: Novel procedure for orchestrating automated deployments.
 			wantPendingIndices: []int{0, 1, 2, 3, 4},
 		},
 	}
+}
 
-	for _, tc := range tests {
+func setupConsolidateProceduralSkillsDir(t *testing.T, validSkillMD, customSkillsDir string) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	skillsDir := filepath.Join(tmpDir, "custom-skills")
+	discordDir := filepath.Join(skillsDir, "discord", "ha-ops")
+	if err := os.MkdirAll(discordDir, 0o755); err != nil {
+		t.Fatalf("failed to create test custom skills dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(discordDir, "SKILL.md"), []byte(validSkillMD), 0o644); err != nil {
+		t.Fatalf("failed to write test SKILL.md: %v", err)
+	}
+
+	if customSkillsDir == "FILE_AS_DIR" {
+		dummyFile := filepath.Join(tmpDir, "dummy-file")
+		_ = os.WriteFile(dummyFile, []byte("not-a-dir"), 0o644)
+		return dummyFile
+	}
+	if customSkillsDir != "" {
+		return customSkillsDir
+	}
+	return skillsDir
+}
+
+func setupConsolidateProceduralStore(ctx context.Context, failOp string, cands []ProceduralCandidate) (*TestMemStore, []int64) {
+	mem := newTestMemStore()
+	if failOp != "" {
+		mem.failOp = failOp
+		mem.failErr = errors.New("simulated store failure")
+	}
+	insertedIDs := make([]int64, 0, len(cands))
+	for _, cand := range cands {
+		id, _ := mem.InsertProceduralCandidate(ctx, cand)
+		insertedIDs = append(insertedIDs, id)
+	}
+	return mem, insertedIDs
+}
+
+func assertConsolidateProceduralCandidateStatus(t *testing.T, tc consolidateProceduralSkillsCase, mem *TestMemStore, insertedIDs []int64) {
+	t.Helper()
+	if tc.wantMarkConsolidate {
+		for _, id := range insertedIDs {
+			if mem.proceduralCandidates[id].Status != "consolidated" {
+				t.Errorf("candidate %d status = %q, want consolidated", id, mem.proceduralCandidates[id].Status)
+			}
+			if mem.proceduralCandidates[id].PRNumber != tc.wantPR {
+				t.Errorf("candidate %d pr_number = %d, want %d", id, mem.proceduralCandidates[id].PRNumber, tc.wantPR)
+			}
+		}
+	}
+	if tc.wantMarkSkipped {
+		for _, id := range insertedIDs {
+			if mem.proceduralCandidates[id].Status != "skipped" {
+				t.Errorf("candidate %d status = %q, want skipped", id, mem.proceduralCandidates[id].Status)
+			}
+		}
+	}
+	for _, idx := range tc.wantConsolidatedIndices {
+		if idx < len(insertedIDs) {
+			id := insertedIDs[idx]
+			if mem.proceduralCandidates[id].Status != "consolidated" {
+				t.Errorf("candidate %d status = %q, want consolidated", id, mem.proceduralCandidates[id].Status)
+			}
+		}
+	}
+	for _, idx := range tc.wantPendingIndices {
+		if idx < len(insertedIDs) {
+			id := insertedIDs[idx]
+			if mem.proceduralCandidates[id].Status != "pending" {
+				t.Errorf("candidate %d status = %q, want pending", id, mem.proceduralCandidates[id].Status)
+			}
+		}
+	}
+}
+
+func assertConsolidateProceduralPublisherOutput(t *testing.T, tc consolidateProceduralSkillsCase, pub *mockSkillPublisher) {
+	t.Helper()
+	if tc.wantChangesLen > 0 && len(pub.changes) != tc.wantChangesLen {
+		t.Errorf("published changes len = %d, want %d", len(pub.changes), tc.wantChangesLen)
+	}
+	if tc.wantAlertsLen > 0 && len(pub.alerts) != tc.wantAlertsLen {
+		t.Errorf("alerts len = %d, want %d", len(pub.alerts), tc.wantAlertsLen)
+	}
+}
+
+func runConsolidateProceduralSkillsCase(ctx context.Context, t *testing.T, validSkillMD string, tc consolidateProceduralSkillsCase) {
+	t.Helper()
+	if tc.lockExtraction {
+		extractionMutex.Lock()
+		defer extractionMutex.Unlock()
+	}
+
+	targetSkillsDir := setupConsolidateProceduralSkillsDir(t, validSkillMD, tc.customSkillsDir)
+	mem, insertedIDs := setupConsolidateProceduralStore(ctx, tc.storeFailOp, tc.cands)
+
+	var store Store = mem
+	if tc.nilStore {
+		store = nil
+	}
+
+	pub := &mockSkillPublisher{
+		prNum:    tc.pubPR,
+		err:      tc.pubErr,
+		alertErr: tc.alertErr,
+	}
+	var publisher SkillPublisher = pub
+	if tc.nilPublisher {
+		publisher = nil
+	}
+
+	var llm LLMClientFunc = func(c context.Context, prompt string) (string, error) {
+		if tc.llmErr != nil {
+			return "", tc.llmErr
+		}
+		return tc.llmResp, nil
+	}
+	if tc.nilLLM {
+		llm = nil
+	}
+
+	ollama := &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)}
+
+	prNum, err := ConsolidateProceduralSkills(ctx, store, ollama, llm, publisher, targetSkillsDir)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ConsolidateProceduralSkills() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr {
+		return
+	}
+	if prNum != tc.wantPR {
+		t.Errorf("prNum = %d, want %d", prNum, tc.wantPR)
+	}
+
+	assertConsolidateProceduralCandidateStatus(t, tc, mem, insertedIDs)
+	assertConsolidateProceduralPublisherOutput(t, tc, pub)
+}
+
+func TestConsolidateProceduralSkills(t *testing.T) {
+	ctx := context.Background()
+
+	validSkillMD := `---
+name: ha-ops
+description: Home assistant operations workflow and automation routines.
+---
+# Home Assistant Operations
+Procedure steps for configuring automations and entities properly.
+`
+	validNewSkillMD := `---
+name: new-flow
+description: Novel procedure for orchestrating automated deployments.
+---
+# New Flow Procedure
+1. First step in the procedural execution pipeline.
+2. Second step in the procedural execution pipeline.
+3. Third step in the procedural execution pipeline.
+`
+
+	for _, tc := range consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD) {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.lockExtraction {
-				extractionMutex.Lock()
-				defer extractionMutex.Unlock()
-			}
-
-			tmpDir := t.TempDir()
-			skillsDir := filepath.Join(tmpDir, "custom-skills")
-			discordDir := filepath.Join(skillsDir, "discord", "ha-ops")
-			if err := os.MkdirAll(discordDir, 0o755); err != nil {
-				t.Fatalf("failed to create test custom skills dir: %v", err)
-			}
-			if err := os.WriteFile(filepath.Join(discordDir, "SKILL.md"), []byte(validSkillMD), 0o644); err != nil {
-				t.Fatalf("failed to write test SKILL.md: %v", err)
-			}
-
-			targetSkillsDir := skillsDir
-			if tc.customSkillsDir == "FILE_AS_DIR" {
-				dummyFile := filepath.Join(tmpDir, "dummy-file")
-				_ = os.WriteFile(dummyFile, []byte("not-a-dir"), 0o644)
-				targetSkillsDir = dummyFile
-			} else if tc.customSkillsDir != "" {
-				targetSkillsDir = tc.customSkillsDir
-			}
-
-			mem := newTestMemStore()
-			if tc.storeFailOp != "" {
-				mem.failOp = tc.storeFailOp
-				mem.failErr = errors.New("simulated store failure")
-			}
-			var insertedIDs []int64
-			for _, cand := range tc.cands {
-				id, _ := mem.InsertProceduralCandidate(ctx, cand)
-				insertedIDs = append(insertedIDs, id)
-			}
-
-			var store Store = mem
-			if tc.nilStore {
-				store = nil
-			}
-
-			pub := &mockSkillPublisher{
-				prNum:    tc.pubPR,
-				err:      tc.pubErr,
-				alertErr: tc.alertErr,
-			}
-			var publisher SkillPublisher = pub
-			if tc.nilPublisher {
-				publisher = nil
-			}
-
-			var llm LLMClientFunc = func(c context.Context, prompt string) (string, error) {
-				if tc.llmErr != nil {
-					return "", tc.llmErr
-				}
-				return tc.llmResp, nil
-			}
-			if tc.nilLLM {
-				llm = nil
-			}
-
-			ollama := &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)}
-
-			prNum, err := ConsolidateProceduralSkills(ctx, store, ollama, llm, publisher, targetSkillsDir)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ConsolidateProceduralSkills() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				return
-			}
-			if prNum != tc.wantPR {
-				t.Errorf("prNum = %d, want %d", prNum, tc.wantPR)
-			}
-
-			if tc.wantMarkConsolidate {
-				for _, id := range insertedIDs {
-					if mem.proceduralCandidates[id].Status != "consolidated" {
-						t.Errorf("candidate %d status = %q, want consolidated", id, mem.proceduralCandidates[id].Status)
-					}
-					if mem.proceduralCandidates[id].PRNumber != tc.wantPR {
-						t.Errorf("candidate %d pr_number = %d, want %d", id, mem.proceduralCandidates[id].PRNumber, tc.wantPR)
-					}
-				}
-			}
-			if tc.wantMarkSkipped {
-				for _, id := range insertedIDs {
-					if mem.proceduralCandidates[id].Status != "skipped" {
-						t.Errorf("candidate %d status = %q, want skipped", id, mem.proceduralCandidates[id].Status)
-					}
-				}
-			}
-			if tc.wantChangesLen > 0 {
-				if len(pub.changes) != tc.wantChangesLen {
-					t.Errorf("published changes len = %d, want %d", len(pub.changes), tc.wantChangesLen)
-				}
-			}
-			if tc.wantAlertsLen > 0 && len(pub.alerts) != tc.wantAlertsLen {
-				t.Errorf("alerts len = %d, want %d", len(pub.alerts), tc.wantAlertsLen)
-			}
-			for _, idx := range tc.wantConsolidatedIndices {
-				if idx < len(insertedIDs) {
-					id := insertedIDs[idx]
-					if mem.proceduralCandidates[id].Status != "consolidated" {
-						t.Errorf("candidate %d status = %q, want consolidated", id, mem.proceduralCandidates[id].Status)
-					}
-				}
-			}
-			for _, idx := range tc.wantPendingIndices {
-				if idx < len(insertedIDs) {
-					id := insertedIDs[idx]
-					if mem.proceduralCandidates[id].Status != "pending" {
-						t.Errorf("candidate %d status = %q, want pending", id, mem.proceduralCandidates[id].Status)
-					}
-				}
-			}
+			runConsolidateProceduralSkillsCase(ctx, t, validSkillMD, tc)
 		})
 	}
 }
