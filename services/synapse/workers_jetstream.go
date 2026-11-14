@@ -13,38 +13,19 @@ import (
 )
 
 func resolveJetStreamJobCoords(args any) (string, string) {
-	switch a := args.(type) {
+	switch a := normalizeJobArgs(args).(type) {
 	case GitHubWebhookArgs:
 		return "aerial.jobs.synapse.github", "github:" + a.Delivery
-	case *GitHubWebhookArgs:
-		return "aerial.jobs.synapse.github", "github:" + a.Delivery
 	case DeployWebhookArgs:
-		return "aerial.jobs.synapse.deploy", "deploy:" + a.IdempotencyKey
-	case *DeployWebhookArgs:
 		return "aerial.jobs.synapse.deploy", "deploy:" + a.IdempotencyKey
 	case MergeConflictArgs:
 		bucket := time.Now().Unix() / 900
 		return "aerial.jobs.synapse.merge_conflict", fmt.Sprintf("conflict:%s:%d:%d", a.Repo, a.PRNumber, bucket)
-	case *MergeConflictArgs:
-		bucket := time.Now().Unix() / 900
-		return "aerial.jobs.synapse.merge_conflict", fmt.Sprintf("conflict:%s:%d:%d", a.Repo, a.PRNumber, bucket)
 	case DiscordIngressArgs:
-		return "aerial.jobs.synapse.discord_ingress", "discord:msg:" + a.MessageID
-	case *DiscordIngressArgs:
 		return "aerial.jobs.synapse.discord_ingress", "discord:msg:" + a.MessageID
 	case DiscordInteractionArgs:
 		return "aerial.jobs.synapse.discord_interaction", "discord:ix:" + a.InteractionID
-	case *DiscordInteractionArgs:
-		return "aerial.jobs.synapse.discord_interaction", "discord:ix:" + a.InteractionID
 	case WidgetSyncArgs:
-		if strings.TrimSpace(a.BuildID) != "" {
-			return "aerial.coalesced.widget_sync.build." + strings.TrimSpace(a.BuildID),
-				fmt.Sprintf("widget:build:%s:%d", strings.TrimSpace(a.BuildID), time.Now().UnixNano())
-		}
-		repo := strings.ReplaceAll(normalizeRepo(a.Repo), "/", ".")
-		return fmt.Sprintf("aerial.coalesced.widget_sync.pr.%s.%d", repo, a.PRNumber),
-			fmt.Sprintf("widget:pr:%s:%d:%d", normalizeRepo(a.Repo), a.PRNumber, time.Now().UnixNano())
-	case *WidgetSyncArgs:
 		if strings.TrimSpace(a.BuildID) != "" {
 			return "aerial.coalesced.widget_sync.build." + strings.TrimSpace(a.BuildID),
 				fmt.Sprintf("widget:build:%s:%d", strings.TrimSpace(a.BuildID), time.Now().UnixNano())

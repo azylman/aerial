@@ -24,6 +24,23 @@ func TestEriJetStreamInit(t *testing.T) {
 		return memBus, nil
 	}
 
+	// attachEriEventBus with nil pool
+	nilCleanup := attachEriEventBus(ctx, nil)
+	if nilCleanup == nil {
+		t.Error("expected non-nil no-op cleanup for nil pool")
+	} else {
+		nilCleanup()
+	}
+
+	// attachEriEventBus with empty pool
+	emptyPool := queue.New(nil, queue.WorkerPoolConfig{NATSURL: ""})
+	emptyCleanup := attachEriEventBus(ctx, emptyPool)
+	if emptyCleanup == nil {
+		t.Error("expected non-nil no-op cleanup for unconfigured pool")
+	} else {
+		emptyCleanup()
+	}
+
 	// attachEriEventBusWithFactory error branch
 	pool := queue.New(nil, queue.WorkerPoolConfig{
 		NATSURL: "nats://127.0.0.1:4222",
@@ -48,40 +65,38 @@ func TestEriJetStreamInit(t *testing.T) {
 
 type natsURLResolutionTestCase struct {
 	name          string
-	envURL        string
 	poolURL       string
 	expectedURL   string
 	expectCleanup bool
 }
 
 func TestAttachEriEventBus_DefaultAndEnvURL(t *testing.T) {
+	t.Parallel()
+
 	tests := []natsURLResolutionTestCase{
 		{
-			name:          "returns nil when env and pool empty",
-			envURL:        "",
+			name:          "returns nil when pool url empty",
 			poolURL:       "",
 			expectedURL:   "",
 			expectCleanup: false,
 		},
 		{
-			name:          "pool config fallback when env empty",
-			envURL:        "",
-			poolURL:       "nats://pool-nats:4222",
-			expectedURL:   "nats://pool-nats:4222",
-			expectCleanup: true,
+			name:          "returns nil when pool url whitespace",
+			poolURL:       "   ",
+			expectedURL:   "",
+			expectCleanup: false,
 		},
 		{
-			name:          "env takes precedence over pool config",
-			envURL:        "nats://env-nats:4222",
+			name:          "pool config url connects",
 			poolURL:       "nats://pool-nats:4222",
-			expectedURL:   "nats://env-nats:4222",
+			expectedURL:   "nats://pool-nats:4222",
 			expectCleanup: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("NATS_URL", tc.envURL)
+			t.Parallel()
 			var capturedURL string
 			memBus := pubsub.NewMemoryBus()
 			defer memBus.Close()
@@ -103,41 +118,6 @@ func TestAttachEriEventBus_DefaultAndEnvURL(t *testing.T) {
 			}
 			if capturedURL != tc.expectedURL {
 				t.Errorf("capturedURL = %q, want %q", capturedURL, tc.expectedURL)
-			}
-		})
-	}
-}
-
-func TestFirstNonEmpty(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		inputs   []string
-		expected string
-	}{
-		{
-			name:     "all empty",
-			inputs:   []string{"", "   ", "\t"},
-			expected: "",
-		},
-		{
-			name:     "first non empty selected",
-			inputs:   []string{"", "  hello  ", "world"},
-			expected: "hello",
-		},
-		{
-			name:     "no inputs",
-			inputs:   nil,
-			expected: "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := firstNonEmpty(tc.inputs...); got != tc.expected {
-				t.Errorf("firstNonEmpty(%v) = %q, want %q", tc.inputs, got, tc.expected)
 			}
 		})
 	}
