@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -131,13 +132,21 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		return reply, conv, customErr
 	}
 
+	model := p.LowEffortModel()
+	start := time.Now()
+	// The invoke_agent span nests under the caller's (the /voice/ask server span) so a voice
+	// turn gets the same invoke_agent -> chat/execute_tool -> mcp tree as a Discord turn.
+	spanCtx, span := startTurnSpan(ctx, p.tracer(), turnSpanSpec{
+		conversationID: deviceKey, agentName: p.cfg.AgentName, triggerType: voiceTriggerType, pickup: start,
+	})
+	turnStatus, turnUsage := "failed", runner.TokenUsage{}
+	defer func() { finishTurnSpan(span, model, turnUsage, turnStatus) }()
+
 	procPool := p.resolveVoiceAgentPool()
 	if procPool == nil {
 		return "", deviceKey, fmt.Errorf("voice daemon pool unavailable")
 	}
 
-	model := p.LowEffortModel()
-	start := time.Now()
 	nodeInstructions := config.LoadScopeInstructions(deviceKey)
 
 	var detector *SentenceDetector
@@ -145,13 +154,14 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		detector = NewSentenceDetector()
 	}
 	sink := newVoiceTurnSink(ctx, onStatus, sentenceCb, detector)
+	traceSink := runner.NewTracingTurnSink(spanCtx, sink)
 
 	turnCtx := &runner.TurnContext{
 		TurnID: uuid.New().String(), SessionID: deviceKey, Model: model,
-		Prompt: turnPrompt, ScopeInstructions: nodeInstructions, Sink: sink, CreatedAt: time.Now(), Ctx: ctx,
+		Prompt: turnPrompt, ScopeInstructions: nodeInstructions, Sink: traceSink, CreatedAt: time.Now(), Ctx: spanCtx,
 	}
 
-	lease, lErr := procPool.AcquireLease(ctx, deviceKey)
+	lease, lErr := procPool.AcquireLease(spanCtx, deviceKey)
 	if lErr != nil {
 		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
 		return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", lErr)
@@ -161,18 +171,53 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 			log.Printf("[WorkerPool] Warning releasing voice lease for %s: %v", deviceKey, relErr)
 		}
 	}()
+	// Registered after the release defer so the daemon's entry is cleared before the lease
+	// (and the daemon) can be handed to the next turn.
+	defer p.markVoiceTurnActive(lease, span.SpanContext(), traceSink)()
 	activeSession := lease.SessionID()
 	if activeSession == "" {
 		activeSession = deviceKey
 	}
 	turnCtx.SessionID = activeSession
-	turnRes, turnErr := lease.Execute(ctx, turnCtx)
+	turnRes, turnErr := lease.Execute(spanCtx, turnCtx)
 	if turnErr != nil && !errors.Is(turnErr, context.Canceled) && !errors.Is(turnErr, context.DeadlineExceeded) {
 		turnErr = fmt.Errorf("failed sending turn to voice daemon: %w", turnErr)
 	}
 
 	outcome := runner.NewTurnResolver().Resolve(ctx, turnRes, turnErr, activeSession)
+	turnStatus, turnUsage = voiceTurnStatus(ctx, outcome), outcome.Usage
 	return finalizeVoiceTurnOutcome(ctx, outcome, turnErr, activeSession, model, start, sink, detector, sentenceCb)
+}
+
+// voiceTriggerType is the aerial.turn.trigger of a voice turn's invoke_agent span.
+const voiceTriggerType = "voice"
+
+// voiceTurnStatus maps a voice turn's outcome onto the aerial.turn.status values Discord turns
+// record: success, cancelled when the caller went away, failed otherwise.
+func voiceTurnStatus(ctx context.Context, outcome runner.TurnOutcome) string {
+	switch {
+	case outcome.IsSuccess:
+		return "success"
+	case ctx.Err() != nil:
+		return "cancelled"
+	default:
+		return "failed"
+	}
+}
+
+// markVoiceTurnActive registers the voice lease's daemon under the turn span and attaches the
+// turn's tool spans, so the loopback MCP proxy nests the daemon's MCP calls under them. It
+// returns the func that clears the registration; leases without a single daemon are skipped.
+func (p *WorkerPool) markVoiceTurnActive(lease runner.SessionLease, sc trace.SpanContext, tools runner.ToolSpanSource) func() {
+	owner, ok := lease.(runner.ActiveTurnOwner)
+	if !ok {
+		return func() {}
+	}
+	turn := owner.ActiveTurn()
+	registry := p.ActiveTurns()
+	registry.Set(turn, sc)
+	registry.SetToolSpans(turn.DaemonID, tools)
+	return func() { registry.Clear(turn.DaemonID) }
 }
 
 func newVoiceTurnSink(ctx context.Context, onStatus func(string), onSentence func(string), detector *SentenceDetector) *runner.BufferingTurnSink {

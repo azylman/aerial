@@ -242,11 +242,17 @@ func (te *turnExecution) endTurnSpan() {
 		// An attempted turn must end with an outcome; surface any path that forgot to assign one.
 		status = turnStatusUnknown
 	}
-	te.turnSpan.SetAttributes(turnSpanEndAttributes(te.turnModel, usage, status)...)
+	finishTurnSpan(te.turnSpan, te.turnModel, usage, status)
+}
+
+// finishTurnSpan records model, usage and outcome on a turn's root span, marks it failed for
+// any status other than success, and ends it.
+func finishTurnSpan(span trace.Span, model string, usage runner.AgyUsage, status string) {
+	span.SetAttributes(turnSpanEndAttributes(model, usage, status)...)
 	if status != "" && status != "success" {
-		te.turnSpan.SetStatus(codes.Error, status)
+		span.SetStatus(codes.Error, status)
 	}
-	te.turnSpan.End()
+	span.End()
 }
 
 // startChildSpan starts a child of the turn span on base, keeping base's cancellation.

@@ -16,6 +16,8 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/guard"
 	"github.com/azylman/aerial/services/eri/pkg/mcp"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -418,6 +420,48 @@ func TestTraceProxy_Routes(t *testing.T) {
 			mux.ServeHTTP(w, req)
 			if w.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d", w.Code, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestTraceProxy_AnnounceOutcomes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		body        string
+		wantStatus  int
+		wantOutcome string
+		wantVia     string
+	}{
+		{name: "known daemon_id is recorded via daemon", body: `{"daemon_id":"p1/voice-kiosk","server":"ha","tool":"get_state"}`, wantStatus: http.StatusNoContent, wantOutcome: "recorded", wantVia: "daemon"},
+		{name: "unknown daemon_id resolved by conversation", body: `{"daemon_id":"stale","conversation_id":"conv-kiosk","server":"ha","tool":"get_state"}`, wantStatus: http.StatusNoContent, wantOutcome: "recorded", wantVia: "conversation"},
+		{name: "empty daemon_id resolved by conversation", body: `{"conversation_id":"conv-kiosk","server":"ha","tool":"get_state"}`, wantStatus: http.StatusNoContent, wantOutcome: "recorded", wantVia: "conversation"},
+		{name: "announcement no turn claims is dropped", body: `{"daemon_id":"stale","conversation_id":"conv-gone","server":"ha","tool":"get_state"}`, wantStatus: http.StatusAccepted, wantOutcome: "dropped", wantVia: "none"},
+		{name: "announcement without a tool is malformed", body: `{"daemon_id":"p1/voice-kiosk","server":"ha"}`, wantStatus: http.StatusAccepted, wantOutcome: "malformed", wantVia: "none"},
+		{name: "announcement without a server is malformed", body: `{"daemon_id":"p1/voice-kiosk","tool":"get_state"}`, wantStatus: http.StatusAccepted, wantOutcome: "malformed", wantVia: "none"},
+		{name: "undecodable announcement is malformed", body: `{`, wantStatus: http.StatusBadRequest, wantOutcome: "malformed", wantVia: "none"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			registry := runner.NewActiveTurnRegistry()
+			registry.Set(runner.ActiveTurn{DaemonID: "p1/voice-kiosk", Target: "voice", ConversationID: "conv-kiosk"}, turnSpan(9))
+			outcomes := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_announcements_total"}, []string{"outcome", "via"})
+			mux := http.NewServeMux()
+			mcp.NewTraceProxy(mcp.TraceProxyConfig{Upstreams: upstreamMap{}, Turns: registry, AnnouncementOutcomes: outcomes}).Register(mux)
+			req := httptest.NewRequest(http.MethodPost, "/internal/mcp-proxy/announce", strings.NewReader(tc.body))
+			req.RemoteAddr = "127.0.0.1:5555"
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tc.wantStatus)
+			}
+			if got := testutil.CollectAndCount(outcomes); got != 1 {
+				t.Errorf("outcome series = %d, want 1", got)
+			}
+			if got := testutil.ToFloat64(outcomes.WithLabelValues(tc.wantOutcome, tc.wantVia)); got != 1 {
+				t.Errorf("announcements{outcome=%q,via=%q} = %v, want 1", tc.wantOutcome, tc.wantVia, got)
 			}
 		})
 	}

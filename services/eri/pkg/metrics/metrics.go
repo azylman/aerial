@@ -28,6 +28,17 @@ var (
 		[]string{"status", "trigger_type", "model"},
 	)
 
+	// MCPTraceAnnouncementsTotal counts agy hook announcements reaching the loopback MCP trace
+	// proxy by outcome (recorded, dropped, malformed) and by how the announcing daemon was
+	// resolved (daemon from daemon_id, conversation from the conversation_id fallback, none).
+	MCPTraceAnnouncementsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "eri_mcp_trace_announcements_total",
+			Help: "Total agy hook announcements received by the MCP trace proxy, by outcome and daemon resolution.",
+		},
+		[]string{"outcome", "via"},
+	)
+
 	TurnDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "aerial_brain_turn_duration_seconds",
@@ -438,6 +449,7 @@ func init() {
 		ToolDurationSeconds,
 		SkillInvocationsTotal,
 		TurnsTotal,
+		MCPTraceAnnouncementsTotal,
 		TurnDurationSeconds,
 		TokensTotal,
 		ActiveWorkers,
