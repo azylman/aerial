@@ -482,7 +482,6 @@ func (m *jsMessage) Snooze(delay time.Duration) error {
 		m.mu.Unlock()
 		return nil
 	}
-	m.settled = true
 	m.mu.Unlock()
 
 	seq := 0
@@ -520,6 +519,10 @@ func (m *jsMessage) Snooze(delay time.Duration) error {
 	}
 
 	if delay > 0 {
+		m.mu.Lock()
+		m.settled = true
+		m.mu.Unlock()
+
 		time.AfterFunc(delay, func() {
 			if pubErr := publishContinuation(); pubErr != nil {
 				log.Printf("[pubsub] warning: background snooze publish failed: %v", pubErr)
@@ -529,6 +532,9 @@ func (m *jsMessage) Snooze(delay time.Duration) error {
 		if err := publishContinuation(); err != nil {
 			return fmt.Errorf("snooze publish continuation: %w", err)
 		}
+		m.mu.Lock()
+		m.settled = true
+		m.mu.Unlock()
 	}
 
 	err := m.raw.Ack()

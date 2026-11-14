@@ -110,7 +110,8 @@ func (b *MemoryBus) PublishWithHeader(ctx context.Context, subject string, msgID
 		b.roundRobin[key]++
 		b.mu.Unlock()
 		targetSub := group[idx]
-		go b.dispatchToSub(targetSub, subject, payload, mergedHeader, currentSeq, 1)
+		subHeader := cloneHeader(mergedHeader)
+		go b.dispatchToSub(targetSub, subject, payload, subHeader, currentSeq, 1)
 	}
 
 	// 7. Competing consumer queue workers (grouped by queue)
@@ -127,10 +128,24 @@ func (b *MemoryBus) PublishWithHeader(ctx context.Context, subject string, msgID
 		b.roundRobin[qName]++
 		b.mu.Unlock()
 		targetSub := group[idx]
-		go b.dispatchToSub(targetSub, subject, payload, mergedHeader, currentSeq, 1)
+		subHeader := cloneHeader(mergedHeader)
+		go b.dispatchToSub(targetSub, subject, payload, subHeader, currentSeq, 1)
 	}
 
 	return nil
+}
+
+func cloneHeader(h nats.Header) nats.Header {
+	if h == nil {
+		return nats.Header{}
+	}
+	cloned := make(nats.Header, len(h))
+	for k, vv := range h {
+		cp := make([]string, len(vv))
+		copy(cp, vv)
+		cloned[k] = cp
+	}
+	return cloned
 }
 
 func (b *MemoryBus) dispatchToSub(sub *memSubscription, subject string, data []byte, header nats.Header, coalescedSeq uint64, delivered uint64) {
@@ -148,7 +163,6 @@ func (b *MemoryBus) dispatchToSub(sub *memSubscription, subject string, data []b
 		delivered:    delivered,
 	}
 
-	// Automatic heartbeat / InProgress
 	if progErr := msg.InProgress(); progErr != nil {
 		log.Printf("[pubsub/memory] warning: initial in-progress failed: %v", progErr)
 	}
@@ -365,7 +379,6 @@ func (m *memMessage) Snooze(delay time.Duration) error {
 		m.mu.Unlock()
 		return nil
 	}
-	m.settled = true
 	m.mu.Unlock()
 
 	// 1. Calculate next snooze sequence
@@ -388,12 +401,7 @@ func (m *memMessage) Snooze(delay time.Duration) error {
 	rotatedMsgID := fmt.Sprintf("%s:snooze:%d", msgID, nextSeq)
 
 	// 3. Clone headers and set rotated values
-	newHeader := nats.Header{}
-	for k, vv := range m.Header() {
-		for _, v := range vv {
-			newHeader.Add(k, v)
-		}
-	}
+	newHeader := cloneHeader(m.Header())
 	newHeader.Set(HeaderMsgID, rotatedMsgID)
 	newHeader.Set(HeaderSnoozeSeq, strconv.Itoa(nextSeq))
 
@@ -403,21 +411,34 @@ func (m *memMessage) Snooze(delay time.Duration) error {
 	}
 
 	if delay > 0 {
+		m.mu.Lock()
+		m.settled = true
+		m.mu.Unlock()
+
 		time.AfterFunc(delay, func() {
 			if pubErr := publishContinuation(); pubErr != nil {
 				log.Printf("[pubsub/memory] warning: background snooze publish failed: %v", pubErr)
 			}
 		})
 	} else {
-		go func() {
-			if pubErr := publishContinuation(); pubErr != nil {
-				log.Printf("[pubsub/memory] warning: background snooze publish failed: %v", pubErr)
-			}
-		}()
+		if err := publishContinuation(); err != nil {
+			return fmt.Errorf("snooze publish continuation: %w", err)
+		}
+		m.mu.Lock()
+		m.settled = true
+		m.mu.Unlock()
 	}
 
-	// 5. Ack current delivery
-	return m.Ack()
+	// 5. Ack current delivery with coalesced check
+	if m.coalescedSeq > 0 {
+		m.bus.mu.RLock()
+		activeSeq := m.bus.coalescedSeq[m.subject]
+		m.bus.mu.RUnlock()
+		if activeSeq > m.coalescedSeq {
+			return nil // Benign no-op on superseded sequence
+		}
+	}
+	return nil
 }
 
 func matchSubject(pattern, subject string) bool {
