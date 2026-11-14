@@ -64,20 +64,71 @@ func TestNewReloadable(t *testing.T) {
 	}
 }
 
+type reloadableTestCase struct {
+	name           string
+	nextCfg        *testCfg
+	loadErr        error
+	restartCheck   bool
+	wantStatus     ReloadStatus
+	wantErr        bool
+	wantCurrent    testCfg
+	wantRestarting bool
+}
+
+func runReloadableReloadCase(t *testing.T, tc reloadableTestCase, initial *testCfg) {
+	t.Helper()
+	var restartRequired func(old, next *testCfg) bool
+	if tc.restartCheck {
+		restartRequired = portChanged
+	}
+	seed := *initial
+	r := NewReloadable(&seed, fixtureLoader(tc.nextCfg, tc.loadErr), restartRequired)
+
+	status, err := r.Reload()
+	if status != tc.wantStatus {
+		t.Errorf("status = %q, want %q", status, tc.wantStatus)
+	}
+	if (err != nil) != tc.wantErr {
+		t.Errorf("err = %v, wantErr %v", err, tc.wantErr)
+	}
+	if got := r.Current(); !reflect.DeepEqual(*got, tc.wantCurrent) {
+		t.Errorf("Current() = %+v, want %+v", *got, tc.wantCurrent)
+	}
+	assertRestartRequested(t, r, tc.wantRestarting)
+	assertSecondReload(t, r, tc.wantStatus)
+}
+
+func assertRestartRequested(t *testing.T, r *Reloadable[testCfg], wantRestarting bool) {
+	t.Helper()
+	select {
+	case <-r.RestartRequested():
+		if !wantRestarting {
+			t.Error("RestartRequested closed unexpectedly")
+		}
+	default:
+		if wantRestarting {
+			t.Error("RestartRequested not closed")
+		}
+	}
+}
+
+func assertSecondReload(t *testing.T, r *Reloadable[testCfg], wantStatus ReloadStatus) {
+	t.Helper()
+	status2, _ := r.Reload()
+	wantSecond := wantStatus
+	if wantStatus == ReloadApplied {
+		wantSecond = ReloadUnchanged
+	}
+	if status2 != wantSecond {
+		t.Errorf("second reload status = %q, want %q", status2, wantSecond)
+	}
+}
+
 func TestReloadable_Reload(t *testing.T) {
 	t.Parallel()
 
 	initial := &testCfg{Port: "8080", Model: "a", Tags: []string{"x"}}
-	tests := []struct {
-		name           string
-		nextCfg        *testCfg
-		loadErr        error
-		restartCheck   bool
-		wantStatus     ReloadStatus
-		wantErr        bool
-		wantCurrent    testCfg
-		wantRestarting bool
-	}{
+	tests := []reloadableTestCase{
 		{
 			name:        "load error retains lkgc",
 			loadErr:     errors.New("yaml: bad indent"),
@@ -130,43 +181,7 @@ func TestReloadable_Reload(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var restartRequired func(old, next *testCfg) bool
-			if tc.restartCheck {
-				restartRequired = portChanged
-			}
-			seed := *initial
-			r := NewReloadable(&seed, fixtureLoader(tc.nextCfg, tc.loadErr), restartRequired)
-
-			status, err := r.Reload()
-			if status != tc.wantStatus {
-				t.Errorf("status = %q, want %q", status, tc.wantStatus)
-			}
-			if (err != nil) != tc.wantErr {
-				t.Errorf("err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if got := r.Current(); !reflect.DeepEqual(*got, tc.wantCurrent) {
-				t.Errorf("Current() = %+v, want %+v", *got, tc.wantCurrent)
-			}
-			select {
-			case <-r.RestartRequested():
-				if !tc.wantRestarting {
-					t.Error("RestartRequested closed unexpectedly")
-				}
-			default:
-				if tc.wantRestarting {
-					t.Error("RestartRequested not closed")
-				}
-			}
-
-			// A second identical reload must be idempotent: never double-close
-			// the restart channel and never change the outcome class.
-			status2, _ := r.Reload()
-			if tc.wantStatus == ReloadApplied && status2 != ReloadUnchanged {
-				t.Errorf("second reload status = %q, want %q", status2, ReloadUnchanged)
-			}
-			if tc.wantStatus != ReloadApplied && status2 != tc.wantStatus {
-				t.Errorf("second reload status = %q, want %q", status2, tc.wantStatus)
-			}
+			runReloadableReloadCase(t, tc, initial)
 		})
 	}
 }

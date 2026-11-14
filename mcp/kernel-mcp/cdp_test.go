@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -51,6 +52,201 @@ func (s *fakeCDPServer) getAttachedTarget() string {
 	return s.attachedTarget
 }
 
+func handleFakeCDPList(w http.ResponseWriter, r *http.Request, opts fakeCDPOptions) {
+	if opts.failList {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if opts.corruptList {
+		_, _ = w.Write([]byte("not valid json"))
+		return
+	}
+	if opts.emptyTargets {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+		return
+	}
+	host := r.Host
+	targets := []TargetInfo{}
+	if opts.includeChrome || opts.onlyChrome {
+		targets = append(targets, TargetInfo{
+			ID:                   "chrome-target",
+			Type:                 "page",
+			URL:                  "chrome://newtab",
+			WebSocketDebuggerURL: "ws://" + host + "/devtools/page/chrome-target",
+		})
+	}
+	if !opts.onlyChrome {
+		targets = append(targets, TargetInfo{
+			ID:                   "page-target-1",
+			Type:                 "page",
+			URL:                  "https://www.example.com",
+			WebSocketDebuggerURL: "ws://" + host + "/devtools/page/page-target-1",
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(targets)
+}
+
+type fakeCDPReq struct {
+	ID     int64           `json:"id"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
+}
+
+func checkFakeCDPMethodFails(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOptions, wsMu *sync.Mutex) bool {
+	if opts.returnCDPError && req.Method == "Input.insertText" {
+		writeFakeCDPError(ws, req.ID, -32603, "Internal error executing command", wsMu)
+		return true
+	}
+	if opts.failPageEnable && req.Method == "Page.enable" {
+		writeFakeCDPError(ws, req.ID, -32000, "Page.enable failed", wsMu)
+		return true
+	}
+	if opts.failUserAgent && req.Method == "Emulation.setUserAgentOverride" {
+		writeFakeCDPError(ws, req.ID, -32000, "setUserAgentOverride failed", wsMu)
+		return true
+	}
+	if opts.failAddScript && req.Method == "Page.addScriptToEvaluateOnNewDocument" {
+		writeFakeCDPError(ws, req.ID, -32000, "addScriptToEvaluateOnNewDocument failed", wsMu)
+		return true
+	}
+	return checkFakeCDPMouseFails(ws, req, opts, wsMu)
+}
+
+func checkFakeCDPMouseFails(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOptions, wsMu *sync.Mutex) bool {
+	if req.Method != "Input.dispatchMouseEvent" {
+		return false
+	}
+	var mp struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(req.Params, &mp)
+	mouseFails := []struct {
+		fail  bool
+		mType string
+		msg   string
+	}{
+		{opts.failMouseMoved, "mouseMoved", "mouseMoved error"},
+		{opts.failMousePress, "mousePressed", "mousePressed error"},
+		{opts.failMouseRelease, "mouseReleased", "mouseReleased error"},
+	}
+	for _, mf := range mouseFails {
+		if mf.fail && mp.Type == mf.mType {
+			writeFakeCDPError(ws, req.ID, -32000, mf.msg, wsMu)
+			return true
+		}
+	}
+	return false
+}
+
+func writeFakeCDPError(ws *websocket.Conn, id int64, code int, msg string, wsMu *sync.Mutex) {
+	wsMu.Lock()
+	_ = ws.WriteJSON(map[string]any{
+		"id": id,
+		"error": map[string]any{
+			"code":    code,
+			"message": msg,
+		},
+	})
+	wsMu.Unlock()
+}
+
+func handleFakeCDPMethod(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOptions, fakeSrv *fakeCDPServer, wsMu *sync.Mutex) (any, bool) {
+	switch req.Method {
+	case "Target.attachToTarget":
+		var p struct {
+			TargetID string `json:"targetId"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		fakeSrv.attachedMu.Lock()
+		fakeSrv.attachedTarget = p.TargetID
+		fakeSrv.attachedMu.Unlock()
+		return map[string]any{"sessionId": "test-session-1"}, false
+	case "Page.enable", "Emulation.setUserAgentOverride":
+		return map[string]any{}, false
+	case "Page.addScriptToEvaluateOnNewDocument":
+		return map[string]any{"identifier": "1"}, false
+	case "Runtime.evaluate":
+		return handleFakeCDPEval(ws, req, opts, wsMu)
+	case "Input.dispatchMouseEvent", "Input.insertText", "Page.navigate":
+		return map[string]any{}, false
+	case "Page.captureScreenshot":
+		return handleFakeCDPScreenshot(ws, req, wsMu)
+	default:
+		return map[string]any{}, false
+	}
+}
+
+func handleFakeCDPEval(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOptions, wsMu *sync.Mutex) (any, bool) {
+	if opts.failStealthEval {
+		writeFakeCDPError(ws, req.ID, -32000, "stealth eval failed", wsMu)
+		return nil, true
+	}
+	if opts.evalException != "" {
+		return map[string]any{
+			"result": map[string]any{"type": "undefined"},
+			"exceptionDetails": map[string]any{
+				"text": opts.evalException, "exception": map[string]any{"description": opts.evalException},
+			},
+		}, false
+	}
+	return map[string]any{
+		"result": map[string]any{
+			"type":  "string",
+			"value": "eval-success",
+		},
+	}, false
+}
+
+func handleFakeCDPScreenshot(ws *websocket.Conn, req fakeCDPReq, wsMu *sync.Mutex) (any, bool) {
+	var p struct {
+		Format string `json:"format"`
+	}
+	_ = json.Unmarshal(req.Params, &p)
+	if p.Format == "fail-unmarshal" {
+		wsMu.Lock()
+		_ = ws.WriteMessage(websocket.TextMessage, []byte(`{"id":`+strconv.FormatInt(req.ID, 10)+`,"result":"not-a-json-object"}`))
+		wsMu.Unlock()
+		return nil, true
+	}
+	return map[string]any{"data": "dGVzdC1zY3JlZW5zaG90"}, false
+}
+
+func handleFakeCDPWSLoop(ws *websocket.Conn, opts fakeCDPOptions, fakeSrv *fakeCDPServer, wsMu *sync.Mutex) {
+	defer ws.Close()
+	for {
+		_, data, err := ws.ReadMessage()
+		if err != nil {
+			return
+		}
+		var req fakeCDPReq
+		if err := json.Unmarshal(data, &req); err != nil {
+			continue
+		}
+		if opts.detachOnMethod != "" && req.Method == opts.detachOnMethod {
+			_ = ws.WriteJSON(map[string]any{
+				"method": "Target.detachedFromTarget",
+				"params": map[string]any{"sessionId": "test-session-1"},
+			})
+			return
+		}
+		if opts.withholdMethod != "" && req.Method == opts.withholdMethod {
+			continue
+		}
+		if checkFakeCDPMethodFails(ws, req, opts, wsMu) {
+			continue
+		}
+		result, handled := handleFakeCDPMethod(ws, req, opts, fakeSrv, wsMu)
+		if handled {
+			continue
+		}
+		wsMu.Lock()
+		_ = ws.WriteJSON(map[string]any{"id": req.ID, "result": result})
+		wsMu.Unlock()
+	}
+}
+
 func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Config) {
 	t.Helper()
 
@@ -60,39 +256,7 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Con
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/json/list" {
-			if opts.failList {
-				http.Error(w, "server error", http.StatusInternalServerError)
-				return
-			}
-			if opts.corruptList {
-				w.Write([]byte("not valid json"))
-				return
-			}
-			if opts.emptyTargets {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`[]`))
-				return
-			}
-			host := r.Host
-			targets := []TargetInfo{}
-			if opts.includeChrome || opts.onlyChrome {
-				targets = append(targets, TargetInfo{
-					ID:                   "chrome-target",
-					Type:                 "page",
-					URL:                  "chrome://newtab",
-					WebSocketDebuggerURL: "ws://" + host + "/devtools/page/chrome-target",
-				})
-			}
-			if !opts.onlyChrome {
-				targets = append(targets, TargetInfo{
-					ID:                   "page-target-1",
-					Type:                 "page",
-					URL:                  "https://www.example.com",
-					WebSocketDebuggerURL: "ws://" + host + "/devtools/page/page-target-1",
-				})
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(targets)
+			handleFakeCDPList(w, r, opts)
 			return
 		}
 
@@ -105,203 +269,7 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Con
 			activeWS = ws
 			wsMu.Unlock()
 
-			go func() {
-				defer ws.Close()
-				for {
-					_, data, err := ws.ReadMessage()
-					if err != nil {
-						return
-					}
-
-					var req struct {
-						ID     int64           `json:"id"`
-						Method string          `json:"method"`
-						Params json.RawMessage `json:"params"`
-					}
-					if err := json.Unmarshal(data, &req); err != nil {
-						continue
-					}
-
-					if opts.detachOnMethod != "" && req.Method == opts.detachOnMethod {
-						_ = ws.WriteJSON(map[string]any{
-							"method": "Target.detachedFromTarget",
-							"params": map[string]any{"sessionId": "test-session-1"},
-						})
-						return
-					}
-
-					if opts.withholdMethod != "" && req.Method == opts.withholdMethod {
-						continue
-					}
-
-					if opts.returnCDPError && req.Method == "Input.insertText" {
-						wsMu.Lock()
-						_ = ws.WriteJSON(map[string]any{
-							"id": req.ID,
-							"error": map[string]any{
-								"code":    -32603,
-								"message": "Internal error executing command",
-							},
-						})
-						wsMu.Unlock()
-						continue
-					}
-
-					if opts.failPageEnable && req.Method == "Page.enable" {
-						wsMu.Lock()
-						_ = ws.WriteJSON(map[string]any{
-							"id": req.ID,
-							"error": map[string]any{
-								"code":    -32000,
-								"message": "Page.enable failed",
-							},
-						})
-						wsMu.Unlock()
-						continue
-					}
-
-					if opts.failUserAgent && req.Method == "Emulation.setUserAgentOverride" {
-						wsMu.Lock()
-						_ = ws.WriteJSON(map[string]any{
-							"id": req.ID,
-							"error": map[string]any{
-								"code":    -32000,
-								"message": "setUserAgentOverride failed",
-							},
-						})
-						wsMu.Unlock()
-						continue
-					}
-
-					if opts.failAddScript && req.Method == "Page.addScriptToEvaluateOnNewDocument" {
-						wsMu.Lock()
-						_ = ws.WriteJSON(map[string]any{
-							"id": req.ID,
-							"error": map[string]any{
-								"code":    -32000,
-								"message": "addScriptToEvaluateOnNewDocument failed",
-							},
-						})
-						wsMu.Unlock()
-						continue
-					}
-
-					if req.Method == "Input.dispatchMouseEvent" {
-						var mp struct {
-							Type string `json:"type"`
-						}
-						_ = json.Unmarshal(req.Params, &mp)
-						if opts.failMouseMoved && mp.Type == "mouseMoved" {
-							wsMu.Lock()
-							_ = ws.WriteJSON(map[string]any{
-								"id": req.ID,
-								"error": map[string]any{
-									"code":    -32000,
-									"message": "mouseMoved error",
-								},
-							})
-							wsMu.Unlock()
-							continue
-						}
-						if opts.failMousePress && mp.Type == "mousePressed" {
-							wsMu.Lock()
-							_ = ws.WriteJSON(map[string]any{
-								"id": req.ID,
-								"error": map[string]any{
-									"code":    -32000,
-									"message": "mousePressed error",
-								},
-							})
-							wsMu.Unlock()
-							continue
-						}
-						if opts.failMouseRelease && mp.Type == "mouseReleased" {
-							wsMu.Lock()
-							_ = ws.WriteJSON(map[string]any{
-								"id": req.ID,
-								"error": map[string]any{
-									"code":    -32000,
-									"message": "mouseReleased error",
-								},
-							})
-							wsMu.Unlock()
-							continue
-						}
-					}
-
-					var result any
-
-					switch req.Method {
-					case "Target.attachToTarget":
-						var p struct {
-							TargetID string `json:"targetId"`
-						}
-						_ = json.Unmarshal(req.Params, &p)
-						fakeSrv.attachedMu.Lock()
-						fakeSrv.attachedTarget = p.TargetID
-						fakeSrv.attachedMu.Unlock()
-						result = map[string]any{"sessionId": "test-session-1"}
-					case "Page.enable", "Emulation.setUserAgentOverride":
-						result = map[string]any{}
-					case "Page.addScriptToEvaluateOnNewDocument":
-						result = map[string]any{"identifier": "1"}
-					case "Runtime.evaluate":
-						if opts.failStealthEval {
-							wsMu.Lock()
-							_ = ws.WriteJSON(map[string]any{
-								"id": req.ID,
-								"error": map[string]any{
-									"code":    -32000,
-									"message": "stealth eval failed",
-								},
-							})
-							wsMu.Unlock()
-							continue
-						}
-						if opts.evalException != "" {
-							result = map[string]any{
-								"result": map[string]any{"type": "undefined"},
-								"exceptionDetails": map[string]any{
-									"text": opts.evalException, "exception": map[string]any{"description": opts.evalException},
-								},
-							}
-						} else {
-							result = map[string]any{
-								"result": map[string]any{
-									"type":  "string",
-									"value": "eval-success",
-								},
-							}
-						}
-					case "Input.dispatchMouseEvent", "Input.insertText", "Page.navigate":
-						result = map[string]any{}
-					case "Page.captureScreenshot":
-						var p struct {
-							Format string `json:"format"`
-						}
-						_ = json.Unmarshal(req.Params, &p)
-						if p.Format == "fail-unmarshal" {
-							wsMu.Lock()
-							_ = ws.WriteMessage(websocket.TextMessage, []byte(`{"id":`+strconv.FormatInt(req.ID, 10)+`,"result":"not-a-json-object"}`))
-							wsMu.Unlock()
-							continue
-						}
-						result = map[string]any{
-							"data": "dGVzdC1zY3JlZW5zaG90",
-						}
-					default:
-						result = map[string]any{}
-					}
-
-					resp := map[string]any{
-						"id":     req.ID,
-						"result": result,
-					}
-					wsMu.Lock()
-					_ = ws.WriteJSON(resp)
-					wsMu.Unlock()
-				}
-			}()
+			go handleFakeCDPWSLoop(ws, opts, fakeSrv, &wsMu)
 			return
 		}
 
@@ -440,6 +408,55 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 	}
 }
 
+func runCDPCommand(ctx context.Context, client *CDPClient, action string) error {
+	switch action {
+	case "click":
+		return client.DispatchTrustedClick(ctx, 100, 200)
+	case "type":
+		return client.InsertText(ctx, "hello baddie")
+	case "navigate":
+		return client.Navigate(ctx, "https://www.example.com")
+	case "screenshot":
+		return verifyScreenshot(ctx, client, "png")
+	case "screenshot-empty":
+		return verifyScreenshot(ctx, client, "")
+	case "screenshot-bad-json":
+		_, err := client.CaptureScreenshot(ctx, "fail-unmarshal")
+		return err
+	case "eval":
+		return verifyEval(ctx, client)
+	case "wait-settle-zero":
+		oldDelay := client.cfg.SettleDelay
+		client.cfg.SettleDelay = 0
+		defer func() { client.cfg.SettleDelay = oldDelay }()
+		return client.WaitSettle(ctx)
+	default:
+		return fmt.Errorf("unknown action: %s", action)
+	}
+}
+
+func verifyScreenshot(ctx context.Context, client *CDPClient, format string) error {
+	data, err := client.CaptureScreenshot(ctx, format)
+	if err != nil {
+		return err
+	}
+	if data != "dGVzdC1zY3JlZW5zaG90" {
+		return fmt.Errorf("CaptureScreenshot data = %q, want %q", data, "dGVzdC1zY3JlZW5zaG90")
+	}
+	return nil
+}
+
+func verifyEval(ctx context.Context, client *CDPClient) error {
+	raw, err := client.EvaluateJS(ctx, "window.location.href", true, true)
+	if err != nil {
+		return err
+	}
+	if string(raw) != `"eval-success"` {
+		return fmt.Errorf("EvaluateJS result = %s, want %q", string(raw), `"eval-success"`)
+	}
+	return nil
+}
+
 func TestCDPClient_CommandsTable(t *testing.T) {
 	_, cfg := startFakeCDPServer(t, fakeCDPOptions{})
 	client := NewCDPClient(cfg)
@@ -470,41 +487,7 @@ func TestCDPClient_CommandsTable(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var err error
-			switch tc.action {
-			case "click":
-				err = client.DispatchTrustedClick(ctx, 100, 200)
-			case "type":
-				err = client.InsertText(ctx, "hello baddie")
-			case "navigate":
-				err = client.Navigate(ctx, "https://www.example.com")
-			case "screenshot":
-				var data string
-				data, err = client.CaptureScreenshot(ctx, "png")
-				if err == nil && data != "dGVzdC1zY3JlZW5zaG90" {
-					t.Fatalf("CaptureScreenshot data = %q, want %q", data, "dGVzdC1zY3JlZW5zaG90")
-				}
-			case "screenshot-empty":
-				var data string
-				data, err = client.CaptureScreenshot(ctx, "")
-				if err == nil && data != "dGVzdC1zY3JlZW5zaG90" {
-					t.Fatalf("CaptureScreenshot empty data = %q, want %q", data, "dGVzdC1zY3JlZW5zaG90")
-				}
-			case "screenshot-bad-json":
-				_, err = client.CaptureScreenshot(ctx, "fail-unmarshal")
-			case "eval":
-				var raw json.RawMessage
-				raw, err = client.EvaluateJS(ctx, "window.location.href", true, true)
-				if err == nil && string(raw) != `"eval-success"` {
-					t.Fatalf("EvaluateJS result = %s, want %q", string(raw), `"eval-success"`)
-				}
-			case "wait-settle-zero":
-				oldDelay := client.cfg.SettleDelay
-				client.cfg.SettleDelay = 0
-				err = client.WaitSettle(ctx)
-				client.cfg.SettleDelay = oldDelay
-			}
-
+			err := runCDPCommand(ctx, client, tc.action)
 			if tc.expectErr && err == nil {
 				t.Fatalf("%s expected error, got nil", tc.action)
 			}
@@ -512,6 +495,58 @@ func TestCDPClient_CommandsTable(t *testing.T) {
 				t.Fatalf("%s unexpected error: %v", tc.action, err)
 			}
 		})
+	}
+}
+
+func executeCDPErrorAction(ctx context.Context, client *CDPClient, action string, server *fakeCDPServer) error {
+	switch action {
+	case "eval":
+		_, err := client.EvaluateJS(ctx, "bad()", true, true)
+		return err
+	case "detach":
+		_ = client.EnsureConnection(ctx)
+		return client.InsertText(ctx, "trigger detach")
+	case "settle-cancel":
+		cancelCtx, cancelFn := context.WithCancel(context.Background())
+		cancelFn()
+		client.cfg.SettleDelay = 500 * time.Millisecond
+		client.waitSettleBestEffort(cancelCtx)
+		return client.WaitSettle(cancelCtx)
+	case "send-cdp-fail":
+		server.Close()
+		_, err := client.SendCDP(ctx, "Page.enable", nil)
+		return err
+	case "click-fail-moved", "click-fail-press", "click-fail-release":
+		_ = client.EnsureConnection(ctx)
+		return client.DispatchTrustedClick(ctx, 50, 50)
+	case "cdp-error-resp":
+		_ = client.EnsureConnection(ctx)
+		return client.InsertText(ctx, "should error")
+	case "send-cdp-canceled-ctx":
+		_ = client.EnsureConnection(ctx)
+		cancelCtx, cancelFn := context.WithCancel(context.Background())
+		cancelFn()
+		_, err := client.sendCDPDirect(cancelCtx, client.activeConn, "Test.withheld", nil, "")
+		return err
+	case "send-cdp-write-err":
+		_ = client.EnsureConnection(ctx)
+		client.stateMu.Lock()
+		conn := client.activeConn
+		client.stateMu.Unlock()
+		if conn != nil {
+			_ = conn.UnderlyingConn().Close()
+		}
+		_, err := client.sendCDPDirect(ctx, conn, "Page.enable", nil, "")
+		return err
+	case "send-cdp-late-cancel":
+		_ = client.EnsureConnection(ctx)
+		lateCtx, lateCancel := context.WithCancel(context.Background())
+		defer lateCancel()
+		time.AfterFunc(20*time.Millisecond, lateCancel)
+		_, err := client.sendCDPDirect(lateCtx, client.activeConn, "Test.withheld", nil, "")
+		return err
+	default:
+		return nil
 	}
 }
 
@@ -609,74 +644,9 @@ func TestCDPClient_ErrorAndDisconnectTable(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 
-			switch tc.action {
-			case "eval":
-				_, err := client.EvaluateJS(ctx, "bad()", true, true)
-				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
-					t.Fatalf("EvaluateJS error = %v, want %q", err, tc.errSubstr)
-				}
-			case "detach":
-				_ = client.EnsureConnection(ctx)
-				err := client.InsertText(ctx, "trigger detach")
-				if tc.wantErr && err == nil {
-					t.Fatalf("InsertText expected error on detach, got nil")
-				}
-			case "settle-cancel":
-				cancelCtx, cancelFn := context.WithCancel(context.Background())
-				cancelFn()
-				client.cfg.SettleDelay = 500 * time.Millisecond
-				client.waitSettleBestEffort(cancelCtx)
-				err := client.WaitSettle(cancelCtx)
-				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
-					t.Fatalf("WaitSettle error = %v, want substring %q", err, tc.errSubstr)
-				}
-			case "send-cdp-fail":
-				server.Close()
-				_, err := client.SendCDP(ctx, "Page.enable", nil)
-				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
-					t.Fatalf("SendCDP error = %v, want substring %q", err, tc.errSubstr)
-				}
-			case "click-fail-moved", "click-fail-press", "click-fail-release":
-				_ = client.EnsureConnection(ctx)
-				err := client.DispatchTrustedClick(ctx, 50, 50)
-				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
-					t.Fatalf("DispatchTrustedClick error = %v, want substring %q", err, tc.errSubstr)
-				}
-			case "cdp-error-resp":
-				_ = client.EnsureConnection(ctx)
-				err := client.InsertText(ctx, "should error")
-				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
-					t.Fatalf("InsertText error = %v, want substring %q", err, tc.errSubstr)
-				}
-			case "send-cdp-canceled-ctx":
-				_ = client.EnsureConnection(ctx)
-				cancelCtx, cancelFn := context.WithCancel(context.Background())
-				cancelFn()
-				_, err := client.sendCDPDirect(cancelCtx, client.activeConn, "Test.withheld", nil, "")
-				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
-					t.Fatalf("sendCDPDirect error = %v, want substring %q", err, tc.errSubstr)
-				}
-			case "send-cdp-write-err":
-				_ = client.EnsureConnection(ctx)
-				client.stateMu.Lock()
-				conn := client.activeConn
-				client.stateMu.Unlock()
-				if conn != nil {
-					_ = conn.UnderlyingConn().Close()
-				}
-				_, err := client.sendCDPDirect(ctx, conn, "Page.enable", nil, "")
-				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
-					t.Fatalf("sendCDPDirect error = %v, want substring %q", err, tc.errSubstr)
-				}
-			case "send-cdp-late-cancel":
-				_ = client.EnsureConnection(ctx)
-				lateCtx, lateCancel := context.WithCancel(context.Background())
-				defer lateCancel()
-				time.AfterFunc(20*time.Millisecond, lateCancel)
-				_, err := client.sendCDPDirect(lateCtx, client.activeConn, "Test.withheld", nil, "")
-				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
-					t.Fatalf("sendCDPDirect error = %v, want substring %q", err, tc.errSubstr)
-				}
+			err := executeCDPErrorAction(ctx, client, tc.action, server)
+			if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
+				t.Fatalf("action %s error = %v, want substring %q", tc.action, err, tc.errSubstr)
 			}
 		})
 	}
