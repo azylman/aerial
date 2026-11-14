@@ -16,6 +16,8 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/guard"
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -120,6 +122,9 @@ type TraceProxyConfig struct {
 	Clock          func() time.Time     // nil uses time.Now
 	Transport      http.RoundTripper    // nil uses http.DefaultTransport
 	TracerProvider trace.TracerProvider // nil uses the global provider
+	// AnnouncementOutcomes counts announcements by outcome and via; nil uses
+	// metrics.MCPTraceAnnouncementsTotal.
+	AnnouncementOutcomes *prometheus.CounterVec
 }
 
 // TraceProxy is eri's loopback MCP proxy. Agents' HTTP MCP servers point at it when tracing
@@ -134,6 +139,7 @@ type TraceProxy struct {
 	now           func() time.Time
 	transport     http.RoundTripper
 	tracer        trace.Tracer
+	outcomes      *prometheus.CounterVec
 }
 
 // NewTraceProxy returns a proxy over cfg.
@@ -144,6 +150,10 @@ func NewTraceProxy(cfg TraceProxyConfig) *TraceProxy {
 		announcements: cfg.Announcements,
 		now:           cfg.Clock,
 		transport:     cfg.Transport,
+		outcomes:      cfg.AnnouncementOutcomes,
+	}
+	if p.outcomes == nil {
+		p.outcomes = metrics.MCPTraceAnnouncementsTotal
 	}
 	if p.now == nil {
 		p.now = time.Now
@@ -168,25 +178,46 @@ func (p *TraceProxy) Register(mux *http.ServeMux) {
 	mux.Handle(traceProxyRoutePattern, httpkit.LoopbackOnly(http.HandlerFunc(p.serveProxy)))
 }
 
+// Announcement outcomes and daemon resolutions counted by serveAnnounce.
+const (
+	announceRecorded  = "recorded"
+	announceDropped   = "dropped"
+	announceMalformed = "malformed"
+
+	announceViaDaemon       = "daemon"
+	announceViaConversation = "conversation"
+	announceViaNone         = "none"
+)
+
 // serveAnnounce records an agy hook announcement under the announcing daemon's target. The
 // daemon comes from daemon_id or, when that is empty or unknown, from conversation_id; an
-// announcement no active turn claims is dropped.
+// announcement no active turn claims is dropped. Every outcome is counted, so whether agy
+// passes its env to hook subprocesses (and which ID resolves the daemon) is observable.
 func (p *TraceProxy) serveAnnounce(w http.ResponseWriter, r *http.Request) {
 	var a guard.TraceAnnouncement
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAnnouncementBytes)).Decode(&a); err != nil {
+		p.outcomes.WithLabelValues(announceMalformed, announceViaNone).Inc()
 		http.Error(w, "malformed announcement", http.StatusBadRequest)
 		return
 	}
-	daemonID := a.DaemonID
+	if a.Server == "" || a.Tool == "" {
+		p.outcomes.WithLabelValues(announceMalformed, announceViaNone).Inc()
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	daemonID, via := a.DaemonID, announceViaDaemon
 	target, ok := p.turns.Target(daemonID)
 	if !ok {
 		daemonID, target, ok = p.turns.DaemonByConversation(a.ConversationID)
+		via = announceViaConversation
 	}
-	if !ok || a.Server == "" || a.Tool == "" {
+	if !ok {
+		p.outcomes.WithLabelValues(announceDropped, announceViaNone).Inc()
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	p.announcements.Record(target, a.Server, a.Tool, daemonID, p.now())
+	p.outcomes.WithLabelValues(announceRecorded, via).Inc()
 	w.WriteHeader(http.StatusNoContent)
 }
 
