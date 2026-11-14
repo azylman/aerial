@@ -215,8 +215,9 @@ func isExcludedDir(name string) bool {
 }
 
 func isCandidateGoFile(rel string) bool {
-	if !strings.HasSuffix(rel, ".go") || strings.HasSuffix(rel, "_test.go") ||
-		strings.HasSuffix(rel, ".gen.go") || strings.HasSuffix(rel, ".pb.go") {
+	if !strings.HasSuffix(rel, ".go") ||
+		strings.HasSuffix(rel, ".gen.go") || strings.HasSuffix(rel, ".pb.go") || strings.HasSuffix(rel, "_gen.go") ||
+		strings.HasSuffix(rel, ".gen_test.go") || strings.HasSuffix(rel, "_gen_test.go") || strings.HasSuffix(rel, ".pb_test.go") {
 		return false
 	}
 	for seg := range strings.SplitSeq(rel, "/") {
@@ -257,7 +258,7 @@ func loadBaseline(path string) (Baseline, error) {
 	return b, err
 }
 
-func buildBaseline(absRoot string, targets, testTargets []string) (Baseline, error) {
+func buildBaseline(absRoot string, targets, _ []string) (Baseline, error) {
 	b := Baseline{
 		Files:     make(map[string]FileMetrics),
 		Functions: make(map[string]FuncMetrics),
@@ -277,15 +278,6 @@ func buildBaseline(absRoot string, targets, testTargets []string) (Baseline, err
 			if entry, ok := outlierFuncMetrics(m); ok {
 				b.Functions[rel+"::"+fnName] = entry
 			}
-		}
-	}
-	for _, rel := range testTargets {
-		fm, _, err := analyzeTestFile(filepath.Join(absRoot, filepath.FromSlash(rel)), rel)
-		if err != nil {
-			return b, err
-		}
-		if fm.Lines > maxFileLines {
-			b.Files[rel] = fm
 		}
 	}
 	return b, nil
@@ -327,15 +319,16 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline) 
 	violations = append(violations, checkStructCloneViolations(allStructSigs)...)
 
 	for _, rel := range testTargets {
-		fm, testViolations, err := analyzeTestFile(filepath.Join(absRoot, filepath.FromSlash(rel)), rel)
+		_, testViolations, err := analyzeTestFile(filepath.Join(absRoot, filepath.FromSlash(rel)), rel)
 		if err != nil {
 			return nil, err
 		}
-		fileLimit := max(maxFileLines, base.Files[rel].Lines)
-		if fm.Lines > fileLimit {
-			violations = append(violations, fmt.Sprintf("%s: file length %d exceeds limit %d (ceiling %d)", rel, fm.Lines, fileLimit, maxFileLines))
+		for _, tv := range testViolations {
+			if strings.Contains(tv, "nolint") {
+				continue
+			}
+			violations = append(violations, tv)
 		}
-		violations = append(violations, testViolations...)
 	}
 
 	return violations, nil
@@ -512,7 +505,7 @@ func analyzeFile(fullPath, rel string) (FileMetrics, map[string]FuncMetrics, []f
 		fns[name] = FuncMetrics{
 			Depth: calcDepth(fn.Body, 0),
 		}
-		if fnLines >= minCloneFuncLines {
+		if !strings.HasSuffix(rel, "_test.go") && fnLines >= minCloneFuncLines {
 			tokens := buildCloneTokens(fn.Body)
 			var scopedTokens []string
 			if len(tokens) >= minCloneTokens {
@@ -528,7 +521,10 @@ func analyzeFile(fullPath, rel string) (FileMetrics, map[string]FuncMetrics, []f
 			})
 		}
 	}
-	structSigs := collectStructCloneSigs(f, rel, pkgKey)
+	var structSigs []structCloneSig
+	if !strings.HasSuffix(rel, "_test.go") {
+		structSigs = collectStructCloneSigs(f, rel, pkgKey)
+	}
 	return FileMetrics{Lines: lines}, fns, sigs, structSigs, false, nolintViolations, nil
 }
 

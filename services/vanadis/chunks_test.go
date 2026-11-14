@@ -391,6 +391,16 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 	}
 }
 
+func setTestChunkStatus(s *memoryVanadisStore, bID, chunkID, status string) {
+	list := s.chunks[bID]
+	for i := range list {
+		if list[i].ID == chunkID {
+			list[i].Status = status
+		}
+	}
+	s.chunks[bID] = list
+}
+
 func setupTestStoreWithBuild() (*memoryVanadisStore, string, []string) {
 	s := newMemoryVanadisStore()
 	buildID := "build-test-1"
@@ -503,13 +513,7 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 					s.builds[bID] = b
 				}
 				if tc.chunkStatus != "" {
-					list := s.chunks[bID]
-					for i := range list {
-						if list[i].ID == tc.chunkID {
-							list[i].Status = tc.chunkStatus
-						}
-					}
-					s.chunks[bID] = list
+					setTestChunkStatus(s, bID, tc.chunkID, tc.chunkStatus)
 				}
 				_, err := s.AttachChunkPR(ctx, tc.chunkID, 101, tc.repo)
 				if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {

@@ -165,22 +165,44 @@ func init() {}
 func init() {}
 `
 
+type testRunCase struct {
+	name              string
+	files             map[string]string
+	baselineJSON      string
+	readOnlyBase      bool
+	customArgs        []string
+	targetArgs        []string
+	relTargets        []string
+	wantBaselineFiles map[string]int
+	wantCode          int
+	wantOut           string
+	wantErr           string
+}
+
 func TestRun(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name              string
-		files             map[string]string
-		baselineJSON      string
-		readOnlyBase      bool
-		customArgs        []string
-		targetArgs        []string
-		relTargets        []string
-		wantBaselineFiles map[string]int
-		wantCode          int
-		wantOut           string
-		wantErr           string
-	}{
+	for _, tc := range testRunCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runTestRunCase(t, tc)
+		})
+	}
+}
+
+func testRunCases() []testRunCase {
+	base := testRunBaseCases()
+	clones := testRunCloneCases()
+	targets := testRunTargetCases()
+	all := make([]testRunCase, 0, len(base)+len(clones)+len(targets))
+	all = append(all, base...)
+	all = append(all, clones...)
+	all = append(all, targets...)
+	return all
+}
+
+func testRunBaseCases() []testRunCase {
+	return []testRunCase{
 		{
 			name: "healthy repository passes with missing baseline file",
 			files: map[string]string{
@@ -195,7 +217,7 @@ func TestRun(t *testing.T) {
 				"node_modules/m/m.go": buildLargeGoSource(1600, 160),
 			},
 			wantCode: 0,
-			wantOut:  "Checked 2 Go file(s)",
+			wantOut:  "Checked 3 Go file(s)",
 		},
 		{
 			name: "violations reported when metrics exceed ceilings without baseline",
@@ -310,6 +332,11 @@ func TestRun(t *testing.T) {
 			wantCode: 1,
 			wantErr:  "//nolint:gocyclo is prohibited",
 		},
+	}
+}
+
+func testRunCloneCases() []testRunCase {
+	return []testRunCase{
 		{
 			name: "allowed nolint directives and normal comments pass cleanly",
 			files: map[string]string{
@@ -393,6 +420,11 @@ type SmallB struct {
 			wantCode: 0,
 			wantOut:  "Checked 2 Go file(s)",
 		},
+	}
+}
+
+func testRunTargetCases() []testRunCase {
+	return []testRunCase{
 		{
 			name: "test file hygiene violations reported in check mode",
 			files: map[string]string{
@@ -449,7 +481,7 @@ type SmallB struct {
 			},
 			baselineJSON: `{"files":{"pkg/big_test.go":{"lines":1510}}}`,
 			wantCode:     0,
-			wantOut:      "Checked 1 Go file(s)",
+			wantOut:      "Checked 2 Go file(s)",
 		},
 		{
 			name: "update mode records test file length outliers into baseline",
@@ -476,68 +508,88 @@ type SmallB struct {
 			wantErr:    "code-health: analyze:",
 		},
 	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			dir := t.TempDir()
-			for rel, content := range tc.files {
-				full := filepath.Join(dir, filepath.FromSlash(rel))
-				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-					t.Fatalf("mkdir: %v", err)
-				}
-				if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-					t.Fatalf("write file: %v", err)
-				}
-			}
+func runTestRunCase(t *testing.T, tc testRunCase) {
+	t.Helper()
+	dir := t.TempDir()
+	setupTestFiles(t, dir, tc.files)
+	basePath := setupBaseline(t, dir, tc.readOnlyBase, tc.baselineJSON)
+	args := buildTestArgs(dir, basePath, tc)
 
-			basePath := filepath.Join(dir, ".code-health-baseline.json")
-			if tc.readOnlyBase {
-				basePath = dir
-			} else if tc.baselineJSON != "" {
-				if err := os.WriteFile(basePath, []byte(tc.baselineJSON), 0o644); err != nil {
-					t.Fatalf("write baseline: %v", err)
-				}
-			}
+	var stdout, stderr bytes.Buffer
+	code := run(args, &stdout, &stderr)
+	if code != tc.wantCode {
+		t.Fatalf("run() code = %d, want %d (stdout=%q, stderr=%q)", code, tc.wantCode, stdout.String(), stderr.String())
+	}
+	if tc.wantOut != "" && !strings.Contains(stdout.String(), tc.wantOut) {
+		t.Errorf("stdout %q does not contain %q", stdout.String(), tc.wantOut)
+	}
+	if tc.wantErr != "" && !strings.Contains(stderr.String(), tc.wantErr) {
+		t.Errorf("stderr %q does not contain %q", stderr.String(), tc.wantErr)
+	}
+	verifyBaselineFiles(t, basePath, tc.wantBaselineFiles)
+}
 
-			args := []string{"-root", dir, "-baseline", basePath}
-			args = append(args, tc.customArgs...)
-			for _, targ := range tc.targetArgs {
-				args = append(args, filepath.Join(dir, filepath.FromSlash(targ)))
-			}
-			args = append(args, tc.relTargets...)
-			if len(tc.customArgs) == 2 && tc.customArgs[0] == "-root" {
-				args = tc.customArgs
-			} else if len(tc.customArgs) == 1 && tc.customArgs[0] == "-unknown-flag" {
-				args = tc.customArgs
-			}
+func setupTestFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for rel, content := range files {
+		full := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+	}
+}
 
-			var stdout, stderr bytes.Buffer
-			code := run(args, &stdout, &stderr)
-			if code != tc.wantCode {
-				t.Fatalf("run() code = %d, want %d (stdout=%q, stderr=%q)", code, tc.wantCode, stdout.String(), stderr.String())
-			}
-			if tc.wantOut != "" && !strings.Contains(stdout.String(), tc.wantOut) {
-				t.Errorf("stdout %q does not contain %q", stdout.String(), tc.wantOut)
-			}
-			if tc.wantErr != "" && !strings.Contains(stderr.String(), tc.wantErr) {
-				t.Errorf("stderr %q does not contain %q", stderr.String(), tc.wantErr)
-			}
-			if tc.wantBaselineFiles != nil {
-				base, err := loadBaseline(basePath)
-				if err != nil {
-					t.Fatalf("load written baseline: %v", err)
-				}
-				if len(base.Files) != len(tc.wantBaselineFiles) {
-					t.Errorf("baseline files count = %d, want %d: %v", len(base.Files), len(tc.wantBaselineFiles), base.Files)
-				}
-				for k, wantLines := range tc.wantBaselineFiles {
-					if gotLines := base.Files[k].Lines; gotLines != wantLines {
-						t.Errorf("baseline file %q lines = %d, want %d", k, gotLines, wantLines)
-					}
-				}
-			}
-		})
+func setupBaseline(t *testing.T, dir string, readOnlyBase bool, baselineJSON string) string {
+	t.Helper()
+	basePath := filepath.Join(dir, ".code-health-baseline.json")
+	if readOnlyBase {
+		return dir
+	}
+	if baselineJSON != "" {
+		if err := os.WriteFile(basePath, []byte(baselineJSON), 0o644); err != nil {
+			t.Fatalf("write baseline: %v", err)
+		}
+	}
+	return basePath
+}
+
+func buildTestArgs(dir, basePath string, tc testRunCase) []string {
+	if len(tc.customArgs) == 2 && tc.customArgs[0] == "-root" {
+		return tc.customArgs
+	}
+	if len(tc.customArgs) == 1 && tc.customArgs[0] == "-unknown-flag" {
+		return tc.customArgs
+	}
+	args := []string{"-root", dir, "-baseline", basePath}
+	args = append(args, tc.customArgs...)
+	for _, targ := range tc.targetArgs {
+		args = append(args, filepath.Join(dir, filepath.FromSlash(targ)))
+	}
+	args = append(args, tc.relTargets...)
+	return args
+}
+
+func verifyBaselineFiles(t *testing.T, basePath string, wantBaselineFiles map[string]int) {
+	t.Helper()
+	if wantBaselineFiles == nil {
+		return
+	}
+	base, err := loadBaseline(basePath)
+	if err != nil {
+		t.Fatalf("load written baseline: %v", err)
+	}
+	if len(base.Files) != len(wantBaselineFiles) {
+		t.Errorf("baseline files count = %d, want %d: %v", len(base.Files), len(wantBaselineFiles), base.Files)
+	}
+	for k, wantLines := range wantBaselineFiles {
+		if gotLines := base.Files[k].Lines; gotLines != wantLines {
+			t.Errorf("baseline file %q lines = %d, want %d", k, gotLines, wantLines)
+		}
 	}
 }
 
@@ -571,16 +623,58 @@ func TestExprName(t *testing.T) {
 	}
 }
 
+type analyzeTestCase struct {
+	name           string
+	content        string
+	nonexistent    bool
+	wantViolations []string
+	wantErr        bool
+}
+
+func runAnalyzeTestFileCase(t *testing.T, tc analyzeTestCase) {
+	t.Helper()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "sample_test.go")
+	if !tc.nonexistent {
+		if err := os.WriteFile(filePath, []byte(tc.content), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+	} else {
+		filePath = filepath.Join(dir, "does_not_exist_test.go")
+	}
+
+	fm, violations, err := analyzeTestFile(filePath, "sample_test.go")
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("analyzeTestFile() error = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if !tc.wantErr && fm.Lines < 0 {
+		t.Errorf("expected non-negative lines, got %d", fm.Lines)
+	}
+	if len(tc.wantViolations) > 0 {
+		joined := strings.Join(violations, "\n")
+		for _, wv := range tc.wantViolations {
+			if !strings.Contains(joined, wv) {
+				t.Errorf("violations output does not contain expected snippet %q; got:\n%s", wv, joined)
+			}
+		}
+	} else if len(violations) > 0 && !tc.wantErr {
+		t.Errorf("expected 0 violations, got %d: %v", len(violations), violations)
+	}
+}
+
 func TestAnalyzeTestFile(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name           string
-		content        string
-		nonexistent    bool
-		wantViolations []string
-		wantErr        bool
-	}{
+	for _, tc := range analyzeTestCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runAnalyzeTestFileCase(t, tc)
+		})
+	}
+}
+
+func analyzeTestCases() []analyzeTestCase {
+	return []analyzeTestCase{
 		{
 			name: "clean test file produces no violations",
 			content: `package pkg
@@ -689,36 +783,6 @@ func TestJ_CoverageGaps() {}
 			content: "package pkg\nfunc (",
 			wantErr: true,
 		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			dir := t.TempDir()
-			filePath := filepath.Join(dir, "sample_test.go")
-			if !tc.nonexistent {
-				if err := os.WriteFile(filePath, []byte(tc.content), 0o644); err != nil {
-					t.Fatalf("write file: %v", err)
-				}
-			} else {
-				filePath = filepath.Join(dir, "does_not_exist_test.go")
-			}
-
-			_, violations, err := analyzeTestFile(filePath, "sample_test.go")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("analyzeTestFile() error = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if len(tc.wantViolations) > 0 {
-				joined := strings.Join(violations, "\n")
-				for _, wv := range tc.wantViolations {
-					if !strings.Contains(joined, wv) {
-						t.Errorf("violations output does not contain expected snippet %q; got:\n%s", wv, joined)
-					}
-				}
-			} else if len(violations) > 0 && !tc.wantErr {
-				t.Errorf("expected 0 violations, got %d: %v", len(violations), violations)
-			}
-		})
 	}
 }
 
@@ -966,14 +1030,50 @@ func Control(ch chan int) int {
 	}
 }
 
+type scopedCloneCase struct {
+	name       string
+	src        string
+	wantTokens []string
+}
+
+func runScopedCloneCase(t *testing.T, tc scopedCloneCase) {
+	t.Helper()
+	if tc.src == "" {
+		if got := buildScopedCloneTokens(nil); got != nil {
+			t.Fatalf("buildScopedCloneTokens(nil) = %v, want nil", got)
+		}
+		return
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "sample.go", tc.src, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var body *ast.BlockStmt
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+			body = fn.Body
+			break
+		}
+	}
+	if body == nil {
+		t.Fatal("no function body found")
+	}
+	got := buildScopedCloneTokens(body)
+	if len(got) != len(tc.wantTokens) {
+		t.Fatalf("buildScopedCloneTokens() got %v, want %v", got, tc.wantTokens)
+	}
+	for i := range got {
+		if got[i] != tc.wantTokens[i] {
+			t.Errorf("token[%d] = %q, want %q", i, got[i], tc.wantTokens[i])
+		}
+	}
+}
+
 func TestBuildScopedCloneTokens(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		src        string
-		wantTokens []string
-	}{
+	tests := []scopedCloneCase{
 		{
 			name: "scoped block delimiters with calls and controls",
 			src: `package sample
@@ -996,36 +1096,7 @@ func Scoped() {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.src == "" {
-				if got := buildScopedCloneTokens(nil); got != nil {
-					t.Fatalf("buildScopedCloneTokens(nil) = %v, want nil", got)
-				}
-				return
-			}
-			fset := token.NewFileSet()
-			f, err := parser.ParseFile(fset, "sample.go", tc.src, 0)
-			if err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			var body *ast.BlockStmt
-			for _, decl := range f.Decls {
-				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
-					body = fn.Body
-					break
-				}
-			}
-			if body == nil {
-				t.Fatal("no function body found")
-			}
-			got := buildScopedCloneTokens(body)
-			if len(got) != len(tc.wantTokens) {
-				t.Fatalf("buildScopedCloneTokens() got %v, want %v", got, tc.wantTokens)
-			}
-			for i := range got {
-				if got[i] != tc.wantTokens[i] {
-					t.Errorf("token[%d] = %q, want %q", i, got[i], tc.wantTokens[i])
-				}
-			}
+			runScopedCloneCase(t, tc)
 		})
 	}
 }

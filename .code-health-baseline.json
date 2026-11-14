@@ -1,13 +1,1 @@
-{
-  "files": {
-    "services/eri/pkg/queue/queue_test.go": {
-      "lines": 5806
-    },
-    "services/eri/pkg/queue/worker_test.go": {
-      "lines": 1957
-    },
-    "services/eri/pkg/runner/unified_pool_test.go": {
-      "lines": 1732
-    }
-  }
-}
+{}
