@@ -983,6 +983,7 @@ func TestPostgresVanadisStore_UpdateChunk(t *testing.T) {
 		{"action_mode_with_files", "b1", "c1", UpdateChunkRequest{TargetFiles: []string{"a.go"}}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Mode: "action", Repo: "", Status: "pending"}}, nil, nil, ErrInvalidBuildInput, true},
 		{"action_mode_with_symbols", "b1", "c1", UpdateChunkRequest{TargetSymbols: []string{"A"}}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Mode: "action", Repo: "", Status: "pending"}}, nil, nil, ErrInvalidBuildInput, true},
 		{"transition_pr_to_action_mode_success", "b1", "c1", UpdateChunkRequest{Mode: &modeAction}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Mode: "pr", Repo: "aerial", TargetFiles: []string{"a.go"}, TargetSymbols: []string{"A"}, Status: "pending"}}, nil, nil, nil, false},
+		{"dag_cycle_error", "b1", "c1", UpdateChunkRequest{DependsOn: &[]string{"c2"}}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Mode: "action", Status: "pending"}, {ID: "c2", Mode: "action", DependsOn: []string{"c1"}, Status: "pending"}}, nil, nil, nil, true},
 		{"success", "b1", "c1", UpdateChunkRequest{Repo: "mirrormere", Title: "New Title", Instructions: "New Instr", Effort: "low", TargetFiles: []string{"a.go"}, TargetSymbols: []string{"A"}}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "pending"}}, nil, nil, nil, false},
 	}
 	for _, tc := range tests {
@@ -1083,6 +1084,7 @@ func TestPostgresVanadisStore_AppendChunks(t *testing.T) {
 		{"exec_insert_error", "b1", []CreateChunkInput{{Title: "T", Instructions: "I", Repo: "aerial"}}, nil, nil, "running", nil, nil, nil, errors.New("insert err"), nil, nil, true, 0},
 		{"commit_error", "b1", []CreateChunkInput{{Title: "T", Instructions: "I", Repo: "aerial"}}, nil, nil, "running", nil, nil, nil, nil, errors.New("commit err"), nil, true, 0},
 		{"success_with_id_collision_resolution", "b1", []CreateChunkInput{{Title: "T", Instructions: "I", Repo: "aerial"}}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "b1-chunk-1", ChunkIndex: 0, Repo: "mirrormere"}}, nil, nil, nil, false, 1},
+		{"dag_validation_cycle_error", "b1", []CreateChunkInput{{ID: "c2", Title: "T", Instructions: "I", Repo: "aerial", DependsOn: []string{"c3"}}, {ID: "c3", Title: "T", Instructions: "I", Repo: "aerial", DependsOn: []string{"c2"}}}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Repo: "aerial"}}, nil, nil, nil, true, 0},
 		{"success_append_action_chunk", "b1", []CreateChunkInput{{Mode: "action", Title: "Act", Instructions: "Do Act"}}, nil, nil, "running", nil, nil, nil, nil, nil, nil, false, 1},
 	}
 	for _, tc := range tests {

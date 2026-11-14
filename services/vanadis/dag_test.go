@@ -193,6 +193,71 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 	runDAGTestCases(t, tests)
 }
 
+func TestValidateUpdateAndAppendChunkDAG(t *testing.T) {
+	t.Parallel()
+
+	t.Run("update_chunk_cycle_rejected", func(t *testing.T) {
+		t.Parallel()
+		existing := []VanadisChunk{
+			{ID: "c1", Mode: "action", DependsOn: []string{}},
+			{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
+		}
+		updated := existing[0]
+		updated.DependsOn = []string{"c2"}
+		_, err := validateUpdateChunkDAG(existing, 0, updated)
+		if err == nil || !strings.Contains(err.Error(), "cycle detected") {
+			t.Fatalf("expected cycle error, got %v", err)
+		}
+	})
+
+	t.Run("update_chunk_overlapping_files_rejected", func(t *testing.T) {
+		t.Parallel()
+		existing := []VanadisChunk{
+			{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+			{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"b.go"}},
+		}
+		updated := existing[1]
+		updated.TargetFiles = []string{"a.go"}
+		_, err := validateUpdateChunkDAG(existing, 1, updated)
+		if err == nil || !strings.Contains(err.Error(), "overlapping target_files") {
+			t.Fatalf("expected overlapping target_files error, got %v", err)
+		}
+	})
+
+	t.Run("append_chunks_cycle_rejected", func(t *testing.T) {
+		t.Parallel()
+		existing := []VanadisChunk{
+			{ID: "c1", Mode: "action", DependsOn: []string{}},
+		}
+		appended := []VanadisChunk{
+			{ID: "c2", Mode: "action", DependsOn: []string{"c3"}},
+			{ID: "c3", Mode: "action", DependsOn: []string{"c2"}},
+		}
+		_, err := validateAppendChunksDAG(existing, appended)
+		if err == nil || !strings.Contains(err.Error(), "cycle detected") {
+			t.Fatalf("expected cycle error, got %v", err)
+		}
+	})
+
+	t.Run("append_chunks_valid_sequential_default", func(t *testing.T) {
+		t.Parallel()
+		existing := []VanadisChunk{
+			{ID: "c1", Mode: "action", DependsOn: []string{}},
+		}
+		appended := []VanadisChunk{
+			{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
+			{ID: "c3", Mode: "action", DependsOn: []string{"c2"}},
+		}
+		norm, err := validateAppendChunksDAG(existing, appended)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(norm) != 2 || len(norm[0].DependsOn) != 1 || norm[0].DependsOn[0] != "c1" {
+			t.Fatalf("unexpected normalized appended chunks: %+v", norm)
+		}
+	})
+}
+
 func TestMarshalJSONBOrEmpty(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

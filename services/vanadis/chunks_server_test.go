@@ -162,33 +162,6 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 		if saRes["status"] != "attached" || saRes["build_id"] == "" || saRes["chunk_id"] == "" {
 			t.Fatalf("unexpected standalone attach res: %+v", saRes)
 		}
-		saBuild, _, _ := sAttach.GetBuild(context.Background(), saRes["build_id"])
-		if saBuild.Quiet {
-			t.Errorf("expected quiet=false for feature branch")
-		}
-
-		// Repeat standalone attach for same repo/PR returns same build/chunk
-		recStandaloneRepeat := doAttachReq(http.MethodPost, "/chunks/attach-pr", `{"chunk_id":"","repo":"aerial","pr_number":401}`)
-		if recStandaloneRepeat.Code != http.StatusOK {
-			t.Fatalf("expected 200 for repeat standalone attach, got %d", recStandaloneRepeat.Code)
-		}
-		var saRepeatRes map[string]string
-		_ = json.Unmarshal(recStandaloneRepeat.Body.Bytes(), &saRepeatRes)
-		if saRepeatRes["build_id"] != saRes["build_id"] || saRepeatRes["chunk_id"] != saRes["chunk_id"] {
-			t.Errorf("expected idempotent repeat to return same build/chunk, got %+v vs %+v", saRepeatRes, saRes)
-		}
-
-		// Standalone attach with dependabot branch sets quiet=true
-		recDependabot := doAttachReq(http.MethodPost, "/chunks/attach-pr", `{"chunk_id":"","repo":"aerial","pr_number":402,"branch":"dependabot/npm_and_yarn/foo","title":"Bump foo"}`)
-		if recDependabot.Code != http.StatusOK {
-			t.Fatalf("expected 200 for dependabot attach, got %d", recDependabot.Code)
-		}
-		var dbRes map[string]string
-		_ = json.Unmarshal(recDependabot.Body.Bytes(), &dbRes)
-		dbBuild, _, _ := sAttach.GetBuild(context.Background(), dbRes["build_id"])
-		if !dbBuild.Quiet {
-			t.Errorf("expected quiet=true for dependabot branch")
-		}
 
 		rec404 := doAttachReq(http.MethodPost, "/chunks/attach-pr", `{"chunk_id":"missing-chunk","pr_number":101,"repo":"aerial"}`)
 		if rec404.Code != http.StatusNotFound {

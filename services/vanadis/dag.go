@@ -250,3 +250,34 @@ func marshalJSONBOrEmpty(v any) []byte {
 	}
 	return b
 }
+
+// validateUpdateChunkDAG substitutes updated into existing, validates the entire DAG, and returns the normalized depends_on.
+func validateUpdateChunkDAG(existing []VanadisChunk, updatedIdx int, updated VanadisChunk) ([]string, error) {
+	candidateChunks := make([]VanadisChunk, len(existing))
+	copy(candidateChunks, existing)
+	candidateChunks[updatedIdx] = updated
+
+	validated, err := normalizeAndValidateBuildDAG(candidateChunks)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
+	}
+	return validated[updatedIdx].DependsOn, nil
+}
+
+// validateAppendChunksDAG combines existing chunks with appended chunks, validates the DAG, and returns the appended chunks with normalized depends_on.
+func validateAppendChunksDAG(existing []VanadisChunk, appended []VanadisChunk) ([]VanadisChunk, error) {
+	allChunks := make([]VanadisChunk, 0, len(existing)+len(appended))
+	allChunks = append(allChunks, existing...)
+	allChunks = append(allChunks, appended...)
+
+	validatedAll, err := normalizeAndValidateBuildDAG(allChunks)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
+	}
+	out := make([]VanadisChunk, len(appended))
+	copy(out, appended)
+	for i := range out {
+		out[i].DependsOn = validatedAll[len(existing)+i].DependsOn
+	}
+	return out, nil
+}

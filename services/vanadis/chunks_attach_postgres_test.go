@@ -207,11 +207,11 @@ func TestVanadisStore_AttachChunkPR_ExistingSuccess_MockDB(t *testing.T) {
 
 func mockTxWithExecErr(matchSQL, errMsg string) *PostgresVanadisStore {
 	return newMockStore(mockDB{
-		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
-			return &mockRow{err: pgx.ErrNoRows}
-		},
 		beginFn: func(context.Context) (pgx.Tx, error) {
 			return &mockTx{
+				queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+					return &mockRow{err: pgx.ErrNoRows}
+				},
 				execFn: func(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
 					if strings.Contains(sql, matchSQL) {
 						return pgconn.CommandTag{}, errors.New(errMsg)
@@ -235,13 +235,17 @@ func TestVanadisStore_AttachChunkPR_Standalone_MockDB(t *testing.T) {
 
 	// Standalone attach: existing PR lookup matches
 	sExistingMatch := newMockStore(mockDB{
-		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
-			return &genericMockRow{scanFn: func(dest ...any) error {
-				*dest[0].(*string) = "b-existing"
-				*dest[1].(*string) = "c-existing"
-				*dest[2].(*string) = "thread-existing"
-				return nil
-			}}
+		beginFn: func(context.Context) (pgx.Tx, error) {
+			return &mockTx{
+				queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+					return &genericMockRow{scanFn: func(dest ...any) error {
+						*dest[0].(*string) = "b-existing"
+						*dest[1].(*string) = "c-existing"
+						*dest[2].(*string) = "thread-existing"
+						return nil
+					}}
+				},
+			}, nil
 		},
 	})
 	bIDMatch, cIDMatch, thMatch, err := sExistingMatch.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"})
@@ -251,8 +255,12 @@ func TestVanadisStore_AttachChunkPR_Standalone_MockDB(t *testing.T) {
 
 	// Standalone attach: existing PR lookup error (not ErrNoRows)
 	sExistingErr := newMockStore(mockDB{
-		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
-			return &mockRow{err: errors.New("lookup err")}
+		beginFn: func(context.Context) (pgx.Tx, error) {
+			return &mockTx{
+				queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+					return &mockRow{err: errors.New("lookup err")}
+				},
+			}, nil
 		},
 	})
 	if _, _, _, err := sExistingErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
@@ -261,15 +269,29 @@ func TestVanadisStore_AttachChunkPR_Standalone_MockDB(t *testing.T) {
 
 	// Standalone attach: begin tx error
 	sStandaloneBeginErr := newMockStore(mockDB{
-		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
-			return &mockRow{err: pgx.ErrNoRows}
-		},
 		beginFn: func(context.Context) (pgx.Tx, error) {
 			return nil, errors.New("begin standalone tx err")
 		},
 	})
 	if _, _, _, err := sStandaloneBeginErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
 		t.Error("expected error on begin tx failure in standalone attach")
+	}
+
+	// Standalone attach: advisory lock error
+	sLockErr := newMockStore(mockDB{
+		beginFn: func(context.Context) (pgx.Tx, error) {
+			return &mockTx{
+				execFn: func(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+					if strings.Contains(sql, "pg_advisory_xact_lock") {
+						return pgconn.CommandTag{}, errors.New("advisory lock boom")
+					}
+					return pgconn.NewCommandTag("INSERT 0 1"), nil
+				},
+			}, nil
+		},
+	})
+	if _, _, _, err := sLockErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
+		t.Error("expected error on advisory lock failure")
 	}
 
 	// Standalone attach: insert build error
@@ -286,11 +308,13 @@ func TestVanadisStore_AttachChunkPR_Standalone_MockDB(t *testing.T) {
 
 	// Standalone attach: commit error
 	sStandaloneCommitErr := newMockStore(mockDB{
-		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
-			return &mockRow{err: pgx.ErrNoRows}
-		},
 		beginFn: func(context.Context) (pgx.Tx, error) {
-			return &mockTx{commitErr: errors.New("commit standalone err")}, nil
+			return &mockTx{
+				queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+					return &mockRow{err: pgx.ErrNoRows}
+				},
+				commitErr: errors.New("commit standalone err"),
+			}, nil
 		},
 	})
 	if _, _, _, err := sStandaloneCommitErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
@@ -299,11 +323,12 @@ func TestVanadisStore_AttachChunkPR_Standalone_MockDB(t *testing.T) {
 
 	// Standalone attach: success
 	sStandaloneSuccess := newMockStore(mockDB{
-		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
-			return &mockRow{err: pgx.ErrNoRows}
-		},
 		beginFn: func(context.Context) (pgx.Tx, error) {
-			return &mockTx{}, nil
+			return &mockTx{
+				queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+					return &mockRow{err: pgx.ErrNoRows}
+				},
+			}, nil
 		},
 	})
 	bIDNew, cIDNew, thNew, err := sStandaloneSuccess.AttachChunkPR(ctx, AttachChunkPRRequest{

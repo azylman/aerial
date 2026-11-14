@@ -375,9 +375,13 @@ func (m *memoryVanadisStore) attachStandalonePR(req AttachChunkPRRequest) (strin
 		return "", "", "", errors.New("repo is required for standalone attach")
 	}
 	for bID, list := range m.chunks {
+		b := m.builds[bID]
+		if b.Status == "cancelled" || b.Status == "completed" {
+			continue
+		}
 		for _, c := range list {
-			if reposMatch(c.Repo, repo) && c.PRNumber == req.PRNumber {
-				return bID, c.ID, m.builds[bID].ThreadID, nil
+			if c.Status != "cancelled" && reposMatch(c.Repo, repo) && c.PRNumber == req.PRNumber {
+				return bID, c.ID, b.ThreadID, nil
 			}
 		}
 	}
@@ -793,6 +797,11 @@ func (m *memoryVanadisStore) UpdateChunk(_ context.Context, buildID, chunkRef st
 	if err := applyChunkUpdates(&c, req, normEffort); err != nil {
 		return nil, err
 	}
+	normDeps, err := validateUpdateChunkDAG(list, idx, c)
+	if err != nil {
+		return nil, err
+	}
+	c.DependsOn = normDeps
 	c.UpdatedAt = time.Now().UTC()
 	list[idx] = c
 	m.chunks[buildID] = list
@@ -820,23 +829,31 @@ func (m *memoryVanadisStore) AppendChunks(_ context.Context, buildID string, inp
 		usedIDs[c.ID] = true
 	}
 	nextIdx := 0
+	var prevChunkID string
 	if len(existing) > 0 {
 		last := existing[len(existing)-1]
 		nextIdx = last.ChunkIndex + 1
+		prevChunkID = last.ID
 	}
 	now := time.Now().UTC()
 	appended := make([]VanadisChunk, 0, len(inputs))
 	for _, in := range inputs {
-		newChunk, err := buildAppendedChunk(buildID, in, nextIdx, usedIDs, now)
+		newChunk, err := buildAppendedChunk(buildID, in, nextIdx, prevChunkID, usedIDs, now)
 		if err != nil {
 			return nil, err
 		}
 		appended = append(appended, newChunk)
-		existing = append(existing, newChunk)
+		prevChunkID = newChunk.ID
 		nextIdx++
 	}
+
+	normAppended, err := validateAppendChunksDAG(existing, appended)
+	if err != nil {
+		return nil, err
+	}
+	existing = append(existing, normAppended...)
 	m.chunks[buildID] = existing
-	return appended, nil
+	return normAppended, nil
 }
 
 func (m *memoryVanadisStore) RemoveChunk(_ context.Context, buildID, chunkRef string) (*VanadisChunk, []VanadisChunk, error) {
