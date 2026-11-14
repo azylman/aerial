@@ -177,6 +177,8 @@ ENV RUSTUP_HOME="/usr/local/rustup" \
 
 # Install official Antigravity CLI binary
 RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
+# Disable agy background self-updater (https://www.antigravity.google/docs/cli/troubleshooting); agy versions must only change on image rebuild.
+ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
 
 # Install Stripe Link CLI (@stripe/link-cli v0.29.0) standalone binary
 RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%401.0.0/link-cli-linux-x64 -o /usr/local/bin/link-cli && \
