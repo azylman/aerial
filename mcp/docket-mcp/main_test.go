@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +19,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/ollama"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type memoryTaskStore struct {
@@ -492,77 +493,181 @@ func TestServer_RESTUpstreamErrorsTable(t *testing.T) {
 	}
 }
 
-func TestServer_MCPMethodsTable(t *testing.T) {
+// postMCP POSTs one raw JSON-RPC body to the docket-mcp handler at path.
+func postMCP(t *testing.T, handler http.Handler, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	return w
+}
+
+// toolCallResponse is a tools/call JSON-RPC response: a tool result or a protocol error.
+type toolCallResponse struct {
+	Result struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	} `json:"result"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// callTool sends tools/call for name with raw JSON args and decodes the response.
+func callTool(t *testing.T, handler http.Handler, name, args string) toolCallResponse {
+	t.Helper()
+	body := `{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":` + strconv.Quote(name) + `,"arguments":` + args + `}}`
+	w := postMCP(t, handler, "/mcp", body)
+	var resp toolCallResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unexpected response %q (status %d, err %v)", w.Body.String(), w.Code, err)
+	}
+	return resp
+}
+
+func TestServerInstructions(t *testing.T) {
 	t.Parallel()
 
 	_, mux, _ := setupTestEnvironment(t)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
 
 	tests := []struct {
-		name       string
-		request    string
-		wantSubstr string
-		wantError  bool
+		name           string
+		path           string
+		wantServerName string
+		wantTool       string
 	}{
-		{
-			name:       "invalid json returns parse error",
-			request:    `{invalid_json`,
-			wantSubstr: "Parse error",
-			wantError:  true,
-		},
-		{
-			name:       "unknown method returns method not found",
-			request:    `{"jsonrpc":"2.0","id":1,"method":"foo/bar"}`,
-			wantSubstr: "Method not found",
-			wantError:  true,
-		},
-		{
-			name:       "initialize returns server info",
-			request:    `{"jsonrpc":"2.0","id":1,"method":"initialize"}`,
-			wantSubstr: "docket-mcp",
-			wantError:  false,
-		},
-		{
-			name:       "notifications initialized returns no content",
-			request:    `{"jsonrpc":"2.0","method":"notifications/initialized"}`,
-			wantSubstr: "",
-			wantError:  false,
-		},
-		{
-			name:       "ping returns success",
-			request:    `{"jsonrpc":"2.0","id":2,"method":"ping"}`,
-			wantSubstr: `"result":{}`,
-			wantError:  false,
-		},
-		{
-			name:       "tools list returns 9 tools",
-			request:    `{"jsonrpc":"2.0","id":3,"method":"tools/list"}`,
-			wantSubstr: `"ready"`,
-			wantError:  false,
-		},
-		{
-			name:       "tools call with invalid params",
-			request:    `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":"invalid"}`,
-			wantSubstr: "Invalid params",
-			wantError:  true,
-		},
+		{name: "initialize advertises server identity and task workflow instructions", path: "/mcp", wantServerName: "docket-mcp", wantTool: "blocked_by"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(tc.request))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, req)
-
-			body := w.Body.String()
-			if tc.wantSubstr != "" && !strings.Contains(body, tc.wantSubstr) {
-				t.Fatalf("body = %q, want substring %q", body, tc.wantSubstr)
+			client := mcp.NewClient(&mcp.Implementation{Name: "instructions-test", Version: "1.0.0"}, nil)
+			session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+				Endpoint:             ts.URL + tc.path,
+				HTTPClient:           ts.Client(),
+				DisableStandaloneSSE: true,
+			}, nil)
+			if err != nil {
+				t.Fatalf("Connect: %v", err)
 			}
-			if tc.wantError && !strings.Contains(body, `"error"`) {
-				t.Fatalf("expected error in response, got %s", body)
+			defer func() { _ = session.Close() }()
+
+			if got := session.InitializeResult().ServerInfo.Name; got != tc.wantServerName {
+				t.Errorf("server name = %q, want %q", got, tc.wantServerName)
+			}
+			got := session.InitializeResult().Instructions
+			if got == "" || len(got) > 1024 {
+				t.Fatalf("instructions length = %d, want 1..1024", len(got))
+			}
+			if !strings.Contains(got, tc.wantTool) {
+				t.Errorf("instructions missing %q: %q", tc.wantTool, got)
 			}
 		})
+	}
+}
+
+func TestServer_ToolsListSchemaTable(t *testing.T) {
+	t.Parallel()
+
+	_, mux, _ := setupTestEnvironment(t)
+	w := postMCP(t, mux, "/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	var resp struct {
+		Result struct {
+			Tools []struct {
+				Name        string `json:"name"`
+				InputSchema struct {
+					Properties map[string]struct {
+						Type    string   `json:"type"`
+						Enum    []string `json:"enum"`
+						Default any      `json:"default"`
+						Items   struct {
+							Type string `json:"type"`
+						} `json:"items"`
+					} `json:"properties"`
+					Required []string `json:"required"`
+				} `json:"inputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode tools/list %q: %v", w.Body.String(), err)
+	}
+	type schemaShape struct {
+		props    map[string]string
+		required []string
+	}
+	got := make(map[string]schemaShape)
+	enums := make(map[string]string)
+	defaults := make(map[string]any)
+	for _, tool := range resp.Result.Tools {
+		shape := schemaShape{props: make(map[string]string), required: tool.InputSchema.Required}
+		for name, prop := range tool.InputSchema.Properties {
+			shape.props[name] = prop.Type
+			if prop.Items.Type != "" {
+				shape.props[name] += "<" + prop.Items.Type + ">"
+			}
+			if len(prop.Enum) > 0 {
+				enums[tool.Name+"."+name] = strings.Join(prop.Enum, ",")
+			}
+			if prop.Default != nil {
+				defaults[tool.Name+"."+name] = prop.Default
+			}
+		}
+		got[tool.Name] = shape
+	}
+
+	tests := []struct {
+		tool         string
+		wantProps    map[string]string
+		wantRequired []string
+	}{
+		{tool: "ready", wantProps: map[string]string{"parent_id": "integer"}},
+		{tool: "list", wantProps: map[string]string{"status": "string", "parent_id": "integer"}},
+		{tool: "search", wantProps: map[string]string{"query": "string", "status": "string", "limit": "integer"}, wantRequired: []string{"query"}},
+		{tool: "show", wantProps: map[string]string{"id": "integer"}, wantRequired: []string{"id"}},
+		{tool: "create", wantProps: map[string]string{"title": "string", "description": "string", "parent_id": "integer", "blocks": "array<integer>", "blocked_by": "array<integer>", "related": "array<integer>"}, wantRequired: []string{"title"}},
+		{tool: "update", wantProps: map[string]string{"id": "integer", "title": "string", "description": "string"}, wantRequired: []string{"id"}},
+		{tool: "comment", wantProps: map[string]string{"id": "integer", "text": "string"}, wantRequired: []string{"id", "text"}},
+		{tool: "link", wantProps: map[string]string{"id": "integer", "target_id": "integer", "type": "string", "remove": "boolean"}, wantRequired: []string{"id", "target_id", "type"}},
+		{tool: "close", wantProps: map[string]string{"id": "integer", "resolution": "string", "reason": "string"}, wantRequired: []string{"id", "resolution", "reason"}},
+	}
+	if len(got) != len(tests) {
+		t.Fatalf("tools/list returned %d tools, want %d", len(got), len(tests))
+	}
+	for _, tc := range tests {
+		t.Run(tc.tool, func(t *testing.T) {
+			t.Parallel()
+			shape, ok := got[tc.tool]
+			if !ok {
+				t.Fatalf("tool %q missing from tools/list", tc.tool)
+			}
+			if !maps.Equal(shape.props, tc.wantProps) {
+				t.Errorf("properties = %v, want %v", shape.props, tc.wantProps)
+			}
+			gotRequired := slices.Sorted(slices.Values(shape.required))
+			if !slices.Equal(gotRequired, slices.Sorted(slices.Values(tc.wantRequired))) {
+				t.Errorf("required = %v, want %v", shape.required, tc.wantRequired)
+			}
+		})
+	}
+
+	wantEnums := map[string]string{
+		"list.status":      "open,completed,wont_do,all",
+		"search.status":    "open,completed,wont_do,all",
+		"link.type":        "parent,blocks,related",
+		"close.resolution": "completed,wont_do",
+	}
+	if !maps.Equal(enums, wantEnums) {
+		t.Errorf("enums = %v, want %v", enums, wantEnums)
+	}
+	wantDefaults := map[string]any{"list.status": "open", "search.status": "open", "search.limit": float64(10), "link.remove": false}
+	if !maps.Equal(defaults, wantDefaults) {
+		t.Errorf("defaults = %v, want %v", defaults, wantDefaults)
 	}
 }
 
@@ -626,7 +731,6 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		{name: "link self-link rejected", toolName: "link", args: `{"id":1,"target_id":1,"type":"parent"}`, wantSubstr: "self-link cycle", wantError: true},
 		{name: "link cycle rejected", toolName: "link", args: `{"id":1,"target_id":2,"type":"parent"}`, wantSubstr: "cycle detected: task 1 is already an ancestor of task 2", wantError: true},
 		{name: "link remove relation", toolName: "link", args: `{"id":1,"target_id":2,"type":"parent","remove":true}`, wantSubstr: "removed"},
-		{name: "link invalid relation type", toolName: "link", args: `{"id":1,"target_id":2,"type":"invalid"}`, wantSubstr: "invalid relation type", wantError: true},
 		{name: "close invalid id error", toolName: "close", args: `{"id":0,"resolution":"completed","reason":"done"}`, wantSubstr: "must be a positive integer", wantError: true},
 		{name: "close completed rejected with open subtask", toolName: "close", args: `{"id":1,"resolution":"completed","reason":"done"}`, wantSubstr: "open subtasks: [2]", wantError: true},
 		{name: "close completed rejected with open blocker", toolName: "close", args: `{"id":76,"resolution":"completed","reason":"done"}`, wantSubstr: "open blockers: [75]", wantError: true},
@@ -637,37 +741,18 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		{name: "close task in another project not found", toolName: "close", args: `{"id":60,"resolution":"completed","reason":"done"}`, wantSubstr: "task 60 not found in graph", wantError: true},
 		{name: "close task unknown to vikunja not found", toolName: "close", args: `{"id":999,"resolution":"wont_do","reason":"done"}`, wantSubstr: "task 999 not found in graph", wantError: true},
 		{name: "close fetch failure", toolName: "close", args: `{"id":888,"resolution":"completed","reason":"done"}`, wantSubstr: "failed to fetch task 888", wantError: true},
-		{name: "close invalid resolution error", toolName: "close", args: `{"id":1,"resolution":"invalid","reason":"why"}`, wantSubstr: "invalid resolution", wantError: true},
 		{name: "close empty reason error", toolName: "close", args: `{"id":1,"resolution":"completed","reason":""}`, wantSubstr: "cannot be empty", wantError: true},
-		{name: "ready invalid arguments", toolName: "ready", args: `{"parent_id":"not-an-integer"}`, wantSubstr: "invalid arguments", wantError: true},
-		{name: "list invalid arguments", toolName: "list", args: `{"parent_id":"not-an-integer"}`, wantSubstr: "invalid arguments", wantError: true},
-		{name: "unknown tool returns error", toolName: "unknown_tool", args: `{}`, wantSubstr: "Unknown tool: unknown_tool", wantError: true},
+		{name: "list status defaults to open", toolName: "list", args: `{}`, wantSubstr: `[{"id":1,"title":"Top Task 1","status":"open","blocks":[3]},{"id":2,`},
+		{name: "legacy docket_ prefix resolves tool", toolName: "docket_comment", args: `{"id":1,"text":"via alias"}`, wantSubstr: "comment added to task 1"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			_, mux, state := setupTestEnvironment(t)
-			payload := map[string]any{
-				"jsonrpc": "2.0",
-				"id":      100,
-				"method":  "tools/call",
-				"params": map[string]any{
-					"name":      tc.toolName,
-					"arguments": json.RawMessage(tc.args),
-				},
-			}
-			reqBytes, _ := json.Marshal(payload)
-			req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(reqBytes))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, req)
-
-			var resp struct {
-				Result ToolCallResult `json:"result"`
-			}
-			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || len(resp.Result.Content) != 1 {
-				t.Fatalf("unexpected response %q (err %v)", w.Body.String(), err)
+			resp := callTool(t, mux, tc.toolName, tc.args)
+			if resp.Error != nil || len(resp.Result.Content) != 1 {
+				t.Fatalf("unexpected response %+v", resp)
 			}
 			text := resp.Result.Content[0].Text
 			if !strings.Contains(text, tc.wantSubstr) {
@@ -705,7 +790,7 @@ func TestServer_ErrorBranchesTable(t *testing.T) {
 	store.searchErr = errors.New("search db failed")
 	store.fetchErr = errors.New("fetch db failed")
 
-	srv := NewServer(cfg, vkClient, store, nil)
+	mux := NewHTTPMux(NewServer(cfg, vkClient, store, nil))
 
 	tests := []struct {
 		name     string
@@ -726,9 +811,9 @@ func TestServer_ErrorBranchesTable(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			res, isErr := srv.executeTool(context.Background(), tc.toolName, json.RawMessage(tc.args))
-			if !isErr {
-				t.Fatalf("%s: expected isErr=true, got result %q", tc.name, res)
+			resp := callTool(t, mux, tc.toolName, tc.args)
+			if resp.Error != nil || !resp.Result.IsError {
+				t.Fatalf("%s: expected isError tool result, got %+v", tc.name, resp)
 			}
 		})
 	}
@@ -946,11 +1031,7 @@ func TestServer_UpdateTaskDescription(t *testing.T) {
 
 	srv, _, state := setupTestEnvironment(t)
 	desc := "Updated description text"
-	payload, _ := json.Marshal(map[string]any{
-		"id":          1,
-		"description": desc,
-	})
-	res, isErr := srv.toolUpdate(context.Background(), payload)
+	res, isErr := srv.toolUpdate(context.Background(), UpdateArgs{ID: 1, Description: &desc})
 	if isErr {
 		t.Fatalf("unexpected error: %s", res)
 	}
