@@ -90,7 +90,8 @@ func (r *mockRows) Scan(dest ...any) error {
 			return nil
 		}
 		if len(dest) == 25 {
-			var rawCIChecks, rawRolloutState []byte
+			rawCIChecks := []byte(`{"lint":"passed"}`)
+			rawRolloutState := []byte(`{"expected_jobs":["eri"]}`)
 			*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*[]string), *dest[8].(*[]string), *dest[9].(*string), *dest[10].(*[]string), *dest[11].(*string), *dest[12].(*int), *dest[13].(*int), *dest[14].(*[]string), *dest[15].(*int), *dest[16].(*[]byte), *dest[17].(*[]byte), *dest[18].(*string), *dest[19].(*string), *dest[20].(*string), *dest[21].(*sql.NullTime), *dest[22].(*sql.NullTime), *dest[23].(*time.Time), *dest[24].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
 			return nil
 		}
@@ -253,6 +254,26 @@ func (m *memoryVanadisStore) UpdateChunkStatus(_ context.Context, chunkID, statu
 	return ErrChunkNotFound
 }
 
+func (m *memoryVanadisStore) SetChunkAwakeables(_ context.Context, chunkID, mergeAwakeableID, deployAwakeableID string) error {
+	if m.updateChunkErr != nil {
+		return m.updateChunkErr
+	}
+	now := time.Now().UTC()
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].ID != chunkID {
+				continue
+			}
+			list[i].MergeAwakeableID = mergeAwakeableID
+			list[i].DeployAwakeableID = deployAwakeableID
+			list[i].UpdatedAt = now
+			m.chunks[bID] = list
+			return nil
+		}
+	}
+	return ErrChunkNotFound
+}
+
 func (m *memoryVanadisStore) setBuild(id string, fn func(*VanadisBuild)) error {
 	if m.updateBuildErr != nil {
 		return m.updateBuildErr
@@ -300,6 +321,9 @@ func reposMatch(a, b string) bool {
 }
 
 func (m *memoryVanadisStore) GetChunkByPR(_ context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
 	repo = normalizeRepo(repo)
 	if repo == "" || prNumber <= 0 {
 		return &VanadisChunkPRLookup{Matched: false}, nil
@@ -331,6 +355,9 @@ func (m *memoryVanadisStore) GetChunkByPR(_ context.Context, repo string, prNumb
 }
 
 func (m *memoryVanadisStore) AttachChunkPR(_ context.Context, req AttachChunkPRRequest) (string, string, string, error) {
+	if m.updateChunkErr != nil {
+		return "", "", "", m.updateChunkErr
+	}
 	chunkID := strings.TrimSpace(req.ChunkID)
 	if req.PRNumber <= 0 {
 		return "", "", "", errors.New("chunk id or repo, and valid pr number are required")
@@ -489,6 +516,9 @@ func (m *memoryVanadisStore) activateNextPendingChunk(buildID string, nextIdx in
 }
 
 func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
+	if m.updateChunkErr != nil {
+		return nil, m.updateChunkErr
+	}
 	repo = normalizeRepo(repo)
 	if repo == "" || prNumber <= 0 {
 		return &VanadisAdvancementResult{Matched: false}, nil
@@ -575,6 +605,9 @@ func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, pr
 }
 
 func (m *memoryVanadisStore) FailChunkByPR(_ context.Context, repo string, prNumber int) (string, string, bool, error) {
+	if m.updateChunkErr != nil {
+		return "", "", false, m.updateChunkErr
+	}
 	repo = normalizeRepo(repo)
 	if repo == "" || prNumber <= 0 {
 		return "", "", false, nil

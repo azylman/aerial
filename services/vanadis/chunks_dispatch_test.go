@@ -20,6 +20,7 @@ type memoryMsg struct {
 	subject      string
 	numDelivered uint64
 	termed       bool
+	acked        bool
 	nakDelay     time.Duration
 }
 
@@ -32,7 +33,12 @@ func (m *memoryMsg) NumDelivered() uint64 {
 	}
 	return 1
 }
-func (m *memoryMsg) Ack() error                         { return nil }
+
+func (m *memoryMsg) Ack() error {
+	m.acked = true
+	return nil
+}
+
 func (m *memoryMsg) NakWithDelay(d time.Duration) error { m.nakDelay = d; return nil }
 func (m *memoryMsg) Term() error                        { m.termed = true; return nil }
 func (m *memoryMsg) Snooze(_ time.Duration) error       { return nil }
@@ -477,7 +483,8 @@ func TestVanadisServer_MemoryBusIntegration(t *testing.T) {
 		t.Fatalf("EnsureCoreStreams: %v", err)
 	}
 
-	wrapped := &ackBus{Bus: memBus, onHandled: func() { close(done) }}
+	var closeOnce sync.Once
+	wrapped := &ackBus{Bus: memBus, onHandled: func() { closeOnce.Do(func() { close(done) }) }}
 	stopBus, err := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return wrapped, nil
 	})
@@ -592,4 +599,157 @@ func (b *errQueueSubBus) ConsumeQueue(ctx context.Context, subject, queue string
 		return nil, b.err
 	}
 	return b.Bus.ConsumeQueue(ctx, subject, queue, handler)
+}
+
+func TestChunksAction_And_Events_Helpers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// 1. repoMatchCandidates
+	if got := repoMatchCandidates(""); got != nil {
+		t.Fatalf("expected nil for empty repo, got %v", got)
+	}
+	if got := repoMatchCandidates("aerial"); len(got) != 2 || got[0] != "aerial" || got[1] != "azylman/aerial" {
+		t.Fatalf("unexpected repoMatchCandidates(aerial): %v", got)
+	}
+	if got := repoMatchCandidates("azylman/aerial"); len(got) != 2 || got[0] != "azylman/aerial" || got[1] != "aerial" {
+		t.Fatalf("unexpected repoMatchCandidates(azylman/aerial): %v", got)
+	}
+	if got := repoMatchCandidates("other/repo"); len(got) != 1 || got[0] != "other/repo" {
+		t.Fatalf("unexpected repoMatchCandidates(other/repo): %v", got)
+	}
+
+	// 2. validateChunkModeAndRepo
+	if err := validateChunkModeAndRepo(0, "invalid-mode", "aerial", nil, nil); err == nil {
+		t.Fatal("expected error on invalid mode")
+	}
+	if err := validateChunkModeAndRepo(0, "pr", "", nil, nil); err == nil {
+		t.Fatal("expected error on pr with empty repo")
+	}
+	if err := validateChunkModeAndRepo(0, "action", "aerial", nil, nil); err == nil {
+		t.Fatal("expected error on action with repo")
+	}
+	if err := validateChunkModeAndRepo(0, "action", "", []string{"file.go"}, nil); err == nil {
+		t.Fatal("expected error on action with target_files")
+	}
+	if err := validateChunkModeAndRepo(0, "action", "", nil, []string{"Sym"}); err == nil {
+		t.Fatal("expected error on action with target_symbols")
+	}
+	if err := validateChunkModeAndRepo(0, "action", "", nil, nil); err != nil {
+		t.Fatalf("unexpected error on valid action: %v", err)
+	}
+	if err := validateChunkModeAndRepo(0, "pr", "azylman/aerial", []string{"file.go"}, []string{"Sym"}); err != nil {
+		t.Fatalf("unexpected error on valid pr: %v", err)
+	}
+
+	// 3. failChunkInternal
+	var nilSrv *VanadisServer
+	if _, _, _, err := nilSrv.failChunkInternal(ctx, "c1", "reason"); err == nil {
+		t.Fatal("expected error on nil server failChunkInternal")
+	}
+
+	memStore := newMemoryVanadisStore()
+	srv := &VanadisServer{store: memStore}
+	if _, _, _, err := srv.failChunkInternal(ctx, "", "reason"); err == nil {
+		t.Fatal("expected error on empty chunkID")
+	}
+	if _, _, _, err := srv.failChunkInternal(ctx, "c1", ""); err == nil {
+		t.Fatal("expected error on empty reason")
+	}
+
+	// Shutdown interruption reason
+	b1 := VanadisBuild{ID: "b-shut", ThreadID: "th-1", Objective: "shut"}
+	c1 := VanadisChunk{ID: "c-shut", BuildID: "b-shut", Title: "c-shut"}
+	_ = memStore.CreateBuild(ctx, b1, []VanadisChunk{c1})
+	bGot, cGot, failed, err := srv.failChunkInternal(ctx, "c-shut", "interrupted by shutdown")
+	if err != nil || failed || bGot == nil || cGot == nil {
+		t.Fatalf("expected no fail on shutdown interruption, got err=%v failed=%v", err, failed)
+	}
+
+	// Normal fail chunk
+	bFail := VanadisBuild{ID: "b-f", ThreadID: "th-fail", Objective: "fail obj"}
+	cFail := VanadisChunk{ID: "c-f", BuildID: "b-f", Title: "c-f", Status: "running"}
+	_ = memStore.CreateBuild(ctx, bFail, []VanadisChunk{cFail})
+	bF, cF, failedF, errF := srv.failChunkInternal(ctx, "c-f", "test fail reason")
+	if errF != nil || !failedF || bF == nil || cF == nil {
+		t.Fatalf("expected failed=true, got err=%v failed=%v", errF, failedF)
+	}
+
+	// 4. retryNextRunningChunkEnqueue
+	if err := srv.retryNextRunningChunkEnqueue(ctx, nil); err != nil {
+		t.Fatalf("expected nil for nil res: %v", err)
+	}
+	if err := srv.retryNextRunningChunkEnqueue(ctx, &VanadisAdvancementResult{ChunkMode: "pr"}); err != nil {
+		t.Fatalf("expected nil for non-action mode: %v", err)
+	}
+	if err := srv.retryNextRunningChunkEnqueue(ctx, &VanadisAdvancementResult{ChunkMode: "action", BuildStatus: "completed"}); err != nil {
+		t.Fatalf("expected nil for non-running status: %v", err)
+	}
+	if err := srv.retryNextRunningChunkEnqueue(ctx, &VanadisAdvancementResult{ChunkMode: "action", BuildStatus: "running", BuildID: "non-existent"}); err == nil {
+		t.Fatal("expected error for non-existent build")
+	}
+
+	// Next running chunk enqueue
+	bRetry := VanadisBuild{ID: "b-ret", Status: "running"}
+	cRet0 := VanadisChunk{ID: "c-ret-0", BuildID: "b-ret", ChunkIndex: 0, Status: "completed"}
+	cRet1 := VanadisChunk{ID: "c-ret-1", BuildID: "b-ret", ChunkIndex: 1, Status: "running"}
+	_ = memStore.CreateBuild(ctx, bRetry, []VanadisChunk{cRet0, cRet1})
+	// Without bus -> enqueue fails
+	err = srv.retryNextRunningChunkEnqueue(ctx, &VanadisAdvancementResult{
+		ChunkMode:        "action",
+		BuildStatus:      "running",
+		BuildID:          "b-ret",
+		MergedChunkIndex: 0,
+	})
+	if err == nil {
+		t.Fatal("expected error on enqueue without bus")
+	}
+
+	// 5. handleFailedDispatchOutcome
+	err = srv.handleFailedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
+		VanadisChunkID: "c-not-found",
+		Status:         "failed",
+	})
+	if err != nil {
+		t.Fatalf("expected nil on not found chunk: %v", err)
+	}
+
+	// 6. HandleDispatchOutcomeEvent
+	var nilSrvEvents *VanadisServer
+	if err := nilSrvEvents.HandleDispatchOutcomeEvent(ctx, &memoryMsg{}); err == nil {
+		t.Fatal("expected error on nil server HandleDispatchOutcomeEvent")
+	}
+	// Invalid json
+	if err := srv.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: []byte("invalid json")}); err != nil {
+		t.Fatalf("expected nil on invalid json: %v", err)
+	}
+	// healthcheck ping
+	pingData, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "healthcheck-ping"})
+	if err := srv.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: pingData}); err != nil {
+		t.Fatalf("expected nil on healthcheck ping: %v", err)
+	}
+	// empty chunk ID
+	emptyChunkData, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "d1", VanadisChunkID: ""})
+	if err := srv.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: emptyChunkData}); err != nil {
+		t.Fatalf("expected nil on empty chunk id: %v", err)
+	}
+	// unknown status
+	unknownStatusData, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "d1", VanadisChunkID: "c1", Status: "unknown"})
+	if err := srv.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: unknownStatusData}); err != nil {
+		t.Fatalf("expected nil on unknown status: %v", err)
+	}
+
+	// 7. handleCompletedDispatchOutcome with store error
+	storeErr := &errVanadisStore{getBuildErr: errors.New("db error")}
+	srvStoreErr := &VanadisServer{store: storeErr}
+	completedData, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "d1", VanadisChunkID: "c1", Status: "completed"})
+	if err := srvStoreErr.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: completedData}); err == nil {
+		t.Fatal("expected error on CompleteActionChunk store failure")
+	}
+
+	// 8. handleFailedDispatchOutcome with internal fail error
+	failedData, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "d1", VanadisChunkID: "c1", Status: "failed"})
+	if err := srvStoreErr.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: failedData}); err == nil {
+		t.Fatal("expected error on failChunkInternal store failure")
+	}
 }

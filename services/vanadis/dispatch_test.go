@@ -156,3 +156,12 @@ func TestDispatchChunkTurn_Span(t *testing.T) {
 		})
 	}
 }
+
+func TestDispatchChunkTurn_FormatPromptError(t *testing.T) {
+	t.Parallel()
+	s := NewVanadisServer(Config{}, nil, nil)
+	err := s.dispatchChunkTurn(context.Background(), VanadisBuild{}, []VanadisChunk{}, 0, "")
+	if err == nil {
+		t.Fatal("expected error on empty chunks")
+	}
+}

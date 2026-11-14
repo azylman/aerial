@@ -258,6 +258,7 @@ type VanadisStore interface {
 	GetBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error)
 	ListBuilds(ctx context.Context, limit int) ([]VanadisBuildEntry, error)
 	UpdateChunkStatus(ctx context.Context, chunkID, status string) error
+	SetChunkAwakeables(ctx context.Context, chunkID, mergeAwakeableID, deployAwakeableID string) error
 	UpdateBuildStatus(ctx context.Context, buildID, status string) error
 	UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
 	GetChunk(ctx context.Context, chunkID string) (*VanadisChunk, *VanadisBuild, error)
@@ -587,6 +588,26 @@ func (s *PostgresVanadisStore) UpdateChunkStatus(ctx context.Context, chunkID, s
 	return s.execUpdateByID(ctx, "chunk id", chunkID, "status", status, false, `UPDATE vanadis_chunks SET status = $1, started_at = CASE WHEN $1 IN ('running', 'coding') THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END, completed_at = CASE WHEN $1 IN ('merged', 'completed', 'failed', 'cancelled') THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis chunk status", ErrChunkNotFound)
 }
 
+// SetChunkAwakeables persists the merge and deploy awakeable IDs on a chunk.
+func (s *PostgresVanadisStore) SetChunkAwakeables(ctx context.Context, chunkID, mergeAwakeableID, deployAwakeableID string) error {
+	if s == nil || s.db == nil {
+		return errors.New("database connection is nil")
+	}
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return errors.New("chunk id cannot be empty")
+	}
+	const q = `UPDATE vanadis_chunks SET merge_awakeable_id = $1, deploy_awakeable_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`
+	tag, err := s.db.Exec(ctx, q, strings.TrimSpace(mergeAwakeableID), strings.TrimSpace(deployAwakeableID), chunkID)
+	if err != nil {
+		return fmt.Errorf("failed to set chunk awakeables: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrChunkNotFound
+	}
+	return nil
+}
+
 // UpdateBuildStatus updates the lifecycle status of a VanadisBuild.
 func (s *PostgresVanadisStore) UpdateBuildStatus(ctx context.Context, buildID, status string) error {
 	return s.execUpdateByID(ctx, "build id", buildID, "status", status, false, `UPDATE vanadis_builds SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status", ErrBuildNotFound)
@@ -711,11 +732,7 @@ func (s *VanadisServer) postBrainJSON(ctx context.Context, path string, payload 
 }
 
 func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner string) {
-	if s == nil || s.httpClient == nil {
-		return
-	}
-	routerURL := strings.TrimRight(strings.TrimSpace(s.cfg.SynapseURL), "/")
-	if routerURL == "" {
+	if s == nil {
 		return
 	}
 	cleanBuildID := strings.TrimSpace(buildID)
@@ -723,6 +740,25 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner str
 		return
 	}
 	cleanBanner := strings.TrimSpace(banner)
+	if s.bus != nil {
+		if _, isMock := s.bus.(*mockChunkBus); !isMock {
+			payload := map[string]string{
+				"build_id": cleanBuildID,
+				"banner":   cleanBanner,
+			}
+			subject := "aerial.coalesced.vanadis_widget." + cleanBuildID
+			if err := s.bus.Publish(ctx, subject, "", payload); err == nil {
+				return
+			}
+		}
+	}
+	if s.httpClient == nil {
+		return
+	}
+	routerURL := strings.TrimRight(strings.TrimSpace(s.cfg.SynapseURL), "/")
+	if routerURL == "" {
+		return
+	}
 	payload := map[string]string{
 		"build_id": cleanBuildID,
 		"banner":   cleanBanner,
@@ -814,7 +850,10 @@ func (s *VanadisServer) StartJobConsumers(ctx context.Context) error {
 	if s.bus == nil {
 		return nil
 	}
-	_, err := s.bus.ConsumeQueue(ctx, "aerial.jobs.vanadis.chunk", "vanadis-chunk", s.HandleExecuteChunkJob)
+	if _, err := s.bus.ConsumeQueue(ctx, "aerial.jobs.vanadis.chunk", "vanadis-chunk", s.HandleExecuteChunkJob); err != nil {
+		return err
+	}
+	_, err := s.bus.ConsumeQueue(ctx, "aerial.coalesced.vanadis_widget.*", "vanadis-widget", s.HandleCoalescedWidgetMessage)
 	return err
 }
 
@@ -1377,6 +1416,13 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		return err
 	}
 	defer cleanupBus()
+
+	restateCtx, restateCancel := context.WithCancel(ctx)
+	defer restateCancel()
+	if _, err := startRestateServer(restateCtx, server); err != nil && !errors.Is(err, ErrRestateDisabled) {
+		log.Printf("[vanadis] warning: failed starting restate server: %v", err)
+	}
+
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)
 	if err != nil {

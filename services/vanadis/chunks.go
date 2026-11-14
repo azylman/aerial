@@ -1219,16 +1219,22 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 		chunkStatus := normalizeWidgetStatus(c.Status)
 		completedAt := c.CompletedAt
 		var activeStep string
-		if req.PRNumber > 0 && c.PRNumber == req.PRNumber && req.PRFound {
+		switch {
+		case req.PRNumber > 0 && c.PRNumber == req.PRNumber && req.PRFound:
 			chunkStatus = resolveVanadisChunkWidgetStatus(c.Status, req.PRStatus)
 			if (chunkStatus == "failed" || chunkStatus == "conflict") && widgetStatus != "completed" {
 				widgetStatus = "failed"
 			}
 			if isVanadisChunkStreamingPhase(chunkStatus) {
 				activeStep = strings.TrimSpace(req.ActiveStep)
+				if activeStep == "" {
+					activeStep = FormatChunkActiveStep(c)
+				}
 				completedAt = time.Time{}
 			}
-		} else if chunkStatus == "merged" || (c.Mode == "action" && chunkStatus == "completed") {
+		case isVanadisChunkStreamingPhase(chunkStatus):
+			activeStep = FormatChunkActiveStep(c)
+		case chunkStatus == "merged" || (c.Mode == "action" && chunkStatus == "completed"):
 			chunkStatus = "deployed"
 		}
 		wChunks[i] = StatusWidgetChunk{
@@ -1255,6 +1261,7 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 		Title:     firstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
 		Status:    widgetStatus,
 		Banner:    resolveWidgetBanner(widgetStatus, req),
+		SkipSink:  build.Quiet,
 		Chunks:    wChunks,
 		StartedAt: build.CreatedAt,
 	}

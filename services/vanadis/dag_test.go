@@ -305,3 +305,148 @@ func TestMarshalJSONBOrEmpty(t *testing.T) {
 		})
 	}
 }
+
+func TestRelinkDependenciesAfterRemoval_SelfDep(t *testing.T) {
+	t.Parallel()
+
+	// c1 removed, which depended on c2. c2 remaining shouldn't add c2 to its own DependsOn.
+	remaining := []VanadisChunk{
+		{ID: "c2", DependsOn: []string{"c1"}},
+	}
+	relinkDependenciesAfterRemoval(remaining, "c1", []string{"c2"})
+	if len(remaining[0].DependsOn) != 0 {
+		t.Fatalf("expected empty depends_on preventing self dependency, got %v", remaining[0].DependsOn)
+	}
+}
+
+func TestValidateUpdateChunkInput_Validation(t *testing.T) {
+	t.Parallel()
+
+	strPtr := func(s string) *string { return &s }
+
+	// validateUpdateChunkInput tests
+	_, err := validateUpdateChunkInput("", "c1", UpdateChunkRequest{})
+	if err == nil || !strings.Contains(err.Error(), "build id and chunk ref are required") {
+		t.Fatalf("expected error on empty buildID, got %v", err)
+	}
+	_, err = validateUpdateChunkInput("b1", "", UpdateChunkRequest{})
+	if err == nil || !strings.Contains(err.Error(), "build id and chunk ref are required") {
+		t.Fatalf("expected error on empty chunkRef, got %v", err)
+	}
+	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{})
+	if err == nil || !strings.Contains(err.Error(), "at least one updated field are required") {
+		t.Fatalf("expected error on empty fields, got %v", err)
+	}
+	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Mode: strPtr("  ")})
+	if err == nil || !strings.Contains(err.Error(), "mode cannot be empty string") {
+		t.Fatalf("expected error on empty mode string, got %v", err)
+	}
+	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Mode: strPtr("invalid-mode")})
+	if err == nil {
+		t.Fatal("expected error on invalid mode")
+	}
+	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Effort: "huge"})
+	if err == nil {
+		t.Fatal("expected error on invalid effort")
+	}
+	effort, err := validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Effort: "high"})
+	if err != nil || effort != "medium" {
+		t.Fatalf("expected medium effort, got %q (err: %v)", effort, err)
+	}
+	effort, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Title: "New Title"})
+	if err != nil || effort != "" {
+		t.Fatalf("expected empty effort, got %q (err: %v)", effort, err)
+	}
+}
+
+func TestApplyChunkUpdates_Validation(t *testing.T) {
+	t.Parallel()
+
+	strPtr := func(s string) *string { return &s }
+
+	// applyChunkUpdates tests
+	c := VanadisChunk{
+		ID:            "c1",
+		Mode:          "pr",
+		Repo:          "azylman/aerial",
+		Title:         "Old Title",
+		Instructions:  "Old Instr",
+		TargetFiles:   []string{"main.go"},
+		TargetSymbols: []string{"OldSym"},
+	}
+
+	// PR mode with empty repo error
+	cEmptyRepo := c
+	cEmptyRepo.Repo = ""
+	err := applyChunkUpdates(&cEmptyRepo, UpdateChunkRequest{}, "")
+	if err == nil || !strings.Contains(err.Error(), "repo is required for pr mode") {
+		t.Fatalf("expected error on pr mode with empty repo, got %v", err)
+	}
+
+	// Action mode with repo error
+	cActionWithRepo := c
+	err = applyChunkUpdates(&cActionWithRepo, UpdateChunkRequest{Mode: strPtr("action"), Repo: "azylman/aerial"}, "")
+	if err == nil || !strings.Contains(err.Error(), "action chunk must have empty repo") {
+		t.Fatalf("expected error on action chunk with repo, got %v", err)
+	}
+
+	// Action mode with target_files error
+	cActionWithFiles := c
+	err = applyChunkUpdates(&cActionWithFiles, UpdateChunkRequest{Mode: strPtr("action"), TargetFiles: []string{"a.go"}}, "")
+	if err == nil || !strings.Contains(err.Error(), "action chunk must not specify target_files") {
+		t.Fatalf("expected error on action chunk with target_files, got %v", err)
+	}
+
+	// Action mode with target_symbols error
+	cActionWithSymbols := c
+	err = applyChunkUpdates(&cActionWithSymbols, UpdateChunkRequest{Mode: strPtr("action"), TargetSymbols: []string{"Sym"}}, "")
+	if err == nil || !strings.Contains(err.Error(), "action chunk must not specify target_symbols") {
+		t.Fatalf("expected error on action chunk with target_symbols, got %v", err)
+	}
+
+	// Valid action mode switch
+	cValidAction := c
+	err = applyChunkUpdates(&cValidAction, UpdateChunkRequest{
+		Mode:         strPtr("action"),
+		Title:        "New Action Title",
+		Instructions: "New Action Instr",
+	}, "low")
+	if err != nil {
+		t.Fatalf("unexpected error on valid action update: %v", err)
+	}
+	if cValidAction.Mode != "action" || cValidAction.Repo != "" || len(cValidAction.TargetFiles) != 0 || len(cValidAction.TargetSymbols) != 0 || cValidAction.Effort != "low" {
+		t.Fatalf("unexpected updated action chunk: %+v", cValidAction)
+	}
+}
+
+func TestCheckDisjointFiles_ChunkBEmptyTargetFiles(t *testing.T) {
+	t.Parallel()
+	a := VanadisChunk{ID: "c1", TargetFiles: []string{"a.go"}}
+	b := VanadisChunk{ID: "c2", TargetFiles: nil}
+	err := checkDisjointFiles(a, b, "repo")
+	if err == nil || !strings.Contains(err.Error(), "concurrent PR chunk \"c2\" on repo \"repo\" must specify target_files") {
+		t.Fatalf("expected error on chunk b empty target files, got %v", err)
+	}
+}
+
+func TestRelinkDependenciesAfterRemoval_DuplicateDep(t *testing.T) {
+	t.Parallel()
+	remaining := []VanadisChunk{
+		{ID: "c3", DependsOn: []string{"c2", "c1", "c1"}},
+	}
+	relinkDependenciesAfterRemoval(remaining, "c2", []string{"c0"})
+	if !slices.Equal(remaining[0].DependsOn, []string{"c0", "c1"}) {
+		t.Fatalf("unexpected DependsOn after relink: %v", remaining[0].DependsOn)
+	}
+}
+
+func TestValidateCreateBuildInputs_InvalidDAG(t *testing.T) {
+	t.Parallel()
+	chunks := []VanadisChunk{
+		{ID: "c1", Title: "t1", Instructions: "i1", Mode: "action", DependsOn: []string{"c1"}},
+	}
+	err := validateCreateBuildInputs("b1", "th1", "obj", chunks)
+	if err == nil {
+		t.Fatal("expected error on self dependency in DAG")
+	}
+}

@@ -565,6 +565,11 @@ func assertVanadisMCPToolResult(t *testing.T, respBytes []byte, wantToolErr bool
 
 func TestToMCPChunkBriefs(t *testing.T) {
 	t.Parallel()
+	gotNil := toMCPChunkBriefs(nil)
+	if len(gotNil) != 0 {
+		t.Fatalf("expected empty slice for nil chunks, got %+v", gotNil)
+	}
+
 	chunks := []VanadisChunk{
 		{ID: "c1", DependsOn: nil},
 	}
@@ -579,4 +584,14 @@ func TestToMCPChunkBriefs(t *testing.T) {
 	if !strings.Contains(string(b), `"depends_on":[]`) {
 		t.Fatalf("expected \"depends_on\":[] in JSON, got %s", string(b))
 	}
+}
+
+func TestRegisterVanadisCollector_AlreadyRegistered(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic in registerVanadisCollector: %v", r)
+		}
+	}()
+	registerVanadisCollector(BuildsActive)
 }
