@@ -6,11 +6,18 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func (p *InterchangeablePool) Workers() []string {
@@ -447,4 +454,170 @@ func TestInterchangeablePool_AcquireLeaseAndMetadata(t *testing.T) {
 
 	checkInterchangeableNilLease(ctx, t)
 	checkInterchangeableInvalidAcquires(ctx, t)
+}
+
+// replySpawner returns a spawner whose daemons announce a session and answer every prompt
+// with reply.
+func replySpawner(reply string) *MockDaemonSpawner {
+	return &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			go func() {
+				defer outW.Close()
+				_, _ = fmt.Fprintln(outW, `{"event":"init","conversation_id":"550e8400-e29b-41d4-a716-000000000001"}`)
+				buf := make([]byte, 4096)
+				for {
+					if _, err := inR.Read(buf); err != nil {
+						return
+					}
+					_, _ = fmt.Fprintln(outW, reply)
+				}
+			}()
+			return inW, outR, io.NopCloser(strings.NewReader("")), &MockProcessHandle{pid: 100}, nil
+		},
+	}
+}
+
+type wantEphemeralSpan struct {
+	name       string
+	parent     string // name of the parent span
+	attrs      []attribute.KeyValue
+	statusCode codes.Code
+	statusDesc string
+}
+
+func TestInterchangeablePool_ExecuteEphemeralSpans(t *testing.T) {
+	t.Parallel()
+	const (
+		okReply  = `{"event":"result","result":{"status":"SUCCESS","response":"a caption","usage":{"input_tokens":120,"output_tokens":30,"cache_read_tokens":80}}}`
+		errReply = `{"event":"result","result":{"status":"ERROR","error":"model overloaded"}}`
+	)
+	usage := []attribute.KeyValue{
+		attribute.Int("gen_ai.usage.input_tokens", 120), attribute.Int("gen_ai.usage.output_tokens", 30),
+		attribute.Int("gen_ai.usage.cache_read.input_tokens", 80), attribute.Int("gen_ai.usage.cache_creation.input_tokens", 0),
+	}
+	zeroUsage := []attribute.KeyValue{
+		attribute.Int("gen_ai.usage.input_tokens", 0), attribute.Int("gen_ai.usage.output_tokens", 0),
+		attribute.Int("gen_ai.usage.cache_read.input_tokens", 0), attribute.Int("gen_ai.usage.cache_creation.input_tokens", 0),
+	}
+	agentAttrs := func(u []attribute.KeyValue) []attribute.KeyValue {
+		return append([]attribute.KeyValue{
+			attribute.String("gen_ai.operation.name", "invoke_agent"), attribute.String("aerial.ephemeral.target", "vision:caption"),
+			attribute.String("gen_ai.request.model", "claude-sonnet-5-5"), attribute.String("gen_ai.provider.name", "anthropic"),
+		}, u...)
+	}
+	tests := []struct {
+		name       string
+		poolClosed bool
+		reply      string
+		wantResp   string
+		wantErr    string
+		wantSpans  []wantEphemeralSpan
+	}{
+		{
+			name: "success nests invoke_agent under caller and chat under invoke_agent", reply: okReply, wantResp: "a caption",
+			wantSpans: []wantEphemeralSpan{
+				{name: "invoke_agent", parent: "caller", attrs: agentAttrs(usage)},
+				{name: "chat", parent: "invoke_agent", attrs: append([]attribute.KeyValue{attribute.String("gen_ai.operation.name", "chat")}, usage...)},
+			},
+		},
+		{
+			name: "lease acquire error", poolClosed: true,
+			wantErr: "failed to acquire leased session: interchangeable pool is closed",
+			wantSpans: []wantEphemeralSpan{
+				{name: "invoke_agent", parent: "caller", attrs: agentAttrs(zeroUsage), statusCode: codes.Error, statusDesc: "failed to acquire leased session: interchangeable pool is closed"},
+			},
+		},
+		{
+			name: "execute error", reply: errReply, wantErr: "model overloaded",
+			wantSpans: []wantEphemeralSpan{
+				{name: "invoke_agent", parent: "caller", attrs: agentAttrs(zeroUsage), statusCode: codes.Error, statusDesc: "model overloaded"},
+				{name: "chat", parent: "invoke_agent", attrs: []attribute.KeyValue{attribute.String("gen_ai.operation.name", "chat")}, statusCode: codes.Error, statusDesc: "model overloaded"},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pool, _ := newTestInterchangeablePool(t, 1, "", "claude-sonnet-5-5", replySpawner(tc.reply))
+			if tc.poolClosed {
+				_ = pool.Close()
+			}
+			rec := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+			ctx, caller := tp.Tracer("test").Start(context.Background(), "caller")
+			defer caller.End()
+
+			resp, err := pool.ExecuteEphemeral(ctx, "vision:caption", "describe this frame")
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if resp != tc.wantResp || gotErr != tc.wantErr {
+				t.Fatalf("ExecuteEphemeral = (%q, %q), want (%q, %q)", resp, gotErr, tc.wantResp, tc.wantErr)
+			}
+			assertEphemeralSpans(t, rec.Ended(), caller.SpanContext().SpanID(), tc.wantSpans)
+		})
+	}
+}
+
+// assertEphemeralSpans checks that the ended invoke_agent and chat spans are exactly want, with
+// the listed parents, attribute sets and statuses.
+func assertEphemeralSpans(t *testing.T, ended []sdktrace.ReadOnlySpan, callerID trace.SpanID, want []wantEphemeralSpan) {
+	t.Helper()
+	ids := map[string]trace.SpanID{"caller": callerID}
+	got := map[string]sdktrace.ReadOnlySpan{}
+	var names []string
+	for _, s := range ended {
+		if s.Name() == OperationInvokeAgent || s.Name() == OperationChat {
+			names = append(names, s.Name())
+			got[s.Name()] = s
+			ids[s.Name()] = s.SpanContext().SpanID()
+		}
+	}
+	wantNames := make([]string, 0, len(want))
+	for _, w := range want {
+		wantNames = append(wantNames, w.name)
+	}
+	if fmt.Sprint(sortedCopy(names)) != fmt.Sprint(sortedCopy(wantNames)) {
+		t.Fatalf("ended spans = %v, want %v", names, wantNames)
+	}
+	for _, w := range want {
+		s := got[w.name]
+		if s.Parent().SpanID() != ids[w.parent] {
+			t.Errorf("%s parent = %s, want %s (%s)", w.name, s.Parent().SpanID(), ids[w.parent], w.parent)
+		}
+		if gotAttrs, wantAttrs := attribute.NewSet(s.Attributes()...), attribute.NewSet(w.attrs...); !gotAttrs.Equals(&wantAttrs) {
+			t.Errorf("%s attrs = %v, want %v", w.name, gotAttrs.Encoded(attribute.DefaultEncoder()), wantAttrs.Encoded(attribute.DefaultEncoder()))
+		}
+		if s.Status().Code != w.statusCode || s.Status().Description != w.statusDesc {
+			t.Errorf("%s status = (%v, %q), want (%v, %q)", w.name, s.Status().Code, s.Status().Description, w.statusCode, w.statusDesc)
+		}
+	}
+}
+
+func sortedCopy(in []string) []string {
+	out := slices.Clone(in)
+	slices.Sort(out)
+	return out
+}
+
+func TestInterchangeablePool_Model(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		pool *InterchangeablePool
+		want string
+	}{
+		{name: "nil underlying", pool: &InterchangeablePool{}, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.pool.Model(); got != tc.want {
+				t.Errorf("Model() = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
