@@ -391,6 +391,29 @@ func TestEnsureCoreStreams(t *testing.T) {
 	if err := EnsureCoreStreams(context.Background(), nil); err == nil {
 		t.Error("EnsureCoreStreams with nil bus expected error, got nil")
 	}
+
+	// Verify JetStream stream config subjects include aerial.pr.>
+	mjs := &mockJetStream{
+		existingStreams: make(map[string]*nats.StreamInfo),
+	}
+	jsBus := newJetStreamBusWithContext(nil, mjs)
+	if err := jsBus.EnsureCoreStreams(context.Background()); err != nil {
+		t.Fatalf("jsBus.EnsureCoreStreams failed: %v", err)
+	}
+	eventsStream, ok := mjs.existingStreams[StreamAerialEvents]
+	if !ok {
+		t.Fatalf("stream %s not found in mockJetStream", StreamAerialEvents)
+	}
+	matched := false
+	for _, pattern := range eventsStream.Config.Subjects {
+		if matchSubject(pattern, SubjectAerialPRPrefix+"merged") {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		t.Errorf("AERIAL_EVENTS subjects %v do not match %s", eventsStream.Config.Subjects, SubjectAerialPRPrefix+"merged")
+	}
 }
 
 func TestMatchSubject(t *testing.T) {
