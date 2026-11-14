@@ -376,7 +376,7 @@ func TestBuildStatusWidgetComponents_CeilingGuard(t *testing.T) {
 	foundSummary := false
 	for _, c := range container.Components {
 		if td, ok := c.(*discordgo.TextDisplay); ok {
-			if strings.Contains(td.Content, "earlier chunks completed and merged") {
+			if td.Content == "✅ ***8/15** earlier chunks completed and merged*" {
 				foundSummary = true
 				break
 			}
