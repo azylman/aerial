@@ -27,11 +27,20 @@ func assertConfigDefaults(t *testing.T, cfg Config) {
 	if cfg.Port != "4025" {
 		t.Fatalf("unexpected port default: %s", cfg.Port)
 	}
-	if cfg.BrainURL != "http://127.0.0.1:8088" {
+	if cfg.PostgresURL != "" {
+		t.Fatalf("unexpected PostgresURL default: %s", cfg.PostgresURL)
+	}
+	if cfg.BrainURL != "" {
 		t.Fatalf("unexpected BrainURL default: %s", cfg.BrainURL)
 	}
-	if cfg.SynapseURL != "http://synapse.aerial" {
+	if cfg.EriURL != "" {
+		t.Fatalf("unexpected EriURL default: %s", cfg.EriURL)
+	}
+	if cfg.SynapseURL != "" {
 		t.Fatalf("unexpected SynapseURL default: %s", cfg.SynapseURL)
+	}
+	if cfg.NATSURL != "" {
+		t.Fatalf("unexpected NATSURL default: %s", cfg.NATSURL)
 	}
 }
 
@@ -56,45 +65,37 @@ func assertEnvConfig(t *testing.T, cfg Config) {
 }
 
 func TestLoadConfigAndEnv(t *testing.T) {
-	origFallback, origLookup := vanadisFallbackConfigPath, lookupHostFn
+	origFallback := vanadisFallbackConfigPath
 	defer func() {
-		vanadisFallbackConfigPath, lookupHostFn = origFallback, origLookup
+		vanadisFallbackConfigPath = origFallback
 	}()
 	for _, k := range []string{
 		"PORT", "DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
-		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "ERI_URL", "SYNAPSE_URL", "CONFIG_PATH",
+		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "ERI_URL", "SYNAPSE_URL", "NATS_URL", "CONFIG_PATH",
 	} {
 		t.Setenv(k, "")
 	}
 	tmpDir := t.TempDir()
 	vanadisFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
 	tests := []struct {
-		name, lookupHost, wantHost, password string
+		name, wantHost, password string
 	}{
-		{"DNSFallback_AerialPostgres", "aerial-postgres", "@aerial-postgres:5432/", ""},
-		{"DNSFallback_Postgres", "postgres", "@postgres:5432/", ""},
-		{"DNSFallback_Localhost", "other", "@127.0.0.1:5432/", ""},
-		{"Decomposed_PostgresPassword", "other", "@postgres:5432/", "custom_vanadis_pass"},
+		{"UnconfiguredDefaults", "", ""},
+		{"Decomposed_PostgresPassword", "@postgres:5432/", "custom_vanadis_pass"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.password != "" {
 				t.Setenv("POSTGRES_PASSWORD", tc.password)
 			}
-			lookupHostFn = func(_ context.Context, host string) ([]string, error) {
-				if host == tc.lookupHost {
-					return []string{"10.0.0.2"}, nil
-				}
-				return nil, errors.New("not found")
-			}
 			cfg := LoadConfig("")
-			if !strings.Contains(cfg.PostgresURL, tc.wantHost) {
+			if tc.wantHost != "" && !strings.Contains(cfg.PostgresURL, tc.wantHost) {
 				t.Fatalf("expected postgres URL to contain %s, got %s", tc.wantHost, cfg.PostgresURL)
 			}
 			if tc.password != "" && !strings.Contains(cfg.PostgresURL, ":"+tc.password+"@") {
 				t.Fatalf("expected postgres URL to contain password %s, got %s", tc.password, cfg.PostgresURL)
 			}
-			if tc.name == "DNSFallback_AerialPostgres" {
+			if tc.name == "UnconfiguredDefaults" {
 				assertConfigDefaults(t, cfg)
 			}
 		})
@@ -829,7 +830,7 @@ func TestSyncBuildWidget(t *testing.T) {
 	var nilSrv *VanadisServer
 	nilSrv.syncBuildWidget(ctx, "b1", "")
 	store := newMemoryVanadisStore()
-	store.builds["b1"] = mkBuild("b1", "1555405874565091380", "", "", "")
+	store.builds["b1"] = mkBuild("b1", "100000000000000001", "", "", "")
 	var postedReq map[string]string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/internal/widget/sync" {
@@ -850,6 +851,18 @@ func TestSyncBuildWidget(t *testing.T) {
 	srv.syncBuildWidget(ctx, "b1", "test banner")
 	if postedReq["build_id"] != "b1" || postedReq["banner"] != "test banner" {
 		t.Errorf("Unexpected posted widget payload: %+v", postedReq)
+	}
+
+	// Empty SynapseURL returns early with zero HTTP requests
+	postedReq = nil
+	emptySynapseSrv := &VanadisServer{
+		cfg:        Config{SynapseURL: ""},
+		httpClient: ts.Client(),
+		store:      store,
+	}
+	emptySynapseSrv.syncBuildWidget(ctx, "b1", "banner")
+	if postedReq != nil {
+		t.Errorf("Expected nil postedReq for empty SynapseURL, got %+v", postedReq)
 	}
 
 	// Empty build ID early return

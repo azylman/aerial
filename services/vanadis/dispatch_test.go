@@ -42,36 +42,60 @@ func brainStub(t *testing.T, status int, got *string) *httptest.Server {
 	return srv
 }
 
+type postBrainJSONTraceCase struct {
+	name       string
+	brainURL   string
+	withParent bool
+	wantErr    bool
+}
+
+func runPostBrainJSONTraceCase(t *testing.T, tc postBrainJSONTraceCase) {
+	t.Helper()
+	var got string
+	srv := brainStub(t, http.StatusOK, &got)
+	parentCtx, parentTraceID := recordedParent(t)
+	ctx := context.Background()
+	if tc.withParent {
+		ctx = parentCtx
+	}
+	brainURL := srv.URL
+	if tc.wantErr {
+		brainURL = tc.brainURL
+	}
+	s := NewVanadisServer(Config{BrainURL: brainURL}, nil, nil, srv.Client())
+	res, err := s.postBrainJSON(ctx, "/dispatch", BrainDispatchRequest{Source: "vanadis"}, 0)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatal("expected error for unconfigured brain URL, got nil")
+		}
+		if res != nil || got != "" {
+			t.Fatalf("expected nil bytes and zero network I/O, got res=%s got=%q", string(res), got)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("postBrainJSON: %v", err)
+	}
+	sc := traceparentContext(got)
+	if !sc.IsValid() {
+		t.Fatalf("request carried no valid traceparent: %q", got)
+	}
+	if (sc.TraceID().String() == parentTraceID) != tc.withParent {
+		t.Errorf("trace id = %s, parent %s, want continues=%v", sc.TraceID(), parentTraceID, tc.withParent)
+	}
+}
+
 func TestPostBrainJSON_Traceparent(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name       string
-		withParent bool
-	}{
+	tests := []postBrainJSONTraceCase{
+		{name: "unconfigured brain and eri URL returns immediate error", wantErr: true},
 		{name: "dispatch continues the caller's trace", withParent: true},
 		{name: "starts a trace when the caller has none"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var got string
-			srv := brainStub(t, http.StatusOK, &got)
-			parentCtx, parentTraceID := recordedParent(t)
-			ctx := context.Background()
-			if tc.withParent {
-				ctx = parentCtx
-			}
-			s := NewVanadisServer(Config{BrainURL: srv.URL}, nil, nil, srv.Client())
-			if _, err := s.postBrainJSON(ctx, "/dispatch", BrainDispatchRequest{Source: "vanadis"}, 0); err != nil {
-				t.Fatalf("postBrainJSON: %v", err)
-			}
-			sc := traceparentContext(got)
-			if !sc.IsValid() {
-				t.Fatalf("request carried no valid traceparent: %q", got)
-			}
-			if (sc.TraceID().String() == parentTraceID) != tc.withParent {
-				t.Errorf("trace id = %s, parent %s, want continues=%v", sc.TraceID(), parentTraceID, tc.withParent)
-			}
+			runPostBrainJSONTraceCase(t, tc)
 		})
 	}
 }
