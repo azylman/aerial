@@ -39,3 +39,89 @@ func TestEriJetStreamInit(t *testing.T) {
 	}
 	cleanupSuccess()
 }
+
+type natsURLResolutionTestCase struct {
+	name        string
+	envURL      string
+	poolURL     string
+	expectedURL string
+}
+
+func TestAttachEriEventBus_URLResolution(t *testing.T) {
+	tests := []natsURLResolutionTestCase{
+		{
+			name:        "default fallback when env and pool empty",
+			envURL:      "",
+			poolURL:     "",
+			expectedURL: "nats://nats.aerial:4222",
+		},
+		{
+			name:        "pool config fallback when env empty",
+			envURL:      "",
+			poolURL:     "nats://pool-nats:4222",
+			expectedURL: "nats://pool-nats:4222",
+		},
+		{
+			name:        "env takes precedence over pool config",
+			envURL:      "nats://env-nats:4222",
+			poolURL:     "nats://pool-nats:4222",
+			expectedURL: "nats://env-nats:4222",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NATS_URL", tc.envURL)
+			var capturedURL string
+			memBus := pubsub.NewMemoryBus()
+			defer memBus.Close()
+			capturingFactory := func(_ context.Context, u string) (pubsub.Bus, error) {
+				capturedURL = u
+				return memBus, nil
+			}
+			pool := queue.New(nil, queue.WorkerPoolConfig{
+				NATSURL: tc.poolURL,
+			})
+			cleanup := attachEriEventBusWithFactory(context.Background(), pool, capturingFactory)
+			cleanup()
+			if capturedURL != tc.expectedURL {
+				t.Errorf("capturedURL = %q, want %q", capturedURL, tc.expectedURL)
+			}
+		})
+	}
+}
+
+func TestFirstNonEmpty(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		inputs   []string
+		expected string
+	}{
+		{
+			name:     "all empty",
+			inputs:   []string{"", "   ", "\t"},
+			expected: "",
+		},
+		{
+			name:     "first non empty selected",
+			inputs:   []string{"", "  hello  ", "world"},
+			expected: "hello",
+		},
+		{
+			name:     "no inputs",
+			inputs:   nil,
+			expected: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := firstNonEmpty(tc.inputs...); got != tc.expected {
+				t.Errorf("firstNonEmpty(%v) = %q, want %q", tc.inputs, got, tc.expected)
+			}
+		})
+	}
+}

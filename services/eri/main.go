@@ -1031,6 +1031,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		AmbientResolver:  ambientResolver,
 		HaroURL:          cur.HaroURL,
 		SynapseURL:       cur.SynapseURL,
+		NATSURL:          cur.NATSURL,
 		AgentName:        appOpts.agentName,
 		ActiveTurns:      activeTurns,
 	})
