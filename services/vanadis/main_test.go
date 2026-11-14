@@ -41,26 +41,50 @@ func assertConfigDefaults(t *testing.T, cfg Config) {
 	if cfg.NATSURL != "" {
 		t.Fatalf("unexpected NATSURL default: %s", cfg.NATSURL)
 	}
+	if cfg.RestatePort != "9080" {
+		t.Fatalf("unexpected RestatePort default: %s", cfg.RestatePort)
+	}
+	if cfg.RestateIngressURL != "" {
+		t.Fatalf("unexpected RestateIngressURL default: %s", cfg.RestateIngressURL)
+	}
+	if cfg.RestateAdminURL != "" {
+		t.Fatalf("unexpected RestateAdminURL default: %s", cfg.RestateAdminURL)
+	}
+	if cfg.RestateAdvertiseURL != "" {
+		t.Fatalf("unexpected RestateAdvertiseURL default: %s", cfg.RestateAdvertiseURL)
+	}
+	if cfg.GitHubAPIURL != "https://api.github.com" {
+		t.Fatalf("unexpected GitHubAPIURL default: %s", cfg.GitHubAPIURL)
+	}
+	if cfg.GitHubToken != "" {
+		t.Fatalf("unexpected GitHubToken default: %s", cfg.GitHubToken)
+	}
+}
+
+func assertExpectedConfig(t *testing.T, cfg Config, wantPort, wantPostgres, wantBrain, wantEri, wantSynapse, wantRestatePort, wantRestateIngress, wantRestateAdmin, wantRestateAdv, wantGHURL, wantGHToken string) {
+	t.Helper()
+	if cfg.Port != wantPort || cfg.PostgresURL != wantPostgres {
+		t.Fatalf("unexpected port or postgres_url: got port=%q pg=%q", cfg.Port, cfg.PostgresURL)
+	}
+	if cfg.BrainURL != wantBrain || cfg.EriURL != wantEri || cfg.SynapseURL != wantSynapse {
+		t.Fatalf("unexpected endpoints: got brain=%q eri=%q synapse=%q", cfg.BrainURL, cfg.EriURL, cfg.SynapseURL)
+	}
+	if cfg.RestatePort != wantRestatePort || cfg.RestateIngressURL != wantRestateIngress || cfg.RestateAdminURL != wantRestateAdmin || cfg.RestateAdvertiseURL != wantRestateAdv {
+		t.Fatalf("unexpected restate config: got port=%q ingress=%q admin=%q adv=%q", cfg.RestatePort, cfg.RestateIngressURL, cfg.RestateAdminURL, cfg.RestateAdvertiseURL)
+	}
+	if cfg.GitHubAPIURL != wantGHURL || cfg.GitHubToken != wantGHToken {
+		t.Fatalf("unexpected github config: got url=%q token=%q", cfg.GitHubAPIURL, cfg.GitHubToken)
+	}
 }
 
 func assertFileConfig(t *testing.T, cfg Config) {
 	t.Helper()
-	if cfg.Port != "4099" || cfg.PostgresURL != "postgres://u:p@db:5432/vanadis" {
-		t.Fatalf("unexpected yaml port or postgres_url: %+v", cfg)
-	}
-	if cfg.BrainURL != "http://eri.aerial:8088" || cfg.EriURL != "http://eri.aerial:8088" || cfg.SynapseURL != "http://router.aerial:4020" {
-		t.Fatalf("unexpected yaml endpoints: %+v", cfg)
-	}
+	assertExpectedConfig(t, cfg, "4099", "postgres://u:p@db:5432/vanadis", "http://eri.aerial:8088", "http://eri.aerial:8088", "http://router.aerial:4020", "9081", "http://restate:8080", "http://restate:9070", "http://vanadis:9081", "https://api.github.internal", "yaml-pat")
 }
 
 func assertEnvConfig(t *testing.T, cfg Config) {
 	t.Helper()
-	if cfg.Port != "4030" || cfg.PostgresURL != "postgres://env:5432/db" {
-		t.Fatalf("unexpected env port or postgres_url: %+v", cfg)
-	}
-	if cfg.BrainURL != "http://env-eri:8088" || cfg.EriURL != "http://env-eri:8088" || cfg.SynapseURL != "http://env-router:4020" {
-		t.Fatalf("unexpected env endpoints: %+v", cfg)
-	}
+	assertExpectedConfig(t, cfg, "4030", "postgres://env:5432/db", "http://env-eri:8088", "http://env-eri:8088", "http://env-router:4020", "9082", "http://env-restate:8080", "http://env-restate:9070", "http://env-vanadis:9082", "https://env-api.github.com", "env-token")
 }
 
 func TestLoadConfigAndEnv(t *testing.T) {
@@ -71,6 +95,8 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	for _, k := range []string{
 		"PORT", "DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "ERI_URL", "SYNAPSE_URL", "NATS_URL", "CONFIG_PATH",
+		"RESTATE_PORT", "RESTATE_INGRESS_URL", "RESTATE_ADMIN_URL", "VANADIS_RESTATE_ADVERTISE_URL",
+		"GITHUB_API_URL", "GITHUB_TOKEN", "GITHUB_PAT",
 	} {
 		t.Setenv(k, "")
 	}
@@ -100,7 +126,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 		})
 	}
 	yamlPath := filepath.Join(tmpDir, "vanadis.yaml")
-	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\neri_url: \"http://eri.aerial:8088/\"\nsynapse_url: \"http://router.aerial:4020/\"\n"), 0o600)
+	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\neri_url: \"http://eri.aerial:8088/\"\nsynapse_url: \"http://router.aerial:4020/\"\nrestate_port: \"9081\"\nrestate_ingress_url: \"http://restate:8080/\"\nrestate_admin_url: \"http://restate:9070/\"\nrestate_advertise_url: \"http://vanadis:9081/\"\ngithub_api_url: \"https://api.github.internal/\"\ngithub_token: \"yaml-pat\"\n"), 0o600)
 	vanadisFallbackConfigPath = yamlPath
 	assertFileConfig(t, LoadConfig(filepath.Join(tmpDir, "missing.yaml")))
 
@@ -111,11 +137,23 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://env:5432/db")
 	t.Setenv("ERI_URL", "http://env-eri:8088/")
 	t.Setenv("SYNAPSE_URL", "http://env-router:4020/")
+	t.Setenv("RESTATE_PORT", "9082")
+	t.Setenv("RESTATE_INGRESS_URL", "http://env-restate:8080/")
+	t.Setenv("RESTATE_ADMIN_URL", "http://env-restate:9070/")
+	t.Setenv("VANADIS_RESTATE_ADVERTISE_URL", "http://env-vanadis:9082/")
+	t.Setenv("GITHUB_API_URL", "https://env-api.github.com/")
+	t.Setenv("GITHUB_TOKEN", "env-token")
 	assertEnvConfig(t, LoadConfigFromEnv())
 
 	t.Setenv("SYNAPSE_URL", "http://synapse-override:4020/")
 	if envCfg := LoadConfigFromEnv(); envCfg.SynapseURL != "http://synapse-override:4020" {
 		t.Fatalf("unexpected SYNAPSE_URL override: %+v", envCfg)
+	}
+
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GITHUB_PAT", "pat-token-fallback")
+	if patCfg := LoadConfigFromEnv(); patCfg.GitHubToken != "pat-token-fallback" {
+		t.Fatalf("expected GITHUB_PAT fallback, got: %s", patCfg.GitHubToken)
 	}
 }
 

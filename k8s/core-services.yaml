@@ -92,6 +92,8 @@ spec:
               value: http://eri.aerial
             - name: HARO_URL
               value: http://haro.aerial
+            - name: NATS_URL
+              value: nats://nats.aerial:4222
             - name: AERIAL_INTERNAL_ERI_URL
               value: http://127.0.0.1:8080
             - name: GIT_TERMINAL_PROMPT
@@ -421,6 +423,19 @@ spec:
               value: http://synapse.aerial
             - name: NATS_URL
               value: nats://nats.aerial:4222
+            - name: RESTATE_INGRESS_URL
+              value: http://restate.aerial:8080
+            - name: RESTATE_ADMIN_URL
+              value: http://restate.aerial:9070
+            - name: VANADIS_RESTATE_ADVERTISE_URL
+              value: http://vanadis.default.svc.cluster.local:9080
+            - name: GITHUB_API_URL
+              value: https://api.github.com
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: vanadis-secret
           envFrom:
             - secretRef:
                 name: postgres-secret
@@ -430,6 +445,9 @@ spec:
           ports:
             - containerPort: 4025
               name: http
+              protocol: TCP
+            - containerPort: 9080
+              name: restate
               protocol: TCP
           resources:
             limits:
@@ -1892,5 +1910,98 @@ spec:
       targetPort: 8222
   selector:
     app.kubernetes.io/name: nats
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: restate-data
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app.kubernetes.io/name: restate
+  name: restate
+  namespace: default
+spec:
+  replicas: 1
+  serviceName: restate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: restate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: restate
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: quiet-zero
+      containers:
+        - name: restate
+          image: docker.io/restatedev/restate:1.6
+          env:
+            - name: RESTATE_BASE_DIR
+              value: /restate-data
+          ports:
+            - containerPort: 8080
+              name: ingress
+              protocol: TCP
+            - containerPort: 9070
+              name: admin
+              protocol: TCP
+            - containerPort: 5122
+              name: metrics
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9070
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          volumeMounts:
+            - mountPath: /restate-data
+              name: restate-data
+      volumes:
+        - name: restate-data
+          persistentVolumeClaim:
+            claimName: restate-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: restate
+  namespace: default
+spec:
+  ports:
+    - name: ingress
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: admin
+      port: 9070
+      protocol: TCP
+      targetPort: 9070
+    - name: metrics
+      port: 5122
+      protocol: TCP
+      targetPort: 5122
+  selector:
+    app.kubernetes.io/name: restate
   type: ClusterIP
 
