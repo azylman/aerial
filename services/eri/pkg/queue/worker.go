@@ -469,8 +469,8 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	}
 
 	te.turnAttempted = true
-	_, promptSpan := te.startSetupChildSpan(te.turnCtxValue(), spanPrompt)
-	te.buildTurnPrompt()
+	promptCtx, promptSpan := te.startSetupChildSpan(te.turnCtxValue(), spanPrompt)
+	te.buildTurnPrompt(promptCtx)
 	promptSpan.End()
 	te.executeWithRetries()
 }
@@ -591,8 +591,8 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	defer cleanupChunk()
 
 	te.turnAttempted = true
-	_, promptSpan := te.startSetupChildSpan(te.turnCtxValue(), spanPrompt)
-	te.turnPrompt = te.buildDispatchPrompt()
+	promptCtx, promptSpan := te.startSetupChildSpan(te.turnCtxValue(), spanPrompt)
+	te.turnPrompt = te.buildDispatchPrompt(promptCtx)
 	promptSpan.End()
 	te.executeWithRetries()
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/bwmarrin/discordgo"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -348,7 +349,8 @@ func SummarizeThreadHistoryWithGroup(ctx context.Context, sfg *singleflight.Grou
 		}
 	}
 
-	v, err, _ := sfg.Do(threadID, func() (any, error) {
+	tracer := trace.SpanFromContext(ctx).TracerProvider().Tracer(runner.TracerScope)
+	v, err, shared := sfg.Do(threadID, func() (any, error) {
 		timeoutCtx, cancel := context.WithTimeout(ctx, DefaultThreadSummaryTimeout)
 		defer cancel()
 
@@ -359,31 +361,49 @@ func SummarizeThreadHistoryWithGroup(ctx context.Context, sfg *singleflight.Grou
 			}
 		}
 		if len(validMsgs) == 0 {
-			return "", fmt.Errorf("no valid history to summarize")
+			return threadSummaryResult{}, fmt.Errorf("no valid history to summarize")
 		}
 		sort.SliceStable(validMsgs, func(i, j int) bool { return validMsgs[i].CreatedAt.Before(validMsgs[j].CreatedAt) })
 
 		deltaMsgs, originMsgs := splitThreadHistoryDeltas(validMsgs, sumCfg)
 		deltaTranscript := FormatThreadHistory(deltaMsgs)
 		if deltaTranscript == "" {
-			return "", fmt.Errorf("no valid history to summarize")
+			return threadSummaryResult{}, fmt.Errorf("no valid history to summarize")
 		}
+		res := threadSummaryResult{deltaMsgs: len(deltaMsgs)}
 
 		prompt := buildThreadSummaryPrompt(deltaTranscript, sumCfg, originMsgs)
-		result, err := llm(timeoutCtx, model, prompt)
+		llmCtx, llmSpan := tracer.Start(timeoutCtx, spanPromptSummaryLLM, trace.WithAttributes(attrPromptSummaryPromptChars.Int(len(prompt))))
+		result, err := llm(llmCtx, model, prompt)
+		recordSpanError(llmSpan, err)
+		llmSpan.End()
 		if err != nil {
-			return "", err
+			return res, err
 		}
-		return extractThreadSummaryTag(result)
+		res.summary, err = extractThreadSummaryTag(result)
+		return res, err
 	})
+	// Annotate the caller's span (prompt.thread_summary on the turn path). A caller that joined
+	// another's in-flight summary sees shared=true; the prompt.summary_llm span lives under the leader.
+	res, ok := v.(threadSummaryResult)
+	callerSpan := trace.SpanFromContext(ctx)
+	callerSpan.SetAttributes(attrPromptSummaryShared.Bool(shared))
+	if res.deltaMsgs > 0 {
+		callerSpan.SetAttributes(attrPromptSummaryDeltaMsgs.Int(res.deltaMsgs))
+	}
 	if err != nil {
 		return "", err
 	}
-	s, ok := v.(string)
 	if !ok {
 		return "", fmt.Errorf("unexpected thread summary type: %T", v)
 	}
-	return s, nil
+	return res.summary, nil
+}
+
+// threadSummaryResult is the value shared by singleflight callers summarizing the same thread.
+type threadSummaryResult struct {
+	summary   string
+	deltaMsgs int // messages sent to the model
 }
 
 // FormatPreviousSession formats an advisory <PREVIOUS_SESSION> block indicating that session rotation occurred.

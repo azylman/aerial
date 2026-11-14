@@ -15,6 +15,10 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -369,6 +373,15 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 	freshMsgs := []HistoryMessage{{ID: "m1", Content: "fresh", CreatedAt: now}}
 	zeroMsgs := []HistoryMessage{{ID: "m2", Content: "zero-timestamp", CreatedAt: time.Time{}}}
 	oldMsgs := []HistoryMessage{{ID: "m3", Content: "older than 4 hours", CreatedAt: now.Add(-10 * time.Hour)}}
+	sharedOnly := []wantPromptSpan{{name: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryShared.Bool(false)}}}
+	oneDelta := []wantPromptSpan{
+		{name: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryShared.Bool(false), attrPromptSummaryDeltaMsgs.Int(1)}},
+		{name: spanPromptSummaryLLM, parent: spanPrompt},
+	}
+	oneDeltaLLMFailed := []wantPromptSpan{
+		{name: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryShared.Bool(false), attrPromptSummaryDeltaMsgs.Int(1)}},
+		{name: spanPromptSummaryLLM, parent: spanPrompt, errored: true},
+	}
 
 	tests := []struct {
 		name, llmOut, wantSub, wantErrText string
@@ -376,16 +389,18 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 		opts                               []ThreadSummaryOption
 		llmErr                             error
 		wantPromptContains                 []string
+		wantSpans                          []wantPromptSpan
+		wantAbsent                         []string
 	}{
-		{name: "empty history", msgs: nil, wantErrText: "empty history"},
-		{name: "expired history", msgs: zeroMsgs, wantErrText: "no valid history"},
-		{name: "older than 4h thread history succeeds", msgs: oldMsgs, llmOut: "<THREAD_SUMMARY>Old thread preserved</THREAD_SUMMARY>", wantSub: "Old thread preserved"},
-		{name: "llm error", msgs: freshMsgs, llmErr: errors.New("simulated error"), wantErrText: "simulated error"},
-		{name: "valid XML summary", msgs: freshMsgs, llmOut: "<THREAD_SUMMARY>Summary</THREAD_SUMMARY>", wantSub: "Summary"},
-		{name: "missing closing tag", msgs: freshMsgs, llmOut: "<THREAD_SUMMARY>Missing end", wantErrText: "missing <THREAD_SUMMARY>"},
-		{name: "missing opening tag", msgs: freshMsgs, llmOut: "Missing start</THREAD_SUMMARY>", wantErrText: "missing <THREAD_SUMMARY>"},
-		{name: "malformed order", msgs: freshMsgs, llmOut: "</THREAD_SUMMARY><THREAD_SUMMARY>", wantErrText: "missing <THREAD_SUMMARY>"},
-		{name: "surrounding text extraction", msgs: freshMsgs, llmOut: "Banter\n<THREAD_SUMMARY>Key points</THREAD_SUMMARY>\nMore banter", wantSub: "Key points"},
+		{name: "empty history", msgs: nil, wantErrText: "empty history", wantAbsent: []string{spanPromptSummaryLLM}},
+		{name: "expired history", msgs: zeroMsgs, wantErrText: "no valid history", wantSpans: sharedOnly, wantAbsent: []string{spanPromptSummaryLLM}},
+		{name: "older than 4h thread history succeeds", msgs: oldMsgs, llmOut: "<THREAD_SUMMARY>Old thread preserved</THREAD_SUMMARY>", wantSub: "Old thread preserved", wantSpans: oneDelta},
+		{name: "llm error", msgs: freshMsgs, llmErr: errors.New("simulated error"), wantErrText: "simulated error", wantSpans: oneDeltaLLMFailed},
+		{name: "valid XML summary", msgs: freshMsgs, llmOut: "<THREAD_SUMMARY>Summary</THREAD_SUMMARY>", wantSub: "Summary", wantSpans: oneDelta},
+		{name: "missing closing tag", msgs: freshMsgs, llmOut: "<THREAD_SUMMARY>Missing end", wantErrText: "missing <THREAD_SUMMARY>", wantSpans: oneDelta},
+		{name: "missing opening tag", msgs: freshMsgs, llmOut: "Missing start</THREAD_SUMMARY>", wantErrText: "missing <THREAD_SUMMARY>", wantSpans: oneDelta},
+		{name: "malformed order", msgs: freshMsgs, llmOut: "</THREAD_SUMMARY><THREAD_SUMMARY>", wantErrText: "missing <THREAD_SUMMARY>", wantSpans: oneDelta},
+		{name: "surrounding text extraction", msgs: freshMsgs, llmOut: "Banter\n<THREAD_SUMMARY>Key points</THREAD_SUMMARY>\nMore banter", wantSub: "Key points", wantSpans: oneDelta},
 		{
 			name: "incremental summary with prior summary and origin anchor",
 			msgs: []HistoryMessage{
@@ -397,8 +412,9 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 			opts: []ThreadSummaryOption{
 				WithPriorSummary("Existing summary before watermark", "m-watermark"),
 			},
-			llmOut:  "<THREAD_SUMMARY>Updated rolling summary</THREAD_SUMMARY>",
-			wantSub: "Updated rolling summary",
+			llmOut:    "<THREAD_SUMMARY>Updated rolling summary</THREAD_SUMMARY>",
+			wantSub:   "Updated rolling summary",
+			wantSpans: oneDelta,
 			wantPromptContains: []string{
 				"<prior_thread_summary>",
 				"Existing summary before watermark",
@@ -419,7 +435,15 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 				capturedPrompt = prompt
 				return tc.llmOut, tc.llmErr
 			}
-			summary, err := SummarizeThreadHistoryWithGroup(context.Background(), new(singleflight.Group), mockLLM, "test-model", "th-"+tc.name, tc.msgs, tc.opts...)
+			rec, _, ctx, root := newPromptBuildRecorder()
+			summary, err := SummarizeThreadHistoryWithGroup(ctx, new(singleflight.Group), mockLLM, "test-model", "th-"+tc.name, tc.msgs, tc.opts...)
+			root.End()
+			assertPromptSpans(t, rec.Ended(), tc.wantSpans, tc.wantAbsent)
+			for _, s := range rec.Ended() {
+				if s.Name() == spanPromptSummaryLLM && attrMap(s.Attributes())[attrPromptSummaryPromptChars] != attribute.IntValue(len(capturedPrompt)) {
+					t.Errorf("summary_llm prompt chars = %v, want %d", attrMap(s.Attributes())[attrPromptSummaryPromptChars].String(), len(capturedPrompt))
+				}
+			}
 			if tc.wantErrText != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
 					t.Fatalf("expected error containing %q, got: %v", tc.wantErrText, err)
@@ -482,10 +506,14 @@ func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
 		return "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>", nil
 	}
 
+	rec := tracetest.NewSpanRecorder()
+	tracer := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)).Tracer("test")
 	sfg, done := new(singleflight.Group), make(chan string, 3)
 	for range 3 {
 		go func() {
-			summary, _ := SummarizeThreadHistoryWithGroup(context.Background(), sfg, mockLLM, "test-model", "thread-sf", msgs)
+			ctx, caller := tracer.Start(context.Background(), spanPromptThreadSummary)
+			summary, _ := SummarizeThreadHistoryWithGroup(ctx, sfg, mockLLM, "test-model", "thread-sf", msgs)
+			caller.End()
 			done <- summary
 		}()
 	}
@@ -510,6 +538,26 @@ func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Errorf("expected 1 call to LLM, got %d", calls.Load())
+	}
+
+	// Every caller's span records the shared wait and the leader's delta; the single model call
+	// lives under exactly one caller.
+	callerIDs := map[trace.SpanID]bool{}
+	var llmSpans []sdktrace.ReadOnlySpan
+	for _, s := range rec.Ended() {
+		switch s.Name() {
+		case spanPromptThreadSummary:
+			callerIDs[s.SpanContext().SpanID()] = true
+			attrs := attrMap(s.Attributes())
+			if attrs[attrPromptSummaryShared] != attribute.BoolValue(true) || attrs[attrPromptSummaryDeltaMsgs] != attribute.IntValue(1) {
+				t.Errorf("caller span attrs = %v, want shared=true delta_msgs=1", s.Attributes())
+			}
+		case spanPromptSummaryLLM:
+			llmSpans = append(llmSpans, s)
+		}
+	}
+	if len(callerIDs) != 3 || len(llmSpans) != 1 || !callerIDs[llmSpans[0].Parent().SpanID()] {
+		t.Errorf("got %d caller spans and %d summary_llm spans; want 3 callers and 1 llm span under one of them", len(callerIDs), len(llmSpans))
 	}
 }
 

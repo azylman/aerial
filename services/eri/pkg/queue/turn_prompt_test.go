@@ -18,6 +18,9 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -373,55 +376,182 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 	}
 }
 
-func TestBuildTurnPrompt_AmbientResolver(t *testing.T) {
+// buildTurnPromptCase is one buildTurnPrompt scenario; newBuildTurnPromptFixture turns it into a turnExecution.
+type buildTurnPromptCase struct {
+	name                                   string
+	ambCfg                                 *config.AmbientContextConfig
+	resolverErr                            error
+	resolverText                           string
+	isCold, threadSnapshot                 bool
+	mode                                   string
+	histMsgs                               []HistoryMessage
+	fetchErr                               error
+	cachedSum, cachedMsgID                 string
+	llmOut                                 string
+	llmErr                                 error
+	wantResolverCalled                     bool
+	wantPromptContains, wantPromptExcludes []string
+	wantSpans                              []wantPromptSpan
+	wantAbsent                             []string
+}
+
+func newBuildTurnPromptFixture(t *testing.T, tc buildTurnPromptCase, threadID string, tp trace.TracerProvider, resolverCalled *atomic.Bool) *turnExecution {
+	t.Helper()
+	store := setupTestStore(t)
+	if tc.cachedSum != "" {
+		if err := store.SaveThreadSummary(context.Background(), threadID, tc.cachedSum, tc.cachedMsgID); err != nil {
+			t.Fatalf("seed thread summary: %v", err)
+		}
+	}
+	pool := &WorkerPool{
+		ctx: context.Background(),
+		cfg: WorkerPoolConfig{
+			Store:          store,
+			TracerProvider: tp,
+			AmbientResolver: func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error) {
+				resolverCalled.Store(true)
+				return tc.resolverText, tc.resolverErr
+			},
+			HistoryFetcher: func(ctx context.Context, channelID, beforeID string, limit int) ([]HistoryMessage, error) {
+				return tc.histMsgs, tc.fetchErr
+			},
+			LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
+				return tc.llmOut, tc.llmErr
+			},
+		},
+	}
+	return &turnExecution{
+		pool: pool, effectiveName: "kitchen", threadID: threadID, currentSessionID: "sess-amb-1", isCold: tc.isCold,
+		policy: config.ChannelPolicy{AmbientContext: tc.ambCfg, Mode: tc.mode},
+		burst:  []db.Message{{ID: "m1", ThreadID: threadID, Content: "turn off kitchen lights"}},
+	}
+}
+
+func TestBuildTurnPrompt(t *testing.T) {
 	t.Parallel()
 	ambCfg := &config.AmbientContextConfig{Template: "Kitchen Temp: {{.temp}}"}
-	tests := []struct {
-		name                                   string
-		ambCfg                                 *config.AmbientContextConfig
-		resolverErr                            error
-		resolverText                           string
-		wantResolverCalled                     bool
-		wantPromptContains, wantPromptExcludes []string
-	}{
-		{name: "ConfiguredChannel", ambCfg: ambCfg, resolverText: "<ambient_context>\nKitchen Temp: 71F\n</ambient_context>", wantResolverCalled: true, wantPromptContains: []string{"<ambient_context>", "Kitchen Temp: 71F", "turn off kitchen lights"}},
-		{name: "UnconfiguredChannel_Bypass", ambCfg: nil, resolverText: "<ambient_context>should not appear</ambient_context>", wantResolverCalled: false, wantPromptContains: []string{"turn off kitchen lights"}, wantPromptExcludes: []string{"<ambient_context>"}},
-		{name: "ResolverErrorTolerance", ambCfg: ambCfg, resolverErr: errors.New("mcp tool timed out"), wantResolverCalled: true, wantPromptContains: []string{"turn off kitchen lights"}, wantPromptExcludes: []string{"<ambient_context>"}},
+	now := time.Now().UTC()
+	twoMsgs := []HistoryMessage{
+		{ID: "h-1", AuthorName: "Alex", Content: "plan the build", CreatedAt: now.Add(-time.Hour)},
+		{ID: "h-2", AuthorName: "Alex", Content: "ship it", CreatedAt: now.Add(-time.Minute)},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	summaryOut := "<THREAD_SUMMARY>Shipping the build</THREAD_SUMMARY>"
+	tests := []buildTurnPromptCase{
+		{
+			name: "ConfiguredChannel", ambCfg: ambCfg, resolverText: "<ambient_context>\nKitchen Temp: 71F\n</ambient_context>", wantResolverCalled: true,
+			wantPromptContains: []string{"<ambient_context>", "Kitchen Temp: 71F", "turn off kitchen lights"},
+			wantSpans: []wantPromptSpan{
+				{name: spanPrompt, attrs: []attribute.KeyValue{attrPromptColdStart.Bool(false)}},
+				{name: spanPromptChannelSnapshot, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSnapshotOK.Bool(false)}},
+				{name: spanPromptScopeInstr, parent: spanPrompt},
+				{name: spanPromptAmbientContext, parent: spanPrompt},
+			},
+			wantAbsent: []string{spanPromptThreadSummary, spanPromptHistoryFetch, spanPromptPrevSessionID},
+		},
+		{
+			name: "UnconfiguredChannel_Bypass", resolverText: "<ambient_context>should not appear</ambient_context>",
+			wantPromptContains: []string{"turn off kitchen lights"}, wantPromptExcludes: []string{"<ambient_context>"},
+			wantSpans:  []wantPromptSpan{{name: spanPromptScopeInstr, parent: spanPrompt}},
+			wantAbsent: []string{spanPromptAmbientContext},
+		},
+		{
+			name: "ResolverErrorTolerance", ambCfg: ambCfg, resolverErr: errors.New("mcp tool timed out"), wantResolverCalled: true,
+			wantPromptContains: []string{"turn off kitchen lights"}, wantPromptExcludes: []string{"<ambient_context>"},
+			wantSpans: []wantPromptSpan{{name: spanPromptAmbientContext, parent: spanPrompt, errored: true}},
+		},
+		{
+			name: "ColdThreadRefreshesSummary", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, llmOut: summaryOut,
+			wantPromptContains: []string{"Shipping the build", "turn off kitchen lights"},
+			wantSpans: []wantPromptSpan{
+				{name: spanPrompt, attrs: []attribute.KeyValue{attrPromptColdStart.Bool(true)}},
+				{name: spanPromptChannelSnapshot, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSnapshotOK.Bool(true)}},
+				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{
+					attrPromptSummaryOutcome.String("refreshed"), attrPromptSummaryHadPrior.Bool(false),
+					attrPromptSummaryDeltaMsgs.Int(2), attrPromptSummaryShared.Bool(false),
+				}},
+				{name: spanPromptSummaryLoad, parent: spanPromptThreadSummary},
+				{name: spanPromptHistoryFetch, parent: spanPromptThreadSummary, attrs: []attribute.KeyValue{attrPromptHistoryLimit.Int(100), attrPromptHistoryCount.Int(2)}},
+				{name: spanPromptSummaryLLM, parent: spanPromptThreadSummary},
+				{name: spanPromptSummarySave, parent: spanPromptThreadSummary},
+				{name: spanPromptPrevSessionID, parent: spanPrompt},
+				{name: spanPromptScopeInstr, parent: spanPrompt},
+			},
+			wantAbsent: []string{spanPromptAmbientContext, spanPromptPreviousSession},
+		},
+		{
+			name: "ColdThreadCacheHit", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-2",
+			wantPromptContains: []string{"Shipping the build"},
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("cache_hit")}},
+				{name: spanPromptHistoryFetch, parent: spanPromptThreadSummary, attrs: []attribute.KeyValue{attrPromptHistoryCount.Int(2)}},
+			},
+			wantAbsent: []string{spanPromptSummaryLLM, spanPromptSummarySave},
+		},
+		{
+			name: "ColdThreadSummaryFails", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, llmErr: errors.New("context deadline exceeded"),
+			wantPromptExcludes: []string{"<THREAD_SUMMARY>"},
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptThreadSummary, parent: spanPrompt, errored: true, attrs: []attribute.KeyValue{
+					attrPromptSummaryOutcome.String("failed"), attrPromptSummaryHadPrior.Bool(false), attrPromptSummaryDeltaMsgs.Int(2),
+				}},
+				{name: spanPromptSummaryLLM, parent: spanPromptThreadSummary, errored: true},
+			},
+			wantAbsent: []string{spanPromptSummarySave},
+		},
+		{
+			name: "ColdThreadHistoryFetchFails", isCold: true, threadSnapshot: true, fetchErr: errors.New("discord 503"),
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("no_history")}},
+				{name: spanPromptHistoryFetch, parent: spanPromptThreadSummary, errored: true, attrs: []attribute.KeyValue{attrPromptHistoryLimit.Int(100), attrPromptHistoryCount.Int(0)}},
+			},
+			wantAbsent: []string{spanPromptSummaryLLM},
+		},
+		{
+			name: "WarmChannelModeLookback", mode: "channel", histMsgs: twoMsgs[1:],
+			wantPromptContains: []string{"ship it"},
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptHistoryFetch, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptHistoryLimit.Int(10), attrPromptHistoryCount.Int(1)}},
+			},
+			wantAbsent: []string{spanPromptThreadSummary, spanPromptPrevSessionID},
+		},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var resolverCalled atomic.Bool
-			pool := &WorkerPool{
-				ctx: context.Background(),
-				cfg: WorkerPoolConfig{
-					AmbientResolver: func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error) {
-						resolverCalled.Store(true)
-						if tt.resolverErr != nil {
-							return "", tt.resolverErr
-						}
-						return tt.resolverText, nil
-					},
-				},
+			threadID := fmt.Sprintf("t-btp-%d", i)
+			if tc.threadSnapshot {
+				CacheDiscordChannel(&discordgo.Channel{ID: threadID, ParentID: "p-" + threadID, Type: discordgo.ChannelTypeGuildPublicThread})
 			}
-			te := &turnExecution{
-				pool: pool, effectiveName: "kitchen", threadID: "t-amb-1", currentSessionID: "sess-amb-1",
-				policy: config.ChannelPolicy{AmbientContext: tt.ambCfg},
-				burst:  []db.Message{{ID: "m1", ThreadID: "t-amb-1", Content: "turn off kitchen lights"}},
+
+			var resolverCalled, untracedResolverCalled atomic.Bool
+			rec, tp, ctx, root := newPromptBuildRecorder()
+			te := newBuildTurnPromptFixture(t, tc, threadID, tp, &resolverCalled)
+			te.buildTurnPrompt(ctx)
+			root.End()
+
+			// Same inputs without a recording tracer must yield byte-identical prompt text.
+			untraced := newBuildTurnPromptFixture(t, tc, threadID, nil, &untracedResolverCalled)
+			untraced.buildTurnPrompt(context.Background())
+			if te.turnPrompt != untraced.turnPrompt {
+				t.Errorf("traced prompt differs from untraced prompt:\n%s\n---\n%s", te.turnPrompt, untraced.turnPrompt)
 			}
-			te.buildTurnPrompt()
-			if called := resolverCalled.Load(); called != tt.wantResolverCalled {
-				t.Errorf("resolverCalled = %t, want %t", called, tt.wantResolverCalled)
+
+			if called := resolverCalled.Load(); called != tc.wantResolverCalled {
+				t.Errorf("resolverCalled = %t, want %t", called, tc.wantResolverCalled)
 			}
-			for _, sub := range tt.wantPromptContains {
+			for _, sub := range tc.wantPromptContains {
 				if !strings.Contains(te.turnPrompt, sub) {
 					t.Errorf("expected prompt containing %q", sub)
 				}
 			}
-			for _, sub := range tt.wantPromptExcludes {
+			for _, sub := range tc.wantPromptExcludes {
 				if strings.Contains(te.turnPrompt, sub) {
 					t.Errorf("expected prompt NOT containing %q", sub)
 				}
+			}
+			assertPromptSpans(t, rec.Ended(), tc.wantSpans, tc.wantAbsent)
+			if got := attrMap(root.(sdktrace.ReadOnlySpan).Attributes())[attrPromptChars]; got != attribute.IntValue(len(te.turnPrompt)) {
+				t.Errorf("prompt.build chars = %v, want %d", got.String(), len(te.turnPrompt))
 			}
 		})
 	}
@@ -510,6 +640,8 @@ func TestResolveThreadColdStartSummary_IncrementalAndFallback(t *testing.T) {
 		wantSummary   string
 		wantLLMCalled bool
 		wantSaved     bool
+		wantSpans     []wantPromptSpan
+		wantAbsent    []string
 	}{
 		{
 			name:        "empty history returns cached summary",
@@ -517,6 +649,33 @@ func TestResolveThreadColdStartSummary_IncrementalAndFallback(t *testing.T) {
 			cachedMsgID: "msg-1",
 			histMsgs:    nil,
 			wantSummary: "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("no_history")}},
+				{name: spanPromptSummaryLoad, parent: spanPromptThreadSummary},
+			},
+			wantAbsent: []string{spanPromptSummaryLLM, spanPromptSummarySave},
+		},
+		{
+			name:        "watermark match is a cache hit",
+			cachedSum:   "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
+			cachedMsgID: "msg-1",
+			histMsgs:    []HistoryMessage{{ID: "msg-1", Content: "done", CreatedAt: now}},
+			wantSummary: "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("cache_hit")}},
+			},
+			wantAbsent: []string{spanPromptSummaryLLM, spanPromptSummarySave},
+		},
+		{
+			name:          "first summary without prior refreshes and saves",
+			histMsgs:      []HistoryMessage{{ID: "msg-new", Content: "new work", CreatedAt: now}},
+			llmOut:        "<THREAD_SUMMARY></THREAD_SUMMARY>",
+			wantSummary:   "<THREAD_SUMMARY></THREAD_SUMMARY>",
+			wantLLMCalled: true,
+			wantSaved:     true,
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("refreshed"), attrPromptSummaryDeltaMsgs.Int(1)}},
+			},
 		},
 		{
 			name:        "all zero-timestamp history returns cached summary",
@@ -526,6 +685,12 @@ func TestResolveThreadColdStartSummary_IncrementalAndFallback(t *testing.T) {
 				{ID: "msg-zero", Content: "zero", CreatedAt: time.Time{}},
 			},
 			wantSummary: "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptThreadSummary, parent: spanPrompt, errored: true, attrs: []attribute.KeyValue{
+					attrPromptSummaryOutcome.String("failed"), attrPromptSummaryHadPrior.Bool(true), attrPromptSummaryShared.Bool(false),
+				}},
+			},
+			wantAbsent: []string{spanPromptSummaryLLM},
 		},
 		{
 			name:          "llm error falls back to cached summary",
@@ -535,6 +700,13 @@ func TestResolveThreadColdStartSummary_IncrementalAndFallback(t *testing.T) {
 			llmErr:        errors.New("flash rate limit"),
 			wantSummary:   "<THREAD_SUMMARY>Fallback Cached</THREAD_SUMMARY>",
 			wantLLMCalled: true,
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptThreadSummary, parent: spanPrompt, errored: true, attrs: []attribute.KeyValue{
+					attrPromptSummaryOutcome.String("failed"), attrPromptSummaryHadPrior.Bool(true), attrPromptSummaryDeltaMsgs.Int(1),
+				}},
+				{name: spanPromptSummaryLLM, parent: spanPromptThreadSummary, errored: true},
+			},
+			wantAbsent: []string{spanPromptSummarySave},
 		},
 		{
 			name:          "llm error without cached summary falls back to empty",
@@ -544,6 +716,11 @@ func TestResolveThreadColdStartSummary_IncrementalAndFallback(t *testing.T) {
 			llmErr:        errors.New("flash rate limit"),
 			wantSummary:   "",
 			wantLLMCalled: true,
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptThreadSummary, parent: spanPrompt, errored: true, attrs: []attribute.KeyValue{
+					attrPromptSummaryOutcome.String("failed"), attrPromptSummaryHadPrior.Bool(false), attrPromptSummaryDeltaMsgs.Int(1),
+				}},
+			},
 		},
 		{
 			name:          "incremental update generates new summary and saves watermark",
@@ -554,6 +731,15 @@ func TestResolveThreadColdStartSummary_IncrementalAndFallback(t *testing.T) {
 			wantSummary:   "<THREAD_SUMMARY>New Incremental Summary</THREAD_SUMMARY>",
 			wantLLMCalled: true,
 			wantSaved:     true,
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{
+					attrPromptSummaryOutcome.String("refreshed"), attrPromptSummaryHadPrior.Bool(true),
+					attrPromptSummaryDeltaMsgs.Int(1), attrPromptSummaryShared.Bool(false),
+				}},
+				{name: spanPromptSummaryLoad, parent: spanPromptThreadSummary},
+				{name: spanPromptSummaryLLM, parent: spanPromptThreadSummary},
+				{name: spanPromptSummarySave, parent: spanPromptThreadSummary},
+			},
 		},
 	}
 
@@ -567,10 +753,12 @@ func TestResolveThreadColdStartSummary_IncrementalAndFallback(t *testing.T) {
 				_ = store.SaveThreadSummary(context.Background(), "th-test", tc.cachedSum, tc.cachedMsgID)
 			}
 
+			rec, tp, ctx, root := newPromptBuildRecorder()
 			pool := &WorkerPool{
 				ctx: context.Background(),
 				cfg: WorkerPoolConfig{
-					Store: store,
+					Store:          store,
+					TracerProvider: tp,
 					LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
 						llmCalled.Store(true)
 						if tc.llmErr != nil {
@@ -586,10 +774,11 @@ func TestResolveThreadColdStartSummary_IncrementalAndFallback(t *testing.T) {
 				threadID: "th-test",
 			}
 
-			// Hook saveThreadSummary tracking if needed via db.Store wrapper or verify in store
-			got := te.resolveThreadColdStartSummary(func(int) []HistoryMessage {
+			got := te.resolveThreadColdStartSummary(ctx, func(context.Context, int) []HistoryMessage {
 				return tc.histMsgs
 			})
+			root.End()
+			assertPromptSpans(t, rec.Ended(), tc.wantSpans, tc.wantAbsent)
 
 			if got != tc.wantSummary {
 				t.Errorf("resolveThreadColdStartSummary() = %q, want %q", got, tc.wantSummary)

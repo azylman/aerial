@@ -34,6 +34,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func TestWorkerPool_ConfigInjection(t *testing.T) {
@@ -5038,35 +5039,94 @@ func TestFormatDispatchHistory(t *testing.T) {
 
 func TestBuildDispatchPrompt(t *testing.T) {
 	t.Parallel()
+	const directive = "<SYSTEM_DIRECTIVE>\nrun background task\n\nOnly formulate and output your final response once all immediate work is complete. This is a headless dispatch turn; your response will not be delivered to Discord.\n</SYSTEM_DIRECTIVE>"
+	runAt := time.Date(2026, 11, 13, 9, 30, 0, 0, time.UTC)
 
 	tests := []struct {
-		name       string
-		te         *turnExecution
-		wantSubstr string
-		wantEmpty  bool
+		name          string
+		nilTE         bool
+		isCold        bool
+		sessionID     string
+		prevSessionID string
+		recent        []string // summaries of completed dispatches already in the session
+		failRecent    error
+		wantPrompt    string
+		wantSpans     []wantPromptSpan
+		wantAbsent    []string
 	}{
-		{name: "nil turnExecution", te: nil, wantEmpty: true},
+		{name: "nil turnExecution", nilTE: true, wantAbsent: []string{spanPromptRecentDispatches, spanPromptPrevSessionID}},
 		{
-			name: "dispatch prompt populated",
-			te: &turnExecution{
-				dispatch: &db.Dispatch{
-					Prompt: "run background task",
-				},
+			name:       "warm dispatch prompt populated",
+			sessionID:  "sess-warm",
+			recent:     []string{"ignored on warm turns"},
+			wantPrompt: directive,
+			wantSpans:  []wantPromptSpan{{name: spanPrompt, attrs: []attribute.KeyValue{attrPromptColdStart.Bool(false), attrPromptChars.Int(224)}}},
+			wantAbsent: []string{spanPromptRecentDispatches, spanPromptPrevSessionID},
+		},
+		{
+			name:      "cold dispatch loads recent session history",
+			isCold:    true,
+			sessionID: "sess-cold",
+			recent:    []string{"first run", "second run"},
+			wantPrompt: "<DISPATCH_HISTORY>\nRecent runs for session sess-cold:\n" +
+				"- [2026-11-13T09:30:00Z] status=COMPLETED: first run\n" +
+				"- [2026-11-13T09:30:00Z] status=COMPLETED: second run\n" +
+				"</DISPATCH_HISTORY>\n\n" + directive,
+			wantSpans: []wantPromptSpan{
+				{name: spanPrompt, attrs: []attribute.KeyValue{attrPromptColdStart.Bool(true)}},
+				{name: spanPromptPrevSessionID, parent: spanPrompt},
+				{name: spanPromptRecentDispatches, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptDispatchCount.Int(2)}},
 			},
-			wantSubstr: "run background task",
+		},
+		{
+			name:          "cold dispatch survives recent history failure",
+			isCold:        true,
+			sessionID:     "sess-fail",
+			prevSessionID: "prev-sess-1",
+			recent:        []string{"never read"},
+			failRecent:    errors.New("connection reset"),
+			wantPrompt: "<PREVIOUS_SESSION>\nNote: This thread was recently rotated to preserve token budget and optimize context window performance.\n" +
+				"Previous conversation ID: prev-sess-1\n" +
+				"Prior conversation context, active decisions, and recent channel history are summarized in thread summary and channel message history. " +
+				"Semantic facts and user preferences are preserved in long-term memory. " +
+				"If continuity details are missing, you may inspect the prior session (prev-sess-1) via transcript-search or thread history.\n" +
+				"</PREVIOUS_SESSION>\n\n" + directive,
+			wantSpans: []wantPromptSpan{
+				{name: spanPromptRecentDispatches, parent: spanPrompt, errored: true},
+			},
+			wantAbsent: []string{spanPromptPrevSessionID},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := tc.te.buildDispatchPrompt()
-			if tc.wantEmpty && got != "" {
-				t.Fatalf("expected empty string, got %q", got)
+			store := setupTestStore(t)
+			for i, summary := range tc.recent {
+				d := db.Dispatch{ID: fmt.Sprintf("%s-%d", tc.sessionID, i), SessionID: tc.sessionID, Status: db.StatusCompleted, Summary: summary, CreatedAt: runAt}
+				if err := store.InsertDispatch(context.Background(), d); err != nil {
+					t.Fatalf("seed dispatch: %v", err)
+				}
 			}
-			if !tc.wantEmpty && !strings.Contains(got, tc.wantSubstr) {
-				t.Fatalf("expected %q to contain %q", got, tc.wantSubstr)
+			if tc.failRecent != nil {
+				store.FailNext("GetRecentSessionDispatches", tc.failRecent)
 			}
+			rec, tp, ctx, root := newPromptBuildRecorder()
+			var te *turnExecution
+			if !tc.nilTE {
+				te = &turnExecution{
+					pool:              &WorkerPool{ctx: context.Background(), cfg: WorkerPoolConfig{Store: store, TracerProvider: tp}},
+					dispatch:          &db.Dispatch{ID: "d-current", SessionID: tc.sessionID, Prompt: "run background task"},
+					isCold:            tc.isCold,
+					previousSessionID: tc.prevSessionID,
+				}
+			}
+			got := te.buildDispatchPrompt(ctx)
+			root.End()
+			if got != tc.wantPrompt {
+				t.Errorf("buildDispatchPrompt() =\n%q\nwant\n%q", got, tc.wantPrompt)
+			}
+			assertPromptSpans(t, rec.Ended(), tc.wantSpans, tc.wantAbsent)
 		})
 	}
 }
