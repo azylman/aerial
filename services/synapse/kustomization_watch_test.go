@@ -494,8 +494,50 @@ func (r *recordingSink) hasPendingRollouts(context.Context) (bool, error) {
 	return r.pending, nil
 }
 
+type kustomizationWatcherRunTestCase struct {
+	name         string
+	lists        []kubeRoute
+	watches      []kubeRoute
+	source       kubeWatchSource
+	failStatus   bool
+	pending      bool
+	wantRequests []string
+	wantEvents   []string
+}
+
+func runKustomizationWatcherCase(t *testing.T, tc kustomizationWatcherRunTestCase) {
+	t.Helper()
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fixture := &watchFixture{lists: tc.lists, watches: tc.watches, cancel: cancel}
+	ts := httptest.NewServer(fixture)
+	defer ts.Close()
+	disp := NewDefaultOutboundDispatcher("", ts.Client())
+	disp.SetKubeConfig(ts.URL, "test-token")
+	sink := &recordingSink{failStatus: tc.failStatus, pending: tc.pending}
+
+	newKubeWatcher(disp, sink, tc.source, time.Millisecond).Run(ctx)
+
+	if got := fixture.requests; !slices.Equal(got, tc.wantRequests) {
+		t.Errorf("requests = %v, want %v", got, tc.wantRequests)
+	}
+	if !slices.Equal(sink.events, tc.wantEvents) {
+		t.Errorf("events = %q, want %q", sink.events, tc.wantEvents)
+	}
+}
+
 func TestKustomizationWatcherRun(t *testing.T) {
 	t.Parallel()
+
+	for _, tc := range kustomizationWatcherRunTestCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			runKustomizationWatcherCase(t, tc)
+		})
+	}
+}
+
+func kustomizationWatcherRunTestCases() []kustomizationWatcherRunTestCase {
 	list := func(rv string, names ...string) kubeRoute {
 		items := make([]string, 0, len(names))
 		for _, n := range names {
@@ -519,16 +561,7 @@ func TestKustomizationWatcherRun(t *testing.T) {
 	deployments := workloadSource{path: "/apis/apps/v1/deployments"}
 	gone := `{"type":"ERROR","object":{"kind":"Status","code":410,"message":"too old resource version"}}` + "\n"
 
-	tests := []struct {
-		name         string
-		lists        []kubeRoute
-		watches      []kubeRoute
-		source       kubeWatchSource
-		failStatus   bool
-		pending      bool
-		wantRequests []string
-		wantEvents   []string
-	}{
+	return []kustomizationWatcherRunTestCase{
 		{
 			source:       kustomizationSource{namespace: "flux-system"},
 			name:         "list then chunked watch stream applies events and re-lists when the stream ends",
@@ -639,28 +672,6 @@ func TestKustomizationWatcherRun(t *testing.T) {
 			wantRequests: []string{deploymentsList, deploymentsList, deploymentsList, deploymentsWatch + "9"},
 			wantEvents:   []string{"pending? false"},
 		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			fixture := &watchFixture{lists: tc.lists, watches: tc.watches, cancel: cancel}
-			ts := httptest.NewServer(fixture)
-			defer ts.Close()
-			disp := NewDefaultOutboundDispatcher("", ts.Client())
-			disp.SetKubeConfig(ts.URL, "test-token")
-			sink := &recordingSink{failStatus: tc.failStatus, pending: tc.pending}
-
-			newKubeWatcher(disp, sink, tc.source, time.Millisecond).Run(ctx)
-
-			if got := fixture.requests; !slices.Equal(got, tc.wantRequests) {
-				t.Errorf("requests = %v, want %v", got, tc.wantRequests)
-			}
-			if !slices.Equal(sink.events, tc.wantEvents) {
-				t.Errorf("events = %q, want %q", sink.events, tc.wantEvents)
-			}
-		})
 	}
 }
 

@@ -4,31 +4,72 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // --- 3. GitHub Webhook HTTP Handler & Event Processing ---
 
+type ghWebhookTestCase struct {
+	name, path, wantMetricSubstr string
+	body                         io.Reader
+	headers                      map[string]string
+	river                        *mockRiverInserter
+	wantStatus, wantInserted     int
+}
+
+func assertGitHubWebhookResponse(t *testing.T, tc ghWebhookTestCase, rec *httptest.ResponseRecorder, routes http.Handler) {
+	t.Helper()
+	if rec.Code != tc.wantStatus {
+		t.Fatalf("expected status %d, got %d", tc.wantStatus, rec.Code)
+	}
+	if tc.wantInserted > 0 && tc.river != nil {
+		if len(tc.river.insertedJobs) != tc.wantInserted {
+			t.Fatalf("expected %d inserted jobs, got %d", tc.wantInserted, len(tc.river.insertedJobs))
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse json response: %v", err)
+		}
+		if resp["status"] != "accepted" || resp["event"] != tc.headers["X-GitHub-Event"] || resp["delivery"] != tc.headers["X-GitHub-Delivery"] {
+			t.Errorf("unexpected response body: %+v", resp)
+		}
+		if tc.river.insertedJobs[0].Event != tc.headers["X-GitHub-Event"] || tc.river.insertedJobs[0].Delivery != tc.headers["X-GitHub-Delivery"] {
+			t.Errorf("unexpected inserted jobs: %+v", tc.river.insertedJobs)
+		}
+	}
+	if tc.wantMetricSubstr != "" {
+		recM := doHTTPRequest(routes, http.MethodGet, "/metrics", nil, nil)
+		if !strings.Contains(recM.Body.String(), tc.wantMetricSubstr) {
+			t.Errorf("expected /metrics to include %q, got:\n%s", tc.wantMetricSubstr, recM.Body.String())
+		}
+	}
+}
+
+func runGitHubWebhookCase(t *testing.T, tc ghWebhookTestCase) {
+	t.Helper()
+	t.Parallel()
+	var srv *RouterServer
+	if tc.river != nil {
+		srv = NewRouterServer(fixedConfig(Config{}), nil, tc.river)
+	} else {
+		srv = NewRouterServer(fixedConfig(Config{}), nil)
+	}
+	routes := srv.Routes()
+	rec := doHTTPRequest(routes, http.MethodPost, tc.path, tc.body, tc.headers)
+	assertGitHubWebhookResponse(t, tc, rec, routes)
+}
+
 func TestHandleGitHubWebhook(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name, path, wantMetricSubstr string
-		body                         io.Reader
-		headers                      map[string]string
-		river                        *mockRiverInserter
-		wantStatus, wantInserted     int
-	}{
+	tests := []ghWebhookTestCase{
 		{name: "missing X-GitHub-Event header", path: "/api/webhooks/github", body: strings.NewReader(`{}`), wantStatus: http.StatusBadRequest},
 		{name: "read error in body", path: "/api/webhooks/github", body: errReader{}, headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusBadRequest},
 		{name: "river client nil", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusInternalServerError},
@@ -40,40 +81,7 @@ func TestHandleGitHubWebhook(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var srv *RouterServer
-			if tc.river != nil {
-				srv = NewRouterServer(fixedConfig(Config{}), nil, tc.river)
-			} else {
-				srv = NewRouterServer(fixedConfig(Config{}), nil)
-			}
-			routes := srv.Routes()
-
-			rec := doHTTPRequest(routes, http.MethodPost, tc.path, tc.body, tc.headers)
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("expected status %d, got %d", tc.wantStatus, rec.Code)
-			}
-			if tc.wantInserted > 0 && tc.river != nil {
-				if len(tc.river.insertedJobs) != tc.wantInserted {
-					t.Fatalf("expected %d inserted jobs, got %d", tc.wantInserted, len(tc.river.insertedJobs))
-				}
-				var resp map[string]any
-				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-					t.Fatalf("failed to parse json response: %v", err)
-				}
-				if resp["status"] != "accepted" || resp["event"] != tc.headers["X-GitHub-Event"] || resp["delivery"] != tc.headers["X-GitHub-Delivery"] {
-					t.Errorf("unexpected response body: %+v", resp)
-				}
-				if tc.river.insertedJobs[0].Event != tc.headers["X-GitHub-Event"] || tc.river.insertedJobs[0].Delivery != tc.headers["X-GitHub-Delivery"] {
-					t.Errorf("unexpected inserted jobs: %+v", tc.river.insertedJobs)
-				}
-			}
-			if tc.wantMetricSubstr != "" {
-				recM := doHTTPRequest(routes, http.MethodGet, "/metrics", nil, nil)
-				if !strings.Contains(recM.Body.String(), tc.wantMetricSubstr) {
-					t.Errorf("expected /metrics to include %q, got:\n%s", tc.wantMetricSubstr, recM.Body.String())
-				}
-			}
+			runGitHubWebhookCase(t, tc)
 		})
 	}
 
@@ -173,7 +181,229 @@ func TestProcessGitHubEvent(t *testing.T) {
 	}))
 	t.Cleanup(mockServer.Close)
 
-	cases := []ghEventCase{
+	cases := processGitHubEventTestCases()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runProcessGitHubEventCase(ctx, t, tc, mockServer, &ghPaths)
+		})
+	}
+}
+
+func assertEventRegistryCalls(t *testing.T, tc ghEventCase) {
+	t.Helper()
+	if tc.reg == nil {
+		return
+	}
+	assertEventRegistryTransitionCalls(t, tc)
+	assertEventRegistryLifecycleCalls(t, tc)
+}
+
+func assertEventRegistryTransitionCalls(t *testing.T, tc ghEventCase) {
+	t.Helper()
+	if len(tc.reg.mergedCalls) != tc.wantMergedCalls {
+		t.Errorf("mergedCalls = %d, want %d", len(tc.reg.mergedCalls), tc.wantMergedCalls)
+	}
+	if tc.wantMergeSHA != "" && len(tc.reg.mergedCalls) > 0 && tc.reg.mergedCalls[0].mergeSHA != tc.wantMergeSHA {
+		t.Errorf("mergedCalls mergeSHA = %q, want %q", tc.reg.mergedCalls[0].mergeSHA, tc.wantMergeSHA)
+	}
+	if len(tc.reg.closedUnmergedCalls) != tc.wantClosedCalls {
+		t.Errorf("closedUnmergedCalls = %d, want %d", len(tc.reg.closedUnmergedCalls), tc.wantClosedCalls)
+	}
+	if len(tc.reg.syncCalls) != tc.wantSyncCalls {
+		t.Errorf("syncCalls = %d, want %d", len(tc.reg.syncCalls), tc.wantSyncCalls)
+	}
+	if len(tc.reg.ciFailedCalls) != tc.wantCIFailedCalls {
+		t.Errorf("ciFailedCalls = %d, want %d", len(tc.reg.ciFailedCalls), tc.wantCIFailedCalls)
+	}
+	if len(tc.reg.ciFailedBySHACalls) != tc.wantCIFailedSHAs {
+		t.Errorf("ciFailedBySHACalls = %d, want %d", len(tc.reg.ciFailedBySHACalls), tc.wantCIFailedSHAs)
+	}
+	if tc.wantHeadSHA != "" && len(tc.reg.ciFailedBySHACalls) > 0 && tc.reg.ciFailedBySHACalls[0].headSHA != tc.wantHeadSHA {
+		t.Errorf("ciFailedBySHACalls headSHA = %q, want %q", tc.reg.ciFailedBySHACalls[0].headSHA, tc.wantHeadSHA)
+	}
+}
+
+func assertEventRegistryLifecycleCalls(t *testing.T, tc ghEventCase) {
+	t.Helper()
+	if len(tc.reg.backfillCalls) != tc.wantBackfillCalls {
+		t.Errorf("backfillCalls = %d, want %d", len(tc.reg.backfillCalls), tc.wantBackfillCalls)
+	}
+	if tc.wantMergeSHA != "" && len(tc.reg.backfillCalls) > 0 && tc.reg.backfillCalls[0].mergeSHA != tc.wantMergeSHA {
+		t.Errorf("backfillCalls mergeSHA = %q, want %q", tc.reg.backfillCalls[0].mergeSHA, tc.wantMergeSHA)
+	}
+	if len(tc.reg.conflictCalls) != tc.wantConflictCalls {
+		t.Errorf("conflictCalls = %d, want %d", len(tc.reg.conflictCalls), tc.wantConflictCalls)
+	}
+	if len(tc.reg.advanceVanadisCalls) != tc.wantAdvanceCalls {
+		t.Errorf("advanceVanadisCalls = %d, want %d", len(tc.reg.advanceVanadisCalls), tc.wantAdvanceCalls)
+	}
+	if len(tc.reg.failVanadisCalls) != tc.wantFailVanadis {
+		t.Errorf("failVanadisCalls = %d, want %d", len(tc.reg.failVanadisCalls), tc.wantFailVanadis)
+	}
+	if len(tc.reg.ensureCalls) != tc.wantEnsureCalls {
+		t.Errorf("ensureCalls = %d, want %d", len(tc.reg.ensureCalls), tc.wantEnsureCalls)
+	}
+	if len(tc.reg.recordCheckCalls) != tc.wantRecordCheckCalls {
+		t.Errorf("recordCheckCalls = %d, want %d", len(tc.reg.recordCheckCalls), tc.wantRecordCheckCalls)
+	}
+	if tc.wantRecordCheckState != "" && len(tc.reg.recordCheckCalls) > 0 && tc.reg.recordCheckCalls[0].checkState != tc.wantRecordCheckState {
+		t.Errorf("recordCheckCalls checkState = %q, want %q", tc.reg.recordCheckCalls[0].checkState, tc.wantRecordCheckState)
+	}
+}
+
+func assertEventDispatcherCalls(t *testing.T, tc ghEventCase) {
+	t.Helper()
+	if tc.disp == nil {
+		return
+	}
+	assertEventDispatcherPushesAndReconciles(t, tc)
+	assertEventDispatcherPromptsAndDMs(t, tc)
+}
+
+func assertEventDispatcherPushesAndReconciles(t *testing.T, tc ghEventCase) {
+	t.Helper()
+	gitPushes := tc.disp.GitPushCalls()
+	if len(gitPushes) != tc.wantGitPushes {
+		t.Errorf("gitPushes = %d, want %d", len(gitPushes), tc.wantGitPushes)
+	}
+	if tc.wantGitPushes > 0 && len(gitPushes) > 0 {
+		if tc.wantTargetID != "" && gitPushes[0].TargetID != tc.wantTargetID {
+			t.Errorf("git push TargetID = %q, want %q", gitPushes[0].TargetID, tc.wantTargetID)
+		}
+		if tc.wantPR != 0 && gitPushes[0].PRNumber != tc.wantPR {
+			t.Errorf("git push PRNumber = %d, want %d", gitPushes[0].PRNumber, tc.wantPR)
+		}
+	}
+	if got := tc.disp.ReconcileCalls(); !slices.Equal(got, tc.wantReconciles) {
+		t.Errorf("reconcile calls = %v, want %v", got, tc.wantReconciles)
+	}
+}
+
+func assertEventDispatcherPromptsAndDMs(t *testing.T, tc ghEventCase) {
+	t.Helper()
+	dispatches := tc.disp.DispatchCalls()
+	if len(dispatches) != tc.wantDispatches {
+		t.Errorf("dispatches = %d, want %d", len(dispatches), tc.wantDispatches)
+	}
+	if tc.wantPromptSubstr != "" && len(dispatches) > 0 && !strings.Contains(dispatches[len(dispatches)-1].Prompt, tc.wantPromptSubstr) {
+		t.Errorf("expected dispatch to contain %q, got %+v", tc.wantPromptSubstr, dispatches)
+	}
+	prompts := tc.disp.PromptCalls()
+	if len(prompts) != tc.wantPrompts {
+		t.Errorf("prompts = %d, want %d", len(prompts), tc.wantPrompts)
+	}
+	if tc.wantPromptSubstr != "" && len(prompts) > 0 && !strings.Contains(prompts[len(prompts)-1].Prompt, tc.wantPromptSubstr) {
+		t.Errorf("expected prompt to contain %q, got %+v", tc.wantPromptSubstr, prompts)
+	}
+	dms := tc.disp.DirectMessageCalls()
+	if len(dms) != tc.wantDMs {
+		t.Errorf("dms = %d, want %d", len(dms), tc.wantDMs)
+	}
+	if tc.wantDMSubstr != "" && (len(dms) == 0 || !strings.Contains(dms[len(dms)-1].Content, tc.wantDMSubstr)) {
+		t.Errorf("expected DM to contain %q, got %+v", tc.wantDMSubstr, dms)
+	}
+}
+
+func assertEventResult(t *testing.T, tc ghEventCase, res *ResolvedGitHubEvent, ghPaths *sync.Map) {
+	t.Helper()
+	if tc.spyNoGitHubHit {
+		if _, hit := ghPaths.Load("/repos/azylman/aerial/commits/localsha123/pulls"); hit {
+			t.Fatalf("expected 0 GitHub API hits for localsha123, but endpoint was called")
+		}
+	}
+	if tc.wantUpdatedBranchHit != "" {
+		if _, hit := ghPaths.Load(tc.wantUpdatedBranchHit); !hit {
+			t.Errorf("expected branch update hit for %q, but was not called", tc.wantUpdatedBranchHit)
+		}
+	}
+	assertEventBasicFields(t, tc, res)
+	assertEventRegistryCalls(t, tc)
+	assertEventDispatcherCalls(t, tc)
+}
+
+func assertEventBasicFields(t *testing.T, tc ghEventCase, res *ResolvedGitHubEvent) {
+	t.Helper()
+	checkFields := []struct {
+		name, got, want string
+	}{
+		{"Repo", res.Repo, tc.wantRepo},
+		{"Action", res.Action, tc.wantAction},
+		{"Branch", res.Branch, tc.wantBranch},
+		{"HeadSHA", res.HeadSHA, tc.wantHeadSHA},
+		{"MergeSHA", res.MergeSHA, tc.wantMergeSHA},
+		{"TargetID", res.TargetID, tc.wantTargetID},
+		{"ResolutionSource", res.ResolutionSource, tc.wantSource},
+		{"Conclusion", res.Conclusion, tc.wantConclusion},
+		{"Sender", res.Sender, tc.wantSender},
+	}
+	for _, f := range checkFields {
+		if f.want != "" && f.got != f.want {
+			t.Errorf("%s = %q, want %q", f.name, f.got, f.want)
+		}
+	}
+	if tc.wantPR != 0 && res.PRNumber != tc.wantPR {
+		t.Errorf("PRNumber = %d, want %d", res.PRNumber, tc.wantPR)
+	}
+}
+
+func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase, mockServer *httptest.Server, ghPaths *sync.Map) {
+	t.Helper()
+	t.Parallel()
+	var inserters []RiverInserter
+	if tc.river != nil {
+		inserters = append(inserters, tc.river)
+	}
+	var reg PRRegistryUpdater
+	if tc.reg != nil {
+		reg = tc.reg
+	}
+	var disp OutboundDispatcher
+	if tc.disp != nil {
+		disp = tc.disp
+	}
+	srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: true}, mockServer.Client(), reg, disp, inserters...)
+	srv.onProcessed = func(string, string) {}
+
+	if tc.priorEvent != nil {
+		if _, err := srv.ProcessGitHubEvent(ctx, tc.priorEvent.event, tc.priorEvent.delivery, []byte(tc.priorEvent.payload)); err != nil {
+			t.Fatalf("priorEvent failed: %v", err)
+		}
+	}
+
+	res, err := srv.ProcessGitHubEvent(ctx, tc.event, tc.delivery, []byte(tc.payload))
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ProcessGitHubEvent() err = %v, wantErr %v", err, tc.wantErr)
+	}
+	if tc.wantErr {
+		return
+	}
+	assertEventResult(t, tc, res, ghPaths)
+}
+
+func processGitHubEventTestCases() []ghEventCase {
+	p1 := processGitHubEventCasesPart1()
+	p2 := processGitHubEventCasesPart2()
+	p3 := processGitHubEventCasesPart3()
+	p4 := processGitHubEventCasesPart4()
+	p5 := processGitHubEventCasesPart5()
+	p6 := processGitHubEventCasesPart6()
+	p7 := processGitHubEventCasesPart7()
+	p8 := processGitHubEventCasesPart8()
+	total := len(p1) + len(p2) + len(p3) + len(p4) + len(p5) + len(p6) + len(p7) + len(p8)
+	all := make([]ghEventCase, 0, total)
+	all = append(all, p1...)
+	all = append(all, p2...)
+	all = append(all, p3...)
+	all = append(all, p4...)
+	all = append(all, p5...)
+	all = append(all, p6...)
+	all = append(all, p7...)
+	all = append(all, p8...)
+	return all
+}
+
+func processGitHubEventCasesPart1() []ghEventCase {
+	return []ghEventCase{
 		{
 			name: "ping valid", event: "ping", delivery: "del-ping-1",
 			payload:  `{"zen":"Responsive is better than fast.","hook_id":98765,"repository":{"full_name":"azylman/aerial"}}`,
@@ -240,6 +470,11 @@ func TestProcessGitHubEvent(t *testing.T) {
 			reg:     &mockPRRegistry{recordCheckUpdated: false},
 			wantPR:  515, wantRecordCheckCalls: 1, wantRecordCheckState: "pending",
 		},
+	}
+}
+
+func processGitHubEventCasesPart2() []ghEventCase {
+	return []ghEventCase{
 		{
 			name: "check_run failure does not record check status", event: "check_run", delivery: "del-cr-ci-failed-norecord",
 			payload: `{"action":"completed","check_run":{"name":"Unit Tests","head_sha":"headsha111","status":"completed","conclusion":"failure","pull_requests":[{"number":515,"head":{"ref":"feat/awesome","sha":"headsha111"}}]},"repository":{"full_name":"azylman/aerial"}}`,
@@ -312,6 +547,11 @@ func TestProcessGitHubEvent(t *testing.T) {
 			reg:     &mockPRRegistry{mergeAdvanceRes: true, mergedTargetID: "target-merged-1"},
 			wantPR:  515, wantMergeSHA: "merge111", wantTargetID: "target-merged-1", wantMergedCalls: 1, wantAdvanceCalls: 1,
 		},
+	}
+}
+
+func processGitHubEventCasesPart3() []ghEventCase {
+	return []ghEventCase{
 		{
 			name: "pull_request closed unmerged transitions registry", event: "pull_request", delivery: "del-pr-closed",
 			payload: `{"action":"closed","number":516,"pull_request":{"number":516,"head":{"ref":"feat/discard","sha":"head222"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
@@ -417,6 +657,11 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantRecordCheckCalls: 1,
 			wantRecordCheckState: "passed",
 		},
+	}
+}
+
+func processGitHubEventCasesPart4() []ghEventCase {
+	return []ghEventCase{
 		{
 			name: "check_run success for unrelated non-gate check after another check failed on same SHA does not recover", event: "check_run", delivery: "del-cr-unrelated-nongate-no-recover",
 			priorEvent: &ghPriorEvent{
@@ -531,6 +776,11 @@ func TestProcessGitHubEvent(t *testing.T) {
 			disp:              &mockOutboundDispatcher{},
 			wantCIFailedCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Please investigate and fix the failure by inspecting the failing logs",
 		},
+	}
+}
+
+func processGitHubEventCasesPart5() []ghEventCase {
+	return []ghEventCase{
 		{
 			name: "check_run failure with ciFailCount exceeding cap suppresses prompt and dispatches cap DM", event: "check_run", delivery: "del-cr-cap",
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
@@ -624,6 +874,11 @@ func TestProcessGitHubEvent(t *testing.T) {
 			reg:            &mockPRRegistry{mergeAdvanceRes: true, resolvePRNum: 530, resolveBranch: "feat/local-resolved", resolveTargetID: "thread-local-530"},
 			spyNoGitHubHit: true, wantPR: 530, wantTargetID: "thread-local-530", wantMergeSHA: "localsha123", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
 		},
+	}
+}
+
+func processGitHubEventCasesPart6() []ghEventCase {
+	return []ghEventCase{
 		{
 			name: "push to main triggers DispatchGitPush", event: "push", delivery: "del-push-main-disp",
 			payload: `{"ref":"refs/heads/main","after":"maincommit123","repository":{"full_name":"azylman/aerial"}}`,
@@ -722,6 +977,11 @@ func TestProcessGitHubEvent(t *testing.T) {
 			disp:    &mockOutboundDispatcher{},
 			wantErr: true,
 		},
+	}
+}
+
+func processGitHubEventCasesPart7() []ghEventCase {
+	return []ghEventCase{
 		{
 			name: "closed unmerged PR calls FailVanadisChunkByPR", event: "pull_request", delivery: "del-pr-discard",
 			payload: `{"action":"closed","number":212,"pull_request":{"number":212,"head":{"ref":"feat/discard","sha":"head212"},"merged":false},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
@@ -810,6 +1070,11 @@ func TestProcessGitHubEvent(t *testing.T) {
 			disp:    &mockOutboundDispatcher{},
 			wantErr: true,
 		},
+	}
+}
+
+func processGitHubEventCasesPart8() []ghEventCase {
+	return []ghEventCase{
 		{
 			name: "workflow_run on main completeNoDeployWorkflowRun isVanadisPR error propagates", event: "workflow_run", delivery: "del-wf-mirrormere-is-vanadis-err",
 			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge221","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
@@ -932,2593 +1197,5 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantCIFailedCalls: 1,
 			wantDispatches:    1,
 		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var inserters []RiverInserter
-			if tc.river != nil {
-				inserters = append(inserters, tc.river)
-			}
-			var reg PRRegistryUpdater
-			if tc.reg != nil {
-				reg = tc.reg
-			}
-			var disp OutboundDispatcher
-			if tc.disp != nil {
-				disp = tc.disp
-			}
-			srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: true}, mockServer.Client(), reg, disp, inserters...)
-			srv.onProcessed = func(string, string) {}
-
-			if tc.priorEvent != nil {
-				if _, err := srv.ProcessGitHubEvent(ctx, tc.priorEvent.event, tc.priorEvent.delivery, []byte(tc.priorEvent.payload)); err != nil {
-					t.Fatalf("priorEvent failed: %v", err)
-				}
-			}
-
-			res, err := srv.ProcessGitHubEvent(ctx, tc.event, tc.delivery, []byte(tc.payload))
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ProcessGitHubEvent() err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				return
-			}
-			if tc.spyNoGitHubHit {
-				if _, hit := ghPaths.Load("/repos/azylman/aerial/commits/localsha123/pulls"); hit {
-					t.Fatalf("expected 0 GitHub API hits for localsha123, but endpoint was called")
-				}
-			}
-			if tc.wantUpdatedBranchHit != "" {
-				if _, hit := ghPaths.Load(tc.wantUpdatedBranchHit); !hit {
-					t.Errorf("expected branch update hit for %q, but was not called", tc.wantUpdatedBranchHit)
-				}
-			}
-			if tc.wantRepo != "" && res.Repo != tc.wantRepo {
-				t.Errorf("Repo = %q, want %q", res.Repo, tc.wantRepo)
-			}
-			if tc.wantAction != "" && res.Action != tc.wantAction {
-				t.Errorf("Action = %q, want %q", res.Action, tc.wantAction)
-			}
-			if tc.wantPR != 0 && res.PRNumber != tc.wantPR {
-				t.Errorf("PRNumber = %d, want %d", res.PRNumber, tc.wantPR)
-			}
-			if tc.wantBranch != "" && res.Branch != tc.wantBranch {
-				t.Errorf("Branch = %q, want %q", res.Branch, tc.wantBranch)
-			}
-			if tc.wantHeadSHA != "" && res.HeadSHA != tc.wantHeadSHA {
-				t.Errorf("HeadSHA = %q, want %q", res.HeadSHA, tc.wantHeadSHA)
-			}
-			if tc.wantMergeSHA != "" && res.MergeSHA != tc.wantMergeSHA {
-				t.Errorf("MergeSHA = %q, want %q", res.MergeSHA, tc.wantMergeSHA)
-			}
-			if tc.wantTargetID != "" && res.TargetID != tc.wantTargetID {
-				t.Errorf("TargetID = %q, want %q", res.TargetID, tc.wantTargetID)
-			}
-			if tc.wantSource != "" && res.ResolutionSource != tc.wantSource {
-				t.Errorf("ResolutionSource = %q, want %q", res.ResolutionSource, tc.wantSource)
-			}
-			if tc.wantConclusion != "" && res.Conclusion != tc.wantConclusion {
-				t.Errorf("Conclusion = %q, want %q", res.Conclusion, tc.wantConclusion)
-			}
-			if tc.wantSender != "" && res.Sender != tc.wantSender {
-				t.Errorf("Sender = %q, want %q", res.Sender, tc.wantSender)
-			}
-			if tc.reg != nil {
-				if len(tc.reg.mergedCalls) != tc.wantMergedCalls {
-					t.Errorf("mergedCalls = %d, want %d", len(tc.reg.mergedCalls), tc.wantMergedCalls)
-				}
-				if tc.wantMergeSHA != "" && len(tc.reg.mergedCalls) > 0 && tc.reg.mergedCalls[0].mergeSHA != tc.wantMergeSHA {
-					t.Errorf("mergedCalls mergeSHA = %q, want %q", tc.reg.mergedCalls[0].mergeSHA, tc.wantMergeSHA)
-				}
-				if len(tc.reg.closedUnmergedCalls) != tc.wantClosedCalls {
-					t.Errorf("closedUnmergedCalls = %d, want %d", len(tc.reg.closedUnmergedCalls), tc.wantClosedCalls)
-				}
-				if len(tc.reg.syncCalls) != tc.wantSyncCalls {
-					t.Errorf("syncCalls = %d, want %d", len(tc.reg.syncCalls), tc.wantSyncCalls)
-				}
-				if len(tc.reg.ciFailedCalls) != tc.wantCIFailedCalls {
-					t.Errorf("ciFailedCalls = %d, want %d", len(tc.reg.ciFailedCalls), tc.wantCIFailedCalls)
-				}
-				if len(tc.reg.ciFailedBySHACalls) != tc.wantCIFailedSHAs {
-					t.Errorf("ciFailedBySHACalls = %d, want %d", len(tc.reg.ciFailedBySHACalls), tc.wantCIFailedSHAs)
-				}
-				if tc.wantHeadSHA != "" && len(tc.reg.ciFailedBySHACalls) > 0 && tc.reg.ciFailedBySHACalls[0].headSHA != tc.wantHeadSHA {
-					t.Errorf("ciFailedBySHACalls headSHA = %q, want %q", tc.reg.ciFailedBySHACalls[0].headSHA, tc.wantHeadSHA)
-				}
-				if len(tc.reg.backfillCalls) != tc.wantBackfillCalls {
-					t.Errorf("backfillCalls = %d, want %d", len(tc.reg.backfillCalls), tc.wantBackfillCalls)
-				}
-				if tc.wantMergeSHA != "" && len(tc.reg.backfillCalls) > 0 && tc.reg.backfillCalls[0].mergeSHA != tc.wantMergeSHA {
-					t.Errorf("backfillCalls mergeSHA = %q, want %q", tc.reg.backfillCalls[0].mergeSHA, tc.wantMergeSHA)
-				}
-				if len(tc.reg.conflictCalls) != tc.wantConflictCalls {
-					t.Errorf("conflictCalls = %d, want %d", len(tc.reg.conflictCalls), tc.wantConflictCalls)
-				}
-				if len(tc.reg.advanceVanadisCalls) != tc.wantAdvanceCalls {
-					t.Errorf("advanceVanadisCalls = %d, want %d", len(tc.reg.advanceVanadisCalls), tc.wantAdvanceCalls)
-				}
-				if len(tc.reg.failVanadisCalls) != tc.wantFailVanadis {
-					t.Errorf("failVanadisCalls = %d, want %d", len(tc.reg.failVanadisCalls), tc.wantFailVanadis)
-				}
-				if len(tc.reg.ensureCalls) != tc.wantEnsureCalls {
-					t.Errorf("ensureCalls = %d, want %d", len(tc.reg.ensureCalls), tc.wantEnsureCalls)
-				}
-				if len(tc.reg.recordCheckCalls) != tc.wantRecordCheckCalls {
-					t.Errorf("recordCheckCalls = %d, want %d", len(tc.reg.recordCheckCalls), tc.wantRecordCheckCalls)
-				}
-				if tc.wantRecordCheckState != "" && len(tc.reg.recordCheckCalls) > 0 {
-					if tc.reg.recordCheckCalls[0].checkState != tc.wantRecordCheckState {
-						t.Errorf("recordCheckCalls checkState = %q, want %q", tc.reg.recordCheckCalls[0].checkState, tc.wantRecordCheckState)
-					}
-				}
-			}
-			if tc.disp != nil {
-				gitPushes := tc.disp.GitPushCalls()
-				if len(gitPushes) != tc.wantGitPushes {
-					t.Errorf("gitPushes = %d, want %d", len(gitPushes), tc.wantGitPushes)
-				}
-				if tc.wantGitPushes > 0 && len(gitPushes) > 0 {
-					if tc.wantTargetID != "" && gitPushes[0].TargetID != tc.wantTargetID {
-						t.Errorf("git push TargetID = %q, want %q", gitPushes[0].TargetID, tc.wantTargetID)
-					}
-					if tc.wantPR != 0 && gitPushes[0].PRNumber != tc.wantPR {
-						t.Errorf("git push PRNumber = %d, want %d", gitPushes[0].PRNumber, tc.wantPR)
-					}
-				}
-				if got := tc.disp.ReconcileCalls(); !slices.Equal(got, tc.wantReconciles) {
-					t.Errorf("reconcile calls = %v, want %v", got, tc.wantReconciles)
-				}
-				dispatches := tc.disp.DispatchCalls()
-				if len(dispatches) != tc.wantDispatches {
-					t.Errorf("dispatches = %d, want %d", len(dispatches), tc.wantDispatches)
-				}
-				if tc.wantPromptSubstr != "" && tc.wantDispatches > 0 {
-					if len(dispatches) == 0 || !strings.Contains(dispatches[len(dispatches)-1].Prompt, tc.wantPromptSubstr) {
-						t.Errorf("expected dispatch to contain %q, got %+v", tc.wantPromptSubstr, dispatches)
-					}
-				}
-				prompts := tc.disp.PromptCalls()
-				if len(prompts) != tc.wantPrompts {
-					t.Errorf("prompts = %d, want %d", len(prompts), tc.wantPrompts)
-				}
-				if tc.wantPromptSubstr != "" && tc.wantPrompts > 0 {
-					if len(prompts) == 0 || !strings.Contains(prompts[len(prompts)-1].Prompt, tc.wantPromptSubstr) {
-						t.Errorf("expected prompt to contain %q, got %+v", tc.wantPromptSubstr, prompts)
-					}
-				}
-				dms := tc.disp.DirectMessageCalls()
-				if len(dms) != tc.wantDMs {
-					t.Errorf("dms = %d, want %d", len(dms), tc.wantDMs)
-				}
-				if tc.wantDMSubstr != "" {
-					if len(dms) == 0 || !strings.Contains(dms[len(dms)-1].Content, tc.wantDMSubstr) {
-						t.Errorf("expected DM to contain %q, got %+v", tc.wantDMSubstr, dms)
-					}
-				}
-			}
-		})
-	}
-}
-
-// --- 6. Workflow Run Image Resolution & Dispatch ---
-
-func TestResolveWorkflowRunImages(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	mockJobs := GitHubWorkflowJobsResponse{
-		TotalCount: 8,
-		Jobs: []GitHubWorkflowJobItem{
-			{ID: 8, Name: "Build & Push Images to GHCR (${{ matrix.service }})", Status: "completed", Conclusion: "success", Steps: []GitHubWorkflowJobStep{{Name: "Build and Push Docker Image", Status: "completed", Conclusion: "success", Number: 1}}},
-			{ID: 1, Name: "Detect Changed Microservices", Status: "completed", Conclusion: "success"},
-			{ID: 2, Name: "Run Service Unit Tests", Status: "completed", Conclusion: "success"},
-			{ID: 3, Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"},
-			{ID: 4, Name: "Build & Push Images to GHCR (synapse)", Status: "completed", Conclusion: "success"},
-			{ID: 5, Name: "Build & Push Images to GHCR (custom-microservice)", Status: "completed", Conclusion: "success"},
-			{ID: 6, Name: "Build & Push Images to GHCR (failed-service)", Status: "completed", Conclusion: "failure"},
-			{ID: 7, Name: "Build & Push Images to GHCR (running-service)", Status: "in_progress", Conclusion: ""},
-		},
-	}
-	mockSidecarJobs := GitHubWorkflowJobsResponse{
-		TotalCount: 2,
-		Jobs: []GitHubWorkflowJobItem{
-			{ID: 10, Name: "Build & Push Sidecar Images to GHCR (banana)", Status: "completed", Conclusion: "success"},
-			{ID: 11, Name: "Build & Push Sidecar Images to GHCR (voice-cuda)", Status: "completed", Conclusion: "success"},
-		},
-	}
-	mockMirrormereJobs := GitHubWorkflowJobsResponse{
-		TotalCount: 2,
-		Jobs: []GitHubWorkflowJobItem{
-			{ID: 20, Name: "Build & Publish Container Image (mirrormere)", Status: "completed", Conclusion: "success"},
-			{ID: 21, Name: "Build & Publish Container Image (mirrormere-cast-watcher)", Status: "completed", Conclusion: "success"},
-		},
-	}
-	mockSkippedStepJobs := GitHubWorkflowJobsResponse{
-		TotalCount: 2,
-		Jobs: []GitHubWorkflowJobItem{
-			{
-				ID: 101, Name: "Build & Publish Container Image (mirrormere)", Status: "completed", Conclusion: "success",
-				Steps: []GitHubWorkflowJobStep{
-					{Name: "Checkout Repository", Status: "completed", Conclusion: "success", Number: 1},
-					{Name: "Build and Push Docker Image", Status: "completed", Conclusion: "skipped", Number: 2},
-				},
-			},
-			{
-				ID: 102, Name: "Build & Publish Container Image (mirrormere-cast-watcher)", Status: "completed", Conclusion: "success",
-				Steps: []GitHubWorkflowJobStep{
-					{Name: "Checkout Repository", Status: "completed", Conclusion: "success", Number: 1},
-					{Name: "Build and Push Docker Image", Status: "completed", Conclusion: "success", Number: 2},
-				},
-			},
-		},
-	}
-	mockSkippedPromotionJobs := GitHubWorkflowJobsResponse{
-		TotalCount: 2,
-		Jobs: []GitHubWorkflowJobItem{
-			{ID: 201, Name: "Build & Push Images to GHCR (eri)", Status: "completed", Conclusion: "success"},
-			{ID: 202, Name: "Promote Images to :latest", Status: "completed", Conclusion: "skipped"},
-		},
-	}
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.Contains(r.URL.Path, "/actions/runs/12345/jobs"):
-			_ = json.NewEncoder(w).Encode(mockJobs)
-		case strings.Contains(r.URL.Path, "/actions/runs/54321/jobs"):
-			_ = json.NewEncoder(w).Encode(mockSidecarJobs)
-		case strings.Contains(r.URL.Path, "/actions/runs/67890/jobs"):
-			_ = json.NewEncoder(w).Encode(mockMirrormereJobs)
-		case strings.Contains(r.URL.Path, "/actions/runs/77777/jobs"):
-			_ = json.NewEncoder(w).Encode(mockSkippedStepJobs)
-		case strings.Contains(r.URL.Path, "/actions/runs/88888/jobs"):
-			_ = json.NewEncoder(w).Encode(mockSkippedPromotionJobs)
-		case strings.Contains(r.URL.Path, "/actions/runs/403/jobs"):
-			w.Header().Set("X-Ratelimit-Remaining", "0")
-			w.WriteHeader(http.StatusForbidden)
-		case strings.Contains(r.URL.Path, "/actions/runs/500/jobs"):
-			w.WriteHeader(http.StatusInternalServerError)
-		case strings.Contains(r.URL.Path, "/actions/runs/999/jobs"):
-			_, _ = w.Write([]byte("malformed json"))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(ts.Close)
-
-	srv := NewRouterServer(fixedConfig(Config{GitHubAPIURL: ts.URL}), ts.Client())
-
-	cases := []struct {
-		name    string
-		repo    string
-		runID   int64
-		want    []string
-		wantErr bool
-	}{
-		{
-			name:  "aerial monorepo images",
-			repo:  "azylman/aerial",
-			runID: 12345,
-			want: []string{
-				"ghcr.io/azylman/brain:latest",
-				"ghcr.io/azylman/synapse:latest",
-				"ghcr.io/azylman/custom-microservice:latest",
-			},
-		},
-		{
-			name:  "unprefixed repo normalization",
-			repo:  "aerial",
-			runID: 12345,
-			want: []string{
-				"ghcr.io/azylman/brain:latest",
-				"ghcr.io/azylman/synapse:latest",
-				"ghcr.io/azylman/custom-microservice:latest",
-			},
-		},
-		{
-			name:  "aerial-sidecars images",
-			repo:  "azylman/aerial-sidecars",
-			runID: 54321,
-			want: []string{
-				"ghcr.io/azylman/banana:latest",
-				"ghcr.io/azylman/voice-cuda:latest",
-			},
-		},
-		{
-			name:  "mirrormere images",
-			repo:  "azylman/mirrormere",
-			runID: 67890,
-			want: []string{
-				"ghcr.io/azylman/mirrormere:latest",
-				"ghcr.io/azylman/mirrormere-cast-watcher:latest",
-			},
-		},
-		{
-			name:  "skipped build step filtering",
-			repo:  "azylman/mirrormere",
-			runID: 77777,
-			want:  []string{"ghcr.io/azylman/mirrormere-cast-watcher:latest"},
-		},
-		{
-			name:  "skipped image promotion returns nil",
-			repo:  "azylman/aerial",
-			runID: 88888,
-			want:  nil,
-		},
-		{name: "empty repo", repo: "", runID: 12345, wantErr: true},
-		{name: "zero runID", repo: "aerial", runID: 0, wantErr: true},
-		{name: "403 rate limit", repo: "aerial", runID: 403, wantErr: true},
-		{name: "500 server error", repo: "aerial", runID: 500, wantErr: true},
-		{name: "malformed json", repo: "aerial", runID: 999, wantErr: true},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			images, err := srv.resolveWorkflowRunImages(ctx, tc.repo, tc.runID)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("resolveWorkflowRunImages() err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if !tc.wantErr {
-				if len(images) != len(tc.want) {
-					t.Fatalf("expected %v, got %v", tc.want, images)
-				}
-				for i := range tc.want {
-					if images[i] != tc.want[i] {
-						t.Errorf("image[%d] = %q, want %q", i, images[i], tc.want[i])
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestDispatchWorkflowRunImages(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	brainJob := `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"}]}`
-	twoJobs := `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"},{"name":"Build & Push Images to GHCR (haro)","status":"completed","conclusion":"success"}]}`
-	core := fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}
-	marida := fluxKustomizationRef{Namespace: "flux-system", Name: "marida-core"}
-	owners := map[string][]fluxKustomizationRef{
-		"aerial-brain": {core},
-		"aerial-haro":  {core, marida},
-	}
-
-	tests := []struct {
-		name             string
-		isGitPush        bool
-		ref              string
-		commit           string
-		headBranch       string
-		conclusion       string
-		jobsStatus       int
-		jobsBody         string
-		noDisp           bool
-		gitPushErr       error
-		promoteErr       error
-		discoverErr      error
-		reconcileErrs    map[string]error
-		deployingErr     error
-		recordErr        error
-		hasExpectedErr   error
-		suppressVanadis  bool
-		widgetErr        error
-		wantPromoteCalls int
-		wantDeployJobs   []string
-		wantWidgetCalls  int
-		wantReconciles   []fluxKustomizationRef
-		wantRecorded     []string
-		wantErr          bool
-	}{
-		{
-			name:             "main success transitions deploying then reconciles owning kustomization",
-			headBranch:       "main",
-			conclusion:       "success",
-			jobsStatus:       http.StatusOK,
-			jobsBody:         brainJob,
-			wantPromoteCalls: 1,
-			wantDeployJobs:   []string{"brain"},
-			wantWidgetCalls:  1,
-			wantReconciles:   []fluxKustomizationRef{core},
-			wantRecorded:     []string{"aerial-core"},
-		},
-		{
-			name:             "two images reconcile each distinct kustomization once",
-			headBranch:       "main",
-			conclusion:       "success",
-			jobsBody:         twoJobs,
-			wantPromoteCalls: 2,
-			wantDeployJobs:   []string{"brain", "haro"},
-			wantReconciles:   []fluxKustomizationRef{core, marida},
-			wantRecorded:     []string{"aerial-core", "marida-core"},
-		},
-		{
-			name:             "partial reconcile failure keeps every recorded request for watcher repair and errors",
-			headBranch:       "main",
-			conclusion:       "success",
-			jobsBody:         twoJobs,
-			reconcileErrs:    map[string]error{"aerial-core": errors.New("patch denied")},
-			wantPromoteCalls: 2,
-			wantDeployJobs:   []string{"brain", "haro"},
-			wantReconciles:   []fluxKustomizationRef{core, marida},
-			wantRecorded:     []string{"aerial-core", "marida-core"},
-			wantErr:          true,
-		},
-		{
-			name:             "reconcile failure after record keeps the request and errors",
-			headBranch:       "main",
-			conclusion:       "success",
-			jobsBody:         brainJob,
-			reconcileErrs:    map[string]error{"aerial-core": errors.New("patch denied")},
-			wantPromoteCalls: 1,
-			wantDeployJobs:   []string{"brain"},
-			wantReconciles:   []fluxKustomizationRef{core},
-			wantRecorded:     []string{"aerial-core"},
-			wantErr:          true,
-		},
-		{
-			name:             "record error returns before any reconcile patch",
-			headBranch:       "main",
-			conclusion:       "success",
-			jobsBody:         brainJob,
-			recordErr:        errors.New("db fail"),
-			wantPromoteCalls: 1,
-			wantDeployJobs:   []string{"brain"},
-			wantErr:          true,
-		},
-		{
-			name:             "main success with widget sync warning still succeeds",
-			headBranch:       "main",
-			conclusion:       "success",
-			jobsBody:         brainJob,
-			widgetErr:        errors.New("transient widget error"),
-			wantPromoteCalls: 1,
-			wantDeployJobs:   []string{"brain"},
-			wantWidgetCalls:  1,
-			wantReconciles:   []fluxKustomizationRef{core},
-			wantRecorded:     []string{"aerial-core"},
-		},
-		{
-			name:       "jobs API 500 error",
-			headBranch: "main",
-			conclusion: "success",
-			jobsStatus: http.StatusInternalServerError,
-			jobsBody:   `api error`,
-			wantErr:    true,
-		},
-		{
-			name:       "0 resolved images returns nil",
-			headBranch: "main",
-			conclusion: "success",
-			jobsBody:   `{"jobs":[]}`,
-		},
-		{
-			name:            "0 resolved images with hasExpectedErr and Vanadis widget sync warning",
-			headBranch:      "main",
-			conclusion:      "success",
-			jobsBody:        `{"jobs":[]}`,
-			hasExpectedErr:  errors.New("expected err"),
-			suppressVanadis: true,
-			widgetErr:       errors.New("widget sync err"),
-			wantErr:         true,
-		},
-		{
-			name:             "image without owning kustomization promotes then completes no-deploy",
-			headBranch:       "main",
-			conclusion:       "success",
-			jobsBody:         `{"jobs":[{"name":"Build & Push Images to GHCR (unmanaged)","status":"completed","conclusion":"success"}]}`,
-			wantPromoteCalls: 1,
-		},
-		{
-			name:        "discovery error returns before any side effect",
-			headBranch:  "main",
-			conclusion:  "success",
-			jobsBody:    brainJob,
-			discoverErr: errors.New("list forbidden"),
-			wantErr:     true,
-		},
-		{
-			name:             "promote failure skips reconcile and returns error",
-			headBranch:       "main",
-			conclusion:       "success",
-			jobsBody:         brainJob,
-			promoteErr:       errors.New("hangar image failed"),
-			wantPromoteCalls: 1,
-			wantDeployJobs:   []string{"brain"},
-			wantErr:          true,
-		},
-		{
-			name:         "deployingErr registry error returns before promotion",
-			headBranch:   "main",
-			conclusion:   "success",
-			jobsBody:     brainJob,
-			deployingErr: errors.New("db fail"),
-			wantErr:      true,
-		},
-		{
-			name:       "non-main branch is no-op",
-			headBranch: "feat/my-feature",
-			conclusion: "success",
-		},
-		{
-			name:       "non-success conclusion is no-op",
-			headBranch: "main",
-			conclusion: "failure",
-		},
-		{
-			name:      "git push nil dispatcher is no-op",
-			isGitPush: true,
-			noDisp:    true,
-			ref:       "refs/heads/main",
-			commit:    "sha123",
-		},
-		{
-			name:      "git push non-main ref is no-op",
-			isGitPush: true,
-			ref:       "refs/heads/feat",
-			commit:    "sha123",
-		},
-		{
-			name:      "git push zero sha is no-op",
-			isGitPush: true,
-			ref:       "refs/heads/main",
-			commit:    "0000000000000000000000000000000000000000",
-		},
-		{
-			name:       "git push dispatcher error returns error",
-			isGitPush:  true,
-			ref:        "refs/heads/main",
-			commit:     "sha123",
-			gitPushErr: errors.New("hangar down"),
-			wantErr:    true,
-		},
-		{
-			name:      "git push successful dispatch",
-			isGitPush: true,
-			ref:       "refs/heads/main",
-			commit:    "sha123",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				status := tc.jobsStatus
-				if status == 0 {
-					status = http.StatusOK
-				}
-				w.WriteHeader(status)
-				body := tc.jobsBody
-				if body == "" {
-					body = `{"jobs":[]}`
-				}
-				_, _ = w.Write([]byte(body))
-			}))
-			defer ts.Close()
-
-			var disp *mockOutboundDispatcher
-			if !tc.noDisp {
-				disp = &mockOutboundDispatcher{
-					gitPushErr:            tc.gitPushErr,
-					promoteErr:            tc.promoteErr,
-					discoverErr:           tc.discoverErr,
-					reconcileErrs:         tc.reconcileErrs,
-					widgetErr:             tc.widgetErr,
-					kustomizationsByImage: owners,
-				}
-			}
-			reg := &mockPRRegistry{
-				deployingErr:            tc.deployingErr,
-				kustomizationRequestErr: tc.recordErr,
-				hasExpectedErr:          tc.hasExpectedErr,
-				suppressVanadisRes:      tc.suppressVanadis,
-				resolveTargetID:         "1555405874565091380",
-				resolveBranch:           "feat/test",
-			}
-			srv := NewRouterServer(fixedConfig(Config{GitHubAPIURL: ts.URL}), ts.Client())
-			if disp != nil {
-				srv.SetDispatcher(disp)
-			}
-			srv.SetRegistry(reg)
-
-			var err error
-			if tc.isGitPush {
-				err = srv.dispatchGitPush(ctx, "azylman/aerial", tc.ref, tc.commit, "1555405874565091380", 1)
-			} else {
-				err = srv.dispatchWorkflowRunImages(ctx, "azylman/aerial", 12345, tc.headBranch, tc.conclusion, "sha123", "1555405874565091380", 42)
-			}
-
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if disp == nil {
-				return
-			}
-			if got := len(disp.PromoteCalls()); got != tc.wantPromoteCalls {
-				t.Errorf("promote calls = %d, want %d", got, tc.wantPromoteCalls)
-			}
-			var gotDeployJobs []string
-			if len(reg.deployingCalls) > 0 {
-				gotDeployJobs = reg.deployingCalls[0].jobs
-			}
-			if len(reg.deployingCalls) > 1 || !slices.Equal(gotDeployJobs, tc.wantDeployJobs) {
-				t.Errorf("deploying calls = %+v, want one call with jobs %v", reg.deployingCalls, tc.wantDeployJobs)
-			}
-			if tc.wantWidgetCalls > 0 && len(disp.WidgetCalls()) != tc.wantWidgetCalls {
-				t.Errorf("widgetCalls = %d, want %d", len(disp.WidgetCalls()), tc.wantWidgetCalls)
-			}
-			if got := disp.ReconcileCalls(); !slices.Equal(got, tc.wantReconciles) {
-				t.Errorf("reconcile calls = %v, want %v", got, tc.wantReconciles)
-			}
-			if tc.wantRecorded == nil {
-				if len(reg.kustomizationRequestCalls) != 0 {
-					t.Errorf("recorded requests = %v, want none", reg.kustomizationRequestCalls)
-				}
-				return
-			}
-			if len(reg.kustomizationRequestCalls) != 1 {
-				t.Fatalf("recorded request calls = %d, want 1", len(reg.kustomizationRequestCalls))
-			}
-			recorded := reg.kustomizationRequestCalls[0]
-			if got := slices.Sorted(maps.Keys(recorded)); !slices.Equal(got, tc.wantRecorded) {
-				t.Errorf("recorded kustomizations = %v, want %v", got, tc.wantRecorded)
-			}
-			for i, ref := range disp.ReconcileCalls() {
-				if req := recorded[ref.Name]; req.Namespace != "flux-system" || disp.reconcileRequestedAts[i] != req.RequestedAt {
-					t.Errorf("reconcile %s requestedAt = %q, want recorded %+v", ref.Name, disp.reconcileRequestedAts[i], req)
-				}
-			}
-		})
-	}
-}
-
-// --- 7. PR Conflict Checks & SHA/Thread Resolution ---
-
-func makeTestOpenPR(number int, branch, sha, author string) GitHubPullRequest {
-	return GitHubPullRequest{Number: number, Head: GitHubPRRef{Ref: branch, SHA: sha}, User: struct {
-		Login string `json:"login"`
-	}{Login: author}}
-}
-
-func TestCheckOpenPRConflicts(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name                  string
-		autoUpdateAuthors     []string
-		listPRsStatus         int
-		useNilRegistry        bool
-		useRiver              bool
-		riverErr              error
-		conflictErr           error
-		openPRs               []GitHubPullRequest
-		prResponses           []string
-		prStatusCodes         []int
-		closedErr             error
-		wantClosedPRs         []int
-		wantErr               bool
-		wantErrSubstr         string
-		wantConflict          bool
-		wantConflictPR        int
-		wantConflictQueued    int
-		wantPrompts           int
-		wantDispatches        int
-		wantPromptSubs        []string
-		wantDMs               int
-		wantUpdatedPRs        []string
-		checkRunsBySHA        map[string]string
-		presetFailedSHAs      map[int]string
-		presetUpdatedPRs      []int
-		wantCachedFailedSHAs  map[int]string
-		wantUncachedFailedPRs []int
-	}{
-		{
-			name:              "empty autoUpdateAuthors is clean no-op",
-			autoUpdateAuthors: nil,
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/behind-1", "head550", "trusted-author"),
-			},
-			wantErr: false,
-		},
-		{
-			name:              "422 no new commits on base branch marks PR updated and stops FIFO loop",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/behind-1", "head550", "trusted-author"),
-				makeTestOpenPR(551, "feat/behind-2", "head551", "trusted-author"),
-			},
-			prResponses: []string{
-				`{"message":"There are no new commits on the base branch."}`,
-			},
-			prStatusCodes:  []int{http.StatusUnprocessableEntity},
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/550/update-branch"},
-		},
-		{
-			name:              "nil registry still updates whitelisted PRs",
-			useNilRegistry:    true,
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/clean", "head550", "trusted-author"),
-			},
-			prResponses:    []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:  []int{http.StatusAccepted},
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/550/update-branch"},
-		},
-		{
-			name:              "nil registry on conflict does not crash",
-			useNilRegistry:    true,
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs:           []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
-			prStatusCodes:     []int{http.StatusUnprocessableEntity},
-			prResponses:       []string{`{"message":"merge conflict between base and head"}`},
-			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/543/update-branch"},
-		},
-		{
-			name:              "nil registry on stale head ref does not crash",
-			useNilRegistry:    true,
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(512, "feat/stale-branch", "head512", "trusted-author"),
-				makeTestOpenPR(550, "feat/clean-branch", "head550", "trusted-author"),
-			},
-			prResponses: []string{
-				`{"message":"head ref does not exist"}`,
-				`{"message":"Updating pull request branch."}`,
-			},
-			prStatusCodes: []int{http.StatusUnprocessableEntity, http.StatusAccepted},
-			wantUpdatedPRs: []string{
-				"/repos/azylman/aerial/pulls/512/update-branch",
-				"/repos/azylman/aerial/pulls/550/update-branch",
-			},
-		},
-		{
-			name:              "skips non-whitelisted PR authors and updates whitelisted PR",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(540, "feat/untrusted", "head540", "untrusted-user"),
-				makeTestOpenPR(541, "feat/trusted", "head541", "trusted-author"),
-			},
-			prResponses:    []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:  []int{http.StatusAccepted},
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/541/update-branch"},
-		},
-		{
-			name:              "list open PRs error returns error",
-			autoUpdateAuthors: []string{"trusted-author"},
-			listPRsStatus:     http.StatusInternalServerError,
-			wantErr:           true,
-			wantErrSubstr:     "list open prs",
-		},
-		{
-			name:              "422 merge conflict transitions and dispatches via background /dispatch without DM",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs:           []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
-			prStatusCodes:     []int{http.StatusUnprocessableEntity},
-			prResponses:       []string{`{"message":"merge conflict between base and head"}`},
-			wantConflict:      true,
-			wantConflictPR:    543,
-			wantDMs:           0,
-			wantDispatches:    1,
-			wantPromptSubs:    []string{"Merge conflict detected on PR #543"},
-			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/543/update-branch"},
-		},
-		{
-			name:               "409 conflict with river client enqueues MergeConflictArgs on merge_conflict queue",
-			useRiver:           true,
-			autoUpdateAuthors:  []string{"trusted-author"},
-			openPRs:            []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
-			prStatusCodes:      []int{http.StatusConflict},
-			prResponses:        []string{`{"message":"Merge conflict"}`},
-			wantConflict:       true,
-			wantConflictPR:     543,
-			wantConflictQueued: 1,
-			wantDMs:            0,
-			wantDispatches:     0,
-			wantUpdatedPRs:     []string{"/repos/azylman/aerial/pulls/543/update-branch"},
-		},
-		{
-			name:              "river insert error on conflict logs warning without failing check",
-			useRiver:          true,
-			riverErr:          errors.New("river insert failed"),
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs:           []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
-			prStatusCodes:     []int{http.StatusConflict},
-			prResponses:       []string{`{"message":"Merge conflict"}`},
-			wantConflict:      true,
-			wantConflictPR:    543,
-			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/543/update-branch"},
-		},
-		{
-			name:              "open PRs update only oldest clean PR in FIFO order",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/behind-1", "head550", "trusted-author"),
-				makeTestOpenPR(551, "feat/behind-2", "head551", "trusted-author"),
-			},
-			prResponses:    []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:  []int{http.StatusAccepted},
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/550/update-branch"},
-		},
-		{
-			name:              "conflicted oldest PR transitions to conflict and advances to update next clean PR",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(545, "feat/conflicted-1", "head545", "trusted-author"),
-				makeTestOpenPR(546, "feat/clean-2", "head546", "trusted-author"),
-			},
-			prResponses: []string{
-				`{"message":"merge conflict between base and head"}`,
-				`{"message":"Updating pull request branch."}`,
-			},
-			prStatusCodes:  []int{http.StatusUnprocessableEntity, http.StatusAccepted},
-			wantConflict:   true,
-			wantConflictPR: 545,
-			wantDMs:        0,
-			wantDispatches: 1,
-			wantUpdatedPRs: []string{
-				"/repos/azylman/aerial/pulls/545/update-branch",
-				"/repos/azylman/aerial/pulls/546/update-branch",
-			},
-		},
-		{
-			name:              "non-conflict 422 logs warning and skips without marking conflict",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs:           []GitHubPullRequest{makeTestOpenPR(552, "feat/behind-err", "head552", "trusted-author")},
-			prResponses:       []string{`{"message":"Validation Failed"}`},
-			prStatusCodes:     []int{http.StatusUnprocessableEntity},
-			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/552/update-branch"},
-		},
-		{
-			name:              "403 rate-limit error returns error",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs:           []GitHubPullRequest{makeTestOpenPR(546, "feat/rate-limit", "head546", "trusted-author")},
-			prStatusCodes:     []int{http.StatusForbidden},
-			prResponses:       []string{`{"message":"API rate limit exceeded"}`},
-			wantErr:           true,
-			wantErrSubstr:     "rate limit",
-			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/546/update-branch"},
-		},
-		{
-			name:              "non-403 error skips PR and returns nil",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs:           []GitHubPullRequest{makeTestOpenPR(547, "feat/not-found", "head547", "trusted-author")},
-			prStatusCodes:     []int{http.StatusNotFound},
-			prResponses:       []string{`{"message":"Not Found"}`},
-			wantErr:           false,
-			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/547/update-branch"},
-		},
-		{
-			name:              "conflict transition error logged cleanly without returning error",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs:           []GitHubPullRequest{makeTestOpenPR(549, "feat/trans-err", "head549", "trusted-author")},
-			prStatusCodes:     []int{http.StatusUnprocessableEntity},
-			prResponses:       []string{`{"message":"merge conflict between base and head"}`},
-			conflictErr:       errors.New("conflict transition err"),
-			wantErr:           false,
-			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/549/update-branch"},
-		},
-		{
-			name:              "422 head ref does not exist closes stale PR and advances to next clean PR",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(512, "feat/stale-branch", "head512", "trusted-author"),
-				makeTestOpenPR(550, "feat/clean-branch", "head550", "trusted-author"),
-			},
-			prResponses: []string{
-				`{"message":"head ref does not exist"}`,
-				`{"message":"Updating pull request branch."}`,
-			},
-			prStatusCodes: []int{http.StatusUnprocessableEntity, http.StatusAccepted},
-			wantClosedPRs: []int{512},
-			wantUpdatedPRs: []string{
-				"/repos/azylman/aerial/pulls/512/update-branch",
-				"/repos/azylman/aerial/pulls/550/update-branch",
-			},
-		},
-		{
-			name:              "422 head ref does not exist logs close error cleanly without failing check",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs:           []GitHubPullRequest{makeTestOpenPR(512, "feat/stale-branch", "head512", "trusted-author")},
-			prStatusCodes:     []int{http.StatusUnprocessableEntity},
-			prResponses:       []string{`{"message":"head ref does not exist"}`},
-			closedErr:         errors.New("close db err"),
-			wantClosedPRs:     nil,
-			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/512/update-branch"},
-		},
-		{
-			name:              "skips draft PRs and updates next clean PR",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs: []GitHubPullRequest{
-				{Number: 550, Head: GitHubPRRef{Ref: "feat/draft", SHA: "head550"}, Draft: true, User: struct {
-					Login string `json:"login"`
-				}{Login: "trusted-author"}},
-				makeTestOpenPR(551, "feat/ready", "head551", "trusted-author"),
-			},
-			prResponses:    []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:  []int{http.StatusAccepted},
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/551/update-branch"},
-		},
-		{
-			name:              "skips PR with in-memory failedCheckSHAs and updates next clean PR",
-			autoUpdateAuthors: []string{"trusted-author"},
-			presetFailedSHAs:  map[int]string{550: "head550"},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/failing", "head550", "trusted-author"),
-				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
-			},
-			prResponses:    []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:  []int{http.StatusAccepted},
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/551/update-branch"},
-		},
-		{
-			name:              "skips PR with failed check-run in API, caches failure, and updates next clean PR",
-			autoUpdateAuthors: []string{"trusted-author"},
-			checkRunsBySHA: map[string]string{
-				"head550": `{"check_runs":[{"name":"Unit Tests","status":"completed","conclusion":"failure"}]}`,
-			},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/failing-check", "head550", "trusted-author"),
-				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
-			},
-			prResponses:          []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:        []int{http.StatusAccepted},
-			wantUpdatedPRs:       []string{"/repos/azylman/aerial/pulls/551/update-branch"},
-			wantCachedFailedSHAs: map[int]string{550: "head550"},
-		},
-		{
-			name:              "breaks without updating when leading clean PR already updated for current main",
-			autoUpdateAuthors: []string{"trusted-author"},
-			presetUpdatedPRs:  []int{550},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/in-flight", "head550", "trusted-author"),
-				makeTestOpenPR(551, "feat/waiting", "head551", "trusted-author"),
-			},
-			wantUpdatedPRs: nil,
-		},
-		{
-			name:              "skips PR with pending check-run without caching failure and updates next clean PR",
-			autoUpdateAuthors: []string{"trusted-author"},
-			checkRunsBySHA: map[string]string{
-				"head550": `{"check_runs":[{"name":"roborev","status":"in_progress","conclusion":""}]}`,
-			},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/pending-check", "head550", "trusted-author"),
-				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
-			},
-			prResponses:           []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:         []int{http.StatusAccepted},
-			wantUpdatedPRs:        []string{"/repos/azylman/aerial/pulls/551/update-branch"},
-			wantUncachedFailedPRs: []int{550},
-		},
-		{
-			name:              "breaks without updating when leading clean PR already updated for current main has pending checks",
-			autoUpdateAuthors: []string{"trusted-author"},
-			presetUpdatedPRs:  []int{550},
-			checkRunsBySHA: map[string]string{
-				"head550": `{"check_runs":[{"name":"roborev","status":"in_progress","conclusion":""}]}`,
-			},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/in-flight", "head550", "trusted-author"),
-				makeTestOpenPR(551, "feat/waiting", "head551", "trusted-author"),
-			},
-			wantUpdatedPRs:        nil,
-			wantUncachedFailedPRs: []int{550},
-		},
-		{
-			name:              "advances to update next clean PR when leading PR updated for current main has failed checks",
-			autoUpdateAuthors: []string{"trusted-author"},
-			presetUpdatedPRs:  []int{550},
-			checkRunsBySHA: map[string]string{
-				"head550": `{"check_runs":[{"name":"unit-tests","status":"completed","conclusion":"failure"}]}`,
-			},
-			openPRs: []GitHubPullRequest{
-				makeTestOpenPR(550, "feat/failed-in-flight", "head550", "trusted-author"),
-				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
-			},
-			prResponses:          []string{`{"message":"Updating pull request branch."}`},
-			prStatusCodes:        []int{http.StatusAccepted},
-			wantUpdatedPRs:       []string{"/repos/azylman/aerial/pulls/551/update-branch"},
-			wantCachedFailedSHAs: map[int]string{550: "head550"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var reqCount atomic.Int32
-			var mu sync.Mutex
-			var putPaths []string
-			apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls") {
-					w.Header().Set("Content-Type", "application/json")
-					if tc.listPRsStatus != 0 {
-						w.WriteHeader(tc.listPRsStatus)
-						_, _ = w.Write([]byte(`{"message":"server error"}`))
-						return
-					}
-					w.WriteHeader(http.StatusOK)
-					_ = json.NewEncoder(w).Encode(tc.openPRs)
-					return
-				}
-				if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/check-runs") {
-					w.Header().Set("Content-Type", "application/json")
-					trimmed := strings.TrimSuffix(r.URL.Path, "/check-runs")
-					sha := trimmed[strings.LastIndex(trimmed, "/")+1:]
-					body := `{"check_runs":[]}`
-					if tc.checkRunsBySHA != nil {
-						if resp, ok := tc.checkRunsBySHA[sha]; ok {
-							body = resp
-						}
-					}
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte(body))
-					return
-				}
-				if r.Method == http.MethodPut {
-					mu.Lock()
-					putPaths = append(putPaths, r.URL.Path)
-					mu.Unlock()
-				}
-				idx := int(reqCount.Add(1)) - 1
-				code := http.StatusOK
-				if idx < len(tc.prStatusCodes) && tc.prStatusCodes[idx] != 0 {
-					code = tc.prStatusCodes[idx]
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(code)
-				body := `{"number":0}`
-				if idx < len(tc.prResponses) {
-					body = tc.prResponses[idx]
-				} else if len(tc.prResponses) > 0 {
-					body = tc.prResponses[len(tc.prResponses)-1]
-				}
-				_, _ = w.Write([]byte(body))
-			}))
-			defer apiServer.Close()
-
-			var mockReg PRRegistryUpdater
-			if !tc.useNilRegistry {
-				mockReg = &mockPRRegistry{
-					conflictErr:      tc.conflictErr,
-					conflictTargetID: "1555405874565091380",
-					conflictUpdated:  true,
-					closedErr:        tc.closedErr,
-				}
-			}
-			mockDisp := &mockOutboundDispatcher{}
-			var inserters []RiverInserter
-			var mockRiver *mockRiverInserter
-			if tc.useRiver {
-				mockRiver = &mockRiverInserter{err: tc.riverErr}
-				inserters = append(inserters, mockRiver)
-			}
-			srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL, GitHubToken: "test-token", AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: true}, nil, mockReg, mockDisp, inserters...)
-			for prNum, sha := range tc.presetFailedSHAs {
-				srv.recordFailedCISHA("azylman/aerial", prNum, sha)
-			}
-			for _, prNum := range tc.presetUpdatedPRs {
-				srv.markUpdatedForCurrentMain("azylman/aerial", prNum)
-			}
-
-			err := srv.checkOpenPRConflicts(ctx, "azylman/aerial")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("checkOpenPRConflicts() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
-				t.Errorf("err = %v, want substr %q", err, tc.wantErrSubstr)
-			}
-			for prNum, wantSHA := range tc.wantCachedFailedSHAs {
-				v, ok := srv.failedCheckSHAs.Load(prCheckKey("azylman/aerial", prNum))
-				if !ok || fmt.Sprint(v) != wantSHA {
-					t.Errorf("cached failedCheckSHAs[%d] = %v (ok=%v), want %q", prNum, v, ok, wantSHA)
-				}
-			}
-			for _, prNum := range tc.wantUncachedFailedPRs {
-				if v, ok := srv.failedCheckSHAs.Load(prCheckKey("azylman/aerial", prNum)); ok {
-					t.Errorf("cached failedCheckSHAs[%d] = %v, want uncached", prNum, v)
-				}
-			}
-			mu.Lock()
-			gotUpdated := append([]string(nil), putPaths...)
-			mu.Unlock()
-			if len(gotUpdated) != len(tc.wantUpdatedPRs) {
-				t.Fatalf("got updated PR paths %v, want %v", gotUpdated, tc.wantUpdatedPRs)
-			}
-			for i := range tc.wantUpdatedPRs {
-				if gotUpdated[i] != tc.wantUpdatedPRs[i] {
-					t.Errorf("updated PR path[%d] = %q, want %q", i, gotUpdated[i], tc.wantUpdatedPRs[i])
-				}
-			}
-			if mReg, ok := mockReg.(*mockPRRegistry); ok && mReg != nil {
-				if tc.wantConflict {
-					if len(mReg.conflictCalls) != 1 || mReg.conflictCalls[0].prNumber != tc.wantConflictPR {
-						t.Errorf("conflictCalls = %+v, want PR %d", mReg.conflictCalls, tc.wantConflictPR)
-					}
-				} else if len(mReg.conflictCalls) != 0 {
-					t.Errorf("unexpected conflictCalls: %+v", mReg.conflictCalls)
-				}
-				if len(mReg.closedUnmergedCalls) != len(tc.wantClosedPRs) {
-					t.Errorf("closedUnmergedCalls count = %d, want %d", len(mReg.closedUnmergedCalls), len(tc.wantClosedPRs))
-				} else {
-					for i, wantPR := range tc.wantClosedPRs {
-						if mReg.closedUnmergedCalls[i].prNumber != wantPR {
-							t.Errorf("closedUnmergedCalls[%d] = %d, want %d", i, mReg.closedUnmergedCalls[i].prNumber, wantPR)
-						}
-					}
-				}
-			}
-			if mockRiver != nil && len(mockRiver.insertedConflictJobs) != tc.wantConflictQueued {
-				t.Errorf("insertedConflictJobs = %d, want %d", len(mockRiver.insertedConflictJobs), tc.wantConflictQueued)
-			}
-			if len(mockDisp.DirectMessageCalls()) != tc.wantDMs {
-				t.Errorf("got %d DMs, want %d", len(mockDisp.DirectMessageCalls()), tc.wantDMs)
-			}
-			if len(mockDisp.PromptCalls()) != tc.wantPrompts {
-				t.Errorf("got %d prompts, want %d", len(mockDisp.PromptCalls()), tc.wantPrompts)
-			}
-			if len(mockDisp.DispatchCalls()) != tc.wantDispatches {
-				t.Errorf("got %d dispatches, want %d", len(mockDisp.DispatchCalls()), tc.wantDispatches)
-			}
-			for _, sub := range tc.wantPromptSubs {
-				if tc.wantDispatches > 0 {
-					if len(mockDisp.DispatchCalls()) == 0 || !strings.Contains(mockDisp.DispatchCalls()[0].Prompt, sub) {
-						t.Errorf("expected dispatch prompt containing %q", sub)
-					}
-				} else if len(mockDisp.PromptCalls()) == 0 || !strings.Contains(mockDisp.PromptCalls()[0].Prompt, sub) {
-					t.Errorf("expected prompt containing %q", sub)
-				}
-			}
-		})
-	}
-}
-
-func TestResolvePRFromCommitSHA(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name          string
-		repo          string
-		sha           string
-		apiURL        string
-		statusCode    int
-		responseBody  string
-		openPRsBody   string
-		preCacheRepo  string
-		preCacheSHA   string
-		preCachePR    int
-		preCacheBr    string
-		wantErr       bool
-		wantErrSubstr string
-		wantPRNum     int
-		wantBranch    string
-	}{
-		{
-			name:          "empty repo",
-			repo:          "",
-			sha:           "sha123",
-			wantErr:       true,
-			wantErrSubstr: "invalid repo or sha",
-		},
-		{
-			name:    "invalid api url",
-			repo:    "azylman/aerial",
-			sha:     "sha123",
-			apiURL:  "::bad-url::",
-			wantErr: true,
-		},
-		{
-			name:          "empty sha",
-			repo:          "azylman/aerial",
-			sha:           "",
-			wantErr:       true,
-			wantErrSubstr: "invalid repo or sha",
-		},
-		{
-			name:          "zero SHA",
-			repo:          "azylman/aerial",
-			sha:           "0000000000000000000000000000000000000000",
-			wantErr:       true,
-			wantErrSubstr: "invalid repo or sha",
-		},
-		{
-			name:          "403 rate limit",
-			repo:          "azylman/aerial",
-			sha:           "sha403",
-			statusCode:    http.StatusForbidden,
-			responseBody:  `{"message":"API rate limit exceeded"}`,
-			wantErr:       true,
-			wantErrSubstr: "rate limit",
-		},
-		{
-			name:          "404 not found",
-			repo:          "azylman/aerial",
-			sha:           "sha404",
-			statusCode:    http.StatusNotFound,
-			responseBody:  `{"message":"Not Found"}`,
-			wantErr:       true,
-			wantErrSubstr: "404",
-		},
-		{
-			name:         "malformed JSON",
-			repo:         "azylman/aerial",
-			sha:          "shamalformed",
-			statusCode:   http.StatusOK,
-			responseBody: `{not-an-array`,
-			wantErr:      true,
-		},
-		{
-			name:          "empty PR list",
-			repo:          "azylman/aerial",
-			sha:           "shaempty",
-			statusCode:    http.StatusOK,
-			responseBody:  `[]`,
-			wantErr:       true,
-			wantErrSubstr: "no pull requests associated",
-		},
-		{
-			name:         "closed-PR over open-PR priority",
-			repo:         "azylman/aerial",
-			sha:          "shaclosed",
-			statusCode:   http.StatusOK,
-			responseBody: `[{"number":10,"state":"open","head":{"ref":"feat/open"}},{"number":20,"state":"closed","head":{"ref":"feat/closed"}}]`,
-			wantPRNum:    20,
-			wantBranch:   "feat/closed",
-		},
-		{
-			name:         "higher-number selection priority when states match",
-			repo:         "azylman/aerial",
-			sha:          "shahigher",
-			statusCode:   http.StatusOK,
-			responseBody: `[{"number":10,"state":"closed","head":{"ref":"feat/ten"}},{"number":30,"state":"closed","head":{"ref":"feat/thirty"}},{"number":20,"state":"closed","head":{"ref":"feat/twenty"}}]`,
-			wantPRNum:    30,
-			wantBranch:   "feat/thirty",
-		},
-		{
-			name:         "fork PR fallback scans open pulls when commits pulls returns empty",
-			repo:         "azylman/aerial",
-			sha:          "forksha123",
-			statusCode:   http.StatusOK,
-			responseBody: `[]`,
-			openPRsBody:  `[{"number":456,"state":"open","head":{"ref":"fork-feature","sha":"forksha123"}},{"number":455,"state":"open","head":{"ref":"other","sha":"diffsha"}}]`,
-			wantPRNum:    456,
-			wantBranch:   "fork-feature",
-		},
-		{
-			name:         "in-memory commitSHAPRs cache hit avoids hitting GitHub API",
-			repo:         "azylman/aerial",
-			sha:          "cachedsha999",
-			apiURL:       "::bad-url::",
-			preCacheRepo: "azylman/aerial",
-			preCacheSHA:  "cachedsha999",
-			preCachePR:   999,
-			preCacheBr:   "feat/cached-branch",
-			wantPRNum:    999,
-			wantBranch:   "feat/cached-branch",
-		},
-		{
-			name:          "invalid commit sha characters return error",
-			repo:          "azylman/aerial",
-			sha:           "0000",
-			wantErr:       true,
-			wantErrSubstr: "invalid repo or sha",
-		},
-		{
-			name:          "lookupCommitSHAPR empty or zero sha returns false",
-			repo:          "",
-			sha:           "",
-			wantErr:       true,
-			wantErrSubstr: "invalid repo or sha",
-		},
-		{
-			name:          "open PR fallback fails if both commits/pulls and pulls return empty",
-			repo:          "azylman/aerial",
-			sha:           "notfoundsha",
-			statusCode:    http.StatusOK,
-			responseBody:  `[]`,
-			openPRsBody:   `[{"number":123,"state":"open","head":{"ref":"foo","sha":"other"}}]`,
-			wantErr:       true,
-			wantErrSubstr: "no pull requests associated",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				if strings.Contains(r.URL.Path, "/pulls") && strings.Contains(r.URL.RawQuery, "state=open") {
-					if tc.openPRsBody != "" {
-						_, _ = w.Write([]byte(tc.openPRsBody))
-						return
-					}
-					_, _ = w.Write([]byte(`[]`))
-					return
-				}
-				code := tc.statusCode
-				if code == 0 {
-					code = http.StatusOK
-				}
-				w.WriteHeader(code)
-				_, _ = w.Write([]byte(tc.responseBody))
-			}))
-			defer ts.Close()
-
-			apiURL := ts.URL
-			if tc.apiURL != "" {
-				apiURL = tc.apiURL
-			}
-			srv := NewRouterServer(fixedConfig(Config{GitHubAPIURL: apiURL, GitHubToken: "secret"}), ts.Client())
-			if tc.preCacheRepo != "" && tc.preCacheSHA != "" {
-				srv.recordCommitSHAPR(tc.preCacheRepo, tc.preCacheSHA, tc.preCachePR, tc.preCacheBr)
-			}
-			prNum, branch, err := srv.resolvePRFromCommitSHA(ctx, tc.repo, tc.sha)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("resolvePRFromCommitSHA() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
-				t.Errorf("err = %v, want substr %q", err, tc.wantErrSubstr)
-			}
-			if prNum != tc.wantPRNum {
-				t.Errorf("got prNum = %d, want %d", prNum, tc.wantPRNum)
-			}
-			if branch != tc.wantBranch {
-				t.Errorf("got branch = %q, want %q", branch, tc.wantBranch)
-			}
-		})
-	}
-}
-
-func TestCommitSHAPRCacheHelpers(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		nilServer  bool
-		repo       string
-		sha        string
-		prNumber   int
-		branch     string
-		corruptKey string
-		corruptVal any
-		wantLookup bool
-		wantPR     int
-		wantBranch string
-	}{
-		{
-			name:       "nil receiver returns false on lookup and no-ops on record",
-			nilServer:  true,
-			repo:       "azylman/aerial",
-			sha:        "abcdef123456",
-			prNumber:   42,
-			branch:     "feat/test",
-			wantLookup: false,
-		},
-		{
-			name:       "empty repo is no-op",
-			repo:       "",
-			sha:        "abcdef123456",
-			prNumber:   42,
-			branch:     "feat/test",
-			wantLookup: false,
-		},
-		{
-			name:       "empty sha is no-op",
-			repo:       "azylman/aerial",
-			sha:        "",
-			prNumber:   42,
-			branch:     "feat/test",
-			wantLookup: false,
-		},
-		{
-			name:       "zero sha is no-op",
-			repo:       "azylman/aerial",
-			sha:        "0000000000000000000000000000000000000000",
-			prNumber:   42,
-			branch:     "feat/test",
-			wantLookup: false,
-		},
-		{
-			name:       "invalid prNumber <= 0 is no-op",
-			repo:       "azylman/aerial",
-			sha:        "abcdef123456",
-			prNumber:   0,
-			branch:     "feat/test",
-			wantLookup: false,
-		},
-		{
-			name:       "valid record and lookup with trimming and case normalization",
-			repo:       " Azylman/Aerial ",
-			sha:        " ABCDEF123456 ",
-			prNumber:   100,
-			branch:     " feat/normalized ",
-			wantLookup: true,
-			wantPR:     100,
-			wantBranch: "feat/normalized",
-		},
-		{
-			name:       "corrupt cache entry type returns false",
-			repo:       "azylman/aerial",
-			sha:        "corrupttype",
-			corruptKey: "azylman/aerial@corrupttype",
-			corruptVal: "not-a-GitHubCheckRunPR",
-			wantLookup: false,
-		},
-		{
-			name:       "corrupt cache entry zero PR number returns false",
-			repo:       "azylman/aerial",
-			sha:        "corruptpr",
-			corruptKey: "azylman/aerial@corruptpr",
-			corruptVal: GitHubCheckRunPR{Number: 0},
-			wantLookup: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = &RouterServer{}
-			}
-			if tc.corruptKey != "" && srv != nil {
-				srv.commitSHAPRs.Store(tc.corruptKey, tc.corruptVal)
-			} else {
-				srv.recordCommitSHAPR(tc.repo, tc.sha, tc.prNumber, tc.branch)
-			}
-			prNum, branch, ok := srv.lookupCommitSHAPR(tc.repo, tc.sha)
-			if ok != tc.wantLookup {
-				t.Fatalf("lookupCommitSHAPR() ok = %v, want %v", ok, tc.wantLookup)
-			}
-			if prNum != tc.wantPR {
-				t.Errorf("lookupCommitSHAPR() prNum = %d, want %d", prNum, tc.wantPR)
-			}
-			if branch != tc.wantBranch {
-				t.Errorf("lookupCommitSHAPR() branch = %q, want %q", branch, tc.wantBranch)
-			}
-		})
-	}
-}
-
-func TestUpdatedForCurrentMainHelpers(t *testing.T) {
-	t.Parallel()
-
-	var nilSrv *RouterServer
-	nilSrv.markUpdatedForCurrentMain("azylman/aerial", 123)
-	if nilSrv.wasUpdatedForCurrentMain("azylman/aerial", 123) {
-		t.Errorf("expected false for nil server")
-	}
-	nilSrv.clearUpdatedPRsForRepo("azylman/aerial")
-
-	srv := &RouterServer{}
-	srv.markUpdatedForCurrentMain("azylman/aerial", 0)
-	if srv.wasUpdatedForCurrentMain("azylman/aerial", 0) {
-		t.Errorf("expected false for pr <= 0")
-	}
-
-	srv.markUpdatedForCurrentMain("azylman/aerial", 42)
-	srv.markUpdatedForCurrentMain("azylman/aerial", 43)
-	srv.markUpdatedForCurrentMain("azylman/other", 99)
-
-	if !srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
-		t.Errorf("expected true for PR 42")
-	}
-	if !srv.wasUpdatedForCurrentMain("azylman/aerial", 43) {
-		t.Errorf("expected true for PR 43")
-	}
-	if !srv.wasUpdatedForCurrentMain("azylman/other", 99) {
-		t.Errorf("expected true for PR 99")
-	}
-
-	srv.clearUpdatedPRsForRepo("azylman/aerial")
-
-	if srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
-		t.Errorf("expected false for cleared PR 42")
-	}
-	if srv.wasUpdatedForCurrentMain("azylman/aerial", 43) {
-		t.Errorf("expected false for cleared PR 43")
-	}
-	if !srv.wasUpdatedForCurrentMain("azylman/other", 99) {
-		t.Errorf("expected true for remaining PR 99")
-	}
-}
-
-func TestFailedCheckTrackerHelpers(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name               string
-		nilServer          bool
-		repo               string
-		prNumber           int
-		headSHA            string
-		presetHeadSHA      string
-		presetFailedChecks []string
-		presetClearChecks  []string
-		evalCheck          string
-		wantRecover        bool
-	}{
-		{
-			name:        "nil server returns false",
-			nilServer:   true,
-			repo:        "azylman/aerial",
-			prNumber:    10,
-			headSHA:     "sha10",
-			evalCheck:   "Unit Tests",
-			wantRecover: false,
-		},
-		{
-			name:        "invalid PR number returns false",
-			repo:        "azylman/aerial",
-			prNumber:    0,
-			headSHA:     "sha10",
-			evalCheck:   "Unit Tests",
-			wantRecover: false,
-		},
-		{
-			name:        "empty head sha returns false",
-			repo:        "azylman/aerial",
-			prNumber:    10,
-			headSHA:     "",
-			evalCheck:   "Unit Tests",
-			wantRecover: false,
-		},
-		{
-			name:        "zero head sha returns false",
-			repo:        "azylman/aerial",
-			prNumber:    10,
-			headSHA:     "0000000000000000000000000000000000000000",
-			evalCheck:   "Unit Tests",
-			wantRecover: false,
-		},
-		{
-			name:        "empty check name returns false",
-			repo:        "azylman/aerial",
-			prNumber:    10,
-			headSHA:     "sha10",
-			evalCheck:   "",
-			wantRecover: false,
-		},
-		{
-			name:               "single check failure and rerun success recovers",
-			repo:               "azylman/aerial",
-			prNumber:           11,
-			headSHA:            "sha11",
-			presetHeadSHA:      "sha11",
-			presetFailedChecks: []string{"Unit Tests"},
-			evalCheck:          "Unit Tests",
-			wantRecover:        true,
-		},
-		{
-			name:               "unrelated check that never failed returns false",
-			repo:               "azylman/aerial",
-			prNumber:           12,
-			headSHA:            "sha12",
-			presetHeadSHA:      "sha12",
-			presetFailedChecks: []string{"Unit Tests"},
-			evalCheck:          "Lint",
-			wantRecover:        false,
-		},
-		{
-			name:               "mismatched sha returns false",
-			repo:               "azylman/aerial",
-			prNumber:           13,
-			headSHA:            "sha13-new",
-			presetHeadSHA:      "sha13-old",
-			presetFailedChecks: []string{"Unit Tests"},
-			evalCheck:          "Unit Tests",
-			wantRecover:        false,
-		},
-		{
-			name:               "two checks failed: one cleared active and one succeeds recovers",
-			repo:               "azylman/aerial",
-			prNumber:           14,
-			headSHA:            "sha14",
-			presetHeadSHA:      "sha14",
-			presetFailedChecks: []string{"Lint", "Unit Tests"},
-			presetClearChecks:  []string{"Lint"},
-			evalCheck:          "Unit Tests",
-			wantRecover:        true,
-		},
-		{
-			name:               "two checks failed: one still active prevents recovery",
-			repo:               "azylman/aerial",
-			prNumber:           15,
-			headSHA:            "sha15",
-			presetHeadSHA:      "sha15",
-			presetFailedChecks: []string{"Lint", "Unit Tests"},
-			evalCheck:          "Unit Tests",
-			wantRecover:        false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = &RouterServer{}
-			}
-			if srv != nil && tc.presetHeadSHA != "" {
-				for _, c := range tc.presetFailedChecks {
-					srv.recordFailedCheckRun(tc.repo, tc.prNumber, tc.presetHeadSHA, c)
-				}
-				for _, c := range tc.presetClearChecks {
-					srv.clearActiveFailedCheckRun(tc.repo, tc.prNumber, tc.presetHeadSHA, c)
-				}
-			}
-			got := srv.canRecoverNonGateCheckSuccess(tc.repo, tc.prNumber, tc.evalCheck, tc.headSHA)
-			if got != tc.wantRecover {
-				t.Fatalf("canRecoverNonGateCheckSuccess() = %v, want %v", got, tc.wantRecover)
-			}
-		})
-	}
-}
-
-func TestIsCachedFailedCISHA(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		nilServer  bool
-		repo       string
-		prNumber   int
-		headSHA    string
-		presetMap  string
-		presetSHA  string
-		wantCached bool
-	}{
-		{
-			name:       "nil server returns false",
-			nilServer:  true,
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10",
-			wantCached: false,
-		},
-		{
-			name:       "empty repo returns false",
-			repo:       "",
-			prNumber:   10,
-			headSHA:    "sha10",
-			wantCached: false,
-		},
-		{
-			name:       "invalid prNumber <= 0 returns false",
-			repo:       "azylman/aerial",
-			prNumber:   0,
-			headSHA:    "sha10",
-			wantCached: false,
-		},
-		{
-			name:       "empty head sha returns false",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "",
-			wantCached: false,
-		},
-		{
-			name:       "zero head sha returns false",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "0000000000000000000000000000000000000000",
-			wantCached: false,
-		},
-		{
-			name:       "uncached pr returns false",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10",
-			wantCached: false,
-		},
-		{
-			name:       "cached in failedCheckSHAs returns true",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10",
-			presetMap:  "failedCheckSHAs",
-			presetSHA:  "sha10",
-			wantCached: true,
-		},
-		{
-			name:       "cached in nonRoboRevFailedSHAs returns true",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10",
-			presetMap:  "nonRoboRevFailedSHAs",
-			presetSHA:  "sha10",
-			wantCached: true,
-		},
-		{
-			name:       "cached in cancelledCheckSHAs returns true",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10",
-			presetMap:  "cancelledCheckSHAs",
-			presetSHA:  "sha10",
-			wantCached: true,
-		},
-		{
-			name:       "cached sha mismatch returns false",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			headSHA:    "sha10-new",
-			presetMap:  "failedCheckSHAs",
-			presetSHA:  "sha10-old",
-			wantCached: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = &RouterServer{}
-				key := prCheckKey(tc.repo, tc.prNumber)
-				switch tc.presetMap {
-				case "failedCheckSHAs":
-					srv.failedCheckSHAs.Store(key, tc.presetSHA)
-				case "nonRoboRevFailedSHAs":
-					srv.nonRoboRevFailedSHAs.Store(key, tc.presetSHA)
-				case "cancelledCheckSHAs":
-					srv.cancelledCheckSHAs.Store(key, tc.presetSHA)
-				}
-			}
-			got := srv.isCachedFailedCISHA(tc.repo, tc.prNumber, tc.headSHA)
-			if got != tc.wantCached {
-				t.Fatalf("isCachedFailedCISHA() = %v, want %v", got, tc.wantCached)
-			}
-		})
-	}
-}
-
-func TestParseAerialPRMetadata(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, body, wantTarget, wantChunk, wantBotID string
-		wantOK                                       bool
-	}{
-		{name: "no trailer", body: "Standard PR body\n<!-- regular comment -->"},
-		{name: "unclosed trailer", body: "Body\n<!-- aerial-pr: {\"target_id\":\"1562162630997581946\"}"},
-		{name: "invalid json", body: "Body\n<!-- aerial-pr: {bad-json} -->"},
-		{name: "invalid target and empty chunk", body: "Body\n<!-- aerial-pr: {\"target_id\":\"bad\",\"vanadis_chunk_id\":\"\"} -->"},
-		{name: "valid target and chunk", body: "<!-- x -->\n<!-- aerial-pr: {\"target_id\":\"1562162630997581946\",\"vanadis_chunk_id\":\"chunk-2\"} -->", wantTarget: "1562162630997581946", wantChunk: "chunk-2", wantOK: true},
-		{name: "discord prefixed target and pool prefix", body: "<!-- aerial-pr: {\"target_id\":\"stateful_medium:discord-1562162630997581946\",\"vanadis_chunk_id\":\"\"} -->", wantTarget: "1562162630997581946", wantChunk: "", wantOK: true},
-		{name: "valid chunk only", body: "<!-- aerial-pr: {\"target_id\":\"\",\"vanadis_chunk_id\":\"chunk-only\"} -->", wantChunk: "chunk-only", wantOK: true},
-		{name: "valid bot id only", body: "<!-- aerial-pr: {\"bot_id\":\"eri-sub\"} -->", wantBotID: "eri-sub", wantOK: true},
-		{name: "valid target chunk and bot id", body: "<!-- aerial-pr: {\"target_id\":\"1562162630997581946\",\"vanadis_chunk_id\":\"chunk-3\",\"bot_id\":\"eri-sub\"} -->", wantTarget: "1562162630997581946", wantChunk: "chunk-3", wantBotID: "eri-sub", wantOK: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := ParseAerialPRMetadata(tc.body)
-			if got.OK() != tc.wantOK || got.TargetID != tc.wantTarget || got.VanadisChunkID != tc.wantChunk || got.BotID != tc.wantBotID {
-				t.Fatalf("ParseAerialPRMetadata() = %+v (ok=%v), want target=%q chunk=%q bot=%q ok=%v", got, got.OK(), tc.wantTarget, tc.wantChunk, tc.wantBotID, tc.wantOK)
-			}
-		})
-	}
-}
-
-func TestClassifyCheckState_Unit(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		status     string
-		conclusion string
-		want       string
-	}{
-		{name: "completed success", status: "completed", conclusion: "success", want: "passed"},
-		{name: "completed neutral", status: "completed", conclusion: "neutral", want: "passed"},
-		{name: "completed skipped", status: "completed", conclusion: "skipped", want: "passed"},
-		{name: "completed failure", status: "completed", conclusion: "failure", want: "failed"},
-		{name: "completed timed_out", status: "completed", conclusion: "timed_out", want: "failed"},
-		{name: "completed cancelled", status: "completed", conclusion: "cancelled", want: "failed"},
-		{name: "completed action_required", status: "completed", conclusion: "action_required", want: "failed"},
-		{name: "completed unknown conclusion", status: "completed", conclusion: "stale", want: ""},
-		{name: "queued", status: "queued", want: "pending"},
-		{name: "in_progress", status: "in_progress", want: "pending"},
-		{name: "waiting", status: "waiting", want: "pending"},
-		{name: "requested", status: "requested", want: "pending"},
-		{name: "pending", status: "pending", want: "pending"},
-		{name: "other non-completed", status: "custom_status", want: "pending"},
-		{name: "empty status", status: "", want: ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := classifyCheckState(tc.status, tc.conclusion)
-			if got != tc.want {
-				t.Fatalf("classifyCheckState(%q, %q) = %q, want %q", tc.status, tc.conclusion, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestFormatCIChecksActiveStep_Unit(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name         string
-		prStatus     string
-		ciChecksJSON string
-		metadataJSON string
-		wantLegacy   string
-		want         string
-	}{
-		{name: "non-open status merged legacy empty", prStatus: "merged", ciChecksJSON: `{"lint":"passed"}`, wantLegacy: "", want: "Building container images (1/1 completed)"},
-		{name: "non-open status closed", prStatus: "closed", ciChecksJSON: `{"lint":"passed"}`, wantLegacy: "", want: ""},
-		{name: "non-open status ci_failed", prStatus: "ci_failed", ciChecksJSON: `{"lint":"passed"}`, wantLegacy: "", want: ""},
-		{name: "empty ciChecksJSON", prStatus: "open", ciChecksJSON: "", wantLegacy: "", want: ""},
-		{name: "empty JSON object", prStatus: "open", ciChecksJSON: "{}", wantLegacy: "", want: ""},
-		{name: "invalid JSON", prStatus: "open", ciChecksJSON: "not-json", wantLegacy: "", want: ""},
-		{name: "single check passed", prStatus: "open", ciChecksJSON: `{"test":"passed"}`, wantLegacy: "Waiting on CI (1/1 passed)", want: "Waiting on CI (1/1 passed)"},
-		{name: "multiple checks all passed", prStatus: "open", ciChecksJSON: `{"lint":"passed","unit":"passed","integration":"passed"}`, wantLegacy: "Waiting on CI (3/3 passed)", want: "Waiting on CI (3/3 passed)"},
-		{name: "mixed passed and pending", prStatus: "open", ciChecksJSON: `{"lint":"passed","build":"pending","unit":"passed"}`, wantLegacy: "Waiting on CI (2/3 passed)", want: "Waiting on CI (2/3 passed)"},
-		{name: "all pending", prStatus: "open", ciChecksJSON: `{"lint":"pending","unit":"pending"}`, wantLegacy: "Waiting on CI (0/2 passed)", want: "Waiting on CI (0/2 passed)"},
-		{name: "any check failed returns empty", prStatus: "open", ciChecksJSON: `{"lint":"passed","unit":"failed"}`, wantLegacy: "", want: ""},
-
-		// Post-merge tests for formatPRWidgetActiveStep
-		{
-			name:         "merged with candidate jobs and started verifying_health",
-			prStatus:     "merged",
-			metadataJSON: `{"jobs":["eri","haro"],"started_jobs":["eri"],"deployed_jobs":[],"job_states":{"eri":"verifying_health"}}`,
-			want:         "`eri`: 🔄 verifying health\n`haro`: ⏳ building image",
-		},
-		{
-			name:         "synced with deployed job and starting job",
-			prStatus:     "synced",
-			metadataJSON: `{"jobs":["coven","eri"],"started_jobs":["eri"],"deployed_jobs":["coven"]}`,
-			want:         "`coven`: ✅ healthy\n`eri`: 🔄 starting",
-		},
-		{
-			name:         "deploying status with empty started_jobs defaults candidate jobs to starting",
-			prStatus:     "deploying",
-			metadataJSON: `{"jobs":["eri","haro"]}`,
-			want:         "`eri`: 🔄 starting\n`haro`: 🔄 starting",
-		},
-		{
-			name:         "merged with buildJobRegex service matches in ci_checks",
-			prStatus:     "merged",
-			ciChecksJSON: `{"Build & Push Images (mesh-proxy)":"passed","Build & Push Images (eri)":"in_progress"}`,
-			want:         "`eri`: ⏳ building image\n`mesh-proxy`: 🔄 starting",
-		},
-		{
-			name:         "merged with only unexpanded matrix build check falls back to container images count",
-			prStatus:     "merged",
-			ciChecksJSON: `{"Build & Push Images to GHCR (${{ matrix.service }})":"passed","CI Gate":"passed"}`,
-			want:         "Building container images (2/2 completed)",
-		},
-		{
-			name:         "merged with unexpanded matrix build check alongside real service renders only real service",
-			prStatus:     "merged",
-			ciChecksJSON: `{"Build & Push Images to GHCR (${{ matrix.service }})":"passed","Build & Push Images to GHCR (eri)":"in_progress"}`,
-			want:         "`eri`: ⏳ building image",
-		},
-		{
-			name:         "merged with non-matching ci_checks falls back to container images count",
-			prStatus:     "merged",
-			ciChecksJSON: `{"Docker Build":"passed","Test Gate":"passed"}`,
-			want:         "Building container images (2/2 completed)",
-		},
-		{
-			name:         "merged with failed check returns empty",
-			prStatus:     "merged",
-			ciChecksJSON: `{"Docker Build":"failed","Test Gate":"passed"}`,
-			metadataJSON: `{"jobs":["eri"]}`,
-			want:         "",
-		},
-		{
-			name:         "merged fallback to meta ci_checks when ciChecksJSON is empty",
-			prStatus:     "merged",
-			metadataJSON: `{"ci_checks":{"Docker Build":"passed"}}`,
-			want:         "Building container images (1/1 completed)",
-		},
-		{
-			name:         "deploying kustomizations none rolled out",
-			prStatus:     "deploying",
-			metadataJSON: `{"jobs":["eri"],"kustomization_requests":{"marida-core":{"namespace":"flux-system","requested_at":"t1"},"aerial-core":{"namespace":"flux-system","requested_at":"t1"}}}`,
-			want:         "`aerial-core`: 🔄 rolling out\n`marida-core`: 🔄 rolling out",
-		},
-		{
-			name:         "deploying kustomizations partially rolled out",
-			prStatus:     "deploying",
-			metadataJSON: `{"kustomization_requests":{"marida-core":{"namespace":"flux-system","requested_at":"t1"},"aerial-core":{"namespace":"flux-system","requested_at":"t1"}},"deployed_kustomizations":["aerial-core"]}`,
-			want:         "`aerial-core`: ✅ rolled out\n`marida-core`: 🔄 rolling out",
-		},
-		{
-			name:         "deploying kustomizations all rolled out",
-			prStatus:     "deploying",
-			metadataJSON: `{"kustomization_requests":{"marida-core":{"namespace":"apps","requested_at":"t1"},"aerial-core":{"namespace":"flux-system","requested_at":"t1"}},"deployed_kustomizations":["aerial-core","marida-core"]}`,
-			want:         "`aerial-core`: ✅ rolled out\n`marida-core`: ✅ rolled out",
-		},
-		{
-			name:         "deploying legacy empty kustomization requests falls back to jobs",
-			prStatus:     "deploying",
-			metadataJSON: `{"jobs":["eri"],"kustomization_requests":{},"deployed_jobs":["eri"]}`,
-			want:         "`eri`: ✅ healthy",
-		},
-		{
-			name:     "unsupported status returns empty",
-			prStatus: "deployed",
-			want:     "",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			gotLegacy := formatCIChecksActiveStep(tc.prStatus, tc.ciChecksJSON)
-			if tc.metadataJSON == "" && tc.prStatus == "open" {
-				if gotLegacy != tc.wantLegacy {
-					t.Fatalf("formatCIChecksActiveStep(%q, %q) = %q, want %q", tc.prStatus, tc.ciChecksJSON, gotLegacy, tc.wantLegacy)
-				}
-			}
-			got := formatPRWidgetActiveStep(tc.prStatus, tc.ciChecksJSON, tc.metadataJSON)
-			if got != tc.want {
-				t.Fatalf("formatPRWidgetActiveStep(%q, %q, %q) = %q, want %q", tc.prStatus, tc.ciChecksJSON, tc.metadataJSON, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestExtractStringMapFromMetadata_Unit(t *testing.T) {
-	t.Parallel()
-
-	if res := extractStringMapFromMetadata(nil, "key"); res != nil {
-		t.Errorf("expected nil for nil meta, got %v", res)
-	}
-	if res := extractStringMapFromMetadata(map[string]any{}, "key"); res != nil {
-		t.Errorf("expected nil for missing key, got %v", res)
-	}
-
-	paddedKey := " ERI "
-	metaObj := map[string]any{
-		"job_states": map[string]any{
-			paddedKey: "verifying_health",
-			"":        "invalid",
-			"HARO":    "starting",
-		},
-	}
-	gotObj := extractStringMapFromMetadata(metaObj, "job_states")
-	if gotObj["eri"] != "verifying_health" || gotObj["haro"] != "starting" {
-		t.Errorf("unexpected map from interface: %+v", gotObj)
-	}
-
-	metaStr := map[string]any{
-		"job_states": map[string]string{
-			" CADVISOR ": " healthy ",
-		},
-	}
-	gotStr := extractStringMapFromMetadata(metaStr, "job_states")
-	if gotStr["cadvisor"] != "healthy" {
-		t.Errorf("unexpected map from string map: %+v", gotStr)
-	}
-}
-
-func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	trueVal := true
-	falseVal := false
-
-	tests := []struct {
-		name                  string
-		resRepo               string
-		resPRNum              int
-		resBranch             string
-		resHeadSHA            string
-		payloadMergeableState string
-		payloadMergeable      *bool
-		ghAPIStatus           int
-		apiMergeableState     string
-		apiHeadSHA            string
-		apiState              string
-		apiMerged             bool
-		registryUpdated       bool
-		registryTargetID      string
-		wantConflictEnqueued  int
-		wantErr               bool
-		wantFailedNonRoboRev  string
-	}{
-		{
-			name:                  "unknown state where API returns dirty open PR transitions conflict and enqueues job",
-			resRepo:               "azylman/aerial",
-			resPRNum:              102,
-			resBranch:             "feat/fallback",
-			resHeadSHA:            "sha102",
-			payloadMergeableState: "unknown",
-			apiMergeableState:     "dirty",
-			apiHeadSHA:            "sha102",
-			apiState:              "open",
-			registryUpdated:       true,
-			registryTargetID:      "1555405874565091380",
-			wantConflictEnqueued:  1,
-			wantFailedNonRoboRev:  "sha102",
-		},
-		{
-			name:                  "payload mergeable false with empty state is merge conflict without API lookup",
-			resRepo:               "azylman/aerial",
-			resPRNum:              103,
-			resBranch:             "feat/unmergeable",
-			resHeadSHA:            "sha103",
-			payloadMergeable:      &falseVal,
-			payloadMergeableState: "",
-			registryUpdated:       true,
-			registryTargetID:      "1555405874565091380",
-			wantConflictEnqueued:  1,
-			wantFailedNonRoboRev:  "sha103",
-		},
-		{
-			name:                  "payload mergeable true with empty state is clean and ignored",
-			resRepo:               "azylman/aerial",
-			resPRNum:              104,
-			resBranch:             "feat/clean",
-			resHeadSHA:            "sha104",
-			payloadMergeable:      &trueVal,
-			payloadMergeableState: "",
-			wantConflictEnqueued:  0,
-		},
-		{
-			name:                  "unknown state with empty repo normalization skips API lookup and ignores non-conflict",
-			resRepo:               "",
-			resPRNum:              107,
-			resBranch:             "feat/unknown",
-			resHeadSHA:            "sha107",
-			payloadMergeableState: "unknown",
-			ghAPIStatus:           http.StatusInternalServerError,
-			wantConflictEnqueued:  0,
-		},
-		{
-			name:                  "unknown state where API returns merged PR is ignored cleanly",
-			resRepo:               "azylman/aerial",
-			resPRNum:              109,
-			resBranch:             "feat/api-merged",
-			resHeadSHA:            "sha109",
-			payloadMergeableState: "unknown",
-			apiMergeableState:     "dirty",
-			apiHeadSHA:            "sha109",
-			apiMerged:             true,
-			wantConflictEnqueued:  0,
-		},
-		{
-			name:                  "unknown state where API returns closed PR is ignored cleanly",
-			resRepo:               "azylman/aerial",
-			resPRNum:              110,
-			resBranch:             "feat/api-closed",
-			resHeadSHA:            "sha110",
-			payloadMergeableState: "unknown",
-			apiMergeableState:     "dirty",
-			apiHeadSHA:            "sha110",
-			apiState:              "closed",
-			wantConflictEnqueued:  0,
-		},
-		{
-			name:                  "unknown state where API returns superseded head SHA is ignored cleanly",
-			resRepo:               "azylman/aerial",
-			resPRNum:              111,
-			resBranch:             "feat/api-superseded",
-			resHeadSHA:            "sha111",
-			payloadMergeableState: "unknown",
-			apiMergeableState:     "dirty",
-			apiHeadSHA:            "sha111-newer",
-			apiState:              "open",
-			wantConflictEnqueued:  0,
-		},
-		{
-			name:                  "unknown state where API returns HTTP 500 propagates error",
-			resRepo:               "azylman/aerial",
-			resPRNum:              112,
-			resBranch:             "feat/api-err",
-			resHeadSHA:            "sha112",
-			payloadMergeableState: "unknown",
-			ghAPIStatus:           http.StatusInternalServerError,
-			wantErr:               true,
-			wantConflictEnqueued:  0,
-		},
-		{
-			name:                  "registry returns updated false skips enqueuing conflict job",
-			resRepo:               "azylman/aerial",
-			resPRNum:              115,
-			resBranch:             "feat/not-updated",
-			resHeadSHA:            "sha115",
-			payloadMergeableState: "dirty",
-			registryUpdated:       false,
-			wantConflictEnqueued:  0,
-			wantFailedNonRoboRev:  "sha115",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				if strings.Contains(r.URL.Path, fmt.Sprintf("/pulls/%d", tc.resPRNum)) {
-					if tc.ghAPIStatus > 0 && tc.ghAPIStatus != http.StatusOK {
-						w.WriteHeader(tc.ghAPIStatus)
-						_, _ = w.Write([]byte(`{"message": "github api error"}`))
-						return
-					}
-					state := tc.apiState
-					if state == "" {
-						state = "open"
-					}
-					apiHeadSHA := firstNonEmpty(tc.apiHeadSHA, tc.resHeadSHA)
-					pr := GitHubPullRequest{
-						Number:         tc.resPRNum,
-						State:          state,
-						Merged:         tc.apiMerged,
-						MergeableState: tc.apiMergeableState,
-						Head: GitHubPRRef{
-							Ref: tc.resBranch,
-							SHA: apiHeadSHA,
-						},
-					}
-					_ = json.NewEncoder(w).Encode(pr)
-					return
-				}
-				w.WriteHeader(http.StatusNotFound)
-			}))
-			defer mockServer.Close()
-
-			reg := &mockPRRegistry{
-				conflictTargetID: tc.registryTargetID,
-				conflictUpdated:  tc.registryUpdated,
-			}
-			river := &mockRiverInserter{}
-			cfg := Config{
-				GitHubAPIURL: mockServer.URL,
-			}
-			srv := newTestRouter(cfg, mockServer.Client(), reg, nil, river)
-
-			res := &ResolvedGitHubEvent{
-				Event:    "pull_request",
-				Action:   "auto_merge_disabled",
-				Repo:     tc.resRepo,
-				PRNumber: tc.resPRNum,
-				HeadSHA:  tc.resHeadSHA,
-				Branch:   tc.resBranch,
-			}
-			pr := GitHubPullRequest{
-				Number:         tc.resPRNum,
-				MergeableState: tc.payloadMergeableState,
-				Mergeable:      tc.payloadMergeable,
-			}
-
-			err := srv.handlePRAutoMergeDisabledAction(ctx, res, pr)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("handlePRAutoMergeDisabledAction err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if len(river.insertedConflictJobs) != tc.wantConflictEnqueued {
-				t.Fatalf("insertedConflictJobs len = %d, want %d", len(river.insertedConflictJobs), tc.wantConflictEnqueued)
-			}
-			if tc.wantFailedNonRoboRev != "" {
-				val, ok := srv.nonRoboRevFailedSHAs.Load(prCheckKey(tc.resRepo, tc.resPRNum))
-				if !ok || fmt.Sprint(val) != tc.wantFailedNonRoboRev {
-					t.Errorf("nonRoboRevFailedSHAs[%s#%d] = %v (ok=%v), want %q", tc.resRepo, tc.resPRNum, val, ok, tc.wantFailedNonRoboRev)
-				}
-			} else if val, ok := srv.nonRoboRevFailedSHAs.Load(prCheckKey(tc.resRepo, tc.resPRNum)); ok {
-				t.Errorf("unexpected nonRoboRevFailedSHAs entry: %v", val)
-			}
-		})
-	}
-}
-
-type ownedMapRegistry struct {
-	mockPRRegistry
-
-	ownedPRs  map[int]bool
-	ownedSHAs map[string]int
-}
-
-func (r *ownedMapRegistry) ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (string, string, string, string, error) {
-	if err := r.checkErr(r.resolveErr); err != nil {
-		return "", "", "", "", err
-	}
-	if r.ownedPRs != nil && r.ownedPRs[prNumber] {
-		return "1555405874565091380", "feat/test", "sha123", "", nil
-	}
-	return "", "", "", "", nil
-}
-
-func (r *ownedMapRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha string) (int, string, string, error) {
-	if err := r.checkErr(r.resolveErr); err != nil {
-		return 0, "", "", err
-	}
-	if r.ownedSHAs != nil {
-		if prNum, ok := r.ownedSHAs[sha]; ok {
-			return prNum, "feat/test", "1555405874565091380", nil
-		}
-	}
-	return 0, "", "", nil
-}
-
-func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		botID          string
-		defaultOwner   bool
-		prBody         string
-		action         string
-		merged         bool
-		wantRegistered bool
-		wantClosed     bool
-	}{
-		{
-			name:           "matching bot_id registered",
-			botID:          "aerial",
-			defaultOwner:   false,
-			prBody:         "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"aerial\"} -->",
-			wantRegistered: true,
-		},
-		{
-			name:           "case-insensitive matching bot_id registered",
-			botID:          "aerial",
-			defaultOwner:   false,
-			prBody:         "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"AERIAL\"} -->",
-			wantRegistered: true,
-		},
-		{
-			name:           "peer bot_id skipped",
-			botID:          "aerial",
-			defaultOwner:   true,
-			prBody:         "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"coven\"} -->",
-			wantRegistered: false,
-		},
-		{
-			name:           "untagged registered when default owner",
-			botID:          "aerial",
-			defaultOwner:   true,
-			prBody:         "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\"} -->",
-			wantRegistered: true,
-		},
-		{
-			name:           "untagged skipped when not default owner",
-			botID:          "aerial",
-			defaultOwner:   false,
-			prBody:         "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\"} -->",
-			wantRegistered: false,
-		},
-		{
-			name:           "closed unmerged pr skips registration and marks pr closed",
-			botID:          "aerial",
-			defaultOwner:   true,
-			prBody:         "Some PR\n\n<!-- aerial-pr:{\"target_id\":\"123456789012345678\",\"bot_id\":\"aerial\"} -->",
-			action:         "closed",
-			merged:         false,
-			wantRegistered: false,
-			wantClosed:     true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			reg := &mockPRRegistry{}
-			cfg := Config{
-				BotID:        tc.botID,
-				DefaultOwner: tc.defaultOwner,
-			}
-			srv := newTestRouter(cfg, nil, reg, nil)
-			action := tc.action
-			if action == "" {
-				action = "opened"
-			}
-			res := &ResolvedGitHubEvent{
-				Repo:     "azylman/aerial",
-				PRNumber: 101,
-				Branch:   "feat/something",
-				HeadSHA:  "sha101",
-				Action:   action,
-			}
-			pr := GitHubPullRequest{
-				Number: 101,
-				Title:  "Test PR",
-				Body:   tc.prBody,
-				Merged: tc.merged,
-			}
-
-			err := srv.handlePullRequestRegistryAction(context.Background(), res, pr)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.wantRegistered && len(reg.ensureCalls) == 0 {
-				t.Fatalf("expected PR to be registered, but EnsurePRRegistered was not called")
-			}
-			if !tc.wantRegistered && len(reg.ensureCalls) > 0 {
-				t.Fatalf("expected PR NOT to be registered, but EnsurePRRegistered was called %d times", len(reg.ensureCalls))
-			}
-			if tc.wantClosed && len(reg.closedUnmergedCalls) == 0 {
-				t.Fatalf("expected PR to be marked closed unmerged, but UpdatePRClosedUnmerged was not called")
-			}
-			if !tc.wantClosed && len(reg.closedUnmergedCalls) > 0 {
-				t.Fatalf("expected PR NOT to be marked closed unmerged, but UpdatePRClosedUnmerged was called %d times", len(reg.closedUnmergedCalls))
-			}
-		})
-	}
-}
-
-func TestHandleGitHubWebhook_TeeAndForwarding(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		event         string
-		payload       string
-		ownedPRs      map[int]bool
-		ownedSHAs     map[string]int
-		wantBotACalls int
-		wantBotBCalls int
-	}{
-		{
-			name:          "pull_request tagged with bot_a forwards strictly to bot_a",
-			event:         "pull_request",
-			payload:       `{"number": 101, "pull_request": {"body": "PR<!-- aerial-pr:{\"bot_id\":\"bot_a\"} -->"}, "repository": {"full_name": "azylman/aerial"}}`,
-			wantBotACalls: 1,
-			wantBotBCalls: 0,
-		},
-		{
-			name:          "pull_request tagged with self does not forward",
-			event:         "pull_request",
-			payload:       `{"number": 102, "pull_request": {"body": "PR<!-- aerial-pr:{\"bot_id\":\"aerial\"} -->"}, "repository": {"full_name": "azylman/aerial"}}`,
-			wantBotACalls: 0,
-			wantBotBCalls: 0,
-		},
-		{
-			name:          "pull_request untagged and locally owned does not forward",
-			event:         "pull_request",
-			payload:       `{"number": 103, "pull_request": {"body": "Plain PR"}, "repository": {"full_name": "azylman/aerial"}}`,
-			ownedPRs:      map[int]bool{103: true},
-			wantBotACalls: 0,
-			wantBotBCalls: 0,
-		},
-		{
-			name:          "pull_request untagged and not locally owned forwards to all peers",
-			event:         "pull_request",
-			payload:       `{"number": 104, "pull_request": {"body": "Plain PR"}, "repository": {"full_name": "azylman/aerial"}}`,
-			ownedPRs:      map[int]bool{},
-			wantBotACalls: 1,
-			wantBotBCalls: 1,
-		},
-		{
-			name:          "push to main forwards to all peers",
-			event:         "push",
-			payload:       `{"ref": "refs/heads/main", "after": "sha_main", "repository": {"full_name": "azylman/aerial"}}`,
-			wantBotACalls: 1,
-			wantBotBCalls: 1,
-		},
-		{
-			name:          "push to feature branch locally owned does not forward",
-			event:         "push",
-			payload:       `{"ref": "refs/heads/feat/mine", "after": "sha_owned", "repository": {"full_name": "azylman/aerial"}}`,
-			ownedSHAs:     map[string]int{"sha_owned": 105},
-			ownedPRs:      map[int]bool{105: true},
-			wantBotACalls: 0,
-			wantBotBCalls: 0,
-		},
-		{
-			name:          "push to feature branch unowned forwards to all peers",
-			event:         "push",
-			payload:       `{"ref": "refs/heads/feat/other", "after": "sha_unowned", "repository": {"full_name": "azylman/aerial"}}`,
-			wantBotACalls: 1,
-			wantBotBCalls: 1,
-		},
-		{
-			name:          "check_run locally owned does not forward",
-			event:         "check_run",
-			payload:       `{"check_run": {"head_sha": "sha_cr_owned", "pull_requests": [{"number": 106}]}, "repository": {"full_name": "azylman/aerial"}}`,
-			ownedPRs:      map[int]bool{106: true},
-			wantBotACalls: 0,
-			wantBotBCalls: 0,
-		},
-		{
-			name:          "check_run unowned forwards to all peers",
-			event:         "check_run",
-			payload:       `{"check_run": {"head_sha": "sha_cr_unowned", "pull_requests": [{"number": 107}]}, "repository": {"full_name": "azylman/aerial"}}`,
-			wantBotACalls: 1,
-			wantBotBCalls: 1,
-		},
-		{
-			name:          "workflow_run locally owned does not forward",
-			event:         "workflow_run",
-			payload:       `{"workflow_run": {"head_sha": "sha_wf_owned", "pull_requests": [{"number": 108}]}, "repository": {"full_name": "azylman/aerial"}}`,
-			ownedPRs:      map[int]bool{108: true},
-			wantBotACalls: 0,
-			wantBotBCalls: 0,
-		},
-		{
-			name:          "workflow_run unowned forwards to all peers",
-			event:         "workflow_run",
-			payload:       `{"workflow_run": {"head_sha": "sha_wf_unowned", "pull_requests": [{"number": 109}]}, "repository": {"full_name": "azylman/aerial"}}`,
-			wantBotACalls: 1,
-			wantBotBCalls: 1,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var botACalls, botBCalls atomic.Int32
-			var receivedEventA, receivedDeliveryA string
-			var mu sync.Mutex
-
-			serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				botACalls.Add(1)
-				mu.Lock()
-				receivedEventA = r.Header.Get("X-Github-Event")
-				receivedDeliveryA = r.Header.Get("X-Github-Delivery")
-				mu.Unlock()
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer serverA.Close()
-
-			serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				botBCalls.Add(1)
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer serverB.Close()
-
-			reg := &ownedMapRegistry{
-				ownedPRs:  tc.ownedPRs,
-				ownedSHAs: tc.ownedSHAs,
-			}
-			cfg := Config{
-				BotID: "aerial",
-				WebhookForwardURLs: map[string]string{
-					"bot_a":  serverA.URL,
-					"bot_b":  serverB.URL,
-					"aerial": "http://127.0.0.1:9999", // self, must never be called
-				},
-			}
-			river := &mockRiverInserter{}
-			srv := newTestRouter(cfg, serverA.Client(), reg, nil, river)
-
-			headers := map[string]string{
-				"X-Github-Event":    tc.event,
-				"X-Github-Delivery": "del-test-1234",
-				"Content-Type":      "application/json",
-			}
-			rec := doHTTPRequest(srv.Routes(), http.MethodPost, "/api/webhooks/github", strings.NewReader(tc.payload), headers)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
-			}
-
-			if int(botACalls.Load()) != tc.wantBotACalls {
-				t.Errorf("bot_a calls = %d, want %d", botACalls.Load(), tc.wantBotACalls)
-			}
-			if int(botBCalls.Load()) != tc.wantBotBCalls {
-				t.Errorf("bot_b calls = %d, want %d", botBCalls.Load(), tc.wantBotBCalls)
-			}
-
-			if tc.wantBotACalls > 0 {
-				mu.Lock()
-				defer mu.Unlock()
-				if receivedEventA != tc.event {
-					t.Errorf("received X-Github-Event = %q, want %q", receivedEventA, tc.event)
-				}
-				if receivedDeliveryA != "del-test-1234" {
-					t.Errorf("received X-Github-Delivery = %q, want del-test-1234", receivedDeliveryA)
-				}
-			}
-		})
-	}
-}
-
-func TestDispatchWorkflowRunImages_KubeRollout(t *testing.T) {
-	t.Parallel()
-	const (
-		jobsPath      = "GET /repos/azylman/aerial/actions/runs/7/jobs"
-		configMapPath = "PATCH /api/v1/namespaces/flux-system/configmaps/aerial-image-tags"
-		kustPrefix    = "PATCH /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/"
-	)
-	twoImages := `{"jobs":[{"name":"Build & Push Images to GHCR (synapse)","status":"completed","conclusion":"success"},{"name":"Build & Push Images to GHCR (eri)","status":"completed","conclusion":"success"}]}`
-	ownedDeployments := `{"items":[
-		{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"aerial-core","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:old"},{"image":"ghcr.io/azylman/aerial-eri:old"}]}}}},
-		{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"marida-core","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:old"}]}}}}
-	]}`
-	fallbackKustomizations := `{"items":[{"metadata":{"name":"aerial-config","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"ConfigMap","name":"aerial-image-tags"}]}}}]}`
-
-	tests := []struct {
-		name           string
-		routes         map[string]kubeRoute
-		wantReconciled []string
-		wantRecorded   []string
-		wantErr        bool
-	}{
-		{
-			name: "every owning kustomization reconciles once after all tags are written",
-			routes: kubeWorkloadRoutes(map[string]kubeRoute{
-				jobsPath:                   {body: twoImages},
-				kubeDeploymentsPath:        {body: ownedDeployments},
-				configMapPath:              {body: `{}`},
-				kustPrefix + "aerial-core": {body: `{}`},
-				kustPrefix + "marida-core": {body: `{}`},
-			}),
-			wantReconciled: []string{"aerial-core", "marida-core"},
-			wantRecorded:   []string{"aerial-core", "marida-core"},
-		},
-		{
-			name: "no labeled owner falls back to image tag substituting kustomizations",
-			routes: kubeWorkloadRoutes(map[string]kubeRoute{
-				jobsPath:                     {body: twoImages},
-				kubeKustomizations:           {body: fallbackKustomizations},
-				configMapPath:                {body: `{}`},
-				kustPrefix + "aerial-config": {body: `{}`},
-			}),
-			wantReconciled: []string{"aerial-config"},
-			wantRecorded:   []string{"aerial-config"},
-		},
-		{
-			name: "partial reconcile failure still records every request before patching",
-			routes: kubeWorkloadRoutes(map[string]kubeRoute{
-				jobsPath:                   {body: twoImages},
-				kubeDeploymentsPath:        {body: ownedDeployments},
-				configMapPath:              {body: `{}`},
-				kustPrefix + "aerial-core": {status: http.StatusForbidden, body: `forbidden`},
-				kustPrefix + "marida-core": {body: `{}`},
-			}),
-			wantReconciled: []string{"aerial-core", "marida-core"},
-			wantRecorded:   []string{"aerial-core", "marida-core"},
-			wantErr:        true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			fixture, ts := newKubeFixture(t, tc.routes)
-			disp := NewDefaultOutboundDispatcher("", ts.Client())
-			disp.SetKubeConfig(ts.URL, "test-token")
-			reg := &mockPRRegistry{resolveTargetID: "1555405874565091380"}
-			srv := newTestRouter(Config{GitHubAPIURL: ts.URL, DefaultOwner: true}, ts.Client(), reg, disp)
-
-			err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 7, "main", "success", "abcdef1234567890abcdef1234567890abcdef12", "1555405874565091380", 42)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
-			}
-
-			lastTagWrite, firstReconcile := -1, -1
-			var reconciled []string
-			for i, req := range fixture.Requests() {
-				switch {
-				case req == configMapPath:
-					lastTagWrite = i
-				case strings.HasPrefix(req, kustPrefix):
-					if firstReconcile < 0 {
-						firstReconcile = i
-					}
-					reconciled = append(reconciled, strings.TrimPrefix(req, kustPrefix))
-				}
-			}
-			if lastTagWrite < 0 || firstReconcile <= lastTagWrite {
-				t.Errorf("requests %v: want every configmap write before the first reconcile", fixture.Requests())
-			}
-			slices.Sort(reconciled)
-			if !slices.Equal(reconciled, tc.wantReconciled) {
-				t.Errorf("reconciled = %v, want %v", reconciled, tc.wantReconciled)
-			}
-			if len(reg.deployingCalls) != 1 || !slices.Equal(reg.deployingCalls[0].jobs, []string{"synapse", "eri"}) {
-				t.Errorf("deploying calls = %+v, want one call with jobs [synapse eri]", reg.deployingCalls)
-			}
-			if len(reg.kustomizationRequestCalls) != 1 {
-				t.Fatalf("recorded request calls = %d, want 1", len(reg.kustomizationRequestCalls))
-			}
-			recorded := reg.kustomizationRequestCalls[0]
-			if got := slices.Sorted(maps.Keys(recorded)); !slices.Equal(got, tc.wantRecorded) {
-				t.Errorf("recorded kustomizations = %v, want %v", got, tc.wantRecorded)
-			}
-			for name, req := range recorded {
-				if req.Namespace != "flux-system" || !strings.Contains(fixture.Body(kustPrefix+name), `"`+req.RequestedAt+`"`) {
-					t.Errorf("recorded %s = %+v, want namespace flux-system and the patched requestedAt (body %s)", name, req, fixture.Body(kustPrefix+name))
-				}
-			}
-		})
 	}
 }
