@@ -641,6 +641,9 @@ func TestChunksEvents_And_PersistWidget_RemainingGaps(t *testing.T) {
 	assert.NoError(t, errPersist)
 
 	// Case D: SkipSink sends widget with skip_sink: true
+	reqQuiet := buildSyncWidgetRequest(VanadisBuild{Quiet: true}, nil, SyncChunkPRWidgetRequest{})
+	assert.True(t, reqQuiet.SkipSink)
+
 	var receivedBody []byte
 	tsSkipSink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedBody, _ = io.ReadAll(r.Body)

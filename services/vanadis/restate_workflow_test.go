@@ -407,8 +407,12 @@ func TestBuildWorkflowWaitFutures(t *testing.T) {
 	states := map[string]*workflowChunkRuntimeState{
 		"c1": {chunk: VanadisChunk{Mode: "pr"}, launched: false},
 		"c2": {chunk: VanadisChunk{Mode: "pr"}, launched: true, codeReady: true, runtimeReady: true},
+		"c3": {chunk: VanadisChunk{Mode: "pr"}, launched: true, codeReady: false},
+		"c4": {chunk: VanadisChunk{Mode: "pr"}, launched: true, codeReady: true, runtimeReady: false},
+		"c5": {chunk: VanadisChunk{Mode: "action"}, launched: true, runtimeReady: false},
+		"c6": {chunk: VanadisChunk{Mode: "action"}, launched: true, runtimeReady: true},
 	}
-	futs := buildWorkflowWaitFutures(nil, nil, []string{"c1", "c2"}, states)
+	futs := buildWorkflowWaitFutures(nil, nil, []string{"c1", "c2", "c3", "c4", "c5", "c6"}, states)
 	assert.Len(t, futs, 2)
 }
 
@@ -571,6 +575,17 @@ func TestBuildWorkflow_DirectExecution(t *testing.T) {
 	done, err := processChunkAwakeable(nil, srv, "b-run", nil, order, states)
 	assert.False(t, done)
 	assert.NoError(t, err)
+
+	ensureBuildRunning(nil, srv, "b-run", "pending")
+	ensureBuildRunning(nil, srv, "b-run", "running")
+
+	snapLoaded, lErr := loadWorkflowSnapshot(nil, srv, "b-run")
+	assert.NoError(t, lErr)
+	assert.NotNil(t, snapLoaded)
+
+	stFailVal, errFailVal := handleAwakeableOutcome(nil, srv, "b-run", cs, "action", "failed", nil)
+	assert.NoError(t, errFailVal)
+	assert.Equal(t, "failed", stFailVal)
 
 	// 11. buildWorkflowWaitFutures with various states
 	wfFuts := buildWorkflowWaitFutures(nil, nil, order, states)

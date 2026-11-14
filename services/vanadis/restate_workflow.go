@@ -190,7 +190,12 @@ func (w *BuildWorkflow) executeWorkflowLoop(ctx restate.WorkflowContext, buildID
 
 		if handled, pErr := processChunkAwakeable(ctx, w.srv, buildID, firstDone, chunkOrder, chunkStates); handled {
 			if pErr != nil {
-				return RunBuildWorkflowResult{BuildID: buildID, Status: "failed"}, pErr
+				return RunBuildWorkflowResult{
+					BuildID:         buildID,
+					Status:          "failed",
+					TotalChunks:     len(chunkOrder),
+					CompletedChunks: countCompletedChunksFromStates(chunkStates),
+				}, pErr
 			}
 		}
 	}
@@ -499,7 +504,9 @@ func processChunkAwakeable(ctx restate.WorkflowContext, srv *VanadisServer, buil
 		status, err := handleAwakeableOutcome(ctx, srv, buildID, cs, eventType, val, awkErr)
 		if status == "failed" {
 			if err == nil {
-				err = fmt.Errorf("chunk %s %s awakeable resolved to %s", cs.chunk.ID, eventType, val)
+				err = restate.TerminalErrorf("chunk %s %s awakeable resolved to %s", cs.chunk.ID, eventType, val)
+			} else {
+				err = restate.TerminalErrorf("chunk %s %s awakeable error: %v", cs.chunk.ID, eventType, err)
 			}
 			return true, err
 		}
