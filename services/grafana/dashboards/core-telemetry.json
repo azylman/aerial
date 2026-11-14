@@ -3582,7 +3582,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "JetStream queue depth categorized by state (pending, in_flight) and oldest pending job age. Anomaly targets: synapse_queue_backlog (sum(synapse_queue_depth{state=~\"pending|in_flight\"}) or vector(0)), synapse_discord_ingress_lag (sum(synapse_queue_depth{queue=\"discord_ingress\",state=\"pending\"}) or vector(0)).",
+      "description": "JetStream queue depth categorized by state (pending, in_flight). Anomaly targets: synapse_queue_backlog (sum(synapse_queue_depth{state=~\"pending|in_flight\"}) or vector(0)), synapse_discord_ingress_lag (sum(synapse_queue_depth{queue=\"discord_ingress\",state=\"pending\"}) or vector(0)).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3667,20 +3667,9 @@
           "legendFormat": "{{queue}} ({{state}})",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "VictoriaMetrics"
-          },
-          "editorMode": "code",
-          "expr": "max by (queue) (synapse_queue_oldest_age_seconds)",
-          "legendFormat": "Oldest Age (s): {{queue}}",
-          "range": true,
-          "refId": "B"
         }
       ],
-      "title": "JetStream Queue Depth & Oldest Pending Job Age",
+      "title": "JetStream Queue Depth",
       "type": "timeseries"
     },
     {

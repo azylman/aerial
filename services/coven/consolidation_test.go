@@ -292,17 +292,14 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 }
 
 type workerLifecycleTestCase struct {
-	name          string
-	tick          int64
-	runCatchUp    bool
-	nilStore      bool
-	nilOllama     bool
-	nilLLM        bool
-	subscribed    bool
-	withReconnect bool
-	storeFail     string
-	wantExtract   bool
-	wantReconnect bool
+	name        string
+	tick        int64
+	runCatchUp  bool
+	nilStore    bool
+	nilOllama   bool
+	nilLLM      bool
+	storeFail   string
+	wantExtract bool
 }
 
 func runWorkerLifecycleCase(t *testing.T, tc workerLifecycleTestCase, validEmb []float32) {
@@ -333,24 +330,13 @@ func runWorkerLifecycleCase(t *testing.T, tc workerLifecycleTestCase, validEmb [
 		}
 	}
 
-	var reconnectCalls int
-	var reconnectFn func(context.Context) error
-	if tc.withReconnect {
-		reconnectFn = func(context.Context) error {
-			reconnectCalls++
-			return nil
-		}
-	}
-
 	w := NewWorker(WorkerConfig{
 		Store:        store,
 		Ollama:       client,
 		LLMClient:    llm,
 		InitialDelay: 0,
 		TickInterval: -1,
-		ReconnectFn:  reconnectFn,
 	})
-	w.SetSubscribed(tc.subscribed)
 
 	if tc.runCatchUp {
 		w.RunStartupCatchUp(ctx)
@@ -363,12 +349,6 @@ func runWorkerLifecycleCase(t *testing.T, tc workerLifecycleTestCase, validEmb [
 	}
 	if !tc.wantExtract && llmCalls > 0 {
 		t.Errorf("unexpected LLM calls: %d", llmCalls)
-	}
-	if tc.wantReconnect && reconnectCalls == 0 {
-		t.Errorf("expected reconnect call, got 0")
-	}
-	if !tc.wantReconnect && reconnectCalls > 0 {
-		t.Errorf("unexpected reconnect call: %d", reconnectCalls)
 	}
 }
 
@@ -404,34 +384,6 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 			name:       "StartupCatchUpErrorHandled",
 			runCatchUp: true,
 			storeFail:  "GetActiveConversationsForExtraction",
-		},
-		{
-			name:        "FallbackExtractionWhenUnsubscribedTick0",
-			tick:        0,
-			subscribed:  false,
-			wantExtract: true,
-		},
-		{
-			name:        "FallbackExtractionWhenUnsubscribedTick120",
-			tick:        120,
-			subscribed:  false,
-			wantExtract: true,
-		},
-		{
-			name:          "PeriodicBackstopExtractionWhenSubscribedTick0",
-			tick:          0,
-			subscribed:    true,
-			withReconnect: true,
-			wantExtract:   true,
-			wantReconnect: false,
-		},
-		{
-			name:          "ReconnectCalledWhenUnsubscribedTick0",
-			tick:          0,
-			subscribed:    false,
-			withReconnect: true,
-			wantExtract:   true,
-			wantReconnect: true,
 		},
 	}
 

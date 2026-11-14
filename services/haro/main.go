@@ -114,8 +114,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	toolHandler := NewToolHandler(cfg, database)
 	server := NewServer(toolHandler, dispatcher)
 
-	natsURL := firstNonEmpty(cfg.NATSURL, os.Getenv("NATS_URL"))
-	bus := initHaroJetStream(ctx, server, database, natsURL)
+	bus := initHaroJetStream(ctx, server, database, cfg.NATSURL)
 	defer func() {
 		if bus != nil {
 			if closeErr := bus.Close(); closeErr != nil {
