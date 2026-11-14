@@ -778,23 +778,4 @@ func TestJobArgsKindsAndResolveJobQueueAndKind(t *testing.T) {
 			}
 		})
 	}
-
-	if k := (GitHubWebhookArgs{}).Kind(); k != "github_webhook" {
-		t.Errorf("GitHubWebhookArgs.Kind() = %q, want github_webhook", k)
-	}
-	if k := (DeployWebhookArgs{}).Kind(); k != "deploy_webhook" {
-		t.Errorf("DeployWebhookArgs.Kind() = %q, want deploy_webhook", k)
-	}
-	if k := (WidgetSyncArgs{}).Kind(); k != "widget_sync" {
-		t.Errorf("WidgetSyncArgs.Kind() = %q, want widget_sync", k)
-	}
-	if k := (MergeConflictArgs{}).Kind(); k != "merge_conflict" {
-		t.Errorf("MergeConflictArgs.Kind() = %q, want merge_conflict", k)
-	}
-	if k := (DiscordIngressArgs{}).Kind(); k != "discord_ingress" {
-		t.Errorf("DiscordIngressArgs.Kind() = %q, want discord_ingress", k)
-	}
-	if k := (DiscordInteractionArgs{}).Kind(); k != "discord_interaction" {
-		t.Errorf("DiscordInteractionArgs.Kind() = %q, want discord_interaction", k)
-	}
 }

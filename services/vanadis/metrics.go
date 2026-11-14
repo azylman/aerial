@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -46,20 +47,20 @@ var (
 		[]string{"status"},
 	)
 
-	// QueueDepth tracks depth of the Vanadis River job queue by job state.
+	// QueueDepth tracks chunk execution jobs in the Vanadis JetStream queue categorized by state.
 	QueueDepth = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "vanadis_queue_depth",
-			Help: "Depth of the Vanadis River job queue by job state.",
+			Help: "Current count of chunk execution jobs by state.",
 		},
 		[]string{"state"},
 	)
 
-	// QueueOldestAgeSeconds tracks the age in seconds of the oldest pending job in the Vanadis River queue.
+	// QueueOldestAgeSeconds tracks the age in seconds of the oldest pending job in the Vanadis queue.
 	QueueOldestAgeSeconds = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "vanadis_queue_oldest_age_seconds",
-			Help: "Age in seconds of the oldest pending job in the Vanadis River queue.",
+			Help: "Age in seconds of the oldest pending job in the Vanadis queue.",
 		},
 	)
 )
@@ -69,7 +70,7 @@ var (
 	knownChunkActiveStatuses = []string{"pending", "running", "pr_opened"}
 	knownBuildStatuses       = []string{"created", "completed", "failed", "cancelled"}
 	knownChunkStatuses       = []string{"dispatched", "merged", "completed", "failed", "cancelled"}
-	knownRiverJobStates      = []string{"available", "running", "retryable", "scheduled"}
+	knownQueueDepthStates    = []string{"pending", "in_flight"}
 )
 
 func registerVanadisCollector(c prometheus.Collector) {
@@ -100,7 +101,7 @@ func init() {
 	for _, s := range knownChunkStatuses {
 		ChunksTotal.WithLabelValues(s).Add(0)
 	}
-	for _, js := range knownRiverJobStates {
+	for _, js := range knownQueueDepthStates {
 		QueueDepth.WithLabelValues(js).Set(0)
 	}
 	QueueOldestAgeSeconds.Set(0)
@@ -154,17 +155,35 @@ func (s *VanadisServer) collectBuildMetrics(ctx context.Context) {
 	ChunksActive.WithLabelValues("pr_opened").Set(prOpenedChunks)
 }
 
-func (s *VanadisServer) collectQueueMetrics() {
-	for _, st := range knownRiverJobStates {
+type consumerStatsQuerier interface {
+	ConsumerStats(ctx context.Context, stream, consumer string) (pending int64, inFlight int64, err error)
+}
+
+func (s *VanadisServer) collectQueueMetrics(ctx context.Context) {
+	for _, st := range knownQueueDepthStates {
 		QueueDepth.WithLabelValues(st).Set(0)
 	}
 	QueueOldestAgeSeconds.Set(0)
+	if s == nil {
+		return
+	}
+	q := s.consumerStatsQuerier()
+	if q == nil {
+		return
+	}
+	pending, inFlight, err := q.ConsumerStats(ctx, "AERIAL_JOBS", "vanadis-chunk")
+	if err != nil {
+		log.Printf("[vanadis] [metrics] error querying consumer stats: %v", err)
+		return
+	}
+	QueueDepth.WithLabelValues("pending").Set(float64(pending))
+	QueueDepth.WithLabelValues("in_flight").Set(float64(inFlight))
 }
 
 func (s *VanadisServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s != nil {
 		s.collectBuildMetrics(r.Context())
-		s.collectQueueMetrics()
+		s.collectQueueMetrics(r.Context())
 	}
 	promhttp.Handler().ServeHTTP(w, r)
 }

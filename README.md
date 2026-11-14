@@ -17,7 +17,7 @@ Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 - **Service Discovery & Ingress**: **NGINX Gateway Fabric** (`lan-gateway` on `:80`/`:443` and `edge-gateway` on `:4021`) + **CoreDNS** rewriting `*.aerial` and `*.lan` internal DNS to `*.default.svc.cluster.local`.
 - **Persistence & Vector Memory**: **CloudNativePG (PostgreSQL 18 + pgvector)** — 2-instance high-availability cluster for multi-turn conversation state, strict 1-to-1 single-service table ownership, native `:9187` Prometheus metrics, and hybrid RRF semantic memory (`coven`).
 - **Schema Migrations**: **Ariga Atlas** — Declarative schema migrations, automated diffing, and checksum validation via Kubernetes batch jobs.
-- **Idempotent, Guaranteed Event Handling**: **Webhooks + River Queue** — Transactional PostgreSQL-backed Go job queue powering strictly idempotent Discord ingress (`discord_ingress`, `discord_interaction`), webhook processing, event dispatch (`synapse`), and multi-chunk build orchestration (`vanadis`).
+- **Idempotent, Guaranteed Event Handling**: **Webhooks + NATS JetStream Queue** — High-performance durable event bus and work-queue fabric powering strictly idempotent Discord ingress (`discord_ingress`, `discord_interaction`), webhook processing, event dispatch (`synapse`), and multi-chunk build orchestration (`vanadis`).
 - **Secrets Management**: **Infisical + Valkey 9 + External Secrets Operator** — Centralized secret governance syncing scoped per-service Kubernetes Secrets and the `shared-secrets` redaction pool with zero plaintext disk persistence.
 - **Observability & Telemetry**:
   - **Metrics**: **VictoriaMetrics** (TSDB `:8428`) + **`vmalert`** (`:8880`) + **Grafana** (telemetry HUDs `:3000`) + Prometheus Exporters (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**)
@@ -356,7 +356,7 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
   - Database Connection Pool: `aerial_brain_db_query_duration_seconds`, `aerial_brain_db_open_connections`, `aerial_brain_db_in_use_connections`, `aerial_brain_db_idle_connections`, `aerial_brain_db_wait_count_total`.
 - **`synapse`** (Exposed on `:4020/metrics`):
   - Discord Gateway: `synapse_discord_gateway_latency_seconds`, `synapse_discord_events_received_total`.
-  - River Queue: `synapse_queue_depth`, `synapse_jobs_completed_total`, `synapse_jobs_errors_total`.
+  - JetStream Queue: `synapse_queue_depth`, `synapse_jobs_processed_total`, `synapse_job_retries_total`.
 
 ---
 

@@ -288,15 +288,11 @@ type GitHubWebhookArgs struct {
 	Body     []byte `json:"body"`
 }
 
-func (GitHubWebhookArgs) Kind() string { return "github_webhook" }
-
 // DeployWebhookArgs contains payload data for durable background processing of deployment webhooks.
 type DeployWebhookArgs struct {
 	IdempotencyKey string      `json:"idempotency_key,omitempty"`
 	Event          DeployEvent `json:"event"`
 }
-
-func (DeployWebhookArgs) Kind() string { return "deploy_webhook" }
 
 // WidgetSyncArgs contains payload data for Discord PR and build widget updates.
 type WidgetSyncArgs struct {
@@ -307,8 +303,6 @@ type WidgetSyncArgs struct {
 	Status   string `json:"status,omitempty"`
 }
 
-func (WidgetSyncArgs) Kind() string { return "widget_sync" }
-
 // MergeConflictArgs contains payload data for durable background processing of PR merge conflicts.
 type MergeConflictArgs struct {
 	Repo     string `json:"repo"`
@@ -317,8 +311,6 @@ type MergeConflictArgs struct {
 	HeadSHA  string `json:"head_sha"`
 	TargetID string `json:"target_id"`
 }
-
-func (MergeConflictArgs) Kind() string { return "merge_conflict" }
 
 // DiscordMessageIngressRequest represents the payload delivered to Eri for message ingress.
 type DiscordMessageIngressRequest struct {
@@ -336,16 +328,12 @@ type DiscordIngressArgs struct {
 	Traceparent string             `json:"traceparent,omitempty"`
 }
 
-func (DiscordIngressArgs) Kind() string { return "discord_ingress" }
-
 // DiscordInteractionArgs contains payload data for JetStream queueing of Discord interaction events.
 type DiscordInteractionArgs struct {
 	InteractionID string                 `json:"interaction_id"`
 	Interaction   *discordgo.Interaction `json:"interaction"`
 	Traceparent   string                 `json:"traceparent,omitempty"`
 }
-
-func (DiscordInteractionArgs) Kind() string { return "discord_interaction" }
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
 type StatusWidgetChunk struct {

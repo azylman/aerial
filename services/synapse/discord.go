@@ -390,7 +390,7 @@ func isCatchUpMessageEligible(m *discordgo.Message, botUserID, minSnowflake stri
 		return false
 	}
 	if !m.Timestamp.IsZero() && (m.Timestamp.Before(now.Add(-discordCatchUpStaleTTL)) || now.Sub(m.Timestamp) > discordCatchUpStaleTTL) {
-		RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "catchup_stale_ttl")
+		RecordJobDropped(QueueDiscordIngress, "discord_ingress", "catchup_stale_ttl")
 		return false
 	}
 	if compareDiscordSnowflakes(m.ID, minSnowflake) <= 0 {

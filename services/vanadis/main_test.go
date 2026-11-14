@@ -119,11 +119,28 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	}
 }
 
-func TestExecuteChunkArgsAndNormalizeRepo(t *testing.T) {
+func TestVanadisConsumerStatsQuerier(t *testing.T) {
 	t.Parallel()
-	args := ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 2}
-	if args.BuildID != "b1" || args.ChunkIndex != 2 {
-		t.Fatalf("unexpected ExecuteChunkArgs: %+v", args)
+	var nilSrv *VanadisServer
+	if nilSrv.consumerStatsQuerier() != nil {
+		t.Errorf("expected nil for nil server")
+	}
+	nilSrv.collectQueueMetrics(context.Background())
+
+	srv := NewVanadisServer(Config{}, nil, nil)
+	if srv.consumerStatsQuerier() != nil {
+		t.Errorf("expected nil when no stats or bus configured")
+	}
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	srv.SetBus(memBus)
+	if srv.consumerStatsQuerier() == nil {
+		t.Errorf("expected bus stats querier when bus implements consumerStatsQuerier")
+	}
+	mockQ := &mockConsumerStatsQuerier{}
+	srv.SetQueueStats(mockQ)
+	if srv.consumerStatsQuerier() != mockQ {
+		t.Errorf("expected queueStats override")
 	}
 }
 
@@ -913,6 +930,21 @@ func TestClassifyAndSummarizeBuildEntry(t *testing.T) {
 	}
 }
 
+type mockConsumerStatsQuerier struct {
+	stats map[string][2]int64
+	err   error
+}
+
+func (m *mockConsumerStatsQuerier) ConsumerStats(_ context.Context, stream, consumer string) (int64, int64, error) {
+	if m.err != nil {
+		return 0, 0, m.err
+	}
+	if v, ok := m.stats[stream+"/"+consumer]; ok {
+		return v[0], v[1], nil
+	}
+	return 0, 0, nil
+}
+
 type vanadisMetricsCase struct {
 	name           string
 	server         *VanadisServer
@@ -928,7 +960,7 @@ func makeVanadisMetricsCases(srvWithQueue, srvMem, srvPGErr *VanadisServer) []va
 
 	return []vanadisMetricsCase{
 		{
-			name:       "valid postgres server with active builds and river queue metrics",
+			name:       "valid postgres server with active builds and jetstream queue metrics",
 			server:     srvWithQueue,
 			method:     http.MethodGet,
 			url:        "/metrics",
@@ -942,10 +974,8 @@ func makeVanadisMetricsCases(srvWithQueue, srvMem, srvPGErr *VanadisServer) []va
 				`vanadis_chunks_active{status="running"} 1`,
 				`vanadis_chunks_active{status="pr_opened"} 1`,
 				"vanadis_queue_depth",
-				`vanadis_queue_depth{state="available"} 0`,
-				`vanadis_queue_depth{state="running"} 0`,
-				`vanadis_queue_depth{state="retryable"} 0`,
-				`vanadis_queue_depth{state="scheduled"} 0`,
+				`vanadis_queue_depth{state="pending"} 2`,
+				`vanadis_queue_depth{state="in_flight"} 1`,
 				"vanadis_queue_oldest_age_seconds 0",
 				"vanadis_builds_total",
 				`vanadis_builds_total{status="created"}`,
@@ -1058,6 +1088,11 @@ func TestVanadisMetrics(t *testing.T) {
 		},
 	})
 	srvWithQueue := NewVanadisServer(Config{}, pgStoreWithQueue, nil)
+	srvWithQueue.SetQueueStats(&mockConsumerStatsQuerier{
+		stats: map[string][2]int64{
+			"AERIAL_JOBS/vanadis-chunk": {2, 1},
+		},
+	})
 
 	memStore := newMemoryVanadisStore()
 	_ = memStore.CreateBuild(context.Background(), b1, []VanadisChunk{c1, c2, c3})
@@ -1069,6 +1104,7 @@ func TestVanadisMetrics(t *testing.T) {
 		},
 	})
 	srvPGErr := NewVanadisServer(Config{}, pgStoreErr, nil)
+	srvPGErr.SetQueueStats(&mockConsumerStatsQuerier{err: errors.New("simulated stats error")})
 
 	tests := makeVanadisMetricsCases(srvWithQueue, srvMem, srvPGErr)
 	for _, tc := range tests {

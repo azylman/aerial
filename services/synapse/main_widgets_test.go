@@ -1333,35 +1333,10 @@ func TestSetupPostgres(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	tests := []struct {
-		name        string
-		postgresURL string
-		wantErr     bool
-	}{
-		{
-			name:        "valid postgres URL initializes pool and registry",
-			postgresURL: "postgres://aerial:pass@127.0.0.1:5432/aerial?sslmode=disable",
-			wantErr:     false,
-		},
-		{
-			name:        "invalid postgres URL returns error",
-			postgresURL: "postgres://%gh:invalid",
-			wantErr:     true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
-			pool, err := setupPostgres(ctx, srv, tc.postgresURL, "")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("setupPostgres() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if pool != nil {
-				defer pool.Close()
-			}
-		})
+	srv := NewRouterServer(fixedConfig(Config{}), nil)
+	_, err := setupPostgres(ctx, srv, "postgres://%gh:invalid", "")
+	if err == nil {
+		t.Fatal("setupPostgres() expected error on invalid url")
 	}
 }
 

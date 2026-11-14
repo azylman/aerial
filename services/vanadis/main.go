@@ -604,6 +604,7 @@ type VanadisServer struct {
 	httpClient *http.Client
 	store      VanadisStore
 	bus        pubsub.Bus
+	queueStats consumerStatsQuerier
 }
 
 // NewVanadisServer constructs a new VanadisServer instance.
@@ -620,6 +621,22 @@ func (s *VanadisServer) SetStore(store VanadisStore) { s.store = store }
 
 // SetBus sets the pubsub.Bus for event emission and consumption.
 func (s *VanadisServer) SetBus(bus pubsub.Bus) { s.bus = bus }
+
+// SetQueueStats overrides the consumerStatsQuerier for testing or custom statistics.
+func (s *VanadisServer) SetQueueStats(q consumerStatsQuerier) { s.queueStats = q }
+
+func (s *VanadisServer) consumerStatsQuerier() consumerStatsQuerier {
+	if s == nil {
+		return nil
+	}
+	if s.queueStats != nil {
+		return s.queueStats
+	}
+	if csp, ok := s.bus.(consumerStatsQuerier); ok {
+		return csp
+	}
+	return nil
+}
 
 // Bus returns the configured pubsub.Bus instance.
 func (s *VanadisServer) Bus() pubsub.Bus { return s.bus }

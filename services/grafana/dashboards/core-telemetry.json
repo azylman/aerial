@@ -3574,7 +3574,7 @@
       },
       "id": 60,
       "panels": [],
-      "title": "🌊 Webhooks Router & River Queue Telemetry",
+      "title": "🌊 Webhooks Router & JetStream Queue Telemetry",
       "type": "row"
     },
     {
@@ -3582,7 +3582,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "River queue depth categorized by state and oldest pending job age. Anomaly targets: synapse_queue_backlog (sum(synapse_queue_depth{state=~\"available|retryable\"}) or vector(0)), synapse_discord_ingress_lag (max(synapse_queue_oldest_age_seconds{queue=\"discord_ingress\"}) or vector(0)).",
+      "description": "JetStream queue depth categorized by state (pending, in_flight) and oldest pending job age. Anomaly targets: synapse_queue_backlog (sum(synapse_queue_depth{state=~\"pending|in_flight\"}) or vector(0)), synapse_discord_ingress_lag (sum(synapse_queue_depth{queue=\"discord_ingress\",state=\"pending\"}) or vector(0)).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3680,7 +3680,7 @@
           "refId": "B"
         }
       ],
-      "title": "River Queue Depth & Oldest Pending Job Age",
+      "title": "JetStream Queue Depth & Oldest Pending Job Age",
       "type": "timeseries"
     },
     {
@@ -3688,7 +3688,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "River worker processing throughput, retries, dropped jobs, and execution duration quantiles. Anomaly targets: synapse_job_retries (sum(rate(synapse_job_retries_total[5m])) * 60 or vector(0)), synapse_jobs_dropped (sum(increase(synapse_jobs_dropped_total[1h])) or vector(0)).",
+      "description": "JetStream worker processing throughput, retries, dropped jobs, and execution duration quantiles. Anomaly targets: synapse_job_retries (sum(rate(synapse_job_retries_total[5m])) * 60 or vector(0)), synapse_jobs_dropped (sum(increase(synapse_jobs_dropped_total[1h])) or vector(0)).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3819,7 +3819,7 @@
           "refId": "E"
         }
       ],
-      "title": "River Worker Throughput, Retries & Dedup Skips",
+      "title": "JetStream Worker Throughput, Retries & Dedup Skips",
       "type": "timeseries"
     },
     {
@@ -4085,7 +4085,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "Active builds, active chunks, River queue depth, and chunk throughput. Anomaly targets: vanadis_chunk_failures_rate (sum(rate(vanadis_chunks_total{status=\"failed\"}[5m])) * 60), vanadis_queue_oldest_pending_age (max(vanadis_queue_oldest_age_seconds) or vector(0)).",
+      "description": "Active builds, active chunks, JetStream queue depth, and chunk throughput. Anomaly targets: vanadis_chunk_failures_rate (sum(rate(vanadis_chunks_total{status=\"failed\"}[5m])) * 60), vanadis_queue_backlog (sum(vanadis_queue_depth{state=~\"pending|in_flight\"}) or vector(0)).",
       "fieldConfig": {
         "defaults": {
           "color": {
