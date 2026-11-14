@@ -67,12 +67,7 @@ type VanadisYAMLConfig struct {
 	NATSURL     string `yaml:"nats_url"`
 }
 
-var (
-	vanadisFallbackConfigPath = "/config/vanadis.yaml"
-	lookupHostFn              = func(ctx context.Context, host string) ([]string, error) {
-		return net.DefaultResolver.LookupHost(ctx, host)
-	}
-)
+var vanadisFallbackConfigPath = "/config/vanadis.yaml"
 
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
@@ -107,27 +102,15 @@ func LoadConfig(configPath string) Config {
 			}
 		}
 	}
-	pgURL := firstNonEmpty(httpkit.BuildPostgresDSN(os.Getenv, "aerial"), fileCfg.PostgresURL)
-	if pgURL == "" {
-		host := "127.0.0.1"
-		for _, h := range []string{"aerial-postgres", "postgres"} {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			_, err := lookupHostFn(ctx, h)
-			cancel()
-			if err == nil {
-				host = h
-				break
-			}
-		}
-		pgURL = fmt.Sprintf("postgres://aerial:aerial_secure_pass@%s/aerial?sslmode=disable", net.JoinHostPort(host, "5432"))
-	}
+	pgURL := firstNonEmpty(httpkit.BuildPostgresDSN(os.Getenv, "aerial"), strings.TrimSpace(fileCfg.PostgresURL))
+	eriURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL)), "/")
 	return Config{
 		Port:        firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
 		PostgresURL: pgURL,
-		BrainURL:    strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
-		EriURL:      strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
-		SynapseURL:  strings.TrimRight(firstNonEmpty(os.Getenv("SYNAPSE_URL"), fileCfg.SynapseURL, "http://synapse.aerial"), "/"),
-		NATSURL:     firstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
+		BrainURL:    eriURL,
+		EriURL:      eriURL,
+		SynapseURL:  strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("SYNAPSE_URL"), fileCfg.SynapseURL)), "/"),
+		NATSURL:     firstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL),
 	}
 }
 
@@ -691,11 +674,14 @@ func (s *VanadisServer) postBrainJSON(ctx context.Context, path string, payload 
 	if s == nil || s.httpClient == nil {
 		return nil, errors.New("http client is nil")
 	}
+	brainURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(s.cfg.BrainURL, s.cfg.EriURL)), "/")
+	if brainURL == "" {
+		return nil, errors.New("brain URL is not configured")
+	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
-	brainURL := strings.TrimRight(firstNonEmpty(s.cfg.BrainURL, "http://127.0.0.1:8088"), "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, brainURL+path, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -723,6 +709,10 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner str
 	if s == nil || s.httpClient == nil {
 		return
 	}
+	routerURL := strings.TrimRight(strings.TrimSpace(s.cfg.SynapseURL), "/")
+	if routerURL == "" {
+		return
+	}
 	cleanBuildID := strings.TrimSpace(buildID)
 	if cleanBuildID == "" {
 		return
@@ -737,7 +727,6 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner str
 		log.Printf("[vanadis] warning: marshal widget sync payload failed for build %s: %v", cleanBuildID, err)
 		return
 	}
-	routerURL := strings.TrimRight(firstNonEmpty(s.cfg.SynapseURL, "http://127.0.0.1:4020"), "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, routerURL+"/internal/widget/sync", bytes.NewReader(bodyBytes))
 	if err != nil {
 		log.Printf("[vanadis] warning: create widget sync request failed for build %s: %v", cleanBuildID, err)
@@ -1314,6 +1303,7 @@ func initVanadisJetStream(ctx context.Context, server *VanadisServer, natsURL st
 func initVanadisJetStreamWithFactory(ctx context.Context, server *VanadisServer, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {
+		log.Println("[vanadis] warning: nats_url is not configured; event bus disabled")
 		return nil
 	}
 	b, err := factory(ctx, natsURL)
