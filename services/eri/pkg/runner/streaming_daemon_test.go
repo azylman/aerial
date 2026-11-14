@@ -1174,63 +1174,27 @@ func TestStreamingDaemon_StepAwareDeltaPurging(t *testing.T) {
 	}
 }
 
-func TestStreamingDaemon_Claude_FullLifecycle(t *testing.T) {
-	claudeSess := "99999999-8888-7777-6666-555555555555"
-	cfg := DaemonConfig{
-		Engine:        "claude",
-		SessionID:     claudeSess,
-		ClaudeBin:     "claude",
-		GeminiHomeDir: "/tmp/claude-home",
-	}
-	h := startTestStreamingDaemon(t, cfg, "", true)
-	defer h.daemon.Close()
-
-	if h.daemon.State() != StateReady {
-		t.Fatalf("expected StateReady on spawn, got %s", h.daemon.State())
-	}
-	if h.daemon.SessionID() != claudeSess {
-		t.Fatalf("expected session ID %s, got %s", claudeSess, h.daemon.SessionID())
-	}
-
-	sink := newMockTurnSink()
-	turn := &TurnContext{
-		TurnID:    "claude-turn-1",
-		Prompt:    "fix the bug",
-		Sink:      sink,
-		CreatedAt: time.Now(),
-	}
-	if err := h.daemon.Send(turn.Prompt, turn); err != nil {
-		t.Fatalf("send failed: %v", err)
-	}
-
+func dispatchClaudeLifecycleEvents(d *StreamingDaemon) {
 	// 1. System init event latching session ID
-	h.daemon.dispatchNDJSONLine(`{"type":"system","subtype":"init","session_id":"12345678-1234-5678-1234-567812345678"}`)
-	if h.daemon.SessionID() != "12345678-1234-5678-1234-567812345678" {
-		t.Errorf("expected latched session ID, got %s", h.daemon.SessionID())
-	}
-
+	d.dispatchNDJSONLine(`{"type":"system","subtype":"init","session_id":"12345678-1234-5678-1234-567812345678"}`)
 	// 2. Stream event: message_start
-	h.daemon.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"message_start"}}`)
-
+	d.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"message_start"}}`)
 	// 3. Stream event: thinking_delta
-	h.daemon.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta"}}}`)
-
+	d.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta"}}}`)
 	// 4. Stream event: text_delta
-	h.daemon.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Thinking about "}}}`)
-	h.daemon.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"it..."}}}`)
-
+	d.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Thinking about "}}}`)
+	d.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"it..."}}}`)
 	// 5. Assistant event: tool_use (double underscore mcp format and skill)
-	h.daemon.dispatchNDJSONLine(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call_1","name":"mcp__github__create_pull_request","input":{"title":"my PR"}},{"type":"tool_use","id":"call_2","name":"run_command","input":{"CommandLine":"cat /share/aerial-config/custom-skills/ha-operations/SKILL.md"}}]}}`)
-
+	d.dispatchNDJSONLine(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call_1","name":"mcp__github__create_pull_request","input":{"title":"my PR"}},{"type":"tool_use","id":"call_2","name":"run_command","input":{"CommandLine":"cat /share/aerial-config/custom-skills/ha-operations/SKILL.md"}}]}}`)
 	// 6. User event: tool_result
-	h.daemon.dispatchNDJSONLine(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_1","is_error":false}]}}`)
-	h.daemon.dispatchNDJSONLine(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_2","is_error":true}]}}`)
-
+	d.dispatchNDJSONLine(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_1","is_error":false}]}}`)
+	d.dispatchNDJSONLine(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_2","is_error":true}]}}`)
 	// 7. Result event: success with usage tokens
-	h.daemon.dispatchNDJSONLine(`{"type":"result","result":"all done successfully","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":20,"cache_read_input_tokens":10}}`)
+	d.dispatchNDJSONLine(`{"type":"result","result":"all done successfully","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":20,"cache_read_input_tokens":10}}`)
+}
 
-	waitAndAssertSinkResult(t, "ClaudeTurn", sink, "all done successfully", "", "")
-
+func assertClaudeTurnSinkState(t *testing.T, sink *mockTurnSink) {
+	t.Helper()
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
 
@@ -1268,6 +1232,44 @@ func TestStreamingDaemon_Claude_FullLifecycle(t *testing.T) {
 	if sink.result.Usage.InputTokens != 120 || sink.result.Usage.CacheReadTokens != 10 || sink.result.Usage.TotalTokens != 170 || sink.result.Usage.OutputTokens != 50 {
 		t.Errorf("unexpected usage in result: %+v", sink.result.Usage)
 	}
+}
+
+func TestStreamingDaemon_Claude_FullLifecycle(t *testing.T) {
+	claudeSess := "99999999-8888-7777-6666-555555555555"
+	cfg := DaemonConfig{
+		Engine:        "claude",
+		SessionID:     claudeSess,
+		ClaudeBin:     "claude",
+		GeminiHomeDir: "/tmp/claude-home",
+	}
+	h := startTestStreamingDaemon(t, cfg, "", true)
+	defer h.daemon.Close()
+
+	if h.daemon.State() != StateReady {
+		t.Fatalf("expected StateReady on spawn, got %s", h.daemon.State())
+	}
+	if h.daemon.SessionID() != claudeSess {
+		t.Fatalf("expected session ID %s, got %s", claudeSess, h.daemon.SessionID())
+	}
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID:    "claude-turn-1",
+		Prompt:    "fix the bug",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+	if err := h.daemon.Send(turn.Prompt, turn); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	dispatchClaudeLifecycleEvents(h.daemon)
+	if h.daemon.SessionID() != "12345678-1234-5678-1234-567812345678" {
+		t.Errorf("expected latched session ID, got %s", h.daemon.SessionID())
+	}
+
+	waitAndAssertSinkResult(t, "ClaudeTurn", sink, "all done successfully", "", "")
+	assertClaudeTurnSinkState(t, sink)
 }
 
 func TestStreamingDaemon_Claude_ErrorHandling(t *testing.T) {

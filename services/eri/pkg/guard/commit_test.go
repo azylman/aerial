@@ -25,9 +25,8 @@ func testDiff(file string, line int, added string) string {
 	return fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1,1 +%d,1 @@\n+%s\n", file, file, file, file, line, added)
 }
 
-func TestScanDiff(t *testing.T) {
-	t.Parallel()
-
+func checkScanDiffPatterns(t *testing.T) {
+	t.Helper()
 	patternTests := []struct {
 		name         string
 		diff         string
@@ -68,7 +67,10 @@ func TestScanDiff(t *testing.T) {
 			}
 		})
 	}
+}
 
+func checkScanDiffIgnored(t *testing.T) {
+	t.Helper()
 	ignoredDiffs := []struct {
 		name       string
 		diff       string
@@ -97,7 +99,10 @@ func TestScanDiff(t *testing.T) {
 			}
 		})
 	}
+}
 
+func checkScanDiffSecrets(t *testing.T) {
+	t.Helper()
 	secretDiffTests := []struct {
 		name       string
 		secret     string
@@ -149,7 +154,10 @@ func TestScanDiff(t *testing.T) {
 			}
 		})
 	}
+}
 
+func checkScanDiffLoopback(t *testing.T) {
+	t.Helper()
 	loopbackTests := []struct {
 		name       string
 		status     int
@@ -195,7 +203,10 @@ func TestScanDiff(t *testing.T) {
 			}
 		})
 	}
+}
 
+func checkScanDiffHunks(t *testing.T) {
+	t.Helper()
 	hunkTests := []struct {
 		name string
 		hunk string
@@ -215,6 +226,16 @@ func TestScanDiff(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestScanDiff(t *testing.T) {
+	t.Parallel()
+
+	checkScanDiffPatterns(t)
+	checkScanDiffIgnored(t)
+	checkScanDiffSecrets(t)
+	checkScanDiffLoopback(t)
+	checkScanDiffHunks(t)
 }
 
 func TestCustomPatterns(t *testing.T) {
@@ -302,11 +323,8 @@ func TestCustomPatterns(t *testing.T) {
 	os.Unsetenv("AERIAL_COMMIT_GUARD_PATTERNS")
 }
 
-func TestRepoAndCommitDetection(t *testing.T) {
-	// Not t.Parallel() because it touches gitCmdRunner
-	oldRunner := gitCmdRunner
-	defer func() { gitCmdRunner = oldRunner }()
-
+func checkCommitCommandDetection(t *testing.T) {
+	t.Helper()
 	commitTests := []struct {
 		name       string
 		cmd        string
@@ -339,7 +357,10 @@ func TestRepoAndCommitDetection(t *testing.T) {
 			}
 		})
 	}
+}
 
+func checkAllCommitDetection(t *testing.T) {
+	t.Helper()
 	allCommitTests := []struct {
 		name string
 		cmd  string
@@ -363,8 +384,10 @@ func TestRepoAndCommitDetection(t *testing.T) {
 			}
 		})
 	}
+}
 
-	// IsAerialConfig checks
+func checkAerialConfigDetection(t *testing.T) {
+	t.Helper()
 	tmpDir := t.TempDir()
 	aerialConfigDir := filepath.Join(tmpDir, "worktrees", "wt-config")
 	if err := os.MkdirAll(aerialConfigDir, 0o755); err != nil {
@@ -381,7 +404,6 @@ func TestRepoAndCommitDetection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Commondir traversal worktree
 	wtCommonRoot := filepath.Join(tmpDir, "wt-common-root")
 	wtCommonGit := filepath.Join(tmpDir, "wt-common-git")
 	if err := os.MkdirAll(wtCommonRoot, 0o755); err != nil {
@@ -417,8 +439,19 @@ func TestRepoAndCommitDetection(t *testing.T) {
 			}
 		})
 	}
+}
 
-	// IsCoreAerial checks
+func checkCoreAerialDetection(t *testing.T) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	aerialConfigDir := filepath.Join(tmpDir, "worktrees", "wt-config")
+	if err := os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aerialConfigDir, ".git", "config"), []byte("[remote \"origin\"]\nurl = git@github.com:azylman/aerial-config.git\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	tmpAerial := filepath.Join(tmpDir, "aerial-monorepo")
 	if err := os.MkdirAll(filepath.Join(tmpAerial, ".git"), 0o755); err != nil {
 		t.Fatal(err)
@@ -427,7 +460,6 @@ func TestRepoAndCommitDetection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Core aerial without .git (fallback checks services/eri/go.mod and brain/go.mod + scripts/aerial-pr.sh)
 	tmpPrimary := filepath.Join(tmpDir, "aerial-primary")
 	if err := os.MkdirAll(filepath.Join(tmpPrimary, "services", "eri"), 0o755); err != nil {
 		t.Fatal(err)
@@ -476,6 +508,17 @@ func TestRepoAndCommitDetection(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRepoAndCommitDetection(t *testing.T) {
+	// Not t.Parallel() because it touches gitCmdRunner
+	oldRunner := gitCmdRunner
+	defer func() { gitCmdRunner = oldRunner }()
+
+	checkCommitCommandDetection(t)
+	checkAllCommitDetection(t)
+	checkAerialConfigDetection(t)
+	checkCoreAerialDetection(t)
 
 	// Git origin runner check
 	gitCmdRunner = func(dir string, args ...string) (string, error) {
@@ -483,6 +526,57 @@ func TestRepoAndCommitDetection(t *testing.T) {
 	}
 	if !hasRepoOriginMatch(t.TempDir(), func(s string) bool { return strings.Contains(s, "aerial") }) {
 		t.Fatalf("expected hasRepoOriginMatch to succeed via gitCmdRunner")
+	}
+}
+
+type checkCommitTestCase struct {
+	name       string
+	tool       string
+	cmd        string
+	arguments  string
+	server     string
+	cwd        string
+	mockDiff   string
+	emptyTree  bool
+	untracked  bool
+	useCoreDir bool
+	secret     string
+	wantDeny   bool
+	wantReason string
+}
+
+func runCheckCommitCase(t *testing.T, tc checkCommitTestCase, tmpCore string) {
+	t.Helper()
+	if tc.secret != "" {
+		sanitizer.ResetSensitiveTokensForTest()
+		sanitizer.RegisterSensitiveTokens(tc.secret)
+		defer sanitizer.ResetSensitiveTokensForTest()
+	}
+	cwd := tc.cwd
+	if tc.useCoreDir {
+		cwd = tmpCore
+	}
+	gitCmdRunner = func(dir string, args ...string) (string, error) {
+		if tc.untracked && len(args) > 0 && args[0] == "ls-files" {
+			return "secret.txt\n", nil
+		}
+		if tc.emptyTree && len(args) > 1 && args[0] == "diff" && args[1] == "HEAD" {
+			return "", os.ErrNotExist
+		}
+		return tc.mockDiff, nil
+	}
+
+	args := ToolArgs{CommandLine: tc.cmd, Arguments: []byte(tc.arguments), ServerName: tc.server, Cwd: cwd}
+	args.AdoptClaudeMCPCall(tc.tool, []byte(tc.arguments))
+	dec := CheckCommit(tc.tool, args)
+	if tc.wantDeny && dec.Decision != DecisionDeny {
+		t.Fatalf("expected deny, got %v", dec)
+	}
+	if !tc.wantDeny && dec.Decision != DecisionAllow {
+		t.Fatalf("expected allow, got deny: %v", dec)
+	}
+	if tc.wantReason != "" && !strings.Contains(dec.Reason, tc.wantReason) {
+		t.Fatalf("expected %q in reason, got %q", tc.wantReason, dec.Reason)
 	}
 }
 
@@ -507,21 +601,7 @@ func TestCheckCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tests := []struct {
-		name       string
-		tool       string
-		cmd        string
-		arguments  string
-		server     string
-		cwd        string
-		mockDiff   string
-		emptyTree  bool
-		untracked  bool
-		useCoreDir bool
-		secret     string
-		wantDeny   bool
-		wantReason string
-	}{
+	tests := []checkCommitTestCase{
 		{name: "non-commit allowed", tool: "run_command", cmd: "git status"},
 		{name: "aerial-config bypass", tool: "run_command", cmd: "git commit -m 'feat'", cwd: "/share/aerial-config"},
 		{name: "clean diff allowed", tool: "run_command", cmd: "git commit -m 'clean'", cwd: "/workspace", mockDiff: "diff --git a/pkg/file.go b/pkg/file.go\n+var x = 1\n"},
@@ -553,37 +633,7 @@ func TestCheckCommit(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.secret != "" {
-				sanitizer.ResetSensitiveTokensForTest()
-				sanitizer.RegisterSensitiveTokens(tc.secret)
-				defer sanitizer.ResetSensitiveTokensForTest()
-			}
-			cwd := tc.cwd
-			if tc.useCoreDir {
-				cwd = tmpCore
-			}
-			gitCmdRunner = func(dir string, args ...string) (string, error) {
-				if tc.untracked && len(args) > 0 && args[0] == "ls-files" {
-					return "secret.txt\n", nil
-				}
-				if tc.emptyTree && len(args) > 1 && args[0] == "diff" && args[1] == "HEAD" {
-					return "", os.ErrNotExist
-				}
-				return tc.mockDiff, nil
-			}
-
-			args := ToolArgs{CommandLine: tc.cmd, Arguments: []byte(tc.arguments), ServerName: tc.server, Cwd: cwd}
-			args.AdoptClaudeMCPCall(tc.tool, []byte(tc.arguments))
-			dec := CheckCommit(tc.tool, args)
-			if tc.wantDeny && dec.Decision != DecisionDeny {
-				t.Fatalf("expected deny, got %v", dec)
-			}
-			if !tc.wantDeny && dec.Decision != DecisionAllow {
-				t.Fatalf("expected allow, got deny: %v", dec)
-			}
-			if tc.wantReason != "" && !strings.Contains(dec.Reason, tc.wantReason) {
-				t.Fatalf("expected %q in reason, got %q", tc.wantReason, dec.Reason)
-			}
+			runCheckCommitCase(t, tc, tmpCore)
 		})
 	}
 }

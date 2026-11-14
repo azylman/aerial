@@ -335,30 +335,125 @@ func newSearchTestStore(t *testing.T, seedCase int) *dbtest.FakeStore {
 	return store
 }
 
+type executeTranscriptSearchCase struct {
+	name         string
+	seedCase     int
+	nilStore     bool
+	closedStore  bool
+	cancelCtx    bool
+	nilCtx       bool
+	embedderType string
+	stack        string
+	query        string
+	mode         string
+	sessionID    string
+	toolName     string
+	limit        int
+	wantErr      bool
+	wantSubstr   string
+	wantSessions int
+	wantSteps    int
+	wantTotal    int
+	wantMode     string
+}
+
+func setupSearchStore(t *testing.T, tc executeTranscriptSearchCase) db.TranscriptStore {
+	t.Helper()
+	if tc.nilStore {
+		return nil
+	}
+	fakeStore := newSearchTestStore(t, tc.seedCase)
+	if tc.closedStore {
+		_ = fakeStore.Close()
+	}
+	return fakeStore
+}
+
+func setupSearchContext(tc executeTranscriptSearchCase) context.Context {
+	if tc.nilCtx {
+		return nil
+	}
+	ctx := context.Background()
+	if tc.cancelCtx {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		cancel()
+	}
+	return ctx
+}
+
+func setupSearchEmbedder(tc executeTranscriptSearchCase) func(ctx context.Context, text string) ([]float32, error) {
+	switch tc.embedderType {
+	case "dummy":
+		return func(ctx context.Context, text string) ([]float32, error) {
+			v := make([]float32, db.ExpectedEmbeddingDim)
+			v[0] = 1.0
+			return v, nil
+		}
+	case "fail":
+		return func(ctx context.Context, text string) ([]float32, error) {
+			return nil, errors.New("ollama service unavailable")
+		}
+	default:
+		return nil
+	}
+}
+
+func assertSearchResult(t *testing.T, tc executeTranscriptSearchCase, res SearchResult, err error) {
+	t.Helper()
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+			t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("ExecuteTranscriptSearch() unexpected error: %v", err)
+	}
+
+	if tc.wantMode != "" && res.Mode != tc.wantMode {
+		t.Errorf("expected Mode %q, got %q", tc.wantMode, res.Mode)
+	}
+	if len(res.Sessions) != tc.wantSessions {
+		t.Errorf("expected %d sessions, got %d", tc.wantSessions, len(res.Sessions))
+	}
+	if len(res.Steps) != tc.wantSteps {
+		t.Errorf("expected %d steps, got %d", tc.wantSteps, len(res.Steps))
+	}
+	if res.Total != tc.wantTotal {
+		t.Errorf("expected Total %d, got %d", tc.wantTotal, res.Total)
+	}
+	if tc.mode == "steps" && tc.sessionID != "" && len(res.Steps) > 0 {
+		if res.Steps[0].SessionID != tc.sessionID {
+			t.Errorf("expected step SessionID %q, got %q", tc.sessionID, res.Steps[0].SessionID)
+		}
+	}
+}
+
+func runExecuteTranscriptSearchCase(t *testing.T, tc executeTranscriptSearchCase) {
+	t.Helper()
+	store := setupSearchStore(t, tc)
+	ctx := setupSearchContext(tc)
+	embedder := setupSearchEmbedder(tc)
+
+	res, err := ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{
+		Stack:         tc.stack,
+		Query:         tc.query,
+		Mode:          tc.mode,
+		SessionFilter: tc.sessionID,
+		ToolFilter:    tc.toolName,
+		Limit:         tc.limit,
+	})
+	assertSearchResult(t, tc, res, err)
+}
+
 func TestExecuteTranscriptSearch(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		seedCase     int
-		nilStore     bool
-		closedStore  bool
-		cancelCtx    bool
-		nilCtx       bool
-		embedderType string
-		stack        string
-		query        string
-		mode         string
-		sessionID    string
-		toolName     string
-		limit        int
-		wantErr      bool
-		wantSubstr   string
-		wantSessions int
-		wantSteps    int
-		wantTotal    int
-		wantMode     string
-	}{
+	tests := []executeTranscriptSearchCase{
 		{
 			name:       "nil store returns error",
 			nilStore:   true,
@@ -482,80 +577,7 @@ func TestExecuteTranscriptSearch(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			var store db.TranscriptStore
-			if !tc.nilStore {
-				fakeStore := newSearchTestStore(t, tc.seedCase)
-				if tc.closedStore {
-					_ = fakeStore.Close()
-				}
-				store = fakeStore
-			}
-
-			var ctx context.Context
-			if tc.nilCtx {
-				ctx = nil
-			} else {
-				ctx = context.Background()
-				if tc.cancelCtx {
-					var cancel context.CancelFunc
-					ctx, cancel = context.WithCancel(ctx)
-					cancel()
-				}
-			}
-
-			var embedder func(ctx context.Context, text string) ([]float32, error)
-			switch tc.embedderType {
-			case "dummy":
-				embedder = func(ctx context.Context, text string) ([]float32, error) {
-					v := make([]float32, db.ExpectedEmbeddingDim)
-					v[0] = 1.0
-					return v, nil
-				}
-			case "fail":
-				embedder = func(ctx context.Context, text string) ([]float32, error) {
-					return nil, errors.New("ollama service unavailable")
-				}
-			}
-
-			res, err := ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{
-				Stack:         tc.stack,
-				Query:         tc.query,
-				Mode:          tc.mode,
-				SessionFilter: tc.sessionID,
-				ToolFilter:    tc.toolName,
-				Limit:         tc.limit,
-			})
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("ExecuteTranscriptSearch() unexpected error: %v", err)
-			}
-
-			if tc.wantMode != "" && res.Mode != tc.wantMode {
-				t.Errorf("expected Mode %q, got %q", tc.wantMode, res.Mode)
-			}
-			if len(res.Sessions) != tc.wantSessions {
-				t.Errorf("expected %d sessions, got %d", tc.wantSessions, len(res.Sessions))
-			}
-			if len(res.Steps) != tc.wantSteps {
-				t.Errorf("expected %d steps, got %d", tc.wantSteps, len(res.Steps))
-			}
-			if res.Total != tc.wantTotal {
-				t.Errorf("expected Total %d, got %d", tc.wantTotal, res.Total)
-			}
-			if tc.mode == "steps" && tc.sessionID != "" && len(res.Steps) > 0 {
-				if res.Steps[0].SessionID != tc.sessionID {
-					t.Errorf("expected step SessionID %q, got %q", tc.sessionID, res.Steps[0].SessionID)
-				}
-			}
+			runExecuteTranscriptSearchCase(t, tc)
 		})
 	}
 }
@@ -577,24 +599,102 @@ func TestDefaultSyncOptions(t *testing.T) {
 	}
 }
 
+type getTranscriptStepWindowCase struct {
+	name        string
+	nilStore    bool
+	closedStore bool
+	cancelCtx   bool
+	nilCtx      bool
+	sessionID   string
+	stepIndex   int
+	context     int
+	wantErr     bool
+	wantSubstr  string
+	wantCount   int
+	wantContext int
+	wantCenter  int
+}
+
+func setupStepWindowStore(tc getTranscriptStepWindowCase) db.TranscriptStore {
+	if tc.nilStore {
+		return nil
+	}
+	fake := dbtest.NewFakeStore()
+	ctx := context.Background()
+	_ = fake.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-win-1"})
+	steps := make([]db.TranscriptStep, 10)
+	for i := range 10 {
+		steps[i] = db.TranscriptStep{
+			SessionID: "sess-win-1",
+			StepIndex: i,
+			StepType:  "tool_call",
+			ToolName:  "run_command",
+			Content:   fmt.Sprintf("echo step %d", i),
+			CreatedAt: time.Now().UTC(),
+		}
+	}
+	_ = fake.BatchInsertTranscriptSteps(ctx, steps)
+	if tc.closedStore {
+		_ = fake.Close()
+	}
+	return fake
+}
+
+func setupStepWindowContext(tc getTranscriptStepWindowCase) context.Context {
+	if tc.nilCtx {
+		return nil
+	}
+	ctx := context.Background()
+	if tc.cancelCtx {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		cancel()
+	}
+	return ctx
+}
+
+func assertStepWindowResult(t *testing.T, tc getTranscriptStepWindowCase, res StepWindowResult, err error) {
+	t.Helper()
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+			t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+		}
+		return
+	}
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Steps) != tc.wantCount {
+		t.Errorf("got %d steps, want %d", len(res.Steps), tc.wantCount)
+	}
+	if res.Context != tc.wantContext {
+		t.Errorf("got context=%d, want %d", res.Context, tc.wantContext)
+	}
+	if res.CenterStep != tc.wantCenter {
+		t.Errorf("got center step=%d, want %d", res.CenterStep, tc.wantCenter)
+	}
+	if res.Steps == nil {
+		t.Errorf("res.Steps should not be nil")
+	}
+}
+
+func runGetTranscriptStepWindowCase(t *testing.T, tc getTranscriptStepWindowCase) {
+	t.Helper()
+	store := setupStepWindowStore(tc)
+	ctx := setupStepWindowContext(tc)
+
+	res, err := GetTranscriptStepWindow(ctx, store, "", tc.sessionID, tc.stepIndex, tc.context)
+	assertStepWindowResult(t, tc, res, err)
+}
+
 func TestGetTranscriptStepWindow(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name        string
-		nilStore    bool
-		closedStore bool
-		cancelCtx   bool
-		nilCtx      bool
-		sessionID   string
-		stepIndex   int
-		context     int
-		wantErr     bool
-		wantSubstr  string
-		wantCount   int
-		wantContext int
-		wantCenter  int
-	}{
+	tests := []getTranscriptStepWindowCase{
 		{
 			name:       "nil store returns error",
 			nilStore:   true,
@@ -691,68 +791,7 @@ func TestGetTranscriptStepWindow(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			var store db.TranscriptStore
-			if !tc.nilStore {
-				fake := dbtest.NewFakeStore()
-				ctx := context.Background()
-				_ = fake.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-win-1"})
-				steps := make([]db.TranscriptStep, 10)
-				for i := range 10 {
-					steps[i] = db.TranscriptStep{
-						SessionID: "sess-win-1",
-						StepIndex: i,
-						StepType:  "tool_call",
-						ToolName:  "run_command",
-						Content:   fmt.Sprintf("echo step %d", i),
-						CreatedAt: time.Now().UTC(),
-					}
-				}
-				_ = fake.BatchInsertTranscriptSteps(ctx, steps)
-				if tc.closedStore {
-					_ = fake.Close()
-				}
-				store = fake
-			}
-
-			var ctx context.Context
-			if tc.nilCtx {
-				ctx = nil
-			} else {
-				ctx = context.Background()
-				if tc.cancelCtx {
-					var cancel context.CancelFunc
-					ctx, cancel = context.WithCancel(ctx)
-					cancel()
-				}
-			}
-
-			res, err := GetTranscriptStepWindow(ctx, store, "", tc.sessionID, tc.stepIndex, tc.context)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(res.Steps) != tc.wantCount {
-				t.Errorf("got %d steps, want %d", len(res.Steps), tc.wantCount)
-			}
-			if res.Context != tc.wantContext {
-				t.Errorf("got context=%d, want %d", res.Context, tc.wantContext)
-			}
-			if res.CenterStep != tc.wantCenter {
-				t.Errorf("got center step=%d, want %d", res.CenterStep, tc.wantCenter)
-			}
-			if res.Steps == nil {
-				t.Errorf("res.Steps should not be nil")
-			}
+			runGetTranscriptStepWindowCase(t, tc)
 		})
 	}
 }

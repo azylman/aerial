@@ -111,28 +111,108 @@ func TestClient_NewEmbedderAndConfig(t *testing.T) {
 	}
 }
 
+type generateEmbeddingCase struct {
+	name         string
+	text         string
+	isQuery      bool
+	maxRetries   int
+	retryDelay   time.Duration
+	queryPrefix  string
+	model        string
+	numCtx       int
+	httpStatus   int
+	httpBody     string
+	netErr       bool
+	closeErr     bool
+	cancelCtx    bool
+	nilHTTP      bool
+	badURL       bool
+	wantLen      int
+	wantErr      bool
+	wantSubstr   string
+	expectPrompt string
+}
+
+func setupMockEmbedder(tc generateEmbeddingCase, receivedPrompt *string) *Client {
+	rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if tc.netErr {
+			return nil, errors.New("connection refused")
+		}
+		var reqBody embeddingRequest
+		_ = json.NewDecoder(req.Body).Decode(&reqBody)
+		*receivedPrompt = reqBody.Prompt
+
+		resp := mockJSONResponse(tc.httpStatus, tc.httpBody)
+		if tc.closeErr {
+			resp.Body = &mockCloseErrReader{Reader: strings.NewReader(tc.httpBody)}
+		}
+		return resp, nil
+	})
+
+	baseURL := "http://mock-ollama:11434"
+	if tc.badURL {
+		baseURL = "http://\x7f"
+	}
+	cfg := config.NewFromData(&config.ConfigData{
+		Ollama: config.OllamaConfig{
+			BaseURL:     baseURL,
+			Model:       tc.model,
+			QueryPrefix: tc.queryPrefix,
+			NumCtx:      tc.numCtx,
+		},
+	})
+	client := NewEmbedder(cfg)
+	client.SetHTTPClient(&http.Client{Transport: rt})
+	client.SetRetryDelay(-1)
+	if tc.retryDelay != 0 {
+		client.SetRetryDelay(tc.retryDelay)
+	}
+	if tc.nilHTTP {
+		client.SetHTTPClient(nil)
+	}
+	return client
+}
+
+func assertEmbeddingResult(t *testing.T, tc generateEmbeddingCase, emb []float32, err error, receivedPrompt string) {
+	t.Helper()
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+			t.Errorf("error %q does not contain %q", err.Error(), tc.wantSubstr)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(emb) != tc.wantLen {
+		t.Errorf("len(emb) = %d, want %d", len(emb), tc.wantLen)
+	}
+	if tc.expectPrompt != "" && receivedPrompt != tc.expectPrompt {
+		t.Errorf("prompt = %q, want %q", receivedPrompt, tc.expectPrompt)
+	}
+}
+
+func runGenerateEmbeddingCase(t *testing.T, tc generateEmbeddingCase) {
+	t.Helper()
+	var receivedPrompt string
+	client := setupMockEmbedder(tc, &receivedPrompt)
+
+	ctx := context.Background()
+	if tc.cancelCtx {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		cancel()
+	}
+
+	emb, err := client.GenerateEmbedding(ctx, tc.text, tc.isQuery, tc.maxRetries)
+	assertEmbeddingResult(t, tc, emb, err, receivedPrompt)
+}
+
 func TestGenerateEmbedding(t *testing.T) {
-	tests := []struct {
-		name         string
-		text         string
-		isQuery      bool
-		maxRetries   int
-		retryDelay   time.Duration
-		queryPrefix  string
-		model        string
-		numCtx       int
-		httpStatus   int
-		httpBody     string
-		netErr       bool
-		closeErr     bool
-		cancelCtx    bool
-		nilHTTP      bool
-		badURL       bool
-		wantLen      int
-		wantErr      bool
-		wantSubstr   string
-		expectPrompt string
-	}{
+	tests := []generateEmbeddingCase{
 		{
 			name:       "EmptyText",
 			text:       "",
@@ -248,71 +328,7 @@ func TestGenerateEmbedding(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var receivedPrompt string
-			rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-				if tc.netErr {
-					return nil, errors.New("connection refused")
-				}
-				var reqBody embeddingRequest
-				_ = json.NewDecoder(req.Body).Decode(&reqBody)
-				receivedPrompt = reqBody.Prompt
-
-				resp := mockJSONResponse(tc.httpStatus, tc.httpBody)
-				if tc.closeErr {
-					resp.Body = &mockCloseErrReader{Reader: strings.NewReader(tc.httpBody)}
-				}
-				return resp, nil
-			})
-
-			baseURL := "http://mock-ollama:11434"
-			if tc.badURL {
-				baseURL = "http://\x7f"
-			}
-			cfg := config.NewFromData(&config.ConfigData{
-				Ollama: config.OllamaConfig{
-					BaseURL:     baseURL,
-					Model:       tc.model,
-					QueryPrefix: tc.queryPrefix,
-					NumCtx:      tc.numCtx,
-				},
-			})
-			client := NewEmbedder(cfg)
-			client.SetHTTPClient(&http.Client{Transport: rt})
-			client.SetRetryDelay(-1)
-			if tc.retryDelay != 0 {
-				client.SetRetryDelay(tc.retryDelay)
-			}
-
-			if tc.nilHTTP {
-				client.SetHTTPClient(nil)
-			}
-
-			ctx := context.Background()
-			if tc.cancelCtx {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
-			}
-
-			emb, err := client.GenerateEmbedding(ctx, tc.text, tc.isQuery, tc.maxRetries)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-					t.Errorf("error %q does not contain %q", err.Error(), tc.wantSubstr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(emb) != tc.wantLen {
-				t.Errorf("len(emb) = %d, want %d", len(emb), tc.wantLen)
-			}
-			if tc.expectPrompt != "" && receivedPrompt != tc.expectPrompt {
-				t.Errorf("prompt = %q, want %q", receivedPrompt, tc.expectPrompt)
-			}
+			runGenerateEmbeddingCase(t, tc)
 		})
 	}
 }

@@ -157,6 +157,139 @@ func makeSendSuiteHandler(tc sendTestCase, lastReqBody *[]byte) http.HandlerFunc
 	}
 }
 
+func assertSendSuiteError(t *testing.T, tc sendTestCase, pool *GeminiAPIPool, sendErr error, sink *mockTurnSink) {
+	t.Helper()
+	if sendErr == nil || (tc.expectErrMsg != "" && sendErr.Error() != tc.expectErrMsg) {
+		t.Fatalf("expected error %q, got: %v", tc.expectErrMsg, sendErr)
+	}
+	if sink != nil {
+		sink.mu.Lock()
+		sErr := sink.err
+		sink.mu.Unlock()
+		if sErr == nil || (tc.expectSinkErrMsg != "" && sErr.Error() != tc.expectSinkErrMsg) {
+			t.Errorf("sink error mismatch: expected %q, got %v", tc.expectSinkErrMsg, sErr)
+		}
+	}
+	if tc.verifySanitizeKey != "" {
+		if strings.Contains(sendErr.Error(), tc.verifySanitizeKey) || !strings.Contains(sendErr.Error(), "[REDACTED]") {
+			t.Errorf("send error contains unredacted API key: %s", sendErr.Error())
+		}
+		sanitized := pool.sanitizeError(fmt.Errorf("connection failed to https://generativelanguage.googleapis.com/v1beta/models/gemini:stream?key=%s&alt=sse: timeout", tc.verifySanitizeKey))
+		if strings.Contains(sanitized.Error(), tc.verifySanitizeKey) || !strings.Contains(sanitized.Error(), "key=[REDACTED]") {
+			t.Errorf("sanitized query error still contains secret key: %s", sanitized.Error())
+		}
+	}
+}
+
+func assertSendSuiteSink(t *testing.T, tc sendTestCase, sink *mockTurnSink) {
+	t.Helper()
+	if sink == nil {
+		return
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if !sink.started || (tc.expectSinkResult != "" && (sink.result == nil || sink.result.Response != tc.expectSinkResult)) {
+		t.Errorf("sink state mismatch: started=%v, result=%+v", sink.started, sink.result)
+	}
+	if len(tc.expectDeltas) > 0 && len(sink.deltas) != len(tc.expectDeltas) {
+		t.Fatalf("expected %d deltas, got %d: %v", len(tc.expectDeltas), len(sink.deltas), sink.deltas)
+	}
+	if (tc.expectPromptToken > 0 && sink.result.Usage.InputTokens != tc.expectPromptToken) ||
+		(tc.expectCandToken > 0 && sink.result.Usage.OutputTokens != tc.expectCandToken) ||
+		(tc.expectTotalToken > 0 && sink.result.Usage.TotalTokens != tc.expectTotalToken) {
+		t.Errorf("usage mismatch: %+v", sink.result.Usage)
+	}
+}
+
+func assertSendSuiteSuccess(t *testing.T, tc sendTestCase, sess AgentSession, sendErr error, sink *mockTurnSink, lastReqBody []byte) {
+	t.Helper()
+	if sendErr != nil {
+		t.Fatalf("unexpected Send error: %v", sendErr)
+	}
+	if tc.expectEmptyHist {
+		if hist := sess.(*GeminiAPISession).History(); len(hist) != 0 {
+			t.Errorf("expected empty history, got %d", len(hist))
+		}
+		return
+	}
+	assertSendSuiteSink(t, tc, sink)
+	if tc.checkThinkingBody {
+		rawJSON := string(lastReqBody)
+		if (!strings.Contains(rawJSON, `"thinkingBudget":0`) && !strings.Contains(rawJSON, `"thinkingBudget": 0`)) || !strings.Contains(rawJSON, "You are Aerial.") {
+			t.Errorf("expected thinkingBudget: 0 and systemInstruction, got %s", rawJSON)
+		}
+	}
+}
+
+func runSendSuiteSequential(t *testing.T, tc sendTestCase, sess AgentSession) {
+	t.Helper()
+	for i := 1; i <= tc.runSequential; i++ {
+		p := fmt.Sprintf("%s %d", tc.prompt, i)
+		sink := newMockTurnSink()
+		if err := sess.Send(p, &TurnContext{TurnID: fmt.Sprintf("turn-%d", i), Prompt: p, Sink: sink}); err != nil {
+			t.Fatalf("turn %d failed: %v", i, err)
+		}
+	}
+	hist := sess.(*GeminiAPISession).History()
+	if len(hist) != tc.expectMaxHistory || (tc.expectHistFirst != "" && hist[0].Parts[0].Text != tc.expectHistFirst) || (tc.expectHistLast != "" && hist[len(hist)-1].Parts[0].Text != tc.expectHistLast) {
+		t.Errorf("history mismatch: len=%d, first=%q, last=%q", len(hist), hist[0].Parts[0].Text, hist[len(hist)-1].Parts[0].Text)
+	}
+}
+
+func runGeminiAPIPoolSendCase(t *testing.T, tc sendTestCase) {
+	t.Helper()
+	var lastReqBody []byte
+	var ts *httptest.Server
+	if h := makeSendSuiteHandler(tc, &lastReqBody); h != nil {
+		ts = httptest.NewServer(h)
+		defer ts.Close()
+	}
+	cfg := tc.cfg
+	if ts != nil {
+		cfg.BaseURL, cfg.HTTPClient = ts.URL, ts.Client()
+	} else if tc.badURL {
+		cfg.BaseURL = "http://127.0.0.1:1"
+	}
+	pool := NewGeminiAPIPool(cfg)
+	defer pool.Close()
+	ctx := context.Background()
+	sess, err := pool.GetOrCreateSession(ctx, tc.device, "")
+	if err != nil {
+		t.Fatalf("unexpected GetOrCreateSession error: %v", err)
+	}
+
+	if tc.runSequential > 0 {
+		runSendSuiteSequential(t, tc, sess)
+		return
+	}
+
+	turnCtx := ctx
+	if tc.preCancelCtx {
+		cCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		turnCtx = cCtx
+	} else if tc.cancelOnFlush {
+		cCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		time.AfterFunc(20*time.Millisecond, cancel)
+		turnCtx = cCtx
+	}
+
+	var sink *mockTurnSink
+	var sinkInterface TurnSink
+	if !tc.nilSink {
+		sink = newMockTurnSink()
+		sinkInterface = sink
+	}
+
+	sendErr := sess.Send(tc.prompt, &TurnContext{TurnID: "turn-suite", Prompt: tc.prompt, Sink: sinkInterface, CreatedAt: time.Now(), Ctx: turnCtx})
+	if tc.expectErr {
+		assertSendSuiteError(t, tc, pool, sendErr, sink)
+		return
+	}
+	assertSendSuiteSuccess(t, tc, sess, sendErr, sink, lastReqBody)
+}
+
 func TestGeminiAPIPool_Send_Suite(t *testing.T) {
 	t.Parallel()
 	tests := []sendTestCase{
@@ -179,115 +312,7 @@ func TestGeminiAPIPool_Send_Suite(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var lastReqBody []byte
-			var ts *httptest.Server
-			if h := makeSendSuiteHandler(tc, &lastReqBody); h != nil {
-				ts = httptest.NewServer(h)
-				defer ts.Close()
-			}
-			cfg := tc.cfg
-			if ts != nil {
-				cfg.BaseURL, cfg.HTTPClient = ts.URL, ts.Client()
-			} else if tc.badURL {
-				cfg.BaseURL = "http://127.0.0.1:1"
-			}
-			pool := NewGeminiAPIPool(cfg)
-			defer pool.Close()
-			ctx := context.Background()
-			sess, err := pool.GetOrCreateSession(ctx, tc.device, "")
-			if err != nil {
-				t.Fatalf("unexpected GetOrCreateSession error: %v", err)
-			}
-
-			if tc.runSequential > 0 {
-				for i := 1; i <= tc.runSequential; i++ {
-					p := fmt.Sprintf("%s %d", tc.prompt, i)
-					sink := newMockTurnSink()
-					if err := sess.Send(p, &TurnContext{TurnID: fmt.Sprintf("turn-%d", i), Prompt: p, Sink: sink}); err != nil {
-						t.Fatalf("turn %d failed: %v", i, err)
-					}
-				}
-				hist := sess.(*GeminiAPISession).History()
-				if len(hist) != tc.expectMaxHistory || (tc.expectHistFirst != "" && hist[0].Parts[0].Text != tc.expectHistFirst) || (tc.expectHistLast != "" && hist[len(hist)-1].Parts[0].Text != tc.expectHistLast) {
-					t.Errorf("history mismatch: len=%d, first=%q, last=%q", len(hist), hist[0].Parts[0].Text, hist[len(hist)-1].Parts[0].Text)
-				}
-				return
-			}
-
-			turnCtx := ctx
-			if tc.preCancelCtx {
-				cCtx, cancel := context.WithCancel(ctx)
-				cancel()
-				turnCtx = cCtx
-			} else if tc.cancelOnFlush {
-				cCtx, cancel := context.WithCancel(ctx)
-				defer cancel()
-				time.AfterFunc(20*time.Millisecond, cancel)
-				turnCtx = cCtx
-			}
-
-			var sink *mockTurnSink
-			var sinkInterface TurnSink
-			if !tc.nilSink {
-				sink = newMockTurnSink()
-				sinkInterface = sink
-			}
-
-			sendErr := sess.Send(tc.prompt, &TurnContext{TurnID: "turn-suite", Prompt: tc.prompt, Sink: sinkInterface, CreatedAt: time.Now(), Ctx: turnCtx})
-			if tc.expectErr {
-				if sendErr == nil || (tc.expectErrMsg != "" && sendErr.Error() != tc.expectErrMsg) {
-					t.Fatalf("expected error %q, got: %v", tc.expectErrMsg, sendErr)
-				}
-				if sink != nil {
-					sink.mu.Lock()
-					sErr := sink.err
-					sink.mu.Unlock()
-					if sErr == nil || (tc.expectSinkErrMsg != "" && sErr.Error() != tc.expectSinkErrMsg) {
-						t.Errorf("sink error mismatch: expected %q, got %v", tc.expectSinkErrMsg, sErr)
-					}
-				}
-				if tc.verifySanitizeKey != "" {
-					if strings.Contains(sendErr.Error(), tc.verifySanitizeKey) || !strings.Contains(sendErr.Error(), "[REDACTED]") {
-						t.Errorf("send error contains unredacted API key: %s", sendErr.Error())
-					}
-					sanitized := pool.sanitizeError(fmt.Errorf("connection failed to https://generativelanguage.googleapis.com/v1beta/models/gemini:stream?key=%s&alt=sse: timeout", tc.verifySanitizeKey))
-					if strings.Contains(sanitized.Error(), tc.verifySanitizeKey) || !strings.Contains(sanitized.Error(), "key=[REDACTED]") {
-						t.Errorf("sanitized query error still contains secret key: %s", sanitized.Error())
-					}
-				}
-				return
-			}
-
-			if sendErr != nil {
-				t.Fatalf("unexpected Send error: %v", sendErr)
-			}
-			if tc.expectEmptyHist {
-				if hist := sess.(*GeminiAPISession).History(); len(hist) != 0 {
-					t.Errorf("expected empty history, got %d", len(hist))
-				}
-				return
-			}
-			if sink != nil {
-				sink.mu.Lock()
-				defer sink.mu.Unlock()
-				if !sink.started || (tc.expectSinkResult != "" && (sink.result == nil || sink.result.Response != tc.expectSinkResult)) {
-					t.Errorf("sink state mismatch: started=%v, result=%+v", sink.started, sink.result)
-				}
-				if len(tc.expectDeltas) > 0 && len(sink.deltas) != len(tc.expectDeltas) {
-					t.Fatalf("expected %d deltas, got %d: %v", len(tc.expectDeltas), len(sink.deltas), sink.deltas)
-				}
-				if (tc.expectPromptToken > 0 && sink.result.Usage.InputTokens != tc.expectPromptToken) ||
-					(tc.expectCandToken > 0 && sink.result.Usage.OutputTokens != tc.expectCandToken) ||
-					(tc.expectTotalToken > 0 && sink.result.Usage.TotalTokens != tc.expectTotalToken) {
-					t.Errorf("usage mismatch: %+v", sink.result.Usage)
-				}
-			}
-			if tc.checkThinkingBody {
-				rawJSON := string(lastReqBody)
-				if (!strings.Contains(rawJSON, `"thinkingBudget":0`) && !strings.Contains(rawJSON, `"thinkingBudget": 0`)) || !strings.Contains(rawJSON, "You are Aerial.") {
-					t.Errorf("expected thinkingBudget: 0 and systemInstruction, got %s", rawJSON)
-				}
-			}
+			runGeminiAPIPoolSendCase(t, tc)
 		})
 	}
 }
@@ -632,6 +657,48 @@ func TestCleanParameters(t *testing.T) {
 	}
 }
 
+func assertNoDisallowedKeys(t *testing.T, m map[string]any, path string, disallowed []string) {
+	t.Helper()
+	for k, v := range m {
+		for _, dis := range disallowed {
+			if strings.EqualFold(k, dis) {
+				t.Errorf("found disallowed key %q at path %s", k, path)
+			}
+		}
+		if childMap, ok := v.(map[string]any); ok {
+			assertNoDisallowedKeys(t, childMap, path+"."+k, disallowed)
+		} else if childSlice, ok := v.([]any); ok {
+			for idx, elem := range childSlice {
+				if elemMap, ok := elem.(map[string]any); ok {
+					assertNoDisallowedKeys(t, elemMap, fmt.Sprintf("%s.%s[%d]", path, k, idx), disallowed)
+				}
+			}
+		}
+	}
+}
+
+func assertDeeplyNestedSchema(t *testing.T) {
+	t.Helper()
+	root := map[string]any{"type": "object", "additionalProperties": false}
+	curr := root
+	for range 20 {
+		child := map[string]any{"type": "object", "additionalProperties": false}
+		curr["properties"] = map[string]any{"nested": child}
+		curr = child
+	}
+	curr["properties"] = map[string]any{"leaf": map[string]any{"type": "string", "additionalProperties": false}}
+	probe := cleanParameters(root)
+	for level := range 20 {
+		if _, hasAddl := probe["additionalProperties"]; hasAddl {
+			t.Fatalf("level %d had additionalProperties", level)
+		}
+		probe = probe["properties"].(map[string]any)["nested"].(map[string]any)
+	}
+	if leaf := probe["properties"].(map[string]any)["leaf"].(map[string]any); leaf["type"] != "STRING" {
+		t.Fatalf("leaf not preserved: %+v", leaf)
+	}
+}
+
 func TestCleanParameters_StripsDisallowedKeys(t *testing.T) {
 	t.Parallel()
 	complexSchema := map[string]any{
@@ -651,26 +718,7 @@ func TestCleanParameters_StripsDisallowedKeys(t *testing.T) {
 	}
 	cleaned := cleanParameters(complexSchema)
 	disallowed := []string{"additionalproperties", "$schema", "title", "default", "$ref", "$id", "definitions"}
-	var checkKeys func(m map[string]any, path string)
-	checkKeys = func(m map[string]any, path string) {
-		for k, v := range m {
-			for _, dis := range disallowed {
-				if strings.EqualFold(k, dis) {
-					t.Errorf("found disallowed key %q at path %s", k, path)
-				}
-			}
-			if childMap, ok := v.(map[string]any); ok {
-				checkKeys(childMap, path+"."+k)
-			} else if childSlice, ok := v.([]any); ok {
-				for idx, elem := range childSlice {
-					if elemMap, ok := elem.(map[string]any); ok {
-						checkKeys(elemMap, fmt.Sprintf("%s.%s[%d]", path, k, idx))
-					}
-				}
-			}
-		}
-	}
-	checkKeys(cleaned, "root")
+	assertNoDisallowedKeys(t, cleaned, "root", disallowed)
 	props := cleaned["properties"].(map[string]any)
 	if cleaned["type"] != "OBJECT" || props["prompt"].(map[string]any)["type"] != "STRING" || props["empty_child"].(map[string]any)["type"] != "OBJECT" {
 		t.Errorf("cleaned schema types mismatch: %+v", cleaned)
@@ -681,25 +729,7 @@ func TestCleanParameters_StripsDisallowedKeys(t *testing.T) {
 	if revNull := props["reversed_null"].(map[string]any); revNull["type"] != "STRING" || revNull["nullable"] != true {
 		t.Errorf("expected reversed_null STRING nullable: %+v", revNull)
 	}
-	// Deeply nested schema check (20 levels)
-	root := map[string]any{"type": "object", "additionalProperties": false}
-	curr := root
-	for range 20 {
-		child := map[string]any{"type": "object", "additionalProperties": false}
-		curr["properties"] = map[string]any{"nested": child}
-		curr = child
-	}
-	curr["properties"] = map[string]any{"leaf": map[string]any{"type": "string", "additionalProperties": false}}
-	probe := cleanParameters(root)
-	for level := range 20 {
-		if _, hasAddl := probe["additionalProperties"]; hasAddl {
-			t.Fatalf("level %d had additionalProperties", level)
-		}
-		probe = probe["properties"].(map[string]any)["nested"].(map[string]any)
-	}
-	if leaf := probe["properties"].(map[string]any)["leaf"].(map[string]any); leaf["type"] != "STRING" {
-		t.Fatalf("leaf not preserved: %+v", leaf)
-	}
+	assertDeeplyNestedSchema(t)
 }
 
 func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
@@ -924,12 +954,71 @@ func TestDefaultMCPDispatcher_AllowedToolsFilteringAndExecution(t *testing.T) {
 	}
 }
 
+type retrieverTestCase struct {
+	name, preSeededPrompt, normalPrompt, retrieverSnippet, modelResponse, expectedWireTag, expectedContent, expectedHistoryClean string
+	isAmbient                                                                                                                    bool
+}
+
+func runGeminiAPISessionRetrieverCase(t *testing.T, tc retrieverTestCase) {
+	t.Helper()
+	retrieverCalled := false
+	var receivedBody []byte
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":%q}],\"role\":\"model\"}}]}\n\n", tc.modelResponse)
+	}))
+	defer ts.Close()
+
+	poolCfg := GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash", BaseURL: ts.URL, HTTPClient: ts.Client()}
+	if tc.isAmbient {
+		poolCfg.AmbientContextRetriever = func(ctx context.Context) (string, error) {
+			retrieverCalled = true
+			return tc.retrieverSnippet, nil
+		}
+	} else {
+		poolCfg.MemoryRetriever = func(ctx context.Context, query string) (string, error) {
+			retrieverCalled = true
+			return tc.retrieverSnippet, nil
+		}
+	}
+	pool := NewGeminiAPIPool(poolCfg)
+	defer pool.Close()
+	sess, err := pool.GetOrCreateSession(context.Background(), "test-sess", "")
+	if err != nil {
+		t.Fatalf("unexpected GetOrCreateSession error: %v", err)
+	}
+	prompt := tc.normalPrompt
+	if tc.preSeededPrompt != "" {
+		prompt = tc.preSeededPrompt
+	}
+	sink := newMockTurnSink()
+	if err := sess.Send(prompt, &TurnContext{TurnID: "turn-retriever", Prompt: prompt, Sink: sink}); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+	if tc.preSeededPrompt != "" && retrieverCalled {
+		t.Errorf("expected retriever NOT to be called when tag already present")
+	}
+	var req geminiStreamRequest
+	if err := json.Unmarshal(receivedBody, &req); err != nil || len(req.Contents) == 0 || len(req.Contents[0].Parts) == 0 {
+		t.Fatalf("failed to unmarshal request or empty parts: %v", err)
+	}
+	wireText := req.Contents[0].Parts[0].Text
+	if strings.Count(wireText, tc.expectedWireTag) != 1 || !strings.Contains(wireText, tc.expectedContent) {
+		t.Errorf("wireText mismatch for %s: %s", tc.expectedWireTag, wireText)
+	}
+	hist := sess.(*GeminiAPISession).History()
+	if len(hist) != 2 || hist[0].Role != "user" || !strings.Contains(hist[0].Parts[0].Text, tc.expectedHistoryClean) || hist[1].Parts[0].Text != tc.modelResponse {
+		t.Errorf("history mismatch: %+v", hist)
+	}
+	if tc.preSeededPrompt == "" && strings.Contains(hist[0].Parts[0].Text, tc.expectedWireTag) {
+		t.Errorf("history should not contain %s when dynamically injected", tc.expectedWireTag)
+	}
+}
+
 func TestGeminiAPISession_Send_Retrievers(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name, preSeededPrompt, normalPrompt, retrieverSnippet, modelResponse, expectedWireTag, expectedContent, expectedHistoryClean string
-		isAmbient                                                                                                                    bool
-	}{
+	cases := []retrieverTestCase{
 		{name: "MemoryRetriever_Normal", normalPrompt: "What is my theme preference?", retrieverSnippet: "<retrieved_memory>\n- User prefers dark mode\n</retrieved_memory>", modelResponse: "Got your preference!", expectedWireTag: "<retrieved_memory>", expectedContent: "User prefers dark mode", expectedHistoryClean: "What is my theme preference?"},
 		{name: "MemoryRetriever_NoDoubleInject", preSeededPrompt: "<retrieved_memory>\n- Already present\n</retrieved_memory>\n\nHello", retrieverSnippet: "<retrieved_memory>\n- Extra memory\n</retrieved_memory>", modelResponse: "Acknowledged", expectedWireTag: "<retrieved_memory>", expectedContent: "Already present", expectedHistoryClean: "Already present"},
 		{name: "AmbientContextRetriever_Normal", isAmbient: true, normalPrompt: "turn off the living room lights", retrieverSnippet: "<ambient_context>\nLiving Room: lights are ON\n</ambient_context>", modelResponse: "Turned them off!", expectedWireTag: "<ambient_context>", expectedContent: "Living Room: lights are ON", expectedHistoryClean: "turn off the living room lights"},
@@ -939,59 +1028,7 @@ func TestGeminiAPISession_Send_Retrievers(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			retrieverCalled := false
-			var receivedBody []byte
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				receivedBody, _ = io.ReadAll(r.Body)
-				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = fmt.Fprintf(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":%q}],\"role\":\"model\"}}]}\n\n", tc.modelResponse)
-			}))
-			defer ts.Close()
-
-			poolCfg := GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash", BaseURL: ts.URL, HTTPClient: ts.Client()}
-			if tc.isAmbient {
-				poolCfg.AmbientContextRetriever = func(ctx context.Context) (string, error) {
-					retrieverCalled = true
-					return tc.retrieverSnippet, nil
-				}
-			} else {
-				poolCfg.MemoryRetriever = func(ctx context.Context, query string) (string, error) {
-					retrieverCalled = true
-					return tc.retrieverSnippet, nil
-				}
-			}
-			pool := NewGeminiAPIPool(poolCfg)
-			defer pool.Close()
-			sess, err := pool.GetOrCreateSession(context.Background(), "test-sess", "")
-			if err != nil {
-				t.Fatalf("unexpected GetOrCreateSession error: %v", err)
-			}
-			prompt := tc.normalPrompt
-			if tc.preSeededPrompt != "" {
-				prompt = tc.preSeededPrompt
-			}
-			sink := newMockTurnSink()
-			if err := sess.Send(prompt, &TurnContext{TurnID: "turn-retriever", Prompt: prompt, Sink: sink}); err != nil {
-				t.Fatalf("Send failed: %v", err)
-			}
-			if tc.preSeededPrompt != "" && retrieverCalled {
-				t.Errorf("expected retriever NOT to be called when tag already present")
-			}
-			var req geminiStreamRequest
-			if err := json.Unmarshal(receivedBody, &req); err != nil || len(req.Contents) == 0 || len(req.Contents[0].Parts) == 0 {
-				t.Fatalf("failed to unmarshal request or empty parts: %v", err)
-			}
-			wireText := req.Contents[0].Parts[0].Text
-			if strings.Count(wireText, tc.expectedWireTag) != 1 || !strings.Contains(wireText, tc.expectedContent) {
-				t.Errorf("wireText mismatch for %s: %s", tc.expectedWireTag, wireText)
-			}
-			hist := sess.(*GeminiAPISession).History()
-			if len(hist) != 2 || hist[0].Role != "user" || !strings.Contains(hist[0].Parts[0].Text, tc.expectedHistoryClean) || hist[1].Parts[0].Text != tc.modelResponse {
-				t.Errorf("history mismatch: %+v", hist)
-			}
-			if tc.preSeededPrompt == "" && strings.Contains(hist[0].Parts[0].Text, tc.expectedWireTag) {
-				t.Errorf("history should not contain %s when dynamically injected", tc.expectedWireTag)
-			}
+			runGeminiAPISessionRetrieverCase(t, tc)
 		})
 	}
 }
@@ -1028,6 +1065,144 @@ func TestGeminiAPIPool_AcquireLease_ConcurrencySerialization(t *testing.T) {
 	_ = lease3.Release()
 }
 
+type acquireLeaseTestCase struct {
+	name                                                                                                                           string
+	nilPool, emptyTarget, useChannelFallback, expectInitCold, expectExecErr, expectRotation, expectEvictedOnFail, expectNilTurnErr bool
+	maxTurns                                                                                                                       int
+	turnPrompts                                                                                                                    []string
+	responseStatusCodes                                                                                                            []int
+	responseChunks                                                                                                                 []string
+	onRotateErr, expectReleaseErr                                                                                                  error
+}
+
+func assertLeaseTurnsExecution(ctx context.Context, t *testing.T, tc acquireLeaseTestCase, lease SessionLease) {
+	t.Helper()
+	for i, prompt := range tc.turnPrompts {
+		turnCtx := &TurnContext{TurnID: fmt.Sprintf("turn-%d", i+1), Prompt: prompt, Ctx: ctx}
+		if tc.useChannelFallback {
+			turnCtx.ChannelInstructions = "channel guideline"
+		} else if i == 0 && tc.expectInitCold {
+			turnCtx.ScopeInstructions, turnCtx.CoordinationContext, turnCtx.ThreadSummary = "scope rule", "coord info", "summary of thread"
+		}
+		res, execErr := lease.Execute(ctx, turnCtx)
+		if execErr != nil {
+			if !tc.expectExecErr && i != 0 {
+				t.Fatalf("turn %d Execute failed: %v", i+1, execErr)
+			}
+			if tc.expectExecErr && !IsQuotaPause(execErr.Error(), "") && !IsCapacityBlip(execErr.Error(), "") {
+				t.Errorf("expected quota/capacity error, got: %v", execErr)
+			}
+		} else if res == nil {
+			t.Errorf("turn %d expected non-nil response", i+1)
+		}
+	}
+	if tc.expectNilTurnErr {
+		if _, err := lease.Execute(ctx, nil); err == nil {
+			t.Errorf("expected error on nil turn context")
+		}
+	}
+}
+
+func assertLeaseRotationAndRollback(t *testing.T, tc acquireLeaseTestCase, pool *GeminiAPIPool, targetKey, initSessID, rotatedOld, rotatedNew string, rotationCount int, relErr error) {
+	t.Helper()
+	if tc.expectReleaseErr != nil {
+		if !errors.Is(relErr, tc.expectReleaseErr) {
+			t.Errorf("expected release error %v, got %v", tc.expectReleaseErr, relErr)
+		}
+	} else if relErr != nil && !tc.expectExecErr {
+		t.Errorf("unexpected release error: %v", relErr)
+	}
+
+	if tc.expectRotation {
+		if rotationCount == 0 || rotatedOld != initSessID || rotatedNew == "" || rotatedNew == rotatedOld {
+			t.Errorf("rotation mismatch: count=%d, old=%s, new=%s, init=%s", rotationCount, rotatedOld, rotatedNew, initSessID)
+		}
+	} else if tc.expectExecErr && rotationCount > 0 {
+		t.Errorf("expected NO rotation on quota pause, got %d", rotationCount)
+	}
+
+	if tc.expectEvictedOnFail {
+		pool.mu.RLock()
+		_, exists := pool.sessions[targetKey]
+		pool.mu.RUnlock()
+		if exists {
+			t.Errorf("expected session evicted after latch rollback")
+		}
+	}
+}
+
+func runGeminiAPIPoolAcquireLeaseCase(t *testing.T, tc acquireLeaseTestCase, okChunk string) {
+	t.Helper()
+	ctx := context.Background()
+	if tc.nilPool {
+		var nilPool *GeminiAPIPool
+		if _, err := nilPool.AcquireLease(ctx, "target"); err == nil {
+			t.Error("expected error from nil pool AcquireLease")
+		}
+		return
+	}
+	if tc.emptyTarget {
+		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "test"})
+		defer pool.Close()
+		if _, err := pool.AcquireLease(ctx, "   "); err == nil {
+			t.Error("expected error from empty targetKey AcquireLease")
+		}
+		return
+	}
+
+	var callIdx atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := int(callIdx.Add(1) - 1)
+		status, chunk := http.StatusOK, okChunk
+		if idx < len(tc.responseStatusCodes) && tc.responseStatusCodes[idx] != 0 {
+			status = tc.responseStatusCodes[idx]
+		}
+		if idx < len(tc.responseChunks) && tc.responseChunks[idx] != "" {
+			chunk = tc.responseChunks[idx]
+		}
+		if status == http.StatusOK {
+			w.Header().Set("Content-Type", "text/event-stream")
+		}
+		w.WriteHeader(status)
+		flusher, _ := w.(http.Flusher)
+		_, _ = w.Write([]byte(chunk))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer ts.Close()
+
+	var rotatedOld, rotatedNew string
+	var rotationCount int
+	cfg := GeminiAPIPoolConfig{
+		APIKey: "test-key", Model: "gemini-2.5-flash", BaseURL: ts.URL, HTTPClient: ts.Client(), MaxSessionTurns: tc.maxTurns,
+		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+			return SessionRecord{ActiveSessionID: "550e8400-e29b-41d4-a716-446655440001", PreviousSessionID: "550e8400-e29b-41d4-a716-446655440000", TurnCount: 0}, nil
+		},
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			rotationCount++
+			rotatedOld, rotatedNew = oldSessionID, newSessionID
+			return tc.onRotateErr
+		},
+	}
+
+	pool := NewGeminiAPIPool(cfg)
+	defer pool.Close()
+	targetKey := "target-" + tc.name
+	lease, err := pool.AcquireLease(ctx, targetKey)
+	if err != nil {
+		t.Fatalf("AcquireLease failed: %v", err)
+	}
+	if tc.expectInitCold && (!lease.IsCold() || lease.TurnCount() != 0 || lease.PreviousSessionID() != "550e8400-e29b-41d4-a716-446655440000" || lease.SessionID() != "550e8400-e29b-41d4-a716-446655440001") {
+		t.Errorf("initial lease state mismatch: cold=%v, count=%d, prev=%s, sess=%s", lease.IsCold(), lease.TurnCount(), lease.PreviousSessionID(), lease.SessionID())
+	}
+	initSessID := lease.SessionID()
+
+	assertLeaseTurnsExecution(ctx, t, tc, lease)
+	relErr := lease.Release()
+	assertLeaseRotationAndRollback(t, tc, pool, targetKey, initSessID, rotatedOld, rotatedNew, rotationCount, relErr)
+}
+
 func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 	t.Parallel()
 	simulatedDBErr := errors.New("simulated DB latch timeout")
@@ -1040,15 +1215,7 @@ func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 		rateLimitConvChunk = `data: {"candidates":[{"content":{"parts":[{"text":"I hit an external rate limit reached earlier, but cached the response."}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
 	)
 
-	cases := []struct {
-		name                                                                                                                           string
-		nilPool, emptyTarget, useChannelFallback, expectInitCold, expectExecErr, expectRotation, expectEvictedOnFail, expectNilTurnErr bool
-		maxTurns                                                                                                                       int
-		turnPrompts                                                                                                                    []string
-		responseStatusCodes                                                                                                            []int
-		responseChunks                                                                                                                 []string
-		onRotateErr, expectReleaseErr                                                                                                  error
-	}{
+	cases := []acquireLeaseTestCase{
 		{name: "Validation_NilPool", nilPool: true},
 		{name: "Validation_EmptyTarget", emptyTarget: true},
 		{name: "BasicExecution_ColdAndWarmAndNilTurn", maxTurns: 10, turnPrompts: []string{"hello", "hello again"}, responseChunks: []string{leaseUsageChunk, leaseChunk}, expectInitCold: true, expectNilTurnErr: true},
@@ -1064,122 +1231,7 @@ func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ctx := context.Background()
-			if tc.nilPool {
-				var nilPool *GeminiAPIPool
-				if _, err := nilPool.AcquireLease(ctx, "target"); err == nil {
-					t.Error("expected error from nil pool AcquireLease")
-				}
-				return
-			}
-			if tc.emptyTarget {
-				pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "test"})
-				defer pool.Close()
-				if _, err := pool.AcquireLease(ctx, "   "); err == nil {
-					t.Error("expected error from empty targetKey AcquireLease")
-				}
-				return
-			}
-
-			var callIdx atomic.Int32
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				idx := int(callIdx.Add(1) - 1)
-				status, chunk := http.StatusOK, okChunk
-				if idx < len(tc.responseStatusCodes) && tc.responseStatusCodes[idx] != 0 {
-					status = tc.responseStatusCodes[idx]
-				}
-				if idx < len(tc.responseChunks) && tc.responseChunks[idx] != "" {
-					chunk = tc.responseChunks[idx]
-				}
-				if status == http.StatusOK {
-					w.Header().Set("Content-Type", "text/event-stream")
-				}
-				w.WriteHeader(status)
-				flusher, _ := w.(http.Flusher)
-				_, _ = w.Write([]byte(chunk))
-				if flusher != nil {
-					flusher.Flush()
-				}
-			}))
-			defer ts.Close()
-
-			var rotatedOld, rotatedNew string
-			var rotationCount int
-			cfg := GeminiAPIPoolConfig{
-				APIKey: "test-key", Model: "gemini-2.5-flash", BaseURL: ts.URL, HTTPClient: ts.Client(), MaxSessionTurns: tc.maxTurns,
-				GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
-					return SessionRecord{ActiveSessionID: "550e8400-e29b-41d4-a716-446655440001", PreviousSessionID: "550e8400-e29b-41d4-a716-446655440000", TurnCount: 0}, nil
-				},
-				OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-					rotationCount++
-					rotatedOld, rotatedNew = oldSessionID, newSessionID
-					return tc.onRotateErr
-				},
-			}
-
-			pool := NewGeminiAPIPool(cfg)
-			defer pool.Close()
-			targetKey := "target-" + tc.name
-			lease, err := pool.AcquireLease(ctx, targetKey)
-			if err != nil {
-				t.Fatalf("AcquireLease failed: %v", err)
-			}
-			if tc.expectInitCold && (!lease.IsCold() || lease.TurnCount() != 0 || lease.PreviousSessionID() != "550e8400-e29b-41d4-a716-446655440000" || lease.SessionID() != "550e8400-e29b-41d4-a716-446655440001") {
-				t.Errorf("initial lease state mismatch: cold=%v, count=%d, prev=%s, sess=%s", lease.IsCold(), lease.TurnCount(), lease.PreviousSessionID(), lease.SessionID())
-			}
-			initSessID := lease.SessionID()
-
-			for i, prompt := range tc.turnPrompts {
-				turnCtx := &TurnContext{TurnID: fmt.Sprintf("turn-%d", i+1), Prompt: prompt, Ctx: ctx}
-				if tc.useChannelFallback {
-					turnCtx.ChannelInstructions = "channel guideline"
-				} else if i == 0 && tc.expectInitCold {
-					turnCtx.ScopeInstructions, turnCtx.CoordinationContext, turnCtx.ThreadSummary = "scope rule", "coord info", "summary of thread"
-				}
-				res, execErr := lease.Execute(ctx, turnCtx)
-				if execErr != nil {
-					if !tc.expectExecErr && i != 0 {
-						t.Fatalf("turn %d Execute failed: %v", i+1, execErr)
-					}
-					if tc.expectExecErr && !IsQuotaPause(execErr.Error(), "") && !IsCapacityBlip(execErr.Error(), "") {
-						t.Errorf("expected quota/capacity error, got: %v", execErr)
-					}
-				} else if res == nil {
-					t.Errorf("turn %d expected non-nil response", i+1)
-				}
-			}
-
-			if tc.expectNilTurnErr {
-				if _, err := lease.Execute(ctx, nil); err == nil {
-					t.Errorf("expected error on nil turn context")
-				}
-			}
-
-			relErr := lease.Release()
-			if tc.expectReleaseErr != nil {
-				if !errors.Is(relErr, tc.expectReleaseErr) {
-					t.Errorf("expected release error %v, got %v", tc.expectReleaseErr, relErr)
-				}
-			} else if relErr != nil && !tc.expectExecErr {
-				t.Errorf("unexpected release error: %v", relErr)
-			}
-
-			if tc.expectRotation {
-				if rotationCount == 0 || rotatedOld != initSessID || rotatedNew == "" || rotatedNew == rotatedOld {
-					t.Errorf("rotation mismatch: count=%d, old=%s, new=%s, init=%s", rotationCount, rotatedOld, rotatedNew, initSessID)
-				}
-			} else if tc.expectExecErr && rotationCount > 0 {
-				t.Errorf("expected NO rotation on quota pause, got %d", rotationCount)
-			}
-
-			if tc.expectEvictedOnFail {
-				pool.mu.RLock()
-				_, exists := pool.sessions[targetKey]
-				pool.mu.RUnlock()
-				if exists {
-					t.Errorf("expected session evicted after latch rollback")
-				}
-			}
+			runGeminiAPIPoolAcquireLeaseCase(t, tc, okChunk)
 		})
 	}
 }

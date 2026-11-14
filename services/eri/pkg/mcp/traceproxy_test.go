@@ -221,50 +221,60 @@ func TestTraceProxy(t *testing.T) {
 			clock.Advance(tc.advance)
 
 			for i, call := range tc.calls {
-				req, _ := http.NewRequest(http.MethodPost, srv.URL+"/internal/mcp-proxy/discord/docket", strings.NewReader(call.body))
-				req.Header.Set("Authorization", "Bearer upstream-token")
-				if call.daemonHeader != "" {
-					req.Header.Set("X-Eri-Daemon", call.daemonHeader)
-				}
-				resp, err := srv.Client().Do(req)
-				if err != nil {
-					t.Fatalf("call %d: %v", i, err)
-				}
-				_ = resp.Body.Close()
-				if resp.StatusCode != http.StatusAccepted || resp.Header.Get("Mcp-Session-Id") != "sess-42" {
-					t.Errorf("call %d: status %d session %q, want 202 sess-42", i, resp.StatusCode, resp.Header.Get("Mcp-Session-Id"))
-				}
-				got := <-seen
-				if got.auth != "Bearer upstream-token" || got.daemonHeader != "" || got.path != "/mcp?team=1" || got.body != call.body {
-					t.Errorf("call %d: upstream saw %+v", i, got)
-				}
-				if call.wantParent == 0 {
-					if got.traceparent != "" || len(rec.ch) != 0 {
-						t.Errorf("call %d: traceparent %q, %d spans; want none", i, got.traceparent, len(rec.ch))
-					}
-					continue
-				}
-				var span sdktrace.ReadOnlySpan
-				select {
-				case span = <-rec.ch:
-				case <-time.After(10 * time.Second):
-					t.Fatalf("call %d: no span ended", i)
-				}
-				want := turnSpan(call.wantParent)
-				if span.Parent().SpanID() != want.SpanID() || span.SpanContext().TraceID() != want.TraceID() {
-					t.Errorf("call %d: parent %s/%s, want %s/%s", i, span.SpanContext().TraceID(), span.Parent().SpanID(), want.TraceID(), want.SpanID())
-				}
-				wantTP := fmt.Sprintf("00-%s-%s-01", want.TraceID(), span.SpanContext().SpanID())
-				if got.traceparent != wantTP {
-					t.Errorf("call %d: traceparent %q, want %q", i, got.traceparent, wantTP)
-				}
-				for _, kv := range span.Attributes() {
-					if strings.Contains(kv.Value.String(), "do-not-leak") || strings.Contains(kv.Value.String(), "upstream-token") || strings.Contains(kv.Value.String(), "team=1") {
-						t.Errorf("call %d: span attribute %s leaks content", i, kv.Key)
-					}
-				}
+				assertTraceProxyCall(t, srv, rec, seen, i, call)
 			}
 		})
+	}
+}
+
+func assertTraceProxyCall(t *testing.T, srv *httptest.Server, rec endedSpans, seen <-chan seenRequest, i int, call proxyCall) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/internal/mcp-proxy/discord/docket", strings.NewReader(call.body))
+	req.Header.Set("Authorization", "Bearer upstream-token")
+	if call.daemonHeader != "" {
+		req.Header.Set("X-Eri-Daemon", call.daemonHeader)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("call %d: %v", i, err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted || resp.Header.Get("Mcp-Session-Id") != "sess-42" {
+		t.Errorf("call %d: status %d session %q, want 202 sess-42", i, resp.StatusCode, resp.Header.Get("Mcp-Session-Id"))
+	}
+	got := <-seen
+	if got.auth != "Bearer upstream-token" || got.daemonHeader != "" || got.path != "/mcp?team=1" || got.body != call.body {
+		t.Errorf("call %d: upstream saw %+v", i, got)
+	}
+	if call.wantParent == 0 {
+		if got.traceparent != "" || len(rec.ch) != 0 {
+			t.Errorf("call %d: traceparent %q, %d spans; want none", i, got.traceparent, len(rec.ch))
+		}
+		return
+	}
+	assertTraceProxySpan(t, rec, got, i, call.wantParent)
+}
+
+func assertTraceProxySpan(t *testing.T, rec endedSpans, got seenRequest, i int, wantParent byte) {
+	t.Helper()
+	var span sdktrace.ReadOnlySpan
+	select {
+	case span = <-rec.ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("call %d: no span ended", i)
+	}
+	want := turnSpan(wantParent)
+	if span.Parent().SpanID() != want.SpanID() || span.SpanContext().TraceID() != want.TraceID() {
+		t.Errorf("call %d: parent %s/%s, want %s/%s", i, span.SpanContext().TraceID(), span.Parent().SpanID(), want.TraceID(), want.SpanID())
+	}
+	wantTP := fmt.Sprintf("00-%s-%s-01", want.TraceID(), span.SpanContext().SpanID())
+	if got.traceparent != wantTP {
+		t.Errorf("call %d: traceparent %q, want %q", i, got.traceparent, wantTP)
+	}
+	for _, kv := range span.Attributes() {
+		if strings.Contains(kv.Value.String(), "do-not-leak") || strings.Contains(kv.Value.String(), "upstream-token") || strings.Contains(kv.Value.String(), "team=1") {
+			t.Errorf("call %d: span attribute %s leaks content", i, kv.Key)
+		}
 	}
 }
 

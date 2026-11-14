@@ -42,31 +42,31 @@ type sessionFileFixture struct {
 	age       time.Duration
 }
 
-func TestSyncTranscripts_Scenarios(t *testing.T) {
-	t.Parallel()
+type syncTranscriptsScenarioCase struct {
+	name                  string
+	files                 []sessionFileFixture
+	priorSummary          *db.SessionSummary
+	llmMode               string
+	withEmbedder          bool
+	idleThreshold         time.Duration
+	batchLimit            int
+	secondPassFiles       []sessionFileFixture
+	secondPassAge         time.Duration
+	wantScanned           int
+	wantSynced            int
+	wantStepsInserted     int
+	wantSummaries         int
+	wantSkippedUnchanged  int
+	wantErrors            int
+	wantSettled           *bool
+	wantLastIndexed       int
+	wantSummaryText       string
+	secondPassSteps       int
+	secondPassLastIndexed int
+}
 
-	tests := []struct {
-		name                  string
-		files                 []sessionFileFixture
-		priorSummary          *db.SessionSummary
-		llmMode               string
-		withEmbedder          bool
-		idleThreshold         time.Duration
-		batchLimit            int
-		secondPassFiles       []sessionFileFixture
-		secondPassAge         time.Duration
-		wantScanned           int
-		wantSynced            int
-		wantStepsInserted     int
-		wantSummaries         int
-		wantSkippedUnchanged  int
-		wantErrors            int
-		wantSettled           *bool
-		wantLastIndexed       int
-		wantSummaryText       string
-		secondPassSteps       int
-		secondPassLastIndexed int
-	}{
+func standardScenarioCases() []syncTranscriptsScenarioCase {
+	return []syncTranscriptsScenarioCase{
 		{
 			name: "basic sweep and settled with embedder and llm",
 			files: []sessionFileFixture{
@@ -160,6 +160,11 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 			wantStepsInserted: 2,
 			wantLastIndexed:   1,
 		},
+	}
+}
+
+func advancedScenarioCases() []syncTranscriptsScenarioCase {
+	return []syncTranscriptsScenarioCase{
 		{
 			name: "historical session without LLM falls back to step 0 prompt",
 			files: []sessionFileFixture{
@@ -268,135 +273,168 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 			wantSummaries: 1,
 		},
 	}
+}
 
+func setupScenarioLLM(tc syncTranscriptsScenarioCase) func(context.Context, string) (string, error) {
+	switch tc.llmMode {
+	case "success":
+		return func(ctx context.Context, prompt string) (string, error) {
+			return "Checked system health and free memory: 24GB available.", nil
+		}
+	case "error":
+		return func(ctx context.Context, prompt string) (string, error) {
+			return "", errors.New("rate limit exceeded")
+		}
+	default:
+		return nil
+	}
+}
+
+func setupScenarioEmbedder(tc syncTranscriptsScenarioCase) func(context.Context, string) ([]float32, error) {
+	if !tc.withEmbedder {
+		return nil
+	}
+	return func(ctx context.Context, text string) ([]float32, error) {
+		vec := make([]float32, db.ExpectedEmbeddingDim)
+		vec[0] = 0.88
+		return vec, nil
+	}
+}
+
+func assertScenarioSyncStats(t *testing.T, stats SyncStats, tc syncTranscriptsScenarioCase) {
+	t.Helper()
+	if tc.wantScanned != 0 && stats.Scanned != tc.wantScanned {
+		t.Errorf("Scanned = %d, want %d", stats.Scanned, tc.wantScanned)
+	}
+	if tc.wantSynced != 0 && stats.Synced != tc.wantSynced {
+		t.Errorf("Synced = %d, want %d", stats.Synced, tc.wantSynced)
+	}
+	if tc.wantStepsInserted != 0 && stats.StepsInserted != tc.wantStepsInserted {
+		t.Errorf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantStepsInserted)
+	}
+	if tc.wantSummaries != 0 && stats.SummariesGenerated != tc.wantSummaries {
+		t.Errorf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
+	}
+	if stats.Errors != tc.wantErrors {
+		t.Errorf("Errors = %d, want %d", stats.Errors, tc.wantErrors)
+	}
+}
+
+func runSecondPassScenarioSync(ctx context.Context, t *testing.T, store db.TranscriptStore, tempDir string, embedder func(context.Context, string) ([]float32, error), llm func(context.Context, string) (string, error), opts SyncOptions, tc syncTranscriptsScenarioCase) {
+	t.Helper()
+	if len(tc.secondPassFiles) == 0 && tc.wantSkippedUnchanged == 0 {
+		return
+	}
+	for _, f := range tc.secondPassFiles {
+		age := f.age
+		if tc.secondPassAge != 0 {
+			age = tc.secondPassAge
+		}
+		writeTranscriptFile(t, tempDir, f.sessionID, f.content, time.Now().Add(-age))
+	}
+	stats2, err := SyncTranscripts(ctx, store, tempDir, embedder, llm, opts)
+	if err != nil {
+		t.Fatalf("SyncTranscripts second pass failed: %v", err)
+	}
+	if tc.wantSkippedUnchanged != 0 && stats2.SkippedUnchanged != tc.wantSkippedUnchanged {
+		t.Errorf("second pass SkippedUnchanged = %d, want %d", stats2.SkippedUnchanged, tc.wantSkippedUnchanged)
+	}
+	if tc.secondPassSteps != 0 && stats2.StepsInserted != tc.secondPassSteps {
+		t.Errorf("second pass StepsInserted = %d, want %d", stats2.StepsInserted, tc.secondPassSteps)
+	}
+}
+
+func assertScenarioSessionState(ctx context.Context, t *testing.T, store db.TranscriptStore, embedder func(context.Context, string) ([]float32, error), tc syncTranscriptsScenarioCase) {
+	t.Helper()
+	if len(tc.files) == 0 {
+		return
+	}
+	primarySession := tc.files[0].sessionID
+	states, err := store.GetSessionSyncStates(ctx)
+	if err != nil {
+		t.Fatalf("GetSessionSyncStates: %v", err)
+	}
+	expectedLastIndexed := tc.wantLastIndexed
+	if tc.secondPassLastIndexed != 0 {
+		expectedLastIndexed = tc.secondPassLastIndexed
+	}
+	if tc.wantSettled != nil || expectedLastIndexed != 0 {
+		st, ok := states[primarySession]
+		if !ok {
+			t.Fatalf("session %q missing from sync states", primarySession)
+		}
+		if tc.wantSettled != nil && st.IsSettled != *tc.wantSettled {
+			t.Errorf("IsSettled = %v, want %v", st.IsSettled, *tc.wantSettled)
+		}
+		if expectedLastIndexed != 0 && st.LastIndexedStep != expectedLastIndexed {
+			t.Errorf("LastIndexedStep = %d, want %d", st.LastIndexedStep, expectedLastIndexed)
+		}
+	}
+	if tc.wantSummaryText != "" {
+		res, err := ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{Query: tc.wantSummaryText, Mode: "sessions", Limit: 10})
+		if err != nil || len(res.Sessions) == 0 {
+			t.Fatalf("ExecuteTranscriptSearch(%q) err=%v, sessions=%d", tc.wantSummaryText, err, len(res.Sessions))
+		}
+		if res.Sessions[0].Summary != tc.wantSummaryText {
+			t.Errorf("summary = %q, want %q", res.Sessions[0].Summary, tc.wantSummaryText)
+		}
+	}
+}
+
+func runSyncTranscriptsScenarioCase(t *testing.T, tc syncTranscriptsScenarioCase) {
+	t.Helper()
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	store := dbtest.NewFakeStore()
+
+	if tc.priorSummary != nil {
+		if err := store.UpsertSessionSummary(ctx, *tc.priorSummary); err != nil {
+			t.Fatalf("upsert prior summary: %v", err)
+		}
+	}
+
+	for _, f := range tc.files {
+		writeTranscriptFile(t, tempDir, f.sessionID, f.content, time.Now().Add(-f.age))
+	}
+
+	llm := setupScenarioLLM(tc)
+	embedder := setupScenarioEmbedder(tc)
+
+	batchLimit := tc.batchLimit
+	if batchLimit == 0 {
+		batchLimit = 10
+	}
+	idle := tc.idleThreshold
+	if idle == 0 {
+		idle = 10 * time.Minute
+	}
+
+	opts := SyncOptions{
+		BatchLimit:    batchLimit,
+		IdleThreshold: idle,
+		BrainDir:      tempDir,
+		HeadLimit:     1000,
+		TailLimit:     1000,
+	}
+
+	stats, err := SyncTranscripts(ctx, store, tempDir, embedder, llm, opts)
+	if err != nil {
+		t.Fatalf("SyncTranscripts failed: %v", err)
+	}
+
+	assertScenarioSyncStats(t, stats, tc)
+	runSecondPassScenarioSync(ctx, t, store, tempDir, embedder, llm, opts, tc)
+	assertScenarioSessionState(ctx, t, store, embedder, tc)
+}
+
+func TestSyncTranscripts_Scenarios(t *testing.T) {
+	t.Parallel()
+
+	tests := append(standardScenarioCases(), advancedScenarioCases()...)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ctx := context.Background()
-			tempDir := t.TempDir()
-			store := dbtest.NewFakeStore()
-
-			if tc.priorSummary != nil {
-				if err := store.UpsertSessionSummary(ctx, *tc.priorSummary); err != nil {
-					t.Fatalf("upsert prior summary: %v", err)
-				}
-			}
-
-			for _, f := range tc.files {
-				writeTranscriptFile(t, tempDir, f.sessionID, f.content, time.Now().Add(-f.age))
-			}
-
-			var llm func(ctx context.Context, prompt string) (string, error)
-			switch tc.llmMode {
-			case "success":
-				llm = func(ctx context.Context, prompt string) (string, error) {
-					return "Checked system health and free memory: 24GB available.", nil
-				}
-			case "error":
-				llm = func(ctx context.Context, prompt string) (string, error) {
-					return "", errors.New("rate limit exceeded")
-				}
-			}
-
-			var embedder func(ctx context.Context, text string) ([]float32, error)
-			if tc.withEmbedder {
-				embedder = func(ctx context.Context, text string) ([]float32, error) {
-					vec := make([]float32, db.ExpectedEmbeddingDim)
-					vec[0] = 0.88
-					return vec, nil
-				}
-			}
-
-			batchLimit := tc.batchLimit
-			if batchLimit == 0 {
-				batchLimit = 10
-			}
-			idle := tc.idleThreshold
-			if idle == 0 {
-				idle = 10 * time.Minute
-			}
-
-			opts := SyncOptions{
-				BatchLimit:    batchLimit,
-				IdleThreshold: idle,
-				BrainDir:      tempDir,
-				HeadLimit:     1000,
-				TailLimit:     1000,
-			}
-
-			stats, err := SyncTranscripts(ctx, store, tempDir, embedder, llm, opts)
-			if err != nil {
-				t.Fatalf("SyncTranscripts failed: %v", err)
-			}
-
-			if tc.wantScanned != 0 && stats.Scanned != tc.wantScanned {
-				t.Errorf("Scanned = %d, want %d", stats.Scanned, tc.wantScanned)
-			}
-			if tc.wantSynced != 0 && stats.Synced != tc.wantSynced {
-				t.Errorf("Synced = %d, want %d", stats.Synced, tc.wantSynced)
-			}
-			if tc.wantStepsInserted != 0 && stats.StepsInserted != tc.wantStepsInserted {
-				t.Errorf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantStepsInserted)
-			}
-			if tc.wantSummaries != 0 && stats.SummariesGenerated != tc.wantSummaries {
-				t.Errorf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
-			}
-			if stats.Errors != tc.wantErrors {
-				t.Errorf("Errors = %d, want %d", stats.Errors, tc.wantErrors)
-			}
-
-			if len(tc.secondPassFiles) > 0 || tc.wantSkippedUnchanged > 0 {
-				for _, f := range tc.secondPassFiles {
-					age := f.age
-					if tc.secondPassAge != 0 {
-						age = tc.secondPassAge
-					}
-					writeTranscriptFile(t, tempDir, f.sessionID, f.content, time.Now().Add(-age))
-				}
-				stats2, err := SyncTranscripts(ctx, store, tempDir, embedder, llm, opts)
-				if err != nil {
-					t.Fatalf("SyncTranscripts second pass failed: %v", err)
-				}
-				if tc.wantSkippedUnchanged != 0 && stats2.SkippedUnchanged != tc.wantSkippedUnchanged {
-					t.Errorf("second pass SkippedUnchanged = %d, want %d", stats2.SkippedUnchanged, tc.wantSkippedUnchanged)
-				}
-				if tc.secondPassSteps != 0 && stats2.StepsInserted != tc.secondPassSteps {
-					t.Errorf("second pass StepsInserted = %d, want %d", stats2.StepsInserted, tc.secondPassSteps)
-				}
-			}
-
-			if len(tc.files) > 0 {
-				primarySession := tc.files[0].sessionID
-				states, err := store.GetSessionSyncStates(ctx)
-				if err != nil {
-					t.Fatalf("GetSessionSyncStates: %v", err)
-				}
-				expectedLastIndexed := tc.wantLastIndexed
-				if tc.secondPassLastIndexed != 0 {
-					expectedLastIndexed = tc.secondPassLastIndexed
-				}
-				if tc.wantSettled != nil || expectedLastIndexed != 0 {
-					st, ok := states[primarySession]
-					if !ok {
-						t.Fatalf("session %q missing from sync states", primarySession)
-					}
-					if tc.wantSettled != nil && st.IsSettled != *tc.wantSettled {
-						t.Errorf("IsSettled = %v, want %v", st.IsSettled, *tc.wantSettled)
-					}
-					if expectedLastIndexed != 0 && st.LastIndexedStep != expectedLastIndexed {
-						t.Errorf("LastIndexedStep = %d, want %d", st.LastIndexedStep, expectedLastIndexed)
-					}
-				}
-				if tc.wantSummaryText != "" {
-					res, err := ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{Query: tc.wantSummaryText, Mode: "sessions", Limit: 10})
-					if err != nil || len(res.Sessions) == 0 {
-						t.Fatalf("ExecuteTranscriptSearch(%q) err=%v, sessions=%d", tc.wantSummaryText, err, len(res.Sessions))
-					}
-					if res.Sessions[0].Summary != tc.wantSummaryText {
-						t.Errorf("summary = %q, want %q", res.Sessions[0].Summary, tc.wantSummaryText)
-					}
-				}
-			}
+			runSyncTranscriptsScenarioCase(t, tc)
 		})
 	}
 }
@@ -439,35 +477,35 @@ func newMockTranscriptStore(base db.TranscriptStore, failGetSyncStates, failBatc
 	}
 }
 
-func TestSyncTranscripts_ErrorsAndEdgeCases(t *testing.T) {
-	t.Parallel()
+type syncTranscriptsErrorCase struct {
+	name                string
+	nilStore            bool
+	emptyBrainDir       bool
+	nonExistentBrainDir bool
+	cancelCtx           bool
+	nilCtx              bool
+	hasSession          bool
+	socketFile          bool
+	emptyFile           bool
+	prePopActive        bool
+	activeFile          bool
+	failGetSyncStates   bool
+	failBatchInsert     bool
+	failUpsertSummary   bool
+	opts                SyncOptions
+	zeroOpts            bool
+	wantErr             bool
+	isContextCanceled   bool
+	wantSubstr          string
+	wantSweepErrors     int
+	wantSynced          int
+	wantSummaries       int
+	wantStepsInserted   int
+	wantLastIndexed     int
+}
 
-	tests := []struct {
-		name                string
-		nilStore            bool
-		emptyBrainDir       bool
-		nonExistentBrainDir bool
-		cancelCtx           bool
-		nilCtx              bool
-		hasSession          bool
-		socketFile          bool
-		emptyFile           bool
-		prePopActive        bool
-		activeFile          bool
-		failGetSyncStates   bool
-		failBatchInsert     bool
-		failUpsertSummary   bool
-		opts                SyncOptions
-		zeroOpts            bool
-		wantErr             bool
-		isContextCanceled   bool
-		wantSubstr          string
-		wantSweepErrors     int
-		wantSynced          int
-		wantSummaries       int
-		wantStepsInserted   int
-		wantLastIndexed     int
-	}{
+func syncTranscriptsErrorCases() []syncTranscriptsErrorCase {
+	return []syncTranscriptsErrorCase{
 		{
 			name:       "nil store returns error",
 			nilStore:   true,
@@ -545,133 +583,159 @@ func TestSyncTranscripts_ErrorsAndEdgeCases(t *testing.T) {
 			wantSweepErrors:   1,
 		},
 	}
+}
 
-	for _, tc := range tests {
+func setupErrorCaseStore(tc syncTranscriptsErrorCase) db.TranscriptStore {
+	if tc.nilStore {
+		return nil
+	}
+	fakeStore := dbtest.NewFakeStore()
+	if tc.prePopActive {
+		_ = fakeStore.UpsertSessionSummary(context.Background(), db.SessionSummary{
+			SessionID:       "sess-active-err",
+			Summary:         "Initial active session",
+			LastIndexedStep: 0,
+			LastMtime:       time.Now().Add(-5 * time.Minute),
+			IsSettled:       false,
+		})
+	}
+	if tc.failGetSyncStates || tc.failBatchInsert || tc.failUpsertSummary {
+		return newMockTranscriptStore(fakeStore, tc.failGetSyncStates, tc.failBatchInsert, tc.failUpsertSummary)
+	}
+	return fakeStore
+}
+
+func setupErrorCaseFiles(t *testing.T, tempDir string, tc syncTranscriptsErrorCase) {
+	t.Helper()
+	switch {
+	case tc.hasSession:
+		writeTranscriptFile(t, tempDir, "sess-err-01", `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Err test"}`+"\n", time.Now().Add(-1*time.Hour))
+	case tc.socketFile:
+		sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("ae_t_%d.sock", time.Now().UnixNano()))
+		l, err := net.Listen("unix", sockPath)
+		if err != nil {
+			t.Fatalf("net.Listen failed: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = l.Close()
+			_ = os.Remove(sockPath)
+		})
+
+		sockDir := filepath.Join(tempDir, "sess-sock-err", ".system_generated", "logs")
+		if err := os.MkdirAll(sockDir, 0o755); err != nil {
+			t.Fatalf("mkdir failed: %v", err)
+		}
+		if err := os.Symlink(sockPath, filepath.Join(sockDir, "transcript.jsonl")); err != nil {
+			t.Fatalf("symlink failed: %v", err)
+		}
+	case tc.emptyFile:
+		writeTranscriptFile(t, tempDir, "sess-empty-file", "", time.Now().Add(-1*time.Hour))
+	case tc.activeFile:
+		content := strings.Join([]string{
+			`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Step 0"}`,
+			`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T12:00:05Z","content":"Step 1"}`,
+		}, "\n") + "\n"
+		writeTranscriptFile(t, tempDir, "sess-active-err", content, time.Now().Add(-5*time.Second))
+	}
+}
+
+func setupErrorCaseContext(tc syncTranscriptsErrorCase) (context.Context, context.CancelFunc) {
+	if tc.nilCtx {
+		return nil, func() {}
+	}
+	ctx := context.Background()
+	if tc.cancelCtx {
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		return cctx, func() {}
+	}
+	return ctx, func() {}
+}
+
+func assertErrorCaseStats(t *testing.T, store db.TranscriptStore, stats SyncStats, tc syncTranscriptsErrorCase) {
+	t.Helper()
+	if stats.Errors != tc.wantSweepErrors {
+		t.Errorf("Errors = %d, want %d", stats.Errors, tc.wantSweepErrors)
+	}
+	if tc.wantSynced != 0 && stats.Synced != tc.wantSynced {
+		t.Errorf("Synced = %d, want %d", stats.Synced, tc.wantSynced)
+	}
+	if (tc.wantSummaries != 0 || tc.failUpsertSummary) && stats.SummariesGenerated != tc.wantSummaries {
+		t.Errorf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
+	}
+	if (tc.wantStepsInserted != 0 || tc.failBatchInsert) && stats.StepsInserted != tc.wantStepsInserted {
+		t.Errorf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantStepsInserted)
+	}
+
+	if tc.wantLastIndexed != 0 && store != nil {
+		states, err := store.GetSessionSyncStates(context.Background())
+		if err != nil {
+			t.Fatalf("GetSessionSyncStates: %v", err)
+		}
+		if tc.emptyFile {
+			if states["sess-empty-file"].LastIndexedStep != tc.wantLastIndexed {
+				t.Errorf("LastIndexedStep = %d, want %d", states["sess-empty-file"].LastIndexedStep, tc.wantLastIndexed)
+			}
+		}
+	}
+}
+
+func runSyncTranscriptsErrorCase(t *testing.T, tc syncTranscriptsErrorCase) {
+	t.Helper()
+	tempDir := t.TempDir()
+	store := setupErrorCaseStore(tc)
+
+	brainDir := tempDir
+	if tc.emptyBrainDir {
+		brainDir = ""
+	} else if tc.nonExistentBrainDir {
+		brainDir = "/non/existent/path/for/transcripts/test"
+	}
+
+	setupErrorCaseFiles(t, tempDir, tc)
+	ctx, cancel := setupErrorCaseContext(tc)
+	defer cancel()
+
+	opts := tc.opts
+	if opts.BrainDir == "" {
+		opts.BrainDir = brainDir
+	}
+	if !tc.zeroOpts {
+		if opts.BatchLimit == 0 {
+			opts.BatchLimit = 10
+		}
+		if opts.IdleThreshold == 0 {
+			opts.IdleThreshold = 10 * time.Minute
+		}
+	}
+
+	stats, err := SyncTranscripts(ctx, store, brainDir, nil, nil, opts)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		if tc.isContextCanceled && !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+		if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+			t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertErrorCaseStats(t, store, stats, tc)
+}
+
+func TestSyncTranscripts_ErrorsAndEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range syncTranscriptsErrorCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tempDir := t.TempDir()
-
-			var store db.TranscriptStore
-			if !tc.nilStore {
-				fakeStore := dbtest.NewFakeStore()
-				if tc.prePopActive {
-					_ = fakeStore.UpsertSessionSummary(context.Background(), db.SessionSummary{
-						SessionID:       "sess-active-err",
-						Summary:         "Initial active session",
-						LastIndexedStep: 0,
-						LastMtime:       time.Now().Add(-5 * time.Minute),
-						IsSettled:       false,
-					})
-				}
-				if tc.failGetSyncStates || tc.failBatchInsert || tc.failUpsertSummary {
-					store = newMockTranscriptStore(fakeStore, tc.failGetSyncStates, tc.failBatchInsert, tc.failUpsertSummary)
-				} else {
-					store = fakeStore
-				}
-			}
-
-			brainDir := tempDir
-			if tc.emptyBrainDir {
-				brainDir = ""
-			} else if tc.nonExistentBrainDir {
-				brainDir = "/non/existent/path/for/transcripts/test"
-			}
-
-			switch {
-			case tc.hasSession:
-				writeTranscriptFile(t, tempDir, "sess-err-01", `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Err test"}`+"\n", time.Now().Add(-1*time.Hour))
-			case tc.socketFile:
-				sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("ae_t_%d.sock", time.Now().UnixNano()))
-				l, err := net.Listen("unix", sockPath)
-				if err != nil {
-					t.Fatalf("net.Listen failed: %v", err)
-				}
-				defer l.Close()
-				defer os.Remove(sockPath)
-
-				sockDir := filepath.Join(tempDir, "sess-sock-err", ".system_generated", "logs")
-				if err := os.MkdirAll(sockDir, 0o755); err != nil {
-					t.Fatalf("mkdir failed: %v", err)
-				}
-				if err := os.Symlink(sockPath, filepath.Join(sockDir, "transcript.jsonl")); err != nil {
-					t.Fatalf("symlink failed: %v", err)
-				}
-			case tc.emptyFile:
-				writeTranscriptFile(t, tempDir, "sess-empty-file", "", time.Now().Add(-1*time.Hour))
-			case tc.activeFile:
-				content := strings.Join([]string{
-					`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Step 0"}`,
-					`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T12:00:05Z","content":"Step 1"}`,
-				}, "\n") + "\n"
-				writeTranscriptFile(t, tempDir, "sess-active-err", content, time.Now().Add(-5*time.Second))
-			}
-
-			var ctx context.Context
-			if tc.nilCtx {
-				ctx = nil
-			} else {
-				ctx = context.Background()
-				if tc.cancelCtx {
-					var cancel context.CancelFunc
-					ctx, cancel = context.WithCancel(ctx)
-					cancel()
-				}
-			}
-
-			opts := tc.opts
-			if opts.BrainDir == "" {
-				opts.BrainDir = brainDir
-			}
-			if !tc.zeroOpts {
-				if opts.BatchLimit == 0 {
-					opts.BatchLimit = 10
-				}
-				if opts.IdleThreshold == 0 {
-					opts.IdleThreshold = 10 * time.Minute
-				}
-			}
-
-			stats, err := SyncTranscripts(ctx, store, brainDir, nil, nil, opts)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tc.isContextCanceled && !errors.Is(err, context.Canceled) {
-					t.Fatalf("expected context.Canceled, got %v", err)
-				}
-				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if stats.Errors != tc.wantSweepErrors {
-				t.Errorf("Errors = %d, want %d", stats.Errors, tc.wantSweepErrors)
-			}
-			if tc.wantSynced != 0 && stats.Synced != tc.wantSynced {
-				t.Errorf("Synced = %d, want %d", stats.Synced, tc.wantSynced)
-			}
-			if (tc.wantSummaries != 0 || tc.failUpsertSummary) && stats.SummariesGenerated != tc.wantSummaries {
-				t.Errorf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
-			}
-			if (tc.wantStepsInserted != 0 || tc.failBatchInsert) && stats.StepsInserted != tc.wantStepsInserted {
-				t.Errorf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantStepsInserted)
-			}
-
-			if tc.wantLastIndexed != 0 && store != nil {
-				states, err := store.GetSessionSyncStates(context.Background())
-				if err != nil {
-					t.Fatalf("GetSessionSyncStates: %v", err)
-				}
-				if tc.emptyFile {
-					if states["sess-empty-file"].LastIndexedStep != tc.wantLastIndexed {
-						t.Errorf("LastIndexedStep = %d, want %d", states["sess-empty-file"].LastIndexedStep, tc.wantLastIndexed)
-					}
-				}
-			}
+			runSyncTranscriptsErrorCase(t, tc)
 		})
 	}
 }
@@ -791,25 +855,25 @@ func TestFindTranscriptFile_PathResolution(t *testing.T) {
 	}
 }
 
-func TestSyncTranscripts_ClaudeScenarios(t *testing.T) {
-	t.Parallel()
+type syncTranscriptsClaudeCase struct {
+	name                 string
+	sessionID            string
+	content              string
+	customClaudeDir      bool
+	withLLM              bool
+	withEmbedder         bool
+	secondPassContent    string
+	wantSteps            int
+	wantSummaries        int
+	wantSettled          bool
+	wantSkippedUnchanged int
+	secondPassSteps      int
+	wantStoredTools      []string
+	wantToolResults      []string
+}
 
-	tests := []struct {
-		name                 string
-		sessionID            string
-		content              string
-		customClaudeDir      bool
-		withLLM              bool
-		withEmbedder         bool
-		secondPassContent    string
-		wantSteps            int
-		wantSummaries        int
-		wantSettled          bool
-		wantSkippedUnchanged int
-		secondPassSteps      int
-		wantStoredTools      []string // persisted tool_name per stored step, in step order
-		wantToolResults      []string // parsed TOOL steps as "tool_call_id|tool_name|status|content"
-	}{
+func syncTranscriptsClaudeCases() []syncTranscriptsClaudeCase {
+	return []syncTranscriptsClaudeCase{
 		{
 			name:      "claude transcript with prompt thinking tool use tool result and reply",
 			sessionID: "sess-claude-full",
@@ -895,133 +959,162 @@ func TestSyncTranscripts_ClaudeScenarios(t *testing.T) {
 			wantSettled:   true,
 		},
 	}
+}
 
-	for _, tc := range tests {
+func assertClaudeStoredToolsAndResults(ctx context.Context, t *testing.T, store db.TranscriptStore, filePath string, tc syncTranscriptsClaudeCase) {
+	t.Helper()
+	if tc.wantStoredTools != nil {
+		stored, err := store.GetTranscriptStepRange(ctx, "", tc.sessionID, 0, 1000)
+		if err != nil {
+			t.Fatalf("GetTranscriptStepRange failed: %v", err)
+		}
+		gotTools := make([]string, 0, len(stored))
+		for _, s := range stored {
+			gotTools = append(gotTools, s.ToolName)
+		}
+		if !slices.Equal(gotTools, tc.wantStoredTools) {
+			t.Fatalf("stored tool names = %q, want %q", gotTools, tc.wantStoredTools)
+		}
+	}
+	if tc.wantToolResults != nil {
+		scan, err := scanSessionTranscriptFile(filePath, nil)
+		if err != nil {
+			t.Fatalf("scanSessionTranscriptFile failed: %v", err)
+		}
+		var gotResults []string
+		for _, s := range scan.parsedSteps {
+			if s.Type == "TOOL" {
+				gotResults = append(gotResults, strings.Join([]string{s.ToolCallID, s.ToolName, s.Status, s.Content}, "|"))
+			}
+		}
+		if !slices.Equal(gotResults, tc.wantToolResults) {
+			t.Fatalf("parsed tool results = %q, want %q", gotResults, tc.wantToolResults)
+		}
+	}
+}
+
+func runClaudeSecondPass(ctx context.Context, t *testing.T, store db.TranscriptStore, brainDir, filePath string, embedder func(context.Context, string) ([]float32, error), llm func(context.Context, string) (string, error), opts SyncOptions, tc syncTranscriptsClaudeCase) {
+	t.Helper()
+	if tc.secondPassContent == "" && tc.wantSkippedUnchanged == 0 {
+		return
+	}
+	if tc.secondPassContent != "" {
+		_ = os.WriteFile(filePath, []byte(tc.secondPassContent), 0o644)
+		t1 := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+		_ = os.Chtimes(filePath, t1, t1)
+	}
+	stats2, err := SyncTranscripts(ctx, store, brainDir, embedder, llm, opts)
+	if err != nil {
+		t.Fatalf("SyncTranscripts second pass failed: %v", err)
+	}
+	if tc.wantSkippedUnchanged > 0 && stats2.SkippedUnchanged != tc.wantSkippedUnchanged {
+		t.Fatalf("second pass SkippedUnchanged = %d, want %d", stats2.SkippedUnchanged, tc.wantSkippedUnchanged)
+	}
+	if tc.secondPassSteps > 0 && stats2.StepsInserted != tc.secondPassSteps {
+		t.Fatalf("second pass StepsInserted = %d, want %d", stats2.StepsInserted, tc.secondPassSteps)
+	}
+}
+
+func runSyncTranscriptsClaudeCase(t *testing.T, tc syncTranscriptsClaudeCase) {
+	t.Helper()
+	ctx := context.Background()
+	tmp := t.TempDir()
+	brainDir := filepath.Join(tmp, "brain")
+	_ = os.MkdirAll(brainDir, 0o755)
+	store := dbtest.NewFakeStore()
+
+	claudeProjectDir := filepath.Join(brainDir, "..", "claude", "projects")
+	if tc.customClaudeDir {
+		claudeProjectDir = filepath.Join(tmp, "custom-claude-projects")
+	}
+	projDir := filepath.Join(claudeProjectDir, "-test-project")
+	_ = os.MkdirAll(projDir, 0o755)
+
+	filePath := filepath.Join(projDir, tc.sessionID+".jsonl")
+	_ = os.WriteFile(filePath, []byte(tc.content), 0o644)
+	t0 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	_ = os.Chtimes(filePath, t0, t0)
+
+	opts := SyncOptions{
+		BrainDir:      brainDir,
+		BatchLimit:    10,
+		IdleThreshold: 10 * time.Minute,
+		HeadLimit:     1000,
+		TailLimit:     1000,
+	}
+	if tc.customClaudeDir {
+		opts.ClaudeProjectsDir = claudeProjectDir
+	}
+
+	var llm func(ctx context.Context, prompt string) (string, error)
+	if tc.withLLM {
+		llm = func(ctx context.Context, prompt string) (string, error) {
+			return "Claude session summary: analyzed disk.", nil
+		}
+	}
+
+	var embedder func(ctx context.Context, text string) ([]float32, error)
+	if tc.withEmbedder {
+		embedder = func(ctx context.Context, text string) ([]float32, error) {
+			vec := make([]float32, db.ExpectedEmbeddingDim)
+			vec[0] = 0.55
+			return vec, nil
+		}
+	}
+
+	stats, err := SyncTranscripts(ctx, store, brainDir, embedder, llm, opts)
+	if err != nil {
+		t.Fatalf("SyncTranscripts failed: %v", err)
+	}
+	if stats.StepsInserted != tc.wantSteps {
+		t.Fatalf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantSteps)
+	}
+	if stats.SummariesGenerated != tc.wantSummaries {
+		t.Fatalf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
+	}
+
+	assertClaudeStoredToolsAndResults(ctx, t, store, filePath, tc)
+
+	states, err := store.GetSessionSyncStates(ctx)
+	if err != nil {
+		t.Fatalf("GetSessionSyncStates failed: %v", err)
+	}
+	st, ok := states[tc.sessionID]
+	if !ok {
+		t.Fatalf("expected state for session %q", tc.sessionID)
+	}
+	if st.IsSettled != tc.wantSettled {
+		t.Fatalf("IsSettled = %v, want %v", st.IsSettled, tc.wantSettled)
+	}
+
+	runClaudeSecondPass(ctx, t, store, brainDir, filePath, embedder, llm, opts, tc)
+}
+
+func TestSyncTranscripts_ClaudeScenarios(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range syncTranscriptsClaudeCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ctx := context.Background()
-			tmp := t.TempDir()
-			brainDir := filepath.Join(tmp, "brain")
-			_ = os.MkdirAll(brainDir, 0o755)
-			store := dbtest.NewFakeStore()
-
-			var claudeProjectDir string
-			if tc.customClaudeDir {
-				claudeProjectDir = filepath.Join(tmp, "custom-claude-projects")
-			} else {
-				claudeProjectDir = filepath.Join(brainDir, "..", "claude", "projects")
-			}
-			projDir := filepath.Join(claudeProjectDir, "-test-project")
-			_ = os.MkdirAll(projDir, 0o755)
-
-			filePath := filepath.Join(projDir, tc.sessionID+".jsonl")
-			_ = os.WriteFile(filePath, []byte(tc.content), 0o644)
-			t0 := time.Now().Add(-time.Hour).Truncate(time.Second)
-			_ = os.Chtimes(filePath, t0, t0)
-
-			opts := SyncOptions{
-				BrainDir:      brainDir,
-				BatchLimit:    10,
-				IdleThreshold: 10 * time.Minute,
-				HeadLimit:     1000,
-				TailLimit:     1000,
-			}
-			if tc.customClaudeDir {
-				opts.ClaudeProjectsDir = claudeProjectDir
-			}
-
-			var llm func(ctx context.Context, prompt string) (string, error)
-			if tc.withLLM {
-				llm = func(ctx context.Context, prompt string) (string, error) {
-					return "Claude session summary: analyzed disk.", nil
-				}
-			}
-
-			var embedder func(ctx context.Context, text string) ([]float32, error)
-			if tc.withEmbedder {
-				embedder = func(ctx context.Context, text string) ([]float32, error) {
-					vec := make([]float32, db.ExpectedEmbeddingDim)
-					vec[0] = 0.55
-					return vec, nil
-				}
-			}
-
-			stats, err := SyncTranscripts(ctx, store, brainDir, embedder, llm, opts)
-			if err != nil {
-				t.Fatalf("SyncTranscripts failed: %v", err)
-			}
-			if stats.StepsInserted != tc.wantSteps {
-				t.Fatalf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantSteps)
-			}
-			if stats.SummariesGenerated != tc.wantSummaries {
-				t.Fatalf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
-			}
-
-			if tc.wantStoredTools != nil {
-				stored, err := store.GetTranscriptStepRange(ctx, "", tc.sessionID, 0, 1000)
-				if err != nil {
-					t.Fatalf("GetTranscriptStepRange failed: %v", err)
-				}
-				gotTools := make([]string, 0, len(stored))
-				for _, s := range stored {
-					gotTools = append(gotTools, s.ToolName)
-				}
-				if !slices.Equal(gotTools, tc.wantStoredTools) {
-					t.Fatalf("stored tool names = %q, want %q", gotTools, tc.wantStoredTools)
-				}
-			}
-			if tc.wantToolResults != nil {
-				scan, err := scanSessionTranscriptFile(filePath, nil)
-				if err != nil {
-					t.Fatalf("scanSessionTranscriptFile failed: %v", err)
-				}
-				var gotResults []string
-				for _, s := range scan.parsedSteps {
-					if s.Type == "TOOL" {
-						gotResults = append(gotResults, strings.Join([]string{s.ToolCallID, s.ToolName, s.Status, s.Content}, "|"))
-					}
-				}
-				if !slices.Equal(gotResults, tc.wantToolResults) {
-					t.Fatalf("parsed tool results = %q, want %q", gotResults, tc.wantToolResults)
-				}
-			}
-
-			states, err := store.GetSessionSyncStates(ctx)
-			if err != nil {
-				t.Fatalf("GetSessionSyncStates failed: %v", err)
-			}
-			st, ok := states[tc.sessionID]
-			if !ok {
-				t.Fatalf("expected state for session %q", tc.sessionID)
-			}
-			if st.IsSettled != tc.wantSettled {
-				t.Fatalf("IsSettled = %v, want %v", st.IsSettled, tc.wantSettled)
-			}
-
-			if tc.secondPassContent != "" || tc.wantSkippedUnchanged > 0 {
-				if tc.secondPassContent != "" {
-					_ = os.WriteFile(filePath, []byte(tc.secondPassContent), 0o644)
-					t1 := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
-					_ = os.Chtimes(filePath, t1, t1)
-				}
-				stats2, err := SyncTranscripts(ctx, store, brainDir, embedder, llm, opts)
-				if err != nil {
-					t.Fatalf("SyncTranscripts second pass failed: %v", err)
-				}
-				if tc.wantSkippedUnchanged > 0 && stats2.SkippedUnchanged != tc.wantSkippedUnchanged {
-					t.Fatalf("second pass SkippedUnchanged = %d, want %d", stats2.SkippedUnchanged, tc.wantSkippedUnchanged)
-				}
-				if tc.secondPassSteps > 0 && stats2.StepsInserted != tc.secondPassSteps {
-					t.Fatalf("second pass StepsInserted = %d, want %d", stats2.StepsInserted, tc.secondPassSteps)
-				}
-			}
+			runSyncTranscriptsClaudeCase(t, tc)
 		})
 	}
 }
 
-func TestSyncTranscripts_EngineAndToolKinds(t *testing.T) {
-	t.Parallel()
+type syncTranscriptsEngineCase struct {
+	name         string
+	brainFiles   []sessionFileFixture
+	claudeFiles  []sessionFileFixture
+	priorSummary *db.SessionSummary
+	priorSteps   []db.TranscriptStep
+	mcpServers   []string
+	failMethod   string
+	session      string
+	wantEngine   string
+	wantKinds    []string // "tool_name=tool_kind|tool_call_id" per stored step with a tool name
+}
 
+func syncTranscriptsEngineCases() []syncTranscriptsEngineCase {
 	agyMCP := strings.Join([]string{
 		`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Turn on the lights"}`,
 		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","tool_calls":[{"name":"mcp_home_assistant_turn_on","args":{"entity":"light.desk"}}]}`,
@@ -1034,18 +1127,7 @@ func TestSyncTranscripts_EngineAndToolKinds(t *testing.T) {
 	}, "\n") + "\n"
 	future := time.Now().Add(time.Hour).UTC()
 
-	tests := []struct {
-		name         string
-		brainFiles   []sessionFileFixture
-		claudeFiles  []sessionFileFixture
-		priorSummary *db.SessionSummary
-		priorSteps   []db.TranscriptStep
-		mcpServers   []string
-		failMethod   string
-		session      string
-		wantEngine   string
-		wantKinds    []string // "tool_name=tool_kind|tool_call_id" per stored step with a tool name
-	}{
+	return []syncTranscriptsEngineCase{
 		{
 			name:       "agy session records engine and longest-prefix mcp kind",
 			brainFiles: []sessionFileFixture{{sessionID: "sess-agy-kinds", content: agyMCP, age: time.Hour}},
@@ -1120,70 +1202,79 @@ func TestSyncTranscripts_EngineAndToolKinds(t *testing.T) {
 			wantKinds:    []string{"run_command=shell|"},
 		},
 	}
+}
 
-	for _, tc := range tests {
+func runSyncTranscriptsEngineAndKindsCase(t *testing.T, tc syncTranscriptsEngineCase) {
+	t.Helper()
+	ctx := context.Background()
+	tmp := t.TempDir()
+	brainDir := filepath.Join(tmp, "brain")
+	projDir := filepath.Join(tmp, "claude", "projects", "-test-project")
+	for _, dir := range []string{brainDir, projDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	store := dbtest.NewFakeStore()
+	if tc.priorSummary != nil {
+		if err := store.UpsertSessionSummary(ctx, *tc.priorSummary); err != nil {
+			t.Fatalf("seed summary: %v", err)
+		}
+		if err := store.BatchInsertTranscriptSteps(ctx, tc.priorSteps); err != nil {
+			t.Fatalf("seed steps: %v", err)
+		}
+	}
+	for _, f := range tc.brainFiles {
+		writeTranscriptFile(t, brainDir, f.sessionID, f.content, time.Now().Add(-f.age))
+	}
+	for _, f := range tc.claudeFiles {
+		p := filepath.Join(projDir, f.sessionID+".jsonl")
+		if err := os.WriteFile(p, []byte(f.content), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		mtime := time.Now().Add(-f.age).Truncate(time.Second)
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+	}
+
+	if tc.failMethod != "" {
+		store.FailNext(tc.failMethod, errors.New("simulated "+tc.failMethod+" failure"))
+	}
+	opts := SyncOptions{BrainDir: brainDir, BatchLimit: 10, IdleThreshold: 10 * time.Minute, HeadLimit: 1000, TailLimit: 1000, MCPServers: tc.mcpServers}
+	if _, err := SyncTranscripts(ctx, store, brainDir, nil, nil, opts); err != nil {
+		t.Fatalf("SyncTranscripts: %v", err)
+	}
+
+	states, err := store.GetSessionSyncStates(ctx)
+	if err != nil {
+		t.Fatalf("GetSessionSyncStates: %v", err)
+	}
+	if got := states[tc.session].Engine; got != tc.wantEngine {
+		t.Errorf("engine = %q, want %q", got, tc.wantEngine)
+	}
+	stored, err := store.GetTranscriptStepRange(ctx, "", tc.session, 0, 1000)
+	if err != nil {
+		t.Fatalf("GetTranscriptStepRange: %v", err)
+	}
+	var gotKinds []string
+	for _, st := range stored {
+		if st.ToolName != "" {
+			gotKinds = append(gotKinds, st.ToolName+"="+st.ToolKind+"|"+st.ToolCallID)
+		}
+	}
+	if !slices.Equal(gotKinds, tc.wantKinds) {
+		t.Errorf("kinds = %q, want %q", gotKinds, tc.wantKinds)
+	}
+}
+
+func TestSyncTranscripts_EngineAndToolKinds(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range syncTranscriptsEngineCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ctx := context.Background()
-			tmp := t.TempDir()
-			brainDir := filepath.Join(tmp, "brain")
-			projDir := filepath.Join(tmp, "claude", "projects", "-test-project")
-			for _, dir := range []string{brainDir, projDir} {
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatalf("mkdir: %v", err)
-				}
-			}
-			store := dbtest.NewFakeStore()
-			if tc.priorSummary != nil {
-				if err := store.UpsertSessionSummary(ctx, *tc.priorSummary); err != nil {
-					t.Fatalf("seed summary: %v", err)
-				}
-				if err := store.BatchInsertTranscriptSteps(ctx, tc.priorSteps); err != nil {
-					t.Fatalf("seed steps: %v", err)
-				}
-			}
-			for _, f := range tc.brainFiles {
-				writeTranscriptFile(t, brainDir, f.sessionID, f.content, time.Now().Add(-f.age))
-			}
-			for _, f := range tc.claudeFiles {
-				p := filepath.Join(projDir, f.sessionID+".jsonl")
-				if err := os.WriteFile(p, []byte(f.content), 0o644); err != nil {
-					t.Fatalf("write: %v", err)
-				}
-				mtime := time.Now().Add(-f.age).Truncate(time.Second)
-				if err := os.Chtimes(p, mtime, mtime); err != nil {
-					t.Fatalf("chtimes: %v", err)
-				}
-			}
-
-			if tc.failMethod != "" {
-				store.FailNext(tc.failMethod, errors.New("simulated "+tc.failMethod+" failure"))
-			}
-			opts := SyncOptions{BrainDir: brainDir, BatchLimit: 10, IdleThreshold: 10 * time.Minute, HeadLimit: 1000, TailLimit: 1000, MCPServers: tc.mcpServers}
-			if _, err := SyncTranscripts(ctx, store, brainDir, nil, nil, opts); err != nil {
-				t.Fatalf("SyncTranscripts: %v", err)
-			}
-
-			states, err := store.GetSessionSyncStates(ctx)
-			if err != nil {
-				t.Fatalf("GetSessionSyncStates: %v", err)
-			}
-			if got := states[tc.session].Engine; got != tc.wantEngine {
-				t.Errorf("engine = %q, want %q", got, tc.wantEngine)
-			}
-			stored, err := store.GetTranscriptStepRange(ctx, "", tc.session, 0, 1000)
-			if err != nil {
-				t.Fatalf("GetTranscriptStepRange: %v", err)
-			}
-			var gotKinds []string
-			for _, st := range stored {
-				if st.ToolName != "" {
-					gotKinds = append(gotKinds, st.ToolName+"="+st.ToolKind+"|"+st.ToolCallID)
-				}
-			}
-			if !slices.Equal(gotKinds, tc.wantKinds) {
-				t.Errorf("kinds = %q, want %q", gotKinds, tc.wantKinds)
-			}
+			runSyncTranscriptsEngineAndKindsCase(t, tc)
 		})
 	}
 }

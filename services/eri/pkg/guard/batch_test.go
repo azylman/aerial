@@ -19,6 +19,208 @@ type batchHookInput struct {
 	end   int
 }
 
+type checkBatchTestCase struct {
+	name               string
+	steps              [][]batchHookInput
+	wantLastDecision   DecisionType
+	wantReasonSubstr   string
+	wantOverwriteCmd   string
+	wantOverwriteStart int
+	wantOverwriteEnd   int
+}
+
+func runCheckBatchStepCase(t *testing.T, tc checkBatchTestCase, now time.Time) {
+	t.Helper()
+	dir := t.TempDir()
+	convID := "test-session"
+	var lastDec *Decision
+
+	stepIdx := 0
+	for turnIdx, turn := range tc.steps {
+		stepTime := now.Add(time.Duration(turnIdx) * 2 * time.Second)
+		for _, inv := range turn {
+			stepIdx++
+			payload := Payload{
+				ConversationID: convID,
+				StepIdx:        stepIdx,
+				ToolCall:       ToolCall{Name: inv.tool},
+			}
+			args := ToolArgs{
+				TargetFile:  inv.path,
+				StartLine:   inv.start,
+				EndLine:     inv.end,
+				CommandLine: inv.cmd,
+			}
+			lastDec = CheckBatchWithDir(payload, args, dir, stepTime)
+		}
+	}
+
+	if lastDec == nil {
+		t.Fatalf("no decisions returned")
+	}
+	if lastDec.Decision != tc.wantLastDecision {
+		t.Fatalf("got decision=%q, want %q (reason: %s)", lastDec.Decision, tc.wantLastDecision, lastDec.Reason)
+	}
+	if tc.wantReasonSubstr != "" && !strings.Contains(lastDec.Reason, tc.wantReasonSubstr) {
+		t.Fatalf("expected reason containing %q, got %q", tc.wantReasonSubstr, lastDec.Reason)
+	}
+	if strings.Contains(lastDec.Reason, " -v ") {
+		t.Fatalf("unexpected -v recommendation in reason: %q", lastDec.Reason)
+	}
+	gotOverwrite, _ := lastDec.Overwrite["CommandLine"].(string)
+	if gotOverwrite != tc.wantOverwriteCmd {
+		t.Fatalf("Overwrite[CommandLine] = %q, want %q", gotOverwrite, tc.wantOverwriteCmd)
+	}
+	gotStart, _ := lastDec.Overwrite["StartLine"].(int)
+	gotEnd, _ := lastDec.Overwrite["EndLine"].(int)
+	if gotStart != tc.wantOverwriteStart || gotEnd != tc.wantOverwriteEnd {
+		t.Fatalf("Overwrite[StartLine,EndLine] = (%d, %d), want (%d, %d)", gotStart, gotEnd, tc.wantOverwriteStart, tc.wantOverwriteEnd)
+	}
+}
+
+func testBatchFaultInjectionAndConcurrency(t *testing.T, now time.Time) {
+	t.Helper()
+	dir := t.TempDir()
+	convID := "corrupted-session"
+	statePath := filepath.Join(dir, fmt.Sprintf("state-%s.json", sanitizeID(convID)))
+	if err := os.WriteFile(statePath, []byte("{invalid-json-data"), 0o600); err != nil {
+		t.Fatalf("failed to write corrupted state: %v", err)
+	}
+	dec := CheckBatchWithDir(Payload{ConversationID: convID, StepIdx: 1, ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/tmp/foo.txt"}, dir, now)
+	if dec.Decision != DecisionAllow {
+		t.Fatalf("expected allow after corrupt state recovery, got: %v", dec)
+	}
+
+	var wg sync.WaitGroup
+	concurrentSession := "concurrent-session"
+	for i := range 10 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			p := Payload{
+				ConversationID: concurrentSession,
+				StepIdx:        idx + 1,
+				ToolCall:       ToolCall{Name: "view_file"},
+			}
+			d := CheckBatchWithDir(p, ToolArgs{TargetFile: fmt.Sprintf("/tmp/concurrent_%d.go", idx)}, dir, now)
+			if d == nil {
+				t.Errorf("got nil decision in concurrent call")
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+func testBatchLimitsAndDirectoryOverrides(t *testing.T, now time.Time) {
+	t.Helper()
+	truncDir := t.TempDir()
+	truncSession := "trunc-session"
+	for i := range 35 {
+		p := Payload{
+			ConversationID: truncSession,
+			StepIdx:        i + 1,
+			ToolCall:       ToolCall{Name: "run_command"},
+		}
+		d := CheckBatchWithDir(p, ToolArgs{CommandLine: fmt.Sprintf("echo rec-%d && true", i)}, truncDir, now)
+		if d.Decision != DecisionAllow {
+			t.Fatalf("call %d expected allow, got %v", i, d)
+		}
+	}
+	st := loadState(truncDir, truncSession, now)
+	if len(st.Records) > DefaultMaxRecords {
+		t.Fatalf("records length = %d, want <= %d", len(st.Records), DefaultMaxRecords)
+	}
+
+	dFail := CheckBatchWithDir(Payload{ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/a.go"}, "/dev/null/impossible", now)
+	if dFail.Decision != DecisionAllow {
+		t.Fatalf("expected allow on uncreatable dir, got %v", dFail)
+	}
+
+	if defDir := GetBatchDir(); defDir != DefaultBatchDir {
+		t.Fatalf("GetBatchDir() default = %q, want %q", defDir, DefaultBatchDir)
+	}
+	t.Setenv("AERIAL_BATCH_GUARD_DIR", "/tmp/custom-batch-guard-dir")
+	if envDir := GetBatchDir(); envDir != "/tmp/custom-batch-guard-dir" {
+		t.Fatalf("GetBatchDir() = %q, want /tmp/custom-batch-guard-dir", envDir)
+	}
+
+	customDir := t.TempDir()
+	t.Setenv("AERIAL_BATCH_GUARD_DIR", customDir)
+	dDefault := CheckBatch(Payload{ConversationID: "custom-batch-session", StepIdx: 1, ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/tmp/fresh.txt"})
+	if dDefault == nil || dDefault.Decision != DecisionAllow {
+		t.Fatalf("expected allow from CheckBatch, got %v", dDefault)
+	}
+
+	t.Setenv("AERIAL_BATCH_MIN_ANCHOR_LINES", "80")
+	t.Setenv("SCRATCH_DIR", "/tmp/custom-worktree")
+	if got := minAnchorReadLines(); got != 80 {
+		t.Fatalf("minAnchorReadLines() = %d, want 80", got)
+	}
+	if got := normalizeBatchTarget("/tmp/custom-worktree/pkg/a.go"); got != "/share/aerial/pkg/a.go" {
+		t.Fatalf("normalizeBatchTarget(custom-worktree) = %q, want /share/aerial/pkg/a.go", got)
+	}
+	if got := normalizeBatchTarget("$SCRATCH_DIR/pkg/a.go"); got != "/share/aerial/pkg/a.go" {
+		t.Fatalf("normalizeBatchTarget($SCRATCH_DIR) = %q, want /share/aerial/pkg/a.go", got)
+	}
+	t.Setenv("AERIAL_BATCH_MIN_ANCHOR_LINES", "invalid")
+	if got := minAnchorReadLines(); got != DefaultMinAnchorReadLines {
+		t.Fatalf("minAnchorReadLines() fallback = %d, want %d", got, DefaultMinAnchorReadLines)
+	}
+}
+
+func testBatchGCAndPreInvocation(t *testing.T, now time.Time) {
+	t.Helper()
+	gcDir := t.TempDir()
+	oldFile := filepath.Join(gcDir, "state-old-session.json")
+	newFile := filepath.Join(gcDir, "state-new-session.json")
+	if err := os.WriteFile(oldFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := now.Add(-3 * time.Hour)
+	if err := os.Chtimes(oldFile, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(gcDir, "subdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gcDir, "ignore.txt"), []byte("txt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	pruneStateFiles(gcDir, now)
+	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		t.Fatalf("expected old file to be pruned")
+	}
+	if _, err := os.Stat(newFile); err != nil {
+		t.Fatalf("expected new file to remain")
+	}
+	opportunisticGC(gcDir, now)
+
+	invDir := t.TempDir()
+	t.Setenv("AERIAL_BATCH_GUARD_DIR", invDir)
+	_ = RecordPreInvocation(Payload{ConversationID: "inv-s", InvocationNum: 1})
+	for i := range 4 {
+		if d := CheckBatchWithDir(Payload{ConversationID: "inv-s", StepIdx: 10 + i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/same_turn.go"}, invDir, now.Add(time.Duration(i*3)*time.Second)); d.Decision != DecisionAllow {
+			t.Fatalf("parallel edit %d in same invocationNum=1 should be allowed, got: %+v", i, d)
+		}
+	}
+	for i := 1; i <= 3; i++ {
+		_ = RecordPreInvocationWithDir(Payload{ConversationID: "post-s", InvocationNum: i}, invDir, now.Add(time.Duration(i*2)*time.Second))
+		if d := CheckBatchWithDir(Payload{ConversationID: "post-s", StepIdx: i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now.Add(time.Duration(i*2)*time.Second)); d.Decision != DecisionAllow {
+			t.Fatalf("turn %d expected allow after rolling back turn 2 failed edit, got: %+v", i, d)
+		}
+		if i == 2 {
+			_ = RecordPostBatch(Payload{ConversationID: "post-s", StepIdx: 2, Error: "not found", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"})
+		}
+	}
+	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 99, Error: "failed", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now)
+	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 3, Error: "", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now)
+	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 4, Error: "", ToolCall: ToolCall{Name: "run_command"}}, ToolArgs{CommandLine: "scripts/aerial-pr.sh submit /data/scratch/x 'feat: test'"}, invDir, now)
+}
+
 func TestCheckBatch(t *testing.T) {
 	// Not t.Parallel() because it exercises SetBatchDir and t.Setenv
 	now := time.Now()
@@ -26,15 +228,7 @@ func TestCheckBatch(t *testing.T) {
 	turn := func(items ...batchHookInput) []batchHookInput { return items }
 	turns := func(ts ...[]batchHookInput) [][]batchHookInput { return ts }
 
-	stepTests := []struct {
-		name               string
-		steps              [][]batchHookInput
-		wantLastDecision   DecisionType
-		wantReasonSubstr   string
-		wantOverwriteCmd   string
-		wantOverwriteStart int
-		wantOverwriteEnd   int
-	}{
+	stepTests := []checkBatchTestCase{
 		{"unscoped go test", turns(turn(batchHookInput{tool: "run_command", cmd: "go test ./..."})), DecisionDeny, "Unscoped test sweep", "", 0, 0},
 		{"unscoped test brain/...", turns(turn(batchHookInput{tool: "run_command", cmd: "go test brain/..."})), DecisionDeny, "Unscoped test sweep", "", 0, 0},
 		{"unscoped test services/eri/...", turns(turn(batchHookInput{tool: "run_command", cmd: "go test services/eri/..."})), DecisionDeny, "Unscoped test sweep", "", 0, 0},
@@ -100,200 +294,17 @@ func TestCheckBatch(t *testing.T) {
 
 	for _, tc := range stepTests {
 		t.Run("step_"+tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			convID := "test-session"
-			var lastDec *Decision
-
-			stepIdx := 0
-			for turnIdx, turn := range tc.steps {
-				stepTime := now.Add(time.Duration(turnIdx) * 2 * time.Second)
-				for _, inv := range turn {
-					stepIdx++
-					payload := Payload{
-						ConversationID: convID,
-						StepIdx:        stepIdx,
-						ToolCall:       ToolCall{Name: inv.tool},
-					}
-					args := ToolArgs{
-						TargetFile:  inv.path,
-						StartLine:   inv.start,
-						EndLine:     inv.end,
-						CommandLine: inv.cmd,
-					}
-					lastDec = CheckBatchWithDir(payload, args, dir, stepTime)
-				}
-			}
-
-			if lastDec == nil {
-				t.Fatalf("no decisions returned")
-			}
-			if lastDec.Decision != tc.wantLastDecision {
-				t.Fatalf("got decision=%q, want %q (reason: %s)", lastDec.Decision, tc.wantLastDecision, lastDec.Reason)
-			}
-			if tc.wantReasonSubstr != "" && !strings.Contains(lastDec.Reason, tc.wantReasonSubstr) {
-				t.Fatalf("expected reason containing %q, got %q", tc.wantReasonSubstr, lastDec.Reason)
-			}
-			if strings.Contains(lastDec.Reason, " -v ") {
-				t.Fatalf("unexpected -v recommendation in reason: %q", lastDec.Reason)
-			}
-			gotOverwrite, _ := lastDec.Overwrite["CommandLine"].(string)
-			if gotOverwrite != tc.wantOverwriteCmd {
-				t.Fatalf("Overwrite[CommandLine] = %q, want %q", gotOverwrite, tc.wantOverwriteCmd)
-			}
-			gotStart, _ := lastDec.Overwrite["StartLine"].(int)
-			gotEnd, _ := lastDec.Overwrite["EndLine"].(int)
-			if gotStart != tc.wantOverwriteStart || gotEnd != tc.wantOverwriteEnd {
-				t.Fatalf("Overwrite[StartLine,EndLine] = (%d, %d), want (%d, %d)", gotStart, gotEnd, tc.wantOverwriteStart, tc.wantOverwriteEnd)
-			}
+			runCheckBatchStepCase(t, tc, now)
 		})
 	}
 
-	// Fault Injection: Corrupted state file recovery
-	dir := t.TempDir()
-	convID := "corrupted-session"
-	statePath := filepath.Join(dir, fmt.Sprintf("state-%s.json", sanitizeID(convID)))
-	if err := os.WriteFile(statePath, []byte("{invalid-json-data"), 0o600); err != nil {
-		t.Fatalf("failed to write corrupted state: %v", err)
-	}
-	dec := CheckBatchWithDir(Payload{ConversationID: convID, StepIdx: 1, ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/tmp/foo.txt"}, dir, now)
-	if dec.Decision != DecisionAllow {
-		t.Fatalf("expected allow after corrupt state recovery, got: %v", dec)
-	}
-
-	// Concurrency test: 10 concurrent goroutines calling CheckBatchWithDir
-	var wg sync.WaitGroup
-	concurrentSession := "concurrent-session"
-	for i := range 10 {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			p := Payload{
-				ConversationID: concurrentSession,
-				StepIdx:        idx + 1,
-				ToolCall:       ToolCall{Name: "view_file"},
-			}
-			d := CheckBatchWithDir(p, ToolArgs{TargetFile: fmt.Sprintf("/tmp/concurrent_%d.go", idx)}, dir, now)
-			if d == nil {
-				t.Errorf("got nil decision in concurrent call")
-			}
-		}(i)
-	}
-	wg.Wait()
-
-	// Max records truncation (DefaultMaxRecords = 30)
-	truncDir := t.TempDir()
-	truncSession := "trunc-session"
-	for i := range 35 {
-		p := Payload{
-			ConversationID: truncSession,
-			StepIdx:        i + 1,
-			ToolCall:       ToolCall{Name: "run_command"},
-		}
-		d := CheckBatchWithDir(p, ToolArgs{CommandLine: fmt.Sprintf("echo rec-%d && true", i)}, truncDir, now)
-		if d.Decision != DecisionAllow {
-			t.Fatalf("call %d expected allow, got %v", i, d)
-		}
-	}
-	st := loadState(truncDir, truncSession, now)
-	if len(st.Records) > DefaultMaxRecords {
-		t.Fatalf("records length = %d, want <= %d", len(st.Records), DefaultMaxRecords)
-	}
-
-	// Uncreatable directory fail-open
-	dFail := CheckBatchWithDir(Payload{ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/a.go"}, "/dev/null/impossible", now)
-	if dFail.Decision != DecisionAllow {
-		t.Fatalf("expected allow on uncreatable dir, got %v", dFail)
-	}
-
-	// Wrapper and Env checks
-	if defDir := GetBatchDir(); defDir != DefaultBatchDir {
-		t.Fatalf("GetBatchDir() default = %q, want %q", defDir, DefaultBatchDir)
-	}
-	t.Setenv("AERIAL_BATCH_GUARD_DIR", "/tmp/custom-batch-guard-dir")
-	if envDir := GetBatchDir(); envDir != "/tmp/custom-batch-guard-dir" {
-		t.Fatalf("GetBatchDir() = %q, want /tmp/custom-batch-guard-dir", envDir)
-	}
-
-	customDir := t.TempDir()
-	t.Setenv("AERIAL_BATCH_GUARD_DIR", customDir)
-	dDefault := CheckBatch(Payload{ConversationID: "custom-batch-session", StepIdx: 1, ToolCall: ToolCall{Name: "view_file"}}, ToolArgs{TargetFile: "/tmp/fresh.txt"})
-	if dDefault == nil || dDefault.Decision != DecisionAllow {
-		t.Fatalf("expected allow from CheckBatch, got %v", dDefault)
-	}
-
-	// Tunable environment variable overrides and SCRATCH_DIR resolution
-	t.Setenv("AERIAL_BATCH_MIN_ANCHOR_LINES", "80")
-	t.Setenv("SCRATCH_DIR", "/tmp/custom-worktree")
-	if got := minAnchorReadLines(); got != 80 {
-		t.Fatalf("minAnchorReadLines() = %d, want 80", got)
-	}
-	if got := normalizeBatchTarget("/tmp/custom-worktree/pkg/a.go"); got != "/share/aerial/pkg/a.go" {
-		t.Fatalf("normalizeBatchTarget(custom-worktree) = %q, want /share/aerial/pkg/a.go", got)
-	}
-	if got := normalizeBatchTarget("$SCRATCH_DIR/pkg/a.go"); got != "/share/aerial/pkg/a.go" {
-		t.Fatalf("normalizeBatchTarget($SCRATCH_DIR) = %q, want /share/aerial/pkg/a.go", got)
-	}
-	t.Setenv("AERIAL_BATCH_MIN_ANCHOR_LINES", "invalid")
-	if got := minAnchorReadLines(); got != DefaultMinAnchorReadLines {
-		t.Fatalf("minAnchorReadLines() fallback = %d, want %d", got, DefaultMinAnchorReadLines)
-	}
-
-	// Prune state files and opportunistic GC
-	gcDir := t.TempDir()
-	oldFile := filepath.Join(gcDir, "state-old-session.json")
-	newFile := filepath.Join(gcDir, "state-new-session.json")
-	if err := os.WriteFile(oldFile, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(newFile, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	oldTime := now.Add(-3 * time.Hour)
-	if err := os.Chtimes(oldFile, oldTime, oldTime); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(gcDir, "subdir"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(gcDir, "ignore.txt"), []byte("txt"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	pruneStateFiles(gcDir, now)
-	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
-		t.Fatalf("expected old file to be pruned")
-	}
-	if _, err := os.Stat(newFile); err != nil {
-		t.Fatalf("expected new file to remain")
-	}
-	opportunisticGC(gcDir, now)
-
-	// PreInvocation turn grouping (parallel multi-region edit_file taking >1s each)
-	invDir := t.TempDir()
-	t.Setenv("AERIAL_BATCH_GUARD_DIR", invDir)
-	_ = RecordPreInvocation(Payload{ConversationID: "inv-s", InvocationNum: 1})
-	for i := range 4 {
-		if d := CheckBatchWithDir(Payload{ConversationID: "inv-s", StepIdx: 10 + i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/same_turn.go"}, invDir, now.Add(time.Duration(i*3)*time.Second)); d.Decision != DecisionAllow {
-			t.Fatalf("parallel edit %d in same invocationNum=1 should be allowed, got: %+v", i, d)
-		}
-	}
-	for i := 1; i <= 3; i++ {
-		_ = RecordPreInvocationWithDir(Payload{ConversationID: "post-s", InvocationNum: i}, invDir, now.Add(time.Duration(i*2)*time.Second))
-		if d := CheckBatchWithDir(Payload{ConversationID: "post-s", StepIdx: i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now.Add(time.Duration(i*2)*time.Second)); d.Decision != DecisionAllow {
-			t.Fatalf("turn %d expected allow after rolling back turn 2 failed edit, got: %+v", i, d)
-		}
-		if i == 2 {
-			_ = RecordPostBatch(Payload{ConversationID: "post-s", StepIdx: 2, Error: "not found", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"})
-		}
-	}
-	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 99, Error: "failed", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now)
-	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 3, Error: "", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now)
-	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 4, Error: "", ToolCall: ToolCall{Name: "run_command"}}, ToolArgs{CommandLine: "scripts/aerial-pr.sh submit /data/scratch/x 'feat: test'"}, invDir, now)
+	testBatchFaultInjectionAndConcurrency(t, now)
+	testBatchLimitsAndDirectoryOverrides(t, now)
+	testBatchGCAndPreInvocation(t, now)
 }
 
-func TestBatchHelpers(t *testing.T) {
-	t.Parallel()
-
+func checkBatchUnscopedAndStripVerbose(t *testing.T) {
+	t.Helper()
 	unscopedTests := []struct {
 		cmd  string
 		want bool
@@ -365,7 +376,10 @@ func TestBatchHelpers(t *testing.T) {
 			}
 		})
 	}
+}
 
+func checkBatchMutationAndCategory(t *testing.T) {
+	t.Helper()
 	gitMutationTests := []struct {
 		cmd  string
 		want bool
@@ -435,7 +449,10 @@ func TestBatchHelpers(t *testing.T) {
 			}
 		})
 	}
+}
 
+func checkBatchSubmitAndStat(t *testing.T) {
+	t.Helper()
 	// Step grouping and timestamp check
 	rec := ToolInvocation{Timestamp: 100, StepIdx: 0}
 	if !isSameStep(rec, 0, 99) {
@@ -504,7 +521,10 @@ func TestBatchHelpers(t *testing.T) {
 			}
 		})
 	}
+}
 
+func checkBatchReapOrphans(t *testing.T) {
+	t.Helper()
 	if got := resolveProcDir(DefaultBatchDir); got != "/proc" {
 		t.Fatalf("resolveProcDir(DefaultBatchDir) = %q, want /proc", got)
 	}
@@ -555,4 +575,13 @@ func TestBatchHelpers(t *testing.T) {
 	if len(signaled) != 2 || signaled[0] != -1425 || signaled[1] != -1426 {
 		t.Fatalf("signaled = %v, want [-1425 -1426]", signaled)
 	}
+}
+
+func TestBatchHelpers(t *testing.T) {
+	t.Parallel()
+
+	checkBatchUnscopedAndStripVerbose(t)
+	checkBatchMutationAndCategory(t)
+	checkBatchSubmitAndStat(t)
+	checkBatchReapOrphans(t)
 }
