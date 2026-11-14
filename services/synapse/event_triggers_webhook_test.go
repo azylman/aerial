@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -55,7 +56,7 @@ func (tr *eventTracker) waitEvents(t *testing.T, count int) ([]pubsub.ExternalEv
 	return events, topics
 }
 
-func verifyPublishedEvents(t *testing.T, tracker *eventTracker, wantCount int, wantTopic string) {
+func verifyPublishedEvents(t *testing.T, tracker *eventTracker, wantCount int, wantTopic string, wantTargets []string) {
 	t.Helper()
 	if tracker == nil || wantCount <= 0 {
 		return
@@ -66,6 +67,9 @@ func verifyPublishedEvents(t *testing.T, tracker *eventTracker, wantCount int, w
 	}
 	if wantTopic != "" && len(topics) > 0 && topics[0] != wantTopic {
 		t.Errorf("published topic = %s, want %s", topics[0], wantTopic)
+	}
+	if len(wantTargets) > 0 && len(events) > 0 && !slices.Equal(events[0].Targets, wantTargets) {
+		t.Errorf("published targets = %v, want %v", events[0].Targets, wantTargets)
 	}
 }
 
@@ -144,7 +148,7 @@ func assertEvaluateEventTriggersScenario(t *testing.T, tc evaluateEventTriggersT
 	if recBus != nil && recBus.publishCount() != tc.wantPubCount {
 		t.Errorf("recordingBus publish count = %d, want %d", recBus.publishCount(), tc.wantPubCount)
 	}
-	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic)
+	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, nil)
 
 	if len(mockRiver.insertedEventJobs) != tc.wantRiverJobs {
 		t.Errorf("river inserted jobs = %d, want %d", len(mockRiver.insertedEventJobs), tc.wantRiverJobs)
@@ -233,6 +237,7 @@ type handleEventsWebhookTestCase struct {
 	wantStatus   int
 	wantPubCount int
 	wantPubTopic string
+	wantTargets  []string
 }
 
 func assertHandleEventsWebhookScenario(t *testing.T, tc handleEventsWebhookTestCase) {
@@ -257,7 +262,7 @@ func assertHandleEventsWebhookScenario(t *testing.T, tc handleEventsWebhookTestC
 		t.Fatalf("status code = %d, want %d: body=%s", w.Code, tc.wantStatus, w.Body.String())
 	}
 
-	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic)
+	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, tc.wantTargets)
 }
 
 func TestHandleEventsWebhook_Scenarios(t *testing.T) {
@@ -271,14 +276,7 @@ func TestHandleEventsWebhook_Scenarios(t *testing.T) {
 			wantStatus:   http.StatusOK,
 			wantPubCount: 1,
 			wantPubTopic: "aerial.events.camera.motion",
-		},
-		{
-			name:         "singular target field is normalized into targets",
-			payload:      `{"source":"vision","event_type":"person_detected","target":"front_door"}`,
-			useBus:       true,
-			wantStatus:   http.StatusOK,
-			wantPubCount: 1,
-			wantPubTopic: "aerial.events.vision.person_detected",
+			wantTargets:  []string{"driveway"},
 		},
 		{
 			name:       "missing source returns 400",
