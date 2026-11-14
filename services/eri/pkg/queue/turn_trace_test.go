@@ -39,6 +39,90 @@ const (
 	malformedTP = "00-not-a-trace-01"
 )
 
+type startTurnSpanCase struct {
+	name         string
+	items        []queuedTurnItem
+	wantTrace    string // "" means a fresh root trace
+	wantLinks    []string
+	wantWait     bool
+	wantStart    time.Time
+	agentName    string
+	wantAgent    bool
+	wantRestarts int
+	wantRetries  int
+	wantResumed  bool
+	wantFirstMs  int64 // aerial.queue.first_enqueued_unix_ms; 0 means absent
+}
+
+func assertTurnSpanAttrs(t *testing.T, tc startTurnSpanCase, root sdktrace.ReadOnlySpan) {
+	t.Helper()
+	have := attrMap(root.Attributes())
+	if have[runner.AttrGenAIConversationID] != attribute.StringValue("thread-1") || have[runner.AttrGenAIOperationName] != attribute.StringValue("invoke_agent") {
+		t.Errorf("root attrs = %v", root.Attributes())
+	}
+	if _, ok := have[runner.AttrGenAIAgentName]; ok != tc.wantAgent {
+		t.Errorf("agent name present = %v, want %v", ok, tc.wantAgent)
+	}
+	if have[attrRestartCount] != attribute.IntValue(tc.wantRestarts) || have[attrRetryCount] != attribute.IntValue(tc.wantRetries) {
+		t.Errorf("restart/retry attrs = %v/%v, want %d/%d", have[attrRestartCount], have[attrRetryCount], tc.wantRestarts, tc.wantRetries)
+	}
+	if resumed, ok := have[attrResumed]; ok != tc.wantResumed || (ok && !resumed.AsBool()) {
+		t.Errorf("resumed attr = %v (present %v), want present %v", resumed, ok, tc.wantResumed)
+	}
+	firstMs, ok := have[attrFirstEnqueuedMs]
+	if ok != (tc.wantFirstMs != 0) || (ok && firstMs.AsInt64() != tc.wantFirstMs) {
+		t.Errorf("first_enqueued attr = %v (present %v), want %d", firstMs, ok, tc.wantFirstMs)
+	}
+}
+
+func runStartTurnSpanCase(t *testing.T, tc startTurnSpanCase, pickup time.Time) {
+	t.Helper()
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	ctx, span := startTurnSpan(context.Background(), tp.Tracer("test"), turnSpanSpec{items: tc.items, conversationID: "thread-1", agentName: tc.agentName, triggerType: "discord", pickup: pickup})
+	if trace.SpanFromContext(ctx) != span {
+		t.Fatalf("returned context does not carry the turn span")
+	}
+	span.End()
+
+	var root, wait sdktrace.ReadOnlySpan
+	for _, s := range rec.Ended() {
+		switch s.Name() {
+		case runner.OperationInvokeAgent:
+			root = s
+		case spanQueueWait:
+			wait = s
+		}
+	}
+	if root == nil {
+		t.Fatalf("no invoke_agent span ended")
+	}
+	gotTrace := root.SpanContext().TraceID().String()
+	if tc.wantTrace != "" && (gotTrace != tc.wantTrace || root.Parent().SpanID().String() != spanA) {
+		t.Errorf("root trace/parent = %s/%s, want %s/%s", gotTrace, root.Parent().SpanID(), tc.wantTrace, spanA)
+	}
+	if tc.wantTrace == "" && root.Parent().IsValid() {
+		t.Errorf("root has parent %v, want none", root.Parent())
+	}
+	links := make([]string, 0, len(root.Links()))
+	for _, l := range root.Links() {
+		links = append(links, l.SpanContext.TraceID().String())
+	}
+	if fmt.Sprint(links) != fmt.Sprint(tc.wantLinks) {
+		t.Errorf("links = %v, want %v", links, tc.wantLinks)
+	}
+	if !root.StartTime().Equal(tc.wantStart) {
+		t.Errorf("root start = %v, want %v", root.StartTime(), tc.wantStart)
+	}
+	if (wait != nil) != tc.wantWait {
+		t.Fatalf("queue.wait present = %v, want %v", wait != nil, tc.wantWait)
+	}
+	if wait != nil && (!wait.StartTime().Equal(tc.wantStart) || !wait.EndTime().Equal(pickup) || wait.Parent().SpanID() != root.SpanContext().SpanID()) {
+		t.Errorf("queue.wait = %v..%v parent %v, want %v..%v under root", wait.StartTime(), wait.EndTime(), wait.Parent().SpanID(), tc.wantStart, pickup)
+	}
+	assertTurnSpanAttrs(t, tc, root)
+}
+
 func TestStartTurnSpan(t *testing.T) {
 	t.Parallel()
 	pickup := time.Date(2026, 11, 13, 8, 0, 10, 0, time.UTC)
@@ -46,20 +130,7 @@ func TestStartTurnSpan(t *testing.T) {
 	poolStart := pickup.Add(-5 * time.Second)
 	firstEnq := pickup.Add(-40 * time.Minute)
 	staleUpdate := firstEnq.Add(time.Minute) // recovery bumps RestartCount without touching UpdatedAt
-	tests := []struct {
-		name         string
-		items        []queuedTurnItem
-		wantTrace    string // "" means a fresh root trace
-		wantLinks    []string
-		wantWait     bool
-		wantStart    time.Time
-		agentName    string
-		wantAgent    bool
-		wantRestarts int
-		wantRetries  int
-		wantResumed  bool
-		wantFirstMs  int64 // aerial.queue.first_enqueued_unix_ms; 0 means absent
-	}{
+	tests := []startTurnSpanCase{
 		{name: "single message parents to its traceparent", items: []queuedTurnItem{{traceparent: traceparA, createdAt: enq}}, wantTrace: traceA, wantWait: true, wantStart: enq, agentName: "aerial", wantAgent: true},
 		{name: "burst links the rest", items: []queuedTurnItem{{traceparent: traceparA, createdAt: enq}, {traceparent: traceparB, createdAt: enq}, {traceparent: malformedTP}, {traceparent: traceparC}}, wantTrace: traceA, wantLinks: []string{traceB, traceC}, wantWait: true, wantStart: enq},
 		{name: "untraced first message starts a root and links the others", items: []queuedTurnItem{{createdAt: enq}, {traceparent: traceparB}}, wantLinks: []string{traceB}, wantWait: true, wantStart: enq},
@@ -72,66 +143,7 @@ func TestStartTurnSpan(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			rec := tracetest.NewSpanRecorder()
-			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
-			ctx, span := startTurnSpan(context.Background(), tp.Tracer("test"), turnSpanSpec{items: tc.items, conversationID: "thread-1", agentName: tc.agentName, triggerType: "discord", pickup: pickup})
-			if trace.SpanFromContext(ctx) != span {
-				t.Fatalf("returned context does not carry the turn span")
-			}
-			span.End()
-
-			var root, wait sdktrace.ReadOnlySpan
-			for _, s := range rec.Ended() {
-				switch s.Name() {
-				case runner.OperationInvokeAgent:
-					root = s
-				case spanQueueWait:
-					wait = s
-				}
-			}
-			if root == nil {
-				t.Fatalf("no invoke_agent span ended")
-			}
-			gotTrace := root.SpanContext().TraceID().String()
-			if tc.wantTrace != "" && (gotTrace != tc.wantTrace || root.Parent().SpanID().String() != spanA) {
-				t.Errorf("root trace/parent = %s/%s, want %s/%s", gotTrace, root.Parent().SpanID(), tc.wantTrace, spanA)
-			}
-			if tc.wantTrace == "" && root.Parent().IsValid() {
-				t.Errorf("root has parent %v, want none", root.Parent())
-			}
-			links := make([]string, 0, len(root.Links()))
-			for _, l := range root.Links() {
-				links = append(links, l.SpanContext.TraceID().String())
-			}
-			if fmt.Sprint(links) != fmt.Sprint(tc.wantLinks) {
-				t.Errorf("links = %v, want %v", links, tc.wantLinks)
-			}
-			if !root.StartTime().Equal(tc.wantStart) {
-				t.Errorf("root start = %v, want %v", root.StartTime(), tc.wantStart)
-			}
-			if (wait != nil) != tc.wantWait {
-				t.Fatalf("queue.wait present = %v, want %v", wait != nil, tc.wantWait)
-			}
-			if wait != nil && (!wait.StartTime().Equal(tc.wantStart) || !wait.EndTime().Equal(pickup) || wait.Parent().SpanID() != root.SpanContext().SpanID()) {
-				t.Errorf("queue.wait = %v..%v parent %v, want %v..%v under root", wait.StartTime(), wait.EndTime(), wait.Parent().SpanID(), tc.wantStart, pickup)
-			}
-			have := attrMap(root.Attributes())
-			if have[runner.AttrGenAIConversationID] != attribute.StringValue("thread-1") || have[runner.AttrGenAIOperationName] != attribute.StringValue("invoke_agent") {
-				t.Errorf("root attrs = %v", root.Attributes())
-			}
-			if _, ok := have[runner.AttrGenAIAgentName]; ok != tc.wantAgent {
-				t.Errorf("agent name present = %v, want %v", ok, tc.wantAgent)
-			}
-			if have[attrRestartCount] != attribute.IntValue(tc.wantRestarts) || have[attrRetryCount] != attribute.IntValue(tc.wantRetries) {
-				t.Errorf("restart/retry attrs = %v/%v, want %d/%d", have[attrRestartCount], have[attrRetryCount], tc.wantRestarts, tc.wantRetries)
-			}
-			if resumed, ok := have[attrResumed]; ok != tc.wantResumed || (ok && !resumed.AsBool()) {
-				t.Errorf("resumed attr = %v (present %v), want present %v", resumed, ok, tc.wantResumed)
-			}
-			firstMs, ok := have[attrFirstEnqueuedMs]
-			if ok != (tc.wantFirstMs != 0) || (ok && firstMs.AsInt64() != tc.wantFirstMs) {
-				t.Errorf("first_enqueued attr = %v (present %v), want %d", firstMs, ok, tc.wantFirstMs)
-			}
+			runStartTurnSpanCase(t, tc, pickup)
 		})
 	}
 }
@@ -218,96 +230,109 @@ func agyToolTurnSpawner(onTurn func()) *mockDaemonSpawner {
 	}
 }
 
+type processBurstTraceCase struct {
+	name        string
+	traceparent string
+	wantTrace   string
+}
+
+func assertProcessBurstHierarchy(t *testing.T, sig rootEndSignal, byName map[string]sdktrace.ReadOnlySpan, root sdktrace.ReadOnlySpan, rootID trace.SpanID) {
+	t.Helper()
+	for child, parent := range map[string]string{spanTurnSetup: runner.OperationInvokeAgent, spanLease: spanTurnSetup, "session.lock_wait": spanLease, "daemon.spawn": spanLease, spanPrompt: spanTurnSetup, spanPromptChannelSnapshot: spanPrompt, spanPromptScopeInstr: spanPrompt} {
+		s, ok := byName[child]
+		if !ok {
+			t.Errorf("missing startup span %q", child)
+			continue
+		}
+		if p, ok := byName[parent]; !ok || s.Parent().SpanID() != p.SpanContext().SpanID() {
+			t.Errorf("startup span %q not parented under %q", child, parent)
+		}
+	}
+	if setup, chat := byName[spanTurnSetup], byName[runner.OperationChat]; setup != nil && chat != nil && setup.EndTime().After(chat.StartTime()) {
+		t.Errorf("turn.setup ends %v after chat starts %v", setup.EndTime(), chat.StartTime())
+	}
+	if lease := byName[spanLease]; lease != nil {
+		leaseAttrs := attrMap(lease.Attributes())
+		if leaseAttrs[attrNewConversation] != attribute.BoolValue(true) || leaseAttrs[attrSessionEphemeral] != attribute.BoolValue(false) {
+			t.Errorf("session.lease attrs = %v", lease.Attributes())
+		}
+	}
+	for _, child := range []string{spanQueueWait, runner.OperationChat, "execute_tool run_command", spanDeliver} {
+		s, ok := byName[child]
+		if !ok {
+			t.Errorf("missing span %q (got %v)", child, sig.Ended())
+			continue
+		}
+		if s.Parent().SpanID() != rootID || s.SpanContext().TraceID() != root.SpanContext().TraceID() {
+			t.Errorf("span %q not parented under the turn root", child)
+		}
+	}
+}
+
+func runProcessBurstTraceCase(t *testing.T, tc processBurstTraceCase, i int) {
+	t.Helper()
+	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, agyToolTurnSpawner(nil))
+	defer procPool.Close()
+
+	sig := rootEndSignal{SpanRecorder: tracetest.NewSpanRecorder(), done: make(chan struct{})}
+	logs := &syncBuffer{}
+	pool := New(newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData }), WorkerPoolConfig{
+		ProcessPool:    procPool,
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sig)),
+		Logger:         slog.New(tracing.SlogHandler(slog.NewJSONHandler(logs, nil))),
+		AgentName:      "aerial",
+	})
+	defer pool.Stop()
+
+	threadID := fmt.Sprintf("trace-thread-%d", i)
+	msg := db.Message{ID: fmt.Sprintf("trace-msg-%d", i), ThreadID: threadID, Content: "hi", Status: db.StatusPending, Traceparent: tc.traceparent, CreatedAt: time.Now().Add(-2 * time.Second)}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+	select {
+	case <-sig.done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("turn span never ended")
+	}
+
+	byName := map[string]sdktrace.ReadOnlySpan{}
+	for _, s := range sig.Ended() {
+		byName[s.Name()] = s
+	}
+	root := byName[runner.OperationInvokeAgent]
+	rootID := root.SpanContext().SpanID()
+	assertProcessBurstHierarchy(t, sig, byName, root, rootID)
+
+	if tc.wantTrace != "" && root.SpanContext().TraceID().String() != tc.wantTrace {
+		t.Errorf("root trace = %s, want %s", root.SpanContext().TraceID(), tc.wantTrace)
+	}
+	have := attrMap(root.Attributes())
+	if have[runner.AttrGenAIUsageInputTokens] != attribute.IntValue(7) || have[runner.AttrGenAIUsageOutputTokens] != attribute.IntValue(3) ||
+		have[runner.AttrGenAIAgentName] != attribute.StringValue("aerial") || have[runner.AttrGenAIProviderName] != attribute.StringValue("gcp.gemini") {
+		t.Errorf("root attrs = %v", root.Attributes())
+	}
+	if root.Status().Code == codes.Error {
+		t.Errorf("root status = %v, want ok", root.Status())
+	}
+	wantLog := fmt.Sprintf(`"msg":"[WorkerPool] 1 message(s) in thread %s completed successfully on attempt 1/3","trace_id":"%s"`, threadID, root.SpanContext().TraceID())
+	if !strings.Contains(logs.String(), wantLog) {
+		t.Errorf("turn log lines lack the turn trace_id; want %s in:\n%s", wantLog, logs.String())
+	}
+}
+
 func TestProcessBurst_EmitsTurnTrace(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name        string
-		traceparent string
-		wantTrace   string
-	}{
+	tests := []processBurstTraceCase{
 		{name: "continues ingress trace", traceparent: traceparA, wantTrace: traceA},
 		{name: "untraced message starts a root", traceparent: ""},
 	}
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
-			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, agyToolTurnSpawner(nil))
-			defer procPool.Close()
-
-			sig := rootEndSignal{SpanRecorder: tracetest.NewSpanRecorder(), done: make(chan struct{})}
-			logs := &syncBuffer{}
-			pool := New(newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData }), WorkerPoolConfig{
-				ProcessPool:    procPool,
-				SessionManager: session.New(tmpHome, tempData),
-				Store:          store,
-				TimeoutMinutes: 1,
-				TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sig)),
-				Logger:         slog.New(tracing.SlogHandler(slog.NewJSONHandler(logs, nil))),
-				AgentName:      "aerial",
-			})
-			defer pool.Stop()
-
-			threadID := fmt.Sprintf("trace-thread-%d", i)
-			msg := db.Message{ID: fmt.Sprintf("trace-msg-%d", i), ThreadID: threadID, Content: "hi", Status: db.StatusPending, Traceparent: tc.traceparent, CreatedAt: time.Now().Add(-2 * time.Second)}
-			_ = store.InsertMessage(context.Background(), msg)
-			pool.Enqueue(msg)
-			select {
-			case <-sig.done:
-			case <-time.After(10 * time.Second):
-				t.Fatalf("turn span never ended")
-			}
-
-			byName := map[string]sdktrace.ReadOnlySpan{}
-			for _, s := range sig.Ended() {
-				byName[s.Name()] = s
-			}
-			root := byName[runner.OperationInvokeAgent]
-			rootID := root.SpanContext().SpanID()
-			for child, parent := range map[string]string{spanTurnSetup: runner.OperationInvokeAgent, spanLease: spanTurnSetup, "session.lock_wait": spanLease, "daemon.spawn": spanLease, spanPrompt: spanTurnSetup, spanPromptChannelSnapshot: spanPrompt, spanPromptScopeInstr: spanPrompt} {
-				s, ok := byName[child]
-				if !ok {
-					t.Errorf("missing startup span %q", child)
-					continue
-				}
-				if p, ok := byName[parent]; !ok || s.Parent().SpanID() != p.SpanContext().SpanID() {
-					t.Errorf("startup span %q not parented under %q", child, parent)
-				}
-			}
-			if setup, chat := byName[spanTurnSetup], byName[runner.OperationChat]; setup != nil && chat != nil && setup.EndTime().After(chat.StartTime()) {
-				t.Errorf("turn.setup ends %v after chat starts %v", setup.EndTime(), chat.StartTime())
-			}
-			if lease := byName[spanLease]; lease != nil {
-				leaseAttrs := attrMap(lease.Attributes())
-				if leaseAttrs[attrNewConversation] != attribute.BoolValue(true) || leaseAttrs[attrSessionEphemeral] != attribute.BoolValue(false) {
-					t.Errorf("session.lease attrs = %v", lease.Attributes())
-				}
-			}
-			if tc.wantTrace != "" && root.SpanContext().TraceID().String() != tc.wantTrace {
-				t.Errorf("root trace = %s, want %s", root.SpanContext().TraceID(), tc.wantTrace)
-			}
-			for _, child := range []string{spanQueueWait, runner.OperationChat, "execute_tool run_command", spanDeliver} {
-				s, ok := byName[child]
-				if !ok {
-					t.Errorf("missing span %q (got %v)", child, sig.Ended())
-					continue
-				}
-				if s.Parent().SpanID() != rootID || s.SpanContext().TraceID() != root.SpanContext().TraceID() {
-					t.Errorf("span %q not parented under the turn root", child)
-				}
-			}
-			have := attrMap(root.Attributes())
-			if have[runner.AttrGenAIUsageInputTokens] != attribute.IntValue(7) || have[runner.AttrGenAIUsageOutputTokens] != attribute.IntValue(3) ||
-				have[runner.AttrGenAIAgentName] != attribute.StringValue("aerial") || have[runner.AttrGenAIProviderName] != attribute.StringValue("gcp.gemini") {
-				t.Errorf("root attrs = %v", root.Attributes())
-			}
-			if root.Status().Code == codes.Error {
-				t.Errorf("root status = %v, want ok", root.Status())
-			}
-			wantLog := fmt.Sprintf(`"msg":"[WorkerPool] 1 message(s) in thread %s completed successfully on attempt 1/3","trace_id":"%s"`, threadID, root.SpanContext().TraceID())
-			if !strings.Contains(logs.String(), wantLog) {
-				t.Errorf("turn log lines lack the turn trace_id; want %s in:\n%s", wantLog, logs.String())
-			}
+			runProcessBurstTraceCase(t, tc, i)
 		})
 	}
 }

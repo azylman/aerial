@@ -277,23 +277,14 @@ type workerTestCase struct {
 	wantAttemptPromptContains, wantAttemptPromptExcludes                                                                                      map[int][]string
 }
 
-func runWorkerTestCase(t *testing.T, tc workerTestCase) {
+func initWorkerTestSession(t *testing.T, tc workerTestCase, store *dbtest.FakeStore) (string, *session.Manager, string) {
 	t.Helper()
-	if tc.wantDefaultTimeout > 0 && len(tc.messages) == 0 && tc.concurrentEnqueueCount == 0 {
-		if DefaultTimeoutMinutes != tc.wantDefaultTimeout {
-			t.Errorf("DefaultTimeoutMinutes = %d, want %d", DefaultTimeoutMinutes, tc.wantDefaultTimeout)
-		}
-		return
-	}
-
-	store, tmpHome := setupTestStore(t), ""
+	var tmpHome, threadID string
 	var sessMgr *session.Manager
 	if tc.useSessionMgr || tc.seedTurnCount > 0 || tc.seedIdleAge > 0 || len(tc.seedTranscriptFiles) > 0 {
 		tmpHome = t.TempDir()
 		sessMgr = session.New(tmpHome, "")
 	}
-
-	threadID := ""
 	if len(tc.messages) > 0 {
 		threadID = tc.messages[0].ThreadID
 	}
@@ -315,139 +306,52 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 		}
 	}
 	tNow := time.Now().UTC()
-	for sessID, content := range tc.seedTranscriptFiles {
+	for sessID, fileContent := range tc.seedTranscriptFiles {
 		sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", sessID, ".system_generated", "logs")
 		_ = os.MkdirAll(sessDir, 0o755)
 		_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(strings.NewReplacer(
 			"{{TS0}}", tNow.Format(time.RFC3339Nano), "{{TS1}}", tNow.Add(time.Second).Format(time.RFC3339Nano), "{{TS2}}", tNow.Add(2*time.Second).Format(time.RFC3339Nano),
-		).Replace(content)), 0o600)
+		).Replace(fileContent)), 0o600)
 	}
+	return tmpHome, sessMgr, threadID
+}
 
-	steps := append([]mockRunnerStep(nil), tc.runnerSteps...)
-	wantDeliveredExcludes := append([]string(nil), tc.wantDeliveredExcludes...)
-	if tc.seedPNGFilename != "" && tc.seedPNGImage != nil {
-		var imgBuf bytes.Buffer
-		_ = (&png.Encoder{CompressionLevel: tc.seedPNGLevel}).Encode(&imgBuf, tc.seedPNGImage)
-		testImgPath := filepath.Join(t.TempDir(), tc.seedPNGFilename)
-		_ = os.WriteFile(testImgPath, imgBuf.Bytes(), 0o600)
-		for i := range steps {
-			steps[i].response = strings.ReplaceAll(steps[i].response, "{{IMAGE_PATH}}", testImgPath)
-		}
-		wantDeliveredExcludes = append(wantDeliveredExcludes, testImgPath)
+func setupWorkerTestPNG(t *testing.T, tc workerTestCase, steps []mockRunnerStep, wantExcludes []string) ([]mockRunnerStep, []string) {
+	t.Helper()
+	if tc.seedPNGFilename == "" || tc.seedPNGImage == nil {
+		return steps, wantExcludes
 	}
+	var imgBuf bytes.Buffer
+	_ = (&png.Encoder{CompressionLevel: tc.seedPNGLevel}).Encode(&imgBuf, tc.seedPNGImage)
+	testImgPath := filepath.Join(t.TempDir(), tc.seedPNGFilename)
+	_ = os.WriteFile(testImgPath, imgBuf.Bytes(), 0o600)
+	for i := range steps {
+		steps[i].response = strings.ReplaceAll(steps[i].response, "{{IMAGE_PATH}}", testImgPath)
+	}
+	wantExcludes = append(wantExcludes, testImgPath)
+	return steps, wantExcludes
+}
 
-	if tc.seedTurnCount > 0 && tc.seedIdleAge == 0 {
-		for range tc.seedTurnCount {
-			_, _ = incrementSessionTurnCount(store, threadID)
-		}
+func runWorkerConcurrentEnqueue(t *testing.T, tc workerTestCase, pool *WorkerPool, store db.Store, doneCh <-chan struct{}) {
+	t.Helper()
+	pool.Start()
+	var wg sync.WaitGroup
+	for i := range tc.concurrentEnqueueCount {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			m := db.Message{ID: fmt.Sprintf("msg-race-%d", idx), ThreadID: "thread-evict-race", GuildID: "guild-race", AuthorID: "user-race", AuthorName: "User", Content: fmt.Sprintf("msg content %d", idx), Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+			_ = insertMessage(store, m)
+			pool.Enqueue(m)
+		}(i)
 	}
+	wg.Wait()
+	waitForCompletion(t, doneCh, 5*time.Second, tc.name)
+	pool.Stop()
+}
 
-	maxAttempts, expectedCompletions := tc.maxAttempts, len(tc.messages)
-	if maxAttempts == 0 {
-		maxAttempts = 1
-	}
-	if tc.concurrentEnqueueCount > 0 {
-		expectedCompletions = tc.concurrentEnqueueCount
-	}
-
-	var mu sync.Mutex
-	var runnerCalls int
-	var passedSessions, promptsSeen, deliveredTexts, deliveredChannels []string
-	var capturedPrompt string
-	var deliveredAttachments []*delivery.Attachment
-	var completedCount atomic.Int32
-	doneCh := make(chan struct{})
-	turnDoneCh := make(chan struct{}, expectedCompletions+1)
-
-	cfg := WorkerPoolConfig{
-		Store: store, SessionManager: sessMgr, TimeoutMinutes: 1, IdleTimeout: tc.idleTimeout,
-		BackoffBase: 5 * time.Millisecond, MaxAttempts: maxAttempts,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			idx := runnerCalls
-			runnerCalls++
-			passedSessions = append(passedSessions, sessionID)
-			promptsSeen = append(promptsSeen, prompt)
-			capturedPrompt = prompt
-			mu.Unlock()
-			var step mockRunnerStep
-			if len(steps) > 0 {
-				if idx >= len(steps) {
-					idx = len(steps) - 1
-				}
-				step = steps[idx]
-			}
-			return execMockRunnerStep(step, tmpHome, sessionID)
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredChannels = append(deliveredChannels, channelID)
-			deliveredTexts = append(deliveredTexts, text)
-			mu.Unlock()
-			return nil
-		},
-		TypingFunc: noopTyping,
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			if int(completedCount.Add(1)) == expectedCompletions {
-				select {
-				case <-doneCh:
-				default:
-					close(doneCh)
-				}
-			}
-			turnDoneCh <- struct{}{}
-		},
-	}
-	if len(tc.wantAttachments) > 0 {
-		cfg.DeliveryWithAttachmentsFunc = func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error {
-			mu.Lock()
-			deliveredChannels = append(deliveredChannels, channelID)
-			deliveredTexts = append(deliveredTexts, text)
-			deliveredAttachments = attachments
-			mu.Unlock()
-			return nil
-		}
-	}
-	if tc.notifierReply != "" {
-		cfg.NotifierFunc = func(agyBin, apiKey, desc string) string { return tc.notifierReply }
-	}
-	if tc.policyMode != "" {
-		cfg.ResolveChannelPolicy = func(cID, cName string) config.ChannelPolicy { return config.ChannelPolicy{Mode: tc.policyMode} }
-	}
-
-	pool := NewWorkerPool(cfg)
-	if tc.concurrentEnqueueCount > 0 {
-		pool.Start()
-		var wg sync.WaitGroup
-		for i := range tc.concurrentEnqueueCount {
-			wg.Add(1)
-			go func(idx int) {
-				defer wg.Done()
-				m := db.Message{ID: fmt.Sprintf("msg-race-%d", idx), ThreadID: "thread-evict-race", GuildID: "guild-race", AuthorID: "user-race", AuthorName: "User", Content: fmt.Sprintf("msg content %d", idx), Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-				_ = insertMessage(store, m)
-				pool.Enqueue(m)
-			}(i)
-		}
-		wg.Wait()
-		waitForCompletion(t, doneCh, 5*time.Second, tc.name)
-		pool.Stop()
-		return
-	}
-
-	msgs := make([]db.Message, len(tc.messages))
-	for i, m := range tc.messages {
-		if m.Status == "" {
-			m.Status = db.StatusPending
-		}
-		if m.CreatedAt.IsZero() {
-			m.CreatedAt = time.Now().UTC()
-		}
-		msgs[i] = m
-		if err := insertMessage(store, m); err != nil {
-			t.Fatalf("insert message %s: %v", m.ID, err)
-		}
-	}
-
+func runWorkerExecDispatches(t *testing.T, tc workerTestCase, pool *WorkerPool, msgs []db.Message, doneCh, turnDoneCh <-chan struct{}) {
+	t.Helper()
 	switch {
 	case tc.enqueueAsBurst:
 		pool.EnqueueBurst(msgs...)
@@ -469,9 +373,10 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 		}
 		waitForCompletion(t, doneCh, 5*time.Second, tc.name)
 	}
+}
 
-	mu.Lock()
-	defer mu.Unlock()
+func assertWorkerDeliveries(t *testing.T, tc workerTestCase, runnerCalls int, passedSessions, deliveredTexts, deliveredChannels []string, deliveredAttachments []*delivery.Attachment, wantDeliveredExcludes []string) {
+	t.Helper()
 	if tc.checkRunnerCalls && runnerCalls != tc.wantRunnerCalls {
 		t.Errorf("runnerCalls = %d, want %d", runnerCalls, tc.wantRunnerCalls)
 	}
@@ -503,6 +408,35 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 			t.Errorf("expected delivery to channel %q, got %v", wantCh, deliveredChannels)
 		}
 	}
+}
+
+func assertWorkerSavedMessages(t *testing.T, tc workerTestCase, store db.Store, msgs []db.Message) {
+	t.Helper()
+	for _, m := range msgs {
+		dbMsg, err := getMessage(store, m.ID)
+		if err != nil || dbMsg == nil {
+			t.Fatalf("get message %s: %v", m.ID, err)
+		}
+		if tc.wantStatus != "" && dbMsg.Status != tc.wantStatus {
+			t.Errorf("message %s status = %s, want %s", m.ID, dbMsg.Status, tc.wantStatus)
+		}
+		if tc.wantRetryCount > 0 && dbMsg.RetryCount != tc.wantRetryCount {
+			t.Errorf("message %s retryCount = %d, want %d", m.ID, dbMsg.RetryCount, tc.wantRetryCount)
+		}
+		if tc.wantErrorContains != "" && !strings.Contains(dbMsg.ErrorMessage, tc.wantErrorContains) {
+			t.Errorf("message %s error = %q, want %q", m.ID, dbMsg.ErrorMessage, tc.wantErrorContains)
+		}
+		if tc.wantDBContent != "" && dbMsg.Content != tc.wantDBContent {
+			t.Errorf("message %s content = %q, want %q", m.ID, dbMsg.Content, tc.wantDBContent)
+		}
+		if tc.wantResponseText != "" && dbMsg.ResponseText != tc.wantResponseText {
+			t.Errorf("message %s response = %q, want %q", m.ID, dbMsg.ResponseText, tc.wantResponseText)
+		}
+	}
+}
+
+func assertWorkerPromptsAndState(t *testing.T, tc workerTestCase, store db.Store, threadID, capturedPrompt string, promptsSeen []string, msgs []db.Message) {
+	t.Helper()
 	assertContainsAll(t, capturedPrompt, tc.wantPromptContains, "prompt")
 	assertExcludesAll(t, capturedPrompt, tc.wantPromptExcludes, "prompt")
 
@@ -528,62 +462,167 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 			t.Errorf("turnCount = %d, want %d", c, tc.wantTurnCount)
 		}
 	}
-	for _, m := range msgs {
-		dbMsg, err := getMessage(store, m.ID)
-		if err != nil || dbMsg == nil {
-			t.Fatalf("get message %s: %v", m.ID, err)
-		}
-		if tc.wantStatus != "" && dbMsg.Status != tc.wantStatus {
-			t.Errorf("message %s status = %s, want %s", m.ID, dbMsg.Status, tc.wantStatus)
-		}
-		if tc.wantRetryCount > 0 && dbMsg.RetryCount != tc.wantRetryCount {
-			t.Errorf("message %s retryCount = %d, want %d", m.ID, dbMsg.RetryCount, tc.wantRetryCount)
-		}
-		if tc.wantErrorContains != "" && !strings.Contains(dbMsg.ErrorMessage, tc.wantErrorContains) {
-			t.Errorf("message %s error = %q, want %q", m.ID, dbMsg.ErrorMessage, tc.wantErrorContains)
-		}
-		if tc.wantDBContent != "" && dbMsg.Content != tc.wantDBContent {
-			t.Errorf("message %s content = %q, want %q", m.ID, dbMsg.Content, tc.wantDBContent)
-		}
-		if tc.wantResponseText != "" && dbMsg.ResponseText != tc.wantResponseText {
-			t.Errorf("message %s response = %q, want %q", m.ID, dbMsg.ResponseText, tc.wantResponseText)
+	assertWorkerSavedMessages(t, tc, store, msgs)
+}
+
+func makeWorkerTestConfig(tc workerTestCase, store db.Store, sessMgr *session.Manager, tmpHome string, steps []mockRunnerStep, maxAttempts, expectedCompletions int, mu *sync.Mutex, runnerCalls *int, passedSessions, promptsSeen *[]string, capturedPrompt *string, deliveredChannels, deliveredTexts *[]string, deliveredAttachments *[]*delivery.Attachment, completedCount *atomic.Int32, doneCh chan struct{}, turnDoneCh chan struct{}) WorkerPoolConfig {
+	cfg := WorkerPoolConfig{
+		Store: store, SessionManager: sessMgr, TimeoutMinutes: 1, IdleTimeout: tc.idleTimeout,
+		BackoffBase: 5 * time.Millisecond, MaxAttempts: maxAttempts,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			idx := *runnerCalls
+			*runnerCalls++
+			*passedSessions = append(*passedSessions, sessionID)
+			*promptsSeen = append(*promptsSeen, prompt)
+			*capturedPrompt = prompt
+			mu.Unlock()
+			var step mockRunnerStep
+			if len(steps) > 0 {
+				if idx >= len(steps) {
+					idx = len(steps) - 1
+				}
+				step = steps[idx]
+			}
+			return execMockRunnerStep(step, tmpHome, sessionID)
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			*deliveredChannels = append(*deliveredChannels, channelID)
+			*deliveredTexts = append(*deliveredTexts, text)
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: noopTyping,
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			if int(completedCount.Add(1)) == expectedCompletions {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+			turnDoneCh <- struct{}{}
+		},
+	}
+	if len(tc.wantAttachments) > 0 {
+		cfg.DeliveryWithAttachmentsFunc = func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error {
+			mu.Lock()
+			*deliveredChannels = append(*deliveredChannels, channelID)
+			*deliveredTexts = append(*deliveredTexts, text)
+			*deliveredAttachments = attachments
+			mu.Unlock()
+			return nil
 		}
 	}
+	if tc.notifierReply != "" {
+		cfg.NotifierFunc = func(agyBin, apiKey, desc string) string { return tc.notifierReply }
+	}
+	if tc.policyMode != "" {
+		cfg.ResolveChannelPolicy = func(cID, cName string) config.ChannelPolicy { return config.ChannelPolicy{Mode: tc.policyMode} }
+	}
+	return cfg
+}
+
+func runWorkerTestCase(t *testing.T, tc workerTestCase) {
+	t.Helper()
+	if tc.wantDefaultTimeout > 0 && len(tc.messages) == 0 && tc.concurrentEnqueueCount == 0 {
+		if DefaultTimeoutMinutes != tc.wantDefaultTimeout {
+			t.Errorf("DefaultTimeoutMinutes = %d, want %d", DefaultTimeoutMinutes, tc.wantDefaultTimeout)
+		}
+		return
+	}
+
+	store := setupTestStore(t)
+	tmpHome, sessMgr, threadID := initWorkerTestSession(t, tc, store)
+	steps, wantDeliveredExcludes := setupWorkerTestPNG(t, tc, append([]mockRunnerStep(nil), tc.runnerSteps...), append([]string(nil), tc.wantDeliveredExcludes...))
+
+	if tc.seedTurnCount > 0 && tc.seedIdleAge == 0 {
+		for range tc.seedTurnCount {
+			_, _ = incrementSessionTurnCount(store, threadID)
+		}
+	}
+
+	maxAttempts, expectedCompletions := tc.maxAttempts, len(tc.messages)
+	if maxAttempts == 0 {
+		maxAttempts = 1
+	}
+	if tc.concurrentEnqueueCount > 0 {
+		expectedCompletions = tc.concurrentEnqueueCount
+	}
+
+	var mu sync.Mutex
+	var runnerCalls int
+	var passedSessions, promptsSeen, deliveredTexts, deliveredChannels []string
+	var capturedPrompt string
+	var deliveredAttachments []*delivery.Attachment
+	var completedCount atomic.Int32
+	doneCh := make(chan struct{})
+	turnDoneCh := make(chan struct{}, expectedCompletions+1)
+
+	cfg := makeWorkerTestConfig(tc, store, sessMgr, tmpHome, steps, maxAttempts, expectedCompletions, &mu, &runnerCalls, &passedSessions, &promptsSeen, &capturedPrompt, &deliveredChannels, &deliveredTexts, &deliveredAttachments, &completedCount, doneCh, turnDoneCh)
+
+	pool := NewWorkerPool(cfg)
+	if tc.concurrentEnqueueCount > 0 {
+		runWorkerConcurrentEnqueue(t, tc, pool, store, doneCh)
+		return
+	}
+
+	msgs := make([]db.Message, len(tc.messages))
+	for i, m := range tc.messages {
+		if m.Status == "" {
+			m.Status = db.StatusPending
+		}
+		if m.CreatedAt.IsZero() {
+			m.CreatedAt = time.Now().UTC()
+		}
+		msgs[i] = m
+		if err := insertMessage(store, m); err != nil {
+			t.Fatalf("insert message %s: %v", m.ID, err)
+		}
+	}
+
+	runWorkerExecDispatches(t, tc, pool, msgs, doneCh, turnDoneCh)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assertWorkerDeliveries(t, tc, runnerCalls, passedSessions, deliveredTexts, deliveredChannels, deliveredAttachments, wantDeliveredExcludes)
+	assertWorkerPromptsAndState(t, tc, store, threadID, capturedPrompt, promptsSeen, msgs)
 }
 
 type burstTestCase struct {
-	name, channelID, seedSessionID, botUserID, classifierJSON, runnerConvID, runnerResponse, wantSavedSession, wantFinalStatus, wantDeliveredText, wantPromptPrefix, wantClassifierPromptContains, wantAlertTitle, wantAlertChannel            string
-	seedSession, enableHistoryFetcher, sequentialBursts, preserveSessionInRunner, checkClassifierCalls, checkSavedSession, wantNoStubDir, checkDeliveryCalls, checkMaxTypingCalls, wantPassedInitialSession, wantSingleInstructionTagPerPrompt bool
-	seedTurnCount, maxAttempts, rotateBeforeTurn, wantClassifierCalls, wantRunnerCalls, wantDeliveryCalls, wantMinTypingCalls, wantMaxTypingCalls, wantTurnCount                                                                               int
-	seedTranscripts, wantPassedSessions, wantPromptContains, wantPromptExcludes, wantAlertBodyContains                                                                                                                                         []string
-	channelInstructions, wantMsgErrors, wantMsgResponses                                                                                                                                                                                       map[string]string
-	cachedChannels                                                                                                                                                                                                                             []*discordgo.Channel
-	historyMessages                                                                                                                                                                                                                            []HistoryMessage
-	policy                                                                                                                                                                                                                                     config.ChannelPolicy
-	runnerSteps                                                                                                                                                                                                                                []mockRunnerStep
-	messages                                                                                                                                                                                                                                   []db.Message
-	wantTurnPromptContains, wantTurnPromptExcludes                                                                                                                                                                                             map[int][]string
+	name, channelID, seedSessionID, botUserID, classifierJSON, runnerConvID, runnerResponse, wantSavedSession, wantFinalStatus, wantDeliveredText, wantPromptPrefix, wantClassifierPromptContains, wantAlertTitle, wantAlertChannel string
+	messages                                                                                                                                                                                                                        []db.Message
+	historyMessages                                                                                                                                                                                                                 []HistoryMessage
+	runnerSteps                                                                                                                                                                                                                     []mockRunnerStep
+	seedTranscripts                                                                                                                                                                                                                 []string
+	channelInstructions                                                                                                                                                                                                             map[string]string
+	policy                                                                                                                                                                                                                          config.ChannelPolicy
+	cachedChannels                                                                                                                                                                                                                  []*discordgo.Channel
+	wantMsgErrors, wantMsgResponses                                                                                                                                                                                                 map[string]string
+	wantPromptContains, wantPromptExcludes, wantPassedSessions, wantAlertBodyContains                                                                                                                                               []string
+	seedSession, checkClassifierCalls, checkDeliveryCalls, preserveSessionInRunner, sequentialBursts, checkSavedSession, enableHistoryFetcher, wantPassedInitialSession, wantSingleInstructionTagPerPrompt, wantNoStubDir           bool
+	rotateBeforeTurn, seedTurnCount, maxAttempts, wantClassifierCalls, wantRunnerCalls, wantDeliveryCalls, wantTurnCount, wantMinTypingCalls, wantMaxTypingCalls                                                                    int
+	checkMaxTypingCalls                                                                                                                                                                                                             bool
+	wantTurnPromptContains, wantTurnPromptExcludes                                                                                                                                                                                  map[int][]string
 }
 
-func runBurstTestCase(t *testing.T, tc burstTestCase) {
+func setupBurstTestEnv(t *testing.T, tc burstTestCase, tmpDir string, store *dbtest.FakeStore, sessMgr *session.Manager) string {
 	t.Helper()
-	tmpDir, store := t.TempDir(), setupTestStore(t)
-	sessMgr := session.New(tmpDir, "")
-
 	if len(tc.channelInstructions) > 0 {
 		channelsDir := filepath.Join(tmpDir, "channels")
 		_ = os.MkdirAll(channelsDir, 0o755)
-		for fname, content := range tc.channelInstructions {
-			_ = os.WriteFile(filepath.Join(channelsDir, fname), []byte(content), 0o644)
+		for fname, fileContent := range tc.channelInstructions {
+			_ = os.WriteFile(filepath.Join(channelsDir, fname), []byte(fileContent), 0o644)
 		}
 		oldDirs := config.ChannelInstructionsDirs
 		config.ChannelInstructionsDirs = []string{channelsDir}
-		defer func() { config.ChannelInstructionsDirs = oldDirs }()
+		t.Cleanup(func() { config.ChannelInstructionsDirs = oldDirs })
 	}
 	for _, ch := range tc.cachedChannels {
 		CacheDiscordChannel(ch)
 		chID := ch.ID
-		defer InvalidateChannelCache(chID)
+		t.Cleanup(func() { InvalidateChannelCache(chID) })
 	}
 
 	var initialSessionID string
@@ -609,6 +648,183 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 	for range tc.seedTurnCount {
 		_, _ = incrementSessionTurnCount(store, tc.channelID)
 	}
+	return initialSessionID
+}
+
+func assertBurstAlertAndOutputs(t *testing.T, tc burstTestCase, alertTitle, alertChannel, alertBody string, classifierCalls, runnerCalls, deliveryCalls, typingCalls int, passedSessions []string, deliveredText, passedSessID, initialSessionID string) {
+	t.Helper()
+	if tc.wantAlertTitle != "" {
+		if alertTitle != tc.wantAlertTitle {
+			t.Errorf("alertTitle = %q, want %q", alertTitle, tc.wantAlertTitle)
+		}
+		if tc.wantAlertChannel != "" && alertChannel != tc.wantAlertChannel {
+			t.Errorf("alertChannel = %q, want %q", alertChannel, tc.wantAlertChannel)
+		}
+		assertContainsAll(t, alertBody, tc.wantAlertBodyContains, "alertBody")
+	}
+	if tc.checkClassifierCalls && classifierCalls != tc.wantClassifierCalls {
+		t.Errorf("classifierCalls = %d, want %d", classifierCalls, tc.wantClassifierCalls)
+	}
+	if runnerCalls != tc.wantRunnerCalls {
+		t.Errorf("runnerCalls = %d, want %d", runnerCalls, tc.wantRunnerCalls)
+	}
+	if len(tc.wantPassedSessions) > 0 && !reflect.DeepEqual(passedSessions, tc.wantPassedSessions) {
+		t.Errorf("passedSessions = %v, want %v", passedSessions, tc.wantPassedSessions)
+	}
+	if tc.checkDeliveryCalls && deliveryCalls != tc.wantDeliveryCalls {
+		t.Errorf("deliveryCalls = %d, want %d", deliveryCalls, tc.wantDeliveryCalls)
+	}
+	if tc.wantDeliveredText != "" && deliveredText != tc.wantDeliveredText {
+		t.Errorf("deliveredText = %q, want %q", deliveredText, tc.wantDeliveredText)
+	}
+	if tc.wantMinTypingCalls > 0 && typingCalls < tc.wantMinTypingCalls {
+		t.Errorf("typingCalls = %d, want >= %d", typingCalls, tc.wantMinTypingCalls)
+	}
+	if tc.checkMaxTypingCalls && typingCalls > tc.wantMaxTypingCalls {
+		t.Errorf("typingCalls = %d, want <= %d", typingCalls, tc.wantMaxTypingCalls)
+	}
+	if tc.wantPassedInitialSession && passedSessID != initialSessionID {
+		t.Errorf("passedSessID = %q, want %q", passedSessID, initialSessionID)
+	}
+}
+
+func assertBurstPrompts(t *testing.T, tc burstTestCase, receivedPrompt, capturedClassifierPrompt string, capturedPrompts []string) {
+	t.Helper()
+	if tc.wantPromptPrefix != "" && !strings.HasPrefix(receivedPrompt, tc.wantPromptPrefix) {
+		t.Errorf("prompt prefix missing %q", tc.wantPromptPrefix)
+	}
+	if tc.wantSingleInstructionTagPerPrompt {
+		for i, p := range capturedPrompts {
+			if c := strings.Count(p, "<CHANNEL_INSTRUCTIONS>"); c != 1 {
+				t.Errorf("attempt %d: <CHANNEL_INSTRUCTIONS> = %d", i+1, c)
+			}
+			if c := strings.Count(p, "</CHANNEL_INSTRUCTIONS>"); c != 1 {
+				t.Errorf("attempt %d: </CHANNEL_INSTRUCTIONS> = %d", i+1, c)
+			}
+		}
+	}
+	assertContainsAll(t, receivedPrompt, tc.wantPromptContains, "runner prompt")
+	assertExcludesAll(t, receivedPrompt, tc.wantPromptExcludes, "runner prompt")
+
+	for turnIdx, subs := range tc.wantTurnPromptContains {
+		if turnIdx >= len(capturedPrompts) {
+			t.Fatalf("expected turn %d prompt, saw %d turns", turnIdx, len(capturedPrompts))
+		}
+		assertContainsAll(t, capturedPrompts[turnIdx], subs, fmt.Sprintf("turn %d prompt", turnIdx))
+	}
+	for turnIdx, subs := range tc.wantTurnPromptExcludes {
+		if turnIdx >= len(capturedPrompts) {
+			t.Fatalf("expected turn %d prompt, saw %d turns", turnIdx, len(capturedPrompts))
+		}
+		assertExcludesAll(t, capturedPrompts[turnIdx], subs, fmt.Sprintf("turn %d prompt", turnIdx))
+	}
+	if tc.wantClassifierPromptContains != "" && !strings.Contains(capturedClassifierPrompt, tc.wantClassifierPromptContains) {
+		t.Errorf("classifier prompt missing %q", tc.wantClassifierPromptContains)
+	}
+}
+
+func assertBurstState(t *testing.T, tc burstTestCase, store db.Store, tmpDir string, burst []db.Message) {
+	t.Helper()
+	if tc.checkSavedSession {
+		if s, _ := getSessionID(store, tc.channelID); s != tc.wantSavedSession {
+			t.Errorf("savedSession = %q, want %q", s, tc.wantSavedSession)
+		}
+	}
+	if tc.wantNoStubDir {
+		for _, root := range []string{"/data/brain/" + tc.channelID, filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", tc.channelID), filepath.Join(tmpDir, ".gemini", "antigravity", "brain", tc.channelID)} {
+			if fi, err := os.Stat(root); err == nil {
+				t.Errorf("unexpected dir at %s (isDir=%t)", root, fi.IsDir())
+			}
+		}
+	}
+	if turnCount, _ := getSessionTurnCount(store, tc.channelID); turnCount != tc.wantTurnCount {
+		t.Errorf("turnCount = %d, want %d", turnCount, tc.wantTurnCount)
+	}
+	wantStatus := tc.wantFinalStatus
+	if wantStatus == "" {
+		wantStatus = db.StatusCompleted
+	}
+	for _, m := range burst {
+		saved, err := getMessage(store, m.ID)
+		if err != nil || saved == nil {
+			t.Fatalf("get message %s: %v", m.ID, err)
+		}
+		if saved.Status != wantStatus {
+			t.Errorf("message %s status = %s, want %s", m.ID, saved.Status, wantStatus)
+		}
+		if wantErr, ok := tc.wantMsgErrors[m.ID]; ok && !strings.Contains(saved.ErrorMessage, wantErr) {
+			t.Errorf("message %s error = %q, want %q", m.ID, saved.ErrorMessage, wantErr)
+		}
+		if wantResp, ok := tc.wantMsgResponses[m.ID]; ok && saved.ResponseText != wantResp {
+			t.Errorf("message %s response = %q, want %q", m.ID, saved.ResponseText, wantResp)
+		}
+	}
+}
+
+func makeBurstTestConfig(tc burstTestCase, store db.Store, sessMgr *session.Manager, dg *discordgo.Session, cls *classifier.Classifier, tmpDir, initialSessionID string, mu *sync.Mutex, runnerCalls, deliveryCalls, typingCalls *int, receivedPrompt, deliveredText, passedSessID *string, capturedPrompts, passedSessions *[]string, alertChannel, alertTitle, alertBody *string, alertReceived chan struct{}) WorkerPoolConfig {
+	cfg := WorkerPoolConfig{
+		Store: store, SessionManager: sessMgr, DiscordSession: dg, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
+		MaxAttempts: tc.maxAttempts, Classifier: cls,
+		SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, body string) error {
+			mu.Lock()
+			*alertChannel, *alertTitle, *alertBody = channelNameOrID, title, body
+			mu.Unlock()
+			select {
+			case alertReceived <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			idx := *runnerCalls
+			*runnerCalls++
+			*receivedPrompt = prompt
+			*capturedPrompts = append(*capturedPrompts, prompt)
+			*passedSessID = sessID
+			*passedSessions = append(*passedSessions, sessID)
+			mu.Unlock()
+			if len(tc.runnerSteps) > 0 {
+				if idx >= len(tc.runnerSteps) {
+					idx = len(tc.runnerSteps) - 1
+				}
+				return execMockRunnerStep(tc.runnerSteps[idx], tmpDir, sessID)
+			}
+			convID := tc.runnerConvID
+			if tc.preserveSessionInRunner && convID == "" {
+				convID = initialSessionID
+			}
+			return mockJSONResponse(convID, tc.runnerResponse), "", 0, nil
+		},
+		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			*deliveryCalls++
+			*deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
+			mu.Lock()
+			*typingCalls++
+			mu.Unlock()
+			return func() {}
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy { return tc.policy },
+	}
+	if tc.enableHistoryFetcher || len(tc.historyMessages) > 0 {
+		cfg.HistoryFetcher = func(ctx context.Context, cID, beforeID string, limit int) ([]HistoryMessage, error) {
+			return tc.historyMessages, nil
+		}
+	}
+	return cfg
+}
+
+func runBurstTestCase(t *testing.T, tc burstTestCase) {
+	t.Helper()
+	tmpDir, store := t.TempDir(), setupTestStore(t)
+	sessMgr := session.New(tmpDir, "")
+
+	initialSessionID := setupBurstTestEnv(t, tc, tmpDir, store, sessMgr)
 
 	var mu sync.Mutex
 	var classifierCalls, runnerCalls, deliveryCalls, typingCalls int
@@ -635,60 +851,7 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 		dg.State.User = &discordgo.User{ID: tc.botUserID, Username: "Aerial"}
 	}
 
-	cfg := WorkerPoolConfig{
-		Store: store, SessionManager: sessMgr, DiscordSession: dg, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
-		MaxAttempts: tc.maxAttempts, Classifier: cls,
-		SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, body string) error {
-			mu.Lock()
-			alertChannel, alertTitle, alertBody = channelNameOrID, title, body
-			mu.Unlock()
-			select {
-			case alertReceived <- struct{}{}:
-			default:
-			}
-			return nil
-		},
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			idx := runnerCalls
-			runnerCalls++
-			receivedPrompt = prompt
-			capturedPrompts = append(capturedPrompts, prompt)
-			passedSessID = sessID
-			passedSessions = append(passedSessions, sessID)
-			mu.Unlock()
-			if len(tc.runnerSteps) > 0 {
-				if idx >= len(tc.runnerSteps) {
-					idx = len(tc.runnerSteps) - 1
-				}
-				return execMockRunnerStep(tc.runnerSteps[idx], tmpDir, sessID)
-			}
-			convID := tc.runnerConvID
-			if tc.preserveSessionInRunner && convID == "" {
-				convID = initialSessionID
-			}
-			return mockJSONResponse(convID, tc.runnerResponse), "", 0, nil
-		},
-		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveryCalls++
-			deliveredText = text
-			mu.Unlock()
-			return nil
-		},
-		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
-			mu.Lock()
-			typingCalls++
-			mu.Unlock()
-			return func() {}
-		},
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy { return tc.policy },
-	}
-	if tc.enableHistoryFetcher || len(tc.historyMessages) > 0 {
-		cfg.HistoryFetcher = func(ctx context.Context, cID, beforeID string, limit int) ([]HistoryMessage, error) {
-			return tc.historyMessages, nil
-		}
-	}
+	cfg := makeBurstTestConfig(tc, store, sessMgr, dg, cls, tmpDir, initialSessionID, &mu, &runnerCalls, &deliveryCalls, &typingCalls, &receivedPrompt, &deliveredText, &passedSessID, &capturedPrompts, &passedSessions, &alertChannel, &alertTitle, &alertBody, alertReceived)
 
 	pool := NewWorkerPool(cfg)
 	if tc.wantAlertTitle != "" {
@@ -734,104 +897,9 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if tc.wantAlertTitle != "" {
-		if alertTitle != tc.wantAlertTitle {
-			t.Errorf("alertTitle = %q, want %q", alertTitle, tc.wantAlertTitle)
-		}
-		if tc.wantAlertChannel != "" && alertChannel != tc.wantAlertChannel {
-			t.Errorf("alertChannel = %q, want %q", alertChannel, tc.wantAlertChannel)
-		}
-		assertContainsAll(t, alertBody, tc.wantAlertBodyContains, "alertBody")
-	}
-	if tc.checkClassifierCalls && classifierCalls != tc.wantClassifierCalls {
-		t.Errorf("classifierCalls = %d, want %d", classifierCalls, tc.wantClassifierCalls)
-	}
-	if runnerCalls != tc.wantRunnerCalls {
-		t.Errorf("runnerCalls = %d, want %d", runnerCalls, tc.wantRunnerCalls)
-	}
-	if len(tc.wantPassedSessions) > 0 && !reflect.DeepEqual(passedSessions, tc.wantPassedSessions) {
-		t.Errorf("passedSessions = %v, want %v", passedSessions, tc.wantPassedSessions)
-	}
-	if tc.checkDeliveryCalls && deliveryCalls != tc.wantDeliveryCalls {
-		t.Errorf("deliveryCalls = %d, want %d", deliveryCalls, tc.wantDeliveryCalls)
-	}
-	if tc.wantDeliveredText != "" && deliveredText != tc.wantDeliveredText {
-		t.Errorf("deliveredText = %q, want %q", deliveredText, tc.wantDeliveredText)
-	}
-	if tc.wantMinTypingCalls > 0 && typingCalls < tc.wantMinTypingCalls {
-		t.Errorf("typingCalls = %d, want >= %d", typingCalls, tc.wantMinTypingCalls)
-	}
-	if tc.checkMaxTypingCalls && typingCalls > tc.wantMaxTypingCalls {
-		t.Errorf("typingCalls = %d, want <= %d", typingCalls, tc.wantMaxTypingCalls)
-	}
-	if tc.wantPassedInitialSession && passedSessID != initialSessionID {
-		t.Errorf("passedSessID = %q, want %q", passedSessID, initialSessionID)
-	}
-	if tc.wantPromptPrefix != "" && !strings.HasPrefix(receivedPrompt, tc.wantPromptPrefix) {
-		t.Errorf("prompt prefix missing %q", tc.wantPromptPrefix)
-	}
-	if tc.wantSingleInstructionTagPerPrompt {
-		for i, p := range capturedPrompts {
-			if c := strings.Count(p, "<CHANNEL_INSTRUCTIONS>"); c != 1 {
-				t.Errorf("attempt %d: <CHANNEL_INSTRUCTIONS> = %d", i+1, c)
-			}
-			if c := strings.Count(p, "</CHANNEL_INSTRUCTIONS>"); c != 1 {
-				t.Errorf("attempt %d: </CHANNEL_INSTRUCTIONS> = %d", i+1, c)
-			}
-		}
-	}
-	assertContainsAll(t, receivedPrompt, tc.wantPromptContains, "runner prompt")
-	assertExcludesAll(t, receivedPrompt, tc.wantPromptExcludes, "runner prompt")
-
-	for turnIdx, subs := range tc.wantTurnPromptContains {
-		if turnIdx >= len(capturedPrompts) {
-			t.Fatalf("expected turn %d prompt, saw %d turns", turnIdx, len(capturedPrompts))
-		}
-		assertContainsAll(t, capturedPrompts[turnIdx], subs, fmt.Sprintf("turn %d prompt", turnIdx))
-	}
-	for turnIdx, subs := range tc.wantTurnPromptExcludes {
-		if turnIdx >= len(capturedPrompts) {
-			t.Fatalf("expected turn %d prompt, saw %d turns", turnIdx, len(capturedPrompts))
-		}
-		assertExcludesAll(t, capturedPrompts[turnIdx], subs, fmt.Sprintf("turn %d prompt", turnIdx))
-	}
-	if tc.wantClassifierPromptContains != "" && !strings.Contains(capturedClassifierPrompt, tc.wantClassifierPromptContains) {
-		t.Errorf("classifier prompt missing %q", tc.wantClassifierPromptContains)
-	}
-	if tc.checkSavedSession {
-		if s, _ := getSessionID(store, tc.channelID); s != tc.wantSavedSession {
-			t.Errorf("savedSession = %q, want %q", s, tc.wantSavedSession)
-		}
-	}
-	if tc.wantNoStubDir {
-		for _, root := range []string{"/data/brain/" + tc.channelID, filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", tc.channelID), filepath.Join(tmpDir, ".gemini", "antigravity", "brain", tc.channelID)} {
-			if fi, err := os.Stat(root); err == nil {
-				t.Errorf("unexpected dir at %s (isDir=%t)", root, fi.IsDir())
-			}
-		}
-	}
-	if turnCount, _ := getSessionTurnCount(store, tc.channelID); turnCount != tc.wantTurnCount {
-		t.Errorf("turnCount = %d, want %d", turnCount, tc.wantTurnCount)
-	}
-	wantStatus := tc.wantFinalStatus
-	if wantStatus == "" {
-		wantStatus = db.StatusCompleted
-	}
-	for _, m := range burst {
-		saved, err := getMessage(store, m.ID)
-		if err != nil || saved == nil {
-			t.Fatalf("get message %s: %v", m.ID, err)
-		}
-		if saved.Status != wantStatus {
-			t.Errorf("message %s status = %s, want %s", m.ID, saved.Status, wantStatus)
-		}
-		if wantErr, ok := tc.wantMsgErrors[m.ID]; ok && !strings.Contains(saved.ErrorMessage, wantErr) {
-			t.Errorf("message %s error = %q, want %q", m.ID, saved.ErrorMessage, wantErr)
-		}
-		if wantResp, ok := tc.wantMsgResponses[m.ID]; ok && saved.ResponseText != wantResp {
-			t.Errorf("message %s response = %q, want %q", m.ID, saved.ResponseText, wantResp)
-		}
-	}
+	assertBurstAlertAndOutputs(t, tc, alertTitle, alertChannel, alertBody, classifierCalls, runnerCalls, deliveryCalls, typingCalls, passedSessions, deliveredText, passedSessID, initialSessionID)
+	assertBurstPrompts(t, tc, receivedPrompt, capturedClassifierPrompt, capturedPrompts)
+	assertBurstState(t, tc, store, tmpDir, burst)
 }
 
 func TestWorkerPool_ScopeKeyAndPreviousSessionFallback(t *testing.T) {
