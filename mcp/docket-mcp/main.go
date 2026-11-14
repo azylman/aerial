@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"maps"
 	"net"
@@ -22,25 +21,42 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/ollama"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/google/jsonschema-go/jsonschema"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Server encapsulates HTTP routes, Vikunja client, and SQL task store for docket-mcp.
 type Server struct {
-	cfg          *Config
-	vikunja      *VikunjaClient
-	store        TaskStore
-	ollamaClient *ollama.Client
+	cfg           *Config
+	vikunja       *VikunjaClient
+	store         TaskStore
+	ollamaClient  *ollama.Client
+	streamHandler http.Handler
 }
 
-// NewServer initializes a Server instance.
+// serverInstructions is sent on initialize so clients that defer tool schemas
+// still learn how the task tools fit together.
+const serverInstructions = `Task IDs are integers returned by create, ready, list and search.
+- Next work: ready lists open tasks whose blockers are all completed (a wont_do blocker still blocks). Ready subtasks nest only under a ready parent; pass parent_id to see them under a blocked one. list browses by status or parent; show returns one task with relations and comments.
+- Run search before create to avoid duplicates.
+- create sets parent_id, blocks, blocked_by and related at once; link adds or (remove=true) drops edges later. update edits only title and description; status changes go through close.
+- close completed is refused while open blockers or open direct subtasks remain. close wont_do also closes the open subtree and is refused if any of it blocks an open task outside it. close returns unblocked_ids.`
+
+// NewServer initializes a Server instance and its MCP tool handler.
 func NewServer(cfg *Config, vikunja *VikunjaClient, store TaskStore, ollamaClient *ollama.Client) *Server {
-	return &Server{
+	s := &Server{
 		cfg:          cfg,
 		vikunja:      vikunja,
 		store:        store,
 		ollamaClient: ollamaClient,
 	}
+	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "docket-mcp", Version: "1.0.0"}, &mcp.ServerOptions{Instructions: serverInstructions})
+	s.registerTools(mcpServer)
+	s.streamHandler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return mcpServer
+	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	return s
 }
 
 // HandleHealth handles GET and HEAD readiness requests.
@@ -53,90 +69,101 @@ func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// HandleMCPStreamable processes MCP JSON-RPC 2.0 requests over HTTP.
+// HandleMCPStreamable serves MCP over streamable HTTP, accepting legacy docket_-prefixed tool names.
 func (s *Server) HandleMCPStreamable(w http.ResponseWriter, r *http.Request) {
-	streamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err != nil {
-			s.writeRPCError(w, nil, -32700, "Failed to read request body")
-			return
-		}
+	httpkit.ServeMCPStream(w, r, s.streamHandler, "docket-mcp ready\n", "docket_", "")
+}
 
-		var req JSONRPCRequest
-		if err := json.Unmarshal(bodyBytes, &req); err != nil {
-			s.writeRPCError(w, nil, -32700, "Parse error")
-			return
-		}
+var taskStatusFilters = []any{"open", "completed", "wont_do", "all"}
 
-		reqID := req.ID
-		if len(reqID) == 0 {
-			reqID = []byte("null")
-		}
+func (s *Server) registerTools(srv *mcp.Server) {
+	listSchema := inputSchema[ListArgs]()
+	setEnum(listSchema, "status", `"open"`, taskStatusFilters...)
+	searchSchema := inputSchema[SearchArgs]()
+	setEnum(searchSchema, "status", `"open"`, taskStatusFilters...)
+	searchSchema.Properties["limit"].Default = json.RawMessage(`10`)
+	linkSchema := inputSchema[LinkArgs]()
+	setEnum(linkSchema, "type", "", "parent", "blocks", "related")
+	linkSchema.Properties["remove"].Default = json.RawMessage(`false`)
+	closeSchema := inputSchema[CloseArgs]()
+	setEnum(closeSchema, "resolution", "", "completed", "wont_do")
 
-		switch req.Method {
-		case "initialize":
-			resp := map[string]any{
-				"protocolVersion": "2024-11-05",
-				"capabilities": map[string]any{
-					"tools": map[string]any{},
-				},
-				"serverInfo": map[string]any{
-					"name":    "docket-mcp",
-					"version": "1.0.0",
-				},
-			}
-			s.writeRPCResult(w, reqID, resp)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "ready",
+		Description: "Returns unblocked open tasks ready for execution, top-down with subtasks nested in ready_subtasks. If parent_id is omitted, returns top-level tasks. If parent_id is provided, returns ready subtasks under that parent.",
+		InputSchema: inputSchema[ReadyArgs](),
+	}, s.toolReady)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "list",
+		Description: "List tasks filtered by status ('open', 'completed', 'wont_do', 'all', default 'open') and optional parent_id.",
+		InputSchema: listSchema,
+	}, s.toolList)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "search",
+		Description: "Search tasks using hybrid semantic and keyword search (Weighted RRF) with status pre-filtering.",
+		InputSchema: searchSchema,
+	}, s.toolSearch)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "show",
+		Description: "Show full details of a task including parent, subtasks, blockers, blocked tasks, related tasks, and comments.",
+		InputSchema: inputSchema[ShowArgs](),
+	}, s.toolShow)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "create",
+		Description: "Create a new task with optional description, parent, blocker relations, and related links; any unknown referenced task ID rejects the create.",
+		InputSchema: inputSchema[CreateArgs](),
+	}, s.toolCreate)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "update",
+		Description: "Update task title and/or description.",
+		InputSchema: inputSchema[UpdateArgs](),
+	}, s.toolUpdate)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "comment",
+		Description: "Add a comment to a task.",
+		InputSchema: inputSchema[CommentArgs](),
+	}, s.toolComment)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "link",
+		Description: "Create or remove a relation between tasks ('parent', 'blocks', 'related'); new parent and blocks edges that would form a cycle are rejected.",
+		InputSchema: linkSchema,
+	}, s.toolLink)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "close",
+		Description: "Close a task with resolution 'completed' or 'wont_do' and a required reason. Validates no open blockers/subtasks for completed, cascades for wont_do.",
+		InputSchema: closeSchema,
+	}, s.toolClose)
+}
 
-		case "notifications/initialized":
-			w.WriteHeader(http.StatusNoContent)
-
-		case "ping":
-			s.writeRPCResult(w, reqID, map[string]any{})
-
-		case "tools/list":
-			s.writeRPCResult(w, reqID, map[string]any{
-				"tools": Tools,
-			})
-
-		case "tools/call":
-			var p ToolCallParams
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				s.writeRPCError(w, reqID, -32602, "Invalid params")
-				return
-			}
-			result, isErr := s.executeTool(r.Context(), p.Name, p.Arguments)
-			s.writeRPCResult(w, reqID, ToolCallResult{
-				Content: []ContentItem{{Type: "text", Text: result}},
-				IsError: isErr,
-			})
-
-		default:
-			s.writeRPCError(w, reqID, -32601, "Method not found: "+req.Method)
-		}
+// addTextTool registers a tool whose logic returns its result text and whether it is an error.
+func addTextTool[In any](srv *mcp.Server, tool *mcp.Tool, run func(context.Context, In) (string, bool)) {
+	mcp.AddTool(srv, tool, func(ctx context.Context, _ *mcp.CallToolRequest, args In) (*mcp.CallToolResult, any, error) {
+		text, isErr := run(ctx, args)
+		return &mcp.CallToolResult{IsError: isErr, Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
 	})
-
-	httpkit.ServeMCPStream(w, r, streamHandler, "docket-mcp ready\n", "docket_", "")
 }
 
-func (s *Server) writeRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {
-	resp := JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result:  result,
+// inputSchema infers T's input schema and collapses the ["null", X] unions inferred
+// for pointer and slice fields to plain X, matching the types clients have always seen.
+func inputSchema[T any]() *jsonschema.Schema {
+	schema, err := jsonschema.For[T](nil)
+	if err != nil {
+		panic(fmt.Sprintf("docket-mcp: infer input schema: %v", err))
 	}
-	httpkit.WriteJSON(w, http.StatusOK, resp)
+	for _, prop := range schema.Properties {
+		if len(prop.Types) == 2 && prop.Types[0] == "null" {
+			prop.Type, prop.Types = prop.Types[1], nil
+		}
+	}
+	return schema
 }
 
-func (s *Server) writeRPCError(w http.ResponseWriter, id json.RawMessage, code int, msg string) {
-	resp := JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error: &JSONRPCError{
-			Code:    code,
-			Message: msg,
-		},
+// setEnum restricts a string property to values, with an optional JSON-encoded default.
+func setEnum(schema *jsonschema.Schema, prop, defaultJSON string, values ...any) {
+	schema.Properties[prop].Enum = values
+	if defaultJSON != "" {
+		schema.Properties[prop].Default = json.RawMessage(defaultJSON)
 	}
-	httpkit.WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) loadGraph(ctx context.Context) (map[int64]TaskNode, error) {
@@ -213,42 +240,12 @@ func isVikunjaNotFound(err error) bool {
 	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound
 }
 
-func (s *Server) executeTool(ctx context.Context, name string, argsRaw json.RawMessage) (string, bool) {
-	cleanName := strings.TrimPrefix(name, "docket_")
-	switch cleanName {
-	case "ready":
-		return s.toolReady(ctx, argsRaw)
-	case "list":
-		return s.toolList(ctx, argsRaw)
-	case "search":
-		return s.toolSearch(ctx, argsRaw)
-	case "show":
-		return s.toolShow(ctx, argsRaw)
-	case "create":
-		return s.toolCreate(ctx, argsRaw)
-	case "update":
-		return s.toolUpdate(ctx, argsRaw)
-	case "comment":
-		return s.toolComment(ctx, argsRaw)
-	case "link":
-		return s.toolLink(ctx, argsRaw)
-	case "close":
-		return s.toolClose(ctx, argsRaw)
-	default:
-		return "Unknown tool: " + name, true
-	}
+// ReadyArgs are the ready tool arguments.
+type ReadyArgs struct {
+	ParentID *int64 `json:"parent_id,omitempty" jsonschema:"Optional parent task ID to scope ready subtasks under."`
 }
 
-func (s *Server) toolReady(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		ParentID *int64 `json:"parent_id"`
-	}
-	if len(argsRaw) > 0 {
-		if err := json.Unmarshal(argsRaw, &args); err != nil {
-			return "invalid arguments: " + err.Error(), true
-		}
-	}
-
+func (s *Server) toolReady(ctx context.Context, args ReadyArgs) (string, bool) {
 	nodes, err := s.loadGraph(ctx)
 	if err != nil {
 		return err.Error(), true
@@ -265,18 +262,13 @@ func (s *Server) toolReady(ctx context.Context, argsRaw json.RawMessage) (string
 // ErrTaskNotFound reports that a task id is absent from the project graph.
 var ErrTaskNotFound = errors.New("not found in project graph")
 
-func (s *Server) toolList(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		Status   string `json:"status"`
-		ParentID *int64 `json:"parent_id"`
-	}
-	args.Status = "open"
-	if len(argsRaw) > 0 {
-		if err := json.Unmarshal(argsRaw, &args); err != nil {
-			return "invalid arguments: " + err.Error(), true
-		}
-	}
+// ListArgs are the list tool arguments; the schema defaults status to "open".
+type ListArgs struct {
+	Status   string `json:"status,omitempty" jsonschema:"Status filter: 'open', 'completed', 'wont_do', 'all'"`
+	ParentID *int64 `json:"parent_id,omitempty" jsonschema:"Optional parent task ID to filter by."`
+}
 
+func (s *Server) toolList(ctx context.Context, args ListArgs) (string, bool) {
 	summaries, err := s.listTasks(ctx, args.Status, args.ParentID)
 	if err != nil {
 		return err.Error(), true
@@ -317,15 +309,15 @@ func (s *Server) listTasks(ctx context.Context, status string, parentID *int64) 
 	return summaries, nil
 }
 
-func (s *Server) toolSearch(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		Query  string `json:"query"`
-		Status string `json:"status"`
-		Limit  int    `json:"limit"`
-	}
-	args.Status = "open"
-	args.Limit = 10
-	if err := json.Unmarshal(argsRaw, &args); err != nil || strings.TrimSpace(args.Query) == "" {
+// SearchArgs are the search tool arguments; the schema defaults status to "open" and limit to 10.
+type SearchArgs struct {
+	Query  string `json:"query" jsonschema:"Search query text."`
+	Status string `json:"status,omitempty" jsonschema:"Status filter: 'open', 'completed', 'wont_do', 'all' (default 'open')"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum number of results to return (default 10)."`
+}
+
+func (s *Server) toolSearch(ctx context.Context, args SearchArgs) (string, bool) {
+	if strings.TrimSpace(args.Query) == "" {
 		return "parameter 'query' is required", true
 	}
 
@@ -362,11 +354,13 @@ func (s *Server) searchTasks(ctx context.Context, query, status string, limit in
 	return results, nil
 }
 
-func (s *Server) toolShow(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		ID int64 `json:"id"`
-	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || args.ID <= 0 {
+// ShowArgs are the show tool arguments.
+type ShowArgs struct {
+	ID int64 `json:"id" jsonschema:"Task ID to show."`
+}
+
+func (s *Server) toolShow(ctx context.Context, args ShowArgs) (string, bool) {
+	if args.ID <= 0 {
 		return "parameter 'id' must be a positive integer", true
 	}
 
@@ -470,16 +464,18 @@ func (s *Server) wireCreateRelations(ctx context.Context, taskID int64, parentID
 	}
 }
 
-func (s *Server) toolCreate(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		Title       string  `json:"title"`
-		Description string  `json:"description"`
-		ParentID    *int64  `json:"parent_id"`
-		Blocks      []int64 `json:"blocks"`
-		BlockedBy   []int64 `json:"blocked_by"`
-		Related     []int64 `json:"related"`
-	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || strings.TrimSpace(args.Title) == "" {
+// CreateArgs are the create tool arguments.
+type CreateArgs struct {
+	Title       string  `json:"title" jsonschema:"Task title (required)."`
+	Description string  `json:"description,omitempty" jsonschema:"Task description in markdown."`
+	ParentID    *int64  `json:"parent_id,omitempty" jsonschema:"Optional parent task ID."`
+	Blocks      []int64 `json:"blocks,omitempty" jsonschema:"Optional task IDs that this new task blocks."`
+	BlockedBy   []int64 `json:"blocked_by,omitempty" jsonschema:"Optional task IDs that block this new task."`
+	Related     []int64 `json:"related,omitempty" jsonschema:"Optional related task IDs."`
+}
+
+func (s *Server) toolCreate(ctx context.Context, args CreateArgs) (string, bool) {
+	if strings.TrimSpace(args.Title) == "" {
 		return "parameter 'title' cannot be empty", true
 	}
 
@@ -525,13 +521,15 @@ func (s *Server) toolCreate(ctx context.Context, argsRaw json.RawMessage) (strin
 	return string(data), false
 }
 
-func (s *Server) toolUpdate(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		ID          int64   `json:"id"`
-		Title       *string `json:"title"`
-		Description *string `json:"description"`
-	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || args.ID <= 0 {
+// UpdateArgs are the update tool arguments; nil fields are left unchanged.
+type UpdateArgs struct {
+	ID          int64   `json:"id" jsonschema:"Task ID to update."`
+	Title       *string `json:"title,omitempty" jsonschema:"New task title."`
+	Description *string `json:"description,omitempty" jsonschema:"New task description."`
+}
+
+func (s *Server) toolUpdate(ctx context.Context, args UpdateArgs) (string, bool) {
+	if args.ID <= 0 {
 		return "parameter 'id' must be a positive integer", true
 	}
 
@@ -586,12 +584,14 @@ func (s *Server) toolUpdate(ctx context.Context, argsRaw json.RawMessage) (strin
 	return string(data), false
 }
 
-func (s *Server) toolComment(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		ID   int64  `json:"id"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || args.ID <= 0 || strings.TrimSpace(args.Text) == "" {
+// CommentArgs are the comment tool arguments.
+type CommentArgs struct {
+	ID   int64  `json:"id" jsonschema:"Task ID to comment on."`
+	Text string `json:"text" jsonschema:"Comment text."`
+}
+
+func (s *Server) toolComment(ctx context.Context, args CommentArgs) (string, bool) {
+	if args.ID <= 0 || strings.TrimSpace(args.Text) == "" {
 		return "parameters 'id' and non-empty 'text' are required", true
 	}
 
@@ -601,14 +601,16 @@ func (s *Server) toolComment(ctx context.Context, argsRaw json.RawMessage) (stri
 	return fmt.Sprintf("comment added to task %d", args.ID), false
 }
 
-func (s *Server) toolLink(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		ID       int64  `json:"id"`
-		TargetID int64  `json:"target_id"`
-		Type     string `json:"type"`
-		Remove   bool   `json:"remove"`
-	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || args.ID <= 0 || args.TargetID <= 0 {
+// LinkArgs are the link tool arguments.
+type LinkArgs struct {
+	ID       int64  `json:"id" jsonschema:"Source task ID."`
+	TargetID int64  `json:"target_id" jsonschema:"Target task ID."`
+	Type     string `json:"type" jsonschema:"Relation type: 'parent', 'blocks', or 'related'."`
+	Remove   bool   `json:"remove,omitempty" jsonschema:"Whether to remove the relation (default false)."`
+}
+
+func (s *Server) toolLink(ctx context.Context, args LinkArgs) (string, bool) {
+	if args.ID <= 0 || args.TargetID <= 0 {
 		return "parameters 'id' and 'target_id' must be positive integers", true
 	}
 	if args.ID == args.TargetID {
@@ -703,13 +705,15 @@ func (s *Server) closeWontDo(ctx context.Context, id int64, reason string, openS
 	return nil
 }
 
-func (s *Server) toolClose(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		ID         int64  `json:"id"`
-		Resolution string `json:"resolution"`
-		Reason     string `json:"reason"`
-	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || args.ID <= 0 {
+// CloseArgs are the close tool arguments.
+type CloseArgs struct {
+	ID         int64  `json:"id" jsonschema:"Task ID to close."`
+	Resolution string `json:"resolution" jsonschema:"Resolution: 'completed' or 'wont_do'."`
+	Reason     string `json:"reason" jsonschema:"Required explanation for closing the task."`
+}
+
+func (s *Server) toolClose(ctx context.Context, args CloseArgs) (string, bool) {
+	if args.ID <= 0 {
 		return "parameter 'id' must be a positive integer", true
 	}
 	if strings.TrimSpace(args.Reason) == "" {

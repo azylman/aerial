@@ -566,3 +566,56 @@ func ShapeSearchMessagesResponse(rawResp []byte, offset int) ([]byte, error) {
 	resp.Result = newResBytes
 	return marshalFn(resp)
 }
+
+// ServerInstructions is injected into the upstream initialize response when the upstream omits its own.
+const ServerInstructions = `Discord read/admin tools. Guild, channel, and message IDs are numeric snowflake strings: get guild IDs from discord_list_servers, then channel IDs from discord_get_server_info; message IDs come from discord_search_messages.
+- discord_search_messages returns total_results, returned_count, offset, and has_more; while has_more is true, repeat the call with offset increased by returned_count.
+- Delete tools (messages, channels, categories, forum posts, webhooks) are irreversible; confirm the target ID before calling.
+- Replies to the current conversation are delivered automatically at the end of the turn, so put the reply in your final answer. Never use discord_reply_to_forum, discord_send_webhook_message or discord_create_forum_post to answer the user; they post publicly.`
+
+// IsInitializeRequest checks if a raw JSON-RPC request byte slice is an initialize call.
+func IsInitializeRequest(rawReq []byte) bool {
+	trimmed := bytes.TrimSpace(rawReq)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	var req JSONRPCRequest
+	if err := json.Unmarshal(trimmed, &req); err != nil {
+		return false
+	}
+	return strings.TrimSpace(req.Method) == "initialize"
+}
+
+// InjectInstructions sets result.instructions on an initialize JSON-RPC response when upstream left it absent or empty.
+// Unknown result fields are preserved; on parse failure the input is returned unchanged with the error.
+func InjectInstructions(rawResp []byte, instructions string) ([]byte, error) {
+	var resp JSONRPCResponse
+	if err := json.Unmarshal(rawResp, &resp); err != nil {
+		return rawResp, err
+	}
+	trimmedResult := bytes.TrimSpace(resp.Result)
+	if len(trimmedResult) == 0 || bytes.Equal(trimmedResult, []byte("null")) {
+		return rawResp, nil
+	}
+	var resultMap map[string]json.RawMessage
+	if err := json.Unmarshal(trimmedResult, &resultMap); err != nil {
+		return rawResp, err
+	}
+	if existing, ok := resultMap["instructions"]; ok {
+		var s string
+		if json.Unmarshal(existing, &s) == nil && s != "" {
+			return rawResp, nil
+		}
+	}
+	instrBytes, err := json.Marshal(instructions)
+	if err != nil {
+		return rawResp, err
+	}
+	resultMap["instructions"] = instrBytes
+	resultBytes, err := json.Marshal(resultMap)
+	if err != nil {
+		return rawResp, err
+	}
+	resp.Result = resultBytes
+	return json.Marshal(resp)
+}

@@ -22,6 +22,13 @@ type Server struct {
 	streamHandler http.Handler
 }
 
+// serverInstructions is sent on initialize so clients that defer tool schemas
+// still learn the search-then-store workflow and correction semantics.
+const serverInstructions = `Run memory_search before memory_store; results carry the fact IDs other tools take.
+memory_store already dedupes: text at >= 0.85 cosine similarity to an existing fact only reinforces that fact and keeps its old wording. So to correct or update a fact, call memory_store with supersedes_id set to the ID from memory_search; that rewrites it in place. Do not forget + store, which loses reinforcement history and may still collide with a neighbor.
+Never store secrets, tokens or credentials, including in supersedes_id updates (they skip the admission gate).
+memory_forget permanently deletes a fact by ID; use it only for facts that are wrong with no replacement.`
+
 // NewServer creates and initializes the Server.
 func NewServer(handler *ToolHandler) *Server {
 	if handler == nil {
@@ -36,7 +43,7 @@ func NewServer(handler *ToolHandler) *Server {
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "coven",
 		Version: "1.0.0",
-	}, nil)
+	}, &mcp.ServerOptions{Instructions: serverInstructions})
 
 	s := &Server{
 		handler:   handler,

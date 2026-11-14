@@ -166,12 +166,18 @@ func toMCPChunkBriefs(chunks []VanadisChunk) []MCPChunkBrief {
 	return briefs
 }
 
+// serverInstructions is sent on initialize so clients that defer tool schemas
+// still learn build/chunk lifecycle rules and ID provenance.
+const serverInstructions = `Read state first: get_build (by build_id, or by thread_id which resolves to that thread's latest running build, else its most recent build) returns status and chunk IDs; get_chunk returns full instructions by chunk_id or build_id + chunk_ref (chunk ID or 0-based index).
+update_chunk and remove_chunk only work on chunks still pending; running, completed or failed chunks are rejected with a conflict. append_chunk adds pending chunks to the end of a build; update_build replaces the build title, objective or shared_context.
+fail_chunk is terminal: it fails the chunk and the whole build and wakes the build's thread. Call it only for an unrecoverable blocker in the chunk you are executing, never for fixable test, lint or CI failures; fix forward instead.`
+
 // newMCPHandler constructs and returns the Streamable HTTP MCP server handler.
 func (s *VanadisServer) newMCPHandler() http.HandlerFunc {
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "vanadis",
 		Version: "1.0.0",
-	}, nil)
+	}, &mcp.ServerOptions{Instructions: serverInstructions})
 
 	s.registerMCPTools(mcpServer)
 
