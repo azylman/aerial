@@ -21,12 +21,6 @@
     "services/eri/pkg/runner/unified_pool_test.go": {
       "lines": 1732
     },
-    "services/synapse/github.go": {
-      "lines": 1672
-    },
-    "services/synapse/github_test.go": {
-      "lines": 3800
-    },
     "services/synapse/main_test.go": {
       "lines": 3962
     },

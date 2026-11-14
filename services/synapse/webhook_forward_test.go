@@ -32,20 +32,67 @@ func (c *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}, nil
 }
 
+type forwardRawWebhookTransportTestCase struct {
+	name          string
+	nilServer     bool
+	nilClient     bool
+	baseURL       string
+	clientErr     error
+	headers       http.Header
+	wantSent      bool
+	wantHeaders   map[string]string
+	wantNoHeaders []string
+}
+
+func assertCapturedHeaders(t *testing.T, tc forwardRawWebhookTransportTestCase, capturedReq *http.Request) {
+	t.Helper()
+	if capturedReq == nil {
+		t.Fatalf("expected request to be sent, but capturedReq is nil")
+	}
+	for k, v := range tc.wantHeaders {
+		if got := capturedReq.Header.Get(k); got != v {
+			t.Errorf("header %q = %q, want %q", k, got, v)
+		}
+	}
+	for _, k := range tc.wantNoHeaders {
+		if got := capturedReq.Header.Get(k); got != "" {
+			t.Errorf("expected header %q to be stripped, got %q", k, got)
+		}
+	}
+}
+
+func runForwardRawWebhookTransportCase(t *testing.T, tc forwardRawWebhookTransportTestCase) {
+	t.Helper()
+	t.Parallel()
+	transport := &captureTransport{err: tc.clientErr}
+	client := &http.Client{Transport: transport}
+	if tc.nilClient {
+		client = nil
+	}
+
+	var srv *RouterServer
+	if !tc.nilServer {
+		srv = &RouterServer{
+			httpClient: client,
+		}
+	}
+
+	srv.forwardRawWebhook(context.Background(), tc.baseURL, "/hook", tc.headers, []byte(`{"test":true}`))
+
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+
+	if tc.wantSent {
+		assertCapturedHeaders(t, tc, transport.capturedReq)
+	} else if tc.clientErr == nil && transport.capturedReq != nil {
+		t.Fatalf("expected no request to be sent, but capturedReq is not nil")
+	}
+}
+
 func TestForwardRawWebhook_TransportErrors(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name          string
-		nilServer     bool
-		nilClient     bool
-		baseURL       string
-		clientErr     error
-		headers       http.Header
-		wantSent      bool
-		wantHeaders   map[string]string
-		wantNoHeaders []string
-	}{
+	tests := []forwardRawWebhookTransportTestCase{
 		{name: "nil server", nilServer: true, baseURL: "http://127.0.0.1:4020"},
 		{name: "nil client", nilClient: true, baseURL: "http://127.0.0.1:4020"},
 		{name: "empty baseURL", baseURL: "", wantSent: false},
@@ -70,42 +117,7 @@ func TestForwardRawWebhook_TransportErrors(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			transport := &captureTransport{err: tc.clientErr}
-			client := &http.Client{Transport: transport}
-			if tc.nilClient {
-				client = nil
-			}
-
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = &RouterServer{
-					httpClient: client,
-				}
-			}
-
-			srv.forwardRawWebhook(context.Background(), tc.baseURL, "/hook", tc.headers, []byte(`{"test":true}`))
-
-			transport.mu.Lock()
-			defer transport.mu.Unlock()
-
-			if tc.wantSent {
-				if transport.capturedReq == nil {
-					t.Fatalf("expected request to be sent, but capturedReq is nil")
-				}
-				for k, v := range tc.wantHeaders {
-					if got := transport.capturedReq.Header.Get(k); got != v {
-						t.Errorf("header %q = %q, want %q", k, got, v)
-					}
-				}
-				for _, k := range tc.wantNoHeaders {
-					if got := transport.capturedReq.Header.Get(k); got != "" {
-						t.Errorf("expected header %q to be stripped, got %q", k, got)
-					}
-				}
-			} else if tc.clientErr == nil && transport.capturedReq != nil {
-				t.Fatalf("expected no request to be sent, but capturedReq is not nil")
-			}
+			runForwardRawWebhookTransportCase(t, tc)
 		})
 	}
 }
