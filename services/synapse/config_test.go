@@ -37,6 +37,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		wantSysChan    string
 		wantDiscTok    string
 		wantNATSURL    string
+		wantEmptyURL   bool
 	}{
 		{
 			name: "primary port env",
@@ -48,11 +49,12 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			wantPGURL: "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
 		},
 		{
-			name:      "default fallback loading with empty envs",
-			env:       map[string]string{},
-			wantPort:  "4020",
-			wantGHURL: "https://api.github.com",
-			wantPGURL: "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
+			name:         "default fallback loading with empty envs",
+			env:          map[string]string{},
+			wantPort:     "4020",
+			wantGHURL:    "https://api.github.com",
+			wantPGURL:    "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
+			wantEmptyURL: true,
 		},
 		{
 			name: "primary kube envs",
@@ -133,7 +135,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		"GITHUB_PAT", "GITHUB_API_URL",
 		"DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
-		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "NATS_URL",
+		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "VANADIS_URL", "HARO_URL", "NATS_URL",
 		"SYSTEM_CHANNEL_ID", "CONFIG_PATH", "DISCORD_TOKEN",
 	}
 
@@ -146,6 +148,9 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				t.Setenv(k, v)
 			}
 			cfg := LoadConfigFromEnv()
+			if tc.wantEmptyURL && cfg.VanadisURL != "" {
+				t.Errorf("VanadisURL=%q, want empty when unset", cfg.VanadisURL)
+			}
 			for _, check := range []struct{ got, want, field string }{
 				{cfg.Port, tc.wantPort, "Port"},
 				{cfg.KubeAPIServer, tc.wantKubeServer, "KubeAPIServer"},

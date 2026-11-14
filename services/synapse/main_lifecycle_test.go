@@ -235,10 +235,10 @@ func TestResolveSHA(t *testing.T) {
 			repo:               "azylman/aerial",
 			sha:                "sha-fast-1",
 			regResolvePRNum:    42,
-			regResolveTargetID: "1555405874565091380",
+			regResolveTargetID: "100000000000000001",
 			regResolveBranch:   "feat/fast-path",
 			wantPRNum:          42,
-			wantTargetID:       "1555405874565091380",
+			wantTargetID:       "100000000000000001",
 			wantBranch:         "feat/fast-path",
 		},
 		{
@@ -248,9 +248,9 @@ func TestResolveSHA(t *testing.T) {
 			regResolvePRNum:  43,
 			regResolveBranch: "feat/resolved-by-num",
 			regEmptySHAID:    true,
-			byNumTargetID:    "1555405874565091380",
+			byNumTargetID:    "100000000000000001",
 			wantPRNum:        43,
-			wantTargetID:     "1555405874565091380",
+			wantTargetID:     "100000000000000001",
 			wantBranch:       "feat/resolved-by-num",
 		},
 		{
@@ -259,9 +259,9 @@ func TestResolveSHA(t *testing.T) {
 			sha:               "sha-gh-3",
 			ghPRNumber:        99,
 			ghBranch:          "feat/gh-fallback",
-			byNumTargetID:     "1555405874565091380",
+			byNumTargetID:     "100000000000000001",
 			wantPRNum:         99,
-			wantTargetID:      "1555405874565091380",
+			wantTargetID:      "100000000000000001",
 			wantBranch:        "feat/gh-fallback",
 			wantBackfillCalls: 1,
 		},
@@ -341,7 +341,7 @@ func TestResolveSHA(t *testing.T) {
 func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	validSnowflake := "1555405874565091380"
+	validSnowflake := "100000000000000001"
 
 	tests := []resolveThreadCase{
 		{

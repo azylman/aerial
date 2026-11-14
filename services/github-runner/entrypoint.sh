@@ -57,7 +57,7 @@ if [ -s "/root/.roborev/claude-oauth-token" ] && command -v claude >/dev/null 2>
   cat > /root/.roborev/config.toml <<'EOF'
 default_agent = "claude-code"
 review_agent = "claude-code"
-default_model = "opus"
+default_model = "sonnet"
 default_backup_agent = "gemini"
 review_reasoning = "thorough"
 review_min_severity = "medium"
@@ -84,18 +84,18 @@ default_panel = "ci"
 
 [review.subagents.default]
 agent = "claude-code"
-model = "opus"
+model = "sonnet"
 review_type = "default"
 
 [review.subagents.test-value]
 agent = "claude-code"
-model = "opus"
+model = "sonnet"
 review_type = "test-value"
 
 [review.panels.ci]
 members = ["default", "test-value"]
 synthesis_agent = "claude-code"
-synthesis_model = "opus"
+synthesis_model = "sonnet"
 synthesis_backup_agent = "gemini"
 
 review_guidelines = """

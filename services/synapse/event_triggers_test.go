@@ -961,7 +961,7 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 				srv.notifyRemediationCap(ctx, &ResolvedGitHubEvent{
 					Repo:     "azylman/aerial",
 					PRNumber: 1,
-					TargetID: "1555405874565091380",
+					TargetID: "100000000000000001",
 				}, 4)
 			case "vanadis_advance":
 				_ = srv.advanceVanadisChunk(ctx, "azylman/aerial", 1)
