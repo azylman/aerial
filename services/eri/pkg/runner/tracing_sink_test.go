@@ -267,6 +267,18 @@ func TestProviderForModel(t *testing.T) {
 		want  string
 	}{
 		{name: "claude match is case-insensitive", model: "Claude-Opus-5-5", want: "anthropic"},
+		{name: "claude full id", model: "claude-haiku-5-5", want: "anthropic"},
+		{name: "opus alias with effort", model: "opus-high", want: "anthropic"},
+		{name: "opus alias low effort", model: "opus-low", want: "anthropic"},
+		{name: "sonnet alias case-insensitive", model: "Sonnet", want: "anthropic"},
+		{name: "bare haiku alias", model: "haiku", want: "anthropic"},
+		{name: "fable alias with effort", model: "fable-medium", want: "anthropic"},
+		{name: "sonnet alias with context suffix", model: "sonnet[1m]", want: "anthropic"},
+		{name: "gemini model", model: "gemini-3.8-flash-low", want: "gcp.gemini"},
+		{name: "empty model", model: "", want: ""},
+		{name: "unknown model", model: "gpt-5", want: ""},
+		{name: "alias prefix without boundary", model: "opusx", want: ""},
+		{name: "alias not at start", model: "mysonnet", want: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
