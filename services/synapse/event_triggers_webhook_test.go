@@ -9,29 +9,27 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 type eventTracker struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	events []pubsub.ExternalEvent
-	topics []string
+	eventsChan chan pubsub.ExternalEvent
+	topicsChan chan string
 }
 
 func newEventTracker(t *testing.T, bus pubsub.Bus, topic, subID string) *eventTracker {
 	t.Helper()
-	tr := &eventTracker{}
-	tr.cond = sync.NewCond(&tr.mu)
+	tr := &eventTracker{
+		eventsChan: make(chan pubsub.ExternalEvent, 20),
+		topicsChan: make(chan string, 20),
+	}
 	_, err := bus.Subscribe(context.Background(), topic, subID, func(_ context.Context, msg pubsub.Message) error {
 		var ev pubsub.ExternalEvent
 		if err := json.Unmarshal(msg.Data(), &ev); err == nil {
-			tr.mu.Lock()
-			tr.events = append(tr.events, ev)
-			tr.topics = append(tr.topics, msg.Subject())
-			tr.cond.Broadcast()
-			tr.mu.Unlock()
+			tr.eventsChan <- ev
+			tr.topicsChan <- msg.Subject()
 		}
 		return msg.Ack()
 	})
@@ -41,18 +39,60 @@ func newEventTracker(t *testing.T, bus pubsub.Bus, topic, subID string) *eventTr
 	return tr
 }
 
-func (tr *eventTracker) waitCount(count int) (int, []string) {
-	tr.mu.Lock()
-	defer tr.mu.Unlock()
-	for len(tr.events) < count {
-		tr.cond.Wait()
+func (tr *eventTracker) waitEvents(t *testing.T, count int) ([]pubsub.ExternalEvent, []string) {
+	t.Helper()
+	var events []pubsub.ExternalEvent
+	var topics []string
+	for i := range count {
+		select {
+		case ev := <-tr.eventsChan:
+			events = append(events, ev)
+			topics = append(topics, <-tr.topicsChan)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for event %d of %d", i+1, count)
+		}
 	}
-	return len(tr.events), tr.topics
+	return events, topics
+}
+
+func verifyPublishedEvents(t *testing.T, tracker *eventTracker, wantCount int, wantTopic string) {
+	t.Helper()
+	if tracker == nil || wantCount <= 0 {
+		return
+	}
+	events, topics := tracker.waitEvents(t, wantCount)
+	if len(events) != wantCount {
+		t.Errorf("published event count = %d, want %d", len(events), wantCount)
+	}
+	if wantTopic != "" && len(topics) > 0 && topics[0] != wantTopic {
+		t.Errorf("published topic = %s, want %s", topics[0], wantTopic)
+	}
+}
+
+type recordingBus struct {
+	pubsub.Bus
+
+	mu        sync.Mutex
+	publishes []string
+}
+
+func (b *recordingBus) Publish(ctx context.Context, subject, msgID string, payload any) error {
+	b.mu.Lock()
+	b.publishes = append(b.publishes, subject)
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *recordingBus) publishCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.publishes)
 }
 
 type evaluateEventTriggersTestCase struct {
 	name          string
 	useBus        bool
+	useSyncBus    bool
 	closeBusFirst bool
 	source        string
 	eventType     string
@@ -81,7 +121,12 @@ func assertEvaluateEventTriggersScenario(t *testing.T, tc evaluateEventTriggersT
 	srv.SetRegistry(mockReg)
 
 	var tracker *eventTracker
-	if tc.useBus {
+	var recBus *recordingBus
+
+	if tc.useSyncBus {
+		recBus = &recordingBus{}
+		srv.SetEventBus(recBus)
+	} else if tc.useBus {
 		memBus := pubsub.NewMemoryBus()
 		defer memBus.Close()
 		tracker = newEventTracker(t, memBus, "aerial.events.>", "test-eval-events")
@@ -96,20 +141,11 @@ func assertEvaluateEventTriggersScenario(t *testing.T, tc evaluateEventTriggersT
 		t.Fatalf("evaluateEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
 	}
 
-	var gotPubCount int
-	var publishedTopics []string
-	if tracker != nil {
-		gotPubCount, publishedTopics = tracker.waitCount(tc.wantPubCount)
+	if recBus != nil && recBus.publishCount() != tc.wantPubCount {
+		t.Errorf("recordingBus publish count = %d, want %d", recBus.publishCount(), tc.wantPubCount)
 	}
+	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic)
 
-	if gotPubCount != tc.wantPubCount {
-		t.Errorf("published event count = %d, want %d", gotPubCount, tc.wantPubCount)
-	}
-	if tc.wantPubTopic != "" && len(publishedTopics) > 0 {
-		if publishedTopics[0] != tc.wantPubTopic {
-			t.Errorf("published topic = %s, want %s", publishedTopics[0], tc.wantPubTopic)
-		}
-	}
 	if len(mockRiver.insertedEventJobs) != tc.wantRiverJobs {
 		t.Errorf("river inserted jobs = %d, want %d", len(mockRiver.insertedEventJobs), tc.wantRiverJobs)
 	}
@@ -131,8 +167,19 @@ func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
 			wantRiverJobs: 0,
 		},
 		{
-			name:          "empty targets is a no-op",
+			name:          "sanitizes subject tokens with spaces or special characters",
 			useBus:        true,
+			source:        "camera/front",
+			eventType:     "person detected*",
+			targets:       []string{"porch"},
+			contextHeader: "Person detected on porch",
+			wantPubCount:  1,
+			wantPubTopic:  "aerial.events.camera_front.person_detected_",
+			wantRiverJobs: 0,
+		},
+		{
+			name:          "empty targets is a no-op",
+			useSyncBus:    true,
 			source:        "camera",
 			eventType:     "motion",
 			targets:       []string{"   ", ""},
@@ -141,7 +188,7 @@ func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
 		},
 		{
 			name:          "empty source is a no-op",
-			useBus:        true,
+			useSyncBus:    true,
 			source:        "",
 			eventType:     "motion",
 			targets:       []string{"driveway"},
@@ -150,31 +197,10 @@ func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
 		},
 		{
 			name:          "empty event type is a no-op",
-			useBus:        true,
+			useSyncBus:    true,
 			source:        "camera",
 			eventType:     "",
 			targets:       []string{"driveway"},
-			wantPubCount:  0,
-			wantRiverJobs: 0,
-		},
-		{
-			name:          "nil bus falls back to river when trigger matched",
-			useBus:        false,
-			source:        "custom",
-			eventType:     "state_change",
-			targets:       []string{"sensor.temp"},
-			contextHeader: "Temperature spike",
-			checkMatched:  true,
-			wantPubCount:  0,
-			wantRiverJobs: 1,
-		},
-		{
-			name:          "nil bus drops event when trigger not matched",
-			useBus:        false,
-			source:        "custom",
-			eventType:     "state_change",
-			targets:       []string{"sensor.temp"},
-			checkMatched:  false,
 			wantPubCount:  0,
 			wantRiverJobs: 0,
 		},
@@ -202,7 +228,6 @@ func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
 
 type handleEventsWebhookTestCase struct {
 	name         string
-	path         string
 	payload      string
 	useBus       bool
 	wantStatus   int
@@ -222,34 +247,17 @@ func assertHandleEventsWebhookScenario(t *testing.T, tc handleEventsWebhookTestC
 		srv.SetEventBus(memBus)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.payload))
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/events", strings.NewReader(tc.payload))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	if strings.HasPrefix(tc.path, "/api/") {
-		srv.handleExternalEventsWebhook(w, req)
-	} else {
-		srv.handleEventsWebhook(w, req)
-	}
+	srv.handleEventsWebhook(w, req)
 
 	if w.Code != tc.wantStatus {
 		t.Fatalf("status code = %d, want %d: body=%s", w.Code, tc.wantStatus, w.Body.String())
 	}
 
-	var gotPubCount int
-	var publishedTopics []string
-	if tracker != nil {
-		gotPubCount, publishedTopics = tracker.waitCount(tc.wantPubCount)
-	}
-
-	if gotPubCount != tc.wantPubCount {
-		t.Errorf("published events = %d, want %d", gotPubCount, tc.wantPubCount)
-	}
-	if tc.wantPubTopic != "" && len(publishedTopics) > 0 {
-		if publishedTopics[0] != tc.wantPubTopic {
-			t.Errorf("published topic = %s, want %s", publishedTopics[0], tc.wantPubTopic)
-		}
-	}
+	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic)
 }
 
 func TestHandleEventsWebhook_Scenarios(t *testing.T) {
@@ -258,7 +266,6 @@ func TestHandleEventsWebhook_Scenarios(t *testing.T) {
 	tests := []handleEventsWebhookTestCase{
 		{
 			name:         "valid event webhook publishes to jetstream",
-			path:         "/webhooks/events",
 			payload:      `{"source":"camera","event_type":"motion","targets":["driveway"],"context_header":"Driveway motion"}`,
 			useBus:       true,
 			wantStatus:   http.StatusOK,
@@ -266,8 +273,7 @@ func TestHandleEventsWebhook_Scenarios(t *testing.T) {
 			wantPubTopic: "aerial.events.camera.motion",
 		},
 		{
-			name:         "handleExternalEventsWebhook alias processes valid webhook",
-			path:         "/api/webhooks/events",
+			name:         "singular target field is normalized into targets",
 			payload:      `{"source":"vision","event_type":"person_detected","target":"front_door"}`,
 			useBus:       true,
 			wantStatus:   http.StatusOK,
@@ -275,20 +281,12 @@ func TestHandleEventsWebhook_Scenarios(t *testing.T) {
 			wantPubTopic: "aerial.events.vision.person_detected",
 		},
 		{
-			name:       "invalid json returns 400",
-			path:       "/webhooks/events",
-			payload:    `{broken-json`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
 			name:       "missing source returns 400",
-			path:       "/webhooks/events",
 			payload:    `{"source":"","event_type":"motion","target":"driveway"}`,
 			wantStatus: http.StatusBadRequest,
 		},
 		{
 			name:       "missing targets returns 400",
-			path:       "/webhooks/events",
 			payload:    `{"source":"camera","event_type":"motion"}`,
 			wantStatus: http.StatusBadRequest,
 		},

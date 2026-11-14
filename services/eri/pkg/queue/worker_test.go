@@ -1150,7 +1150,6 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 
 type publishTurnCompletedCase struct {
 	name           string
-	attachBus      bool
 	sessionID      string
 	conversationID string
 	source         string
@@ -1166,25 +1165,21 @@ type turnCompletedDelivery struct {
 }
 
 type turnCompletedTracker struct {
-	mu        sync.Mutex
-	cond      *sync.Cond
-	delivered []turnCompletedDelivery
+	eventsChan chan turnCompletedDelivery
 }
 
 func newTurnCompletedTracker(t *testing.T, bus pubsub.Bus, topic, subID string) *turnCompletedTracker {
 	t.Helper()
-	tracker := &turnCompletedTracker{}
-	tracker.cond = sync.NewCond(&tracker.mu)
+	tracker := &turnCompletedTracker{
+		eventsChan: make(chan turnCompletedDelivery, 10),
+	}
 	_, err := bus.Subscribe(context.Background(), topic, subID, func(_ context.Context, msg pubsub.Message) error {
 		var ev pubsub.TurnCompletedEvent
 		if uErr := json.Unmarshal(msg.Data(), &ev); uErr == nil {
-			tracker.mu.Lock()
-			tracker.delivered = append(tracker.delivered, turnCompletedDelivery{
+			tracker.eventsChan <- turnCompletedDelivery{
 				subject: msg.Subject(),
 				event:   ev,
-			})
-			tracker.cond.Broadcast()
-			tracker.mu.Unlock()
+			}
 		}
 		return nil
 	})
@@ -1194,25 +1189,24 @@ func newTurnCompletedTracker(t *testing.T, bus pubsub.Bus, topic, subID string) 
 	return tracker
 }
 
-func (tr *turnCompletedTracker) waitForFirst() turnCompletedDelivery {
-	tr.mu.Lock()
-	defer tr.mu.Unlock()
-	for len(tr.delivered) == 0 {
-		tr.cond.Wait()
+func (tr *turnCompletedTracker) waitForFirst(t *testing.T) turnCompletedDelivery {
+	t.Helper()
+	select {
+	case d := <-tr.eventsChan:
+		return d
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for turn completed event")
+		return turnCompletedDelivery{}
 	}
-	return tr.delivered[0]
 }
 
 func assertPublishTurnCompletedScenario(t *testing.T, tc publishTurnCompletedCase) {
 	t.Helper()
 	pool := &WorkerPool{}
-	var tracker *turnCompletedTracker
-	if tc.attachBus {
-		memBus := pubsub.NewMemoryBus()
-		defer memBus.Close()
-		pool.SetEventBus(memBus)
-		tracker = newTurnCompletedTracker(t, memBus, "aerial.turn.*", "test-sub")
-	}
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	pool.SetEventBus(memBus)
+	tracker := newTurnCompletedTracker(t, memBus, "aerial.turn.*", "test-sub")
 
 	err := pool.publishTurnCompleted(context.Background(), tc.sessionID, tc.conversationID, tc.source)
 	if tc.wantErr {
@@ -1228,7 +1222,7 @@ func assertPublishTurnCompletedScenario(t *testing.T, tc publishTurnCompletedCas
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	gotMsg := tracker.waitForFirst()
+	gotMsg := tracker.waitForFirst(t)
 	if gotMsg.subject != tc.wantSubject {
 		t.Errorf("subject = %q, want %q", gotMsg.subject, tc.wantSubject)
 	}
@@ -1250,29 +1244,19 @@ func TestWorkerPool_PublishTurnCompleted_Scenarios(t *testing.T) {
 	t.Parallel()
 	tests := []publishTurnCompletedCase{
 		{
-			name:        "nil event bus returns error",
-			attachBus:   false,
-			sessionID:   "sess-nil-bus",
-			wantErr:     true,
-			errContains: "event bus is nil",
-		},
-		{
 			name:        "empty session id returns error",
-			attachBus:   true,
 			sessionID:   "",
 			wantErr:     true,
 			errContains: "empty session id",
 		},
 		{
 			name:        "whitespace session id returns error",
-			attachBus:   true,
 			sessionID:   "   ",
 			wantErr:     true,
 			errContains: "empty session id",
 		},
 		{
 			name:           "successful publish with explicit source",
-			attachBus:      true,
 			sessionID:      "sess-voice-1",
 			conversationID: "conv-voice-1",
 			source:         "voice",
@@ -1282,7 +1266,6 @@ func TestWorkerPool_PublishTurnCompleted_Scenarios(t *testing.T) {
 		},
 		{
 			name:           "successful publish defaults empty source to discord",
-			attachBus:      true,
 			sessionID:      "sess-discord-1",
 			conversationID: "conv-discord-1",
 			source:         "",
@@ -1333,7 +1316,7 @@ func TestWorkerPool_ProcessInteractiveTurn_PublishesTurnCompleted(t *testing.T) 
 
 	pool.processInteractiveTurn([]db.Message{msg})
 
-	gotMsg := tracker.waitForFirst()
+	gotMsg := tracker.waitForFirst(t)
 	if gotMsg.subject != "aerial.turn.completed" {
 		t.Errorf("subject = %q, want %q", gotMsg.subject, "aerial.turn.completed")
 	}

@@ -155,6 +155,23 @@ func (r *PostgresPRRegistry) FailVanadisChunkDetailsByPR(ctx context.Context, re
 	return res.BuildID, res.ChunkID, res.Failed, nil
 }
 
+func sanitizeSubjectToken(token string) string {
+	token = strings.TrimSpace(token)
+	var sb strings.Builder
+	for _, r := range token {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteRune('_')
+		}
+	}
+	clean := sb.String()
+	if clean == "" {
+		return "unknown"
+	}
+	return clean
+}
+
 func (s *RouterServer) fireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) {
 	if len(targets) == 0 {
 		return
@@ -164,9 +181,10 @@ func (s *RouterServer) fireEventTriggers(ctx context.Context, source string, tar
 		return
 	}
 	if s != nil && s.bus != nil {
-		if err := s.evaluateEventTriggers(ctx, source, eventType, cleanTargets, contextHeader); err == nil {
-			return
+		if err := s.evaluateEventTriggers(ctx, source, eventType, cleanTargets, contextHeader); err != nil {
+			log.Printf("[synapse] [event-triggers] error evaluating triggers for %s %v %s: %v", source, cleanTargets, eventType, err)
 		}
+		return
 	}
 	if s != nil && s.registry != nil {
 		if _, err := s.registry.FireEventTriggers(ctx, source, cleanTargets, eventType, contextHeader); err != nil {
@@ -193,8 +211,10 @@ func (s *RouterServer) evaluateEventTriggers(ctx context.Context, source, eventT
 			ContextHeader: contextHeader,
 			OccurredAt:    time.Now().UTC(),
 		}
-		subject := fmt.Sprintf("aerial.events.%s.%s", source, eventType)
-		msgID := fmt.Sprintf("event:%s:%s:%s", source, eventType, ev.EventID)
+		cleanSource := sanitizeSubjectToken(source)
+		cleanEventType := sanitizeSubjectToken(eventType)
+		subject := fmt.Sprintf("aerial.events.%s.%s", cleanSource, cleanEventType)
+		msgID := fmt.Sprintf("event:%s:%s:%s", cleanSource, cleanEventType, ev.EventID)
 		pubErr := s.bus.Publish(ctx, subject, msgID, ev)
 		if pubErr == nil {
 			return nil
@@ -259,15 +279,17 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 	}
 
 	if s != nil && s.bus != nil {
-		if err := s.evaluateEventTriggers(r.Context(), source, eventType, targets, contextHeader); err == nil {
-			httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-				"status":     "accepted",
-				"source":     source,
-				"targets":    targets,
-				"event_type": eventType,
-			})
+		if err := s.evaluateEventTriggers(r.Context(), source, eventType, targets, contextHeader); err != nil {
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to evaluate triggers"})
 			return
 		}
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
+			"status":     "accepted",
+			"source":     source,
+			"targets":    targets,
+			"event_type": eventType,
+		})
+		return
 	}
 
 	if s.registry != nil {
@@ -317,10 +339,6 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 		"targets":    targets,
 		"event_type": eventType,
 	})
-}
-
-func (s *RouterServer) handleExternalEventsWebhook(w http.ResponseWriter, r *http.Request) {
-	s.handleEventsWebhook(w, r)
 }
 
 // ProcessEventTriggerWebhook fires matching event triggers via Haro, returning any error so River retries.

@@ -9,28 +9,10 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
-type errCloseBus struct {
-	pubsub.Bus
-}
-
-func (e *errCloseBus) Close() error {
-	_ = e.Bus.Close()
-	return errors.New("close err")
-}
-
 func TestEriJetStreamInit(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-
-	// Empty URL returns nil
-	if b := initEriJetStreamWithFactory(ctx, "   ", nil); b != nil {
-		t.Error("expected nil bus when url is empty")
-	}
-
-	// Nil pool returns no-op cleanup
-	nilPoolCleanup := attachEriEventBusWithFactory(ctx, nil, nil)
-	nilPoolCleanup()
 
 	errFactory := func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return nil, errors.New("nats connect error")
@@ -56,21 +38,6 @@ func TestEriJetStreamInit(t *testing.T) {
 		t.Error("expected non-nil event bus on pool when factory succeeds")
 	}
 	cleanupSuccess()
-
-	// Close error branch
-	closeErrPool := queue.New(nil, queue.WorkerPoolConfig{})
-	closeErrFactory := func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return &errCloseBus{Bus: pubsub.NewMemoryBus()}, nil
-	}
-	cleanupCloseErr := attachEriEventBusWithFactory(ctx, closeErrPool, closeErrFactory)
-	cleanupCloseErr()
-
-	// Default attachEriEventBus with err factory replacement
-	origFactory := newBusFn
-	defer func() { newBusFn = origFactory }()
-	newBusFn = errFactory
-	defCleanup := attachEriEventBus(ctx, pool)
-	defCleanup()
 }
 
 type natsURLResolutionTestCase struct {

@@ -426,7 +426,7 @@ func (p *WorkerPool) publishTurnCompleted(ctx context.Context, sessionID, conver
 	return bus.Publish(ctx, pubsub.SubjectAerialTurnCompleted, msgID, ev)
 }
 
-func (te *turnExecution) processInteractiveTurn() {
+func (te *turnExecution) publishTurnCompleted() {
 	if te == nil || te.pool == nil {
 		return
 	}
