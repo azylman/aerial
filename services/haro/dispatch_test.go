@@ -141,6 +141,16 @@ func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 			wantNaked: true,
 		},
 		{
+			name: "non-heartbeat source like vanadis is ignored without nak",
+			event: &pubsub.DispatchOutcomeEvent{
+				DispatchID: "disp-vanadis-chunk",
+				Source:     "vanadis",
+				Status:     "completed",
+			},
+			wantErr:   false,
+			wantNaked: false,
+		},
+		{
 			name:             "heartbeat completed updates run and advances watermark",
 			seedScheduleType: "heartbeat",
 			seedScheduleID:   "hb-disp-1",

@@ -29,11 +29,12 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		busMode      string // "success", "nil", "error"
+		busMode      string // "success", "error"
 		turnStatus   string
 		turnError    string
 		chunkID      string
 		dispatchID   string
+		source       string
 		wantPubTopic string
 		wantPubCount int
 		wantHTTPCall bool
@@ -46,6 +47,7 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 			turnError:    "",
 			chunkID:      "chunk-js-success",
 			dispatchID:   "disp-js-success",
+			source:       "vanadis",
 			wantPubTopic: "aerial.dispatch.completed",
 			wantPubCount: 1,
 			wantHTTPCall: false,
@@ -57,20 +59,22 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 			turnError:    "build error",
 			chunkID:      "chunk-js-fail",
 			dispatchID:   "disp-js-fail",
+			source:       "vanadis",
 			wantPubTopic: "aerial.dispatch.failed",
 			wantPubCount: 1,
 			wantHTTPCall: false,
 		},
 		{
-			name:         "nil event bus invokes legacy http fallback",
-			busMode:      "nil",
+			name:         "heartbeat dispatch outcome publishes to jetstream without http fallback",
+			busMode:      "success",
 			turnStatus:   "success",
 			turnError:    "",
-			chunkID:      "chunk-nil-bus",
-			dispatchID:   "disp-nil-bus",
-			wantPubCount: 0,
-			wantHTTPCall: true,
-			wantHTTPEnd:  "/chunks/complete",
+			chunkID:      "",
+			dispatchID:   "disp-hb-success",
+			source:       "heartbeat",
+			wantPubTopic: "aerial.dispatch.completed",
+			wantPubCount: 1,
+			wantHTTPCall: false,
 		},
 		{
 			name:         "bus publish error invokes legacy http fallback",
@@ -79,6 +83,7 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 			turnError:    "fatal runner crash",
 			chunkID:      "chunk-bus-err",
 			dispatchID:   "disp-bus-err",
+			source:       "vanadis",
 			wantPubCount: 0,
 			wantHTTPCall: true,
 			wantHTTPEnd:  "/chunks/fail",
@@ -103,7 +108,11 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 			memBus := pubsub.NewMemoryBus()
 			defer memBus.Close()
 
-			var deliveredEvents []pubsub.DispatchOutcomeEvent
+			type deliveredMessage struct {
+				subject string
+				event   pubsub.DispatchOutcomeEvent
+			}
+			var deliveredMessages []deliveredMessage
 			var deliveredMu sync.Mutex
 			deliveredCond := sync.NewCond(&deliveredMu)
 
@@ -112,7 +121,10 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 					var ev pubsub.DispatchOutcomeEvent
 					if uErr := json.Unmarshal(msg.Data(), &ev); uErr == nil {
 						deliveredMu.Lock()
-						deliveredEvents = append(deliveredEvents, ev)
+						deliveredMessages = append(deliveredMessages, deliveredMessage{
+							subject: msg.Subject(),
+							event:   ev,
+						})
 						deliveredCond.Broadcast()
 						deliveredMu.Unlock()
 					}
@@ -127,8 +139,6 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 			switch tc.busMode {
 			case "success":
 				bus = memBus
-			case "nil":
-				bus = nil
 			case "error":
 				bus = &errPublishBus{Bus: memBus, err: errors.New("simulated nats publish failure")}
 			}
@@ -146,13 +156,22 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 				},
 			}
 
+			src := tc.source
+			if src == "" {
+				src = "vanadis"
+			}
+			prompt := "=== Active Chunk (Chunk 1 of 1) ===\nBuild ID: build-test\nChunk ID: " + tc.chunkID
+			if src != "vanadis" {
+				prompt = "heartbeat prompt"
+			}
+
 			disp := db.Dispatch{
 				ID:             tc.dispatchID,
-				Source:         "vanadis",
-				SessionID:      "vanadis-" + tc.chunkID,
+				Source:         src,
+				SessionID:      src + "-" + tc.dispatchID,
 				TargetID:       tc.chunkID,
 				VanadisChunkID: tc.chunkID,
-				Prompt:         "=== Active Chunk (Chunk 1 of 1) ===\nBuild ID: build-test\nChunk ID: " + tc.chunkID,
+				Prompt:         prompt,
 				Status:         db.StatusPending,
 				CreatedAt:      time.Now().UTC(),
 				UpdatedAt:      time.Now().UTC(),
@@ -162,19 +181,19 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 				pool:        pool,
 				dispatch:    &disp,
 				threadID:    "dispatch-" + disp.ID,
-				triggerType: "dispatch:vanadis",
+				triggerType: "dispatch:" + src,
 				execStart:   time.Now().UTC().Add(-100 * time.Millisecond),
 				turnStatus:  tc.turnStatus,
 				turnError:   tc.turnError,
 				turnCtx:     poolCtx,
 			}
 
-			cleanup := pool.setupVanadisChunkTurn(disp, te)
+			cleanup := pool.setupDispatchTurn(disp, te)
 			cleanup()
 
 			if tc.wantPubCount > 0 {
 				deliveredMu.Lock()
-				for len(deliveredEvents) < tc.wantPubCount {
+				for len(deliveredMessages) < tc.wantPubCount {
 					deliveredCond.Wait()
 				}
 				deliveredMu.Unlock()
@@ -204,15 +223,22 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 			if tc.wantPubCount > 0 {
 				deliveredMu.Lock()
 				defer deliveredMu.Unlock()
-				if len(deliveredEvents) != tc.wantPubCount {
-					t.Fatalf("delivered events = %d, want %d", len(deliveredEvents), tc.wantPubCount)
+				if len(deliveredMessages) != tc.wantPubCount {
+					t.Fatalf("delivered events = %d, want %d", len(deliveredMessages), tc.wantPubCount)
 				}
-				ev := deliveredEvents[0]
+				dm := deliveredMessages[0]
+				if tc.wantPubTopic != "" && dm.subject != tc.wantPubTopic {
+					t.Errorf("got subject %q, want %q", dm.subject, tc.wantPubTopic)
+				}
+				ev := dm.event
 				if ev.DispatchID != tc.dispatchID {
 					t.Errorf("ev.DispatchID = %q, want %q", ev.DispatchID, tc.dispatchID)
 				}
 				if ev.VanadisChunkID != tc.chunkID {
 					t.Errorf("ev.VanadisChunkID = %q, want %q", ev.VanadisChunkID, tc.chunkID)
+				}
+				if ev.Source != src {
+					t.Errorf("ev.Source = %q, want %q", ev.Source, src)
 				}
 				wantStatusNorm := tc.turnStatus
 				if wantStatusNorm == "success" {

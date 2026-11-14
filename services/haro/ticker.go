@@ -589,6 +589,9 @@ func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Mes
 	if dispatchID == "" || dispatchID == "healthcheck-ping" {
 		return nil
 	}
+	if strings.TrimSpace(ev.Source) != "" && ev.Source != "heartbeat" {
+		return nil
+	}
 
 	run, err := GetScheduleRun(ctx, database, dispatchID)
 	if err != nil {

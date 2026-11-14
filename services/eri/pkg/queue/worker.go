@@ -563,8 +563,8 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	defer te.releaseActivePoolLease()
 	defer te.markTurnActive()()
 
-	cleanupChunk := p.setupVanadisChunkTurn(d, te)
-	defer cleanupChunk()
+	cleanupDispatch := p.setupDispatchTurn(d, te)
+	defer cleanupDispatch()
 
 	te.turnAttempted = true
 	promptCtx, promptSpan := te.startSetupChildSpan(te.turnCtxValue(), spanPrompt)

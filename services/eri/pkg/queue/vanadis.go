@@ -52,32 +52,34 @@ func (p *WorkerPool) publishDispatchOutcome(ctx context.Context, d db.Dispatch, 
 	return bus.Publish(ctx, subject, msgID, ev)
 }
 
-func (p *WorkerPool) setupVanadisChunkTurn(d db.Dispatch, te *turnExecution) func() {
+func (p *WorkerPool) setupDispatchTurn(d db.Dispatch, te *turnExecution) func() {
 	chunkID, buildID, chunkIdx := extractVanadisDispatchInfo(&d)
-	if chunkID == "" {
-		return func() {}
+	if chunkID != "" {
+		// Widget edits ride the turn's trace but must not be aborted by an interrupt.
+		widgetCtx := context.WithoutCancel(te.turnCtxValue())
+		p.StartChunkStepTurn(widgetCtx, chunkID, buildID, chunkIdx, d.ID)
+		p.ensureChunkWidgetHydrated(widgetCtx, d.Prompt, chunkID, buildID)
+		te.statusUpdater = NewChunkStepStatusUpdater(chunkID, func(step string) error {
+			return p.FlushChunkActiveStep(widgetCtx, chunkID, d.ID, step)
+		})
 	}
-	// Widget edits ride the turn's trace but must not be aborted by an interrupt.
-	widgetCtx := context.WithoutCancel(te.turnCtxValue())
-	p.StartChunkStepTurn(widgetCtx, chunkID, buildID, chunkIdx, d.ID)
-	p.ensureChunkWidgetHydrated(widgetCtx, d.Prompt, chunkID, buildID)
-	te.statusUpdater = NewChunkStepStatusUpdater(chunkID, func(step string) error {
-		return p.FlushChunkActiveStep(widgetCtx, chunkID, d.ID, step)
-	})
 	return func() {
 		if te.statusUpdater != nil {
 			te.statusUpdater.Stop()
 			te.statusUpdater.DeleteStatusMessage()
 		}
-		p.FinishChunkStepTurn(widgetCtx, chunkID, d.ID)
-		if d.Source == "vanadis" && (p.ctx == nil || p.ctx.Err() == nil) && !te.isInterrupted() {
+		if chunkID != "" {
+			widgetCtx := context.WithoutCancel(te.turnCtxValue())
+			p.FinishChunkStepTurn(widgetCtx, chunkID, d.ID)
+		}
+		if (p.ctx == nil || p.ctx.Err() == nil) && !te.isInterrupted() {
 			var pubErr error
 			if p.EventBus() != nil {
 				pubCtx, cancel := context.WithTimeout(context.WithoutCancel(te.turnCtxValue()), 5*time.Second)
 				pubErr = p.publishDispatchOutcome(pubCtx, d, te.turnStatus, te.turnError, te.execStart, time.Now().UTC())
 				cancel()
 			}
-			if p.EventBus() == nil || pubErr != nil {
+			if d.Source == "vanadis" && chunkID != "" && (p.EventBus() == nil || pubErr != nil) {
 				p.notifyVanadisChunkOutcome(chunkID, te.turnStatus, te.turnError, d.ID)
 			}
 		}
