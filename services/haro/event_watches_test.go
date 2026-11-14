@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -624,6 +626,209 @@ func TestEventWatchTools(t *testing.T) {
 	testEventWatchHandleWatchEvent(ctx, t, db)
 	testEventWatchHandleToctou(ctx, t, db)
 	testEventWatchHandleListAndCancel(ctx, t, db)
+}
+
+func TestHandleExternalEvent_Scenarios(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	_ = InsertEventTrigger(ctx, db, EventTrigger{
+		ID:        "trig-ext-1",
+		ChannelID: "1555405874565091380",
+		Source:    "camera",
+		Target:    "driveway",
+		EventType: "vehicle_detected",
+		Prompt:    "Vehicle in driveway",
+		Effort:    "low",
+	})
+
+	_ = InsertEventTrigger(ctx, db, EventTrigger{
+		ID:        "trig-ext-fail",
+		ChannelID: "1555405874565091380",
+		Source:    "camera",
+		Target:    "backyard",
+		EventType: "motion",
+		Prompt:    "Motion in backyard",
+		Effort:    "low",
+	})
+
+	_ = InsertEventTrigger(ctx, db, EventTrigger{
+		ID:        "trig-ext-nil-disp",
+		ChannelID: "1555405874565091380",
+		Source:    "camera",
+		Target:    "porch",
+		EventType: "motion",
+		Prompt:    "Motion on porch",
+		Effort:    "low",
+	})
+
+	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+	serverClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
+
+	mockDispFail := &mockDispatcher{err: errors.New("eri unavailable")}
+	mockDispOK := &mockDispatcher{response: PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-1"}}
+	serverOK := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDispOK)
+	serverFail := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDispFail)
+	serverNilDB := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, nil), mockDispOK)
+	serverNilDisp := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db))
+	serverNilDisp.dispatcher = nil
+
+	tests := []struct {
+		name      string
+		server    *Server
+		ev        pubsub.ExternalEvent
+		wantErr   bool
+		checkDBID string
+		wantInDB  bool
+	}{
+		{
+			name:    "healthcheck source is no-op",
+			server:  serverOK,
+			ev:      pubsub.ExternalEvent{Source: "healthcheck", EventType: "ping", Targets: []string{"ping"}},
+			wantErr: false,
+		},
+		{
+			name:    "empty targets is no-op",
+			server:  serverOK,
+			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: nil},
+			wantErr: false,
+		},
+		{
+			name:    "nil db returns error",
+			server:  serverNilDB,
+			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}},
+			wantErr: true,
+		},
+		{
+			name:    "closed db returns error from ClaimEventTriggers",
+			server:  serverClosed,
+			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}},
+			wantErr: true,
+		},
+		{
+			name:    "no matching triggers succeeds without firing",
+			server:  serverOK,
+			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"front_door"}},
+			wantErr: false,
+		},
+		{
+			name:      "dispatch failure returns error and re-inserts trigger",
+			server:    serverFail,
+			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"backyard"}},
+			wantErr:   true,
+			checkDBID: "trig-ext-fail",
+			wantInDB:  true,
+		},
+		{
+			name:      "nil dispatcher returns error",
+			server:    serverNilDisp,
+			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"porch"}},
+			wantErr:   true,
+			checkDBID: "trig-ext-nil-disp",
+			wantInDB:  true,
+		},
+		{
+			name:      "successful dispatch claims and fires trigger",
+			server:    serverOK,
+			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}, ContextHeader: "Camera Alert"},
+			wantErr:   false,
+			checkDBID: "trig-ext-1",
+			wantInDB:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotErr := tc.server.HandleExternalEvent(ctx, tc.ev)
+			if (gotErr != nil) != tc.wantErr {
+				t.Fatalf("HandleExternalEvent() err = %v, wantErr = %v", gotErr, tc.wantErr)
+			}
+			if tc.checkDBID != "" {
+				matched, err := CheckEventTriggers(ctx, db, tc.ev.Source, tc.ev.Targets, tc.ev.EventType)
+				if err != nil {
+					t.Fatalf("CheckEventTriggers failed: %v", err)
+				}
+				if matched != tc.wantInDB {
+					t.Errorf("trigger in db = %v, want %v", matched, tc.wantInDB)
+				}
+			}
+		})
+	}
+}
+
+type ackSubscribeBus struct {
+	pubsub.Bus
+
+	onHandled func()
+}
+
+func (a *ackSubscribeBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	return a.Bus.Subscribe(ctx, subject, durable, func(mCtx context.Context, msg pubsub.Message) error {
+		defer a.onHandled()
+		return handler(mCtx, msg)
+	})
+}
+
+func TestHaro_EventsConsumerIntegration(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	_ = InsertEventTrigger(ctx, db, EventTrigger{
+		ID:        "trig-int-1",
+		ChannelID: "1555405874565091380",
+		Source:    "flux",
+		Target:    "aerial",
+		EventType: "sync_success",
+		Prompt:    "Deploy succeeded",
+		Effort:    "low",
+	})
+
+	done := make(chan struct{})
+	mockDisp := &mockDispatcher{response: PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-int"}}
+	server := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDisp)
+
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+
+	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
+		t.Fatalf("EnsureCoreStreams: %v", err)
+	}
+
+	wrapped := &ackSubscribeBus{Bus: memBus, onHandled: func() { close(done) }}
+	bus := initHaroJetStreamWithFactory(ctx, server, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return wrapped, nil
+	})
+	if bus == nil {
+		t.Fatal("expected non-nil bus")
+	}
+
+	ev := pubsub.ExternalEvent{
+		Source:        "flux",
+		EventType:     "sync_success",
+		Targets:       []string{"aerial"},
+		ContextHeader: "Deployment update",
+	}
+	if err := memBus.Publish(ctx, "aerial.events.flux.sync_success", "ev-1", ev); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event delivery")
+	}
+
+	matched, err := CheckEventTriggers(ctx, db, "flux", []string{"aerial"}, "sync_success")
+	if err != nil {
+		t.Fatalf("CheckEventTriggers failed: %v", err)
+	}
+	if matched {
+		t.Error("expected trigger to have been claimed and deleted from db")
+	}
 }
 
 func TestVanadisURL_Precedence(t *testing.T) {

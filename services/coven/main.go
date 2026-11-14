@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -14,8 +15,47 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 )
+
+var newCovenBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
+	return pubsub.NewJetStreamBus(ctx, url)
+}
+
+func initCovenJetStream(ctx context.Context, worker *Worker, natsURL string) pubsub.Bus {
+	return initCovenJetStreamWithFactory(ctx, worker, natsURL, newCovenBusFn)
+}
+
+func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
+	natsURL = strings.TrimSpace(natsURL)
+	if natsURL == "" {
+		return nil
+	}
+	b, err := factory(ctx, natsURL)
+	if err != nil {
+		log.Printf("[Coven] warning: failed to connect to nats at %s: %v", natsURL, err)
+		return nil
+	}
+	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
+		log.Printf("[Coven] warning: failed to ensure core streams: %v", err)
+	}
+	if worker != nil {
+		if _, err := b.Subscribe(ctx, "aerial.turn.completed", "coven-turns", func(msgCtx context.Context, msg pubsub.Message) error {
+			var ev pubsub.TurnCompletedEvent
+			if unmarshalErr := json.Unmarshal(msg.Data(), &ev); unmarshalErr != nil {
+				log.Printf("[Coven] warning: failed to unmarshal turn completed event: %v", unmarshalErr)
+				return nil
+			}
+			return worker.HandleTurnCompletedEvent(msgCtx, ev)
+		}); err != nil {
+			log.Printf("[Coven] warning: failed to subscribe coven-turns: %v", err)
+		} else {
+			log.Println("[Coven] Subscribed coven-turns durable consumer to aerial.turn.completed")
+		}
+	}
+	return b
+}
 
 // RunApp bootstraps the coven MCP HTTP server with graceful shutdown.
 func RunApp(ctx context.Context, cfg *Config) error {
@@ -58,6 +98,16 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	})
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
+
+	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), cfg.NATSURL)
+	bus := initCovenJetStream(ctx, worker, natsURL)
+	defer func() {
+		if bus != nil {
+			if closeErr := bus.Close(); closeErr != nil {
+				log.Printf("[Coven] bus close error: %v", closeErr)
+			}
+		}
+	}()
 
 	go func() {
 		if err := worker.Start(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
