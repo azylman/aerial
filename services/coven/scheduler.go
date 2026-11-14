@@ -74,7 +74,6 @@ func (w *Worker) HandleTurnCompletedEvent(ctx context.Context, ev pubsub.TurnCom
 	}
 	if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("[Coven Worker] Immediate fact extraction on turn completion failed: %v", err)
-		return err
 	}
 	return nil
 }

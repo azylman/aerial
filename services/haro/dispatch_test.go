@@ -12,15 +12,21 @@ import (
 )
 
 type memoryMsg struct {
-	data    []byte
-	subject string
-	naked   bool
+	data         []byte
+	subject      string
+	naked        bool
+	numDelivered uint64
 }
 
-func (m *memoryMsg) Data() []byte                       { return m.data }
-func (m *memoryMsg) Subject() string                    { return m.subject }
-func (m *memoryMsg) Header() nats.Header                { return nil }
-func (m *memoryMsg) NumDelivered() uint64               { return 1 }
+func (m *memoryMsg) Data() []byte        { return m.data }
+func (m *memoryMsg) Subject() string     { return m.subject }
+func (m *memoryMsg) Header() nats.Header { return nil }
+func (m *memoryMsg) NumDelivered() uint64 {
+	if m.numDelivered > 0 {
+		return m.numDelivered
+	}
+	return 1
+}
 func (m *memoryMsg) Ack() error                         { return nil }
 func (m *memoryMsg) NakWithDelay(_ time.Duration) error { m.naked = true; return nil }
 func (m *memoryMsg) Term() error                        { return nil }

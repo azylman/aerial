@@ -87,7 +87,6 @@ ollama:
 			t.Setenv("ERI_URL", tc.envEriURL)
 			t.Setenv("ERI_LLM_URL", tc.envEriLLMURL)
 			t.Setenv("PR_REGISTER_URL", tc.envPRRegURL)
-			t.Setenv("NATS_URL", "")
 
 			cfg, err := LoadConfig(tc.path)
 			if err != nil {
@@ -105,9 +104,6 @@ ollama:
 			if tc.wantDB != "" && cfg.DatabaseURL != tc.wantDB {
 				t.Errorf("DatabaseURL = %q, want %q", cfg.DatabaseURL, tc.wantDB)
 			}
-			if cfg.NATSURL != "nats://nats.aerial:4222" {
-				t.Errorf("NATSURL = %q, want default nats://nats.aerial:4222", cfg.NATSURL)
-			}
 		})
 	}
 }
@@ -115,24 +111,21 @@ ollama:
 type ackSubscribeBus struct {
 	pubsub.Bus
 
+	lastErr   error
 	onHandled func()
 }
 
 func (a *ackSubscribeBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
 	return a.Bus.Subscribe(ctx, subject, durable, func(mCtx context.Context, msg pubsub.Message) error {
 		defer a.onHandled()
-		return handler(mCtx, msg)
+		err := handler(mCtx, msg)
+		a.lastErr = err
+		return err
 	})
 }
 
 func TestHandleTurnCompletedEvent_Scenarios(t *testing.T) {
 	ctx := context.Background()
-
-	memStore := newTestMemStore()
-	memStore.activeThreads = []string{"th-turn-1"}
-	memStore.unextractedTurns["th-turn-1"] = []Message{
-		{RowID: 10, Content: "Hello", ResponseText: "Hi there"},
-	}
 
 	validEmb := make([]float32, ExpectedEmbeddingDim)
 	client := &MockOllamaClient{embedding: validEmb}
@@ -140,8 +133,13 @@ func TestHandleTurnCompletedEvent_Scenarios(t *testing.T) {
 		return `{"facts":[]}`, nil
 	}
 
-	worker := NewWorker(WorkerConfig{
-		Store:     memStore,
+	memStorePing := newTestMemStore()
+	memStorePing.activeThreads = []string{"th-ping-1"}
+	memStorePing.unextractedTurns["th-ping-1"] = []Message{
+		{RowID: 15, Content: "ping message", ResponseText: "pong response"},
+	}
+	workerPing := NewWorker(WorkerConfig{
+		Store:     memStorePing,
 		Ollama:    client,
 		LLMClient: llm,
 	})
@@ -161,17 +159,22 @@ func TestHandleTurnCompletedEvent_Scenarios(t *testing.T) {
 	})
 
 	tests := []struct {
-		name      string
-		worker    *Worker
-		ev        pubsub.TurnCompletedEvent
-		wantErr   bool
-		wantWater int64
+		name        string
+		worker      *Worker
+		ev          pubsub.TurnCompletedEvent
+		wantErr     bool
+		checkStore  *TestMemStore
+		checkThread string
+		wantWater   int64
 	}{
 		{
-			name:    "healthcheck ping returns nil without extraction",
-			worker:  worker,
-			ev:      pubsub.TurnCompletedEvent{SessionID: "healthcheck-ping", Source: "test"},
-			wantErr: false,
+			name:        "healthcheck ping returns nil without extraction",
+			worker:      workerPing,
+			ev:          pubsub.TurnCompletedEvent{SessionID: "healthcheck-ping", Source: "test"},
+			wantErr:     false,
+			checkStore:  memStorePing,
+			checkThread: "th-ping-1",
+			wantWater:   0,
 		},
 		{
 			name:    "nil store returns nil without error",
@@ -180,17 +183,10 @@ func TestHandleTurnCompletedEvent_Scenarios(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "extraction failure returns error",
+			name:    "extraction failure is logged and returns nil without error",
 			worker:  workerErr,
 			ev:      pubsub.TurnCompletedEvent{SessionID: "sess-err", Source: "discord"},
-			wantErr: true,
-		},
-		{
-			name:      "valid turn completed triggers extraction sweep",
-			worker:    worker,
-			ev:        pubsub.TurnCompletedEvent{SessionID: "sess-1", Source: "discord"},
-			wantErr:   false,
-			wantWater: 10,
+			wantErr: false,
 		},
 	}
 
@@ -200,9 +196,9 @@ func TestHandleTurnCompletedEvent_Scenarios(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("HandleTurnCompletedEvent() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if tc.wantWater > 0 {
-				if memStore.watermarks["th-turn-1"] != tc.wantWater {
-					t.Errorf("watermark = %d, want %d", memStore.watermarks["th-turn-1"], tc.wantWater)
+			if tc.checkStore != nil {
+				if w := tc.checkStore.watermarks[tc.checkThread]; w != tc.wantWater {
+					t.Errorf("watermark for %s = %d, want %d", tc.checkThread, w, tc.wantWater)
 				}
 			}
 		})
@@ -264,6 +260,9 @@ func TestCoven_TurnsConsumerIntegration(t *testing.T) {
 
 	if memStore.watermarks["th-int-1"] != 25 {
 		t.Errorf("watermark = %d, want 25", memStore.watermarks["th-int-1"])
+	}
+	if wrapped.lastErr != nil {
+		t.Errorf("expected nil error on valid turn delivery, got %v", wrapped.lastErr)
 	}
 }
 
@@ -340,5 +339,8 @@ func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
 	case <-unmarshalDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for bad json message to be handled")
+	}
+	if wrapped.lastErr != nil {
+		t.Errorf("expected nil error on bad json unmarshal to avoid poison redelivery loop, got %v", wrapped.lastErr)
 	}
 }

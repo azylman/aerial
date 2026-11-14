@@ -60,7 +60,14 @@ func initHaroJetStreamWithFactory(ctx context.Context, server *Server, database 
 				log.Printf("[Haro] warning: failed to unmarshal external event: %v", unmarshalErr)
 				return nil
 			}
-			return server.HandleExternalEvent(msgCtx, ev)
+			if err := server.HandleExternalEvent(msgCtx, ev); err != nil {
+				if msg.NumDelivered() < 5 {
+					return err
+				}
+				log.Printf("[Haro] dropping external event %s after %d delivery attempts: %v", ev.EventID, msg.NumDelivered(), err)
+				return nil
+			}
+			return nil
 		}); err != nil {
 			log.Printf("[Haro] warning: failed to subscribe haro-events: %v", err)
 		} else {

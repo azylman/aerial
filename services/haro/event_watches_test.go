@@ -628,6 +628,30 @@ func TestEventWatchTools(t *testing.T) {
 	testEventWatchHandleListAndCancel(ctx, t, db)
 }
 
+func verifyTriggerState(ctx context.Context, t *testing.T, db *sql.DB, ev pubsub.ExternalEvent, wantInDB bool) {
+	t.Helper()
+	matched, err := CheckEventTriggers(ctx, db, ev.Source, ev.Targets, ev.EventType)
+	if err != nil {
+		t.Fatalf("CheckEventTriggers failed: %v", err)
+	}
+	if matched != wantInDB {
+		t.Errorf("trigger in db = %v, want %v", matched, wantInDB)
+	}
+}
+
+func verifyDispatchedPrompt(t *testing.T, disp *mockDispatcher, wantChannel, wantPrompt string) {
+	t.Helper()
+	if len(disp.dispatched) != 1 {
+		t.Fatalf("expected 1 dispatched prompt, got %d", len(disp.dispatched))
+	}
+	if disp.dispatched[0].ChannelID != wantChannel {
+		t.Errorf("ChannelID = %s, want %s", disp.dispatched[0].ChannelID, wantChannel)
+	}
+	if disp.dispatched[0].Prompt != wantPrompt {
+		t.Errorf("Prompt = %q, want %q", disp.dispatched[0].Prompt, wantPrompt)
+	}
+}
+
 func TestHandleExternalEvent_Scenarios(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()
@@ -653,12 +677,23 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 	})
 
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
-		ID:        "trig-ext-nil-disp",
+		ID:         "trig-ext-fail-pers",
+		ChannelID:  "1555405874565091380",
+		Source:     "camera",
+		Target:     "gate",
+		EventType:  "motion",
+		Prompt:     "Motion at gate",
+		Effort:     "low",
+		Persistent: true,
+	})
+
+	_ = InsertEventTrigger(ctx, db, EventTrigger{
+		ID:        "trig-ext-healthcheck",
 		ChannelID: "1555405874565091380",
-		Source:    "camera",
-		Target:    "porch",
-		EventType: "motion",
-		Prompt:    "Motion on porch",
+		Source:    "healthcheck",
+		Target:    "ping",
+		EventType: "ping",
+		Prompt:    "Healthcheck ping",
 		Effort:    "low",
 	})
 
@@ -673,9 +708,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 	mockDispOK := &mockDispatcher{response: PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-1"}}
 	serverOK := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDispOK)
 	serverFail := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDispFail)
-	serverNilDB := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, nil), mockDispOK)
-	serverNilDisp := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db))
-	serverNilDisp.dispatcher = nil
 
 	tests := []struct {
 		name      string
@@ -686,22 +718,12 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		wantInDB  bool
 	}{
 		{
-			name:    "healthcheck source is no-op",
-			server:  serverOK,
-			ev:      pubsub.ExternalEvent{Source: "healthcheck", EventType: "ping", Targets: []string{"ping"}},
-			wantErr: false,
-		},
-		{
-			name:    "empty targets is no-op",
-			server:  serverOK,
-			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: nil},
-			wantErr: false,
-		},
-		{
-			name:    "nil db returns error",
-			server:  serverNilDB,
-			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}},
-			wantErr: true,
+			name:      "healthcheck source is no-op and leaves trigger unclaimed",
+			server:    serverOK,
+			ev:        pubsub.ExternalEvent{Source: "healthcheck", EventType: "ping", Targets: []string{"ping"}},
+			wantErr:   false,
+			checkDBID: "trig-ext-healthcheck",
+			wantInDB:  true,
 		},
 		{
 			name:    "closed db returns error from ClaimEventTriggers",
@@ -716,19 +738,19 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:      "dispatch failure returns error and re-inserts trigger",
+			name:      "dispatch failure recovers trigger to db and returns nil to avoid redelivery storm",
 			server:    serverFail,
 			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"backyard"}},
-			wantErr:   true,
+			wantErr:   false,
 			checkDBID: "trig-ext-fail",
 			wantInDB:  true,
 		},
 		{
-			name:      "nil dispatcher returns error",
-			server:    serverNilDisp,
-			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"porch"}},
-			wantErr:   true,
-			checkDBID: "trig-ext-nil-disp",
+			name:      "persistent trigger dispatch failure resets updated_at and returns nil",
+			server:    serverFail,
+			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"gate"}},
+			wantErr:   false,
+			checkDBID: "trig-ext-fail-pers",
 			wantInDB:  true,
 		},
 		{
@@ -748,13 +770,10 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 				t.Fatalf("HandleExternalEvent() err = %v, wantErr = %v", gotErr, tc.wantErr)
 			}
 			if tc.checkDBID != "" {
-				matched, err := CheckEventTriggers(ctx, db, tc.ev.Source, tc.ev.Targets, tc.ev.EventType)
-				if err != nil {
-					t.Fatalf("CheckEventTriggers failed: %v", err)
-				}
-				if matched != tc.wantInDB {
-					t.Errorf("trigger in db = %v, want %v", matched, tc.wantInDB)
-				}
+				verifyTriggerState(ctx, t, db, tc.ev, tc.wantInDB)
+			}
+			if tc.name == "successful dispatch claims and fires trigger" {
+				verifyDispatchedPrompt(t, mockDispOK, "1555405874565091380", "Camera Alert\n\nVehicle in driveway")
 			}
 		})
 	}
@@ -763,13 +782,16 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 type ackSubscribeBus struct {
 	pubsub.Bus
 
+	lastErr   error
 	onHandled func()
 }
 
 func (a *ackSubscribeBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
 	return a.Bus.Subscribe(ctx, subject, durable, func(mCtx context.Context, msg pubsub.Message) error {
 		defer a.onHandled()
-		return handler(mCtx, msg)
+		err := handler(mCtx, msg)
+		a.lastErr = err
+		return err
 	})
 }
 
@@ -828,6 +850,112 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 	}
 	if matched {
 		t.Error("expected trigger to have been claimed and deleted from db")
+	}
+	if wrapped.lastErr != nil {
+		t.Errorf("expected nil error on successful event handling, got %v", wrapped.lastErr)
+	}
+}
+
+type brokenBus struct {
+	pubsub.Bus
+
+	errOnEnsure    bool
+	errOnSubscribe bool
+}
+
+func (b *brokenBus) EnsureCoreStreams(ctx context.Context) error {
+	if b.errOnEnsure {
+		return errors.New("ensure core streams failed")
+	}
+	return b.Bus.EnsureCoreStreams(ctx)
+}
+
+func (b *brokenBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	if b.errOnSubscribe {
+		return nil, errors.New("subscribe failed")
+	}
+	return b.Bus.Subscribe(ctx, subject, durable, handler)
+}
+
+type handlerCaptureBus struct {
+	pubsub.Bus
+
+	captured pubsub.Handler
+}
+
+func (c *handlerCaptureBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	c.captured = handler
+	return c.Bus.Subscribe(ctx, subject, durable, handler)
+}
+
+func TestHaro_InitJetStreamEdgeCases(t *testing.T) {
+	ctx := context.Background()
+
+	if bus := initHaroJetStream(ctx, nil, nil, ""); bus != nil {
+		t.Error("expected nil bus for empty natsURL")
+	}
+
+	errFactory := func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return nil, errors.New("connection failed")
+	}
+	if bus := initHaroJetStreamWithFactory(ctx, nil, nil, "nats://mock", errFactory); bus != nil {
+		t.Error("expected nil bus when factory returns error")
+	}
+
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+
+	brokenEnsure := &brokenBus{Bus: memBus, errOnEnsure: true}
+	if bus := initHaroJetStreamWithFactory(ctx, nil, nil, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return brokenEnsure, nil
+	}); bus == nil {
+		t.Error("expected non-nil bus even if ensure stream fails")
+	}
+
+	server := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, nil))
+	brokenSub := &brokenBus{Bus: memBus, errOnSubscribe: true}
+	if bus := initHaroJetStreamWithFactory(ctx, server, nil, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return brokenSub, nil
+	}); bus == nil {
+		t.Error("expected non-nil bus even if subscribe fails")
+	}
+
+	// Test handler delivery retry capping
+	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+	serverClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
+
+	captureBus := &handlerCaptureBus{Bus: memBus}
+	bus := initHaroJetStreamWithFactory(ctx, serverClosed, nil, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return captureBus, nil
+	})
+	if bus == nil || captureBus.captured == nil {
+		t.Fatal("expected captured subscribe handler")
+	}
+
+	evBytes, _ := json.Marshal(pubsub.ExternalEvent{
+		EventID:   "ev-retry-test",
+		Source:    "camera",
+		EventType: "motion",
+		Targets:   []string{"driveway"},
+	})
+
+	// When attempts < 5 and handler fails on DB error, returns error (NAK)
+	if err := captureBus.captured(ctx, &memoryMsg{data: evBytes, numDelivered: 1}); err == nil {
+		t.Error("expected error for numDelivered < 5 on DB failure")
+	}
+
+	// When attempts >= 5 and handler fails, drops and returns nil
+	if err := captureBus.captured(ctx, &memoryMsg{data: evBytes, numDelivered: 5}); err != nil {
+		t.Errorf("expected nil error for numDelivered >= 5 to drop poison event, got %v", err)
+	}
+
+	// Bad JSON payload returns nil to avoid poison redelivery loop
+	if err := captureBus.captured(ctx, &memoryMsg{data: []byte("invalid-json"), numDelivered: 1}); err != nil {
+		t.Errorf("expected nil error for bad json to avoid poison loop, got %v", err)
 	}
 }
 

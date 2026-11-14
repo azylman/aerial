@@ -47,7 +47,14 @@ func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL 
 				log.Printf("[Coven] warning: failed to unmarshal turn completed event: %v", unmarshalErr)
 				return nil
 			}
-			return worker.HandleTurnCompletedEvent(msgCtx, ev)
+			if err := worker.HandleTurnCompletedEvent(msgCtx, ev); err != nil {
+				if msg.NumDelivered() < 5 {
+					return err
+				}
+				log.Printf("[Coven] dropping turn completed event %s after %d delivery attempts: %v", ev.SessionID, msg.NumDelivered(), err)
+				return nil
+			}
+			return nil
 		}); err != nil {
 			log.Printf("[Coven] warning: failed to subscribe coven-turns: %v", err)
 		} else {

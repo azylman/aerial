@@ -575,13 +575,12 @@ func (s *Server) HandleExternalEvent(ctx context.Context, ev pubsub.ExternalEven
 	if err != nil {
 		return err
 	}
-	var firstErr error
 	for _, trig := range triggers {
-		if fireErr := s.fireClaimedTrigger(ctx, trig, ev.ContextHeader); fireErr != nil && firstErr == nil {
-			firstErr = fireErr
+		if fireErr := s.fireClaimedTrigger(ctx, trig, ev.ContextHeader); fireErr != nil {
+			log.Printf("[Haro] error firing claimed event trigger %s (%s): %v", trig.ID, trig.Source, fireErr)
 		}
 	}
-	return firstErr
+	return nil
 }
 
 func (s *Server) handleFireEventTriggers(w http.ResponseWriter, r *http.Request) {
