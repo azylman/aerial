@@ -96,7 +96,7 @@ type WorkerPoolConfig struct {
 	Pools                                                                        map[PoolKey]runner.AgentPool
 	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool runner.AgentPool
 	Classifier                                                                   *classifier.Classifier
-	HaroURL, SynapseURL                                                          string
+	HaroURL, SynapseURL, NATSURL                                                 string
 	EventBus                                                                     pubsub.Bus
 
 	// Optional hooks for testing/custom overrides
@@ -210,6 +210,21 @@ func (p *WorkerPool) EventBus() pubsub.Bus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.eventBus
+}
+
+// NATSURL returns the resolved NATS URL configured on the pool.
+func (p *WorkerPool) NATSURL() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil && cur.NATSURL != "" {
+			return cur.NATSURL
+		}
+	}
+	return p.cfg.NATSURL
 }
 
 func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error) {
@@ -331,6 +346,9 @@ func resolveDefaultAppConfig(appCfg *config.Config, cfg WorkerPoolConfig) (*conf
 	}
 	if cfg.SystemPrompt != "" {
 		def.SystemPrompt = cfg.SystemPrompt
+	}
+	if cfg.NATSURL != "" {
+		def.NATSURL = cfg.NATSURL
 	}
 	return config.NewFromData(def), false
 }

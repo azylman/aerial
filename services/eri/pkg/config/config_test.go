@@ -64,6 +64,7 @@ type loadConfigIngestionCase struct {
 	wantVanadisURL string
 	wantHaroURL    string
 	wantCovenURL   string
+	wantNATSURL    string
 	wantTx         TranscriptsConfig
 	wantErr        bool
 	errContains    string
@@ -95,6 +96,9 @@ func assertLoadConfigIngestionValues(t *testing.T, cur *ConfigData, tc loadConfi
 	if tc.wantCovenURL != "" && cur.CovenURL != tc.wantCovenURL {
 		t.Errorf("CovenURL = %q, want %q", cur.CovenURL, tc.wantCovenURL)
 	}
+	if tc.wantNATSURL != "" && cur.NATSURL != tc.wantNATSURL {
+		t.Errorf("NATSURL = %q, want %q", cur.NATSURL, tc.wantNATSURL)
+	}
 	if cur.Transcripts != tc.wantTx {
 		t.Errorf("Transcripts = %+v, want %+v", cur.Transcripts, tc.wantTx)
 	}
@@ -121,6 +125,10 @@ func assertLoadConfigIngestionCase(t *testing.T, tc loadConfigIngestionCase) {
 }
 
 func loadConfigIngestionCases() []loadConfigIngestionCase {
+	return append(loadConfigIngestionBaseCases(), loadConfigIngestionExtendedCases()...)
+}
+
+func loadConfigIngestionBaseCases() []loadConfigIngestionCase {
 	return []loadConfigIngestionCase{
 		{
 			name: "valid modern yaml",
@@ -219,6 +227,11 @@ channels:
 			envMap:    map[string]string{"SYSTEM_PROMPT": "prompt from lookup"},
 			wantModel: "isolated-model-123",
 		},
+	}
+}
+
+func loadConfigIngestionExtendedCases() []loadConfigIngestionCase {
+	return []loadConfigIngestionCase{
 		{
 			name: "polymorphic mcp_config string",
 			content: `
@@ -251,6 +264,7 @@ synapse_url: "  http://synapse.internal:4020///  "
 vanadis_url: "http://vanadis.internal:4025/  "
 haro_url: "  http://haro.internal:4026  "
 coven_url: "http://coven.internal:4027/"
+nats_url: "  nats://nats-cluster:4222/  "
 transcripts:
   database: "  shared_db  "
   stack: " stack-b "
@@ -264,7 +278,21 @@ channels:
 			wantVanadisURL: "http://vanadis.internal:4025",
 			wantHaroURL:    "http://haro.internal:4026",
 			wantCovenURL:   "http://coven.internal:4027",
+			wantNATSURL:    "nats://nats-cluster:4222",
 			wantTx:         TranscriptsConfig{Database: "shared_db", Stack: "stack-b"},
+		},
+		{
+			name: "nats url env override",
+			content: `
+channels:
+  default:
+    mode: "threads"
+nats_url: "nats://file-nats:4222"
+`,
+			envMap: map[string]string{
+				"NATS_URL": "nats://env-nats:4222",
+			},
+			wantNATSURL: "nats://env-nats:4222",
 		},
 	}
 }

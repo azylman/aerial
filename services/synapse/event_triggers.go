@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/google/uuid"
 )
 
 // ClaimedEventTrigger represents an event trigger claimed and fired atomically via Haro.
@@ -154,16 +156,72 @@ func (r *PostgresPRRegistry) FailVanadisChunkDetailsByPR(ctx context.Context, re
 }
 
 func (s *RouterServer) fireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) {
-	if s.registry == nil || len(targets) == 0 {
+	if len(targets) == 0 {
 		return
 	}
 	cleanTargets := dedupeTrimmedStrings(targets)
 	if len(cleanTargets) == 0 {
 		return
 	}
-	if _, err := s.registry.FireEventTriggers(ctx, source, cleanTargets, eventType, contextHeader); err != nil {
-		log.Printf("[synapse] [event-triggers] error firing triggers for %s %v %s: %v", source, cleanTargets, eventType, err)
+	if s != nil && s.bus != nil {
+		if err := s.evaluateEventTriggers(ctx, source, eventType, cleanTargets, contextHeader); err == nil {
+			return
+		}
 	}
+	if s != nil && s.registry != nil {
+		if _, err := s.registry.FireEventTriggers(ctx, source, cleanTargets, eventType, contextHeader); err != nil {
+			log.Printf("[synapse] [event-triggers] error firing triggers for %s %v %s: %v", source, cleanTargets, eventType, err)
+		}
+	}
+}
+
+// evaluateEventTriggers evaluates incoming event triggers by publishing to AERIAL_EVENTS on JetStream,
+// falling back to legacy Haro HTTP /event-triggers/check and River workers only on failure or when bus is nil.
+func (s *RouterServer) evaluateEventTriggers(ctx context.Context, source, eventType string, targets []string, contextHeader string) error {
+	source, eventType = strings.TrimSpace(source), strings.TrimSpace(eventType)
+	cleanTargets := dedupeTrimmedStrings(targets)
+	if len(cleanTargets) == 0 || source == "" || eventType == "" {
+		return nil
+	}
+
+	if s != nil && s.bus != nil {
+		ev := pubsub.ExternalEvent{
+			EventID:       uuid.New().String(),
+			Source:        source,
+			EventType:     eventType,
+			Targets:       cleanTargets,
+			ContextHeader: contextHeader,
+			OccurredAt:    time.Now().UTC(),
+		}
+		subject := fmt.Sprintf("aerial.events.%s.%s", source, eventType)
+		msgID := fmt.Sprintf("event:%s:%s:%s", source, eventType, ev.EventID)
+		pubErr := s.bus.Publish(ctx, subject, msgID, ev)
+		if pubErr == nil {
+			return nil
+		}
+		log.Printf("[synapse] [event-triggers] Warning: jetstream publish failed for %s (%s): %v, falling back to legacy path", subject, msgID, pubErr)
+	}
+
+	if s != nil && s.registry != nil {
+		matched, checkErr := s.registry.CheckEventTriggers(ctx, source, cleanTargets, eventType)
+		if checkErr == nil && !matched {
+			return nil
+		}
+		if checkErr != nil {
+			log.Printf("[synapse] [events] warning: haro pre-check failed for %s %v %s (failing open to river): %v", source, cleanTargets, eventType, checkErr)
+		}
+	}
+
+	jobArgs := EventTriggerWebhookArgs{
+		Source:        source,
+		Targets:       cleanTargets,
+		EventType:     eventType,
+		ContextHeader: contextHeader,
+	}
+	if s != nil && s.riverClient != nil {
+		return s.insertRiverJob(ctx, jobArgs)
+	}
+	return s.ProcessEventTriggerWebhook(ctx, jobArgs)
 }
 
 func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Request) {
@@ -197,6 +255,18 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 		contextHeader = fmt.Sprintf("External %s event %s on %s", source, eventType, strings.Join(targets, ", "))
 		if details := strings.TrimSpace(req.Details); details != "" {
 			contextHeader += ": " + details
+		}
+	}
+
+	if s != nil && s.bus != nil {
+		if err := s.evaluateEventTriggers(r.Context(), source, eventType, targets, contextHeader); err == nil {
+			httpkit.WriteJSON(w, http.StatusOK, map[string]any{
+				"status":     "accepted",
+				"source":     source,
+				"targets":    targets,
+				"event_type": eventType,
+			})
+			return
 		}
 	}
 
@@ -247,6 +317,10 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 		"targets":    targets,
 		"event_type": eventType,
 	})
+}
+
+func (s *RouterServer) handleExternalEventsWebhook(w http.ResponseWriter, r *http.Request) {
+	s.handleEventsWebhook(w, r)
 }
 
 // ProcessEventTriggerWebhook fires matching event triggers via Haro, returning any error so River retries.

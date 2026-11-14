@@ -3,6 +3,7 @@ package queue
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -1143,5 +1145,208 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 				t.Errorf("expected ambient wake to be evaluated, but wakeInfos was nil")
 			}
 		})
+	}
+}
+
+type publishTurnCompletedCase struct {
+	name           string
+	attachBus      bool
+	sessionID      string
+	conversationID string
+	source         string
+	wantErr        bool
+	errContains    string
+	wantSubject    string
+	wantSource     string
+}
+
+type turnCompletedDelivery struct {
+	subject string
+	event   pubsub.TurnCompletedEvent
+}
+
+type turnCompletedTracker struct {
+	mu        sync.Mutex
+	cond      *sync.Cond
+	delivered []turnCompletedDelivery
+}
+
+func newTurnCompletedTracker(t *testing.T, bus pubsub.Bus, topic, subID string) *turnCompletedTracker {
+	t.Helper()
+	tracker := &turnCompletedTracker{}
+	tracker.cond = sync.NewCond(&tracker.mu)
+	_, err := bus.Subscribe(context.Background(), topic, subID, func(_ context.Context, msg pubsub.Message) error {
+		var ev pubsub.TurnCompletedEvent
+		if uErr := json.Unmarshal(msg.Data(), &ev); uErr == nil {
+			tracker.mu.Lock()
+			tracker.delivered = append(tracker.delivered, turnCompletedDelivery{
+				subject: msg.Subject(),
+				event:   ev,
+			})
+			tracker.cond.Broadcast()
+			tracker.mu.Unlock()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to subscribe to memory bus: %v", err)
+	}
+	return tracker
+}
+
+func (tr *turnCompletedTracker) waitForFirst() turnCompletedDelivery {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	for len(tr.delivered) == 0 {
+		tr.cond.Wait()
+	}
+	return tr.delivered[0]
+}
+
+func assertPublishTurnCompletedScenario(t *testing.T, tc publishTurnCompletedCase) {
+	t.Helper()
+	pool := &WorkerPool{}
+	var tracker *turnCompletedTracker
+	if tc.attachBus {
+		memBus := pubsub.NewMemoryBus()
+		defer memBus.Close()
+		pool.SetEventBus(memBus)
+		tracker = newTurnCompletedTracker(t, memBus, "aerial.turn.*", "test-sub")
+	}
+
+	err := pool.publishTurnCompleted(context.Background(), tc.sessionID, tc.conversationID, tc.source)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error containing %q, got nil", tc.errContains)
+		}
+		if !strings.Contains(err.Error(), tc.errContains) {
+			t.Fatalf("expected error containing %q, got: %v", tc.errContains, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	gotMsg := tracker.waitForFirst()
+	if gotMsg.subject != tc.wantSubject {
+		t.Errorf("subject = %q, want %q", gotMsg.subject, tc.wantSubject)
+	}
+	if gotMsg.event.SessionID != strings.TrimSpace(tc.sessionID) {
+		t.Errorf("event.SessionID = %q, want %q", gotMsg.event.SessionID, tc.sessionID)
+	}
+	if gotMsg.event.ConversationID != strings.TrimSpace(tc.conversationID) {
+		t.Errorf("event.ConversationID = %q, want %q", gotMsg.event.ConversationID, tc.conversationID)
+	}
+	if gotMsg.event.Source != tc.wantSource {
+		t.Errorf("event.Source = %q, want %q", gotMsg.event.Source, tc.wantSource)
+	}
+	if gotMsg.event.CompletedAt.IsZero() {
+		t.Errorf("expected non-zero CompletedAt")
+	}
+}
+
+func TestWorkerPool_PublishTurnCompleted_Scenarios(t *testing.T) {
+	t.Parallel()
+	tests := []publishTurnCompletedCase{
+		{
+			name:        "nil event bus returns error",
+			attachBus:   false,
+			sessionID:   "sess-nil-bus",
+			wantErr:     true,
+			errContains: "event bus is nil",
+		},
+		{
+			name:        "empty session id returns error",
+			attachBus:   true,
+			sessionID:   "",
+			wantErr:     true,
+			errContains: "empty session id",
+		},
+		{
+			name:        "whitespace session id returns error",
+			attachBus:   true,
+			sessionID:   "   ",
+			wantErr:     true,
+			errContains: "empty session id",
+		},
+		{
+			name:           "successful publish with explicit source",
+			attachBus:      true,
+			sessionID:      "sess-voice-1",
+			conversationID: "conv-voice-1",
+			source:         "voice",
+			wantErr:        false,
+			wantSubject:    "aerial.turn.completed",
+			wantSource:     "voice",
+		},
+		{
+			name:           "successful publish defaults empty source to discord",
+			attachBus:      true,
+			sessionID:      "sess-discord-1",
+			conversationID: "conv-discord-1",
+			source:         "",
+			wantErr:        false,
+			wantSubject:    "aerial.turn.completed",
+			wantSource:     "discord",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertPublishTurnCompletedScenario(t, tc)
+		})
+	}
+}
+
+func TestWorkerPool_ProcessInteractiveTurn_PublishesTurnCompleted(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	tracker := newTurnCompletedTracker(t, memBus, "aerial.turn.*", "interactive-sub")
+
+	threadID := "thread-turn-completed-test"
+	expectedSessID := "sess-interactive-completed-123"
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:          store,
+		EventBus:       memBus,
+		TimeoutMinutes: 1,
+		DeliveryFunc:   noopDelivery,
+		TypingFunc:     noopTyping,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse(expectedSessID, "Task finished cleanly!"), "", 0, nil
+		},
+	})
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:        "msg-interactive-1",
+		ThreadID:  threadID,
+		AuthorID:  "user-1",
+		Content:   "Hello from interactive turn",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = insertMessage(store, msg)
+
+	pool.processInteractiveTurn([]db.Message{msg})
+
+	gotMsg := tracker.waitForFirst()
+	if gotMsg.subject != "aerial.turn.completed" {
+		t.Errorf("subject = %q, want %q", gotMsg.subject, "aerial.turn.completed")
+	}
+	if gotMsg.event.SessionID != expectedSessID {
+		t.Errorf("event.SessionID = %q, want %q", gotMsg.event.SessionID, expectedSessID)
+	}
+	if gotMsg.event.ConversationID != threadID {
+		t.Errorf("event.ConversationID = %q, want %q", gotMsg.event.ConversationID, threadID)
+	}
+	if gotMsg.event.Source != "discord" {
+		t.Errorf("event.Source = %q, want %q", gotMsg.event.Source, "discord")
+	}
+	if gotMsg.event.CompletedAt.IsZero() {
+		t.Errorf("expected non-zero CompletedAt")
 	}
 }

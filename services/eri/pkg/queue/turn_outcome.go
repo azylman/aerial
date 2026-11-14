@@ -178,6 +178,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 		te.logf("[WorkerPool] Dispatch %s (session: %s) completed successfully on attempt %d/%d", te.dispatch.ID, te.threadID, attempt, maxAttempts)
 	} else {
 		te.logf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
+		te.processInteractiveTurn()
 	}
 	return true, ""
 }
