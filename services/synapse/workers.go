@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"slices"
@@ -17,10 +16,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/bwmarrin/discordgo"
-	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/riverqueue/river"
-	"github.com/riverqueue/river/rivertype"
 )
 
 // Metric collectors for River queues and worker execution telemetry.
@@ -99,15 +95,23 @@ var (
 	)
 )
 
+const (
+	QueueDefault            = "default"
+	QueueMergeConflict      = "merge_conflict"
+	QueueWidgetSync         = "widget_sync"
+	QueueDiscordIngress     = "discord_ingress"
+	QueueDiscordInteraction = "discord_interaction"
+)
+
 var (
-	knownRiverQueues = []string{
-		river.QueueDefault,
+	knownQueues = []string{
+		QueueDefault,
 		QueueMergeConflict,
 		QueueWidgetSync,
 		QueueDiscordIngress,
 		QueueDiscordInteraction,
 	}
-	knownRiverStates = []string{"available", "running", "retryable", "scheduled"}
+	knownStates = []string{"pending", "in_flight"}
 )
 
 func registerCollector(c prometheus.Collector) {
@@ -129,8 +133,8 @@ func init() {
 	registerCollector(QueueOldestAgeSeconds)
 	registerCollector(DiscordGatewayLatencySeconds)
 
-	for _, q := range knownRiverQueues {
-		for _, s := range knownRiverStates {
+	for _, q := range knownQueues {
+		for _, s := range knownStates {
 			QueueDepth.WithLabelValues(q, s).Set(0)
 		}
 		QueueOldestAgeSeconds.WithLabelValues(q).Set(0)
@@ -149,7 +153,7 @@ func RecordUniqueSkipped(kind string) {
 // RecordJobEnqueued increments the JobsEnqueuedTotal counter for the specified queue, kind, and status.
 func RecordJobEnqueued(queue, kind, status string) {
 	if queue == "" {
-		queue = river.QueueDefault
+		queue = QueueDefault
 	}
 	if kind == "" {
 		kind = "unknown"
@@ -163,7 +167,7 @@ func RecordJobEnqueued(queue, kind, status string) {
 // RecordJobRetry increments the JobRetriesTotal counter for the specified queue, kind, and reason.
 func RecordJobRetry(queue, kind, reason string) {
 	if queue == "" {
-		queue = river.QueueDefault
+		queue = QueueDefault
 	}
 	if kind == "" {
 		kind = "unknown"
@@ -177,7 +181,7 @@ func RecordJobRetry(queue, kind, reason string) {
 // RecordJobDropped increments the JobsDroppedTotal counter for the specified queue, kind, and reason.
 func RecordJobDropped(queue, kind, reason string) {
 	if queue == "" {
-		queue = river.QueueDefault
+		queue = QueueDefault
 	}
 	if kind == "" {
 		kind = "unknown"
@@ -193,224 +197,106 @@ func SetDiscordGatewayLatency(seconds float64) {
 	DiscordGatewayLatencySeconds.Set(seconds)
 }
 
-func resolveRiverJobMeta[T river.JobArgs](job *river.Job[T], defaultQueue string) (string, string) {
-	queue := defaultQueue
-	if queue == "" {
-		queue = river.QueueDefault
-	}
-	if job == nil {
-		var zero T
-		return queue, zero.Kind()
-	}
-	if job.JobRow != nil {
-		if job.Queue != "" {
-			queue = job.Queue
-		}
-		if job.Attempt > 1 {
-			RecordJobRetry(queue, job.Args.Kind(), "river_retry")
-		}
-	}
-	return queue, job.Args.Kind()
+type consumerStatsQuerier interface {
+	ConsumerStats(ctx context.Context, stream, consumer string) (pending int64, inFlight int64, err error)
 }
 
-func observeRiverJob[T river.JobArgs](job *river.Job[T], defaultQueue string, fn func() error) error {
-	queue, kind := resolveRiverJobMeta(job, defaultQueue)
-	start := time.Now()
-	err := fn()
-	duration := time.Since(start).Seconds()
-	JobDurationSeconds.WithLabelValues(queue, kind).Observe(duration)
+type synapseConsumerTarget struct {
+	stream   string
+	consumer string
+	queue    string
+}
 
-	var status string
-	if err == nil {
-		status = "success"
-	} else if _, ok := errors.AsType[*rivertype.JobCancelError](err); ok {
-		status = "cancelled"
-	} else if job != nil && job.JobRow != nil && job.MaxAttempts > 0 && job.Attempt >= job.MaxAttempts {
-		status = "discarded"
-		RecordJobDropped(queue, kind, "max_attempts_exhausted")
-	} else {
-		status = "error"
+var synapseConsumerTargets = []synapseConsumerTarget{
+	{stream: "AERIAL_JOBS", consumer: "synapse-github", queue: QueueDefault},
+	{stream: "AERIAL_JOBS", consumer: "synapse-deploy", queue: QueueDefault},
+	{stream: "AERIAL_JOBS", consumer: "synapse-merge-conflict", queue: QueueMergeConflict},
+	{stream: "AERIAL_JOBS", consumer: "synapse-discord-ingress", queue: QueueDiscordIngress},
+	{stream: "AERIAL_JOBS", consumer: "synapse-discord-interaction", queue: QueueDiscordInteraction},
+	{stream: "AERIAL_COALESCED", consumer: "synapse-widget-sync", queue: QueueWidgetSync},
+}
+
+func collectJetStreamQueueMetrics(ctx context.Context, q consumerStatsQuerier) error {
+	for _, queue := range knownQueues {
+		QueueDepth.WithLabelValues(queue, "pending").Set(0)
+		QueueDepth.WithLabelValues(queue, "in_flight").Set(0)
+		QueueOldestAgeSeconds.WithLabelValues(queue).Set(0)
 	}
-	JobsProcessedTotal.WithLabelValues(queue, kind, status).Inc()
-	return err
-}
-
-type queueStatsQuerier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
-
-const riverQueueStatsQuery = `SELECT queue, state::text, COUNT(*), COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::float8, 0) FROM river_job WHERE state IN ('available', 'running', 'retryable', 'scheduled') AND queue IN ('default', 'merge_conflict', 'widget_sync', 'discord_ingress', 'discord_interaction') GROUP BY queue, state`
-
-func collectRiverQueueMetrics(ctx context.Context, q queueStatsQuerier) error {
 	if q == nil {
 		return nil
 	}
-	for _, queue := range knownRiverQueues {
-		for _, state := range knownRiverStates {
-			QueueDepth.WithLabelValues(queue, state).Set(0)
-		}
-		QueueOldestAgeSeconds.WithLabelValues(queue).Set(0)
-	}
 
-	rows, err := q.Query(ctx, riverQueueStatsQuery)
-	if err != nil {
-		return fmt.Errorf("query river queue stats: %w", err)
-	}
-	defer rows.Close()
-
-	maxPendingAge := make(map[string]float64)
-	for rows.Next() {
-		var (
-			queue     string
-			state     string
-			count     int64
-			oldestAge float64
-		)
-		if err := rows.Scan(&queue, &state, &count, &oldestAge); err != nil {
-			return fmt.Errorf("scan river queue stats: %w", err)
+	queuePending := make(map[string]int64)
+	queueInFlight := make(map[string]int64)
+	for _, target := range synapseConsumerTargets {
+		pending, inFlight, err := q.ConsumerStats(ctx, target.stream, target.consumer)
+		if err != nil {
+			return fmt.Errorf("consumer stats %s/%s: %w", target.stream, target.consumer, err)
 		}
-		QueueDepth.WithLabelValues(queue, state).Set(float64(count))
-		if state == "available" || state == "retryable" || state == "scheduled" {
-			if oldestAge > maxPendingAge[queue] {
-				maxPendingAge[queue] = oldestAge
-			}
-		}
+		queuePending[target.queue] += pending
+		queueInFlight[target.queue] += inFlight
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate river queue stats: %w", err)
+	for queue, p := range queuePending {
+		QueueDepth.WithLabelValues(queue, "pending").Set(float64(p))
 	}
-
-	for queue, age := range maxPendingAge {
-		QueueOldestAgeSeconds.WithLabelValues(queue).Set(age)
+	for queue, f := range queueInFlight {
+		QueueDepth.WithLabelValues(queue, "in_flight").Set(float64(f))
 	}
 	return nil
 }
 
-// RiverInserter defines the interface for inserting jobs into River.
-type RiverInserter interface {
-	Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error)
-}
-
-type riverJobArgsWithOpts interface {
-	river.JobArgs
-	InsertOpts() river.InsertOpts
-}
-
-func defaultRiverInsertOpts() river.InsertOpts {
-	return river.InsertOpts{
-		MaxAttempts: 5,
-		UniqueOpts:  river.UniqueOpts{ByArgs: true, ByPeriod: 15 * time.Minute},
+func resolveJobQueueAndKind(args any) (string, string) {
+	switch args.(type) {
+	case GitHubWebhookArgs, *GitHubWebhookArgs:
+		return QueueDefault, "github_webhook"
+	case DeployWebhookArgs, *DeployWebhookArgs:
+		return QueueDefault, "deploy_webhook"
+	case MergeConflictArgs, *MergeConflictArgs:
+		return QueueMergeConflict, "merge_conflict"
+	case DiscordIngressArgs, *DiscordIngressArgs:
+		return QueueDiscordIngress, "discord_ingress"
+	case DiscordInteractionArgs, *DiscordInteractionArgs:
+		return QueueDiscordInteraction, "discord_interaction"
+	case WidgetSyncArgs, *WidgetSyncArgs:
+		return QueueWidgetSync, "widget_sync"
+	default:
+		return QueueDefault, "unknown"
 	}
 }
 
-func (s *RouterServer) insertRiverJob(ctx context.Context, args riverJobArgsWithOpts) error {
-	opts := args.InsertOpts()
-	queue := opts.Queue
-	if queue == "" {
-		queue = river.QueueDefault
+func (s *RouterServer) publishJetStreamJob(ctx context.Context, args any) error {
+	if s == nil || s.bus == nil {
+		return errors.New("event bus not configured")
 	}
-
-	if s != nil && s.bus != nil {
-		subject, msgID := resolveJetStreamJobCoords(args)
-		if subject != "" {
-			err := s.bus.Publish(ctx, subject, msgID, args)
-			if err == nil {
-				RecordJobEnqueued(queue, args.Kind(), "enqueued")
-				return nil
-			}
-			log.Printf("[synapse] warning: publish to jetstream subject %s failed: %v, falling back to river", subject, err)
-		}
+	subject, msgID := resolveJetStreamJobCoords(args)
+	if subject == "" {
+		return fmt.Errorf("unsupported job args type %T", args)
 	}
-
-	if s == nil || s.riverClient == nil {
-		return errors.New("river client not configured")
-	}
-
-	res, err := s.riverClient.Insert(ctx, args, &opts)
-	if err != nil {
-		RecordJobEnqueued(queue, args.Kind(), "error")
+	queue, kind := resolveJobQueueAndKind(args)
+	if err := s.bus.Publish(ctx, subject, msgID, args); err != nil {
+		RecordJobEnqueued(queue, kind, "error")
 		return err
 	}
-	if res != nil && res.UniqueSkippedAsDuplicate {
-		RecordUniqueSkipped(args.Kind())
-		RecordJobEnqueued(queue, args.Kind(), "skipped_duplicate")
-		return nil
-	}
-	RecordJobEnqueued(queue, args.Kind(), "enqueued")
+	RecordJobEnqueued(queue, kind, "enqueued")
 	return nil
 }
 
 // GitHubWebhookArgs contains payload data for durable background processing of GitHub webhooks.
 type GitHubWebhookArgs struct {
 	Event    string `json:"event"`
-	Delivery string `json:"delivery" river:"unique"`
+	Delivery string `json:"delivery"`
 	Body     []byte `json:"body"`
 }
 
-func (GitHubWebhookArgs) Kind() string                 { return "github_webhook" }
-func (GitHubWebhookArgs) InsertOpts() river.InsertOpts { return defaultRiverInsertOpts() }
-
-// GitHubWebhookWorker processes GitHub webhook events asynchronously from River.
-type GitHubWebhookWorker struct {
-	river.WorkerDefaults[GitHubWebhookArgs]
-
-	server *RouterServer
-}
-
-func (w *GitHubWebhookWorker) Work(ctx context.Context, job *river.Job[GitHubWebhookArgs]) error {
-	return observeRiverJob(job, river.QueueDefault, func() error {
-		if w.server == nil {
-			return errors.New("router server not configured on worker")
-		}
-		var jobID int64
-		if job != nil && job.JobRow != nil {
-			jobID = job.ID
-		}
-		log.Printf("[synapse] [river] processing github job id=%d event=%s delivery=%s", jobID, job.Args.Event, job.Args.Delivery)
-		if _, err := w.server.ProcessGitHubEvent(ctx, job.Args.Event, job.Args.Delivery, job.Args.Body); err != nil {
-			log.Printf("[synapse] [river] error processing github job id=%d event=%s delivery=%s: %v", jobID, job.Args.Event, job.Args.Delivery, err)
-			return err
-		}
-		return nil
-	})
-}
+func (GitHubWebhookArgs) Kind() string { return "github_webhook" }
 
 // DeployWebhookArgs contains payload data for durable background processing of deployment webhooks.
 type DeployWebhookArgs struct {
-	IdempotencyKey string      `json:"idempotency_key,omitempty" river:"unique"`
+	IdempotencyKey string      `json:"idempotency_key,omitempty"`
 	Event          DeployEvent `json:"event"`
 }
 
-func (DeployWebhookArgs) Kind() string                 { return "deploy_webhook" }
-func (DeployWebhookArgs) InsertOpts() river.InsertOpts { return defaultRiverInsertOpts() }
-
-// DeployWebhookWorker processes deployment and sync webhook events from River.
-type DeployWebhookWorker struct {
-	river.WorkerDefaults[DeployWebhookArgs]
-
-	server *RouterServer
-}
-
-func (w *DeployWebhookWorker) Work(ctx context.Context, job *river.Job[DeployWebhookArgs]) error {
-	return observeRiverJob(job, river.QueueDefault, func() error {
-		if w.server == nil {
-			return errors.New("router server not configured on worker")
-		}
-		var jobID int64
-		if job != nil && job.JobRow != nil {
-			jobID = job.ID
-		}
-		log.Printf("[synapse] [river] processing deploy job id=%d event=%s job_name=%s", jobID, job.Args.Event.Event, job.Args.Event.JobName)
-		if _, err := w.server.ProcessDeployEvent(ctx, job.Args.Event); err != nil {
-			log.Printf("[synapse] [river] error processing deploy job id=%d: %v", jobID, err)
-			return err
-		}
-		return nil
-	})
-}
-
-// QueueWidgetSync is the dedicated River queue for Discord widget sync jobs.
-const QueueWidgetSync = "widget_sync"
+func (DeployWebhookArgs) Kind() string { return "deploy_webhook" }
 
 // WidgetSyncArgs contains payload data for Discord PR and build widget updates.
 type WidgetSyncArgs struct {
@@ -422,99 +308,17 @@ type WidgetSyncArgs struct {
 }
 
 func (WidgetSyncArgs) Kind() string { return "widget_sync" }
-func (WidgetSyncArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{
-		Queue:       QueueWidgetSync,
-		MaxAttempts: 5,
-		UniqueOpts: river.UniqueOpts{
-			ByArgs: true,
-			ByState: []rivertype.JobState{
-				rivertype.JobStateAvailable,
-				rivertype.JobStatePending,
-				rivertype.JobStateRunning,
-				rivertype.JobStateRetryable,
-				rivertype.JobStateScheduled,
-			},
-		},
-	}
-}
-
-// WidgetSyncWorker processes Discord PR and build status widget updates from River.
-type WidgetSyncWorker struct {
-	river.WorkerDefaults[WidgetSyncArgs]
-
-	server *RouterServer
-}
-
-func (w *WidgetSyncWorker) Work(ctx context.Context, job *river.Job[WidgetSyncArgs]) error {
-	return observeRiverJob(job, QueueWidgetSync, func() error {
-		if w.server == nil {
-			return errors.New("router server not configured on worker")
-		}
-		var jobID int64
-		if job != nil && job.JobRow != nil {
-			jobID = job.ID
-		}
-		log.Printf("[synapse] [river] processing widget sync job id=%d repo=%s pr=%d build_id=%s", jobID, job.Args.Repo, job.Args.PRNumber, job.Args.BuildID)
-		if err := w.server.ProcessWidgetSync(ctx, job.Args); err != nil {
-			log.Printf("[synapse] [river] error processing widget sync job id=%d: %v", jobID, err)
-			return err
-		}
-		return nil
-	})
-}
-
-// QueueMergeConflict is the dedicated River queue for PR merge conflict remediation dispatches.
-const QueueMergeConflict = "merge_conflict"
 
 // MergeConflictArgs contains payload data for durable background processing of PR merge conflicts.
 type MergeConflictArgs struct {
-	Repo     string `json:"repo" river:"unique"`
-	PRNumber int    `json:"pr_number" river:"unique"`
+	Repo     string `json:"repo"`
+	PRNumber int    `json:"pr_number"`
 	Branch   string `json:"branch"`
 	HeadSHA  string `json:"head_sha"`
 	TargetID string `json:"target_id"`
 }
 
 func (MergeConflictArgs) Kind() string { return "merge_conflict" }
-func (MergeConflictArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{
-		Queue:       QueueMergeConflict,
-		MaxAttempts: 5,
-		UniqueOpts:  river.UniqueOpts{ByArgs: true, ByPeriod: 15 * time.Minute},
-	}
-}
-
-// MergeConflictWorker processes PR merge conflict remediation dispatches from River.
-type MergeConflictWorker struct {
-	river.WorkerDefaults[MergeConflictArgs]
-
-	server *RouterServer
-}
-
-func (w *MergeConflictWorker) Work(ctx context.Context, job *river.Job[MergeConflictArgs]) error {
-	return observeRiverJob(job, QueueMergeConflict, func() error {
-		if w.server == nil {
-			return errors.New("router server not configured on worker")
-		}
-		var jobID int64
-		if job != nil && job.JobRow != nil {
-			jobID = job.ID
-		}
-		log.Printf("[synapse] [river] processing merge conflict job id=%d repo=%s pr=%d", jobID, job.Args.Repo, job.Args.PRNumber)
-		if err := w.server.ProcessMergeConflict(ctx, job.Args); err != nil {
-			log.Printf("[synapse] [river] error processing merge conflict job id=%d: %v", jobID, err)
-			return err
-		}
-		return nil
-	})
-}
-
-// QueueDiscordIngress is the dedicated River queue for single-consumer sequential Discord message ingress.
-const QueueDiscordIngress = "discord_ingress"
-
-// QueueDiscordInteraction is the dedicated River queue for Discord application command interaction dispatch.
-const QueueDiscordInteraction = "discord_interaction"
 
 // DiscordMessageIngressRequest represents the payload delivered to Eri for message ingress.
 type DiscordMessageIngressRequest struct {
@@ -523,131 +327,25 @@ type DiscordMessageIngressRequest struct {
 	Message   *discordgo.Message `json:"message"`
 }
 
-// DiscordIngressArgs contains payload data for River queueing of Discord message ingress events.
+// DiscordIngressArgs contains payload data for JetStream queueing of Discord message ingress events.
 type DiscordIngressArgs struct {
-	MessageID string             `json:"message_id" river:"unique"`
-	BotUserID string             `json:"bot_user_id,omitempty"`
-	RoleNames map[string]string  `json:"role_names,omitempty"`
-	Message   *discordgo.Message `json:"message"`
-	// Traceparent is W3C trace context of the gateway receive span continuing trace to eri.
-	Traceparent string `json:"traceparent,omitempty"`
+	MessageID   string             `json:"message_id"`
+	BotUserID   string             `json:"bot_user_id,omitempty"`
+	RoleNames   map[string]string  `json:"role_names,omitempty"`
+	Message     *discordgo.Message `json:"message"`
+	Traceparent string             `json:"traceparent,omitempty"`
 }
 
 func (DiscordIngressArgs) Kind() string { return "discord_ingress" }
-func (DiscordIngressArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{
-		Queue:       QueueDiscordIngress,
-		MaxAttempts: 30,
-		UniqueOpts: river.UniqueOpts{
-			ByArgs:   true,
-			ByPeriod: 30 * time.Minute,
-		},
-	}
-}
 
-// DiscordIngressWorker processes Discord message ingress events with single-consumer head-of-line backpressure.
-type DiscordIngressWorker struct {
-	river.WorkerDefaults[DiscordIngressArgs]
-
-	server     *RouterServer
-	retryDelay time.Duration
-	maxAge     time.Duration
-}
-
-func (w *DiscordIngressWorker) Timeout(*river.Job[DiscordIngressArgs]) time.Duration {
-	return 30 * time.Minute
-}
-
-func (w *DiscordIngressWorker) NextRetry(*river.Job[DiscordIngressArgs]) time.Time {
-	return time.Now().Add(5 * time.Second)
-}
-
-func (w *DiscordIngressWorker) Work(ctx context.Context, job *river.Job[DiscordIngressArgs]) (err error) {
-	ctx, span := tracing.Tracer().Start(tracing.ContextWithTraceparent(ctx, job.Args.Traceparent), "process "+QueueDiscordIngress, discordJobSpanOptions(QueueDiscordIngress)...)
-	defer span.End()
-	defer func() { markDiscordJobSpan(span, err) }()
-	return observeRiverJob(job, QueueDiscordIngress, func() error {
-		if w.server == nil {
-			return errors.New("router server not configured on worker")
-		}
-		delay := w.retryDelay
-		if delay <= 0 {
-			delay = 2 * time.Second
-		} else if delay > 5*time.Second {
-			delay = 5 * time.Second
-		}
-		maxAge := w.maxAge
-		if maxAge <= 0 {
-			maxAge = 30 * time.Minute
-		}
-
-		for {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			err := w.server.ProcessDiscordIngress(ctx, job.Args)
-			if err == nil {
-				return nil
-			}
-			if is4xxClientError(err) {
-				RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "client_4xx")
-				return river.JobCancel(err)
-			}
-			if !job.CreatedAt.IsZero() && time.Since(job.CreatedAt) >= maxAge {
-				RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "ttl_expired")
-				return river.JobCancel(fmt.Errorf("discord message %s exceeded 30m TTL: %w", job.Args.MessageID, err))
-			}
-			RecordJobRetry(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "discord_ingress_backoff")
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-	})
-}
-
-// DiscordInteractionArgs contains payload data for River queueing of Discord interaction events.
+// DiscordInteractionArgs contains payload data for JetStream queueing of Discord interaction events.
 type DiscordInteractionArgs struct {
-	InteractionID string                 `json:"interaction_id" river:"unique"`
+	InteractionID string                 `json:"interaction_id"`
 	Interaction   *discordgo.Interaction `json:"interaction"`
-	Traceparent   string                 `json:"traceparent,omitempty"` // W3C trace context from gateway receive span.
+	Traceparent   string                 `json:"traceparent,omitempty"`
 }
 
 func (DiscordInteractionArgs) Kind() string { return "discord_interaction" }
-func (DiscordInteractionArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{
-		Queue:       QueueDiscordInteraction,
-		MaxAttempts: 1,
-		UniqueOpts: river.UniqueOpts{
-			ByArgs:   true,
-			ByPeriod: 15 * time.Minute,
-		},
-	}
-}
-
-// DiscordInteractionWorker processes Discord interactions asynchronously from River.
-type DiscordInteractionWorker struct {
-	river.WorkerDefaults[DiscordInteractionArgs]
-
-	server *RouterServer
-}
-
-func (w *DiscordInteractionWorker) Timeout(*river.Job[DiscordInteractionArgs]) time.Duration {
-	return 5 * time.Second
-}
-
-func (w *DiscordInteractionWorker) Work(ctx context.Context, job *river.Job[DiscordInteractionArgs]) (err error) {
-	ctx, span := tracing.Tracer().Start(tracing.ContextWithTraceparent(ctx, job.Args.Traceparent), "process "+QueueDiscordInteraction, discordJobSpanOptions(QueueDiscordInteraction)...)
-	defer span.End()
-	defer func() { markDiscordJobSpan(span, err) }()
-	return observeRiverJob(job, QueueDiscordInteraction, func() error {
-		if w.server == nil {
-			return errors.New("router server not configured on worker")
-		}
-		return w.server.ProcessDiscordInteraction(ctx, job.Args)
-	})
-}
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
 type StatusWidgetChunk struct {
@@ -1338,7 +1036,7 @@ func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endp
 			return ctx.Err()
 		}
 		if attempt > 0 {
-			RecordJobRetry(river.QueueDefault, "brain_http_dispatch", "brain_http_retry")
+			RecordJobRetry(QueueDefault, "brain_http_dispatch", "brain_http_retry")
 		}
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 		if err != nil {

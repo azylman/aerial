@@ -12,7 +12,7 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
-func resolveJetStreamJobCoords(args riverJobArgsWithOpts) (string, string) {
+func resolveJetStreamJobCoords(args any) (string, string) {
 	switch a := args.(type) {
 	case GitHubWebhookArgs:
 		return "aerial.jobs.synapse.github", "github:" + a.Delivery

@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 // --- 6. Workflow Run Image Resolution & Dispatch ---
@@ -715,7 +717,7 @@ func runCheckOpenPRConflictsCase(ctx context.Context, t *testing.T, tc checkOpen
 		}
 	}
 	mockDisp := &mockOutboundDispatcher{}
-	var inserters []RiverInserter
+	var inserters []pubsub.Bus
 	var mockRiver *mockRiverInserter
 	if tc.useRiver {
 		mockRiver = &mockRiverInserter{err: tc.riverErr}

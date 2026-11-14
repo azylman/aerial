@@ -559,13 +559,13 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		}
 		s.teeGitHubWebhook(r.Context(), reqPath, r, event, body)
 	}
-	if s.bus == nil && s.riverClient == nil {
-		log.Printf("[synapse] [github] ERROR: river client not initialized")
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "river queue not initialized"})
+	if s.bus == nil {
+		log.Printf("[synapse] [github] ERROR: event bus not initialized")
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "event bus not initialized"})
 		return
 	}
-	if err := s.insertRiverJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body}); err != nil {
-		log.Printf("[synapse] [github] ERROR: failed to insert job into river: %v", err)
+	if err := s.publishJetStreamJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body}); err != nil {
+		log.Printf("[synapse] [github] ERROR: failed to publish job to jetstream: %v", err)
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 		return
 	}

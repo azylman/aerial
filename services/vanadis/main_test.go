@@ -19,8 +19,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/riverqueue/river"
-	"github.com/riverqueue/river/rivertype"
 )
 
 func assertConfigDefaults(t *testing.T, cfg Config) {
@@ -123,8 +121,9 @@ func TestLoadConfigAndEnv(t *testing.T) {
 
 func TestExecuteChunkArgsAndNormalizeRepo(t *testing.T) {
 	t.Parallel()
-	if args := (ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 2}); args.Kind() != "vanadis_execute_chunk" || args.InsertOpts().Queue != VanadisQueueName || args.InsertOpts().MaxAttempts != 3 || !args.InsertOpts().UniqueOpts.ByArgs {
-		t.Fatalf("unexpected ExecuteChunkArgs metadata: %+v", args)
+	args := ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 2}
+	if args.BuildID != "b1" || args.ChunkIndex != 2 {
+		t.Fatalf("unexpected ExecuteChunkArgs: %+v", args)
 	}
 }
 
@@ -445,13 +444,10 @@ func assertBuildAndChunkFailed(t *testing.T, memStore *memoryVanadisStore, build
 	}
 }
 
-func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
+func TestProcessExecuteChunk(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	if (&ExecuteChunkWorker{}).Work(ctx, &river.Job[ExecuteChunkArgs]{}) == nil {
-		t.Fatal("expected error when worker server is nil")
-	}
-	if NewVanadisServer(Config{}, nil, nil, nil).ProcessExecuteChunk(ctx, "b1", 0, false) == nil {
+	if NewVanadisServer(Config{}, nil, nil).ProcessExecuteChunk(ctx, "b1", 0, false) == nil {
 		t.Fatal("expected error when store is nil")
 	}
 	var gotPrompts []BrainDispatchRequest
@@ -469,7 +465,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	}))
 	defer brainSrv.Close()
 	memStore := newMemoryVanadisStore()
-	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, &mockRiverInserter{}, brainSrv.Client())
+	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, brainSrv.Client())
 	if err := srv.ProcessExecuteChunk(ctx, "nonexistent", 0, false); err != nil {
 		t.Fatalf("expected nil on missing build, got %v", err)
 	}
@@ -496,10 +492,8 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 		t.Fatal("expected error when UpdateChunkStatus fails")
 	}
 	memStore.updateChunkErr = nil
-	worker := &ExecuteChunkWorker{server: srv}
-	job := &river.Job[ExecuteChunkArgs]{JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 3}, Args: ExecuteChunkArgs{BuildID: "b-run", ChunkIndex: 1}}
-	if err := worker.Work(ctx, job); err != nil {
-		t.Fatalf("unexpected worker error: %v", err)
+	if err := srv.ProcessExecuteChunk(ctx, "b-run", 1, false); err != nil {
+		t.Fatalf("unexpected chunk execution error: %v", err)
 	}
 	if len(gotPrompts) != 1 {
 		t.Fatalf("expected 1 prompt, got %d", len(gotPrompts))
@@ -512,8 +506,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	if bState, _, _ := memStore.GetBuild(ctx, "b-run"); bState.Status != "running" {
 		t.Fatalf("expected build to remain running on non-final attempt, got %s", bState.Status)
 	}
-	finalJob := &river.Job[ExecuteChunkArgs]{JobRow: &rivertype.JobRow{Attempt: 3, MaxAttempts: 3}, Args: ExecuteChunkArgs{BuildID: "b-run", ChunkIndex: 1}}
-	if err := worker.Work(ctx, finalJob); err == nil {
+	if err := srv.ProcessExecuteChunk(ctx, "b-run", 1, true); err == nil {
 		t.Fatal("expected error on final attempt 502 from brain")
 	}
 	assertBuildAndChunkFailed(t, memStore, "b-run", 1)
@@ -523,12 +516,12 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	noopClient := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("simulated network error")
 	})}
-	_ = NewVanadisServer(Config{BrainURL: "http://[::1]:namedport"}, memStore, nil, noopClient).ProcessExecuteChunk(ctx, "b-run", 1, true)
+	_ = NewVanadisServer(Config{BrainURL: "http://[::1]:namedport"}, memStore, noopClient).ProcessExecuteChunk(ctx, "b-run", 1, true)
 	closedSrv := httptest.NewServer(http.NotFoundHandler())
 	closedURL := closedSrv.URL
 	closedSrv.Close()
 	memStore.updateBuildErr = errors.New("build fail update err")
-	_ = NewVanadisServer(Config{BrainURL: closedURL, SynapseURL: closedURL}, memStore, nil, noopClient).ProcessExecuteChunk(ctx, "b-run", 1, true)
+	_ = NewVanadisServer(Config{BrainURL: closedURL, SynapseURL: closedURL}, memStore, noopClient).ProcessExecuteChunk(ctx, "b-run", 1, true)
 	memStore.updateBuildErr = nil
 	httpkit.WriteJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
 }
@@ -555,7 +548,7 @@ func testHTTPEndpointsBasicAndFlush(t *testing.T, srv *VanadisServer, doReq func
 	checkCode(http.MethodGet, "/builds", nil, http.StatusInternalServerError)
 }
 
-func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *memoryVanadisStore, inserter *mockRiverInserter, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) string {
+func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *memoryVanadisStore, bus *mockChunkBus, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) string {
 	t.Helper()
 	checkCode := func(method, path string, body io.Reader, want int) {
 		if rec := doReq(method, path, body); rec.Code != want {
@@ -588,12 +581,9 @@ func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *
 	memStore.createErr = errors.New("create failed")
 	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
 	memStore.createErr = nil
-	srv.SetRiverClient(nil)
+	srv.SetBus(nil)
 	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
-	inserter.err = errors.New("river insert failed")
-	srv.SetRiverClient(inserter)
-	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
-	inserter.err = nil
+	srv.SetBus(bus)
 	rec := doReq(http.MethodPost, "/builds", strings.NewReader(validPayload))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202 Accepted, got %d: %s", rec.Code, rec.Body.String())
@@ -601,7 +591,7 @@ func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *
 	var createResp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &createResp)
 	buildID, _ := createResp["build_id"].(string)
-	if buildID == "" || createResp["status"] != "accepted" || len(inserter.inserted) != 1 {
+	if buildID == "" || createResp["status"] != "accepted" || len(bus.published) != 1 {
 		t.Fatalf("unexpected create response: %+v", createResp)
 	}
 	storedBuild, storedChunks, _ := memStore.GetBuild(context.Background(), buildID)
@@ -745,8 +735,9 @@ func testHTTPEndpointsListAndFilter(t *testing.T, srv *VanadisServer, doReq func
 
 func TestHTTPEndpoints(t *testing.T) {
 	memStore := newMemoryVanadisStore()
-	inserter := &mockRiverInserter{}
-	srv := NewVanadisServer(Config{Port: "0", BrainURL: "http://127.0.0.1:8088"}, memStore, inserter, noopHTTPClient)
+	bus := &mockChunkBus{}
+	srv := NewVanadisServer(Config{Port: "0", BrainURL: "http://127.0.0.1:8088"}, memStore, noopHTTPClient)
+	srv.SetBus(bus)
 	mux := srv.Routes()
 	doReq := func(method, path string, body io.Reader) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
@@ -755,48 +746,30 @@ func TestHTTPEndpoints(t *testing.T) {
 	}
 
 	testHTTPEndpointsBasicAndFlush(t, srv, doReq)
-	buildID := testHTTPEndpointsBuildCreation(t, srv, memStore, inserter, doReq)
+	buildID := testHTTPEndpointsBuildCreation(t, srv, memStore, bus, doReq)
 	testHTTPEndpointsBuildCancel(t, srv, memStore, buildID, doReq)
 	testHTTPEndpointsListAndFilter(t, srv, doReq)
 }
 
-func TestInitPostgresAndRiverAndRunServer(t *testing.T) {
-	origPoolFn, origRiverFn := newPgxPoolFn, newRiverClientFn
-	defer func() { newPgxPoolFn, newRiverClientFn = origPoolFn, origRiverFn }()
+func TestInitPostgresAndRunServer(t *testing.T) {
+	origPoolFn := newPgxPoolFn
+	defer func() { newPgxPoolFn = origPoolFn }()
 	ctx := context.Background()
-	srv := NewVanadisServer(Config{}, nil, nil, nil)
-	if _, err := initPostgresAndRiver(ctx, srv, "postgres://user:pass@invalid%xx/db"); err == nil {
+	srv := NewVanadisServer(Config{}, nil, nil)
+	if _, err := initPostgres(ctx, srv, "postgres://user:pass@invalid%xx/db"); err == nil {
 		t.Fatal("expected parse error")
 	}
 	newPgxPoolFn = func(context.Context, *pgxpool.Config) (*pgxpool.Pool, error) {
 		return nil, errors.New("pool creation failed")
 	}
-	if _, err := initPostgresAndRiver(ctx, srv, "postgres://u:p@127.0.0.1:5432/db"); err == nil {
+	if _, err := initPostgres(ctx, srv, "postgres://u:p@127.0.0.1:5432/db"); err == nil {
 		t.Fatal("expected pool error")
 	}
 	cfg, _ := pgxpool.ParseConfig("postgres://u:p@127.0.0.1:5432/db")
 	newPgxPoolFn = origPoolFn
-	for _, clientErr := range []error{errors.New("client error"), nil} {
-		startErr := clientErr
-		if startErr == nil {
-			startErr = errors.New("start failed")
-		}
-		newRiverClientFn = func(*pgxpool.Pool, *river.Workers) (riverLifecycleClient, error) {
-			if clientErr != nil {
-				return nil, clientErr
-			}
-			return &mockRiverLifecycle{startErr: startErr}, nil
-		}
-		if _, err := initPostgresAndRiver(ctx, srv, cfg.ConnString()); err == nil {
-			t.Fatal("expected error from initPostgresAndRiver")
-		}
-	}
-	newRiverClientFn = func(*pgxpool.Pool, *river.Workers) (riverLifecycleClient, error) {
-		return &mockRiverLifecycle{stopErr: errors.New("stop warning")}, nil
-	}
-	cleanup, err := initPostgresAndRiver(ctx, srv, cfg.ConnString())
+	cleanup, err := initPostgres(ctx, srv, cfg.ConnString())
 	if err != nil || cleanup == nil {
-		t.Fatalf("expected success from initPostgresAndRiver, got err=%v", err)
+		t.Fatalf("expected success from initPostgres, got err=%v", err)
 	}
 	cleanup(ctx)
 	if runServer(ctx, Config{Port: "-1", PostgresURL: cfg.ConnString()}, nil) == nil || runServer(ctx, Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"}, nil) == nil {
@@ -940,31 +913,6 @@ func TestClassifyAndSummarizeBuildEntry(t *testing.T) {
 	}
 }
 
-type mockRiverJobRows struct {
-	pgx.Rows
-
-	rows [][]any
-	idx  int
-}
-
-func (r *mockRiverJobRows) Close()     {}
-func (r *mockRiverJobRows) Err() error { return nil }
-func (r *mockRiverJobRows) Next() bool {
-	if r.idx < len(r.rows) {
-		r.idx++
-		return true
-	}
-	return false
-}
-
-func (r *mockRiverJobRows) Scan(dest ...any) error {
-	row := r.rows[r.idx-1]
-	*dest[0].(*string) = row[0].(string)
-	*dest[1].(*int64) = row[1].(int64)
-	*dest[2].(*float64) = row[2].(float64)
-	return nil
-}
-
 type vanadisMetricsCase struct {
 	name           string
 	server         *VanadisServer
@@ -994,11 +942,11 @@ func makeVanadisMetricsCases(srvWithQueue, srvMem, srvPGErr *VanadisServer) []va
 				`vanadis_chunks_active{status="running"} 1`,
 				`vanadis_chunks_active{status="pr_opened"} 1`,
 				"vanadis_queue_depth",
-				`vanadis_queue_depth{state="available"} 3`,
-				`vanadis_queue_depth{state="running"} 1`,
+				`vanadis_queue_depth{state="available"} 0`,
+				`vanadis_queue_depth{state="running"} 0`,
 				`vanadis_queue_depth{state="retryable"} 0`,
 				`vanadis_queue_depth{state="scheduled"} 0`,
-				"vanadis_queue_oldest_age_seconds 15.5",
+				"vanadis_queue_oldest_age_seconds 0",
 				"vanadis_builds_total",
 				`vanadis_builds_total{status="created"}`,
 				`vanadis_builds_total{status="completed"}`,
@@ -1103,32 +1051,24 @@ func TestVanadisMetrics(t *testing.T) {
 
 	pgStoreWithQueue := newMockStore(mockDB{
 		queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
-			if strings.Contains(sql, "FROM river_job") {
-				return &mockRiverJobRows{
-					rows: [][]any{
-						{"available", int64(3), float64(15.5)},
-						{"running", int64(1), float64(2.0)},
-					},
-				}, nil
-			}
 			if strings.Contains(sql, "vanadis_builds") {
 				return &mockRows{builds: []VanadisBuild{b1, b2, b3}}, nil
 			}
 			return &mockRows{items: []VanadisChunk{c1, c2, c3, c4, c5, c6}}, nil
 		},
 	})
-	srvWithQueue := NewVanadisServer(Config{}, pgStoreWithQueue, nil, nil)
+	srvWithQueue := NewVanadisServer(Config{}, pgStoreWithQueue, nil)
 
 	memStore := newMemoryVanadisStore()
 	_ = memStore.CreateBuild(context.Background(), b1, []VanadisChunk{c1, c2, c3})
-	srvMem := NewVanadisServer(Config{}, memStore, nil, nil)
+	srvMem := NewVanadisServer(Config{}, memStore, nil)
 
 	pgStoreErr := newMockStore(mockDB{
 		queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
 			return nil, errors.New("db outage")
 		},
 	})
-	srvPGErr := NewVanadisServer(Config{}, pgStoreErr, nil, nil)
+	srvPGErr := NewVanadisServer(Config{}, pgStoreErr, nil)
 
 	tests := makeVanadisMetricsCases(srvWithQueue, srvMem, srvPGErr)
 	for _, tc := range tests {
@@ -1141,9 +1081,11 @@ func TestVanadisMetrics(t *testing.T) {
 func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	ctx := context.Background()
 	memStore := newMemoryVanadisStore()
-	inserter := &mockRiverInserter{}
 	noopClient := noopHTTPClient
-	srv := NewVanadisServer(Config{}, memStore, inserter, noopClient)
+	srv := NewVanadisServer(Config{}, memStore, noopClient)
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	srv.SetBus(memBus)
 
 	// 1. handleCreateBuild success -> created
 	reqBody := `{"thread_id":"123456789012345678","tier":2,"objective":"Metric test build","chunks":[{"repo":"aerial","title":"C1","instructions":"I1"}]}`
@@ -1154,8 +1096,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	}
 
 	// 2. handleCreateBuild enqueue failure -> failed
-	failInserter := &mockRiverInserter{err: errors.New("enqueue fail")}
-	srvFailInsert := NewVanadisServer(Config{}, memStore, failInserter, noopClient)
+	srvFailInsert := NewVanadisServer(Config{}, memStore, noopClient)
 	recCreateFail := httptest.NewRecorder()
 	srvFailInsert.handleCreateBuild(recCreateFail, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
 	if recCreateFail.Code != http.StatusInternalServerError {
@@ -1200,7 +1141,8 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 			}, nil
 		},
 	})
-	srvAdv := NewVanadisServer(Config{}, advStore, inserter, noopClient)
+	srvAdv := NewVanadisServer(Config{}, advStore, noopClient)
+	srvAdv.SetBus(memBus)
 	recAdv := httptest.NewRecorder()
 	srvAdv.handleAdvanceChunkPR(recAdv, httptest.NewRequest(http.MethodPost, "/chunks/advance-pr", strings.NewReader(`{"repo":"aerial","pr_number":42}`)))
 	if recAdv.Code != http.StatusOK {
@@ -1217,7 +1159,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 			}}
 		},
 	})
-	srvFailPR := NewVanadisServer(Config{}, failStore, inserter, noopClient)
+	srvFailPR := NewVanadisServer(Config{}, failStore, noopClient)
 	recFailPR := httptest.NewRecorder()
 	srvFailPR.handleFailChunkPR(recFailPR, httptest.NewRequest(http.MethodPost, "/chunks/fail-pr", strings.NewReader(`{"repo":"aerial","pr_number":43}`)))
 	if recFailPR.Code != http.StatusOK {
@@ -1230,14 +1172,11 @@ func TestEnqueueExecuteChunk(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name          string
-		hasBus        bool
-		busErr        error
-		hasRiver      bool
-		riverErr      error
-		args          ExecuteChunkArgs
-		wantErr       bool
-		wantRiverCall bool
+		name    string
+		hasBus  bool
+		busErr  bool
+		args    ExecuteChunkArgs
+		wantErr bool
 	}{
 		{
 			name:    "publishes to jetstream when bus configured",
@@ -1246,54 +1185,28 @@ func TestEnqueueExecuteChunk(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:          "falls back to river when bus publish fails",
-			hasBus:        true,
-			busErr:        errors.New("nats publish failed"),
-			hasRiver:      true,
-			args:          ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 2},
-			wantErr:       false,
-			wantRiverCall: true,
+			name:    "returns error when bus publish fails",
+			hasBus:  true,
+			busErr:  true,
+			args:    ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 2},
+			wantErr: true,
 		},
 		{
-			name:          "falls back to river when bus is nil",
-			hasBus:        false,
-			hasRiver:      true,
-			args:          ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 3},
-			wantErr:       false,
-			wantRiverCall: true,
-		},
-		{
-			name:     "returns error when both bus and river fail",
-			hasBus:   true,
-			busErr:   errors.New("nats down"),
-			hasRiver: true,
-			riverErr: errors.New("river down"),
-			args:     ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 4},
-			wantErr:  true,
-		},
-		{
-			name:     "returns error when bus nil and river nil",
-			hasBus:   false,
-			hasRiver: false,
-			args:     ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 5},
-			wantErr:  true,
+			name:    "returns error when bus is nil",
+			hasBus:  false,
+			args:    ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 3},
+			wantErr: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var inserter RiverInserter
-			var mockIns *mockRiverInserter
-			if tc.hasRiver {
-				mockIns = &mockRiverInserter{err: tc.riverErr}
-				inserter = mockIns
-			}
-			srv := NewVanadisServer(Config{}, nil, inserter, nil)
+			srv := NewVanadisServer(Config{}, nil, nil)
 			if tc.hasBus {
 				memBus := pubsub.NewMemoryBus()
 				t.Cleanup(func() { _ = memBus.Close() })
-				if tc.busErr != nil {
+				if tc.busErr {
 					_ = memBus.Close()
 				}
 				srv.SetBus(memBus)
@@ -1302,9 +1215,6 @@ func TestEnqueueExecuteChunk(t *testing.T) {
 			err := srv.enqueueExecuteChunk(ctx, tc.args)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("enqueueExecuteChunk() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantRiverCall && (mockIns == nil || len(mockIns.inserted) == 0) {
-				t.Errorf("expected river insert call, got none")
 			}
 		})
 	}
@@ -1364,7 +1274,7 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 			memStore := newMemoryVanadisStore()
 			c0 := mkChunk("c-0", "b-run", 0, "C0", "I0", "medium", "pending")
 			_ = memStore.CreateBuild(ctx, mkBuild("b-run", "123456789012345678", "Run", "obj", "running"), []VanadisChunk{c0})
-			srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, nil, brainSrv.Client())
+			srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, brainSrv.Client())
 
 			msg := &memoryMsg{
 				data:         []byte(tc.rawPayload),
@@ -1402,7 +1312,7 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	memStore := newMemoryVanadisStore()
 	c0 := mkChunk("c-wire-0", "b-wire", 0, "C0", "I0", "medium", "pending")
 	_ = memStore.CreateBuild(ctx, mkBuild("b-wire", "123456789012345678", "Run", "obj", "running"), []VanadisChunk{c0})
-	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, nil, brainSrv.Client())
+	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, brainSrv.Client())
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()

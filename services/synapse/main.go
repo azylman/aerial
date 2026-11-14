@@ -23,8 +23,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/riverqueue/river"
-	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 )
 
 // RouterServer handles webhook requests and orchestrates secret synchronization.
@@ -32,7 +30,6 @@ type RouterServer struct {
 	cfgSrc                   ConfigSource
 	httpClient               *http.Client
 	bus                      pubsub.Bus
-	riverClient              RiverInserter
 	registry                 PRRegistryUpdater
 	dispatcher               OutboundDispatcher
 	onProcessed              func(event, delivery string)
@@ -43,7 +40,7 @@ type RouterServer struct {
 	updatedForCurrentMain    sync.Map
 	buildCompletedDispatched sync.Map
 	deploySuccessDispatched  sync.Map
-	queueStats               queueStatsQuerier
+	queueStats               consumerStatsQuerier
 	gatewayLatencyFn         func() time.Duration
 	commitSHAPRs             sync.Map
 	gitHistory               gitHistoryCache
@@ -52,26 +49,21 @@ type RouterServer struct {
 }
 
 // NewRouterServer constructs a new RouterServer instance.
-func NewRouterServer(cfgSrc ConfigSource, client *http.Client, riverClient ...RiverInserter) *RouterServer {
+func NewRouterServer(cfgSrc ConfigSource, client *http.Client) *RouterServer {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
-	s := &RouterServer{
+	return &RouterServer{
 		cfgSrc:     cfgSrc,
 		httpClient: client,
 	}
-	if len(riverClient) > 0 {
-		s.riverClient = riverClient[0]
-	}
-	return s
 }
 
-func (s *RouterServer) SetRiverClient(rc RiverInserter)             { s.riverClient = rc }
 func (s *RouterServer) SetEventBus(b pubsub.Bus)                    { s.bus = b }
 func (s *RouterServer) EventBus() pubsub.Bus                        { return s.bus }
 func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)           { s.registry = reg }
 func (s *RouterServer) SetDispatcher(d OutboundDispatcher)          { s.dispatcher = d }
-func (s *RouterServer) SetQueueStats(q queueStatsQuerier)           { s.queueStats = q }
+func (s *RouterServer) SetQueueStats(q consumerStatsQuerier)        { s.queueStats = q }
 func (s *RouterServer) SetGatewayLatencyFn(fn func() time.Duration) { s.gatewayLatencyFn = fn }
 
 func readWebhookBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
@@ -115,10 +107,23 @@ func (s *RouterServer) Routes() http.Handler {
 	return mux
 }
 
+func (s *RouterServer) consumerStatsQuerier() consumerStatsQuerier {
+	if s == nil {
+		return nil
+	}
+	if s.queueStats != nil {
+		return s.queueStats
+	}
+	if csp, ok := s.bus.(consumerStatsQuerier); ok {
+		return csp
+	}
+	return nil
+}
+
 func (s *RouterServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	if s != nil && s.queueStats != nil {
-		if err := collectRiverQueueMetrics(r.Context(), s.queueStats); err != nil {
-			log.Printf("[synapse] [metrics] error collecting river queue metrics: %v", err)
+	if q := s.consumerStatsQuerier(); q != nil {
+		if err := collectJetStreamQueueMetrics(r.Context(), q); err != nil {
+			log.Printf("[synapse] [metrics] error collecting jetstream queue metrics: %v", err)
 		}
 	}
 	if s != nil && s.gatewayLatencyFn != nil {
@@ -301,10 +306,10 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 		})
 		return
 	}
-	if s.bus != nil || s.riverClient != nil {
+	if s.bus != nil {
 		idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
-		if err := s.insertRiverJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
-			log.Printf("[synapse] [%s] ERROR: failed to insert job into river: %v", logPrefix, err)
+		if err := s.publishJetStreamJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
+			log.Printf("[synapse] [%s] ERROR: failed to publish job to jetstream: %v", logPrefix, err)
 			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 			return
 		}
@@ -459,10 +464,10 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 		Repo:     normalizeRepo(repo),
 		PRNumber: prNumber,
 	}
-	if s.bus != nil || s.riverClient != nil {
+	if s.bus != nil {
 		args.Status = s.resolvePRWidgetSyncStatus(ctx, args.Repo, prNumber)
-		if err := s.insertRiverJob(ctx, args); err != nil {
-			log.Printf("[synapse] [widget] error enqueuing widget sync into river: %v", err)
+		if err := s.publishJetStreamJob(ctx, args); err != nil {
+			log.Printf("[synapse] [widget] error enqueuing widget sync into jetstream: %v", err)
 			return fmt.Errorf("enqueue widget sync: %w", err)
 		}
 		return nil
@@ -480,9 +485,9 @@ func (s *RouterServer) SyncBuildWidget(ctx context.Context, buildID, banner stri
 		BuildID: buildID,
 		Banner:  banner,
 	}
-	if s.bus != nil || s.riverClient != nil {
-		if err := s.insertRiverJob(ctx, args); err != nil {
-			log.Printf("[synapse] [widget] error enqueuing build widget sync into river: %v", err)
+	if s.bus != nil {
+		if err := s.publishJetStreamJob(ctx, args); err != nil {
+			log.Printf("[synapse] [widget] error enqueuing build widget sync into jetstream: %v", err)
 			return fmt.Errorf("enqueue build widget sync: %w", err)
 		}
 		return nil
@@ -1278,13 +1283,10 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 	return s.dispatchAlertWithPrompt(ctx, targetID, "deploy_success", "", strings.Join(lines, "\n"))
 }
 
-func setupRiverWorkerPool(ctx context.Context, server *RouterServer, cfg Config) (*pgxpool.Pool, *river.Client[pgx.Tx], error) {
-	if cfg.PostgresURL == "" {
-		return nil, nil, nil
-	}
-	poolConfig, err := pgxpool.ParseConfig(cfg.PostgresURL)
+func setupPostgres(ctx context.Context, server *RouterServer, postgresURL, vanadisURL string) (*pgxpool.Pool, error) {
+	poolConfig, err := pgxpool.ParseConfig(postgresURL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse postgres url: %w", err)
+		return nil, fmt.Errorf("parse postgres url: %w", err)
 	}
 	poolConfig.MaxConns = 10
 	poolConfig.MinConns = 2
@@ -1297,42 +1299,11 @@ func setupRiverWorkerPool(ctx context.Context, server *RouterServer, cfg Config)
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create pgxpool: %w", err)
+		return nil, fmt.Errorf("create pgxpool: %w", err)
 	}
-	server.SetQueueStats(pool)
-	server.SetRegistry(NewPostgresPRRegistry(pool, WithVanadisClient(cfg.VanadisURL, server.httpClient)))
-
-	workers := river.NewWorkers()
-	river.AddWorker(workers, &GitHubWebhookWorker{server: server})
-	river.AddWorker(workers, &DeployWebhookWorker{server: server})
-	river.AddWorker(workers, &WidgetSyncWorker{server: server})
-	river.AddWorker(workers, &MergeConflictWorker{server: server})
-	river.AddWorker(workers, &DiscordIngressWorker{server: server})
-	river.AddWorker(workers, &DiscordInteractionWorker{server: server})
-
-	rc, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
-		Queues: map[string]river.QueueConfig{
-			river.QueueDefault:      {MaxWorkers: 10},
-			QueueMergeConflict:      {MaxWorkers: 2},
-			QueueWidgetSync:         {MaxWorkers: 1},
-			QueueDiscordIngress:     {MaxWorkers: 1},
-			QueueDiscordInteraction: {MaxWorkers: 4},
-		},
-		Workers:             workers,
-		SkipUnknownJobCheck: true,
-	})
-	if err != nil {
-		pool.Close()
-		return nil, nil, fmt.Errorf("create river client: %w", err)
-	}
-	server.SetRiverClient(rc)
-
-	if err := rc.Start(ctx); err != nil {
-		pool.Close()
-		return nil, nil, fmt.Errorf("start river client: %w", err)
-	}
-	log.Println("[synapse] River worker pool started successfully")
-	return pool, rc, nil
+	server.SetRegistry(NewPostgresPRRegistry(pool, WithVanadisClient(vanadisURL, server.httpClient)))
+	log.Println("[synapse] PostgreSQL PR registry initialized")
+	return pool, nil
 }
 
 // runServer runs the HTTP server with graceful shutdown and optional ready callback.
@@ -1352,11 +1323,13 @@ func runServer(ctx context.Context, cfgSrc *httpkit.Reloadable[Config], onReady 
 	stopJetStream := initSynapseJetStream(ctx, server, cfg.NATSURL)
 	defer stopJetStream()
 
-	dbPool, riverClient, err := setupRiverWorkerPool(ctx, server, *cfg)
-	if err != nil {
-		return err
-	}
-	if dbPool != nil {
+	var dbPool *pgxpool.Pool
+	if cfg.PostgresURL != "" {
+		pool, err := setupPostgres(ctx, server, cfg.PostgresURL, cfg.VanadisURL)
+		if err != nil {
+			return err
+		}
+		dbPool = pool
 		defer dbPool.Close()
 	}
 	stopWatcher := server.startKustomizationWatcher(ctx, dispatcher)
@@ -1421,12 +1394,6 @@ func runServer(ctx context.Context, cfgSrc *httpkit.Reloadable[Config], onReady 
 	safeStopDiscord()
 
 	stopWatcher()
-
-	if riverClient != nil {
-		if stopErr := riverClient.Stop(shutdownCtx); stopErr != nil && !errors.Is(stopErr, context.Canceled) {
-			log.Printf("[synapse] River client stop error: %v", stopErr)
-		}
-	}
 
 	log.Println("[synapse] Server stopped")
 	return runErr

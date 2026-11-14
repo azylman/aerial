@@ -56,6 +56,11 @@ type HeaderPublisher interface {
 	PublishWithHeader(ctx context.Context, subject string, msgID string, data any, header nats.Header) error
 }
 
+// ConsumerStatsProvider is an optional interface implemented by buses that support querying consumer queue depth.
+type ConsumerStatsProvider interface {
+	ConsumerStats(ctx context.Context, stream, consumer string) (pending int64, inFlight int64, err error)
+}
+
 // Subscription represents an active subscription that can be terminated.
 type Subscription interface {
 	Unsubscribe() error
@@ -305,6 +310,18 @@ func (b *JetStreamBus) Close() error {
 		b.nc.Close()
 	}
 	return nil
+}
+
+// ConsumerStats returns the number of pending and in-flight (ack pending) messages for a consumer.
+func (b *JetStreamBus) ConsumerStats(ctx context.Context, stream, consumer string) (int64, int64, error) {
+	if b == nil || b.js == nil {
+		return 0, 0, errors.New("pubsub: jetstream context is nil")
+	}
+	info, err := b.js.ConsumerInfo(stream, consumer)
+	if err != nil {
+		return 0, 0, fmt.Errorf("consumer info %s/%s: %w", stream, consumer, err)
+	}
+	return int64(info.NumPending), int64(info.NumAckPending), nil
 }
 
 func (b *JetStreamBus) dispatch(m *nats.Msg, handler Handler) {

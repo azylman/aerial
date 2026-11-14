@@ -8,134 +8,37 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-type mockRowData struct {
-	queue     string
-	state     string
-	count     int64
-	oldestAge float64
+type mockConsumerStatsQuerier struct {
+	stats map[string][2]int64
+	err   error
 }
 
-type mockPgxRows struct {
-	rows    []mockRowData
-	idx     int
-	scanErr error
-	rowsErr error
-	closed  bool
-}
-
-func (m *mockPgxRows) Close() {
-	m.closed = true
-}
-
-func (m *mockPgxRows) Err() error {
-	return m.rowsErr
-}
-
-func (m *mockPgxRows) CommandTag() pgconn.CommandTag {
-	return pgconn.CommandTag{}
-}
-
-func (m *mockPgxRows) FieldDescriptions() []pgconn.FieldDescription {
-	return nil
-}
-
-func (m *mockPgxRows) Next() bool {
-	if m.scanErr != nil && m.idx == 0 {
-		return true
+func (m *mockConsumerStatsQuerier) ConsumerStats(ctx context.Context, stream, consumer string) (int64, int64, error) {
+	if m.err != nil {
+		return 0, 0, m.err
 	}
-	if m.idx < len(m.rows) {
-		m.idx++
-		return true
+	if v, ok := m.stats[stream+"/"+consumer]; ok {
+		return v[0], v[1], nil
 	}
-	return false
+	return 0, 0, nil
 }
 
-func (m *mockPgxRows) Scan(dest ...any) error {
-	if m.scanErr != nil {
-		return m.scanErr
-	}
-	if m.idx <= 0 || m.idx > len(m.rows) {
-		return errors.New("out of range scan")
-	}
-	row := m.rows[m.idx-1]
-	if len(dest) >= 4 {
-		if p, ok := dest[0].(*string); ok {
-			*p = row.queue
-		}
-		if p, ok := dest[1].(*string); ok {
-			*p = row.state
-		}
-		if p, ok := dest[2].(*int64); ok {
-			*p = row.count
-		}
-		if p, ok := dest[3].(*float64); ok {
-			*p = row.oldestAge
-		}
-	}
-	return nil
-}
-
-func (m *mockPgxRows) Values() ([]any, error) {
-	return nil, nil
-}
-
-func (m *mockPgxRows) RawValues() [][]byte {
-	return nil
-}
-
-func (m *mockPgxRows) Conn() *pgx.Conn {
-	return nil
-}
-
-func (m *mockPgxRows) TypeMap() *pgtype.Map {
-	return nil
-}
-
-type mockQueueStatsQuerier struct {
-	queryErr error
-	rows     *mockPgxRows
-}
-
-func (m *mockQueueStatsQuerier) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	if m.queryErr != nil {
-		return nil, m.queryErr
-	}
-	if m.rows != nil {
-		return m.rows, nil
-	}
-	return &mockPgxRows{}, nil
-}
-
-func TestCollectRiverQueueMetrics(t *testing.T) {
-	if !strings.Contains(riverQueueStatsQuery, "FROM river_job") {
-		t.Errorf("riverQueueStatsQuery should query FROM river_job, got: %s", riverQueueStatsQuery)
-	}
-	if strings.Contains(riverQueueStatsQuery, "sidecars.river_job") {
-		t.Errorf("riverQueueStatsQuery should not query sidecars.river_job, got: %s", riverQueueStatsQuery)
-	}
-
+func TestCollectJetStreamQueueMetrics(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name               string
-		nilQuerier         bool
-		queryErr           error
-		scanErr            error
-		rowsErr            error
-		rows               []mockRowData
-		wantErr            bool
-		wantSubstr         string
-		wantDepthQueue     string
-		wantDepthState     string
-		wantDepthVal       float64
-		wantOldestAgeQueue string
-		wantOldestAgeVal   float64
+		name           string
+		nilQuerier     bool
+		querierErr     error
+		stats          map[string][2]int64
+		wantErr        bool
+		wantSubstr     string
+		wantDepthQueue string
+		wantDepthState string
+		wantDepthVal   float64
 	}{
 		{
 			name:       "nil querier returns nil without error",
@@ -143,57 +46,36 @@ func TestCollectRiverQueueMetrics(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "query error returns wrapped error",
-			queryErr:   errors.New("connection closed"),
+			name:       "querier error returns wrapped error",
+			querierErr: errors.New("nats down"),
 			wantErr:    true,
-			wantSubstr: "query river queue stats",
+			wantSubstr: "consumer stats",
 		},
 		{
-			name:       "scan error returns wrapped error",
-			scanErr:    errors.New("column count mismatch"),
-			wantErr:    true,
-			wantSubstr: "scan river queue stats",
-		},
-		{
-			name:       "rows iteration error returns wrapped error",
-			rowsErr:    errors.New("network disconnect during iteration"),
-			wantErr:    true,
-			wantSubstr: "iterate river queue stats",
-		},
-		{
-			name: "multi-queue state and age aggregation populates gauges correctly",
-			rows: []mockRowData{
-				{queue: "default", state: "available", count: 7, oldestAge: 45.5},
-				{queue: "default", state: "running", count: 3, oldestAge: 120.0},
-				{queue: "default", state: "retryable", count: 2, oldestAge: 90.2},
-				{queue: "discord_ingress", state: "available", count: 12, oldestAge: 250.0},
-				{queue: "widget_sync", state: "scheduled", count: 4, oldestAge: 18.0},
+			name: "aggregates pending and in_flight across consumers",
+			stats: map[string][2]int64{
+				"AERIAL_JOBS/synapse-github":              {3, 1},
+				"AERIAL_JOBS/synapse-deploy":              {4, 2},
+				"AERIAL_JOBS/synapse-merge-conflict":      {1, 0},
+				"AERIAL_JOBS/synapse-discord-ingress":     {5, 3},
+				"AERIAL_JOBS/synapse-discord-interaction": {2, 1},
+				"AERIAL_COALESCED/synapse-widget-sync":    {6, 2},
 			},
-			wantDepthQueue:     "default",
-			wantDepthState:     "available",
-			wantDepthVal:       7,
-			wantOldestAgeQueue: "default",
-			wantOldestAgeVal:   90.2,
+			wantDepthQueue: QueueDefault,
+			wantDepthState: "pending",
+			wantDepthVal:   7,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var q queueStatsQuerier
+			var q consumerStatsQuerier
 			if !tc.nilQuerier {
-				q = &mockQueueStatsQuerier{
-					queryErr: tc.queryErr,
-					rows: &mockPgxRows{
-						rows:    tc.rows,
-						scanErr: tc.scanErr,
-						rowsErr: tc.rowsErr,
-					},
-				}
+				q = &mockConsumerStatsQuerier{stats: tc.stats, err: tc.querierErr}
 			}
-
-			err := collectRiverQueueMetrics(ctx, q)
+			err := collectJetStreamQueueMetrics(ctx, q)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("collectRiverQueueMetrics() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("collectJetStreamQueueMetrics() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
 				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
@@ -202,12 +84,6 @@ func TestCollectRiverQueueMetrics(t *testing.T) {
 				gotDepth := testutil.ToFloat64(QueueDepth.WithLabelValues(tc.wantDepthQueue, tc.wantDepthState))
 				if gotDepth != tc.wantDepthVal {
 					t.Errorf("QueueDepth[%s, %s] = %v, want %v", tc.wantDepthQueue, tc.wantDepthState, gotDepth, tc.wantDepthVal)
-				}
-			}
-			if tc.wantOldestAgeQueue != "" {
-				gotAge := testutil.ToFloat64(QueueOldestAgeSeconds.WithLabelValues(tc.wantOldestAgeQueue))
-				if gotAge != tc.wantOldestAgeVal {
-					t.Errorf("QueueOldestAgeSeconds[%s] = %v, want %v", tc.wantOldestAgeQueue, gotAge, tc.wantOldestAgeVal)
 				}
 			}
 		})

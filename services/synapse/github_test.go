@@ -58,11 +58,9 @@ func assertGitHubWebhookResponse(t *testing.T, tc ghWebhookTestCase, rec *httpte
 func runGitHubWebhookCase(t *testing.T, tc ghWebhookTestCase) {
 	t.Helper()
 	t.Parallel()
-	var srv *RouterServer
+	srv := NewRouterServer(fixedConfig(Config{}), nil)
 	if tc.river != nil {
-		srv = NewRouterServer(fixedConfig(Config{}), nil, tc.river)
-	} else {
-		srv = NewRouterServer(fixedConfig(Config{}), nil)
+		srv.SetEventBus(tc.river)
 	}
 	busCh := make(chan string, 1)
 	if tc.hasBus {
@@ -100,23 +98,17 @@ func TestHandleGitHubWebhook(t *testing.T) {
 	tests := []ghWebhookTestCase{
 		{name: "missing X-GitHub-Event header", path: "/api/webhooks/github", body: strings.NewReader(`{}`), wantStatus: http.StatusBadRequest},
 		{name: "read error in body", path: "/api/webhooks/github", body: errReader{}, headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusBadRequest},
-		{name: "river client nil", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusInternalServerError},
-		{name: "river client insert error", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, river: &mockRiverInserter{err: errors.New("simulated database failure")}, wantStatus: http.StatusInternalServerError},
+		{name: "bus nil", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusInternalServerError},
+		{name: "bus publish error", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, river: &mockRiverInserter{err: errors.New("simulated database failure")}, wantStatus: http.StatusInternalServerError},
 		{name: "api path success", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, river: &mockRiverInserter{}, wantStatus: http.StatusOK, wantInserted: 1},
-		{name: "bus only success without river client", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-bus-1"}, hasBus: true, wantStatus: http.StatusOK},
+		{name: "bus only success", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-bus-1"}, hasBus: true, wantStatus: http.StatusOK},
 		{name: "legacy path success", path: "/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, river: &mockRiverInserter{}, wantStatus: http.StatusOK, wantInserted: 1},
-		{name: "duplicate skipped", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Responsive is better than fast.","hook_id":9999,"repository":{"full_name":"azylman/aerial"}}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "dup-gh-delivery-1"}, river: &mockRiverInserter{skipDuplicate: true}, wantStatus: http.StatusOK, wantMetricSubstr: `synapse_unique_skipped_total{kind="github_webhook"}`},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runGitHubWebhookCase(t, tc)
 		})
-	}
-
-	opts := (GitHubWebhookArgs{Delivery: "test-delivery"}).InsertOpts()
-	if !opts.UniqueOpts.ByArgs || opts.UniqueOpts.ByPeriod != 15*time.Minute {
-		t.Errorf("unexpected GitHubWebhookArgs InsertOpts: %+v", opts)
 	}
 }
 
@@ -378,7 +370,7 @@ func assertEventBasicFields(t *testing.T, tc ghEventCase, res *ResolvedGitHubEve
 func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase, mockServer *httptest.Server, ghPaths *sync.Map) {
 	t.Helper()
 	t.Parallel()
-	var inserters []RiverInserter
+	var inserters []pubsub.Bus
 	if tc.river != nil {
 		inserters = append(inserters, tc.river)
 	}

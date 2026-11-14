@@ -802,6 +802,57 @@ func TestSynapseRestartRequired(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFromEnvStrict(t *testing.T) {
+	tmpDir := t.TempDir()
+	validYAML := filepath.Join(tmpDir, "valid.yaml")
+	if err := os.WriteFile(validYAML, []byte("port: \"5050\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	invalidYAML := filepath.Join(tmpDir, "invalid.yaml")
+	if err := os.WriteFile(invalidYAML, []byte("invalid:\n  - : bad\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		configPath string
+		wantErr    bool
+		wantPort   string
+	}{
+		{
+			name:       "valid file loads successfully",
+			configPath: validYAML,
+			wantErr:    false,
+			wantPort:   "5050",
+		},
+		{
+			name:       "invalid file returns error",
+			configPath: invalidYAML,
+			wantErr:    true,
+		},
+		{
+			name:       "empty path uses default",
+			configPath: "",
+			wantErr:    false,
+			wantPort:   "4020",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PORT", "")
+			t.Setenv("CONFIG_PATH", tc.configPath)
+			cfg, err := loadConfigFromEnvStrict()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("loadConfigFromEnvStrict() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && cfg != nil && tc.wantPort != "" && cfg.Port != tc.wantPort {
+				t.Errorf("cfg.Port = %q, want %q", cfg.Port, tc.wantPort)
+			}
+		})
+	}
+}
+
 // withField returns base with every non-zero field of overlay copied over it.
 func withField(base, overlay Config) Config {
 	dst := reflect.ValueOf(&base).Elem()

@@ -419,7 +419,7 @@ func runSyncPRWidgetMockRegCase(ctx context.Context, t *testing.T, tc syncPRWidg
 	var inserter *mockRiverInserter
 	if tc.useInserter {
 		inserter = &mockRiverInserter{err: tc.inserterErr}
-		srv.SetRiverClient(inserter)
+		srv.SetEventBus(inserter)
 	}
 	err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber)
 	if (err != nil) != tc.wantErr {
@@ -454,7 +454,7 @@ func runSyncPRWidgetPgxCase(ctx context.Context, t *testing.T, tc syncPRWidgetCa
 	var inserter *mockRiverInserter
 	if tc.useInserter {
 		inserter = &mockRiverInserter{err: tc.inserterErr}
-		srv.SetRiverClient(inserter)
+		srv.SetEventBus(inserter)
 	}
 	if tc.prDBBanner != "" {
 		srv.setPRWidgetState(ctx, tc.repo, tc.prNumber, tc.prDBStatus, tc.prDBBanner)
@@ -1160,7 +1160,7 @@ func setupSyncBuildWidgetRouter(tc syncBuildWidgetCase, tsVanadis *httptest.Serv
 	var inserter *mockRiverInserter
 	if tc.useInserter {
 		inserter = &mockRiverInserter{err: tc.inserterErr}
-		srv.SetRiverClient(inserter)
+		srv.SetEventBus(inserter)
 	}
 	return srv, inserter
 }
@@ -1229,7 +1229,7 @@ func TestRouterServer_HandleInternalWidgetSync(t *testing.T) {
 			var inserter *mockRiverInserter
 			if tc.useInserter {
 				inserter = &mockRiverInserter{err: tc.inserterErr}
-				srv.SetRiverClient(inserter)
+				srv.SetEventBus(inserter)
 			}
 
 			routes := srv.Routes()
@@ -1293,7 +1293,7 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 			if !tc.nilServer {
 				srv = newTestRouter(Config{}, nil, nil, disp)
 				if tc.hasRiver {
-					srv.SetRiverClient(river)
+					srv.SetEventBus(river)
 				}
 			}
 
@@ -1329,7 +1329,7 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 	}
 }
 
-func TestSetupRiverWorkerPool(t *testing.T) {
+func TestSetupPostgres(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
@@ -1337,18 +1337,16 @@ func TestSetupRiverWorkerPool(t *testing.T) {
 		name        string
 		postgresURL string
 		wantErr     bool
-		wantNilPool bool
 	}{
 		{
-			name:        "empty postgres URL returns nil pool without error",
-			postgresURL: "",
-			wantNilPool: true,
+			name:        "valid postgres URL initializes pool and registry",
+			postgresURL: "postgres://aerial:pass@127.0.0.1:5432/aerial?sslmode=disable",
+			wantErr:     false,
 		},
 		{
 			name:        "invalid postgres URL returns error",
 			postgresURL: "postgres://%gh:invalid",
 			wantErr:     true,
-			wantNilPool: true,
 		},
 	}
 
@@ -1356,18 +1354,12 @@ func TestSetupRiverWorkerPool(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			srv := NewRouterServer(fixedConfig(Config{}), nil)
-			pool, rc, err := setupRiverWorkerPool(ctx, srv, Config{PostgresURL: tc.postgresURL})
+			pool, err := setupPostgres(ctx, srv, tc.postgresURL, "")
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("setupRiverWorkerPool() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantNilPool && pool != nil {
-				t.Errorf("expected nil pool, got %v", pool)
+				t.Fatalf("setupPostgres() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if pool != nil {
 				defer pool.Close()
-			}
-			if rc != nil {
-				defer rc.Stop(context.Background())
 			}
 		})
 	}

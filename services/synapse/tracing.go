@@ -35,7 +35,7 @@ func discordJobSpanOptions(queue string) []trace.SpanStartOption {
 	return []trace.SpanStartOption{
 		trace.WithSpanKind(trace.SpanKindConsumer),
 		trace.WithAttributes(
-			attribute.String("messaging.system", "river"),
+			attribute.String("messaging.system", "nats"),
 			attribute.String("messaging.destination.name", queue),
 		),
 	}

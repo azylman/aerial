@@ -154,49 +154,17 @@ func (s *VanadisServer) collectBuildMetrics(ctx context.Context) {
 	ChunksActive.WithLabelValues("pr_opened").Set(prOpenedChunks)
 }
 
-func (s *VanadisServer) collectQueueMetrics(ctx context.Context) {
-	stateCounts := make(map[string]float64, len(knownRiverJobStates))
+func (s *VanadisServer) collectQueueMetrics() {
 	for _, st := range knownRiverJobStates {
-		stateCounts[st] = 0
+		QueueDepth.WithLabelValues(st).Set(0)
 	}
-	var maxAge float64
-	defer func() {
-		for _, st := range knownRiverJobStates {
-			QueueDepth.WithLabelValues(st).Set(stateCounts[st])
-		}
-		QueueOldestAgeSeconds.Set(maxAge)
-	}()
-
-	if s == nil {
-		return
-	}
-	pgStore, ok := s.store.(*PostgresVanadisStore)
-	if !ok || pgStore == nil || pgStore.db == nil {
-		return
-	}
-	const q = `SELECT state::text, COUNT(*), COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::float8, 0) FROM river_job WHERE queue = 'vanadis' AND state IN ('available', 'running', 'retryable', 'scheduled') GROUP BY state`
-	rows, err := pgStore.db.Query(ctx, q)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var st string
-		var count int64
-		var age float64
-		if scanErr := rows.Scan(&st, &count, &age); scanErr == nil {
-			stateCounts[st] = float64(count)
-			if age > maxAge {
-				maxAge = age
-			}
-		}
-	}
+	QueueOldestAgeSeconds.Set(0)
 }
 
 func (s *VanadisServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s != nil {
 		s.collectBuildMetrics(r.Context())
-		s.collectQueueMetrics(r.Context())
+		s.collectQueueMetrics()
 	}
 	promhttp.Handler().ServeHTTP(w, r)
 }

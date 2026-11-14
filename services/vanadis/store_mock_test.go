@@ -12,10 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/riverqueue/river"
-	"github.com/riverqueue/river/rivertype"
 )
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
@@ -804,29 +803,25 @@ func (m *memoryVanadisStore) RemoveChunk(_ context.Context, buildID, chunkRef st
 	return &removed, remaining, nil
 }
 
-type mockRiverInserter struct {
-	inserted []ExecuteChunkArgs
-	err      error
+type mockChunkBus struct {
+	pubsub.Bus
+
+	published []ExecuteChunkArgs
+	err       error
 }
 
-func (m *mockRiverInserter) Insert(_ context.Context, args river.JobArgs, _ *river.InsertOpts) (*rivertype.JobInsertResult, error) {
+func (m *mockChunkBus) Publish(ctx context.Context, subject, msgID string, data any) error {
 	if m.err != nil {
-		return nil, m.err
+		return m.err
 	}
-	if a, ok := args.(ExecuteChunkArgs); ok {
-		m.inserted = append(m.inserted, a)
+	if a, ok := data.(ExecuteChunkArgs); ok {
+		m.published = append(m.published, a)
 	}
-	return &rivertype.JobInsertResult{}, nil
+	if m.Bus != nil {
+		return m.Bus.Publish(ctx, subject, msgID, data)
+	}
+	return nil
 }
-
-type mockRiverLifecycle struct {
-	mockRiverInserter
-
-	startErr, stopErr error
-}
-
-func (m *mockRiverLifecycle) Start(_ context.Context) error { return m.startErr }
-func (m *mockRiverLifecycle) Stop(_ context.Context) error  { return m.stopErr }
 
 type errorReader struct{}
 

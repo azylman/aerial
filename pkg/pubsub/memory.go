@@ -246,6 +246,11 @@ func (b *MemoryBus) Close() error {
 	return nil
 }
 
+// ConsumerStats returns the number of pending and in-flight messages for a consumer in MemoryBus.
+func (b *MemoryBus) ConsumerStats(ctx context.Context, stream, consumer string) (int64, int64, error) {
+	return 0, 0, nil
+}
+
 func (b *MemoryBus) removeSubscription(target *memSubscription) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

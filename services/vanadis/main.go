@@ -28,14 +28,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/riverqueue/river"
-	"github.com/riverqueue/river/riverdriver/riverpgxv5"
-	"github.com/riverqueue/river/rivertype"
 	"gopkg.in/yaml.v3"
 )
-
-// VanadisQueueName is the dedicated River queue name for Vanadis chunk execution jobs.
-const VanadisQueueName = "vanadis"
 
 var (
 	// ErrBuildNotFound indicates a requested VanadisBuild does not exist in PostgreSQL.
@@ -117,27 +111,10 @@ func LoadConfig(configPath string) Config {
 // LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
 func LoadConfigFromEnv() Config { return LoadConfig(os.Getenv("CONFIG_PATH")) }
 
-// ExecuteChunkArgs defines the River job payload for executing a single Vanadis build chunk.
+// ExecuteChunkArgs defines the job payload for executing a single Vanadis build chunk.
 type ExecuteChunkArgs struct {
-	BuildID    string `json:"build_id" river:"unique"`
-	ChunkIndex int    `json:"chunk_index" river:"unique"`
-}
-
-// Kind returns the River job kind identifier for ExecuteChunkArgs.
-func (ExecuteChunkArgs) Kind() string { return "vanadis_execute_chunk" }
-
-// InsertOpts returns the River queue and deduplication options for ExecuteChunkArgs.
-func (ExecuteChunkArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{
-		Queue:       VanadisQueueName,
-		MaxAttempts: 3,
-		UniqueOpts:  river.UniqueOpts{ByArgs: true, ByPeriod: 15 * time.Minute},
-	}
-}
-
-// RiverInserter defines the interface for inserting jobs into River.
-type RiverInserter interface {
-	Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error)
+	BuildID    string `json:"build_id"`
+	ChunkIndex int    `json:"chunk_index"`
 }
 
 func capChunkEffort(effort string) string {
@@ -580,25 +557,6 @@ func (s *PostgresVanadisStore) UpdateBuildStatusMessageID(ctx context.Context, b
 	return s.execUpdateByID(ctx, "build id", buildID, "message_id", messageID, true, `UPDATE vanadis_builds SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status_message_id", ErrBuildNotFound)
 }
 
-// ExecuteChunkWorker processes Vanadis chunk execution jobs from River.
-type ExecuteChunkWorker struct {
-	river.WorkerDefaults[ExecuteChunkArgs]
-
-	server *VanadisServer
-}
-
-// Work executes a River job for a single Vanadis build chunk.
-func (w *ExecuteChunkWorker) Work(ctx context.Context, job *river.Job[ExecuteChunkArgs]) error {
-	if w == nil || w.server == nil {
-		return errors.New("vanadis server not configured on worker")
-	}
-	isFinalAttempt := false
-	if job != nil && job.JobRow != nil && job.MaxAttempts > 0 {
-		isFinalAttempt = job.Attempt >= job.MaxAttempts
-	}
-	return w.server.ProcessExecuteChunk(ctx, job.Args.BuildID, job.Args.ChunkIndex, isFinalAttempt)
-}
-
 // BrainDispatchRequest represents the JSON payload dispatched to Brain's POST /dispatch endpoint.
 type BrainDispatchRequest struct {
 	ID             string `json:"id,omitempty"`
@@ -640,29 +598,25 @@ type StatusWidgetRequest struct {
 	StartedAt time.Time           `json:"started_at,omitempty"`
 }
 
-// VanadisServer manages HTTP endpoints and River worker coordination for Vanadis builds.
+// VanadisServer manages HTTP endpoints and JetStream worker coordination for Vanadis builds.
 type VanadisServer struct {
-	cfg         Config
-	httpClient  *http.Client
-	store       VanadisStore
-	riverClient RiverInserter
-	bus         pubsub.Bus
+	cfg        Config
+	httpClient *http.Client
+	store      VanadisStore
+	bus        pubsub.Bus
 }
 
 // NewVanadisServer constructs a new VanadisServer instance.
-func NewVanadisServer(cfg Config, store VanadisStore, riverClient RiverInserter, httpClient *http.Client) *VanadisServer {
+func NewVanadisServer(cfg Config, store VanadisStore, httpClient *http.Client) *VanadisServer {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	// Traced so eri turns join the chunk dispatch span (and widget/wake posts carry traceparent).
-	return &VanadisServer{cfg: cfg, httpClient: tracing.Client(httpClient), store: store, riverClient: riverClient}
+	return &VanadisServer{cfg: cfg, httpClient: tracing.Client(httpClient), store: store}
 }
 
 // SetStore updates the VanadisStore backing the server.
 func (s *VanadisServer) SetStore(store VanadisStore) { s.store = store }
-
-// SetRiverClient updates the RiverInserter backing the server.
-func (s *VanadisServer) SetRiverClient(rc RiverInserter) { s.riverClient = rc }
 
 // SetBus sets the pubsub.Bus for event emission and consumption.
 func (s *VanadisServer) SetBus(bus pubsub.Bus) { s.bus = bus }
@@ -766,20 +720,11 @@ func (s *VanadisServer) dispatchWakePrompt(ctx context.Context, threadID, prompt
 }
 
 func (s *VanadisServer) enqueueExecuteChunk(ctx context.Context, args ExecuteChunkArgs) error {
-	if s.bus != nil {
-		msgID := fmt.Sprintf("vanadis:chunk:%s:%d", args.BuildID, args.ChunkIndex)
-		err := s.bus.Publish(ctx, "aerial.jobs.vanadis.chunk", msgID, args)
-		if err == nil {
-			return nil
-		}
-		log.Printf("[vanadis] warning: failed to publish chunk job to jetstream: %v, falling back to river", err)
+	if s.bus == nil {
+		return errors.New("event bus not configured")
 	}
-	if s.riverClient == nil {
-		return errors.New("river client not configured")
-	}
-	opts := args.InsertOpts()
-	_, err := s.riverClient.Insert(ctx, args, &opts)
-	return err
+	msgID := fmt.Sprintf("vanadis:chunk:%s:%d", args.BuildID, args.ChunkIndex)
+	return s.bus.Publish(ctx, "aerial.jobs.vanadis.chunk", msgID, args)
 }
 
 func settleFailedChunk(msg pubsub.Message, isFinalAttempt bool) {
@@ -1291,25 +1236,9 @@ func (s *VanadisServer) handleListBuilds(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-type riverLifecycleClient interface {
-	RiverInserter
-	Start(ctx context.Context) error
-	Stop(ctx context.Context) error
-}
+var newPgxPoolFn = pgxpool.NewWithConfig
 
-var (
-	newPgxPoolFn     = pgxpool.NewWithConfig
-	newRiverClientFn = func(dbPool *pgxpool.Pool, workers *river.Workers) (riverLifecycleClient, error) {
-		return river.NewClient(riverpgxv5.New(dbPool), &river.Config{
-			Queues: map[string]river.QueueConfig{
-				VanadisQueueName: {MaxWorkers: 5},
-			},
-			Workers: workers,
-		})
-	}
-)
-
-func initPostgresAndRiver(ctx context.Context, server *VanadisServer, pgURL string) (func(context.Context), error) {
+func initPostgres(ctx context.Context, server *VanadisServer, pgURL string) (func(context.Context), error) {
 	poolConfig, err := pgxpool.ParseConfig(pgURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres url: %w", err)
@@ -1320,22 +1249,7 @@ func initPostgresAndRiver(ctx context.Context, server *VanadisServer, pgURL stri
 		return nil, fmt.Errorf("create pgxpool: %w", err)
 	}
 	server.SetStore(NewPostgresVanadisStore(pool))
-	workers := river.NewWorkers()
-	river.AddWorker(workers, &ExecuteChunkWorker{server: server})
-	rc, err := newRiverClientFn(pool, workers)
-	if err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("create river client: %w", err)
-	}
-	server.SetRiverClient(rc)
-	if err := rc.Start(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("start river client: %w", err)
-	}
-	return func(stopCtx context.Context) {
-		if stopErr := rc.Stop(stopCtx); stopErr != nil && !errors.Is(stopErr, context.Canceled) {
-			log.Printf("[vanadis] River client stop error: %v", stopErr)
-		}
+	return func(context.Context) {
 		pool.Close()
 	}, nil
 }
@@ -1377,15 +1291,15 @@ func initVanadisJetStreamWithFactory(ctx context.Context, server *VanadisServer,
 }
 
 func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error {
-	server := NewVanadisServer(cfg, nil, nil, nil)
+	server := NewVanadisServer(cfg, nil, nil)
 	var cleanupDB func(context.Context)
 	if cfg.PostgresURL != "" {
-		cleanup, err := initPostgresAndRiver(ctx, server, cfg.PostgresURL)
+		cleanup, err := initPostgres(ctx, server, cfg.PostgresURL)
 		if err != nil {
 			return err
 		}
 		cleanupDB = cleanup
-		log.Println("[vanadis] River worker pool started successfully")
+		log.Println("[vanadis] PostgreSQL store initialized")
 	}
 
 	natsURL := firstNonEmpty(cfg.NATSURL, os.Getenv("NATS_URL"))

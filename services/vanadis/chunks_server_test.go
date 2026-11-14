@@ -30,8 +30,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 	}))
 	defer tsBrain.Close()
 
-	inserter := &mockRiverInserter{}
-	srv := NewVanadisServer(Config{BrainURL: tsBrain.URL}, memStore, inserter, tsBrain.Client())
+	srv := NewVanadisServer(Config{BrainURL: tsBrain.URL}, memStore, tsBrain.Client())
 	mux := SetupMux(srv)
 
 	doReq := func(method, path string, body string) *httptest.ResponseRecorder {
@@ -73,7 +72,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 			t.Errorf("expected 405, got %d", rec405.Code)
 		}
 
-		srvNil := NewVanadisServer(Config{}, nil, nil, nil)
+		srvNil := NewVanadisServer(Config{}, nil, nil)
 		muxNil := SetupMux(srvNil)
 		rec500 := httptest.NewRecorder()
 		muxNil.ServeHTTP(rec500, httptest.NewRequest(http.MethodGet, "/chunks/"+cIDs[0], nil))
@@ -116,7 +115,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 			t.Errorf("expected 405, got %d", rec405.Code)
 		}
 
-		srvNil := NewVanadisServer(Config{}, nil, nil, nil)
+		srvNil := NewVanadisServer(Config{}, nil, nil)
 		muxNil := SetupMux(srvNil)
 		rec500 := httptest.NewRecorder()
 		muxNil.ServeHTTP(rec500, httptest.NewRequest(http.MethodGet, "/chunks/by-pr?repo=aerial&pr_number=101", nil))
@@ -127,7 +126,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 
 	t.Run("POST_AttachChunkPR", func(t *testing.T) {
 		sAttach, _, cAttachIDs := setupTestStoreWithBuild()
-		srvAttach := NewVanadisServer(Config{}, sAttach, nil, nil)
+		srvAttach := NewVanadisServer(Config{}, sAttach, nil)
 		muxAttach := SetupMux(srvAttach)
 		doAttachReq := func(method, path string, body string) *httptest.ResponseRecorder {
 			var r *http.Request
@@ -178,7 +177,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 			t.Errorf("expected 405, got %d", rec405.Code)
 		}
 
-		srvNil := NewVanadisServer(Config{}, nil, nil, nil)
+		srvNil := NewVanadisServer(Config{}, nil, nil)
 		muxNil := SetupMux(srvNil)
 		rec500 := httptest.NewRecorder()
 		muxNil.ServeHTTP(rec500, httptest.NewRequest(http.MethodPost, "/chunks/attach-pr", strings.NewReader(`{}`)))
@@ -196,8 +195,9 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 		c3 := VanadisChunk{ID: "c-adv-3", BuildID: bAdvID, ChunkIndex: 2, Repo: "aerial", Title: "C3", Status: "pr_opened", PRNumber: 103}
 		_ = sAdv.CreateBuild(context.Background(), b, []VanadisChunk{c1, c2, c3})
 
-		inserterAdv := &mockRiverInserter{}
-		srvAdv := NewVanadisServer(Config{}, sAdv, inserterAdv, nil)
+		bus := &mockChunkBus{}
+		srvAdv := NewVanadisServer(Config{}, sAdv, nil)
+		srvAdv.SetBus(bus)
 		muxAdv := SetupMux(srvAdv)
 
 		doAdvReq := func(method, path string, body string) *httptest.ResponseRecorder {
@@ -221,25 +221,25 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 		if !advRes.Matched || !advRes.Advanced || advRes.NextChunkIndex != 1 {
 			t.Errorf("unexpected advancement result: %+v", advRes)
 		}
-		if len(inserterAdv.inserted) != 1 || inserterAdv.inserted[0].ChunkIndex != 1 {
-			t.Errorf("expected river job inserted for chunk 1, got %+v", inserterAdv.inserted)
+		if len(bus.published) != 1 || bus.published[0].ChunkIndex != 1 {
+			t.Errorf("expected chunk job published for chunk 1, got %+v", bus.published)
 		}
 
-		// River insert error on chunk 2 advancement
-		inserterAdv.err = errors.New("river boom")
+		// Bus error on chunk 2 advancement
+		bus.err = errors.New("bus boom")
 		advErrRec := doAdvReq(http.MethodPost, "/chunks/advance-pr", `{"repo":"aerial","pr_number":102}`)
 		if advErrRec.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500 on river error, got %d", advErrRec.Code)
+			t.Errorf("expected 500 on bus error, got %d", advErrRec.Code)
 		}
-		inserterAdv.err = nil
+		bus.err = nil
 
 		// Repeat chunk 2 advance succeeding
 		advRec2 := doAdvReq(http.MethodPost, "/chunks/advance-pr", `{"repo":"aerial","pr_number":102}`)
 		if advRec2.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK on repeat chunk 2 advance, got %d", advRec2.Code)
 		}
-		if len(inserterAdv.inserted) != 2 || inserterAdv.inserted[1].ChunkIndex != 2 {
-			t.Errorf("expected river job inserted for chunk 2 on repeat, got %+v", inserterAdv.inserted)
+		if len(bus.published) != 2 || bus.published[1].ChunkIndex != 2 {
+			t.Errorf("expected chunk job published for chunk 2 on repeat, got %+v", bus.published)
 		}
 
 		// Final advance completing build
@@ -275,7 +275,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 			t.Errorf("expected 405, got %d", rec405.Code)
 		}
 
-		srvNil := NewVanadisServer(Config{}, nil, nil, nil)
+		srvNil := NewVanadisServer(Config{}, nil, nil)
 		muxNil := SetupMux(srvNil)
 		rec500 := httptest.NewRecorder()
 		muxNil.ServeHTTP(rec500, httptest.NewRequest(http.MethodPost, "/chunks/advance-pr", strings.NewReader(`{}`)))
@@ -287,7 +287,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 	t.Run("POST_FailChunkPR", func(t *testing.T) {
 		sFail, _, cFailIDs := setupTestStoreWithBuild()
 		_, _ = sFail.AttachChunkPR(context.Background(), cFailIDs[0], 201, "aerial")
-		srvFail := NewVanadisServer(Config{}, sFail, nil, nil)
+		srvFail := NewVanadisServer(Config{}, sFail, nil)
 		muxFail := SetupMux(srvFail)
 
 		rec := httptest.NewRecorder()
@@ -331,7 +331,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 			t.Errorf("expected 405, got %d", rec405.Code)
 		}
 
-		srvNil := NewVanadisServer(Config{}, nil, nil, nil)
+		srvNil := NewVanadisServer(Config{}, nil, nil)
 		muxNil := SetupMux(srvNil)
 		rec500 := httptest.NewRecorder()
 		muxNil.ServeHTTP(rec500, httptest.NewRequest(http.MethodPost, "/chunks/fail-pr", strings.NewReader(`{}`)))
@@ -344,7 +344,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 		sWidget, bWidgetID, cWidgetIDs := setupTestStoreWithBuild()
 		_, _ = sWidget.AttachChunkPR(context.Background(), cWidgetIDs[0], 301, "aerial")
 
-		srvWidget := NewVanadisServer(Config{BrainURL: tsBrain.URL}, sWidget, nil, tsBrain.Client())
+		srvWidget := NewVanadisServer(Config{BrainURL: tsBrain.URL}, sWidget, tsBrain.Client())
 		muxWidget := SetupMux(srvWidget)
 
 		payload := `{"repo":"aerial","pr_number":301,"pr_status":"deploying","pr_banner":"","pr_found":true}`
@@ -483,7 +483,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 			http.Error(w, "brain failure", http.StatusInternalServerError)
 		}))
 		defer tsBadBrain.Close()
-		srvBadBrain := NewVanadisServer(Config{BrainURL: tsBadBrain.URL}, sWidget, nil, tsBadBrain.Client())
+		srvBadBrain := NewVanadisServer(Config{BrainURL: tsBadBrain.URL}, sWidget, tsBadBrain.Client())
 		muxBadBrain := SetupMux(srvBadBrain)
 		recBrainErr := httptest.NewRecorder()
 		muxBadBrain.ServeHTTP(recBrainErr, httptest.NewRequest(http.MethodPost, "/chunks/sync-pr-widget", strings.NewReader(payload)))
@@ -515,7 +515,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 			t.Errorf("expected 405, got %d", rec405.Code)
 		}
 
-		srvNil := NewVanadisServer(Config{}, nil, nil, nil)
+		srvNil := NewVanadisServer(Config{}, nil, nil)
 		muxNil := SetupMux(srvNil)
 		rec500 := httptest.NewRecorder()
 		muxNil.ServeHTTP(rec500, httptest.NewRequest(http.MethodPost, "/chunks/sync-pr-widget", strings.NewReader(`{}`)))
@@ -617,7 +617,7 @@ func TestServer_MutationEndpoints(t *testing.T) {
 				store = mem
 			}
 
-			srv := NewVanadisServer(Config{SynapseURL: tsWidget.URL}, store, nil, tsWidget.Client())
+			srv := NewVanadisServer(Config{SynapseURL: tsWidget.URL}, store, tsWidget.Client())
 			mux := SetupMux(srv)
 
 			var req *http.Request

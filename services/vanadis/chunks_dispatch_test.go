@@ -383,8 +383,9 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 				store = mem
 			}
 
-			inserter := &mockRiverInserter{}
-			server := NewVanadisServer(Config{BrainURL: tsMock.URL, SynapseURL: tsMock.URL}, store, inserter, tsMock.Client())
+			bus := &mockChunkBus{}
+			server := NewVanadisServer(Config{BrainURL: tsMock.URL, SynapseURL: tsMock.URL}, store, tsMock.Client())
+			server.SetBus(bus)
 
 			var payloadBytes []byte
 			if tc.rawPayload != "" {
@@ -415,10 +416,10 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 				t.Errorf("wake prompt called = %v, want %v", gotWake, tc.wantWake)
 			}
 			if tc.wantNextQueue {
-				if len(inserter.inserted) == 0 {
-					t.Errorf("expected river job inserted, got 0")
-				} else if inserter.inserted[0].ChunkIndex != tc.wantNextIndex {
-					t.Errorf("river inserted chunk index = %d, want %d", inserter.inserted[0].ChunkIndex, tc.wantNextIndex)
+				if len(bus.published) == 0 {
+					t.Errorf("expected chunk job published, got 0")
+				} else if bus.published[0].ChunkIndex != tc.wantNextIndex {
+					t.Errorf("published chunk index = %d, want %d", bus.published[0].ChunkIndex, tc.wantNextIndex)
 				}
 			}
 			if tc.wantStatus != "" && mem != nil && tc.event != nil {
@@ -465,8 +466,7 @@ func TestVanadisServer_MemoryBusIntegration(t *testing.T) {
 		},
 	}
 
-	inserter := &mockRiverInserter{}
-	server := NewVanadisServer(Config{}, mem, inserter, nil)
+	server := NewVanadisServer(Config{}, mem, nil)
 
 	ctx := context.Background()
 	done := make(chan struct{})
@@ -514,7 +514,7 @@ func TestVanadisServer_BusAndJetStreamInit(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	server := NewVanadisServer(Config{}, nil, nil, nil)
+	server := NewVanadisServer(Config{}, nil, nil)
 
 	// initVanadisJetStream empty natsURL
 	if bus := initVanadisJetStream(ctx, server, ""); bus != nil {
