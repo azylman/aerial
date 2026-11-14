@@ -489,7 +489,7 @@ func parseURLHostPort(raw string) (string, string) {
 func LoadConfig(path string) (*Config, error) {
 	cfg := &Config{
 		Port:        "4018",
-		CDPHost:     "browser.aerial",
+		CDPHost:     "",
 		CDPPort:     "9222",
 		SettleDelay: 500 * time.Millisecond,
 	}

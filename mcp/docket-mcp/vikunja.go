@@ -76,6 +76,9 @@ func (c *VikunjaClient) getToken() string {
 }
 
 func (c *VikunjaClient) authenticateLocked(ctx context.Context) error {
+	if c.cfg == nil || strings.TrimSpace(c.cfg.VikunjaURL) == "" {
+		return errors.New("vikunja URL is not configured")
+	}
 	loginReq := map[string]string{
 		"username": c.cfg.VikunjaUsername,
 		"password": c.cfg.VikunjaPassword,
@@ -111,6 +114,9 @@ func (c *VikunjaClient) authenticateLocked(ctx context.Context) error {
 }
 
 func (c *VikunjaClient) execRequest(ctx context.Context, method, path string, reqBody, respOut any, withAuth bool) error {
+	if c.cfg == nil || strings.TrimSpace(c.cfg.VikunjaURL) == "" {
+		return errors.New("vikunja URL is not configured")
+	}
 	baseURL := strings.TrimRight(c.cfg.VikunjaURL, "/")
 	var bodyReader io.Reader
 	if reqBody != nil {

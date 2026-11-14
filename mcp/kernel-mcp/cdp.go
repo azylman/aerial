@@ -70,6 +70,9 @@ func NewCDPClient(cfg *Config) *CDPClient {
 
 // getActivePageTarget queries /json/list on the CDP host and returns target ID and WS URL.
 func (c *CDPClient) getActivePageTarget(ctx context.Context) (string, string, error) {
+	if c.cfg == nil || strings.TrimSpace(c.cfg.CDPHost) == "" {
+		return "", "", errors.New("cdp host is not configured")
+	}
 	resolvedHost := ResolveCDPHost(ctx, c.cfg.CDPHost)
 	listURL := fmt.Sprintf("http://%s/json/list", net.JoinHostPort(resolvedHost, c.cfg.CDPPort))
 

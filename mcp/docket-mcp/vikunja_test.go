@@ -476,6 +476,7 @@ func TestVikunjaClient_TaskOperations(t *testing.T) {
 type authAndRetryTestCase struct {
 	name         string
 	initialToken string
+	emptyURL     bool
 	unauthorized bool
 	reauthFails  bool
 	invalidJSON  bool
@@ -532,6 +533,9 @@ func runAuthAndRetryCase(t *testing.T, tc authAndRetryTestCase) {
 	if tc.networkError {
 		ts.Close()
 	}
+	if tc.emptyURL {
+		serverURL = ""
+	}
 
 	client := NewVikunjaClient(&Config{VikunjaURL: serverURL, VikunjaUsername: "u", VikunjaPassword: "p"}, ts.Client())
 	if tc.initialToken != "" {
@@ -554,6 +558,11 @@ func TestVikunjaClient_AuthAndRetry(t *testing.T) {
 	t.Parallel()
 
 	tests := []authAndRetryTestCase{
+		{
+			name:     "unconfigured vikunja URL fails fast",
+			emptyURL: true,
+			wantErr:  "vikunja URL is not configured",
+		},
 		{
 			name:         "empty token bootstraps login",
 			initialToken: "",

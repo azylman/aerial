@@ -31,7 +31,7 @@ func TestNewDynamicClient_TableDriven(t *testing.T) {
 		{
 			name:        "static default values",
 			cfg:         Config{},
-			wantBaseURL: DefaultBaseURL,
+			wantBaseURL: "",
 		},
 		{
 			name: "static custom base url with trailing slash",
@@ -45,7 +45,7 @@ func TestNewDynamicClient_TableDriven(t *testing.T) {
 		{
 			name:        "dynamic with nil func",
 			nilCfgFn:    true,
-			wantBaseURL: DefaultBaseURL,
+			wantBaseURL: "",
 		},
 		{
 			name: "dynamic with valid func",
@@ -87,6 +87,7 @@ type generateEmbeddingTestCase struct {
 	queryPrefix   string
 	maxRetries    int
 	retryDelay    time.Duration
+	emptyBaseURL  bool
 	nilHTTPClient bool
 	cancelInDelay bool
 	handlerStatus int
@@ -138,9 +139,13 @@ func runGenerateEmbeddingCase(t *testing.T, tc generateEmbeddingTestCase) {
 	}))
 	defer server.Close()
 
+	baseURL := server.URL
+	if tc.emptyBaseURL {
+		baseURL = ""
+	}
 	client := NewDynamicClient(func() Config {
 		return Config{
-			BaseURL:     server.URL,
+			BaseURL:     baseURL,
 			QueryPrefix: tc.queryPrefix,
 		}
 	})
@@ -293,6 +298,13 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 			handlerBody:   `{"embedding": [0.77]}`,
 			wantEmbedding: []float32{0.77},
 			wantAttempts:  1,
+		},
+		{
+			name:          "unconfigured base URL fails fast with zero network IO",
+			text:          "test prompt",
+			emptyBaseURL:  true,
+			wantErrSubstr: "ollama base URL is not configured",
+			wantAttempts:  0,
 		},
 	}
 
