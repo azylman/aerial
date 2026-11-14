@@ -52,6 +52,39 @@ func TestSanitizeHistoryContent(t *testing.T) {
 	}
 }
 
+type historyTestCase struct {
+	name         string
+	msgs         []HistoryMessage
+	tzOpt        []string
+	wantPrefix   string
+	wantSuffix   string
+	wantContains []string
+	wantExcludes []string
+}
+
+func assertFormattedHistory(t *testing.T, targetName, got string, tc historyTestCase) {
+	t.Helper()
+	if len(tc.wantContains) == 0 && got != "" {
+		t.Errorf("%s = %q, want empty", targetName, got)
+	}
+	if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) {
+		t.Errorf("expected prefix %q, got:\n%s", tc.wantPrefix, got)
+	}
+	if tc.wantSuffix != "" && !strings.HasSuffix(got, tc.wantSuffix) {
+		t.Errorf("expected suffix %q, got:\n%s", tc.wantSuffix, got)
+	}
+	for _, sub := range tc.wantContains {
+		if !strings.Contains(got, sub) {
+			t.Errorf("expected history to contain %q, got:\n%s", sub, got)
+		}
+	}
+	for _, sub := range tc.wantExcludes {
+		if strings.Contains(got, sub) {
+			t.Errorf("expected history to exclude %q, got:\n%s", sub, got)
+		}
+	}
+}
+
 func TestFormatChannelHistory(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
@@ -60,15 +93,7 @@ func TestFormatChannelHistory(t *testing.T) {
 		t.Fatalf("failed to load America/Los_Angeles: %v", err)
 	}
 
-	tests := []struct {
-		name         string
-		msgs         []HistoryMessage
-		tzOpt        []string
-		wantPrefix   string
-		wantSuffix   string
-		wantContains []string
-		wantExcludes []string
-	}{
+	tests := []historyTestCase{
 		{name: "nil messages", msgs: nil},
 		{name: "empty slice", msgs: []HistoryMessage{}},
 		{name: "all messages older than 4h clamped", msgs: []HistoryMessage{{ID: "msg-old", Content: "Ancient", CreatedAt: now.Add(-10 * time.Hour)}}},
@@ -144,25 +169,7 @@ func TestFormatChannelHistory(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := FormatChannelHistory(tc.msgs, tc.tzOpt...)
-			if len(tc.wantContains) == 0 && got != "" {
-				t.Errorf("FormatChannelHistory() = %q, want empty", got)
-			}
-			if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) {
-				t.Errorf("expected prefix %q, got:\n%s", tc.wantPrefix, got)
-			}
-			if tc.wantSuffix != "" && !strings.HasSuffix(got, tc.wantSuffix) {
-				t.Errorf("expected suffix %q, got:\n%s", tc.wantSuffix, got)
-			}
-			for _, sub := range tc.wantContains {
-				if !strings.Contains(got, sub) {
-					t.Errorf("expected history to contain %q, got:\n%s", sub, got)
-				}
-			}
-			for _, sub := range tc.wantExcludes {
-				if strings.Contains(got, sub) {
-					t.Errorf("expected history to exclude %q, got:\n%s", sub, got)
-				}
-			}
+			assertFormattedHistory(t, "FormatChannelHistory()", got, tc)
 		})
 	}
 }
@@ -171,15 +178,7 @@ func TestFormatThreadHistory(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 
-	tests := []struct {
-		name         string
-		msgs         []HistoryMessage
-		tzOpt        []string
-		wantPrefix   string
-		wantSuffix   string
-		wantContains []string
-		wantExcludes []string
-	}{
+	tests := []historyTestCase{
 		{name: "nil messages", msgs: nil},
 		{name: "empty slice", msgs: []HistoryMessage{}},
 		{
@@ -215,25 +214,7 @@ func TestFormatThreadHistory(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := FormatThreadHistory(tc.msgs, tc.tzOpt...)
-			if len(tc.wantContains) == 0 && got != "" {
-				t.Errorf("FormatThreadHistory() = %q, want empty", got)
-			}
-			if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) {
-				t.Errorf("expected prefix %q, got:\n%s", tc.wantPrefix, got)
-			}
-			if tc.wantSuffix != "" && !strings.HasSuffix(got, tc.wantSuffix) {
-				t.Errorf("expected suffix %q, got:\n%s", tc.wantSuffix, got)
-			}
-			for _, sub := range tc.wantContains {
-				if !strings.Contains(got, sub) {
-					t.Errorf("expected thread history to contain %q, got:\n%s", sub, got)
-				}
-			}
-			for _, sub := range tc.wantExcludes {
-				if strings.Contains(got, sub) {
-					t.Errorf("expected thread history to exclude %q, got:\n%s", sub, got)
-				}
-			}
+			assertFormattedHistory(t, "FormatThreadHistory()", got, tc)
 		})
 	}
 }

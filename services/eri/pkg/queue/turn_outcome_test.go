@@ -26,15 +26,100 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
+type capacityBlipCase struct {
+	name, runnerErr, wantFinalStatus, wantErrContains, wantDeliveryContains string
+	maxAttempts, wantAttempts                                               int
+	presetGlobalLockSec                                                     int64
+	deliveryErr                                                             error
+	checkGlobalLockZero, checkNoSchedules                                   bool
+}
+
+func runCapacityBlipCase(t *testing.T, tt capacityBlipCase) {
+	t.Helper()
+	store, tmpDir := setupTestStore(t), t.TempDir()
+	var mu sync.Mutex
+	var attemptCount int
+	var deliveredText string
+	doneCh := make(chan struct{}, 1)
+	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "thread"}}})
+	haroSrv, getOneShots := newMockHaroOneShotServer(t)
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, tmpDir), Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
+		RetryDelayOverride: 10 * time.Millisecond, MaxAttempts: tt.maxAttempts, HaroURL: haroSrv.URL,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			attemptCount++
+			cur := attemptCount
+			mu.Unlock()
+			if cur == 1 {
+				return "", tt.runnerErr, 1, errors.New("exit code 1")
+			}
+			return mockJSONResponse(uuid.New().String(), "Recovered on attempt 2!"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredText = text
+			mu.Unlock()
+			return tt.deliveryErr
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	if tt.presetGlobalLockSec > 0 {
+		pool.quotaLockedUntil.Store(time.Now().Add(time.Duration(tt.presetGlobalLockSec) * time.Second).Unix())
+	}
+
+	threadID, msgID := "thread-"+strings.ToLower(tt.name), "msg-"+strings.ToLower(tt.name)
+	CacheDiscordChannel(&discordgo.Channel{ID: threadID, Type: discordgo.ChannelTypeGuildPublicThread, Name: threadID})
+	msg := db.Message{ID: msgID, ThreadID: threadID, Content: "hello " + tt.name}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message completed")
+	}
+	pool.Stop()
+
+	mu.Lock()
+	attempts, delivered := attemptCount, deliveredText
+	mu.Unlock()
+	if attempts != tt.wantAttempts {
+		t.Fatalf("attempts = %d, want %d", attempts, tt.wantAttempts)
+	}
+	dbMsg, _ := store.GetMessage(context.Background(), msgID)
+	if dbMsg.Status != tt.wantFinalStatus {
+		t.Errorf("status = %s, want %s", dbMsg.Status, tt.wantFinalStatus)
+	}
+	if tt.wantErrContains != "" && !strings.Contains(dbMsg.ErrorMessage, tt.wantErrContains) {
+		t.Errorf("expected error %q in %q", tt.wantErrContains, dbMsg.ErrorMessage)
+	}
+	if tt.wantDeliveryContains != "" && !strings.Contains(delivered, tt.wantDeliveryContains) {
+		t.Errorf("expected delivery %q in %q", tt.wantDeliveryContains, delivered)
+	}
+	if tt.checkGlobalLockZero && pool.quotaLockedUntil.Load() > 0 {
+		t.Errorf("expected quotaLockedUntil == 0")
+	}
+	if tt.checkNoSchedules {
+		s := getOneShots(threadID)
+		if len(s) > 0 {
+			t.Errorf("expected 0 schedules, got %d", len(s))
+		}
+	}
+}
+
 func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name, runnerErr, wantFinalStatus, wantErrContains, wantDeliveryContains string
-		maxAttempts, wantAttempts                                               int
-		presetGlobalLockSec                                                     int64
-		deliveryErr                                                             error
-		checkGlobalLockZero, checkNoSchedules                                   bool
-	}{
+	tests := []capacityBlipCase{
 		{name: "LocalRetry_Success", maxAttempts: 2, runnerErr: "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", wantAttempts: 2, wantFinalStatus: db.StatusCompleted, wantDeliveryContains: "Recovered on attempt 2!", checkGlobalLockZero: true},
 		{name: "RateLimit503_RetryBackoff_Success", maxAttempts: 2, runnerErr: "503 Service Unavailable: high demand on model", wantAttempts: 2, wantFinalStatus: db.StatusCompleted, wantDeliveryContains: "Recovered on attempt 2!", checkGlobalLockZero: true},
 		{name: "GenericTransient_RetryBackoff_Success", maxAttempts: 2, runnerErr: "transient connection reset", wantAttempts: 2, wantFinalStatus: db.StatusCompleted, wantDeliveryContains: "Recovered on attempt 2!", checkGlobalLockZero: true},
@@ -45,85 +130,7 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			store, tmpDir := setupTestStore(t), t.TempDir()
-			var mu sync.Mutex
-			var attemptCount int
-			var deliveredText string
-			doneCh := make(chan struct{}, 1)
-			appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "thread"}}})
-			haroSrv, getOneShots := newMockHaroOneShotServer(t)
-			pool := New(appCfg, WorkerPoolConfig{
-				SessionManager: session.New(tmpDir, tmpDir), Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
-				RetryDelayOverride: 10 * time.Millisecond, MaxAttempts: tt.maxAttempts, HaroURL: haroSrv.URL,
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					mu.Lock()
-					attemptCount++
-					cur := attemptCount
-					mu.Unlock()
-					if cur == 1 {
-						return "", tt.runnerErr, 1, errors.New("exit code 1")
-					}
-					return mockJSONResponse(uuid.New().String(), "Recovered on attempt 2!"), "", 0, nil
-				},
-				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-					mu.Lock()
-					deliveredText = text
-					mu.Unlock()
-					return tt.deliveryErr
-				},
-				TypingFunc: func(s *discordgo.Session, channelID string) func() { return func() {} },
-				OnMessageCompleted: func(msg db.Message, finalStatus string) {
-					select {
-					case doneCh <- struct{}{}:
-					default:
-					}
-				},
-			})
-			pool.Start()
-			defer pool.Stop()
-
-			if tt.presetGlobalLockSec > 0 {
-				pool.quotaLockedUntil.Store(time.Now().Add(time.Duration(tt.presetGlobalLockSec) * time.Second).Unix())
-			}
-
-			threadID, msgID := "thread-"+strings.ToLower(tt.name), "msg-"+strings.ToLower(tt.name)
-			CacheDiscordChannel(&discordgo.Channel{ID: threadID, Type: discordgo.ChannelTypeGuildPublicThread, Name: threadID})
-			msg := db.Message{ID: msgID, ThreadID: threadID, Content: "hello " + tt.name}
-			_ = insertMessage(store, msg)
-			pool.Enqueue(msg)
-
-			select {
-			case <-doneCh:
-			case <-time.After(10 * time.Second):
-				t.Fatal("Timeout waiting for message completed")
-			}
-			pool.Stop()
-
-			mu.Lock()
-			attempts, delivered := attemptCount, deliveredText
-			mu.Unlock()
-			if attempts != tt.wantAttempts {
-				t.Fatalf("attempts = %d, want %d", attempts, tt.wantAttempts)
-			}
-			dbMsg, _ := store.GetMessage(context.Background(), msgID)
-			if dbMsg.Status != tt.wantFinalStatus {
-				t.Errorf("status = %s, want %s", dbMsg.Status, tt.wantFinalStatus)
-			}
-			if tt.wantErrContains != "" && !strings.Contains(dbMsg.ErrorMessage, tt.wantErrContains) {
-				t.Errorf("expected error %q in %q", tt.wantErrContains, dbMsg.ErrorMessage)
-			}
-			if tt.wantDeliveryContains != "" && !strings.Contains(delivered, tt.wantDeliveryContains) {
-				t.Errorf("expected delivery %q in %q", tt.wantDeliveryContains, delivered)
-			}
-			if tt.checkGlobalLockZero && pool.quotaLockedUntil.Load() > 0 {
-				t.Errorf("expected quotaLockedUntil == 0")
-			}
-			if tt.checkNoSchedules {
-				s := getOneShots(threadID)
-				if len(s) > 0 {
-					t.Errorf("expected 0 schedules, got %d", len(s))
-				}
-			}
+			runCapacityBlipCase(t, tt)
 		})
 	}
 }
@@ -508,13 +515,99 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 	}
 }
 
+type yieldTrapCase struct {
+	name, threadID, sessionID, msgID, metricOutcome, metricSignature, expectDeliveredText, expectedSecondPrompt string
+	maxYields                                                                                                   int
+	expectInvocations                                                                                           int32
+	verifyPromptsSeen                                                                                           bool
+}
+
+func runYieldTrapCase(t *testing.T, tc yieldTrapCase) {
+	t.Helper()
+	store, tmpHome := setupTestStore(t), t.TempDir()
+	var runnerInvocations atomic.Int32
+	var promptsSeenMu, deliveredMu sync.Mutex
+	var promptsSeen []string
+	var deliveredText string
+	doneCh := make(chan struct{})
+
+	sessMgr := session.New(tmpHome, "")
+	sessDir, _ := ensureTestSessionDir(sessMgr, tc.sessionID)
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
+	_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644)
+	now := time.Now()
+	_ = os.Chtimes(sessDir, now, now)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			inv := runnerInvocations.Add(1)
+			promptsSeenMu.Lock()
+			promptsSeen = append(promptsSeen, prompt)
+			promptsSeenMu.Unlock()
+			_ = os.Chtimes(sessDir, time.Now(), time.Now())
+			if int(inv) <= tc.maxYields {
+				msg := fmt.Sprintf("Still waiting turn %d", inv)
+				if tc.maxYields == 1 {
+					msg = "Waiting on background task task-444"
+				}
+				return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}`, tc.sessionID, msg), "terminating 1 background task(s) on exit\n", 0, nil
+			}
+			return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":150,"output_tokens":35,"total_tokens":185}}`, tc.sessionID, tc.expectDeliveredText), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			deliveredMu.Lock()
+			deliveredText = text
+			deliveredMu.Unlock()
+			return nil
+		},
+		TypingFunc:         func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) { close(doneCh) },
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: tc.msgID, ThreadID: tc.threadID, GuildID: "guild-1", AuthorID: "user-1", AuthorName: "test-user", Content: "Run task", Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	_ = insertMessage(store, msg)
+	model := pool.GetRuntimeConfig()
+	initialMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	if runnerInvocations.Load() != tc.expectInvocations {
+		t.Fatalf("invocations = %d, want %d", runnerInvocations.Load(), tc.expectInvocations)
+	}
+	if tc.verifyPromptsSeen {
+		promptsSeenMu.Lock()
+		seenCount := len(promptsSeen)
+		secondPrompt := ""
+		if seenCount > 1 {
+			secondPrompt = promptsSeen[1]
+		}
+		promptsSeenMu.Unlock()
+		if seenCount != int(tc.expectInvocations) || secondPrompt != tc.expectedSecondPrompt {
+			t.Errorf("prompts mismatch: count=%d second=%q", seenCount, secondPrompt)
+		}
+	}
+	deliveredMu.Lock()
+	finalText := deliveredText
+	deliveredMu.Unlock()
+	if finalText != tc.expectDeliveredText {
+		t.Errorf("delivered = %q, want %q", finalText, tc.expectDeliveredText)
+	}
+	newMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))
+	if newMetric != initialMetric+1 {
+		t.Errorf("metric delta = %.0f, want 1", newMetric-initialMetric)
+	}
+}
+
 func TestYieldTrap_Scenarios(t *testing.T) {
-	tests := []struct {
-		name, threadID, sessionID, msgID, metricOutcome, metricSignature, expectDeliveredText, expectedSecondPrompt string
-		maxYields                                                                                                   int
-		expectInvocations                                                                                           int32
-		verifyPromptsSeen                                                                                           bool
-	}{
+	tests := []yieldTrapCase{
 		{
 			name: "auto-resumption on stderr signature success", threadID: "thread-yield-auto", sessionID: "f2222222-3333-4444-5555-666666666666", msgID: "msg-yield-1",
 			maxYields: 1, expectInvocations: 2, expectDeliveredText: "Job completed after resumption!", metricOutcome: "resumed", metricSignature: "stderr_signature", verifyPromptsSeen: true, expectedSecondPrompt: YieldTrapResumePrompt,
@@ -526,86 +619,7 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store, tmpHome := setupTestStore(t), t.TempDir()
-			var runnerInvocations atomic.Int32
-			var promptsSeenMu, deliveredMu sync.Mutex
-			var promptsSeen []string
-			var deliveredText string
-			doneCh := make(chan struct{})
-
-			sessMgr := session.New(tmpHome, "")
-			sessDir, _ := ensureTestSessionDir(sessMgr, tc.sessionID)
-			_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
-			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644)
-			now := time.Now()
-			_ = os.Chtimes(sessDir, now, now)
-
-			pool := NewWorkerPool(WorkerPoolConfig{
-				SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					inv := runnerInvocations.Add(1)
-					promptsSeenMu.Lock()
-					promptsSeen = append(promptsSeen, prompt)
-					promptsSeenMu.Unlock()
-					_ = os.Chtimes(sessDir, time.Now(), time.Now())
-					if int(inv) <= tc.maxYields {
-						msg := fmt.Sprintf("Still waiting turn %d", inv)
-						if tc.maxYields == 1 {
-							msg = "Waiting on background task task-444"
-						}
-						return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}`, tc.sessionID, msg), "terminating 1 background task(s) on exit\n", 0, nil
-					}
-					return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":150,"output_tokens":35,"total_tokens":185}}`, tc.sessionID, tc.expectDeliveredText), "", 0, nil
-				},
-				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-					deliveredMu.Lock()
-					deliveredText = text
-					deliveredMu.Unlock()
-					return nil
-				},
-				TypingFunc:         func(s *discordgo.Session, channelID string) func() { return func() {} },
-				OnMessageCompleted: func(msg db.Message, finalStatus string) { close(doneCh) },
-			})
-			pool.Start()
-			defer pool.Stop()
-
-			msg := db.Message{ID: tc.msgID, ThreadID: tc.threadID, GuildID: "guild-1", AuthorID: "user-1", AuthorName: "test-user", Content: "Run task", Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-			_ = insertMessage(store, msg)
-			model := pool.GetRuntimeConfig()
-			initialMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))
-			pool.Enqueue(msg)
-
-			select {
-			case <-doneCh:
-			case <-time.After(5 * time.Second):
-				t.Fatal("Timeout waiting for message processing")
-			}
-
-			if runnerInvocations.Load() != tc.expectInvocations {
-				t.Fatalf("invocations = %d, want %d", runnerInvocations.Load(), tc.expectInvocations)
-			}
-			if tc.verifyPromptsSeen {
-				promptsSeenMu.Lock()
-				seenCount := len(promptsSeen)
-				secondPrompt := ""
-				if seenCount > 1 {
-					secondPrompt = promptsSeen[1]
-				}
-				promptsSeenMu.Unlock()
-				if seenCount != int(tc.expectInvocations) || secondPrompt != tc.expectedSecondPrompt {
-					t.Errorf("prompts mismatch: count=%d second=%q", seenCount, secondPrompt)
-				}
-			}
-			deliveredMu.Lock()
-			finalText := deliveredText
-			deliveredMu.Unlock()
-			if finalText != tc.expectDeliveredText {
-				t.Errorf("delivered = %q, want %q", finalText, tc.expectDeliveredText)
-			}
-			newMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))
-			if newMetric != initialMetric+1 {
-				t.Errorf("metric delta = %.0f, want 1", newMetric-initialMetric)
-			}
+			runYieldTrapCase(t, tc)
 		})
 	}
 }
@@ -749,16 +763,106 @@ func TestWorker_GlobalQuotaLockout_SilentAndDeliveryTarget_TableDriven(t *testin
 	}
 }
 
+type customSessionTargetCase struct {
+	name           string
+	threadID       string
+	channelID      string
+	silent         bool
+	wantDelivered  bool
+	wantTargetChan string
+}
+
+func assertCustomSessionDeliveryTelemetry(t *testing.T, tc customSessionTargetCase, store db.Store) {
+	t.Helper()
+	if tc.silent {
+		disp, err := store.GetDispatch(context.Background(), "d-silent")
+		if err != nil || disp == nil {
+			t.Fatalf("failed to get dispatch: %v", err)
+		}
+		if disp.DurationMs < 0 || disp.InputTokens != 60 || disp.OutputTokens != 30 || disp.ThinkingTokens != 6 || disp.CacheReadTokens != 3 || disp.TotalTokens != 99 {
+			t.Errorf("unexpected telemetry on dispatch: %+v", disp)
+		}
+		return
+	}
+	m, err := store.GetMessage(context.Background(), "msg-succ")
+	if err != nil || m == nil {
+		t.Fatalf("failed to get message: %v", err)
+	}
+	if m.DurationMs < 0 || m.InputTokens != 60 || m.OutputTokens != 30 || m.ThinkingTokens != 6 || m.CacheReadTokens != 3 || m.TotalTokens != 99 {
+		t.Errorf("unexpected telemetry on message: %+v", m)
+	}
+}
+
+func runCustomSessionTargetCase(t *testing.T, tc customSessionTargetCase) {
+	t.Helper()
+	var deliveredTo string
+	store := dbtest.NewFakeStore()
+	pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
+		Store: store,
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			deliveredTo = channelID
+			return nil
+		},
+	})
+
+	msg := db.Message{
+		ID:        "msg-succ",
+		ThreadID:  tc.threadID,
+		Status:    db.StatusProcessing,
+		ChannelID: tc.channelID,
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+
+	var d *db.Dispatch
+	if tc.silent {
+		d = &db.Dispatch{ID: "d-silent", Source: "webhook", Status: db.StatusProcessing}
+		_, _ = store.InsertDispatch(context.Background(), *d)
+	}
+
+	te := &turnExecution{
+		pool:        pool,
+		threadID:    tc.threadID,
+		triggerType: "http",
+		dispatch:    d,
+		burst:       []db.Message{msg},
+		execStart:   time.Now().UTC(),
+		stopTyping:  func() {},
+	}
+
+	resp := &runner.AgyResponse{
+		Response: "Task completed successfully",
+		Usage: runner.TokenUsage{
+			InputTokens:     50,
+			OutputTokens:    25,
+			ThinkingTokens:  5,
+			CacheReadTokens: 2,
+			TotalTokens:     82,
+		},
+	}
+	accumulated := runner.TokenUsage{
+		InputTokens:     10,
+		OutputTokens:    5,
+		ThinkingTokens:  1,
+		CacheReadTokens: 1,
+		TotalTokens:     17,
+	}
+	ok, _ := te.deliverSuccessAndFinalize(resp, accumulated, "test-model", 1, 1)
+	if !ok {
+		t.Fatalf("deliverSuccessAndFinalize returned false")
+	}
+	if tc.wantDelivered && deliveredTo != tc.wantTargetChan {
+		t.Fatalf("deliveredTo = %q, want %q", deliveredTo, tc.wantTargetChan)
+	}
+	if !tc.wantDelivered && deliveredTo != "" {
+		t.Fatalf("deliveredTo = %q, want empty", deliveredTo)
+	}
+
+	assertCustomSessionDeliveryTelemetry(t, tc, store)
+}
+
 func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name           string
-		threadID       string
-		channelID      string
-		silent         bool
-		wantDelivered  bool
-		wantTargetChan string
-	}{
+	tests := []customSessionTargetCase{
 		{
 			name:           "custom session non-silent delivers to snowflake channelID",
 			threadID:       "1542423172400291873",
@@ -780,85 +884,7 @@ func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *tes
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var deliveredTo string
-			store := dbtest.NewFakeStore()
-			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
-				Store: store,
-				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-					deliveredTo = channelID
-					return nil
-				},
-			})
-
-			msg := db.Message{
-				ID:        "msg-succ",
-				ThreadID:  tc.threadID,
-				Status:    db.StatusProcessing,
-				ChannelID: tc.channelID,
-			}
-			_ = store.InsertMessage(context.Background(), msg)
-
-			var d *db.Dispatch
-			if tc.silent {
-				d = &db.Dispatch{ID: "d-silent", Source: "webhook", Status: db.StatusProcessing}
-				_, _ = store.InsertDispatch(context.Background(), *d)
-			}
-
-			te := &turnExecution{
-				pool:        pool,
-				threadID:    tc.threadID,
-				triggerType: "http",
-				dispatch:    d,
-				burst:       []db.Message{msg},
-				execStart:   time.Now().UTC(),
-				stopTyping:  func() {},
-			}
-
-			resp := &runner.AgyResponse{
-				Response: "Task completed successfully",
-				Usage: runner.TokenUsage{
-					InputTokens:     50,
-					OutputTokens:    25,
-					ThinkingTokens:  5,
-					CacheReadTokens: 2,
-					TotalTokens:     82,
-				},
-			}
-			accumulated := runner.TokenUsage{
-				InputTokens:     10,
-				OutputTokens:    5,
-				ThinkingTokens:  1,
-				CacheReadTokens: 1,
-				TotalTokens:     17,
-			}
-			ok, _ := te.deliverSuccessAndFinalize(resp, accumulated, "test-model", 1, 1)
-			if !ok {
-				t.Fatalf("deliverSuccessAndFinalize returned false")
-			}
-			if tc.wantDelivered && deliveredTo != tc.wantTargetChan {
-				t.Fatalf("deliveredTo = %q, want %q", deliveredTo, tc.wantTargetChan)
-			}
-			if !tc.wantDelivered && deliveredTo != "" {
-				t.Fatalf("deliveredTo = %q, want empty", deliveredTo)
-			}
-
-			if tc.silent {
-				disp, err := store.GetDispatch(context.Background(), "d-silent")
-				if err != nil || disp == nil {
-					t.Fatalf("failed to get dispatch: %v", err)
-				}
-				if disp.DurationMs < 0 || disp.InputTokens != 60 || disp.OutputTokens != 30 || disp.ThinkingTokens != 6 || disp.CacheReadTokens != 3 || disp.TotalTokens != 99 {
-					t.Errorf("unexpected telemetry on dispatch: %+v", disp)
-				}
-			} else {
-				m, err := store.GetMessage(context.Background(), "msg-succ")
-				if err != nil || m == nil {
-					t.Fatalf("failed to get message: %v", err)
-				}
-				if m.DurationMs < 0 || m.InputTokens != 60 || m.OutputTokens != 30 || m.ThinkingTokens != 6 || m.CacheReadTokens != 3 || m.TotalTokens != 99 {
-					t.Errorf("unexpected telemetry on message: %+v", m)
-				}
-			}
+			runCustomSessionTargetCase(t, tc)
 		})
 	}
 }

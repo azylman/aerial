@@ -27,18 +27,52 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+type effortModelResolutionCase struct {
+	name, cfgLow, cfgMed string
+	poolNil              bool
+	appLowVal, appMedVal *string
+	wantLow, wantMed     string
+}
+
+func runEffortModelResolutionCase(t *testing.T, tt effortModelResolutionCase) {
+	t.Helper()
+	if tt.poolNil {
+		var nilPool *WorkerPool
+		if got := nilPool.LowEffortModel(); got != tt.wantLow {
+			t.Errorf("LowEffortModel() = %q, want %q", got, tt.wantLow)
+		}
+		if got := nilPool.MediumEffortModel(); got != tt.wantMed {
+			t.Errorf("MediumEffortModel() = %q, want %q", got, tt.wantMed)
+		}
+		return
+	}
+	var appCfg *config.Config
+	if tt.appLowVal != nil || tt.appMedVal != nil {
+		appCfg = newTestConfig(func(d *config.ConfigData) {
+			if tt.appLowVal != nil {
+				d.LowEffortModel = *tt.appLowVal
+			}
+			if tt.appMedVal != nil {
+				d.MediumEffortModel = *tt.appMedVal
+			}
+		})
+	}
+	p := New(appCfg, WorkerPoolConfig{LowEffortModel: tt.cfgLow, MediumEffortModel: tt.cfgMed})
+	if got := p.LowEffortModel(); got != tt.wantLow {
+		t.Errorf("LowEffortModel() = %q, want %q", got, tt.wantLow)
+	}
+	if got := p.MediumEffortModel(); got != tt.wantMed {
+		t.Errorf("MediumEffortModel() = %q, want %q", got, tt.wantMed)
+	}
+}
+
 func TestWorkerPool_EffortModelResolution(t *testing.T) {
 	t.Parallel()
 	defaultLow := config.DefaultConfigData().LowEffortModel
 	defaultMed := config.DefaultConfigData().MediumEffortModel
 	appLow, appMed, appEmpty := "app-cfg-low-model", "app-cfg-med-model", ""
 
-	tests := []struct {
-		name, cfgLow, cfgMed string
-		poolNil              bool
-		appLowVal, appMedVal *string
-		wantLow, wantMed     string
-	}{
+	tests := []effortModelResolutionCase{
 		{"NilPoolFallback", "", "", true, nil, nil, defaultLow, defaultMed},
 		{"CustomModelInCfg", "gemini-flash-low-test", "gemini-flash-med-test", false, nil, nil, "gemini-flash-low-test", "gemini-flash-med-test"},
 		{"AppCfgOverride", "", "", false, &appLow, &appMed, "app-cfg-low-model", "app-cfg-med-model"},
@@ -49,34 +83,7 @@ func TestWorkerPool_EffortModelResolution(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if tt.poolNil {
-				var nilPool *WorkerPool
-				if got := nilPool.LowEffortModel(); got != tt.wantLow {
-					t.Errorf("LowEffortModel() = %q, want %q", got, tt.wantLow)
-				}
-				if got := nilPool.MediumEffortModel(); got != tt.wantMed {
-					t.Errorf("MediumEffortModel() = %q, want %q", got, tt.wantMed)
-				}
-				return
-			}
-			var appCfg *config.Config
-			if tt.appLowVal != nil || tt.appMedVal != nil {
-				appCfg = newTestConfig(func(d *config.ConfigData) {
-					if tt.appLowVal != nil {
-						d.LowEffortModel = *tt.appLowVal
-					}
-					if tt.appMedVal != nil {
-						d.MediumEffortModel = *tt.appMedVal
-					}
-				})
-			}
-			p := New(appCfg, WorkerPoolConfig{LowEffortModel: tt.cfgLow, MediumEffortModel: tt.cfgMed})
-			if got := p.LowEffortModel(); got != tt.wantLow {
-				t.Errorf("LowEffortModel() = %q, want %q", got, tt.wantLow)
-			}
-			if got := p.MediumEffortModel(); got != tt.wantMed {
-				t.Errorf("MediumEffortModel() = %q, want %q", got, tt.wantMed)
-			}
+			runEffortModelResolutionCase(t, tt)
 		})
 	}
 }
@@ -171,6 +178,79 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller contex
 	return p, procPool, true
 }
 
+func assertVoiceTurnOutputs(t *testing.T, tt voiceTurnTestCase, reply, convID, statusReceived, sentenceReceived, recordedPrompt string) {
+	t.Helper()
+	if tt.wantReply != "" && reply != tt.wantReply {
+		t.Errorf("reply = %q, want %q", reply, tt.wantReply)
+	}
+	if tt.wantConvID != "" && convID != tt.wantConvID {
+		t.Errorf("convID = %q, want %q", convID, tt.wantConvID)
+	}
+	if tt.wantStatusSub != "" && !strings.Contains(statusReceived, tt.wantStatusSub) {
+		t.Errorf("status = %q, want substring %q", statusReceived, tt.wantStatusSub)
+	}
+	if tt.wantSentenceSub != "" && sentenceReceived != tt.wantSentenceSub {
+		t.Errorf("sentence = %q, want %q", sentenceReceived, tt.wantSentenceSub)
+	}
+	if tt.name == "ForwardCleanPrompt" && recordedPrompt != tt.prompt {
+		t.Errorf("recorded prompt = %q, want %q", recordedPrompt, tt.prompt)
+	}
+}
+
+func assertVoiceTurnError(t *testing.T, tt voiceTurnTestCase, err error) bool {
+	t.Helper()
+	if tt.wantErrIs != nil {
+		if !errors.Is(err, tt.wantErrIs) {
+			t.Fatalf("expected error %v, got %v", tt.wantErrIs, err)
+		}
+		return true
+	}
+	if tt.wantErrSub != "" {
+		if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+			t.Fatalf("expected error containing %q, got: %v", tt.wantErrSub, err)
+		}
+		return true
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	return false
+}
+
+func runVoiceTurnCase(t *testing.T, tt voiceTurnTestCase) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if tt.cancelCaller {
+		cancel()
+	}
+
+	var recordedPrompt, statusReceived, sentenceReceived string
+	pool, procPool, shouldStop := setupVoiceTestPool(t, &tt, cancel, func(p string) { recordedPrompt = p })
+	if shouldStop && pool != nil {
+		defer pool.Stop()
+	}
+	if procPool != nil {
+		defer procPool.Close()
+	}
+
+	targetSess := tt.sessionID
+	if tt.clearPreSpawnedSessionID && procPool != nil {
+		targetSess = "fallback-conv-id"
+		d, err := procPool.GetOrCreate(context.Background(), targetSess, "")
+		if err != nil {
+			t.Fatalf("failed pre-spawning: %v", err)
+		}
+		d.SetSessionID("")
+	}
+
+	reply, convID, err := pool.ExecuteVoiceTurn(ctx, tt.prompt, targetSess, func(s string) { statusReceived = s }, func(s string) { sentenceReceived = s })
+	if assertVoiceTurnError(t, tt, err) {
+		return
+	}
+	assertVoiceTurnOutputs(t, tt, reply, convID, statusReceived, sentenceReceived, recordedPrompt)
+}
+
 func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
 	t.Parallel()
 	tests := []voiceTurnTestCase{
@@ -200,62 +280,7 @@ func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if tt.cancelCaller {
-				cancel()
-			}
-
-			var recordedPrompt, statusReceived, sentenceReceived string
-			pool, procPool, shouldStop := setupVoiceTestPool(t, &tt, cancel, func(p string) { recordedPrompt = p })
-			if shouldStop && pool != nil {
-				defer pool.Stop()
-			}
-			if procPool != nil {
-				defer procPool.Close()
-			}
-
-			targetSess := tt.sessionID
-			if tt.clearPreSpawnedSessionID && procPool != nil {
-				targetSess = "fallback-conv-id"
-				d, err := procPool.GetOrCreate(context.Background(), targetSess, "")
-				if err != nil {
-					t.Fatalf("failed pre-spawning: %v", err)
-				}
-				d.SetSessionID("")
-			}
-
-			reply, convID, err := pool.ExecuteVoiceTurn(ctx, tt.prompt, targetSess, func(s string) { statusReceived = s }, func(s string) { sentenceReceived = s })
-			if tt.wantErrIs != nil {
-				if !errors.Is(err, tt.wantErrIs) {
-					t.Fatalf("expected error %v, got %v", tt.wantErrIs, err)
-				}
-				return
-			}
-			if tt.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
-					t.Fatalf("expected error containing %q, got: %v", tt.wantErrSub, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tt.wantReply != "" && reply != tt.wantReply {
-				t.Errorf("reply = %q, want %q", reply, tt.wantReply)
-			}
-			if tt.wantConvID != "" && convID != tt.wantConvID {
-				t.Errorf("convID = %q, want %q", convID, tt.wantConvID)
-			}
-			if tt.wantStatusSub != "" && !strings.Contains(statusReceived, tt.wantStatusSub) {
-				t.Errorf("status = %q, want substring %q", statusReceived, tt.wantStatusSub)
-			}
-			if tt.wantSentenceSub != "" && sentenceReceived != tt.wantSentenceSub {
-				t.Errorf("sentence = %q, want %q", sentenceReceived, tt.wantSentenceSub)
-			}
-			if tt.name == "ForwardCleanPrompt" && recordedPrompt != tt.prompt {
-				t.Errorf("recorded prompt = %q, want %q", recordedPrompt, tt.prompt)
-			}
+			runVoiceTurnCase(t, tt)
 		})
 	}
 }

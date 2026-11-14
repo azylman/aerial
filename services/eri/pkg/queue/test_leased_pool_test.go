@@ -418,6 +418,59 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 	return s.routeSendResponse(turn, stdout, stderr, exitCode, err)
 }
 
+func (s *testRunnerAgentSession) extractRescueResponse(turn *runner.TurnContext) string {
+	if s.pool.cfg.SessionManager == nil {
+		return ""
+	}
+	resSess := s.SessionID()
+	if resSess == "" && turn != nil {
+		resSess = turn.SessionID
+	}
+	if resSess == "" {
+		return ""
+	}
+	var since time.Time
+	if turn != nil {
+		since = turn.CreatedAt
+	}
+	resc := s.pool.cfg.SessionManager.ExtractResponseSince(resSess, since)
+	if runner.IsSubstantiveResponse(resc) && !strings.HasPrefix(resc, "[Tool Call Requested]:") {
+		return strings.TrimSpace(resc)
+	}
+	return ""
+}
+
+func (s *testRunnerAgentSession) handleParsedError(turn *runner.TurnContext, parsed *runner.AgyResponse, reportErr func(error) error) (string, error) {
+	if resc := s.extractRescueResponse(turn); resc != "" {
+		return resc, nil
+	}
+	lower := strings.ToLower(parsed.Error)
+	if strings.Contains(lower, "stream was interrupted") || strings.Contains(lower, "session corrupt") || strings.Contains(lower, "corrupted session") {
+		s.setSessionID("")
+	}
+	return "", reportErr(errors.New(parsed.Error))
+}
+
+func (s *testRunnerAgentSession) handleParsedStatus(turn *runner.TurnContext, parsed *runner.AgyResponse, reportErr func(error) error) (string, error) {
+	if resc := s.extractRescueResponse(turn); resc != "" {
+		return resc, nil
+	}
+	return "", reportErr(fmt.Errorf("runner status: %s", parsed.Status))
+}
+
+func (s *testRunnerAgentSession) processParsedAgyOutput(turn *runner.TurnContext, parsed *runner.AgyResponse, reportErr func(error) error) (string, error) {
+	if parsed.ConversationID != "" {
+		s.setSessionID(parsed.ConversationID)
+	}
+	if parsed.Error != "" {
+		return s.handleParsedError(turn, parsed, reportErr)
+	}
+	if parsed.Status != "" && strings.ToUpper(parsed.Status) != "SUCCESS" {
+		return s.handleParsedStatus(turn, parsed, reportErr)
+	}
+	return parsed.Response, nil
+}
+
 func (s *testRunnerAgentSession) routeSendResponse(turn *runner.TurnContext, stdout, stderr string, exitCode int, err error) error {
 	reportErr := func(e error) error {
 		if turn != nil && turn.Sink != nil {
@@ -434,53 +487,19 @@ func (s *testRunnerAgentSession) routeSendResponse(turn *runner.TurnContext, std
 	if exitCode != 0 {
 		return reportErr(fmt.Errorf("runner failed with exit code %d: %s", exitCode, stderr))
 	}
-	rescue := func() string {
-		if s.pool.cfg.SessionManager == nil {
-			return ""
-		}
-		resSess := s.SessionID()
-		if resSess == "" && turn != nil {
-			resSess = turn.SessionID
-		}
-		if resSess == "" {
-			return ""
-		}
-		var since time.Time
-		if turn != nil {
-			since = turn.CreatedAt
-		}
-		if resc := s.pool.cfg.SessionManager.ExtractResponseSince(resSess, since); runner.IsSubstantiveResponse(resc) && !strings.HasPrefix(resc, "[Tool Call Requested]:") {
-			return strings.TrimSpace(resc)
-		}
-		return ""
-	}
+
 	respText := stdout
 	var parsedUsage runner.AgyUsage
 	if parsed, pErr := parseTestAgyOutput(stdout); pErr == nil {
-		respText, parsedUsage = parsed.Response, parsed.Usage
-		if parsed.ConversationID != "" {
-			s.setSessionID(parsed.ConversationID)
+		parsedUsage = parsed.Usage
+		handledText, handledErr := s.processParsedAgyOutput(turn, parsed, reportErr)
+		if handledErr != nil {
+			return handledErr
 		}
-		if parsed.Error != "" {
-			if resc := rescue(); resc != "" {
-				respText = resc
-			} else {
-				lower := strings.ToLower(parsed.Error)
-				if strings.Contains(lower, "stream was interrupted") || strings.Contains(lower, "session corrupt") || strings.Contains(lower, "corrupted session") {
-					s.setSessionID("")
-				}
-				return reportErr(errors.New(parsed.Error))
-			}
-		} else if parsed.Status != "" && strings.ToUpper(parsed.Status) != "SUCCESS" {
-			if resc := rescue(); resc != "" {
-				respText = resc
-			} else {
-				return reportErr(fmt.Errorf("runner status: %s", parsed.Status))
-			}
-		}
+		respText = handledText
 	}
 	if strings.TrimSpace(respText) == "" {
-		if resc := rescue(); resc != "" {
+		if resc := s.extractRescueResponse(turn); resc != "" {
 			respText = resc
 		}
 	}
@@ -509,6 +528,68 @@ type testSessionProbe struct {
 	} `json:"result"`
 }
 
+func parseProbeResult(probe *testSessionProbe, streamConvID string) *runner.AgyResponse {
+	if (probe.Event != "result" && probe.Type != "result") || probe.Result == nil {
+		return nil
+	}
+	resp := &runner.AgyResponse{
+		ConversationID: probe.Result.ConversationID,
+		Status:         probe.Result.Status,
+		Response:       probe.Result.Response,
+		Error:          probe.Result.Error,
+	}
+	if resp.ConversationID == "" {
+		resp.ConversationID = probe.Result.SessionID
+	}
+	if resp.ConversationID == "" {
+		resp.ConversationID = streamConvID
+	}
+	if probe.Result.Usage != nil {
+		resp.Usage = *probe.Result.Usage
+	}
+	return resp
+}
+
+func parseProbeLine(line string, streamConvID *string) (*runner.AgyResponse, bool) {
+	l := strings.TrimSpace(line)
+	if !strings.HasPrefix(l, "{") || !strings.HasSuffix(l, "}") {
+		return nil, false
+	}
+	var probe testSessionProbe
+	if err := json.Unmarshal([]byte(l), &probe); err != nil {
+		return nil, true
+	}
+	if probe.ConversationID != "" {
+		*streamConvID = probe.ConversationID
+	} else if probe.SessionID != "" {
+		*streamConvID = probe.SessionID
+	}
+	if resp := parseProbeResult(&probe, *streamConvID); resp != nil {
+		return resp, true
+	}
+	return nil, true
+}
+
+func parseTrailingJSON(trimmed, streamConvID string) (*runner.AgyResponse, error) {
+	startIdx := strings.LastIndex(trimmed, "\n{")
+	if startIdx == -1 && strings.HasPrefix(trimmed, "{") {
+		startIdx = 0
+	} else if startIdx != -1 {
+		startIdx++
+	}
+	if startIdx == -1 {
+		return nil, fmt.Errorf("no JSON payload found in agy output")
+	}
+	var resp runner.AgyResponse
+	if err := json.Unmarshal([]byte(trimmed[startIdx:]), &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse agy JSON: %w", err)
+	}
+	if resp.ConversationID == "" && streamConvID != "" {
+		resp.ConversationID = streamConvID
+	}
+	return &resp, nil
+}
+
 func parseTestAgyOutput(raw string) (*runner.AgyResponse, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -518,34 +599,10 @@ func parseTestAgyOutput(raw string) (*runner.AgyResponse, error) {
 	var lastJSONLine string
 	var streamConvID string
 	for _, line := range lines {
-		l := strings.TrimSpace(line)
-		if strings.HasPrefix(l, "{") && strings.HasSuffix(l, "}") {
-			lastJSONLine = l
-			var probe testSessionProbe
-			if err := json.Unmarshal([]byte(l), &probe); err == nil {
-				if probe.ConversationID != "" {
-					streamConvID = probe.ConversationID
-				} else if probe.SessionID != "" {
-					streamConvID = probe.SessionID
-				}
-				if (probe.Event == "result" || probe.Type == "result") && probe.Result != nil {
-					resp := &runner.AgyResponse{
-						ConversationID: probe.Result.ConversationID,
-						Status:         probe.Result.Status,
-						Response:       probe.Result.Response,
-						Error:          probe.Result.Error,
-					}
-					if resp.ConversationID == "" {
-						resp.ConversationID = probe.Result.SessionID
-					}
-					if resp.ConversationID == "" {
-						resp.ConversationID = streamConvID
-					}
-					if probe.Result.Usage != nil {
-						resp.Usage = *probe.Result.Usage
-					}
-					return resp, nil
-				}
+		if resp, isJSON := parseProbeLine(line, &streamConvID); isJSON {
+			lastJSONLine = strings.TrimSpace(line)
+			if resp != nil {
+				return resp, nil
 			}
 		}
 	}
@@ -558,23 +615,7 @@ func parseTestAgyOutput(raw string) (*runner.AgyResponse, error) {
 			return &resp, nil
 		}
 	}
-	startIdx := strings.LastIndex(trimmed, "\n{")
-	if startIdx == -1 && strings.HasPrefix(trimmed, "{") {
-		startIdx = 0
-	} else if startIdx != -1 {
-		startIdx++
-	}
-	if startIdx != -1 {
-		var resp runner.AgyResponse
-		if err := json.Unmarshal([]byte(trimmed[startIdx:]), &resp); err != nil {
-			return nil, fmt.Errorf("failed to parse agy JSON: %w", err)
-		}
-		if resp.ConversationID == "" && streamConvID != "" {
-			resp.ConversationID = streamConvID
-		}
-		return &resp, nil
-	}
-	return nil, fmt.Errorf("no JSON payload found in agy output")
+	return parseTrailingJSON(trimmed, streamConvID)
 }
 
 var _ runner.AgentSession = (*testRunnerAgentSession)(nil)

@@ -194,10 +194,8 @@ func TestWebhookDispatcher_HTTPStatusAndTimeoutErrors(t *testing.T) {
 	}
 }
 
-func TestWebhookDispatcher_ValidationAndGuardBranches(t *testing.T) {
-	t.Parallel()
-	dispatcher := NewDefaultWebhookDispatcher()
-
+func assertWebhookDispatcherNilGuards(t *testing.T, dispatcher *DefaultWebhookDispatcher) {
+	t.Helper()
 	if _, err := dispatcher.CallWakeHook(context.Background(), nil, &WakeRequest{}); err == nil {
 		t.Errorf("expected error for nil endpoint")
 	}
@@ -220,23 +218,11 @@ func TestWebhookDispatcher_ValidationAndGuardBranches(t *testing.T) {
 	if _, err := nilDispatcher.CallWakeHook(context.Background(), ep, &WakeRequest{}); err == nil {
 		t.Errorf("expected error on nil dispatcher")
 	}
+}
 
-	customDisp := NewWebhookDispatcherWithClient(nil)
-	if customDisp.client == nil {
-		t.Errorf("expected non-nil client with NewWebhookDispatcherWithClient(nil)")
-	}
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(WakeResponse{Override: "wake"})
-	}))
-	defer ts.Close()
-
-	dispWithNilClient := &DefaultWebhookDispatcher{client: nil}
-	resp, err := dispWithNilClient.CallWakeHook(nil, &config.WebhookEndpoint{URL: ts.URL}, &WakeRequest{ChannelID: "c1"})
-	if err != nil || resp.Override != "wake" {
-		t.Fatalf("unexpected response with nil client and nil ctx: resp=%+v err=%v", resp, err)
-	}
-
+func assertWebhookDispatcherNetworkAndPayloadErrors(t *testing.T, dispatcher *DefaultWebhookDispatcher) {
+	t.Helper()
+	ep := &config.WebhookEndpoint{URL: "http://127.0.0.1:9999"}
 	epInvalid := &config.WebhookEndpoint{URL: "http://invalid-url-that-does-not-exist:9999", TimeoutMs: 5}
 	if _, err := dispatcher.CallWakeHook(context.Background(), epInvalid, &WakeRequest{ChannelID: "c1"}); err == nil {
 		t.Errorf("expected network error on invalid host")
@@ -257,6 +243,31 @@ func TestWebhookDispatcher_ValidationAndGuardBranches(t *testing.T) {
 	if err := dispatcher.dispatch(context.Background(), "on_wake", &config.WebhookEndpoint{URL: "http://example.com/\x7fbad"}, "ok", nil); err == nil || !strings.Contains(err.Error(), "failed to create http request") {
 		t.Errorf("expected http request creation error, got %v", err)
 	}
+}
+
+func TestWebhookDispatcher_ValidationAndGuardBranches(t *testing.T) {
+	t.Parallel()
+	dispatcher := NewDefaultWebhookDispatcher()
+
+	assertWebhookDispatcherNilGuards(t, dispatcher)
+
+	customDisp := NewWebhookDispatcherWithClient(nil)
+	if customDisp.client == nil {
+		t.Errorf("expected non-nil client with NewWebhookDispatcherWithClient(nil)")
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(WakeResponse{Override: "wake"})
+	}))
+	defer ts.Close()
+
+	dispWithNilClient := &DefaultWebhookDispatcher{client: nil}
+	resp, err := dispWithNilClient.CallWakeHook(nil, &config.WebhookEndpoint{URL: ts.URL}, &WakeRequest{ChannelID: "c1"})
+	if err != nil || resp.Override != "wake" {
+		t.Fatalf("unexpected response with nil client and nil ctx: resp=%+v err=%v", resp, err)
+	}
+
+	assertWebhookDispatcherNetworkAndPayloadErrors(t, dispatcher)
 
 	clientWithErrBody := &http.Client{
 		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {

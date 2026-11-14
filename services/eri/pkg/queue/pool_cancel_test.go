@@ -7,40 +7,174 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+type cancelDispatchFixture struct {
+	queuedDispatches []*db.Dispatch
+	queuedMessages   []*db.Message
+	activeDispatch   *db.Dispatch
+	persistedStatus  string
+}
+
+type cancelDispatchTestCase struct {
+	name             string
+	nilPool          bool
+	dispatchID       string
+	buildID          string
+	reason           string
+	fixture          cancelDispatchFixture
+	wantCancelledIDs []string
+	wantRemainingIDs []string
+	wantInterrupted  bool
+	wantCtxCancelled bool
+	wantReason       string
+	wantSpanStatus   string
+	wantSpanCode     codes.Code
+}
+
+func assertActiveTurnExecution(t *testing.T, tc cancelDispatchTestCase, activeTE *turnExecution, rec *tracetest.SpanRecorder) {
+	t.Helper()
+	if activeTE == nil {
+		return
+	}
+	if activeTE.isInterrupted() != tc.wantInterrupted {
+		t.Fatalf("activeTE.isInterrupted() = %v, want %v", activeTE.isInterrupted(), tc.wantInterrupted)
+	}
+	isCancelled := activeTE.turnCtx.Err() != nil
+	if isCancelled != tc.wantCtxCancelled {
+		t.Fatalf("activeTE context cancelled = %v, want %v", isCancelled, tc.wantCtxCancelled)
+	}
+	if tc.wantReason != "" && activeTE.getInterruptReason() != tc.wantReason {
+		t.Fatalf("activeTE interruptReason = %q, want %q", activeTE.getInterruptReason(), tc.wantReason)
+	}
+
+	if activeTE.isInterrupted() {
+		activeTE.finalizeInterruptedTurn("claude-opus-5-5")
+	}
+	activeTE.endTurnSpan()
+	ended := rec.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(ended))
+	}
+	gotStatus := attrMap(ended[0].Attributes())[attrTurnStatus].AsString()
+	if gotStatus != tc.wantSpanStatus {
+		t.Fatalf("span %s = %q, want %q", attrTurnStatus, gotStatus, tc.wantSpanStatus)
+	}
+	if ended[0].Status().Code != tc.wantSpanCode {
+		t.Fatalf("span status code = %v, want %v", ended[0].Status().Code, tc.wantSpanCode)
+	}
+}
+
+func prepareActiveDispatchStore(t *testing.T, tc cancelDispatchTestCase, store db.Store) {
+	t.Helper()
+	if tc.fixture.activeDispatch != nil && tc.fixture.persistedStatus != "" {
+		persisted := *tc.fixture.activeDispatch
+		persisted.Status = tc.fixture.persistedStatus
+		if _, err := store.InsertDispatch(context.Background(), persisted); err != nil {
+			t.Fatalf("InsertDispatch: %v", err)
+		}
+	}
+}
+
+func assertCancelledAndRemainingIDs(t *testing.T, tc cancelDispatchTestCase, gotCancelled []string, ch chan queueItem) {
+	t.Helper()
+	if len(gotCancelled) != len(tc.wantCancelledIDs) {
+		t.Fatalf("cancelled IDs count = %d (%v), want %d (%v)",
+			len(gotCancelled), gotCancelled, len(tc.wantCancelledIDs), tc.wantCancelledIDs)
+	}
+	for _, wantID := range tc.wantCancelledIDs {
+		if !slices.Contains(gotCancelled, wantID) {
+			t.Fatalf("expected cancelled IDs to contain %q, got %v", wantID, gotCancelled)
+		}
+	}
+
+	var remainingIDs []string
+drainRemaining:
+	for {
+		select {
+		case item := <-ch:
+			if item.dispatch != nil {
+				remainingIDs = append(remainingIDs, item.dispatch.ID)
+			} else if item.msg != nil {
+				remainingIDs = append(remainingIDs, item.msg.ID)
+			}
+		default:
+			break drainRemaining
+		}
+	}
+	if len(remainingIDs) != len(tc.wantRemainingIDs) {
+		t.Fatalf("remaining IDs count = %d (%v), want %d (%v)",
+			len(remainingIDs), remainingIDs, len(tc.wantRemainingIDs), tc.wantRemainingIDs)
+	}
+	for i, wantID := range tc.wantRemainingIDs {
+		if remainingIDs[i] != wantID {
+			t.Fatalf("remaining ID at %d = %q, want %q", i, remainingIDs[i], wantID)
+		}
+	}
+}
+
+func runCancelDispatchCase(t *testing.T, tc cancelDispatchTestCase) {
+	t.Helper()
+	if tc.nilPool {
+		var nilP *WorkerPool
+		got := nilP.CancelDispatches(tc.dispatchID, tc.buildID, tc.reason)
+		if len(got) != 0 {
+			t.Fatalf("expected empty cancelled list from nil pool, got %v", got)
+		}
+		return
+	}
+
+	store := setupTestStore(t)
+	p := &WorkerPool{
+		cfg:         WorkerPoolConfig{Store: store},
+		threadChs:   make(map[string]*threadWorkerState),
+		activeTurns: make(map[string]*turnExecution),
+	}
+
+	ch := make(chan queueItem, 20)
+	p.threadChs["test-thread"] = &threadWorkerState{ch: ch}
+
+	for _, d := range tc.fixture.queuedDispatches {
+		ch <- queueItem{dispatch: d}
+	}
+	for _, m := range tc.fixture.queuedMessages {
+		ch <- queueItem{msg: m}
+	}
+
+	prepareActiveDispatchStore(t, tc, store)
+
+	rec := tracetest.NewSpanRecorder()
+	var activeTE *turnExecution
+	if tc.fixture.activeDispatch != nil {
+		_, turnSpan := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)).Tracer("test").Start(context.Background(), runner.OperationInvokeAgent)
+		turnCtx, cancelTurn := context.WithCancel(context.Background())
+		defer cancelTurn()
+		activeTE = &turnExecution{
+			pool:          p,
+			threadID:      "test-thread",
+			dispatch:      tc.fixture.activeDispatch,
+			turnCtx:       turnCtx,
+			turnCancel:    cancelTurn,
+			turnSpan:      turnSpan,
+			turnAttempted: true,
+			execStart:     time.Now(),
+		}
+		p.activeTurns["test-thread"] = activeTE
+	}
+
+	gotCancelled := p.CancelDispatches(tc.dispatchID, tc.buildID, tc.reason)
+	assertCancelledAndRemainingIDs(t, tc, gotCancelled, ch)
+	assertActiveTurnExecution(t, tc, activeTE, rec)
+}
+
 func TestCancelDispatches(t *testing.T) {
 	t.Parallel()
 
-	type cancelDispatchFixture struct {
-		queuedDispatches []*db.Dispatch
-		queuedMessages   []*db.Message
-		activeDispatch   *db.Dispatch
-		// persistedStatus is the dispatch status already in the store when the active turn
-		// finalizes; the cancel API marks dispatches FAILED before interrupting them.
-		persistedStatus string
-	}
-
-	tests := []struct {
-		name             string
-		nilPool          bool
-		dispatchID       string
-		buildID          string
-		reason           string
-		fixture          cancelDispatchFixture
-		wantCancelledIDs []string
-		wantRemainingIDs []string
-		wantInterrupted  bool
-		wantCtxCancelled bool
-		wantReason       string
-		wantSpanStatus   string
-		wantSpanCode     codes.Code
-	}{
+	tests := []cancelDispatchTestCase{
 		{
 			name:             "nil worker pool returns nil",
 			nilPool:          true,
@@ -152,123 +286,7 @@ func TestCancelDispatches(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.nilPool {
-				var nilP *WorkerPool
-				got := nilP.CancelDispatches(tc.dispatchID, tc.buildID, tc.reason)
-				if got != nil {
-					t.Fatalf("expected nil for nil WorkerPool, got %v", got)
-				}
-				return
-			}
-
-			store := dbtest.NewFakeStore()
-			p := &WorkerPool{
-				cfg:         WorkerPoolConfig{Store: store},
-				threadChs:   make(map[string]*threadWorkerState),
-				activeTurns: make(map[string]*turnExecution),
-			}
-
-			ch := make(chan queueItem, 20)
-			p.threadChs["test-thread"] = &threadWorkerState{ch: ch}
-
-			for _, d := range tc.fixture.queuedDispatches {
-				ch <- queueItem{dispatch: d}
-			}
-			for _, m := range tc.fixture.queuedMessages {
-				ch <- queueItem{msg: m}
-			}
-
-			var activeTE *turnExecution
-			rec := tracetest.NewSpanRecorder()
-			if tc.fixture.activeDispatch != nil {
-				if tc.fixture.persistedStatus != "" {
-					persisted := *tc.fixture.activeDispatch
-					persisted.Status = tc.fixture.persistedStatus
-					if _, err := store.InsertDispatch(context.Background(), persisted); err != nil {
-						t.Fatalf("InsertDispatch: %v", err)
-					}
-				}
-				_, turnSpan := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)).Tracer("test").Start(context.Background(), runner.OperationInvokeAgent)
-				turnCtx, cancelTurn := context.WithCancel(context.Background())
-				defer cancelTurn()
-				activeTE = &turnExecution{
-					pool:          p,
-					threadID:      "test-thread",
-					dispatch:      tc.fixture.activeDispatch,
-					turnCtx:       turnCtx,
-					turnCancel:    cancelTurn,
-					turnSpan:      turnSpan,
-					turnAttempted: true,
-					execStart:     time.Now(),
-				}
-				p.activeTurns["test-thread"] = activeTE
-			}
-
-			gotCancelled := p.CancelDispatches(tc.dispatchID, tc.buildID, tc.reason)
-
-			if len(gotCancelled) != len(tc.wantCancelledIDs) {
-				t.Fatalf("cancelled IDs count = %d (%v), want %d (%v)",
-					len(gotCancelled), gotCancelled, len(tc.wantCancelledIDs), tc.wantCancelledIDs)
-			}
-			for _, wantID := range tc.wantCancelledIDs {
-				if !slices.Contains(gotCancelled, wantID) {
-					t.Fatalf("expected cancelled IDs to contain %q, got %v", wantID, gotCancelled)
-				}
-			}
-
-			var remainingIDs []string
-		drainRemaining:
-			for {
-				select {
-				case item := <-ch:
-					if item.dispatch != nil {
-						remainingIDs = append(remainingIDs, item.dispatch.ID)
-					} else if item.msg != nil {
-						remainingIDs = append(remainingIDs, item.msg.ID)
-					}
-				default:
-					break drainRemaining
-				}
-			}
-			if len(remainingIDs) != len(tc.wantRemainingIDs) {
-				t.Fatalf("remaining IDs count = %d (%v), want %d (%v)",
-					len(remainingIDs), remainingIDs, len(tc.wantRemainingIDs), tc.wantRemainingIDs)
-			}
-			for i, wantID := range tc.wantRemainingIDs {
-				if remainingIDs[i] != wantID {
-					t.Fatalf("remaining ID at %d = %q, want %q", i, remainingIDs[i], wantID)
-				}
-			}
-
-			if activeTE != nil {
-				if activeTE.isInterrupted() != tc.wantInterrupted {
-					t.Fatalf("activeTE.isInterrupted() = %v, want %v", activeTE.isInterrupted(), tc.wantInterrupted)
-				}
-				isCancelled := activeTE.turnCtx.Err() != nil
-				if isCancelled != tc.wantCtxCancelled {
-					t.Fatalf("activeTE context cancelled = %v, want %v", isCancelled, tc.wantCtxCancelled)
-				}
-				if tc.wantReason != "" && activeTE.getInterruptReason() != tc.wantReason {
-					t.Fatalf("activeTE interruptReason = %q, want %q", activeTE.getInterruptReason(), tc.wantReason)
-				}
-
-				// Mirror the worker: an interrupted turn finalizes, then the deferred span end runs.
-				if activeTE.isInterrupted() {
-					activeTE.finalizeInterruptedTurn("claude-opus-5-5")
-				}
-				activeTE.endTurnSpan()
-				ended := rec.Ended()
-				if len(ended) != 1 {
-					t.Fatalf("ended spans = %d, want 1", len(ended))
-				}
-				gotStatus := attrMap(ended[0].Attributes())[attrTurnStatus].AsString()
-				if gotStatus != tc.wantSpanStatus {
-					t.Fatalf("span %s = %q, want %q", attrTurnStatus, gotStatus, tc.wantSpanStatus)
-				}
-				if ended[0].Status().Code != tc.wantSpanCode {
-					t.Fatalf("span status code = %v, want %v", ended[0].Status().Code, tc.wantSpanCode)
-				}
-			}
+			runCancelDispatchCase(t, tc)
 		})
 	}
 }

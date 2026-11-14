@@ -17,24 +17,75 @@ func mkBurstMsg(id, content string, created ...time.Time) db.Message {
 	return db.Message{ID: id, Content: content, CreatedAt: ts}
 }
 
+type planBurstTestCase struct {
+	name                            string
+	input                           BurstPlanInput
+	expectedWakeIdx                 int
+	expectedAllAmb, wantAllAmbient  bool
+	classifierMode                  string
+	classifierScore                 float64
+	classifierReason                string
+	wantFirstWake, wantAllWakeFalse bool
+	wantWakeReason                  string
+	wantFirstScore                  float64
+	wantClassifyCalls               int
+}
+
+func runPlanBurstCase(t *testing.T, tc planBurstTestCase) {
+	t.Helper()
+	var classifyCalls int
+	in := tc.input
+	origClassifierFn := in.ClassifierFn
+	in.ClassifierFn = func(msgs []db.Message) (float64, string) {
+		classifyCalls++
+		if tc.classifierMode == "panic" {
+			t.Fatalf("classifier should NOT be called")
+			return 1.0, ""
+		}
+		if tc.classifierMode == "static" {
+			return tc.classifierScore, tc.classifierReason
+		}
+		if origClassifierFn != nil {
+			return origClassifierFn(msgs)
+		}
+		return 0.0, "no classifier configured"
+	}
+
+	plan := PlanBurstExecution(in)
+	wantAllAmb := tc.expectedAllAmb || tc.wantAllAmbient
+	if plan.WakeIndex != tc.expectedWakeIdx || plan.IsAllAmbient != wantAllAmb {
+		t.Errorf("WakeIndex=%d, IsAllAmbient=%t (want WakeIndex=%d, IsAllAmbient=%t)", plan.WakeIndex, plan.IsAllAmbient, tc.expectedWakeIdx, wantAllAmb)
+	}
+	if tc.wantFirstWake && (len(plan.WakeInfos) == 0 || !plan.WakeInfos[0].IsWake) {
+		t.Errorf("expected wakeInfos[0].IsWake = true")
+	}
+	if tc.wantAllWakeFalse {
+		for i, info := range plan.WakeInfos {
+			if info.IsWake {
+				t.Errorf("expected wakeInfo[%d].IsWake = false", i)
+			}
+		}
+	}
+	if tc.wantWakeReason != "" {
+		idx := max(plan.WakeIndex, 0)
+		if idx < len(plan.WakeInfos) && plan.WakeInfos[idx].Reason != tc.wantWakeReason {
+			t.Errorf("expected wakeInfo[%d].Reason = %q, got %q", idx, tc.wantWakeReason, plan.WakeInfos[idx].Reason)
+		}
+	}
+	if tc.wantFirstScore != 0 && (len(plan.WakeInfos) == 0 || plan.WakeInfos[0].Score != tc.wantFirstScore) {
+		t.Errorf("expected wakeInfos[0].Score %f", tc.wantFirstScore)
+	}
+	if classifyCalls != tc.wantClassifyCalls {
+		t.Errorf("expected %d classifier calls, got %d", tc.wantClassifyCalls, classifyCalls)
+	}
+}
+
 func TestPlanBurstExecution(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
 	botID, roleIDs := "bot-aerial-123", []string{"role-aerial-managed"}
 
-	tests := []struct {
-		name                            string
-		input                           BurstPlanInput
-		expectedWakeIdx                 int
-		expectedAllAmb, wantAllAmbient  bool
-		classifierMode                  string
-		classifierScore                 float64
-		classifierReason                string
-		wantFirstWake, wantAllWakeFalse bool
-		wantWakeReason                  string
-		wantFirstScore                  float64
-		wantClassifyCalls               int
-	}{
+	tests := []planBurstTestCase{
 		{name: "Empty burst", input: BurstPlanInput{Burst: nil}, expectedWakeIdx: -1, expectedAllAmb: true},
 		{name: "Hook override wake", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "hello"), mkBurstMsg("m2", "world")}, HookOverride: "wake"}, expectedWakeIdx: 0, wantFirstWake: true},
 		{name: "Hook override drop", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "hello"), mkBurstMsg("m2", "world")}, HookOverride: "drop"}, expectedWakeIdx: -1, expectedAllAmb: true, wantAllWakeFalse: true, wantWakeReason: "hook_drop_override"},
@@ -125,51 +176,7 @@ func TestPlanBurstExecution(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var classifyCalls int
-			in := tc.input
-			origClassifierFn := in.ClassifierFn
-			in.ClassifierFn = func(msgs []db.Message) (float64, string) {
-				classifyCalls++
-				if tc.classifierMode == "panic" {
-					t.Fatalf("classifier should NOT be called")
-					return 1.0, ""
-				}
-				if tc.classifierMode == "static" {
-					return tc.classifierScore, tc.classifierReason
-				}
-				if origClassifierFn != nil {
-					return origClassifierFn(msgs)
-				}
-				return 0.0, "no classifier configured"
-			}
-
-			plan := PlanBurstExecution(in)
-			wantAllAmb := tc.expectedAllAmb || tc.wantAllAmbient
-			if plan.WakeIndex != tc.expectedWakeIdx || plan.IsAllAmbient != wantAllAmb {
-				t.Errorf("WakeIndex=%d, IsAllAmbient=%t (want WakeIndex=%d, IsAllAmbient=%t)", plan.WakeIndex, plan.IsAllAmbient, tc.expectedWakeIdx, wantAllAmb)
-			}
-			if tc.wantFirstWake && (len(plan.WakeInfos) == 0 || !plan.WakeInfos[0].IsWake) {
-				t.Errorf("expected wakeInfos[0].IsWake = true")
-			}
-			if tc.wantAllWakeFalse {
-				for i, info := range plan.WakeInfos {
-					if info.IsWake {
-						t.Errorf("expected wakeInfo[%d].IsWake = false", i)
-					}
-				}
-			}
-			if tc.wantWakeReason != "" {
-				idx := max(plan.WakeIndex, 0)
-				if idx < len(plan.WakeInfos) && plan.WakeInfos[idx].Reason != tc.wantWakeReason {
-					t.Errorf("expected wakeInfo[%d].Reason = %q, got %q", idx, tc.wantWakeReason, plan.WakeInfos[idx].Reason)
-				}
-			}
-			if tc.wantFirstScore != 0 && (len(plan.WakeInfos) == 0 || plan.WakeInfos[0].Score != tc.wantFirstScore) {
-				t.Errorf("expected wakeInfos[0].Score %f", tc.wantFirstScore)
-			}
-			if classifyCalls != tc.wantClassifyCalls {
-				t.Errorf("expected %d classifier calls, got %d", tc.wantClassifyCalls, classifyCalls)
-			}
+			runPlanBurstCase(t, tc)
 		})
 	}
 }
@@ -379,18 +386,62 @@ func TestIsTier1Wake(t *testing.T) {
 	}
 }
 
+type assembleTurnPromptCase struct {
+	name                              string
+	input                             TurnPromptInput
+	wantExact, wantPrefix, wantSuffix string
+	wantContains, wantExcludes        []string
+	wantTagCounts                     map[string]int
+	wantOrderedSubstrings             []string
+}
+
+func runAssembleTurnPromptCase(t *testing.T, tc assembleTurnPromptCase) {
+	t.Helper()
+	result := AssembleTurnPrompt(tc.input)
+	if tc.wantExact != "" && result != tc.wantExact {
+		t.Errorf("expected %q, got %q", tc.wantExact, result)
+	}
+	if tc.wantPrefix != "" && !strings.HasPrefix(result, tc.wantPrefix) {
+		t.Errorf("expected prefix %q, got:\n%s", tc.wantPrefix, result)
+	}
+	if tc.wantSuffix != "" && !strings.HasSuffix(result, tc.wantSuffix) {
+		t.Errorf("expected suffix %q, got:\n%s", tc.wantSuffix, result)
+	}
+	for _, sub := range tc.wantContains {
+		if !strings.Contains(result, sub) {
+			t.Errorf("expected result to contain %q, got:\n%s", sub, result)
+		}
+	}
+	for _, sub := range tc.wantExcludes {
+		if strings.Contains(result, sub) {
+			t.Errorf("expected result to exclude %q, got:\n%s", sub, result)
+		}
+	}
+	for tag, count := range tc.wantTagCounts {
+		if actual := strings.Count(result, tag); actual != count {
+			t.Errorf("expected %d occurrences of %q, got %d", count, tag, actual)
+		}
+	}
+	if len(tc.wantOrderedSubstrings) > 0 {
+		lastIdx := -1
+		for _, sub := range tc.wantOrderedSubstrings {
+			idx := strings.Index(result, sub)
+			if idx == -1 {
+				t.Fatalf("expected substring %q not found in prompt:\n%s", sub, result)
+			}
+			if idx <= lastIdx {
+				t.Errorf("substring %q at index %d out of order (previous at %d)", sub, idx, lastIdx)
+			}
+			lastIdx = idx
+		}
+	}
+}
+
 func TestAssembleTurnPrompt(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 12, 14, 0, 0, 0, time.UTC)
 
-	tests := []struct {
-		name                              string
-		input                             TurnPromptInput
-		wantExact, wantPrefix, wantSuffix string
-		wantContains, wantExcludes        []string
-		wantTagCounts                     map[string]int
-		wantOrderedSubstrings             []string
-	}{
+	tests := []assembleTurnPromptCase{
 		{name: "Empty input produces empty prompt", input: TurnPromptInput{}, wantExact: ""},
 		{name: "Single message burst formats directly", input: TurnPromptInput{Burst: []db.Message{{Content: "What is the capital of France?"}}}, wantExact: "What is the capital of France?"},
 		{
@@ -450,44 +501,7 @@ func TestAssembleTurnPrompt(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			result := AssembleTurnPrompt(tc.input)
-			if tc.wantExact != "" && result != tc.wantExact {
-				t.Errorf("expected %q, got %q", tc.wantExact, result)
-			}
-			if tc.wantPrefix != "" && !strings.HasPrefix(result, tc.wantPrefix) {
-				t.Errorf("expected prefix %q, got:\n%s", tc.wantPrefix, result)
-			}
-			if tc.wantSuffix != "" && !strings.HasSuffix(result, tc.wantSuffix) {
-				t.Errorf("expected suffix %q, got:\n%s", tc.wantSuffix, result)
-			}
-			for _, sub := range tc.wantContains {
-				if !strings.Contains(result, sub) {
-					t.Errorf("expected result to contain %q, got:\n%s", sub, result)
-				}
-			}
-			for _, sub := range tc.wantExcludes {
-				if strings.Contains(result, sub) {
-					t.Errorf("expected result to exclude %q, got:\n%s", sub, result)
-				}
-			}
-			for tag, count := range tc.wantTagCounts {
-				if actual := strings.Count(result, tag); actual != count {
-					t.Errorf("expected %d occurrences of %q, got %d", count, tag, actual)
-				}
-			}
-			if len(tc.wantOrderedSubstrings) > 0 {
-				lastIdx := -1
-				for _, sub := range tc.wantOrderedSubstrings {
-					idx := strings.Index(result, sub)
-					if idx == -1 {
-						t.Fatalf("expected substring %q not found in prompt:\n%s", sub, result)
-					}
-					if idx <= lastIdx {
-						t.Errorf("substring %q at index %d out of order (previous at %d)", sub, idx, lastIdx)
-					}
-					lastIdx = idx
-				}
-			}
+			runAssembleTurnPromptCase(t, tc)
 		})
 	}
 }

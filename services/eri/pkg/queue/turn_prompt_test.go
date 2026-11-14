@@ -180,13 +180,101 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	teNull.rotateSessionID("thread-evict-3", "")
 }
 
+type sessionDBRotationCase struct {
+	name, channelMode, runnerMode     string
+	preWriteDBBytes, preWriteWALBytes int64
+	maxAttempts, wantAttempts         int
+}
+
+func execSessionDBRotationStep(tc sessionDBRotationCase, sessionID, oldSess, convDir string, cur int) (string, string, int, error) {
+	switch tc.runnerMode {
+	case "quota_429":
+		return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
+	case "post_heavy":
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0o644)
+		return mockJSONResponse(oldSess, "heavy output"), "", 0, nil
+	case "retry_watchdog":
+		if cur == 1 {
+			_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0o644)
+			return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
+		}
+		return mockJSONResponse(sessionID, "Recovered"), "", 0, nil
+	case "retry_transient":
+		if cur == 1 {
+			_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0o644)
+			return `{"status": "ERROR", "error": "temporary network timeout"}`, "", 0, nil
+		}
+		return mockJSONResponse(sessionID, "Recovered"), "", 0, nil
+	default:
+		return mockJSONResponse(sessionID, "OK"), "", 0, nil
+	}
+}
+
+func runSessionDBRotationCase(t *testing.T, tc sessionDBRotationCase) {
+	t.Helper()
+	store, tmpDir := setupTestStore(t), t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+	oldSess, convDir := "sess-"+tc.name, filepath.Join(tmpDir, "conversations")
+	_ = os.MkdirAll(convDir, 0o755)
+	if tc.preWriteDBBytes > 0 {
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0o644)
+	}
+	if tc.preWriteWALBytes > 0 {
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, tc.preWriteWALBytes), 0o644)
+	}
+
+	threadID := "thread-" + tc.name
+	_ = saveSessionID(store, threadID, oldSess)
+	_, _ = incrementSessionTurnCount(store, threadID)
+
+	doneCh := make(chan struct{}, 1)
+	var mu sync.Mutex
+	var attempts []string
+	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: tc.channelMode}}})
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond, MaxAttempts: tc.maxAttempts,
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		},
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			mu.Lock()
+			attempts = append(attempts, sessionID)
+			cur := len(attempts)
+			mu.Unlock()
+			return execSessionDBRotationStep(tc, sessionID, oldSess, convDir, cur)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-" + tc.name, ThreadID: threadID, Content: "<@aerial> test message"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message completion")
+	}
+	mu.Lock()
+	gotAttempts := len(attempts)
+	mu.Unlock()
+	if gotAttempts != tc.wantAttempts {
+		t.Fatalf("attempts = %d, want %d", gotAttempts, tc.wantAttempts)
+	}
+	if curSess, _ := getSessionID(store, threadID); curSess != oldSess {
+		t.Errorf("session %q != %q", curSess, oldSess)
+	}
+}
+
 func TestWorker_SessionDBRotation(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name, channelMode, runnerMode     string
-		preWriteDBBytes, preWriteWALBytes int64
-		maxAttempts, wantAttempts         int
-	}{
+	tests := []sessionDBRotationCase{
 		{name: "PreTurn_Channel_DBLimit", channelMode: "channel", preWriteDBBytes: session.DefaultMaxSessionDBBytes + 1024, preWriteWALBytes: 600 * 1024, maxAttempts: 1, wantAttempts: 1},
 		{name: "PreTurn_Channel_WALIgnored", channelMode: "channel", preWriteDBBytes: 1000 * 1024, preWriteWALBytes: 600 * 1024, maxAttempts: 1, wantAttempts: 1},
 		{name: "PreTurn_Thread_DBLimit", channelMode: "thread", preWriteDBBytes: session.DefaultMaxSessionDBBytes + 1024, maxAttempts: 1, wantAttempts: 1},
@@ -199,178 +287,108 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, tmpDir := setupTestStore(t), t.TempDir()
-			sessMgr := session.New(tmpDir, tmpDir)
-			oldSess, convDir := "sess-"+tc.name, filepath.Join(tmpDir, "conversations")
-			_ = os.MkdirAll(convDir, 0o755)
-			if tc.preWriteDBBytes > 0 {
-				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0o644)
-			}
-			if tc.preWriteWALBytes > 0 {
-				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, tc.preWriteWALBytes), 0o644)
-			}
-
-			threadID := "thread-" + tc.name
-			_ = saveSessionID(store, threadID, oldSess)
-			_, _ = incrementSessionTurnCount(store, threadID)
-
-			doneCh := make(chan struct{}, 1)
-			var mu sync.Mutex
-			var attempts []string
-			appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: tc.channelMode}}})
-			pool := New(appCfg, WorkerPoolConfig{
-				SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond, MaxAttempts: tc.maxAttempts,
-				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-				TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-				OnMessageCompleted: func(msg db.Message, finalStatus string) {
-					select {
-					case doneCh <- struct{}{}:
-					default:
-					}
-				},
-				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-					mu.Lock()
-					attempts = append(attempts, sessionID)
-					cur := len(attempts)
-					mu.Unlock()
-					switch tc.runnerMode {
-					case "quota_429":
-						return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
-					case "post_heavy":
-						_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0o644)
-						return mockJSONResponse(oldSess, "heavy output"), "", 0, nil
-					case "retry_watchdog":
-						if cur == 1 {
-							_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0o644)
-							return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
-						}
-						return mockJSONResponse(sessionID, "Recovered"), "", 0, nil
-					case "retry_transient":
-						if cur == 1 {
-							_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0o644)
-							return `{"status": "ERROR", "error": "temporary network timeout"}`, "", 0, nil
-						}
-						return mockJSONResponse(sessionID, "Recovered"), "", 0, nil
-					default:
-						return mockJSONResponse(sessionID, "OK"), "", 0, nil
-					}
-				},
-			})
-			pool.Start()
-			defer pool.Stop()
-
-			msg := db.Message{ID: "msg-" + tc.name, ThreadID: threadID, Content: "<@aerial> test message"}
-			_ = insertMessage(store, msg)
-			pool.Enqueue(msg)
-
-			select {
-			case <-doneCh:
-			case <-time.After(10 * time.Second):
-				t.Fatal("Timeout waiting for message completion")
-			}
-			mu.Lock()
-			gotAttempts := len(attempts)
-			mu.Unlock()
-			if gotAttempts != tc.wantAttempts {
-				t.Fatalf("attempts = %d, want %d", gotAttempts, tc.wantAttempts)
-			}
-			if curSess, _ := getSessionID(store, threadID); curSess != oldSess {
-				t.Errorf("session %q != %q", curSess, oldSess)
-			}
+			runSessionDBRotationCase(t, tc)
 		})
+	}
+}
+
+type sessionRotationInjectCase struct {
+	name              string
+	maxAttempts       int
+	triggerErr        string
+	transientErr      bool
+	wantAttempts      int
+	wantRetainSession bool
+}
+
+func runSessionRotationInjectCase(t *testing.T, tt sessionRotationInjectCase) {
+	t.Helper()
+	tmpHome, tempData, store := t.TempDir(), t.TempDir(), setupTestStore(t)
+	validUUID := uuid.New().String()
+	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDir, 0o755)
+	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}`+"\n"), 0o644)
+
+	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
+	threadID := "thread-rot-" + strings.ToLower(tt.name)
+	_ = store.SaveSessionID(context.Background(), threadID, validUUID)
+
+	var mu sync.Mutex
+	var recordedPrompts, recordedSessions []string
+	doneCh := make(chan struct{})
+
+	pool := New(cfg, WorkerPoolConfig{
+		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1, MaxAttempts: tt.maxAttempts,
+		RetryDelayOverride: 10 * time.Millisecond, BackoffBase: 5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			mu.Lock()
+			recordedPrompts = append(recordedPrompts, prompt)
+			recordedSessions = append(recordedSessions, sessionID)
+			attemptNum := len(recordedPrompts)
+			mu.Unlock()
+			if attemptNum < tt.wantAttempts {
+				transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"run_command","args":{"command_line":"docker stats"}}]}
+{"step_index":2,"source":"TOOL","type":"GENERIC","status":"DONE","content":"CONTAINER ID aerial-brain MEM USAGE 120MiB"}
+{"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":%q,"created_at":%q}
+`, session.DefaultMaxSessionSteps, tt.triggerErr, time.Now().UTC().Format(time.RFC3339))
+				_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0o644)
+				return "", tt.triggerErr, 1, errors.New("simulated error")
+			}
+			return mockJSONResponse(uuid.New().String(), "Completed"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-rot-" + strings.ToLower(tt.name), ThreadID: threadID, Content: "run investigation", Status: db.StatusPending, CreatedAt: time.Now()}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for turn completion")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(recordedPrompts) != tt.wantAttempts {
+		t.Fatalf("expected %d attempts, got %d", tt.wantAttempts, len(recordedPrompts))
+	}
+	if recordedSessions[0] != validUUID {
+		t.Errorf("expected attempt 1 session %q, got %q", validUUID, recordedSessions[0])
+	}
+	if strings.Contains(recordedPrompts[0], "<PREVIOUS_TURN_ACTIONS>") {
+		t.Errorf("unexpected PREVIOUS_TURN_ACTIONS in attempt 1")
+	}
+	for i := 1; i < tt.wantAttempts; i++ {
+		if tt.wantRetainSession && recordedSessions[i] != validUUID {
+			t.Errorf("expected attempt %d session %q, got %q", i+1, validUUID, recordedSessions[i])
+		}
 	}
 }
 
 func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 	t.Parallel()
-	rotationTests := []struct {
-		name              string
-		maxAttempts       int
-		triggerErr        string
-		transientErr      bool
-		wantAttempts      int
-		wantRetainSession bool
-	}{
+	rotationTests := []sessionRotationInjectCase{
 		{name: "EndToEnd_SessionRotationInjectsAndRetainsActions", maxAttempts: 3, triggerErr: "RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2s.", wantAttempts: 3, wantRetainSession: true},
 		{name: "EndToEnd_TransientRotationInjectsToolActions", maxAttempts: 2, triggerErr: "transient connection reset", transientErr: true, wantAttempts: 2, wantRetainSession: true},
 	}
 	for _, tt := range rotationTests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			tmpHome, tempData, store := t.TempDir(), t.TempDir(), setupTestStore(t)
-			validUUID := uuid.New().String()
-			sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
-			_ = os.MkdirAll(sessDir, 0o755)
-			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}`+"\n"), 0o644)
-
-			cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
-			threadID := "thread-rot-" + strings.ToLower(tt.name)
-			_ = store.SaveSessionID(context.Background(), threadID, validUUID)
-
-			var mu sync.Mutex
-			var recordedPrompts, recordedSessions []string
-			doneCh := make(chan struct{})
-
-			pool := New(cfg, WorkerPoolConfig{
-				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1, MaxAttempts: tt.maxAttempts,
-				RetryDelayOverride: 10 * time.Millisecond, BackoffBase: 5 * time.Millisecond,
-				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-					mu.Lock()
-					recordedPrompts = append(recordedPrompts, prompt)
-					recordedSessions = append(recordedSessions, sessionID)
-					attemptNum := len(recordedPrompts)
-					mu.Unlock()
-					if attemptNum < tt.wantAttempts {
-						transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}
-{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"run_command","args":{"command_line":"docker stats"}}]}
-{"step_index":2,"source":"TOOL","type":"GENERIC","status":"DONE","content":"CONTAINER ID aerial-brain MEM USAGE 120MiB"}
-{"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":%q,"created_at":%q}
-`, session.DefaultMaxSessionSteps, tt.triggerErr, time.Now().UTC().Format(time.RFC3339))
-						_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0o644)
-						return "", tt.triggerErr, 1, errors.New("simulated error")
-					}
-					return mockJSONResponse(uuid.New().String(), "Completed"), "", 0, nil
-				},
-				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-				TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-				OnMessageCompleted: func(msg db.Message, status string) {
-					if status == db.StatusCompleted {
-						select {
-						case <-doneCh:
-						default:
-							close(doneCh)
-						}
-					}
-				},
-			})
-			pool.Start()
-			defer pool.Stop()
-
-			msg := db.Message{ID: "msg-rot-" + strings.ToLower(tt.name), ThreadID: threadID, Content: "run investigation", Status: db.StatusPending, CreatedAt: time.Now()}
-			_ = store.InsertMessage(context.Background(), msg)
-			pool.Enqueue(msg)
-
-			select {
-			case <-doneCh:
-			case <-time.After(10 * time.Second):
-				t.Fatalf("timed out waiting for turn completion")
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			if len(recordedPrompts) != tt.wantAttempts {
-				t.Fatalf("expected %d attempts, got %d", tt.wantAttempts, len(recordedPrompts))
-			}
-			if recordedSessions[0] != validUUID {
-				t.Errorf("expected attempt 1 session %q, got %q", validUUID, recordedSessions[0])
-			}
-			if strings.Contains(recordedPrompts[0], "<PREVIOUS_TURN_ACTIONS>") {
-				t.Errorf("unexpected PREVIOUS_TURN_ACTIONS in attempt 1")
-			}
-			for i := 1; i < tt.wantAttempts; i++ {
-				if tt.wantRetainSession && recordedSessions[i] != validUUID {
-					t.Errorf("expected attempt %d session %q, got %q", i+1, validUUID, recordedSessions[i])
-				}
-			}
+			runSessionRotationInjectCase(t, tt)
 		})
 	}
 }

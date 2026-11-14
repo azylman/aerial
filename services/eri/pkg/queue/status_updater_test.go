@@ -117,8 +117,8 @@ func (h *statusUpdaterHarness) options(extra ...StatusUpdaterOption) []StatusUpd
 	}}, extra...)
 }
 
-func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
-	t.Parallel()
+func testStatusUpdaterBasicFlow(t *testing.T) {
+	t.Helper()
 	h := newStatusUpdaterHarness()
 	u := NewStatusUpdater(nil, "thread-ticker", true, h.options(WithStatusDebounce(0), WithStatusInterval(2*time.Millisecond))...)
 	u.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
@@ -139,7 +139,10 @@ func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
 	if h.sends.Load() == 0 || h.deletes.Load() != 1 {
 		t.Errorf("expected sends > 0 and 1 delete, got sends=%d deletes=%d", h.sends.Load(), h.deletes.Load())
 	}
+}
 
+func testStatusUpdaterDebounceAndSync(t *testing.T) {
+	t.Helper()
 	hDebounce := newStatusUpdaterHarness()
 	uDebounce := NewStatusUpdater(nil, "thread-debounce", true, hDebounce.options(WithStatusInterval(time.Hour), WithStatusDebounce(time.Hour))...)
 	uDebounce.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
@@ -163,7 +166,10 @@ func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
 	if hSync.deletes.Load() != 1 {
 		t.Fatalf("expected synchronous delete count 1, got %d", hSync.deletes.Load())
 	}
+}
 
+func testChunkStepStatusUpdater(t *testing.T) {
+	t.Helper()
 	chunkFlushed := make(chan string, 4)
 	chunkDeleted := make(chan struct{}, 1)
 	flushFn := func(step string) error {
@@ -231,17 +237,88 @@ func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
 	uErr.DeleteStatusMessage()
 }
 
+func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
+	t.Parallel()
+	testStatusUpdaterBasicFlow(t)
+	testStatusUpdaterDebounceAndSync(t)
+	testChunkStepStatusUpdater(t)
+}
+
+type statusUpdaterLifecycleCase struct {
+	name                       string
+	interval, debounce, latch  time.Duration
+	steps                      []*runner.StepUpdateEvent
+	wantSendSub                string
+	checkPostDone              bool
+	wantLatched, wantUnlatched string
+	simulateLatch              bool
+}
+
+func runStatusUpdaterLifecycleCase(t *testing.T, tt statusUpdaterLifecycleCase) {
+	t.Helper()
+	h := newStatusUpdaterHarness()
+	var opts []StatusUpdaterOption
+	if tt.interval > 0 {
+		opts = append(opts, WithStatusInterval(tt.interval))
+	}
+	opts = append(opts, WithStatusDebounce(tt.debounce))
+	if tt.latch > 0 {
+		opts = append(opts, func(u *StatusUpdater) { u.toolLatchDuration = tt.latch })
+	}
+
+	updater := NewStatusUpdater(nil, "thread-"+tt.name, true, h.options(opts...)...)
+	for _, step := range tt.steps {
+		updater.HandleStep(step)
+		updater.flush()
+	}
+
+	if h.sends.Load() != 1 {
+		t.Fatalf("expected 1 send, got %d", h.sends.Load())
+	}
+	last := h.lastText.Load()
+	if last == nil || !strings.Contains(*last, tt.wantSendSub) {
+		t.Errorf("expected text to mention %q, got %v", tt.wantSendSub, last)
+	}
+	if tt.checkPostDone {
+		updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "view_file", State: "DONE"})
+		updater.HandleStep(&runner.StepUpdateEvent{StepType: "agent_response"})
+		updater.flush()
+		if h.edits.Load() == 0 {
+			t.Errorf("expected at least 1 edit, got %d", h.edits.Load())
+		}
+	}
+	if tt.wantLatched != "" {
+		updater.mu.Lock()
+		latched := updater.currentStatusText()
+		updater.mu.Unlock()
+		if !strings.Contains(latched, tt.wantLatched) {
+			t.Errorf("expected latched %q, got: %s", tt.wantLatched, latched)
+		}
+	}
+	if tt.simulateLatch {
+		updater.mu.Lock()
+		updater.lastCompletedAt = time.Now().Add(-600 * time.Millisecond)
+		expired := updater.currentStatusText()
+		updater.mu.Unlock()
+		if !strings.Contains(expired, tt.wantUnlatched) {
+			t.Errorf("expected expired %q, got: %s", tt.wantUnlatched, expired)
+		}
+	}
+	updater.Stop()
+	updater.DeleteStatusMessage()
+	select {
+	case <-h.deleteDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for delete")
+	}
+	if h.deletes.Load() != 1 {
+		t.Errorf("expected 1 delete, got %d", h.deletes.Load())
+	}
+}
+
 func TestStatusUpdater_ToolLifecycleAndFlushes(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name                       string
-		interval, debounce, latch  time.Duration
-		steps                      []*runner.StepUpdateEvent
-		wantSendSub                string
-		checkPostDone              bool
-		wantLatched, wantUnlatched string
-		simulateLatch              bool
-	}{
+	tests := []statusUpdaterLifecycleCase{
 		{
 			name: "ActiveToolBypassesDebounceAndFlushes", interval: time.Hour, debounce: 100 * time.Millisecond,
 			steps:       []*runner.StepUpdateEvent{{StepType: "tool", ToolName: "view_file", State: "ACTIVE"}},
@@ -275,64 +352,7 @@ func TestStatusUpdater_ToolLifecycleAndFlushes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			h := newStatusUpdaterHarness()
-			var opts []StatusUpdaterOption
-			if tt.interval > 0 {
-				opts = append(opts, WithStatusInterval(tt.interval))
-			}
-			opts = append(opts, WithStatusDebounce(tt.debounce))
-			if tt.latch > 0 {
-				opts = append(opts, func(u *StatusUpdater) { u.toolLatchDuration = tt.latch })
-			}
-
-			updater := NewStatusUpdater(nil, "thread-"+tt.name, true, h.options(opts...)...)
-			for _, step := range tt.steps {
-				updater.HandleStep(step)
-				updater.flush()
-			}
-
-			if h.sends.Load() != 1 {
-				t.Fatalf("expected 1 send, got %d", h.sends.Load())
-			}
-			last := h.lastText.Load()
-			if last == nil || !strings.Contains(*last, tt.wantSendSub) {
-				t.Errorf("expected text to mention %q, got %v", tt.wantSendSub, last)
-			}
-			if tt.checkPostDone {
-				updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "view_file", State: "DONE"})
-				updater.HandleStep(&runner.StepUpdateEvent{StepType: "agent_response"})
-				updater.flush()
-				if h.edits.Load() == 0 {
-					t.Errorf("expected at least 1 edit, got %d", h.edits.Load())
-				}
-			}
-			if tt.wantLatched != "" {
-				updater.mu.Lock()
-				latched := updater.currentStatusText()
-				updater.mu.Unlock()
-				if !strings.Contains(latched, tt.wantLatched) {
-					t.Errorf("expected latched %q, got: %s", tt.wantLatched, latched)
-				}
-			}
-			if tt.simulateLatch {
-				updater.mu.Lock()
-				updater.lastCompletedAt = time.Now().Add(-600 * time.Millisecond)
-				expired := updater.currentStatusText()
-				updater.mu.Unlock()
-				if !strings.Contains(expired, tt.wantUnlatched) {
-					t.Errorf("expected expired %q, got: %s", tt.wantUnlatched, expired)
-				}
-			}
-			updater.Stop()
-			updater.DeleteStatusMessage()
-			select {
-			case <-h.deleteDone:
-			case <-time.After(time.Second):
-				t.Fatal("timed out waiting for delete")
-			}
-			if h.deletes.Load() != 1 {
-				t.Errorf("expected 1 delete, got %d", h.deletes.Load())
-			}
+			runStatusUpdaterLifecycleCase(t, tt)
 		})
 	}
 }

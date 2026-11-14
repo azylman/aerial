@@ -118,26 +118,73 @@ func TestIsValidThreadKey_TableDriven(t *testing.T) {
 	}
 }
 
+type resolveTargetThreadCase struct {
+	name            string
+	isNilPool       bool
+	channelID       string
+	title           string
+	prompt          string
+	cachedChannel   *discordgo.Channel
+	policyMode      string
+	noBuildUpdates  bool
+	systemChannel   string
+	omitPolicyFn    bool
+	hasHook         bool
+	hookThreadID    string
+	hookErr         error
+	withDiscordSess bool
+	discordThreadID string
+	discordErr      error
+	expected        string
+}
+
+func setupResolveTargetThreadPool(tc resolveTargetThreadCase) *WorkerPool {
+	if tc.isNilPool {
+		return nil
+	}
+	pool := &WorkerPool{}
+	if !tc.omitPolicyFn {
+		pool.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: tc.policyMode, NoBuildUpdates: tc.noBuildUpdates}
+		}
+	}
+	if tc.systemChannel != "" {
+		pool.appCfg = config.NewFromData(&config.ConfigData{SystemChannel: tc.systemChannel})
+	}
+	if tc.withDiscordSess {
+		dg, _ := discordgo.New("Bot test-token")
+		tid, derr := tc.discordThreadID, tc.discordErr
+		dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			if derr != nil {
+				return nil, derr
+			}
+			b, _ := json.Marshal(&discordgo.Channel{ID: tid, Type: discordgo.ChannelTypeGuildPublicThread, Name: "auto-thread"})
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+		})
+		pool.cfg.DiscordSession = dg
+	}
+	if tc.hasHook {
+		pool.SetCreateThreadFunc(func(cID, title string) (string, error) {
+			return tc.hookThreadID, tc.hookErr
+		})
+	}
+	return pool
+}
+
+func runResolveTargetThreadCase(t *testing.T, tc resolveTargetThreadCase) {
+	t.Helper()
+	if tc.cachedChannel != nil {
+		CacheDiscordChannel(tc.cachedChannel)
+	}
+	pool := setupResolveTargetThreadPool(tc)
+	got := pool.ResolveTargetThread(tc.channelID, tc.title, tc.prompt, time.Now())
+	if got != tc.expected {
+		t.Errorf("ResolveTargetThread() = %q, want %q", got, tc.expected)
+	}
+}
+
 func TestResolveTargetThread_TableDriven(t *testing.T) {
-	tests := []struct {
-		name            string
-		isNilPool       bool
-		channelID       string
-		title           string
-		prompt          string
-		cachedChannel   *discordgo.Channel
-		policyMode      string
-		noBuildUpdates  bool
-		systemChannel   string
-		omitPolicyFn    bool
-		hasHook         bool
-		hookThreadID    string
-		hookErr         error
-		withDiscordSess bool
-		discordThreadID string
-		discordErr      error
-		expected        string
-	}{
+	tests := []resolveTargetThreadCase{
 		{
 			name:      "nil pool returns channelID",
 			isNilPool: true,
@@ -269,43 +316,7 @@ func TestResolveTargetThread_TableDriven(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.cachedChannel != nil {
-				CacheDiscordChannel(tc.cachedChannel)
-			}
-			var pool *WorkerPool
-			if !tc.isNilPool {
-				pool = &WorkerPool{}
-				if !tc.omitPolicyFn {
-					pool.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
-						return config.ChannelPolicy{Mode: tc.policyMode, NoBuildUpdates: tc.noBuildUpdates}
-					}
-				}
-				if tc.systemChannel != "" {
-					pool.appCfg = config.NewFromData(&config.ConfigData{SystemChannel: tc.systemChannel})
-				}
-				if tc.withDiscordSess {
-					dg, _ := discordgo.New("Bot test-token")
-					tid, derr := tc.discordThreadID, tc.discordErr
-					dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-						if derr != nil {
-							return nil, derr
-						}
-						b, _ := json.Marshal(&discordgo.Channel{ID: tid, Type: discordgo.ChannelTypeGuildPublicThread, Name: "auto-thread"})
-						return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
-					})
-					pool.cfg.DiscordSession = dg
-				}
-				if tc.hasHook {
-					pool.SetCreateThreadFunc(func(cID, title string) (string, error) {
-						return tc.hookThreadID, tc.hookErr
-					})
-				}
-			}
-
-			got := pool.ResolveTargetThread(tc.channelID, tc.title, tc.prompt, time.Now())
-			if got != tc.expected {
-				t.Errorf("ResolveTargetThread() = %q, want %q", got, tc.expected)
-			}
+			runResolveTargetThreadCase(t, tc)
 		})
 	}
 }
