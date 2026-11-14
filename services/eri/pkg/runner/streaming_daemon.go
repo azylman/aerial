@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -81,6 +82,19 @@ type TurnContext struct {
 	// streamMessageByParent maps a parent tool call ID ("" for the main agent) to the message it is
 	// streaming, so message_delta usage lands on the right message; guarded by inflightMu.
 	streamMessageByParent map[string]string
+	// sawModelReply records that a real (model-produced) assistant message arrived this turn, and
+	// syntheticReply holds the latest Claude CLI-authored one; guarded by inflightMu.
+	sawModelReply  bool
+	syntheticReply *claudeSyntheticReply
+}
+
+// ClaudeSyntheticModel is the message.model of assistant messages the Claude CLI writes itself.
+const ClaudeSyntheticModel = session.ClaudeSyntheticModel
+
+// claudeSyntheticReply is a Claude CLI-authored assistant message: its text and the stream event's
+// typed error (e.g. "rate_limit"; empty for the resume placeholder).
+type claudeSyntheticReply struct {
+	text, errType string
 }
 
 // tailBuffer is a thread-safe ring buffer capturing the trailing N bytes written to it.
@@ -1102,6 +1116,12 @@ func (d *StreamingDaemon) deliverResultToSink(activeTurn *TurnContext, raw map[s
 	respStr := extractResponseString(raw)
 	status, errMsg := extractResultStatusAndError(raw)
 
+	if err := d.syntheticOnlyReplyError(activeTurn); err != nil {
+		recordStreamErrorMetric(err.Error(), currentModel, true)
+		d.failTurn(activeTurn, err)
+		return
+	}
+
 	if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") || strings.EqualFold(status, "ERROR") {
 		if d.tryRescueTurnOnResult(activeTurn, raw, errMsg, currentModel) {
 			return
@@ -1263,6 +1283,7 @@ func (d *StreamingDaemon) handleClaudeAssistantEvent(activeTurn *TurnContext, ra
 	}
 	d.recordStreamUsage(activeTurn, msg)
 	contents, ok := msg["content"].([]any)
+	d.recordAssistantOrigin(activeTurn, raw, msg, contents)
 	if !ok {
 		return
 	}
@@ -1323,6 +1344,40 @@ func (d *StreamingDaemon) handleClaudeAssistantEvent(activeTurn *TurnContext, ra
 			}
 		}
 	}
+}
+
+// recordAssistantOrigin notes whether an assistant message came from a model call or was written by
+// the Claude CLI itself (message.model == ClaudeSyntheticModel).
+func (d *StreamingDaemon) recordAssistantOrigin(activeTurn *TurnContext, raw, msg map[string]any, contents []any) {
+	d.inflightMu.Lock()
+	defer d.inflightMu.Unlock()
+	if extractFirstString(msg, "model") != ClaudeSyntheticModel {
+		activeTurn.sawModelReply = true
+		return
+	}
+	var parts []string
+	for _, block := range contents {
+		if bMap, ok := block.(map[string]any); ok && extractFirstString(bMap, "type") == "text" {
+			parts = append(parts, extractFirstString(bMap, "text"))
+		}
+	}
+	activeTurn.syntheticReply = &claudeSyntheticReply{text: strings.TrimSpace(strings.Join(parts, "\n")), errType: extractFirstString(raw, "error")}
+}
+
+// syntheticOnlyReplyError returns the turn's failure when its only assistant output was written by
+// the Claude CLI without a model call, so it is never counted (or rescued) as a reply.
+func (d *StreamingDaemon) syntheticOnlyReplyError(activeTurn *TurnContext) error {
+	d.inflightMu.Lock()
+	defer d.inflightMu.Unlock()
+	reply := activeTurn.syntheticReply
+	if reply == nil || activeTurn.sawModelReply {
+		return nil
+	}
+	errType := reply.errType
+	if errType == "" {
+		errType = "none"
+	}
+	return fmt.Errorf("claude synthetic reply (error=%s): %s", errType, reply.text)
 }
 
 func (d *StreamingDaemon) handleClaudeUserEvent(activeTurn *TurnContext, raw map[string]any) {
