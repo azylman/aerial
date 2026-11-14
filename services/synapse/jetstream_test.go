@@ -12,22 +12,35 @@ func TestInitSynapseJetStream(t *testing.T) {
 	origNewBus := newBusFn
 	defer func() { newBusFn = origNewBus }()
 
-	t.Run("empty nats url returns noop", func(t *testing.T) {
-		stop := initSynapseJetStream(context.Background(), &RouterServer{}, "")
-		if stop == nil {
-			t.Fatal("expected non-nil stop func")
-		}
-		stop()
-	})
+	tests := []struct {
+		name          string
+		natsURL       string
+		busErr        error
+		wantBusCalled bool
+	}{
+		{name: "empty nats url returns noop without connecting", natsURL: "", wantBusCalled: false},
+		{name: "connect error returns noop", natsURL: "nats://127.0.0.1:4222", busErr: errors.New("connection refused"), wantBusCalled: true},
+	}
 
-	t.Run("connect error returns noop", func(t *testing.T) {
-		newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
-			return nil, errors.New("connection refused")
-		}
-		stop := initSynapseJetStream(context.Background(), &RouterServer{}, "nats://127.0.0.1:4222")
-		if stop == nil {
-			t.Fatal("expected non-nil stop func")
-		}
-		stop()
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
+				called = true
+				return nil, tc.busErr
+			}
+			srv := &RouterServer{}
+			stop := initSynapseJetStream(context.Background(), srv, tc.natsURL)
+			if stop == nil {
+				t.Fatal("expected non-nil stop func")
+			}
+			stop()
+			if called != tc.wantBusCalled {
+				t.Errorf("newBusFn called = %v, want %v", called, tc.wantBusCalled)
+			}
+			if srv.EventBus() != nil {
+				t.Errorf("srv.EventBus() = %v, want nil", srv.EventBus())
+			}
+		})
+	}
 }
