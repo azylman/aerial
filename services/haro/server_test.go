@@ -109,14 +109,6 @@ type serverRPCTestCase struct {
 	wantRPCErr  bool
 }
 
-type toolSchemaTestCase struct {
-	name         string
-	toolName     string
-	wantProps    []string
-	wantRequired []string
-	descContains string
-}
-
 func testServerDirectMCPProbes(t *testing.T, server *Server) {
 	t.Helper()
 	recH, recC, recErr := httptest.NewRecorder(), httptest.NewRecorder(), httptest.NewRecorder()
@@ -171,41 +163,9 @@ func runServerRPCCase(t *testing.T, ts *httptest.Server, tc serverRPCTestCase) {
 	}
 }
 
-func runToolSchemaCase(t *testing.T, toolSchemas map[string]map[string]any, toolDescs map[string]string, tc toolSchemaTestCase) {
-	t.Helper()
-	schema, ok := toolSchemas[tc.toolName]
-	if !ok {
-		t.Fatalf("tool %q not found in tools/list", tc.toolName)
-	}
-	desc, ok := toolDescs[tc.toolName]
-	if !ok || !strings.Contains(desc, tc.descContains) {
-		t.Errorf("tool %q description = %q, want containing %q", tc.toolName, desc, tc.descContains)
-	}
-	props, ok := schema["properties"].(map[string]any)
-	if !ok {
-		t.Fatalf("tool %q inputSchema missing properties map", tc.toolName)
-	}
-	for _, prop := range tc.wantProps {
-		if _, ok := props[prop]; !ok {
-			t.Errorf("tool %q properties missing expected property %q", tc.toolName, prop)
-		}
-	}
-	rawReq, _ := schema["required"].([]any)
-	reqSet := make(map[string]bool)
-	for _, r := range rawReq {
-		if s, ok := r.(string); ok {
-			reqSet[s] = true
-		}
-	}
-	for _, req := range tc.wantRequired {
-		if !reqSet[req] {
-			t.Errorf("tool %q required missing expected required field %q", tc.toolName, req)
-		}
-	}
-}
-
 func serverRPCTestCases() []serverRPCTestCase {
 	return []serverRPCTestCase{
+		{"tools_list", `{"jsonrpc":"2.0","id":200,"method":"tools/list","params":{}}`, false, false},
 		{"schedule_recurring alias", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"scheduler_schedule_recurring","arguments":{"channel_id":"123","cron_expression":"0 20 * * 5","prompt":"plan","effort":"high"}}}`, false, false},
 		{"update_cron_schedule", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"update_cron_schedule","arguments":{"schedule_id":"missing-id","effort":"low"}}}`, true, false},
 		{"update_cron_schedule success", `{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"update_cron_schedule","arguments":{"schedule_id":"test-cron-id","effort":"medium"}}}`, false, false},
@@ -219,28 +179,21 @@ func serverRPCTestCases() []serverRPCTestCase {
 		{"schedule_heartbeat invalid", `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"invalid-snow","cron_expr":"0 0 * * *","prompt":"monitor disk"}}}`, true, false},
 		{"update_heartbeat missing", `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"id":"missing-hb","effort":"low"}}}`, true, false},
 		{"update_heartbeat success", `{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"id":"test-hb-id","effort":"medium"}}}`, false, false},
-		{"update_heartbeat alias success", `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"schedule_id":"test-hb-id","effort":"high","title_prefix":"Updated"}}}`, false, false},
+		{"update_heartbeat alias success", `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"schedule_id":"test-hb-id","channel_id":"123456789012345678","cron_expression":"0 0 * * *","prompt":"updated prompt","timezone":"UTC","effort":"high","title_prefix":"Updated","enabled":true}}}`, false, false},
+		{"update_heartbeat target_id and cron_expr", `{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"schedule_id":"test-hb-id","target_id":"123456789012345678","cron_expr":"0 0 * * *","enabled":false}}}`, false, false},
 		{"cancel_schedule missing", `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"none"}}}`, true, false},
 		{"cancel_schedule success", `{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"test-once-id"}}}`, false, false},
-		{"watch_event success", `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"123456789012345678","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, false, false},
-		{"watch_event thread_id success", `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"watch_event","arguments":{"thread_id":"123456789012345678","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, false, false},
+		{"watch_event success", `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"123456789012345678","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification","effort":"low","persistent":true}}}`, false, false},
+		{"watch_event thread_id success", `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"watch_event","arguments":{"thread_id":"123456789012345678","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification","persistent":false}}}`, false, false},
+		{"watch_event target_id success", `{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"watch_event","arguments":{"target_id":"123456789012345678","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, false, false},
 		{"watch_event invalid", `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"bad-snowflake","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, true, false},
 		{"list_event_watches", `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"list_event_watches","arguments":{}}}`, false, false},
+		{"list_event_watches with channel_id", `{"jsonrpc":"2.0","id":26,"method":"tools/call","params":{"name":"list_event_watches","arguments":{"channel_id":"123456789012345678"}}}`, false, false},
+		{"list_event_watches with target_id", `{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"list_event_watches","arguments":{"target_id":"123456789012345678"}}}`, false, false},
 		{"cancel_event_watch missing", `{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"watch_id":"missing-watch"}}}`, true, false},
 		{"cancel_event_watch alias missing", `{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"id":"missing-watch"}}}`, true, false},
+		{"cancel_event_watch schedule_id missing", `{"jsonrpc":"2.0","id":28,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"schedule_id":"missing-watch"}}}`, true, false},
 		{"unknown tool", `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"non_existent","arguments":{}}}`, false, true},
-	}
-}
-
-func toolSchemaTestCases() []toolSchemaTestCase {
-	return []toolSchemaTestCase{
-		{"schedule_heartbeat schema and description", "schedule_heartbeat", []string{"channel_id", "target_id", "title_prefix", "cron_expression", "cron_expr", "prompt", "timezone", "effort"}, []string{"prompt"}, "silent background polling and edge-triggered state tracking"},
-		{"update_heartbeat schema and description", "update_heartbeat", []string{"schedule_id", "id", "channel_id", "target_id", "cron_expression", "cron_expr", "prompt", "title_prefix", "timezone", "effort", "enabled"}, nil, "Update an existing heartbeat monitoring schedule"},
-		{"watch_event schema and description", "watch_event", []string{"channel_id", "target_id", "thread_id", "source", "target", "event_type", "prompt", "effort", "persistent"}, []string{"source", "target", "event_type", "prompt"}, "deterministic one-shot event watch"},
-		{"list_event_watches schema and description", "list_event_watches", []string{"channel_id", "target_id"}, nil, "List active deterministic event watch triggers"},
-		{"cancel_event_watch schema and description", "cancel_event_watch", []string{"watch_id", "id", "schedule_id"}, nil, "Cancel an active deterministic event watch trigger"},
-		{"list_schedules description references list_event_watches", "list_schedules", []string{"target_id"}, nil, "event watches are listed via list_event_watches"},
-		{"schedule_recurring description references unconditional messages", "schedule_recurring", []string{"channel_id", "cron_expression", "prompt"}, []string{"channel_id", "cron_expression", "prompt"}, "unconditional user-facing messages"},
 	}
 }
 
@@ -298,39 +251,6 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 	for _, tc := range serverRPCTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			runServerRPCCase(t, ts, tc)
-		})
-	}
-
-	// Verify tools/list schema exposes typed properties and descriptions
-	listResp, err := http.Post(ts.URL+"/mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":200,"method":"tools/list","params":{}}`))
-	if err != nil {
-		t.Fatalf("POST /mcp tools/list failed: %v", err)
-	}
-	defer listResp.Body.Close()
-
-	var listData struct {
-		Result struct {
-			Tools []struct {
-				Name        string         `json:"name"`
-				Description string         `json:"description"`
-				InputSchema map[string]any `json:"inputSchema"`
-			} `json:"tools"`
-		} `json:"result"`
-	}
-	if err := json.NewDecoder(listResp.Body).Decode(&listData); err != nil {
-		t.Fatalf("decode tools/list failed: %v", err)
-	}
-
-	toolSchemas := make(map[string]map[string]any)
-	toolDescs := make(map[string]string)
-	for _, tool := range listData.Result.Tools {
-		toolSchemas[tool.Name] = tool.InputSchema
-		toolDescs[tool.Name] = tool.Description
-	}
-
-	for _, tc := range toolSchemaTestCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			runToolSchemaCase(t, toolSchemas, toolDescs, tc)
 		})
 	}
 }

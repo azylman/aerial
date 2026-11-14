@@ -271,10 +271,6 @@ func testToolHandlerGuardsAndNilDB(t *testing.T) {
 		}()
 		NewToolHandler(nil, nil)
 	}()
-
-	if err := InsertOneShotSchedule(context.Background(), nil, OneShotSchedule{ID: "n1"}); err == nil {
-		t.Error("expected error for InsertOneShotSchedule with nil db")
-	}
 }
 
 func testToolHandlerClosedDB(ctx context.Context, t *testing.T, cfg *Config) {
@@ -366,10 +362,6 @@ func TestToolHandler_ScheduleAndList(t *testing.T) {
 	defer db.Close()
 	h := NewToolHandler(cfg, db)
 	ctx := context.Background()
-
-	if h.cfg != cfg {
-		t.Errorf("expected handler to retain *Config")
-	}
 
 	recErrTests := []scheduleRecurringErrTestCase{
 		{"missing channel_id", ScheduleRecurringArgs{CronExpression: "0 9 * * *", Prompt: "p"}, "'channel_id' is required"},

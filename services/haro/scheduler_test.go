@@ -990,7 +990,7 @@ func cronDueSchedulesTestCases() []evaluateDueSchedulesTestCase {
 	}
 }
 
-func oneShotAndHeartbeatDueSchedulesTestCases() []evaluateDueSchedulesTestCase {
+func oneShotDueSchedulesTestCases() []evaluateDueSchedulesTestCase {
 	return []evaluateDueSchedulesTestCase{
 		{
 			name: "due one shot dispatched successfully",
@@ -1053,84 +1053,11 @@ func oneShotAndHeartbeatDueSchedulesTestCases() []evaluateDueSchedulesTestCase {
 			wantRunStatus:     "failed",
 			wantRunError:      "network timeout",
 		},
-		{
-			name: "due heartbeat dispatched successfully",
-			setupHeartbeat: &HeartbeatSchedule{
-				ID:          "hb-eval-1",
-				TargetID:    "123456789",
-				TitlePrefix: "Heartbeat Check",
-				CronExpr:    "0 12 * * *",
-				Prompt:      "System Heartbeat",
-				Timezone:    "UTC",
-				NextRunAt:   time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
-				Enabled:     true,
-				Effort:      "low",
-			},
-			dispatcherStatus:  "accepted",
-			responseMessageID: "disp-hb-1",
-			evaluateNowOffset: 0,
-			wantDispatched:    1,
-			wantRunStatus:     "completed",
-		},
-		{
-			name: "due heartbeat skipped when thread has active turn",
-			setupHeartbeat: &HeartbeatSchedule{
-				ID:          "hb-eval-skipped",
-				TargetID:    "123456789",
-				TitlePrefix: "Heartbeat Skip",
-				CronExpr:    "0 12 * * *",
-				Prompt:      "System Heartbeat",
-				Timezone:    "UTC",
-				NextRunAt:   time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
-				Enabled:     true,
-				Effort:      "low",
-			},
-			dispatcherStatus:  "skipped_active",
-			evaluateNowOffset: 0,
-			wantDispatched:    1,
-		},
-		{
-			name: "due heartbeat stale over 24h skips dispatch",
-			setupHeartbeat: &HeartbeatSchedule{
-				ID:          "hb-eval-stale",
-				TargetID:    "123456789",
-				TitlePrefix: "Stale Heartbeat",
-				CronExpr:    "0 12 * * *",
-				Prompt:      "Stale Check",
-				Timezone:    "UTC",
-				NextRunAt:   time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC), // >24h overdue
-				Enabled:     true,
-				Effort:      "low",
-			},
-			evaluateNowOffset: 0,
-			wantDispatched:    0,
-			wantRunStatus:     "failed",
-			wantRunError:      "stale heartbeat (>24h overdue)",
-		},
-		{
-			name: "due heartbeat dispatch error records failed run",
-			setupHeartbeat: &HeartbeatSchedule{
-				ID:          "hb-eval-err",
-				TargetID:    "123456789",
-				TitlePrefix: "Heartbeat Error",
-				CronExpr:    "0 12 * * *",
-				Prompt:      "Error Check",
-				Timezone:    "UTC",
-				NextRunAt:   time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
-				Enabled:     true,
-				Effort:      "low",
-			},
-			dispatcherErr:     fmt.Errorf("connection refused"),
-			evaluateNowOffset: 0,
-			wantDispatched:    1,
-			wantRunStatus:     "failed",
-			wantRunError:      "connection refused",
-		},
 	}
 }
 
 func evaluateDueSchedulesTestCases() []evaluateDueSchedulesTestCase {
-	return append(cronDueSchedulesTestCases(), oneShotAndHeartbeatDueSchedulesTestCases()...)
+	return append(cronDueSchedulesTestCases(), oneShotDueSchedulesTestCases()...)
 }
 
 func TestTicker_EvaluateDueSchedules_Scenarios(t *testing.T) {

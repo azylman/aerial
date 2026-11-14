@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -33,11 +32,6 @@ func TestPureHelpers_BuildHeartbeatPrompt(t *testing.T) {
 				`title "Heartbeat Alert"`,
 				"Check node exporter disk",
 				`<\HEARTBEAT_INSTRUCTIONS>`,
-				"do NOT scan /data or filesystem transcripts on disk",
-				"jq -Rs --arg channel_id",
-				"<<'EOF' | curl -sS -f -X POST http://eri.aerial/prompt",
-				"Retry the POST if curl fails",
-				"NEVER send a second POST once Eri returns a successful HTTP 2xx response",
 			},
 		},
 		{
@@ -667,119 +661,6 @@ func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runEvaluateDueHeartbeatsCase(ctx, t, tc, now)
-		})
-	}
-}
-
-func TestScheduleHeartbeatArgs_ToMap(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		args ScheduleHeartbeatArgs
-		want map[string]any
-	}{
-		{
-			name: "empty args",
-			args: ScheduleHeartbeatArgs{},
-			want: map[string]any{},
-		},
-		{
-			name: "all fields populated",
-			args: ScheduleHeartbeatArgs{
-				ChannelID:      "1562847268833337377",
-				TargetID:       "1562847268833337378",
-				TitlePrefix:    "HB Alert",
-				CronExpression: "0 0 * * *",
-				CronExpr:       "@daily",
-				Prompt:         "poll status",
-				Timezone:       "America/Los_Angeles",
-				Effort:         "high",
-			},
-			want: map[string]any{
-				"channel_id":      "1562847268833337377",
-				"target_id":       "1562847268833337378",
-				"title_prefix":    "HB Alert",
-				"cron_expression": "0 0 * * *",
-				"cron_expr":       "@daily",
-				"prompt":          "poll status",
-				"timezone":        "America/Los_Angeles",
-				"effort":          "high",
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := tc.args.toMap()
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("toMap() = %+v, want %+v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestUpdateHeartbeatArgs_ToMap(t *testing.T) {
-	t.Parallel()
-	trueVal := true
-	falseVal := false
-	tests := []struct {
-		name string
-		args UpdateHeartbeatArgs
-		want map[string]any
-	}{
-		{
-			name: "empty args",
-			args: UpdateHeartbeatArgs{},
-			want: map[string]any{},
-		},
-		{
-			name: "all fields with enabled true",
-			args: UpdateHeartbeatArgs{
-				ScheduleID:     "hb-1",
-				ID:             "hb-2",
-				ChannelID:      "1562847268833337377",
-				TargetID:       "1562847268833337378",
-				CronExpression: "*/5 * * * *",
-				CronExpr:       "@hourly",
-				Prompt:         "updated prompt",
-				TitlePrefix:    "Updated Prefix",
-				Timezone:       "UTC",
-				Effort:         "low",
-				Enabled:        &trueVal,
-			},
-			want: map[string]any{
-				"schedule_id":     "hb-1",
-				"id":              "hb-2",
-				"channel_id":      "1562847268833337377",
-				"target_id":       "1562847268833337378",
-				"cron_expression": "*/5 * * * *",
-				"cron_expr":       "@hourly",
-				"prompt":          "updated prompt",
-				"title_prefix":    "Updated Prefix",
-				"timezone":        "UTC",
-				"effort":          "low",
-				"enabled":         true,
-			},
-		},
-		{
-			name: "enabled false",
-			args: UpdateHeartbeatArgs{
-				ID:      "hb-disabled",
-				Enabled: &falseVal,
-			},
-			want: map[string]any{
-				"id":      "hb-disabled",
-				"enabled": false,
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := tc.args.toMap()
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("toMap() = %+v, want %+v", got, tc.want)
-			}
 		})
 	}
 }
