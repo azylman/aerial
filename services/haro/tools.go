@@ -395,16 +395,8 @@ func (h *ToolHandler) UpdateCronSchedule(ctx context.Context, args UpdateCronSch
 	}
 
 	var nextRun *time.Time
-	if args.CronExpression != nil && strings.TrimSpace(*args.CronExpression) != "" {
-		var tzArg, hTZ string
-		if args.Timezone != nil {
-			tzArg = *args.Timezone
-		}
-		if h != nil {
-			hTZ = h.timezone
-		}
-		tz := resolveTimezone(tzArg, hTZ)
-		computed, err := CalculateNextCronRun(*args.CronExpression, tz, time.Now().UTC())
+	if newExpr, newTZ := trimmedOrEmpty(args.CronExpression), trimmedOrEmpty(args.Timezone); newExpr != "" || newTZ != "" {
+		computed, err := h.recomputeCronNextRun(ctx, id, newExpr, newTZ)
 		if err != nil {
 			return UpdateCronScheduleOutput{}, err
 		}
@@ -423,6 +415,29 @@ func (h *ToolHandler) UpdateCronSchedule(ctx context.Context, args UpdateCronSch
 		resp.NextRunAt = nextRun.Format(time.RFC3339)
 	}
 	return resp, nil
+}
+
+// recomputeCronNextRun returns the next run for an update that changes the cron
+// expression or timezone, evaluated against the stored row so the result uses the
+// timezone the schedule will actually run in. Blank newExpr/newTZ keep stored values.
+func (h *ToolHandler) recomputeCronNextRun(ctx context.Context, id, newExpr, newTZ string) (time.Time, error) {
+	sched, err := GetCronSchedule(ctx, h.db, id)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to update recurring schedule: %w", err)
+	}
+	expr := sched.CronExpr
+	if newExpr != "" {
+		expr = newExpr
+	}
+	tz := resolveTimezone(newTZ, resolveTimezone(sched.Timezone, h.timezone))
+	return CalculateNextCronRun(expr, tz, time.Now().UTC())
+}
+
+func trimmedOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(*s)
 }
 
 func getMapString(args map[string]any, keys ...string) string {
