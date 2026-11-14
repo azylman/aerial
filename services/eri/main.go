@@ -354,7 +354,7 @@ func buildGeminiVoicePool(cur *config.ConfigData, lowEffortModel string, prewarm
 	return voicePool, geminiModel, apiKey, mcpServers, true
 }
 
-func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome, lowEffortModel string, prewarmedTargets []string, spawner runner.DaemonSpawner, memoryRetriever runner.MemoryRetriever, ambRetriever runner.AmbientContextRetriever) runner.AgentPool {
+func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome, lowEffortModel, mcpProxyPort string, prewarmedTargets []string, spawner runner.DaemonSpawner, memoryRetriever runner.MemoryRetriever, ambRetriever runner.AmbientContextRetriever) runner.AgentPool {
 	runtimeBase := cur.DataDir
 	if runtimeBase == "" && cfg != nil {
 		runtimeBase = cfg.DataDir()
@@ -377,6 +377,7 @@ func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome
 		MemoryRetriever:         memoryRetriever,
 		AmbientContextRetriever: ambRetriever,
 		SessionManager:          voiceSessionMgr,
+		MCPProxyPort:            mcpProxyPort,
 	}, spawner)
 }
 
@@ -435,7 +436,9 @@ func computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey 
 
 // createVoiceProcessPool constructs a runner.AgentPool based on cfg.VoiceEngine()
 // wrapped in runner.DynamicVoicePool with a factory closure evaluating cfg.Current() dynamically.
-func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner, memRetriever ...runner.MemoryRetriever) runner.AgentPool {
+// mcpProxyPort points agy/Claude voice daemons at the loopback MCP trace proxy ("" when tracing
+// is off), exactly as basePoolCfg does for the Discord and ephemeral pools.
+func createVoiceProcessPool(cfg *config.Config, voiceHome, lowEffortModel, mcpProxyPort string, spawner runner.DaemonSpawner, memRetriever ...runner.MemoryRetriever) runner.AgentPool {
 	var memoryRetriever runner.MemoryRetriever
 	if len(memRetriever) > 0 {
 		memoryRetriever = memRetriever[0]
@@ -482,7 +485,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 			if cur != nil && strings.TrimSpace(cur.Voice.Model) != "" {
 				effectiveModel = strings.TrimSpace(cur.Voice.Model)
 			}
-			voicePool = buildUnifiedVoicePool(cfg, cur, voiceHome, effectiveModel, prewarmedTargets, spawner, memoryRetriever, ambRetriever)
+			voicePool = buildUnifiedVoicePool(cfg, cur, voiceHome, effectiveModel, mcpProxyPort, prewarmedTargets, spawner, memoryRetriever, ambRetriever)
 		}
 
 		fingerprint := computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey, cur, prewarmedTargets, mcpServers)
@@ -612,7 +615,7 @@ func buildBrainProcessPools(
 
 	discordPools, discordPoolList := buildDiscordPools(basePoolCfg, discordHome, cur.Model, mediumEffortModel, lowEffortModel, spawner)
 	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), spawner, "ephemeral:worker")
-	voicePool := createVoiceProcessPool(cfg, voiceHome, lowEffortModel, spawner, memoryRetriever)
+	voicePool := createVoiceProcessPool(cfg, voiceHome, lowEffortModel, mcpProxyPort, spawner, memoryRetriever)
 	allPools := append(append([]runner.AgentPool{}, discordPoolList...), ephemeralPool, voicePool)
 
 	return discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome

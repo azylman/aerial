@@ -69,7 +69,7 @@ func voicePoolWiringCases() []voicePoolWiringCase {
 
 func runVoicePoolWiringCase(t *testing.T, tc voicePoolWiringCase, voiceHome string, spawner runner.DaemonSpawner) {
 	t.Helper()
-	pool := createVoiceProcessPool(tc.cfg, voiceHome, "fallback-model", spawner)
+	pool := createVoiceProcessPool(tc.cfg, voiceHome, "fallback-model", "", spawner)
 	defer pool.Close()
 
 	dynPool, ok := pool.(*runner.DynamicVoicePool)
@@ -99,19 +99,24 @@ func runVoicePoolHotReload(t *testing.T, voiceHome string) {
 	cfg := config.NewFromData(data)
 
 	var mu sync.Mutex
-	var lastSpawnedModel, lastSpawnedEngine, lastSpawnedClaudeBin string
+	var lastSpawnedModel, lastSpawnedEngine, lastSpawnedClaudeBin, lastSpawnedHookEndpoint string
 	trackingSpawner := &mockMainDaemonSpawner{
 		SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			mu.Lock()
 			lastSpawnedModel = dCfg.Model
 			lastSpawnedEngine = dCfg.Engine
 			lastSpawnedClaudeBin = dCfg.ClaudeBin
+			for _, kv := range dCfg.Env {
+				if v, ok := strings.CutPrefix(kv, "ERI_HOOK_ENDPOINT="); ok {
+					lastSpawnedHookEndpoint = v
+				}
+			}
 			mu.Unlock()
 			return newMockMainDaemonSpawner().Spawn(ctx, dCfg)
 		},
 	}
 
-	pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", trackingSpawner)
+	pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", "8123", trackingSpawner)
 	defer pool.Close()
 
 	dynPool, ok := pool.(*runner.DynamicVoicePool)
@@ -129,7 +134,11 @@ func runVoicePoolHotReload(t *testing.T, voiceHome string) {
 	}
 	mu.Lock()
 	initialModel := lastSpawnedModel
+	initialHookEndpoint := lastSpawnedHookEndpoint
 	mu.Unlock()
+	if initialHookEndpoint != "http://127.0.0.1:8123/internal/mcp-proxy/announce" {
+		t.Fatalf("expected voice daemon hook endpoint on the MCP proxy port, got %q", initialHookEndpoint)
+	}
 	if initialModel != "agy-model" {
 		t.Fatalf("expected initial spawned model to be agy-model, got %q", initialModel)
 	}
