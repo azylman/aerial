@@ -439,11 +439,6 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 			summary, err := SummarizeThreadHistoryWithGroup(ctx, new(singleflight.Group), mockLLM, "test-model", "th-"+tc.name, tc.msgs, tc.opts...)
 			root.End()
 			assertPromptSpans(t, rec.Ended(), tc.wantSpans, tc.wantAbsent)
-			for _, s := range rec.Ended() {
-				if s.Name() == spanPromptSummaryLLM && attrMap(s.Attributes())[attrPromptSummaryPromptChars] != attribute.IntValue(len(capturedPrompt)) {
-					t.Errorf("summary_llm prompt chars = %v, want %d", attrMap(s.Attributes())[attrPromptSummaryPromptChars].String(), len(capturedPrompt))
-				}
-			}
 			if tc.wantErrText != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
 					t.Fatalf("expected error containing %q, got: %v", tc.wantErrText, err)

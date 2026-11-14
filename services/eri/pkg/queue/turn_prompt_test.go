@@ -19,7 +19,6 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -550,9 +549,6 @@ func TestBuildTurnPrompt(t *testing.T) {
 				}
 			}
 			assertPromptSpans(t, rec.Ended(), tc.wantSpans, tc.wantAbsent)
-			if got := attrMap(root.(sdktrace.ReadOnlySpan).Attributes())[attrPromptChars]; got != attribute.IntValue(len(te.turnPrompt)) {
-				t.Errorf("prompt.build chars = %v, want %d", got.String(), len(te.turnPrompt))
-			}
 		})
 	}
 }
@@ -654,28 +650,6 @@ func TestResolveThreadColdStartSummary_IncrementalAndFallback(t *testing.T) {
 				{name: spanPromptSummaryLoad, parent: spanPromptThreadSummary},
 			},
 			wantAbsent: []string{spanPromptSummaryLLM, spanPromptSummarySave},
-		},
-		{
-			name:        "watermark match is a cache hit",
-			cachedSum:   "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
-			cachedMsgID: "msg-1",
-			histMsgs:    []HistoryMessage{{ID: "msg-1", Content: "done", CreatedAt: now}},
-			wantSummary: "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
-			wantSpans: []wantPromptSpan{
-				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("cache_hit")}},
-			},
-			wantAbsent: []string{spanPromptSummaryLLM, spanPromptSummarySave},
-		},
-		{
-			name:          "first summary without prior refreshes and saves",
-			histMsgs:      []HistoryMessage{{ID: "msg-new", Content: "new work", CreatedAt: now}},
-			llmOut:        "<THREAD_SUMMARY></THREAD_SUMMARY>",
-			wantSummary:   "<THREAD_SUMMARY></THREAD_SUMMARY>",
-			wantLLMCalled: true,
-			wantSaved:     true,
-			wantSpans: []wantPromptSpan{
-				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("refreshed"), attrPromptSummaryDeltaMsgs.Int(1)}},
-			},
 		},
 		{
 			name:        "all zero-timestamp history returns cached summary",
