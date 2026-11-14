@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -42,6 +41,57 @@ func runHTTP(h http.HandlerFunc, method, target string, body io.Reader, headers 
 	w := httptest.NewRecorder()
 	h(w, req)
 	return w
+}
+
+type promptPayloadCase struct {
+	name          string
+	pool          *queue.WorkerPool
+	payload       string
+	msgID         string
+	wantThreadID  string
+	wantChannelID string
+	wantEffort    string
+	wantModel     string
+	wantContent   string
+}
+
+func assertPromptPayloadCase(t *testing.T, store db.Store, tc promptPayloadCase) {
+	t.Helper()
+	w := runHTTP(handlePrompt(store, tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.payload))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status=%d body=%q, want 202", w.Code, w.Body.String())
+	}
+	if tc.wantThreadID != "" && !strings.Contains(w.Body.String(), fmt.Sprintf(`"session_id":"%s"`, tc.wantThreadID)) {
+		t.Errorf("response body missing session_id %q: %s", tc.wantThreadID, w.Body.String())
+	}
+	if tc.wantChannelID != "" && !strings.Contains(w.Body.String(), fmt.Sprintf(`"channel_id":"%s"`, tc.wantChannelID)) {
+		t.Errorf("response body missing channel_id %q: %s", tc.wantChannelID, w.Body.String())
+	}
+	if tc.msgID == "" {
+		return
+	}
+	msg, err := store.GetMessage(context.Background(), tc.msgID)
+	if err != nil || msg == nil {
+		t.Fatalf("failed to retrieve persisted message %s: %v", tc.msgID, err)
+	}
+	if tc.wantThreadID != "" && msg.ThreadID != tc.wantThreadID {
+		t.Errorf("thread_id=%q, want %q", msg.ThreadID, tc.wantThreadID)
+	}
+	if tc.wantChannelID != "" && msg.ChannelID != tc.wantChannelID {
+		t.Errorf("channel_id=%q, want %q", msg.ChannelID, tc.wantChannelID)
+	}
+	if tc.wantContent != "" && msg.Content != tc.wantContent {
+		t.Errorf("content=%q, want %q", msg.Content, tc.wantContent)
+	}
+	if tc.wantEffort != "" && msg.Effort != tc.wantEffort {
+		t.Errorf("effort=%q, want %q", msg.Effort, tc.wantEffort)
+	}
+	if tc.wantModel != "" && msg.Model != tc.wantModel {
+		t.Errorf("model=%q, want %q", msg.Model, tc.wantModel)
+	}
+	if !msg.IsAdmin {
+		t.Errorf("expected is_admin=true for /prompt message, got false")
+	}
 }
 
 func TestHandlePromptValidation(t *testing.T) {
@@ -124,17 +174,7 @@ func TestHandlePromptValidation(t *testing.T) {
 	})
 	defer redirectPool.Stop()
 
-	for _, tc := range []struct {
-		name          string
-		pool          *queue.WorkerPool
-		payload       string
-		msgID         string
-		wantThreadID  string
-		wantChannelID string
-		wantEffort    string
-		wantModel     string
-		wantContent   string
-	}{
+	for _, tc := range []promptPayloadCase{
 		{"default effort", pool, `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`, "msg-123", "1542423172400291873", "1542423172400291873", "", "", "Test valid prompt"},
 		{"explicit effort", pool, `{"prompt":"Test explicit effort","channel_id":"1542423172400291873","effort":"high","message_id":"msg-effort-high"}`, "msg-effort-high", "1542423172400291873", "1542423172400291873", "high", "", "Test explicit effort"},
 		{"inferred medium effort", pool, `{"prompt":"Test medium effort","channel_id":"1542423172400291873","model":"model-medium","message_id":"msg-effort-med"}`, "msg-effort-med", "1542423172400291873", "1542423172400291873", "medium", "model-medium", "Test medium effort"},
@@ -166,40 +206,7 @@ func TestHandlePromptValidation(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handlePrompt(store, tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.payload))
-			if w.Code != http.StatusAccepted {
-				t.Fatalf("got status=%d body=%q, want 202", w.Code, w.Body.String())
-			}
-			if tc.wantThreadID != "" && !strings.Contains(w.Body.String(), fmt.Sprintf(`"session_id":"%s"`, tc.wantThreadID)) {
-				t.Errorf("response body missing session_id %q: %s", tc.wantThreadID, w.Body.String())
-			}
-			if tc.wantChannelID != "" && !strings.Contains(w.Body.String(), fmt.Sprintf(`"channel_id":"%s"`, tc.wantChannelID)) {
-				t.Errorf("response body missing channel_id %q: %s", tc.wantChannelID, w.Body.String())
-			}
-			if tc.msgID != "" {
-				msg, err := store.GetMessage(context.Background(), tc.msgID)
-				if err != nil || msg == nil {
-					t.Fatalf("failed to retrieve persisted message %s: %v", tc.msgID, err)
-				}
-				if tc.wantThreadID != "" && msg.ThreadID != tc.wantThreadID {
-					t.Errorf("thread_id=%q, want %q", msg.ThreadID, tc.wantThreadID)
-				}
-				if tc.wantChannelID != "" && msg.ChannelID != tc.wantChannelID {
-					t.Errorf("channel_id=%q, want %q", msg.ChannelID, tc.wantChannelID)
-				}
-				if tc.wantContent != "" && msg.Content != tc.wantContent {
-					t.Errorf("content=%q, want %q", msg.Content, tc.wantContent)
-				}
-				if tc.wantEffort != "" && msg.Effort != tc.wantEffort {
-					t.Errorf("effort=%q, want %q", msg.Effort, tc.wantEffort)
-				}
-				if tc.wantModel != "" && msg.Model != tc.wantModel {
-					t.Errorf("model=%q, want %q", msg.Model, tc.wantModel)
-				}
-				if !msg.IsAdmin {
-					t.Errorf("expected is_admin=true for /prompt message, got false")
-				}
-			}
+			assertPromptPayloadCase(t, store, tc)
 		})
 	}
 }
@@ -419,6 +426,84 @@ func TestHandleCancelDispatch(t *testing.T) {
 	}
 }
 
+type directMessageCase struct {
+	name       string
+	method     string
+	pool       *queue.WorkerPool
+	body       io.Reader
+	wantStatus int
+	wantSubstr string
+}
+
+func assertDirectMessageCase(t *testing.T, tc directMessageCase) {
+	t.Helper()
+	w := runHTTP(handleDirectMessage(tc.pool), tc.method, "/discord/message", tc.body)
+	if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
+		t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
+	}
+}
+
+func runDirectMessageDeliveryCases(t *testing.T) {
+	t.Helper()
+	var capturedChannelID, capturedText string
+	handler := handleDirectMessage(queue.New(nil, queue.WorkerPoolConfig{
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			capturedChannelID, capturedText = channelID, text
+			return nil
+		},
+	}))
+
+	w := runHTTP(handler, http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"Deploy succeeded!"}`))
+	if w.Code != http.StatusOK || capturedChannelID != "1542423172400291873" || capturedText != "Deploy succeeded!" {
+		t.Fatalf("unexpected delivery: code=%d, ch=%q, txt=%q", w.Code, capturedChannelID, capturedText)
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["status"] != "sent" || resp["channel_id"] != "1542423172400291873" {
+		t.Fatalf("unexpected response body: %+v", resp)
+	}
+
+	w2 := runHTTP(handler, http.MethodPost, "/discord/message", strings.NewReader(`{"thread_id":"1542423172400291874","text":"Deploy failed!"}`))
+	if w2.Code != http.StatusOK || capturedChannelID != "1542423172400291874" || capturedText != "Deploy failed!" {
+		t.Fatalf("unexpected fallback: code=%d, ch=%q, txt=%q", w2.Code, capturedChannelID, capturedText)
+	}
+
+	w3 := runHTTP(handler, http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","thread_id":"1542423172400291875","content":"Priority check"}`))
+	if w3.Code != http.StatusOK || capturedChannelID != "1542423172400291875" || capturedText != "Priority check" {
+		t.Fatalf("unexpected thread priority: code=%d, ch=%q, txt=%q", w3.Code, capturedChannelID, capturedText)
+	}
+
+	var capturedAtts []*delivery.Attachment
+	attHandler := handleDirectMessage(queue.New(nil, queue.WorkerPoolConfig{
+		DeliveryWithAttachmentsFunc: func(s *discordgo.Session, channelID, text string, atts []*delivery.Attachment) error {
+			capturedChannelID, capturedText, capturedAtts = channelID, text, atts
+			return nil
+		},
+	}))
+	wAtt := runHTTP(attHandler, http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"Voicemail received","attachments":[{"filename":"test.wav","content_type":"audio/wav","content_base64":"UklGRg=="}]}`))
+	if wAtt.Code != http.StatusOK || len(capturedAtts) != 1 || capturedAtts[0].Filename != "test.wav" || string(capturedAtts[0].Data) != "RIFF" {
+		t.Fatalf("unexpected attachment delivery: code=%d, atts=%+v", wAtt.Code, capturedAtts)
+	}
+}
+
+func runDirectMessageMuxCases(t *testing.T) {
+	t.Helper()
+	pool := queue.New(nil, queue.WorkerPoolConfig{
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+	})
+	mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), dbtest.NewFakeStore(), pool, nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`)))
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for /discord/message, got %d", w.Code)
+	}
+	wInternal := httptest.NewRecorder()
+	mux.ServeHTTP(wInternal, httptest.NewRequest(http.MethodPost, "/internal/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`)))
+	if wInternal.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for dropped /internal/message, got %d", wInternal.Code)
+	}
+}
+
 func TestHandleDirectMessage(t *testing.T) {
 	mockSess, _ := discordgo.New("Bot fake-token")
 	mockSess.State = discordgo.NewState()
@@ -451,14 +536,7 @@ func TestHandleDirectMessage(t *testing.T) {
 
 	oversizedB64 := base64.StdEncoding.EncodeToString(make([]byte, 8*1024*1024+1))
 
-	for _, tc := range []struct {
-		name       string
-		method     string
-		pool       *queue.WorkerPool
-		body       io.Reader
-		wantStatus int
-		wantSubstr string
-	}{
+	for _, tc := range []directMessageCase{
 		{"method not allowed", http.MethodGet, &queue.WorkerPool{}, nil, http.StatusMethodNotAllowed, "Method not allowed"},
 		{"nil pool", http.MethodPost, nil, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusInternalServerError, "Worker pool not available"},
 		{"read and close error", http.MethodPost, &queue.WorkerPool{}, &errReadCloser{readErr: errors.New("read err"), closeErr: errors.New("close err")}, http.StatusBadRequest, "Failed to read request body"},
@@ -480,71 +558,69 @@ func TestHandleDirectMessage(t *testing.T) {
 		{"discord client cannot send", http.MethodPost, sendErrPool, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusBadRequest, "Discord client error"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handleDirectMessage(tc.pool), tc.method, "/discord/message", tc.body)
-			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
-			}
+			assertDirectMessageCase(t, tc)
 		})
 	}
 
 	t.Run("delivery success and fallback", func(t *testing.T) {
-		var capturedChannelID, capturedText string
-		handler := handleDirectMessage(queue.New(nil, queue.WorkerPoolConfig{
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-				capturedChannelID, capturedText = channelID, text
-				return nil
-			},
-		}))
-
-		w := runHTTP(handler, http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"Deploy succeeded!"}`))
-		if w.Code != http.StatusOK || capturedChannelID != "1542423172400291873" || capturedText != "Deploy succeeded!" {
-			t.Fatalf("unexpected delivery: code=%d, ch=%q, txt=%q", w.Code, capturedChannelID, capturedText)
-		}
-		var resp map[string]any
-		_ = json.Unmarshal(w.Body.Bytes(), &resp)
-		if resp["status"] != "sent" || resp["channel_id"] != "1542423172400291873" {
-			t.Fatalf("unexpected response body: %+v", resp)
-		}
-
-		w2 := runHTTP(handler, http.MethodPost, "/discord/message", strings.NewReader(`{"thread_id":"1542423172400291874","text":"Deploy failed!"}`))
-		if w2.Code != http.StatusOK || capturedChannelID != "1542423172400291874" || capturedText != "Deploy failed!" {
-			t.Fatalf("unexpected fallback: code=%d, ch=%q, txt=%q", w2.Code, capturedChannelID, capturedText)
-		}
-
-		w3 := runHTTP(handler, http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","thread_id":"1542423172400291875","content":"Priority check"}`))
-		if w3.Code != http.StatusOK || capturedChannelID != "1542423172400291875" || capturedText != "Priority check" {
-			t.Fatalf("unexpected thread priority: code=%d, ch=%q, txt=%q", w3.Code, capturedChannelID, capturedText)
-		}
-
-		var capturedAtts []*delivery.Attachment
-		attHandler := handleDirectMessage(queue.New(nil, queue.WorkerPoolConfig{
-			DeliveryWithAttachmentsFunc: func(s *discordgo.Session, channelID, text string, atts []*delivery.Attachment) error {
-				capturedChannelID, capturedText, capturedAtts = channelID, text, atts
-				return nil
-			},
-		}))
-		wAtt := runHTTP(attHandler, http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"Voicemail received","attachments":[{"filename":"test.wav","content_type":"audio/wav","content_base64":"UklGRg=="}]}`))
-		if wAtt.Code != http.StatusOK || len(capturedAtts) != 1 || capturedAtts[0].Filename != "test.wav" || string(capturedAtts[0].Data) != "RIFF" {
-			t.Fatalf("unexpected attachment delivery: code=%d, atts=%+v", wAtt.Code, capturedAtts)
-		}
+		runDirectMessageDeliveryCases(t)
 	})
 
 	t.Run("mux route mounting for /discord/message", func(t *testing.T) {
-		pool := queue.New(nil, queue.WorkerPoolConfig{
-			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		})
-		mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), dbtest.NewFakeStore(), pool, nil)
-		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`)))
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200 for /discord/message, got %d", w.Code)
-		}
-		wInternal := httptest.NewRecorder()
-		mux.ServeHTTP(wInternal, httptest.NewRequest(http.MethodPost, "/internal/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`)))
-		if wInternal.Code != http.StatusNotFound {
-			t.Errorf("expected 404 for dropped /internal/message, got %d", wInternal.Code)
-		}
+		runDirectMessageMuxCases(t)
 	})
+}
+
+type statusWidgetCase struct {
+	name              string
+	method            string
+	urlPath           string
+	pool              *queue.WorkerPool
+	body              string
+	wantStatus        int
+	wantSubstr        string
+	useMux            bool
+	wantMessageID     string
+	wantDeliveredID   string
+	wantDeliveredChan string
+	wantChunkCount    int
+}
+
+func assertStatusWidgetCase(t *testing.T, tc statusWidgetCase, capturedReq *discord.StatusWidgetRequest) {
+	t.Helper()
+	var r io.Reader
+	if tc.body != "" {
+		r = strings.NewReader(tc.body)
+	}
+	path := tc.urlPath
+	if path == "" {
+		path = "/discord/widget"
+	}
+	var w *httptest.ResponseRecorder
+	if tc.useMux {
+		mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), dbtest.NewFakeStore(), tc.pool, nil)
+		w = httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(tc.method, path, r))
+	} else {
+		w = runHTTP(handleStatusWidget(tc.pool), tc.method, path, r)
+	}
+
+	if w.Code != tc.wantStatus {
+		t.Fatalf("got status=%d body=%q, want status=%d", w.Code, w.Body.String(), tc.wantStatus)
+	}
+	if tc.wantSubstr != "" && !strings.Contains(w.Body.String(), tc.wantSubstr) {
+		t.Fatalf("got body=%q, want substr=%q", w.Body.String(), tc.wantSubstr)
+	}
+	if tc.wantMessageID != "" {
+		var resp map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		if resp["status"] != "ok" || resp["message_id"] != tc.wantMessageID {
+			t.Fatalf("unexpected response body: %+v", resp)
+		}
+	}
+	if tc.wantDeliveredID != "" && (capturedReq.ID != tc.wantDeliveredID || capturedReq.ChannelID != tc.wantDeliveredChan || len(capturedReq.Chunks) != tc.wantChunkCount) {
+		t.Fatalf("unexpected captured request: %+v", capturedReq)
+	}
 }
 
 func TestHandleStatusWidget(t *testing.T) {
@@ -576,20 +652,7 @@ func TestHandleStatusWidget(t *testing.T) {
 		WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) { return "widget-99", nil },
 	})
 
-	tests := []struct {
-		name              string
-		method            string
-		urlPath           string
-		pool              *queue.WorkerPool
-		body              string
-		wantStatus        int
-		wantSubstr        string
-		useMux            bool
-		wantMessageID     string
-		wantDeliveredID   string
-		wantDeliveredChan string
-		wantChunkCount    int
-	}{
+	tests := []statusWidgetCase{
 		{name: "method not allowed", method: http.MethodGet, pool: &queue.WorkerPool{}, wantStatus: http.StatusMethodNotAllowed, wantSubstr: "Method not allowed"},
 		{name: "nil pool", method: http.MethodPost, pool: nil, body: `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, wantStatus: http.StatusInternalServerError, wantSubstr: "Worker pool not available"},
 		{name: "invalid JSON", method: http.MethodPost, pool: &queue.WorkerPool{}, body: "{invalid-json", wantStatus: http.StatusBadRequest, wantSubstr: "Invalid JSON payload"},
@@ -633,38 +696,94 @@ func TestHandleStatusWidget(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var r io.Reader
-			if tc.body != "" {
-				r = strings.NewReader(tc.body)
-			}
-			path := tc.urlPath
-			if path == "" {
-				path = "/discord/widget"
-			}
-			var w *httptest.ResponseRecorder
-			if tc.useMux {
-				mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), dbtest.NewFakeStore(), tc.pool, nil)
-				w = httptest.NewRecorder()
-				mux.ServeHTTP(w, httptest.NewRequest(tc.method, path, r))
-			} else {
-				w = runHTTP(handleStatusWidget(tc.pool), tc.method, path, r)
-			}
+			assertStatusWidgetCase(t, tc, &capturedReq)
+		})
+	}
+}
 
-			if w.Code != tc.wantStatus {
-				t.Fatalf("got status=%d body=%q, want status=%d", w.Code, w.Body.String(), tc.wantStatus)
+func runTranscriptSearchSuccessCases(t *testing.T, fake *dbtest.FakeStore, embedder func(context.Context, string) ([]float32, error), embedderCalled *bool) {
+	t.Helper()
+	t.Run("search success and embedder", func(t *testing.T) {
+		w := runHTTP(handleTranscriptSearch(fake, embedder), http.MethodGet, "/api/transcripts/search?q=container&mode=auto&limit=5&tool=run_command&session=sess-mux-1", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+		if !*embedderCalled {
+			t.Error("expected embedder to be invoked")
+		}
+		var res transcript.SearchResult
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || len(res.Sessions) != 1 || res.Sessions[0].SessionID != "sess-mux-1" {
+			t.Fatalf("unexpected search result: %+v, err: %v", res, err)
+		}
+	})
+
+	t.Run("search with since and empty query steps mode", func(t *testing.T) {
+		sinceTime := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
+		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&since="+url.QueryEscape(sinceTime), nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("search tool kind matches native name", func(t *testing.T) {
+		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&tool=shell", nil)
+		var resTool transcript.SearchResult
+		if err := json.Unmarshal(w.Body.Bytes(), &resTool); err != nil || len(resTool.Steps) != 1 || resTool.Steps[0].ToolName != "Bash" || resTool.Steps[0].ToolKind != "shell" || resTool.Steps[0].Stack != "fake" {
+			t.Fatalf("unexpected steps: %d %+v err=%v", w.Code, resTool, err)
+		}
+	})
+
+	t.Run("search filtered to other stack", func(t *testing.T) {
+		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?q=container&stack=elsewhere", nil)
+		var resOther transcript.SearchResult
+		if err := json.Unmarshal(w.Body.Bytes(), &resOther); err != nil || w.Code != http.StatusOK || resOther.Total != 0 {
+			t.Fatalf("expected empty 200 result, got %d %+v err=%v", w.Code, resOther, err)
+		}
+	})
+}
+
+func runTranscriptStatsAndStepsCases(t *testing.T, fake *dbtest.FakeStore) {
+	t.Helper()
+	for _, tc := range []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{"stats all stacks", "/api/transcripts/stats", `{"stacks":[{"stack":"fake","sessions":1,"steps":1}],"status":"ok","total_sessions":1,"total_steps":1}`},
+		{"stats filtered to other stack", "/api/transcripts/stats?stack=elsewhere", `{"stacks":[],"status":"ok","total_sessions":0,"total_steps":0}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := runHTTP(handleTranscriptStats(fake), http.MethodGet, tc.target, nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
 			}
-			if tc.wantSubstr != "" && !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("got body=%q, want substr=%q", w.Body.String(), tc.wantSubstr)
+			if got := strings.TrimSpace(w.Body.String()); got != tc.want {
+				t.Fatalf("stats body = %s, want %s", got, tc.want)
 			}
-			if tc.wantMessageID != "" {
-				var resp map[string]any
-				_ = json.Unmarshal(w.Body.Bytes(), &resp)
-				if resp["status"] != "ok" || resp["message_id"] != tc.wantMessageID {
-					t.Fatalf("unexpected response body: %+v", resp)
-				}
+		})
+	}
+
+	for _, tc := range []struct {
+		name       string
+		target     string
+		wantStacks []string
+	}{
+		{"steps all stacks", "/api/transcripts/steps?session=sess-mux-1&step=0", []string{"fake"}},
+		{"steps own stack", "/api/transcripts/steps?session=sess-mux-1&step=0&stack=fake", []string{"fake"}},
+		{"steps other stack is empty", "/api/transcripts/steps?session=sess-mux-1&step=0&stack=elsewhere", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := runHTTP(handleTranscriptSteps(fake), http.MethodGet, tc.target, nil)
+			var res transcript.StepWindowResult
+			if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || w.Code != http.StatusOK {
+				t.Fatalf("got %d %s err=%v", w.Code, w.Body.String(), err)
 			}
-			if tc.wantDeliveredID != "" && (capturedReq.ID != tc.wantDeliveredID || capturedReq.ChannelID != tc.wantDeliveredChan || len(capturedReq.Chunks) != tc.wantChunkCount) {
-				t.Fatalf("unexpected captured request: %+v", capturedReq)
+			gotStacks := make([]string, 0, len(res.Steps))
+			for _, st := range res.Steps {
+				gotStacks = append(gotStacks, st.Stack)
+			}
+			if !slices.Equal(gotStacks, tc.wantStacks) {
+				t.Errorf("step stacks = %v, want %v", gotStacks, tc.wantStacks)
 			}
 		})
 	}
@@ -719,87 +838,9 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 		})
 	}
 
-	t.Run("search success and embedder", func(t *testing.T) {
-		w := runHTTP(handleTranscriptSearch(fake, embedder), http.MethodGet, "/api/transcripts/search?q=container&mode=auto&limit=5&tool=run_command&session=sess-mux-1", nil)
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
-		}
-		if !embedderCalled {
-			t.Error("expected embedder to be invoked")
-		}
-		var res transcript.SearchResult
-		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || len(res.Sessions) != 1 || res.Sessions[0].SessionID != "sess-mux-1" {
-			t.Fatalf("unexpected search result: %+v, err: %v", res, err)
-		}
-	})
+	runTranscriptSearchSuccessCases(t, fake, embedder, &embedderCalled)
 
-	t.Run("search with since and empty query steps mode", func(t *testing.T) {
-		sinceTime := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
-		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&since="+url.QueryEscape(sinceTime), nil)
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-
-	for _, tc := range []struct {
-		name   string
-		target string
-		want   string
-	}{
-		{"stats all stacks", "/api/transcripts/stats", `{"stacks":[{"stack":"fake","sessions":1,"steps":1}],"status":"ok","total_sessions":1,"total_steps":1}`},
-		{"stats filtered to other stack", "/api/transcripts/stats?stack=elsewhere", `{"stacks":[],"status":"ok","total_sessions":0,"total_steps":0}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handleTranscriptStats(fake), http.MethodGet, tc.target, nil)
-			if w.Code != http.StatusOK {
-				t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
-			}
-			if got := strings.TrimSpace(w.Body.String()); got != tc.want {
-				t.Fatalf("stats body = %s, want %s", got, tc.want)
-			}
-		})
-	}
-
-	for _, tc := range []struct {
-		name       string
-		target     string
-		wantStacks []string
-	}{
-		{"steps all stacks", "/api/transcripts/steps?session=sess-mux-1&step=0", []string{"fake"}},
-		{"steps own stack", "/api/transcripts/steps?session=sess-mux-1&step=0&stack=fake", []string{"fake"}},
-		{"steps other stack is empty", "/api/transcripts/steps?session=sess-mux-1&step=0&stack=elsewhere", nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handleTranscriptSteps(fake), http.MethodGet, tc.target, nil)
-			var res transcript.StepWindowResult
-			if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || w.Code != http.StatusOK {
-				t.Fatalf("got %d %s err=%v", w.Code, w.Body.String(), err)
-			}
-			gotStacks := make([]string, 0, len(res.Steps))
-			for _, st := range res.Steps {
-				gotStacks = append(gotStacks, st.Stack)
-			}
-			if !slices.Equal(gotStacks, tc.wantStacks) {
-				t.Errorf("step stacks = %v, want %v", gotStacks, tc.wantStacks)
-			}
-		})
-	}
-
-	t.Run("search tool kind matches native name", func(t *testing.T) {
-		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&tool=shell", nil)
-		var res transcript.SearchResult
-		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || len(res.Steps) != 1 || res.Steps[0].ToolName != "Bash" || res.Steps[0].ToolKind != "shell" || res.Steps[0].Stack != "fake" {
-			t.Fatalf("unexpected steps: %d %+v err=%v", w.Code, res, err)
-		}
-	})
-
-	t.Run("search filtered to other stack", func(t *testing.T) {
-		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?q=container&stack=elsewhere", nil)
-		var res transcript.SearchResult
-		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || w.Code != http.StatusOK || res.Total != 0 {
-			t.Fatalf("expected empty 200 result, got %d %+v err=%v", w.Code, res, err)
-		}
-	})
+	runTranscriptStatsAndStepsCases(t, fake)
 
 	t.Run("mux endpoints", func(t *testing.T) {
 		mux := SetupBrainMuxWithEmbedder(fake, fake, nil, nil)
@@ -829,6 +870,93 @@ func (e *errTranscriptStore) SearchSessionSummaries(ctx context.Context, stack s
 
 func (e *errTranscriptStore) GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) ([]db.TranscriptStep, error) {
 	return nil, errors.New("simulated get transcript step range error")
+}
+
+func runHandleTasksFilterCases(t *testing.T, handler http.HandlerFunc, now time.Time) {
+	t.Helper()
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "status filter", path: "/tasks?status=PENDING,PROCESSING"},
+		{name: "thread_id filter", path: "/tasks?thread_id=thread-1"},
+		{name: "is_admin filter", path: "/tasks?is_admin=true"},
+		{name: "since filter", path: "/tasks?since=" + url.QueryEscape(now.Add(-time.Hour).Format(time.RFC3339))},
+		{name: "after_row_id filter", path: "/tasks?after_row_id=0"},
+		{name: "before_row_id filter", path: "/tasks?before_row_id=100"},
+		{name: "limit filter", path: "/tasks?limit=10"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := runHTTP(handler, http.MethodGet, tc.path, nil)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func runHandleTasksErrorCases(t *testing.T, handler http.HandlerFunc) {
+	t.Helper()
+	if code := runHTTP(handler, http.MethodPost, "/tasks", nil).Code; code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 Method Not Allowed, got %d", code)
+	}
+
+	closedStore := dbtest.NewFakeStore()
+	_ = closedStore.Close()
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"nil store", handleTasks(nil)},
+		{"closed store", handleTasks(closedStore)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if code := runHTTP(tc.handler, http.MethodGet, "/tasks", nil).Code; code != http.StatusInternalServerError {
+				t.Fatalf("got status=%d, want 500", code)
+			}
+		})
+	}
+}
+
+func runHandleTasksEphemeralCase(t *testing.T, now time.Time) {
+	t.Helper()
+	ephemStore := dbtest.NewFakeStore()
+	_ = ephemStore.SaveSessionID(context.Background(), "1564704264645902626", "parent-thread-sess-uuid")
+	turnStarted := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	ephemPool := queue.New(nil, queue.WorkerPoolConfig{
+		Store: ephemStore,
+		MediumEffortProcessPool: &blockingTaskTestPool{
+			sessionID:   "88888888-4444-4444-4444-121212121212",
+			turnStarted: turnStarted,
+			releaseTurn: releaseTurn,
+		},
+	})
+	defer ephemPool.Stop()
+
+	ephemDisp := db.Dispatch{
+		ID:        "msg-vanadis-chunk",
+		Source:    "vanadis",
+		Prompt:    "[VANADIS BUILD CHUNK EXECUTION]",
+		Effort:    "medium",
+		Status:    db.StatusPending,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	_, _ = ephemStore.InsertDispatch(context.Background(), ephemDisp)
+	ephemPool.EnqueueDispatch(ephemDisp)
+	<-turnStarted
+
+	liveRR := runHTTP(handleTasks(ephemStore, ephemPool), http.MethodGet, "/tasks", nil)
+	close(releaseTurn)
+	if liveRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from live tasks handler, got %d", liveRR.Code)
+	}
+	var liveResp TasksResponse
+	_ = json.NewDecoder(liveRR.Body).Decode(&liveResp)
+	if len(liveResp.Tasks) != 1 || liveResp.Tasks[0].SessionID != "88888888-4444-4444-4444-121212121212" {
+		t.Fatalf("expected live ephemeral session ID instead of parent thread session, got %+v", liveResp.Tasks)
+	}
 }
 
 func TestHandleTasks(t *testing.T) {
@@ -881,45 +1009,8 @@ func TestHandleTasks(t *testing.T) {
 		t.Errorf("expected 1 cached task within 1s TTL, got %d", cachedResp.Total)
 	}
 
-	for _, tc := range []struct {
-		name string
-		path string
-	}{
-		{name: "status filter", path: "/tasks?status=PENDING,PROCESSING"},
-		{name: "thread_id filter", path: "/tasks?thread_id=thread-1"},
-		{name: "is_admin filter", path: "/tasks?is_admin=true"},
-		{name: "since filter", path: "/tasks?since=" + url.QueryEscape(now.Add(-time.Hour).Format(time.RFC3339))},
-		{name: "after_row_id filter", path: "/tasks?after_row_id=0"},
-		{name: "before_row_id filter", path: "/tasks?before_row_id=100"},
-		{name: "limit filter", path: "/tasks?limit=10"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rr := runHTTP(handler, http.MethodGet, tc.path, nil)
-			if rr.Code != http.StatusOK {
-				t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
-			}
-		})
-	}
-
-	if code := runHTTP(handler, http.MethodPost, "/tasks", nil).Code; code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 Method Not Allowed, got %d", code)
-	}
-
-	closedStore := dbtest.NewFakeStore()
-	_ = closedStore.Close()
-	for _, tc := range []struct {
-		name    string
-		handler http.HandlerFunc
-	}{
-		{"nil store", handleTasks(nil)},
-		{"closed store", handleTasks(closedStore)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if code := runHTTP(tc.handler, http.MethodGet, "/tasks", nil).Code; code != http.StatusInternalServerError {
-				t.Fatalf("got status=%d, want 500", code)
-			}
-		})
-	}
+	runHandleTasksFilterCases(t, handler, now)
+	runHandleTasksErrorCases(t, handler)
 
 	var wg sync.WaitGroup
 	for range 10 {
@@ -929,43 +1020,7 @@ func TestHandleTasks(t *testing.T) {
 	}
 	wg.Wait()
 
-	ephemStore := dbtest.NewFakeStore()
-	_ = ephemStore.SaveSessionID(context.Background(), "1564704264645902626", "parent-thread-sess-uuid")
-	turnStarted := make(chan struct{})
-	releaseTurn := make(chan struct{})
-	ephemPool := queue.New(nil, queue.WorkerPoolConfig{
-		Store: ephemStore,
-		MediumEffortProcessPool: &blockingTaskTestPool{
-			sessionID:   "88888888-4444-4444-4444-121212121212",
-			turnStarted: turnStarted,
-			releaseTurn: releaseTurn,
-		},
-	})
-	defer ephemPool.Stop()
-
-	ephemDisp := db.Dispatch{
-		ID:        "msg-vanadis-chunk",
-		Source:    "vanadis",
-		Prompt:    "[VANADIS BUILD CHUNK EXECUTION]",
-		Effort:    "medium",
-		Status:    db.StatusPending,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	_, _ = ephemStore.InsertDispatch(context.Background(), ephemDisp)
-	ephemPool.EnqueueDispatch(ephemDisp)
-	<-turnStarted
-
-	liveRR := runHTTP(handleTasks(ephemStore, ephemPool), http.MethodGet, "/tasks", nil)
-	close(releaseTurn)
-	if liveRR.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from live tasks handler, got %d", liveRR.Code)
-	}
-	var liveResp TasksResponse
-	_ = json.NewDecoder(liveRR.Body).Decode(&liveResp)
-	if len(liveResp.Tasks) != 1 || liveResp.Tasks[0].SessionID != "88888888-4444-4444-4444-121212121212" {
-		t.Fatalf("expected live ephemeral session ID instead of parent thread session, got %+v", liveResp.Tasks)
-	}
+	runHandleTasksEphemeralCase(t, now)
 }
 
 type blockingTaskTestPool struct {
@@ -1146,6 +1201,42 @@ func TestStatusRecorder_Flush(t *testing.T) {
 	srPlain.Flush() // should not panic
 }
 
+func runHTTPMemoryRetrieverCases(t *testing.T) {
+	t.Helper()
+	memSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("q") == "fail" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if r.URL.Query().Get("q") == "badjson" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{bad"))
+			return
+		}
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"context": "<retrieved_memory>ok</retrieved_memory>"})
+	}))
+	defer memSrv.Close()
+
+	ret := newHTTPMemoryRetriever(memSrv.URL)
+	if out, err := ret(context.Background(), ""); err != nil || out != "" {
+		t.Errorf("expected empty on blank query, got %q, %v", out, err)
+	}
+	if out, err := ret(context.Background(), "hello world"); err != nil || !strings.Contains(out, "<retrieved_memory>") {
+		t.Errorf("expected retrieved memory, got %q, %v", out, err)
+	}
+	if _, err := ret(context.Background(), "fail"); err == nil {
+		t.Errorf("expected error on 500 status")
+	}
+	if _, err := ret(context.Background(), "badjson"); err == nil {
+		t.Errorf("expected error on bad json")
+	}
+
+	retEmpty := newHTTPMemoryRetriever("")
+	if out, err := retEmpty(context.Background(), "hello"); err != nil || out != "" {
+		t.Errorf("expected empty string and nil error on empty base URL, got %q, %v", out, err)
+	}
+}
+
 func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 	attSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1263,38 +1354,7 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 		t.Errorf("expected staged tmpDir %q to be removed after handleInternalLLM returned", observedDir)
 	}
 
-	memSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("q") == "fail" {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		if r.URL.Query().Get("q") == "badjson" {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("{bad"))
-			return
-		}
-		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"context": "<retrieved_memory>ok</retrieved_memory>"})
-	}))
-	defer memSrv.Close()
-
-	ret := newHTTPMemoryRetriever(memSrv.URL)
-	if out, err := ret(context.Background(), ""); err != nil || out != "" {
-		t.Errorf("expected empty on blank query, got %q, %v", out, err)
-	}
-	if out, err := ret(context.Background(), "hello world"); err != nil || !strings.Contains(out, "<retrieved_memory>") {
-		t.Errorf("expected retrieved memory, got %q, %v", out, err)
-	}
-	if _, err := ret(context.Background(), "fail"); err == nil {
-		t.Errorf("expected error on 500 status")
-	}
-	if _, err := ret(context.Background(), "badjson"); err == nil {
-		t.Errorf("expected error on bad json")
-	}
-
-	retEmpty := newHTTPMemoryRetriever("")
-	if out, err := retEmpty(context.Background(), "hello"); err != nil || out != "" {
-		t.Errorf("expected empty string and nil error on empty base URL, got %q, %v", out, err)
-	}
+	runHTTPMemoryRetrieverCases(t)
 }
 
 func TestSetupBrainMux_And_Endpoints(t *testing.T) {
@@ -1366,654 +1426,4 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/debug/coverage/flush", nil); w.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500 on flush error, got %d", w.Code)
 	}
-}
-
-type errReadCloser struct {
-	reader   io.Reader
-	readErr  error
-	closeErr error
-}
-
-func (e *errReadCloser) Read(p []byte) (int, error) {
-	if e.readErr != nil {
-		return 0, e.readErr
-	}
-	if e.reader != nil {
-		return e.reader.Read(p)
-	}
-	return 0, errors.New("simulated network read error")
-}
-
-func (e *errReadCloser) Close() error {
-	if e.closeErr != nil {
-		return e.closeErr
-	}
-	return nil
-}
-
-type mockHTTPResponseWriter struct {
-	header http.Header
-	code   int
-	body   bytes.Buffer
-}
-
-func (w *mockHTTPResponseWriter) Header() http.Header {
-	if w.header == nil {
-		w.header = make(http.Header)
-	}
-	return w.header
-}
-
-func (w *mockHTTPResponseWriter) Write(b []byte) (int, error) {
-	return w.body.Write(b)
-}
-
-func (w *mockHTTPResponseWriter) WriteHeader(statusCode int) {
-	w.code = statusCode
-}
-
-type flusherErrWriter struct {
-	header http.Header
-	code   int
-}
-
-func (e *flusherErrWriter) Header() http.Header {
-	if e.header == nil {
-		e.header = make(http.Header)
-	}
-	return e.header
-}
-
-func (e *flusherErrWriter) Write(p []byte) (int, error) {
-	return 0, errors.New("simulated write error")
-}
-
-func (e *flusherErrWriter) WriteHeader(statusCode int) {
-	e.code = statusCode
-}
-
-func (e *flusherErrWriter) Flush() {}
-
-func TestHandleVoiceAsk_Validation(t *testing.T) {
-	store := dbtest.NewFakeStore()
-	pool := newTestWorkerPool(store)
-	pool.Start()
-	defer pool.Stop()
-
-	handler := handleVoiceAsk(pool)
-
-	tests := []struct {
-		name       string
-		method     string
-		body       io.Reader
-		accept     string
-		wantStatus int
-		wantSubstr string
-	}{
-		{"GET not allowed", http.MethodGet, nil, "", http.StatusMethodNotAllowed, "Method not allowed"},
-		{"empty prompt", http.MethodPost, strings.NewReader(`{"prompt":""}`), "", http.StatusBadRequest, "'prompt' field is required"},
-		{"malformed JSON", http.MethodPost, strings.NewReader(`{invalid-json`), "", http.StatusBadRequest, "Invalid JSON payload"},
-		{"body read error", http.MethodPost, &errReadCloser{readErr: errors.New("simulated body read error")}, "", http.StatusBadRequest, "Failed to read request body"},
-		{"conversation_id fallback", http.MethodPost, strings.NewReader(`{"conversation_id":"conv-123","prompt":"hello"}`), "", http.StatusOK, ""},
-		{"missing session_id", http.MethodPost, strings.NewReader(`{"prompt":"hello"}`), "", http.StatusBadRequest, "session_id"},
-		{"node_id provided", http.MethodPost, strings.NewReader(`{"prompt":"hello","node_id":"touch-kiosk-kitchen"}`), "", http.StatusOK, ""},
-		{"node_id priority", http.MethodPost, strings.NewReader(`{"prompt":"hello","node_id":"touch-kiosk-kitchen","session_id":"turn-123","conversation_id":"conv-456"}`), "", http.StatusOK, ""},
-		{"oversized device ID", http.MethodPost, strings.NewReader(fmt.Sprintf(`{"prompt":"hello","node_id":%q}`, strings.Repeat("a", 129))), "", http.StatusBadRequest, "exceeds 128 characters"},
-		{"control characters in device ID", http.MethodPost, strings.NewReader(`{"prompt":"hello","node_id":"dock\ninvalid"}`), "", http.StatusBadRequest, "contains invalid characters"},
-		{"body close error handled", http.MethodPost, &errReadCloser{reader: strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`), closeErr: errors.New("simulated close error")}, "", http.StatusOK, ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handler, tc.method, "/voice/ask", tc.body, "Accept", tc.accept)
-			if w.Code != tc.wantStatus {
-				t.Fatalf("got status %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Errorf("expected substring %q in body, got: %s", tc.wantSubstr, w.Body.String())
-			}
-			if tc.method != http.MethodPost && w.Header().Get("Allow") != "POST" {
-				t.Errorf("expected Allow: POST header, got %q", w.Header().Get("Allow"))
-			}
-		})
-	}
-
-	t.Run("non-flusher response writer for SSE", func(t *testing.T) {
-		reqSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
-		reqSSE.Header.Set("Accept", "text/event-stream")
-		nonFlusher := &mockHTTPResponseWriter{}
-		handler(nonFlusher, reqSSE)
-		if nonFlusher.code != http.StatusInternalServerError {
-			t.Errorf("expected 500 for non-flusher SSE, got %d", nonFlusher.code)
-		}
-	})
-}
-
-func newVoiceHandler(cfg queue.WorkerPoolConfig) (http.HandlerFunc, func()) {
-	if cfg.Store == nil {
-		cfg.Store = dbtest.NewFakeStore()
-	}
-	pool := queue.New(nil, cfg)
-	pool.Start()
-	return handleVoiceAsk(pool), pool.Stop
-}
-
-func TestHandleVoiceAsk_SSE(t *testing.T) {
-	t.Run("Success", func(t *testing.T) {
-		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				if onStatus != nil {
-					onStatus("⚡ Checking smart lights...")
-				}
-				return "Lights have been turned off.", "sess-test-456", nil
-			},
-		})
-		defer stop()
-
-		w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"turn off the lights","session_id":"sess-test-456"}`), "Accept", "text/event-stream")
-		if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") || w.Header().Get("X-Accel-Buffering") != "no" {
-			t.Fatalf("unexpected headers or status: code=%d, ct=%s", w.Code, w.Header().Get("Content-Type"))
-		}
-		body := w.Body.String()
-		for _, want := range []string{
-			"event: status\ndata: {\"status\":\"⚡ Checking smart lights...\"}\n\n",
-			"event: reply\ndata: {\"conversation_id\":\"sess-test-456\",\"reply\":\"Lights have been turned off.\"}\n\n",
-			"event: done\ndata: {\"conversation_id\":\"sess-test-456\"}\n\n",
-		} {
-			if !strings.Contains(body, want) {
-				t.Errorf("missing SSE event %q in body:\n%s", want, body)
-			}
-		}
-	})
-
-	t.Run("SentenceStreaming", func(t *testing.T) {
-		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-			VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
-				if onStatus != nil {
-					onStatus("⚡ Checking status...")
-				}
-				if onSentence != nil {
-					onSentence("Here is sentence one.")
-					onSentence("And here is sentence two.")
-				}
-				return "Here is sentence one. And here is sentence two.", "sess-stream-789", nil
-			},
-		})
-		defer stop()
-
-		w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"tell me two things","session_id":"sess-stream-789"}`), "Accept", "text/event-stream")
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d", w.Code)
-		}
-		body := w.Body.String()
-		for _, want := range []string{
-			"event: status\ndata: {\"status\":\"⚡ Checking status...\"}\n\n",
-			"event: sentence\ndata: {\"text\":\"Here is sentence one.\"}\n\n",
-			"event: sentence\ndata: {\"text\":\"And here is sentence two.\"}\n\n",
-			"event: reply\ndata: {\"conversation_id\":\"sess-stream-789\",\"reply\":\"Here is sentence one. And here is sentence two.\"}\n\n",
-			"event: done\ndata: {\"conversation_id\":\"sess-stream-789\"}\n\n",
-		} {
-			if !strings.Contains(body, want) {
-				t.Errorf("missing SSE event %q in body:\n%s", want, body)
-			}
-		}
-		idxSent1 := strings.Index(body, "event: sentence\ndata: {\"text\":\"Here is sentence one.\"}")
-		idxSent2 := strings.Index(body, "event: sentence\ndata: {\"text\":\"And here is sentence two.\"}")
-		idxReply := strings.Index(body, "event: reply\ndata: {\"conversation_id\":\"sess-stream-789\"")
-		if idxSent1 == -1 || idxSent2 == -1 || idxReply == -1 || idxSent1 > idxSent2 || idxSent2 > idxReply {
-			t.Errorf("invalid event ordering: idxSent1=%d, idxSent2=%d, idxReply=%d", idxSent1, idxSent2, idxReply)
-		}
-	})
-
-	t.Run("CancelledContext", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-			VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				cancel()
-				if onStatus != nil {
-					onStatus("status after cancel")
-				}
-				return "done", "sess-1", nil
-			},
-		})
-		defer stop()
-
-		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`)).WithContext(ctx)
-		req.Header.Set("Accept", "text/event-stream")
-		handler(httptest.NewRecorder(), req)
-	})
-
-	t.Run("VoiceRunnerError", func(t *testing.T) {
-		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-			VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				return "", "", errors.New("synthetic voice failure")
-			},
-		})
-		defer stop()
-
-		w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`), "Accept", "text/event-stream")
-		if !strings.Contains(w.Body.String(), "event: error") {
-			t.Errorf("expected SSE error event, got %q", w.Body.String())
-		}
-	})
-
-	t.Run("WriteError", func(t *testing.T) {
-		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-			VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				return "done", "sess-1", nil
-			},
-		})
-		defer stop()
-
-		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
-		req.Header.Set("Accept", "text/event-stream")
-		handler(&flusherErrWriter{}, req)
-	})
-
-	t.Run("JSON_Success", func(t *testing.T) {
-		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				return "The temperature is 72 degrees.", "sess-json-789", nil
-			},
-		})
-		defer stop()
-
-		w := runHTTP(handler, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"what is the temperature?","session_id":"sess-json-789"}`), "Accept", "application/json")
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d", w.Code)
-		}
-		var resp VoiceAskResponse
-		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Reply != "The temperature is 72 degrees." || resp.SessionID != "sess-json-789" {
-			t.Fatalf("unexpected JSON response: %+v, err: %v", resp, err)
-		}
-	})
-
-	t.Run("Errors", func(t *testing.T) {
-		hErr, stop := newVoiceHandler(queue.WorkerPoolConfig{
-			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				return "", "", errors.New("deliberation timed out")
-			},
-		})
-		defer stop()
-
-		wJSON := runHTTP(hErr, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail","session_id":"sess-err-2"}`), "Accept", "application/json")
-		if wJSON.Code != http.StatusInternalServerError || !strings.Contains(wJSON.Body.String(), "deliberation timed out") {
-			t.Errorf("expected 500 error, got %d: %s", wJSON.Code, wJSON.Body.String())
-		}
-
-		hNil := handleVoiceAsk(nil)
-		if w := runHTTP(hNil, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil"}`)); w.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500 for nil pool, got %d", w.Code)
-		}
-		if w := runHTTP(hNil, http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil-sse"}`), "Accept", "text/event-stream"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "event: error") {
-			t.Errorf("expected 200 SSE error for nil pool, got %d: %s", w.Code, w.Body.String())
-		}
-
-		mRec := httptest.NewRecorder()
-		metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-		for _, metric := range []string{
-			`aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="error"`,
-			`aerial_brain_voice_ttfr_duration_seconds_bucket{mode="json",status="error"`,
-		} {
-			if !strings.Contains(mRec.Body.String(), metric) {
-				t.Errorf("missing metric %q", metric)
-			}
-		}
-	})
-}
-
-func TestHandleInternalDiscordMessage(t *testing.T) {
-	setupTestConfig(t, `
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "threads"
-`)
-
-	tests := []struct {
-		name       string
-		method     string
-		body       string
-		closedDB   bool
-		wantStatus int
-		wantSubstr string
-	}{
-		{
-			name:       "ValidTargetedMessage",
-			method:     http.MethodPost,
-			body:       `{"bot_user_id":"bot-1","message":{"id":"123456789012345678","channel_id":"ch-1","author":{"id":"u-1","username":"alex"},"content":"hey aerial"}}`,
-			wantStatus: http.StatusOK,
-			wantSubstr: `"enqueued"`,
-		},
-		{
-			name:       "MissingMessageID",
-			method:     http.MethodPost,
-			body:       `{"message":{}}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "Invalid payload",
-		},
-		{
-			name:       "MissingMessage",
-			method:     http.MethodPost,
-			body:       `{"bot_user_id":"bot-1"}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "Invalid payload",
-		},
-		{
-			name:       "MissingAuthor",
-			method:     http.MethodPost,
-			body:       `{"message":{"id":"123456789012345678"}}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "Invalid payload",
-		},
-		{
-			name:       "MethodNotAllowed",
-			method:     http.MethodGet,
-			body:       "",
-			wantStatus: http.StatusMethodNotAllowed,
-			wantSubstr: "Method not allowed",
-		},
-		{
-			name:       "MalformedJSON",
-			method:     http.MethodPost,
-			body:       `{"message":`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "Invalid payload",
-		},
-		{
-			name:       "SelfMessageIgnored",
-			method:     http.MethodPost,
-			body:       `{"bot_user_id":"bot-1","message":{"id":"msg-self-1","channel_id":"ch-1","author":{"id":"bot-1","username":"aerial"},"content":"hello"}}`,
-			wantStatus: http.StatusOK,
-			wantSubstr: `"ignored_self"`,
-		},
-		{
-			name:       "UntargetedMessageIgnored",
-			method:     http.MethodPost,
-			body:       `{"bot_user_id":"bot-1","message":{"id":"msg-untargeted-1","channel_id":"ch-1","guild_id":"g-1","author":{"id":"u-2","username":"bob"},"content":"random chatter"}}`,
-			wantStatus: http.StatusOK,
-			wantSubstr: `"ignored"`,
-		},
-		{
-			name:       "DatabaseErrorReturns500",
-			method:     http.MethodPost,
-			body:       `{"bot_user_id":"bot-1","message":{"id":"msg-db-err-1","channel_id":"ch-1","author":{"id":"u-1","username":"alex"},"content":"hey aerial"}}`,
-			closedDB:   true,
-			wantStatus: http.StatusInternalServerError,
-			wantSubstr: "Failed to process message",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			store := dbtest.NewFakeStore()
-			if tc.closedDB {
-				_ = store.Close()
-			}
-			pool := newTestWorkerPool(store)
-			handler := handleInternalDiscordMessage(store, pool)
-
-			req := httptest.NewRequest(tc.method, "/internal/discord/message", strings.NewReader(tc.body))
-			rec := httptest.NewRecorder()
-			handler(rec, req)
-
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
-				t.Errorf("body %q does not contain wantSubstr %q", rec.Body.String(), tc.wantSubstr)
-			}
-		})
-	}
-}
-
-func TestHandleInternalDiscordInteraction(t *testing.T) {
-	origRouter := activeInteractionRouter.Swap(nil)
-	defer activeInteractionRouter.Store(origRouter)
-
-	tests := []struct {
-		name           string
-		method         string
-		body           string
-		readErr        bool
-		hasPoolSession bool
-		wantStatus     int
-		wantSubstr     string
-	}{
-		{
-			name:       "ValidDirectInteraction",
-			method:     http.MethodPost,
-			body:       `{"id":"int-1","type":2,"data":{"name":"status"}}`,
-			wantStatus: http.StatusOK,
-			wantSubstr: `"ok"`,
-		},
-		{
-			name:       "ValidWrappedInteraction",
-			method:     http.MethodPost,
-			body:       `{"interaction":{"id":"int-2","type":2,"data":{"name":"status"}}}`,
-			wantStatus: http.StatusOK,
-			wantSubstr: `"ok"`,
-		},
-		{
-			name:           "WithPoolSession",
-			method:         http.MethodPost,
-			body:           `{"id":"int-3","type":2,"data":{"name":"status"}}`,
-			hasPoolSession: true,
-			wantStatus:     http.StatusOK,
-			wantSubstr:     `"ok"`,
-		},
-		{
-			name:       "BodyReadError",
-			method:     http.MethodPost,
-			readErr:    true,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "Failed to read request body",
-		},
-		{
-			name:       "MethodNotAllowed",
-			method:     http.MethodGet,
-			body:       "",
-			wantStatus: http.StatusMethodNotAllowed,
-			wantSubstr: "Method not allowed",
-		},
-		{
-			name:       "MalformedJSON",
-			method:     http.MethodPost,
-			body:       `{"id":`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "Invalid payload",
-		},
-		{
-			name:       "MissingInteractionID",
-			method:     http.MethodPost,
-			body:       `{"type":2}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "Invalid payload",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			store := dbtest.NewFakeStore()
-			pool := newTestWorkerPool(store)
-			if tc.hasPoolSession {
-				sess, _ := discordgo.New("Bot fake-token")
-				pool.SetDiscordSession(sess)
-			}
-			handler := handleInternalDiscordInteraction(store, pool)
-
-			var r io.Reader = strings.NewReader(tc.body)
-			if tc.readErr {
-				r = &errReadCloser{readErr: errors.New("simulated body read error")}
-			}
-			req := httptest.NewRequest(tc.method, "/internal/discord/interaction", r)
-			rec := httptest.NewRecorder()
-			handler(rec, req)
-
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
-				t.Errorf("body %q does not contain wantSubstr %q", rec.Body.String(), tc.wantSubstr)
-			}
-		})
-	}
-}
-
-func TestHandleInternalGitHubAPIProxy(t *testing.T) {
-	var capturedAuth, capturedPath, capturedQuery string
-	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedAuth = r.Header.Get("Authorization")
-		capturedPath = r.URL.Path
-		capturedQuery = r.URL.RawQuery
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
-	defer mockAPI.Close()
-
-	t.Setenv("GITHUB_API_URL", mockAPI.URL)
-
-	cfgWithPAT := config.NewFromData(&config.ConfigData{GitHubPAT: "ghp_mockpat12345"})
-	cfgWithoutPAT := config.NewFromData(&config.ConfigData{GitHubPAT: ""})
-
-	tests := []struct {
-		name       string
-		cfg        *config.Config
-		path       string
-		wantStatus int
-		wantSubstr string
-		wantAuth   string
-		wantPath   string
-		wantQuery  string
-	}{
-		{
-			name:       "missing PAT returns 503",
-			cfg:        cfgWithoutPAT,
-			path:       "/internal/github-api/user",
-			wantStatus: http.StatusServiceUnavailable,
-			wantSubstr: "GitHub PAT not configured",
-		},
-		{
-			name:       "successful proxy with subpath and query",
-			cfg:        cfgWithPAT,
-			path:       "/internal/github-api/repos/org/repo/pulls?state=open",
-			wantStatus: http.StatusOK,
-			wantSubstr: `"status":"ok"`,
-			wantAuth:   "token ghp_mockpat12345",
-			wantPath:   "/repos/org/repo/pulls",
-			wantQuery:  "state=open",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			capturedAuth, capturedPath, capturedQuery = "", "", ""
-			h := handleInternalGitHubAPIProxy(tc.cfg)
-			w := runHTTP(h, http.MethodGet, tc.path, nil)
-			if w.Code != tc.wantStatus {
-				t.Fatalf("got status=%d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("expected substr %q in body: %s", tc.wantSubstr, w.Body.String())
-			}
-			if tc.wantAuth != "" && capturedAuth != tc.wantAuth {
-				t.Errorf("captured auth = %q, want %q", capturedAuth, tc.wantAuth)
-			}
-			if tc.wantPath != "" && capturedPath != tc.wantPath {
-				t.Errorf("captured path = %q, want %q", capturedPath, tc.wantPath)
-			}
-			if tc.wantQuery != "" && capturedQuery != tc.wantQuery {
-				t.Errorf("captured query = %q, want %q", capturedQuery, tc.wantQuery)
-			}
-		})
-	}
-
-	t.Run("upstream network failure returns 502", func(t *testing.T) {
-		t.Setenv("GITHUB_API_URL", "http://127.0.0.1:0")
-		h := handleInternalGitHubAPIProxy(cfgWithPAT)
-		w := runHTTP(h, http.MethodGet, "/internal/github-api/test", nil)
-		if w.Code != http.StatusBadGateway {
-			t.Fatalf("expected 502, got %d", w.Code)
-		}
-	})
-}
-
-func TestHandleInternalGitHubGitProxy(t *testing.T) {
-	var capturedAuth, capturedPath, capturedQuery string
-	mockGit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedAuth = r.Header.Get("Authorization")
-		capturedPath = r.URL.Path
-		capturedQuery = r.URL.RawQuery
-		w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("001e# service=git-upload-pack\n0000"))
-	}))
-	defer mockGit.Close()
-
-	t.Setenv("AERIAL_GITHUB_GIT_UPSTREAM", mockGit.URL)
-
-	cfgWithPAT := config.NewFromData(&config.ConfigData{GitHubPAT: "ghp_gitpat98765"})
-	cfgWithoutPAT := config.NewFromData(&config.ConfigData{GitHubPAT: ""})
-
-	tests := []struct {
-		name       string
-		cfg        *config.Config
-		path       string
-		wantStatus int
-		wantSubstr string
-		wantAuth   string
-		wantPath   string
-		wantQuery  string
-	}{
-		{
-			name:       "missing PAT returns 503",
-			cfg:        cfgWithoutPAT,
-			path:       "/internal/github-git/org/repo.git/info/refs",
-			wantStatus: http.StatusServiceUnavailable,
-			wantSubstr: "GitHub PAT not configured",
-		},
-		{
-			name:       "successful git proxy with basic auth and query",
-			cfg:        cfgWithPAT,
-			path:       "/internal/github-git/org/repo.git/info/refs?service=git-upload-pack",
-			wantStatus: http.StatusOK,
-			wantSubstr: "git-upload-pack",
-			wantAuth:   "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghp_gitpat98765")),
-			wantPath:   "/org/repo.git/info/refs",
-			wantQuery:  "service=git-upload-pack",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			capturedAuth, capturedPath, capturedQuery = "", "", ""
-			h := handleInternalGitHubGitProxy(tc.cfg)
-			w := runHTTP(h, http.MethodGet, tc.path, nil)
-			if w.Code != tc.wantStatus {
-				t.Fatalf("got status=%d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("expected substr %q in body: %s", tc.wantSubstr, w.Body.String())
-			}
-			if tc.wantAuth != "" && capturedAuth != tc.wantAuth {
-				t.Errorf("captured auth = %q, want %q", capturedAuth, tc.wantAuth)
-			}
-			if tc.wantPath != "" && capturedPath != tc.wantPath {
-				t.Errorf("captured path = %q, want %q", capturedPath, tc.wantPath)
-			}
-			if tc.wantQuery != "" && capturedQuery != tc.wantQuery {
-				t.Errorf("captured query = %q, want %q", capturedQuery, tc.wantQuery)
-			}
-		})
-	}
-
-	t.Run("upstream network failure returns 502", func(t *testing.T) {
-		t.Setenv("AERIAL_GITHUB_GIT_UPSTREAM", "http://127.0.0.1:0")
-		h := handleInternalGitHubGitProxy(cfgWithPAT)
-		w := runHTTP(h, http.MethodGet, "/internal/github-git/test", nil)
-		if w.Code != http.StatusBadGateway {
-			t.Fatalf("expected 502, got %d", w.Code)
-		}
-	})
 }

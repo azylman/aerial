@@ -9,10 +9,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"gopkg.in/yaml.v3"
-
-	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 // NewTestConfig returns a hermetic in-memory *Config initialized with DefaultConfigData().
@@ -56,28 +52,76 @@ func mapLookup(kv map[string]string) func(string) string {
 	}
 }
 
-func TestLoadConfig_Ingestion(t *testing.T) {
-	origGlobal := activeGlobalConfig.Current()
-	t.Cleanup(func() {
-		activeGlobalConfig.update(origGlobal)
-	})
+type loadConfigIngestionCase struct {
+	name           string
+	content        string
+	envMap         map[string]string
+	wantModel      string
+	wantTZ         string
+	wantSysChan    string
+	wantBotID      string
+	wantSynapseURL string
+	wantVanadisURL string
+	wantHaroURL    string
+	wantCovenURL   string
+	wantTx         TranscriptsConfig
+	wantErr        bool
+	errContains    string
+}
 
-	tests := []struct {
-		name           string
-		content        string
-		envMap         map[string]string
-		wantModel      string
-		wantTZ         string
-		wantSysChan    string
-		wantBotID      string
-		wantSynapseURL string
-		wantVanadisURL string
-		wantHaroURL    string
-		wantCovenURL   string
-		wantTx         TranscriptsConfig
-		wantErr        bool
-		errContains    string
-	}{
+func assertLoadConfigIngestionValues(t *testing.T, cur *ConfigData, tc loadConfigIngestionCase) {
+	t.Helper()
+	if tc.wantModel != "" && cur.Model != tc.wantModel {
+		t.Errorf("Model = %q, want %q", cur.Model, tc.wantModel)
+	}
+	if tc.wantTZ != "" && cur.Timezone != tc.wantTZ {
+		t.Errorf("Timezone = %q, want %q", cur.Timezone, tc.wantTZ)
+	}
+	if tc.wantSysChan != "" && cur.SystemChannel != tc.wantSysChan {
+		t.Errorf("SystemChannel = %q, want %q", cur.SystemChannel, tc.wantSysChan)
+	}
+	if tc.wantBotID != "" && cur.BotID != tc.wantBotID {
+		t.Errorf("BotID = %q, want %q", cur.BotID, tc.wantBotID)
+	}
+	if tc.wantSynapseURL != "" && cur.SynapseURL != tc.wantSynapseURL {
+		t.Errorf("SynapseURL = %q, want %q", cur.SynapseURL, tc.wantSynapseURL)
+	}
+	if tc.wantVanadisURL != "" && cur.VanadisURL != tc.wantVanadisURL {
+		t.Errorf("VanadisURL = %q, want %q", cur.VanadisURL, tc.wantVanadisURL)
+	}
+	if tc.wantHaroURL != "" && cur.HaroURL != tc.wantHaroURL {
+		t.Errorf("HaroURL = %q, want %q", cur.HaroURL, tc.wantHaroURL)
+	}
+	if tc.wantCovenURL != "" && cur.CovenURL != tc.wantCovenURL {
+		t.Errorf("CovenURL = %q, want %q", cur.CovenURL, tc.wantCovenURL)
+	}
+	if cur.Transcripts != tc.wantTx {
+		t.Errorf("Transcripts = %+v, want %+v", cur.Transcripts, tc.wantTx)
+	}
+}
+
+func assertLoadConfigIngestionCase(t *testing.T, tc loadConfigIngestionCase) {
+	t.Helper()
+	lookup := mapLookup(tc.envMap)
+	p := writeTempYAML(t, tc.content)
+	cfg, err := LoadConfigFromLookup(lookup, p)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error containing %q, got nil", tc.errContains)
+		}
+		if !strings.Contains(err.Error(), tc.errContains) {
+			t.Fatalf("expected error containing %q, got: %v", tc.errContains, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertLoadConfigIngestionValues(t, cfg.Current(), tc)
+}
+
+func loadConfigIngestionCases() []loadConfigIngestionCase {
+	return []loadConfigIngestionCase{
 		{
 			name: "valid modern yaml",
 			content: `
@@ -223,52 +267,18 @@ channels:
 			wantTx:         TranscriptsConfig{Database: "shared_db", Stack: "stack-b"},
 		},
 	}
+}
 
+func TestLoadConfig_Ingestion(t *testing.T) {
+	origGlobal := activeGlobalConfig.Current()
+	t.Cleanup(func() {
+		activeGlobalConfig.update(origGlobal)
+	})
+
+	tests := loadConfigIngestionCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			lookup := mapLookup(tc.envMap)
-			p := writeTempYAML(t, tc.content)
-			cfg, err := LoadConfigFromLookup(lookup, p)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.errContains)
-				}
-				if !strings.Contains(err.Error(), tc.errContains) {
-					t.Fatalf("expected error containing %q, got: %v", tc.errContains, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			cur := cfg.Current()
-			if tc.wantModel != "" && cur.Model != tc.wantModel {
-				t.Errorf("Model = %q, want %q", cur.Model, tc.wantModel)
-			}
-			if tc.wantTZ != "" && cur.Timezone != tc.wantTZ {
-				t.Errorf("Timezone = %q, want %q", cur.Timezone, tc.wantTZ)
-			}
-			if tc.wantSysChan != "" && cur.SystemChannel != tc.wantSysChan {
-				t.Errorf("SystemChannel = %q, want %q", cur.SystemChannel, tc.wantSysChan)
-			}
-			if tc.wantBotID != "" && cur.BotID != tc.wantBotID {
-				t.Errorf("BotID = %q, want %q", cur.BotID, tc.wantBotID)
-			}
-			if tc.wantSynapseURL != "" && cur.SynapseURL != tc.wantSynapseURL {
-				t.Errorf("SynapseURL = %q, want %q", cur.SynapseURL, tc.wantSynapseURL)
-			}
-			if tc.wantVanadisURL != "" && cur.VanadisURL != tc.wantVanadisURL {
-				t.Errorf("VanadisURL = %q, want %q", cur.VanadisURL, tc.wantVanadisURL)
-			}
-			if tc.wantHaroURL != "" && cur.HaroURL != tc.wantHaroURL {
-				t.Errorf("HaroURL = %q, want %q", cur.HaroURL, tc.wantHaroURL)
-			}
-			if tc.wantCovenURL != "" && cur.CovenURL != tc.wantCovenURL {
-				t.Errorf("CovenURL = %q, want %q", cur.CovenURL, tc.wantCovenURL)
-			}
-			if cur.Transcripts != tc.wantTx {
-				t.Errorf("Transcripts = %+v, want %+v", cur.Transcripts, tc.wantTx)
-			}
+			assertLoadConfigIngestionCase(t, tc)
 		})
 	}
 
@@ -278,21 +288,73 @@ channels:
 	_, _ = New()
 }
 
+type loadConfigLKGCBootCase struct {
+	name          string
+	files         []string
+	wantModel     string
+	wantErr       bool
+	errSubstr     string
+	testReload    bool
+	badReloadYAML string
+}
+
+func assertLoadConfigLKGCBootCase(t *testing.T, tc loadConfigLKGCBootCase) {
+	t.Helper()
+	t.Setenv("AGY_MODEL", "")
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "")
+	tmpDir := t.TempDir()
+	paths := make([]string, 0, len(tc.files))
+	for _, f := range tc.files {
+		parts := strings.SplitN(f, ":", 2)
+		p := filepath.Join(tmpDir, parts[0])
+		if len(parts) == 2 {
+			if err := os.WriteFile(p, []byte(parts[1]), 0o600); err != nil {
+				t.Fatalf("failed to write %s: %v", p, err)
+			}
+		}
+		paths = append(paths, p)
+	}
+
+	cfg, err := LoadConfigFromPaths(paths...)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error containing %q, got nil", tc.errSubstr)
+		}
+		if !strings.Contains(err.Error(), tc.errSubstr) {
+			t.Fatalf("expected error containing %q, got: %v", tc.errSubstr, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tc.wantModel != "" && cfg.Current().Model != tc.wantModel {
+		t.Fatalf("got model %q, want %q", cfg.Current().Model, tc.wantModel)
+	}
+
+	if tc.testReload {
+		primaryPath := paths[0]
+		_ = os.WriteFile(primaryPath, []byte(tc.badReloadYAML), 0o600)
+		errReload := ReloadWithSupplier(cfg, func() (*Config, error) {
+			return LoadConfigFromPaths(primaryPath)
+		})
+		if errReload == nil {
+			t.Fatal("expected ReloadWithSupplier to fail on corrupted file")
+		}
+		if cfg.Current().Model != tc.wantModel {
+			t.Errorf("active config failed to retain LKGC: got %q, want %q", cfg.Current().Model, tc.wantModel)
+		}
+	}
+}
+
 func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 	origGlobal := activeGlobalConfig.Current()
 	t.Cleanup(func() {
 		activeGlobalConfig.update(origGlobal)
 	})
 
-	tests := []struct {
-		name          string
-		files         []string
-		wantModel     string
-		wantErr       bool
-		errSubstr     string
-		testReload    bool
-		badReloadYAML string
-	}{
+	tests := []loadConfigLKGCBootCase{
 		{
 			name:      "missing search paths fails",
 			files:     []string{"nonexistent.yaml"},
@@ -342,52 +404,7 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("AGY_MODEL", "")
-			t.Setenv("DEFAULT_TIMEZONE", "")
-			t.Setenv("TZ", "")
-			tmpDir := t.TempDir()
-			var paths []string
-			for _, f := range tc.files {
-				parts := strings.SplitN(f, ":", 2)
-				p := filepath.Join(tmpDir, parts[0])
-				if len(parts) == 2 {
-					if err := os.WriteFile(p, []byte(parts[1]), 0o600); err != nil {
-						t.Fatalf("failed to write %s: %v", p, err)
-					}
-				}
-				paths = append(paths, p)
-			}
-
-			cfg, err := LoadConfigFromPaths(paths...)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.errSubstr)
-				}
-				if !strings.Contains(err.Error(), tc.errSubstr) {
-					t.Fatalf("expected error containing %q, got: %v", tc.errSubstr, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.wantModel != "" && cfg.Current().Model != tc.wantModel {
-				t.Fatalf("got model %q, want %q", cfg.Current().Model, tc.wantModel)
-			}
-
-			if tc.testReload {
-				primaryPath := paths[0]
-				_ = os.WriteFile(primaryPath, []byte(tc.badReloadYAML), 0o600)
-				errReload := ReloadWithSupplier(cfg, func() (*Config, error) {
-					return LoadConfigFromPaths(primaryPath)
-				})
-				if errReload == nil {
-					t.Fatal("expected ReloadWithSupplier to fail on corrupted file")
-				}
-				if cfg.Current().Model != tc.wantModel {
-					t.Errorf("active config failed to retain LKGC: got %q, want %q", cfg.Current().Model, tc.wantModel)
-				}
-			}
+			assertLoadConfigLKGCBootCase(t, tc)
 		})
 	}
 
@@ -450,12 +467,57 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 	}
 }
 
-func TestChannelPolicy_ValidationAndResolution(t *testing.T) {
-	validationTests := []struct {
-		name        string
-		yaml        string
-		expectedErr string
-	}{
+type channelPolicyResolutionCase struct {
+	channels           map[string]ChannelPolicy
+	channelID          string
+	channelName        string
+	wantMode           string
+	wantEffort         string
+	wantWake           string
+	wantIgnore         bool
+	wantBotIgn         bool
+	wantNoBuildUpdates bool
+	wantThreshold      float64
+	wantHasHook        bool
+}
+
+func assertChannelPolicyResolutionCase(t *testing.T, tc channelPolicyResolutionCase) {
+	t.Helper()
+	res := ResolveChannelPolicy(tc.channels, tc.channelID, tc.channelName)
+	if tc.wantMode != "" && res.Mode != tc.wantMode {
+		t.Errorf("Mode = %q, want %q", res.Mode, tc.wantMode)
+	}
+	if tc.wantEffort != "" && res.GetEffort() != tc.wantEffort {
+		t.Errorf("Effort = %q, want %q", res.GetEffort(), tc.wantEffort)
+	}
+	if tc.wantWake != "" && res.GetWakeMode() != tc.wantWake {
+		t.Errorf("WakeMode = %q, want %q", res.GetWakeMode(), tc.wantWake)
+	}
+	if res.IsIgnored() != tc.wantIgnore {
+		t.Errorf("IsIgnored = %v, want %v", res.IsIgnored(), tc.wantIgnore)
+	}
+	if res.IsBotIgnored() != tc.wantBotIgn {
+		t.Errorf("IsBotIgnored = %v, want %v", res.IsBotIgnored(), tc.wantBotIgn)
+	}
+	if res.NoBuildUpdates != tc.wantNoBuildUpdates {
+		t.Errorf("NoBuildUpdates = %v, want %v", res.NoBuildUpdates, tc.wantNoBuildUpdates)
+	}
+	if tc.wantThreshold > 0 && res.GetAmbientWakeThreshold() != tc.wantThreshold {
+		t.Errorf("AmbientWakeThreshold = %v, want %v", res.GetAmbientWakeThreshold(), tc.wantThreshold)
+	}
+	if tc.wantHasHook && (res.Hooks.OnWake == nil || res.Hooks.OnWake.URL == "") {
+		t.Errorf("expected inherited OnWake hook, got nil")
+	}
+}
+
+type channelPolicyValidationCase struct {
+	name        string
+	yaml        string
+	expectedErr string
+}
+
+func channelPolicyValidationCases() []channelPolicyValidationCase {
+	return []channelPolicyValidationCase{
 		{
 			name:        "missing channels",
 			yaml:        `model: "gemini-flash"`,
@@ -596,7 +658,11 @@ channels:
 			expectedErr: "effort must be 'low', 'medium', or 'high'",
 		},
 	}
+}
 
+func runChannelPolicyValidationTests(t *testing.T) {
+	t.Helper()
+	validationTests := channelPolicyValidationCases()
 	for _, tc := range validationTests {
 		t.Run("validate_"+tc.name, func(t *testing.T) {
 			p := writeTempYAML(t, tc.yaml)
@@ -609,7 +675,83 @@ channels:
 			}
 		})
 	}
+}
 
+func channelPolicyResolutionCases(channels map[string]ChannelPolicy) []channelPolicyResolutionCase {
+	return []channelPolicyResolutionCase{
+		{
+			channels:           channels,
+			channelID:          "12345",
+			channelName:        "lounge",
+			wantMode:           "mention",
+			wantEffort:         "medium",
+			wantWake:           "mention",
+			wantBotIgn:         true,
+			wantNoBuildUpdates: true,
+			wantThreshold:      0.75,
+			wantHasHook:        true,
+		},
+		{
+			channels:      channels,
+			channelID:     "1543668253363150928",
+			channelName:   "dev",
+			wantMode:      "channel",
+			wantEffort:    "medium",
+			wantWake:      "mention",
+			wantBotIgn:    false,
+			wantThreshold: 0.75,
+			wantHasHook:   true,
+		},
+		{
+			channels:      channels,
+			channelID:     "99999",
+			channelName:   "#General",
+			wantMode:      "channel",
+			wantEffort:    "low",
+			wantWake:      "classifier",
+			wantBotIgn:    true,
+			wantThreshold: 0.85,
+			wantHasHook:   true,
+		},
+		{
+			channels:      channels,
+			channelID:     "88888",
+			channelName:   "random-topic",
+			wantMode:      "threads",
+			wantEffort:    "medium",
+			wantWake:      "mention",
+			wantBotIgn:    true,
+			wantThreshold: 0.75,
+			wantHasHook:   true,
+		},
+		{
+			channels:    channels,
+			channelID:   "77777",
+			channelName: "ignored-channel",
+			wantMode:    "ignore",
+			wantIgnore:  true,
+		},
+		{
+			channels:    channels,
+			channelID:   "66666",
+			channelName: "disabled-channel",
+			wantMode:    "disabled",
+			wantIgnore:  true,
+		},
+		{
+			channels:      nil,
+			channelID:     "",
+			channelName:   "any-chan",
+			wantMode:      "threads",
+			wantEffort:    "high",
+			wantBotIgn:    true,
+			wantThreshold: 0.0,
+		},
+	}
+}
+
+func runChannelPolicyResolutionTests(t *testing.T) {
+	t.Helper()
 	thresh := 0.75
 	channels := map[string]ChannelPolicy{
 		"default": {
@@ -649,124 +791,10 @@ channels:
 		},
 	}
 
-	resolutionTests := []struct {
-		name               string
-		channels           map[string]ChannelPolicy
-		channelID          string
-		channelName        string
-		wantMode           string
-		wantEffort         string
-		wantWake           string
-		wantIgnore         bool
-		wantBotIgn         bool
-		wantNoBuildUpdates bool
-		wantThreshold      float64
-		wantHasHook        bool
-	}{
-		{
-			name:               "match lounge with no build updates",
-			channels:           channels,
-			channelID:          "12345",
-			channelName:        "lounge",
-			wantMode:           "mention",
-			wantEffort:         "medium",
-			wantWake:           "mention",
-			wantBotIgn:         true,
-			wantNoBuildUpdates: true,
-			wantThreshold:      0.75,
-			wantHasHook:        true,
-		},
-		{
-			name:          "match snowflake id",
-			channels:      channels,
-			channelID:     "1543668253363150928",
-			channelName:   "dev",
-			wantMode:      "channel",
-			wantEffort:    "medium",
-			wantWake:      "mention",
-			wantBotIgn:    false,
-			wantThreshold: 0.75,
-			wantHasHook:   true,
-		},
-		{
-			name:          "match channel name case insensitive with hash",
-			channels:      channels,
-			channelID:     "99999",
-			channelName:   "#General",
-			wantMode:      "channel",
-			wantEffort:    "low",
-			wantWake:      "classifier",
-			wantBotIgn:    true,
-			wantThreshold: 0.85,
-			wantHasHook:   true,
-		},
-		{
-			name:          "unmatched falls back to default",
-			channels:      channels,
-			channelID:     "88888",
-			channelName:   "random-topic",
-			wantMode:      "threads",
-			wantEffort:    "medium",
-			wantWake:      "mention",
-			wantBotIgn:    true,
-			wantThreshold: 0.75,
-			wantHasHook:   true,
-		},
-		{
-			name:        "ignored mode stops resolution",
-			channels:    channels,
-			channelID:   "77777",
-			channelName: "ignored-channel",
-			wantMode:    "ignore",
-			wantIgnore:  true,
-		},
-		{
-			name:        "disabled mode stops resolution",
-			channels:    channels,
-			channelID:   "66666",
-			channelName: "disabled-channel",
-			wantMode:    "disabled",
-			wantIgnore:  true,
-		},
-		{
-			name:          "nil map fallback",
-			channels:      nil,
-			channelID:     "",
-			channelName:   "any-chan",
-			wantMode:      "threads",
-			wantEffort:    "high",
-			wantBotIgn:    true,
-			wantThreshold: 0.0,
-		},
-	}
-
+	resolutionTests := channelPolicyResolutionCases(channels)
 	for _, tc := range resolutionTests {
-		t.Run("resolve_"+tc.name, func(t *testing.T) {
-			res := ResolveChannelPolicy(tc.channels, tc.channelID, tc.channelName)
-			if tc.wantMode != "" && res.Mode != tc.wantMode {
-				t.Errorf("Mode = %q, want %q", res.Mode, tc.wantMode)
-			}
-			if tc.wantEffort != "" && res.GetEffort() != tc.wantEffort {
-				t.Errorf("Effort = %q, want %q", res.GetEffort(), tc.wantEffort)
-			}
-			if tc.wantWake != "" && res.GetWakeMode() != tc.wantWake {
-				t.Errorf("WakeMode = %q, want %q", res.GetWakeMode(), tc.wantWake)
-			}
-			if res.IsIgnored() != tc.wantIgnore {
-				t.Errorf("IsIgnored = %v, want %v", res.IsIgnored(), tc.wantIgnore)
-			}
-			if res.IsBotIgnored() != tc.wantBotIgn {
-				t.Errorf("IsBotIgnored = %v, want %v", res.IsBotIgnored(), tc.wantBotIgn)
-			}
-			if res.NoBuildUpdates != tc.wantNoBuildUpdates {
-				t.Errorf("NoBuildUpdates = %v, want %v", res.NoBuildUpdates, tc.wantNoBuildUpdates)
-			}
-			if tc.wantThreshold > 0 && res.GetAmbientWakeThreshold() != tc.wantThreshold {
-				t.Errorf("AmbientWakeThreshold = %v, want %v", res.GetAmbientWakeThreshold(), tc.wantThreshold)
-			}
-			if tc.wantHasHook && (res.Hooks.OnWake == nil || res.Hooks.OnWake.URL == "") {
-				t.Errorf("expected inherited OnWake hook, got nil")
-			}
+		t.Run("resolve_"+tc.channelName, func(t *testing.T) {
+			assertChannelPolicyResolutionCase(t, tc)
 		})
 	}
 
@@ -811,6 +839,80 @@ channels:
 	if nilEndpoint.GetTimeout() != 3000*time.Millisecond || nilEndpoint.GetOnTimeout("fallback") != "fallback" {
 		t.Errorf("nil WebhookEndpoint methods unexpected")
 	}
+}
+
+func TestChannelPolicy_ValidationAndResolution(t *testing.T) {
+	runChannelPolicyValidationTests(t)
+	runChannelPolicyResolutionTests(t)
+}
+
+type envOverrideCase struct {
+	name             string
+	envMap           map[string]string
+	wantPort         string
+	wantBin          string
+	wantEngine       string
+	wantClaude       string
+	wantKey          string
+	wantModel        string
+	wantTZ           string
+	wantChan         string
+	wantDiscordToken string
+	wantIdle         time.Duration
+	wantMaxDur       time.Duration
+	wantCtx          int
+}
+
+func assertEnvOverrideBasic(t *testing.T, data *ConfigData, tc envOverrideCase) {
+	t.Helper()
+	if tc.wantPort != "" && data.Port != tc.wantPort {
+		t.Errorf("Port = %q, want %q", data.Port, tc.wantPort)
+	}
+	if tc.wantBin != "" && data.AgyBin != tc.wantBin {
+		t.Errorf("AgyBin = %q, want %q", data.AgyBin, tc.wantBin)
+	}
+	if tc.wantEngine != "" && data.Engine != tc.wantEngine {
+		t.Errorf("Engine = %q, want %q", data.Engine, tc.wantEngine)
+	}
+	if tc.wantClaude != "" && data.ClaudeBin != tc.wantClaude {
+		t.Errorf("ClaudeBin = %q, want %q", data.ClaudeBin, tc.wantClaude)
+	}
+	if tc.wantKey != "" && data.APIKey != tc.wantKey {
+		t.Errorf("APIKey = %q, want %q", data.APIKey, tc.wantKey)
+	}
+	if tc.wantModel != "" && data.Model != tc.wantModel {
+		t.Errorf("Model = %q, want %q", data.Model, tc.wantModel)
+	}
+}
+
+func assertEnvOverrideExtended(t *testing.T, data *ConfigData, tc envOverrideCase) {
+	t.Helper()
+	if tc.wantTZ != "" && data.Timezone != tc.wantTZ {
+		t.Errorf("Timezone = %q, want %q", data.Timezone, tc.wantTZ)
+	}
+	if tc.wantChan != "" && data.SystemChannel != tc.wantChan {
+		t.Errorf("SystemChannel = %q, want %q", data.SystemChannel, tc.wantChan)
+	}
+	if tc.wantDiscordToken != "" && data.DiscordToken != tc.wantDiscordToken {
+		t.Errorf("DiscordToken = %q, want %q", data.DiscordToken, tc.wantDiscordToken)
+	}
+	if tc.wantIdle > 0 && data.DaemonIdleTimeout != tc.wantIdle {
+		t.Errorf("DaemonIdleTimeout = %v, want %v", data.DaemonIdleTimeout, tc.wantIdle)
+	}
+	if tc.wantMaxDur > 0 && data.MaxBackgroundTaskDuration != tc.wantMaxDur {
+		t.Errorf("MaxBackgroundTaskDuration = %v, want %v", data.MaxBackgroundTaskDuration, tc.wantMaxDur)
+	}
+	if tc.wantCtx > 0 && data.Ollama.NumCtx != tc.wantCtx {
+		t.Errorf("Ollama.NumCtx = %v, want %v", data.Ollama.NumCtx, tc.wantCtx)
+	}
+}
+
+func assertEnvOverrideCase(t *testing.T, tc envOverrideCase) {
+	t.Helper()
+	data := DefaultConfigData()
+	applyEnvironmentOverrides(data, mapLookup(tc.envMap))
+	assertEnvOverrideBasic(t, data, tc)
+	assertEnvOverrideExtended(t, data, tc)
 }
 
 func TestConfig_EnvironmentAndDSN(t *testing.T) {
@@ -882,22 +984,7 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 		})
 	}
 
-	overrideTests := []struct {
-		name             string
-		envMap           map[string]string
-		wantPort         string
-		wantBin          string
-		wantEngine       string
-		wantClaude       string
-		wantKey          string
-		wantModel        string
-		wantTZ           string
-		wantChan         string
-		wantDiscordToken string
-		wantIdle         time.Duration
-		wantMaxDur       time.Duration
-		wantCtx          int
-	}{
+	overrideTests := []envOverrideCase{
 		{
 			name: "primary env vars",
 			envMap: map[string]string{
@@ -942,49 +1029,147 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 	}
 	for _, tc := range overrideTests {
 		t.Run("override_"+tc.name, func(t *testing.T) {
-			data := DefaultConfigData()
-			applyEnvironmentOverrides(data, mapLookup(tc.envMap))
-			if tc.wantPort != "" && data.Port != tc.wantPort {
-				t.Errorf("Port = %q, want %q", data.Port, tc.wantPort)
-			}
-			if tc.wantBin != "" && data.AgyBin != tc.wantBin {
-				t.Errorf("AgyBin = %q, want %q", data.AgyBin, tc.wantBin)
-			}
-			if tc.wantEngine != "" && data.Engine != tc.wantEngine {
-				t.Errorf("Engine = %q, want %q", data.Engine, tc.wantEngine)
-			}
-			if tc.wantClaude != "" && data.ClaudeBin != tc.wantClaude {
-				t.Errorf("ClaudeBin = %q, want %q", data.ClaudeBin, tc.wantClaude)
-			}
-			if tc.wantKey != "" && data.APIKey != tc.wantKey {
-				t.Errorf("APIKey = %q, want %q", data.APIKey, tc.wantKey)
-			}
-			if tc.wantModel != "" && data.Model != tc.wantModel {
-				t.Errorf("Model = %q, want %q", data.Model, tc.wantModel)
-			}
-			if tc.wantTZ != "" && data.Timezone != tc.wantTZ {
-				t.Errorf("Timezone = %q, want %q", data.Timezone, tc.wantTZ)
-			}
-			if tc.wantChan != "" && data.SystemChannel != tc.wantChan {
-				t.Errorf("SystemChannel = %q, want %q", data.SystemChannel, tc.wantChan)
-			}
-			if tc.wantDiscordToken != "" && data.DiscordToken != tc.wantDiscordToken {
-				t.Errorf("DiscordToken = %q, want %q", data.DiscordToken, tc.wantDiscordToken)
-			}
-			if tc.wantIdle > 0 && data.DaemonIdleTimeout != tc.wantIdle {
-				t.Errorf("DaemonIdleTimeout = %v, want %v", data.DaemonIdleTimeout, tc.wantIdle)
-			}
-			if tc.wantMaxDur > 0 && data.MaxBackgroundTaskDuration != tc.wantMaxDur {
-				t.Errorf("MaxBackgroundTaskDuration = %v, want %v", data.MaxBackgroundTaskDuration, tc.wantMaxDur)
-			}
-			if tc.wantCtx > 0 && data.Ollama.NumCtx != tc.wantCtx {
-				t.Errorf("Ollama.NumCtx = %v, want %v", data.Ollama.NumCtx, tc.wantCtx)
-			}
+			assertEnvOverrideCase(t, tc)
 		})
 	}
 
 	applyEnvironmentOverrides(nil, mapLookup(nil))
 	applyEnvironmentOverrides(DefaultConfigData(), nil)
+}
+
+func assertConfigBasics(t *testing.T, nilCfg *Config) {
+	t.Helper()
+	if nilCfg.Current() == nil || (&Config{}).Current() == nil || NewFromData(nil).Current() == nil {
+		t.Errorf("expected DefaultConfigData on nil/empty Config, got nil")
+	}
+	if _, ok := nilCfg.getChannelPolicyRaw("nonexistent"); ok {
+		t.Errorf("expected false from nilCfg.getChannelPolicyRaw")
+	}
+	if nilCfg.Get() == nil {
+		t.Errorf("expected DefaultConfigData from nilCfg.Get()")
+	}
+	if nilCfg.VoiceEngine() != "agy" {
+		t.Errorf("expected agy voice engine on nil Config, got %q", nilCfg.VoiceEngine())
+	}
+	if nilCfg.VoicePrewarmedTargets() == nil {
+		t.Errorf("expected non-nil prewarmed targets on nil Config")
+	}
+}
+
+func runConfigAccessors(t *testing.T) {
+	t.Helper()
+	var nilCfg *Config
+	assertConfigBasics(t, nilCfg)
+	origGlobal := ActiveConfig().Current()
+	ActiveConfig().Update(&ConfigData{Timezone: "", SystemChannel: ""})
+	if ActiveConfig().Current().SystemChannel != "" || ActiveConfig().Current().Timezone != "" {
+		t.Errorf("expected empty on updated ActiveConfig")
+	}
+	ActiveConfig().Update(&ConfigData{Timezone: "UTC", SystemChannel: "custom-sys"})
+	if ActiveConfig().Current().SystemChannel != "custom-sys" || ActiveConfig().Current().Timezone != "UTC" {
+		t.Errorf("expected custom values on ActiveConfig")
+	}
+	ActiveConfig().Update(origGlobal)
+	if nilCfg.GeminiHomeDir() != "" || nilCfg.DataDir() != "" {
+		t.Errorf("expected empty dirs on nil Config")
+	}
+	var nilData *ConfigData
+	if nilData.VoiceEngine() != "agy" || nilData.VoiceAmbientContext() != nil {
+		t.Errorf("unexpected nil ConfigData responses")
+	}
+	if nilData.VoiceAllowedTools() != nil {
+		t.Errorf("expected nil tools on nil ConfigData")
+	}
+	if cloneConfigData(nil) != nil {
+		t.Errorf("expected nil from cloneConfigData(nil)")
+	}
+
+	testCfg := NewTestConfig(func(d *ConfigData) {
+		d.Model = "test-model-override"
+	})
+	testCfg.Update(nil)
+	nilCfg.Update(DefaultConfigData())
+	cur := testCfg.Current()
+	if cur.Model != "test-model-override" || cur.DatabaseURL != ":memory:" || cur.Port != "0" {
+		t.Errorf("NewTestConfig unexpected values: %+v", cur)
+	}
+	if testCfg.GeminiHomeDir() != cur.GeminiHomeDir || testCfg.DataDir() != cur.DataDir {
+		t.Errorf("dirs mismatch: %q vs %q", testCfg.DataDir(), cur.DataDir)
+	}
+	testCfg.Update(&ConfigData{Model: "updated-model"})
+	if testCfg.Current().Model != "updated-model" {
+		t.Errorf("Update failed: got %q", testCfg.Current().Model)
+	}
+}
+
+func runConfigConcurrency(t *testing.T) {
+	t.Helper()
+	origCD := &ConfigData{
+		AdminUsers: []string{"u1"},
+		Channels:   map[string]ChannelPolicy{"default": {Mode: "threads"}},
+		McpServers: TargetMcpConfig{
+			Discord: map[string]json.RawMessage{"s": json.RawMessage(`{}`)},
+		},
+	}
+	clonedCD := cloneConfigData(origCD)
+	origCD.AdminUsers[0] = "mutated"
+	if clonedCD.AdminUsers[0] == "mutated" {
+		t.Errorf("slice backing array shared after clone")
+	}
+	origCD.Channels["mutated"] = ChannelPolicy{Mode: "channel"}
+	if _, exists := clonedCD.Channels["mutated"]; exists {
+		t.Errorf("channels map shared after clone")
+	}
+
+	raceCfg := NewFromData(&ConfigData{
+		Model:    "init",
+		Channels: map[string]ChannelPolicy{"default": {Mode: "threads"}},
+	})
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Go(func() {
+			for range 50 {
+				cur := raceCfg.Current()
+				_ = cur.Model
+				_ = cur.Channels["default"].Mode
+			}
+		})
+	}
+	for i := range 4 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for j := range 25 {
+				raceCfg.update(&ConfigData{
+					Model:    fmt.Sprintf("m-%d-%d", idx, j),
+					Channels: map[string]ChannelPolicy{"default": {Mode: "threads"}},
+				})
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	_ = GetRuntimeConfig()
+	origG := activeGlobalConfig.Current()
+	activeGlobalConfig.update(&ConfigData{
+		Timezone:      "America/New_York",
+		SystemChannel: "ops-channel",
+	})
+	if GetTimezone() != "America/New_York" || activeGlobalConfig.Current().SystemChannel != "ops-channel" {
+		t.Errorf("expected updated timezone and channel from globals")
+	}
+	activeGlobalConfig.update(origG)
+
+	cfgWithAmbient := NewFromData(&ConfigData{
+		Voice: VoiceConfig{
+			AmbientContext: &AmbientContextConfig{CacheTTL: "5m"},
+		},
+	})
+	if cfgWithAmbient.Current().VoiceAmbientContext() == nil {
+		t.Errorf("expected non-nil voice ambient context")
+	}
+
+	_ = LoadScopeInstructions("general")
 }
 
 func TestConfig_AccessorsAndConcurrency(t *testing.T) {
@@ -1061,129 +1246,8 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 		})
 	}
 
-	var nilCfg *Config
-	if nilCfg.Current() == nil || (&Config{}).Current() == nil || NewFromData(nil).Current() == nil {
-		t.Errorf("expected DefaultConfigData on nil/empty Config, got nil")
-	}
-	if _, ok := nilCfg.getChannelPolicyRaw("nonexistent"); ok {
-		t.Errorf("expected false from nilCfg.getChannelPolicyRaw")
-	}
-	if nilCfg.Get() == nil {
-		t.Errorf("expected DefaultConfigData from nilCfg.Get()")
-	}
-	if nilCfg.VoiceEngine() != "agy" {
-		t.Errorf("expected agy voice engine on nil Config, got %q", nilCfg.VoiceEngine())
-	}
-	if nilCfg.VoicePrewarmedTargets() == nil {
-		t.Errorf("expected non-nil prewarmed targets on nil Config")
-	}
-	origGlobal := ActiveConfig().Current()
-	ActiveConfig().Update(&ConfigData{Timezone: "", SystemChannel: ""})
-	if ActiveConfig().Current().SystemChannel != "" || ActiveConfig().Current().Timezone != "" {
-		t.Errorf("expected empty on updated ActiveConfig")
-	}
-	ActiveConfig().Update(&ConfigData{Timezone: "UTC", SystemChannel: "custom-sys"})
-	if ActiveConfig().Current().SystemChannel != "custom-sys" || ActiveConfig().Current().Timezone != "UTC" {
-		t.Errorf("expected custom values on ActiveConfig")
-	}
-	ActiveConfig().Update(origGlobal)
-	if nilCfg.GeminiHomeDir() != "" || nilCfg.DataDir() != "" {
-		t.Errorf("expected empty dirs on nil Config")
-	}
-	var nilData *ConfigData
-	if nilData.VoiceEngine() != "agy" || nilData.VoiceAmbientContext() != nil {
-		t.Errorf("unexpected nil ConfigData responses")
-	}
-	if nilData.VoiceAllowedTools() != nil {
-		t.Errorf("expected nil tools on nil ConfigData")
-	}
-	if cloneConfigData(nil) != nil {
-		t.Errorf("expected nil from cloneConfigData(nil)")
-	}
-
-	testCfg := NewTestConfig(func(d *ConfigData) {
-		d.Model = "test-model-override"
-	})
-	testCfg.Update(nil)
-	nilCfg.Update(DefaultConfigData())
-	cur := testCfg.Current()
-	if cur.Model != "test-model-override" || cur.DatabaseURL != ":memory:" || cur.Port != "0" {
-		t.Errorf("NewTestConfig unexpected values: %+v", cur)
-	}
-	if testCfg.GeminiHomeDir() != cur.GeminiHomeDir || testCfg.DataDir() != cur.DataDir {
-		t.Errorf("dirs mismatch: %q vs %q", testCfg.DataDir(), cur.DataDir)
-	}
-	testCfg.Update(&ConfigData{Model: "updated-model"})
-	if testCfg.Current().Model != "updated-model" {
-		t.Errorf("Update failed: got %q", testCfg.Current().Model)
-	}
-
-	origCD := &ConfigData{
-		AdminUsers: []string{"u1"},
-		Channels:   map[string]ChannelPolicy{"default": {Mode: "threads"}},
-		McpServers: TargetMcpConfig{
-			Discord: map[string]json.RawMessage{"s": json.RawMessage(`{}`)},
-		},
-	}
-	clonedCD := cloneConfigData(origCD)
-	origCD.AdminUsers[0] = "mutated"
-	if clonedCD.AdminUsers[0] == "mutated" {
-		t.Errorf("slice backing array shared after clone")
-	}
-	origCD.Channels["mutated"] = ChannelPolicy{Mode: "channel"}
-	if _, exists := clonedCD.Channels["mutated"]; exists {
-		t.Errorf("channels map shared after clone")
-	}
-
-	raceCfg := NewFromData(&ConfigData{
-		Model:    "init",
-		Channels: map[string]ChannelPolicy{"default": {Mode: "threads"}},
-	})
-	var wg sync.WaitGroup
-	for range 10 {
-		wg.Go(func() {
-			for range 50 {
-				cur := raceCfg.Current()
-				_ = cur.Model
-				_ = cur.Channels["default"].Mode
-			}
-		})
-	}
-	for i := range 4 {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			for j := range 25 {
-				raceCfg.update(&ConfigData{
-					Model:    fmt.Sprintf("m-%d-%d", idx, j),
-					Channels: map[string]ChannelPolicy{"default": {Mode: "threads"}},
-				})
-			}
-		}(i)
-	}
-	wg.Wait()
-
-	_ = GetRuntimeConfig()
-	origG := activeGlobalConfig.Current()
-	activeGlobalConfig.update(&ConfigData{
-		Timezone:      "America/New_York",
-		SystemChannel: "ops-channel",
-	})
-	if GetTimezone() != "America/New_York" || activeGlobalConfig.Current().SystemChannel != "ops-channel" {
-		t.Errorf("expected updated timezone and channel from globals")
-	}
-	activeGlobalConfig.update(origG)
-
-	cfgWithAmbient := NewFromData(&ConfigData{
-		Voice: VoiceConfig{
-			AmbientContext: &AmbientContextConfig{CacheTTL: "5m"},
-		},
-	})
-	if cfgWithAmbient.Current().VoiceAmbientContext() == nil {
-		t.Errorf("expected non-nil voice ambient context")
-	}
-
-	_ = LoadScopeInstructions("general")
+	runConfigAccessors(t)
+	runConfigConcurrency(t)
 }
 
 func slicesEqual(a, b []string) bool {
@@ -1196,898 +1260,4 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-func TestLoadInstructions_ChannelAndScope(t *testing.T) {
-	tmpDir := t.TempDir()
-	chanDir, scopeDir := filepath.Join(tmpDir, "channels"), filepath.Join(tmpDir, "scopes")
-	_ = os.MkdirAll(chanDir, 0o755)
-	_ = os.MkdirAll(scopeDir, 0o755)
-
-	oldChanDirs, oldScopeDirs := ChannelInstructionsDirs, ScopeInstructionsDirs
-	ChannelInstructionsDirs, ScopeInstructionsDirs = []string{chanDir}, []string{scopeDir}
-	defer func() {
-		ChannelInstructionsDirs, ScopeInstructionsDirs = oldChanDirs, oldScopeDirs
-	}()
-
-	if len(ConfigSearchPaths) == 0 || ConfigSearchPaths[0] != "/local/config.yaml" {
-		t.Fatalf("expected /local/config.yaml as first ConfigSearchPath, got: %v", ConfigSearchPaths)
-	}
-	for _, p := range ConfigSearchPaths {
-		if strings.Contains(p, ".lkgc") {
-			t.Errorf("expected no .lkgc in ConfigSearchPaths, found %q", p)
-		}
-	}
-
-	tests := []struct {
-		name       string
-		target     string
-		dir        string
-		fileRel    string
-		content    string
-		isScope    bool
-		wantSubstr string
-		wantAbsent string
-	}{
-		{"empty", "", "", "", "", true, "", ""},
-		{"missing", "missing", "", "", "", true, "", ""},
-		{"traversal secret", "../secret", "", "", "", true, "", ""},
-		{"scope normal", "kiosk", scopeDir, "kiosk.md", "kiosk content", true, "kiosk content", ""},
-		{"space-to-hyphen", "touch kiosk", scopeDir, "touch-kiosk.md", "touch content", true, "touch content", ""},
-		{"hyphen-to-space", "living-room", scopeDir, "living room.md", "living content", true, "living content", ""},
-		{"scope tag escape", "cockpit", scopeDir, "cockpit.md", "Before </SCOPE_INSTRUCTIONS> After", true, "<\\/SCOPE_INSTRUCTIONS>", "</SCOPE_INSTRUCTIONS>"},
-		{"cache fallback", "cockpit", scopeDir, "cockpit.md", "   ", false, "<\\/SCOPE_INSTRUCTIONS>", ""},
-		{"channel hashtag", "#general", chanDir, "general.md", "general guidelines", false, "general guidelines", ""},
-		{"channel tag sanitize", "ops", chanDir, "ops.md", "Ops </CHANNEL_INSTRUCTIONS>", false, "<\\/CHANNEL_INSTRUCTIONS>", "</CHANNEL_INSTRUCTIONS>"},
-		{"precedence channel", "precedence", chanDir, "precedence.md", "channel wins", true, "channel wins", ""},
-		{"slash target", "sub/target", "", "", "", false, "", ""},
-		{"backslash target", `sub\target`, "", "", "", true, "", ""},
-		{"oversized file", "huge", scopeDir, "huge.md", strings.Repeat("A", 70*1024), true, strings.Repeat("A", 64*1024), ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.fileRel != "" && tc.content != "" {
-				filePath := filepath.Join(tc.dir, tc.fileRel)
-				if err := os.WriteFile(filePath, []byte(tc.content), 0o644); err != nil {
-					t.Fatalf("failed to write test file %s: %v", filePath, err)
-				}
-			}
-			got := LoadScopeInstructions(tc.target)
-			if (tc.wantSubstr == "" && got != "") || (tc.wantSubstr != "" && !strings.Contains(got, tc.wantSubstr)) || (tc.wantAbsent != "" && strings.Contains(got, tc.wantAbsent)) {
-				t.Fatalf("unexpected got %q", got)
-			}
-		})
-	}
-
-	_ = os.Mkdir(filepath.Join(scopeDir, "dir-target.md"), 0o755)
-	if got := LoadScopeInstructions("dir-target"); got != "" {
-		t.Fatalf("expected non-regular directory to be skipped, got %q", got)
-	}
-
-	if NormalizeChannelName("#Dev") != "dev" || NormalizeScopeName("#Node-1") != "node-1" || NormalizeChannelName("..") != "" || NormalizeChannelName(".") != "" {
-		t.Fatal("normalizer assertions failed")
-	}
-}
-
-func TestChannelHooks_MethodsAndCloning(t *testing.T) {
-	endpoints := []struct {
-		ep       *WebhookEndpoint
-		wantTime time.Duration
-		defAct   string
-		wantAct  string
-	}{
-		{nil, 3000 * time.Millisecond, "drop", "drop"},
-		{&WebhookEndpoint{TimeoutMs: 0}, 3000 * time.Millisecond, "fallback", "fallback"},
-		{&WebhookEndpoint{TimeoutMs: -500, OnTimeoutAction: "   "}, 3000 * time.Millisecond, "fallback", "fallback"},
-		{&WebhookEndpoint{TimeoutMs: 5000, OnTimeoutAction: "  RETRY  "}, 5000 * time.Millisecond, "drop", "retry"},
-		{&WebhookEndpoint{TimeoutMs: 2500, OnTimeoutAction: "WaKe"}, 2500 * time.Millisecond, "drop", "wake"},
-	}
-	for i, tc := range endpoints {
-		t.Run(fmt.Sprintf("endpoint_%d", i), func(t *testing.T) {
-			if tc.ep.GetTimeout() != tc.wantTime || tc.ep.GetOnTimeout(tc.defAct) != tc.wantAct {
-				t.Fatalf("endpoint timeout/action mismatch")
-			}
-		})
-	}
-
-	p := ChannelPolicy{Mode: "threads", NoBuildUpdates: true, Hooks: ChannelHooksConfig{
-		OnWake:   &WebhookEndpoint{URL: "https://sidecar:8080/on-wake", TimeoutMs: 2500, OnTimeoutAction: "wake"},
-		PreTurn:  &WebhookEndpoint{URL: "http://127.0.0.1:9090/pre", TimeoutMs: 1500, OnTimeoutAction: "retry"},
-		PostTurn: &WebhookEndpoint{URL: "http://127.0.0.1:9090/post", TimeoutMs: 4000, OnTimeoutAction: "proceed"},
-	}}
-	if p.Hooks.OnWake.URL != "https://sidecar:8080/on-wake" || !p.NoBuildUpdates {
-		t.Fatal("Hooks or NoBuildUpdates mismatch")
-	}
-
-	yBytes, _ := yaml.Marshal(p)
-	var pYAML, pJSON ChannelPolicy
-	_ = yaml.Unmarshal(yBytes, &pYAML)
-	jBytes, _ := json.Marshal(p)
-	_ = json.Unmarshal(jBytes, &pJSON)
-	if pYAML.Hooks.OnWake.URL != p.Hooks.OnWake.URL || pJSON.Hooks.PreTurn.URL != p.Hooks.PreTurn.URL || !pYAML.NoBuildUpdates || !pJSON.NoBuildUpdates {
-		t.Fatal("round-trip mismatch")
-	}
-
-	channels := map[string]ChannelPolicy{
-		"default": {Mode: "threads", Hooks: ChannelHooksConfig{OnWake: &WebhookEndpoint{URL: "http://def/wake"}, PreTurn: &WebhookEndpoint{URL: "http://def/pre"}}},
-		"custom":  {Mode: "channel", Hooks: ChannelHooksConfig{PreTurn: &WebhookEndpoint{URL: "http://cust/pre"}, PostTurn: &WebhookEndpoint{URL: "http://cust/post"}}},
-	}
-	res := ResolveChannelPolicy(channels, "", "custom")
-	if res.Hooks.OnWake.URL != "http://def/wake" || res.Hooks.PreTurn.URL != "http://cust/pre" || res.Hooks.PostTurn.URL != "http://cust/post" {
-		t.Fatal("ResolveChannelPolicy hook inheritance failed")
-	}
-	res.Hooks.OnWake.URL = "http://mutated/wake"
-	if channels["default"].Hooks.OnWake.URL == "http://mutated/wake" {
-		t.Fatal("resolved policy mutation leaked to source")
-	}
-	cloned := cloneChannelPolicy(p)
-	cloned.Hooks.OnWake.URL = "http://cloned/wake"
-	if p.Hooks.OnWake.URL == "http://cloned/wake" || !cloned.NoBuildUpdates {
-		t.Fatal("cloneChannelPolicy deep copy failed")
-	}
-}
-
-func TestChannelHooks_Validation(t *testing.T) {
-	tests := []struct {
-		name          string
-		yaml          string
-		wantErrSubstr string
-	}{
-		{"valid", "channels:\n  default:\n    mode: threads\n    hooks:\n      on_wake: {url: 'http://127.0.0.1:8080/w', timeout_ms: 1000}\n      pre_turn: {url: 'https://ex.com/p', timeout_ms: 2000}\n      post_turn: {url: 'http://loc:9000/po'}", ""},
-		{"default empty url", "channels:\n  default:\n    mode: threads\n    hooks:\n      on_wake: {url: '   '}", `channel "default" on_wake webhook url is required`},
-		{"default invalid scheme", "channels:\n  default:\n    mode: threads\n    hooks:\n      pre_turn: {url: 'ftp://ex.com/h'}", `channel "default" pre_turn webhook url must be a valid http or https URL`},
-		{"default malformed url", "channels:\n  default:\n    mode: threads\n    hooks:\n      post_turn: {url: '://invalid'}", `channel "default" post_turn webhook url must be a valid http or https URL`},
-		{"default neg timeout", "channels:\n  default:\n    mode: threads\n    hooks:\n      on_wake: {url: 'http://loc:8080/w', timeout_ms: -1}", `channel "default" on_wake webhook timeout_ms cannot be negative`},
-		{"custom empty url", "channels:\n  default: {mode: threads}\n  custom:\n    mode: channel\n    hooks:\n      pre_turn: {url: ''}", `channel "custom" pre_turn webhook url is required`},
-		{"custom invalid host", "channels:\n  default: {mode: threads}\n  custom:\n    mode: channel\n    hooks:\n      post_turn: {url: 'http://'}", `channel "custom" post_turn webhook url must be a valid http or https URL`},
-		{"custom neg timeout", "channels:\n  default: {mode: threads}\n  custom:\n    mode: channel\n    hooks:\n      on_wake: {url: 'https://ex.com/w', timeout_ms: -100}", `channel "custom" on_wake webhook timeout_ms cannot be negative`},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := LoadConfigFromLookup(func(string) string { return "" }, writeTempYAML(t, tc.yaml))
-			if tc.wantErrSubstr == "" && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
-				t.Fatalf("got err=%v, want %q", err, tc.wantErrSubstr)
-			}
-		})
-	}
-}
-
-func TestConfig_DaemonClassifierAndThreadTitle(t *testing.T) {
-	var exampleContent string
-	for d := "."; d != "/" && filepath.Clean(d) != "/"; d = filepath.Join("..", d) {
-		if b, err := os.ReadFile(filepath.Join(d, "config.example.yaml")); err == nil {
-			exampleContent = string(b)
-			break
-		}
-	}
-
-	tests := []struct {
-		name         string
-		yaml         string
-		env          map[string]string
-		wantProtocol string
-		wantClassURL string
-		wantTitleURL string
-		wantModel    string
-		wantChannel  string
-		wantIdle     time.Duration
-		wantErr      bool
-	}{
-		{"daemon explicit", "channels: {default: {mode: threads}}\ndaemon_idle_timeout: 12h\nmax_concurrent_daemons: 25\nmax_background_task_duration: 90m\n", nil, "", "", "", "", "", 12 * time.Hour, false},
-		{"daemon defaults", "channels: {default: {mode: threads}}\n", nil, "", "", "", "", "", 24 * time.Hour, false},
-		{"classifier yaml", "channels: {default: {mode: threads}}\nclassifier_url: http://192.168.1.70:11434\nclassifier_model: qwen2.5:3b\nclassifier_protocol: systemone\n", nil, "systemone", "http://192.168.1.70:11434", "", "", "", 0, false},
-		{"classifier sysone valid", "channels: {default: {mode: threads}}\nclassifier_protocol: systemone\nclassifier_url: http://192.168.1.70:8000/v1/systemone\n", nil, "systemone", "http://192.168.1.70:8000/v1/systemone", "", "", "", 0, false},
-		{"classifier ollama with url", "channels: {default: {mode: threads}}\nclassifier_protocol: ollama\nclassifier_url: http://192.168.1.70:11434\n", nil, "ollama", "http://192.168.1.70:11434", "", "", "", 0, false},
-		{"classifier ollama no url", "channels: {default: {mode: threads}}\nclassifier_protocol: ollama\n", nil, "ollama", "", "", "", "", 0, false},
-		{"classifier sysone missing url", "channels: {default: {mode: threads}}\nclassifier_protocol: systemone\n", nil, "", "", "", "", "", 0, true},
-		{"classifier invalid protocol", "channels: {default: {mode: threads}}\nclassifier_protocol: unsupported\n", nil, "", "", "", "", "", 0, true},
-		{"classifier env", "", map[string]string{"CLASSIFIER_PROTOCOL": "SYSTEMONE"}, "systemone", "", "", "", "", 0, false},
-		{"thread title yaml", "channels: {default: {mode: threads}}\nthread_title_url: http://192.168.1.70:11434\nthread_title_model: qwen2.5:3b\n", nil, "", "", "http://192.168.1.70:11434", "", "", 0, false},
-		{"thread title env", "", map[string]string{"THREAD_TITLE_URL": "http://edge.lan:11434", "THREAD_TITLE_MODEL": "llama3.2:1b"}, "", "", "http://edge.lan:11434", "", "", 0, false},
-		{"example config", exampleContent, nil, "", "", "", "gemini-2.5-flash", "aerial-dev", 24 * time.Hour, false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			lookup := func(k string) string {
-				if tc.env != nil {
-					return tc.env[k]
-				}
-				return ""
-			}
-			var data *ConfigData
-			if tc.yaml != "" {
-				cfg, err := LoadConfigFromLookup(lookup, writeTempYAML(t, tc.yaml))
-				if tc.wantErr {
-					if err == nil {
-						t.Fatalf("expected error, got nil")
-					}
-					return
-				}
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				data = cfg.Current()
-			} else {
-				data = DefaultConfigData()
-				applyEnvironmentOverrides(data, lookup)
-			}
-			if (tc.wantProtocol != "" && data.ClassifierProtocol != tc.wantProtocol) ||
-				(tc.wantClassURL != "" && data.ClassifierURL != tc.wantClassURL) ||
-				(tc.wantTitleURL != "" && data.ThreadTitleURL != tc.wantTitleURL) ||
-				(tc.wantModel != "" && data.Model != tc.wantModel) ||
-				(tc.wantChannel != "" && data.SystemChannel != tc.wantChannel) ||
-				(tc.wantIdle != 0 && data.DaemonIdleTimeout != tc.wantIdle) {
-				t.Fatalf("field expectation failed for %s: %+v", tc.name, data)
-			}
-		})
-	}
-}
-
-func TestTargetMcpConfig(t *testing.T) {
-	tests := []struct {
-		name          string
-		yaml          string
-		wantCommon    int
-		wantDiscord   int
-		wantVoice     int
-		wantEphemeral int
-		wantErrSubstr string
-	}{
-		{"valid targets", "channels: {default: {mode: threads}}\nmcp_servers:\n  common: {scheduler: {serverUrl: 'http://s:8080/mcp'}}\n  discord: {docker: {serverUrl: 'http://d:4002/mcp'}}\n  voice: {kiosk: {serverUrl: 'http://k:4003/mcp'}}\n  ephemeral: {custom: {serverUrl: 'http://e:4005/mcp'}}\n", 1, 1, 1, 1, ""},
-		{"null categories", "channels: {default: {mode: threads}}\nmcp_servers: {common: null, discord: null, voice: null, ephemeral: null}\n", 0, 0, 0, 0, ""},
-		{"reject flat keys", "channels: {default: {mode: threads}}\nmcp_servers: {weather: {serverUrl: 'http://w:8080/mcp'}}\n", 0, 0, 0, 0, "unrecognized target category"},
-		{"reject non-mapping", "channels: {default: {mode: threads}}\nmcp_servers: {common: 'invalid'}\n", 0, 0, 0, 0, "must be a mapping"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := LoadConfigFromLookup(func(string) string { return "" }, writeTempYAML(t, tc.yaml))
-			if tc.wantErrSubstr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
-					t.Fatalf("got err=%v, want %q", err, tc.wantErrSubstr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			cur := cfg.Current()
-			if len(cur.McpServers.Common) != tc.wantCommon || len(cur.McpServers.Discord) != tc.wantDiscord || len(cur.McpServers.Voice) != tc.wantVoice || len(cur.McpServers.Ephemeral) != tc.wantEphemeral {
-				t.Fatalf("mcp count mismatch: %+v", cur.McpServers)
-			}
-		})
-	}
-
-	orig := &ConfigData{McpServers: TargetMcpConfig{
-		Common:    map[string]json.RawMessage{"srv1": []byte(`{"url":"http://c"}`)},
-		Discord:   map[string]json.RawMessage{"srv2": []byte(`{"url":"http://d"}`)},
-		Voice:     map[string]json.RawMessage{"srv3": []byte(`{"url":"http://v"}`)},
-		Ephemeral: map[string]json.RawMessage{"srv4": []byte(`{"url":"http://e"}`)},
-	}}
-	cloned := cloneConfigData(orig)
-	orig.McpServers.Common["new"], orig.McpServers.Discord["new"] = []byte(`{}`), []byte(`{}`)
-	orig.McpServers.Voice["new"], orig.McpServers.Ephemeral["new"] = []byte(`{}`), []byte(`{}`)
-	orig.McpServers.Common["srv1"][0] = 'X'
-
-	if _, ok := cloned.McpServers.Common["new"]; ok || cloned.McpServers.Common["srv1"][0] == 'X' || len(cloned.McpServers.Discord) != 1 || cloneConfigData(&ConfigData{}).McpServers.Ephemeral != nil {
-		t.Fatal("target mcp clone isolation failed")
-	}
-}
-
-func TestVoiceConfigAndEngine(t *testing.T) {
-	engineTests := []struct{ in, want string }{
-		{"", "agy"},
-		{"   ", "agy"},
-		{"agy", "agy"},
-		{"AGY", "agy"},
-		{"  agy  ", "agy"},
-		{"gemini_api", "gemini_api"},
-		{"GEMINI_API", "gemini_api"},
-		{" gemini_api ", "gemini_api"},
-		{"gemini", "gemini_api"},
-		{"GEMINI", "gemini_api"},
-		{"  gemini  ", "gemini_api"},
-		{"direct_api", "gemini_api"},
-		{"DIRECT_API", "gemini_api"},
-		{" direct_api ", "gemini_api"},
-		{"custom", "agy"},
-		{"openai", "agy"},
-		{"12345", "agy"},
-	}
-	for _, tc := range engineTests {
-		t.Run("engine_"+tc.in, func(t *testing.T) {
-			cfg := NewTestConfig(func(c *ConfigData) { c.Voice.Engine = tc.in })
-			if got := cfg.VoiceEngine(); got != tc.want {
-				t.Fatalf("VoiceEngine(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-			if got := cfg.Current().VoiceEngine(); got != tc.want {
-				t.Fatalf("Current().VoiceEngine(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-
-	processEngineTests := []struct{ in, want string }{
-		{"", "agy"},
-		{"   ", "agy"},
-		{"agy", "agy"},
-		{"AGY", "agy"},
-		{"  agy  ", "agy"},
-		{"claude", "claude"},
-		{"CLAUDE", "claude"},
-		{" Claude ", "claude"},
-		{"other", "agy"},
-	}
-	for _, tc := range processEngineTests {
-		t.Run("process_engine_"+tc.in, func(t *testing.T) {
-			cfg := NewTestConfig(func(c *ConfigData) { c.Engine = tc.in })
-			if got := cfg.Engine(); got != tc.want {
-				t.Fatalf("Engine(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-			if got := cfg.Current().GetEngine(); got != tc.want {
-				t.Fatalf("Current().GetEngine(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-	if (*Config)(nil).Engine() != "agy" || (*ConfigData)(nil).GetEngine() != "agy" {
-		t.Fatal("nil Config/ConfigData Engine accessor failed")
-	}
-
-	featureTests := []struct {
-		name        string
-		yaml        string
-		wantTargets []string
-		wantTools   []string
-		wantModel   string
-	}{
-		{"omitted", "channels: {default: {mode: threads}}\n", []string{"kiosk"}, []string{}, ""},
-		{"empty targets", "channels: {default: {mode: threads}}\nvoice: {prewarmed_targets: []}\n", []string{}, nil, ""},
-		{"targets", "channels: {default: {mode: threads}}\nvoice: {prewarmed_targets: ['kiosk', ' touch-kiosk-kitchen ', '', '   ', 'dock']}\n", []string{"kiosk", "touch-kiosk-kitchen", "dock"}, nil, ""},
-		{"tools", "channels: {default: {mode: threads}}\nvoice: {allowed_tools: ['ha_read', 'ha_write', 'events']}\n", nil, []string{"ha_read", "ha_write", "events"}, ""},
-		{"model", "channels: {default: {mode: threads}}\nvoice: {model: ' gemini-2.5-flash '}\n", nil, nil, "gemini-2.5-flash"},
-	}
-	for _, tc := range featureTests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := LoadConfigFromLookup(func(string) string { return "" }, writeTempYAML(t, tc.yaml))
-			if err != nil {
-				t.Fatalf("LoadConfigFromLookup failed: %v", err)
-			}
-			if tc.wantModel != "" && strings.TrimSpace(cfg.Current().Voice.Model) != tc.wantModel {
-				t.Fatalf("Voice.Model mismatch: got %q want %q", cfg.Current().Voice.Model, tc.wantModel)
-			}
-			if tc.wantTargets != nil && !slicesEqual(cfg.VoicePrewarmedTargets(), tc.wantTargets) {
-				t.Fatalf("VoicePrewarmedTargets mismatch: got %v want %v", cfg.VoicePrewarmedTargets(), tc.wantTargets)
-			}
-			if tc.wantTools != nil && !slicesEqual(cfg.Current().VoiceAllowedTools(), tc.wantTools) {
-				t.Fatalf("VoiceAllowedTools mismatch: got %v want %v", cfg.Current().VoiceAllowedTools(), tc.wantTools)
-			}
-		})
-	}
-
-	if (*Config)(nil).VoiceEngine() != "agy" || len((*Config)(nil).VoicePrewarmedTargets()) != 0 || (*ConfigData)(nil).VoiceEngine() != "agy" || len((*ConfigData)(nil).VoiceAllowedTools()) != 0 {
-		t.Fatal("nil voice accessors failed")
-	}
-
-	orig := &ConfigData{Voice: VoiceConfig{Engine: "gemini_api", Model: "gemini-2.5-flash", PrewarmedTargets: []string{"kiosk", "dock"}, AllowedTools: []string{"tool1", "tool2"}}}
-	cloned := cloneConfigData(orig)
-	cloned.Voice.PrewarmedTargets[0], cloned.Voice.AllowedTools[0] = "mutated", "mutated_tool"
-	cloned.Voice.PrewarmedTargets = append(cloned.Voice.PrewarmedTargets, "extra")
-	cloned.Voice.AllowedTools = append(cloned.Voice.AllowedTools, "extra_tool")
-	cloned.Voice.Engine, cloned.Voice.Model = "agy", "gemini-2.5-pro"
-
-	if orig.Voice.PrewarmedTargets[0] != "kiosk" || len(orig.Voice.PrewarmedTargets) != 2 || orig.Voice.AllowedTools[0] != "tool1" || len(orig.Voice.AllowedTools) != 2 || orig.Voice.Engine != "gemini_api" || orig.Voice.Model != "gemini-2.5-flash" {
-		t.Fatalf("Voice clone independence violated: %+v", orig.Voice)
-	}
-
-	cfg := NewFromData(orig)
-	targets, tools := cfg.VoicePrewarmedTargets(), cfg.Current().VoiceAllowedTools()
-	targets[0], tools[0] = "mutated", "mutated"
-	if cfg.VoicePrewarmedTargets()[0] != "kiosk" || cfg.Current().VoiceAllowedTools()[0] != "tool1" {
-		t.Fatal("Voice defensive copies failed")
-	}
-}
-
-func TestChannelPolicy_Modes(t *testing.T) {
-	tests := []struct {
-		name          string
-		input         ChannelPolicy
-		wantMode      string
-		wantWake      string
-		wantEffort    string
-		wantThreshold float64
-	}{
-		{"canonical thread", ChannelPolicy{Mode: "thread", Effort: "low"}, "thread", "all", "low", 0.0},
-		{"canonical classifier", ChannelPolicy{Mode: "classifier", Effort: "medium"}, "classifier", "classifier", "medium", 0.50},
-		{"canonical mention", ChannelPolicy{Mode: "mention", Effort: "high"}, "mention", "mention", "high", 0.0},
-		{"canonical ignore", ChannelPolicy{Mode: "ignore"}, "ignore", "ignore", "high", 0.0},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			p := tc.input
-			if p.Mode != tc.wantMode || p.GetWakeMode() != tc.wantWake || p.GetEffort() != tc.wantEffort || p.GetAmbientWakeThreshold() != tc.wantThreshold || (tc.wantMode == "thread") != p.IsThread() || (tc.wantMode == "ignore") != p.IsIgnored() {
-				t.Fatalf("mode/wake/effort/thresh mismatch: %+v", p)
-			}
-		})
-	}
-	ignore := true
-	p1 := ChannelPolicy{IgnoreBots: &ignore}
-	if !p1.IsBotIgnored() || (ChannelPolicy{}).IsBotIgnored() {
-		t.Fatal("IsBotIgnored failed")
-	}
-}
-
-func TestAmbientContextConfig(t *testing.T) {
-	tests := []struct {
-		name          string
-		yaml          string
-		wantCacheTTL  string
-		wantTimeoutMs int
-		wantTemplate  string
-		wantToolName  string
-	}{
-		{"voice ambient", "channels: {default: {mode: threads}}\nvoice:\n  engine: gemini_api\n  ambient_context:\n    cache_ttl: '45s'\n    timeout_ms: 300\n    template_path: '/path/tmpl'\n    template: 'Voice: {{.now}}'\n    tools: [{name: ha, server: ha-mcp, tool: get_state, arguments: {entity_id: 'light.living'}}]\n", "45s", 300, "Voice: {{.now}}", "ha"},
-		{"channel ambient", "channels:\n  default: {mode: threads}\n  home:\n    mode: thread\n    ambient_context:\n      cache_ttl: '1m'\n      timeout_ms: 500\n      template: 'Chan: {{.now}}'\n      tools: [{name: weather, tool: current_weather, arguments: {city: 'San Francisco'}}]\n", "1m", 500, "Chan: {{.now}}", "weather"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := LoadConfigFromLookup(func(string) string { return "" }, writeTempYAML(t, tc.yaml))
-			if err != nil {
-				t.Fatalf("LoadConfigFromLookup failed: %v", err)
-			}
-			var ac *AmbientContextConfig
-			if cfg.Current().Voice.AmbientContext != nil {
-				ac = cfg.Current().VoiceAmbientContext()
-			} else if home, ok := cfg.Current().Channels["home"]; ok {
-				ac = home.AmbientContext
-			}
-			if ac == nil || ac.CacheTTL != tc.wantCacheTTL || ac.TimeoutMs != tc.wantTimeoutMs || ac.Template != tc.wantTemplate || len(ac.Tools) != 1 || ac.Tools[0].Name != tc.wantToolName {
-				t.Fatalf("ambient context mismatch: %+v", ac)
-			}
-		})
-	}
-
-	src := &AmbientContextConfig{
-		CacheTTL: "20s", TimeoutMs: 150, Template: "Test {{.now}}",
-		Tools: []AmbientToolConfig{{Name: "ha", Server: "ha-mcp", Tool: "get_state", Arguments: map[string]any{"entity_id": "light.kitchen", "nested": map[string]any{"key": "val"}, "tags": []any{"a", "b"}, "val": 42}}},
-	}
-	cloned := cloneAmbientContextConfig(src)
-	cloned.CacheTTL, cloned.Tools[0].Name = "99s", "mutated"
-	cloned.Tools[0].Arguments["entity_id"] = "light.bedroom"
-	cloned.Tools[0].Arguments["nested"].(map[string]any)["key"] = "mutated_val"
-	cloned.Tools[0].Arguments["tags"].([]any)[0] = "mutated_tag"
-	cloned.Tools[0].Arguments["val"] = 99
-
-	if src.CacheTTL != "20s" || src.Tools[0].Name != "ha" || src.Tools[0].Arguments["entity_id"] != "light.kitchen" || src.Tools[0].Arguments["val"] == 99 || cloneAmbientContextConfig(nil) != nil || cloneInterfaceMap(nil) != nil {
-		t.Fatal("src ambient context mutated by clone or nil check failed")
-	}
-
-	cp := ChannelPolicy{Mode: "thread", AmbientContext: src}
-	clonedCP := cloneChannelPolicy(cp)
-	clonedCP.AmbientContext.CacheTTL = "88s"
-	if src.CacheTTL != "20s" {
-		t.Fatal("src.CacheTTL mutated via cloneChannelPolicy")
-	}
-	resolved := ResolveChannelPolicy(map[string]ChannelPolicy{"default": cp}, "custom", "custom")
-	if resolved.AmbientContext == nil || resolved.AmbientContext.CacheTTL != "20s" {
-		t.Fatal("ResolveChannelPolicy ambient inheritance failed")
-	}
-
-	if (*ConfigData)(nil).VoiceAmbientContext() != nil || (&ConfigData{}).VoiceAmbientContext() != nil {
-		t.Fatal("nil accessors failed")
-	}
-
-	cfgData := &ConfigData{Model: "gemini-test", DataDir: "/data/test", GeminiHomeDir: "/home/gemini", Voice: VoiceConfig{Engine: "agy", AmbientContext: src}}
-	cfg := NewFromData(cfgData)
-	if cfg.DataDir() != "/data/test" || cfg.GeminiHomeDir() != "/home/gemini" || cfg.Get().Model != "gemini-test" {
-		t.Fatal("accessors mismatch")
-	}
-	vac := cfg.Current().VoiceAmbientContext()
-	vac.CacheTTL = "mutated_defensive"
-	if cfg.Current().VoiceAmbientContext().CacheTTL == "mutated_defensive" {
-		t.Fatal("VoiceAmbientContext defensive copy failed")
-	}
-	if defData := DefaultConfigData(); defData == nil || defData.Model == "" {
-		t.Fatal("DefaultConfigData failed")
-	}
-	_ = GetRuntimeConfig()
-}
-
-func TestRegisterConfigTokens(t *testing.T) {
-	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
-	tests := []struct {
-		name       string
-		initialCfg *Config
-		cfg        *Config
-		input      string
-		wantResult string
-	}{
-		{
-			name:       "nil config",
-			cfg:        nil,
-			input:      "text with unredacted token discord_secret_token_12345",
-			wantResult: "text with unredacted token discord_secret_token_12345",
-		},
-		{
-			name:       "empty config",
-			cfg:        &Config{},
-			input:      "text with unredacted token discord_secret_token_12345",
-			wantResult: "text with unredacted token discord_secret_token_12345",
-		},
-		{
-			name: "populated discord token and mcp servers",
-			cfg: NewFromData(&ConfigData{
-				DiscordToken: "secret_discord_token_12345",
-				MCPServers: MCPServersConfig{
-					Common: map[string]MCPServerConfig{
-						"common-srv": {
-							Env:     map[string]string{"COMMON_ENV": "secret_common_env_1111"},
-							Headers: map[string]string{"X-Common": "secret_common_hdr_2222"},
-						},
-					},
-					Eri: map[string]MCPServerConfig{
-						"eri-srv": {
-							Env:     map[string]string{"ERI_ENV": "secret_eri_env_3333"},
-							Headers: map[string]string{"X-Eri": "secret_eri_hdr_4444"},
-						},
-					},
-					Voice: map[string]MCPServerConfig{
-						"voice-srv": {
-							Env:     map[string]string{"VOICE_ENV": "secret_voice_env_5555"},
-							Headers: map[string]string{"X-Voice": "secret_voice_hdr_6666"},
-						},
-					},
-					Ephemeral: map[string]MCPServerConfig{
-						"eph-srv": {
-							Env:     map[string]string{"EPH_ENV": "secret_eph_env_7777"},
-							Headers: map[string]string{"X-Eph": "secret_eph_hdr_8888"},
-						},
-					},
-				},
-			}),
-			input:      "discord: secret_discord_token_12345, c-env: secret_common_env_1111, c-hdr: secret_common_hdr_2222, e-env: secret_eri_env_3333, e-hdr: secret_eri_hdr_4444, v-env: secret_voice_env_5555, v-hdr: secret_voice_hdr_6666, eph-env: secret_eph_env_7777, eph-hdr: secret_eph_hdr_8888",
-			wantResult: "discord: [REDACTED], c-env: [REDACTED], c-hdr: [REDACTED], e-env: [REDACTED], e-hdr: [REDACTED], v-env: [REDACTED], v-hdr: [REDACTED], eph-env: [REDACTED], eph-hdr: [REDACTED]",
-		},
-		{
-			name: "populated secrets discord token and core credentials",
-			cfg: NewFromData(&ConfigData{
-				Secrets: SecretsConfig{
-					DiscordToken: "secret_secrets_token_9999",
-				},
-				APIKey:        "secret_api_key_888888",
-				HarnessAPIKey: "secret_harness_key_77777",
-				GitHubPAT:     "ghp_testpersonalaccesstoken6666666",
-				DatabaseURL:   "postgres://user:secret_db_pass_55555@localhost:5432/aerial",
-				McpServers: TargetMcpConfig{
-					Common: map[string]json.RawMessage{
-						"srv-json": []byte(`{"env":{"RAW_SECRET":"secret_raw_env_44444"},"headers":{"Authorization":"secret_raw_hdr_33333"}}`),
-					},
-				},
-			}),
-			input:      "sec: secret_secrets_token_9999, api: secret_api_key_888888, harn: secret_harness_key_77777, pat: ghp_testpersonalaccesstoken6666666, db: secret_db_pass_55555, raw-env: secret_raw_env_44444, raw-hdr: secret_raw_hdr_33333",
-			wantResult: "sec: [REDACTED], api: [REDACTED], harn: [REDACTED], pat: [REDACTED], db: [REDACTED], raw-env: [REDACTED], raw-hdr: [REDACTED]",
-		},
-		{
-			name: "purges removed config secrets on reload",
-			initialCfg: NewFromData(&ConfigData{
-				DiscordToken: "secret_discord_token_initial_12345",
-				APIKey:       "secret_api_key_initial_888888",
-			}),
-			cfg: NewFromData(&ConfigData{
-				DiscordToken: "secret_discord_token_initial_12345",
-			}),
-			input:      "sec: secret_api_key_initial_888888, preserved: secret_discord_token_initial_12345",
-			wantResult: "sec: secret_api_key_initial_888888, preserved: [REDACTED]",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.initialCfg != nil {
-				RegisterConfigTokens(tc.initialCfg)
-			}
-			RegisterConfigTokens(tc.cfg)
-
-			got := sanitizer.SanitizeString(tc.input)
-			if got != tc.wantResult {
-				t.Errorf("SanitizeString() = %q, want %q", got, tc.wantResult)
-			}
-		})
-	}
-}
-
-func TestLoadSharedSecrets_TableDriven(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	validJSON := filepath.Join(tmpDir, "valid.json")
-	_ = os.WriteFile(validJSON, []byte(`{
-		"FOO": "  bar  ",
-		"DISCORD_BOT_TOKEN": "bot-tok-123",
-		"1PASSWORD_SERVICE_ACCOUNT_TOKEN": "op-tok-789",
-		"GEMINI_HARNESS_API_KEY": "harness-key-abc",
-		"UNIFI_PASS": "unifi-pass-def"
-	}`), 0o600)
-
-	existingPrimaryJSON := filepath.Join(tmpDir, "existing-primary.json")
-	_ = os.WriteFile(existingPrimaryJSON, []byte(`{
-		"DISCORD_TOKEN": "primary-tok",
-		"DISCORD_BOT_TOKEN": "fallback-tok"
-	}`), 0o600)
-
-	invalidJSON := filepath.Join(tmpDir, "invalid.json")
-	_ = os.WriteFile(invalidJSON, []byte(`{not valid json`), 0o600)
-
-	secretsDir := filepath.Join(tmpDir, "secrets_dir")
-	_ = os.MkdirAll(filepath.Join(secretsDir, "..data"), 0o755)
-	_ = os.WriteFile(filepath.Join(secretsDir, "..data", "IGNORE_ME"), []byte("ignored"), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, ".hidden"), []byte("ignored"), 0o600)
-	_ = os.MkdirAll(filepath.Join(secretsDir, "subdir"), 0o755)
-	_ = os.WriteFile(filepath.Join(secretsDir, "subdir", "IGNORE_SUB"), []byte("ignored"), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, "DISCORD_BOT_TOKEN"), []byte("dir-bot-token\n"), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, "POSTGRES_PASSWORD"), []byte("  dir-pg-pass  "), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, "EMPTY_KEY"), []byte("  "), 0o600)
-
-	tests := []struct {
-		name         string
-		filePath     string
-		wantKey      string
-		wantVal      string
-		wantMapEmpty bool
-	}{
-		{
-			name:         "empty path returns empty map",
-			filePath:     "",
-			wantMapEmpty: true,
-		},
-		{
-			name:         "missing file returns empty map",
-			filePath:     filepath.Join(tmpDir, "nonexistent.json"),
-			wantMapEmpty: true,
-		},
-		{
-			name:         "invalid json returns empty map",
-			filePath:     invalidJSON,
-			wantMapEmpty: true,
-		},
-		{
-			name:     "trimmed values parsed correctly",
-			filePath: validJSON,
-			wantKey:  "FOO",
-			wantVal:  "bar",
-		},
-		{
-			name:     "discord bot token alias fallback",
-			filePath: validJSON,
-			wantKey:  "DISCORD_TOKEN",
-			wantVal:  "bot-tok-123",
-		},
-		{
-			name:     "1password service account alias fallback",
-			filePath: validJSON,
-			wantKey:  "OP_SERVICE_ACCOUNT_TOKEN",
-			wantVal:  "op-tok-789",
-		},
-		{
-			name:     "gemini harness api key is not aliased to agy gemini api key",
-			filePath: validJSON,
-			wantKey:  "AGY_GEMINI_API_KEY",
-			wantVal:  "",
-		},
-		{
-			name:     "unifi pass alias fallback",
-			filePath: validJSON,
-			wantKey:  "UNIFI_PASSWORD",
-			wantVal:  "unifi-pass-def",
-		},
-		{
-			name:     "primary key not overwritten by alias fallback",
-			filePath: existingPrimaryJSON,
-			wantKey:  "DISCORD_TOKEN",
-			wantVal:  "primary-tok",
-		},
-		{
-			name:     "directory mount reads individual files",
-			filePath: secretsDir,
-			wantKey:  "POSTGRES_PASSWORD",
-			wantVal:  "dir-pg-pass",
-		},
-		{
-			name:     "directory mount alias fallback",
-			filePath: secretsDir,
-			wantKey:  "DISCORD_TOKEN",
-			wantVal:  "dir-bot-token",
-		},
-		{
-			name:     "directory mount skips dotfiles",
-			filePath: secretsDir,
-			wantKey:  ".hidden",
-			wantVal:  "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			res := LoadSharedSecrets(tc.filePath)
-			if tc.wantMapEmpty {
-				if len(res) != 0 {
-					t.Errorf("LoadSharedSecrets() returned non-empty map: %v", res)
-				}
-				return
-			}
-			if got := res[tc.wantKey]; got != tc.wantVal {
-				t.Errorf("LoadSharedSecrets()[%q] = %q, want %q", tc.wantKey, got, tc.wantVal)
-			}
-		})
-	}
-}
-
-func TestWithSharedSecretsLookup_TableDriven(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	sharedFile := filepath.Join(tmpDir, "shared.json")
-	_ = os.WriteFile(sharedFile, []byte(`{
-		"SECRET_ONLY": "secret-val",
-		"OVERRIDDEN": "shared-val",
-		"POSTGRES_PASSWORD": "secret-pg-pass"
-	}`), 0o600)
-
-	customHostFile := filepath.Join(tmpDir, "custom-host.json")
-	_ = os.WriteFile(customHostFile, []byte(`{
-		"POSTGRES_HOST": "shared-db.internal",
-		"POSTGRES_PASSWORD": "secret-pg-pass"
-	}`), 0o600)
-
-	noPassFile := filepath.Join(tmpDir, "no-pass.json")
-	_ = os.WriteFile(noPassFile, []byte(`{
-		"OTHER": "val"
-	}`), 0o600)
-
-	tests := []struct {
-		name       string
-		primaryMap map[string]string
-		isNilPrim  bool
-		filePath   string
-		queryKey   string
-		expected   string
-	}{
-		{
-			name:       "primary wins over shared secret",
-			primaryMap: map[string]string{"OVERRIDDEN": "primary-val"},
-			filePath:   sharedFile,
-			queryKey:   "OVERRIDDEN",
-			expected:   "primary-val",
-		},
-		{
-			name:       "fallback to shared secret when unset in primary",
-			primaryMap: map[string]string{},
-			filePath:   sharedFile,
-			queryKey:   "SECRET_ONLY",
-			expected:   "secret-val",
-		},
-		{
-			name:      "nil primary handled safely",
-			isNilPrim: true,
-			filePath:  sharedFile,
-			queryKey:  "SECRET_ONLY",
-			expected:  "secret-val",
-		},
-		{
-			name:       "postgres host defaulted when password present in shared secrets",
-			primaryMap: map[string]string{},
-			filePath:   sharedFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "postgres",
-		},
-		{
-			name:       "postgres host preserved from primary even if password in shared secrets",
-			primaryMap: map[string]string{"POSTGRES_HOST": "primary-db.internal"},
-			filePath:   sharedFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "primary-db.internal",
-		},
-		{
-			name:       "postgres host preserved from shared secrets if specified",
-			primaryMap: map[string]string{},
-			filePath:   customHostFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "shared-db.internal",
-		},
-		{
-			name:       "postgres host empty when password unset",
-			primaryMap: map[string]string{},
-			filePath:   noPassFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "",
-		},
-		{
-			name:       "missing key returns empty",
-			primaryMap: map[string]string{},
-			filePath:   sharedFile,
-			queryKey:   "NONEXISTENT",
-			expected:   "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var prim func(string) string
-			if !tc.isNilPrim {
-				prim = mapLookup(tc.primaryMap)
-			}
-			lookup := WithSharedSecretsLookup(prim, tc.filePath)
-			if got := lookup(tc.queryKey); got != tc.expected {
-				t.Errorf("lookup(%q) = %q, want %q", tc.queryKey, got, tc.expected)
-			}
-		})
-	}
-}
-
-func TestRegisterConfigTokens_SharedSecrets_TableDriven(t *testing.T) {
-	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
-	origSharedPath := SharedSecretsPath
-	defer func() {
-		SharedSecretsPath = origSharedPath
-	}()
-
-	tmpDir := t.TempDir()
-	secretsFile := filepath.Join(tmpDir, "shared-secrets.json")
-	_ = os.WriteFile(secretsFile, []byte(`{
-		"DYNAMIC_SHARED_SECRET": "dynamic_shared_secret_token_val_12345"
-	}`), 0o600)
-
-	emptySecretsFile := filepath.Join(tmpDir, "empty-secrets.json")
-	_ = os.WriteFile(emptySecretsFile, []byte(`{}`), 0o600)
-
-	secretsDir := filepath.Join(tmpDir, "secrets_dir")
-	_ = os.MkdirAll(secretsDir, 0o755)
-	_ = os.WriteFile(filepath.Join(secretsDir, "DYNAMIC_DIR_SECRET"), []byte("dynamic_dir_secret_token_val_67890"), 0o600)
-
-	tests := []struct {
-		name        string
-		initialPath string
-		path        string
-		cfg         *Config
-		input       string
-		wantResult  string
-	}{
-		{
-			name:       "shared secrets token registered and redacted from json file",
-			path:       secretsFile,
-			cfg:        nil,
-			input:      "alert with dynamic_shared_secret_token_val_12345 in message",
-			wantResult: "alert with [REDACTED] in message",
-		},
-		{
-			name:       "shared secrets token registered and redacted from directory mount",
-			path:       secretsDir,
-			cfg:        nil,
-			input:      "alert with dynamic_dir_secret_token_val_67890 in message",
-			wantResult: "alert with [REDACTED] in message",
-		},
-		{
-			name:        "shared secrets purged on reload when secret removed from json file",
-			initialPath: secretsFile,
-			path:        emptySecretsFile,
-			cfg:         nil,
-			input:       "alert with dynamic_shared_secret_token_val_12345 in message",
-			wantResult:  "alert with dynamic_shared_secret_token_val_12345 in message",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.initialPath != "" {
-				SharedSecretsPath = tc.initialPath
-				RegisterConfigTokens(nil)
-			}
-			SharedSecretsPath = tc.path
-			RegisterConfigTokens(tc.cfg)
-			got := sanitizer.SanitizeString(tc.input)
-			if got != tc.wantResult {
-				t.Errorf("SanitizeString() = %q, want %q", got, tc.wantResult)
-			}
-		})
-	}
 }

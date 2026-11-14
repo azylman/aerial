@@ -18,25 +18,59 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
-func TestParseCLIArgs(t *testing.T) {
-	tests := []struct {
-		name        string
-		args        []string
-		envEriURL   string
-		wantCmd     string
-		wantQuery   string
-		wantMode    string
-		wantTool    string
-		wantSession string
-		wantLimit   int
-		wantStep    int
-		wantContext int
-		wantJSON    bool
-		wantStack   string
-		wantURL     string
-		wantErrSub  string
-		wantErrIs   error
-	}{
+type parseCLIArgsCase struct {
+	name        string
+	args        []string
+	envEriURL   string
+	wantCmd     string
+	wantQuery   string
+	wantMode    string
+	wantTool    string
+	wantSession string
+	wantLimit   int
+	wantStep    int
+	wantContext int
+	wantJSON    bool
+	wantStack   string
+	wantURL     string
+	wantErrSub  string
+	wantErrIs   error
+}
+
+func assertParseCLIArgsCase(t *testing.T, tc parseCLIArgsCase) {
+	t.Helper()
+	t.Setenv("ERI_URL", tc.envEriURL)
+	t.Setenv("AERIAL_ERI_URL", "")
+	t.Setenv("AERIAL_BRAIN_URL", "")
+	cfg, err := parseCLIArgs(tc.args)
+	if tc.wantErrIs != nil {
+		if !errors.Is(err, tc.wantErrIs) {
+			t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
+		}
+		return
+	}
+	if tc.wantErrSub != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+			t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Command != tc.wantCmd || cfg.Query != tc.wantQuery || cfg.Mode != tc.wantMode ||
+		cfg.Tool != tc.wantTool || cfg.Session != tc.wantSession || cfg.Limit != tc.wantLimit ||
+		cfg.Step != tc.wantStep || cfg.Context != tc.wantContext || cfg.JSON != tc.wantJSON ||
+		cfg.Stack != tc.wantStack || (tc.wantURL != "" && cfg.BaseURL != tc.wantURL) {
+		t.Errorf("unexpected cfg: %+v, want cmd=%q query=%q mode=%q tool=%q session=%q limit=%d step=%d ctx=%d json=%v stack=%q url=%q",
+			cfg, tc.wantCmd, tc.wantQuery, tc.wantMode, tc.wantTool, tc.wantSession, tc.wantLimit, tc.wantStep, tc.wantContext, tc.wantJSON, tc.wantStack, tc.wantURL)
+	}
+}
+
+func parseCLIArgsTestCases() []parseCLIArgsCase {
+	extra := parseCLIArgsExtraCases()
+	cases := make([]parseCLIArgsCase, 0, 15+len(extra))
+	cases = append(cases, []parseCLIArgsCase{
 		{
 			name:       "EmptyArgs",
 			args:       []string{},
@@ -140,6 +174,12 @@ func TestParseCLIArgs(t *testing.T) {
 			args:       []string{"get", "--session", "sess-1", "--step", "-5"},
 			wantErrSub: "step index is required and must be non-negative",
 		},
+	}...)
+	return append(cases, extra...)
+}
+
+func parseCLIArgsExtraCases() []parseCLIArgsCase {
+	return []parseCLIArgsCase{
 		{
 			name: "ShorthandFlagsAndPositional",
 			args: []string{
@@ -216,35 +256,13 @@ func TestParseCLIArgs(t *testing.T) {
 			wantErrSub: "context window size must be non-negative",
 		},
 	}
+}
 
+func TestParseCLIArgs(t *testing.T) {
+	tests := parseCLIArgsTestCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("ERI_URL", tc.envEriURL)
-			t.Setenv("AERIAL_ERI_URL", "")
-			t.Setenv("AERIAL_BRAIN_URL", "")
-			cfg, err := parseCLIArgs(tc.args)
-			if tc.wantErrIs != nil {
-				if !errors.Is(err, tc.wantErrIs) {
-					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
-				}
-				return
-			}
-			if tc.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if cfg.Command != tc.wantCmd || cfg.Query != tc.wantQuery || cfg.Mode != tc.wantMode ||
-				cfg.Tool != tc.wantTool || cfg.Session != tc.wantSession || cfg.Limit != tc.wantLimit ||
-				cfg.Step != tc.wantStep || cfg.Context != tc.wantContext || cfg.JSON != tc.wantJSON ||
-				cfg.Stack != tc.wantStack || (tc.wantURL != "" && cfg.BaseURL != tc.wantURL) {
-				t.Errorf("unexpected cfg: %+v, want cmd=%q query=%q mode=%q tool=%q session=%q limit=%d step=%d ctx=%d json=%v stack=%q url=%q",
-					cfg, tc.wantCmd, tc.wantQuery, tc.wantMode, tc.wantTool, tc.wantSession, tc.wantLimit, tc.wantStep, tc.wantContext, tc.wantJSON, tc.wantStack, tc.wantURL)
-			}
+			assertParseCLIArgsCase(t, tc)
 		})
 	}
 }

@@ -638,22 +638,106 @@ func TestConnectDiscordFunnel_DisabledAndLifecycle(t *testing.T) {
 	}
 }
 
+type hydrateDiscordSessionCase struct {
+	name         string
+	nilSession   bool
+	nilState     bool
+	token        string
+	userStatus   int
+	userBody     string
+	guildsStatus int
+	guildsBody   string
+	wantErr      bool
+	wantGuildID  string
+	wantChanID   string
+	wantThreadID string
+	wantRoleID   string
+}
+
+func runHydrateSessionRoundTrip(req *http.Request, tc hydrateDiscordSessionCase) (*http.Response, error) {
+	p := req.URL.Path
+	switch {
+	case strings.Contains(p, "/users/@me/guilds"):
+		if tc.guildsStatus != 0 {
+			return jsonHTTPResponse(tc.guildsStatus, tc.guildsBody), nil
+		}
+		return jsonHTTPResponse(http.StatusOK, `[]`), nil
+	case strings.Contains(p, "/users/@me"):
+		if tc.userStatus != 0 {
+			return jsonHTTPResponse(tc.userStatus, tc.userBody), nil
+		}
+		return jsonHTTPResponse(http.StatusOK, `{"id":"bot-1"}`), nil
+	case strings.Contains(p, "/roles"):
+		return jsonHTTPResponse(http.StatusOK, `[{"id":"role-hydrated-1","name":"Admins"},null]`), nil
+	case strings.Contains(p, "/threads/active"):
+		return jsonHTTPResponse(http.StatusOK, `{"threads":[{"id":"th-hydrated-1","name":"Active Thread","type":11},null]}`), nil
+	case strings.Contains(p, "/channels"):
+		return jsonHTTPResponse(http.StatusOK, `[{"id":"ch-hydrated-1","name":"general","type":0},null]`), nil
+	default:
+		return jsonHTTPResponse(http.StatusOK, `{}`), nil
+	}
+}
+
+func assertHydrateDiscordSessionCase(t *testing.T, tc hydrateDiscordSessionCase) {
+	t.Helper()
+	if tc.nilSession {
+		if err := hydrateDiscordSessionREST(nil); err != nil {
+			t.Fatalf("unexpected error for nil session: %v", err)
+		}
+		return
+	}
+
+	s, err := discordgo.New("Bot " + tc.token)
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+	s.StateEnabled = true
+	if !tc.nilState {
+		s.State = discordgo.NewState()
+	}
+
+	s.Client = &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return runHydrateSessionRoundTrip(req, tc)
+		}),
+	}
+
+	err = hydrateDiscordSessionREST(s)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("hydrateDiscordSessionREST() error = %v, wantErr = %v", err, tc.wantErr)
+	}
+
+	if tc.wantGuildID != "" {
+		g, gErr := s.State.Guild(tc.wantGuildID)
+		if gErr != nil || g == nil {
+			t.Fatalf("expected guild %s in state: %v", tc.wantGuildID, gErr)
+		}
+	}
+	if tc.wantChanID != "" {
+		if _, ok := queue.GetCachedChannel(tc.wantChanID); !ok {
+			t.Errorf("expected channel %s in channel cache", tc.wantChanID)
+		}
+		if _, cErr := s.State.Channel(tc.wantChanID); cErr != nil {
+			t.Errorf("expected channel %s in session state: %v", tc.wantChanID, cErr)
+		}
+	}
+	if tc.wantThreadID != "" {
+		if _, ok := queue.GetCachedChannel(tc.wantThreadID); !ok {
+			t.Errorf("expected thread %s in channel cache", tc.wantThreadID)
+		}
+		if _, tErr := s.State.Channel(tc.wantThreadID); tErr != nil {
+			t.Errorf("expected thread %s in session state: %v", tc.wantThreadID, tErr)
+		}
+	}
+	if tc.wantRoleID != "" {
+		if _, rErr := s.State.Role(tc.wantGuildID, tc.wantRoleID); rErr != nil {
+			t.Errorf("expected role %s in session state: %v", tc.wantRoleID, rErr)
+		}
+	}
+}
+
 func TestHydrateDiscordSessionREST(t *testing.T) {
-	tests := []struct {
-		name         string
-		nilSession   bool
-		nilState     bool
-		token        string
-		userStatus   int
-		userBody     string
-		guildsStatus int
-		guildsBody   string
-		wantErr      bool
-		wantGuildID  string
-		wantChanID   string
-		wantThreadID string
-		wantRoleID   string
-	}{
+	tests := []hydrateDiscordSessionCase{
 		{
 			name:       "NilSession",
 			nilSession: true,
@@ -716,80 +800,7 @@ func TestHydrateDiscordSessionREST(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.nilSession {
-				if err := hydrateDiscordSessionREST(nil); err != nil {
-					t.Fatalf("unexpected error for nil session: %v", err)
-				}
-				return
-			}
-
-			s, err := discordgo.New("Bot " + tc.token)
-			if err != nil {
-				t.Fatalf("failed to create session: %v", err)
-			}
-			s.StateEnabled = true
-			if !tc.nilState {
-				s.State = discordgo.NewState()
-			}
-
-			s.Client = &http.Client{
-				Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-					p := req.URL.Path
-					switch {
-					case strings.Contains(p, "/users/@me/guilds"):
-						if tc.guildsStatus != 0 {
-							return jsonHTTPResponse(tc.guildsStatus, tc.guildsBody), nil
-						}
-						return jsonHTTPResponse(http.StatusOK, `[]`), nil
-					case strings.Contains(p, "/users/@me"):
-						if tc.userStatus != 0 {
-							return jsonHTTPResponse(tc.userStatus, tc.userBody), nil
-						}
-						return jsonHTTPResponse(http.StatusOK, `{"id":"bot-1"}`), nil
-					case strings.Contains(p, "/roles"):
-						return jsonHTTPResponse(http.StatusOK, `[{"id":"role-hydrated-1","name":"Admins"},null]`), nil
-					case strings.Contains(p, "/threads/active"):
-						return jsonHTTPResponse(http.StatusOK, `{"threads":[{"id":"th-hydrated-1","name":"Active Thread","type":11},null]}`), nil
-					case strings.Contains(p, "/channels"):
-						return jsonHTTPResponse(http.StatusOK, `[{"id":"ch-hydrated-1","name":"general","type":0},null]`), nil
-					default:
-						return jsonHTTPResponse(http.StatusOK, `{}`), nil
-					}
-				}),
-			}
-
-			err = hydrateDiscordSessionREST(s)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("hydrateDiscordSessionREST() error = %v, wantErr = %v", err, tc.wantErr)
-			}
-
-			if tc.wantGuildID != "" {
-				g, gErr := s.State.Guild(tc.wantGuildID)
-				if gErr != nil || g == nil {
-					t.Fatalf("expected guild %s in state: %v", tc.wantGuildID, gErr)
-				}
-			}
-			if tc.wantChanID != "" {
-				if _, ok := queue.GetCachedChannel(tc.wantChanID); !ok {
-					t.Errorf("expected channel %s in channel cache", tc.wantChanID)
-				}
-				if _, cErr := s.State.Channel(tc.wantChanID); cErr != nil {
-					t.Errorf("expected channel %s in session state: %v", tc.wantChanID, cErr)
-				}
-			}
-			if tc.wantThreadID != "" {
-				if _, ok := queue.GetCachedChannel(tc.wantThreadID); !ok {
-					t.Errorf("expected thread %s in channel cache", tc.wantThreadID)
-				}
-				if _, tErr := s.State.Channel(tc.wantThreadID); tErr != nil {
-					t.Errorf("expected thread %s in session state: %v", tc.wantThreadID, tErr)
-				}
-			}
-			if tc.wantRoleID != "" {
-				if _, rErr := s.State.Role(tc.wantGuildID, tc.wantRoleID); rErr != nil {
-					t.Errorf("expected role %s in session state: %v", tc.wantRoleID, rErr)
-				}
-			}
+			assertHydrateDiscordSessionCase(t, tc)
 		})
 	}
 
@@ -867,6 +878,62 @@ func TestSyncBotMemberRoles(t *testing.T) {
 	_ = DefaultDataDir()
 }
 
+type populateDiscordMessageCase struct {
+	name                 string
+	s                    *discordgo.Session
+	m                    *discordgo.Message
+	extraRoles           map[string]string
+	wantEmpty            bool
+	wantChannelID        string
+	wantAuthorGlobalName string
+	wantReplyingToAuthor string
+	wantReplyingToCont   string
+	wantMentionUserIDs   []string
+	wantMentionRoleIDs   []string
+	wantAttachments      []string
+	wantMentionsContain  string
+}
+
+func assertPopulateDiscordMessageCase(t *testing.T, tc populateDiscordMessageCase) {
+	t.Helper()
+	var msg db.Message
+	if tc.extraRoles != nil {
+		populateDiscordMessageFields(tc.s, tc.m, &msg, tc.extraRoles)
+	} else {
+		populateDiscordMessageFields(tc.s, tc.m, &msg)
+	}
+	if tc.wantEmpty {
+		if msg.HasStructuredFields() {
+			t.Errorf("expected empty fields for nil message")
+		}
+		return
+	}
+	if msg.ChannelID != tc.wantChannelID {
+		t.Errorf("channel ID mismatch: got %q, want %q", msg.ChannelID, tc.wantChannelID)
+	}
+	if tc.wantAuthorGlobalName != "" && msg.AuthorGlobalName != tc.wantAuthorGlobalName {
+		t.Errorf("author global name mismatch: got %q, want %q", msg.AuthorGlobalName, tc.wantAuthorGlobalName)
+	}
+	if msg.ReplyingToAuthor != tc.wantReplyingToAuthor {
+		t.Errorf("replyingToAuthor mismatch: got %q, want %q", msg.ReplyingToAuthor, tc.wantReplyingToAuthor)
+	}
+	if msg.ReplyingToContent != tc.wantReplyingToCont {
+		t.Errorf("replyingToContent mismatch: got %q, want %q", msg.ReplyingToContent, tc.wantReplyingToCont)
+	}
+	if tc.wantMentionUserIDs != nil && !slices.Equal(msg.MentionUserIDs, tc.wantMentionUserIDs) {
+		t.Errorf("mentionUserIDs mismatch: got %v, want %v", msg.MentionUserIDs, tc.wantMentionUserIDs)
+	}
+	if tc.wantMentionRoleIDs != nil && !slices.Equal(msg.MentionRoleIDs, tc.wantMentionRoleIDs) {
+		t.Errorf("mentionRoleIDs mismatch: got %v, want %v", msg.MentionRoleIDs, tc.wantMentionRoleIDs)
+	}
+	if tc.wantAttachments != nil && !slices.Equal(msg.Attachments, tc.wantAttachments) {
+		t.Errorf("attachments mismatch: got %v, want %v", msg.Attachments, tc.wantAttachments)
+	}
+	if tc.wantMentionsContain != "" && !slices.Contains(msg.Mentions, tc.wantMentionsContain) {
+		t.Errorf("expected %q in mentions, got: %v", tc.wantMentionsContain, msg.Mentions)
+	}
+}
+
 func TestPopulateDiscordMessageFields(t *testing.T) {
 	t.Parallel()
 	s := newMockDiscordSession(t, nil)
@@ -875,21 +942,7 @@ func TestPopulateDiscordMessageFields(t *testing.T) {
 		Roles: []*discordgo.Role{{ID: "role-mod", Name: "Moderator"}},
 	})
 
-	tests := []struct {
-		name                 string
-		s                    *discordgo.Session
-		m                    *discordgo.Message
-		extraRoles           map[string]string
-		wantEmpty            bool
-		wantChannelID        string
-		wantAuthorGlobalName string
-		wantReplyingToAuthor string
-		wantReplyingToCont   string
-		wantMentionUserIDs   []string
-		wantMentionRoleIDs   []string
-		wantAttachments      []string
-		wantMentionsContain  string
-	}{
+	tests := []populateDiscordMessageCase{
 		{
 			name:      "NilMessage",
 			m:         nil,
@@ -961,42 +1014,7 @@ func TestPopulateDiscordMessageFields(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var msg db.Message
-			if tc.extraRoles != nil {
-				populateDiscordMessageFields(tc.s, tc.m, &msg, tc.extraRoles)
-			} else {
-				populateDiscordMessageFields(tc.s, tc.m, &msg)
-			}
-			if tc.wantEmpty {
-				if msg.HasStructuredFields() {
-					t.Errorf("expected empty fields for nil message")
-				}
-				return
-			}
-			if msg.ChannelID != tc.wantChannelID {
-				t.Errorf("channel ID mismatch: got %q, want %q", msg.ChannelID, tc.wantChannelID)
-			}
-			if tc.wantAuthorGlobalName != "" && msg.AuthorGlobalName != tc.wantAuthorGlobalName {
-				t.Errorf("author global name mismatch: got %q, want %q", msg.AuthorGlobalName, tc.wantAuthorGlobalName)
-			}
-			if msg.ReplyingToAuthor != tc.wantReplyingToAuthor {
-				t.Errorf("replyingToAuthor mismatch: got %q, want %q", msg.ReplyingToAuthor, tc.wantReplyingToAuthor)
-			}
-			if msg.ReplyingToContent != tc.wantReplyingToCont {
-				t.Errorf("replyingToContent mismatch: got %q, want %q", msg.ReplyingToContent, tc.wantReplyingToCont)
-			}
-			if tc.wantMentionUserIDs != nil && !slices.Equal(msg.MentionUserIDs, tc.wantMentionUserIDs) {
-				t.Errorf("mentionUserIDs mismatch: got %v, want %v", msg.MentionUserIDs, tc.wantMentionUserIDs)
-			}
-			if tc.wantMentionRoleIDs != nil && !slices.Equal(msg.MentionRoleIDs, tc.wantMentionRoleIDs) {
-				t.Errorf("mentionRoleIDs mismatch: got %v, want %v", msg.MentionRoleIDs, tc.wantMentionRoleIDs)
-			}
-			if tc.wantAttachments != nil && !slices.Equal(msg.Attachments, tc.wantAttachments) {
-				t.Errorf("attachments mismatch: got %v, want %v", msg.Attachments, tc.wantAttachments)
-			}
-			if tc.wantMentionsContain != "" && !slices.Contains(msg.Mentions, tc.wantMentionsContain) {
-				t.Errorf("expected %q in mentions, got: %v", tc.wantMentionsContain, msg.Mentions)
-			}
+			assertPopulateDiscordMessageCase(t, tc)
 		})
 	}
 }
