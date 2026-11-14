@@ -5,6 +5,60 @@ import (
 	"testing"
 )
 
+type dispatchPersistenceCase struct {
+	name               string
+	dispatch           Dispatch
+	wantTargetID       string
+	wantVanadisChunkID string
+}
+
+func assertPendingDispatch(ctx context.Context, t *testing.T, store Store, tc dispatchPersistenceCase) {
+	t.Helper()
+	pending, err := store.GetPendingOrProcessingDispatches(ctx, 100)
+	if err != nil {
+		t.Fatalf("GetPendingOrProcessingDispatches failed: %v", err)
+	}
+	var found *Dispatch
+	for i := range pending {
+		if pending[i].ID == tc.dispatch.ID {
+			found = &pending[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("GetPendingOrProcessingDispatches did not return dispatch %q", tc.dispatch.ID)
+	}
+	if found.TargetID != tc.wantTargetID {
+		t.Errorf("pending TargetID = %q, want %q", found.TargetID, tc.wantTargetID)
+	}
+	if found.VanadisChunkID != tc.wantVanadisChunkID {
+		t.Errorf("pending VanadisChunkID = %q, want %q", found.VanadisChunkID, tc.wantVanadisChunkID)
+	}
+}
+
+func runDispatchPersistenceCase(ctx context.Context, t *testing.T, store Store, tc dispatchPersistenceCase) {
+	t.Helper()
+	if _, err := store.InsertDispatch(ctx, tc.dispatch); err != nil {
+		t.Fatalf("InsertDispatch failed: %v", err)
+	}
+
+	got, err := store.GetDispatch(ctx, tc.dispatch.ID)
+	if err != nil {
+		t.Fatalf("GetDispatch failed: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("GetDispatch returned nil for id %q", tc.dispatch.ID)
+	}
+	if got.TargetID != tc.wantTargetID {
+		t.Errorf("GetDispatch TargetID = %q, want %q", got.TargetID, tc.wantTargetID)
+	}
+	if got.VanadisChunkID != tc.wantVanadisChunkID {
+		t.Errorf("GetDispatch VanadisChunkID = %q, want %q", got.VanadisChunkID, tc.wantVanadisChunkID)
+	}
+
+	assertPendingDispatch(ctx, t, store, tc)
+}
+
 func TestDispatchPersistence_TargetAndChunkID(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
@@ -12,12 +66,7 @@ func TestDispatchPersistence_TargetAndChunkID(t *testing.T) {
 	store := NewSQLStore(database)
 	ctx := context.Background()
 
-	tests := []struct {
-		name               string
-		dispatch           Dispatch
-		wantTargetID       string
-		wantVanadisChunkID string
-	}{
+	tests := []dispatchPersistenceCase{
 		{
 			name: "persists target_id and vanadis_chunk_id",
 			dispatch: Dispatch{
@@ -36,46 +85,7 @@ func TestDispatchPersistence_TargetAndChunkID(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := store.InsertDispatch(ctx, tc.dispatch); err != nil {
-				t.Fatalf("InsertDispatch failed: %v", err)
-			}
-
-			// Verify GetDispatch retrieves normalized fields
-			got, err := store.GetDispatch(ctx, tc.dispatch.ID)
-			if err != nil {
-				t.Fatalf("GetDispatch failed: %v", err)
-			}
-			if got == nil {
-				t.Fatalf("GetDispatch returned nil for id %q", tc.dispatch.ID)
-			}
-			if got.TargetID != tc.wantTargetID {
-				t.Errorf("GetDispatch TargetID = %q, want %q", got.TargetID, tc.wantTargetID)
-			}
-			if got.VanadisChunkID != tc.wantVanadisChunkID {
-				t.Errorf("GetDispatch VanadisChunkID = %q, want %q", got.VanadisChunkID, tc.wantVanadisChunkID)
-			}
-
-			// Verify GetPendingOrProcessingDispatches includes the fields
-			pending, err := store.GetPendingOrProcessingDispatches(ctx, 100)
-			if err != nil {
-				t.Fatalf("GetPendingOrProcessingDispatches failed: %v", err)
-			}
-			var found *Dispatch
-			for i := range pending {
-				if pending[i].ID == tc.dispatch.ID {
-					found = &pending[i]
-					break
-				}
-			}
-			if found == nil {
-				t.Fatalf("GetPendingOrProcessingDispatches did not return dispatch %q", tc.dispatch.ID)
-			}
-			if found.TargetID != tc.wantTargetID {
-				t.Errorf("pending TargetID = %q, want %q", found.TargetID, tc.wantTargetID)
-			}
-			if found.VanadisChunkID != tc.wantVanadisChunkID {
-				t.Errorf("pending VanadisChunkID = %q, want %q", found.VanadisChunkID, tc.wantVanadisChunkID)
-			}
+			runDispatchPersistenceCase(ctx, t, store, tc)
 		})
 	}
 }

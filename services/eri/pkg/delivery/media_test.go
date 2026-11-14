@@ -217,38 +217,44 @@ func TestSanitizeIntermediateStatus(t *testing.T) {
 	}
 }
 
+type sanitizedIntermediateStatusCase struct {
+	name  string
+	input string
+	want  string
+}
+
+func assertSanitizedIntermediateStatusCases(t *testing.T, cases []sanitizedIntermediateStatusCase) {
+	t.Helper()
+	for _, tc := range cases {
+		if got := SanitizeIntermediateStatus(tc.input); got != tc.want {
+			t.Errorf("[%s] SanitizeIntermediateStatus() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestSanitizeIntermediateStatus_ComplexCodeFences(t *testing.T) {
-	// 1. Repeated braces and identical lines inside code fences MUST be preserved!
-	codeBlockInput := "Here is some code:\n```go\nfunc test() {\n\tif true {\n\t}\n\tif false {\n\t}\n}\n```\nOutside line\nOutside line\nFinal line"
-	wantCodeBlock := "Here is some code:\n```go\nfunc test() {\n\tif true {\n\t}\n\tif false {\n\t}\n}\n```\nOutside line\nFinal line"
-	gotCodeBlock := SanitizeIntermediateStatus(codeBlockInput)
-	if gotCodeBlock != wantCodeBlock {
-		t.Errorf("Expected code block with duplicate braces preserved, got:\n%s\nwant:\n%s", gotCodeBlock, wantCodeBlock)
-	}
-
-	// 2. Single-line code span must not invert state
-	singleLineSpan := "Intro\n```bash echo \"hello\"```\nDuplicate outside\nDuplicate outside\nDone"
-	wantSingleLine := "Intro\n```bash echo \"hello\"```\nDuplicate outside\nDone"
-	gotSingleLine := SanitizeIntermediateStatus(singleLineSpan)
-	if gotSingleLine != wantSingleLine {
-		t.Errorf("Expected single-line span to not prevent deduplication outside, got:\n%s\nwant:\n%s", gotSingleLine, wantSingleLine)
-	}
-
-	// 3. 4-backticks fence and tildes
-	tildeBlock := "Tilde test:\n~~~python\ndef foo():\n    return 1\n    return 1\n~~~\nDuplicate outside\nDuplicate outside"
-	wantTilde := "Tilde test:\n~~~python\ndef foo():\n    return 1\n    return 1\n~~~\nDuplicate outside"
-	gotTilde := SanitizeIntermediateStatus(tildeBlock)
-	if gotTilde != wantTilde {
-		t.Errorf("Expected tilde block content preserved, got:\n%s\nwant:\n%s", gotTilde, wantTilde)
-	}
-
-	// 4. Blockquoted code fence
-	blockquoteBlock := "> ```json\n> {\n> }\n> }\n> ```\nOut\nOut"
-	wantBlockquote := "> ```json\n> {\n> }\n> }\n> ```\nOut"
-	gotBlockquote := SanitizeIntermediateStatus(blockquoteBlock)
-	if gotBlockquote != wantBlockquote {
-		t.Errorf("Expected blockquoted fence handled, got:\n%s\nwant:\n%s", gotBlockquote, wantBlockquote)
-	}
+	assertSanitizedIntermediateStatusCases(t, []sanitizedIntermediateStatusCase{
+		{
+			name:  "repeated braces inside code fences preserved",
+			input: "Here is some code:\n```go\nfunc test() {\n\tif true {\n\t}\n\tif false {\n\t}\n}\n```\nOutside line\nOutside line\nFinal line",
+			want:  "Here is some code:\n```go\nfunc test() {\n\tif true {\n\t}\n\tif false {\n\t}\n}\n```\nOutside line\nFinal line",
+		},
+		{
+			name:  "single-line code span outside deduplication",
+			input: "Intro\n```bash echo \"hello\"```\nDuplicate outside\nDuplicate outside\nDone",
+			want:  "Intro\n```bash echo \"hello\"```\nDuplicate outside\nDone",
+		},
+		{
+			name:  "tilde block content preserved",
+			input: "Tilde test:\n~~~python\ndef foo():\n    return 1\n    return 1\n~~~\nDuplicate outside\nDuplicate outside",
+			want:  "Tilde test:\n~~~python\ndef foo():\n    return 1\n    return 1\n~~~\nDuplicate outside",
+		},
+		{
+			name:  "blockquoted fence handled",
+			input: "> ```json\n> {\n> }\n> }\n> ```\nOut\nOut",
+			want:  "> ```json\n> {\n> }\n> }\n> ```\nOut",
+		},
+	})
 }
 
 func TestAutoAttachNewMedia(t *testing.T) {
@@ -499,6 +505,38 @@ func TestExtractAndSanitizeMedia_EdgePaths(t *testing.T) {
 	}
 }
 
+type extractSanitizeMediaTestCase struct {
+	name               string
+	input              string
+	wantAttachments    int
+	wantAttachmentName string
+	wantContentType    string
+	wantTextContain    string
+	wantTextNotContain string
+}
+
+func runExtractSanitizeMediaCase(t *testing.T, tc extractSanitizeMediaTestCase) {
+	t.Helper()
+	cleanText, attachments := ExtractAndSanitizeMedia(tc.input, "")
+	if len(attachments) != tc.wantAttachments {
+		t.Fatalf("expected %d attachments, got %d", tc.wantAttachments, len(attachments))
+	}
+	if tc.wantAttachments > 0 {
+		if attachments[0].Filename != tc.wantAttachmentName {
+			t.Errorf("expected attachment name %q, got %q", tc.wantAttachmentName, attachments[0].Filename)
+		}
+		if attachments[0].ContentType != tc.wantContentType {
+			t.Errorf("expected content type %q, got %q", tc.wantContentType, attachments[0].ContentType)
+		}
+	}
+	if tc.wantTextContain != "" && !strings.Contains(cleanText, tc.wantTextContain) {
+		t.Errorf("expected cleanText to contain %q, got %q", tc.wantTextContain, cleanText)
+	}
+	if tc.wantTextNotContain != "" && strings.Contains(cleanText, tc.wantTextNotContain) {
+		t.Errorf("expected cleanText to not contain %q, got %q", tc.wantTextNotContain, cleanText)
+	}
+}
+
 func TestExtractAndSanitizeMedia_InternalAerialImages(t *testing.T) {
 	// Generate valid test PNG data
 	img := image.NewRGBA(image.Rect(0, 0, 5, 5))
@@ -550,15 +588,7 @@ func TestExtractAndSanitizeMedia_InternalAerialImages(t *testing.T) {
 	AllowedInternalHosts[serverHost] = true
 	defer delete(AllowedInternalHosts, serverHost)
 
-	tests := []struct {
-		name               string
-		input              string
-		wantAttachments    int
-		wantAttachmentName string
-		wantContentType    string
-		wantTextContain    string
-		wantTextNotContain string
-	}{
+	tests := []extractSanitizeMediaTestCase{
 		{
 			name:               "valid internal image attached and replaced with alt text",
 			input:              fmt.Sprintf("Episode ready:\n![Garage Storyboard](%s/media/storyboard.png)", server.URL),
@@ -623,25 +653,41 @@ func TestExtractAndSanitizeMedia_InternalAerialImages(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cleanText, attachments := ExtractAndSanitizeMedia(tc.input, "")
-			if len(attachments) != tc.wantAttachments {
-				t.Fatalf("expected %d attachments, got %d", tc.wantAttachments, len(attachments))
-			}
-			if tc.wantAttachments > 0 {
-				if attachments[0].Filename != tc.wantAttachmentName {
-					t.Errorf("expected attachment name %q, got %q", tc.wantAttachmentName, attachments[0].Filename)
-				}
-				if attachments[0].ContentType != tc.wantContentType {
-					t.Errorf("expected content type %q, got %q", tc.wantContentType, attachments[0].ContentType)
-				}
-			}
-			if tc.wantTextContain != "" && !strings.Contains(cleanText, tc.wantTextContain) {
-				t.Errorf("expected cleanText to contain %q, got %q", tc.wantTextContain, cleanText)
-			}
-			if tc.wantTextNotContain != "" && strings.Contains(cleanText, tc.wantTextNotContain) {
-				t.Errorf("expected cleanText to not contain %q, got %q", tc.wantTextNotContain, cleanText)
-			}
+			runExtractSanitizeMediaCase(t, tc)
 		})
+	}
+}
+
+type resolveFetchInternalImageCase struct {
+	name            string
+	rawURL          string
+	filename        string
+	wantErr         bool
+	wantErrSentinel error
+	wantFilename    string
+	wantContentType string
+}
+
+func runResolveFetchInternalImageCase(t *testing.T, tc resolveFetchInternalImageCase) {
+	t.Helper()
+	att, err := ResolveAndFetchInternalAttachment(tc.rawURL, tc.filename)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error for %s, got nil", tc.rawURL)
+		}
+		if tc.wantErrSentinel != nil && !errors.Is(err, tc.wantErrSentinel) {
+			t.Errorf("expected error to wrap %v, got %v", tc.wantErrSentinel, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error for %s: %v", tc.rawURL, err)
+	}
+	if att.Filename != tc.wantFilename {
+		t.Errorf("expected filename %q, got %q", tc.wantFilename, att.Filename)
+	}
+	if att.ContentType != tc.wantContentType {
+		t.Errorf("expected content type %q, got %q", tc.wantContentType, att.ContentType)
 	}
 }
 
@@ -690,15 +736,7 @@ func TestResolveAndFetchInternalImage_Validation(t *testing.T) {
 	}}
 	defer func() { internalMediaHTTPClient.Transport = origTransport }()
 
-	tests := []struct {
-		name            string
-		rawURL          string
-		filename        string
-		wantErr         bool
-		wantErrSentinel error
-		wantFilename    string
-		wantContentType string
-	}{
+	tests := []resolveFetchInternalImageCase{
 		{
 			name:            "disallowed non-internal domain",
 			rawURL:          "https://example.com/pic.png",
@@ -779,25 +817,7 @@ func TestResolveAndFetchInternalImage_Validation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			att, err := ResolveAndFetchInternalAttachment(tc.rawURL, tc.filename)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error for %s, got nil", tc.rawURL)
-				}
-				if tc.wantErrSentinel != nil && !errors.Is(err, tc.wantErrSentinel) {
-					t.Errorf("expected error to wrap %v, got %v", tc.wantErrSentinel, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error for %s: %v", tc.rawURL, err)
-			}
-			if att.Filename != tc.wantFilename {
-				t.Errorf("expected filename %q, got %q", tc.wantFilename, att.Filename)
-			}
-			if att.ContentType != tc.wantContentType {
-				t.Errorf("expected content type %q, got %q", tc.wantContentType, att.ContentType)
-			}
+			runResolveFetchInternalImageCase(t, tc)
 		})
 	}
 
@@ -811,33 +831,26 @@ func TestResolveAndFetchInternalImage_Validation(t *testing.T) {
 }
 
 func TestSanitizeIntermediateStatus_HarnessChatter(t *testing.T) {
-	input := `Waiting for unit test suite completion on PR #225.
-Waiting on Docker image builds for dashboard on PR #225.
-Handled, boss—PR #225 is merged and synced! 🍵`
-	got := SanitizeIntermediateStatus(input)
-	want := "Handled, boss—PR #225 is merged and synced! 🍵"
-	if got != want {
-		t.Errorf("expected %q, got %q", want, got)
-	}
-
-	// Conversational sentences preserved
-	convInput := "Waiting on your decision between Option A and Option B.\nPlease let me know."
-	gotConv := SanitizeIntermediateStatus(convInput)
-	if gotConv != convInput {
-		t.Errorf("expected conversational text preserved, got %q", gotConv)
-	}
-
-	// Lines inside code block preserved
-	codeBlock := "Here is a script:\n```bash\nwaiting for unit test suite completion\n```\nDone."
-	gotCode := SanitizeIntermediateStatus(codeBlock)
-	if gotCode != codeBlock {
-		t.Errorf("expected code block line preserved, got %q", gotCode)
-	}
-
-	// Indented list following status preamble or harness chatter is dedented uniformly
-	listAfterChatter := "Everything is running smoothly! I'll keep working on this and check in shortly.\nWaiting for unit test suite completion.\n  - **coven**: cpu = 100\n  - **hangar**: cpu = 100"
-	wantList := "- **coven**: cpu = 100\n- **hangar**: cpu = 100"
-	if gotList := SanitizeIntermediateStatus(listAfterChatter); gotList != wantList {
-		t.Errorf("expected dedented list %q, got %q", wantList, gotList)
-	}
+	assertSanitizedIntermediateStatusCases(t, []sanitizedIntermediateStatusCase{
+		{
+			name:  "harness chatter stripped",
+			input: "Waiting for unit test suite completion on PR #225.\nWaiting on Docker image builds for dashboard on PR #225.\nHandled, boss—PR #225 is merged and synced! 🍵",
+			want:  "Handled, boss—PR #225 is merged and synced! 🍵",
+		},
+		{
+			name:  "conversational sentences preserved",
+			input: "Waiting on your decision between Option A and Option B.\nPlease let me know.",
+			want:  "Waiting on your decision between Option A and Option B.\nPlease let me know.",
+		},
+		{
+			name:  "lines inside code block preserved",
+			input: "Here is a script:\n```bash\nwaiting for unit test suite completion\n```\nDone.",
+			want:  "Here is a script:\n```bash\nwaiting for unit test suite completion\n```\nDone.",
+		},
+		{
+			name:  "indented list following chatter dedented uniformly",
+			input: "Everything is running smoothly! I'll keep working on this and check in shortly.\nWaiting for unit test suite completion.\n  - **coven**: cpu = 100\n  - **hangar**: cpu = 100",
+			want:  "- **coven**: cpu = 100\n- **hangar**: cpu = 100",
+		},
+	})
 }

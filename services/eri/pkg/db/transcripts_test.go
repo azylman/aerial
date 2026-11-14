@@ -10,54 +10,47 @@ import (
 	"time"
 )
 
-func TestTranscriptStore_CRUD_And_SyncStates(t *testing.T) {
-	for _, store := range []TranscriptStore{newTestTranscriptStore(t, "stack-a")} {
-		ctx := context.Background()
-		syncStates, err := store.GetSessionSyncStates(ctx)
-		if err != nil || len(syncStates) != 0 {
-			t.Fatalf("expected 0 sync states, got %d, err: %v", len(syncStates), err)
-		}
-		if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: ""}); err == nil {
-			t.Errorf("expected error for empty session ID")
-		}
-
-		now := time.Now().UTC().Truncate(time.Second)
-		summary := SessionSummary{
-			SessionID: "sess-1", ThreadID: "th-1", Summary: "Debugged interface",
-			LastIndexedStep: 10, LastMtime: now, SummaryStepWatermark: 5, IsSettled: false,
-		}
-		if err := store.UpsertSessionSummary(ctx, summary); err != nil {
-			t.Fatalf("UpsertSessionSummary failed: %v", err)
-		}
-		syncStates, err = store.GetSessionSyncStates(ctx)
-		if err != nil || syncStates["sess-1"].LastIndexedStep != 10 || syncStates["sess-1"].IsSettled || syncStates["sess-1"].LastMtime.IsZero() {
-			t.Fatalf("unexpected state1: %+v", syncStates["sess-1"])
-		}
-
-		updateSummary := SessionSummary{SessionID: "sess-1", Summary: "Updated", LastIndexedStep: 25, SummaryStepWatermark: 25, IsSettled: true}
-		if err := store.UpsertSessionSummary(ctx, updateSummary); err != nil {
-			t.Fatalf("UpsertSessionSummary update failed: %v", err)
-		}
-		syncStates, err = store.GetSessionSyncStates(ctx)
-		if err != nil || syncStates["sess-1"].LastIndexedStep != 25 || !syncStates["sess-1"].IsSettled {
-			t.Fatalf("unexpected state after update: %+v, err: %v", syncStates["sess-1"], err)
-		}
-
-		if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-1", LastIndexedStep: -2}); err != nil {
-			t.Fatalf("UpsertSessionSummary reset failed: %v", err)
-		}
-		syncStates, err = store.GetSessionSyncStates(ctx)
-		if err != nil || syncStates["sess-1"].LastIndexedStep != -1 {
-			t.Fatalf("expected LastIndexedStep=-1, got %+v", syncStates["sess-1"])
-		}
-		if states, err := store.GetSessionSyncStates(nil); err != nil || states == nil {
-			t.Errorf("expected non-nil states on nil ctx: %v", err)
-		}
-		if err := store.UpsertSessionSummary(nil, summary); err != nil {
-			t.Errorf("expected nil error on UpsertSessionSummary with nil ctx: %v", err)
-		}
+func assertSessionSummarySyncTransitions(ctx context.Context, t *testing.T, store TranscriptStore) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	summary := SessionSummary{
+		SessionID: "sess-1", ThreadID: "th-1", Summary: "Debugged interface",
+		LastIndexedStep: 10, LastMtime: now, SummaryStepWatermark: 5, IsSettled: false,
+	}
+	if err := store.UpsertSessionSummary(ctx, summary); err != nil {
+		t.Fatalf("UpsertSessionSummary failed: %v", err)
+	}
+	syncStates, err := store.GetSessionSyncStates(ctx)
+	if err != nil || syncStates["sess-1"].LastIndexedStep != 10 || syncStates["sess-1"].IsSettled || syncStates["sess-1"].LastMtime.IsZero() {
+		t.Fatalf("unexpected state1: %+v", syncStates["sess-1"])
 	}
 
+	updateSummary := SessionSummary{SessionID: "sess-1", Summary: "Updated", LastIndexedStep: 25, SummaryStepWatermark: 25, IsSettled: true}
+	if err := store.UpsertSessionSummary(ctx, updateSummary); err != nil {
+		t.Fatalf("UpsertSessionSummary update failed: %v", err)
+	}
+	syncStates, err = store.GetSessionSyncStates(ctx)
+	if err != nil || syncStates["sess-1"].LastIndexedStep != 25 || !syncStates["sess-1"].IsSettled {
+		t.Fatalf("unexpected state after update: %+v, err: %v", syncStates["sess-1"], err)
+	}
+
+	if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-1", LastIndexedStep: -2}); err != nil {
+		t.Fatalf("UpsertSessionSummary reset failed: %v", err)
+	}
+	syncStates, err = store.GetSessionSyncStates(ctx)
+	if err != nil || syncStates["sess-1"].LastIndexedStep != -1 {
+		t.Fatalf("expected LastIndexedStep=-1, got %+v", syncStates["sess-1"])
+	}
+	if states, err := store.GetSessionSyncStates(nil); err != nil || states == nil {
+		t.Errorf("expected non-nil states on nil ctx: %v", err)
+	}
+	if err := store.UpsertSessionSummary(nil, summary); err != nil {
+		t.Errorf("expected nil error on UpsertSessionSummary with nil ctx: %v", err)
+	}
+}
+
+func assertNilTranscriptStore(t *testing.T) {
+	t.Helper()
 	var nilStore *SQLTranscriptStore
 	if err := nilStore.UpsertSessionSummary(context.Background(), SessionSummary{SessionID: "s1"}); err == nil {
 		t.Errorf("expected error on nil store UpsertSessionSummary")
@@ -76,6 +69,59 @@ func TestTranscriptStore_CRUD_And_SyncStates(t *testing.T) {
 	}
 	if _, ok := ParseDBTime(nil); ok {
 		t.Errorf("expected false for ParseDBTime(nil)")
+	}
+}
+
+func TestTranscriptStore_CRUD_And_SyncStates(t *testing.T) {
+	for _, store := range []TranscriptStore{newTestTranscriptStore(t, "stack-a")} {
+		ctx := context.Background()
+		syncStates, err := store.GetSessionSyncStates(ctx)
+		if err != nil || len(syncStates) != 0 {
+			t.Fatalf("expected 0 sync states, got %d, err: %v", len(syncStates), err)
+		}
+		if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: ""}); err == nil {
+			t.Errorf("expected error for empty session ID")
+		}
+
+		assertSessionSummarySyncTransitions(ctx, t, store)
+	}
+
+	assertNilTranscriptStore(t)
+}
+
+func assertBatchInsertDuplicatesAndDirty(ctx context.Context, t *testing.T, store TranscriptStore) {
+	t.Helper()
+	dupSteps := []TranscriptStep{
+		{SessionID: "sess-steps-1", StepIndex: 1, StepType: "tool_call", ToolName: "run_command", Content: "DIFFERENT CONTENT IGNORED"},
+		{SessionID: "sess-steps-1", StepIndex: 3, StepType: "model_response", Content: "Deployment completed"},
+	}
+	if err := store.BatchInsertTranscriptSteps(ctx, dupSteps); err != nil {
+		t.Fatalf("BatchInsertTranscriptSteps with duplicates failed: %v", err)
+	}
+
+	resultsAfter, err := store.SearchTranscriptSteps(ctx, "", "", "sess-steps-1", "", 10)
+	if err != nil || len(resultsAfter) != 4 {
+		t.Fatalf("expected 4 steps total, got %d (err: %v)", len(resultsAfter), err)
+	}
+	for _, r := range resultsAfter {
+		if r.StepIndex == 1 && r.Content != "kubectl apply -f deployment.yaml" {
+			t.Errorf("expected original content for step 1 preserved, got %q", r.Content)
+		}
+	}
+
+	dirty := []TranscriptStep{{SessionID: "sess-steps-1", StepIndex: 4, StepType: "tool_result", Content: "a\x00b\xff"}}
+	if err := store.BatchInsertTranscriptSteps(ctx, dirty); err != nil {
+		t.Fatalf("BatchInsertTranscriptSteps with dirty text failed: %v", err)
+	}
+	if got, err := store.GetTranscriptStepRange(ctx, "", "sess-steps-1", 4, 4); err != nil || len(got) != 1 || got[0].Content != "ab\uFFFD" {
+		t.Fatalf("dirty step stored as %+v (err: %v), want content %q", got, err, "ab\uFFFD")
+	}
+	if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-steps-1", Summary: "fix\x00ed\xfe"}); err != nil {
+		t.Fatalf("UpsertSessionSummary with dirty text failed: %v", err)
+	}
+	var storedSummary string
+	if err := store.(*SQLTranscriptStore).db.QueryRowContext(ctx, "SELECT summary FROM session_summaries WHERE session_id = 'sess-steps-1'").Scan(&storedSummary); err != nil || storedSummary != "fixed\uFFFD" {
+		t.Fatalf("dirty summary stored as %q (err: %v), want %q", storedSummary, err, "fixed\uFFFD")
 	}
 }
 
@@ -101,38 +147,7 @@ func TestTranscriptStore_BatchInsertTranscriptSteps(t *testing.T) {
 			t.Fatalf("expected 3 steps, got %d (err: %v)", len(results), err)
 		}
 
-		dupSteps := []TranscriptStep{
-			{SessionID: "sess-steps-1", StepIndex: 1, StepType: "tool_call", ToolName: "run_command", Content: "DIFFERENT CONTENT IGNORED"},
-			{SessionID: "sess-steps-1", StepIndex: 3, StepType: "model_response", Content: "Deployment completed"},
-		}
-		if err := store.BatchInsertTranscriptSteps(ctx, dupSteps); err != nil {
-			t.Fatalf("BatchInsertTranscriptSteps with duplicates failed: %v", err)
-		}
-
-		resultsAfter, err := store.SearchTranscriptSteps(ctx, "", "", "sess-steps-1", "", 10)
-		if err != nil || len(resultsAfter) != 4 {
-			t.Fatalf("expected 4 steps total, got %d (err: %v)", len(resultsAfter), err)
-		}
-		for _, r := range resultsAfter {
-			if r.StepIndex == 1 && r.Content != "kubectl apply -f deployment.yaml" {
-				t.Errorf("expected original content for step 1 preserved, got %q", r.Content)
-			}
-		}
-
-		dirty := []TranscriptStep{{SessionID: "sess-steps-1", StepIndex: 4, StepType: "tool_result", Content: "a\x00b\xff"}}
-		if err := store.BatchInsertTranscriptSteps(ctx, dirty); err != nil {
-			t.Fatalf("BatchInsertTranscriptSteps with dirty text failed: %v", err)
-		}
-		if got, err := store.GetTranscriptStepRange(ctx, "", "sess-steps-1", 4, 4); err != nil || len(got) != 1 || got[0].Content != "ab\uFFFD" {
-			t.Fatalf("dirty step stored as %+v (err: %v), want content %q", got, err, "ab\uFFFD")
-		}
-		if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-steps-1", Summary: "fix\x00ed\xfe"}); err != nil {
-			t.Fatalf("UpsertSessionSummary with dirty text failed: %v", err)
-		}
-		var storedSummary string
-		if err := store.(*SQLTranscriptStore).db.QueryRowContext(ctx, "SELECT summary FROM session_summaries WHERE session_id = 'sess-steps-1'").Scan(&storedSummary); err != nil || storedSummary != "fixed\uFFFD" {
-			t.Fatalf("dirty summary stored as %q (err: %v), want %q", storedSummary, err, "fixed\uFFFD")
-		}
+		assertBatchInsertDuplicatesAndDirty(ctx, t, store)
 
 		if err := store.BatchInsertTranscriptSteps(ctx, nil); err != nil {
 			t.Errorf("expected nil error for nil slice")
@@ -312,35 +327,61 @@ func (m testMockDBTX) QueryRowContext(ctx context.Context, query string, args ..
 	return nil
 }
 
+type mockDBQueryHarness struct {
+	capturedQuery string
+	mock          testMockDBTX
+}
+
+func newMockDBQueryHarness(dbMem *sql.DB, scanSQL string, queryErr error) *mockDBQueryHarness {
+	h := &mockDBQueryHarness{}
+	h.mock = testMockDBTX{queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+		h.capturedQuery = query
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		return dbMem.QueryContext(ctx, scanSQL)
+	}}
+	return h
+}
+
+func (h *mockDBQueryHarness) assertCapturedPatterns(t *testing.T, patterns []string) {
+	t.Helper()
+	for _, pat := range patterns {
+		if !strings.Contains(h.capturedQuery, pat) {
+			t.Errorf("expected query containing %q, got: %s", pat, h.capturedQuery)
+		}
+	}
+}
+
+type mockSyncStatesCase struct {
+	name, querySQL, wantErr string
+	queryErr                error
+	wantLen                 int
+}
+
+func runGetSessionSyncStatesMockDBCase(t *testing.T, dbMem *sql.DB, tc mockSyncStatesCase) {
+	t.Helper()
+	h := newMockDBQueryHarness(dbMem, tc.querySQL, tc.queryErr)
+	states, err := (&SQLTranscriptStore{db: h.mock, stack: "stack-a"}).GetSessionSyncStates(context.Background())
+	if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+		t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+	} else if tc.wantErr == "" && (err != nil || len(states) != tc.wantLen || states["sess-1"].LastIndexedStep != 10 || !states["sess-1"].IsSettled) {
+		t.Fatalf("unexpected states: %+v, err: %v", states, err)
+	}
+	if tc.wantErr == "" {
+		h.assertCapturedPatterns(t, []string{"SELECT session_id, engine, last_mtime, last_indexed_step, is_settled FROM session_summaries WHERE stack = $1"})
+	}
+}
+
 func TestTranscriptStore_GetSessionSyncStatesWithContext_MockDB(t *testing.T) {
 	dbMem := initTestSQLiteDB(t)
-	for _, tc := range []struct {
-		name, querySQL, wantErr string
-		queryErr                error
-		wantLen                 int
-	}{
+	for _, tc := range []mockSyncStatesCase{
 		{name: "success query", querySQL: "SELECT 'sess-1' AS session_id, 'agy' AS engine, '2026-10-01 12:00:00' AS last_mtime, 10 AS last_indexed_step, 1 AS is_settled", wantLen: 1},
 		{name: "scan error wrong column count", querySQL: "SELECT 'sess-1' AS session_id", wantErr: "scan session sync state"},
 		{name: "query failure error", queryErr: errors.New("simulated sync states query failure"), wantErr: "query session sync states"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var capturedQuery string
-			mock := testMockDBTX{queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-				capturedQuery = query
-				if tc.queryErr != nil {
-					return nil, tc.queryErr
-				}
-				return dbMem.QueryContext(ctx, tc.querySQL)
-			}}
-			states, err := (&SQLTranscriptStore{db: mock, stack: "stack-a"}).GetSessionSyncStates(context.Background())
-			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
-				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
-			} else if tc.wantErr == "" && (err != nil || len(states) != tc.wantLen || states["sess-1"].LastIndexedStep != 10 || !states["sess-1"].IsSettled) {
-				t.Fatalf("unexpected states: %+v, err: %v", states, err)
-			}
-			if tc.wantErr == "" && !strings.Contains(capturedQuery, "SELECT session_id, engine, last_mtime, last_indexed_step, is_settled FROM session_summaries WHERE stack = $1") {
-				t.Errorf("unexpected query: %s", capturedQuery)
-			}
+			runGetSessionSyncStatesMockDBCase(t, dbMem, tc)
 		})
 	}
 }
@@ -416,6 +457,26 @@ func TestTranscriptStore_BatchInsertTranscriptStepsWithContext_MockDB(t *testing
 	}
 }
 
+type mockSearchSummariesCase struct {
+	name, stack, query, scanSQL, wantErrMsg string
+	emb                                     []float32
+	queryErr                                error
+	wantPatterns                            []string
+	wantLen                                 int
+}
+
+func runSearchSessionSummariesMockDBCase(t *testing.T, dbMem *sql.DB, tc mockSearchSummariesCase) {
+	t.Helper()
+	h := newMockDBQueryHarness(dbMem, tc.scanSQL, tc.queryErr)
+	res, err := (&SQLTranscriptStore{db: h.mock, stack: "stack-a"}).SearchSessionSummaries(context.Background(), tc.stack, tc.emb, tc.query, 10, 0.5)
+	if tc.wantErrMsg != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrMsg)) {
+		t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+	} else if tc.wantErrMsg == "" && (err != nil || len(res) != tc.wantLen) {
+		t.Fatalf("unexpected res len=%d err=%v", len(res), err)
+	}
+	h.assertCapturedPatterns(t, tc.wantPatterns)
+}
+
 func TestTranscriptStore_SearchSessionSummariesWithContext_MockDB(t *testing.T) {
 	dbMem := initTestSQLiteDB(t)
 	emb := make([]float32, ExpectedEmbeddingDim)
@@ -423,13 +484,7 @@ func TestTranscriptStore_SearchSessionSummariesWithContext_MockDB(t *testing.T) 
 
 	mockScanQuery := "SELECT 'stack-a' AS stack, 's-pg-1' AS session_id, 'agy' AS engine, 'th-1' AS thread_id, 'PG summary result' AS summary, 5 AS last_indexed_step, '2026-10-01 12:00:00' AS last_mtime, 5 AS summary_step_watermark, 1 AS is_settled, '2026-10-01 11:00:00' AS created_at, '2026-10-01 12:00:00' AS updated_at, 0.85 AS score"
 
-	for _, tc := range []struct {
-		name, stack, query, scanSQL, wantErrMsg string
-		emb                                     []float32
-		queryErr                                error
-		wantPatterns                            []string
-		wantLen                                 int
-	}{
+	for _, tc := range []mockSearchSummariesCase{
 		{name: "hybrid", emb: emb, query: "query text", scanSQL: mockScanQuery, wantPatterns: []string{"vector_hits", "text_hits", "FULL OUTER JOIN"}, wantLen: 1},
 		{name: "dense", emb: emb, scanSQL: mockScanQuery, wantPatterns: []string{"WITH candidates AS", "similarity AS score"}, wantLen: 1},
 		{name: "dense stack filtered on non-postgres skips exact-scan tx", stack: "stack-b", emb: emb, scanSQL: mockScanQuery, wantPatterns: []string{"($1 = '' OR ss.stack = $1)", "WITH candidates AS"}, wantLen: 1},
@@ -438,27 +493,28 @@ func TestTranscriptStore_SearchSessionSummariesWithContext_MockDB(t *testing.T) 
 		{name: "scan error", emb: emb, query: "test", scanSQL: "SELECT 's-pg-1' AS session_id", wantErrMsg: "scan session summary result"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var capturedQuery string
-			mockDB := testMockDBTX{queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-				capturedQuery = query
-				if tc.queryErr != nil {
-					return nil, tc.queryErr
-				}
-				return dbMem.QueryContext(ctx, tc.scanSQL)
-			}}
-			res, err := (&SQLTranscriptStore{db: mockDB, stack: "stack-a"}).SearchSessionSummaries(context.Background(), tc.stack, tc.emb, tc.query, 10, 0.5)
-			if tc.wantErrMsg != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrMsg)) {
-				t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
-			} else if tc.wantErrMsg == "" && (err != nil || len(res) != tc.wantLen) {
-				t.Fatalf("unexpected res len=%d err=%v", len(res), err)
-			}
-			for _, pat := range tc.wantPatterns {
-				if !strings.Contains(capturedQuery, pat) {
-					t.Errorf("expected query containing %q, got: %s", pat, capturedQuery)
-				}
-			}
+			runSearchSessionSummariesMockDBCase(t, dbMem, tc)
 		})
 	}
+}
+
+type mockSearchStepsCase struct {
+	name, stack, query, sess, tool, scanSQL, wantErrMsg string
+	limit, wantLen                                      int
+	queryErr                                            error
+	wantPatterns                                        []string
+}
+
+func runSearchTranscriptStepsMockDBCase(t *testing.T, dbMem *sql.DB, tc mockSearchStepsCase) {
+	t.Helper()
+	h := newMockDBQueryHarness(dbMem, tc.scanSQL, tc.queryErr)
+	steps, err := (&SQLTranscriptStore{db: h.mock, stack: "stack-a"}).SearchTranscriptSteps(context.Background(), tc.stack, tc.query, tc.sess, tc.tool, tc.limit)
+	if tc.wantErrMsg != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrMsg)) {
+		t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+	} else if tc.wantErrMsg == "" && (err != nil || len(steps) != tc.wantLen) {
+		t.Fatalf("unexpected steps len=%d err=%v", len(steps), err)
+	}
+	h.assertCapturedPatterns(t, tc.wantPatterns)
 }
 
 func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
@@ -466,12 +522,7 @@ func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
 
 	mockScanQuery := "SELECT 'stack-a' AS stack, 's-pg-1' AS session_id, 'agy' AS engine, 0 AS step_index, 'tool' AS step_type, 'run_command' AS tool_name, 'shell' AS tool_kind, 'echo test' AS content, '2026-10-01 12:00:00' AS created_at, 1.0 AS rank_score"
 
-	for _, tc := range []struct {
-		name, stack, query, sess, tool, scanSQL, wantErrMsg string
-		limit, wantLen                                      int
-		queryErr                                            error
-		wantPatterns                                        []string
-	}{
+	for _, tc := range []mockSearchStepsCase{
 		{name: "with text", query: "build command", sess: "sess-1", tool: "run_command", limit: 15, scanSQL: mockScanQuery, wantPatterns: []string{"t.fts_tokens @@ websearch_to_tsquery", "rank_score"}, wantLen: 1},
 		{name: "filters only", sess: "sess-1", tool: "run_command", limit: 10, scanSQL: mockScanQuery, wantPatterns: []string{"1.0 AS rank_score"}, wantLen: 1},
 		{name: "stack filter", stack: "stack-b", sess: "sess-1", limit: 10, scanSQL: mockScanQuery, wantPatterns: []string{"t.stack = $1", "t.session_id = $2"}, wantLen: 1},
@@ -481,26 +532,40 @@ func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
 		{name: "scan error", query: "test", limit: 10, scanSQL: "SELECT 's-pg-1' AS session_id", wantErrMsg: "scan transcript step result"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var capturedQuery string
-			mockDB := testMockDBTX{queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-				capturedQuery = query
-				if tc.queryErr != nil {
-					return nil, tc.queryErr
-				}
-				return dbMem.QueryContext(ctx, tc.scanSQL)
-			}}
-			steps, err := (&SQLTranscriptStore{db: mockDB, stack: "stack-a"}).SearchTranscriptSteps(context.Background(), tc.stack, tc.query, tc.sess, tc.tool, tc.limit)
-			if tc.wantErrMsg != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrMsg)) {
-				t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
-			} else if tc.wantErrMsg == "" && (err != nil || len(steps) != tc.wantLen) {
-				t.Fatalf("unexpected steps len=%d err=%v", len(steps), err)
-			}
-			for _, pat := range tc.wantPatterns {
-				if !strings.Contains(capturedQuery, pat) {
-					t.Errorf("expected query containing %q, got: %s", pat, capturedQuery)
-				}
-			}
+			runSearchTranscriptStepsMockDBCase(t, dbMem, tc)
 		})
+	}
+}
+
+type transcriptStepRangeCase struct {
+	name      string
+	session   string
+	startStep int
+	endStep   int
+	wantLen   int
+	wantFirst int
+	wantLast  int
+}
+
+func runGetTranscriptStepRangeCase(ctx context.Context, t *testing.T, store TranscriptStore, tc transcriptStepRangeCase) {
+	t.Helper()
+	got, err := store.GetTranscriptStepRange(ctx, "", tc.session, tc.startStep, tc.endStep)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != tc.wantLen {
+		t.Fatalf("got len=%d, want %d", len(got), tc.wantLen)
+	}
+	if tc.wantLen > 0 {
+		if got[0].StepIndex != tc.wantFirst {
+			t.Errorf("got first step index=%d, want %d", got[0].StepIndex, tc.wantFirst)
+		}
+		if got[len(got)-1].StepIndex != tc.wantLast {
+			t.Errorf("got last step index=%d, want %d", got[len(got)-1].StepIndex, tc.wantLast)
+		}
+		if got[0].RankScore != 1.0 {
+			t.Errorf("got rank score %f, want 1.0", got[0].RankScore)
+		}
 	}
 }
 
@@ -523,15 +588,7 @@ func TestTranscriptStore_GetTranscriptStepRange(t *testing.T) {
 			t.Fatalf("BatchInsertTranscriptSteps failed: %v", err)
 		}
 
-		tests := []struct {
-			name      string
-			session   string
-			startStep int
-			endStep   int
-			wantLen   int
-			wantFirst int
-			wantLast  int
-		}{
+		tests := []transcriptStepRangeCase{
 			{name: "normal range", session: "sess-range-a", startStep: 1, endStep: 3, wantLen: 3, wantFirst: 1, wantLast: 3},
 			{name: "single step", session: "sess-range-a", startStep: 2, endStep: 2, wantLen: 1, wantFirst: 2, wantLast: 2},
 			{name: "negative start clamped", session: "sess-range-a", startStep: -5, endStep: 1, wantLen: 2, wantFirst: 0, wantLast: 1},
@@ -544,24 +601,7 @@ func TestTranscriptStore_GetTranscriptStepRange(t *testing.T) {
 
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
-				got, err := store.GetTranscriptStepRange(ctx, "", tc.session, tc.startStep, tc.endStep)
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if len(got) != tc.wantLen {
-					t.Fatalf("got len=%d, want %d", len(got), tc.wantLen)
-				}
-				if tc.wantLen > 0 {
-					if got[0].StepIndex != tc.wantFirst {
-						t.Errorf("got first step index=%d, want %d", got[0].StepIndex, tc.wantFirst)
-					}
-					if got[len(got)-1].StepIndex != tc.wantLast {
-						t.Errorf("got last step index=%d, want %d", got[len(got)-1].StepIndex, tc.wantLast)
-					}
-					if got[0].RankScore != 1.0 {
-						t.Errorf("got rank score %f, want 1.0", got[0].RankScore)
-					}
-				}
+				runGetTranscriptStepRangeCase(ctx, t, store, tc)
 			})
 		}
 	}

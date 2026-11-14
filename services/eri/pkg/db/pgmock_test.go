@@ -33,32 +33,31 @@ func startMockPostgres(t *testing.T) string {
 	return listener.Addr().String()
 }
 
-func handlePgConn(conn net.Conn) {
-	defer conn.Close()
+func handlePgStartupHandshake(conn net.Conn) error {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
-		return
+		return err
 	}
 	length := binary.BigEndian.Uint32(lenBuf[:])
 	if length == 8 {
 		var codeBuf [4]byte
 		if _, err := io.ReadFull(conn, codeBuf[:]); err != nil {
-			return
+			return err
 		}
 		if _, err := conn.Write([]byte{'N'}); err != nil {
-			return
+			return err
 		}
 		if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
-			return
+			return err
 		}
 		length = binary.BigEndian.Uint32(lenBuf[:])
 	}
 	rest := make([]byte, length-4)
 	if _, err := io.ReadFull(conn, rest); err != nil {
-		return
+		return err
 	}
 	if _, err := conn.Write([]byte{'R', 0, 0, 0, 8, 0, 0, 0, 0}); err != nil {
-		return
+		return err
 	}
 	for _, kv := range [][2]string{{"server_version", "16.0"}, {"client_encoding", "UTF8"}, {"standard_conforming_strings", "on"}} {
 		body := kv[0] + "\x00" + kv[1] + "\x00"
@@ -67,14 +66,37 @@ func handlePgConn(conn net.Conn) {
 		binary.BigEndian.PutUint32(pkt[1:5], uint32(4+len(body)))
 		copy(pkt[5:], body)
 		if _, err := conn.Write(pkt); err != nil {
-			return
+			return err
 		}
+	}
+	return nil
+}
+
+func handlePgQuery(conn net.Conn, msgBody, ready []byte) {
+	tag := "SELECT 1"
+	s := string(msgBody)
+	if strings.HasPrefix(s, "ALTER") {
+		tag = "ALTER TABLE"
+	} else if strings.HasPrefix(s, "CREATE") || strings.Contains(s, "CREATE TABLE") {
+		tag = "CREATE TABLE"
+	}
+	cmdBytes := append([]byte{'C', 0, 0, 0, 0}, (tag + "\x00")...)
+	binary.BigEndian.PutUint32(cmdBytes[1:5], uint32(len(cmdBytes)-1))
+	_, _ = conn.Write(cmdBytes)
+	_, _ = conn.Write(ready)
+}
+
+func handlePgConn(conn net.Conn) {
+	defer conn.Close()
+	if err := handlePgStartupHandshake(conn); err != nil {
+		return
 	}
 	ready := []byte{'Z', 0, 0, 0, 5, 'I'}
 	if _, err := conn.Write(ready); err != nil {
 		return
 	}
 
+	var lenBuf [4]byte
 	for {
 		var typeBuf [1]byte
 		if _, err := io.ReadFull(conn, typeBuf[:]); err != nil {
@@ -90,17 +112,7 @@ func handlePgConn(conn net.Conn) {
 
 		switch typeBuf[0] {
 		case 'Q':
-			tag := "SELECT 1"
-			s := string(msgBody)
-			if strings.HasPrefix(s, "ALTER") {
-				tag = "ALTER TABLE"
-			} else if strings.HasPrefix(s, "CREATE") || strings.Contains(s, "CREATE TABLE") {
-				tag = "CREATE TABLE"
-			}
-			cmdBytes := append([]byte{'C', 0, 0, 0, 0}, (tag + "\x00")...)
-			binary.BigEndian.PutUint32(cmdBytes[1:5], uint32(len(cmdBytes)-1))
-			_, _ = conn.Write(cmdBytes)
-			_, _ = conn.Write(ready)
+			handlePgQuery(conn, msgBody, ready)
 		case 'S':
 			_, _ = conn.Write(ready)
 		case 'X':

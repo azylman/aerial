@@ -138,6 +138,80 @@ func TestStoreUnavailableContract(t *testing.T) {
 	closeWarn(nil, "test")
 }
 
+func assertMessageQueries(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
+	_ = store.InsertMessage(ctx, Message{ID: "msg-2", ThreadID: "th-1", Content: "Message 2", Status: StatusPending})
+	if pending, err := store.GetPendingOrProcessingMessages(ctx, 10); err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
+		t.Errorf("GetPendingOrProcessingMessages = %+v, %v", pending, err)
+	}
+	if threadIDs, err := store.GetActiveRecentThreadIDs(ctx, time.Hour); err != nil || len(threadIDs) != 1 || threadIDs[0] != "th-1" {
+		t.Errorf("GetActiveRecentThreadIDs = %v, %v", threadIDs, err)
+	}
+	if recent, err := store.GetRecentThreadMessages(ctx, "th-1", 10); err != nil || len(recent) != 2 {
+		t.Errorf("GetRecentThreadMessages = %+v, %v", recent, err)
+	}
+	if tasks, err := store.GetActiveTasks(ctx); err != nil || len(tasks) != 1 || tasks[0].ID != "msg-2" {
+		t.Errorf("GetActiveTasks = %+v, %v", tasks, err)
+	}
+
+	if active, err := store.HasActiveThreadTurn(ctx, ""); err != nil || active {
+		t.Errorf("HasActiveThreadTurn empty = %v, %v, want false, nil", active, err)
+	}
+	if active, err := store.HasActiveThreadTurn(ctx, "th-none"); err != nil || active {
+		t.Errorf("HasActiveThreadTurn th-none = %v, %v, want false, nil", active, err)
+	}
+	if active, err := store.HasActiveThreadTurn(ctx, "th-1"); err != nil || !active {
+		t.Errorf("HasActiveThreadTurn th-1 = %v, %v, want true, nil", active, err)
+	}
+}
+
+func assertMessageEmptyIDGuards(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
+	assertErr(t, store.InsertMessage(ctx, Message{ID: ""}), "InsertMessage empty ID")
+	assertErr(t, store.UpdateMessageStatus(ctx, "", StatusCompleted, ""), "UpdateMessageStatus empty ID")
+	assertErr(t, store.UpdateMessageCompleted(ctx, "", "resp", ""), "UpdateMessageCompleted empty ID")
+	assertErr(t, store.IncrementMessageRetry(ctx, "", "err"), "IncrementMessageRetry empty ID")
+	assertErr(t, store.ResetMessageToPendingWithRestart(ctx, "", "reason"), "ResetMessageToPendingWithRestart empty ID")
+	if m, err := store.GetMessage(ctx, ""); err != nil || m != nil {
+		t.Errorf("expected nil, nil on empty ID GetMessage")
+	}
+	if exists, err := store.MessageExists(ctx, ""); err != nil || exists {
+		t.Errorf("expected false, nil on empty ID MessageExists")
+	}
+	if claimed, err := store.ClaimPendingMessage(ctx, ""); err != nil || claimed {
+		t.Errorf("expected false, nil on empty ID ClaimPendingMessage")
+	}
+}
+
+func assertMessageUpdatesAndTelemetry(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
+	mustOK(t, store.UpdateMessageStatus(ctx, "msg-1", StatusProcessing, "working"), "UpdateMessageStatus")
+	mustOK(t, store.IncrementMessageRetry(ctx, "msg-1", "timeout"), "IncrementMessageRetry")
+	got, _ := store.GetMessage(ctx, "msg-1")
+	if got.RetryCount != 1 || got.ErrorMessage != "timeout" {
+		t.Errorf("retry mismatch: %+v", got)
+	}
+
+	mustOK(t, store.ResetMessageToPendingWithRestart(ctx, "msg-1", "recovered"), "ResetMessageToPendingWithRestart")
+	got, _ = store.GetMessage(ctx, "msg-1")
+	if got.Status != StatusPending || got.RestartCount != 1 {
+		t.Errorf("restart mismatch: %+v", got)
+	}
+
+	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-1", "Task complete", "conv-msg-1", TurnTelemetry{
+		DurationMs:      1200,
+		InputTokens:     100,
+		OutputTokens:    50,
+		ThinkingTokens:  10,
+		CacheReadTokens: 5,
+		TotalTokens:     165,
+	}), "UpdateMessageCompleted")
+	got, _ = store.GetMessage(ctx, "msg-1")
+	if got.Status != StatusCompleted || got.ResponseText != "Task complete" || got.ConversationID != "conv-msg-1" || got.DurationMs != 1200 || got.TotalTokens != 165 {
+		t.Errorf("completed mismatch: %+v", got)
+	}
+}
+
 func TestMessageLifecycle(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
@@ -173,81 +247,13 @@ func TestMessageLifecycle(t *testing.T) {
 		t.Errorf("ClaimPendingMessage already claimed = true, want false")
 	}
 
-	mustOK(t, store.UpdateMessageStatus(ctx, "msg-1", StatusProcessing, "working"), "UpdateMessageStatus")
-	mustOK(t, store.IncrementMessageRetry(ctx, "msg-1", "timeout"), "IncrementMessageRetry")
-	got, _ = store.GetMessage(ctx, "msg-1")
-	if got.RetryCount != 1 || got.ErrorMessage != "timeout" {
-		t.Errorf("retry mismatch: %+v", got)
-	}
-
-	mustOK(t, store.ResetMessageToPendingWithRestart(ctx, "msg-1", "recovered"), "ResetMessageToPendingWithRestart")
-	got, _ = store.GetMessage(ctx, "msg-1")
-	if got.Status != StatusPending || got.RestartCount != 1 {
-		t.Errorf("restart mismatch: %+v", got)
-	}
-
-	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-1", "Task complete", "conv-msg-1", TurnTelemetry{
-		DurationMs:      1200,
-		InputTokens:     100,
-		OutputTokens:    50,
-		ThinkingTokens:  10,
-		CacheReadTokens: 5,
-		TotalTokens:     165,
-	}), "UpdateMessageCompleted")
-	got, _ = store.GetMessage(ctx, "msg-1")
-	if got.Status != StatusCompleted || got.ResponseText != "Task complete" || got.ConversationID != "conv-msg-1" || got.DurationMs != 1200 || got.TotalTokens != 165 {
-		t.Errorf("completed mismatch: %+v", got)
-	}
-
-	_ = store.InsertMessage(ctx, Message{ID: "msg-2", ThreadID: "th-1", Content: "Message 2", Status: StatusPending})
-	if pending, err := store.GetPendingOrProcessingMessages(ctx, 10); err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
-		t.Errorf("GetPendingOrProcessingMessages = %+v, %v", pending, err)
-	}
-	if threadIDs, err := store.GetActiveRecentThreadIDs(ctx, time.Hour); err != nil || len(threadIDs) != 1 || threadIDs[0] != "th-1" {
-		t.Errorf("GetActiveRecentThreadIDs = %v, %v", threadIDs, err)
-	}
-	if recent, err := store.GetRecentThreadMessages(ctx, "th-1", 10); err != nil || len(recent) != 2 {
-		t.Errorf("GetRecentThreadMessages = %+v, %v", recent, err)
-	}
-	if tasks, err := store.GetActiveTasks(ctx); err != nil || len(tasks) != 1 || tasks[0].ID != "msg-2" {
-		t.Errorf("GetActiveTasks = %+v, %v", tasks, err)
-	}
-
-	if active, err := store.HasActiveThreadTurn(ctx, ""); err != nil || active {
-		t.Errorf("HasActiveThreadTurn empty = %v, %v, want false, nil", active, err)
-	}
-	if active, err := store.HasActiveThreadTurn(ctx, "th-none"); err != nil || active {
-		t.Errorf("HasActiveThreadTurn th-none = %v, %v, want false, nil", active, err)
-	}
-	if active, err := store.HasActiveThreadTurn(ctx, "th-1"); err != nil || !active {
-		t.Errorf("HasActiveThreadTurn th-1 = %v, %v, want true, nil", active, err)
-	}
-
-	// Empty ID validation
-	assertErr(t, store.InsertMessage(ctx, Message{ID: ""}), "InsertMessage empty ID")
-	assertErr(t, store.UpdateMessageStatus(ctx, "", StatusCompleted, ""), "UpdateMessageStatus empty ID")
-	assertErr(t, store.UpdateMessageCompleted(ctx, "", "resp", ""), "UpdateMessageCompleted empty ID")
-	assertErr(t, store.IncrementMessageRetry(ctx, "", "err"), "IncrementMessageRetry empty ID")
-	assertErr(t, store.ResetMessageToPendingWithRestart(ctx, "", "reason"), "ResetMessageToPendingWithRestart empty ID")
-	if m, err := store.GetMessage(ctx, ""); err != nil || m != nil {
-		t.Errorf("expected nil, nil on empty ID GetMessage")
-	}
-	if exists, err := store.MessageExists(ctx, ""); err != nil || exists {
-		t.Errorf("expected false, nil on empty ID MessageExists")
-	}
-	if claimed, err := store.ClaimPendingMessage(ctx, ""); err != nil || claimed {
-		t.Errorf("expected false, nil on empty ID ClaimPendingMessage")
-	}
+	assertMessageUpdatesAndTelemetry(ctx, t, store)
+	assertMessageQueries(ctx, t, store)
+	assertMessageEmptyIDGuards(ctx, t, store)
 }
 
-func TestSessionLifecycle(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	store := NewSQLStore(database)
-	ctx := context.Background()
-
-	// 1. Session turn count and rotation
+func assertSessionTurnCountAndRotation(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
 	if id, err := store.GetSessionID(ctx, "th-1"); err != nil || id != "" {
 		t.Errorf("expected empty session ID, got %q, %v", id, err)
 	}
@@ -271,6 +277,41 @@ func TestSessionLifecycle(t *testing.T) {
 	if curr != "sess-2" || prev != "sess-1" || turns != 0 {
 		t.Errorf("post-rotation: curr=%q, prev=%q, turns=%d", curr, prev, turns)
 	}
+}
+
+func assertSessionEmptyKeyGuards(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
+	if id, err := store.GetSessionID(ctx, ""); err != nil || id != "" {
+		t.Errorf("expected empty GetSessionID")
+	}
+	_ = store.SaveSessionID(ctx, "", "s1")
+	_, errEmptyTurn := store.IncrementSessionTurnCount(ctx, "")
+	assertErr(t, errEmptyTurn, "IncrementSessionTurnCount empty key")
+	if cnt, err := store.GetSessionTurnCount(ctx, ""); err != nil || cnt != 0 {
+		t.Errorf("GetSessionTurnCount empty key = %d, %v", cnt, err)
+	}
+	if cnt, err := store.GetSessionTurnCount(ctx, "nonexistent-thread"); err != nil || cnt != 0 {
+		t.Errorf("GetSessionTurnCount nonexistent = %d, %v", cnt, err)
+	}
+	assertErr(t, store.RotateSessionID(ctx, "", "s2"), "RotateSessionID empty key")
+	if prev, err := store.GetPreviousSessionID(ctx, ""); err != nil || prev != "" {
+		t.Errorf("GetPreviousSessionID empty key = %q, %v", prev, err)
+	}
+	_ = store.SaveThreadSummary(ctx, "", "sum", "mid")
+	if sum, last, err := store.GetThreadSummary(ctx, ""); err != nil || sum != "" || last != "" {
+		t.Errorf("GetThreadSummary empty thread = %q, %q, %v", sum, last, err)
+	}
+}
+
+func TestSessionLifecycle(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
+	// 1. Session turn count and rotation
+	assertSessionTurnCountAndRotation(ctx, t, store)
 
 	// 2. Thread summary
 	if sum, wm, err := store.GetThreadSummary(ctx, "th-1"); err != nil || sum != "" || wm != "" {
@@ -333,26 +374,7 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 
 	// 7. Empty key validations
-	if id, err := store.GetSessionID(ctx, ""); err != nil || id != "" {
-		t.Errorf("expected empty GetSessionID")
-	}
-	_ = store.SaveSessionID(ctx, "", "s1")
-	_, errEmptyTurn := store.IncrementSessionTurnCount(ctx, "")
-	assertErr(t, errEmptyTurn, "IncrementSessionTurnCount empty key")
-	if cnt, err := store.GetSessionTurnCount(ctx, ""); err != nil || cnt != 0 {
-		t.Errorf("GetSessionTurnCount empty key = %d, %v", cnt, err)
-	}
-	if cnt, err := store.GetSessionTurnCount(ctx, "nonexistent-thread"); err != nil || cnt != 0 {
-		t.Errorf("GetSessionTurnCount nonexistent = %d, %v", cnt, err)
-	}
-	assertErr(t, store.RotateSessionID(ctx, "", "s2"), "RotateSessionID empty key")
-	if prev, err := store.GetPreviousSessionID(ctx, ""); err != nil || prev != "" {
-		t.Errorf("GetPreviousSessionID empty key = %q, %v", prev, err)
-	}
-	_ = store.SaveThreadSummary(ctx, "", "sum", "mid")
-	if sum, last, err := store.GetThreadSummary(ctx, ""); err != nil || sum != "" || last != "" {
-		t.Errorf("GetThreadSummary empty thread = %q, %q, %v", sum, last, err)
-	}
+	assertSessionEmptyKeyGuards(ctx, t, store)
 }
 
 func TestTaskHelpers(t *testing.T) {
@@ -417,6 +439,52 @@ func TestTaskHelpers(t *testing.T) {
 	closeWarn(closer, "test closer")
 }
 
+type taskFilterCase struct {
+	name          string
+	filter        TasksFilter
+	wantCount     int
+	wantFirstID   string
+	wantSess      string
+	checkSess     bool
+	wantPrevSess  string
+	wantThreadSum string
+	wantRespText  string
+}
+
+func assertTaskFilterExpectations(t *testing.T, tasks []ActiveTask, tc taskFilterCase) {
+	t.Helper()
+	if tc.wantCount == 0 {
+		return
+	}
+	if tc.wantFirstID != "" && tasks[0].ID != tc.wantFirstID {
+		t.Errorf("got first ID %q, want %q", tasks[0].ID, tc.wantFirstID)
+	}
+	if tc.checkSess && tasks[0].SessionID != tc.wantSess {
+		t.Errorf("got SessionID %q, want %q", tasks[0].SessionID, tc.wantSess)
+	}
+	if tc.wantPrevSess != "" && tasks[0].PreviousSessionID != tc.wantPrevSess {
+		t.Errorf("got PreviousSessionID %q, want %q", tasks[0].PreviousSessionID, tc.wantPrevSess)
+	}
+	if tc.wantThreadSum != "" && tasks[0].ThreadSummary != tc.wantThreadSum {
+		t.Errorf("got ThreadSummary %q, want %q", tasks[0].ThreadSummary, tc.wantThreadSum)
+	}
+	if tc.wantRespText != "" && tasks[0].ResponseText != tc.wantRespText {
+		t.Errorf("got ResponseText %q, want %q", tasks[0].ResponseText, tc.wantRespText)
+	}
+}
+
+func runTaskFilterCase(ctx context.Context, t *testing.T, store Store, tc taskFilterCase) {
+	t.Helper()
+	tasks, err := store.GetActiveTasks(ctx, tc.filter)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tasks) != tc.wantCount {
+		t.Fatalf("got count %d, want %d", len(tasks), tc.wantCount)
+	}
+	assertTaskFilterExpectations(t, tasks, tc)
+}
+
 func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 	database, err := initTestSQLite(filepath.Join(t.TempDir(), "aerial_tasks_test.db"))
 	if err != nil {
@@ -471,17 +539,7 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 		UpdatedAt:    now.Add(-1 * time.Minute),
 	})
 
-	tests := []struct {
-		name          string
-		filter        TasksFilter
-		wantCount     int
-		wantFirstID   string
-		wantSess      string
-		checkSess     bool
-		wantPrevSess  string
-		wantThreadSum string
-		wantRespText  string
-	}{
+	tests := []taskFilterCase{
 		{
 			name:          "thread_id filter and session join",
 			filter:        TasksFilter{ThreadID: "th-filter", Statuses: []string{"COMPLETED"}},
@@ -541,30 +599,7 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tasks, err := store.GetActiveTasks(ctx, tc.filter)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(tasks) != tc.wantCount {
-				t.Fatalf("got count %d, want %d", len(tasks), tc.wantCount)
-			}
-			if tc.wantCount > 0 {
-				if tc.wantFirstID != "" && tasks[0].ID != tc.wantFirstID {
-					t.Errorf("got first ID %q, want %q", tasks[0].ID, tc.wantFirstID)
-				}
-				if tc.checkSess && tasks[0].SessionID != tc.wantSess {
-					t.Errorf("got SessionID %q, want %q", tasks[0].SessionID, tc.wantSess)
-				}
-				if tc.wantPrevSess != "" && tasks[0].PreviousSessionID != tc.wantPrevSess {
-					t.Errorf("got PreviousSessionID %q, want %q", tasks[0].PreviousSessionID, tc.wantPrevSess)
-				}
-				if tc.wantThreadSum != "" && tasks[0].ThreadSummary != tc.wantThreadSum {
-					t.Errorf("got ThreadSummary %q, want %q", tasks[0].ThreadSummary, tc.wantThreadSum)
-				}
-				if tc.wantRespText != "" && tasks[0].ResponseText != tc.wantRespText {
-					t.Errorf("got ResponseText %q, want %q", tasks[0].ResponseText, tc.wantRespText)
-				}
-			}
+			runTaskFilterCase(ctx, t, store, tc)
 		})
 	}
 }
@@ -631,111 +666,14 @@ func mustInsertDispatch(ctx context.Context, t *testing.T, store Store, d Dispat
 	mustOK(t, err, msg)
 }
 
-func TestDispatchStore_SQLite(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-	store := NewSQLStore(database)
-	ctx := context.Background()
-
-	// 1. Insert & Get
-	d1 := Dispatch{
-		ID:          "disp-1",
-		Source:      "heartbeat",
-		SessionID:   "heartbeat-hb-1",
-		Prompt:      "Prompt for dispatch 1",
-		Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-	}
-	mustInsertDispatch(ctx, t, store, d1, "InsertDispatch disp-1")
-
-	got, err := store.GetDispatch(ctx, "disp-1")
-	mustOK(t, err, "GetDispatch disp-1")
-	if got == nil || got.ID != "disp-1" || got.Status != StatusPending || got.Summary == "" || got.Traceparent != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
-		t.Fatalf("unexpected dispatch retrieved: %+v", got)
-	}
-
-	// 2. Claim pending
-	claimed, err := store.ClaimPendingDispatch(ctx, "disp-1")
-	mustOK(t, err, "ClaimPendingDispatch disp-1")
-	if !claimed {
-		t.Errorf("expected claimed=true")
-	}
-	claimedAgain, err := store.ClaimPendingDispatch(ctx, "disp-1")
-	mustOK(t, err, "ClaimPendingDispatch again")
-	if claimedAgain {
-		t.Errorf("expected claimed=false for already processing dispatch")
-	}
-
-	// 3. Update status & retry
-	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-1", "PROCESSING", "in flight"), "UpdateDispatchStatus")
-	mustOK(t, store.IncrementDispatchRetry(ctx, "disp-1", "network error"), "IncrementDispatchRetry")
-	got, _ = store.GetDispatch(ctx, "disp-1")
-	if got.RetryCount != 1 || got.ErrorMessage != "network error" {
-		t.Errorf("unexpected retry state: %+v", got)
-	}
-
-	// 4. Reset to pending with restart
-	mustOK(t, store.ResetDispatchToPendingWithRestart(ctx, "disp-1", "runner restart"), "ResetDispatchToPendingWithRestart")
-	got, _ = store.GetDispatch(ctx, "disp-1")
-	if got.Status != StatusPending || got.RestartCount != 1 {
-		t.Errorf("unexpected restart state: %+v", got)
-	}
-
-	// 5. Update completed with conversation ID and telemetry
-	dispTel := TurnTelemetry{DurationMs: 2500, InputTokens: 200, OutputTokens: 80, ThinkingTokens: 20, CacheReadTokens: 10, TotalTokens: 310}
-	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-1", "Result text", "conv-uuid-123", dispTel), "UpdateDispatchCompleted")
-	got, _ = store.GetDispatch(ctx, "disp-1")
-	if got.Status != StatusCompleted || got.ResponseText != "Result text" || got.ConversationID != "conv-uuid-123" {
-		t.Errorf("unexpected completed state: %+v", got)
-	}
-	if got.DurationMs != 2500 || got.InputTokens != 200 || got.OutputTokens != 80 || got.ThinkingTokens != 20 || got.CacheReadTokens != 10 || got.TotalTokens != 310 {
-		t.Errorf("unexpected telemetry on dispatch: %+v", got)
-	}
-
-	// 6. Recent session dispatches
-	d2 := Dispatch{
-		ID:        "disp-2",
-		Source:    "heartbeat",
-		SessionID: "heartbeat-hb-1",
-		Prompt:    "Prompt for dispatch 2",
-	}
-	mustInsertDispatch(ctx, t, store, d2, "InsertDispatch disp-2")
-	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-2", "Result 2", ""), "UpdateDispatchCompleted disp-2")
-
-	recent, err := store.GetRecentSessionDispatches(ctx, "heartbeat-hb-1", 10)
-	mustOK(t, err, "GetRecentSessionDispatches")
-	if len(recent) != 2 || recent[0].ID != "disp-1" || recent[1].ID != "disp-2" {
-		t.Errorf("unexpected recent session dispatches: %+v", recent)
-	}
-
-	// 7. Active check
-	d3 := Dispatch{
-		ID:        "disp-3",
-		Source:    "vanadis",
-		SessionID: "build-1",
-		Prompt:    "Build ID: b-123\nChunk 1",
-	}
-	mustInsertDispatch(ctx, t, store, d3, "InsertDispatch disp-3")
-	d3b := Dispatch{
-		ID:        "disp-3b",
-		Source:    "vanadis",
-		SessionID: "vanadis-b-123-chunk-2",
-		Prompt:    "Executing chunk 2",
-	}
-	mustInsertDispatch(ctx, t, store, d3b, "InsertDispatch disp-3b")
-	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-3b", StatusProcessing, "running"), "UpdateDispatchStatus disp-3b")
-	hasActive, err := store.HasActiveDispatchTurn(ctx, "build-1", "")
-	mustOK(t, err, "HasActiveDispatchTurn")
-	if !hasActive {
-		t.Errorf("expected active dispatch for session build-1")
-	}
-
-	// 8. Cancel pending dispatches
+func assertDispatchCancelPending(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
 	cancelled, err := store.CancelPendingDispatches(ctx, "", "b-123", "aborted build")
 	mustOK(t, err, "CancelPendingDispatches")
 	if len(cancelled) != 2 || !slices.Contains(cancelled, "disp-3") || !slices.Contains(cancelled, "disp-3b") {
 		t.Errorf("expected cancelled [disp-3, disp-3b], got %v", cancelled)
 	}
-	got, _ = store.GetDispatch(ctx, "disp-3")
+	got, _ := store.GetDispatch(ctx, "disp-3")
 	if got.Status != "FAILED" || got.ErrorMessage != "aborted build" {
 		t.Errorf("unexpected status after cancel: %+v", got)
 	}
@@ -755,34 +693,10 @@ func TestDispatchStore_SQLite(t *testing.T) {
 	if len(cancelledSolo) != 1 || cancelledSolo[0] != "disp-3-solo" {
 		t.Errorf("expected cancelled [disp-3-solo], got %v", cancelledSolo)
 	}
+}
 
-	// 9. Pending or processing dispatches
-	d4 := Dispatch{
-		ID:        "disp-4-pending",
-		Source:    "heartbeat",
-		SessionID: "heartbeat-hb-2",
-		Prompt:    "Prompt 4",
-		Status:    StatusPending,
-	}
-	mustInsertDispatch(ctx, t, store, d4, "InsertDispatch disp-4-pending")
-	pendingDisps, err := store.GetPendingOrProcessingDispatches(ctx, 10)
-	mustOK(t, err, "GetPendingOrProcessingDispatches")
-	if len(pendingDisps) != 1 || pendingDisps[0].ID != "disp-4-pending" {
-		t.Errorf("unexpected pending dispatches: %+v", pendingDisps)
-	}
-	pendingLimited, _ := store.GetPendingOrProcessingDispatches(ctx, 1)
-	if len(pendingLimited) != 1 {
-		t.Errorf("expected 1 limited pending dispatch")
-	}
-
-	// 10. UpdateDispatchCompleted without conversationID
-	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-4-pending", "Done 4", ""), "UpdateDispatchCompleted without conv")
-	got, _ = store.GetDispatch(ctx, "disp-4-pending")
-	if got.Status != StatusCompleted || got.ResponseText != "Done 4" {
-		t.Errorf("unexpected completed state without conv: %+v", got)
-	}
-
-	// 11. Edge cases and validation guards
+func assertDispatchValidationGuards(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
 	_, errEmptyDisp := store.InsertDispatch(ctx, Dispatch{})
 	assertErr(t, errEmptyDisp, "InsertDispatch empty ID")
 	assertErr(t, store.UpdateDispatchStatus(ctx, "", "PROCESSING", ""), "UpdateDispatchStatus empty ID")
@@ -813,8 +727,130 @@ func TestDispatchStore_SQLite(t *testing.T) {
 	if err != nil || scannedNil != nil {
 		t.Errorf("expected nil, nil for scanDispatches(nil)")
 	}
+}
 
-	// 12. UpdateMessageCompleted with and without conversationID
+func assertDispatchClaimAndRetry(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
+	claimed, err := store.ClaimPendingDispatch(ctx, "disp-1")
+	mustOK(t, err, "ClaimPendingDispatch disp-1")
+	if !claimed {
+		t.Errorf("expected claimed=true")
+	}
+	claimedAgain, err := store.ClaimPendingDispatch(ctx, "disp-1")
+	mustOK(t, err, "ClaimPendingDispatch again")
+	if claimedAgain {
+		t.Errorf("expected claimed=false for already processing dispatch")
+	}
+
+	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-1", "PROCESSING", "in flight"), "UpdateDispatchStatus")
+	mustOK(t, store.IncrementDispatchRetry(ctx, "disp-1", "network error"), "IncrementDispatchRetry")
+	got, _ := store.GetDispatch(ctx, "disp-1")
+	if got.RetryCount != 1 || got.ErrorMessage != "network error" {
+		t.Errorf("unexpected retry state: %+v", got)
+	}
+
+	mustOK(t, store.ResetDispatchToPendingWithRestart(ctx, "disp-1", "runner restart"), "ResetDispatchToPendingWithRestart")
+	got, _ = store.GetDispatch(ctx, "disp-1")
+	if got.Status != StatusPending || got.RestartCount != 1 {
+		t.Errorf("unexpected restart state: %+v", got)
+	}
+}
+
+func assertDispatchStoreLifecycleTransitions(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
+	d1 := Dispatch{
+		ID:          "disp-1",
+		Source:      "heartbeat",
+		SessionID:   "heartbeat-hb-1",
+		Prompt:      "Prompt for dispatch 1",
+		Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+	}
+	mustInsertDispatch(ctx, t, store, d1, "InsertDispatch disp-1")
+
+	got, err := store.GetDispatch(ctx, "disp-1")
+	mustOK(t, err, "GetDispatch disp-1")
+	if got == nil || got.ID != "disp-1" || got.Status != StatusPending || got.Summary == "" || got.Traceparent != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
+		t.Fatalf("unexpected dispatch retrieved: %+v", got)
+	}
+
+	assertDispatchClaimAndRetry(ctx, t, store)
+
+	dispTel := TurnTelemetry{DurationMs: 2500, InputTokens: 200, OutputTokens: 80, ThinkingTokens: 20, CacheReadTokens: 10, TotalTokens: 310}
+	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-1", "Result text", "conv-uuid-123", dispTel), "UpdateDispatchCompleted")
+	got, _ = store.GetDispatch(ctx, "disp-1")
+	if got.Status != StatusCompleted || got.ResponseText != "Result text" || got.ConversationID != "conv-uuid-123" {
+		t.Errorf("unexpected completed state: %+v", got)
+	}
+	if got.DurationMs != 2500 || got.InputTokens != 200 || got.OutputTokens != 80 || got.ThinkingTokens != 20 || got.CacheReadTokens != 10 || got.TotalTokens != 310 {
+		t.Errorf("unexpected telemetry on dispatch: %+v", got)
+	}
+}
+
+func assertDispatchRecentAndActive(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
+	d2 := Dispatch{
+		ID:        "disp-2",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-hb-1",
+		Prompt:    "Prompt for dispatch 2",
+	}
+	mustInsertDispatch(ctx, t, store, d2, "InsertDispatch disp-2")
+	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-2", "Result 2", ""), "UpdateDispatchCompleted disp-2")
+
+	recent, err := store.GetRecentSessionDispatches(ctx, "heartbeat-hb-1", 10)
+	mustOK(t, err, "GetRecentSessionDispatches")
+	if len(recent) != 2 || recent[0].ID != "disp-1" || recent[1].ID != "disp-2" {
+		t.Errorf("unexpected recent session dispatches: %+v", recent)
+	}
+
+	d3 := Dispatch{
+		ID:        "disp-3",
+		Source:    "vanadis",
+		SessionID: "build-1",
+		Prompt:    "Build ID: b-123\nChunk 1",
+	}
+	mustInsertDispatch(ctx, t, store, d3, "InsertDispatch disp-3")
+	d3b := Dispatch{
+		ID:        "disp-3b",
+		Source:    "vanadis",
+		SessionID: "vanadis-b-123-chunk-2",
+		Prompt:    "Executing chunk 2",
+	}
+	mustInsertDispatch(ctx, t, store, d3b, "InsertDispatch disp-3b")
+	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-3b", StatusProcessing, "running"), "UpdateDispatchStatus disp-3b")
+	hasActive, err := store.HasActiveDispatchTurn(ctx, "build-1", "")
+	mustOK(t, err, "HasActiveDispatchTurn")
+	if !hasActive {
+		t.Errorf("expected active dispatch for session build-1")
+	}
+}
+
+func assertDispatchPendingAndMessageCompleted(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
+	d4 := Dispatch{
+		ID:        "disp-4-pending",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-hb-2",
+		Prompt:    "Prompt 4",
+		Status:    StatusPending,
+	}
+	mustInsertDispatch(ctx, t, store, d4, "InsertDispatch disp-4-pending")
+	pendingDisps, err := store.GetPendingOrProcessingDispatches(ctx, 10)
+	mustOK(t, err, "GetPendingOrProcessingDispatches")
+	if len(pendingDisps) != 1 || pendingDisps[0].ID != "disp-4-pending" {
+		t.Errorf("unexpected pending dispatches: %+v", pendingDisps)
+	}
+	pendingLimited, _ := store.GetPendingOrProcessingDispatches(ctx, 1)
+	if len(pendingLimited) != 1 {
+		t.Errorf("expected 1 limited pending dispatch")
+	}
+
+	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-4-pending", "Done 4", ""), "UpdateDispatchCompleted without conv")
+	got, _ := store.GetDispatch(ctx, "disp-4-pending")
+	if got.Status != StatusCompleted || got.ResponseText != "Done 4" {
+		t.Errorf("unexpected completed state without conv: %+v", got)
+	}
+
 	mustOK(t, store.InsertMessage(ctx, Message{ID: "msg-cov-1", Content: "Coverage"}), "InsertMessage")
 	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-cov-1", "Done without conv", ""), "UpdateMessageCompleted without conv")
 	covMsg, _ := store.GetMessage(ctx, "msg-cov-1")
@@ -826,6 +862,19 @@ func TestDispatchStore_SQLite(t *testing.T) {
 	if covMsg.ResponseText != "Done with conv" || covMsg.ConversationID != "conv-cov-uuid" {
 		t.Errorf("unexpected response text or conversation ID: %+v", covMsg)
 	}
+}
+
+func TestDispatchStore_SQLite(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
+	assertDispatchStoreLifecycleTransitions(ctx, t, store)
+	assertDispatchRecentAndActive(ctx, t, store)
+	assertDispatchCancelPending(ctx, t, store)
+	assertDispatchPendingAndMessageCompleted(ctx, t, store)
+	assertDispatchValidationGuards(ctx, t, store)
 }
 
 func TestGetActiveRecentThreadIDs_StrippingDiscordPrefix(t *testing.T) {
