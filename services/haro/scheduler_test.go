@@ -223,7 +223,7 @@ func setupMockDispatcherServer(t *testing.T, expectedPath string, status int, re
 		dispatcher = nil
 	case testName == "default http client used when httpClient is nil":
 		dispatcher = &HTTPPromptDispatcher{brainURL: server.URL}
-	case testName == "empty brain url defaults to eri.aerial":
+	case testName == "empty brain url fails fast":
 		dispatcher = &HTTPPromptDispatcher{}
 	default:
 		serverURL := server.URL + "/"
@@ -234,23 +234,19 @@ func setupMockDispatcherServer(t *testing.T, expectedPath string, status int, re
 	}
 
 	ctx := context.Background()
-	if testName == "empty brain url defaults to eri.aerial" {
-		cancelCtx, cancel := context.WithCancel(ctx)
-		cancel()
-		ctx = cancelCtx
-	}
 	return dispatcher, server, ctx
 }
 
 type promptDispatcherTestCase struct {
-	name           string
-	serverStatus   int
-	serverResponse string
-	req            PromptDispatchRequest
-	closeServer    bool
-	nilDispatcher  bool
-	wantErr        bool
-	wantChannelID  string
+	name            string
+	serverStatus    int
+	serverResponse  string
+	req             PromptDispatchRequest
+	closeServer     bool
+	nilDispatcher   bool
+	wantErr         bool
+	wantErrContains string
+	wantChannelID   string
 }
 
 func runPromptDispatcherCase(t *testing.T, tc promptDispatcherTestCase) {
@@ -263,6 +259,9 @@ func runPromptDispatcherCase(t *testing.T, tc promptDispatcherTestCase) {
 	case tc.wantErr:
 		if err == nil {
 			t.Fatal("DispatchPrompt() expected error, got nil")
+		}
+		if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
+			t.Fatalf("DispatchPrompt() err = %v, want error containing %q", err, tc.wantErrContains)
 		}
 	default:
 		if err != nil {
@@ -351,11 +350,12 @@ func TestHTTPPromptDispatcher(t *testing.T) {
 			wantChannelID: "nil-client-chan",
 		},
 		{
-			name: "empty brain url defaults to eri.aerial",
+			name: "empty brain url fails fast",
 			req: PromptDispatchRequest{
 				Prompt: "test empty url",
 			},
-			wantErr: true,
+			wantErr:         true,
+			wantErrContains: "brain URL is not configured",
 		},
 	}
 
@@ -367,14 +367,15 @@ func TestHTTPPromptDispatcher(t *testing.T) {
 }
 
 type dispatchTestCase struct {
-	name           string
-	serverStatus   int
-	serverResponse string
-	req            DispatchRequest
-	closeServer    bool
-	nilDispatcher  bool
-	wantErr        bool
-	wantDispatchID string
+	name            string
+	serverStatus    int
+	serverResponse  string
+	req             DispatchRequest
+	closeServer     bool
+	nilDispatcher   bool
+	wantErr         bool
+	wantErrContains string
+	wantDispatchID  string
 }
 
 func runDispatchCase(t *testing.T, tc dispatchTestCase) {
@@ -384,6 +385,8 @@ func runDispatchCase(t *testing.T, tc dispatchTestCase) {
 
 	if resp, err := disp.Dispatch(ctx, tc.req); (err != nil) != tc.wantErr {
 		t.Fatalf("Dispatch() err = %v, wantErr = %v", err, tc.wantErr)
+	} else if tc.wantErr && tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
+		t.Fatalf("Dispatch() err = %v, want error containing %q", err, tc.wantErrContains)
 	} else if !tc.wantErr && resp.DispatchID != tc.wantDispatchID {
 		t.Errorf("resp.DispatchID = %q, want %q", resp.DispatchID, tc.wantDispatchID)
 	}
@@ -461,9 +464,10 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			wantDispatchID: "disp-nc",
 		},
 		{
-			name:    "empty brain url defaults to eri.aerial",
-			req:     DispatchRequest{Source: "heartbeat", Prompt: "test default url"},
-			wantErr: true,
+			name:            "empty brain url fails fast",
+			req:             DispatchRequest{Source: "heartbeat", Prompt: "test default url"},
+			wantErr:         true,
+			wantErrContains: "brain URL is not configured",
 		},
 	}
 
@@ -472,6 +476,17 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			runDispatchCase(t, tc)
 		})
 	}
+}
+
+func TestNewHTTPPromptDispatcher_Validation(t *testing.T) {
+	t.Run("empty URL panics", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("expected panic for empty brainURL, got nil")
+			}
+		}()
+		NewHTTPPromptDispatcher("   ")
+	})
 }
 
 func TestDB_CronOperations(t *testing.T) {
