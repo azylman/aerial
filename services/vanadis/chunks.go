@@ -64,9 +64,13 @@ type VanadisChunkPRLookup struct {
 
 // AttachChunkPRRequest represents the payload for POST /chunks/attach-pr.
 type AttachChunkPRRequest struct {
-	ChunkID  string `json:"chunk_id"`
+	ChunkID  string `json:"chunk_id,omitempty"`
 	PRNumber int    `json:"pr_number"`
 	Repo     string `json:"repo"`
+	Branch   string `json:"branch,omitempty"`
+	Title    string `json:"title,omitempty"`
+	TargetID string `json:"target_id,omitempty"`
+	Quiet    bool   `json:"quiet,omitempty"`
 }
 
 // ChunkPRRequest represents generic repo + pr_number request payloads.
@@ -95,13 +99,14 @@ type UpdateBuildRequest struct {
 
 // UpdateChunkRequest defines the request payload for mutating an existing pending chunk.
 type UpdateChunkRequest struct {
-	Mode          *string  `json:"mode,omitempty"`
-	Repo          string   `json:"repo,omitempty"`
-	Title         string   `json:"title,omitempty"`
-	Instructions  string   `json:"instructions,omitempty"`
-	TargetFiles   []string `json:"target_files,omitempty"`
-	TargetSymbols []string `json:"target_symbols,omitempty"`
-	Effort        string   `json:"effort,omitempty"`
+	Mode          *string   `json:"mode,omitempty"`
+	Repo          string    `json:"repo,omitempty"`
+	Title         string    `json:"title,omitempty"`
+	Instructions  string    `json:"instructions,omitempty"`
+	TargetFiles   []string  `json:"target_files,omitempty"`
+	TargetSymbols []string  `json:"target_symbols,omitempty"`
+	Effort        string    `json:"effort,omitempty"`
+	DependsOn     *[]string `json:"depends_on,omitempty"`
 }
 
 // AppendChunksRequest defines the request payload for appending chunks to a running build.
@@ -177,7 +182,7 @@ func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*V
 	if chunkID == "" {
 		return nil, nil, errors.New("chunk id cannot be empty")
 	}
-	const chunkQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE id = $1;`
+	const chunkQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE id = $1;`
 	rows, err := s.db.Query(ctx, chunkQuery, chunkID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query chunk %s: %w", chunkID, err)
@@ -191,7 +196,7 @@ func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*V
 		return nil, nil, ErrChunkNotFound
 	}
 	c := chunks[0]
-	const buildQuery = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, created_at, updated_at FROM vanadis_builds WHERE id = $1;`
+	const buildQuery = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at FROM vanadis_builds WHERE id = $1;`
 	b, err := scanBuild(s.db.QueryRow(ctx, buildQuery, c.BuildID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -202,45 +207,124 @@ func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*V
 	return &c, &b, nil
 }
 
-// AttachChunkPR links a PR number and repository to a chunk, returning the build's thread ID.
-func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, chunkID string, prNumber int, repo string) (string, error) {
+// AttachChunkPR links a PR number and repository to an existing chunk, or auto-creates a standalone 1-chunk build when chunk_id is empty.
+func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, req AttachChunkPRRequest) (string, string, string, error) {
 	if s == nil || s.db == nil {
-		return "", errors.New("database connection is nil")
+		return "", "", "", errors.New("database connection is nil")
 	}
-	chunkID = strings.TrimSpace(chunkID)
-	candidates := repoMatchCandidates(repo)
-	if chunkID == "" || prNumber <= 0 {
-		return "", errors.New("chunk id and valid pr number are required")
+	if req.PRNumber <= 0 {
+		return "", "", "", errors.New("chunk id or repo, and valid pr number are required")
 	}
+	chunkID := strings.TrimSpace(req.ChunkID)
+	if chunkID != "" {
+		return s.attachToExistingChunk(ctx, chunkID, req)
+	}
+	return s.attachStandalonePR(ctx, req)
+}
 
+func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkID string, req AttachChunkPRRequest) (string, string, string, error) {
 	var mode string
 	chkErr := s.db.QueryRow(ctx, `SELECT mode FROM vanadis_chunks WHERE id = $1;`, chunkID).Scan(&mode)
 	if chkErr != nil {
 		if errors.Is(chkErr, pgx.ErrNoRows) {
-			return "", ErrChunkNotFound
+			return "", "", "", ErrChunkNotFound
 		}
-		return "", fmt.Errorf("check chunk mode %s: %w", chunkID, chkErr)
+		return "", "", "", fmt.Errorf("check chunk mode %s: %w", chunkID, chkErr)
 	}
 	if mode == "action" {
-		return "", fmt.Errorf("%w: action chunk cannot attach a pull request", ErrBuildConflict)
+		return "", "", "", fmt.Errorf("%w: action chunk cannot attach a pull request", ErrBuildConflict)
 	}
 
-	var threadID string
+	candidates := repoMatchCandidates(req.Repo)
+	var buildID, returnChunkID, threadID string
 	var err error
 	if len(candidates) > 0 {
-		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = ANY($3) AND c.status != 'cancelled' AND b.status NOT IN ('cancelled', 'completed') RETURNING b.thread_id;`
-		err = s.db.QueryRow(ctx, qWithRepo, prNumber, chunkID, candidates).Scan(&threadID)
+		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = ANY($3) AND c.status != 'cancelled' AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
+		err = s.db.QueryRow(ctx, qWithRepo, req.PRNumber, chunkID, candidates).Scan(&buildID, &returnChunkID, &threadID)
 	} else {
-		const qNoRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.status != 'cancelled' AND b.status NOT IN ('cancelled', 'completed') RETURNING b.thread_id;`
-		err = s.db.QueryRow(ctx, qNoRepo, prNumber, chunkID).Scan(&threadID)
+		const qNoRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.status != 'cancelled' AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
+		err = s.db.QueryRow(ctx, qNoRepo, req.PRNumber, chunkID).Scan(&buildID, &returnChunkID, &threadID)
 	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", s.resolveAttachChunkPRError(ctx, chunkID, repo, prNumber)
+			return "", "", "", s.resolveAttachChunkPRError(ctx, chunkID, req.Repo, req.PRNumber)
 		}
-		return "", fmt.Errorf("attach chunk pr %s#%d: %w", repo, prNumber, err)
+		return "", "", "", fmt.Errorf("attach chunk pr %s#%d: %w", req.Repo, req.PRNumber, err)
 	}
-	return threadID, nil
+	return buildID, returnChunkID, threadID, nil
+}
+
+func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest) (string, string, string, error) {
+	repo := normalizeRepo(req.Repo)
+	if repo == "" {
+		return "", "", "", errors.New("repo is required for standalone attach")
+	}
+
+	tx, txErr := s.db.Begin(ctx)
+	if txErr != nil {
+		return "", "", "", fmt.Errorf("begin standalone build tx: %w", txErr)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			log.Printf("[vanadis] standalone build tx rollback error: %v", rbErr)
+		}
+	}()
+
+	lockKey := fmt.Sprintf("%s#%d", repo, req.PRNumber)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1));`, lockKey); err != nil {
+		return "", "", "", fmt.Errorf("acquire standalone attach lock for %s: %w", lockKey, err)
+	}
+
+	candidates := repoMatchCandidates(repo)
+	const findQ = `SELECT c.build_id, c.id, b.thread_id FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.repo = ANY($1) AND c.pr_number = $2 AND c.status != 'cancelled' AND b.status NOT IN ('cancelled', 'completed') ORDER BY c.created_at ASC LIMIT 1;`
+	var existingBuildID, existingChunkID, existingThreadID string
+	err := tx.QueryRow(ctx, findQ, candidates, req.PRNumber).Scan(&existingBuildID, &existingChunkID, &existingThreadID)
+	if err == nil {
+		if cErr := tx.Commit(ctx); cErr != nil {
+			return "", "", "", fmt.Errorf("commit standalone existing match tx: %w", cErr)
+		}
+		return existingBuildID, existingChunkID, existingThreadID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", "", "", fmt.Errorf("find existing chunk by pr %s#%d: %w", repo, req.PRNumber, err)
+	}
+
+	newBuildID := generateBuildID()
+	newChunkID := newBuildID + "-chunk-1"
+	threadID := normalizeDiscordThreadID(req.TargetID)
+	title := firstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d", req.PRNumber))
+	objective := firstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("Track PR #%d on %s", req.PRNumber, repo))
+	isQuiet := req.Quiet || strings.HasPrefix(strings.TrimSpace(req.Branch), "dependabot/")
+	now := time.Now().UTC()
+
+	const bQ = `INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
+	if _, err := tx.Exec(ctx, bQ, newBuildID, threadID, 0, title, objective, "", "running", "", isQuiet); err != nil {
+		return "", "", "", fmt.Errorf("insert standalone vanadis build: %w", err)
+	}
+
+	standaloneChunk := VanadisChunk{
+		ID:           newChunkID,
+		BuildID:      newBuildID,
+		ChunkIndex:   0,
+		Mode:         "pr",
+		Repo:         repo,
+		Title:        title,
+		Instructions: objective,
+		Status:       "pr_opened",
+		PRNumber:     req.PRNumber,
+		DependsOn:    []string{},
+		StartedAt:    now,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := execInsertVanadisChunk(ctx, tx, newBuildID, standaloneChunk); err != nil {
+		return "", "", "", fmt.Errorf("insert standalone vanadis chunk: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", "", fmt.Errorf("commit standalone build tx: %w", err)
+	}
+	return newBuildID, newChunkID, threadID, nil
 }
 
 func (s *PostgresVanadisStore) resolveAttachChunkPRError(ctx context.Context, chunkID, repo string, prNumber int) error {
@@ -542,7 +626,7 @@ func (s *PostgresVanadisStore) UpdateBuild(ctx context.Context, buildID string, 
 }
 
 func lockRunningBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) ([]VanadisChunk, error) {
-	const buildQuery = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, created_at, updated_at FROM vanadis_builds WHERE id = $1 FOR UPDATE;`
+	const buildQuery = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at FROM vanadis_builds WHERE id = $1 FOR UPDATE;`
 	b, err := scanBuild(tx.QueryRow(ctx, buildQuery, buildID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -554,7 +638,7 @@ func lockRunningBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) (
 		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, b.Status)
 	}
 
-	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE;`
+	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE;`
 	rows, err := tx.Query(ctx, chunksQuery, buildID)
 	if err != nil {
 		return nil, fmt.Errorf("lock chunks for build %s: %w", buildID, err)
@@ -575,7 +659,7 @@ func validateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) 
 	title := strings.TrimSpace(req.Title)
 	instructions := strings.TrimSpace(req.Instructions)
 	effortStr := strings.TrimSpace(req.Effort)
-	hasField := req.Mode != nil || repo != "" || title != "" || instructions != "" || effortStr != "" || req.TargetFiles != nil || req.TargetSymbols != nil
+	hasField := req.Mode != nil || repo != "" || title != "" || instructions != "" || effortStr != "" || req.TargetFiles != nil || req.TargetSymbols != nil || req.DependsOn != nil
 	if !hasField {
 		return "", fmt.Errorf("%w: build id, chunk ref, and at least one updated field are required", ErrInvalidBuildInput)
 	}
@@ -656,6 +740,9 @@ func applyChunkUpdates(c *VanadisChunk, req UpdateChunkRequest, normEffort strin
 	if normEffort != "" {
 		c.Effort = normEffort
 	}
+	if req.DependsOn != nil {
+		c.DependsOn = nonNilSlice(*req.DependsOn)
+	}
 	return nil
 }
 
@@ -698,8 +785,14 @@ func (s *PostgresVanadisStore) UpdateChunk(ctx context.Context, buildID, chunkRe
 		return nil, err
 	}
 
-	const updateChunkQ = `UPDATE vanadis_chunks SET mode = $1, repo = $2, title = $3, instructions = $4, target_files = $5, target_symbols = $6, effort = $7, updated_at = CURRENT_TIMESTAMP WHERE id = $8;`
-	if _, err := tx.Exec(ctx, updateChunkQ, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.ID); err != nil {
+	normDeps, err := validateUpdateChunkDAG(chunks, idx, c)
+	if err != nil {
+		return nil, err
+	}
+	c.DependsOn = normDeps
+
+	const updateChunkQ = `UPDATE vanadis_chunks SET mode = $1, repo = $2, title = $3, instructions = $4, target_files = $5, target_symbols = $6, effort = $7, depends_on = $8, updated_at = CURRENT_TIMESTAMP WHERE id = $9;`
+	if _, err := tx.Exec(ctx, updateChunkQ, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, nonNilSlice(c.DependsOn), c.ID); err != nil {
 		return nil, fmt.Errorf("update chunk %s: %w", c.ID, err)
 	}
 	c.UpdatedAt = time.Now().UTC()
@@ -748,7 +841,7 @@ func resolveAppendedChunkID(buildID string, rawID string, nextIdx int, usedIDs m
 	}
 }
 
-func buildAppendedChunk(buildID string, in CreateChunkInput, nextIdx int, usedIDs map[string]bool, now time.Time) (VanadisChunk, error) {
+func buildAppendedChunk(buildID string, in CreateChunkInput, nextIdx int, prevChunkID string, usedIDs map[string]bool, now time.Time) (VanadisChunk, error) {
 	resolvedID, err := resolveAppendedChunkID(buildID, in.ID, nextIdx, usedIDs)
 	if err != nil {
 		return VanadisChunk{}, err
@@ -766,6 +859,15 @@ func buildAppendedChunk(buildID string, in CreateChunkInput, nextIdx int, usedID
 	if err != nil {
 		return VanadisChunk{}, err
 	}
+	var deps []string
+	switch {
+	case in.DependsOn != nil:
+		deps = nonNilSlice(in.DependsOn)
+	case prevChunkID != "":
+		deps = []string{prevChunkID}
+	default:
+		deps = []string{}
+	}
 	return VanadisChunk{
 		ID:                 resolvedID,
 		BuildID:            buildID,
@@ -779,6 +881,7 @@ func buildAppendedChunk(buildID string, in CreateChunkInput, nextIdx int, usedID
 		Effort:             eff,
 		AcceptanceCriteria: nonNilSlice(in.AcceptanceCriteria),
 		Status:             "pending",
+		DependsOn:          deps,
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}, nil
@@ -815,23 +918,34 @@ func (s *PostgresVanadisStore) AppendChunks(ctx context.Context, buildID string,
 	}
 
 	nextIdx := 0
+	var prevChunkID string
 	if len(existing) > 0 {
 		last := existing[len(existing)-1]
 		nextIdx = last.ChunkIndex + 1
+		prevChunkID = last.ID
 	}
 
 	now := time.Now().UTC()
 	appended := make([]VanadisChunk, 0, len(inputs))
 	for _, in := range inputs {
-		newChunk, err := buildAppendedChunk(buildID, in, nextIdx, usedIDs, now)
+		newChunk, err := buildAppendedChunk(buildID, in, nextIdx, prevChunkID, usedIDs, now)
 		if err != nil {
 			return nil, err
 		}
-		if err := execInsertVanadisChunk(ctx, tx, buildID, newChunk); err != nil {
+		appended = append(appended, newChunk)
+		prevChunkID = newChunk.ID
+		nextIdx++
+	}
+
+	appended, err = validateAppendChunksDAG(existing, appended)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, chunk := range appended {
+		if err := execInsertVanadisChunk(ctx, tx, buildID, chunk); err != nil {
 			return nil, err
 		}
-		appended = append(appended, newChunk)
-		nextIdx++
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -882,18 +996,20 @@ func (s *PostgresVanadisStore) RemoveChunk(ctx context.Context, buildID, chunkRe
 		return nil, nil, fmt.Errorf("delete chunk %s: %w", removed.ID, err)
 	}
 
-	const compactQ = `UPDATE vanadis_chunks SET chunk_index = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`
-	for i := removeIdx + 1; i < len(existing); i++ {
-		newIdx := existing[i].ChunkIndex - 1
-		if _, err := tx.Exec(ctx, compactQ, newIdx, existing[i].ID); err != nil {
-			return nil, nil, fmt.Errorf("compact chunk %s index to %d: %w", existing[i].ID, newIdx, err)
-		}
-		existing[i].ChunkIndex = newIdx
-	}
-
 	remaining := make([]VanadisChunk, 0, len(existing)-1)
 	remaining = append(remaining, existing[:removeIdx]...)
 	remaining = append(remaining, existing[removeIdx+1:]...)
+
+	relinkDependenciesAfterRemoval(remaining, removed.ID, removed.DependsOn)
+
+	const compactQ = `UPDATE vanadis_chunks SET chunk_index = $1, depends_on = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`
+	for i := range remaining {
+		newIdx := i
+		remaining[i].ChunkIndex = newIdx
+		if _, err := tx.Exec(ctx, compactQ, newIdx, nonNilSlice(remaining[i].DependsOn), remaining[i].ID); err != nil {
+			return nil, nil, fmt.Errorf("compact chunk %s index to %d: %w", remaining[i].ID, newIdx, err)
+		}
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, fmt.Errorf("commit remove chunk %s: %w", removed.ID, err)
@@ -979,21 +1095,23 @@ func decodeChunkPRPost[T any](s *VanadisServer, w http.ResponseWriter, r *http.R
 }
 
 func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Request) {
-	req, ok := decodeChunkPRPost(s, w, r, "chunk_id and valid pr_number are required", func(req *AttachChunkPRRequest) bool {
+	req, ok := decodeChunkPRPost(s, w, r, "chunk_id or repo, and valid pr_number are required", func(req *AttachChunkPRRequest) bool {
 		req.ChunkID = strings.TrimSpace(req.ChunkID)
-		return req.ChunkID != "" && req.PRNumber > 0
+		req.Repo = strings.TrimSpace(req.Repo)
+		return (req.ChunkID != "" || req.Repo != "") && req.PRNumber > 0
 	})
 	if !ok {
 		return
 	}
-	threadID, err := s.store.AttachChunkPR(r.Context(), req.ChunkID, req.PRNumber, req.Repo)
+	buildID, chunkID, threadID, err := s.store.AttachChunkPR(r.Context(), req)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
 		"status":    "attached",
-		"chunk_id":  req.ChunkID,
+		"build_id":  buildID,
+		"chunk_id":  chunkID,
 		"thread_id": threadID,
 	})
 }

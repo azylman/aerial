@@ -15,7 +15,9 @@ import (
 
 func TestServer_ChunkEndpoints(t *testing.T) {
 	memStore, bID, cIDs := setupTestStoreWithBuild()
-	_, _ = memStore.AttachChunkPR(context.Background(), cIDs[0], 101, "aerial")
+	if _, _, _, err := memStore.AttachChunkPR(context.Background(), AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"}); err != nil {
+		t.Fatalf("AttachChunkPR failed: %v", err)
+	}
 
 	var widgetDispatched []StatusWidgetRequest
 	tsBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,8 +148,19 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 		}
 		var res map[string]string
 		_ = json.Unmarshal(rec.Body.Bytes(), &res)
-		if res["status"] != "attached" || res["thread_id"] == "" {
+		if res["status"] != "attached" || res["thread_id"] == "" || res["build_id"] == "" || res["chunk_id"] == "" {
 			t.Errorf("unexpected attach response: %+v", res)
+		}
+
+		// Standalone attach test
+		recStandalone := doAttachReq(http.MethodPost, "/chunks/attach-pr", `{"chunk_id":"","repo":"aerial","pr_number":401,"branch":"feature-1","title":"Feature 1"}`)
+		if recStandalone.Code != http.StatusOK {
+			t.Fatalf("expected 200 for standalone attach, got %d: %s", recStandalone.Code, recStandalone.Body.String())
+		}
+		var saRes map[string]string
+		_ = json.Unmarshal(recStandalone.Body.Bytes(), &saRes)
+		if saRes["status"] != "attached" || saRes["build_id"] == "" || saRes["chunk_id"] == "" {
+			t.Fatalf("unexpected standalone attach res: %+v", saRes)
 		}
 
 		rec404 := doAttachReq(http.MethodPost, "/chunks/attach-pr", `{"chunk_id":"missing-chunk","pr_number":101,"repo":"aerial"}`)
@@ -163,7 +176,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 
 		for _, bad := range []string{
 			`{invalid-json`,
-			`{"chunk_id":"","pr_number":101}`,
+			`{"chunk_id":"","repo":"","pr_number":101}`,
 			`{"chunk_id":"chunk-1","pr_number":0}`,
 		} {
 			recBad := doAttachReq(http.MethodPost, "/chunks/attach-pr", bad)
@@ -286,7 +299,9 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 
 	t.Run("POST_FailChunkPR", func(t *testing.T) {
 		sFail, _, cFailIDs := setupTestStoreWithBuild()
-		_, _ = sFail.AttachChunkPR(context.Background(), cFailIDs[0], 201, "aerial")
+		if _, _, _, err := sFail.AttachChunkPR(context.Background(), AttachChunkPRRequest{ChunkID: cFailIDs[0], PRNumber: 201, Repo: "aerial"}); err != nil {
+			t.Fatalf("AttachChunkPR failed: %v", err)
+		}
 		srvFail := NewVanadisServer(Config{}, sFail, nil)
 		muxFail := SetupMux(srvFail)
 
@@ -342,7 +357,9 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 
 	t.Run("POST_SyncPRWidget", func(t *testing.T) {
 		sWidget, bWidgetID, cWidgetIDs := setupTestStoreWithBuild()
-		_, _ = sWidget.AttachChunkPR(context.Background(), cWidgetIDs[0], 301, "aerial")
+		if _, _, _, err := sWidget.AttachChunkPR(context.Background(), AttachChunkPRRequest{ChunkID: cWidgetIDs[0], PRNumber: 301, Repo: "aerial"}); err != nil {
+			t.Fatalf("AttachChunkPR failed: %v", err)
+		}
 
 		srvWidget := NewVanadisServer(Config{BrainURL: tsBrain.URL}, sWidget, tsBrain.Client())
 		muxWidget := SetupMux(srvWidget)

@@ -466,7 +466,7 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 
 	t.Run("AttachChunkPR_Success", func(t *testing.T) {
 		s, _, cIDs := setupTestStoreWithBuild()
-		threadID, err := s.AttachChunkPR(ctx, cIDs[0], 101, "aerial")
+		_, _, threadID, err := s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"})
 		if err != nil || threadID != "123456789012345678" {
 			t.Fatalf("AttachChunkPR err=%v, threadID=%q", err, threadID)
 		}
@@ -475,7 +475,7 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 			t.Errorf("expected pr_number=101, status=pr_opened, got %+v", c)
 		}
 
-		threadID, err = s.AttachChunkPR(ctx, cIDs[0], 102, "aerial")
+		_, _, threadID, err = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 102, Repo: "aerial"})
 		if err != nil || threadID != "123456789012345678" {
 			t.Fatalf("AttachChunkPR overwrite err=%v, threadID=%q", err, threadID)
 		}
@@ -497,7 +497,7 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 		}{
 			{name: "mismatched repo", chunkID: "chunk-1", repo: "other-repo", wantSubstr: "does not match"},
 			{name: "chunk not found", chunkID: "missing", repo: "aerial", wantErr: ErrChunkNotFound},
-			{name: "empty chunk ID", chunkID: "", repo: "aerial", wantSubstr: "chunk id and valid pr number are required"},
+			{name: "empty chunk ID and empty repo", chunkID: "", repo: "", wantSubstr: "repo is required for standalone attach"},
 			{name: "parent build completed returns ErrBuildConflict", chunkID: "chunk-1", repo: "aerial", buildStatus: "completed", wantErr: ErrBuildConflict},
 			{name: "parent build cancelled returns ErrBuildConflict", chunkID: "chunk-1", repo: "aerial", buildStatus: "cancelled", wantErr: ErrBuildConflict},
 			{name: "chunk cancelled returns ErrBuildConflict", chunkID: "chunk-1", repo: "aerial", chunkStatus: "cancelled", wantErr: ErrBuildConflict},
@@ -506,7 +506,7 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
 				s, bID, cIDs := setupTestStoreWithBuild()
-				_, _ = s.AttachChunkPR(ctx, cIDs[0], 101, "aerial")
+				_, _, _, _ = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"})
 				if tc.buildStatus != "" {
 					b := s.builds[bID]
 					b.Status = tc.buildStatus
@@ -515,7 +515,7 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 				if tc.chunkStatus != "" {
 					setTestChunkStatus(s, bID, tc.chunkID, tc.chunkStatus)
 				}
-				_, err := s.AttachChunkPR(ctx, tc.chunkID, 101, tc.repo)
+				_, _, _, err := s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: tc.chunkID, PRNumber: 101, Repo: tc.repo})
 				if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 					t.Errorf("expected error %v, got %v", tc.wantErr, err)
 				}
@@ -528,7 +528,7 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 
 	t.Run("GetChunkByPR_Lifecycle", func(t *testing.T) {
 		s, bID, cIDs := setupTestStoreWithBuild()
-		_, _ = s.AttachChunkPR(ctx, cIDs[0], 101, "aerial")
+		_, _, _, _ = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"})
 
 		res, err := s.GetChunkByPR(ctx, "aerial", 101)
 		if err != nil || res == nil || !res.Matched || !res.HasRemainingChunks || res.BuildID != bID || res.ChunkID != cIDs[0] || res.NextChunkMode != "action" {
@@ -556,8 +556,8 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 
 	t.Run("AdvanceChunkByPR_Lifecycle", func(t *testing.T) {
 		s, bID, cIDs := setupTestStoreWithBuild()
-		_, _ = s.AttachChunkPR(ctx, cIDs[0], 101, "aerial")
-		_, _ = s.AttachChunkPR(ctx, cIDs[1], 102, "aerial")
+		_, _, _, _ = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"})
+		_, _, _, _ = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[1], PRNumber: 102, Repo: "aerial"})
 
 		adv1, err := s.AdvanceChunkByPR(ctx, "aerial", 101)
 		if err != nil || adv1 == nil || !adv1.Matched || !adv1.Advanced || adv1.BuildCompleted || adv1.NextChunkIndex != 1 {
@@ -565,7 +565,7 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 		}
 
 		sRec, bRecID, cRecIDs := setupTestStoreWithBuild()
-		_, _ = sRec.AttachChunkPR(ctx, cRecIDs[0], 111, "aerial")
+		_, _, _, _ = sRec.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cRecIDs[0], PRNumber: 111, Repo: "aerial"})
 		_, _, _, _ = sRec.FailChunkByPR(ctx, "aerial", 111)
 		advRecov, err := sRec.AdvanceChunkByPR(ctx, "aerial", 111)
 		if err != nil || advRecov == nil || !advRecov.Matched || !advRecov.Advanced || advRecov.BuildStatus != "running" || advRecov.NextChunkIndex != 1 {
@@ -608,7 +608,7 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 
 	t.Run("FailChunkByPR_Lifecycle", func(t *testing.T) {
 		s, bID, cIDs := setupTestStoreWithBuild()
-		_, _ = s.AttachChunkPR(ctx, cIDs[0], 101, "aerial")
+		_, _, _, _ = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"})
 
 		bIDGot, cIDGot, failed, err := s.FailChunkByPR(ctx, "aerial", 101)
 		if err != nil || !failed || bIDGot != bID || cIDGot != cIDs[0] {

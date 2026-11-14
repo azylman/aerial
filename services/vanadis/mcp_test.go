@@ -562,3 +562,21 @@ func assertVanadisMCPToolResult(t *testing.T, respBytes []byte, wantToolErr bool
 		t.Fatalf("response %s does not contain expected substring %q", string(respBytes), wantSubstr)
 	}
 }
+
+func TestToMCPChunkBriefs(t *testing.T) {
+	t.Parallel()
+	chunks := []VanadisChunk{
+		{ID: "c1", DependsOn: nil},
+	}
+	got := toMCPChunkBriefs(chunks)
+	if len(got) != 1 || got[0].ID != "c1" || got[0].DependsOn == nil {
+		t.Fatalf("expected non-nil DependsOn, got %+v", got)
+	}
+	b, err := json.Marshal(got[0])
+	if err != nil {
+		t.Fatalf("failed to marshal brief: %v", err)
+	}
+	if !strings.Contains(string(b), `"depends_on":[]`) {
+		t.Fatalf("expected \"depends_on\":[] in JSON, got %s", string(b))
+	}
+}
