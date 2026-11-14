@@ -1042,6 +1042,9 @@ func (te *turnExecution) executeLeaseAttempt(currentModel, promptToSend string, 
 		}
 		sink := runner.NewTracingTurnSink(runCtx, newDiscordTurnSink(te.statusUpdater))
 		te.traceSink = sink
+		// The loopback MCP proxy claims this attempt's execute_tool spans to nest MCP calls
+		// under them; a retry attempt replaces the source.
+		te.pool.ActiveTurns().SetToolSpans(te.activeTurnDaemon, sink)
 		turnCtx := te.buildLeaseTurnContext(runCtx, currentModel, promptToSend, sink)
 		// Setup ends at hand-off: from here the daemon's chat span (and any respawn) takes over.
 		te.endSetupSpan()

@@ -60,13 +60,44 @@ func ProviderForModel(model string) string {
 	}
 }
 
+// DefaultToolSpanClaimWait bounds how long ClaimToolSpan waits for a matching execute_tool
+// span to open. Engines normally announce a tool before its MCP request reaches the proxy, so
+// the wait only covers the race where the request wins.
+const DefaultToolSpanClaimWait = 250 * time.Millisecond
+
+// ToolSpanSource resolves an MCP request to the execute_tool span of the tool call that made
+// it (implemented by *TracingTurnSink).
+type ToolSpanSource interface {
+	ClaimToolSpan(ctx context.Context, server, tool, callID string) (trace.SpanContext, bool)
+}
+
 // openToolSpan is an in-flight execute_tool span. Subagent calls also own a nested
-// invoke_agent span; calls whose ParentID names this call start under it.
+// invoke_agent span; calls whose ParentID names this call start under it. MCP calls carry
+// their server and tool so the loopback MCP proxy can claim the span for the matching request.
 type openToolSpan struct {
-	id    string
-	name  string
-	span  trace.Span
-	agent trace.Span
+	id        string
+	name      string
+	mcpServer string
+	mcpTool   string
+	claimed   bool
+	span      trace.Span
+	agent     trace.Span
+}
+
+// claimTimer starts the ClaimToolSpan wait timer, returning its channel and stop function.
+type claimTimer func(time.Duration) (<-chan time.Time, func() bool)
+
+func newClaimTimer(d time.Duration) (<-chan time.Time, func() bool) {
+	t := time.NewTimer(d)
+	return t.C, t.Stop
+}
+
+// TracingTurnSinkOption configures a TracingTurnSink.
+type TracingTurnSinkOption func(*TracingTurnSink)
+
+// WithToolSpanClaimWait overrides DefaultToolSpanClaimWait.
+func WithToolSpanClaimWait(d time.Duration) TracingTurnSinkOption {
+	return func(s *TracingTurnSink) { s.claimWait = d }
 }
 
 // TracingTurnSink decorates a TurnSink with OpenTelemetry spans: one chat span per turn
@@ -75,31 +106,96 @@ type openToolSpan struct {
 // the inner sink unchanged. Span attributes carry only tool names, call IDs, MCP server
 // names and redacted statuses, never tool arguments or response text.
 type TracingTurnSink struct {
-	inner  TurnSink
-	tracer trace.Tracer
-	turn   trace.Span // parent of the chat and top-level tool spans
+	inner     TurnSink
+	tracer    trace.Tracer
+	turn      trace.Span // parent of the chat and top-level tool spans
+	claimWait time.Duration
+	newTimer  claimTimer
 
 	mu     sync.Mutex
 	chat   trace.Span
 	open   []*openToolSpan // start order, for FIFO correlation of ID-less calls
+	opened chan struct{}   // closed (and replaced) whenever a tool span opens
 	closed bool
 	usage  AgyUsage      // usage recorded on the chat span; set when the turn closes
 	done   chan struct{} // closed once the turn has closed
 }
 
 var (
-	_ TurnSink      = (*TracingTurnSink)(nil)
-	_ StepAwareSink = (*TracingTurnSink)(nil)
+	_ TurnSink       = (*TracingTurnSink)(nil)
+	_ StepAwareSink  = (*TracingTurnSink)(nil)
+	_ ToolSpanSource = (*TracingTurnSink)(nil)
 )
 
 // NewTracingTurnSink wraps inner so spans are children of the span carried by turnCtx and
 // are created with that span's tracer provider (a noop when tracing is disabled).
-func NewTracingTurnSink(turnCtx context.Context, inner TurnSink) *TracingTurnSink {
+func NewTracingTurnSink(turnCtx context.Context, inner TurnSink, opts ...TracingTurnSinkOption) *TracingTurnSink {
 	if turnCtx == nil {
 		turnCtx = context.Background()
 	}
 	turn := trace.SpanFromContext(turnCtx)
-	return &TracingTurnSink{inner: inner, tracer: turn.TracerProvider().Tracer(TracerScope), turn: turn, done: make(chan struct{})}
+	s := &TracingTurnSink{
+		inner: inner, tracer: turn.TracerProvider().Tracer(TracerScope), turn: turn,
+		claimWait: DefaultToolSpanClaimWait, newTimer: newClaimTimer,
+		opened: make(chan struct{}), done: make(chan struct{}),
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// ClaimToolSpan returns the span context of the open execute_tool span behind an MCP
+// tools/call request and marks it claimed so no other request takes it. It matches the span
+// whose call ID equals callID when callID is non-empty, else the oldest unclaimed span for the
+// same MCP server and tool (subagent calls included). With no match it waits for a matching
+// span to open, until ctx is done or the claim wait elapses; ok is false then and once the
+// turn has closed.
+func (s *TracingTurnSink) ClaimToolSpan(ctx context.Context, server, tool, callID string) (trace.SpanContext, bool) {
+	sc, opened, ok := s.tryClaim(server, tool, callID)
+	if ok || opened == nil {
+		return sc, ok
+	}
+	timeout, stop := s.newTimer(s.claimWait)
+	defer stop()
+	for {
+		select {
+		case <-opened:
+		case <-s.done:
+			return trace.SpanContext{}, false
+		case <-timeout:
+			return trace.SpanContext{}, false
+		case <-ctx.Done():
+			return trace.SpanContext{}, false
+		}
+		if sc, opened, ok = s.tryClaim(server, tool, callID); ok || opened == nil {
+			return sc, ok
+		}
+	}
+}
+
+// tryClaim claims a matching open span. Without a match it returns the channel that closes
+// when the next tool span opens, or nil once the turn has closed.
+func (s *TracingTurnSink) tryClaim(server, tool, callID string) (trace.SpanContext, <-chan struct{}, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return trace.SpanContext{}, nil, false
+	}
+	match := -1
+	if callID != "" {
+		match = slices.IndexFunc(s.open, func(ts *openToolSpan) bool { return !ts.claimed && ts.id == callID })
+	}
+	if match < 0 && server != "" && tool != "" {
+		match = slices.IndexFunc(s.open, func(ts *openToolSpan) bool {
+			return !ts.claimed && ts.mcpServer == server && ts.mcpTool == tool
+		})
+	}
+	if match < 0 {
+		return trace.SpanContext{}, s.opened, false
+	}
+	s.open[match].claimed = true
+	return s.open[match].span.SpanContext(), nil, true
 }
 
 // Usage waits until the turn has closed (on its result, its error, or daemon death) or ctx is
@@ -213,11 +309,16 @@ func (s *TracingTurnSink) startToolSpan(call ToolCall) {
 	if call.ID != "" {
 		attrs = append(attrs, AttrGenAIToolCallID.String(call.ID))
 	}
-	ts := &openToolSpan{id: call.ID, name: call.Name, span: s.startUnder(parent, OperationExecuteTool+" "+call.Name, attrs...)}
+	ts := &openToolSpan{
+		id: call.ID, name: call.Name, mcpServer: call.MCPServer, mcpTool: call.MCPTool,
+		span: s.startUnder(parent, OperationExecuteTool+" "+call.Name, attrs...),
+	}
 	if call.Subagent {
 		ts.agent = s.startUnder(ts.span, OperationInvokeAgent, AttrGenAIOperationName.String(OperationInvokeAgent))
 	}
 	s.open = append(s.open, ts)
+	close(s.opened)
+	s.opened = make(chan struct{})
 }
 
 func (s *TracingTurnSink) endToolSpan(call ToolCall, mcpServer, status string) {

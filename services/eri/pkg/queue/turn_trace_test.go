@@ -205,7 +205,7 @@ func (r rootEndSignal) OnEnd(s sdktrace.ReadOnlySpan) {
 }
 
 // agyToolTurnSpawner fakes an agy daemon that runs one tool per turn; onTurn (optional) runs
-// while each turn is executing, before the result is emitted.
+// while each turn is executing, after the tool's start has been read and before it completes.
 func agyToolTurnSpawner(onTurn func()) *mockDaemonSpawner {
 	return &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
@@ -217,10 +217,10 @@ func agyToolTurnSpawner(onTurn func()) *mockDaemonSpawner {
 				_, _ = fmt.Fprintf(outW, `{"event":"init","conversation_id":%q}`+"\n", "c1111111-2222-3333-4444-555555555555")
 				scanner := bufio.NewScanner(inR)
 				for scanner.Scan() {
+					_, _ = outW.Write([]byte(`{"event":"step_update","step_update":{"step_index":1,"type":"tool_call","tool_name":"run_command"}}` + "\n"))
 					if onTurn != nil {
 						onTurn()
 					}
-					_, _ = outW.Write([]byte(`{"event":"step_update","step_update":{"step_index":1,"type":"tool_call","tool_name":"run_command"}}` + "\n"))
 					_, _ = outW.Write([]byte(`{"event":"step_update","step_update":{"step_index":1,"type":"tool_call","state":"DONE"}}` + "\n"))
 					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"done","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}` + "\n"))
 				}
@@ -370,9 +370,13 @@ func TestProcessBurst_RegistersActiveTurnDuringExecution(t *testing.T) {
 			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
 			registry := runner.NewActiveTurnRegistry()
 			duringTurn := make(chan trace.SpanContext, 1)
+			claimedTool := make(chan trace.SpanContext, 1)
 			spawner := agyToolTurnSpawner(func() {
-				sc, _ := registry.SoleTurnInTarget(tc.target)
+				daemon, _ := registry.SoleDaemonInTarget(tc.target)
+				sc, _ := registry.Get(daemon)
 				duringTurn <- sc
+				tool, _ := registry.ToolSpan(context.Background(), daemon, "", "", "step-1")
+				claimedTool <- tool
 			})
 			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
 				DefaultModel:  "gemini-2.5-flash",
@@ -403,17 +407,23 @@ func TestProcessBurst_RegistersActiveTurnDuringExecution(t *testing.T) {
 				t.Fatalf("turn span never ended")
 			}
 
-			var root sdktrace.ReadOnlySpan
+			var root, tool sdktrace.ReadOnlySpan
 			for _, s := range sig.Ended() {
-				if s.Name() == runner.OperationInvokeAgent {
+				switch s.Name() {
+				case runner.OperationInvokeAgent:
 					root = s
+				case "execute_tool run_command":
+					tool = s
 				}
 			}
 			if got := <-duringTurn; !got.Equal(root.SpanContext()) {
 				t.Errorf("registered span during turn = %v, want turn root %v", got.SpanID(), root.SpanContext().SpanID())
 			}
-			if sc, ok := registry.SoleTurnInTarget(tc.target); ok {
-				t.Errorf("turn still registered after completion: %v", sc.SpanID())
+			if got := <-claimedTool; tool == nil || !got.Equal(tool.SpanContext()) {
+				t.Errorf("claimed tool span during turn = %v, want the execute_tool run_command span", got.SpanID())
+			}
+			if daemon, ok := registry.SoleDaemonInTarget(tc.target); ok {
+				t.Errorf("turn still registered after completion: %q", daemon)
 			}
 		})
 	}
@@ -458,7 +468,7 @@ func TestSessionCorruptionRetry_ReregistersActiveTurn(t *testing.T) {
 			}
 			unmark()
 			_ = te.lease.Release()
-			if _, ok := pool.ActiveTurns().SoleTurnInTarget("ephemeral"); ok {
+			if _, ok := pool.ActiveTurns().SoleDaemonInTarget("ephemeral"); ok {
 				t.Errorf("turn still registered after clear")
 			}
 		})

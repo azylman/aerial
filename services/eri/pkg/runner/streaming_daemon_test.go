@@ -867,6 +867,33 @@ func TestStreamingDaemon_ToolCallIdentity(t *testing.T) {
 				{ID: "step-3", Name: "invoke_subagent", Subagent: true},
 			},
 		},
+		{
+			name:   "claude mcp tools carry their server and tool",
+			engine: "claude",
+			lines: []string{
+				`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_m","name":"mcp__docket__create","input":{}},{"type":"tool_use","id":"toolu_n","name":"Grep","input":{}}]}}`,
+				`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_m"}]}}`,
+			},
+			wantCalls: []ToolCall{
+				{ID: "toolu_m", Name: "create", MCPServer: "docket", MCPTool: "create"},
+				{ID: "toolu_n", Name: "Grep"},
+			},
+			wantCompletions: []ToolCall{{ID: "toolu_m", Name: "create"}},
+		},
+		{
+			name:   "agy call_mcp_tool keeps its name and carries the resolved server and tool",
+			engine: "",
+			lines: []string{
+				`{"event":"step_update","step_update":{"step_index":5,"type":"tool_call","tool_name":"call_mcp_tool","tool_info":{"parameters":{"ServerName":"github","ToolName":"get_me"}}}}`,
+				`{"event":"step_update","step_update":{"step_index":6,"type":"tool_call","tool_name":"call_mcp_tool","tool_info":{"parameters":{"ToolName":"get_me"}}}}`,
+				`{"event":"step_update","step_update":{"step_index":5,"type":"tool_call","state":"DONE"}}`,
+			},
+			wantCalls: []ToolCall{
+				{ID: "step-5", Name: "call_mcp_tool", Command: "get_me", MCPServer: "github", MCPTool: "get_me"},
+				{ID: "step-6", Name: "call_mcp_tool", Command: "get_me"},
+			},
+			wantCompletions: []ToolCall{{ID: "step-5", Name: "get_me"}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

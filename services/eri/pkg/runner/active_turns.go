@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"sync"
 
 	"go.opentelemetry.io/otel/trace"
@@ -24,12 +25,13 @@ type ActiveTurnOwner interface {
 }
 
 type activeTurnEntry struct {
-	turn ActiveTurn
-	sc   trace.SpanContext
+	turn  ActiveTurn
+	sc    trace.SpanContext
+	tools ToolSpanSource // the executing attempt's tool spans; nil until attached
 }
 
-// ActiveTurnRegistry maps daemons to the span context of the turn they are executing. It is
-// safe for concurrent use.
+// ActiveTurnRegistry maps daemons to the span context of the turn they are executing and to
+// the tool spans of the attempt in flight. It is safe for concurrent use.
 type ActiveTurnRegistry struct {
 	mu      sync.RWMutex
 	entries map[string]activeTurnEntry
@@ -40,7 +42,8 @@ func NewActiveTurnRegistry() *ActiveTurnRegistry {
 	return &ActiveTurnRegistry{entries: make(map[string]activeTurnEntry)}
 }
 
-// Set records that turn's daemon is executing the turn whose root span is sc.
+// Set records that turn's daemon is executing the turn whose root span is sc. It replaces any
+// previous entry for the daemon, dropping its tool span source.
 func (r *ActiveTurnRegistry) Set(turn ActiveTurn, sc trace.SpanContext) {
 	if r == nil || turn.DaemonID == "" || !sc.IsValid() {
 		return
@@ -50,7 +53,36 @@ func (r *ActiveTurnRegistry) Set(turn ActiveTurn, sc trace.SpanContext) {
 	r.entries[turn.DaemonID] = activeTurnEntry{turn: turn, sc: sc}
 }
 
-// Clear removes daemonID's active turn.
+// SetToolSpans attaches the tool spans of daemonID's executing attempt, replacing the previous
+// attempt's. It is a no-op unless Set registered daemonID.
+func (r *ActiveTurnRegistry) SetToolSpans(daemonID string, src ToolSpanSource) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.entries[daemonID]; ok {
+		e.tools = src
+		r.entries[daemonID] = e
+	}
+}
+
+// ToolSpan claims the execute_tool span behind an MCP request from daemonID (see
+// ToolSpanSource). With no source attached it returns false without waiting.
+func (r *ActiveTurnRegistry) ToolSpan(ctx context.Context, daemonID, server, tool, callID string) (trace.SpanContext, bool) {
+	if r == nil {
+		return trace.SpanContext{}, false
+	}
+	r.mu.RLock()
+	src := r.entries[daemonID].tools
+	r.mu.RUnlock()
+	if src == nil {
+		return trace.SpanContext{}, false
+	}
+	return src.ClaimToolSpan(ctx, server, tool, callID)
+}
+
+// Clear removes daemonID's active turn and its tool span source.
 func (r *ActiveTurnRegistry) Clear(daemonID string) {
 	if r == nil {
 		return
@@ -97,24 +129,23 @@ func (r *ActiveTurnRegistry) DaemonByConversation(conversationID string) (daemon
 	return "", "", false
 }
 
-// SoleTurnInTarget returns the span context of target's active turn when exactly one daemon
+// SoleDaemonInTarget returns the daemon executing target's active turn when exactly one daemon
 // in target is executing one; with zero or several the owner is ambiguous and ok is false.
-func (r *ActiveTurnRegistry) SoleTurnInTarget(target string) (trace.SpanContext, bool) {
+func (r *ActiveTurnRegistry) SoleDaemonInTarget(target string) (daemonID string, ok bool) {
 	if r == nil || target == "" {
-		return trace.SpanContext{}, false
+		return "", false
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	var found trace.SpanContext
 	n := 0
-	for _, e := range r.entries {
+	for id, e := range r.entries {
 		if e.turn.Target == target {
-			found = e.sc
+			daemonID = id
 			n++
 		}
 	}
 	if n != 1 {
-		return trace.SpanContext{}, false
+		return "", false
 	}
-	return found, true
+	return daemonID, true
 }
