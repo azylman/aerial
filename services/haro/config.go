@@ -97,7 +97,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 	eriURL = strings.TrimSpace(eriURL)
 	if eriURL == "" {
-		eriURL = "http://eri.aerial"
+		return nil, fmt.Errorf("config: eri_url is required in %s", cleanPath)
 	}
 	eriURL = strings.TrimRight(eriURL, "/")
 
@@ -107,7 +107,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 	vanadisURL = strings.TrimSpace(vanadisURL)
 	if vanadisURL == "" {
-		vanadisURL = "http://vanadis.aerial"
+		return nil, fmt.Errorf("config: vanadis_url is required in %s", cleanPath)
 	}
 	vanadisURL = strings.TrimRight(vanadisURL, "/")
 

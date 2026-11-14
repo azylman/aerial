@@ -20,7 +20,7 @@ func TestMain_Execution(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	testCfg := filepath.Join(tmpDir, "config.yaml")
-	_ = os.WriteFile(testCfg, []byte("port: \"4005\"\ntimezone: \"America/Los_Angeles\"\n"), 0o644)
+	_ = os.WriteFile(testCfg, []byte("port: \"4005\"\ntimezone: \"America/Los_Angeles\"\neri_url: \"http://127.0.0.1:59484\"\nvanadis_url: \"http://127.0.0.1:59485\"\n"), 0o644)
 	configPath = testCfg
 	t.Setenv("CONFIG_PATH", testCfg)
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
@@ -63,7 +63,15 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	tempDB := filepath.Join(t.TempDir(), "runapp.db")
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- RunApp(ctx, &Config{Port: "59483", DatabaseURL: tempDB}) }()
+	go func() {
+		errCh <- RunApp(ctx, &Config{
+			Port:        "59483",
+			DatabaseURL: tempDB,
+			BrainURL:    "http://127.0.0.1:59484",
+			EriURL:      "http://127.0.0.1:59484",
+			VanadisURL:  "http://127.0.0.1:59485",
+		})
+	}()
 
 	var resp *http.Response
 	for start := time.Now(); time.Since(start) < 3*time.Second; {
@@ -96,10 +104,11 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	defer func() { postgresMaxAttempts, postgresRetryBase = origMax, origBase }()
 
 	for _, cfg := range []*Config{
-		{Port: "9999", DatabaseURL: "postgres://invalid:pass@127.0.0.1:59996/db?sslmode=disable"},
+		{Port: "9999", DatabaseURL: "postgres://invalid:pass@127.0.0.1:59996/db?sslmode=disable", BrainURL: "http://127.0.0.1:59484"},
 		nil,
-		{Port: "", DatabaseURL: ":memory:"},
-		{Port: "-1", DatabaseURL: ":memory:"},
+		{Port: "", DatabaseURL: ":memory:", BrainURL: "http://127.0.0.1:59484"},
+		{Port: "-1", DatabaseURL: ":memory:", BrainURL: "http://127.0.0.1:59484"},
+		{Port: "8080", DatabaseURL: ":memory:", BrainURL: ""},
 	} {
 		if err := RunApp(context.Background(), cfg); err == nil {
 			t.Errorf("expected error running app with %v", cfg)

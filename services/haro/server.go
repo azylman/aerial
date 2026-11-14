@@ -58,7 +58,7 @@ func NewServer(handler *ToolHandler, dispatcher ...PromptDispatcher) *Server {
 	var disp PromptDispatcher
 	if len(dispatcher) > 0 && dispatcher[0] != nil {
 		disp = dispatcher[0]
-	} else if handler.cfg != nil {
+	} else if handler.cfg != nil && strings.TrimSpace(handler.cfg.BrainURL) != "" {
 		disp = NewHTTPPromptDispatcher(handler.cfg.BrainURL)
 	}
 
