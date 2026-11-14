@@ -92,25 +92,16 @@ func newClaimTimer(d time.Duration) (<-chan time.Time, func() bool) {
 	return t.C, t.Stop
 }
 
-// TracingTurnSinkOption configures a TracingTurnSink.
-type TracingTurnSinkOption func(*TracingTurnSink)
-
-// WithToolSpanClaimWait overrides DefaultToolSpanClaimWait.
-func WithToolSpanClaimWait(d time.Duration) TracingTurnSinkOption {
-	return func(s *TracingTurnSink) { s.claimWait = d }
-}
-
 // TracingTurnSink decorates a TurnSink with OpenTelemetry spans: one chat span per turn
 // (carrying usage) and one execute_tool span per tool call, nested under a child
 // invoke_agent span when the call runs inside a subagent. Every callback is forwarded to
 // the inner sink unchanged. Span attributes carry only tool names, call IDs, MCP server
 // names and redacted statuses, never tool arguments or response text.
 type TracingTurnSink struct {
-	inner     TurnSink
-	tracer    trace.Tracer
-	turn      trace.Span // parent of the chat and top-level tool spans
-	claimWait time.Duration
-	newTimer  claimTimer
+	inner    TurnSink
+	tracer   trace.Tracer
+	turn     trace.Span // parent of the chat and top-level tool spans
+	newTimer claimTimer // starts the ClaimToolSpan wait; tests inject a fake clock
 
 	mu     sync.Mutex
 	chat   trace.Span
@@ -129,18 +120,15 @@ var (
 
 // NewTracingTurnSink wraps inner so spans are children of the span carried by turnCtx and
 // are created with that span's tracer provider (a noop when tracing is disabled).
-func NewTracingTurnSink(turnCtx context.Context, inner TurnSink, opts ...TracingTurnSinkOption) *TracingTurnSink {
+func NewTracingTurnSink(turnCtx context.Context, inner TurnSink) *TracingTurnSink {
 	if turnCtx == nil {
 		turnCtx = context.Background()
 	}
 	turn := trace.SpanFromContext(turnCtx)
 	s := &TracingTurnSink{
 		inner: inner, tracer: turn.TracerProvider().Tracer(TracerScope), turn: turn,
-		claimWait: DefaultToolSpanClaimWait, newTimer: newClaimTimer,
-		opened: make(chan struct{}), done: make(chan struct{}),
-	}
-	for _, opt := range opts {
-		opt(s)
+		newTimer: newClaimTimer,
+		opened:   make(chan struct{}), done: make(chan struct{}),
 	}
 	return s
 }
@@ -157,7 +145,7 @@ func (s *TracingTurnSink) ClaimToolSpan(ctx context.Context, server, tool, callI
 	if ok || opened == nil {
 		return sc, ok
 	}
-	timeout, stop := s.newTimer(s.claimWait)
+	timeout, stop := s.newTimer(DefaultToolSpanClaimWait)
 	defer stop()
 	for {
 		select {

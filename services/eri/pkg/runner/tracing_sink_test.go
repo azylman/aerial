@@ -382,7 +382,7 @@ func TestTracingTurnSink_ClaimToolSpan(t *testing.T) {
 			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
 			turnCtx, turn := tp.Tracer("test").Start(context.Background(), "turn")
 			timer := &fakeClaimTimer{fire: tc.openLater == nil, armed: make(chan struct{}, 1)}
-			sink := NewTracingTurnSink(turnCtx, nil, WithToolSpanClaimWait(time.Hour))
+			sink := NewTracingTurnSink(turnCtx, nil)
 			sink.newTimer = timer.start
 			for _, call := range tc.opened {
 				sink.OnToolCall(call)
