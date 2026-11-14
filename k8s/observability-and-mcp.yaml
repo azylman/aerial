@@ -344,13 +344,19 @@ data:
     end)
     seen = nil
 
+    -- print() goes to fully buffered stdout under a non-tty PID 1, so the
+    -- startup line never reaches the pod log; stderr is unbuffered.
+    local function log(msg)
+      io.stderr:write(msg, "\n")
+    end
+
     if #targets == 0 then
-      print(string.format("[redact] WARNING: 0 redaction targets loaded from %d secret values; logs pass through unredacted", values))
+      log(string.format("[redact] WARNING: 0 redaction targets loaded from %d secret values; logs pass through unredacted", values))
     else
-      print(string.format("[redact] loaded %d redaction targets from %d secret values", #targets, values))
+      log(string.format("[redact] loaded %d redaction targets from %d secret values", #targets, values))
     end
     if json_without_secrets > 0 then
-      print(string.format("[redact] WARNING: %d JSON secret values had no recognized secret fields", json_without_secrets))
+      log(string.format("[redact] WARNING: %d JSON secret values had no recognized secret fields", json_without_secrets))
     end
 
     local function replace_all(s, t, start)
