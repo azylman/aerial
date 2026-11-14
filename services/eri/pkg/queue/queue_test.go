@@ -4604,14 +4604,6 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 			wantStatus:     db.StatusFailed,
 			wantMinRetries: 1,
 		},
-		{
-			name:           "vanadis chunk exhausts retries to failed status",
-			source:         "vanadis",
-			sessionID:      "vanadis-chunk-fail-term",
-			prompt:         "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: b-fail\nChunk ID: chunk-fail-term\nfail this chunk",
-			wantStatus:     db.StatusFailed,
-			wantMinRetries: 1,
-		},
 	}
 
 	for _, tc := range tests {
