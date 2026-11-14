@@ -483,17 +483,19 @@ func (p *WorkerPool) setupVanadisChunkTurn(d db.Dispatch, te *turnExecution) fun
 	if chunkID == "" {
 		return func() {}
 	}
-	p.StartChunkStepTurn(chunkID, buildID, chunkIdx, d.ID)
-	p.ensureChunkWidgetHydrated(d.Prompt, chunkID, buildID)
+	// Widget edits ride the turn's trace but must not be aborted by an interrupt.
+	widgetCtx := context.WithoutCancel(te.turnCtxValue())
+	p.StartChunkStepTurn(widgetCtx, chunkID, buildID, chunkIdx, d.ID)
+	p.ensureChunkWidgetHydrated(widgetCtx, d.Prompt, chunkID, buildID)
 	te.statusUpdater = NewChunkStepStatusUpdater(chunkID, func(step string) error {
-		return p.FlushChunkActiveStep(chunkID, d.ID, step)
+		return p.FlushChunkActiveStep(widgetCtx, chunkID, d.ID, step)
 	})
 	return func() {
 		if te.statusUpdater != nil {
 			te.statusUpdater.Stop()
 			te.statusUpdater.DeleteStatusMessage()
 		}
-		p.FinishChunkStepTurn(chunkID, d.ID)
+		p.FinishChunkStepTurn(widgetCtx, chunkID, d.ID)
 		if d.Source == "vanadis" && (p.ctx == nil || p.ctx.Err() == nil) && !te.isInterrupted() {
 			p.notifyVanadisChunkOutcome(chunkID, te.turnStatus, te.turnError)
 		}

@@ -706,6 +706,8 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 		log.Printf("Discord funnel failed to create session: %v", err)
 		return nil
 	}
+	// REST calls made on behalf of a turn or request get client spans; Discord never sees our trace IDs.
+	dg.Client = tracing.ExternalClient(dg.Client)
 	if pool != nil {
 		pool.SetDiscordSession(dg)
 		SetFunnelPool(pool)
