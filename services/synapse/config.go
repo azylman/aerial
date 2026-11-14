@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -421,12 +420,4 @@ func truncatePromptRunes(s string, maxRunes int) string {
 		return s
 	}
 	return string(runes[:maxRunes]) + "... (truncated)"
-}
-
-func readBodyString(r io.Reader) string {
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return ""
-	}
-	return string(body)
 }

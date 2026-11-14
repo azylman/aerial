@@ -645,9 +645,14 @@ func TestEventWatchTools(t *testing.T) {
 
 func verifyTriggerState(ctx context.Context, t *testing.T, db *sql.DB, ev pubsub.ExternalEvent, wantInDB bool) {
 	t.Helper()
-	matched, err := CheckEventTriggers(ctx, db, ev.Source, ev.Targets, ev.EventType)
-	if err != nil {
-		t.Fatalf("CheckEventTriggers failed: %v", err)
+	placeholders, args, ok := buildEventTriggerFilterArgs(ev.Source, ev.Targets, ev.EventType)
+	if !ok {
+		t.Fatal("invalid event trigger filter args")
+	}
+	rawQuery := "SELECT EXISTS(SELECT 1 FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (" + placeholders + "))"
+	var matched bool
+	if err := db.QueryRowContext(ctx, rawQuery, args...).Scan(&matched); err != nil {
+		t.Fatalf("query event_triggers failed: %v", err)
 	}
 	if matched != wantInDB {
 		t.Errorf("trigger in db = %v, want %v", matched, wantInDB)
@@ -876,13 +881,7 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 		t.Fatal("timed out waiting for event delivery")
 	}
 
-	matched, err := CheckEventTriggers(ctx, db, "flux", []string{"aerial"}, "sync_success")
-	if err != nil {
-		t.Fatalf("CheckEventTriggers failed: %v", err)
-	}
-	if matched {
-		t.Error("expected trigger to have been claimed and deleted from db")
-	}
+	verifyTriggerState(ctx, t, db, ev, false)
 	if wrapped.lastErr != nil {
 		t.Errorf("expected nil error on successful event handling, got %v", wrapped.lastErr)
 	}

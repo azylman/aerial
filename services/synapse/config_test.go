@@ -549,12 +549,6 @@ func TestStringAndRepoHelpers(t *testing.T) {
 		})
 	}
 
-	if got := readBodyString(errReader{}); got != "" {
-		t.Errorf("readBodyString(errReader) = %q, want empty", got)
-	}
-	if got := readBodyString(strings.NewReader("")); got != "" {
-		t.Errorf("readBodyString(empty) = %q, want empty", got)
-	}
 	if n := len(randomNonce()); n != 32 {
 		t.Errorf("len(randomNonce()) = %d, want 32", n)
 	}
