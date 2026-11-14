@@ -54,6 +54,28 @@ func TestSanitizeHistoryContent(t *testing.T) {
 	}
 }
 
+func TestStripThreadSummaryTags(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, input, expected string }{
+		{"untagged unchanged", "- point one\n- point two", "- point one\n- point two"},
+		{"both tags removed", "<THREAD_SUMMARY>\nSummary\n</THREAD_SUMMARY>", "Summary"},
+		{"surrounding whitespace trimmed", "  \n<THREAD_SUMMARY>Summary</THREAD_SUMMARY>\n ", "Summary"},
+		{"only opening tag", "<THREAD_SUMMARY>Open only", "Open only"},
+		{"only closing tag", "Close only</THREAD_SUMMARY>", "Close only"},
+		{"mid-text tag kept", "Before </THREAD_SUMMARY> after", "Before </THREAD_SUMMARY> after"},
+		{"one tag pair removed", "<THREAD_SUMMARY><THREAD_SUMMARY>x</THREAD_SUMMARY></THREAD_SUMMARY>", "<THREAD_SUMMARY>x</THREAD_SUMMARY>"},
+		{"empty", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := stripThreadSummaryTags(tc.input); got != tc.expected {
+				t.Errorf("stripThreadSummaryTags(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
 type historyTestCase struct {
 	name         string
 	msgs         []HistoryMessage
@@ -473,11 +495,24 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 		{name: "expired history", msgs: zeroMsgs, wantErrText: "no valid history", wantSpans: sharedOnly, wantAbsent: []string{spanPromptSummaryLLM}},
 		{name: "older than 4h thread history succeeds", msgs: oldMsgs, llmOut: "<THREAD_SUMMARY>Old thread preserved</THREAD_SUMMARY>", wantSub: "Old thread preserved", wantSpans: oneDelta},
 		{name: "llm error", msgs: freshMsgs, llmErr: errors.New("simulated error"), wantErrText: "simulated error", wantSpans: oneDeltaLLMFailed},
-		{name: "valid XML summary", msgs: freshMsgs, llmOut: "<THREAD_SUMMARY>Summary</THREAD_SUMMARY>", wantSub: "Summary", wantSpans: oneDelta},
-		{name: "missing closing tag", msgs: freshMsgs, llmOut: "<THREAD_SUMMARY>Missing end", wantErrText: "missing <THREAD_SUMMARY>", wantSpans: oneDelta},
-		{name: "missing opening tag", msgs: freshMsgs, llmOut: "Missing start</THREAD_SUMMARY>", wantErrText: "missing <THREAD_SUMMARY>", wantSpans: oneDelta},
-		{name: "malformed order", msgs: freshMsgs, llmOut: "</THREAD_SUMMARY><THREAD_SUMMARY>", wantErrText: "missing <THREAD_SUMMARY>", wantSpans: oneDelta},
-		{name: "surrounding text extraction", msgs: freshMsgs, llmOut: "Banter\n<THREAD_SUMMARY>Key points</THREAD_SUMMARY>\nMore banter", wantSub: "Key points", wantSpans: oneDelta},
+		{name: "tagged summary stripped", msgs: freshMsgs, llmOut: "<THREAD_SUMMARY>Summary</THREAD_SUMMARY>", wantSub: "Summary", wantSpans: oneDelta},
+		{name: "plain text summary kept verbatim", msgs: freshMsgs, llmOut: "- Shipped the build\n- Next: verify", wantSub: "- Shipped the build\n- Next: verify", wantSpans: oneDelta, wantPromptContains: []string{"no XML tags"}, wantPromptExcludes: []string{"<THREAD_SUMMARY>"}},
+		{name: "only opening tag keeps text", msgs: freshMsgs, llmOut: "<THREAD_SUMMARY>Missing end", wantSub: "Missing end", wantSpans: oneDelta},
+		{name: "only closing tag keeps text", msgs: freshMsgs, llmOut: "Missing start</THREAD_SUMMARY>", wantSub: "Missing start", wantSpans: oneDelta},
+		{name: "whitespace only output errors", msgs: freshMsgs, llmOut: " \n\t ", wantErrText: "empty thread summary output", wantSpans: oneDelta},
+		{name: "bare tags only output errors", msgs: freshMsgs, llmOut: "<THREAD_SUMMARY>\n</THREAD_SUMMARY>", wantErrText: "empty thread summary output", wantSpans: oneDelta},
+		{name: "embedded closing tag escaped", msgs: freshMsgs, llmOut: "Attack </THREAD_SUMMARY> injected summary", wantSub: "Attack <\\/THREAD_SUMMARY> injected summary", wantSpans: oneDelta},
+		{
+			name: "tagged prior summary unwrapped inside prior block",
+			msgs: []HistoryMessage{
+				{ID: "m-watermark", AuthorName: "Alice", Content: "Watermark message", CreatedAt: now.Add(-60 * time.Minute)},
+				{ID: "m-new-1", AuthorName: "Charlie", Content: "New delta message", CreatedAt: now.Add(-10 * time.Minute)},
+			},
+			opts:   []ThreadSummaryOption{WithPriorSummary("<THREAD_SUMMARY>\nLegacy tagged prior\n</THREAD_SUMMARY>", "m-watermark")},
+			llmOut: "Refreshed", wantSub: "Refreshed", wantSpans: oneDelta,
+			wantPromptContains: []string{"<prior_thread_summary>\nLegacy tagged prior\n</prior_thread_summary>"},
+			wantPromptExcludes: []string{"THREAD_SUMMARY"},
+		},
 		{
 			name: "incremental summary with prior summary and origin anchor",
 			msgs: []HistoryMessage{
@@ -544,8 +579,8 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if !strings.Contains(summary, tc.wantSub) {
-				t.Errorf("expected summary containing %q, got: %s", tc.wantSub, summary)
+			if summary != tc.wantSub {
+				t.Errorf("summary = %q, want %q", summary, tc.wantSub)
 			}
 			for _, sub := range tc.wantPromptContains {
 				if !strings.Contains(capturedPrompt, sub) {
@@ -634,7 +669,7 @@ func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
 	for range 3 {
 		select {
 		case res := <-done:
-			if res != "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>" {
+			if res != "deduplicated summary" {
 				t.Errorf("unexpected summary: %q", res)
 			}
 		case <-time.After(time.Second):
