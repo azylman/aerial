@@ -87,8 +87,6 @@ func (m *mockTwilioClient) DownloadRecording(ctx context.Context, recordingURL s
 func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 	t.Parallel()
 
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-
 	var geminiReceivedMessages []string
 	var geminiMu sync.Mutex
 	recordGeminiMsg := func(s string) {
@@ -97,108 +95,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 		geminiReceivedMessages = append(geminiReceivedMessages, s)
 	}
 
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		_, setupBytes, err := conn.ReadMessage()
-		if err != nil {
-			return
-		}
-		recordGeminiMsg(string(setupBytes))
-
-		_ = conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
-
-		for {
-			_, msgBytes, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-			msgStr := string(msgBytes)
-			recordGeminiMsg(msgStr)
-
-			switch {
-			case strings.Contains(msgStr, "Call connected"):
-				pcm24 := make([]byte, 4800)
-				_ = conn.WriteJSON(map[string]any{
-					"serverContent": map[string]any{
-						"modelTurn": map[string]any{
-							"parts": []map[string]any{
-								{
-									"inlineData": map[string]any{
-										"mimeType": "audio/pcm;rate=24000",
-										"data":     base64.StdEncoding.EncodeToString(pcm24),
-									},
-								},
-								{
-									"text":    "Internal thinking reasoning",
-									"thought": true,
-								},
-							},
-						},
-						"outputTranscription": map[string]any{
-							"text": "Hello, this is Prospera speaking.",
-						},
-						"turnComplete": true,
-					},
-				})
-			case strings.Contains(msgStr, "test_dtmf_trigger"):
-				_ = conn.WriteJSON(map[string]any{
-					"toolCall": map[string]any{
-						"functionCalls": []map[string]any{
-							{
-								"id":   "call_dtmf_1",
-								"name": "send_dtmf",
-								"args": map[string]any{"digits": "12w3"},
-							},
-						},
-					},
-				})
-			case strings.Contains(msgStr, "test_calendar_trigger"):
-				_ = conn.WriteJSON(map[string]any{
-					"toolCall": map[string]any{
-						"functionCalls": []map[string]any{
-							{
-								"id":   "call_cal_1",
-								"name": "consult_calendar",
-								"args": map[string]any{"query": "dentist", "start_iso": "2026-10-26T00:00:00Z"},
-							},
-						},
-					},
-				})
-			case strings.Contains(msgStr, "test_memory_trigger"):
-				_ = conn.WriteJSON(map[string]any{
-					"toolCall": map[string]any{
-						"functionCalls": []map[string]any{
-							{
-								"id":   "call_mem_1",
-								"name": "consult_memory",
-								"args": map[string]any{"query": "address"},
-							},
-						},
-					},
-				})
-			case strings.Contains(msgStr, "test_end_trigger"):
-				_ = conn.WriteJSON(map[string]any{
-					"toolCall": map[string]any{
-						"functionCalls": []map[string]any{
-							{
-								"id":   "call_end_1",
-								"name": "end_call",
-								"args": map[string]any{"reason": "task_completed"},
-							},
-						},
-					},
-				})
-			}
-		}
-	}))
-	t.Cleanup(geminiServer.Close)
-
-	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
+	geminiWSURL, _ := setupLifecycleGeminiServer(t, recordGeminiMsg)
 
 	cfg := &Config{
 		GeminiLiveModel:     "gemini-3.8-live",
@@ -270,94 +167,13 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 		t.Fatal("timed out waiting for session start event")
 	}
 
-	quietUlaw := make([]byte, 160)
-	for i := range quietUlaw {
-		quietUlaw[i] = 0xFE // low-level line noise (PCM16 amplitude 8, normalized RMS ~0.00024 < 0.015)
-	}
-	quietPayload := base64.StdEncoding.EncodeToString(quietUlaw)
-	loudUlaw := make([]byte, 160)
-	for i := range loudUlaw {
-		loudUlaw[i] = 0x00
-	}
-	loudPayload := base64.StdEncoding.EncodeToString(loudUlaw)
+	injectTwilioAudioFrames(twilioWS)
 
-	for range 15 {
-		_ = twilioWS.WriteJSON(map[string]any{
-			"event":     "media",
-			"streamSid": "MZ123",
-			"media": map[string]any{
-				"payload": loudPayload,
-			},
-		})
-	}
-	for range 31 {
-		_ = twilioWS.WriteJSON(map[string]any{
-			"event":     "media",
-			"streamSid": "MZ123",
-			"media": map[string]any{
-				"payload": quietPayload,
-			},
-		})
-	}
+	exerciseBridgeSteerAndAMD(t, sessionMgr, "call-test-bridge", "CA_twilio_123")
 
-	if err := sessionMgr.SteerCall("call-test-bridge", "Focus on price confirmation", "guidance"); err != nil {
-		t.Fatalf("SteerCall(guidance) error: %v", err)
-	}
-	if err := sessionMgr.SteerCall("call-test-bridge", "Understood, thank you", "say"); err != nil {
-		t.Fatalf("SteerCall(say) error: %v", err)
-	}
-
-	if err := sessionMgr.SteerCall("call-test-bridge", "test_dtmf_trigger", "guidance"); err != nil {
-		t.Fatalf("trigger dtmf err: %v", err)
-	}
-	if err := sessionMgr.SteerCall("call-test-bridge", "test_calendar_trigger", "guidance"); err != nil {
-		t.Fatalf("trigger calendar err: %v", err)
-	}
-	if err := sessionMgr.SteerCall("call-test-bridge", "test_memory_trigger", "guidance"); err != nil {
-		t.Fatalf("trigger memory err: %v", err)
-	}
-
-	if err := sessionMgr.HandleAMDWebhook("CA_twilio_123", "human"); err != nil {
-		t.Fatalf("HandleAMDWebhook() error: %v", err)
-	}
-
-	if err := sessionMgr.SteerCall("call-test-bridge", "test_end_trigger", "guidance"); err != nil {
-		t.Fatalf("trigger end_call err: %v", err)
-	}
-
-	var receivedMedia bool
-	var receivedHangupMark bool
-
-	for !receivedHangupMark {
-		_ = twilioWS.SetReadDeadline(time.Now().Add(3 * time.Second))
-		_, data, err := twilioWS.ReadMessage()
-		if err != nil {
-			t.Fatalf("reading from Twilio WS failed before hangup mark: %v", err)
-		}
-		var evt map[string]any
-		if err := json.Unmarshal(data, &evt); err == nil {
-			if evt["event"] == "media" {
-				receivedMedia = true
-			}
-			if evt["event"] == "mark" {
-				if markObj, ok := evt["mark"].(map[string]any); ok && markObj["name"] == "hangup" {
-					receivedHangupMark = true
-					_ = twilioWS.WriteJSON(map[string]any{
-						"event":     "mark",
-						"streamSid": "MZ123",
-						"mark":      map[string]any{"name": "hangup"},
-					})
-					break
-				}
-			}
-		}
-	}
-
+	receivedMedia := waitForHangupMark(t, twilioWS)
 	if !receivedMedia {
 		t.Error("expected to receive paced media frames on Twilio WebSocket")
-	}
-	if !receivedHangupMark {
-		t.Error("expected to receive mark event name=hangup on Twilio WebSocket")
 	}
 
 	select {
@@ -377,6 +193,177 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 	geminiMu.Unlock()
 	if !sawRealtimeAudio {
 		t.Error("expected Gemini Live to receive realtimeInput.audio chunk after normalized AMD cadence release")
+	}
+}
+
+func setupLifecycleGeminiServer(t *testing.T, recordGeminiMsg func(string)) (string, *httptest.Server) {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_, setupBytes, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		recordGeminiMsg(string(setupBytes))
+
+		_ = conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
+
+		for {
+			_, msgBytes, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			msgStr := string(msgBytes)
+			recordGeminiMsg(msgStr)
+
+			respondLifecycleGeminiEvent(conn, msgStr)
+		}
+	}))
+	t.Cleanup(geminiServer.Close)
+	return "ws" + strings.TrimPrefix(geminiServer.URL, "http"), geminiServer
+}
+
+func respondLifecycleGeminiEvent(conn *websocket.Conn, msgStr string) {
+	switch {
+	case strings.Contains(msgStr, "Call connected"):
+		pcm24 := make([]byte, 4800)
+		_ = conn.WriteJSON(map[string]any{
+			"serverContent": map[string]any{
+				"modelTurn": map[string]any{
+					"parts": []map[string]any{
+						{
+							"inlineData": map[string]any{
+								"mimeType": "audio/pcm;rate=24000",
+								"data":     base64.StdEncoding.EncodeToString(pcm24),
+							},
+						},
+						{
+							"text":    "Internal thinking reasoning",
+							"thought": true,
+						},
+					},
+				},
+				"outputTranscription": map[string]any{
+					"text": "Hello, this is Prospera speaking.",
+				},
+				"turnComplete": true,
+			},
+		})
+	case strings.Contains(msgStr, "test_dtmf_trigger"):
+		_ = conn.WriteJSON(map[string]any{
+			"toolCall": map[string]any{
+				"functionCalls": []map[string]any{
+					{
+						"id":   "call_dtmf_1",
+						"name": "send_dtmf",
+						"args": map[string]any{"digits": "12w3"},
+					},
+				},
+			},
+		})
+	case strings.Contains(msgStr, "test_calendar_trigger"):
+		_ = conn.WriteJSON(map[string]any{
+			"toolCall": map[string]any{
+				"functionCalls": []map[string]any{
+					{
+						"id":   "call_cal_1",
+						"name": "consult_calendar",
+						"args": map[string]any{"query": "dentist", "start_iso": "2026-10-26T00:00:00Z"},
+					},
+				},
+			},
+		})
+	case strings.Contains(msgStr, "test_memory_trigger"):
+		_ = conn.WriteJSON(map[string]any{
+			"toolCall": map[string]any{
+				"functionCalls": []map[string]any{
+					{
+						"id":   "call_mem_1",
+						"name": "consult_memory",
+						"args": map[string]any{"query": "address"},
+					},
+				},
+			},
+		})
+	case strings.Contains(msgStr, "test_end_trigger"):
+		_ = conn.WriteJSON(map[string]any{
+			"toolCall": map[string]any{
+				"functionCalls": []map[string]any{
+					{
+						"id":   "call_end_1",
+						"name": "end_call",
+						"args": map[string]any{"reason": "task_completed"},
+					},
+				},
+			},
+		})
+	}
+}
+
+func injectTwilioAudioFrames(ws *websocket.Conn) {
+	quietUlaw := make([]byte, 160)
+	for i := range quietUlaw {
+		quietUlaw[i] = 0xFE
+	}
+	quietPayload := base64.StdEncoding.EncodeToString(quietUlaw)
+	loudUlaw := make([]byte, 160)
+	for i := range loudUlaw {
+		loudUlaw[i] = 0x00
+	}
+	loudPayload := base64.StdEncoding.EncodeToString(loudUlaw)
+
+	for range 15 {
+		_ = ws.WriteJSON(map[string]any{
+			"event":     "media",
+			"streamSid": "MZ123",
+			"media": map[string]any{
+				"payload": loudPayload,
+			},
+		})
+	}
+	for range 31 {
+		_ = ws.WriteJSON(map[string]any{
+			"event":     "media",
+			"streamSid": "MZ123",
+			"media": map[string]any{
+				"payload": quietPayload,
+			},
+		})
+	}
+}
+
+func waitForHangupMark(t *testing.T, ws *websocket.Conn) bool {
+	t.Helper()
+	var receivedMedia bool
+	for {
+		_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, data, err := ws.ReadMessage()
+		if err != nil {
+			t.Fatalf("reading from Twilio WS failed before hangup mark: %v", err)
+		}
+		var evt map[string]any
+		if err := json.Unmarshal(data, &evt); err == nil {
+			if evt["event"] == "media" {
+				receivedMedia = true
+			}
+			if evt["event"] == "mark" {
+				if markObj, ok := evt["mark"].(map[string]any); ok && markObj["name"] == "hangup" {
+					_ = ws.WriteJSON(map[string]any{
+						"event":     "mark",
+						"streamSid": "MZ123",
+						"mark":      map[string]any{"name": "hangup"},
+					})
+					return receivedMedia
+				}
+			}
+		}
 	}
 }
 
@@ -655,53 +642,59 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 	sess.handleInboundTwilioMedia("")
 	sess.handleInboundTwilioMedia("invalid-base64!!!")
 
-	sess.executeToolCall(context.Background(), GeminiFunctionCall{
+	executeBargeInToolCalls(context.Background(), sess)
+
+	if !waitForClearEvent(twilioWS) {
+		t.Error("expected to see clear event on Twilio WS after barge-in/voicemail")
+	}
+}
+
+func executeBargeInToolCalls(ctx context.Context, sess *MediaStreamSession) {
+	sess.executeToolCall(ctx, GeminiFunctionCall{
 		ID:   "call_dtmf_good",
 		Name: "send_dtmf",
 		Args: map[string]any{"digits": "123"},
 	})
-	sess.executeToolCall(context.Background(), GeminiFunctionCall{
+	sess.executeToolCall(ctx, GeminiFunctionCall{
 		ID:   "call_cal_good",
 		Name: "consult_calendar",
 		Args: map[string]any{"query": "schedule"},
 	})
-	sess.executeToolCall(context.Background(), GeminiFunctionCall{
+	sess.executeToolCall(ctx, GeminiFunctionCall{
 		ID:   "call_mem_good",
 		Name: "consult_memory",
 		Args: map[string]any{"query": "preferences"},
 	})
-	sess.executeToolCall(context.Background(), GeminiFunctionCall{
+	sess.executeToolCall(ctx, GeminiFunctionCall{
 		ID:   "call_dtmf_bad",
 		Name: "send_dtmf",
 		Args: map[string]any{"digits": "INVALID_DIGIT"},
 	})
-	sess.executeToolCall(context.Background(), GeminiFunctionCall{
+	sess.executeToolCall(ctx, GeminiFunctionCall{
 		ID:   "call_cal_bad",
 		Name: "consult_calendar",
 		Args: map[string]any{"query": "bad"},
 	})
-	sess.executeToolCall(context.Background(), GeminiFunctionCall{
+	sess.executeToolCall(ctx, GeminiFunctionCall{
 		ID:   "call_mem_bad",
 		Name: "consult_memory",
 		Args: map[string]any{"query": "bad"},
 	})
+}
 
-	var sawClear bool
+func waitForClearEvent(ws *websocket.Conn) bool {
 	for range 20 {
-		_ = twilioWS.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		_, data, err := twilioWS.ReadMessage()
+		_ = ws.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		_, data, err := ws.ReadMessage()
 		if err != nil {
 			break
 		}
 		var evt map[string]any
 		if err := json.Unmarshal(data, &evt); err == nil && evt["event"] == "clear" {
-			sawClear = true
-			break
+			return true
 		}
 	}
-	if !sawClear {
-		t.Error("expected to see clear event on Twilio WS after barge-in/voicemail")
-	}
+	return false
 }
 
 func TestStreamTokenManager_NilTimeSource(t *testing.T) {
@@ -800,11 +793,70 @@ func TestCallSessionManager_HandleAMDWebhookByProviderSID(t *testing.T) {
 	sessionMgr.deregisterSession(callLookup)
 }
 
-func TestMediaStream_StopEvent(t *testing.T) {
+type mediaWebSocketModeTestCase struct {
+	name          string
+	callID        string
+	streamSID     string
+	providerSID   string
+	direction     string
+	callMode      string
+	task          string
+	voicemailMsg  string
+	wantPromptSub string
+	wantGreetSub  string
+}
+
+func TestHandleMediaWebSocket_LifecycleModes(t *testing.T) {
 	t.Parallel()
 
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	tests := []mediaWebSocketModeTestCase{
+		{
+			name:        "stop event terminates session",
+			callID:      "call-stop-event",
+			streamSID:   "MZ_stop",
+			providerSID: "CA_stop",
+		},
+		{
+			name:         "with store call configured",
+			callID:       "call-store-configured",
+			streamSID:    "MZ_store_cfg",
+			providerSID:  "CA_store_cfg",
+			direction:    "outbound",
+			task:         "Confirm doctor visit",
+			voicemailMsg: "Please call the account owner back",
+		},
+		{
+			name:          "inbound mode sets receptionist prompt and greeting",
+			callID:        "call-inbound-mode-test",
+			streamSID:     "MZ_inbound_test",
+			providerSID:   "CA_inbound_test",
+			direction:     "inbound",
+			wantPromptSub: "CALLBACK RECEPTIONIST MODE:",
+			wantGreetSub:  "Answer the incoming call with a warm, brief greeting",
+		},
+		{
+			name:          "notify mode sets notify prompt",
+			callID:        "call-notify-mode-test",
+			streamSID:     "MZ_notify_test",
+			providerSID:   "CA_notify_test",
+			direction:     "outbound",
+			callMode:      "notify",
+			task:          "Alert: package delivered",
+			wantPromptSub: "NOTIFY MODE:",
+		},
+	}
 
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runMediaWebSocketModeCase(t, tc)
+		})
+	}
+}
+
+func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -822,9 +874,10 @@ func TestMediaStream_StopEvent(t *testing.T) {
 	}))
 	t.Cleanup(geminiServer.Close)
 
-	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
-
 	store := setUpTestStore(t)
+	setupMediaWebSocketStoreCall(context.Background(), store, tc)
+
+	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
 	tokenMgr := NewStreamTokenManager(time.Now)
 	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
@@ -838,7 +891,7 @@ func TestMediaStream_StopEvent(t *testing.T) {
 		}),
 	)
 
-	token, _ := tokenMgr.Issue("call-stop-event", 30*time.Second)
+	token, _ := tokenMgr.Issue(tc.callID, 30*time.Second)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sessionMgr.HandleMediaWebSocket(w, r)
@@ -857,13 +910,20 @@ func TestMediaStream_StopEvent(t *testing.T) {
 
 	_ = twilioWS.WriteJSON(map[string]any{
 		"event":     "start",
-		"streamSid": "MZ_stop",
-		"start":     map[string]any{"streamSid": "MZ_stop", "callSid": "CA_stop"},
+		"streamSid": tc.streamSID,
+		"start":     map[string]any{"streamSid": tc.streamSID, "callSid": tc.providerSID},
 	})
 
-	sess, err := sessionMgr.WaitForSession(context.Background(), "call-stop-event")
+	sess, err := sessionMgr.WaitForSession(context.Background(), tc.callID)
 	if err != nil || sess == nil {
 		t.Fatalf("WaitForSession failed: %v", err)
+	}
+
+	if tc.wantPromptSub != "" && !strings.Contains(sess.systemPrompt, tc.wantPromptSub) {
+		t.Fatalf("system prompt missing %q:\n%s", tc.wantPromptSub, sess.systemPrompt)
+	}
+	if tc.wantGreetSub != "" && !strings.Contains(sess.openingGreeting, tc.wantGreetSub) {
+		t.Fatalf("openingGreeting missing %q: %s", tc.wantGreetSub, sess.openingGreeting)
 	}
 
 	select {
@@ -874,13 +934,68 @@ func TestMediaStream_StopEvent(t *testing.T) {
 
 	_ = twilioWS.WriteJSON(map[string]any{
 		"event": "stop",
-		"stop":  map[string]any{"callSid": "CA_stop"},
+		"stop":  map[string]any{"callSid": tc.providerSID},
 	})
 
 	select {
 	case <-sess.Done():
 	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for session stop")
+		t.Fatal("timed out waiting for done")
+	}
+}
+
+func exerciseBridgeSteerAndAMD(t *testing.T, sessionMgr *CallSessionManager, callID, providerSID string) {
+	t.Helper()
+	if err := sessionMgr.SteerCall(callID, "Focus on price confirmation", "guidance"); err != nil {
+		t.Fatalf("SteerCall(guidance) error: %v", err)
+	}
+	if err := sessionMgr.SteerCall(callID, "Understood, thank you", "say"); err != nil {
+		t.Fatalf("SteerCall(say) error: %v", err)
+	}
+	if err := sessionMgr.SteerCall(callID, "test_dtmf_trigger", "guidance"); err != nil {
+		t.Fatalf("trigger dtmf err: %v", err)
+	}
+	if err := sessionMgr.SteerCall(callID, "test_calendar_trigger", "guidance"); err != nil {
+		t.Fatalf("trigger calendar err: %v", err)
+	}
+	if err := sessionMgr.SteerCall(callID, "test_memory_trigger", "guidance"); err != nil {
+		t.Fatalf("trigger memory err: %v", err)
+	}
+	if err := sessionMgr.HandleAMDWebhook(providerSID, "human"); err != nil {
+		t.Fatalf("HandleAMDWebhook() error: %v", err)
+	}
+	if err := sessionMgr.SteerCall(callID, "test_end_trigger", "guidance"); err != nil {
+		t.Fatalf("trigger end_call err: %v", err)
+	}
+}
+
+func setupMediaWebSocketStoreCall(ctx context.Context, store *PGStore, tc mediaWebSocketModeTestCase) {
+	switch tc.direction {
+	case "outbound":
+		_ = store.CreateOutboundCall(ctx, VoiceCall{
+			CallID:     tc.callID,
+			Direction:  "outbound",
+			State:      "initiated",
+			FromNumber: "+15105550100",
+			ToNumber:   "+15105550199",
+			Brief: CallBrief{
+				Mode:             tc.callMode,
+				Task:             tc.task,
+				VoicemailMessage: tc.voicemailMsg,
+			},
+			StartedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+		}, 5)
+	case "inbound":
+		_ = store.CreateInboundCall(ctx, VoiceCall{
+			CallID:     tc.callID,
+			Direction:  "inbound",
+			State:      "in-progress",
+			FromNumber: "+15105550111",
+			ToNumber:   "+15105550100",
+			StartedAt:  time.Now().UTC(),
+			UpdatedAt:  time.Now().UTC(),
+		})
 	}
 }
 
@@ -910,301 +1025,6 @@ func TestCallSessionManager_WaitForSession(t *testing.T) {
 	found, err := sessionMgr.WaitForSession(context.Background(), "call-wait-async")
 	if err != nil || found != sess {
 		t.Fatalf("WaitForSession async failed: %v, %v", found, err)
-	}
-}
-
-func TestHandleMediaWebSocket_WithStoreCall(t *testing.T) {
-	t.Parallel()
-
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		_, _, _ = conn.ReadMessage()
-		_ = conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
-		for {
-			_, _, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-		}
-	}))
-	t.Cleanup(geminiServer.Close)
-
-	store := setUpTestStore(t)
-	callID := "call-store-configured"
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
-		CallID:     callID,
-		Direction:  "outbound",
-		State:      "initiated",
-		FromNumber: "+15105550100",
-		ToNumber:   "+15105550199",
-		Brief: CallBrief{
-			Task:             "Confirm doctor visit",
-			VoicemailMessage: "Please call the account owner back",
-		},
-		StartedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
-	}, 5)
-
-	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr,
-		WithPacerInterval(1*time.Millisecond),
-		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
-			dialer := websocket.DefaultDialer
-			conn, resp, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(geminiServer.URL, "http"), nil)
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-			return conn, err
-		}),
-	)
-
-	token, _ := tokenMgr.Issue(callID, 30*time.Second)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sessionMgr.HandleMediaWebSocket(w, r)
-	}))
-	t.Cleanup(server.Close)
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "?token=" + token
-	twilioWS, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if resp != nil && resp.Body != nil {
-		resp.Body.Close()
-	}
-	if err != nil {
-		t.Fatalf("dial twilio ws failed: %v", err)
-	}
-	defer twilioWS.Close()
-
-	_ = twilioWS.WriteJSON(map[string]any{
-		"event":     "start",
-		"streamSid": "MZ_store_cfg",
-		"start":     map[string]any{"streamSid": "MZ_store_cfg", "callSid": "CA_store_cfg"},
-	})
-
-	sess, err := sessionMgr.WaitForSession(context.Background(), callID)
-	if err != nil || sess == nil {
-		t.Fatalf("WaitForSession failed: %v", err)
-	}
-
-	select {
-	case <-sess.Started():
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for start")
-	}
-
-	_ = twilioWS.WriteJSON(map[string]any{
-		"event": "stop",
-		"stop":  map[string]any{"callSid": "CA_store_cfg"},
-	})
-
-	select {
-	case <-sess.Done():
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for done")
-	}
-}
-
-func TestHandleMediaWebSocket_InboundMode(t *testing.T) {
-	t.Parallel()
-
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		_, _, _ = conn.ReadMessage()
-		_ = conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
-		for {
-			_, _, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-		}
-	}))
-	t.Cleanup(geminiServer.Close)
-
-	store := setUpTestStore(t)
-	callID := "call-inbound-mode-test"
-	_ = store.CreateInboundCall(context.Background(), VoiceCall{
-		CallID:     callID,
-		Direction:  "inbound",
-		State:      "in-progress",
-		FromNumber: "+15105550111",
-		ToNumber:   "+15105550100",
-		StartedAt:  time.Now().UTC(),
-		UpdatedAt:  time.Now().UTC(),
-	})
-
-	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr,
-		WithPacerInterval(1*time.Millisecond),
-		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
-			dialer := websocket.DefaultDialer
-			conn, resp, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(geminiServer.URL, "http"), nil)
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-			return conn, err
-		}),
-	)
-
-	token, _ := tokenMgr.Issue(callID, 30*time.Second)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sessionMgr.HandleMediaWebSocket(w, r)
-	}))
-	t.Cleanup(server.Close)
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "?token=" + token
-	twilioWS, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if resp != nil && resp.Body != nil {
-		resp.Body.Close()
-	}
-	if err != nil {
-		t.Fatalf("dial twilio ws failed: %v", err)
-	}
-	defer twilioWS.Close()
-
-	_ = twilioWS.WriteJSON(map[string]any{
-		"event":     "start",
-		"streamSid": "MZ_inbound_test",
-		"start":     map[string]any{"streamSid": "MZ_inbound_test", "callSid": "CA_inbound_test"},
-	})
-
-	sess, err := sessionMgr.WaitForSession(context.Background(), callID)
-	if err != nil || sess == nil {
-		t.Fatalf("WaitForSession failed: %v", err)
-	}
-
-	if !strings.Contains(sess.systemPrompt, "CALLBACK RECEPTIONIST MODE:") {
-		t.Fatalf("inbound session system prompt missing CALLBACK RECEPTIONIST MODE:\n%s", sess.systemPrompt)
-	}
-	if !strings.Contains(sess.openingGreeting, "Answer the incoming call with a warm, brief greeting") {
-		t.Fatalf("inbound session openingGreeting = %q, want brief natural greeting instruction", sess.openingGreeting)
-	}
-
-	select {
-	case <-sess.Started():
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for start")
-	}
-
-	_ = twilioWS.WriteJSON(map[string]any{
-		"event": "stop",
-		"stop":  map[string]any{"callSid": "CA_inbound_test"},
-	})
-
-	select {
-	case <-sess.Done():
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for done")
-	}
-}
-
-func TestHandleMediaWebSocket_NotifyMode(t *testing.T) {
-	t.Parallel()
-
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		_, _, _ = conn.ReadMessage()
-		_ = conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
-		for {
-			_, _, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-		}
-	}))
-	t.Cleanup(geminiServer.Close)
-
-	store := setUpTestStore(t)
-	callID := "call-notify-mode-test"
-	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
-		CallID:     callID,
-		Direction:  "outbound",
-		State:      "in-progress",
-		FromNumber: "+15105550100",
-		ToNumber:   "+15105550199",
-		Brief: CallBrief{
-			Mode: "notify",
-			Task: "Alert: package delivered",
-		},
-		StartedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
-	}, 5)
-
-	tokenMgr := NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr,
-		WithPacerInterval(1*time.Millisecond),
-		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
-			dialer := websocket.DefaultDialer
-			conn, resp, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(geminiServer.URL, "http"), nil)
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-			return conn, err
-		}),
-	)
-
-	token, _ := tokenMgr.Issue(callID, 30*time.Second)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sessionMgr.HandleMediaWebSocket(w, r)
-	}))
-	t.Cleanup(server.Close)
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "?token=" + token
-	twilioWS, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if resp != nil && resp.Body != nil {
-		resp.Body.Close()
-	}
-	if err != nil {
-		t.Fatalf("dial twilio ws failed: %v", err)
-	}
-	defer twilioWS.Close()
-
-	_ = twilioWS.WriteJSON(map[string]any{
-		"event":     "start",
-		"streamSid": "MZ_notify_test",
-		"start":     map[string]any{"streamSid": "MZ_notify_test", "callSid": "CA_notify_test"},
-	})
-
-	sess, err := sessionMgr.WaitForSession(context.Background(), callID)
-	if err != nil || sess == nil {
-		t.Fatalf("WaitForSession failed: %v", err)
-	}
-
-	if !strings.Contains(sess.systemPrompt, "NOTIFY MODE:") {
-		t.Fatalf("notify session system prompt missing NOTIFY MODE:\n%s", sess.systemPrompt)
-	}
-
-	select {
-	case <-sess.Started():
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for start")
-	}
-
-	_ = twilioWS.WriteJSON(map[string]any{
-		"event": "stop",
-		"stop":  map[string]any{"callSid": "CA_notify_test"},
-	})
-
-	select {
-	case <-sess.Done():
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for done")
 	}
 }
 

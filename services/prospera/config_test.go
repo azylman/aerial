@@ -97,9 +97,48 @@ func TestResolveConfigPath(t *testing.T) {
 	}
 }
 
+type loadConfigFileTestCase struct {
+	name                   string
+	path                   string
+	env                    map[string]string
+	nilEnv                 bool
+	callLoadConfig         bool
+	wantErr                bool
+	wantPort               string
+	wantDatabaseURL        string
+	wantTwilioAccountSID   string
+	wantTwilioAuthToken    string
+	wantTwilioFromNumber   string
+	wantPublicWebhookBase  string
+	wantGeminiAPIKey       string
+	wantGeminiLiveModel    string
+	wantGeminiFallback     string
+	wantGeminiVoiceName    string
+	wantBrainURL           string
+	wantGoogleMCPURL       string
+	wantCovenURL           string
+	wantWhisperURL         string
+	wantDiscordChannel     string
+	wantCallbackWindowMins int
+	wantMaxConcurrent      int
+	wantAllowFromLen       int
+	wantFirstAllowFrom     string
+}
+
 func TestLoadConfigFile_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
+	paths := setupLoadConfigFileFixtures(t, tmpDir)
+	tests := loadConfigFileTestCases(paths, tmpDir)
 
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runLoadConfigFileCase(t, tc)
+		})
+	}
+}
+
+func setupLoadConfigFileFixtures(t *testing.T, tmpDir string) map[string]string {
+	t.Helper()
 	validYAML := `
 port: "4019"
 eri_url: "http://eri.aerial"
@@ -114,127 +153,46 @@ gemini_voice_name: "Kore"
 callback_window_minutes: 10080
 max_concurrent_calls: 2
 `
-	validPath := filepath.Join(tmpDir, "valid.yaml")
-	if err := os.WriteFile(validPath, []byte(validYAML), 0o644); err != nil {
-		t.Fatalf("failed to write valid.yaml: %v", err)
-	}
-
-	badYAML := `port: [unclosed`
-	badPath := filepath.Join(tmpDir, "bad.yaml")
-	if err := os.WriteFile(badPath, []byte(badYAML), 0o644); err != nil {
-		t.Fatalf("failed to write bad.yaml: %v", err)
-	}
-
-	missingPortYAML := strings.Replace(validYAML, `port: "4019"`, `port: ""`, 1)
-	missingPortPath := filepath.Join(tmpDir, "missing_port.yaml")
-	if err := os.WriteFile(missingPortPath, []byte(missingPortYAML), 0o644); err != nil {
-		t.Fatalf("failed to write missing_port.yaml: %v", err)
-	}
-
-	missingBrainYAML := strings.Replace(validYAML, `eri_url: "http://eri.aerial"`, `eri_url: ""`, 1)
-	missingBrainPath := filepath.Join(tmpDir, "missing_brain.yaml")
-	if err := os.WriteFile(missingBrainPath, []byte(missingBrainYAML), 0o644); err != nil {
-		t.Fatalf("failed to write missing_brain.yaml: %v", err)
-	}
-
-	eriYAML := strings.Replace(validYAML, `eri_url: "http://eri.aerial"`, `eri_url: "http://eri-prospera.aerial"`, 1)
-	eriPath := filepath.Join(tmpDir, "eri.yaml")
-	if err := os.WriteFile(eriPath, []byte(eriYAML), 0o644); err != nil {
-		t.Fatalf("failed to write eri.yaml: %v", err)
-	}
-
-	missingGoogleMCPYAML := strings.Replace(validYAML, `google_mcp_url: "http://google-mcp.aerial/mcp"`, `google_mcp_url: ""`, 1)
-	missingGoogleMCPPath := filepath.Join(tmpDir, "missing_google.yaml")
-	if err := os.WriteFile(missingGoogleMCPPath, []byte(missingGoogleMCPYAML), 0o644); err != nil {
-		t.Fatalf("failed to write missing_google.yaml: %v", err)
-	}
-
-	missingCovenYAML := strings.Replace(validYAML, `coven_url: "http://coven.aerial"`, `coven_url: ""`, 1)
-	missingCovenPath := filepath.Join(tmpDir, "missing_coven.yaml")
-	if err := os.WriteFile(missingCovenPath, []byte(missingCovenYAML), 0o644); err != nil {
-		t.Fatalf("failed to write missing_coven.yaml: %v", err)
-	}
-
-	missingWhisperYAML := strings.Replace(validYAML, `whisper_url: "http://voice.aerial"`, `whisper_url: ""`, 1)
-	missingWhisperPath := filepath.Join(tmpDir, "missing_whisper.yaml")
-	if err := os.WriteFile(missingWhisperPath, []byte(missingWhisperYAML), 0o644); err != nil {
-		t.Fatalf("failed to write missing_whisper.yaml: %v", err)
-	}
-
-	missingChannelYAML := strings.Replace(validYAML, `default_discord_channel: "prospera"`, `default_discord_channel: ""`, 1)
-	missingChannelPath := filepath.Join(tmpDir, "missing_channel.yaml")
-	if err := os.WriteFile(missingChannelPath, []byte(missingChannelYAML), 0o644); err != nil {
-		t.Fatalf("failed to write missing_channel.yaml: %v", err)
-	}
-
-	missingLiveModelYAML := strings.Replace(validYAML, `gemini_live_model: "gemini-3.8-live"`, `gemini_live_model: ""`, 1)
-	missingLiveModelPath := filepath.Join(tmpDir, "missing_live_model.yaml")
-	if err := os.WriteFile(missingLiveModelPath, []byte(missingLiveModelYAML), 0o644); err != nil {
-		t.Fatalf("failed to write missing_live_model.yaml: %v", err)
-	}
-
-	missingFallbackModelYAML := strings.Replace(validYAML, `gemini_fallback_model: "gemini-3.1-flash-live-preview"`, `gemini_fallback_model: ""`, 1)
-	missingFallbackModelPath := filepath.Join(tmpDir, "missing_fallback_model.yaml")
-	if err := os.WriteFile(missingFallbackModelPath, []byte(missingFallbackModelYAML), 0o644); err != nil {
-		t.Fatalf("failed to write missing_fallback_model.yaml: %v", err)
-	}
-
-	missingVoiceNameYAML := strings.Replace(validYAML, `gemini_voice_name: "Kore"`, `gemini_voice_name: ""`, 1)
-	missingVoiceNamePath := filepath.Join(tmpDir, "missing_voice_name.yaml")
-	if err := os.WriteFile(missingVoiceNamePath, []byte(missingVoiceNameYAML), 0o644); err != nil {
-		t.Fatalf("failed to write missing_voice_name.yaml: %v", err)
-	}
-
-	badWindowYAML := strings.Replace(validYAML, `callback_window_minutes: 10080`, `callback_window_minutes: 0`, 1)
-	badWindowPath := filepath.Join(tmpDir, "bad_window.yaml")
-	if err := os.WriteFile(badWindowPath, []byte(badWindowYAML), 0o644); err != nil {
-		t.Fatalf("failed to write bad_window.yaml: %v", err)
-	}
-
-	badCallsYAML := strings.Replace(validYAML, `max_concurrent_calls: 2`, `max_concurrent_calls: 0`, 1)
-	badCallsPath := filepath.Join(tmpDir, "bad_calls.yaml")
-	if err := os.WriteFile(badCallsPath, []byte(badCallsYAML), 0o644); err != nil {
-		t.Fatalf("failed to write bad_calls.yaml: %v", err)
-	}
-
-	twilioYAML := validYAML + `twilio_account_sid: "AC_from_yaml"
+	files := map[string]string{
+		"valid":            validYAML,
+		"bad":              `port: [unclosed`,
+		"missing_port":     strings.Replace(validYAML, `port: "4019"`, `port: ""`, 1),
+		"missing_brain":    strings.Replace(validYAML, `eri_url: "http://eri.aerial"`, `eri_url: ""`, 1),
+		"eri":              strings.Replace(validYAML, `eri_url: "http://eri.aerial"`, `eri_url: "http://eri-prospera.aerial"`, 1),
+		"missing_google":   strings.Replace(validYAML, `google_mcp_url: "http://google-mcp.aerial/mcp"`, `google_mcp_url: ""`, 1),
+		"missing_coven":    strings.Replace(validYAML, `coven_url: "http://coven.aerial"`, `coven_url: ""`, 1),
+		"missing_whisper":  strings.Replace(validYAML, `whisper_url: "http://voice.aerial"`, `whisper_url: ""`, 1),
+		"missing_channel":  strings.Replace(validYAML, `default_discord_channel: "prospera"`, `default_discord_channel: ""`, 1),
+		"missing_live":     strings.Replace(validYAML, `gemini_live_model: "gemini-3.8-live"`, `gemini_live_model: ""`, 1),
+		"missing_fallback": strings.Replace(validYAML, `gemini_fallback_model: "gemini-3.1-flash-live-preview"`, `gemini_fallback_model: ""`, 1),
+		"missing_voice":    strings.Replace(validYAML, `gemini_voice_name: "Kore"`, `gemini_voice_name: ""`, 1),
+		"bad_window":       strings.Replace(validYAML, `callback_window_minutes: 10080`, `callback_window_minutes: 0`, 1),
+		"bad_calls":        strings.Replace(validYAML, `max_concurrent_calls: 2`, `max_concurrent_calls: 0`, 1),
+		"twilio": validYAML + `twilio_account_sid: "AC_from_yaml"
 twilio_from_number: "(510) 555-0999"
-`
-	twilioPath := filepath.Join(tmpDir, "twilio.yaml")
-	if err := os.WriteFile(twilioPath, []byte(twilioYAML), 0o644); err != nil {
-		t.Fatalf("failed to write twilio.yaml: %v", err)
+`,
 	}
 
-	tests := []struct {
-		name                   string
-		path                   string
-		env                    map[string]string
-		nilEnv                 bool
-		callLoadConfig         bool
-		wantErr                bool
-		wantPort               string
-		wantDatabaseURL        string
-		wantTwilioAccountSID   string
-		wantTwilioAuthToken    string
-		wantTwilioFromNumber   string
-		wantPublicWebhookBase  string
-		wantGeminiAPIKey       string
-		wantGeminiLiveModel    string
-		wantGeminiFallback     string
-		wantGeminiVoiceName    string
-		wantBrainURL           string
-		wantGoogleMCPURL       string
-		wantCovenURL           string
-		wantWhisperURL         string
-		wantDiscordChannel     string
-		wantCallbackWindowMins int
-		wantMaxConcurrent      int
-		wantAllowFromLen       int
-		wantFirstAllowFrom     string
-	}{
+	paths := make(map[string]string, len(files))
+	for name, content := range files {
+		path := filepath.Join(tmpDir, name+".yaml")
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write %s.yaml: %v", name, err)
+		}
+		paths[name] = path
+	}
+	return paths
+}
+
+func loadConfigFileTestCases(paths map[string]string, tmpDir string) []loadConfigFileTestCase {
+	return append(loadConfigValidCases(paths), loadConfigErrorCases(paths, tmpDir)...)
+}
+
+func loadConfigValidCases(paths map[string]string) []loadConfigFileTestCase {
+	return []loadConfigFileTestCase{
 		{
 			name: "valid complete configuration",
-			path: validPath,
+			path: paths["valid"],
 			env: map[string]string{
 				"DATABASE_URL":           "postgres://user:pass@localhost:5432/testdb",
 				"GEMINI_HARNESS_API_KEY": "key-123",
@@ -266,7 +224,7 @@ twilio_from_number: "(510) 555-0999"
 		},
 		{
 			name: "gemini harness fallback and allow_from with spaces",
-			path: validPath,
+			path: paths["valid"],
 			env: map[string]string{
 				"DATABASE_URL":           "postgres://user:pass@localhost:5432/testdb",
 				"GEMINI_HARNESS_API_KEY": "harness-key-456",
@@ -281,7 +239,7 @@ twilio_from_number: "(510) 555-0999"
 		},
 		{
 			name:           "load config wrapper with env",
-			path:           validPath,
+			path:           paths["valid"],
 			callLoadConfig: true,
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
@@ -291,7 +249,7 @@ twilio_from_number: "(510) 555-0999"
 		},
 		{
 			name: "eri_url in yaml",
-			path: eriPath,
+			path: paths["eri"],
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 			},
@@ -301,7 +259,7 @@ twilio_from_number: "(510) 555-0999"
 		},
 		{
 			name: "decomposed POSTGRES_PASSWORD resolution",
-			path: validPath,
+			path: paths["valid"],
 			env: map[string]string{
 				"POSTGRES_PASSWORD": "secretpassword",
 			},
@@ -311,7 +269,7 @@ twilio_from_number: "(510) 555-0999"
 		},
 		{
 			name: "ERI_URL env fallback when absent from yaml",
-			path: missingBrainPath,
+			path: paths["missing_brain"],
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 				"ERI_URL":      "http://env-eri.aerial:8088",
@@ -322,7 +280,7 @@ twilio_from_number: "(510) 555-0999"
 		},
 		{
 			name: "twilio fields loaded from yaml when env unset",
-			path: twilioPath,
+			path: paths["twilio"],
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 			},
@@ -333,7 +291,7 @@ twilio_from_number: "(510) 555-0999"
 		},
 		{
 			name: "twilio fields in env override yaml",
-			path: twilioPath,
+			path: paths["twilio"],
 			env: map[string]string{
 				"DATABASE_URL":       "postgres://user:pass@localhost:5432/testdb",
 				"TWILIO_ACCOUNT_SID": "AC_override_env",
@@ -344,6 +302,11 @@ twilio_from_number: "(510) 555-0999"
 			wantTwilioAccountSID: "AC_override_env",
 			wantTwilioFromNumber: "+15105550111",
 		},
+	}
+}
+
+func loadConfigErrorCases(paths map[string]string, tmpDir string) []loadConfigFileTestCase {
+	return []loadConfigFileTestCase{
 		{
 			name:    "empty path error",
 			path:    "",
@@ -356,73 +319,73 @@ twilio_from_number: "(510) 555-0999"
 		},
 		{
 			name:    "bad yaml syntax error",
-			path:    badPath,
+			path:    paths["bad"],
 			wantErr: true,
 		},
 		{
 			name:    "missing port error",
-			path:    missingPortPath,
+			path:    paths["missing_port"],
 			wantErr: true,
 		},
 		{
 			name:    "missing brain url error",
-			path:    missingBrainPath,
+			path:    paths["missing_brain"],
 			wantErr: true,
 		},
 		{
 			name:    "missing google mcp url error",
-			path:    missingGoogleMCPPath,
+			path:    paths["missing_google"],
 			wantErr: true,
 		},
 		{
 			name:    "missing coven url error",
-			path:    missingCovenPath,
+			path:    paths["missing_coven"],
 			wantErr: true,
 		},
 		{
 			name:    "missing whisper url error",
-			path:    missingWhisperPath,
+			path:    paths["missing_whisper"],
 			wantErr: true,
 		},
 		{
 			name:    "missing default discord channel error",
-			path:    missingChannelPath,
+			path:    paths["missing_channel"],
 			wantErr: true,
 		},
 		{
 			name:    "missing live model error",
-			path:    missingLiveModelPath,
+			path:    paths["missing_live"],
 			wantErr: true,
 		},
 		{
 			name:    "missing fallback model error",
-			path:    missingFallbackModelPath,
+			path:    paths["missing_fallback"],
 			wantErr: true,
 		},
 		{
 			name:    "missing voice name error",
-			path:    missingVoiceNamePath,
+			path:    paths["missing_voice"],
 			wantErr: true,
 		},
 		{
 			name:    "callback window <= 0 error",
-			path:    badWindowPath,
+			path:    paths["bad_window"],
 			wantErr: true,
 		},
 		{
 			name:    "max concurrent calls <= 0 error",
-			path:    badCallsPath,
+			path:    paths["bad_calls"],
 			wantErr: true,
 		},
 		{
 			name:    "missing database url error",
-			path:    validPath,
+			path:    paths["valid"],
 			env:     map[string]string{},
 			wantErr: true,
 		},
 		{
 			name: "invalid twilio from number error",
-			path: validPath,
+			path: paths["valid"],
 			env: map[string]string{
 				"DATABASE_URL":       "postgres://localhost/test",
 				"TWILIO_FROM_NUMBER": "not-a-number",
@@ -431,7 +394,7 @@ twilio_from_number: "(510) 555-0999"
 		},
 		{
 			name: "invalid allow from error",
-			path: validPath,
+			path: paths["valid"],
 			env: map[string]string{
 				"DATABASE_URL": "postgres://localhost/test",
 				"ALLOW_FROM":   "invalid",
@@ -439,102 +402,87 @@ twilio_from_number: "(510) 555-0999"
 			wantErr: true,
 		},
 	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var getenv func(string) string
-			if tc.callLoadConfig {
-				for k, v := range tc.env {
-					t.Setenv(k, v)
-				}
-				cfg, err := LoadConfig(tc.path)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("LoadConfig() error = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if tc.wantErr {
-					return
-				}
-				if cfg.Port != tc.wantPort {
-					t.Errorf("cfg.Port = %q, want %q", cfg.Port, tc.wantPort)
-				}
-				return
-			}
+func runLoadConfigFileCase(t *testing.T, tc loadConfigFileTestCase) {
+	t.Helper()
+	if tc.callLoadConfig {
+		for k, v := range tc.env {
+			t.Setenv(k, v)
+		}
+		cfg, err := LoadConfig(tc.path)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("LoadConfig() error = %v, wantErr = %v", err, tc.wantErr)
+		}
+		if tc.wantErr {
+			return
+		}
+		if cfg.Port != tc.wantPort {
+			t.Errorf("cfg.Port = %q, want %q", cfg.Port, tc.wantPort)
+		}
+		return
+	}
 
-			if tc.nilEnv {
-				getenv = nil
-			} else {
-				getenv = func(key string) string {
-					if tc.env == nil {
-						return ""
-					}
-					return tc.env[key]
-				}
+	var getenv func(string) string
+	if tc.nilEnv {
+		getenv = nil
+	} else {
+		getenv = func(key string) string {
+			if tc.env == nil {
+				return ""
 			}
+			return tc.env[key]
+		}
+	}
 
-			cfg, err := LoadConfigFile(tc.path, getenv)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("LoadConfigFile() error = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				return
-			}
-			if cfg.Port != tc.wantPort {
-				t.Errorf("cfg.Port = %q, want %q", cfg.Port, tc.wantPort)
-			}
-			if tc.wantDatabaseURL != "" && cfg.DatabaseURL != tc.wantDatabaseURL {
-				t.Errorf("cfg.DatabaseURL = %q, want %q", cfg.DatabaseURL, tc.wantDatabaseURL)
-			}
-			if tc.wantTwilioAccountSID != "" && cfg.TwilioAccountSID != tc.wantTwilioAccountSID {
-				t.Errorf("cfg.TwilioAccountSID = %q, want %q", cfg.TwilioAccountSID, tc.wantTwilioAccountSID)
-			}
-			if tc.wantTwilioAuthToken != "" && cfg.TwilioAuthToken != tc.wantTwilioAuthToken {
-				t.Errorf("cfg.TwilioAuthToken = %q, want %q", cfg.TwilioAuthToken, tc.wantTwilioAuthToken)
-			}
-			if tc.wantTwilioFromNumber != "" && cfg.TwilioFromNumber != tc.wantTwilioFromNumber {
-				t.Errorf("cfg.TwilioFromNumber = %q, want %q", cfg.TwilioFromNumber, tc.wantTwilioFromNumber)
-			}
-			if tc.wantPublicWebhookBase != "" && cfg.PublicWebhookBaseURL != tc.wantPublicWebhookBase {
-				t.Errorf("cfg.PublicWebhookBaseURL = %q, want %q", cfg.PublicWebhookBaseURL, tc.wantPublicWebhookBase)
-			}
-			if tc.wantGeminiAPIKey != "" && cfg.GeminiAPIKey != tc.wantGeminiAPIKey {
-				t.Errorf("cfg.GeminiAPIKey = %q, want %q", cfg.GeminiAPIKey, tc.wantGeminiAPIKey)
-			}
-			if tc.wantGeminiLiveModel != "" && cfg.GeminiLiveModel != tc.wantGeminiLiveModel {
-				t.Errorf("cfg.GeminiLiveModel = %q, want %q", cfg.GeminiLiveModel, tc.wantGeminiLiveModel)
-			}
-			if tc.wantGeminiFallback != "" && cfg.GeminiFallbackModel != tc.wantGeminiFallback {
-				t.Errorf("cfg.GeminiFallbackModel = %q, want %q", cfg.GeminiFallbackModel, tc.wantGeminiFallback)
-			}
-			if tc.wantGeminiVoiceName != "" && cfg.GeminiVoiceName != tc.wantGeminiVoiceName {
-				t.Errorf("cfg.GeminiVoiceName = %q, want %q", cfg.GeminiVoiceName, tc.wantGeminiVoiceName)
-			}
-			if tc.wantBrainURL != "" && (cfg.BrainURL != tc.wantBrainURL || cfg.EriURL != tc.wantBrainURL) {
-				t.Errorf("cfg.BrainURL = %q, cfg.EriURL = %q, want %q", cfg.BrainURL, cfg.EriURL, tc.wantBrainURL)
-			}
-			if tc.wantGoogleMCPURL != "" && cfg.GoogleMCPURL != tc.wantGoogleMCPURL {
-				t.Errorf("cfg.GoogleMCPURL = %q, want %q", cfg.GoogleMCPURL, tc.wantGoogleMCPURL)
-			}
-			if tc.wantCovenURL != "" && cfg.CovenURL != tc.wantCovenURL {
-				t.Errorf("cfg.CovenURL = %q, want %q", cfg.CovenURL, tc.wantCovenURL)
-			}
-			if tc.wantWhisperURL != "" && cfg.WhisperURL != tc.wantWhisperURL {
-				t.Errorf("cfg.WhisperURL = %q, want %q", cfg.WhisperURL, tc.wantWhisperURL)
-			}
-			if tc.wantDiscordChannel != "" && cfg.DefaultDiscordChannel != tc.wantDiscordChannel {
-				t.Errorf("cfg.DefaultDiscordChannel = %q, want %q", cfg.DefaultDiscordChannel, tc.wantDiscordChannel)
-			}
-			if tc.wantCallbackWindowMins != 0 && cfg.CallbackWindowMinutes != tc.wantCallbackWindowMins {
-				t.Errorf("cfg.CallbackWindowMinutes = %d, want %d", cfg.CallbackWindowMinutes, tc.wantCallbackWindowMins)
-			}
-			if tc.wantMaxConcurrent != 0 && cfg.MaxConcurrentCalls != tc.wantMaxConcurrent {
-				t.Errorf("cfg.MaxConcurrentCalls = %d, want %d", cfg.MaxConcurrentCalls, tc.wantMaxConcurrent)
-			}
-			if len(cfg.AllowFrom) != tc.wantAllowFromLen {
-				t.Errorf("len(cfg.AllowFrom) = %d, want %d", len(cfg.AllowFrom), tc.wantAllowFromLen)
-			}
-			if tc.wantFirstAllowFrom != "" && len(cfg.AllowFrom) > 0 && cfg.AllowFrom[0] != tc.wantFirstAllowFrom {
-				t.Errorf("cfg.AllowFrom[0] = %q, want %q", cfg.AllowFrom[0], tc.wantFirstAllowFrom)
-			}
-		})
+	cfg, err := LoadConfigFile(tc.path, getenv)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("LoadConfigFile() error = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr {
+		return
+	}
+	assertLoadedConfig(t, tc, cfg)
+}
+
+func assertLoadedConfig(t *testing.T, tc loadConfigFileTestCase, cfg *Config) {
+	t.Helper()
+	strChecks := []struct {
+		got, want, field string
+	}{
+		{cfg.Port, tc.wantPort, "Port"},
+		{cfg.DatabaseURL, tc.wantDatabaseURL, "DatabaseURL"},
+		{cfg.TwilioAccountSID, tc.wantTwilioAccountSID, "TwilioAccountSID"},
+		{cfg.TwilioAuthToken, tc.wantTwilioAuthToken, "TwilioAuthToken"},
+		{cfg.TwilioFromNumber, tc.wantTwilioFromNumber, "TwilioFromNumber"},
+		{cfg.PublicWebhookBaseURL, tc.wantPublicWebhookBase, "PublicWebhookBaseURL"},
+		{cfg.GeminiAPIKey, tc.wantGeminiAPIKey, "GeminiAPIKey"},
+		{cfg.GeminiLiveModel, tc.wantGeminiLiveModel, "GeminiLiveModel"},
+		{cfg.GeminiFallbackModel, tc.wantGeminiFallback, "GeminiFallbackModel"},
+		{cfg.GeminiVoiceName, tc.wantGeminiVoiceName, "GeminiVoiceName"},
+		{cfg.GoogleMCPURL, tc.wantGoogleMCPURL, "GoogleMCPURL"},
+		{cfg.CovenURL, tc.wantCovenURL, "CovenURL"},
+		{cfg.WhisperURL, tc.wantWhisperURL, "WhisperURL"},
+		{cfg.DefaultDiscordChannel, tc.wantDiscordChannel, "DefaultDiscordChannel"},
+	}
+	for _, c := range strChecks {
+		if c.want != "" && c.got != c.want {
+			t.Errorf("cfg.%s = %q, want %q", c.field, c.got, c.want)
+		}
+	}
+	if tc.wantBrainURL != "" && (cfg.BrainURL != tc.wantBrainURL || cfg.EriURL != tc.wantBrainURL) {
+		t.Errorf("cfg.BrainURL = %q, cfg.EriURL = %q, want %q", cfg.BrainURL, cfg.EriURL, tc.wantBrainURL)
+	}
+	if tc.wantCallbackWindowMins != 0 && cfg.CallbackWindowMinutes != tc.wantCallbackWindowMins {
+		t.Errorf("cfg.CallbackWindowMinutes = %d, want %d", cfg.CallbackWindowMinutes, tc.wantCallbackWindowMins)
+	}
+	if tc.wantMaxConcurrent != 0 && cfg.MaxConcurrentCalls != tc.wantMaxConcurrent {
+		t.Errorf("cfg.MaxConcurrentCalls = %d, want %d", cfg.MaxConcurrentCalls, tc.wantMaxConcurrent)
+	}
+	if len(cfg.AllowFrom) != tc.wantAllowFromLen {
+		t.Errorf("len(cfg.AllowFrom) = %d, want %d", len(cfg.AllowFrom), tc.wantAllowFromLen)
+	}
+	if tc.wantFirstAllowFrom != "" && len(cfg.AllowFrom) > 0 && cfg.AllowFrom[0] != tc.wantFirstAllowFrom {
+		t.Errorf("cfg.AllowFrom[0] = %q, want %q", cfg.AllowFrom[0], tc.wantFirstAllowFrom)
 	}
 }

@@ -84,6 +84,14 @@ func TestPGStore_CallLifecycle(t *testing.T) {
 	store := setUpTestStore(t)
 	ctx := context.Background()
 
+	testLifecycleCreateAndFetch(ctx, t, store)
+	testLifecycleBindProviderSID(ctx, t, store)
+	testLifecycleUpdateStateAndTurns(ctx, t, store)
+	testLifecycleInstructionsAndCompletion(ctx, t, store)
+}
+
+func testLifecycleCreateAndFetch(ctx context.Context, t *testing.T, store *PGStore) {
+	t.Helper()
 	now := time.Now().UTC()
 	answered := now
 	ended := now
@@ -132,8 +140,10 @@ func TestPGStore_CallLifecycle(t *testing.T) {
 	if !errors.Is(err, ErrCallNotFound) {
 		t.Errorf("GetCall(non-existent) err = %v, want ErrCallNotFound", err)
 	}
+}
 
-	// Bind provider SID
+func testLifecycleBindProviderSID(ctx context.Context, t *testing.T, store *PGStore) {
+	t.Helper()
 	if err := store.BindProviderCallSID(ctx, "call-123", "CA111222333"); err != nil {
 		t.Fatalf("BindProviderCallSID() error = %v", err)
 	}
@@ -153,13 +163,14 @@ func TestPGStore_CallLifecycle(t *testing.T) {
 	if !errors.Is(err, ErrCallNotFound) {
 		t.Errorf("GetCallByProviderSID(non-existent) err = %v, want ErrCallNotFound", err)
 	}
+}
 
-	// Update call state to ringing
+func testLifecycleUpdateStateAndTurns(ctx context.Context, t *testing.T, store *PGStore) {
+	t.Helper()
 	if err := store.UpdateCallState(ctx, "call-123", "ringing", "", ""); err != nil {
 		t.Fatalf("UpdateCallState(ringing) error = %v", err)
 	}
 
-	// Update call state to in-progress
 	if err := store.UpdateCallState(ctx, "call-123", "in-progress", "", "human"); err != nil {
 		t.Fatalf("UpdateCallState(in-progress) error = %v", err)
 	}
@@ -168,7 +179,6 @@ func TestPGStore_CallLifecycle(t *testing.T) {
 		t.Errorf("expected in-progress call with answered_by=human, got: %+v", updatedCall)
 	}
 
-	// Append transcript turns
 	turn1 := TranscriptTurn{Role: "model", Text: "Hello, this is Prospera", Timestamp: time.Now().UTC()}
 	turn2 := TranscriptTurn{Role: "user", Text: "Hi, how can I help?", Timestamp: time.Now().UTC()}
 	if err := store.AppendTranscriptTurn(ctx, "call-123", turn1); err != nil {
@@ -186,7 +196,6 @@ func TestPGStore_CallLifecycle(t *testing.T) {
 		t.Errorf("unexpected transcript turns: %+v", withTurns.Transcript)
 	}
 
-	// Advance live transcript cursor (CAS)
 	advanced, err := store.AdvanceLiveTranscriptCursor(ctx, "call-123", 0, 2)
 	if err != nil || !advanced {
 		t.Fatalf("AdvanceLiveTranscriptCursor(0 -> 2) err = %v, advanced = %v", err, advanced)
@@ -195,8 +204,10 @@ func TestPGStore_CallLifecycle(t *testing.T) {
 	if err != nil || staleAdvance {
 		t.Fatalf("stale AdvanceLiveTranscriptCursor should return false, got advanced=%v, err=%v", staleAdvance, err)
 	}
+}
 
-	// Append owner instruction
+func testLifecycleInstructionsAndCompletion(ctx context.Context, t *testing.T, store *PGStore) {
+	t.Helper()
 	instr := OwnerInstruction{Instruction: "Ask about reservations", Mode: "guidance", CreatedAt: time.Now().UTC()}
 	if err := store.AppendOwnerInstruction(ctx, "call-123", instr); err != nil {
 		t.Fatalf("AppendOwnerInstruction() error = %v", err)
@@ -205,7 +216,6 @@ func TestPGStore_CallLifecycle(t *testing.T) {
 		t.Errorf("AppendOwnerInstruction(non-existent) err = %v, want ErrCallNotFound", err)
 	}
 
-	// Set voicemail recording
 	if err := store.SetVoicemailRecording(ctx, "call-123", "https://api.twilio.com/recordings/RE123"); err != nil {
 		t.Fatalf("SetVoicemailRecording() error = %v", err)
 	}
@@ -213,12 +223,10 @@ func TestPGStore_CallLifecycle(t *testing.T) {
 		t.Errorf("SetVoicemailRecording(non-existent) err = %v, want ErrCallNotFound", err)
 	}
 
-	// Update call state to failed
 	if err := store.UpdateCallState(ctx, "call-123", "failed", "network_error", ""); err != nil {
 		t.Fatalf("UpdateCallState(failed) error = %v", err)
 	}
 
-	// Update call state to completed
 	if err := store.UpdateCallState(ctx, "call-123", "completed", "completed_normally", ""); err != nil {
 		t.Fatalf("UpdateCallState(completed) error = %v", err)
 	}
@@ -231,7 +239,6 @@ func TestPGStore_CallLifecycle(t *testing.T) {
 		t.Errorf("unexpected ended call: %+v", endedCall)
 	}
 
-	// List calls with default limit
 	list, err := store.ListCalls(ctx, 0)
 	if err != nil {
 		t.Fatalf("ListCalls() error = %v", err)

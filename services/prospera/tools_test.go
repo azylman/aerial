@@ -31,15 +31,17 @@ func setupTestToolHandler() (*ToolHandler, *mockStoreForDelivery, *mockTwilioFor
 	return handler, store, twilioMock
 }
 
+type toolHandlerInitiateCallTestCase struct {
+	name     string
+	args     InitiateCallArgs
+	wantErr  bool
+	wantMode string
+}
+
 func TestToolHandler_InitiateCall(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name     string
-		args     InitiateCallArgs
-		wantErr  bool
-		wantMode string
-	}{
+	tests := []toolHandlerInitiateCallTestCase{
 		{
 			name: "valid initiate call",
 			args: InitiateCallArgs{
@@ -91,47 +93,60 @@ func TestToolHandler_InitiateCall(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			handler, store, twilioMock := setupTestToolHandler()
-
-			out, err := handler.InitiateCall(context.Background(), tc.args)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("InitiateCall() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr {
-				if out.CallID == "" || out.ProviderCallSID == "" || out.Status != "initiated" {
-					t.Fatalf("InitiateCall() unexpected output: %+v", out)
-				}
-				if !strings.Contains(twilioMock.lastCreateCallReq.TwiMLURL, "?call_id="+out.CallID) {
-					t.Fatalf("TwiMLURL %q does not contain call_id", twilioMock.lastCreateCallReq.TwiMLURL)
-				}
-				if !strings.Contains(twilioMock.lastCreateCallReq.StatusCallback, "?call_id="+out.CallID) {
-					t.Fatalf("StatusCallback %q does not contain call_id", twilioMock.lastCreateCallReq.StatusCallback)
-				}
-				if !strings.Contains(twilioMock.lastCreateCallReq.AsyncAmdStatusCallback, "?call_id="+out.CallID) {
-					t.Fatalf("AsyncAmdStatusCallback %q does not contain call_id", twilioMock.lastCreateCallReq.AsyncAmdStatusCallback)
-				}
-				savedCall, getErr := store.GetCall(context.Background(), out.CallID)
-				if getErr != nil || savedCall == nil || savedCall.Brief.Task != tc.args.Message {
-					t.Fatalf("savedCall.Brief.Task = %v, want %q", savedCall, tc.args.Message)
-				}
-				if tc.wantMode != "" && savedCall.Brief.Mode != tc.wantMode {
-					t.Fatalf("savedCall.Brief.Mode = %q, want %q", savedCall.Brief.Mode, tc.wantMode)
-				}
-			}
+			runToolHandlerInitiateCallCase(t, tc)
 		})
 	}
+}
+
+func runToolHandlerInitiateCallCase(t *testing.T, tc toolHandlerInitiateCallTestCase) {
+	t.Helper()
+	handler, store, twilioMock := setupTestToolHandler()
+
+	out, err := handler.InitiateCall(context.Background(), tc.args)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("InitiateCall() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr {
+		return
+	}
+	assertToolHandlerInitiateCallSuccess(t, tc, out, store, twilioMock)
+}
+
+func assertToolHandlerInitiateCallSuccess(t *testing.T, tc toolHandlerInitiateCallTestCase, out InitiateCallOutput, store *mockStoreForDelivery, twilioMock *mockTwilioForDelivery) {
+	t.Helper()
+	if out.CallID == "" || out.ProviderCallSID == "" || out.Status != "initiated" {
+		t.Fatalf("InitiateCall() unexpected output: %+v", out)
+	}
+	if !strings.Contains(twilioMock.lastCreateCallReq.TwiMLURL, "?call_id="+out.CallID) {
+		t.Fatalf("TwiMLURL %q does not contain call_id", twilioMock.lastCreateCallReq.TwiMLURL)
+	}
+	if !strings.Contains(twilioMock.lastCreateCallReq.StatusCallback, "?call_id="+out.CallID) {
+		t.Fatalf("StatusCallback %q does not contain call_id", twilioMock.lastCreateCallReq.StatusCallback)
+	}
+	if !strings.Contains(twilioMock.lastCreateCallReq.AsyncAmdStatusCallback, "?call_id="+out.CallID) {
+		t.Fatalf("AsyncAmdStatusCallback %q does not contain call_id", twilioMock.lastCreateCallReq.AsyncAmdStatusCallback)
+	}
+	savedCall, getErr := store.GetCall(context.Background(), out.CallID)
+	if getErr != nil || savedCall == nil || savedCall.Brief.Task != tc.args.Message {
+		t.Fatalf("savedCall.Brief.Task = %v, want %q", savedCall, tc.args.Message)
+	}
+	if tc.wantMode != "" && savedCall.Brief.Mode != tc.wantMode {
+		t.Fatalf("savedCall.Brief.Mode = %q, want %q", savedCall.Brief.Mode, tc.wantMode)
+	}
+}
+
+type toolHandlerSteerCallTestCase struct {
+	name    string
+	callID  string
+	msg     string
+	mode    string
+	wantErr bool
 }
 
 func TestToolHandler_SteerCall(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name    string
-		callID  string
-		msg     string
-		mode    string
-		wantErr bool
-	}{
+	tests := []toolHandlerSteerCallTestCase{
 		{
 			name:    "empty call id",
 			callID:  "",
@@ -169,52 +184,62 @@ func TestToolHandler_SteerCall(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			handler, _, _ := setupTestToolHandler()
-			if tc.callID == "call-steer-active" {
-				upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-				geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					conn, err := upgrader.Upgrade(w, r, nil)
-					if err != nil {
-						return
-					}
-					defer conn.Close()
-					for {
-						var msg any
-						if err := conn.ReadJSON(&msg); err != nil {
-							return
-						}
-					}
-				}))
-				defer geminiServer.Close()
-
-				wsURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
-				wsConn, dialResp, err := websocket.DefaultDialer.Dial(wsURL, nil)
-				if dialResp != nil && dialResp.Body != nil {
-					_ = dialResp.Body.Close()
-				}
-				if err != nil {
-					t.Fatalf("dial mock gemini: %v", err)
-				}
-				defer func() {
-					_ = wsConn.Close()
-				}()
-
-				sess := &MediaStreamSession{
-					callID:     "call-steer-active",
-					geminiConn: wsConn,
-				}
-				handler.sessionMgr.registerSession("call-steer-active", sess)
-			}
-
-			_, err := handler.SteerCall(context.Background(), SteerCallArgs{
-				CallID:  tc.callID,
-				Message: tc.msg,
-				Mode:    tc.mode,
-			})
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("SteerCall() err = %v, wantErr = %v", err, tc.wantErr)
-			}
+			runToolHandlerSteerCallCase(t, tc)
 		})
+	}
+}
+
+func setupMockGeminiSession(t *testing.T, callID string, handler *ToolHandler) {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			var msg any
+			if err := conn.ReadJSON(&msg); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(geminiServer.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
+	wsConn, dialResp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if dialResp != nil && dialResp.Body != nil {
+		_ = dialResp.Body.Close()
+	}
+	if err != nil {
+		t.Fatalf("dial mock gemini: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = wsConn.Close()
+	})
+
+	sess := &MediaStreamSession{
+		callID:     callID,
+		geminiConn: wsConn,
+	}
+	handler.sessionMgr.registerSession(callID, sess)
+}
+
+func runToolHandlerSteerCallCase(t *testing.T, tc toolHandlerSteerCallTestCase) {
+	t.Helper()
+	handler, _, _ := setupTestToolHandler()
+	if tc.callID == "call-steer-active" {
+		setupMockGeminiSession(t, tc.callID, handler)
+	}
+
+	_, err := handler.SteerCall(context.Background(), SteerCallArgs{
+		CallID:  tc.callID,
+		Message: tc.msg,
+		Mode:    tc.mode,
+	})
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("SteerCall() err = %v, wantErr = %v", err, tc.wantErr)
 	}
 }
 
@@ -318,113 +343,95 @@ func TestToolHandler_SMSAndPhone(t *testing.T) {
 
 	handler, _, _ := setupTestToolHandler()
 
-	t.Run("send sms success", func(t *testing.T) {
+	t.Run("send sms", func(t *testing.T) {
 		t.Parallel()
-		out, err := handler.SendSMS(context.Background(), SendSMSArgs{
-			To:   "+15105550199",
-			Body: "Test SMS message",
-		})
-		if err != nil || out.Status != "sent" || out.MessageSID == "" {
-			t.Fatalf("SendSMS() err = %v, out = %+v", err, out)
-		}
-
-		outCustom, errCustom := handler.SendSMS(context.Background(), SendSMSArgs{
-			To:   "+15105550199",
-			From: "+1 (510) 555-0188",
-			Body: "Test custom from",
-		})
-		if errCustom != nil || outCustom.Status != "sent" {
-			t.Fatalf("SendSMS() with custom from err = %v, out = %+v", errCustom, outCustom)
-		}
+		testToolHandlerSendSMS(t, handler)
 	})
-
-	t.Run("send sms invalid number", func(t *testing.T) {
+	t.Run("list sms and calls", func(t *testing.T) {
 		t.Parallel()
-		_, err := handler.SendSMS(context.Background(), SendSMSArgs{
-			To:   "invalid",
-			Body: "Test",
-		})
-		if err == nil {
-			t.Fatal("expected error for invalid phone number")
-		}
-
-		_, errFromInv := handler.SendSMS(context.Background(), SendSMSArgs{
-			To:   "+15105550199",
-			From: "invalid-source-number",
-			Body: "Test",
-		})
-		if errFromInv == nil {
-			t.Fatal("expected error for invalid from number")
-		}
+		testToolHandlerListSMSAndCalls(t, handler)
 	})
-
-	t.Run("list sms", func(t *testing.T) {
-		t.Parallel()
-		out, err := handler.ListSMS(context.Background(), ListSMSArgs{Limit: 5})
-		if err != nil {
-			t.Fatalf("ListSMS() err = %v", err)
-		}
-		_ = out
-	})
-
 	t.Run("ensure phone number", func(t *testing.T) {
 		t.Parallel()
-		handler, _, twilioMock := setupTestToolHandler()
-		out, err := handler.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: "510"})
-		if err != nil || out.PhoneNumber == "" || out.Status != "configured" {
-			t.Fatalf("EnsurePhoneNumber() err = %v, out = %+v", err, out)
-		}
-		if twilioMock.lastWebhookBaseURL != "https://webhooks.example.com/api/webhooks" {
-			t.Fatalf("lastWebhookBaseURL = %q, want https://webhooks.example.com/api/webhooks", twilioMock.lastWebhookBaseURL)
-		}
+		testToolHandlerEnsurePhone(t, handler)
 	})
+}
 
-	t.Run("send sms empty body or missing from", func(t *testing.T) {
-		t.Parallel()
-		_, err := handler.SendSMS(context.Background(), SendSMSArgs{
-			To:   "+15105550199",
-			Body: "",
-		})
-		if err == nil {
-			t.Fatal("expected error for empty body")
-		}
-
-		handlerNoFrom := NewToolHandler(staticConfig{cfg: &Config{}}, nil, nil, nil, nil)
-		_, err2 := handlerNoFrom.SendSMS(context.Background(), SendSMSArgs{
-			To:   "+15105550199",
-			Body: "hi",
-		})
-		if err2 == nil {
-			t.Fatal("expected error for missing from")
-		}
+func testToolHandlerSendSMS(t *testing.T, handler *ToolHandler) {
+	t.Helper()
+	out, err := handler.SendSMS(context.Background(), SendSMSArgs{
+		To:   "+15105550199",
+		Body: "Test SMS message",
 	})
+	if err != nil || out.Status != "sent" || out.MessageSID == "" {
+		t.Fatalf("SendSMS() err = %v, out = %+v", err, out)
+	}
 
-	t.Run("list sms and calls limit branches", func(t *testing.T) {
-		t.Parallel()
-		_, _ = handler.ListSMS(context.Background(), ListSMSArgs{Limit: -1})
-		_, _ = handler.ListSMS(context.Background(), ListSMSArgs{Limit: 100})
-		_, _ = handler.ListCalls(context.Background(), ListCallsArgs{Limit: -1})
-		_, _ = handler.ListCalls(context.Background(), ListCallsArgs{Limit: 100})
-
-		emptyStore := newMockStoreForDelivery()
-		h := NewToolHandler(handler.cfgSrc, emptyStore, &mockTwilioForDelivery{}, nil, nil)
-		outCalls, err := h.ListCalls(context.Background(), ListCallsArgs{})
-		if err != nil || outCalls.Calls == nil {
-			t.Fatal("expected empty non-nil calls slice")
-		}
-		outSMS, err := h.ListSMS(context.Background(), ListSMSArgs{})
-		if err != nil || outSMS.Messages == nil {
-			t.Fatal("expected empty non-nil messages slice")
-		}
+	outCustom, errCustom := handler.SendSMS(context.Background(), SendSMSArgs{
+		To:   "+15105550199",
+		From: "+1 (510) 555-0188",
+		Body: "Test custom from",
 	})
+	if errCustom != nil || outCustom.Status != "sent" {
+		t.Fatalf("SendSMS() with custom from err = %v, out = %+v", errCustom, outCustom)
+	}
 
-	t.Run("ensure phone number default area code", func(t *testing.T) {
-		t.Parallel()
-		out, err := handler.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: ""})
-		if err != nil || out.Status != "configured" {
-			t.Fatalf("EnsurePhoneNumber() err = %v, out = %+v", err, out)
-		}
-	})
+	if _, err := handler.SendSMS(context.Background(), SendSMSArgs{To: "invalid", Body: "Test"}); err == nil {
+		t.Fatal("expected error for invalid phone number")
+	}
+
+	if _, err := handler.SendSMS(context.Background(), SendSMSArgs{To: "+15105550199", From: "invalid-source-number", Body: "Test"}); err == nil {
+		t.Fatal("expected error for invalid from number")
+	}
+
+	if _, err := handler.SendSMS(context.Background(), SendSMSArgs{To: "+15105550199", Body: ""}); err == nil {
+		t.Fatal("expected error for empty body")
+	}
+
+	handlerNoFrom := NewToolHandler(staticConfig{cfg: &Config{}}, nil, nil, nil, nil)
+	if _, err := handlerNoFrom.SendSMS(context.Background(), SendSMSArgs{To: "+15105550199", Body: "hi"}); err == nil {
+		t.Fatal("expected error for missing from")
+	}
+}
+
+func testToolHandlerListSMSAndCalls(t *testing.T, handler *ToolHandler) {
+	t.Helper()
+	if _, err := handler.ListSMS(context.Background(), ListSMSArgs{Limit: 5}); err != nil {
+		t.Fatalf("ListSMS() err = %v", err)
+	}
+
+	_, _ = handler.ListSMS(context.Background(), ListSMSArgs{Limit: -1})
+	_, _ = handler.ListSMS(context.Background(), ListSMSArgs{Limit: 100})
+	_, _ = handler.ListCalls(context.Background(), ListCallsArgs{Limit: -1})
+	_, _ = handler.ListCalls(context.Background(), ListCallsArgs{Limit: 100})
+
+	emptyStore := newMockStoreForDelivery()
+	h := NewToolHandler(handler.cfgSrc, emptyStore, &mockTwilioForDelivery{}, nil, nil)
+	outCalls, err := h.ListCalls(context.Background(), ListCallsArgs{})
+	if err != nil || outCalls.Calls == nil {
+		t.Fatal("expected empty non-nil calls slice")
+	}
+	outSMS, err := h.ListSMS(context.Background(), ListSMSArgs{})
+	if err != nil || outSMS.Messages == nil {
+		t.Fatal("expected empty non-nil messages slice")
+	}
+}
+
+func testToolHandlerEnsurePhone(t *testing.T, handler *ToolHandler) {
+	t.Helper()
+	h, _, twilioMock := setupTestToolHandler()
+	out, err := h.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: "510"})
+	if err != nil || out.PhoneNumber == "" || out.Status != "configured" {
+		t.Fatalf("EnsurePhoneNumber() err = %v, out = %+v", err, out)
+	}
+	if twilioMock.lastWebhookBaseURL != "https://webhooks.example.com/api/webhooks" {
+		t.Fatalf("lastWebhookBaseURL = %q, want https://webhooks.example.com/api/webhooks", twilioMock.lastWebhookBaseURL)
+	}
+
+	outDef, errDef := handler.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: ""})
+	if errDef != nil || outDef.Status != "configured" {
+		t.Fatalf("EnsurePhoneNumber() default err = %v, out = %+v", errDef, outDef)
+	}
 }
 
 func TestMCPStreamableHTTPHandler(t *testing.T) {

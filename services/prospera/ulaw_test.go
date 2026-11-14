@@ -5,14 +5,16 @@ import (
 	"testing"
 )
 
+type muLawTestCase struct {
+	name     string
+	input    []byte
+	wantPCM  []int16
+	reencode []byte
+}
+
 func TestMuLawCodec(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name     string
-		input    []byte
-		wantPCM  []int16
-		reencode []byte
-	}{
+	tests := []muLawTestCase{
 		{
 			name:     "empty slice",
 			input:    []byte{},
@@ -48,25 +50,7 @@ func TestMuLawCodec(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pcm := MuLawToPCM16(tc.input)
-			if len(pcm) != len(tc.wantPCM) {
-				t.Fatalf("len(pcm) = %d, want %d", len(pcm), len(tc.wantPCM))
-			}
-			for i := range pcm {
-				if pcm[i] != tc.wantPCM[i] {
-					t.Fatalf("pcm[%d] = %d, want %d", i, pcm[i], tc.wantPCM[i])
-				}
-			}
-
-			re := PCM16ToMuLaw(pcm)
-			if len(re) != len(tc.reencode) {
-				t.Fatalf("len(re) = %d, want %d", len(re), len(tc.reencode))
-			}
-			for i := range re {
-				if re[i] != tc.reencode[i] {
-					t.Fatalf("re[%d] = 0x%02X, want 0x%02X", i, re[i], tc.reencode[i])
-				}
-			}
+			runMuLawCodecCase(t, tc)
 		})
 	}
 
@@ -83,67 +67,87 @@ func TestMuLawCodec(t *testing.T) {
 
 	t.Run("all 256 bytes roundtrip", func(t *testing.T) {
 		t.Parallel()
-		for b := range 256 {
-			in := byte(b)
-			pcm := MuLawToPCM16([]byte{in})
-			if len(pcm) != 1 {
-				t.Fatalf("unexpected pcm len: %d", len(pcm))
-			}
-			out := PCM16ToMuLaw(pcm)
-			if len(out) != 1 {
-				t.Fatalf("unexpected out len: %d", len(out))
-			}
-			// Both 0xFF and 0x7F encode silence (0)
-			if in == 0x7F {
-				if out[0] != 0xFF {
-					t.Errorf("roundtrip for 0x7F = 0x%02X, want 0xFF", out[0])
-				}
-			} else if out[0] != in {
-				t.Errorf("roundtrip mismatch for 0x%02X: got 0x%02X (pcm: %d)", in, out[0], pcm[0])
-			}
-		}
+		testMuLawRoundtrip(t)
 	})
 }
 
-func TestResample8kTo16k(t *testing.T) {
+func runMuLawCodecCase(t *testing.T, tc muLawTestCase) {
+	t.Helper()
+	pcm := MuLawToPCM16(tc.input)
+	if len(pcm) != len(tc.wantPCM) {
+		t.Fatalf("len(pcm) = %d, want %d", len(pcm), len(tc.wantPCM))
+	}
+	for i := range pcm {
+		if pcm[i] != tc.wantPCM[i] {
+			t.Fatalf("pcm[%d] = %d, want %d", i, pcm[i], tc.wantPCM[i])
+		}
+	}
+
+	re := PCM16ToMuLaw(pcm)
+	if len(re) != len(tc.reencode) {
+		t.Fatalf("len(re) = %d, want %d", len(re), len(tc.reencode))
+	}
+	for i := range re {
+		if re[i] != tc.reencode[i] {
+			t.Fatalf("re[%d] = 0x%02X, want 0x%02X", i, re[i], tc.reencode[i])
+		}
+	}
+}
+
+func testMuLawRoundtrip(t *testing.T) {
+	t.Helper()
+	for b := range 256 {
+		in := byte(b)
+		pcm := MuLawToPCM16([]byte{in})
+		if len(pcm) != 1 {
+			t.Fatalf("unexpected pcm len: %d", len(pcm))
+		}
+		out := PCM16ToMuLaw(pcm)
+		if len(out) != 1 {
+			t.Fatalf("unexpected out len: %d", len(out))
+		}
+		if in == 0x7F {
+			if out[0] != 0xFF {
+				t.Errorf("roundtrip for 0x7F = 0x%02X, want 0xFF", out[0])
+			}
+		} else if out[0] != in {
+			t.Errorf("roundtrip mismatch for 0x%02X: got 0x%02X (pcm: %d)", in, out[0], pcm[0])
+		}
+	}
+}
+
+func TestResampleAudio(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name    string
-		input   []int16
-		wantLen int
-	}{
-		{name: "empty", input: nil, wantLen: 0},
-		{name: "single sample", input: []int16{100}, wantLen: 2},
-		{name: "standard 20ms frame (160 samples)", input: make([]int16, 160), wantLen: 320},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := Resample8kTo16k(tc.input)
-			if len(got) != tc.wantLen {
-				t.Fatalf("Resample8kTo16k() len = %d, want %d", len(got), tc.wantLen)
-			}
-		})
-	}
-
-	t.Run("linear interpolation values", func(t *testing.T) {
-		t.Parallel()
-		input := []int16{1000, 2000, 3000}
-		got := Resample8kTo16k(input)
-		want := []int16{1000, 1500, 2000, 2500, 3000, 3000}
-		if len(got) != len(want) {
-			t.Fatalf("len = %d, want %d", len(got), len(want))
-		}
-		for i := range got {
-			if got[i] != want[i] {
-				t.Errorf("got[%d] = %d, want %d", i, got[i], want[i])
-			}
-		}
-	})
+	t.Run("Resample8kTo16k", testResample8kTo16k)
+	t.Run("Resample24kTo8k", testResample24kTo8k)
 }
 
-func TestResample24kTo8k(t *testing.T) {
+func testResample8kTo16k(t *testing.T) {
+	t.Parallel()
+	if got := Resample8kTo16k(nil); len(got) != 0 {
+		t.Fatalf("empty len = %d, want 0", len(got))
+	}
+	if got := Resample8kTo16k([]int16{100}); len(got) != 2 {
+		t.Fatalf("single sample len = %d, want 2", len(got))
+	}
+	if got := Resample8kTo16k(make([]int16, 160)); len(got) != 320 {
+		t.Fatalf("20ms frame len = %d, want 320", len(got))
+	}
+
+	input := []int16{1000, 2000, 3000}
+	got := Resample8kTo16k(input)
+	want := []int16{1000, 1500, 2000, 2500, 3000, 3000}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %d, want %d", i, got[i], want[i])
+		}
+	}
+}
+
+func testResample24kTo8k(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
@@ -154,7 +158,6 @@ func TestResample24kTo8k(t *testing.T) {
 		{name: "less than 3 samples", input: []int16{100, 200}, wantLen: 0},
 		{name: "standard 20ms frame (480 samples)", input: make([]int16, 480), wantLen: 160},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

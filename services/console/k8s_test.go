@@ -13,22 +13,36 @@ import (
 	"time"
 )
 
+type parseK8sClusterStateTestCase struct {
+	name            string
+	deploymentsJSON string
+	podsJSON        string
+	now             time.Time
+	wantErr         bool
+	wantErrSubstr   string
+	wantCount       int
+	wantStatuses    map[string]string
+	wantUptimes     map[string]int64
+}
+
 func TestParseK8sClusterState(t *testing.T) {
 	refTime := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 	tenSecAgo := refTime.Add(-10 * time.Second)
 	twentySecAgo := refTime.Add(-20 * time.Second)
 
-	tests := []struct {
-		name            string
-		deploymentsJSON string
-		podsJSON        string
-		now             time.Time
-		wantErr         bool
-		wantErrSubstr   string
-		wantCount       int
-		wantStatuses    map[string]string
-		wantUptimes     map[string]int64
-	}{
+	tests := parseK8sClusterStatePrimaryCases(refTime, tenSecAgo, twentySecAgo)
+	tests = append(tests, parseK8sClusterStateSecondaryCases(refTime, tenSecAgo)...)
+	tests = append(tests, parseK8sClusterStateTertiaryCases(refTime, tenSecAgo, twentySecAgo)...)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runParseK8sClusterStateCase(t, tc)
+		})
+	}
+}
+
+func parseK8sClusterStatePrimaryCases(refTime, tenSecAgo, twentySecAgo time.Time) []parseK8sClusterStateTestCase {
+	return []parseK8sClusterStateTestCase{
 		{
 			name:            "empty deployments data error",
 			deploymentsJSON: "",
@@ -127,6 +141,11 @@ func TestParseK8sClusterState(t *testing.T) {
 				"haro": "starting",
 			},
 		},
+	}
+}
+
+func parseK8sClusterStateSecondaryCases(refTime, tenSecAgo time.Time) []parseK8sClusterStateTestCase {
+	return []parseK8sClusterStateTestCase{
 		{
 			name:            "starting deployment readyReplicas less than replicas without crashloop",
 			deploymentsJSON: `{"items":[{"metadata":{"name":"coven"},"spec":{"replicas":2},"status":{"replicas":2,"readyReplicas":1}}]}`,
@@ -226,6 +245,11 @@ func TestParseK8sClusterState(t *testing.T) {
 				"dashboard": "unhealthy",
 			},
 		},
+	}
+}
+
+func parseK8sClusterStateTertiaryCases(refTime, tenSecAgo, twentySecAgo time.Time) []parseK8sClusterStateTestCase {
+	return []parseK8sClusterStateTestCase{
 		{
 			name:            "unhealthy initContainer crashloop backoff",
 			deploymentsJSON: `{"items":[{"metadata":{"name":"hangar"},"spec":{"replicas":1},"status":{"replicas":1,"readyReplicas":0}}]}`,
@@ -302,45 +326,57 @@ func TestParseK8sClusterState(t *testing.T) {
 			},
 		},
 	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			services, err := ParseK8sClusterState([]byte(tc.deploymentsJSON), []byte(tc.podsJSON), tc.now)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tc.wantErrSubstr != "" && !strings.Contains(err.Error(), tc.wantErrSubstr) {
-					t.Errorf("expected error containing %q, got: %v", tc.wantErrSubstr, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(services) != tc.wantCount {
-				t.Fatalf("expected %d services, got %d", tc.wantCount, len(services))
-			}
-			// Verify sorted by Name
-			for i := 1; i < len(services); i++ {
-				if services[i].Name < services[i-1].Name {
-					t.Errorf("services not sorted alphabetically: index %d (%q) < index %d (%q)", i, services[i].Name, i-1, services[i-1].Name)
-				}
-			}
-			for _, svc := range services {
-				if expectedStatus, ok := tc.wantStatuses[svc.Name]; ok {
-					if svc.Status != expectedStatus {
-						t.Errorf("service %q expected status %q, got %q", svc.Name, expectedStatus, svc.Status)
-					}
-				}
-				if expectedUptime, ok := tc.wantUptimes[svc.Name]; ok {
-					if svc.UptimeSeconds != expectedUptime {
-						t.Errorf("service %q expected uptime %d, got %d", svc.Name, expectedUptime, svc.UptimeSeconds)
-					}
-				}
-			}
-		})
+func runParseK8sClusterStateCase(t *testing.T, tc parseK8sClusterStateTestCase) {
+	t.Helper()
+	services, err := ParseK8sClusterState([]byte(tc.deploymentsJSON), []byte(tc.podsJSON), tc.now)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		if tc.wantErrSubstr != "" && !strings.Contains(err.Error(), tc.wantErrSubstr) {
+			t.Errorf("expected error containing %q, got: %v", tc.wantErrSubstr, err)
+		}
+		return
 	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(services) != tc.wantCount {
+		t.Fatalf("expected %d services, got %d", tc.wantCount, len(services))
+	}
+	for i := 1; i < len(services); i++ {
+		if services[i].Name < services[i-1].Name {
+			t.Errorf("services not sorted alphabetically: index %d (%q) < index %d (%q)", i, services[i].Name, i-1, services[i-1].Name)
+		}
+	}
+	for _, svc := range services {
+		if expectedStatus, ok := tc.wantStatuses[svc.Name]; ok {
+			if svc.Status != expectedStatus {
+				t.Errorf("service %q expected status %q, got %q", svc.Name, expectedStatus, svc.Status)
+			}
+		}
+		if expectedUptime, ok := tc.wantUptimes[svc.Name]; ok {
+			if svc.UptimeSeconds != expectedUptime {
+				t.Errorf("service %q expected uptime %d, got %d", svc.Name, expectedUptime, svc.UptimeSeconds)
+			}
+		}
+	}
+}
+
+type fetchK8sClusterStateTestCase struct {
+	name          string
+	tokenPath     string
+	caPath        string
+	subpath       string
+	overrideAddr  string
+	wantAuth      string
+	wantErr       bool
+	wantErrSubstr string
+	wantCount     int
+	wantName      string
+	wantStatus    string
 }
 
 func TestFetchK8sClusterState(t *testing.T) {
@@ -417,19 +453,7 @@ func TestFetchK8sClusterState(t *testing.T) {
 	caFile := filepath.Join(tempDir, "ca.crt")
 	_ = os.WriteFile(caFile, caCertPEM, 0o644)
 
-	tests := []struct {
-		name          string
-		tokenPath     string
-		caPath        string
-		subpath       string
-		overrideAddr  string
-		wantAuth      string
-		wantErr       bool
-		wantErrSubstr string
-		wantCount     int
-		wantName      string
-		wantStatus    string
-	}{
+	tests := []fetchK8sClusterStateTestCase{
 		{
 			name:       "success with bearer token",
 			tokenPath:  tokenFile,
@@ -483,53 +507,58 @@ func TestFetchK8sClusterState(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			authHeaderReceived.Store("")
-			if tc.tokenPath != "" {
-				kubeTokenPath = tc.tokenPath
-			} else {
-				kubeTokenPath = filepath.Join(tempDir, "nonexistent")
-			}
-
-			if tc.caPath != "" {
-				kubeCAPath = tc.caPath
-			} else {
-				kubeCAPath = filepath.Join(tempDir, "nonexistent-ca")
-			}
-			k8sHTTPClient = buildK8sHTTPClient()
-
-			addr := tc.overrideAddr
-			if addr == "" {
-				addr = mockServer.URL + tc.subpath
-			}
-
-			services, err := fetchK8sClusterState(context.Background(), addr)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tc.wantErrSubstr != "" && !strings.Contains(err.Error(), tc.wantErrSubstr) {
-					t.Errorf("expected error containing %q, got: %v", tc.wantErrSubstr, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(services) != tc.wantCount {
-				t.Fatalf("expected %d services, got %d", tc.wantCount, len(services))
-			}
-			if len(services) > 0 {
-				if services[0].Name != tc.wantName || services[0].Status != tc.wantStatus {
-					t.Errorf("unexpected service: %+v", services[0])
-				}
-			}
-			if tc.wantAuth != "" {
-				val, _ := authHeaderReceived.Load().(string)
-				if val != tc.wantAuth {
-					t.Errorf("expected Authorization header %q, got %q", tc.wantAuth, val)
-				}
-			}
+			runFetchK8sClusterStateCase(t, tc, tempDir, mockServer.URL, mockTLSServer.URL, &authHeaderReceived)
 		})
+	}
+}
+
+func runFetchK8sClusterStateCase(t *testing.T, tc fetchK8sClusterStateTestCase, tempDir, mockServerURL, mockTLSServerURL string, authHeaderReceived *atomic.Value) {
+	t.Helper()
+	authHeaderReceived.Store("")
+	if tc.tokenPath != "" {
+		kubeTokenPath = tc.tokenPath
+	} else {
+		kubeTokenPath = filepath.Join(tempDir, "nonexistent")
+	}
+
+	if tc.caPath != "" {
+		kubeCAPath = tc.caPath
+	} else {
+		kubeCAPath = filepath.Join(tempDir, "nonexistent-ca")
+	}
+	k8sHTTPClient = buildK8sHTTPClient()
+
+	addr := tc.overrideAddr
+	if addr == "" {
+		addr = mockServerURL + tc.subpath
+	}
+
+	services, err := fetchK8sClusterState(context.Background(), addr)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		if tc.wantErrSubstr != "" && !strings.Contains(err.Error(), tc.wantErrSubstr) {
+			t.Errorf("expected error containing %q, got: %v", tc.wantErrSubstr, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(services) != tc.wantCount {
+		t.Fatalf("expected %d services, got %d", tc.wantCount, len(services))
+	}
+	if len(services) > 0 {
+		if services[0].Name != tc.wantName || services[0].Status != tc.wantStatus {
+			t.Errorf("unexpected service: %+v", services[0])
+		}
+	}
+	if tc.wantAuth != "" {
+		val, _ := authHeaderReceived.Load().(string)
+		if val != tc.wantAuth {
+			t.Errorf("expected Authorization header %q, got %q", tc.wantAuth, val)
+		}
 	}
 }
 

@@ -5,27 +5,40 @@ import (
 	"testing"
 )
 
+type validateInitiateCallTestCase struct {
+	name          string
+	toRaw         string
+	fromNumber    string
+	message       string
+	brief         CallBrief
+	wantErr       bool
+	wantTo        string
+	wantLanguage  string
+	wantDisclose  string
+	wantMaxDur    int
+	wantApprovals string
+	wantTask      string
+	wantMode      string
+}
+
 func TestValidateInitiateCallArgs(t *testing.T) {
 	t.Parallel()
-	longString := func(n int) string {
-		return strings.Repeat("a", n)
-	}
+	tests := validateInitiateCallTestCases()
 
-	tests := []struct {
-		name          string
-		toRaw         string
-		fromNumber    string
-		message       string
-		brief         CallBrief
-		wantErr       bool
-		wantTo        string
-		wantLanguage  string
-		wantDisclose  string
-		wantMaxDur    int
-		wantApprovals string
-		wantTask      string
-		wantMode      string
-	}{
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runValidateInitiateCallCase(t, tc)
+		})
+	}
+}
+
+func validateInitiateCallTestCases() []validateInitiateCallTestCase {
+	return append(validateInitiateCallValidCases(), validateInitiateCallInvalidCases()...)
+}
+
+func validateInitiateCallValidCases() []validateInitiateCallTestCase {
+	return []validateInitiateCallTestCase{
 		{
 			name:       "valid standard call with defaults applied",
 			toRaw:      "(510) 555-0199",
@@ -76,6 +89,28 @@ func TestValidateInitiateCallArgs(t *testing.T) {
 			wantMaxDur:    900,
 			wantApprovals: "Authorized to commit up to $50 deposit.",
 		},
+		{
+			name:       "notify mode preserved",
+			toRaw:      "+15105550199",
+			fromNumber: "+15105550100",
+			message:    "Notification",
+			brief: CallBrief{
+				Mode: "notify",
+				Task: "Notify client",
+			},
+			wantErr:  false,
+			wantTo:   "+15105550199",
+			wantMode: "notify",
+		},
+	}
+}
+
+func validateInitiateCallInvalidCases() []validateInitiateCallTestCase {
+	longString := func(n int) string {
+		return strings.Repeat("a", n)
+	}
+
+	return []validateInitiateCallTestCase{
 		{
 			name:       "empty message and task rejected",
 			toRaw:      "+15105550199",
@@ -152,19 +187,6 @@ func TestValidateInitiateCallArgs(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:       "notify mode preserved",
-			toRaw:      "+15105550199",
-			fromNumber: "+15105550100",
-			message:    "Notification",
-			brief: CallBrief{
-				Mode: "notify",
-				Task: "Notify client",
-			},
-			wantErr:  false,
-			wantTo:   "+15105550199",
-			wantMode: "notify",
-		},
-		{
 			name:       "invalid mode rejected",
 			toRaw:      "+15105550199",
 			fromNumber: "+15105550100",
@@ -176,39 +198,39 @@ func TestValidateInitiateCallArgs(t *testing.T) {
 			wantErr: true,
 		},
 	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			gotTo, gotBrief, err := ValidateInitiateCallArgs(tc.toRaw, tc.fromNumber, tc.message, tc.brief)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ValidateInitiateCallArgs() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				return
-			}
-			if gotTo != tc.wantTo {
-				t.Errorf("gotTo = %q, want %q", gotTo, tc.wantTo)
-			}
-			if gotBrief.Language != tc.wantLanguage && tc.wantLanguage != "" {
-				t.Errorf("gotBrief.Language = %q, want %q", gotBrief.Language, tc.wantLanguage)
-			}
-			if gotBrief.Identity.Disclose != tc.wantDisclose && tc.wantDisclose != "" {
-				t.Errorf("gotBrief.Identity.Disclose = %q, want %q", gotBrief.Identity.Disclose, tc.wantDisclose)
-			}
-			if tc.wantMaxDur != 0 && gotBrief.MaxDurationSeconds != tc.wantMaxDur {
-				t.Errorf("gotBrief.MaxDurationSeconds = %d, want %d", gotBrief.MaxDurationSeconds, tc.wantMaxDur)
-			}
-			if tc.wantApprovals != "" && gotBrief.Approvals != tc.wantApprovals {
-				t.Errorf("gotBrief.Approvals = %q, want %q", gotBrief.Approvals, tc.wantApprovals)
-			}
-			if tc.wantTask != "" && gotBrief.Task != tc.wantTask {
-				t.Errorf("gotBrief.Task = %q, want %q", gotBrief.Task, tc.wantTask)
-			}
-			if tc.wantMode != "" && gotBrief.Mode != tc.wantMode {
-				t.Errorf("gotBrief.Mode = %q, want %q", gotBrief.Mode, tc.wantMode)
-			}
-		})
+func runValidateInitiateCallCase(t *testing.T, tc validateInitiateCallTestCase) {
+	t.Helper()
+	gotTo, gotBrief, err := ValidateInitiateCallArgs(tc.toRaw, tc.fromNumber, tc.message, tc.brief)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ValidateInitiateCallArgs() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr {
+		return
+	}
+	assertValidateInitiateCallBrief(t, tc, gotTo, gotBrief)
+}
+
+func assertValidateInitiateCallBrief(t *testing.T, tc validateInitiateCallTestCase, gotTo string, gotBrief CallBrief) {
+	t.Helper()
+	strChecks := []struct {
+		got, want, field string
+	}{
+		{gotTo, tc.wantTo, "To"},
+		{gotBrief.Language, tc.wantLanguage, "Language"},
+		{gotBrief.Identity.Disclose, tc.wantDisclose, "Identity.Disclose"},
+		{gotBrief.Approvals, tc.wantApprovals, "Approvals"},
+		{gotBrief.Task, tc.wantTask, "Task"},
+		{gotBrief.Mode, tc.wantMode, "Mode"},
+	}
+	for _, c := range strChecks {
+		if c.want != "" && c.got != c.want {
+			t.Errorf("gotBrief.%s = %q, want %q", c.field, c.got, c.want)
+		}
+	}
+	if tc.wantMaxDur != 0 && gotBrief.MaxDurationSeconds != tc.wantMaxDur {
+		t.Errorf("gotBrief.MaxDurationSeconds = %d, want %d", gotBrief.MaxDurationSeconds, tc.wantMaxDur)
 	}
 }
 
