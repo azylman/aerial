@@ -11,19 +11,45 @@ import (
 	"testing"
 )
 
+type prOwnedLocallyTestCase struct {
+	name       string
+	nilServer  bool
+	nilReg     bool
+	prNum      int
+	targetID   string
+	branch     string
+	resolveErr error
+	wantOwned  bool
+}
+
+func runIsPROwnedLocallyCase(t *testing.T, tc prOwnedLocallyTestCase) {
+	t.Helper()
+	t.Parallel()
+	if tc.nilServer {
+		var srv *RouterServer
+		if got := srv.isPROwnedLocally(context.Background(), "azylman/aerial", tc.prNum); got != tc.wantOwned {
+			t.Fatalf("isPROwnedLocally got %v, want %v", got, tc.wantOwned)
+		}
+		return
+	}
+	var reg PRRegistryUpdater
+	if !tc.nilReg {
+		reg = &mockPRRegistry{
+			resolveTargetID: tc.targetID,
+			resolveBranch:   tc.branch,
+			resolveErr:      tc.resolveErr,
+		}
+	}
+	srv := newTestRouter(Config{}, nil, reg, nil)
+	if got := srv.isPROwnedLocally(context.Background(), "azylman/aerial", tc.prNum); got != tc.wantOwned {
+		t.Fatalf("isPROwnedLocally got %v, want %v", got, tc.wantOwned)
+	}
+}
+
 func TestIsPROwnedLocally(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		nilServer  bool
-		nilReg     bool
-		prNum      int
-		targetID   string
-		branch     string
-		resolveErr error
-		wantOwned  bool
-	}{
+	tests := []prOwnedLocallyTestCase{
 		{name: "nil server", nilServer: true, prNum: 101, wantOwned: false},
 		{name: "nil registry", nilReg: true, prNum: 101, wantOwned: false},
 		{name: "prNum zero", prNum: 0, targetID: "12345", wantOwned: false},
@@ -37,26 +63,7 @@ func TestIsPROwnedLocally(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if tc.nilServer {
-				var srv *RouterServer
-				if got := srv.isPROwnedLocally(context.Background(), "azylman/aerial", tc.prNum); got != tc.wantOwned {
-					t.Fatalf("isPROwnedLocally got %v, want %v", got, tc.wantOwned)
-				}
-				return
-			}
-			var reg PRRegistryUpdater
-			if !tc.nilReg {
-				reg = &mockPRRegistry{
-					resolveTargetID: tc.targetID,
-					resolveBranch:   tc.branch,
-					resolveErr:      tc.resolveErr,
-				}
-			}
-			srv := newTestRouter(Config{}, nil, reg, nil)
-			if got := srv.isPROwnedLocally(context.Background(), "azylman/aerial", tc.prNum); got != tc.wantOwned {
-				t.Fatalf("isPROwnedLocally got %v, want %v", got, tc.wantOwned)
-			}
+			runIsPROwnedLocallyCase(t, tc)
 		})
 	}
 }
@@ -242,16 +249,76 @@ func TestDispatchGitPush_Ownership(t *testing.T) {
 	}
 }
 
+type checkOpenPROwnershipTestCase struct {
+	name            string
+	defaultOwner    bool
+	ownedPRs        map[int]bool
+	wantUpdateCalls int
+	wantUpdatedPR   int
+}
+
+func newCheckOpenPROwnershipMockServer(updateCalls *[]int, mu *sync.Mutex) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/pulls") && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"number": 10, "draft": false, "user": {"login": "azylman"}, "head": {"ref": "branch-10", "sha": "sha10"}},
+				{"number": 20, "draft": false, "user": {"login": "azylman"}, "head": {"ref": "branch-20", "sha": "sha20"}}
+			]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/update-branch") && r.Method == http.MethodPut {
+			parts := strings.Split(r.URL.Path, "/")
+			for i, p := range parts {
+				if p == "pulls" && i+1 < len(parts) {
+					var num int
+					_, _ = fmt.Sscanf(parts[i+1], "%d", &num)
+					mu.Lock()
+					*updateCalls = append(*updateCalls, num)
+					mu.Unlock()
+				}
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
+func runCheckOpenPROwnershipCase(t *testing.T, tc checkOpenPROwnershipTestCase) {
+	t.Helper()
+	t.Parallel()
+	var mu sync.Mutex
+	var updateCalls []int
+	mockServer := newCheckOpenPROwnershipMockServer(&updateCalls, &mu)
+	defer mockServer.Close()
+
+	reg := &ownedMapRegistry{ownedPRs: tc.ownedPRs}
+	cfg := Config{
+		GitHubAPIURL:        mockServer.URL,
+		DefaultOwner:        tc.defaultOwner,
+		AutoUpdatePRAuthors: []string{"azylman"},
+	}
+	srv := newTestRouter(cfg, mockServer.Client(), reg, nil)
+
+	err := srv.checkOpenPRConflicts(context.Background(), "azylman/aerial")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(updateCalls) != tc.wantUpdateCalls {
+		t.Fatalf("updateCalls len = %d, want %d", len(updateCalls), tc.wantUpdateCalls)
+	}
+	if tc.wantUpdateCalls > 0 && updateCalls[0] != tc.wantUpdatedPR {
+		t.Fatalf("updated PR = %d, want %d", updateCalls[0], tc.wantUpdatedPR)
+	}
+}
+
 func TestCheckOpenPRConflicts_Ownership(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name            string
-		defaultOwner    bool
-		ownedPRs        map[int]bool
-		wantUpdateCalls int
-		wantUpdatedPR   int
-	}{
+	tests := []checkOpenPROwnershipTestCase{
 		{
 			name:            "default owner checks first eligible PR",
 			defaultOwner:    true,
@@ -276,56 +343,7 @@ func TestCheckOpenPRConflicts_Ownership(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var mu sync.Mutex
-			var updateCalls []int
-			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.Contains(r.URL.Path, "/pulls") && r.Method == http.MethodGet {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`[
-						{"number": 10, "draft": false, "user": {"login": "azylman"}, "head": {"ref": "branch-10", "sha": "sha10"}},
-						{"number": 20, "draft": false, "user": {"login": "azylman"}, "head": {"ref": "branch-20", "sha": "sha20"}}
-					]`))
-					return
-				}
-				if strings.Contains(r.URL.Path, "/update-branch") && r.Method == http.MethodPut {
-					parts := strings.Split(r.URL.Path, "/")
-					for i, p := range parts {
-						if p == "pulls" && i+1 < len(parts) {
-							var num int
-							fmt.Sscanf(parts[i+1], "%d", &num)
-							mu.Lock()
-							updateCalls = append(updateCalls, num)
-							mu.Unlock()
-						}
-					}
-					w.WriteHeader(http.StatusOK)
-					return
-				}
-				w.WriteHeader(http.StatusNotFound)
-			}))
-			defer mockServer.Close()
-
-			reg := &ownedMapRegistry{ownedPRs: tc.ownedPRs}
-			cfg := Config{
-				GitHubAPIURL:        mockServer.URL,
-				DefaultOwner:        tc.defaultOwner,
-				AutoUpdatePRAuthors: []string{"azylman"},
-			}
-			srv := newTestRouter(cfg, mockServer.Client(), reg, nil)
-
-			err := srv.checkOpenPRConflicts(context.Background(), "azylman/aerial")
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			if len(updateCalls) != tc.wantUpdateCalls {
-				t.Fatalf("updateCalls len = %d, want %d", len(updateCalls), tc.wantUpdateCalls)
-			}
-			if tc.wantUpdateCalls > 0 && updateCalls[0] != tc.wantUpdatedPR {
-				t.Fatalf("updated PR = %d, want %d", updateCalls[0], tc.wantUpdatedPR)
-			}
+			runCheckOpenPROwnershipCase(t, tc)
 		})
 	}
 }
