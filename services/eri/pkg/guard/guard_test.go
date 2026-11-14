@@ -149,6 +149,11 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"claude victorialogs unbounded query denied", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__victorialogs__query", "tool_input": {"query": "* | limit 10"}}`, true, 0, "", ""},
 		{"claude victorialogs bounded query allowed", "search", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__victorialogs__query", "tool_input": {"query": "kubernetes.container_name:eri | limit 10", "start": "2026-11-12T00:00:00Z", "end": "2026-11-12T01:00:00Z"}}`, false, 0, "", ""},
 		{"claude mcp tool call scanned for outbound secrets", "commit", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__github__add_issue_comment", "tool_input": {"body": "` + testPAT + `"}}`, true, 0, "", ""},
+		{"claude bash relative rm in share cwd denied", "share", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf scripts"}, "cwd": "/share/aerial"}`, true, 0, "", ""},
+		{"claude bash relative rm in tmp cwd allowed", "share", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf scripts"}, "cwd": "/tmp/work"}`, false, 0, "", ""},
+		{"claude bash relative rm in live-state cwd denied", "live-state", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -f config"}, "cwd": "/data/ssh"}`, true, 0, "", ""},
+		{"claude bash git checkout in share cwd denied", "share", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "git checkout -b x"}, "cwd": "/share/aerial"}`, true, 0, "", ""},
+		{"agy args Cwd wins over top-level cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "rm -rf scripts", "Cwd": "/tmp/work"}}, "cwd": "/share/aerial"}`, false, 0, "", ""},
 		{"claude mcp tool name normalized", "batch", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__server__bash", "tool_input": {"command": "git status"}}`, false, 0, "git status -sb", ""},
 	}
 
