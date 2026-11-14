@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -1221,5 +1222,203 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	srvFailPR.handleFailChunkPR(recFailPR, httptest.NewRequest(http.MethodPost, "/chunks/fail-pr", strings.NewReader(`{"repo":"aerial","pr_number":43}`)))
 	if recFailPR.Code != http.StatusOK {
 		t.Fatalf("handleFailChunkPR status = %d, want %d", recFailPR.Code, http.StatusOK)
+	}
+}
+
+func TestEnqueueExecuteChunk(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		hasBus        bool
+		busErr        error
+		hasRiver      bool
+		riverErr      error
+		args          ExecuteChunkArgs
+		wantErr       bool
+		wantRiverCall bool
+	}{
+		{
+			name:    "publishes to jetstream when bus configured",
+			hasBus:  true,
+			args:    ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 1},
+			wantErr: false,
+		},
+		{
+			name:          "falls back to river when bus publish fails",
+			hasBus:        true,
+			busErr:        errors.New("nats publish failed"),
+			hasRiver:      true,
+			args:          ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 2},
+			wantErr:       false,
+			wantRiverCall: true,
+		},
+		{
+			name:          "falls back to river when bus is nil",
+			hasBus:        false,
+			hasRiver:      true,
+			args:          ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 3},
+			wantErr:       false,
+			wantRiverCall: true,
+		},
+		{
+			name:     "returns error when both bus and river fail",
+			hasBus:   true,
+			busErr:   errors.New("nats down"),
+			hasRiver: true,
+			riverErr: errors.New("river down"),
+			args:     ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 4},
+			wantErr:  true,
+		},
+		{
+			name:     "returns error when bus nil and river nil",
+			hasBus:   false,
+			hasRiver: false,
+			args:     ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 5},
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var inserter RiverInserter
+			var mockIns *mockRiverInserter
+			if tc.hasRiver {
+				mockIns = &mockRiverInserter{err: tc.riverErr}
+				inserter = mockIns
+			}
+			srv := NewVanadisServer(Config{}, nil, inserter, nil)
+			if tc.hasBus {
+				memBus := pubsub.NewMemoryBus()
+				t.Cleanup(func() { _ = memBus.Close() })
+				if tc.busErr != nil {
+					_ = memBus.Close()
+				}
+				srv.SetBus(memBus)
+			}
+
+			err := srv.enqueueExecuteChunk(ctx, tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("enqueueExecuteChunk() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantRiverCall && (mockIns == nil || len(mockIns.inserted) == 0) {
+				t.Errorf("expected river insert call, got none")
+			}
+		})
+	}
+}
+
+func TestHandleExecuteChunkJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		rawPayload   string
+		numDelivered uint64
+		brainStatus  int
+		wantErr      bool
+		wantTerm     bool
+		wantNak      bool
+	}{
+		{
+			name:       "malformed payload terms message and returns nil",
+			rawPayload: `{"build_id": invalid`,
+			wantErr:    false,
+			wantTerm:   true,
+		},
+		{
+			name:         "chunk attempt 1 fails non-final with nak backoff",
+			rawPayload:   `{"build_id":"b-run","chunk_index":0}`,
+			numDelivered: 1,
+			brainStatus:  http.StatusBadGateway,
+			wantErr:      true,
+			wantTerm:     false,
+			wantNak:      true,
+		},
+		{
+			name:         "valid chunk attempt 3 dispatches final attempt and terms on failure",
+			rawPayload:   `{"build_id":"b-run","chunk_index":0}`,
+			numDelivered: 3,
+			brainStatus:  http.StatusBadGateway,
+			wantErr:      true,
+			wantTerm:     true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				status := tc.brainStatus
+				if status == 0 {
+					status = http.StatusAccepted
+				}
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			}))
+			defer brainSrv.Close()
+
+			memStore := newMemoryVanadisStore()
+			c0 := mkChunk("c-0", "b-run", 0, "C0", "I0", "medium", "pending")
+			_ = memStore.CreateBuild(ctx, mkBuild("b-run", "123456789012345678", "Run", "obj", "running"), []VanadisChunk{c0})
+			srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, nil, brainSrv.Client())
+
+			msg := &memoryMsg{
+				data:         []byte(tc.rawPayload),
+				numDelivered: tc.numDelivered,
+			}
+			err := srv.HandleExecuteChunkJob(ctx, msg)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("HandleExecuteChunkJob() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if msg.termed != tc.wantTerm {
+				t.Errorf("msg.termed = %v, want %v", msg.termed, tc.wantTerm)
+			}
+			if (msg.nakDelay > 0) != tc.wantNak {
+				t.Errorf("msg.nakDelay = %v, wantNak %v", msg.nakDelay, tc.wantNak)
+			}
+		})
+	}
+}
+
+func TestStartJobConsumersAndPublishWiring(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	dispatched := make(chan struct{}, 1)
+	brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		select {
+		case dispatched <- struct{}{}:
+		default:
+		}
+	}))
+	defer brainSrv.Close()
+
+	memStore := newMemoryVanadisStore()
+	c0 := mkChunk("c-wire-0", "b-wire", 0, "C0", "I0", "medium", "pending")
+	_ = memStore.CreateBuild(ctx, mkBuild("b-wire", "123456789012345678", "Run", "obj", "running"), []VanadisChunk{c0})
+	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, nil, brainSrv.Client())
+
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	srv.SetBus(memBus)
+
+	if err := srv.StartJobConsumers(ctx); err != nil {
+		t.Fatalf("StartJobConsumers() error: %v", err)
+	}
+
+	if err := srv.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: "b-wire", ChunkIndex: 0}); err != nil {
+		t.Fatalf("enqueueExecuteChunk() error: %v", err)
+	}
+
+	select {
+	case <-dispatched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for vanadis-chunk consumer to process chunk")
 	}
 }

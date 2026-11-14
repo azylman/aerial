@@ -765,12 +765,60 @@ func (s *VanadisServer) dispatchWakePrompt(ctx context.Context, threadID, prompt
 	return nil
 }
 
-func (s *VanadisServer) insertRiverJob(ctx context.Context, args ExecuteChunkArgs) error {
+func (s *VanadisServer) enqueueExecuteChunk(ctx context.Context, args ExecuteChunkArgs) error {
+	if s.bus != nil {
+		msgID := fmt.Sprintf("vanadis:chunk:%s:%d", args.BuildID, args.ChunkIndex)
+		err := s.bus.Publish(ctx, "aerial.jobs.vanadis.chunk", msgID, args)
+		if err == nil {
+			return nil
+		}
+		log.Printf("[vanadis] warning: failed to publish chunk job to jetstream: %v, falling back to river", err)
+	}
 	if s.riverClient == nil {
 		return errors.New("river client not configured")
 	}
 	opts := args.InsertOpts()
 	_, err := s.riverClient.Insert(ctx, args, &opts)
+	return err
+}
+
+func settleFailedChunk(msg pubsub.Message, isFinalAttempt bool) {
+	if isFinalAttempt {
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[vanadis] warning: error terming chunk job: %v", termErr)
+		}
+		return
+	}
+	delay := time.Duration(min(max(msg.NumDelivered(), 1), 3)) * 5 * time.Second
+	if nakErr := msg.NakWithDelay(delay); nakErr != nil {
+		log.Printf("[vanadis] warning: error naking chunk job: %v", nakErr)
+	}
+}
+
+// HandleExecuteChunkJob processes an aerial.jobs.vanadis.chunk execution message from JetStream.
+func (s *VanadisServer) HandleExecuteChunkJob(ctx context.Context, msg pubsub.Message) error {
+	var args ExecuteChunkArgs
+	if err := json.Unmarshal(msg.Data(), &args); err != nil {
+		log.Printf("[vanadis] failed to unmarshal chunk job payload: %v", err)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[vanadis] warning: error terming chunk job: %v", termErr)
+		}
+		return nil
+	}
+	isFinalAttempt := msg.NumDelivered() >= 3
+	err := s.ProcessExecuteChunk(ctx, args.BuildID, args.ChunkIndex, isFinalAttempt)
+	if err != nil {
+		settleFailedChunk(msg, isFinalAttempt)
+	}
+	return err
+}
+
+// StartJobConsumers subscribes the vanadis durable queue consumers to the configured bus.
+func (s *VanadisServer) StartJobConsumers(ctx context.Context) error {
+	if s.bus == nil {
+		return nil
+	}
+	_, err := s.bus.ConsumeQueue(ctx, "aerial.jobs.vanadis.chunk", "vanadis-chunk", s.HandleExecuteChunkJob)
 	return err
 }
 
@@ -1052,7 +1100,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.syncBuildWidget(r.Context(), build.ID, "")
-	if err := s.insertRiverJob(r.Context(), ExecuteChunkArgs{BuildID: buildID, ChunkIndex: 0}); err != nil {
+	if err := s.enqueueExecuteChunk(r.Context(), ExecuteChunkArgs{BuildID: buildID, ChunkIndex: 0}); err != nil {
 		if statusErr := s.store.UpdateBuildStatus(r.Context(), buildID, "failed"); statusErr != nil {
 			log.Printf("[vanadis] warning marking build %s failed after enqueue error: %v", buildID, statusErr)
 		}
@@ -1319,6 +1367,11 @@ func initVanadisJetStreamWithFactory(ctx context.Context, server *VanadisServer,
 		log.Printf("[vanadis] warning: failed to subscribe vanadis-dispatch: %v", err)
 	} else {
 		log.Println("[vanadis] Subscribed vanadis-dispatch queue consumer to aerial.dispatch.*")
+	}
+	if err := server.StartJobConsumers(ctx); err != nil {
+		log.Printf("[vanadis] warning: failed to subscribe vanadis-chunk: %v", err)
+	} else {
+		log.Println("[vanadis] Subscribed vanadis-chunk queue consumer to aerial.jobs.vanadis.chunk")
 	}
 	return b
 }

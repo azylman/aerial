@@ -47,6 +47,8 @@ type RouterServer struct {
 	gatewayLatencyFn         func() time.Duration
 	commitSHAPRs             sync.Map
 	gitHistory               gitHistoryCache
+	discordIngressRetryDelay time.Duration
+	discordIngressMaxAge     time.Duration
 }
 
 // NewRouterServer constructs a new RouterServer instance.
@@ -299,7 +301,7 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 		})
 		return
 	}
-	if s.riverClient != nil {
+	if s.bus != nil || s.riverClient != nil {
 		idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
 		if err := s.insertRiverJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
 			log.Printf("[synapse] [%s] ERROR: failed to insert job into river: %v", logPrefix, err)
@@ -457,7 +459,7 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 		Repo:     normalizeRepo(repo),
 		PRNumber: prNumber,
 	}
-	if s.riverClient != nil {
+	if s.bus != nil || s.riverClient != nil {
 		args.Status = s.resolvePRWidgetSyncStatus(ctx, args.Repo, prNumber)
 		if err := s.insertRiverJob(ctx, args); err != nil {
 			log.Printf("[synapse] [widget] error enqueuing widget sync into river: %v", err)
@@ -478,7 +480,7 @@ func (s *RouterServer) SyncBuildWidget(ctx context.Context, buildID, banner stri
 		BuildID: buildID,
 		Banner:  banner,
 	}
-	if s.riverClient != nil {
+	if s.bus != nil || s.riverClient != nil {
 		if err := s.insertRiverJob(ctx, args); err != nil {
 			log.Printf("[synapse] [widget] error enqueuing build widget sync into river: %v", err)
 			return fmt.Errorf("enqueue build widget sync: %w", err)
