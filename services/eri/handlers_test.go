@@ -703,35 +703,43 @@ func TestHandleStatusWidget(t *testing.T) {
 
 func runTranscriptSearchSuccessCases(t *testing.T, fake *dbtest.FakeStore, embedder func(context.Context, string) ([]float32, error), embedderCalled *bool) {
 	t.Helper()
-	w := runHTTP(handleTranscriptSearch(fake, embedder), http.MethodGet, "/api/transcripts/search?q=container&mode=auto&limit=5&tool=run_command&session=sess-mux-1", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
-	}
-	if !*embedderCalled {
-		t.Error("expected embedder to be invoked")
-	}
-	var res transcript.SearchResult
-	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || len(res.Sessions) != 1 || res.Sessions[0].SessionID != "sess-mux-1" {
-		t.Fatalf("unexpected search result: %+v, err: %v", res, err)
-	}
+	t.Run("search success and embedder", func(t *testing.T) {
+		w := runHTTP(handleTranscriptSearch(fake, embedder), http.MethodGet, "/api/transcripts/search?q=container&mode=auto&limit=5&tool=run_command&session=sess-mux-1", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+		if !*embedderCalled {
+			t.Error("expected embedder to be invoked")
+		}
+		var res transcript.SearchResult
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || len(res.Sessions) != 1 || res.Sessions[0].SessionID != "sess-mux-1" {
+			t.Fatalf("unexpected search result: %+v, err: %v", res, err)
+		}
+	})
 
-	sinceTime := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
-	w = runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&since="+url.QueryEscape(sinceTime), nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
-	}
+	t.Run("search with since and empty query steps mode", func(t *testing.T) {
+		sinceTime := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
+		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&since="+url.QueryEscape(sinceTime), nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+	})
 
-	w = runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&tool=shell", nil)
-	var resTool transcript.SearchResult
-	if err := json.Unmarshal(w.Body.Bytes(), &resTool); err != nil || len(resTool.Steps) != 1 || resTool.Steps[0].ToolName != "Bash" || resTool.Steps[0].ToolKind != "shell" || resTool.Steps[0].Stack != "fake" {
-		t.Fatalf("unexpected steps: %d %+v err=%v", w.Code, resTool, err)
-	}
+	t.Run("search tool kind matches native name", func(t *testing.T) {
+		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&tool=shell", nil)
+		var resTool transcript.SearchResult
+		if err := json.Unmarshal(w.Body.Bytes(), &resTool); err != nil || len(resTool.Steps) != 1 || resTool.Steps[0].ToolName != "Bash" || resTool.Steps[0].ToolKind != "shell" || resTool.Steps[0].Stack != "fake" {
+			t.Fatalf("unexpected steps: %d %+v err=%v", w.Code, resTool, err)
+		}
+	})
 
-	w = runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?q=container&stack=elsewhere", nil)
-	var resOther transcript.SearchResult
-	if err := json.Unmarshal(w.Body.Bytes(), &resOther); err != nil || w.Code != http.StatusOK || resOther.Total != 0 {
-		t.Fatalf("expected empty 200 result, got %d %+v err=%v", w.Code, resOther, err)
-	}
+	t.Run("search filtered to other stack", func(t *testing.T) {
+		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?q=container&stack=elsewhere", nil)
+		var resOther transcript.SearchResult
+		if err := json.Unmarshal(w.Body.Bytes(), &resOther); err != nil || w.Code != http.StatusOK || resOther.Total != 0 {
+			t.Fatalf("expected empty 200 result, got %d %+v err=%v", w.Code, resOther, err)
+		}
+	})
 }
 
 func runTranscriptStatsAndStepsCases(t *testing.T, fake *dbtest.FakeStore) {
@@ -830,9 +838,7 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 		})
 	}
 
-	t.Run("search success and embedder", func(t *testing.T) {
-		runTranscriptSearchSuccessCases(t, fake, embedder, &embedderCalled)
-	})
+	runTranscriptSearchSuccessCases(t, fake, embedder, &embedderCalled)
 
 	runTranscriptStatsAndStepsCases(t, fake)
 

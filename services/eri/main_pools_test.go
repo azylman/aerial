@@ -29,7 +29,7 @@ type voicePoolWiringCase struct {
 	wantGeminiAPI bool
 }
 
-func voicePoolWiringCases(voiceHome string) []voicePoolWiringCase {
+func voicePoolWiringCases() []voicePoolWiringCase {
 	mkCfg := func(engine, model, harnessKey, apiKey, tmpl string) *config.Config {
 		cd := &config.ConfigData{
 			HarnessAPIKey: harnessKey,
@@ -231,7 +231,7 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 	voiceHome := filepath.Join(tmpDir, "voice")
 	spawner := newMockMainDaemonSpawner()
 
-	tests := voicePoolWiringCases(voiceHome)
+	tests := voicePoolWiringCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -439,36 +439,25 @@ func TestPrewarmProcessPoolsSequentially(t *testing.T) {
 	if order[0] != "pool1" || order[1] != "pool2" || order[2] != "pool3" {
 		t.Errorf("expected sequential order [pool1, pool2, pool3], got %v", order)
 	}
-
-	t.Run("CancelledContext", func(t *testing.T) {
-		cancelCtx, cancelFn := context.WithCancel(context.Background())
-		cancelFn() // cancelled upfront
-
-		done := make(chan struct{})
-		pCancelled := &mockSequentialPool{
-			name: "pCancelled",
-			onInit: func(string) {
-				close(done)
-			},
-		}
-		PrewarmProcessPoolsSequentially(cancelCtx, pCancelled)
-		select {
-		case <-done:
-		case <-time.After(50 * time.Millisecond):
-		}
-	})
 }
 
 type mockErrClosingPool struct {
 	runner.AgentPool
+
+	closed bool
 }
 
 func (m *mockErrClosingPool) Close() error {
+	m.closed = true
 	return errors.New("mock pool close error")
 }
 
 func TestCloseAllBrainPools_Error(t *testing.T) {
-	closeAllBrainPools([]runner.AgentPool{&mockErrClosingPool{}})
+	pool := &mockErrClosingPool{}
+	closeAllBrainPools([]runner.AgentPool{pool})
+	if !pool.closed {
+		t.Fatal("expected pool Close to be called")
+	}
 }
 
 func TestNewAmbientContextResolver(t *testing.T) {

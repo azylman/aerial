@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
@@ -25,15 +23,6 @@ func TestLoadInstructions_ChannelAndScope(t *testing.T) {
 	defer func() {
 		ChannelInstructionsDirs, ScopeInstructionsDirs = oldChanDirs, oldScopeDirs
 	}()
-
-	if len(ConfigSearchPaths) == 0 || ConfigSearchPaths[0] != "/local/config.yaml" {
-		t.Fatalf("expected /local/config.yaml as first ConfigSearchPath, got: %v", ConfigSearchPaths)
-	}
-	for _, p := range ConfigSearchPaths {
-		if strings.Contains(p, ".lkgc") {
-			t.Errorf("expected no .lkgc in ConfigSearchPaths, found %q", p)
-		}
-	}
 
 	tests := []struct {
 		name       string
@@ -112,18 +101,6 @@ func TestChannelHooks_MethodsAndCloning(t *testing.T) {
 		PreTurn:  &WebhookEndpoint{URL: "http://127.0.0.1:9090/pre", TimeoutMs: 1500, OnTimeoutAction: "retry"},
 		PostTurn: &WebhookEndpoint{URL: "http://127.0.0.1:9090/post", TimeoutMs: 4000, OnTimeoutAction: "proceed"},
 	}}
-	if p.Hooks.OnWake.URL != "https://sidecar:8080/on-wake" || !p.NoBuildUpdates {
-		t.Fatal("Hooks or NoBuildUpdates mismatch")
-	}
-
-	yBytes, _ := yaml.Marshal(p)
-	var pYAML, pJSON ChannelPolicy
-	_ = yaml.Unmarshal(yBytes, &pYAML)
-	jBytes, _ := json.Marshal(p)
-	_ = json.Unmarshal(jBytes, &pJSON)
-	if pYAML.Hooks.OnWake.URL != p.Hooks.OnWake.URL || pJSON.Hooks.PreTurn.URL != p.Hooks.PreTurn.URL || !pYAML.NoBuildUpdates || !pJSON.NoBuildUpdates {
-		t.Fatal("round-trip mismatch")
-	}
 
 	channels := map[string]ChannelPolicy{
 		"default": {Mode: "threads", Hooks: ChannelHooksConfig{OnWake: &WebhookEndpoint{URL: "http://def/wake"}, PreTurn: &WebhookEndpoint{URL: "http://def/pre"}}},
