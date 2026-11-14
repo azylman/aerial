@@ -163,42 +163,43 @@ func ExtractActiveConversationFacts(ctx context.Context, store Store, client Oll
 		RecordOperation("extract", "success", time.Since(start).Seconds())
 		return nil
 	}
-	defer extractionMutex.Unlock()
 
 	for {
 		extractionRerunRequested.Store(false)
 
 		threadIDs, err := store.GetActiveConversationsForExtraction(ctx, activeHours)
 		if err != nil {
+			extractionMutex.Unlock()
 			RecordOperation("extract", "error", time.Since(start).Seconds())
 			return fmt.Errorf("failed to get active conversations: %w", err)
 		}
 
-		if len(threadIDs) == 0 {
+		if len(threadIDs) > 0 {
+			log.Printf("[Memory] Starting hourly fact extraction for %d active conversation threads...", len(threadIDs))
+
+			for _, tid := range threadIDs {
+				select {
+				case <-ctx.Done():
+					extractionMutex.Unlock()
+					RecordOperation("extract", "error", time.Since(start).Seconds())
+					return ctx.Err()
+				default:
+				}
+
+				if err := processThreadFacts(ctx, store, client, llmFunc, tid); err != nil {
+					log.Printf("[Memory] Error extracting facts for thread %s: %v", tid, err)
+				}
+			}
+		} else {
 			log.Printf("[Memory] No active conversations requiring fact extraction.")
-			RecordOperation("extract", "success", time.Since(start).Seconds())
-			return nil
 		}
 
-		log.Printf("[Memory] Starting hourly fact extraction for %d active conversation threads...", len(threadIDs))
-
-		for _, tid := range threadIDs {
-			select {
-			case <-ctx.Done():
-				RecordOperation("extract", "error", time.Since(start).Seconds())
-				return ctx.Err()
-			default:
-			}
-
-			if err := processThreadFacts(ctx, store, client, llmFunc, tid); err != nil {
-				log.Printf("[Memory] Error extracting facts for thread %s: %v", tid, err)
-			}
+		extractionMutex.Unlock()
+		if extractionRerunRequested.Load() && extractionMutex.TryLock() {
+			log.Printf("[Memory] Re-running fact extraction pass due to inbound turn completed event.")
+			continue
 		}
-
-		if !extractionRerunRequested.Load() {
-			break
-		}
-		log.Printf("[Memory] Re-running fact extraction pass due to inbound turn completed event.")
+		break
 	}
 
 	RecordOperation("extract", "success", time.Since(start).Seconds())

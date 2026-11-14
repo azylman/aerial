@@ -66,6 +66,7 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		initialDelay:    initDelay,
 		tickInterval:    tickInt,
 		reconnectFn:     cfg.ReconnectFn,
+		tickCount:       1,
 	}
 }
 

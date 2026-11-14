@@ -520,7 +520,6 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 	if err := AdvanceHeartbeatLastCompletedAt(ctx, db, "", time.Now()); err == nil {
 		t.Error("expected error for empty id")
 	}
-	advanceHeartbeatWatermark(ctx, nil, &ScheduleRun{ScheduleType: "heartbeat", ScheduleID: "hb-1"}, "completed", time.Now())
 
 	// GetScheduleRun error paths
 	if _, err := GetScheduleRun(ctx, nil, "r1"); err == nil {

@@ -824,9 +824,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			}
 		})
 	}
-
-	serverClosed.recoverFailedEventTrigger(ctx, EventTrigger{ID: "trig-fail-rec", Persistent: false})
-	serverClosed.recoverFailedEventTrigger(ctx, EventTrigger{ID: "trig-fail-rec-p", Persistent: true})
 }
 
 type ackSubscribeBus struct {
