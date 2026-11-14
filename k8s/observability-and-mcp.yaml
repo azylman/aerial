@@ -197,6 +197,12 @@ data:
         K8S-Logging.Parser  On
         K8S-Logging.Exclude On
 
+    [FILTER]
+        Name    lua
+        Match   *
+        script  /fluent-bit/etc/redact.lua
+        call    redact
+
     [OUTPUT]
         Name                     http
         Match                    kube.*
@@ -229,6 +235,174 @@ data:
         Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
         Time_Key    time
         Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+  redact.lua: |
+    -- Exact-value secret redaction. /redact/values holds every Infisical secret
+    -- value, NUL-terminated, written by the redact-values initContainer.
+    -- Never print values from this script: counts only.
+    local find, sub, gsub = string.find, string.sub, string.gsub
+    local MASK = "[REDACTED]"
+    local JSON_SECRET_KEYS = { "token", "access_token", "refresh_token", "client_secret", "password", "private_key" }
+    local JSON_UNESCAPE = { ["\\"] = "\\", ['"'] = '"', ["/"] = "/", n = "\n" }
+
+    local targets = {}
+    local seen = {}
+
+    local function add(v)
+      if v ~= "" and not seen[v] then
+        seen[v] = true
+        targets[#targets + 1] = v
+      end
+    end
+
+    local function trim_newline(v)
+      return (gsub(v, "\r?\n$", "", 1))
+    end
+
+    -- Each line of a PEM body, minus the armor lines.
+    local function add_pem_lines(v)
+      for line in string.gmatch(v .. "\n", "([^\n]*)\n") do
+        line = gsub(line, "\r$", "")
+        if line ~= "" and not find(line, "-----BEGIN", 1, true) and not find(line, "-----END", 1, true) then
+          add(line)
+        end
+      end
+    end
+
+    -- Register a secret plus its JSON-escaped spelling, which is how it appears
+    -- when a log line embeds it inside a JSON string that was not merged.
+    local function add_secret(v)
+      add(v)
+      add((gsub(gsub(gsub(v, "\\", "\\\\"), '"', '\\"'), "\n", "\\n")))
+      if find(v, "-----BEGIN", 1, true) then
+        add_pem_lines(v)
+      end
+    end
+
+    -- Raw (still escaped) contents of every "key": "..." string value in a JSON text.
+    local function json_string_values(text, key)
+      local out = {}
+      local pos = 1
+      local quoted = '"' .. key .. '"'
+      while true do
+        local _, e = find(text, quoted, pos, true)
+        if not e then break end
+        pos = e + 1
+        local _, q = find(text, "^%s*:%s*\"", pos)
+        if q then
+          local i = q + 1
+          while i <= #text do
+            local c = sub(text, i, i)
+            if c == "\\" then
+              i = i + 2
+            elseif c == '"' then
+              out[#out + 1] = sub(text, q + 1, i - 1)
+              break
+            else
+              i = i + 1
+            end
+          end
+          pos = i + 1
+        end
+      end
+      return out
+    end
+
+    local values, json_without_secrets = 0, 0
+
+    local f = io.open("/redact/values", "rb")
+    if f then
+      local blob = f:read("*a")
+      f:close()
+      for raw in string.gmatch(blob, "([^%z]*)%z") do
+        if raw ~= "" then
+          values = values + 1
+          if sub(raw, 1, 1) == "{" then
+            local found = 0
+            for _, key in ipairs(JSON_SECRET_KEYS) do
+              for _, esc in ipairs(json_string_values(raw, key)) do
+                local v = gsub(esc, "\\(.)", function(c) return JSON_UNESCAPE[c] or ("\\" .. c) end)
+                if v ~= "" then
+                  found = found + 1
+                  add_secret(v)
+                end
+              end
+            end
+            if found == 0 then json_without_secrets = json_without_secrets + 1 end
+          elseif find(raw, "-----BEGIN", 1, true) then
+            add_pem_lines(raw)
+          else
+            add_secret(trim_newline(raw))
+          end
+        end
+      end
+    end
+
+    -- Longest first so a secret that contains another is masked whole.
+    table.sort(targets, function(a, b)
+      if #a ~= #b then return #a > #b end
+      return a < b
+    end)
+    seen = nil
+
+    if #targets == 0 then
+      print(string.format("[redact] WARNING: 0 redaction targets loaded from %d secret values; logs pass through unredacted", values))
+    else
+      print(string.format("[redact] loaded %d redaction targets from %d secret values", #targets, values))
+    end
+    if json_without_secrets > 0 then
+      print(string.format("[redact] WARNING: %d JSON secret values had no recognized secret fields", json_without_secrets))
+    end
+
+    local function replace_all(s, t, start)
+      local parts, n, i = {}, 0, 1
+      local a, b = start, start + #t - 1
+      while a do
+        parts[n + 1] = sub(s, i, a - 1)
+        parts[n + 2] = MASK
+        n = n + 2
+        i = b + 1
+        a, b = find(s, t, i, true)
+      end
+      parts[n + 1] = sub(s, i)
+      return table.concat(parts)
+    end
+
+    local function scrub_string(s)
+      local changed = false
+      for k = 1, #targets do
+        local t = targets[k]
+        local a = find(s, t, 1, true)
+        if a then
+          s = replace_all(s, t, a)
+          changed = true
+        end
+      end
+      return s, changed
+    end
+
+    local function scrub_table(tbl)
+      local changed = false
+      for k, v in pairs(tbl) do
+        local tv = type(v)
+        if tv == "string" then
+          local s, c = scrub_string(v)
+          if c then
+            tbl[k] = s
+            changed = true
+          end
+        elseif tv == "table" then
+          if scrub_table(v) then changed = true end
+        end
+      end
+      return changed
+    end
+
+    function redact(tag, timestamp, record)
+      if #targets > 0 and scrub_table(record) then
+        return 2, timestamp, record
+      end
+      return 0, timestamp, record
+    end
 kind: ConfigMap
 metadata:
   annotations:
@@ -255,6 +429,37 @@ spec:
       labels:
         app.kubernetes.io/name: fluent-bit
     spec:
+      initContainers:
+        - command:
+            - sh
+            - -c
+            - |
+              set -eu
+              out=/redact/values
+              : > "$out"
+              n=0
+              for f in /secrets/*; do
+                [ -f "$f" ] || continue
+                cat "$f" >> "$out"
+                printf '\0' >> "$out"
+                n=$((n + 1))
+              done
+              echo "redact-values: wrote $n secret values"
+          image: cr.fluentbit.io/fluent/fluent-bit:3.2.4-debug
+          name: redact-values
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+          volumeMounts:
+            - mountPath: /secrets
+              name: shared-secrets
+              readOnly: true
+            - mountPath: /redact
+              name: redact-values
       containers:
         - image: cr.fluentbit.io/fluent/fluent-bit:3.2.4
           name: fluent-bit
@@ -276,6 +481,9 @@ spec:
             - mountPath: /etc/machine-id
               name: etcmachineid
               readOnly: true
+            - mountPath: /redact
+              name: redact-values
+              readOnly: true
       serviceAccountName: fluent-bit-sa
       tolerations:
         - operator: Exists
@@ -296,6 +504,13 @@ spec:
             path: /etc/machine-id
             type: File
           name: etcmachineid
+        - name: shared-secrets
+          secret:
+            secretName: shared-secrets
+        - emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+          name: redact-values
   updateStrategy:
     rollingUpdate:
       maxSurge: 0
