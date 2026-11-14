@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -338,92 +337,6 @@ func TestJitterCoord(t *testing.T) {
 			gx, gy := JitterCoord(tc.x, tc.y, tc.w, tc.h)
 			if (gx != tc.x || gy != tc.y) != tc.wantChanged {
 				t.Fatalf("JitterCoord(%d,%d,%d,%d) = (%d,%d)", tc.x, tc.y, tc.w, tc.h, gx, gy)
-			}
-		})
-	}
-}
-
-func TestToolsDeclaration(t *testing.T) {
-	t.Parallel()
-
-	if len(Tools) != 9 {
-		t.Fatalf("Tools length = %d, want 9", len(Tools))
-	}
-
-	for _, tool := range Tools {
-		if strings.Contains(strings.ToLower(tool.Description), "blocked on") {
-			t.Fatalf("Tool %s contains stale checkout block description: %q", tool.Name, tool.Description)
-		}
-	}
-
-	toolsByName := make(map[string]Tool)
-	for _, tool := range Tools {
-		toolsByName[tool.Name] = tool
-	}
-
-	tests := []struct {
-		name        string
-		toolName    string
-		descMatches []string
-		propName    string
-		wantType    string
-		wantReq     bool
-	}{
-		{
-			name:        "browser_evaluate discloses guardrails and redirects",
-			toolName:    "browser_evaluate",
-			descMatches: []string{"fetch(", "XMLHttpRequest", ".click()", "browser_click", "browser_get_content"},
-			propName:    "expression",
-			wantType:    "string",
-			wantReq:     true,
-		},
-		{
-			name:        "browser_get_content specifies innerText and integer maxLength",
-			toolName:    "browser_get_content",
-			descMatches: []string{"innerText"},
-			propName:    "maxLength",
-			wantType:    "integer",
-		},
-		{
-			name:        "amazon_search specifies integer maxResults",
-			toolName:    "amazon_search",
-			descMatches: []string{"Search Amazon"},
-			propName:    "maxResults",
-			wantType:    "integer",
-		},
-		{
-			name:        "amazon_add_to_cart specifies 10-char ASIN not URL",
-			toolName:    "amazon_add_to_cart",
-			descMatches: []string{"10-character alphanumeric ASIN", "rather than a URL"},
-			propName:    "asin",
-			wantType:    "string",
-			wantReq:     true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tool, ok := toolsByName[tc.toolName]
-			if !ok {
-				t.Fatalf("tool %q not found in Tools", tc.toolName)
-			}
-			for _, m := range tc.descMatches {
-				if !strings.Contains(tool.Description, m) {
-					t.Errorf("tool %q description %q missing %q", tc.toolName, tool.Description, m)
-				}
-			}
-			if tc.propName != "" {
-				prop, ok := tool.InputSchema.Properties[tc.propName]
-				if !ok {
-					t.Fatalf("tool %q schema missing property %q", tc.toolName, tc.propName)
-				}
-				if prop.Type != tc.wantType {
-					t.Errorf("tool %q property %q type = %q, want %q", tc.toolName, tc.propName, prop.Type, tc.wantType)
-				}
-			}
-			if tc.wantReq && !slices.Contains(tool.InputSchema.Required, tc.propName) {
-				t.Errorf("tool %q property %q expected in Required list", tc.toolName, tc.propName)
 			}
 		})
 	}

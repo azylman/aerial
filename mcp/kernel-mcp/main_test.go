@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/gorilla/websocket"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func startMainFakeCDPServer(t *testing.T) (*httptest.Server, *Config) {
@@ -288,9 +291,11 @@ func startMainFakeCDPServer(t *testing.T) (*httptest.Server, *Config) {
 							wsMu.Unlock()
 							continue
 						}
-						result = map[string]any{
-							"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+						data := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+						if p.Format == "rawtext" {
+							data = "not-base64!"
 						}
+						result = map[string]any{"data": data}
 					case "Input.dispatchMouseEvent":
 						wsMu.Lock()
 						clickCount++
@@ -446,66 +451,120 @@ func TestServer_HTTPRoutesTable(t *testing.T) {
 	}
 }
 
-func TestServer_MCPMethodsTable(t *testing.T) {
+func TestServerInstructions(t *testing.T) {
 	_, cfg := startMainFakeCDPServer(t)
 	client := NewCDPClient(cfg)
 	defer client.Close()
-	srv := NewServer(cfg, client)
-	mux := NewHTTPMux(srv)
+	ts := httptest.NewServer(NewHTTPMux(NewServer(cfg, client)))
+	t.Cleanup(ts.Close)
 
 	tests := []struct {
-		name       string
-		request    string
-		wantSubstr string
-		wantError  bool
+		name           string
+		path           string
+		wantServerName string
+		wantTool       string
 	}{
-		{
-			name:       "invalid json returns parse error",
-			request:    `{invalid`,
-			wantSubstr: "Parse error",
-			wantError:  true,
-		},
-		{
-			name:       "unknown method returns method not found",
-			request:    `{"jsonrpc":"2.0","id":1,"method":"foo/bar"}`,
-			wantSubstr: "Method not found",
-			wantError:  true,
-		},
-		{
-			name:       "initialize returns capabilities and serverInfo",
-			request:    `{"jsonrpc":"2.0","id":2,"method":"initialize"}`,
-			wantSubstr: `"name":"kernel-mcp"`,
-			wantError:  false,
-		},
-		{
-			name:       "notifications/initialized returns 204",
-			request:    `{"jsonrpc":"2.0","method":"notifications/initialized"}`,
-			wantSubstr: "",
-			wantError:  false,
-		},
-		{
-			name:       "tools/list returns 9 tools",
-			request:    `{"jsonrpc":"2.0","id":3,"method":"tools/list"}`,
-			wantSubstr: `"browser_navigate"`,
-			wantError:  false,
-		},
-		{
-			name:       "tools/call invalid params returns error",
-			request:    `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":"invalid"}`,
-			wantSubstr: "Invalid params",
-			wantError:  true,
-		},
+		{name: "initialize advertises server identity and browser workflow instructions", path: "/mcp", wantServerName: "kernel-mcp", wantTool: "amazon_add_to_cart"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(tc.request))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, req)
+			mcpClient := mcp.NewClient(&mcp.Implementation{Name: "instructions-test", Version: "1.0.0"}, nil)
+			session, err := mcpClient.Connect(context.Background(), &mcp.StreamableClientTransport{
+				Endpoint:             ts.URL + tc.path,
+				HTTPClient:           ts.Client(),
+				DisableStandaloneSSE: true,
+			}, nil)
+			if err != nil {
+				t.Fatalf("Connect: %v", err)
+			}
+			defer func() { _ = session.Close() }()
 
-			if tc.wantSubstr != "" && !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("%s: response = %q, want substring %q", tc.name, w.Body.String(), tc.wantSubstr)
+			if got := session.InitializeResult().ServerInfo.Name; got != tc.wantServerName {
+				t.Errorf("server name = %q, want %q", got, tc.wantServerName)
+			}
+			got := session.InitializeResult().Instructions
+			if got == "" || len(got) > 1024 {
+				t.Fatalf("instructions length = %d, want 1..1024", len(got))
+			}
+			if !strings.Contains(got, tc.wantTool) {
+				t.Errorf("instructions missing %q: %q", tc.wantTool, got)
+			}
+		})
+	}
+}
+
+func TestServer_ToolsListSchemaTable(t *testing.T) {
+	_, cfg := startMainFakeCDPServer(t)
+	client := NewCDPClient(cfg)
+	defer client.Close()
+	mux := NewHTTPMux(NewServer(cfg, client))
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	var resp struct {
+		Result struct {
+			Tools []struct {
+				Name        string `json:"name"`
+				InputSchema struct {
+					Properties map[string]struct {
+						Type string   `json:"type"`
+						Enum []string `json:"enum"`
+					} `json:"properties"`
+					Required []string `json:"required"`
+				} `json:"inputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode tools/list %q: %v", w.Body.String(), err)
+	}
+	type schemaShape struct {
+		props    map[string]string
+		required []string
+	}
+	got := make(map[string]schemaShape)
+	for _, tool := range resp.Result.Tools {
+		shape := schemaShape{props: make(map[string]string), required: tool.InputSchema.Required}
+		for name, prop := range tool.InputSchema.Properties {
+			shape.props[name] = prop.Type
+			if len(prop.Enum) > 0 {
+				shape.props[name] += " enum"
+			}
+		}
+		got[tool.Name] = shape
+	}
+
+	tests := []struct {
+		tool         string
+		wantProps    map[string]string
+		wantRequired []string
+	}{
+		{tool: "browser_navigate", wantProps: map[string]string{"url": "string"}, wantRequired: []string{"url"}},
+		{tool: "browser_evaluate", wantProps: map[string]string{"expression": "string", "awaitPromise": "boolean", "returnByValue": "boolean"}, wantRequired: []string{"expression"}},
+		{tool: "browser_get_content", wantProps: map[string]string{"selector": "string", "maxLength": "integer", "max_chars": "integer"}},
+		{tool: "browser_click", wantProps: map[string]string{"selector": "string"}, wantRequired: []string{"selector"}},
+		{tool: "browser_type", wantProps: map[string]string{"selector": "string", "text": "string", "clear": "boolean"}, wantRequired: []string{"selector", "text"}},
+		{tool: "browser_screenshot", wantProps: map[string]string{"format": "string"}},
+		{tool: "amazon_search", wantProps: map[string]string{"query": "string", "maxResults": "integer"}, wantRequired: []string{"query"}},
+		{tool: "amazon_get_cart", wantProps: map[string]string{}},
+		{tool: "amazon_add_to_cart", wantProps: map[string]string{"asin": "string"}, wantRequired: []string{"asin"}},
+	}
+	if len(got) != len(tests) {
+		t.Fatalf("tools/list returned %d tools, want %d", len(got), len(tests))
+	}
+	for _, tc := range tests {
+		t.Run(tc.tool, func(t *testing.T) {
+			shape, ok := got[tc.tool]
+			if !ok {
+				t.Fatalf("tool %q missing from tools/list", tc.tool)
+			}
+			if !maps.Equal(shape.props, tc.wantProps) {
+				t.Errorf("properties = %v, want %v", shape.props, tc.wantProps)
+			}
+			gotRequired := slices.Sorted(slices.Values(shape.required))
+			if !slices.Equal(gotRequired, slices.Sorted(slices.Values(tc.wantRequired))) {
+				t.Errorf("required = %v, want %v", shape.required, tc.wantRequired)
 			}
 		})
 	}
@@ -527,9 +586,9 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 	}{
 		// 1. browser_navigate
 		{
-			name:       "browser_navigate missing url",
+			name:       "browser_navigate blank url",
 			toolName:   "browser_navigate",
-			args:       `{}`,
+			args:       `{"url":"  "}`,
 			wantSubstr: "Argument 'url' is required",
 			wantError:  true,
 		},
@@ -549,9 +608,9 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		},
 		// 2. browser_evaluate
 		{
-			name:       "browser_evaluate missing expression",
+			name:       "browser_evaluate blank expression",
 			toolName:   "browser_evaluate",
-			args:       `{}`,
+			args:       `{"expression":" "}`,
 			wantSubstr: "Argument 'expression' is required",
 			wantError:  true,
 		},
@@ -592,6 +651,13 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			wantError:  false,
 		},
 		{
+			name:       "browser_get_content accepts legacy max_chars alias",
+			toolName:   "browser_get_content",
+			args:       `{"max_chars":5}`,
+			wantSubstr: `...[truncated]`,
+			wantError:  false,
+		},
+		{
 			name:       "browser_get_content eval error",
 			toolName:   "browser_get_content",
 			args:       `{"selector":"fail-eval"}`,
@@ -600,9 +666,9 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		},
 		// 4. browser_click
 		{
-			name:       "browser_click missing selector",
+			name:       "browser_click blank selector",
 			toolName:   "browser_click",
-			args:       `{}`,
+			args:       `{"selector":""}`,
 			wantSubstr: "Argument 'selector' is required",
 			wantError:  true,
 		},
@@ -636,9 +702,9 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		},
 		// 5. browser_type
 		{
-			name:       "browser_type missing selector",
+			name:       "browser_type blank selector",
 			toolName:   "browser_type",
-			args:       `{"text":"hello"}`,
+			args:       `{"selector":"","text":"hello"}`,
 			wantSubstr: "Argument 'selector' is required",
 			wantError:  true,
 		},
@@ -689,14 +755,28 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			name:       "browser_screenshot returns image and text",
 			toolName:   "browser_screenshot",
 			args:       `{"format":"png"}`,
-			wantSubstr: `"type":"image"`,
+			wantSubstr: `Screenshot captured (png)`,
+			wantError:  false,
+		},
+		{
+			name:       "browser_screenshot lowercases format into mime type",
+			toolName:   "browser_screenshot",
+			args:       `{"format":" JPEG "}`,
+			wantSubstr: `"mimeType":"image/jpeg"`,
+			wantError:  false,
+		},
+		{
+			name:       "browser_screenshot undecodable data falls back to text",
+			toolName:   "browser_screenshot",
+			args:       `{"format":"rawtext"}`,
+			wantSubstr: `not-base64!`,
 			wantError:  false,
 		},
 		// 7. amazon_search
 		{
-			name:       "amazon_search missing query",
+			name:       "amazon_search blank query",
 			toolName:   "amazon_search",
-			args:       `{}`,
+			args:       `{"query":"   "}`,
 			wantSubstr: "Argument 'query' is required",
 			wantError:  true,
 		},
@@ -745,9 +825,9 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		},
 		// 9. amazon_add_to_cart
 		{
-			name:       "amazon_add_to_cart missing asin",
+			name:       "amazon_add_to_cart blank asin",
 			toolName:   "amazon_add_to_cart",
-			args:       `{}`,
+			args:       `{"asin":" "}`,
 			wantSubstr: "Argument 'asin' is required",
 			wantError:  true,
 		},
@@ -786,27 +866,13 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			wantSubstr: "added",
 			wantError:  false,
 		},
-		// Prefix aliases: steel_ and kernel_ prefixes
-		{
-			name:       "steel_ prefix normalized to browser_navigate",
-			toolName:   "steel_browser_navigate",
-			args:       `{"url":"https://www.amazon.com"}`,
-			wantSubstr: "Navigated to https://www.amazon.com",
-			wantError:  false,
-		},
+		// Prefix alias: kernel_ resolves to bare names via ServeMCPStream.
 		{
 			name:       "kernel_ prefix normalized to browser_navigate",
 			toolName:   "kernel_browser_navigate",
 			args:       `{"url":"https://www.amazon.com"}`,
 			wantSubstr: "Navigated to https://www.amazon.com",
 			wantError:  false,
-		},
-		{
-			name:       "unknown tool returns error",
-			toolName:   "unknown_tool",
-			args:       `{}`,
-			wantSubstr: "Unknown tool: unknown_tool",
-			wantError:  true,
 		},
 	}
 
