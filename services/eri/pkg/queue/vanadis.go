@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -76,14 +77,12 @@ func (p *WorkerPool) setupDispatchTurn(d db.Dispatch, te *turnExecution) func() 
 			if strings.TrimSpace(te.turnStatus) == "" {
 				return
 			}
-			var pubErr error
 			if p.EventBus() != nil {
 				pubCtx, cancel := context.WithTimeout(context.WithoutCancel(te.turnCtxValue()), 5*time.Second)
-				pubErr = p.publishDispatchOutcome(pubCtx, d, te.turnStatus, te.turnError, te.execStart, time.Now().UTC())
+				if err := p.publishDispatchOutcome(pubCtx, d, te.turnStatus, te.turnError, te.execStart, time.Now().UTC()); err != nil {
+					log.Printf("[WorkerPool] Warning publishing dispatch outcome for %s: %v", d.ID, err)
+				}
 				cancel()
-			}
-			if d.Source == "vanadis" && chunkID != "" && (p.EventBus() == nil || pubErr != nil) {
-				p.notifyVanadisChunkOutcome(chunkID, te.turnStatus, te.turnError, d.ID)
 			}
 		}
 	}

@@ -4160,16 +4160,15 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			wantRespText: "all systems normal",
 		},
 		{
-			name:               "vanadis chunk step streaming to build card widget",
-			source:             "vanadis",
-			sessionID:          "vanadis-chunk-step-live",
-			prompt:             "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-streaming-live\nChunk ID: chunk-step-live\n=== Active Chunk (Chunk 1 of 1) ===\nImplement step streaming",
-			respJSON:           `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"step streaming succeeded"}`,
-			wantStatus:         db.StatusCompleted,
-			wantRespText:       "step streaming succeeded",
-			seedWidget:         true,
-			emitStep:           true,
-			wantVanadisChunkID: "chunk-step-live",
+			name:         "vanadis chunk step streaming to build card widget",
+			source:       "vanadis",
+			sessionID:    "vanadis-chunk-step-live",
+			prompt:       "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-streaming-live\nChunk ID: chunk-step-live\n=== Active Chunk (Chunk 1 of 1) ===\nImplement step streaming",
+			respJSON:     `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"step streaming succeeded"}`,
+			wantStatus:   db.StatusCompleted,
+			wantRespText: "step streaming succeeded",
+			seedWidget:   true,
+			emitStep:     true,
 		},
 		{
 			name:               "cold widget cache on PR CI remediation lazily syncs widget and streams steps",
@@ -4371,21 +4370,6 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			if tc.wantSyncedRepo != "" {
 				if syncedPayload.Repo != tc.wantSyncedRepo || syncedPayload.PRNumber != tc.wantSyncedPRNumber {
 					t.Fatalf("syncedPayload = %+v, want repo=%q pr=%d", syncedPayload, tc.wantSyncedRepo, tc.wantSyncedPRNumber)
-				}
-			}
-
-			if tc.wantVanadisChunkID != "" {
-				vanadisReqsMu.Lock()
-				var foundComplete bool
-				for _, req := range vanadisReqs {
-					if req.Path == "/chunks/complete" && req.Body["chunk_id"] == tc.wantVanadisChunkID {
-						foundComplete = true
-						break
-					}
-				}
-				vanadisReqsMu.Unlock()
-				if !foundComplete {
-					t.Fatalf("expected /chunks/complete call for chunk %q, got: %+v", tc.wantVanadisChunkID, vanadisReqs)
 				}
 			}
 
@@ -4642,13 +4626,12 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 			wantMinRetries: 1,
 		},
 		{
-			name:              "vanadis chunk exhausts retries and notifies vanadis failure",
-			source:            "vanadis",
-			sessionID:         "vanadis-chunk-fail-term",
-			prompt:            "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: b-fail\nChunk ID: chunk-fail-term\nfail this chunk",
-			wantStatus:        db.StatusFailed,
-			wantMinRetries:    1,
-			wantVanadisFailID: "chunk-fail-term",
+			name:           "vanadis chunk exhausts retries to failed status",
+			source:         "vanadis",
+			sessionID:      "vanadis-chunk-fail-term",
+			prompt:         "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: b-fail\nChunk ID: chunk-fail-term\nfail this chunk",
+			wantStatus:     db.StatusFailed,
+			wantMinRetries: 1,
 		},
 	}
 
@@ -4657,24 +4640,6 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 			t.Parallel()
 			store := dbtest.NewFakeStore()
 			ctx := context.Background()
-
-			var vanadisReqsMu sync.Mutex
-			var vanadisReqs []struct {
-				Path string
-				Body map[string]string
-			}
-			vanadisSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var b map[string]string
-				_ = json.NewDecoder(r.Body).Decode(&b)
-				vanadisReqsMu.Lock()
-				vanadisReqs = append(vanadisReqs, struct {
-					Path string
-					Body map[string]string
-				}{Path: r.URL.Path, Body: b})
-				vanadisReqsMu.Unlock()
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer vanadisSrv.Close()
 
 			disp := db.Dispatch{
 				ID:        uuid.New().String(),
@@ -4692,7 +4657,6 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 				MaxAttempts:    2,
 				BackoffBase:    1 * time.Millisecond,
 				TimeoutMinutes: 1,
-				VanadisURL:     vanadisSrv.URL,
 				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 					if attempts.Add(1) == 2 {
 						close(exhausted)
@@ -4723,45 +4687,6 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 			if d.RetryCount < tc.wantMinRetries {
 				t.Fatalf("expected retry_count >= %d, got %d", tc.wantMinRetries, d.RetryCount)
 			}
-
-			if tc.wantVanadisFailID != "" {
-				vanadisReqsMu.Lock()
-				var foundFail bool
-				for _, req := range vanadisReqs {
-					if req.Path == "/chunks/fail" && req.Body["chunk_id"] == tc.wantVanadisFailID && req.Body["reason"] != "" {
-						foundFail = true
-						break
-					}
-				}
-				vanadisReqsMu.Unlock()
-				if !foundFail {
-					t.Fatalf("expected /chunks/fail call for chunk %q, got: %+v", tc.wantVanadisFailID, vanadisReqs)
-				}
-			}
-		})
-	}
-}
-
-func TestWorkerPool_ResolveVanadisURL(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		pool *WorkerPool
-		want string
-	}{
-		{name: "nil pool", pool: nil, want: ""},
-		{name: "configured URL trimmed", pool: &WorkerPool{cfg: WorkerPoolConfig{VanadisURL: "http://vanadis.local:4025///"}}, want: "http://vanadis.local:4025"},
-		{name: "appCfg fallback", pool: &WorkerPool{appCfg: config.NewFromData(&config.ConfigData{VanadisURL: "http://vanadis.cfg:4025///"})}, want: "http://vanadis.cfg:4025"},
-		{name: "empty when unconfigured", pool: &WorkerPool{}, want: ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := tc.pool.resolveVanadisURL(); got != tc.want {
-				t.Fatalf("resolveVanadisURL() = %q, want %q", got, tc.want)
-			}
 		})
 	}
 }
@@ -4788,183 +4713,6 @@ func TestWorkerPool_ResolveSynapseURL(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestWorkerPool_NotifyVanadisChunkOutcome(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		chunkID      string
-		dispatchID   string
-		turnStatus   string
-		turnError    string
-		emptyURL     bool
-		cancelPool   bool
-		serverStatus int
-		wantEndpoint string
-		wantBody     map[string]string
-		wantCalls    int
-	}{
-		{
-			name:       "empty chunk ID returns immediately",
-			chunkID:    "",
-			turnStatus: "success",
-			wantCalls:  0,
-		},
-		{
-			name:       "empty vanadis URL returns immediately",
-			chunkID:    "c-1",
-			turnStatus: "success",
-			emptyURL:   true,
-			wantCalls:  0,
-		},
-		{
-			name:       "cancelled pool context makes no calls",
-			chunkID:    "c-shutdown",
-			turnStatus: "success",
-			cancelPool: true,
-			wantCalls:  0,
-		},
-		{
-			name:         "success notifies chunks complete",
-			chunkID:      "c-success",
-			turnStatus:   "success",
-			wantEndpoint: "/chunks/complete",
-			wantBody:     map[string]string{"chunk_id": "c-success"},
-			wantCalls:    1,
-		},
-		{
-			name:         "success notifies chunks complete with dispatch ID",
-			chunkID:      "c-success-disp",
-			dispatchID:   "disp-vanadis-999",
-			turnStatus:   "success",
-			wantEndpoint: "/chunks/complete",
-			wantBody:     map[string]string{"chunk_id": "c-success-disp", "dispatch_id": "disp-vanadis-999"},
-			wantCalls:    1,
-		},
-		{
-			name:         "failed notifies chunks fail with error detail",
-			chunkID:      "c-fail",
-			turnStatus:   "failed",
-			turnError:    "build compilation error",
-			wantEndpoint: "/chunks/fail",
-			wantBody:     map[string]string{"chunk_id": "c-fail", "reason": "build compilation error"},
-			wantCalls:    1,
-		},
-		{
-			name:         "timeout without error falls back to default reason",
-			chunkID:      "c-timeout",
-			turnStatus:   "timeout",
-			turnError:    "",
-			wantEndpoint: "/chunks/fail",
-			wantBody:     map[string]string{"chunk_id": "c-timeout", "reason": "dispatch turn timeout"},
-			wantCalls:    1,
-		},
-		{
-			name:       "failed with interrupted by shutdown makes no calls",
-			chunkID:    "c-shutdown-fail",
-			turnStatus: "failed",
-			turnError:  "interrupted by shutdown",
-			wantCalls:  0,
-		},
-		{
-			name:       "failed with context cancelled during execution makes no calls",
-			chunkID:    "c-ctx-cancel-fail",
-			turnStatus: "failed",
-			turnError:  "context cancelled during execution",
-			wantCalls:  0,
-		},
-		{
-			name:       "timeout with interrupted by shutdown makes no calls",
-			chunkID:    "c-shutdown-timeout",
-			turnStatus: "timeout",
-			turnError:  "  Interrupted by Shutdown  ",
-			wantCalls:  0,
-		},
-		{
-			name:       "unhandled status makes no calls",
-			chunkID:    "c-cancelled",
-			turnStatus: "cancelled",
-			wantCalls:  0,
-		},
-		{
-			name:         "server error 500 does not panic",
-			chunkID:      "c-err500",
-			turnStatus:   "success",
-			serverStatus: http.StatusInternalServerError,
-			wantEndpoint: "/chunks/complete",
-			wantBody:     map[string]string{"chunk_id": "c-err500"},
-			wantCalls:    1,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var reqsMu sync.Mutex
-			var reqs []struct {
-				path string
-				body map[string]string
-			}
-
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var b map[string]string
-				_ = json.NewDecoder(r.Body).Decode(&b)
-				reqsMu.Lock()
-				reqs = append(reqs, struct {
-					path string
-					body map[string]string
-				}{path: r.URL.Path, body: b})
-				reqsMu.Unlock()
-				status := http.StatusOK
-				if tc.serverStatus != 0 {
-					status = tc.serverStatus
-				}
-				w.WriteHeader(status)
-			}))
-			defer srv.Close()
-
-			url := srv.URL
-			if tc.emptyURL {
-				url = ""
-			}
-
-			poolCtx, cancelPool := context.WithCancel(context.Background())
-			if tc.cancelPool {
-				cancelPool()
-			} else {
-				defer cancelPool()
-			}
-
-			pool := &WorkerPool{ctx: poolCtx, cancel: cancelPool, cfg: WorkerPoolConfig{VanadisURL: url}}
-			if tc.dispatchID != "" {
-				pool.notifyVanadisChunkOutcome(tc.chunkID, tc.turnStatus, tc.turnError, tc.dispatchID)
-			} else {
-				pool.notifyVanadisChunkOutcome(tc.chunkID, tc.turnStatus, tc.turnError)
-			}
-
-			reqsMu.Lock()
-			defer reqsMu.Unlock()
-			if len(reqs) != tc.wantCalls {
-				t.Fatalf("reqs count = %d, want %d", len(reqs), tc.wantCalls)
-			}
-			if tc.wantCalls > 0 {
-				if reqs[0].path != tc.wantEndpoint {
-					t.Fatalf("endpoint = %q, want %q", reqs[0].path, tc.wantEndpoint)
-				}
-				for k, v := range tc.wantBody {
-					if reqs[0].body[k] != v {
-						t.Fatalf("body[%q] = %q, want %q", k, reqs[0].body[k], v)
-					}
-				}
-			}
-		})
-	}
-
-	// Also test nil pool safety
-	var nilPool *WorkerPool
-	nilPool.notifyVanadisChunkOutcome("c-nil", "success", "")
 }
 
 func TestDispatchPromptAssembly(t *testing.T) {

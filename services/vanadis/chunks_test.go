@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 func TestHelpers_WidgetStatus(t *testing.T) {
@@ -1367,11 +1369,15 @@ func TestServer_CompleteChunkRunsStallCheck(t *testing.T) {
 	defer brain.Close()
 	store := newMemoryVanadisStore()
 	_ = store.CreateBuild(context.Background(), mkBuild("b-done", "123456789012345678", "T", "O", "running"), []VanadisChunk{mkChunk("c-done", "b-done", 0, "Done", "do it", "", "running")})
-	mux := SetupMux(NewVanadisServer(Config{BrainURL: brain.URL, SynapseURL: brain.URL}, store, &mockRiverInserter{}, brain.Client()))
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/chunks/complete", strings.NewReader(`{"chunk_id":"c-done","dispatch_id":"vanadis-c-done-turn-0"}`)))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code = %d, want 200: %s", rec.Code, rec.Body.String())
+	server := NewVanadisServer(Config{BrainURL: brain.URL, SynapseURL: brain.URL}, store, &mockRiverInserter{}, brain.Client())
+	ev := pubsub.DispatchOutcomeEvent{
+		DispatchID:     "vanadis-c-done-turn-0",
+		VanadisChunkID: "c-done",
+		Status:         "completed",
+	}
+	evData, _ := json.Marshal(ev)
+	if err := server.HandleDispatchOutcomeEvent(context.Background(), &memoryMsg{data: evData, subject: "aerial.dispatch.completed"}); err != nil {
+		t.Fatalf("HandleDispatchOutcomeEvent failed: %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
