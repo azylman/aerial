@@ -5,6 +5,10 @@ import (
 	"errors"
 	"log"
 	"time"
+
+	"github.com/azylman/aerial/pkg/tracing"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // DefaultWorkerInitialDelay is the default initial delay before the worker ticks.
@@ -125,7 +129,9 @@ func (w *Worker) runDaily(ctx context.Context) {
 		return
 	}
 	if w.ollama != nil && w.llmClient != nil {
-		consolidated, err := ConsolidateFactClusters(ctx, w.store, w.ollama, w.llmClient)
+		spanCtx, span := tracing.Tracer().Start(ctx, "coven.consolidate", trace.WithNewRoot())
+		consolidated, err := ConsolidateFactClusters(spanCtx, w.store, w.ollama, w.llmClient)
+		endSchedulerSpan(span, err)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("[Memory Worker] Fact consolidation dreaming failed: %v", err)
 		} else {
@@ -133,11 +139,21 @@ func (w *Worker) runDaily(ctx context.Context) {
 		}
 	}
 	if w.publisher != nil && w.llmClient != nil {
-		prNum, err := ConsolidateProceduralSkills(ctx, w.store, w.ollama, w.llmClient, w.publisher, w.customSkillsDir)
+		spanCtx, span := tracing.Tracer().Start(ctx, "coven.consolidate_skills", trace.WithNewRoot())
+		prNum, err := ConsolidateProceduralSkills(spanCtx, w.store, w.ollama, w.llmClient, w.publisher, w.customSkillsDir)
+		endSchedulerSpan(span, err)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("[Memory Worker] Procedural skill consolidation failed: %v", err)
 		} else if prNum > 0 {
 			log.Printf("[Memory Worker] Procedural skill consolidation opened PR #%d", prNum)
 		}
 	}
+}
+
+// endSchedulerSpan closes a scheduler root span, marking it Error when the run failed.
+func endSchedulerSpan(span trace.Span, err error) {
+	if err != nil {
+		span.SetStatus(codes.Error, "scheduled run failed")
+	}
+	span.End()
 }

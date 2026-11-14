@@ -93,7 +93,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/facts", s.handleFacts)
 	mux.HandleFunc("/context", s.handleContext)
-	mux.HandleFunc("/consolidate", s.handleConsolidate)
+	mux.Handle("/consolidate", tracing.Middleware("coven", http.HandlerFunc(s.handleConsolidate)))
 
 	mcpBridge := tracing.Middleware("coven", http.HandlerFunc(s.handleMCP))
 	mux.Handle("/mcp", mcpBridge)
