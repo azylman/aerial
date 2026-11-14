@@ -59,7 +59,7 @@ func NewServer(
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "prospera",
 		Version: "1.0.0",
-	}, nil)
+	}, &mcp.ServerOptions{Instructions: serverInstructions})
 	RegisterProsperaMCPTools(mcpServer, toolHandler)
 
 	streamHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {

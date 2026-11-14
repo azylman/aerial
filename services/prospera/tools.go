@@ -424,6 +424,14 @@ func (h *ToolHandler) EnsurePhoneNumber(ctx context.Context, args EnsurePhoneNum
 	}, nil
 }
 
+// serverInstructions is sent on initialize so clients that defer tool schemas
+// still learn the real-world side effects and call lifecycle.
+const serverInstructions = `Calls and SMS reach real people and cost money: confirm the recipient and purpose with the requester before initiate_call or send_sms.
+Numbers: E.164 ("+15551234567"); 10-digit US numbers and 11-digit numbers starting with 1 are normalized, spaces/dashes/dots/parens are stripped, anything else is rejected.
+Call modes: "conversation" (default, interactive) or "notify" (one-way announcement). The brief's approvals default to zero spend; widen them only on explicit instruction.
+Lifecycle: initiate_call returns a call_id -> get_call_status (live transcript, summary) or list_calls -> steer_call ("guidance" by default, "say" to speak verbatim) -> end_call (hangs up and triggers the summary report).
+ensure_phone_number is one-time provisioning, not a per-call step: it rewires webhooks on the account's existing Twilio number or, if none exists, purchases a new one (billing). Calls send from the configured number; send_sms uses it unless from is set.`
+
 // RegisterProsperaMCPTools registers all 8 Prospera control tools onto the given MCP server.
 func RegisterProsperaMCPTools(s *mcp.Server, h *ToolHandler) {
 	mcp.AddTool(s, &mcp.Tool{

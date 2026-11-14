@@ -38,6 +38,18 @@ func (s *Server) InvalidateSchedulesCache() {
 	s.schedulesCache.mu.Unlock()
 }
 
+// serverInstructions is sent on initialize so clients that defer tool schemas
+// still learn cross-tool routing, ID provenance, and defaults.
+const serverInstructions = `Pick the schedule type by delivery semantics:
+- schedule_recurring: unconditional message on every cron tick (fresh thread per run).
+- schedule_heartbeat: silent periodic polling that should message only when state materially changes.
+- schedule_once: one-time reminder; run_at takes a relative duration ("30m", "2 hours", "1d") or a timestamp.
+- watch_event: one-shot trigger fired by an external event (vanadis_build, vanadis_chunk, flux, github, plus configured extra sources).
+Every create call returns the ID the other tools need; list_schedules shows recurring, one-shot and heartbeat IDs but not event watches (use list_event_watches / cancel_event_watch).
+To change a schedule, prefer update_cron_schedule or update_heartbeat over cancel_schedule + recreate so the schedule ID stays stable; get_schedule returns the full prompt.
+Omitted timezone falls back to the server's configured timezone for recurring, heartbeat and one-shot schedules; pass an IANA name for anything else.
+cancel_schedule deletes permanently.`
+
 func NewServer(handler *ToolHandler, dispatcher ...PromptDispatcher) *Server {
 	if handler == nil {
 		panic("server: handler cannot be nil")
@@ -58,7 +70,7 @@ func NewServer(handler *ToolHandler, dispatcher ...PromptDispatcher) *Server {
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "haro",
 		Version: "1.0.0",
-	}, nil)
+	}, &mcp.ServerOptions{Instructions: serverInstructions})
 
 	s := &Server{
 		handler:    handler,
