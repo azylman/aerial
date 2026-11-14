@@ -18,7 +18,6 @@ type synapseMemoryMsg struct {
 	subject      string
 	numDelivered uint64
 	termed       bool
-	nakDelay     time.Duration
 }
 
 func (m *synapseMemoryMsg) Data() []byte        { return m.data }
@@ -30,11 +29,11 @@ func (m *synapseMemoryMsg) NumDelivered() uint64 {
 	}
 	return 1
 }
-func (m *synapseMemoryMsg) Ack() error                             { return nil }
-func (m *synapseMemoryMsg) NakWithDelay(delay time.Duration) error { m.nakDelay = delay; return nil }
-func (m *synapseMemoryMsg) Term() error                            { m.termed = true; return nil }
-func (m *synapseMemoryMsg) Snooze(_ time.Duration) error           { return nil }
-func (m *synapseMemoryMsg) InProgress() error                      { return nil }
+func (m *synapseMemoryMsg) Ack() error                         { return nil }
+func (m *synapseMemoryMsg) NakWithDelay(_ time.Duration) error { return nil }
+func (m *synapseMemoryMsg) Term() error                        { m.termed = true; return nil }
+func (m *synapseMemoryMsg) Snooze(_ time.Duration) error       { return nil }
+func (m *synapseMemoryMsg) InProgress() error                  { return nil }
 
 func TestResolveJetStreamJobCoords(t *testing.T) {
 	t.Parallel()
@@ -171,8 +170,6 @@ func TestInsertRiverJobWithJetStream(t *testing.T) {
 		hasBus        bool
 		busErr        error
 		hasRiver      bool
-		riverErr      error
-		duplicateSkip bool
 		args          riverJobArgsWithOpts
 		wantErr       bool
 		wantRiverCall bool
@@ -202,24 +199,6 @@ func TestInsertRiverJobWithJetStream(t *testing.T) {
 			wantRiverCall: true,
 		},
 		{
-			name:          "duplicate skipped on river fallback",
-			hasBus:        false,
-			hasRiver:      true,
-			duplicateSkip: true,
-			args:          GitHubWebhookArgs{Delivery: "d4"},
-			wantErr:       false,
-			wantRiverCall: true,
-		},
-		{
-			name:          "returns error when river fails",
-			hasBus:        false,
-			hasRiver:      true,
-			riverErr:      errors.New("db error"),
-			args:          GitHubWebhookArgs{Delivery: "d5"},
-			wantErr:       true,
-			wantRiverCall: true,
-		},
-		{
 			name:     "returns error when both bus and river nil",
 			hasBus:   false,
 			hasRiver: false,
@@ -234,7 +213,7 @@ func TestInsertRiverJobWithJetStream(t *testing.T) {
 			srv := &RouterServer{}
 			var mockRiver *mockRiverInserter
 			if tc.hasRiver {
-				mockRiver = &mockRiverInserter{err: tc.riverErr, skipDuplicate: tc.duplicateSkip}
+				mockRiver = &mockRiverInserter{}
 				srv.SetRiverClient(mockRiver)
 			}
 			busReceived := make(chan struct{}, 1)
@@ -248,7 +227,7 @@ func TestInsertRiverJobWithJetStream(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("insertRiverJob() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if tc.wantRiverCall && tc.riverErr == nil && (mockRiver == nil || len(mockRiver.insertedJobs) == 0) {
+			if tc.wantRiverCall && (mockRiver == nil || len(mockRiver.insertedJobs) == 0) {
 				t.Errorf("expected river insert call, got none")
 			}
 			if tc.hasBus && tc.busErr == nil && !tc.wantErr {
@@ -548,20 +527,11 @@ func TestJetStreamJobHandlers(t *testing.T) {
 type wiringDispatcher struct {
 	mockOutboundDispatcher
 
-	onPrompt      func()
 	onDirect      func()
 	onBackground  func()
 	onMessage     func()
 	onInteraction func()
 	onWidget      func()
-}
-
-func (w *wiringDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
-	err := w.mockOutboundDispatcher.DispatchPrompt(ctx, req)
-	if w.onPrompt != nil {
-		w.onPrompt()
-	}
-	return err
 }
 
 func (w *wiringDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {

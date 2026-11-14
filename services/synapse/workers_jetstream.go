@@ -152,6 +152,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 		return nil
 	}
 
+	start := time.Now()
 	delay := s.discordIngressRetryDelay
 	if delay <= 0 {
 		delay = 2 * time.Second
@@ -167,7 +168,11 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		isStale := time.Since(start) >= maxAge
 		if args.Message != nil && !args.Message.Timestamp.IsZero() && time.Since(args.Message.Timestamp) >= maxAge {
+			isStale = true
+		}
+		if isStale {
 			RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "ttl_expired")
 			if termErr := msg.Term(); termErr != nil {
 				log.Printf("[synapse] [jetstream] warning: error terming expired discord ingress job: %v", termErr)

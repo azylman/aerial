@@ -782,6 +782,29 @@ func (s *VanadisServer) enqueueExecuteChunk(ctx context.Context, args ExecuteChu
 	return err
 }
 
+func chunkNakBackoffDelay(numDelivered uint64) time.Duration {
+	switch numDelivered {
+	case 1:
+		return 5 * time.Second
+	case 2:
+		return 15 * time.Second
+	default:
+		return 30 * time.Second
+	}
+}
+
+func settleFailedChunk(msg pubsub.Message, isFinalAttempt bool) {
+	if isFinalAttempt {
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[vanadis] warning: error terming chunk job: %v", termErr)
+		}
+		return
+	}
+	if nakErr := msg.NakWithDelay(chunkNakBackoffDelay(msg.NumDelivered())); nakErr != nil {
+		log.Printf("[vanadis] warning: error naking chunk job: %v", nakErr)
+	}
+}
+
 // HandleExecuteChunkJob processes an aerial.jobs.vanadis.chunk execution message from JetStream.
 func (s *VanadisServer) HandleExecuteChunkJob(ctx context.Context, msg pubsub.Message) error {
 	var args ExecuteChunkArgs
@@ -794,10 +817,8 @@ func (s *VanadisServer) HandleExecuteChunkJob(ctx context.Context, msg pubsub.Me
 	}
 	isFinalAttempt := msg.NumDelivered() >= 3
 	err := s.ProcessExecuteChunk(ctx, args.BuildID, args.ChunkIndex, isFinalAttempt)
-	if err != nil && isFinalAttempt {
-		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[vanadis] warning: error terming chunk job: %v", termErr)
-		}
+	if err != nil {
+		settleFailedChunk(msg, isFinalAttempt)
 	}
 	return err
 }

@@ -1372,10 +1372,27 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("HandleExecuteChunkJob() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if tc.wantTerm && !msg.termed {
-				t.Errorf("expected msg.Term() called")
+			if msg.termed != tc.wantTerm {
+				t.Errorf("msg.termed = %v, want %v", msg.termed, tc.wantTerm)
 			}
 		})
+	}
+}
+
+func TestChunkNakBackoffDelay(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		numDelivered uint64
+		want         time.Duration
+	}{
+		{1, 5 * time.Second},
+		{2, 15 * time.Second},
+		{3, 30 * time.Second},
+	}
+	for _, tc := range cases {
+		if got := chunkNakBackoffDelay(tc.numDelivered); got != tc.want {
+			t.Errorf("chunkNakBackoffDelay(%d) = %v, want %v", tc.numDelivered, got, tc.want)
+		}
 	}
 }
 
