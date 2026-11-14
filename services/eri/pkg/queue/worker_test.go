@@ -1314,7 +1314,7 @@ func TestWorkerPool_ProcessInteractiveTurn_PublishesTurnCompleted(t *testing.T) 
 	}
 	_ = insertMessage(store, msg)
 
-	pool.processInteractiveTurn([]db.Message{msg})
+	pool.processBurst([]db.Message{msg})
 
 	gotMsg := tracker.waitForFirst(t)
 	if gotMsg.subject != "aerial.turn.completed" {

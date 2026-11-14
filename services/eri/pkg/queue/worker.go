@@ -390,11 +390,6 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 	return true
 }
 
-// processInteractiveTurn processes an interactive message burst, delegating to processBurst.
-func (p *WorkerPool) processInteractiveTurn(burst []db.Message, scopeKeyOpt ...string) {
-	p.processBurst(burst, scopeKeyOpt...)
-}
-
 // publishTurnCompleted publishes a pubsub.TurnCompletedEvent to aerial.turn.completed on AERIAL_EVENTS.
 func (p *WorkerPool) publishTurnCompleted(ctx context.Context, sessionID, conversationID, source string) error {
 	if p == nil {
