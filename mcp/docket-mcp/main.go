@@ -37,13 +37,11 @@ type Server struct {
 
 // serverInstructions is sent on initialize so clients that defer tool schemas
 // still learn how the task tools fit together.
-const serverInstructions = `Task graph tracker; task IDs are integers returned by create, ready, list and search.
-- What to work on next: ready (unblocked open tasks, ready subtasks nested; parent_id scopes to one parent). Browse by status or parent: list. Full task with relations and comments: show.
-- list and search default to status=open; pass all to include closed tasks.
-- search is hybrid semantic + keyword; run it before create to avoid duplicates.
-- create can set parent_id, blocks, blocked_by and related at once and rejects unknown IDs; link adds edges later or drops them with remove=true. Parent and blocks edges that would form a cycle are rejected.
-- Log progress with comment; update edits only title and description.
-- close needs a reason. resolution=completed fails while the task has open subtasks or open blockers; close those first. resolution=wont_do also closes every open descendant subtask, and fails if any task being closed blocks another open task. close returns unblocked_ids for tasks that just became ready.`
+const serverInstructions = `Task IDs are integers returned by create, ready, list and search.
+- Next work: ready lists open tasks whose blockers are all completed (a wont_do blocker still blocks). Ready subtasks nest only under a ready parent; pass parent_id to see them under a blocked one. list browses by status or parent; show returns one task with relations and comments.
+- Run search before create to avoid duplicates.
+- create sets parent_id, blocks, blocked_by and related at once; link adds or (remove=true) drops edges later. update edits only title and description; status changes go through close.
+- close completed is refused while open blockers or open direct subtasks remain. close wont_do also closes the open subtree and is refused if any of it blocks an open task outside it. close returns unblocked_ids.`
 
 // NewServer initializes a Server instance and its MCP tool handler.
 func NewServer(cfg *Config, vikunja *VikunjaClient, store TaskStore, ollamaClient *ollama.Client) *Server {
@@ -102,7 +100,7 @@ func (s *Server) registerTools(srv *mcp.Server) {
 	}, s.toolList)
 	addTextTool(srv, &mcp.Tool{
 		Name:        "search",
-		Description: "Search tasks using hybrid vector and full-text search (Weighted RRF) with status pre-filtering.",
+		Description: "Search tasks using hybrid semantic and keyword search (Weighted RRF) with status pre-filtering.",
 		InputSchema: searchSchema,
 	}, s.toolSearch)
 	addTextTool(srv, &mcp.Tool{
@@ -112,7 +110,7 @@ func (s *Server) registerTools(srv *mcp.Server) {
 	}, s.toolShow)
 	addTextTool(srv, &mcp.Tool{
 		Name:        "create",
-		Description: "Create a new task with optional description, parent, blocker relations, and related links.",
+		Description: "Create a new task with optional description, parent, blocker relations, and related links; any unknown referenced task ID rejects the create.",
 		InputSchema: inputSchema[CreateArgs](),
 	}, s.toolCreate)
 	addTextTool(srv, &mcp.Tool{
@@ -127,7 +125,7 @@ func (s *Server) registerTools(srv *mcp.Server) {
 	}, s.toolComment)
 	addTextTool(srv, &mcp.Tool{
 		Name:        "link",
-		Description: "Create or remove a relation between tasks ('parent', 'blocks', 'related') with cycle detection.",
+		Description: "Create or remove a relation between tasks ('parent', 'blocks', 'related'); new parent and blocks edges that would form a cycle are rejected.",
 		InputSchema: linkSchema,
 	}, s.toolLink)
 	addTextTool(srv, &mcp.Tool{
@@ -314,7 +312,7 @@ func (s *Server) listTasks(ctx context.Context, status string, parentID *int64) 
 // SearchArgs are the search tool arguments; the schema defaults status to "open" and limit to 10.
 type SearchArgs struct {
 	Query  string `json:"query" jsonschema:"Search query text."`
-	Status string `json:"status,omitempty" jsonschema:"Status filter: 'open', 'completed', 'wont_do', 'all'"`
+	Status string `json:"status,omitempty" jsonschema:"Status filter: 'open', 'completed', 'wont_do', 'all' (default 'open')"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum number of results to return (default 10)."`
 }
 
