@@ -22,7 +22,7 @@ func (p *WorkerPool) publishDispatchOutcome(ctx context.Context, d db.Dispatch, 
 		normStatus = "completed"
 	}
 	if normStatus == "" {
-		normStatus = "completed"
+		return errors.New("empty dispatch outcome status")
 	}
 
 	durMs := max(0, completedAt.Sub(startedAt).Milliseconds())
@@ -73,6 +73,9 @@ func (p *WorkerPool) setupDispatchTurn(d db.Dispatch, te *turnExecution) func() 
 			p.FinishChunkStepTurn(widgetCtx, chunkID, d.ID)
 		}
 		if (p.ctx == nil || p.ctx.Err() == nil) && !te.isInterrupted() {
+			if strings.TrimSpace(te.turnStatus) == "" {
+				return
+			}
 			var pubErr error
 			if p.EventBus() != nil {
 				pubCtx, cancel := context.WithTimeout(context.WithoutCancel(te.turnCtxValue()), 5*time.Second)

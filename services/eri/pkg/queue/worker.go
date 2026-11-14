@@ -551,6 +551,9 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	te.beginSetupSpan()
 	defer te.endSetupSpan()
 
+	cleanupDispatch := p.setupDispatchTurn(d, te)
+	defer cleanupDispatch()
+
 	defer func() {
 		if r := recover(); r != nil {
 			te.handleBurstPanic(r)
@@ -562,9 +565,6 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	}
 	defer te.releaseActivePoolLease()
 	defer te.markTurnActive()()
-
-	cleanupDispatch := p.setupDispatchTurn(d, te)
-	defer cleanupDispatch()
 
 	te.turnAttempted = true
 	promptCtx, promptSpan := te.startSetupChildSpan(te.turnCtxValue(), spanPrompt)

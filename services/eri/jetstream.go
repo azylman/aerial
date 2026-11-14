@@ -14,10 +14,6 @@ var newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
 	return pubsub.NewJetStreamBus(ctx, url)
 }
 
-func initEriJetStream(ctx context.Context, natsURL string) pubsub.Bus {
-	return initEriJetStreamWithFactory(ctx, natsURL, newBusFn)
-}
-
 func initEriJetStreamWithFactory(ctx context.Context, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {

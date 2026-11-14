@@ -77,6 +77,17 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 			wantHTTPCall: false,
 		},
 		{
+			name:         "empty turn status does not publish completed or invoke http fallback",
+			busMode:      "success",
+			turnStatus:   "",
+			turnError:    "",
+			chunkID:      "chunk-empty-status",
+			dispatchID:   "disp-empty-status",
+			source:       "vanadis",
+			wantPubCount: 0,
+			wantHTTPCall: false,
+		},
+		{
 			name:         "bus publish error invokes legacy http fallback",
 			busMode:      "error",
 			turnStatus:   "failed",
