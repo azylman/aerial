@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -395,21 +397,19 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 
 // buildTurnPromptCase is one buildTurnPrompt scenario; newBuildTurnPromptFixture turns it into a turnExecution.
 type buildTurnPromptCase struct {
-	name                                   string
-	ambCfg                                 *config.AmbientContextConfig
-	resolverErr                            error
-	resolverText                           string
-	isCold, threadSnapshot                 bool
-	mode                                   string
-	histMsgs                               []HistoryMessage
-	fetchErr                               error
-	cachedSum, cachedMsgID                 string
-	llmOut                                 string
-	llmErr                                 error
-	wantResolverCalled                     bool
-	wantPromptContains, wantPromptExcludes []string
-	wantSpans                              []wantPromptSpan
-	wantAbsent                             []string
+	name                                    string
+	ambCfg                                  *config.AmbientContextConfig
+	resolverErr                             error
+	resolverText                            string
+	isCold, threadSnapshot                  bool
+	mode                                    string
+	histMsgs                                []HistoryMessage
+	fetchErr                                error
+	cachedSum, cachedMsgID                  string
+	wantResolverCalled, wantSummarizeThread bool
+	wantPromptContains, wantPromptExcludes  []string
+	wantSpans                               []wantPromptSpan
+	wantAbsent                              []string
 }
 
 func newBuildTurnPromptFixture(t *testing.T, tc buildTurnPromptCase, threadID string, tp trace.TracerProvider, resolverCalled *atomic.Bool) *turnExecution {
@@ -433,7 +433,8 @@ func newBuildTurnPromptFixture(t *testing.T, tc buildTurnPromptCase, threadID st
 				return tc.histMsgs, tc.fetchErr
 			},
 			LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
-				return tc.llmOut, tc.llmErr
+				t.Errorf("summarizer called while building the prompt")
+				return "", nil
 			},
 		},
 	}
@@ -477,51 +478,54 @@ func TestBuildTurnPrompt(t *testing.T) {
 			wantSpans: []wantPromptSpan{{name: spanPromptAmbientContext, parent: spanPrompt, errored: true}},
 		},
 		{
-			name: "ColdThreadRefreshesSummary", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, llmOut: summaryOut,
-			wantPromptContains: []string{"Shipping the build", "turn off kitchen lights"},
+			name: "ColdNewThreadRunsOnRawLookback", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, wantSummarizeThread: true,
+			wantPromptContains: []string{"ship it", "turn off kitchen lights"}, wantPromptExcludes: []string{"<THREAD_SUMMARY>"},
 			wantSpans: []wantPromptSpan{
 				{name: spanPrompt, attrs: []attribute.KeyValue{attrPromptColdStart.Bool(true)}},
 				{name: spanPromptChannelSnapshot, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSnapshotOK.Bool(true)}},
-				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{
-					attrPromptSummaryOutcome.String("refreshed"), attrPromptSummaryHadPrior.Bool(false),
-					attrPromptSummaryDeltaMsgs.Int(2), attrPromptSummaryShared.Bool(false),
-				}},
+				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("no_history")}},
 				{name: spanPromptSummaryLoad, parent: spanPromptThreadSummary},
-				{name: spanPromptHistoryFetch, parent: spanPromptThreadSummary, attrs: []attribute.KeyValue{attrPromptHistoryLimit.Int(100), attrPromptHistoryCount.Int(2)}},
-				{name: spanPromptSummaryLLM, parent: spanPromptThreadSummary},
-				{name: spanPromptSummarySave, parent: spanPromptThreadSummary},
+				{name: spanPromptHistoryFetch, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptHistoryLimit.Int(10), attrPromptHistoryCount.Int(2)}},
 				{name: spanPromptPrevSessionID, parent: spanPrompt},
 				{name: spanPromptScopeInstr, parent: spanPrompt},
 			},
-			wantAbsent: []string{spanPromptAmbientContext, spanPromptPreviousSession},
+			wantAbsent: []string{spanPromptAmbientContext, spanPromptPreviousSession, spanPromptSummaryLLM, spanPromptSummarySave},
 		},
 		{
-			name: "ColdThreadCacheHit", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-2",
-			wantPromptContains: []string{"Shipping the build"},
+			name: "ColdThreadCacheHit", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-2", wantSummarizeThread: true,
+			wantPromptContains: []string{"Shipping the build", "ship it"},
 			wantSpans: []wantPromptSpan{
 				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("cache_hit")}},
-				{name: spanPromptHistoryFetch, parent: spanPromptThreadSummary, attrs: []attribute.KeyValue{attrPromptHistoryCount.Int(2)}},
+				{name: spanPromptHistoryFetch, parent: spanPromptThreadSummary, attrs: []attribute.KeyValue{attrPromptHistoryLimit.Int(10), attrPromptHistoryCount.Int(2)}},
 			},
 			wantAbsent: []string{spanPromptSummaryLLM, spanPromptSummarySave},
 		},
 		{
-			name: "ColdThreadSummaryFails", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, llmErr: errors.New("context deadline exceeded"),
-			wantPromptExcludes: []string{"<THREAD_SUMMARY>"},
+			name: "ColdThreadStaleSummaryStillInjected", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-0", wantSummarizeThread: true,
+			wantPromptContains: []string{"Shipping the build", "ship it"},
 			wantSpans: []wantPromptSpan{
-				{name: spanPromptThreadSummary, parent: spanPrompt, errored: true, attrs: []attribute.KeyValue{
-					attrPromptSummaryOutcome.String("failed"), attrPromptSummaryHadPrior.Bool(false), attrPromptSummaryDeltaMsgs.Int(2),
-				}},
-				{name: spanPromptSummaryLLM, parent: spanPromptThreadSummary, errored: true},
+				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("stale")}},
 			},
-			wantAbsent: []string{spanPromptSummarySave},
+			wantAbsent: []string{spanPromptSummaryLLM, spanPromptSummarySave},
 		},
 		{
-			name: "ColdThreadHistoryFetchFails", isCold: true, threadSnapshot: true, fetchErr: errors.New("discord 503"),
+			name: "ColdThreadHistoryFetchFails", isCold: true, threadSnapshot: true, fetchErr: errors.New("discord 503"), cachedSum: summaryOut, cachedMsgID: "h-2", wantSummarizeThread: true,
+			wantPromptContains: []string{"Shipping the build"},
 			wantSpans: []wantPromptSpan{
-				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("no_history")}},
-				{name: spanPromptHistoryFetch, parent: spanPromptThreadSummary, errored: true, attrs: []attribute.KeyValue{attrPromptHistoryLimit.Int(100), attrPromptHistoryCount.Int(0)}},
+				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("stale")}},
+				{name: spanPromptHistoryFetch, parent: spanPromptThreadSummary, errored: true, attrs: []attribute.KeyValue{attrPromptHistoryLimit.Int(10), attrPromptHistoryCount.Int(0)}},
 			},
 			wantAbsent: []string{spanPromptSummaryLLM},
+		},
+		{
+			name: "WarmThreadMarksSummarizeThread", threadSnapshot: true, histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-2", wantSummarizeThread: true,
+			wantPromptContains: []string{"turn off kitchen lights"}, wantPromptExcludes: []string{"<THREAD_SUMMARY>", "ship it"},
+			wantAbsent: []string{spanPromptThreadSummary, spanPromptHistoryFetch},
+		},
+		{
+			name: "ChannelModeThreadDoesNotSummarize", isCold: true, threadSnapshot: true, mode: "channel", histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-2",
+			wantPromptContains: []string{"ship it"}, wantPromptExcludes: []string{"<THREAD_SUMMARY>"},
+			wantAbsent: []string{spanPromptThreadSummary},
 		},
 		{
 			name: "WarmChannelModeLookback", mode: "channel", histMsgs: twoMsgs[1:],
@@ -553,6 +557,9 @@ func TestBuildTurnPrompt(t *testing.T) {
 				t.Errorf("traced prompt differs from untraced prompt:\n%s\n---\n%s", te.turnPrompt, untraced.turnPrompt)
 			}
 
+			if te.summarizeThread != tc.wantSummarizeThread {
+				t.Errorf("summarizeThread = %t, want %t", te.summarizeThread, tc.wantSummarizeThread)
+			}
 			if called := resolverCalled.Load(); called != tc.wantResolverCalled {
 				t.Errorf("resolverCalled = %t, want %t", called, tc.wantResolverCalled)
 			}
@@ -640,152 +647,78 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	}
 }
 
-func TestResolveThreadColdStartSummary_IncrementalAndFallback(t *testing.T) {
+func TestResolveThreadColdStartSummary_LoadOnly(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
+	lookback := []HistoryMessage{
+		{ID: "msg-9", Content: "older", CreatedAt: now.Add(-time.Hour)},
+		{ID: "msg-10", Content: "newest pre-burst", CreatedAt: now},
+	}
+	saved := "<THREAD_SUMMARY>Saved</THREAD_SUMMARY>"
 
 	tests := []struct {
-		name          string
-		cachedSum     string
-		cachedMsgID   string
-		histMsgs      []HistoryMessage
-		llmOut        string
-		llmErr        error
-		wantSummary   string
-		wantLLMCalled bool
-		wantSaved     bool
-		wantSpans     []wantPromptSpan
-		wantAbsent    []string
+		name             string
+		cachedSum        string
+		cachedMsgID      string
+		histMsgs         []HistoryMessage
+		wantSummary      string
+		wantFetchLimits  []int
+		wantOutcome      string
+		wantSavedSummary string
+		wantSavedMsgID   string
 	}{
-		{
-			name:        "empty history returns cached summary",
-			cachedSum:   "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
-			cachedMsgID: "msg-1",
-			histMsgs:    nil,
-			wantSummary: "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
-			wantSpans: []wantPromptSpan{
-				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("no_history")}},
-				{name: spanPromptSummaryLoad, parent: spanPromptThreadSummary},
-			},
-			wantAbsent: []string{spanPromptSummaryLLM, spanPromptSummarySave},
-		},
-		{
-			name:        "all zero-timestamp history returns cached summary",
-			cachedSum:   "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
-			cachedMsgID: "msg-1",
-			histMsgs: []HistoryMessage{
-				{ID: "msg-zero", Content: "zero", CreatedAt: time.Time{}},
-			},
-			wantSummary: "<THREAD_SUMMARY>Cached</THREAD_SUMMARY>",
-			wantSpans: []wantPromptSpan{
-				{name: spanPromptThreadSummary, parent: spanPrompt, errored: true, attrs: []attribute.KeyValue{
-					attrPromptSummaryOutcome.String("failed"), attrPromptSummaryHadPrior.Bool(true), attrPromptSummaryShared.Bool(false),
-				}},
-			},
-			wantAbsent: []string{spanPromptSummaryLLM},
-		},
-		{
-			name:          "llm error falls back to cached summary",
-			cachedSum:     "<THREAD_SUMMARY>Fallback Cached</THREAD_SUMMARY>",
-			cachedMsgID:   "msg-old",
-			histMsgs:      []HistoryMessage{{ID: "msg-new", Content: "new work", CreatedAt: now}},
-			llmErr:        errors.New("flash rate limit"),
-			wantSummary:   "<THREAD_SUMMARY>Fallback Cached</THREAD_SUMMARY>",
-			wantLLMCalled: true,
-			wantSpans: []wantPromptSpan{
-				{name: spanPromptThreadSummary, parent: spanPrompt, errored: true, attrs: []attribute.KeyValue{
-					attrPromptSummaryOutcome.String("failed"), attrPromptSummaryHadPrior.Bool(true), attrPromptSummaryDeltaMsgs.Int(1),
-				}},
-				{name: spanPromptSummaryLLM, parent: spanPromptThreadSummary, errored: true},
-			},
-			wantAbsent: []string{spanPromptSummarySave},
-		},
-		{
-			name:          "llm error without cached summary falls back to empty",
-			cachedSum:     "",
-			cachedMsgID:   "",
-			histMsgs:      []HistoryMessage{{ID: "msg-new", Content: "new work", CreatedAt: now}},
-			llmErr:        errors.New("flash rate limit"),
-			wantSummary:   "",
-			wantLLMCalled: true,
-			wantSpans: []wantPromptSpan{
-				{name: spanPromptThreadSummary, parent: spanPrompt, errored: true, attrs: []attribute.KeyValue{
-					attrPromptSummaryOutcome.String("failed"), attrPromptSummaryHadPrior.Bool(false), attrPromptSummaryDeltaMsgs.Int(1),
-				}},
-			},
-		},
-		{
-			name:          "incremental update generates new summary and saves watermark",
-			cachedSum:     "<THREAD_SUMMARY>Old Summary</THREAD_SUMMARY>",
-			cachedMsgID:   "msg-1",
-			histMsgs:      []HistoryMessage{{ID: "msg-1", Content: "1", CreatedAt: now.Add(-time.Hour)}, {ID: "msg-2", Content: "2", CreatedAt: now}},
-			llmOut:        "<THREAD_SUMMARY>New Incremental Summary</THREAD_SUMMARY>",
-			wantSummary:   "<THREAD_SUMMARY>New Incremental Summary</THREAD_SUMMARY>",
-			wantLLMCalled: true,
-			wantSaved:     true,
-			wantSpans: []wantPromptSpan{
-				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{
-					attrPromptSummaryOutcome.String("refreshed"), attrPromptSummaryHadPrior.Bool(true),
-					attrPromptSummaryDeltaMsgs.Int(1), attrPromptSummaryShared.Bool(false),
-				}},
-				{name: spanPromptSummaryLoad, parent: spanPromptThreadSummary},
-				{name: spanPromptSummaryLLM, parent: spanPromptThreadSummary},
-				{name: spanPromptSummarySave, parent: spanPromptThreadSummary},
-			},
-		},
+		{name: "watermark is latest pre-burst message", cachedSum: saved, cachedMsgID: "msg-10", histMsgs: lookback, wantSummary: saved, wantFetchLimits: []int{10}, wantOutcome: "cache_hit", wantSavedSummary: saved, wantSavedMsgID: "msg-10"},
+		{name: "watermark inside lookback", cachedSum: saved, cachedMsgID: "msg-9", histMsgs: lookback, wantSummary: saved, wantFetchLimits: []int{10}, wantOutcome: "cache_hit", wantSavedSummary: saved, wantSavedMsgID: "msg-9"},
+		{name: "watermark older than lookback is stale but injected", cachedSum: saved, cachedMsgID: "msg-1", histMsgs: lookback, wantSummary: saved, wantFetchLimits: []int{10}, wantOutcome: "stale", wantSavedSummary: saved, wantSavedMsgID: "msg-1"},
+		{name: "empty lookback is stale but injected", cachedSum: saved, cachedMsgID: "msg-10", wantSummary: saved, wantFetchLimits: []int{10}, wantOutcome: "stale", wantSavedSummary: saved, wantSavedMsgID: "msg-10"},
+		{name: "no saved summary skips the fetch", histMsgs: lookback, wantOutcome: "no_history"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var llmCalled atomic.Bool
+			var mu sync.Mutex
+			var llmPrompts []string
+			var fetchLimits []int
 
 			store := setupTestStore(t)
 			if tc.cachedSum != "" {
 				_ = store.SaveThreadSummary(context.Background(), "th-test", tc.cachedSum, tc.cachedMsgID)
 			}
-
 			rec, tp, ctx, root := newPromptBuildRecorder()
-			pool := &WorkerPool{
-				ctx: context.Background(),
-				cfg: WorkerPoolConfig{
-					Store:          store,
-					TracerProvider: tp,
-					LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
-						llmCalled.Store(true)
-						if tc.llmErr != nil {
-							return "", tc.llmErr
-						}
-						return tc.llmOut, nil
-					},
+			pool := &WorkerPool{ctx: context.Background(), cfg: WorkerPoolConfig{
+				Store: store, TracerProvider: tp,
+				LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
+					mu.Lock()
+					llmPrompts = append(llmPrompts, prompt)
+					mu.Unlock()
+					return "<THREAD_SUMMARY>unexpected</THREAD_SUMMARY>", nil
 				},
-			}
+			}}
+			te := &turnExecution{pool: pool, threadID: "th-test"}
 
-			te := &turnExecution{
-				pool:     pool,
-				threadID: "th-test",
-			}
-
-			got := te.resolveThreadColdStartSummary(ctx, func(context.Context, int) []HistoryMessage {
+			got := te.resolveThreadColdStartSummary(ctx, func(_ context.Context, limit int) []HistoryMessage {
+				fetchLimits = append(fetchLimits, limit)
 				return tc.histMsgs
 			})
 			root.End()
-			assertPromptSpans(t, rec.Ended(), tc.wantSpans, tc.wantAbsent)
 
+			assertPromptSpans(t, rec.Ended(), []wantPromptSpan{
+				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String(tc.wantOutcome)}},
+				{name: spanPromptSummaryLoad, parent: spanPromptThreadSummary},
+			}, []string{spanPromptSummaryLLM, spanPromptSummarySave})
 			if got != tc.wantSummary {
 				t.Errorf("resolveThreadColdStartSummary() = %q, want %q", got, tc.wantSummary)
 			}
-			if called := llmCalled.Load(); called != tc.wantLLMCalled {
-				t.Errorf("llmCalled = %t, want %t", called, tc.wantLLMCalled)
+			if !slices.Equal(fetchLimits, tc.wantFetchLimits) {
+				t.Errorf("history fetch limits = %v, want %v", fetchLimits, tc.wantFetchLimits)
 			}
-			if tc.wantSaved {
-				sum, msgID, err := store.GetThreadSummary(context.Background(), "th-test")
-				if err != nil || sum != tc.wantSummary {
-					t.Errorf("saved thread summary = %q, err = %v; want %q", sum, err, tc.wantSummary)
-				}
-				if msgID == "" {
-					t.Errorf("expected non-empty watermark message ID in store")
-				}
+			if len(llmPrompts) != 0 {
+				t.Errorf("cold start sent %d summarizer prompts, want 0", len(llmPrompts))
+			}
+			sum, msgID, _ := store.GetThreadSummary(context.Background(), "th-test")
+			if sum != tc.wantSavedSummary || msgID != tc.wantSavedMsgID {
+				t.Errorf("stored summary = (%q, %q), want (%q, %q)", sum, msgID, tc.wantSavedSummary, tc.wantSavedMsgID)
 			}
 		})
 	}
@@ -816,5 +749,133 @@ func TestWorker_BurstHelpers_LowEffort(t *testing.T) {
 				t.Errorf("resolveBurstEffort = %q, want %q", got, tt.wantEffort)
 			}
 		})
+	}
+}
+
+// turnEndHistory returns thread messages with IDs first..last, one minute apart; even IDs are Assistant replies.
+func turnEndHistory(base time.Time, first, last int) []HistoryMessage {
+	msgs := make([]HistoryMessage, 0, last-first+1)
+	for id := first; id <= last; id++ {
+		role := "User"
+		if id%2 == 0 {
+			role = "Assistant"
+		}
+		msgs = append(msgs, HistoryMessage{ID: strconv.Itoa(id), Role: role, AuthorName: role, Content: fmt.Sprintf("content-%d", id), CreatedAt: base.Add(time.Duration(id-first) * time.Minute)})
+	}
+	return msgs
+}
+
+func TestRefreshThreadSummaryAtTurnEnd(t *testing.T) {
+	t.Parallel()
+	base := time.Now().UTC().Add(-time.Hour)
+	prior, fresh := "<THREAD_SUMMARY>Prior</THREAD_SUMMARY>", "<THREAD_SUMMARY>Fresh</THREAD_SUMMARY>"
+	window := turnEndHistory(base, 1000, 1008)
+
+	tests := []turnEndRefreshCase{
+		{name: "stale watermark refreshes with prior summary", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "success", wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"<prior_thread_summary>", "Prior", "<thread_origin_anchor>", "content-1008"}, wantSum: fresh, wantMsgID: "1008"},
+		{name: "first summary sends whole window", histMsgs: window, burstID: "1007", turnStatus: "success", wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"content-1000", "content-1008"}, wantPromptExcludes: []string{"<prior_thread_summary>"}, wantSum: fresh, wantMsgID: "1008"},
+		{name: "watermark at delivered reply is cache hit", cachedSum: prior, cachedMsgID: "1008", histMsgs: window, burstID: "1007", turnStatus: "success", wantOutcome: "cache_hit", wantSum: prior, wantMsgID: "1008"},
+		{name: "watermark among newest five is fresh enough", cachedSum: prior, cachedMsgID: "1004", histMsgs: window, burstID: "1007", turnStatus: "success", wantOutcome: "fresh_enough", wantSum: prior, wantMsgID: "1004"},
+		{name: "llm error leaves stored summary untouched", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "success", llmErr: errors.New("ephemeral pool busy"), wantOutcome: "failed", wantLLMPrompts: 1, wantSum: prior, wantMsgID: "1001"},
+		{name: "next burst user message excluded from watermark", cachedSum: prior, cachedMsgID: "1001", histMsgs: turnEndHistory(base, 1000, 1009), burstID: "1007", turnStatus: "success", wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"content-1008"}, wantPromptExcludes: []string{"content-1009"}, wantSum: fresh, wantMsgID: "1008"},
+		{name: "no history fetched", cachedSum: prior, cachedMsgID: "1001", burstID: "1007", turnStatus: "success", wantOutcome: "no_history", wantSum: prior, wantMsgID: "1001"},
+		{name: "non-thread turn skipped", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "success", notThread: true, wantSum: prior, wantMsgID: "1001"},
+		{name: "dispatch turn skipped", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "success", dispatch: true, wantSum: prior, wantMsgID: "1001"},
+		{name: "ephemeral turn skipped", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "success", ephem: true, wantSum: prior, wantMsgID: "1001"},
+		{name: "failed turn skipped", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "failed", wantSum: prior, wantMsgID: "1001"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runTurnEndRefreshCase(t, tc, fresh)
+		})
+	}
+}
+
+// turnEndRefreshCase is one refreshThreadSummaryAtTurnEnd scenario.
+type turnEndRefreshCase struct {
+	name                       string
+	cachedSum, cachedMsgID     string
+	histMsgs                   []HistoryMessage
+	burstID, turnStatus        string
+	notThread, dispatch, ephem bool
+	llmErr                     error
+	wantOutcome                string // "" when the refresh is skipped and records no span
+	wantLLMPrompts             int
+	wantPromptContains         []string
+	wantPromptExcludes         []string
+	wantSum, wantMsgID         string
+}
+
+// runTurnEndRefreshCase runs refreshThreadSummaryAtTurnEnd against a fake store, history fetcher and
+// LLM that answers llmOut, then checks the span outcome, recorded summarizer prompts and stored summary.
+func runTurnEndRefreshCase(t *testing.T, tc turnEndRefreshCase, llmOut string) {
+	t.Helper()
+	var mu sync.Mutex
+	var llmPrompts, fetchBeforeIDs []string
+	store := setupTestStore(t)
+	if tc.cachedSum != "" {
+		_ = store.SaveThreadSummary(context.Background(), "th-end", tc.cachedSum, tc.cachedMsgID)
+	}
+	rec, tp, ctx, root := newPromptBuildRecorder()
+	pool := &WorkerPool{ctx: context.Background(), cfg: WorkerPoolConfig{
+		Store: store, TracerProvider: tp,
+		HistoryFetcher: func(_ context.Context, _, beforeID string, _ int) ([]HistoryMessage, error) {
+			mu.Lock()
+			fetchBeforeIDs = append(fetchBeforeIDs, beforeID)
+			mu.Unlock()
+			return tc.histMsgs, nil
+		},
+		LLMFunc: func(_ context.Context, _, prompt string) (string, error) {
+			mu.Lock()
+			llmPrompts = append(llmPrompts, prompt)
+			mu.Unlock()
+			return llmOut, tc.llmErr
+		},
+	}}
+	te := &turnExecution{
+		pool: pool, threadID: "th-end", burst: []db.Message{{ID: tc.burstID, ThreadID: "th-end"}},
+		turnStatus: tc.turnStatus, summarizeThread: !tc.notThread, isEphemeral: tc.ephem,
+	}
+	if tc.dispatch {
+		te.dispatch = &db.Dispatch{ID: "d-1"}
+	}
+	te.refreshThreadSummaryAtTurnEnd(ctx)
+	root.End()
+
+	var wantSpans []wantPromptSpan
+	var wantFetches []string
+	absent := []string{spanTurnSummaryRefresh, spanPromptHistoryFetch}
+	if tc.wantOutcome != "" {
+		wantSpans = []wantPromptSpan{{name: spanTurnSummaryRefresh, parent: spanPrompt, errored: tc.llmErr != nil, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String(tc.wantOutcome)}}}
+		wantFetches, absent = []string{""}, nil
+	}
+	assertPromptSpans(t, rec.Ended(), wantSpans, absent)
+	if !slices.Equal(fetchBeforeIDs, wantFetches) {
+		t.Errorf("history fetch beforeIDs = %q, want %q", fetchBeforeIDs, wantFetches)
+	}
+	if len(llmPrompts) != tc.wantLLMPrompts {
+		t.Fatalf("summarizer prompts = %d, want %d", len(llmPrompts), tc.wantLLMPrompts)
+	}
+	for _, p := range llmPrompts {
+		assertSubstrings(t, "summarizer prompt", p, tc.wantPromptContains, tc.wantPromptExcludes)
+	}
+	sum, msgID, _ := store.GetThreadSummary(context.Background(), "th-end")
+	if sum != tc.wantSum || msgID != tc.wantMsgID {
+		t.Errorf("stored summary = (%q, %q), want (%q, %q)", sum, msgID, tc.wantSum, tc.wantMsgID)
+	}
+}
+
+func assertSubstrings(t *testing.T, label, got string, contains, excludes []string) {
+	t.Helper()
+	for _, sub := range contains {
+		if !strings.Contains(got, sub) {
+			t.Errorf("%s missing %q", label, sub)
+		}
+	}
+	for _, sub := range excludes {
+		if strings.Contains(got, sub) {
+			t.Errorf("%s unexpectedly contains %q", label, sub)
+		}
 	}
 }

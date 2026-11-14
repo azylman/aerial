@@ -1215,8 +1215,22 @@ func TestQueueWorker_PerScopeSerialization(t *testing.T) {
 	}
 }
 
+// summarySaveNotifyStore reports every saved thread watermark on saved.
+type summarySaveNotifyStore struct {
+	db.Store
+
+	saved chan string
+}
+
+func (s *summarySaveNotifyStore) SaveThreadSummary(ctx context.Context, threadID, summary, lastMsgID string) error {
+	err := s.Store.SaveThreadSummary(ctx, threadID, summary, lastMsgID)
+	s.saved <- "saved:" + lastMsgID
+	return err
+}
+
 func TestThreadColdStartSummarization_Integration(t *testing.T) {
-	store := setupTestStore(t)
+	refreshEvents := make(chan string, 10)
+	store := &summarySaveNotifyStore{Store: setupTestStore(t), saved: refreshEvents}
 	for _, ch := range []*discordgo.Channel{
 		{ID: "thread-100", ParentID: "channel-1", Type: discordgo.ChannelTypeGuildPublicThread},
 		{ID: "channel-1", ParentID: "", Type: discordgo.ChannelTypeGuildText},
@@ -1225,7 +1239,7 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	} {
 		CacheDiscordChannel(ch)
 	}
-	_ = saveThreadSummary(store, "thread-cached", "<THREAD_SUMMARY>\n- Existing cached summary\n</THREAD_SUMMARY>", "msg-hist-1")
+	_ = saveThreadSummary(store.Store, "thread-cached", "<THREAD_SUMMARY>\n- Existing cached summary\n</THREAD_SUMMARY>", "msg-hist-1")
 
 	var mu sync.Mutex
 	var lastPromptReceived string
@@ -1239,6 +1253,7 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 			llmCallCount++
 			mu.Unlock()
 			if strings.Contains(prompt, "fail-llm") {
+				refreshEvents <- "llm-error"
 				return "", errors.New("llm error")
 			}
 			return "<THREAD_SUMMARY>\n- Technical Decision: Architectural shift to SQLite\n</THREAD_SUMMARY>", nil
@@ -1262,15 +1277,16 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
+	// Cold starts never call the summarizer; the turn-end refresh after delivery does.
 	steps := []struct {
-		name, wantPromptContains, wantPromptExcludes, wantSavedWatermark string
-		msg                                                              db.Message
-		wantLLMDelta                                                     int
+		name, wantPromptContains, wantPromptExcludes, wantRefreshEvent string
+		msg                                                            db.Message
+		wantLLMDelta                                                   int
 	}{
-		{name: "Thread Cold Start Summarizes History", msg: db.Message{ID: "m1", ThreadID: "thread-100", Content: "Hello thread"}, wantLLMDelta: 1, wantPromptContains: "<THREAD_SUMMARY>", wantSavedWatermark: "msg-hist-1"},
+		{name: "New Thread Runs On Lookback And Turn End Creates Summary", msg: db.Message{ID: "m1", ThreadID: "thread-100", Content: "Hello thread"}, wantLLMDelta: 1, wantPromptContains: "<CHANNEL_HISTORY>", wantPromptExcludes: "<THREAD_SUMMARY>", wantRefreshEvent: "saved:msg-hist-1"},
 		{name: "Main Channel Does Not Summarize", msg: db.Message{ID: "m2", ThreadID: "channel-1", Content: "Hello main channel"}, wantPromptExcludes: "<THREAD_SUMMARY>"},
-		{name: "Thread Cold Start Cache Watermark Hit", msg: db.Message{ID: "m3", ThreadID: "thread-cached", Content: "Cached test"}, wantPromptContains: "Existing cached summary"},
-		{name: "Fallback on LLM Failure", msg: db.Message{ID: "m4", ThreadID: "thread-fail-llm", Content: "fail-llm request"}, wantLLMDelta: 1, wantPromptContains: "<CHANNEL_HISTORY>", wantPromptExcludes: "<THREAD_SUMMARY>"},
+		{name: "Thread Cold Start Injects Saved Summary", msg: db.Message{ID: "m3", ThreadID: "thread-cached", Content: "Cached test"}, wantPromptContains: "Existing cached summary"},
+		{name: "Turn End LLM Failure Saves Nothing", msg: db.Message{ID: "m4", ThreadID: "thread-fail-llm", Content: "fail-llm request"}, wantLLMDelta: 1, wantPromptContains: "<CHANNEL_HISTORY>", wantPromptExcludes: "<THREAD_SUMMARY>", wantRefreshEvent: "llm-error"},
 	}
 	for _, st := range steps {
 		t.Run(st.name, func(t *testing.T) {
@@ -1280,6 +1296,16 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 			_ = insertMessage(store, st.msg)
 			pool.Enqueue(st.msg)
 			waitForCompletion(t, doneCh, 3*time.Second, st.name)
+			if st.wantRefreshEvent != "" {
+				select {
+				case got := <-refreshEvents:
+					if got != st.wantRefreshEvent {
+						t.Errorf("turn-end refresh event = %q, want %q", got, st.wantRefreshEvent)
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatalf("timed out waiting for turn-end refresh event %q", st.wantRefreshEvent)
+				}
+			}
 
 			mu.Lock()
 			prompt, calls := lastPromptReceived, llmCallCount
@@ -1293,13 +1319,10 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 			if st.wantPromptExcludes != "" && strings.Contains(prompt, st.wantPromptExcludes) {
 				t.Errorf("prompt should not contain %q:\n%s", st.wantPromptExcludes, prompt)
 			}
-			if st.wantSavedWatermark != "" {
-				sum, lastMsgID, err := getThreadSummary(store, st.msg.ThreadID)
-				if err != nil || sum == "" || lastMsgID != st.wantSavedWatermark {
-					t.Errorf("saved summary/watermark = %q/%q (err=%v)", sum, lastMsgID, err)
-				}
-			}
 		})
+	}
+	if sum, _, _ := getThreadSummary(store.Store, "thread-fail-llm"); sum != "" {
+		t.Errorf("failed turn-end refresh saved summary %q", sum)
 	}
 }
 

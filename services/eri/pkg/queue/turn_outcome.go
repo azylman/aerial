@@ -178,6 +178,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	tokenChannel := te.resolveTokenChannel()
 	metrics.RecordTokens(currentModel, tokenChannel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
 	te.turnStatus, te.turnResponseText = "success", cleanText
+	te.finalized.Store(true)
 	te.finalizeBurstMessages(te.burst, db.StatusCompleted, cleanText, "completed", "", currentModel, true, true)
 
 	te.handleDispatchSessionRotation()

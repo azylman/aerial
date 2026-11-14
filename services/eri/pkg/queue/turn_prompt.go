@@ -295,6 +295,19 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 }
 
 func (te *turnExecution) fetchTurnHistory(fetchCtx context.Context, limit int) []HistoryMessage {
+	var beforeID string
+	if len(te.burst) > 0 {
+		beforeID = te.burst[0].ID
+	}
+	return te.fetchThreadHistoryBefore(fetchCtx, beforeID, limit)
+}
+
+// fetchLatestThreadHistory fetches the newest thread messages, including the reply this turn delivered.
+func (te *turnExecution) fetchLatestThreadHistory(fetchCtx context.Context, limit int) []HistoryMessage {
+	return te.fetchThreadHistoryBefore(fetchCtx, "", limit)
+}
+
+func (te *turnExecution) fetchThreadHistoryBefore(fetchCtx context.Context, beforeID string, limit int) []HistoryMessage {
 	if !IsNumericSnowflake(te.threadID) && (te.pool == nil || te.pool.cfg.HistoryFetcher == nil) {
 		return nil
 	}
@@ -303,10 +316,6 @@ func (te *turnExecution) fetchTurnHistory(fetchCtx context.Context, limit int) [
 	var err error
 	var turnHistory []HistoryMessage
 	if te.pool.cfg.HistoryFetcher != nil {
-		var beforeID string
-		if len(te.burst) > 0 {
-			beforeID = te.burst[0].ID
-		}
 		turnHistory, err = te.pool.cfg.HistoryFetcher(fetchCtx, te.threadID, beforeID, limit)
 	} else {
 		turnHistory, err = FetchRecentThreadHistory(fetchCtx, te.pool.getDiscordSession(), te.threadID, limit)
@@ -392,6 +401,7 @@ func (te *turnExecution) buildTurnPrompt(ctx context.Context) {
 	snapSpan.End()
 	isColdStart := te.isCold && !te.isEphemeral
 	isChannelMode := strings.EqualFold(te.policy.Mode, "channel")
+	te.summarizeThread = summarizesThread(snap, isChannelMode)
 	summary, lookbackMsgs := te.buildColdStartLookback(ctx, snap, isColdStart, isChannelMode, getTurnHistory)
 
 	prevID := te.resolveColdStartPreviousSessionID(ctx, isColdStart)
@@ -470,64 +480,137 @@ func (te *turnExecution) resolveSummarizerLLMAndModel() (LLMFunc, string) {
 	return llmFn, flashModel
 }
 
+const (
+	summaryFreshWindow     = 5   // turn end skips the model call when the watermark is among this many newest messages
+	coldStartLookbackLimit = 10  // raw messages injected into a cold-start prompt
+	turnEndSummaryFetch    = 100 // messages fetched at turn end to locate the watermark (one Discord request)
+)
+
 // Values of aerial.prompt.summary_outcome.
 const (
-	summaryOutcomeCacheHit    = "cache_hit"
+	summaryOutcomeCacheHit    = "cache_hit"    // saved watermark is current (turn end) or inside the lookback (cold start)
+	summaryOutcomeFreshEnough = "fresh_enough" // turn end: watermark among the newest summaryFreshWindow messages, no model call
+	summaryOutcomeStale       = "stale"        // cold start: saved summary injected, watermark older than the lookback
 	summaryOutcomeRefreshed   = "refreshed"
 	summaryOutcomeFailed      = "failed"
-	summaryOutcomeNoHistory   = "no_history"
-	summaryOutcomeEmptyResult = "empty_result"
+	summaryOutcomeNoHistory   = "no_history" // nothing saved (cold start) or nothing fetched (turn end)
 )
+
+// summarizesThread reports whether the turn's channel is a Discord thread whose summary eri maintains.
+func summarizesThread(snap ChannelSnapshot, isChannelMode bool) bool {
+	return snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID && !isChannelMode
+}
 
 func (te *turnExecution) resolveThreadColdStartSummary(ctx context.Context, getTurnHistory func(context.Context, int) []HistoryMessage) string {
 	ctx, span := te.startPromptStep(ctx, spanPromptThreadSummary)
 	defer span.End()
-	summary, outcome, err := te.refreshThreadColdStartSummary(ctx, getTurnHistory)
+	summary, outcome := te.loadThreadColdStartSummary(ctx, getTurnHistory)
 	span.SetAttributes(attrPromptSummaryOutcome.String(outcome))
-	recordSpanError(span, err)
 	return summary
 }
 
-// refreshThreadColdStartSummary returns the thread summary to inject plus the outcome that produced it.
-func (te *turnExecution) refreshThreadColdStartSummary(ctx context.Context, getTurnHistory func(context.Context, int) []HistoryMessage) (string, string, error) {
+// loadThreadColdStartSummary returns the saved thread summary and how current it is. It never calls the
+// summarizer: a stale summary is still injected, and the next successful turn-end refresh catches it up.
+func (te *turnExecution) loadThreadColdStartSummary(ctx context.Context, getTurnHistory func(context.Context, int) []HistoryMessage) (string, string) {
 	_, loadSpan := te.startPromptStep(ctx, spanPromptSummaryLoad)
 	cachedSum, lastMsgID := te.getThreadSummary(te.threadID)
 	loadSpan.End()
-	histMsgs := getTurnHistory(ctx, 100)
-	if len(histMsgs) == 0 {
-		return cachedSum, summaryOutcomeNoHistory, nil
+	if cachedSum == "" {
+		return "", summaryOutcomeNoHistory
 	}
-	latestMsgID := latestHistoryMessageID(histMsgs)
-	if cachedSum != "" && lastMsgID != "" && lastMsgID == latestMsgID {
-		te.logf("[WorkerPool] Using cached thread summary for thread %s (watermark msg: %s)", te.threadID, lastMsgID)
-		return cachedSum, summaryOutcomeCacheHit, nil
+	for _, m := range getTurnHistory(ctx, coldStartLookbackLimit) {
+		if m.ID == lastMsgID {
+			return cachedSum, summaryOutcomeCacheHit
+		}
 	}
-	llmFn, flashModel := te.resolveSummarizerLLMAndModel()
-	sumCtx, sumCancel := context.WithTimeout(promptStepCtx(te.pool.ctx, ctx), DefaultThreadSummaryTimeout)
-	defer sumCancel()
-	var opts []ThreadSummaryOption
+	return cachedSum, summaryOutcomeStale
+}
+
+// refreshThreadSummaryAtTurnEnd brings the saved thread summary up to date after a successful thread turn
+// delivered its reply. It runs synchronously while the session lease is held, so the thread's next burst
+// waits behind it, and ctx cancellation (shutdown, /interrupt) aborts it. Failures only leave the previous
+// summary in place; the turn outcome is already final.
+func (te *turnExecution) refreshThreadSummaryAtTurnEnd(ctx context.Context) {
+	if te.turnStatus != "success" || !te.summarizeThread || te.isDispatch() || te.isEphemeral {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, DefaultTurnEndSummaryTimeout)
+	defer cancel()
+	ctx, span := te.startChildSpan(ctx, spanTurnSummaryRefresh)
+	defer span.End()
+	outcome, err := te.runTurnEndSummaryRefresh(ctx)
+	span.SetAttributes(attrPromptSummaryOutcome.String(outcome))
+	recordSpanError(span, err)
+	if err != nil {
+		te.logf("[WorkerPool] Warning: turn-end thread summary refresh failed for thread %s: %v", te.threadID, err)
+	}
+}
+
+func (te *turnExecution) runTurnEndSummaryRefresh(ctx context.Context) (string, error) {
+	_, loadSpan := te.startPromptStep(ctx, spanPromptSummaryLoad)
+	cachedSum, lastMsgID := te.getThreadSummary(te.threadID)
+	loadSpan.End()
+	histMsgs := dropNextBurstMessages(te.fetchLatestThreadHistory(ctx, turnEndSummaryFetch), newestBurstMessageID(te.burst))
+	watermark := latestHistoryMessageID(histMsgs)
+	if watermark == "" {
+		return summaryOutcomeNoHistory, nil
+	}
 	hadPrior := cachedSum != "" && lastMsgID != ""
+	if hadPrior && lastMsgID == watermark {
+		return summaryOutcomeCacheHit, nil
+	}
+	if hadPrior && slices.Contains(newestHistoryMessageIDs(histMsgs, summaryFreshWindow), lastMsgID) {
+		return summaryOutcomeFreshEnough, nil
+	}
+	var opts []ThreadSummaryOption
 	if hadPrior {
 		opts = append(opts, WithPriorSummary(cachedSum, lastMsgID))
 	}
 	trace.SpanFromContext(ctx).SetAttributes(attrPromptSummaryHadPrior.Bool(hadPrior))
-	newSum, sumErr := SummarizeThreadHistoryWithGroup(sumCtx, te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs, opts...)
-	if sumErr != nil {
-		te.logf("[WorkerPool] Warning: Thread history summarization failed for thread %s: %v. Falling back to raw lookback.", te.threadID, sumErr)
-		return cachedSum, summaryOutcomeFailed, sumErr
-	}
-	if newSum == "" {
-		return "", summaryOutcomeEmptyResult, nil
+	llmFn, flashModel := te.resolveSummarizerLLMAndModel()
+	newSum, err := SummarizeThreadHistoryWithGroup(ctx, te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs, opts...)
+	if err != nil {
+		return summaryOutcomeFailed, err
 	}
 	_, saveSpan := te.startPromptStep(ctx, spanPromptSummarySave)
-	te.saveThreadSummary(te.threadID, newSum, latestMsgID)
+	te.saveThreadSummary(te.threadID, newSum, watermark)
 	saveSpan.End()
-	return newSum, summaryOutcomeRefreshed, nil
+	return summaryOutcomeRefreshed, nil
+}
+
+// newestBurstMessageID returns the newest Discord snowflake in burst, or "" when none is numeric.
+func newestBurstMessageID(burst []db.Message) string {
+	var newest string
+	for _, m := range burst {
+		if IsNumericSnowflake(m.ID) && (newest == "" || compareSnowflakeIDs(m.ID, newest) > 0) {
+			newest = m.ID
+		}
+	}
+	return newest
+}
+
+// dropNextBurstMessages removes non-Assistant messages newer than the turn's newest burst message: they
+// belong to the next queued burst, and using one as the watermark would hide it from the next cold start.
+func dropNextBurstMessages(msgs []HistoryMessage, newestBurstID string) []HistoryMessage {
+	return slices.DeleteFunc(slices.Clone(msgs), func(m HistoryMessage) bool {
+		return m.Role != "Assistant" && compareSnowflakeIDs(m.ID, newestBurstID) > 0
+	})
+}
+
+// newestHistoryMessageIDs returns the IDs of the n newest timestamped messages, newest first.
+func newestHistoryMessageIDs(msgs []HistoryMessage, n int) []string {
+	dated := slices.DeleteFunc(slices.Clone(msgs), func(m HistoryMessage) bool { return m.CreatedAt.IsZero() })
+	slices.SortStableFunc(dated, func(a, b HistoryMessage) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	ids := make([]string, 0, min(n, len(dated)))
+	for _, m := range dated[:min(n, len(dated))] {
+		ids = append(ids, m.ID)
+	}
+	return ids
 }
 
 func (te *turnExecution) resolveColdStartLookbackMessages(ctx context.Context, isColdStart, isChannelMode bool, getTurnHistory func(context.Context, int) []HistoryMessage) []HistoryMessage {
 	if !te.isEphemeral && (isColdStart || isChannelMode) {
-		lookbackMsgs := getTurnHistory(ctx, 10)
+		lookbackMsgs := getTurnHistory(ctx, coldStartLookbackLimit)
 		if len(lookbackMsgs) > 0 {
 			te.logf("[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
 		}
@@ -538,8 +621,7 @@ func (te *turnExecution) resolveColdStartLookbackMessages(ctx context.Context, i
 
 func (te *turnExecution) buildColdStartLookback(ctx context.Context, snap ChannelSnapshot, isColdStart, isChannelMode bool, getTurnHistory func(context.Context, int) []HistoryMessage) (string, []HistoryMessage) {
 	var summary string
-	isThreadColdStart := snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID && isColdStart && !isChannelMode
-	if isThreadColdStart {
+	if isColdStart && summarizesThread(snap, isChannelMode) {
 		summary = te.resolveThreadColdStartSummary(ctx, getTurnHistory)
 		if summary != "" {
 			te.logf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", te.threadID)
