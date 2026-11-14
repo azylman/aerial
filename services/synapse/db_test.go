@@ -322,6 +322,7 @@ func postgresPRRegistryJobKustCases() []postgresPRRegistryUnitCase {
 		{name: "AtomicTransitionDeployFailedByJob success", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", repo: "azylman/aerial", targetIDReturn: "100000000000000001", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "100000000000000001"},
 
 		// EnsurePRRegistered
+		{name: "EnsurePRRegistered unconfigured vanadis returns error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", wantErr: true},
 		{name: "EnsurePRRegistered empty repo guard", op: "EnsurePRRegistered", repo: "", prNumber: 692, wantTarget: ""},
 		{name: "EnsurePRRegistered chunk query error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusInternalServerError, vanadisBody: `{"error":"internal"}`, wantErr: true},
 		{name: "EnsurePRRegistered chunk attach 400 bad request returns error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusBadRequest, vanadisBody: `{"error":"bad request"}`, wantErr: true},
@@ -331,6 +332,7 @@ func postgresPRRegistryJobKustCases() []postgresPRRegistryUnitCase {
 		{name: "EnsurePRRegistered upsert exec error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, targetID: "100000000000000002", mockExecErr: errors.New("upsert err"), wantErr: true},
 
 		// RegisterPR
+		{name: "RegisterPR unconfigured vanadis returns error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", wantErr: true},
 		{name: "RegisterPR nil pool guard", op: "RegisterPR", nilPool: true, repo: "azylman/aerial", prNumber: 42, targetID: "100000000000000001", wantErr: true},
 		{name: "RegisterPR empty repo guard", op: "RegisterPR", repo: "", prNumber: 42, targetID: "100000000000000001", wantErr: true},
 		{name: "RegisterPR zero pr guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 0, targetID: "100000000000000001", wantErr: true},
@@ -1127,6 +1129,9 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		{name: "AdvanceVanadisChunkByPR invalid json returns error", method: "AdvanceVanadisChunkByPR", httpStatus: http.StatusOK, httpBody: `{invalid-json`, wantErr: true},
 		{name: "AdvanceVanadisChunkByPR unconfigured url returns error", method: "AdvanceVanadisChunkByPR", zeroRetryDelay: true, wantErr: true},
 		{name: "ResolveVanadisChunkForPR unconfigured url returns error", method: "ResolveVanadisChunkForPR", zeroRetryDelay: true, wantErr: true},
+		{name: "ShouldSuppressVanadisDeployWake unconfigured url returns error", method: "ShouldSuppressVanadisDeployWake", zeroRetryDelay: true, wantErr: true},
+		{name: "AdvancesVanadisChunkOnMerge unconfigured url returns error", method: "AdvancesVanadisChunkOnMerge", zeroRetryDelay: true, wantErr: true},
+		{name: "FailVanadisChunkByPR unconfigured url returns error", method: "FailVanadisChunkByPR", zeroRetryDelay: true, wantErr: true},
 		{name: "ResolveVanadisChunkForPR network error retries and fails", method: "ResolveVanadisChunkForPR", networkErr: true, zeroRetryDelay: true, wantErr: true},
 		{name: "AdvanceVanadisChunkByPR network error retries and fails", method: "AdvanceVanadisChunkByPR", networkErr: true, zeroRetryDelay: true, wantErr: true},
 		{name: "FailVanadisChunkByPR network error retries and fails", method: "FailVanadisChunkByPR", networkErr: true, zeroRetryDelay: true, wantErr: true},
