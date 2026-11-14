@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/azylman/aerial/pkg/tracing"
@@ -180,26 +179,13 @@ func startTurnSpan(base context.Context, tracer trace.Tracer, spec turnSpanSpec)
 	return ctx, span
 }
 
-// providerForModel maps a model ID to its gen_ai.provider.name.
-func providerForModel(model string) string {
-	m := strings.ToLower(model)
-	switch {
-	case strings.Contains(m, "claude"):
-		return "anthropic"
-	case strings.Contains(m, "gemini"):
-		return "gcp.gemini"
-	default:
-		return ""
-	}
-}
-
 // turnSpanEndAttributes renders the outcome attributes recorded when a turn ends.
 func turnSpanEndAttributes(model string, usage runner.AgyUsage, status string) []attribute.KeyValue {
 	attrs := runner.UsageAttributes(usage)
 	if model != "" {
 		attrs = append(attrs, runner.AttrGenAIRequestModel.String(model))
 	}
-	if provider := providerForModel(model); provider != "" {
+	if provider := runner.ProviderForModel(model); provider != "" {
 		attrs = append(attrs, runner.AttrGenAIProviderName.String(provider))
 	}
 	if status != "" {

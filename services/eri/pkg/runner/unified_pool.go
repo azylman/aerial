@@ -751,6 +751,16 @@ func (p *UnifiedProcessPool) ExecuteEphemeral(ctx context.Context, targetKey, pr
 	return res, nil
 }
 
+// Model returns the model new daemons are spawned with, or "" when the pool is nil.
+func (p *UnifiedProcessPool) Model() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.cfg.Model
+}
+
 // EphemeralLLMFunc returns a runner.LLMFunc that executes prompts against targetKey.
 func (p *UnifiedProcessPool) EphemeralLLMFunc(targetKey string) LLMFunc {
 	return func(ctx context.Context, model, prompt string) (string, error) {

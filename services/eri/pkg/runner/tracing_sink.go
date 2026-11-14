@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,19 @@ func UsageAttributes(u AgyUsage) []attribute.KeyValue {
 		AttrGenAIUsageOutputTokens.Int(u.OutputTokens),
 		AttrGenAIUsageCacheRead.Int(u.CacheReadTokens),
 		AttrGenAIUsageCacheCreation.Int(u.CacheCreationTokens),
+	}
+}
+
+// ProviderForModel maps a model ID to its gen_ai.provider.name, or "" when unrecognised.
+func ProviderForModel(model string) string {
+	m := strings.ToLower(model)
+	switch {
+	case strings.Contains(m, "claude"):
+		return "anthropic"
+	case strings.Contains(m, "gemini"):
+		return "gcp.gemini"
+	default:
+		return ""
 	}
 }
 
