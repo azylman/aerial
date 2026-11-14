@@ -445,6 +445,48 @@ func TestToolHandler_UpdateAndCancel(t *testing.T) {
 		t.Fatalf("unexpected UpdateCronSchedule output: %+v, err: %v", upRes, err)
 	}
 
+	tokyo := CronSchedule{ID: "c-tokyo", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "prompt", Timezone: "Asia/Tokyo", NextRunAt: now, Enabled: true, Effort: "medium"}
+	if err := InsertCronSchedule(ctx, db, tokyo); err != nil {
+		t.Fatalf("InsertCronSchedule error: %v", err)
+	}
+	cron9, cron1730, tzNY := "0 9 * * *", "30 17 * * *", "America/New_York"
+	nextRunTests := []struct {
+		name      string
+		args      UpdateCronScheduleArgs
+		wantTZ    string
+		wantClock string
+	}{
+		{"cron-only update uses stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron9}, "Asia/Tokyo", "09:00"},
+		{"timezone-only update recomputes with stored cron", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Timezone: &tzNY}, "America/New_York", "09:00"},
+		{"cron-only update after timezone change uses new stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron1730}, "America/New_York", "17:30"},
+		{"content-only update leaves next_run_at untouched", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Prompt: &prompt}, "", ""},
+	}
+	for _, tc := range nextRunTests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := h.UpdateCronSchedule(ctx, tc.args)
+			if err != nil {
+				t.Fatalf("UpdateCronSchedule error: %v", err)
+			}
+			if tc.wantClock == "" {
+				if out.NextRunAt != "" {
+					t.Fatalf("expected no next_run_at, got %q", out.NextRunAt)
+				}
+				return
+			}
+			got, err := time.Parse(time.RFC3339, out.NextRunAt)
+			if err != nil {
+				t.Fatalf("parse next_run_at %q: %v", out.NextRunAt, err)
+			}
+			loc, _ := time.LoadLocation(tc.wantTZ)
+			if clock := got.In(loc).Format("15:04"); clock != tc.wantClock {
+				t.Fatalf("next_run_at %s in %s = %s, want %s", out.NextRunAt, tc.wantTZ, clock, tc.wantClock)
+			}
+			if d := time.Until(got); d <= 0 || d > 25*time.Hour {
+				t.Fatalf("next_run_at %s not within the next day", out.NextRunAt)
+			}
+		})
+	}
+
 	badExpr := "not-a-cron"
 	updateErrTests := []struct {
 		name       string
@@ -454,6 +496,7 @@ func TestToolHandler_UpdateAndCancel(t *testing.T) {
 		{"missing schedule_id", UpdateCronScheduleArgs{ScheduleID: "  "}, "'schedule_id' is required"},
 		{"invalid cron expression", UpdateCronScheduleArgs{ScheduleID: "c1", CronExpression: &badExpr}, "invalid cron expression"},
 		{"non-existent schedule", UpdateCronScheduleArgs{ScheduleID: "missing-id", Effort: &eff}, "failed to update recurring schedule"},
+		{"non-existent schedule with cron change", UpdateCronScheduleArgs{ScheduleID: "missing-id", CronExpression: &cron9}, "failed to update recurring schedule"},
 	}
 	for _, tc := range updateErrTests {
 		t.Run(tc.name, func(t *testing.T) {
