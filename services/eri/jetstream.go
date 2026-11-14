@@ -38,10 +38,7 @@ func attachEriEventBusWithFactory(ctx context.Context, pool *queue.WorkerPool, f
 	if pool == nil {
 		return func() {}
 	}
-	natsURL := strings.TrimSpace(os.Getenv("NATS_URL"))
-	if natsURL == "" {
-		natsURL = "nats://nats.aerial:4222"
-	}
+	natsURL := firstNonEmpty(os.Getenv("NATS_URL"), pool.NATSURL(), "nats://nats.aerial:4222")
 	bus := initEriJetStreamWithFactory(ctx, natsURL, factory)
 	if bus == nil {
 		return func() {}
@@ -52,4 +49,13 @@ func attachEriEventBusWithFactory(ctx context.Context, pool *queue.WorkerPool, f
 			log.Printf("[WorkerPool] Warning closing event bus: %v", closeErr)
 		}
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }

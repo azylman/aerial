@@ -245,6 +245,7 @@ type ConfigData struct {
 	VanadisURL                string                   `yaml:"vanadis_url" json:"vanadis_url"`
 	HaroURL                   string                   `yaml:"haro_url" json:"haro_url"`
 	CovenURL                  string                   `yaml:"coven_url" json:"coven_url"`
+	NATSURL                   string                   `yaml:"nats_url" json:"nats_url"`
 	Transcripts               TranscriptsConfig        `yaml:"transcripts,omitempty" json:"transcripts,omitempty"`
 }
 
@@ -378,6 +379,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		VanadisURL                string                   `yaml:"vanadis_url"`
 		HaroURL                   string                   `yaml:"haro_url"`
 		CovenURL                  string                   `yaml:"coven_url"`
+		NATSURL                   string                   `yaml:"nats_url"`
 		Transcripts               TranscriptsConfig        `yaml:"transcripts"`
 	}
 
@@ -404,6 +406,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.VanadisURL = strings.TrimRight(strings.TrimSpace(raw.VanadisURL), "/")
 	c.HaroURL = strings.TrimRight(strings.TrimSpace(raw.HaroURL), "/")
 	c.CovenURL = strings.TrimRight(strings.TrimSpace(raw.CovenURL), "/")
+	c.NATSURL = strings.TrimRight(strings.TrimSpace(raw.NATSURL), "/")
 	c.Transcripts = TranscriptsConfig{
 		Database: strings.TrimSpace(raw.Transcripts.Database),
 		Stack:    strings.TrimSpace(raw.Transcripts.Stack),
@@ -616,6 +619,7 @@ func DefaultConfigData() *ConfigData {
 		MaxBackgroundTaskDuration: 2 * time.Hour,
 		Engine:                    "agy",
 		ClaudeBin:                 "claude",
+		NATSURL:                   "nats://nats.aerial:4222",
 	}
 }
 
@@ -937,6 +941,7 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	overrideEnvStr(&data.GeminiHomeDir, lookup, "GEMINI_HOME", "GEMINI_HOME_DIR")
 	overrideEnvStr(&data.DataDir, lookup, "DATA_DIR")
 	overrideEnvStr(&data.MCPConfig, lookup, "MCP_CONFIG")
+	overrideEnvStr(&data.NATSURL, lookup, "NATS_URL")
 	overrideEnvDuration(&data.DaemonIdleTimeout, lookup, "DAEMON_IDLE_TIMEOUT", false)
 	overrideEnvDuration(&data.MaxBackgroundTaskDuration, lookup, "MAX_BACKGROUND_TASK_DURATION", false)
 }
