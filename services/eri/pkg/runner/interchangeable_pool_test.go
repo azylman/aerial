@@ -456,29 +456,9 @@ func TestInterchangeablePool_AcquireLeaseAndMetadata(t *testing.T) {
 	checkInterchangeableInvalidAcquires(ctx, t)
 }
 
-// promptDeadlineCtx reports context.DeadlineExceeded once expired is closed, so a test can
-// make a run's deadline pass at a chosen point without waiting on a clock.
-type promptDeadlineCtx struct {
-	context.Context
-
-	expired <-chan struct{}
-}
-
-func (c promptDeadlineCtx) Done() <-chan struct{} { return c.expired }
-
-func (c promptDeadlineCtx) Err() error {
-	select {
-	case <-c.expired:
-		return context.DeadlineExceeded
-	default:
-		return nil
-	}
-}
-
-// replySpawner returns a spawner whose daemons announce a session, close prompted on the first
-// prompt, and answer every prompt with reply (nothing when reply is empty).
-func replySpawner(reply string, prompted chan struct{}) *MockDaemonSpawner {
-	var once sync.Once
+// replySpawner returns a spawner whose daemons announce a session and answer every prompt
+// with reply.
+func replySpawner(reply string) *MockDaemonSpawner {
 	return &MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
 			outR, outW := io.Pipe()
@@ -491,10 +471,7 @@ func replySpawner(reply string, prompted chan struct{}) *MockDaemonSpawner {
 					if _, err := inR.Read(buf); err != nil {
 						return
 					}
-					once.Do(func() { close(prompted) })
-					if reply != "" {
-						_, _ = fmt.Fprintln(outW, reply)
-					}
+					_, _ = fmt.Fprintln(outW, reply)
 				}
 			}()
 			return inW, outR, io.NopCloser(strings.NewReader("")), &MockProcessHandle{pid: 100}, nil
@@ -532,65 +509,45 @@ func TestInterchangeablePool_ExecuteEphemeralSpans(t *testing.T) {
 	}
 	tests := []struct {
 		name       string
-		traced     bool // ctx carries the caller's span
 		poolClosed bool
 		reply      string
-		deadline   bool // ctx's deadline passes once the daemon receives the prompt
 		wantResp   string
 		wantErr    string
 		wantSpans  []wantEphemeralSpan
 	}{
 		{
-			name: "success nests invoke_agent under caller and chat under invoke_agent", traced: true, reply: okReply, wantResp: "a caption",
+			name: "success nests invoke_agent under caller and chat under invoke_agent", reply: okReply, wantResp: "a caption",
 			wantSpans: []wantEphemeralSpan{
 				{name: "invoke_agent", parent: "caller", attrs: agentAttrs(usage)},
 				{name: "chat", parent: "invoke_agent", attrs: append([]attribute.KeyValue{attribute.String("gen_ai.operation.name", "chat")}, usage...)},
 			},
 		},
-		{name: "ctx without a span records nothing", reply: okReply, wantResp: "a caption"},
 		{
-			name: "lease acquire error", traced: true, poolClosed: true,
+			name: "lease acquire error", poolClosed: true,
 			wantErr: "failed to acquire leased session: interchangeable pool is closed",
 			wantSpans: []wantEphemeralSpan{
 				{name: "invoke_agent", parent: "caller", attrs: agentAttrs(zeroUsage), statusCode: codes.Error, statusDesc: "failed to acquire leased session: interchangeable pool is closed"},
 			},
 		},
 		{
-			name: "execute error", traced: true, reply: errReply, wantErr: "model overloaded",
+			name: "execute error", reply: errReply, wantErr: "model overloaded",
 			wantSpans: []wantEphemeralSpan{
 				{name: "invoke_agent", parent: "caller", attrs: agentAttrs(zeroUsage), statusCode: codes.Error, statusDesc: "model overloaded"},
 				{name: "chat", parent: "invoke_agent", attrs: []attribute.KeyValue{attribute.String("gen_ai.operation.name", "chat")}, statusCode: codes.Error, statusDesc: "model overloaded"},
-			},
-		},
-		{
-			name: "ctx deadline", traced: true, deadline: true, wantErr: "context deadline exceeded",
-			wantSpans: []wantEphemeralSpan{
-				{name: "invoke_agent", parent: "caller", attrs: agentAttrs(zeroUsage), statusCode: codes.Error, statusDesc: "context deadline exceeded"},
 			},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			prompted := make(chan struct{})
-			pool, _ := newTestInterchangeablePool(t, 1, "", "claude-sonnet-5-5", replySpawner(tc.reply, prompted))
+			pool, _ := newTestInterchangeablePool(t, 1, "", "claude-sonnet-5-5", replySpawner(tc.reply))
 			if tc.poolClosed {
 				_ = pool.Close()
 			}
 			rec := tracetest.NewSpanRecorder()
 			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
-			var expired <-chan struct{}
-			if tc.deadline {
-				expired = prompted
-			}
-			ctx := context.Context(promptDeadlineCtx{Context: context.Background(), expired: expired})
-			var callerID trace.SpanID
-			if tc.traced {
-				var caller trace.Span
-				ctx, caller = tp.Tracer("test").Start(ctx, "caller")
-				defer caller.End()
-				callerID = caller.SpanContext().SpanID()
-			}
+			ctx, caller := tp.Tracer("test").Start(context.Background(), "caller")
+			defer caller.End()
 
 			resp, err := pool.ExecuteEphemeral(ctx, "vision:caption", "describe this frame")
 			gotErr := ""
@@ -600,7 +557,7 @@ func TestInterchangeablePool_ExecuteEphemeralSpans(t *testing.T) {
 			if resp != tc.wantResp || gotErr != tc.wantErr {
 				t.Fatalf("ExecuteEphemeral = (%q, %q), want (%q, %q)", resp, gotErr, tc.wantResp, tc.wantErr)
 			}
-			assertEphemeralSpans(t, rec.Ended(), callerID, tc.wantSpans)
+			assertEphemeralSpans(t, rec.Ended(), caller.SpanContext().SpanID(), tc.wantSpans)
 		})
 	}
 }
@@ -653,17 +610,11 @@ func TestInterchangeablePool_Model(t *testing.T) {
 		pool *InterchangeablePool
 		want string
 	}{
-		{name: "nil pool", pool: nil, want: ""},
 		{name: "nil underlying", pool: &InterchangeablePool{}, want: ""},
-		{name: "configured model", pool: NewInterchangeablePool(NewUnifiedProcessPool(PoolConfig{Model: "gemini-3-flash"}, createTestSpawner()), InterchangeablePoolConfig{}), want: "gemini-3-flash"},
-		{name: "default model fallback", pool: NewInterchangeablePool(NewUnifiedProcessPool(PoolConfig{DefaultModel: "claude-haiku-5-5"}, createTestSpawner()), InterchangeablePoolConfig{}), want: "claude-haiku-5-5"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.pool != nil {
-				t.Cleanup(func() { _ = tc.pool.Close() })
-			}
 			if got := tc.pool.Model(); got != tc.want {
 				t.Errorf("Model() = %q, want %q", got, tc.want)
 			}

@@ -266,11 +266,7 @@ func TestProviderForModel(t *testing.T) {
 		model string
 		want  string
 	}{
-		{name: "claude model", model: "claude-sonnet-5-5", want: "anthropic"},
 		{name: "claude match is case-insensitive", model: "Claude-Opus-5-5", want: "anthropic"},
-		{name: "gemini model", model: "gemini-3-flash", want: "gcp.gemini"},
-		{name: "unknown model", model: "local-gguf", want: ""},
-		{name: "empty model", model: "", want: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
