@@ -191,17 +191,10 @@ linters:
     rules:
       - linters:
           - containedctx
-          - cyclop
-          - dupl
           - errcheck
           - errchkjson
-          - funlen
-          - gocognit
-          - gocyclo
           - gosec
           - gosmopolitan
-          - maintidx
-          - nestif
           - nilnil
           - noctx
           - unparam
@@ -210,6 +203,42 @@ linters:
           - staticcheck
         path: _test\.go
         text: "SA1012:"
+      - linters:
+          - gocognit
+          - nestif
+        path: services/synapse/main_widgets_test\.go
+      - linters:
+          - cyclop
+          - funlen
+          - gocognit
+          - gocyclo
+          - maintidx
+          - nestif
+        path: services/haro/(dispatch|tools)_test\.go
+      - linters:
+          - funlen
+        path: services/coven/(extraction|procedural|server|skills_publisher)_test\.go
+      - linters:
+          - cyclop
+          - dupl
+          - funlen
+          - gocognit
+          - gocyclo
+          - maintidx
+        path: services/vanadis/(chunks|chunks_dispatch|chunks_postgres|chunks_server|mcp|symbols)_test\.go
+      - linters:
+          - cyclop
+          - funlen
+          - gocognit
+          - gocyclo
+        path: pkg/(pubsub/pubsub|tracing/tracing)_test\.go
+      - linters:
+          - cyclop
+          - funlen
+          - gocognit
+          - gocyclo
+          - nestif
+        path: services/eri/pkg/queue/(vanadis|queue_widgets)_test\.go
       - linters:
           - containedctx
         path: services/eri/pkg/(queue/(pool|worker)|runner/(interchangeable_pool|streaming_daemon|unified_pool))\.go
