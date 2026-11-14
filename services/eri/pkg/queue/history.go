@@ -342,7 +342,7 @@ func buildThreadSummaryPrompt(deltaTranscript string, sumCfg threadSummaryConfig
 		"5. Active Sub-Problems & Future Action Items: Unresolved tasks, open questions, and context likely to be discussed in future turns.\n\n")
 
 	if sumCfg.priorSummary != "" {
-		cleanPrior := SanitizeHistoryContent(sumCfg.priorSummary)
+		cleanPrior := SanitizeHistoryContent(stripThreadSummaryTags(sumCfg.priorSummary))
 		fmt.Fprintf(&prompt, "<prior_thread_summary>\n%s\n</prior_thread_summary>\n\n", cleanPrior)
 	}
 	if len(originMsgs) > 0 {
@@ -352,16 +352,28 @@ func buildThreadSummaryPrompt(deltaTranscript string, sumCfg threadSummaryConfig
 		}
 	}
 
-	fmt.Fprintf(&prompt, "You must output exactly a <THREAD_SUMMARY> block containing your summary. Do not include extra text outside the tags.\n\n<raw_thread_transcript>\n%s\n</raw_thread_transcript>", deltaTranscript)
+	fmt.Fprintf(&prompt, "Output only the summary text in markdown, with no XML tags and no preamble or closing remarks.\n\n<raw_thread_transcript>\n%s\n</raw_thread_transcript>", deltaTranscript)
 	return prompt.String()
 }
 
-func extractThreadSummaryTag(result string) (string, error) {
-	startIdx, endIdx := strings.Index(result, "<THREAD_SUMMARY>"), strings.Index(result, "</THREAD_SUMMARY>")
-	if startIdx == -1 || endIdx == -1 || startIdx > endIdx {
-		return "", fmt.Errorf("missing <THREAD_SUMMARY> structural tags in output")
+// stripThreadSummaryTags trims whitespace and removes one leading <THREAD_SUMMARY> and one trailing
+// </THREAD_SUMMARY> when present. The harness adds the tags at prompt-build time (wrapPromptTag), so
+// summaries are stored untagged; legacy stored summaries and models that still emit tags are unwrapped here.
+func stripThreadSummaryTags(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "<THREAD_SUMMARY>")
+	s = strings.TrimSuffix(s, "</THREAD_SUMMARY>")
+	return strings.TrimSpace(s)
+}
+
+// normalizeThreadSummaryOutput turns raw summarizer output into the stored summary: tags stripped and
+// prompt delimiters escaped so model text cannot break out of the harness <THREAD_SUMMARY> wrapper.
+func normalizeThreadSummaryOutput(result string) (string, error) {
+	summary := SanitizeHistoryContent(stripThreadSummaryTags(result))
+	if summary == "" {
+		return "", fmt.Errorf("empty thread summary output")
 	}
-	return result[startIdx : endIdx+len("</THREAD_SUMMARY>")], nil
+	return summary, nil
 }
 
 // SummarizeThreadHistoryWithGroup coordinates concurrent summarization requests for the same thread via singleflight.
@@ -408,7 +420,7 @@ func SummarizeThreadHistoryWithGroup(ctx context.Context, sfg *singleflight.Grou
 		if err != nil {
 			return res, err
 		}
-		res.summary, err = extractThreadSummaryTag(result)
+		res.summary, err = normalizeThreadSummaryOutput(result)
 		return res, err
 	})
 	// Annotate the caller's span (turn.summary_refresh on the turn path). A caller that joined

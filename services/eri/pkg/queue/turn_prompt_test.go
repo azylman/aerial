@@ -768,7 +768,7 @@ func turnEndHistory(base time.Time, first, last int) []HistoryMessage {
 func TestRefreshThreadSummaryAtTurnEnd(t *testing.T) {
 	t.Parallel()
 	base := time.Now().UTC().Add(-time.Hour)
-	prior, fresh := "<THREAD_SUMMARY>Prior</THREAD_SUMMARY>", "<THREAD_SUMMARY>Fresh</THREAD_SUMMARY>"
+	prior, fresh := "<THREAD_SUMMARY>Prior</THREAD_SUMMARY>", "Fresh"
 	window := turnEndHistory(base, 1000, 1008)
 
 	tests := []turnEndRefreshCase{
