@@ -122,6 +122,9 @@ func (w *Worker) RunStartupCatchUp(ctx context.Context) {
 }
 
 // Tick performs scheduled maintenance operations for the given tick count.
+// Invariant: Turn event ingestion is event-driven via JetStream durable consumer
+// coven-turns backed by RunStartupCatchUp on boot and pubsub auto-reconnect
+// (nats.MaxReconnects(-1)); legacy 120-tick DB fallback polling is retired.
 func (w *Worker) Tick(ctx context.Context, tick int64) {
 	// Daily: fact consolidation dreaming (tick % 2880 == 60)
 	if tick%2880 == 60 {

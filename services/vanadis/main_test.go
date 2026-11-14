@@ -135,6 +135,11 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	if patCfg := LoadConfigFromEnv(); patCfg.GitHubToken != "pat-token-fallback" {
 		t.Fatalf("expected GITHUB_PAT fallback, got: %s", patCfg.GitHubToken)
 	}
+
+	t.Setenv("NATS_URL", "nats://env-nats:4222")
+	if natsCfg := LoadConfigFromEnv(); natsCfg.NATSURL != "nats://env-nats:4222" {
+		t.Fatalf("expected NATS_URL override, got: %s", natsCfg.NATSURL)
+	}
 }
 
 func TestVanadisConsumerStatsQuerier(t *testing.T) {

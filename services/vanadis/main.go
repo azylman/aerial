@@ -108,7 +108,7 @@ func LoadConfig(configPath string) Config {
 		BrainURL:     eriURL,
 		EriURL:       eriURL,
 		SynapseURL:   strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("SYNAPSE_URL"), fileCfg.SynapseURL)), "/"),
-		NATSURL:      strings.TrimSpace(fileCfg.NATSURL),
+		NATSURL:      firstNonEmpty(os.Getenv("NATS_URL"), strings.TrimSpace(fileCfg.NATSURL)),
 		GitHubAPIURL: strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("GITHUB_API_URL"), fileCfg.GitHubAPIURL, "https://api.github.com")), "/"),
 		GitHubToken:  firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT"), fileCfg.GitHubToken),
 	}

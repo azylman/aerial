@@ -24,6 +24,23 @@ func TestEriJetStreamInit(t *testing.T) {
 		return memBus, nil
 	}
 
+	// attachEriEventBus with nil pool
+	nilCleanup := attachEriEventBus(ctx, nil)
+	if nilCleanup == nil {
+		t.Error("expected non-nil no-op cleanup for nil pool")
+	} else {
+		nilCleanup()
+	}
+
+	// attachEriEventBus with empty pool
+	emptyPool := queue.New(nil, queue.WorkerPoolConfig{NATSURL: ""})
+	emptyCleanup := attachEriEventBus(ctx, emptyPool)
+	if emptyCleanup == nil {
+		t.Error("expected non-nil no-op cleanup for unconfigured pool")
+	} else {
+		emptyCleanup()
+	}
+
 	// attachEriEventBusWithFactory error branch
 	pool := queue.New(nil, queue.WorkerPoolConfig{
 		NATSURL: "nats://127.0.0.1:4222",
