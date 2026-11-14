@@ -35,6 +35,9 @@ subjects:
 ---
 apiVersion: gateway.nginx.org/v1alpha2
 kind: NginxProxy
+# lan-gateway's Gateway-level override (spec.infrastructure.parametersRef), merged on
+# top of the GatewayClass's Helm-managed nginx-gateway/ngf-proxy-config. Holds only the
+# OTLP exporter; Service/deployment settings come from the class-level config.
 metadata:
   name: ngf-proxy-config
   namespace: default
@@ -63,6 +66,11 @@ metadata:
   namespace: default
 spec:
   gatewayClassName: nginx
+  infrastructure:
+    parametersRef:
+      group: gateway.nginx.org
+      kind: NginxProxy
+      name: ngf-proxy-config
   listeners:
     - allowedRoutes:
         namespaces:
