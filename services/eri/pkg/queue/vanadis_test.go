@@ -3,9 +3,6 @@ package queue
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -17,28 +14,22 @@ import (
 type trackingBus struct {
 	pubsub.Bus
 
-	mu         sync.Mutex
-	publishes  []string
-	publishErr error
+	mu        sync.Mutex
+	publishes []string
 }
 
 func (t *trackingBus) Publish(ctx context.Context, subject, msgID string, payload any) error {
 	t.mu.Lock()
 	t.publishes = append(t.publishes, subject)
-	err := t.publishErr
 	t.mu.Unlock()
-	if err != nil {
-		return err
-	}
 	return t.Bus.Publish(ctx, subject, msgID, payload)
 }
 
-func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
+func TestWorkerPool_PublishDispatchOutcome_JetStream(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name            string
-		busMode         string // "success", "error"
 		turnStatus      string
 		turnError       string
 		chunkID         string
@@ -47,12 +38,9 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 		wantPubTopic    string
 		wantAttemptPubs int
 		wantDeliverPubs int
-		wantHTTPCall    bool
-		wantHTTPEnd     string
 	}{
 		{
-			name:            "jetstream publish success does not invoke http fallback",
-			busMode:         "success",
+			name:            "jetstream publish success on completed status",
 			turnStatus:      "success",
 			turnError:       "",
 			chunkID:         "chunk-js-success",
@@ -61,11 +49,9 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 			wantPubTopic:    "aerial.dispatch.completed",
 			wantAttemptPubs: 1,
 			wantDeliverPubs: 1,
-			wantHTTPCall:    false,
 		},
 		{
 			name:            "jetstream publish failed status routes to failed topic",
-			busMode:         "success",
 			turnStatus:      "failed",
 			turnError:       "build error",
 			chunkID:         "chunk-js-fail",
@@ -74,11 +60,9 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 			wantPubTopic:    "aerial.dispatch.failed",
 			wantAttemptPubs: 1,
 			wantDeliverPubs: 1,
-			wantHTTPCall:    false,
 		},
 		{
-			name:            "heartbeat dispatch outcome publishes to jetstream without http fallback",
-			busMode:         "success",
+			name:            "heartbeat dispatch outcome publishes to jetstream",
 			turnStatus:      "success",
 			turnError:       "",
 			chunkID:         "",
@@ -87,11 +71,9 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 			wantPubTopic:    "aerial.dispatch.completed",
 			wantAttemptPubs: 1,
 			wantDeliverPubs: 1,
-			wantHTTPCall:    false,
 		},
 		{
-			name:            "empty turn status does not publish completed or invoke http fallback",
-			busMode:         "success",
+			name:            "empty turn status does not publish",
 			turnStatus:      "",
 			turnError:       "",
 			chunkID:         "chunk-empty-status",
@@ -99,21 +81,6 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 			source:          "vanadis",
 			wantAttemptPubs: 0,
 			wantDeliverPubs: 0,
-			wantHTTPCall:    false,
-		},
-		{
-			name:            "bus publish error invokes legacy http fallback",
-			busMode:         "error",
-			turnStatus:      "failed",
-			turnError:       "fatal runner crash",
-			chunkID:         "chunk-bus-err",
-			dispatchID:      "disp-bus-err",
-			source:          "vanadis",
-			wantPubTopic:    "aerial.dispatch.failed",
-			wantAttemptPubs: 1,
-			wantDeliverPubs: 0,
-			wantHTTPCall:    true,
-			wantHTTPEnd:     "/chunks/fail",
 		},
 	}
 
@@ -121,27 +88,11 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			var httpCallsMu sync.Mutex
-			var httpEndpoints []string
-
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				httpCallsMu.Lock()
-				httpEndpoints = append(httpEndpoints, r.URL.Path)
-				httpCallsMu.Unlock()
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer srv.Close()
-
 			memBus := pubsub.NewMemoryBus()
 			defer memBus.Close()
 
-			var publishErr error
-			if tc.busMode == "error" {
-				publishErr = errors.New("simulated nats publish failure")
-			}
 			trackBus := &trackingBus{
-				Bus:        memBus,
-				publishErr: publishErr,
+				Bus: memBus,
 			}
 
 			type deliveredMessage struct {
@@ -177,8 +128,7 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 				cancel:   cancelPool,
 				eventBus: trackBus,
 				cfg: WorkerPoolConfig{
-					VanadisURL: srv.URL,
-					EventBus:   trackBus,
+					EventBus: trackBus,
 				},
 			}
 
@@ -223,26 +173,6 @@ func TestWorkerPool_PublishDispatchOutcome_JetStreamAndFallback(t *testing.T) {
 					deliveredCond.Wait()
 				}
 				deliveredMu.Unlock()
-			}
-
-			// Check HTTP calls
-			httpCallsMu.Lock()
-			callsCount := len(httpEndpoints)
-			var calledPath string
-			if callsCount > 0 {
-				calledPath = httpEndpoints[0]
-			}
-			httpCallsMu.Unlock()
-
-			if tc.wantHTTPCall {
-				if callsCount != 1 {
-					t.Fatalf("expected 1 HTTP fallback call, got %d", callsCount)
-				}
-				if calledPath != tc.wantHTTPEnd {
-					t.Fatalf("expected HTTP fallback endpoint %q, got %q", tc.wantHTTPEnd, calledPath)
-				}
-			} else if callsCount != 0 {
-				t.Fatalf("expected 0 HTTP fallback calls (no dual-fire), got %d (%v)", callsCount, httpEndpoints)
 			}
 
 			// Check attempted publishes

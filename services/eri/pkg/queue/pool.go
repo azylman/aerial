@@ -96,7 +96,7 @@ type WorkerPoolConfig struct {
 	Pools                                                                        map[PoolKey]runner.AgentPool
 	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool runner.AgentPool
 	Classifier                                                                   *classifier.Classifier
-	HaroURL, SynapseURL, VanadisURL                                              string
+	HaroURL, SynapseURL                                                          string
 	EventBus                                                                     pubsub.Bus
 
 	// Optional hooks for testing/custom overrides

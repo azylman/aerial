@@ -86,18 +86,6 @@ type SyncChunkPRWidgetRequest struct {
 	PRFound    bool   `json:"pr_found"`
 }
 
-// CompleteChunkRequest represents the payload for POST /chunks/complete.
-type CompleteChunkRequest struct {
-	ChunkID    string `json:"chunk_id"`
-	DispatchID string `json:"dispatch_id,omitempty"`
-}
-
-// FailChunkRequest represents the payload for POST /chunks/fail.
-type FailChunkRequest struct {
-	ChunkID string `json:"chunk_id"`
-	Reason  string `json:"reason"`
-}
-
 // UpdateBuildRequest defines the request payload for updating build metadata.
 type UpdateBuildRequest struct {
 	Title         string `json:"title,omitempty"`
@@ -1064,47 +1052,6 @@ func (s *VanadisServer) handleFailChunkPR(w http.ResponseWriter, r *http.Request
 	})
 }
 
-func (s *VanadisServer) handleCompleteChunk(w http.ResponseWriter, r *http.Request) {
-	req, ok := decodeChunkPRPost(s, w, r, "chunk_id is required", func(req *CompleteChunkRequest) bool {
-		req.ChunkID = strings.TrimSpace(req.ChunkID)
-		return req.ChunkID != ""
-	})
-	if !ok {
-		return
-	}
-	res, err := s.store.CompleteActionChunk(r.Context(), req.ChunkID)
-	if err != nil {
-		writeStoreErr(w, err)
-		return
-	}
-	if res != nil && res.ChunkMode == "pr" {
-		if err := s.ProcessStalledChunkCheck(r.Context(), req.ChunkID, req.DispatchID); err != nil {
-			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("stalled chunk check for %s failed: %v", req.ChunkID, err))
-			return
-		}
-	}
-	if res == nil || !res.Advanced {
-		buildID := ""
-		if res != nil {
-			buildID = res.BuildID
-		}
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "noop", "build_id": buildID})
-		return
-	}
-	RecordChunkTotal("completed")
-	s.syncBuildWidget(r.Context(), res.BuildID, "")
-	if res.BuildCompleted {
-		RecordBuildTotal("completed")
-		s.dispatchCompletedBuildWake(r.Context(), res)
-	} else if res.NextChunkIndex >= 0 {
-		if err := s.insertRiverJob(r.Context(), ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: res.NextChunkIndex}); err != nil {
-			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue next chunk %d: %v", res.NextChunkIndex, err))
-			return
-		}
-	}
-	httpkit.WriteJSON(w, http.StatusOK, res)
-}
-
 func (s *VanadisServer) dispatchCompletedBuildWake(ctx context.Context, res *VanadisAdvancementResult) {
 	if res == nil || strings.TrimSpace(res.ThreadID) == "" {
 		return
@@ -1113,36 +1060,6 @@ func (s *VanadisServer) dispatchCompletedBuildWake(ctx context.Context, res *Van
 	if err := s.dispatchWakePrompt(ctx, res.ThreadID, prompt); err != nil {
 		log.Printf("[vanadis] warning: failed dispatching completed wake prompt to thread %s: %v", res.ThreadID, err)
 	}
-}
-
-func (s *VanadisServer) handleFailChunk(w http.ResponseWriter, r *http.Request) {
-	req, ok := decodeChunkPRPost(s, w, r, "chunk_id and reason are required", func(req *FailChunkRequest) bool {
-		req.ChunkID = strings.TrimSpace(req.ChunkID)
-		req.Reason = strings.TrimSpace(req.Reason)
-		return req.ChunkID != "" && req.Reason != ""
-	})
-	if !ok {
-		return
-	}
-	build, chunk, transitioned, err := s.failChunkInternal(r.Context(), req.ChunkID, req.Reason)
-	if err != nil {
-		writeStoreErr(w, err)
-		return
-	}
-	buildID := ""
-	if build != nil {
-		buildID = build.ID
-	}
-	chunkID := req.ChunkID
-	if chunk != nil {
-		chunkID = chunk.ID
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":   "failed",
-		"build_id": buildID,
-		"chunk_id": chunkID,
-		"failed":   transitioned,
-	})
 }
 
 func isVanadisChunkStreamingPhase(chunkStatus string) bool {

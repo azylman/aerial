@@ -945,8 +945,6 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 		"/chunks/attach-pr":          server.handleAttachChunkPR,
 		"/chunks/advance-pr":         server.handleAdvanceChunkPR,
 		"/chunks/fail-pr":            server.handleFailChunkPR,
-		"/chunks/complete":           server.handleCompleteChunk,
-		"/chunks/fail":               server.handleFailChunk,
 		"/chunks/sync-pr-widget":     server.handleSyncPRWidget,
 		"/chunks/":                   server.handleChunkByID,
 		"/mcp":                       mcpHandler,
