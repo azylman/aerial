@@ -525,6 +525,26 @@ spec:
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
+  name: vanadis-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: POSTGRES_PASSWORD
+      secretKey: POSTGRES_PASSWORD
+    - remoteRef:
+        key: GITHUB_PAT
+      secretKey: GITHUB_PAT
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
   name: synapse-secret
   namespace: default
 spec:
