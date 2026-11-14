@@ -24,16 +24,19 @@ import (
 // TestSetupTracing mutates the global propagator, so it is not parallel.
 func TestSetupTracing(t *testing.T) {
 	tests := []struct {
-		name      string
-		content   string // "" means the config file is absent
-		wantAgent string
-		wantProxy bool // MCP trace proxy switched on
+		name        string
+		content     string // "" means the config file is absent
+		wantAgent   string
+		wantProxy   bool // MCP trace proxy switched on
+		wantContent bool // prompt/response capture switched on
 	}{
 		{name: "missing config runs disabled", content: ""},
 		{name: "malformed config runs disabled", content: "enabled: [true\nstack: marida\n"},
 		{name: "enabled without endpoint runs disabled", content: "enabled: true\nstack: marida\n"},
 		{name: "stack names the turn agent", content: "enabled: false\nstack: marida\n", wantAgent: "marida"},
 		{name: "enabled config switches on the MCP trace proxy", content: "enabled: true\nendpoint: http://127.0.0.1:1/v1/traces\nstack: aerial\n", wantAgent: "aerial", wantProxy: true},
+		{name: "capture_content on an enabled config captures content", content: "enabled: true\nendpoint: http://127.0.0.1:1/v1/traces\nstack: aerial\ncapture_content: true\n", wantAgent: "aerial", wantProxy: true, wantContent: true},
+		{name: "capture_content on a disabled config captures nothing", content: "enabled: false\nstack: aerial\ncapture_content: true\n", wantAgent: "aerial"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -48,8 +51,9 @@ func TestSetupTracing(t *testing.T) {
 			shutdown()
 			var opts brainAppOptions
 			withTracing(&opts)
-			if opts.agentName != tc.wantAgent || opts.tracingEnabled != tc.wantProxy {
-				t.Errorf("agent name = %q, proxy = %v; want %q, %v", opts.agentName, opts.tracingEnabled, tc.wantAgent, tc.wantProxy)
+			if opts.agentName != tc.wantAgent || opts.tracingEnabled != tc.wantProxy || opts.traceContent != tc.wantContent {
+				t.Errorf("agent name = %q, proxy = %v, content = %v; want %q, %v, %v",
+					opts.agentName, opts.tracingEnabled, opts.traceContent, tc.wantAgent, tc.wantProxy, tc.wantContent)
 			}
 			if fields := otel.GetTextMapPropagator().Fields(); !slices.Contains(fields, "traceparent") {
 				t.Errorf("propagator fields = %v, want traceparent", fields)

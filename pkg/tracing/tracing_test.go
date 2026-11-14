@@ -66,6 +66,11 @@ func TestLoadConfig(t *testing.T) {
 			want: Config{Enabled: true, Endpoint: "http://vt.aerial/insert/opentelemetry/v1/traces", SampleRatio: 0.5, Stack: "aerial"},
 		},
 		{name: "explicitly disabled", content: "enabled: false\n", want: Config{}},
+		{
+			name: "capture_content on", content: "enabled: true\nendpoint: http://x\ncapture_content: true\n",
+			want: Config{Enabled: true, Endpoint: "http://x", CaptureContent: true},
+		},
+		{name: "capture_content absent is off", content: "enabled: true\nendpoint: http://x\n", want: Config{Enabled: true, Endpoint: "http://x"}},
 		{name: "malformed yaml", content: "enabled: [true\n", wantErr: true},
 		{name: "enabled without endpoint", content: "enabled: true\n", wantErr: true},
 		{name: "ratio above one", content: "enabled: true\nendpoint: http://x\nsample_ratio: 2\n", wantErr: true},
@@ -85,6 +90,69 @@ func TestLoadConfig(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Errorf("LoadConfig = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContentAttr(t *testing.T) {
+	t.Parallel()
+	// 16384 runes exactly fit; one more truncates. "é" checks the cap counts runes, not bytes.
+	fits := strings.Repeat("é", 16384)
+	over := "AB" + strings.Repeat("é", 16383)
+	tests := []struct {
+		name    string
+		key     attribute.Key
+		role    string
+		text    string
+		wantKey string
+		want    string
+	}{
+		{
+			name: "user prompt", key: AttrGenAIInputMessages, role: RoleUser, text: "hi <@123> & bye",
+			wantKey: "gen_ai.input.messages",
+			want:    `[{"role":"user","parts":[{"type":"text","content":"hi <@123> & bye"}]}]`,
+		},
+		{
+			name: "assistant reply", key: AttrGenAIOutputMessages, role: RoleAssistant, text: "line1\n\"quoted\"",
+			wantKey: "gen_ai.output.messages",
+			want:    `[{"role":"assistant","parts":[{"type":"text","content":"line1\n\"quoted\""}]}]`,
+		},
+		{
+			name: "empty text", key: AttrGenAIOutputMessages, role: RoleAssistant, text: "",
+			wantKey: "gen_ai.output.messages",
+			want:    `[{"role":"assistant","parts":[{"type":"text","content":""}]}]`,
+		},
+		{
+			name: "redacts an API key", key: AttrGenAIInputMessages, role: RoleUser, text: "key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 done",
+			wantKey: "gen_ai.input.messages",
+			want:    `[{"role":"user","parts":[{"type":"text","content":"key [REDACTED] done"}]}]`,
+		},
+		{
+			name: "input at the cap is kept whole", key: AttrGenAIInputMessages, role: RoleUser, text: fits,
+			wantKey: "gen_ai.input.messages",
+			want:    `[{"role":"user","parts":[{"type":"text","content":"` + fits + `"}]}]`,
+		},
+		{
+			name: "input over the cap keeps the tail", key: AttrGenAIInputMessages, role: RoleUser, text: over,
+			wantKey: "gen_ai.input.messages",
+			want:    `[{"role":"user","parts":[{"type":"text","content":"[truncated]…` + strings.Repeat("é", 16372) + `"}]}]`,
+		},
+		{
+			name: "output over the cap keeps the head", key: AttrGenAIOutputMessages, role: RoleAssistant, text: over,
+			wantKey: "gen_ai.output.messages",
+			want:    `[{"role":"assistant","parts":[{"type":"text","content":"AB` + strings.Repeat("é", 16370) + `…[truncated]"}]}]`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ContentAttr(tc.key, tc.role, tc.text)
+			if string(got.Key) != tc.wantKey {
+				t.Errorf("key = %q, want %q", got.Key, tc.wantKey)
+			}
+			if got.Value.AsString() != tc.want {
+				t.Errorf("value = %.200q..., want %.200q...", got.Value.AsString(), tc.want)
 			}
 		})
 	}

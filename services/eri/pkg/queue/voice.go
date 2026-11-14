@@ -139,8 +139,13 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	spanCtx, span := startTurnSpan(ctx, p.tracer(), turnSpanSpec{
 		conversationID: deviceKey, agentName: p.cfg.AgentName, triggerType: voiceTriggerType, pickup: start,
 	})
-	turnStatus, turnUsage := "failed", runner.TokenUsage{}
-	defer func() { finishTurnSpan(span, model, turnUsage, turnStatus) }()
+	turnStatus, turnUsage, reply := "failed", runner.TokenUsage{}, ""
+	defer func() {
+		if p.cfg.TraceContent {
+			span.SetAttributes(runner.ContentAttributes(turnPrompt, reply)...)
+		}
+		finishTurnSpan(span, model, turnUsage, turnStatus)
+	}()
 
 	procPool := p.resolveVoiceAgentPool()
 	if procPool == nil {
@@ -186,7 +191,8 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 
 	outcome := runner.NewTurnResolver().Resolve(ctx, turnRes, turnErr, activeSession)
 	turnStatus, turnUsage = voiceTurnStatus(ctx, outcome), outcome.Usage
-	return finalizeVoiceTurnOutcome(ctx, outcome, turnErr, activeSession, model, start, sink, detector, sentenceCb)
+	reply, conv, err := finalizeVoiceTurnOutcome(ctx, outcome, turnErr, activeSession, model, start, sink, detector, sentenceCb)
+	return reply, conv, err
 }
 
 // voiceTriggerType is the aerial.turn.trigger of a voice turn's invoke_agent span.

@@ -22,6 +22,9 @@ import (
 type InterchangeablePoolConfig struct {
 	WorkerCount int    // defaults to 2 if <= 0
 	KeyPrefix   string // defaults to "ephemeral:worker" if empty
+	// CaptureContent records each ephemeral run's prompt and response on its invoke_agent span
+	// (tracing's capture_content).
+	CaptureContent bool
 }
 
 // attrEphemeralTarget names the target key an ephemeral run (caption, summary) was issued for.
@@ -32,6 +35,7 @@ type InterchangeablePool struct {
 	underlying  *UnifiedProcessPool
 	workers     []string
 	keyPrefix   string
+	capture     bool // record prompt/response on invoke_agent spans
 	overflowSeq atomic.Uint64
 	available   chan string
 	mu          sync.Mutex
@@ -67,7 +71,7 @@ func NewInterchangeablePool(underlying *UnifiedProcessPool, cfg InterchangeableP
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &InterchangeablePool{
-		underlying: underlying, workers: workers, keyPrefix: keyPrefix,
+		underlying: underlying, workers: workers, keyPrefix: keyPrefix, capture: cfg.CaptureContent,
 		available: available, ctx: ctx, cancel: cancel,
 	}
 }
@@ -179,7 +183,8 @@ func (p *InterchangeablePool) Close() error {
 // ExecuteEphemeral runs prompt on a leased worker and returns the response. When ctx carries a
 // span, the run is traced as an invoke_agent child span (wrapping lease acquisition, daemon
 // startup and the chat/execute_tool spans) that records the configured model, provider and token
-// usage; without one it records nothing, so untraced callers never open stray root traces.
+// usage (plus the prompt and response when the pool captures content); without one it records
+// nothing, so untraced callers never open stray root traces.
 func (p *InterchangeablePool) ExecuteEphemeral(ctx context.Context, targetKey, prompt string) (string, error) {
 	if p == nil {
 		return "", fmt.Errorf("interchangeable pool is nil")
@@ -190,11 +195,15 @@ func (p *InterchangeablePool) ExecuteEphemeral(ctx context.Context, targetKey, p
 	spanCtx, span := startChildOf(ctx, OperationInvokeAgent, trace.WithAttributes(
 		AttrGenAIOperationName.String(OperationInvokeAgent), attrEphemeralTarget.String(targetKey)))
 	res, err := p.executeEphemeral(spanCtx, targetKey, prompt)
-	endEphemeralSpan(span, p.Model(), res, err)
-	if err != nil || res == nil {
-		return "", err
+	var response string
+	if err == nil && res != nil {
+		response = res.Response
 	}
-	return res.Response, nil
+	if p.capture {
+		span.SetAttributes(ContentAttributes(prompt, response)...)
+	}
+	endEphemeralSpan(span, p.Model(), res, err)
+	return response, err
 }
 
 func (p *InterchangeablePool) executeEphemeral(ctx context.Context, targetKey, prompt string) (*TurnResult, error) {
