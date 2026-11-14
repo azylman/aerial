@@ -277,3 +277,160 @@ func TestProviderForModel(t *testing.T) {
 		})
 	}
 }
+
+// toolClaim is one ClaimToolSpan request and the call ID of the execute_tool span it must
+// claim ("" = no span).
+type toolClaim struct {
+	server, tool, callID string
+	want                 string
+}
+
+// fakeClaimTimer is a claimTimer whose start is announced on armed. It fires as soon as it
+// starts when fire is set, otherwise never.
+type fakeClaimTimer struct {
+	fire  bool
+	armed chan struct{}
+}
+
+func (f *fakeClaimTimer) start(time.Duration) (<-chan time.Time, func() bool) {
+	c := make(chan time.Time, 1)
+	if f.fire {
+		c <- time.Time{}
+	}
+	f.armed <- struct{}{}
+	return c, func() bool { return true }
+}
+
+func TestTracingTurnSink_ClaimToolSpan(t *testing.T) {
+	t.Parallel()
+	docketCreate := func(id, parent string) ToolCall {
+		return ToolCall{ID: id, ParentID: parent, Name: "create", MCPServer: "docket", MCPTool: "create"}
+	}
+	agyGetMe := func(id string) ToolCall {
+		return ToolCall{ID: id, Name: "call_mcp_tool", MCPServer: "github", MCPTool: "get_me"}
+	}
+	tests := []struct {
+		name      string
+		opened    []ToolCall  // started before the claims
+		ended     *TurnResult // turn result delivered before the claims; nil = turn open
+		claims    []toolClaim // run in order
+		openLater *ToolCall   // started once the last claim is waiting; nil = the wait times out
+	}{
+		{
+			name:   "claims by call id",
+			opened: []ToolCall{docketCreate("toolu_a", ""), docketCreate("toolu_b", "")},
+			claims: []toolClaim{{server: "docket", tool: "create", callID: "toolu_b", want: "toolu_b"}},
+		},
+		{
+			name:   "unknown call id falls back to server and tool after the wait",
+			opened: []ToolCall{{ID: "toolu_x", Name: "Bash"}, docketCreate("toolu_a", "")},
+			claims: []toolClaim{{server: "docket", tool: "create", callID: "toolu_zz", want: "toolu_a"}},
+		},
+		{
+			name:   "fifo by server and tool",
+			opened: []ToolCall{agyGetMe("step-2"), {ID: "step-3", Name: "run_command"}, agyGetMe("step-4")},
+			claims: []toolClaim{{server: "github", tool: "get_me", want: "step-2"}, {server: "github", tool: "get_me", want: "step-4"}},
+		},
+		{
+			name:   "two identical calls get distinct spans and a third waits",
+			opened: []ToolCall{agyGetMe("step-1"), agyGetMe("step-2")},
+			claims: []toolClaim{{server: "github", tool: "get_me", want: "step-1"}, {server: "github", tool: "get_me", want: "step-2"}, {server: "github", tool: "get_me"}},
+		},
+		{
+			name:   "claimed span is not claimed again by id",
+			opened: []ToolCall{docketCreate("toolu_a", "")},
+			claims: []toolClaim{{server: "docket", tool: "create", callID: "toolu_a", want: "toolu_a"}, {server: "docket", tool: "create", callID: "toolu_a"}},
+		},
+		{
+			name:   "subagent tool span",
+			opened: []ToolCall{{ID: "toolu_agent", Name: "Agent", Subagent: true}, docketCreate("toolu_inner", "toolu_agent")},
+			claims: []toolClaim{{server: "docket", tool: "create", callID: "toolu_inner", want: "toolu_inner"}},
+		},
+		{
+			name:      "call id waits for its own span instead of taking a parallel sibling's",
+			opened:    []ToolCall{docketCreate("toolu_a", "")},
+			claims:    []toolClaim{{server: "docket", tool: "create", callID: "toolu_b", want: "toolu_b"}},
+			openLater: &ToolCall{ID: "toolu_b", Name: "create", MCPServer: "docket", MCPTool: "create"},
+		},
+		{
+			name:      "span opened during the wait is claimed",
+			opened:    []ToolCall{{ID: "toolu_x", Name: "Bash"}},
+			claims:    []toolClaim{{server: "docket", tool: "create", callID: "toolu_late", want: "toolu_late"}},
+			openLater: &ToolCall{ID: "toolu_late", Name: "create", MCPServer: "docket", MCPTool: "create"},
+		},
+		{
+			name:      "non-matching span opened during the wait keeps waiting until the turn closes",
+			claims:    []toolClaim{{server: "docket", tool: "create", callID: "toolu_late"}},
+			openLater: &ToolCall{ID: "toolu_other", Name: "Bash"},
+		},
+		{
+			name:   "no match returns false after the wait and leaks no goroutine",
+			opened: []ToolCall{agyGetMe("step-1")},
+			claims: []toolClaim{{server: "docket", tool: "create"}},
+		},
+		{
+			name:   "closed turn returns false",
+			opened: []ToolCall{docketCreate("toolu_a", "")},
+			ended:  &TurnResult{},
+			claims: []toolClaim{{server: "docket", tool: "create", callID: "toolu_a"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+			turnCtx, turn := tp.Tracer("test").Start(context.Background(), "turn")
+			timer := &fakeClaimTimer{fire: tc.openLater == nil, armed: make(chan struct{}, 1)}
+			sink := NewTracingTurnSink(turnCtx, nil)
+			sink.newTimer = timer.start
+			for _, call := range tc.opened {
+				sink.OnToolCall(call)
+			}
+			if tc.ended != nil {
+				sink.OnResult(tc.ended)
+			}
+			got := make([]trace.SpanContext, len(tc.claims))
+			for i, c := range tc.claims[:len(tc.claims)-1] {
+				got[i], _ = sink.ClaimToolSpan(context.Background(), c.server, c.tool, c.callID)
+			}
+			last := tc.claims[len(tc.claims)-1]
+			done := make(chan trace.SpanContext, 1)
+			go func() {
+				sc, _ := sink.ClaimToolSpan(context.Background(), last.server, last.tool, last.callID)
+				done <- sc
+			}()
+			if tc.openLater != nil {
+				<-timer.armed
+				sink.OnToolCall(*tc.openLater)
+				if last.want == "" {
+					sink.OnResult(&TurnResult{}) // the timer never fires; closing the turn ends the wait
+				}
+			}
+			got[len(got)-1] = <-done
+			sink.OnResult(&TurnResult{})
+			turn.End()
+			assertClaimedToolSpans(t, rec.Ended(), tc.claims, got)
+		})
+	}
+}
+
+func assertClaimedToolSpans(t *testing.T, ended []sdktrace.ReadOnlySpan, claims []toolClaim, got []trace.SpanContext) {
+	t.Helper()
+	byCallID := map[string]trace.SpanID{}
+	for _, s := range ended {
+		for _, kv := range s.Attributes() {
+			if kv.Key == AttrGenAIToolCallID {
+				byCallID[kv.Value.AsString()] = s.SpanContext().SpanID()
+			}
+		}
+	}
+	for i, c := range claims {
+		switch {
+		case c.want == "" && got[i].IsValid():
+			t.Errorf("claim %d (%s/%s %q) = span %v, want none", i, c.server, c.tool, c.callID, got[i].SpanID())
+		case c.want != "" && got[i].SpanID() != byCallID[c.want]:
+			t.Errorf("claim %d (%s/%s %q) = span %v, want the %s span %v", i, c.server, c.tool, c.callID, got[i].SpanID(), c.want, byCallID[c.want])
+		}
+	}
+}

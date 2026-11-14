@@ -3,6 +3,7 @@ package mcp_test
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -85,35 +86,56 @@ func newUpstream(t *testing.T) (*httptest.Server, <-chan seenRequest) {
 	return srv, seen
 }
 
+// toolSpans is a runner.ToolSpanSource holding open execute_tool spans keyed by
+// "server/tool/callID"; a claim resolves to turnSpan(n) for its key.
+type toolSpans map[string]byte
+
+func (m toolSpans) ClaimToolSpan(_ context.Context, server, tool, callID string) (trace.SpanContext, bool) {
+	n, ok := m[server+"/"+tool+"/"+callID]
+	if !ok {
+		return trace.SpanContext{}, false
+	}
+	return turnSpan(n), true
+}
+
 type activeTurn struct {
 	daemon, target, conversation string
 	span                         byte
+	tools                        toolSpans // attached tool span source; nil = none
 }
 
 type proxyCall struct {
 	daemonHeader string
 	body         string
-	wantParent   byte // 0 = no span and no traceparent
+	wantParent   byte   // 0 = no span and no traceparent
+	wantCallID   string // gen_ai.tool.call.id on the client span; "" = absent
 }
 
 func toolsCall(tool string) string {
 	return fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":{"secret":"do-not-leak"}}}`, tool)
 }
 
+// claudeToolsCall is a tools/call carrying Claude Code's tool_use ID in params._meta.
+func claudeToolsCall(tool, toolUseID string) string {
+	return fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":{"secret":"do-not-leak"},"_meta":{"claudecode/toolUseId":%q}}}`, tool, toolUseID)
+}
+
 const toolsList = `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`
 
 const pingReply = `{"jsonrpc":"2.0","id":7,"result":{}}`
 
+type traceProxyCase struct {
+	name          string
+	turns         []activeTurn
+	announcements []guard.TraceAnnouncement
+	advance       time.Duration
+	calls         []proxyCall
+}
+
 func TestTraceProxy(t *testing.T) {
 	t.Parallel()
 	twoTurns := []activeTurn{{daemon: "p1/discord-1", target: "discord", conversation: "conv-1", span: 1}, {daemon: "p1/discord-2", target: "discord", conversation: "conv-2", span: 2}}
-	tests := []struct {
-		name          string
-		turns         []activeTurn
-		announcements []guard.TraceAnnouncement
-		advance       time.Duration
-		calls         []proxyCall
-	}{
+	tests := []traceProxyCase{
 		{
 			name:  "claude daemon header picks its own turn",
 			turns: twoTurns,
@@ -188,42 +210,79 @@ func TestTraceProxy(t *testing.T) {
 			turns: twoTurns,
 			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: ""}},
 		},
+		{
+			name:  "claude tools/call nests under the execute_tool span of its tool_use id",
+			turns: []activeTurn{{daemon: "p1/discord-1", target: "discord", span: 1, tools: toolSpans{"docket/create/toolu_7": 9}}},
+			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: claudeToolsCall("create", "toolu_7"), wantParent: 9, wantCallID: "toolu_7"}},
+		},
+		{
+			name:  "agy sole turn tools/call nests under the execute_tool span by server and tool",
+			turns: []activeTurn{{daemon: "p1/discord-1", target: "discord", span: 1, tools: toolSpans{"docket/create/": 9}}},
+			calls: []proxyCall{{body: toolsCall("create"), wantParent: 9}},
+		},
+		{
+			name: "agy announced tools/call nests under the announcing daemon's execute_tool span",
+			turns: []activeTurn{
+				{daemon: "p1/discord-1", target: "discord", span: 1, tools: toolSpans{"docket/create/": 8}},
+				{daemon: "p1/discord-2", target: "discord", span: 2, tools: toolSpans{"docket/create/": 9}},
+			},
+			announcements: []guard.TraceAnnouncement{{DaemonID: "p1/discord-2", Server: "docket", Tool: "create"}},
+			calls:         []proxyCall{{body: toolsCall("create"), wantParent: 9}},
+		},
+		{
+			name:  "unmatched tools/call falls back to the invoke_agent span",
+			turns: []activeTurn{{daemon: "p1/discord-1", target: "discord", span: 1, tools: toolSpans{"docket/search/toolu_7": 9}}},
+			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: claudeToolsCall("create", "toolu_8"), wantParent: 1, wantCallID: "toolu_8"}},
+		},
+		{
+			name:  "non tools/call methods never claim a tool span",
+			turns: []activeTurn{{daemon: "p1/discord-1", target: "discord", span: 1, tools: toolSpans{"docket//": 9}}},
+			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: toolsList, wantParent: 1}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			upstream, seen := newUpstream(t)
-			registry := runner.NewActiveTurnRegistry()
-			for _, at := range tc.turns {
-				registry.Set(runner.ActiveTurn{DaemonID: at.daemon, Target: at.target, ConversationID: at.conversation}, turnSpan(at.span))
-			}
-			rec := endedSpans{SpanProcessor: tracetest.NewSpanRecorder(), ch: make(chan sdktrace.ReadOnlySpan, 16)}
-			clock := &manualClock{now: time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)}
-			proxy := mcp.NewTraceProxy(mcp.TraceProxyConfig{
-				Upstreams:      upstreamMap{"discord/docket": upstream.URL + "/mcp?team=1"},
-				Turns:          registry,
-				Clock:          clock.Now,
-				TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)),
-			})
-			mux := http.NewServeMux()
-			proxy.Register(mux)
-			srv := httptest.NewServer(mux)
-			defer srv.Close()
-
-			for _, a := range tc.announcements {
-				body, _ := json.Marshal(a)
-				resp, err := srv.Client().Post(srv.URL+"/internal/mcp-proxy/announce", "application/json", bytes.NewReader(body))
-				if err != nil {
-					t.Fatalf("announce: %v", err)
-				}
-				_ = resp.Body.Close()
-			}
-			clock.Advance(tc.advance)
-
-			for i, call := range tc.calls {
-				assertTraceProxyCall(t, srv, rec, seen, i, call)
-			}
+			runTraceProxyCase(t, tc)
 		})
+	}
+}
+
+func runTraceProxyCase(t *testing.T, tc traceProxyCase) {
+	t.Helper()
+	upstream, seen := newUpstream(t)
+	registry := runner.NewActiveTurnRegistry()
+	for _, at := range tc.turns {
+		registry.Set(runner.ActiveTurn{DaemonID: at.daemon, Target: at.target, ConversationID: at.conversation}, turnSpan(at.span))
+		if at.tools != nil {
+			registry.SetToolSpans(at.daemon, at.tools)
+		}
+	}
+	rec := endedSpans{SpanProcessor: tracetest.NewSpanRecorder(), ch: make(chan sdktrace.ReadOnlySpan, 16)}
+	clock := &manualClock{now: time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)}
+	proxy := mcp.NewTraceProxy(mcp.TraceProxyConfig{
+		Upstreams:      upstreamMap{"discord/docket": upstream.URL + "/mcp?team=1"},
+		Turns:          registry,
+		Clock:          clock.Now,
+		TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)),
+	})
+	mux := http.NewServeMux()
+	proxy.Register(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	for _, a := range tc.announcements {
+		body, _ := json.Marshal(a)
+		resp, err := srv.Client().Post(srv.URL+"/internal/mcp-proxy/announce", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("announce: %v", err)
+		}
+		_ = resp.Body.Close()
+	}
+	clock.Advance(tc.advance)
+
+	for i, call := range tc.calls {
+		assertTraceProxyCall(t, srv, rec, seen, i, call)
 	}
 }
 
@@ -252,10 +311,10 @@ func assertTraceProxyCall(t *testing.T, srv *httptest.Server, rec endedSpans, se
 		}
 		return
 	}
-	assertTraceProxySpan(t, rec, got, i, call.wantParent)
+	assertTraceProxySpan(t, rec, got, i, call.wantParent, call.wantCallID)
 }
 
-func assertTraceProxySpan(t *testing.T, rec endedSpans, got seenRequest, i int, wantParent byte) {
+func assertTraceProxySpan(t *testing.T, rec endedSpans, got seenRequest, i int, wantParent byte, wantCallID string) {
 	t.Helper()
 	var span sdktrace.ReadOnlySpan
 	select {
@@ -271,10 +330,17 @@ func assertTraceProxySpan(t *testing.T, rec endedSpans, got seenRequest, i int, 
 	if got.traceparent != wantTP {
 		t.Errorf("call %d: traceparent %q, want %q", i, got.traceparent, wantTP)
 	}
+	callID := ""
 	for _, kv := range span.Attributes() {
+		if kv.Key == "gen_ai.tool.call.id" {
+			callID = kv.Value.AsString()
+		}
 		if strings.Contains(kv.Value.String(), "do-not-leak") || strings.Contains(kv.Value.String(), "upstream-token") || strings.Contains(kv.Value.String(), "team=1") {
 			t.Errorf("call %d: span attribute %s leaks content", i, kv.Key)
 		}
+	}
+	if callID != wantCallID {
+		t.Errorf("call %d: gen_ai.tool.call.id = %q, want %q", i, callID, wantCallID)
 	}
 }
 

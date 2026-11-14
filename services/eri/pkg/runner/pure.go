@@ -321,6 +321,15 @@ func ExtractMCPToolInfo(toolName string, params map[string]any) (string, string)
 	return toolName, "native"
 }
 
+// mcpCallTarget maps ExtractMCPToolInfo's result to the MCP server and tool of an MCP call,
+// or "", "" for native tools and calls whose server is unknown.
+func mcpCallTarget(canonicalTool, mcpServer string) (server, tool string) {
+	if mcpServer == "native" || mcpServer == "unknown" {
+		return "", ""
+	}
+	return mcpServer, canonicalTool
+}
+
 func isSkillNameChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
 }
