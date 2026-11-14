@@ -21,15 +21,16 @@ import (
 type Mode string
 
 const (
-	ModeAll      Mode = "all"
-	ModeShare    Mode = "share"
-	ModeSchedule Mode = "schedule"
-	ModeBatch    Mode = "batch"
-	ModePost     Mode = "post-batch"
-	ModeInv      Mode = "pre-invocation"
-	ModeSearch   Mode = "search"
-	ModeCommit   Mode = "commit"
-	ModeTrace    Mode = "trace"
+	ModeAll       Mode = "all"
+	ModeShare     Mode = "share"
+	ModeLiveState Mode = "live-state"
+	ModeSchedule  Mode = "schedule"
+	ModeBatch     Mode = "batch"
+	ModePost      Mode = "post-batch"
+	ModeInv       Mode = "pre-invocation"
+	ModeSearch    Mode = "search"
+	ModeCommit    Mode = "commit"
+	ModeTrace     Mode = "trace"
 )
 
 // traceAnnounceTimeout bounds the announcement POST so a stalled eri never delays a tool call.
@@ -43,11 +44,13 @@ type Config struct {
 
 // HelpMessage returns the CLI usage documentation.
 func HelpMessage() string {
-	return "Usage: hook-guard [share|schedule|batch|post-batch|pre-invocation|search|commit|trace|all]"
+	return "Usage: hook-guard [share|live-state|schedule|batch|post-batch|pre-invocation|search|commit|trace|all]"
 }
 
 func detectModeFromBase(base string) (Mode, bool) {
 	switch {
+	case strings.Contains(base, "live-state"):
+		return ModeLiveState, true
 	case strings.Contains(base, "share"):
 		return ModeShare, true
 	case strings.Contains(base, "schedule"):
@@ -73,7 +76,7 @@ func ParseCLIConfig(args []string) Config {
 		Mode: ModeAll,
 	}
 
-	// 1. Detect mode from binary base name (supporting symlinks like share-guard, schedule-guard, batch-guard, search-guard, commit-guard)
+	// 1. Detect mode from binary base name (supporting symlinks like share-guard, live-state-guard, schedule-guard, batch-guard, search-guard, commit-guard)
 	if len(args) > 0 {
 		base := strings.ToLower(filepath.Base(args[0]))
 		if m, ok := detectModeFromBase(base); ok {
@@ -87,6 +90,8 @@ func ParseCLIConfig(args []string) Config {
 		switch arg {
 		case "share", "share-guard":
 			cfg.Mode = ModeShare
+		case "live-state", "live-state-guard":
+			cfg.Mode = ModeLiveState
 		case "schedule", "schedule-guard":
 			cfg.Mode = ModeSchedule
 		case "post-batch", "post-batch-guard", "post-tool":

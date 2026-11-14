@@ -129,6 +129,10 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 
 	args := ParseArgs(payload.ToolCall.Args)
 	args.AdoptClaudeMCPCall(payload.ToolCall.Name, payload.ToolCall.Args)
+	// Claude Code carries the shell cwd at the payload top level, not in tool_input.
+	if args.Cwd == "" {
+		args.Cwd = payload.Cwd
+	}
 
 	switch mode {
 	case string(ModeInv), "invocation":

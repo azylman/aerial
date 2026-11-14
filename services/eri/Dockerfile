@@ -193,6 +193,7 @@ WORKDIR /app
 RUN ln -s /app/eri /usr/local/bin/aerial-brain && \
     ln -s /app/eri /usr/local/bin/aerial-eri && \
     ln -s /usr/local/bin/hook-guard /usr/local/bin/share-guard && \
+    ln -s /usr/local/bin/hook-guard /usr/local/bin/live-state-guard && \
     ln -s /usr/local/bin/hook-guard /usr/local/bin/schedule-guard && \
     ln -s /usr/local/bin/hook-guard /usr/local/bin/batch-guard && \
     ln -s /usr/local/bin/hook-guard /usr/local/bin/search-guard && \
