@@ -14,19 +14,14 @@ import (
 type trackingBus struct {
 	pubsub.Bus
 
-	mu         sync.Mutex
-	publishes  []string
-	publishErr error
+	mu        sync.Mutex
+	publishes []string
 }
 
 func (t *trackingBus) Publish(ctx context.Context, subject, msgID string, payload any) error {
 	t.mu.Lock()
 	t.publishes = append(t.publishes, subject)
-	err := t.publishErr
 	t.mu.Unlock()
-	if err != nil {
-		return err
-	}
 	return t.Bus.Publish(ctx, subject, msgID, payload)
 }
 

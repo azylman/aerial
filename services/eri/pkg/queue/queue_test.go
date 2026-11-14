@@ -4139,7 +4139,6 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 		emitStep           bool
 		wantSyncedRepo     string
 		wantSyncedPRNumber int
-		wantVanadisChunkID string
 	}{
 		{
 			name:         "ephemeral vanadis chunk",
@@ -4211,24 +4210,6 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			}
 			var pool *WorkerPool
 
-			var vanadisReqsMu sync.Mutex
-			var vanadisReqs []struct {
-				Path string
-				Body map[string]string
-			}
-			vanadisSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var b map[string]string
-				_ = json.NewDecoder(r.Body).Decode(&b)
-				vanadisReqsMu.Lock()
-				vanadisReqs = append(vanadisReqs, struct {
-					Path string
-					Body map[string]string
-				}{Path: r.URL.Path, Body: b})
-				vanadisReqsMu.Unlock()
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer vanadisSrv.Close()
-
 			var routerSrv *httptest.Server
 			if tc.coldWidgetSync || tc.syncConnErr {
 				routerSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4264,7 +4245,6 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 				Store:          store,
 				TimeoutMinutes: 1,
 				SynapseURL:     routerURL,
-				VanadisURL:     vanadisSrv.URL,
 				DeliveryFunc: func(s *discordgo.Session, c, text string) error {
 					t.Errorf("unexpected Discord DeliveryFunc call for headless dispatch")
 					return nil
@@ -4309,7 +4289,7 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			defer pool.Stop()
 
 			if tc.syncBadURL {
-				pBad := &WorkerPool{cfg: WorkerPoolConfig{SynapseURL: "://bad-url", VanadisURL: "http://vanadis.aerial/api/"}}
+				pBad := &WorkerPool{cfg: WorkerPoolConfig{SynapseURL: "://bad-url"}}
 				pBad.ensureChunkWidgetHydrated(context.Background(), "Build ID: b1", "c1", "b1")
 			}
 
@@ -4609,13 +4589,12 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name              string
-		source            string
-		sessionID         string
-		prompt            string
-		wantStatus        string
-		wantMinRetries    int
-		wantVanadisFailID string
+		name           string
+		source         string
+		sessionID      string
+		prompt         string
+		wantStatus     string
+		wantMinRetries int
 	}{
 		{
 			name:           "heartbeat dispatch exhausts retries to failed status",
