@@ -82,6 +82,10 @@ func TestIsQuotaPause(t *testing.T) {
 		{name: "Claude usage limit phrase with resets prefix", errDetail: "Your usage limit resets 3pm.", want: true},
 		{name: "Claude CLI hit your limit straight apostrophe", errDetail: "You've hit your limit · resets 3pm (America/Los_Angeles)", want: true},
 		{name: "Claude CLI hit your limit curly apostrophe", stderr: "You’ve hit your limit · resets 3pm (America/Los_Angeles)", want: true},
+		{name: "Claude synthetic 5-hour limit reply", errDetail: "claude synthetic reply (error=rate_limit): You've hit your 5-hour limit · resets 12:10pm (America/Los_Angeles)", want: true},
+		{name: "Claude synthetic rate limit reply in stderr", stderr: "claude synthetic reply (error=rate_limit): limit reached", want: true},
+		{name: "Claude synthetic resume placeholder", errDetail: "claude synthetic reply (error=none): No response requested."},
+		{name: "Claude synthetic model not found", errDetail: "claude synthetic reply (error=model_not_found): model not found"},
 	} {
 		if got := IsQuotaPause(tc.errDetail, tc.stderr); got != tc.want {
 			t.Errorf("%s: IsQuotaPause(%q, %q) = %v, want %v", tc.name, tc.errDetail, tc.stderr, got, tc.want)
