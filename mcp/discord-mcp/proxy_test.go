@@ -110,6 +110,8 @@ func setupMockDiscordUpstream(t *testing.T) *httptest.Server {
 
 		w.Header().Set("Content-Type", "application/json")
 		switch req.Method {
+		case "initialize":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"mcp-discord","version":"1.0.0"}}}`))
 		case "tools/list":
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"discord_send"},{"name":"discord_read_messages"}]}}`))
 		case "tools/call":
@@ -149,18 +151,21 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 		wantStatusCode int
 		wantContains   string
 		wantAbsent     string
+		wantInstrMax   int
 	}{
-		{"tools/list filters discord_send", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":100,"method":"tools/list"}`), nil, false, http.StatusOK, "discord_read_messages", "discord_send"},
-		{"tools/call blocked for discord_send", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":200,"method":"tools/call","params":{"name":"discord_send","arguments":{"message":"test"}}}`), nil, false, http.StatusOK, "disabled", ""},
-		{"tools/call allowed for discord_read_messages", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":300,"method":"tools/call","params":{"name":"discord_read_messages","arguments":{"channelId":"123"}}}`), nil, false, http.StatusOK, "executed", ""},
-		{"tools/call shapes discord_search_messages", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"discord_search_messages","arguments":{"guildId":"123","offset":2}}}`), nil, false, http.StatusOK, "has_more", "threads"},
-		{"GET /health reverse proxies to upstream", handler, http.MethodGet, "/health", nil, nil, false, http.StatusOK, "ok", ""},
-		{"upstream returns invalid JSON for tools/list", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), map[string]string{"X-Mock-Invalid-Json": "1"}, false, http.StatusOK, "{invalid-tools-list", ""},
-		{"offline upstream returns BadGateway", offlineHandler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`), nil, false, http.StatusBadGateway, "", ""},
-		{"request body read error returns BadRequest", handler, http.MethodPost, "/mcp", &errReader{}, nil, false, http.StatusBadRequest, "", ""},
-		{"upstream body read error returns BadGateway", handler, http.MethodPost, "/mcp", strings.NewReader(`{}`), map[string]string{"X-Mock-Hijack": "1"}, false, http.StatusBadGateway, "", ""},
-		{"upstream body close error handled cleanly", handler, http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","method":"tools/list"}`), nil, true, http.StatusOK, "", ""},
-		{"invalid HTTP method returns error", handler, "INVALID METHOD WITH SPACES", "/mcp", nil, nil, false, http.StatusBadRequest, "", ""},
+		{"initialize injects instructions", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":99,"method":"initialize","params":{}}`), nil, false, http.StatusOK, "discord_list_servers", "", 1024},
+		{"tools/list filters discord_send", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":100,"method":"tools/list"}`), nil, false, http.StatusOK, "discord_read_messages", "discord_send", 0},
+		{"tools/call blocked for discord_send", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":200,"method":"tools/call","params":{"name":"discord_send","arguments":{"message":"test"}}}`), nil, false, http.StatusOK, "disabled", "", 0},
+		{"tools/call allowed for discord_read_messages", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":300,"method":"tools/call","params":{"name":"discord_read_messages","arguments":{"channelId":"123"}}}`), nil, false, http.StatusOK, "executed", "", 0},
+		{"tools/call shapes discord_search_messages", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"discord_search_messages","arguments":{"guildId":"123","offset":2}}}`), nil, false, http.StatusOK, "has_more", "threads", 0},
+		{"GET /health reverse proxies to upstream", handler, http.MethodGet, "/health", nil, nil, false, http.StatusOK, "ok", "", 0},
+		{"upstream returns invalid JSON for initialize", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`), map[string]string{"X-Mock-Invalid-Json": "1"}, false, http.StatusOK, "{invalid-tools-list", "", 0},
+		{"upstream returns invalid JSON for tools/list", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), map[string]string{"X-Mock-Invalid-Json": "1"}, false, http.StatusOK, "{invalid-tools-list", "", 0},
+		{"offline upstream returns BadGateway", offlineHandler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`), nil, false, http.StatusBadGateway, "", "", 0},
+		{"request body read error returns BadRequest", handler, http.MethodPost, "/mcp", &errReader{}, nil, false, http.StatusBadRequest, "", "", 0},
+		{"upstream body read error returns BadGateway", handler, http.MethodPost, "/mcp", strings.NewReader(`{}`), map[string]string{"X-Mock-Hijack": "1"}, false, http.StatusBadGateway, "", "", 0},
+		{"upstream body close error handled cleanly", handler, http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","method":"tools/list"}`), nil, true, http.StatusOK, "", "", 0},
+		{"invalid HTTP method returns error", handler, "INVALID METHOD WITH SPACES", "/mcp", nil, nil, false, http.StatusBadRequest, "", "", 0},
 	}
 
 	for _, tc := range tests {
@@ -202,6 +207,25 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 			}
 			if tc.wantAbsent != "" && strings.Contains(bodyStr, tc.wantAbsent) {
 				t.Errorf("expected body to NOT contain %q, got: %s", tc.wantAbsent, bodyStr)
+			}
+			if tc.wantInstrMax > 0 {
+				var parsed struct {
+					Result struct {
+						Instructions string `json:"instructions"`
+						ServerInfo   struct {
+							Name string `json:"name"`
+						} `json:"serverInfo"`
+					} `json:"result"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
+					t.Fatalf("failed to decode initialize response: %v", err)
+				}
+				if n := len(parsed.Result.Instructions); n == 0 || n > tc.wantInstrMax {
+					t.Errorf("instructions length %d, want 1..%d", n, tc.wantInstrMax)
+				}
+				if parsed.Result.ServerInfo.Name != "mcp-discord" {
+					t.Errorf("serverInfo not preserved: %q", parsed.Result.ServerInfo.Name)
+				}
 			}
 		})
 	}
