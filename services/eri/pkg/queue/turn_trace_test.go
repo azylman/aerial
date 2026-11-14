@@ -264,7 +264,7 @@ func TestProcessBurst_EmitsTurnTrace(t *testing.T) {
 			}
 			root := byName[runner.OperationInvokeAgent]
 			rootID := root.SpanContext().SpanID()
-			for child, parent := range map[string]string{spanTurnSetup: runner.OperationInvokeAgent, spanLease: spanTurnSetup, "session.lock_wait": spanLease, "daemon.spawn": spanLease, spanPrompt: spanTurnSetup} {
+			for child, parent := range map[string]string{spanTurnSetup: runner.OperationInvokeAgent, spanLease: spanTurnSetup, "session.lock_wait": spanLease, "daemon.spawn": spanLease, spanPrompt: spanTurnSetup, spanPromptChannelSnapshot: spanPrompt, spanPromptScopeInstr: spanPrompt} {
 				s, ok := byName[child]
 				if !ok {
 					t.Errorf("missing startup span %q", child)
@@ -497,5 +497,62 @@ func TestLeaseSpanAttributes(t *testing.T) {
 				t.Errorf("leaseSpanAttributes = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// wantPromptSpan describes one expected span: its parent span name ("" skips the parent check),
+// a subset of its attributes, and whether it carries an error status.
+type wantPromptSpan struct {
+	name, parent string
+	attrs        []attribute.KeyValue
+	errored      bool
+}
+
+// newPromptBuildRecorder returns a tracer provider recording into rec and a ctx carrying an open
+// prompt.build span from it.
+func newPromptBuildRecorder() (*tracetest.SpanRecorder, *sdktrace.TracerProvider, context.Context, trace.Span) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	ctx, root := tp.Tracer("test").Start(context.Background(), spanPrompt) //nolint:spancheck // the caller ends the span
+	return rec, tp, ctx, root                                              //nolint:spancheck // the caller ends the span
+}
+
+// assertPromptSpans checks every wanted span exists exactly once with the wanted parent, attributes
+// and status, and that no absent span was recorded.
+func assertPromptSpans(t *testing.T, ended []sdktrace.ReadOnlySpan, want []wantPromptSpan, absent []string) {
+	t.Helper()
+	byName, counts := map[string]sdktrace.ReadOnlySpan{}, map[string]int{}
+	for _, s := range ended {
+		byName[s.Name()] = s
+		counts[s.Name()]++
+	}
+	for _, w := range want {
+		s, ok := byName[w.name]
+		if !ok {
+			t.Errorf("missing span %q", w.name)
+			continue
+		}
+		if counts[w.name] != 1 {
+			t.Errorf("span %q recorded %d times, want 1", w.name, counts[w.name])
+		}
+		if w.parent != "" {
+			if p, ok := byName[w.parent]; !ok || s.Parent().SpanID() != p.SpanContext().SpanID() {
+				t.Errorf("span %q not parented under %q", w.name, w.parent)
+			}
+		}
+		have := attrMap(s.Attributes())
+		for _, kv := range w.attrs {
+			if got, ok := have[kv.Key]; !ok || got != kv.Value {
+				t.Errorf("span %q attr %s = %v (present %t), want %v", w.name, kv.Key, got.String(), ok, kv.Value.String())
+			}
+		}
+		if gotErr := s.Status().Code == codes.Error; gotErr != w.errored {
+			t.Errorf("span %q errored = %t, want %t (status %v)", w.name, gotErr, w.errored, s.Status())
+		}
+	}
+	for _, name := range absent {
+		if counts[name] != 0 {
+			t.Errorf("unexpected span %q", name)
+		}
 	}
 }

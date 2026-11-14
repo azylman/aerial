@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"go.opentelemetry.io/otel"
@@ -25,6 +26,19 @@ const (
 	spanLease     = "session.lease"
 	spanPrompt    = "prompt.build"
 
+	// Child spans of prompt.build: every step that can block while the prompt is assembled.
+	spanPromptChannelSnapshot  = "prompt.channel_snapshot"
+	spanPromptHistoryFetch     = "prompt.history_fetch"
+	spanPromptThreadSummary    = "prompt.thread_summary"
+	spanPromptSummaryLoad      = "prompt.summary_cache_load"
+	spanPromptSummarySave      = "prompt.summary_cache_save"
+	spanPromptSummaryLLM       = "prompt.summary_llm"
+	spanPromptPrevSessionID    = "prompt.previous_session_id"
+	spanPromptPreviousSession  = "prompt.previous_session"
+	spanPromptScopeInstr       = "prompt.scope_instructions"
+	spanPromptAmbientContext   = "prompt.ambient_context"
+	spanPromptRecentDispatches = "prompt.recent_dispatches"
+
 	attrTurnStatus       = attribute.Key("aerial.turn.status")
 	attrTriggerType      = attribute.Key("aerial.turn.trigger")
 	attrBurstSize        = attribute.Key("aerial.turn.burst_size")
@@ -35,6 +49,19 @@ const (
 	attrNewConversation  = attribute.Key("aerial.session.new_conversation")
 	attrSessionEphemeral = attribute.Key("aerial.session.ephemeral")
 	attrSessionOverflow  = attribute.Key("aerial.session.overflow")
+
+	attrPromptColdStart          = attribute.Key("aerial.prompt.cold_start")
+	attrPromptChars              = attribute.Key("aerial.prompt.chars")
+	attrPromptSnapshotOK         = attribute.Key("aerial.prompt.snapshot_ok")
+	attrPromptHistoryLimit       = attribute.Key("aerial.prompt.history_limit")
+	attrPromptHistoryCount       = attribute.Key("aerial.prompt.history_count")
+	attrPromptSummaryOutcome     = attribute.Key("aerial.prompt.summary_outcome")
+	attrPromptSummaryHadPrior    = attribute.Key("aerial.prompt.summary_had_prior")
+	attrPromptSummaryDeltaMsgs   = attribute.Key("aerial.prompt.summary_delta_msgs")
+	attrPromptSummaryShared      = attribute.Key("aerial.prompt.summary_shared")
+	attrPromptSummaryPromptChars = attribute.Key("aerial.prompt.summary_prompt_chars")
+	attrPromptPrevSessionChars   = attribute.Key("aerial.prompt.previous_session_chars")
+	attrPromptDispatchCount      = attribute.Key("aerial.prompt.dispatch_count")
 )
 
 // queuedTurnItem is the trace-relevant part of a queued row (message or dispatch).
@@ -264,6 +291,24 @@ func (te *turnExecution) startSetupChildSpan(base context.Context, name string) 
 		return te.startChildSpan(base, name)
 	}
 	return te.pool.tracer().Start(trace.ContextWithSpan(base, te.setupSpan), name) //nolint:spancheck // the caller owns and ends the span
+}
+
+// promptStepCtx joins the cancellation and deadline of cancelCtx with the span carried by
+// spanCtx, so a prompt.build step parents its span correctly without changing what cancels it.
+func promptStepCtx(cancelCtx, spanCtx context.Context) context.Context {
+	return trace.ContextWithSpan(cancelCtx, trace.SpanFromContext(spanCtx))
+}
+
+// startPromptStep opens a prompt.build step span as a child of the span carried by ctx.
+func (te *turnExecution) startPromptStep(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	return te.pool.tracer().Start(ctx, name, trace.WithAttributes(attrs...)) //nolint:spancheck // the caller owns and ends the span
+}
+
+// recordSpanError marks span failed with a redacted error message.
+func recordSpanError(span trace.Span, err error) {
+	if err != nil {
+		span.SetStatus(codes.Error, tracing.Redact(err.Error()))
+	}
 }
 
 // overflowLease is implemented by leases that may run on an on-demand overflow worker.
