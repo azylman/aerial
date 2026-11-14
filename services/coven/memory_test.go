@@ -836,16 +836,16 @@ func TestNewOllamaClient(t *testing.T) {
 		wantCtx   int
 	}{
 		{
-			name:      "NilConfigUsesDefaults",
+			name:      "NilConfigEmptyURL",
 			cfg:       nil,
-			wantURL:   DefaultOllamaURL,
+			wantURL:   "",
 			wantModel: DefaultOllamaModel,
 			wantCtx:   DefaultOllamaNumCtx,
 		},
 		{
-			name:      "EmptyFieldsUseDefaults",
+			name:      "EmptyFieldsEmptyURL",
 			cfg:       &OllamaConfig{BaseURL: "  ", Model: "", NumCtx: 0},
-			wantURL:   DefaultOllamaURL,
+			wantURL:   "",
 			wantModel: DefaultOllamaModel,
 			wantCtx:   DefaultOllamaNumCtx,
 		},
@@ -876,6 +876,7 @@ func TestOllamaClient_GenerateEmbedding(t *testing.T) {
 		{name: "NegativeRetriesClampedAndFails", handlerCodes: []int{http.StatusInternalServerError}, handlerBodies: []string{`temporary error`}, input: "query", maxRetries: -1, wantErr: true},
 		{name: "ContextCanceledError", handlerCodes: []int{http.StatusInternalServerError}, handlerBodies: []string{`err`}, input: "query", maxRetries: 1, cancelCtx: true, wantErr: true},
 		{name: "EmptyTextInputError", input: "", wantErr: true, handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{}`}},
+		{name: "UnconfiguredBaseURLError", input: "test text", wantErr: true, emptyBaseURL: true},
 		{name: "Non200Error", handlerCodes: []int{http.StatusInternalServerError}, handlerBodies: []string{`internal server error`}, input: "test text", wantErr: true},
 		{name: "InvalidJSONResponse", handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{bad json`}, input: "test text", wantErr: true},
 		{name: "OllamaErrorResponse", handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{"error": "model not found"}`}, input: "test text", wantErr: true},
@@ -902,6 +903,7 @@ type ollamaEmbeddingTestCase struct {
 	wantErr       bool
 	wantVecLen    int
 	expectPrompt  string
+	emptyBaseURL  bool
 }
 
 func runOllamaEmbeddingCase(t *testing.T, tc ollamaEmbeddingTestCase) {
@@ -927,8 +929,13 @@ func runOllamaEmbeddingCase(t *testing.T, tc ollamaEmbeddingTestCase) {
 	}))
 	defer server.Close()
 
+	baseURL := server.URL
+	if tc.emptyBaseURL {
+		baseURL = ""
+	}
+
 	client := NewOllamaClient(&OllamaConfig{
-		BaseURL:     server.URL,
+		BaseURL:     baseURL,
 		QueryPrefix: tc.prefix,
 	})
 	client.SetRetryDelay(tc.retryDelay)

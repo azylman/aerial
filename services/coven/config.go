@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -171,7 +172,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 	ollamaBaseURL := strings.TrimSpace(ycfg.Ollama.BaseURL)
 	if ollamaBaseURL == "" {
-		return nil, fmt.Errorf("config: ollama.base_url is required in %s", cleanPath)
+		return nil, errors.New("missing required configuration: ollama.base_url")
 	}
 	ollamaModel := strings.TrimSpace(ycfg.Ollama.Model)
 	if ollamaModel == "" {
@@ -191,7 +192,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	if !systemChannelIDRegex.MatchString(systemChannelID) {
 		systemChannelID = ""
 	}
-	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL, "nats://nats.aerial:4222")
+	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL)
 
 	return &Config{
 		Port:               port,

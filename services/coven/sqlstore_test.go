@@ -99,7 +99,7 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 		{
 			name:         "DefaultURL",
 			initialURL:   "",
-			wantBrainURL: DefaultBrainURL,
+			wantBrainURL: "",
 		},
 		{
 			name:         "CustomURL",
@@ -110,22 +110,22 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 		},
 		{
 			name:         "SetterWithWhitespace",
-			initialURL:   DefaultBrainURL,
+			initialURL:   "http://old-eri:5000",
 			setURL:       " http://new-eri:6000/ ",
 			setToken:     "  padded-token  ",
 			wantBrainURL: "http://new-eri:6000",
 			wantToken:    "padded-token",
 		},
 		{
-			name:         "SetterEmptyResetsToDefault",
+			name:         "SetterEmptyResetsToEmpty",
 			initialURL:   "http://custom:1234",
 			setURL:       "   ",
-			wantBrainURL: DefaultBrainURL,
+			wantBrainURL: "",
 		},
 		{
 			name:         "NilStoreFallback",
-			initialURL:   DefaultBrainURL,
-			wantBrainURL: DefaultBrainURL,
+			initialURL:   "",
+			wantBrainURL: "",
 		},
 	}
 
@@ -157,11 +157,17 @@ func TestSQLStore_FetchBrainJSON(t *testing.T) {
 	tests := []struct {
 		name       string
 		token      string
+		emptyURL   bool
 		serverCode int
 		serverBody string
 		wantErr    bool
 		wantVal    string
 	}{
+		{
+			name:     "UnconfiguredBrainURLFailsFast",
+			emptyURL: true,
+			wantErr:  true,
+		},
 		{
 			name:       "SuccessWithToken",
 			token:      "secret-token",
@@ -187,22 +193,36 @@ func TestSQLStore_FetchBrainJSON(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotAuthHeader string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				gotAuthHeader = r.Header.Get("Authorization")
-				w.WriteHeader(tc.serverCode)
-				_, _ = w.Write([]byte(tc.serverBody))
-			}))
-			defer srv.Close()
+			var srv *httptest.Server
+			if !tc.emptyURL {
+				srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					gotAuthHeader = r.Header.Get("Authorization")
+					w.WriteHeader(tc.serverCode)
+					_, _ = w.Write([]byte(tc.serverBody))
+				}))
+				defer srv.Close()
+			}
+
+			brainURL := ""
+			var client *http.Client
+			if srv != nil {
+				brainURL = srv.URL
+				client = srv.Client()
+			}
 
 			store := &SQLStore{
-				brainURL:   srv.URL,
-				httpClient: srv.Client(),
+				brainURL:   brainURL,
+				httpClient: client,
 				brainToken: tc.token,
 			}
 			var dst struct {
 				Val string `json:"val"`
 			}
-			err := store.fetchBrainJSON(ctx, srv.URL+"/test", "test", &dst)
+			fetchURL := ""
+			if srv != nil {
+				fetchURL = srv.URL + "/test"
+			}
+			err := store.fetchBrainJSON(ctx, fetchURL, "test", &dst)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("fetchBrainJSON() err = %v, wantErr = %v", err, tc.wantErr)
 			}

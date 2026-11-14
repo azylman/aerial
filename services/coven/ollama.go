@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -26,22 +27,17 @@ type Client struct {
 
 // NewOllamaClient creates a new Client configured from OllamaConfig.
 func NewOllamaClient(cfg *OllamaConfig) *Client {
-	if cfg == nil {
-		cfg = &OllamaConfig{
-			BaseURL: DefaultOllamaURL,
-			Model:   DefaultOllamaModel,
-			NumCtx:  DefaultOllamaNumCtx,
-		}
+	var baseURL, model, queryPrefix string
+	var numCtx int
+	if cfg != nil {
+		baseURL = strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+		model = strings.TrimSpace(cfg.Model)
+		queryPrefix = cfg.QueryPrefix
+		numCtx = cfg.NumCtx
 	}
-	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	if baseURL == "" {
-		baseURL = DefaultOllamaURL
-	}
-	model := strings.TrimSpace(cfg.Model)
 	if model == "" {
 		model = DefaultOllamaModel
 	}
-	numCtx := cfg.NumCtx
 	if numCtx <= 0 {
 		numCtx = DefaultOllamaNumCtx
 	}
@@ -52,7 +48,7 @@ func NewOllamaClient(cfg *OllamaConfig) *Client {
 	c := &Client{
 		baseURL:     baseURL,
 		model:       model,
-		queryPrefix: cfg.QueryPrefix,
+		queryPrefix: queryPrefix,
 		numCtx:      numCtx,
 	}
 	c.Client = ollama.NewDynamicClient(func() ollama.Config {
@@ -71,5 +67,8 @@ func NewOllamaClient(cfg *OllamaConfig) *Client {
 // GenerateEmbedding generates an embedding vector for the provided text.
 // If isQuery is true and queryPrefix is configured, prepends the query prefix to the prompt.
 func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) ([]float32, error) {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return nil, errors.New("ollama base URL is not configured")
+	}
 	return c.Client.GenerateEmbedding(ctx, text, isQuery, maxRetries)
 }

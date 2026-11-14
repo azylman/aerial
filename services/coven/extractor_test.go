@@ -54,9 +54,9 @@ func TestHTTPBrainLLMClient(t *testing.T) {
 			wantErr:    true,
 		},
 		{
-			name:       "DefaultURLFallback",
-			statusCode: http.StatusOK,
-			rawURL:     "http://127.0.0.1:0/bad",
+			name:       "UnconfiguredURLError",
+			statusCode: 0,
+			rawURL:     "",
 			prompt:     "hello",
 			wantErr:    true,
 		},
