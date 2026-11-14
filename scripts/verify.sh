@@ -575,6 +575,72 @@ check_code_health() {
     fi
 }
 
+# Scan the staged (and branch) diff for registered Infisical secret values and
+# built-in pattern rules via eri's loopback guard endpoint. Only eri can read
+# /secrets, so the scan must go through it; where eri is absent (CI, human
+# machines) the check is skipped. Secret samples, patterns, and the deny reason
+# are never printed — only file:line [category].
+check_staged_secrets() {
+    if [ -z "${AERIAL_INTERNAL_ERI_URL:-}" ]; then
+        echo "ℹ️  [Aerial Verify] Registered-secret scan skipped (no eri: AERIAL_INTERNAL_ERI_URL unset)."
+        return 0
+    fi
+    if ! has_cmd jq || ! has_cmd curl; then
+        echo "🚨 [Aerial Verify] Registered-secret scan requires jq and curl when AERIAL_INTERNAL_ERI_URL is set." >&2
+        exit 1
+    fi
+
+    local base=""
+    if git rev-parse --verify origin/main >/dev/null 2>&1 && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)" != "main" ]; then
+        base=$(git merge-base origin/main HEAD 2>/dev/null || true)
+    fi
+
+    local tmp
+    tmp=$(mktemp -d /tmp/aerial-secret-scan.XXXXXX)
+    # shellcheck disable=SC2086 # $base is empty or a single SHA
+    if ! git diff --cached $base > "$tmp/diff"; then
+        rm -rf "$tmp"
+        echo "🚨 [Aerial Verify] Registered-secret scan could not compute the staged diff." >&2
+        exit 1
+    fi
+    if [ ! -s "$tmp/diff" ]; then
+        rm -rf "$tmp"
+        return 0
+    fi
+
+    local code
+    code=$(jq -Rs '{diff: ., source_label: "verify", check_test_files: false, ignore_internal_domain: true}' < "$tmp/diff" |
+        curl -sS --max-time 10 -o "$tmp/resp" -w '%{http_code}' -H 'Content-Type: application/json' \
+            --data-binary @- "${AERIAL_INTERNAL_ERI_URL%/}/internal/guard/scan" 2>"$tmp/err") || code="curl-failed"
+    if [ "$code" != "200" ]; then
+        echo "🚨 [Aerial Verify] Registered-secret scan failed against eri (status: $code)." >&2
+        [ -s "$tmp/err" ] && sed 's/^/   /' "$tmp/err" >&2
+        rm -rf "$tmp"
+        exit 1
+    fi
+
+    local decision
+    decision=$(jq -er '.decision | select(. == "allow" or . == "deny")' < "$tmp/resp" 2>/dev/null) || decision=""
+    case "$decision" in
+        allow)
+            rm -rf "$tmp"
+            return 0
+            ;;
+        deny)
+            echo "🚨 [Aerial Verify] Registered secret or credential pattern detected in staged diff:" >&2
+            jq -r '.violations[]? | "   • \(.file):\(.lineNum) [\(.category)]"' < "$tmp/resp" >&2 || true
+            echo "   Remove the value (sample withheld) and re-stage before submitting." >&2
+            rm -rf "$tmp"
+            exit 1
+            ;;
+        *)
+            echo "🚨 [Aerial Verify] Registered-secret scan returned an unparseable response from eri." >&2
+            rm -rf "$tmp"
+            exit 1
+            ;;
+    esac
+}
+
 run_atlas_validate() {
     has_cmd atlas || return 0
     find . -maxdepth 3 -name "atlas.hcl" 2>/dev/null | sort | while IFS= read -r hcl; do
@@ -625,6 +691,7 @@ if [ "$MODE" = "staged" ]; then
     check_dependabot_coverage
     check_no_imperative_ddl
     check_code_health
+    check_staged_secrets
 
     if echo "$CHANGED_FILES" | grep -q '^docker-compose\.yml$'; then
         check_docker_compose
