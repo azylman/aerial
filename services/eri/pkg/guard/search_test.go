@@ -59,18 +59,18 @@ func (f *fakeSQLCatalogConn) QueryCatalog(_ context.Context, sqlStr string, args
 
 func (f *fakeSQLCatalogConn) Close(_ context.Context) {}
 
-func TestCheckSearch(t *testing.T) {
-	t.Parallel()
+type searchTestCase struct {
+	name             string
+	tool             string
+	cmd              string
+	cwd              string
+	wantDeny         bool
+	wantOverwriteSub string
+	server           string
+}
 
-	tests := []struct {
-		name             string
-		tool             string
-		cmd              string
-		cwd              string
-		wantDeny         bool
-		wantOverwriteSub string
-		server           string
-	}{
+func checkSearchBaseCases() []searchTestCase {
+	return []searchTestCase{
 		// Non-search tools / empty / prefix cases
 		{"write_to_file allowed", "write_to_file", "find /", "", false, "", ""},
 		{"empty command line allowed", "run_command", "", "", false, "", ""},
@@ -168,7 +168,11 @@ func TestCheckSearch(t *testing.T) {
 		{"bash safe command in search", "run_command", "bash -c 'echo safe'", "", false, "", ""},
 		{"grep short flag with digit", "run_command", "grep -m 10 foo file.txt", "", false, "", ""},
 		{"unclosed sql single quote", "run_command", `psql -A -c "SELECT 'unclosed"`, "", false, "", ""},
+	}
+}
 
+func checkSearchExtendedCases() []searchTestCase {
+	return []searchTestCase{
 		// Pipelines & Quotes
 		{"echo containing find in quotes allowed", "run_command", `echo "find / -name foo"`, "", false, "", ""},
 		{"chained safe commands allowed", "run_command", `ls -la && find . -maxdepth 1 -name '*.go'`, "", false, "", ""},
@@ -246,65 +250,65 @@ func TestCheckSearch(t *testing.T) {
 		{"claude victorialogs query bounded allowed", "mcp__victorialogs__query", "query", `{"query":"_time:15m kubernetes.container_name:synapse | limit 10"}`, false, "", "victorialogs"},
 		{"claude discord_search_messages limit 50 denied", "mcp__discord__discord_search_messages", "discord_search_messages", `{"guildId":"123","limit":50}`, true, "", "discord"},
 	}
+}
 
+func checkSearchTestCases() []searchTestCase {
+	return append(checkSearchBaseCases(), checkSearchExtendedCases()...)
+}
+
+func runCheckSearchCase(t *testing.T, tc searchTestCase) {
+	t.Helper()
+	tool := tc.tool
+	if tool == "" {
+		tool = "run_command"
+	}
+	args := ToolArgs{CommandLine: tc.cmd, Cwd: tc.cwd}
+	if normalizeToolName(tool) == "call_mcp_tool" || isClaudeMCPToolName(tool) {
+		args = ToolArgs{ServerName: tc.server, ToolName: tc.cmd, Arguments: json.RawMessage(tc.cwd)}
+	}
+	d := CheckSearchWithSQL(tool, args, nil)
+	if tc.wantDeny && d.Decision != DecisionDeny {
+		t.Fatalf("cmd %q: expected deny, got %v", tc.cmd, d)
+	}
+	if !tc.wantDeny && d.Decision != DecisionAllow {
+		t.Fatalf("cmd %q: expected allow, got deny: %v", tc.cmd, d)
+	}
+	if tc.wantOverwriteSub == "" {
+		if d.Overwrite != nil {
+			t.Fatalf("cmd %q: unexpected Overwrite: %v", tc.cmd, d.Overwrite)
+		}
+		return
+	}
+	rawOverwrite, err := json.Marshal(d.Overwrite["Arguments"])
+	if err != nil || !strings.Contains(string(rawOverwrite), tc.wantOverwriteSub) {
+		t.Fatalf("cmd %q: Overwrite[Arguments] = %s (err=%v), want substring %q", tc.cmd, rawOverwrite, err, tc.wantOverwriteSub)
+	}
+}
+
+func TestCheckSearch(t *testing.T) {
+	t.Parallel()
+
+	tests := checkSearchTestCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tool := tc.tool
-			if tool == "" {
-				tool = "run_command"
-			}
-			args := ToolArgs{CommandLine: tc.cmd, Cwd: tc.cwd}
-			if normalizeToolName(tool) == "call_mcp_tool" || isClaudeMCPToolName(tool) {
-				args = ToolArgs{ServerName: tc.server, ToolName: tc.cmd, Arguments: json.RawMessage(tc.cwd)}
-			}
-			d := CheckSearchWithSQL(tool, args, nil)
-			if tc.wantDeny && d.Decision != DecisionDeny {
-				t.Fatalf("cmd %q: expected deny, got %v", tc.cmd, d)
-			}
-			if !tc.wantDeny && d.Decision != DecisionAllow {
-				t.Fatalf("cmd %q: expected allow, got deny: %v", tc.cmd, d)
-			}
-			if tc.wantOverwriteSub == "" {
-				if d.Overwrite != nil {
-					t.Fatalf("cmd %q: unexpected Overwrite: %v", tc.cmd, d.Overwrite)
-				}
-				return
-			}
-			rawOverwrite, err := json.Marshal(d.Overwrite["Arguments"])
-			if err != nil || !strings.Contains(string(rawOverwrite), tc.wantOverwriteSub) {
-				t.Fatalf("cmd %q: Overwrite[Arguments] = %s (err=%v), want substring %q", tc.cmd, rawOverwrite, err, tc.wantOverwriteSub)
-			}
+			runCheckSearchCase(t, tc)
 		})
 	}
 }
 
-func TestPsqlGuard(t *testing.T) {
-	twoCols := []SQLColumn{{Name: "id", TableOID: 100, AttrNum: 1}, {Name: "author_name", TableOID: 100, AttrNum: 2}}
-	threeCols := []SQLColumn{{Name: "id", TableOID: 100, AttrNum: 1}, {Name: "author_name", TableOID: 100, AttrNum: 2}, {Name: "content", TableOID: 100, AttrNum: 3}}
-	cteCols := []SQLColumn{{Name: "id", TableOID: 0, AttrNum: 0}, {Name: "author_name", TableOID: 0, AttrNum: 0}, {Name: "content", TableOID: 0, AttrNum: 0}}
-	embedCols := []SQLColumn{{Name: "id", TableOID: 200, AttrNum: 1}, {Name: "embedding", TableOID: 200, AttrNum: 2}}
+type psqlTestCase struct {
+	name          string
+	cmd           string
+	conn          *fakeSQLCatalogConn
+	connErr       error
+	wantDeny      bool
+	wantReasonSub string
+	wantOverwrite string
+}
 
-	meta3 := map[uint32][2]string{100: {"messages", "3"}, 200: {"facts", "7"}}
-	rel3 := map[string]string{"messages": "3"}
-	schemaRows := [][3]string{{"messages", "id", "text"}, {"messages", "author_name", "text"}, {"messages", "content", "text"}}
-
-	limitPlan := `[{"Plan": {"Node Type": "Limit", "Plan Rows": 10, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 100}]}}]`
-	aggLimitPlan := `[{"Plan": {"Node Type": "Limit", "Plan Rows": 10, "Plans": [{"Node Type": "Aggregate", "Plan Rows": 10, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 100}]}]}}]`
-	overLimitPlan := `[{"Plan": {"Node Type": "Limit", "Plan Rows": 100, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 200}]}}]`
-	unboundedPlan := `[{"Plan": {"Node Type": "Sort", "Plan Rows": 103, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 103}]}}]`
-	pkPlan := `[{"Plan": {"Node Type": "Index Scan", "Relation Name": "messages", "Plan Rows": 1}}]`
-	dmlPlan := `[{"Plan": {"Node Type": "ModifyTable", "Relation Name": "messages", "Plan Rows": 1}}]`
-
-	tests := []struct {
-		name          string
-		cmd           string
-		conn          *fakeSQLCatalogConn
-		connErr       error
-		wantDeny      bool
-		wantReasonSub string
-		wantOverwrite string
-	}{
+func psqlGuardBasicCases(twoCols, threeCols, cteCols, embedCols []SQLColumn, meta3 map[uint32][2]string, rel3 map[string]string, limitPlan, aggLimitPlan, overLimitPlan, unboundedPlan, pkPlan, dmlPlan string) []psqlTestCase {
+	return []psqlTestCase{
 		{
 			name:          "scoped select injects -A",
 			cmd:           `psql "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
@@ -376,6 +380,11 @@ func TestPsqlGuard(t *testing.T) {
 			conn:          &fakeSQLCatalogConn{cols: threeCols, explainJSON: dmlPlan, tableMeta: meta3},
 			wantOverwrite: `psql -A "$DATABASE_URL" -c "UPDATE messages SET content = 'a''b' WHERE id = '1' RETURNING *"`,
 		},
+	}
+}
+
+func psqlGuardErrorCases(twoCols, threeCols []SQLColumn, meta3 map[uint32][2]string, rel3 map[string]string, schemaRows [][3]string, limitPlan string) []psqlTestCase {
+	return []psqlTestCase{
 		{
 			name:          "undefined column 42703 returns schema hint for referenced table",
 			cmd:           `psql "$DATABASE_URL" -c "SELECT author_username FROM \"messages\" -- comment\n WHERE id = '1'"`,
@@ -461,6 +470,57 @@ func TestPsqlGuard(t *testing.T) {
 			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT id FROM messages"`,
 		},
 	}
+}
+
+func psqlGuardTestCases(twoCols, threeCols, cteCols, embedCols []SQLColumn, meta3 map[uint32][2]string, rel3 map[string]string, schemaRows [][3]string, limitPlan, aggLimitPlan, overLimitPlan, unboundedPlan, pkPlan, dmlPlan string) []psqlTestCase {
+	cases := psqlGuardBasicCases(twoCols, threeCols, cteCols, embedCols, meta3, rel3, limitPlan, aggLimitPlan, overLimitPlan, unboundedPlan, pkPlan, dmlPlan)
+	return append(cases, psqlGuardErrorCases(twoCols, threeCols, meta3, rel3, schemaRows, limitPlan)...)
+}
+
+func runPsqlGuardCase(t *testing.T, tc psqlTestCase) {
+	t.Helper()
+	desc := &pgxDescriber{
+		connect: func(_ context.Context) (sqlCatalogConn, error) {
+			if tc.connErr != nil {
+				return nil, tc.connErr
+			}
+			return tc.conn, nil
+		},
+	}
+	d := CheckSearchWithSQL("run_command", ToolArgs{CommandLine: tc.cmd}, desc)
+	if tc.wantDeny && d.Decision != DecisionDeny {
+		t.Fatalf("expected deny, got %+v", d)
+	}
+	if !tc.wantDeny && d.Decision != DecisionAllow {
+		t.Fatalf("expected allow, got %+v", d)
+	}
+	if tc.wantReasonSub != "" && !strings.Contains(d.Reason, tc.wantReasonSub) {
+		t.Fatalf("reason %q missing %q", d.Reason, tc.wantReasonSub)
+	}
+	gotOverwrite, _ := d.Overwrite["CommandLine"].(string)
+	if gotOverwrite != tc.wantOverwrite {
+		t.Fatalf("Overwrite[CommandLine] = %q, want %q", gotOverwrite, tc.wantOverwrite)
+	}
+}
+
+func TestPsqlGuard(t *testing.T) {
+	twoCols := []SQLColumn{{Name: "id", TableOID: 100, AttrNum: 1}, {Name: "author_name", TableOID: 100, AttrNum: 2}}
+	threeCols := []SQLColumn{{Name: "id", TableOID: 100, AttrNum: 1}, {Name: "author_name", TableOID: 100, AttrNum: 2}, {Name: "content", TableOID: 100, AttrNum: 3}}
+	cteCols := []SQLColumn{{Name: "id", TableOID: 0, AttrNum: 0}, {Name: "author_name", TableOID: 0, AttrNum: 0}, {Name: "content", TableOID: 0, AttrNum: 0}}
+	embedCols := []SQLColumn{{Name: "id", TableOID: 200, AttrNum: 1}, {Name: "embedding", TableOID: 200, AttrNum: 2}}
+
+	meta3 := map[uint32][2]string{100: {"messages", "3"}, 200: {"facts", "7"}}
+	rel3 := map[string]string{"messages": "3"}
+	schemaRows := [][3]string{{"messages", "id", "text"}, {"messages", "author_name", "text"}, {"messages", "content", "text"}}
+
+	limitPlan := `[{"Plan": {"Node Type": "Limit", "Plan Rows": 10, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 100}]}}]`
+	aggLimitPlan := `[{"Plan": {"Node Type": "Limit", "Plan Rows": 10, "Plans": [{"Node Type": "Aggregate", "Plan Rows": 10, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 100}]}]}}]`
+	overLimitPlan := `[{"Plan": {"Node Type": "Limit", "Plan Rows": 100, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 200}]}}]`
+	unboundedPlan := `[{"Plan": {"Node Type": "Sort", "Plan Rows": 103, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 103}]}}]`
+	pkPlan := `[{"Plan": {"Node Type": "Index Scan", "Relation Name": "messages", "Plan Rows": 1}}]`
+	dmlPlan := `[{"Plan": {"Node Type": "ModifyTable", "Relation Name": "messages", "Plan Rows": 1}}]`
+
+	tests := psqlGuardTestCases(twoCols, threeCols, cteCols, embedCols, meta3, rel3, schemaRows, limitPlan, aggLimitPlan, overLimitPlan, unboundedPlan, pkPlan, dmlPlan)
 
 	t.Setenv("DATABASE_URL", "postgres://127.0.0.1:1/aerial?connect_timeout=1")
 	if d := CheckSearch("run_command", ToolArgs{CommandLine: `psql -c "SELECT id FROM messages LIMIT 1"`}); d.Decision != DecisionAllow {
@@ -473,28 +533,7 @@ func TestPsqlGuard(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			desc := &pgxDescriber{
-				connect: func(_ context.Context) (sqlCatalogConn, error) {
-					if tc.connErr != nil {
-						return nil, tc.connErr
-					}
-					return tc.conn, nil
-				},
-			}
-			d := CheckSearchWithSQL("run_command", ToolArgs{CommandLine: tc.cmd}, desc)
-			if tc.wantDeny && d.Decision != DecisionDeny {
-				t.Fatalf("expected deny, got %+v", d)
-			}
-			if !tc.wantDeny && d.Decision != DecisionAllow {
-				t.Fatalf("expected allow, got %+v", d)
-			}
-			if tc.wantReasonSub != "" && !strings.Contains(d.Reason, tc.wantReasonSub) {
-				t.Fatalf("reason %q missing %q", d.Reason, tc.wantReasonSub)
-			}
-			gotOverwrite, _ := d.Overwrite["CommandLine"].(string)
-			if gotOverwrite != tc.wantOverwrite {
-				t.Fatalf("Overwrite[CommandLine] = %q, want %q", gotOverwrite, tc.wantOverwrite)
-			}
+			runPsqlGuardCase(t, tc)
 		})
 	}
 }

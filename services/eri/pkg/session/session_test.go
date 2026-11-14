@@ -92,6 +92,69 @@ func writeConversationFile(t *testing.T, dir, sessionID, ext string, size int) s
 	return p
 }
 
+type managerInitActivityCase struct {
+	name              string
+	isNilMgr          bool
+	sessionID         string
+	roots             []string
+	setupLogs         bool
+	setupTasks        bool
+	setupClaudeDirect bool
+	wantErr           bool
+	wantZero          bool
+}
+
+func setupManagerInitActivityFixtures(tc managerInitActivityCase, tmp string) {
+	if tc.setupClaudeDirect && len(tc.roots) > 0 {
+		_ = os.MkdirAll(tc.roots[0], 0o755)
+		_ = os.WriteFile(filepath.Join(tc.roots[0], tc.sessionID+".jsonl"), []byte(`{"type":"user"}`+"\n"), 0o644)
+	}
+	if tc.setupLogs {
+		sessDir := filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", tc.sessionID)
+		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
+		_ = os.MkdirAll(logsDir, 0o755)
+		_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte("line1\n"), 0o644)
+	}
+	if tc.setupTasks {
+		sessDir := filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", tc.sessionID)
+		tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
+		_ = os.MkdirAll(tasksDir, 0o755)
+		_ = os.WriteFile(filepath.Join(tasksDir, "task-1.log"), []byte("log\n"), 0o644)
+		_ = os.MkdirAll(filepath.Join(tasksDir, "nested-dir"), 0o755)
+		_ = os.WriteFile(filepath.Join(tasksDir, "ignore.txt"), []byte("txt"), 0o644)
+	}
+}
+
+func runManagerInitAndActivityCase(t *testing.T, m *Manager, tmp string, tc managerInitActivityCase) {
+	t.Helper()
+	mgr := m
+	if tc.isNilMgr {
+		mgr = nil
+	}
+	roots := tc.roots
+	if roots == nil && mgr != nil {
+		roots = mgr.Roots()
+	}
+	setupManagerInitActivityFixtures(tc, tmp)
+	ts, err := mgr.GetSessionLastActivity(tc.sessionID, roots...)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("GetSessionLastActivity error=%v, wantErr=%v", err, tc.wantErr)
+	}
+	if tc.wantZero && !ts.IsZero() {
+		t.Fatalf("expected zero timestamp, got %v", ts)
+	} else if !tc.wantZero && ts.IsZero() {
+		t.Fatalf("expected non-zero timestamp")
+	}
+
+	tsDirect, errDirect := LastActivityFromRoots(tc.sessionID, roots)
+	if (errDirect != nil) != tc.wantErr {
+		t.Fatalf("LastActivityFromRoots error=%v", errDirect)
+	}
+	if tc.wantZero && !tsDirect.IsZero() {
+		t.Fatalf("LastActivityFromRoots expected zero, got %v", tsDirect)
+	}
+}
+
 func TestManager_InitAndActivity(t *testing.T) {
 	tmp := t.TempDir()
 	m := New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
@@ -103,17 +166,7 @@ func TestManager_InitAndActivity(t *testing.T) {
 		t.Fatalf("nil Manager should return nil roots")
 	}
 
-	tests := []struct {
-		name              string
-		isNilMgr          bool
-		sessionID         string
-		roots             []string
-		setupLogs         bool
-		setupTasks        bool
-		setupClaudeDirect bool
-		wantErr           bool
-		wantZero          bool
-	}{
+	tests := []managerInitActivityCase{
 		{name: "nil manager", isNilMgr: true, sessionID: "sess-1", wantZero: true},
 		{name: "empty session ID", sessionID: "", wantZero: true},
 		{name: "path traversal ID", sessionID: "../bad", wantZero: true},
@@ -130,62 +183,80 @@ func TestManager_InitAndActivity(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mgr := m
-			if tc.isNilMgr {
-				mgr = nil
-			}
-			roots := tc.roots
-			if roots == nil && mgr != nil {
-				roots = mgr.Roots()
-			}
-			if tc.setupClaudeDirect && len(tc.roots) > 0 {
-				_ = os.MkdirAll(tc.roots[0], 0o755)
-				_ = os.WriteFile(filepath.Join(tc.roots[0], tc.sessionID+".jsonl"), []byte(`{"type":"user"}`+"\n"), 0o644)
-			}
-			if tc.setupLogs {
-				sessDir := filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", tc.sessionID)
-				logsDir := filepath.Join(sessDir, ".system_generated", "logs")
-				_ = os.MkdirAll(logsDir, 0o755)
-				_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte("line1\n"), 0o644)
-			}
-			if tc.setupTasks {
-				sessDir := filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", tc.sessionID)
-				tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
-				_ = os.MkdirAll(tasksDir, 0o755)
-				_ = os.WriteFile(filepath.Join(tasksDir, "task-1.log"), []byte("log\n"), 0o644)
-				_ = os.MkdirAll(filepath.Join(tasksDir, "nested-dir"), 0o755)
-				_ = os.WriteFile(filepath.Join(tasksDir, "ignore.txt"), []byte("txt"), 0o644)
-			}
-			ts, err := mgr.GetSessionLastActivity(tc.sessionID, roots...)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("GetSessionLastActivity error=%v, wantErr=%v", err, tc.wantErr)
-			}
-			if tc.wantZero && !ts.IsZero() {
-				t.Fatalf("expected zero timestamp, got %v", ts)
-			} else if !tc.wantZero && ts.IsZero() {
-				t.Fatalf("expected non-zero timestamp")
-			}
-
-			tsDirect, errDirect := LastActivityFromRoots(tc.sessionID, roots)
-			if (errDirect != nil) != tc.wantErr {
-				t.Fatalf("LastActivityFromRoots error=%v", errDirect)
-			}
-			if tc.wantZero && !tsDirect.IsZero() {
-				t.Fatalf("LastActivityFromRoots expected zero, got %v", tsDirect)
-			}
+			runManagerInitAndActivityCase(t, m, tmp, tc)
 		})
 	}
 }
 
+type ensureSessionDirCase struct {
+	name       string
+	isNilMgr   bool
+	emptyRoots bool
+	sessionID  string
+	preExist   bool
+	wantErr    bool
+}
+
+func runEnsureSessionDirCase(t *testing.T, tc ensureSessionDirCase) {
+	t.Helper()
+	tmp := t.TempDir()
+	var mgr *Manager
+	if tc.emptyRoots {
+		mgr = &Manager{}
+	} else if !tc.isNilMgr {
+		mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
+		if tc.preExist {
+			dir, _ := mgr.EnsureSessionDir(tc.sessionID)
+			_ = os.MkdirAll(dir, 0o755)
+		}
+	}
+	dir, err := mgr.EnsureSessionDir(tc.sessionID)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("EnsureSessionDir error=%v, wantErr=%v", err, tc.wantErr)
+	}
+	if !tc.wantErr && dir == "" {
+		t.Fatalf("expected non-empty dir")
+	}
+}
+
+func testResolveBaseDirBranches(t *testing.T) {
+	t.Helper()
+	tmp := t.TempDir()
+	mgr := New(filepath.Join(tmp, "nonexistent-root-1"), filepath.Join(tmp, "nonexistent-root-2"))
+	if base := mgr.resolveBaseDir("s1"); base == "" {
+		t.Fatalf("expected fallback root")
+	}
+	var nilMgr *Manager
+	if nilMgr.resolveBaseDir("s1") != "" {
+		t.Fatalf("expected empty for nil manager")
+	}
+	existingRoot := filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain")
+	_ = os.MkdirAll(existingRoot, 0o755)
+	mgrWithExisting := New(filepath.Join(tmp, "home"), "")
+	preDir := filepath.Join(existingRoot, "sess-pre")
+	_ = os.MkdirAll(preDir, 0o755)
+	if base := mgrWithExisting.resolveBaseDir("sess-pre"); base != existingRoot {
+		t.Fatalf("expected existing parent %q, got %q", existingRoot, base)
+	}
+	if base := mgrWithExisting.resolveBaseDir("s1"); base != existingRoot {
+		t.Fatalf("expected existing root %q, got %q", existingRoot, base)
+	}
+	blockMgr := New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
+	sessDir := filepath.Join(existingRoot, "sess-block")
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), 0o755)
+	if _, err := blockMgr.EnsureSessionDir("sess-block"); err == nil {
+		t.Fatalf("expected OpenFile error when transcript.jsonl is a directory")
+	}
+	mkdirBlockDir := filepath.Join(existingRoot, "sess-mkdir-block")
+	_ = os.MkdirAll(mkdirBlockDir, 0o755)
+	_ = os.WriteFile(filepath.Join(mkdirBlockDir, ".system_generated"), []byte("file"), 0o644)
+	if _, err := blockMgr.EnsureSessionDir("sess-mkdir-block"); err == nil {
+		t.Fatalf("expected MkdirAll error when .system_generated is a file")
+	}
+}
+
 func TestEnsureSessionDirAndBaseDir(t *testing.T) {
-	tests := []struct {
-		name       string
-		isNilMgr   bool
-		emptyRoots bool
-		sessionID  string
-		preExist   bool
-		wantErr    bool
-	}{
+	tests := []ensureSessionDirCase{
 		{name: "nil manager", isNilMgr: true, sessionID: "sess-1", wantErr: true},
 		{name: "empty session ID", sessionID: "", wantErr: true},
 		{name: "path traversal", sessionID: "../bad", wantErr: true},
@@ -195,24 +266,7 @@ func TestEnsureSessionDirAndBaseDir(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tmp := t.TempDir()
-			var mgr *Manager
-			if tc.emptyRoots {
-				mgr = &Manager{}
-			} else if !tc.isNilMgr {
-				mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
-				if tc.preExist {
-					dir, _ := mgr.EnsureSessionDir(tc.sessionID)
-					_ = os.MkdirAll(dir, 0o755)
-				}
-			}
-			dir, err := mgr.EnsureSessionDir(tc.sessionID)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("EnsureSessionDir error=%v, wantErr=%v", err, tc.wantErr)
-			}
-			if !tc.wantErr && dir == "" {
-				t.Fatalf("expected non-empty dir")
-			}
+			runEnsureSessionDirCase(t, tc)
 		})
 	}
 
@@ -235,38 +289,7 @@ func TestEnsureSessionDirAndBaseDir(t *testing.T) {
 	})
 
 	t.Run("resolveBaseDir and EnsureSessionDir branches", func(t *testing.T) {
-		tmp := t.TempDir()
-		mgr := New(filepath.Join(tmp, "nonexistent-root-1"), filepath.Join(tmp, "nonexistent-root-2"))
-		if base := mgr.resolveBaseDir("s1"); base == "" {
-			t.Fatalf("expected fallback root")
-		}
-		var nilMgr *Manager
-		if nilMgr.resolveBaseDir("s1") != "" {
-			t.Fatalf("expected empty for nil manager")
-		}
-		existingRoot := filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain")
-		_ = os.MkdirAll(existingRoot, 0o755)
-		mgrWithExisting := New(filepath.Join(tmp, "home"), "")
-		preDir := filepath.Join(existingRoot, "sess-pre")
-		_ = os.MkdirAll(preDir, 0o755)
-		if base := mgrWithExisting.resolveBaseDir("sess-pre"); base != existingRoot {
-			t.Fatalf("expected existing parent %q, got %q", existingRoot, base)
-		}
-		if base := mgrWithExisting.resolveBaseDir("s1"); base != existingRoot {
-			t.Fatalf("expected existing root %q, got %q", existingRoot, base)
-		}
-		blockMgr := New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
-		sessDir := filepath.Join(existingRoot, "sess-block")
-		_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), 0o755)
-		if _, err := blockMgr.EnsureSessionDir("sess-block"); err == nil {
-			t.Fatalf("expected OpenFile error when transcript.jsonl is a directory")
-		}
-		mkdirBlockDir := filepath.Join(existingRoot, "sess-mkdir-block")
-		_ = os.MkdirAll(mkdirBlockDir, 0o755)
-		_ = os.WriteFile(filepath.Join(mkdirBlockDir, ".system_generated"), []byte("file"), 0o644)
-		if _, err := blockMgr.EnsureSessionDir("sess-mkdir-block"); err == nil {
-			t.Fatalf("expected MkdirAll error when .system_generated is a file")
-		}
+		testResolveBaseDirBranches(t)
 	})
 }
 
@@ -315,21 +338,21 @@ func TestGetLastStepIndex(t *testing.T) {
 	}
 }
 
-func TestExtractLastTurnError(t *testing.T) {
-	t0 := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
-	t1 := t0.Add(time.Minute)
-	tests := []struct {
-		name             string
-		isNilMgr         bool
-		convID           string
-		transcript       string
-		claudeTranscript string
-		writeFilename    string
-		since            time.Time
-		cancelCtx        bool
-		wantError        string
-		wantErr          bool
-	}{
+type extractLastTurnErrorCase struct {
+	name             string
+	isNilMgr         bool
+	convID           string
+	transcript       string
+	claudeTranscript string
+	writeFilename    string
+	since            time.Time
+	cancelCtx        bool
+	wantError        string
+	wantErr          bool
+}
+
+func standardExtractTurnCases(t0, t1 time.Time) []extractLastTurnErrorCase {
+	return []extractLastTurnErrorCase{
 		{name: "nil manager", isNilMgr: true, convID: "s1"},
 		{name: "empty convID", convID: ""},
 		{name: "path traversal", convID: "../bad"},
@@ -401,21 +424,17 @@ func TestExtractLastTurnError(t *testing.T) {
 			wantError: "",
 		},
 		{
-			name:   "large file seek with fallback read",
-			convID: "s-large-err",
-			transcript: func() string {
-				var sb strings.Builder
-				fmt.Fprintf(&sb, `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":%q}`+"\n", t0.Format(time.RFC3339Nano))
-				padding := strings.Repeat("A", 1000)
-				for i := 1; i <= 1050; i++ {
-					fmt.Fprintf(&sb, `{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","content":%q}`+"\n", i, padding)
-				}
-				fmt.Fprintf(&sb, `{"step_index":1051,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","error":"large chunk fail","created_at":%q}`+"\n", t1.Format(time.RFC3339Nano))
-				return sb.String()
-			}(),
-			since:     t0,
-			wantError: "large chunk fail",
+			name:       "large file seek with fallback read",
+			convID:     "s-large-err",
+			transcript: buildLargeTranscriptFile(t0, t1),
+			since:      t0,
+			wantError:  "large chunk fail",
 		},
+	}
+}
+
+func claudeExtractTurnCases(t0, t1 time.Time) []extractLastTurnErrorCase {
+	return []extractLastTurnErrorCase{
 		{
 			name:   "claude transcript extracts error event after user input",
 			convID: "s-claude-err-event",
@@ -518,38 +537,64 @@ func TestExtractLastTurnError(t *testing.T) {
 			wantError: "",
 		},
 	}
+}
+
+func extractLastTurnErrorCases(t0, t1 time.Time) []extractLastTurnErrorCase {
+	return append(standardExtractTurnCases(t0, t1), claudeExtractTurnCases(t0, t1)...)
+}
+
+func buildLargeTranscriptFile(t0, t1 time.Time) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":%q}`+"\n", t0.Format(time.RFC3339Nano))
+	padding := strings.Repeat("A", 1000)
+	for i := 1; i <= 1050; i++ {
+		fmt.Fprintf(&sb, `{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","content":%q}`+"\n", i, padding)
+	}
+	fmt.Fprintf(&sb, `{"step_index":1051,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","error":"large chunk fail","created_at":%q}`+"\n", t1.Format(time.RFC3339Nano))
+	return sb.String()
+}
+
+func runExtractLastTurnErrorCase(t *testing.T, tc extractLastTurnErrorCase) {
+	t.Helper()
+	tmp := t.TempDir()
+	var mgr *Manager
+	if !tc.isNilMgr {
+		mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
+		if tc.transcript != "" {
+			fn := "transcript_full.jsonl"
+			if tc.writeFilename != "" {
+				fn = tc.writeFilename
+			}
+			writeTranscript(t, mgr, tc.convID, fn, tc.transcript)
+		}
+		if tc.claudeTranscript != "" {
+			projDir := filepath.Join(tmp, "data", "claude", "projects", "-test-proj")
+			_ = os.MkdirAll(projDir, 0o755)
+			_ = os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644)
+		}
+	}
+	ctx := context.Background()
+	if tc.cancelCtx {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		cancel()
+	}
+	errStr, err := mgr.ExtractLastTurnError(ctx, tc.convID, tc.since)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ExtractLastTurnError error=%v, wantErr=%v", err, tc.wantErr)
+	}
+	if errStr != tc.wantError {
+		t.Fatalf("ExtractLastTurnError=%q, want %q", errStr, tc.wantError)
+	}
+}
+
+func TestExtractLastTurnError(t *testing.T) {
+	t0 := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Minute)
+	tests := extractLastTurnErrorCases(t0, t1)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tmp := t.TempDir()
-			var mgr *Manager
-			if !tc.isNilMgr {
-				mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
-				if tc.transcript != "" {
-					fn := "transcript_full.jsonl"
-					if tc.writeFilename != "" {
-						fn = tc.writeFilename
-					}
-					writeTranscript(t, mgr, tc.convID, fn, tc.transcript)
-				}
-				if tc.claudeTranscript != "" {
-					projDir := filepath.Join(tmp, "data", "claude", "projects", "-test-proj")
-					_ = os.MkdirAll(projDir, 0o755)
-					_ = os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644)
-				}
-			}
-			ctx := context.Background()
-			if tc.cancelCtx {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
-			}
-			errStr, err := mgr.ExtractLastTurnError(ctx, tc.convID, tc.since)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ExtractLastTurnError error=%v, wantErr=%v", err, tc.wantErr)
-			}
-			if errStr != tc.wantError {
-				t.Fatalf("ExtractLastTurnError=%q, want %q", errStr, tc.wantError)
-			}
+			runExtractLastTurnErrorCase(t, tc)
 		})
 	}
 }
@@ -693,25 +738,107 @@ func TestExtractResponseSince(t *testing.T) {
 	}
 }
 
+type sessionStorageMetricsCase struct {
+	name        string
+	isNilMgr    bool
+	sessionID   string
+	dbSize      int
+	pbSize      int
+	transSize   int
+	fullSize    int
+	stepCount   int
+	turnCount   int
+	rtDir       bool
+	statErrFile bool
+	wantDBSize  int64
+	wantTrSize  int64
+	wantSteps   int
+	wantTurns   int
+	wantExists  bool
+}
+
+func setupSessionStorageMetrics(t *testing.T, mgr *Manager, tc sessionStorageMetricsCase, tmp string) {
+	t.Helper()
+	convDir := filepath.Join(tmp, "conversations")
+	if tc.statErrFile {
+		_ = os.WriteFile(convDir, []byte("file"), 0o644)
+		sessDir := filepath.Join(tmp, "brain", tc.sessionID)
+		_ = os.MkdirAll(sessDir, 0o755)
+		_ = os.WriteFile(filepath.Join(sessDir, ".system_generated"), []byte("file"), 0o644)
+	}
+	if tc.rtDir {
+		rtDir := filepath.Join(tmp, "runtimes", "discord", ".gemini", "antigravity-cli", "conversations")
+		writeConversationFile(t, rtDir, tc.sessionID, ".db", 200)
+	}
+	if tc.dbSize > 0 || (tc.name == "0-byte files do not exist") {
+		writeConversationFile(t, convDir, tc.sessionID, ".db", tc.dbSize)
+	}
+	if tc.pbSize > 0 || (tc.name == "0-byte files do not exist") {
+		writeConversationFile(t, convDir, tc.sessionID, ".pb", tc.pbSize)
+	}
+	setupSessionStorageTranscript(t, mgr, tc)
+}
+
+func setupSessionStorageTranscript(t *testing.T, mgr *Manager, tc sessionStorageMetricsCase) {
+	t.Helper()
+	if tc.transSize > 0 || (tc.name == "0-byte files do not exist") {
+		sessDir, _ := mgr.EnsureSessionDir(tc.sessionID)
+		var content string
+		if tc.stepCount > 0 {
+			var sb strings.Builder
+			for i := range tc.stepCount {
+				typ := "PLANNER_RESPONSE"
+				source := "MODEL"
+				if i < tc.turnCount {
+					typ = "USER_INPUT"
+					source = "USER_EXPLICIT"
+				}
+				fmt.Fprintf(&sb, `{"step_index":%d,"source":%q,"type":%q,"content":"msg"}`+"\n", i, source, typ)
+			}
+			content = sb.String()
+		} else if tc.transSize > 0 {
+			content = strings.Repeat("x", tc.transSize)
+		}
+		_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(content), 0o644)
+	}
+	if tc.fullSize > 0 {
+		sessDir, _ := mgr.EnsureSessionDir(tc.sessionID)
+		_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript_full.jsonl"), []byte(strings.Repeat("y", tc.fullSize)), 0o644)
+	}
+}
+
+func assertSessionStorageMetrics(t *testing.T, mgr *Manager, tc sessionStorageMetricsCase) {
+	t.Helper()
+	if got := mgr.SessionExistsOnDisk(tc.sessionID); got != tc.wantExists {
+		t.Fatalf("SessionExistsOnDisk=%v, want %v", got, tc.wantExists)
+	}
+	if got := mgr.GetSessionDBSize(tc.sessionID); got != tc.wantDBSize {
+		t.Fatalf("GetSessionDBSize=%d, want %d", got, tc.wantDBSize)
+	}
+	if got := mgr.GetTranscriptSize(tc.sessionID); got != tc.wantTrSize {
+		t.Fatalf("GetTranscriptSize=%d, want %d", got, tc.wantTrSize)
+	}
+	if got := mgr.CountTranscriptSteps(tc.sessionID); got != tc.wantSteps {
+		t.Fatalf("CountTranscriptSteps=%d, want %d", got, tc.wantSteps)
+	}
+	if got := mgr.CountTranscriptTurns(tc.sessionID); got != tc.wantTurns {
+		t.Fatalf("CountTranscriptTurns=%d, want %d", got, tc.wantTurns)
+	}
+}
+
+func runSessionStorageMetricsCase(t *testing.T, tc sessionStorageMetricsCase) {
+	t.Helper()
+	tmp := t.TempDir()
+	var mgr *Manager
+	if !tc.isNilMgr {
+		mgr = New(tmp, tmp)
+		setupSessionStorageMetrics(t, mgr, tc, tmp)
+	}
+	assertSessionStorageMetrics(t, mgr, tc)
+}
+
 func TestSessionStorageAndRotationMetrics(t *testing.T) {
-	tests := []struct {
-		name        string
-		isNilMgr    bool
-		sessionID   string
-		dbSize      int
-		pbSize      int
-		transSize   int
-		fullSize    int
-		stepCount   int
-		turnCount   int
-		rtDir       bool
-		statErrFile bool
-		wantDBSize  int64
-		wantTrSize  int64
-		wantSteps   int
-		wantTurns   int
-		wantExists  bool
-	}{
+	tests := []sessionStorageMetricsCase{
 		{name: "nil manager", isNilMgr: true, sessionID: "s1", wantExists: false},
 		{name: "empty session ID", sessionID: "", wantExists: false},
 		{name: "path traversal", sessionID: "../bad", wantExists: false},
@@ -768,68 +895,7 @@ func TestSessionStorageAndRotationMetrics(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tmp := t.TempDir()
-			var mgr *Manager
-			if !tc.isNilMgr {
-				mgr = New(tmp, tmp)
-				convDir := filepath.Join(tmp, "conversations")
-				if tc.statErrFile {
-					_ = os.WriteFile(convDir, []byte("file"), 0o644)
-					sessDir := filepath.Join(tmp, "brain", tc.sessionID)
-					_ = os.MkdirAll(sessDir, 0o755)
-					_ = os.WriteFile(filepath.Join(sessDir, ".system_generated"), []byte("file"), 0o644)
-				}
-				if tc.rtDir {
-					rtDir := filepath.Join(tmp, "runtimes", "discord", ".gemini", "antigravity-cli", "conversations")
-					writeConversationFile(t, rtDir, tc.sessionID, ".db", 200)
-				}
-				if tc.dbSize > 0 || (tc.name == "0-byte files do not exist") {
-					writeConversationFile(t, convDir, tc.sessionID, ".db", tc.dbSize)
-				}
-				if tc.pbSize > 0 || (tc.name == "0-byte files do not exist") {
-					writeConversationFile(t, convDir, tc.sessionID, ".pb", tc.pbSize)
-				}
-				if tc.transSize > 0 || (tc.name == "0-byte files do not exist") {
-					sessDir, _ := mgr.EnsureSessionDir(tc.sessionID)
-					var content string
-					if tc.stepCount > 0 {
-						var sb strings.Builder
-						for i := range tc.stepCount {
-							typ := "PLANNER_RESPONSE"
-							source := "MODEL"
-							if i < tc.turnCount {
-								typ = "USER_INPUT"
-								source = "USER_EXPLICIT"
-							}
-							fmt.Fprintf(&sb, `{"step_index":%d,"source":%q,"type":%q,"content":"msg"}`+"\n", i, source, typ)
-						}
-						content = sb.String()
-					} else if tc.transSize > 0 {
-						content = strings.Repeat("x", tc.transSize)
-					}
-					_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(content), 0o644)
-				}
-				if tc.fullSize > 0 {
-					sessDir, _ := mgr.EnsureSessionDir(tc.sessionID)
-					_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript_full.jsonl"), []byte(strings.Repeat("y", tc.fullSize)), 0o644)
-				}
-			}
-
-			if got := mgr.SessionExistsOnDisk(tc.sessionID); got != tc.wantExists {
-				t.Fatalf("SessionExistsOnDisk=%v, want %v", got, tc.wantExists)
-			}
-			if got := mgr.GetSessionDBSize(tc.sessionID); got != tc.wantDBSize {
-				t.Fatalf("GetSessionDBSize=%d, want %d", got, tc.wantDBSize)
-			}
-			if got := mgr.GetTranscriptSize(tc.sessionID); got != tc.wantTrSize {
-				t.Fatalf("GetTranscriptSize=%d, want %d", got, tc.wantTrSize)
-			}
-			if got := mgr.CountTranscriptSteps(tc.sessionID); got != tc.wantSteps {
-				t.Fatalf("CountTranscriptSteps=%d, want %d", got, tc.wantSteps)
-			}
-			if got := mgr.CountTranscriptTurns(tc.sessionID); got != tc.wantTurns {
-				t.Fatalf("CountTranscriptTurns=%d, want %d", got, tc.wantTurns)
-			}
+			runSessionStorageMetricsCase(t, tc)
 		})
 	}
 
@@ -877,25 +943,128 @@ func TestSanitizeClaudeProjectPath(t *testing.T) {
 	}
 }
 
+type claudeSessionLifecycleCase struct {
+	name            string
+	isNilMgr        bool
+	sessionID       string
+	location        string
+	content         string
+	zeroByte        bool
+	age             time.Duration
+	wantExists      bool
+	wantPaths       int
+	wantSize        int64
+	wantSteps       int
+	wantTurns       int
+	wantNonZeroTime bool
+}
+
+func resolveClaudeWriteDir(location, homeDir, dataDir string) string {
+	switch location {
+	case "data_claude":
+		return filepath.Join(dataDir, "claude", "projects", "-data-proj")
+	case "data_runtime":
+		return filepath.Join(dataDir, "runtimes", "discord", ".claude", "projects", "-runtime-proj")
+	case "home_claude":
+		return filepath.Join(homeDir, ".claude", "projects", "-home-proj")
+	case "direct_claude":
+		return filepath.Join(dataDir, "claude", "projects")
+	default:
+		return ""
+	}
+}
+
+func setupClaudeSessionFile(tc claudeSessionLifecycleCase, homeDir, dataDir string, t0 time.Time) {
+	writeDir := resolveClaudeWriteDir(tc.location, homeDir, dataDir)
+	if writeDir == "" {
+		return
+	}
+	_ = os.MkdirAll(writeDir, 0o755)
+	filePath := filepath.Join(writeDir, tc.sessionID+".jsonl")
+	if tc.zeroByte {
+		_ = os.WriteFile(filePath, nil, 0o644)
+		return
+	}
+	if tc.content == "" {
+		return
+	}
+	_ = os.WriteFile(filePath, []byte(tc.content), 0o644)
+	mtime := t0
+	if tc.age > 0 {
+		mtime = time.Now().Add(-tc.age)
+	}
+	_ = os.Chtimes(filePath, mtime, mtime)
+}
+
+func assertClaudeSessionMetrics(t *testing.T, mgr *Manager, tc claudeSessionLifecycleCase, dataDir string) {
+	t.Helper()
+	paths := mgr.claudeTranscriptPaths(tc.sessionID)
+	if len(paths) != tc.wantPaths {
+		t.Errorf("claudeTranscriptPaths count=%d, want %d", len(paths), tc.wantPaths)
+	}
+
+	exists := mgr.ClaudeSessionExistsOnDisk(tc.sessionID)
+	if exists != tc.wantExists {
+		t.Errorf("ClaudeSessionExistsOnDisk=%v, want %v", exists, tc.wantExists)
+	}
+
+	sessExists := mgr.SessionExistsOnDisk(tc.sessionID)
+	if sessExists != tc.wantExists {
+		t.Errorf("SessionExistsOnDisk=%v, want %v", sessExists, tc.wantExists)
+	}
+
+	size := mgr.GetTranscriptSize(tc.sessionID)
+	if tc.wantSize > 0 && size != tc.wantSize {
+		t.Errorf("GetTranscriptSize=%d, want %d", size, tc.wantSize)
+	} else if tc.content != "" && size == 0 {
+		t.Errorf("GetTranscriptSize expected non-zero, got 0")
+	}
+
+	steps := mgr.CountTranscriptSteps(tc.sessionID)
+	if steps != tc.wantSteps {
+		t.Errorf("CountTranscriptSteps=%d, want %d", steps, tc.wantSteps)
+	}
+
+	turns := mgr.CountTranscriptTurns(tc.sessionID)
+	if turns != tc.wantTurns {
+		t.Errorf("CountTranscriptTurns=%d, want %d", turns, tc.wantTurns)
+	}
+
+	var lastAct time.Time
+	var err error
+	if tc.name == "custom roots override in GetSessionLastActivity" {
+		lastAct, err = mgr.GetSessionLastActivity(tc.sessionID, filepath.Join(dataDir, "claude", "projects"))
+	} else {
+		lastAct, err = mgr.GetSessionLastActivity(tc.sessionID)
+	}
+	if err != nil {
+		t.Fatalf("GetSessionLastActivity error: %v", err)
+	}
+	if tc.wantNonZeroTime && lastAct.IsZero() {
+		t.Errorf("GetSessionLastActivity expected non-zero, got zero")
+	} else if !tc.wantNonZeroTime && !lastAct.IsZero() {
+		t.Errorf("GetSessionLastActivity expected zero, got %v", lastAct)
+	}
+}
+
+func runClaudeSessionLifecycleCase(t *testing.T, tc claudeSessionLifecycleCase, t0 time.Time) {
+	t.Helper()
+	tmp := t.TempDir()
+	var mgr *Manager
+	var dataDir string
+	if !tc.isNilMgr {
+		homeDir := filepath.Join(tmp, "home")
+		dataDir = filepath.Join(tmp, "data")
+		mgr = New(homeDir, dataDir)
+		setupClaudeSessionFile(tc, homeDir, dataDir, t0)
+	}
+	assertClaudeSessionMetrics(t, mgr, tc, dataDir)
+}
+
 func TestClaudeSessionLifecycle(t *testing.T) {
 	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
 
-	tests := []struct {
-		name            string
-		isNilMgr        bool
-		sessionID       string
-		location        string
-		content         string
-		zeroByte        bool
-		age             time.Duration
-		rootsOverride   []string
-		wantExists      bool
-		wantPaths       int
-		wantSize        int64
-		wantSteps       int
-		wantTurns       int
-		wantNonZeroTime bool
-	}{
+	tests := []claudeSessionLifecycleCase{
 		{
 			name:      "nil manager",
 			isNilMgr:  true,
@@ -1008,94 +1177,13 @@ func TestClaudeSessionLifecycle(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tmp := t.TempDir()
-			var mgr *Manager
-			var dataDir string
-			if !tc.isNilMgr {
-				homeDir := filepath.Join(tmp, "home")
-				dataDir = filepath.Join(tmp, "data")
-				mgr = New(homeDir, dataDir)
-
-				var writeDir string
-				switch tc.location {
-				case "data_claude":
-					writeDir = filepath.Join(dataDir, "claude", "projects", "-data-proj")
-				case "data_runtime":
-					writeDir = filepath.Join(dataDir, "runtimes", "discord", ".claude", "projects", "-runtime-proj")
-				case "home_claude":
-					writeDir = filepath.Join(homeDir, ".claude", "projects", "-home-proj")
-				case "direct_claude":
-					writeDir = filepath.Join(dataDir, "claude", "projects")
-				}
-
-				if writeDir != "" {
-					_ = os.MkdirAll(writeDir, 0o755)
-					filePath := filepath.Join(writeDir, tc.sessionID+".jsonl")
-					if tc.zeroByte {
-						_ = os.WriteFile(filePath, nil, 0o644)
-					} else if tc.content != "" {
-						_ = os.WriteFile(filePath, []byte(tc.content), 0o644)
-						mtime := t0
-						if tc.age > 0 {
-							mtime = time.Now().Add(-tc.age)
-						}
-						_ = os.Chtimes(filePath, mtime, mtime)
-					}
-				}
-			}
-
-			paths := mgr.claudeTranscriptPaths(tc.sessionID)
-			if len(paths) != tc.wantPaths {
-				t.Errorf("claudeTranscriptPaths count=%d, want %d", len(paths), tc.wantPaths)
-			}
-
-			exists := mgr.ClaudeSessionExistsOnDisk(tc.sessionID)
-			if exists != tc.wantExists {
-				t.Errorf("ClaudeSessionExistsOnDisk=%v, want %v", exists, tc.wantExists)
-			}
-
-			sessExists := mgr.SessionExistsOnDisk(tc.sessionID)
-			if sessExists != tc.wantExists {
-				t.Errorf("SessionExistsOnDisk=%v, want %v", sessExists, tc.wantExists)
-			}
-
-			size := mgr.GetTranscriptSize(tc.sessionID)
-			if tc.wantSize > 0 && size != tc.wantSize {
-				t.Errorf("GetTranscriptSize=%d, want %d", size, tc.wantSize)
-			} else if tc.content != "" && size == 0 {
-				t.Errorf("GetTranscriptSize expected non-zero, got 0")
-			}
-
-			steps := mgr.CountTranscriptSteps(tc.sessionID)
-			if steps != tc.wantSteps {
-				t.Errorf("CountTranscriptSteps=%d, want %d", steps, tc.wantSteps)
-			}
-
-			turns := mgr.CountTranscriptTurns(tc.sessionID)
-			if turns != tc.wantTurns {
-				t.Errorf("CountTranscriptTurns=%d, want %d", turns, tc.wantTurns)
-			}
-
-			var lastAct time.Time
-			var err error
-			if tc.name == "custom roots override in GetSessionLastActivity" {
-				lastAct, err = mgr.GetSessionLastActivity(tc.sessionID, filepath.Join(dataDir, "claude", "projects"))
-			} else {
-				lastAct, err = mgr.GetSessionLastActivity(tc.sessionID)
-			}
-			if err != nil {
-				t.Fatalf("GetSessionLastActivity error: %v", err)
-			}
-			if tc.wantNonZeroTime && lastAct.IsZero() {
-				t.Errorf("GetSessionLastActivity expected non-zero, got zero")
-			} else if !tc.wantNonZeroTime && !lastAct.IsZero() {
-				t.Errorf("GetSessionLastActivity expected zero, got %v", lastAct)
-			}
+			runClaudeSessionLifecycleCase(t, tc, t0)
 		})
 	}
 }
 
-func TestClaudeInternalHelpers(t *testing.T) {
+func testClaudeToolResultContent(t *testing.T) {
+	t.Helper()
 	tests := []struct {
 		name       string
 		content    string
@@ -1115,7 +1203,10 @@ func TestClaudeInternalHelpers(t *testing.T) {
 			}
 		})
 	}
+}
 
+func testClaudeMissingFiles(t *testing.T) {
+	t.Helper()
 	missingFileTests := []struct {
 		name      string
 		filePath  string
@@ -1138,7 +1229,10 @@ func TestClaudeInternalHelpers(t *testing.T) {
 			}
 		})
 	}
+}
 
+func testClaudeTargetProjects(t *testing.T) {
+	t.Helper()
 	targetTests := []struct {
 		name       string
 		cwd        string
@@ -1173,7 +1267,10 @@ func TestClaudeInternalHelpers(t *testing.T) {
 			}
 		})
 	}
+}
 
+func testClaudeAssistantAndErrors(t *testing.T) {
+	t.Helper()
 	assistantTests := []struct {
 		name     string
 		content  string
@@ -1208,4 +1305,11 @@ func TestClaudeInternalHelpers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClaudeInternalHelpers(t *testing.T) {
+	testClaudeToolResultContent(t)
+	testClaudeMissingFiles(t)
+	testClaudeTargetProjects(t)
+	testClaudeAssistantAndErrors(t)
 }

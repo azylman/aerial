@@ -60,173 +60,207 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 
 		switch method {
 		case "initialize":
-			if cfg.failReInit {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte("re-init failed"))
-				return
-			}
-			status := cfg.initStatus
-			if status == 0 {
-				status = http.StatusOK
-			}
-			if status != http.StatusOK {
-				w.WriteHeader(status)
-				if cfg.initBody != "" {
-					_, _ = w.Write([]byte(cfg.initBody))
-				}
-				return
-			}
-			if cfg.nonCanonHeader {
-				w.Header()["mcp-session-id"] = []string{sess}
-				delete(w.Header(), "Mcp-Session-Id")
-			} else {
-				w.Header().Set("Mcp-Session-Id", sess)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			if cfg.initBody != "" {
-				_, _ = w.Write([]byte(cfg.initBody))
-				return
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"jsonrpc": "2.0", "id": id,
-				"result": map[string]any{"protocolVersion": "2024-11-05"},
-			})
-
+			handleMockInit(w, cfg, id, sess)
 		case "notifications/initialized":
 			if cfg.requireSessionID && r.Header.Get("Mcp-Session-Id") != sess {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
 			w.WriteHeader(http.StatusOK)
-
 		case "tools/list":
-			calls := listCalls.Add(1)
-			if calls == 1 && cfg.failFirstToolsListMissingSession {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"error": "missing session id"}`))
-				return
-			}
-			if calls > 1 && cfg.closeConnOnListRetry {
-				srv.CloseClientConnections()
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			if cfg.requireSessionID && r.Header.Get("Mcp-Session-Id") != sess {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"error": "missing session id"}`))
-				return
-			}
-			status := cfg.toolsListStatus
-			if status == 0 {
-				status = http.StatusOK
-			}
-			if status != http.StatusOK {
-				w.WriteHeader(status)
-				if cfg.toolsListBody != "" {
-					_, _ = w.Write([]byte(cfg.toolsListBody))
-				}
-				return
-			}
-			if cfg.toolsListBody != "" {
-				if cfg.useSSE {
-					w.Header().Set("Content-Type", "text/event-stream")
-					fmt.Fprintf(w, "event: message\ndata: %s\n\n", cfg.toolsListBody)
-				} else {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(cfg.toolsListBody))
-				}
-				return
-			}
-			tools := cfg.tools
-			if tools == nil {
-				tools = []Tool{{Name: "default_tool", Description: "Default mock tool"}}
-			}
-			respPayload, _ := json.Marshal(map[string]any{
-				"jsonrpc": "2.0", "id": id,
-				"result": map[string]any{"tools": tools},
-			})
-			if cfg.useSSE {
-				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprintf(w, "event: message\ndata: %s\n\n", string(respPayload))
-			} else {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write(respPayload)
-			}
-
+			handleMockToolsList(w, r, cfg, id, sess, srv, &listCalls)
 		case "tools/call":
-			calls := callCalls.Add(1)
-			if calls == 1 && cfg.failFirstToolsCallMissingSession {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"error": "missing session id"}`))
-				return
-			}
-			if calls == 1 && cfg.failFirstCallRPC32600 {
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"jsonrpc": "2.0", "id": id,
-					"error": map[string]any{
-						"code":    -32600,
-						"message": "Invalid request: missing session id",
-					},
-				})
-				return
-			}
-			if calls > 1 && cfg.closeConnOnCallRetry {
-				srv.CloseClientConnections()
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			if cfg.requireSessionID && r.Header.Get("Mcp-Session-Id") != sess {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"error": "missing session id"}`))
-				return
-			}
-			status := cfg.toolsCallStatus
-			if status == 0 {
-				status = http.StatusOK
-			}
-			if status != http.StatusOK {
-				w.WriteHeader(status)
-				if cfg.toolsCallBody != "" {
-					_, _ = w.Write([]byte(cfg.toolsCallBody))
-				}
-				return
-			}
-			if cfg.toolsCallBody != "" {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(cfg.toolsCallBody))
-				return
-			}
-			var resultVal any
-			if cfg.callResultRaw != "" {
-				resultVal = json.RawMessage(cfg.callResultRaw)
-			} else {
-				txt := cfg.callContentText
-				if txt == "" {
-					txt = "call success"
-				}
-				resultVal = map[string]any{
-					"content": []map[string]any{{"type": "text", "text": txt}},
-					"isError": cfg.callIsError,
-				}
-			}
-			respPayload, _ := json.Marshal(map[string]any{
-				"jsonrpc": "2.0", "id": id,
-				"result": resultVal,
-			})
-			if cfg.useSSE {
-				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprintf(w, "data: %s\n\n", string(respPayload))
-			} else {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write(respPayload)
-			}
-
+			handleMockToolsCall(w, r, cfg, id, sess, srv, &callCalls)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	return srv
+}
+
+func handleMockInit(w http.ResponseWriter, cfg mockMCPConfig, id any, sess string) {
+	if cfg.failReInit {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("re-init failed"))
+		return
+	}
+	status := cfg.initStatus
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		if cfg.initBody != "" {
+			_, _ = w.Write([]byte(cfg.initBody))
+		}
+		return
+	}
+	if cfg.nonCanonHeader {
+		w.Header()["mcp-session-id"] = []string{sess}
+		delete(w.Header(), "Mcp-Session-Id")
+	} else {
+		w.Header().Set("Mcp-Session-Id", sess)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if cfg.initBody != "" {
+		_, _ = w.Write([]byte(cfg.initBody))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"jsonrpc": "2.0", "id": id,
+		"result": map[string]any{"protocolVersion": "2024-11-05"},
+	})
+}
+
+func handleMockToolsList(w http.ResponseWriter, r *http.Request, cfg mockMCPConfig, id any, sess string, srv *httptest.Server, listCalls *atomic.Int32) {
+	calls := listCalls.Add(1)
+	if calls == 1 && cfg.failFirstToolsListMissingSession {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error": "missing session id"}`))
+		return
+	}
+	if calls > 1 && cfg.closeConnOnListRetry {
+		srv.CloseClientConnections()
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if cfg.requireSessionID && r.Header.Get("Mcp-Session-Id") != sess {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error": "missing session id"}`))
+		return
+	}
+	status := cfg.toolsListStatus
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		if cfg.toolsListBody != "" {
+			_, _ = w.Write([]byte(cfg.toolsListBody))
+		}
+		return
+	}
+	if cfg.toolsListBody != "" {
+		writeMockToolsListBody(w, cfg)
+		return
+	}
+	writeMockDefaultToolsList(w, cfg, id)
+}
+
+func writeMockToolsListBody(w http.ResponseWriter, cfg mockMCPConfig) {
+	if cfg.useSSE {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: message\ndata: %s\n\n", cfg.toolsListBody)
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(cfg.toolsListBody))
+	}
+}
+
+func writeMockDefaultToolsList(w http.ResponseWriter, cfg mockMCPConfig, id any) {
+	tools := cfg.tools
+	if tools == nil {
+		tools = []Tool{{Name: "default_tool", Description: "Default mock tool"}}
+	}
+	respPayload, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": id,
+		"result": map[string]any{"tools": tools},
+	})
+	if cfg.useSSE {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: message\ndata: %s\n\n", string(respPayload))
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(respPayload)
+	}
+}
+
+func handleMockToolsCall(w http.ResponseWriter, r *http.Request, cfg mockMCPConfig, id any, sess string, srv *httptest.Server, callCalls *atomic.Int32) {
+	calls := callCalls.Add(1)
+	if calls == 1 && checkMockCallSpecialCases(w, cfg, id) {
+		return
+	}
+	if calls > 1 && cfg.closeConnOnCallRetry {
+		srv.CloseClientConnections()
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if cfg.requireSessionID && r.Header.Get("Mcp-Session-Id") != sess {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error": "missing session id"}`))
+		return
+	}
+	if !writeMockToolsCallStatus(w, cfg) {
+		return
+	}
+	writeMockToolsCallSuccess(w, cfg, id)
+}
+
+func checkMockCallSpecialCases(w http.ResponseWriter, cfg mockMCPConfig, id any) bool {
+	if cfg.failFirstToolsCallMissingSession {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error": "missing session id"}`))
+		return true
+	}
+	if cfg.failFirstCallRPC32600 {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0", "id": id,
+			"error": map[string]any{
+				"code":    -32600,
+				"message": "Invalid request: missing session id",
+			},
+		})
+		return true
+	}
+	return false
+}
+
+func writeMockToolsCallStatus(w http.ResponseWriter, cfg mockMCPConfig) bool {
+	status := cfg.toolsCallStatus
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		if cfg.toolsCallBody != "" {
+			_, _ = w.Write([]byte(cfg.toolsCallBody))
+		}
+		return false
+	}
+	if cfg.toolsCallBody != "" {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(cfg.toolsCallBody))
+		return false
+	}
+	return true
+}
+
+func writeMockToolsCallSuccess(w http.ResponseWriter, cfg mockMCPConfig, id any) {
+	var resultVal any
+	if cfg.callResultRaw != "" {
+		resultVal = json.RawMessage(cfg.callResultRaw)
+	} else {
+		txt := cfg.callContentText
+		if txt == "" {
+			txt = "call success"
+		}
+		resultVal = map[string]any{
+			"content": []map[string]any{{"type": "text", "text": txt}},
+			"isError": cfg.callIsError,
+		}
+	}
+	respPayload, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": id,
+		"result": resultVal,
+	})
+	if cfg.useSSE {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: %s\n\n", string(respPayload))
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(respPayload)
+	}
 }
 
 func mkDisp(srvName, url string, sessID ...string) *DefaultDispatcher {

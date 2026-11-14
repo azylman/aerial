@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // sinkEvent is one scripted TurnSink callback: a tool start (start=true), a tool
@@ -34,18 +35,115 @@ type wantSpan struct {
 
 const leakedPAT = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 
+type tracingTurnSinkCase struct {
+	name     string
+	events   []sinkEvent
+	result   *TurnResult
+	turnErr  error
+	want     []wantSpan
+	innerOK  int // tool callbacks the inner sink must still receive
+	noLeakOf string
+	wantUse  AgyUsage // usage reported by Usage once the turn closes
+}
+
+func driveTracingTurnSinkEvents(sink *TracingTurnSink, tc tracingTurnSinkCase, turn trace.Span) {
+	sink.OnTurnStarted()
+	sink.OnThinking()
+	sink.OnStepStarted(1)
+	sink.OnSkillActivated("self-improvement", "discord")
+	sink.OnTextDelta("partial")
+	for _, ev := range tc.events {
+		if ev.start {
+			sink.OnToolCall(ev.call)
+		} else {
+			sink.OnToolCompleted(ev.call, ev.server, time.Millisecond, ev.status)
+		}
+	}
+	if tc.turnErr != nil {
+		sink.OnError(tc.turnErr)
+	} else {
+		sink.OnResult(tc.result)
+	}
+	sink.OnResult(&TurnResult{}) // late duplicate terminal callbacks must not re-end spans
+	turn.End()
+}
+
+func assertTracingSpanProperties(t *testing.T, s sdktrace.ReadOnlySpan, w wantSpan, parentName, noLeakOf string, i int) {
+	t.Helper()
+	if s.Name() != w.name || parentName != w.parent {
+		t.Errorf("span %d = %q (parent %q), want %q (parent %q)", i, s.Name(), parentName, w.name, w.parent)
+	}
+	if s.Status().Code != w.code || (w.desc != "" && s.Status().Description != w.desc) {
+		t.Errorf("span %q status = %v %q, want %v %q", w.name, s.Status().Code, s.Status().Description, w.code, w.desc)
+	}
+	have := map[attribute.Key]attribute.Value{}
+	for _, kv := range s.Attributes() {
+		have[kv.Key] = kv.Value
+	}
+	for _, kv := range w.attrs {
+		if v, ok := have[kv.Key]; !ok || v != kv.Value {
+			t.Errorf("span %q attr %s = %v, want %v", w.name, kv.Key, v.String(), kv.Value.String())
+		}
+	}
+	if noLeakOf != "" {
+		var dump strings.Builder
+		dump.WriteString(s.Status().Description)
+		for _, kv := range s.Attributes() {
+			dump.WriteString(" " + kv.Value.String())
+		}
+		if strings.Contains(dump.String(), noLeakOf) {
+			t.Errorf("span %q leaked %q: %s", w.name, noLeakOf, dump.String())
+		}
+	}
+}
+
+func assertTracingTurnSpans(t *testing.T, tc tracingTurnSinkCase, ended []sdktrace.ReadOnlySpan) {
+	t.Helper()
+	names := map[string]string{}
+	for _, s := range ended {
+		names[s.SpanContext().SpanID().String()] = s.Name()
+	}
+	got := ended[:len(ended)-1] // drop the root "turn" span
+	if len(got) != len(tc.want) {
+		t.Fatalf("ended %d spans, want %d: %v", len(got), len(tc.want), spanNames(got))
+	}
+	for i, w := range tc.want {
+		assertTracingSpanProperties(t, got[i], w, names[got[i].Parent().SpanID().String()], tc.noLeakOf, i)
+	}
+}
+
+func assertInnerTurnSinkState(t *testing.T, tc tracingTurnSinkCase, inner *mockTurnSink) {
+	t.Helper()
+	inner.mu.Lock()
+	forwarded := len(inner.calls) + len(inner.completions)
+	passthrough := inner.started && inner.thinking == 1 && len(inner.stepStarts) == 1 && len(inner.activatedSkills) == 1 && len(inner.deltas) == 1
+	inner.mu.Unlock()
+	if forwarded != tc.innerOK || !passthrough {
+		t.Errorf("inner sink got %d tool callbacks (passthrough=%v), want %d", forwarded, passthrough, tc.innerOK)
+	}
+}
+
+func runTracingTurnSinkCase(t *testing.T, tc tracingTurnSinkCase) {
+	t.Helper()
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	turnCtx, turn := tp.Tracer("test").Start(context.Background(), "turn")
+
+	inner := newMockTurnSink()
+	sink := NewTracingTurnSink(turnCtx, inner)
+	driveTracingTurnSinkEvents(sink, tc, turn)
+
+	if use, ok := sink.Usage(context.Background()); !ok || use != tc.wantUse {
+		t.Errorf("Usage() = %+v, %t; want %+v, true", use, ok, tc.wantUse)
+	}
+
+	assertTracingTurnSpans(t, tc, rec.Ended())
+	assertInnerTurnSinkState(t, tc, inner)
+}
+
 func TestTracingTurnSink(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name     string
-		events   []sinkEvent
-		result   *TurnResult
-		turnErr  error
-		want     []wantSpan
-		innerOK  int // tool callbacks the inner sink must still receive
-		noLeakOf string
-		wantUse  AgyUsage // usage reported by Usage once the turn closes
-	}{
+	tests := []tracingTurnSinkCase{
 		{
 			name: "single tool",
 			events: []sinkEvent{
@@ -148,79 +246,7 @@ func TestTracingTurnSink(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			rec := tracetest.NewSpanRecorder()
-			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
-			turnCtx, turn := tp.Tracer("test").Start(context.Background(), "turn")
-
-			inner := newMockTurnSink()
-			sink := NewTracingTurnSink(turnCtx, inner)
-			sink.OnTurnStarted()
-			sink.OnThinking()
-			sink.OnStepStarted(1)
-			sink.OnSkillActivated("self-improvement", "discord")
-			sink.OnTextDelta("partial")
-			for _, ev := range tc.events {
-				if ev.start {
-					sink.OnToolCall(ev.call)
-				} else {
-					sink.OnToolCompleted(ev.call, ev.server, time.Millisecond, ev.status)
-				}
-			}
-			if tc.turnErr != nil {
-				sink.OnError(tc.turnErr)
-			} else {
-				sink.OnResult(tc.result)
-			}
-			sink.OnResult(&TurnResult{}) // late duplicate terminal callbacks must not re-end spans
-			turn.End()
-			if use, ok := sink.Usage(context.Background()); !ok || use != tc.wantUse {
-				t.Errorf("Usage() = %+v, %t; want %+v, true", use, ok, tc.wantUse)
-			}
-
-			ended := rec.Ended()
-			names := map[string]string{}
-			for _, s := range ended {
-				names[s.SpanContext().SpanID().String()] = s.Name()
-			}
-			got := ended[:len(ended)-1] // drop the root "turn" span
-			if len(got) != len(tc.want) {
-				t.Fatalf("ended %d spans, want %d: %v", len(got), len(tc.want), spanNames(got))
-			}
-			for i, w := range tc.want {
-				s := got[i]
-				if s.Name() != w.name || names[s.Parent().SpanID().String()] != w.parent {
-					t.Errorf("span %d = %q (parent %q), want %q (parent %q)", i, s.Name(), names[s.Parent().SpanID().String()], w.name, w.parent)
-				}
-				if s.Status().Code != w.code || (w.desc != "" && s.Status().Description != w.desc) {
-					t.Errorf("span %q status = %v %q, want %v %q", w.name, s.Status().Code, s.Status().Description, w.code, w.desc)
-				}
-				have := map[attribute.Key]attribute.Value{}
-				for _, kv := range s.Attributes() {
-					have[kv.Key] = kv.Value
-				}
-				for _, kv := range w.attrs {
-					if v, ok := have[kv.Key]; !ok || v != kv.Value {
-						t.Errorf("span %q attr %s = %v, want %v", w.name, kv.Key, v.String(), kv.Value.String())
-					}
-				}
-				if tc.noLeakOf != "" {
-					var dump strings.Builder
-					dump.WriteString(s.Status().Description)
-					for _, kv := range s.Attributes() {
-						dump.WriteString(" " + kv.Value.String())
-					}
-					if strings.Contains(dump.String(), tc.noLeakOf) {
-						t.Errorf("span %q leaked %q: %s", w.name, tc.noLeakOf, dump.String())
-					}
-				}
-			}
-			inner.mu.Lock()
-			forwarded := len(inner.calls) + len(inner.completions)
-			passthrough := inner.started && inner.thinking == 1 && len(inner.stepStarts) == 1 && len(inner.activatedSkills) == 1 && len(inner.deltas) == 1
-			inner.mu.Unlock()
-			if forwarded != tc.innerOK || !passthrough {
-				t.Errorf("inner sink got %d tool callbacks (passthrough=%v), want %d", forwarded, passthrough, tc.innerOK)
-			}
+			runTracingTurnSinkCase(t, tc)
 		})
 	}
 }

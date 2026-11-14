@@ -41,6 +41,32 @@ func (p *InterchangeablePool) WaitBackground() {
 	}
 }
 
+func handleTestSpawnerInput(inR io.Reader, outW io.WriteCloser, sessUUID string, id int64, onPrompt []func(prompt string)) {
+	defer outW.Close()
+	_, _ = fmt.Fprintf(outW, `{"event":"init","conversation_id":%q}`+"\n", sessUUID)
+	buf := make([]byte, 4096)
+	for {
+		n, err := inR.Read(buf)
+		if err != nil {
+			return
+		}
+		if n <= 0 {
+			continue
+		}
+		prompt := string(buf[:n])
+		for _, fn := range onPrompt {
+			if fn != nil {
+				fn(prompt)
+			}
+		}
+		resp := fmt.Sprintf("response-to-%d", id)
+		if strings.Contains(prompt, "custom-prompt") {
+			resp = "custom-result-ok"
+		}
+		_, _ = fmt.Fprintf(outW, `{"event":"result","result":{"status":"SUCCESS","response":%q}}`+"\n", resp)
+	}
+}
+
 // Helper mock spawner that generates deterministic sequential session UUIDs
 // and responds to user prompts with structured result events.
 func createTestSpawner(onPrompt ...func(prompt string)) *MockDaemonSpawner {
@@ -51,30 +77,7 @@ func createTestSpawner(onPrompt ...func(prompt string)) *MockDaemonSpawner {
 			sessUUID := fmt.Sprintf("550e8400-e29b-41d4-a716-%012d", id)
 			outR, outW := io.Pipe()
 			inR, inW := io.Pipe()
-			go func() {
-				defer outW.Close()
-				_, _ = fmt.Fprintf(outW, `{"event":"init","conversation_id":%q}`+"\n", sessUUID)
-				buf := make([]byte, 4096)
-				for {
-					n, err := inR.Read(buf)
-					if err != nil {
-						return
-					}
-					if n > 0 {
-						prompt := string(buf[:n])
-						for _, fn := range onPrompt {
-							if fn != nil {
-								fn(prompt)
-							}
-						}
-						resp := fmt.Sprintf("response-to-%d", id)
-						if strings.Contains(prompt, "custom-prompt") {
-							resp = "custom-result-ok"
-						}
-						_, _ = fmt.Fprintf(outW, `{"event":"result","result":{"status":"SUCCESS","response":%q}}`+"\n", resp)
-					}
-				}
-			}()
+			go handleTestSpawnerInput(inR, outW, sessUUID, id, onPrompt)
 			return inW, outR, io.NopCloser(strings.NewReader("")), &MockProcessHandle{pid: int(id * 100)}, nil
 		},
 	}
@@ -264,6 +267,56 @@ func TestInterchangeablePool_ContextCancellation(t *testing.T) {
 	}
 }
 
+func checkInterchangeableNilPool(ctx context.Context, t *testing.T) {
+	t.Helper()
+	var nilPool *InterchangeablePool
+	_, ngErr := nilPool.AcquireLease(ctx, "t")
+	_, neErr := nilPool.ExecuteEphemeral(ctx, "t", "p")
+	_, nlErr := nilPool.EphemeralLLMFunc("t")(ctx, "m", "p")
+	nd, ndOk := nilPool.Get("t")
+	nilPool.SetTranscriptRescuer(nil)
+	nilPool.UpdateModel("claude-sonnet-5-5-low")
+	nilPool.UpdateEngine("claude", "claude")
+	nilPool.MarkDirty()
+	nilPool.WaitBackground()
+	nilPool.SetSessionManager(nil)
+	nilPool.SetSessionCallbacks(nil, nil)
+	nilPool.returnWorker("ephemeral:worker-0")
+	if nilPool.Close() != nil || nilPool.Workers() != nil || nilPool.AvailableCount() != 0 || nilPool.Underlying() != nil || nilPool.Initialize(ctx) == nil || ngErr == nil || ndOk || nd != nil || neErr == nil || nlErr == nil {
+		t.Error("unexpected nilPool accessor returns or missing errors")
+	}
+}
+
+func checkInterchangeableClosedAndFailurePools(ctx context.Context, t *testing.T) {
+	t.Helper()
+	poolWaiting, _ := newTestInterchangeablePool(t, 1, "", "", nil)
+	wLease, _ := poolWaiting.AcquireLease(ctx, "t1")
+	wOverflowLease, _ := poolWaiting.AcquireLease(ctx, "t2")
+	_ = poolWaiting.Close()
+	_ = wLease.Release()
+	_ = wOverflowLease.Release()
+	poolWaiting.evictOverflow("ephemeral:worker-ondemand-closed")
+	runtime.Gosched()
+
+	_, wgErr := poolWaiting.AcquireLease(ctx, "target")
+	_, weErr := poolWaiting.ExecuteEphemeral(ctx, "target", "prompt")
+	if wgErr == nil || !strings.Contains(wgErr.Error(), "closed") || poolWaiting.Close() != nil || poolWaiting.Initialize(ctx) == nil || weErr == nil {
+		t.Errorf("expected closed error on closed poolWaiting: wgErr=%v, weErr=%v", wgErr, weErr)
+	}
+
+	poolNoUnderlying := NewInterchangeablePool(nil, InterchangeablePoolConfig{WorkerCount: 1})
+	defer poolNoUnderlying.Close()
+	_, nuErr := poolNoUnderlying.AcquireLease(ctx, "t")
+	failSpawner := &MockDaemonSpawner{SpawnFn: func(context.Context, DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+		return nil, nil, nil, nil, errors.New("spawn error")
+	}}
+	failPool, _ := newTestInterchangeablePool(t, 1, "", "", failSpawner)
+	_, fErr := failPool.AcquireLease(ctx, "t")
+	if poolNoUnderlying.Initialize(ctx) != nil || nuErr == nil || fErr == nil || failPool.AvailableCount() != 1 {
+		t.Errorf("expected underlying/spawner errors: nuErr=%v, fErr=%v, avail=%d", nuErr, fErr, failPool.AvailableCount())
+	}
+}
+
 func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	pool, underlying := newTestInterchangeablePool(t, 2, "", "gemini-2.5-flash", nil)
 	ctx := context.Background()
@@ -305,53 +358,50 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	_ = lease.Release()
 	pool.WaitBackground()
 
-	var nilPool *InterchangeablePool
-	_, ngErr := nilPool.AcquireLease(ctx, "t")
-	_, neErr := nilPool.ExecuteEphemeral(ctx, "t", "p")
-	_, nlErr := nilPool.EphemeralLLMFunc("t")(ctx, "m", "p")
-	nd, ndOk := nilPool.Get("t")
-	nilPool.SetTranscriptRescuer(nil)
-	nilPool.UpdateModel("claude-sonnet-5-5-low")
-	nilPool.UpdateEngine("claude", "claude")
-	nilPool.MarkDirty()
-	nilPool.WaitBackground()
-	nilPool.SetSessionManager(nil)
-	nilPool.SetSessionCallbacks(nil, nil)
-	nilPool.returnWorker("ephemeral:worker-0")
-	if nilPool.Close() != nil || nilPool.Workers() != nil || nilPool.AvailableCount() != 0 || nilPool.Underlying() != nil || nilPool.Initialize(ctx) == nil || ngErr == nil || ndOk || nd != nil || neErr == nil || nlErr == nil {
-		t.Error("unexpected nilPool accessor returns or missing errors")
-	}
-
-	poolWaiting, _ := newTestInterchangeablePool(t, 1, "", "", nil)
-	wLease, _ := poolWaiting.AcquireLease(ctx, "t1")
-	wOverflowLease, _ := poolWaiting.AcquireLease(ctx, "t2")
-	_ = poolWaiting.Close()
-	_ = wLease.Release()
-	_ = wOverflowLease.Release()
-	poolWaiting.evictOverflow("ephemeral:worker-ondemand-closed")
-	runtime.Gosched()
-
-	_, wgErr := poolWaiting.AcquireLease(ctx, "target")
-	_, weErr := poolWaiting.ExecuteEphemeral(ctx, "target", "prompt")
-	if wgErr == nil || !strings.Contains(wgErr.Error(), "closed") || poolWaiting.Close() != nil || poolWaiting.Initialize(ctx) == nil || weErr == nil {
-		t.Errorf("expected closed error on closed poolWaiting: wgErr=%v, weErr=%v", wgErr, weErr)
-	}
-
-	poolNoUnderlying := NewInterchangeablePool(nil, InterchangeablePoolConfig{WorkerCount: 1})
-	defer poolNoUnderlying.Close()
-	_, nuErr := poolNoUnderlying.AcquireLease(ctx, "t")
-	failSpawner := &MockDaemonSpawner{SpawnFn: func(context.Context, DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-		return nil, nil, nil, nil, errors.New("spawn error")
-	}}
-	failPool, _ := newTestInterchangeablePool(t, 1, "", "", failSpawner)
-	_, fErr := failPool.AcquireLease(ctx, "t")
-	if poolNoUnderlying.Initialize(ctx) != nil || nuErr == nil || fErr == nil || failPool.AvailableCount() != 1 {
-		t.Errorf("expected underlying/spawner errors: nuErr=%v, fErr=%v, avail=%d", nuErr, fErr, failPool.AvailableCount())
-	}
+	checkInterchangeableNilPool(ctx, t)
+	checkInterchangeableClosedAndFailurePools(ctx, t)
 
 	var nilDaemon *StreamingDaemon
 	if nilDaemon.SessionID() != "" {
 		t.Error("unexpected nil daemon SessionID")
+	}
+}
+
+func checkInterchangeableNilLease(ctx context.Context, t *testing.T) {
+	t.Helper()
+	var nilLease *interchangeableSessionLease
+	nilLease.MarkDirty()
+	_, nlExec := nilLease.Execute(ctx, nil)
+	if nilLease.SessionID() != "" || nilLease.TurnCount() != 0 || nilLease.PreviousSessionID() != "" || nilLease.IsCold() || !nilLease.IsEphemeral() || nlExec == nil || nilLease.Release() != nil {
+		t.Error("unexpected nilLease state")
+	}
+}
+
+func checkInterchangeableInvalidAcquires(ctx context.Context, t *testing.T) {
+	t.Helper()
+	var nilPool *InterchangeablePool
+	closedPool, _ := newTestInterchangeablePool(t, 1, "", "", nil)
+	_ = closedPool.Initialize(ctx)
+	_ = closedPool.Close()
+
+	poolCancelled, _ := newTestInterchangeablePool(t, 1, "", "", nil)
+	<-poolCancelled.available
+	ctxCancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	pNoUnder, pClosedFlag := &InterchangeablePool{available: make(chan string, 1)}, &InterchangeablePool{available: make(chan string, 1)}
+	pNoUnder.available <- "w1"
+	pClosedFlag.closed.Store(true)
+	pClosedFlag.available <- "w1"
+
+	for name, p := range map[string]*InterchangeablePool{"nil": nilPool, "closed": closedPool, "cancelled": poolCancelled, "noUnder": pNoUnder, "closedFlag": pClosedFlag} {
+		c := ctx
+		if name == "cancelled" {
+			c = ctxCancelled
+		}
+		if _, aErr := p.AcquireLease(c, "k"); aErr == nil {
+			t.Errorf("expected error from %s pool AcquireLease", name)
+		}
 	}
 }
 
@@ -395,35 +445,6 @@ func TestInterchangeablePool_AcquireLeaseAndMetadata(t *testing.T) {
 		t.Errorf("expected rotated session IDs: first=%q, l2=%q, l3=%q", firstSessionID, lease2.SessionID(), lease3.SessionID())
 	}
 
-	var nilLease *interchangeableSessionLease
-	nilLease.MarkDirty()
-	_, nlExec := nilLease.Execute(ctx, nil)
-	if nilLease.SessionID() != "" || nilLease.TurnCount() != 0 || nilLease.PreviousSessionID() != "" || nilLease.IsCold() || !nilLease.IsEphemeral() || nlExec == nil || nilLease.Release() != nil {
-		t.Error("unexpected nilLease state")
-	}
-
-	var nilPool *InterchangeablePool
-	closedPool, _ := newTestInterchangeablePool(t, 1, "", "", nil)
-	_ = closedPool.Initialize(ctx)
-	_ = closedPool.Close()
-
-	poolCancelled, _ := newTestInterchangeablePool(t, 1, "", "", nil)
-	<-poolCancelled.available
-	ctxCancelled, cancel := context.WithCancel(ctx)
-	cancel()
-
-	pNoUnder, pClosedFlag := &InterchangeablePool{available: make(chan string, 1)}, &InterchangeablePool{available: make(chan string, 1)}
-	pNoUnder.available <- "w1"
-	pClosedFlag.closed.Store(true)
-	pClosedFlag.available <- "w1"
-
-	for name, p := range map[string]*InterchangeablePool{"nil": nilPool, "closed": closedPool, "cancelled": poolCancelled, "noUnder": pNoUnder, "closedFlag": pClosedFlag} {
-		c := ctx
-		if name == "cancelled" {
-			c = ctxCancelled
-		}
-		if _, aErr := p.AcquireLease(c, "k"); aErr == nil {
-			t.Errorf("expected error from %s pool AcquireLease", name)
-		}
-	}
+	checkInterchangeableNilLease(ctx, t)
+	checkInterchangeableInvalidAcquires(ctx, t)
 }
