@@ -84,7 +84,8 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 		effort TEXT NOT NULL DEFAULT 'low',
 		next_run_at TIMESTAMP NOT NULL,
 		enabled BOOLEAN NOT NULL DEFAULT TRUE,
-		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		last_completed_at TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_heartbeat_schedules_next_run ON heartbeat_schedules(enabled, next_run_at);
 
@@ -133,6 +134,7 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 		`ALTER TABLE cron_schedules ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles';`,
 		`ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low';`,
 		`ALTER TABLE one_shot_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low';`,
+		`ALTER TABLE heartbeat_schedules ADD COLUMN last_completed_at TIMESTAMP;`,
 		`ALTER TABLE event_triggers ADD COLUMN persistent BOOLEAN NOT NULL DEFAULT FALSE;`,
 		`ALTER TABLE event_triggers ADD COLUMN updated_at TIMESTAMP;`,
 	} {

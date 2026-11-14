@@ -38,6 +38,7 @@ type Config struct {
 	BrainURL          string   `yaml:"brain_url"`
 	EriURL            string   `yaml:"eri_url"`
 	VanadisURL        string   `yaml:"vanadis_url"`
+	NATSURL           string   `yaml:"nats_url"`
 	ExtraEventSources []string `yaml:"extra_event_sources"`
 }
 
@@ -47,6 +48,7 @@ type SchedulerYAMLConfig struct {
 	Timezone          string   `yaml:"timezone"`
 	EriURL            string   `yaml:"eri_url"`
 	VanadisURL        string   `yaml:"vanadis_url"`
+	NATSURL           string   `yaml:"nats_url"`
 	ExtraEventSources []string `yaml:"extra_event_sources"`
 }
 
@@ -120,6 +122,15 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		}
 	}
 
+	natsURL := os.Getenv("NATS_URL")
+	if natsURL == "" {
+		natsURL = ycfg.NATSURL
+	}
+	natsURL = strings.TrimSpace(natsURL)
+	if natsURL == "" {
+		natsURL = "nats://nats.aerial:4222"
+	}
+
 	return &Config{
 		DatabaseURL:       cleanDB,
 		Timezone:          tz,
@@ -127,6 +138,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		BrainURL:          eriURL,
 		EriURL:            eriURL,
 		VanadisURL:        vanadisURL,
+		NATSURL:           natsURL,
 		ExtraEventSources: extraSources,
 	}, nil
 }

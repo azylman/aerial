@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -217,13 +218,15 @@ type DispatchRequest struct {
 	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
 }
 
+var reDispatchSource = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
+
 func validateDispatchRequest(req *DispatchRequest) error {
 	if req == nil {
 		return errors.New("Invalid payload: request cannot be nil")
 	}
 	source := strings.ToLower(strings.TrimSpace(req.Source))
-	if source != "heartbeat" && source != "vanadis" && source != "webhook" {
-		return errors.New("Invalid payload: 'source' must be 'heartbeat', 'vanadis', or 'webhook'")
+	if !reDispatchSource.MatchString(source) {
+		return errors.New("Invalid payload: 'source' must match ^[a-z0-9_-]{1,64}$")
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
 		return errors.New("Invalid payload: 'prompt' field is required and cannot be empty")
