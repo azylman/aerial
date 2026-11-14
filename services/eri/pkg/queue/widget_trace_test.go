@@ -208,6 +208,61 @@ func TestWorkerPool_FlushChunkActiveStepSpans(t *testing.T) {
 	}
 }
 
+func TestWorkerPool_FinishChunkStepTurnSpans(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		traced      bool
+		finishTurn  string
+		wantParents map[string]string
+		wantDeliver map[string]string
+	}{
+		{
+			name: "step clear is delivered under its own span", traced: true, finishTurn: "t1",
+			wantParents: map[string]string{spanWidgetDeliver: "turn", spanWidgetLockWait: spanWidgetDeliver},
+			wantDeliver: map[string]string{string(attrWidgetHasStep): "false", string(attrWidgetChunks): "1"},
+		},
+		{
+			name: "finish from another turn records only the lock", traced: true, finishTurn: "t-other",
+			wantParents: map[string]string{spanWidgetDeliver: "turn", spanWidgetLockWait: spanWidgetDeliver},
+			wantDeliver: map[string]string{},
+		},
+		{name: "untraced finish opens no root span", finishTurn: "t1", wantParents: map[string]string{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p, rec, ctx := newWidgetTracePool(t, tc.traced)
+			p.widgetMu.Lock()
+			p.ensureWidgetMapsLocked()
+			p.widgetsByID["b1"] = discord.StatusWidgetRequest{ID: "b1", ChannelID: "chan-1", MessageID: "msg-1", Chunks: []discord.StatusWidgetChunk{{ID: "c1", Status: "running"}}}
+			p.widgetMu.Unlock()
+			p.StartChunkStepTurn(context.Background(), "c1", "b1", 0, "t1")
+			if err := p.FlushChunkActiveStep(context.Background(), "c1", "t1", "running tests"); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+
+			p.FinishChunkStepTurn(ctx, "c1", tc.finishTurn)
+
+			_, attrs := endedWidgetSpans(ctx, t, rec)
+			names := map[trace.SpanID]string{trace.SpanContextFromContext(ctx).SpanID(): "turn"}
+			for _, s := range rec.Ended() {
+				names[s.SpanContext().SpanID()] = s.Name()
+			}
+			parents := map[string]string{}
+			for _, s := range rec.Ended() {
+				parents[s.Name()] = names[s.Parent().SpanID()]
+			}
+			if fmt.Sprint(parents) != fmt.Sprint(tc.wantParents) {
+				t.Fatalf("span parents = %v, want %v", parents, tc.wantParents)
+			}
+			if tc.wantDeliver != nil && fmt.Sprint(attrs[spanWidgetDeliver]) != fmt.Sprint(tc.wantDeliver) {
+				t.Errorf("deliver attrs = %v, want %v", attrs[spanWidgetDeliver], tc.wantDeliver)
+			}
+		})
+	}
+}
+
 func TestWorkerPool_EnsureChunkWidgetHydratedSpans(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
