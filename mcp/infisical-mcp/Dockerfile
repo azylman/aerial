@@ -11,7 +11,7 @@ RUN apk add --no-cache tini curl
 
 # Install @infisical/mcp, symlink binary, and purge npm/corepack bloat
 RUN --mount=type=cache,target=/root/.npm \
-    npm install -g @infisical/mcp@0.0.24 && \
+    npm install -g @infisical/mcp@0.1.0 && \
     ln -s /usr/local/bin/mcp /usr/local/bin/infisical-mcp && \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
