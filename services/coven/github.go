@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -75,13 +76,7 @@ func NewGitHubSkillPublisher(cfg GitHubSkillPublisherConfig) *GitHubSkillPublish
 		repo = DefaultConfigRepoName
 	}
 	brainURL := strings.TrimRight(strings.TrimSpace(cfg.BrainURL), "/")
-	if brainURL == "" {
-		brainURL = DefaultBrainURL
-	}
 	brainPRRegisterURL := strings.TrimSpace(cfg.BrainPRRegisterURL)
-	if brainPRRegisterURL == "" {
-		brainPRRegisterURL = DefaultBrainPRRegisterURL
-	}
 	return &GitHubSkillPublisher{
 		token:              strings.TrimSpace(cfg.Token),
 		owner:              owner,
@@ -483,7 +478,7 @@ func (p *GitHubSkillPublisher) NotifyShortFriction(ctx context.Context, content 
 	}
 	brainURL := strings.TrimRight(strings.TrimSpace(p.brainURL), "/")
 	if brainURL == "" {
-		brainURL = DefaultBrainURL
+		return errors.New("brain URL is not configured")
 	}
 	msgURL := brainURL + "/discord/message"
 	body := fmt.Sprintf(`{"channel_id":%q,"content":%q}`, p.systemChannelID, content)

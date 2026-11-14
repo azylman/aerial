@@ -11,19 +11,72 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+func testHTTPBrainLLMClientCase(ctx context.Context, t *testing.T, tc brainLLMClientCase) {
+	t.Helper()
+	var srv *httptest.Server
+	var gotTraceparent string
+	if tc.statusCode != 0 {
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotTraceparent = r.Header.Get("Traceparent")
+			if r.Header.Get("Content-Type") != "application/json" {
+				http.Error(w, "bad content type", http.StatusBadRequest)
+				return
+			}
+			var req brainLLMRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.WriteHeader(tc.statusCode)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		defer srv.Close()
+	}
+
+	targetURL := tc.rawURL
+	if srv != nil {
+		targetURL = srv.URL
+	}
+	callCtx := ctx
+	const parentTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	if tc.parent {
+		traceID, _ := trace.TraceIDFromHex(parentTraceID)
+		spanID, _ := trace.SpanIDFromHex("00f067aa0ba902b7")
+		callCtx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled,
+		}))
+	}
+	fn := HTTPBrainLLMClient(targetURL, nil)
+	resp, err := fn(callCtx, tc.prompt)
+	if tc.parent && !strings.HasPrefix(gotTraceparent, "00-"+parentTraceID+"-") {
+		t.Errorf("traceparent = %q, want trace ID %s", gotTraceparent, parentTraceID)
+	}
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("HTTPBrainLLMClient() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr && tc.errSubstr != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
+			t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
+		}
+	}
+	if !tc.wantErr && resp != tc.wantResp {
+		t.Errorf("resp = %q, want %q", resp, tc.wantResp)
+	}
+}
+
+type brainLLMClientCase struct {
+	name       string
+	statusCode int
+	body       string
+	prompt     string
+	rawURL     string
+	parent     bool
+	wantErr    bool
+	errSubstr  string
+	wantResp   string
+}
+
 func TestHTTPBrainLLMClient(t *testing.T) {
 	ctx := context.Background()
 
-	tests := []struct {
-		name       string
-		statusCode int
-		body       string
-		prompt     string
-		rawURL     string
-		parent     bool
-		wantErr    bool
-		wantResp   string
-	}{
+	tests := []brainLLMClientCase{
 		{
 			name:       "TraceparentPropagatedFromParentSpan",
 			statusCode: http.StatusOK,
@@ -54,57 +107,18 @@ func TestHTTPBrainLLMClient(t *testing.T) {
 			wantErr:    true,
 		},
 		{
-			name:       "DefaultURLFallback",
-			statusCode: http.StatusOK,
-			rawURL:     "http://127.0.0.1:0/bad",
+			name:       "UnconfiguredURLError",
+			statusCode: 0,
+			rawURL:     "",
 			prompt:     "hello",
 			wantErr:    true,
+			errSubstr:  "brain LLM URL is not configured",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var srv *httptest.Server
-			var gotTraceparent string
-			if tc.statusCode != 0 {
-				srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					gotTraceparent = r.Header.Get("Traceparent")
-					if r.Header.Get("Content-Type") != "application/json" {
-						http.Error(w, "bad content type", http.StatusBadRequest)
-						return
-					}
-					var req brainLLMRequest
-					_ = json.NewDecoder(r.Body).Decode(&req)
-					w.WriteHeader(tc.statusCode)
-					_, _ = w.Write([]byte(tc.body))
-				}))
-				defer srv.Close()
-			}
-
-			targetURL := tc.rawURL
-			if srv != nil {
-				targetURL = srv.URL
-			}
-			callCtx := ctx
-			const parentTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
-			if tc.parent {
-				traceID, _ := trace.TraceIDFromHex(parentTraceID)
-				spanID, _ := trace.SpanIDFromHex("00f067aa0ba902b7")
-				callCtx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
-					TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled,
-				}))
-			}
-			fn := HTTPBrainLLMClient(targetURL, nil)
-			resp, err := fn(callCtx, tc.prompt)
-			if tc.parent && !strings.HasPrefix(gotTraceparent, "00-"+parentTraceID+"-") {
-				t.Errorf("traceparent = %q, want trace ID %s", gotTraceparent, parentTraceID)
-			}
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("HTTPBrainLLMClient() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && resp != tc.wantResp {
-				t.Errorf("resp = %q, want %q", resp, tc.wantResp)
-			}
+			testHTTPBrainLLMClientCase(ctx, t, tc)
 		})
 	}
 }
