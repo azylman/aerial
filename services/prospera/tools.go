@@ -34,7 +34,7 @@ func NewToolHandler(cfgSrc ConfigSource, store Store, twilio TwilioClient, sessi
 
 // InitiateCallArgs defines input arguments for initiate_call.
 type InitiateCallArgs struct {
-	To               string    `json:"to" jsonschema:"Destination phone number in E.164 format"`
+	To               string    `json:"to" jsonschema:"Destination phone number in E.164 format (10-digit US numbers and 11-digit numbers starting with 1 are normalized; spaces, dashes, dots, slashes and parens are stripped; anything else is rejected)"`
 	Message          string    `json:"message,omitempty" jsonschema:"Opening spoken greeting or task instruction"`
 	Mode             string    `json:"mode,omitempty" jsonschema:"Operating mode: 'conversation' for interactive bidirectional dialog or 'notify' for one-way spoken announcement (default 'conversation')"`
 	DTMFSequence     string    `json:"dtmf_sequence,omitempty" jsonschema:"Optional pre-connect DTMF sequence"`
@@ -54,7 +54,7 @@ type InitiateCallOutput struct {
 type SteerCallArgs struct {
 	CallID  string `json:"call_id" jsonschema:"Active call ID to steer"`
 	Message string `json:"message" jsonschema:"Guidance or message text to inject (max 500 chars)"`
-	Mode    string `json:"mode,omitempty" jsonschema:"Steer mode: 'guidance' to instruct the assistant on behavior/strategy without speaking verbatim, or 'say' to speak the message verbatim out loud (default 'guidance')"`
+	Mode    string `json:"mode,omitempty" jsonschema:"Steer mode: 'guidance' to instruct the assistant on behavior/strategy without speaking verbatim, or 'say' to ask the assistant to say the message out loud immediately, wording not guaranteed verbatim (default 'guidance')"`
 }
 
 // SteerCallOutput defines return payload for steer_call.
@@ -96,9 +96,9 @@ type ListCallsOutput struct {
 
 // SendSMSArgs defines input arguments for send_sms.
 type SendSMSArgs struct {
-	To            string `json:"to" jsonschema:"Destination phone number in E.164 format"`
+	To            string `json:"to" jsonschema:"Destination phone number in E.164 format (10-digit US numbers and 11-digit numbers starting with 1 are normalized; spaces, dashes, dots, slashes and parens are stripped; anything else is rejected)"`
 	Body          string `json:"body" jsonschema:"Message body text"`
-	From          string `json:"from,omitempty" jsonschema:"Optional sender phone number in E.164 format"`
+	From          string `json:"from,omitempty" jsonschema:"Optional sender phone number in E.164 format, normalized like to; defaults to the configured from-number"`
 	RelatedCallID string `json:"related_call_id,omitempty" jsonschema:"Optional associated call ID"`
 }
 
@@ -427,10 +427,9 @@ func (h *ToolHandler) EnsurePhoneNumber(ctx context.Context, args EnsurePhoneNum
 // serverInstructions is sent on initialize so clients that defer tool schemas
 // still learn the real-world side effects and call lifecycle.
 const serverInstructions = `Calls and SMS reach real people and cost money: confirm the recipient and purpose with the requester before initiate_call or send_sms.
-Numbers: E.164 ("+15551234567"); 10-digit US numbers and 11-digit numbers starting with 1 are normalized, spaces/dashes/dots/parens are stripped, anything else is rejected.
-Call modes: "conversation" (default, interactive) or "notify" (one-way announcement). The brief's approvals default to zero spend; widen them only on explicit instruction.
-Lifecycle: initiate_call returns a call_id -> get_call_status (live transcript, summary) or list_calls -> steer_call ("guidance" by default, "say" to speak verbatim) -> end_call (hangs up and triggers the summary report).
-ensure_phone_number is one-time provisioning, not a per-call step: it rewires webhooks on the account's existing Twilio number or, if none exists, purchases a new one (billing). Calls send from the configured number; send_sms uses it unless from is set.`
+The brief's approvals default to zero spend; widen them only on explicit instruction.
+Lifecycle: initiate_call returns a call_id -> get_call_status (live transcript, summary) or list_calls -> steer_call to redirect the live assistant -> end_call (hangs up and triggers the summary report).
+ensure_phone_number is one-time provisioning, not a per-call step: it rewires webhooks on the account's first existing Twilio number (which may differ from the configured from-number) or, if none exists, purchases a new one (billing).`
 
 // RegisterProsperaMCPTools registers all 8 Prospera control tools onto the given MCP server.
 func RegisterProsperaMCPTools(s *mcp.Server, h *ToolHandler) {

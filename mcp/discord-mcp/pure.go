@@ -568,10 +568,10 @@ func ShapeSearchMessagesResponse(rawResp []byte, offset int) ([]byte, error) {
 }
 
 // ServerInstructions is injected into the upstream initialize response when the upstream omits its own.
-const ServerInstructions = `Discord read/admin tools. Guild, channel, and message IDs are numeric snowflake strings: get guild IDs from discord_list_servers, then channel IDs from discord_get_server_info; message IDs come from discord_read_messages or discord_search_messages.
+const ServerInstructions = `Discord read/admin tools. Guild, channel, and message IDs are numeric snowflake strings: get guild IDs from discord_list_servers, then channel IDs from discord_get_server_info; message IDs come from discord_search_messages.
 - discord_search_messages returns total_results, returned_count, offset, and has_more; while has_more is true, repeat the call with offset increased by returned_count.
 - Delete tools (messages, channels, categories, forum posts, webhooks) are irreversible; confirm the target ID before calling.
-- Sending tools (discord_send, send_message, discord_create_thread) are intentionally blocked: user-facing replies are delivered automatically at the end of the turn, so put the reply in your final answer instead of retrying.`
+- Replies to the current conversation are delivered automatically at the end of the turn, so put the reply in your final answer. Never use discord_reply_to_forum, discord_send_webhook_message or discord_create_forum_post to answer the user; they post publicly.`
 
 // IsInitializeRequest checks if a raw JSON-RPC request byte slice is an initialize call.
 func IsInitializeRequest(rawReq []byte) bool {
