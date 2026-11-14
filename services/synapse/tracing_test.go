@@ -103,6 +103,46 @@ func assertTraceIDs(t *testing.T, got []string, wantRequests int, parentTraceID 
 	}
 }
 
+func runTraceparentDispatchCase(t *testing.T, target string, withParent bool, failFirst int, nilClient bool, wantRequests int) {
+	t.Helper()
+	var respBody string
+	switch target {
+	case "brain":
+		respBody = `{"status":"queued"}`
+	case "discord":
+		respBody = `{"status":"ok"}`
+	case "widget":
+		respBody = `{"status":"ok","message_id":"msg-widget"}`
+	}
+	srv := newTraceparentServer(t, failFirst, respBody)
+	parentCtx, parentTraceID := recordedParent(t)
+	ctx := context.Background()
+	if withParent {
+		ctx = parentCtx
+	}
+	d := NewDefaultOutboundDispatcher(srv.URL, srv.Client())
+	d.retryDelay = time.Millisecond
+	switch target {
+	case "brain":
+		if err := d.postBrainWithRetry(ctx, "/dispatch", "dispatch", "brain dispatch", "", 3, time.Millisecond, false, DispatchRequest{Source: "webhook"}); err != nil {
+			t.Fatalf("postBrainWithRetry: %v", err)
+		}
+	case "discord":
+		client := d.discordMsgClient
+		if nilClient {
+			client = nil
+		}
+		if err := d.postDiscordInternalJSON(ctx, client, time.Minute, "/internal/discord/message", "discord message ingress", "discord ingress", DiscordMessageIngressRequest{}); err != nil {
+			t.Fatalf("postDiscordInternalJSON: %v", err)
+		}
+	case "widget":
+		if msgID, err := d.DispatchWidget(ctx, StatusWidgetRequest{ChannelID: "1555405874565091380", ID: "widget-1"}); err != nil || msgID != "msg-widget" {
+			t.Fatalf("DispatchWidget = %q, %v", msgID, err)
+		}
+	}
+	assertTraceIDs(t, srv.traceIDs(), wantRequests, parentTraceID, withParent)
+}
+
 func TestPostBrainWithRetry_Traceparent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -118,18 +158,7 @@ func TestPostBrainWithRetry_Traceparent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := newTraceparentServer(t, tc.failFirst, `{"status":"queued"}`)
-			parentCtx, parentTraceID := recordedParent(t)
-			ctx := context.Background()
-			if tc.withParent {
-				ctx = parentCtx
-			}
-			d := NewDefaultOutboundDispatcher(srv.URL, srv.Client())
-			d.retryDelay = time.Millisecond
-			if err := d.postBrainWithRetry(ctx, "/dispatch", "dispatch", "brain dispatch", "", 3, time.Millisecond, false, DispatchRequest{Source: "webhook"}); err != nil {
-				t.Fatalf("postBrainWithRetry: %v", err)
-			}
-			assertTraceIDs(t, srv.traceIDs(), tc.wantRequests, parentTraceID, tc.withParent)
+			runTraceparentDispatchCase(t, "brain", tc.withParent, tc.failFirst, false, tc.wantRequests)
 		})
 	}
 }
@@ -139,7 +168,7 @@ func TestPostDiscordInternalJSON_Traceparent(t *testing.T) {
 	tests := []struct {
 		name       string
 		withParent bool
-		nilClient  bool // falls back to the dispatcher's default client
+		nilClient  bool
 	}{
 		{name: "continues the gateway trace", withParent: true},
 		{name: "default client also propagates", withParent: true, nilClient: true},
@@ -148,21 +177,7 @@ func TestPostDiscordInternalJSON_Traceparent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := newTraceparentServer(t, 0, `{"status":"ok"}`)
-			parentCtx, parentTraceID := recordedParent(t)
-			ctx := context.Background()
-			if tc.withParent {
-				ctx = parentCtx
-			}
-			d := NewDefaultOutboundDispatcher(srv.URL, srv.Client())
-			client := d.discordMsgClient
-			if tc.nilClient {
-				client = nil
-			}
-			if err := d.postDiscordInternalJSON(ctx, client, time.Minute, "/internal/discord/message", "discord message ingress", "discord ingress", DiscordMessageIngressRequest{}); err != nil {
-				t.Fatalf("postDiscordInternalJSON: %v", err)
-			}
-			assertTraceIDs(t, srv.traceIDs(), 1, parentTraceID, tc.withParent)
+			runTraceparentDispatchCase(t, "discord", tc.withParent, 0, tc.nilClient, 1)
 		})
 	}
 }
@@ -179,17 +194,7 @@ func TestDispatchWidget_Traceparent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := newTraceparentServer(t, 0, `{"status":"ok","message_id":"msg-widget"}`)
-			parentCtx, parentTraceID := recordedParent(t)
-			ctx := context.Background()
-			if tc.withParent {
-				ctx = parentCtx
-			}
-			d := NewDefaultOutboundDispatcher(srv.URL, srv.Client())
-			if msgID, err := d.DispatchWidget(ctx, StatusWidgetRequest{ChannelID: "1555405874565091380", ID: "widget-1"}); err != nil || msgID != "msg-widget" {
-				t.Fatalf("DispatchWidget = %q, %v", msgID, err)
-			}
-			assertTraceIDs(t, srv.traceIDs(), 1, parentTraceID, tc.withParent)
+			runTraceparentDispatchCase(t, "widget", tc.withParent, 0, false, 1)
 		})
 	}
 }

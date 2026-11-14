@@ -179,28 +179,110 @@ func TestStartDiscordGateway(t *testing.T) {
 	}
 }
 
+type gatewayMessageCreateCase struct {
+	name            string
+	nilServer       bool
+	nilMsg          bool
+	nilAuthor       bool
+	botUserID       string
+	authorID        string
+	refGuildID      string
+	msgGuildID      string
+	hasRiver        bool
+	riverErr        bool
+	directErr       bool
+	hasRolesInState bool
+	mentionRoles    []string
+	refRoles        []string
+	wantEnqueued    int
+	wantProcessed   int
+}
+
+func buildGatewayMessage(tc gatewayMessageCreateCase) *discordgo.MessageCreate {
+	if tc.nilMsg {
+		return nil
+	}
+	mc := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:           "msg-101",
+			ChannelID:    "chan-202",
+			GuildID:      tc.msgGuildID,
+			Content:      "hello world",
+			MentionRoles: tc.mentionRoles,
+		},
+	}
+	if !tc.nilAuthor {
+		mc.Author = &discordgo.User{ID: tc.authorID}
+	}
+	if tc.refGuildID != "" || tc.msgGuildID != "" {
+		mc.ReferencedMessage = &discordgo.Message{
+			ID:           "ref-999",
+			GuildID:      tc.refGuildID,
+			MentionRoles: tc.refRoles,
+		}
+	}
+	return mc
+}
+
+func runGatewayMessageCreateCase(ctx context.Context, t *testing.T, tc gatewayMessageCreateCase) {
+	t.Helper()
+	disp := &mockOutboundDispatcher{}
+	if tc.directErr {
+		disp.discordMessageErr = errors.New("dispatch direct error")
+	}
+	river := &mockRiverInserter{}
+	if tc.riverErr {
+		river.err = errors.New("river insert error")
+	}
+
+	var srv *RouterServer
+	if !tc.nilServer {
+		srv = newTestRouter(Config{}, nil, nil, disp)
+		if tc.hasRiver {
+			srv.SetRiverClient(river)
+		}
+	}
+
+	session, err := discordgo.New("Bot dummy-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() err = %v", err)
+	}
+	if tc.botUserID != "" {
+		session.State.User = &discordgo.User{ID: tc.botUserID}
+	}
+	if tc.hasRolesInState {
+		_ = session.State.GuildAdd(&discordgo.Guild{
+			ID: "guild-1",
+			Roles: []*discordgo.Role{
+				{ID: "role-a", Name: "AdminRole"},
+				{ID: "role-b", Name: "ReviewerRole"},
+			},
+		})
+	}
+
+	mc := buildGatewayMessage(tc)
+	handleGatewayMessageCreate(ctx, srv, session, mc)
+
+	if tc.hasRiver {
+		if len(river.insertedDiscordJobs) != tc.wantEnqueued {
+			t.Errorf("insertedDiscordJobs = %d, want %d", len(river.insertedDiscordJobs), tc.wantEnqueued)
+		}
+		for _, job := range river.insertedDiscordJobs {
+			assertRootTraceparent(t, job.Traceparent)
+		}
+	} else if !tc.nilServer {
+		calls := disp.DiscordMessageCalls()
+		if len(calls) != tc.wantProcessed {
+			t.Errorf("DiscordMessageCalls = %d, want %d", len(calls), tc.wantProcessed)
+		}
+	}
+}
+
 func TestHandleGatewayMessageCreate(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	tests := []struct {
-		name            string
-		nilServer       bool
-		nilMsg          bool
-		nilAuthor       bool
-		botUserID       string
-		authorID        string
-		refGuildID      string
-		msgGuildID      string
-		hasRiver        bool
-		riverErr        bool
-		directErr       bool
-		hasRolesInState bool
-		mentionRoles    []string
-		refRoles        []string
-		wantEnqueued    int
-		wantProcessed   int
-	}{
+	tests := []gatewayMessageCreateCase{
 		{
 			name:      "nil server ignored",
 			nilServer: true,
@@ -265,79 +347,66 @@ func TestHandleGatewayMessageCreate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			disp := &mockOutboundDispatcher{}
-			if tc.directErr {
-				disp.discordMessageErr = errors.New("dispatch direct error")
-			}
-			river := &mockRiverInserter{}
-			if tc.riverErr {
-				river.err = errors.New("river insert error")
-			}
-
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = newTestRouter(Config{}, nil, nil, disp)
-				if tc.hasRiver {
-					srv.SetRiverClient(river)
-				}
-			}
-
-			session, err := discordgo.New("Bot dummy-token")
-			if err != nil {
-				t.Fatalf("discordgo.New() err = %v", err)
-			}
-			if tc.botUserID != "" {
-				session.State.User = &discordgo.User{ID: tc.botUserID}
-			}
-			if tc.hasRolesInState {
-				_ = session.State.GuildAdd(&discordgo.Guild{
-					ID: "guild-1",
-					Roles: []*discordgo.Role{
-						{ID: "role-a", Name: "AdminRole"},
-						{ID: "role-b", Name: "ReviewerRole"},
-					},
-				})
-			}
-
-			var mc *discordgo.MessageCreate
-			if !tc.nilMsg {
-				mc = &discordgo.MessageCreate{
-					Message: &discordgo.Message{
-						ID:           "msg-101",
-						ChannelID:    "chan-202",
-						GuildID:      tc.msgGuildID,
-						Content:      "hello world",
-						MentionRoles: tc.mentionRoles,
-					},
-				}
-				if !tc.nilAuthor {
-					mc.Author = &discordgo.User{ID: tc.authorID}
-				}
-				if tc.refGuildID != "" || tc.msgGuildID != "" {
-					mc.ReferencedMessage = &discordgo.Message{
-						ID:           "ref-999",
-						GuildID:      tc.refGuildID,
-						MentionRoles: tc.refRoles,
-					}
-				}
-			}
-
-			handleGatewayMessageCreate(ctx, srv, session, mc)
-
-			if tc.hasRiver {
-				if len(river.insertedDiscordJobs) != tc.wantEnqueued {
-					t.Errorf("insertedDiscordJobs = %d, want %d", len(river.insertedDiscordJobs), tc.wantEnqueued)
-				}
-				for _, job := range river.insertedDiscordJobs {
-					assertRootTraceparent(t, job.Traceparent)
-				}
-			} else if !tc.nilServer {
-				calls := disp.DiscordMessageCalls()
-				if len(calls) != tc.wantProcessed {
-					t.Errorf("DiscordMessageCalls = %d, want %d", len(calls), tc.wantProcessed)
-				}
-			}
+			runGatewayMessageCreateCase(ctx, t, tc)
 		})
+	}
+}
+
+type gatewayInteractionCreateCase struct {
+	name            string
+	nilServer       bool
+	nilInteraction  bool
+	interactionType discordgo.InteractionType
+	hasRiver        bool
+	riverErr        bool
+	directErr       bool
+	wantEnqueued    int
+	wantProcessed   int
+}
+
+func runGatewayInteractionCreateCase(ctx context.Context, t *testing.T, tc gatewayInteractionCreateCase) {
+	t.Helper()
+	disp := &mockOutboundDispatcher{}
+	if tc.directErr {
+		disp.discordInteractionErr = errors.New("dispatch direct error")
+	}
+	river := &mockRiverInserter{}
+	if tc.riverErr {
+		river.err = errors.New("river insert error")
+	}
+
+	var srv *RouterServer
+	if !tc.nilServer {
+		srv = newTestRouter(Config{}, nil, nil, disp)
+		if tc.hasRiver {
+			srv.SetRiverClient(river)
+		}
+	}
+
+	var ic *discordgo.InteractionCreate
+	if !tc.nilInteraction {
+		ic = &discordgo.InteractionCreate{
+			Interaction: &discordgo.Interaction{
+				ID:   "inter-101",
+				Type: tc.interactionType,
+			},
+		}
+	}
+
+	handleGatewayInteractionCreate(ctx, srv, ic)
+
+	if tc.hasRiver {
+		if len(river.insertedInteractJobs) != tc.wantEnqueued {
+			t.Errorf("insertedInteractJobs = %d, want %d", len(river.insertedInteractJobs), tc.wantEnqueued)
+		}
+		for _, job := range river.insertedInteractJobs {
+			assertRootTraceparent(t, job.Traceparent)
+		}
+	} else if !tc.nilServer {
+		calls := disp.DiscordInteractionCalls()
+		if len(calls) != tc.wantProcessed {
+			t.Errorf("DiscordInteractionCalls = %d, want %d", len(calls), tc.wantProcessed)
+		}
 	}
 }
 
@@ -345,17 +414,7 @@ func TestHandleGatewayInteractionCreate(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	tests := []struct {
-		name            string
-		nilServer       bool
-		nilInteraction  bool
-		interactionType discordgo.InteractionType
-		hasRiver        bool
-		riverErr        bool
-		directErr       bool
-		wantEnqueued    int
-		wantProcessed   int
-	}{
+	tests := []gatewayInteractionCreateCase{
 		{
 			name:      "nil server ignored",
 			nilServer: true,
@@ -397,48 +456,7 @@ func TestHandleGatewayInteractionCreate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			disp := &mockOutboundDispatcher{}
-			if tc.directErr {
-				disp.discordInteractionErr = errors.New("dispatch direct error")
-			}
-			river := &mockRiverInserter{}
-			if tc.riverErr {
-				river.err = errors.New("river insert error")
-			}
-
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = newTestRouter(Config{}, nil, nil, disp)
-				if tc.hasRiver {
-					srv.SetRiverClient(river)
-				}
-			}
-
-			var ic *discordgo.InteractionCreate
-			if !tc.nilInteraction {
-				ic = &discordgo.InteractionCreate{
-					Interaction: &discordgo.Interaction{
-						ID:   "inter-101",
-						Type: tc.interactionType,
-					},
-				}
-			}
-
-			handleGatewayInteractionCreate(ctx, srv, ic)
-
-			if tc.hasRiver {
-				if len(river.insertedInteractJobs) != tc.wantEnqueued {
-					t.Errorf("insertedInteractJobs = %d, want %d", len(river.insertedInteractJobs), tc.wantEnqueued)
-				}
-				for _, job := range river.insertedInteractJobs {
-					assertRootTraceparent(t, job.Traceparent)
-				}
-			} else if !tc.nilServer {
-				calls := disp.DiscordInteractionCalls()
-				if len(calls) != tc.wantProcessed {
-					t.Errorf("DiscordInteractionCalls = %d, want %d", len(calls), tc.wantProcessed)
-				}
-			}
+			runGatewayInteractionCreateCase(ctx, t, tc)
 		})
 	}
 }
@@ -779,49 +797,177 @@ type sweepTestCase struct {
 	wantWatermark   string
 }
 
-func TestRunDiscordCatchUpSweep(t *testing.T) {
-	ctx := context.Background()
+func buildCatchUpGuildChannels(tc sweepTestCase) []*discordgo.Channel {
+	var chs []*discordgo.Channel
+	if tc.nilChannelInGuild {
+		chs = append(chs, nil, &discordgo.Channel{ID: ""})
+	}
+	if tc.channelID != "" {
+		chs = append(chs, &discordgo.Channel{
+			ID:            tc.channelID,
+			GuildID:       tc.channelGuildID,
+			LastMessageID: tc.lastMessageID,
+		})
+	}
+	return chs
+}
 
-	baseNow := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	minSnow := discordSnowflakeFromTime(baseNow.Add(-30 * time.Minute))
-	staleSnow := discordSnowflakeFromTime(baseNow.Add(-45 * time.Minute))
-	freshSnow1 := discordSnowflakeFromTime(baseNow.Add(-15 * time.Minute))
-	freshSnow2 := discordSnowflakeFromTime(baseNow.Add(-5 * time.Minute))
-	botSnow := discordSnowflakeFromTime(baseNow.Add(-10 * time.Minute))
+func setupCatchUpSweepSession(t *testing.T, tc sweepTestCase) (*discordgo.Session, *mockDiscordTransport) {
+	t.Helper()
+	if tc.nilSession {
+		return nil, nil
+	}
+	session, err := discordgo.New("Bot dummy-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() err = %v", err)
+	}
+	gID := tc.guildID
+	if gID == "" {
+		gID = "default-guild"
+	}
+	transport := &mockDiscordTransport{
+		messagesResp:    map[string][]*discordgo.Message{tc.channelID: tc.messagesResp},
+		messagesErrCode: map[string]int{tc.channelID: tc.messagesErrCode},
+		channelsResp:    map[string][]*discordgo.Channel{gID: tc.restChannels},
+		channelsErr:     map[string]bool{gID: tc.restChannelsErr},
+		threadsResp:     map[string]*discordgo.ThreadsList{gID: {Threads: tc.restThreads}},
+		threadsErr:      map[string]bool{gID: tc.restThreadsErr},
+		userGuildsResp:  tc.userGuildsResp,
+		userGuildsErr:   tc.userGuildsErr,
+	}
+	session.Client = &http.Client{Transport: transport}
+	if tc.botUserID != "" {
+		session.State.User = &discordgo.User{ID: tc.botUserID}
+	}
+	switch {
+	case tc.userGuildsResp != nil || tc.userGuildsErr:
+		session.State.Guilds = nil
+	case tc.channelID != "" || tc.nilGuildInState:
+		chs := buildCatchUpGuildChannels(tc)
+		if tc.nilGuildInState {
+			session.State.Guilds = append(session.State.Guilds, nil, &discordgo.Guild{ID: ""})
+		}
+		session.State.Guilds = append(session.State.Guilds, &discordgo.Guild{
+			ID:       gID,
+			Channels: chs,
+			Threads:  tc.threadsInState,
+		})
+	}
+	return session, transport
+}
 
-	freshMsg1 := &discordgo.Message{
-		ID:        freshSnow1,
-		ChannelID: "chan-sweep-5",
-		Author:    &discordgo.User{ID: "user-alpha"},
-		Content:   "older fresh message",
-		Timestamp: baseNow.Add(-15 * time.Minute),
+func assertCatchUpSweepTransport(t *testing.T, tc sweepTestCase, transport *mockDiscordTransport) {
+	t.Helper()
+	if transport == nil {
+		return
 	}
-	freshMsg2 := &discordgo.Message{
-		ID:        freshSnow2,
-		ChannelID: "chan-sweep-5",
-		Author:    &discordgo.User{ID: "user-beta"},
-		Content:   "newer fresh message",
-		Timestamp: baseNow.Add(-5 * time.Minute),
-		ReferencedMessage: &discordgo.Message{
-			ID: "ref-parent",
-		},
+	if len(transport.messageCalls) != tc.wantFetchCalls {
+		t.Errorf("fetch calls = %d, want %d", len(transport.messageCalls), tc.wantFetchCalls)
 	}
-	botMsg := &discordgo.Message{
-		ID:        botSnow,
-		ChannelID: "chan-sweep-5",
-		Author:    &discordgo.User{ID: "bot-123"},
-		Content:   "bot response",
-		Timestamp: baseNow.Add(-10 * time.Minute),
+	if tc.wantAfterQuery != "" && len(transport.afterQueries) > 0 {
+		if transport.afterQueries[0] != tc.wantAfterQuery {
+			t.Errorf("after query = %q, want %q", transport.afterQueries[0], tc.wantAfterQuery)
+		}
 	}
-	staleMsg := &discordgo.Message{
-		ID:        staleSnow,
-		ChannelID: "chan-sweep-5",
-		Author:    &discordgo.User{ID: "user-gamma"},
-		Content:   "stale message older than 30m",
-		Timestamp: baseNow.Add(-45 * time.Minute),
+}
+
+func assertCatchUpSweepRiver(t *testing.T, tc sweepTestCase, river *mockRiverInserter) {
+	t.Helper()
+	if len(river.insertedDiscordJobs) != len(tc.wantEnqueuedIDs) {
+		t.Errorf("insertedDiscordJobs = %d, want %d", len(river.insertedDiscordJobs), len(tc.wantEnqueuedIDs))
+	}
+	for idx, wantID := range tc.wantEnqueuedIDs {
+		if idx < len(river.insertedDiscordJobs) && river.insertedDiscordJobs[idx].MessageID != wantID {
+			t.Errorf("job[%d] MessageID = %q, want %q", idx, river.insertedDiscordJobs[idx].MessageID, wantID)
+		}
+	}
+}
+
+func assertCatchUpSweepServer(t *testing.T, tc sweepTestCase, srv *RouterServer, disp *mockOutboundDispatcher) {
+	t.Helper()
+	if srv == nil {
+		return
+	}
+	calls := disp.DiscordMessageCalls()
+	if len(calls) != len(tc.wantEnqueuedIDs) {
+		t.Errorf("DiscordMessageCalls = %d, want %d", len(calls), len(tc.wantEnqueuedIDs))
+	}
+	for idx, wantID := range tc.wantEnqueuedIDs {
+		if idx < len(calls) && calls[idx].Message.ID != wantID {
+			t.Errorf("call[%d] MessageID = %q, want %q", idx, calls[idx].Message.ID, wantID)
+		}
+	}
+	if len(calls) > 1 && tc.guildID != "" {
+		if calls[1].Message.GuildID != tc.guildID {
+			t.Errorf("call[1] GuildID = %q, want %q", calls[1].Message.GuildID, tc.guildID)
+		}
+		if calls[1].Message.ReferencedMessage != nil && calls[1].Message.ReferencedMessage.GuildID != tc.guildID {
+			t.Errorf("call[1] RefMessage GuildID = %q, want %q", calls[1].Message.ReferencedMessage.GuildID, tc.guildID)
+		}
+	}
+}
+
+func assertCatchUpSweepResults(t *testing.T, tc sweepTestCase, srv *RouterServer, disp *mockOutboundDispatcher, river *mockRiverInserter, transport *mockDiscordTransport) {
+	t.Helper()
+	assertCatchUpSweepTransport(t, tc, transport)
+	if tc.hasRiver {
+		assertCatchUpSweepRiver(t, tc, river)
+		return
+	}
+	assertCatchUpSweepServer(t, tc, srv, disp)
+}
+
+func runDiscordCatchUpSweepCase(ctx context.Context, t *testing.T, tc sweepTestCase) {
+	t.Helper()
+	resetChannelWatermarks()
+	defer resetChannelWatermarks()
+
+	if tc.initialWatermark != "" && tc.channelID != "" {
+		advanceChannelWatermark(tc.channelID, tc.initialWatermark)
 	}
 
-	tests := []sweepTestCase{
+	disp := &mockOutboundDispatcher{}
+	river := &mockRiverInserter{}
+	var srv *RouterServer
+	if !tc.nilServer {
+		srv = newTestRouter(Config{}, nil, nil, disp)
+		if tc.hasRiver {
+			srv.SetRiverClient(river)
+		}
+	}
+
+	targetCtx := ctx
+	if tc.canceledCtx {
+		cCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		targetCtx = cCtx
+	}
+
+	session, transport := setupCatchUpSweepSession(t, tc)
+
+	if tc.sweepAlreadyRunning {
+		discordSweepRunning.Store(true)
+		defer discordSweepRunning.Store(false)
+	}
+
+	runDiscordCatchUpSweep(targetCtx, session, srv, tc.now)
+
+	if tc.runSecondSweep {
+		runDiscordCatchUpSweep(targetCtx, session, srv, tc.now)
+	}
+
+	assertCatchUpSweepResults(t, tc, srv, disp, river, transport)
+
+	if tc.channelID != "" && tc.wantWatermark != "" {
+		wm := getChannelWatermark(tc.channelID)
+		if wm != tc.wantWatermark {
+			t.Errorf("channel watermark = %q, want %q", wm, tc.wantWatermark)
+		}
+	}
+}
+
+func discordCatchUpSweepCases(baseNow time.Time, minSnow, staleSnow, freshSnow1, freshSnow2, botSnow string, freshMsg1, freshMsg2, botMsg, staleMsg *discordgo.Message) []sweepTestCase {
+	return []sweepTestCase{
 		{
 			name:       "nil session returns immediately",
 			nilSession: true,
@@ -968,142 +1114,54 @@ func TestRunDiscordCatchUpSweep(t *testing.T) {
 			wantWatermark:   freshSnow2,
 		},
 	}
+}
 
+func TestRunDiscordCatchUpSweep(t *testing.T) {
+	ctx := context.Background()
+
+	baseNow := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	minSnow := discordSnowflakeFromTime(baseNow.Add(-30 * time.Minute))
+	staleSnow := discordSnowflakeFromTime(baseNow.Add(-45 * time.Minute))
+	freshSnow1 := discordSnowflakeFromTime(baseNow.Add(-15 * time.Minute))
+	freshSnow2 := discordSnowflakeFromTime(baseNow.Add(-5 * time.Minute))
+	botSnow := discordSnowflakeFromTime(baseNow.Add(-10 * time.Minute))
+
+	freshMsg1 := &discordgo.Message{
+		ID:        freshSnow1,
+		ChannelID: "chan-sweep-5",
+		Author:    &discordgo.User{ID: "user-alpha"},
+		Content:   "older fresh message",
+		Timestamp: baseNow.Add(-15 * time.Minute),
+	}
+	freshMsg2 := &discordgo.Message{
+		ID:        freshSnow2,
+		ChannelID: "chan-sweep-5",
+		Author:    &discordgo.User{ID: "user-beta"},
+		Content:   "newer fresh message",
+		Timestamp: baseNow.Add(-5 * time.Minute),
+		ReferencedMessage: &discordgo.Message{
+			ID: "ref-parent",
+		},
+	}
+	botMsg := &discordgo.Message{
+		ID:        botSnow,
+		ChannelID: "chan-sweep-5",
+		Author:    &discordgo.User{ID: "bot-123"},
+		Content:   "bot response",
+		Timestamp: baseNow.Add(-10 * time.Minute),
+	}
+	staleMsg := &discordgo.Message{
+		ID:        staleSnow,
+		ChannelID: "chan-sweep-5",
+		Author:    &discordgo.User{ID: "user-gamma"},
+		Content:   "stale message older than 30m",
+		Timestamp: baseNow.Add(-45 * time.Minute),
+	}
+
+	tests := discordCatchUpSweepCases(baseNow, minSnow, staleSnow, freshSnow1, freshSnow2, botSnow, freshMsg1, freshMsg2, botMsg, staleMsg)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resetChannelWatermarks()
-			defer resetChannelWatermarks()
-
-			if tc.initialWatermark != "" && tc.channelID != "" {
-				advanceChannelWatermark(tc.channelID, tc.initialWatermark)
-			}
-
-			disp := &mockOutboundDispatcher{}
-			river := &mockRiverInserter{}
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = newTestRouter(Config{}, nil, nil, disp)
-				if tc.hasRiver {
-					srv.SetRiverClient(river)
-				}
-			}
-
-			targetCtx := ctx
-			if tc.canceledCtx {
-				cCtx, cancel := context.WithCancel(ctx)
-				cancel()
-				targetCtx = cCtx
-			}
-
-			var session *discordgo.Session
-			var transport *mockDiscordTransport
-			if !tc.nilSession {
-				var err error
-				session, err = discordgo.New("Bot dummy-token")
-				if err != nil {
-					t.Fatalf("discordgo.New() err = %v", err)
-				}
-				gID := tc.guildID
-				if gID == "" {
-					gID = "default-guild"
-				}
-				transport = &mockDiscordTransport{
-					messagesResp:    map[string][]*discordgo.Message{tc.channelID: tc.messagesResp},
-					messagesErrCode: map[string]int{tc.channelID: tc.messagesErrCode},
-					channelsResp:    map[string][]*discordgo.Channel{gID: tc.restChannels},
-					channelsErr:     map[string]bool{gID: tc.restChannelsErr},
-					threadsResp:     map[string]*discordgo.ThreadsList{gID: {Threads: tc.restThreads}},
-					threadsErr:      map[string]bool{gID: tc.restThreadsErr},
-					userGuildsResp:  tc.userGuildsResp,
-					userGuildsErr:   tc.userGuildsErr,
-				}
-				session.Client = &http.Client{Transport: transport}
-				if tc.botUserID != "" {
-					session.State.User = &discordgo.User{ID: tc.botUserID}
-				}
-				if tc.userGuildsResp != nil || tc.userGuildsErr {
-					session.State.Guilds = nil
-				} else if tc.channelID != "" || tc.nilGuildInState {
-					var chs []*discordgo.Channel
-					if tc.nilChannelInGuild {
-						chs = append(chs, nil, &discordgo.Channel{ID: ""})
-					}
-					if tc.channelID != "" {
-						chs = append(chs, &discordgo.Channel{
-							ID:            tc.channelID,
-							GuildID:       tc.channelGuildID,
-							LastMessageID: tc.lastMessageID,
-						})
-					}
-					if tc.nilGuildInState {
-						session.State.Guilds = append(session.State.Guilds, nil, &discordgo.Guild{ID: ""})
-					}
-					session.State.Guilds = append(session.State.Guilds, &discordgo.Guild{
-						ID:       gID,
-						Channels: chs,
-						Threads:  tc.threadsInState,
-					})
-				}
-			}
-
-			if tc.sweepAlreadyRunning {
-				discordSweepRunning.Store(true)
-				defer discordSweepRunning.Store(false)
-			}
-
-			runDiscordCatchUpSweep(targetCtx, session, srv, tc.now)
-
-			if tc.runSecondSweep {
-				runDiscordCatchUpSweep(targetCtx, session, srv, tc.now)
-			}
-
-			if transport != nil {
-				if len(transport.messageCalls) != tc.wantFetchCalls {
-					t.Errorf("fetch calls = %d, want %d", len(transport.messageCalls), tc.wantFetchCalls)
-				}
-				if tc.wantAfterQuery != "" && len(transport.afterQueries) > 0 {
-					if transport.afterQueries[0] != tc.wantAfterQuery {
-						t.Errorf("after query = %q, want %q", transport.afterQueries[0], tc.wantAfterQuery)
-					}
-				}
-			}
-
-			if tc.hasRiver {
-				if len(river.insertedDiscordJobs) != len(tc.wantEnqueuedIDs) {
-					t.Errorf("insertedDiscordJobs = %d, want %d", len(river.insertedDiscordJobs), len(tc.wantEnqueuedIDs))
-				}
-				for idx, wantID := range tc.wantEnqueuedIDs {
-					if idx < len(river.insertedDiscordJobs) && river.insertedDiscordJobs[idx].MessageID != wantID {
-						t.Errorf("job[%d] MessageID = %q, want %q", idx, river.insertedDiscordJobs[idx].MessageID, wantID)
-					}
-				}
-			} else if srv != nil {
-				calls := disp.DiscordMessageCalls()
-				if len(calls) != len(tc.wantEnqueuedIDs) {
-					t.Errorf("DiscordMessageCalls = %d, want %d", len(calls), len(tc.wantEnqueuedIDs))
-				}
-				for idx, wantID := range tc.wantEnqueuedIDs {
-					if idx < len(calls) && calls[idx].Message.ID != wantID {
-						t.Errorf("call[%d] MessageID = %q, want %q", idx, calls[idx].Message.ID, wantID)
-					}
-				}
-				// Verify guild ID fallback propagation
-				if len(calls) > 1 && tc.guildID != "" {
-					if calls[1].Message.GuildID != tc.guildID {
-						t.Errorf("call[1] GuildID = %q, want %q", calls[1].Message.GuildID, tc.guildID)
-					}
-					if calls[1].Message.ReferencedMessage != nil && calls[1].Message.ReferencedMessage.GuildID != tc.guildID {
-						t.Errorf("call[1] RefMessage GuildID = %q, want %q", calls[1].Message.ReferencedMessage.GuildID, tc.guildID)
-					}
-				}
-			}
-
-			if tc.channelID != "" && tc.wantWatermark != "" {
-				wm := getChannelWatermark(tc.channelID)
-				if wm != tc.wantWatermark {
-					t.Errorf("channel watermark = %q, want %q", wm, tc.wantWatermark)
-				}
-			}
+			runDiscordCatchUpSweepCase(ctx, t, tc)
 		})
 	}
 }
@@ -1200,6 +1258,66 @@ type mockDiscordTransport struct {
 	messagesErrCode map[string]int
 }
 
+func extractPathSegmentAfter(path, segment string) string {
+	parts := strings.Split(path, "/")
+	for idx, p := range parts {
+		if p == segment && idx+1 < len(parts) {
+			return parts[idx+1]
+		}
+	}
+	return ""
+}
+
+func (m *mockDiscordTransport) roundTripGuilds() (int, []byte) {
+	if m.userGuildsErr {
+		return http.StatusInternalServerError, []byte(`{"message": "error"}`)
+	}
+	bodyBytes, _ := json.Marshal(m.userGuildsResp)
+	return http.StatusOK, bodyBytes
+}
+
+func (m *mockDiscordTransport) roundTripThreads(path string) (int, []byte) {
+	guildID := extractPathSegmentAfter(path, "guilds")
+	if m.threadsErr != nil && m.threadsErr[guildID] {
+		return http.StatusInternalServerError, []byte(`{"message": "error"}`)
+	}
+	thList := &discordgo.ThreadsList{}
+	if m.threadsResp != nil && m.threadsResp[guildID] != nil {
+		thList = m.threadsResp[guildID]
+	}
+	bodyBytes, _ := json.Marshal(thList)
+	return http.StatusOK, bodyBytes
+}
+
+func (m *mockDiscordTransport) roundTripChannels(path string) (int, []byte) {
+	guildID := extractPathSegmentAfter(path, "guilds")
+	if m.channelsErr != nil && m.channelsErr[guildID] {
+		return http.StatusInternalServerError, []byte(`{"message": "error"}`)
+	}
+	var chList []*discordgo.Channel
+	if m.channelsResp != nil && m.channelsResp[guildID] != nil {
+		chList = m.channelsResp[guildID]
+	}
+	bodyBytes, _ := json.Marshal(chList)
+	return http.StatusOK, bodyBytes
+}
+
+func (m *mockDiscordTransport) roundTripMessages(req *http.Request, path string) (int, []byte) {
+	channelID := extractPathSegmentAfter(path, "channels")
+	m.messageCalls = append(m.messageCalls, channelID)
+	m.afterQueries = append(m.afterQueries, req.URL.Query().Get("after"))
+
+	if m.messagesErrCode != nil && m.messagesErrCode[channelID] > 0 {
+		return m.messagesErrCode[channelID], []byte(`{"message": "error"}`)
+	}
+	var msgList []*discordgo.Message
+	if m.messagesResp != nil && m.messagesResp[channelID] != nil {
+		msgList = m.messagesResp[channelID]
+	}
+	bodyBytes, _ := json.Marshal(msgList)
+	return http.StatusOK, bodyBytes
+}
+
 func (m *mockDiscordTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1210,72 +1328,13 @@ func (m *mockDiscordTransport) RoundTrip(req *http.Request) (*http.Response, err
 
 	switch {
 	case strings.HasSuffix(path, "/users/@me/guilds"):
-		if m.userGuildsErr {
-			statusCode = http.StatusInternalServerError
-			bodyBytes = []byte(`{"message": "error"}`)
-		} else {
-			bodyBytes, _ = json.Marshal(m.userGuildsResp)
-		}
+		statusCode, bodyBytes = m.roundTripGuilds()
 	case strings.Contains(path, "/threads/active"):
-		parts := strings.Split(path, "/")
-		guildID := ""
-		for idx, p := range parts {
-			if p == "guilds" && idx+1 < len(parts) {
-				guildID = parts[idx+1]
-				break
-			}
-		}
-		if m.threadsErr != nil && m.threadsErr[guildID] {
-			statusCode = http.StatusInternalServerError
-			bodyBytes = []byte(`{"message": "error"}`)
-		} else {
-			thList := &discordgo.ThreadsList{}
-			if m.threadsResp != nil && m.threadsResp[guildID] != nil {
-				thList = m.threadsResp[guildID]
-			}
-			bodyBytes, _ = json.Marshal(thList)
-		}
+		statusCode, bodyBytes = m.roundTripThreads(path)
 	case strings.HasSuffix(path, "/channels"):
-		parts := strings.Split(path, "/")
-		guildID := ""
-		for idx, p := range parts {
-			if p == "guilds" && idx+1 < len(parts) {
-				guildID = parts[idx+1]
-				break
-			}
-		}
-		if m.channelsErr != nil && m.channelsErr[guildID] {
-			statusCode = http.StatusInternalServerError
-			bodyBytes = []byte(`{"message": "error"}`)
-		} else {
-			var chList []*discordgo.Channel
-			if m.channelsResp != nil && m.channelsResp[guildID] != nil {
-				chList = m.channelsResp[guildID]
-			}
-			bodyBytes, _ = json.Marshal(chList)
-		}
+		statusCode, bodyBytes = m.roundTripChannels(path)
 	case strings.HasSuffix(path, "/messages"):
-		parts := strings.Split(path, "/")
-		channelID := ""
-		for idx, p := range parts {
-			if p == "channels" && idx+1 < len(parts) {
-				channelID = parts[idx+1]
-				break
-			}
-		}
-		m.messageCalls = append(m.messageCalls, channelID)
-		m.afterQueries = append(m.afterQueries, req.URL.Query().Get("after"))
-
-		if m.messagesErrCode != nil && m.messagesErrCode[channelID] > 0 {
-			statusCode = m.messagesErrCode[channelID]
-			bodyBytes = []byte(`{"message": "error"}`)
-		} else {
-			var msgList []*discordgo.Message
-			if m.messagesResp != nil && m.messagesResp[channelID] != nil {
-				msgList = m.messagesResp[channelID]
-			}
-			bodyBytes, _ = json.Marshal(msgList)
-		}
+		statusCode, bodyBytes = m.roundTripMessages(req, path)
 	default:
 		bodyBytes = []byte(`{}`)
 	}

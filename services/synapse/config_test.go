@@ -9,6 +9,18 @@ import (
 	"testing"
 )
 
+var synapseConfigKeysToClear = []string{
+	"PORT", "KUBE_API_SERVER",
+	"KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
+	"GITHUB_PAT", "GITHUB_API_URL",
+	"DATABASE_URL", "POSTGRES_URL", "POSTGRES_USER", "POSTGRES_PASSWORD",
+	"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB",
+	"DISCORD_TOKEN", "BOT_ID", "AERIAL_BOT_ID", "BRAIN_URL", "ERI_URL",
+	"FLUX_RECEIVER_URL", "VANADIS_URL", "HARO_URL", "HANGAR_URL",
+	"SYSTEM_CHANNEL_ID", "AUTO_UPDATE_PR_AUTHORS",
+	"WEBHOOK_FORWARD_URLS", "SYNAPSE_DEFAULT_OWNER", "DEFAULT_OWNER", "AERIAL_DEFAULT_OWNER",
+}
+
 func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -147,25 +159,130 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
-	tests := []struct {
-		name             string
-		localYAML        string
-		fallbackYAML     string
-		aerialYAML       string
-		useEmptyPath     bool
-		missingFallback  bool
-		env              map[string]string
-		wantPort         string
-		wantFluxURL      string
-		wantBrainURL     string
-		wantSysChan      string
-		wantAuthors      []string
-		wantBotID        string
-		wantDefaultOwner bool
-		wantForwardURLs  map[string]string
-		wantStrictErr    bool
-	}{
+type loadConfigCase struct {
+	name             string
+	localYAML        string
+	fallbackYAML     string
+	aerialYAML       string
+	useEmptyPath     bool
+	missingFallback  bool
+	env              map[string]string
+	wantPort         string
+	wantFluxURL      string
+	wantBrainURL     string
+	wantSysChan      string
+	wantAuthors      []string
+	wantBotID        string
+	wantDefaultOwner bool
+	wantForwardURLs  map[string]string
+	wantStrictErr    bool
+}
+
+func setupSynapseTestConfigFiles(t *testing.T, tc loadConfigCase) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	var targetPath string
+	if !tc.useEmptyPath {
+		targetPath = filepath.Join(tmpDir, "local.yaml")
+		if err := os.WriteFile(targetPath, []byte(tc.localYAML), 0o644); err != nil {
+			t.Fatalf("failed to write local config: %v", err)
+		}
+	}
+
+	oldAerial := synapseAerialConfigPath
+	if tc.aerialYAML != "" {
+		aerialPath := filepath.Join(tmpDir, "config.yaml")
+		if err := os.WriteFile(aerialPath, []byte(tc.aerialYAML), 0o644); err != nil {
+			t.Fatalf("failed to write aerial config: %v", err)
+		}
+		synapseAerialConfigPath = aerialPath
+	} else {
+		synapseAerialConfigPath = filepath.Join(tmpDir, "nonexistent-config.yaml")
+	}
+	t.Cleanup(func() { synapseAerialConfigPath = oldAerial })
+
+	oldFallback := synapseFallbackConfigPath
+	switch {
+	case tc.missingFallback:
+		synapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
+	case tc.fallbackYAML != "":
+		fbPath := filepath.Join(tmpDir, "fallback.yaml")
+		if err := os.WriteFile(fbPath, []byte(tc.fallbackYAML), 0o644); err != nil {
+			t.Fatalf("failed to write fallback config: %v", err)
+		}
+		synapseFallbackConfigPath = fbPath
+	default:
+		synapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-synapse.yaml")
+	}
+	t.Cleanup(func() {
+		synapseFallbackConfigPath = oldFallback
+	})
+
+	for _, k := range synapseConfigKeysToClear {
+		t.Setenv(k, "")
+	}
+	for k, v := range tc.env {
+		t.Setenv(k, v)
+	}
+	return targetPath
+}
+
+func assertLoadedConfigFields(t *testing.T, tc loadConfigCase, cfg Config) {
+	t.Helper()
+	for _, check := range []struct{ got, want, field string }{
+		{cfg.Port, tc.wantPort, "Port"},
+		{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
+		{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
+		{cfg.EriURL, tc.wantBrainURL, "EriURL"},
+		{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
+		{cfg.BotID, tc.wantBotID, "BotID"},
+	} {
+		if check.want != "" && check.got != check.want {
+			t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
+		}
+	}
+	if tc.wantDefaultOwner != cfg.DefaultOwner && (tc.wantDefaultOwner || tc.localYAML != "") {
+		t.Errorf("DefaultOwner = %v, want %v", cfg.DefaultOwner, tc.wantDefaultOwner)
+	}
+	if tc.wantForwardURLs != nil {
+		if len(cfg.WebhookForwardURLs) != len(tc.wantForwardURLs) {
+			t.Errorf("WebhookForwardURLs len = %d, want %d", len(cfg.WebhookForwardURLs), len(tc.wantForwardURLs))
+		}
+		for k, v := range tc.wantForwardURLs {
+			if cfg.WebhookForwardURLs[k] != v {
+				t.Errorf("WebhookForwardURLs[%q] = %q, want %q", k, cfg.WebhookForwardURLs[k], v)
+			}
+		}
+	}
+	if tc.wantAuthors != nil {
+		if len(cfg.AutoUpdatePRAuthors) != len(tc.wantAuthors) {
+			t.Errorf("AutoUpdatePRAuthors len = %d, want %d", len(cfg.AutoUpdatePRAuthors), len(tc.wantAuthors))
+		} else {
+			for i, a := range tc.wantAuthors {
+				if cfg.AutoUpdatePRAuthors[i] != a {
+					t.Errorf("AutoUpdatePRAuthors[%d] = %q, want %q", i, cfg.AutoUpdatePRAuthors[i], a)
+				}
+			}
+		}
+	}
+}
+
+func runLoadConfigCase(t *testing.T, tc loadConfigCase) {
+	t.Helper()
+	targetPath := setupSynapseTestConfigFiles(t, tc)
+	cfg := LoadConfig(targetPath)
+	strictCfg, strictErr := LoadConfigStrict(targetPath)
+	if (strictErr != nil) != tc.wantStrictErr {
+		t.Errorf("LoadConfigStrict() err = %v, wantStrictErr %v", strictErr, tc.wantStrictErr)
+	}
+	if strictErr == nil && !reflect.DeepEqual(strictCfg, cfg) {
+		t.Errorf("LoadConfigStrict() = %+v, want LoadConfig result %+v", strictCfg, cfg)
+	}
+	assertLoadedConfigFields(t, tc, cfg)
+}
+
+func loadConfigYAMLTestCases() []loadConfigCase {
+	return []loadConfigCase{
 		{
 			name: "yaml config without overrides",
 			localYAML: `port: "4099"
@@ -310,107 +427,14 @@ eri_url: "http://brain.custom:8088"
 			wantBotID: "aerial",
 		},
 	}
+}
 
-	keysToClear := []string{
-		"PORT",
-		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "SYSTEM_CHANNEL_ID",
-		"AERIAL_BOT_ID", "DEFAULT_OWNER", "AERIAL_DEFAULT_OWNER",
-	}
+func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
+	tests := loadConfigYAMLTestCases()
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-			var targetPath string
-			if !tc.useEmptyPath {
-				targetPath = filepath.Join(tmpDir, "local.yaml")
-				if err := os.WriteFile(targetPath, []byte(tc.localYAML), 0o644); err != nil {
-					t.Fatalf("failed to write local config: %v", err)
-				}
-			}
-
-			oldAerial := synapseAerialConfigPath
-			if tc.aerialYAML != "" {
-				aerialPath := filepath.Join(tmpDir, "config.yaml")
-				if err := os.WriteFile(aerialPath, []byte(tc.aerialYAML), 0o644); err != nil {
-					t.Fatalf("failed to write aerial config: %v", err)
-				}
-				synapseAerialConfigPath = aerialPath
-			} else {
-				synapseAerialConfigPath = filepath.Join(tmpDir, "nonexistent-config.yaml")
-			}
-			t.Cleanup(func() { synapseAerialConfigPath = oldAerial })
-
-			oldFallback := synapseFallbackConfigPath
-			if tc.fallbackYAML != "" || tc.missingFallback {
-				if tc.missingFallback {
-					synapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
-				} else {
-					fbPath := filepath.Join(tmpDir, "fallback.yaml")
-					if err := os.WriteFile(fbPath, []byte(tc.fallbackYAML), 0o644); err != nil {
-						t.Fatalf("failed to write fallback config: %v", err)
-					}
-					synapseFallbackConfigPath = fbPath
-				}
-			} else {
-				synapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-synapse.yaml")
-			}
-			t.Cleanup(func() {
-				synapseFallbackConfigPath = oldFallback
-			})
-
-			for _, k := range keysToClear {
-				t.Setenv(k, "")
-			}
-			for k, v := range tc.env {
-				t.Setenv(k, v)
-			}
-
-			cfg := LoadConfig(targetPath)
-			strictCfg, strictErr := LoadConfigStrict(targetPath)
-			if (strictErr != nil) != tc.wantStrictErr {
-				t.Errorf("LoadConfigStrict() err = %v, wantStrictErr %v", strictErr, tc.wantStrictErr)
-			}
-			if strictErr == nil && !reflect.DeepEqual(strictCfg, cfg) {
-				t.Errorf("LoadConfigStrict() = %+v, want LoadConfig result %+v", strictCfg, cfg)
-			}
-			for _, check := range []struct{ got, want, field string }{
-				{cfg.Port, tc.wantPort, "Port"},
-				{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
-				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
-				{cfg.EriURL, tc.wantBrainURL, "EriURL"},
-				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
-				{cfg.BotID, tc.wantBotID, "BotID"},
-			} {
-				if check.want != "" && check.got != check.want {
-					t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
-				}
-			}
-			if tc.wantDefaultOwner != cfg.DefaultOwner && (tc.wantDefaultOwner || tc.localYAML != "") {
-				if tc.wantDefaultOwner != cfg.DefaultOwner {
-					t.Errorf("DefaultOwner = %v, want %v", cfg.DefaultOwner, tc.wantDefaultOwner)
-				}
-			}
-			if tc.wantForwardURLs != nil {
-				if len(cfg.WebhookForwardURLs) != len(tc.wantForwardURLs) {
-					t.Errorf("WebhookForwardURLs len = %d, want %d", len(cfg.WebhookForwardURLs), len(tc.wantForwardURLs))
-				}
-				for k, v := range tc.wantForwardURLs {
-					if cfg.WebhookForwardURLs[k] != v {
-						t.Errorf("WebhookForwardURLs[%q] = %q, want %q", k, cfg.WebhookForwardURLs[k], v)
-					}
-				}
-			}
-			if tc.wantAuthors != nil {
-				if len(cfg.AutoUpdatePRAuthors) != len(tc.wantAuthors) {
-					t.Errorf("AutoUpdatePRAuthors len = %d, want %d", len(cfg.AutoUpdatePRAuthors), len(tc.wantAuthors))
-				} else {
-					for i, a := range tc.wantAuthors {
-						if cfg.AutoUpdatePRAuthors[i] != a {
-							t.Errorf("AutoUpdatePRAuthors[%d] = %q, want %q", i, cfg.AutoUpdatePRAuthors[i], a)
-						}
-					}
-				}
-			}
+			runLoadConfigCase(t, tc)
 		})
 	}
 }
@@ -527,9 +551,8 @@ func TestStringAndRepoHelpers(t *testing.T) {
 	}
 }
 
-func TestPromptAndContextFormatting(t *testing.T) {
-	t.Parallel()
-
+func runTruncatePromptTests(t *testing.T) {
+	t.Helper()
 	truncateTests := []struct {
 		name, input, wantSuffix, wantSub, wantNotSub string
 		wantLen                                      int
@@ -556,7 +579,10 @@ func TestPromptAndContextFormatting(t *testing.T) {
 			}
 		})
 	}
+}
 
+func runErrorBlockTests(t *testing.T) {
+	t.Helper()
 	errorBlockTests := []struct {
 		name, header, details, extraLine, footer, wantExact string
 		wantSub                                             []string
@@ -578,7 +604,10 @@ func TestPromptAndContextFormatting(t *testing.T) {
 			}
 		})
 	}
+}
 
+func runVanadisBuildPromptTests(t *testing.T) {
+	t.Helper()
 	vanadisPromptTests := []struct {
 		name    string
 		res     *VanadisAdvancementResult
@@ -619,6 +648,13 @@ func TestPromptAndContextFormatting(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPromptAndContextFormatting(t *testing.T) {
+	t.Parallel()
+	runTruncatePromptTests(t)
+	runErrorBlockTests(t)
+	runVanadisBuildPromptTests(t)
 }
 
 func TestIs4xxClientError(t *testing.T) {

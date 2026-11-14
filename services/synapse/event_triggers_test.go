@@ -9,21 +9,84 @@ import (
 	"testing"
 )
 
+func newSequentialMockServer(t *testing.T, expectedPath string, defaultStatus int, statuses []int, body string) *httptest.Server {
+	t.Helper()
+	var reqIdx int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != expectedPath {
+			http.NotFound(w, r)
+			return
+		}
+		status := defaultStatus
+		if len(statuses) > 0 {
+			if reqIdx < len(statuses) {
+				status = statuses[reqIdx]
+			} else {
+				status = statuses[len(statuses)-1]
+			}
+		}
+		reqIdx++
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func newHaroTestRegistry(t *testing.T, nilRegistry bool, expectedPath string, defaultStatus int, statuses []int, body string) *PostgresPRRegistry {
+	t.Helper()
+	if nilRegistry {
+		return nil
+	}
+	ts := newSequentialMockServer(t, expectedPath, defaultStatus, statuses, body)
+	reg := NewPostgresPRRegistry(nil, WithHaroClient(ts.URL, ts.Client()))
+	reg.vanadisRetryDelay = 0
+	return reg
+}
+
+func newVanadisTestRegistry(t *testing.T, nilRegistry bool, expectedPath string, defaultStatus int, statuses []int, body string) *PostgresPRRegistry {
+	t.Helper()
+	if nilRegistry {
+		return nil
+	}
+	ts := newSequentialMockServer(t, expectedPath, defaultStatus, statuses, body)
+	reg := NewPostgresPRRegistry(nil, WithVanadisClient(ts.URL, ts.Client()))
+	reg.vanadisRetryDelay = 0
+	return reg
+}
+
+type checkEventTriggerCase struct {
+	name         string
+	nilRegistry  bool
+	source       string
+	targets      []string
+	eventType    string
+	httpStatus   int
+	httpStatuses []int
+	httpBody     string
+	wantMatched  bool
+	wantErr      bool
+}
+
+func runCheckEventTriggerCase(t *testing.T, tc checkEventTriggerCase) {
+	t.Helper()
+	reg := newHaroTestRegistry(t, tc.nilRegistry, "/event-triggers/check", tc.httpStatus, tc.httpStatuses, tc.httpBody)
+	matched, err := reg.CheckEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("CheckEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if matched != tc.wantMatched {
+		t.Fatalf("CheckEventTriggers() matched = %v, want %v", matched, tc.wantMatched)
+	}
+}
+
 func TestCheckEventTriggers_HaroHTTP(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		nilRegistry  bool
-		source       string
-		targets      []string
-		eventType    string
-		httpStatus   int
-		httpStatuses []int
-		httpBody     string
-		wantMatched  bool
-		wantErr      bool
-	}{
+	tests := []checkEventTriggerCase{
 		{name: "check nil registry returns false", nilRegistry: true, source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready"},
 		{name: "check empty targets returns false", source: "custom_source", targets: nil, eventType: "ready"},
 		{name: "check 500 error returns error", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusInternalServerError, httpBody: `{"error":"db"}`, wantErr: true},
@@ -36,60 +99,41 @@ func TestCheckEventTriggers_HaroHTTP(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var reg *PostgresPRRegistry
-			if !tc.nilRegistry {
-				var reqIdx int
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path != "/event-triggers/check" {
-						http.NotFound(w, r)
-						return
-					}
-					status := tc.httpStatus
-					if len(tc.httpStatuses) > 0 {
-						if reqIdx < len(tc.httpStatuses) {
-							status = tc.httpStatuses[reqIdx]
-						} else {
-							status = tc.httpStatuses[len(tc.httpStatuses)-1]
-						}
-					}
-					reqIdx++
-					if status == 0 {
-						status = http.StatusOK
-					}
-					w.WriteHeader(status)
-					_, _ = w.Write([]byte(tc.httpBody))
-				}))
-				defer ts.Close()
-				reg = NewPostgresPRRegistry(nil, WithHaroClient(ts.URL, ts.Client()))
-				reg.vanadisRetryDelay = 0
-			}
-			matched, err := reg.CheckEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("CheckEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if matched != tc.wantMatched {
-				t.Fatalf("CheckEventTriggers() matched = %v, want %v", matched, tc.wantMatched)
-			}
+			runCheckEventTriggerCase(t, tc)
 		})
+	}
+}
+
+type fireEventTriggerCase struct {
+	name          string
+	nilRegistry   bool
+	source        string
+	targets       []string
+	eventType     string
+	contextHeader string
+	httpStatus    int
+	httpStatuses  []int
+	httpBody      string
+	wantCount     int
+	wantErr       bool
+}
+
+func runFireEventTriggerCase(t *testing.T, tc fireEventTriggerCase) {
+	t.Helper()
+	reg := newHaroTestRegistry(t, tc.nilRegistry, "/event-triggers/fire", tc.httpStatus, tc.httpStatuses, tc.httpBody)
+	got, err := reg.FireEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType, tc.contextHeader)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("FireEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if len(got) != tc.wantCount {
+		t.Fatalf("FireEventTriggers() returned %d items, want %d", len(got), tc.wantCount)
 	}
 }
 
 func TestFireEventTriggers_HaroHTTP(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name          string
-		nilRegistry   bool
-		source        string
-		targets       []string
-		eventType     string
-		contextHeader string
-		httpStatus    int
-		httpStatuses  []int
-		httpBody      string
-		wantCount     int
-		wantErr       bool
-	}{
+	tests := []fireEventTriggerCase{
 		{name: "fire nil registry returns nil", nilRegistry: true, source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed"},
 		{name: "fire empty targets returns nil", source: "github", targets: nil, eventType: "ci_passed"},
 		{name: "fire whitespace targets returns nil", source: "github", targets: []string{"   ", ""}, eventType: "ci_passed"},
@@ -104,40 +148,7 @@ func TestFireEventTriggers_HaroHTTP(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var reg *PostgresPRRegistry
-			if !tc.nilRegistry {
-				var reqIdx int
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path != "/event-triggers/fire" {
-						http.NotFound(w, r)
-						return
-					}
-					status := tc.httpStatus
-					if len(tc.httpStatuses) > 0 {
-						if reqIdx < len(tc.httpStatuses) {
-							status = tc.httpStatuses[reqIdx]
-						} else {
-							status = tc.httpStatuses[len(tc.httpStatuses)-1]
-						}
-					}
-					reqIdx++
-					if status == 0 {
-						status = http.StatusOK
-					}
-					w.WriteHeader(status)
-					_, _ = w.Write([]byte(tc.httpBody))
-				}))
-				defer ts.Close()
-				reg = NewPostgresPRRegistry(nil, WithHaroClient(ts.URL, ts.Client()))
-				reg.vanadisRetryDelay = 0
-			}
-			got, err := reg.FireEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType, tc.contextHeader)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("FireEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if len(got) != tc.wantCount {
-				t.Fatalf("FireEventTriggers() returned %d items, want %d", len(got), tc.wantCount)
-			}
+			runFireEventTriggerCase(t, tc)
 		})
 	}
 }
@@ -155,22 +166,39 @@ func TestPostgresPRRegistry_HaroClientOptions(t *testing.T) {
 	}
 }
 
+type failVanadisChunkCase struct {
+	name         string
+	nilRegistry  bool
+	repo         string
+	prNumber     int
+	httpStatus   int
+	httpStatuses []int
+	httpBody     string
+	buildID      string
+	chunkID      string
+	wantFailed   bool
+	wantErr      bool
+}
+
+func runFailVanadisChunkDetailsCase(t *testing.T, tc failVanadisChunkCase) {
+	t.Helper()
+	reg := newVanadisTestRegistry(t, tc.nilRegistry, "/chunks/fail-pr", tc.httpStatus, tc.httpStatuses, tc.httpBody)
+	bID, cID, failed, err := reg.FailVanadisChunkDetailsByPR(context.Background(), tc.repo, tc.prNumber)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("FailVanadisChunkDetailsByPR() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if failed != tc.wantFailed {
+		t.Fatalf("FailVanadisChunkDetailsByPR() failed = %v, want %v", failed, tc.wantFailed)
+	}
+	if tc.wantFailed && (bID != tc.buildID || cID != tc.chunkID) {
+		t.Fatalf("FailVanadisChunkDetailsByPR() got bID=%q, cID=%q; want %q, %q", bID, cID, tc.buildID, tc.chunkID)
+	}
+}
+
 func TestFailVanadisChunkDetailsByPR(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		nilRegistry  bool
-		repo         string
-		prNumber     int
-		httpStatus   int
-		httpStatuses []int
-		httpBody     string
-		buildID      string
-		chunkID      string
-		wantFailed   bool
-		wantErr      bool
-	}{
+	tests := []failVanadisChunkCase{
 		{
 			name:        "nil registry returns false",
 			nilRegistry: true,
@@ -244,46 +272,7 @@ func TestFailVanadisChunkDetailsByPR(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var reg *PostgresPRRegistry
-			if !tc.nilRegistry {
-				var reqIdx int
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path != "/chunks/fail-pr" {
-						http.NotFound(w, r)
-						return
-					}
-					status := tc.httpStatus
-					if len(tc.httpStatuses) > 0 {
-						if reqIdx < len(tc.httpStatuses) {
-							status = tc.httpStatuses[reqIdx]
-						} else {
-							status = tc.httpStatuses[len(tc.httpStatuses)-1]
-						}
-					}
-					reqIdx++
-					if status == 0 {
-						status = http.StatusOK
-					}
-					w.WriteHeader(status)
-					_, _ = w.Write([]byte(tc.httpBody))
-				}))
-				defer ts.Close()
-				reg = NewPostgresPRRegistry(nil, WithVanadisClient(ts.URL, ts.Client()))
-				reg.vanadisRetryDelay = 0
-			}
-
-			bID, cID, failed, err := reg.FailVanadisChunkDetailsByPR(context.Background(), tc.repo, tc.prNumber)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("FailVanadisChunkDetailsByPR() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if failed != tc.wantFailed {
-				t.Fatalf("FailVanadisChunkDetailsByPR() failed = %v, want %v", failed, tc.wantFailed)
-			}
-			if tc.wantFailed {
-				if bID != tc.buildID || cID != tc.chunkID {
-					t.Fatalf("FailVanadisChunkDetailsByPR() got bID=%q, cID=%q; want %q, %q", bID, cID, tc.buildID, tc.chunkID)
-				}
-			}
+			runFailVanadisChunkDetailsCase(t, tc)
 		})
 	}
 }
@@ -627,17 +616,46 @@ func TestEvaluateFluxEventTriggers(t *testing.T) {
 	}
 }
 
+type vanadisAdvancementTriggerCase struct {
+	name            string
+	res             *VanadisAdvancementResult
+	wantChunkTarget string
+	wantBuildTarget string
+	wantChunkFired  bool
+	wantBuildFired  bool
+}
+
+func runVanadisAdvancementTriggerCase(t *testing.T, tc vanadisAdvancementTriggerCase) {
+	t.Helper()
+	mockReg := &mockPRRegistry{}
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(fixedConfig(Config{}), nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	srv.evaluateVanadisAdvancementTriggers(context.Background(), "azylman/aerial", 42, tc.res)
+
+	var chunkFired, buildFired bool
+	for _, call := range mockReg.claimTriggersCalls {
+		if call.source == "vanadis_chunk" && call.eventType == "merged" && len(call.targets) == 1 && call.targets[0] == tc.wantChunkTarget {
+			chunkFired = true
+		}
+		if call.source == "vanadis_build" && call.eventType == "completed" && len(call.targets) == 1 && call.targets[0] == tc.wantBuildTarget {
+			buildFired = true
+		}
+	}
+	if chunkFired != tc.wantChunkFired {
+		t.Fatalf("chunkFired = %v, want %v", chunkFired, tc.wantChunkFired)
+	}
+	if buildFired != tc.wantBuildFired {
+		t.Fatalf("buildFired = %v, want %v", buildFired, tc.wantBuildFired)
+	}
+}
+
 func TestEvaluateVanadisAdvancementTriggers(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name            string
-		res             *VanadisAdvancementResult
-		wantChunkTarget string
-		wantBuildTarget string
-		wantChunkFired  bool
-		wantBuildFired  bool
-	}{
+	tests := []vanadisAdvancementTriggerCase{
 		{
 			name: "nil result is no-op",
 			res:  nil,
@@ -705,44 +723,51 @@ func TestEvaluateVanadisAdvancementTriggers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mockReg := &mockPRRegistry{}
-			mockDisp := &mockOutboundDispatcher{}
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
-			srv.SetRegistry(mockReg)
-			srv.SetDispatcher(mockDisp)
-
-			srv.evaluateVanadisAdvancementTriggers(context.Background(), "azylman/aerial", 42, tc.res)
-
-			var chunkFired, buildFired bool
-			for _, call := range mockReg.claimTriggersCalls {
-				if call.source == "vanadis_chunk" && call.eventType == "merged" && len(call.targets) == 1 && call.targets[0] == tc.wantChunkTarget {
-					chunkFired = true
-				}
-				if call.source == "vanadis_build" && call.eventType == "completed" && len(call.targets) == 1 && call.targets[0] == tc.wantBuildTarget {
-					buildFired = true
-				}
-			}
-			if chunkFired != tc.wantChunkFired {
-				t.Fatalf("chunkFired = %v, want %v", chunkFired, tc.wantChunkFired)
-			}
-			if buildFired != tc.wantBuildFired {
-				t.Fatalf("buildFired = %v, want %v", buildFired, tc.wantBuildFired)
-			}
+			runVanadisAdvancementTriggerCase(t, tc)
 		})
+	}
+}
+
+type vanadisFailureTriggerCase struct {
+	name           string
+	buildID        string
+	chunkID        string
+	reason         string
+	wantChunkFired bool
+	wantBuildFired bool
+}
+
+func runVanadisFailureTriggerCase(t *testing.T, tc vanadisFailureTriggerCase) {
+	t.Helper()
+	mockReg := &mockPRRegistry{}
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(fixedConfig(Config{}), nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	srv.evaluateVanadisFailureTriggers(context.Background(), tc.buildID, tc.chunkID, tc.reason)
+
+	var chunkFired, buildFired bool
+	for _, call := range mockReg.claimTriggersCalls {
+		if call.source == "vanadis_chunk" && call.eventType == "failed" {
+			chunkFired = true
+		}
+		if call.source == "vanadis_build" && call.eventType == "failed" {
+			buildFired = true
+		}
+	}
+	if chunkFired != tc.wantChunkFired {
+		t.Fatalf("chunkFired = %v, want %v", chunkFired, tc.wantChunkFired)
+	}
+	if buildFired != tc.wantBuildFired {
+		t.Fatalf("buildFired = %v, want %v", buildFired, tc.wantBuildFired)
 	}
 }
 
 func TestEvaluateVanadisFailureTriggers(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name           string
-		buildID        string
-		chunkID        string
-		reason         string
-		wantChunkFired bool
-		wantBuildFired bool
-	}{
+	tests := []vanadisFailureTriggerCase{
 		{
 			name:           "both empty is no-op",
 			buildID:        "",
@@ -777,29 +802,7 @@ func TestEvaluateVanadisFailureTriggers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mockReg := &mockPRRegistry{}
-			mockDisp := &mockOutboundDispatcher{}
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
-			srv.SetRegistry(mockReg)
-			srv.SetDispatcher(mockDisp)
-
-			srv.evaluateVanadisFailureTriggers(context.Background(), tc.buildID, tc.chunkID, tc.reason)
-
-			var chunkFired, buildFired bool
-			for _, call := range mockReg.claimTriggersCalls {
-				if call.source == "vanadis_chunk" && call.eventType == "failed" {
-					chunkFired = true
-				}
-				if call.source == "vanadis_build" && call.eventType == "failed" {
-					buildFired = true
-				}
-			}
-			if chunkFired != tc.wantChunkFired {
-				t.Fatalf("chunkFired = %v, want %v", chunkFired, tc.wantChunkFired)
-			}
-			if buildFired != tc.wantBuildFired {
-				t.Fatalf("buildFired = %v, want %v", buildFired, tc.wantBuildFired)
-			}
+			runVanadisFailureTriggerCase(t, tc)
 		})
 	}
 }
