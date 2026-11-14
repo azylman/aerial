@@ -645,9 +645,14 @@ func TestEventWatchTools(t *testing.T) {
 
 func verifyTriggerState(ctx context.Context, t *testing.T, db *sql.DB, ev pubsub.ExternalEvent, wantInDB bool) {
 	t.Helper()
-	matched, err := CheckEventTriggers(ctx, db, ev.Source, ev.Targets, ev.EventType)
-	if err != nil {
-		t.Fatalf("CheckEventTriggers failed: %v", err)
+	placeholders, args, ok := buildEventTriggerFilterArgs(ev.Source, ev.Targets, ev.EventType)
+	if !ok {
+		t.Fatal("invalid event trigger filter args")
+	}
+	rawQuery := "SELECT EXISTS(SELECT 1 FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (" + placeholders + "))"
+	var matched bool
+	if err := db.QueryRowContext(ctx, rawQuery, args...).Scan(&matched); err != nil {
+		t.Fatalf("query event_triggers failed: %v", err)
 	}
 	if matched != wantInDB {
 		t.Errorf("trigger in db = %v, want %v", matched, wantInDB)
@@ -667,10 +672,7 @@ func verifyDispatchedPrompt(t *testing.T, disp *mockDispatcher, wantChannel, wan
 	}
 }
 
-func TestHandleExternalEvent_Scenarios(t *testing.T) {
-	db := setupTestDB(t)
-	ctx := context.Background()
-
+func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-ext-1",
 		ChannelID: "100000000000000001",
@@ -680,7 +682,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		Prompt:    "Vehicle in driveway",
 		Effort:    "low",
 	})
-
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-ext-fail",
 		ChannelID: "100000000000000001",
@@ -690,7 +691,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		Prompt:    "Motion in backyard",
 		Effort:    "low",
 	})
-
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-ext-healthcheck",
 		ChannelID: "100000000000000001",
@@ -700,6 +700,23 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		Prompt:    "Healthcheck ping",
 		Effort:    "low",
 	})
+	_ = InsertEventTrigger(ctx, db, EventTrigger{
+		ID:         "trig-ext-fail-persistent",
+		ChannelID:  "100000000000000001",
+		Source:     "camera",
+		Target:     "sideyard",
+		EventType:  "motion",
+		Prompt:     "Motion in sideyard",
+		Effort:     "low",
+		Persistent: true,
+	})
+}
+
+func TestHandleExternalEvent_Scenarios(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	seedExternalEventTriggers(ctx, db)
 
 	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
 	if err != nil {
@@ -712,14 +729,16 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 	mockDispOK := &mockDispatcher{response: PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-1"}}
 	serverOK := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDispOK)
 	serverFail := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDispFail)
+	serverNoDisp := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db))
 
 	tests := []struct {
-		name      string
-		server    *Server
-		ev        pubsub.ExternalEvent
-		wantErr   bool
-		checkDBID string
-		wantInDB  bool
+		name                 string
+		server               *Server
+		ev                   pubsub.ExternalEvent
+		wantErr              bool
+		checkDBID            string
+		wantInDB             bool
+		wantImmediateReclaim bool
 	}{
 		{
 			name:      "healthcheck source is no-op and leaves trigger unclaimed",
@@ -728,6 +747,12 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			wantErr:   false,
 			checkDBID: "trig-ext-healthcheck",
 			wantInDB:  true,
+		},
+		{
+			name:    "nil db returns error from ClaimEventTriggers",
+			server:  NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, nil)),
+			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}},
+			wantErr: true,
 		},
 		{
 			name:    "closed db returns error from ClaimEventTriggers",
@@ -750,6 +775,23 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			wantInDB:  true,
 		},
 		{
+			name:      "nil dispatcher recovers trigger to db and returns nil to avoid redelivery storm",
+			server:    serverNoDisp,
+			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"backyard"}},
+			wantErr:   false,
+			checkDBID: "trig-ext-fail",
+			wantInDB:  true,
+		},
+		{
+			name:                 "dispatch failure recovers persistent trigger to db",
+			server:               serverFail,
+			ev:                   pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"sideyard"}},
+			wantErr:              false,
+			checkDBID:            "trig-ext-fail-persistent",
+			wantInDB:             true,
+			wantImmediateReclaim: true,
+		},
+		{
 			name:      "successful dispatch claims and fires trigger",
 			server:    serverOK,
 			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}, ContextHeader: "Camera Alert"},
@@ -767,6 +809,15 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			}
 			if tc.checkDBID != "" {
 				verifyTriggerState(ctx, t, db, tc.ev, tc.wantInDB)
+			}
+			if tc.wantImmediateReclaim {
+				reclaimed, rErr := ClaimEventTriggers(ctx, db, tc.ev.Source, tc.ev.Targets, tc.ev.EventType)
+				if rErr != nil {
+					t.Fatalf("ClaimEventTriggers failed: %v", rErr)
+				}
+				if len(reclaimed) != 1 || reclaimed[0].ID != tc.checkDBID {
+					t.Fatalf("expected persistent trigger %s to be immediately reclaimable, got %v", tc.checkDBID, reclaimed)
+				}
 			}
 			if tc.name == "successful dispatch claims and fires trigger" {
 				verifyDispatchedPrompt(t, mockDispOK, "100000000000000001", "Camera Alert\n\nVehicle in driveway")
@@ -840,13 +891,7 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 		t.Fatal("timed out waiting for event delivery")
 	}
 
-	matched, err := CheckEventTriggers(ctx, db, "flux", []string{"aerial"}, "sync_success")
-	if err != nil {
-		t.Fatalf("CheckEventTriggers failed: %v", err)
-	}
-	if matched {
-		t.Error("expected trigger to have been claimed and deleted from db")
-	}
+	verifyTriggerState(ctx, t, db, ev, false)
 	if wrapped.lastErr != nil {
 		t.Errorf("expected nil error on successful event handling, got %v", wrapped.lastErr)
 	}

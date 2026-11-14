@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,6 +28,37 @@ func initCovenJetStream(ctx context.Context, worker *Worker, natsURL string) pub
 	return initCovenJetStreamWithFactory(ctx, worker, natsURL, newCovenBusFn)
 }
 
+func subscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) error {
+	if b == nil || worker == nil {
+		return nil
+	}
+	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
+		log.Printf("[Coven] warning: failed to ensure core streams: %v", err)
+	}
+	_, err := b.Subscribe(ctx, "aerial.turn.completed", "coven-turns", func(msgCtx context.Context, msg pubsub.Message) error {
+		var ev pubsub.TurnCompletedEvent
+		if unmarshalErr := json.Unmarshal(msg.Data(), &ev); unmarshalErr != nil {
+			log.Printf("[Coven] warning: failed to unmarshal turn completed event: %v", unmarshalErr)
+			return nil
+		}
+		if err := worker.HandleTurnCompletedEvent(msgCtx, ev); err != nil {
+			if msg.NumDelivered() < 5 {
+				return err
+			}
+			log.Printf("[Coven] dropping turn completed event %s after %d delivery attempts: %v", ev.SessionID, msg.NumDelivered(), err)
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("[Coven] warning: failed to subscribe coven-turns: %v", err)
+		return err
+	}
+	worker.SetSubscribed(true)
+	log.Println("[Coven] Subscribed coven-turns durable consumer to aerial.turn.completed")
+	return nil
+}
+
 func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {
@@ -37,31 +69,36 @@ func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL 
 		log.Printf("[Coven] warning: failed to connect to nats at %s: %v", natsURL, err)
 		return nil
 	}
-	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
-		log.Printf("[Coven] warning: failed to ensure core streams: %v", err)
-	}
 	if worker != nil {
-		if _, err := b.Subscribe(ctx, "aerial.turn.completed", "coven-turns", func(msgCtx context.Context, msg pubsub.Message) error {
-			var ev pubsub.TurnCompletedEvent
-			if unmarshalErr := json.Unmarshal(msg.Data(), &ev); unmarshalErr != nil {
-				log.Printf("[Coven] warning: failed to unmarshal turn completed event: %v", unmarshalErr)
-				return nil
-			}
-			if err := worker.HandleTurnCompletedEvent(msgCtx, ev); err != nil {
-				if msg.NumDelivered() < 5 {
-					return err
-				}
-				log.Printf("[Coven] dropping turn completed event %s after %d delivery attempts: %v", ev.SessionID, msg.NumDelivered(), err)
-				return nil
-			}
-			return nil
-		}); err != nil {
-			log.Printf("[Coven] warning: failed to subscribe coven-turns: %v", err)
-		} else {
-			log.Println("[Coven] Subscribed coven-turns durable consumer to aerial.turn.completed")
+		if subErr := subscribeCovenTurns(ctx, b, worker); subErr != nil {
+			log.Printf("[Coven] warning: failed initial coven-turns subscription: %v", subErr)
 		}
 	}
 	return b
+}
+
+func makeCovenReconnectFn(busMu *sync.Mutex, bus *pubsub.Bus, worker *Worker, natsURL string) func(context.Context) error {
+	return func(rCtx context.Context) error {
+		busMu.Lock()
+		defer busMu.Unlock()
+		if worker != nil && worker.IsSubscribed() {
+			return nil
+		}
+		if *bus == nil {
+			newBus := initCovenJetStream(rCtx, worker, natsURL)
+			if newBus != nil {
+				*bus = newBus
+			}
+		} else if worker != nil {
+			if subErr := subscribeCovenTurns(rCtx, *bus, worker); subErr != nil {
+				log.Printf("[Coven] warning: subscription reconnect failed: %v", subErr)
+			}
+		}
+		if worker != nil && worker.IsSubscribed() {
+			return nil
+		}
+		return errors.New("jetstream subscription reconnect failed")
+	}
 }
 
 // RunApp bootstraps the coven MCP HTTP server with graceful shutdown.
@@ -94,6 +131,11 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	toolHandler := NewToolHandler(cfg, store, ollama, publisher)
 	server := NewServer(toolHandler)
 
+	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), cfg.NATSURL)
+	var (
+		busMu sync.Mutex
+		bus   pubsub.Bus
+	)
 	worker := NewWorker(WorkerConfig{
 		Store:           store,
 		Ollama:          ollama,
@@ -103,12 +145,16 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		InitialDelay:    DefaultWorkerInitialDelay,
 		TickInterval:    DefaultWorkerTickInterval,
 	})
+	worker.reconnectFn = makeCovenReconnectFn(&busMu, &bus, worker, natsURL)
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
 
-	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), cfg.NATSURL)
-	bus := initCovenJetStream(ctx, worker, natsURL)
+	busMu.Lock()
+	bus = initCovenJetStream(ctx, worker, natsURL)
+	busMu.Unlock()
 	defer func() {
+		busMu.Lock()
+		defer busMu.Unlock()
 		if bus != nil {
 			if closeErr := bus.Close(); closeErr != nil {
 				log.Printf("[Coven] bus close error: %v", closeErr)

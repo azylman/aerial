@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -28,6 +29,7 @@ type WorkerConfig struct {
 	CustomSkillsDir string
 	InitialDelay    time.Duration
 	TickInterval    time.Duration
+	ReconnectFn     func(ctx context.Context) error
 }
 
 // Worker coordinates periodic embedding backfills, fact extraction, and importance decay/pruning.
@@ -40,6 +42,8 @@ type Worker struct {
 	initialDelay    time.Duration
 	tickInterval    time.Duration
 	tickCount       int64
+	reconnectFn     func(ctx context.Context) error
+	subscribed      atomic.Bool
 }
 
 // NewWorker initializes a new background Worker instance.
@@ -61,7 +65,19 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		customSkillsDir: customDir,
 		initialDelay:    initDelay,
 		tickInterval:    tickInt,
+		reconnectFn:     cfg.ReconnectFn,
+		tickCount:       1,
 	}
+}
+
+// SetSubscribed sets whether the worker's JetStream subscription is active.
+func (w *Worker) SetSubscribed(sub bool) {
+	w.subscribed.Store(sub)
+}
+
+// IsSubscribed returns true if the worker is subscribed to JetStream turn events.
+func (w *Worker) IsSubscribed() bool {
+	return w.subscribed.Load()
 }
 
 // HandleTurnCompletedEvent handles an incoming turn completed event from JetStream.
@@ -74,12 +90,16 @@ func (w *Worker) HandleTurnCompletedEvent(ctx context.Context, ev pubsub.TurnCom
 	}
 	if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("[Coven Worker] Immediate fact extraction on turn completion failed: %v", err)
+		return err
 	}
 	return nil
 }
 
-// Start begins the ticker loop, running until ctx is canceled.
+// Start begins the maintenance worker, executing a startup catch-up extraction sweep
+// followed by the periodic maintenance loop (dreaming/pruning), running until ctx is canceled.
 func (w *Worker) Start(ctx context.Context) error {
+	w.RunStartupCatchUp(ctx)
+
 	if w.initialDelay > 0 {
 		timer := time.NewTimer(w.initialDelay)
 		select {
@@ -105,25 +125,39 @@ func (w *Worker) Start(ctx context.Context) error {
 	}
 }
 
+// RunStartupCatchUp performs a single initial sweep of fact extraction across active conversations
+// to catch up on any turns that completed while coven was offline.
+func (w *Worker) RunStartupCatchUp(ctx context.Context) {
+	if w.store == nil || w.ollama == nil || w.llmClient == nil {
+		return
+	}
+	if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("[Coven Worker] Startup catch-up fact extraction failed: %v", err)
+	}
+}
+
 // Tick performs scheduled maintenance operations for the given tick count.
 func (w *Worker) Tick(ctx context.Context, tick int64) {
-	// Hourly: fact extraction (tick % 120 == 0)
+	// Periodic fact extraction sweep (every 120 ticks = 60 minutes) as a backstop
 	if tick%120 == 0 {
-		w.runHourly(ctx)
+		w.runFallback(ctx)
 	}
+
 	// Daily: fact consolidation dreaming (tick % 2880 == 60)
 	if tick%2880 == 60 {
 		w.runDaily(ctx)
 	}
 }
 
-func (w *Worker) runHourly(ctx context.Context) {
-	if w.store == nil || w.ollama == nil {
-		return
-	}
-	if w.llmClient != nil {
+func (w *Worker) runFallback(ctx context.Context) {
+	if w.store != nil && w.ollama != nil && w.llmClient != nil {
 		if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("[Memory Worker] Fact extraction failed: %v", err)
+			log.Printf("[Coven Worker] Periodic fact extraction sweep failed: %v", err)
+		}
+	}
+	if !w.IsSubscribed() && w.reconnectFn != nil {
+		if err := w.reconnectFn(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[Coven Worker] Subscription reconnect attempt failed: %v", err)
 		}
 	}
 }

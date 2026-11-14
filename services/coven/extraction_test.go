@@ -1132,6 +1132,9 @@ func runExtractActiveConversationFactsCase(t *testing.T, tc extractActiveConvers
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ExtractActiveConversationFacts() err = %v, wantErr = %v", err, tc.wantErr)
 	}
+	if tc.lockMutex && !extractionRerunRequested.Load() {
+		t.Errorf("expected extractionRerunRequested to be true when extractionMutex is locked")
+	}
 	if tc.wantWatermark > 0 && memStore != nil {
 		for _, tid := range tc.threads {
 			if memStore.watermarks[tid] != tc.wantWatermark {

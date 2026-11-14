@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -25,11 +24,6 @@ import (
 )
 
 // --- Test Fixtures & Mocks ---
-
-// RegisterSQLiteTestHook allows unit tests to inject in-memory databases.
-func RegisterSQLiteTestHook(fn func(string) (*sql.DB, error)) {
-	sqliteTestInitHook = fn
-}
 
 type TestMemStore struct {
 	mu                   sync.Mutex

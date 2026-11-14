@@ -26,7 +26,6 @@ type mockRiverInserter struct {
 	insertedJobs           []GitHubWebhookArgs
 	insertedDeployJobs     []DeployWebhookArgs
 	insertedWidgetSyncJobs []WidgetSyncArgs
-	insertedEventJobs      []EventTriggerWebhookArgs
 	insertedConflictJobs   []MergeConflictArgs
 	insertedDiscordJobs    []DiscordIngressArgs
 	insertedInteractJobs   []DiscordInteractionArgs
@@ -49,8 +48,6 @@ func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts
 		m.insertedDeployJobs = append(m.insertedDeployJobs, a)
 	case WidgetSyncArgs:
 		m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, a)
-	case EventTriggerWebhookArgs:
-		m.insertedEventJobs = append(m.insertedEventJobs, a)
 	case MergeConflictArgs:
 		m.insertedConflictJobs = append(m.insertedConflictJobs, a)
 	case DiscordIngressArgs:
@@ -204,12 +201,6 @@ type mockPRRegistry struct {
 	failVanadisErr     error
 	failVanadisBuildID string
 	failVanadisChunkID string
-
-	claimTriggersCalls []claimTriggersCall
-	claimTriggersRes   []ClaimedEventTrigger
-	claimTriggersErr   error
-	checkTriggersRes   bool
-	checkTriggersErr   error
 
 	ciFailCount    int
 	ciFailCountErr error
@@ -466,33 +457,6 @@ func (m *mockPRRegistry) FailVanadisChunkDetailsByPR(ctx context.Context, repo s
 	return m.failVanadisBuildID, m.failVanadisChunkID, failed, err
 }
 
-type claimTriggersCall struct {
-	source        string
-	targets       []string
-	eventType     string
-	contextHeader string
-}
-
-func (m *mockPRRegistry) CheckEventTriggers(ctx context.Context, source string, targets []string, eventType string) (bool, error) {
-	if err := m.checkErr(m.checkTriggersErr); err != nil {
-		return false, err
-	}
-	return m.checkTriggersRes, nil
-}
-
-func (m *mockPRRegistry) FireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) ([]ClaimedEventTrigger, error) {
-	m.claimTriggersCalls = append(m.claimTriggersCalls, claimTriggersCall{
-		source:        source,
-		targets:       targets,
-		eventType:     eventType,
-		contextHeader: contextHeader,
-	})
-	if err := m.checkErr(m.claimTriggersErr); err != nil {
-		return nil, err
-	}
-	return m.claimTriggersRes, nil
-}
-
 func (m *mockPRRegistry) IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error) {
 	return m.ciFailCount, m.checkErr(m.ciFailCountErr)
 }
@@ -587,9 +551,8 @@ func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp 
 	srv := NewRouterServer(fixedConfig(cfg), client, riverInserter...)
 	if reg != nil {
 		if pgReg, ok := reg.(*PostgresPRRegistry); ok && pgReg != nil {
-			if pgReg.vanadisURL == "" && pgReg.haroURL == "" {
+			if pgReg.vanadisURL == "" {
 				pgReg.vanadisURL = "http://127.0.0.1:0"
-				pgReg.haroURL = "http://127.0.0.1:0"
 				pgReg.httpClient = &http.Client{Transport: noopClusterTransport{}}
 				pgReg.vanadisRetryDelay = 0
 			}
