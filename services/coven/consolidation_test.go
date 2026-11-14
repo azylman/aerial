@@ -291,20 +291,95 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 	}
 }
 
-func TestWorker_LifecycleAndTick(t *testing.T) {
+type workerLifecycleTestCase struct {
+	name          string
+	tick          int64
+	runCatchUp    bool
+	nilStore      bool
+	nilOllama     bool
+	nilLLM        bool
+	subscribed    bool
+	withReconnect bool
+	reconnectErr  bool
+	storeFail     string
+	wantExtract   bool
+	wantReconnect bool
+}
+
+func runWorkerLifecycleCase(t *testing.T, tc workerLifecycleTestCase, validEmb []float32) {
+	t.Helper()
 	ctx := context.Background()
+	mem := newTestMemStore()
+	mem.activeThreads = []string{"th-1"}
+	mem.unextractedTurns["th-1"] = []Message{
+		{RowID: 1, ThreadID: "th-1", Content: "user prompt", ResponseText: "resp", Status: "COMPLETED", IsAdmin: true},
+	}
+	if tc.storeFail != "" {
+		mem.SetFail(tc.storeFail, errors.New("store err"))
+	}
+	var store Store = mem
+	if tc.nilStore {
+		store = nil
+	}
+	var client OllamaClient = &MockOllamaClient{embedding: validEmb}
+	if tc.nilOllama {
+		client = nil
+	}
+	var llmCalls int
+	var llm LLMClientFunc
+	if !tc.nilLLM {
+		llm = func(ctx context.Context, prompt string) (string, error) {
+			llmCalls++
+			return `{"facts":[]}`, nil
+		}
+	}
+
+	var reconnectCalls int
+	var reconnectFn func(context.Context) error
+	if tc.withReconnect {
+		reconnectFn = func(context.Context) error {
+			reconnectCalls++
+			if tc.reconnectErr {
+				return errors.New("reconnect failed")
+			}
+			return nil
+		}
+	}
+
+	w := NewWorker(WorkerConfig{
+		Store:        store,
+		Ollama:       client,
+		LLMClient:    llm,
+		InitialDelay: 0,
+		TickInterval: -1,
+		ReconnectFn:  reconnectFn,
+	})
+	w.SetSubscribed(tc.subscribed)
+
+	if tc.runCatchUp {
+		w.RunStartupCatchUp(ctx)
+	} else {
+		w.Tick(ctx, tc.tick)
+	}
+
+	if tc.wantExtract && llmCalls == 0 {
+		t.Errorf("expected fact extraction LLM call, got 0")
+	}
+	if !tc.wantExtract && llmCalls > 0 {
+		t.Errorf("unexpected LLM calls: %d", llmCalls)
+	}
+	if tc.wantReconnect && reconnectCalls == 0 {
+		t.Errorf("expected reconnect call, got 0")
+	}
+	if !tc.wantReconnect && reconnectCalls > 0 {
+		t.Errorf("unexpected reconnect call: %d", reconnectCalls)
+	}
+}
+
+func TestWorker_LifecycleAndTick(t *testing.T) {
 	validEmb := make([]float32, ExpectedEmbeddingDim)
 
-	tests := []struct {
-		name        string
-		tick        int64
-		runCatchUp  bool
-		nilStore    bool
-		nilOllama   bool
-		nilLLM      bool
-		storeFail   string
-		wantExtract bool
-	}{
+	tests := []workerLifecycleTestCase{
 		{
 			name:        "StartupCatchUpExtraction",
 			runCatchUp:  true,
@@ -334,55 +409,46 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 			runCatchUp: true,
 			storeFail:  "GetActiveConversationsForExtraction",
 		},
+		{
+			name:        "FallbackExtractionWhenUnsubscribedTick0",
+			tick:        0,
+			subscribed:  false,
+			wantExtract: true,
+		},
+		{
+			name:        "FallbackExtractionWhenUnsubscribedTick120",
+			tick:        120,
+			subscribed:  false,
+			wantExtract: true,
+		},
+		{
+			name:        "NoFallbackExtractionWhenSubscribedTick0",
+			tick:        0,
+			subscribed:  true,
+			wantExtract: false,
+		},
+		{
+			name:          "ReconnectCalledWhenUnsubscribedTick0",
+			tick:          0,
+			subscribed:    false,
+			withReconnect: true,
+			wantExtract:   true,
+			wantReconnect: true,
+		},
+		{
+			name:          "ReconnectErrorHandledTick0",
+			tick:          0,
+			subscribed:    false,
+			withReconnect: true,
+			reconnectErr:  true,
+			wantExtract:   true,
+			wantReconnect: true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mem := newTestMemStore()
-			mem.activeThreads = []string{"th-1"}
-			mem.unextractedTurns["th-1"] = []Message{
-				{RowID: 1, ThreadID: "th-1", Content: "user prompt", ResponseText: "resp", Status: "COMPLETED", IsAdmin: true},
-			}
-			if tc.storeFail != "" {
-				mem.SetFail(tc.storeFail, errors.New("store err"))
-			}
-			var store Store = mem
-			if tc.nilStore {
-				store = nil
-			}
-			var client OllamaClient = &MockOllamaClient{embedding: validEmb}
-			if tc.nilOllama {
-				client = nil
-			}
-			var llmCalls int
-			var llm LLMClientFunc
-			if !tc.nilLLM {
-				llm = func(ctx context.Context, prompt string) (string, error) {
-					llmCalls++
-					return `{"facts":[]}`, nil
-				}
-			}
-
-			w := NewWorker(WorkerConfig{
-				Store:        store,
-				Ollama:       client,
-				LLMClient:    llm,
-				InitialDelay: 0,
-				TickInterval: -1,
-			})
-
-			if tc.runCatchUp {
-				w.RunStartupCatchUp(ctx)
-			} else {
-				w.Tick(ctx, tc.tick)
-			}
-
-			if tc.wantExtract && llmCalls == 0 {
-				t.Errorf("expected fact extraction LLM call, got 0")
-			}
-			if !tc.wantExtract && llmCalls > 0 {
-				t.Errorf("unexpected LLM calls: %d", llmCalls)
-			}
+			runWorkerLifecycleCase(t, tc, validEmb)
 		})
 	}
 }

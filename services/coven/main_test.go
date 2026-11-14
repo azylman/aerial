@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/nats-io/nats.go"
 )
 
 func TestLoadConfigFile_EriKeysAndEnv(t *testing.T) {
@@ -171,10 +174,10 @@ func TestHandleTurnCompletedEvent_Scenarios(t *testing.T) {
 			wantWater:   0,
 		},
 		{
-			name:    "extraction failure is logged and returns nil without error",
+			name:    "extraction failure is logged and returns error for redelivery",
 			worker:  workerErr,
 			ev:      pubsub.TurnCompletedEvent{SessionID: "sess-err", Source: "discord"},
-			wantErr: false,
+			wantErr: true,
 		},
 	}
 
@@ -305,6 +308,9 @@ func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
 	}); bus == nil {
 		t.Error("expected non-nil bus even if subscribe fails")
 	}
+	if worker.IsSubscribed() {
+		t.Error("expected worker not subscribed when subscribe fails")
+	}
 
 	// Unmarshal error on bad JSON payload
 	unmarshalDone := make(chan struct{})
@@ -314,6 +320,9 @@ func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
 	})
 	if bus == nil {
 		t.Fatal("expected non-nil bus")
+	}
+	if !worker.IsSubscribed() {
+		t.Error("expected worker subscribed when subscribe succeeds")
 	}
 
 	if err := memBus.Publish(ctx, "aerial.turn.completed", "bad-turn-1", "not-a-valid-json"); err != nil {
@@ -328,4 +337,111 @@ func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
 	if wrapped.lastErr != nil {
 		t.Errorf("expected nil error on bad json unmarshal to avoid poison redelivery loop, got %v", wrapped.lastErr)
 	}
+}
+
+type mockPubsubMsg struct {
+	data      []byte
+	delivered uint64
+}
+
+func (m *mockPubsubMsg) Data() []byte                       { return m.data }
+func (m *mockPubsubMsg) Subject() string                    { return "aerial.turn.completed" }
+func (m *mockPubsubMsg) Header() nats.Header                { return nil }
+func (m *mockPubsubMsg) NumDelivered() uint64               { return m.delivered }
+func (m *mockPubsubMsg) Ack() error                         { return nil }
+func (m *mockPubsubMsg) NakWithDelay(_ time.Duration) error { return nil }
+func (m *mockPubsubMsg) Term() error                        { return nil }
+func (m *mockPubsubMsg) Snooze(_ time.Duration) error       { return nil }
+func (m *mockPubsubMsg) InProgress() error                  { return nil }
+
+type captureSubscribeBus struct {
+	pubsub.Bus
+
+	handler pubsub.Handler
+}
+
+func (c *captureSubscribeBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	c.handler = handler
+	return c.Bus.Subscribe(ctx, subject, durable, handler)
+}
+
+func TestCoven_TurnCompletedConsumerRetriesAndDrop(t *testing.T) {
+	ctx := context.Background()
+	memStore := newTestMemStore()
+	memStore.SetFail("GetActiveConversationsForExtraction", errors.New("query failed"))
+	worker := NewWorker(WorkerConfig{
+		Store:     memStore,
+		Ollama:    &MockOllamaClient{embedding: make([]float32, ExpectedEmbeddingDim)},
+		LLMClient: func(context.Context, string) (string, error) { return `{"facts":[]}`, nil },
+	})
+
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	captureBus := &captureSubscribeBus{Bus: memBus}
+
+	bus := initCovenJetStreamWithFactory(ctx, worker, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return captureBus, nil
+	})
+	if bus == nil || captureBus.handler == nil {
+		t.Fatal("expected non-nil bus and captured handler")
+	}
+
+	ev := pubsub.TurnCompletedEvent{SessionID: "sess-retry", Source: "discord"}
+	data, _ := json.Marshal(ev)
+
+	// Delivery attempt < 5 returns error to allow JetStream redelivery
+	if err := captureBus.handler(ctx, &mockPubsubMsg{data: data, delivered: 1}); err == nil {
+		t.Error("expected error on attempt 1")
+	}
+
+	// Delivery attempt >= 5 drops message and returns nil
+	if err := captureBus.handler(ctx, &mockPubsubMsg{data: data, delivered: 5}); err != nil {
+		t.Errorf("expected nil error on attempt 5, got %v", err)
+	}
+}
+
+func TestCoven_ReconnectFn(t *testing.T) {
+	ctx := context.Background()
+	var (
+		busMu sync.Mutex
+		bus   pubsub.Bus
+	)
+	worker := NewWorker(WorkerConfig{})
+	reconnect := makeCovenReconnectFn(&busMu, &bus, worker, "nats://mock")
+
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	oldFactory := newCovenBusFn
+	defer func() { newCovenBusFn = oldFactory }()
+	newCovenBusFn = func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return memBus, nil
+	}
+
+	// 1. When bus is nil and init succeeds, it stores bus and returns nil
+	if err := reconnect(ctx); err != nil {
+		t.Fatalf("unexpected reconnect err: %v", err)
+	}
+	if bus == nil {
+		t.Fatal("expected non-nil bus after reconnect")
+	}
+
+	// 2. When bus is already non-nil, returns nil immediately
+	if err := reconnect(ctx); err != nil {
+		t.Fatalf("unexpected err when bus already connected: %v", err)
+	}
+
+	// 3. When factory fails, returns error
+	bus = nil
+	newCovenBusFn = func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return nil, errors.New("conn fail")
+	}
+	if err := reconnect(ctx); err == nil {
+		t.Fatal("expected error when factory fails")
+	}
+}
+
+func TestCoven_NewCovenBusFn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = newCovenBusFn(ctx, "nats://invalid:1234")
 }

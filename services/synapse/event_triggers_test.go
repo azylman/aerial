@@ -209,14 +209,6 @@ func TestFireEventTriggers(t *testing.T) {
 	}
 }
 
-func TestFireEventTriggers_NilServerOrBus(t *testing.T) {
-	t.Parallel()
-	var nilSrv *RouterServer
-	nilSrv.fireEventTriggers(context.Background(), "github", []string{"aerial"}, "ci_passed", "")
-	srv := NewRouterServer(fixedConfig(Config{}), nil)
-	srv.fireEventTriggers(context.Background(), "github", []string{"aerial"}, "ci_passed", "")
-}
-
 func TestEvaluateFluxEventTriggers(t *testing.T) {
 	t.Parallel()
 

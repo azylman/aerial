@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +57,7 @@ func (tr *eventTracker) waitEvents(t *testing.T, count int) ([]pubsub.ExternalEv
 	return events, topics
 }
 
-func verifyPublishedEvents(t *testing.T, tracker *eventTracker, wantCount int, wantTopic string, wantTargets []string) {
+func verifyPublishedEvents(t *testing.T, tracker *eventTracker, wantCount int, wantTopic string, wantTargets []string, wantHeaderSubstr string) {
 	t.Helper()
 	if tracker == nil || wantCount <= 0 {
 		return
@@ -69,6 +71,9 @@ func verifyPublishedEvents(t *testing.T, tracker *eventTracker, wantCount int, w
 	}
 	if len(wantTargets) > 0 && len(events) > 0 && !slices.Equal(events[0].Targets, wantTargets) {
 		t.Errorf("published targets = %v, want %v", events[0].Targets, wantTargets)
+	}
+	if wantHeaderSubstr != "" && len(events) > 0 && !strings.Contains(events[0].ContextHeader, wantHeaderSubstr) {
+		t.Errorf("published context_header = %q, want substring %q", events[0].ContextHeader, wantHeaderSubstr)
 	}
 }
 
@@ -147,7 +152,7 @@ func assertEvaluateEventTriggersScenario(t *testing.T, tc evaluateEventTriggersT
 	if recBus != nil && recBus.publishCount() != tc.wantPubCount {
 		t.Errorf("recordingBus publish count = %d, want %d", recBus.publishCount(), tc.wantPubCount)
 	}
-	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, nil)
+	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, nil, tc.contextHeader)
 }
 
 func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
@@ -220,24 +225,38 @@ func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
 }
 
 type handleEventsWebhookTestCase struct {
-	name         string
-	payload      string
-	useBus       bool
-	closeBus     bool
-	withPeerURL  bool
-	wantStatus   int
-	wantPubCount int
-	wantPubTopic string
-	wantTargets  []string
+	name             string
+	payload          string
+	useBus           bool
+	closeBus         bool
+	withPeerURL      bool
+	wantStatus       int
+	wantPubCount     int
+	wantPubTopic     string
+	wantTargets      []string
+	wantHeaderSubstr string
 }
 
 func assertHandleEventsWebhookScenario(t *testing.T, tc handleEventsWebhookTestCase) {
 	t.Helper()
 	cfg := Config{}
+	var (
+		forwardedPayload atomic.Value
+		client           *http.Client
+	)
 	if tc.withPeerURL {
-		cfg.WebhookForwardURLs = map[string]string{"marida": "http://mock-peer.aerial"}
+		peerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			forwardedPayload.Store(string(body))
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer peerServer.Close()
+		cfg.WebhookForwardURLs = map[string]string{"peer": peerServer.URL}
+		client = peerServer.Client()
+	} else {
+		client = &http.Client{Transport: &zeroCallTransport{}}
 	}
-	srv := NewRouterServer(fixedConfig(cfg), nil)
+	srv := NewRouterServer(fixedConfig(cfg), client)
 
 	var tracker *eventTracker
 	if tc.useBus {
@@ -260,8 +279,15 @@ func assertHandleEventsWebhookScenario(t *testing.T, tc handleEventsWebhookTestC
 		t.Fatalf("status code = %d, want %d: body=%s", w.Code, tc.wantStatus, w.Body.String())
 	}
 
+	if tc.withPeerURL {
+		received, _ := forwardedPayload.Load().(string)
+		if received != tc.payload {
+			t.Errorf("forwarded peer payload = %q, want %q", received, tc.payload)
+		}
+	}
+
 	if tc.useBus && !tc.closeBus {
-		verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, tc.wantTargets)
+		verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, tc.wantTargets, tc.wantHeaderSubstr)
 	}
 }
 
@@ -270,23 +296,25 @@ func TestHandleEventsWebhook_Scenarios(t *testing.T) {
 
 	tests := []handleEventsWebhookTestCase{
 		{
-			name:         "valid event webhook publishes to jetstream",
-			payload:      `{"source":"camera","event_type":"motion","targets":["driveway"],"context_header":"Driveway motion"}`,
-			useBus:       true,
-			wantStatus:   http.StatusOK,
-			wantPubCount: 1,
-			wantPubTopic: "aerial.events.camera.motion",
-			wantTargets:  []string{"driveway"},
+			name:             "valid event webhook publishes to jetstream",
+			payload:          `{"source":"camera","event_type":"motion","targets":["driveway"],"context_header":"Driveway motion"}`,
+			useBus:           true,
+			wantStatus:       http.StatusOK,
+			wantPubCount:     1,
+			wantPubTopic:     "aerial.events.camera.motion",
+			wantTargets:      []string{"driveway"},
+			wantHeaderSubstr: "Driveway motion",
 		},
 		{
-			name:         "valid event with target singular and details formats context header and forwards to peer",
-			payload:      `{"source":"camera","event_type":"motion","target":"backyard","details":"high confidence"}`,
-			useBus:       true,
-			withPeerURL:  true,
-			wantStatus:   http.StatusOK,
-			wantPubCount: 1,
-			wantPubTopic: "aerial.events.camera.motion",
-			wantTargets:  []string{"backyard"},
+			name:             "valid event with target singular and details formats context header and forwards to peer",
+			payload:          `{"source":"camera","event_type":"motion","target":"backyard","details":"high confidence"}`,
+			useBus:           true,
+			withPeerURL:      true,
+			wantStatus:       http.StatusOK,
+			wantPubCount:     1,
+			wantPubTopic:     "aerial.events.camera.motion",
+			wantTargets:      []string{"backyard"},
+			wantHeaderSubstr: "External camera event motion on backyard: high confidence",
 		},
 		{
 			name:       "invalid json returns 400",

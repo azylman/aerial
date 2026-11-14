@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -28,6 +29,7 @@ type WorkerConfig struct {
 	CustomSkillsDir string
 	InitialDelay    time.Duration
 	TickInterval    time.Duration
+	ReconnectFn     func(ctx context.Context) error
 }
 
 // Worker coordinates periodic embedding backfills, fact extraction, and importance decay/pruning.
@@ -40,6 +42,8 @@ type Worker struct {
 	initialDelay    time.Duration
 	tickInterval    time.Duration
 	tickCount       int64
+	reconnectFn     func(ctx context.Context) error
+	subscribed      atomic.Bool
 }
 
 // NewWorker initializes a new background Worker instance.
@@ -61,7 +65,18 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		customSkillsDir: customDir,
 		initialDelay:    initDelay,
 		tickInterval:    tickInt,
+		reconnectFn:     cfg.ReconnectFn,
 	}
+}
+
+// SetSubscribed sets whether the worker's JetStream subscription is active.
+func (w *Worker) SetSubscribed(sub bool) {
+	w.subscribed.Store(sub)
+}
+
+// IsSubscribed returns true if the worker is subscribed to JetStream turn events.
+func (w *Worker) IsSubscribed() bool {
+	return w.subscribed.Load()
 }
 
 // HandleTurnCompletedEvent handles an incoming turn completed event from JetStream.
@@ -74,6 +89,7 @@ func (w *Worker) HandleTurnCompletedEvent(ctx context.Context, ev pubsub.TurnCom
 	}
 	if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("[Coven Worker] Immediate fact extraction on turn completion failed: %v", err)
+		return err
 	}
 	return nil
 }
@@ -121,9 +137,27 @@ func (w *Worker) RunStartupCatchUp(ctx context.Context) {
 
 // Tick performs scheduled maintenance operations for the given tick count.
 func (w *Worker) Tick(ctx context.Context, tick int64) {
+	// Fallback when JetStream is offline: run hourly fact extraction sweep and retry subscribing (tick % 120 == 0)
+	if !w.IsSubscribed() && tick%120 == 0 {
+		w.runFallback(ctx)
+	}
+
 	// Daily: fact consolidation dreaming (tick % 2880 == 60)
 	if tick%2880 == 60 {
 		w.runDaily(ctx)
+	}
+}
+
+func (w *Worker) runFallback(ctx context.Context) {
+	if w.store != nil && w.ollama != nil && w.llmClient != nil {
+		if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[Coven Worker] Fallback fact extraction failed: %v", err)
+		}
+	}
+	if w.reconnectFn != nil {
+		if err := w.reconnectFn(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[Coven Worker] Subscription reconnect attempt failed: %v", err)
+		}
 	}
 }
 

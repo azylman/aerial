@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -58,10 +59,27 @@ func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL 
 		}); err != nil {
 			log.Printf("[Coven] warning: failed to subscribe coven-turns: %v", err)
 		} else {
+			worker.SetSubscribed(true)
 			log.Println("[Coven] Subscribed coven-turns durable consumer to aerial.turn.completed")
 		}
 	}
 	return b
+}
+
+func makeCovenReconnectFn(busMu *sync.Mutex, bus *pubsub.Bus, worker *Worker, natsURL string) func(context.Context) error {
+	return func(rCtx context.Context) error {
+		busMu.Lock()
+		defer busMu.Unlock()
+		if *bus != nil {
+			return nil
+		}
+		newBus := initCovenJetStream(rCtx, worker, natsURL)
+		if newBus != nil {
+			*bus = newBus
+			return nil
+		}
+		return errors.New("jetstream reconnect failed")
+	}
 }
 
 // RunApp bootstraps the coven MCP HTTP server with graceful shutdown.
@@ -94,6 +112,11 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	toolHandler := NewToolHandler(cfg, store, ollama, publisher)
 	server := NewServer(toolHandler)
 
+	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), cfg.NATSURL)
+	var (
+		busMu sync.Mutex
+		bus   pubsub.Bus
+	)
 	worker := NewWorker(WorkerConfig{
 		Store:           store,
 		Ollama:          ollama,
@@ -103,12 +126,16 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		InitialDelay:    DefaultWorkerInitialDelay,
 		TickInterval:    DefaultWorkerTickInterval,
 	})
+	worker.reconnectFn = makeCovenReconnectFn(&busMu, &bus, worker, natsURL)
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
 
-	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), cfg.NATSURL)
-	bus := initCovenJetStream(ctx, worker, natsURL)
+	busMu.Lock()
+	bus = initCovenJetStream(ctx, worker, natsURL)
+	busMu.Unlock()
 	defer func() {
+		busMu.Lock()
+		defer busMu.Unlock()
 		if bus != nil {
 			if closeErr := bus.Close(); closeErr != nil {
 				log.Printf("[Coven] bus close error: %v", closeErr)
