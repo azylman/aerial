@@ -196,6 +196,12 @@ spec:
           name: restate
           port: 9070
           weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+          type: URLRewrite
       matches:
         - path:
             type: PathPrefix
