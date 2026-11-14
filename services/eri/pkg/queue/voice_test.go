@@ -591,18 +591,24 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 	fake := setupTestStore(t)
 	closedFake := setupTestStore(t)
 	_ = closedFake.Close()
-	pFake := &WorkerPool{cfg: WorkerPoolConfig{Store: fake}}
+	haroSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(haroSrv.Close)
+
+	pFake := &WorkerPool{cfg: WorkerPoolConfig{Store: fake, HaroURL: haroSrv.URL}}
 	pErr := &WorkerPool{cfg: WorkerPoolConfig{Store: &errQueueStore{Store: closedFake}}}
 
 	tests := []struct {
-		name      string
-		te        *turnExecution
-		wantCount int
-		wantErr   bool
+		name         string
+		te           *turnExecution
+		wantCount    int
+		wantErr      bool
+		wantSchedErr bool
 	}{
-		{name: "nil_pool_delegates", te: &turnExecution{}, wantCount: 0},
-		{name: "valid_store_delegates", te: &turnExecution{pool: pFake}, wantCount: 1},
-		{name: "error_store_delegates", te: &turnExecution{pool: pErr}, wantCount: 0, wantErr: true},
+		{name: "nil_pool_delegates", te: &turnExecution{}, wantCount: 0, wantErr: false, wantSchedErr: true},
+		{name: "valid_store_delegates", te: &turnExecution{pool: pFake}, wantCount: 1, wantErr: false, wantSchedErr: false},
+		{name: "error_store_delegates", te: &turnExecution{pool: pErr}, wantCount: 0, wantErr: true, wantSchedErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -619,7 +625,10 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 			}
 			_, _ = tc.te.getSessionID(threadID)
 			_ = tc.te.getPreviousSessionID(threadID)
-			_ = tc.te.createOneShotSchedule(oneShotScheduleRequest{ID: "os-" + tc.name, ThreadID: threadID, Prompt: "p", RunAt: time.Now().UTC()})
+			schedErr := tc.te.createOneShotSchedule(oneShotScheduleRequest{ID: "os-" + tc.name, ThreadID: threadID, Prompt: "p", RunAt: time.Now().UTC()})
+			if (schedErr != nil) != tc.wantSchedErr {
+				t.Errorf("createOneShotSchedule() err = %v, wantSchedErr = %v", schedErr, tc.wantSchedErr)
+			}
 			tc.te.saveThreadSummary(threadID, "sum", "m1")
 			_, _ = tc.te.getThreadSummary(threadID)
 			_, _ = tc.te.getRecentThreadMessages(threadID, 10)

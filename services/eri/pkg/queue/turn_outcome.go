@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -34,18 +33,11 @@ type oneShotScheduleRequest struct {
 }
 
 func (te *turnExecution) createOneShotSchedule(s oneShotScheduleRequest) error {
-	if te == nil || te.pool == nil {
-		return errors.New("turnExecution or pool is nil")
+	if te == nil || te.pool == nil || strings.TrimSpace(te.pool.cfg.HaroURL) == "" {
+		return errors.New("haro URL is not configured")
 	}
 
-	haroURL := strings.TrimSpace(te.pool.cfg.HaroURL)
-	if haroURL == "" {
-		haroURL = strings.TrimSpace(os.Getenv("HARO_URL"))
-	}
-	if haroURL == "" {
-		haroURL = "http://haro.aerial"
-	}
-	haroURL = strings.TrimRight(haroURL, "/")
+	haroURL := strings.TrimRight(strings.TrimSpace(te.pool.cfg.HaroURL), "/")
 
 	bodyBytes, err := json.Marshal(s)
 	if err != nil {
