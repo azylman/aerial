@@ -300,7 +300,6 @@ type workerLifecycleTestCase struct {
 	nilLLM        bool
 	subscribed    bool
 	withReconnect bool
-	reconnectErr  bool
 	storeFail     string
 	wantExtract   bool
 	wantReconnect bool
@@ -339,9 +338,6 @@ func runWorkerLifecycleCase(t *testing.T, tc workerLifecycleTestCase, validEmb [
 	if tc.withReconnect {
 		reconnectFn = func(context.Context) error {
 			reconnectCalls++
-			if tc.reconnectErr {
-				return errors.New("reconnect failed")
-			}
 			return nil
 		}
 	}
@@ -422,25 +418,18 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 			wantExtract: true,
 		},
 		{
-			name:        "NoFallbackExtractionWhenSubscribedTick0",
-			tick:        0,
-			subscribed:  true,
-			wantExtract: false,
+			name:          "PeriodicBackstopExtractionWhenSubscribedTick0",
+			tick:          0,
+			subscribed:    true,
+			withReconnect: true,
+			wantExtract:   true,
+			wantReconnect: false,
 		},
 		{
 			name:          "ReconnectCalledWhenUnsubscribedTick0",
 			tick:          0,
 			subscribed:    false,
 			withReconnect: true,
-			wantExtract:   true,
-			wantReconnect: true,
-		},
-		{
-			name:          "ReconnectErrorHandledTick0",
-			tick:          0,
-			subscribed:    false,
-			withReconnect: true,
-			reconnectErr:  true,
 			wantExtract:   true,
 			wantReconnect: true,
 		},

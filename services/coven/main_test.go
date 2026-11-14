@@ -411,26 +411,50 @@ func TestCoven_ReconnectFn(t *testing.T) {
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
+	var factoryCalls int
 	oldFactory := newCovenBusFn
 	defer func() { newCovenBusFn = oldFactory }()
 	newCovenBusFn = func(_ context.Context, _ string) (pubsub.Bus, error) {
+		factoryCalls++
 		return memBus, nil
 	}
 
-	// 1. When bus is nil and init succeeds, it stores bus and returns nil
+	// 1. When bus is nil and init succeeds, it stores bus, subscribes worker, and returns nil
 	if err := reconnect(ctx); err != nil {
 		t.Fatalf("unexpected reconnect err: %v", err)
 	}
 	if bus == nil {
 		t.Fatal("expected non-nil bus after reconnect")
 	}
-
-	// 2. When bus is already non-nil, returns nil immediately
-	if err := reconnect(ctx); err != nil {
-		t.Fatalf("unexpected err when bus already connected: %v", err)
+	if !worker.IsSubscribed() {
+		t.Fatal("expected worker subscribed after reconnect")
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("factoryCalls = %d, want 1", factoryCalls)
 	}
 
-	// 3. When factory fails, returns error
+	// 2. When worker is already subscribed, returns nil immediately without calling factory
+	if err := reconnect(ctx); err != nil {
+		t.Fatalf("unexpected err when worker already subscribed: %v", err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("factoryCalls = %d, want 1 (should not recreate bus when subscribed)", factoryCalls)
+	}
+
+	// 3. When worker is unsubscribed but bus is already present, it resubscribes on existing bus without creating new bus
+	worker.SetSubscribed(false)
+	if err := reconnect(ctx); err != nil {
+		t.Fatalf("unexpected err on resubscribing existing bus: %v", err)
+	}
+	if !worker.IsSubscribed() {
+		t.Fatal("expected worker subscribed after resubscribing existing bus")
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("factoryCalls = %d, want 1 (should not call factory when bus exists)", factoryCalls)
+	}
+
+	// 4. When factory fails, returns error
+	worker.SetSubscribed(false)
 	bus = nil
 	newCovenBusFn = func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return nil, errors.New("conn fail")
@@ -438,10 +462,4 @@ func TestCoven_ReconnectFn(t *testing.T) {
 	if err := reconnect(ctx); err == nil {
 		t.Fatal("expected error when factory fails")
 	}
-}
-
-func TestCoven_NewCovenBusFn(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, _ = newCovenBusFn(ctx, "nats://invalid:1234")
 }

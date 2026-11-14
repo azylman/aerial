@@ -137,8 +137,8 @@ func (w *Worker) RunStartupCatchUp(ctx context.Context) {
 
 // Tick performs scheduled maintenance operations for the given tick count.
 func (w *Worker) Tick(ctx context.Context, tick int64) {
-	// Fallback when JetStream is offline: run hourly fact extraction sweep and retry subscribing (tick % 120 == 0)
-	if !w.IsSubscribed() && tick%120 == 0 {
+	// Periodic fact extraction sweep (every 120 ticks = 60 minutes) as a backstop
+	if tick%120 == 0 {
 		w.runFallback(ctx)
 	}
 
@@ -151,10 +151,10 @@ func (w *Worker) Tick(ctx context.Context, tick int64) {
 func (w *Worker) runFallback(ctx context.Context) {
 	if w.store != nil && w.ollama != nil && w.llmClient != nil {
 		if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("[Coven Worker] Fallback fact extraction failed: %v", err)
+			log.Printf("[Coven Worker] Periodic fact extraction sweep failed: %v", err)
 		}
 	}
-	if w.reconnectFn != nil {
+	if !w.IsSubscribed() && w.reconnectFn != nil {
 		if err := w.reconnectFn(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("[Coven Worker] Subscription reconnect attempt failed: %v", err)
 		}
