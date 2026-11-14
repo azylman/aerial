@@ -144,6 +144,85 @@ func TestNormalizeRepo(t *testing.T) {
 	}
 }
 
+func assertVanadisWidgetComponents(t *testing.T, comps []discordgo.MessageComponent) {
+	t.Helper()
+	if len(comps) != 1 {
+		t.Fatalf("expected 1 container component, got %d", len(comps))
+	}
+	container, ok := comps[0].(*discordgo.Container)
+	if !ok {
+		t.Fatalf("expected *discordgo.Container, got %T", comps[0])
+	}
+	if container.AccentColor == nil || *container.AccentColor != 0xA855F7 {
+		t.Errorf("expected accent color 0xA855F7, got %v", container.AccentColor)
+	}
+	if len(container.Components) != 6 {
+		t.Fatalf("expected 6 container components, got %d", len(container.Components))
+	}
+	assertVanadisWidgetInner(t, container.Components)
+}
+
+func assertVanadisWidgetInner(t *testing.T, comps []discordgo.MessageComponent) {
+	t.Helper()
+	header, ok := comps[0].(*discordgo.TextDisplay)
+	if !ok || header.Content != "### 🛠️ Discord status tracker widget" {
+		t.Errorf("unexpected header: %+v", comps[0])
+	}
+	banner, ok := comps[1].(*discordgo.TextDisplay)
+	if !ok || banner.Content != "⚠️ Build in progress" {
+		t.Errorf("unexpected banner: %+v", comps[1])
+	}
+	c1Sec, ok := comps[2].(*discordgo.Section)
+	if !ok {
+		t.Fatalf("expected chunk 1 to be *discordgo.Section, got %T", comps[2])
+	}
+	c1Text := c1Sec.Components[0].(*discordgo.TextDisplay)
+	if c1Text.Content != "🔀 **`aerial`**: Schema migration" {
+		t.Errorf("unexpected chunk 1 row text: %q", c1Text.Content)
+	}
+	btn, ok := c1Sec.Accessory.(*discordgo.Button)
+	if !ok || btn.URL != "https://github.com/azylman/aerial/pull/735" || btn.Label != "PR #735 ↗" {
+		t.Errorf("unexpected button accessory: %+v", c1Sec.Accessory)
+	}
+	c2Sec, ok := comps[3].(*discordgo.Section)
+	if !ok {
+		t.Fatalf("expected chunk 2 to be *discordgo.Section, got %T", comps[3])
+	}
+	c2Text := c2Sec.Components[0].(*discordgo.TextDisplay)
+	if c2Text.Content != "🚀 **`aerial`**: Silent prompt\n-# ↳ `aerial`: ⏳ building image\n-# ↳ `synapse`: 🔄 starting" {
+		t.Errorf("unexpected chunk 2 row text: %q", c2Text.Content)
+	}
+	c3Text, ok := comps[4].(*discordgo.TextDisplay)
+	if !ok || c3Text.Content != "🔨 **`aerial`**: Stateless widget endpoint\n-# ↳ Compiling binary" {
+		t.Errorf("unexpected chunk 3 component: %+v", comps[4])
+	}
+	footer, ok := comps[5].(*discordgo.TextDisplay)
+	if !ok || footer.Content != "*Updated <t:1760000000:R>*" {
+		t.Errorf("unexpected footer: %+v", comps[5])
+	}
+}
+
+func assertVanadisWidgetEmptyTitleFallback(t *testing.T, now time.Time) {
+	t.Helper()
+	emptyTitleComps, err := BuildStatusWidgetComponents(StatusWidgetRequest{
+		ID:     "build-empty-title",
+		Status: "running",
+		Chunks: []StatusWidgetChunk{{Title: "Fallback repo chunk", Status: "pending"}},
+	}, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents empty title failed: %v", err)
+	}
+	emptyContainer := emptyTitleComps[0].(*discordgo.Container)
+	emptyHeader := emptyContainer.Components[0].(*discordgo.TextDisplay)
+	if emptyHeader.Content != "### 🛠️ Vanadis Build" {
+		t.Errorf("expected fallback header '### 🛠️ Vanadis Build', got %q", emptyHeader.Content)
+	}
+	fallbackChunk := emptyContainer.Components[1].(*discordgo.TextDisplay)
+	if fallbackChunk.Content != "⏳ **`aerial`**: Fallback repo chunk" {
+		t.Errorf("expected fallback chunk '⏳ **`aerial`**: Fallback repo chunk', got %q", fallbackChunk.Content)
+	}
+}
+
 func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 	now := time.Unix(1760000000, 0)
 	req := StatusWidgetRequest{
@@ -184,88 +263,8 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildStatusWidgetComponents failed: %v", err)
 	}
-	if len(comps) != 1 {
-		t.Fatalf("expected 1 container component, got %d", len(comps))
-	}
-
-	container, ok := comps[0].(*discordgo.Container)
-	if !ok {
-		t.Fatalf("expected *discordgo.Container, got %T", comps[0])
-	}
-
-	if container.AccentColor == nil || *container.AccentColor != 0xA855F7 {
-		t.Errorf("expected accent color 0xA855F7, got %v", container.AccentColor)
-	}
-
-	// Inner components check: Header, Banner, Chunk 1 (Section with button), Chunk 2 (Section with button), Chunk 3 (TextDisplay), Footer
-	if len(container.Components) != 6 {
-		t.Fatalf("expected 6 container components, got %d", len(container.Components))
-	}
-
-	header, ok := container.Components[0].(*discordgo.TextDisplay)
-	if !ok || header.Content != "### 🛠️ Discord status tracker widget" {
-		t.Errorf("unexpected header: %+v", header)
-	}
-
-	banner, ok := container.Components[1].(*discordgo.TextDisplay)
-	if !ok || banner.Content != "⚠️ Build in progress" {
-		t.Errorf("unexpected banner: %+v", banner)
-	}
-
-	// Chunk 1 has PRNumber > 0 and Repo, so it's a Section with Button, without [index]
-	c1Sec, ok := container.Components[2].(*discordgo.Section)
-	if !ok {
-		t.Fatalf("expected chunk 1 to be *discordgo.Section, got %T", container.Components[2])
-	}
-	c1Text := c1Sec.Components[0].(*discordgo.TextDisplay)
-	if c1Text.Content != "🔀 **`aerial`**: Schema migration" {
-		t.Errorf("unexpected chunk 1 row text: %q", c1Text.Content)
-	}
-	btn, ok := c1Sec.Accessory.(*discordgo.Button)
-	if !ok || btn.URL != "https://github.com/azylman/aerial/pull/735" || btn.Label != "PR #735 ↗" {
-		t.Errorf("unexpected button accessory: %+v", c1Sec.Accessory)
-	}
-
-	// Chunk 2 has PRNumber > 0, no DeployingJobs rendered in row, but has ActiveStep
-	c2Sec, ok := container.Components[3].(*discordgo.Section)
-	if !ok {
-		t.Fatalf("expected chunk 2 to be *discordgo.Section, got %T", container.Components[3])
-	}
-	c2Text := c2Sec.Components[0].(*discordgo.TextDisplay)
-	if c2Text.Content != "🚀 **`aerial`**: Silent prompt\n-# ↳ `aerial`: ⏳ building image\n-# ↳ `synapse`: 🔄 starting" {
-		t.Errorf("unexpected chunk 2 row text: %q", c2Text.Content)
-	}
-
-	// Chunk 3 has no PRNumber, so it's a TextDisplay with ActiveStep
-	c3Text, ok := container.Components[4].(*discordgo.TextDisplay)
-	if !ok || c3Text.Content != "🔨 **`aerial`**: Stateless widget endpoint\n-# ↳ Compiling binary" {
-		t.Errorf("unexpected chunk 3 component: %+v", container.Components[4])
-	}
-
-	// Footer
-	footer, ok := container.Components[5].(*discordgo.TextDisplay)
-	if !ok || footer.Content != "*Updated <t:1760000000:R>*" {
-		t.Errorf("unexpected footer: %+v", footer)
-	}
-
-	// Empty Title fallback on VanadisBuild header + empty chunk Repo fallback
-	emptyTitleComps, err := BuildStatusWidgetComponents(StatusWidgetRequest{
-		ID:     "build-empty-title",
-		Status: "running",
-		Chunks: []StatusWidgetChunk{{Title: "Fallback repo chunk", Status: "pending"}},
-	}, now)
-	if err != nil {
-		t.Fatalf("BuildStatusWidgetComponents empty title failed: %v", err)
-	}
-	emptyContainer := emptyTitleComps[0].(*discordgo.Container)
-	emptyHeader := emptyContainer.Components[0].(*discordgo.TextDisplay)
-	if emptyHeader.Content != "### 🛠️ Vanadis Build" {
-		t.Errorf("expected fallback header '### 🛠️ Vanadis Build', got %q", emptyHeader.Content)
-	}
-	fallbackChunk := emptyContainer.Components[1].(*discordgo.TextDisplay)
-	if fallbackChunk.Content != "⏳ **`aerial`**: Fallback repo chunk" {
-		t.Errorf("expected fallback chunk '⏳ **`aerial`**: Fallback repo chunk', got %q", fallbackChunk.Content)
-	}
+	assertVanadisWidgetComponents(t, comps)
+	assertVanadisWidgetEmptyTitleFallback(t, now)
 }
 
 func TestFormatChunkActiveStepLines(t *testing.T) {
@@ -490,6 +489,55 @@ func TestDeliverStatusWidget_Edit404FallbackToSend(t *testing.T) {
 	}
 }
 
+type deliverAutoSinkTestCase struct {
+	name          string
+	skipSink      bool
+	afterMsgs     []*discordgo.Message
+	messagesErr   error
+	sendReplyID   string
+	sendErr       error
+	deleteErr     error
+	wantMsgID     string
+	wantSentCount int
+	wantEditCount int
+	wantDeletedID string
+	wantSentFlags discordgo.MessageFlags
+	wantQueried   bool
+}
+
+func runDeliverStatusWidgetAutoSinkCase(t *testing.T, tc deliverAutoSinkTestCase, now time.Time) {
+	t.Helper()
+	sender := &mockWidgetSender{afterMsgs: tc.afterMsgs, messagesErr: tc.messagesErr, sendReplyID: tc.sendReplyID, sendErr: tc.sendErr, deleteErr: tc.deleteErr}
+	req := StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-old-100", ID: "build-1", Title: "Build 1", Status: "running", SkipSink: tc.skipSink}
+	msgID, err := DeliverStatusWidget(sender, req, now)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if msgID != tc.wantMsgID {
+		t.Errorf("got msgID %q, want %q", msgID, tc.wantMsgID)
+	}
+	if tc.wantQueried {
+		if sender.queriedAfterID != "msg-old-100" || sender.queriedLimit != WidgetSinkQueryLimit {
+			t.Errorf("got query afterID=%q limit=%d, want afterID=msg-old-100 limit=%d", sender.queriedAfterID, sender.queriedLimit, WidgetSinkQueryLimit)
+		}
+	} else if sender.queriedAfterID != "" || sender.queriedLimit != 0 {
+		t.Errorf("expected no message queries when skipSink=true, got afterID=%q limit=%d", sender.queriedAfterID, sender.queriedLimit)
+	}
+	if len(sender.sentPayloads) != tc.wantSentCount || len(sender.editedPayloads) != tc.wantEditCount {
+		t.Errorf("got sends=%d edits=%d, want sends=%d edits=%d", len(sender.sentPayloads), len(sender.editedPayloads), tc.wantSentCount, tc.wantEditCount)
+	}
+	gotDeleted := ""
+	if len(sender.deletedIDs) > 0 {
+		gotDeleted = sender.deletedIDs[0]
+	}
+	if gotDeleted != tc.wantDeletedID {
+		t.Errorf("got deletedID %q, want %q", gotDeleted, tc.wantDeletedID)
+	}
+	if tc.wantSentFlags != 0 && (len(sender.sentPayloads) == 0 || sender.sentPayloads[0].Flags != tc.wantSentFlags) {
+		t.Errorf("got sent flags %v, want %v", sender.sentPayloads[0].Flags, tc.wantSentFlags)
+	}
+}
+
 func TestDeliverStatusWidget_AutoSink(t *testing.T) {
 	t.Parallel()
 	threeMsgs := []*discordgo.Message{{ID: "m1"}, {ID: "m2"}, {ID: "m3"}}
@@ -505,21 +553,7 @@ func TestDeliverStatusWidget_AutoSink(t *testing.T) {
 	mixedAge := []*discordgo.Message{{ID: "m1", Timestamp: ago(2 * time.Hour)}, {ID: "m2", Timestamp: ago(10 * time.Minute)}}
 	oldWidgetOnly := []*discordgo.Message{{ID: "msg-newer-widget", Flags: discordgo.MessageFlagsIsComponentsV2, Timestamp: ago(2 * time.Hour)}}
 
-	tests := []struct {
-		name          string
-		skipSink      bool
-		afterMsgs     []*discordgo.Message
-		messagesErr   error
-		sendReplyID   string
-		sendErr       error
-		deleteErr     error
-		wantMsgID     string
-		wantSentCount int
-		wantEditCount int
-		wantDeletedID string
-		wantSentFlags discordgo.MessageFlags
-		wantQueried   bool
-	}{
+	tests := []deliverAutoSinkTestCase{
 		{name: "fewer messages than threshold edits in place", afterMsgs: threeMsgs, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
 		{name: "channel messages error falls back to edit in place", messagesErr: errors.New("discord 502"), wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
 		{name: "newer components v2 widget with fewer than threshold regular messages edits in place", afterMsgs: newerWidgetMsgs, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
@@ -537,37 +571,7 @@ func TestDeliverStatusWidget_AutoSink(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			sender := &mockWidgetSender{afterMsgs: tc.afterMsgs, messagesErr: tc.messagesErr, sendReplyID: tc.sendReplyID, sendErr: tc.sendErr, deleteErr: tc.deleteErr}
-			req := StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-old-100", ID: "build-1", Title: "Build 1", Status: "running", SkipSink: tc.skipSink}
-			msgID, err := DeliverStatusWidget(sender, req, now)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if msgID != tc.wantMsgID {
-				t.Errorf("got msgID %q, want %q", msgID, tc.wantMsgID)
-			}
-			if tc.wantQueried {
-				if sender.queriedAfterID != "msg-old-100" || sender.queriedLimit != WidgetSinkQueryLimit {
-					t.Errorf("got query afterID=%q limit=%d, want afterID=msg-old-100 limit=%d", sender.queriedAfterID, sender.queriedLimit, WidgetSinkQueryLimit)
-				}
-			} else {
-				if sender.queriedAfterID != "" || sender.queriedLimit != 0 {
-					t.Errorf("expected no message queries when skipSink=true, got afterID=%q limit=%d", sender.queriedAfterID, sender.queriedLimit)
-				}
-			}
-			if len(sender.sentPayloads) != tc.wantSentCount || len(sender.editedPayloads) != tc.wantEditCount {
-				t.Errorf("got sends=%d edits=%d, want sends=%d edits=%d", len(sender.sentPayloads), len(sender.editedPayloads), tc.wantSentCount, tc.wantEditCount)
-			}
-			gotDeleted := ""
-			if len(sender.deletedIDs) > 0 {
-				gotDeleted = sender.deletedIDs[0]
-			}
-			if gotDeleted != tc.wantDeletedID {
-				t.Errorf("got deletedID %q, want %q", gotDeleted, tc.wantDeletedID)
-			}
-			if tc.wantSentFlags != 0 && (len(sender.sentPayloads) == 0 || sender.sentPayloads[0].Flags != tc.wantSentFlags) {
-				t.Errorf("got sent flags %v, want %v", sender.sentPayloads[0].Flags, tc.wantSentFlags)
-			}
+			runDeliverStatusWidgetAutoSinkCase(t, tc, now)
 		})
 	}
 }
@@ -659,6 +663,141 @@ func TestFormatChunkDuration(t *testing.T) {
 	}
 }
 
+func assertChunkRuntimeBasicChunks(t *testing.T, container *discordgo.Container) {
+	t.Helper()
+	c0Sec := container.Components[1].(*discordgo.Section)
+	c0Text := c0Sec.Components[0].(*discordgo.TextDisplay)
+	if c0Text.Content != "✅ **`aerial`**: Completed chunk with duration *(4m 12s)*" {
+		t.Errorf("unexpected chunk 0 text: %q", c0Text.Content)
+	}
+
+	c1Text := container.Components[2].(*discordgo.TextDisplay)
+	if c1Text.Content != "🔨 **`aerial`**: Active chunk with relative timestamp *(started <t:1760000000:R>)*" {
+		t.Errorf("unexpected chunk 1 text: %q", c1Text.Content)
+	}
+
+	c2Text := container.Components[3].(*discordgo.TextDisplay)
+	if c2Text.Content != "⏳ **`aerial`**: Pending chunk with no runtime" {
+		t.Errorf("unexpected chunk 2 text: %q", c2Text.Content)
+	}
+
+	c3Text := container.Components[4].(*discordgo.TextDisplay)
+	if c3Text.Content != "✅ **`aerial`**: Completed chunk missing UpdatedAt" {
+		t.Errorf("unexpected chunk 3 text: %q", c3Text.Content)
+	}
+
+	footerText := container.Components[5].(*discordgo.TextDisplay)
+	if footerText.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
+		t.Errorf("unexpected footer text: %q", footerText.Content)
+	}
+}
+
+func assertChunkRuntimeTopLevelStartedAt(t *testing.T, req StatusWidgetRequest, now time.Time) {
+	t.Helper()
+	earlierStart := time.Unix(1759999000, 0)
+	reqWithTopStart := req
+	reqWithTopStart.StartedAt = earlierStart
+	compsTop, err := BuildStatusWidgetComponents(reqWithTopStart, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents with StartedAt failed: %v", err)
+	}
+	containerTop := compsTop[0].(*discordgo.Container)
+	footerTop := containerTop.Components[5].(*discordgo.TextDisplay)
+	if footerTop.Content != "*Started <t:1759999000:R> · Updated <t:1760000500:R>*" {
+		t.Errorf("unexpected footer text with earlier top-level StartedAt: %q", footerTop.Content)
+	}
+
+	laterStart := time.Unix(1760000100, 0)
+	reqWithLaterTopStart := req
+	reqWithLaterTopStart.StartedAt = laterStart
+	compsLater, err := BuildStatusWidgetComponents(reqWithLaterTopStart, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents with later StartedAt failed: %v", err)
+	}
+	containerLater := compsLater[0].(*discordgo.Container)
+	footerLater := containerLater.Components[5].(*discordgo.TextDisplay)
+	if footerLater.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
+		t.Errorf("unexpected footer text with later top-level StartedAt: %q", footerLater.Content)
+	}
+}
+
+func assertChunkRuntimeCompletedBuilds(t *testing.T, req StatusWidgetRequest, now, start, completedAt time.Time) {
+	t.Helper()
+	reqCompleted := req
+	reqCompleted.Status = "completed"
+	reqCompleted.Chunks = []StatusWidgetChunk{
+		{
+			Index:       0,
+			Repo:        "aerial",
+			Title:       "Completed chunk 0",
+			Status:      "deployed",
+			StartedAt:   start,
+			CompletedAt: completedAt,
+		},
+		{
+			Index:       1,
+			Repo:        "aerial",
+			Title:       "Completed chunk 1",
+			Status:      "success",
+			StartedAt:   start,
+			CompletedAt: completedAt.Add(2 * time.Minute),
+		},
+	}
+	compsCompleted, err := BuildStatusWidgetComponents(reqCompleted, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents completed build failed: %v", err)
+	}
+	containerCompleted := compsCompleted[0].(*discordgo.Container)
+	footerCompleted := containerCompleted.Components[3].(*discordgo.TextDisplay)
+	if footerCompleted.Content != "*Started <t:1760000000:R> · Duration 6m 12s*" {
+		t.Errorf("unexpected footer text for completed build: %q", footerCompleted.Content)
+	}
+
+	reqCompletedFallback := StatusWidgetRequest{
+		ChannelID: "1542423172400291873",
+		ID:        "build-fallback",
+		Tier:      1,
+		Title:     "Completed build fallback",
+		Status:    "completed",
+		StartedAt: start,
+		Chunks: []StatusWidgetChunk{
+			{
+				Index:  0,
+				Repo:   "aerial",
+				Title:  "Chunk without timestamps",
+				Status: "deployed",
+			},
+		},
+	}
+	compsFallback, err := BuildStatusWidgetComponents(reqCompletedFallback, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents completed fallback failed: %v", err)
+	}
+	containerFallback := compsFallback[0].(*discordgo.Container)
+	footerFallback := containerFallback.Components[2].(*discordgo.TextDisplay)
+	if footerFallback.Content != "*Started <t:1760000000:R> · Duration 8m 20s*" {
+		t.Errorf("unexpected footer text for completed fallback build: %q", footerFallback.Content)
+	}
+
+	reqWithDeploying := reqCompleted
+	reqWithDeploying.Chunks = append(reqWithDeploying.Chunks, StatusWidgetChunk{
+		Index:     2,
+		Repo:      "aerial",
+		Title:     "Deploying chunk",
+		Status:    "deploying",
+		StartedAt: start,
+	})
+	compsDeploying, err := BuildStatusWidgetComponents(reqWithDeploying, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents with deploying chunk failed: %v", err)
+	}
+	containerDeploying := compsDeploying[0].(*discordgo.Container)
+	footerDeploying := containerDeploying.Components[4].(*discordgo.TextDisplay)
+	if footerDeploying.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
+		t.Errorf("unexpected footer text for build with deploying chunk: %q", footerDeploying.Content)
+	}
+}
+
 func TestBuildStatusWidgetComponents_ChunkRuntimes(t *testing.T) {
 	now := time.Unix(1760000500, 0)
 	start := time.Unix(1760000000, 0)
@@ -712,149 +851,19 @@ func TestBuildStatusWidgetComponents_ChunkRuntimes(t *testing.T) {
 		t.Fatalf("BuildStatusWidgetComponents failed: %v", err)
 	}
 	container := comps[0].(*discordgo.Container)
-
-	c0Sec := container.Components[1].(*discordgo.Section)
-	c0Text := c0Sec.Components[0].(*discordgo.TextDisplay)
-	if c0Text.Content != "✅ **`aerial`**: Completed chunk with duration *(4m 12s)*" {
-		t.Errorf("unexpected chunk 0 text: %q", c0Text.Content)
-	}
-
-	c1Text := container.Components[2].(*discordgo.TextDisplay)
-	if c1Text.Content != "🔨 **`aerial`**: Active chunk with relative timestamp *(started <t:1760000000:R>)*" {
-		t.Errorf("unexpected chunk 1 text: %q", c1Text.Content)
-	}
-
-	c2Text := container.Components[3].(*discordgo.TextDisplay)
-	if c2Text.Content != "⏳ **`aerial`**: Pending chunk with no runtime" {
-		t.Errorf("unexpected chunk 2 text: %q", c2Text.Content)
-	}
-
-	c3Text := container.Components[4].(*discordgo.TextDisplay)
-	if c3Text.Content != "✅ **`aerial`**: Completed chunk missing UpdatedAt" {
-		t.Errorf("unexpected chunk 3 text: %q", c3Text.Content)
-	}
-
-	footerText := container.Components[5].(*discordgo.TextDisplay)
-	if footerText.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
-		t.Errorf("unexpected footer text: %q", footerText.Content)
-	}
-
-	// Verify top-level req.StartedAt precedence over chunk start times when earlier,
-	// and chunk start time precedence when earlier than req.StartedAt.
-	earlierStart := time.Unix(1759999000, 0)
-	reqWithTopStart := req
-	reqWithTopStart.StartedAt = earlierStart
-	compsTop, err := BuildStatusWidgetComponents(reqWithTopStart, now)
-	if err != nil {
-		t.Fatalf("BuildStatusWidgetComponents with StartedAt failed: %v", err)
-	}
-	containerTop := compsTop[0].(*discordgo.Container)
-	footerTop := containerTop.Components[5].(*discordgo.TextDisplay)
-	if footerTop.Content != "*Started <t:1759999000:R> · Updated <t:1760000500:R>*" {
-		t.Errorf("unexpected footer text with earlier top-level StartedAt: %q", footerTop.Content)
-	}
-
-	// Top-level StartedAt later than chunk start time should still resolve to earliest chunk start time
-	laterStart := time.Unix(1760000100, 0)
-	reqWithLaterTopStart := req
-	reqWithLaterTopStart.StartedAt = laterStart
-	compsLater, err := BuildStatusWidgetComponents(reqWithLaterTopStart, now)
-	if err != nil {
-		t.Fatalf("BuildStatusWidgetComponents with later StartedAt failed: %v", err)
-	}
-	containerLater := compsLater[0].(*discordgo.Container)
-	footerLater := containerLater.Components[5].(*discordgo.TextDisplay)
-	if footerLater.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
-		t.Errorf("unexpected footer text with later top-level StartedAt: %q", footerLater.Content)
-	}
-
-	// Completed build with completed chunks renders Duration in footer using latest completion timestamp
-	reqCompleted := req
-	reqCompleted.Status = "completed"
-	reqCompleted.Chunks = []StatusWidgetChunk{
-		{
-			Index:       0,
-			Repo:        "aerial",
-			Title:       "Completed chunk 0",
-			Status:      "deployed",
-			StartedAt:   start,
-			CompletedAt: completedAt,
-		},
-		{
-			Index:       1,
-			Repo:        "aerial",
-			Title:       "Completed chunk 1",
-			Status:      "success",
-			StartedAt:   start,
-			CompletedAt: completedAt.Add(2 * time.Minute),
-		},
-	}
-	compsCompleted, err := BuildStatusWidgetComponents(reqCompleted, now)
-	if err != nil {
-		t.Fatalf("BuildStatusWidgetComponents completed build failed: %v", err)
-	}
-	containerCompleted := compsCompleted[0].(*discordgo.Container)
-	footerCompleted := containerCompleted.Components[3].(*discordgo.TextDisplay)
-	// Latest completion time is completedAt + 2m = 6m 12s after start
-	if footerCompleted.Content != "*Started <t:1760000000:R> · Duration 6m 12s*" {
-		t.Errorf("unexpected footer text for completed build: %q", footerCompleted.Content)
-	}
-
-	// Completed build with top-level StartedAt and chunks missing CompletedAt/UpdatedAt falls back to now
-	reqCompletedFallback := StatusWidgetRequest{
-		ChannelID: "1542423172400291873",
-		ID:        "build-fallback",
-		Tier:      1,
-		Title:     "Completed build fallback",
-		Status:    "completed",
-		StartedAt: start,
-		Chunks: []StatusWidgetChunk{
-			{
-				Index:  0,
-				Repo:   "aerial",
-				Title:  "Chunk without timestamps",
-				Status: "deployed",
-			},
-		},
-	}
-	compsFallback, err := BuildStatusWidgetComponents(reqCompletedFallback, now)
-	if err != nil {
-		t.Fatalf("BuildStatusWidgetComponents completed fallback failed: %v", err)
-	}
-	containerFallback := compsFallback[0].(*discordgo.Container)
-	footerFallback := containerFallback.Components[2].(*discordgo.TextDisplay)
-	// now is start + 500s = 8m 20s
-	if footerFallback.Content != "*Started <t:1760000000:R> · Duration 8m 20s*" {
-		t.Errorf("unexpected footer text for completed fallback build: %q", footerFallback.Content)
-	}
-
-	// Completed build with in-progress chunk (e.g. "deploying") continues to render Updated timestamp
-	reqWithDeploying := reqCompleted
-	reqWithDeploying.Chunks = append(reqWithDeploying.Chunks, StatusWidgetChunk{
-		Index:     2,
-		Repo:      "aerial",
-		Title:     "Deploying chunk",
-		Status:    "deploying",
-		StartedAt: start,
-	})
-	compsDeploying, err := BuildStatusWidgetComponents(reqWithDeploying, now)
-	if err != nil {
-		t.Fatalf("BuildStatusWidgetComponents with deploying chunk failed: %v", err)
-	}
-	containerDeploying := compsDeploying[0].(*discordgo.Container)
-	footerDeploying := containerDeploying.Components[4].(*discordgo.TextDisplay)
-	if footerDeploying.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
-		t.Errorf("unexpected footer text for build with deploying chunk: %q", footerDeploying.Content)
-	}
+	assertChunkRuntimeBasicChunks(t, container)
+	assertChunkRuntimeTopLevelStartedAt(t, req, now)
+	assertChunkRuntimeCompletedBuilds(t, req, now, start, completedAt)
 }
 
-func TestExtractMessageComponentsText(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		components []discordgo.MessageComponent
-		want       string
-	}{
+type extractComponentsTestCase struct {
+	name       string
+	components []discordgo.MessageComponent
+	want       string
+}
+
+func extractSimpleComponentsCases() []extractComponentsTestCase {
+	return []extractComponentsTestCase{
 		{
 			name:       "NilSlice",
 			components: nil,
@@ -933,6 +942,11 @@ func TestExtractMessageComponentsText(t *testing.T) {
 			},
 			want: "",
 		},
+	}
+}
+
+func extractComplexComponentsCases() []extractComponentsTestCase {
+	return []extractComponentsTestCase{
 		{
 			name: "PointerSection_WithButtonLabelAndURL",
 			components: []discordgo.MessageComponent{
@@ -1073,6 +1087,16 @@ func TestExtractMessageComponentsText(t *testing.T) {
 			want: "Block 1\nBlock 2",
 		},
 	}
+}
+
+func extractMessageComponentsCases() []extractComponentsTestCase {
+	cases := extractSimpleComponentsCases()
+	return append(cases, extractComplexComponentsCases()...)
+}
+
+func TestExtractMessageComponentsText(t *testing.T) {
+	t.Parallel()
+	tests := extractMessageComponentsCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

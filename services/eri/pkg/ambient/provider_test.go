@@ -239,20 +239,35 @@ Trim: '{{trim .not_found}}'`,
 	}
 }
 
-func TestProvider_RAMCacheHit(t *testing.T) {
-	t.Parallel()
+type providerCacheLifecycleCase struct {
+	name          string
+	advanceBy     time.Duration
+	wantSubstr    string
+	wantCalls     int
+	wantMatchPrev bool
+}
+
+func runProviderCacheLifecycleSuite(t *testing.T, cases []providerCacheLifecycleCase) {
+	t.Helper()
+
+	var counter int
+	var counterMu sync.Mutex
 
 	inv := &mockInvoker{
 		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
-			return `{"count": 1}`, nil
+			counterMu.Lock()
+			counter++
+			val := counter
+			counterMu.Unlock()
+			return fmt.Sprintf(`{"val": %d}`, val), nil
 		},
 	}
 
 	cfg := config.AmbientContextConfig{
-		CacheTTL: "30s",
-		Template: "Count: {{.tool.count}}",
+		CacheTTL: "5s",
+		Template: "Val: {{.tool.val}}",
 		Tools: []config.AmbientToolConfig{
-			{Name: "tool", Tool: "counter"},
+			{Name: "tool", Tool: "getter"},
 		},
 	}
 
@@ -261,7 +276,7 @@ func TestProvider_RAMCacheHit(t *testing.T) {
 		t.Fatalf("NewProvider failed: %v", err)
 	}
 
-	simulatedTime := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	simulatedTime := time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)
 	var timeMu sync.Mutex
 	p.SetNowFunc(func() time.Time {
 		timeMu.Lock()
@@ -269,31 +284,37 @@ func TestProvider_RAMCacheHit(t *testing.T) {
 		return simulatedTime
 	})
 
-	// First call - cache miss
-	res1, err := p.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("first Retrieve failed: %v", err)
-	}
-	if inv.CallCount() != 1 {
-		t.Fatalf("expected 1 invoker call, got %d", inv.CallCount())
-	}
+	var prev string
+	for _, tc := range cases {
+		if tc.advanceBy > 0 {
+			timeMu.Lock()
+			simulatedTime = simulatedTime.Add(tc.advanceBy)
+			timeMu.Unlock()
+		}
 
-	// Advance time within TTL (+15s)
-	timeMu.Lock()
-	simulatedTime = simulatedTime.Add(15 * time.Second)
-	timeMu.Unlock()
+		res, rErr := p.Retrieve(context.Background())
+		if rErr != nil {
+			t.Fatalf("[%s] Retrieve failed: %v", tc.name, rErr)
+		}
+		if tc.wantSubstr != "" && !strings.Contains(res, tc.wantSubstr) {
+			t.Errorf("[%s] expected substring %q in result, got %q", tc.name, tc.wantSubstr, res)
+		}
+		if tc.wantMatchPrev && res != prev {
+			t.Errorf("[%s] expected result %q to match prev %q", tc.name, res, prev)
+		}
+		if tc.wantCalls > 0 && inv.CallCount() != tc.wantCalls {
+			t.Errorf("[%s] expected invoker call count %d, got %d", tc.name, tc.wantCalls, inv.CallCount())
+		}
+		prev = res
+	}
+}
 
-	// Second call - should hit cache
-	res2, err := p.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("second Retrieve failed: %v", err)
-	}
-	if res2 != res1 {
-		t.Errorf("cached result mismatch: %q vs %q", res2, res1)
-	}
-	if inv.CallCount() != 1 {
-		t.Errorf("expected invoker to NOT be called on cache hit, call count: %d", inv.CallCount())
-	}
+func TestProvider_RAMCacheHit(t *testing.T) {
+	t.Parallel()
+	runProviderCacheLifecycleSuite(t, []providerCacheLifecycleCase{
+		{name: "initial cache miss", wantSubstr: "Val: 1", wantCalls: 1},
+		{name: "hit within TTL", advanceBy: 2 * time.Second, wantMatchPrev: true, wantCalls: 1},
+	})
 }
 
 func TestProvider_SingleflightDeduplication(t *testing.T) {
@@ -359,66 +380,10 @@ func TestProvider_SingleflightDeduplication(t *testing.T) {
 
 func TestProvider_ExpiredCacheRefresh(t *testing.T) {
 	t.Parallel()
-
-	var counter int
-	var counterMu sync.Mutex
-
-	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
-			counterMu.Lock()
-			counter++
-			val := counter
-			counterMu.Unlock()
-			return `{"val": ` + string(rune('0'+val)) + `}`, nil
-		},
-	}
-
-	cfg := config.AmbientContextConfig{
-		CacheTTL: "5s",
-		Template: "Val: {{.tool.val}}",
-		Tools: []config.AmbientToolConfig{
-			{Name: "tool", Tool: "getter"},
-		},
-	}
-
-	p, err := NewProvider(cfg, inv)
-	if err != nil {
-		t.Fatalf("NewProvider failed: %v", err)
-	}
-
-	simulatedTime := time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)
-	var timeMu sync.Mutex
-	p.SetNowFunc(func() time.Time {
-		timeMu.Lock()
-		defer timeMu.Unlock()
-		return simulatedTime
+	runProviderCacheLifecycleSuite(t, []providerCacheLifecycleCase{
+		{name: "initial call", wantSubstr: "Val: 1", wantCalls: 1},
+		{name: "after expiration", advanceBy: 12 * time.Second, wantSubstr: "Val: 2", wantCalls: 2},
 	})
-
-	// Initial call
-	res1, err := p.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("first Retrieve failed: %v", err)
-	}
-	if !strings.Contains(res1, "Val: 1") {
-		t.Errorf("expected 'Val: 1', got: %q", res1)
-	}
-
-	// Advance past hard TTL (12s > 10s)
-	timeMu.Lock()
-	simulatedTime = simulatedTime.Add(12 * time.Second)
-	timeMu.Unlock()
-
-	// Call after expiration
-	res2, err := p.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("second Retrieve failed: %v", err)
-	}
-	if !strings.Contains(res2, "Val: 2") {
-		t.Errorf("expected refreshed 'Val: 2', got: %q", res2)
-	}
-	if inv.CallCount() != 2 {
-		t.Errorf("expected 2 invoker calls after cache expiration, got %d", inv.CallCount())
-	}
 }
 
 func TestProvider_TemplateSyntaxError(t *testing.T) {
@@ -827,70 +792,6 @@ func TestProvider_StaleWhileRevalidate(t *testing.T) {
 	}
 	if !strings.Contains(res3, "Val: 2") {
 		t.Errorf("expected refreshed 'Val: 2', got %q", res3)
-	}
-}
-
-func TestProvider_HardExpiredForcesSyncRevalidation(t *testing.T) {
-	t.Parallel()
-
-	var counter int
-	var counterMu sync.Mutex
-
-	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
-			counterMu.Lock()
-			counter++
-			c := counter
-			counterMu.Unlock()
-			return fmt.Sprintf(`{"val": %d}`, c), nil
-		},
-	}
-
-	cfg := config.AmbientContextConfig{
-		CacheTTL: "5s",
-		Template: "Val: {{.tool.val}}",
-		Tools: []config.AmbientToolConfig{
-			{Name: "tool", Tool: "val_tool"},
-		},
-	}
-
-	p, err := NewProvider(cfg, inv)
-	if err != nil {
-		t.Fatalf("NewProvider failed: %v", err)
-	}
-
-	simulatedTime := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
-	var timeMu sync.Mutex
-	p.SetNowFunc(func() time.Time {
-		timeMu.Lock()
-		defer timeMu.Unlock()
-		return simulatedTime
-	})
-
-	// Initial fetch
-	res1, err := p.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("first Retrieve failed: %v", err)
-	}
-	if !strings.Contains(res1, "Val: 1") {
-		t.Fatalf("expected 'Val: 1', got %q", res1)
-	}
-
-	// Advance time past hardExpiresAt (10s) -> 12s
-	timeMu.Lock()
-	simulatedTime = simulatedTime.Add(12 * time.Second)
-	timeMu.Unlock()
-
-	// Should synchronously revalidate and return "Val: 2"
-	res2, err := p.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("second Retrieve failed: %v", err)
-	}
-	if !strings.Contains(res2, "Val: 2") {
-		t.Errorf("expected synchronous 'Val: 2', got %q", res2)
-	}
-	if inv.CallCount() != 2 {
-		t.Errorf("expected 2 calls, got %d", inv.CallCount())
 	}
 }
 
