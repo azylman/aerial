@@ -459,3 +459,88 @@ func TestShapeSearchMessagesResponse_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestIsInitializeRequest_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		rawReq   string
+		expected bool
+	}{
+		{"valid initialize request", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, true},
+		{"initialize with whitespace", `  {"jsonrpc":"2.0","id":1,"method":"  initialize  "}  `, true},
+		{"initialized notification returns false", `{"jsonrpc":"2.0","method":"notifications/initialized"}`, false},
+		{"tools/list returns false", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`, false},
+		{"empty body returns false", "", false},
+		{"array returns false", `[{"jsonrpc":"2.0","method":"initialize"}]`, false},
+		{"invalid json returns false", `{invalid json`, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsInitializeRequest([]byte(tt.rawReq)); got != tt.expected {
+				t.Errorf("expected IsInitializeRequest=%v, got %v", tt.expected, got)
+			}
+		})
+	}
+}
+
+func TestInjectInstructions_TableDriven(t *testing.T) {
+	tests := []struct {
+		name             string
+		rawResp          string
+		wantUnchanged    bool
+		wantInstructions string
+		wantServerName   string
+		wantErrorMsg     string
+	}{
+		{"absent instructions injected and serverInfo preserved", `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"up"}}}`, false, "use list first", "up", ""},
+		{"empty instructions replaced", `{"jsonrpc":"2.0","id":2,"result":{"instructions":"","serverInfo":{"name":"up"}}}`, false, "use list first", "up", ""},
+		{"null instructions replaced", `{"jsonrpc":"2.0","id":3,"result":{"instructions":null}}`, false, "use list first", "", ""},
+		{"upstream instructions kept", `{"jsonrpc":"2.0","id":4,"result":{"instructions":"upstream says"}}`, true, "", "", ""},
+		{"error response without result unchanged", `{"jsonrpc":"2.0","id":5,"error":{"code":-32600,"message":"bad"}}`, true, "", "", ""},
+		{"null result unchanged", `{"jsonrpc":"2.0","id":6,"result":null}`, true, "", "", ""},
+		{"non-object result returns error", `{"jsonrpc":"2.0","id":7,"result":"hello"}`, false, "", "", "cannot unmarshal"},
+		{"SSE body returns error", `event: message`, false, "", "", "invalid"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := InjectInstructions([]byte(tt.rawResp), "use list first")
+			if tt.wantErrorMsg != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrorMsg) {
+					t.Fatalf("expected error containing %q, got: %v", tt.wantErrorMsg, err)
+				}
+				if string(out) != tt.rawResp {
+					t.Errorf("expected input returned unchanged on error, got %s", string(out))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantUnchanged {
+				if string(out) != tt.rawResp {
+					t.Errorf("expected unchanged response, got %s", string(out))
+				}
+				return
+			}
+			var parsed struct {
+				Result struct {
+					Instructions string `json:"instructions"`
+					ServerInfo   struct {
+						Name string `json:"name"`
+					} `json:"serverInfo"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal(out, &parsed); err != nil {
+				t.Fatalf("failed to unmarshal output: %v", err)
+			}
+			if parsed.Result.Instructions != tt.wantInstructions {
+				t.Errorf("instructions got %q, want %q", parsed.Result.Instructions, tt.wantInstructions)
+			}
+			if parsed.Result.ServerInfo.Name != tt.wantServerName {
+				t.Errorf("serverInfo.name got %q, want %q", parsed.Result.ServerInfo.Name, tt.wantServerName)
+			}
+		})
+	}
+}

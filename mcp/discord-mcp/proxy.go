@@ -66,9 +66,6 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Determine if this request is a tools/list request
-	isToolsList := IsToolsListRequest(bodyBytes)
-
 	// Forward request to upstream
 	targetURL := p.upstreamURL.ResolveReference(r.URL)
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bytes.NewReader(bodyBytes))
@@ -103,18 +100,8 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If this was tools/list, filter the response
-	if isToolsList && resp.StatusCode == http.StatusOK {
-		filtered, err := FilterToolsResponse(respBytes, p.blockedTools)
-		if err == nil {
-			respBytes = filtered
-		} else {
-			log.Printf("[Proxy] Warning: failed to filter tools/list response: %v", err)
-		}
-	} else if strings.EqualFold(strings.TrimSpace(toolName), "discord_search_messages") && resp.StatusCode == http.StatusOK {
-		if shaped, shapeErr := ShapeSearchMessagesResponse(respBytes, ExtractSearchOffset(bodyBytes)); shapeErr == nil {
-			respBytes = shaped
-		}
+	if resp.StatusCode == http.StatusOK {
+		respBytes = p.rewriteResponse(bodyBytes, toolName, respBytes)
 	}
 
 	// Copy response headers
@@ -127,4 +114,30 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(respBytes)))
 	w.WriteHeader(resp.StatusCode)
 	httpkit.WriteResponse(w, r, "discord-mcp", respBytes)
+}
+
+// rewriteResponse applies proxy-side shaping to a successful upstream response:
+// tools/list filtering, initialize instruction injection, and search result shaping.
+func (p *ProxyHandler) rewriteResponse(reqBytes []byte, toolName string, respBytes []byte) []byte {
+	switch {
+	case IsToolsListRequest(reqBytes):
+		filtered, err := FilterToolsResponse(respBytes, p.blockedTools)
+		if err != nil {
+			log.Printf("[Proxy] Warning: failed to filter tools/list response: %v", err)
+			return respBytes
+		}
+		return filtered
+	case IsInitializeRequest(reqBytes):
+		injected, err := InjectInstructions(respBytes, ServerInstructions)
+		if err != nil {
+			log.Printf("[Proxy] Warning: failed to inject initialize instructions: %v", err)
+			return respBytes
+		}
+		return injected
+	case strings.EqualFold(strings.TrimSpace(toolName), "discord_search_messages"):
+		if shaped, err := ShapeSearchMessagesResponse(respBytes, ExtractSearchOffset(reqBytes)); err == nil {
+			return shaped
+		}
+	}
+	return respBytes
 }
