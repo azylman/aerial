@@ -490,30 +490,6 @@ func (te *turnExecution) releaseActivePoolLease() {
 	}
 }
 
-func (p *WorkerPool) setupVanadisChunkTurn(d db.Dispatch, te *turnExecution) func() {
-	chunkID, buildID, chunkIdx := extractVanadisDispatchInfo(&d)
-	if chunkID == "" {
-		return func() {}
-	}
-	// Widget edits ride the turn's trace but must not be aborted by an interrupt.
-	widgetCtx := context.WithoutCancel(te.turnCtxValue())
-	p.StartChunkStepTurn(widgetCtx, chunkID, buildID, chunkIdx, d.ID)
-	p.ensureChunkWidgetHydrated(widgetCtx, d.Prompt, chunkID, buildID)
-	te.statusUpdater = NewChunkStepStatusUpdater(chunkID, func(step string) error {
-		return p.FlushChunkActiveStep(widgetCtx, chunkID, d.ID, step)
-	})
-	return func() {
-		if te.statusUpdater != nil {
-			te.statusUpdater.Stop()
-			te.statusUpdater.DeleteStatusMessage()
-		}
-		p.FinishChunkStepTurn(widgetCtx, chunkID, d.ID)
-		if d.Source == "vanadis" && (p.ctx == nil || p.ctx.Err() == nil) && !te.isInterrupted() {
-			p.notifyVanadisChunkOutcome(chunkID, te.turnStatus, te.turnError, d.ID)
-		}
-	}
-}
-
 func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	if p.ctx.Err() != nil {
 		return
@@ -575,6 +551,9 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	te.beginSetupSpan()
 	defer te.endSetupSpan()
 
+	cleanupDispatch := p.setupDispatchTurn(d, te)
+	defer cleanupDispatch()
+
 	defer func() {
 		if r := recover(); r != nil {
 			te.handleBurstPanic(r)
@@ -586,9 +565,6 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	}
 	defer te.releaseActivePoolLease()
 	defer te.markTurnActive()()
-
-	cleanupChunk := p.setupVanadisChunkTurn(d, te)
-	defer cleanupChunk()
 
 	te.turnAttempted = true
 	promptCtx, promptSpan := te.startSetupChildSpan(te.turnCtxValue(), spanPrompt)

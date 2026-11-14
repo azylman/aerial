@@ -1032,6 +1032,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		AgentName:        appOpts.agentName,
 		ActiveTurns:      activeTurns,
 	})
+	defer attachEriEventBus(ctx, pool)()
 	pool.HoldUntilLeader()
 	pool.Start()
 
