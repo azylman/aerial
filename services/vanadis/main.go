@@ -766,9 +766,6 @@ func (s *VanadisServer) dispatchWakePrompt(ctx context.Context, threadID, prompt
 }
 
 func (s *VanadisServer) enqueueExecuteChunk(ctx context.Context, args ExecuteChunkArgs) error {
-	if s == nil {
-		return errors.New("vanadis server is nil")
-	}
 	if s.bus != nil {
 		msgID := fmt.Sprintf("vanadis:chunk:%s:%d", args.BuildID, args.ChunkIndex)
 		err := s.bus.Publish(ctx, "aerial.jobs.vanadis.chunk", msgID, args)
@@ -787,9 +784,6 @@ func (s *VanadisServer) enqueueExecuteChunk(ctx context.Context, args ExecuteChu
 
 // HandleExecuteChunkJob processes an aerial.jobs.vanadis.chunk execution message from JetStream.
 func (s *VanadisServer) HandleExecuteChunkJob(ctx context.Context, msg pubsub.Message) error {
-	if s == nil || msg == nil {
-		return nil
-	}
 	var args ExecuteChunkArgs
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
 		log.Printf("[vanadis] failed to unmarshal chunk job payload: %v", err)
@@ -810,7 +804,7 @@ func (s *VanadisServer) HandleExecuteChunkJob(ctx context.Context, msg pubsub.Me
 
 // StartJobConsumers subscribes the vanadis durable queue consumers to the configured bus.
 func (s *VanadisServer) StartJobConsumers(ctx context.Context) error {
-	if s == nil || s.bus == nil {
+	if s.bus == nil {
 		return nil
 	}
 	_, err := s.bus.ConsumeQueue(ctx, "aerial.jobs.vanadis.chunk", "vanadis-chunk", s.HandleExecuteChunkJob)

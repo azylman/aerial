@@ -1231,7 +1231,6 @@ func TestEnqueueExecuteChunk(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		nilServer     bool
 		hasBus        bool
 		busErr        error
 		hasRiver      bool
@@ -1241,12 +1240,6 @@ func TestEnqueueExecuteChunk(t *testing.T) {
 		wantBusPub    bool
 		wantRiverCall bool
 	}{
-		{
-			name:      "nil server returns error",
-			nilServer: true,
-			args:      ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 0},
-			wantErr:   true,
-		},
 		{
 			name:       "publishes to jetstream when bus configured",
 			hasBus:     true,
@@ -1292,23 +1285,20 @@ func TestEnqueueExecuteChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var srv *VanadisServer
 			var inserter RiverInserter
 			var mockIns *mockRiverInserter
-			if !tc.nilServer {
-				if tc.hasRiver {
-					mockIns = &mockRiverInserter{err: tc.riverErr}
-					inserter = mockIns
+			if tc.hasRiver {
+				mockIns = &mockRiverInserter{err: tc.riverErr}
+				inserter = mockIns
+			}
+			srv := NewVanadisServer(Config{}, nil, inserter, nil)
+			if tc.hasBus {
+				memBus := pubsub.NewMemoryBus()
+				t.Cleanup(func() { _ = memBus.Close() })
+				if tc.busErr != nil {
+					_ = memBus.Close()
 				}
-				srv = NewVanadisServer(Config{}, nil, inserter, nil)
-				if tc.hasBus {
-					memBus := pubsub.NewMemoryBus()
-					t.Cleanup(func() { _ = memBus.Close() })
-					if tc.busErr != nil {
-						_ = memBus.Close()
-					}
-					srv.SetBus(memBus)
-				}
+				srv.SetBus(memBus)
 			}
 
 			err := srv.enqueueExecuteChunk(ctx, tc.args)
@@ -1328,24 +1318,12 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		nilServer    bool
-		nilMsg       bool
 		rawPayload   string
 		numDelivered uint64
 		brainStatus  int
 		wantErr      bool
 		wantTerm     bool
 	}{
-		{
-			name:      "nil server returns nil",
-			nilServer: true,
-			wantErr:   false,
-		},
-		{
-			name:    "nil msg returns nil",
-			nilMsg:  true,
-			wantErr: false,
-		},
 		{
 			name:       "malformed payload terms message and returns nil",
 			rawPayload: `{"build_id": invalid`,
@@ -1372,22 +1350,6 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.nilServer {
-				msg := &memoryMsg{data: []byte(`{}`)}
-				var srv *VanadisServer
-				if err := srv.HandleExecuteChunkJob(ctx, msg); err != nil {
-					t.Fatalf("unexpected error for nil server: %v", err)
-				}
-				return
-			}
-			if tc.nilMsg {
-				srv := NewVanadisServer(Config{}, nil, nil, nil)
-				if err := srv.HandleExecuteChunkJob(ctx, nil); err != nil {
-					t.Fatalf("unexpected error for nil msg: %v", err)
-				}
-				return
-			}
-
 			brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				status := tc.brainStatus
 				if status == 0 {
@@ -1418,24 +1380,44 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 	}
 }
 
-func TestStartJobConsumers(t *testing.T) {
+func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	var nilSrv *VanadisServer
-	if err := nilSrv.StartJobConsumers(ctx); err != nil {
-		t.Fatalf("unexpected error on nil server: %v", err)
-	}
+	dispatched := make(chan struct{}, 1)
+	brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		select {
+		case dispatched <- struct{}{}:
+		default:
+		}
+	}))
+	defer brainSrv.Close()
 
-	srv := NewVanadisServer(Config{}, nil, nil, nil)
+	memStore := newMemoryVanadisStore()
+	c0 := mkChunk("c-wire-0", "b-wire", 0, "C0", "I0", "medium", "pending")
+	_ = memStore.CreateBuild(ctx, mkBuild("b-wire", "123456789012345678", "Run", "obj", "running"), []VanadisChunk{c0})
+	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, nil, brainSrv.Client())
 	if err := srv.StartJobConsumers(ctx); err != nil {
-		t.Fatalf("unexpected error on nil bus: %v", err)
+		t.Fatalf("StartJobConsumers() on nil bus error: %v", err)
 	}
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
 	srv.SetBus(memBus)
+
 	if err := srv.StartJobConsumers(ctx); err != nil {
 		t.Fatalf("StartJobConsumers() error: %v", err)
+	}
+
+	if err := srv.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: "b-wire", ChunkIndex: 0}); err != nil {
+		t.Fatalf("enqueueExecuteChunk() error: %v", err)
+	}
+
+	select {
+	case <-dispatched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for vanadis-chunk consumer to process chunk")
 	}
 }
