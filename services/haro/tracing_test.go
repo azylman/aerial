@@ -71,16 +71,70 @@ func TestPostBrainJSON_Traceparent(t *testing.T) {
 	}
 }
 
+type traceFireTestCase struct {
+	name         string
+	scheduleType string
+	scheduleID   string
+	withParent   bool
+	dispatchErr  error
+	wantStatus   codes.Code
+}
+
+func findSpanBySpanID(spanID trace.SpanID) sdktrace.ReadOnlySpan {
+	for _, s := range spanRecorder.Ended() {
+		if s.SpanContext().SpanID() == spanID {
+			return s
+		}
+	}
+	return nil
+}
+
+func assertSpanStatusAndAttrs(t *testing.T, span sdktrace.ReadOnlySpan, tc traceFireTestCase) {
+	t.Helper()
+	if span.Status().Code != tc.wantStatus || (tc.wantStatus == codes.Error && span.Status().Description != "dispatch failed") {
+		t.Errorf("status = %+v, want %v with generic description", span.Status(), tc.wantStatus)
+	}
+	attrs := map[string]string{}
+	for _, kv := range span.Attributes() {
+		attrs[string(kv.Key)] = kv.Value.String()
+	}
+	want := map[string]string{"haro.schedule.type": tc.scheduleType, "haro.schedule.id": tc.scheduleID}
+	if len(attrs) != len(want) || attrs["haro.schedule.type"] != want["haro.schedule.type"] || attrs["haro.schedule.id"] != want["haro.schedule.id"] {
+		t.Errorf("attributes = %v, want exactly %v", attrs, want)
+	}
+}
+
+func runTraceFireCase(t *testing.T, tc traceFireTestCase) {
+	t.Helper()
+	parentCtx, parentTraceID := recordedParent(t)
+	ctx := context.Background()
+	if tc.withParent {
+		ctx = parentCtx
+	}
+	var dispatchSC trace.SpanContext
+	_, err := traceFire(ctx, tc.scheduleType, tc.scheduleID, func(ctx context.Context) (DispatchResponse, error) {
+		dispatchSC = trace.SpanContextFromContext(ctx)
+		return DispatchResponse{}, tc.dispatchErr
+	})
+	if !errors.Is(err, tc.dispatchErr) {
+		t.Fatalf("traceFire err = %v, want %v", err, tc.dispatchErr)
+	}
+	span := findSpanBySpanID(dispatchSC.SpanID())
+	if span == nil {
+		t.Fatal("fire span was not recorded")
+	}
+	if span.Name() != "haro.fire "+tc.scheduleType || span.SpanKind() != trace.SpanKindProducer {
+		t.Errorf("span = %q kind %v", span.Name(), span.SpanKind())
+	}
+	if (span.SpanContext().TraceID().String() == parentTraceID) != tc.withParent {
+		t.Errorf("trace id = %s, parent %s, want continues=%v", span.SpanContext().TraceID(), parentTraceID, tc.withParent)
+	}
+	assertSpanStatusAndAttrs(t, span, tc)
+}
+
 func TestTraceFire(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name         string
-		scheduleType string
-		scheduleID   string
-		withParent   bool
-		dispatchErr  error
-		wantStatus   codes.Code
-	}{
+	tests := []traceFireTestCase{
 		{name: "cron fire roots a trace", scheduleType: "cron", scheduleID: "cron-1", wantStatus: codes.Unset},
 		{name: "event trigger continues the webhook trace", scheduleType: "event_watch", scheduleID: "trig-1", withParent: true, wantStatus: codes.Unset},
 		{name: "dispatch failure marks the span without error text", scheduleType: "heartbeat", scheduleID: "hb-1", dispatchErr: errors.New("brain /dispatch returned HTTP 500: secret prompt echo"), wantStatus: codes.Error},
@@ -88,45 +142,7 @@ func TestTraceFire(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			parentCtx, parentTraceID := recordedParent(t)
-			ctx := context.Background()
-			if tc.withParent {
-				ctx = parentCtx
-			}
-			var dispatchSC trace.SpanContext
-			_, err := traceFire(ctx, tc.scheduleType, tc.scheduleID, func(ctx context.Context) (DispatchResponse, error) {
-				dispatchSC = trace.SpanContextFromContext(ctx)
-				return DispatchResponse{}, tc.dispatchErr
-			})
-			if !errors.Is(err, tc.dispatchErr) {
-				t.Fatalf("traceFire err = %v, want %v", err, tc.dispatchErr)
-			}
-			var span sdktrace.ReadOnlySpan
-			for _, s := range spanRecorder.Ended() {
-				if s.SpanContext().SpanID() == dispatchSC.SpanID() {
-					span = s
-				}
-			}
-			if span == nil {
-				t.Fatal("fire span was not recorded")
-			}
-			if span.Name() != "haro.fire "+tc.scheduleType || span.SpanKind() != trace.SpanKindProducer {
-				t.Errorf("span = %q kind %v", span.Name(), span.SpanKind())
-			}
-			if (span.SpanContext().TraceID().String() == parentTraceID) != tc.withParent {
-				t.Errorf("trace id = %s, parent %s, want continues=%v", span.SpanContext().TraceID(), parentTraceID, tc.withParent)
-			}
-			if span.Status().Code != tc.wantStatus || (tc.wantStatus == codes.Error && span.Status().Description != "dispatch failed") {
-				t.Errorf("status = %+v, want %v with generic description", span.Status(), tc.wantStatus)
-			}
-			attrs := map[string]string{}
-			for _, kv := range span.Attributes() {
-				attrs[string(kv.Key)] = kv.Value.String()
-			}
-			want := map[string]string{"haro.schedule.type": tc.scheduleType, "haro.schedule.id": tc.scheduleID}
-			if len(attrs) != len(want) || attrs["haro.schedule.type"] != want["haro.schedule.type"] || attrs["haro.schedule.id"] != want["haro.schedule.id"] {
-				t.Errorf("attributes = %v, want exactly %v", attrs, want)
-			}
+			runTraceFireCase(t, tc)
 		})
 	}
 }

@@ -24,12 +24,6 @@
     "services/eri/pkg/runner/unified_pool_test.go": {
       "lines": 1732
     },
-    "services/haro/scheduler_test.go": {
-      "lines": 2803
-    },
-    "services/haro/server_test.go": {
-      "lines": 1872
-    },
     "services/synapse/github.go": {
       "lines": 1672
     },
