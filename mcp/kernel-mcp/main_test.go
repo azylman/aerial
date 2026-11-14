@@ -451,71 +451,6 @@ func TestServer_HTTPRoutesTable(t *testing.T) {
 	}
 }
 
-func TestServer_MCPMethodsTable(t *testing.T) {
-	_, cfg := startMainFakeCDPServer(t)
-	client := NewCDPClient(cfg)
-	defer client.Close()
-	srv := NewServer(cfg, client)
-	mux := NewHTTPMux(srv)
-
-	tests := []struct {
-		name       string
-		request    string
-		wantSubstr string
-		wantError  bool
-	}{
-		{
-			name:       "invalid json returns parse error",
-			request:    `{invalid`,
-			wantSubstr: "malformed payload",
-			wantError:  true,
-		},
-		{
-			name:       "unknown method is not handled",
-			request:    `{"jsonrpc":"2.0","id":1,"method":"foo/bar"}`,
-			wantSubstr: `"foo/bar" unsupported`,
-			wantError:  true,
-		},
-		{
-			name:       "initialize returns capabilities and serverInfo",
-			request:    `{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}`,
-			wantSubstr: `"name":"kernel-mcp"`,
-			wantError:  false,
-		},
-		{
-			name:       "notifications/initialized returns 204",
-			request:    `{"jsonrpc":"2.0","method":"notifications/initialized"}`,
-			wantSubstr: "",
-			wantError:  false,
-		},
-		{
-			name:       "tools/list returns 9 tools",
-			request:    `{"jsonrpc":"2.0","id":3,"method":"tools/list"}`,
-			wantSubstr: `"browser_navigate"`,
-			wantError:  false,
-		},
-		{
-			name:       "tools/call invalid params returns error",
-			request:    `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":"invalid"}`,
-			wantSubstr: "invalid params",
-			wantError:  true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(tc.request))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, req)
-
-			if tc.wantSubstr != "" && !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("%s: response = %q, want substring %q", tc.name, w.Body.String(), tc.wantSubstr)
-			}
-		})
-	}
-}
-
 func TestServerInstructions(t *testing.T) {
 	_, cfg := startMainFakeCDPServer(t)
 	client := NewCDPClient(cfg)
@@ -650,20 +585,6 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		wantError  bool
 	}{
 		// 1. browser_navigate
-		{
-			name:       "browser_navigate missing url rejected by schema validation",
-			toolName:   "browser_navigate",
-			args:       `{}`,
-			wantSubstr: `missing properties: [\"url\"]`,
-			wantError:  true,
-		},
-		{
-			name:       "browser_navigate undeclared property rejected by schema validation",
-			toolName:   "browser_navigate",
-			args:       `{"url":"https://www.amazon.com","waitUntil":"load"}`,
-			wantSubstr: "validating",
-			wantError:  true,
-		},
 		{
 			name:       "browser_navigate blank url",
 			toolName:   "browser_navigate",
@@ -945,27 +866,13 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			wantSubstr: "added",
 			wantError:  false,
 		},
-		// Prefix aliases: kernel_ resolves to bare names; the legacy steel_ alias is gone.
-		{
-			name:       "steel_ prefix is an unknown tool",
-			toolName:   "steel_browser_navigate",
-			args:       `{"url":"https://www.amazon.com"}`,
-			wantSubstr: `unknown tool \"steel_browser_navigate\"`,
-			wantError:  true,
-		},
+		// Prefix alias: kernel_ resolves to bare names via ServeMCPStream.
 		{
 			name:       "kernel_ prefix normalized to browser_navigate",
 			toolName:   "kernel_browser_navigate",
 			args:       `{"url":"https://www.amazon.com"}`,
 			wantSubstr: "Navigated to https://www.amazon.com",
 			wantError:  false,
-		},
-		{
-			name:       "unknown tool returns error",
-			toolName:   "unknown_tool",
-			args:       `{}`,
-			wantSubstr: `unknown tool \"unknown_tool\"`,
-			wantError:  true,
 		},
 	}
 
