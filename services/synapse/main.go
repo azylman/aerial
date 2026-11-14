@@ -47,6 +47,8 @@ type RouterServer struct {
 	gatewayLatencyFn         func() time.Duration
 	commitSHAPRs             sync.Map
 	gitHistory               gitHistoryCache
+	discordIngressRetryDelay time.Duration
+	discordIngressMaxAge     time.Duration
 }
 
 // NewRouterServer constructs a new RouterServer instance.

@@ -66,6 +66,14 @@ const (
 	maxDeliverWidgetSync         uint64 = 5
 )
 
+func nakBackoffDelay(numDelivered uint64) time.Duration {
+	if numDelivered <= 1 {
+		return 1 * time.Second
+	}
+	shift := min(numDelivered-1, 4)
+	return time.Duration(1<<shift) * time.Second
+}
+
 func termJobIfExhausted(msg pubsub.Message, maxDeliver uint64, jobName string) bool {
 	if msg.NumDelivered() >= maxDeliver {
 		if termErr := msg.Term(); termErr != nil {
@@ -76,67 +84,52 @@ func termJobIfExhausted(msg pubsub.Message, maxDeliver uint64, jobName string) b
 	return false
 }
 
-// HandleGitHubJob processes an aerial.jobs.synapse.github job message from JetStream.
-func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) error {
-	var args GitHubWebhookArgs
+func handleJetStreamJob[T any](msg pubsub.Message, maxDeliver uint64, jobName string, process func(args T) error) error {
+	var args T
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		log.Printf("[synapse] [jetstream] error unmarshaling github job: %v", err)
+		log.Printf("[synapse] [jetstream] error unmarshaling %s job: %v", jobName, err)
 		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[synapse] [jetstream] warning: error terming github job: %v", termErr)
+			log.Printf("[synapse] [jetstream] warning: error terming %s job: %v", jobName, termErr)
 		}
 		return nil
 	}
-	log.Printf("[synapse] [jetstream] processing github job event=%s delivery=%s", args.Event, args.Delivery)
-	if _, err := s.ProcessGitHubEvent(ctx, args.Event, args.Delivery, args.Body); err != nil {
-		log.Printf("[synapse] [jetstream] error processing github job event=%s delivery=%s: %v", args.Event, args.Delivery, err)
-		if termJobIfExhausted(msg, maxDeliverGitHubWebhook, "github") {
+	if err := process(args); err != nil {
+		log.Printf("[synapse] [jetstream] error processing %s job: %v", jobName, err)
+		if termJobIfExhausted(msg, maxDeliver, jobName) {
 			return nil
+		}
+		if nakErr := msg.NakWithDelay(nakBackoffDelay(msg.NumDelivered())); nakErr != nil {
+			log.Printf("[synapse] [jetstream] warning: error naking %s job: %v", jobName, nakErr)
 		}
 		return err
 	}
 	return nil
+}
+
+// HandleGitHubJob processes an aerial.jobs.synapse.github job message from JetStream.
+func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) error {
+	return handleJetStreamJob(msg, maxDeliverGitHubWebhook, "github", func(args GitHubWebhookArgs) error {
+		log.Printf("[synapse] [jetstream] processing github job event=%s delivery=%s", args.Event, args.Delivery)
+		_, err := s.ProcessGitHubEvent(ctx, args.Event, args.Delivery, args.Body)
+		return err
+	})
 }
 
 // HandleDeployJob processes an aerial.jobs.synapse.deploy job message from JetStream.
 func (s *RouterServer) HandleDeployJob(ctx context.Context, msg pubsub.Message) error {
-	var args DeployWebhookArgs
-	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		log.Printf("[synapse] [jetstream] error unmarshaling deploy job: %v", err)
-		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[synapse] [jetstream] warning: error terming deploy job: %v", termErr)
-		}
-		return nil
-	}
-	log.Printf("[synapse] [jetstream] processing deploy job event=%s job_name=%s", args.Event.Event, args.Event.JobName)
-	if _, err := s.ProcessDeployEvent(ctx, args.Event); err != nil {
-		log.Printf("[synapse] [jetstream] error processing deploy job: %v", err)
-		if termJobIfExhausted(msg, maxDeliverDeployWebhook, "deploy") {
-			return nil
-		}
+	return handleJetStreamJob(msg, maxDeliverDeployWebhook, "deploy", func(args DeployWebhookArgs) error {
+		log.Printf("[synapse] [jetstream] processing deploy job event=%s job_name=%s", args.Event.Event, args.Event.JobName)
+		_, err := s.ProcessDeployEvent(ctx, args.Event)
 		return err
-	}
-	return nil
+	})
 }
 
 // HandleMergeConflictJob processes an aerial.jobs.synapse.merge_conflict job message from JetStream.
 func (s *RouterServer) HandleMergeConflictJob(ctx context.Context, msg pubsub.Message) error {
-	var args MergeConflictArgs
-	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		log.Printf("[synapse] [jetstream] error unmarshaling merge conflict job: %v", err)
-		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[synapse] [jetstream] warning: error terming merge conflict job: %v", termErr)
-		}
-		return nil
-	}
-	log.Printf("[synapse] [jetstream] processing merge conflict job repo=%s pr=%d", args.Repo, args.PRNumber)
-	if err := s.ProcessMergeConflict(ctx, args); err != nil {
-		log.Printf("[synapse] [jetstream] error processing merge conflict job: %v", err)
-		if termJobIfExhausted(msg, maxDeliverMergeConflict, "merge conflict") {
-			return nil
-		}
-		return err
-	}
-	return nil
+	return handleJetStreamJob(msg, maxDeliverMergeConflict, "merge conflict", func(args MergeConflictArgs) error {
+		log.Printf("[synapse] [jetstream] processing merge conflict job repo=%s pr=%d", args.Repo, args.PRNumber)
+		return s.ProcessMergeConflict(ctx, args)
+	})
 }
 
 // HandleDiscordIngressJob processes an aerial.jobs.synapse.discord_ingress job message from JetStream.
@@ -154,37 +147,55 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 	defer span.End()
 	defer func() { markDiscordJobSpan(span, err) }()
 
-	// Staleness check (>30m staleness)
-	maxAge := 30 * time.Minute
-	if args.Message != nil && !args.Message.Timestamp.IsZero() && time.Since(args.Message.Timestamp) >= maxAge {
-		RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "ttl_expired")
-		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[synapse] [jetstream] warning: error terming expired discord ingress job: %v", termErr)
-		}
-		return nil
-	}
-
-	pErr := s.ProcessDiscordIngress(ctx, args)
-	if pErr == nil {
-		return nil
-	}
-	if is4xxClientError(pErr) {
-		RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "client_4xx")
-		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[synapse] [jetstream] warning: error terming client 4xx discord ingress job: %v", termErr)
-		}
-		return nil
-	}
 	if termJobIfExhausted(msg, maxDeliverDiscordIngress, "discord ingress") {
 		RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "max_retries_exhausted")
 		return nil
 	}
-	RecordJobRetry(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "discord_ingress_backoff")
-	return pErr
+
+	delay := s.discordIngressRetryDelay
+	if delay <= 0 {
+		delay = 2 * time.Second
+	} else if delay > 5*time.Second {
+		delay = 5 * time.Second
+	}
+	maxAge := s.discordIngressMaxAge
+	if maxAge <= 0 {
+		maxAge = 30 * time.Minute
+	}
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if args.Message != nil && !args.Message.Timestamp.IsZero() && time.Since(args.Message.Timestamp) >= maxAge {
+			RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "ttl_expired")
+			if termErr := msg.Term(); termErr != nil {
+				log.Printf("[synapse] [jetstream] warning: error terming expired discord ingress job: %v", termErr)
+			}
+			return nil
+		}
+		pErr := s.ProcessDiscordIngress(ctx, args)
+		if pErr == nil {
+			return nil
+		}
+		if is4xxClientError(pErr) {
+			RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "client_4xx")
+			if termErr := msg.Term(); termErr != nil {
+				log.Printf("[synapse] [jetstream] warning: error terming client 4xx discord ingress job: %v", termErr)
+			}
+			return nil
+		}
+		RecordJobRetry(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "discord_ingress_backoff")
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // HandleDiscordInteractionJob processes an aerial.jobs.synapse.discord_interaction job message from JetStream.
-func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubsub.Message) (err error) {
+func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubsub.Message) error {
 	var args DiscordInteractionArgs
 	if uErr := json.Unmarshal(msg.Data(), &args); uErr != nil {
 		log.Printf("[synapse] [jetstream] error unmarshaling discord interaction job: %v", uErr)
@@ -195,10 +206,13 @@ func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubs
 	}
 	ctx, span := tracing.Tracer().Start(tracing.ContextWithTraceparent(ctx, args.Traceparent), "process "+QueueDiscordInteraction, discordJobSpanOptions(QueueDiscordInteraction)...)
 	defer span.End()
-	defer func() { markDiscordJobSpan(span, err) }()
+
+	var procErr error
+	defer func() { markDiscordJobSpan(span, procErr) }()
 
 	if pErr := s.ProcessDiscordInteraction(ctx, args); pErr != nil {
 		log.Printf("[synapse] [jetstream] error processing discord interaction job: %v", pErr)
+		procErr = pErr
 		_ = termJobIfExhausted(msg, maxDeliverDiscordInteraction, "discord interaction")
 		return nil
 	}
@@ -207,23 +221,10 @@ func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubs
 
 // HandleWidgetSyncJob processes an aerial.coalesced.widget_sync.> job message from JetStream.
 func (s *RouterServer) HandleWidgetSyncJob(ctx context.Context, msg pubsub.Message) error {
-	var args WidgetSyncArgs
-	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		log.Printf("[synapse] [jetstream] error unmarshaling widget sync job: %v", err)
-		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[synapse] [jetstream] warning: error terming widget sync job: %v", termErr)
-		}
-		return nil
-	}
-	log.Printf("[synapse] [jetstream] processing widget sync job repo=%s pr=%d build_id=%s", args.Repo, args.PRNumber, args.BuildID)
-	if err := s.ProcessWidgetSync(ctx, args); err != nil {
-		log.Printf("[synapse] [jetstream] error processing widget sync job: %v", err)
-		if termJobIfExhausted(msg, maxDeliverWidgetSync, "widget sync") {
-			return nil
-		}
-		return err
-	}
-	return nil
+	return handleJetStreamJob(msg, maxDeliverWidgetSync, "widget sync", func(args WidgetSyncArgs) error {
+		log.Printf("[synapse] [jetstream] processing widget sync job repo=%s pr=%d build_id=%s", args.Repo, args.PRNumber, args.BuildID)
+		return s.ProcessWidgetSync(ctx, args)
+	})
 }
 
 // StartJobConsumers registers the 6 durable consumers for Synapse on AERIAL_JOBS and AERIAL_COALESCED.

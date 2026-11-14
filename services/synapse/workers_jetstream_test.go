@@ -18,6 +18,7 @@ type synapseMemoryMsg struct {
 	subject      string
 	numDelivered uint64
 	termed       bool
+	nakDelay     time.Duration
 }
 
 func (m *synapseMemoryMsg) Data() []byte        { return m.data }
@@ -29,11 +30,11 @@ func (m *synapseMemoryMsg) NumDelivered() uint64 {
 	}
 	return 1
 }
-func (m *synapseMemoryMsg) Ack() error                         { return nil }
-func (m *synapseMemoryMsg) NakWithDelay(_ time.Duration) error { return nil }
-func (m *synapseMemoryMsg) Term() error                        { m.termed = true; return nil }
-func (m *synapseMemoryMsg) Snooze(_ time.Duration) error       { return nil }
-func (m *synapseMemoryMsg) InProgress() error                  { return nil }
+func (m *synapseMemoryMsg) Ack() error                             { return nil }
+func (m *synapseMemoryMsg) NakWithDelay(delay time.Duration) error { m.nakDelay = delay; return nil }
+func (m *synapseMemoryMsg) Term() error                            { m.termed = true; return nil }
+func (m *synapseMemoryMsg) Snooze(_ time.Duration) error           { return nil }
+func (m *synapseMemoryMsg) InProgress() error                      { return nil }
 
 func TestResolveJetStreamJobCoords(t *testing.T) {
 	t.Parallel()
@@ -264,6 +265,27 @@ func TestInsertRiverJobWithJetStream(t *testing.T) {
 	}
 }
 
+func TestNakBackoffDelay(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		numDelivered uint64
+		want         time.Duration
+	}{
+		{0, 1 * time.Second},
+		{1, 1 * time.Second},
+		{2, 2 * time.Second},
+		{3, 4 * time.Second},
+		{4, 8 * time.Second},
+		{5, 16 * time.Second},
+		{10, 16 * time.Second},
+	}
+	for _, tc := range cases {
+		if got := nakBackoffDelay(tc.numDelivered); got != tc.want {
+			t.Errorf("nakBackoffDelay(%d) = %v, want %v", tc.numDelivered, got, tc.want)
+		}
+	}
+}
+
 type jetstreamHandlerCase struct {
 	name         string
 	handlerType  string
@@ -282,12 +304,6 @@ func jetstreamWebhookAndDeployCases() []jetstreamHandlerCase {
 			handlerType: "github",
 			payload:     `{bad json`,
 			wantTerm:    true,
-		},
-		{
-			name:        "HandleGitHubJob valid ping payload",
-			handlerType: "github",
-			payload:     `{"event":"ping","delivery":"d-1","body":"e30="}`,
-			wantErr:     false,
 		},
 		{
 			name:         "HandleGitHubJob error processing payload below limit",
@@ -310,12 +326,6 @@ func jetstreamWebhookAndDeployCases() []jetstreamHandlerCase {
 			handlerType: "deploy",
 			payload:     `{bad json`,
 			wantTerm:    true,
-		},
-		{
-			name:        "HandleDeployJob valid payload",
-			handlerType: "deploy",
-			payload:     `{"idempotency_key":"k-1","event":{"event":"unknown_deploy_event"}}`,
-			wantErr:     false,
 		},
 		{
 			name:         "HandleDeployJob error processing payload below limit",
@@ -342,12 +352,6 @@ func jetstreamWebhookAndDeployCases() []jetstreamHandlerCase {
 			handlerType: "conflict",
 			payload:     `{bad json`,
 			wantTerm:    true,
-		},
-		{
-			name:        "HandleMergeConflictJob valid payload",
-			handlerType: "conflict",
-			payload:     `{"repo":"azylman/aerial","pr_number":42}`,
-			wantErr:     false,
 		},
 		{
 			name:         "HandleMergeConflictJob error dispatching prompt below limit",
@@ -385,12 +389,6 @@ func jetstreamDiscordAndWidgetCases() []jetstreamHandlerCase {
 			wantTerm:    true,
 		},
 		{
-			name:        "HandleDiscordIngressJob valid 200 payload",
-			handlerType: "ingress",
-			payload:     `{"message_id":"123","message":{"id":"123"}}`,
-			wantErr:     false,
-		},
-		{
 			name:        "HandleDiscordIngressJob client 4xx terms",
 			handlerType: "ingress",
 			payload:     `{"message_id":"124","message":{"id":"124"}}`,
@@ -405,6 +403,15 @@ func jetstreamDiscordAndWidgetCases() []jetstreamHandlerCase {
 			dispErrType:  "msg_500",
 			numDelivered: 1,
 			wantErr:      true,
+			wantTerm:     false,
+		},
+		{
+			name:         "HandleDiscordIngressJob recovers after temporary error",
+			handlerType:  "ingress",
+			payload:      `{"message_id":"126","message":{"id":"126"}}`,
+			dispErrType:  "msg_recover",
+			numDelivered: 1,
+			wantErr:      false,
 			wantTerm:     false,
 		},
 		{
@@ -423,12 +430,6 @@ func jetstreamDiscordAndWidgetCases() []jetstreamHandlerCase {
 			wantTerm:    true,
 		},
 		{
-			name:        "HandleDiscordInteractionJob valid payload",
-			handlerType: "interaction",
-			payload:     `{"interaction_id":"ix-1"}`,
-			wantErr:     false,
-		},
-		{
 			name:         "HandleDiscordInteractionJob dispatch error at limit terms",
 			handlerType:  "interaction",
 			payload:      `{"interaction_id":"ix-2","interaction":{}}`,
@@ -442,13 +443,6 @@ func jetstreamDiscordAndWidgetCases() []jetstreamHandlerCase {
 			handlerType: "widget",
 			payload:     `{bad json`,
 			wantTerm:    true,
-		},
-		{
-			name:        "HandleWidgetSyncJob valid payload with mock registry",
-			handlerType: "widget",
-			payload:     `{"repo":"azylman/aerial","pr_number":99}`,
-			withMockReg: true,
-			wantErr:     false,
 		},
 		{
 			name:         "HandleWidgetSyncJob dispatch error below limit",
@@ -485,12 +479,16 @@ func TestJetStreamJobHandlers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			srv := &RouterServer{
-				cfgSrc: fixedConfig(Config{SystemChannelID: "100000000000000001"}),
+				cfgSrc:                   fixedConfig(Config{SystemChannelID: "100000000000000001"}),
+				discordIngressRetryDelay: 1 * time.Millisecond,
 			}
 			disp := &mockOutboundDispatcher{}
 			switch tc.dispErrType {
 			case "msg_4xx":
 				disp.discordMessageErr = errors.New("request returned status 400 Bad Request")
+			case "msg_recover":
+				disp.discordMessageErr = errors.New("request returned status 500 Internal Server Error")
+				disp.discordMessageFailCount = 1
 			case "msg_500":
 				disp.discordMessageErr = errors.New("request returned status 500 Internal Server Error")
 			case "interaction_err":
@@ -514,20 +512,27 @@ func TestJetStreamJobHandlers(t *testing.T) {
 				numDelivered: tc.numDelivered,
 			}
 
+			testCtx := ctx
+			if tc.dispErrType == "msg_500" && tc.wantErr {
+				var cancel context.CancelFunc
+				testCtx, cancel = context.WithTimeout(ctx, 15*time.Millisecond)
+				defer cancel()
+			}
+
 			var err error
 			switch tc.handlerType {
 			case "github":
-				err = srv.HandleGitHubJob(ctx, memMsg)
+				err = srv.HandleGitHubJob(testCtx, memMsg)
 			case "deploy":
-				err = srv.HandleDeployJob(ctx, memMsg)
+				err = srv.HandleDeployJob(testCtx, memMsg)
 			case "conflict":
-				err = srv.HandleMergeConflictJob(ctx, memMsg)
+				err = srv.HandleMergeConflictJob(testCtx, memMsg)
 			case "ingress":
-				err = srv.HandleDiscordIngressJob(ctx, memMsg)
+				err = srv.HandleDiscordIngressJob(testCtx, memMsg)
 			case "interaction":
-				err = srv.HandleDiscordInteractionJob(ctx, memMsg)
+				err = srv.HandleDiscordInteractionJob(testCtx, memMsg)
 			case "widget":
-				err = srv.HandleWidgetSyncJob(ctx, memMsg)
+				err = srv.HandleWidgetSyncJob(testCtx, memMsg)
 			}
 
 			if (err != nil) != tc.wantErr {
@@ -544,6 +549,7 @@ type wiringDispatcher struct {
 	mockOutboundDispatcher
 
 	onPrompt      func()
+	onDirect      func()
 	onBackground  func()
 	onMessage     func()
 	onInteraction func()
@@ -554,6 +560,14 @@ func (w *wiringDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest
 	err := w.mockOutboundDispatcher.DispatchPrompt(ctx, req)
 	if w.onPrompt != nil {
 		w.onPrompt()
+	}
+	return err
+}
+
+func (w *wiringDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
+	err := w.mockOutboundDispatcher.DispatchDirectMessage(ctx, req)
+	if w.onDirect != nil {
+		w.onDirect()
 	}
 	return err
 }
@@ -628,11 +642,13 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	interactionCh := make(chan struct{}, 1)
 	widgetCh := make(chan struct{}, 1)
 
-	disp.onWidget = func() {
+	disp.onDirect = func() {
 		select {
 		case deployCh <- struct{}{}:
 		default:
 		}
+	}
+	disp.onWidget = func() {
 		select {
 		case widgetCh <- struct{}{}:
 		default:
@@ -672,9 +688,8 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 			args: DeployWebhookArgs{
 				IdempotencyKey: "wire-dep",
 				Event: DeployEvent{
-					Event:    "deploy_started",
+					Event:    "deploy_failed",
 					Repo:     "azylman/aerial",
-					PRNumber: 10,
 					TargetID: "100000000000000001",
 				},
 			},

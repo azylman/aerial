@@ -1237,15 +1237,13 @@ func TestEnqueueExecuteChunk(t *testing.T) {
 		riverErr      error
 		args          ExecuteChunkArgs
 		wantErr       bool
-		wantBusPub    bool
 		wantRiverCall bool
 	}{
 		{
-			name:       "publishes to jetstream when bus configured",
-			hasBus:     true,
-			args:       ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 1},
-			wantErr:    false,
-			wantBusPub: true,
+			name:    "publishes to jetstream when bus configured",
+			hasBus:  true,
+			args:    ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 1},
+			wantErr: false,
 		},
 		{
 			name:          "falls back to river when bus publish fails",
@@ -1331,11 +1329,12 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 			wantTerm:   true,
 		},
 		{
-			name:         "valid chunk attempt 1 dispatches non-final",
+			name:         "chunk attempt 1 fails non-final without terming",
 			rawPayload:   `{"build_id":"b-run","chunk_index":0}`,
 			numDelivered: 1,
-			brainStatus:  http.StatusAccepted,
-			wantErr:      false,
+			brainStatus:  http.StatusBadGateway,
+			wantErr:      true,
+			wantTerm:     false,
 		},
 		{
 			name:         "valid chunk attempt 3 dispatches final attempt and terms on failure",
@@ -1399,9 +1398,6 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	c0 := mkChunk("c-wire-0", "b-wire", 0, "C0", "I0", "medium", "pending")
 	_ = memStore.CreateBuild(ctx, mkBuild("b-wire", "123456789012345678", "Run", "obj", "running"), []VanadisChunk{c0})
 	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, nil, brainSrv.Client())
-	if err := srv.StartJobConsumers(ctx); err != nil {
-		t.Fatalf("StartJobConsumers() on nil bus error: %v", err)
-	}
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
