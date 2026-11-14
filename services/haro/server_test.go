@@ -94,6 +94,19 @@ func TestNewServer_NilHandlerPanics(t *testing.T) {
 	NewServer(nil)
 }
 
+func TestNewServer_BrainURLDispatcherConstruction(t *testing.T) {
+	db := setupTestDB(t)
+	sWithURL := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:", BrainURL: "http://eri:8080"}, db))
+	if sWithURL.dispatcher == nil {
+		t.Error("expected non-nil dispatcher when BrainURL is configured")
+	}
+
+	sWithoutURL := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:", BrainURL: ""}, db))
+	if sWithoutURL.dispatcher != nil {
+		t.Error("expected nil dispatcher when BrainURL is empty")
+	}
+}
+
 type serverHTTPTestCase struct {
 	name       string
 	method     string

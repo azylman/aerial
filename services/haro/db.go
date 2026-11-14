@@ -10,7 +10,6 @@ import (
 	"math"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -641,17 +640,10 @@ func SetVanadisURL(u string) {
 }
 
 // GetVanadisURL gets the base URL for Vanadis HTTP API calls.
-// Explicitly configured URLs via SetVanadisURL take precedence over environment defaults.
 func GetVanadisURL() string {
 	vanadisMu.RLock()
 	defer vanadisMu.RUnlock()
-	if vanadisURL != "" {
-		return vanadisURL
-	}
-	if env := strings.TrimSpace(os.Getenv("VANADIS_URL")); env != "" {
-		return strings.TrimRight(env, "/")
-	}
-	return "http://vanadis.aerial"
+	return vanadisURL
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -673,68 +665,61 @@ func ValidateLiveEventTarget(ctx context.Context, database *sql.DB, source, targ
 	if target == "" {
 		return fmt.Errorf("target cannot be empty")
 	}
-	baseURL := GetVanadisURL()
+	baseURL := strings.TrimSpace(GetVanadisURL())
 	switch source {
-	case "vanadis_build":
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/builds/%s", baseURL, url.PathEscape(target)), nil)
-		if err != nil {
-			return fmt.Errorf("create vanadis build request: %w", err)
+	case "vanadis_build", "vanadis_chunk":
+		return validateVanadisTarget(ctx, baseURL, source, target)
+	}
+	return nil
+}
+
+func validateVanadisTarget(ctx context.Context, baseURL, source, target string) error {
+	if baseURL == "" {
+		return fmt.Errorf("vanadis URL is not configured")
+	}
+	pathPrefix := "builds"
+	terminalStates := map[string]bool{
+		"completed": true, "merged": true, "failed": true, "cancelled": true, "canceled": true,
+	}
+	entityName := "vanadis build"
+	if source == "vanadis_chunk" {
+		pathPrefix = "chunks"
+		terminalStates = map[string]bool{
+			"merged": true, "completed": true, "failed": true,
 		}
-		resp, err := vanadisClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("failed to query vanadis build %q: %w", target, err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("vanadis build %q not found", target)
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("failed to query vanadis build %q: HTTP %d", target, resp.StatusCode)
-		}
-		var bResp struct {
-			Build struct {
-				Status string `json:"status"`
-			} `json:"build"`
+		entityName = "vanadis chunk"
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/%s/%s", baseURL, pathPrefix, url.PathEscape(target)), nil)
+	if err != nil {
+		return fmt.Errorf("create %s request: %w", entityName, err)
+	}
+	resp, err := vanadisClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to query %s %q: %w", entityName, target, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%s %q not found", entityName, target)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("failed to query %s %q: HTTP %d", entityName, target, resp.StatusCode)
+	}
+	var res struct {
+		Build struct {
 			Status string `json:"status"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&bResp); err != nil {
-			return fmt.Errorf("failed to decode vanadis build %q response: %w", target, err)
-		}
-		status := firstNonEmpty(bResp.Build.Status, bResp.Status)
-		switch strings.ToLower(strings.TrimSpace(status)) {
-		case "completed", "merged", "failed", "cancelled", "canceled":
-			return fmt.Errorf("vanadis build %q is already in terminal state %q", target, status)
-		}
-	case "vanadis_chunk":
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/chunks/%s", baseURL, url.PathEscape(target)), nil)
-		if err != nil {
-			return fmt.Errorf("create vanadis chunk request: %w", err)
-		}
-		resp, err := vanadisClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("failed to query vanadis chunk %q: %w", target, err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("vanadis chunk %q not found", target)
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("failed to query vanadis chunk %q: HTTP %d", target, resp.StatusCode)
-		}
-		var cResp struct {
-			Chunk struct {
-				Status string `json:"status"`
-			} `json:"chunk"`
+		} `json:"build"`
+		Chunk struct {
 			Status string `json:"status"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&cResp); err != nil {
-			return fmt.Errorf("failed to decode vanadis chunk %q response: %w", target, err)
-		}
-		status := firstNonEmpty(cResp.Chunk.Status, cResp.Status)
-		switch strings.ToLower(strings.TrimSpace(status)) {
-		case "merged", "completed", "failed":
-			return fmt.Errorf("vanadis chunk %q is already in terminal state %q", target, status)
-		}
+		} `json:"chunk"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return fmt.Errorf("failed to decode %s %q response: %w", entityName, target, err)
+	}
+	status := firstNonEmpty(res.Build.Status, res.Chunk.Status, res.Status)
+	if terminalStates[strings.ToLower(strings.TrimSpace(status))] {
+		return fmt.Errorf("%s %q is already in terminal state %q", entityName, target, status)
 	}
 	return nil
 }

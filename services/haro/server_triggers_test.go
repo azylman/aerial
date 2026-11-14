@@ -102,7 +102,7 @@ func TestHandleClaimEventTriggers_Table(t *testing.T) {
 
 	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
 		ID:        "trig-claim-1",
-		ChannelID: "1555405874565091380",
+		ChannelID: "100000000000000001",
 		Source:    "github",
 		Target:    "azylman/aerial",
 		EventType: "ci_passed",
@@ -111,7 +111,7 @@ func TestHandleClaimEventTriggers_Table(t *testing.T) {
 	})
 	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
 		ID:         "trig-claim-persistent-1",
-		ChannelID:  "1555405874565091380",
+		ChannelID:  "100000000000000001",
 		Source:     "camera",
 		Target:     "garage",
 		EventType:  "person_arrived",
@@ -165,7 +165,7 @@ func TestHandleCheckEventTriggers_Table(t *testing.T) {
 
 	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
 		ID:        "trig-check-1",
-		ChannelID: "1555405874565091380",
+		ChannelID: "100000000000000001",
 		Source:    "custom_source",
 		Target:    "device.alpha",
 		EventType: "ready",
@@ -213,7 +213,7 @@ func TestHandleFireEventTriggers_Table(t *testing.T) {
 
 	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
 		ID:        "trig-fire-1",
-		ChannelID: "1555405874565091380",
+		ChannelID: "100000000000000001",
 		Source:    "custom_source",
 		Target:    "device.alpha",
 		EventType: "ready",
@@ -222,7 +222,7 @@ func TestHandleFireEventTriggers_Table(t *testing.T) {
 	})
 	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
 		ID:         "trig-fire-persistent-1",
-		ChannelID:  "1555405874565091380",
+		ChannelID:  "100000000000000001",
 		Source:     "camera",
 		Target:     "entryway",
 		EventType:  "package_delivered",
@@ -232,7 +232,7 @@ func TestHandleFireEventTriggers_Table(t *testing.T) {
 	})
 	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
 		ID:         "trig-fire-persistent-error",
-		ChannelID:  "1555405874565091380",
+		ChannelID:  "100000000000000001",
 		Source:     "camera",
 		Target:     "porch",
 		EventType:  "package_delivered",
@@ -254,6 +254,7 @@ func TestHandleFireEventTriggers_Table(t *testing.T) {
 	serverNoDisp.dispatcher = nil
 	serverFailDisp := NewServer(server.handler, mockDispFail)
 	serverOKDisp := NewServer(server.handler, mockDispOK)
+	serverClosedWithDisp := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB), mockDispOK)
 
 	tests := []struct {
 		name       string
@@ -273,6 +274,8 @@ func TestHandleFireEventTriggers_Table(t *testing.T) {
 		{"fire persistent trigger second time within 5s debounce window returns 0 fired", http.MethodPost, `{"source":"camera","targets":["entryway"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 0},
 		{"fire dispatch error does not reinsert duplicate for persistent trigger", http.MethodPost, `{"source":"camera","targets":["porch"],"event_type":"package_delivered"}`, serverFailDisp, http.StatusBadGateway, 0},
 		{"fire retry succeeds for persistent trigger after failed dispatch", http.MethodPost, `{"source":"camera","targets":["porch"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 1},
+		{"fire missing fields error", http.MethodPost, `{"source":""}`, serverOKDisp, http.StatusBadRequest, 0},
+		{"fire claim error on closed db", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready"}`, serverClosedWithDisp, http.StatusInternalServerError, 0},
 	}
 
 	for _, tc := range tests {

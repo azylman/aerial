@@ -48,11 +48,14 @@ func TestResolveConfigPath(t *testing.T) {
 func TestLoadConfigFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	validPath, noPortPath, noTZPath, malformedPath := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "no_port.yaml"), filepath.Join(tmpDir, "no_tz.yaml"), filepath.Join(tmpDir, "malformed.yaml")
+	noEriPath, noVanadisPath := filepath.Join(tmpDir, "no_eri.yaml"), filepath.Join(tmpDir, "no_vanadis.yaml")
 	extraPath := filepath.Join(tmpDir, "extra.yaml")
-	_ = os.WriteFile(validPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\n"), 0o644)
-	_ = os.WriteFile(extraPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\nextra_event_sources:\n  - ' Custom_Source '\n  - ''\n  - 'custom_source'\n"), 0o644)
-	_ = os.WriteFile(noPortPath, []byte("timezone: 'America/Chicago'\n"), 0o644)
-	_ = os.WriteFile(noTZPath, []byte("port: '4005'\n"), 0o644)
+	_ = os.WriteFile(validPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
+	_ = os.WriteFile(extraPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\nextra_event_sources:\n  - ' Custom_Source '\n  - ''\n  - 'custom_source'\n"), 0o644)
+	_ = os.WriteFile(noPortPath, []byte("timezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
+	_ = os.WriteFile(noTZPath, []byte("port: '4005'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
+	_ = os.WriteFile(noEriPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
+	_ = os.WriteFile(noVanadisPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\n"), 0o644)
 	_ = os.WriteFile(malformedPath, []byte("port: [unclosed"), 0o644)
 
 	tests := []struct {
@@ -73,11 +76,15 @@ func TestLoadConfigFile(t *testing.T) {
 		{"malformed yaml", malformedPath, "postgres://localhost/db", "", true, "", "", "", 0},
 		{"missing port", noPortPath, "postgres://localhost/db", "", true, "", "", "", 0},
 		{"missing timezone", noTZPath, "postgres://localhost/db", "", true, "", "", "", 0},
+		{"missing eri_url", noEriPath, "postgres://localhost/db", "", true, "", "", "", 0},
+		{"missing vanadis_url", noVanadisPath, "postgres://localhost/db", "", true, "", "", "", 0},
 		{"empty dbURL", validPath, "", "", true, "", "", "", 0},
 		{"empty path", "", "postgres://localhost/db", "", true, "", "", "", 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ERI_URL", "")
+			t.Setenv("VANADIS_URL", "")
 			t.Setenv("DATABASE_URL", "")
 			t.Setenv("POSTGRES_URL", "")
 			t.Setenv("POSTGRES_HOST", "")
@@ -101,8 +108,8 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 	tmpDir := t.TempDir()
 	pathWithEri := filepath.Join(tmpDir, "with_eri.yaml")
 	pathWithoutBrain := filepath.Join(tmpDir, "without_brain.yaml")
-	_ = os.WriteFile(pathWithEri, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\n"), 0o644)
-	_ = os.WriteFile(pathWithoutBrain, []byte("port: '4005'\ntimezone: 'UTC'\n"), 0o644)
+	_ = os.WriteFile(pathWithEri, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:8080'\n"), 0o644)
+	_ = os.WriteFile(pathWithoutBrain, []byte("port: '4005'\ntimezone: 'UTC'\nvanadis_url: 'http://yaml.vanadis:8080'\n"), 0o644)
 
 	tests := []struct {
 		name         string
@@ -128,21 +135,21 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 			wantBrainURL: "http://yaml.eri:8088",
 		},
 		{
-			name:         "default fallback when nothing configured",
-			path:         pathWithoutBrain,
-			envDB:        "postgres://localhost/db",
-			wantBrainURL: "http://eri.aerial",
+			name:    "missing eri_url returns error",
+			path:    pathWithoutBrain,
+			envDB:   "postgres://localhost/db",
+			wantErr: true,
 		},
 		{
 			name:         "decomposed POSTGRES_PASSWORD resolution",
-			path:         pathWithoutBrain,
+			path:         pathWithEri,
 			envPassword:  "secretpass",
-			wantBrainURL: "http://eri.aerial",
+			wantBrainURL: "http://yaml.eri:8088",
 			wantDB:       "postgres://aerial:secretpass@postgres:5432/aerial?sslmode=disable",
 		},
 		{
 			name:    "missing DB returns error via LoadConfig",
-			path:    pathWithoutBrain,
+			path:    pathWithEri,
 			envDB:   "",
 			wantErr: true,
 		},
@@ -150,6 +157,7 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("VANADIS_URL", "")
 			t.Setenv("ERI_URL", tc.envEri)
 			t.Setenv("DATABASE_URL", tc.envDB)
 			t.Setenv("POSTGRES_URL", "")
@@ -182,8 +190,8 @@ func TestLoadConfig_VanadisURLResolution(t *testing.T) {
 	tmpDir := t.TempDir()
 	pathWithVanadis := filepath.Join(tmpDir, "with_vanadis.yaml")
 	pathWithoutVanadis := filepath.Join(tmpDir, "without_vanadis.yaml")
-	_ = os.WriteFile(pathWithVanadis, []byte("port: '4005'\ntimezone: 'UTC'\nvanadis_url: 'http://yaml.vanadis:4025/'\n"), 0o644)
-	_ = os.WriteFile(pathWithoutVanadis, []byte("port: '4005'\ntimezone: 'UTC'\n"), 0o644)
+	_ = os.WriteFile(pathWithVanadis, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8080'\nvanadis_url: 'http://yaml.vanadis:4025/'\n"), 0o644)
+	_ = os.WriteFile(pathWithoutVanadis, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8080'\n"), 0o644)
 
 	tests := []struct {
 		name           string
@@ -208,16 +216,17 @@ func TestLoadConfig_VanadisURLResolution(t *testing.T) {
 			wantVanadisURL: "http://yaml.vanadis:4025",
 		},
 		{
-			name:           "default fallback when nothing configured",
-			path:           pathWithoutVanadis,
-			envVanadis:     "",
-			envDB:          "postgres://localhost/db",
-			wantVanadisURL: "http://vanadis.aerial",
+			name:       "missing vanadis_url returns error",
+			path:       pathWithoutVanadis,
+			envVanadis: "",
+			envDB:      "postgres://localhost/db",
+			wantErr:    true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ERI_URL", "")
 			t.Setenv("VANADIS_URL", tc.envVanadis)
 			t.Setenv("DATABASE_URL", tc.envDB)
 			t.Setenv("POSTGRES_URL", "")

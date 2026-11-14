@@ -70,8 +70,12 @@ type HTTPPromptDispatcher struct {
 }
 
 func NewHTTPPromptDispatcher(brainURL string) *HTTPPromptDispatcher {
+	trimmed := strings.TrimRight(strings.TrimSpace(brainURL), "/")
+	if trimmed == "" {
+		panic("ticker: brainURL cannot be empty")
+	}
 	return &HTTPPromptDispatcher{
-		brainURL: strings.TrimRight(strings.TrimSpace(brainURL), "/"),
+		brainURL: trimmed,
 		// Traced so each eri turn joins the trace of the schedule or trigger that fired it.
 		httpClient: tracing.Client(&http.Client{
 			Timeout: 15 * time.Second,
@@ -106,7 +110,7 @@ func postBrainJSON[Req any, Resp any](ctx context.Context, d *HTTPPromptDispatch
 	}
 	brainURL := strings.TrimRight(strings.TrimSpace(d.brainURL), "/")
 	if brainURL == "" {
-		brainURL = "http://eri.aerial"
+		return zero, fmt.Errorf("brain URL is not configured")
 	}
 
 	body, err := json.Marshal(req)

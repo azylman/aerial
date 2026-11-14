@@ -223,7 +223,7 @@ func setupMockDispatcherServer(t *testing.T, expectedPath string, status int, re
 		dispatcher = nil
 	case testName == "default http client used when httpClient is nil":
 		dispatcher = &HTTPPromptDispatcher{brainURL: server.URL}
-	case testName == "empty brain url defaults to eri.aerial":
+	case testName == "empty brain url fails fast":
 		dispatcher = &HTTPPromptDispatcher{}
 	default:
 		serverURL := server.URL + "/"
@@ -234,11 +234,6 @@ func setupMockDispatcherServer(t *testing.T, expectedPath string, status int, re
 	}
 
 	ctx := context.Background()
-	if testName == "empty brain url defaults to eri.aerial" {
-		cancelCtx, cancel := context.WithCancel(ctx)
-		cancel()
-		ctx = cancelCtx
-	}
 	return dispatcher, server, ctx
 }
 
@@ -351,7 +346,7 @@ func TestHTTPPromptDispatcher(t *testing.T) {
 			wantChannelID: "nil-client-chan",
 		},
 		{
-			name: "empty brain url defaults to eri.aerial",
+			name: "empty brain url fails fast",
 			req: PromptDispatchRequest{
 				Prompt: "test empty url",
 			},
@@ -461,7 +456,7 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			wantDispatchID: "disp-nc",
 		},
 		{
-			name:    "empty brain url defaults to eri.aerial",
+			name:    "empty brain url fails fast",
 			req:     DispatchRequest{Source: "heartbeat", Prompt: "test default url"},
 			wantErr: true,
 		},
@@ -472,6 +467,24 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			runDispatchCase(t, tc)
 		})
 	}
+}
+
+func TestNewHTTPPromptDispatcher_Validation(t *testing.T) {
+	t.Run("empty URL panics", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("expected panic for empty brainURL, got nil")
+			}
+		}()
+		NewHTTPPromptDispatcher("   ")
+	})
+
+	t.Run("valid URL succeeds", func(t *testing.T) {
+		disp := NewHTTPPromptDispatcher("http://localhost:8080/")
+		if disp.brainURL != "http://localhost:8080" {
+			t.Errorf("disp.brainURL = %q, want %q", disp.brainURL, "http://localhost:8080")
+		}
+	})
 }
 
 func TestDB_CronOperations(t *testing.T) {

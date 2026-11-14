@@ -197,9 +197,16 @@ func testValidateLiveEventTarget(ctx context.Context, t *testing.T, db *sql.DB) 
 		{"other source flux", "flux", "azylman/aerial", false},
 		{"other source github", "github", "azylman/aerial:main", false},
 		{"other source nomad", "nomad", "aerial-brain", false},
+		{"vanadis URL not configured build", "vanadis_build", "b-running", true},
+		{"vanadis URL not configured chunk", "vanadis_chunk", "c-pending", true},
 	}
 	for _, tc := range validateTests {
 		t.Run("validate_"+tc.name, func(t *testing.T) {
+			if strings.HasPrefix(tc.name, "vanadis URL not configured") {
+				old := GetVanadisURL()
+				SetVanadisURL("")
+				defer SetVanadisURL(old)
+			}
 			err := ValidateLiveEventTarget(ctx, db, tc.source, tc.target)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ValidateLiveEventTarget(%q, %q) err = %v, wantErr = %v", tc.source, tc.target, err, tc.wantErr)
@@ -658,7 +665,7 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-ext-1",
-		ChannelID: "1555405874565091380",
+		ChannelID: "100000000000000001",
 		Source:    "camera",
 		Target:    "driveway",
 		EventType: "vehicle_detected",
@@ -668,7 +675,7 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-ext-fail",
-		ChannelID: "1555405874565091380",
+		ChannelID: "100000000000000001",
 		Source:    "camera",
 		Target:    "backyard",
 		EventType: "motion",
@@ -677,8 +684,19 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 	})
 
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
+		ID:         "trig-ext-fail-persistent",
+		ChannelID:  "100000000000000001",
+		Source:     "camera",
+		Target:     "porch",
+		EventType:  "motion",
+		Prompt:     "Motion on porch",
+		Effort:     "low",
+		Persistent: true,
+	})
+
+	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-ext-healthcheck",
-		ChannelID: "1555405874565091380",
+		ChannelID: "100000000000000001",
 		Source:    "healthcheck",
 		Target:    "ping",
 		EventType: "ping",
@@ -721,6 +739,12 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "nil db returns error from HandleExternalEvent",
+			server:  &Server{},
+			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}},
+			wantErr: true,
+		},
+		{
 			name:    "no matching triggers succeeds without firing",
 			server:  serverOK,
 			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"front_door"}},
@@ -732,6 +756,14 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"backyard"}},
 			wantErr:   false,
 			checkDBID: "trig-ext-fail",
+			wantInDB:  true,
+		},
+		{
+			name:      "dispatch failure resets updated_at for persistent trigger",
+			server:    serverFail,
+			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"porch"}},
+			wantErr:   false,
+			checkDBID: "trig-ext-fail-persistent",
 			wantInDB:  true,
 		},
 		{
@@ -754,7 +786,7 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 				verifyTriggerState(ctx, t, db, tc.ev, tc.wantInDB)
 			}
 			if tc.name == "successful dispatch claims and fires trigger" {
-				verifyDispatchedPrompt(t, mockDispOK, "1555405874565091380", "Camera Alert\n\nVehicle in driveway")
+				verifyDispatchedPrompt(t, mockDispOK, "100000000000000001", "Camera Alert\n\nVehicle in driveway")
 			}
 		})
 	}
@@ -782,7 +814,7 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-int-1",
-		ChannelID: "1555405874565091380",
+		ChannelID: "100000000000000001",
 		Source:    "flux",
 		Target:    "aerial",
 		EventType: "sync_success",
@@ -900,18 +932,14 @@ func TestVanadisURL_Precedence(t *testing.T) {
 	tests := []struct {
 		name    string
 		setURL  string
-		envURL  string
 		wantURL string
 	}{
-		{"explicit setURL takes precedence over env", "http://explicit.vanadis", "http://env.vanadis", "http://explicit.vanadis"},
-		{"fallback to env when setURL empty", "", "http://env.vanadis", "http://env.vanadis"},
-		{"trailing slash stripped from explicit", "http://explicit.vanadis/api/", "", "http://explicit.vanadis/api"},
-		{"trailing slash stripped from env", "", "http://env.vanadis/api/", "http://env.vanadis/api"},
-		{"default fallback when both empty", "", "", "http://vanadis.aerial"},
+		{"explicit setURL returned directly", "http://explicit.vanadis", "http://explicit.vanadis"},
+		{"trailing slash stripped from explicit", "http://explicit.vanadis/api/", "http://explicit.vanadis/api"},
+		{"empty when not configured", "", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("VANADIS_URL", tc.envURL)
 			SetVanadisURL(tc.setURL)
 			got := GetVanadisURL()
 			if got != tc.wantURL {
