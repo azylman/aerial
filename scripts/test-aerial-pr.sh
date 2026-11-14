@@ -1011,6 +1011,7 @@ assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch_s
 # Case 17: github-runner roborev wrapper ROBOREV_SYNC_BRANCH propagation + roborev-override rebuttal backfill and head short-circuit
 ROBOREV_WRAPPER_CHECK=$(SCRIPT_DIR="$SCRIPT_DIR" bash -s << 'CASE17_EOF'
 set -euo pipefail
+unset CLAUDE_CODE_OAUTH_TOKEN
 TEST_ROOT=$(mktemp -d /tmp/roborev-wrapper-test.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 ENTRYPOINT_FILE="${SCRIPT_DIR}/../services/github-runner/entrypoint.sh"
@@ -1023,13 +1024,14 @@ REPO_DIR="$TEST_ROOT/aerial"
 mkdir -p "$STATE_DIR" "$REPO_DIR"
 
 awk '/^  cat > \/usr\/local\/bin\/roborev <<'\''EOF'\''$/ { flag=1; next } flag && /^EOF$/ { flag=0; exit } flag { print }' "$ENTRYPOINT_FILE" \
-  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/usr/local/bin/sync-gemini-settings|$MOCK_SYNC_SETTINGS|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g" > "$WRAPPER_SCRIPT"
+  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/usr/local/bin/sync-gemini-settings|$MOCK_SYNC_SETTINGS|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g; s|/root/.roborev/claude-oauth-token|$STATE_DIR/claude-oauth-token|g" > "$WRAPPER_SCRIPT"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$MOCK_SYNC_SETTINGS"
 printf 'secret-pw\n' > "$STATE_DIR/postgres-password"
 
 cat << 'MOCK_EOF' > "$MOCK_REAL"
 #!/usr/bin/env bash
 echo "[branch=${ROBOREV_SYNC_BRANCH:-}] $*" >> "${CALL_LOG}"
+echo "[token=${CLAUDE_CODE_OAUTH_TOKEN:-}]" >> "${CALL_LOG}"
 case "${1:-}" in
   list) cat "${STATE_DIR}/jobs.json" ;;
   show) cat "${STATE_DIR}/show.json" ;;
@@ -1080,6 +1082,44 @@ if ! grep -q "comment --commenter" "$CALL_LOG" && grep -q "close 43" "$CALL_LOG"
   echo 'head_shortcircuit:ok'
 fi
 
+# Subtests for Claude Code OAuth token export and bidirectional --agent normalization
+mkdir -p "$TEST_ROOT/bin"
+cat << 'CLAUDE_BIN_EOF' > "$TEST_ROOT/bin/claude"
+#!/usr/bin/env bash
+exit 0
+CLAUDE_BIN_EOF
+chmod +x "$TEST_ROOT/bin/claude"
+PATH="$TEST_ROOT/bin:$PATH"
+
+printf '[]\n' > "$STATE_DIR/comments.json"
+printf '[]\n' > "$STATE_DIR/jobs.json"
+
+# Subtest 3a: Token exists + claude exists -> exports token and normalizes gemini -> claude-code
+printf 'test-claude-token-123\n' > "$STATE_DIR/claude-oauth-token"
+: > "$CALL_LOG"
+(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough >/dev/null 2>&1)
+if grep -q "\[token=test-claude-token-123\]" "$CALL_LOG" &&
+   grep -q -- "--agent claude-code" "$CALL_LOG"; then
+  echo 'claude_remap_gemini:ok'
+fi
+
+# Subtest 3b: Token exists + claude exists with --agent=gemini
+: > "$CALL_LOG"
+(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent=gemini --min-severity medium --reasoning thorough >/dev/null 2>&1)
+if grep -q "\[token=test-claude-token-123\]" "$CALL_LOG" &&
+   grep -q -- "--agent claude-code" "$CALL_LOG"; then
+  echo 'claude_remap_gemini_eq:ok'
+fi
+
+# Subtest 3c: Token removed -> unsets token and normalizes claude-code -> gemini
+rm -f "$STATE_DIR/claude-oauth-token"
+: > "$CALL_LOG"
+(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent claude-code --min-severity medium --reasoning thorough >/dev/null 2>&1)
+if grep -q "\[token=\]" "$CALL_LOG" &&
+   grep -q -- "--agent gemini" "$CALL_LOG"; then
+  echo 'claude_fallback_gemini:ok'
+fi
+
 AGY_WRAPPER="$TEST_ROOT/agy-wrapper.sh"
 MOCK_AGY_REAL="$TEST_ROOT/agy.real"
 AGY_LOG="$TEST_ROOT/agy.log"
@@ -1102,6 +1142,9 @@ CASE17_EOF
 )
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper passes ROBOREV_SYNC_BRANCH and backfills prior roborev-override rebuttals before review --wait"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'head_shortcircuit:ok' && echo true || echo false)" "github-runner roborev wrapper skips duplicate comment and short-circuits Review Passed when override matches current HEAD"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_remap_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper exports CLAUDE_CODE_OAUTH_TOKEN and remaps --agent gemini to claude-code when token exists"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_remap_gemini_eq:ok' && echo true || echo false)" "github-runner roborev wrapper remaps --agent=gemini to claude-code when token exists"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_fallback_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper unsets CLAUDE_CODE_OAUTH_TOKEN and remaps --agent claude-code to gemini when token is absent"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'agy_model_pin:ok' && echo true || echo false)" "github-runner agy wrapper pins --model gemini-4-argon-low on headless invocations while preserving --version, subcommands, and explicit --model"
 
 echo "--------------------------------------------------------"

@@ -4,19 +4,111 @@ set -euo pipefail
 export RUNNER_ALLOW_RUNASROOT=1
 
 # Create isolated directories with 0700 permissions
-mkdir -p /root/.gemini/antigravity-cli /root/.roborev
+mkdir -p /root/.gemini/antigravity-cli /root/.roborev /root/.claude/projects
+find /root/.claude/projects -type f -mtime +14 -delete 2>/dev/null || true
+find /root/.claude/projects -mindepth 1 -type d -empty -delete 2>/dev/null || true
 if [ -d "/root/.gemini/antigravity-cli/brain" ]; then
   find /root/.gemini/antigravity-cli/brain -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} + 2>/dev/null || true
 fi
 if [ -d "/root/.gemini/antigravity-cli/conversations" ]; then
   find /root/.gemini/antigravity-cli/conversations -mindepth 1 -maxdepth 1 -mtime +14 -exec rm -rf {} + 2>/dev/null || true
 fi
-chmod 0700 /root/.gemini/antigravity-cli /root/.roborev
+chmod 0700 /root/.gemini/antigravity-cli /root/.roborev /root/.claude
+
+# Pre-populate Claude configuration and deny rules
+cat > /root/.claude.json <<'EOF'
+{"hasCompletedOnboarding": true}
+EOF
+chmod 0600 /root/.claude.json
+
+cat > /root/.claude/settings.json <<'EOF'
+{
+  "permissions": {
+    "deny": [
+      "Read(/local/**)",
+      "Read(//local/**)",
+      "Read(/secrets/**)",
+      "Read(//secrets/**)",
+      "Read(/root/.roborev/**)",
+      "Read(//root/.roborev/**)",
+      "Read(/root/.claude/**)",
+      "Read(//root/.claude/**)",
+      "Read(/root/.gemini/**)",
+      "Read(//root/.gemini/**)"
+    ]
+  }
+}
+EOF
+chmod 0600 /root/.claude/settings.json
+
+# Seed claude-oauth-token as a writable 0600 file from /local/claude-oauth-token (or fallback /secrets/claude-oauth-token)
+if [ -s "/local/claude-oauth-token" ]; then
+  cp -f "/local/claude-oauth-token" "/root/.roborev/claude-oauth-token"
+  chmod 0600 "/root/.roborev/claude-oauth-token"
+elif [ -s "/secrets/claude-oauth-token" ]; then
+  cp -f "/secrets/claude-oauth-token" "/root/.roborev/claude-oauth-token"
+  chmod 0600 "/root/.roborev/claude-oauth-token"
+fi
 
 # Pre-populate global /root/.roborev/config.toml with cluster-wide review guidelines,
 # global exclude_patterns (honored even by security specialist reviews), engine defaults,
 # and a 2-member default+test-value review panel for daemon-backed CI reviews.
-cat > /root/.roborev/config.toml <<'EOF'
+if [ -s "/root/.roborev/claude-oauth-token" ] && command -v claude >/dev/null 2>&1; then
+  cat > /root/.roborev/config.toml <<'EOF'
+default_agent = "claude-code"
+review_agent = "claude-code"
+default_model = "opus"
+default_backup_agent = "gemini"
+review_reasoning = "thorough"
+review_min_severity = "medium"
+agent_quota_cooldown = "2m"
+review_context_count = 5
+reuse_review_session = true
+
+exclude_patterns = [
+  "*.sum",
+  "*.lock",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "web/static/ui/**",
+  "migrations/*.sql",
+  "**/migrations/*.sql",
+  "**/__fixtures__/*.json"
+]
+
+[ci]
+review_types = ["default", "test-value"]
+
+[review]
+default_panel = "ci"
+
+[review.subagents.default]
+agent = "claude-code"
+model = "opus"
+review_type = "default"
+
+[review.subagents.test-value]
+agent = "claude-code"
+model = "opus"
+review_type = "test-value"
+
+[review.panels.ci]
+members = ["default", "test-value"]
+synthesis_agent = "claude-code"
+synthesis_model = "opus"
+synthesis_backup_agent = "gemini"
+
+review_guidelines = """
+Global Aerial Stack & Cluster Invariants (applies across all repositories):
+1. Security & Secrets: Zero plaintext tokens, API keys, passwords, or GitHub PATs in code, configs, logs, or git configs. Zero imperative SQL DDL (ALTER TABLE, DROP TABLE) in application code (must use declarative schema.sql + Atlas migrations). Prevent command injection, SSRF, XSS, and path traversal on untrusted inputs.
+2. Concurrency & Reliability: Zero data races, unclosed HTTP response bodies, or leaked goroutines/tickers/timers. Zero arbitrary time.Sleep calls in tests or production plumbing.
+3. Architecture & Testing: Functional Core / Imperative Shell. Go unit tests must use homogeneous table-driven loops without closure fields on table structs (run, check, setup, runnerFn, opts, etc.) or catch-all Test*Coverage* names.
+4. Internal Cluster & Runtime Coverage Topology: All services run inside a private NixOS k3s Kubernetes cluster (*.aerial, *.lan, postgres, synapse, eri, vanadis, haro, coven) behind NGINX Gateway Fabric (lan-gateway and edge-gateway) that never exposes /debug/*. Outbound internal cluster DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/github-runner/entrypoint.sh and k8s/operators-and-storage.yaml, retaining GITHUB_PAT for ./run.sh in roborev-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,roborev) while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses. Mounting /var/run/docker.sock and /cache in ci-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,ci, which strip GITHUB_PAT via env -u GITHUB_PAT ./run.sh) while roborev-runner-* scale sets mount /cache (/var/lib/aerial/ci-cache), /local/claude-oauth-token, /var/lib/aerial/roborev-cache/brain, /var/lib/aerial/roborev-cache/conversations, and /var/lib/aerial/roborev-cache/claude-projects at /cache, /local/claude-oauth-token, /root/.gemini/antigravity-cli/brain, /root/.gemini/antigravity-cli/conversations, and /root/.claude/projects on calibarn for warm build/test caches and persistent review session reuse, is an intentional cluster invariant.
+5. Prior Review Consistency (<prior-range-reviews>): When <prior-range-reviews> is present in the prompt, treat any file, function, or code block that was already reviewed in an ancestor commit on this branch and NOT modified between the prior reviewed commit and HEAD as previously approved. Do NOT raise new findings on untouched code that passed an earlier review on the same branch unless a newly modified line directly broke a caller/callee contract with that code. If a prior finding was fixed, verify the fix and do not re-flag it or invent tangential style/nitpick findings in the same area.
+"""
+EOF
+else
+  cat > /root/.roborev/config.toml <<'EOF'
 default_agent = "gemini"
 review_agent = "gemini"
 review_reasoning = "thorough"
@@ -43,23 +135,27 @@ review_types = ["default", "test-value"]
 default_panel = "ci"
 
 [review.subagents.default]
+agent = "gemini"
 review_type = "default"
 
 [review.subagents.test-value]
+agent = "gemini"
 review_type = "test-value"
 
 [review.panels.ci]
 members = ["default", "test-value"]
+synthesis_agent = "gemini"
 
 review_guidelines = """
 Global Aerial Stack & Cluster Invariants (applies across all repositories):
 1. Security & Secrets: Zero plaintext tokens, API keys, passwords, or GitHub PATs in code, configs, logs, or git configs. Zero imperative SQL DDL (ALTER TABLE, DROP TABLE) in application code (must use declarative schema.sql + Atlas migrations). Prevent command injection, SSRF, XSS, and path traversal on untrusted inputs.
 2. Concurrency & Reliability: Zero data races, unclosed HTTP response bodies, or leaked goroutines/tickers/timers. Zero arbitrary time.Sleep calls in tests or production plumbing.
 3. Architecture & Testing: Functional Core / Imperative Shell. Go unit tests must use homogeneous table-driven loops without closure fields on table structs (run, check, setup, runnerFn, opts, etc.) or catch-all Test*Coverage* names.
-4. Internal Cluster & Runtime Coverage Topology: All services run inside a private NixOS k3s Kubernetes cluster (*.aerial, *.lan, postgres, synapse, eri, vanadis, haro, coven) behind NGINX Gateway Fabric (lan-gateway and edge-gateway) that never exposes /debug/*. Outbound internal cluster DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/github-runner/entrypoint.sh and k8s/operators-and-storage.yaml, retaining GITHUB_PAT for ./run.sh in roborev-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,roborev) while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses. Mounting /var/run/docker.sock and /cache in ci-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,ci, which strip GITHUB_PAT via env -u GITHUB_PAT ./run.sh) while roborev-runner-* scale sets mount /cache (/var/lib/aerial/ci-cache), /var/lib/aerial/roborev-cache/brain, and /var/lib/aerial/roborev-cache/conversations at /cache, /root/.gemini/antigravity-cli/brain, and /root/.gemini/antigravity-cli/conversations on calibarn for warm build/test caches and persistent review session reuse, is an intentional cluster invariant.
+4. Internal Cluster & Runtime Coverage Topology: All services run inside a private NixOS k3s Kubernetes cluster (*.aerial, *.lan, postgres, synapse, eri, vanadis, haro, coven) behind NGINX Gateway Fabric (lan-gateway and edge-gateway) that never exposes /debug/*. Outbound internal cluster DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/github-runner/entrypoint.sh and k8s/operators-and-storage.yaml, retaining GITHUB_PAT for ./run.sh in roborev-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,roborev) while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses. Mounting /var/run/docker.sock and /cache in ci-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,ci, which strip GITHUB_PAT via env -u GITHUB_PAT ./run.sh) while roborev-runner-* scale sets mount /cache (/var/lib/aerial/ci-cache), /local/claude-oauth-token, /var/lib/aerial/roborev-cache/brain, /var/lib/aerial/roborev-cache/conversations, and /var/lib/aerial/roborev-cache/claude-projects at /cache, /local/claude-oauth-token, /root/.gemini/antigravity-cli/brain, /root/.gemini/antigravity-cli/conversations, and /root/.claude/projects on calibarn for warm build/test caches and persistent review session reuse, is an intentional cluster invariant.
 5. Prior Review Consistency (<prior-range-reviews>): When <prior-range-reviews> is present in the prompt, treat any file, function, or code block that was already reviewed in an ancestor commit on this branch and NOT modified between the prior reviewed commit and HEAD as previously approved. Do NOT raise new findings on untouched code that passed an earlier review on the same branch unless a newly modified line directly broke a caller/callee contract with that code. If a prior finding was fixed, verify the fix and do not re-flag it or invent tangential style/nitpick findings in the same area.
 """
 EOF
+fi
 
 if [ -s "/local/postgres-password" ]; then
   cp -f "/local/postgres-password" "/root/.roborev/postgres-password"
@@ -276,6 +372,12 @@ set -euo pipefail
 
 /usr/local/bin/sync-gemini-settings || true
 
+if [ -s "/root/.roborev/claude-oauth-token" ]; then
+  export CLAUDE_CODE_OAUTH_TOKEN="$(tr -d '\r\n' < /root/.roborev/claude-oauth-token)"
+else
+  unset CLAUDE_CODE_OAUTH_TOKEN
+fi
+
 if [ -d "/cache" ]; then
   mkdir -p /cache/go-build /cache/go-mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm
   export GOCACHE="/cache/go-build"
@@ -371,6 +473,30 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
         ;;
     esac
   done
+
+  if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && command -v claude >/dev/null 2>&1; then
+    if [[ -z "${agent}" || "${agent}" == "gemini" ]]; then
+      agent="claude-code"
+    fi
+    for i in "${!orig_args[@]}"; do
+      if [[ "${orig_args[i]}" == "--agent=gemini" ]]; then
+        orig_args[i]="--agent=claude-code"
+      elif [[ "${orig_args[i]}" == "--agent" && "${orig_args[i+1]:-}" == "gemini" ]]; then
+        orig_args[i+1]="claude-code"
+      fi
+    done
+  else
+    if [[ "${agent}" == "claude-code" || "${agent}" == "claude" ]]; then
+      agent="gemini"
+    fi
+    for i in "${!orig_args[@]}"; do
+      if [[ "${orig_args[i]}" == "--agent=claude-code" || "${orig_args[i]}" == "--agent=claude" ]]; then
+        orig_args[i]="--agent=gemini"
+      elif [[ "${orig_args[i]}" == "--agent" && ( "${orig_args[i+1]:-}" == "claude-code" || "${orig_args[i+1]:-}" == "claude" ) ]]; then
+        orig_args[i+1]="gemini"
+      fi
+    done
+  fi
 
   branch="${GITHUB_HEAD_REF:-}"
   base_sha=""
