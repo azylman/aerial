@@ -559,7 +559,7 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		}
 		s.teeGitHubWebhook(r.Context(), reqPath, r, event, body)
 	}
-	if s.riverClient == nil {
+	if s.bus == nil && s.riverClient == nil {
 		log.Printf("[synapse] [github] ERROR: river client not initialized")
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "river queue not initialized"})
 		return

@@ -1321,6 +1321,7 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 		brainStatus  int
 		wantErr      bool
 		wantTerm     bool
+		wantNak      bool
 	}{
 		{
 			name:       "malformed payload terms message and returns nil",
@@ -1329,12 +1330,13 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 			wantTerm:   true,
 		},
 		{
-			name:         "chunk attempt 1 fails non-final without terming",
+			name:         "chunk attempt 1 fails non-final with nak backoff",
 			rawPayload:   `{"build_id":"b-run","chunk_index":0}`,
 			numDelivered: 1,
 			brainStatus:  http.StatusBadGateway,
 			wantErr:      true,
 			wantTerm:     false,
+			wantNak:      true,
 		},
 		{
 			name:         "valid chunk attempt 3 dispatches final attempt and terms on failure",
@@ -1375,24 +1377,10 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 			if msg.termed != tc.wantTerm {
 				t.Errorf("msg.termed = %v, want %v", msg.termed, tc.wantTerm)
 			}
+			if (msg.nakDelay > 0) != tc.wantNak {
+				t.Errorf("msg.nakDelay = %v, wantNak %v", msg.nakDelay, tc.wantNak)
+			}
 		})
-	}
-}
-
-func TestChunkNakBackoffDelay(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		numDelivered uint64
-		want         time.Duration
-	}{
-		{1, 5 * time.Second},
-		{2, 15 * time.Second},
-		{3, 30 * time.Second},
-	}
-	for _, tc := range cases {
-		if got := chunkNakBackoffDelay(tc.numDelivered); got != tc.want {
-			t.Errorf("chunkNakBackoffDelay(%d) = %v, want %v", tc.numDelivered, got, tc.want)
-		}
 	}
 }
 

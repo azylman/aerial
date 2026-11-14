@@ -782,17 +782,6 @@ func (s *VanadisServer) enqueueExecuteChunk(ctx context.Context, args ExecuteChu
 	return err
 }
 
-func chunkNakBackoffDelay(numDelivered uint64) time.Duration {
-	switch numDelivered {
-	case 1:
-		return 5 * time.Second
-	case 2:
-		return 15 * time.Second
-	default:
-		return 30 * time.Second
-	}
-}
-
 func settleFailedChunk(msg pubsub.Message, isFinalAttempt bool) {
 	if isFinalAttempt {
 		if termErr := msg.Term(); termErr != nil {
@@ -800,7 +789,8 @@ func settleFailedChunk(msg pubsub.Message, isFinalAttempt bool) {
 		}
 		return
 	}
-	if nakErr := msg.NakWithDelay(chunkNakBackoffDelay(msg.NumDelivered())); nakErr != nil {
+	delay := time.Duration(min(max(msg.NumDelivered(), 1), 3)) * 5 * time.Second
+	if nakErr := msg.NakWithDelay(delay); nakErr != nil {
 		log.Printf("[vanadis] warning: error naking chunk job: %v", nakErr)
 	}
 }

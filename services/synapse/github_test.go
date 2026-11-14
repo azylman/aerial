@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 // --- 3. GitHub Webhook HTTP Handler & Event Processing ---
@@ -21,6 +23,7 @@ type ghWebhookTestCase struct {
 	body                         io.Reader
 	headers                      map[string]string
 	river                        *mockRiverInserter
+	hasBus                       bool
 	wantStatus, wantInserted     int
 }
 
@@ -61,9 +64,34 @@ func runGitHubWebhookCase(t *testing.T, tc ghWebhookTestCase) {
 	} else {
 		srv = NewRouterServer(fixedConfig(Config{}), nil)
 	}
+	busCh := make(chan string, 1)
+	if tc.hasBus {
+		memBus := pubsub.NewMemoryBus()
+		t.Cleanup(func() { _ = memBus.Close() })
+		srv.SetEventBus(memBus)
+		srv.onProcessed = func(_, delivery string) {
+			select {
+			case busCh <- delivery:
+			default:
+			}
+		}
+		if err := srv.StartJobConsumers(context.Background()); err != nil {
+			t.Fatalf("StartJobConsumers() error: %v", err)
+		}
+	}
 	routes := srv.Routes()
 	rec := doHTTPRequest(routes, http.MethodPost, tc.path, tc.body, tc.headers)
 	assertGitHubWebhookResponse(t, tc, rec, routes)
+	if tc.hasBus && tc.wantStatus == http.StatusOK {
+		select {
+		case gotDel := <-busCh:
+			if gotDel != tc.headers["X-GitHub-Delivery"] {
+				t.Errorf("bus consumer delivery = %q, want %q", gotDel, tc.headers["X-GitHub-Delivery"])
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for synapse-github bus consumer")
+		}
+	}
 }
 
 func TestHandleGitHubWebhook(t *testing.T) {
@@ -75,6 +103,7 @@ func TestHandleGitHubWebhook(t *testing.T) {
 		{name: "river client nil", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusInternalServerError},
 		{name: "river client insert error", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, river: &mockRiverInserter{err: errors.New("simulated database failure")}, wantStatus: http.StatusInternalServerError},
 		{name: "api path success", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, river: &mockRiverInserter{}, wantStatus: http.StatusOK, wantInserted: 1},
+		{name: "bus only success without river client", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-bus-1"}, hasBus: true, wantStatus: http.StatusOK},
 		{name: "legacy path success", path: "/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, river: &mockRiverInserter{}, wantStatus: http.StatusOK, wantInserted: 1},
 		{name: "duplicate skipped", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Responsive is better than fast.","hook_id":9999,"repository":{"full_name":"azylman/aerial"}}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "dup-gh-delivery-1"}, river: &mockRiverInserter{skipDuplicate: true}, wantStatus: http.StatusOK, wantMetricSubstr: `synapse_unique_skipped_total{kind="github_webhook"}`},
 	}

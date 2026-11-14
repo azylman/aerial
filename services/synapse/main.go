@@ -301,7 +301,7 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 		})
 		return
 	}
-	if s.riverClient != nil {
+	if s.bus != nil || s.riverClient != nil {
 		idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
 		if err := s.insertRiverJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
 			log.Printf("[synapse] [%s] ERROR: failed to insert job into river: %v", logPrefix, err)

@@ -20,6 +20,7 @@ type memoryMsg struct {
 	subject      string
 	numDelivered uint64
 	termed       bool
+	nakDelay     time.Duration
 }
 
 func (m *memoryMsg) Data() []byte        { return m.data }
@@ -32,7 +33,7 @@ func (m *memoryMsg) NumDelivered() uint64 {
 	return 1
 }
 func (m *memoryMsg) Ack() error                         { return nil }
-func (m *memoryMsg) NakWithDelay(_ time.Duration) error { return nil }
+func (m *memoryMsg) NakWithDelay(d time.Duration) error { m.nakDelay = d; return nil }
 func (m *memoryMsg) Term() error                        { m.termed = true; return nil }
 func (m *memoryMsg) Snooze(_ time.Duration) error       { return nil }
 func (m *memoryMsg) InProgress() error                  { return nil }
