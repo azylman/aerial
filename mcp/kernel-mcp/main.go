@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -18,6 +18,8 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 var (
@@ -25,50 +27,7 @@ var (
 	exitFn      = log.Fatalf
 )
 
-// JSONRPCRequest represents an incoming JSON-RPC 2.0 request.
-type JSONRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
-}
-
-// JSONRPCResponse represents an outgoing JSON-RPC 2.0 response.
-type JSONRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Result  any             `json:"result,omitempty"`
-	Error   *JSONRPCError   `json:"error,omitempty"`
-}
-
-// JSONRPCError represents a JSON-RPC 2.0 error.
-type JSONRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Data    any    `json:"data,omitempty"`
-}
-
-// ToolCallParams defines params for "tools/call".
-type ToolCallParams struct {
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
-}
-
-// ContentItem represents MCP content payload.
-type ContentItem struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	Data     string `json:"data,omitempty"`
-	MIMEType string `json:"mimeType,omitempty"`
-}
-
-// ToolCallResult defines the MCP result payload.
-type ToolCallResult struct {
-	Content []ContentItem `json:"content"`
-	IsError bool          `json:"isError,omitempty"`
-}
-
-// Server holds server dependencies and handlers.
+// unmarshalOptional decodes raw into dst when present, leaving dst untouched on empty or invalid input.
 func unmarshalOptional(raw []byte, dst any) {
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, dst); err != nil {
@@ -77,17 +36,33 @@ func unmarshalOptional(raw []byte, dst any) {
 	}
 }
 
+// serverInstructions is sent on initialize so clients that defer tool schemas
+// still learn how the browser tools fit together.
+const serverInstructions = `All tools drive one shared browser page; amazon_* tools navigate it away.
+- Flow: browser_navigate, then browser_get_content (cheap text), then browser_click / browser_type. Use browser_screenshot (large image) only when layout matters.
+- browser_navigate only waits a short fixed settle delay, not for page load; confirm with browser_get_content before acting.
+- browser_evaluate rejects fetch(, XMLHttpRequest and .click(; use browser_click for clicks.
+- amazon_add_to_cart changes a real Amazon cart; no tool checks out.`
+
+// Server holds server dependencies and the MCP tool handler.
 type Server struct {
-	cfg    *Config
-	client *CDPClient
+	cfg           *Config
+	client        *CDPClient
+	streamHandler http.Handler
 }
 
-// NewServer creates a new Server.
+// NewServer creates a new Server and its MCP tool handler.
 func NewServer(cfg *Config, client *CDPClient) *Server {
-	return &Server{
+	s := &Server{
 		cfg:    cfg,
 		client: client,
 	}
+	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "kernel-mcp", Version: "1.0.0"}, &mcp.ServerOptions{Instructions: serverInstructions})
+	s.registerTools(mcpServer)
+	s.streamHandler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return mcpServer
+	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	return s
 }
 
 // HandleHealth handles the GET /health readiness endpoint.
@@ -100,125 +75,140 @@ func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// HandleMCPStreamable processes MCP JSON-RPC 2.0 over HTTP.
+// HandleMCPStreamable serves MCP over streamable HTTP, accepting legacy kernel_-prefixed tool names.
 func (s *Server) HandleMCPStreamable(w http.ResponseWriter, r *http.Request) {
-	streamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err != nil {
-			s.writeRPCError(w, nil, -32700, "Failed to read request body")
-			return
-		}
+	httpkit.ServeMCPStream(w, r, s.streamHandler, "kernel-mcp ready\n", "kernel_", "")
+}
 
-		var req JSONRPCRequest
-		if err := json.Unmarshal(bodyBytes, &req); err != nil {
-			s.writeRPCError(w, nil, -32700, "Parse error")
-			return
-		}
+// NavigateArgs are the browser_navigate arguments.
+type NavigateArgs struct {
+	URL string `json:"url" jsonschema:"Absolute URL to navigate to (e.g. https://www.amazon.com)."`
+}
 
-		reqID := req.ID
-		if len(reqID) == 0 {
-			reqID = []byte("null")
-		}
+// EvaluateArgs are the browser_evaluate arguments.
+type EvaluateArgs struct {
+	Expression    string `json:"expression" jsonschema:"JavaScript code to execute."`
+	AwaitPromise  *bool  `json:"awaitPromise,omitempty" jsonschema:"Await a returned promise (default true)."`
+	ReturnByValue *bool  `json:"returnByValue,omitempty" jsonschema:"Return the result by value (default true)."`
+}
 
-		switch req.Method {
-		case "initialize":
-			resp := map[string]any{
-				"protocolVersion": "2024-11-05",
-				"capabilities": map[string]any{
-					"tools": map[string]any{},
-				},
-				"serverInfo": map[string]any{
-					"name":    "kernel-mcp",
-					"version": "1.0.0",
-				},
-			}
-			s.writeRPCResult(w, reqID, resp)
+// GetContentArgs are the browser_get_content arguments.
+type GetContentArgs struct {
+	Selector  string `json:"selector,omitempty" jsonschema:"CSS selector (default body; falls back to body when nothing matches)."`
+	MaxLength int    `json:"maxLength,omitempty" jsonschema:"Maximum text characters to return (default 15000)."`
+	MaxChars  int    `json:"max_chars,omitempty" jsonschema:"Alias for maxLength, used only when maxLength is unset."`
+}
 
-		case "notifications/initialized":
-			w.WriteHeader(http.StatusNoContent)
+// ClickArgs are the browser_click arguments.
+type ClickArgs struct {
+	Selector string `json:"selector" jsonschema:"CSS selector of the element to click."`
+}
 
-		case "tools/list":
-			s.writeRPCResult(w, reqID, map[string]any{
-				"tools": Tools,
-			})
+// TypeArgs are the browser_type arguments.
+type TypeArgs struct {
+	Selector string `json:"selector" jsonschema:"CSS selector of the input field."`
+	Text     string `json:"text" jsonschema:"Text to input."`
+	Clear    *bool  `json:"clear,omitempty" jsonschema:"Clear existing text before typing (default true)."`
+}
 
-		case "tools/call":
-			var p ToolCallParams
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				s.writeRPCError(w, reqID, -32602, "Invalid params")
-				return
-			}
-			result, isErr := s.executeTool(r.Context(), p.Name, p.Arguments)
-			if isErr {
-				s.writeRPCResult(w, reqID, ToolCallResult{
-					Content: []ContentItem{{Type: "text", Text: result}},
-					IsError: true,
-				})
-				return
-			}
-			if p.Name == "browser_screenshot" || strings.TrimPrefix(strings.TrimPrefix(p.Name, "kernel_"), "steel_") == "browser_screenshot" {
-				var sc struct {
-					Data   string `json:"data"`
-					Format string `json:"format"`
-				}
-				if err := json.Unmarshal([]byte(result), &sc); err == nil && sc.Data != "" {
-					s.writeRPCResult(w, reqID, ToolCallResult{
-						Content: []ContentItem{
-							{
-								Type:     "image",
-								MIMEType: "image/" + sc.Format,
-								Data:     sc.Data,
-							},
-							{
-								Type: "text",
-								Text: fmt.Sprintf("Screenshot captured (%s)", sc.Format),
-							},
-						},
-					})
-					return
-				}
-			}
-			s.writeRPCResult(w, reqID, ToolCallResult{
-				Content: []ContentItem{{Type: "text", Text: result}},
-			})
+// ScreenshotArgs are the browser_screenshot arguments.
+type ScreenshotArgs struct {
+	Format string `json:"format,omitempty" jsonschema:"Image format: png (default), jpeg or webp."`
+}
 
-		default:
-			s.writeRPCError(w, reqID, -32601, "Method not found: "+req.Method)
-		}
+// AmazonSearchArgs are the amazon_search arguments.
+type AmazonSearchArgs struct {
+	Query      string `json:"query" jsonschema:"Search keywords or product description."`
+	MaxResults int    `json:"maxResults,omitempty" jsonschema:"Maximum number of results to extract (default 5)."`
+}
+
+// AmazonGetCartArgs are the (empty) amazon_get_cart arguments.
+type AmazonGetCartArgs struct{}
+
+// AmazonAddToCartArgs are the amazon_add_to_cart arguments.
+type AmazonAddToCartArgs struct {
+	ASIN string `json:"asin" jsonschema:"Amazon ASIN: exactly 10 alphanumeric characters (e.g. B08N5WRWNW), not a URL."`
+}
+
+func (s *Server) registerTools(srv *mcp.Server) {
+	addTextTool(srv, &mcp.Tool{
+		Name:        "browser_navigate",
+		Description: "Navigate the active browser page to a URL.",
+		InputSchema: inputSchema[NavigateArgs](),
+	}, s.toolBrowserNavigate)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "browser_evaluate",
+		Description: "Evaluate a JavaScript expression in the active page and return the result as JSON. Card-like 13-16 digit numbers in the output are redacted.",
+		InputSchema: inputSchema[EvaluateArgs](),
+	}, s.toolBrowserEvaluate)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "browser_get_content",
+		Description: `Return the active page's visible text (innerText without scripts/styles) as JSON {title,url,text}, with card-like numbers redacted. Text over the limit is cut and ends with "...[truncated]".`,
+		InputSchema: inputSchema[GetContentArgs](),
+	}, s.toolBrowserGetContent)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "browser_click",
+		Description: "Click the element matching a CSS selector, using a trusted mouse event when it has a visible box.",
+		InputSchema: inputSchema[ClickArgs](),
+	}, s.toolBrowserClick)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "browser_type",
+		Description: "Type text into the input matching a CSS selector, then dispatch input/change events.",
+		InputSchema: inputSchema[TypeArgs](),
+	}, s.toolBrowserType)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "browser_screenshot",
+		Description: "Capture the current viewport (not the full page) as an image.",
+		InputSchema: inputSchema[ScreenshotArgs](),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ScreenshotArgs) (*mcp.CallToolResult, any, error) {
+		return s.toolBrowserScreenshot(ctx, args), nil, nil
 	})
-
-	httpkit.ServeMCPStream(w, r, streamHandler, "kernel-mcp ready\n", "steel_", "kernel_")
+	addTextTool(srv, &mcp.Tool{
+		Name:        "amazon_search",
+		Description: "Search Amazon and return structured product results (title, ASIN, price, prime eligibility, rating, URL).",
+		InputSchema: inputSchema[AmazonSearchArgs](),
+	}, s.toolAmazonSearch)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "amazon_get_cart",
+		Description: "Read the Amazon cart without changing it: item count, subtotal, and items with title, price, quantity, and ASIN.",
+		InputSchema: inputSchema[AmazonGetCartArgs](),
+	}, s.toolAmazonGetCart)
+	addTextTool(srv, &mcp.Tool{
+		Name:        "amazon_add_to_cart",
+		Description: "Add a product to the Amazon cart by ASIN, returning the product title and resulting cart count.",
+		InputSchema: inputSchema[AmazonAddToCartArgs](),
+	}, s.toolAmazonAddToCart)
 }
 
-func (s *Server) writeRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {
-	resp := JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result:  result,
-	}
-	httpkit.WriteJSON(w, http.StatusOK, resp)
+// addTextTool registers a tool whose logic returns its result text and whether it is an error.
+func addTextTool[In any](srv *mcp.Server, tool *mcp.Tool, run func(context.Context, In) (string, bool)) {
+	mcp.AddTool(srv, tool, func(ctx context.Context, _ *mcp.CallToolRequest, args In) (*mcp.CallToolResult, any, error) {
+		text, isErr := run(ctx, args)
+		return textResult(text, isErr), nil, nil
+	})
 }
 
-func (s *Server) writeRPCError(w http.ResponseWriter, id json.RawMessage, code int, msg string) {
-	if len(id) == 0 {
-		id = []byte("null")
-	}
-	resp := JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error: &JSONRPCError{
-			Code:    code,
-			Message: msg,
-		},
-	}
-	httpkit.WriteJSON(w, http.StatusOK, resp)
+func textResult(text string, isErr bool) *mcp.CallToolResult {
+	return &mcp.CallToolResult{IsError: isErr, Content: []mcp.Content{&mcp.TextContent{Text: text}}}
 }
 
-func (s *Server) toolBrowserNavigate(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		URL string `json:"url"`
+// inputSchema infers T's input schema and collapses the ["null", X] unions inferred
+// for pointer fields to plain X, matching the types clients have always seen.
+func inputSchema[T any]() *jsonschema.Schema {
+	schema, err := jsonschema.For[T](nil)
+	if err != nil {
+		panic(fmt.Sprintf("kernel-mcp: infer input schema: %v", err))
 	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || strings.TrimSpace(args.URL) == "" {
+	for _, prop := range schema.Properties {
+		if len(prop.Types) == 2 && prop.Types[0] == "null" {
+			prop.Type, prop.Types = prop.Types[1], nil
+		}
+	}
+	return schema
+}
+
+func (s *Server) toolBrowserNavigate(ctx context.Context, args NavigateArgs) (string, bool) {
+	if strings.TrimSpace(args.URL) == "" {
 		return "Argument 'url' is required and must be a valid URL string", true
 	}
 	if err := s.client.Navigate(ctx, args.URL); err != nil {
@@ -227,13 +217,8 @@ func (s *Server) toolBrowserNavigate(ctx context.Context, argsRaw json.RawMessag
 	return "Navigated to " + args.URL, false
 }
 
-func (s *Server) toolBrowserEvaluate(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		Expression   string `json:"expression"`
-		AwaitPromise *bool  `json:"awaitPromise"`
-		ReturnByVal  *bool  `json:"returnByValue"`
-	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || strings.TrimSpace(args.Expression) == "" {
+func (s *Server) toolBrowserEvaluate(ctx context.Context, args EvaluateArgs) (string, bool) {
+	if strings.TrimSpace(args.Expression) == "" {
 		return "Argument 'expression' is required", true
 	}
 	if err := ValidateEvaluateExpression(args.Expression); err != nil {
@@ -244,8 +229,8 @@ func (s *Server) toolBrowserEvaluate(ctx context.Context, argsRaw json.RawMessag
 		awaitPromise = *args.AwaitPromise
 	}
 	returnByValue := true
-	if args.ReturnByVal != nil {
-		returnByValue = *args.ReturnByVal
+	if args.ReturnByValue != nil {
+		returnByValue = *args.ReturnByValue
 	}
 
 	raw, err := s.client.EvaluateJS(ctx, args.Expression, awaitPromise, returnByValue)
@@ -255,13 +240,7 @@ func (s *Server) toolBrowserEvaluate(ctx context.Context, argsRaw json.RawMessag
 	return SanitizePII(string(raw)), false
 }
 
-func (s *Server) toolBrowserGetContent(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		Selector  string `json:"selector"`
-		MaxLength int    `json:"maxLength"`
-		MaxChars  int    `json:"max_chars"`
-	}
-	unmarshalOptional(argsRaw, &args)
+func (s *Server) toolBrowserGetContent(ctx context.Context, args GetContentArgs) (string, bool) {
 	limit := args.MaxLength
 	if limit <= 0 {
 		limit = args.MaxChars
@@ -292,11 +271,8 @@ func (s *Server) toolBrowserGetContent(ctx context.Context, argsRaw json.RawMess
 	return SanitizePII(string(outBytes)), false
 }
 
-func (s *Server) toolBrowserClick(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		Selector string `json:"selector"`
-	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || strings.TrimSpace(args.Selector) == "" {
+func (s *Server) toolBrowserClick(ctx context.Context, args ClickArgs) (string, bool) {
+	if strings.TrimSpace(args.Selector) == "" {
 		return "Argument 'selector' is required", true
 	}
 
@@ -330,13 +306,8 @@ func (s *Server) toolBrowserClick(ctx context.Context, argsRaw json.RawMessage) 
 	return string(out), false
 }
 
-func (s *Server) toolBrowserType(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		Selector string `json:"selector"`
-		Text     string `json:"text"`
-		Clear    *bool  `json:"clear"`
-	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || strings.TrimSpace(args.Selector) == "" {
+func (s *Server) toolBrowserType(ctx context.Context, args TypeArgs) (string, bool) {
+	if strings.TrimSpace(args.Selector) == "" {
 		return "Argument 'selector' is required", true
 	}
 	shouldClear := true
@@ -382,35 +353,35 @@ func (s *Server) toolBrowserType(ctx context.Context, argsRaw json.RawMessage) (
 	return string(out), false
 }
 
-func (s *Server) toolBrowserScreenshot(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		Format string `json:"format"`
-	}
-	unmarshalOptional(argsRaw, &args)
+// toolBrowserScreenshot returns the capture as an image item plus a caption,
+// falling back to the raw {data,format} JSON text when the data is not decodable.
+func (s *Server) toolBrowserScreenshot(ctx context.Context, args ScreenshotArgs) *mcp.CallToolResult {
 	format := strings.ToLower(strings.TrimSpace(args.Format))
 	if format == "" {
 		format = "png"
 	}
 	data, err := s.client.CaptureScreenshot(ctx, format)
 	if err != nil {
-		return fmt.Sprintf("Screenshot capture failed: %v", err), true
+		return textResult(fmt.Sprintf("Screenshot capture failed: %v", err), true)
+	}
+	if img, err := base64.StdEncoding.DecodeString(data); err == nil && len(img) > 0 {
+		return &mcp.CallToolResult{Content: []mcp.Content{
+			&mcp.ImageContent{MIMEType: "image/" + format, Data: img},
+			&mcp.TextContent{Text: fmt.Sprintf("Screenshot captured (%s)", format)},
+		}}
 	}
 	out, err := json.Marshal(map[string]string{
 		"data":   data,
 		"format": format,
 	})
 	if err != nil {
-		return fmt.Sprintf("Failed to encode screenshot result: %v", err), true
+		return textResult(fmt.Sprintf("Failed to encode screenshot result: %v", err), true)
 	}
-	return string(out), false
+	return textResult(string(out), false)
 }
 
-func (s *Server) toolAmazonSearch(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		Query      string `json:"query"`
-		MaxResults int    `json:"maxResults"`
-	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || strings.TrimSpace(args.Query) == "" {
+func (s *Server) toolAmazonSearch(ctx context.Context, args AmazonSearchArgs) (string, bool) {
+	if strings.TrimSpace(args.Query) == "" {
 		return "Argument 'query' is required", true
 	}
 	limit := args.MaxResults
@@ -430,7 +401,7 @@ func (s *Server) toolAmazonSearch(ctx context.Context, argsRaw json.RawMessage) 
 	return SanitizePII(string(raw)), false
 }
 
-func (s *Server) toolAmazonGetCart(ctx context.Context) (string, bool) {
+func (s *Server) toolAmazonGetCart(ctx context.Context, _ AmazonGetCartArgs) (string, bool) {
 	cartURL := "https://www.amazon.com/gp/cart/view.html"
 	if err := s.client.Navigate(ctx, cartURL); err != nil {
 		return fmt.Sprintf("Amazon cart navigation failed: %v", err), true
@@ -443,11 +414,8 @@ func (s *Server) toolAmazonGetCart(ctx context.Context) (string, bool) {
 	return SanitizePII(string(raw)), false
 }
 
-func (s *Server) toolAmazonAddToCart(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
-	var args struct {
-		ASIN string `json:"asin"`
-	}
-	if err := json.Unmarshal(argsRaw, &args); err != nil || strings.TrimSpace(args.ASIN) == "" {
+func (s *Server) toolAmazonAddToCart(ctx context.Context, args AmazonAddToCartArgs) (string, bool) {
+	if strings.TrimSpace(args.ASIN) == "" {
 		return "Argument 'asin' is required", true
 	}
 	asin := strings.TrimSpace(args.ASIN)
@@ -504,34 +472,6 @@ func (s *Server) toolAmazonAddToCart(ctx context.Context, argsRaw json.RawMessag
 		return fmt.Sprintf("Failed to encode add to cart result: %v", err), true
 	}
 	return string(out), false
-}
-
-func (s *Server) executeTool(ctx context.Context, toolName string, argsRaw json.RawMessage) (string, bool) {
-	name := strings.TrimPrefix(toolName, "kernel_")
-	name = strings.TrimPrefix(name, "steel_")
-
-	switch name {
-	case "browser_navigate":
-		return s.toolBrowserNavigate(ctx, argsRaw)
-	case "browser_evaluate":
-		return s.toolBrowserEvaluate(ctx, argsRaw)
-	case "browser_get_content":
-		return s.toolBrowserGetContent(ctx, argsRaw)
-	case "browser_click":
-		return s.toolBrowserClick(ctx, argsRaw)
-	case "browser_type":
-		return s.toolBrowserType(ctx, argsRaw)
-	case "browser_screenshot":
-		return s.toolBrowserScreenshot(ctx, argsRaw)
-	case "amazon_search":
-		return s.toolAmazonSearch(ctx, argsRaw)
-	case "amazon_get_cart":
-		return s.toolAmazonGetCart(ctx)
-	case "amazon_add_to_cart":
-		return s.toolAmazonAddToCart(ctx, argsRaw)
-	default:
-		return "Unknown tool: " + toolName, true
-	}
 }
 
 // NewHTTPMux builds and registers HTTP routes for kernel-mcp.
