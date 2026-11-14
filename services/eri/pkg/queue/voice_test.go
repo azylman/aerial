@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +26,10 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/bwmarrin/discordgo"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type effortModelResolutionCase struct {
@@ -94,10 +99,43 @@ type voiceTurnTestCase struct {
 	runnerErr, spawnerErr, wantErrIs, hookErr                                                                           error
 	poolNil, poolStopped, poolDeadCtx, cancelCaller, nilProcessPool, useVoiceHook, useVoiceStreamHook                   bool
 	closePipeImmediately, cancelCallerOnScan, clearPreSpawnedSessionID                                                  bool
-	resultStatus, resultError                                                                                           string
+	resultStatus, resultError, resultResponse                                                                           string
+	// wantTurnStatus is the aerial.turn.status of the invoke_agent span parented to the caller's
+	// span; "" leaves the turn's trace unchecked. wantChatSpan expects a chat child under it, and
+	// wantRegistered expects the daemon's registry entry during Execute (it must be gone after).
+	wantTurnStatus                             string
+	wantChatSpan, wantRegistered, wantUntraced bool
 }
 
-func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller context.CancelFunc, onRecordPrompt func(string)) (*WorkerPool, *runner.UnifiedProcessPool, bool) {
+// voiceTraceHarness is the tracing side of a voice test pool: the recorder its spans land in,
+// the active-turn registry it registers daemons in, and whether the daemon saw its turn
+// registered (with tool spans attached) while executing.
+type voiceTraceHarness struct {
+	rec        *tracetest.SpanRecorder
+	tp         *sdktrace.TracerProvider
+	registry   *runner.ActiveTurnRegistry
+	registered atomic.Bool
+}
+
+func newVoiceTraceHarness() *voiceTraceHarness {
+	rec := tracetest.NewSpanRecorder()
+	return &voiceTraceHarness{rec: rec, tp: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)), registry: runner.NewActiveTurnRegistry()}
+}
+
+// observeRegistration records whether the voice daemon is registered under its turn span.
+func (h *voiceTraceHarness) observeRegistration() {
+	daemonID, ok := h.registry.SoleDaemonInTarget(voiceTestTarget)
+	if !ok {
+		return
+	}
+	_, hasSpan := h.registry.Get(daemonID)
+	h.registered.Store(hasSpan)
+}
+
+// voiceTestTarget names the voice test pool's runtime home, so its daemons register under it.
+const voiceTestTarget = "voice"
+
+func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarness, cancelCaller context.CancelFunc, onRecordPrompt func(string)) (*WorkerPool, *runner.UnifiedProcessPool, bool) {
 	t.Helper()
 	if tt.poolNil {
 		return nil, nil, false
@@ -111,12 +149,13 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller contex
 		return &WorkerPool{stopped: true}, nil, false
 	}
 	if tt.nilProcessPool {
-		p := New(nil, WorkerPoolConfig{})
+		p := New(nil, WorkerPoolConfig{TracerProvider: h.tp, ActiveTurns: h.registry})
 		p.pools = nil
 		return p, nil, false
 	}
 	if tt.useVoiceHook {
 		p := New(nil, WorkerPoolConfig{
+			TracerProvider: h.tp, ActiveTurns: h.registry,
 			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
 				onRecordPrompt(prompt)
 				if onStatus != nil {
@@ -134,6 +173,7 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller contex
 	}
 	if tt.useVoiceStreamHook {
 		p := New(nil, WorkerPoolConfig{
+			TracerProvider: h.tp, ActiveTurns: h.registry,
 			VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
 				if tt.hookErr != nil {
 					return "", sessionID, tt.hookErr
@@ -152,7 +192,7 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller contex
 	}
 	if tt.runnerOut != "" || tt.runnerErr != nil || tt.runnerCode != 0 {
 		p := New(nil, WorkerPoolConfig{
-			LowEffortModel: "low-effort-fast-model", Store: dbtest.NewFakeStore(),
+			LowEffortModel: "low-effort-fast-model", Store: dbtest.NewFakeStore(), TracerProvider: h.tp, ActiveTurns: h.registry,
 			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 				return tt.runnerOut, tt.runnerErrOut, tt.runnerCode, tt.runnerErr
 			},
@@ -161,19 +201,19 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller contex
 		return p, nil, true
 	}
 	var blockCh chan struct{}
-	var onScan func()
+	onScan := h.observeRegistration
 	if tt.cancelCallerOnScan {
 		blockCh = make(chan struct{})
 		t.Cleanup(func() { close(blockCh) })
-		onScan = func() { cancelCaller() }
+		onScan = func() { h.observeRegistration(); cancelCaller() }
 	}
 	spawner := newEventDrivenVoiceDaemonSpawner(voiceProcessPoolSpawnerConfig{
 		spawnerErr: tt.spawnerErr, closeInRPipeImmediately: tt.closePipeImmediately,
-		resultStatus: tt.resultStatus, resultError: tt.resultError, resultExitCode: tt.resultExitCode,
+		resultStatus: tt.resultStatus, resultError: tt.resultError, resultResponse: tt.resultResponse, resultExitCode: tt.resultExitCode,
 		cancelCallerOnScan: onScan, blockUntilDone: blockCh,
 	})
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawner)
-	p := New(nil, WorkerPoolConfig{ProcessPool: procPool})
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash", GeminiHomeDir: filepath.Join(t.TempDir(), voiceTestTarget)}, spawner)
+	p := New(nil, WorkerPoolConfig{ProcessPool: procPool, TracerProvider: h.tp, ActiveTurns: h.registry})
 	p.Start()
 	return p, procPool, true
 }
@@ -226,7 +266,9 @@ func runVoiceTurnCase(t *testing.T, tt voiceTurnTestCase) {
 	}
 
 	var recordedPrompt, statusReceived, sentenceReceived string
-	pool, procPool, shouldStop := setupVoiceTestPool(t, &tt, cancel, func(p string) { recordedPrompt = p })
+	h := newVoiceTraceHarness()
+	ctx, caller := h.tp.Tracer("test").Start(ctx, "POST /voice/ask")
+	pool, procPool, shouldStop := setupVoiceTestPool(t, &tt, h, cancel, func(p string) { recordedPrompt = p })
 	if shouldStop && pool != nil {
 		defer pool.Stop()
 	}
@@ -245,10 +287,58 @@ func runVoiceTurnCase(t *testing.T, tt voiceTurnTestCase) {
 	}
 
 	reply, convID, err := pool.ExecuteVoiceTurn(ctx, tt.prompt, targetSess, func(s string) { statusReceived = s }, func(s string) { sentenceReceived = s })
+	caller.End()
+	assertVoiceTurnTrace(t, tt, h, caller.SpanContext().SpanID())
 	if assertVoiceTurnError(t, tt, err) {
 		return
 	}
 	assertVoiceTurnOutputs(t, tt, reply, convID, statusReceived, sentenceReceived, recordedPrompt)
+}
+
+// assertVoiceTurnTrace checks the turn's invoke_agent span (parented to the caller's span), its
+// chat child, and that the daemon was registered only while the turn executed.
+func assertVoiceTurnTrace(t *testing.T, tt voiceTurnTestCase, h *voiceTraceHarness, callerID trace.SpanID) {
+	t.Helper()
+	var turn sdktrace.ReadOnlySpan
+	for _, s := range h.rec.Ended() {
+		if s.Name() == "invoke_agent" && s.Parent().SpanID() == callerID {
+			turn = s
+		}
+	}
+	if tt.wantUntraced && turn != nil {
+		t.Errorf("custom voice runner opened an invoke_agent span")
+	}
+	if tt.wantRegistered != h.registered.Load() {
+		t.Errorf("registered during Execute = %v, want %v", h.registered.Load(), tt.wantRegistered)
+	}
+	if _, ok := h.registry.SoleDaemonInTarget(voiceTestTarget); ok {
+		t.Errorf("voice daemon still registered after the turn")
+	}
+	if tt.wantTurnStatus == "" {
+		return
+	}
+	if turn == nil {
+		t.Fatalf("no invoke_agent span parented to the caller span")
+	}
+	attrs := map[string]string{}
+	for _, kv := range turn.Attributes() {
+		attrs[string(kv.Key)] = kv.Value.String()
+	}
+	if attrs["aerial.turn.trigger"] != "voice" || attrs["aerial.turn.status"] != tt.wantTurnStatus {
+		t.Errorf("invoke_agent trigger=%q status=%q, want voice/%q", attrs["aerial.turn.trigger"], attrs["aerial.turn.status"], tt.wantTurnStatus)
+	}
+	if wantErr := tt.wantTurnStatus != "success"; wantErr != (turn.Status().Code == codes.Error) {
+		t.Errorf("invoke_agent span status = %v, want error=%v", turn.Status().Code, wantErr)
+	}
+	hasChat := false
+	for _, s := range h.rec.Ended() {
+		if s.Name() == "chat" && s.Parent().SpanID() == turn.SpanContext().SpanID() {
+			hasChat = true
+		}
+	}
+	if hasChat != tt.wantChatSpan {
+		t.Errorf("chat child span = %v, want %v", hasChat, tt.wantChatSpan)
+	}
 }
 
 func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
@@ -260,21 +350,22 @@ func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
 		{name: "deadPoolCtx", prompt: "hello", sessionID: "sess-dead", poolDeadCtx: true, wantErrSub: "brain is shutting down"},
 		{name: "nilPool", prompt: "hello", sessionID: "sess-nil", poolNil: true, wantErrSub: "worker pool is uninitialized"},
 		{name: "stoppedPool", prompt: "hello", sessionID: "sess-stopped", poolStopped: true, wantErrSub: "brain is shutting down"},
-		{name: "nilProcessPool", prompt: "hello", sessionID: "sess-1", nilProcessPool: true, wantErrSub: "voice daemon pool unavailable"},
+		{name: "nilProcessPool", prompt: "hello", sessionID: "sess-1", nilProcessPool: true, wantErrSub: "voice daemon pool unavailable", wantTurnStatus: "failed"},
 		{name: "SuccessTurn", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: `{"event":"result","result":{"status":"SUCCESS","response":"turned off fan"}}`, wantReply: "turned off fan", wantConvID: "sess-custom-1", wantStatusSub: "⚡"},
 		{name: "RunnerError", prompt: "turn off fan", sessionID: "sess-custom-1", runnerErrOut: "exec error", runnerCode: 1, runnerErr: errors.New("exec failed"), wantErrSub: "exec failed"},
 		{name: "ExitCodeNonZero", prompt: "turn off fan", sessionID: "sess-custom-1", runnerErrOut: "process died", runnerCode: 42, wantErrSub: "exit code 42"},
 		{name: "PlainTextFallback", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: "plain text response", wantReply: "plain text response", wantConvID: "sess-custom-1"},
 		{name: "EmptyResponseField", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: `{"event":"result","result":{"status":"SUCCESS","response":""}}`, wantErrSub: "empty response"},
-		{name: "VoiceRunnerHook", prompt: "hello", sessionID: "sess-hook-1", useVoiceHook: true, wantReply: "voice hook reply", wantConvID: "sess-hook-1", wantStatusSub: "⚡ Custom hook"},
+		{name: "VoiceRunnerHook", prompt: "hello", sessionID: "sess-hook-1", useVoiceHook: true, wantReply: "voice hook reply", wantConvID: "sess-hook-1", wantStatusSub: "⚡ Custom hook", wantUntraced: true},
 		{name: "VoiceStreamRunnerHook", prompt: "hello", sessionID: "sess-stream-1", useVoiceStreamHook: true, wantReply: "voice stream reply", wantConvID: "sess-stream-1", wantStatusSub: "⚡ Streaming hook", wantSentenceSub: "Streaming sentence."},
 		{name: "VoiceStreamRunnerHookError", prompt: "hello", sessionID: "sess-err", useVoiceStreamHook: true, hookErr: errors.New("simulated stream failure"), wantErrSub: "simulated stream failure"},
 		{name: "ForwardCleanPrompt", prompt: "what is the cluster node status?", sessionID: "dev-voice-1", useVoiceHook: true, wantReply: "All three nodes are online.", wantConvID: "dev-voice-1"},
-		{name: "AcquisitionFailure", prompt: "test", sessionID: "sess-acq-fail", spawnerErr: errors.New("spawner failed to start"), wantErrSub: "failed to acquire voice daemon"},
-		{name: "DaemonExecutionError", prompt: "test", sessionID: "sess-daemon-err", resultStatus: "ERROR", resultError: "simulated failure in daemon", wantErrSub: "simulated failure in daemon"},
+		{name: "AcquisitionFailure", prompt: "test", sessionID: "sess-acq-fail", spawnerErr: errors.New("spawner failed to start"), wantErrSub: "failed to acquire voice daemon", wantTurnStatus: "failed"},
+		{name: "DaemonExecutionError", prompt: "test", sessionID: "sess-daemon-err", resultStatus: "ERROR", resultError: "simulated failure in daemon", wantErrSub: "simulated failure in daemon", wantTurnStatus: "failed", wantChatSpan: true, wantRegistered: true},
+		{name: "DaemonTurnTraced", prompt: "test", sessionID: "sess-daemon-ok", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true},
 		{name: "SendFailureBrokenPipe", prompt: "test", sessionID: "sess-pipe-err", closePipeImmediately: true, wantErrSub: "failed sending turn to voice daemon"},
-		{name: "ContextCanceledWaitingForResult", prompt: "test", sessionID: "sess-ctx-cancel", cancelCallerOnScan: true, wantErrSub: "context canceled"},
-		{name: "ExitCodeNonZeroAndEmptySessionFallback", prompt: "test", sessionID: "sess-exit-fallback", clearPreSpawnedSessionID: true, resultStatus: "SUCCESS", resultExitCode: 1, wantErrSub: "empty response"},
+		{name: "ContextCanceledWaitingForResult", prompt: "test", sessionID: "sess-ctx-cancel", cancelCallerOnScan: true, wantErrSub: "context canceled", wantTurnStatus: "cancelled", wantRegistered: true},
+		{name: "ExitCodeNonZeroAndEmptySessionFallback", prompt: "test", sessionID: "sess-exit-fallback", clearPreSpawnedSessionID: true, resultStatus: "SUCCESS", resultExitCode: 1, wantErrSub: "empty response", wantRegistered: true},
 	}
 
 	for _, tt := range tests {
