@@ -1327,10 +1327,10 @@ func initVanadisJetStreamWithFactory(ctx context.Context, server *VanadisServer,
 	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
 		log.Printf("[vanadis] warning: failed to ensure core streams: %v", err)
 	}
-	if _, err := b.Subscribe(ctx, "aerial.dispatch.*", "vanadis-dispatch", server.HandleDispatchOutcomeEvent); err != nil {
+	if _, err := b.ConsumeQueue(ctx, "aerial.dispatch.*", "vanadis-dispatch", server.HandleDispatchOutcomeEvent); err != nil {
 		log.Printf("[vanadis] warning: failed to subscribe vanadis-dispatch: %v", err)
 	} else {
-		log.Println("[vanadis] Subscribed vanadis-dispatch consumer to aerial.dispatch.*")
+		log.Println("[vanadis] Subscribed vanadis-dispatch queue consumer to aerial.dispatch.*")
 	}
 	return b
 }

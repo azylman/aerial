@@ -45,12 +45,12 @@ func initHaroJetStreamWithFactory(ctx context.Context, database *sql.DB, natsURL
 	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
 		log.Printf("[Haro] warning: failed to ensure core streams: %v", err)
 	}
-	if _, err := b.Subscribe(ctx, "aerial.dispatch.*", "haro-dispatch", func(msgCtx context.Context, msg pubsub.Message) error {
+	if _, err := b.ConsumeQueue(ctx, "aerial.dispatch.*", "haro-dispatch", func(msgCtx context.Context, msg pubsub.Message) error {
 		return HandleDispatchOutcome(msgCtx, database, msg)
 	}); err != nil {
 		log.Printf("[Haro] warning: failed to subscribe haro-dispatch: %v", err)
 	} else {
-		log.Println("[Haro] Subscribed haro-dispatch consumer to aerial.dispatch.*")
+		log.Println("[Haro] Subscribed haro-dispatch queue consumer to aerial.dispatch.*")
 	}
 	return b
 }

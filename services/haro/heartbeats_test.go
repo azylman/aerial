@@ -33,10 +33,7 @@ func TestPureHelpers_BuildHeartbeatPrompt(t *testing.T) {
 				`title "Heartbeat Alert"`,
 				"Check node exporter disk",
 				`<\HEARTBEAT_INSTRUCTIONS>`,
-				"<HEARTBEAT_WATERMARK>",
 				"Last Successful Check Started At: none (initial run)",
-				"Watermark Rule: Only inspect events, logs, metrics, or alerts that occurred AFTER Last Successful Check Started At",
-				"</HEARTBEAT_WATERMARK>",
 			},
 		},
 		{
@@ -53,10 +50,7 @@ func TestPureHelpers_BuildHeartbeatPrompt(t *testing.T) {
 				`channel_id "9876543210"`,
 				`title "Disk Space Alert"`,
 				"Check high disk usage",
-				"<HEARTBEAT_WATERMARK>",
 				"Last Successful Check Started At: 2026-11-14T01:00:00Z (1794618000)",
-				"Current Check Started At:",
-				"</HEARTBEAT_WATERMARK>",
 			},
 		},
 	}

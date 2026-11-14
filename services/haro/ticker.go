@@ -490,6 +490,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 		Effort:       hb.Effort,
 		SkipIfActive: true,
 	}
+
 	dispatchStart := time.Now()
 	resp, dispatchErr := traceFire(ctx, "heartbeat", hb.ID, func(ctx context.Context) (DispatchResponse, error) {
 		return t.dispatcher.Dispatch(ctx, req)
@@ -549,6 +550,31 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 	}
 }
 
+func calculateOutcomeTiming(ev pubsub.DispatchOutcomeEvent, runStartedAt time.Time) (time.Time, int64, time.Time) {
+	completedAt := ev.CompletedAt
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	startedAt := ev.StartedAt
+	if startedAt.IsZero() {
+		startedAt = runStartedAt
+	}
+	durationMs := ev.DurationMs
+	if durationMs <= 0 && !startedAt.IsZero() {
+		durationMs = completedAt.Sub(startedAt).Milliseconds()
+	}
+	return completedAt, durationMs, startedAt
+}
+
+func advanceHeartbeatWatermark(ctx context.Context, database *sql.DB, run *ScheduleRun, status string, startedAt time.Time) {
+	if status != "completed" || run.ScheduleType != "heartbeat" || startedAt.IsZero() {
+		return
+	}
+	if err := AdvanceHeartbeatLastCompletedAt(ctx, database, run.ScheduleID, startedAt); err != nil {
+		log.Printf("[Haro] failed to advance last_completed_at for heartbeat %s: %v", run.ScheduleID, err)
+	}
+}
+
 // HandleDispatchOutcome updates schedule_runs and monotonically advances heartbeat last_completed_at.
 func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Message) error {
 	if database == nil || msg == nil {
@@ -567,23 +593,17 @@ func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Mes
 	run, err := GetScheduleRun(ctx, database, dispatchID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "not found") {
+			if msg.NumDelivered() < 5 {
+				return msg.NakWithDelay(1 * time.Second)
+			}
 			return nil
 		}
 		log.Printf("[Haro] error querying schedule run for %s: %v", dispatchID, err)
-		return nil
+		return err
 	}
 
 	status := strings.ToLower(strings.TrimSpace(ev.Status))
-	completedAt := ev.CompletedAt
-	if completedAt.IsZero() {
-		completedAt = time.Now().UTC()
-	}
-	durationMs := ev.DurationMs
-	if durationMs <= 0 && !ev.StartedAt.IsZero() {
-		durationMs = completedAt.Sub(ev.StartedAt).Milliseconds()
-	} else if durationMs <= 0 && !run.StartedAt.IsZero() {
-		durationMs = completedAt.Sub(run.StartedAt).Milliseconds()
-	}
+	completedAt, durationMs, startedAt := calculateOutcomeTiming(ev, run.StartedAt)
 
 	if err := UpdateScheduleRunOutcome(ctx, database, dispatchID, status, ev.Error, completedAt, durationMs); err != nil {
 		log.Printf("[Haro] failed to update schedule run outcome for %s: %v", dispatchID, err)
@@ -591,18 +611,7 @@ func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Mes
 	}
 
 	RecordScheduleRun(run.ScheduleType, status)
-
-	if status == "completed" && run.ScheduleType == "heartbeat" {
-		startedAt := ev.StartedAt
-		if startedAt.IsZero() {
-			startedAt = run.StartedAt
-		}
-		if !startedAt.IsZero() {
-			if err := AdvanceHeartbeatLastCompletedAt(ctx, database, run.ScheduleID, startedAt); err != nil {
-				log.Printf("[Haro] failed to advance last_completed_at for heartbeat %s: %v", run.ScheduleID, err)
-			}
-		}
-	}
+	advanceHeartbeatWatermark(ctx, database, run, status, startedAt)
 
 	return nil
 }

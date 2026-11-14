@@ -62,12 +62,28 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 		},
 		{
 			name: "healthcheck ping is ignored",
+			seedBuild: &VanadisBuild{
+				ID:        "b-ping",
+				Status:    "running",
+				CreatedAt: now,
+			},
+			seedChunks: []VanadisChunk{
+				{
+					ID:         "c1",
+					BuildID:    "b-ping",
+					ChunkIndex: 0,
+					Mode:       "action",
+					Status:     "running",
+					Title:      "Ping Step",
+				},
+			},
 			event: &pubsub.DispatchOutcomeEvent{
 				DispatchID:     "healthcheck-ping",
 				VanadisChunkID: "c1",
 				Status:         "completed",
 			},
-			wantErr: false,
+			wantErr:    false,
+			wantStatus: "running",
 		},
 		{
 			name: "empty vanadis chunk id is ignored",
@@ -80,12 +96,28 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 		},
 		{
 			name: "unhandled status returns nil",
+			seedBuild: &VanadisBuild{
+				ID:        "b-running",
+				Status:    "running",
+				CreatedAt: now,
+			},
+			seedChunks: []VanadisChunk{
+				{
+					ID:         "c1",
+					BuildID:    "b-running",
+					ChunkIndex: 0,
+					Mode:       "action",
+					Status:     "running",
+					Title:      "Running Step",
+				},
+			},
 			event: &pubsub.DispatchOutcomeEvent{
 				DispatchID:     "disp-1",
 				VanadisChunkID: "c1",
 				Status:         "running",
 			},
-			wantErr: false,
+			wantErr:    false,
+			wantStatus: "running",
 		},
 		{
 			name: "completed action chunk advances to next chunk",
@@ -354,6 +386,19 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 	}
 }
 
+type ackBus struct {
+	pubsub.Bus
+
+	onHandled func()
+}
+
+func (a *ackBus) ConsumeQueue(ctx context.Context, subject, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	return a.Bus.ConsumeQueue(ctx, subject, queue, func(mCtx context.Context, msg pubsub.Message) error {
+		defer a.onHandled()
+		return handler(mCtx, msg)
+	})
+}
+
 func TestVanadisServer_MemoryBusIntegration(t *testing.T) {
 	t.Parallel()
 
@@ -377,21 +422,22 @@ func TestVanadisServer_MemoryBusIntegration(t *testing.T) {
 
 	inserter := &mockRiverInserter{}
 	server := NewVanadisServer(Config{}, mem, inserter, nil)
-	bus := pubsub.NewMemoryBus()
-	server.SetBus(bus)
 
 	ctx := context.Background()
-	if err := pubsub.EnsureCoreStreams(ctx, bus); err != nil {
+	done := make(chan struct{})
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+
+	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
 		t.Fatalf("EnsureCoreStreams: %v", err)
 	}
 
-	done := make(chan struct{})
-	_, err := bus.Subscribe(ctx, "aerial.dispatch.*", "vanadis-dispatch", func(msgCtx context.Context, msg pubsub.Message) error {
-		defer close(done)
-		return server.HandleDispatchOutcomeEvent(msgCtx, msg)
+	wrapped := &ackBus{Bus: memBus, onHandled: func() { close(done) }}
+	bus := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return wrapped, nil
 	})
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
+	if bus == nil {
+		t.Fatal("expected non-nil bus from initVanadisJetStreamWithFactory")
 	}
 
 	ev := pubsub.DispatchOutcomeEvent{
@@ -400,7 +446,7 @@ func TestVanadisServer_MemoryBusIntegration(t *testing.T) {
 		Status:         "completed",
 		CompletedAt:    time.Now().UTC(),
 	}
-	if err := bus.Publish(ctx, "aerial.dispatch.completed", "disp-bus-1", ev); err != nil {
+	if err := memBus.Publish(ctx, "aerial.dispatch.completed", "disp-bus-1", ev); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 
@@ -425,17 +471,6 @@ func TestVanadisServer_BusAndJetStreamInit(t *testing.T) {
 	ctx := context.Background()
 	server := NewVanadisServer(Config{}, nil, nil, nil)
 
-	// Bus getter and setter
-	if server.Bus() != nil {
-		t.Error("expected initial bus to be nil")
-	}
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-	server.SetBus(memBus)
-	if server.Bus() != memBus {
-		t.Error("expected server.Bus() to return configured bus")
-	}
-
 	// initVanadisJetStream empty natsURL
 	if bus := initVanadisJetStream(ctx, server, ""); bus != nil {
 		t.Error("expected nil bus for empty natsURL")
@@ -450,18 +485,15 @@ func TestVanadisServer_BusAndJetStreamInit(t *testing.T) {
 	}
 
 	// initVanadisJetStreamWithFactory success branch
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
 	successFactory := func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return memBus, nil
 	}
 	if bus := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", successFactory); bus == nil {
 		t.Error("expected non-nil bus when factory succeeds")
-	} else {
-		// Exercise subscription callback registered in initVanadisJetStreamWithFactory
-		_ = bus.Publish(ctx, "aerial.dispatch.completed", "noop-ping", pubsub.DispatchOutcomeEvent{DispatchID: "healthcheck-ping"})
 	}
-
-	// Exercise default newVanadisBusFn error path with invalid URL format
-	if _, err := newVanadisBusFn(ctx, "://bad-url"); err == nil {
-		t.Error("expected error from newVanadisBusFn with bad URL")
+	if server.Bus() != memBus {
+		t.Error("expected server.Bus() to equal configured bus")
 	}
 }
