@@ -108,10 +108,6 @@ func TestAttachEriEventBus_DefaultAndEnvURL(t *testing.T) {
 	}
 }
 
-func TestAttachEriEventBus_URLResolution(t *testing.T) {
-	TestAttachEriEventBus_DefaultAndEnvURL(t)
-}
-
 func TestFirstNonEmpty(t *testing.T) {
 	t.Parallel()
 

@@ -44,6 +44,7 @@ func attachEriEventBusWithFactory(ctx context.Context, pool *queue.WorkerPool, f
 	}
 	natsURL := firstNonEmpty(os.Getenv("NATS_URL"), pool.NATSURL())
 	if natsURL == "" {
+		log.Printf("[WorkerPool] Warning: NATS_URL is not configured; event bus disabled")
 		return nil
 	}
 	bus := initEriJetStreamWithFactory(ctx, natsURL, factory)
