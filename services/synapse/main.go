@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 
 	"github.com/jackc/pgx/v5"
@@ -30,6 +31,7 @@ import (
 type RouterServer struct {
 	cfgSrc                   ConfigSource
 	httpClient               *http.Client
+	bus                      pubsub.Bus
 	riverClient              RiverInserter
 	registry                 PRRegistryUpdater
 	dispatcher               OutboundDispatcher
@@ -63,6 +65,8 @@ func NewRouterServer(cfgSrc ConfigSource, client *http.Client, riverClient ...Ri
 }
 
 func (s *RouterServer) SetRiverClient(rc RiverInserter)             { s.riverClient = rc }
+func (s *RouterServer) SetEventBus(b pubsub.Bus)                    { s.bus = b }
+func (s *RouterServer) EventBus() pubsub.Bus                        { return s.bus }
 func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)           { s.registry = reg }
 func (s *RouterServer) SetDispatcher(d OutboundDispatcher)          { s.dispatcher = d }
 func (s *RouterServer) SetQueueStats(q queueStatsQuerier)           { s.queueStats = q }
@@ -1272,49 +1276,6 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 	return s.dispatchAlertWithPrompt(ctx, targetID, "deploy_success", "", strings.Join(lines, "\n"))
 }
 
-func (s *RouterServer) enqueueMergeConflict(ctx context.Context, args MergeConflictArgs) error {
-	if s == nil {
-		return nil
-	}
-	args.Repo = normalizeRepo(args.Repo)
-	if s.riverClient != nil {
-		if err := s.insertRiverJob(ctx, args); err != nil {
-			log.Printf("[synapse] [github] error enqueuing merge conflict into river: %v", err)
-			return fmt.Errorf("enqueue merge conflict: %w", err)
-		}
-		return nil
-	}
-	return s.ProcessMergeConflict(ctx, args)
-}
-
-func (s *RouterServer) ProcessMergeConflict(ctx context.Context, args MergeConflictArgs) error {
-	if s == nil {
-		return nil
-	}
-	return s.dispatchConflictPrompt(ctx, args.TargetID, args.Repo, args.Branch, args.HeadSHA, args.PRNumber)
-}
-
-func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, repo, branch, headSHA string, prNum int) error {
-	if prNum > 0 && s.registry != nil {
-		if _, isPg := s.registry.(*PostgresPRRegistry); isPg {
-			s.setPRWidgetState(ctx, repo, prNum, "conflict", "Merge conflict detected")
-			if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-				log.Printf("[synapse] [widget] warning syncing conflict widget: %v", err)
-			}
-		}
-	}
-	shortRepo := firstNonEmpty(cleanRepoName(repo), "aerial")
-	cleanBranch := firstNonEmpty(strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/"), "<branch>")
-	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', merge origin/main to resolve conflicts, verify locally, and push to update the PR via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", prNum, repo, branch, headSHA, shortRepo, cleanBranch)
-	opts := s.vanadisPromptOpts(ctx, repo, prNum)
-	opts.silent, opts.skipIfActive, opts.effort = true, true, firstNonEmpty(opts.effort, "medium")
-	opts.dispatchID = fmt.Sprintf("conflict-%s-%d", strings.ReplaceAll(repo, "/", "-"), prNum)
-	if cleanSHA := strings.TrimSpace(headSHA); cleanSHA != "" {
-		opts.dispatchID += "-" + cleanSHA
-	}
-	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", "", prompt, opts)
-}
-
 func setupRiverWorkerPool(ctx context.Context, server *RouterServer, cfg Config) (*pgxpool.Pool, *river.Client[pgx.Tx], error) {
 	if cfg.PostgresURL == "" {
 		return nil, nil, nil
@@ -1386,6 +1347,9 @@ func runServer(ctx context.Context, cfgSrc *httpkit.Reloadable[Config], onReady 
 	dispatcher.SetFluxReceiverURL(cfg.FluxReceiverURL)
 	dispatcher.SetKubeConfig(cfg.KubeAPIServer, cfg.KubeToken)
 	server.SetDispatcher(dispatcher)
+
+	stopJetStream := initSynapseJetStream(ctx, server, cfg.NATSURL)
+	defer stopJetStream()
 
 	dbPool, riverClient, err := setupRiverWorkerPool(ctx, server, *cfg)
 	if err != nil {

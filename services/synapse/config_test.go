@@ -16,7 +16,7 @@ var synapseConfigKeysToClear = []string{
 	"DATABASE_URL", "POSTGRES_URL", "POSTGRES_USER", "POSTGRES_PASSWORD",
 	"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB",
 	"DISCORD_TOKEN", "BOT_ID", "AERIAL_BOT_ID", "BRAIN_URL", "ERI_URL",
-	"FLUX_RECEIVER_URL", "VANADIS_URL", "HARO_URL", "HANGAR_URL",
+	"FLUX_RECEIVER_URL", "VANADIS_URL", "HARO_URL", "HANGAR_URL", "NATS_URL",
 	"SYSTEM_CHANNEL_ID", "AUTO_UPDATE_PR_AUTHORS",
 	"WEBHOOK_FORWARD_URLS", "SYNAPSE_DEFAULT_OWNER", "DEFAULT_OWNER", "AERIAL_DEFAULT_OWNER",
 }
@@ -36,6 +36,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		wantEriURL     string
 		wantSysChan    string
 		wantDiscTok    string
+		wantNATSURL    string
 	}{
 		{
 			name: "primary port env",
@@ -117,6 +118,13 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			},
 			wantFluxURL: "http://flux-receiver.aerial/webhook",
 		},
+		{
+			name: "nats url primary env",
+			env: map[string]string{
+				"NATS_URL": "nats://custom-nats:4222",
+			},
+			wantNATSURL: "nats://custom-nats:4222",
+		},
 	}
 
 	keysToClear := []string{
@@ -125,7 +133,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		"GITHUB_PAT", "GITHUB_API_URL",
 		"DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
-		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL",
+		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "NATS_URL",
 		"SYSTEM_CHANNEL_ID", "CONFIG_PATH", "DISCORD_TOKEN",
 	}
 
@@ -150,6 +158,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				{cfg.EriURL, tc.wantEriURL, "EriURL"},
 				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
 				{cfg.DiscordToken, tc.wantDiscTok, "DiscordToken"},
+				{cfg.NATSURL, tc.wantNATSURL, "NATSURL"},
 			} {
 				if check.want != "" && check.got != check.want {
 					t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
@@ -782,6 +791,7 @@ func TestSynapseRestartRequired(t *testing.T) {
 		{name: "kube token requires restart", next: withField(base, Config{KubeToken: "kube2"}), want: true},
 		{name: "vanadis url requires restart", next: withField(base, Config{VanadisURL: "http://vanadis2"}), want: true},
 		{name: "haro url requires restart", next: withField(base, Config{HaroURL: "http://haro2"}), want: true},
+		{name: "nats url requires restart", next: withField(base, Config{NATSURL: "nats://nats2:4222"}), want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
