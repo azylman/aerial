@@ -15,6 +15,8 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -320,13 +322,23 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 	}, nil
 }
 
+// spawnStreamingDaemonWithRetry starts a daemon, retrying once on a handshake timeout. ctx only
+// parents the daemon.spawn span and gates the retry; the daemon itself runs on the pool's
+// long-lived ctx so it outlives the turn that spawned it. For agy the span ends after the init
+// handshake; for claude it covers the fork, and the init arrival is a daemon.init turn event.
 func (p *UnifiedProcessPool) spawnStreamingDaemonWithRetry(ctx context.Context, targetKey string, daemonCfg DaemonConfig) (*StreamingDaemon, error) {
+	_, span := startChildOf(ctx, spanDaemonSpawn, trace.WithAttributes(attrAgentEngine.String(daemonCfg.engineName())))
+	defer span.End()
+	attempts := 1
 	daemon, spawnErr := StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)
 	if spawnErr != nil && strings.Contains(spawnErr.Error(), "daemon startup timed out waiting for init event") && p.ctx.Err() == nil && ctx.Err() == nil {
 		log.Printf("[UnifiedProcessPool] Warning: cold-start handshake timed out for target %q; retrying once...", targetKey)
+		attempts++
 		daemon, spawnErr = StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)
 	}
+	span.SetAttributes(attrDaemonAttempts.Int(attempts))
 	if spawnErr != nil {
+		span.SetStatus(codes.Error, "daemon spawn failed")
 		if p.isClosed() {
 			return nil, fmt.Errorf("process pool is closed")
 		}
@@ -837,7 +849,13 @@ func releasePoolTargetLock(mu *sync.Mutex, locks map[string]*targetLock, targetK
 }
 
 func (p *UnifiedProcessPool) acquireTargetLock(ctx context.Context, targetKey string) (*targetLock, error) {
-	return acquirePoolTargetLock(ctx, &p.targetMu, &p.targetLocks, targetKey, p.cfg.TargetLockTimeout)
+	_, span := startChildOf(ctx, spanSessionLockWait)
+	defer span.End()
+	tl, err := acquirePoolTargetLock(ctx, &p.targetMu, &p.targetLocks, targetKey, p.cfg.TargetLockTimeout)
+	if err != nil {
+		span.SetStatus(codes.Error, "session lock wait failed")
+	}
+	return tl, err
 }
 
 func (p *UnifiedProcessPool) releaseTargetLock(targetKey string, tl *targetLock, held bool) {

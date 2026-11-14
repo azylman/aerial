@@ -17,6 +17,7 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // TurnSink receives streaming notifications and results during an active turn.
@@ -1147,6 +1148,20 @@ func (d *StreamingDaemon) handleResultEvent(raw map[string]any) {
 	d.deliverResultToSink(activeTurn, raw)
 }
 
+// recordDaemonInit marks Claude's init message on the in-flight turn's span: StartStreamingDaemon
+// returns before Claude has connected its MCP servers, so this event closes that gap in the trace.
+func (d *StreamingDaemon) recordDaemonInit() {
+	d.inflightMu.Lock()
+	var turn *TurnContext
+	if len(d.inflight) > 0 {
+		turn = d.inflight[0]
+	}
+	d.inflightMu.Unlock()
+	if turn != nil && turn.Ctx != nil {
+		trace.SpanFromContext(turn.Ctx).AddEvent(eventDaemonInit)
+	}
+}
+
 func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
@@ -1175,6 +1190,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				d.sessionID = sessID
 				d.mu.Unlock()
 			}
+			d.recordDaemonInit()
 		}
 		return
 	}

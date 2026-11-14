@@ -43,21 +43,31 @@ func TestStartTurnSpan(t *testing.T) {
 	t.Parallel()
 	pickup := time.Date(2026, 11, 13, 8, 0, 10, 0, time.UTC)
 	enq := pickup.Add(-3 * time.Second)
+	poolStart := pickup.Add(-5 * time.Second)
+	firstEnq := pickup.Add(-40 * time.Minute)
+	staleUpdate := firstEnq.Add(time.Minute) // recovery bumps RestartCount without touching UpdatedAt
 	tests := []struct {
-		name      string
-		items     []queuedTurnItem
-		wantTrace string // "" means a fresh root trace
-		wantLinks []string
-		wantWait  bool
-		wantStart time.Time
-		agentName string
-		wantAgent bool
+		name         string
+		items        []queuedTurnItem
+		wantTrace    string // "" means a fresh root trace
+		wantLinks    []string
+		wantWait     bool
+		wantStart    time.Time
+		agentName    string
+		wantAgent    bool
+		wantRestarts int
+		wantRetries  int
+		wantResumed  bool
+		wantFirstMs  int64 // aerial.queue.first_enqueued_unix_ms; 0 means absent
 	}{
 		{name: "single message parents to its traceparent", items: []queuedTurnItem{{traceparent: traceparA, createdAt: enq}}, wantTrace: traceA, wantWait: true, wantStart: enq, agentName: "aerial", wantAgent: true},
 		{name: "burst links the rest", items: []queuedTurnItem{{traceparent: traceparA, createdAt: enq}, {traceparent: traceparB, createdAt: enq}, {traceparent: malformedTP}, {traceparent: traceparC}}, wantTrace: traceA, wantLinks: []string{traceB, traceC}, wantWait: true, wantStart: enq},
 		{name: "untraced first message starts a root and links the others", items: []queuedTurnItem{{createdAt: enq}, {traceparent: traceparB}}, wantLinks: []string{traceB}, wantWait: true, wantStart: enq},
 		{name: "no enqueue time skips queue wait", items: []queuedTurnItem{{traceparent: traceparA}}, wantTrace: traceA, wantStart: pickup},
 		{name: "clock skew skips queue wait", items: []queuedTurnItem{{traceparent: traceparA, createdAt: pickup.Add(time.Second)}}, wantTrace: traceA, wantStart: pickup},
+		{name: "first attempt dispatch waits from creation", items: []queuedTurnItem{dispatchTraceItem(db.Dispatch{Traceparent: traceparA, CreatedAt: enq, UpdatedAt: enq, RetryCount: 1}, poolStart)}, wantTrace: traceA, wantWait: true, wantStart: enq, wantRetries: 1},
+		{name: "resumed dispatch with stale updated_at waits from pool start", items: []queuedTurnItem{dispatchTraceItem(db.Dispatch{Traceparent: traceparA, CreatedAt: firstEnq, UpdatedAt: staleUpdate, RestartCount: 1, RetryCount: 2}, poolStart)}, wantTrace: traceA, wantWait: true, wantStart: poolStart, wantRestarts: 1, wantRetries: 2, wantResumed: true, wantFirstMs: firstEnq.UnixMilli()},
+		{name: "resumed burst waits from its requeue", items: burstTraceItems([]db.Message{{Traceparent: traceparA, CreatedAt: firstEnq, UpdatedAt: enq, RestartCount: 2}, {Traceparent: traceparB, CreatedAt: firstEnq}}, poolStart), wantTrace: traceA, wantLinks: []string{traceB}, wantWait: true, wantStart: enq, wantRestarts: 2, wantResumed: true, wantFirstMs: firstEnq.UnixMilli()},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -102,8 +112,8 @@ func TestStartTurnSpan(t *testing.T) {
 			if (wait != nil) != tc.wantWait {
 				t.Fatalf("queue.wait present = %v, want %v", wait != nil, tc.wantWait)
 			}
-			if wait != nil && (!wait.StartTime().Equal(enq) || !wait.EndTime().Equal(pickup) || wait.Parent().SpanID() != root.SpanContext().SpanID()) {
-				t.Errorf("queue.wait = %v..%v parent %v, want %v..%v under root", wait.StartTime(), wait.EndTime(), wait.Parent().SpanID(), enq, pickup)
+			if wait != nil && (!wait.StartTime().Equal(tc.wantStart) || !wait.EndTime().Equal(pickup) || wait.Parent().SpanID() != root.SpanContext().SpanID()) {
+				t.Errorf("queue.wait = %v..%v parent %v, want %v..%v under root", wait.StartTime(), wait.EndTime(), wait.Parent().SpanID(), tc.wantStart, pickup)
 			}
 			have := attrMap(root.Attributes())
 			if have[runner.AttrGenAIConversationID] != attribute.StringValue("thread-1") || have[runner.AttrGenAIOperationName] != attribute.StringValue("invoke_agent") {
@@ -111,6 +121,16 @@ func TestStartTurnSpan(t *testing.T) {
 			}
 			if _, ok := have[runner.AttrGenAIAgentName]; ok != tc.wantAgent {
 				t.Errorf("agent name present = %v, want %v", ok, tc.wantAgent)
+			}
+			if have[attrRestartCount] != attribute.IntValue(tc.wantRestarts) || have[attrRetryCount] != attribute.IntValue(tc.wantRetries) {
+				t.Errorf("restart/retry attrs = %v/%v, want %d/%d", have[attrRestartCount], have[attrRetryCount], tc.wantRestarts, tc.wantRetries)
+			}
+			if resumed, ok := have[attrResumed]; ok != tc.wantResumed || (ok && !resumed.AsBool()) {
+				t.Errorf("resumed attr = %v (present %v), want present %v", resumed, ok, tc.wantResumed)
+			}
+			firstMs, ok := have[attrFirstEnqueuedMs]
+			if ok != (tc.wantFirstMs != 0) || (ok && firstMs.AsInt64() != tc.wantFirstMs) {
+				t.Errorf("first_enqueued attr = %v (present %v), want %d", firstMs, ok, tc.wantFirstMs)
 			}
 		})
 	}
@@ -244,6 +264,25 @@ func TestProcessBurst_EmitsTurnTrace(t *testing.T) {
 			}
 			root := byName[runner.OperationInvokeAgent]
 			rootID := root.SpanContext().SpanID()
+			for child, parent := range map[string]string{spanTurnSetup: runner.OperationInvokeAgent, spanLease: spanTurnSetup, "session.lock_wait": spanLease, "daemon.spawn": spanLease, spanPrompt: spanTurnSetup} {
+				s, ok := byName[child]
+				if !ok {
+					t.Errorf("missing startup span %q", child)
+					continue
+				}
+				if p, ok := byName[parent]; !ok || s.Parent().SpanID() != p.SpanContext().SpanID() {
+					t.Errorf("startup span %q not parented under %q", child, parent)
+				}
+			}
+			if setup, chat := byName[spanTurnSetup], byName[runner.OperationChat]; setup != nil && chat != nil && setup.EndTime().After(chat.StartTime()) {
+				t.Errorf("turn.setup ends %v after chat starts %v", setup.EndTime(), chat.StartTime())
+			}
+			if lease := byName[spanLease]; lease != nil {
+				leaseAttrs := attrMap(lease.Attributes())
+				if leaseAttrs[attrNewConversation] != attribute.BoolValue(true) || leaseAttrs[attrSessionEphemeral] != attribute.BoolValue(false) {
+					t.Errorf("session.lease attrs = %v", lease.Attributes())
+				}
+			}
 			if tc.wantTrace != "" && root.SpanContext().TraceID().String() != tc.wantTrace {
 				t.Errorf("root trace = %s, want %s", root.SpanContext().TraceID(), tc.wantTrace)
 			}
@@ -424,6 +463,38 @@ func TestLateSinkUsage(t *testing.T) {
 			te := &turnExecution{traceSink: tc.sink}
 			if got := te.lateSinkUsage(tc.ctx); got != tc.want {
 				t.Errorf("lateSinkUsage = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// overflowTestLease is a lease served by an InterchangeablePool worker.
+type overflowTestLease struct {
+	testSessionLease
+
+	overflow bool
+}
+
+func (l *overflowTestLease) IsOverflow() bool { return l.overflow }
+
+func TestLeaseSpanAttributes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		lease     runner.SessionLease
+		ephemeral bool
+		want      map[attribute.Key]attribute.Value
+	}{
+		{name: "new conversation", lease: &testSessionLease{turnCount: 1}, want: map[attribute.Key]attribute.Value{attrNewConversation: attribute.BoolValue(true), attrSessionEphemeral: attribute.BoolValue(false)}},
+		{name: "resumed conversation", lease: &testSessionLease{turnCount: 7}, want: map[attribute.Key]attribute.Value{attrNewConversation: attribute.BoolValue(false), attrSessionEphemeral: attribute.BoolValue(false)}},
+		{name: "fixed interchangeable worker", lease: &overflowTestLease{}, ephemeral: true, want: map[attribute.Key]attribute.Value{attrNewConversation: attribute.BoolValue(true), attrSessionEphemeral: attribute.BoolValue(true), attrSessionOverflow: attribute.BoolValue(false)}},
+		{name: "on-demand overflow worker", lease: &overflowTestLease{overflow: true}, ephemeral: true, want: map[attribute.Key]attribute.Value{attrNewConversation: attribute.BoolValue(true), attrSessionEphemeral: attribute.BoolValue(true), attrSessionOverflow: attribute.BoolValue(true)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := attrMap(leaseSpanAttributes(tc.lease, tc.ephemeral)); fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Errorf("leaseSpanAttributes = %v, want %v", got, tc.want)
 			}
 		})
 	}

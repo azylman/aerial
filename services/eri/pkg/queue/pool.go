@@ -135,34 +135,34 @@ type threadWorkerState struct {
 }
 
 type WorkerPool struct {
-	appCfg            *config.Config
-	hasExplicitAppCfg bool
-	overrideModel     string
-	cfg               WorkerPoolConfig
-	sessionMgr        *session.Manager
-	mu                sync.Mutex
-	threadChs         map[string]*threadWorkerState
-	activeTurns       map[string]*turnExecution
-	wg                sync.WaitGroup
-	ctx               context.Context
-	cancel            context.CancelFunc
-	stopped           bool
-	quotaLockedUntil  atomic.Int64
-	scopeLocks        sync.Map
-	webhookDispatcher WebhookDispatcher
-	summaryGroup      singleflight.Group
-	pools             map[PoolKey]runner.AgentPool
-	voiceProcessPool  runner.AgentPool
-	createThreadFn    func(channelID, title string) (string, error)
-	widgetDeliveryMu  sync.Mutex
-	widgetLockHolder  atomic.Pointer[widgetLockPath] // path holding widgetDeliveryMu; nil when free
-	widgetMu          sync.Mutex
-	widgetsByID       map[string]discord.StatusWidgetRequest
-	widgetOrder       []string
-	chunkToBuildID    map[string]string
-	activeChunkSteps  map[string]string
-	activeChunkTurns  map[string]string
-	leaderHold        bool
+	appCfg              *config.Config
+	hasExplicitAppCfg   bool
+	overrideModel       string
+	cfg                 WorkerPoolConfig
+	sessionMgr          *session.Manager
+	mu                  sync.Mutex
+	threadChs           map[string]*threadWorkerState
+	activeTurns         map[string]*turnExecution
+	wg                  sync.WaitGroup
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	stopped, leaderHold bool
+	quotaLockedUntil    atomic.Int64
+	scopeLocks          sync.Map
+	webhookDispatcher   WebhookDispatcher
+	summaryGroup        singleflight.Group
+	pools               map[PoolKey]runner.AgentPool
+	voiceProcessPool    runner.AgentPool
+	createThreadFn      func(channelID, title string) (string, error)
+	widgetDeliveryMu    sync.Mutex
+	widgetLockHolder    atomic.Pointer[widgetLockPath] // path holding widgetDeliveryMu; nil when free
+	widgetMu            sync.Mutex
+	widgetsByID         map[string]discord.StatusWidgetRequest
+	widgetOrder         []string
+	chunkToBuildID      map[string]string
+	activeChunkSteps    map[string]string
+	activeChunkTurns    map[string]string
+	startedAt           time.Time // anchors queue.wait for rows resumed after a restart
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -460,7 +460,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	p := &WorkerPool{
 		appCfg: resolvedAppCfg, hasExplicitAppCfg: isExplicitAppCfg, cfg: cfg, pools: pools, voiceProcessPool: cfg.VoiceProcessPool,
 		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState),
-		activeTurns: make(map[string]*turnExecution), ctx: ctx, cancel: cancel,
+		activeTurns: make(map[string]*turnExecution), ctx: ctx, cancel: cancel, startedAt: time.Now().UTC(),
 		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
 		widgetsByID:      make(map[string]discord.StatusWidgetRequest),
 		chunkToBuildID:   make(map[string]string),

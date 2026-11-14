@@ -308,6 +308,10 @@ func (l *interchangeableSessionLease) SessionID() string {
 	}
 	return l.inner.SessionID()
 }
+
+// IsOverflow reports whether the lease runs on an on-demand worker because every fixed worker was busy.
+func (l *interchangeableSessionLease) IsOverflow() bool { return l != nil && l.isOverflow }
+
 func (l *interchangeableSessionLease) PreviousSessionID() string { return "" }
 func (l *interchangeableSessionLease) IsCold() bool              { return false }
 func (l *interchangeableSessionLease) IsEphemeral() bool         { return true }
