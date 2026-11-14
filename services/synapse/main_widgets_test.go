@@ -861,12 +861,12 @@ func routerServerHandlePRRegisterValidationCases() []handlePRRegisterCase {
 		{
 			name:           "SuccessEmptyTargetIDFallsBackToSystemChannelID",
 			noExistingPR:   true,
-			sysChanID:      "1542423172400291873",
+			sysChanID:      "100000000000000004",
 			body:           `{"repo":"azylman/aerial","pr_number":108,"branch":"feat/empty-target","head_sha":"sha555","target_id":""}`,
 			wantStatus:     http.StatusOK,
 			wantSubstr:     `"status":"registered"`,
 			wantRegistered: true,
-			wantTargetID:   "1542423172400291873",
+			wantTargetID:   "100000000000000004",
 			wantWidgetCall: true,
 		},
 		{
@@ -920,11 +920,11 @@ func routerServerHandlePRRegisterSuccessCases() []handlePRRegisterCase {
 		{
 			name:           "SuccessWithChunkIDResolvingThreadID",
 			body:           `{"repo":"azylman/aerial","pr_number":102,"branch":"feat/chunk","head_sha":"sha456","vanadis_chunk_id":"chunk-xyz"}`,
-			regTargetID:    "1555405874565091399",
+			regTargetID:    "100000000000000005",
 			wantStatus:     http.StatusOK,
 			wantSubstr:     `"status":"registered"`,
 			wantRegistered: true,
-			wantTargetID:   "1555405874565091399",
+			wantTargetID:   "100000000000000005",
 			wantWidgetCall: true,
 		},
 		{
@@ -949,12 +949,12 @@ func routerServerHandlePRRegisterSuccessCases() []handlePRRegisterCase {
 		{
 			name:           "SuccessHeadlessHeartbeatFallsBackToSystemChannelID",
 			noExistingPR:   true,
-			sysChanID:      "discord-1542423172400291873",
+			sysChanID:      "discord-100000000000000004",
 			body:           `{"repo":"azylman/aerial","pr_number":106,"branch":"feat/heartbeat","head_sha":"sha333","target_id":"heartbeat-daily-check"}`,
 			wantStatus:     http.StatusOK,
 			wantSubstr:     `"status":"registered"`,
 			wantRegistered: true,
-			wantTargetID:   "1542423172400291873",
+			wantTargetID:   "100000000000000004",
 			wantWidgetCall: true,
 		},
 		{

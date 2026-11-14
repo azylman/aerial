@@ -41,8 +41,10 @@ func newHaroTestRegistry(t *testing.T, nilRegistry bool, expectedPath string, de
 	if nilRegistry {
 		return nil
 	}
-	if expectedPath == "" && defaultStatus == 0 && len(statuses) == 0 && body == "" {
-		reg := NewPostgresPRRegistry(nil)
+	if defaultStatus == 0 && len(statuses) == 0 && body == "" {
+		reg := NewPostgresPRRegistry(nil, func(r *PostgresPRRegistry) {
+			r.httpClient = &http.Client{Transport: noopClusterTransport{}}
+		})
 		reg.vanadisRetryDelay = 0
 		return reg
 	}
@@ -64,16 +66,17 @@ func newVanadisTestRegistry(t *testing.T, nilRegistry bool, expectedPath string,
 }
 
 type checkEventTriggerCase struct {
-	name         string
-	nilRegistry  bool
-	source       string
-	targets      []string
-	eventType    string
-	httpStatus   int
-	httpStatuses []int
-	httpBody     string
-	wantMatched  bool
-	wantErr      bool
+	name          string
+	nilRegistry   bool
+	source        string
+	targets       []string
+	eventType     string
+	httpStatus    int
+	httpStatuses  []int
+	httpBody      string
+	wantMatched   bool
+	wantErr       bool
+	wantErrSubstr string
 }
 
 func runCheckEventTriggerCase(t *testing.T, tc checkEventTriggerCase) {
@@ -82,6 +85,9 @@ func runCheckEventTriggerCase(t *testing.T, tc checkEventTriggerCase) {
 	matched, err := reg.CheckEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("CheckEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
+		t.Fatalf("CheckEventTriggers() err = %v, want substring %q", err, tc.wantErrSubstr)
 	}
 	if matched != tc.wantMatched {
 		t.Fatalf("CheckEventTriggers() matched = %v, want %v", matched, tc.wantMatched)
@@ -94,7 +100,7 @@ func TestCheckEventTriggers_HaroHTTP(t *testing.T) {
 	tests := []checkEventTriggerCase{
 		{name: "check nil registry returns false", nilRegistry: true, source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready"},
 		{name: "check empty targets returns false", source: "custom_source", targets: nil, eventType: "ready"},
-		{name: "check unconfigured haro url returns error", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", wantErr: true},
+		{name: "check unconfigured haro url returns error", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", wantErr: true, wantErrSubstr: "haro URL is not configured"},
 		{name: "check 500 error returns error", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusInternalServerError, httpBody: `{"error":"db"}`, wantErr: true},
 		{name: "check non-transient 400 error returns error", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusBadRequest, httpBody: `{"error":"bad request"}`, wantErr: true},
 		{name: "check retry transient 503 then 200 succeeds", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatuses: []int{http.StatusServiceUnavailable, http.StatusOK}, httpBody: `{"status":"ok","matched":true}`, wantMatched: true},
@@ -122,6 +128,7 @@ type fireEventTriggerCase struct {
 	httpBody      string
 	wantCount     int
 	wantErr       bool
+	wantErrSubstr string
 }
 
 func runFireEventTriggerCase(t *testing.T, tc fireEventTriggerCase) {
@@ -130,6 +137,9 @@ func runFireEventTriggerCase(t *testing.T, tc fireEventTriggerCase) {
 	got, err := reg.FireEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType, tc.contextHeader)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("FireEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
+		t.Fatalf("FireEventTriggers() err = %v, want substring %q", err, tc.wantErrSubstr)
 	}
 	if len(got) != tc.wantCount {
 		t.Fatalf("FireEventTriggers() returned %d items, want %d", len(got), tc.wantCount)
@@ -145,7 +155,7 @@ func TestFireEventTriggers_HaroHTTP(t *testing.T) {
 		{name: "fire whitespace targets returns nil", source: "github", targets: []string{"   ", ""}, eventType: "ci_passed"},
 		{name: "fire empty source returns nil", source: "", targets: []string{"azylman/aerial"}, eventType: "ci_passed"},
 		{name: "fire empty eventType returns nil", source: "github", targets: []string{"azylman/aerial"}, eventType: ""},
-		{name: "fire unconfigured haro url returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", wantErr: true},
+		{name: "fire unconfigured haro url returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", wantErr: true, wantErrSubstr: "haro URL is not configured"},
 		{name: "fire server 500 error returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusInternalServerError, httpBody: `{"error":"db error"}`, wantErr: true},
 		{name: "fire retry transient 500 then 200 succeeds", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatuses: []int{http.StatusInternalServerError, http.StatusOK}, httpBody: `{"status":"ok","fired":1,"triggers":[{"id":"trig-1"}]}`, wantCount: 1},
 		{name: "fire invalid json returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusOK, httpBody: `{invalid`, wantErr: true},

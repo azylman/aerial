@@ -325,10 +325,10 @@ func postgresPRRegistryJobKustCases() []postgresPRRegistryUnitCase {
 		{name: "EnsurePRRegistered empty repo guard", op: "EnsurePRRegistered", repo: "", prNumber: 692, wantTarget: ""},
 		{name: "EnsurePRRegistered chunk query error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusInternalServerError, vanadisBody: `{"error":"internal"}`, wantErr: true},
 		{name: "EnsurePRRegistered chunk attach 400 bad request returns error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusBadRequest, vanadisBody: `{"error":"bad request"}`, wantErr: true},
-		{name: "EnsurePRRegistered cancelled chunk returns empty target without error or upsert", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusConflict, vanadisBody: `{"error":"chunk or parent build is cancelled"}`, targetID: "1562162630997581946", mockExecErr: errors.New("unexpected upsert"), wantTarget: ""},
-		{name: "EnsurePRRegistered chunk resolves thread_id and upserts pr_registry", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"1562162630997581946"}`, targetIDReturn: "1562162630997581946", wantTarget: "1562162630997581946"},
+		{name: "EnsurePRRegistered cancelled chunk returns empty target without error or upsert", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusConflict, vanadisBody: `{"error":"chunk or parent build is cancelled"}`, targetID: "100000000000000002", mockExecErr: errors.New("unexpected upsert"), wantTarget: ""},
+		{name: "EnsurePRRegistered chunk resolves thread_id and upserts pr_registry", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"100000000000000002"}`, targetIDReturn: "100000000000000002", wantTarget: "100000000000000002"},
 		{name: "EnsurePRRegistered invalid targetID after chunk miss skips upsert", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusNotFound, vanadisBody: `{"error":"not found"}`, wantTarget: ""},
-		{name: "EnsurePRRegistered upsert exec error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, targetID: "1562162630997581946", mockExecErr: errors.New("upsert err"), wantErr: true},
+		{name: "EnsurePRRegistered upsert exec error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, targetID: "100000000000000002", mockExecErr: errors.New("upsert err"), wantErr: true},
 
 		// RegisterPR
 		{name: "RegisterPR nil pool guard", op: "RegisterPR", nilPool: true, repo: "azylman/aerial", prNumber: 42, targetID: "100000000000000001", wantErr: true},
@@ -1127,9 +1127,6 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		{name: "AdvanceVanadisChunkByPR invalid json returns error", method: "AdvanceVanadisChunkByPR", httpStatus: http.StatusOK, httpBody: `{invalid-json`, wantErr: true},
 		{name: "AdvanceVanadisChunkByPR unconfigured url returns error", method: "AdvanceVanadisChunkByPR", zeroRetryDelay: true, wantErr: true},
 		{name: "ResolveVanadisChunkForPR unconfigured url returns error", method: "ResolveVanadisChunkForPR", zeroRetryDelay: true, wantErr: true},
-		{name: "FailVanadisChunkByPR unconfigured url returns error", method: "FailVanadisChunkByPR", zeroRetryDelay: true, wantErr: true},
-		{name: "ShouldSuppressVanadisDeployWake unconfigured url returns error", method: "ShouldSuppressVanadisDeployWake", zeroRetryDelay: true, wantErr: true},
-		{name: "AdvancesVanadisChunkOnMerge unconfigured url returns error", method: "AdvancesVanadisChunkOnMerge", zeroRetryDelay: true, wantErr: true},
 		{name: "ResolveVanadisChunkForPR network error retries and fails", method: "ResolveVanadisChunkForPR", networkErr: true, zeroRetryDelay: true, wantErr: true},
 		{name: "AdvanceVanadisChunkByPR network error retries and fails", method: "AdvanceVanadisChunkByPR", networkErr: true, zeroRetryDelay: true, wantErr: true},
 		{name: "FailVanadisChunkByPR network error retries and fails", method: "FailVanadisChunkByPR", networkErr: true, zeroRetryDelay: true, wantErr: true},

@@ -425,14 +425,14 @@ func TestParseAerialPRMetadata(t *testing.T) {
 		wantOK                                       bool
 	}{
 		{name: "no trailer", body: "Standard PR body\n<!-- regular comment -->"},
-		{name: "unclosed trailer", body: "Body\n<!-- aerial-pr: {\"target_id\":\"1562162630997581946\"}"},
+		{name: "unclosed trailer", body: "Body\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\"}"},
 		{name: "invalid json", body: "Body\n<!-- aerial-pr: {bad-json} -->"},
 		{name: "invalid target and empty chunk", body: "Body\n<!-- aerial-pr: {\"target_id\":\"bad\",\"vanadis_chunk_id\":\"\"} -->"},
-		{name: "valid target and chunk", body: "<!-- x -->\n<!-- aerial-pr: {\"target_id\":\"1562162630997581946\",\"vanadis_chunk_id\":\"chunk-2\"} -->", wantTarget: "1562162630997581946", wantChunk: "chunk-2", wantOK: true},
-		{name: "discord prefixed target and pool prefix", body: "<!-- aerial-pr: {\"target_id\":\"stateful_medium:discord-1562162630997581946\",\"vanadis_chunk_id\":\"\"} -->", wantTarget: "1562162630997581946", wantChunk: "", wantOK: true},
+		{name: "valid target and chunk", body: "<!-- x -->\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"vanadis_chunk_id\":\"chunk-2\"} -->", wantTarget: "100000000000000002", wantChunk: "chunk-2", wantOK: true},
+		{name: "discord prefixed target and pool prefix", body: "<!-- aerial-pr: {\"target_id\":\"stateful_medium:discord-100000000000000002\",\"vanadis_chunk_id\":\"\"} -->", wantTarget: "100000000000000002", wantChunk: "", wantOK: true},
 		{name: "valid chunk only", body: "<!-- aerial-pr: {\"target_id\":\"\",\"vanadis_chunk_id\":\"chunk-only\"} -->", wantChunk: "chunk-only", wantOK: true},
 		{name: "valid bot id only", body: "<!-- aerial-pr: {\"bot_id\":\"eri-sub\"} -->", wantBotID: "eri-sub", wantOK: true},
-		{name: "valid target chunk and bot id", body: "<!-- aerial-pr: {\"target_id\":\"1562162630997581946\",\"vanadis_chunk_id\":\"chunk-3\",\"bot_id\":\"eri-sub\"} -->", wantTarget: "1562162630997581946", wantChunk: "chunk-3", wantBotID: "eri-sub", wantOK: true},
+		{name: "valid target chunk and bot id", body: "<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"vanadis_chunk_id\":\"chunk-3\",\"bot_id\":\"eri-sub\"} -->", wantTarget: "100000000000000002", wantChunk: "chunk-3", wantBotID: "eri-sub", wantOK: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
