@@ -152,6 +152,14 @@ func assertLeaseReleaseAndRotation(t *testing.T, pool *UnifiedProcessPool, lease
 		t.Fatalf("unexpected Release error: %v", relErr)
 	}
 
+	if tc.concurrencyConflict {
+		if lease3, err3 := pool.AcquireLease(context.Background(), targetKey); err3 != nil {
+			t.Fatalf("lease3 error: %v", err3)
+		} else {
+			_ = lease3.Release()
+		}
+	}
+
 	if tc.expectRotated {
 		if !*rotationCalled || *rotatedOld != pinnedSessID || *rotatedNew == "" || *rotatedNew == *rotatedOld {
 			t.Errorf("expected valid rotation: called=%v old=%q new=%q", *rotationCalled, *rotatedOld, *rotatedNew)
@@ -225,6 +233,9 @@ func runAcquireLeaseSuiteCase(t *testing.T, tc acquireLeaseSuiteCase) {
 	if tc.expectPreservedSess && lease.SessionID() != pinnedSessID {
 		t.Errorf("expected session %q, got %q", pinnedSessID, lease.SessionID())
 	}
+	if tc.expectPreservedSess && rotationCalled {
+		t.Errorf("rotation must NOT be called before release")
+	}
 
 	if tc.concurrencyConflict {
 		ctxTimeout, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
@@ -237,14 +248,6 @@ func runAcquireLeaseSuiteCase(t *testing.T, tc acquireLeaseSuiteCase) {
 	res, execErr := executeLeaseTurn(ctx, t, lease, tc)
 	assertLeaseExecutionState(t, res, execErr, lease, tc)
 	assertLeaseReleaseAndRotation(t, pool, lease, targetKey, pinnedSessID, &rotatedOld, &rotatedNew, &rotationCalled, tc)
-
-	if tc.concurrencyConflict {
-		if lease3, err3 := pool.AcquireLease(ctx, targetKey); err3 != nil {
-			t.Fatalf("lease3 error: %v", err3)
-		} else {
-			_ = lease3.Release()
-		}
-	}
 }
 
 func TestUnifiedProcessPool_AcquireLease_Suite(t *testing.T) {

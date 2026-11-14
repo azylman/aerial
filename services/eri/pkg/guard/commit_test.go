@@ -445,6 +445,12 @@ func checkCoreAerialDetection(t *testing.T) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	aerialConfigDir := filepath.Join(tmpDir, "worktrees", "wt-config")
+	if err := os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aerialConfigDir, ".git", "config"), []byte("[remote \"origin\"]\nurl = git@github.com:azylman/aerial-config.git\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	tmpAerial := filepath.Join(tmpDir, "aerial-monorepo")
 	if err := os.MkdirAll(filepath.Join(tmpAerial, ".git"), 0o755); err != nil {
@@ -539,7 +545,7 @@ type checkCommitTestCase struct {
 	wantReason string
 }
 
-func runCheckCommitCase(t *testing.T, tc checkCommitTestCase, tmpCore, tmpWorkspace string) {
+func runCheckCommitCase(t *testing.T, tc checkCommitTestCase, tmpCore string) {
 	t.Helper()
 	if tc.secret != "" {
 		sanitizer.ResetSensitiveTokensForTest()
@@ -627,7 +633,7 @@ func TestCheckCommit(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runCheckCommitCase(t, tc, tmpCore, tmpWorkspace)
+			runCheckCommitCase(t, tc, tmpCore)
 		})
 	}
 }
