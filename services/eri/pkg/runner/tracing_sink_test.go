@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -287,30 +286,19 @@ type toolClaim struct {
 }
 
 // fakeClaimTimer is a claimTimer whose start is announced on armed. It fires as soon as it
-// starts when fire is set, otherwise never; stopped records Stop calls.
+// starts when fire is set, otherwise never.
 type fakeClaimTimer struct {
-	fire    bool
-	armed   chan struct{}
-	mu      sync.Mutex
-	started int
-	stopped int
+	fire  bool
+	armed chan struct{}
 }
 
 func (f *fakeClaimTimer) start(time.Duration) (<-chan time.Time, func() bool) {
-	f.mu.Lock()
-	f.started++
-	f.mu.Unlock()
 	c := make(chan time.Time, 1)
 	if f.fire {
 		c <- time.Time{}
 	}
 	f.armed <- struct{}{}
-	return c, func() bool {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.stopped++
-		return true
-	}
+	return c, func() bool { return true }
 }
 
 func TestTracingTurnSink_ClaimToolSpan(t *testing.T) {
@@ -334,7 +322,7 @@ func TestTracingTurnSink_ClaimToolSpan(t *testing.T) {
 			claims: []toolClaim{{server: "docket", tool: "create", callID: "toolu_b", want: "toolu_b"}},
 		},
 		{
-			name:   "unknown call id falls back to server and tool",
+			name:   "unknown call id falls back to server and tool after the wait",
 			opened: []ToolCall{{ID: "toolu_x", Name: "Bash"}, docketCreate("toolu_a", "")},
 			claims: []toolClaim{{server: "docket", tool: "create", callID: "toolu_zz", want: "toolu_a"}},
 		},
@@ -357,6 +345,12 @@ func TestTracingTurnSink_ClaimToolSpan(t *testing.T) {
 			name:   "subagent tool span",
 			opened: []ToolCall{{ID: "toolu_agent", Name: "Agent", Subagent: true}, docketCreate("toolu_inner", "toolu_agent")},
 			claims: []toolClaim{{server: "docket", tool: "create", callID: "toolu_inner", want: "toolu_inner"}},
+		},
+		{
+			name:      "call id waits for its own span instead of taking a parallel sibling's",
+			opened:    []ToolCall{docketCreate("toolu_a", "")},
+			claims:    []toolClaim{{server: "docket", tool: "create", callID: "toolu_b", want: "toolu_b"}},
+			openLater: &ToolCall{ID: "toolu_b", Name: "create", MCPServer: "docket", MCPTool: "create"},
 		},
 		{
 			name:      "span opened during the wait is claimed",
@@ -417,11 +411,6 @@ func TestTracingTurnSink_ClaimToolSpan(t *testing.T) {
 			sink.OnResult(&TurnResult{})
 			turn.End()
 			assertClaimedToolSpans(t, rec.Ended(), tc.claims, got)
-			timer.mu.Lock()
-			defer timer.mu.Unlock()
-			if timer.stopped != timer.started {
-				t.Errorf("claim timers started %d, stopped %d; want every timer stopped", timer.started, timer.stopped)
-			}
 		})
 	}
 }

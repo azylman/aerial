@@ -146,11 +146,12 @@ func NewTracingTurnSink(turnCtx context.Context, inner TurnSink, opts ...Tracing
 }
 
 // ClaimToolSpan returns the span context of the open execute_tool span behind an MCP
-// tools/call request and marks it claimed so no other request takes it. It matches the span
-// whose call ID equals callID when callID is non-empty, else the oldest unclaimed span for the
-// same MCP server and tool (subagent calls included). With no match it waits for a matching
-// span to open, until ctx is done or the claim wait elapses; ok is false then and once the
-// turn has closed.
+// tools/call request and marks it claimed so no other request takes it. A request with a
+// callID (Claude) waits for the span with that call ID: every Claude span has an ID, so
+// matching on server and tool early could take a parallel sibling call's span. Only once the
+// claim wait elapses does it fall back to server and tool. A request without one (agy) takes
+// the oldest unclaimed span for the same MCP server and tool (subagent calls included), waiting
+// for one to open. ok is false when nothing matches in time, ctx is done, or the turn has closed.
 func (s *TracingTurnSink) ClaimToolSpan(ctx context.Context, server, tool, callID string) (trace.SpanContext, bool) {
 	sc, opened, ok := s.tryClaim(server, tool, callID)
 	if ok || opened == nil {
@@ -164,7 +165,11 @@ func (s *TracingTurnSink) ClaimToolSpan(ctx context.Context, server, tool, callI
 		case <-s.done:
 			return trace.SpanContext{}, false
 		case <-timeout:
-			return trace.SpanContext{}, false
+			if callID == "" {
+				return trace.SpanContext{}, false
+			}
+			sc, _, ok = s.tryClaim(server, tool, "")
+			return sc, ok
 		case <-ctx.Done():
 			return trace.SpanContext{}, false
 		}
@@ -174,23 +179,24 @@ func (s *TracingTurnSink) ClaimToolSpan(ctx context.Context, server, tool, callI
 	}
 }
 
-// tryClaim claims a matching open span. Without a match it returns the channel that closes
-// when the next tool span opens, or nil once the turn has closed.
+// tryClaim claims the unclaimed open span whose ID is callID or, when callID is empty, the
+// oldest one for server and tool. Without a match it returns the channel that closes when the
+// next tool span opens, or nil once the turn has closed.
 func (s *TracingTurnSink) tryClaim(server, tool, callID string) (trace.SpanContext, <-chan struct{}, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return trace.SpanContext{}, nil, false
 	}
-	match := -1
-	if callID != "" {
-		match = slices.IndexFunc(s.open, func(ts *openToolSpan) bool { return !ts.claimed && ts.id == callID })
-	}
-	if match < 0 && server != "" && tool != "" {
-		match = slices.IndexFunc(s.open, func(ts *openToolSpan) bool {
-			return !ts.claimed && ts.mcpServer == server && ts.mcpTool == tool
-		})
-	}
+	match := slices.IndexFunc(s.open, func(ts *openToolSpan) bool {
+		if ts.claimed {
+			return false
+		}
+		if callID != "" {
+			return ts.id == callID
+		}
+		return server != "" && tool != "" && ts.mcpServer == server && ts.mcpTool == tool
+	})
 	if match < 0 {
 		return trace.SpanContext{}, s.opened, false
 	}

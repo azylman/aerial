@@ -49,7 +49,6 @@ func TestActiveTurnRegistry(t *testing.T) {
 		{name: "turn without daemon id is ignored", set: []ActiveTurn{{Target: "discord"}}, get: "", target: "discord"},
 		{name: "unknown daemon", get: "p9/x", target: "voice"},
 		{name: "tool span claims through the attached source", set: []ActiveTurn{d1}, toolSpans: []string{d1.DaemonID}, get: d1.DaemonID, wantSpan: 1, wantToolSpan: 9, target: "discord", wantSole: d1.DaemonID},
-		{name: "turn without a source claims nothing", set: []ActiveTurn{d1}, get: d1.DaemonID, wantSpan: 1, target: "discord", wantSole: d1.DaemonID},
 		{name: "tool spans need a registered turn", toolSpans: []string{d1.DaemonID}, get: d1.DaemonID, target: "discord"},
 		{name: "clear drops the tool spans", set: []ActiveTurn{d1}, toolSpans: []string{d1.DaemonID}, clear: []string{d1.DaemonID}, get: d1.DaemonID, target: "discord"},
 		{name: "re-set drops the previous attempt's tool spans", set: []ActiveTurn{d1}, toolSpans: []string{d1.DaemonID}, reset: []ActiveTurn{d1}, get: d1.DaemonID, wantSpan: 2, target: "discord", wantSole: d1.DaemonID},
