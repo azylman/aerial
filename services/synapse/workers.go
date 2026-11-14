@@ -447,44 +447,6 @@ func (w *WidgetSyncWorker) Work(ctx context.Context, job *river.Job[WidgetSyncAr
 	})
 }
 
-// EventTriggerWebhookArgs contains payload data for durable background firing of generic event triggers via Haro.
-type EventTriggerWebhookArgs struct {
-	Source        string   `json:"source"`
-	Targets       []string `json:"targets"`
-	EventType     string   `json:"event_type"`
-	ContextHeader string   `json:"context_header,omitempty"`
-}
-
-func (EventTriggerWebhookArgs) Kind() string { return "event_trigger_webhook" }
-func (EventTriggerWebhookArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{MaxAttempts: 5}
-}
-
-// EventTriggerWebhookWorker processes enqueued external event triggers asynchronously from River.
-type EventTriggerWebhookWorker struct {
-	river.WorkerDefaults[EventTriggerWebhookArgs]
-
-	server *RouterServer
-}
-
-func (w *EventTriggerWebhookWorker) Work(ctx context.Context, job *river.Job[EventTriggerWebhookArgs]) error {
-	return observeRiverJob(job, river.QueueDefault, func() error {
-		if w.server == nil {
-			return errors.New("router server not configured on worker")
-		}
-		var jobID int64
-		if job != nil && job.JobRow != nil {
-			jobID = job.ID
-		}
-		log.Printf("[synapse] [river] processing event trigger job id=%d source=%s event_type=%s targets=%v", jobID, job.Args.Source, job.Args.EventType, job.Args.Targets)
-		if err := w.server.ProcessEventTriggerWebhook(ctx, job.Args); err != nil {
-			log.Printf("[synapse] [river] error processing event trigger job id=%d: %v", jobID, err)
-			return err
-		}
-		return nil
-	})
-}
-
 // QueueMergeConflict is the dedicated River queue for PR merge conflict remediation dispatches.
 const QueueMergeConflict = "merge_conflict"
 

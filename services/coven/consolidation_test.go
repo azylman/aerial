@@ -296,47 +296,51 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 	validEmb := make([]float32, ExpectedEmbeddingDim)
 
 	tests := []struct {
-		name       string
-		tick       int64
-		nilStore   bool
-		nilOllama  bool
-		nilLLM     bool
-		storeFail  string
-		wantHourly bool
+		name        string
+		tick        int64
+		runCatchUp  bool
+		nilStore    bool
+		nilOllama   bool
+		nilLLM      bool
+		storeFail   string
+		wantExtract bool
 	}{
 		{
-			name:       "Tick0HourlyExtraction",
-			tick:       0,
-			wantHourly: true,
+			name:        "StartupCatchUpExtraction",
+			runCatchUp:  true,
+			wantExtract: true,
 		},
 		{
-			name:       "Tick120HourlyExtraction",
-			tick:       120,
-			wantHourly: true,
+			name: "Tick0Noop",
+			tick: 0,
+		},
+		{
+			name: "Tick120Noop",
+			tick: 120,
 		},
 		{
 			name: "Tick1Noop",
 			tick: 1,
 		},
 		{
-			name:     "NilStoreSafe",
-			tick:     0,
-			nilStore: true,
+			name:       "NilStoreSafe",
+			runCatchUp: true,
+			nilStore:   true,
 		},
 		{
-			name:      "NilOllamaSafe",
-			tick:      0,
-			nilOllama: true,
+			name:       "NilOllamaSafe",
+			runCatchUp: true,
+			nilOllama:  true,
 		},
 		{
-			name:   "NilLLMSafe",
-			tick:   0,
-			nilLLM: true,
+			name:       "NilLLMSafe",
+			runCatchUp: true,
+			nilLLM:     true,
 		},
 		{
-			name:      "HourlyExtractionErrorHandled",
-			tick:      0,
-			storeFail: "GetActiveConversationsForExtraction",
+			name:       "StartupCatchUpErrorHandled",
+			runCatchUp: true,
+			storeFail:  "GetActiveConversationsForExtraction",
 		},
 	}
 
@@ -375,12 +379,16 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 				TickInterval: -1,
 			})
 
-			w.Tick(ctx, tc.tick)
-
-			if tc.wantHourly && llmCalls == 0 {
-				t.Errorf("expected hourly extraction LLM call, got 0")
+			if tc.runCatchUp {
+				w.RunStartupCatchUp(ctx)
+			} else {
+				w.Tick(ctx, tc.tick)
 			}
-			if !tc.wantHourly && llmCalls > 0 {
+
+			if tc.wantExtract && llmCalls == 0 {
+				t.Errorf("expected fact extraction LLM call, got 0")
+			}
+			if !tc.wantExtract && llmCalls > 0 {
 				t.Errorf("unexpected LLM calls: %d", llmCalls)
 			}
 		})

@@ -26,7 +26,6 @@ type mockRiverInserter struct {
 	insertedJobs           []GitHubWebhookArgs
 	insertedDeployJobs     []DeployWebhookArgs
 	insertedWidgetSyncJobs []WidgetSyncArgs
-	insertedEventJobs      []EventTriggerWebhookArgs
 	insertedConflictJobs   []MergeConflictArgs
 	insertedDiscordJobs    []DiscordIngressArgs
 	insertedInteractJobs   []DiscordInteractionArgs
@@ -49,8 +48,6 @@ func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts
 		m.insertedDeployJobs = append(m.insertedDeployJobs, a)
 	case WidgetSyncArgs:
 		m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, a)
-	case EventTriggerWebhookArgs:
-		m.insertedEventJobs = append(m.insertedEventJobs, a)
 	case MergeConflictArgs:
 		m.insertedConflictJobs = append(m.insertedConflictJobs, a)
 	case DiscordIngressArgs:

@@ -701,6 +701,17 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		Effort:    "low",
 	})
 
+	_ = InsertEventTrigger(ctx, db, EventTrigger{
+		ID:         "trig-ext-fail-persistent",
+		ChannelID:  "100000000000000001",
+		Source:     "camera",
+		Target:     "sideyard",
+		EventType:  "motion",
+		Prompt:     "Motion in sideyard",
+		Effort:     "low",
+		Persistent: true,
+	})
+
 	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
@@ -730,6 +741,12 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			wantInDB:  true,
 		},
 		{
+			name:    "nil db returns error from ClaimEventTriggers",
+			server:  NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, nil)),
+			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}},
+			wantErr: true,
+		},
+		{
 			name:    "closed db returns error from ClaimEventTriggers",
 			server:  serverClosed,
 			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}},
@@ -747,6 +764,14 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"backyard"}},
 			wantErr:   false,
 			checkDBID: "trig-ext-fail",
+			wantInDB:  true,
+		},
+		{
+			name:      "dispatch failure recovers persistent trigger to db",
+			server:    serverFail,
+			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"sideyard"}},
+			wantErr:   false,
+			checkDBID: "trig-ext-fail-persistent",
 			wantInDB:  true,
 		},
 		{

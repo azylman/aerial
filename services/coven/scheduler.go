@@ -78,8 +78,11 @@ func (w *Worker) HandleTurnCompletedEvent(ctx context.Context, ev pubsub.TurnCom
 	return nil
 }
 
-// Start begins the ticker loop, running until ctx is canceled.
+// Start begins the maintenance worker, executing a startup catch-up extraction sweep
+// followed by the periodic maintenance loop (dreaming/pruning), running until ctx is canceled.
 func (w *Worker) Start(ctx context.Context) error {
+	w.RunStartupCatchUp(ctx)
+
 	if w.initialDelay > 0 {
 		timer := time.NewTimer(w.initialDelay)
 		select {
@@ -105,26 +108,22 @@ func (w *Worker) Start(ctx context.Context) error {
 	}
 }
 
-// Tick performs scheduled maintenance operations for the given tick count.
-func (w *Worker) Tick(ctx context.Context, tick int64) {
-	// Hourly: fact extraction (tick % 120 == 0)
-	if tick%120 == 0 {
-		w.runHourly(ctx)
+// RunStartupCatchUp performs a single initial sweep of fact extraction across active conversations
+// to catch up on any turns that completed while coven was offline.
+func (w *Worker) RunStartupCatchUp(ctx context.Context) {
+	if w.store == nil || w.ollama == nil || w.llmClient == nil {
+		return
 	}
-	// Daily: fact consolidation dreaming (tick % 2880 == 60)
-	if tick%2880 == 60 {
-		w.runDaily(ctx)
+	if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("[Coven Worker] Startup catch-up fact extraction failed: %v", err)
 	}
 }
 
-func (w *Worker) runHourly(ctx context.Context) {
-	if w.store == nil || w.ollama == nil {
-		return
-	}
-	if w.llmClient != nil {
-		if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("[Memory Worker] Fact extraction failed: %v", err)
-		}
+// Tick performs scheduled maintenance operations for the given tick count.
+func (w *Worker) Tick(ctx context.Context, tick int64) {
+	// Daily: fact consolidation dreaming (tick % 2880 == 60)
+	if tick%2880 == 60 {
+		w.runDaily(ctx)
 	}
 }
 

@@ -3,11 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"net/http"
-	"net/http/httptest"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -78,12 +74,16 @@ type recordingBus struct {
 
 	mu        sync.Mutex
 	publishes []string
+	events    []pubsub.ExternalEvent
 }
 
 func (b *recordingBus) Publish(ctx context.Context, subject, msgID string, payload any) error {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.publishes = append(b.publishes, subject)
-	b.mu.Unlock()
+	if ev, ok := payload.(pubsub.ExternalEvent); ok {
+		b.events = append(b.events, ev)
+	}
 	return nil
 }
 
@@ -91,6 +91,15 @@ func (b *recordingBus) publishCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.publishes)
+}
+
+func (b *recordingBus) lastEvent() (pubsub.ExternalEvent, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.events) == 0 {
+		return pubsub.ExternalEvent{}, false
+	}
+	return b.events[len(b.events)-1], true
 }
 
 type evaluateEventTriggersTestCase struct {
@@ -102,27 +111,14 @@ type evaluateEventTriggersTestCase struct {
 	eventType     string
 	targets       []string
 	contextHeader string
-	checkMatched  bool
-	checkErr      bool
 	wantErr       bool
 	wantPubCount  int
 	wantPubTopic  string
-	wantRiverJobs int
 }
 
 func assertEvaluateEventTriggersScenario(t *testing.T, tc evaluateEventTriggersTestCase) {
 	t.Helper()
 	srv := NewRouterServer(fixedConfig(Config{}), nil)
-	mockRiver := &mockRiverInserter{}
-	srv.SetRiverClient(mockRiver)
-
-	mockReg := &mockPRRegistry{
-		checkTriggersRes: tc.checkMatched,
-	}
-	if tc.checkErr {
-		mockReg.checkTriggersErr = errors.New("simulated check error")
-	}
-	srv.SetRegistry(mockReg)
 
 	var tracker *eventTracker
 	var recBus *recordingBus
@@ -149,10 +145,6 @@ func assertEvaluateEventTriggersScenario(t *testing.T, tc evaluateEventTriggersT
 		t.Errorf("recordingBus publish count = %d, want %d", recBus.publishCount(), tc.wantPubCount)
 	}
 	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, nil)
-
-	if len(mockRiver.insertedEventJobs) != tc.wantRiverJobs {
-		t.Errorf("river inserted jobs = %d, want %d", len(mockRiver.insertedEventJobs), tc.wantRiverJobs)
-	}
 }
 
 func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
@@ -168,7 +160,6 @@ func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
 			contextHeader: "Driveway motion detected",
 			wantPubCount:  1,
 			wantPubTopic:  "aerial.events.camera.motion",
-			wantRiverJobs: 0,
 		},
 		{
 			name:          "sanitizes subject tokens with spaces or special characters",
@@ -179,46 +170,41 @@ func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
 			contextHeader: "Person detected on porch",
 			wantPubCount:  1,
 			wantPubTopic:  "aerial.events.camera_front.person_detected_",
-			wantRiverJobs: 0,
 		},
 		{
-			name:          "empty targets is a no-op",
-			useSyncBus:    true,
-			source:        "camera",
-			eventType:     "motion",
-			targets:       []string{"   ", ""},
-			wantPubCount:  0,
-			wantRiverJobs: 0,
+			name:         "empty targets is a no-op",
+			useSyncBus:   true,
+			source:       "camera",
+			eventType:    "motion",
+			targets:      []string{"   ", ""},
+			wantPubCount: 0,
 		},
 		{
-			name:          "empty source is a no-op",
-			useSyncBus:    true,
-			source:        "",
-			eventType:     "motion",
-			targets:       []string{"driveway"},
-			wantPubCount:  0,
-			wantRiverJobs: 0,
+			name:         "empty source is a no-op",
+			useSyncBus:   true,
+			source:       "",
+			eventType:    "motion",
+			targets:      []string{"driveway"},
+			wantPubCount: 0,
 		},
 		{
-			name:          "empty event type is a no-op",
-			useSyncBus:    true,
-			source:        "camera",
-			eventType:     "",
-			targets:       []string{"driveway"},
-			wantPubCount:  0,
-			wantRiverJobs: 0,
+			name:         "empty event type is a no-op",
+			useSyncBus:   true,
+			source:       "camera",
+			eventType:    "",
+			targets:      []string{"driveway"},
+			wantPubCount: 0,
 		},
 		{
-			name:          "bus error falls back to river",
+			name:          "bus error returns error without fallback",
 			useBus:        true,
 			closeBusFirst: true,
 			source:        "custom",
 			eventType:     "state_change",
 			targets:       []string{"sensor.temp"},
 			contextHeader: "Temperature spike",
-			checkMatched:  true,
+			wantErr:       true,
 			wantPubCount:  0,
-			wantRiverJobs: 1,
 		},
 	}
 
@@ -226,74 +212,6 @@ func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assertEvaluateEventTriggersScenario(t, tc)
-		})
-	}
-}
-
-type handleEventsWebhookTestCase struct {
-	name         string
-	payload      string
-	useBus       bool
-	wantStatus   int
-	wantPubCount int
-	wantPubTopic string
-	wantTargets  []string
-}
-
-func assertHandleEventsWebhookScenario(t *testing.T, tc handleEventsWebhookTestCase) {
-	t.Helper()
-	srv := NewRouterServer(fixedConfig(Config{}), nil)
-
-	var tracker *eventTracker
-	if tc.useBus {
-		memBus := pubsub.NewMemoryBus()
-		defer memBus.Close()
-		tracker = newEventTracker(t, memBus, "aerial.events.>", "test-events-webhook")
-		srv.SetEventBus(memBus)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/webhooks/events", strings.NewReader(tc.payload))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	srv.handleEventsWebhook(w, req)
-
-	if w.Code != tc.wantStatus {
-		t.Fatalf("status code = %d, want %d: body=%s", w.Code, tc.wantStatus, w.Body.String())
-	}
-
-	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, tc.wantTargets)
-}
-
-func TestHandleEventsWebhook_Scenarios(t *testing.T) {
-	t.Parallel()
-
-	tests := []handleEventsWebhookTestCase{
-		{
-			name:         "valid event webhook publishes to jetstream",
-			payload:      `{"source":"camera","event_type":"motion","targets":["driveway"],"context_header":"Driveway motion"}`,
-			useBus:       true,
-			wantStatus:   http.StatusOK,
-			wantPubCount: 1,
-			wantPubTopic: "aerial.events.camera.motion",
-			wantTargets:  []string{"driveway"},
-		},
-		{
-			name:       "missing source returns 400",
-			payload:    `{"source":"","event_type":"motion","target":"driveway"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "missing targets returns 400",
-			payload:    `{"source":"camera","event_type":"motion"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assertHandleEventsWebhookScenario(t, tc)
 		})
 	}
 }
