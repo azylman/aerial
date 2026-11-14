@@ -1303,6 +1303,7 @@ func initVanadisJetStream(ctx context.Context, server *VanadisServer, natsURL st
 func initVanadisJetStreamWithFactory(ctx context.Context, server *VanadisServer, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {
+		log.Println("[vanadis] warning: nats_url is not configured; event bus disabled")
 		return nil
 	}
 	b, err := factory(ctx, natsURL)

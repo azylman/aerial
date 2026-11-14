@@ -419,6 +419,8 @@ spec:
               value: http://eri.aerial
             - name: SYNAPSE_URL
               value: http://synapse.aerial
+            - name: NATS_URL
+              value: nats://nats.aerial:4222
           envFrom:
             - secretRef:
                 name: postgres-secret
