@@ -805,6 +805,9 @@ func TestHydrateDiscordSessionREST(t *testing.T) {
 	}
 
 	hydrateGuildState(nil, nil, "bot-1")
+	hydrateGuildRoles(nil, "g1")
+	hydrateGuildChannels(nil, "g1")
+	hydrateGuildThreads(nil, "g1")
 	errSess := newMockDiscordSession(t, nil)
 	hydrateGuildRoles(errSess, "g1")
 	hydrateGuildChannels(errSess, "g1")
