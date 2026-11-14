@@ -10,8 +10,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // InterchangeablePoolConfig specifies sizing and naming configuration for an InterchangeablePool.
@@ -19,6 +23,9 @@ type InterchangeablePoolConfig struct {
 	WorkerCount int    // defaults to 2 if <= 0
 	KeyPrefix   string // defaults to "ephemeral:worker" if empty
 }
+
+// attrEphemeralTarget names the target key an ephemeral run (caption, summary) was issued for.
+const attrEphemeralTarget = attribute.Key("aerial.ephemeral.target")
 
 // InterchangeablePool manages a fixed set of interchangeable low-effort worker daemons.
 type InterchangeablePool struct {
@@ -169,6 +176,10 @@ func (p *InterchangeablePool) Close() error {
 	return err
 }
 
+// ExecuteEphemeral runs prompt on a leased worker and returns the response. When ctx carries a
+// span, the run is traced as an invoke_agent child span (wrapping lease acquisition, daemon
+// startup and the chat/execute_tool spans) that records the configured model, provider and token
+// usage; without one it records nothing, so untraced callers never open stray root traces.
 func (p *InterchangeablePool) ExecuteEphemeral(ctx context.Context, targetKey, prompt string) (string, error) {
 	if p == nil {
 		return "", fmt.Errorf("interchangeable pool is nil")
@@ -176,18 +187,46 @@ func (p *InterchangeablePool) ExecuteEphemeral(ctx context.Context, targetKey, p
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	lease, err := p.AcquireLease(ctx, targetKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to acquire leased session: %w", err)
-	}
-	res, err := lease.Execute(ctx, &TurnContext{
-		TurnID: uuid.New().String(), SessionID: lease.SessionID(),
-		Prompt: prompt, CreatedAt: time.Now(), Ctx: ctx,
-	})
-	if err = errors.Join(err, lease.Release()); err != nil || res == nil {
+	spanCtx, span := startChildOf(ctx, OperationInvokeAgent, trace.WithAttributes(
+		AttrGenAIOperationName.String(OperationInvokeAgent), attrEphemeralTarget.String(targetKey)))
+	res, err := p.executeEphemeral(spanCtx, targetKey, prompt)
+	endEphemeralSpan(span, p.Model(), res, err)
+	if err != nil || res == nil {
 		return "", err
 	}
 	return res.Response, nil
+}
+
+func (p *InterchangeablePool) executeEphemeral(ctx context.Context, targetKey, prompt string) (*TurnResult, error) {
+	lease, err := p.AcquireLease(ctx, targetKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire leased session: %w", err)
+	}
+	res, err := lease.Execute(ctx, &TurnContext{
+		TurnID: uuid.New().String(), SessionID: lease.SessionID(),
+		Prompt: prompt, CreatedAt: time.Now(), Ctx: ctx, Sink: NewTracingTurnSink(ctx, nil),
+	})
+	return res, errors.Join(err, lease.Release())
+}
+
+// endEphemeralSpan records an ephemeral run's model, provider, usage and outcome, then ends span.
+func endEphemeralSpan(span trace.Span, model string, res *TurnResult, err error) {
+	var usage AgyUsage
+	if res != nil {
+		usage = res.Usage
+	}
+	attrs := UsageAttributes(usage)
+	if model != "" {
+		attrs = append(attrs, AttrGenAIRequestModel.String(model))
+	}
+	if provider := ProviderForModel(model); provider != "" {
+		attrs = append(attrs, AttrGenAIProviderName.String(provider))
+	}
+	span.SetAttributes(attrs...)
+	if err != nil {
+		span.SetStatus(codes.Error, tracing.Redact(err.Error()))
+	}
+	span.End()
 }
 
 func (p *InterchangeablePool) EphemeralLLMFunc(targetKey string) LLMFunc {
@@ -197,6 +236,14 @@ func (p *InterchangeablePool) EphemeralLLMFunc(targetKey string) LLMFunc {
 		}
 		return p.ExecuteEphemeral(ctx, targetKey, prompt)
 	}
+}
+
+// Model returns the model the worker daemons run, or "" when the pool is uninitialized.
+func (p *InterchangeablePool) Model() string {
+	if p == nil {
+		return ""
+	}
+	return p.underlying.Model()
 }
 
 func (p *InterchangeablePool) Underlying() *UnifiedProcessPool {
