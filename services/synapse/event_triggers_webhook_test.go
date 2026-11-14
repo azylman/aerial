@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -212,6 +215,113 @@ func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assertEvaluateEventTriggersScenario(t, tc)
+		})
+	}
+}
+
+type handleEventsWebhookTestCase struct {
+	name         string
+	payload      string
+	useBus       bool
+	closeBus     bool
+	withPeerURL  bool
+	wantStatus   int
+	wantPubCount int
+	wantPubTopic string
+	wantTargets  []string
+}
+
+func assertHandleEventsWebhookScenario(t *testing.T, tc handleEventsWebhookTestCase) {
+	t.Helper()
+	cfg := Config{}
+	if tc.withPeerURL {
+		cfg.WebhookForwardURLs = map[string]string{"marida": "http://mock-peer.aerial"}
+	}
+	srv := NewRouterServer(fixedConfig(cfg), nil)
+
+	var tracker *eventTracker
+	if tc.useBus {
+		memBus := pubsub.NewMemoryBus()
+		defer memBus.Close()
+		tracker = newEventTracker(t, memBus, "aerial.events.>", "test-events-webhook")
+		if tc.closeBus {
+			_ = memBus.Close()
+		}
+		srv.SetEventBus(memBus)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/events", strings.NewReader(tc.payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleEventsWebhook(w, req)
+
+	if w.Code != tc.wantStatus {
+		t.Fatalf("status code = %d, want %d: body=%s", w.Code, tc.wantStatus, w.Body.String())
+	}
+
+	if tc.useBus && !tc.closeBus {
+		verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, tc.wantTargets)
+	}
+}
+
+func TestHandleEventsWebhook_Scenarios(t *testing.T) {
+	t.Parallel()
+
+	tests := []handleEventsWebhookTestCase{
+		{
+			name:         "valid event webhook publishes to jetstream",
+			payload:      `{"source":"camera","event_type":"motion","targets":["driveway"],"context_header":"Driveway motion"}`,
+			useBus:       true,
+			wantStatus:   http.StatusOK,
+			wantPubCount: 1,
+			wantPubTopic: "aerial.events.camera.motion",
+			wantTargets:  []string{"driveway"},
+		},
+		{
+			name:         "valid event with target singular and details formats context header and forwards to peer",
+			payload:      `{"source":"camera","event_type":"motion","target":"backyard","details":"high confidence"}`,
+			useBus:       true,
+			withPeerURL:  true,
+			wantStatus:   http.StatusOK,
+			wantPubCount: 1,
+			wantPubTopic: "aerial.events.camera.motion",
+			wantTargets:  []string{"backyard"},
+		},
+		{
+			name:       "invalid json returns 400",
+			payload:    `{invalid`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "missing source returns 400",
+			payload:    `{"source":"","event_type":"motion","target":"driveway"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "missing targets returns 400",
+			payload:    `{"source":"camera","event_type":"motion"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "nil event bus returns 503",
+			payload:    `{"source":"camera","event_type":"motion","target":"driveway"}`,
+			useBus:     false,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "closed event bus returns 500",
+			payload:    `{"source":"camera","event_type":"motion","target":"driveway"}`,
+			useBus:     true,
+			closeBus:   true,
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertHandleEventsWebhookScenario(t, tc)
 		})
 	}
 }

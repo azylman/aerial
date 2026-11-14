@@ -725,12 +725,13 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 	serverFail := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), mockDispFail)
 
 	tests := []struct {
-		name      string
-		server    *Server
-		ev        pubsub.ExternalEvent
-		wantErr   bool
-		checkDBID string
-		wantInDB  bool
+		name                 string
+		server               *Server
+		ev                   pubsub.ExternalEvent
+		wantErr              bool
+		checkDBID            string
+		wantInDB             bool
+		wantImmediateReclaim bool
 	}{
 		{
 			name:      "healthcheck source is no-op and leaves trigger unclaimed",
@@ -767,12 +768,13 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			wantInDB:  true,
 		},
 		{
-			name:      "dispatch failure recovers persistent trigger to db",
-			server:    serverFail,
-			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"sideyard"}},
-			wantErr:   false,
-			checkDBID: "trig-ext-fail-persistent",
-			wantInDB:  true,
+			name:                 "dispatch failure recovers persistent trigger to db",
+			server:               serverFail,
+			ev:                   pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"sideyard"}},
+			wantErr:              false,
+			checkDBID:            "trig-ext-fail-persistent",
+			wantInDB:             true,
+			wantImmediateReclaim: true,
 		},
 		{
 			name:      "successful dispatch claims and fires trigger",
@@ -792,6 +794,15 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			}
 			if tc.checkDBID != "" {
 				verifyTriggerState(ctx, t, db, tc.ev, tc.wantInDB)
+			}
+			if tc.wantImmediateReclaim {
+				reclaimed, rErr := ClaimEventTriggers(ctx, db, tc.ev.Source, tc.ev.Targets, tc.ev.EventType)
+				if rErr != nil {
+					t.Fatalf("ClaimEventTriggers failed: %v", rErr)
+				}
+				if len(reclaimed) != 1 || reclaimed[0].ID != tc.checkDBID {
+					t.Fatalf("expected persistent trigger %s to be immediately reclaimable, got %v", tc.checkDBID, reclaimed)
+				}
 			}
 			if tc.name == "successful dispatch claims and fires trigger" {
 				verifyDispatchedPrompt(t, mockDispOK, "100000000000000001", "Camera Alert\n\nVehicle in driveway")

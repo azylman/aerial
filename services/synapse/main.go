@@ -105,6 +105,8 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.Handle("POST /webhooks/github", tracedIngress(s.handleGitHubWebhook))
 	mux.Handle("POST /api/webhooks/flux", tracedIngress(s.handleFluxWebhook))
 	mux.Handle("POST /webhooks/flux", tracedIngress(s.handleFluxWebhook))
+	mux.Handle("POST /api/webhooks/events", tracedIngress(s.handleEventsWebhook))
+	mux.Handle("POST /webhooks/events", tracedIngress(s.handleEventsWebhook))
 	coverageFlush := httpkit.HandleCoverageFlush("synapse")
 	mux.HandleFunc("POST /debug/coverage/flush", coverageFlush)
 	mux.HandleFunc("GET /debug/coverage/flush", coverageFlush)
@@ -1296,7 +1298,7 @@ func setupRiverWorkerPool(ctx context.Context, server *RouterServer, cfg Config)
 		return nil, nil, fmt.Errorf("create pgxpool: %w", err)
 	}
 	server.SetQueueStats(pool)
-	server.SetRegistry(NewPostgresPRRegistry(pool, WithVanadisClient(cfg.VanadisURL, server.httpClient), WithHaroClient(cfg.HaroURL, server.httpClient)))
+	server.SetRegistry(NewPostgresPRRegistry(pool, WithVanadisClient(cfg.VanadisURL, server.httpClient)))
 
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &GitHubWebhookWorker{server: server})

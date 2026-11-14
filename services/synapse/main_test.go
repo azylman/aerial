@@ -202,12 +202,6 @@ type mockPRRegistry struct {
 	failVanadisBuildID string
 	failVanadisChunkID string
 
-	claimTriggersCalls []claimTriggersCall
-	claimTriggersRes   []ClaimedEventTrigger
-	claimTriggersErr   error
-	checkTriggersRes   bool
-	checkTriggersErr   error
-
 	ciFailCount    int
 	ciFailCountErr error
 
@@ -463,33 +457,6 @@ func (m *mockPRRegistry) FailVanadisChunkDetailsByPR(ctx context.Context, repo s
 	return m.failVanadisBuildID, m.failVanadisChunkID, failed, err
 }
 
-type claimTriggersCall struct {
-	source        string
-	targets       []string
-	eventType     string
-	contextHeader string
-}
-
-func (m *mockPRRegistry) CheckEventTriggers(ctx context.Context, source string, targets []string, eventType string) (bool, error) {
-	if err := m.checkErr(m.checkTriggersErr); err != nil {
-		return false, err
-	}
-	return m.checkTriggersRes, nil
-}
-
-func (m *mockPRRegistry) FireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) ([]ClaimedEventTrigger, error) {
-	m.claimTriggersCalls = append(m.claimTriggersCalls, claimTriggersCall{
-		source:        source,
-		targets:       targets,
-		eventType:     eventType,
-		contextHeader: contextHeader,
-	})
-	if err := m.checkErr(m.claimTriggersErr); err != nil {
-		return nil, err
-	}
-	return m.claimTriggersRes, nil
-}
-
 func (m *mockPRRegistry) IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error) {
 	return m.ciFailCount, m.checkErr(m.ciFailCountErr)
 }
@@ -584,7 +551,7 @@ func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp 
 	srv := NewRouterServer(fixedConfig(cfg), client, riverInserter...)
 	if reg != nil {
 		if pgReg, ok := reg.(*PostgresPRRegistry); ok && pgReg != nil {
-			if pgReg.vanadisURL == "http://vanadis.aerial" && pgReg.haroURL == "http://haro.aerial" {
+			if pgReg.vanadisURL == "http://vanadis.aerial" {
 				pgReg.httpClient = &http.Client{Transport: noopClusterTransport{}}
 				pgReg.vanadisRetryDelay = 0
 			}

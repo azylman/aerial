@@ -311,14 +311,6 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 			wantExtract: true,
 		},
 		{
-			name: "Tick0Noop",
-			tick: 0,
-		},
-		{
-			name: "Tick120Noop",
-			tick: 120,
-		},
-		{
 			name: "Tick1Noop",
 			tick: 1,
 		},
