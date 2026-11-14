@@ -24,6 +24,9 @@ func initSynapseJetStream(ctx context.Context, server *RouterServer, natsURL str
 		log.Printf("[synapse] Warning: failed to ensure core streams: %v", streamErr)
 	}
 	server.SetEventBus(bus)
+	if err := server.StartJobConsumers(ctx); err != nil {
+		log.Printf("[synapse] Warning starting job consumers: %v", err)
+	}
 	return func() {
 		if closeErr := bus.Close(); closeErr != nil {
 			log.Printf("[synapse] Warning closing event bus: %v", closeErr)

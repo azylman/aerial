@@ -1,0 +1,233 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/tracing"
+)
+
+func resolveJetStreamJobCoords(args riverJobArgsWithOpts) (string, string) {
+	switch a := args.(type) {
+	case GitHubWebhookArgs:
+		return "aerial.jobs.synapse.github", "github:" + a.Delivery
+	case *GitHubWebhookArgs:
+		return "aerial.jobs.synapse.github", "github:" + a.Delivery
+	case DeployWebhookArgs:
+		return "aerial.jobs.synapse.deploy", "deploy:" + a.IdempotencyKey
+	case *DeployWebhookArgs:
+		return "aerial.jobs.synapse.deploy", "deploy:" + a.IdempotencyKey
+	case MergeConflictArgs:
+		bucket := time.Now().Unix() / 900
+		return "aerial.jobs.synapse.merge_conflict", fmt.Sprintf("conflict:%s:%d:%d", a.Repo, a.PRNumber, bucket)
+	case *MergeConflictArgs:
+		bucket := time.Now().Unix() / 900
+		return "aerial.jobs.synapse.merge_conflict", fmt.Sprintf("conflict:%s:%d:%d", a.Repo, a.PRNumber, bucket)
+	case DiscordIngressArgs:
+		return "aerial.jobs.synapse.discord_ingress", "discord:msg:" + a.MessageID
+	case *DiscordIngressArgs:
+		return "aerial.jobs.synapse.discord_ingress", "discord:msg:" + a.MessageID
+	case DiscordInteractionArgs:
+		return "aerial.jobs.synapse.discord_interaction", "discord:ix:" + a.InteractionID
+	case *DiscordInteractionArgs:
+		return "aerial.jobs.synapse.discord_interaction", "discord:ix:" + a.InteractionID
+	case WidgetSyncArgs:
+		if strings.TrimSpace(a.BuildID) != "" {
+			return "aerial.coalesced.widget_sync.build." + strings.TrimSpace(a.BuildID),
+				fmt.Sprintf("widget:build:%s:%d", strings.TrimSpace(a.BuildID), time.Now().UnixNano())
+		}
+		repo := strings.ReplaceAll(normalizeRepo(a.Repo), "/", ".")
+		return fmt.Sprintf("aerial.coalesced.widget_sync.pr.%s.%d", repo, a.PRNumber),
+			fmt.Sprintf("widget:pr:%s:%d:%d", normalizeRepo(a.Repo), a.PRNumber, time.Now().UnixNano())
+	case *WidgetSyncArgs:
+		if strings.TrimSpace(a.BuildID) != "" {
+			return "aerial.coalesced.widget_sync.build." + strings.TrimSpace(a.BuildID),
+				fmt.Sprintf("widget:build:%s:%d", strings.TrimSpace(a.BuildID), time.Now().UnixNano())
+		}
+		repo := strings.ReplaceAll(normalizeRepo(a.Repo), "/", ".")
+		return fmt.Sprintf("aerial.coalesced.widget_sync.pr.%s.%d", repo, a.PRNumber),
+			fmt.Sprintf("widget:pr:%s:%d:%d", normalizeRepo(a.Repo), a.PRNumber, time.Now().UnixNano())
+	default:
+		return "", ""
+	}
+}
+
+// HandleGitHubJob processes an aerial.jobs.synapse.github job message from JetStream.
+func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) error {
+	if s == nil || msg == nil {
+		return nil
+	}
+	var args GitHubWebhookArgs
+	if err := json.Unmarshal(msg.Data(), &args); err != nil {
+		log.Printf("[synapse] [jetstream] error unmarshaling github job: %v", err)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[synapse] [jetstream] warning: error terming github job: %v", termErr)
+		}
+		return nil
+	}
+	log.Printf("[synapse] [jetstream] processing github job event=%s delivery=%s", args.Event, args.Delivery)
+	if _, err := s.ProcessGitHubEvent(ctx, args.Event, args.Delivery, args.Body); err != nil {
+		log.Printf("[synapse] [jetstream] error processing github job event=%s delivery=%s: %v", args.Event, args.Delivery, err)
+		return err
+	}
+	return nil
+}
+
+// HandleDeployJob processes an aerial.jobs.synapse.deploy job message from JetStream.
+func (s *RouterServer) HandleDeployJob(ctx context.Context, msg pubsub.Message) error {
+	if s == nil || msg == nil {
+		return nil
+	}
+	var args DeployWebhookArgs
+	if err := json.Unmarshal(msg.Data(), &args); err != nil {
+		log.Printf("[synapse] [jetstream] error unmarshaling deploy job: %v", err)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[synapse] [jetstream] warning: error terming deploy job: %v", termErr)
+		}
+		return nil
+	}
+	log.Printf("[synapse] [jetstream] processing deploy job event=%s job_name=%s", args.Event.Event, args.Event.JobName)
+	if _, err := s.ProcessDeployEvent(ctx, args.Event); err != nil {
+		log.Printf("[synapse] [jetstream] error processing deploy job: %v", err)
+		return err
+	}
+	return nil
+}
+
+// HandleMergeConflictJob processes an aerial.jobs.synapse.merge_conflict job message from JetStream.
+func (s *RouterServer) HandleMergeConflictJob(ctx context.Context, msg pubsub.Message) error {
+	if s == nil || msg == nil {
+		return nil
+	}
+	var args MergeConflictArgs
+	if err := json.Unmarshal(msg.Data(), &args); err != nil {
+		log.Printf("[synapse] [jetstream] error unmarshaling merge conflict job: %v", err)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[synapse] [jetstream] warning: error terming merge conflict job: %v", termErr)
+		}
+		return nil
+	}
+	log.Printf("[synapse] [jetstream] processing merge conflict job repo=%s pr=%d", args.Repo, args.PRNumber)
+	if err := s.ProcessMergeConflict(ctx, args); err != nil {
+		log.Printf("[synapse] [jetstream] error processing merge conflict job: %v", err)
+		return err
+	}
+	return nil
+}
+
+// HandleDiscordIngressJob processes an aerial.jobs.synapse.discord_ingress job message from JetStream.
+func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.Message) (err error) {
+	if s == nil || msg == nil {
+		return nil
+	}
+	var args DiscordIngressArgs
+	if uErr := json.Unmarshal(msg.Data(), &args); uErr != nil {
+		log.Printf("[synapse] [jetstream] error unmarshaling discord ingress job: %v", uErr)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[synapse] [jetstream] warning: error terming discord ingress job: %v", termErr)
+		}
+		return nil
+	}
+
+	ctx, span := tracing.Tracer().Start(tracing.ContextWithTraceparent(ctx, args.Traceparent), "process "+QueueDiscordIngress, discordJobSpanOptions(QueueDiscordIngress)...)
+	defer span.End()
+	defer func() { markDiscordJobSpan(span, err) }()
+
+	// Staleness check (>30m staleness)
+	maxAge := 30 * time.Minute
+	if args.Message != nil && !args.Message.Timestamp.IsZero() && time.Since(args.Message.Timestamp) >= maxAge {
+		RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "ttl_expired")
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[synapse] [jetstream] warning: error terming expired discord ingress job: %v", termErr)
+		}
+		return nil
+	}
+
+	pErr := s.ProcessDiscordIngress(ctx, args)
+	if pErr == nil {
+		return nil
+	}
+	if is4xxClientError(pErr) {
+		RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "client_4xx")
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[synapse] [jetstream] warning: error terming client 4xx discord ingress job: %v", termErr)
+		}
+		return nil
+	}
+	RecordJobRetry(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "discord_ingress_backoff")
+	return pErr
+}
+
+// HandleDiscordInteractionJob processes an aerial.jobs.synapse.discord_interaction job message from JetStream.
+func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubsub.Message) (err error) {
+	if s == nil || msg == nil {
+		return nil
+	}
+	var args DiscordInteractionArgs
+	if uErr := json.Unmarshal(msg.Data(), &args); uErr != nil {
+		log.Printf("[synapse] [jetstream] error unmarshaling discord interaction job: %v", uErr)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[synapse] [jetstream] warning: error terming discord interaction job: %v", termErr)
+		}
+		return nil
+	}
+	ctx, span := tracing.Tracer().Start(tracing.ContextWithTraceparent(ctx, args.Traceparent), "process "+QueueDiscordInteraction, discordJobSpanOptions(QueueDiscordInteraction)...)
+	defer span.End()
+	defer func() { markDiscordJobSpan(span, err) }()
+
+	return s.ProcessDiscordInteraction(ctx, args)
+}
+
+// HandleWidgetSyncJob processes an aerial.coalesced.widget_sync.> job message from JetStream.
+func (s *RouterServer) HandleWidgetSyncJob(ctx context.Context, msg pubsub.Message) error {
+	if s == nil || msg == nil {
+		return nil
+	}
+	var args WidgetSyncArgs
+	if err := json.Unmarshal(msg.Data(), &args); err != nil {
+		log.Printf("[synapse] [jetstream] error unmarshaling widget sync job: %v", err)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[synapse] [jetstream] warning: error terming widget sync job: %v", termErr)
+		}
+		return nil
+	}
+	log.Printf("[synapse] [jetstream] processing widget sync job repo=%s pr=%d build_id=%s", args.Repo, args.PRNumber, args.BuildID)
+	if err := s.ProcessWidgetSync(ctx, args); err != nil {
+		log.Printf("[synapse] [jetstream] error processing widget sync job: %v", err)
+		return err
+	}
+	return nil
+}
+
+// StartJobConsumers registers the 6 durable consumers for Synapse on AERIAL_JOBS and AERIAL_COALESCED.
+func (s *RouterServer) StartJobConsumers(ctx context.Context) error {
+	if s == nil || s.bus == nil {
+		return nil
+	}
+	type consumerSpec struct {
+		subject string
+		queue   string
+		handler pubsub.Handler
+	}
+	specs := []consumerSpec{
+		{"aerial.jobs.synapse.github", "synapse-github", s.HandleGitHubJob},
+		{"aerial.jobs.synapse.deploy", "synapse-deploy", s.HandleDeployJob},
+		{"aerial.jobs.synapse.merge_conflict", "synapse-merge-conflict", s.HandleMergeConflictJob},
+		{"aerial.jobs.synapse.discord_ingress", "synapse-discord-ingress", s.HandleDiscordIngressJob},
+		{"aerial.jobs.synapse.discord_interaction", "synapse-discord-interaction", s.HandleDiscordInteractionJob},
+		{"aerial.coalesced.widget_sync.>", "synapse-widget-sync", s.HandleWidgetSyncJob},
+	}
+	for _, spec := range specs {
+		if _, err := s.bus.ConsumeQueue(ctx, spec.subject, spec.queue, spec.handler); err != nil {
+			log.Printf("[synapse] warning: failed to subscribe %s: %v", spec.queue, err)
+			return fmt.Errorf("subscribe %s: %w", spec.queue, err)
+		}
+		log.Printf("[synapse] Subscribed %s queue consumer to %s", spec.queue, spec.subject)
+	}
+	return nil
+}

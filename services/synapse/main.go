@@ -457,7 +457,7 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 		Repo:     normalizeRepo(repo),
 		PRNumber: prNumber,
 	}
-	if s.riverClient != nil {
+	if s.bus != nil || s.riverClient != nil {
 		args.Status = s.resolvePRWidgetSyncStatus(ctx, args.Repo, prNumber)
 		if err := s.insertRiverJob(ctx, args); err != nil {
 			log.Printf("[synapse] [widget] error enqueuing widget sync into river: %v", err)
@@ -478,7 +478,7 @@ func (s *RouterServer) SyncBuildWidget(ctx context.Context, buildID, banner stri
 		BuildID: buildID,
 		Banner:  banner,
 	}
-	if s.riverClient != nil {
+	if s.bus != nil || s.riverClient != nil {
 		if err := s.insertRiverJob(ctx, args); err != nil {
 			log.Printf("[synapse] [widget] error enqueuing build widget sync into river: %v", err)
 			return fmt.Errorf("enqueue build widget sync: %w", err)

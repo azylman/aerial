@@ -309,6 +309,23 @@ func (s *RouterServer) insertRiverJob(ctx context.Context, args riverJobArgsWith
 	if queue == "" {
 		queue = river.QueueDefault
 	}
+
+	if s != nil && s.bus != nil {
+		subject, msgID := resolveJetStreamJobCoords(args)
+		if subject != "" {
+			err := s.bus.Publish(ctx, subject, msgID, args)
+			if err == nil {
+				RecordJobEnqueued(queue, args.Kind(), "enqueued")
+				return nil
+			}
+			log.Printf("[synapse] warning: publish to jetstream subject %s failed: %v, falling back to river", subject, err)
+		}
+	}
+
+	if s == nil || s.riverClient == nil {
+		return errors.New("river client not configured")
+	}
+
 	res, err := s.riverClient.Insert(ctx, args, &opts)
 	if err != nil {
 		RecordJobEnqueued(queue, args.Kind(), "error")

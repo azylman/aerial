@@ -21,7 +21,7 @@ func (s *VanadisServer) retryNextRunningChunkEnqueue(ctx context.Context, res *V
 	}
 	for _, next := range chunks {
 		if next.ChunkIndex > res.MergedChunkIndex && next.Status == "running" {
-			if err := s.insertRiverJob(ctx, ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: next.ChunkIndex}); err != nil {
+			if err := s.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: next.ChunkIndex}); err != nil {
 				log.Printf("[vanadis] failed to re-enqueue running chunk %d for build %s on redelivery: %v", next.ChunkIndex, res.BuildID, err)
 				return err
 			}
@@ -55,7 +55,7 @@ func (s *VanadisServer) handleCompletedDispatchOutcome(ctx context.Context, ev p
 		RecordBuildTotal("completed")
 		s.dispatchCompletedBuildWake(ctx, res)
 	} else if res.NextChunkIndex >= 0 {
-		if err := s.insertRiverJob(ctx, ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: res.NextChunkIndex}); err != nil {
+		if err := s.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: res.NextChunkIndex}); err != nil {
 			log.Printf("[vanadis] failed to enqueue next chunk %d for build %s: %v", res.NextChunkIndex, res.BuildID, err)
 			return err
 		}
