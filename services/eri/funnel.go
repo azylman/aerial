@@ -560,10 +560,10 @@ func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, stor
 	return "enqueued", nil
 }
 
+// hydrateGuildRoles, hydrateGuildChannels and hydrateGuildThreads are only
+// called from hydrateGuildState, which receives a non-nil session from
+// hydrateDiscordSessionREST (it returns early on nil), so they take dg as non-nil.
 func hydrateGuildRoles(dg *discordgo.Session, guildID string) {
-	if dg == nil {
-		return
-	}
 	roles, err := dg.GuildRoles(guildID)
 	if err != nil {
 		return
@@ -578,9 +578,6 @@ func hydrateGuildRoles(dg *discordgo.Session, guildID string) {
 }
 
 func hydrateGuildChannels(dg *discordgo.Session, guildID string) {
-	if dg == nil {
-		return
-	}
 	channels, err := dg.GuildChannels(guildID)
 	if err != nil {
 		return
@@ -598,9 +595,6 @@ func hydrateGuildChannels(dg *discordgo.Session, guildID string) {
 }
 
 func hydrateGuildThreads(dg *discordgo.Session, guildID string) {
-	if dg == nil {
-		return
-	}
 	activeThreads, err := dg.GuildThreadsActive(guildID)
 	if err != nil || activeThreads == nil {
 		return
