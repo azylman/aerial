@@ -231,7 +231,7 @@ func collapseCompletedWidgetChunks(chunks []StatusWidgetChunk) ([]StatusWidgetCh
 	}
 
 	if len(collapsedMerged) > 0 {
-		summaryText := fmt.Sprintf("✅ *%d earlier chunks completed and merged*", len(collapsedMerged))
+		summaryText := fmt.Sprintf("✅ ***%d/%d** earlier chunks completed and merged*", len(collapsedMerged), len(chunks))
 		return activeChunks, summaryText
 	}
 	return chunks, ""
