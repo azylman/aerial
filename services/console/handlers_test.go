@@ -10,10 +10,9 @@ import (
 	"time"
 )
 
-func TestFactsHandler_TableDriven(t *testing.T) {
-	var capturedQuery url.Values
-	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedQuery = r.URL.Query()
+func newFactsMockBrain(capturedQuery *url.Values) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*capturedQuery = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path != "/facts" {
 			http.NotFound(w, r)
@@ -70,21 +69,16 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 			Offset: 0,
 		})
 	}))
+}
+
+func TestFactsHandler_TableDriven(t *testing.T) {
+	var capturedQuery url.Values
+	mockBrain := newFactsMockBrain(&capturedQuery)
 	defer mockBrain.Close()
 
 	offlineURL := "http://127.0.0.1:54321"
 
-	tests := []struct {
-		name               string
-		brainURL           string
-		method             string
-		target             string
-		wantStatus         int
-		wantBodySubstr     []string
-		wantBodyNotSubstr  []string
-		wantForwardedLimit string
-		wantMaxQRunes      int
-	}{
+	tests := []factsHandlerTestCase{
 		{
 			name:           "Success_QueryFilter",
 			brainURL:       mockBrain.URL,
@@ -159,45 +153,260 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := factsHandler(tt.brainURL)
-			req := httptest.NewRequest(tt.method, tt.target, nil)
-			rr := httptest.NewRecorder()
-			h(rr, req)
-			if rr.Code != tt.wantStatus {
-				t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
-			}
-			bodyStr := rr.Body.String()
-			for _, sub := range tt.wantBodySubstr {
-				if !strings.Contains(bodyStr, sub) {
-					t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
-				}
-			}
-			for _, sub := range tt.wantBodyNotSubstr {
-				if strings.Contains(bodyStr, sub) {
-					t.Errorf("expected body NOT to contain %q, got: %s", sub, bodyStr)
-				}
-			}
-			if tt.wantForwardedLimit != "" {
-				if tt.wantForwardedLimit == "none" {
-					if capturedQuery.Get("limit") != "" {
-						t.Errorf("expected empty limit forwarded, got %q", capturedQuery.Get("limit"))
-					}
-				} else if capturedQuery.Get("limit") != tt.wantForwardedLimit {
-					t.Errorf("expected limit=%s forwarded, got %q", tt.wantForwardedLimit, capturedQuery.Get("limit"))
-				}
-			}
-			if tt.wantMaxQRunes > 0 {
-				gotQ := capturedQuery.Get("q")
-				if len([]rune(gotQ)) > tt.wantMaxQRunes {
-					t.Errorf("expected q truncated to %d runes, got len %d: %q", tt.wantMaxQRunes, len([]rune(gotQ)), gotQ)
-				}
-			}
+			runFactsHandlerCase(t, tt, &capturedQuery)
 		})
 	}
 }
 
-func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
-	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+type factsHandlerTestCase struct {
+	name               string
+	brainURL           string
+	method             string
+	target             string
+	wantStatus         int
+	wantBodySubstr     []string
+	wantBodyNotSubstr  []string
+	wantForwardedLimit string
+	wantMaxQRunes      int
+}
+
+func runFactsHandlerCase(t *testing.T, tt factsHandlerTestCase, capturedQuery *url.Values) {
+	t.Helper()
+	h := factsHandler(tt.brainURL)
+	req := httptest.NewRequest(tt.method, tt.target, nil)
+	rr := httptest.NewRecorder()
+	h(rr, req)
+	if rr.Code != tt.wantStatus {
+		t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
+	}
+	bodyStr := rr.Body.String()
+	for _, sub := range tt.wantBodySubstr {
+		if !strings.Contains(bodyStr, sub) {
+			t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
+		}
+	}
+	for _, sub := range tt.wantBodyNotSubstr {
+		if strings.Contains(bodyStr, sub) {
+			t.Errorf("expected body NOT to contain %q, got: %s", sub, bodyStr)
+		}
+	}
+	if tt.wantForwardedLimit != "" {
+		if tt.wantForwardedLimit == "none" {
+			if capturedQuery.Get("limit") != "" {
+				t.Errorf("expected empty limit forwarded, got %q", capturedQuery.Get("limit"))
+			}
+		} else if capturedQuery.Get("limit") != tt.wantForwardedLimit {
+			t.Errorf("expected limit=%s forwarded, got %q", tt.wantForwardedLimit, capturedQuery.Get("limit"))
+		}
+	}
+	if tt.wantMaxQRunes > 0 {
+		gotQ := capturedQuery.Get("q")
+		if len([]rune(gotQ)) > tt.wantMaxQRunes {
+			t.Errorf("expected q truncated to %d runes, got len %d: %q", tt.wantMaxQRunes, len([]rune(gotQ)), gotQ)
+		}
+	}
+}
+
+type schedulesAndRunsTestCase struct {
+	name           string
+	isRuns         bool
+	useMux         bool
+	haroURL        string
+	brainURL       string
+	method         string
+	target         string
+	wantStatus     int
+	wantBodySubstr []string
+}
+
+func schedulesAndRunsTestCases(mockBrainURL, mockHaroURL, offlineURL string) []schedulesAndRunsTestCase {
+	cases := schedulesAndRunsPrimaryCases(mockBrainURL, offlineURL)
+	return append(cases, schedulesAndRunsSecondaryCases(mockBrainURL, mockHaroURL, offlineURL)...)
+}
+
+func schedulesAndRunsPrimaryCases(mockBrainURL, offlineURL string) []schedulesAndRunsTestCase {
+	return []schedulesAndRunsTestCase{
+		{
+			name:           "Schedules_Success",
+			brainURL:       mockBrainURL,
+			method:         "GET",
+			target:         "/api/schedules",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Morning Brief", "Remind about tea", `"total_active":3`},
+		},
+		{
+			name:           "Schedules_SuccessParams_NilSlices",
+			brainURL:       mockBrainURL + "/nil",
+			method:         "GET",
+			target:         "/api/schedules?limit=5&offset=2&active=true&q=weather",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{`"crons":[]`, `"one_shots":[]`},
+		},
+		{
+			name:       "Schedules_ActiveFalse",
+			brainURL:   mockBrainURL,
+			method:     "GET",
+			target:     "/api/schedules?active=false",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:           "Schedules_DegradedFallback",
+			brainURL:       offlineURL,
+			method:         "GET",
+			target:         "/api/schedules",
+			wantStatus:     http.StatusServiceUnavailable,
+			wantBodySubstr: []string{`"status":"degraded"`, "Brain service unreachable. Retrying...", `"crons":[]`, `"one_shots":[]`},
+		},
+		{
+			name:       "Schedules_Upstream500",
+			brainURL:   mockBrainURL + "/error500",
+			method:     "GET",
+			target:     "/api/schedules",
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "Schedules_BadGateway",
+			brainURL:   mockBrainURL + "/badjson",
+			method:     "GET",
+			target:     "/api/schedules",
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "Schedules_MethodNotAllowed",
+			brainURL:   offlineURL,
+			method:     "POST",
+			target:     "/api/schedules",
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:       "Schedules_InvalidUpstreamURL",
+			brainURL:   "http://brain:\x7f8080",
+			method:     "GET",
+			target:     "/api/schedules",
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:           "ScheduleRuns_Success",
+			isRuns:         true,
+			brainURL:       mockBrainURL,
+			method:         "GET",
+			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"cron-brief-101", `"total":42`, `"duration_ms":1250`},
+		},
+		{
+			name:           "ScheduleRuns_SuccessParams_NilSlices",
+			isRuns:         true,
+			brainURL:       mockBrainURL + "/nil/runs",
+			method:         "GET",
+			target:         "/api/schedules/runs?limit=10&offset=5&status=SUCCESS&schedule_id=42",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{`"runs":[]`},
+		},
+	}
+}
+
+func schedulesAndRunsSecondaryCases(mockBrainURL, mockHaroURL, offlineURL string) []schedulesAndRunsTestCase {
+	return []schedulesAndRunsTestCase{
+		{
+			name:           "ScheduleRuns_DegradedFallback",
+			isRuns:         true,
+			brainURL:       offlineURL,
+			method:         "GET",
+			target:         "/api/schedules/runs?limit=20&offset=10",
+			wantStatus:     http.StatusServiceUnavailable,
+			wantBodySubstr: []string{`"status":"degraded"`, "Brain service unreachable. Retrying...", `"runs":[]`},
+		},
+		{
+			name:       "ScheduleRuns_Upstream500",
+			isRuns:     true,
+			brainURL:   mockBrainURL + "/error500",
+			method:     "GET",
+			target:     "/api/schedules/runs",
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "ScheduleRuns_BadGateway",
+			isRuns:     true,
+			brainURL:   mockBrainURL + "/badjson",
+			method:     "GET",
+			target:     "/api/schedules/runs",
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "ScheduleRuns_MethodNotAllowed",
+			isRuns:     true,
+			brainURL:   offlineURL,
+			method:     "DELETE",
+			target:     "/api/schedules/runs",
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:       "ScheduleRuns_InvalidUpstreamURL",
+			isRuns:     true,
+			brainURL:   "http://brain:\x7f8080",
+			method:     "GET",
+			target:     "/api/schedules/runs",
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:           "SetupConsoleMux_Schedules_RoutesToHaro",
+			useMux:         true,
+			brainURL:       offlineURL,
+			haroURL:        mockHaroURL,
+			method:         "GET",
+			target:         "/api/schedules",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Haro Schedule", `"total_active":1`},
+		},
+		{
+			name:           "SetupConsoleMux_ConsoleSchedules_RoutesToHaro",
+			useMux:         true,
+			brainURL:       offlineURL,
+			haroURL:        mockHaroURL,
+			method:         "GET",
+			target:         "/console/api/schedules",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Haro Schedule", `"total_active":1`},
+		},
+		{
+			name:           "SetupConsoleMux_ScheduleRuns_RoutesToHaro",
+			useMux:         true,
+			isRuns:         true,
+			brainURL:       offlineURL,
+			haroURL:        mockHaroURL,
+			method:         "GET",
+			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Haro Brief #101", `"total":42`},
+		},
+		{
+			name:           "SetupConsoleMux_ConsoleScheduleRuns_RoutesToHaro",
+			useMux:         true,
+			isRuns:         true,
+			brainURL:       offlineURL,
+			haroURL:        mockHaroURL,
+			method:         "GET",
+			target:         "/console/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Haro Brief #101", `"total":42`},
+		},
+		{
+			name:           "SetupConsoleMux_Schedules_FallbackToBrainWhenHaroEmpty",
+			useMux:         true,
+			brainURL:       mockBrainURL,
+			haroURL:        "",
+			method:         "GET",
+			target:         "/api/schedules",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Morning Brief", `"total_active":3`},
+		},
+	}
+}
+
+func newSchedulesMockBrain(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.Contains(r.URL.Path, "/error500"):
@@ -240,9 +449,10 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer mockBrain.Close()
+}
 
-	mockHaro := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func newSchedulesMockHaro() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/schedules/runs"):
@@ -261,225 +471,68 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
+}
+
+func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
+	mockBrain := newSchedulesMockBrain(t)
+	defer mockBrain.Close()
+
+	mockHaro := newSchedulesMockHaro()
 	defer mockHaro.Close()
 
 	offlineURL := "http://127.0.0.1:54321"
-	tests := []struct {
-		name           string
-		isRuns         bool
-		useMux         bool
-		haroURL        string
-		brainURL       string
-		method         string
-		target         string
-		wantStatus     int
-		wantBodySubstr []string
-	}{
-		{
-			name:           "Schedules_Success",
-			brainURL:       mockBrain.URL,
-			method:         "GET",
-			target:         "/api/schedules",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Morning Brief", "Remind about tea", `"total_active":3`},
-		},
-		{
-			name:           "Schedules_SuccessParams_NilSlices",
-			brainURL:       mockBrain.URL + "/nil",
-			method:         "GET",
-			target:         "/api/schedules?limit=5&offset=2&active=true&q=weather",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{`"crons":[]`, `"one_shots":[]`},
-		},
-		{
-			name:       "Schedules_ActiveFalse",
-			brainURL:   mockBrain.URL,
-			method:     "GET",
-			target:     "/api/schedules?active=false",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:           "Schedules_DegradedFallback",
-			brainURL:       offlineURL,
-			method:         "GET",
-			target:         "/api/schedules",
-			wantStatus:     http.StatusServiceUnavailable,
-			wantBodySubstr: []string{`"status":"degraded"`, "Brain service unreachable. Retrying...", `"crons":[]`, `"one_shots":[]`},
-		},
-		{
-			name:       "Schedules_Upstream500",
-			brainURL:   mockBrain.URL + "/error500",
-			method:     "GET",
-			target:     "/api/schedules",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "Schedules_BadGateway",
-			brainURL:   mockBrain.URL + "/badjson",
-			method:     "GET",
-			target:     "/api/schedules",
-			wantStatus: http.StatusBadGateway,
-		},
-		{
-			name:       "Schedules_MethodNotAllowed",
-			brainURL:   offlineURL,
-			method:     "POST",
-			target:     "/api/schedules",
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:       "Schedules_InvalidUpstreamURL",
-			brainURL:   "http://brain:\x7f8080",
-			method:     "GET",
-			target:     "/api/schedules",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:           "ScheduleRuns_Success",
-			isRuns:         true,
-			brainURL:       mockBrain.URL,
-			method:         "GET",
-			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"cron-brief-101", `"total":42`, `"duration_ms":1250`},
-		},
-		{
-			name:           "ScheduleRuns_SuccessParams_NilSlices",
-			isRuns:         true,
-			brainURL:       mockBrain.URL + "/nil/runs",
-			method:         "GET",
-			target:         "/api/schedules/runs?limit=10&offset=5&status=SUCCESS&schedule_id=42",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{`"runs":[]`},
-		},
-		{
-			name:           "ScheduleRuns_DegradedFallback",
-			isRuns:         true,
-			brainURL:       offlineURL,
-			method:         "GET",
-			target:         "/api/schedules/runs?limit=20&offset=10",
-			wantStatus:     http.StatusServiceUnavailable,
-			wantBodySubstr: []string{`"status":"degraded"`, "Brain service unreachable. Retrying...", `"runs":[]`},
-		},
-		{
-			name:       "ScheduleRuns_Upstream500",
-			isRuns:     true,
-			brainURL:   mockBrain.URL + "/error500",
-			method:     "GET",
-			target:     "/api/schedules/runs",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "ScheduleRuns_BadGateway",
-			isRuns:     true,
-			brainURL:   mockBrain.URL + "/badjson",
-			method:     "GET",
-			target:     "/api/schedules/runs",
-			wantStatus: http.StatusBadGateway,
-		},
-		{
-			name:       "ScheduleRuns_MethodNotAllowed",
-			isRuns:     true,
-			brainURL:   offlineURL,
-			method:     "DELETE",
-			target:     "/api/schedules/runs",
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:       "ScheduleRuns_InvalidUpstreamURL",
-			isRuns:     true,
-			brainURL:   "http://brain:\x7f8080",
-			method:     "GET",
-			target:     "/api/schedules/runs",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:           "SetupConsoleMux_Schedules_RoutesToHaro",
-			useMux:         true,
-			brainURL:       offlineURL,
-			haroURL:        mockHaro.URL,
-			method:         "GET",
-			target:         "/api/schedules",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Haro Schedule", `"total_active":1`},
-		},
-		{
-			name:           "SetupConsoleMux_ConsoleSchedules_RoutesToHaro",
-			useMux:         true,
-			brainURL:       offlineURL,
-			haroURL:        mockHaro.URL,
-			method:         "GET",
-			target:         "/console/api/schedules",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Haro Schedule", `"total_active":1`},
-		},
-		{
-			name:           "SetupConsoleMux_ScheduleRuns_RoutesToHaro",
-			useMux:         true,
-			isRuns:         true,
-			brainURL:       offlineURL,
-			haroURL:        mockHaro.URL,
-			method:         "GET",
-			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Haro Brief #101", `"total":42`},
-		},
-		{
-			name:           "SetupConsoleMux_ConsoleScheduleRuns_RoutesToHaro",
-			useMux:         true,
-			isRuns:         true,
-			brainURL:       offlineURL,
-			haroURL:        mockHaro.URL,
-			method:         "GET",
-			target:         "/console/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Haro Brief #101", `"total":42`},
-		},
-		{
-			name:           "SetupConsoleMux_Schedules_FallbackToBrainWhenHaroEmpty",
-			useMux:         true,
-			brainURL:       mockBrain.URL,
-			haroURL:        "",
-			method:         "GET",
-			target:         "/api/schedules",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Morning Brief", `"total_active":3`},
-		},
-	}
+	tests := schedulesAndRunsTestCases(mockBrain.URL, mockHaro.URL, offlineURL)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var h http.Handler
-			if tt.useMux {
-				h = SetupConsoleMux(ConsoleConfig{
-					BrainURL: tt.brainURL,
-					HaroURL:  tt.haroURL,
-				}, nil)
-			} else {
-				if tt.isRuns {
-					h = scheduleRunsHandler(tt.brainURL)
-				} else {
-					h = schedulesHandler(tt.brainURL)
-				}
-			}
-			req := httptest.NewRequest(tt.method, tt.target, nil)
-			rr := httptest.NewRecorder()
-			h.ServeHTTP(rr, req)
-			if rr.Code != tt.wantStatus {
-				t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
-			}
-			bodyStr := rr.Body.String()
-			for _, sub := range tt.wantBodySubstr {
-				if !strings.Contains(bodyStr, sub) {
-					t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
-				}
-			}
+			runSchedulesAndRunsCase(t, tt)
 		})
 	}
 }
 
-func TestVanadisBuildsHandlers(t *testing.T) {
-	mockVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func runSchedulesAndRunsCase(t *testing.T, tt schedulesAndRunsTestCase) {
+	t.Helper()
+	var h http.Handler
+	switch {
+	case tt.useMux:
+		h = SetupConsoleMux(ConsoleConfig{
+			BrainURL: tt.brainURL,
+			HaroURL:  tt.haroURL,
+		}, nil)
+	case tt.isRuns:
+		h = scheduleRunsHandler(tt.brainURL)
+	default:
+		h = schedulesHandler(tt.brainURL)
+	}
+	req := httptest.NewRequest(tt.method, tt.target, nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != tt.wantStatus {
+		t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
+	}
+	bodyStr := rr.Body.String()
+	for _, sub := range tt.wantBodySubstr {
+		if !strings.Contains(bodyStr, sub) {
+			t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
+		}
+	}
+}
+
+type vanadisBuildTestCase struct {
+	name              string
+	isDetail          bool
+	useMux            bool
+	vanadisURL        string
+	method            string
+	target            string
+	wantStatus        int
+	wantBodySubstr    []string
+	wantBodyNotSubstr []string
+}
+
+func newVanadisMockServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/builds" && r.Method == http.MethodGet:
 			q := r.URL.Query()
@@ -567,24 +620,19 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer mockVanadis.Close()
+}
 
-	offlineURL := "http://127.0.0.1:54321"
+func vanadisBuildsTestCases(mockVanadisURL, offlineURL string) []vanadisBuildTestCase {
+	cases := vanadisBuildsRootCases(mockVanadisURL, offlineURL)
+	cases = append(cases, vanadisBuildsDetailCases(mockVanadisURL, offlineURL)...)
+	return append(cases, vanadisBuildsMuxCases(mockVanadisURL)...)
+}
 
-	tests := []struct {
-		name              string
-		isDetail          bool
-		useMux            bool
-		vanadisURL        string
-		method            string
-		target            string
-		wantStatus        int
-		wantBodySubstr    []string
-		wantBodyNotSubstr []string
-	}{
+func vanadisBuildsRootCases(mockVanadisURL, offlineURL string) []vanadisBuildTestCase {
+	return []vanadisBuildTestCase{
 		{
 			name:              "Builds_Success_WithQuery",
-			vanadisURL:        mockVanadis.URL,
+			vanadisURL:        mockVanadisURL,
 			method:            http.MethodGet,
 			target:            "/api/builds?limit=25&status=running&queue_state=running",
 			wantStatus:        http.StatusOK,
@@ -601,21 +649,21 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		},
 		{
 			name:       "Builds_MethodNotAllowed",
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodPost,
 			target:     "/api/builds",
 			wantStatus: http.StatusMethodNotAllowed,
 		},
 		{
 			name:       "Builds_Upstream500",
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodGet,
 			target:     "/api/builds?status=error500",
 			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:       "Builds_BadGateway_InvalidJSON",
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodGet,
 			target:     "/api/builds?status=badjson",
 			wantStatus: http.StatusBadGateway,
@@ -627,10 +675,15 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 			target:     "/api/builds",
 			wantStatus: http.StatusInternalServerError,
 		},
+	}
+}
+
+func vanadisBuildsDetailCases(mockVanadisURL, offlineURL string) []vanadisBuildTestCase {
+	return []vanadisBuildTestCase{
 		{
 			name:           "BuildDetail_Success_APIPrefix",
 			isDetail:       true,
-			vanadisURL:     mockVanadis.URL,
+			vanadisURL:     mockVanadisURL,
 			method:         http.MethodGet,
 			target:         "/api/builds/build-101",
 			wantStatus:     http.StatusOK,
@@ -639,7 +692,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		{
 			name:           "BuildDetail_Success_ConsolePrefix",
 			isDetail:       true,
-			vanadisURL:     mockVanadis.URL,
+			vanadisURL:     mockVanadisURL,
 			method:         http.MethodGet,
 			target:         "/console/api/builds/build-101",
 			wantStatus:     http.StatusOK,
@@ -648,7 +701,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		{
 			name:           "BuildDetail_NotFound_404",
 			isDetail:       true,
-			vanadisURL:     mockVanadis.URL,
+			vanadisURL:     mockVanadisURL,
 			method:         http.MethodGet,
 			target:         "/api/builds/nonexistent-build",
 			wantStatus:     http.StatusNotFound,
@@ -657,7 +710,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		{
 			name:       "BuildDetail_MethodNotAllowed",
 			isDetail:   true,
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodDelete,
 			target:     "/api/builds/build-101",
 			wantStatus: http.StatusMethodNotAllowed,
@@ -674,7 +727,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		{
 			name:       "BuildDetail_BadGateway_InvalidJSON",
 			isDetail:   true,
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodGet,
 			target:     "/api/builds/build-badjson",
 			wantStatus: http.StatusBadGateway,
@@ -682,7 +735,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		{
 			name:       "BuildDetail_Upstream500",
 			isDetail:   true,
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodGet,
 			target:     "/api/builds/build-500",
 			wantStatus: http.StatusInternalServerError,
@@ -690,7 +743,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		{
 			name:       "BuildDetail_EmptyID_BadRequest",
 			isDetail:   true,
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodGet,
 			target:     "/api/builds/",
 			wantStatus: http.StatusBadRequest,
@@ -698,7 +751,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		{
 			name:       "BuildDetail_PathTraversal_BadRequest",
 			isDetail:   true,
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodGet,
 			target:     "/api/builds/../traversal",
 			wantStatus: http.StatusBadRequest,
@@ -711,10 +764,15 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 			target:     "/api/builds/build-101",
 			wantStatus: http.StatusInternalServerError,
 		},
+	}
+}
+
+func vanadisBuildsMuxCases(mockVanadisURL string) []vanadisBuildTestCase {
+	return []vanadisBuildTestCase{
 		{
 			name:       "MuxWiring_BuildsRoot",
 			useMux:     true,
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodGet,
 			target:     "/api/builds",
 			wantStatus: http.StatusOK,
@@ -722,7 +780,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		{
 			name:       "MuxWiring_ConsoleBuildsRoot",
 			useMux:     true,
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodGet,
 			target:     "/console/api/builds",
 			wantStatus: http.StatusOK,
@@ -730,7 +788,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		{
 			name:       "MuxWiring_BuildDetail1",
 			useMux:     true,
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodGet,
 			target:     "/api/builds/test-build-1",
 			wantStatus: http.StatusOK,
@@ -738,43 +796,66 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 		{
 			name:       "MuxWiring_ConsoleBuildDetail2",
 			useMux:     true,
-			vanadisURL: mockVanadis.URL,
+			vanadisURL: mockVanadisURL,
 			method:     http.MethodGet,
 			target:     "/console/api/builds/test-build-2",
 			wantStatus: http.StatusOK,
 		},
 	}
+}
+
+func TestVanadisBuildsHandlers(t *testing.T) {
+	mockVanadis := newVanadisMockServer(t)
+	defer mockVanadis.Close()
+
+	offlineURL := "http://127.0.0.1:54321"
+	tests := vanadisBuildsTestCases(mockVanadis.URL, offlineURL)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var h http.Handler
-			switch {
-			case tt.useMux:
-				h = SetupConsoleMux(ConsoleConfig{VanadisURL: tt.vanadisURL}, nil)
-			case tt.isDetail:
-				h = buildDetailHandler(tt.vanadisURL)
-			default:
-				h = buildsHandler(tt.vanadisURL)
-			}
-			req := httptest.NewRequest(tt.method, tt.target, nil)
-			rr := httptest.NewRecorder()
-			h.ServeHTTP(rr, req)
-			if rr.Code != tt.wantStatus {
-				t.Fatalf("expected status %d, got %d (body: %s)", tt.wantStatus, rr.Code, rr.Body.String())
-			}
-			bodyStr := rr.Body.String()
-			for _, sub := range tt.wantBodySubstr {
-				if !strings.Contains(bodyStr, sub) {
-					t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
-				}
-			}
-			for _, sub := range tt.wantBodyNotSubstr {
-				if strings.Contains(bodyStr, sub) {
-					t.Errorf("expected body NOT to contain %q, got: %s", sub, bodyStr)
-				}
-			}
+			runVanadisBuildsCase(t, tt)
 		})
 	}
+}
+
+func runVanadisBuildsCase(t *testing.T, tt vanadisBuildTestCase) {
+	t.Helper()
+	var h http.Handler
+	switch {
+	case tt.useMux:
+		h = SetupConsoleMux(ConsoleConfig{VanadisURL: tt.vanadisURL}, nil)
+	case tt.isDetail:
+		h = buildDetailHandler(tt.vanadisURL)
+	default:
+		h = buildsHandler(tt.vanadisURL)
+	}
+	req := httptest.NewRequest(tt.method, tt.target, nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != tt.wantStatus {
+		t.Fatalf("expected status %d, got %d (body: %s)", tt.wantStatus, rr.Code, rr.Body.String())
+	}
+	bodyStr := rr.Body.String()
+	for _, sub := range tt.wantBodySubstr {
+		if !strings.Contains(bodyStr, sub) {
+			t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
+		}
+	}
+	for _, sub := range tt.wantBodyNotSubstr {
+		if strings.Contains(bodyStr, sub) {
+			t.Errorf("expected body NOT to contain %q, got: %s", sub, bodyStr)
+		}
+	}
+}
+
+type docketHandlerTestCase struct {
+	name         string
+	docketURL    string
+	method       string
+	target       string
+	wantStatus   int
+	wantBody     string
+	wantContains []string
 }
 
 func TestDocketHandlers(t *testing.T) {
@@ -821,15 +902,7 @@ func TestDocketHandlers(t *testing.T) {
 	deadURL := deadDocket.URL
 	deadDocket.Close()
 
-	tests := []struct {
-		name         string
-		docketURL    string
-		method       string
-		target       string
-		wantStatus   int
-		wantBody     string
-		wantContains []string
-	}{
+	tests := []docketHandlerTestCase{
 		{name: "Tasks_DefaultQuery", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks", wantStatus: http.StatusOK, wantBody: `{"status":"ok","tasks":[{"id":1,"title":"query:","status":"open","parent_id":9,"blocked_by":[2]}]}`},
 		{name: "Tasks_ConsolePrefix_ForwardsOnlyStatus", docketURL: mockDocket.URL, method: http.MethodGet, target: "/console/api/docket/tasks?status=all&q=x&limit=3", wantStatus: http.StatusOK, wantBody: `{"status":"ok","tasks":[{"id":1,"title":"query:status=all","status":"open","parent_id":9,"blocked_by":[2]}]}`},
 		{name: "Tasks_NullNormalizedToEmpty", docketURL: mockDocket.URL, method: http.MethodGet, target: "/api/docket/tasks?status=wont_do", wantStatus: http.StatusOK, wantBody: `{"status":"ok","tasks":[]}`},
@@ -865,21 +938,26 @@ func TestDocketHandlers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := SetupConsoleMux(ConsoleConfig{DocketURL: tc.docketURL}, nil)
-			rr := httptest.NewRecorder()
-			h.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.target, nil))
-			if rr.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d (body: %s)", rr.Code, tc.wantStatus, rr.Body.String())
-			}
-			body := strings.TrimSpace(rr.Body.String())
-			if tc.wantBody != "" && body != tc.wantBody {
-				t.Errorf("body mismatch\n got: %s\nwant: %s", body, tc.wantBody)
-			}
-			for _, sub := range tc.wantContains {
-				if !strings.Contains(body, sub) {
-					t.Errorf("body %s missing %q", body, sub)
-				}
-			}
+			runDocketHandlerCase(t, tc)
 		})
+	}
+}
+
+func runDocketHandlerCase(t *testing.T, tc docketHandlerTestCase) {
+	t.Helper()
+	h := SetupConsoleMux(ConsoleConfig{DocketURL: tc.docketURL}, nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.target, nil))
+	if rr.Code != tc.wantStatus {
+		t.Fatalf("status = %d, want %d (body: %s)", rr.Code, tc.wantStatus, rr.Body.String())
+	}
+	body := strings.TrimSpace(rr.Body.String())
+	if tc.wantBody != "" && body != tc.wantBody {
+		t.Errorf("body mismatch\n got: %s\nwant: %s", body, tc.wantBody)
+	}
+	for _, sub := range tc.wantContains {
+		if !strings.Contains(body, sub) {
+			t.Errorf("body %s missing %q", body, sub)
+		}
 	}
 }

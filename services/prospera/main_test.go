@@ -225,6 +225,16 @@ func TestRoutes_HealthAndCoverage(t *testing.T) {
 	}
 }
 
+type runAppMainSignalTestCase struct {
+	name         string
+	loadErr      error
+	runErr       error
+	reloadCfg    *Config
+	wantExit     bool
+	wantStatus   httpkit.ReloadStatus
+	wantCanceled bool
+}
+
 func TestRunApp_MainSignal(t *testing.T) {
 	origLoad := loadConfigFn
 	origRun := runAppFn
@@ -235,15 +245,7 @@ func TestRunApp_MainSignal(t *testing.T) {
 		exitFn = origExit
 	}()
 
-	tests := []struct {
-		name         string
-		loadErr      error
-		runErr       error
-		reloadCfg    *Config
-		wantExit     bool
-		wantStatus   httpkit.ReloadStatus
-		wantCanceled bool
-	}{
+	tests := []runAppMainSignalTestCase{
 		{
 			name:     "config error triggers exit",
 			loadErr:  errors.New("mock config error"),
@@ -278,52 +280,57 @@ func TestRunApp_MainSignal(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			exited := false
-			exitFn = func(format string, v ...any) {
-				exited = true
-			}
-			loads := 0
-			loadConfigFn = func(_ string) (*Config, error) {
-				loads++
-				if tc.loadErr != nil {
-					return nil, tc.loadErr
-				}
-				if loads > 1 && tc.reloadCfg != nil {
-					return tc.reloadCfg, nil
-				}
-				return &Config{Port: "4019", DatabaseURL: "sqlite://:memory:"}, nil
-			}
-			var gotStatus httpkit.ReloadStatus
-			canceled := false
-			runAppFn = func(ctx context.Context, cfgSrc *httpkit.Reloadable[Config]) error {
-				if tc.reloadCfg == nil {
-					return tc.runErr
-				}
-				gotStatus, _ = cfgSrc.Reload()
-				if !tc.wantCanceled {
-					canceled = ctx.Err() != nil
-					return tc.runErr
-				}
-				select {
-				case <-ctx.Done():
-					canceled = true
-				case <-time.After(5 * time.Second):
-				}
-				return tc.runErr
-			}
-
-			main()
-
-			if exited != tc.wantExit {
-				t.Errorf("main() exited = %v, want %v", exited, tc.wantExit)
-			}
-			if gotStatus != tc.wantStatus {
-				t.Errorf("reload status = %q, want %q", gotStatus, tc.wantStatus)
-			}
-			if canceled != tc.wantCanceled {
-				t.Errorf("run context canceled = %v, want %v", canceled, tc.wantCanceled)
-			}
+			runMainSignalCase(t, tc)
 		})
+	}
+}
+
+func runMainSignalCase(t *testing.T, tc runAppMainSignalTestCase) {
+	t.Helper()
+	exited := false
+	exitFn = func(format string, v ...any) {
+		exited = true
+	}
+	loads := 0
+	loadConfigFn = func(_ string) (*Config, error) {
+		loads++
+		if tc.loadErr != nil {
+			return nil, tc.loadErr
+		}
+		if loads > 1 && tc.reloadCfg != nil {
+			return tc.reloadCfg, nil
+		}
+		return &Config{Port: "4019", DatabaseURL: "sqlite://:memory:"}, nil
+	}
+	var gotStatus httpkit.ReloadStatus
+	canceled := false
+	runAppFn = func(ctx context.Context, cfgSrc *httpkit.Reloadable[Config]) error {
+		if tc.reloadCfg == nil {
+			return tc.runErr
+		}
+		gotStatus, _ = cfgSrc.Reload()
+		if !tc.wantCanceled {
+			canceled = ctx.Err() != nil
+			return tc.runErr
+		}
+		select {
+		case <-ctx.Done():
+			canceled = true
+		case <-time.After(5 * time.Second):
+		}
+		return tc.runErr
+	}
+
+	main()
+
+	if exited != tc.wantExit {
+		t.Errorf("main() exited = %v, want %v", exited, tc.wantExit)
+	}
+	if gotStatus != tc.wantStatus {
+		t.Errorf("reload status = %q, want %q", gotStatus, tc.wantStatus)
+	}
+	if canceled != tc.wantCanceled {
+		t.Errorf("run context canceled = %v, want %v", canceled, tc.wantCanceled)
 	}
 }
 

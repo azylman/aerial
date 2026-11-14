@@ -5,16 +5,18 @@ import (
 	"testing"
 )
 
+type dtmfTestCase struct {
+	name        string
+	sequence    string
+	wantLen     int
+	wantErr     bool
+	checkTone   bool
+	checkSilent bool
+}
+
 func TestSynthesizeDTMFMuLaw(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name        string
-		sequence    string
-		wantLen     int
-		wantErr     bool
-		checkTone   bool
-		checkSilent bool
-	}{
+	tests := []dtmfTestCase{
 		{
 			name:     "empty sequence",
 			sequence: "",
@@ -71,40 +73,7 @@ func TestSynthesizeDTMFMuLaw(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := SynthesizeDTMFMuLaw(tc.sequence)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("SynthesizeDTMFMuLaw(%q) error = %v, wantErr = %v", tc.sequence, err, tc.wantErr)
-			}
-			if tc.wantErr {
-				return
-			}
-			if len(got) != tc.wantLen {
-				t.Fatalf("SynthesizeDTMFMuLaw(%q) len = %d, want %d", tc.sequence, len(got), tc.wantLen)
-			}
-
-			if tc.checkTone && len(got) >= 1280 {
-				tonePCM := MuLawToPCM16(got[:1280])
-				rms := ComputeRMS(tonePCM)
-				if rms < 1000.0 {
-					t.Errorf("tone RMS = %f, expected non-silent dual-tone energy (>1000)", rms)
-				}
-			}
-
-			if tc.checkSilent {
-				if tc.sequence == "w" || tc.sequence == "W" {
-					for i, b := range got {
-						if b != 0xFF {
-							t.Fatalf("pause byte at %d = 0x%02X, want silence 0xFF", i, b)
-						}
-					}
-				} else if len(got) >= 1760 {
-					for i := 1280; i < 1760; i++ {
-						if got[i] != 0xFF {
-							t.Fatalf("inter-digit silence byte at %d = 0x%02X, want 0xFF", i, got[i])
-						}
-					}
-				}
-			}
+			runSynthesizeDTMFMuLawCase(t, tc)
 		})
 	}
 
@@ -119,4 +88,50 @@ func TestSynthesizeDTMFMuLaw(t *testing.T) {
 			t.Errorf("expected upper and lower DTMF synthesis to produce identical audio")
 		}
 	})
+}
+
+func runSynthesizeDTMFMuLawCase(t *testing.T, tc dtmfTestCase) {
+	t.Helper()
+	got, err := SynthesizeDTMFMuLaw(tc.sequence)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("SynthesizeDTMFMuLaw(%q) error = %v, wantErr = %v", tc.sequence, err, tc.wantErr)
+	}
+	if tc.wantErr {
+		return
+	}
+	if len(got) != tc.wantLen {
+		t.Fatalf("SynthesizeDTMFMuLaw(%q) len = %d, want %d", tc.sequence, len(got), tc.wantLen)
+	}
+
+	if tc.checkTone && len(got) >= 1280 {
+		tonePCM := MuLawToPCM16(got[:1280])
+		rms := ComputeRMS(tonePCM)
+		if rms < 1000.0 {
+			t.Errorf("tone RMS = %f, expected non-silent dual-tone energy (>1000)", rms)
+		}
+	}
+
+	if tc.checkSilent {
+		checkDTMFSilence(t, tc.sequence, got)
+	}
+}
+
+func checkDTMFSilence(t *testing.T, seq string, got []byte) {
+	t.Helper()
+	if seq == "w" || seq == "W" {
+		assertSilenceBytes(t, got, 0, len(got), "pause byte")
+		return
+	}
+	if len(got) >= 1760 {
+		assertSilenceBytes(t, got, 1280, 1760, "inter-digit silence byte")
+	}
+}
+
+func assertSilenceBytes(t *testing.T, got []byte, start, end int, desc string) {
+	t.Helper()
+	for i := start; i < end; i++ {
+		if got[i] != 0xFF {
+			t.Fatalf("%s at %d = 0x%02X, want 0xFF", desc, i, got[i])
+		}
+	}
 }

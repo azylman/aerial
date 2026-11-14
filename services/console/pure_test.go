@@ -10,7 +10,10 @@ import (
 	"unicode/utf8"
 )
 
-var testRefTime = time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+var (
+	testRefTime    = time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	testCommitTime = testRefTime.Add(-10 * time.Minute)
+)
 
 func mkRuns(runs ...GitHubRun) []GitHubRun {
 	return runs
@@ -113,16 +116,7 @@ func mkRecon(active bool, state, sha, errMsg string, targets []string, startOff 
 }
 
 func TestBuildFactsUpstreamURL_TableDriven(t *testing.T) {
-	tests := []struct {
-		name       string
-		baseURL    string
-		query      url.Values
-		wantLimit  int
-		wantOffset int
-		wantErr    bool
-		wantQuery  map[string]string
-		omitQuery  []string
-	}{
+	tests := []upstreamURLTestCase{
 		{name: "empty base URL errors", baseURL: "", query: url.Values{}, wantErr: true},
 		{name: "control characters in base URL error", baseURL: "http://brain:\x7f8080", query: url.Values{}, wantErr: true},
 		{name: "invalid url parse input error", baseURL: "http://[::1]:namedport", query: url.Values{}, wantErr: true},
@@ -139,45 +133,61 @@ func TestBuildFactsUpstreamURL_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotURL, gotLimit, gotOffset, err := BuildFactsUpstreamURL(tt.baseURL, tt.query)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("BuildFactsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-			if gotLimit != tt.wantLimit {
-				t.Errorf("BuildFactsUpstreamURL() gotLimit = %v, want %v", gotLimit, tt.wantLimit)
-			}
-			if gotOffset != tt.wantOffset {
-				t.Errorf("BuildFactsUpstreamURL() gotOffset = %v, want %v", gotOffset, tt.wantOffset)
-			}
-
-			parsed, err := url.Parse(gotURL)
-			if err != nil {
-				t.Fatalf("failed to parse returned URL: %v", err)
-			}
-			if strings.Contains(parsed.Path, "//") {
-				t.Errorf("expected normalized path without double slashes, got %q", parsed.Path)
-			}
-
-			q := parsed.Query()
-			for k, v := range tt.wantQuery {
-				if got := q.Get(k); got != v {
-					t.Errorf("query param %q = %q, want %q", k, got, v)
-				}
-				if k == "q" {
-					if runeLen := utf8.RuneCountInString(q.Get(k)); runeLen > 64 {
-						t.Errorf("query param q has rune length %d, want <= 64", runeLen)
-					}
-				}
-			}
-			for _, k := range tt.omitQuery {
-				if q.Has(k) {
-					t.Errorf("expected query param %q to be omitted, got %q", k, q.Get(k))
-				}
-			}
+			runBuildFactsUpstreamURLCase(t, tt)
 		})
+	}
+}
+
+type upstreamURLTestCase struct {
+	name       string
+	baseURL    string
+	query      url.Values
+	wantLimit  int
+	wantOffset int
+	wantErr    bool
+	wantQuery  map[string]string
+	omitQuery  []string
+}
+
+func runBuildFactsUpstreamURLCase(t *testing.T, tt upstreamURLTestCase) {
+	t.Helper()
+	gotURL, gotLimit, gotOffset, err := BuildFactsUpstreamURL(tt.baseURL, tt.query)
+	if (err != nil) != tt.wantErr {
+		t.Fatalf("BuildFactsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
+	}
+	if tt.wantErr {
+		return
+	}
+	if gotLimit != tt.wantLimit {
+		t.Errorf("BuildFactsUpstreamURL() gotLimit = %v, want %v", gotLimit, tt.wantLimit)
+	}
+	if gotOffset != tt.wantOffset {
+		t.Errorf("BuildFactsUpstreamURL() gotOffset = %v, want %v", gotOffset, tt.wantOffset)
+	}
+
+	parsed, err := url.Parse(gotURL)
+	if err != nil {
+		t.Fatalf("failed to parse returned URL: %v", err)
+	}
+	if strings.Contains(parsed.Path, "//") {
+		t.Errorf("expected normalized path without double slashes, got %q", parsed.Path)
+	}
+
+	q := parsed.Query()
+	for k, v := range tt.wantQuery {
+		if got := q.Get(k); got != v {
+			t.Errorf("query param %q = %q, want %q", k, got, v)
+		}
+		if k == "q" {
+			if runeLen := utf8.RuneCountInString(q.Get(k)); runeLen > 64 {
+				t.Errorf("query param q has rune length %d, want <= 64", runeLen)
+			}
+		}
+	}
+	for _, k := range tt.omitQuery {
+		if q.Has(k) {
+			t.Errorf("expected query param %q to be omitted, got %q", k, q.Get(k))
+		}
 	}
 }
 
@@ -209,15 +219,7 @@ func TestBuildSchedulesUpstreamURL_TableDriven(t *testing.T) {
 }
 
 func TestBuildScheduleRunsUpstreamURL_TableDriven(t *testing.T) {
-	tests := []struct {
-		name       string
-		baseURL    string
-		query      url.Values
-		wantLimit  int
-		wantOffset int
-		wantErr    bool
-		wantQuery  map[string]string
-	}{
+	tests := []upstreamURLTestCase{
 		{name: "empty base URL returns error", baseURL: "", wantErr: true},
 		{name: "control characters in URL return error", baseURL: "http://brain:\x7f8080", wantErr: true},
 		{name: "invalid url parse input error", baseURL: "http://[::1]:namedport", wantErr: true},
@@ -230,47 +232,45 @@ func TestBuildScheduleRunsUpstreamURL_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotURL, gotLimit, gotOffset, err := BuildScheduleRunsUpstreamURL(tt.baseURL, tt.query)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("BuildScheduleRunsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-			if gotLimit != tt.wantLimit {
-				t.Errorf("gotLimit = %d, want %d", gotLimit, tt.wantLimit)
-			}
-			if gotOffset != tt.wantOffset {
-				t.Errorf("gotOffset = %d, want %d", gotOffset, tt.wantOffset)
-			}
-
-			parsed, err := url.Parse(gotURL)
-			if err != nil {
-				t.Fatalf("failed to parse returned URL: %v", err)
-			}
-			if strings.Contains(parsed.Path, "//") {
-				t.Errorf("path contains double slashes: %q", parsed.Path)
-			}
-
-			q := parsed.Query()
-			for k, v := range tt.wantQuery {
-				if got := q.Get(k); got != v {
-					t.Errorf("query param %q = %q, want %q", k, got, v)
-				}
-			}
+			runBuildScheduleRunsCase(t, tt)
 		})
 	}
 }
 
+func runBuildScheduleRunsCase(t *testing.T, tt upstreamURLTestCase) {
+	t.Helper()
+	gotURL, gotLimit, gotOffset, err := BuildScheduleRunsUpstreamURL(tt.baseURL, tt.query)
+	if (err != nil) != tt.wantErr {
+		t.Fatalf("BuildScheduleRunsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
+	}
+	if tt.wantErr {
+		return
+	}
+	if gotLimit != tt.wantLimit {
+		t.Errorf("gotLimit = %d, want %d", gotLimit, tt.wantLimit)
+	}
+	if gotOffset != tt.wantOffset {
+		t.Errorf("gotOffset = %d, want %d", gotOffset, tt.wantOffset)
+	}
+
+	parsed, err := url.Parse(gotURL)
+	if err != nil {
+		t.Fatalf("failed to parse returned URL: %v", err)
+	}
+	if strings.Contains(parsed.Path, "//") {
+		t.Errorf("path contains double slashes: %q", parsed.Path)
+	}
+
+	q := parsed.Query()
+	for k, v := range tt.wantQuery {
+		if got := q.Get(k); got != v {
+			t.Errorf("query param %q = %q, want %q", k, got, v)
+		}
+	}
+}
+
 func TestBuildVanadisBuildsUpstreamURL_TableDriven(t *testing.T) {
-	tests := []struct {
-		name      string
-		baseURL   string
-		query     url.Values
-		wantLimit int
-		wantErr   bool
-		wantQuery map[string]string
-	}{
+	tests := []upstreamURLTestCase{
 		{name: "empty base URL returns error", baseURL: "", wantErr: true},
 		{name: "control characters in URL return error", baseURL: "http://vanadis:\x7f8080", wantErr: true},
 		{name: "defaults applied when query is empty", baseURL: "http://vanadis.aerial/", query: url.Values{}, wantLimit: 50, wantQuery: map[string]string{"limit": "50"}},
@@ -284,32 +284,37 @@ func TestBuildVanadisBuildsUpstreamURL_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotURL, gotLimit, err := BuildVanadisBuildsUpstreamURL(tt.baseURL, tt.query)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("BuildVanadisBuildsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-			if gotLimit != tt.wantLimit {
-				t.Errorf("gotLimit = %d, want %d", gotLimit, tt.wantLimit)
-			}
-
-			parsed, err := url.Parse(gotURL)
-			if err != nil {
-				t.Fatalf("failed to parse returned URL: %v", err)
-			}
-			if !strings.HasSuffix(parsed.Path, "/builds") {
-				t.Errorf("path does not end with /builds: %q", parsed.Path)
-			}
-
-			q := parsed.Query()
-			for k, v := range tt.wantQuery {
-				if got := q.Get(k); got != v {
-					t.Errorf("query param %q = %q, want %q", k, got, v)
-				}
-			}
+			runBuildVanadisBuildsCase(t, tt)
 		})
+	}
+}
+
+func runBuildVanadisBuildsCase(t *testing.T, tt upstreamURLTestCase) {
+	t.Helper()
+	gotURL, gotLimit, err := BuildVanadisBuildsUpstreamURL(tt.baseURL, tt.query)
+	if (err != nil) != tt.wantErr {
+		t.Fatalf("BuildVanadisBuildsUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
+	}
+	if tt.wantErr {
+		return
+	}
+	if gotLimit != tt.wantLimit {
+		t.Errorf("gotLimit = %d, want %d", gotLimit, tt.wantLimit)
+	}
+
+	parsed, err := url.Parse(gotURL)
+	if err != nil {
+		t.Fatalf("failed to parse returned URL: %v", err)
+	}
+	if !strings.HasSuffix(parsed.Path, "/builds") {
+		t.Errorf("path does not end with /builds: %q", parsed.Path)
+	}
+
+	q := parsed.Query()
+	for k, v := range tt.wantQuery {
+		if got := q.Get(k); got != v {
+			t.Errorf("query param %q = %q, want %q", k, got, v)
+		}
 	}
 }
 
@@ -795,6 +800,14 @@ func TestCalculateDeployStatus_TableDriven(t *testing.T) {
 	}
 }
 
+type buildTargetContainerChipsTestCase struct {
+	name             string
+	targets          []string
+	startedAt        time.Time
+	customContainers []DockerContainerJSON
+	wantChips        []MatrixJobChip
+}
+
 func TestBuildTargetContainerChips_TableDriven(t *testing.T) {
 	now := testRefTime
 	startedAt := now.Add(-60 * time.Second)
@@ -806,13 +819,7 @@ func TestBuildTargetContainerChips_TableDriven(t *testing.T) {
 		mkCont("aerial-docs", "docs", "", "exited", "", -5*time.Second),
 	}
 
-	tests := []struct {
-		name             string
-		targets          []string
-		startedAt        time.Time
-		customContainers []DockerContainerJSON
-		wantChips        []MatrixJobChip
-	}{
+	tests := []buildTargetContainerChipsTestCase{
 		{name: "nil targets falls back to all containers", targets: nil, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard"}, {Name: "brain"}, {Name: "proxy"}, {Name: "docs"}}},
 		{name: "empty targets falls back to all containers", targets: []string{}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard"}, {Name: "brain"}, {Name: "proxy"}, {Name: "docs"}}},
 		{name: "scoped to single recently created target", targets: []string{"dashboard"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard", Status: "completed", Conclusion: "success", Duration: "30s"}}},
@@ -830,44 +837,78 @@ func TestBuildTargetContainerChips_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			containers := rawContainers
-			if tt.customContainers != nil {
-				containers = tt.customContainers
-			}
-			refTime := now
-			if tt.name == "zero reference time defaults now to time.Now().UTC()" {
-				refTime = time.Time{}
-			}
-			got := BuildTargetContainerChips(containers, tt.targets, tt.startedAt, refTime)
-			if len(got) != len(tt.wantChips) {
-				t.Fatalf("BuildTargetContainerChips() returned %d chips, want %d", len(got), len(tt.wantChips))
-			}
-			for i, want := range tt.wantChips {
-				if want.Name != "" && got[i].Name != want.Name {
-					t.Errorf("chip[%d] name = %q, want %q", i, got[i].Name, want.Name)
-				}
-				if want.Status != "" && got[i].Status != want.Status {
-					t.Errorf("chip[%d] status = %q, want %q", i, got[i].Status, want.Status)
-				}
-				if want.Conclusion != "" && got[i].Conclusion != want.Conclusion {
-					t.Errorf("chip[%d] conclusion = %q, want %q", i, got[i].Conclusion, want.Conclusion)
-				}
-				if want.Duration == "*" {
-					if got[i].Duration == "" {
-						t.Errorf("chip[%d] expected non-empty duration", i)
-					}
-				} else if want.Duration != "" && got[i].Duration != want.Duration {
-					t.Errorf("chip[%d] duration = %q, want %q", i, got[i].Duration, want.Duration)
-				}
-			}
+			runBuildTargetContainerChipsCase(t, tt, rawContainers, now, startedAt)
 		})
 	}
 }
 
+func runBuildTargetContainerChipsCase(t *testing.T, tt buildTargetContainerChipsTestCase, rawContainers []DockerContainerJSON, now, startedAt time.Time) {
+	t.Helper()
+	containers := rawContainers
+	if tt.customContainers != nil {
+		containers = tt.customContainers
+	}
+	refTime := now
+	if tt.name == "zero reference time defaults now to time.Now().UTC()" {
+		refTime = time.Time{}
+	}
+	got := BuildTargetContainerChips(containers, tt.targets, tt.startedAt, refTime)
+	if len(got) != len(tt.wantChips) {
+		t.Fatalf("BuildTargetContainerChips() returned %d chips, want %d", len(got), len(tt.wantChips))
+	}
+	for i, want := range tt.wantChips {
+		if want.Name != "" && got[i].Name != want.Name {
+			t.Errorf("chip[%d] name = %q, want %q", i, got[i].Name, want.Name)
+		}
+		if want.Status != "" && got[i].Status != want.Status {
+			t.Errorf("chip[%d] status = %q, want %q", i, got[i].Status, want.Status)
+		}
+		if want.Conclusion != "" && got[i].Conclusion != want.Conclusion {
+			t.Errorf("chip[%d] conclusion = %q, want %q", i, got[i].Conclusion, want.Conclusion)
+		}
+		if want.Duration == "*" {
+			if got[i].Duration == "" {
+				t.Errorf("chip[%d] expected non-empty duration", i)
+			}
+		} else if want.Duration != "" && got[i].Duration != want.Duration {
+			t.Errorf("chip[%d] duration = %q, want %q", i, got[i].Duration, want.Duration)
+		}
+	}
+}
+
+type wantDep struct {
+	ID               string
+	Service          string
+	Repository       string
+	Commit           string
+	CommitMsgSubstr  string
+	Stage            string
+	Progress         int
+	HTMLURL          string
+	StepStatuses     []string
+	StepStatusMap    map[int]string
+	MatrixJobCount   int
+	HasContainerChip bool
+	HasCIChip        bool
+	CheckCommitTime  *time.Time
+}
+
 func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 	t.Parallel()
-	commitTime := testRefTime.Add(-10 * time.Minute)
+	tests := make([]mergeClusterTestCase, 0, 55)
+	tests = append(tests, mergeClusterBatch1Cases()...)
+	tests = append(tests, mergeClusterBatch2Cases()...)
+	tests = append(tests, mergeClusterBatch3Cases()...)
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			runMergeClusterDeploymentsCase(t, tt, testRefTime)
+		})
+	}
+}
+
+func mergeClusterBatch1Cases() []mergeClusterTestCase {
 	var cardinalityRuns []GitHubRun
 	for i := 1; i <= 8; i++ {
 		cardinalityRuns = append(cardinalityRuns, mkRun(int64(600+i), "", fmt.Sprintf("%07d000000000000000000000000000000000", i), "in_progress", "", "", time.Duration(-i)*time.Minute, time.Duration(-i)*time.Minute))
@@ -885,36 +926,7 @@ func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 		mkCont("brain", "brain", "6666666666666666666666666666666666666666", "running", "", -300*time.Second),
 	}
 
-	type wantDep struct {
-		ID               string
-		Service          string
-		Repository       string
-		Commit           string
-		CommitMsgSubstr  string
-		Stage            string
-		Progress         int
-		HTMLURL          string
-		StepStatuses     []string
-		StepStatusMap    map[int]string
-		MatrixJobCount   int
-		HasContainerChip bool
-		HasCIChip        bool
-		CheckCommitTime  *time.Time
-	}
-
-	tests := []struct {
-		name          string
-		runs          []GitHubRun
-		jobs          map[int64][]GitHubJob
-		gitSync       GitSyncStatusResponse
-		containers    []DockerContainerJSON
-		currentCommit string
-		refTime       time.Time
-		useZeroTime   bool
-		wantCount     int
-		wantList      []wantDep
-		wantRepeats   int
-	}{
+	return []mergeClusterTestCase{
 		// 1. Concurrent Pipelines
 		{name: "ConcurrentPipelines", runs: mkRuns(mkRun(201, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "in_progress", "", "feat: build feature B", -5*time.Minute, -1*time.Minute)), jobs: map[int64][]GitHubJob{201: {mkJob(1, 201, "build (dashboard)", "in_progress", "", -4*time.Minute, 0)}}, gitSync: mkRecon(true, "swapping", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", []string{"proxy"}, -2*time.Minute), currentCommit: "aaaaaaaa", wantList: []wantDep{{Stage: "swapping", Commit: "aaaaaaa"}, {Stage: "building", Commit: "bbbbbbb"}}},
 
@@ -974,7 +986,11 @@ func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 
 		// 20. HangarSyncTimeout
 		{name: "HangarSyncTimeout", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, runs: mkRuns(mkRun(484, "", "timeout1234", "completed", "success", "", -10*time.Minute, -150*time.Second)), jobs: map[int64][]GitHubJob{484: {mkJob(0, 484, "Build & Push Images to GHCR (brain)", "completed", "success", 0, 0)}}, currentCommit: "old1234", wantList: []wantDep{{Stage: "failed", CommitMsgSubstr: "Hangar reconciliation timed out (>120s)", StepStatusMap: map[int]string{2: "failed"}}}},
+	}
+}
 
+func mergeClusterBatch2Cases() []mergeClusterTestCase {
+	return []mergeClusterTestCase{
 		// 21. NoContainerBuilds_ImmediateLive
 		{name: "NoContainerBuilds_ImmediateLive", runs: mkRuns(mkRun(485, "", "purecode1234", "completed", "success", "", -10*time.Minute, -150*time.Second)), jobs: map[int64][]GitHubJob{485: {mkJob(0, 485, "Run Service Unit Tests", "completed", "success", 0, 0), mkJob(0, 485, "Lint Microservices & Frontend", "completed", "success", 0, 0), mkJob(0, 485, "Build & Push Images to GHCR (brain)", "completed", "skipped", 0, 0)}}, containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -1*time.Hour)}, currentCommit: "old1234", wantList: []wantDep{{Stage: "live", Progress: 100, StepStatusMap: map[int]string{2: "completed"}}}},
 
@@ -997,16 +1013,16 @@ func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 		{name: "AdversarialClockSkewFutureTimestamp", runs: mkRuns(mkRun(999, "", "future1234", "completed", "success", "", 10*time.Second, 15*time.Second)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", 2*time.Hour)}, currentCommit: "old1234", wantList: []wantDep{{Stage: "awaiting_pull"}}},
 
 		// 28. CommitTimeAcrossAllStages_Queued
-		{name: "CommitTimeAcrossAllStages_Queued", runs: mkRuns(mkRun(501, "", "1111aaa", "queued", "", "feat: queued", -2*time.Minute, 0)), currentCommit: "1111aaa", wantList: []wantDep{{CheckCommitTime: &commitTime}}},
+		{name: "CommitTimeAcrossAllStages_Queued", runs: mkRuns(mkRun(501, "", "1111aaa", "queued", "", "feat: queued", -2*time.Minute, 0)), currentCommit: "1111aaa", wantList: []wantDep{{CheckCommitTime: &testCommitTime}}},
 
 		// 29. CommitTimeAcrossAllStages_Building
-		{name: "CommitTimeAcrossAllStages_Building", runs: mkRuns(mkRun(502, "", "2222bbb", "in_progress", "", "feat: building", -1*time.Minute, 0)), currentCommit: "2222bbb", wantList: []wantDep{{CheckCommitTime: &commitTime}}},
+		{name: "CommitTimeAcrossAllStages_Building", runs: mkRuns(mkRun(502, "", "2222bbb", "in_progress", "", "feat: building", -1*time.Minute, 0)), currentCommit: "2222bbb", wantList: []wantDep{{CheckCommitTime: &testCommitTime}}},
 
 		// 30. CommitTimeAcrossAllStages_Failed
-		{name: "CommitTimeAcrossAllStages_Failed", runs: mkRuns(mkRun(503, "", "3333ccc", "completed", "failure", "feat: failed", -5*time.Minute, -4*time.Minute)), currentCommit: "3333ccc", wantList: []wantDep{{CheckCommitTime: &commitTime}}},
+		{name: "CommitTimeAcrossAllStages_Failed", runs: mkRuns(mkRun(503, "", "3333ccc", "completed", "failure", "feat: failed", -5*time.Minute, -4*time.Minute)), currentCommit: "3333ccc", wantList: []wantDep{{CheckCommitTime: &testCommitTime}}},
 
 		// 31. CommitTimeAcrossAllStages_Swapping
-		{name: "CommitTimeAcrossAllStages_Swapping", runs: mkRuns(mkRun(504, "", "4444ddd", "completed", "success", "feat: success", -2*time.Minute, -1*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "starting", -30*time.Second)}, currentCommit: "4444ddd", wantList: []wantDep{{CheckCommitTime: &commitTime}}},
+		{name: "CommitTimeAcrossAllStages_Swapping", runs: mkRuns(mkRun(504, "", "4444ddd", "completed", "success", "feat: success", -2*time.Minute, -1*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "starting", -30*time.Second)}, currentCommit: "4444ddd", wantList: []wantDep{{CheckCommitTime: &testCommitTime}}},
 
 		// 32. EmptyAndFuture_Empty
 		{name: "EmptyAndFuture_Empty", currentCommit: "commit123", wantCount: 0},
@@ -1028,7 +1044,11 @@ func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 
 		// 38. MultiRepoActiveFanout
 		{name: "MultiRepoActiveFanout", runs: mkRuns(mkRun(101, "azylman/aerial", "1111aaa", "in_progress", "", "", -2*time.Minute, 0), mkRun(201, "azylman/aerial-sidecars", "2222bbb", "in_progress", "", "", -1*time.Minute, 0)), currentCommit: "0000000", wantList: []wantDep{{Repository: "azylman/aerial-sidecars", Service: "aerial-sidecars", Stage: "building"}, {Repository: "azylman/aerial", Service: "aerial-stack", Stage: "building"}}},
+	}
+}
 
+func mergeClusterBatch3Cases() []mergeClusterTestCase {
+	return []mergeClusterTestCase{
 		// 39. NonContainerRepoNoTimeout
 		{name: "NonContainerRepoNoTimeout", runs: mkRuns(mkRun(301, "azylman/aerial-config", "3333ccc", "completed", "success", "", -5*time.Minute, -150*time.Second)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, currentCommit: "oldcorecommit", wantList: []wantDep{{Service: "aerial-config", Stage: "awaiting_pull"}}},
 
@@ -1080,119 +1100,150 @@ func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 		// 55. SortTieBreaker_FailedPrecedesDegraded_BothPositions
 		{name: "SortTieBreaker_FailedPrecedesDegraded_BothPositions", runs: mkRuns(mkRun(901, "", "1111111111111111111111111111111111111111", "completed", "failure", "", -5*time.Minute, -5*time.Minute), mkRun(902, "", "2222222222222222222222222222222222222222", "completed", "success", "", -5*time.Minute, -5*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "", "2222222222222222222222222222222222222222", "exited", "", -5*time.Minute)}, wantList: []wantDep{{Stage: "failed", Commit: "1111111"}, {Stage: "degraded", Commit: "2222222"}}},
 	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			ref := tt.refTime
-			if ref.IsZero() && !tt.useZeroTime {
-				ref = testRefTime
-			}
-			deps := MergeClusterDeploymentsWithHangar(tt.runs, tt.jobs, tt.gitSync, tt.containers, tt.currentCommit, ref)
+type mergeClusterTestCase struct {
+	name          string
+	runs          []GitHubRun
+	jobs          map[int64][]GitHubJob
+	gitSync       GitSyncStatusResponse
+	containers    []DockerContainerJSON
+	currentCommit string
+	refTime       time.Time
+	useZeroTime   bool
+	wantCount     int
+	wantList      []wantDep
+	wantRepeats   int
+}
 
-			expectedCount := tt.wantCount
-			if expectedCount == 0 && len(tt.wantList) > 0 {
-				expectedCount = len(tt.wantList)
-			}
-			if len(deps) != expectedCount {
-				t.Fatalf("expected %d deployments, got %d: %+v", expectedCount, len(deps), deps)
-			}
-			for i, want := range tt.wantList {
-				if i >= len(deps) {
-					break
-				}
-				got := deps[i]
-				if want.ID != "" && got.ID != want.ID {
-					t.Errorf("dep[%d].ID = %q, want %q", i, got.ID, want.ID)
-				}
-				if want.Service != "" && got.Service != want.Service {
-					t.Errorf("dep[%d].Service = %q, want %q", i, got.Service, want.Service)
-				}
-				if want.Repository != "" && got.Repository != want.Repository {
-					t.Errorf("dep[%d].Repository = %q, want %q", i, got.Repository, want.Repository)
-				}
-				if want.Commit != "" && got.Commit != want.Commit {
-					t.Errorf("dep[%d].Commit = %q, want %q", i, got.Commit, want.Commit)
-				}
-				if want.Stage != "" && got.Stage != want.Stage {
-					t.Errorf("dep[%d].Stage = %q, want %q", i, got.Stage, want.Stage)
-				}
-				if want.Progress != 0 && got.Progress != want.Progress {
-					t.Errorf("dep[%d].Progress = %d, want %d", i, got.Progress, want.Progress)
-				}
-				if want.CommitMsgSubstr != "" && !strings.Contains(got.CommitMsg, want.CommitMsgSubstr) {
-					t.Errorf("dep[%d].CommitMsg = %q, want containing %q", i, got.CommitMsg, want.CommitMsgSubstr)
-				}
-				if want.HTMLURL != "" && got.HTMLURL != want.HTMLURL {
-					t.Errorf("dep[%d].HTMLURL = %q, want %q", i, got.HTMLURL, want.HTMLURL)
-				}
-				if len(want.StepStatuses) > 0 {
-					if len(got.Steps) != len(want.StepStatuses) {
-						t.Errorf("dep[%d].Steps len = %d, want %d", i, len(got.Steps), len(want.StepStatuses))
-					} else {
-						for sIdx, expStatus := range want.StepStatuses {
-							if got.Steps[sIdx].Status != expStatus {
-								t.Errorf("dep[%d].Steps[%d].Status = %q, want %q", i, sIdx, got.Steps[sIdx].Status, expStatus)
-							}
-						}
-					}
-				}
-				for sIdx, expStatus := range want.StepStatusMap {
-					if sIdx < len(got.Steps) {
-						if got.Steps[sIdx].Status != expStatus {
-							t.Errorf("dep[%d].Steps[%d].Status = %q, want %q", i, sIdx, got.Steps[sIdx].Status, expStatus)
-						}
-					} else {
-						t.Errorf("dep[%d].Steps has len %d, cannot check index %d", i, len(got.Steps), sIdx)
-					}
-				}
-				if want.MatrixJobCount > 0 && len(got.MatrixJobs) != want.MatrixJobCount {
-					t.Errorf("dep[%d].MatrixJobs count = %d, want %d", i, len(got.MatrixJobs), want.MatrixJobCount)
-				}
-				if want.HasContainerChip {
-					found := false
-					for _, c := range got.MatrixJobs {
-						if c.Type == "container" {
-							found = true
-							break
-						}
-					}
-					if !found {
-						t.Errorf("dep[%d] expected container chip, got %+v", i, got.MatrixJobs)
-					}
-				}
-				if want.HasCIChip {
-					found := false
-					for _, c := range got.MatrixJobs {
-						if c.Type == "ci" {
-							found = true
-							break
-						}
-					}
-					if !found {
-						t.Errorf("dep[%d] expected CI chip, got %+v", i, got.MatrixJobs)
-					}
-				}
-				if want.CheckCommitTime != nil {
-					if got.CommitTime == nil || !got.CommitTime.Equal(*want.CheckCommitTime) {
-						t.Errorf("dep[%d].CommitTime = %v, want %v", i, got.CommitTime, *want.CheckCommitTime)
-					}
+func runMergeClusterDeploymentsCase(t *testing.T, tt mergeClusterTestCase, defaultRefTime time.Time) {
+	t.Helper()
+	ref := tt.refTime
+	if ref.IsZero() && !tt.useZeroTime {
+		ref = defaultRefTime
+	}
+	deps := MergeClusterDeploymentsWithHangar(tt.runs, tt.jobs, tt.gitSync, tt.containers, tt.currentCommit, ref)
+
+	expectedCount := tt.wantCount
+	if expectedCount == 0 && len(tt.wantList) > 0 {
+		expectedCount = len(tt.wantList)
+	}
+	if len(deps) != expectedCount {
+		t.Fatalf("expected %d deployments, got %d: %+v", expectedCount, len(deps), deps)
+	}
+	for i, want := range tt.wantList {
+		if i >= len(deps) {
+			break
+		}
+		assertMergeClusterDeploymentItem(t, i, deps[i], want)
+	}
+	if tt.wantRepeats > 0 {
+		assertMergeClusterDeploymentRepeats(t, tt, ref)
+	}
+}
+
+func assertMergeClusterDeploymentItem(t *testing.T, i int, got DeploymentStatus, want wantDep) {
+	t.Helper()
+	if want.ID != "" && got.ID != want.ID {
+		t.Errorf("dep[%d].ID = %q, want %q", i, got.ID, want.ID)
+	}
+	if want.Service != "" && got.Service != want.Service {
+		t.Errorf("dep[%d].Service = %q, want %q", i, got.Service, want.Service)
+	}
+	if want.Repository != "" && got.Repository != want.Repository {
+		t.Errorf("dep[%d].Repository = %q, want %q", i, got.Repository, want.Repository)
+	}
+	if want.Commit != "" && got.Commit != want.Commit {
+		t.Errorf("dep[%d].Commit = %q, want %q", i, got.Commit, want.Commit)
+	}
+	if want.Stage != "" && got.Stage != want.Stage {
+		t.Errorf("dep[%d].Stage = %q, want %q", i, got.Stage, want.Stage)
+	}
+	if want.Progress != 0 && got.Progress != want.Progress {
+		t.Errorf("dep[%d].Progress = %d, want %d", i, got.Progress, want.Progress)
+	}
+	if want.CommitMsgSubstr != "" && !strings.Contains(got.CommitMsg, want.CommitMsgSubstr) {
+		t.Errorf("dep[%d].CommitMsg = %q, want containing %q", i, got.CommitMsg, want.CommitMsgSubstr)
+	}
+	if want.HTMLURL != "" && got.HTMLURL != want.HTMLURL {
+		t.Errorf("dep[%d].HTMLURL = %q, want %q", i, got.HTMLURL, want.HTMLURL)
+	}
+	assertMergeClusterDeploymentSteps(t, i, got, want)
+	assertMergeClusterDeploymentChips(t, i, got, want)
+	if want.CheckCommitTime != nil {
+		if got.CommitTime == nil || !got.CommitTime.Equal(*want.CheckCommitTime) {
+			t.Errorf("dep[%d].CommitTime = %v, want %v", i, got.CommitTime, *want.CheckCommitTime)
+		}
+	}
+}
+
+func assertMergeClusterDeploymentSteps(t *testing.T, i int, got DeploymentStatus, want wantDep) {
+	t.Helper()
+	if len(want.StepStatuses) > 0 {
+		if len(got.Steps) != len(want.StepStatuses) {
+			t.Errorf("dep[%d].Steps len = %d, want %d", i, len(got.Steps), len(want.StepStatuses))
+		} else {
+			for sIdx, expStatus := range want.StepStatuses {
+				if got.Steps[sIdx].Status != expStatus {
+					t.Errorf("dep[%d].Steps[%d].Status = %q, want %q", i, sIdx, got.Steps[sIdx].Status, expStatus)
 				}
 			}
-			if tt.wantRepeats > 0 {
-				for iter := range tt.wantRepeats {
-					iterDeps := MergeClusterDeploymentsWithHangar(tt.runs, tt.jobs, tt.gitSync, tt.containers, tt.currentCommit, ref)
-					if len(iterDeps) != len(tt.wantList) {
-						t.Fatalf("iteration %d: expected %d deployments, got %d", iter, len(tt.wantList), len(iterDeps))
-					}
-					for idx, want := range tt.wantList {
-						if iterDeps[idx].Stage != want.Stage {
-							t.Fatalf("iteration %d at index %d: expected stage %q, got %q", iter, idx, want.Stage, iterDeps[idx].Stage)
-						}
-					}
-				}
+		}
+	}
+	for sIdx, expStatus := range want.StepStatusMap {
+		if sIdx < len(got.Steps) {
+			if got.Steps[sIdx].Status != expStatus {
+				t.Errorf("dep[%d].Steps[%d].Status = %q, want %q", i, sIdx, got.Steps[sIdx].Status, expStatus)
 			}
-		})
+		} else {
+			t.Errorf("dep[%d].Steps has len %d, cannot check index %d", i, len(got.Steps), sIdx)
+		}
+	}
+}
+
+func assertMergeClusterDeploymentChips(t *testing.T, i int, got DeploymentStatus, want wantDep) {
+	t.Helper()
+	if want.MatrixJobCount > 0 && len(got.MatrixJobs) != want.MatrixJobCount {
+		t.Errorf("dep[%d].MatrixJobs count = %d, want %d", i, len(got.MatrixJobs), want.MatrixJobCount)
+	}
+	if want.HasContainerChip {
+		found := false
+		for _, c := range got.MatrixJobs {
+			if c.Type == "container" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("dep[%d] expected container chip, got %+v", i, got.MatrixJobs)
+		}
+	}
+	if want.HasCIChip {
+		found := false
+		for _, c := range got.MatrixJobs {
+			if c.Type == "ci" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("dep[%d] expected CI chip, got %+v", i, got.MatrixJobs)
+		}
+	}
+}
+
+func assertMergeClusterDeploymentRepeats(t *testing.T, tt mergeClusterTestCase, ref time.Time) {
+	t.Helper()
+	for iter := range tt.wantRepeats {
+		iterDeps := MergeClusterDeploymentsWithHangar(tt.runs, tt.jobs, tt.gitSync, tt.containers, tt.currentCommit, ref)
+		if len(iterDeps) != len(tt.wantList) {
+			t.Fatalf("iteration %d: expected %d deployments, got %d", iter, len(tt.wantList), len(iterDeps))
+		}
+		for idx, want := range tt.wantList {
+			if iterDeps[idx].Stage != want.Stage {
+				t.Fatalf("iteration %d at index %d: expected stage %q, got %q", iter, idx, want.Stage, iterDeps[idx].Stage)
+			}
+		}
 	}
 }
 
@@ -1328,16 +1379,18 @@ func TestBuildDocketTasksUpstreamURL_TableDriven(t *testing.T) {
 	}
 }
 
+type docketSearchTestCase struct {
+	name           string
+	baseURL        string
+	query          url.Values
+	wantURL        string
+	wantErr        bool
+	wantBadRequest bool
+}
+
 func TestBuildDocketSearchUpstreamURL_TableDriven(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name           string
-		baseURL        string
-		query          url.Values
-		wantURL        string
-		wantErr        bool
-		wantBadRequest bool
-	}{
+	tests := []docketSearchTestCase{
 		{name: "empty base URL", baseURL: "", query: url.Values{"q": {"x"}}, wantErr: true},
 		{name: "missing q is a bad request", baseURL: "http://docket.local", query: url.Values{}, wantErr: true, wantBadRequest: true},
 		{name: "whitespace q is a bad request", baseURL: "http://docket.local", query: url.Values{"q": {"   "}}, wantErr: true, wantBadRequest: true},
@@ -1349,31 +1402,38 @@ func TestBuildDocketSearchUpstreamURL_TableDriven(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := BuildDocketSearchUpstreamURL(tc.baseURL, tc.query)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if errors.Is(err, errInvalidDocketRequest) != tc.wantBadRequest {
-				t.Errorf("bad-request classification = %v, want %v (err %v)", !tc.wantBadRequest, tc.wantBadRequest, err)
-			}
-			if got != tc.wantURL {
-				t.Errorf("url = %q, want %q", got, tc.wantURL)
-			}
+			runDocketSearchCase(t, tc)
 		})
 	}
 }
 
+func runDocketSearchCase(t *testing.T, tc docketSearchTestCase) {
+	t.Helper()
+	got, err := BuildDocketSearchUpstreamURL(tc.baseURL, tc.query)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+	}
+	if errors.Is(err, errInvalidDocketRequest) != tc.wantBadRequest {
+		t.Errorf("bad-request classification = %v, want %v (err %v)", !tc.wantBadRequest, tc.wantBadRequest, err)
+	}
+	if got != tc.wantURL {
+		t.Errorf("url = %q, want %q", got, tc.wantURL)
+	}
+}
+
+type docketTaskDetailTestCase struct {
+	name           string
+	baseURL        string
+	requestPath    string
+	wantURL        string
+	wantID         string
+	wantErr        bool
+	wantBadRequest bool
+}
+
 func TestBuildDocketTaskDetailUpstreamURL_TableDriven(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name           string
-		baseURL        string
-		requestPath    string
-		wantURL        string
-		wantID         string
-		wantErr        bool
-		wantBadRequest bool
-	}{
+	tests := []docketTaskDetailTestCase{
 		{name: "empty base URL", baseURL: "", requestPath: "/api/docket/tasks/7", wantErr: true},
 		{name: "control character in base URL", baseURL: "http://docket:\x7f80", requestPath: "/api/docket/tasks/7", wantErr: true},
 		{name: "bare prefix", baseURL: "http://docket.local", requestPath: "/api/docket/tasks/42", wantURL: "http://docket.local/api/tasks/42", wantID: "42"},
@@ -1390,16 +1450,21 @@ func TestBuildDocketTaskDetailUpstreamURL_TableDriven(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			gotURL, gotID, err := BuildDocketTaskDetailUpstreamURL(tc.baseURL, tc.requestPath)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if errors.Is(err, errInvalidDocketRequest) != tc.wantBadRequest {
-				t.Errorf("bad-request classification = %v, want %v (err %v)", !tc.wantBadRequest, tc.wantBadRequest, err)
-			}
-			if gotURL != tc.wantURL || gotID != tc.wantID {
-				t.Errorf("got (%q, %q), want (%q, %q)", gotURL, gotID, tc.wantURL, tc.wantID)
-			}
+			runDocketTaskDetailCase(t, tc)
 		})
+	}
+}
+
+func runDocketTaskDetailCase(t *testing.T, tc docketTaskDetailTestCase) {
+	t.Helper()
+	gotURL, gotID, err := BuildDocketTaskDetailUpstreamURL(tc.baseURL, tc.requestPath)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+	}
+	if errors.Is(err, errInvalidDocketRequest) != tc.wantBadRequest {
+		t.Errorf("bad-request classification = %v, want %v (err %v)", !tc.wantBadRequest, tc.wantBadRequest, err)
+	}
+	if gotURL != tc.wantURL || gotID != tc.wantID {
+		t.Errorf("got (%q, %q), want (%q, %q)", gotURL, gotID, tc.wantURL, tc.wantID)
 	}
 }

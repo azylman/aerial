@@ -60,6 +60,15 @@ func setupTestServer() (*Server, *mockStoreForDelivery, *Config) {
 	return server, store, cfg
 }
 
+type threeTierInboundTestCase struct {
+	name         string
+	form         url.Values
+	validSig     bool
+	wantCode     int
+	wantBodySub  string
+	wantCallTier string
+}
+
 func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 	t.Parallel()
 
@@ -94,14 +103,7 @@ func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 		UpdatedAt:       time.Now().UTC(),
 	}, 5)
 
-	tests := []struct {
-		name         string
-		form         url.Values
-		validSig     bool
-		wantCode     int
-		wantBodySub  string
-		wantCallTier string
-	}{
+	tests := []threeTierInboundTestCase{
 		{
 			name: "invalid twilio signature returns forbidden",
 			form: url.Values{
@@ -165,62 +167,72 @@ func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			path := "/api/webhooks/twilio/voice"
-			fullURL := cfg.PublicWebhookBaseURL + path
-
-			sig := "invalid-signature"
-			if tc.validSig {
-				sig = generateTwilioSignature(cfg.TwilioAuthToken, fullURL, tc.form)
-			}
-
-			req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader(tc.form.Encode()))
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			req.Header.Set("X-Twilio-Signature", sig)
-
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantCode {
-				t.Fatalf("status code = %d, want %d (body: %s)", rec.Code, tc.wantCode, rec.Body.String())
-			}
-
-			if tc.wantBodySub != "" && !strings.Contains(rec.Body.String(), tc.wantBodySub) {
-				t.Fatalf("response body %q does not contain %q", rec.Body.String(), tc.wantBodySub)
-			}
-
-			switch tc.wantCallTier {
-			case "tier1":
-				c, err := store.GetCallByProviderSID(context.Background(), "CA-in-tier1")
-				if err != nil || c == nil {
-					t.Fatalf("tier1 call not found in store: %v", err)
-				}
-				if !strings.Contains(c.Brief.Task, "Greet the caller professionally") {
-					t.Fatalf("tier1 Task = %q, want default receptionist greeting", c.Brief.Task)
-				}
-				if c.Brief.Approvals == "" {
-					t.Fatal("tier1 Approvals should be set to defaultApprovalFirewall")
-				}
-			case "tier2":
-				c, err := store.GetCallByProviderSID(context.Background(), "CA-in-tier2")
-				if err != nil || c == nil {
-					t.Fatalf("tier2 call not found in store: %v", err)
-				}
-				if c.CallbackOfCallID != "call-out-prior" {
-					t.Fatalf("tier2 CallbackOfCallID = %q, want 'call-out-prior'", c.CallbackOfCallID)
-				}
-				if !strings.Contains(c.Brief.Context, "Dentist appointment confirmation") {
-					t.Fatalf("tier2 Context = %q, want prior call task in context", c.Brief.Context)
-				}
-			case "tier3":
-				c, err := store.GetCallByProviderSID(context.Background(), "CA-in-tier3")
-				if err != nil || c == nil {
-					t.Fatalf("tier3 call not found in store: %v", err)
-				}
-				if c.ReportStatus != "awaiting_recording" {
-					t.Fatalf("tier3 ReportStatus = %q, want 'awaiting_recording'", c.ReportStatus)
-				}
-			}
+			runThreeTierInboundCase(t, tc, cfg, mux, store)
 		})
+	}
+}
+
+func runThreeTierInboundCase(t *testing.T, tc threeTierInboundTestCase, cfg *Config, mux http.Handler, store *mockStoreForDelivery) {
+	t.Helper()
+	path := "/api/webhooks/twilio/voice"
+	fullURL := cfg.PublicWebhookBaseURL + path
+
+	sig := "invalid-signature"
+	if tc.validSig {
+		sig = generateTwilioSignature(cfg.TwilioAuthToken, fullURL, tc.form)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader(tc.form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Twilio-Signature", sig)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != tc.wantCode {
+		t.Fatalf("status code = %d, want %d (body: %s)", rec.Code, tc.wantCode, rec.Body.String())
+	}
+
+	if tc.wantBodySub != "" && !strings.Contains(rec.Body.String(), tc.wantBodySub) {
+		t.Fatalf("response body %q does not contain %q", rec.Body.String(), tc.wantBodySub)
+	}
+
+	assertThreeTierCall(t, tc, store)
+}
+
+func assertThreeTierCall(t *testing.T, tc threeTierInboundTestCase, store *mockStoreForDelivery) {
+	t.Helper()
+	switch tc.wantCallTier {
+	case "tier1":
+		c, err := store.GetCallByProviderSID(context.Background(), "CA-in-tier1")
+		if err != nil || c == nil {
+			t.Fatalf("tier1 call not found in store: %v", err)
+		}
+		if !strings.Contains(c.Brief.Task, "Greet the caller professionally") {
+			t.Fatalf("tier1 Task = %q, want default receptionist greeting", c.Brief.Task)
+		}
+		if c.Brief.Approvals == "" {
+			t.Fatal("tier1 Approvals should be set to defaultApprovalFirewall")
+		}
+	case "tier2":
+		c, err := store.GetCallByProviderSID(context.Background(), "CA-in-tier2")
+		if err != nil || c == nil {
+			t.Fatalf("tier2 call not found in store: %v", err)
+		}
+		if c.CallbackOfCallID != "call-out-prior" {
+			t.Fatalf("tier2 CallbackOfCallID = %q, want 'call-out-prior'", c.CallbackOfCallID)
+		}
+		if !strings.Contains(c.Brief.Context, "Dentist appointment confirmation") {
+			t.Fatalf("tier2 Context = %q, want prior call task in context", c.Brief.Context)
+		}
+	case "tier3":
+		c, err := store.GetCallByProviderSID(context.Background(), "CA-in-tier3")
+		if err != nil || c == nil {
+			t.Fatalf("tier3 call not found in store: %v", err)
+		}
+		if c.ReportStatus != "awaiting_recording" {
+			t.Fatalf("tier3 ReportStatus = %q, want 'awaiting_recording'", c.ReportStatus)
+		}
 	}
 }
 
@@ -585,29 +597,42 @@ func TestServer_ToWSSAndRouteGuards(t *testing.T) {
 	})
 }
 
-func TestWebhooks_InvalidSignature(t *testing.T) {
+func TestWebhooks_InvalidRequests(t *testing.T) {
 	t.Parallel()
 	server, _, cfg := setupTestServer()
 	mux := server.Routes()
 
-	endpoints := []string{
-		"/api/webhooks/twilio/amd",
-		"/api/webhooks/twilio/status",
-		"/api/webhooks/twilio/voicemail",
-		"/api/webhooks/twilio/sms",
+	tests := []struct {
+		name       string
+		endpoint   string
+		body       string
+		sig        string
+		wantStatus int
+	}{
+		{name: "amd bad sig", endpoint: "/api/webhooks/twilio/amd", body: "CallSid=CA123", sig: "bad-sig", wantStatus: http.StatusForbidden},
+		{name: "status bad sig", endpoint: "/api/webhooks/twilio/status", body: "CallSid=CA123", sig: "bad-sig", wantStatus: http.StatusForbidden},
+		{name: "voicemail bad sig", endpoint: "/api/webhooks/twilio/voicemail", body: "CallSid=CA123", sig: "bad-sig", wantStatus: http.StatusForbidden},
+		{name: "sms bad sig", endpoint: "/api/webhooks/twilio/sms", body: "CallSid=CA123", sig: "bad-sig", wantStatus: http.StatusForbidden},
+		{name: "voice bad form", endpoint: "/api/webhooks/twilio/voice", body: "%%invalid-url-encoded-form", wantStatus: http.StatusBadRequest},
+		{name: "amd bad form", endpoint: "/api/webhooks/twilio/amd", body: "%%invalid-url-encoded-form", wantStatus: http.StatusBadRequest},
+		{name: "status bad form", endpoint: "/api/webhooks/twilio/status", body: "%%invalid-url-encoded-form", wantStatus: http.StatusBadRequest},
+		{name: "voicemail bad form", endpoint: "/api/webhooks/twilio/voicemail", body: "%%invalid-url-encoded-form", wantStatus: http.StatusBadRequest},
+		{name: "sms bad form", endpoint: "/api/webhooks/twilio/sms", body: "%%invalid-url-encoded-form", wantStatus: http.StatusBadRequest},
 	}
 
-	for _, ep := range endpoints {
-		t.Run(ep, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fullURL := cfg.PublicWebhookBaseURL + ep
-			req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader("CallSid=CA123"))
+			fullURL := cfg.PublicWebhookBaseURL + tc.endpoint
+			req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			req.Header.Set("X-Twilio-Signature", "bad-sig")
+			if tc.sig != "" {
+				req.Header.Set("X-Twilio-Signature", tc.sig)
+			}
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, req)
-			if rec.Code != http.StatusForbidden {
-				t.Fatalf("%s with bad signature status = %d, want 403", ep, rec.Code)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("%s status = %d, want %d", tc.name, rec.Code, tc.wantStatus)
 			}
 		})
 	}
@@ -865,35 +890,6 @@ func TestServer_UnnormalizedPhonesAndReporterErrors(t *testing.T) {
 		t.Fatalf("status returned %d, want 200", recStat.Code)
 	}
 	serverFailRep.Wait()
-}
-
-func TestServer_BadFormRequests(t *testing.T) {
-	t.Parallel()
-	server, _, cfg := setupTestServer()
-	mux := server.Routes()
-
-	endpoints := []string{
-		"/api/webhooks/twilio/voice",
-		"/api/webhooks/twilio/amd",
-		"/api/webhooks/twilio/status",
-		"/api/webhooks/twilio/voicemail",
-		"/api/webhooks/twilio/sms",
-	}
-
-	for _, ep := range endpoints {
-		t.Run(ep+" bad form", func(t *testing.T) {
-			t.Parallel()
-			fullURL := cfg.PublicWebhookBaseURL + ep
-			// Invalid url query/form encoding triggers ParseForm error
-			req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader("%%invalid-url-encoded-form"))
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("%s with bad form returned %d, want 400", ep, rec.Code)
-			}
-		})
-	}
 }
 
 type failResponseWriter struct {

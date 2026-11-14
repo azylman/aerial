@@ -14,14 +14,7 @@ func TestLoadConsoleYAMLConfigs_TableDriven(t *testing.T) {
 		t.Fatalf("expected 0 default quick launch links, got %d", len(defaults))
 	}
 
-	tests := []struct {
-		name        string
-		yamlData    string
-		noFile      bool
-		nonExistent bool
-		wantLinks   []QuickLaunchLink
-		wantRepos   []string
-	}{
+	tests := []loadConsoleYAMLTestCase{
 		{
 			name:      "EmptyPath",
 			noFile:    true,
@@ -141,40 +134,54 @@ github_repos:
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			path := ""
-			if !tc.noFile {
-				if tc.nonExistent {
-					path = filepath.Join(t.TempDir(), "nonexistent.yaml")
-				} else {
-					path = filepath.Join(t.TempDir(), "config.yaml")
-					_ = os.WriteFile(path, []byte(tc.yamlData), 0o644)
-				}
-			}
-
-			if tc.wantLinks != nil || tc.noFile || tc.nonExistent || tc.yamlData != "" {
-				gotLinks := loadQuickLaunchLinks(path)
-				if len(gotLinks) != len(tc.wantLinks) {
-					t.Fatalf("expected %d links, got %d", len(tc.wantLinks), len(gotLinks))
-				}
-				for i := range gotLinks {
-					if gotLinks[i] != tc.wantLinks[i] {
-						t.Errorf("link [%d] = %+v, want %+v", i, gotLinks[i], tc.wantLinks[i])
-					}
-				}
-			}
-
-			if tc.wantRepos != nil || tc.noFile || tc.nonExistent || tc.yamlData != "" {
-				gotRepos := loadConsoleRepos(path)
-				if len(gotRepos) != len(tc.wantRepos) {
-					t.Fatalf("expected %d repos, got %d: %v vs %v", len(tc.wantRepos), len(gotRepos), tc.wantRepos, gotRepos)
-				}
-				for i := range gotRepos {
-					if gotRepos[i] != tc.wantRepos[i] {
-						t.Errorf("repo [%d] = %q, want %q", i, gotRepos[i], tc.wantRepos[i])
-					}
-				}
-			}
+			runLoadConsoleYAMLConfigsCase(t, tc)
 		})
+	}
+}
+
+type loadConsoleYAMLTestCase struct {
+	name        string
+	yamlData    string
+	noFile      bool
+	nonExistent bool
+	wantLinks   []QuickLaunchLink
+	wantRepos   []string
+}
+
+func runLoadConsoleYAMLConfigsCase(t *testing.T, tc loadConsoleYAMLTestCase) {
+	t.Helper()
+	path := ""
+	if !tc.noFile {
+		if tc.nonExistent {
+			path = filepath.Join(t.TempDir(), "nonexistent.yaml")
+		} else {
+			path = filepath.Join(t.TempDir(), "config.yaml")
+			_ = os.WriteFile(path, []byte(tc.yamlData), 0o644)
+		}
+	}
+
+	if tc.wantLinks != nil || tc.noFile || tc.nonExistent || tc.yamlData != "" {
+		gotLinks := loadQuickLaunchLinks(path)
+		if len(gotLinks) != len(tc.wantLinks) {
+			t.Fatalf("expected %d links, got %d", len(tc.wantLinks), len(gotLinks))
+		}
+		for i := range gotLinks {
+			if gotLinks[i] != tc.wantLinks[i] {
+				t.Errorf("link [%d] = %+v, want %+v", i, gotLinks[i], tc.wantLinks[i])
+			}
+		}
+	}
+
+	if tc.wantRepos != nil || tc.noFile || tc.nonExistent || tc.yamlData != "" {
+		gotRepos := loadConsoleRepos(path)
+		if len(gotRepos) != len(tc.wantRepos) {
+			t.Fatalf("expected %d repos, got %d: %v vs %v", len(tc.wantRepos), len(gotRepos), tc.wantRepos, gotRepos)
+		}
+		for i := range gotRepos {
+			if gotRepos[i] != tc.wantRepos[i] {
+				t.Errorf("repo [%d] = %q, want %q", i, gotRepos[i], tc.wantRepos[i])
+			}
+		}
 	}
 }
 
@@ -220,101 +227,22 @@ func TestResolveConfigPath(t *testing.T) {
 	}
 }
 
-func TestLoadConfigFile_TableDriven(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	validYAML := `
-port: "8084"
-eri_url: "http://eri.aerial"
-memory_url: "http://coven.aerial"
-hangar_url: "http://hangar.aerial"
-haro_url: "http://haro.aerial"
-vanadis_url: "http://vanadis.aerial"
-docket_url: " http://docket-mcp.aerial "
-nomad_addr: "http://nomad.cluster:4646"
-github_repos:
-  - "azylman/aerial"
-  - "azylman/aerial-config"
-  - "azylman/aerial"
-`
+func loadConfigFileCases(tmpDir string) []loadConfigFileTestCase {
 	validPath := filepath.Join(tmpDir, "console.yaml")
-	_ = os.WriteFile(validPath, []byte(validYAML), 0o644)
-
-	singleRepoYAML := `
-port: "8084"
-eri_url: "http://eri.aerial"
-memory_url: "http://coven.aerial"
-hangar_url: "http://hangar.aerial"
-haro_url: "http://haro.aerial"
-vanadis_url: "http://vanadis.aerial"
-github_repos:
-  - "azylman/single-repo"
-config_path: "/custom/path/config.yaml"
-`
 	singleRepoPath := filepath.Join(tmpDir, "single_repo.yaml")
-	_ = os.WriteFile(singleRepoPath, []byte(singleRepoYAML), 0o644)
-
-	eriYAML := `
-port: "8084"
-eri_url: "http://eri-direct.aerial"
-memory_url: "http://coven.aerial"
-hangar_url: "http://hangar.aerial"
-haro_url: "http://haro.aerial"
-vanadis_url: "http://vanadis.aerial"
-github_repos:
-  - "azylman/aerial"
-`
 	eriPath := filepath.Join(tmpDir, "eri.yaml")
-	_ = os.WriteFile(eriPath, []byte(eriYAML), 0o644)
-
-	noBrainYAML := `
-port: "8084"
-memory_url: "http://coven.aerial"
-hangar_url: "http://hangar.aerial"
-haro_url: "http://haro.aerial"
-vanadis_url: "http://vanadis.aerial"
-github_repos:
-  - "azylman/aerial"
-`
 	noBrainPath := filepath.Join(tmpDir, "no_brain.yaml")
-	_ = os.WriteFile(noBrainPath, []byte(noBrainYAML), 0o644)
-
-	kubeYAML := `
-port: "8084"
-eri_url: "http://eri.aerial"
-memory_url: "http://coven.aerial"
-hangar_url: "http://hangar.aerial"
-haro_url: "http://haro.aerial"
-vanadis_url: "http://vanadis.aerial"
-kube_api_server: "http://kube.cluster:6443"
-github_repos:
-  - "azylman/aerial"
-`
 	kubePath := filepath.Join(tmpDir, "kube.yaml")
-	_ = os.WriteFile(kubePath, []byte(kubeYAML), 0o644)
-
 	badYAMLPath := filepath.Join(tmpDir, "bad.yaml")
-	_ = os.WriteFile(badYAMLPath, []byte("port: [unclosed"), 0o644)
 
-	tests := []struct {
-		name              string
-		path              string
-		env               map[string]string
-		nilLookup         bool
-		callLoadConfig    bool
-		wantErr           bool
-		wantPort          string
-		wantBrainURL      string
-		wantMemoryURL     string
-		wantHaroURL       string
-		wantVanadisURL    string
-		wantDocketURL     string
-		wantGHRepo        string
-		wantGHRepos       []string
-		wantGHToken       string
-		wantKubeAPIServer string
-		wantConfigPath    string
-	}{
+	fallbackCases := loadConfigFileFallbackCases(validPath, badYAMLPath, tmpDir)
+	cases := make([]loadConfigFileTestCase, 0, 7+len(fallbackCases))
+	cases = append(cases, loadConfigFilePrimaryCases(validPath, singleRepoPath, eriPath, noBrainPath, kubePath)...)
+	return append(cases, fallbackCases...)
+}
+
+func loadConfigFilePrimaryCases(validPath, singleRepoPath, eriPath, noBrainPath, kubePath string) []loadConfigFileTestCase {
+	return []loadConfigFileTestCase{
 		{
 			name: "valid full configuration with token and commit",
 			path: validPath,
@@ -402,6 +330,11 @@ github_repos:
 			wantKubeAPIServer: "http://kube.cluster:6443",
 			wantConfigPath:    kubePath,
 		},
+	}
+}
+
+func loadConfigFileFallbackCases(validPath, badYAMLPath, tmpDir string) []loadConfigFileTestCase {
+	return []loadConfigFileTestCase{
 		{
 			name: "KUBE_API_SERVER env fallback when absent from yaml",
 			path: validPath,
@@ -467,76 +400,203 @@ github_repos:
 			wantErr: true,
 		},
 	}
+}
 
-	for _, tc := range tests {
+func writeConfigFileFixtures(t *testing.T, tmpDir string) {
+	t.Helper()
+	validYAML := `
+port: "8084"
+eri_url: "http://eri.aerial"
+memory_url: "http://coven.aerial"
+hangar_url: "http://hangar.aerial"
+haro_url: "http://haro.aerial"
+vanadis_url: "http://vanadis.aerial"
+docket_url: " http://docket-mcp.aerial "
+nomad_addr: "http://nomad.cluster:4646"
+github_repos:
+  - "azylman/aerial"
+  - "azylman/aerial-config"
+  - "azylman/aerial"
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "console.yaml"), []byte(validYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	singleRepoYAML := `
+port: "8084"
+eri_url: "http://eri.aerial"
+memory_url: "http://coven.aerial"
+hangar_url: "http://hangar.aerial"
+haro_url: "http://haro.aerial"
+vanadis_url: "http://vanadis.aerial"
+github_repos:
+  - "azylman/single-repo"
+config_path: "/custom/path/config.yaml"
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "single_repo.yaml"), []byte(singleRepoYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	eriYAML := `
+port: "8084"
+eri_url: "http://eri-direct.aerial"
+memory_url: "http://coven.aerial"
+hangar_url: "http://hangar.aerial"
+haro_url: "http://haro.aerial"
+vanadis_url: "http://vanadis.aerial"
+github_repos:
+  - "azylman/aerial"
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "eri.yaml"), []byte(eriYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	noBrainYAML := `
+port: "8084"
+memory_url: "http://coven.aerial"
+hangar_url: "http://hangar.aerial"
+haro_url: "http://haro.aerial"
+vanadis_url: "http://vanadis.aerial"
+github_repos:
+  - "azylman/aerial"
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "no_brain.yaml"), []byte(noBrainYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	kubeYAML := `
+port: "8084"
+eri_url: "http://eri.aerial"
+memory_url: "http://coven.aerial"
+hangar_url: "http://hangar.aerial"
+haro_url: "http://haro.aerial"
+vanadis_url: "http://vanadis.aerial"
+kube_api_server: "http://kube.cluster:6443"
+github_repos:
+  - "azylman/aerial"
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "kube.yaml"), []byte(kubeYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "bad.yaml"), []byte("port: [unclosed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadConfigFile_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeConfigFileFixtures(t, tmpDir)
+
+	for _, tc := range loadConfigFileCases(tmpDir) {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.callLoadConfig {
-				for k, v := range tc.env {
-					t.Setenv(k, v)
-				}
-				cfg, err := LoadConfig(tc.path)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if tc.wantErr {
-					return
-				}
-				if cfg.Port != tc.wantPort {
-					t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
-				}
-				return
-			}
-
-			var lookup func(string) string
-			if !tc.nilLookup {
-				lookup = func(k string) string {
-					if tc.env == nil {
-						return ""
-					}
-					return tc.env[k]
-				}
-			}
-
-			cfg, err := LoadConfigFile(tc.path, lookup)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				return
-			}
-			if tc.wantPort != "" && cfg.Port != tc.wantPort {
-				t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
-			}
-			if tc.wantBrainURL != "" && (cfg.BrainURL != tc.wantBrainURL || cfg.EriURL != tc.wantBrainURL) {
-				t.Errorf("BrainURL = %q, EriURL = %q, want %q", cfg.BrainURL, cfg.EriURL, tc.wantBrainURL)
-			}
-			if tc.wantMemoryURL != "" && cfg.MemoryURL != tc.wantMemoryURL {
-				t.Errorf("MemoryURL = %q, want %q", cfg.MemoryURL, tc.wantMemoryURL)
-			}
-			if tc.wantHaroURL != "" && cfg.HaroURL != tc.wantHaroURL {
-				t.Errorf("HaroURL = %q, want %q", cfg.HaroURL, tc.wantHaroURL)
-			}
-			if tc.wantVanadisURL != "" && cfg.VanadisURL != tc.wantVanadisURL {
-				t.Errorf("VanadisURL = %q, want %q", cfg.VanadisURL, tc.wantVanadisURL)
-			}
-			if tc.wantDocketURL != "" && cfg.DocketURL != tc.wantDocketURL {
-				t.Errorf("DocketURL = %q, want %q", cfg.DocketURL, tc.wantDocketURL)
-			}
-			if tc.wantGHRepo != "" && cfg.GHRepo != tc.wantGHRepo {
-				t.Errorf("GHRepo = %q, want %q", cfg.GHRepo, tc.wantGHRepo)
-			}
-			if len(tc.wantGHRepos) > 0 && !reflect.DeepEqual(cfg.GHRepos, tc.wantGHRepos) {
-				t.Errorf("GHRepos = %v, want %v", cfg.GHRepos, tc.wantGHRepos)
-			}
-			if tc.wantGHToken != "" && cfg.GHToken != tc.wantGHToken {
-				t.Errorf("GHToken = %q, want %q", cfg.GHToken, tc.wantGHToken)
-			}
-			if tc.wantKubeAPIServer != "" && cfg.KubeAPIServer != tc.wantKubeAPIServer {
-				t.Errorf("KubeAPIServer = %q, want %q", cfg.KubeAPIServer, tc.wantKubeAPIServer)
-			}
-			if tc.wantConfigPath != "" && cfg.ConfigPath != tc.wantConfigPath {
-				t.Errorf("ConfigPath = %q, want %q", cfg.ConfigPath, tc.wantConfigPath)
-			}
+			runLoadConfigFileCase(t, tc)
 		})
+	}
+}
+
+type loadConfigFileTestCase struct {
+	name              string
+	path              string
+	env               map[string]string
+	nilLookup         bool
+	callLoadConfig    bool
+	wantErr           bool
+	wantPort          string
+	wantBrainURL      string
+	wantMemoryURL     string
+	wantHaroURL       string
+	wantVanadisURL    string
+	wantDocketURL     string
+	wantGHRepo        string
+	wantGHRepos       []string
+	wantGHToken       string
+	wantKubeAPIServer string
+	wantConfigPath    string
+}
+
+func runLoadConfigFileCase(t *testing.T, tc loadConfigFileTestCase) {
+	t.Helper()
+	if tc.callLoadConfig {
+		for k, v := range tc.env {
+			t.Setenv(k, v)
+		}
+		cfg, err := LoadConfig(tc.path)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
+		}
+		if tc.wantErr {
+			return
+		}
+		if cfg.Port != tc.wantPort {
+			t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
+		}
+		return
+	}
+
+	var lookup func(string) string
+	if !tc.nilLookup {
+		lookup = func(k string) string {
+			if tc.env == nil {
+				return ""
+			}
+			return tc.env[k]
+		}
+	}
+
+	cfg, err := LoadConfigFile(tc.path, lookup)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr {
+		return
+	}
+	assertLoadedConfigFields(t, &cfg, tc)
+}
+
+func assertLoadedConfigFields(t *testing.T, cfg *ConsoleConfig, tc loadConfigFileTestCase) {
+	t.Helper()
+	assertLoadedConfigURLs(t, cfg, tc)
+	assertLoadedConfigReposAndAuth(t, cfg, tc)
+	if tc.wantPort != "" && cfg.Port != tc.wantPort {
+		t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
+	}
+	if tc.wantConfigPath != "" && cfg.ConfigPath != tc.wantConfigPath {
+		t.Errorf("ConfigPath = %q, want %q", cfg.ConfigPath, tc.wantConfigPath)
+	}
+}
+
+func assertLoadedConfigURLs(t *testing.T, cfg *ConsoleConfig, tc loadConfigFileTestCase) {
+	t.Helper()
+	if tc.wantBrainURL != "" && (cfg.BrainURL != tc.wantBrainURL || cfg.EriURL != tc.wantBrainURL) {
+		t.Errorf("BrainURL = %q, EriURL = %q, want %q", cfg.BrainURL, cfg.EriURL, tc.wantBrainURL)
+	}
+	if tc.wantMemoryURL != "" && cfg.MemoryURL != tc.wantMemoryURL {
+		t.Errorf("MemoryURL = %q, want %q", cfg.MemoryURL, tc.wantMemoryURL)
+	}
+	if tc.wantHaroURL != "" && cfg.HaroURL != tc.wantHaroURL {
+		t.Errorf("HaroURL = %q, want %q", cfg.HaroURL, tc.wantHaroURL)
+	}
+	if tc.wantVanadisURL != "" && cfg.VanadisURL != tc.wantVanadisURL {
+		t.Errorf("VanadisURL = %q, want %q", cfg.VanadisURL, tc.wantVanadisURL)
+	}
+	if tc.wantDocketURL != "" && cfg.DocketURL != tc.wantDocketURL {
+		t.Errorf("DocketURL = %q, want %q", cfg.DocketURL, tc.wantDocketURL)
+	}
+	if tc.wantKubeAPIServer != "" && cfg.KubeAPIServer != tc.wantKubeAPIServer {
+		t.Errorf("KubeAPIServer = %q, want %q", cfg.KubeAPIServer, tc.wantKubeAPIServer)
+	}
+}
+
+func assertLoadedConfigReposAndAuth(t *testing.T, cfg *ConsoleConfig, tc loadConfigFileTestCase) {
+	t.Helper()
+	if tc.wantGHRepo != "" && cfg.GHRepo != tc.wantGHRepo {
+		t.Errorf("GHRepo = %q, want %q", cfg.GHRepo, tc.wantGHRepo)
+	}
+	if len(tc.wantGHRepos) > 0 && !reflect.DeepEqual(cfg.GHRepos, tc.wantGHRepos) {
+		t.Errorf("GHRepos = %v, want %v", cfg.GHRepos, tc.wantGHRepos)
+	}
+	if tc.wantGHToken != "" && cfg.GHToken != tc.wantGHToken {
+		t.Errorf("GHToken = %q, want %q", cfg.GHToken, tc.wantGHToken)
 	}
 }

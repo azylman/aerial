@@ -289,19 +289,21 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 
 type roundTripperFunc = roundTripFunc
 
+type downloadRecordingTestCase struct {
+	name         string
+	rawURL       string
+	redirectURL  string
+	mockStatus   int
+	mockBody     []byte
+	mockType     string
+	transportErr error
+	wantErrSub   string
+}
+
 func TestDownloadRecording(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		rawURL       string
-		redirectURL  string
-		mockStatus   int
-		mockBody     []byte
-		mockType     string
-		transportErr error
-		wantErrSub   string
-	}{
+	tests := []downloadRecordingTestCase{
 		{
 			name:       "rejects invalid url",
 			rawURL:     "::not-a-url",
@@ -356,74 +358,78 @@ func TestDownloadRecording(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			tripper := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				if tc.transportErr != nil {
-					return nil, tc.transportErr
-				}
-				if req.URL.Hostname() == "api.twilio.com" && tc.redirectURL != "" {
-					if !strings.HasPrefix(req.Header.Get("Authorization"), "Basic ") {
-						t.Errorf("api.twilio.com request missing Basic auth, got %q", req.Header.Get("Authorization"))
-					}
-					header := make(http.Header)
-					header.Set("Location", tc.redirectURL)
-					return &http.Response{
-						StatusCode: http.StatusFound,
-						Header:     header,
-						Body:       io.NopCloser(strings.NewReader("")),
-					}, nil
-				}
-				if tc.redirectURL != "" && req.URL.Hostname() == "media.twiliocdn.com" {
-					if req.Header.Get("Authorization") != "" {
-						t.Errorf("CDN redirect still contains Authorization header: %s", req.Header.Get("Authorization"))
-					}
-				}
-				header := make(http.Header)
-				if tc.mockType != "" {
-					header.Set("Content-Type", tc.mockType)
-				}
-				return &http.Response{
-					StatusCode: tc.mockStatus,
-					Header:     header,
-					Body:       io.NopCloser(bytes.NewReader(tc.mockBody)),
-				}, nil
-			})
-
-			client := NewHTTPTwilioClient("AC123", "token123", WithTwilioHTTPClient(&http.Client{
-				Transport: tripper,
-			}))
-
-			data, contentType, err := client.DownloadRecording(context.Background(), tc.rawURL)
-			if tc.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-					t.Fatalf("DownloadRecording() err = %v, want substring %q", err, tc.wantErrSub)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("DownloadRecording() unexpected error: %v", err)
-			}
-			if string(data) != string(tc.mockBody) {
-				t.Fatalf("DownloadRecording() data = %q, want %q", string(data), string(tc.mockBody))
-			}
-			if contentType != tc.mockType {
-				t.Fatalf("DownloadRecording() contentType = %q, want %q", contentType, tc.mockType)
-			}
+			runDownloadRecordingCase(t, tc)
 		})
 	}
+}
+
+func runDownloadRecordingCase(t *testing.T, tc downloadRecordingTestCase) {
+	t.Helper()
+	tripper := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if tc.transportErr != nil {
+			return nil, tc.transportErr
+		}
+		if req.URL.Hostname() == "api.twilio.com" && tc.redirectURL != "" {
+			if !strings.HasPrefix(req.Header.Get("Authorization"), "Basic ") {
+				t.Errorf("api.twilio.com request missing Basic auth, got %q", req.Header.Get("Authorization"))
+			}
+			header := make(http.Header)
+			header.Set("Location", tc.redirectURL)
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader("")),
+			}, nil
+		}
+		if tc.redirectURL != "" && req.URL.Hostname() == "media.twiliocdn.com" && req.Header.Get("Authorization") != "" {
+			t.Errorf("CDN redirect still contains Authorization header: %s", req.Header.Get("Authorization"))
+		}
+		header := make(http.Header)
+		if tc.mockType != "" {
+			header.Set("Content-Type", tc.mockType)
+		}
+		return &http.Response{
+			StatusCode: tc.mockStatus,
+			Header:     header,
+			Body:       io.NopCloser(bytes.NewReader(tc.mockBody)),
+		}, nil
+	})
+
+	client := NewHTTPTwilioClient("AC123", "token123", WithTwilioHTTPClient(&http.Client{
+		Transport: tripper,
+	}))
+
+	data, contentType, err := client.DownloadRecording(context.Background(), tc.rawURL)
+	if tc.wantErrSub != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+			t.Fatalf("DownloadRecording() err = %v, want substring %q", err, tc.wantErrSub)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("DownloadRecording() unexpected error: %v", err)
+	}
+	if string(data) != string(tc.mockBody) {
+		t.Fatalf("DownloadRecording() data = %q, want %q", string(data), string(tc.mockBody))
+	}
+	if contentType != tc.mockType {
+		t.Fatalf("DownloadRecording() contentType = %q, want %q", contentType, tc.mockType)
+	}
+}
+
+type createCallTestCase struct {
+	name       string
+	req        CreateCallRequest
+	statusCode int
+	respBody   string
+	wantSID    string
+	wantErr    bool
 }
 
 func TestHTTPTwilioClient_CreateCall(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		req        CreateCallRequest
-		statusCode int
-		respBody   string
-		wantSID    string
-		wantErr    bool
-	}{
+	tests := []createCallTestCase{
 		{
 			name: "successful call creation with AMD and SendDigits",
 			req: CreateCallRequest{
@@ -472,46 +478,51 @@ func TestHTTPTwilioClient_CreateCall(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/2010-04-01/Accounts/AC123/Calls.json" {
-					http.Error(w, "not found", http.StatusNotFound)
-					return
-				}
-				_ = r.ParseForm()
-				if tc.req.SendDigits != "" && r.FormValue("SendDigits") != tc.req.SendDigits {
-					http.Error(w, "missing SendDigits", http.StatusBadRequest)
-					return
-				}
-				if tc.req.AsyncAmdStatusCallback != "" && r.FormValue("AsyncAmdStatusCallback") != tc.req.AsyncAmdStatusCallback {
-					http.Error(w, "missing AsyncAmdStatusCallback", http.StatusBadRequest)
-					return
-				}
-				if r.FormValue("AsyncAmd") != "true" || r.FormValue("MachineDetection") != "DetectMessageEnd" {
-					http.Error(w, "missing AMD params", http.StatusBadRequest)
-					return
-				}
-				if tc.statusCode != 0 {
-					w.WriteHeader(tc.statusCode)
-				}
-				_, _ = w.Write([]byte(tc.respBody))
-			}))
-			t.Cleanup(server.Close)
-
-			client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(server.Client()))
-			sid, err := client.CreateCall(context.Background(), tc.req)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if sid != tc.wantSID {
-				t.Fatalf("sid = %q, want %q", sid, tc.wantSID)
-			}
+			runCreateCallCase(t, tc)
 		})
+	}
+}
+
+func runCreateCallCase(t *testing.T, tc createCallTestCase) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/2010-04-01/Accounts/AC123/Calls.json" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		_ = r.ParseForm()
+		if tc.req.SendDigits != "" && r.FormValue("SendDigits") != tc.req.SendDigits {
+			http.Error(w, "missing SendDigits", http.StatusBadRequest)
+			return
+		}
+		if tc.req.AsyncAmdStatusCallback != "" && r.FormValue("AsyncAmdStatusCallback") != tc.req.AsyncAmdStatusCallback {
+			http.Error(w, "missing AsyncAmdStatusCallback", http.StatusBadRequest)
+			return
+		}
+		if r.FormValue("AsyncAmd") != "true" || r.FormValue("MachineDetection") != "DetectMessageEnd" {
+			http.Error(w, "missing AMD params", http.StatusBadRequest)
+			return
+		}
+		if tc.statusCode != 0 {
+			w.WriteHeader(tc.statusCode)
+		}
+		_, _ = w.Write([]byte(tc.respBody))
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(server.Client()))
+	sid, err := client.CreateCall(context.Background(), tc.req)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sid != tc.wantSID {
+		t.Fatalf("sid = %q, want %q", sid, tc.wantSID)
 	}
 }
 
@@ -724,21 +735,23 @@ func TestHTTPTwilioClient_SendSMS(t *testing.T) {
 	}
 }
 
+type ensurePhoneNumberTestCase struct {
+	name       string
+	ownedBody  string
+	ownedCode  int
+	updateCode int
+	searchBody string
+	searchCode int
+	buyBody    string
+	buyCode    int
+	wantNumber string
+	wantErr    bool
+}
+
 func TestHTTPTwilioClient_EnsurePhoneNumber(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		ownedBody  string
-		ownedCode  int
-		updateCode int
-		searchBody string
-		searchCode int
-		buyBody    string
-		buyCode    int
-		wantNumber string
-		wantErr    bool
-	}{
+	tests := []ensurePhoneNumberTestCase{
 		{
 			name:       "existing owned number updated",
 			ownedBody:  `{"incoming_phone_numbers":[{"sid":"PN111","phone_number":"+15105550100","voice_url":"http://old"}]}`,
@@ -781,65 +794,83 @@ func TestHTTPTwilioClient_EnsurePhoneNumber(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				switch {
-				case r.Method == http.MethodGet && r.URL.Path == "/2010-04-01/Accounts/AC123/IncomingPhoneNumbers.json":
-					if tc.ownedCode != 0 {
-						w.WriteHeader(tc.ownedCode)
-					}
-					_, _ = w.Write([]byte(tc.ownedBody))
-				case r.Method == http.MethodPost && r.URL.Path == "/2010-04-01/Accounts/AC123/IncomingPhoneNumbers/PN111.json":
-					if err := r.ParseForm(); err == nil {
-						if r.FormValue("VoiceUrl") != "https://prospera.aerial/api/webhooks/twilio/voice" {
-							t.Errorf("VoiceUrl = %q, want https://prospera.aerial/api/webhooks/twilio/voice", r.FormValue("VoiceUrl"))
-						}
-						if r.FormValue("StatusCallback") != "https://prospera.aerial/api/webhooks/twilio/status" {
-							t.Errorf("StatusCallback = %q, want https://prospera.aerial/api/webhooks/twilio/status", r.FormValue("StatusCallback"))
-						}
-						if r.FormValue("SmsUrl") != "https://prospera.aerial/api/webhooks/twilio/sms" {
-							t.Errorf("SmsUrl = %q, want https://prospera.aerial/api/webhooks/twilio/sms", r.FormValue("SmsUrl"))
-						}
-					}
-					if tc.updateCode != 0 {
-						w.WriteHeader(tc.updateCode)
-					}
-				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "AvailablePhoneNumbers"):
-					if tc.searchCode != 0 {
-						w.WriteHeader(tc.searchCode)
-					}
-					_, _ = w.Write([]byte(tc.searchBody))
-				case r.Method == http.MethodPost && r.URL.Path == "/2010-04-01/Accounts/AC123/IncomingPhoneNumbers.json":
-					if err := r.ParseForm(); err == nil && r.FormValue("VoiceUrl") != "" {
-						if r.FormValue("VoiceUrl") != "https://prospera.aerial/api/webhooks/twilio/voice" {
-							t.Errorf("buy VoiceUrl = %q, want https://prospera.aerial/api/webhooks/twilio/voice", r.FormValue("VoiceUrl"))
-						}
-					}
-					if tc.buyCode != 0 {
-						w.WriteHeader(tc.buyCode)
-					}
-					_, _ = w.Write([]byte(tc.buyBody))
-				default:
-					http.NotFound(w, r)
-				}
-			}))
-			t.Cleanup(server.Close)
-
-			client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(server.Client()))
-			phone, err := client.EnsurePhoneNumber(context.Background(), "510", "https://prospera.aerial")
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if phone != tc.wantNumber {
-				t.Fatalf("phone = %q, want %q", phone, tc.wantNumber)
-			}
+			runEnsurePhoneNumberCase(t, tc)
 		})
+	}
+}
+
+func handleEnsurePhoneMock(t *testing.T, w http.ResponseWriter, r *http.Request, tc ensurePhoneNumberTestCase) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/2010-04-01/Accounts/AC123/IncomingPhoneNumbers.json":
+		if tc.ownedCode != 0 {
+			w.WriteHeader(tc.ownedCode)
+		}
+		_, _ = w.Write([]byte(tc.ownedBody))
+	case r.Method == http.MethodPost && r.URL.Path == "/2010-04-01/Accounts/AC123/IncomingPhoneNumbers/PN111.json":
+		handleUpdatePhoneNumberMock(t, w, r, tc.updateCode)
+	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "AvailablePhoneNumbers"):
+		if tc.searchCode != 0 {
+			w.WriteHeader(tc.searchCode)
+		}
+		_, _ = w.Write([]byte(tc.searchBody))
+	case r.Method == http.MethodPost && r.URL.Path == "/2010-04-01/Accounts/AC123/IncomingPhoneNumbers.json":
+		handleBuyPhoneNumberMock(t, w, r, tc.buyCode, tc.buyBody)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func handleUpdatePhoneNumberMock(t *testing.T, w http.ResponseWriter, r *http.Request, code int) {
+	t.Helper()
+	_ = r.ParseForm()
+	if r.FormValue("VoiceUrl") != "https://prospera.aerial/api/webhooks/twilio/voice" {
+		t.Errorf("VoiceUrl = %q, want https://prospera.aerial/api/webhooks/twilio/voice", r.FormValue("VoiceUrl"))
+	}
+	if r.FormValue("StatusCallback") != "https://prospera.aerial/api/webhooks/twilio/status" {
+		t.Errorf("StatusCallback = %q, want https://prospera.aerial/api/webhooks/twilio/status", r.FormValue("StatusCallback"))
+	}
+	if r.FormValue("SmsUrl") != "https://prospera.aerial/api/webhooks/twilio/sms" {
+		t.Errorf("SmsUrl = %q, want https://prospera.aerial/api/webhooks/twilio/sms", r.FormValue("SmsUrl"))
+	}
+	if code != 0 {
+		w.WriteHeader(code)
+	}
+}
+
+func handleBuyPhoneNumberMock(t *testing.T, w http.ResponseWriter, r *http.Request, code int, body string) {
+	t.Helper()
+	_ = r.ParseForm()
+	if r.FormValue("VoiceUrl") != "" && r.FormValue("VoiceUrl") != "https://prospera.aerial/api/webhooks/twilio/voice" {
+		t.Errorf("buy VoiceUrl = %q, want https://prospera.aerial/api/webhooks/twilio/voice", r.FormValue("VoiceUrl"))
+	}
+	if code != 0 {
+		w.WriteHeader(code)
+	}
+	_, _ = w.Write([]byte(body))
+}
+
+func runEnsurePhoneNumberCase(t *testing.T, tc ensurePhoneNumberTestCase) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleEnsurePhoneMock(t, w, r, tc)
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(server.Client()))
+	phone, err := client.EnsurePhoneNumber(context.Background(), "510", "https://prospera.aerial")
+	if tc.wantErr {
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if phone != tc.wantNumber {
+		t.Fatalf("phone = %q, want %q", phone, tc.wantNumber)
 	}
 }
 

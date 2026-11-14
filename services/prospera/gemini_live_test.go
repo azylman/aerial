@@ -135,199 +135,200 @@ func TestBuildGeminiMessages(t *testing.T) {
 	}
 }
 
-func TestHTTPContextConsultClient_ConsultCalendar(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		overrideURL string
-		sessionID   string
-		startISO    string
-		endISO      string
-		statusCode  int
-		respBody    string
-		wantSubstr  string
-		wantErr     bool
-	}{
-		{
-			name:       "calendar multi-line",
-			statusCode: http.StatusOK,
-			respBody:   `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Line 1"},{"type":"text","text":"Line 2"}]}}`,
-			wantSubstr: "Line 1\nLine 2",
-		},
-		{
-			name:       "calendar streamable http sse with session id and time range",
-			sessionID:  "mcp-sess-123",
-			startISO:   "2026-11-01T00:00:00Z",
-			endISO:     "2026-11-02T00:00:00Z",
-			statusCode: http.StatusOK,
-			respBody:   "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Sunday is free\"}]}}\n\n",
-			wantSubstr: "Sunday is free",
-		},
-		{
-			name:       "calendar 500 error",
-			statusCode: http.StatusInternalServerError,
-			respBody:   "internal server error",
-			wantErr:    true,
-		},
-		{
-			name:       "calendar RPC error payload",
-			statusCode: http.StatusOK,
-			respBody:   `{"jsonrpc":"2.0","id":1,"error":{"message":"tool execution failed"}}`,
-			wantErr:    true,
-		},
-		{
-			name:       "calendar empty results",
-			statusCode: http.StatusOK,
-			respBody:   `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`,
-			wantSubstr: "No matching",
-		},
-		{
-			name:       "calendar bad json payload",
-			statusCode: http.StatusOK,
-			respBody:   `not-json`,
-			wantErr:    true,
-		},
-		{
-			name:        "calendar network error",
-			overrideURL: "http://127.0.0.1:1",
-			wantErr:     true,
-		},
-		{
-			name:        "calendar request creation error",
-			overrideURL: ":\x7f",
-			wantErr:     true,
-		},
-		{
-			name:        "calendar empty url returns unavailable",
-			overrideURL: "none",
-			wantSubstr:  "unavailable",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			calURL := tc.overrideURL
-			if tc.overrideURL == "none" {
-				calURL = ""
-			} else if calURL == "" {
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if tc.sessionID != "" {
-						w.Header().Set("Mcp-Session-Id", tc.sessionID)
-					}
-					w.Header().Set("Content-Type", "application/json")
-					if tc.statusCode != 0 {
-						w.WriteHeader(tc.statusCode)
-					}
-					_, _ = w.Write([]byte(tc.respBody))
-				}))
-				t.Cleanup(server.Close)
-				calURL = server.URL
-			}
-
-			client := NewHTTPContextConsultClient(calURL, "")
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			defer cancel()
-
-			res, err := client.ConsultCalendar(ctx, "q", tc.startISO, tc.endISO)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.wantSubstr != "" && !strings.Contains(res, tc.wantSubstr) {
-				t.Fatalf("result %q does not contain %q", res, tc.wantSubstr)
-			}
-		})
-	}
+type consultTestCase struct {
+	name        string
+	overrideURL string
+	sessionID   string
+	startISO    string
+	endISO      string
+	statusCode  int
+	respBody    string
+	wantSubstr  string
+	wantErr     bool
 }
 
-func TestHTTPContextConsultClient_ConsultMemory(t *testing.T) {
+func TestHTTPContextConsultClient_TableDriven(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name        string
-		overrideURL string
-		statusCode  int
-		respBody    string
-		wantSubstr  string
-		wantErr     bool
-	}{
-		{
-			name:       "memory success",
-			statusCode: http.StatusOK,
-			respBody:   "Fact 1: User prefers coffee\nFact 2: Office on 3rd floor",
-			wantSubstr: "User prefers coffee",
-		},
-		{
-			name:       "memory 500 error",
-			statusCode: http.StatusInternalServerError,
-			respBody:   "internal error",
-			wantErr:    true,
-		},
-		{
-			name:       "memory empty body",
-			statusCode: http.StatusOK,
-			respBody:   "   ",
-			wantSubstr: "No relevant",
-		},
-		{
-			name:        "memory network error",
-			overrideURL: "http://127.0.0.1:1",
-			wantErr:     true,
-		},
-		{
-			name:        "memory request creation error",
-			overrideURL: ":\x7f",
-			wantErr:     true,
-		},
-		{
-			name:        "memory empty url returns unavailable",
-			overrideURL: "none",
-			wantSubstr:  "unavailable",
-		},
+	t.Run("ConsultCalendar", func(t *testing.T) {
+		t.Parallel()
+		tests := []consultTestCase{
+			{
+				name:       "calendar multi-line",
+				statusCode: http.StatusOK,
+				respBody:   `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Line 1"},{"type":"text","text":"Line 2"}]}}`,
+				wantSubstr: "Line 1\nLine 2",
+			},
+			{
+				name:       "calendar streamable http sse with session id and time range",
+				sessionID:  "mcp-sess-123",
+				startISO:   "2026-11-01T00:00:00Z",
+				endISO:     "2026-11-02T00:00:00Z",
+				statusCode: http.StatusOK,
+				respBody:   "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Sunday is free\"}]}}\n\n",
+				wantSubstr: "Sunday is free",
+			},
+			{
+				name:       "calendar 500 error",
+				statusCode: http.StatusInternalServerError,
+				respBody:   "internal server error",
+				wantErr:    true,
+			},
+			{
+				name:       "calendar RPC error payload",
+				statusCode: http.StatusOK,
+				respBody:   `{"jsonrpc":"2.0","id":1,"error":{"message":"tool execution failed"}}`,
+				wantErr:    true,
+			},
+			{
+				name:       "calendar empty results",
+				statusCode: http.StatusOK,
+				respBody:   `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`,
+				wantSubstr: "No matching",
+			},
+			{
+				name:       "calendar bad json payload",
+				statusCode: http.StatusOK,
+				respBody:   `not-json`,
+				wantErr:    true,
+			},
+			{
+				name:        "calendar network error",
+				overrideURL: "http://127.0.0.1:1",
+				wantErr:     true,
+			},
+			{
+				name:        "calendar request creation error",
+				overrideURL: ":\x7f",
+				wantErr:     true,
+			},
+			{
+				name:        "calendar empty url returns unavailable",
+				overrideURL: "none",
+				wantSubstr:  "unavailable",
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				runConsultCalendarCase(t, tc)
+			})
+		}
+	})
+
+	t.Run("ConsultMemory", func(t *testing.T) {
+		t.Parallel()
+		tests := []consultTestCase{
+			{
+				name:       "memory success",
+				statusCode: http.StatusOK,
+				respBody:   "Fact 1: User prefers coffee\nFact 2: Office on 3rd floor",
+				wantSubstr: "User prefers coffee",
+			},
+			{
+				name:       "memory 500 error",
+				statusCode: http.StatusInternalServerError,
+				respBody:   "internal error",
+				wantErr:    true,
+			},
+			{
+				name:       "memory empty body",
+				statusCode: http.StatusOK,
+				respBody:   "   ",
+				wantSubstr: "No relevant",
+			},
+			{
+				name:        "memory network error",
+				overrideURL: "http://127.0.0.1:1",
+				wantErr:     true,
+			},
+			{
+				name:        "memory request creation error",
+				overrideURL: ":\x7f",
+				wantErr:     true,
+			},
+			{
+				name:        "memory empty url returns unavailable",
+				overrideURL: "none",
+				wantSubstr:  "unavailable",
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				runConsultMemoryCase(t, tc)
+			})
+		}
+	})
+}
+
+func runConsultCalendarCase(t *testing.T, tc consultTestCase) {
+	t.Helper()
+	calURL := tc.overrideURL
+	if tc.overrideURL == "none" {
+		calURL = ""
+	} else if calURL == "" {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if tc.sessionID != "" {
+				w.Header().Set("Mcp-Session-Id", tc.sessionID)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if tc.statusCode != 0 {
+				w.WriteHeader(tc.statusCode)
+			}
+			_, _ = w.Write([]byte(tc.respBody))
+		}))
+		t.Cleanup(server.Close)
+		calURL = server.URL
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			memURL := tc.overrideURL
-			if tc.overrideURL == "none" {
-				memURL = ""
-			} else if memURL == "" {
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "text/plain")
-					if tc.statusCode != 0 {
-						w.WriteHeader(tc.statusCode)
-					}
-					_, _ = w.Write([]byte(tc.respBody))
-				}))
-				t.Cleanup(server.Close)
-				memURL = server.URL
-			}
+	client := NewHTTPContextConsultClient(calURL, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
 
-			client := NewHTTPContextConsultClient("", memURL)
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			defer cancel()
+	res, err := client.ConsultCalendar(ctx, "q", tc.startISO, tc.endISO)
+	assertConsultOutcome(t, res, err, tc.wantErr, tc.wantSubstr)
+}
 
-			res, err := client.ConsultMemory(ctx, "q")
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
+func runConsultMemoryCase(t *testing.T, tc consultTestCase) {
+	t.Helper()
+	memURL := tc.overrideURL
+	if tc.overrideURL == "none" {
+		memURL = ""
+	} else if memURL == "" {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			if tc.statusCode != 0 {
+				w.WriteHeader(tc.statusCode)
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.wantSubstr != "" && !strings.Contains(res, tc.wantSubstr) {
-				t.Fatalf("result %q does not contain %q", res, tc.wantSubstr)
-			}
-		})
+			_, _ = w.Write([]byte(tc.respBody))
+		}))
+		t.Cleanup(server.Close)
+		memURL = server.URL
+	}
+
+	client := NewHTTPContextConsultClient("", memURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	res, err := client.ConsultMemory(ctx, "q")
+	assertConsultOutcome(t, res, err, tc.wantErr, tc.wantSubstr)
+}
+
+func assertConsultOutcome(t *testing.T, res string, err error, wantErr bool, wantSubstr string) {
+	t.Helper()
+	if wantErr {
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wantSubstr != "" && !strings.Contains(res, wantSubstr) {
+		t.Fatalf("result %q does not contain %q", res, wantSubstr)
 	}
 }

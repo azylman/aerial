@@ -24,7 +24,27 @@ import (
 )
 
 func TestStatusHandler(t *testing.T) {
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockServer := newStatusMockServer(t)
+	defer mockServer.Close()
+
+	tests := append(statusHandlerPrimaryCases(), statusHandlerSecondaryCases()...)
+
+	origDockerDefault := dockerSocketClient
+	defer func() { dockerSocketClient = origDockerDefault }()
+	dockerSocketClient = &http.Client{Transport: &roundTripperFunc{fn: func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("hermetic test: docker socket disabled")
+	}}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runStatusHandlerCase(t, tc, mockServer.URL)
+		})
+	}
+}
+
+func newStatusMockServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/brain/ok/tasks"):
@@ -77,30 +97,10 @@ func TestStatusHandler(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer mockServer.Close()
+}
 
-	tests := []struct {
-		name              string
-		method            string
-		useMux            bool
-		brainMode         string
-		gitSyncMode       string
-		k8sMode           string
-		emptyCommit       bool
-		dockerJSON        string
-		pollerRuns        []GitHubRun
-		pollerJobs        map[int64][]GitHubJob
-		yamlContent       string
-		wantCode          int
-		wantClusterStatus string
-		wantOngoingDeploy string
-		wantIsDeploying   bool
-		wantTasks         int
-		wantDeploys       int
-		wantMinServices   int
-		wantServiceName   string
-		wantQuickLink     string
-	}{
+func statusHandlerPrimaryCases() []statusTestCase {
+	return []statusTestCase{
 		{
 			name:              "Basic_DockerFallback",
 			wantCode:          http.StatusOK,
@@ -138,6 +138,11 @@ func TestStatusHandler(t *testing.T) {
 			wantCode:          http.StatusOK,
 			wantClusterStatus: "degraded",
 		},
+	}
+}
+
+func statusHandlerSecondaryCases() []statusTestCase {
+	return []statusTestCase{
 		{
 			name:        "ConcurrentPipelines",
 			gitSyncMode: "swapping",
@@ -193,196 +198,237 @@ func TestStatusHandler(t *testing.T) {
 			wantMinServices: 1,
 		},
 	}
+}
 
-	origDockerDefault := dockerSocketClient
-	defer func() { dockerSocketClient = origDockerDefault }()
-	dockerSocketClient = &http.Client{Transport: &roundTripperFunc{fn: func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("hermetic test: docker socket disabled")
-	}}}
+type statusTestCase struct {
+	name              string
+	method            string
+	useMux            bool
+	brainMode         string
+	gitSyncMode       string
+	k8sMode           string
+	emptyCommit       bool
+	dockerJSON        string
+	pollerRuns        []GitHubRun
+	pollerJobs        map[int64][]GitHubJob
+	yamlContent       string
+	wantCode          int
+	wantClusterStatus string
+	wantOngoingDeploy string
+	wantIsDeploying   bool
+	wantTasks         int
+	wantDeploys       int
+	wantMinServices   int
+	wantServiceName   string
+	wantQuickLink     string
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.dockerJSON != "" {
-				origDocker := dockerSocketClient
-				defer func() { dockerSocketClient = origDocker }()
-				dockerSocketClient = &http.Client{
-					Transport: &roundTripperFunc{
-						fn: func(req *http.Request) (*http.Response, error) {
-							return &http.Response{
-								StatusCode: http.StatusOK,
-								Body:       io.NopCloser(strings.NewReader(tc.dockerJSON)),
-								Header:     make(http.Header),
-							}, nil
-						},
-					},
-				}
-			}
+func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string) {
+	t.Helper()
+	if tc.dockerJSON != "" {
+		origDocker := dockerSocketClient
+		defer func() { dockerSocketClient = origDocker }()
+		dockerSocketClient = &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(tc.dockerJSON)),
+						Header:     make(http.Header),
+					}, nil
+				},
+			},
+		}
+	}
 
-			if tc.pollerRuns != nil {
-				oldPoller := globalGHPoller
-				defer func() { globalGHPoller = oldPoller }()
-				globalGHPoller = &GitHubPoller{
-					cachedRuns: tc.pollerRuns,
-					cachedJobs: tc.pollerJobs,
-				}
-			}
+	if tc.pollerRuns != nil {
+		oldPoller := globalGHPoller
+		defer func() { globalGHPoller = oldPoller }()
+		globalGHPoller = &GitHubPoller{
+			cachedRuns: tc.pollerRuns,
+			cachedJobs: tc.pollerJobs,
+		}
+	}
 
-			cfgFile := ""
-			if tc.yamlContent != "" {
-				tempDir := t.TempDir()
-				cfgFile = filepath.Join(tempDir, "config.yaml")
-				if err := os.WriteFile(cfgFile, []byte(tc.yamlContent), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
+	cfgFile := ""
+	if tc.yamlContent != "" {
+		tempDir := t.TempDir()
+		cfgFile = filepath.Join(tempDir, "config.yaml")
+		if err := os.WriteFile(cfgFile, []byte(tc.yamlContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-			brainURL := ""
-			switch tc.brainMode {
-			case "ok":
-				brainURL = mockServer.URL + "/brain/ok"
-			case "offline":
-				brainURL = "http://127.0.0.1:54321"
-			}
+	brainURL := ""
+	switch tc.brainMode {
+	case "ok":
+		brainURL = mockServerURL + "/brain/ok"
+	case "offline":
+		brainURL = "http://127.0.0.1:54321"
+	}
 
-			gitSyncURL := ""
-			switch tc.gitSyncMode {
-			case "synced":
-				gitSyncURL = mockServer.URL + "/hangar/synced"
-			case "swapping":
-				gitSyncURL = mockServer.URL + "/hangar/swapping"
-			}
+	gitSyncURL := ""
+	switch tc.gitSyncMode {
+	case "synced":
+		gitSyncURL = mockServerURL + "/hangar/synced"
+	case "swapping":
+		gitSyncURL = mockServerURL + "/hangar/swapping"
+	}
 
-			kubeAPIServer := ""
-			switch tc.k8sMode {
-			case "ok":
-				kubeAPIServer = mockServer.URL + "/k8s/ok"
-			case "error500":
-				kubeAPIServer = mockServer.URL + "/k8s/error500"
-			}
+	kubeAPIServer := ""
+	switch tc.k8sMode {
+	case "ok":
+		kubeAPIServer = mockServerURL + "/k8s/ok"
+	case "error500":
+		kubeAPIServer = mockServerURL + "/k8s/error500"
+	}
 
-			commitArg := "testcommit"
-			if tc.emptyCommit {
-				commitArg = ""
-			}
-			var h http.Handler
-			if tc.useMux {
-				cfg := ConsoleConfig{
-					Port:          "8080",
-					BrainURL:      brainURL,
-					GitSyncURL:    gitSyncURL,
-					ConfigPath:    cfgFile,
-					GitCommit:     commitArg,
-					KubeAPIServer: kubeAPIServer,
-				}
-				h = SetupConsoleMux(cfg, nil)
-			} else {
-				h = statusHandler(brainURL, gitSyncURL, cfgFile, commitArg, kubeAPIServer)
-			}
+	commitArg := "testcommit"
+	if tc.emptyCommit {
+		commitArg = ""
+	}
+	var h http.Handler
+	if tc.useMux {
+		cfg := ConsoleConfig{
+			Port:          "8080",
+			BrainURL:      brainURL,
+			GitSyncURL:    gitSyncURL,
+			ConfigPath:    cfgFile,
+			GitCommit:     commitArg,
+			KubeAPIServer: kubeAPIServer,
+		}
+		h = SetupConsoleMux(cfg, nil)
+	} else {
+		h = statusHandler(brainURL, gitSyncURL, cfgFile, commitArg, kubeAPIServer)
+	}
 
-			method := tc.method
-			if method == "" {
-				method = http.MethodGet
-			}
-			req := httptest.NewRequest(method, "/api/status", nil)
-			rr := httptest.NewRecorder()
-			h.ServeHTTP(rr, req)
+	method := tc.method
+	if method == "" {
+		method = http.MethodGet
+	}
+	req := httptest.NewRequest(method, "/api/status", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
 
-			if rr.Code != tc.wantCode {
-				t.Fatalf("expected status %d, got %d", tc.wantCode, rr.Code)
-			}
-			if tc.wantCode != http.StatusOK {
-				return
-			}
+	if rr.Code != tc.wantCode {
+		t.Fatalf("expected status %d, got %d", tc.wantCode, rr.Code)
+	}
+	if tc.wantCode != http.StatusOK {
+		return
+	}
 
-			var resp ClusterResponse
-			if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-				t.Fatalf("failed to decode response: %v", err)
-			}
+	var resp ClusterResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 
-			if tc.wantClusterStatus != "" && resp.ClusterStatus != tc.wantClusterStatus {
-				t.Errorf("expected ClusterStatus %q, got %q", tc.wantClusterStatus, resp.ClusterStatus)
+	assertStatusResponse(t, tc, resp)
+}
+
+func assertStatusResponse(t *testing.T, tc statusTestCase, resp ClusterResponse) {
+	t.Helper()
+	assertStatusBasic(t, tc, resp)
+	assertStatusServices(t, tc, resp)
+}
+
+func assertStatusBasic(t *testing.T, tc statusTestCase, resp ClusterResponse) {
+	t.Helper()
+	if tc.wantClusterStatus != "" && resp.ClusterStatus != tc.wantClusterStatus {
+		t.Errorf("expected ClusterStatus %q, got %q", tc.wantClusterStatus, resp.ClusterStatus)
+	}
+	if tc.wantOngoingDeploy != "" {
+		if resp.OngoingDeploy != "idle" && resp.OngoingDeploy != "swapping" && resp.OngoingDeploy != "building" {
+			t.Errorf("unexpected OngoingDeploy: %q", resp.OngoingDeploy)
+		}
+		if tc.wantOngoingDeploy != "idle" && resp.OngoingDeploy != tc.wantOngoingDeploy {
+			t.Errorf("expected OngoingDeploy %q, got %q", tc.wantOngoingDeploy, resp.OngoingDeploy)
+		}
+	}
+	if tc.wantIsDeploying != resp.IsDeploying {
+		t.Errorf("expected IsDeploying %v, got %v", tc.wantIsDeploying, resp.IsDeploying)
+	}
+	assertStatusActiveTasks(t, tc, resp)
+	assertStatusDeployments(t, tc, resp)
+}
+
+func assertStatusActiveTasks(t *testing.T, tc statusTestCase, resp ClusterResponse) {
+	t.Helper()
+	if tc.brainMode == "ok" {
+		if resp.ActiveTasksCount != tc.wantTasks || len(resp.ActiveTasks) != tc.wantTasks {
+			t.Fatalf("expected %d active tasks, got %d: %+v", tc.wantTasks, resp.ActiveTasksCount, resp.ActiveTasks)
+		}
+		if len(resp.ActiveTasks) > 0 {
+			task := resp.ActiveTasks[0]
+			if task.ID != "task-abc" || task.SessionID != "session-456" || task.TriggerType != "discord" || task.Summary != "Test execution prompt summary" || task.Status != "PROCESSING" || task.AuthorName != "UserA" {
+				t.Errorf("unexpected task contents: %+v", task)
 			}
-			if tc.wantOngoingDeploy != "" {
-				if resp.OngoingDeploy != "idle" && resp.OngoingDeploy != "swapping" && resp.OngoingDeploy != "building" {
-					t.Errorf("unexpected OngoingDeploy: %q", resp.OngoingDeploy)
-				}
-				if tc.wantOngoingDeploy != "idle" && resp.OngoingDeploy != tc.wantOngoingDeploy {
-					t.Errorf("expected OngoingDeploy %q, got %q", tc.wantOngoingDeploy, resp.OngoingDeploy)
-				}
+		}
+	}
+	if tc.brainMode == "offline" {
+		if resp.ActiveTasksCount != 0 {
+			t.Errorf("expected 0 active tasks on degraded brain, got %d", resp.ActiveTasksCount)
+		}
+		if resp.ActiveTasks == nil || len(resp.ActiveTasks) != 0 {
+			t.Errorf("expected non-nil empty ActiveTasks on degraded brain, got %+v", resp.ActiveTasks)
+		}
+	}
+}
+
+func assertStatusDeployments(t *testing.T, tc statusTestCase, resp ClusterResponse) {
+	t.Helper()
+	if tc.wantDeploys > 0 {
+		if len(resp.Deployments) != tc.wantDeploys {
+			t.Fatalf("expected %d deployments, got %d", tc.wantDeploys, len(resp.Deployments))
+		}
+		stages := map[string]string{}
+		for _, d := range resp.Deployments {
+			stages[d.Commit] = d.Stage
+		}
+		if stages["aaaaaaa"] != "swapping" {
+			t.Errorf("expected commit aaaaaaa swapping, got %q", stages["aaaaaaa"])
+		}
+		if stages["bbbbbbb"] != "building" {
+			t.Errorf("expected commit bbbbbbb building, got %q", stages["bbbbbbb"])
+		}
+	}
+}
+
+func assertStatusServices(t *testing.T, tc statusTestCase, resp ClusterResponse) {
+	t.Helper()
+	if tc.wantMinServices > 0 && len(resp.Services) < tc.wantMinServices {
+		t.Errorf("expected at least %d services, got %d", tc.wantMinServices, len(resp.Services))
+	}
+	for _, svc := range resp.Services {
+		if svc.UptimeSeconds < 0 {
+			t.Errorf("service %s has negative uptime: %d", svc.Name, svc.UptimeSeconds)
+		}
+	}
+	if tc.wantServiceName != "" {
+		found := false
+		for _, s := range resp.Services {
+			if s.Name == tc.wantServiceName {
+				found = true
+				break
 			}
-			if tc.wantIsDeploying != resp.IsDeploying {
-				t.Errorf("expected IsDeploying %v, got %v", tc.wantIsDeploying, resp.IsDeploying)
+		}
+		if !found {
+			t.Errorf("expected service %q, got services: %+v", tc.wantServiceName, resp.Services)
+		}
+	}
+	if tc.wantQuickLink != "" {
+		found := false
+		for _, l := range resp.QuickLaunchLinks {
+			if l.Name == tc.wantQuickLink {
+				found = true
+				break
 			}
-			if tc.brainMode == "ok" {
-				if resp.ActiveTasksCount != tc.wantTasks || len(resp.ActiveTasks) != tc.wantTasks {
-					t.Fatalf("expected %d active tasks, got %d: %+v", tc.wantTasks, resp.ActiveTasksCount, resp.ActiveTasks)
-				}
-				if len(resp.ActiveTasks) > 0 {
-					task := resp.ActiveTasks[0]
-					if task.ID != "task-abc" || task.SessionID != "session-456" || task.TriggerType != "discord" || task.Summary != "Test execution prompt summary" || task.Status != "PROCESSING" || task.AuthorName != "UserA" {
-						t.Errorf("unexpected task contents: %+v", task)
-					}
-				}
-			}
-			if tc.brainMode == "offline" {
-				if resp.ActiveTasksCount != 0 {
-					t.Errorf("expected 0 active tasks on degraded brain, got %d", resp.ActiveTasksCount)
-				}
-				if resp.ActiveTasks == nil || len(resp.ActiveTasks) != 0 {
-					t.Errorf("expected non-nil empty ActiveTasks on degraded brain, got %+v", resp.ActiveTasks)
-				}
-			}
-			if tc.wantDeploys > 0 {
-				if len(resp.Deployments) != tc.wantDeploys {
-					t.Fatalf("expected %d deployments, got %d", tc.wantDeploys, len(resp.Deployments))
-				}
-				stages := map[string]string{}
-				for _, d := range resp.Deployments {
-					stages[d.Commit] = d.Stage
-				}
-				if stages["aaaaaaa"] != "swapping" {
-					t.Errorf("expected commit aaaaaaa swapping, got %q", stages["aaaaaaa"])
-				}
-				if stages["bbbbbbb"] != "building" {
-					t.Errorf("expected commit bbbbbbb building, got %q", stages["bbbbbbb"])
-				}
-			}
-			if tc.wantMinServices > 0 && len(resp.Services) < tc.wantMinServices {
-				t.Errorf("expected at least %d services, got %d", tc.wantMinServices, len(resp.Services))
-			}
-			for _, svc := range resp.Services {
-				if svc.UptimeSeconds < 0 {
-					t.Errorf("service %s has negative uptime: %d", svc.Name, svc.UptimeSeconds)
-				}
-			}
-			if tc.wantServiceName != "" {
-				found := false
-				for _, s := range resp.Services {
-					if s.Name == tc.wantServiceName {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("expected service %q, got services: %+v", tc.wantServiceName, resp.Services)
-				}
-			}
-			if tc.wantQuickLink != "" {
-				found := false
-				for _, l := range resp.QuickLaunchLinks {
-					if l.Name == tc.wantQuickLink {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("expected quick link %q in %+v", tc.wantQuickLink, resp.QuickLaunchLinks)
-				}
-				if resp.GitSync.Status != "synced" {
-					t.Errorf("expected GitSync status 'synced', got %q", resp.GitSync.Status)
-				}
-			}
-		})
+		}
+		if !found {
+			t.Errorf("expected quick link %q in %+v", tc.wantQuickLink, resp.QuickLaunchLinks)
+		}
+		if resp.GitSync.Status != "synced" {
+			t.Errorf("expected GitSync status 'synced', got %q", resp.GitSync.Status)
+		}
 	}
 }
 

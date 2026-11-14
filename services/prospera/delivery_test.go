@@ -438,25 +438,27 @@ func TestFlushLiveTranscript(t *testing.T) {
 	}
 }
 
+type deliverCallReportTestCase struct {
+	name          string
+	initialStatus string
+	direction     string
+	fromNumber    string
+	toNumber      string
+	geminiCode    int
+	geminiResp    string
+	discordCode   int
+	recordingWAV  []byte
+	wantDelivered bool
+	wantFailed    bool
+	wantErr       bool
+	wantWith      string
+	wantFilename  string
+}
+
 func TestDeliverCallReport(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name          string
-		initialStatus string
-		direction     string
-		fromNumber    string
-		toNumber      string
-		geminiCode    int
-		geminiResp    string
-		discordCode   int
-		recordingWAV  []byte
-		wantDelivered bool
-		wantFailed    bool
-		wantErr       bool
-		wantWith      string
-		wantFilename  string
-	}{
+	tests := []deliverCallReportTestCase{
 		{
 			name:          "successful report with gemini tools empty",
 			initialStatus: "pending",
@@ -504,90 +506,100 @@ func TestDeliverCallReport(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			store := newMockStoreForDelivery()
-			call := VoiceCall{
-				CallID:       "call-rep-1",
-				ReportStatus: tc.initialStatus,
-				Direction:    tc.direction,
-				FromNumber:   tc.fromNumber,
-				ToNumber:     tc.toNumber,
-				Transcript: []TranscriptTurn{
-					{Role: "user", Text: "Book table for 2"},
-					{Role: "model", Text: "Table booked for 7pm"},
-				},
-			}
-			_ = store.CreateOutboundCall(context.Background(), call, 5)
-
-			var deliveredDiscordMsg string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.Contains(r.URL.Path, "generateContent") {
-					if strings.Contains(r.URL.Path, "live") {
-						t.Errorf("REST generateContent should not use live websocket model in path: %s", r.URL.Path)
-					}
-					var reqBody map[string]any
-					_ = json.NewDecoder(r.Body).Decode(&reqBody)
-					tools, hasTools := reqBody["tools"].([]any)
-					if !hasTools || len(tools) != 0 {
-						t.Errorf("expected empty tools array in gemini request, got %v", reqBody["tools"])
-					}
-					w.WriteHeader(tc.geminiCode)
-					_, _ = w.Write([]byte(tc.geminiResp))
-					return
-				}
-				if tc.discordCode != 0 {
-					w.WriteHeader(tc.discordCode)
-					return
-				}
-				bodyBytes, _ := io.ReadAll(r.Body)
-				deliveredDiscordMsg = string(bodyBytes)
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer srv.Close()
-
-			cfg := &Config{
-				BrainURL:              srv.URL,
-				GeminiAPIKey:          "test-key",
-				GeminiFallbackModel:   "gemini-3.1-flash-live-preview",
-				DefaultDiscordChannel: "prospera",
-			}
-
-			reporter := NewReporter(staticConfig{cfg: cfg},
-				store,
-				&mockTwilioForDelivery{},
-				WithReporterHTTPClient(srv.Client()),
-				WithReporterGeminiBaseURL(srv.URL),
-				WithReporterRecordingProvider(func(id string) []byte {
-					return tc.recordingWAV
-				}),
-			)
-			err := reporter.DeliverCallReport(context.Background(), call.CallID)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-			} else if err != nil {
-				t.Fatalf("DeliverCallReport() error: %v", err)
-			}
-
-			updated, _ := store.GetCall(context.Background(), call.CallID)
-			isDelivered := updated.ReportStatus == "delivered"
-			if isDelivered != tc.wantDelivered {
-				t.Fatalf("report status = %s, want delivered=%v", updated.ReportStatus, tc.wantDelivered)
-			}
-			if tc.wantFailed && updated.ReportStatus != "failed" {
-				t.Fatalf("report status = %s, want failed", updated.ReportStatus)
-			}
-			if tc.wantDelivered && updated.LiveTranscriptCursor != len(call.Transcript) {
-				t.Fatalf("LiveTranscriptCursor = %d, want %d", updated.LiveTranscriptCursor, len(call.Transcript))
-			}
-			if tc.wantWith != "" && !strings.Contains(deliveredDiscordMsg, tc.wantWith) {
-				t.Fatalf("delivered discord msg %q does not contain wantWith %q", deliveredDiscordMsg, tc.wantWith)
-			}
-			if tc.wantFilename != "" && !strings.Contains(deliveredDiscordMsg, tc.wantFilename) {
-				t.Fatalf("delivered discord msg %q does not contain wantFilename %q", deliveredDiscordMsg, tc.wantFilename)
-			}
+			runDeliverCallReportCase(t, tc)
 		})
+	}
+}
+
+func runDeliverCallReportCase(t *testing.T, tc deliverCallReportTestCase) {
+	t.Helper()
+
+	store := newMockStoreForDelivery()
+	call := VoiceCall{
+		CallID:       "call-rep-1",
+		ReportStatus: tc.initialStatus,
+		Direction:    tc.direction,
+		FromNumber:   tc.fromNumber,
+		ToNumber:     tc.toNumber,
+		Transcript: []TranscriptTurn{
+			{Role: "user", Text: "Book table for 2"},
+			{Role: "model", Text: "Table booked for 7pm"},
+		},
+	}
+	_ = store.CreateOutboundCall(context.Background(), call, 5)
+
+	var deliveredDiscordMsg string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "generateContent") {
+			if strings.Contains(r.URL.Path, "live") {
+				t.Errorf("REST generateContent should not use live websocket model in path: %s", r.URL.Path)
+			}
+			var reqBody map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&reqBody)
+			tools, hasTools := reqBody["tools"].([]any)
+			if !hasTools || len(tools) != 0 {
+				t.Errorf("expected empty tools array in gemini request, got %v", reqBody["tools"])
+			}
+			w.WriteHeader(tc.geminiCode)
+			_, _ = w.Write([]byte(tc.geminiResp))
+			return
+		}
+		if tc.discordCode != 0 {
+			w.WriteHeader(tc.discordCode)
+			return
+		}
+		bodyBytes, _ := io.ReadAll(r.Body)
+		deliveredDiscordMsg = string(bodyBytes)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		BrainURL:              srv.URL,
+		GeminiAPIKey:          "test-key",
+		GeminiFallbackModel:   "gemini-3.1-flash-live-preview",
+		DefaultDiscordChannel: "prospera",
+	}
+
+	reporter := NewReporter(staticConfig{cfg: cfg},
+		store,
+		&mockTwilioForDelivery{},
+		WithReporterHTTPClient(srv.Client()),
+		WithReporterGeminiBaseURL(srv.URL),
+		WithReporterRecordingProvider(func(id string) []byte {
+			return tc.recordingWAV
+		}),
+	)
+	err := reporter.DeliverCallReport(context.Background(), call.CallID)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	} else if err != nil {
+		t.Fatalf("DeliverCallReport() error: %v", err)
+	}
+
+	assertDeliverCallReportResult(t, tc, store, call, deliveredDiscordMsg)
+}
+
+func assertDeliverCallReportResult(t *testing.T, tc deliverCallReportTestCase, store *mockStoreForDelivery, call VoiceCall, deliveredDiscordMsg string) {
+	t.Helper()
+	updated, _ := store.GetCall(context.Background(), call.CallID)
+	isDelivered := updated.ReportStatus == "delivered"
+	if isDelivered != tc.wantDelivered {
+		t.Fatalf("report status = %s, want delivered=%v", updated.ReportStatus, tc.wantDelivered)
+	}
+	if tc.wantFailed && updated.ReportStatus != "failed" {
+		t.Fatalf("report status = %s, want failed", updated.ReportStatus)
+	}
+	if tc.wantDelivered && updated.LiveTranscriptCursor != len(call.Transcript) {
+		t.Fatalf("LiveTranscriptCursor = %d, want %d", updated.LiveTranscriptCursor, len(call.Transcript))
+	}
+	if tc.wantWith != "" && !strings.Contains(deliveredDiscordMsg, tc.wantWith) {
+		t.Fatalf("delivered discord msg %q does not contain wantWith %q", deliveredDiscordMsg, tc.wantWith)
+	}
+	if tc.wantFilename != "" && !strings.Contains(deliveredDiscordMsg, tc.wantFilename) {
+		t.Fatalf("delivered discord msg %q does not contain wantFilename %q", deliveredDiscordMsg, tc.wantFilename)
 	}
 }
 
@@ -871,113 +883,70 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 	})
 }
 
-func TestDelivery_GeminiSummaryBranches(t *testing.T) {
+type transcriptionBranchTestCase struct {
+	name       string
+	backend    string
+	code       int
+	body       string
+	wantErr    bool
+	wantResult string
+}
+
+func TestDelivery_TranscriptionAndSummaryBranches(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name    string
-		code    int
-		body    string
-		wantErr bool
-	}{
-		{"http 500", http.StatusInternalServerError, `server error`, true},
-		{"bad json", http.StatusOK, `{invalid json`, true},
-		{"empty candidates", http.StatusOK, `{"candidates":[]}`, true},
-		{"success", http.StatusOK, `{"candidates":[{"content":{"parts":[{"text":"summary text"}]}}]}`, false},
+	tests := []transcriptionBranchTestCase{
+		{"summary http 500", "gemini_summary", http.StatusInternalServerError, `server error`, true, ""},
+		{"summary bad json", "gemini_summary", http.StatusOK, `{invalid json`, true, ""},
+		{"summary empty candidates", "gemini_summary", http.StatusOK, `{"candidates":[]}`, true, ""},
+		{"summary success", "gemini_summary", http.StatusOK, `{"candidates":[{"content":{"parts":[{"text":"summary text"}]}}]}`, false, "summary text"},
+		{"whisper http 500", "whisper", http.StatusInternalServerError, `server error`, true, ""},
+		{"whisper bad json", "whisper", http.StatusOK, `{bad json`, true, ""},
+		{"whisper success", "whisper", http.StatusOK, `{"text":"hello from whisper"}`, false, "hello from whisper"},
+		{"flash http 500", "flash", http.StatusInternalServerError, `server error`, true, ""},
+		{"flash bad json", "flash", http.StatusOK, `{bad json`, true, ""},
+		{"flash empty candidates", "flash", http.StatusOK, `{"candidates":[]}`, true, ""},
+		{"flash success", "flash", http.StatusOK, `{"candidates":[{"content":{"parts":[{"text":"flash text"}]}}]}`, false, "flash text"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.code)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			t.Cleanup(srv.Close)
-
-			cfg := &Config{
-				GeminiAPIKey:        "test-key",
-				GeminiFallbackModel: "gemini-2.5-flash",
-			}
-			rep := NewReporter(staticConfig{cfg: cfg}, nil, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
-			res, err := rep.generateGeminiSummary(context.Background(), rep.cfgSrc.Current(), "test prompt")
-			if tc.wantErr && err == nil {
-				t.Fatalf("%s: expected error, got nil", tc.name)
-			}
-			if !tc.wantErr && (err != nil || res != "summary text") {
-				t.Fatalf("%s: unexpected result (%q, %v)", tc.name, res, err)
-			}
+			runTranscriptionBranchCase(t, tc)
 		})
 	}
 }
 
-func TestDelivery_WhisperBranches(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		code    int
-		body    string
-		wantErr bool
-	}{
-		{"http 500", http.StatusInternalServerError, `server error`, true},
-		{"bad json", http.StatusOK, `{bad json`, true},
-		{"success", http.StatusOK, `{"text":"hello from whisper"}`, false},
+func runTranscriptionBranchCase(t *testing.T, tc transcriptionBranchTestCase) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(tc.code)
+		_, _ = w.Write([]byte(tc.body))
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := &Config{
+		GeminiAPIKey:        "test-key",
+		GeminiFallbackModel: "gemini-2.5-flash",
+		WhisperURL:          srv.URL,
+	}
+	rep := NewReporter(staticConfig{cfg: cfg}, nil, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
+
+	var res string
+	var err error
+	switch tc.backend {
+	case "gemini_summary":
+		res, err = rep.generateGeminiSummary(context.Background(), rep.cfgSrc.Current(), "test prompt")
+	case "whisper":
+		res, err = rep.transcribeViaWhisper(context.Background(), rep.cfgSrc.Current(), []byte("audio"))
+	case "flash":
+		res, err = rep.transcribeViaGeminiFlash(context.Background(), rep.cfgSrc.Current(), []byte("audio"), "audio/wav")
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.code)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			t.Cleanup(srv.Close)
-
-			cfg := &Config{WhisperURL: srv.URL}
-			rep := NewReporter(staticConfig{cfg: cfg}, nil, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
-			res, err := rep.transcribeViaWhisper(context.Background(), rep.cfgSrc.Current(), []byte("audio"))
-			if tc.wantErr && err == nil {
-				t.Fatalf("%s: expected error, got nil", tc.name)
-			}
-			if !tc.wantErr && (err != nil || res != "hello from whisper") {
-				t.Fatalf("%s: unexpected result (%q, %v)", tc.name, res, err)
-			}
-		})
+	if tc.wantErr && err == nil {
+		t.Fatalf("%s: expected error, got nil", tc.name)
 	}
-}
-
-func TestDelivery_GeminiFlashBranches(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		code    int
-		body    string
-		wantErr bool
-	}{
-		{"http 500", http.StatusInternalServerError, `server error`, true},
-		{"bad json", http.StatusOK, `{bad json`, true},
-		{"empty candidates", http.StatusOK, `{"candidates":[]}`, true},
-		{"success", http.StatusOK, `{"candidates":[{"content":{"parts":[{"text":"flash text"}]}}]}`, false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.code)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			t.Cleanup(srv.Close)
-
-			cfg := &Config{GeminiAPIKey: "test-key"}
-			rep := NewReporter(staticConfig{cfg: cfg}, nil, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
-			res, err := rep.transcribeViaGeminiFlash(context.Background(), rep.cfgSrc.Current(), []byte("audio"), "audio/wav")
-			if tc.wantErr && err == nil {
-				t.Fatalf("%s: expected error, got nil", tc.name)
-			}
-			if !tc.wantErr && (err != nil || res != "flash text") {
-				t.Fatalf("%s: unexpected result (%q, %v)", tc.name, res, err)
-			}
-		})
+	if !tc.wantErr && (err != nil || res != tc.wantResult) {
+		t.Fatalf("%s: unexpected result (%q, %v)", tc.name, res, err)
 	}
 }
 
