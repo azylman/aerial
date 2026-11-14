@@ -1,0 +1,85 @@
+package queue
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/eri/pkg/db"
+)
+
+func (p *WorkerPool) publishDispatchOutcome(ctx context.Context, d db.Dispatch, status, errMsg string, startedAt, completedAt time.Time) error {
+	bus := p.EventBus()
+	if bus == nil {
+		return errors.New("event bus is nil")
+	}
+
+	normStatus := strings.ToLower(strings.TrimSpace(status))
+	if normStatus == "success" {
+		normStatus = "completed"
+	}
+	if normStatus == "" {
+		normStatus = "completed"
+	}
+
+	durMs := max(0, completedAt.Sub(startedAt).Milliseconds())
+
+	chunkID := strings.TrimSpace(d.VanadisChunkID)
+	if chunkID == "" {
+		extractedChunk, _, _ := extractVanadisDispatchInfo(&d)
+		chunkID = extractedChunk
+	}
+
+	ev := pubsub.DispatchOutcomeEvent{
+		DispatchID:     d.ID,
+		Source:         d.Source,
+		SessionID:      d.SessionID,
+		TargetID:       d.TargetID,
+		VanadisChunkID: chunkID,
+		Status:         normStatus,
+		Error:          errMsg,
+		StartedAt:      startedAt,
+		CompletedAt:    completedAt,
+		DurationMs:     durMs,
+	}
+
+	subject := pubsub.SubjectAerialDispatchPrefix + normStatus
+	msgID := fmt.Sprintf("dispatch:%s:%s", d.ID, normStatus)
+
+	return bus.Publish(ctx, subject, msgID, ev)
+}
+
+func (p *WorkerPool) setupVanadisChunkTurn(d db.Dispatch, te *turnExecution) func() {
+	chunkID, buildID, chunkIdx := extractVanadisDispatchInfo(&d)
+	if chunkID == "" {
+		return func() {}
+	}
+	// Widget edits ride the turn's trace but must not be aborted by an interrupt.
+	widgetCtx := context.WithoutCancel(te.turnCtxValue())
+	p.StartChunkStepTurn(widgetCtx, chunkID, buildID, chunkIdx, d.ID)
+	p.ensureChunkWidgetHydrated(widgetCtx, d.Prompt, chunkID, buildID)
+	te.statusUpdater = NewChunkStepStatusUpdater(chunkID, func(step string) error {
+		return p.FlushChunkActiveStep(widgetCtx, chunkID, d.ID, step)
+	})
+	return func() {
+		if te.statusUpdater != nil {
+			te.statusUpdater.Stop()
+			te.statusUpdater.DeleteStatusMessage()
+		}
+		p.FinishChunkStepTurn(widgetCtx, chunkID, d.ID)
+		if d.Source == "vanadis" && (p.ctx == nil || p.ctx.Err() == nil) && !te.isInterrupted() {
+			var pubErr error
+			if p.EventBus() != nil {
+				pubCtx, cancel := context.WithTimeout(context.WithoutCancel(te.turnCtxValue()), 5*time.Second)
+				pubErr = p.publishDispatchOutcome(pubCtx, d, te.turnStatus, te.turnError, te.execStart, time.Now().UTC())
+				cancel()
+			}
+			if p.EventBus() == nil || pubErr != nil {
+				p.notifyVanadisChunkOutcome(chunkID, te.turnStatus, te.turnError, d.ID)
+			}
+		}
+	}
+}
