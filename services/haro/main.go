@@ -85,6 +85,10 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	if port == "" {
 		return fmt.Errorf("app: port cannot be empty")
 	}
+	brainURL := strings.TrimSpace(cfg.BrainURL)
+	if brainURL == "" {
+		return fmt.Errorf("app: brain URL cannot be empty")
+	}
 
 	database, err := openDBFn(cfg)
 	if err != nil {

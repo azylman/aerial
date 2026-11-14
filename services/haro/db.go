@@ -717,7 +717,12 @@ func validateVanadisTarget(ctx context.Context, baseURL, source, target string) 
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 		return fmt.Errorf("failed to decode %s %q response: %w", entityName, target, err)
 	}
-	status := firstNonEmpty(res.Build.Status, res.Chunk.Status, res.Status)
+	var status string
+	if source == "vanadis_chunk" {
+		status = firstNonEmpty(res.Chunk.Status, res.Status)
+	} else {
+		status = firstNonEmpty(res.Build.Status, res.Status)
+	}
 	if terminalStates[strings.ToLower(strings.TrimSpace(status))] {
 		return fmt.Errorf("%s %q is already in terminal state %q", entityName, target, status)
 	}

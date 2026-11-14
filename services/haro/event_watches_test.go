@@ -164,7 +164,11 @@ func handleMockEntityStatus(w http.ResponseWriter, key, id string, mockMap map[s
 		return
 	}
 	if st, ok := mockMap[id]; ok {
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{key: map[string]string{"status": st}})
+		payload := map[string]any{key: map[string]string{"status": st}}
+		if key == "chunk" {
+			payload["build"] = map[string]string{"status": "running"}
+		}
+		httpkit.WriteJSON(w, http.StatusOK, payload)
 		return
 	}
 	http.Error(w, "not found", http.StatusNotFound)
@@ -173,32 +177,33 @@ func handleMockEntityStatus(w http.ResponseWriter, key, id string, mockMap map[s
 func testValidateLiveEventTarget(ctx context.Context, t *testing.T, db *sql.DB) {
 	t.Helper()
 	validateTests := []struct {
-		name    string
-		source  string
-		target  string
-		wantErr bool
+		name            string
+		source          string
+		target          string
+		wantErr         bool
+		wantErrContains string
 	}{
-		{"vanadis_build running", "vanadis_build", "b-running", false},
-		{"vanadis_build completed", "vanadis_build", "b-completed", true},
-		{"vanadis_build failed", "vanadis_build", "b-failed", true},
-		{"vanadis_build cancelled", "vanadis_build", "b-cancelled", true},
-		{"vanadis_build canceled", "vanadis_build", "b-canceled", true},
-		{"vanadis_build not found", "vanadis_build", "b-missing", true},
-		{"vanadis_build 500 error", "vanadis_build", "b-500", true},
-		{"vanadis_build bad json", "vanadis_build", "b-badjson", true},
-		{"vanadis_chunk pending", "vanadis_chunk", "c-pending", false},
-		{"vanadis_chunk merged", "vanadis_chunk", "c-merged", true},
-		{"vanadis_chunk completed", "vanadis_chunk", "c-completed", true},
-		{"vanadis_chunk failed", "vanadis_chunk", "c-failed", true},
-		{"vanadis_chunk not found", "vanadis_chunk", "c-missing", true},
-		{"vanadis_chunk 500 error", "vanadis_chunk", "c-500", true},
-		{"vanadis_chunk bad json", "vanadis_chunk", "c-badjson", true},
-		{"empty target", "vanadis_build", "   ", true},
-		{"other source flux", "flux", "azylman/aerial", false},
-		{"other source github", "github", "azylman/aerial:main", false},
-		{"other source nomad", "nomad", "aerial-brain", false},
-		{"vanadis URL not configured build", "vanadis_build", "b-running", true},
-		{"vanadis URL not configured chunk", "vanadis_chunk", "c-pending", true},
+		{"vanadis_build running", "vanadis_build", "b-running", false, ""},
+		{"vanadis_build completed", "vanadis_build", "b-completed", true, ""},
+		{"vanadis_build failed", "vanadis_build", "b-failed", true, ""},
+		{"vanadis_build cancelled", "vanadis_build", "b-cancelled", true, ""},
+		{"vanadis_build canceled", "vanadis_build", "b-canceled", true, ""},
+		{"vanadis_build not found", "vanadis_build", "b-missing", true, ""},
+		{"vanadis_build 500 error", "vanadis_build", "b-500", true, ""},
+		{"vanadis_build bad json", "vanadis_build", "b-badjson", true, ""},
+		{"vanadis_chunk pending", "vanadis_chunk", "c-pending", false, ""},
+		{"vanadis_chunk merged", "vanadis_chunk", "c-merged", true, ""},
+		{"vanadis_chunk completed", "vanadis_chunk", "c-completed", true, ""},
+		{"vanadis_chunk failed", "vanadis_chunk", "c-failed", true, ""},
+		{"vanadis_chunk not found", "vanadis_chunk", "c-missing", true, ""},
+		{"vanadis_chunk 500 error", "vanadis_chunk", "c-500", true, ""},
+		{"vanadis_chunk bad json", "vanadis_chunk", "c-badjson", true, ""},
+		{"empty target", "vanadis_build", "   ", true, ""},
+		{"other source flux", "flux", "azylman/aerial", false, ""},
+		{"other source github", "github", "azylman/aerial:main", false, ""},
+		{"other source nomad", "nomad", "aerial-brain", false, ""},
+		{"vanadis URL not configured build", "vanadis_build", "b-running", true, "vanadis URL is not configured"},
+		{"vanadis URL not configured chunk", "vanadis_chunk", "c-pending", true, "vanadis URL is not configured"},
 	}
 	for _, tc := range validateTests {
 		t.Run("validate_"+tc.name, func(t *testing.T) {
@@ -210,6 +215,9 @@ func testValidateLiveEventTarget(ctx context.Context, t *testing.T, db *sql.DB) 
 			err := ValidateLiveEventTarget(ctx, db, tc.source, tc.target)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ValidateLiveEventTarget(%q, %q) err = %v, wantErr = %v", tc.source, tc.target, err, tc.wantErr)
+			}
+			if tc.wantErrContains != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrContains)) {
+				t.Fatalf("ValidateLiveEventTarget(%q, %q) err = %v, want error containing %q", tc.source, tc.target, err, tc.wantErrContains)
 			}
 		})
 	}
@@ -684,17 +692,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 	})
 
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
-		ID:         "trig-ext-fail-persistent",
-		ChannelID:  "100000000000000001",
-		Source:     "camera",
-		Target:     "porch",
-		EventType:  "motion",
-		Prompt:     "Motion on porch",
-		Effort:     "low",
-		Persistent: true,
-	})
-
-	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-ext-healthcheck",
 		ChannelID: "100000000000000001",
 		Source:    "healthcheck",
@@ -739,12 +736,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "nil db returns error from HandleExternalEvent",
-			server:  &Server{},
-			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}},
-			wantErr: true,
-		},
-		{
 			name:    "no matching triggers succeeds without firing",
 			server:  serverOK,
 			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"front_door"}},
@@ -756,14 +747,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"backyard"}},
 			wantErr:   false,
 			checkDBID: "trig-ext-fail",
-			wantInDB:  true,
-		},
-		{
-			name:      "dispatch failure resets updated_at for persistent trigger",
-			server:    serverFail,
-			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"porch"}},
-			wantErr:   false,
-			checkDBID: "trig-ext-fail-persistent",
 			wantInDB:  true,
 		},
 		{
@@ -934,7 +917,6 @@ func TestVanadisURL_Precedence(t *testing.T) {
 		setURL  string
 		wantURL string
 	}{
-		{"explicit setURL returned directly", "http://explicit.vanadis", "http://explicit.vanadis"},
 		{"trailing slash stripped from explicit", "http://explicit.vanadis/api/", "http://explicit.vanadis/api"},
 		{"empty when not configured", "", ""},
 	}

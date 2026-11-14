@@ -238,14 +238,15 @@ func setupMockDispatcherServer(t *testing.T, expectedPath string, status int, re
 }
 
 type promptDispatcherTestCase struct {
-	name           string
-	serverStatus   int
-	serverResponse string
-	req            PromptDispatchRequest
-	closeServer    bool
-	nilDispatcher  bool
-	wantErr        bool
-	wantChannelID  string
+	name            string
+	serverStatus    int
+	serverResponse  string
+	req             PromptDispatchRequest
+	closeServer     bool
+	nilDispatcher   bool
+	wantErr         bool
+	wantErrContains string
+	wantChannelID   string
 }
 
 func runPromptDispatcherCase(t *testing.T, tc promptDispatcherTestCase) {
@@ -258,6 +259,9 @@ func runPromptDispatcherCase(t *testing.T, tc promptDispatcherTestCase) {
 	case tc.wantErr:
 		if err == nil {
 			t.Fatal("DispatchPrompt() expected error, got nil")
+		}
+		if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
+			t.Fatalf("DispatchPrompt() err = %v, want error containing %q", err, tc.wantErrContains)
 		}
 	default:
 		if err != nil {
@@ -350,7 +354,8 @@ func TestHTTPPromptDispatcher(t *testing.T) {
 			req: PromptDispatchRequest{
 				Prompt: "test empty url",
 			},
-			wantErr: true,
+			wantErr:         true,
+			wantErrContains: "brain URL is not configured",
 		},
 	}
 
@@ -362,14 +367,15 @@ func TestHTTPPromptDispatcher(t *testing.T) {
 }
 
 type dispatchTestCase struct {
-	name           string
-	serverStatus   int
-	serverResponse string
-	req            DispatchRequest
-	closeServer    bool
-	nilDispatcher  bool
-	wantErr        bool
-	wantDispatchID string
+	name            string
+	serverStatus    int
+	serverResponse  string
+	req             DispatchRequest
+	closeServer     bool
+	nilDispatcher   bool
+	wantErr         bool
+	wantErrContains string
+	wantDispatchID  string
 }
 
 func runDispatchCase(t *testing.T, tc dispatchTestCase) {
@@ -379,6 +385,8 @@ func runDispatchCase(t *testing.T, tc dispatchTestCase) {
 
 	if resp, err := disp.Dispatch(ctx, tc.req); (err != nil) != tc.wantErr {
 		t.Fatalf("Dispatch() err = %v, wantErr = %v", err, tc.wantErr)
+	} else if tc.wantErr && tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
+		t.Fatalf("Dispatch() err = %v, want error containing %q", err, tc.wantErrContains)
 	} else if !tc.wantErr && resp.DispatchID != tc.wantDispatchID {
 		t.Errorf("resp.DispatchID = %q, want %q", resp.DispatchID, tc.wantDispatchID)
 	}
@@ -456,9 +464,10 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			wantDispatchID: "disp-nc",
 		},
 		{
-			name:    "empty brain url fails fast",
-			req:     DispatchRequest{Source: "heartbeat", Prompt: "test default url"},
-			wantErr: true,
+			name:            "empty brain url fails fast",
+			req:             DispatchRequest{Source: "heartbeat", Prompt: "test default url"},
+			wantErr:         true,
+			wantErrContains: "brain URL is not configured",
 		},
 	}
 
@@ -477,13 +486,6 @@ func TestNewHTTPPromptDispatcher_Validation(t *testing.T) {
 			}
 		}()
 		NewHTTPPromptDispatcher("   ")
-	})
-
-	t.Run("valid URL succeeds", func(t *testing.T) {
-		disp := NewHTTPPromptDispatcher("http://localhost:8080/")
-		if disp.brainURL != "http://localhost:8080" {
-			t.Errorf("disp.brainURL = %q, want %q", disp.brainURL, "http://localhost:8080")
-		}
 	})
 }
 

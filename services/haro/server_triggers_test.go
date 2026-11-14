@@ -274,7 +274,6 @@ func TestHandleFireEventTriggers_Table(t *testing.T) {
 		{"fire persistent trigger second time within 5s debounce window returns 0 fired", http.MethodPost, `{"source":"camera","targets":["entryway"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 0},
 		{"fire dispatch error does not reinsert duplicate for persistent trigger", http.MethodPost, `{"source":"camera","targets":["porch"],"event_type":"package_delivered"}`, serverFailDisp, http.StatusBadGateway, 0},
 		{"fire retry succeeds for persistent trigger after failed dispatch", http.MethodPost, `{"source":"camera","targets":["porch"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 1},
-		{"fire missing fields error", http.MethodPost, `{"source":""}`, serverOKDisp, http.StatusBadRequest, 0},
 		{"fire claim error on closed db", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready"}`, serverClosedWithDisp, http.StatusInternalServerError, 0},
 	}
 

@@ -108,6 +108,7 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		nil,
 		{Port: "", DatabaseURL: ":memory:", BrainURL: "http://127.0.0.1:59484"},
 		{Port: "-1", DatabaseURL: ":memory:", BrainURL: "http://127.0.0.1:59484"},
+		{Port: "8080", DatabaseURL: ":memory:", BrainURL: ""},
 	} {
 		if err := RunApp(context.Background(), cfg); err == nil {
 			t.Errorf("expected error running app with %v", cfg)

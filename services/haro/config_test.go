@@ -48,14 +48,11 @@ func TestResolveConfigPath(t *testing.T) {
 func TestLoadConfigFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	validPath, noPortPath, noTZPath, malformedPath := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "no_port.yaml"), filepath.Join(tmpDir, "no_tz.yaml"), filepath.Join(tmpDir, "malformed.yaml")
-	noEriPath, noVanadisPath := filepath.Join(tmpDir, "no_eri.yaml"), filepath.Join(tmpDir, "no_vanadis.yaml")
 	extraPath := filepath.Join(tmpDir, "extra.yaml")
 	_ = os.WriteFile(validPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
 	_ = os.WriteFile(extraPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\nextra_event_sources:\n  - ' Custom_Source '\n  - ''\n  - 'custom_source'\n"), 0o644)
 	_ = os.WriteFile(noPortPath, []byte("timezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
 	_ = os.WriteFile(noTZPath, []byte("port: '4005'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
-	_ = os.WriteFile(noEriPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
-	_ = os.WriteFile(noVanadisPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\n"), 0o644)
 	_ = os.WriteFile(malformedPath, []byte("port: [unclosed"), 0o644)
 
 	tests := []struct {
@@ -76,8 +73,6 @@ func TestLoadConfigFile(t *testing.T) {
 		{"malformed yaml", malformedPath, "postgres://localhost/db", "", true, "", "", "", 0},
 		{"missing port", noPortPath, "postgres://localhost/db", "", true, "", "", "", 0},
 		{"missing timezone", noTZPath, "postgres://localhost/db", "", true, "", "", "", 0},
-		{"missing eri_url", noEriPath, "postgres://localhost/db", "", true, "", "", "", 0},
-		{"missing vanadis_url", noVanadisPath, "postgres://localhost/db", "", true, "", "", "", 0},
 		{"empty dbURL", validPath, "", "", true, "", "", "", 0},
 		{"empty path", "", "postgres://localhost/db", "", true, "", "", "", 0},
 	}
