@@ -57,7 +57,7 @@ function openBuild(id: string): void {
 }
 
 /**
- * One renderBuildQueueCards card. Memoized on the reconciled build object, so a poll that leaves
+ * One build queue card. Memoized on the reconciled build object, so a poll that leaves
  * the build unchanged skips it entirely; only a running build's duration ticks. Clicking (or
  * Enter/Space on the focused card) opens the build's detail drawer.
  */

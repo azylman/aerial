@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { useLiveNow } from '../../hooks/useLiveNow';
 import { parseValidTimestampMs } from '../../lib/formatters';
 
-// Drift correction for schedule countdowns (schedulesState.serverClockSkewMs in static/app.js):
+// Drift correction for schedule countdowns:
 // each schedules poll records how far the server clock is ahead of the browser's, and every
 // countdown counts against server time so a skewed laptop clock still fires "in 5s" on time.
 

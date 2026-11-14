@@ -3,8 +3,7 @@ import { syncResource } from '../../hooks/usePollingSync';
 import { useConsoleStore } from '../../store/store';
 import { recordServerTime } from './clock';
 
-// The schedules view's two polls (fetchSchedules / fetchScheduleRuns in static/app.js). The
-// schedules poll also samples the server clock for drift-corrected countdowns.
+// The schedules view's two polls: schedules and runs. The schedules poll also samples the server clock for drift-corrected countdowns.
 
 export const syncSchedules = syncResource(
   fetchSchedules,

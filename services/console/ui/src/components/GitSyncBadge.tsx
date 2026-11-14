@@ -29,7 +29,7 @@ function isLagging(gitSync: GitSyncStatusResponse | null): gitSync is GitSyncSta
 }
 
 /**
- * Git-sync status pill (port of renderGitSyncBadge). Only a lagging repo subscribes to the shared
+ * Git-sync status pill. Only a lagging repo subscribes to the shared
  * 1s clock, so its delta keeps counting between polls; synced and error states never tick.
  */
 export const GitSyncBadge = memo(function GitSyncBadge() {

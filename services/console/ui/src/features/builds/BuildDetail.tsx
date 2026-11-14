@@ -95,7 +95,7 @@ interface ContentProps {
   readonly chunks: readonly VanadisChunkDTO[];
 }
 
-/** Port of renderBuildDetailContent: summary header, then the ordered chunk list. */
+/** Build detail content: summary header, then the ordered chunk list. */
 const BuildDetailContent = memo(function BuildDetailContent({ build, chunks }: ContentProps) {
   const stats = computeBuildChunkStats({ ...build, chunks });
   return (
@@ -168,7 +168,7 @@ function BuildDetail({ id }: { readonly id: string }) {
 }
 
 /**
- * Build drawer body (port of openBuildDetailDrawer). It renders the queue entry at once, then the
+ * Build drawer body. It renders the queue entry at once, then the
  * fetched detail, and keeps polling the build while the drawer is open; closing the drawer (or
  * hiding the page) aborts the in-flight request. Keyed by id, so switching builds restarts the poll.
  */

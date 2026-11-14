@@ -5,8 +5,8 @@ import { queueKpis } from './model';
 import { QueueBadge, TaskQueue, useQueueCounts } from './TaskQueue';
 import './tasks.css';
 
-// Summary cards keep the whitespace between their spans that the vanilla markup has, so label,
-// value and sub-label wrap and space identically.
+// Summary cards keep whitespace between their spans, so label, value and sub-label wrap and
+// space as separate words.
 
 /** Queue concurrency and backlog cards; subscribes to the two counts only. */
 const QueueKpis = memo(function QueueKpis() {
@@ -31,7 +31,7 @@ const QueueKpis = memo(function QueueKpis() {
   );
 });
 
-/** Port of the ACTIVE TASKS cockpit (#tasks-view in static/index.html). */
+/** The ACTIVE TASKS cockpit (#tasks-view). */
 export default function TasksView() {
   return (
     <>

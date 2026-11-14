@@ -88,7 +88,7 @@ function TaskIdleCard() {
   );
 }
 
-/** Port of the active-task list renderActiveTasks writes into both views. */
+/** The active-task list, shared by the telemetry and tasks views. */
 export const TaskQueue = memo(function TaskQueue() {
   const tasks = useConsoleStore(selectTasks);
   if (tasks.length === 0) return <TaskIdleCard />;

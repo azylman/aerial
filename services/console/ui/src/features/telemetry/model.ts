@@ -3,12 +3,11 @@ import type { IconName } from '../../components/Icon';
 import { formatCommitTimestamp, parseValidTimestampMs } from '../../lib/formatters';
 import type { BadgeModel } from '../tasks/model';
 
-// Pure view models for the telemetry view, ported from renderDeployments, renderServicesGrid and
-// openDiagnosticDrawerByName in static/app.js.
+// Pure view models for the telemetry view: deployment pipeline, services grid and service lookup.
 
 // ---- Services ----
 
-/** `healthy / total` for the ACTIVE STACK COMPONENTS badge (renderServicesGrid's active-count). */
+/** `healthy / total` for the ACTIVE STACK COMPONENTS badge. */
 export function healthyCountText(services: readonly ServiceStatus[] | null): string {
   if (services === null) return '0 / 0 HEALTHY';
   const healthy = services.filter((s) => s.status === 'healthy').length;
@@ -18,7 +17,7 @@ export function healthyCountText(services: readonly ServiceStatus[] | null): str
 const stripPrefix = (name: string): string => name.toLowerCase().replace(/^aerial-/, '');
 
 /**
- * Port of openDiagnosticDrawerByName: matches case-insensitively with the `aerial-` prefix
+ * Service lookup by loose name: matches case-insensitively with the `aerial-` prefix
  * dropped, exact name first in list order, else the first service whose name contains it.
  */
 export function findServiceByName(services: readonly ServiceStatus[] | null, name: string): ServiceStatus | null {
@@ -33,7 +32,7 @@ export function findServiceByName(services: readonly ServiceStatus[] | null, nam
 
 const isBuildingStage = (stage: string): boolean => stage === 'building' || stage === 'queued';
 
-/** Header badge for DEPLOYMENT PIPELINE: the first matching rule of renderDeployments wins. */
+/** Header badge for DEPLOYMENT PIPELINE: the first matching rule wins. */
 export function deployBadge(deploys: readonly DeploymentStatus[]): BadgeModel {
   const has = (stage: string): boolean => deploys.some((d) => d.stage === stage);
   const active = deploys.filter((d) => d.stage !== 'live' && d.stage !== 'completed').length;
@@ -43,7 +42,7 @@ export function deployBadge(deploys: readonly DeploymentStatus[]): BadgeModel {
   if (has('swapping')) return { icon: 'refresh', text: 'FLUX SWAPPING', className: 'section-badge swapping' };
   if (has('pulling')) return { icon: 'download', text: 'FLUX PULLING', className: 'section-badge pulling' };
   // Two or more building deploys already matched "N DEPLOYS IN PROGRESS" above, so a build that
-  // reaches this rule is the only one (the vanilla plural branch here is unreachable).
+  // reaches this rule is the only one.
   if (deploys.some((d) => isBuildingStage(d.stage))) {
     return { icon: 'bolt', text: '1 CI BUILD ACTIVE', className: 'section-badge building' };
   }
@@ -187,7 +186,7 @@ export interface DeployCardModel {
   readonly started: string;
 }
 
-/** The full pipeline card, field for field with renderDeployments' non-compact template. */
+/** The full (non-compact) pipeline card's display fields. */
 export function deployCardModel(dep: DeploymentStatus): DeployCardModel {
   const stage = dep.stage;
   const live = stage === 'live';

@@ -27,7 +27,7 @@ import './builds.css';
 // The drawer body ships in this chunk; App lazy-loads it from here.
 export { BuildDetailPanel } from './BuildDetail';
 
-/** Same cadence as the vanilla build queue tab (buildsPollInterval). */
+/** Poll cadence for the build queue tab. */
 export const BUILDS_POLL_MS = 5000;
 
 const EMPTY_BUILDS: readonly VanadisBuildDTO[] = Object.freeze([]);
@@ -161,7 +161,7 @@ interface PillsProps {
   readonly onSelect: (filter: BuildFilter) => void;
 }
 
-/** Queue-state pills with their counts (renderBuildsPills). */
+/** Queue-state pills with their counts. */
 const BuildsPills = memo(function BuildsPills({ index, filter, onSelect }: PillsProps) {
   const data = useConsoleStore(selectData);
   const counts = pillCounts(data, index);
@@ -225,7 +225,7 @@ const BuildGrid = memo(function BuildGrid({ builds }: { readonly builds: readonl
 });
 
 /**
- * Port of #builds-view. Pill and search are local state; the visible cards derive from the
+ * The build queue view (#builds-view). Pill and search are local state; the visible cards derive from the
  * deferred search text, so a keystroke paints the input at once and the grid follows as a
  * background render. Builds are indexed once per (reconciled) object and cards are memoized per
  * build, so an unchanged poll renders nothing and a changed build re-renders only its own card.

@@ -10,7 +10,7 @@ import './VirtualList.css';
 // round trip, and the browser's scroll anchoring keeps the visible rows still when a row above
 // them mounts at a height different from its estimate.
 //
-// The list scrolls with the page like the vanilla grid it replaces: the window is the part of the
+// The list scrolls with the page: the window is the part of the
 // list inside the browser viewport, so any scrolling ancestor (the document or a nested container;
 // scroll listeners are captured) moves it.
 //

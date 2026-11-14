@@ -484,7 +484,7 @@ run_console_ui() {
 
 # Console browser e2e suite (services/console/ui/e2e): the React console on the real console
 # binary. Runs only when a Playwright Chromium can actually launch here; otherwise it prints a skip
-# notice and the CI "Console UI Parity Suite" job enforces it. Needs Go to build the binary.
+# notice and the CI "Console UI E2E Suite" job enforces it. Needs Go to build the binary.
 run_console_e2e() {
     ui_dir="$REPO_ROOT/services/console/ui"
     [ -f "$ui_dir/playwright.config.ts" ] || return 0

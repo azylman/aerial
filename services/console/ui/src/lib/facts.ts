@@ -1,5 +1,5 @@
-// Memory archive fact ordering, ported from static/app.js: most-reinforced first, then most
-// recently reinforced (or created), then highest id.
+// Memory archive fact ordering: most-reinforced first, then most recently reinforced (or
+// created), then highest id.
 
 import type { FactItem } from '../api/types';
 import { parseValidTimestampMs } from './formatters';

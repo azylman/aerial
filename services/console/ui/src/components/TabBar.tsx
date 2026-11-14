@@ -11,7 +11,7 @@ interface TabMeta {
   readonly badge: ((state: ConsoleState) => number) | null;
 }
 
-// Same order, labels and badges as the `.hud-view-tabs` nav in static/index.html.
+// Tab order, labels and badges for the `.hud-view-tabs` nav.
 export const TABS: readonly TabMeta[] = [
   { id: 'telemetry', label: 'TELEMETRY', icon: 'bolt', badge: null },
   { id: 'tasks', label: 'ACTIVE TASKS', icon: 'target', badge: (s) => tasksBadgeCount(s.status.cluster.data) },

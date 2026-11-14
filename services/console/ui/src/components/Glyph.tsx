@@ -1,7 +1,7 @@
 import { Icon, type IconName } from './Icon';
 
 /**
- * Inline SVG standing in for a vanilla emoji prefix inside a badge or pill (`⚡ RUNNING`). The
+ * Inline SVG prefix inside a badge or pill (`⚡ RUNNING`). The
  * owning element carries the text, so the glyph stays decorative.
  */
 export function Glyph({ name }: { readonly name: IconName }) {
@@ -12,7 +12,7 @@ export function Glyph({ name }: { readonly name: IconName }) {
   );
 }
 
-/** Badge content: optional glyph, then the text (a space keeps the vanilla word spacing). */
+/** Badge content: optional glyph, then the text (separated by a space). */
 export function GlyphText({ icon, text }: { readonly icon: IconName | null; readonly text: string }) {
   if (icon === null) return text;
   return (

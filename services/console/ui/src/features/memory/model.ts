@@ -1,6 +1,5 @@
-// Pure derivations for the memory archive, ported from updateMemoryMetrics, renderCategoryPills
-// and applyFilters in static/app.js. The vanilla UI re-parsed every fact's reinforce count and
-// lowercased every fact text on each keystroke; here each fact is indexed once per payload
+// Pure derivations for the memory archive: metrics, category pills and filtering. Each fact is
+// indexed once per payload
 // (count, search haystack, importance order) and a filter is a single linear pass over that index.
 
 import type { FactItem, FactsAPIResponse } from '../../api/types';
@@ -34,7 +33,7 @@ export function indexFacts(facts: readonly FactItem[]): readonly IndexedFact[] {
 const inCategory = (count: number, category: FactCategory): boolean =>
   category === 'ALL' || (category === 'REINFORCED' ? count >= 2 : count === 1);
 
-/** Pill counts (renderCategoryPills): a fact is REINFORCED at 2+ reinforcements, else BASE. */
+/** Pill counts: a fact is REINFORCED at 2+ reinforcements, else BASE. */
 export function categoryCounts(index: readonly IndexedFact[]): Readonly<Record<FactCategory, number>> {
   const reinforced = index.reduce((n, f) => (f.count >= 2 ? n + 1 : n), 0);
   return { ALL: index.length, REINFORCED: reinforced, BASE: index.length - reinforced };
@@ -65,7 +64,7 @@ export interface MemoryMetrics {
 /** Static #memory-view values before the first payload. */
 export const METRICS_IDLE: MemoryMetrics = Object.freeze({ total: '--', reinforced: '-- REINFORCED', average: '--' });
 
-/** updateMemoryMetrics: reported total (falling back to the list size), reinforced count, mean. */
+/** Summary metrics: reported total (falling back to the list size), reinforced count, mean. */
 export function memoryMetrics(data: FactsAPIResponse | null, index: readonly IndexedFact[]): MemoryMetrics {
   if (data === null) return METRICS_IDLE;
   const sum = index.reduce((n, f) => n + f.count, 0);
@@ -85,7 +84,7 @@ export const factAgeTimestamp = (fact: FactItem): string | undefined =>
 /** What the archive body shows: skeleton, the severed-link box, the empty box or the list. */
 export type MemoryPhase = 'loading' | 'error' | 'empty' | 'ready';
 
-/** Like renderMemoryError, a failed sync replaces the grid even when an older payload is cached. */
+/** A failed sync replaces the grid even when an older payload is cached. */
 export function memoryPhase(loaded: boolean, error: string | null, shown: number): MemoryPhase {
   if (error !== null) return 'error';
   if (!loaded) return 'loading';

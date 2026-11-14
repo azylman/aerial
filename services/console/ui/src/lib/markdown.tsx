@@ -1,9 +1,8 @@
-// Minimal Markdown for build objectives, shared context and chunk instructions, ported from
-// renderMarkdown / renderInlineMarkdown in static/app.js. The source is parsed into a small AST and
-// rendered as React elements, so no HTML string is ever produced or parsed. Supported syntax is
-// exactly the vanilla subset: ATX headings, blockquotes, horizontal rules, -/*/• and 1. lists,
-// paragraphs (soft breaks become <br>), fenced code, `inline code`, **bold** / __bold__, *italic*
-// and [links](...) restricted to http(s) and same-origin absolute paths.
+// Minimal Markdown for build objectives, shared context and chunk instructions. The source is
+// parsed into a small AST and rendered as React elements, so no HTML string is ever produced or
+// parsed. Supported syntax is exactly this subset: ATX headings, blockquotes, horizontal rules,
+// -/*/• and 1. lists, paragraphs (soft breaks become <br>), fenced code, `inline code`, **bold** /
+// __bold__, *italic* and [links](...) restricted to http(s) and same-origin absolute paths.
 
 import { Fragment, memo, type ReactNode } from 'react';
 
@@ -25,10 +24,9 @@ export type MdNode =
 
 // ---- inline parsing ----
 //
-// Mirrors the vanilla pipeline step for step: stash inline code, stash links, then run the three
-// emphasis regexes over the remaining string. Where the vanilla code emitted HTML tags, this emits
-// private-use sentinel characters, so emphasis can still wrap stashed code/links (and nest) exactly
-// as before; the sentinel stream is then folded into a tree.
+// Stash inline code, stash links, then run the three emphasis regexes over the remaining string.
+// The regexes emit private-use sentinel characters instead of tags, so emphasis can wrap stashed
+// code/links (and nest); the sentinel stream is then folded into a tree.
 
 const STASH_OPEN = '';
 const STASH_CLOSE = '';

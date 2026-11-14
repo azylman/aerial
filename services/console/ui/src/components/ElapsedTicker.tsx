@@ -10,7 +10,7 @@ export function elapsedSeconds(startedAt: string, now: number): number {
 }
 
 /**
- * Stopwatch leaf (port of startLiveTimerLoop's `.timer-text[data-started]` writer). It is the only
+ * Stopwatch leaf for `.timer-text` elapsed times. It is the only
  * component that subscribes to the shared 1s clock, so a tick re-renders this span and nothing
  * above it: task rows and deploy cards stay untouched.
  */

@@ -37,12 +37,12 @@ const CARD_GAP = 20;
 const CARD_ESTIMATE = 190;
 const OVERSCAN_ROWS = 2;
 
-/** Before the first payload the vanilla bar holds only the static ALL pill. */
+/** Before the first payload the bar holds only the static ALL pill. */
 const IDLE_CATEGORIES: readonly FactCategory[] = ['ALL'];
 
 /**
- * When the archive was last synced, for the SYNCED label and card ages (renderFactCards ages
- * every card from its render time). Re-stamped whenever a new payload lands, and by `touch`
+ * When the archive was last synced, for the SYNCED label and card ages (every card
+ * ages from this instant). Re-stamped whenever a new payload lands, and by `touch`
  * after a manual sync whose payload was identical.
  */
 function useSyncStamp(data: FactsAPIResponse | null): readonly [number, () => void] {
@@ -71,7 +71,7 @@ interface MetricsProps {
   readonly syncedAt: number;
 }
 
-/** The four summary cards (updateMemoryMetrics / renderMemoryError's status badge). */
+/** The four summary cards, including the sync status badge. */
 const MemoryMetrics = memo(function MemoryMetrics({ index, syncedAt }: MetricsProps) {
   const data = useConsoleStore(selectData);
   const failed = useConsoleStore((s) => selectError(s) !== null);
@@ -169,7 +169,7 @@ interface PillsProps {
   readonly onSelect: (category: FactCategory) => void;
 }
 
-/** Category pills with their counts (renderCategoryPills). */
+/** Category pills with their counts. */
 const CategoryPills = memo(function CategoryPills({ index, loaded, category, onSelect }: PillsProps) {
   const counts = useMemo(() => categoryCounts(index), [index]);
   return (
@@ -266,7 +266,7 @@ const FactList = memo(function FactList({ facts, query, now }: ListProps) {
 });
 
 /**
- * Port of #memory-view. Pill and search are local state; the visible list derives from the
+ * The memory archive view (#memory-view). Pill and search are local state; the visible list derives from the
  * deferred search, so a keystroke paints the input at once and the list follows as a background
  * render. Facts are indexed and sorted once per payload, filtered in one pass per change and
  * rendered through VirtualList, so the archive's cost no longer grows with its size.

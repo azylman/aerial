@@ -10,7 +10,7 @@ import './telemetry.css';
 const expandTasks = (): void => useConsoleStore.getState().setActiveTab('tasks');
 
 /**
- * Port of #telemetry-view. The view itself subscribes to nothing: every badge, list and card
+ * The telemetry view (#telemetry-view). The view itself subscribes to nothing: every badge, list and card
  * selects its own slice of the status snapshot, so the shell of the view renders once.
  */
 export default function TelemetryView() {

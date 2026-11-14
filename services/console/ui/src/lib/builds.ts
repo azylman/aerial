@@ -1,5 +1,4 @@
-// Vanadis build queue classification, chunk stats, status badges and timing, ported from
-// static/app.js. Inputs are structural subsets of the /api/builds DTOs so callers can pass either
+// Vanadis build queue classification, chunk stats, status badges and timing. Inputs are structural subsets of the /api/builds DTOs so callers can pass either
 // list entries (precomputed *_chunks counters) or detail payloads (full chunk arrays).
 
 import type { VanadisBuildDTO, VanadisChunkDTO } from '../api/types';
@@ -102,7 +101,7 @@ export type BuildStatusTone = 'queued' | 'running' | 'completed' | 'failed' | 'c
 
 export interface BuildStatusBadge {
   readonly label: string;
-  /** Matches the `status-<tone>` modifier classes in the vanilla stylesheet. */
+  /** Matches the `status-<tone>` modifier classes in the console stylesheet. */
   readonly tone: BuildStatusTone;
   readonly icon: IconName;
 }

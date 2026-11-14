@@ -50,7 +50,7 @@ function DockChip({ link, pathname }: { readonly link: QuickLaunchLink; readonly
   );
 }
 
-/** Port of renderQuickLaunchDock: hidden entirely until the status poll returns links. */
+/** Quick-launch dock: hidden entirely until the status poll returns links. */
 const QuickLaunchDock = memo(function QuickLaunchDock() {
   const raw = useConsoleStore((s) => s.status.cluster.data?.quick_launch_links ?? null);
   const links = useMemo(() => dockLinks(raw), [raw]);

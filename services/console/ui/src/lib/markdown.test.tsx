@@ -124,7 +124,7 @@ describe('parseMarkdown', () => {
   });
 });
 
-// Rendered-markup expectations ported from the app.test.js renderMarkdown suite.
+// Rendered-markup expectations.
 const SAMPLE = [
   '### Build Spec',
   'Use **strict** and *clean* `go test` with [Docs](https://github.com/azylman/aerial) and [Evil](javascript:alert(1)).',
