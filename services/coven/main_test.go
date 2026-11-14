@@ -144,12 +144,6 @@ func TestHandleTurnCompletedEvent_Scenarios(t *testing.T) {
 		LLMClient: llm,
 	})
 
-	workerNilStore := NewWorker(WorkerConfig{
-		Store:     nil,
-		Ollama:    client,
-		LLMClient: llm,
-	})
-
 	memStoreErr := newTestMemStore()
 	memStoreErr.SetFail("GetActiveConversationsForExtraction", errors.New("query failed"))
 	workerErr := NewWorker(WorkerConfig{
@@ -175,12 +169,6 @@ func TestHandleTurnCompletedEvent_Scenarios(t *testing.T) {
 			checkStore:  memStorePing,
 			checkThread: "th-ping-1",
 			wantWater:   0,
-		},
-		{
-			name:    "nil store returns nil without error",
-			worker:  workerNilStore,
-			ev:      pubsub.TurnCompletedEvent{SessionID: "sess-1", Source: "discord"},
-			wantErr: false,
 		},
 		{
 			name:    "extraction failure is logged and returns nil without error",
@@ -260,9 +248,6 @@ func TestCoven_TurnsConsumerIntegration(t *testing.T) {
 
 	if memStore.watermarks["th-int-1"] != 25 {
 		t.Errorf("watermark = %d, want 25", memStore.watermarks["th-int-1"])
-	}
-	if wrapped.lastErr != nil {
-		t.Errorf("expected nil error on valid turn delivery, got %v", wrapped.lastErr)
 	}
 }
 

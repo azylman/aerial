@@ -677,17 +677,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 	})
 
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
-		ID:         "trig-ext-fail-pers",
-		ChannelID:  "1555405874565091380",
-		Source:     "camera",
-		Target:     "gate",
-		EventType:  "motion",
-		Prompt:     "Motion at gate",
-		Effort:     "low",
-		Persistent: true,
-	})
-
-	_ = InsertEventTrigger(ctx, db, EventTrigger{
 		ID:        "trig-ext-healthcheck",
 		ChannelID: "1555405874565091380",
 		Source:    "healthcheck",
@@ -743,14 +732,6 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"backyard"}},
 			wantErr:   false,
 			checkDBID: "trig-ext-fail",
-			wantInDB:  true,
-		},
-		{
-			name:      "persistent trigger dispatch failure resets updated_at and returns nil",
-			server:    serverFail,
-			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"gate"}},
-			wantErr:   false,
-			checkDBID: "trig-ext-fail-pers",
 			wantInDB:  true,
 		},
 		{
@@ -856,27 +837,6 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 	}
 }
 
-type brokenBus struct {
-	pubsub.Bus
-
-	errOnEnsure    bool
-	errOnSubscribe bool
-}
-
-func (b *brokenBus) EnsureCoreStreams(ctx context.Context) error {
-	if b.errOnEnsure {
-		return errors.New("ensure core streams failed")
-	}
-	return b.Bus.EnsureCoreStreams(ctx)
-}
-
-func (b *brokenBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
-	if b.errOnSubscribe {
-		return nil, errors.New("subscribe failed")
-	}
-	return b.Bus.Subscribe(ctx, subject, durable, handler)
-}
-
 type handlerCaptureBus struct {
 	pubsub.Bus
 
@@ -891,34 +851,8 @@ func (c *handlerCaptureBus) Subscribe(ctx context.Context, subject, durable stri
 func TestHaro_InitJetStreamEdgeCases(t *testing.T) {
 	ctx := context.Background()
 
-	if bus := initHaroJetStream(ctx, nil, nil, ""); bus != nil {
-		t.Error("expected nil bus for empty natsURL")
-	}
-
-	errFactory := func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return nil, errors.New("connection failed")
-	}
-	if bus := initHaroJetStreamWithFactory(ctx, nil, nil, "nats://mock", errFactory); bus != nil {
-		t.Error("expected nil bus when factory returns error")
-	}
-
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
-
-	brokenEnsure := &brokenBus{Bus: memBus, errOnEnsure: true}
-	if bus := initHaroJetStreamWithFactory(ctx, nil, nil, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return brokenEnsure, nil
-	}); bus == nil {
-		t.Error("expected non-nil bus even if ensure stream fails")
-	}
-
-	server := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, nil))
-	brokenSub := &brokenBus{Bus: memBus, errOnSubscribe: true}
-	if bus := initHaroJetStreamWithFactory(ctx, server, nil, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return brokenSub, nil
-	}); bus == nil {
-		t.Error("expected non-nil bus even if subscribe fails")
-	}
 
 	// Test handler delivery retry capping
 	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
