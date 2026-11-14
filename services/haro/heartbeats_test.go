@@ -13,13 +13,14 @@ import (
 )
 
 func TestPureHelpers_BuildHeartbeatPrompt(t *testing.T) {
+	completedTime := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name         string
 		schedule     HeartbeatSchedule
 		wantContains []string
 	}{
 		{
-			name: "default title when empty",
+			name: "default title when empty with initial watermark",
 			schedule: HeartbeatSchedule{
 				ID:          "hb-1",
 				TargetID:    "1234567890",
@@ -32,21 +33,24 @@ func TestPureHelpers_BuildHeartbeatPrompt(t *testing.T) {
 				`title "Heartbeat Alert"`,
 				"Check node exporter disk",
 				`<\HEARTBEAT_INSTRUCTIONS>`,
+				"Last Successful Check Started At: none (initial run)",
 			},
 		},
 		{
-			name: "custom title prefix and trimmed fields",
+			name: "custom title prefix and trimmed fields with last_completed_at watermark",
 			schedule: HeartbeatSchedule{
-				ID:          "hb-2",
-				TargetID:    " 9876543210 ",
-				TitlePrefix: " Disk Space Alert ",
-				Prompt:      "  Check high disk usage  ",
+				ID:              "hb-2",
+				TargetID:        " 9876543210 ",
+				TitlePrefix:     " Disk Space Alert ",
+				Prompt:          "  Check high disk usage  ",
+				LastCompletedAt: &completedTime,
 			},
 			wantContains: []string{
 				"Target Discord Channel ID for Escalations: 9876543210",
 				`channel_id "9876543210"`,
 				`title "Disk Space Alert"`,
 				"Check high disk usage",
+				"Last Successful Check Started At: 2026-11-14T01:00:00Z (1794618000)",
 			},
 		},
 	}
@@ -548,8 +552,8 @@ func assertHeartbeatScheduleRuns(t *testing.T, db *sql.DB, tc evaluateDueHeartbe
 	if tc.wantFailedRun && (runCount == 0 || runStatus != "failed") {
 		t.Errorf("expected failed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
 	}
-	if tc.wantDispatched && tc.dispatcherErr == nil && !tc.wantSkippedRun && (runCount == 0 || runStatus != "completed") {
-		t.Errorf("expected completed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
+	if tc.wantDispatched && tc.dispatcherErr == nil && !tc.wantSkippedRun && (runCount == 0 || runStatus != "running") {
+		t.Errorf("expected running run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
 	}
 	if runCount > 0 {
 		if runType != "heartbeat" {

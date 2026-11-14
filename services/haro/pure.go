@@ -27,12 +27,31 @@ func CalculateNextRun(cronExpr, timezone string, from time.Time) (time.Time, err
 }
 
 // BuildHeartbeatPrompt wraps a raw heartbeat prompt with runtime instructions for the LLM.
-func BuildHeartbeatPrompt(hb HeartbeatSchedule) string {
+func BuildHeartbeatPrompt(hb HeartbeatSchedule, currentCheck ...time.Time) string {
 	targetID := strings.TrimSpace(hb.TargetID)
 	title := strings.TrimSpace(hb.TitlePrefix)
 	if title == "" {
 		title = "Heartbeat Alert"
 	}
+
+	now := time.Now().UTC()
+	if len(currentCheck) > 0 && !currentCheck[0].IsZero() {
+		now = currentCheck[0].UTC()
+	}
+
+	lastStr := "none (initial run)"
+	if hb.LastCompletedAt != nil && !hb.LastCompletedAt.IsZero() {
+		lastUTC := hb.LastCompletedAt.UTC()
+		lastStr = fmt.Sprintf("%s (%d)", lastUTC.Format(time.RFC3339), lastUTC.Unix())
+	}
+	currStr := fmt.Sprintf("%s (%d)", now.Format(time.RFC3339), now.Unix())
+
+	watermarkBlock := fmt.Sprintf(`<HEARTBEAT_WATERMARK>
+Last Successful Check Started At: %s
+Current Check Started At: %s
+Watermark Rule: Only inspect events, logs, metrics, or alerts that occurred AFTER Last Successful Check Started At (unless none, then inspect the current nominal window). Do NOT re-alert on incidents already resolved or older than the watermark.
+</HEARTBEAT_WATERMARK>`, lastStr, currStr)
+
 	return fmt.Sprintf(`<\HEARTBEAT_INSTRUCTIONS>
 Your direct text response in this turn is suppressed (silent: true) and will NOT be delivered to Discord.
 Target Discord Channel ID for Escalations: %s
@@ -48,7 +67,9 @@ EOF
    - Delivery & Retry Policy: Retry the POST if curl fails (non-zero exit code, network error, or non-2xx HTTP status), but NEVER send a second POST once Eri returns a successful HTTP 2xx response (e.g. "status":"accepted").
 <\/HEARTBEAT_INSTRUCTIONS>
 
-%s`, targetID, targetID, targetID, title, strings.TrimSpace(hb.Prompt))
+%s
+
+%s`, targetID, targetID, targetID, title, watermarkBlock, strings.TrimSpace(hb.Prompt))
 }
 
 // NormalizeEffort validates effort tiers, defaulting empty to "low".

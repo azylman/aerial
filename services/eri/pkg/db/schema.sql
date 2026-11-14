@@ -141,7 +141,8 @@ CREATE TABLE heartbeat_schedules (
     effort TEXT NOT NULL DEFAULT 'low',
     next_run_at TIMESTAMPTZ NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_completed_at TIMESTAMPTZ
 );
 
 CREATE INDEX idx_heartbeat_schedules_next_run ON heartbeat_schedules(enabled, next_run_at);
