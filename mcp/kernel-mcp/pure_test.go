@@ -368,40 +368,20 @@ func TestParseURLHostPort(t *testing.T) {
 	}
 }
 
-func TestLoadConfig(t *testing.T) {
-	tmpDir := t.TempDir()
+type kernelLoadConfigCase struct {
+	name        string
+	path        string
+	envKey      string
+	envVal      string
+	wantPort    string
+	wantHost    string
+	wantCDPPort string
+	wantDelay   time.Duration
+	wantErr     bool
+}
 
-	validYAMLPath := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(validYAMLPath, []byte(`
-port: "4099"
-cdp_host: "custom.aerial"
-cdp_port: "9333"
-settle_delay: "250ms"
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	emptyYAMLPath := filepath.Join(tmpDir, "empty.yaml")
-	if err := os.WriteFile(emptyYAMLPath, []byte(""), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	invalidYAMLPath := filepath.Join(tmpDir, "bad.yaml")
-	if err := os.WriteFile(invalidYAMLPath, []byte(`port: [invalid`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	tests := []struct {
-		name        string
-		path        string
-		envKey      string
-		envVal      string
-		wantPort    string
-		wantHost    string
-		wantCDPPort string
-		wantDelay   time.Duration
-		wantErr     bool
-	}{
+func kernelLoadConfigTestCases(tmpDir, validYAMLPath, emptyYAMLPath, invalidYAMLPath string) []kernelLoadConfigCase {
+	return []kernelLoadConfigCase{
 		{
 			name:        "nonexistent path returns default config",
 			path:        filepath.Join(tmpDir, "does-not-exist.yaml"),
@@ -524,40 +504,71 @@ settle_delay: "250ms"
 			wantErr:     false,
 		},
 	}
+}
+
+func runKernelLoadConfigCase(t *testing.T, tc kernelLoadConfigCase) {
+	t.Helper()
+	t.Setenv("PORT", "")
+	t.Setenv("CDP_HOST", "")
+	t.Setenv("CDP_PORT", "")
+	t.Setenv("KERNEL_CDP_URL", "")
+	t.Setenv("KERNEL_API_URL", "")
+	t.Setenv("SETTLE_DELAY", "")
+	if tc.envKey != "" {
+		t.Setenv(tc.envKey, tc.envVal)
+	}
+	cfg, err := LoadConfig(tc.path)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("LoadConfig(%q) expected error, got nil", tc.path)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("LoadConfig(%q) unexpected error: %v", tc.path, err)
+	}
+	if cfg.Port != tc.wantPort {
+		t.Fatalf("Port = %q, want %q", cfg.Port, tc.wantPort)
+	}
+	if cfg.CDPHost != tc.wantHost {
+		t.Fatalf("CDPHost = %q, want %q", cfg.CDPHost, tc.wantHost)
+	}
+	if cfg.CDPPort != tc.wantCDPPort {
+		t.Fatalf("CDPPort = %q, want %q", cfg.CDPPort, tc.wantCDPPort)
+	}
+	if cfg.SettleDelay != tc.wantDelay {
+		t.Fatalf("SettleDelay = %v, want %v", cfg.SettleDelay, tc.wantDelay)
+	}
+}
+
+func TestLoadConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	validYAMLPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(validYAMLPath, []byte(`
+port: "4099"
+cdp_host: "custom.aerial"
+cdp_port: "9333"
+settle_delay: "250ms"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	emptyYAMLPath := filepath.Join(tmpDir, "empty.yaml")
+	if err := os.WriteFile(emptyYAMLPath, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	invalidYAMLPath := filepath.Join(tmpDir, "bad.yaml")
+	if err := os.WriteFile(invalidYAMLPath, []byte(`port: [invalid`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := kernelLoadConfigTestCases(tmpDir, validYAMLPath, emptyYAMLPath, invalidYAMLPath)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("PORT", "")
-			t.Setenv("CDP_HOST", "")
-			t.Setenv("CDP_PORT", "")
-			t.Setenv("KERNEL_CDP_URL", "")
-			t.Setenv("KERNEL_API_URL", "")
-			t.Setenv("SETTLE_DELAY", "")
-			if tc.envKey != "" {
-				t.Setenv(tc.envKey, tc.envVal)
-			}
-			cfg, err := LoadConfig(tc.path)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("LoadConfig(%q) expected error, got nil", tc.path)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("LoadConfig(%q) unexpected error: %v", tc.path, err)
-			}
-			if cfg.Port != tc.wantPort {
-				t.Fatalf("Port = %q, want %q", cfg.Port, tc.wantPort)
-			}
-			if cfg.CDPHost != tc.wantHost {
-				t.Fatalf("CDPHost = %q, want %q", cfg.CDPHost, tc.wantHost)
-			}
-			if cfg.CDPPort != tc.wantCDPPort {
-				t.Fatalf("CDPPort = %q, want %q", cfg.CDPPort, tc.wantCDPPort)
-			}
-			if cfg.SettleDelay != tc.wantDelay {
-				t.Fatalf("SettleDelay = %v, want %v", cfg.SettleDelay, tc.wantDelay)
-			}
+			runKernelLoadConfigCase(t, tc)
 		})
 	}
 }

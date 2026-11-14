@@ -160,10 +160,28 @@ func TestSanitizeLog_TableDriven(t *testing.T) {
 	}
 }
 
+func assertStringTransformTable(t *testing.T, tests []struct {
+	name     string
+	input    string
+	expected string
+}, fn func(string) string,
+) {
+	t.Helper()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := fn(tc.input)
+			if got != tc.expected {
+				t.Errorf("transform(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
 func TestSanitizeMentions_TableDriven(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	assertStringTransformTable(t, []struct {
 		name     string
 		input    string
 		expected string
@@ -183,18 +201,7 @@ func TestSanitizeMentions_TableDriven(t *testing.T) {
 			input:    "Check <#99887766> @everyone and @here right now",
 			expected: "Check   and  right now",
 		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := SanitizeMentions(tc.input)
-			if got != tc.expected {
-				t.Errorf("SanitizeMentions(%q) = %q, want %q", tc.input, got, tc.expected)
-			}
-		})
-	}
+	}, SanitizeMentions)
 }
 
 func TestNormalizeWhitespace_TableDriven(t *testing.T) {
@@ -274,7 +281,7 @@ func TestSanitizePromptTags_TableDriven(t *testing.T) {
 func TestSanitizeAuthor_TableDriven(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	assertStringTransformTable(t, []struct {
 		name     string
 		input    string
 		expected string
@@ -294,18 +301,7 @@ func TestSanitizeAuthor_TableDriven(t *testing.T) {
 			input:    "NormalUser#1234",
 			expected: "NormalUser#1234",
 		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := SanitizeAuthor(tc.input)
-			if got != tc.expected {
-				t.Errorf("SanitizeAuthor(%q) = %q, want %q", tc.input, got, tc.expected)
-			}
-		})
-	}
+	}, SanitizeAuthor)
 }
 
 func resetSensitiveTokens() {

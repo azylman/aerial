@@ -79,19 +79,64 @@ func newTestDB(t *testing.T, conn *testConn) *sql.DB {
 	return db
 }
 
+type updateTaskEmbeddingTestCase struct {
+	name         string
+	taskID       int64
+	embedding    []float32
+	execErr      error
+	wantExec     bool
+	wantQuerySub string
+	wantArgCount int
+	wantErr      string
+}
+
+func runUpdateTaskEmbeddingCase(t *testing.T, tc updateTaskEmbeddingTestCase) {
+	t.Helper()
+	var execCount int
+	var calledQuery string
+	var calledArgs []driver.NamedValue
+	conn := &testConn{
+		execFn: func(query string, args []driver.NamedValue) (driver.Result, error) {
+			execCount++
+			calledQuery = query
+			calledArgs = args
+			if tc.execErr != nil {
+				return nil, tc.execErr
+			}
+			return driver.RowsAffected(1), nil
+		},
+	}
+	db := newTestDB(t, conn)
+	store := NewSQLTaskStore(db)
+
+	err := store.UpdateTaskEmbedding(context.Background(), tc.taskID, tc.embedding)
+	if tc.wantErr == "" && err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tc.wantErr != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+		}
+		return
+	}
+	if tc.wantExec && execCount == 0 {
+		t.Fatalf("expected ExecContext to be called")
+	}
+	if !tc.wantExec && execCount > 0 {
+		t.Fatalf("expected ExecContext NOT to be called, called %d times", execCount)
+	}
+	if tc.wantQuerySub != "" && !strings.Contains(calledQuery, tc.wantQuerySub) {
+		t.Fatalf("query %q does not contain %q", calledQuery, tc.wantQuerySub)
+	}
+	if tc.wantArgCount > 0 && len(calledArgs) != tc.wantArgCount {
+		t.Fatalf("args len = %d, want %d", len(calledArgs), tc.wantArgCount)
+	}
+}
+
 func TestSQLTaskStore_UpdateTaskEmbedding(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		taskID       int64
-		embedding    []float32
-		execErr      error
-		wantExec     bool
-		wantQuerySub string
-		wantArgCount int
-		wantErr      string
-	}{
+	tests := []updateTaskEmbeddingTestCase{
 		{
 			name:         "with embedding updates embedding",
 			taskID:       1,
@@ -127,45 +172,7 @@ func TestSQLTaskStore_UpdateTaskEmbedding(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var execCount int
-			var calledQuery string
-			var calledArgs []driver.NamedValue
-			conn := &testConn{
-				execFn: func(query string, args []driver.NamedValue) (driver.Result, error) {
-					execCount++
-					calledQuery = query
-					calledArgs = args
-					if tc.execErr != nil {
-						return nil, tc.execErr
-					}
-					return driver.RowsAffected(1), nil
-				},
-			}
-			db := newTestDB(t, conn)
-			store := NewSQLTaskStore(db)
-
-			err := store.UpdateTaskEmbedding(context.Background(), tc.taskID, tc.embedding)
-			if tc.wantErr == "" && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
-				}
-				return
-			}
-			if tc.wantExec && execCount == 0 {
-				t.Fatalf("expected ExecContext to be called")
-			}
-			if !tc.wantExec && execCount > 0 {
-				t.Fatalf("expected ExecContext NOT to be called, called %d times", execCount)
-			}
-			if tc.wantQuerySub != "" && !strings.Contains(calledQuery, tc.wantQuerySub) {
-				t.Fatalf("query %q does not contain %q", calledQuery, tc.wantQuerySub)
-			}
-			if tc.wantArgCount > 0 && len(calledArgs) != tc.wantArgCount {
-				t.Fatalf("args len = %d, want %d", len(calledArgs), tc.wantArgCount)
-			}
+			runUpdateTaskEmbeddingCase(t, tc)
 		})
 	}
 }
@@ -266,18 +273,61 @@ func TestSQLTaskStore_UpdateTaskEmbeddingAndResolution(t *testing.T) {
 	}
 }
 
+type updateTaskResolutionBatchTestCase struct {
+	name         string
+	taskIDs      []int64
+	res          string
+	execErr      error
+	wantExec     bool
+	wantQuerySub string
+	wantErr      string
+}
+
+func runUpdateTaskResolutionBatchCase(t *testing.T, tc updateTaskResolutionBatchTestCase) {
+	t.Helper()
+	var execCount int
+	var calledQuery string
+	conn := &testConn{
+		execFn: func(query string, args []driver.NamedValue) (driver.Result, error) {
+			execCount++
+			calledQuery = query
+			if tc.execErr != nil {
+				return nil, tc.execErr
+			}
+			return driver.RowsAffected(int64(len(tc.taskIDs))), nil
+		},
+	}
+	db := newTestDB(t, conn)
+	store := NewSQLTaskStore(db)
+
+	err := store.UpdateTaskResolutionBatch(context.Background(), tc.taskIDs, tc.res)
+	if tc.wantErr == "" && err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tc.wantErr != "" {
+		if err == nil {
+			t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
+		}
+		return
+	}
+	if tc.wantExec && execCount == 0 {
+		t.Fatalf("expected ExecContext to be called")
+	}
+	if !tc.wantExec && execCount > 0 {
+		t.Fatalf("expected ExecContext NOT to be called, was called %d times", execCount)
+	}
+	if tc.wantQuerySub != "" && !strings.Contains(calledQuery, tc.wantQuerySub) {
+		t.Fatalf("query %q does not contain %q", calledQuery, tc.wantQuerySub)
+	}
+}
+
 func TestSQLTaskStore_UpdateTaskResolutionBatch(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		taskIDs      []int64
-		res          string
-		execErr      error
-		wantExec     bool
-		wantQuerySub string
-		wantErr      string
-	}{
+	tests := []updateTaskResolutionBatchTestCase{
 		{
 			name:         "empty slice returns immediately without query",
 			taskIDs:      nil,
@@ -308,43 +358,7 @@ func TestSQLTaskStore_UpdateTaskResolutionBatch(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var execCount int
-			var calledQuery string
-			conn := &testConn{
-				execFn: func(query string, args []driver.NamedValue) (driver.Result, error) {
-					execCount++
-					calledQuery = query
-					if tc.execErr != nil {
-						return nil, tc.execErr
-					}
-					return driver.RowsAffected(int64(len(tc.taskIDs))), nil
-				},
-			}
-			db := newTestDB(t, conn)
-			store := NewSQLTaskStore(db)
-
-			err := store.UpdateTaskResolutionBatch(context.Background(), tc.taskIDs, tc.res)
-			if tc.wantErr == "" && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
-				}
-				return
-			}
-			if tc.wantExec && execCount == 0 {
-				t.Fatalf("expected ExecContext to be called")
-			}
-			if !tc.wantExec && execCount > 0 {
-				t.Fatalf("expected ExecContext NOT to be called, was called %d times", execCount)
-			}
-			if tc.wantQuerySub != "" && !strings.Contains(calledQuery, tc.wantQuerySub) {
-				t.Fatalf("query %q does not contain %q", calledQuery, tc.wantQuerySub)
-			}
+			runUpdateTaskResolutionBatchCase(t, tc)
 		})
 	}
 }
@@ -435,23 +449,69 @@ func TestSQLTaskStore_FetchTaskResolutions(t *testing.T) {
 	}
 }
 
+type searchTasksRRFTestCase struct {
+	name          string
+	embedding     []float32
+	queryText     string
+	status        string
+	limit         int
+	rows          *testRows
+	queryErr      error
+	wantCount     int
+	wantLimitArg  int
+	wantFilterArg string
+	wantVectorArg bool
+	wantErr       string
+}
+
+func runSearchTasksRRFCase(t *testing.T, tc searchTasksRRFTestCase) {
+	t.Helper()
+	var calledArgs []driver.NamedValue
+	conn := &testConn{
+		queryFn: func(query string, args []driver.NamedValue) (driver.Rows, error) {
+			calledArgs = args
+			if tc.queryErr != nil {
+				return nil, tc.queryErr
+			}
+			return tc.rows, nil
+		},
+	}
+	db := newTestDB(t, conn)
+	store := NewSQLTaskStore(db)
+
+	results, err := store.SearchTasksRRF(context.Background(), tc.embedding, tc.queryText, tc.status, tc.limit)
+	if tc.wantErr == "" && err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tc.wantErr != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+		}
+		return
+	}
+	assertSearchTasksRRFResults(t, tc, results, calledArgs)
+}
+
+func assertSearchTasksRRFResults(t *testing.T, tc searchTasksRRFTestCase, results []ScoredTaskSummary, calledArgs []driver.NamedValue) {
+	t.Helper()
+	if len(results) != tc.wantCount {
+		t.Fatalf("results len = %d, want %d", len(results), tc.wantCount)
+	}
+	if tc.wantLimitArg > 0 && len(calledArgs) > 1 && calledArgs[1].Value != tc.wantLimitArg {
+		t.Fatalf("limit arg = %v, want %d", calledArgs[1].Value, tc.wantLimitArg)
+	}
+	if tc.wantFilterArg != "" && len(calledArgs) > 3 && calledArgs[3].Value != tc.wantFilterArg {
+		t.Fatalf("filter arg = %v, want %q", calledArgs[3].Value, tc.wantFilterArg)
+	}
+	if len(calledArgs) > 4 && calledArgs[4].Value != tc.wantVectorArg {
+		t.Fatalf("hasVector arg = %v, want %v", calledArgs[4].Value, tc.wantVectorArg)
+	}
+}
+
 func TestSQLTaskStore_SearchTasksRRF(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name          string
-		embedding     []float32
-		queryText     string
-		status        string
-		limit         int
-		rows          *testRows
-		queryErr      error
-		wantCount     int
-		wantLimitArg  int
-		wantFilterArg string
-		wantVectorArg bool
-		wantErr       string
-	}{
+	tests := []searchTasksRRFTestCase{
 		{
 			name:      "successful search with rows",
 			embedding: make([]float32, 384),
@@ -509,50 +569,7 @@ func TestSQLTaskStore_SearchTasksRRF(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var calledArgs []driver.NamedValue
-			conn := &testConn{
-				queryFn: func(query string, args []driver.NamedValue) (driver.Rows, error) {
-					calledArgs = args
-					if tc.queryErr != nil {
-						return nil, tc.queryErr
-					}
-					return tc.rows, nil
-				},
-			}
-			db := newTestDB(t, conn)
-			store := NewSQLTaskStore(db)
-
-			results, err := store.SearchTasksRRF(context.Background(), tc.embedding, tc.queryText, tc.status, tc.limit)
-			if tc.wantErr == "" && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
-				}
-				return
-			}
-			if len(results) != tc.wantCount {
-				t.Fatalf("results len = %d, want %d", len(results), tc.wantCount)
-			}
-			if tc.wantLimitArg > 0 && len(calledArgs) > 1 {
-				if calledArgs[1].Value != tc.wantLimitArg {
-					t.Fatalf("limit arg = %v, want %d", calledArgs[1].Value, tc.wantLimitArg)
-				}
-			}
-			if tc.wantFilterArg != "" && len(calledArgs) > 3 {
-				if calledArgs[3].Value != tc.wantFilterArg {
-					t.Fatalf("filter arg = %v, want %q", calledArgs[3].Value, tc.wantFilterArg)
-				}
-			}
-			if len(calledArgs) > 4 {
-				if calledArgs[4].Value != tc.wantVectorArg {
-					t.Fatalf("hasVector arg = %v, want %v", calledArgs[4].Value, tc.wantVectorArg)
-				}
-			}
+			runSearchTasksRRFCase(t, tc)
 		})
 	}
 }

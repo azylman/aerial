@@ -321,6 +321,47 @@ func assertErrString(t *testing.T, err error, wantErr string) {
 	}
 }
 
+type readyTreeTestCase struct {
+	name           string
+	nodes          map[int64]TaskNode
+	scopedParentID *int64
+	wantIDs        []int64
+	wantNestedIDs  map[int64][]int64
+}
+
+func runReadyTreeCase(t *testing.T, tc readyTreeTestCase) {
+	t.Helper()
+	got := BuildReadyTree(tc.nodes, tc.scopedParentID)
+	gotIDs := make([]int64, 0, len(got))
+	for _, item := range got {
+		gotIDs = append(gotIDs, item.ID)
+	}
+	if len(tc.wantIDs) == 0 && len(gotIDs) == 0 {
+		return
+	}
+	if !reflect.DeepEqual(gotIDs, tc.wantIDs) {
+		t.Fatalf("BuildReadyTree top IDs = %v; want %v", gotIDs, tc.wantIDs)
+	}
+	assertReadyTreeNested(t, got, tc.wantNestedIDs)
+}
+
+func assertReadyTreeNested(t *testing.T, got []ReadyTask, wantNestedIDs map[int64][]int64) {
+	t.Helper()
+	for parentID, expectedNested := range wantNestedIDs {
+		for _, top := range got {
+			if top.ID == parentID {
+				var nestedIDs []int64
+				for _, sub := range top.ReadySubtasks {
+					nestedIDs = append(nestedIDs, sub.ID)
+				}
+				if !reflect.DeepEqual(nestedIDs, expectedNested) {
+					t.Fatalf("Nested subtasks for %d = %v; want %v", parentID, nestedIDs, expectedNested)
+				}
+			}
+		}
+	}
+}
+
 func TestBuildReadyTree(t *testing.T) {
 	t.Parallel()
 
@@ -345,13 +386,7 @@ func TestBuildReadyTree(t *testing.T) {
 	node2.SubtaskIDs = []int64{9}
 	nodes[2] = node2
 
-	tests := []struct {
-		name           string
-		nodes          map[int64]TaskNode
-		scopedParentID *int64
-		wantIDs        []int64
-		wantNestedIDs  map[int64][]int64
-	}{
+	tests := []readyTreeTestCase{
 		{
 			name:           "top level ready tree",
 			nodes:          nodes,
@@ -383,30 +418,7 @@ func TestBuildReadyTree(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := BuildReadyTree(tc.nodes, tc.scopedParentID)
-			var gotIDs []int64
-			for _, item := range got {
-				gotIDs = append(gotIDs, item.ID)
-			}
-			if len(tc.wantIDs) == 0 && len(gotIDs) == 0 {
-				return
-			}
-			if !reflect.DeepEqual(gotIDs, tc.wantIDs) {
-				t.Fatalf("BuildReadyTree top IDs = %v; want %v", gotIDs, tc.wantIDs)
-			}
-			for parentID, expectedNested := range tc.wantNestedIDs {
-				for _, top := range got {
-					if top.ID == parentID {
-						var nestedIDs []int64
-						for _, sub := range top.ReadySubtasks {
-							nestedIDs = append(nestedIDs, sub.ID)
-						}
-						if !reflect.DeepEqual(nestedIDs, expectedNested) {
-							t.Fatalf("Nested subtasks for %d = %v; want %v", parentID, nestedIDs, expectedNested)
-						}
-					}
-				}
-			}
+			runReadyTreeCase(t, tc)
 		})
 	}
 }
@@ -539,6 +551,17 @@ func TestValidateCloseGuard(t *testing.T) {
 	}
 }
 
+func assertSubtreeIDs(t *testing.T, nodes map[int64]TaskNode, rootID int64, wantIDs []int64) {
+	t.Helper()
+	got := CollectOpenSubtreeIDs(nodes, rootID)
+	if len(wantIDs) == 0 && len(got) == 0 {
+		return
+	}
+	if !reflect.DeepEqual(got, wantIDs) {
+		t.Fatalf("CollectOpenSubtreeIDs(%d) = %v; want %v", rootID, got, wantIDs)
+	}
+}
+
 func TestCollectOpenSubtreeIDs(t *testing.T) {
 	t.Parallel()
 
@@ -581,14 +604,19 @@ func TestCollectOpenSubtreeIDs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := CollectOpenSubtreeIDs(tc.nodes, tc.rootID)
-			if len(tc.wantIDs) == 0 && len(got) == 0 {
-				return
-			}
-			if !reflect.DeepEqual(got, tc.wantIDs) {
-				t.Fatalf("CollectOpenSubtreeIDs(%d) = %v; want %v", tc.rootID, got, tc.wantIDs)
-			}
+			assertSubtreeIDs(t, tc.nodes, tc.rootID, tc.wantIDs)
 		})
+	}
+}
+
+func assertUnblockedIDs(t *testing.T, before, after map[int64]TaskNode, closedIDs, wantIDs []int64) {
+	t.Helper()
+	got := ComputeUnblockedIDs(before, after, closedIDs)
+	if len(wantIDs) == 0 && len(got) == 0 {
+		return
+	}
+	if !reflect.DeepEqual(got, wantIDs) {
+		t.Fatalf("ComputeUnblockedIDs = %v; want %v", got, wantIDs)
 	}
 }
 
@@ -654,49 +682,91 @@ func TestComputeUnblockedIDs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := ComputeUnblockedIDs(tc.before, tc.after, tc.closedIDs)
-			if len(tc.wantIDs) == 0 && len(got) == 0 {
-				return
-			}
-			if !reflect.DeepEqual(got, tc.wantIDs) {
-				t.Fatalf("ComputeUnblockedIDs = %v; want %v", got, tc.wantIDs)
-			}
+			assertUnblockedIDs(t, tc.before, tc.after, tc.closedIDs, tc.wantIDs)
 		})
 	}
 }
 
-func TestLoadConfig(t *testing.T) {
-	tempDir := t.TempDir()
-	validYAML := filepath.Join(tempDir, "config.yaml")
-	if err := os.WriteFile(validYAML, []byte("port: \"9090\"\nvikunja_url: \"http://custom-vikunja:3456\"\ndefault_project_id: 42\n"), 0o600); err != nil {
-		t.Fatalf("failed to write config: %v", err)
+type loadConfigTestCase struct {
+	name            string
+	path            string
+	envKey          string
+	envVal          string
+	wantPort        string
+	wantProjID      int64
+	wantVikunjaURL  string
+	wantUsername    string
+	wantPassword    string
+	wantDatabaseURL string
+	wantOllamaBase  string
+	wantOllamaModel string
+	wantErr         bool
+}
+
+func runLoadConfigCase(t *testing.T, tc loadConfigTestCase) {
+	t.Helper()
+	t.Setenv("PORT", "")
+	t.Setenv("VIKUNJA_URL", "")
+	t.Setenv("VIKUNJA_USERNAME", "")
+	t.Setenv("VIKUNJA_PASSWORD", "")
+	t.Setenv("DEFAULT_PROJECT_ID", "")
+	t.Setenv("POSTGRES_URL", "")
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("POSTGRES_PASSWORD", "")
+	t.Setenv("POSTGRES_HOST", "")
+	t.Setenv("POSTGRES_PORT", "")
+	t.Setenv("POSTGRES_USER", "")
+	t.Setenv("POSTGRES_DB", "")
+	t.Setenv("OLLAMA_BASE_URL", "")
+	t.Setenv("OLLAMA_MODEL", "")
+
+	if tc.envKey != "" {
+		t.Setenv(tc.envKey, tc.envVal)
 	}
 
-	invalidYAML := filepath.Join(tempDir, "bad.yaml")
-	if err := os.WriteFile(invalidYAML, []byte("port: [unclosed"), 0o600); err != nil {
-		t.Fatalf("failed to write bad config: %v", err)
+	cfg, err := LoadConfig(tc.path)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		return
 	}
-
-	emptyYAML := filepath.Join(tempDir, "empty.yaml")
-	if err := os.WriteFile(emptyYAML, []byte(""), 0o600); err != nil {
-		t.Fatalf("failed to write empty config: %v", err)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+	assertLoadedConfigFields(t, cfg, tc)
+}
 
-	tests := []struct {
-		name            string
-		path            string
-		envKey          string
-		envVal          string
-		wantPort        string
-		wantProjID      int64
-		wantVikunjaURL  string
-		wantUsername    string
-		wantPassword    string
-		wantDatabaseURL string
-		wantOllamaBase  string
-		wantOllamaModel string
-		wantErr         bool
-	}{
+func assertLoadedConfigFields(t *testing.T, cfg *Config, tc loadConfigTestCase) {
+	t.Helper()
+	if cfg.Port != tc.wantPort {
+		t.Fatalf("Port = %q; want %q", cfg.Port, tc.wantPort)
+	}
+	if cfg.DefaultProjectID != tc.wantProjID {
+		t.Fatalf("DefaultProjectID = %d; want %d", cfg.DefaultProjectID, tc.wantProjID)
+	}
+	if tc.wantVikunjaURL != "" && cfg.VikunjaURL != tc.wantVikunjaURL {
+		t.Fatalf("VikunjaURL = %q; want %q", cfg.VikunjaURL, tc.wantVikunjaURL)
+	}
+	if tc.wantUsername != "" && cfg.VikunjaUsername != tc.wantUsername {
+		t.Fatalf("VikunjaUsername = %q; want %q", cfg.VikunjaUsername, tc.wantUsername)
+	}
+	if tc.wantPassword != "" && cfg.VikunjaPassword != tc.wantPassword {
+		t.Fatalf("VikunjaPassword = %q; want %q", cfg.VikunjaPassword, tc.wantPassword)
+	}
+	if tc.wantDatabaseURL != "" && cfg.DatabaseURL != tc.wantDatabaseURL {
+		t.Fatalf("DatabaseURL = %q; want %q", cfg.DatabaseURL, tc.wantDatabaseURL)
+	}
+	if tc.wantOllamaBase != "" && cfg.Ollama.BaseURL != tc.wantOllamaBase {
+		t.Fatalf("Ollama.BaseURL = %q; want %q", cfg.Ollama.BaseURL, tc.wantOllamaBase)
+	}
+	if tc.wantOllamaModel != "" && cfg.Ollama.Model != tc.wantOllamaModel {
+		t.Fatalf("Ollama.Model = %q; want %q", cfg.Ollama.Model, tc.wantOllamaModel)
+	}
+}
+
+func loadConfigTestCases(validYAML, invalidYAML, emptyYAML, tempDir string) []loadConfigTestCase {
+	return []loadConfigTestCase{
 		{
 			name:       "defaults applied when path is empty",
 			path:       "",
@@ -839,61 +909,60 @@ func TestLoadConfig(t *testing.T) {
 			wantErr:    false,
 		},
 	}
+}
 
+func TestLoadConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	validYAML := filepath.Join(tempDir, "config.yaml")
+	if err := os.WriteFile(validYAML, []byte("port: \"9090\"\nvikunja_url: \"http://custom-vikunja:3456\"\ndefault_project_id: 42\n"), 0o600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	invalidYAML := filepath.Join(tempDir, "bad.yaml")
+	if err := os.WriteFile(invalidYAML, []byte("port: [unclosed"), 0o600); err != nil {
+		t.Fatalf("failed to write bad config: %v", err)
+	}
+
+	emptyYAML := filepath.Join(tempDir, "empty.yaml")
+	if err := os.WriteFile(emptyYAML, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write empty config: %v", err)
+	}
+
+	tests := loadConfigTestCases(validYAML, invalidYAML, emptyYAML, tempDir)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("PORT", "")
-			t.Setenv("VIKUNJA_URL", "")
-			t.Setenv("VIKUNJA_USERNAME", "")
-			t.Setenv("VIKUNJA_PASSWORD", "")
-			t.Setenv("DEFAULT_PROJECT_ID", "")
-			t.Setenv("POSTGRES_URL", "")
-			t.Setenv("DATABASE_URL", "")
-			t.Setenv("POSTGRES_PASSWORD", "")
-			t.Setenv("POSTGRES_HOST", "")
-			t.Setenv("POSTGRES_PORT", "")
-			t.Setenv("POSTGRES_USER", "")
-			t.Setenv("POSTGRES_DB", "")
-			t.Setenv("OLLAMA_BASE_URL", "")
-			t.Setenv("OLLAMA_MODEL", "")
+			runLoadConfigCase(t, tc)
+		})
+	}
+}
 
-			if tc.envKey != "" {
-				t.Setenv(tc.envKey, tc.envVal)
+func assertQueryParseTable[T any](t *testing.T, tests []struct {
+	name    string
+	raw     string
+	want    T
+	wantErr string
+}, parseFn func(url.Values) (T, error),
+) {
+	t.Helper()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			values, err := url.ParseQuery(tc.raw)
+			if err != nil {
+				t.Fatalf("ParseQuery: %v", err)
 			}
-
-			cfg, err := LoadConfig(tc.path)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
+			got, err := parseFn(values)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if cfg.Port != tc.wantPort {
-				t.Fatalf("Port = %q; want %q", cfg.Port, tc.wantPort)
-			}
-			if cfg.DefaultProjectID != tc.wantProjID {
-				t.Fatalf("DefaultProjectID = %d; want %d", cfg.DefaultProjectID, tc.wantProjID)
-			}
-			if tc.wantVikunjaURL != "" && cfg.VikunjaURL != tc.wantVikunjaURL {
-				t.Fatalf("VikunjaURL = %q; want %q", cfg.VikunjaURL, tc.wantVikunjaURL)
-			}
-			if tc.wantUsername != "" && cfg.VikunjaUsername != tc.wantUsername {
-				t.Fatalf("VikunjaUsername = %q; want %q", cfg.VikunjaUsername, tc.wantUsername)
-			}
-			if tc.wantPassword != "" && cfg.VikunjaPassword != tc.wantPassword {
-				t.Fatalf("VikunjaPassword = %q; want %q", cfg.VikunjaPassword, tc.wantPassword)
-			}
-			if tc.wantDatabaseURL != "" && cfg.DatabaseURL != tc.wantDatabaseURL {
-				t.Fatalf("DatabaseURL = %q; want %q", cfg.DatabaseURL, tc.wantDatabaseURL)
-			}
-			if tc.wantOllamaBase != "" && cfg.Ollama.BaseURL != tc.wantOllamaBase {
-				t.Fatalf("Ollama.BaseURL = %q; want %q", cfg.Ollama.BaseURL, tc.wantOllamaBase)
-			}
-			if tc.wantOllamaModel != "" && cfg.Ollama.Model != tc.wantOllamaModel {
-				t.Fatalf("Ollama.Model = %q; want %q", cfg.Ollama.Model, tc.wantOllamaModel)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
 			}
 		})
 	}
@@ -902,7 +971,7 @@ func TestLoadConfig(t *testing.T) {
 func TestParseTaskListQuery(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	assertQueryParseTable(t, []struct {
 		name    string
 		raw     string
 		want    TaskListQuery
@@ -913,36 +982,13 @@ func TestParseTaskListQuery(t *testing.T) {
 		{name: "wont_do accepted", raw: "status=wont_do", want: TaskListQuery{Status: "wont_do"}},
 		{name: "all accepted", raw: "status=all", want: TaskListQuery{Status: "all"}},
 		{name: "unknown status rejected", raw: "status=pending", wantErr: `invalid status "pending"`},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			values, err := url.ParseQuery(tc.raw)
-			if err != nil {
-				t.Fatalf("ParseQuery: %v", err)
-			}
-			got, err := ParseTaskListQuery(values)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("got %+v, want %+v", got, tc.want)
-			}
-		})
-	}
+	}, ParseTaskListQuery)
 }
 
 func TestParseTaskSearchQuery(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	assertQueryParseTable(t, []struct {
 		name    string
 		raw     string
 		want    TaskSearchQuery
@@ -958,30 +1004,7 @@ func TestParseTaskSearchQuery(t *testing.T) {
 		{name: "non-numeric limit rejected", raw: "q=x&limit=ten", wantErr: `invalid limit "ten"`},
 		{name: "zero limit rejected", raw: "q=x&limit=0", wantErr: `invalid limit "0"`},
 		{name: "negative limit rejected", raw: "q=x&limit=-3", wantErr: `invalid limit "-3"`},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			values, err := url.ParseQuery(tc.raw)
-			if err != nil {
-				t.Fatalf("ParseQuery: %v", err)
-			}
-			got, err := ParseTaskSearchQuery(values)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("got %+v, want %+v", got, tc.want)
-			}
-		})
-	}
+	}, ParseTaskSearchQuery)
 }
 
 func TestParseTaskID(t *testing.T) {

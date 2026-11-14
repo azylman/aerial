@@ -156,6 +156,105 @@ func fixtureTasks() []VikunjaTask {
 	return tasks
 }
 
+func setupFakeVikunjaTasksHandler(byID map[int64]VikunjaTask, state *fakeVikunjaServerState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		if strings.Contains(path, "/comments") {
+			handleFakeVikunjaComments(w, r, path)
+			return
+		}
+		if strings.Contains(path, "/relations") {
+			handleFakeVikunjaRelations(w, r, path, state)
+			return
+		}
+		if strings.HasSuffix(path, "/888") {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"task 888 error"}`))
+			return
+		}
+		if r.Method == http.MethodGet {
+			handleFakeVikunjaGetTask(w, path, byID)
+			return
+		}
+		if r.Method == http.MethodPost {
+			handleFakeVikunjaPostTask(w, r, state)
+			return
+		}
+		http.NotFound(w, r)
+	}
+}
+
+func handleFakeVikunjaComments(w http.ResponseWriter, r *http.Request, path string) {
+	if strings.Contains(path, "/5/comments") {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"comments failed"}`))
+		return
+	}
+	if r.Method == http.MethodGet {
+		_ = json.NewEncoder(w).Encode([]VikunjaComment{
+			{ID: 1, Comment: "Initial comment", Created: time.Now().UTC()},
+		})
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{}`))
+}
+
+func handleFakeVikunjaRelations(w http.ResponseWriter, r *http.Request, path string, state *fakeVikunjaServerState) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	taskID, _ := strconv.ParseInt(parts[3], 10, 64)
+	if strings.Contains(path, "/888") || strings.Contains(path, "/relations/blocking/888") {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"relation failed"}`))
+		return
+	}
+	if r.Method == http.MethodDelete {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+		return
+	}
+	var relReq VikunjaRelationReq
+	_ = json.NewDecoder(r.Body).Decode(&relReq)
+	if relReq.OtherTaskID == 888 {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"relation failed"}`))
+		return
+	}
+	state.mu.Lock()
+	state.recordedRelations = append(state.recordedRelations, VikunjaRelationRecord{
+		TaskID:       taskID,
+		OtherTaskID:  relReq.OtherTaskID,
+		RelationKind: relReq.RelationKind,
+	})
+	state.mu.Unlock()
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{}`))
+}
+
+func handleFakeVikunjaGetTask(w http.ResponseWriter, path string, byID map[int64]VikunjaTask) {
+	taskID, _ := strconv.ParseInt(strings.TrimPrefix(path, "/api/v1/tasks/"), 10, 64)
+	task, ok := byID[taskID]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"The task does not exist."}`))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(task)
+}
+
+func handleFakeVikunjaPostTask(w http.ResponseWriter, r *http.Request, state *fakeVikunjaServerState) {
+	var updated VikunjaTask
+	_ = json.NewDecoder(r.Body).Decode(&updated)
+	if updated.ID == 0 {
+		updated.ID = 1
+	}
+	state.mu.Lock()
+	state.lastUpdatedTask = &updated
+	state.mu.Unlock()
+	_ = json.NewEncoder(w).Encode(updated)
+}
+
 func setupTestEnvironment(t *testing.T) (*Server, *http.ServeMux, *fakeVikunjaServerState) {
 	t.Helper()
 	state := &fakeVikunjaServerState{}
@@ -202,86 +301,7 @@ func setupTestEnvironment(t *testing.T) (*Server, *http.ServeMux, *fakeVikunjaSe
 		_ = json.NewEncoder(w).Encode(created)
 	})
 
-	vikunjaMux.HandleFunc("/api/v1/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		path := r.URL.Path
-		if strings.Contains(path, "/comments") {
-			if strings.Contains(path, "/5/comments") {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`{"error":"comments failed"}`))
-				return
-			}
-			if r.Method == http.MethodGet {
-				_ = json.NewEncoder(w).Encode([]VikunjaComment{
-					{ID: 1, Comment: "Initial comment", Created: time.Now().UTC()},
-				})
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-			return
-		}
-		if strings.Contains(path, "/relations") {
-			parts := strings.Split(strings.Trim(path, "/"), "/")
-			taskID, _ := strconv.ParseInt(parts[3], 10, 64)
-			if strings.Contains(path, "/888") || strings.Contains(path, "/relations/blocking/888") {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`{"error":"relation failed"}`))
-				return
-			}
-			if r.Method == http.MethodDelete {
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{}`))
-				return
-			}
-			var relReq VikunjaRelationReq
-			_ = json.NewDecoder(r.Body).Decode(&relReq)
-			if relReq.OtherTaskID == 888 {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`{"error":"relation failed"}`))
-				return
-			}
-			state.mu.Lock()
-			state.recordedRelations = append(state.recordedRelations, VikunjaRelationRecord{
-				TaskID:       taskID,
-				OtherTaskID:  relReq.OtherTaskID,
-				RelationKind: relReq.RelationKind,
-			})
-			state.mu.Unlock()
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-			return
-		}
-		if strings.HasSuffix(path, "/888") {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"task 888 error"}`))
-			return
-		}
-		if r.Method == http.MethodGet {
-			taskID, _ := strconv.ParseInt(strings.TrimPrefix(path, "/api/v1/tasks/"), 10, 64)
-			task, ok := byID[taskID]
-			if !ok {
-				w.WriteHeader(http.StatusNotFound)
-				_, _ = w.Write([]byte(`{"message":"The task does not exist."}`))
-				return
-			}
-			_ = json.NewEncoder(w).Encode(task)
-			return
-		}
-		if r.Method == http.MethodPost {
-			var updated VikunjaTask
-			_ = json.NewDecoder(r.Body).Decode(&updated)
-			if updated.ID == 0 {
-				updated.ID = 1
-			}
-			state.mu.Lock()
-			state.lastUpdatedTask = &updated
-			state.mu.Unlock()
-			_ = json.NewEncoder(w).Encode(updated)
-			return
-		}
-		http.NotFound(w, r)
-	})
+	vikunjaMux.HandleFunc("/api/v1/tasks/", setupFakeVikunjaTasksHandler(byID, state))
 
 	vikunjaServer := httptest.NewServer(vikunjaMux)
 	t.Cleanup(vikunjaServer.Close)

@@ -128,6 +128,91 @@ func setupMockDiscordUpstream(t *testing.T) *httptest.Server {
 	return srv
 }
 
+type proxyHandlerTestCase struct {
+	name           string
+	handler        *ProxyHandler
+	method         string
+	path           string
+	body           io.Reader
+	header         map[string]string
+	useCloseErr    bool
+	wantStatusCode int
+	wantContains   string
+	wantAbsent     string
+	wantInstrMax   int
+}
+
+func runProxyHandlerCase(t *testing.T, tc proxyHandlerTestCase) {
+	t.Helper()
+	h := tc.handler
+	if tc.useCloseErr {
+		hCopy := *h
+		hCopy.httpClient.Transport = &mockRoundTripper{
+			resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       &mockErrorCloserReader{Reader: strings.NewReader(`{"jsonrpc":"2.0","result":{"tools":[]}}`)},
+			},
+		}
+		h = &hCopy
+	}
+
+	req := httptest.NewRequest(http.MethodPost, tc.path, tc.body)
+	req.Method = tc.method
+	for k, v := range tc.header {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertProxyHandlerResponse(t, tc, rec)
+}
+
+func assertProxyHandlerResponse(t *testing.T, tc proxyHandlerTestCase, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if tc.wantStatusCode == http.StatusBadRequest && tc.method == "INVALID METHOD WITH SPACES" {
+		if rec.Code < 400 {
+			t.Errorf("expected error status >= 400, got %d", rec.Code)
+		}
+		return
+	}
+
+	if rec.Code != tc.wantStatusCode {
+		t.Errorf("status code got %d, want %d", rec.Code, tc.wantStatusCode)
+	}
+	bodyStr := rec.Body.String()
+	if tc.wantContains != "" && !strings.Contains(bodyStr, tc.wantContains) {
+		t.Errorf("expected body to contain %q, got: %s", tc.wantContains, bodyStr)
+	}
+	if tc.wantAbsent != "" && strings.Contains(bodyStr, tc.wantAbsent) {
+		t.Errorf("expected body to NOT contain %q, got: %s", tc.wantAbsent, bodyStr)
+	}
+	if tc.wantInstrMax > 0 {
+		assertProxyHandlerInstructions(t, rec.Body.Bytes(), tc.wantInstrMax)
+	}
+}
+
+func assertProxyHandlerInstructions(t *testing.T, bodyBytes []byte, wantInstrMax int) {
+	t.Helper()
+	var parsed struct {
+		Result struct {
+			Instructions string `json:"instructions"`
+			ServerInfo   struct {
+				Name string `json:"name"`
+			} `json:"serverInfo"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
+		t.Fatalf("failed to decode initialize response: %v", err)
+	}
+	if n := len(parsed.Result.Instructions); n == 0 || n > wantInstrMax {
+		t.Errorf("instructions length %d, want 1..%d", n, wantInstrMax)
+	}
+	if parsed.Result.ServerInfo.Name != "mcp-discord" {
+		t.Errorf("serverInfo not preserved: %q", parsed.Result.ServerInfo.Name)
+	}
+}
+
 func TestProxyHandler_ServeHTTP(t *testing.T) {
 	mockUpstream := setupMockDiscordUpstream(t)
 	handler, err := NewProxyHandler(mockUpstream.URL, BlockedToolNames)
@@ -140,19 +225,7 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 		t.Fatalf("failed to create offline handler: %v", err)
 	}
 
-	tests := []struct {
-		name           string
-		handler        *ProxyHandler
-		method         string
-		path           string
-		body           io.Reader
-		header         map[string]string
-		useCloseErr    bool
-		wantStatusCode int
-		wantContains   string
-		wantAbsent     string
-		wantInstrMax   int
-	}{
+	tests := []proxyHandlerTestCase{
 		{"initialize injects instructions", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":99,"method":"initialize","params":{}}`), nil, false, http.StatusOK, "discord_list_servers", "", 1024},
 		{"tools/list filters discord_send", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":100,"method":"tools/list"}`), nil, false, http.StatusOK, "discord_read_messages", "discord_send", 0},
 		{"tools/call blocked for discord_send", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":200,"method":"tools/call","params":{"name":"discord_send","arguments":{"message":"test"}}}`), nil, false, http.StatusOK, "disabled", "", 0},
@@ -170,63 +243,7 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := tc.handler
-			if tc.useCloseErr {
-				hCopy := *h
-				hCopy.httpClient.Transport = &mockRoundTripper{
-					resp: &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     make(http.Header),
-						Body:       &mockErrorCloserReader{Reader: strings.NewReader(`{"jsonrpc":"2.0","result":{"tools":[]}}`)},
-					},
-				}
-				h = &hCopy
-			}
-
-			req := httptest.NewRequest(http.MethodPost, tc.path, tc.body)
-			req.Method = tc.method
-			for k, v := range tc.header {
-				req.Header.Set(k, v)
-			}
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, req)
-
-			if tc.wantStatusCode == http.StatusBadRequest && tc.method == "INVALID METHOD WITH SPACES" {
-				if rec.Code < 400 {
-					t.Errorf("expected error status >= 400, got %d", rec.Code)
-				}
-				return
-			}
-
-			if rec.Code != tc.wantStatusCode {
-				t.Errorf("status code got %d, want %d", rec.Code, tc.wantStatusCode)
-			}
-			bodyStr := rec.Body.String()
-			if tc.wantContains != "" && !strings.Contains(bodyStr, tc.wantContains) {
-				t.Errorf("expected body to contain %q, got: %s", tc.wantContains, bodyStr)
-			}
-			if tc.wantAbsent != "" && strings.Contains(bodyStr, tc.wantAbsent) {
-				t.Errorf("expected body to NOT contain %q, got: %s", tc.wantAbsent, bodyStr)
-			}
-			if tc.wantInstrMax > 0 {
-				var parsed struct {
-					Result struct {
-						Instructions string `json:"instructions"`
-						ServerInfo   struct {
-							Name string `json:"name"`
-						} `json:"serverInfo"`
-					} `json:"result"`
-				}
-				if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
-					t.Fatalf("failed to decode initialize response: %v", err)
-				}
-				if n := len(parsed.Result.Instructions); n == 0 || n > tc.wantInstrMax {
-					t.Errorf("instructions length %d, want 1..%d", n, tc.wantInstrMax)
-				}
-				if parsed.Result.ServerInfo.Name != "mcp-discord" {
-					t.Errorf("serverInfo not preserved: %q", parsed.Result.ServerInfo.Name)
-				}
-			}
+			runProxyHandlerCase(t, tc)
 		})
 	}
 }

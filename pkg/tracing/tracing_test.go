@@ -271,21 +271,75 @@ func TestTraceparent(t *testing.T) {
 	}
 }
 
+type middlewareTestCase struct {
+	name        string
+	pattern     string
+	target      string
+	traceparent string
+	preRouted   string
+	rename      string
+	status      int
+	wantName    string
+	wantRoute   string
+	wantParent  bool
+	wantError   bool
+}
+
+func runMiddlewareCase(t *testing.T, tc middlewareTestCase) {
+	t.Helper()
+	sr, tp := newRecorder(t)
+	var handlerTP string
+	mux := http.NewServeMux()
+	mux.HandleFunc(tc.pattern, func(w http.ResponseWriter, r *http.Request) {
+		handlerTP = Traceparent(r.Context())
+		if tc.rename != "" {
+			trace.SpanFromContext(r.Context()).SetName(tc.rename)
+		}
+		w.WriteHeader(tc.status)
+	})
+	req := httptest.NewRequest(http.MethodPost, tc.target, nil)
+	req.Pattern = tc.preRouted
+	if tc.traceparent != "" {
+		req.Header.Set("Traceparent", tc.traceparent)
+	}
+	newMiddleware(tp, propagation.TraceContext{}, "eri", mux).ServeHTTP(httptest.NewRecorder(), req)
+
+	assertMiddlewareSpan(t, tc, sr, handlerTP)
+}
+
+func assertMiddlewareSpan(t *testing.T, tc middlewareTestCase, sr *tracetest.SpanRecorder, handlerTP string) {
+	t.Helper()
+	spans := sr.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	s := spans[0]
+	if s.Name() != tc.wantName || s.SpanKind() != trace.SpanKindServer {
+		t.Errorf("span = %q kind %v, want %q server", s.Name(), s.SpanKind(), tc.wantName)
+	}
+	if got := s.Parent().TraceID().String() == parentTraceID; got != tc.wantParent {
+		t.Errorf("parent trace = %s, want parented=%v", s.Parent().TraceID(), tc.wantParent)
+	}
+	if (s.Status().Code == codes.Error) != tc.wantError {
+		t.Errorf("status = %v, wantError %v", s.Status(), tc.wantError)
+	}
+	attrs := attrMap(s.Attributes())
+	if attrs["http.route"] != tc.wantRoute {
+		t.Errorf("http.route = %q, want %q", attrs["http.route"], tc.wantRoute)
+	}
+	for k, v := range attrs {
+		if strings.Contains(v, "?") || strings.Contains(v, "ghp_") || strings.HasPrefix(k, "url.") {
+			t.Errorf("attribute %s=%q leaks URL content", k, v)
+		}
+	}
+	if tc.status != http.StatusNotFound && !strings.Contains(handlerTP, s.SpanContext().SpanID().String()) {
+		t.Errorf("handler traceparent %q does not carry server span %s", handlerTP, s.SpanContext().SpanID())
+	}
+}
+
 func TestMiddleware(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name        string
-		pattern     string
-		target      string
-		traceparent string
-		preRouted   string
-		rename      string
-		status      int
-		wantName    string
-		wantRoute   string
-		wantParent  bool
-		wantError   bool
-	}{
+	tests := []middlewareTestCase{
 		{
 			name: "routed with parent", pattern: "/prompt", target: "/prompt?token=ghp_secret", traceparent: parentTraceparent,
 			status: http.StatusAccepted, wantName: "POST /prompt", wantRoute: "/prompt", wantParent: true,
@@ -314,49 +368,7 @@ func TestMiddleware(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			sr, tp := newRecorder(t)
-			var handlerTP string
-			mux := http.NewServeMux()
-			mux.HandleFunc(tc.pattern, func(w http.ResponseWriter, r *http.Request) {
-				handlerTP = Traceparent(r.Context())
-				if tc.rename != "" {
-					trace.SpanFromContext(r.Context()).SetName(tc.rename)
-				}
-				w.WriteHeader(tc.status)
-			})
-			req := httptest.NewRequest(http.MethodPost, tc.target, nil)
-			req.Pattern = tc.preRouted
-			if tc.traceparent != "" {
-				req.Header.Set("Traceparent", tc.traceparent)
-			}
-			newMiddleware(tp, propagation.TraceContext{}, "eri", mux).ServeHTTP(httptest.NewRecorder(), req)
-
-			spans := sr.Ended()
-			if len(spans) != 1 {
-				t.Fatalf("got %d spans, want 1", len(spans))
-			}
-			s := spans[0]
-			if s.Name() != tc.wantName || s.SpanKind() != trace.SpanKindServer {
-				t.Errorf("span = %q kind %v, want %q server", s.Name(), s.SpanKind(), tc.wantName)
-			}
-			if got := s.Parent().TraceID().String() == parentTraceID; got != tc.wantParent {
-				t.Errorf("parent trace = %s, want parented=%v", s.Parent().TraceID(), tc.wantParent)
-			}
-			if (s.Status().Code == codes.Error) != tc.wantError {
-				t.Errorf("status = %v, wantError %v", s.Status(), tc.wantError)
-			}
-			attrs := attrMap(s.Attributes())
-			if attrs["http.route"] != tc.wantRoute {
-				t.Errorf("http.route = %q, want %q", attrs["http.route"], tc.wantRoute)
-			}
-			for k, v := range attrs {
-				if strings.Contains(v, "?") || strings.Contains(v, "ghp_") || strings.HasPrefix(k, "url.") {
-					t.Errorf("attribute %s=%q leaks URL content", k, v)
-				}
-			}
-			if tc.status != http.StatusNotFound && !strings.Contains(handlerTP, s.SpanContext().SpanID().String()) {
-				t.Errorf("handler traceparent %q does not carry server span %s", handlerTP, s.SpanContext().SpanID())
-			}
+			runMiddlewareCase(t, tc)
 		})
 	}
 }
@@ -377,16 +389,68 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+type transportTestCase struct {
+	name       string
+	url        string
+	respStatus int
+	respErr    error
+	wantError  bool
+	wantDesc   string
+}
+
+func runTransportCase(t *testing.T, tc transportTestCase) {
+	t.Helper()
+	sr, tp := newRecorder(t)
+	var gotTP string
+	base := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotTP = r.Header.Get("Traceparent")
+		if tc.respErr != nil {
+			return nil, tc.respErr
+		}
+		return &http.Response{StatusCode: tc.respStatus, Body: http.NoBody, Request: r}, nil
+	})
+	ctx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": parentTraceparent})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tc.url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: newTransport(tp, propagation.TraceContext{}, base)}
+	resp, err := client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+	}
+	if req.Header.Get("Traceparent") != "" {
+		t.Error("caller's request was mutated")
+	}
+
+	assertTransportSpan(t, tc, sr, gotTP)
+}
+
+func assertTransportSpan(t *testing.T, tc transportTestCase, sr *tracetest.SpanRecorder, gotTP string) {
+	t.Helper()
+	spans := sr.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	s := spans[0]
+	if s.SpanKind() != trace.SpanKindClient || s.Parent().SpanID().String() != parentSpanID {
+		t.Errorf("span kind %v parent %s", s.SpanKind(), s.Parent().SpanID())
+	}
+	if want := "00-" + parentTraceID + "-" + s.SpanContext().SpanID().String() + "-01"; gotTP != want {
+		t.Errorf("injected traceparent = %q, want %q", gotTP, want)
+	}
+	if (s.Status().Code == codes.Error) != tc.wantError || s.Status().Description != tc.wantDesc {
+		t.Errorf("status = %+v, want error=%v desc=%q", s.Status(), tc.wantError, tc.wantDesc)
+	}
+	full := attrMap(s.Attributes())["url.full"]
+	if strings.Count(full, "/") != 2 || strings.ContainsAny(full, "?@") {
+		t.Errorf("url.full = %q, want scheme://host only", full)
+	}
+}
+
 func TestTransport(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name       string
-		url        string
-		respStatus int
-		respErr    error
-		wantError  bool
-		wantDesc   string
-	}{
+	tests := []transportTestCase{
 		{name: "ok strips path and query", url: "https://api.github.com/repos/x/y?access_token=ghp_abcdefghijklmnopqrstuvwxyz0123456789", respStatus: http.StatusOK},
 		{name: "server error", url: "http://haro.aerial/dispatch", respStatus: http.StatusServiceUnavailable, wantError: true},
 		{
@@ -399,47 +463,7 @@ func TestTransport(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			sr, tp := newRecorder(t)
-			var gotTP string
-			base := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				gotTP = r.Header.Get("Traceparent")
-				if tc.respErr != nil {
-					return nil, tc.respErr
-				}
-				return &http.Response{StatusCode: tc.respStatus, Body: http.NoBody, Request: r}, nil
-			})
-			ctx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": parentTraceparent})
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, tc.url, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			client := &http.Client{Transport: newTransport(tp, propagation.TraceContext{}, base)}
-			resp, err := client.Do(req)
-			if err == nil {
-				_ = resp.Body.Close()
-			}
-			if req.Header.Get("Traceparent") != "" {
-				t.Error("caller's request was mutated")
-			}
-
-			spans := sr.Ended()
-			if len(spans) != 1 {
-				t.Fatalf("got %d spans, want 1", len(spans))
-			}
-			s := spans[0]
-			if s.SpanKind() != trace.SpanKindClient || s.Parent().SpanID().String() != parentSpanID {
-				t.Errorf("span kind %v parent %s", s.SpanKind(), s.Parent().SpanID())
-			}
-			if want := "00-" + parentTraceID + "-" + s.SpanContext().SpanID().String() + "-01"; gotTP != want {
-				t.Errorf("injected traceparent = %q, want %q", gotTP, want)
-			}
-			if (s.Status().Code == codes.Error) != tc.wantError || s.Status().Description != tc.wantDesc {
-				t.Errorf("status = %+v, want error=%v desc=%q", s.Status(), tc.wantError, tc.wantDesc)
-			}
-			full := attrMap(s.Attributes())["url.full"]
-			if strings.Count(full, "/") != 2 || strings.ContainsAny(full, "?@") {
-				t.Errorf("url.full = %q, want scheme://host only", full)
-			}
+			runTransportCase(t, tc)
 		})
 	}
 }

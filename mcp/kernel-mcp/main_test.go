@@ -22,328 +22,316 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+type mainFakeCDPState struct {
+	wsMu          sync.Mutex
+	activeWS      *websocket.Conn
+	lastNavURL    string
+	cartNavCount  int
+	cartEvalCount int
+	clickCount    int
+}
+
+func writeMainCDPError(ws *websocket.Conn, mu *sync.Mutex, id int64, msg string) {
+	mu.Lock()
+	defer mu.Unlock()
+	_ = ws.WriteJSON(map[string]any{
+		"id": id,
+		"error": map[string]any{
+			"code":    -32000,
+			"message": msg,
+		},
+	})
+}
+
+func writeMainCDPResult(ws *websocket.Conn, mu *sync.Mutex, id int64, result any) {
+	mu.Lock()
+	defer mu.Unlock()
+	_ = ws.WriteJSON(map[string]any{
+		"id":     id,
+		"result": result,
+	})
+}
+
+func handleMainFakeCDPList(w http.ResponseWriter, r *http.Request) {
+	targets := []TargetInfo{
+		{
+			ID:                   "main-page-1",
+			Type:                 "page",
+			URL:                  "https://www.amazon.com",
+			WebSocketDebuggerURL: "ws://" + r.Host + "/devtools/page/main-page-1",
+		},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(targets)
+}
+
+func handleMainFakeCDPNavigate(ws *websocket.Conn, state *mainFakeCDPState, reqID int64, params json.RawMessage) {
+	var p struct {
+		URL string `json:"url"`
+	}
+	_ = json.Unmarshal(params, &p)
+	state.wsMu.Lock()
+	state.lastNavURL = p.URL
+	if strings.Contains(p.URL, "/cart/view.html") {
+		state.cartNavCount++
+	}
+	failNav := strings.Contains(p.URL, "fail-navigate") || strings.Contains(p.URL, "failnav") || (strings.Contains(p.URL, "/cart/view.html") && state.cartNavCount == 2)
+	state.wsMu.Unlock()
+
+	if failNav {
+		writeMainCDPError(ws, &state.wsMu, reqID, "Cannot navigate")
+		return
+	}
+	writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{})
+}
+
+func evaluateAmazonCart(ws *websocket.Conn, state *mainFakeCDPState, reqID int64) (any, bool) {
+	state.wsMu.Lock()
+	state.cartEvalCount++
+	failEval := state.cartEvalCount == 2
+	state.wsMu.Unlock()
+	if failEval {
+		writeMainCDPError(ws, &state.wsMu, reqID, "Cart extraction failed")
+		return nil, false
+	}
+	return map[string]any{
+		"subtotal": "$49.99",
+		"count":    "1 item",
+		"items": []map[string]any{
+			{
+				"asin":     "B08N5WRWNW",
+				"title":    "Echo Dot 4111-2222-3333-4444",
+				"price":    "$49.99",
+				"quantity": "1",
+			},
+		},
+	}, true
+}
+
+func evaluateAmazonAddToCart(ws *websocket.Conn, state *mainFakeCDPState, reqID int64, currentNav string) (any, bool) {
+	if strings.Contains(currentNav, "failevl123") {
+		writeMainCDPError(ws, &state.wsMu, reqID, "Locate add-to-cart failed")
+		return nil, false
+	}
+	if strings.Contains(currentNav, "B08N5WRWNX") {
+		return map[string]any{
+			"found":        false,
+			"hasRect":      false,
+			"x":            0,
+			"y":            0,
+			"productTitle": "",
+		}, true
+	}
+	return map[string]any{
+		"found":        true,
+		"hasRect":      true,
+		"x":            200,
+		"y":            150,
+		"productTitle": "Echo Dot Gen 4",
+	}, true
+}
+
+func evaluateAmazonSearch(ws *websocket.Conn, state *mainFakeCDPState, reqID int64, currentNav string) (any, bool) {
+	if strings.Contains(currentNav, "fail-search-eval") {
+		writeMainCDPError(ws, &state.wsMu, reqID, "Search eval failed")
+		return nil, false
+	}
+	return []map[string]any{
+		{
+			"asin":    "B08N5WRWNW",
+			"title":   "Echo Dot with card 4111-2222-3333-4444",
+			"price":   "$49.99",
+			"rating":  "4.7",
+			"reviews": "1200",
+			"prime":   true,
+			"url":     "https://www.amazon.com/dp/B08N5WRWNW",
+		},
+	}, true
+}
+
+func handleMainFakeCDPEvaluate(ws *websocket.Conn, state *mainFakeCDPState, reqID int64, params json.RawMessage) {
+	var p struct {
+		Expression string `json:"expression"`
+	}
+	_ = json.Unmarshal(params, &p)
+	expr := p.Expression
+
+	state.wsMu.Lock()
+	currentNav := state.lastNavURL
+	state.wsMu.Unlock()
+
+	switch {
+	case strings.Contains(expr, "fail-eval"):
+		writeMainCDPError(ws, &state.wsMu, reqID, "Eval failed")
+		return
+	case strings.Contains(expr, "throw new Error"):
+		state.wsMu.Lock()
+		_ = ws.WriteJSON(map[string]any{
+			"id": reqID,
+			"result": map[string]any{
+				"result": map[string]any{"type": "undefined"},
+				"exceptionDetails": map[string]any{
+					"text": "Uncaught Error: boom",
+				},
+			},
+		})
+		state.wsMu.Unlock()
+		return
+	case strings.Contains(expr, "#sc-subtotal-amount-activecart"):
+		if evalVal, ok := evaluateAmazonCart(ws, state, reqID); ok {
+			writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{"result": map[string]any{"type": "object", "value": evalVal}})
+		}
+		return
+	case strings.Contains(expr, "#add-to-cart-button"):
+		if evalVal, ok := evaluateAmazonAddToCart(ws, state, reqID, currentNav); ok {
+			writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{"result": map[string]any{"type": "object", "value": evalVal}})
+		}
+		return
+	case strings.Contains(expr, "s-search-result"):
+		if evalVal, ok := evaluateAmazonSearch(ws, state, reqID, currentNav); ok {
+			writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{"result": map[string]any{"type": "object", "value": evalVal}})
+		}
+		return
+	}
+
+	evalVal := evaluateRemainingExpressions(expr)
+	writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{
+		"result": map[string]any{
+			"type":  "object",
+			"value": evalVal,
+		},
+	})
+}
+
+func evaluateRemainingExpressions(expr string) any {
+	switch {
+	case strings.Contains(expr, "StealthInitScript") || strings.Contains(expr, "navigator.webdriver"):
+		return true
+	case strings.Contains(expr, "cloneNode(true)"):
+		return map[string]any{
+			"title": "Amazon Test",
+			"url":   "https://www.amazon.com",
+			"text":  "Product details with card 4111-2222-3333-4444 here",
+		}
+	case strings.Contains(expr, "#nav-cart-count"):
+		return "1"
+	case strings.Contains(expr, `"#not-found"`):
+		return map[string]any{"found": false, "tag": "", "text": "", "hasRect": false, "x": 0, "y": 0}
+	case strings.Contains(expr, `"#type-not-found"`):
+		return map[string]any{"found": false, "hasRect": false, "x": 0, "y": 0}
+	case strings.Contains(expr, "getBoundingClientRect"):
+		return map[string]any{"found": true, "tag": "button", "text": "Add to Cart", "hasRect": true, "x": 120, "y": 340}
+	default:
+		return "eval-ok"
+	}
+}
+
+func handleMainFakeCDPScreenshot(ws *websocket.Conn, state *mainFakeCDPState, reqID int64, params json.RawMessage) {
+	var p struct {
+		Format string `json:"format"`
+	}
+	_ = json.Unmarshal(params, &p)
+	if p.Format == "fail" {
+		writeMainCDPError(ws, &state.wsMu, reqID, "Screenshot failed")
+		return
+	}
+	data := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	if p.Format == "rawtext" {
+		data = "not-base64!"
+	}
+	writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{"data": data})
+}
+
+func handleMainFakeCDPMouse(ws *websocket.Conn, state *mainFakeCDPState, reqID int64) {
+	state.wsMu.Lock()
+	state.clickCount++
+	failClick := state.clickCount == 4
+	state.wsMu.Unlock()
+	if failClick {
+		writeMainCDPError(ws, &state.wsMu, reqID, "Click dispatch failed")
+		return
+	}
+	writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{})
+}
+
+func handleMainFakeCDPInsertText(ws *websocket.Conn, state *mainFakeCDPState, reqID int64, params json.RawMessage) {
+	var ip struct {
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(params, &ip)
+	if ip.Text == "fail-insert" {
+		writeMainCDPError(ws, &state.wsMu, reqID, "Insert text failed")
+		return
+	}
+	writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{})
+}
+
+func handleMainFakeCDPMethod(ws *websocket.Conn, state *mainFakeCDPState, reqID int64, method string, params json.RawMessage) {
+	switch method {
+	case "Target.attachToTarget":
+		writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{"sessionId": "sess-main-1"})
+	case "Page.enable", "Emulation.setUserAgentOverride", "Page.addScriptToEvaluateOnNewDocument":
+		writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{})
+	case "Page.navigate":
+		handleMainFakeCDPNavigate(ws, state, reqID, params)
+	case "Runtime.evaluate":
+		handleMainFakeCDPEvaluate(ws, state, reqID, params)
+	case "Page.captureScreenshot":
+		handleMainFakeCDPScreenshot(ws, state, reqID, params)
+	case "Input.dispatchMouseEvent":
+		handleMainFakeCDPMouse(ws, state, reqID)
+	case "Input.insertText":
+		handleMainFakeCDPInsertText(ws, state, reqID, params)
+	default:
+		writeMainCDPResult(ws, &state.wsMu, reqID, map[string]any{})
+	}
+}
+
+func handleMainFakeCDPWSLoop(ws *websocket.Conn, state *mainFakeCDPState) {
+	defer ws.Close()
+	for {
+		_, data, err := ws.ReadMessage()
+		if err != nil {
+			return
+		}
+
+		var req struct {
+			ID     int64           `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal(data, &req); err != nil {
+			continue
+		}
+
+		handleMainFakeCDPMethod(ws, state, req.ID, req.Method, req.Params)
+	}
+}
+
+func handleMainFakeCDPDevTools(w http.ResponseWriter, r *http.Request, state *mainFakeCDPState) {
+	ws, err := testUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	state.wsMu.Lock()
+	state.activeWS = ws
+	state.wsMu.Unlock()
+
+	go handleMainFakeCDPWSLoop(ws, state)
+}
+
 func startMainFakeCDPServer(t *testing.T) (*httptest.Server, *Config) {
 	t.Helper()
-
-	var wsMu sync.Mutex
-	var activeWS *websocket.Conn
-	var lastNavURL string
-	var cartNavCount int
-	var cartEvalCount int
-	var clickCount int
+	state := &mainFakeCDPState{}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/json/list" {
-			targets := []TargetInfo{
-				{
-					ID:                   "main-page-1",
-					Type:                 "page",
-					URL:                  "https://www.amazon.com",
-					WebSocketDebuggerURL: "ws://" + r.Host + "/devtools/page/main-page-1",
-				},
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(targets)
+			handleMainFakeCDPList(w, r)
 			return
 		}
 
 		if strings.HasPrefix(r.URL.Path, "/devtools/page/") {
-			ws, err := testUpgrader.Upgrade(w, r, nil)
-			if err != nil {
-				return
-			}
-			wsMu.Lock()
-			activeWS = ws
-			wsMu.Unlock()
-
-			go func() {
-				defer ws.Close()
-				for {
-					_, data, err := ws.ReadMessage()
-					if err != nil {
-						return
-					}
-
-					var req struct {
-						ID     int64           `json:"id"`
-						Method string          `json:"method"`
-						Params json.RawMessage `json:"params"`
-					}
-					if err := json.Unmarshal(data, &req); err != nil {
-						continue
-					}
-
-					var result any
-
-					switch req.Method {
-					case "Target.attachToTarget":
-						result = map[string]any{"sessionId": "sess-main-1"}
-					case "Page.enable", "Emulation.setUserAgentOverride", "Page.addScriptToEvaluateOnNewDocument":
-						result = map[string]any{}
-					case "Page.navigate":
-						var p struct {
-							URL string `json:"url"`
-						}
-						_ = json.Unmarshal(req.Params, &p)
-						wsMu.Lock()
-						lastNavURL = p.URL
-						wsMu.Unlock()
-
-						wsMu.Lock()
-						if strings.Contains(p.URL, "/cart/view.html") {
-							cartNavCount++
-						}
-						failNav := strings.Contains(p.URL, "fail-navigate") || strings.Contains(p.URL, "failnav") || (strings.Contains(p.URL, "/cart/view.html") && cartNavCount == 2)
-						wsMu.Unlock()
-
-						if failNav {
-							wsMu.Lock()
-							_ = ws.WriteJSON(map[string]any{
-								"id": req.ID,
-								"error": map[string]any{
-									"code":    -32000,
-									"message": "Cannot navigate",
-								},
-							})
-							wsMu.Unlock()
-							continue
-						}
-						result = map[string]any{}
-					case "Runtime.evaluate":
-						var p struct {
-							Expression string `json:"expression"`
-						}
-						_ = json.Unmarshal(req.Params, &p)
-						expr := p.Expression
-
-						wsMu.Lock()
-						currentNav := lastNavURL
-						wsMu.Unlock()
-
-						var evalVal any
-						switch {
-						case strings.Contains(expr, "StealthInitScript") || strings.Contains(expr, "navigator.webdriver"):
-							evalVal = true
-						case strings.Contains(expr, "fail-eval"):
-							wsMu.Lock()
-							_ = ws.WriteJSON(map[string]any{
-								"id": req.ID,
-								"error": map[string]any{
-									"code":    -32000,
-									"message": "Eval failed",
-								},
-							})
-							wsMu.Unlock()
-							continue
-						case strings.Contains(expr, "cloneNode(true)"):
-							evalVal = map[string]any{
-								"title": "Amazon Test",
-								"url":   "https://www.amazon.com",
-								"text":  "Product details with card 4111-2222-3333-4444 here",
-							}
-						case strings.Contains(expr, "#sc-subtotal-amount-activecart"):
-							wsMu.Lock()
-							cartEvalCount++
-							failEval := cartEvalCount == 2
-							wsMu.Unlock()
-							if failEval {
-								wsMu.Lock()
-								_ = ws.WriteJSON(map[string]any{
-									"id": req.ID,
-									"error": map[string]any{
-										"code":    -32000,
-										"message": "Cart extraction failed",
-									},
-								})
-								wsMu.Unlock()
-								continue
-							}
-							evalVal = map[string]any{
-								"subtotal": "$49.99",
-								"count":    "1 item",
-								"items": []map[string]any{
-									{
-										"asin":     "B08N5WRWNW",
-										"title":    "Echo Dot 4111-2222-3333-4444",
-										"price":    "$49.99",
-										"quantity": "1",
-									},
-								},
-							}
-						case strings.Contains(expr, "#add-to-cart-button"):
-							if strings.Contains(currentNav, "failevl123") {
-								wsMu.Lock()
-								_ = ws.WriteJSON(map[string]any{
-									"id": req.ID,
-									"error": map[string]any{
-										"code":    -32000,
-										"message": "Locate add-to-cart failed",
-									},
-								})
-								wsMu.Unlock()
-								continue
-							}
-							if strings.Contains(currentNav, "B08N5WRWNX") {
-								evalVal = map[string]any{
-									"found":        false,
-									"hasRect":      false,
-									"x":            0,
-									"y":            0,
-									"productTitle": "",
-								}
-							} else {
-								evalVal = map[string]any{
-									"found":        true,
-									"hasRect":      true,
-									"x":            200,
-									"y":            150,
-									"productTitle": "Echo Dot Gen 4",
-								}
-							}
-						case strings.Contains(expr, "#nav-cart-count"):
-							evalVal = "1"
-						case strings.Contains(expr, "s-search-result"):
-							if strings.Contains(currentNav, "fail-search-eval") {
-								wsMu.Lock()
-								_ = ws.WriteJSON(map[string]any{
-									"id": req.ID,
-									"error": map[string]any{
-										"code":    -32000,
-										"message": "Search eval failed",
-									},
-								})
-								wsMu.Unlock()
-								continue
-							}
-							evalVal = []map[string]any{
-								{
-									"asin":    "B08N5WRWNW",
-									"title":   "Echo Dot with card 4111-2222-3333-4444",
-									"price":   "$49.99",
-									"rating":  "4.7",
-									"reviews": "1200",
-									"prime":   true,
-									"url":     "https://www.amazon.com/dp/B08N5WRWNW",
-								},
-							}
-						case strings.Contains(expr, `"#not-found"`):
-							evalVal = map[string]any{
-								"found":   false,
-								"tag":     "",
-								"text":    "",
-								"hasRect": false,
-								"x":       0,
-								"y":       0,
-							}
-						case strings.Contains(expr, `"#type-not-found"`):
-							evalVal = map[string]any{
-								"found":   false,
-								"hasRect": false,
-								"x":       0,
-								"y":       0,
-							}
-						case strings.Contains(expr, "getBoundingClientRect"):
-							evalVal = map[string]any{
-								"found":   true,
-								"tag":     "button",
-								"text":    "Add to Cart",
-								"hasRect": true,
-								"x":       120,
-								"y":       340,
-							}
-						case strings.Contains(expr, "throw new Error"):
-							wsMu.Lock()
-							_ = ws.WriteJSON(map[string]any{
-								"id": req.ID,
-								"result": map[string]any{
-									"result": map[string]any{"type": "undefined"},
-									"exceptionDetails": map[string]any{
-										"text": "Uncaught Error: boom",
-									},
-								},
-							})
-							wsMu.Unlock()
-							continue
-						default:
-							evalVal = "eval-ok"
-						}
-
-						result = map[string]any{
-							"result": map[string]any{
-								"type":  "object",
-								"value": evalVal,
-							},
-						}
-					case "Page.captureScreenshot":
-						var p struct {
-							Format string `json:"format"`
-						}
-						_ = json.Unmarshal(req.Params, &p)
-						if p.Format == "fail" {
-							wsMu.Lock()
-							_ = ws.WriteJSON(map[string]any{
-								"id": req.ID,
-								"error": map[string]any{
-									"code":    -32000,
-									"message": "Screenshot failed",
-								},
-							})
-							wsMu.Unlock()
-							continue
-						}
-						data := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-						if p.Format == "rawtext" {
-							data = "not-base64!"
-						}
-						result = map[string]any{"data": data}
-					case "Input.dispatchMouseEvent":
-						wsMu.Lock()
-						clickCount++
-						failClick := clickCount == 4
-						wsMu.Unlock()
-						if failClick {
-							wsMu.Lock()
-							_ = ws.WriteJSON(map[string]any{
-								"id": req.ID,
-								"error": map[string]any{
-									"code":    -32000,
-									"message": "Click dispatch failed",
-								},
-							})
-							wsMu.Unlock()
-							continue
-						}
-						result = map[string]any{}
-					case "Input.insertText":
-						var ip struct {
-							Text string `json:"text"`
-						}
-						_ = json.Unmarshal(req.Params, &ip)
-						if ip.Text == "fail-insert" {
-							wsMu.Lock()
-							_ = ws.WriteJSON(map[string]any{
-								"id": req.ID,
-								"error": map[string]any{
-									"code":    -32000,
-									"message": "Insert text failed",
-								},
-							})
-							wsMu.Unlock()
-							continue
-						}
-						result = map[string]any{}
-					default:
-						result = map[string]any{}
-					}
-
-					wsMu.Lock()
-					_ = ws.WriteJSON(map[string]any{
-						"id":     req.ID,
-						"result": result,
-					})
-					wsMu.Unlock()
-				}
-			}()
+			handleMainFakeCDPDevTools(w, r, state)
 			return
 		}
 
@@ -359,11 +347,11 @@ func startMainFakeCDPServer(t *testing.T) (*httptest.Server, *Config) {
 	}
 
 	t.Cleanup(func() {
-		wsMu.Lock()
-		if activeWS != nil {
-			_ = activeWS.Close()
+		state.wsMu.Lock()
+		if state.activeWS != nil {
+			_ = state.activeWS.Close()
 		}
-		wsMu.Unlock()
+		state.wsMu.Unlock()
 		server.Close()
 	})
 
@@ -570,20 +558,16 @@ func TestServer_ToolsListSchemaTable(t *testing.T) {
 	}
 }
 
-func TestServer_ToolsExecutionTable(t *testing.T) {
-	_, cfg := startMainFakeCDPServer(t)
-	client := NewCDPClient(cfg)
-	defer client.Close()
-	srv := NewServer(cfg, client)
-	mux := NewHTTPMux(srv)
+type serverToolsExecutionCase struct {
+	name       string
+	toolName   string
+	args       string
+	wantSubstr string
+	wantError  bool
+}
 
-	tests := []struct {
-		name       string
-		toolName   string
-		args       string
-		wantSubstr string
-		wantError  bool
-	}{
+func browserBasicToolsExecutionCases() []serverToolsExecutionCase {
+	return []serverToolsExecutionCase{
 		// 1. browser_navigate
 		{
 			name:       "browser_navigate blank url",
@@ -664,6 +648,11 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			wantSubstr: "Content extraction failed",
 			wantError:  true,
 		},
+	}
+}
+
+func browserInteractionToolsExecutionCases() []serverToolsExecutionCase {
+	return []serverToolsExecutionCase{
 		// 4. browser_click
 		{
 			name:       "browser_click blank selector",
@@ -772,6 +761,20 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			wantSubstr: `not-base64!`,
 			wantError:  false,
 		},
+	}
+}
+
+func browserToolsExecutionCases() []serverToolsExecutionCase {
+	basic := browserBasicToolsExecutionCases()
+	interact := browserInteractionToolsExecutionCases()
+	cases := make([]serverToolsExecutionCase, 0, len(basic)+len(interact))
+	cases = append(cases, basic...)
+	cases = append(cases, interact...)
+	return cases
+}
+
+func amazonToolsExecutionCases() []serverToolsExecutionCase {
+	return []serverToolsExecutionCase{
 		// 7. amazon_search
 		{
 			name:       "amazon_search blank query",
@@ -875,31 +878,55 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			wantError:  false,
 		},
 	}
+}
+
+func serverToolsExecutionTestCases() []serverToolsExecutionCase {
+	b := browserToolsExecutionCases()
+	a := amazonToolsExecutionCases()
+	cases := make([]serverToolsExecutionCase, 0, len(b)+len(a))
+	cases = append(cases, b...)
+	cases = append(cases, a...)
+	return cases
+}
+
+func runServerToolsExecutionCase(t *testing.T, mux http.Handler, tc serverToolsExecutionCase) {
+	t.Helper()
+	payload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      100,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      tc.toolName,
+			"arguments": json.RawMessage(tc.args),
+		},
+	}
+	reqBytes, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(reqBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, tc.wantSubstr) {
+		t.Fatalf("%s: body = %q, want substring %q", tc.name, body, tc.wantSubstr)
+	}
+	if tc.wantError && !strings.Contains(body, `"isError":true`) && !strings.Contains(body, `"error"`) {
+		t.Fatalf("%s: expected isError:true or error object in response: %s", tc.name, body)
+	}
+}
+
+func TestServer_ToolsExecutionTable(t *testing.T) {
+	_, cfg := startMainFakeCDPServer(t)
+	client := NewCDPClient(cfg)
+	defer client.Close()
+	srv := NewServer(cfg, client)
+	mux := NewHTTPMux(srv)
+
+	tests := serverToolsExecutionTestCases()
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			payload := map[string]any{
-				"jsonrpc": "2.0",
-				"id":      100,
-				"method":  "tools/call",
-				"params": map[string]any{
-					"name":      tc.toolName,
-					"arguments": json.RawMessage(tc.args),
-				},
-			}
-			reqBytes, _ := json.Marshal(payload)
-			req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(reqBytes))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, req)
-
-			body := w.Body.String()
-			if !strings.Contains(body, tc.wantSubstr) {
-				t.Fatalf("%s: body = %q, want substring %q", tc.name, body, tc.wantSubstr)
-			}
-			if tc.wantError && !strings.Contains(body, `"isError":true`) && !strings.Contains(body, `"error"`) {
-				t.Fatalf("%s: expected isError:true or error object in response: %s", tc.name, body)
-			}
+			runServerToolsExecutionCase(t, mux, tc)
 		})
 	}
 }

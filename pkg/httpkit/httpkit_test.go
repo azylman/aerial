@@ -307,23 +307,89 @@ func TestNormalizeMCPToolPrefix_TableDriven(t *testing.T) {
 	}
 }
 
+type serveMCPStreamTestCase struct {
+	name           string
+	method         string
+	body           string
+	readyBanner    string
+	oldToolPrefix  string
+	newToolPrefix  string
+	wantStatus     int
+	wantBodySubstr string
+	wantHeaderCT   string
+	startSpan      string
+	wantSpanName   string
+	wantSpanAttrs  map[string]string
+}
+
+func runServeMCPStreamCase(t *testing.T, tc serveMCPStreamTestCase) {
+	t.Helper()
+	sr := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	streamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(b), `"name":"list"`) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("invoked:list"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("stream-handled"))
+	})
+
+	req := httptest.NewRequest(tc.method, "/mcp", strings.NewReader(tc.body))
+	rec := httptest.NewRecorder()
+	if tc.startSpan != "" {
+		ctx, span := tp.Tracer("test").Start(req.Context(), tc.startSpan)
+		req = req.WithContext(ctx)
+		ServeMCPStream(rec, req, streamHandler, tc.readyBanner, tc.oldToolPrefix, tc.newToolPrefix)
+		span.End()
+	} else {
+		ServeMCPStream(rec, req, streamHandler, tc.readyBanner, tc.oldToolPrefix, tc.newToolPrefix)
+	}
+
+	assertServeMCPStreamResult(t, tc, rec, sr)
+}
+
+func assertServeMCPStreamResult(t *testing.T, tc serveMCPStreamTestCase, rec *httptest.ResponseRecorder, sr *tracetest.SpanRecorder) {
+	t.Helper()
+	spans := sr.Ended()
+	if tc.startSpan == "" && len(spans) != 0 {
+		t.Errorf("ServeMCPStream without an active span recorded %d spans, want 0", len(spans))
+	}
+	if tc.startSpan != "" {
+		if len(spans) != 1 {
+			t.Fatalf("recorded %d spans, want 1", len(spans))
+		}
+		if spans[0].Name() != tc.wantSpanName {
+			t.Errorf("span name = %q, want %q", spans[0].Name(), tc.wantSpanName)
+		}
+		got := map[string]string{}
+		for _, kv := range spans[0].Attributes() {
+			got[string(kv.Key)] = kv.Value.AsString()
+		}
+		if !reflect.DeepEqual(got, tc.wantSpanAttrs) {
+			t.Errorf("span attrs = %v, want %v", got, tc.wantSpanAttrs)
+		}
+	}
+
+	if rec.Code != tc.wantStatus {
+		t.Errorf("ServeMCPStream status = %d, want %d", rec.Code, tc.wantStatus)
+	}
+	if !strings.Contains(rec.Body.String(), tc.wantBodySubstr) {
+		t.Errorf("ServeMCPStream body = %q, want substring %q", rec.Body.String(), tc.wantBodySubstr)
+	}
+	if tc.wantHeaderCT != "" && rec.Header().Get("Content-Type") != tc.wantHeaderCT {
+		t.Errorf("ServeMCPStream Content-Type = %q, want %q", rec.Header().Get("Content-Type"), tc.wantHeaderCT)
+	}
+}
+
 func TestServeMCPStream_TableDriven(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name           string
-		method         string
-		body           string
-		readyBanner    string
-		oldToolPrefix  string
-		newToolPrefix  string
-		wantStatus     int
-		wantBodySubstr string
-		wantHeaderCT   string
-		startSpan      string
-		wantSpanName   string
-		wantSpanAttrs  map[string]string
-	}{
+	tests := []serveMCPStreamTestCase{
 		{
 			name:           "get readiness banner",
 			method:         http.MethodGet,
@@ -390,62 +456,7 @@ func TestServeMCPStream_TableDriven(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			sr := tracetest.NewSpanRecorder()
-			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
-			t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
-
-			streamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				b, _ := io.ReadAll(r.Body)
-				if strings.Contains(string(b), `"name":"list"`) {
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte("invoked:list"))
-					return
-				}
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte("stream-handled"))
-			})
-
-			req := httptest.NewRequest(tc.method, "/mcp", strings.NewReader(tc.body))
-			rec := httptest.NewRecorder()
-			if tc.startSpan != "" {
-				ctx, span := tp.Tracer("test").Start(req.Context(), tc.startSpan)
-				req = req.WithContext(ctx)
-				ServeMCPStream(rec, req, streamHandler, tc.readyBanner, tc.oldToolPrefix, tc.newToolPrefix)
-				span.End()
-			} else {
-				ServeMCPStream(rec, req, streamHandler, tc.readyBanner, tc.oldToolPrefix, tc.newToolPrefix)
-			}
-
-			spans := sr.Ended()
-			if tc.startSpan == "" && len(spans) != 0 {
-				t.Errorf("ServeMCPStream without an active span recorded %d spans, want 0", len(spans))
-			}
-			if tc.startSpan != "" {
-				if len(spans) != 1 {
-					t.Fatalf("recorded %d spans, want 1", len(spans))
-				}
-				if spans[0].Name() != tc.wantSpanName {
-					t.Errorf("span name = %q, want %q", spans[0].Name(), tc.wantSpanName)
-				}
-				got := map[string]string{}
-				for _, kv := range spans[0].Attributes() {
-					got[string(kv.Key)] = kv.Value.AsString()
-				}
-				if !reflect.DeepEqual(got, tc.wantSpanAttrs) {
-					t.Errorf("span attrs = %v, want %v", got, tc.wantSpanAttrs)
-				}
-			}
-
-			if rec.Code != tc.wantStatus {
-				t.Errorf("ServeMCPStream status = %d, want %d", rec.Code, tc.wantStatus)
-			}
-			if !strings.Contains(rec.Body.String(), tc.wantBodySubstr) {
-				t.Errorf("ServeMCPStream body = %q, want substring %q", rec.Body.String(), tc.wantBodySubstr)
-			}
-			if tc.wantHeaderCT != "" && rec.Header().Get("Content-Type") != tc.wantHeaderCT {
-				t.Errorf("ServeMCPStream Content-Type = %q, want %q", rec.Header().Get("Content-Type"), tc.wantHeaderCT)
-			}
+			runServeMCPStreamCase(t, tc)
 		})
 	}
 }

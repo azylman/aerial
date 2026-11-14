@@ -60,15 +60,74 @@ func TestIsBlockedToolCall_TableDriven(t *testing.T) {
 	}
 }
 
+type filterToolsTestCase struct {
+	name          string
+	rawResp       string
+	blockedMap    map[string]bool
+	wantUnchanged bool
+	wantTools     []string
+	wantErrorMsg  string
+}
+
+func runFilterToolsCase(t *testing.T, tt filterToolsTestCase) {
+	t.Helper()
+	out, err := FilterToolsResponse([]byte(tt.rawResp), tt.blockedMap)
+	if tt.wantErrorMsg != "" {
+		if err == nil || !strings.Contains(err.Error(), tt.wantErrorMsg) {
+			t.Fatalf("expected error containing %q, got: %v", tt.wantErrorMsg, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tt.wantUnchanged {
+		if string(out) != tt.rawResp {
+			t.Errorf("expected unchanged response, got %s", string(out))
+		}
+		return
+	}
+	if tt.wantTools != nil {
+		assertFilteredTools(t, tt.rawResp, out, tt.wantTools)
+	}
+}
+
+func assertFilteredTools(t *testing.T, rawResp string, out []byte, wantTools []string) {
+	t.Helper()
+	var parsed struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+			NextCursor string         `json:"nextCursor"`
+			Meta       map[string]any `json:"_meta"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+	gotNames := make([]string, 0, len(parsed.Result.Tools))
+	for _, tool := range parsed.Result.Tools {
+		gotNames = append(gotNames, tool.Name)
+	}
+	if len(gotNames) != len(wantTools) {
+		t.Fatalf("expected %d tools, got %d (%v)", len(wantTools), len(gotNames), gotNames)
+	}
+	for i, want := range wantTools {
+		if gotNames[i] != want {
+			t.Errorf("tool[%d]: expected %q, got %q", i, want, gotNames[i])
+		}
+	}
+	if strings.Contains(rawResp, "nextCursor") && parsed.Result.NextCursor != "cursor-token-xyz" {
+		t.Errorf("expected nextCursor to be preserved, got %q", parsed.Result.NextCursor)
+	}
+	if strings.Contains(rawResp, "_meta") && parsed.Result.Meta["version"] != "2024-11-05" {
+		t.Errorf("expected _meta to be preserved, got %v", parsed.Result.Meta)
+	}
+}
+
 func TestFilterToolsResponse_TableDriven(t *testing.T) {
-	tests := []struct {
-		name          string
-		rawResp       string
-		blockedMap    map[string]bool
-		wantUnchanged bool
-		wantTools     []string
-		wantErrorMsg  string
-	}{
+	tests := []filterToolsTestCase{
 		{"standard response with blocked and allowed tools", `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"discord_send"},{"name":"discord_read_messages"},{"name":"send_message"}]}}`, BlockedToolNames, false, []string{"discord_read_messages"}, ""},
 		{"preserves nextCursor and _meta in result", `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"discord_send"},{"name":"allowed_tool"}],"nextCursor":"cursor-token-xyz","_meta":{"version":"2024-11-05"}}}`, BlockedToolNames, false, []string{"allowed_tool"}, ""},
 		{"case variant blocked tool filtered", `{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"DISCORD_SEND"},{"name":"valid_tool"}]}}`, BlockedToolNames, false, []string{"valid_tool"}, ""},
@@ -82,54 +141,7 @@ func TestFilterToolsResponse_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := FilterToolsResponse([]byte(tt.rawResp), tt.blockedMap)
-			if tt.wantErrorMsg != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrorMsg) {
-					t.Fatalf("expected error containing %q, got: %v", tt.wantErrorMsg, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tt.wantUnchanged {
-				if string(out) != tt.rawResp {
-					t.Errorf("expected unchanged response, got %s", string(out))
-				}
-				return
-			}
-			if tt.wantTools != nil {
-				var parsed struct {
-					Result struct {
-						Tools []struct {
-							Name string `json:"name"`
-						} `json:"tools"`
-						NextCursor string         `json:"nextCursor"`
-						Meta       map[string]any `json:"_meta"`
-					} `json:"result"`
-				}
-				if err := json.Unmarshal(out, &parsed); err != nil {
-					t.Fatalf("failed to unmarshal output: %v", err)
-				}
-				var gotNames []string
-				for _, tool := range parsed.Result.Tools {
-					gotNames = append(gotNames, tool.Name)
-				}
-				if len(gotNames) != len(tt.wantTools) {
-					t.Fatalf("expected %d tools, got %d (%v)", len(tt.wantTools), len(gotNames), gotNames)
-				}
-				for i, want := range tt.wantTools {
-					if gotNames[i] != want {
-						t.Errorf("tool[%d]: expected %q, got %q", i, want, gotNames[i])
-					}
-				}
-				if strings.Contains(tt.rawResp, "nextCursor") && parsed.Result.NextCursor != "cursor-token-xyz" {
-					t.Errorf("expected nextCursor to be preserved, got %q", parsed.Result.NextCursor)
-				}
-				if strings.Contains(tt.rawResp, "_meta") && parsed.Result.Meta["version"] != "2024-11-05" {
-					t.Errorf("expected _meta to be preserved, got %v", parsed.Result.Meta)
-				}
-			}
+			runFilterToolsCase(t, tt)
 		})
 	}
 }
@@ -272,21 +284,31 @@ func TestValidateConfig_TableDriven(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := ValidateConfig(tt.cfg)
 			if tt.expectErr {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tt.errContains)
-				}
-				if !strings.Contains(err.Error(), tt.errContains) {
-					t.Errorf("expected error containing %q, got %v", tt.errContains, err)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if tt.cfg.Port != "4001" || tt.cfg.UpstreamPort != "4005" || tt.cfg.NodeBin != "node" || tt.cfg.AppPath != "app.js" {
-					t.Errorf("fields not trimmed cleanly: %+v", tt.cfg)
-				}
+				assertValidateConfigError(t, err, tt.errContains)
+				return
 			}
+			assertValidateConfigSuccess(t, err, tt.cfg)
 		})
+	}
+}
+
+func assertValidateConfigError(t *testing.T, err error, errContains string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error containing %q, got nil", errContains)
+	}
+	if !strings.Contains(err.Error(), errContains) {
+		t.Errorf("expected error containing %q, got %v", errContains, err)
+	}
+}
+
+func assertValidateConfigSuccess(t *testing.T, err error, cfg *Config) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Port != "4001" || cfg.UpstreamPort != "4005" || cfg.NodeBin != "node" || cfg.AppPath != "app.js" {
+		t.Errorf("fields not trimmed cleanly: %+v", cfg)
 	}
 }
 
@@ -484,15 +506,62 @@ func TestIsInitializeRequest_TableDriven(t *testing.T) {
 	}
 }
 
+type injectInstructionsTestCase struct {
+	name             string
+	rawResp          string
+	wantUnchanged    bool
+	wantInstructions string
+	wantServerName   string
+	wantErrorMsg     string
+}
+
+func runInjectInstructionsCase(t *testing.T, tt injectInstructionsTestCase) {
+	t.Helper()
+	out, err := InjectInstructions([]byte(tt.rawResp), "use list first")
+	if tt.wantErrorMsg != "" {
+		if err == nil || !strings.Contains(err.Error(), tt.wantErrorMsg) {
+			t.Fatalf("expected error containing %q, got: %v", tt.wantErrorMsg, err)
+		}
+		if string(out) != tt.rawResp {
+			t.Errorf("expected input returned unchanged on error, got %s", string(out))
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tt.wantUnchanged {
+		if string(out) != tt.rawResp {
+			t.Errorf("expected unchanged response, got %s", string(out))
+		}
+		return
+	}
+	assertInjectedInstructions(t, out, tt.wantInstructions, tt.wantServerName)
+}
+
+func assertInjectedInstructions(t *testing.T, out []byte, wantInstructions, wantServerName string) {
+	t.Helper()
+	var parsed struct {
+		Result struct {
+			Instructions string `json:"instructions"`
+			ServerInfo   struct {
+				Name string `json:"name"`
+			} `json:"serverInfo"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+	if parsed.Result.Instructions != wantInstructions {
+		t.Errorf("instructions got %q, want %q", parsed.Result.Instructions, wantInstructions)
+	}
+	if parsed.Result.ServerInfo.Name != wantServerName {
+		t.Errorf("serverInfo.name got %q, want %q", parsed.Result.ServerInfo.Name, wantServerName)
+	}
+}
+
 func TestInjectInstructions_TableDriven(t *testing.T) {
-	tests := []struct {
-		name             string
-		rawResp          string
-		wantUnchanged    bool
-		wantInstructions string
-		wantServerName   string
-		wantErrorMsg     string
-	}{
+	tests := []injectInstructionsTestCase{
 		{"absent instructions injected and serverInfo preserved", `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"up"}}}`, false, "use list first", "up", ""},
 		{"empty instructions replaced", `{"jsonrpc":"2.0","id":2,"result":{"instructions":"","serverInfo":{"name":"up"}}}`, false, "use list first", "up", ""},
 		{"null instructions replaced", `{"jsonrpc":"2.0","id":3,"result":{"instructions":null}}`, false, "use list first", "", ""},
@@ -505,42 +574,7 @@ func TestInjectInstructions_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := InjectInstructions([]byte(tt.rawResp), "use list first")
-			if tt.wantErrorMsg != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrorMsg) {
-					t.Fatalf("expected error containing %q, got: %v", tt.wantErrorMsg, err)
-				}
-				if string(out) != tt.rawResp {
-					t.Errorf("expected input returned unchanged on error, got %s", string(out))
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tt.wantUnchanged {
-				if string(out) != tt.rawResp {
-					t.Errorf("expected unchanged response, got %s", string(out))
-				}
-				return
-			}
-			var parsed struct {
-				Result struct {
-					Instructions string `json:"instructions"`
-					ServerInfo   struct {
-						Name string `json:"name"`
-					} `json:"serverInfo"`
-				} `json:"result"`
-			}
-			if err := json.Unmarshal(out, &parsed); err != nil {
-				t.Fatalf("failed to unmarshal output: %v", err)
-			}
-			if parsed.Result.Instructions != tt.wantInstructions {
-				t.Errorf("instructions got %q, want %q", parsed.Result.Instructions, tt.wantInstructions)
-			}
-			if parsed.Result.ServerInfo.Name != tt.wantServerName {
-				t.Errorf("serverInfo.name got %q, want %q", parsed.Result.ServerInfo.Name, tt.wantServerName)
-			}
+			runInjectInstructionsCase(t, tt)
 		})
 	}
 }

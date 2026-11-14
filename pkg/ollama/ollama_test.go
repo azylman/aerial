@@ -80,26 +80,105 @@ func TestNewDynamicClient_TableDriven(t *testing.T) {
 	}
 }
 
+type generateEmbeddingTestCase struct {
+	name          string
+	text          string
+	isQuery       bool
+	queryPrefix   string
+	maxRetries    int
+	retryDelay    time.Duration
+	nilHTTPClient bool
+	cancelInDelay bool
+	handlerStatus int
+	handlerBody   string
+	failAttempts  int
+	cancelCtx     bool
+	wantErrSubstr string
+	wantEmbedding []float32
+	wantAttempts  int
+}
+
+func runGenerateEmbeddingCase(t *testing.T, tc generateEmbeddingTestCase) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if tc.cancelCtx {
+		cancel()
+	}
+
+	var attemptCount int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := atomic.AddInt64(&attemptCount, 1)
+
+		if tc.isQuery && tc.queryPrefix != "" {
+			var req embeddingRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if !strings.HasPrefix(req.Prompt, tc.queryPrefix) {
+				http.Error(w, fmt.Sprintf("expected prompt to have prefix %q", tc.queryPrefix), http.StatusBadRequest)
+				return
+			}
+		}
+
+		if tc.cancelInDelay && idx == 1 {
+			cancel()
+		}
+
+		if tc.failAttempts > 0 && int(idx) <= tc.failAttempts {
+			http.Error(w, "server temporary failure", http.StatusServiceUnavailable)
+			return
+		}
+
+		status := tc.handlerStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(tc.handlerBody))
+	}))
+	defer server.Close()
+
+	client := NewDynamicClient(func() Config {
+		return Config{
+			BaseURL:     server.URL,
+			QueryPrefix: tc.queryPrefix,
+		}
+	})
+	if !tc.nilHTTPClient {
+		client.SetHTTPClient(server.Client())
+	} else {
+		client.SetHTTPClient(nil)
+	}
+	client.SetRetryDelay(tc.retryDelay)
+
+	emb, err := client.GenerateEmbedding(ctx, tc.text, tc.isQuery, tc.maxRetries)
+	assertGenerateEmbeddingResult(t, tc, emb, err, attemptCount)
+}
+
+func assertGenerateEmbeddingResult(t *testing.T, tc generateEmbeddingTestCase, emb []float32, err error, attemptCount int64) {
+	t.Helper()
+	if tc.wantErrSubstr != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
+			t.Fatalf("GenerateEmbedding() error = %v, want substring %q", err, tc.wantErrSubstr)
+		}
+	} else {
+		if err != nil {
+			t.Fatalf("GenerateEmbedding() unexpected error = %v", err)
+		}
+		if !reflect.DeepEqual(emb, tc.wantEmbedding) {
+			t.Errorf("GenerateEmbedding() got = %v, want = %v", emb, tc.wantEmbedding)
+		}
+	}
+
+	if tc.wantAttempts > 0 && int(attemptCount) != tc.wantAttempts {
+		t.Errorf("server request attempts = %d, want = %d", attemptCount, tc.wantAttempts)
+	}
+}
+
 func TestGenerateEmbedding_TableDriven(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name          string
-		text          string
-		isQuery       bool
-		queryPrefix   string
-		maxRetries    int
-		retryDelay    time.Duration
-		nilHTTPClient bool
-		cancelInDelay bool
-		handlerStatus int
-		handlerBody   string
-		failAttempts  int
-		cancelCtx     bool
-		wantErrSubstr string
-		wantEmbedding []float32
-		wantAttempts  int
-	}{
+	tests := []generateEmbeddingTestCase{
 		{
 			name:          "empty text validation error",
 			text:          "   ",
@@ -220,75 +299,7 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			if tc.cancelCtx {
-				cancel()
-			}
-
-			var attemptCount int64
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				idx := atomic.AddInt64(&attemptCount, 1)
-
-				if tc.isQuery && tc.queryPrefix != "" {
-					var req embeddingRequest
-					_ = json.NewDecoder(r.Body).Decode(&req)
-					if !strings.HasPrefix(req.Prompt, tc.queryPrefix) {
-						http.Error(w, fmt.Sprintf("expected prompt to have prefix %q", tc.queryPrefix), http.StatusBadRequest)
-						return
-					}
-				}
-
-				if tc.cancelInDelay && idx == 1 {
-					cancel()
-				}
-
-				if tc.failAttempts > 0 && int(idx) <= tc.failAttempts {
-					http.Error(w, "server temporary failure", http.StatusServiceUnavailable)
-					return
-				}
-
-				status := tc.handlerStatus
-				if status == 0 {
-					status = http.StatusOK
-				}
-				w.WriteHeader(status)
-				_, _ = w.Write([]byte(tc.handlerBody))
-			}))
-			defer server.Close()
-
-			client := NewDynamicClient(func() Config {
-				return Config{
-					BaseURL:     server.URL,
-					QueryPrefix: tc.queryPrefix,
-				}
-			})
-			if !tc.nilHTTPClient {
-				client.SetHTTPClient(server.Client())
-			} else {
-				client.SetHTTPClient(nil)
-			}
-			client.SetRetryDelay(tc.retryDelay)
-
-			emb, err := client.GenerateEmbedding(ctx, tc.text, tc.isQuery, tc.maxRetries)
-			if tc.wantErrSubstr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
-					t.Fatalf("GenerateEmbedding() error = %v, want substring %q", err, tc.wantErrSubstr)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("GenerateEmbedding() unexpected error = %v", err)
-				}
-				if !reflect.DeepEqual(emb, tc.wantEmbedding) {
-					t.Errorf("GenerateEmbedding() got = %v, want = %v", emb, tc.wantEmbedding)
-				}
-			}
-
-			if tc.wantAttempts > 0 && int(attemptCount) != tc.wantAttempts {
-				t.Errorf("server request attempts = %d, want = %d", attemptCount, tc.wantAttempts)
-			}
+			runGenerateEmbeddingCase(t, tc)
 		})
 	}
 }
