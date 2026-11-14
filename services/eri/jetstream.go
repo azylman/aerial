@@ -31,14 +31,21 @@ func initEriJetStreamWithFactory(ctx context.Context, natsURL string, factory fu
 }
 
 func attachEriEventBus(ctx context.Context, pool *queue.WorkerPool) func() {
-	return attachEriEventBusWithFactory(ctx, pool, newBusFn)
+	fn := attachEriEventBusWithFactory(ctx, pool, newBusFn)
+	if fn == nil {
+		return func() {}
+	}
+	return fn
 }
 
 func attachEriEventBusWithFactory(ctx context.Context, pool *queue.WorkerPool, factory func(ctx context.Context, url string) (pubsub.Bus, error)) func() {
 	if pool == nil {
-		return func() {}
+		return nil
 	}
-	natsURL := firstNonEmpty(os.Getenv("NATS_URL"), pool.NATSURL(), "nats://nats.aerial:4222")
+	natsURL := firstNonEmpty(os.Getenv("NATS_URL"), pool.NATSURL())
+	if natsURL == "" {
+		return nil
+	}
 	bus := initEriJetStreamWithFactory(ctx, natsURL, factory)
 	if bus == nil {
 		return func() {}

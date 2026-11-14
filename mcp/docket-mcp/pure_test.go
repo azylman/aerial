@@ -700,6 +700,7 @@ type loadConfigTestCase struct {
 	wantDatabaseURL string
 	wantOllamaBase  string
 	wantOllamaModel string
+	wantEmptyURLs   bool
 	wantErr         bool
 }
 
@@ -763,23 +764,36 @@ func assertLoadedConfigFields(t *testing.T, cfg *Config, tc loadConfigTestCase) 
 	if tc.wantOllamaModel != "" && cfg.Ollama.Model != tc.wantOllamaModel {
 		t.Fatalf("Ollama.Model = %q; want %q", cfg.Ollama.Model, tc.wantOllamaModel)
 	}
+	if tc.wantEmptyURLs {
+		if cfg.VikunjaURL != "" {
+			t.Fatalf("VikunjaURL = %q; want empty", cfg.VikunjaURL)
+		}
+		if cfg.DatabaseURL != "" {
+			t.Fatalf("DatabaseURL = %q; want empty", cfg.DatabaseURL)
+		}
+		if cfg.Ollama.BaseURL != "" {
+			t.Fatalf("Ollama.BaseURL = %q; want empty", cfg.Ollama.BaseURL)
+		}
+	}
 }
 
 func loadConfigTestCases(validYAML, invalidYAML, emptyYAML, tempDir string) []loadConfigTestCase {
 	return []loadConfigTestCase{
 		{
-			name:       "defaults applied when path is empty",
-			path:       "",
-			wantPort:   "8080",
-			wantProjID: 0,
-			wantErr:    false,
+			name:          "defaults applied when path is empty",
+			path:          "",
+			wantPort:      "8080",
+			wantProjID:    0,
+			wantEmptyURLs: true,
+			wantErr:       false,
 		},
 		{
-			name:       "empty file returns defaults",
-			path:       emptyYAML,
-			wantPort:   "8080",
-			wantProjID: 0,
-			wantErr:    false,
+			name:          "empty file returns defaults",
+			path:          emptyYAML,
+			wantPort:      "8080",
+			wantProjID:    0,
+			wantEmptyURLs: true,
+			wantErr:       false,
 		},
 		{
 			name:       "valid yaml loaded successfully",
@@ -902,11 +916,12 @@ func loadConfigTestCases(validYAML, invalidYAML, emptyYAML, tempDir string) []lo
 			wantErr:         false,
 		},
 		{
-			name:       "nonexistent file returns defaults",
-			path:       filepath.Join(tempDir, "nonexistent.yaml"),
-			wantPort:   "8080",
-			wantProjID: 0,
-			wantErr:    false,
+			name:          "nonexistent file returns defaults",
+			path:          filepath.Join(tempDir, "nonexistent.yaml"),
+			wantPort:      "8080",
+			wantProjID:    0,
+			wantEmptyURLs: true,
+			wantErr:       false,
 		},
 	}
 }

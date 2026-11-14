@@ -21,6 +21,7 @@ var testUpgrader = websocket.Upgrader{
 }
 
 type fakeCDPOptions struct {
+	emptyHost        bool
 	failList         bool
 	corruptList      bool
 	emptyTargets     bool
@@ -283,6 +284,9 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Con
 		CDPPort:     u.Port(),
 		SettleDelay: 1 * time.Millisecond,
 	}
+	if opts.emptyHost {
+		cfg.CDPHost = ""
+	}
 
 	fakeSrv.Server = server
 
@@ -306,6 +310,12 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 		errSubstr          string
 		wantAttachedTarget string
 	}{
+		{
+			name:      "unconfigured cdp host fails fast",
+			opts:      fakeCDPOptions{emptyHost: true},
+			wantErr:   true,
+			errSubstr: "cdp host is not configured",
+		},
 		{
 			name:               "successful connection and stealth init",
 			wantAttachedTarget: "page-target-1",

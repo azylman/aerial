@@ -609,7 +609,7 @@ func DefaultConfigData() *ConfigData {
 		DataDir:            "",
 		GeminiHomeDir:      "",
 		Ollama: OllamaConfig{
-			BaseURL:     "http://ollama:11434",
+			BaseURL:     "",
 			Model:       "all-minilm",
 			QueryPrefix: "Represent this sentence for searching relevant passages: ",
 			NumCtx:      512,
@@ -619,7 +619,7 @@ func DefaultConfigData() *ConfigData {
 		MaxBackgroundTaskDuration: 2 * time.Hour,
 		Engine:                    "agy",
 		ClaudeBin:                 "claude",
-		NATSURL:                   "nats://nats.aerial:4222",
+		NATSURL:                   "",
 	}
 }
 

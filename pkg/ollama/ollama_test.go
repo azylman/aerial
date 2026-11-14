@@ -31,7 +31,7 @@ func TestNewDynamicClient_TableDriven(t *testing.T) {
 		{
 			name:        "static default values",
 			cfg:         Config{},
-			wantBaseURL: DefaultBaseURL,
+			wantBaseURL: "",
 		},
 		{
 			name: "static custom base url with trailing slash",
@@ -45,7 +45,7 @@ func TestNewDynamicClient_TableDriven(t *testing.T) {
 		{
 			name:        "dynamic with nil func",
 			nilCfgFn:    true,
-			wantBaseURL: DefaultBaseURL,
+			wantBaseURL: "",
 		},
 		{
 			name: "dynamic with valid func",
@@ -87,6 +87,7 @@ type generateEmbeddingTestCase struct {
 	queryPrefix   string
 	maxRetries    int
 	retryDelay    time.Duration
+	emptyBaseURL  bool
 	nilHTTPClient bool
 	cancelInDelay bool
 	handlerStatus int
@@ -138,9 +139,13 @@ func runGenerateEmbeddingCase(t *testing.T, tc generateEmbeddingTestCase) {
 	}))
 	defer server.Close()
 
+	baseURL := server.URL
+	if tc.emptyBaseURL {
+		baseURL = ""
+	}
 	client := NewDynamicClient(func() Config {
 		return Config{
-			BaseURL:     server.URL,
+			BaseURL:     baseURL,
 			QueryPrefix: tc.queryPrefix,
 		}
 	})
@@ -294,6 +299,13 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 			wantEmbedding: []float32{0.77},
 			wantAttempts:  1,
 		},
+		{
+			name:          "unconfigured base URL fails fast with zero network IO",
+			text:          "test prompt",
+			emptyBaseURL:  true,
+			wantErrSubstr: "ollama base URL is not configured",
+			wantAttempts:  0,
+		},
 	}
 
 	for _, tc := range tests {
@@ -336,6 +348,73 @@ func TestGenerateEmbedding_NetworkError_TableDriven(t *testing.T) {
 			_, err := client.GenerateEmbedding(context.Background(), "test prompt", false, tc.maxRetries)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
 				t.Fatalf("GenerateEmbedding() error = %v, want substring %q", err, tc.wantErrSubstr)
+			}
+		})
+	}
+}
+
+func TestDynamicClient(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		useServerURL  bool
+		wantEmbedding []float32
+		wantErrSubstr string
+		wantAttempts  int
+	}{
+		{
+			name:          "empty base URL fails fast with zero network IO",
+			useServerURL:  false,
+			wantErrSubstr: "ollama base URL is not configured",
+			wantAttempts:  0,
+		},
+		{
+			name:          "explicit srv URL succeeds",
+			useServerURL:  true,
+			wantEmbedding: []float32{0.1, 0.2, 0.3},
+			wantAttempts:  1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var attempts atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"embedding": [0.1, 0.2, 0.3]}`))
+			}))
+			defer srv.Close()
+
+			baseURL := ""
+			if tc.useServerURL {
+				baseURL = srv.URL
+			}
+
+			client := NewDynamicClient(func() Config {
+				return Config{BaseURL: baseURL}
+			})
+			client.SetHTTPClient(srv.Client())
+
+			emb, err := client.GenerateEmbedding(context.Background(), "sample text", false, 1)
+			if tc.wantErrSubstr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
+					t.Fatalf("GenerateEmbedding() error = %v, want substring %q", err, tc.wantErrSubstr)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("GenerateEmbedding() unexpected error = %v", err)
+				}
+				if !reflect.DeepEqual(emb, tc.wantEmbedding) {
+					t.Errorf("GenerateEmbedding() = %v, want %v", emb, tc.wantEmbedding)
+				}
+			}
+
+			if got := int(attempts.Load()); got != tc.wantAttempts {
+				t.Errorf("server attempts = %d, want %d", got, tc.wantAttempts)
 			}
 		})
 	}
