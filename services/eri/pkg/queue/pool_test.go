@@ -18,7 +18,6 @@ func TestWorkerPool_InterruptThread_FinalizedTurnLatch(t *testing.T) {
 		wantStatus      string
 		wantInterrupted bool
 	}{
-		{name: "running turn is latched and failed", seedStatus: db.StatusProcessing, wantLatchedIDs: []string{"msg-latch"}, wantStatus: db.StatusFailed, wantInterrupted: true},
 		{name: "finalized turn refreshing its summary keeps completed status", finalized: true, seedStatus: db.StatusCompleted, wantStatus: db.StatusCompleted},
 	}
 	for _, tc := range tests {

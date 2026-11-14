@@ -589,11 +589,22 @@ func newestBurstMessageID(burst []db.Message) string {
 	return newest
 }
 
-// dropNextBurstMessages removes non-Assistant messages newer than the turn's newest burst message: they
-// belong to the next queued burst, and using one as the watermark would hide it from the next cold start.
+// dropNextBurstMessages cuts msgs before the oldest non-Assistant message newer than the turn's newest
+// burst message. That message belongs to the next queued burst; it and everything after it (including
+// this turn's reply when the follow-up arrived mid-turn) are dropped so the watermark never moves past
+// it and a later refresh summarizes the follow-up and its reply in order.
 func dropNextBurstMessages(msgs []HistoryMessage, newestBurstID string) []HistoryMessage {
+	var cutoff string
+	for _, m := range msgs {
+		if m.Role != "Assistant" && compareSnowflakeIDs(m.ID, newestBurstID) > 0 && (cutoff == "" || compareSnowflakeIDs(m.ID, cutoff) < 0) {
+			cutoff = m.ID
+		}
+	}
+	if cutoff == "" {
+		return msgs
+	}
 	return slices.DeleteFunc(slices.Clone(msgs), func(m HistoryMessage) bool {
-		return m.Role != "Assistant" && compareSnowflakeIDs(m.ID, newestBurstID) > 0
+		return IsNumericSnowflake(m.ID) && compareSnowflakeIDs(m.ID, cutoff) >= 0
 	})
 }
 

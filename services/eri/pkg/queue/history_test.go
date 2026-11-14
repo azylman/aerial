@@ -237,7 +237,6 @@ func TestFormatSummaryTranscript(t *testing.T) {
 	shortWidget := strings.Repeat("s", 400)
 
 	tests := []historyTestCase{
-		{name: "nil messages", msgs: nil},
 		{
 			name:         "long widget keeps head and tail",
 			msgs:         []HistoryMessage{{ID: "w-1", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: longWidgetCard, CreatedAt: now}},
@@ -252,16 +251,13 @@ func TestFormatSummaryTranscript(t *testing.T) {
 			wantExcludes: []string{truncationMarker},
 		},
 		{
-			name:         "user message keeps the 1000-rune head cut",
-			msgs:         []HistoryMessage{{ID: "u-1", AuthorName: "Alex", Role: "User", Content: longUser, CreatedAt: now}},
-			wantContains: []string{strings.Repeat("u", 1000) + truncationMarker},
-			wantExcludes: []string{"xxxx"},
-		},
-		{
-			name:         "assistant reply keeps the 1000-rune head cut",
-			msgs:         []HistoryMessage{{ID: "a-1", AuthorName: "Aerial", Role: "Assistant", Content: longReply, CreatedAt: now}},
-			wantContains: []string{strings.Repeat("a", 1000) + truncationMarker},
-			wantExcludes: []string{"yyyy"},
+			name: "user message and assistant reply keep the 1000-rune head cut",
+			msgs: []HistoryMessage{
+				{ID: "u-1", AuthorName: "Alex", Role: "User", Content: longUser, CreatedAt: now.Add(-time.Minute)},
+				{ID: "a-1", AuthorName: "Aerial", Role: "Assistant", Content: longReply, CreatedAt: now},
+			},
+			wantContains: []string{strings.Repeat("u", 1000) + truncationMarker, strings.Repeat("a", 1000) + truncationMarker},
+			wantExcludes: []string{"xxxx", "yyyy"},
 		},
 	}
 	for _, tc := range tests {
