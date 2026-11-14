@@ -49,15 +49,29 @@ func UsageAttributes(u AgyUsage) []attribute.KeyValue {
 
 // ProviderForModel maps a model ID to its gen_ai.provider.name, or "" when unrecognised.
 func ProviderForModel(model string) string {
-	m := strings.ToLower(model)
+	m := strings.ToLower(strings.TrimSpace(model))
 	switch {
-	case strings.Contains(m, "claude"):
+	case strings.Contains(m, "claude"), isClaudeAlias(m):
 		return "anthropic"
 	case strings.Contains(m, "gemini"):
 		return "gcp.gemini"
 	default:
 		return ""
 	}
+}
+
+// claudeAliases are the Claude CLI model family aliases (e.g. "opus", "opus-low", "sonnet[1m]").
+var claudeAliases = []string{"opus", "sonnet", "haiku", "fable"}
+
+// isClaudeAlias reports whether the lowercased model is a Claude CLI alias, optionally followed
+// by an effort ("-low") or context ("[1m]") suffix.
+func isClaudeAlias(m string) bool {
+	for _, a := range claudeAliases {
+		if rest, ok := strings.CutPrefix(m, a); ok && (rest == "" || rest[0] == '-' || rest[0] == '[') {
+			return true
+		}
+	}
+	return false
 }
 
 // DefaultToolSpanClaimWait bounds how long ClaimToolSpan waits for a matching execute_tool
