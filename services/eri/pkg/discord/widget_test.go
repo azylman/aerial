@@ -547,9 +547,8 @@ func TestDeliverStatusWidget_AutoSink(t *testing.T) {
 	sunkFlags := discordgo.MessageFlagsIsComponentsV2 | discordgo.MessageFlagsSuppressNotifications
 	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
-	idle46 := []*discordgo.Message{{ID: "m1", Timestamp: ago(46 * time.Minute)}}
-	idle45 := []*discordgo.Message{{ID: "m1", Timestamp: ago(45 * time.Minute)}}
-	idle44 := []*discordgo.Message{{ID: "m1", Timestamp: ago(44 * time.Minute)}}
+	idle15 := []*discordgo.Message{{ID: "m1", Timestamp: ago(15 * time.Minute)}}
+	idle14 := []*discordgo.Message{{ID: "m1", Timestamp: ago(14 * time.Minute)}}
 	mixedAge := []*discordgo.Message{{ID: "m1", Timestamp: ago(2 * time.Hour)}, {ID: "m2", Timestamp: ago(10 * time.Minute)}}
 	oldWidgetOnly := []*discordgo.Message{{ID: "msg-newer-widget", Flags: discordgo.MessageFlagsIsComponentsV2, Timestamp: ago(2 * time.Hour)}}
 
@@ -561,9 +560,8 @@ func TestDeliverStatusWidget_AutoSink(t *testing.T) {
 		{name: "buried by threshold regular messages sinks to bottom and deletes old", afterMsgs: fourMsgs, sendReplyID: "msg-sunk-999", deleteErr: errors.New("ignored delete failure"), wantMsgID: "msg-sunk-999", wantSentCount: 1, wantDeletedID: "msg-old-100", wantSentFlags: sunkFlags, wantQueried: true},
 		{name: "sink send error falls back to editing existing message in place", afterMsgs: fourMsgs, sendErr: errors.New("rate limit on send"), wantMsgID: "msg-old-100", wantSentCount: 1, wantEditCount: 1, wantQueried: true},
 		{name: "skip sink bypasses auto sinking even when buried", skipSink: true, afterMsgs: fourMsgs, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: false},
-		{name: "one regular message idle 46 minutes sinks to bottom", afterMsgs: idle46, sendReplyID: "msg-sunk-46", wantMsgID: "msg-sunk-46", wantSentCount: 1, wantDeletedID: "msg-old-100", wantSentFlags: sunkFlags, wantQueried: true},
-		{name: "one regular message idle exactly 45 minutes sinks to bottom", afterMsgs: idle45, sendReplyID: "msg-sunk-45", wantMsgID: "msg-sunk-45", wantSentCount: 1, wantDeletedID: "msg-old-100", wantSentFlags: sunkFlags, wantQueried: true},
-		{name: "one regular message idle 44 minutes edits in place", afterMsgs: idle44, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
+		{name: "one regular message idle exactly 15 minutes sinks to bottom", afterMsgs: idle15, sendReplyID: "msg-sunk-15", wantMsgID: "msg-sunk-15", wantSentCount: 1, wantDeletedID: "msg-old-100", wantSentFlags: sunkFlags, wantQueried: true},
+		{name: "one regular message idle 14 minutes edits in place", afterMsgs: idle14, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
 		{name: "newest regular message 10 minutes old edits in place despite older idle message", afterMsgs: mixedAge, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
 		{name: "only older components v2 widget below edits in place", afterMsgs: oldWidgetOnly, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
 	}

@@ -51,7 +51,7 @@ const WidgetSinkQueryLimit = 20
 // WidgetSinkIdleThreshold is how long a thread must be idle (measured from the newest regular
 // message after a status widget) before the next widget update re-posts a buried widget at the
 // bottom of the thread, even when fewer than WidgetSinkMessageThreshold messages sit below it.
-const WidgetSinkIdleThreshold = 45 * time.Minute
+const WidgetSinkIdleThreshold = 15 * time.Minute
 
 // DiscordWidgetSender defines the interface required by DeliverStatusWidget to send, edit, query, and delete Discord messages.
 type DiscordWidgetSender interface {
