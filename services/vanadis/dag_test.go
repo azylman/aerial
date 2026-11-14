@@ -256,6 +256,31 @@ func TestValidateUpdateAndAppendChunkDAG(t *testing.T) {
 			t.Fatalf("unexpected normalized appended chunks: %+v", norm)
 		}
 	})
+
+	t.Run("relink_dependencies_after_removal_and_update", func(t *testing.T) {
+		t.Parallel()
+		chunks := []VanadisChunk{
+			{ID: "c1", Mode: "action", DependsOn: []string{}},
+			{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
+			{ID: "c3", Mode: "action", DependsOn: []string{"c2"}},
+		}
+		// Remove c2
+		remaining := []VanadisChunk{chunks[0], chunks[2]}
+		relinkDependenciesAfterRemoval(remaining, chunks[1].ID, chunks[1].DependsOn)
+		if len(remaining[1].DependsOn) != 1 || remaining[1].DependsOn[0] != "c1" {
+			t.Fatalf("expected c3 to depend on c1 after c2 removal, got %+v", remaining[1].DependsOn)
+		}
+		// Now update c3, DAG validation should succeed
+		updatedC3 := remaining[1]
+		updatedC3.Title = "Updated C3"
+		normDeps, err := validateUpdateChunkDAG(remaining, 1, updatedC3)
+		if err != nil {
+			t.Fatalf("unexpected DAG validation error after removal: %v", err)
+		}
+		if len(normDeps) != 1 || normDeps[0] != "c1" {
+			t.Fatalf("unexpected normalized deps: %+v", normDeps)
+		}
+	})
 }
 
 func TestMarshalJSONBOrEmpty(t *testing.T) {

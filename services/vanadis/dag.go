@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -249,6 +250,32 @@ func marshalJSONBOrEmpty(v any) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// relinkDependenciesAfterRemoval rewrites dependencies in remaining after removedID is deleted,
+// removing removedID and replacing it with removedDeps.
+func relinkDependenciesAfterRemoval(remaining []VanadisChunk, removedID string, removedDeps []string) {
+	for i := range remaining {
+		if !slices.Contains(remaining[i].DependsOn, removedID) {
+			continue
+		}
+		newDeps := make([]string, 0, len(remaining[i].DependsOn)+len(removedDeps))
+		seen := make(map[string]bool)
+		for _, dep := range remaining[i].DependsOn {
+			if dep == removedID {
+				for _, rd := range removedDeps {
+					if rd != remaining[i].ID && !seen[rd] {
+						seen[rd] = true
+						newDeps = append(newDeps, rd)
+					}
+				}
+			} else if !seen[dep] {
+				seen[dep] = true
+				newDeps = append(newDeps, dep)
+			}
+		}
+		remaining[i].DependsOn = newDeps
+	}
 }
 
 // validateUpdateChunkDAG substitutes updated into existing, validates the entire DAG, and returns the normalized depends_on.

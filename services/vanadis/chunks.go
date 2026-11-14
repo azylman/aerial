@@ -996,18 +996,20 @@ func (s *PostgresVanadisStore) RemoveChunk(ctx context.Context, buildID, chunkRe
 		return nil, nil, fmt.Errorf("delete chunk %s: %w", removed.ID, err)
 	}
 
-	const compactQ = `UPDATE vanadis_chunks SET chunk_index = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`
-	for i := removeIdx + 1; i < len(existing); i++ {
-		newIdx := existing[i].ChunkIndex - 1
-		if _, err := tx.Exec(ctx, compactQ, newIdx, existing[i].ID); err != nil {
-			return nil, nil, fmt.Errorf("compact chunk %s index to %d: %w", existing[i].ID, newIdx, err)
-		}
-		existing[i].ChunkIndex = newIdx
-	}
-
 	remaining := make([]VanadisChunk, 0, len(existing)-1)
 	remaining = append(remaining, existing[:removeIdx]...)
 	remaining = append(remaining, existing[removeIdx+1:]...)
+
+	relinkDependenciesAfterRemoval(remaining, removed.ID, removed.DependsOn)
+
+	const compactQ = `UPDATE vanadis_chunks SET chunk_index = $1, depends_on = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`
+	for i := range remaining {
+		newIdx := i
+		remaining[i].ChunkIndex = newIdx
+		if _, err := tx.Exec(ctx, compactQ, newIdx, nonNilSlice(remaining[i].DependsOn), remaining[i].ID); err != nil {
+			return nil, nil, fmt.Errorf("compact chunk %s index to %d: %w", remaining[i].ID, newIdx, err)
+		}
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, fmt.Errorf("commit remove chunk %s: %w", removed.ID, err)

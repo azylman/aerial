@@ -883,12 +883,13 @@ func (m *memoryVanadisStore) RemoveChunk(_ context.Context, buildID, chunkRef st
 	if len(existing) <= 1 {
 		return nil, nil, fmt.Errorf("%w: cannot remove the only chunk of build %s", ErrBuildConflict, buildID)
 	}
-	for i := removeIdx + 1; i < len(existing); i++ {
-		existing[i].ChunkIndex--
-	}
 	remaining := make([]VanadisChunk, 0, len(existing)-1)
 	remaining = append(remaining, existing[:removeIdx]...)
 	remaining = append(remaining, existing[removeIdx+1:]...)
+	relinkDependenciesAfterRemoval(remaining, removed.ID, removed.DependsOn)
+	for i := range remaining {
+		remaining[i].ChunkIndex = i
+	}
 	m.chunks[buildID] = remaining
 	return &removed, remaining, nil
 }

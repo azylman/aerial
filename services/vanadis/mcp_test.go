@@ -565,14 +565,18 @@ func assertVanadisMCPToolResult(t *testing.T, respBytes []byte, wantToolErr bool
 
 func TestToMCPChunkBriefs(t *testing.T) {
 	t.Parallel()
-	if got := toMCPChunkBriefs(nil); len(got) != 0 {
-		t.Errorf("expected empty slice for nil chunks, got %+v", got)
-	}
 	chunks := []VanadisChunk{
-		{ID: "c1", ChunkIndex: 0, Title: "C1", Mode: "pr", Status: "running", Repo: "aerial", PRNumber: 10, DependsOn: []string{"c0"}},
+		{ID: "c1", DependsOn: nil},
 	}
 	got := toMCPChunkBriefs(chunks)
-	if len(got) != 1 || got[0].ID != "c1" || len(got[0].DependsOn) != 1 || got[0].DependsOn[0] != "c0" {
-		t.Errorf("unexpected briefs: %+v", got)
+	if len(got) != 1 || got[0].ID != "c1" || got[0].DependsOn == nil {
+		t.Fatalf("expected non-nil DependsOn, got %+v", got)
+	}
+	b, err := json.Marshal(got[0])
+	if err != nil {
+		t.Fatalf("failed to marshal brief: %v", err)
+	}
+	if !strings.Contains(string(b), `"depends_on":[]`) {
+		t.Fatalf("expected \"depends_on\":[] in JSON, got %s", string(b))
 	}
 }
