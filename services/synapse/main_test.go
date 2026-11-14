@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -14,9 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
-
-	"github.com/azylman/aerial/pkg/httpkit"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -628,32 +623,71 @@ func mkKustomizationEvt(event, job, repo, sha string, pr int, targetID, status s
 
 // --- 4. Deploy Event Processing ---
 
-func TestProcessDeployEvent(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
+type fixedConfigSource struct{ cfg Config }
 
-	tests := []struct {
-		name               string
-		evt                DeployEvent
-		extraEvts          []DeployEvent
-		sysChan            string
-		reg                *mockPRRegistry
-		pgReg              *PostgresPRRegistry
-		disp               *mockOutboundDispatcher
-		wantErr            bool
-		wantPR             int
-		wantTargetID       string
-		wantDeployingCalls int
-		wantDeployedJobs   []string
-		wantAdvanceCalls   int
-		wantPrompts        int
-		wantDispatches     int
-		wantDMs            int
-		wantDMSubstr       string
-		wantPromptSubs     []string
-		wantRequested      []string
-		wantReconciles     []fluxKustomizationRef
-	}{
+func (f *fixedConfigSource) Current() *Config { return &f.cfg }
+
+func fixedConfig(cfg Config) ConfigSource { return &fixedConfigSource{cfg: cfg} }
+
+func scanBuildChecksRow(dest []any, status, checksJSON string) error {
+	if len(dest) < 2 {
+		return nil
+	}
+	if s, ok := dest[0].(*string); ok {
+		*s = status
+	}
+	if b, ok := dest[1].(*[]byte); ok {
+		*b = []byte(checksJSON)
+	}
+	return nil
+}
+
+func newMockBuildChecksPgRegistry(status string, checksJSON string, extraRowFns ...func(sql string) pgx.Row) *PostgresPRRegistry {
+	return NewPostgresPRRegistry(&mockVanadisPgxPool{
+		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+			if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
+				return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+					return scanBuildChecksRow(dest, status, checksJSON)
+				}}
+			}
+			for _, fn := range extraRowFns {
+				if row := fn(sql); row != nil {
+					return row
+				}
+			}
+			return mockVanadisPgxRow{}
+		},
+		execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		},
+	})
+}
+
+type processDeployEventCase struct {
+	name               string
+	evt                DeployEvent
+	extraEvts          []DeployEvent
+	sysChan            string
+	reg                *mockPRRegistry
+	pgReg              *PostgresPRRegistry
+	disp               *mockOutboundDispatcher
+	wantErr            bool
+	wantPR             int
+	wantTargetID       string
+	wantDeployingCalls int
+	wantDeployedJobs   []string
+	wantAdvanceCalls   int
+	wantPrompts        int
+	wantDispatches     int
+	wantDMs            int
+	wantDMSubstr       string
+	wantPromptSubs     []string
+	wantRequested      []string
+	wantReconciles     []fluxKustomizationRef
+}
+
+func processDeployEventBasicCases() []processDeployEventCase {
+	return []processDeployEventCase{
 		{
 			name: "deploy_started ignored without PR number or targetID",
 			evt:  mkDeployEvt("deploy_started", "brain", "azylman/aerial", "sha-test", 0, "", "started", ""),
@@ -769,6 +803,11 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantDispatches: 1,
 			wantPromptSubs: []string{"Deployment failed and rolled back"},
 		},
+	}
+}
+
+func processDeployEventSyncCases() []processDeployEventCase {
+	return []processDeployEventCase{
 		{
 			name: "sync_success without PR number",
 			evt:  mkDeployEvt("sync_success", "", "azylman/aerial-config", "sha999", 0, "1555405874565091380", "", ""),
@@ -889,6 +928,11 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantTargetID:       "1555405874565091380",
 			wantDeployingCalls: 1,
 		},
+	}
+}
+
+func processDeployEventVanadisActionCases() []processDeployEventCase {
+	return []processDeployEventCase{
 		{
 			name: "sync_success with expected_jobs advances Vanadis when next chunk is a pr",
 			evt: DeployEvent{
@@ -948,6 +992,11 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantPR:           977,
 			wantAdvanceCalls: 0,
 		},
+	}
+}
+
+func processDeployEventVanadisChunkCases() []processDeployEventCase {
+	return []processDeployEventCase{
 		{
 			name: "sync_success without expected_jobs on final Vanadis chunk advances and dispatches build completed prompt",
 			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha_final_sync_only", 978, "1555405874565091380", "success", ""),
@@ -1055,30 +1104,19 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantTargetID: "1555405874565091380",
 			wantPrompts:  0,
 		},
+	}
+}
+
+func processDeployEventVanadisCases() []processDeployEventCase {
+	return append(processDeployEventVanadisActionCases(), processDeployEventVanadisChunkCases()...)
+}
+
+func processDeployEventFluxWatcherCases() []processDeployEventCase {
+	return []processDeployEventCase{
 		{
-			name: "deploy_success on aerial-core with build checks in metadata and merged status handles sync success",
-			evt:  mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-aerial-sync", 893, "1555405874565091380", "success"),
-			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
-				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
-						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							if len(dest) >= 2 {
-								if s, ok := dest[0].(*string); ok {
-									*s = "merged"
-								}
-								if b, ok := dest[1].(*[]byte); ok {
-									*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
-								}
-							}
-							return nil
-						}}
-					}
-					return mockVanadisPgxRow{}
-				},
-				execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-					return pgconn.NewCommandTag("UPDATE 1"), nil
-				},
-			}),
+			name:         "deploy_success on aerial-core with build checks in metadata and merged status handles sync success",
+			evt:          mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-aerial-sync", 893, "1555405874565091380", "success"),
+			pgReg:        newMockBuildChecksPgRegistry("merged", `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`),
 			disp:         &mockOutboundDispatcher{},
 			wantPR:       893,
 			wantTargetID: "1555405874565091380",
@@ -1087,22 +1125,9 @@ func TestProcessDeployEvent(t *testing.T) {
 		{
 			name: "deploy_started on aerial-core skipped when waiting for image build",
 			evt:  mkKustomizationEvt("deploy_started", "aerial-core", "azylman/aerial", "sha-aerial-started", 89894, "1555405874565091380", "started"),
-			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
-				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
-						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							if len(dest) >= 2 {
-								if s, ok := dest[0].(*string); ok {
-									*s = "merged"
-								}
-								if b, ok := dest[1].(*[]byte); ok {
-									*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
-								}
-							}
-							return nil
-						}}
-					}
-					if strings.Contains(sql, "SET status = 'deploying'") {
+			pgReg: newMockBuildChecksPgRegistry("merged", `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+				func(sql string) pgx.Row {
+					if strings.Contains(sql, "SET status = 'deploying'") || strings.Contains(sql, "SELECT target_id, title, status") {
 						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
 							if len(dest) > 0 {
 								if s, ok := dest[0].(*string); ok {
@@ -1112,48 +1137,18 @@ func TestProcessDeployEvent(t *testing.T) {
 							return nil
 						}}
 					}
-					if strings.Contains(sql, "SELECT target_id, title, status") {
-						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							if len(dest) > 0 {
-								if s, ok := dest[0].(*string); ok {
-									*s = "1555405874565091380"
-								}
-							}
-							return nil
-						}}
-					}
-					return mockVanadisPgxRow{}
+					return nil
 				},
-			}),
+			),
 			disp:         &mockOutboundDispatcher{widgetErr: errors.New("unexpected widget sync for skipped deploy_started")},
 			wantPR:       89894,
 			wantTargetID: "1555405874565091380",
 			wantPrompts:  0,
 		},
 		{
-			name: "sync_success on git-sync with ci_checks build jobs stays in synced without firing deploy prompt",
-			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial", "sha-aerial-sync-pending", 89895, "1555405874565091380", "success", ""),
-			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
-				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
-						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							if len(dest) >= 2 {
-								if s, ok := dest[0].(*string); ok {
-									*s = "merged"
-								}
-								if b, ok := dest[1].(*[]byte); ok {
-									*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
-								}
-							}
-							return nil
-						}}
-					}
-					return mockVanadisPgxRow{}
-				},
-				execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-					return pgconn.NewCommandTag("UPDATE 1"), nil
-				},
-			}),
+			name:         "sync_success on git-sync with ci_checks build jobs stays in synced without firing deploy prompt",
+			evt:          mkDeployEvt("sync_success", "git-sync", "azylman/aerial", "sha-aerial-sync-pending", 89895, "1555405874565091380", "success", ""),
+			pgReg:        newMockBuildChecksPgRegistry("merged", `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`),
 			disp:         &mockOutboundDispatcher{},
 			wantPR:       89895,
 			wantTargetID: "1555405874565091380",
@@ -1204,6 +1199,11 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantTargetID: "1555405874565091380",
 			wantPrompts:  1,
 		},
+	}
+}
+
+func processDeployEventFluxDiscoveryCases() []processDeployEventCase {
+	return []processDeployEventCase{
 		{
 			name: "sync_success on a Flux-sourced repo defers completion to the kustomization watcher",
 			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-config-only", 1640, "1555405874565091380", "success", ""),
@@ -1286,2618 +1286,140 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantErr: true,
 		},
 	}
+}
 
-	for _, tc := range tests {
+func processDeployEventFluxCases() []processDeployEventCase {
+	return append(processDeployEventFluxWatcherCases(), processDeployEventFluxDiscoveryCases()...)
+}
+
+func processDeployEventCases() []processDeployEventCase {
+	basic := processDeployEventBasicCases()
+	sync := processDeployEventSyncCases()
+	vanadis := processDeployEventVanadisCases()
+	flux := processDeployEventFluxCases()
+	all := make([]processDeployEventCase, 0, len(basic)+len(sync)+len(vanadis)+len(flux))
+	all = append(all, basic...)
+	all = append(all, sync...)
+	all = append(all, vanadis...)
+	all = append(all, flux...)
+	return all
+}
+
+func TestProcessDeployEvent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	for _, tc := range processDeployEventCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var reg PRRegistryUpdater
-			switch {
-			case tc.pgReg != nil:
-				reg = tc.pgReg
-			case tc.reg != nil:
-				reg = tc.reg
-			default:
-				reg = &mockPRRegistry{}
-			}
-			var disp OutboundDispatcher
-			if tc.disp != nil {
-				disp = tc.disp
-			}
-			cfg := Config{SystemChannelID: tc.sysChan}
-			client := &http.Client{Transport: &zeroCallTransport{}}
-			srv := newTestRouter(cfg, client, reg, disp)
-			res, err := srv.ProcessDeployEvent(ctx, tc.evt)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ProcessDeployEvent() err = %v, wantErr %v", err, tc.wantErr)
-			}
-			for _, extra := range tc.extraEvts {
-				if _, err := srv.ProcessDeployEvent(ctx, extra); err != nil {
-					t.Fatalf("ProcessDeployEvent(extra) err = %v", err)
-				}
-			}
-			if tc.wantErr {
-				return
-			}
-			if tc.wantPR != 0 && res.PRNumber != tc.wantPR {
-				t.Errorf("PRNumber = %d, want %d", res.PRNumber, tc.wantPR)
-			}
-			if tc.wantTargetID != "" && res.TargetID != tc.wantTargetID {
-				t.Errorf("TargetID = %q, want %q", res.TargetID, tc.wantTargetID)
-			}
-			if tc.reg != nil {
-				if tc.wantDeployingCalls > 0 && len(tc.reg.deployingCalls) != tc.wantDeployingCalls {
-					t.Errorf("deployingCalls = %d, want %d", len(tc.reg.deployingCalls), tc.wantDeployingCalls)
-				}
-				if len(tc.wantDeployedJobs) > 0 && !reflect.DeepEqual(tc.reg.deployedJobCalls, tc.wantDeployedJobs) {
-					t.Errorf("deployedJobCalls = %v, want %v", tc.reg.deployedJobCalls, tc.wantDeployedJobs)
-				}
-				if len(tc.reg.advanceVanadisCalls) != tc.wantAdvanceCalls {
-					t.Errorf("advanceVanadisCalls = %d, want %d", len(tc.reg.advanceVanadisCalls), tc.wantAdvanceCalls)
-				}
-				var requested []string
-				for _, call := range tc.reg.kustomizationRequestCalls {
-					for name := range call {
-						requested = append(requested, name)
-					}
-				}
-				slices.Sort(requested)
-				if !slices.Equal(requested, tc.wantRequested) {
-					t.Errorf("recorded kustomization requests = %v, want %v", requested, tc.wantRequested)
-				}
-			}
-			if tc.disp != nil {
-				if got := tc.disp.ReconcileCalls(); !slices.Equal(got, tc.wantReconciles) {
-					t.Errorf("reconcile calls = %v, want %v", got, tc.wantReconciles)
-				}
-				dms := tc.disp.DirectMessageCalls()
-				if len(dms) != tc.wantDMs {
-					t.Errorf("DMs = %d, want %d", len(dms), tc.wantDMs)
-				}
-				if tc.wantDMSubstr != "" {
-					if len(dms) == 0 || !strings.Contains(dms[len(dms)-1].Content, tc.wantDMSubstr) {
-						t.Errorf("DM = %v, want substr %q", dms, tc.wantDMSubstr)
-					}
-				}
-				dispatches := tc.disp.DispatchCalls()
-				if len(dispatches) != tc.wantDispatches {
-					t.Errorf("dispatches = %d, want %d", len(dispatches), tc.wantDispatches)
-				}
-				for _, sub := range tc.wantPromptSubs {
-					if tc.wantDispatches > 0 {
-						if len(dispatches) == 0 || !strings.Contains(dispatches[len(dispatches)-1].Prompt, sub) {
-							t.Errorf("dispatch = %v, want substr %q", dispatches, sub)
-						}
-					}
-				}
-				prompts := tc.disp.PromptCalls()
-				if len(prompts) != tc.wantPrompts {
-					t.Errorf("prompts = %d, want %d", len(prompts), tc.wantPrompts)
-				}
-				for _, sub := range tc.wantPromptSubs {
-					if tc.wantPrompts > 0 {
-						if len(prompts) == 0 || !strings.Contains(prompts[len(prompts)-1].Prompt, sub) {
-							t.Errorf("prompt = %v, want substr %q", prompts, sub)
-						}
-					}
-				}
-			}
+			runProcessDeployEventCase(ctx, t, tc)
 		})
 	}
 }
 
-func TestIsWaitingForImageBuild(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name       string
-		serverNil  bool
-		nilReg     bool
-		mockReg    bool
-		nilPool    bool
-		repo       string
-		prNumber   int
-		status     string
-		metadata   string
-		queryErr   error
-		wantResult bool
-	}{
-		{
-			name:       "nil server returns false",
-			serverNil:  true,
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "nil registry returns false",
-			nilReg:     true,
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "empty repo returns false",
-			repo:       "",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "zero prNumber returns false",
-			repo:       "azylman/aerial",
-			prNumber:   0,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "non-postgres registry returns false",
-			mockReg:    true,
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "nil pool returns false",
-			nilPool:    true,
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "query error returns false",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			queryErr:   errors.New("db error"),
-			wantResult: false,
-		},
-		{
-			name:       "unsupported status returns false",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "deploying",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "invalid metadata unmarshals to nil and returns false",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{invalid json`,
-			wantResult: false,
-		},
-		{
-			name:       "started_jobs non-empty returns false",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"started_jobs":["aerial-synapse"],"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "no build checks in metadata returns false",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Go Unit Tests":"passed"}}`,
-			wantResult: false,
-		},
-		{
-			name:       "open status with build checks returns true",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "open",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: true,
-		},
-		{
-			name:       "merged status with build checks returns true",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "merged",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: true,
-		},
-		{
-			name:       "synced status with build checks returns true",
-			repo:       "azylman/aerial",
-			prNumber:   42,
-			status:     "synced",
-			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
-			wantResult: true,
-		},
+func runProcessDeployEventCase(ctx context.Context, t *testing.T, tc processDeployEventCase) {
+	t.Helper()
+	var reg PRRegistryUpdater
+	switch {
+	case tc.pgReg != nil:
+		reg = tc.pgReg
+	case tc.reg != nil:
+		reg = tc.reg
+	default:
+		reg = &mockPRRegistry{}
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if tc.serverNil {
-				var nilSrv *RouterServer
-				if got := nilSrv.isWaitingForImageBuild(ctx, tc.repo, tc.prNumber); got != tc.wantResult {
-					t.Errorf("isWaitingForImageBuild() = %v, want %v", got, tc.wantResult)
-				}
-				return
-			}
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
-			switch {
-			case tc.mockReg:
-				srv.SetRegistry(&mockPRRegistry{})
-			case tc.nilPool:
-				srv.SetRegistry(NewPostgresPRRegistry(nil))
-			case !tc.nilReg:
-				pool := &mockVanadisPgxPool{
-					queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-						if tc.queryErr != nil {
-							return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-								return tc.queryErr
-							}}
-						}
-						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							if len(dest) >= 2 {
-								if s, ok := dest[0].(*string); ok {
-									*s = tc.status
-								}
-								if b, ok := dest[1].(*[]byte); ok {
-									if tc.metadata != "" {
-										*b = []byte(tc.metadata)
-									}
-								}
-							}
-							return nil
-						}}
-					},
-				}
-				srv.SetRegistry(NewPostgresPRRegistry(pool))
-			}
-			got := srv.isWaitingForImageBuild(ctx, tc.repo, tc.prNumber)
-			if got != tc.wantResult {
-				t.Errorf("isWaitingForImageBuild() = %v, want %v", got, tc.wantResult)
-			}
-		})
+	var disp OutboundDispatcher
+	if tc.disp != nil {
+		disp = tc.disp
 	}
-}
-
-// --- 5. Outbound Dispatcher ---
-
-func TestResolveSHA(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name               string
-		repo               string
-		sha                string
-		regErr             error
-		regResolvePRNum    int
-		regResolveTargetID string
-		regResolveBranch   string
-		regEmptySHAID      bool
-		byNumTargetID      string
-		ghPRNumber         int
-		ghBranch           string
-		wantPRNum          int
-		wantTargetID       string
-		wantBranch         string
-		wantBackfillCalls  int
-		wantErr            bool
-	}{
-		{
-			name:               "local fast-path with targetID",
-			repo:               "azylman/aerial",
-			sha:                "sha-fast-1",
-			regResolvePRNum:    42,
-			regResolveTargetID: "1555405874565091380",
-			regResolveBranch:   "feat/fast-path",
-			wantPRNum:          42,
-			wantTargetID:       "1555405874565091380",
-			wantBranch:         "feat/fast-path",
-		},
-		{
-			name:             "local fast-path with empty targetID resolved via ResolvePRByNumber",
-			repo:             "azylman/aerial",
-			sha:              "sha-fast-empty-tid",
-			regResolvePRNum:  43,
-			regResolveBranch: "feat/resolved-by-num",
-			regEmptySHAID:    true,
-			byNumTargetID:    "1555405874565091380",
-			wantPRNum:        43,
-			wantTargetID:     "1555405874565091380",
-			wantBranch:       "feat/resolved-by-num",
-		},
-		{
-			name:              "GitHub API fallback with BackfillPushMergeSHA",
-			repo:              "azylman/aerial",
-			sha:               "sha-gh-3",
-			ghPRNumber:        99,
-			ghBranch:          "feat/gh-fallback",
-			byNumTargetID:     "1555405874565091380",
-			wantPRNum:         99,
-			wantTargetID:      "1555405874565091380",
-			wantBranch:        "feat/gh-fallback",
-			wantBackfillCalls: 1,
-		},
-		{
-			name:       "GitHub API fallback with BackfillPushMergeSHA error",
-			repo:       "azylman/aerial",
-			sha:        "sha-gh-bf-err",
-			ghPRNumber: 99,
-			ghBranch:   "feat/gh-fallback-err",
-			regErr:     errors.New("bf err"),
-			wantPRNum:  99,
-			wantBranch: "feat/gh-fallback-err",
-		},
-		{
-			name:      "zero SHA returns zero results",
-			repo:      "azylman/aerial",
-			sha:       "0000000000000000000000000000000000000000",
-			wantPRNum: 0,
-		},
-		{
-			name:      "empty repo and sha returns zero results",
-			repo:      "",
-			sha:       "",
-			wantPRNum: 0,
-		},
+	cfg := Config{SystemChannelID: tc.sysChan}
+	client := &http.Client{Transport: &zeroCallTransport{}}
+	srv := newTestRouter(cfg, client, reg, disp)
+	res, err := srv.ProcessDeployEvent(ctx, tc.evt)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ProcessDeployEvent() err = %v, wantErr %v", err, tc.wantErr)
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if tc.ghPRNumber > 0 {
-					w.Header().Set("Content-Type", "application/json")
-					item := GitHubCommitPRItem{Number: tc.ghPRNumber, State: "closed"}
-					item.Head.Ref = tc.ghBranch
-					_ = json.NewEncoder(w).Encode([]GitHubCommitPRItem{item})
-					return
-				}
-				http.NotFound(w, r)
-			}))
-			defer ghServer.Close()
-
-			targetID := tc.regResolveTargetID
-			if tc.byNumTargetID != "" {
-				targetID = tc.byNumTargetID
-			}
-			mockReg := &mockPRRegistry{
-				err:                     tc.regErr,
-				resolvePRNum:            tc.regResolvePRNum,
-				resolveTargetID:         targetID,
-				resolveBranch:           tc.regResolveBranch,
-				resolveBySHATargetEmpty: tc.regEmptySHAID,
-				backfillTargetID:        tc.byNumTargetID,
-			}
-			srv := newTestRouter(Config{GitHubAPIURL: ghServer.URL}, ghServer.Client(), mockReg, nil)
-
-			prNum, targetID, branch, err := srv.ResolveSHA(ctx, tc.repo, tc.sha)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ResolveSHA() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if prNum != tc.wantPRNum {
-				t.Errorf("got prNum = %d, want %d", prNum, tc.wantPRNum)
-			}
-			if targetID != tc.wantTargetID {
-				t.Errorf("got targetID = %q, want %q", targetID, tc.wantTargetID)
-			}
-			if branch != tc.wantBranch {
-				t.Errorf("got branch = %q, want %q", branch, tc.wantBranch)
-			}
-			if len(mockReg.backfillCalls) != tc.wantBackfillCalls {
-				t.Errorf("got %d backfill calls, want %d", len(mockReg.backfillCalls), tc.wantBackfillCalls)
-			}
-		})
-	}
-}
-
-func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	validSnowflake := "1555405874565091380"
-
-	tests := []struct {
-		name                string
-		isDeploymentSuccess bool
-		useNilRegistry      bool
-		prNumber            int
-		targetID            string
-		branch              string
-		suppressVanadis     bool
-		suppressVanadisErr  error
-		advanceVanadisRes   *VanadisAdvancementResult
-		wantTargetID        string
-		wantErr             bool
-		wantPrompts         int
-		wantPromptSubs      []string
-		wantDMs             int
-		wantWidgets         int
-		resolveErr          error
-		widgetErr           error
-	}{
-		{
-			name:           "ResolveThreadForPR nil registry returns empty",
-			useNilRegistry: true,
-			prNumber:       123,
-			wantTargetID:   "",
-		},
-		{
-			name:         "ResolveThreadForPR zero prNumber returns empty",
-			prNumber:     0,
-			wantTargetID: "",
-		},
-		{
-			name:       "ResolveThreadForPR registry error returns error",
-			prNumber:   456,
-			resolveErr: errors.New("db error"),
-			wantErr:    true,
-		},
-		{
-			name:         "ResolveThreadForPR valid prNumber returns targetID",
-			prNumber:     456,
-			targetID:     validSnowflake,
-			wantTargetID: validSnowflake,
-		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt normal",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			wantPrompts:         1,
-			wantWidgets:         1,
-			wantPromptSubs: []string{
-				"Continuous Delivery deployment completed for job brain on azylman/aerial",
-				"Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely.",
-			},
-		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt dependabot branch suppresses wake and widget",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			branch:              "dependabot/github_actions/fetch-metadata-3",
-			wantPrompts:         0,
-			wantWidgets:         0,
-		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt invalid snowflake is no-op",
-			isDeploymentSuccess: true,
-			targetID:            "invalid-snowflake",
-			wantPrompts:         0,
-			wantWidgets:         0,
-		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression true",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			suppressVanadis:     true,
-			wantPrompts:         0,
-			wantDMs:             0,
-			wantWidgets:         1,
-		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt final Vanadis chunk advances build and dispatches completion prompt",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			suppressVanadis:     true,
-			advanceVanadisRes: &VanadisAdvancementResult{
-				Matched:        true,
-				Advanced:       true,
-				BuildID:        "build-done",
-				ThreadID:       validSnowflake,
-				BuildCompleted: true,
-			},
-			wantPrompts:    1,
-			wantPromptSubs: []string{"Vanadis build build-done completed"},
-			wantDMs:        0,
-			wantWidgets:    1,
-		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt final Vanadis chunk already advanced on merge syncs widget",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			suppressVanadis:     true,
-			advanceVanadisRes: &VanadisAdvancementResult{
-				Matched:  true,
-				Advanced: false,
-			},
-			wantPrompts: 0,
-			wantDMs:     0,
-			wantWidgets: 1,
-		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression DB error propagates",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			suppressVanadisErr:  errors.New("db check err"),
-			wantErr:             true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var mockReg PRRegistryUpdater
-			if !tc.useNilRegistry {
-				mockReg = &mockPRRegistry{
-					resolveTargetID:    tc.targetID,
-					resolveBranch:      tc.branch,
-					resolveErr:         tc.resolveErr,
-					suppressVanadisRes: tc.suppressVanadis,
-					suppressVanadisErr: tc.suppressVanadisErr,
-					advanceVanadisRes:  tc.advanceVanadisRes,
-				}
-			}
-			mockDisp := &mockOutboundDispatcher{widgetErr: tc.widgetErr}
-			srv := newTestRouter(Config{}, nil, mockReg, mockDisp)
-
-			if !tc.isDeploymentSuccess {
-				gotTarget, err := srv.ResolveThreadForPR(ctx, "azylman/aerial", tc.prNumber)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("ResolveThreadForPR() err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if gotTarget != tc.wantTargetID {
-					t.Errorf("got targetID = %q, want %q", gotTarget, tc.wantTargetID)
-				}
-				return
-			}
-
-			err := srv.dispatchDeploymentSuccessPrompt(ctx, tc.targetID, "brain", "azylman/aerial", "sha123", 558, "alloc-1")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("dispatchDeploymentSuccessPrompt() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			pCalls := mockDisp.PromptCalls()
-			if len(pCalls) != tc.wantPrompts {
-				t.Errorf("got %d prompts, want %d", len(pCalls), tc.wantPrompts)
-			}
-			for _, sub := range tc.wantPromptSubs {
-				if len(pCalls) == 0 || !strings.Contains(pCalls[0].Prompt, sub) {
-					t.Errorf("expected prompt containing %q, got %+v", sub, pCalls)
-				}
-			}
-			if len(mockDisp.DirectMessageCalls()) != tc.wantDMs {
-				t.Errorf("got %d DMs, want %d", len(mockDisp.DirectMessageCalls()), tc.wantDMs)
-			}
-			wCalls := mockDisp.WidgetCalls()
-			if len(wCalls) != tc.wantWidgets {
-				t.Errorf("got %d widgets, want %d", len(wCalls), tc.wantWidgets)
-			} else if tc.wantWidgets > 0 && wCalls[0].Status != "open" {
-				t.Errorf("got widget status %q, want \"open\"", wCalls[0].Status)
-			}
-		})
-	}
-
-	// PR 0 with mock dispatcher
-	srv := newTestRouter(Config{}, nil, nil, &mockOutboundDispatcher{})
-	if err := srv.dispatchConflictPrompt(ctx, validSnowflake, "azylman/aerial", "feat/x", "sha1", 0); err != nil {
-		t.Errorf("dispatchConflictPrompt(pr=0): %v", err)
-	}
-
-	// PostgresPRRegistry syncs widget in conflict prompt and CI failure prompt
-	pool := &mockVanadisPgxPool{
-		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-			return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-				if len(dest) >= 1 {
-					if s, ok := dest[0].(*string); ok {
-						*s = validSnowflake
-					}
-				}
-				return nil
-			}}
-		},
-	}
-	dispPG := &mockOutboundDispatcher{}
-	srvPG := newTestRouter(Config{}, nil, NewPostgresPRRegistry(pool), dispPG)
-	if err := srvPG.dispatchConflictPrompt(ctx, validSnowflake, "azylman/aerial", "main", "sha1", 42); err != nil {
-		t.Errorf("dispatchConflictPrompt with pgReg: %v", err)
-	}
-	if err := srvPG.dispatchCIFailurePrompt(ctx, validSnowflake, "run", "azylman/aerial", "sha1", 42, "fail", "http://ci.test"); err != nil {
-		t.Errorf("dispatchCIFailurePrompt with pgReg: %v", err)
-	}
-	if err := srvPG.dispatchCIFailurePrompt(ctx, validSnowflake, "RoboRev Code Review", "azylman/aerial", "sha1", 42, "findings", "http://ci.test"); err != nil {
-		t.Errorf("dispatchCIFailurePrompt(roborev) with pgReg: %v", err)
-	}
-	pgDispatches := dispPG.DispatchCalls()
-	if len(pgDispatches) < 3 {
-		t.Fatalf("expected at least 3 dispatches from srvPG, got %d", len(pgDispatches))
-	}
-	if !strings.Contains(pgDispatches[0].Prompt, "Merge conflict detected on PR #42") || pgDispatches[0].TargetID != validSnowflake || pgDispatches[0].Source != "webhook" || pgDispatches[0].Effort != "medium" {
-		t.Errorf("expected silent medium-effort conflict dispatch with target_id for standalone PR, got %+v", pgDispatches[0])
-	}
-	if !strings.Contains(pgDispatches[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") || pgDispatches[1].TargetID != validSnowflake || pgDispatches[1].Source != "webhook" || pgDispatches[1].Effort != "medium" {
-		t.Errorf("expected silent medium-effort standard CI dispatch with target_id, got %+v", pgDispatches[1])
-	}
-	if !strings.Contains(pgDispatches[2].Prompt, "override-roborev 42") || pgDispatches[2].TargetID != validSnowflake || pgDispatches[2].Source != "webhook" || pgDispatches[2].Effort != "medium" {
-		t.Errorf("expected silent medium-effort roborev override dispatch with target_id, got %+v", pgDispatches[2])
-	}
-
-	// dispatchAlertWithPrompt with DM error and silent prefixed targetID deduplication
-	dispAlert := &mockOutboundDispatcher{directMessageErr: errors.New("dm failed")}
-	srvAlert := newTestRouter(Config{}, nil, nil, dispAlert)
-	if err := srvAlert.dispatchAlertWithPrompt(ctx, validSnowflake, "alert", "dm text", "prompt text"); err != nil {
-		t.Errorf("dispatchAlertWithPrompt with dm err: %v", err)
-	}
-	if err := srvAlert.dispatchAlertWithPrompt(ctx, "stateful_medium:discord-"+validSnowflake, "silent_alert", "", "prompt text", vanadisPromptOpts{silent: true, chunkID: "c-alert"}); err != nil {
-		t.Errorf("dispatchAlertWithPrompt silent prefixed: %v", err)
-	}
-	if got := dispAlert.DispatchCalls(); len(got) != 1 || got[0].SessionID != "vanadis-c-alert" || got[0].TargetID != validSnowflake || got[0].VanadisChunkID != "c-alert" {
-		t.Errorf("expected single structured target_id, vanadis_chunk_id, and session_id in silent dispatch, got %+v", got)
-	}
-	// invalid chunkID should not populate SessionID or VanadisChunkID
-	if err := srvAlert.dispatchAlertWithPrompt(ctx, "stateful_medium:discord-"+validSnowflake, "silent_alert", "", "prompt text", vanadisPromptOpts{silent: true, chunkID: "bad:chunk:id"}); err != nil {
-		t.Errorf("dispatchAlertWithPrompt bad chunk id: %v", err)
-	}
-	if got := dispAlert.DispatchCalls(); len(got) != 2 || got[1].SessionID != "" || got[1].VanadisChunkID != "" {
-		t.Errorf("expected empty SessionID and VanadisChunkID on invalid chunk id, got %+v", got)
-	}
-
-	// Vanadis silent auto-fix prompts suppress DM and set Silent: true with Vanadis effort/chunk routing
-	dispVanadis := &mockOutboundDispatcher{}
-	srvVanadis := newTestRouter(Config{}, nil, &mockPRRegistry{suppressVanadisRes: true}, dispVanadis)
-	if err := srvVanadis.dispatchCIFailurePrompt(ctx, validSnowflake, "unit", "azylman/aerial", "sha1", 885, "err", "http://ci.test"); err != nil {
-		t.Errorf("dispatchCIFailurePrompt(vanadis): %v", err)
-	}
-	if err := srvVanadis.dispatchConflictPrompt(ctx, validSnowflake, "azylman/aerial", "feat/x", "sha1", 885); err != nil {
-		t.Errorf("dispatchConflictPrompt(vanadis): %v", err)
-	}
-	if len(dispVanadis.DirectMessageCalls()) != 0 {
-		t.Errorf("expected 0 DMs for Vanadis auto-fix, got %d", len(dispVanadis.DirectMessageCalls()))
-	}
-	vDispatches := dispVanadis.DispatchCalls()
-	if len(vDispatches) != 2 || vDispatches[0].Source != "webhook" || vDispatches[0].Effort != "medium" || vDispatches[1].Source != "webhook" || vDispatches[1].Effort != "medium" {
-		t.Errorf("expected 2 silent medium-effort dispatches for Vanadis auto-fix, got %+v", vDispatches)
-	}
-
-	tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/chunks/by-pr") {
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"matched":  true,
-				"chunk_id": "chunk-885",
-				"effort":   "low",
-			})
-			return
+	for _, extra := range tc.extraEvts {
+		if _, err := srv.ProcessDeployEvent(ctx, extra); err != nil {
+			t.Fatalf("ProcessDeployEvent(extra) err = %v", err)
 		}
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(tsVanadis.Close)
-
-	dispVanadisPG := &mockOutboundDispatcher{}
-	srvVanadisPG := newTestRouter(Config{}, nil, NewPostgresPRRegistry(nil, WithVanadisClient(tsVanadis.URL, tsVanadis.Client())), dispVanadisPG)
-	if err := srvVanadisPG.dispatchCIFailurePrompt(ctx, validSnowflake, "unit", "azylman/aerial", "sha1", 885, "err", "http://ci.test"); err != nil {
-		t.Errorf("dispatchCIFailurePrompt(vanadis pg): %v", err)
 	}
-	vpgDispatches := dispVanadisPG.DispatchCalls()
-	if len(vpgDispatches) != 1 || vpgDispatches[0].Source != "webhook" || vpgDispatches[0].SessionID != "vanadis-chunk-885" || vpgDispatches[0].Effort != "low" || vpgDispatches[0].VanadisChunkID != "chunk-885" || vpgDispatches[0].TargetID != validSnowflake {
-		t.Errorf("expected silent low-effort dispatch with chunk-885 and target_id, got %+v", vpgDispatches)
+	if tc.wantErr {
+		return
+	}
+	if tc.wantPR != 0 && res.PRNumber != tc.wantPR {
+		t.Errorf("PRNumber = %d, want %d", res.PRNumber, tc.wantPR)
+	}
+	if tc.wantTargetID != "" && res.TargetID != tc.wantTargetID {
+		t.Errorf("TargetID = %q, want %q", res.TargetID, tc.wantTargetID)
+	}
+	assertDeployEventRegResults(t, tc)
+	assertDeployEventDispResults(t, tc)
+}
+
+func assertDeployEventRegResults(t *testing.T, tc processDeployEventCase) {
+	t.Helper()
+	if tc.reg == nil {
+		return
+	}
+	if tc.wantDeployingCalls > 0 && len(tc.reg.deployingCalls) != tc.wantDeployingCalls {
+		t.Errorf("deployingCalls = %d, want %d", len(tc.reg.deployingCalls), tc.wantDeployingCalls)
+	}
+	if len(tc.wantDeployedJobs) > 0 && !reflect.DeepEqual(tc.reg.deployedJobCalls, tc.wantDeployedJobs) {
+		t.Errorf("deployedJobCalls = %v, want %v", tc.reg.deployedJobCalls, tc.wantDeployedJobs)
+	}
+	if len(tc.reg.advanceVanadisCalls) != tc.wantAdvanceCalls {
+		t.Errorf("advanceVanadisCalls = %d, want %d", len(tc.reg.advanceVanadisCalls), tc.wantAdvanceCalls)
+	}
+	var requested []string
+	for _, call := range tc.reg.kustomizationRequestCalls {
+		for name := range call {
+			requested = append(requested, name)
+		}
+	}
+	slices.Sort(requested)
+	if !slices.Equal(requested, tc.wantRequested) {
+		t.Errorf("recorded kustomization requests = %v, want %v", requested, tc.wantRequested)
 	}
 }
 
-// --- 8. Server Endpoints ---
-
-func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
-	oldCountersFn := httpkit.WriteCountersDirFn
-	oldMetaFn := httpkit.WriteMetaDirFn
-	t.Cleanup(func() {
-		httpkit.WriteCountersDirFn = oldCountersFn
-		httpkit.WriteMetaDirFn = oldMetaFn
-	})
-
-	RecordUniqueSkipped("")
-	RecordUniqueSkipped("test_kind_metric")
-	RecordJobEnqueued("", "", "")
-	RecordJobRetry("", "", "")
-	RecordJobDropped("", "", "")
-	SetDiscordGatewayLatency(0.042)
-	registerCollector(JobsEnqueuedTotal)
-
-	tests := []struct {
-		name          string
-		method        string
-		path          string
-		mockMetaErr   error
-		mockCountErr  error
-		queueStatsErr bool
-		wantCode      int
-		wantBodySubs  []string
-	}{
-		{
-			name:         "/healthz returns 200 and json",
-			method:       http.MethodGet,
-			path:         "/healthz",
-			wantCode:     http.StatusOK,
-			wantBodySubs: []string{`"status":"ok"`, `"service":"synapse"`},
-		},
-		{
-			name:     "/metrics returns 200 and prometheus metrics with queue stats and gateway latency",
-			method:   http.MethodGet,
-			path:     "/metrics",
-			wantCode: http.StatusOK,
-			wantBodySubs: []string{
-				"synapse_unique_skipped_total",
-				`kind="test_kind_metric"`,
-				"synapse_queue_depth",
-				"synapse_queue_oldest_age_seconds",
-				"synapse_discord_gateway_latency_seconds 0.042",
-			},
-		},
-		{
-			name:          "/metrics with queue stats error logs and still returns 200",
-			method:        http.MethodGet,
-			path:          "/metrics",
-			queueStatsErr: true,
-			wantCode:      http.StatusOK,
-			wantBodySubs:  []string{"synapse_discord_gateway_latency_seconds 0.042"},
-		},
-		{
-			name:     "/debug/coverage/flush calls flush and returns 200",
-			method:   http.MethodGet,
-			path:     "/debug/coverage/flush",
-			wantCode: http.StatusOK,
-		},
-		{
-			name:        "/debug/coverage/flush meta error still returns 200",
-			method:      http.MethodGet,
-			path:        "/debug/coverage/flush",
-			mockMetaErr: errors.New("simulated meta flush error"),
-			wantCode:    http.StatusOK,
-		},
-		{
-			name:         "/debug/coverage/flush counters error returns 500",
-			method:       http.MethodGet,
-			path:         "/debug/coverage/flush",
-			mockCountErr: errors.New("simulated counters flush error"),
-			wantCode:     http.StatusInternalServerError,
-		},
+func assertDeployEventDispResults(t *testing.T, tc processDeployEventCase) {
+	t.Helper()
+	if tc.disp == nil {
+		return
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			httpkit.WriteMetaDirFn = func(dir string) error {
-				return tc.mockMetaErr
-			}
-			httpkit.WriteCountersDirFn = func(dir string) error {
-				return tc.mockCountErr
-			}
-
-			srv := NewRouterServer(fixedConfig(Config{Port: "4020"}), nil)
-			mockQ := &mockQueueStatsQuerier{
-				rows: &mockPgxRows{
-					rows: []mockRowData{
-						{queue: "default", state: "available", count: 4, oldestAge: 33.5},
-					},
-				},
-			}
-			if tc.queueStatsErr {
-				mockQ.queryErr = errors.New("simulated queue query error")
-			}
-			srv.SetQueueStats(mockQ)
-			srv.SetGatewayLatencyFn(func() time.Duration {
-				return 42 * time.Millisecond
-			})
-
-			rec := doHTTPRequest(srv.Routes(), tc.method, tc.path, nil, nil)
-			if rec.Code != tc.wantCode {
-				t.Fatalf("code = %d, want %d (body: %s)", rec.Code, tc.wantCode, rec.Body.String())
-			}
-			for _, sub := range tc.wantBodySubs {
-				if !strings.Contains(rec.Body.String(), sub) {
-					t.Errorf("body missing %q: %s", sub, rec.Body.String())
-				}
-			}
-		})
+	if got := tc.disp.ReconcileCalls(); !slices.Equal(got, tc.wantReconciles) {
+		t.Errorf("reconcile calls = %v, want %v", got, tc.wantReconciles)
 	}
-
-	rec := httptest.NewRecorder()
-	httpkit.WriteJSON(rec, http.StatusOK, make(chan int))
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("writeJSON code = %d, want 500", rec.Code)
+	dms := tc.disp.DirectMessageCalls()
+	if len(dms) != tc.wantDMs {
+		t.Errorf("DMs = %d, want %d", len(dms), tc.wantDMs)
 	}
-}
-
-func newTestReloadable(initial, next Config) *httpkit.Reloadable[Config] {
-	return httpkit.NewReloadable(&initial, func() (*Config, error) {
-		reloaded := next
-		return &reloaded, nil
-	}, synapseRestartRequired)
-}
-
-func TestRunServerLifecycle(t *testing.T) {
-	tests := []struct {
-		name             string
-		config           Config
-		reloadConfig     *Config
-		preCancel        bool
-		isRunApp         bool
-		wantErr          bool
-		wantGraceful     bool
-		wantReloadStatus httpkit.ReloadStatus
-	}{
-		{
-			name:             "runServer start, loopback reload, and graceful cancel shutdown",
-			config:           Config{Port: "0"},
-			wantGraceful:     true,
-			wantReloadStatus: httpkit.ReloadUnchanged,
-		},
-		{
-			name:             "runServer live reload applies non-restart field",
-			config:           Config{Port: "0"},
-			reloadConfig:     &Config{Port: "0", SystemChannelID: "123456789012345678"},
-			wantGraceful:     true,
-			wantReloadStatus: httpkit.ReloadApplied,
-		},
-		{
-			name:    "runServer invalid port -1 returns error",
-			config:  Config{Port: "-1"},
-			wantErr: true,
-		},
-		{
-			name:      "runApp pre-canceled context returns clean or server closed",
-			config:    Config{Port: "0"},
-			preCancel: true,
-			isRunApp:  true,
-		},
-		{
-			name:         "runApp exits cleanly when reload requires restart",
-			config:       Config{Port: "0"},
-			reloadConfig: &Config{Port: "4021"},
-			isRunApp:     true,
-		},
-		{
-			name:    "runServer invalid postgres url returns error",
-			config:  Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"},
-			wantErr: true,
-		},
-		{
-			name:    "runServer river start connection error",
-			config:  Config{Port: "0", PostgresURL: "postgres://fake:fake@127.0.0.1:54329/fakedb?sslmode=disable"},
-			wantErr: true,
-		},
-		{
-			name:     "runApp invalid port returns error",
-			config:   Config{Port: "-1"},
-			isRunApp: true,
-			wantErr:  true,
-		},
+	if tc.wantDMSubstr != "" && (len(dms) == 0 || !strings.Contains(dms[len(dms)-1].Content, tc.wantDMSubstr)) {
+		t.Errorf("DM = %v, want substr %q", dms, tc.wantDMSubstr)
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			next := tc.config
-			if tc.reloadConfig != nil {
-				next = *tc.reloadConfig
-			}
-			cfgSrc := newTestReloadable(tc.config, next)
-
-			if tc.wantGraceful {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				ready := make(chan string, 1)
-				done := make(chan error, 1)
-
-				go func() {
-					done <- runServer(ctx, cfgSrc, func(addr string) {
-						ready <- addr
-					})
-				}()
-
-				var addr string
-				select {
-				case addr = <-ready:
-					if addr == "" {
-						t.Errorf("expected non-empty listening address")
-					}
-				case <-time.After(2 * time.Second):
-					t.Fatalf("timeout waiting for server to start")
-				}
-
-				_, port, err := net.SplitHostPort(addr)
-				if err != nil {
-					t.Fatalf("SplitHostPort(%q): %v", addr, err)
-				}
-				resp, err := http.Post("http://"+net.JoinHostPort("127.0.0.1", port)+"/-/reload", "application/json", nil)
-				if err != nil {
-					t.Fatalf("POST /-/reload: %v", err)
-				}
-				var got struct {
-					Status httpkit.ReloadStatus `json:"status"`
-				}
-				decodeErr := json.NewDecoder(resp.Body).Decode(&got)
-				_ = resp.Body.Close()
-				if resp.StatusCode != http.StatusOK || decodeErr != nil || got.Status != tc.wantReloadStatus {
-					t.Errorf("POST /-/reload = %d %q (decode err %v), want 200 %q", resp.StatusCode, got.Status, decodeErr, tc.wantReloadStatus)
-				}
-				if gotSys := cfgSrc.Current().SystemChannelID; gotSys != next.SystemChannelID {
-					t.Errorf("SystemChannelID after reload = %q, want %q", gotSys, next.SystemChannelID)
-				}
-
-				cancel()
-				select {
-				case err := <-done:
-					if err != nil {
-						t.Errorf("expected clean shutdown, got error: %v", err)
-					}
-				case <-time.After(2 * time.Second):
-					t.Fatalf("timeout waiting for server shutdown")
-				}
-				return
-			}
-
-			if tc.isRunApp {
-				ctxC, cancelC := context.WithCancel(context.Background())
-				if tc.preCancel {
-					cancelC()
-				} else {
-					defer cancelC()
-				}
-				if tc.reloadConfig != nil {
-					if status, err := cfgSrc.Reload(); status != httpkit.ReloadRestarting || err != nil {
-						t.Fatalf("Reload() = %q, %v; want %q", status, err, httpkit.ReloadRestarting)
-					}
-				}
-				err := runApp(ctxC, cfgSrc)
-				if (err != nil) != tc.wantErr && !errors.Is(err, http.ErrServerClosed) {
-					t.Errorf("unexpected error from runApp: %v", err)
-				}
-				return
-			}
-
-			err := runServer(context.Background(), cfgSrc, nil)
-			if (err != nil) != tc.wantErr {
-				t.Errorf("runServer() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-		})
+	dispatches := tc.disp.DispatchCalls()
+	if len(dispatches) != tc.wantDispatches {
+		t.Errorf("dispatches = %d, want %d", len(dispatches), tc.wantDispatches)
 	}
-}
-
-// --- 9. Vanadis Build Queue Advancement & Wake Suppression Tests ---
-
-func TestAdvanceVanadisChunk(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	validThread := "123456789012345678"
-
-	tests := []struct {
-		name           string
-		useNilRegistry bool
-		prNumber       int
-		advanceRes     *VanadisAdvancementResult
-		advanceErr     error
-		dispDirectErr  error
-		dispWidgetErr  error
-		dispPromptErr  error
-		repeatCall     bool
-		wantErr        bool
-		wantPrompts    int
-		wantPromptSubs []string
-		wantDMs        int
-	}{
-		{
-			name:           "nil registry is clean no-op",
-			useNilRegistry: true,
-			prNumber:       10,
-			wantErr:        false,
-		},
-		{
-			name:     "prNumber <= 0 is clean no-op",
-			prNumber: 0,
-			wantErr:  false,
-		},
-		{
-			name:       "unmatched result returns nil",
-			prNumber:   10,
-			advanceRes: &VanadisAdvancementResult{Matched: false},
-			wantErr:    false,
-		},
-		{
-			name:          "matched but already advanced result syncs widget and returns nil",
-			prNumber:      10,
-			advanceRes:    &VanadisAdvancementResult{Matched: true, Advanced: false},
-			dispWidgetErr: errors.New("transient widget error"),
-			wantErr:       false,
-		},
-		{
-			name:       "registry error returns error",
-			prNumber:   10,
-			advanceErr: errors.New("db failure"),
-			wantErr:    true,
-		},
-		{
-			name:     "mid-run chunk advancement syncs widget and succeeds",
-			prNumber: 42,
-			advanceRes: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         true,
-				BuildID:          "build-mid",
-				ThreadID:         validThread,
-				MergedChunkIndex: 0,
-				MergedChunkTitle: "Chunk One",
-				NextChunkIndex:   1,
-				BuildCompleted:   false,
-				Chunks: []VanadisChunkSummary{
-					{ChunkIndex: 0, Title: "Chunk One", Status: "merged"},
-					{ChunkIndex: 1, Title: "Chunk Two", Status: "pending"},
-				},
-			},
-			dispDirectErr: errors.New("transient dm error warning"),
-			wantErr:       false,
-		},
-		{
-			name:     "mid-run chunk advancement with widget error logs warning",
-			prNumber: 42,
-			advanceRes: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         true,
-				BuildID:          "build-mid",
-				ThreadID:         validThread,
-				MergedChunkIndex: 0,
-				MergedChunkTitle: "Chunk One",
-				NextChunkIndex:   1,
-				BuildCompleted:   false,
-			},
-			dispWidgetErr: errors.New("transient widget error"),
-			wantErr:       false,
-		},
-		{
-			name:     "final build completion dispatches widget sync and completion prompt",
-			prNumber: 42,
-			advanceRes: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         true,
-				BuildID:          "build-done",
-				ThreadID:         validThread,
-				Tier:             2,
-				Objective:        "Complete all chunks",
-				MergedChunkIndex: 1,
-				MergedChunkTitle: "Chunk Two",
-				NextChunkIndex:   -1,
-				BuildCompleted:   true,
-				Chunks: []VanadisChunkSummary{
-					{ChunkIndex: 0, Title: "Chunk One", Status: "merged", PRNumber: 41},
-					{ChunkIndex: 1, Title: "Chunk Two", Status: "merged", PRNumber: 42},
-				},
-			},
-			dispWidgetErr:  errors.New("widget err"),
-			repeatCall:     true,
-			wantErr:        false,
-			wantPrompts:    1,
-			wantPromptSubs: []string{"Vanadis build build-done completed"},
-			wantDMs:        0,
-		},
-		{
-			name:     "retry of already-completed build with Advanced false still dispatches completion prompt once",
-			prNumber: 42,
-			advanceRes: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         false,
-				BuildID:          "build-retry-done",
-				ThreadID:         validThread,
-				Tier:             2,
-				Objective:        "Complete all chunks on retry",
-				MergedChunkIndex: 1,
-				MergedChunkTitle: "Chunk Two",
-				NextChunkIndex:   -1,
-				BuildCompleted:   true,
-				Chunks: []VanadisChunkSummary{
-					{ChunkIndex: 0, Title: "Chunk One", Status: "merged", PRNumber: 41},
-					{ChunkIndex: 1, Title: "Chunk Two", Status: "merged", PRNumber: 42},
-				},
-			},
-			repeatCall:     true,
-			wantErr:        false,
-			wantPrompts:    1,
-			wantPromptSubs: []string{"Vanadis build build-retry-done completed", "Chunk 2/2: Chunk Two"},
-			wantDMs:        0,
-		},
-		{
-			name:     "final build completion prompt error propagates without marking dispatched",
-			prNumber: 42,
-			advanceRes: &VanadisAdvancementResult{
-				Matched:        true,
-				Advanced:       true,
-				BuildID:        "",
-				ThreadID:       validThread,
-				BuildCompleted: true,
-			},
-			dispPromptErr: errors.New("502 Bad Gateway"),
-			wantErr:       true,
-			wantPrompts:   1,
-		},
+	if tc.wantDispatches > 0 && len(dispatches) > 0 {
+		last := dispatches[len(dispatches)-1].Prompt
+		for _, sub := range tc.wantPromptSubs {
+			if !strings.Contains(last, sub) {
+				t.Errorf("dispatch = %v, want substr %q", dispatches, sub)
+			}
+		}
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var reg PRRegistryUpdater
-			if !tc.useNilRegistry {
-				reg = &mockPRRegistry{
-					advanceVanadisRes: tc.advanceRes,
-					advanceVanadisErr: tc.advanceErr,
-				}
-			}
-			disp := &mockOutboundDispatcher{
-				directMessageErr: tc.dispDirectErr,
-				widgetErr:        tc.dispWidgetErr,
-				promptErr:        tc.dispPromptErr,
-			}
-			srv := newTestRouter(Config{}, nil, reg, disp)
-
-			err := srv.advanceVanadisChunk(ctx, "azylman/aerial", tc.prNumber)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("advanceVanadisChunk() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.repeatCall {
-				if err2 := srv.advanceVanadisChunk(ctx, "azylman/aerial", tc.prNumber); err2 != nil {
-					t.Fatalf("repeat advanceVanadisChunk() err = %v, want nil", err2)
-				}
-			}
-			if tc.useNilRegistry || tc.prNumber <= 0 {
-				if err := srv.advanceVanadisChunkOnMerge(ctx, "azylman/aerial", tc.prNumber); err != nil {
-					t.Errorf("expected advanceVanadisChunkOnMerge nil error for guard case, got %v", err)
-				}
-				vanadisPR, err := srv.isVanadisPR(ctx, "azylman/aerial", tc.prNumber)
-				if err != nil || vanadisPR {
-					t.Errorf("expected isVanadisPR false for guard case")
-				}
-				if err := srv.advanceVanadisChunkOnSync(ctx, "azylman/aerial", tc.prNumber, true); err != nil {
-					t.Errorf("expected advanceVanadisChunkOnSync nil error for guard case, got %v", err)
-				}
-			}
-			if len(disp.PromptCalls()) != tc.wantPrompts {
-				t.Errorf("got %d prompts, want %d", len(disp.PromptCalls()), tc.wantPrompts)
-			}
-			for _, sub := range tc.wantPromptSubs {
-				if len(disp.PromptCalls()) == 0 || !strings.Contains(disp.PromptCalls()[0].Prompt, sub) {
-					t.Errorf("prompt missing %q: %+v", sub, disp.PromptCalls())
-				}
-			}
-			if len(disp.DirectMessageCalls()) != tc.wantDMs {
-				t.Errorf("got %d DMs, want %d", len(disp.DirectMessageCalls()), tc.wantDMs)
-			}
-		})
+	prompts := tc.disp.PromptCalls()
+	if len(prompts) != tc.wantPrompts {
+		t.Errorf("prompts = %d, want %d", len(prompts), tc.wantPrompts)
 	}
-}
-
-func TestSyncPRWidget_Unit(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	prStart := time.Date(2026, 10, 16, 17, 30, 0, 0, time.UTC)
-	prUpdate := prStart.Add(4 * time.Minute)
-	chunk0Start := time.Date(2026, 10, 16, 17, 0, 0, 0, time.UTC)
-	chunk0Update := chunk0Start.Add(5 * time.Minute)
-
-	tests := []struct {
-		name             string
-		useNilServer     bool
-		useMockReg       bool
-		useInserter      bool
-		inserterErr      error
-		mockTargetID     string
-		mockBranch       string
-		prDBStatus       string
-		prDBBranch       string
-		prDBBanner       string
-		prDBCIChecks     string
-		prDBMetadata     string
-		buildDBStatus    string
-		chunk1DBStatus   string
-		repo             string
-		prNumber         int
-		olderPRs         []int
-		vanadisMatch     bool
-		dispErr          error
-		queryErr         error
-		prQueryErr       error
-		execErr          error
-		wantErr          bool
-		wantDispatched   bool
-		wantQueued       int
-		wantQueuedStatus string
-		wantWidgetID     string
-		wantStatus       string
-		wantBanner       string
-		wantActiveStep   string
-		wantSkipSink     bool
-		wantVanadisStep  string
-		wantChannel      string
-		wantChunks       int
-	}{
-		{
-			name:         "nil server returns clean nil",
-			useNilServer: true,
-			repo:         "azylman/aerial",
-			prNumber:     1,
-		},
-		{
-			name:     "empty repo returns clean nil",
-			repo:     "",
-			prNumber: 1,
-		},
-		{
-			name:     "prNumber <= 0 returns clean nil",
-			repo:     "azylman/aerial",
-			prNumber: 0,
-		},
-		{
-			name: "riverClient configured queues WidgetSyncArgs without inline HTTP dispatch", useMockReg: true, useInserter: true,
-			mockTargetID: "1555405874565091380", mockBranch: "feat/queued", repo: "aerial", prNumber: 101, wantQueued: 1, wantQueuedStatus: "",
-		},
-		{
-			name: "Postgres registry queues WidgetSyncArgs with status from pr_registry", useInserter: true,
-			repo: "azylman/aerial", prNumber: 101, prDBStatus: "merged", wantQueued: 1, wantQueuedStatus: "merged",
-		},
-		{
-			name: "Postgres registry queues WidgetSyncArgs with empty status on query error", useInserter: true,
-			repo: "azylman/aerial", prNumber: 101, prQueryErr: errors.New("status lookup failed"), wantQueued: 1, wantQueuedStatus: "",
-		},
-		{
-			name: "riverClient insert error returns error", useMockReg: true, useInserter: true,
-			inserterErr: errors.New("db insert failure"), repo: "azylman/aerial", prNumber: 101, wantErr: true,
-		},
-		{
-			name:           "non-Postgres registry fallback path",
-			useMockReg:     true,
-			mockTargetID:   "1555405874565091380",
-			mockBranch:     "feat/fallback",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			wantDispatched: true,
-			wantWidgetID:   "pr-azylman/aerial-101",
-			wantStatus:     "open",
-			wantChannel:    "1555405874565091380",
-			wantChunks:     1,
-		},
-		{
-			name:           "non-Postgres registry empty targetID returns clean nil",
-			useMockReg:     true,
-			mockTargetID:   "",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			wantDispatched: false,
-		},
-		{
-			name:           "non-Postgres registry dependabot branch suppresses widget",
-			useMockReg:     true,
-			mockTargetID:   "1555405874565091380",
-			mockBranch:     "dependabot/go_modules/foo-1.0.0",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			wantDispatched: false,
-		},
-		{
-			name:           "Postgres standalone PR dependabot branch suppresses widget",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			prDBStatus:     "open",
-			prDBBranch:     "dependabot/go_modules/foo-1.0.0",
-			wantDispatched: false,
-		},
-		{
-			name:           "Postgres standalone PR merged status from DB",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			prDBStatus:     "merged",
-			prDBBanner:     "stale banner ignored on merged",
-			wantDispatched: true,
-			wantWidgetID:   "pr-azylman/aerial-101",
-			wantStatus:     "merged",
-			wantBanner:     "",
-			wantChannel:    "1555405874565091380",
-			wantChunks:     1,
-		},
-		{
-			name:           "Postgres standalone PR synced status from DB",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			prDBStatus:     "synced",
-			prDBBanner:     "stale banner ignored on synced",
-			wantDispatched: true,
-			wantWidgetID:   "pr-azylman/aerial-101",
-			wantStatus:     "synced",
-			wantBanner:     "",
-			wantChannel:    "1555405874565091380",
-			wantChunks:     1,
-		},
-		{
-			name: "Postgres standalone PR ci_failed normalizes to failed and includes banner", prDBStatus: "ci_failed", prDBBanner: "CI check failed",
-			repo: "azylman/aerial", prNumber: 101, execErr: errors.New("exec warning"),
-			wantDispatched: true, wantWidgetID: "pr-azylman/aerial-101", wantStatus: "failed", wantBanner: "CI check failed", wantChannel: "1555405874565091380", wantChunks: 1,
-		},
-		{
-			name: "Postgres standalone PR deploying status from DB", prDBStatus: "deploying",
-			repo: "azylman/aerial", prNumber: 101,
-			wantDispatched: true, wantWidgetID: "pr-azylman/aerial-101", wantStatus: "deploying", wantChannel: "1555405874565091380", wantChunks: 1,
-		},
-		{
-			name:           "Postgres Vanadis chunk match with deployed status and older PR sweep",
-			repo:           "azylman/aerial",
-			prNumber:       102,
-			prDBStatus:     "deployed",
-			olderPRs:       []int{101},
-			vanadisMatch:   true,
-			wantDispatched: true,
-			wantWidgetID:   "pr-azylman/aerial-101",
-			wantStatus:     "deployed",
-			wantChunks:     1,
-		},
-		{
-			name: "Postgres deployed sweep logs warning when older PR widget dispatch fails", repo: "azylman/aerial",
-			prNumber: 102, prDBStatus: "deployed", olderPRs: []int{101}, vanadisMatch: true, dispErr: errors.New("dispatch error"), wantErr: true,
-		},
-		{
-			name:           "Postgres Vanadis chunk completed build status from DB",
-			repo:           "azylman/aerial",
-			prNumber:       102,
-			prDBStatus:     "merged",
-			buildDBStatus:  "completed",
-			vanadisMatch:   true,
-			wantDispatched: false,
-		},
-		{
-			name:           "Postgres Vanadis chunk deploy_failed sets build status failed and banner",
-			repo:           "azylman/aerial",
-			prNumber:       102,
-			prDBStatus:     "deploy_failed",
-			prDBBanner:     "Deploy failed",
-			vanadisMatch:   true,
-			wantDispatched: false,
-		},
-		{
-			name:           "Postgres Vanadis chunk conflict and closed resolution variants",
-			repo:           "azylman/aerial",
-			prNumber:       102,
-			prDBStatus:     "closed",
-			chunk1DBStatus: "pr_opened",
-			vanadisMatch:   true,
-			wantDispatched: false,
-		},
-		{
-			name:           "Postgres superseded Vanadis chunk PR with chunk id in metadata suppresses standalone widget",
-			repo:           "azylman/aerial",
-			prNumber:       103,
-			prDBStatus:     "open",
-			prDBMetadata:   `{"vanadis_chunk_id":"chunk-superseded"}`,
-			vanadisMatch:   false,
-			wantDispatched: false,
-		},
-		{
-			name:         "Postgres Vanadis chunk dispatch error",
-			repo:         "azylman/aerial",
-			prNumber:     102,
-			vanadisMatch: true,
-			dispErr:      errors.New("dispatch error"),
-			wantErr:      true,
-		},
-		{
-			name:     "Postgres standalone PR dispatch error",
-			repo:     "azylman/aerial",
-			prNumber: 101,
-			dispErr:  errors.New("dispatch error"),
-			wantErr:  true,
-		},
-		{
-			name:       "Postgres standalone PR query error",
-			repo:       "azylman/aerial",
-			prNumber:   101,
-			prQueryErr: errors.New("pr query error"),
-			wantErr:    true,
-		},
-		{
-			name:         "Postgres Vanadis chunk query error",
-			repo:         "azylman/aerial",
-			prNumber:     102,
-			vanadisMatch: true,
-			queryErr:     errors.New("query chunks error"),
-			wantErr:      true,
-		},
-		{
-			name:           "Postgres standalone PR open with pending and passed CI checks sets active step and skip sink",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			prDBStatus:     "open",
-			prDBCIChecks:   `{"test": "passed", "lint": "pending"}`,
-			wantDispatched: true,
-			wantWidgetID:   "pr-azylman/aerial-101",
-			wantStatus:     "open",
-			wantActiveStep: "Waiting on CI (1/2 passed)",
-			wantSkipSink:   true,
-			wantChannel:    "1555405874565091380",
-			wantChunks:     1,
-		},
-		{
-			name:           "Postgres standalone PR open with all passed CI checks sets active step and skip sink",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			prDBStatus:     "open",
-			prDBCIChecks:   `{"test": "passed", "lint": "passed"}`,
-			wantDispatched: true,
-			wantWidgetID:   "pr-azylman/aerial-101",
-			wantStatus:     "open",
-			wantActiveStep: "Waiting on CI (2/2 passed)",
-			wantSkipSink:   true,
-			wantChannel:    "1555405874565091380",
-			wantChunks:     1,
-		},
-		{
-			name:           "Postgres standalone PR ci_failed clears active step and disables skip sink",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			prDBStatus:     "ci_failed",
-			prDBBanner:     "CI failed",
-			prDBCIChecks:   `{"test": "failed", "lint": "passed"}`,
-			wantDispatched: true,
-			wantWidgetID:   "pr-azylman/aerial-101",
-			wantStatus:     "failed",
-			wantBanner:     "CI failed",
-			wantActiveStep: "",
-			wantSkipSink:   false,
-			wantChannel:    "1555405874565091380",
-			wantChunks:     1,
-		},
-		{
-			name:            "Postgres Vanadis chunk match passes active step to vanadis",
-			repo:            "azylman/aerial",
-			prNumber:        102,
-			prDBStatus:      "open",
-			prDBCIChecks:    `{"build": "passed", "test": "pending"}`,
-			vanadisMatch:    true,
-			wantVanadisStep: "Waiting on CI (1/2 passed)",
-			wantDispatched:  false,
-		},
-		{
-			name:           "Postgres standalone PR merged status with candidate jobs sets per-job active step and skip sink",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			prDBStatus:     "merged",
-			prDBMetadata:   `{"jobs": ["eri", "haro"]}`,
-			wantDispatched: true,
-			wantWidgetID:   "pr-azylman/aerial-101",
-			wantStatus:     "merged",
-			wantActiveStep: "`eri`: ⏳ building image\n`haro`: ⏳ building image",
-			wantSkipSink:   true,
-			wantChannel:    "1555405874565091380",
-			wantChunks:     1,
-		},
-		{
-			name:           "Postgres standalone PR synced status with deployed jobs and ci_checks sets active step and skip sink",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			prDBStatus:     "synced",
-			prDBMetadata:   `{"jobs": ["eri", "haro"], "deployed_jobs": ["eri"]}`,
-			wantDispatched: true,
-			wantWidgetID:   "pr-azylman/aerial-101",
-			wantStatus:     "synced",
-			wantActiveStep: "`eri`: ✅ healthy\n`haro`: ⏳ building image",
-			wantSkipSink:   true,
-			wantChannel:    "1555405874565091380",
-			wantChunks:     1,
-		},
-		{
-			name:           "Postgres standalone PR deploying status with started and deployed jobs sets active step and skip sink",
-			repo:           "azylman/aerial",
-			prNumber:       101,
-			prDBStatus:     "deploying",
-			prDBMetadata:   `{"jobs": ["coven", "eri", "haro"], "started_jobs": ["haro"], "job_states": {"haro": "verifying_health"}, "deployed_jobs": ["eri"]}`,
-			wantDispatched: true,
-			wantWidgetID:   "pr-azylman/aerial-101",
-			wantStatus:     "deploying",
-			wantActiveStep: "`coven`: ⏳ building image\n`eri`: ✅ healthy\n`haro`: 🔄 verifying health",
-			wantSkipSink:   true,
-			wantChannel:    "1555405874565091380",
-			wantChunks:     1,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mockDisp := &mockOutboundDispatcher{widgetReturnMsgID: "msg-widget-101", widgetErr: tc.dispErr}
-
-			if tc.useNilServer {
-				var nilSrv *RouterServer
-				nilSrv.setPRWidgetState(ctx, tc.repo, tc.prNumber, "conflict", "banner")
-				if err := nilSrv.SyncPRWidget(ctx, tc.repo, tc.prNumber); err != nil {
-					t.Fatalf("SyncPRWidget nil server err = %v", err)
-				}
-				if err := nilSrv.ProcessWidgetSync(ctx, WidgetSyncArgs{Repo: tc.repo, PRNumber: tc.prNumber}); err != nil {
-					t.Fatalf("ProcessWidgetSync nil server err = %v", err)
-				}
-				return
+	if tc.wantPrompts > 0 && len(prompts) > 0 {
+		last := prompts[len(prompts)-1].Prompt
+		for _, sub := range tc.wantPromptSubs {
+			if !strings.Contains(last, sub) {
+				t.Errorf("prompt = %v, want substr %q", prompts, sub)
 			}
-
-			if tc.useMockReg {
-				reg := &mockPRRegistry{
-					resolveTargetID: tc.mockTargetID,
-					resolveBranch:   tc.mockBranch,
-				}
-				srv := newTestRouter(Config{}, nil, reg, mockDisp)
-				srv.setPRWidgetState(ctx, tc.repo, tc.prNumber, "conflict", "banner")
-				var inserter *mockRiverInserter
-				if tc.useInserter {
-					inserter = &mockRiverInserter{err: tc.inserterErr}
-					srv.SetRiverClient(inserter)
-				}
-				err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("SyncPRWidget fallback err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if tc.wantQueued > 0 {
-					if inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued {
-						t.Fatalf("expected %d queued widget sync jobs, got %+v", tc.wantQueued, inserter)
-					}
-					if lastJob := inserter.insertedWidgetSyncJobs[len(inserter.insertedWidgetSyncJobs)-1]; lastJob.Status != tc.wantQueuedStatus {
-						t.Errorf("got queued job Status = %q, want %q", lastJob.Status, tc.wantQueuedStatus)
-					}
-				}
-				if tc.wantDispatched {
-					calls := mockDisp.WidgetCalls()
-					if len(calls) == 0 {
-						t.Fatalf("expected widget call dispatched")
-					}
-					last := calls[len(calls)-1]
-					if last.ID != tc.wantWidgetID || last.Status != tc.wantStatus || last.ChannelID != tc.wantChannel {
-						t.Errorf("unexpected widget request: %+v", last)
-					}
-				} else if len(mockDisp.WidgetCalls()) != 0 {
-					t.Errorf("expected 0 dispatched widget calls, got %d", len(mockDisp.WidgetCalls()))
-				}
-				return
-			}
-
-			pool := &mockVanadisPgxPool{
-				execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-					return pgconn.NewCommandTag("UPDATE 1"), tc.execErr
-				},
-				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-					if strings.Contains(sql, "FROM vanadis_chunks") {
-						if !tc.vanadisMatch {
-							return &mockVanadisPgxRow{scanFn: func(dest ...any) error { return pgx.ErrNoRows }}
-						}
-						return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							*dest[0].(*string) = "chunk-1"
-							*dest[1].(*string) = "build-abc"
-							*dest[2].(*string) = "1555405874565091380"
-							*dest[3].(*int) = 2
-							*dest[4].(*string) = "Vanadis Build Title"
-							*dest[5].(*string) = "Vanadis Objective"
-							bStat := tc.buildDBStatus
-							if bStat == "" {
-								bStat = "running"
-							}
-							*dest[6].(*string) = bStat
-							*dest[7].(*string) = "old-build-msg"
-							return nil
-						}}
-					}
-					if strings.Contains(sql, "FROM pr_registry") {
-						return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							if len(dest) == 1 {
-								if tc.prQueryErr != nil {
-									return tc.prQueryErr
-								}
-								dbStat := tc.prDBStatus
-								if dbStat == "" {
-									dbStat = "open"
-								}
-								*dest[0].(*string) = dbStat
-								return nil
-							}
-							if tc.prQueryErr != nil {
-								*dest[0].(*string) = "1555405874565091380"
-								return tc.prQueryErr
-							}
-							*dest[0].(*string) = "1555405874565091380"
-							*dest[1].(*string) = "feat: awesome feature"
-							dbStat := tc.prDBStatus
-							if dbStat == "" {
-								dbStat = "open"
-							}
-							*dest[2].(*string) = dbStat
-							*dest[3].(*string) = "old-msg-id"
-							if len(dest) > 4 {
-								*dest[4].(*time.Time) = prStart
-							}
-							if len(dest) > 5 {
-								*dest[5].(*time.Time) = prUpdate
-							}
-							if len(dest) > 6 {
-								*dest[6].(*string) = tc.prDBBanner
-							}
-							if len(dest) > 7 {
-								ciChecks := tc.prDBCIChecks
-								if ciChecks == "" {
-									ciChecks = "{}"
-								}
-								*dest[7].(*string) = ciChecks
-							}
-							if len(dest) > 8 {
-								meta := tc.prDBMetadata
-								if meta == "" {
-									meta = "{}"
-								}
-								*dest[8].(*string) = meta
-							}
-							if len(dest) > 9 {
-								*dest[9].(*string) = tc.prDBBranch
-							}
-							return nil
-						}}
-					}
-					return &mockVanadisPgxRow{}
-				},
-				queryFn: func(qCtx context.Context, sql string, args ...any) (pgx.Rows, error) {
-					if strings.Contains(sql, "UPDATE pr_registry") {
-						return &mockVanadisPgxRows{intItems: tc.olderPRs}, nil
-					}
-					if tc.queryErr != nil {
-						return nil, tc.queryErr
-					}
-					c1Stat := tc.chunk1DBStatus
-					if c1Stat == "" {
-						c1Stat = "running"
-					}
-					chunks := []VanadisChunkSummary{
-						{ID: "chunk-0", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 0", Status: "merged", PRNumber: 101, StartedAt: chunk0Start, UpdatedAt: chunk0Update},
-						{ID: "chunk-1", ChunkIndex: 1, Repo: "", Title: "Chunk 1", Status: c1Stat, PRNumber: 102},
-					}
-					return &mockVanadisPgxRows{items: chunks}, nil
-				},
-			}
-
-			var receivedVanadisActiveStep string
-			tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/chunks/sync-pr-widget" {
-					http.NotFound(w, r)
-					return
-				}
-				if tc.queryErr != nil || (tc.vanadisMatch && tc.dispErr != nil) {
-					w.WriteHeader(http.StatusInternalServerError)
-					_, _ = w.Write([]byte(`{"error":"vanadis failure"}`))
-					return
-				}
-				var req struct {
-					Repo       string `json:"repo"`
-					PRNumber   int    `json:"pr_number"`
-					ActiveStep string `json:"active_step"`
-				}
-				_ = json.NewDecoder(r.Body).Decode(&req)
-				receivedVanadisActiveStep = req.ActiveStep
-				if tc.vanadisMatch && req.PRNumber == tc.prNumber {
-					_ = json.NewEncoder(w).Encode(map[string]any{"matched": true, "build_id": "build-abc"})
-					return
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"matched": false})
-			}))
-			t.Cleanup(tsVanadis.Close)
-
-			srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), NewPostgresPRRegistry(pool, WithVanadisClient(tsVanadis.URL, tsVanadis.Client())), mockDisp)
-			var inserter *mockRiverInserter
-			if tc.useInserter {
-				inserter = &mockRiverInserter{err: tc.inserterErr}
-				srv.SetRiverClient(inserter)
-			}
-			if tc.prDBBanner != "" {
-				srv.setPRWidgetState(ctx, tc.repo, tc.prNumber, tc.prDBStatus, tc.prDBBanner)
-			}
-			err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("SyncPRWidget err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantQueued > 0 {
-				if inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued {
-					t.Fatalf("expected %d queued widget sync jobs, got %+v", tc.wantQueued, inserter)
-				}
-				if lastJob := inserter.insertedWidgetSyncJobs[len(inserter.insertedWidgetSyncJobs)-1]; lastJob.Status != tc.wantQueuedStatus {
-					t.Errorf("got queued job Status = %q, want %q", lastJob.Status, tc.wantQueuedStatus)
-				}
-			}
-			if tc.wantDispatched {
-				calls := mockDisp.WidgetCalls()
-				if len(calls) == 0 {
-					t.Fatalf("expected widget call dispatched")
-				}
-				last := calls[len(calls)-1]
-				if last.ID != tc.wantWidgetID || last.Status != tc.wantStatus || last.Banner != tc.wantBanner || len(last.Chunks) != tc.wantChunks {
-					t.Errorf("unexpected widget request: %+v, want ID=%q Status=%q Banner=%q Chunks=%d", last, tc.wantWidgetID, tc.wantStatus, tc.wantBanner, tc.wantChunks)
-				}
-				if len(last.Chunks) > 0 && last.Chunks[0].ActiveStep != tc.wantActiveStep {
-					t.Errorf("got chunk[0].ActiveStep = %q, want %q", last.Chunks[0].ActiveStep, tc.wantActiveStep)
-				}
-				if last.SkipSink != tc.wantSkipSink {
-					t.Errorf("got last.SkipSink = %v, want %v", last.SkipSink, tc.wantSkipSink)
-				}
-			} else if !tc.wantErr && len(mockDisp.WidgetCalls()) != 0 {
-				t.Errorf("expected 0 dispatched widget calls, got %d", len(mockDisp.WidgetCalls()))
-			}
-			if tc.wantVanadisStep != "" && receivedVanadisActiveStep != tc.wantVanadisStep {
-				t.Errorf("got receivedVanadisActiveStep = %q, want %q", receivedVanadisActiveStep, tc.wantVanadisStep)
-			}
-		})
-	}
-}
-
-func TestReconcileStuckDeployingPRWidget(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name           string
-		nilServer      bool
-		nilRegistry    bool
-		useMockReg     bool
-		nilPool        bool
-		repo           string
-		prNum          int
-		queryStatus    string
-		queryErr       error
-		wantExecCount  int
-		wantWidgetCall bool
-		wantWidgetStat string
-	}{
-		{
-			name:      "nil server guard",
-			nilServer: true,
-			repo:      "azylman/aerial",
-			prNum:     42,
-		},
-		{
-			name:        "nil registry guard",
-			nilRegistry: true,
-			repo:        "azylman/aerial",
-			prNum:       42,
-		},
-		{
-			name:       "non-postgres registry guard",
-			useMockReg: true,
-			repo:       "azylman/aerial",
-			prNum:      42,
-		},
-		{
-			name:    "nil pool guard",
-			nilPool: true,
-			repo:    "azylman/aerial",
-			prNum:   42,
-		},
-		{
-			name:  "empty repo guard",
-			repo:  "",
-			prNum: 42,
-		},
-		{
-			name:  "zero prNum guard",
-			repo:  "azylman/aerial",
-			prNum: 0,
-		},
-		{
-			name:        "db error scanning status does not reconcile",
-			repo:        "azylman/aerial",
-			prNum:       42,
-			queryErr:    errors.New("db scan error"),
-			queryStatus: "",
-		},
-		{
-			name:        "pr status already deployed is a no-op",
-			repo:        "azylman/aerial",
-			prNum:       42,
-			queryStatus: "deployed",
-		},
-		{
-			name:           "pr status deploying reconciles to deployed and dispatches widget",
-			repo:           "azylman/aerial",
-			prNum:          42,
-			queryStatus:    "deploying",
-			wantExecCount:  1,
-			wantWidgetCall: true,
-			wantWidgetStat: "deployed",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			mockDisp := &mockOutboundDispatcher{}
-			var execCalls int
-			currentStatus := tc.queryStatus
-
-			if tc.nilServer {
-				var nilSrv *RouterServer
-				nilSrv.reconcileStuckDeployingPRWidget(ctx, tc.repo, tc.prNum)
-				return
-			}
-
-			var reg PRRegistryUpdater
-			switch {
-			case tc.nilRegistry:
-				reg = nil
-			case tc.useMockReg:
-				reg = &mockPRRegistry{}
-			case tc.nilPool:
-				reg = NewPostgresPRRegistry(nil)
-			default:
-				pool := &mockVanadisPgxPool{
-					queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-						if strings.Contains(sql, "SELECT status FROM pr_registry") {
-							if tc.queryErr != nil {
-								return &mockVanadisPgxRow{scanFn: func(dest ...any) error { return tc.queryErr }}
-							}
-							return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
-								if len(dest) > 0 {
-									if s, ok := dest[0].(*string); ok {
-										*s = currentStatus
-									}
-								}
-								return nil
-							}}
-						}
-						if strings.Contains(sql, "SELECT target_id, title, status") {
-							return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
-								if len(dest) >= 10 {
-									*dest[0].(*string) = "1555405874565091380"
-									*dest[1].(*string) = "Fix Widget Race"
-									*dest[2].(*string) = currentStatus
-									*dest[3].(*string) = "status-msg-1"
-									*dest[4].(*time.Time) = time.Now()
-									*dest[5].(*time.Time) = time.Now()
-									*dest[6].(*string) = ""
-									*dest[7].(*string) = "{}"
-									*dest[8].(*string) = "{}"
-									*dest[9].(*string) = "feat/fix-race"
-								}
-								return nil
-							}}
-						}
-						return &mockVanadisPgxRow{}
-					},
-					execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-						if strings.Contains(sql, "UPDATE pr_registry") && strings.Contains(sql, "SET status = CASE") {
-							execCalls++
-							if len(args) >= 3 {
-								if st, ok := args[2].(string); ok && st != "" {
-									currentStatus = st
-								}
-							}
-						}
-						return pgconn.NewCommandTag("UPDATE 1"), nil
-					},
-				}
-				reg = NewPostgresPRRegistry(pool)
-			}
-
-			srv := newTestRouter(Config{}, nil, reg, mockDisp)
-			srv.reconcileStuckDeployingPRWidget(ctx, tc.repo, tc.prNum)
-
-			if execCalls != tc.wantExecCount {
-				t.Errorf("setPRWidgetState execCalls = %d, want %d", execCalls, tc.wantExecCount)
-			}
-
-			calls := mockDisp.WidgetCalls()
-			if tc.wantWidgetCall {
-				if len(calls) == 0 {
-					t.Fatalf("expected widget call dispatched, got 0")
-				}
-				last := calls[len(calls)-1]
-				if last.Status != tc.wantWidgetStat {
-					t.Errorf("got widget status = %q, want %q", last.Status, tc.wantWidgetStat)
-				}
-			} else if len(calls) != 0 {
-				t.Errorf("expected 0 widget calls, got %d", len(calls))
-			}
-		})
-	}
-}
-
-func TestRouterServer_HandlePRRegister(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		nilRegistry    bool
-		noExistingPR   bool
-		sysChanID      string
-		regErr         error
-		regTargetID    string
-		resolveTID     string
-		body           string
-		dispWidgetErr  error
-		wantStatus     int
-		wantSubstr     string
-		wantRegistered bool
-		wantTargetID   string
-		wantWidgetCall bool
-	}{
-		{
-			name:        "NilRegistry",
-			nilRegistry: true,
-			body:        `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
-			wantStatus:  http.StatusInternalServerError,
-			wantSubstr:  "registry not initialized",
-		},
-		{
-			name:       "InvalidJSON",
-			body:       `{not-valid-json`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "invalid json payload",
-		},
-		{
-			name:       "EmptyRepo",
-			body:       `{"repo":"","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "repo cannot be empty",
-		},
-		{
-			name:       "ZeroPRNumber",
-			body:       `{"repo":"azylman/aerial","pr_number":0,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "pr_number must be greater than 0",
-		},
-		{
-			name:       "EmptyBranch",
-			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"","head_sha":"sha123","target_id":"1555405874565091380"}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "branch cannot be empty",
-		},
-		{
-			name:       "EmptyHeadSHA",
-			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"","target_id":"1555405874565091380"}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "head_sha cannot be empty",
-		},
-		{
-			name:         "EmptyTargetIDWithoutExistingPROrSystemChannelReturns400",
-			noExistingPR: true,
-			body:         `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":""}`,
-			wantStatus:   http.StatusBadRequest,
-			wantSubstr:   "target_id must be a valid Discord snowflake (17-20 digits)",
-		},
-		{
-			name:           "SuccessEmptyTargetIDPreservesExistingTargetID",
-			body:           `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":""}`,
-			resolveTID:     "1555405874565091380",
-			wantStatus:     http.StatusOK,
-			wantSubstr:     `"status":"registered"`,
-			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
-			wantWidgetCall: true,
-		},
-		{
-			name:           "SuccessEmptyTargetIDFallsBackToSystemChannelID",
-			noExistingPR:   true,
-			sysChanID:      "1542423172400291873",
-			body:           `{"repo":"azylman/aerial","pr_number":108,"branch":"feat/empty-target","head_sha":"sha555","target_id":""}`,
-			wantStatus:     http.StatusOK,
-			wantSubstr:     `"status":"registered"`,
-			wantRegistered: true,
-			wantTargetID:   "1542423172400291873",
-			wantWidgetCall: true,
-		},
-		{
-			name:       "InvalidTargetIDWithoutChunk",
-			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"not-a-snowflake"}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "target_id must be a valid Discord snowflake (17-20 digits)",
-		},
-		{
-			name:       "MissingVanadisChunkReturns404",
-			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","vanadis_chunk_id":"missing-chunk-id"}`,
-			regErr:     ErrVanadisChunkNotFound,
-			wantStatus: http.StatusNotFound,
-			wantSubstr: "vanadis chunk not found",
-		},
-		{
-			name:       "CancelledVanadisChunkReturns409",
-			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","vanadis_chunk_id":"cancelled-chunk-id"}`,
-			regErr:     ErrVanadisChunkCancelled,
-			wantStatus: http.StatusConflict,
-			wantSubstr: "vanadis chunk or build is cancelled",
-		},
-		{
-			name:       "InvalidTargetIDFromChunkRegistrationReturns400",
-			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","vanadis_chunk_id":"chunk-no-thread"}`,
-			regErr:     ErrInvalidTargetID,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "target_id must be a valid Discord snowflake (17-20 digits)",
-		},
-		{
-			name:       "InternalRegistrationErrorReturns500",
-			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
-			regErr:     errors.New("db disk failure"),
-			wantStatus: http.StatusInternalServerError,
-			wantSubstr: "Failed to register PR",
-		},
-		{
-			name:           "SuccessDirectTargetID",
-			body:           `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380","title":"feat: test"}`,
-			wantStatus:     http.StatusOK,
-			wantSubstr:     `"status":"registered"`,
-			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
-			wantWidgetCall: true,
-		},
-		{
-			name:           "SuccessWithChunkIDResolvingThreadID",
-			body:           `{"repo":"azylman/aerial","pr_number":102,"branch":"feat/chunk","head_sha":"sha456","vanadis_chunk_id":"chunk-xyz"}`,
-			regTargetID:    "1555405874565091399",
-			wantStatus:     http.StatusOK,
-			wantSubstr:     `"status":"registered"`,
-			wantRegistered: true,
-			wantTargetID:   "1555405874565091399",
-			wantWidgetCall: true,
-		},
-		{
-			name:           "SuccessDiscordPrefixedTargetID",
-			body:           `{"repo":"azylman/aerial","pr_number":104,"branch":"feat/discord-prefix","head_sha":"sha111","target_id":"stateful_medium:discord-1555405874565091380"}`,
-			wantStatus:     http.StatusOK,
-			wantSubstr:     `"status":"registered"`,
-			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
-			wantWidgetCall: true,
-		},
-		{
-			name:           "SuccessHeadlessDispatchPreservesExistingTargetID",
-			body:           `{"repo":"azylman/aerial","pr_number":105,"branch":"feat/dispatch","head_sha":"sha222","target_id":"dispatch-8d23879c-1111"}`,
-			resolveTID:     "1555405874565091380",
-			wantStatus:     http.StatusOK,
-			wantSubstr:     `"status":"registered"`,
-			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
-			wantWidgetCall: true,
-		},
-		{
-			name:           "SuccessHeadlessHeartbeatFallsBackToSystemChannelID",
-			noExistingPR:   true,
-			sysChanID:      "discord-1542423172400291873",
-			body:           `{"repo":"azylman/aerial","pr_number":106,"branch":"feat/heartbeat","head_sha":"sha333","target_id":"heartbeat-daily-check"}`,
-			wantStatus:     http.StatusOK,
-			wantSubstr:     `"status":"registered"`,
-			wantRegistered: true,
-			wantTargetID:   "1542423172400291873",
-			wantWidgetCall: true,
-		},
-		{
-			name:           "SuccessPooledWorkerKeyPreservesExistingTargetID",
-			body:           `{"repo":"azylman/aerial","pr_number":108,"branch":"feat/worker-remediate","head_sha":"sha555","target_id":"discord:medium-worker-0"}`,
-			resolveTID:     "1555405874565091380",
-			wantStatus:     http.StatusOK,
-			wantSubstr:     `"status":"registered"`,
-			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
-			wantWidgetCall: true,
-		},
-		{
-			name:         "HeadlessDispatchWithoutExistingTargetOrSystemChannelReturns400",
-			noExistingPR: true,
-			body:         `{"repo":"azylman/aerial","pr_number":107,"branch":"feat/headless-unresolvable","head_sha":"sha444","target_id":"stateful_low:dispatch-8d23879c"}`,
-			wantStatus:   http.StatusBadRequest,
-			wantSubstr:   "target_id must be a valid Discord snowflake (17-20 digits)",
-		},
-		{
-			name:           "SuccessEvenIfWidgetSyncFails",
-			body:           `{"repo":"azylman/aerial","pr_number":103,"branch":"feat/widget-fail","head_sha":"sha789","target_id":"1555405874565091380"}`,
-			dispWidgetErr:  errors.New("discord rate limited"),
-			wantStatus:     http.StatusOK,
-			wantSubstr:     `"status":"registered"`,
-			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
-			wantWidgetCall: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			var reg PRRegistryUpdater
-			var mockReg *mockPRRegistry
-			if !tc.nilRegistry {
-				resolveTarget := firstNonEmpty(tc.resolveTID, tc.regTargetID, "1555405874565091380")
-				if tc.noExistingPR {
-					resolveTarget = ""
-				}
-				mockReg = &mockPRRegistry{
-					registerErr:      tc.regErr,
-					registerTargetID: tc.regTargetID,
-					resolveTargetID:  resolveTarget,
-					resolveBranch:    "feat/test",
-				}
-				reg = mockReg
-			}
-
-			disp := &mockOutboundDispatcher{
-				widgetErr: tc.dispWidgetErr,
-			}
-
-			srv := newTestRouter(Config{SystemChannelID: tc.sysChanID}, nil, reg, disp)
-			routes := srv.Routes()
-
-			rec := doHTTPRequest(routes, http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body), nil)
-
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
-				t.Errorf("body = %q, want substr %q", rec.Body.String(), tc.wantSubstr)
-			}
-			if tc.wantRegistered && mockReg != nil {
-				if len(mockReg.registerCalls) != 1 {
-					t.Errorf("registerCalls = %d, want 1", len(mockReg.registerCalls))
-				}
-			}
-			if tc.wantWidgetCall {
-				calls := disp.WidgetCalls()
-				if len(calls) != 1 {
-					t.Errorf("WidgetCalls = %d, want 1", len(calls))
-				}
-			}
-		})
-	}
-}
-
-func TestSyncBuildWidget_Unit(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name            string
-		useNilServer    bool
-		useMockReg      bool
-		useInserter     bool
-		inserterErr     error
-		buildID         string
-		banner          string
-		vanadisStatus   int
-		vanadisStatuses []int
-		vanadisBody     string
-		wantErr         bool
-		wantQueued      int
-	}{
-		{
-			name:         "nil server returns clean nil",
-			useNilServer: true,
-			buildID:      "build-123",
-		},
-		{
-			name:    "empty buildID returns clean nil",
-			buildID: "",
-		},
-		{
-			name:        "riverClient configured queues WidgetSyncArgs without inline HTTP dispatch",
-			useMockReg:  true,
-			useInserter: true,
-			buildID:     "build-101",
-			banner:      "Build running",
-			wantQueued:  1,
-		},
-		{
-			name:        "riverClient insert error returns error",
-			useMockReg:  true,
-			useInserter: true,
-			inserterErr: errors.New("db insert failure"),
-			buildID:     "build-101",
-			wantErr:     true,
-		},
-		{
-			name:       "non-Postgres registry fallback returns clean nil",
-			useMockReg: true,
-			buildID:    "build-102",
-			wantErr:    false,
-		},
-		{
-			name:          "Postgres registry calls vanadis build widget sync successfully",
-			buildID:       "build-103",
-			banner:        "Chunk 1 running",
-			vanadisStatus: http.StatusOK,
-			wantErr:       false,
-		},
-		{
-			name:            "Postgres registry retries transient 502 then 200 succeeds",
-			buildID:         "build-103-retry",
-			banner:          "Chunk 1 retried",
-			vanadisStatuses: []int{http.StatusBadGateway, http.StatusOK},
-			wantErr:         false,
-		},
-		{
-			name:          "Postgres registry returns error when vanadis fails",
-			buildID:       "build-104",
-			vanadisStatus: http.StatusInternalServerError,
-			wantErr:       true,
-		},
-		{
-			name:          "Postgres registry non-transient 400 error",
-			buildID:       "build-106",
-			vanadisStatus: http.StatusBadRequest,
-			wantErr:       true,
-		},
-		{
-			name:          "Postgres registry invalid json decode error",
-			buildID:       "build-105",
-			vanadisStatus: http.StatusOK,
-			vanadisBody:   `{invalid-json`,
-			wantErr:       true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			if tc.useNilServer {
-				var nilSrv *RouterServer
-				if err := nilSrv.SyncBuildWidget(ctx, tc.buildID, tc.banner); err != nil {
-					t.Fatalf("SyncBuildWidget nil server err = %v, want nil", err)
-				}
-				return
-			}
-
-			var reqIdx int
-			tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/chunks/sync-pr-widget" {
-					http.NotFound(w, r)
-					return
-				}
-				status := tc.vanadisStatus
-				if len(tc.vanadisStatuses) > 0 {
-					if reqIdx < len(tc.vanadisStatuses) {
-						status = tc.vanadisStatuses[reqIdx]
-					} else {
-						status = tc.vanadisStatuses[len(tc.vanadisStatuses)-1]
-					}
-				}
-				reqIdx++
-				if status != 0 && status != http.StatusOK {
-					w.WriteHeader(status)
-					_, _ = w.Write([]byte(`{"error":"vanadis build error"}`))
-					return
-				}
-				if tc.vanadisBody != "" {
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte(tc.vanadisBody))
-					return
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"matched": true, "build_id": tc.buildID})
-			}))
-			t.Cleanup(tsVanadis.Close)
-
-			mockDisp := &mockOutboundDispatcher{}
-			var reg PRRegistryUpdater
-			if tc.useMockReg {
-				reg = &mockPRRegistry{resolveBranch: "feat/mock"}
-			} else {
-				pool := &mockVanadisPgxPool{}
-				pgReg := NewPostgresPRRegistry(pool, WithVanadisClient(tsVanadis.URL, tsVanadis.Client()))
-				pgReg.vanadisRetryDelay = 0
-				reg = pgReg
-			}
-
-			srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), reg, mockDisp)
-			var inserter *mockRiverInserter
-			if tc.useInserter {
-				inserter = &mockRiverInserter{err: tc.inserterErr}
-				srv.SetRiverClient(inserter)
-			}
-
-			err := srv.SyncBuildWidget(ctx, tc.buildID, tc.banner)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("SyncBuildWidget err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantQueued > 0 {
-				if inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued {
-					t.Fatalf("expected %d queued widget sync jobs, got %+v", tc.wantQueued, inserter)
-				}
-				lastJob := inserter.insertedWidgetSyncJobs[len(inserter.insertedWidgetSyncJobs)-1]
-				if lastJob.BuildID != tc.buildID || lastJob.Banner != tc.banner {
-					t.Errorf("queued job mismatch: got %+v, want BuildID=%q Banner=%q", lastJob, tc.buildID, tc.banner)
-				}
-			}
-		})
-	}
-}
-
-func TestRouterServer_HandleInternalWidgetSync(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		body          string
-		useInserter   bool
-		inserterErr   error
-		vanadisStatus int
-		wantStatus    int
-		wantSubstr    string
-		wantQueued    int
-	}{
-		{
-			name:       "InvalidJSON",
-			body:       `{not-valid-json`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "invalid json payload",
-		},
-		{
-			name:       "MissingAllFieldsReturns400",
-			body:       `{}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "build_id or repo and pr_number are required",
-		},
-		{
-			name:       "EmptyBuildIDAndEmptyRepoReturns400",
-			body:       `{"build_id":"","repo":"","pr_number":0}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "build_id or repo and pr_number are required",
-		},
-		{
-			name:       "RepoWithoutPRNumberReturns400",
-			body:       `{"repo":"azylman/aerial","pr_number":0}`,
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "build_id or repo and pr_number are required",
-		},
-		{
-			name:        "ValidBuildIDWithRiver",
-			body:        `{"build_id":"build-777","banner":"Building chunk 0"}`,
-			useInserter: true,
-			wantStatus:  http.StatusAccepted,
-			wantSubstr:  `"status":"accepted"`,
-			wantQueued:  1,
-		},
-		{
-			name:        "ValidRepoAndPRNumberWithRiver",
-			body:        `{"repo":"azylman/aerial","pr_number":202}`,
-			useInserter: true,
-			wantStatus:  http.StatusAccepted,
-			wantSubstr:  `"status":"accepted"`,
-			wantQueued:  1,
-		},
-		{
-			name:        "RiverInsertErrorOnBuildIDReturns500",
-			body:        `{"build_id":"build-888"}`,
-			useInserter: true,
-			inserterErr: errors.New("river pool full"),
-			wantStatus:  http.StatusInternalServerError,
-			wantSubstr:  "failed to sync build widget",
-		},
-		{
-			name:        "RiverInsertErrorOnPRReturns500",
-			body:        `{"repo":"azylman/aerial","pr_number":203}`,
-			useInserter: true,
-			inserterErr: errors.New("river pool full"),
-			wantStatus:  http.StatusInternalServerError,
-			wantSubstr:  "failed to sync pr widget",
-		},
-		{
-			name:          "ValidBuildIDDirectWithoutRiver",
-			body:          `{"build_id":"build-999","banner":"Direct sync"}`,
-			vanadisStatus: http.StatusOK,
-			wantStatus:    http.StatusAccepted,
-			wantSubstr:    `"build_id":"build-999"`,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/chunks/sync-pr-widget" {
-					http.NotFound(w, r)
-					return
-				}
-				if tc.vanadisStatus != 0 && tc.vanadisStatus != http.StatusOK {
-					w.WriteHeader(tc.vanadisStatus)
-					_, _ = w.Write([]byte(`{"error":"vanadis error"}`))
-					return
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"matched": true, "build_id": "build-999"})
-			}))
-			t.Cleanup(tsVanadis.Close)
-
-			pool := &mockVanadisPgxPool{}
-			reg := NewPostgresPRRegistry(pool, WithVanadisClient(tsVanadis.URL, tsVanadis.Client()))
-			reg.vanadisRetryDelay = 0
-			disp := &mockOutboundDispatcher{}
-
-			srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), reg, disp)
-			var inserter *mockRiverInserter
-			if tc.useInserter {
-				inserter = &mockRiverInserter{err: tc.inserterErr}
-				srv.SetRiverClient(inserter)
-			}
-
-			routes := srv.Routes()
-			rec := doHTTPRequest(routes, http.MethodPost, "/internal/widget/sync", strings.NewReader(tc.body), nil)
-
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
-				t.Errorf("body = %q, want substr %q", rec.Body.String(), tc.wantSubstr)
-			}
-			if tc.wantQueued > 0 && (inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued) {
-				t.Errorf("expected %d queued jobs, got %+v", tc.wantQueued, inserter)
-			}
-		})
-	}
-}
-
-func TestProcessMergeConflict_Table(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name          string
-		nilServer     bool
-		isEnqueue     bool
-		hasRiver      bool
-		hasDispatcher bool
-		args          MergeConflictArgs
-		wantEnqueued  int
-		wantPrompts   int
-	}{
-		{
-			name:      "ProcessMergeConflict nil server",
-			nilServer: true,
-		},
-		{
-			name:      "enqueueMergeConflict nil server",
-			nilServer: true,
-			isEnqueue: true,
-		},
-		{
-			name:          "ProcessMergeConflict valid dispatch",
-			hasDispatcher: true,
-			args: MergeConflictArgs{
-				Repo:     "azylman/aerial",
-				Branch:   "feat/conflict",
-				HeadSHA:  "sha-conflict-1",
-				PRNumber: 543,
-				TargetID: "1555405874565091380",
-			},
-			wantPrompts: 1,
-		},
-		{
-			name:      "enqueueMergeConflict with river client enqueues",
-			isEnqueue: true,
-			hasRiver:  true,
-			args: MergeConflictArgs{
-				Repo:     "aerial",
-				Branch:   "feat/conflict",
-				HeadSHA:  "sha-conflict-2",
-				PRNumber: 544,
-				TargetID: "1555405874565091380",
-			},
-			wantEnqueued: 1,
-		},
-		{
-			name:          "enqueueMergeConflict without river client dispatches directly",
-			isEnqueue:     true,
-			hasDispatcher: true,
-			args: MergeConflictArgs{
-				Repo:     "azylman/aerial",
-				Branch:   "feat/conflict",
-				HeadSHA:  "sha-conflict-3",
-				PRNumber: 545,
-				TargetID: "1555405874565091380",
-			},
-			wantPrompts: 1,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			disp := &mockOutboundDispatcher{}
-			river := &mockRiverInserter{}
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = newTestRouter(Config{}, nil, nil, disp)
-				if tc.hasRiver {
-					srv.SetRiverClient(river)
-				}
-			}
-
-			var err error
-			if tc.isEnqueue {
-				err = srv.enqueueMergeConflict(ctx, tc.args)
-			} else {
-				err = srv.ProcessMergeConflict(ctx, tc.args)
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			if tc.hasRiver {
-				if len(river.insertedConflictJobs) != tc.wantEnqueued {
-					t.Errorf("insertedConflictJobs = %d, want %d", len(river.insertedConflictJobs), tc.wantEnqueued)
-				}
-			}
-			if tc.hasDispatcher {
-				if len(disp.DispatchCalls()) != tc.wantPrompts {
-					t.Errorf("DispatchCalls = %d, want %d", len(disp.DispatchCalls()), tc.wantPrompts)
-				}
-			}
-		})
-	}
-}
-
-func TestSetupRiverWorkerPool(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name        string
-		postgresURL string
-		wantErr     bool
-		wantNilPool bool
-	}{
-		{
-			name:        "empty postgres URL returns nil pool without error",
-			postgresURL: "",
-			wantNilPool: true,
-		},
-		{
-			name:        "invalid postgres URL returns error",
-			postgresURL: "postgres://%gh:invalid",
-			wantErr:     true,
-			wantNilPool: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
-			pool, rc, err := setupRiverWorkerPool(ctx, srv, Config{PostgresURL: tc.postgresURL})
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("setupRiverWorkerPool() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantNilPool && pool != nil {
-				t.Errorf("expected nil pool, got %v", pool)
-			}
-			if pool != nil {
-				defer pool.Close()
-			}
-			if rc != nil {
-				defer rc.Stop(context.Background())
-			}
-		})
-	}
-}
-
-type fixedConfigSource struct{ cfg Config }
-
-func (f *fixedConfigSource) Current() *Config { return &f.cfg }
-
-func fixedConfig(cfg Config) ConfigSource { return &fixedConfigSource{cfg: cfg} }
-
-func TestHasMetadataVanadisChunkID(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		input    string
-		expected bool
-	}{
-		{name: "empty string", input: "", expected: false},
-		{name: "whitespace only", input: "   ", expected: false},
-		{name: "invalid json", input: "{invalid", expected: false},
-		{name: "valid json without field", input: `{"foo":"bar"}`, expected: false},
-		{name: "valid json with empty chunk id", input: `{"vanadis_chunk_id":""}`, expected: false},
-		{name: "valid json with whitespace chunk id", input: `{"vanadis_chunk_id":"   "}`, expected: false},
-		{name: "valid json with valid chunk id", input: `{"vanadis_chunk_id":"chunk-superseded"}`, expected: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := hasMetadataVanadisChunkID(tc.input)
-			if got != tc.expected {
-				t.Errorf("hasMetadataVanadisChunkID(%q) = %v, want %v", tc.input, got, tc.expected)
-			}
-		})
+		}
 	}
 }
