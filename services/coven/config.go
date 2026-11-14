@@ -16,15 +16,6 @@ const DefaultConfigPath = "/config/coven.yaml"
 // DefaultPort is the fallback port when unspecified.
 const DefaultPort = "4008"
 
-// DefaultBrainURL is the fallback internal brain HTTP base URL.
-const DefaultBrainURL = "http://eri.aerial"
-
-// DefaultBrainLLMURL is the fallback brain LLM proxy URL.
-const DefaultBrainLLMURL = "http://eri.aerial/internal/llm"
-
-// DefaultOllamaURL is the fallback Ollama API base URL.
-const DefaultOllamaURL = "http://ollama:11434"
-
 // DefaultOllamaModel is the default embedding model.
 const DefaultOllamaModel = "all-minilm"
 
@@ -42,9 +33,6 @@ const DefaultConfigRepoOwner = "azylman"
 
 // DefaultConfigRepoName is the default repository name of the configuration repository.
 const DefaultConfigRepoName = "aerial-config"
-
-// DefaultBrainPRRegisterURL is the default internal brain PR registration endpoint.
-const DefaultBrainPRRegisterURL = "http://synapse.aerial/internal/pr/register"
 
 var systemChannelIDRegex = regexp.MustCompile(`^[0-9]{17,20}$`)
 
@@ -191,7 +179,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	if !systemChannelIDRegex.MatchString(systemChannelID) {
 		systemChannelID = ""
 	}
-	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL, "nats://nats.aerial:4222")
+	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL)
 
 	return &Config{
 		Port:               port,

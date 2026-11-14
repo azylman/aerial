@@ -162,17 +162,14 @@ type SQLStore struct {
 	brainToken string
 }
 
-// NewSQLStore creates a new SQLStore instance using default Brain URL.
+// NewSQLStore creates a new SQLStore instance using an empty Brain URL.
 func NewSQLStore(db DBTX) *SQLStore {
-	return NewSQLStoreWithBrainURL(db, DefaultBrainURL, nil)
+	return NewSQLStoreWithBrainURL(db, "", nil)
 }
 
 // NewSQLStoreWithBrainURL creates a new SQLStore instance with custom Brain URL and HTTP client.
 func NewSQLStoreWithBrainURL(db DBTX, brainURL string, client *http.Client) *SQLStore {
 	cleanURL := strings.TrimRight(strings.TrimSpace(brainURL), "/")
-	if cleanURL == "" {
-		cleanURL = DefaultBrainURL
-	}
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
@@ -186,9 +183,6 @@ func NewSQLStoreWithBrainURL(db DBTX, brainURL string, client *http.Client) *SQL
 // SetBrainURL sets the Brain URL on an existing SQLStore.
 func (s *SQLStore) SetBrainURL(brainURL string) {
 	cleanURL := strings.TrimRight(strings.TrimSpace(brainURL), "/")
-	if cleanURL == "" {
-		cleanURL = DefaultBrainURL
-	}
 	s.brainURL = cleanURL
 }
 
@@ -203,7 +197,7 @@ func (s *SQLStore) getBrainURL() string {
 	if s != nil && s.brainURL != "" {
 		return s.brainURL
 	}
-	return DefaultBrainURL
+	return ""
 }
 
 func (s *SQLStore) getHTTPClient() *http.Client {

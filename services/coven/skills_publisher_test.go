@@ -934,12 +934,15 @@ func TestGitHubSkillPublisher_NotifyShortFriction(t *testing.T) {
 		name       string
 		channelID  string
 		content    string
+		brainURL   string
 		respStatus int
 		clientErr  bool
 		wantErr    bool
+		errSubstr  string
 	}{
 		{name: "EmptyChannelIDNoop", channelID: "", content: "alert", wantErr: false},
 		{name: "EmptyContentNoop", channelID: "ch-1", content: "   ", wantErr: false},
+		{name: "UnconfiguredBrainURLFails", channelID: "ch-1", content: "alert", brainURL: "   ", wantErr: true, errSubstr: "brain URL is not configured"},
 		{name: "Success200", channelID: "ch-1", content: "alert", respStatus: http.StatusOK, wantErr: false},
 		{name: "ServerError500", channelID: "ch-1", content: "alert", respStatus: http.StatusInternalServerError, wantErr: true},
 		{name: "ClientError", channelID: "ch-1", content: "alert", clientErr: true, wantErr: true},
@@ -955,7 +958,9 @@ func TestGitHubSkillPublisher_NotifyShortFriction(t *testing.T) {
 			defer server.Close()
 
 			targetURL := server.URL
-			if tc.clientErr {
+			if tc.brainURL != "" {
+				targetURL = tc.brainURL
+			} else if tc.clientErr {
 				targetURL = "http://127.0.0.1:0/bad"
 			}
 
@@ -968,6 +973,11 @@ func TestGitHubSkillPublisher_NotifyShortFriction(t *testing.T) {
 			err := p.NotifyShortFriction(ctx, tc.content)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("NotifyShortFriction() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr && tc.errSubstr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
+				}
 			}
 		})
 	}

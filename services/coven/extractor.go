@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -67,10 +68,10 @@ func HTTPBrainLLMClient(brainLLMURL string, httpClient *http.Client) LLMClientFu
 	// eri's /internal/llm is internal, so traceparent is propagated and its span joins ours.
 	httpClient = tracing.Client(httpClient)
 	cleanURL := strings.TrimSpace(brainLLMURL)
-	if cleanURL == "" {
-		cleanURL = DefaultBrainLLMURL
-	}
 	return func(ctx context.Context, prompt string) (string, error) {
+		if cleanURL == "" {
+			return "", errors.New("brain LLM URL is not configured")
+		}
 		reqBody, err := json.Marshal(brainLLMRequest{Prompt: prompt})
 		if err != nil {
 			return "", fmt.Errorf("failed to marshal brain LLM request: %w", err)
