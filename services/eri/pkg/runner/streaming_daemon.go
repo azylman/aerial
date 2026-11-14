@@ -47,6 +47,10 @@ type ToolCall struct {
 	Command string
 	// Subagent marks calls that spawn a subagent (Claude Agent/Task, agy invoke_subagent).
 	Subagent bool
+	// MCPServer and MCPTool name the MCP server and tool an MCP call targets (agy's
+	// call_mcp_tool keeps Name "call_mcp_tool"). Both are empty for non-MCP tools.
+	MCPServer string
+	MCPTool   string
 }
 
 // StepAwareSink is an optional interface that TurnSinks can implement
@@ -930,6 +934,8 @@ func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map
 		hasCompletedRecord bool
 		isToolEnd          = f.isToolEnd
 		isNewToolStart     bool
+		mcpCallServer      string
+		mcpCallTool        string
 	)
 
 	if f.isToolStart {
@@ -937,6 +943,7 @@ func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map
 		canonicalTool, mcpServer = ExtractMCPToolInfo(f.toolName, f.toolParams)
 		activatedSkill, hasSkill = extractActivatedSkill(f.toolName, f.toolParams, f.cmdName)
 		isNewToolStart = d.recordToolStart(f.stepIdx, f.hasStepIdx, f.toolCall(canonicalTool), mcpServer)
+		mcpCallServer, mcpCallTool = mcpCallTarget(canonicalTool, mcpServer)
 	} else if f.isToolEnd || (f.hasStepIdx && f.toolEndStatus != "") {
 		completedRecord, hasCompletedRecord, isToolEnd = d.recordToolEnd(f)
 	}
@@ -951,6 +958,7 @@ func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map
 		}
 		call := f.toolCall(toolForSink)
 		call.Command = cmdForSink
+		call.MCPServer, call.MCPTool = mcpCallServer, mcpCallTool
 		activeTurn.Sink.OnToolCall(call)
 	}
 	if isNewToolStart && hasSkill {
@@ -1299,6 +1307,7 @@ func (d *StreamingDaemon) handleClaudeAssistantEvent(activeTurn *TurnContext, ra
 
 		call := ToolCall{ID: toolID, ParentID: parentToolUseID, Name: canonicalTool, Subagent: isClaudeSubagentTool(toolName)}
 		isNewStart := d.recordToolStart(stepIdx, true, call, mcpServer)
+		call.MCPServer, call.MCPTool = mcpCallTarget(canonicalTool, mcpServer)
 		if isNewStart && activeTurn.Sink != nil {
 			toolForSink := canonicalTool
 			cmdForSink := cmdDetail

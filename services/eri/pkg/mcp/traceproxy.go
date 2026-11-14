@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -31,6 +32,8 @@ const (
 	maxProxyRequestBytes   = 32 << 20
 	maxAnnouncementBytes   = 64 << 10
 	attrMCPServer          = attribute.Key("aerial.mcp.server")
+	attrGenAIToolCallID    = attribute.Key("gen_ai.tool.call.id")
+	claudeToolUseIDMetaKey = "claudecode/toolUseId"
 	attrHTTPResponseStatus = attribute.Key("http.response.status_code")
 	mcpMethodToolsCall     = "tools/call"
 	traceProxyTracerScope  = "github.com/azylman/aerial/services/eri/pkg/mcp"
@@ -43,13 +46,14 @@ type UpstreamResolver interface {
 	Upstream(target, server string) (string, bool)
 }
 
-// ActiveTurns resolves daemons to the span of the turn they are executing
-// (runner.ActiveTurnRegistry).
+// ActiveTurns resolves daemons to the span of the turn they are executing and to the
+// execute_tool span behind an MCP tool call (runner.ActiveTurnRegistry).
 type ActiveTurns interface {
 	Get(daemonID string) (trace.SpanContext, bool)
 	Target(daemonID string) (string, bool)
 	DaemonByConversation(conversationID string) (daemonID, target string, ok bool)
-	SoleTurnInTarget(target string) (trace.SpanContext, bool)
+	SoleDaemonInTarget(target string) (daemonID string, ok bool)
+	ToolSpan(ctx context.Context, daemonID, server, tool, callID string) (trace.SpanContext, bool)
 }
 
 type announcement struct {
@@ -211,10 +215,13 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 	// Methodless requests (responses to server pings, empty POSTs, the standalone SSE GET)
 	// are client housekeeping, not agent work, so they never join a turn.
 	if method != "" {
-		if sc, ok := p.owner(target, server, r.Header.Get(env.DaemonHeader), method, tool); ok {
-			ctx, span = p.tracer.Start(trace.ContextWithSpanContext(ctx, sc), "mcp "+server+" "+method,
-				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithAttributes(append(attrs, attrMCPServer.String(server))...))
+		if parent, callID, ok := p.parentSpan(ctx, target, server, r.Header.Get(env.DaemonHeader), method, tool, body); ok {
+			attrs = append(attrs, attrMCPServer.String(server))
+			if callID != "" {
+				attrs = append(attrs, attrGenAIToolCallID.String(callID))
+			}
+			ctx, span = p.tracer.Start(trace.ContextWithSpanContext(ctx, parent), "mcp "+server+" "+method,
+				trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
 			defer span.End()
 		}
 	}
@@ -253,22 +260,63 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 	rp.ServeHTTP(w, out)
 }
 
-// owner resolves the span of the turn behind a proxied request. Claude Code names its daemon
-// in X-Eri-Daemon. agy sends no identity, so a tools/call consumes the oldest announcement its
-// hook made for (target, server, tool); otherwise the request belongs to the target's turn
-// only when exactly one daemon in the target is executing one.
-func (p *TraceProxy) owner(target, server, daemonID, method, tool string) (trace.SpanContext, bool) {
-	if daemonID != "" {
-		return p.turns.Get(daemonID)
+// parentSpan resolves the span a proxied request's client span starts under: for tools/call,
+// the execute_tool span of the tool call that made it (claimed from the owning daemon's turn,
+// waiting briefly when the engine has not announced the tool yet), otherwise or when no span
+// matches, the owning turn's root span. callID is Claude Code's tool_use ID, when sent.
+func (p *TraceProxy) parentSpan(ctx context.Context, target, server, daemonHeader, method, tool string, body []byte) (parent trace.SpanContext, callID string, ok bool) {
+	daemonID, turnSpan, ok := p.owner(target, server, daemonHeader, method, tool)
+	if !ok {
+		return trace.SpanContext{}, "", false
 	}
-	if method == mcpMethodToolsCall && tool != "" {
+	if method != mcpMethodToolsCall {
+		return turnSpan, "", true
+	}
+	callID = mcpToolCallID(body)
+	if sc, ok := p.turns.ToolSpan(ctx, daemonID, server, tool, callID); ok {
+		return sc, callID, true
+	}
+	return turnSpan, callID, true
+}
+
+// owner resolves the daemon behind a proxied request and its turn span. Claude Code names its
+// daemon in X-Eri-Daemon. agy sends no identity, so a tools/call consumes the oldest
+// announcement its hook made for (target, server, tool); otherwise the request belongs to the
+// target's turn only when exactly one daemon in the target is executing one.
+func (p *TraceProxy) owner(target, server, daemonID, method, tool string) (string, trace.SpanContext, bool) {
+	if daemonID == "" && method == mcpMethodToolsCall && tool != "" {
 		if announced, ok := p.announcements.Take(target, server, tool, p.now()); ok {
 			if sc, ok := p.turns.Get(announced); ok {
-				return sc, true
+				return announced, sc, true
 			}
 		}
 	}
-	return p.turns.SoleTurnInTarget(target)
+	if daemonID == "" {
+		sole, ok := p.turns.SoleDaemonInTarget(target)
+		if !ok {
+			return "", trace.SpanContext{}, false
+		}
+		daemonID = sole
+	}
+	sc, ok := p.turns.Get(daemonID)
+	return daemonID, sc, ok
+}
+
+// mcpToolCallID returns the tool_use ID Claude Code sends in a tools/call request's
+// params._meta, or "" when absent.
+func mcpToolCallID(body []byte) string {
+	var req struct {
+		Params struct {
+			Meta map[string]any `json:"_meta"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(body, &req) != nil {
+		return ""
+	}
+	if id, ok := req.Params.Meta[claudeToolUseIDMetaKey].(string); ok {
+		return id
+	}
+	return ""
 }
 
 func mcpMethodAndTool(attrs []attribute.KeyValue) (method, tool string) {
