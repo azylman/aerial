@@ -193,7 +193,7 @@ type postgresPRRegistryUnitCase struct {
 func postgresPRRegistryTransitionCases() []postgresPRRegistryUnitCase {
 	return []postgresPRRegistryUnitCase{
 		// Single-row transitions: UpdatePRMerged
-		{name: "UpdatePRMerged success", op: "UpdatePRMerged", repo: "azylman/aerial", prNumber: 42, sha: "merge123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END"},
+		{name: "UpdatePRMerged success", op: "UpdatePRMerged", repo: "azylman/aerial", prNumber: 42, sha: "merge123", targetIDReturn: "100000000000000001", wantTarget: "100000000000000001", wantSQLSubstr: "CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END"},
 		{name: "UpdatePRMerged not found", op: "UpdatePRMerged", repo: "azylman/aerial", prNumber: 42, sha: "merge123", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
 		{name: "UpdatePRMerged query error", op: "UpdatePRMerged", repo: "azylman/aerial", prNumber: 42, sha: "merge123", mockSelectErr: errors.New("db error"), wantErr: true},
 		{name: "UpdatePRMerged nil pool guard", op: "UpdatePRMerged", nilPool: true, repo: "azylman/aerial", prNumber: 42, sha: "merge123"},
@@ -201,17 +201,17 @@ func postgresPRRegistryTransitionCases() []postgresPRRegistryUnitCase {
 		{name: "UpdatePRMerged prNumber zero guard", op: "UpdatePRMerged", repo: "azylman/aerial", prNumber: 0},
 
 		// UpdatePRClosedUnmerged
-		{name: "UpdatePRClosedUnmerged success", op: "UpdatePRClosedUnmerged", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380"},
+		{name: "UpdatePRClosedUnmerged success", op: "UpdatePRClosedUnmerged", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "100000000000000001", wantTarget: "100000000000000001"},
 		{name: "UpdatePRClosedUnmerged not found", op: "UpdatePRClosedUnmerged", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
 		{name: "UpdatePRClosedUnmerged db error", op: "UpdatePRClosedUnmerged", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
 
 		// UpdatePRSync
-		{name: "UpdatePRSync success", op: "UpdatePRSync", repo: "azylman/aerial", prNumber: 42, sha: "head123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "(COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks'"},
+		{name: "UpdatePRSync success", op: "UpdatePRSync", repo: "azylman/aerial", prNumber: 42, sha: "head123", targetIDReturn: "100000000000000001", wantTarget: "100000000000000001", wantSQLSubstr: "(COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks'"},
 		{name: "UpdatePRSync not found", op: "UpdatePRSync", repo: "azylman/aerial", prNumber: 42, sha: "head123", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
 		{name: "UpdatePRSync db error", op: "UpdatePRSync", repo: "azylman/aerial", prNumber: 42, sha: "head123", mockSelectErr: errors.New("db error"), wantErr: true},
 
 		// BackfillPushMergeSHA
-		{name: "BackfillPushMergeSHA success", op: "BackfillPushMergeSHA", repo: "azylman/aerial", prNumber: 42, sha: "merge123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END"},
+		{name: "BackfillPushMergeSHA success", op: "BackfillPushMergeSHA", repo: "azylman/aerial", prNumber: 42, sha: "merge123", targetIDReturn: "100000000000000001", wantTarget: "100000000000000001", wantSQLSubstr: "CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END"},
 		{name: "BackfillPushMergeSHA not found", op: "BackfillPushMergeSHA", repo: "azylman/aerial", prNumber: 42, sha: "merge123", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
 		{name: "BackfillPushMergeSHA db error", op: "BackfillPushMergeSHA", repo: "azylman/aerial", prNumber: 42, sha: "merge123", mockSelectErr: errors.New("db error"), wantErr: true},
 
@@ -236,41 +236,41 @@ func postgresPRRegistryTransitionCases() []postgresPRRegistryUnitCase {
 		{name: "RecordPRCheckStatus empty checkState guard", op: "RecordPRCheckStatus", repo: "azylman/aerial", prNumber: 42, sha: "head123", jobName: "Verify Codebase", targetID: ""},
 
 		// AtomicTransitionCIFailed
-		{name: "AtomicTransitionCIFailed success", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('ci_failed', 'merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed')"},
+		{name: "AtomicTransitionCIFailed success", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "100000000000000001", wantTarget: "100000000000000001", wantUpdated: true, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('ci_failed', 'merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed')"},
 		{name: "AtomicTransitionCIFailed not found", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: "", wantUpdated: false},
 		{name: "AtomicTransitionCIFailed db error", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
 		{name: "AtomicTransitionCIFailed empty repo guard", op: "AtomicTransitionCIFailed", repo: "", prNumber: 42},
 		{name: "AtomicTransitionCIFailed prNumber zero guard", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 0},
 
 		// AtomicTransitionConflict
-		{name: "AtomicTransitionConflict success", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('conflict', 'merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed')"},
+		{name: "AtomicTransitionConflict success", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "100000000000000001", wantTarget: "100000000000000001", wantUpdated: true, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('conflict', 'merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed')"},
 		{name: "AtomicTransitionConflict not found", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: "", wantUpdated: false},
 		{name: "AtomicTransitionConflict db error", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
 		{name: "AtomicTransitionConflict empty repo guard", op: "AtomicTransitionConflict", repo: "", prNumber: 42},
 		{name: "AtomicTransitionConflict prNumber zero guard", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 0},
 
 		// AtomicTransitionDeployFailed
-		{name: "AtomicTransitionDeployFailed success", op: "AtomicTransitionDeployFailed", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true},
+		{name: "AtomicTransitionDeployFailed success", op: "AtomicTransitionDeployFailed", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "100000000000000001", wantTarget: "100000000000000001", wantUpdated: true},
 		{name: "AtomicTransitionDeployFailed not found", op: "AtomicTransitionDeployFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: "", wantUpdated: false},
 		{name: "AtomicTransitionDeployFailed db error", op: "AtomicTransitionDeployFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
 		{name: "AtomicTransitionDeployFailed empty repo guard", op: "AtomicTransitionDeployFailed", repo: "", prNumber: 42},
 		{name: "AtomicTransitionDeployFailed prNumber zero guard", op: "AtomicTransitionDeployFailed", repo: "azylman/aerial", prNumber: 0},
 
 		// AtomicTransitionCIFailedByHeadSHA
-		{name: "AtomicTransitionCIFailedByHeadSHA success", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "sha123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantPRNum: 42, wantUpdated: true, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('ci_failed', 'merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed')"},
+		{name: "AtomicTransitionCIFailedByHeadSHA success", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "sha123", targetIDReturn: "100000000000000001", wantTarget: "100000000000000001", wantPRNum: 42, wantUpdated: true, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('ci_failed', 'merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed')"},
 		{name: "AtomicTransitionCIFailedByHeadSHA not found", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "sha123", mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
 		{name: "AtomicTransitionCIFailedByHeadSHA db error", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "sha123", mockSelectErr: errors.New("db error"), wantErr: true},
 		{name: "AtomicTransitionCIFailedByHeadSHA empty sha guard", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: ""},
 		{name: "AtomicTransitionCIFailedByHeadSHA zero sha guard", op: "AtomicTransitionCIFailedByHeadSHA", repo: "azylman/aerial", sha: "0000000000000000000000000000000000000000"},
 
 		// ResolvePRBySHA
-		{name: "ResolvePRBySHA success", op: "ResolvePRBySHA", repo: "azylman/aerial", sha: "sha123", wantPRNum: 42, branchReturn: "feat/sha", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380"},
+		{name: "ResolvePRBySHA success", op: "ResolvePRBySHA", repo: "azylman/aerial", sha: "sha123", wantPRNum: 42, branchReturn: "feat/sha", targetIDReturn: "100000000000000001", wantTarget: "100000000000000001"},
 		{name: "ResolvePRBySHA not found", op: "ResolvePRBySHA", repo: "azylman/aerial", sha: "sha123", mockSelectErr: pgx.ErrNoRows, wantPRNum: 0},
 		{name: "ResolvePRBySHA db error", op: "ResolvePRBySHA", repo: "azylman/aerial", sha: "sha123", mockSelectErr: errors.New("db error"), wantErr: true},
 		{name: "ResolvePRBySHA zero sha guard", op: "ResolvePRBySHA", repo: "azylman/aerial", sha: "0000000000000000000000000000000000000000", wantPRNum: 0},
 
 		// ResolvePRByNumber
-		{name: "ResolvePRByNumber success", op: "ResolvePRByNumber", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", branchReturn: "feat/by-num", mergeSHAReturn: "merge123", wantTarget: "1555405874565091380"},
+		{name: "ResolvePRByNumber success", op: "ResolvePRByNumber", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "100000000000000001", branchReturn: "feat/by-num", mergeSHAReturn: "merge123", wantTarget: "100000000000000001"},
 		{name: "ResolvePRByNumber not found", op: "ResolvePRByNumber", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
 		{name: "ResolvePRByNumber db error", op: "ResolvePRByNumber", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
 		{name: "ResolvePRByNumber zero pr guard", op: "ResolvePRByNumber", repo: "azylman/aerial", prNumber: 0, wantTarget: ""},
@@ -279,7 +279,7 @@ func postgresPRRegistryTransitionCases() []postgresPRRegistryUnitCase {
 		{name: "TransitionDeploying empty jobs guard", op: "TransitionDeploying", repo: "azylman/aerial", prNumber: 42, jobs: nil, wantTarget: ""},
 		{name: "TransitionDeploying empty repo guard", op: "TransitionDeploying", repo: "", prNumber: 42, jobs: []string{"brain"}},
 		{name: "TransitionDeploying zero prNumber guard", op: "TransitionDeploying", repo: "azylman/aerial", prNumber: 0, jobs: []string{"brain"}},
-		{name: "TransitionDeploying success", op: "TransitionDeploying", repo: "azylman/aerial", prNumber: 42, jobs: []string{"brain", "synapse"}, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380"},
+		{name: "TransitionDeploying success", op: "TransitionDeploying", repo: "azylman/aerial", prNumber: 42, jobs: []string{"brain", "synapse"}, targetIDReturn: "100000000000000001", wantTarget: "100000000000000001"},
 		{name: "TransitionDeploying db error", op: "TransitionDeploying", repo: "azylman/aerial", prNumber: 42, jobs: []string{"brain"}, mockSelectErr: errors.New("db error"), wantErr: true},
 
 		// ListDeployingPRs
@@ -297,10 +297,10 @@ func postgresPRRegistryJobKustCases() []postgresPRRegistryUnitCase {
 		{name: "AtomicTransitionDeployedByJob begin tx error", op: "AtomicTransitionDeployedByJob", jobName: "brain", mockBeginErr: errors.New("begin err"), wantErr: true},
 		{name: "AtomicTransitionDeployedByJob select ErrNoRows", op: "AtomicTransitionDeployedByJob", jobName: "brain", mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
 		{name: "AtomicTransitionDeployedByJob select error", op: "AtomicTransitionDeployedByJob", jobName: "brain", mockSelectErr: errors.New("select err"), wantErr: true},
-		{name: "AtomicTransitionDeployedByJob remaining jobs update success", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", repo: "azylman/aerial", targetIDReturn: "1555405874565091380", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, wantUpdated: false, wantTarget: "1555405874565091380", wantPRNum: 42},
+		{name: "AtomicTransitionDeployedByJob remaining jobs update success", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", repo: "azylman/aerial", targetIDReturn: "100000000000000001", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, wantUpdated: false, wantTarget: "100000000000000001", wantPRNum: 42},
 		{name: "AtomicTransitionDeployedByJob remaining jobs update exec error", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, mockExecErr: errors.New("exec err"), wantErr: true},
 		{name: "AtomicTransitionDeployedByJob remaining jobs update commit error", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, mockCommitErr: errors.New("commit err"), wantErr: true},
-		{name: "AtomicTransitionDeployedByJob final job deployed RowsAffected 1", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", repo: "azylman/aerial", metaJSON: `{"jobs":["node-exporter"],"started_jobs":["node-exporter"]}`, targetIDReturn: "1555405874565091380", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "1555405874565091380", wantSQLSubstr: "metadata->'jobs' ? $1 AND metadata->'started_jobs' ? $1"},
+		{name: "AtomicTransitionDeployedByJob final job deployed RowsAffected 1", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", repo: "azylman/aerial", metaJSON: `{"jobs":["node-exporter"],"started_jobs":["node-exporter"]}`, targetIDReturn: "100000000000000001", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "100000000000000001", wantSQLSubstr: "metadata->'jobs' ? $1 AND metadata->'started_jobs' ? $1"},
 		{name: "AtomicTransitionDeployedByJob final job deployed RowsAffected 0", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, rowsAffected: 0, wantUpdated: false},
 		{name: "AtomicTransitionDeployedByJob final job exec error", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, mockExecErr: errors.New("exec err"), wantErr: true},
 		{name: "AtomicTransitionDeployedByJob final job commit error", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, rowsAffected: 1, mockCommitErr: errors.New("commit err"), wantErr: true},
@@ -318,8 +318,8 @@ func postgresPRRegistryJobKustCases() []postgresPRRegistryUnitCase {
 		{name: "AtomicTransitionDeployFailedByJob select ErrNoRows", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", mockSelectErr: pgx.ErrNoRows, wantUpdated: false, wantSQLSubstr: "deployed_jobs"},
 		{name: "AtomicTransitionDeployFailedByJob select error", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", mockSelectErr: errors.New("select err"), wantErr: true},
 		{name: "AtomicTransitionDeployFailedByJob exec error", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", mockExecErr: errors.New("exec err"), wantErr: true},
-		{name: "AtomicTransitionDeployFailedByJob RowsAffected 0", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", repo: "azylman/aerial", targetIDReturn: "1555405874565091380", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 0, wantUpdated: false, wantTarget: "1555405874565091380"},
-		{name: "AtomicTransitionDeployFailedByJob success", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", repo: "azylman/aerial", targetIDReturn: "1555405874565091380", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "1555405874565091380"},
+		{name: "AtomicTransitionDeployFailedByJob RowsAffected 0", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", repo: "azylman/aerial", targetIDReturn: "100000000000000001", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 0, wantUpdated: false, wantTarget: "100000000000000001"},
+		{name: "AtomicTransitionDeployFailedByJob success", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", repo: "azylman/aerial", targetIDReturn: "100000000000000001", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "100000000000000001"},
 
 		// EnsurePRRegistered
 		{name: "EnsurePRRegistered empty repo guard", op: "EnsurePRRegistered", repo: "", prNumber: 692, wantTarget: ""},
@@ -331,22 +331,22 @@ func postgresPRRegistryJobKustCases() []postgresPRRegistryUnitCase {
 		{name: "EnsurePRRegistered upsert exec error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, targetID: "1562162630997581946", mockExecErr: errors.New("upsert err"), wantErr: true},
 
 		// RegisterPR
-		{name: "RegisterPR nil pool guard", op: "RegisterPR", nilPool: true, repo: "azylman/aerial", prNumber: 42, targetID: "1555405874565091380", wantErr: true},
-		{name: "RegisterPR empty repo guard", op: "RegisterPR", repo: "", prNumber: 42, targetID: "1555405874565091380", wantErr: true},
-		{name: "RegisterPR zero pr guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 0, targetID: "1555405874565091380", wantErr: true},
-		{name: "RegisterPR empty branch guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, sha: "head123", targetID: "1555405874565091380", branchReturn: "", wantErr: true},
-		{name: "RegisterPR empty head_sha guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, sha: "", targetID: "1555405874565091380", branchReturn: "feat/foo", wantErr: true},
+		{name: "RegisterPR nil pool guard", op: "RegisterPR", nilPool: true, repo: "azylman/aerial", prNumber: 42, targetID: "100000000000000001", wantErr: true},
+		{name: "RegisterPR empty repo guard", op: "RegisterPR", repo: "", prNumber: 42, targetID: "100000000000000001", wantErr: true},
+		{name: "RegisterPR zero pr guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 0, targetID: "100000000000000001", wantErr: true},
+		{name: "RegisterPR empty branch guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, sha: "head123", targetID: "100000000000000001", branchReturn: "", wantErr: true},
+		{name: "RegisterPR empty head_sha guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, sha: "", targetID: "100000000000000001", branchReturn: "feat/foo", wantErr: true},
 		{name: "RegisterPR chunk query error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusInternalServerError, vanadisBody: `{"error":"internal"}`, wantErr: true},
 		{name: "RegisterPR chunk not found returns ErrVanadisChunkNotFound", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusNotFound, vanadisBody: `{"error":"not found"}`, wantErr: true},
 		{name: "RegisterPR chunk cancelled returns ErrVanadisChunkCancelled", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusConflict, vanadisBody: `{"error":"chunk or parent build is cancelled"}`, wantErr: true},
-		{name: "RegisterPR chunk resolves thread_id and upserts pr_registry", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"1555405874565091380"}`, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "ON CONFLICT (repo, pr_number)"},
+		{name: "RegisterPR chunk resolves thread_id and upserts pr_registry", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"100000000000000001"}`, targetIDReturn: "100000000000000001", wantTarget: "100000000000000001", wantSQLSubstr: "ON CONFLICT (repo, pr_number)"},
 		{name: "RegisterPR invalid targetID without chunk returns error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "invalid-target", wantErr: true},
 		{name: "RegisterPR empty targetID without chunk returns error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "", wantErr: true},
-		{name: "RegisterPR upsert exec error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "1555405874565091380", mockExecErr: errors.New("upsert err"), wantErr: true},
-		{name: "RegisterPR success direct targetID", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "INSERT INTO pr_registry"},
-		{name: "RegisterPR success discord prefixed targetID", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "discord-1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "INSERT INTO pr_registry"},
-		{name: "RegisterPR chunk overrides dispatch session key targetID", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "dispatch-8d23879c", jobName: "chunk-1", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"discord-1555405874565091380"}`, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "INSERT INTO pr_registry"},
-		{name: "RegisterPR chunk with invalid metadata JSON initializes map and upserts", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "1555405874565091380", jobName: "chunk-1", metaJSON: "{invalid", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"1555405874565091380"}`, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "INSERT INTO pr_registry"},
+		{name: "RegisterPR upsert exec error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "100000000000000001", mockExecErr: errors.New("upsert err"), wantErr: true},
+		{name: "RegisterPR success direct targetID", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "100000000000000001", wantTarget: "100000000000000001", wantSQLSubstr: "INSERT INTO pr_registry"},
+		{name: "RegisterPR success discord prefixed targetID", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "discord-100000000000000001", wantTarget: "100000000000000001", wantSQLSubstr: "INSERT INTO pr_registry"},
+		{name: "RegisterPR chunk overrides dispatch session key targetID", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "dispatch-8d23879c", jobName: "chunk-1", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"discord-100000000000000001"}`, targetIDReturn: "100000000000000001", wantTarget: "100000000000000001", wantSQLSubstr: "INSERT INTO pr_registry"},
+		{name: "RegisterPR chunk with invalid metadata JSON initializes map and upserts", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "100000000000000001", jobName: "chunk-1", metaJSON: "{invalid", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"100000000000000001"}`, targetIDReturn: "100000000000000001", wantTarget: "100000000000000001", wantSQLSubstr: "INSERT INTO pr_registry"},
 
 		// RecordExpectedJobs
 		{name: "RecordExpectedJobs empty repo guard", op: "RecordExpectedJobs", repo: "", prNumber: 42, jobs: []string{"coven"}, wantUpdated: false},
@@ -510,7 +510,7 @@ func scanMockPRRegistryRows(idx int, dest []any, tc postgresPRRegistryUnitCase) 
 		*dest[3].(*string) = "main"
 		*dest[4].(*string) = "headsha"
 		*dest[5].(*string) = "mergesha"
-		*dest[6].(*string) = "1555405874565091380"
+		*dest[6].(*string) = "100000000000000001"
 		if tc.metaJSON != "" {
 			*dest[7].(*[]byte) = []byte(tc.metaJSON)
 		}
@@ -977,13 +977,13 @@ func TestPostgresPRRegistry_VanadisClientOptions(t *testing.T) {
 		{
 			name:       "nil registry returns defaults",
 			reg:        nil,
-			wantURL:    "http://vanadis.aerial",
+			wantURL:    "",
 			wantClient: true,
 		},
 		{
 			name:       "uninitialized fields return defaults",
 			reg:        &PostgresPRRegistry{},
-			wantURL:    "http://vanadis.aerial",
+			wantURL:    "",
 			wantClient: true,
 		},
 		{
@@ -996,7 +996,7 @@ func TestPostgresPRRegistry_VanadisClientOptions(t *testing.T) {
 			name:       "WithVanadisClient nil registry guard",
 			reg:        nil,
 			url:        "http://custom.vanadis",
-			wantURL:    "http://vanadis.aerial",
+			wantURL:    "",
 			wantClient: true,
 		},
 	}
@@ -1125,6 +1125,11 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		{name: "AdvanceVanadisChunkByPR non-transient 400 returns error", method: "AdvanceVanadisChunkByPR", httpStatus: http.StatusBadRequest, httpBody: `{"error":"bad request"}`, zeroRetryDelay: true, wantErr: true},
 		{name: "ResolveVanadisChunkForPR non-transient 400 returns error", method: "ResolveVanadisChunkForPR", httpStatus: http.StatusBadRequest, httpBody: `{"error":"bad request"}`, zeroRetryDelay: true, wantErr: true},
 		{name: "AdvanceVanadisChunkByPR invalid json returns error", method: "AdvanceVanadisChunkByPR", httpStatus: http.StatusOK, httpBody: `{invalid-json`, wantErr: true},
+		{name: "AdvanceVanadisChunkByPR unconfigured url returns error", method: "AdvanceVanadisChunkByPR", zeroRetryDelay: true, wantErr: true},
+		{name: "ResolveVanadisChunkForPR unconfigured url returns error", method: "ResolveVanadisChunkForPR", zeroRetryDelay: true, wantErr: true},
+		{name: "FailVanadisChunkByPR unconfigured url returns error", method: "FailVanadisChunkByPR", zeroRetryDelay: true, wantErr: true},
+		{name: "ShouldSuppressVanadisDeployWake unconfigured url returns error", method: "ShouldSuppressVanadisDeployWake", zeroRetryDelay: true, wantErr: true},
+		{name: "AdvancesVanadisChunkOnMerge unconfigured url returns error", method: "AdvancesVanadisChunkOnMerge", zeroRetryDelay: true, wantErr: true},
 		{name: "ResolveVanadisChunkForPR network error retries and fails", method: "ResolveVanadisChunkForPR", networkErr: true, zeroRetryDelay: true, wantErr: true},
 		{name: "AdvanceVanadisChunkByPR network error retries and fails", method: "AdvanceVanadisChunkByPR", networkErr: true, zeroRetryDelay: true, wantErr: true},
 		{name: "FailVanadisChunkByPR network error retries and fails", method: "FailVanadisChunkByPR", networkErr: true, zeroRetryDelay: true, wantErr: true},

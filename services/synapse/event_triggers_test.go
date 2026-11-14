@@ -41,6 +41,11 @@ func newHaroTestRegistry(t *testing.T, nilRegistry bool, expectedPath string, de
 	if nilRegistry {
 		return nil
 	}
+	if expectedPath == "" && defaultStatus == 0 && len(statuses) == 0 && body == "" {
+		reg := NewPostgresPRRegistry(nil)
+		reg.vanadisRetryDelay = 0
+		return reg
+	}
 	ts := newSequentialMockServer(t, expectedPath, defaultStatus, statuses, body)
 	reg := NewPostgresPRRegistry(nil, WithHaroClient(ts.URL, ts.Client()))
 	reg.vanadisRetryDelay = 0
@@ -89,6 +94,7 @@ func TestCheckEventTriggers_HaroHTTP(t *testing.T) {
 	tests := []checkEventTriggerCase{
 		{name: "check nil registry returns false", nilRegistry: true, source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready"},
 		{name: "check empty targets returns false", source: "custom_source", targets: nil, eventType: "ready"},
+		{name: "check unconfigured haro url returns error", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", wantErr: true},
 		{name: "check 500 error returns error", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusInternalServerError, httpBody: `{"error":"db"}`, wantErr: true},
 		{name: "check non-transient 400 error returns error", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusBadRequest, httpBody: `{"error":"bad request"}`, wantErr: true},
 		{name: "check retry transient 503 then 200 succeeds", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatuses: []int{http.StatusServiceUnavailable, http.StatusOK}, httpBody: `{"status":"ok","matched":true}`, wantMatched: true},
@@ -139,10 +145,11 @@ func TestFireEventTriggers_HaroHTTP(t *testing.T) {
 		{name: "fire whitespace targets returns nil", source: "github", targets: []string{"   ", ""}, eventType: "ci_passed"},
 		{name: "fire empty source returns nil", source: "", targets: []string{"azylman/aerial"}, eventType: "ci_passed"},
 		{name: "fire empty eventType returns nil", source: "github", targets: []string{"azylman/aerial"}, eventType: ""},
+		{name: "fire unconfigured haro url returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", wantErr: true},
 		{name: "fire server 500 error returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusInternalServerError, httpBody: `{"error":"db error"}`, wantErr: true},
 		{name: "fire retry transient 500 then 200 succeeds", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatuses: []int{http.StatusInternalServerError, http.StatusOK}, httpBody: `{"status":"ok","fired":1,"triggers":[{"id":"trig-1"}]}`, wantCount: 1},
 		{name: "fire invalid json returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusOK, httpBody: `{invalid`, wantErr: true},
-		{name: "fire successful with multiple rows and context_header", source: "github", targets: []string{"azylman/aerial", "azylman/aerial:main"}, eventType: "pr_merged", contextHeader: "GitHub pr_merged", httpStatus: http.StatusOK, httpBody: `{"status":"ok","fired":2,"triggers":[{"id":"trig-1","channel_id":"1555405874565091380","source":"github","target":"azylman/aerial","event_type":"pr_merged","prompt":"Continue","effort":"high"},{"id":"trig-2","channel_id":"1555405874565091380","source":"github","target":"azylman/aerial:main","event_type":"pr_merged","prompt":"Report","effort":"medium"}]}`, wantCount: 2},
+		{name: "fire successful with multiple rows and context_header", source: "github", targets: []string{"azylman/aerial", "azylman/aerial:main"}, eventType: "pr_merged", contextHeader: "GitHub pr_merged", httpStatus: http.StatusOK, httpBody: `{"status":"ok","fired":2,"triggers":[{"id":"trig-1","channel_id":"100000000000000001","source":"github","target":"azylman/aerial","event_type":"pr_merged","prompt":"Continue","effort":"high"},{"id":"trig-2","channel_id":"100000000000000001","source":"github","target":"azylman/aerial:main","event_type":"pr_merged","prompt":"Report","effort":"medium"}]}`, wantCount: 2},
 	}
 
 	for _, tc := range tests {
@@ -157,11 +164,11 @@ func TestPostgresPRRegistry_HaroClientOptions(t *testing.T) {
 	t.Parallel()
 	WithHaroClient("http://custom.haro", nil)(nil)
 	var nilReg *PostgresPRRegistry
-	if c, u := nilReg.getHaroClient(); c == nil || u != "http://haro.aerial" {
+	if c, u := nilReg.getHaroClient(); c == nil || u != "" {
 		t.Fatalf("nilReg.getHaroClient() = %v, %q", c, u)
 	}
 	emptyReg := &PostgresPRRegistry{}
-	if c, u := emptyReg.getHaroClient(); c == nil || u != "http://haro.aerial" {
+	if c, u := emptyReg.getHaroClient(); c == nil || u != "" {
 		t.Fatalf("emptyReg.getHaroClient() = %v, %q", c, u)
 	}
 }
@@ -1270,7 +1277,7 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 				srv.notifyRemediationCap(ctx, &ResolvedGitHubEvent{
 					Repo:     "azylman/aerial",
 					PRNumber: 1,
-					TargetID: "1555405874565091380",
+					TargetID: "100000000000000001",
 				}, 4)
 			case "vanadis_advance":
 				_ = srv.advanceVanadisChunk(ctx, "azylman/aerial", 1)

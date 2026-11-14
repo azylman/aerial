@@ -141,8 +141,6 @@ func NewPostgresPRRegistry(pool pgxQueryExecer, opts ...func(*PostgresPRRegistry
 	}
 	r := &PostgresPRRegistry{
 		pool:              pool,
-		vanadisURL:        "http://vanadis.aerial",
-		haroURL:           "http://haro.aerial",
 		httpClient:        tracing.Client(&http.Client{Timeout: 10 * time.Second}),
 		vanadisRetryDelay: 500 * time.Millisecond,
 	}
@@ -172,17 +170,13 @@ func WithVanadisClient(vanadisURL string, client *http.Client) func(*PostgresPRR
 
 func (r *PostgresPRRegistry) getVanadisClient() (*http.Client, string) {
 	if r == nil {
-		return &http.Client{Timeout: 10 * time.Second}, "http://vanadis.aerial"
+		return &http.Client{Timeout: 10 * time.Second}, ""
 	}
 	client := r.httpClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	vURL := strings.TrimRight(r.vanadisURL, "/")
-	if vURL == "" {
-		vURL = "http://vanadis.aerial"
-	}
-	return client, vURL
+	return client, strings.TrimRight(r.vanadisURL, "/")
 }
 
 func (r *PostgresPRRegistry) queryRowScan(ctx context.Context, opName, query string, dest []any, args ...any) (bool, error) {
@@ -376,6 +370,9 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterReque
 
 func (r *PostgresPRRegistry) attachVanadisChunkPR(ctx context.Context, repo, chunkID string, prNumber int) (string, error) {
 	client, vURL := r.getVanadisClient()
+	if vURL == "" {
+		return "", errors.New("vanadis URL is not configured")
+	}
 	bodyBytes, err := json.Marshal(map[string]any{
 		"chunk_id":  chunkID,
 		"pr_number": prNumber,
@@ -770,6 +767,9 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 
 func (r *PostgresPRRegistry) postVanadisJSON(ctx context.Context, path, shortLabel, opName string, payload any, dst any) error {
 	client, vURL := r.getVanadisClient()
+	if vURL == "" {
+		return errors.New("vanadis URL is not configured")
+	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal %s request: %w", shortLabel, err)
@@ -917,6 +917,9 @@ func (r *PostgresPRRegistry) getChunkByPR(ctx context.Context, repo string, prNu
 		return &vanadisChunkPRLookup{Matched: false}, nil
 	}
 	client, vURL := r.getVanadisClient()
+	if vURL == "" {
+		return nil, errors.New("vanadis URL is not configured")
+	}
 	endpoint := fmt.Sprintf("%s/chunks/by-pr?repo=%s&pr_number=%d", vURL, url.QueryEscape(repo), prNumber)
 	var lookup vanadisChunkPRLookup
 	err := r.doHTTPWithRetry(ctx, client, "get chunk by pr", func() (*http.Request, error) {

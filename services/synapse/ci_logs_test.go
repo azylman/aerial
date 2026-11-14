@@ -313,7 +313,7 @@ func TestCompleteCIFailureTransition(t *testing.T) {
 				PRNumber:  10,
 				HeadSHA:   "sha1111",
 				CheckName: "RoboRev Code Review",
-				TargetID:  "1555405874565091380",
+				TargetID:  "100000000000000001",
 			},
 			details:       "Review Failed",
 			checkURL:      "http://example.com",
@@ -328,7 +328,7 @@ func TestCompleteCIFailureTransition(t *testing.T) {
 				PRNumber:  42,
 				HeadSHA:   "sha2222",
 				CheckName: "CI / test",
-				TargetID:  "1555405874565091380",
+				TargetID:  "100000000000000001",
 				Branch:    "",
 			},
 			details:       "Failed",
@@ -345,7 +345,7 @@ func TestCompleteCIFailureTransition(t *testing.T) {
 				PRNumber:  42,
 				HeadSHA:   "sha2222",
 				CheckName: "CI / test",
-				TargetID:  "1555405874565091380",
+				TargetID:  "100000000000000001",
 			},
 			details:      "Persistent failure",
 			checkURL:     "http://example.com",
@@ -406,7 +406,7 @@ func TestNotifyRemediationCap(t *testing.T) {
 	}{
 		{
 			name:          "standard cap reached with snowflake target dispatches dm and fails chunk",
-			targetID:      "1555405874565091380",
+			targetID:      "100000000000000001",
 			prNum:         10,
 			failChunkRes:  true,
 			wantDMCount:   1,
@@ -414,7 +414,7 @@ func TestNotifyRemediationCap(t *testing.T) {
 		},
 		{
 			name:          "chunk failure error logged without preventing dm dispatch",
-			targetID:      "1555405874565091380",
+			targetID:      "100000000000000001",
 			prNum:         10,
 			failChunkErr:  errors.New("db error failing chunk"),
 			wantDMCount:   1,
@@ -422,7 +422,7 @@ func TestNotifyRemediationCap(t *testing.T) {
 		},
 		{
 			name:          "direct message error handled cleanly",
-			targetID:      "1555405874565091380",
+			targetID:      "100000000000000001",
 			prNum:         10,
 			dmErr:         errors.New("discord network error"),
 			wantDMCount:   1,
@@ -438,7 +438,7 @@ func TestNotifyRemediationCap(t *testing.T) {
 		{
 			name:          "nil dispatcher skips direct message safely",
 			nilDispatcher: true,
-			targetID:      "1555405874565091380",
+			targetID:      "100000000000000001",
 			prNum:         10,
 			wantDMCount:   0,
 			wantChunkFail: 1,
@@ -446,7 +446,7 @@ func TestNotifyRemediationCap(t *testing.T) {
 		{
 			name:          "nil registry skips chunk failure safely",
 			nilRegistry:   true,
-			targetID:      "1555405874565091380",
+			targetID:      "100000000000000001",
 			prNum:         10,
 			wantDMCount:   1,
 			wantChunkFail: 0,

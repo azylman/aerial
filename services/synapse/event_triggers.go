@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -54,17 +55,13 @@ func WithHaroClient(haroURL string, client *http.Client) func(*PostgresPRRegistr
 
 func (r *PostgresPRRegistry) getHaroClient() (*http.Client, string) {
 	if r == nil {
-		return &http.Client{Timeout: 10 * time.Second}, "http://haro.aerial"
+		return &http.Client{Timeout: 10 * time.Second}, ""
 	}
 	client := r.httpClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	hURL := strings.TrimRight(r.haroURL, "/")
-	if hURL == "" {
-		hURL = "http://haro.aerial"
-	}
-	return client, hURL
+	return client, strings.TrimRight(r.haroURL, "/")
 }
 
 func (r *PostgresPRRegistry) postHaroEventTriggers(ctx context.Context, path, op string, source string, targets []string, eventType, contextHeader string, dst any) (bool, error) {
@@ -74,6 +71,9 @@ func (r *PostgresPRRegistry) postHaroEventTriggers(ctx context.Context, path, op
 		return false, nil
 	}
 	client, hURL := r.getHaroClient()
+	if hURL == "" {
+		return false, errors.New("haro URL is not configured")
+	}
 	payload := map[string]any{
 		"source":     source,
 		"targets":    cleanTargets,

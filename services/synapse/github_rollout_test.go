@@ -753,7 +753,7 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			apiHeadSHA:            "sha102",
 			apiState:              "open",
 			registryUpdated:       true,
-			registryTargetID:      "1555405874565091380",
+			registryTargetID:      "100000000000000001",
 			wantConflictEnqueued:  1,
 			wantFailedNonRoboRev:  "sha102",
 		},
@@ -766,7 +766,7 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			payloadMergeable:      &falseVal,
 			payloadMergeableState: "",
 			registryUpdated:       true,
-			registryTargetID:      "1555405874565091380",
+			registryTargetID:      "100000000000000001",
 			wantConflictEnqueued:  1,
 			wantFailedNonRoboRev:  "sha103",
 		},
@@ -869,7 +869,7 @@ func (r *ownedMapRegistry) ResolvePRByNumber(ctx context.Context, repo string, p
 		return "", "", "", "", err
 	}
 	if r.ownedPRs != nil && r.ownedPRs[prNumber] {
-		return "1555405874565091380", "feat/test", "sha123", "", nil
+		return "100000000000000001", "feat/test", "sha123", "", nil
 	}
 	return "", "", "", "", nil
 }
@@ -880,7 +880,7 @@ func (r *ownedMapRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha 
 	}
 	if r.ownedSHAs != nil {
 		if prNum, ok := r.ownedSHAs[sha]; ok {
-			return prNum, "feat/test", "1555405874565091380", nil
+			return prNum, "feat/test", "100000000000000001", nil
 		}
 	}
 	return 0, "", "", nil
@@ -1222,10 +1222,10 @@ func runKubeRolloutCase(t *testing.T, tc kubeRolloutTestCase, configMapPath, kus
 	fixture, ts := newKubeFixture(t, tc.routes)
 	disp := NewDefaultOutboundDispatcher("", ts.Client())
 	disp.SetKubeConfig(ts.URL, "test-token")
-	reg := &mockPRRegistry{resolveTargetID: "1555405874565091380"}
+	reg := &mockPRRegistry{resolveTargetID: "100000000000000001"}
 	srv := newTestRouter(Config{GitHubAPIURL: ts.URL, DefaultOwner: true}, ts.Client(), reg, disp)
 
-	err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 7, "main", "success", "abcdef1234567890abcdef1234567890abcdef12", "1555405874565091380", 42)
+	err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 7, "main", "success", "abcdef1234567890abcdef1234567890abcdef12", "100000000000000001", 42)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
 	}

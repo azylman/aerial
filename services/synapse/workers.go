@@ -395,7 +395,7 @@ func (w *DeployWebhookWorker) Work(ctx context.Context, job *river.Job[DeployWeb
 // QueueWidgetSync is the dedicated River queue for Discord widget sync jobs.
 const QueueWidgetSync = "widget_sync"
 
-// WidgetSyncArgs contains payload data for durable background processing of Discord PR and build widget updates.
+// WidgetSyncArgs contains payload data for Discord PR and build widget updates.
 type WidgetSyncArgs struct {
 	Repo     string `json:"repo,omitempty"`
 	PRNumber int    `json:"pr_number,omitempty"`
@@ -550,8 +550,7 @@ type DiscordIngressArgs struct {
 	BotUserID string             `json:"bot_user_id,omitempty"`
 	RoleNames map[string]string  `json:"role_names,omitempty"`
 	Message   *discordgo.Message `json:"message"`
-	// Traceparent is the W3C trace context of the gateway receive span, so the worker posting
-	// to eri continues the trace begun when the event arrived. Not part of job uniqueness.
+	// Traceparent is W3C trace context of the gateway receive span continuing trace to eri.
 	Traceparent string `json:"traceparent,omitempty"`
 }
 
@@ -633,8 +632,7 @@ func (w *DiscordIngressWorker) Work(ctx context.Context, job *river.Job[DiscordI
 type DiscordInteractionArgs struct {
 	InteractionID string                 `json:"interaction_id" river:"unique"`
 	Interaction   *discordgo.Interaction `json:"interaction"`
-	// Traceparent is the W3C trace context of the gateway receive span (see DiscordIngressArgs).
-	Traceparent string `json:"traceparent,omitempty"`
+	Traceparent   string                 `json:"traceparent,omitempty"` // W3C trace context from gateway receive span.
 }
 
 func (DiscordInteractionArgs) Kind() string { return "discord_interaction" }
@@ -775,8 +773,7 @@ func NewDefaultOutboundDispatcher(brainURL string, client *http.Client) *Default
 		discordMsgClient = &http.Client{Timeout: 20 * time.Second}
 		discordInteractionClient = &http.Client{Timeout: 2500 * time.Millisecond}
 	}
-	// Every eri call (prompt, dispatch, widget, Discord ingress) gets a client span and carries
-	// traceparent so eri's turn joins the trace started at the gateway or webhook.
+	// Outbound eri calls carry traceparent so turn joins gateway or webhook traces.
 	return &DefaultOutboundDispatcher{
 		brainURL:                 strings.TrimRight(brainURL, "/"),
 		httpClient:               tracing.Client(client),
@@ -973,9 +970,7 @@ func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req Git
 	return nil
 }
 
-// PromoteImageTag writes the image's TAG_ key into the shared image tag ConfigMap and forwards the
-// event to the Flux receiver. It never reconciles: callers reconcile the owning Kustomizations only
-// after every image of a run is promoted so a single reconcile renders all of them.
+// PromoteImageTag writes the image's TAG_ key into ConfigMap and forwards to Flux receiver.
 func (d *DefaultOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (string, error) {
 	tagKey, _, workloadName := resolveImageTag(req.Repo, req.Image)
 	if workloadName == "" {
@@ -1068,8 +1063,7 @@ var workloadListPaths = []string{
 	"/apis/batch/v1/cronjobs",
 }
 
-// rolloutWorkloadKinds are the workload kinds whose rollout gates a deploy, with their cluster-wide
-// list endpoints. Jobs and CronJobs have no rollout to wait for.
+// rolloutWorkloadKinds are the workload kinds whose rollout gates a deploy.
 var rolloutWorkloadKinds = []struct{ Kind, Path string }{
 	{Kind: "Deployment", Path: "/apis/apps/v1/deployments"},
 	{Kind: "StatefulSet", Path: "/apis/apps/v1/statefulsets"},
@@ -1115,8 +1109,7 @@ func (d *DefaultOutboundDispatcher) ListKustomizationWorkloads(ctx context.Conte
 	return workloads, nil
 }
 
-// ListFluxWorkloadsVersion lists the Flux-managed workloads at path and returns only the list
-// resourceVersion, the starting point for WatchFluxWorkloads.
+// ListFluxWorkloadsVersion lists workloads at path and returns list resourceVersion for watching.
 func (d *DefaultOutboundDispatcher) ListFluxWorkloadsVersion(ctx context.Context, path string) (string, error) {
 	body, err := d.kubeJSON(ctx, http.MethodGet, path+"?"+url.Values{"labelSelector": {fluxManagedSelector}}.Encode(), "", nil)
 	if err != nil {
@@ -1287,9 +1280,7 @@ func (d *DefaultOutboundDispatcher) WatchKustomizations(ctx context.Context, nam
 	return d.watchKube(ctx, kustomizationPath(fluxKustomizationRef{Namespace: namespace}), url.Values{}, resourceVersion)
 }
 
-// watchKube opens a kube watch stream of the collection at path, filtered by query, from
-// resourceVersion. The stream has no client timeout; the API server ends it, after which the caller
-// re-lists. A 410 Gone response returns errWatchExpired.
+// watchKube opens a kube watch stream at path filtered by query from resourceVersion.
 func (d *DefaultOutboundDispatcher) watchKube(ctx context.Context, path string, query url.Values, resourceVersion string) (io.ReadCloser, error) {
 	if d.kubeAPIServer == "" {
 		return nil, errors.New("kube api server not configured")
@@ -1343,6 +1334,9 @@ func advanceBackoffDelay(delay time.Duration, expBackoff bool) time.Duration {
 }
 
 func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endpointPath, reqLabel, statusLabel, channelID string, maxAttempts int, defaultDelay time.Duration, expBackoff bool, payload any) error {
+	if strings.TrimSpace(d.brainURL) == "" {
+		return errors.New("brain URL is not configured")
+	}
 	if err := validateBrainChannel(channelID, endpointPath); err != nil {
 		return err
 	}
@@ -1416,6 +1410,9 @@ func (d *DefaultOutboundDispatcher) DispatchBackground(ctx context.Context, req 
 }
 
 func (d *DefaultOutboundDispatcher) DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error) {
+	if strings.TrimSpace(d.brainURL) == "" {
+		return "", errors.New("brain URL is not configured")
+	}
 	if !IsValidDiscordSnowflake(payload.ChannelID) {
 		return "", fmt.Errorf("invalid discord snowflake channel id: %q", payload.ChannelID)
 	}
@@ -1455,6 +1452,9 @@ func (d *DefaultOutboundDispatcher) DispatchWidget(ctx context.Context, payload 
 }
 
 func (d *DefaultOutboundDispatcher) postDiscordInternalJSON(ctx context.Context, client *http.Client, timeout time.Duration, path, reqLabel, statusLabel string, payload any) error {
+	if strings.TrimSpace(d.brainURL) == "" {
+		return errors.New("brain URL is not configured")
+	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal %s request: %w", reqLabel, err)

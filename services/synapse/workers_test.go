@@ -43,7 +43,7 @@ type defaultOutboundDispatcherCase struct {
 }
 
 func defaultOutboundDispatcherFluxAndPromptCases() []defaultOutboundDispatcherCase {
-	validSnowflake := "1555405874565091380"
+	validSnowflake := "100000000000000001"
 	return []defaultOutboundDispatcherCase{
 		{
 			name:         "DispatchGitPush forwards to flux receiver",
@@ -643,13 +643,22 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name       string
-		channelID  string
-		statusCode int
-		body       string
-		wantErr    bool
-		wantMsgID  string
+		name          string
+		brainURL      string
+		channelID     string
+		statusCode    int
+		body          string
+		wantErr       bool
+		wantMsgID     string
+		wantErrSubstr string
 	}{
+		{
+			name:          "unconfigured brain url returns error",
+			brainURL:      "",
+			channelID:     "100000000000000001",
+			wantErr:       true,
+			wantErrSubstr: "brain URL is not configured",
+		},
 		{
 			name:      "invalid snowflake returns error",
 			channelID: "bad-snowflake",
@@ -657,21 +666,21 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 		},
 		{
 			name:       "server 200 OK returns message_id",
-			channelID:  "1555405874565091380",
+			channelID:  "100000000000000001",
 			statusCode: http.StatusOK,
 			body:       `{"status":"ok","message_id":"msg-widget-dispatch-ok"}`,
 			wantMsgID:  "msg-widget-dispatch-ok",
 		},
 		{
 			name:       "server 400 bad request returns error",
-			channelID:  "1555405874565091380",
+			channelID:  "100000000000000001",
 			statusCode: http.StatusBadRequest,
 			body:       `{"error":"bad payload"}`,
 			wantErr:    true,
 		},
 		{
 			name:       "server invalid JSON returns error",
-			channelID:  "1555405874565091380",
+			channelID:  "100000000000000001",
 			statusCode: http.StatusOK,
 			body:       `{not json`,
 			wantErr:    true,
@@ -681,27 +690,39 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/discord/widget" {
-					http.NotFound(w, r)
-					return
-				}
-				code := tc.statusCode
-				if code == 0 {
-					code = http.StatusOK
-				}
-				w.WriteHeader(code)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer ts.Close()
+			var dispURL string
+			var dispClient *http.Client
+			if tc.name == "unconfigured brain url returns error" {
+				dispURL = ""
+				dispClient = &http.Client{Transport: noopClusterTransport{}}
+			} else {
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/discord/widget" {
+						http.NotFound(w, r)
+						return
+					}
+					code := tc.statusCode
+					if code == 0 {
+						code = http.StatusOK
+					}
+					w.WriteHeader(code)
+					_, _ = w.Write([]byte(tc.body))
+				}))
+				defer ts.Close()
+				dispURL = ts.URL
+				dispClient = ts.Client()
+			}
 
-			disp := NewDefaultOutboundDispatcher(ts.URL, ts.Client())
+			disp := NewDefaultOutboundDispatcher(dispURL, dispClient)
 			msgID, err := disp.DispatchWidget(ctx, StatusWidgetRequest{
 				ChannelID: tc.channelID,
 				ID:        "widget-1",
 			})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("DispatchWidget() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
+				t.Errorf("DispatchWidget() err = %v, want error containing %q", err, tc.wantErrSubstr)
 			}
 			if msgID != tc.wantMsgID {
 				t.Errorf("got msgID = %q, want %q", msgID, tc.wantMsgID)
@@ -807,7 +828,7 @@ func executeGitHubOrDeployWorker(ctx context.Context, srv *RouterServer, tc rive
 			Args: DeployWebhookArgs{
 				Event: DeployEvent{
 					Event: "deploy_success", JobName: "brain",
-					PRNumber: 558, TargetID: "1555405874565091380", Status: "success",
+					PRNumber: 558, TargetID: "100000000000000001", Status: "success",
 				},
 			},
 		}
@@ -858,7 +879,7 @@ func executeWidgetOrTriggerWorker(ctx context.Context, srv *RouterServer, tc riv
 				PRNumber: 543,
 				Branch:   "feat/conflict",
 				HeadSHA:  "head543",
-				TargetID: "1555405874565091380",
+				TargetID: "100000000000000001",
 			},
 		}
 		return true, w.Work(ctx, job)
@@ -963,12 +984,12 @@ func assertRiverWorkerMetrics(t *testing.T, tc riverWorkerCase, expectedQueue, e
 func runRiverWorkerCase(ctx context.Context, t *testing.T, tc riverWorkerCase) {
 	t.Helper()
 	mockReg := &mockPRRegistry{
-		deployedTargetID: "1555405874565091380",
+		deployedTargetID: "100000000000000001",
 		deployedPRNum:    552,
 		deployedMergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
 		deployedRepo:     "azylman/aerial",
 		deployedUpdated:  true,
-		resolveTargetID:  "1555405874565091380",
+		resolveTargetID:  "100000000000000001",
 		resolveBranch:    "feat/widget",
 	}
 	mockDisp := &mockOutboundDispatcher{}
@@ -981,7 +1002,7 @@ func runRiverWorkerCase(ctx context.Context, t *testing.T, tc riverWorkerCase) {
 		}
 	}
 	srv := newTestRouter(Config{
-		SystemChannelID: "1555405874565091380",
+		SystemChannelID: "100000000000000001",
 	}, nil, mockReg, mockDisp)
 
 	expectedQueue, expectedKind := resolveRiverWorkerQueueAndKind(tc.workerType)

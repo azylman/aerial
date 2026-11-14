@@ -34,7 +34,7 @@ func syncPRWidgetGuardCases() []syncPRWidgetCase {
 		},
 		{
 			name: "riverClient configured queues WidgetSyncArgs without inline HTTP dispatch", useMockReg: true, useInserter: true,
-			mockTargetID: "1555405874565091380", mockBranch: "feat/queued", repo: "aerial", prNumber: 101, wantQueued: 1, wantQueuedStatus: "",
+			mockTargetID: "100000000000000001", mockBranch: "feat/queued", repo: "aerial", prNumber: 101, wantQueued: 1, wantQueuedStatus: "",
 		},
 		{
 			name: "Postgres registry queues WidgetSyncArgs with status from pr_registry", useInserter: true,
@@ -56,14 +56,14 @@ func syncPRWidgetMockCases() []syncPRWidgetCase {
 		{
 			name:           "non-Postgres registry fallback path",
 			useMockReg:     true,
-			mockTargetID:   "1555405874565091380",
+			mockTargetID:   "100000000000000001",
 			mockBranch:     "feat/fallback",
 			repo:           "azylman/aerial",
 			prNumber:       101,
 			wantDispatched: true,
 			wantWidgetID:   "pr-azylman/aerial-101",
 			wantStatus:     "open",
-			wantChannel:    "1555405874565091380",
+			wantChannel:    "100000000000000001",
 			wantChunks:     1,
 		},
 		{
@@ -77,7 +77,7 @@ func syncPRWidgetMockCases() []syncPRWidgetCase {
 		{
 			name:           "non-Postgres registry dependabot branch suppresses widget",
 			useMockReg:     true,
-			mockTargetID:   "1555405874565091380",
+			mockTargetID:   "100000000000000001",
 			mockBranch:     "dependabot/go_modules/foo-1.0.0",
 			repo:           "azylman/aerial",
 			prNumber:       101,
@@ -101,7 +101,7 @@ func syncPRWidgetMockCases() []syncPRWidgetCase {
 			wantWidgetID:   "pr-azylman/aerial-101",
 			wantStatus:     "merged",
 			wantBanner:     "",
-			wantChannel:    "1555405874565091380",
+			wantChannel:    "100000000000000001",
 			wantChunks:     1,
 		},
 		{
@@ -114,18 +114,18 @@ func syncPRWidgetMockCases() []syncPRWidgetCase {
 			wantWidgetID:   "pr-azylman/aerial-101",
 			wantStatus:     "synced",
 			wantBanner:     "",
-			wantChannel:    "1555405874565091380",
+			wantChannel:    "100000000000000001",
 			wantChunks:     1,
 		},
 		{
 			name: "Postgres standalone PR ci_failed normalizes to failed and includes banner", prDBStatus: "ci_failed", prDBBanner: "CI check failed",
 			repo: "azylman/aerial", prNumber: 101, execErr: errors.New("exec warning"),
-			wantDispatched: true, wantWidgetID: "pr-azylman/aerial-101", wantStatus: "failed", wantBanner: "CI check failed", wantChannel: "1555405874565091380", wantChunks: 1,
+			wantDispatched: true, wantWidgetID: "pr-azylman/aerial-101", wantStatus: "failed", wantBanner: "CI check failed", wantChannel: "100000000000000001", wantChunks: 1,
 		},
 		{
 			name: "Postgres standalone PR deploying status from DB", prDBStatus: "deploying",
 			repo: "azylman/aerial", prNumber: 101,
-			wantDispatched: true, wantWidgetID: "pr-azylman/aerial-101", wantStatus: "deploying", wantChannel: "1555405874565091380", wantChunks: 1,
+			wantDispatched: true, wantWidgetID: "pr-azylman/aerial-101", wantStatus: "deploying", wantChannel: "100000000000000001", wantChunks: 1,
 		},
 	}
 }
@@ -230,7 +230,7 @@ func syncPRWidgetPgxAdvancedCases(prStart, prUpdate, chunk0Start, chunk0Update t
 			wantStatus:     "open",
 			wantActiveStep: "Waiting on CI (1/2 passed)",
 			wantSkipSink:   true,
-			wantChannel:    "1555405874565091380",
+			wantChannel:    "100000000000000001",
 			wantChunks:     1,
 		},
 		{
@@ -244,7 +244,7 @@ func syncPRWidgetPgxAdvancedCases(prStart, prUpdate, chunk0Start, chunk0Update t
 			wantStatus:     "open",
 			wantActiveStep: "Waiting on CI (2/2 passed)",
 			wantSkipSink:   true,
-			wantChannel:    "1555405874565091380",
+			wantChannel:    "100000000000000001",
 			wantChunks:     1,
 		},
 		{
@@ -260,7 +260,7 @@ func syncPRWidgetPgxAdvancedCases(prStart, prUpdate, chunk0Start, chunk0Update t
 			wantBanner:     "CI failed",
 			wantActiveStep: "",
 			wantSkipSink:   false,
-			wantChannel:    "1555405874565091380",
+			wantChannel:    "100000000000000001",
 			wantChunks:     1,
 		},
 		{
@@ -284,7 +284,7 @@ func syncPRWidgetPgxAdvancedCases(prStart, prUpdate, chunk0Start, chunk0Update t
 			wantStatus:     "merged",
 			wantActiveStep: "`eri`: ⏳ building image\n`haro`: ⏳ building image",
 			wantSkipSink:   true,
-			wantChannel:    "1555405874565091380",
+			wantChannel:    "100000000000000001",
 			wantChunks:     1,
 		},
 		{
@@ -298,7 +298,7 @@ func syncPRWidgetPgxAdvancedCases(prStart, prUpdate, chunk0Start, chunk0Update t
 			wantStatus:     "synced",
 			wantActiveStep: "`eri`: ✅ healthy\n`haro`: ⏳ building image",
 			wantSkipSink:   true,
-			wantChannel:    "1555405874565091380",
+			wantChannel:    "100000000000000001",
 			wantChunks:     1,
 		},
 		{
@@ -312,7 +312,7 @@ func syncPRWidgetPgxAdvancedCases(prStart, prUpdate, chunk0Start, chunk0Update t
 			wantStatus:     "deploying",
 			wantActiveStep: "`coven`: ⏳ building image\n`eri`: ✅ healthy\n`haro`: 🔄 verifying health",
 			wantSkipSink:   true,
-			wantChannel:    "1555405874565091380",
+			wantChannel:    "100000000000000001",
 			wantChunks:     1,
 		},
 	}
@@ -539,7 +539,7 @@ func scanVanadisChunksRow(tc syncPRWidgetCase) pgx.Row {
 	return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
 		*dest[0].(*string) = "chunk-1"
 		*dest[1].(*string) = "build-abc"
-		*dest[2].(*string) = "1555405874565091380"
+		*dest[2].(*string) = "100000000000000001"
 		*dest[3].(*int) = 2
 		*dest[4].(*string) = "Vanadis Build Title"
 		*dest[5].(*string) = "Vanadis Objective"
@@ -567,10 +567,10 @@ func scanPRRegistryFullRow(tc syncPRWidgetCase, prStart, prUpdate time.Time) pgx
 			return nil
 		}
 		if tc.prQueryErr != nil {
-			*dest[0].(*string) = "1555405874565091380"
+			*dest[0].(*string) = "100000000000000001"
 			return tc.prQueryErr
 		}
-		*dest[0].(*string) = "1555405874565091380"
+		*dest[0].(*string) = "100000000000000001"
 		*dest[1].(*string) = "feat: awesome feature"
 		dbStat := tc.prDBStatus
 		if dbStat == "" {
@@ -715,7 +715,7 @@ func scanReconcileDetailsRow(dest []any, currentStatus string) error {
 	if len(dest) < 10 {
 		return nil
 	}
-	*dest[0].(*string) = "1555405874565091380"
+	*dest[0].(*string) = "100000000000000001"
 	*dest[1].(*string) = "Fix Widget Race"
 	*dest[2].(*string) = currentStatus
 	*dest[3].(*string) = "status-msg-1"
@@ -812,32 +812,32 @@ func routerServerHandlePRRegisterValidationCases() []handlePRRegisterCase {
 		{
 			name:        "NilRegistry",
 			nilRegistry: true,
-			body:        `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
+			body:        `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
 			wantStatus:  http.StatusInternalServerError,
 			wantSubstr:  "registry not initialized",
 		},
 		{name: "InvalidJSON", body: `{not-valid-json`, wantStatus: http.StatusBadRequest, wantSubstr: "invalid json payload"},
 		{
 			name:       "EmptyRepo",
-			body:       `{"repo":"","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
+			body:       `{"repo":"","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
 			wantStatus: http.StatusBadRequest,
 			wantSubstr: "repo cannot be empty",
 		},
 		{
 			name:       "ZeroPRNumber",
-			body:       `{"repo":"azylman/aerial","pr_number":0,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
+			body:       `{"repo":"azylman/aerial","pr_number":0,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
 			wantStatus: http.StatusBadRequest,
 			wantSubstr: "pr_number must be greater than 0",
 		},
 		{
 			name:       "EmptyBranch",
-			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"","head_sha":"sha123","target_id":"1555405874565091380"}`,
+			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"","head_sha":"sha123","target_id":"100000000000000001"}`,
 			wantStatus: http.StatusBadRequest,
 			wantSubstr: "branch cannot be empty",
 		},
 		{
 			name:       "EmptyHeadSHA",
-			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"","target_id":"1555405874565091380"}`,
+			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"","target_id":"100000000000000001"}`,
 			wantStatus: http.StatusBadRequest,
 			wantSubstr: "head_sha cannot be empty",
 		},
@@ -851,11 +851,11 @@ func routerServerHandlePRRegisterValidationCases() []handlePRRegisterCase {
 		{
 			name:           "SuccessEmptyTargetIDPreservesExistingTargetID",
 			body:           `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":""}`,
-			resolveTID:     "1555405874565091380",
+			resolveTID:     "100000000000000001",
 			wantStatus:     http.StatusOK,
 			wantSubstr:     `"status":"registered"`,
 			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
+			wantTargetID:   "100000000000000001",
 			wantWidgetCall: true,
 		},
 		{
@@ -903,18 +903,18 @@ func routerServerHandlePRRegisterSuccessCases() []handlePRRegisterCase {
 		},
 		{
 			name:       "InternalRegistrationErrorReturns500",
-			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
+			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
 			regErr:     errors.New("db disk failure"),
 			wantStatus: http.StatusInternalServerError,
 			wantSubstr: "Failed to register PR",
 		},
 		{
 			name:           "SuccessDirectTargetID",
-			body:           `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380","title":"feat: test"}`,
+			body:           `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001","title":"feat: test"}`,
 			wantStatus:     http.StatusOK,
 			wantSubstr:     `"status":"registered"`,
 			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
+			wantTargetID:   "100000000000000001",
 			wantWidgetCall: true,
 		},
 		{
@@ -929,21 +929,21 @@ func routerServerHandlePRRegisterSuccessCases() []handlePRRegisterCase {
 		},
 		{
 			name:           "SuccessDiscordPrefixedTargetID",
-			body:           `{"repo":"azylman/aerial","pr_number":104,"branch":"feat/discord-prefix","head_sha":"sha111","target_id":"stateful_medium:discord-1555405874565091380"}`,
+			body:           `{"repo":"azylman/aerial","pr_number":104,"branch":"feat/discord-prefix","head_sha":"sha111","target_id":"stateful_medium:discord-100000000000000001"}`,
 			wantStatus:     http.StatusOK,
 			wantSubstr:     `"status":"registered"`,
 			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
+			wantTargetID:   "100000000000000001",
 			wantWidgetCall: true,
 		},
 		{
 			name:           "SuccessHeadlessDispatchPreservesExistingTargetID",
 			body:           `{"repo":"azylman/aerial","pr_number":105,"branch":"feat/dispatch","head_sha":"sha222","target_id":"dispatch-8d23879c-1111"}`,
-			resolveTID:     "1555405874565091380",
+			resolveTID:     "100000000000000001",
 			wantStatus:     http.StatusOK,
 			wantSubstr:     `"status":"registered"`,
 			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
+			wantTargetID:   "100000000000000001",
 			wantWidgetCall: true,
 		},
 		{
@@ -960,11 +960,11 @@ func routerServerHandlePRRegisterSuccessCases() []handlePRRegisterCase {
 		{
 			name:           "SuccessPooledWorkerKeyPreservesExistingTargetID",
 			body:           `{"repo":"azylman/aerial","pr_number":108,"branch":"feat/worker-remediate","head_sha":"sha555","target_id":"discord:medium-worker-0"}`,
-			resolveTID:     "1555405874565091380",
+			resolveTID:     "100000000000000001",
 			wantStatus:     http.StatusOK,
 			wantSubstr:     `"status":"registered"`,
 			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
+			wantTargetID:   "100000000000000001",
 			wantWidgetCall: true,
 		},
 		{
@@ -976,12 +976,12 @@ func routerServerHandlePRRegisterSuccessCases() []handlePRRegisterCase {
 		},
 		{
 			name:           "SuccessEvenIfWidgetSyncFails",
-			body:           `{"repo":"azylman/aerial","pr_number":103,"branch":"feat/widget-fail","head_sha":"sha789","target_id":"1555405874565091380"}`,
+			body:           `{"repo":"azylman/aerial","pr_number":103,"branch":"feat/widget-fail","head_sha":"sha789","target_id":"100000000000000001"}`,
 			dispWidgetErr:  errors.New("discord rate limited"),
 			wantStatus:     http.StatusOK,
 			wantSubstr:     `"status":"registered"`,
 			wantRegistered: true,
-			wantTargetID:   "1555405874565091380",
+			wantTargetID:   "100000000000000001",
 			wantWidgetCall: true,
 		},
 	}
@@ -1007,7 +1007,7 @@ func runHandlePRRegisterCase(t *testing.T, tc handlePRRegisterCase) {
 	var reg PRRegistryUpdater
 	var mockReg *mockPRRegistry
 	if !tc.nilRegistry {
-		resolveTarget := firstNonEmpty(tc.resolveTID, tc.regTargetID, "1555405874565091380")
+		resolveTarget := firstNonEmpty(tc.resolveTID, tc.regTargetID, "100000000000000001")
 		if tc.noExistingPR {
 			resolveTarget = ""
 		}
@@ -1268,18 +1268,18 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 		{
 			name: "ProcessMergeConflict valid dispatch", hasDispatcher: true,
 			wantDispatchID: "conflict-azylman-aerial-543-sha-conflict-1",
-			args:           MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-1", PRNumber: 543, TargetID: "1555405874565091380"},
+			args:           MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-1", PRNumber: 543, TargetID: "100000000000000001"},
 			wantPrompts:    1,
 		},
 		{
 			name: "enqueueMergeConflict with river client enqueues", isEnqueue: true, hasRiver: true,
-			args:         MergeConflictArgs{Repo: "aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-2", PRNumber: 544, TargetID: "1555405874565091380"},
+			args:         MergeConflictArgs{Repo: "aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-2", PRNumber: 544, TargetID: "100000000000000001"},
 			wantEnqueued: 1,
 		},
 		{
 			name: "enqueueMergeConflict without river client dispatches directly", isEnqueue: true, hasDispatcher: true,
 			wantDispatchID: "conflict-azylman-aerial-545-sha-conflict-3",
-			args:           MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-3", PRNumber: 545, TargetID: "1555405874565091380"},
+			args:           MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-3", PRNumber: 545, TargetID: "100000000000000001"},
 			wantPrompts:    1,
 		},
 	}

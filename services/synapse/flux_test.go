@@ -27,7 +27,7 @@ func scanPreImagePRRow(dest ...any) error {
 		*b = "feat/test"
 	}
 	if t, ok := dest[2].(*string); ok {
-		*t = "1555405874565091380"
+		*t = "100000000000000001"
 	}
 	return nil
 }
