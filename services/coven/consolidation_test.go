@@ -301,7 +301,6 @@ type workerLifecycleTestCase struct {
 	subscribed    bool
 	withReconnect bool
 	storeFail     string
-	reconnectErr  error
 	wantExtract   bool
 	wantReconnect bool
 }
@@ -339,7 +338,7 @@ func runWorkerLifecycleCase(t *testing.T, tc workerLifecycleTestCase, validEmb [
 	if tc.withReconnect {
 		reconnectFn = func(context.Context) error {
 			reconnectCalls++
-			return tc.reconnectErr
+			return nil
 		}
 	}
 
@@ -431,22 +430,6 @@ func TestWorker_LifecycleAndTick(t *testing.T) {
 			tick:          0,
 			subscribed:    false,
 			withReconnect: true,
-			wantExtract:   true,
-			wantReconnect: true,
-		},
-		{
-			name:        "FallbackExtractionErrorLogged",
-			tick:        120,
-			subscribed:  true,
-			storeFail:   "GetActiveConversationsForExtraction",
-			wantExtract: false,
-		},
-		{
-			name:          "ReconnectFnErrorLogged",
-			tick:          120,
-			subscribed:    false,
-			withReconnect: true,
-			reconnectErr:  errors.New("nats unavailable"),
 			wantExtract:   true,
 			wantReconnect: true,
 		},

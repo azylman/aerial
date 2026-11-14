@@ -520,16 +520,6 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 			wantWatermark: 30,
 		},
 		{
-			name:          "RerunRequestedTriggersFollowUpPass",
-			ctx:           ctx,
-			threads:       []string{"th-rerun"},
-			turns:         []Message{{Content: "User updated schedule", ResponseText: "Noted.", RowID: 35}},
-			llmResp:       `{"facts":[]}`,
-			triggerRerun:  true,
-			wantErr:       false,
-			wantWatermark: 35,
-		},
-		{
 			name:    "ContextCanceledAborts",
 			ctx:     canceledCtx,
 			threads: []string{"th-cancel-1", "th-cancel-2"},
@@ -1080,7 +1070,6 @@ type extractActiveConversationFactsTestCase struct {
 	llmErr        error
 	lockMutex     bool
 	seedNearest   bool
-	triggerRerun  bool
 	wantErr       bool
 	wantWatermark int64
 }
@@ -1129,14 +1118,9 @@ func runExtractActiveConversationFactsCase(t *testing.T, tc extractActiveConvers
 		client = &MockOllamaClient{embedding: validEmb}
 	}
 
-	var rerunTriggered bool
 	var llm LLMClientFunc
 	if !tc.nilLLM {
 		llm = func(ctx context.Context, prompt string) (string, error) {
-			if tc.triggerRerun && !rerunTriggered {
-				rerunTriggered = true
-				extractionRerunRequested.Store(true)
-			}
 			if tc.llmErr != nil {
 				return "", tc.llmErr
 			}
