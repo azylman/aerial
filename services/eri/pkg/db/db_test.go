@@ -625,6 +625,12 @@ func TestDiscordSessionID(t *testing.T) {
 	}
 }
 
+func mustInsertDispatch(ctx context.Context, t *testing.T, store Store, d Dispatch, msg string) {
+	t.Helper()
+	_, err := store.InsertDispatch(ctx, d)
+	mustOK(t, err, msg)
+}
+
 func TestDispatchStore_SQLite(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
@@ -639,7 +645,7 @@ func TestDispatchStore_SQLite(t *testing.T) {
 		Prompt:      "Prompt for dispatch 1",
 		Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 	}
-	mustOK(t, store.InsertDispatch(ctx, d1), "InsertDispatch disp-1")
+	mustInsertDispatch(ctx, t, store, d1, "InsertDispatch disp-1")
 
 	got, err := store.GetDispatch(ctx, "disp-1")
 	mustOK(t, err, "GetDispatch disp-1")
@@ -692,7 +698,7 @@ func TestDispatchStore_SQLite(t *testing.T) {
 		SessionID: "heartbeat-hb-1",
 		Prompt:    "Prompt for dispatch 2",
 	}
-	mustOK(t, store.InsertDispatch(ctx, d2), "InsertDispatch disp-2")
+	mustInsertDispatch(ctx, t, store, d2, "InsertDispatch disp-2")
 	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-2", "Result 2", ""), "UpdateDispatchCompleted disp-2")
 
 	recent, err := store.GetRecentSessionDispatches(ctx, "heartbeat-hb-1", 10)
@@ -708,14 +714,14 @@ func TestDispatchStore_SQLite(t *testing.T) {
 		SessionID: "build-1",
 		Prompt:    "Build ID: b-123\nChunk 1",
 	}
-	mustOK(t, store.InsertDispatch(ctx, d3), "InsertDispatch disp-3")
+	mustInsertDispatch(ctx, t, store, d3, "InsertDispatch disp-3")
 	d3b := Dispatch{
 		ID:        "disp-3b",
 		Source:    "vanadis",
 		SessionID: "vanadis-b-123-chunk-2",
 		Prompt:    "Executing chunk 2",
 	}
-	mustOK(t, store.InsertDispatch(ctx, d3b), "InsertDispatch disp-3b")
+	mustInsertDispatch(ctx, t, store, d3b, "InsertDispatch disp-3b")
 	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-3b", StatusProcessing, "running"), "UpdateDispatchStatus disp-3b")
 	hasActive, err := store.HasActiveDispatchTurn(ctx, "build-1", "")
 	mustOK(t, err, "HasActiveDispatchTurn")
@@ -743,7 +749,7 @@ func TestDispatchStore_SQLite(t *testing.T) {
 		Prompt: "solo heartbeat",
 		Status: StatusPending,
 	}
-	mustOK(t, store.InsertDispatch(ctx, d3Solo), "InsertDispatch disp-3-solo")
+	mustInsertDispatch(ctx, t, store, d3Solo, "InsertDispatch disp-3-solo")
 	cancelledSolo, err := store.CancelPendingDispatches(ctx, "disp-3-solo", "", "cancelled solo")
 	mustOK(t, err, "CancelPendingDispatches solo")
 	if len(cancelledSolo) != 1 || cancelledSolo[0] != "disp-3-solo" {
@@ -758,7 +764,7 @@ func TestDispatchStore_SQLite(t *testing.T) {
 		Prompt:    "Prompt 4",
 		Status:    StatusPending,
 	}
-	mustOK(t, store.InsertDispatch(ctx, d4), "InsertDispatch disp-4-pending")
+	mustInsertDispatch(ctx, t, store, d4, "InsertDispatch disp-4-pending")
 	pendingDisps, err := store.GetPendingOrProcessingDispatches(ctx, 10)
 	mustOK(t, err, "GetPendingOrProcessingDispatches")
 	if len(pendingDisps) != 1 || pendingDisps[0].ID != "disp-4-pending" {
@@ -777,7 +783,8 @@ func TestDispatchStore_SQLite(t *testing.T) {
 	}
 
 	// 11. Edge cases and validation guards
-	assertErr(t, store.InsertDispatch(ctx, Dispatch{}), "InsertDispatch empty ID")
+	_, errEmptyDisp := store.InsertDispatch(ctx, Dispatch{})
+	assertErr(t, errEmptyDisp, "InsertDispatch empty ID")
 	assertErr(t, store.UpdateDispatchStatus(ctx, "", "PROCESSING", ""), "UpdateDispatchStatus empty ID")
 	assertErr(t, store.IncrementDispatchRetry(ctx, "", "err"), "IncrementDispatchRetry empty ID")
 	assertErr(t, store.ResetDispatchToPendingWithRestart(ctx, "", "rst"), "ResetDispatchToPendingWithRestart empty ID")
@@ -865,7 +872,7 @@ func TestGetActiveTasks_DispatchesUnion_SQLite(t *testing.T) {
 	}), "InsertMessage")
 
 	// Insert stateful dispatch
-	mustOK(t, store.InsertDispatch(ctx, Dispatch{
+	mustInsertDispatch(ctx, t, store, Dispatch{
 		ID:              "disp-live-stateful",
 		Source:          "heartbeat",
 		SessionID:       "heartbeat-hb-1",
@@ -879,10 +886,10 @@ func TestGetActiveTasks_DispatchesUnion_SQLite(t *testing.T) {
 		TotalTokens:     400,
 		CreatedAt:       now.Add(-1 * time.Minute),
 		UpdatedAt:       now.Add(-1 * time.Minute),
-	}), "InsertDispatch stateful")
+	}, "InsertDispatch stateful")
 
 	// Insert ephemeral dispatch
-	mustOK(t, store.InsertDispatch(ctx, Dispatch{
+	mustInsertDispatch(ctx, t, store, Dispatch{
 		ID:        "disp-live-ephem",
 		Source:    "webhook",
 		SessionID: "",
@@ -890,7 +897,7 @@ func TestGetActiveTasks_DispatchesUnion_SQLite(t *testing.T) {
 		Status:    StatusPending,
 		CreatedAt: now,
 		UpdatedAt: now,
-	}), "InsertDispatch ephem")
+	}, "InsertDispatch ephem")
 
 	// Unfiltered query unions messages and dispatches
 	unfiltered, err := store.GetActiveTasks(ctx)

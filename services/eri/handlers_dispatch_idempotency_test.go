@@ -34,7 +34,7 @@ func TestHandleDispatch_DuplicateIdempotency(t *testing.T) {
 			name: "duplicate dispatch id returns already_exists without enqueueing",
 			store: func() db.Store {
 				s := dbtest.NewFakeStore()
-				_ = s.InsertDispatch(context.Background(), db.Dispatch{
+				_, _ = s.InsertDispatch(context.Background(), db.Dispatch{
 					ID:     "disp-dup-1",
 					Source: "vanadis",
 					Prompt: "execute chunk",

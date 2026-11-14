@@ -668,13 +668,13 @@ func (f *FakeStore) GetActiveTasks(ctx context.Context, filter ...db.TasksFilter
 
 // DispatchStore implementation for FakeStore
 
-func (f *FakeStore) InsertDispatch(ctx context.Context, d db.Dispatch) error {
-	return f.withLockErr("InsertDispatch", func() error {
+func (f *FakeStore) InsertDispatch(ctx context.Context, d db.Dispatch) (bool, error) {
+	return withFakeLock(f, "InsertDispatch", func() (bool, error) {
 		if strings.TrimSpace(d.ID) == "" {
-			return fmt.Errorf("dispatch id cannot be empty")
+			return false, fmt.Errorf("dispatch id cannot be empty")
 		}
 		if _, exists := f.dispatches[d.ID]; exists {
-			return nil
+			return false, nil
 		}
 		if d.Status == "" {
 			d.Status = db.StatusPending
@@ -695,7 +695,7 @@ func (f *FakeStore) InsertDispatch(ctx context.Context, d db.Dispatch) error {
 		}
 		f.dispatches[d.ID] = cloneDispatch(&d)
 		f.dispatchOrder = append(f.dispatchOrder, d.ID)
-		return nil
+		return true, nil
 	})
 }
 

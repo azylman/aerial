@@ -184,7 +184,7 @@ func TestCancelDispatches(t *testing.T) {
 				if tc.fixture.persistedStatus != "" {
 					persisted := *tc.fixture.activeDispatch
 					persisted.Status = tc.fixture.persistedStatus
-					if err := store.InsertDispatch(context.Background(), persisted); err != nil {
+					if _, err := store.InsertDispatch(context.Background(), persisted); err != nil {
 						t.Fatalf("InsertDispatch: %v", err)
 					}
 				}

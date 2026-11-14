@@ -351,13 +351,24 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		d := buildDispatchRecord(req, dispatchID, sessionID, tracing.Traceparent(r.Context()))
 
 		insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := store.InsertDispatch(insertCtx, d); err != nil {
+		inserted, err := store.InsertDispatch(insertCtx, d)
+		if err != nil {
 			insertCancel()
 			log.Printf("Failed to insert dispatch %s to DB: %v", dispatchID, err)
 			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("Failed to persist dispatch: %v", err))
 			return
 		}
 		insertCancel()
+
+		if !inserted {
+			httpkit.WriteJSON(w, http.StatusOK, map[string]string{
+				"status":      "already_exists",
+				"dispatch_id": dispatchID,
+				"message_id":  dispatchID,
+				"session_id":  sessionID,
+			})
+			return
+		}
 
 		if pool != nil {
 			pool.EnqueueDispatch(d)

@@ -801,7 +801,7 @@ func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *tes
 			var d *db.Dispatch
 			if tc.silent {
 				d = &db.Dispatch{ID: "d-silent", Source: "webhook", Status: db.StatusProcessing}
-				_ = store.InsertDispatch(context.Background(), *d)
+				_, _ = store.InsertDispatch(context.Background(), *d)
 			}
 
 			te := &turnExecution{

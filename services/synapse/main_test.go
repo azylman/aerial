@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -3730,14 +3729,15 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name          string
-		nilServer     bool
-		isEnqueue     bool
-		hasRiver      bool
-		hasDispatcher bool
-		args          MergeConflictArgs
-		wantEnqueued  int
-		wantPrompts   int
+		name           string
+		nilServer      bool
+		isEnqueue      bool
+		hasRiver       bool
+		hasDispatcher  bool
+		wantDispatchID string
+		args           MergeConflictArgs
+		wantEnqueued   int
+		wantPrompts    int
 	}{
 		{
 			name:      "ProcessMergeConflict nil server",
@@ -3749,8 +3749,9 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 			isEnqueue: true,
 		},
 		{
-			name:          "ProcessMergeConflict valid dispatch",
-			hasDispatcher: true,
+			name:           "ProcessMergeConflict valid dispatch",
+			hasDispatcher:  true,
+			wantDispatchID: "conflict-azylman-aerial-543-sha-conflict-1",
 			args: MergeConflictArgs{
 				Repo:     "azylman/aerial",
 				Branch:   "feat/conflict",
@@ -3774,9 +3775,10 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 			wantEnqueued: 1,
 		},
 		{
-			name:          "enqueueMergeConflict without river client dispatches directly",
-			isEnqueue:     true,
-			hasDispatcher: true,
+			name:           "enqueueMergeConflict without river client dispatches directly",
+			isEnqueue:      true,
+			hasDispatcher:  true,
+			wantDispatchID: "conflict-azylman-aerial-545-sha-conflict-3",
 			args: MergeConflictArgs{
 				Repo:     "azylman/aerial",
 				Branch:   "feat/conflict",
@@ -3821,9 +3823,8 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 				if len(calls) != tc.wantPrompts {
 					t.Errorf("DispatchCalls = %d, want %d", len(calls), tc.wantPrompts)
 				} else if len(calls) > 0 {
-					wantID := fmt.Sprintf("conflict-%s-%d", strings.ReplaceAll(tc.args.Repo, "/", "-"), tc.args.PRNumber)
-					if calls[0].ID != wantID {
-						t.Errorf("DispatchCalls[0].ID = %q, want %q", calls[0].ID, wantID)
+					if tc.wantDispatchID != "" && calls[0].ID != tc.wantDispatchID {
+						t.Errorf("DispatchCalls[0].ID = %q, want %q", calls[0].ID, tc.wantDispatchID)
 					}
 					if !calls[0].SkipIfActive {
 						t.Errorf("DispatchCalls[0].SkipIfActive = false, want true")

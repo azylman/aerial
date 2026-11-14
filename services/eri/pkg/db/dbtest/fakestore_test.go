@@ -843,6 +843,12 @@ func TestFakeStore_DiscordSessionIDNormalization(t *testing.T) {
 	}
 }
 
+func mustInsertDispatch(ctx context.Context, t *testing.T, store db.Store, d db.Dispatch, msg string) {
+	t.Helper()
+	_, err := store.InsertDispatch(ctx, d)
+	mustOK(t, err, msg)
+}
+
 func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
@@ -854,7 +860,7 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 		SessionID: "heartbeat-hb-1",
 		Prompt:    "Prompt for fake dispatch 1",
 	}
-	mustOK(t, s.InsertDispatch(ctx, d1), "InsertDispatch")
+	mustInsertDispatch(ctx, t, s, d1, "InsertDispatch")
 
 	got, err := s.GetDispatch(ctx, "disp-f1")
 	mustOK(t, err, "GetDispatch")
@@ -907,7 +913,7 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 		SessionID: "heartbeat-hb-1",
 		Prompt:    "Prompt for fake dispatch 2",
 	}
-	mustOK(t, s.InsertDispatch(ctx, d2), "InsertDispatch disp-f2")
+	mustInsertDispatch(ctx, t, s, d2, "InsertDispatch disp-f2")
 	mustOK(t, s.UpdateDispatchCompleted(ctx, "disp-f2", "Result 2", ""), "UpdateDispatchCompleted disp-f2")
 
 	recent, err := s.GetRecentSessionDispatches(ctx, "heartbeat-hb-1", 10)
@@ -924,7 +930,7 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 		Prompt:    "Build ID: b-999\nChunk 1",
 		Status:    db.StatusPending,
 	}
-	mustOK(t, s.InsertDispatch(ctx, d3), "InsertDispatch disp-f3")
+	mustInsertDispatch(ctx, t, s, d3, "InsertDispatch disp-f3")
 	d3b := db.Dispatch{
 		ID:        "disp-f3b",
 		Source:    "vanadis",
@@ -932,7 +938,7 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 		Prompt:    "Executing chunk 2",
 		Status:    db.StatusProcessing,
 	}
-	mustOK(t, s.InsertDispatch(ctx, d3b), "InsertDispatch disp-f3b")
+	mustInsertDispatch(ctx, t, s, d3b, "InsertDispatch disp-f3b")
 	hasActive, err := s.HasActiveDispatchTurn(ctx, "build-1", "")
 	mustOK(t, err, "HasActiveDispatchTurn")
 	if !hasActive {
@@ -986,7 +992,7 @@ func TestFakeStore_GetActiveTasks_DispatchesUnion(t *testing.T) {
 		UpdatedAt:       now.Add(-2 * time.Minute),
 	}), "InsertMessage")
 
-	mustOK(t, s.InsertDispatch(ctx, db.Dispatch{
+	mustInsertDispatch(ctx, t, s, db.Dispatch{
 		ID:              "disp-fake-stateful",
 		Source:          "heartbeat",
 		SessionID:       "heartbeat-hb-1",
@@ -1000,9 +1006,9 @@ func TestFakeStore_GetActiveTasks_DispatchesUnion(t *testing.T) {
 		TotalTokens:     250,
 		CreatedAt:       now.Add(-1 * time.Minute),
 		UpdatedAt:       now.Add(-1 * time.Minute),
-	}), "InsertDispatch stateful")
+	}, "InsertDispatch stateful")
 
-	mustOK(t, s.InsertDispatch(ctx, db.Dispatch{
+	mustInsertDispatch(ctx, t, s, db.Dispatch{
 		ID:        "disp-fake-ephem",
 		Source:    "webhook",
 		SessionID: "",
@@ -1010,7 +1016,7 @@ func TestFakeStore_GetActiveTasks_DispatchesUnion(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: now,
 		UpdatedAt: now,
-	}), "InsertDispatch ephem")
+	}, "InsertDispatch ephem")
 
 	// Unfiltered query unions messages and dispatches
 	unfiltered, err := s.GetActiveTasks(ctx)

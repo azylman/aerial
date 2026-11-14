@@ -635,7 +635,7 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	_ = store.SaveThreadSummary(ctx, threadID, "Cached summary that must not be injected", "hist-1")
 
 	d1 := db.Dispatch{ID: "msg-ephem-1", Source: "vanadis", Prompt: "execute vanadis chunk 1", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now(), UpdatedAt: time.Now()}
-	_ = store.InsertDispatch(ctx, d1)
+	_, _ = store.InsertDispatch(ctx, d1)
 	pool.EnqueueDispatch(d1)
 	select {
 	case <-doneCh:
@@ -644,7 +644,7 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	}
 
 	d2 := db.Dispatch{ID: "msg-ephem-2", Source: "vanadis", Prompt: "execute vanadis chunk 2", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now(), UpdatedAt: time.Now()}
-	_ = store.InsertDispatch(ctx, d2)
+	_, _ = store.InsertDispatch(ctx, d2)
 	pool.EnqueueDispatch(d2)
 	select {
 	case <-doneCh:
@@ -1628,7 +1628,7 @@ func TestTurnExecution_IncrementTurnRetries(t *testing.T) {
 			te := &turnExecution{pool: pool}
 			if tc.isDispatch {
 				d := db.Dispatch{ID: "d-retry-1", Status: db.StatusProcessing}
-				_ = store.InsertDispatch(ctx, d)
+				_, _ = store.InsertDispatch(ctx, d)
 				te.dispatch = &d
 			} else {
 				m := db.Message{ID: "m-retry-1", ThreadID: "t-1", Status: db.StatusProcessing}
@@ -1902,7 +1902,7 @@ func TestWorker_ProcessDispatch_StatefulEvictionAndRestartContinuation(t *testin
 				CreatedAt:    time.Now().UTC(),
 				UpdatedAt:    time.Now().UTC(),
 			}
-			_ = store.InsertDispatch(ctx, disp)
+			_, _ = store.InsertDispatch(ctx, disp)
 			pool.EnqueueDispatch(disp)
 
 			select {

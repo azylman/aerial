@@ -134,7 +134,7 @@ func isShutdownInterruptionReason(reason string) bool {
 	return r == "interrupted by shutdown" || r == "context cancelled during execution"
 }
 
-func (p *WorkerPool) notifyVanadisChunkOutcome(chunkID, turnStatus, turnError string) {
+func (p *WorkerPool) notifyVanadisChunkOutcome(chunkID, turnStatus, turnError string, dispatchID ...string) {
 	chunkID = strings.TrimSpace(chunkID)
 	if p == nil || chunkID == "" {
 		return
@@ -154,9 +154,13 @@ func (p *WorkerPool) notifyVanadisChunkOutcome(chunkID, turnStatus, turnError st
 	switch turnStatus {
 	case "success":
 		endpoint = vanadisURL + "/chunks/complete"
-		reqBody, err = json.Marshal(map[string]string{
+		payload := map[string]string{
 			"chunk_id": chunkID,
-		})
+		}
+		if len(dispatchID) > 0 && strings.TrimSpace(dispatchID[0]) != "" {
+			payload["dispatch_id"] = strings.TrimSpace(dispatchID[0])
+		}
+		reqBody, err = json.Marshal(payload)
 	case "failed", "timeout":
 		if isShutdownInterruptionReason(turnError) {
 			return

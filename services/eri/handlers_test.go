@@ -341,7 +341,7 @@ func TestHandleDispatch(t *testing.T) {
 
 func TestHandleDispatch_SkipIfActive(t *testing.T) {
 	s := dbtest.NewFakeStore()
-	_ = s.InsertDispatch(context.Background(), db.Dispatch{
+	_, _ = s.InsertDispatch(context.Background(), db.Dispatch{
 		ID:        "active-disp-1",
 		Source:    "heartbeat",
 		SessionID: "heartbeat-test",
@@ -379,7 +379,7 @@ func TestHandleCancelDispatch(t *testing.T) {
 			{ID: "disp-active-sess", Source: "vanadis", SessionID: "vanadis-build-99-chunk-2", Prompt: "Action chunk without explicit prompt marker", Status: db.StatusProcessing},
 			{ID: "disp-single", Source: "heartbeat", Prompt: "hourly pulse", Status: db.StatusPending},
 		} {
-			_ = s.InsertDispatch(ctx, d)
+			_, _ = s.InsertDispatch(ctx, d)
 		}
 		if failOp != "" {
 			s.FailNext(failOp, errors.New("simulated "+failOp+" error"))
@@ -952,7 +952,7 @@ func TestHandleTasks(t *testing.T) {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	_ = ephemStore.InsertDispatch(context.Background(), ephemDisp)
+	_, _ = ephemStore.InsertDispatch(context.Background(), ephemDisp)
 	ephemPool.EnqueueDispatch(ephemDisp)
 	<-turnStarted
 

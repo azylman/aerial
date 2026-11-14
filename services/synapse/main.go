@@ -1309,6 +1309,9 @@ func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, rep
 	opts := s.vanadisPromptOpts(ctx, repo, prNum)
 	opts.silent, opts.skipIfActive, opts.effort = true, true, firstNonEmpty(opts.effort, "medium")
 	opts.dispatchID = fmt.Sprintf("conflict-%s-%d", strings.ReplaceAll(repo, "/", "-"), prNum)
+	if cleanSHA := strings.TrimSpace(headSHA); cleanSHA != "" {
+		opts.dispatchID += "-" + cleanSHA
+	}
 	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", "", prompt, opts)
 }
 

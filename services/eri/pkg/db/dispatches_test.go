@@ -36,7 +36,7 @@ func TestDispatchPersistence_TargetAndChunkID(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := store.InsertDispatch(ctx, tc.dispatch); err != nil {
+			if _, err := store.InsertDispatch(ctx, tc.dispatch); err != nil {
 				t.Fatalf("InsertDispatch failed: %v", err)
 			}
 
@@ -94,20 +94,20 @@ func TestInsertDispatch_IdempotentDuplicate(t *testing.T) {
 		Status: StatusPending,
 	}
 
-	if err := store.InsertDispatch(ctx, d); err != nil {
+	inserted, err := store.InsertDispatch(ctx, d)
+	if err != nil {
 		t.Fatalf("first InsertDispatch failed: %v", err)
 	}
+	if !inserted {
+		t.Fatalf("first InsertDispatch returned inserted=false, want true")
+	}
 
-	// Re-inserting the same dispatch ID must succeed idempotently (ON CONFLICT DO NOTHING)
-	if err := store.InsertDispatch(ctx, d); err != nil {
+	// Re-inserting the same dispatch ID must succeed idempotently (ON CONFLICT DO NOTHING) and report inserted=false
+	insertedAgain, err := store.InsertDispatch(ctx, d)
+	if err != nil {
 		t.Fatalf("second InsertDispatch with duplicate ID failed: %v", err)
 	}
-
-	got, err := store.GetDispatch(ctx, d.ID)
-	if err != nil || got == nil {
-		t.Fatalf("GetDispatch failed: %v", err)
-	}
-	if got.ID != d.ID {
-		t.Errorf("got ID %q, want %q", got.ID, d.ID)
+	if insertedAgain {
+		t.Fatalf("second InsertDispatch returned inserted=true, want false")
 	}
 }
