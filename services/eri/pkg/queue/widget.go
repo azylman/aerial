@@ -1,9 +1,7 @@
 package queue
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -107,104 +105,6 @@ func (p *WorkerPool) resolveSynapseURL() string {
 			if u := strings.TrimSpace(cur.SynapseURL); u != "" {
 				return strings.TrimRight(u, "/")
 			}
-		}
-	}
-	return ""
-}
-
-func (p *WorkerPool) resolveVanadisURL() string {
-	if p == nil {
-		return ""
-	}
-	if u := strings.TrimSpace(p.cfg.VanadisURL); u != "" {
-		return strings.TrimRight(u, "/")
-	}
-	if p.appCfg != nil {
-		if cur := p.appCfg.Current(); cur != nil {
-			if u := strings.TrimSpace(cur.VanadisURL); u != "" {
-				return strings.TrimRight(u, "/")
-			}
-		}
-	}
-	return ""
-}
-
-func isShutdownInterruptionReason(reason string) bool {
-	r := strings.ToLower(strings.TrimSpace(reason))
-	return r == "interrupted by shutdown" || r == "context cancelled during execution"
-}
-
-func (p *WorkerPool) notifyVanadisChunkOutcome(chunkID, turnStatus, turnError string, dispatchID ...string) {
-	chunkID = strings.TrimSpace(chunkID)
-	if p == nil || chunkID == "" {
-		return
-	}
-	if p.ctx != nil && p.ctx.Err() != nil {
-		return
-	}
-	vanadisURL := p.resolveVanadisURL()
-	if vanadisURL == "" {
-		return
-	}
-
-	var endpoint string
-	var reqBody []byte
-	var err error
-
-	switch turnStatus {
-	case "success":
-		endpoint = vanadisURL + "/chunks/complete"
-		payload := map[string]string{
-			"chunk_id": chunkID,
-		}
-		if len(dispatchID) > 0 && strings.TrimSpace(dispatchID[0]) != "" {
-			payload["dispatch_id"] = strings.TrimSpace(dispatchID[0])
-		}
-		reqBody, err = json.Marshal(payload)
-	case "failed", "timeout":
-		if isShutdownInterruptionReason(turnError) {
-			return
-		}
-		endpoint = vanadisURL + "/chunks/fail"
-		reason := firstNonEmpty(strings.TrimSpace(turnError), "dispatch turn "+turnStatus)
-		reqBody, err = json.Marshal(map[string]string{
-			"chunk_id": chunkID,
-			"reason":   reason,
-		})
-	default:
-		return
-	}
-
-	if err != nil {
-		log.Printf("[WorkerPool] Warning marshalling vanadis chunk %s payload: %v", chunkID, err)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
-	if err != nil {
-		log.Printf("[WorkerPool] Warning creating vanadis chunk %s request: %v", chunkID, err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Printf("[WorkerPool] Warning notifying vanadis chunk %s outcome (%s): %v", chunkID, turnStatus, err)
-		return
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		log.Printf("[WorkerPool] Warning notifying vanadis chunk %s outcome (%s): unexpected status %d", chunkID, turnStatus, resp.StatusCode)
-	}
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if strings.TrimSpace(v) != "" {
-			return v
 		}
 	}
 	return ""
