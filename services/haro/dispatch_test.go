@@ -12,15 +12,21 @@ import (
 )
 
 type memoryMsg struct {
-	data    []byte
-	subject string
-	naked   bool
+	data         []byte
+	subject      string
+	naked        bool
+	numDelivered uint64
 }
 
-func (m *memoryMsg) Data() []byte                       { return m.data }
-func (m *memoryMsg) Subject() string                    { return m.subject }
-func (m *memoryMsg) Header() nats.Header                { return nil }
-func (m *memoryMsg) NumDelivered() uint64               { return 1 }
+func (m *memoryMsg) Data() []byte        { return m.data }
+func (m *memoryMsg) Subject() string     { return m.subject }
+func (m *memoryMsg) Header() nats.Header { return nil }
+func (m *memoryMsg) NumDelivered() uint64 {
+	if m.numDelivered > 0 {
+		return m.numDelivered
+	}
+	return 1
+}
 func (m *memoryMsg) Ack() error                         { return nil }
 func (m *memoryMsg) NakWithDelay(_ time.Duration) error { m.naked = true; return nil }
 func (m *memoryMsg) Term() error                        { return nil }
@@ -375,7 +381,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 	}
 
 	wrapped := &ackBus{Bus: memBus, onHandled: func() { close(done) }}
-	bus := initHaroJetStreamWithFactory(ctx, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+	bus := initHaroJetStreamWithFactory(ctx, nil, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return wrapped, nil
 	})
 	if bus == nil {
@@ -527,13 +533,65 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 	}
 
 	// initHaroJetStream empty and mock factory scenarios
-	if bus := initHaroJetStream(ctx, db, ""); bus != nil {
+	if bus := initHaroJetStream(ctx, nil, db, ""); bus != nil {
 		t.Error("expected nil bus for empty natsURL")
 	}
 	errFactory := func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return nil, errors.New("connection failed")
 	}
-	if bus := initHaroJetStreamWithFactory(ctx, db, "nats://mock", errFactory); bus != nil {
+	if bus := initHaroJetStreamWithFactory(ctx, nil, db, "nats://mock", errFactory); bus != nil {
 		t.Error("expected nil bus when factory returns error")
 	}
+
+	// EnsureCoreStreams failure branch in initHaroJetStreamWithFactory
+	errStreamBus := &failEnsureBus{Bus: pubsub.NewMemoryBus()}
+	defer errStreamBus.Close()
+	if bus := initHaroJetStreamWithFactory(ctx, nil, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return errStreamBus, nil
+	}); bus == nil {
+		t.Error("expected non-nil bus despite EnsureCoreStreams error")
+	}
+
+	// ConsumeQueue failure branch in initHaroJetStreamWithFactory
+	errQueueBus := &failQueueBus{Bus: pubsub.NewMemoryBus()}
+	defer errQueueBus.Close()
+	if bus := initHaroJetStreamWithFactory(ctx, nil, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return errQueueBus, nil
+	}); bus == nil {
+		t.Error("expected non-nil bus despite ConsumeQueue error")
+	}
+
+	// Subscribe failure branch for haro-events in initHaroJetStreamWithFactory
+	errSubBus := &failSubBus{Bus: pubsub.NewMemoryBus()}
+	defer errSubBus.Close()
+	dummyServer := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db))
+	if bus := initHaroJetStreamWithFactory(ctx, dummyServer, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return errSubBus, nil
+	}); bus == nil {
+		t.Error("expected non-nil bus despite Subscribe error")
+	}
+}
+
+type failEnsureBus struct {
+	pubsub.Bus
+}
+
+func (f *failEnsureBus) EnsureCoreStreams(_ context.Context) error {
+	return errors.New("simulated stream creation failure")
+}
+
+type failQueueBus struct {
+	pubsub.Bus
+}
+
+func (f *failQueueBus) ConsumeQueue(_ context.Context, _, _ string, _ pubsub.Handler) (pubsub.Subscription, error) {
+	return nil, errors.New("simulated queue subscription failure")
+}
+
+type failSubBus struct {
+	pubsub.Bus
+}
+
+func (f *failSubBus) Subscribe(_ context.Context, _, _ string, _ pubsub.Handler) (pubsub.Subscription, error) {
+	return nil, errors.New("simulated subscription failure")
 }

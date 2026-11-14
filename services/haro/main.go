@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -28,11 +29,11 @@ var (
 	}
 )
 
-func initHaroJetStream(ctx context.Context, database *sql.DB, natsURL string) pubsub.Bus {
-	return initHaroJetStreamWithFactory(ctx, database, natsURL, newBusFn)
+func initHaroJetStream(ctx context.Context, server *Server, database *sql.DB, natsURL string) pubsub.Bus {
+	return initHaroJetStreamWithFactory(ctx, server, database, natsURL, newBusFn)
 }
 
-func initHaroJetStreamWithFactory(ctx context.Context, database *sql.DB, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
+func initHaroJetStreamWithFactory(ctx context.Context, server *Server, database *sql.DB, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {
 		return nil
@@ -52,6 +53,27 @@ func initHaroJetStreamWithFactory(ctx context.Context, database *sql.DB, natsURL
 	} else {
 		log.Println("[Haro] Subscribed haro-dispatch queue consumer to aerial.dispatch.*")
 	}
+	if server != nil {
+		if _, err := b.Subscribe(ctx, "aerial.events.>", "haro-events", func(msgCtx context.Context, msg pubsub.Message) error {
+			var ev pubsub.ExternalEvent
+			if unmarshalErr := json.Unmarshal(msg.Data(), &ev); unmarshalErr != nil {
+				log.Printf("[Haro] warning: failed to unmarshal external event: %v", unmarshalErr)
+				return nil
+			}
+			if err := server.HandleExternalEvent(msgCtx, ev); err != nil {
+				if msg.NumDelivered() < 5 {
+					return err
+				}
+				log.Printf("[Haro] dropping external event %s after %d delivery attempts: %v", ev.EventID, msg.NumDelivered(), err)
+				return nil
+			}
+			return nil
+		}); err != nil {
+			log.Printf("[Haro] warning: failed to subscribe haro-events: %v", err)
+		} else {
+			log.Println("[Haro] Subscribed haro-events durable consumer to aerial.events.>")
+		}
+	}
 	return b
 }
 
@@ -70,16 +92,6 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	}
 	defer httpkit.CloseWarn(database, "database on shutdown")
 
-	natsURL := firstNonEmpty(cfg.NATSURL, os.Getenv("NATS_URL"))
-	bus := initHaroJetStream(ctx, database, natsURL)
-	defer func() {
-		if bus != nil {
-			if closeErr := bus.Close(); closeErr != nil {
-				log.Printf("[Haro] bus close error: %v", closeErr)
-			}
-		}
-	}()
-
 	// Invariant: ticker goroutine must be bound to a child context and strictly
 	// awaited on all exit paths before closing the database to prevent goroutine leaks
 	// and use-after-close on database shutdown.
@@ -97,6 +109,16 @@ func RunApp(ctx context.Context, cfg *Config) error {
 
 	toolHandler := NewToolHandler(cfg, database)
 	server := NewServer(toolHandler, dispatcher)
+
+	natsURL := firstNonEmpty(cfg.NATSURL, os.Getenv("NATS_URL"))
+	bus := initHaroJetStream(ctx, server, database, natsURL)
+	defer func() {
+		if bus != nil {
+			if closeErr := bus.Close(); closeErr != nil {
+				log.Printf("[Haro] bus close error: %v", closeErr)
+			}
+		}
+	}()
 
 	httpServer := &http.Server{
 		Addr:              ":" + port,

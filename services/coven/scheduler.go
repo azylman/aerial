@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -60,6 +62,20 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		initialDelay:    initDelay,
 		tickInterval:    tickInt,
 	}
+}
+
+// HandleTurnCompletedEvent handles an incoming turn completed event from JetStream.
+func (w *Worker) HandleTurnCompletedEvent(ctx context.Context, ev pubsub.TurnCompletedEvent) error {
+	if strings.TrimSpace(ev.SessionID) == "healthcheck-ping" {
+		return nil
+	}
+	if w.store == nil || w.ollama == nil || w.llmClient == nil {
+		return nil
+	}
+	if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("[Coven Worker] Immediate fact extraction on turn completion failed: %v", err)
+	}
+	return nil
 }
 
 // Start begins the ticker loop, running until ctx is canceled.

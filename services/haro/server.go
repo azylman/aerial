@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -538,6 +540,49 @@ func (s *Server) recoverFailedEventTrigger(ctx context.Context, trig EventTrigge
 	}
 }
 
+func (s *Server) fireClaimedTrigger(ctx context.Context, trig EventTrigger, contextHeader string) error {
+	if s.dispatcher == nil {
+		s.recoverFailedEventTrigger(ctx, trig)
+		return errors.New("dispatcher not initialized")
+	}
+	prompt := FormatEventTriggerPrompt(contextHeader, trig.Prompt)
+	start := time.Now()
+	_, dispErr := traceFire(ctx, "event_watch", trig.ID, func(dispCtx context.Context) (PromptDispatchResponse, error) {
+		return s.dispatcher.DispatchPrompt(dispCtx, PromptDispatchRequest{
+			ChannelID: trig.ChannelID,
+			Prompt:    prompt,
+			Effort:    trig.Effort,
+		})
+	})
+	RecordScheduleDispatchDuration("event_watch", time.Since(start).Seconds())
+	if dispErr != nil {
+		RecordScheduleRun("event_watch", "failed")
+		s.recoverFailedEventTrigger(ctx, trig)
+		return dispErr
+	}
+	RecordScheduleRun("event_watch", "completed")
+	return nil
+}
+
+func (s *Server) HandleExternalEvent(ctx context.Context, ev pubsub.ExternalEvent) error {
+	if ev.Source == "healthcheck" || len(ev.Targets) == 0 {
+		return nil
+	}
+	if s.handler == nil || s.handler.db == nil {
+		return errors.New("database not initialized")
+	}
+	triggers, err := ClaimEventTriggers(ctx, s.handler.db, ev.Source, ev.Targets, ev.EventType)
+	if err != nil {
+		return err
+	}
+	for _, trig := range triggers {
+		if fireErr := s.fireClaimedTrigger(ctx, trig, ev.ContextHeader); fireErr != nil {
+			log.Printf("[Haro] error firing claimed event trigger %s (%s): %v", trig.ID, trig.Source, fireErr)
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleFireEventTriggers(w http.ResponseWriter, r *http.Request) {
 	req, ok := s.parseEventTriggerActionRequest(w, r)
 	if !ok {
@@ -555,25 +600,12 @@ func (s *Server) handleFireEventTriggers(w http.ResponseWriter, r *http.Request)
 	fired := make([]EventTrigger, 0, len(triggers))
 	var firstDispatchErr error
 	for _, trig := range triggers {
-		prompt := FormatEventTriggerPrompt(req.ContextHeader, trig.Prompt)
-		start := time.Now()
-		_, dispErr := traceFire(r.Context(), "event_watch", trig.ID, func(ctx context.Context) (PromptDispatchResponse, error) {
-			return s.dispatcher.DispatchPrompt(ctx, PromptDispatchRequest{
-				ChannelID: trig.ChannelID,
-				Prompt:    prompt,
-				Effort:    trig.Effort,
-			})
-		})
-		RecordScheduleDispatchDuration("event_watch", time.Since(start).Seconds())
-		if dispErr != nil {
-			RecordScheduleRun("event_watch", "failed")
-			s.recoverFailedEventTrigger(r.Context(), trig)
+		if dispErr := s.fireClaimedTrigger(r.Context(), trig, req.ContextHeader); dispErr != nil {
 			if firstDispatchErr == nil {
 				firstDispatchErr = dispErr
 			}
 			continue
 		}
-		RecordScheduleRun("event_watch", "completed")
 		fired = append(fired, trig)
 	}
 	if firstDispatchErr != nil {

@@ -84,6 +84,7 @@ type Config struct {
 	BrainPRRegisterURL string       `yaml:"brain_pr_register_url"`
 	PRRegisterURL      string       `yaml:"pr_register_url"`
 	SystemChannelID    string       `yaml:"system_channel_id"`
+	NATSURL            string       `yaml:"nats_url"`
 }
 
 // MemoryYAMLConfig defines the declarative file schema for /config/config.yaml.
@@ -101,6 +102,7 @@ type MemoryYAMLConfig struct {
 	PRRegisterURL    string       `yaml:"pr_register_url"`
 	EriPRRegisterURL string       `yaml:"eri_pr_register_url"`
 	SystemChannelID  string       `yaml:"system_channel_id"`
+	NATSURL          string       `yaml:"nats_url"`
 }
 
 func resolveFirstNonEmpty(values ...string) string {
@@ -189,6 +191,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	if !systemChannelIDRegex.MatchString(systemChannelID) {
 		systemChannelID = ""
 	}
+	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL, "nats://nats.aerial:4222")
 
 	return &Config{
 		Port:               port,
@@ -205,6 +208,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		BrainPRRegisterURL: prRegisterURL,
 		PRRegisterURL:      prRegisterURL,
 		SystemChannelID:    systemChannelID,
+		NATSURL:            natsURL,
 		Ollama: OllamaConfig{
 			BaseURL:     ollamaBaseURL,
 			Model:       ollamaModel,
