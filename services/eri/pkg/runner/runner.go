@@ -401,7 +401,8 @@ func IsQuotaPause(errDetail, stderr string) bool {
 		strings.Contains(combined, "claude ai usage limit reached") ||
 		strings.Contains(combined, "you've hit your limit") ||
 		strings.Contains(combined, "you’ve hit your limit") ||
-		strings.Contains(combined, "rate_limit_error") {
+		strings.Contains(combined, "rate_limit_error") ||
+		strings.Contains(combined, "claude synthetic reply (error=rate_limit)") {
 		return true
 	}
 	hasQuotaWord := strings.Contains(combined, "quota") ||

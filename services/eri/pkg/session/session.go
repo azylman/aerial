@@ -859,11 +859,17 @@ func extractAssistantText(raw json.RawMessage) string {
 	return ""
 }
 
+// ClaudeSyntheticModel is the message.model the Claude CLI stamps on assistant messages it writes
+// itself without a model call (usage-limit and API errors, the "No response requested." resume
+// placeholder). Such messages are never a reply to the turn.
+const ClaudeSyntheticModel = "<synthetic>"
+
 type claudeAssistantPayload struct {
 	Type      string `json:"type"`
 	Timestamp string `json:"timestamp"`
 	Message   struct {
 		Role    string          `json:"role"`
+		Model   string          `json:"model"`
 		Content json.RawMessage `json:"content"`
 	} `json:"message"`
 }
@@ -884,7 +890,7 @@ func scanClaudeLinesForResponse(ctx context.Context, lines []string, since time.
 		if isStepBefore(payload.Timestamp, since) {
 			return ""
 		}
-		if payload.Type != "assistant" {
+		if payload.Type != "assistant" || payload.Message.Model == ClaudeSyntheticModel {
 			continue
 		}
 		text := extractAssistantText(payload.Message.Content)
