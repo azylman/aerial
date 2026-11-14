@@ -197,6 +197,7 @@ type brainAppOptions struct {
 	onReload       func(source string)
 	agentName      string
 	tracingEnabled bool
+	traceContent   bool // record prompt/response text on agent spans (capture_content)
 }
 
 func extractMCPServers(cur *config.ConfigData, includeDiscord bool) []runner.MCPServerConfig {
@@ -497,11 +498,13 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome, lowEffortModel, mcpPr
 
 // PrewarmProcessPoolsSequentially pre-warms process pool targets in series in the background,
 // ensuring only one daemon is in the CPU-intensive startup phase at a time across all pools.
-func newWorkerInterchangeablePool(pCfg runner.PoolConfig, spawner runner.DaemonSpawner, keyPrefix string) *runner.InterchangeablePool {
+// captureContent records each ephemeral run's prompt and response on its trace span.
+func newWorkerInterchangeablePool(pCfg runner.PoolConfig, spawner runner.DaemonSpawner, keyPrefix string, captureContent bool) *runner.InterchangeablePool {
 	underlying := runner.NewUnifiedProcessPool(pCfg, spawner)
 	return runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{
-		WorkerCount: len(pCfg.PrewarmedTargets),
-		KeyPrefix:   keyPrefix,
+		WorkerCount:    len(pCfg.PrewarmedTargets),
+		KeyPrefix:      keyPrefix,
+		CaptureContent: captureContent,
 	})
 }
 
@@ -572,6 +575,7 @@ func buildBrainProcessPools(
 	sessionMgr *session.Manager,
 	spawner runner.DaemonSpawner,
 	mcpProxyPort string,
+	traceContent bool,
 ) (map[queue.PoolKey]runner.AgentPool, *runner.InterchangeablePool, runner.AgentPool, []runner.AgentPool, []string, string) {
 	lowEffortModel, mediumEffortModel := resolveBrainModelDefaults(cur)
 	runtimeBase := cur.DataDir
@@ -614,7 +618,7 @@ func buildBrainProcessPools(
 	}
 
 	discordPools, discordPoolList := buildDiscordPools(basePoolCfg, discordHome, cur.Model, mediumEffortModel, lowEffortModel, spawner)
-	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), spawner, "ephemeral:worker")
+	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), spawner, "ephemeral:worker", traceContent)
 	voicePool := createVoiceProcessPool(cfg, voiceHome, lowEffortModel, mcpProxyPort, spawner, memoryRetriever)
 	allPools := append(append([]runner.AgentPool{}, discordPoolList...), ephemeralPool, voicePool)
 
@@ -1007,7 +1011,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(cfg, cur, sessionMgr, appOpts.processSpawner, mcpProxyPort)
+	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(cfg, cur, sessionMgr, appOpts.processSpawner, mcpProxyPort, appOpts.traceContent)
 	defer closeAllBrainPools(allPools)
 
 	switch cur.GetEngine() {
@@ -1032,6 +1036,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		HaroURL:          cur.HaroURL,
 		SynapseURL:       cur.SynapseURL,
 		AgentName:        appOpts.agentName,
+		TraceContent:     appOpts.traceContent,
 		ActiveTurns:      activeTurns,
 	})
 	defer attachEriEventBus(ctx, pool)()
@@ -1091,10 +1096,13 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 // setupTracing installs the global tracer provider and propagator from the config at path
 // (see tracing.Init). It returns a BrainAppOption naming the turn agent after the config's stack
 // (the persona recorded as gen_ai.agent.name) and switching on the MCP trace proxy when tracing
-// is enabled, and a func that flushes pending spans.
+// is enabled (plus prompt/response capture when capture_content is also on), and a func that
+// flushes pending spans.
 func setupTracing(ctx context.Context, path string) (BrainAppOption, func()) {
 	tcfg, flush := tracing.Init(ctx, "eri", path)
-	return func(o *brainAppOptions) { o.agentName, o.tracingEnabled = tcfg.Stack, tcfg.Enabled }, flush
+	return func(o *brainAppOptions) {
+		o.agentName, o.tracingEnabled, o.traceContent = tcfg.Stack, tcfg.Enabled, tcfg.Enabled && tcfg.CaptureContent
+	}, flush
 }
 
 func main() {

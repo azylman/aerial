@@ -31,6 +31,7 @@ type turnExecution struct {
 	threadID, triggerType, activeSessionID, currentSessionID, previousSessionID, leaseSessionID string
 	effectiveID, effectiveName, threadName, turnPrompt, turnStatus, turnResponseText            string
 	turnError, injectedHookContext                                                              string
+	sentPrompt                                                                                  string // prompt the latest attempt handed to the daemon; captured on the turn span
 	execStart                                                                                   time.Time
 	activeSessionMu                                                                             sync.Mutex
 	turnCount, wakeIdx                                                                          int
@@ -1043,6 +1044,7 @@ func (te *turnExecution) executeLeaseAttempt(currentModel, promptToSend string, 
 		if te.statusUpdater != nil {
 			te.statusUpdater.MarkTurnStarted()
 		}
+		te.sentPrompt = promptToSend
 		sink := runner.NewTracingTurnSink(runCtx, newDiscordTurnSink(te.statusUpdater))
 		te.traceSink = sink
 		// The loopback MCP proxy claims this attempt's execute_tool spans to nest MCP calls

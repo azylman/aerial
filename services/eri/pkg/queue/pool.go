@@ -121,6 +121,7 @@ type WorkerPoolConfig struct {
 	TracerProvider                   trace.TracerProvider       // turn spans; nil uses the global provider
 	Logger                           *slog.Logger               // turn-scoped log lines; nil uses slog.Default()
 	AgentName                        string                     // stack persona recorded as gen_ai.agent.name
+	TraceContent                     bool                       // record prompt/response on invoke_agent spans (tracing capture_content)
 	ActiveTurns                      *runner.ActiveTurnRegistry // daemons' active turn spans for the MCP trace proxy; nil gets a private registry
 }
 

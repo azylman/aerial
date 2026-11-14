@@ -143,9 +143,9 @@ func buildDiscordPools(basePoolCfg func(home, model string, prewarmed []string) 
 		case !k.Ephemeral:
 			p = runner.NewUnifiedProcessPool(basePoolCfg(discordHome, model, nil), spawner)
 		case k.Effort == "medium":
-			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:medium-worker-0", "discord:medium-worker-1"}), spawner, "discord:medium-worker")
+			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:medium-worker-0", "discord:medium-worker-1"}), spawner, "discord:medium-worker", false)
 		default:
-			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:worker-0", "discord:worker-1"}), spawner, "discord:worker")
+			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:worker-0", "discord:worker-1"}), spawner, "discord:worker", false)
 		}
 		pools[k] = p
 		ordered = append(ordered, p)
