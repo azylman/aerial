@@ -12,6 +12,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/bwmarrin/discordgo"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func (te *turnExecution) getThreadSummary(threadID string) (string, string) {
@@ -297,6 +298,8 @@ func (te *turnExecution) fetchTurnHistory(fetchCtx context.Context, limit int) [
 	if !IsNumericSnowflake(te.threadID) && (te.pool == nil || te.pool.cfg.HistoryFetcher == nil) {
 		return nil
 	}
+	fetchCtx, span := te.startPromptStep(fetchCtx, spanPromptHistoryFetch, attrPromptHistoryLimit.Int(limit))
+	defer span.End()
 	var err error
 	var turnHistory []HistoryMessage
 	if te.pool.cfg.HistoryFetcher != nil {
@@ -308,19 +311,23 @@ func (te *turnExecution) fetchTurnHistory(fetchCtx context.Context, limit int) [
 	} else {
 		turnHistory, err = FetchRecentThreadHistory(fetchCtx, te.pool.getDiscordSession(), te.threadID, limit)
 	}
+	span.SetAttributes(attrPromptHistoryCount.Int(len(turnHistory)))
 	if err != nil {
+		recordSpanError(span, err)
 		te.logf("[WorkerPool] Warning: History fetch failed for thread %s: %v", te.threadID, err)
 	}
 	return turnHistory
 }
 
-func (te *turnExecution) resolveColdStartPreviousSessionID(isColdStart bool) string {
+func (te *turnExecution) resolveColdStartPreviousSessionID(ctx context.Context, isColdStart bool) string {
 	if !isColdStart {
 		return ""
 	}
 	prevID := te.previousSessionID
 	if prevID == "" {
+		_, span := te.startPromptStep(ctx, spanPromptPrevSessionID)
 		prevID = te.getPreviousSessionID(te.threadID)
+		span.End()
 	}
 	if prevID != "" {
 		te.logf("[WorkerPool] Injected previous session identifier (%s) into prompt for thread %s", prevID, te.threadID)
@@ -328,12 +335,15 @@ func (te *turnExecution) resolveColdStartPreviousSessionID(isColdStart bool) str
 	return prevID
 }
 
-func (te *turnExecution) resolveAmbientPromptContext() string {
+func (te *turnExecution) resolveAmbientPromptContext(ctx context.Context) string {
 	if te.policy.AmbientContext == nil || te.pool == nil || te.pool.cfg.AmbientResolver == nil {
 		return ""
 	}
-	actx, ambErr := te.pool.cfg.AmbientResolver(te.poolCtx(), te.policy.AmbientContext)
+	stepCtx, span := te.startPromptStep(promptStepCtx(te.poolCtx(), ctx), spanPromptAmbientContext)
+	defer span.End()
+	actx, ambErr := te.pool.cfg.AmbientResolver(stepCtx, te.policy.AmbientContext)
 	if ambErr != nil {
+		recordSpanError(span, ambErr)
 		te.logf("[WorkerPool] Warning resolving ambient context for channel %s: %v", te.effectiveName, ambErr)
 		return ""
 	}
@@ -358,12 +368,14 @@ func (te *turnExecution) backfillBurstChannelAndThreadNames() {
 	}
 }
 
-func (te *turnExecution) buildTurnPrompt() {
+// buildTurnPrompt assembles te.turnPrompt. ctx carries the prompt.build span and is used only
+// to parent step spans; each step keeps its own cancellation and timeout source.
+func (te *turnExecution) buildTurnPrompt(ctx context.Context) {
 	var turnHistory []HistoryMessage
 	var turnHistoryFetched bool
-	getTurnHistory := func(limit int) []HistoryMessage {
+	getTurnHistory := func(spanCtx context.Context, limit int) []HistoryMessage {
 		if !turnHistoryFetched {
-			fetchCtx, fetchCancel := context.WithTimeout(te.poolCtx(), 3*time.Second)
+			fetchCtx, fetchCancel := context.WithTimeout(promptStepCtx(te.poolCtx(), spanCtx), 3*time.Second)
 			turnHistory = te.fetchTurnHistory(fetchCtx, limit)
 			fetchCancel()
 			turnHistoryFetched = true
@@ -374,18 +386,26 @@ func (te *turnExecution) buildTurnPrompt() {
 		return turnHistory
 	}
 
-	snap, _ := resolveChannelSnapshot(te.pool.getDiscordSession(), te.threadID)
+	_, snapSpan := te.startPromptStep(ctx, spanPromptChannelSnapshot)
+	snap, snapOK := resolveChannelSnapshot(te.pool.getDiscordSession(), te.threadID)
+	snapSpan.SetAttributes(attrPromptSnapshotOK.Bool(snapOK))
+	snapSpan.End()
 	isColdStart := te.isCold && !te.isEphemeral
 	isChannelMode := strings.EqualFold(te.policy.Mode, "channel")
-	summary, lookbackMsgs := te.buildColdStartLookback(snap, isColdStart, isChannelMode, getTurnHistory)
+	summary, lookbackMsgs := te.buildColdStartLookback(ctx, snap, isColdStart, isChannelMode, getTurnHistory)
 
-	prevID := te.resolveColdStartPreviousSessionID(isColdStart)
+	prevID := te.resolveColdStartPreviousSessionID(ctx, isColdStart)
 	var prevContext string
 	if isColdStart && prevID != "" && te.pool != nil && te.pool.sessionMgr != nil {
+		_, prevSpan := te.startPromptStep(ctx, spanPromptPreviousSession)
 		prevContext = te.pool.sessionMgr.ExtractResponseSince(prevID, time.Time{})
+		prevSpan.SetAttributes(attrPromptPrevSessionChars.Int(len(prevContext)))
+		prevSpan.End()
 	}
 
+	_, instrSpan := te.startPromptStep(ctx, spanPromptScopeInstr)
 	instructions := config.LoadScopeInstructions(te.effectiveName)
+	instrSpan.End()
 	if instructions != "" {
 		te.logf("[WorkerPool] Injected channel instructions for #%s into prompt", te.effectiveName)
 	}
@@ -393,7 +413,7 @@ func (te *turnExecution) buildTurnPrompt() {
 		te.logf("[WorkerPool] Injected coordination context into prompt for thread %s", te.threadID)
 	}
 
-	ambientCtx := te.resolveAmbientPromptContext()
+	ambientCtx := te.resolveAmbientPromptContext(ctx)
 	te.backfillBurstChannelAndThreadNames()
 
 	var tz string
@@ -418,6 +438,7 @@ func (te *turnExecution) buildTurnPrompt() {
 		InjectedHookContext:    te.injectedHookContext,
 		Timezone:               tz,
 	})
+	trace.SpanFromContext(ctx).SetAttributes(attrPromptColdStart.Bool(isColdStart), attrPromptChars.Int(len(te.turnPrompt)))
 }
 
 func latestHistoryMessageID(histMsgs []HistoryMessage) string {
@@ -449,38 +470,64 @@ func (te *turnExecution) resolveSummarizerLLMAndModel() (LLMFunc, string) {
 	return llmFn, flashModel
 }
 
-func (te *turnExecution) resolveThreadColdStartSummary(getTurnHistory func(int) []HistoryMessage) string {
+// Values of aerial.prompt.summary_outcome.
+const (
+	summaryOutcomeCacheHit    = "cache_hit"
+	summaryOutcomeRefreshed   = "refreshed"
+	summaryOutcomeFailed      = "failed"
+	summaryOutcomeNoHistory   = "no_history"
+	summaryOutcomeEmptyResult = "empty_result"
+)
+
+func (te *turnExecution) resolveThreadColdStartSummary(ctx context.Context, getTurnHistory func(context.Context, int) []HistoryMessage) string {
+	ctx, span := te.startPromptStep(ctx, spanPromptThreadSummary)
+	defer span.End()
+	summary, outcome, err := te.refreshThreadColdStartSummary(ctx, getTurnHistory)
+	span.SetAttributes(attrPromptSummaryOutcome.String(outcome))
+	recordSpanError(span, err)
+	return summary
+}
+
+// refreshThreadColdStartSummary returns the thread summary to inject plus the outcome that produced it.
+func (te *turnExecution) refreshThreadColdStartSummary(ctx context.Context, getTurnHistory func(context.Context, int) []HistoryMessage) (string, string, error) {
+	_, loadSpan := te.startPromptStep(ctx, spanPromptSummaryLoad)
 	cachedSum, lastMsgID := te.getThreadSummary(te.threadID)
-	histMsgs := getTurnHistory(100)
+	loadSpan.End()
+	histMsgs := getTurnHistory(ctx, 100)
 	if len(histMsgs) == 0 {
-		return cachedSum
+		return cachedSum, summaryOutcomeNoHistory, nil
 	}
 	latestMsgID := latestHistoryMessageID(histMsgs)
 	if cachedSum != "" && lastMsgID != "" && lastMsgID == latestMsgID {
 		te.logf("[WorkerPool] Using cached thread summary for thread %s (watermark msg: %s)", te.threadID, lastMsgID)
-		return cachedSum
+		return cachedSum, summaryOutcomeCacheHit, nil
 	}
 	llmFn, flashModel := te.resolveSummarizerLLMAndModel()
-	sumCtx, sumCancel := context.WithTimeout(te.pool.ctx, DefaultThreadSummaryTimeout)
+	sumCtx, sumCancel := context.WithTimeout(promptStepCtx(te.pool.ctx, ctx), DefaultThreadSummaryTimeout)
 	defer sumCancel()
 	var opts []ThreadSummaryOption
-	if cachedSum != "" && lastMsgID != "" {
+	hadPrior := cachedSum != "" && lastMsgID != ""
+	if hadPrior {
 		opts = append(opts, WithPriorSummary(cachedSum, lastMsgID))
 	}
+	trace.SpanFromContext(ctx).SetAttributes(attrPromptSummaryHadPrior.Bool(hadPrior))
 	newSum, sumErr := SummarizeThreadHistoryWithGroup(sumCtx, te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs, opts...)
 	if sumErr != nil {
 		te.logf("[WorkerPool] Warning: Thread history summarization failed for thread %s: %v. Falling back to raw lookback.", te.threadID, sumErr)
-		return cachedSum
+		return cachedSum, summaryOutcomeFailed, sumErr
 	}
-	if newSum != "" {
-		te.saveThreadSummary(te.threadID, newSum, latestMsgID)
+	if newSum == "" {
+		return "", summaryOutcomeEmptyResult, nil
 	}
-	return newSum
+	_, saveSpan := te.startPromptStep(ctx, spanPromptSummarySave)
+	te.saveThreadSummary(te.threadID, newSum, latestMsgID)
+	saveSpan.End()
+	return newSum, summaryOutcomeRefreshed, nil
 }
 
-func (te *turnExecution) resolveColdStartLookbackMessages(isColdStart, isChannelMode bool, getTurnHistory func(int) []HistoryMessage) []HistoryMessage {
+func (te *turnExecution) resolveColdStartLookbackMessages(ctx context.Context, isColdStart, isChannelMode bool, getTurnHistory func(context.Context, int) []HistoryMessage) []HistoryMessage {
 	if !te.isEphemeral && (isColdStart || isChannelMode) {
-		lookbackMsgs := getTurnHistory(10)
+		lookbackMsgs := getTurnHistory(ctx, 10)
 		if len(lookbackMsgs) > 0 {
 			te.logf("[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
 		}
@@ -489,17 +536,17 @@ func (te *turnExecution) resolveColdStartLookbackMessages(isColdStart, isChannel
 	return nil
 }
 
-func (te *turnExecution) buildColdStartLookback(snap ChannelSnapshot, isColdStart, isChannelMode bool, getTurnHistory func(int) []HistoryMessage) (string, []HistoryMessage) {
+func (te *turnExecution) buildColdStartLookback(ctx context.Context, snap ChannelSnapshot, isColdStart, isChannelMode bool, getTurnHistory func(context.Context, int) []HistoryMessage) (string, []HistoryMessage) {
 	var summary string
 	isThreadColdStart := snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID && isColdStart && !isChannelMode
 	if isThreadColdStart {
-		summary = te.resolveThreadColdStartSummary(getTurnHistory)
+		summary = te.resolveThreadColdStartSummary(ctx, getTurnHistory)
 		if summary != "" {
 			te.logf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", te.threadID)
 		}
 	}
 
-	lookbackMsgs := te.resolveColdStartLookbackMessages(isColdStart, isChannelMode, getTurnHistory)
+	lookbackMsgs := te.resolveColdStartLookbackMessages(ctx, isColdStart, isChannelMode, getTurnHistory)
 	return summary, lookbackMsgs
 }
 
@@ -560,28 +607,42 @@ func AssembleDispatchPrompt(input DispatchPromptInput) string {
 	return strings.TrimSpace(basePrompt)
 }
 
-func (te *turnExecution) buildDispatchPrompt() string {
+// buildDispatchPrompt assembles the dispatch prompt. ctx carries the prompt.build span and is
+// used only to parent step spans; each step keeps its own cancellation source.
+func (te *turnExecution) buildDispatchPrompt(ctx context.Context) string {
 	if te == nil || te.dispatch == nil {
 		return ""
 	}
 	d := *te.dispatch
 	var prevID string
 	var recent []db.Dispatch
-	if !te.isEphemeral && te.isCold && strings.TrimSpace(d.SessionID) != "" {
-		prevID = te.resolveColdStartPreviousSessionID(true)
+	isColdStart := !te.isEphemeral && te.isCold
+	if isColdStart && strings.TrimSpace(d.SessionID) != "" {
+		prevID = te.resolveColdStartPreviousSessionID(ctx, true)
 		if s := te.store(); s != nil {
-			rec, err := s.GetRecentSessionDispatches(te.poolCtx(), d.SessionID, 10)
-			if err != nil {
-				te.logf("[WorkerPool] Warning getting recent session dispatches for %s: %v", d.SessionID, err)
-			} else {
-				recent = rec
-			}
+			recent = te.fetchRecentDispatches(ctx, s, d.SessionID)
 		}
 	}
-	return AssembleDispatchPrompt(DispatchPromptInput{
+	prompt := AssembleDispatchPrompt(DispatchPromptInput{
 		Dispatch:          d,
 		PreviousSessionID: prevID,
-		IsColdStart:       !te.isEphemeral && te.isCold,
+		IsColdStart:       isColdStart,
 		RecentDispatches:  recent,
 	})
+	trace.SpanFromContext(ctx).SetAttributes(attrPromptColdStart.Bool(isColdStart), attrPromptChars.Int(len(prompt)))
+	return prompt
+}
+
+// fetchRecentDispatches loads the session's recent dispatch history under a prompt.recent_dispatches span.
+func (te *turnExecution) fetchRecentDispatches(ctx context.Context, s db.Store, sessionID string) []db.Dispatch {
+	stepCtx, span := te.startPromptStep(promptStepCtx(te.poolCtx(), ctx), spanPromptRecentDispatches)
+	defer span.End()
+	rec, err := s.GetRecentSessionDispatches(stepCtx, sessionID, 10)
+	if err != nil {
+		recordSpanError(span, err)
+		te.logf("[WorkerPool] Warning getting recent session dispatches for %s: %v", sessionID, err)
+		return nil
+	}
+	span.SetAttributes(attrPromptDispatchCount.Int(len(rec)))
+	return rec
 }

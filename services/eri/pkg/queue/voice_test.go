@@ -668,7 +668,7 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 		policy: config.ChannelPolicy{AmbientContext: &config.AmbientContextConfig{}},
 	}
 	_, _ = teSumClassifier.resolveSummarizerLLMAndModel()
-	_ = teSumClassifier.resolveAmbientPromptContext()
+	_ = teSumClassifier.resolveAmbientPromptContext(context.Background())
 	_ = teSumClassifier.fetchTurnHistory(context.Background(), 5)
 	teSnowflakeHist := &turnExecution{threadID: "123456789012345678", pool: &WorkerPool{cfg: WorkerPoolConfig{DiscordSession: dgHist, Store: fake}}}
 	_ = teSnowflakeHist.fetchTurnHistory(context.Background(), 5)

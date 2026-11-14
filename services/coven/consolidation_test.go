@@ -28,31 +28,28 @@ func (s *sequenceOllamaClient) GenerateEmbedding(ctx context.Context, text strin
 	return emb, nil
 }
 
-func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
-	ctx := context.Background()
-	dim := ExpectedEmbeddingDim
-	baseEmb := make([]float32, dim)
-	baseEmb[0] = 1.0
+type processThreadFactsContextCase struct {
+	name                string
+	nilStore            bool
+	storeFailOp         string
+	unextractedErr      bool
+	emptyTurns          bool
+	withSummary         bool
+	withPriorTurns      bool
+	llmErr              error
+	parseErr            bool
+	manyCandidates      bool
+	wantCandidateCapped bool
+	withTrajectory      bool
+	withReinforceIDs    bool
+	wantReinforcedID    int64
+	ollamaErr           error
+	wantWatermark       bool
+	wantErr             bool
+}
 
-	tests := []struct {
-		name                string
-		nilStore            bool
-		storeFailOp         string
-		unextractedErr      bool
-		emptyTurns          bool
-		withSummary         bool
-		withPriorTurns      bool
-		llmErr              error
-		parseErr            bool
-		manyCandidates      bool
-		wantCandidateCapped bool
-		withTrajectory      bool
-		withReinforceIDs    bool
-		wantReinforcedID    int64
-		ollamaErr           error
-		wantWatermark       bool
-		wantErr             bool
-	}{
+func processThreadFactsContextCases() []processThreadFactsContextCase {
+	return []processThreadFactsContextCase{
 		{
 			name:     "NilStoreError",
 			nilStore: true,
@@ -137,122 +134,159 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 			wantErr:       false,
 		},
 	}
+}
 
+func setupProcessThreadFactsStore(tc processThreadFactsContextCase, baseEmb []float32) (Store, *TestMemStore) {
+	if tc.nilStore {
+		return nil, nil
+	}
+	mem := newTestMemStore()
+	threadID := "th-test"
+	if tc.unextractedErr {
+		mem.SetFail("GetUnextractedAdminTurns", errors.New("db error"))
+	} else if !tc.emptyTurns {
+		mem.unextractedTurns[threadID] = []Message{
+			{RowID: 10, ThreadID: threadID, Content: "He likes matcha tea", ResponseText: "Understood", Status: "COMPLETED", IsAdmin: true},
+		}
+	}
+	if tc.withSummary {
+		mem.threadSummaries[threadID] = "User name is Bob"
+	}
+	if tc.withPriorTurns {
+		mem.threadPriorTurns[threadID] = []Message{
+			{RowID: 5, ThreadID: threadID, Content: "My name is Bob", ResponseText: "Hello Bob", Status: "COMPLETED", IsAdmin: true},
+		}
+	}
+	if tc.withTrajectory {
+		mem.threadRetrievedFacts[threadID] = []string{"- [id:42] User likes matcha"}
+		mem.threadToolCalls[threadID] = []string{`memory_search("matcha")`}
+	}
+	if tc.withReinforceIDs {
+		mem.facts[42] = &Fact{ID: 42, FactText: "User likes matcha", ReinforceCount: 1}
+		mem.embeddings[42] = baseEmb
+	}
+	if tc.storeFailOp != "" {
+		mem.SetFail(tc.storeFailOp, errors.New("simulated store failure"))
+	}
+	return mem, mem
+}
+
+func buildProcessThreadFactsLLM(tc processThreadFactsContextCase, capturedPrompt *string, llmSpanID *trace.SpanID) LLMClientFunc {
+	return func(c context.Context, prompt string) (string, error) {
+		*capturedPrompt = prompt
+		*llmSpanID = trace.SpanContextFromContext(c).SpanID()
+		if tc.llmErr != nil {
+			return "", tc.llmErr
+		}
+		if tc.parseErr {
+			return "invalid json response", nil
+		}
+		if tc.manyCandidates {
+			return `{"facts":[
+				{"fact_text":"Candidate fact text number 1"},
+				{"fact_text":"Candidate fact text number 2"},
+				{"fact_text":"Candidate fact text number 3"},
+				{"fact_text":"Candidate fact text number 4"},
+				{"fact_text":"Candidate fact text number 5"},
+				{"fact_text":"Candidate fact text number 6"},
+				{"fact_text":"Candidate fact text number 7"}
+			]}`, nil
+		}
+		if tc.withReinforceIDs {
+			return `{"facts":[],"reinforced_ids":[42,42,-1,0]}`, nil
+		}
+		return `{"facts":[{"fact_text":"Bob likes matcha tea in the afternoon"}]}`, nil
+	}
+}
+
+func assertProcessThreadFactsPrompt(t *testing.T, tc processThreadFactsContextCase, capturedPrompt string, llmSpanID trace.SpanID) {
+	t.Helper()
+	if capturedPrompt == "" {
+		return
+	}
+	name, root, attrs := endedSpanSummary(llmSpanID)
+	if name != "coven.extract" || !root || attrs["aerial.coven.batch_size"] == "" {
+		t.Errorf("LLM call span = %q root=%v attrs=%v, want root coven.extract with aerial.coven.batch_size", name, root, attrs)
+	}
+	assertPromptContent(t, tc, capturedPrompt)
+}
+
+func assertPromptContent(t *testing.T, tc processThreadFactsContextCase, prompt string) {
+	t.Helper()
+	if tc.withSummary && !strings.Contains(prompt, "PRIOR THREAD SUMMARY:\nUser name is Bob") {
+		t.Errorf("captured prompt missing summary: %s", prompt)
+	}
+	if tc.withPriorTurns && !strings.Contains(prompt, "PRIOR TURNS (FOR COREFERENCE RESOLUTION ONLY") {
+		t.Errorf("captured prompt missing prior turns: %s", prompt)
+	}
+	if tc.withTrajectory {
+		if !strings.Contains(prompt, "RETRIEVED MEMORY IN TURN:\n- [id:42] User likes matcha") {
+			t.Errorf("captured prompt missing retrieved memory: %s", prompt)
+		}
+		if !strings.Contains(prompt, "TOOL CALLS IN TURN:\nmemory_search(\"matcha\")") {
+			t.Errorf("captured prompt missing tool calls: %s", prompt)
+		}
+	}
+}
+
+func assertProcessThreadFactsStore(t *testing.T, tc processThreadFactsContextCase, mem *TestMemStore) {
+	t.Helper()
+	if mem == nil {
+		return
+	}
+	if tc.wantReinforcedID > 0 {
+		if f, ok := mem.facts[tc.wantReinforcedID]; !ok || f.ReinforceCount != 2 {
+			t.Errorf("fact %d reinforce count = %v, want 2", tc.wantReinforcedID, f)
+		}
+	}
+	if tc.wantCandidateCapped && len(mem.facts) != 5 {
+		t.Errorf("len(mem.facts) = %d, want 5 (capped)", len(mem.facts))
+	}
+	assertProcessThreadFactsWatermark(t, tc.wantWatermark, mem)
+}
+
+func assertProcessThreadFactsWatermark(t *testing.T, wantWatermark bool, mem *TestMemStore) {
+	t.Helper()
+	wm, ok := mem.watermarks["th-test"]
+	if wantWatermark && wm != 10 {
+		t.Errorf("watermark = %d, want 10", wm)
+	} else if !wantWatermark && ok && wm != 0 {
+		t.Errorf("watermark unexpectedly advanced to %d, want not advanced", wm)
+	}
+}
+
+func runProcessThreadFactsContextCase(t *testing.T, tc processThreadFactsContextCase, baseEmb []float32) {
+	t.Helper()
+	store, mem := setupProcessThreadFactsStore(tc, baseEmb)
+
+	var client OllamaClient
+	if tc.manyCandidates {
+		client = &sequenceOllamaClient{}
+	} else {
+		client = &MockOllamaClient{embedding: baseEmb, err: tc.ollamaErr}
+	}
+
+	var capturedPrompt string
+	var llmSpanID trace.SpanID
+	llm := buildProcessThreadFactsLLM(tc, &capturedPrompt, &llmSpanID)
+
+	err := processThreadFacts(context.Background(), store, client, llm, "th-test")
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("processThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	assertProcessThreadFactsPrompt(t, tc, capturedPrompt, llmSpanID)
+	assertProcessThreadFactsStore(t, tc, mem)
+}
+
+func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
+	dim := ExpectedEmbeddingDim
+	baseEmb := make([]float32, dim)
+	baseEmb[0] = 1.0
+
+	tests := processThreadFactsContextCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var store Store
-			var mem *TestMemStore
-			if !tc.nilStore {
-				mem = newTestMemStore()
-				store = mem
-				threadID := "th-test"
-				if tc.unextractedErr {
-					mem.SetFail("GetUnextractedAdminTurns", errors.New("db error"))
-				} else if !tc.emptyTurns {
-					mem.unextractedTurns[threadID] = []Message{
-						{RowID: 10, ThreadID: threadID, Content: "He likes matcha tea", ResponseText: "Understood", Status: "COMPLETED", IsAdmin: true},
-					}
-				}
-				if tc.withSummary {
-					mem.threadSummaries[threadID] = "User name is Bob"
-				}
-				if tc.withPriorTurns {
-					mem.threadPriorTurns[threadID] = []Message{
-						{RowID: 5, ThreadID: threadID, Content: "My name is Bob", ResponseText: "Hello Bob", Status: "COMPLETED", IsAdmin: true},
-					}
-				}
-				if tc.withTrajectory {
-					mem.threadRetrievedFacts[threadID] = []string{"- [id:42] User likes matcha"}
-					mem.threadToolCalls[threadID] = []string{`memory_search("matcha")`}
-				}
-				if tc.withReinforceIDs {
-					mem.facts[42] = &Fact{ID: 42, FactText: "User likes matcha", ReinforceCount: 1}
-					mem.embeddings[42] = baseEmb
-				}
-				if tc.storeFailOp != "" {
-					mem.SetFail(tc.storeFailOp, errors.New("simulated store failure"))
-				}
-			}
-
-			var client OllamaClient
-			if tc.manyCandidates {
-				client = &sequenceOllamaClient{}
-			} else {
-				client = &MockOllamaClient{embedding: baseEmb, err: tc.ollamaErr}
-			}
-
-			var capturedPrompt string
-			var llmSpanID trace.SpanID
-			llm := func(c context.Context, prompt string) (string, error) {
-				capturedPrompt = prompt
-				llmSpanID = trace.SpanContextFromContext(c).SpanID()
-				if tc.llmErr != nil {
-					return "", tc.llmErr
-				}
-				if tc.parseErr {
-					return "invalid json response", nil
-				}
-				if tc.manyCandidates {
-					return `{"facts":[
-						{"fact_text":"Candidate fact text number 1"},
-						{"fact_text":"Candidate fact text number 2"},
-						{"fact_text":"Candidate fact text number 3"},
-						{"fact_text":"Candidate fact text number 4"},
-						{"fact_text":"Candidate fact text number 5"},
-						{"fact_text":"Candidate fact text number 6"},
-						{"fact_text":"Candidate fact text number 7"}
-					]}`, nil
-				}
-				if tc.withReinforceIDs {
-					return `{"facts":[],"reinforced_ids":[42,42,-1,0]}`, nil
-				}
-				return `{"facts":[{"fact_text":"Bob likes matcha tea in the afternoon"}]}`, nil
-			}
-
-			err := processThreadFacts(ctx, store, client, llm, "th-test")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("processThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if capturedPrompt != "" {
-				name, root, attrs := endedSpanSummary(llmSpanID)
-				if name != "coven.extract" || !root || attrs["aerial.coven.batch_size"] == "" {
-					t.Errorf("LLM call span = %q root=%v attrs=%v, want root coven.extract with aerial.coven.batch_size", name, root, attrs)
-				}
-			}
-			if tc.withSummary && !strings.Contains(capturedPrompt, "PRIOR THREAD SUMMARY:\nUser name is Bob") {
-				t.Errorf("captured prompt missing summary: %s", capturedPrompt)
-			}
-			if tc.withPriorTurns && !strings.Contains(capturedPrompt, "PRIOR TURNS (FOR COREFERENCE RESOLUTION ONLY") {
-				t.Errorf("captured prompt missing prior turns: %s", capturedPrompt)
-			}
-			if tc.withTrajectory {
-				if !strings.Contains(capturedPrompt, "RETRIEVED MEMORY IN TURN:\n- [id:42] User likes matcha") {
-					t.Errorf("captured prompt missing retrieved memory: %s", capturedPrompt)
-				}
-				if !strings.Contains(capturedPrompt, "TOOL CALLS IN TURN:\nmemory_search(\"matcha\")") {
-					t.Errorf("captured prompt missing tool calls: %s", capturedPrompt)
-				}
-			}
-			if tc.wantReinforcedID > 0 && mem != nil {
-				if f, ok := mem.facts[tc.wantReinforcedID]; !ok || f.ReinforceCount != 2 {
-					t.Errorf("fact %d reinforce count = %v, want 2", tc.wantReinforcedID, f)
-				}
-			}
-			if tc.wantCandidateCapped && mem != nil {
-				// 5 candidates should be inserted, not 7
-				if len(mem.facts) != 5 {
-					t.Errorf("len(mem.facts) = %d, want 5 (capped)", len(mem.facts))
-				}
-			}
-			if tc.wantWatermark && mem != nil {
-				if mem.watermarks["th-test"] != 10 {
-					t.Errorf("watermark = %d, want 10", mem.watermarks["th-test"])
-				}
-			} else if !tc.wantWatermark && mem != nil {
-				if wm, ok := mem.watermarks["th-test"]; ok && wm != 0 {
-					t.Errorf("watermark unexpectedly advanced to %d, want not advanced", wm)
-				}
-			}
+			runProcessThreadFactsContextCase(t, tc, baseEmb)
 		})
 	}
 }
@@ -481,47 +515,20 @@ func makeScoredFactFixture(id int64, text string, emb []float32) ScoredFactWithE
 	}
 }
 
-func TestFindConsolidationCliques(t *testing.T) {
-	vecs := makePairwiseSimilarVectors(8, 0.78) // Pairwise similarity = 0.78 (in [0.75, 1.0])
-	looseVecs := makePairwiseSimilarVectors(3, 0.72)
-	orthogonalVec := make([]float32, ExpectedEmbeddingDim)
-	orthogonalVec[ExpectedEmbeddingDim-1] = 1.0 // Orthogonal to vecs[0..7]
+type findConsolidationCliquesCase struct {
+	name      string
+	facts     []ScoredFactWithEmbedding
+	minSim    float64
+	maxSim    float64
+	minSize   int
+	maxSize   int
+	wantCount int
+	wantSizes []int
+	wantIDs   []int64
+}
 
-	vecsB := make([][]float32, 3)
-	for i := range 3 {
-		v := make([]float32, ExpectedEmbeddingDim)
-		v[10] = float32(math.Sqrt(0.78))
-		v[11+i] = float32(math.Sqrt(0.22))
-		vecsB[i] = v
-	}
-
-	seedVec := make([]float32, ExpectedEmbeddingDim)
-	seedVec[0] = 1.0
-	borderlineVec := make([]float32, ExpectedEmbeddingDim)
-	borderlineVec[0] = 0.80
-	borderlineVec[1] = -0.60
-	tightVec := make([]float32, ExpectedEmbeddingDim)
-	tightVec[0] = 0.95
-	tightVec[1] = float32(math.Sqrt(1.0 - 0.95*0.95))
-
-	hijackVec := make([]float32, ExpectedEmbeddingDim)
-	hijackVec[0], hijackVec[1] = 0.76, float32(math.Sqrt(1.0-0.76*0.76))
-	emailVec1 := make([]float32, ExpectedEmbeddingDim)
-	emailVec1[0] = 1.0
-	emailVec2 := make([]float32, ExpectedEmbeddingDim)
-	emailVec2[0], emailVec2[1] = 0.92, -float32(math.Sqrt(1.0-0.92*0.92))
-
-	tests := []struct {
-		name      string
-		facts     []ScoredFactWithEmbedding
-		minSim    float64
-		maxSim    float64
-		minSize   int
-		maxSize   int
-		wantCount int
-		wantSizes []int
-		wantIDs   []int64
-	}{
+func findConsolidationCliquesCases(vecs, vecsB, looseVecs [][]float32, orthogonalVec, seedVec, borderlineVec, tightVec, hijackVec, emailVec1, emailVec2 []float32) []findConsolidationCliquesCase {
+	return []findConsolidationCliquesCase{
 		{
 			name:      "EmptyFacts",
 			facts:     nil,
@@ -654,56 +661,89 @@ func TestFindConsolidationCliques(t *testing.T) {
 			wantIDs:   []int64{2, 3},
 		},
 	}
+}
 
+func runFindConsolidationCliquesCase(t *testing.T, tc findConsolidationCliquesCase) {
+	t.Helper()
+	cliques := FindConsolidationCliques(tc.facts, tc.minSim, tc.maxSim, tc.minSize, tc.maxSize)
+	if len(cliques) != tc.wantCount {
+		t.Fatalf("FindConsolidationCliques() len = %d, want %d", len(cliques), tc.wantCount)
+	}
+	for i, size := range tc.wantSizes {
+		if len(cliques[i]) != size {
+			t.Errorf("clique %d size = %d, want %d", i, len(cliques[i]), size)
+		}
+	}
+	if len(tc.wantIDs) > 0 && len(cliques) > 0 {
+		for i, wantID := range tc.wantIDs {
+			if cliques[0][i].Fact.ID != wantID {
+				t.Errorf("clique[0][%d].Fact.ID = %d, want %d", i, cliques[0][i].Fact.ID, wantID)
+			}
+		}
+	}
+}
+
+func TestFindConsolidationCliques(t *testing.T) {
+	vecs := makePairwiseSimilarVectors(8, 0.78) // Pairwise similarity = 0.78 (in [0.75, 1.0])
+	looseVecs := makePairwiseSimilarVectors(3, 0.72)
+	orthogonalVec := make([]float32, ExpectedEmbeddingDim)
+	orthogonalVec[ExpectedEmbeddingDim-1] = 1.0 // Orthogonal to vecs[0..7]
+
+	vecsB := make([][]float32, 3)
+	for i := range 3 {
+		v := make([]float32, ExpectedEmbeddingDim)
+		v[10] = float32(math.Sqrt(0.78))
+		v[11+i] = float32(math.Sqrt(0.22))
+		vecsB[i] = v
+	}
+
+	seedVec := make([]float32, ExpectedEmbeddingDim)
+	seedVec[0] = 1.0
+	borderlineVec := make([]float32, ExpectedEmbeddingDim)
+	borderlineVec[0] = 0.80
+	borderlineVec[1] = -0.60
+	tightVec := make([]float32, ExpectedEmbeddingDim)
+	tightVec[0] = 0.95
+	tightVec[1] = float32(math.Sqrt(1.0 - 0.95*0.95))
+
+	hijackVec := make([]float32, ExpectedEmbeddingDim)
+	hijackVec[0], hijackVec[1] = 0.76, float32(math.Sqrt(1.0-0.76*0.76))
+	emailVec1 := make([]float32, ExpectedEmbeddingDim)
+	emailVec1[0] = 1.0
+	emailVec2 := make([]float32, ExpectedEmbeddingDim)
+	emailVec2[0], emailVec2[1] = 0.92, -float32(math.Sqrt(1.0-0.92*0.92))
+
+	tests := findConsolidationCliquesCases(vecs, vecsB, looseVecs, orthogonalVec, seedVec, borderlineVec, tightVec, hijackVec, emailVec1, emailVec2)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cliques := FindConsolidationCliques(tc.facts, tc.minSim, tc.maxSim, tc.minSize, tc.maxSize)
-			if len(cliques) != tc.wantCount {
-				t.Fatalf("FindConsolidationCliques() len = %d, want %d", len(cliques), tc.wantCount)
-			}
-			for i, size := range tc.wantSizes {
-				if len(cliques[i]) != size {
-					t.Errorf("clique %d size = %d, want %d", i, len(cliques[i]), size)
-				}
-			}
-			if len(tc.wantIDs) > 0 && len(cliques) > 0 {
-				for i, wantID := range tc.wantIDs {
-					if cliques[0][i].Fact.ID != wantID {
-						t.Errorf("clique[0][%d].Fact.ID = %d, want %d", i, cliques[0][i].Fact.ID, wantID)
-					}
-				}
-			}
+			runFindConsolidationCliquesCase(t, tc)
 		})
 	}
 }
 
-func TestConsolidateFactClusters(t *testing.T) {
-	ctx := context.Background()
-	vecs := makePairwiseSimilarVectors(4, 0.78)
-	validJSON := `{"facts":[{"category":"pref","fact_text":"User prefers dark mode everywhere","importance_score":0.85}]}`
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
+type consolidateFactClustersCase struct {
+	name                string
+	ctx                 context.Context
+	nilStore            bool
+	nilOllama           bool
+	nilLLM              bool
+	storeFail           string
+	lockMutex           bool
+	addFacts            bool
+	seedWatermark       int64
+	seedReinforceCounts []int
+	llmResp             string
+	llmErr              error
+	ollamaErr           error
+	wantErr             bool
+	wantCount           int
+	wantRemaining       int
+	wantReinforcedCount int
+	wantWatermark       int64
+}
 
-	tests := []struct {
-		name                string
-		ctx                 context.Context
-		nilStore            bool
-		nilOllama           bool
-		nilLLM              bool
-		storeFail           string
-		lockMutex           bool
-		addFacts            bool
-		seedWatermark       int64
-		seedReinforceCounts []int
-		llmResp             string
-		llmErr              error
-		ollamaErr           error
-		wantErr             bool
-		wantCount           int
-		wantRemaining       int
-		wantReinforcedCount int
-		wantWatermark       int64
-	}{
+func consolidateFactClustersBasicCases(ctx context.Context, validJSON string) []consolidateFactClustersCase {
+	return []consolidateFactClustersCase{
 		{
 			name:     "NilStoreError",
 			ctx:      ctx,
@@ -798,6 +838,11 @@ func TestConsolidateFactClusters(t *testing.T) {
 			wantCount:     2,
 			wantRemaining: 1,
 		},
+	}
+}
+
+func consolidateFactClustersAdvancedCases(ctx, canceledCtx context.Context, validJSON string) []consolidateFactClustersCase {
+	return []consolidateFactClustersCase{
 		{
 			name:          "TwoCandidateFactsForPairAbortsMergeWithoutDeletion",
 			ctx:           ctx,
@@ -920,70 +965,99 @@ func TestConsolidateFactClusters(t *testing.T) {
 			wantRemaining: 1,
 		},
 	}
+}
 
+func consolidateFactClustersCases(ctx, canceledCtx context.Context, validJSON string) []consolidateFactClustersCase {
+	return append(consolidateFactClustersBasicCases(ctx, validJSON), consolidateFactClustersAdvancedCases(ctx, canceledCtx, validJSON)...)
+}
+
+func setupConsolidateFactStore(tc consolidateFactClustersCase, vecs [][]float32) *TestMemStore {
+	mem := newTestMemStore()
+	if tc.addFacts {
+		ctx := context.Background()
+		_, _ = mem.InsertFact(ctx, "Fact A", vecs[0])
+		_, _ = mem.InsertFact(ctx, "Fact B", vecs[1])
+		_, _ = mem.InsertFact(ctx, "Fact C", vecs[2])
+	}
+	if tc.seedWatermark > 0 {
+		mem.watermarks[DreamingWatermarkThreadID] = tc.seedWatermark
+	}
+	if len(tc.seedReinforceCounts) == 3 && len(mem.facts) >= 3 {
+		mem.facts[1].ReinforceCount = tc.seedReinforceCounts[0]
+		mem.facts[2].ReinforceCount = tc.seedReinforceCounts[1]
+		mem.facts[3].ReinforceCount = tc.seedReinforceCounts[2]
+	}
+	if tc.storeFail != "" {
+		mem.SetFail(tc.storeFail, errors.New("store failed"))
+	}
+	return mem
+}
+
+func assertConsolidateFactResults(t *testing.T, tc consolidateFactClustersCase, mem *TestMemStore, count int) {
+	t.Helper()
+	if count != tc.wantCount {
+		t.Errorf("count = %d, want %d", count, tc.wantCount)
+	}
+	if tc.wantRemaining > 0 && len(mem.facts) != tc.wantRemaining {
+		t.Errorf("len(mem.facts) = %d, want %d", len(mem.facts), tc.wantRemaining)
+	}
+	if tc.wantReinforcedCount > 0 {
+		for _, f := range mem.facts {
+			if f.ReinforceCount != tc.wantReinforcedCount {
+				t.Errorf("consolidated fact reinforce_count = %d, want %d", f.ReinforceCount, tc.wantReinforcedCount)
+			}
+		}
+	}
+	if tc.wantWatermark > 0 && mem.watermarks[DreamingWatermarkThreadID] != tc.wantWatermark {
+		t.Errorf("dreaming watermark = %d, want %d", mem.watermarks[DreamingWatermarkThreadID], tc.wantWatermark)
+	}
+}
+
+func runConsolidateFactClustersCase(t *testing.T, tc consolidateFactClustersCase, vecs [][]float32) {
+	t.Helper()
+	mem := setupConsolidateFactStore(tc, vecs)
+
+	var store Store = mem
+	if tc.nilStore {
+		store = nil
+	}
+	var client OllamaClient = &MockOllamaClient{embedding: vecs[0], err: tc.ollamaErr}
+	if tc.nilOllama {
+		client = nil
+	}
+	var llm LLMClientFunc
+	if !tc.nilLLM {
+		llm = func(c context.Context, p string) (string, error) {
+			if tc.llmErr != nil {
+				return "", tc.llmErr
+			}
+			return tc.llmResp, nil
+		}
+	}
+
+	if tc.lockMutex {
+		extractionMutex.Lock()
+		defer extractionMutex.Unlock()
+	}
+
+	count, err := ConsolidateFactClusters(tc.ctx, store, client, llm)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ConsolidateFactClusters() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	assertConsolidateFactResults(t, tc, mem, count)
+}
+
+func TestConsolidateFactClusters(t *testing.T) {
+	ctx := context.Background()
+	vecs := makePairwiseSimilarVectors(4, 0.78)
+	validJSON := `{"facts":[{"category":"pref","fact_text":"User prefers dark mode everywhere","importance_score":0.85}]}`
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := consolidateFactClustersCases(ctx, canceledCtx, validJSON)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mem := newTestMemStore()
-			if tc.addFacts {
-				_, _ = mem.InsertFact(ctx, "Fact A", vecs[0])
-				_, _ = mem.InsertFact(ctx, "Fact B", vecs[1])
-				_, _ = mem.InsertFact(ctx, "Fact C", vecs[2])
-			}
-			if tc.seedWatermark > 0 {
-				mem.watermarks[DreamingWatermarkThreadID] = tc.seedWatermark
-			}
-			if len(tc.seedReinforceCounts) == 3 && len(mem.facts) >= 3 {
-				mem.facts[1].ReinforceCount = tc.seedReinforceCounts[0]
-				mem.facts[2].ReinforceCount = tc.seedReinforceCounts[1]
-				mem.facts[3].ReinforceCount = tc.seedReinforceCounts[2]
-			}
-			if tc.storeFail != "" {
-				mem.SetFail(tc.storeFail, errors.New("store failed"))
-			}
-
-			var store Store = mem
-			if tc.nilStore {
-				store = nil
-			}
-			var client OllamaClient = &MockOllamaClient{embedding: vecs[0], err: tc.ollamaErr}
-			if tc.nilOllama {
-				client = nil
-			}
-			var llm LLMClientFunc = func(c context.Context, p string) (string, error) {
-				if tc.llmErr != nil {
-					return "", tc.llmErr
-				}
-				return tc.llmResp, nil
-			}
-			if tc.nilLLM {
-				llm = nil
-			}
-
-			if tc.lockMutex {
-				extractionMutex.Lock()
-				defer extractionMutex.Unlock()
-			}
-
-			count, err := ConsolidateFactClusters(tc.ctx, store, client, llm)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ConsolidateFactClusters() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if count != tc.wantCount {
-				t.Errorf("count = %d, want %d", count, tc.wantCount)
-			}
-			if tc.wantRemaining > 0 && len(mem.facts) != tc.wantRemaining {
-				t.Errorf("len(mem.facts) = %d, want %d", len(mem.facts), tc.wantRemaining)
-			}
-			if tc.wantReinforcedCount > 0 {
-				for _, f := range mem.facts {
-					if f.ReinforceCount != tc.wantReinforcedCount {
-						t.Errorf("consolidated fact reinforce_count = %d, want %d", f.ReinforceCount, tc.wantReinforcedCount)
-					}
-				}
-			}
-			if tc.wantWatermark > 0 && mem.watermarks[DreamingWatermarkThreadID] != tc.wantWatermark {
-				t.Errorf("dreaming watermark = %d, want %d", mem.watermarks[DreamingWatermarkThreadID], tc.wantWatermark)
-			}
+			runConsolidateFactClustersCase(t, tc, vecs)
 		})
 	}
 }
