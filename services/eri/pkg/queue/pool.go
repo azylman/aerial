@@ -1109,8 +1109,12 @@ func (p *WorkerPool) latchActiveTurnsLocked(threadID string) ([]*turnExecution, 
 		if te == nil || (te.threadID != threadID && !isScopeKeyForThread(scopeKey, threadID)) {
 			continue
 		}
-		te.interrupted.Store(true)
 		active = append(active, te)
+		if te.finalized.Load() {
+			// The burst already completed; only its post-turn work (summary refresh) is cancelled.
+			continue
+		}
+		te.interrupted.Store(true)
 
 		te.activeSessionMu.Lock()
 		for i := range te.burst {

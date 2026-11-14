@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -208,6 +210,11 @@ func TestFormatThreadHistory(t *testing.T) {
 			wantContains: []string{"Valid time message"},
 			wantExcludes: []string{"Zero time message"},
 		},
+		{
+			name:         "widget card keeps the unchanged head cut in turn prompts",
+			msgs:         []HistoryMessage{{ID: "w-1", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: longWidgetCard, CreatedAt: now.Add(-time.Minute)}},
+			wantContains: []string{longWidgetCard},
+		},
 	}
 
 	for _, tc := range tests {
@@ -215,6 +222,94 @@ func TestFormatThreadHistory(t *testing.T) {
 			t.Parallel()
 			got := FormatThreadHistory(tc.msgs, tc.tzOpt...)
 			assertFormattedHistory(t, "FormatThreadHistory()", got, tc)
+		})
+	}
+}
+
+// longWidgetCard is a 700-rune widget body: 250 head runes, 300 middle runes, 150 tail runes.
+var longWidgetCard = strings.Repeat("h", 250) + strings.Repeat("m", 300) + strings.Repeat("t", 150)
+
+func TestFormatSummaryTranscript(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	longUser := strings.Repeat("u", 1000) + strings.Repeat("x", 200)
+	longReply := strings.Repeat("a", 1000) + strings.Repeat("y", 200)
+	shortWidget := strings.Repeat("s", 400)
+
+	tests := []historyTestCase{
+		{
+			name:         "long widget keeps head and tail",
+			msgs:         []HistoryMessage{{ID: "w-1", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: longWidgetCard, CreatedAt: now}},
+			wantPrefix:   "<CHANNEL_HISTORY>\nPrior messages from this thread for context:\n",
+			wantContains: []string{strings.Repeat("h", 250) + truncationMarker + strings.Repeat("t", 150)},
+			wantExcludes: []string{"mmmm"},
+		},
+		{
+			name:         "widget at 400 runes is not trimmed",
+			msgs:         []HistoryMessage{{ID: "w-2", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: shortWidget, CreatedAt: now}},
+			wantContains: []string{shortWidget + "\n"},
+			wantExcludes: []string{truncationMarker},
+		},
+		{
+			name: "user message and assistant reply keep the 1000-rune head cut",
+			msgs: []HistoryMessage{
+				{ID: "u-1", AuthorName: "Alex", Role: "User", Content: longUser, CreatedAt: now.Add(-time.Minute)},
+				{ID: "a-1", AuthorName: "Aerial", Role: "Assistant", Content: longReply, CreatedAt: now},
+			},
+			wantContains: []string{strings.Repeat("u", 1000) + truncationMarker, strings.Repeat("a", 1000) + truncationMarker},
+			wantExcludes: []string{"xxxx", "yyyy"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertFormattedHistory(t, "FormatSummaryTranscript()", FormatSummaryTranscript(tc.msgs), tc)
+		})
+	}
+}
+
+// historyIDs returns n messages with IDs prefix0..prefix(n-1).
+func historyIDs(prefix string, n int) []HistoryMessage {
+	msgs := make([]HistoryMessage, n)
+	for i := range msgs {
+		msgs[i] = HistoryMessage{ID: fmt.Sprintf("%s%d", prefix, i)}
+	}
+	return msgs
+}
+
+func messageIDs(msgs []HistoryMessage) []string {
+	ids := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+func TestSplitThreadHistoryDeltas(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                      string
+		msgs                      []HistoryMessage
+		priorSummary, lastMsgID   string
+		wantDeltaIDs, wantOrigins []string
+	}{
+		{name: "no prior summary sends full window", msgs: historyIDs("m", 40), wantDeltaIDs: messageIDs(historyIDs("m", 40))},
+		{name: "watermark found sends delta after it", msgs: historyIDs("m", 6), priorSummary: "prior", lastMsgID: "m3", wantDeltaIDs: []string{"m4", "m5"}, wantOrigins: []string{"m0", "m1", "m2"}},
+		{name: "watermark first message anchors on it", msgs: historyIDs("m", 3), priorSummary: "prior", lastMsgID: "m0", wantDeltaIDs: []string{"m1", "m2"}, wantOrigins: []string{"m0"}},
+		{name: "watermark missing with prior summary sends newest 30", msgs: historyIDs("m", 40), priorSummary: "prior", lastMsgID: "gone", wantDeltaIDs: messageIDs(historyIDs("m", 40)[10:]), wantOrigins: []string{"m0", "m1", "m2"}},
+		{name: "watermark missing in short window sends it all", msgs: historyIDs("m", 30), priorSummary: "prior", lastMsgID: "gone", wantDeltaIDs: messageIDs(historyIDs("m", 30))},
+		{name: "watermark is newest message sends full window", msgs: historyIDs("m", 4), priorSummary: "prior", lastMsgID: "m3", wantDeltaIDs: []string{"m0", "m1", "m2", "m3"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			delta, origin := splitThreadHistoryDeltas(tc.msgs, threadSummaryConfig{priorSummary: tc.priorSummary, lastMsgID: tc.lastMsgID})
+			if got := messageIDs(delta); !slices.Equal(got, tc.wantDeltaIDs) {
+				t.Errorf("delta = %v, want %v", got, tc.wantDeltaIDs)
+			}
+			if got := messageIDs(origin); !slices.Equal(got, tc.wantOrigins) && (len(got) != 0 || len(tc.wantOrigins) != 0) {
+				t.Errorf("origin = %v, want %v", got, tc.wantOrigins)
+			}
 		})
 	}
 }
@@ -370,6 +465,7 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 		opts                               []ThreadSummaryOption
 		llmErr                             error
 		wantPromptContains                 []string
+		wantPromptExcludes                 []string
 		wantSpans                          []wantPromptSpan
 		wantAbsent                         []string
 	}{
@@ -406,6 +502,25 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 				"New delta message",
 			},
 		},
+		{
+			name:   "lost watermark sends only the newest 30 messages",
+			msgs:   datedHistory(now, 35),
+			opts:   []ThreadSummaryOption{WithPriorSummary("Prior covers older history", "scrolled-out")},
+			llmOut: "<THREAD_SUMMARY>Caught up</THREAD_SUMMARY>", wantSub: "Caught up",
+			wantSpans: []wantPromptSpan{
+				{name: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryShared.Bool(false), attrPromptSummaryDeltaMsgs.Int(30)}},
+				{name: spanPromptSummaryLLM, parent: spanPrompt},
+			},
+			wantPromptContains: []string{"Prior covers older history", "<thread_origin_anchor>", "body-0", "body-34"},
+			wantPromptExcludes: []string{"body-3\n", "body-4\n"},
+		},
+		{
+			name:   "widget card trimmed in summarizer transcript",
+			msgs:   []HistoryMessage{{ID: "w-1", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: longWidgetCard, CreatedAt: now}},
+			llmOut: "<THREAD_SUMMARY>Build shipped</THREAD_SUMMARY>", wantSub: "Build shipped", wantSpans: oneDelta,
+			wantPromptContains: []string{strings.Repeat("h", 250) + truncationMarker + strings.Repeat("t", 150)},
+			wantPromptExcludes: []string{"mmmm"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -437,8 +552,22 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 					t.Errorf("expected prompt to contain %q, got:\n%s", sub, capturedPrompt)
 				}
 			}
+			for _, sub := range tc.wantPromptExcludes {
+				if strings.Contains(capturedPrompt, sub) {
+					t.Errorf("expected prompt to exclude %q, got:\n%s", sub, capturedPrompt)
+				}
+			}
 		})
 	}
+}
+
+// datedHistory returns n messages body-0..body-(n-1), one minute apart and oldest first.
+func datedHistory(now time.Time, n int) []HistoryMessage {
+	msgs := make([]HistoryMessage, n)
+	for i := range msgs {
+		msgs[i] = HistoryMessage{ID: fmt.Sprintf("h-%d", i), AuthorName: "Alex", Role: "User", Content: fmt.Sprintf("body-%d", i), CreatedAt: now.Add(time.Duration(i-n) * time.Minute)}
+	}
+	return msgs
 }
 
 func waitForSingleflightFollowers(t *testing.T, callerSubstr string, followers int) {
@@ -655,11 +784,31 @@ func TestConvertDiscordMessagesToHistory(t *testing.T) {
 			Timestamp: now,
 			WebhookID: "hook-1",
 		},
+		{
+			ID:        "msg-widget",
+			Content:   "build card",
+			Timestamp: now,
+			Flags:     discordgo.MessageFlagsIsComponentsV2 | discordgo.MessageFlagsSuppressNotifications,
+			Author:    &discordgo.User{ID: "bot-id", Username: "aerial", Bot: true},
+		},
+		{
+			ID:        "msg-suppressed",
+			Content:   "plain reply",
+			Timestamp: now,
+			Flags:     discordgo.MessageFlagsSuppressNotifications,
+			Author:    &discordgo.User{ID: "bot-id", Username: "aerial", Bot: true},
+		},
 	}
 
 	results := convertDiscordMessagesToHistory(dg, msgs)
-	if len(results) != 4 {
-		t.Fatalf("expected 4 results, got %d", len(results))
+	if len(results) != 6 {
+		t.Fatalf("expected 6 results, got %d", len(results))
+	}
+	wantWidget := []bool{false, false, false, false, true, false}
+	for i, r := range results {
+		if r.IsWidget != wantWidget[i] {
+			t.Errorf("results[%d] (%s).IsWidget = %t, want %t", i, r.ID, r.IsWidget, wantWidget[i])
+		}
 	}
 	if results[0].Role != "User" || len(results[0].Attachments) != 1 || results[0].Attachments[0] != "https://cdn.discordapp.com/file1.png" {
 		t.Errorf("unexpected user message: %+v", results[0])
