@@ -79,3 +79,35 @@ func TestDispatchPersistence_TargetAndChunkID(t *testing.T) {
 		})
 	}
 }
+
+func TestInsertDispatch_IdempotentDuplicate(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
+	d := Dispatch{
+		ID:     "disp-idempotent-1",
+		Source: "vanadis",
+		Prompt: "chunk execution",
+		Status: StatusPending,
+	}
+
+	if err := store.InsertDispatch(ctx, d); err != nil {
+		t.Fatalf("first InsertDispatch failed: %v", err)
+	}
+
+	// Re-inserting the same dispatch ID must succeed idempotently (ON CONFLICT DO NOTHING)
+	if err := store.InsertDispatch(ctx, d); err != nil {
+		t.Fatalf("second InsertDispatch with duplicate ID failed: %v", err)
+	}
+
+	got, err := store.GetDispatch(ctx, d.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetDispatch failed: %v", err)
+	}
+	if got.ID != d.ID {
+		t.Errorf("got ID %q, want %q", got.ID, d.ID)
+	}
+}

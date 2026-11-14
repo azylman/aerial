@@ -243,6 +243,75 @@ func validateDispatchRequest(req *DispatchRequest) error {
 	return nil
 }
 
+func checkDuplicateDispatch(ctx context.Context, store db.Store, dispatchID string) (bool, error) {
+	existing, err := store.GetDispatch(ctx, dispatchID)
+	if err != nil {
+		return false, err
+	}
+	return existing != nil, nil
+}
+
+func handleSkipActiveDispatch(ctx context.Context, w http.ResponseWriter, store db.Store, req *DispatchRequest, sessionID, dispatchID string) bool {
+	if !req.SkipIfActive || store == nil {
+		return false
+	}
+	active, err := store.HasActiveDispatchTurn(ctx, sessionID, dispatchID)
+	if err != nil {
+		log.Printf("[HTTP] Failed to check active turn for %s: %v", sessionID, err)
+		writeErr(w, http.StatusInternalServerError, "Failed to check active turn")
+		return true
+	}
+	if active {
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
+			"status":      "skipped_active",
+			"dispatch_id": dispatchID,
+			"session_id":  sessionID,
+		})
+		return true
+	}
+	return false
+}
+
+func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store db.Store, rawID, dispatchID, sessionID string) bool {
+	if strings.TrimSpace(rawID) == "" {
+		return false
+	}
+	exists, err := checkDuplicateDispatch(ctx, store, dispatchID)
+	if err != nil {
+		log.Printf("[HTTP] Failed to check existing dispatch %s: %v", dispatchID, err)
+		writeErr(w, http.StatusInternalServerError, "Failed to check existing dispatch")
+		return true
+	}
+	if exists {
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
+			"status":      "already_exists",
+			"dispatch_id": dispatchID,
+			"message_id":  dispatchID,
+			"session_id":  sessionID,
+		})
+		return true
+	}
+	return false
+}
+
+func buildDispatchRecord(req DispatchRequest, dispatchID, sessionID, traceparent string) db.Dispatch {
+	return db.Dispatch{
+		ID:             dispatchID,
+		Source:         strings.ToLower(strings.TrimSpace(req.Source)),
+		SessionID:      sessionID,
+		TargetID:       req.TargetID,
+		VanadisChunkID: req.VanadisChunkID,
+		Prompt:         req.Prompt,
+		Summary:        db.CleanTaskSummary(req.Prompt),
+		Effort:         strings.ToLower(strings.TrimSpace(req.Effort)),
+		Model:          strings.TrimSpace(req.Model),
+		Status:         db.StatusPending,
+		Traceparent:    traceparent,
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
+	}
+}
+
 func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -266,21 +335,8 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			dispatchID = uuid.New().String()
 		}
 
-		if req.SkipIfActive && store != nil {
-			active, err := store.HasActiveDispatchTurn(r.Context(), sessionID, dispatchID)
-			if err != nil {
-				log.Printf("[HTTP] Failed to check active turn for %s: %v", sessionID, err)
-				writeErr(w, http.StatusInternalServerError, "Failed to check active turn")
-				return
-			}
-			if active {
-				httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-					"status":      "skipped_active",
-					"dispatch_id": dispatchID,
-					"session_id":  sessionID,
-				})
-				return
-			}
+		if handleSkipActiveDispatch(r.Context(), w, store, &req, sessionID, dispatchID) {
+			return
 		}
 
 		if store == nil {
@@ -288,21 +344,11 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		d := db.Dispatch{
-			ID:             dispatchID,
-			Source:         strings.ToLower(strings.TrimSpace(req.Source)),
-			SessionID:      sessionID,
-			TargetID:       req.TargetID,
-			VanadisChunkID: req.VanadisChunkID,
-			Prompt:         req.Prompt,
-			Summary:        db.CleanTaskSummary(req.Prompt),
-			Effort:         strings.ToLower(strings.TrimSpace(req.Effort)),
-			Model:          strings.TrimSpace(req.Model),
-			Status:         db.StatusPending,
-			Traceparent:    tracing.Traceparent(r.Context()),
-			CreatedAt:      time.Now().UTC(),
-			UpdatedAt:      time.Now().UTC(),
+		if handleDuplicateDispatch(r.Context(), w, store, req.ID, dispatchID, sessionID) {
+			return
 		}
+
+		d := buildDispatchRecord(req, dispatchID, sessionID, tracing.Traceparent(r.Context()))
 
 		insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := store.InsertDispatch(insertCtx, d); err != nil {

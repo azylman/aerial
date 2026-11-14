@@ -23,12 +23,14 @@ func (s *VanadisServer) dispatchChunkTurn(ctx context.Context, build VanadisBuil
 	defer span.End()
 	defer func() { markChunkDispatchSpan(span, err) }()
 	err = s.dispatchBrainDispatch(ctx, BrainDispatchRequest{
+		ID:             fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges),
 		Source:         "vanadis",
 		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
 		TargetID:       strings.TrimSpace(build.ThreadID),
 		VanadisChunkID: strings.TrimSpace(chunk.ID),
 		Prompt:         notice + prompt,
 		Effort:         capChunkEffort(chunk.Effort),
+		SkipIfActive:   true,
 	})
 	return err
 }

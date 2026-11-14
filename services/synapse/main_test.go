@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -3816,8 +3817,17 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 				}
 			}
 			if tc.hasDispatcher {
-				if len(disp.DispatchCalls()) != tc.wantPrompts {
-					t.Errorf("DispatchCalls = %d, want %d", len(disp.DispatchCalls()), tc.wantPrompts)
+				calls := disp.DispatchCalls()
+				if len(calls) != tc.wantPrompts {
+					t.Errorf("DispatchCalls = %d, want %d", len(calls), tc.wantPrompts)
+				} else if len(calls) > 0 {
+					wantID := fmt.Sprintf("conflict-%s-%d", strings.ReplaceAll(tc.args.Repo, "/", "-"), tc.args.PRNumber)
+					if calls[0].ID != wantID {
+						t.Errorf("DispatchCalls[0].ID = %q, want %q", calls[0].ID, wantID)
+					}
+					if !calls[0].SkipIfActive {
+						t.Errorf("DispatchCalls[0].SkipIfActive = false, want true")
+					}
 				}
 			}
 		})

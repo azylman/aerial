@@ -143,7 +143,7 @@ func TestHandleClaimEventTriggers_Table(t *testing.T) {
 		{"claim matching trigger", http.MethodPost, `{"source":"github","targets":["azylman/aerial","azylman/aerial:main"],"event_type":"ci_passed"}`, server, http.StatusOK, 1},
 		{"second claim returns empty", http.MethodPost, `{"source":"github","targets":["azylman/aerial"],"event_type":"ci_passed"}`, server, http.StatusOK, 0},
 		{"claim matching persistent trigger", http.MethodPost, `{"source":"camera","targets":["garage"],"event_type":"person_arrived"}`, server, http.StatusOK, 1},
-		{"second claim on persistent trigger still returns it", http.MethodPost, `{"source":"camera","targets":["garage"],"event_type":"person_arrived"}`, server, http.StatusOK, 1},
+		{"second claim on persistent trigger debounces duplicate within 5s", http.MethodPost, `{"source":"camera","targets":["garage"],"event_type":"person_arrived"}`, server, http.StatusOK, 0},
 	}
 
 	for _, tc := range tests {
@@ -230,6 +230,16 @@ func TestHandleFireEventTriggers_Table(t *testing.T) {
 		Effort:     "low",
 		Persistent: true,
 	})
+	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
+		ID:         "trig-fire-persistent-error",
+		ChannelID:  "1555405874565091380",
+		Source:     "camera",
+		Target:     "porch",
+		EventType:  "package_delivered",
+		Prompt:     "porch package",
+		Effort:     "low",
+		Persistent: true,
+	})
 
 	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
 	if err != nil {
@@ -260,9 +270,9 @@ func TestHandleFireEventTriggers_Table(t *testing.T) {
 		{"fire retry succeeds after re-insert", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready","context_header":"External state change"}`, serverOKDisp, http.StatusOK, 1},
 		{"fire subsequent call returns 0 fired", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready"}`, serverOKDisp, http.StatusOK, 0},
 		{"fire persistent trigger first time", http.MethodPost, `{"source":"camera","targets":["entryway"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 1},
-		{"fire persistent trigger second time still fires", http.MethodPost, `{"source":"camera","targets":["entryway"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 1},
-		{"fire dispatch error does not reinsert duplicate for persistent trigger", http.MethodPost, `{"source":"camera","targets":["entryway"],"event_type":"package_delivered"}`, serverFailDisp, http.StatusBadGateway, 0},
-		{"fire retry succeeds for persistent trigger after failed dispatch", http.MethodPost, `{"source":"camera","targets":["entryway"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 1},
+		{"fire persistent trigger second time within 5s debounce window returns 0 fired", http.MethodPost, `{"source":"camera","targets":["entryway"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 0},
+		{"fire dispatch error does not reinsert duplicate for persistent trigger", http.MethodPost, `{"source":"camera","targets":["porch"],"event_type":"package_delivered"}`, serverFailDisp, http.StatusBadGateway, 0},
+		{"fire retry succeeds for persistent trigger after failed dispatch", http.MethodPost, `{"source":"camera","targets":["porch"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 1},
 	}
 
 	for _, tc := range tests {

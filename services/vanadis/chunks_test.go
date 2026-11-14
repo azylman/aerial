@@ -1272,6 +1272,7 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 		name                         string
 		claimID, status, buildStatus string
 		prNumber, priorNudges        int
+		dispatchID                   string
 		dispatchCode                 int
 		wantNotices                  []string
 		wantSessions                 []string
@@ -1284,12 +1285,14 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 		{name: "re-dispatch failure fails chunk", claimID: "c-stall", status: "running", buildStatus: "running", dispatchCode: http.StatusInternalServerError, wantNotices: []string{wantStallNotice}, wantSessions: []string{"vanadis-c-stall"}, wantChunkStatus: "failed", wantBuildStatus: "failed", wantWakeTails: []string{"Chunk 1/1 (Stalled Chunk) failed: chunk stalled (turn ended without submitting a PR or calling fail_chunk) and the stall re-dispatch failed: /dispatch returned status 500:"}},
 		{name: "linked pr is left alone", claimID: "c-stall", status: "pr_opened", buildStatus: "running", prNumber: 9, dispatchCode: http.StatusAccepted, wantChunkStatus: "pr_opened", wantBuildStatus: "running"},
 		{name: "missing chunk is skipped", claimID: "c-gone", status: "running", buildStatus: "running", dispatchCode: http.StatusAccepted, wantChunkStatus: "running", wantBuildStatus: "running"},
+		{name: "duplicate delivery with mismatched dispatch id is noop", claimID: "c-stall", status: "running", buildStatus: "running", priorNudges: 1, dispatchID: "vanadis-c-stall-turn-0", dispatchCode: http.StatusAccepted, wantChunkStatus: "running", wantBuildStatus: "running"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var mu sync.Mutex
 			var notices, sessions, wakeTails, targetIDs, chunkIDs []string
+			var dispatchReqs []BrainDispatchRequest
 			brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
@@ -1297,6 +1300,7 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 				case "/dispatch":
 					var req BrainDispatchRequest
 					_ = json.NewDecoder(r.Body).Decode(&req)
+					dispatchReqs = append(dispatchReqs, req)
 					notice, _, _ := strings.Cut(req.Prompt, "[VANADIS BUILD CHUNK EXECUTION]")
 					notices, sessions = append(notices, notice), append(sessions, req.SessionID)
 					targetIDs, chunkIDs = append(targetIDs, req.TargetID), append(chunkIDs, req.VanadisChunkID)
@@ -1317,7 +1321,7 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 			_ = store.CreateBuild(context.Background(), mkBuild("b-stall", "123456789012345678", "T", "O", tc.buildStatus), []VanadisChunk{c})
 			store.stallNudges = map[string]int{"c-stall": tc.priorNudges}
 			srv := NewVanadisServer(Config{BrainURL: brain.URL, SynapseURL: brain.URL}, store, &mockRiverInserter{}, brain.Client())
-			if err := srv.ProcessStalledChunkCheck(context.Background(), tc.claimID); err != nil {
+			if err := srv.ProcessStalledChunkCheck(context.Background(), tc.claimID, tc.dispatchID); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			b, chunks, _ := store.GetBuild(context.Background(), "b-stall")
@@ -1329,6 +1333,9 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 			if tc.name == "first stall re-dispatches with notice" {
 				if !reflect.DeepEqual(targetIDs, []string{"123456789012345678"}) || !reflect.DeepEqual(chunkIDs, []string{"c-stall"}) {
 					t.Fatalf("dispatches targetIDs=%v chunkIDs=%v, want [123456789012345678], [c-stall]", targetIDs, chunkIDs)
+				}
+				if len(dispatchReqs) != 1 || dispatchReqs[0].ID != "vanadis-c-stall-turn-1" || !dispatchReqs[0].SkipIfActive {
+					t.Fatalf("dispatchReqs = %+v, want ID 'vanadis-c-stall-turn-1' and SkipIfActive true", dispatchReqs)
 				}
 			}
 			if !reflect.DeepEqual(wakeTails, tc.wantWakeTails) {
@@ -1362,7 +1369,7 @@ func TestServer_CompleteChunkRunsStallCheck(t *testing.T) {
 	_ = store.CreateBuild(context.Background(), mkBuild("b-done", "123456789012345678", "T", "O", "running"), []VanadisChunk{mkChunk("c-done", "b-done", 0, "Done", "do it", "", "running")})
 	mux := SetupMux(NewVanadisServer(Config{BrainURL: brain.URL, SynapseURL: brain.URL}, store, &mockRiverInserter{}, brain.Client()))
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/chunks/complete", strings.NewReader(`{"chunk_id":"c-done"}`)))
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/chunks/complete", strings.NewReader(`{"chunk_id":"c-done","dispatch_id":"vanadis-c-done-turn-0"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200: %s", rec.Code, rec.Body.String())
 	}

@@ -116,7 +116,8 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 		prompt TEXT NOT NULL,
 		effort TEXT NOT NULL DEFAULT 'medium',
 		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		persistent BOOLEAN NOT NULL DEFAULT FALSE
+		persistent BOOLEAN NOT NULL DEFAULT FALSE,
+		updated_at TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_event_triggers_lookup ON event_triggers (source, target, event_type);
 	CREATE INDEX IF NOT EXISTS idx_event_triggers_channel ON event_triggers (channel_id, created_at ASC);
@@ -133,6 +134,7 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 		`ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low';`,
 		`ALTER TABLE one_shot_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low';`,
 		`ALTER TABLE event_triggers ADD COLUMN persistent BOOLEAN NOT NULL DEFAULT FALSE;`,
+		`ALTER TABLE event_triggers ADD COLUMN updated_at TIMESTAMP;`,
 	} {
 		if _, alterErr := database.Exec(alterStmt); alterErr != nil {
 			if !strings.Contains(strings.ToLower(alterErr.Error()), "duplicate column") {

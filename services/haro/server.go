@@ -525,6 +525,19 @@ func (s *Server) handleClaimEventTriggers(w http.ResponseWriter, r *http.Request
 	})
 }
 
+func (s *Server) recoverFailedEventTrigger(ctx context.Context, trig EventTrigger) {
+	bgCtx := context.WithoutCancel(ctx)
+	if !trig.Persistent {
+		if err := InsertEventTrigger(bgCtx, s.handler.db, trig); err != nil {
+			log.Printf("[Haro] failed to re-insert event trigger %s after dispatch error: %v", trig.ID, err)
+		}
+		return
+	}
+	if _, err := s.handler.db.ExecContext(bgCtx, "UPDATE event_triggers SET updated_at = NULL WHERE id = $1", trig.ID); err != nil {
+		log.Printf("[Haro] failed to reset updated_at for persistent trigger %s: %v", trig.ID, err)
+	}
+}
+
 func (s *Server) handleFireEventTriggers(w http.ResponseWriter, r *http.Request) {
 	req, ok := s.parseEventTriggerActionRequest(w, r)
 	if !ok {
@@ -554,11 +567,7 @@ func (s *Server) handleFireEventTriggers(w http.ResponseWriter, r *http.Request)
 		RecordScheduleDispatchDuration("event_watch", time.Since(start).Seconds())
 		if dispErr != nil {
 			RecordScheduleRun("event_watch", "failed")
-			if !trig.Persistent {
-				if reinsertErr := InsertEventTrigger(context.WithoutCancel(r.Context()), s.handler.db, trig); reinsertErr != nil {
-					log.Printf("[Haro] failed to re-insert event trigger %s after dispatch error: %v", trig.ID, reinsertErr)
-				}
-			}
+			s.recoverFailedEventTrigger(r.Context(), trig)
 			if firstDispatchErr == nil {
 				firstDispatchErr = dispErr
 			}

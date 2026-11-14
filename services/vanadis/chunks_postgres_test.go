@@ -1405,6 +1405,7 @@ func TestPostgresVanadisStore_ClaimStalledChunk(t *testing.T) {
 		name                                  string
 		chunkID, mode, status, buildStatus    string
 		prNumber, nudges                      int
+		dispatchID                            string
 		beginErr, scanErr, execErr, commitErr error
 		wantVerdict                           StalledChunkVerdict
 		wantErr                               error
@@ -1412,6 +1413,8 @@ func TestPostgresVanadisStore_ClaimStalledChunk(t *testing.T) {
 	}{
 		{name: "pr chunk without pr first stall nudges", chunkID: "c1", mode: "pr", status: "running", buildStatus: "running", wantVerdict: StalledChunkVerdictNudge, wantNudgeExec: true},
 		{name: "pr chunk without pr second stall fails", chunkID: "c1", mode: "pr", status: "running", buildStatus: "running", nudges: 1, wantVerdict: StalledChunkVerdictFail},
+		{name: "matching dispatch id proceeds with verdict", chunkID: "c1", mode: "pr", status: "running", buildStatus: "running", nudges: 0, dispatchID: "vanadis-c1-turn-0", wantVerdict: StalledChunkVerdictNudge, wantNudgeExec: true},
+		{name: "mismatched dispatch id returns noop verdict", chunkID: "c1", mode: "pr", status: "running", buildStatus: "running", nudges: 1, dispatchID: "vanadis-c1-turn-0", wantVerdict: StalledChunkVerdictNoop},
 		{name: "pr opened chunk is not stalled", chunkID: "c1", mode: "pr", status: "pr_opened", buildStatus: "running", prNumber: 42, wantVerdict: StalledChunkVerdictNone},
 		{name: "running chunk with linked pr is not stalled", chunkID: "c1", mode: "pr", status: "running", buildStatus: "running", prNumber: 42, wantVerdict: StalledChunkVerdictNone},
 		{name: "action chunk is never stalled", chunkID: "c1", mode: "action", status: "running", buildStatus: "running", wantVerdict: StalledChunkVerdictNone},
@@ -1448,7 +1451,7 @@ func TestPostgresVanadisStore_ClaimStalledChunk(t *testing.T) {
 				},
 			}
 			store := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, tc.beginErr }})
-			verdict, build, chunk, err := store.ClaimStalledChunk(context.Background(), tc.chunkID)
+			verdict, build, chunk, err := store.ClaimStalledChunk(context.Background(), tc.chunkID, tc.dispatchID)
 			if gotNudge := len(nudgeExecs) == 1 && nudgeExecs[0] == "c1"; gotNudge != tc.wantNudgeExec {
 				t.Fatalf("nudge exec = %v (args %v), want %v", gotNudge, nudgeExecs, tc.wantNudgeExec)
 			}
