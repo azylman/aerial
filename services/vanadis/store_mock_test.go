@@ -940,11 +940,12 @@ func (m *mockChunkBus) Publish(ctx context.Context, subject, msgID string, data 
 	}
 	if a, ok := data.(ExecuteChunkArgs); ok {
 		m.published = append(m.published, a)
+		return nil
 	}
 	if m.Bus != nil {
 		return m.Bus.Publish(ctx, subject, msgID, data)
 	}
-	return nil
+	return errors.New("mockChunkBus: unhandled publish subject")
 }
 
 type errorReader struct{}

@@ -301,8 +301,9 @@ func TestHandleCoalescedWidgetMessage(t *testing.T) {
 					httpClient: ts.Client(),
 				}
 			}(),
-			payload: `{"build_id":"b-err","banner":"Banner"}`,
-			wantErr: true,
+			payload:    `{"build_id":"b-err","banner":"Banner"}`,
+			wantErr:    true,
+			wantTermed: true,
 		},
 	}
 
@@ -310,7 +311,7 @@ func TestHandleCoalescedWidgetMessage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			msg := &memoryMsg{data: []byte(tc.payload)}
+			msg := &memoryMsg{data: []byte(tc.payload), numDelivered: 3}
 			err := tc.srv.HandleCoalescedWidgetMessage(context.Background(), msg)
 			if tc.wantErr {
 				require.Error(t, err)
@@ -618,4 +619,7 @@ func TestChunksEvents_And_PersistWidget_RemainingGaps(t *testing.T) {
 	}
 	errPersist := srvPersist.dispatchAndPersistWidget(ctx, "b1", "", StatusWidgetRequest{Title: "test"})
 	assert.NoError(t, errPersist)
+
+	// Case D: SkipSink returns nil immediately
+	assert.NoError(t, srvPersist.dispatchAndPersistWidget(ctx, "b1", "", StatusWidgetRequest{SkipSink: true}))
 }

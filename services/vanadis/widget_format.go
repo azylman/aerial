@@ -268,6 +268,11 @@ func (s *VanadisServer) HandleCoalescedWidgetMessage(ctx context.Context, msg pu
 	widgetReq := buildSyncWidgetRequest(*build, chunks, syncReq)
 	if err := s.dispatchAndPersistWidget(ctx, build.ID, build.StatusMessageID, widgetReq); err != nil {
 		log.Printf("[vanadis] warning: dispatchAndPersistWidget failed for build %s: %v", buildID, err)
+		if msg.NumDelivered() >= 3 {
+			if termErr := msg.Term(); termErr != nil {
+				log.Printf("[vanadis] warning: error terming failed widget message: %v", termErr)
+			}
+		}
 		return err
 	}
 	if ackErr := msg.Ack(); ackErr != nil {

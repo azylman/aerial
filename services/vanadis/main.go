@@ -741,15 +741,13 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner str
 	}
 	cleanBanner := strings.TrimSpace(banner)
 	if s.bus != nil {
-		if _, isMock := s.bus.(*mockChunkBus); !isMock {
-			payload := map[string]string{
-				"build_id": cleanBuildID,
-				"banner":   cleanBanner,
-			}
-			subject := "aerial.coalesced.vanadis_widget." + cleanBuildID
-			if err := s.bus.Publish(ctx, subject, "", payload); err == nil {
-				return
-			}
+		payload := map[string]string{
+			"build_id": cleanBuildID,
+			"banner":   cleanBanner,
+		}
+		subject := "aerial.coalesced.vanadis_widget." + cleanBuildID
+		if err := s.bus.Publish(ctx, subject, "", payload); err == nil {
+			return
 		}
 	}
 	if s.httpClient == nil {
