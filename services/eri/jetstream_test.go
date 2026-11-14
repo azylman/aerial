@@ -25,9 +25,13 @@ func TestEriJetStreamInit(t *testing.T) {
 	}
 
 	// attachEriEventBusWithFactory error branch
-	pool := queue.New(nil, queue.WorkerPoolConfig{})
+	pool := queue.New(nil, queue.WorkerPoolConfig{
+		NATSURL: "nats://127.0.0.1:4222",
+	})
 	cleanupErr := attachEriEventBusWithFactory(ctx, pool, errFactory)
-	cleanupErr()
+	if cleanupErr != nil {
+		cleanupErr()
+	}
 	if pool.EventBus() != nil {
 		t.Error("expected nil event bus on pool when factory fails")
 	}
@@ -37,35 +41,41 @@ func TestEriJetStreamInit(t *testing.T) {
 	if pool.EventBus() == nil {
 		t.Error("expected non-nil event bus on pool when factory succeeds")
 	}
-	cleanupSuccess()
+	if cleanupSuccess != nil {
+		cleanupSuccess()
+	}
 }
 
 type natsURLResolutionTestCase struct {
-	name        string
-	envURL      string
-	poolURL     string
-	expectedURL string
+	name          string
+	envURL        string
+	poolURL       string
+	expectedURL   string
+	expectCleanup bool
 }
 
-func TestAttachEriEventBus_URLResolution(t *testing.T) {
+func TestAttachEriEventBus_DefaultAndEnvURL(t *testing.T) {
 	tests := []natsURLResolutionTestCase{
 		{
-			name:        "default fallback when env and pool empty",
-			envURL:      "",
-			poolURL:     "",
-			expectedURL: "nats://nats.aerial:4222",
+			name:          "returns nil when env and pool empty",
+			envURL:        "",
+			poolURL:       "",
+			expectedURL:   "",
+			expectCleanup: false,
 		},
 		{
-			name:        "pool config fallback when env empty",
-			envURL:      "",
-			poolURL:     "nats://pool-nats:4222",
-			expectedURL: "nats://pool-nats:4222",
+			name:          "pool config fallback when env empty",
+			envURL:        "",
+			poolURL:       "nats://pool-nats:4222",
+			expectedURL:   "nats://pool-nats:4222",
+			expectCleanup: true,
 		},
 		{
-			name:        "env takes precedence over pool config",
-			envURL:      "nats://env-nats:4222",
-			poolURL:     "nats://pool-nats:4222",
-			expectedURL: "nats://env-nats:4222",
+			name:          "env takes precedence over pool config",
+			envURL:        "nats://env-nats:4222",
+			poolURL:       "nats://pool-nats:4222",
+			expectedURL:   "nats://env-nats:4222",
+			expectCleanup: true,
 		},
 	}
 
@@ -83,7 +93,14 @@ func TestAttachEriEventBus_URLResolution(t *testing.T) {
 				NATSURL: tc.poolURL,
 			})
 			cleanup := attachEriEventBusWithFactory(context.Background(), pool, capturingFactory)
-			cleanup()
+			if tc.expectCleanup {
+				if cleanup == nil {
+					t.Fatalf("expected non-nil cleanup function")
+				}
+				cleanup()
+			} else if cleanup != nil {
+				t.Errorf("expected nil cleanup function, got non-nil")
+			}
 			if capturedURL != tc.expectedURL {
 				t.Errorf("capturedURL = %q, want %q", capturedURL, tc.expectedURL)
 			}

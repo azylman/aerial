@@ -846,30 +846,43 @@ func TestRunServer_Execution(t *testing.T) {
 	})
 
 	tests := []struct {
-		name       string
-		port       string
-		dbErr      error
-		cancelInit bool
-		wantErr    bool
+		name        string
+		port        string
+		databaseURL string
+		dbErr       error
+		cancelInit  bool
+		wantErr     bool
+		wantErrSub  string
 	}{
 		{
-			name:       "clean shutdown on context cancel",
-			port:       "0",
-			cancelInit: true,
-			wantErr:    false,
+			name:        "clean shutdown on context cancel",
+			port:        "0",
+			databaseURL: "postgres://mock",
+			cancelInit:  true,
+			wantErr:     false,
 		},
 		{
-			name:       "database open error returned",
-			port:       "0",
-			dbErr:      errors.New("db open error"),
-			cancelInit: false,
-			wantErr:    true,
+			name:        "unconfigured database URL returns error",
+			port:        "0",
+			databaseURL: "",
+			cancelInit:  false,
+			wantErr:     true,
+			wantErrSub:  "database URL is not configured",
 		},
 		{
-			name:       "invalid port returns listen error",
-			port:       "-1",
-			cancelInit: false,
-			wantErr:    true,
+			name:        "database open error returned",
+			port:        "0",
+			databaseURL: "postgres://mock",
+			dbErr:       errors.New("db open error"),
+			cancelInit:  false,
+			wantErr:     true,
+		},
+		{
+			name:        "invalid port returns listen error",
+			port:        "-1",
+			databaseURL: "postgres://mock",
+			cancelInit:  false,
+			wantErr:     true,
 		},
 	}
 
@@ -885,7 +898,7 @@ func TestRunServer_Execution(t *testing.T) {
 
 			cfg := &Config{
 				Port:        tc.port,
-				DatabaseURL: "postgres://mock",
+				DatabaseURL: tc.databaseURL,
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -899,6 +912,9 @@ func TestRunServer_Execution(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil")
+				}
+				if tc.wantErrSub != "" && !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("expected error substring %q, got %v", tc.wantErrSub, err)
 				}
 				return
 			}

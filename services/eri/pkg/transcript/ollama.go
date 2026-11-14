@@ -13,7 +13,6 @@ import (
 
 const (
 	DefaultEmbeddingModel = ollama.DefaultModel
-	DefaultOllamaURL      = ollama.DefaultBaseURL
 )
 
 // Client manages HTTP embedding requests to Ollama for transcript indexing and search.
@@ -54,7 +53,7 @@ func NewEmbedder(cfg *config.Config, roots ...string) *Client {
 func (c *Client) getOllamaConfig() config.OllamaConfig {
 	if c == nil || c.cfg == nil {
 		return config.OllamaConfig{
-			BaseURL: DefaultOllamaURL,
+			BaseURL: "",
 			Model:   DefaultEmbeddingModel,
 			NumCtx:  512,
 		}
@@ -62,15 +61,12 @@ func (c *Client) getOllamaConfig() config.OllamaConfig {
 	cur := c.cfg.Current()
 	if cur == nil {
 		return config.OllamaConfig{
-			BaseURL: DefaultOllamaURL,
+			BaseURL: "",
 			Model:   DefaultEmbeddingModel,
 			NumCtx:  512,
 		}
 	}
 	cfg := cur.Ollama
-	if cfg.BaseURL == "" {
-		cfg.BaseURL = DefaultOllamaURL
-	}
 	if cfg.Model == "" {
 		cfg.Model = DefaultEmbeddingModel
 	}

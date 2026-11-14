@@ -41,12 +41,12 @@ func LoadConfig(path string) (*Config, error) {
 
 	cfg := &Config{
 		Port:            "8080",
-		VikunjaURL:      "http://vikunja:3456",
+		VikunjaURL:      "",
 		VikunjaUsername: "aerial",
 		VikunjaPassword: "aerial-password",
-		DatabaseURL:     "postgres://postgres:postgres@localhost:5432/docket?sslmode=disable",
+		DatabaseURL:     "",
 		Ollama: ollama.Config{
-			BaseURL: ollama.DefaultBaseURL,
+			BaseURL: "",
 			Model:   ollama.DefaultModel,
 			NumCtx:  ollama.DefaultNumCtx,
 		},

@@ -876,6 +876,9 @@ func NewHTTPMux(srv *Server) *http.ServeMux {
 }
 
 func runServer(ctx context.Context, cfg *Config) error {
+	if cfg == nil || strings.TrimSpace(cfg.DatabaseURL) == "" {
+		return errors.New("database URL is not configured")
+	}
 	db, err := sqlOpenFn("pgx", cfg.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)

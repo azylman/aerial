@@ -16,7 +16,7 @@ import (
 // BaseURL returns the normalized Ollama server URL without trailing slash.
 func (c *Client) BaseURL() string {
 	if c == nil {
-		return DefaultOllamaURL
+		return ""
 	}
 	return strings.TrimSuffix(c.getOllamaConfig().BaseURL, "/")
 }
@@ -74,14 +74,14 @@ func TestClient_NewEmbedderAndConfig(t *testing.T) {
 		wantRoots   []string
 		wantNumCtx  int
 	}{
-		{"NewNilConfig", NewEmbedder(nil), DefaultOllamaURL, nil, 512},
+		{"NewNilConfig", NewEmbedder(nil), "", nil, 512},
 		{"NewCustomConfig", NewEmbedder(cfgCustom, " /r1 ", "", " /r2 "), "http://custom:11434", []string{"/r1", "/r2"}, 1024},
-		{"NilClient", nil, DefaultOllamaURL, nil, 512},
-		{"EmptyClient", &Client{}, DefaultOllamaURL, nil, 512},
-		{"EmptyDataConfig", NewEmbedder(cfgEmpty), DefaultOllamaURL, nil, 512},
-		{"UninitializedConfig", NewEmbedder(&config.Config{}), DefaultOllamaURL, nil, 512},
-		{"ClientWithNilConfig", &Client{cfg: nil}, DefaultOllamaURL, nil, 512},
-		{"EmptyOllamaFields", NewEmbedder(config.NewFromData(&config.ConfigData{Ollama: config.OllamaConfig{}})), DefaultOllamaURL, nil, 512},
+		{"NilClient", nil, "", nil, 512},
+		{"EmptyClient", &Client{}, "", nil, 512},
+		{"EmptyDataConfig", NewEmbedder(cfgEmpty), "", nil, 512},
+		{"UninitializedConfig", NewEmbedder(&config.Config{}), "", nil, 512},
+		{"ClientWithNilConfig", &Client{cfg: nil}, "", nil, 512},
+		{"EmptyOllamaFields", NewEmbedder(config.NewFromData(&config.ConfigData{Ollama: config.OllamaConfig{}})), "", nil, 512},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,6 +127,7 @@ type generateEmbeddingCase struct {
 	cancelCtx    bool
 	nilHTTP      bool
 	badURL       bool
+	emptyURL     bool
 	wantLen      int
 	wantErr      bool
 	wantSubstr   string
@@ -152,6 +153,9 @@ func setupMockEmbedder(tc generateEmbeddingCase, receivedPrompt *string) *Client
 	baseURL := "http://mock-ollama:11434"
 	if tc.badURL {
 		baseURL = "http://\x7f"
+	}
+	if tc.emptyURL {
+		baseURL = ""
 	}
 	cfg := config.NewFromData(&config.ConfigData{
 		Ollama: config.OllamaConfig{
@@ -323,6 +327,13 @@ func TestGenerateEmbedding(t *testing.T) {
 			netErr:     true,
 			wantErr:    true,
 			wantSubstr: "failed after 2 attempts",
+		},
+		{
+			name:       "UnconfiguredBaseURL",
+			text:       "unconfigured",
+			emptyURL:   true,
+			wantErr:    true,
+			wantSubstr: "ollama base URL is not configured",
 		},
 	}
 

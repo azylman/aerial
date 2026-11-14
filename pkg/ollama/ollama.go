@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -59,9 +60,6 @@ func (c *Client) config() Config {
 		cfg = c.cfgFn()
 	}
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	if baseURL == "" {
-		baseURL = DefaultBaseURL
-	}
 	model := strings.TrimSpace(cfg.Model)
 	if model == "" {
 		model = DefaultModel
@@ -103,6 +101,9 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 	}
 
 	cfg := c.config()
+	if cfg.BaseURL == "" {
+		return nil, errors.New("ollama base URL is not configured")
+	}
 	prompt := text
 	if isQuery && cfg.QueryPrefix != "" {
 		prompt = cfg.QueryPrefix + text
