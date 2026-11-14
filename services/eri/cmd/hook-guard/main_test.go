@@ -16,15 +16,49 @@ func (e *errWriter) Write(p []byte) (int, error) {
 	return 0, errors.New("simulated write error")
 }
 
-func TestRunCLI(t *testing.T) {
-	tests := []struct {
-		name       string
-		args       []string
-		input      string
-		wantDeny   bool
-		wantOutput string
-		wantCode   int
-	}{
+type runCLICase struct {
+	name       string
+	args       []string
+	input      string
+	wantDeny   bool
+	wantOutput string
+	wantCode   int
+}
+
+func assertRunCLICase(t *testing.T, tt runCLICase) {
+	t.Helper()
+	var stdout bytes.Buffer
+	stdinBuf := strings.NewReader(tt.input)
+
+	code := RunCLI(tt.args, stdinBuf, &stdout)
+	if code != tt.wantCode {
+		t.Errorf("expected exit code %d, got: %d", tt.wantCode, code)
+	}
+
+	if tt.wantOutput != "" {
+		if !strings.Contains(stdout.String(), tt.wantOutput) {
+			t.Errorf("expected output to contain %q, got: %q", tt.wantOutput, stdout.String())
+		}
+		return
+	}
+
+	var d guard.Decision
+	if err := json.Unmarshal(stdout.Bytes(), &d); err != nil {
+		t.Fatalf("failed to unmarshal output %q: %v", stdout.String(), err)
+	}
+
+	if tt.wantDeny && d.Decision != guard.DecisionDeny {
+		t.Errorf("expected deny, got: %v", d)
+	}
+	if !tt.wantDeny && d.Decision != guard.DecisionAllow {
+		t.Errorf("expected allow, got: %v", d)
+	}
+}
+
+func runCLITestCases() []runCLICase {
+	extra := runCLIExtraTestCases()
+	cases := make([]runCLICase, 0, 25+len(extra))
+	cases = append(cases, []runCLICase{
 		{
 			name:     "share subcommand denies write to share",
 			args:     []string{"hook-guard", "share"},
@@ -140,6 +174,12 @@ func TestRunCLI(t *testing.T) {
 			wantDeny: true,
 			wantCode: 0,
 		},
+	}...)
+	return append(cases, extra...)
+}
+
+func runCLIExtraTestCases() []runCLICase {
+	return []runCLICase{
 		{
 			name:     "symlink search-guard base name",
 			args:     []string{"/usr/local/bin/search-guard"},
@@ -194,35 +234,13 @@ func TestRunCLI(t *testing.T) {
 		{name: "post-batch subcommand", args: []string{"hook-guard", "post-batch"}, input: `{"conversationId":"c2","stepIdx":1,"error":"e","toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`, wantOutput: "{}", wantCode: 0},
 		{name: "post-batch-guard symlink", args: []string{"/usr/local/bin/post-batch-guard"}, input: `{"conversationId":"c2","stepIdx":1,"toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`, wantOutput: "{}", wantCode: 0},
 	}
+}
 
+func TestRunCLI(t *testing.T) {
+	tests := runCLITestCases()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var stdout bytes.Buffer
-			stdinBuf := strings.NewReader(tt.input)
-
-			code := RunCLI(tt.args, stdinBuf, &stdout)
-			if code != tt.wantCode {
-				t.Errorf("expected exit code %d, got: %d", tt.wantCode, code)
-			}
-
-			if tt.wantOutput != "" {
-				if !strings.Contains(stdout.String(), tt.wantOutput) {
-					t.Errorf("expected output to contain %q, got: %q", tt.wantOutput, stdout.String())
-				}
-				return
-			}
-
-			var d guard.Decision
-			if err := json.Unmarshal(stdout.Bytes(), &d); err != nil {
-				t.Fatalf("failed to unmarshal output %q: %v", stdout.String(), err)
-			}
-
-			if tt.wantDeny && d.Decision != guard.DecisionDeny {
-				t.Errorf("expected deny, got: %v", d)
-			}
-			if !tt.wantDeny && d.Decision != guard.DecisionAllow {
-				t.Errorf("expected allow, got: %v", d)
-			}
+			assertRunCLICase(t, tt)
 		})
 	}
 
