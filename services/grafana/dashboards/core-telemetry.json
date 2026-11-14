@@ -3780,21 +3780,10 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "sum by (kind) (rate(synapse_unique_skipped_total[5m])) * 60",
-          "legendFormat": "Dedup Skipped/min: {{kind}}",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "VictoriaMetrics"
-          },
-          "editorMode": "code",
           "expr": "sum by (kind, reason) (rate(synapse_job_retries_total[5m])) * 60",
           "legendFormat": "Retries/min: {{kind}} ({{reason}})",
           "range": true,
-          "refId": "C"
+          "refId": "B"
         },
         {
           "datasource": {
@@ -3805,7 +3794,7 @@
           "expr": "sum by (kind, reason) (rate(synapse_jobs_dropped_total[5m])) * 60",
           "legendFormat": "Dropped/min: {{kind}} ({{reason}})",
           "range": true,
-          "refId": "D"
+          "refId": "C"
         },
         {
           "datasource": {
@@ -3816,10 +3805,10 @@
           "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(synapse_job_duration_seconds_bucket[5m])))",
           "legendFormat": "Job Duration p95 (s): {{kind}}",
           "range": true,
-          "refId": "E"
+          "refId": "D"
         }
       ],
-      "title": "JetStream Worker Throughput, Retries & Dedup Skips",
+      "title": "JetStream Worker Throughput & Retries",
       "type": "timeseries"
     },
     {

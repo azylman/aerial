@@ -653,8 +653,6 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 		httpkit.WriteMetaDirFn = oldMetaFn
 	})
 
-	RecordUniqueSkipped("")
-	RecordUniqueSkipped("test_kind_metric")
 	RecordJobEnqueued("", "", "")
 	RecordJobRetry("", "", "")
 	RecordJobDropped("", "", "")
@@ -684,8 +682,6 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			path:     "/metrics",
 			wantCode: http.StatusOK,
 			wantBodySubs: []string{
-				"synapse_unique_skipped_total",
-				`kind="test_kind_metric"`,
 				"synapse_queue_depth",
 				"synapse_queue_oldest_age_seconds",
 				"synapse_discord_gateway_latency_seconds 0.042",

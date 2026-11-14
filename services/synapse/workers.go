@@ -22,15 +22,6 @@ import (
 
 // Metric collectors for River queues and worker execution telemetry.
 var (
-	// UniqueSkippedTotal records the total number of River jobs dropped due to unique constraint debouncing.
-	UniqueSkippedTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "synapse_unique_skipped_total",
-			Help: "Total number of River jobs skipped as duplicates due to unique constraints.",
-		},
-		[]string{"kind"},
-	)
-
 	JobsEnqueuedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "synapse_jobs_enqueued_total",
@@ -124,7 +115,6 @@ func registerCollector(c prometheus.Collector) {
 }
 
 func init() {
-	registerCollector(UniqueSkippedTotal)
 	registerCollector(JobsEnqueuedTotal)
 	registerCollector(JobsProcessedTotal)
 	registerCollector(JobDurationSeconds)
@@ -141,14 +131,6 @@ func init() {
 		QueueOldestAgeSeconds.WithLabelValues(q).Set(0)
 	}
 	DiscordGatewayLatencySeconds.Set(0)
-}
-
-// RecordUniqueSkipped increments the UniqueSkippedTotal counter for the specified kind.
-func RecordUniqueSkipped(kind string) {
-	if kind == "" {
-		return
-	}
-	UniqueSkippedTotal.WithLabelValues(kind).Inc()
 }
 
 // RecordJobEnqueued increments the JobsEnqueuedTotal counter for the specified queue, kind, and status.

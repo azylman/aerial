@@ -138,7 +138,7 @@ func TestVanadisConsumerStatsQuerier(t *testing.T) {
 		t.Errorf("expected bus stats querier when bus implements consumerStatsQuerier")
 	}
 	mockQ := &mockConsumerStatsQuerier{}
-	srv.SetQueueStats(mockQ)
+	srv.queueStats = mockQ
 	if srv.consumerStatsQuerier() != mockQ {
 		t.Errorf("expected queueStats override")
 	}
@@ -1087,11 +1087,11 @@ func TestVanadisMetrics(t *testing.T) {
 		},
 	})
 	srvWithQueue := NewVanadisServer(Config{}, pgStoreWithQueue, nil)
-	srvWithQueue.SetQueueStats(&mockConsumerStatsQuerier{
+	srvWithQueue.queueStats = &mockConsumerStatsQuerier{
 		stats: map[string][2]int64{
 			"AERIAL_JOBS/vanadis-chunk": {2, 1},
 		},
-	})
+	}
 
 	memStore := newMemoryVanadisStore()
 	_ = memStore.CreateBuild(context.Background(), b1, []VanadisChunk{c1, c2, c3})
@@ -1103,7 +1103,7 @@ func TestVanadisMetrics(t *testing.T) {
 		},
 	})
 	srvPGErr := NewVanadisServer(Config{}, pgStoreErr, nil)
-	srvPGErr.SetQueueStats(&mockConsumerStatsQuerier{err: errors.New("simulated stats error")})
+	srvPGErr.queueStats = &mockConsumerStatsQuerier{err: errors.New("simulated stats error")}
 
 	tests := makeVanadisMetricsCases(srvWithQueue, srvMem, srvPGErr)
 	for _, tc := range tests {

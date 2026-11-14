@@ -564,8 +564,8 @@ func TestVanadisServer_BusAndJetStreamInit(t *testing.T) {
 	if err != nil || stop == nil {
 		t.Errorf("expected non-nil stop and nil error when factory succeeds, got err=%v", err)
 	}
-	if server.Bus() != memBus {
-		t.Error("expected server.Bus() to equal configured bus")
+	if server.bus != memBus {
+		t.Error("expected server.bus to equal configured bus")
 	}
 	stop()
 }

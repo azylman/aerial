@@ -622,9 +622,6 @@ func (s *VanadisServer) SetStore(store VanadisStore) { s.store = store }
 // SetBus sets the pubsub.Bus for event emission and consumption.
 func (s *VanadisServer) SetBus(bus pubsub.Bus) { s.bus = bus }
 
-// SetQueueStats overrides the consumerStatsQuerier for testing or custom statistics.
-func (s *VanadisServer) SetQueueStats(q consumerStatsQuerier) { s.queueStats = q }
-
 func (s *VanadisServer) consumerStatsQuerier() consumerStatsQuerier {
 	if s == nil {
 		return nil
@@ -637,9 +634,6 @@ func (s *VanadisServer) consumerStatsQuerier() consumerStatsQuerier {
 	}
 	return nil
 }
-
-// Bus returns the configured pubsub.Bus instance.
-func (s *VanadisServer) Bus() pubsub.Bus { return s.bus }
 
 func (s *VanadisServer) postBrainJSON(ctx context.Context, path string, payload any, errReadLimit int64) ([]byte, error) {
 	if s == nil || s.httpClient == nil {
