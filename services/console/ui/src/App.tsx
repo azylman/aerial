@@ -66,7 +66,7 @@ function useIdlePrefetch(): void {
 }
 
 /**
- * Shell polling. Like the vanilla UI, /api/status polls only while telemetry or tasks is open; its
+ * Shell polling. /api/status polls only while telemetry or tasks is open; its
  * first poll joins the request startBoot already has in flight. The one-shot badge loads
  * (schedules, facts, builds) are started by startBoot before the first render.
  */

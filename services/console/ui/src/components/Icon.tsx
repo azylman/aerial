@@ -1,6 +1,6 @@
 // Inline SVG icon set for console chrome. Every glyph is a 24x24 path so icons inherit
-// `currentColor` and scale with font size; there is no icon font or sprite request. One entry per
-// emoji the vanilla UI used as chrome (static/app.js, static/index.html):
+// `currentColor` and scale with font size; there is no icon font or sprite request. Each name and
+// the emoji it stands for:
 //   ⚡ bolt  🎯 target  ⏰ alarm  🧠 brain  🛠️ wrench  🚀 rocket  📋 clipboard  🔍 search  ⟳ refresh
 //   🔄 sync  ↗ external  ⬇️ arrow-down  ✓ check  ✕/× x  ⏱ timer  ⏳ hourglass  💬 chat  📦 package
 //   🟢/🟡 dot  🚨/⚠️ alert  ○ circle  ⊘ ban  🩺 pulse  🕒 clock  📅 calendar  🌌 sparkle  ⚙️ gear

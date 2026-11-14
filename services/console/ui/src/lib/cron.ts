@@ -1,6 +1,5 @@
-// Human-readable descriptions for 5-field cron expressions and @macros, ported from
-// formatCronExpression in static/app.js. Numeric fields are parsed strictly (whole field must be
-// digits) so lists and ranges such as `1,3,5` or `1-15` are never misread as their first number.
+// Human-readable descriptions for 5-field cron expressions and @macros. Numeric fields are parsed
+// strictly (whole field must be digits) so lists and ranges such as `1,3,5` or `1-15` are never misread as their first number.
 
 const MACROS: Readonly<Record<string, string>> = Object.freeze({
   '@yearly': 'Every year on Jan 1st at 00:00',

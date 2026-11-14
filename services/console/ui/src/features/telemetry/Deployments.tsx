@@ -126,7 +126,7 @@ export const CompactDeployCard = memo(function CompactDeployCard({ dep }: { read
   );
 });
 
-/** Port of renderDeployments' card list. */
+/** The deployment pipeline card list. */
 export const Deployments = memo(function Deployments() {
   const deploys = useConsoleStore(selectDeploys);
   const loaded = useConsoleStore((s) => s.status.cluster.data !== null);

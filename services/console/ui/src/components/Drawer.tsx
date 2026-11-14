@@ -23,7 +23,7 @@ export type DrawerPanels = {
 };
 
 /**
- * Header text, ported from openDiagnosticDrawer and openBuildDetailDrawer. A build or task drawer
+ * Drawer header text. A build or task drawer
  * shows its id until that target's detail payload arrives, then its title too.
  */
 export function drawerTitle(
@@ -162,7 +162,7 @@ function DrawerPanel({
 const selectDrawer = (s: ConsoleState): DrawerState => s.drawer;
 
 /**
- * The single drawer host, built like the vanilla drawer: the overlay and panel shell stay mounted
+ * The single drawer host: the overlay and panel shell stay mounted
  * and the store's drawer slice toggles their `.active` class in the same commit, so open and close
  * are a class flip plus a compositor-only CSS transition. Opening renders the new target's body at
  * once; closing keeps the last body painted until the panel's fade ends, then drops it, so a

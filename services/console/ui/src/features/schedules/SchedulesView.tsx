@@ -30,7 +30,7 @@ import { RunCard } from './RunsFeed';
 import { CronCard, OneShotCard } from './ScheduleCards';
 import './schedules.css';
 
-/** Same cadence as the vanilla schedules tab (schedulesPollInterval). */
+/** Poll cadence for the schedules tab. */
 export const SCHEDULES_POLL_MS = 10_000;
 
 const EMPTY_CRONS: readonly CronSchedule[] = Object.freeze([]);
@@ -119,7 +119,7 @@ interface PillsProps {
   readonly onSelect: (filter: ScheduleFilter) => void;
 }
 
-/** Category pills with their counts (renderSchedulePills). */
+/** Category pills with their counts. */
 const SchedulePills = memo(function SchedulePills({ filter, onSelect }: PillsProps) {
   const crons = useConsoleStore((s) => selectCrons(s).length);
   const oneShots = useConsoleStore((s) => selectOneShots(s).length);
@@ -336,7 +336,7 @@ const SectionTitle = memo(function SectionTitle({
 });
 
 /**
- * Port of #schedules-view. Pill and search are local state and a keystroke filters and paints in
+ * The schedules view (#schedules-view). Pill and search are local state and a keystroke filters and paints in
  * the same frame as the input. That stays cheap because cards are memoized per schedule (keyed by
  * id, so a card that stays visible keeps its DOM) and take no query prop: the query reaches only
  * their highlight leaves through HighlightQuery, and matching runs against cached haystacks. A

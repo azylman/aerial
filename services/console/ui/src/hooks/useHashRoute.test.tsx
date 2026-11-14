@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { type TabId, useConsoleStore } from '../store/store';
 import { hashForTab, initRouteFromLocation, tabFromHash, useHashRoute } from './useHashRoute';
 
-// Same hash names and default as TABS / navigateTab in static/app.js.
+// Expected hash names and default tab.
 describe('tabFromHash', () => {
   it.each([
     { hash: '#telemetry', want: 'telemetry' },

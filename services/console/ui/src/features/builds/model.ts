@@ -1,7 +1,5 @@
-// Pure derivations for the build queue and its detail drawer, ported from renderBuildsPills,
-// updateBuildsMetrics, renderBuildQueueCards, openBuildDetailDrawer and renderBuildDetailContent
-// in static/app.js. The vanilla UI re-classified and re-lowercased every build on each keystroke
-// and each poll; here a build is indexed once per object (polls are reconciled, so an unchanged
+// Pure derivations for the build queue and its detail drawer: pills, metrics, cards and chunk
+// detail. A build is indexed once per object (polls are reconciled, so an unchanged
 // build keeps its reference and its index entry) and a filter is one linear pass.
 
 import type { BuildDetailAPIResponse, BuildsAPIResponse, VanadisBuildDTO, VanadisChunkDTO } from '../../api/types';
@@ -12,7 +10,7 @@ export type BuildFilter = 'ALL' | 'RUNNING' | 'QUEUED' | 'COMPLETED';
 
 export const BUILD_FILTERS: readonly BuildFilter[] = ['ALL', 'RUNNING', 'QUEUED', 'COMPLETED'];
 
-/** Repo a chunk without one belongs to (renderBuildQueueCards search, chunk PR links). */
+/** Repo a chunk without one belongs to (queue search, chunk PR links). */
 export const DEFAULT_CHUNK_REPO = 'azylman/aerial';
 
 /** One build with the values every filter pass and the metrics need. */
@@ -45,7 +43,7 @@ export function indexBuilds(builds: readonly VanadisBuildDTO[]): readonly Indexe
   return builds.map(indexBuild);
 }
 
-/** renderBuildQueueCards' query normalization. */
+/** Queue search query normalization. */
 export const normalizeQuery = (search: string): string => search.trim().toLowerCase();
 
 const FILTER_STATE: Readonly<Record<Exclude<BuildFilter, 'ALL'>, BuildQueueState>> = {
@@ -62,7 +60,7 @@ export function filterBuilds(index: readonly IndexedBuild[], filter: BuildFilter
 }
 
 /**
- * Pill counts (renderBuildsPills). The server's bucket counters win; ALL is the reported total
+ * Pill counts. The server's bucket counters win; ALL is the reported total
  * when it exceeds the page of builds returned.
  */
 export function pillCounts(data: BuildsAPIResponse | null, index: readonly IndexedBuild[]): Readonly<Record<BuildFilter, number>> {

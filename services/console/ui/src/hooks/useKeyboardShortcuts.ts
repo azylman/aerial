@@ -1,7 +1,7 @@
 import { type RefObject, useEffect, useRef } from 'react';
 import { type TabId, useConsoleStore } from '../store/store';
 
-// Port of setupGlobalKeyboardShortcuts from static/app.js:
+// Global keyboard shortcuts:
 //   '/'      focuses the active view's search box (unless already typing in a field)
 //   Escape   clears and blurs that search box when it has focus
 // Escape with a drawer open belongs to the drawer (see Drawer.tsx), so it is ignored here.

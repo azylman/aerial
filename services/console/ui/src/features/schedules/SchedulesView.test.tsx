@@ -323,7 +323,7 @@ describe('SchedulesView content', () => {
         human: ['Every day at 9:00 AM'],
         meta: ['CRON: 0 9 * * *'],
         link: null,
-        prompt: '\n                        Run routine cron-a\n                    ',
+        prompt: 'Run routine cron-a',
         footer: ['NEXT: Nov 8 12:10:00 PM'],
       },
       {
@@ -335,7 +335,7 @@ describe('SchedulesView content', () => {
         human: ['Every day at 9:00 AM'],
         meta: ['CRON: 0 9 * * *'],
         link: null,
-        prompt: '\n                        Check the garden sensors\n                    ',
+        prompt: 'Check the garden sensors',
         footer: ['NEXT: Nov 8 12:10:00 PM'],
       },
       {
@@ -347,7 +347,7 @@ describe('SchedulesView content', () => {
         human: ['Every 15 minutes'],
         meta: ['CRON: */15 * * * *'],
         link: null,
-        prompt: '\n                        Run routine cron-c\n                    ',
+        prompt: 'Run routine cron-c',
         footer: ['NEXT: Nov 8 12:10:00 PM'],
       },
       {
@@ -359,7 +359,7 @@ describe('SchedulesView content', () => {
         human: ['Single Execution Timer'],
         meta: ['THREAD: #40000000 ↗'],
         link: '/agentsview/?thread=400000000000000000',
-        prompt: '\n                        Water the garden basil\n                    ',
+        prompt: 'Water the garden basil',
         footer: ['RUN AT: Nov 8 12:30:00 PM'],
       },
       {
@@ -371,7 +371,7 @@ describe('SchedulesView content', () => {
         human: ['Single Execution Timer'],
         meta: ['THREAD: not-a-thread'],
         link: null,
-        prompt: '\n                        Reminder once-b\n                    ',
+        prompt: 'Reminder once-b',
         footer: ['RUN AT: Nov 8 12:30:00 PM'],
       },
     ]);

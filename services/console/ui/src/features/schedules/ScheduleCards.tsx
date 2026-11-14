@@ -8,15 +8,10 @@ import { QueryHighlight } from '../../lib/search';
 import { CountdownBadge } from './Countdown';
 import { linkableThread } from './model';
 
-// Cron and one-shot cards (renderScheduleCards). Each card is memoized on its reconciled schedule
+// Cron and one-shot cards. Each card is memoized on its reconciled schedule
 // object alone, so polls that leave a schedule unchanged skip it and a keystroke only reaches its
 // QueryHighlight leaves (through the HighlightQuery context); the countdown is a leaf on the
 // shared 1s clock.
-
-// The vanilla template interpolates the prompt between indented lines inside a `pre-wrap` box, so
-// that whitespace is part of what renders (a blank first line and an indent). Kept for parity.
-const PROMPT_LEAD = '\n                        ';
-const PROMPT_TAIL = '\n                    ';
 
 function PromptBox({ text }: { readonly text: string }) {
   return (
@@ -26,9 +21,7 @@ function PromptBox({ text }: { readonly text: string }) {
         <CopyButton text={text} ariaLabel="Copy prompt text" className="prompt-copy-btn" />
       </div>
       <div className="schedule-prompt-body">
-        {PROMPT_LEAD}
         <QueryHighlight text={text} />
-        {PROMPT_TAIL}
       </div>
     </div>
   );

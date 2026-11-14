@@ -12,12 +12,12 @@ export interface FactCardProps {
   readonly count: number;
   /** Trimmed search text to highlight (original case; matching is case-insensitive). */
   readonly query: string;
-  /** Instant the card ages from: when the archive payload was synced, like renderFactCards. */
+  /** Instant the card ages from: when the archive payload was synced. */
   readonly now: number;
 }
 
 /**
- * Port of one renderFactCards card. Memoized: poll results are reconciled, so an unchanged fact
+ * One memory fact card. Memoized: poll results are reconciled, so an unchanged fact
  * keeps its reference and its card never re-renders; copy reads the text from props instead of
  * an index into the filtered list.
  */

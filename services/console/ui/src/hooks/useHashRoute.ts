@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { type TabId, useConsoleStore } from '../store/store';
 
-// Port of navigateTab/setupTabs from static/app.js: every tab owns `#<id>`, unknown or empty
+// Hash routing: every tab owns `#<id>`, unknown or empty
 // hashes land on telemetry, and the hash is rewritten to the canonical form on load.
 
 export const TAB_IDS = ['telemetry', 'tasks', 'schedules', 'memory', 'builds', 'docket'] as const satisfies readonly TabId[];
@@ -37,8 +37,8 @@ export function initRouteFromLocation(): TabId {
 
 /**
  * Two-way binding between `location.hash` and the ui slice's active tab. Navigation goes through
- * the store (`setActiveTab`); store changes are mirrored into the hash (adding a history entry,
- * like the vanilla UI) and back/forward or manual hash edits flow back via `hashchange`. The hash
+ * the store (`setActiveTab`); store changes are mirrored into the hash (adding a history entry)
+ * and back/forward or manual hash edits flow back via `hashchange`. The hash
  * is canonicalised on mount, so `/console/next/` becomes `/console/next/#telemetry`.
  */
 export function useHashRoute(): TabId {

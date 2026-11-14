@@ -1,6 +1,6 @@
-// Pure display formatters ported from static/app.js. No function here reads the clock: callers
+// Pure display formatters. No function here reads the clock: callers
 // pass `now` (epoch ms, already skew-corrected) so views can share one ticker and tests stay pure.
-// Emoji chrome from the vanilla UI is replaced by an `IconName` the view renders as inline SVG.
+// Icons are returned as an `IconName` the view renders as inline SVG.
 
 import type { IconName } from '../components/Icon';
 
@@ -57,7 +57,7 @@ export function formatGitSyncDelta(seconds: number | null | undefined): string {
 export interface TriggerBadge {
   readonly icon: IconName;
   readonly text: string;
-  /** Modifier class suffix shared with the vanilla stylesheet (`trigger-badge <css>`). */
+  /** Modifier class suffix in the console stylesheet (`trigger-badge <css>`). */
   readonly css: 'cron' | 'reminder' | 'http' | 'discord';
 }
 

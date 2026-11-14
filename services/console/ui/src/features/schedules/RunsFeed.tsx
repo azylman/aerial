@@ -11,7 +11,7 @@ const RunAge = memo(function RunAge({ at }: { readonly at: string }) {
   return <span className="run-time-badge">{formatTimeAgo(at, useLiveNow())}</span>;
 });
 
-/** One execution run (renderScheduleRuns), memoized on the reconciled run; highlights follow HighlightQuery. */
+/** One execution run, memoized on the reconciled run; highlights follow HighlightQuery. */
 export const RunCard = memo(function RunCard({ run }: { readonly run: ScheduleRun }) {
   const status = runStatus(run.status);
   const thread = linkableThread(run.thread_id);

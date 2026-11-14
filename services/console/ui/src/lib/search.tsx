@@ -1,5 +1,4 @@
-// Search-term highlighting, ported from highlightSearch in static/app.js. Instead of building an
-// HTML string the text is split into plain/match segments and React renders <mark> elements, so
+// Search-term highlighting. Instead of building an HTML string the text is split into plain/match segments and React renders <mark> elements, so
 // escaping is handled by React and no markup is ever parsed.
 
 import { createContext, memo, useContext } from 'react';

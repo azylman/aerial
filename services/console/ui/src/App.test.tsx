@@ -292,7 +292,7 @@ describe('tab switch commits', () => {
   });
 });
 
-// ---- fully seeded walk and cross-feature isolation (fixtures shared with the parity suite) ----
+// ---- fully seeded walk and cross-feature isolation (fixtures shared with the e2e suite) ----
 
 const STATUS = JSON.parse(statusRaw) as ClusterResponse;
 const SCHEDULES = JSON.parse(schedulesRaw) as SchedulesAPIResponse;

@@ -1,9 +1,8 @@
 import type { CronSchedule, OneShotSchedule, ScheduleRun, ScheduleSummaryMetrics } from '../../api/types';
 import type { IconName } from '../../components/Icon';
 
-// Pure view models for the schedules view, ported from updateScheduleMetrics, renderSchedulePills,
-// renderScheduleCards, renderScheduleRuns and startSchedulesTicker in static/app.js. Components
-// pass reconciled snapshots in; unchanged inputs come back as the same references so memoized
+// Pure view models for the schedules view: metrics, category pills, cards, runs and countdowns.
+// Components pass reconciled snapshots in; unchanged inputs come back as the same references so memoized
 // cards skip rendering.
 
 export type ScheduleFilter = 'ALL' | 'CRON' | 'ONE_SHOT' | 'RUNS';

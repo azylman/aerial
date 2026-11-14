@@ -321,7 +321,7 @@ jobs:
           echo "Timed out waiting for roborev after 600s; releasing held failure status."
 
   console-e2e:
-    name: Console UI Parity Suite
+    name: Console UI E2E Suite
     needs: changes
     if: github.event_name != 'push' || inputs.force_all == true
     runs-on: [self-hosted, ci]

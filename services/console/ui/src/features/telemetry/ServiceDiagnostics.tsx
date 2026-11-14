@@ -6,7 +6,7 @@ import '../../styles/sections.css';
 import './ServiceDiagnostics.css';
 
 /**
- * Service drawer body (port of openDiagnosticDrawer). It follows the live snapshot, so a status
+ * Service drawer body. It follows the live snapshot, so a status
  * change while the drawer is open updates it in place; a service that disappears renders nothing.
  */
 export const ServiceDiagnostics = memo(function ServiceDiagnostics({ target }: { readonly target: { readonly name: string } }) {

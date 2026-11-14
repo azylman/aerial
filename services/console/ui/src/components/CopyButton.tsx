@@ -12,7 +12,7 @@ export interface CopyButtonProps {
 }
 
 /**
- * Port of copyCronPrompt/copyOneShotPrompt: writes `text` to the clipboard and flips to a
+ * Copy button: writes `text` to the clipboard and flips to a
  * transient COPIED state (`<className> copied`). The text arrives as a prop, so there is no
  * index lookup into a filtered list and no DOM write from outside React.
  */

@@ -2,9 +2,8 @@ import { fetchBuildDetail, fetchBuilds } from '../../api/api';
 import { type PollFetcher, syncResource } from '../../hooks/usePollingSync';
 import { useConsoleStore } from '../../store/store';
 
-// The build queue's fetches (fetchBuilds and openBuildDetailDrawer in static/app.js). The shell
-// loads the queue once at boot for the tab badge; the view polls it while open and re-runs it for
-// SYNC BUILDS. The detail drawer polls its build while it is open.
+// The build queue's fetches: the queue list and one build's detail. The shell loads the queue
+// once at boot for the tab badge; the view polls it while open and re-runs it for SYNC BUILDS. The detail drawer polls its build while it is open.
 
 export const syncBuilds = syncResource(
   fetchBuilds,

@@ -2,7 +2,7 @@ import type { ActiveTaskStatus } from '../../api/types';
 import type { IconName } from '../../components/Icon';
 import { formatAgentsviewSessionUrl } from '../../lib/formatters';
 
-// Pure view models for the active task queue, ported from renderActiveTasks in static/app.js.
+// Pure view models for the active task queue.
 // Components select primitives or reconciled task objects and derive everything else here.
 
 export interface QueueCounts {
@@ -71,7 +71,7 @@ export interface TaskCardModel {
   readonly inspectUrl: string;
 }
 
-/** One task card, field for field with the per-task template in renderActiveTasks. */
+/** One task card's display fields. */
 export function taskCardModel(task: ActiveTaskStatus): TaskCardModel {
   const processing = task.status === 'PROCESSING';
   const pending = task.status === 'PENDING';
