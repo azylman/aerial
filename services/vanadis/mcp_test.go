@@ -562,3 +562,17 @@ func assertVanadisMCPToolResult(t *testing.T, respBytes []byte, wantToolErr bool
 		t.Fatalf("response %s does not contain expected substring %q", string(respBytes), wantSubstr)
 	}
 }
+
+func TestToMCPChunkBriefs(t *testing.T) {
+	t.Parallel()
+	if got := toMCPChunkBriefs(nil); len(got) != 0 {
+		t.Errorf("expected empty slice for nil chunks, got %+v", got)
+	}
+	chunks := []VanadisChunk{
+		{ID: "c1", ChunkIndex: 0, Title: "C1", Mode: "pr", Status: "running", Repo: "aerial", PRNumber: 10, DependsOn: []string{"c0"}},
+	}
+	got := toMCPChunkBriefs(chunks)
+	if len(got) != 1 || got[0].ID != "c1" || len(got[0].DependsOn) != 1 || got[0].DependsOn[0] != "c0" {
+		t.Errorf("unexpected briefs: %+v", got)
+	}
+}

@@ -31,6 +31,10 @@ type mockRow struct {
 }
 
 func fillBuildDest(b VanadisBuild, dest []any) {
+	if len(dest) == 11 {
+		*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*string), *dest[8].(*bool), *dest[9].(*time.Time), *dest[10].(*time.Time) = b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt
+		return
+	}
 	*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*string), *dest[8].(*time.Time), *dest[9].(*time.Time) = b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.CreatedAt, b.UpdatedAt
 }
 
@@ -38,7 +42,7 @@ func (r *mockRow) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
 	}
-	if r.b != nil && len(dest) == 10 {
+	if r.b != nil && (len(dest) == 10 || len(dest) == 11) {
 		fillBuildDest(*r.b, dest)
 	}
 	return nil
@@ -83,6 +87,11 @@ func (r *mockRows) Scan(dest ...any) error {
 		}
 		if len(dest) == 18 {
 			*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*[]string), *dest[8].(*[]string), *dest[9].(*string), *dest[10].(*[]string), *dest[11].(*string), *dest[12].(*int), *dest[13].(*int), *dest[14].(*sql.NullTime), *dest[15].(*sql.NullTime), *dest[16].(*time.Time), *dest[17].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
+			return nil
+		}
+		if len(dest) == 25 {
+			var rawCIChecks, rawRolloutState []byte
+			*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*[]string), *dest[8].(*[]string), *dest[9].(*string), *dest[10].(*[]string), *dest[11].(*string), *dest[12].(*int), *dest[13].(*int), *dest[14].(*[]string), *dest[15].(*int), *dest[16].(*[]byte), *dest[17].(*[]byte), *dest[18].(*string), *dest[19].(*string), *dest[20].(*string), *dest[21].(*sql.NullTime), *dest[22].(*sql.NullTime), *dest[23].(*time.Time), *dest[24].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
 			return nil
 		}
 	}
@@ -171,7 +180,11 @@ func (m *memoryVanadisStore) CreateBuild(_ context.Context, build VanadisBuild, 
 	if m.createErr != nil {
 		return m.createErr
 	}
-	m.builds[build.ID], m.chunks[build.ID] = build, chunks
+	normChunks, err := normalizeAndValidateBuildDAG(chunks)
+	if err != nil {
+		return err
+	}
+	m.builds[build.ID], m.chunks[build.ID] = build, normChunks
 	return nil
 }
 
@@ -317,22 +330,31 @@ func (m *memoryVanadisStore) GetChunkByPR(_ context.Context, repo string, prNumb
 	return &VanadisChunkPRLookup{Matched: false}, nil
 }
 
-func (m *memoryVanadisStore) AttachChunkPR(_ context.Context, chunkID string, prNumber int, repo string) (string, error) {
-	if chunkID, repo = strings.TrimSpace(chunkID), normalizeRepo(repo); chunkID == "" || prNumber <= 0 {
-		return "", errors.New("chunk id and valid pr number are required")
+func (m *memoryVanadisStore) AttachChunkPR(_ context.Context, req AttachChunkPRRequest) (string, string, string, error) {
+	chunkID := strings.TrimSpace(req.ChunkID)
+	if req.PRNumber <= 0 {
+		return "", "", "", errors.New("chunk id or repo, and valid pr number are required")
 	}
+	if chunkID != "" {
+		return m.attachToExistingChunk(chunkID, req)
+	}
+	return m.attachStandalonePR(req)
+}
+
+func (m *memoryVanadisStore) attachToExistingChunk(chunkID string, req AttachChunkPRRequest) (string, string, string, error) {
+	repo := normalizeRepo(req.Repo)
 	for bID, list := range m.chunks {
 		for i := range list {
 			if list[i].ID != chunkID {
 				continue
 			}
 			if list[i].Status == "cancelled" || m.builds[bID].Status == "cancelled" || m.builds[bID].Status == "completed" {
-				return "", ErrBuildConflict
+				return "", "", "", ErrBuildConflict
 			}
 			if repo != "" && !reposMatch(list[i].Repo, repo) {
-				return "", fmt.Errorf("chunk %s repo %q does not match %q", chunkID, list[i].Repo, repo)
+				return "", "", "", fmt.Errorf("chunk %s repo %q does not match %q", chunkID, list[i].Repo, repo)
 			}
-			list[i].PRNumber = prNumber
+			list[i].PRNumber = req.PRNumber
 			if list[i].Status != "merged" && list[i].Status != "failed" {
 				list[i].Status = "pr_opened"
 			}
@@ -341,10 +363,61 @@ func (m *memoryVanadisStore) AttachChunkPR(_ context.Context, chunkID string, pr
 			}
 			list[i].UpdatedAt = time.Now().UTC()
 			m.chunks[bID] = list
-			return m.builds[bID].ThreadID, nil
+			return bID, list[i].ID, m.builds[bID].ThreadID, nil
 		}
 	}
-	return "", ErrChunkNotFound
+	return "", "", "", ErrChunkNotFound
+}
+
+func (m *memoryVanadisStore) attachStandalonePR(req AttachChunkPRRequest) (string, string, string, error) {
+	repo := normalizeRepo(req.Repo)
+	if repo == "" {
+		return "", "", "", errors.New("repo is required for standalone attach")
+	}
+	for bID, list := range m.chunks {
+		for _, c := range list {
+			if reposMatch(c.Repo, repo) && c.PRNumber == req.PRNumber {
+				return bID, c.ID, m.builds[bID].ThreadID, nil
+			}
+		}
+	}
+	buildID := generateBuildID()
+	newChunkID := buildID + "-chunk-1"
+	threadID := normalizeDiscordThreadID(req.TargetID)
+	title := firstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d", req.PRNumber))
+	objective := firstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("Track PR #%d on %s", req.PRNumber, repo))
+	isQuiet := req.Quiet || strings.HasPrefix(strings.TrimSpace(req.Branch), "dependabot/")
+	now := time.Now().UTC()
+
+	b := VanadisBuild{
+		ID:        buildID,
+		ThreadID:  threadID,
+		Tier:      0,
+		Title:     title,
+		Objective: objective,
+		Status:    "running",
+		Quiet:     isQuiet,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	c := VanadisChunk{
+		ID:           newChunkID,
+		BuildID:      buildID,
+		ChunkIndex:   0,
+		Mode:         "pr",
+		Repo:         repo,
+		Title:        title,
+		Instructions: objective,
+		Status:       "pr_opened",
+		PRNumber:     req.PRNumber,
+		DependsOn:    []string{},
+		StartedAt:    now,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	m.builds[buildID] = b
+	m.chunks[buildID] = []VanadisChunk{c}
+	return buildID, newChunkID, threadID, nil
 }
 
 func (m *memoryVanadisStore) findChunkByPR(repo string, prNumber int) (string, int, bool) {

@@ -13,13 +13,14 @@ import (
 
 // MCPChunkBrief captures the concise chunk fields exposed in MCP build listings.
 type MCPChunkBrief struct {
-	ID         string `json:"id"`
-	ChunkIndex int    `json:"chunk_index"`
-	Title      string `json:"title"`
-	Mode       string `json:"mode"`
-	Status     string `json:"status"`
-	Repo       string `json:"repo"`
-	PRNumber   int    `json:"pr_number"`
+	ID         string   `json:"id"`
+	ChunkIndex int      `json:"chunk_index"`
+	Title      string   `json:"title"`
+	Mode       string   `json:"mode"`
+	Status     string   `json:"status"`
+	Repo       string   `json:"repo"`
+	PRNumber   int      `json:"pr_number"`
+	DependsOn  []string `json:"depends_on"`
 }
 
 // MCPGetBuildArgs defines arguments for get_build tool.
@@ -76,15 +77,16 @@ type MCPUpdateBuildOutput struct {
 
 // MCPUpdateChunkArgs defines arguments for update_chunk tool.
 type MCPUpdateChunkArgs struct {
-	BuildID       string   `json:"build_id" jsonschema:"Parent Vanadis build identifier containing the chunk."`
-	ChunkRef      string   `json:"chunk_ref" jsonschema:"Chunk identifier or 0-based chunk_index of the chunk to mutate."`
-	Mode          *string  `json:"mode,omitempty" jsonschema:"Optional new mode for the chunk ('pr' or 'action')."`
-	Repo          string   `json:"repo,omitempty" jsonschema:"Target repository for the chunk."`
-	Title         string   `json:"title,omitempty" jsonschema:"New title for the chunk."`
-	Instructions  string   `json:"instructions,omitempty" jsonschema:"New instructions for the chunk."`
-	TargetFiles   []string `json:"target_files,omitempty" jsonschema:"Target files to inspect or modify."`
-	TargetSymbols []string `json:"target_symbols,omitempty" jsonschema:"Target symbols to inspect or modify."`
-	Effort        string   `json:"effort,omitempty" jsonschema:"Effort level ('low', 'medium', 'high')."`
+	BuildID       string    `json:"build_id" jsonschema:"Parent Vanadis build identifier containing the chunk."`
+	ChunkRef      string    `json:"chunk_ref" jsonschema:"Chunk identifier or 0-based chunk_index of the chunk to mutate."`
+	Mode          *string   `json:"mode,omitempty" jsonschema:"Optional new mode for the chunk ('pr' or 'action')."`
+	Repo          string    `json:"repo,omitempty" jsonschema:"Target repository for the chunk."`
+	Title         string    `json:"title,omitempty" jsonschema:"New title for the chunk."`
+	Instructions  string    `json:"instructions,omitempty" jsonschema:"New instructions for the chunk."`
+	TargetFiles   []string  `json:"target_files,omitempty" jsonschema:"Target files to inspect or modify."`
+	TargetSymbols []string  `json:"target_symbols,omitempty" jsonschema:"Target symbols to inspect or modify."`
+	Effort        string    `json:"effort,omitempty" jsonschema:"Effort level ('low', 'medium', 'high')."`
+	DependsOn     *[]string `json:"depends_on,omitempty" jsonschema:"Optional replacement dependency chunk IDs or indices."`
 }
 
 // MCPUpdateChunkOutput defines output for update_chunk tool.
@@ -104,6 +106,7 @@ type MCPCreateChunkItem struct {
 	TargetSymbols      []string `json:"target_symbols,omitempty" jsonschema:"Target symbols for this chunk."`
 	Effort             string   `json:"effort,omitempty" jsonschema:"Effort level ('low', 'medium', 'high')."`
 	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty" jsonschema:"Acceptance criteria checklist."`
+	DependsOn          []string `json:"depends_on,omitempty" jsonschema:"Optional list of chunk IDs or 0-based indices this chunk depends on."`
 }
 
 // MCPAppendChunkArgs defines arguments for append_chunk tool.
@@ -161,6 +164,7 @@ func toMCPChunkBriefs(chunks []VanadisChunk) []MCPChunkBrief {
 			Status:     c.Status,
 			Repo:       c.Repo,
 			PRNumber:   c.PRNumber,
+			DependsOn:  nonNilSlice(c.DependsOn),
 		}
 	}
 	return briefs
@@ -371,6 +375,7 @@ func (s *VanadisServer) handleMCPUpdateChunk(ctx context.Context, args MCPUpdate
 		TargetFiles:   args.TargetFiles,
 		TargetSymbols: args.TargetSymbols,
 		Effort:        args.Effort,
+		DependsOn:     args.DependsOn,
 	}
 
 	updated, err := s.store.UpdateChunk(ctx, buildID, chunkRef, req)
