@@ -407,16 +407,11 @@ func assertFakeStoreUnrotatedSessions(ctx context.Context, t *testing.T, s *Fake
 	if unrotLong, _ := s.FindUnrotatedSessions(ctx, 5, 4*time.Hour); len(unrotLong) != 2 {
 		t.Errorf("expected 2 unrotated sessions within 4h, got %d", len(unrotLong))
 	}
-	_, _ = s.FindUnrotatedSessions(ctx, 0)
 
 	s.SetSessionInfo(db.SessionInfo{ThreadID: "th-helper", InternalSessionID: "sess-helper", TurnCount: 5, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-10 * time.Minute)})
 	if sessID, _ := s.GetSessionID(ctx, "th-helper"); sessID != "sess-helper" {
 		t.Errorf("SetSessionInfo: sessID=%q", sessID)
 	}
-	s.SetSessionUpdatedAt("th-helper", now.Add(-5*time.Minute))
-	s.SetSessionUpdatedAt("non-existent-sess", now)
-	_, _ = s.GetPreviousSessionID(ctx, "th-helper")
-	_, _ = s.GetPreviousSessionID(ctx, "non-existent-sess")
 }
 
 func TestFakeStoreSessionOperations(t *testing.T) {

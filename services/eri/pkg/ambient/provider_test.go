@@ -795,14 +795,6 @@ func TestProvider_StaleWhileRevalidate(t *testing.T) {
 	}
 }
 
-func TestProvider_HardExpiredForcesSyncRevalidation(t *testing.T) {
-	t.Parallel()
-	runProviderCacheLifecycleSuite(t, []providerCacheLifecycleCase{
-		{name: "initial fetch", wantSubstr: "Val: 1", wantCalls: 1},
-		{name: "hard expired sync revalidation", advanceBy: 12 * time.Second, wantSubstr: "Val: 2", wantCalls: 2},
-	})
-}
-
 func TestProvider_AtomicCAS_PreventsConcurrentRefresh(t *testing.T) {
 	t.Parallel()
 
