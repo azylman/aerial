@@ -35,12 +35,6 @@
     },
     "services/synapse/workers_test.go": {
       "lines": 1580
-    },
-    "services/vanadis/chunks_test.go": {
-      "lines": 3796
-    },
-    "services/vanadis/main_test.go": {
-      "lines": 1897
     }
   }
 }
