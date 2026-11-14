@@ -11,20 +11,57 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+type splitMessageTestCase struct {
+	name       string
+	text       string
+	limit      int
+	wantChunks int
+	wantFirst  string
+	wantLast   string
+	checkCode  bool
+}
+
+func runSplitMessageCase(t *testing.T, tc splitMessageTestCase) {
+	t.Helper()
+	res := SplitMessage(tc.text, tc.limit)
+	effLimit := tc.limit
+	if effLimit <= 0 {
+		effLimit = 2000
+	}
+	if len(tc.text) == 0 {
+		if len(res) != 0 {
+			t.Fatalf("expected 0 chunks for empty input, got %d", len(res))
+		}
+		return
+	}
+	if len(res) < tc.wantChunks {
+		t.Fatalf("expected at least %d chunks, got %d", tc.wantChunks, len(res))
+	}
+	for i, chunk := range res {
+		if len([]rune(chunk)) > effLimit {
+			t.Errorf("chunk %d exceeds limit %d: %d runes", i, effLimit, len([]rune(chunk)))
+		}
+		if tc.checkCode {
+			fenceCount := strings.Count(chunk, "```")
+			if fenceCount%2 != 0 {
+				t.Errorf("chunk %d has unclosed/odd code fences (%d): %q", i, fenceCount, chunk)
+			}
+		}
+	}
+	if tc.wantFirst != "" && len(res) > 0 && res[0] != tc.wantFirst {
+		t.Errorf("want first chunk %q, got %q", tc.wantFirst, res[0])
+	}
+	if tc.wantLast != "" && len(res) > 0 && res[len(res)-1] != tc.wantLast {
+		t.Errorf("want last chunk %q, got %q", tc.wantLast, res[len(res)-1])
+	}
+}
+
 func TestSplitMessage(t *testing.T) {
 	t.Parallel()
 	p1 := strings.Repeat("A", 1200)
 	p2 := strings.Repeat("B", 1200)
 
-	tests := []struct {
-		name       string
-		text       string
-		limit      int
-		wantChunks int
-		wantFirst  string
-		wantLast   string
-		checkCode  bool
-	}{
+	tests := []splitMessageTestCase{
 		{
 			name:       "EmptyString",
 			text:       "",
@@ -166,37 +203,7 @@ func TestSplitMessage(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			res := SplitMessage(tc.text, tc.limit)
-			effLimit := tc.limit
-			if effLimit <= 0 {
-				effLimit = 2000
-			}
-			if len(tc.text) == 0 {
-				if len(res) != 0 {
-					t.Fatalf("expected 0 chunks for empty input, got %d", len(res))
-				}
-				return
-			}
-			if len(res) < tc.wantChunks {
-				t.Fatalf("expected at least %d chunks, got %d", tc.wantChunks, len(res))
-			}
-			for i, chunk := range res {
-				if len([]rune(chunk)) > effLimit {
-					t.Errorf("chunk %d exceeds limit %d: %d runes", i, effLimit, len([]rune(chunk)))
-				}
-				if tc.checkCode {
-					fenceCount := strings.Count(chunk, "```")
-					if fenceCount%2 != 0 {
-						t.Errorf("chunk %d has unclosed/odd code fences (%d): %q", i, fenceCount, chunk)
-					}
-				}
-			}
-			if tc.wantFirst != "" && len(res) > 0 && res[0] != tc.wantFirst {
-				t.Errorf("want first chunk %q, got %q", tc.wantFirst, res[0])
-			}
-			if tc.wantLast != "" && len(res) > 0 && res[len(res)-1] != tc.wantLast {
-				t.Errorf("want last chunk %q, got %q", tc.wantLast, res[len(res)-1])
-			}
+			runSplitMessageCase(t, tc)
 		})
 	}
 }
@@ -335,21 +342,69 @@ func mockJSONResponse(status int, body string) (*http.Response, error) {
 	}, nil
 }
 
+type sendMessageMockCase struct {
+	name            string
+	channelID       string
+	text            string
+	attachments     []*Attachment
+	replyToID       string
+	apiStatus       int
+	wantErr         bool
+	wantPayloads    int
+	wantFirstRef    string
+	wantSecondNoRef bool
+}
+
+func assertSendMessagePayloads(t *testing.T, sentPayloads []string, tc sendMessageMockCase) {
+	t.Helper()
+	if len(sentPayloads) != tc.wantPayloads {
+		t.Fatalf("len(sentPayloads) = %d, want %d", len(sentPayloads), tc.wantPayloads)
+	}
+	if tc.wantPayloads > 0 && !strings.Contains(sentPayloads[0], `"flags":4`) {
+		t.Errorf("expected payload[0] to contain flags:4, got %s", sentPayloads[0])
+	}
+	if tc.wantFirstRef != "" {
+		if !strings.Contains(sentPayloads[0], tc.wantFirstRef) || !strings.Contains(sentPayloads[0], `"fail_if_not_exists":false`) {
+			t.Errorf("expected payload[0] to contain reference %s and fail_if_not_exists:false, got %s", tc.wantFirstRef, sentPayloads[0])
+		}
+	} else if tc.wantPayloads > 0 && strings.Contains(sentPayloads[0], `"message_reference"`) {
+		t.Errorf("expected payload[0] to omit message_reference, got %s", sentPayloads[0])
+	}
+	if tc.wantSecondNoRef && len(sentPayloads) > 1 && strings.Contains(sentPayloads[1], `"message_reference"`) {
+		t.Errorf("expected payload[1] to omit message_reference, got %s", sentPayloads[1])
+	}
+}
+
+func runSendMessageMockCase(t *testing.T, tc sendMessageMockCase) {
+	t.Helper()
+	var sentPayloads []string
+	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		if req.Body != nil {
+			bodyBytes, _ := io.ReadAll(req.Body)
+			sentPayloads = append(sentPayloads, string(bodyBytes))
+		}
+		if tc.apiStatus != http.StatusOK {
+			return mockJSONResponse(tc.apiStatus, `{"message":"Missing permissions","code":50013}`)
+		}
+		return mockJSONResponse(http.StatusOK, `{"id":"msg-123","channel_id":"12345","content":"ok"}`)
+	})
+
+	var err error
+	if tc.replyToID == "" && len(tc.attachments) == 0 && tc.channelID != "" && tc.text != "" {
+		err = SendMessage(sess, tc.channelID, tc.text)
+	} else {
+		err = SendMessageWithAttachments(sess, tc.channelID, tc.text, tc.attachments, tc.replyToID)
+	}
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+	}
+	assertSendMessagePayloads(t, sentPayloads, tc)
+}
+
 func TestSendMessageWithAttachments_MockSession(t *testing.T) {
 	t.Parallel()
 	att := []*Attachment{{Filename: "img.png", ContentType: "image/png", Data: []byte("fake png")}}
-	tests := []struct {
-		name            string
-		channelID       string
-		text            string
-		attachments     []*Attachment
-		replyToID       string
-		apiStatus       int
-		wantErr         bool
-		wantPayloads    int
-		wantFirstRef    string
-		wantSecondNoRef bool
-	}{
+	tests := []sendMessageMockCase{
 		{name: "SingleMessageNoReply", channelID: "12345", text: "Hello world", apiStatus: http.StatusOK, wantPayloads: 1},
 		{name: "SingleMessageWithReplyRef", channelID: "12345", text: "Hello reply", replyToID: "9876543210", apiStatus: http.StatusOK, wantPayloads: 1, wantFirstRef: `"message_id":"9876543210"`},
 		{name: "MultiChunkAttachmentsAndReplyOnFirstChunkOnly", channelID: "12345", text: strings.Repeat("A", 2500), attachments: att, replyToID: "9876543210", apiStatus: http.StatusOK, wantPayloads: 2, wantFirstRef: `"message_id":"9876543210"`, wantSecondNoRef: true},
@@ -364,43 +419,7 @@ func TestSendMessageWithAttachments_MockSession(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var sentPayloads []string
-			sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-				if req.Body != nil {
-					bodyBytes, _ := io.ReadAll(req.Body)
-					sentPayloads = append(sentPayloads, string(bodyBytes))
-				}
-				if tc.apiStatus != http.StatusOK {
-					return mockJSONResponse(tc.apiStatus, `{"message":"Missing permissions","code":50013}`)
-				}
-				return mockJSONResponse(http.StatusOK, `{"id":"msg-123","channel_id":"12345","content":"ok"}`)
-			})
-
-			var err error
-			if tc.replyToID == "" && len(tc.attachments) == 0 && tc.channelID != "" && tc.text != "" {
-				err = SendMessage(sess, tc.channelID, tc.text)
-			} else {
-				err = SendMessageWithAttachments(sess, tc.channelID, tc.text, tc.attachments, tc.replyToID)
-			}
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if len(sentPayloads) != tc.wantPayloads {
-				t.Fatalf("len(sentPayloads) = %d, want %d", len(sentPayloads), tc.wantPayloads)
-			}
-			if tc.wantPayloads > 0 && !strings.Contains(sentPayloads[0], `"flags":4`) {
-				t.Errorf("expected payload[0] to contain flags:4, got %s", sentPayloads[0])
-			}
-			if tc.wantFirstRef != "" {
-				if !strings.Contains(sentPayloads[0], tc.wantFirstRef) || !strings.Contains(sentPayloads[0], `"fail_if_not_exists":false`) {
-					t.Errorf("expected payload[0] to contain reference %s and fail_if_not_exists:false, got %s", tc.wantFirstRef, sentPayloads[0])
-				}
-			} else if tc.wantPayloads > 0 && strings.Contains(sentPayloads[0], `"message_reference"`) {
-				t.Errorf("expected payload[0] to omit message_reference, got %s", sentPayloads[0])
-			}
-			if tc.wantSecondNoRef && len(sentPayloads) > 1 && strings.Contains(sentPayloads[1], `"message_reference"`) {
-				t.Errorf("expected payload[1] to omit message_reference, got %s", sentPayloads[1])
-			}
+			runSendMessageMockCase(t, tc)
 		})
 	}
 }
@@ -653,14 +672,49 @@ func TestIsSnowflake(t *testing.T) {
 	}
 }
 
+type messageSanitizationTestCase struct {
+	name       string
+	token      string
+	rawText    string
+	wantSubstr string
+	wantAbsent string
+}
+
+func runMessageSanitizationTest(t *testing.T, tc messageSanitizationTestCase, isEdit bool) {
+	t.Helper()
+	if tc.token != "" {
+		sanitizer.RegisterSensitiveTokens(tc.token)
+		defer sanitizer.ResetSensitiveTokensForTest()
+	}
+
+	var capturedPayload string
+	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		if req.Body != nil {
+			b, _ := io.ReadAll(req.Body)
+			capturedPayload = string(b)
+		}
+		return mockJSONResponse(http.StatusOK, `{"id":"msg-san","channel_id":"ch-san","content":"ok"}`)
+	})
+
+	if isEdit {
+		if err := EditMessage(sess, "ch-san", "msg-san", tc.rawText); err != nil {
+			t.Fatalf("EditMessage failed: %v", err)
+		}
+	} else {
+		if err := SendMessageWithAttachments(sess, "ch-san", tc.rawText, nil); err != nil {
+			t.Fatalf("SendMessageWithAttachments failed: %v", err)
+		}
+	}
+	if !strings.Contains(capturedPayload, tc.wantSubstr) {
+		t.Errorf("expected payload to contain %q, got: %s", tc.wantSubstr, capturedPayload)
+	}
+	if strings.Contains(capturedPayload, tc.wantAbsent) {
+		t.Errorf("expected payload to NOT contain %q, got: %s", tc.wantAbsent, capturedPayload)
+	}
+}
+
 func TestSendMessageWithAttachments_Sanitization_TableDriven(t *testing.T) {
-	tests := []struct {
-		name       string
-		token      string
-		rawText    string
-		wantSubstr string
-		wantAbsent string
-	}{
+	tests := []messageSanitizationTestCase{
 		{
 			name:       "sensitive token redacted from outbound message",
 			token:      "discord_outbound_secret_token_12345",
@@ -679,41 +733,13 @@ func TestSendMessageWithAttachments_Sanitization_TableDriven(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.token != "" {
-				sanitizer.RegisterSensitiveTokens(tc.token)
-				defer sanitizer.ResetSensitiveTokensForTest()
-			}
-
-			var capturedPayload string
-			sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-				if req.Body != nil {
-					b, _ := io.ReadAll(req.Body)
-					capturedPayload = string(b)
-				}
-				return mockJSONResponse(http.StatusOK, `{"id":"msg-san","channel_id":"ch-san","content":"ok"}`)
-			})
-
-			if err := SendMessageWithAttachments(sess, "ch-san", tc.rawText, nil); err != nil {
-				t.Fatalf("SendMessageWithAttachments failed: %v", err)
-			}
-			if !strings.Contains(capturedPayload, tc.wantSubstr) {
-				t.Errorf("expected payload to contain %q, got: %s", tc.wantSubstr, capturedPayload)
-			}
-			if strings.Contains(capturedPayload, tc.wantAbsent) {
-				t.Errorf("expected payload to NOT contain %q, got: %s", tc.wantAbsent, capturedPayload)
-			}
+			runMessageSanitizationTest(t, tc, false)
 		})
 	}
 }
 
 func TestEditMessage_Sanitization_TableDriven(t *testing.T) {
-	tests := []struct {
-		name       string
-		token      string
-		rawText    string
-		wantSubstr string
-		wantAbsent string
-	}{
+	tests := []messageSanitizationTestCase{
 		{
 			name:       "sensitive token redacted from edited message",
 			token:      "discord_edit_secret_token_67890",
@@ -732,29 +758,7 @@ func TestEditMessage_Sanitization_TableDriven(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.token != "" {
-				sanitizer.RegisterSensitiveTokens(tc.token)
-				defer sanitizer.ResetSensitiveTokensForTest()
-			}
-
-			var capturedPayload string
-			sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-				if req.Body != nil {
-					b, _ := io.ReadAll(req.Body)
-					capturedPayload = string(b)
-				}
-				return mockJSONResponse(http.StatusOK, `{"id":"msg-edit-san","channel_id":"ch-edit","content":"ok"}`)
-			})
-
-			if err := EditMessage(sess, "ch-edit", "msg-edit-san", tc.rawText); err != nil {
-				t.Fatalf("EditMessage failed: %v", err)
-			}
-			if !strings.Contains(capturedPayload, tc.wantSubstr) {
-				t.Errorf("expected payload to contain %q, got: %s", tc.wantSubstr, capturedPayload)
-			}
-			if strings.Contains(capturedPayload, tc.wantAbsent) {
-				t.Errorf("expected payload to NOT contain %q, got: %s", tc.wantAbsent, capturedPayload)
-			}
+			runMessageSanitizationTest(t, tc, true)
 		})
 	}
 }

@@ -334,6 +334,34 @@ func TestClassify_LLM(t *testing.T) {
 	}
 }
 
+func isClassifierCircuitOpen(cls *Classifier) bool {
+	cls.mu.Lock()
+	defer cls.mu.Unlock()
+	if !cls.circuitOpen {
+		return false
+	}
+	now := time.Now()
+	if cls.Clock != nil {
+		now = cls.Clock()
+	}
+	return now.Before(cls.circuitOpenUntil)
+}
+
+func getClassifierFailures(cls *Classifier) int {
+	cls.mu.Lock()
+	defer cls.mu.Unlock()
+	return cls.consecutiveFailures
+}
+
+func assertClassifierState(t *testing.T, cls *Classifier, wantFailures int, wantOpen bool, msg string) {
+	t.Helper()
+	failures := getClassifierFailures(cls)
+	isOpen := isClassifierCircuitOpen(cls)
+	if failures != wantFailures || isOpen != wantOpen {
+		t.Fatalf("%s: failures=%d (want %d), open=%v (want %v)", msg, failures, wantFailures, isOpen, wantOpen)
+	}
+}
+
 func TestCircuitBreaker(t *testing.T) {
 	currTime := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
 	var timeMu sync.Mutex
@@ -346,24 +374,6 @@ func TestCircuitBreaker(t *testing.T) {
 		timeMu.Lock()
 		defer timeMu.Unlock()
 		currTime = currTime.Add(d)
-	}
-
-	isCircuitOpen := func(cls *Classifier) bool {
-		cls.mu.Lock()
-		defer cls.mu.Unlock()
-		if !cls.circuitOpen {
-			return false
-		}
-		now := time.Now()
-		if cls.Clock != nil {
-			now = cls.Clock()
-		}
-		return now.Before(cls.circuitOpenUntil)
-	}
-	getFailures := func(cls *Classifier) int {
-		cls.mu.Lock()
-		defer cls.mu.Unlock()
-		return cls.consecutiveFailures
 	}
 
 	var callCount, shouldFail int32
@@ -385,15 +395,17 @@ func TestCircuitBreaker(t *testing.T) {
 	target := db.Message{Content: "hello"}
 	for i := 1; i <= 2; i++ {
 		res := c.Classify(context.Background(), target, nil)
-		if res.Confidence != 0.0 || getFailures(c) != i || isCircuitOpen(c) {
-			t.Fatalf("call %d: failures=%d, open=%v", i, getFailures(c), isCircuitOpen(c))
+		if res.Confidence != 0.0 {
+			t.Fatalf("call %d: expected 0.0 confidence", i)
 		}
+		assertClassifierState(t, c, i, false, fmt.Sprintf("call %d", i))
 	}
 
 	res3 := c.Classify(context.Background(), target, nil)
-	if res3.Confidence != 0.0 || getFailures(c) != 3 || !isCircuitOpen(c) {
-		t.Fatalf("call 3: failures=%d, open=%v", getFailures(c), isCircuitOpen(c))
+	if res3.Confidence != 0.0 {
+		t.Fatalf("call 3: expected 0.0 confidence")
 	}
+	assertClassifierState(t, c, 3, true, "call 3")
 
 	res4 := c.Classify(context.Background(), target, nil)
 	if res4.Confidence != 0.0 || res4.Reason != "circuit breaker open" || atomic.LoadInt32(&callCount) != 3 {
@@ -403,18 +415,17 @@ func TestCircuitBreaker(t *testing.T) {
 	advanceTime(61 * time.Second)
 	atomic.StoreInt32(&shouldFail, 0)
 	res5 := c.Classify(context.Background(), target, nil)
-	if res5.Confidence != 0.88 || isCircuitOpen(c) || getFailures(c) != 0 {
-		t.Fatalf("call 5: expected recovery, got %+v, failures=%d, open=%v", res5, getFailures(c), isCircuitOpen(c))
+	if res5.Confidence != 0.88 {
+		t.Fatalf("call 5: expected recovery, got %+v", res5)
 	}
+	assertClassifierState(t, c, 0, false, "call 5 recovery")
 
 	cParse := NewClassifier(WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) { return "bad-json", nil }))
 	cParse.FailureThreshold = 2
 	cParse.CooldownDuration = 60 * time.Second
 	cParse.Classify(context.Background(), target, nil)
 	cParse.Classify(context.Background(), target, nil)
-	if getFailures(cParse) != 2 || !isCircuitOpen(cParse) {
-		t.Fatalf("expected 2 parse failures and open circuit, got %d, open=%v", getFailures(cParse), isCircuitOpen(cParse))
-	}
+	assertClassifierState(t, cParse, 2, true, "parse failure circuit")
 
 	cConc := NewClassifier()
 	cConc.FailureThreshold = 5
@@ -428,8 +439,8 @@ func TestCircuitBreaker(t *testing.T) {
 			} else {
 				cConc.recordSuccess()
 			}
-			_ = isCircuitOpen(cConc)
-			_ = getFailures(cConc)
+			_ = isClassifierCircuitOpen(cConc)
+			_ = getClassifierFailures(cConc)
 		}(i)
 	}
 	wg.Wait()
@@ -625,6 +636,53 @@ func TestClassifier_ProcessPools(t *testing.T) {
 	}
 }
 
+type buildSystemOneStateCase struct {
+	name         string
+	targets      []db.Message
+	context      []db.Message
+	wantExact    string
+	wantPrefix   string
+	wantContains []string
+	wantExcluded []string
+	checkRuneCap int
+	checkLineLen int
+}
+
+func assertBuildSystemOneStateCase(t *testing.T, tc buildSystemOneStateCase) {
+	t.Helper()
+	got := BuildSystemOneState(tc.targets, tc.context)
+	if tc.wantExact != "" || (len(tc.targets) == 0 && len(tc.context) == 0) {
+		if got != tc.wantExact {
+			t.Fatalf("BuildSystemOneState() = %q, want %q", got, tc.wantExact)
+		}
+		return
+	}
+	if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) {
+		t.Fatalf("BuildSystemOneState() missing prefix %q in: %q", tc.wantPrefix, got)
+	}
+	for _, sub := range tc.wantContains {
+		if !strings.Contains(got, sub) {
+			t.Fatalf("BuildSystemOneState() missing substring %q in: %q", sub, got)
+		}
+	}
+	for _, sub := range tc.wantExcluded {
+		if strings.Contains(got, sub) {
+			t.Fatalf("BuildSystemOneState() unexpectedly contains %q in: %q", sub, got)
+		}
+	}
+	if tc.checkRuneCap > 0 {
+		if runeCount := utf8.RuneCountInString(got); runeCount > tc.checkRuneCap {
+			t.Fatalf("BuildSystemOneState() runes = %d, exceeds cap %d", runeCount, tc.checkRuneCap)
+		}
+	}
+	if tc.checkLineLen > 0 && tc.wantPrefix != "" {
+		line := strings.TrimPrefix(got, tc.wantPrefix)
+		if runeCount := utf8.RuneCountInString(line); runeCount != tc.checkLineLen {
+			t.Fatalf("message line runes = %d, want %d: %q", runeCount, tc.checkLineLen, line)
+		}
+	}
+}
+
 func TestBuildSystemOneState(t *testing.T) {
 	msgMention := db.Message{
 		AuthorID: "123456", Content: "<@111> check <@&222>",
@@ -651,17 +709,7 @@ func TestBuildSystemOneState(t *testing.T) {
 		{AuthorName: "target8", Content: strings.Repeat("h", 600)},
 	}
 
-	tests := []struct {
-		name         string
-		targets      []db.Message
-		context      []db.Message
-		wantExact    string
-		wantPrefix   string
-		wantContains []string
-		wantExcluded []string
-		checkRuneCap int
-		checkLineLen int
-	}{
+	tests := []buildSystemOneStateCase{
 		{
 			name:      "nil messages",
 			targets:   nil,
@@ -710,56 +758,106 @@ func TestBuildSystemOneState(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := BuildSystemOneState(tc.targets, tc.context)
-			if tc.wantExact != "" || (len(tc.targets) == 0 && len(tc.context) == 0) {
-				if got != tc.wantExact {
-					t.Fatalf("BuildSystemOneState() = %q, want %q", got, tc.wantExact)
-				}
-				return
-			}
-			if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) {
-				t.Fatalf("BuildSystemOneState() missing prefix %q in: %q", tc.wantPrefix, got)
-			}
-			for _, sub := range tc.wantContains {
-				if !strings.Contains(got, sub) {
-					t.Fatalf("BuildSystemOneState() missing substring %q in: %q", sub, got)
-				}
-			}
-			for _, sub := range tc.wantExcluded {
-				if strings.Contains(got, sub) {
-					t.Fatalf("BuildSystemOneState() unexpectedly contains %q in: %q", sub, got)
-				}
-			}
-			if tc.checkRuneCap > 0 {
-				if runeCount := utf8.RuneCountInString(got); runeCount > tc.checkRuneCap {
-					t.Fatalf("BuildSystemOneState() runes = %d, exceeds cap %d", runeCount, tc.checkRuneCap)
-				}
-			}
-			if tc.checkLineLen > 0 && tc.wantPrefix != "" {
-				line := strings.TrimPrefix(got, tc.wantPrefix)
-				if runeCount := utf8.RuneCountInString(line); runeCount != tc.checkLineLen {
-					t.Fatalf("message line runes = %d, want %d: %q", runeCount, tc.checkLineLen, line)
-				}
-			}
+			assertBuildSystemOneStateCase(t, tc)
 		})
 	}
 }
 
+type classifySystemOneCase struct {
+	name          string
+	emptyURL      bool
+	customURL     string
+	customModel   string
+	statusCode    int
+	respBody      string
+	retryFailures int
+	cancelSleep   bool
+	isBurst       bool
+	wantConf      float64
+	wantReasonSub string
+	wantAlert     bool
+}
+
+func assertSystemOneQuestionStructure(t *testing.T, lastReq systemOneRequest) {
+	t.Helper()
+	q, ok := lastReq.Questions["should_wake"]
+	if !ok || q.Type != "noul" || q.Instructions != DefaultSystemOneWakePrompt ||
+		q.Criteria["true"] != DefaultSystemOneTrueCriteria ||
+		q.Criteria["false"] != DefaultSystemOneFalseCriteria {
+		t.Fatalf("unexpected request structure: %+v", lastReq)
+	}
+}
+
+func invokeClassifyVariant(ctx context.Context, cls *Classifier, tc classifySystemOneCase) ClassificationResult {
+	if tc.emptyURL {
+		return cls.classifySystemOne(ctx, []db.Message{{AuthorName: "alex", Content: "test msg"}}, nil)
+	}
+	if tc.isBurst {
+		return cls.ClassifyBurst(ctx, []db.Message{{AuthorName: "alex", Content: "burst msg 1"}, {AuthorName: "alex", Content: "burst msg 2"}}, nil)
+	}
+	return cls.Classify(ctx, db.Message{AuthorName: "alex", Content: "test msg"}, nil)
+}
+
+func runClassifySystemOneCase(t *testing.T, tc classifySystemOneCase) {
+	t.Helper()
+	var attempts atomic.Int32
+	var lastReq systemOneRequest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&lastReq)
+		curr := attempts.Add(1)
+		if int(curr) <= tc.retryFailures {
+			http.Error(w, "transient error", http.StatusInternalServerError)
+			return
+		}
+		if tc.statusCode != 0 && tc.statusCode != http.StatusOK {
+			http.Error(w, tc.respBody, tc.statusCode)
+			return
+		}
+		_, _ = w.Write([]byte(tc.respBody))
+	}))
+	defer ts.Close()
+
+	serverURL := ts.URL
+	if tc.emptyURL {
+		serverURL = ""
+	} else if tc.customURL != "" {
+		serverURL = tc.customURL
+	}
+
+	cfg := config.NewFromData(&config.ConfigData{
+		ClassifierURL:      serverURL,
+		ClassifierProtocol: "systemone",
+		ClassifierModel:    tc.customModel,
+	})
+
+	var alerted bool
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cls := New(cfg)
+	cls.systemOneHTTPClient = ts.Client()
+	cls.retryDelayFunc = func(attempt int) time.Duration { return 0 }
+	cls.retrySleepFunc = func(c context.Context, d time.Duration) error {
+		if tc.cancelSleep {
+			cancel()
+			return c.Err()
+		}
+		return nil
+	}
+	cls.OnSystemAlert = func(endpoint string, err error) { alerted = true }
+
+	res := invokeClassifyVariant(ctx, cls, tc)
+
+	if res.Confidence != tc.wantConf || (tc.wantReasonSub != "" && !strings.Contains(res.Reason, tc.wantReasonSub)) || alerted != tc.wantAlert {
+		t.Fatalf("got res=%+v, alerted=%v; want conf=%f, reasonSub=%q, alert=%v", res, alerted, tc.wantConf, tc.wantReasonSub, tc.wantAlert)
+	}
+	if !tc.emptyURL && !tc.cancelSleep && tc.statusCode == 200 && tc.wantConf > 0 {
+		assertSystemOneQuestionStructure(t, lastReq)
+	}
+}
+
 func TestClassify_SystemOne(t *testing.T) {
-	tests := []struct {
-		name          string
-		emptyURL      bool
-		customURL     string
-		customModel   string
-		statusCode    int
-		respBody      string
-		retryFailures int
-		cancelSleep   bool
-		isBurst       bool
-		wantConf      float64
-		wantReasonSub string
-		wantAlert     bool
-	}{
+	tests := []classifySystemOneCase{
 		{"empty ClassifierURL", true, "", "", 0, "", 0, false, false, 0.0, "classifier_url is empty", false},
 		{"success with noul", false, "", "", 200, `{"model":"laya-cuda","answers":{"should_wake":{"type":"noul","noul":0.88}}}`, 0, false, false, 0.88, "systemone", false},
 		{"confidence fallback", false, "", "", 200, `{"answers":{"should_wake":{"type":"noul","confidence":0.65}}}`, 0, false, false, 0.65, "systemone", false},
@@ -777,73 +875,7 @@ func TestClassify_SystemOne(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var attempts atomic.Int32
-			var lastReq systemOneRequest
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_ = json.NewDecoder(r.Body).Decode(&lastReq)
-				curr := attempts.Add(1)
-				if int(curr) <= tc.retryFailures {
-					http.Error(w, "transient error", http.StatusInternalServerError)
-					return
-				}
-				if tc.statusCode != 0 && tc.statusCode != http.StatusOK {
-					http.Error(w, tc.respBody, tc.statusCode)
-					return
-				}
-				_, _ = w.Write([]byte(tc.respBody))
-			}))
-			defer ts.Close()
-
-			serverURL := ts.URL
-			if tc.emptyURL {
-				serverURL = ""
-			} else if tc.customURL != "" {
-				serverURL = tc.customURL
-			}
-
-			cfg := config.NewFromData(&config.ConfigData{
-				ClassifierURL:      serverURL,
-				ClassifierProtocol: "systemone",
-				ClassifierModel:    tc.customModel,
-			})
-
-			var alerted bool
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			cls := New(cfg)
-			cls.systemOneHTTPClient = ts.Client()
-			cls.retryDelayFunc = func(attempt int) time.Duration { return 0 }
-			cls.retrySleepFunc = func(c context.Context, d time.Duration) error {
-				if tc.cancelSleep {
-					cancel()
-					return c.Err()
-				}
-				return nil
-			}
-			cls.OnSystemAlert = func(endpoint string, err error) { alerted = true }
-
-			var res ClassificationResult
-			switch {
-			case tc.emptyURL:
-				res = cls.classifySystemOne(ctx, []db.Message{{AuthorName: "alex", Content: "test msg"}}, nil)
-			case tc.isBurst:
-				res = cls.ClassifyBurst(ctx, []db.Message{{AuthorName: "alex", Content: "burst msg 1"}, {AuthorName: "alex", Content: "burst msg 2"}}, nil)
-			default:
-				res = cls.Classify(ctx, db.Message{AuthorName: "alex", Content: "test msg"}, nil)
-			}
-
-			if res.Confidence != tc.wantConf || (tc.wantReasonSub != "" && !strings.Contains(res.Reason, tc.wantReasonSub)) || alerted != tc.wantAlert {
-				t.Fatalf("got res=%+v, alerted=%v; want conf=%f, reasonSub=%q, alert=%v", res, alerted, tc.wantConf, tc.wantReasonSub, tc.wantAlert)
-			}
-			if !tc.emptyURL && !tc.cancelSleep && tc.statusCode == 200 && tc.wantConf > 0 {
-				q, ok := lastReq.Questions["should_wake"]
-				if !ok || q.Type != "noul" || q.Instructions != DefaultSystemOneWakePrompt ||
-					q.Criteria["true"] != DefaultSystemOneTrueCriteria ||
-					q.Criteria["false"] != DefaultSystemOneFalseCriteria {
-					t.Fatalf("unexpected request structure: %+v", lastReq)
-				}
-			}
+			runClassifySystemOneCase(t, tc)
 		})
 	}
 }

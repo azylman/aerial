@@ -133,29 +133,8 @@ func TestFakeStoreLifecycleAndFailNext(t *testing.T) {
 	assertStoreUnavailable(t, s)
 }
 
-func TestFakeStoreMessageOperations(t *testing.T) {
-	s := NewFakeStore()
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	m1 := db.Message{ID: "msg-1", ThreadID: "th-1", Content: "Hello", Summary: "Summ"}
-	mustOK(t, s.InsertMessage(ctx, m1), "InsertMessage")
-	mustOK(t, s.InsertMessage(ctx, m1), "Idempotent InsertMessage")
-	mustOK(t, s.InsertMessage(ctx, db.Message{ID: "msg-2", ThreadID: "th-1", Content: "World"}), "InsertMessage msg-2")
-
-	if ok, err := s.MessageExists(ctx, "msg-1"); err != nil || !ok {
-		t.Errorf("MessageExists(msg-1) = %v, %v, want true, nil", ok, err)
-	}
-	if ok, err := s.MessageExists(ctx, "msg-none"); err != nil || ok {
-		t.Errorf("MessageExists(msg-none) = %v, %v, want false, nil", ok, err)
-	}
-	if msg, err := s.GetMessage(ctx, "msg-1"); err != nil || msg.Content != "Hello" {
-		t.Errorf("GetMessage(msg-1) = %+v, %v", msg, err)
-	}
-	if _, err := s.GetMessage(ctx, "msg-none"); !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("expected ErrNoRows, got %v", err)
-	}
-
+func assertFakeStoreMessageStatusTransitions(ctx context.Context, t *testing.T, s *FakeStore) {
+	t.Helper()
 	_ = s.UpdateMessageStatus(ctx, "msg-1", db.StatusProcessing, "busy")
 	_ = s.UpdateMessageStatus(ctx, "msg-none", db.StatusProcessing, "")
 	_ = s.IncrementMessageRetry(ctx, "msg-1", "timeout")
@@ -185,7 +164,10 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 	if msg, _ := s.GetMessage(ctx, "msg-1"); msg.Status != db.StatusCompleted || msg.ResponseText != "Done response" {
 		t.Errorf("expected completed, got %+v", msg)
 	}
+}
 
+func assertFakeStoreMessageQueries(ctx context.Context, t *testing.T, s *FakeStore, now time.Time) {
+	t.Helper()
 	if pending, err := s.GetPendingOrProcessingMessages(ctx, 10); err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
 		t.Errorf("GetPendingOrProcessingMessages = %+v, %v", pending, err)
 	}
@@ -211,6 +193,67 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 	}
 	if clamped, err := s.GetActiveTasks(ctx); err != nil || len(clamped) != 50 {
 		t.Errorf("clamped active tasks len = %d, want 50", len(clamped))
+	}
+}
+
+func TestFakeStoreMessageOperations(t *testing.T) {
+	s := NewFakeStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	m1 := db.Message{ID: "msg-1", ThreadID: "th-1", Content: "Hello", Summary: "Summ"}
+	mustOK(t, s.InsertMessage(ctx, m1), "InsertMessage")
+	mustOK(t, s.InsertMessage(ctx, m1), "Idempotent InsertMessage")
+	mustOK(t, s.InsertMessage(ctx, db.Message{ID: "msg-2", ThreadID: "th-1", Content: "World"}), "InsertMessage msg-2")
+
+	if ok, err := s.MessageExists(ctx, "msg-1"); err != nil || !ok {
+		t.Errorf("MessageExists(msg-1) = %v, %v, want true, nil", ok, err)
+	}
+	if ok, err := s.MessageExists(ctx, "msg-none"); err != nil || ok {
+		t.Errorf("MessageExists(msg-none) = %v, %v, want false, nil", ok, err)
+	}
+	if msg, err := s.GetMessage(ctx, "msg-1"); err != nil || msg.Content != "Hello" {
+		t.Errorf("GetMessage(msg-1) = %+v, %v", msg, err)
+	}
+	if _, err := s.GetMessage(ctx, "msg-none"); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("expected ErrNoRows, got %v", err)
+	}
+
+	assertFakeStoreMessageStatusTransitions(ctx, t, s)
+	assertFakeStoreMessageQueries(ctx, t, s, now)
+}
+
+type fakeStoreActiveTaskTestCase struct {
+	name          string
+	filter        db.TasksFilter
+	wantCount     int
+	wantFirstID   string
+	wantSess      string
+	checkSess     bool
+	wantPrevSess  string
+	wantThreadSum string
+	wantRespText  string
+}
+
+func assertFakeStoreActiveTaskCase(t *testing.T, tasks []db.ActiveTask, tc fakeStoreActiveTaskTestCase) {
+	t.Helper()
+	if tc.wantCount == 0 {
+		return
+	}
+	if tasks[0].ID != tc.wantFirstID {
+		t.Errorf("got first ID %q, want %q", tasks[0].ID, tc.wantFirstID)
+	}
+	if tc.checkSess && tasks[0].SessionID != tc.wantSess {
+		t.Errorf("got SessionID %q, want %q", tasks[0].SessionID, tc.wantSess)
+	}
+	if tc.wantPrevSess != "" && tasks[0].PreviousSessionID != tc.wantPrevSess {
+		t.Errorf("got PreviousSessionID %q, want %q", tasks[0].PreviousSessionID, tc.wantPrevSess)
+	}
+	if tc.wantThreadSum != "" && tasks[0].ThreadSummary != tc.wantThreadSum {
+		t.Errorf("got ThreadSummary %q, want %q", tasks[0].ThreadSummary, tc.wantThreadSum)
+	}
+	if tc.wantRespText != "" && tasks[0].ResponseText != tc.wantRespText {
+		t.Errorf("got ResponseText %q, want %q", tasks[0].ResponseText, tc.wantRespText)
 	}
 }
 
@@ -261,17 +304,7 @@ func TestFakeStore_GetActiveTasks_FiltersAndOrdering(t *testing.T) {
 		UpdatedAt:    now.Add(-1 * time.Minute),
 	})
 
-	tests := []struct {
-		name          string
-		filter        db.TasksFilter
-		wantCount     int
-		wantFirstID   string
-		wantSess      string
-		checkSess     bool
-		wantPrevSess  string
-		wantThreadSum string
-		wantRespText  string
-	}{
+	tests := []fakeStoreActiveTaskTestCase{
 		{
 			name:          "thread_id filter and session join",
 			filter:        db.TasksFilter{ThreadID: "th-filter", Statuses: []string{"COMPLETED"}},
@@ -353,25 +386,37 @@ func TestFakeStore_GetActiveTasks_FiltersAndOrdering(t *testing.T) {
 			if len(tasks) != tc.wantCount {
 				t.Fatalf("got count %d, want %d", len(tasks), tc.wantCount)
 			}
-			if tc.wantCount > 0 {
-				if tasks[0].ID != tc.wantFirstID {
-					t.Errorf("got first ID %q, want %q", tasks[0].ID, tc.wantFirstID)
-				}
-				if tc.checkSess && tasks[0].SessionID != tc.wantSess {
-					t.Errorf("got SessionID %q, want %q", tasks[0].SessionID, tc.wantSess)
-				}
-				if tc.wantPrevSess != "" && tasks[0].PreviousSessionID != tc.wantPrevSess {
-					t.Errorf("got PreviousSessionID %q, want %q", tasks[0].PreviousSessionID, tc.wantPrevSess)
-				}
-				if tc.wantThreadSum != "" && tasks[0].ThreadSummary != tc.wantThreadSum {
-					t.Errorf("got ThreadSummary %q, want %q", tasks[0].ThreadSummary, tc.wantThreadSum)
-				}
-				if tc.wantRespText != "" && tasks[0].ResponseText != tc.wantRespText {
-					t.Errorf("got ResponseText %q, want %q", tasks[0].ResponseText, tc.wantRespText)
-				}
-			}
+			assertFakeStoreActiveTaskCase(t, tasks, tc)
 		})
 	}
+}
+
+func assertFakeStoreUnrotatedSessions(ctx context.Context, t *testing.T, s *FakeStore, now time.Time) {
+	t.Helper()
+	for range 8 {
+		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated")
+	}
+	for range 12 {
+		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated-2")
+	}
+	s.SetSessionUpdatedAt("th-unrotated", time.Now().UTC().Add(-2*time.Hour))
+	s.SetSessionUpdatedAt("th-unrotated-2", time.Now().UTC().Add(-2*time.Hour))
+	if unrot, _ := s.FindUnrotatedSessions(ctx, 5); len(unrot) != 0 {
+		t.Errorf("expected 0 unrotated sessions within 1h, got %d", len(unrot))
+	}
+	if unrotLong, _ := s.FindUnrotatedSessions(ctx, 5, 4*time.Hour); len(unrotLong) != 2 {
+		t.Errorf("expected 2 unrotated sessions within 4h, got %d", len(unrotLong))
+	}
+	_, _ = s.FindUnrotatedSessions(ctx, 0)
+
+	s.SetSessionInfo(db.SessionInfo{ThreadID: "th-helper", InternalSessionID: "sess-helper", TurnCount: 5, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-10 * time.Minute)})
+	if sessID, _ := s.GetSessionID(ctx, "th-helper"); sessID != "sess-helper" {
+		t.Errorf("SetSessionInfo: sessID=%q", sessID)
+	}
+	s.SetSessionUpdatedAt("th-helper", now.Add(-5*time.Minute))
+	s.SetSessionUpdatedAt("non-existent-sess", now)
+	_, _ = s.GetPreviousSessionID(ctx, "th-helper")
+	_, _ = s.GetPreviousSessionID(ctx, "non-existent-sess")
 }
 
 func TestFakeStoreSessionOperations(t *testing.T) {
@@ -427,30 +472,7 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 
 	_ = s.SaveSessionID(ctx, "ext-1", "int-1")
 
-	for range 8 {
-		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated")
-	}
-	for range 12 {
-		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated-2")
-	}
-	s.SetSessionUpdatedAt("th-unrotated", time.Now().UTC().Add(-2*time.Hour))
-	s.SetSessionUpdatedAt("th-unrotated-2", time.Now().UTC().Add(-2*time.Hour))
-	if unrot, _ := s.FindUnrotatedSessions(ctx, 5); len(unrot) != 0 {
-		t.Errorf("expected 0 unrotated sessions within 1h, got %d", len(unrot))
-	}
-	if unrotLong, _ := s.FindUnrotatedSessions(ctx, 5, 4*time.Hour); len(unrotLong) != 2 {
-		t.Errorf("expected 2 unrotated sessions within 4h, got %d", len(unrotLong))
-	}
-	_, _ = s.FindUnrotatedSessions(ctx, 0)
-
-	s.SetSessionInfo(db.SessionInfo{ThreadID: "th-helper", InternalSessionID: "sess-helper", TurnCount: 5, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-10 * time.Minute)})
-	if sessID, _ := s.GetSessionID(ctx, "th-helper"); sessID != "sess-helper" {
-		t.Errorf("SetSessionInfo: sessID=%q", sessID)
-	}
-	s.SetSessionUpdatedAt("th-helper", now.Add(-5*time.Minute))
-	s.SetSessionUpdatedAt("non-existent-sess", now)
-	_, _ = s.GetPreviousSessionID(ctx, "th-helper")
-	_, _ = s.GetPreviousSessionID(ctx, "non-existent-sess")
+	assertFakeStoreUnrotatedSessions(ctx, t, s, now)
 }
 
 func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {
@@ -608,55 +630,28 @@ func TestTranscriptStore_FakeStore_BatchInsertTranscriptSteps(t *testing.T) {
 	}
 }
 
-func TestTranscriptStore_SearchSessionSummaries(t *testing.T) {
-	store := NewFakeStore()
-	ctx := context.Background()
+type fakeStoreSearchSummaryCase struct {
+	name, query, wantID     string
+	emb                     []float32
+	limit, wantMin, wantMax int
+	minScore, wantMinScore  float64
+}
 
-	embVector, embQueue := make([]float32, db.ExpectedEmbeddingDim), make([]float32, db.ExpectedEmbeddingDim)
-	embVector[0], embQueue[1] = 1.0, 1.0
-
-	for _, s := range []db.SessionSummary{
-		{SessionID: "sess-vector", ThreadID: "th-vector", Summary: "Investigated and fixed vector cosine similarity search in database", Embedding: embVector},
-		{SessionID: "sess-queue", ThreadID: "th-queue", Summary: "Architectural optimization of worker pool event queue processing concurrency", Embedding: embQueue},
-		{SessionID: "sess-discord", ThreadID: "th-discord", Summary: "Implemented Discord bot webhook notification dispatching and formatting"},
-	} {
-		if err := store.UpsertSessionSummary(ctx, s); err != nil {
-			t.Fatalf("UpsertSessionSummary failed: %v", err)
-		}
+func assertFakeStoreSearchSummaryCase(t *testing.T, results []db.SessionSummary, tc fakeStoreSearchSummaryCase) {
+	t.Helper()
+	if len(results) < tc.wantMin || len(results) > tc.wantMax {
+		t.Fatalf("got %d results, want between %d and %d", len(results), tc.wantMin, tc.wantMax)
 	}
-
-	tests := []struct {
-		name, query, wantID     string
-		emb                     []float32
-		limit, wantMin, wantMax int
-		minScore, wantMinScore  float64
-	}{
-		{name: "sparse text-only search", query: "vector cosine", limit: 5, minScore: 0.1, wantID: "sess-vector", wantMin: 1, wantMax: 5},
-		{name: "sparse text-only queue search", query: "worker pool concurrency", limit: 5, minScore: 0.1, wantID: "sess-queue", wantMin: 1, wantMax: 5},
-		{name: "dense vector-only search", emb: embVector, limit: 5, minScore: 0.5, wantID: "sess-vector", wantMin: 1, wantMax: 5, wantMinScore: 0.99},
-		{name: "hybrid search", emb: embVector, query: "vector similarity", limit: 5, minScore: 0.3, wantID: "sess-vector", wantMin: 1, wantMax: 5, wantMinScore: 0.01},
-		{name: "impossible minScore", query: "worker", limit: 5, minScore: 2.0},
-		{name: "clamped limit", query: "in", limit: 1, wantMin: 1, wantMax: 1},
-		{name: "empty query and vector", limit: 10},
+	if tc.wantID != "" && (len(results) == 0 || results[0].SessionID != tc.wantID) {
+		t.Errorf("got top result %v, want ID %s", results, tc.wantID)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			results, err := store.SearchSessionSummaries(ctx, "", tc.emb, tc.query, tc.limit, tc.minScore)
-			if err != nil {
-				t.Fatalf("SearchSessionSummaries failed: %v", err)
-			}
-			if len(results) < tc.wantMin || len(results) > tc.wantMax {
-				t.Fatalf("got %d results, want between %d and %d", len(results), tc.wantMin, tc.wantMax)
-			}
-			if tc.wantID != "" && (len(results) == 0 || results[0].SessionID != tc.wantID) {
-				t.Errorf("got top result %v, want ID %s", results, tc.wantID)
-			}
-			if tc.wantMinScore > 0 && len(results) > 0 && results[0].Score < tc.wantMinScore {
-				t.Errorf("got score %f, want >= %f", results[0].Score, tc.wantMinScore)
-			}
-		})
+	if tc.wantMinScore > 0 && len(results) > 0 && results[0].Score < tc.wantMinScore {
+		t.Errorf("got score %f, want >= %f", results[0].Score, tc.wantMinScore)
 	}
+}
 
+func assertFakeStoreSummaryFailureHandling(ctx context.Context, t *testing.T, store *FakeStore, embVector []float32) {
+	t.Helper()
 	if err := store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: ""}); err == nil {
 		t.Errorf("expected error for empty sessionID on FakeStore")
 	}
@@ -685,6 +680,45 @@ func TestTranscriptStore_SearchSessionSummaries(t *testing.T) {
 	if _, err := store.GetSessionSyncStates(ctx); !errors.Is(err, sql.ErrConnDone) {
 		t.Errorf("expected sql.ErrConnDone on GetSessionSyncStates")
 	}
+}
+
+func TestTranscriptStore_SearchSessionSummaries(t *testing.T) {
+	store := NewFakeStore()
+	ctx := context.Background()
+
+	embVector, embQueue := make([]float32, db.ExpectedEmbeddingDim), make([]float32, db.ExpectedEmbeddingDim)
+	embVector[0], embQueue[1] = 1.0, 1.0
+
+	for _, s := range []db.SessionSummary{
+		{SessionID: "sess-vector", ThreadID: "th-vector", Summary: "Investigated and fixed vector cosine similarity search in database", Embedding: embVector},
+		{SessionID: "sess-queue", ThreadID: "th-queue", Summary: "Architectural optimization of worker pool event queue processing concurrency", Embedding: embQueue},
+		{SessionID: "sess-discord", ThreadID: "th-discord", Summary: "Implemented Discord bot webhook notification dispatching and formatting"},
+	} {
+		if err := store.UpsertSessionSummary(ctx, s); err != nil {
+			t.Fatalf("UpsertSessionSummary failed: %v", err)
+		}
+	}
+
+	tests := []fakeStoreSearchSummaryCase{
+		{name: "sparse text-only search", query: "vector cosine", limit: 5, minScore: 0.1, wantID: "sess-vector", wantMin: 1, wantMax: 5},
+		{name: "sparse text-only queue search", query: "worker pool concurrency", limit: 5, minScore: 0.1, wantID: "sess-queue", wantMin: 1, wantMax: 5},
+		{name: "dense vector-only search", emb: embVector, limit: 5, minScore: 0.5, wantID: "sess-vector", wantMin: 1, wantMax: 5, wantMinScore: 0.99},
+		{name: "hybrid search", emb: embVector, query: "vector similarity", limit: 5, minScore: 0.3, wantID: "sess-vector", wantMin: 1, wantMax: 5, wantMinScore: 0.01},
+		{name: "impossible minScore", query: "worker", limit: 5, minScore: 2.0},
+		{name: "clamped limit", query: "in", limit: 1, wantMin: 1, wantMax: 1},
+		{name: "empty query and vector", limit: 10},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			results, err := store.SearchSessionSummaries(ctx, "", tc.emb, tc.query, tc.limit, tc.minScore)
+			if err != nil {
+				t.Fatalf("SearchSessionSummaries failed: %v", err)
+			}
+			assertFakeStoreSearchSummaryCase(t, results, tc)
+		})
+	}
+
+	assertFakeStoreSummaryFailureHandling(ctx, t, store, embVector)
 }
 
 func TestTranscriptStore_SearchTranscriptSteps(t *testing.T) {
@@ -849,6 +883,55 @@ func mustInsertDispatch(ctx context.Context, t *testing.T, store db.Store, d db.
 	mustOK(t, err, msg)
 }
 
+func assertFakeStoreDispatchPendingAndCancel(ctx context.Context, t *testing.T, s *FakeStore) {
+	t.Helper()
+	d3 := db.Dispatch{
+		ID:        "disp-f3",
+		Source:    "vanadis",
+		SessionID: "build-1",
+		Prompt:    "Build ID: b-999\nChunk 1",
+		Status:    db.StatusPending,
+	}
+	mustInsertDispatch(ctx, t, s, d3, "InsertDispatch disp-f3")
+	d3b := db.Dispatch{
+		ID:        "disp-f3b",
+		Source:    "vanadis",
+		SessionID: "vanadis-b-999-chunk-2",
+		Prompt:    "Executing chunk 2",
+		Status:    db.StatusProcessing,
+	}
+	mustInsertDispatch(ctx, t, s, d3b, "InsertDispatch disp-f3b")
+	hasActive, err := s.HasActiveDispatchTurn(ctx, "build-1", "")
+	mustOK(t, err, "HasActiveDispatchTurn")
+	if !hasActive {
+		t.Errorf("expected active dispatch for session build-1")
+	}
+
+	disps, err := s.GetPendingOrProcessingDispatches(ctx, 10)
+	mustOK(t, err, "GetPendingOrProcessingDispatches")
+	if len(disps) == 0 {
+		t.Errorf("expected dispatches from GetPendingOrProcessingDispatches")
+	}
+	dispsLimited, err := s.GetPendingOrProcessingDispatches(ctx, 1)
+	mustOK(t, err, "GetPendingOrProcessingDispatches limit=1")
+	if len(dispsLimited) != 1 {
+		t.Errorf("expected 1 dispatch from limited call")
+	}
+	cancelled, err := s.CancelPendingDispatches(ctx, "", "b-999", "cancelled build")
+	mustOK(t, err, "CancelPendingDispatches")
+	if len(cancelled) != 2 || !slices.Contains(cancelled, "disp-f3") || !slices.Contains(cancelled, "disp-f3b") {
+		t.Errorf("expected cancelled [disp-f3, disp-f3b], got %v", cancelled)
+	}
+	got, _ := s.GetDispatch(ctx, "disp-f3")
+	if got.Status != db.StatusFailed || got.ErrorMessage != "cancelled build" {
+		t.Errorf("unexpected status after cancel: %+v", got)
+	}
+	gotB, _ := s.GetDispatch(ctx, "disp-f3b")
+	if gotB.Status != db.StatusFailed || gotB.ErrorMessage != "cancelled build" {
+		t.Errorf("unexpected status for disp-f3b after cancel: %+v", gotB)
+	}
+}
+
 func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
@@ -922,53 +1005,7 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 		t.Errorf("unexpected recent session dispatches: %+v", recent)
 	}
 
-	// 7. Active check
-	d3 := db.Dispatch{
-		ID:        "disp-f3",
-		Source:    "vanadis",
-		SessionID: "build-1",
-		Prompt:    "Build ID: b-999\nChunk 1",
-		Status:    db.StatusPending,
-	}
-	mustInsertDispatch(ctx, t, s, d3, "InsertDispatch disp-f3")
-	d3b := db.Dispatch{
-		ID:        "disp-f3b",
-		Source:    "vanadis",
-		SessionID: "vanadis-b-999-chunk-2",
-		Prompt:    "Executing chunk 2",
-		Status:    db.StatusProcessing,
-	}
-	mustInsertDispatch(ctx, t, s, d3b, "InsertDispatch disp-f3b")
-	hasActive, err := s.HasActiveDispatchTurn(ctx, "build-1", "")
-	mustOK(t, err, "HasActiveDispatchTurn")
-	if !hasActive {
-		t.Errorf("expected active dispatch for session build-1")
-	}
-
-	// 9. Pending or processing dispatches
-	disps, err := s.GetPendingOrProcessingDispatches(ctx, 10)
-	mustOK(t, err, "GetPendingOrProcessingDispatches")
-	if len(disps) == 0 {
-		t.Errorf("expected dispatches from GetPendingOrProcessingDispatches")
-	}
-	dispsLimited, err := s.GetPendingOrProcessingDispatches(ctx, 1)
-	mustOK(t, err, "GetPendingOrProcessingDispatches limit=1")
-	if len(dispsLimited) != 1 {
-		t.Errorf("expected 1 dispatch from limited call")
-	}
-	cancelled, err := s.CancelPendingDispatches(ctx, "", "b-999", "cancelled build")
-	mustOK(t, err, "CancelPendingDispatches")
-	if len(cancelled) != 2 || !slices.Contains(cancelled, "disp-f3") || !slices.Contains(cancelled, "disp-f3b") {
-		t.Errorf("expected cancelled [disp-f3, disp-f3b], got %v", cancelled)
-	}
-	got, _ = s.GetDispatch(ctx, "disp-f3")
-	if got.Status != db.StatusFailed || got.ErrorMessage != "cancelled build" {
-		t.Errorf("unexpected status after cancel: %+v", got)
-	}
-	gotB, _ := s.GetDispatch(ctx, "disp-f3b")
-	if gotB.Status != db.StatusFailed || gotB.ErrorMessage != "cancelled build" {
-		t.Errorf("unexpected status for disp-f3b after cancel: %+v", gotB)
-	}
+	assertFakeStoreDispatchPendingAndCancel(ctx, t, s)
 }
 
 func TestFakeStore_GetActiveTasks_DispatchesUnion(t *testing.T) {
@@ -1065,6 +1102,73 @@ func TestFakeStore_GetActiveRecentThreadIDs_StrippingDiscordPrefix(t *testing.T)
 	}
 }
 
+type fakeStoreEngineKindsCase struct {
+	name        string
+	stack       string
+	wantKinds   []string
+	wantEngine  string
+	wantSummary int
+	wantShell   int
+	wantMCP     int
+	wantStats   []db.TranscriptStackStats
+}
+
+func runFakeStoreEngineKindsCase(ctx context.Context, t *testing.T, store *FakeStore, tc fakeStoreEngineKindsCase) {
+	t.Helper()
+	steps, err := store.GetTranscriptStepRange(ctx, tc.stack, "sess-e", 0, 10)
+	if err != nil {
+		t.Fatalf("GetTranscriptStepRange: %v", err)
+	}
+	kinds := make([]string, 0, len(steps))
+	for _, st := range steps {
+		kinds = append(kinds, st.ToolKind)
+		if st.Engine != tc.wantEngine || st.Stack != FakeTranscriptStack {
+			t.Errorf("step %d engine=%q stack=%q, want %q/%q", st.StepIndex, st.Engine, st.Stack, tc.wantEngine, FakeTranscriptStack)
+		}
+	}
+	if !slices.Equal(kinds, tc.wantKinds) {
+		t.Errorf("kinds = %q, want %q", kinds, tc.wantKinds)
+	}
+	if found, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "sess-e", "", 10); len(found) != len(tc.wantKinds) {
+		t.Errorf("SearchTranscriptSteps len = %d, want %d", len(found), len(tc.wantKinds))
+	}
+	if sums, _ := store.SearchSessionSummaries(ctx, tc.stack, nil, "engine", 10, 0); len(sums) != tc.wantSummary {
+		t.Errorf("SearchSessionSummaries len = %d, want %d", len(sums), tc.wantSummary)
+	}
+	if shell, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "", "shell", 10); len(shell) != tc.wantShell {
+		t.Errorf("SearchTranscriptSteps(tool=shell) len = %d, want %d", len(shell), tc.wantShell)
+	}
+	if mcp, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "", "mcp", 10); len(mcp) != tc.wantMCP {
+		t.Errorf("SearchTranscriptSteps(tool=mcp) len = %d, want %d", len(mcp), tc.wantMCP)
+	}
+	if stats, err := store.GetTranscriptStats(ctx, tc.stack); err != nil || !slices.Equal(stats, tc.wantStats) {
+		t.Errorf("GetTranscriptStats = %+v err=%v, want %+v", stats, err, tc.wantStats)
+	}
+}
+
+func assertFakeStoreEngineLifecycleAndErrors(ctx context.Context, t *testing.T, store *FakeStore) {
+	t.Helper()
+	if states, err := store.GetSessionSyncStates(ctx); err != nil || states["sess-e"].Engine != "claude" || states["sess-u"].Engine != "agy" {
+		t.Errorf("sync state engines = %+v err=%v, want sess-e claude and sess-u agy", states, err)
+	}
+	if _, err := store.BackfillSessionEngines(ctx, nil); err == nil {
+		t.Error("expected error for nil infer")
+	}
+	if err := store.SetSessionEngine(ctx, "", "agy"); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+	if _, err := store.BackfillToolKinds(ctx, nil); err == nil {
+		t.Error("expected error for nil mapper")
+	}
+	if purged, err := store.PurgeMigratedLocalTranscripts(ctx); err != nil || purged != 0 {
+		t.Errorf("PurgeMigratedLocalTranscripts = %d err=%v, want 0", purged, err)
+	}
+	store.FailNext("PurgeMigratedLocalTranscripts", errors.New("boom"))
+	if _, err := store.PurgeMigratedLocalTranscripts(ctx); err == nil {
+		t.Error("expected armed PurgeMigratedLocalTranscripts failure")
+	}
+}
+
 func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1105,16 +1209,7 @@ func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 		t.Fatalf("BackfillSessionEngines updated=%d names=%q err=%v, want 1 from distinct sorted names", updated, inferredFrom, err)
 	}
 
-	tests := []struct {
-		name        string
-		stack       string
-		wantKinds   []string
-		wantEngine  string
-		wantSummary int
-		wantShell   int
-		wantMCP     int
-		wantStats   []db.TranscriptStackStats
-	}{
+	tests := []fakeStoreEngineKindsCase{
 		{name: "all stacks", wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 2, wantShell: 3, wantMCP: 1, wantStats: []db.TranscriptStackStats{{Stack: FakeTranscriptStack, Sessions: 2, Steps: 7}}},
 		{name: "own stack", stack: FakeTranscriptStack, wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 2, wantShell: 3, wantMCP: 1, wantStats: []db.TranscriptStackStats{{Stack: FakeTranscriptStack, Sessions: 2, Steps: 7}}},
 		{name: "other stack sees nothing", stack: "elsewhere"},
@@ -1122,55 +1217,9 @@ func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			steps, err := store.GetTranscriptStepRange(ctx, tc.stack, "sess-e", 0, 10)
-			if err != nil {
-				t.Fatalf("GetTranscriptStepRange: %v", err)
-			}
-			var kinds []string
-			for _, st := range steps {
-				kinds = append(kinds, st.ToolKind)
-				if st.Engine != tc.wantEngine || st.Stack != FakeTranscriptStack {
-					t.Errorf("step %d engine=%q stack=%q, want %q/%q", st.StepIndex, st.Engine, st.Stack, tc.wantEngine, FakeTranscriptStack)
-				}
-			}
-			if !slices.Equal(kinds, tc.wantKinds) {
-				t.Errorf("kinds = %q, want %q", kinds, tc.wantKinds)
-			}
-			if found, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "sess-e", "", 10); len(found) != len(tc.wantKinds) {
-				t.Errorf("SearchTranscriptSteps len = %d, want %d", len(found), len(tc.wantKinds))
-			}
-			if sums, _ := store.SearchSessionSummaries(ctx, tc.stack, nil, "engine", 10, 0); len(sums) != tc.wantSummary {
-				t.Errorf("SearchSessionSummaries len = %d, want %d", len(sums), tc.wantSummary)
-			}
-			if shell, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "", "shell", 10); len(shell) != tc.wantShell {
-				t.Errorf("SearchTranscriptSteps(tool=shell) len = %d, want %d", len(shell), tc.wantShell)
-			}
-			if mcp, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "", "mcp", 10); len(mcp) != tc.wantMCP {
-				t.Errorf("SearchTranscriptSteps(tool=mcp) len = %d, want %d", len(mcp), tc.wantMCP)
-			}
-			if stats, err := store.GetTranscriptStats(ctx, tc.stack); err != nil || !slices.Equal(stats, tc.wantStats) {
-				t.Errorf("GetTranscriptStats = %+v err=%v, want %+v", stats, err, tc.wantStats)
-			}
+			runFakeStoreEngineKindsCase(ctx, t, store, tc)
 		})
 	}
 
-	if states, err := store.GetSessionSyncStates(ctx); err != nil || states["sess-e"].Engine != "claude" || states["sess-u"].Engine != "agy" {
-		t.Errorf("sync state engines = %+v err=%v, want sess-e claude and sess-u agy", states, err)
-	}
-	if _, err := store.BackfillSessionEngines(ctx, nil); err == nil {
-		t.Error("expected error for nil infer")
-	}
-	if err := store.SetSessionEngine(ctx, "", "agy"); err == nil {
-		t.Error("expected error for empty session ID")
-	}
-	if _, err := store.BackfillToolKinds(ctx, nil); err == nil {
-		t.Error("expected error for nil mapper")
-	}
-	if purged, err := store.PurgeMigratedLocalTranscripts(ctx); err != nil || purged != 0 {
-		t.Errorf("PurgeMigratedLocalTranscripts = %d err=%v, want 0", purged, err)
-	}
-	store.FailNext("PurgeMigratedLocalTranscripts", errors.New("boom"))
-	if _, err := store.PurgeMigratedLocalTranscripts(ctx); err == nil {
-		t.Error("expected armed PurgeMigratedLocalTranscripts failure")
-	}
+	assertFakeStoreEngineLifecycleAndErrors(ctx, t, store)
 }

@@ -461,6 +461,68 @@ func TestSharedTranscripts_BackfillSessionEnginesScopedToStack(t *testing.T) {
 	}
 }
 
+type purgeMigratedLocalCase struct {
+	name        string
+	transcripts config.TranscriptsConfig
+	batchSize   int
+	budget      time.Duration
+	breakLocal  string
+	breakShared string
+	wantDeleted int64
+	wantErr     string
+	wantLocal   map[string]string
+}
+
+func breakDBFixture(t *testing.T, primary, shared *sql.DB, breakLocal, breakShared string) {
+	t.Helper()
+	for database, stmt := range map[*sql.DB]string{primary: breakLocal, shared: breakShared} {
+		if stmt != "" {
+			if _, err := database.Exec(stmt); err != nil {
+				t.Fatalf("break fixture with %q: %v", stmt, err)
+			}
+		}
+	}
+}
+
+func assertPurgedState(t *testing.T, primary, shared *sql.DB, tc purgeMigratedLocalCase, sharedBefore map[string]string) {
+	t.Helper()
+	if got := readStackKeyed(t, primary, stepCountsQuery); fmt.Sprint(got) != fmt.Sprint(tc.wantLocal) {
+		t.Errorf("local sessions = %v, want %v", got, tc.wantLocal)
+	}
+	if got := readStackKeyed(t, primary, "SELECT stack, session_id, COUNT(*) FROM transcript_steps GROUP BY stack, session_id"); fmt.Sprint(got) != fmt.Sprint(tc.wantLocal) {
+		t.Errorf("local steps = %v, want %v", got, tc.wantLocal)
+	}
+	if got := readStackKeyed(t, shared, stepCountsQuery); fmt.Sprint(got) != fmt.Sprint(sharedBefore) {
+		t.Errorf("shared index changed: %v, want %v", got, sharedBefore)
+	}
+}
+
+func runPurgeMigratedLocalCase(t *testing.T, tc purgeMigratedLocalCase, sharedDSN string) {
+	t.Helper()
+	primary, shared := initTestSQLiteDB(t), initTestSQLiteDB(t)
+	seedTranscriptSessions(t, primary, "stack_a", "s1", "s2", "s3", "s4")
+	seedTranscriptSessions(t, primary, "stack_z", "s1")
+	seedTranscriptSessions(t, shared, "stack_a", "s1", "s2", "s3")
+	seedTranscriptSessions(t, shared, "stack_z", "s4")
+	sharedBefore := readStackKeyed(t, shared, stepCountsQuery)
+	breakDBFixture(t, primary, shared, tc.breakLocal, tc.breakShared)
+	opener := &testOpener{pools: map[string]*sql.DB{sharedDSN: shared}}
+	cfg := config.NewFromData(&config.ConfigData{DatabaseURL: testDSNStackA, Transcripts: tc.transcripts})
+	store := NewRoutedTranscriptStore(cfg, primary, opener.open).(*routedTranscriptStore)
+
+	deleted, err := store.purgeMigratedLocalTranscripts(context.Background(), tc.batchSize, tc.budget)
+	if tc.wantErr != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+		}
+		return
+	}
+	if err != nil || deleted != tc.wantDeleted {
+		t.Fatalf("deleted=%d err=%v, want %d", deleted, err, tc.wantDeleted)
+	}
+	assertPurgedState(t, primary, shared, tc, sharedBefore)
+}
+
 // TestSharedTranscripts_PurgeMigratedLocal seeds a primary DB holding stack_a rows written before the
 // index moved to shared_tx, then purges: only stack_a sessions already in the shared index are deleted
 // (with their steps), and the shared index itself is never modified.
@@ -468,17 +530,7 @@ func TestSharedTranscripts_PurgeMigratedLocal(t *testing.T) {
 	const sharedDSN = "postgres://aerial@pg.internal:5432/shared_tx?sslmode=disable"
 	allLocal := map[string]string{"stack_a/s1": "2", "stack_a/s2": "2", "stack_a/s3": "2", "stack_a/s4": "2", "stack_z/s1": "2"}
 	survivors := map[string]string{"stack_a/s4": "2", "stack_z/s1": "2"}
-	tests := []struct {
-		name        string
-		transcripts config.TranscriptsConfig
-		batchSize   int
-		budget      time.Duration
-		breakLocal  string
-		breakShared string
-		wantDeleted int64
-		wantErr     string
-		wantLocal   map[string]string
-	}{
+	tests := []purgeMigratedLocalCase{
 		{name: "deletes only sessions present in the shared index", transcripts: config.TranscriptsConfig{Database: "shared_tx"}, batchSize: 500, budget: time.Minute, wantDeleted: 3, wantLocal: survivors},
 		{name: "small batches page through every local session", transcripts: config.TranscriptsConfig{Database: "shared_tx"}, batchSize: 1, budget: time.Minute, wantDeleted: 3, wantLocal: survivors},
 		{name: "index in primary db is a no-op", batchSize: 500, budget: time.Minute, wantLocal: allLocal},
@@ -491,43 +543,7 @@ func TestSharedTranscripts_PurgeMigratedLocal(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			primary, shared := initTestSQLiteDB(t), initTestSQLiteDB(t)
-			seedTranscriptSessions(t, primary, "stack_a", "s1", "s2", "s3", "s4")
-			seedTranscriptSessions(t, primary, "stack_z", "s1")
-			seedTranscriptSessions(t, shared, "stack_a", "s1", "s2", "s3")
-			seedTranscriptSessions(t, shared, "stack_z", "s4")
-			sharedBefore := readStackKeyed(t, shared, stepCountsQuery)
-			for database, stmt := range map[*sql.DB]string{primary: tc.breakLocal, shared: tc.breakShared} {
-				if stmt == "" {
-					continue
-				}
-				if _, err := database.Exec(stmt); err != nil {
-					t.Fatalf("break fixture with %q: %v", stmt, err)
-				}
-			}
-			opener := &testOpener{pools: map[string]*sql.DB{sharedDSN: shared}}
-			cfg := config.NewFromData(&config.ConfigData{DatabaseURL: testDSNStackA, Transcripts: tc.transcripts})
-			store := NewRoutedTranscriptStore(cfg, primary, opener.open).(*routedTranscriptStore)
-
-			deleted, err := store.purgeMigratedLocalTranscripts(context.Background(), tc.batchSize, tc.budget)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
-				}
-				return
-			}
-			if err != nil || deleted != tc.wantDeleted {
-				t.Fatalf("deleted=%d err=%v, want %d", deleted, err, tc.wantDeleted)
-			}
-			if got := readStackKeyed(t, primary, stepCountsQuery); fmt.Sprint(got) != fmt.Sprint(tc.wantLocal) {
-				t.Errorf("local sessions = %v, want %v", got, tc.wantLocal)
-			}
-			if got := readStackKeyed(t, primary, "SELECT stack, session_id, COUNT(*) FROM transcript_steps GROUP BY stack, session_id"); fmt.Sprint(got) != fmt.Sprint(tc.wantLocal) {
-				t.Errorf("local steps = %v, want %v", got, tc.wantLocal)
-			}
-			if got := readStackKeyed(t, shared, stepCountsQuery); fmt.Sprint(got) != fmt.Sprint(sharedBefore) {
-				t.Errorf("shared index changed: %v, want %v", got, sharedBefore)
-			}
+			runPurgeMigratedLocalCase(t, tc, sharedDSN)
 		})
 	}
 }

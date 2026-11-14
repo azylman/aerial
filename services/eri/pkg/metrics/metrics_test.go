@@ -160,7 +160,7 @@ func TestRecordTokens_AutoCalculatesTotalWhenZero(t *testing.T) {
 }
 
 func TestSanitizeChannelLabel(t *testing.T) {
-	tests := []struct {
+	cases := []struct {
 		input    string
 		expected string
 	}{
@@ -182,10 +182,9 @@ func TestSanitizeChannelLabel(t *testing.T) {
 		{"chan-token-test-1", "chan-token-test-1"},
 	}
 
-	for _, tc := range tests {
-		got := SanitizeChannelLabel(tc.input)
-		if got != tc.expected {
-			t.Errorf("SanitizeChannelLabel(%q) = %q, expected %q", tc.input, got, tc.expected)
+	for idx, c := range cases {
+		if got := SanitizeChannelLabel(c.input); got != c.expected {
+			t.Errorf("case %d: SanitizeChannelLabel(%q) = %q, expected %q", idx, c.input, got, c.expected)
 		}
 	}
 }
