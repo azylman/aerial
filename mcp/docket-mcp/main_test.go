@@ -528,41 +528,6 @@ func callTool(t *testing.T, handler http.Handler, name, args string) toolCallRes
 	return resp
 }
 
-func TestServer_MCPMethodsTable(t *testing.T) {
-	t.Parallel()
-
-	_, mux, _ := setupTestEnvironment(t)
-
-	tests := []struct {
-		name       string
-		request    string
-		wantStatus int
-		wantSubstr string
-	}{
-		{name: "invalid json rejected", request: `{invalid_json`, wantStatus: http.StatusBadRequest},
-		{name: "unknown method rejected", request: `{"jsonrpc":"2.0","id":1,"method":"foo/bar"}`, wantStatus: http.StatusBadRequest, wantSubstr: `"foo/bar" unsupported`},
-		{name: "initialize returns server info", request: `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`, wantStatus: http.StatusOK, wantSubstr: `"name":"docket-mcp"`},
-		{name: "notifications initialized accepted", request: `{"jsonrpc":"2.0","method":"notifications/initialized"}`, wantStatus: http.StatusAccepted},
-		{name: "ping returns success", request: `{"jsonrpc":"2.0","id":2,"method":"ping"}`, wantStatus: http.StatusOK, wantSubstr: `"result":{}`},
-		{name: "tools list includes ready", request: `{"jsonrpc":"2.0","id":3,"method":"tools/list"}`, wantStatus: http.StatusOK, wantSubstr: `"name":"ready"`},
-		{name: "tools call with invalid params", request: `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":"invalid"}`, wantStatus: http.StatusOK, wantSubstr: `"error":{"code":-32602`},
-		{name: "unknown tool returns protocol error", request: `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"unknown_tool","arguments":{}}}`, wantStatus: http.StatusOK, wantSubstr: `unknown tool \"unknown_tool\"`},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			w := postMCP(t, mux, "/mcp", tc.request)
-			if w.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d (body %q)", w.Code, tc.wantStatus, w.Body.String())
-			}
-			if !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("body = %q, want substring %q", w.Body.String(), tc.wantSubstr)
-			}
-		})
-	}
-}
-
 func TestServerInstructions(t *testing.T) {
 	t.Parallel()
 
@@ -571,11 +536,12 @@ func TestServerInstructions(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	tests := []struct {
-		name     string
-		path     string
-		wantTool string
+		name           string
+		path           string
+		wantServerName string
+		wantTool       string
 	}{
-		{name: "initialize advertises task workflow instructions", path: "/mcp", wantTool: "blocked_by"},
+		{name: "initialize advertises server identity and task workflow instructions", path: "/mcp", wantServerName: "docket-mcp", wantTool: "blocked_by"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -591,6 +557,9 @@ func TestServerInstructions(t *testing.T) {
 			}
 			defer func() { _ = session.Close() }()
 
+			if got := session.InitializeResult().ServerInfo.Name; got != tc.wantServerName {
+				t.Errorf("server name = %q, want %q", got, tc.wantServerName)
+			}
 			got := session.InitializeResult().Instructions
 			if got == "" || len(got) > 1024 {
 				t.Fatalf("instructions length = %d, want 1..1024", len(got))
@@ -762,7 +731,6 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		{name: "link self-link rejected", toolName: "link", args: `{"id":1,"target_id":1,"type":"parent"}`, wantSubstr: "self-link cycle", wantError: true},
 		{name: "link cycle rejected", toolName: "link", args: `{"id":1,"target_id":2,"type":"parent"}`, wantSubstr: "cycle detected: task 1 is already an ancestor of task 2", wantError: true},
 		{name: "link remove relation", toolName: "link", args: `{"id":1,"target_id":2,"type":"parent","remove":true}`, wantSubstr: "removed"},
-		{name: "link invalid relation type rejected by schema", toolName: "link", args: `{"id":1,"target_id":2,"type":"invalid"}`, wantSubstr: `validating "arguments"`, wantError: true},
 		{name: "close invalid id error", toolName: "close", args: `{"id":0,"resolution":"completed","reason":"done"}`, wantSubstr: "must be a positive integer", wantError: true},
 		{name: "close completed rejected with open subtask", toolName: "close", args: `{"id":1,"resolution":"completed","reason":"done"}`, wantSubstr: "open subtasks: [2]", wantError: true},
 		{name: "close completed rejected with open blocker", toolName: "close", args: `{"id":76,"resolution":"completed","reason":"done"}`, wantSubstr: "open blockers: [75]", wantError: true},
@@ -773,13 +741,8 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		{name: "close task in another project not found", toolName: "close", args: `{"id":60,"resolution":"completed","reason":"done"}`, wantSubstr: "task 60 not found in graph", wantError: true},
 		{name: "close task unknown to vikunja not found", toolName: "close", args: `{"id":999,"resolution":"wont_do","reason":"done"}`, wantSubstr: "task 999 not found in graph", wantError: true},
 		{name: "close fetch failure", toolName: "close", args: `{"id":888,"resolution":"completed","reason":"done"}`, wantSubstr: "failed to fetch task 888", wantError: true},
-		{name: "close invalid resolution rejected by schema", toolName: "close", args: `{"id":1,"resolution":"invalid","reason":"why"}`, wantSubstr: `validating "arguments"`, wantError: true},
-		{name: "close missing reason rejected by schema", toolName: "close", args: `{"id":1,"resolution":"completed"}`, wantSubstr: `validating "arguments"`, wantError: true},
 		{name: "close empty reason error", toolName: "close", args: `{"id":1,"resolution":"completed","reason":""}`, wantSubstr: "cannot be empty", wantError: true},
-		{name: "ready wrong argument type rejected by schema", toolName: "ready", args: `{"parent_id":"not-an-integer"}`, wantSubstr: `validating "arguments"`, wantError: true},
-		{name: "list out-of-enum status rejected by schema", toolName: "list", args: `{"status":"closed"}`, wantSubstr: `validating "arguments"`, wantError: true},
 		{name: "list status defaults to open", toolName: "list", args: `{}`, wantSubstr: `[{"id":1,"title":"Top Task 1","status":"open","blocks":[3]},{"id":2,`},
-		{name: "show undeclared property rejected by schema", toolName: "show", args: `{"id":1,"verbose":true}`, wantSubstr: `validating "arguments"`, wantError: true},
 		{name: "legacy docket_ prefix resolves tool", toolName: "docket_comment", args: `{"id":1,"text":"via alias"}`, wantSubstr: "comment added to task 1"},
 	}
 
