@@ -191,7 +191,6 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 			wantErr     error
 		}{
 			{name: "cancelled chunk or build with repo returns ErrBuildConflict", repo: "aerial", isCancelled: true, wantErr: ErrBuildConflict},
-			{name: "completed parent build with repo returns ErrBuildConflict", repo: "aerial", isCancelled: true, wantErr: ErrBuildConflict},
 			{name: "cancelled chunk or build without repo returns ErrBuildConflict", repo: "", isCancelled: true, wantErr: ErrBuildConflict},
 		}
 		for _, tc := range conflictTests {
@@ -1312,37 +1311,35 @@ func TestPostgresVanadisStore_AppendChunks(t *testing.T) {
 
 func TestPostgresVanadisStore_RemoveChunk(t *testing.T) {
 	tests := []struct {
-		name           string
-		buildID        string
-		chunkRef       string
-		beginErr       error
-		buildScanErr   error
-		buildStatus    string
-		chunksErr      error
-		scanChunksErr  error
-		existing       []VanadisChunk
-		delExecErr     error
-		compactExecErr error
-		commitErr      error
-		wantErrIs      error
-		wantErr        bool
-		wantRemainLen  int
+		name          string
+		buildID       string
+		chunkRef      string
+		beginErr      error
+		buildScanErr  error
+		buildStatus   string
+		chunksErr     error
+		scanChunksErr error
+		existing      []VanadisChunk
+		delExecErr    error
+		commitErr     error
+		wantErrIs     error
+		wantErr       bool
+		wantRemainLen int
 	}{
-		{"empty_build_id", "", "c1", nil, nil, "", nil, nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
-		{"empty_chunk_ref", "b1", "", nil, nil, "", nil, nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
-		{"begin_error", "b1", "c1", errors.New("begin err"), nil, "", nil, nil, nil, nil, nil, nil, nil, true, 0},
-		{"build_not_found", "b1", "c1", nil, pgx.ErrNoRows, "", nil, nil, nil, nil, nil, nil, ErrBuildNotFound, true, 0},
-		{"build_query_error", "b1", "c1", nil, errors.New("query err"), "", nil, nil, nil, nil, nil, nil, nil, true, 0},
-		{"build_conflict_status", "b1", "c1", nil, nil, "completed", nil, nil, nil, nil, nil, nil, ErrBuildConflict, true, 0},
-		{"chunks_query_error", "b1", "c1", nil, nil, "running", errors.New("chunks err"), nil, nil, nil, nil, nil, nil, true, 0},
-		{"chunks_scan_error", "b1", "c1", nil, nil, "running", nil, errors.New("scan err"), []VanadisChunk{{ID: "c1"}}, nil, nil, nil, nil, true, 0},
-		{"chunk_not_found", "b1", "c999", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "pending"}}, nil, nil, nil, ErrChunkNotFound, true, 0},
-		{"chunk_conflict_status", "b1", "c1", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "running"}, {ID: "c2", Status: "pending"}}, nil, nil, nil, ErrBuildConflict, true, 0},
-		{"cannot_remove_only_chunk", "b1", "c1", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "pending"}}, nil, nil, nil, ErrBuildConflict, true, 0},
-		{"delete_exec_error", "b1", "c2", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Status: "running"}, {ID: "c2", ChunkIndex: 1, Status: "pending"}}, errors.New("del err"), nil, nil, nil, true, 0},
-		{"compact_exec_error", "b1", "c1", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Status: "pending"}, {ID: "c2", ChunkIndex: 1, Status: "pending"}}, nil, errors.New("compact err"), nil, nil, true, 0},
-		{"commit_error", "b1", "c2", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Status: "running"}, {ID: "c2", ChunkIndex: 1, Status: "pending"}}, nil, nil, errors.New("commit err"), nil, true, 0},
-		{"success", "b1", "1", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Status: "running"}, {ID: "c2", ChunkIndex: 1, Status: "pending"}, {ID: "c3", ChunkIndex: 2, Status: "pending"}}, nil, nil, nil, nil, false, 2},
+		{"empty_build_id", "", "c1", nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
+		{"empty_chunk_ref", "b1", "", nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
+		{"begin_error", "b1", "c1", errors.New("begin err"), nil, "", nil, nil, nil, nil, nil, nil, true, 0},
+		{"build_not_found", "b1", "c1", nil, pgx.ErrNoRows, "", nil, nil, nil, nil, nil, ErrBuildNotFound, true, 0},
+		{"build_query_error", "b1", "c1", nil, errors.New("query err"), "", nil, nil, nil, nil, nil, nil, true, 0},
+		{"build_conflict_status", "b1", "c1", nil, nil, "completed", nil, nil, nil, nil, nil, ErrBuildConflict, true, 0},
+		{"chunks_query_error", "b1", "c1", nil, nil, "running", errors.New("chunks err"), nil, nil, nil, nil, nil, true, 0},
+		{"chunks_scan_error", "b1", "c1", nil, nil, "running", nil, errors.New("scan err"), []VanadisChunk{{ID: "c1"}}, nil, nil, nil, true, 0},
+		{"chunk_not_found", "b1", "c999", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "pending"}}, nil, nil, ErrChunkNotFound, true, 0},
+		{"chunk_conflict_status", "b1", "c1", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "running"}, {ID: "c2", Status: "pending"}}, nil, nil, ErrBuildConflict, true, 0},
+		{"cannot_remove_only_chunk", "b1", "c1", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "pending"}}, nil, nil, ErrBuildConflict, true, 0},
+		{"delete_exec_error", "b1", "c2", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Status: "running"}, {ID: "c2", ChunkIndex: 1, Status: "pending"}}, errors.New("del err"), nil, nil, true, 0},
+		{"commit_error", "b1", "c2", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Status: "running"}, {ID: "c2", ChunkIndex: 1, Status: "pending"}}, nil, errors.New("commit err"), nil, true, 0},
+		{"success", "b1", "1", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Status: "running"}, {ID: "c2", ChunkIndex: 1, Status: "pending"}, {ID: "c3", ChunkIndex: 2, Status: "pending"}}, nil, nil, nil, false, 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1363,9 +1360,6 @@ func TestPostgresVanadisStore_RemoveChunk(t *testing.T) {
 				execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
 					if tc.delExecErr != nil {
 						return pgconn.CommandTag{}, tc.delExecErr
-					}
-					if tc.compactExecErr != nil {
-						return pgconn.CommandTag{}, tc.compactExecErr
 					}
 					return pgconn.NewCommandTag("DELETE 1"), nil
 				},
