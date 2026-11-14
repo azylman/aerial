@@ -21,24 +21,62 @@ const (
 	spanPreTurn   = "pre_turn"
 	spanPostTurn  = "post_turn"
 	spanDeliver   = "deliver discord"
+	spanTurnSetup = "turn.setup"
+	spanLease     = "session.lease"
+	spanPrompt    = "prompt.build"
 
-	attrTurnStatus  = attribute.Key("aerial.turn.status")
-	attrTriggerType = attribute.Key("aerial.turn.trigger")
-	attrBurstSize   = attribute.Key("aerial.turn.burst_size")
+	attrTurnStatus       = attribute.Key("aerial.turn.status")
+	attrTriggerType      = attribute.Key("aerial.turn.trigger")
+	attrBurstSize        = attribute.Key("aerial.turn.burst_size")
+	attrRestartCount     = attribute.Key("aerial.turn.restart_count")
+	attrRetryCount       = attribute.Key("aerial.turn.retry_count")
+	attrResumed          = attribute.Key("aerial.turn.resumed")
+	attrFirstEnqueuedMs  = attribute.Key("aerial.queue.first_enqueued_unix_ms")
+	attrNewConversation  = attribute.Key("aerial.session.new_conversation")
+	attrSessionEphemeral = attribute.Key("aerial.session.ephemeral")
+	attrSessionOverflow  = attribute.Key("aerial.session.overflow")
 )
 
 // queuedTurnItem is the trace-relevant part of a queued row (message or dispatch).
 type queuedTurnItem struct {
-	traceparent string
-	createdAt   time.Time
+	traceparent  string
+	createdAt    time.Time
+	requeuedAt   time.Time // when a resumed row re-entered the queue; zero on a first attempt
+	restartCount int
+	retryCount   int
 }
 
-func burstTraceItems(burst []db.Message) []queuedTurnItem {
+// resumedRequeueTime is when a row with restartCount > 0 re-entered the queue. Startup recovery
+// bumps RestartCount in memory without refreshing UpdatedAt, so the row's UpdatedAt can predate
+// the restart; the pool's start time bounds it from below.
+func resumedRequeueTime(restartCount int, updatedAt, poolStart time.Time) time.Time {
+	if restartCount <= 0 {
+		return time.Time{}
+	}
+	if updatedAt.After(poolStart) {
+		return updatedAt
+	}
+	return poolStart
+}
+
+func burstTraceItems(burst []db.Message, poolStart time.Time) []queuedTurnItem {
 	items := make([]queuedTurnItem, 0, len(burst))
 	for _, m := range burst {
-		items = append(items, queuedTurnItem{traceparent: m.Traceparent, createdAt: m.CreatedAt})
+		items = append(items, queuedTurnItem{
+			traceparent: m.Traceparent, createdAt: m.CreatedAt,
+			requeuedAt:   resumedRequeueTime(m.RestartCount, m.UpdatedAt, poolStart),
+			restartCount: m.RestartCount, retryCount: m.RetryCount,
+		})
 	}
 	return items
+}
+
+func dispatchTraceItem(d db.Dispatch, poolStart time.Time) queuedTurnItem {
+	return queuedTurnItem{
+		traceparent: d.Traceparent, createdAt: d.CreatedAt,
+		requeuedAt:   resumedRequeueTime(d.RestartCount, d.UpdatedAt, poolStart),
+		restartCount: d.RestartCount, retryCount: d.RetryCount,
+	}
 }
 
 // remoteSpanContext parses a persisted W3C traceparent; the result is invalid when tp is empty or malformed.
@@ -61,7 +99,9 @@ type turnSpanSpec struct {
 
 // startTurnSpan opens the turn's root invoke_agent span as a child of the first item's
 // persisted traceparent, links every other item's trace, and records a synthetic
-// queue.wait child spanning the first item's enqueue time to pickup.
+// queue.wait child spanning the first item's enqueue time to pickup. A resumed item's wait
+// starts when it was requeued, not when it was first enqueued, so time spent running before
+// a restart is not reported as queue wait.
 func startTurnSpan(base context.Context, tracer trace.Tracer, spec turnSpanSpec) (context.Context, trace.Span) {
 	parent := base
 	var links []trace.Link
@@ -87,7 +127,18 @@ func startTurnSpan(base context.Context, tracer trace.Tracer, spec turnSpanSpec)
 	start := spec.pickup
 	var enqueued time.Time
 	if len(spec.items) > 0 {
-		enqueued = spec.items[0].createdAt
+		first := spec.items[0]
+		enqueued = first.createdAt
+		if first.requeuedAt.After(enqueued) {
+			enqueued = first.requeuedAt
+		}
+		attrs = append(attrs, attrRestartCount.Int(first.restartCount), attrRetryCount.Int(first.retryCount))
+		if first.restartCount > 0 {
+			attrs = append(attrs, attrResumed.Bool(true))
+			if !first.createdAt.IsZero() {
+				attrs = append(attrs, attrFirstEnqueuedMs.Int64(first.createdAt.UnixMilli()))
+			}
+		}
 	}
 	hasWait := !enqueued.IsZero() && enqueued.Before(spec.pickup)
 	if hasWait {
@@ -186,11 +237,48 @@ func (te *turnExecution) endTurnSpan() {
 }
 
 // startChildSpan starts a child of the turn span on base, keeping base's cancellation.
-func (te *turnExecution) startChildSpan(base context.Context, name string) (context.Context, trace.Span) {
+func (te *turnExecution) startChildSpan(base context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	if te.turnSpan != nil {
 		base = trace.ContextWithSpan(base, te.turnSpan)
 	}
-	return te.pool.tracer().Start(base, name) //nolint:spancheck // the caller owns and ends the span
+	return te.pool.tracer().Start(base, name, opts...) //nolint:spancheck // the caller owns and ends the span
+}
+
+// beginSetupSpan opens turn.setup at pickup; it stays open until the first attempt hands the
+// prompt to the session, so every bit of eri-side startup time lands under a named span.
+func (te *turnExecution) beginSetupSpan() {
+	_, te.setupSpan = te.startChildSpan(te.turnCtxValue(), spanTurnSetup, trace.WithTimestamp(te.execStart))
+}
+
+// endSetupSpan ends turn.setup; it is idempotent so early exits and the first attempt can both call it.
+func (te *turnExecution) endSetupSpan() {
+	if te.setupSpan != nil {
+		te.setupSpan.End()
+		te.setupSpan = nil
+	}
+}
+
+// startSetupChildSpan starts a child of turn.setup on base, or of the turn span once setup has ended.
+func (te *turnExecution) startSetupChildSpan(base context.Context, name string) (context.Context, trace.Span) {
+	if te.setupSpan == nil {
+		return te.startChildSpan(base, name)
+	}
+	return te.pool.tracer().Start(trace.ContextWithSpan(base, te.setupSpan), name) //nolint:spancheck // the caller owns and ends the span
+}
+
+// overflowLease is implemented by leases that may run on an on-demand overflow worker.
+type overflowLease interface{ IsOverflow() bool }
+
+// leaseSpanAttributes describes the session a turn leased.
+func leaseSpanAttributes(lease runner.SessionLease, ephemeral bool) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{
+		attrNewConversation.Bool(lease.TurnCount() <= 1),
+		attrSessionEphemeral.Bool(ephemeral),
+	}
+	if o, ok := lease.(overflowLease); ok {
+		attrs = append(attrs, attrSessionOverflow.Bool(o.IsOverflow()))
+	}
+	return attrs
 }
 
 // activeTurnRegistryOrNew gives a pool without an injected registry a private one.

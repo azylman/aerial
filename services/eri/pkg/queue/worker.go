@@ -46,7 +46,8 @@ type turnExecution struct {
 	traceSink                                                                                   *runner.TracingTurnSink // latest attempt's sink; reports usage of turns cut short
 	turnModel                                                                                   string
 	turnSpan                                                                                    trace.Span
-	activeTurnDaemon                                                                            string // daemon registered in ActiveTurnRegistry for this turn
+	setupSpan                                                                                   trace.Span // turn.setup; nil once the first attempt hands off the prompt
+	activeTurnDaemon                                                                            string     // daemon registered in ActiveTurnRegistry for this turn
 	turnCtx                                                                                     context.Context
 	turnCancel                                                                                  context.CancelFunc
 	interrupted                                                                                 atomic.Bool
@@ -349,9 +350,16 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 
 	// 2. Acquire exclusive session lease before prompt construction
 	leaseCtx, leaseCancel := context.WithTimeout(te.turnCtxValue(), 65*time.Second)
+	leaseCtx, leaseSpan := te.startSetupChildSpan(leaseCtx, spanLease)
 	leaseKey := te.leaseKey()
 	lease, leaseErr := activePool.AcquireLease(leaseCtx, leaseKey)
 	leaseCancel()
+	if leaseErr != nil {
+		leaseSpan.SetStatus(codes.Error, "session lease failed")
+	} else if lease != nil {
+		leaseSpan.SetAttributes(leaseSpanAttributes(lease, poolKey.Ephemeral || lease.IsEphemeral())...)
+	}
+	leaseSpan.End()
 	if leaseErr != nil || te.isInterrupted() {
 		if lease != nil {
 			logInterruptWarning("release interrupted lease", lease.Release())
@@ -397,7 +405,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 
 	execStart := time.Now().UTC()
 	triggerType := resolveBurstTriggerType(burst[0])
-	spanCtx, turnSpan := p.beginTurnTrace(burstTraceItems(burst), threadID, triggerType, execStart)
+	spanCtx, turnSpan := p.beginTurnTrace(burstTraceItems(burst, p.startedAt), threadID, triggerType, execStart)
 	turnCtx, turnCancel := context.WithCancel(spanCtx)
 	defer turnCancel()
 
@@ -418,6 +426,8 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	defer p.unregisterActiveTurn(scopeKey, te)
 	// Registered before post_turn so the hook span lands inside the turn span.
 	defer te.endTurnSpan()
+	te.beginSetupSpan()
+	defer te.endSetupSpan()
 
 	// Synchronous post_turn hook:
 	// Go defers execute LIFO. By placing post_turn right after scopeLock.Lock() / defer scopeLock.Unlock(),
@@ -459,7 +469,9 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	}
 
 	te.turnAttempted = true
+	_, promptSpan := te.startSetupChildSpan(te.turnCtxValue(), spanPrompt)
 	te.buildTurnPrompt()
+	promptSpan.End()
 	te.executeWithRetries()
 }
 
@@ -539,7 +551,7 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 
 	execStart := time.Now().UTC()
 	triggerType := "dispatch:" + d.Source
-	spanCtx, turnSpan := p.beginTurnTrace([]queuedTurnItem{{traceparent: d.Traceparent, createdAt: d.CreatedAt}}, leaseKey, triggerType, execStart)
+	spanCtx, turnSpan := p.beginTurnTrace([]queuedTurnItem{dispatchTraceItem(d, p.startedAt)}, leaseKey, triggerType, execStart)
 	turnCtx, turnCancel := context.WithCancel(spanCtx)
 	defer turnCancel()
 
@@ -560,6 +572,8 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	p.registerActiveTurn(scopeKey, te)
 	defer p.unregisterActiveTurn(scopeKey, te)
 	defer te.endTurnSpan()
+	te.beginSetupSpan()
+	defer te.endSetupSpan()
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -577,7 +591,9 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	defer cleanupChunk()
 
 	te.turnAttempted = true
+	_, promptSpan := te.startSetupChildSpan(te.turnCtxValue(), spanPrompt)
 	te.turnPrompt = te.buildDispatchPrompt()
+	promptSpan.End()
 	te.executeWithRetries()
 }
 
@@ -1051,6 +1067,8 @@ func (te *turnExecution) executeLeaseAttempt(currentModel, promptToSend string, 
 		sink := runner.NewTracingTurnSink(runCtx, newDiscordTurnSink(te.statusUpdater))
 		te.traceSink = sink
 		turnCtx := te.buildLeaseTurnContext(runCtx, currentModel, promptToSend, sink)
+		// Setup ends at hand-off: from here the daemon's chat span (and any respawn) takes over.
+		te.endSetupSpan()
 		turnRes, execErr := te.lease.Execute(runCtx, turnCtx)
 		outcome, stderr := te.resolveTurnOutcome(runCtx, turnRes, execErr)
 		return outcome, turnRes, stderr, execErr
