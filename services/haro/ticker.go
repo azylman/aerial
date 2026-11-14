@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
@@ -478,7 +480,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 
 	sessionKey := "heartbeat-" + hb.ID
 	runID := uuid.NewString()
-	wrappedPrompt := BuildHeartbeatPrompt(hb)
+	wrappedPrompt := BuildHeartbeatPrompt(hb, now)
 	req := DispatchRequest{
 		ID:           runID,
 		Source:       "heartbeat",
@@ -498,16 +500,33 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 		slog.Info("Skipping heartbeat run: thread has an active turn in progress", "id", hb.ID, "target_id", hb.TargetID, "thread_id", sessionKey)
 		return
 	}
-	completedAt := time.Now().UTC()
-	durationMs := completedAt.Sub(now).Milliseconds()
-	status := "completed"
-	errMsg := ""
 	if dispatchErr != nil {
-		status = "failed"
-		errMsg = dispatchErr.Error()
+		completedAt := time.Now().UTC()
+		durationMs := completedAt.Sub(now).Milliseconds()
 		log.Printf("[Haro Ticker] Dispatch error for heartbeat %s: %v", hb.ID, dispatchErr)
+		RecordScheduleRun("heartbeat", "failed")
+		run := ScheduleRun{
+			ID:           runID,
+			ScheduleID:   hb.ID,
+			ScheduleType: "heartbeat",
+			MessageID:    runID,
+			TargetID:     hb.TargetID,
+			ThreadID:     sessionKey,
+			Title:        hb.TitlePrefix,
+			Prompt:       hb.Prompt,
+			Status:       "failed",
+			StartedAt:    now,
+			CompletedAt:  &completedAt,
+			DurationMs:   durationMs,
+			Error:        dispatchErr.Error(),
+			Effort:       hb.Effort,
+		}
+		if createErr := CreateScheduleRun(ctx, t.db, run); createErr != nil {
+			log.Printf("[Haro Ticker] Error creating schedule run for heartbeat %s: %v", hb.ID, createErr)
+		}
+		return
 	}
-	RecordScheduleRun("heartbeat", status)
+
 	msgID := firstNonEmpty(resp.DispatchID, resp.MessageID, runID)
 	run := ScheduleRun{
 		ID:           runID,
@@ -515,19 +534,85 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 		ScheduleType: "heartbeat",
 		MessageID:    msgID,
 		TargetID:     hb.TargetID,
-		ThreadID:     "heartbeat-" + hb.ID,
+		ThreadID:     sessionKey,
 		Title:        hb.TitlePrefix,
 		Prompt:       hb.Prompt,
-		Status:       status,
+		Status:       "running",
 		StartedAt:    now,
-		CompletedAt:  &completedAt,
-		DurationMs:   durationMs,
-		Error:        errMsg,
+		CompletedAt:  nil,
+		DurationMs:   0,
+		Error:        "",
 		Effort:       hb.Effort,
 	}
 	if createErr := CreateScheduleRun(ctx, t.db, run); createErr != nil {
 		log.Printf("[Haro Ticker] Error creating schedule run for heartbeat %s: %v", hb.ID, createErr)
 	}
+}
+
+// HandleDispatchOutcome updates schedule_runs and monotonically advances heartbeat last_completed_at.
+func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Message) error {
+	if database == nil || msg == nil {
+		return errors.New("database and message cannot be nil")
+	}
+	var ev pubsub.DispatchOutcomeEvent
+	if err := json.Unmarshal(msg.Data(), &ev); err != nil {
+		log.Printf("[Haro] warning: failed to unmarshal dispatch outcome event: %v", err)
+		return nil
+	}
+	dispatchID := strings.TrimSpace(ev.DispatchID)
+	if dispatchID == "" || dispatchID == "healthcheck-ping" {
+		return nil
+	}
+
+	run, err := GetScheduleRun(ctx, database, dispatchID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "not found") {
+			return nil
+		}
+		log.Printf("[Haro] error querying schedule run for %s: %v", dispatchID, err)
+		return nil
+	}
+
+	status := strings.ToLower(strings.TrimSpace(ev.Status))
+	completedAt := ev.CompletedAt
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	durationMs := ev.DurationMs
+	if durationMs <= 0 && !ev.StartedAt.IsZero() {
+		durationMs = completedAt.Sub(ev.StartedAt).Milliseconds()
+	} else if durationMs <= 0 && !run.StartedAt.IsZero() {
+		durationMs = completedAt.Sub(run.StartedAt).Milliseconds()
+	}
+
+	if err := UpdateScheduleRunOutcome(ctx, database, dispatchID, status, ev.Error, completedAt, durationMs); err != nil {
+		log.Printf("[Haro] failed to update schedule run outcome for %s: %v", dispatchID, err)
+		return err
+	}
+
+	RecordScheduleRun(run.ScheduleType, status)
+
+	if status == "completed" && run.ScheduleType == "heartbeat" {
+		startedAt := ev.StartedAt
+		if startedAt.IsZero() {
+			startedAt = run.StartedAt
+		}
+		if !startedAt.IsZero() {
+			if err := AdvanceHeartbeatLastCompletedAt(ctx, database, run.ScheduleID, startedAt); err != nil {
+				log.Printf("[Haro] failed to advance last_completed_at for heartbeat %s: %v", run.ScheduleID, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// HandleDispatchOutcome handles dispatch outcome messages on the Ticker instance.
+func (t *Ticker) HandleDispatchOutcome(ctx context.Context, msg pubsub.Message) error {
+	if t == nil {
+		return errors.New("ticker is nil")
+	}
+	return HandleDispatchOutcome(ctx, t.db, msg)
 }
 
 func (t *Ticker) Start(ctx context.Context) {

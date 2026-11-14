@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -15,11 +16,44 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // RunApp bootstraps the scheduler MCP HTTP server with graceful shutdown.
-var openDBFn = NewDB
+var (
+	openDBFn = NewDB
+	newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
+		return pubsub.NewJetStreamBus(ctx, url)
+	}
+)
+
+func initHaroJetStream(ctx context.Context, database *sql.DB, natsURL string) pubsub.Bus {
+	return initHaroJetStreamWithFactory(ctx, database, natsURL, newBusFn)
+}
+
+func initHaroJetStreamWithFactory(ctx context.Context, database *sql.DB, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
+	natsURL = strings.TrimSpace(natsURL)
+	if natsURL == "" {
+		return nil
+	}
+	b, err := factory(ctx, natsURL)
+	if err != nil {
+		log.Printf("[Haro] warning: failed to connect to nats at %s: %v", natsURL, err)
+		return nil
+	}
+	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
+		log.Printf("[Haro] warning: failed to ensure core streams: %v", err)
+	}
+	if _, err := b.Subscribe(ctx, "aerial.dispatch.*", "haro-dispatch", func(msgCtx context.Context, msg pubsub.Message) error {
+		return HandleDispatchOutcome(msgCtx, database, msg)
+	}); err != nil {
+		log.Printf("[Haro] warning: failed to subscribe haro-dispatch: %v", err)
+	} else {
+		log.Println("[Haro] Subscribed haro-dispatch consumer to aerial.dispatch.*")
+	}
+	return b
+}
 
 func RunApp(ctx context.Context, cfg *Config) error {
 	if cfg == nil {
@@ -35,6 +69,16 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		return err
 	}
 	defer httpkit.CloseWarn(database, "database on shutdown")
+
+	natsURL := firstNonEmpty(cfg.NATSURL, os.Getenv("NATS_URL"))
+	bus := initHaroJetStream(ctx, database, natsURL)
+	defer func() {
+		if bus != nil {
+			if closeErr := bus.Close(); closeErr != nil {
+				log.Printf("[Haro] bus close error: %v", closeErr)
+			}
+		}
+	}()
 
 	// Invariant: ticker goroutine must be bound to a child context and strictly
 	// awaited on all exit paths before closing the database to prevent goroutine leaks
