@@ -13,9 +13,6 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
@@ -27,28 +24,27 @@ func (d *DefaultOutboundDispatcher) SetRetryConfig(delay time.Duration, maxAttem
 	d.maxAttempts = maxAttempts
 }
 
-func TestDefaultOutboundDispatcher(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	validSnowflake := "1555405874565091380"
+type defaultOutboundDispatcherCase struct {
+	name               string
+	callType           string
+	snowflake          string
+	statusCode         int
+	responseBody       string
+	responseHeaderType string
+	failCount          int
+	maxRetries         int
+	cancelDuringRetry  bool
+	nilSubClient       bool
+	wantRetryRecorded  bool
+	wantErr            bool
+	wantSubstr         string
+	wantWorkload       string
+	wantRequests       int
+}
 
-	tests := []struct {
-		name               string
-		callType           string
-		snowflake          string
-		statusCode         int
-		responseBody       string
-		responseHeaderType string
-		failCount          int
-		maxRetries         int
-		cancelDuringRetry  bool
-		nilSubClient       bool
-		wantRetryRecorded  bool
-		wantErr            bool
-		wantSubstr         string
-		wantWorkload       string
-		wantRequests       int
-	}{
+func defaultOutboundDispatcherFluxAndPromptCases() []defaultOutboundDispatcherCase {
+	validSnowflake := "1555405874565091380"
+	return []defaultOutboundDispatcherCase{
 		{
 			name:         "DispatchGitPush forwards to flux receiver",
 			callType:     "git_push_flux",
@@ -171,6 +167,11 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			maxRetries:   3,
 			wantErr:      true,
 		},
+	}
+}
+
+func defaultOutboundDispatcherKubeAndDiscordCases() []defaultOutboundDispatcherCase {
+	return []defaultOutboundDispatcherCase{
 		{
 			name:         "DispatchDiscordMessage success 200",
 			callType:     "discord_message",
@@ -292,190 +293,221 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			wantWorkload: "aerial-synapse",
 		},
 	}
+}
 
-	for _, tc := range tests {
+func defaultOutboundDispatcherCases() []defaultOutboundDispatcherCase {
+	return append(defaultOutboundDispatcherFluxAndPromptCases(), defaultOutboundDispatcherKubeAndDiscordCases()...)
+}
+
+func handleDispatcherKube404Cases(w http.ResponseWriter, r *http.Request, tc defaultOutboundDispatcherCase, att int32) bool {
+	switch tc.callType {
+	case "image_ready_kube_404_409":
+		if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 1 {
+			http.Error(w, "not found", http.StatusNotFound)
+			return true
+		}
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
+			http.Error(w, "conflict", http.StatusConflict)
+			return true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+		return true
+	case "image_ready_kube_404_post_ok":
+		if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 1 {
+			http.Error(w, "not found", http.StatusNotFound)
+			return true
+		}
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+			return true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+		return true
+	}
+	return false
+}
+
+func handleDispatcherKubeErrCases(w http.ResponseWriter, r *http.Request, tc defaultOutboundDispatcherCase, att int32) bool {
+	switch tc.callType {
+	case "image_ready_kube_404_post_err":
+		if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return true
+		}
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
+			http.Error(w, "post failed", http.StatusBadRequest)
+			return true
+		}
+	case "image_ready_kube_404_409_retry_err":
+		if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 1 {
+			http.Error(w, "not found", http.StatusNotFound)
+			return true
+		}
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
+			http.Error(w, "conflict", http.StatusConflict)
+			return true
+		}
+		if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 3 {
+			http.Error(w, "retry patch failed", http.StatusBadRequest)
+			return true
+		}
+	}
+	return false
+}
+
+func handleDispatcherKubeMock(w http.ResponseWriter, r *http.Request, tc defaultOutboundDispatcherCase, att int32) bool {
+	return handleDispatcherKube404Cases(w, r, tc, att) || handleDispatcherKubeErrCases(w, r, tc, att)
+}
+
+func newDispatcherMockHandler(tc defaultOutboundDispatcherCase, attempts *atomic.Int32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		att := attempts.Add(1)
+		if handleDispatcherKubeMock(w, r, tc, att) {
+			return
+		}
+		if int(att) <= tc.failCount {
+			http.Error(w, "transient error", http.StatusInternalServerError)
+			return
+		}
+		if tc.responseHeaderType != "" {
+			w.Header().Set("Content-Type", tc.responseHeaderType)
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		status := tc.statusCode
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(tc.responseBody))
+	}
+}
+
+func configureDispatcherURLs(disp *DefaultOutboundDispatcher, url string, callType string) {
+	switch callType {
+	case "git_push_flux", "image_ready_flux":
+		disp.SetFluxReceiverURL(url)
+	case "image_ready_both_err", "image_ready_kube", "image_ready_none":
+		disp.SetKubeConfig(url, "test-token")
+		disp.SetFluxReceiverURL(url)
+	case "image_ready_kube_err", "image_ready_kube_404_409",
+		"image_ready_kube_404_post_err", "image_ready_kube_404_409_retry_err", "image_ready_kube_404_post_ok":
+		disp.SetKubeConfig(url, "test-token")
+	}
+}
+
+func executeDispatcherCall(testCtx context.Context, disp *DefaultOutboundDispatcher, tc defaultOutboundDispatcherCase, attempts *atomic.Int32) (string, error) {
+	switch tc.callType {
+	case "git_push", "git_push_flux":
+		return "", disp.DispatchGitPush(testCtx, GitPushEventRequest{Ref: "refs/heads/main", Commit: "testcommit123"})
+	case "image_ready", "image_ready_flux", "image_ready_kube", "image_ready_kube_err", "image_ready_kube_404_409", "image_ready_kube_404_post_ok", "image_ready_both_err", "image_ready_kube_404_post_err", "image_ready_kube_404_409_retry_err":
+		return disp.PromoteImageTag(testCtx, ImageReadyEventRequest{
+			Repo:      "azylman/aerial",
+			Image:     "ghcr.io/azylman/aerial-synapse:latest",
+			CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
+			Digest:    "sha256:abcd",
+		})
+	case "image_ready_none":
+		workload, err := disp.PromoteImageTag(testCtx, ImageReadyEventRequest{
+			Repo:      "azylman/aerial",
+			Image:     "ghcr.io/azylman/none:latest",
+			CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
+		})
+		if attempts.Load() != 0 {
+			return workload, fmt.Errorf("expected 0 HTTP requests for none, got %d", attempts.Load())
+		}
+		return workload, err
+	case "prompt":
+		return "", disp.DispatchPrompt(testCtx, PromptRequest{ChannelID: tc.snowflake, Prompt: "test prompt message"})
+	case "direct_message":
+		return "", disp.DispatchDirectMessage(testCtx, DirectMessageRequest{ChannelID: tc.snowflake, Content: "test content"})
+	case "dispatch_background":
+		return "", disp.DispatchBackground(testCtx, DispatchRequest{Source: "webhook", Prompt: "test dispatch", Effort: "medium"})
+	case "discord_message":
+		return "", disp.DispatchDiscordMessage(testCtx, DiscordMessageIngressRequest{
+			BotUserID: "bot-1",
+			RoleNames: map[string]string{"role-1": "admin"},
+			Message:   &discordgo.Message{ID: "msg-123", Content: "hello"},
+		})
+	case "discord_interaction":
+		return "", disp.DispatchDiscordInteraction(testCtx, &discordgo.Interaction{
+			ID:   "inter-123",
+			Type: discordgo.InteractionApplicationCommand,
+		})
+	}
+	return "", nil
+}
+
+func runDefaultOutboundDispatcherCase(ctx context.Context, t *testing.T, tc defaultOutboundDispatcherCase) {
+	t.Helper()
+	var attempts atomic.Int32
+	ts := httptest.NewServer(newDispatcherMockHandler(tc, &attempts))
+	defer ts.Close()
+
+	disp := NewDefaultOutboundDispatcher(ts.URL, nil)
+	configureDispatcherURLs(disp, ts.URL, tc.callType)
+	if tc.nilSubClient {
+		disp.discordMsgClient = nil
+		disp.discordInteractionClient = nil
+	}
+	delay := 1 * time.Millisecond
+	if tc.cancelDuringRetry {
+		delay = 30 * time.Millisecond
+	}
+	retries := tc.maxRetries
+	if retries <= 0 {
+		retries = 2
+	}
+	disp.SetRetryConfig(delay, retries)
+
+	testCtx := ctx
+	if tc.cancelDuringRetry {
+		var cancel context.CancelFunc
+		testCtx, cancel = context.WithTimeout(ctx, 10*time.Millisecond)
+		defer cancel()
+	}
+
+	var beforeRetry float64
+	if tc.wantRetryRecorded {
+		beforeRetry = testutil.ToFloat64(JobRetriesTotal.WithLabelValues(river.QueueDefault, "brain_http_dispatch", "brain_http_retry"))
+	}
+
+	workload, err := executeDispatcherCall(testCtx, disp, tc, &attempts)
+
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("Dispatch (%s) err = %v, wantErr = %v", tc.callType, err, tc.wantErr)
+	}
+	if tc.wantWorkload != "" && workload != tc.wantWorkload {
+		t.Errorf("got workload %q, want %q", workload, tc.wantWorkload)
+	}
+	if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
+		t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
+	}
+	if tc.wantRetryRecorded {
+		afterRetry := testutil.ToFloat64(JobRetriesTotal.WithLabelValues(river.QueueDefault, "brain_http_dispatch", "brain_http_retry"))
+		if afterRetry <= beforeRetry {
+			t.Errorf("expected brain_http_retry to increment, before=%v after=%v", beforeRetry, afterRetry)
+		}
+	}
+	if tc.wantRequests > 0 && int(attempts.Load()) != tc.wantRequests {
+		t.Errorf("got %d HTTP requests, want %d", attempts.Load(), tc.wantRequests)
+	}
+}
+
+func TestDefaultOutboundDispatcher(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	for _, tc := range defaultOutboundDispatcherCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var attempts atomic.Int32
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				att := attempts.Add(1)
-				if tc.callType == "image_ready_kube_404_409" {
-					if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 1 {
-						http.Error(w, "not found", http.StatusNotFound)
-						return
-					}
-					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
-						http.Error(w, "conflict", http.StatusConflict)
-						return
-					}
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte(`{}`))
-					return
-				}
-				if tc.callType == "image_ready_kube_404_post_ok" {
-					if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 1 {
-						http.Error(w, "not found", http.StatusNotFound)
-						return
-					}
-					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
-						w.Header().Set("Content-Type", "application/json")
-						w.WriteHeader(http.StatusCreated)
-						_, _ = w.Write([]byte(`{}`))
-						return
-					}
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte(`{}`))
-					return
-				}
-				if tc.callType == "image_ready_kube_404_post_err" {
-					if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") {
-						http.Error(w, "not found", http.StatusNotFound)
-						return
-					}
-					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
-						http.Error(w, "post failed", http.StatusBadRequest)
-						return
-					}
-				}
-				if tc.callType == "image_ready_kube_404_409_retry_err" {
-					if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 1 {
-						http.Error(w, "not found", http.StatusNotFound)
-						return
-					}
-					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
-						http.Error(w, "conflict", http.StatusConflict)
-						return
-					}
-					if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 3 {
-						http.Error(w, "retry patch failed", http.StatusBadRequest)
-						return
-					}
-				}
-				if int(att) <= tc.failCount {
-					http.Error(w, "transient error", http.StatusInternalServerError)
-					return
-				}
-				if tc.responseHeaderType != "" {
-					w.Header().Set("Content-Type", tc.responseHeaderType)
-				} else {
-					w.Header().Set("Content-Type", "application/json")
-				}
-				status := tc.statusCode
-				if status == 0 {
-					status = http.StatusOK
-				}
-				w.WriteHeader(status)
-				_, _ = w.Write([]byte(tc.responseBody))
-			}))
-			defer ts.Close()
-
-			disp := NewDefaultOutboundDispatcher(ts.URL, nil)
-			switch tc.callType {
-			case "git_push_flux", "image_ready_flux":
-				disp.SetFluxReceiverURL(ts.URL)
-			case "image_ready_both_err":
-				disp.SetKubeConfig(ts.URL, "test-token")
-				disp.SetFluxReceiverURL(ts.URL)
-			case "image_ready_kube", "image_ready_none":
-				disp.SetKubeConfig(ts.URL, "test-token")
-				disp.SetFluxReceiverURL(ts.URL)
-			case "image_ready_kube_err":
-				disp.SetKubeConfig(ts.URL, "test-token")
-			case "image_ready_kube_404_409":
-				disp.SetKubeConfig(ts.URL, "test-token")
-			case "image_ready_kube_404_post_err", "image_ready_kube_404_409_retry_err", "image_ready_kube_404_post_ok":
-				disp.SetKubeConfig(ts.URL, "test-token")
-			}
-			if tc.nilSubClient {
-				disp.discordMsgClient = nil
-				disp.discordInteractionClient = nil
-			}
-			delay := 1 * time.Millisecond
-			if tc.cancelDuringRetry {
-				delay = 30 * time.Millisecond
-			}
-			retries := tc.maxRetries
-			if retries <= 0 {
-				retries = 2
-			}
-			disp.SetRetryConfig(delay, retries)
-
-			testCtx := ctx
-			if tc.cancelDuringRetry {
-				var cancel context.CancelFunc
-				testCtx, cancel = context.WithTimeout(ctx, 10*time.Millisecond)
-				defer cancel()
-			}
-
-			var beforeRetry float64
-			if tc.wantRetryRecorded {
-				beforeRetry = testutil.ToFloat64(JobRetriesTotal.WithLabelValues(river.QueueDefault, "brain_http_dispatch", "brain_http_retry"))
-			}
-
-			var err error
-			switch tc.callType {
-			case "git_push", "git_push_flux":
-				err = disp.DispatchGitPush(testCtx, GitPushEventRequest{Ref: "refs/heads/main", Commit: "testcommit123"})
-			case "image_ready", "image_ready_flux", "image_ready_kube", "image_ready_kube_err", "image_ready_kube_404_409", "image_ready_kube_404_post_ok", "image_ready_both_err", "image_ready_kube_404_post_err", "image_ready_kube_404_409_retry_err":
-				workload, e := disp.PromoteImageTag(testCtx, ImageReadyEventRequest{
-					Repo:      "azylman/aerial",
-					Image:     "ghcr.io/azylman/aerial-synapse:latest",
-					CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-					Digest:    "sha256:abcd",
-				})
-				err = e
-				if workload != tc.wantWorkload {
-					t.Errorf("got workload %q, want %q", workload, tc.wantWorkload)
-				}
-			case "image_ready_none":
-				workload, e := disp.PromoteImageTag(testCtx, ImageReadyEventRequest{
-					Repo:      "azylman/aerial",
-					Image:     "ghcr.io/azylman/none:latest",
-					CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-				})
-				err = e
-				if workload != "" {
-					t.Errorf("expected empty workload for none, got %q", workload)
-				}
-				if attempts.Load() != 0 {
-					t.Errorf("expected 0 HTTP requests for none, got %d", attempts.Load())
-				}
-			case "prompt":
-				err = disp.DispatchPrompt(testCtx, PromptRequest{ChannelID: tc.snowflake, Prompt: "test prompt message"})
-			case "direct_message":
-				err = disp.DispatchDirectMessage(testCtx, DirectMessageRequest{ChannelID: tc.snowflake, Content: "test content"})
-			case "dispatch_background":
-				err = disp.DispatchBackground(testCtx, DispatchRequest{Source: "webhook", Prompt: "test dispatch", Effort: "medium"})
-			case "discord_message":
-				err = disp.DispatchDiscordMessage(testCtx, DiscordMessageIngressRequest{
-					BotUserID: "bot-1",
-					RoleNames: map[string]string{"role-1": "admin"},
-					Message:   &discordgo.Message{ID: "msg-123", Content: "hello"},
-				})
-			case "discord_interaction":
-				err = disp.DispatchDiscordInteraction(testCtx, &discordgo.Interaction{
-					ID:   "inter-123",
-					Type: discordgo.InteractionApplicationCommand,
-				})
-			}
-
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Dispatch (%s) err = %v, wantErr = %v", tc.callType, err, tc.wantErr)
-			}
-			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
-				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
-			}
-			if tc.wantRetryRecorded {
-				afterRetry := testutil.ToFloat64(JobRetriesTotal.WithLabelValues(river.QueueDefault, "brain_http_dispatch", "brain_http_retry"))
-				if afterRetry <= beforeRetry {
-					t.Errorf("expected brain_http_retry to increment, before=%v after=%v", beforeRetry, afterRetry)
-				}
-			}
-			if tc.wantRequests > 0 && int(attempts.Load()) != tc.wantRequests {
-				t.Errorf("got %d HTTP requests, want %d", attempts.Load(), tc.wantRequests)
-			}
+			runDefaultOutboundDispatcherCase(ctx, t, tc)
 		})
 	}
 }
@@ -678,32 +710,19 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 	}
 }
 
-func TestRiverWorkers(t *testing.T) {
-	ctx := context.Background()
+type riverWorkerCase struct {
+	name          string
+	workerType    string
+	nilServer     bool
+	downstreamErr bool
+	attempt       int
+	maxAttempts   int
+	wantProcessed string
+	wantErr       bool
+}
 
-	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.Contains(r.URL.Path, "/deployments"):
-			_, _ = fmt.Fprint(w, `[{"ID":"dep-1","Status":"successful"}]`)
-		case strings.Contains(r.URL.Path, "/allocations"):
-			_, _ = w.Write([]byte(`[{"ID":"alloc-1","DesiredStatus":"run","ClientStatus":"running"}]`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(nomadServer.Close)
-
-	tests := []struct {
-		name          string
-		workerType    string
-		nilServer     bool
-		downstreamErr bool
-		attempt       int
-		maxAttempts   int
-		wantProcessed string
-		wantErr       bool
-	}{
+func riverWorkerCases() []riverWorkerCase {
+	return []riverWorkerCase{
 		{name: "GitHubWebhookWorker valid job", workerType: "github", wantProcessed: "success"},
 		{name: "GitHubWebhookWorker nil job handled gracefully", workerType: "github_nil_job"},
 		{name: "GitHubWebhookWorker retry attempt > 1", workerType: "github", attempt: 2, wantProcessed: "success"},
@@ -734,242 +753,294 @@ func TestRiverWorkers(t *testing.T) {
 		{name: "DiscordInteractionWorker nil server error", workerType: "discord_interaction", nilServer: true, wantErr: true, wantProcessed: "error"},
 		{name: "DiscordInteractionWorker downstream error", workerType: "discord_interaction", downstreamErr: true, wantErr: true, wantProcessed: "error"},
 	}
+}
 
-	for _, tc := range tests {
+func resolveRiverWorkerQueueAndKind(workerType string) (string, string) {
+	switch {
+	case workerType == "github":
+		return river.QueueDefault, "github_webhook"
+	case workerType == "deploy":
+		return river.QueueDefault, "deploy_webhook"
+	case workerType == "widget":
+		return QueueWidgetSync, "widget_sync"
+	case workerType == "event_trigger":
+		return river.QueueDefault, "event_trigger_webhook"
+	case workerType == "merge_conflict":
+		return QueueMergeConflict, "merge_conflict"
+	case strings.HasPrefix(workerType, "discord_ingress"):
+		return QueueDiscordIngress, "discord_ingress"
+	case workerType == "discord_interaction":
+		return QueueDiscordInteraction, "discord_interaction"
+	}
+	return river.QueueDefault, ""
+}
+
+func executeGitHubOrDeployWorker(ctx context.Context, srv *RouterServer, tc riverWorkerCase) (bool, error) {
+	switch tc.workerType {
+	case "github":
+		w := &GitHubWebhookWorker{server: srv}
+		if tc.nilServer {
+			w.server = nil
+		}
+		job := &river.Job[GitHubWebhookArgs]{
+			JobRow: &rivertype.JobRow{ID: 101, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
+			Args: GitHubWebhookArgs{
+				Event:    "ping",
+				Delivery: "del-worker-1",
+				Body:     []byte(`{"zen":"Responsive is better than fast.","hook_id":123,"repository":{"full_name":"azylman/aerial"}}`),
+			},
+		}
+		if tc.downstreamErr {
+			job.Args.Event = "pull_request"
+			job.Args.Body = []byte(`{malformed`)
+		}
+		return true, w.Work(ctx, job)
+	case "github_nil_job":
+		return true, observeRiverJob[GitHubWebhookArgs](nil, "", func() error { return nil })
+	case "deploy":
+		w := &DeployWebhookWorker{server: srv}
+		if tc.nilServer {
+			w.server = nil
+		}
+		job := &river.Job[DeployWebhookArgs]{
+			JobRow: &rivertype.JobRow{ID: 201, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
+			Args: DeployWebhookArgs{
+				Event: DeployEvent{
+					Event: "deploy_success", JobName: "brain",
+					PRNumber: 558, TargetID: "1555405874565091380", Status: "success",
+				},
+			},
+		}
+		return true, w.Work(ctx, job)
+	}
+	return false, nil
+}
+
+func executeWidgetOrTriggerWorker(ctx context.Context, srv *RouterServer, tc riverWorkerCase) (bool, error) {
+	switch tc.workerType {
+	case "widget":
+		w := &WidgetSyncWorker{server: srv}
+		if tc.nilServer {
+			w.server = nil
+		}
+		job := &river.Job[WidgetSyncArgs]{
+			JobRow: &rivertype.JobRow{ID: 501, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
+			Args: WidgetSyncArgs{
+				Repo:     "azylman/aerial",
+				PRNumber: 552,
+			},
+		}
+		return true, w.Work(ctx, job)
+	case "event_trigger":
+		w := &EventTriggerWebhookWorker{server: srv}
+		if tc.nilServer {
+			w.server = nil
+		}
+		job := &river.Job[EventTriggerWebhookArgs]{
+			JobRow: &rivertype.JobRow{ID: 601, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
+			Args: EventTriggerWebhookArgs{
+				Source:        "custom_source",
+				Targets:       []string{"device.alpha"},
+				EventType:     "ready",
+				ContextHeader: "External event",
+			},
+		}
+		return true, w.Work(ctx, job)
+	case "merge_conflict":
+		w := &MergeConflictWorker{server: srv}
+		if tc.nilServer {
+			w.server = nil
+		}
+		job := &river.Job[MergeConflictArgs]{
+			JobRow: &rivertype.JobRow{ID: 701, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
+			Args: MergeConflictArgs{
+				Repo:     "azylman/aerial",
+				PRNumber: 543,
+				Branch:   "feat/conflict",
+				HeadSHA:  "head543",
+				TargetID: "1555405874565091380",
+			},
+		}
+		return true, w.Work(ctx, job)
+	}
+	return false, nil
+}
+
+func executeDiscordIngressOrInteractionWorker(ctx context.Context, srv *RouterServer, tc riverWorkerCase, mockDisp *mockOutboundDispatcher) error {
+	switch tc.workerType {
+	case "discord_ingress", "discord_ingress_4xx", "discord_ingress_retry", "discord_ingress_ttl", "discord_ingress_zero_delay", "discord_ingress_large_delay", "discord_ingress_ctx_cancel":
+		w := &DiscordIngressWorker{server: srv, retryDelay: 1 * time.Millisecond}
+		switch tc.workerType {
+		case "discord_ingress_zero_delay":
+			w.retryDelay = 0
+		case "discord_ingress_large_delay":
+			w.retryDelay = 10 * time.Second
+		}
+		if tc.nilServer {
+			w.server = nil
+		}
+		job := &river.Job[DiscordIngressArgs]{
+			JobRow: &rivertype.JobRow{
+				ID:          801,
+				CreatedAt:   time.Now(),
+				Attempt:     tc.attempt,
+				MaxAttempts: tc.maxAttempts,
+			},
+			Args: DiscordIngressArgs{
+				MessageID: "msg-worker-1",
+				BotUserID: "bot-1",
+				Message:   &discordgo.Message{ID: "msg-worker-1", Content: "ping"},
+			},
+		}
+		workCtx := ctx
+		switch tc.workerType {
+		case "discord_ingress_4xx", "discord_ingress_zero_delay", "discord_ingress_large_delay":
+			mockDisp.discordMessageErr = errors.New("status 400 bad request")
+		case "discord_ingress_retry":
+			mockDisp.discordMessageFailCount = 1
+			mockDisp.discordMessageErr = errors.New("status 503 unavailable")
+		case "discord_ingress_ttl":
+			job.CreatedAt = time.Now().Add(-31 * time.Minute)
+			mockDisp.discordMessageErr = errors.New("status 500 error")
+		case "discord_ingress_ctx_cancel":
+			cancCtx, cancel := context.WithCancel(ctx)
+			cancel()
+			workCtx = cancCtx
+		}
+		return w.Work(workCtx, job)
+	case "discord_interaction":
+		w := &DiscordInteractionWorker{server: srv}
+		if tc.nilServer {
+			w.server = nil
+		}
+		job := &river.Job[DiscordInteractionArgs]{
+			JobRow: &rivertype.JobRow{ID: 901, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
+			Args: DiscordInteractionArgs{
+				InteractionID: "inter-worker-1",
+				Interaction:   &discordgo.Interaction{ID: "inter-worker-1", Type: discordgo.InteractionApplicationCommand},
+			},
+		}
+		if tc.downstreamErr {
+			mockDisp.discordInteractionErr = errors.New("500 dispatch interaction error")
+		}
+		return w.Work(ctx, job)
+	}
+	return nil
+}
+
+func executeRiverWorker(ctx context.Context, srv *RouterServer, tc riverWorkerCase, mockDisp *mockOutboundDispatcher) error {
+	if handled, err := executeGitHubOrDeployWorker(ctx, srv, tc); handled {
+		return err
+	}
+	if handled, err := executeWidgetOrTriggerWorker(ctx, srv, tc); handled {
+		return err
+	}
+	return executeDiscordIngressOrInteractionWorker(ctx, srv, tc, mockDisp)
+}
+
+func assertRiverWorkerMetrics(t *testing.T, tc riverWorkerCase, expectedQueue, expectedKind string, beforeProcessed, beforeRetry, beforeDropped float64) {
+	t.Helper()
+	if tc.wantProcessed != "" {
+		afterProcessed := testutil.ToFloat64(JobsProcessedTotal.WithLabelValues(expectedQueue, expectedKind, tc.wantProcessed))
+		if afterProcessed <= beforeProcessed {
+			t.Errorf("JobsProcessedTotal[%s] = %v, want > %v", tc.wantProcessed, afterProcessed, beforeProcessed)
+		}
+	}
+	if tc.attempt > 1 {
+		afterRetry := testutil.ToFloat64(JobRetriesTotal.WithLabelValues(expectedQueue, expectedKind, "river_retry"))
+		if afterRetry <= beforeRetry {
+			t.Errorf("JobRetriesTotal[river_retry] = %v, want > %v", afterRetry, beforeRetry)
+		}
+	}
+	if tc.wantProcessed == "discarded" {
+		afterDropped := testutil.ToFloat64(JobsDroppedTotal.WithLabelValues(expectedQueue, expectedKind, "max_attempts_exhausted"))
+		if afterDropped <= beforeDropped {
+			t.Errorf("JobsDroppedTotal[max_attempts_exhausted] = %v, want > %v", afterDropped, beforeDropped)
+		}
+	}
+}
+
+func runRiverWorkerCase(ctx context.Context, t *testing.T, tc riverWorkerCase) {
+	t.Helper()
+	mockReg := &mockPRRegistry{
+		deployedTargetID: "1555405874565091380",
+		deployedPRNum:    552,
+		deployedMergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+		deployedRepo:     "azylman/aerial",
+		deployedUpdated:  true,
+		resolveTargetID:  "1555405874565091380",
+		resolveBranch:    "feat/widget",
+	}
+	mockDisp := &mockOutboundDispatcher{}
+	if tc.downstreamErr {
+		mockDisp.promptErr = errors.New("503 downstream failure")
+		mockDisp.widgetErr = errors.New("503 downstream failure")
+		mockDisp.dispatchErr = errors.New("503 downstream failure")
+		if tc.workerType == "event_trigger" {
+			mockReg.claimTriggersErr = errors.New("502 haro fire failure")
+		}
+	}
+	srv := newTestRouter(Config{
+		SystemChannelID: "1555405874565091380",
+	}, nil, mockReg, mockDisp)
+
+	expectedQueue, expectedKind := resolveRiverWorkerQueueAndKind(tc.workerType)
+
+	var beforeProcessed, beforeRetry, beforeDropped float64
+	if tc.wantProcessed != "" {
+		beforeProcessed = testutil.ToFloat64(JobsProcessedTotal.WithLabelValues(expectedQueue, expectedKind, tc.wantProcessed))
+	}
+	if tc.attempt > 1 {
+		beforeRetry = testutil.ToFloat64(JobRetriesTotal.WithLabelValues(expectedQueue, expectedKind, "river_retry"))
+	}
+	if tc.wantProcessed == "discarded" {
+		beforeDropped = testutil.ToFloat64(JobsDroppedTotal.WithLabelValues(expectedQueue, expectedKind, "max_attempts_exhausted"))
+	}
+
+	err := executeRiverWorker(ctx, srv, tc, mockDisp)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("Work() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+
+	assertRiverWorkerMetrics(t, tc, expectedQueue, expectedKind, beforeProcessed, beforeRetry, beforeDropped)
+}
+
+func TestRiverWorkers(t *testing.T) {
+	ctx := context.Background()
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/deployments"):
+			_, _ = fmt.Fprint(w, `[{"ID":"dep-1","Status":"successful"}]`)
+		case strings.Contains(r.URL.Path, "/allocations"):
+			_, _ = w.Write([]byte(`[{"ID":"alloc-1","DesiredStatus":"run","ClientStatus":"running"}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(nomadServer.Close)
+
+	for _, tc := range riverWorkerCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			mockReg := &mockPRRegistry{
-				deployedTargetID: "1555405874565091380",
-				deployedPRNum:    552,
-				deployedMergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
-				deployedRepo:     "azylman/aerial",
-				deployedUpdated:  true,
-				resolveTargetID:  "1555405874565091380",
-				resolveBranch:    "feat/widget",
-			}
-			mockDisp := &mockOutboundDispatcher{}
-			if tc.downstreamErr {
-				mockDisp.promptErr = errors.New("503 downstream failure")
-				mockDisp.widgetErr = errors.New("503 downstream failure")
-				mockDisp.dispatchErr = errors.New("503 downstream failure")
-				if tc.workerType == "event_trigger" {
-					mockReg.claimTriggersErr = errors.New("502 haro fire failure")
-				}
-			}
-			srv := newTestRouter(Config{
-				SystemChannelID: "1555405874565091380",
-			}, nil, mockReg, mockDisp)
-
-			expectedQueue := river.QueueDefault
-			expectedKind := ""
-			switch {
-			case tc.workerType == "github":
-				expectedKind = "github_webhook"
-			case tc.workerType == "deploy":
-				expectedKind = "deploy_webhook"
-			case tc.workerType == "widget":
-				expectedQueue = QueueWidgetSync
-				expectedKind = "widget_sync"
-			case tc.workerType == "event_trigger":
-				expectedKind = "event_trigger_webhook"
-			case tc.workerType == "merge_conflict":
-				expectedQueue = QueueMergeConflict
-				expectedKind = "merge_conflict"
-			case strings.HasPrefix(tc.workerType, "discord_ingress"):
-				expectedQueue = QueueDiscordIngress
-				expectedKind = "discord_ingress"
-			case tc.workerType == "discord_interaction":
-				expectedQueue = QueueDiscordInteraction
-				expectedKind = "discord_interaction"
-			}
-
-			var beforeProcessed, beforeRetry, beforeDropped float64
-			if tc.wantProcessed != "" {
-				beforeProcessed = testutil.ToFloat64(JobsProcessedTotal.WithLabelValues(expectedQueue, expectedKind, tc.wantProcessed))
-			}
-			if tc.attempt > 1 {
-				beforeRetry = testutil.ToFloat64(JobRetriesTotal.WithLabelValues(expectedQueue, expectedKind, "river_retry"))
-			}
-			if tc.wantProcessed == "discarded" {
-				beforeDropped = testutil.ToFloat64(JobsDroppedTotal.WithLabelValues(expectedQueue, expectedKind, "max_attempts_exhausted"))
-			}
-
-			var err error
-			switch tc.workerType {
-			case "github":
-				w := &GitHubWebhookWorker{server: srv}
-				if tc.nilServer {
-					w.server = nil
-				}
-				job := &river.Job[GitHubWebhookArgs]{
-					JobRow: &rivertype.JobRow{ID: 101, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
-					Args: GitHubWebhookArgs{
-						Event:    "ping",
-						Delivery: "del-worker-1",
-						Body:     []byte(`{"zen":"Responsive is better than fast.","hook_id":123,"repository":{"full_name":"azylman/aerial"}}`),
-					},
-				}
-				if tc.downstreamErr {
-					job.Args.Event = "pull_request"
-					job.Args.Body = []byte(`{malformed`)
-				}
-				err = w.Work(ctx, job)
-			case "github_nil_job":
-				err = observeRiverJob[GitHubWebhookArgs](nil, "", func() error { return nil })
-			case "deploy":
-				w := &DeployWebhookWorker{server: srv}
-				if tc.nilServer {
-					w.server = nil
-				}
-				job := &river.Job[DeployWebhookArgs]{
-					JobRow: &rivertype.JobRow{ID: 201, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
-					Args: DeployWebhookArgs{
-						Event: DeployEvent{
-							Event: "deploy_success", JobName: "brain",
-							PRNumber: 558, TargetID: "1555405874565091380", Status: "success",
-						},
-					},
-				}
-				err = w.Work(ctx, job)
-			case "widget":
-				w := &WidgetSyncWorker{server: srv}
-				if tc.nilServer {
-					w.server = nil
-				}
-				job := &river.Job[WidgetSyncArgs]{
-					JobRow: &rivertype.JobRow{ID: 501, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
-					Args: WidgetSyncArgs{
-						Repo:     "azylman/aerial",
-						PRNumber: 552,
-					},
-				}
-				err = w.Work(ctx, job)
-			case "event_trigger":
-				w := &EventTriggerWebhookWorker{server: srv}
-				if tc.nilServer {
-					w.server = nil
-				}
-				job := &river.Job[EventTriggerWebhookArgs]{
-					JobRow: &rivertype.JobRow{ID: 601, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
-					Args: EventTriggerWebhookArgs{
-						Source:        "custom_source",
-						Targets:       []string{"device.alpha"},
-						EventType:     "ready",
-						ContextHeader: "External event",
-					},
-				}
-				err = w.Work(ctx, job)
-			case "merge_conflict":
-				w := &MergeConflictWorker{server: srv}
-				if tc.nilServer {
-					w.server = nil
-				}
-				job := &river.Job[MergeConflictArgs]{
-					JobRow: &rivertype.JobRow{ID: 701, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
-					Args: MergeConflictArgs{
-						Repo:     "azylman/aerial",
-						PRNumber: 543,
-						Branch:   "feat/conflict",
-						HeadSHA:  "head543",
-						TargetID: "1555405874565091380",
-					},
-				}
-				err = w.Work(ctx, job)
-			case "discord_ingress", "discord_ingress_4xx", "discord_ingress_retry", "discord_ingress_ttl", "discord_ingress_zero_delay", "discord_ingress_large_delay", "discord_ingress_ctx_cancel":
-				w := &DiscordIngressWorker{server: srv, retryDelay: 1 * time.Millisecond}
-				switch tc.workerType {
-				case "discord_ingress_zero_delay":
-					w.retryDelay = 0
-				case "discord_ingress_large_delay":
-					w.retryDelay = 10 * time.Second
-				}
-				if tc.nilServer {
-					w.server = nil
-				}
-				job := &river.Job[DiscordIngressArgs]{
-					JobRow: &rivertype.JobRow{
-						ID:          801,
-						CreatedAt:   time.Now(),
-						Attempt:     tc.attempt,
-						MaxAttempts: tc.maxAttempts,
-					},
-					Args: DiscordIngressArgs{
-						MessageID: "msg-worker-1",
-						BotUserID: "bot-1",
-						Message:   &discordgo.Message{ID: "msg-worker-1", Content: "ping"},
-					},
-				}
-				workCtx := ctx
-				switch tc.workerType {
-				case "discord_ingress_4xx", "discord_ingress_zero_delay", "discord_ingress_large_delay":
-					mockDisp.discordMessageErr = errors.New("status 400 bad request")
-				case "discord_ingress_retry":
-					mockDisp.discordMessageFailCount = 1
-					mockDisp.discordMessageErr = errors.New("status 503 unavailable")
-				case "discord_ingress_ttl":
-					job.CreatedAt = time.Now().Add(-31 * time.Minute)
-					mockDisp.discordMessageErr = errors.New("status 500 error")
-				case "discord_ingress_ctx_cancel":
-					cancCtx, cancel := context.WithCancel(ctx)
-					cancel()
-					workCtx = cancCtx
-				}
-				err = w.Work(workCtx, job)
-			case "discord_interaction":
-				w := &DiscordInteractionWorker{server: srv}
-				if tc.nilServer {
-					w.server = nil
-				}
-				job := &river.Job[DiscordInteractionArgs]{
-					JobRow: &rivertype.JobRow{ID: 901, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
-					Args: DiscordInteractionArgs{
-						InteractionID: "inter-worker-1",
-						Interaction:   &discordgo.Interaction{ID: "inter-worker-1", Type: discordgo.InteractionApplicationCommand},
-					},
-				}
-				if tc.downstreamErr {
-					mockDisp.discordInteractionErr = errors.New("500 dispatch interaction error")
-				}
-				err = w.Work(ctx, job)
-			}
-
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Work() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantProcessed != "" {
-				afterProcessed := testutil.ToFloat64(JobsProcessedTotal.WithLabelValues(expectedQueue, expectedKind, tc.wantProcessed))
-				if afterProcessed <= beforeProcessed {
-					t.Errorf("JobsProcessedTotal[%s] = %v, want > %v", tc.wantProcessed, afterProcessed, beforeProcessed)
-				}
-			}
-			if tc.attempt > 1 {
-				afterRetry := testutil.ToFloat64(JobRetriesTotal.WithLabelValues(expectedQueue, expectedKind, "river_retry"))
-				if afterRetry <= beforeRetry {
-					t.Errorf("JobRetriesTotal[river_retry] = %v, want > %v", afterRetry, beforeRetry)
-				}
-			}
-			if tc.wantProcessed == "discarded" {
-				afterDropped := testutil.ToFloat64(JobsDroppedTotal.WithLabelValues(expectedQueue, expectedKind, "max_attempts_exhausted"))
-				if afterDropped <= beforeDropped {
-					t.Errorf("JobsDroppedTotal[max_attempts_exhausted] = %v, want > %v", afterDropped, beforeDropped)
-				}
-			}
+			runRiverWorkerCase(ctx, t, tc)
 		})
 	}
 }
 
-func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
-	t.Parallel()
+type riverJobArgsCase struct {
+	name         string
+	args         river.JobArgs
+	wantKind     string
+	wantQueue    string
+	wantByArgs   bool
+	wantByStates []rivertype.JobState
+	wantByPeriod time.Duration
+	wantAttempts int
+}
 
-	tests := []struct {
-		name         string
-		args         river.JobArgs
-		wantKind     string
-		wantQueue    string
-		wantByArgs   bool
-		wantByStates []rivertype.JobState
-		wantByPeriod time.Duration
-		wantAttempts int
-	}{
+func riverJobArgsCases() []riverJobArgsCase {
+	return []riverJobArgsCase{
 		{
 			name:     "GitHubWebhookArgs",
 			args:     GitHubWebhookArgs{Delivery: "del-1"},
@@ -1025,46 +1096,64 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			wantAttempts: 1,
 		},
 	}
+}
 
-	for _, tc := range tests {
+func assertRiverJobStates(t *testing.T, states, wantStates []rivertype.JobState) {
+	t.Helper()
+	if !slices.Equal(states, wantStates) {
+		t.Errorf("UniqueOpts.ByState = %v, want %v", states, wantStates)
+	}
+	requiredV3States := []rivertype.JobState{
+		rivertype.JobStateAvailable,
+		rivertype.JobStatePending,
+		rivertype.JobStateRunning,
+		rivertype.JobStateScheduled,
+	}
+	for _, reqState := range requiredV3States {
+		if !slices.Contains(states, reqState) {
+			t.Errorf("UniqueOpts.ByState missing required River v3 state %v", reqState)
+		}
+	}
+}
+
+func assertRiverUniqueOpts(t *testing.T, opts river.InsertOpts, tc riverJobArgsCase) {
+	t.Helper()
+	if tc.wantQueue != "" && opts.Queue != tc.wantQueue {
+		t.Errorf("Queue = %q, want %q", opts.Queue, tc.wantQueue)
+	}
+	if tc.wantByArgs && !opts.UniqueOpts.ByArgs {
+		t.Errorf("UniqueOpts.ByArgs = false, want true")
+	}
+	if len(tc.wantByStates) > 0 {
+		assertRiverJobStates(t, opts.UniqueOpts.ByState, tc.wantByStates)
+	}
+	if tc.wantByPeriod > 0 && opts.UniqueOpts.ByPeriod != tc.wantByPeriod {
+		t.Errorf("UniqueOpts.ByPeriod = %v, want %v", opts.UniqueOpts.ByPeriod, tc.wantByPeriod)
+	}
+	if tc.wantAttempts > 0 && opts.MaxAttempts != tc.wantAttempts {
+		t.Errorf("MaxAttempts = %d, want %d", opts.MaxAttempts, tc.wantAttempts)
+	}
+}
+
+func runRiverJobArgsCase(t *testing.T, tc riverJobArgsCase) {
+	t.Helper()
+	if got := tc.args.Kind(); got != tc.wantKind {
+		t.Errorf("Kind() = %q, want %q", got, tc.wantKind)
+	}
+	optsProvider, ok := tc.args.(interface{ InsertOpts() river.InsertOpts })
+	if !ok {
+		return
+	}
+	assertRiverUniqueOpts(t, optsProvider.InsertOpts(), tc)
+}
+
+func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range riverJobArgsCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := tc.args.Kind(); got != tc.wantKind {
-				t.Errorf("Kind() = %q, want %q", got, tc.wantKind)
-			}
-			optsProvider, ok := tc.args.(interface{ InsertOpts() river.InsertOpts })
-			if !ok {
-				return
-			}
-			opts := optsProvider.InsertOpts()
-			if tc.wantQueue != "" && opts.Queue != tc.wantQueue {
-				t.Errorf("Queue = %q, want %q", opts.Queue, tc.wantQueue)
-			}
-			if tc.wantByArgs && !opts.UniqueOpts.ByArgs {
-				t.Errorf("UniqueOpts.ByArgs = false, want true")
-			}
-			if len(tc.wantByStates) > 0 {
-				if !slices.Equal(opts.UniqueOpts.ByState, tc.wantByStates) {
-					t.Errorf("UniqueOpts.ByState = %v, want %v", opts.UniqueOpts.ByState, tc.wantByStates)
-				}
-				requiredV3States := []rivertype.JobState{
-					rivertype.JobStateAvailable,
-					rivertype.JobStatePending,
-					rivertype.JobStateRunning,
-					rivertype.JobStateScheduled,
-				}
-				for _, reqState := range requiredV3States {
-					if !slices.Contains(opts.UniqueOpts.ByState, reqState) {
-						t.Errorf("UniqueOpts.ByState missing required River v3 state %v", reqState)
-					}
-				}
-			}
-			if tc.wantByPeriod > 0 && opts.UniqueOpts.ByPeriod != tc.wantByPeriod {
-				t.Errorf("UniqueOpts.ByPeriod = %v, want %v", opts.UniqueOpts.ByPeriod, tc.wantByPeriod)
-			}
-			if tc.wantAttempts > 0 && opts.MaxAttempts != tc.wantAttempts {
-				t.Errorf("MaxAttempts = %d, want %d", opts.MaxAttempts, tc.wantAttempts)
-			}
+			runRiverJobArgsCase(t, tc)
 		})
 	}
 }
@@ -1105,464 +1194,5 @@ func TestDiscordIngressWorker_NextRetry(t *testing.T) {
 	nextRetry := (&DiscordIngressWorker{}).NextRetry(nil)
 	if nextRetry.Before(now.Add(4*time.Second)) || nextRetry.After(now.Add(6*time.Second)) {
 		t.Errorf("NextRetry() = %v, want ~5s in future", nextRetry)
-	}
-}
-
-type mockRowData struct {
-	queue     string
-	state     string
-	count     int64
-	oldestAge float64
-}
-
-type mockPgxRows struct {
-	rows    []mockRowData
-	idx     int
-	scanErr error
-	rowsErr error
-	closed  bool
-}
-
-func (m *mockPgxRows) Close() {
-	m.closed = true
-}
-
-func (m *mockPgxRows) Err() error {
-	return m.rowsErr
-}
-
-func (m *mockPgxRows) CommandTag() pgconn.CommandTag {
-	return pgconn.CommandTag{}
-}
-
-func (m *mockPgxRows) FieldDescriptions() []pgconn.FieldDescription {
-	return nil
-}
-
-func (m *mockPgxRows) Next() bool {
-	if m.scanErr != nil && m.idx == 0 {
-		return true
-	}
-	if m.idx < len(m.rows) {
-		m.idx++
-		return true
-	}
-	return false
-}
-
-func (m *mockPgxRows) Scan(dest ...any) error {
-	if m.scanErr != nil {
-		return m.scanErr
-	}
-	if m.idx <= 0 || m.idx > len(m.rows) {
-		return errors.New("out of range scan")
-	}
-	row := m.rows[m.idx-1]
-	if len(dest) >= 4 {
-		if p, ok := dest[0].(*string); ok {
-			*p = row.queue
-		}
-		if p, ok := dest[1].(*string); ok {
-			*p = row.state
-		}
-		if p, ok := dest[2].(*int64); ok {
-			*p = row.count
-		}
-		if p, ok := dest[3].(*float64); ok {
-			*p = row.oldestAge
-		}
-	}
-	return nil
-}
-
-func (m *mockPgxRows) Values() ([]any, error) {
-	return nil, nil
-}
-
-func (m *mockPgxRows) RawValues() [][]byte {
-	return nil
-}
-
-func (m *mockPgxRows) Conn() *pgx.Conn {
-	return nil
-}
-
-func (m *mockPgxRows) TypeMap() *pgtype.Map {
-	return nil
-}
-
-type mockQueueStatsQuerier struct {
-	queryErr error
-	rows     *mockPgxRows
-}
-
-func (m *mockQueueStatsQuerier) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	if m.queryErr != nil {
-		return nil, m.queryErr
-	}
-	if m.rows != nil {
-		return m.rows, nil
-	}
-	return &mockPgxRows{}, nil
-}
-
-func TestCollectRiverQueueMetrics(t *testing.T) {
-	if !strings.Contains(riverQueueStatsQuery, "FROM river_job") {
-		t.Errorf("riverQueueStatsQuery should query FROM river_job, got: %s", riverQueueStatsQuery)
-	}
-	if strings.Contains(riverQueueStatsQuery, "sidecars.river_job") {
-		t.Errorf("riverQueueStatsQuery should not query sidecars.river_job, got: %s", riverQueueStatsQuery)
-	}
-
-	ctx := context.Background()
-
-	tests := []struct {
-		name               string
-		nilQuerier         bool
-		queryErr           error
-		scanErr            error
-		rowsErr            error
-		rows               []mockRowData
-		wantErr            bool
-		wantSubstr         string
-		wantDepthQueue     string
-		wantDepthState     string
-		wantDepthVal       float64
-		wantOldestAgeQueue string
-		wantOldestAgeVal   float64
-	}{
-		{
-			name:       "nil querier returns nil without error",
-			nilQuerier: true,
-			wantErr:    false,
-		},
-		{
-			name:       "query error returns wrapped error",
-			queryErr:   errors.New("connection closed"),
-			wantErr:    true,
-			wantSubstr: "query river queue stats",
-		},
-		{
-			name:       "scan error returns wrapped error",
-			scanErr:    errors.New("column count mismatch"),
-			wantErr:    true,
-			wantSubstr: "scan river queue stats",
-		},
-		{
-			name:       "rows iteration error returns wrapped error",
-			rowsErr:    errors.New("network disconnect during iteration"),
-			wantErr:    true,
-			wantSubstr: "iterate river queue stats",
-		},
-		{
-			name: "multi-queue state and age aggregation populates gauges correctly",
-			rows: []mockRowData{
-				{queue: "default", state: "available", count: 7, oldestAge: 45.5},
-				{queue: "default", state: "running", count: 3, oldestAge: 120.0},
-				{queue: "default", state: "retryable", count: 2, oldestAge: 90.2},
-				{queue: "discord_ingress", state: "available", count: 12, oldestAge: 250.0},
-				{queue: "widget_sync", state: "scheduled", count: 4, oldestAge: 18.0},
-			},
-			wantDepthQueue:     "default",
-			wantDepthState:     "available",
-			wantDepthVal:       7,
-			wantOldestAgeQueue: "default",
-			wantOldestAgeVal:   90.2,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var q queueStatsQuerier
-			if !tc.nilQuerier {
-				q = &mockQueueStatsQuerier{
-					queryErr: tc.queryErr,
-					rows: &mockPgxRows{
-						rows:    tc.rows,
-						scanErr: tc.scanErr,
-						rowsErr: tc.rowsErr,
-					},
-				}
-			}
-
-			err := collectRiverQueueMetrics(ctx, q)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("collectRiverQueueMetrics() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
-				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
-			}
-			if tc.wantDepthQueue != "" {
-				gotDepth := testutil.ToFloat64(QueueDepth.WithLabelValues(tc.wantDepthQueue, tc.wantDepthState))
-				if gotDepth != tc.wantDepthVal {
-					t.Errorf("QueueDepth[%s, %s] = %v, want %v", tc.wantDepthQueue, tc.wantDepthState, gotDepth, tc.wantDepthVal)
-				}
-			}
-			if tc.wantOldestAgeQueue != "" {
-				gotAge := testutil.ToFloat64(QueueOldestAgeSeconds.WithLabelValues(tc.wantOldestAgeQueue))
-				if gotAge != tc.wantOldestAgeVal {
-					t.Errorf("QueueOldestAgeSeconds[%s] = %v, want %v", tc.wantOldestAgeQueue, gotAge, tc.wantOldestAgeVal)
-				}
-			}
-		})
-	}
-}
-
-// kubeRoute is a canned kube API response keyed by "METHOD path" in a kubeFixture.
-func TestDefaultOutboundDispatcher_DiscoverImageKustomizations(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	deploymentList := `{"items":[
-		{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"aerial-core","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:abc"}]}}}},
-		{"metadata":{"labels":{"app":"unmanaged"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:abc"}]}}}}
-	]}`
-	cronJobList := `{"items":[{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"marida-core"}},"spec":{"jobTemplate":{"spec":{"template":{"spec":{"initContainers":[{"image":"ghcr.io/azylman/aerial-synapse@sha256:beef"}],"containers":[{"image":"busybox"}]}}}}}}]}`
-	kustomizationList := `{"items":[
-		{"metadata":{"name":"zeta","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"ConfigMap","name":"aerial-image-tags"}]}}},
-		{"metadata":{"name":"flux-system","namespace":"flux-system"},"spec":{}},
-		{"metadata":{"name":"secrets-only","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"Secret","name":"aerial-image-tags"}]}}},
-		{"metadata":{"name":"alpha","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"ConfigMap","name":"other"},{"kind":"ConfigMap","name":"aerial-image-tags"}]}}}
-	]}`
-
-	tests := []struct {
-		name         string
-		noKube       bool
-		imageNames   []string
-		routes       map[string]kubeRoute
-		want         []fluxKustomizationRef
-		wantErr      string
-		wantRequests int
-	}{
-		{
-			name:         "labeled deployment and cronjob initContainer owners are discovered",
-			imageNames:   []string{"aerial-synapse"},
-			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: deploymentList}, kubeCronJobsPath: {body: cronJobList}}),
-			want:         []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}, {Namespace: "flux-system", Name: "marida-core"}},
-			wantRequests: 5,
-		},
-		{
-			name:         "no owner falls back to kustomizations substituting the image tag configmap",
-			imageNames:   []string{"aerial-haro"},
-			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: deploymentList}, kubeKustomizations: {body: kustomizationList}}),
-			want:         []fluxKustomizationRef{{Namespace: "flux-system", Name: "alpha"}, {Namespace: "flux-system", Name: "zeta"}},
-			wantRequests: 6,
-		},
-		{
-			name:         "workload list failure returns error",
-			imageNames:   []string{"aerial-synapse"},
-			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeStatefulSetsPath: {status: http.StatusForbidden, body: `{"reason":"Forbidden"}`}}),
-			wantErr:      "returned status 403",
-			wantRequests: 2,
-		},
-		{
-			name:         "malformed workload list returns error",
-			imageNames:   []string{"aerial-synapse"},
-			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: `{"items":`}}),
-			wantErr:      "decode /apis/apps/v1/deployments",
-			wantRequests: 1,
-		},
-		{
-			name:         "fallback list failure returns error",
-			imageNames:   []string{"aerial-haro"},
-			routes:       kubeWorkloadRoutes(nil),
-			wantErr:      "list kustomizations",
-			wantRequests: 6,
-		},
-		{
-			name:         "malformed fallback list returns error",
-			imageNames:   []string{"aerial-haro"},
-			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeKustomizations: {body: `[`}}),
-			wantErr:      "decode kustomizations",
-			wantRequests: 6,
-		},
-		{
-			name:       "no image names skips the kube API",
-			imageNames: nil,
-		},
-		{
-			name:       "unconfigured kube API skips discovery",
-			noKube:     true,
-			imageNames: []string{"aerial-synapse"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			fixture, ts := newKubeFixture(t, tc.routes)
-			disp := NewDefaultOutboundDispatcher("", ts.Client())
-			if !tc.noKube {
-				disp.SetKubeConfig(ts.URL, "test-token")
-			}
-			got, err := disp.DiscoverImageKustomizations(ctx, tc.imageNames)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
-				}
-			} else if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			if !slices.Equal(got, tc.want) {
-				t.Errorf("refs = %v, want %v", got, tc.want)
-			}
-			if n := len(fixture.Requests()); n != tc.wantRequests {
-				t.Errorf("kube requests = %d (%v), want %d", n, fixture.Requests(), tc.wantRequests)
-			}
-		})
-	}
-}
-
-func TestDefaultOutboundDispatcher_ReconcileKustomization(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	const marida = "PATCH /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/apps/kustomizations/marida-core"
-	const requestedAt = "2026-11-08T10:00:00.123456789Z"
-
-	tests := []struct {
-		name    string
-		noKube  bool
-		routes  map[string]kubeRoute
-		wantErr string
-	}{
-		{name: "patches the given requestedAt annotation in the ref namespace", routes: map[string]kubeRoute{marida: {body: `{}`}}},
-		{name: "patch rejection returns error", routes: map[string]kubeRoute{marida: {status: http.StatusForbidden, body: `forbidden`}}, wantErr: "reconcile kustomization apps/marida-core"},
-		{name: "unconfigured kube API returns error", noKube: true, wantErr: "kube api server not configured"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			fixture, ts := newKubeFixture(t, tc.routes)
-			disp := NewDefaultOutboundDispatcher("", ts.Client())
-			if !tc.noKube {
-				disp.SetKubeConfig(ts.URL, "test-token")
-			}
-			err := disp.ReconcileKustomization(ctx, fluxKustomizationRef{Namespace: "apps", Name: "marida-core"}, requestedAt)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			wantBody := `{"metadata":{"annotations":{"reconcile.fluxcd.io/requestedAt":"2026-11-08T10:00:00.123456789Z"}}}`
-			if got := fixture.Body(marida); got != wantBody {
-				t.Errorf("patch body = %s, want %s", got, wantBody)
-			}
-		})
-	}
-}
-
-func TestDefaultOutboundDispatcher_DiscoverRepoKustomizations(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	const (
-		configGitGet = "GET /apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/aerial-config"
-		aerialGitGet = "GET /apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/aerial"
-		appsGitGet   = "GET /apis/source.toolkit.fluxcd.io/v1/namespaces/apps/gitrepositories/stack"
-		kustList     = `{"items":[` +
-			`{"metadata":{"name":"zeta-config"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial-config"}}},` +
-			`{"metadata":{"name":"aerial-core"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}}},` +
-			`{"metadata":{"name":"alpha-config"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial-config"}}},` +
-			`{"metadata":{"name":"paused-config"},"spec":{"suspend":true,"sourceRef":{"kind":"GitRepository","name":"aerial-config"}}},` +
-			`{"metadata":{"name":"stack"},"spec":{"sourceRef":{"kind":"GitRepository","name":"stack","namespace":"apps"}}},` +
-			`{"metadata":{"name":"charts"},"spec":{"sourceRef":{"kind":"OCIRepository","name":"charts"}}}]}`
-	)
-	sourceRoutes := map[string]kubeRoute{
-		kubeKustomizations: {body: kustList},
-		configGitGet:       {body: `{"spec":{"url":"https://github.com/Azylman/Aerial-Config.git"}}`},
-		aerialGitGet:       {body: `{"spec":{"url":"ssh://git@github.com/azylman/aerial"}}`},
-		appsGitGet:         {body: `{"spec":{"url":"git@github.com:acme/stack.git"}}`},
-	}
-
-	tests := []struct {
-		name      string
-		apiServer bool
-		repo      string
-		routes    map[string]kubeRoute
-		want      []fluxKustomizationRef
-		wantErr   string
-	}{
-		{name: "matches every unsuspended kustomization of the repo sorted", apiServer: true, repo: "azylman/aerial-config", routes: sourceRoutes, want: []fluxKustomizationRef{{Namespace: "flux-system", Name: "alpha-config"}, {Namespace: "flux-system", Name: "zeta-config"}}},
-		{name: "bare repo name normalizes to the default owner", apiServer: true, repo: "aerial", routes: sourceRoutes, want: []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}}},
-		{name: "cross-namespace source resolves in its own namespace", apiServer: true, repo: "acme/stack", routes: sourceRoutes, want: []fluxKustomizationRef{{Namespace: "flux-system", Name: "stack"}}},
-		{name: "repo with no flux source finds nothing", apiServer: true, repo: "azylman/mirrormere", routes: sourceRoutes},
-		{name: "kube api not configured finds nothing", repo: "azylman/aerial-config"},
-		{name: "empty repo finds nothing", apiServer: true, repo: " ", routes: sourceRoutes},
-		{name: "kustomization list failure", apiServer: true, repo: "azylman/aerial-config", wantErr: "list kustomizations"},
-		{name: "malformed kustomization list", apiServer: true, repo: "azylman/aerial-config", routes: map[string]kubeRoute{kubeKustomizations: {body: `{`}}, wantErr: "decode kustomization list"},
-		{name: "gitrepository get failure", apiServer: true, repo: "azylman/aerial-config", routes: map[string]kubeRoute{kubeKustomizations: {body: kustList}}, wantErr: "get gitrepository flux-system/aerial-config"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, ts := newKubeFixture(t, tc.routes)
-			disp := NewDefaultOutboundDispatcher("", ts.Client())
-			if tc.apiServer {
-				disp.SetKubeConfig(ts.URL, "test-token")
-			}
-			got, err := disp.DiscoverRepoKustomizations(ctx, tc.repo)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
-				}
-			} else if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			if !slices.Equal(got, tc.want) {
-				t.Errorf("refs = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestDefaultOutboundDispatcher_ResolveFluxSourceRepo(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	const (
-		coreGet    = "GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/aerial-core"
-		repoGet    = "GET /apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/aerial"
-		appsGitGet = "GET /apis/source.toolkit.fluxcd.io/v1/namespaces/apps/gitrepositories/stack"
-	)
-
-	tests := []struct {
-		name    string
-		obj     FluxInvolvedObject
-		routes  map[string]kubeRoute
-		want    string
-		wantErr string
-	}{
-		{name: "gitrepository resolves its own url", obj: FluxInvolvedObject{Kind: "GitRepository", Name: "aerial", Namespace: "flux-system"}, routes: map[string]kubeRoute{repoGet: {body: `{"spec":{"url":"https://github.com/acme/widgets.git"}}`}}, want: "acme/widgets"},
-		{name: "kustomization follows sourceRef in its namespace", obj: FluxInvolvedObject{Kind: "Kustomization", Name: "aerial-core"}, routes: map[string]kubeRoute{coreGet: {body: `{"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}}}`}, repoGet: {body: `{"spec":{"url":"ssh://git@github.com/acme/core"}}`}}, want: "acme/core"},
-		{name: "kustomization follows cross-namespace sourceRef", obj: FluxInvolvedObject{Kind: "Kustomization", Name: "aerial-core", Namespace: "flux-system"}, routes: map[string]kubeRoute{coreGet: {body: `{"spec":{"sourceRef":{"kind":"GitRepository","name":"stack","namespace":"apps"}}}`}, appsGitGet: {body: `{"spec":{"url":"git@github.com:acme/stack.git"}}`}}, want: "acme/stack"},
-		{name: "kustomization with bucket source resolves empty", obj: FluxInvolvedObject{Kind: "Kustomization", Name: "aerial-core"}, routes: map[string]kubeRoute{coreGet: {body: `{"spec":{"sourceRef":{"kind":"Bucket","name":"b"}}}`}}},
-		{name: "unsupported kind resolves empty", obj: FluxInvolvedObject{Kind: "HelmRelease", Name: "x"}},
-		{name: "kustomization get failure", obj: FluxInvolvedObject{Kind: "Kustomization", Name: "aerial-core"}, wantErr: "get kustomization flux-system/aerial-core"},
-		{name: "malformed kustomization", obj: FluxInvolvedObject{Kind: "Kustomization", Name: "aerial-core"}, routes: map[string]kubeRoute{coreGet: {body: `{`}}, wantErr: "decode kustomization flux-system/aerial-core"},
-		{name: "gitrepository get failure", obj: FluxInvolvedObject{Kind: "GitRepository", Name: "aerial"}, wantErr: "get gitrepository flux-system/aerial"},
-		{name: "malformed gitrepository", obj: FluxInvolvedObject{Kind: "GitRepository", Name: "aerial"}, routes: map[string]kubeRoute{repoGet: {body: `[`}}, wantErr: "decode gitrepository flux-system/aerial"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, ts := newKubeFixture(t, tc.routes)
-			disp := NewDefaultOutboundDispatcher("", ts.Client())
-			disp.SetKubeConfig(ts.URL, "test-token")
-			got, err := disp.ResolveFluxSourceRepo(ctx, tc.obj)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
-				}
-			} else if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("repo = %q, want %q", got, tc.want)
-			}
-		})
 	}
 }

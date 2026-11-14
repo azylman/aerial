@@ -16,22 +16,180 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
+func scanPreImagePRRow(dest ...any) error {
+	if len(dest) < 3 {
+		return nil
+	}
+	if p, ok := dest[0].(*int); ok {
+		*p = 896
+	}
+	if b, ok := dest[1].(*string); ok {
+		*b = "feat/test"
+	}
+	if t, ok := dest[2].(*string); ok {
+		*t = "1555405874565091380"
+	}
+	return nil
+}
 
-	tests := []struct {
-		name       string
-		alert      FluxAlertEvent
-		wantOK     bool
-		wantEvent  string
-		wantStatus string
-		wantJob    string
-		wantRepo   string
-		wantSHA    string
-		wantDetail string
-		wantKind   string
-	}{
+func scanPreImageStatusRow(status string, dest ...any) error {
+	if len(dest) < 2 {
+		return nil
+	}
+	if s, ok := dest[0].(*string); ok {
+		*s = status
+	}
+	if b, ok := dest[1].(*[]byte); ok {
+		*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
+	}
+	return nil
+}
+
+func newMockPreImageKustomizationPool(status string) *mockVanadisPgxPool {
+	return &mockVanadisPgxPool{
+		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+			if strings.Contains(sql, "SELECT pr_number, branch, target_id FROM pr_registry") {
+				return mockVanadisPgxRow{scanFn: scanPreImagePRRow}
+			}
+			if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
+				return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+					return scanPreImageStatusRow(status, dest...)
+				}}
+			}
+			return mockVanadisPgxRow{}
+		},
+	}
+}
+
+type translateFluxAlertCase struct {
+	name       string
+	alert      FluxAlertEvent
+	wantOK     bool
+	wantEvent  string
+	wantStatus string
+	wantJob    string
+	wantRepo   string
+	wantSHA    string
+	wantDetail string
+	wantKind   string
+}
+
+func runTranslateFluxAlertCase(t *testing.T, tc translateFluxAlertCase) {
+	t.Helper()
+	got, ok := TranslateFluxAlertToDeployEvent(tc.alert)
+	if ok != tc.wantOK {
+		t.Fatalf("TranslateFluxAlertToDeployEvent() ok = %v, wantOK = %v", ok, tc.wantOK)
+	}
+	if !tc.wantOK {
+		return
+	}
+	if got.Event != tc.wantEvent {
+		t.Errorf("Event = %q, want %q", got.Event, tc.wantEvent)
+	}
+	if got.Status != tc.wantStatus {
+		t.Errorf("Status = %q, want %q", got.Status, tc.wantStatus)
+	}
+	if got.JobName != tc.wantJob {
+		t.Errorf("JobName = %q, want %q", got.JobName, tc.wantJob)
+	}
+	if got.Repo != tc.wantRepo {
+		t.Errorf("Repo = %q, want %q", got.Repo, tc.wantRepo)
+	}
+	if got.CommitSHA != tc.wantSHA {
+		t.Errorf("CommitSHA = %q, want %q", got.CommitSHA, tc.wantSHA)
+	}
+	if got.Details != tc.wantDetail {
+		t.Errorf("Details = %q, want %q", got.Details, tc.wantDetail)
+	}
+	if got.SourceKind != tc.wantKind {
+		t.Errorf("SourceKind = %q, want %q", got.SourceKind, tc.wantKind)
+	}
+	if got.Timestamp.IsZero() {
+		t.Errorf("Timestamp is zero, expected set timestamp")
+	}
+}
+
+type handleFluxWebhookCase struct {
+	name           string
+	endpoint       string
+	payload        string
+	withRiver      bool
+	riverFail      bool
+	downstreamFail bool
+	pgReg          *PostgresPRRegistry
+	wantStatusCode int
+	wantStatus     string
+	wantEvent      string
+	wantJobName    string
+	wantPRNumber   int
+	wantRiverJobs  int
+}
+
+func assertFluxResponse(t *testing.T, body []byte, wantStatus, wantEvent, wantJob string, wantPR int) {
+	t.Helper()
+	if wantStatus == "" {
+		return
+	}
+	var res map[string]any
+	if err := json.Unmarshal(body, &res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if gotStatus, _ := res["status"].(string); gotStatus != wantStatus {
+		t.Errorf("status = %q, want %q", gotStatus, wantStatus)
+	}
+	if wantEvent != "" {
+		if gotEvent, _ := res["event"].(string); gotEvent != wantEvent {
+			t.Errorf("event = %q, want %q", gotEvent, wantEvent)
+		}
+	}
+	if wantJob != "" {
+		if gotJob, _ := res["job_name"].(string); gotJob != wantJob {
+			t.Errorf("job_name = %q, want %q", gotJob, wantJob)
+		}
+	}
+	if wantPR != 0 {
+		if gotPR, _ := res["pr_number"].(float64); int(gotPR) != wantPR {
+			t.Errorf("pr_number = %v, want %d", res["pr_number"], wantPR)
+		}
+	}
+}
+
+func runHandleFluxWebhookCase(t *testing.T, tc handleFluxWebhookCase) {
+	t.Helper()
+	srv := newTestRouter(Config{SystemChannelID: "123456789012345678"}, nil, tc.pgReg, nil)
+	if tc.downstreamFail {
+		srv.SetDispatcher(&mockOutboundDispatcher{directMessageErr: errors.New("dispatch failed")})
+	}
+	var mockRiver *mockRiverInserter
+	if tc.withRiver {
+		mockRiver = &mockRiverInserter{}
+		if tc.riverFail {
+			mockRiver.err = errors.New("river insert failed")
+		}
+		srv.SetRiverClient(mockRiver)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, tc.endpoint, strings.NewReader(tc.payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(w, req)
+
+	if w.Code != tc.wantStatusCode {
+		t.Fatalf("status code = %d, want %d (body: %s)", w.Code, tc.wantStatusCode, w.Body.String())
+	}
+
+	assertFluxResponse(t, w.Body.Bytes(), tc.wantStatus, tc.wantEvent, tc.wantJobName, tc.wantPRNumber)
+
+	if tc.withRiver && mockRiver != nil {
+		if len(mockRiver.insertedDeployJobs) != tc.wantRiverJobs {
+			t.Errorf("inserted river jobs = %d, want %d", len(mockRiver.insertedDeployJobs), tc.wantRiverJobs)
+		}
+	}
+}
+
+func translateFluxAlertGitRepoCases(now time.Time) []translateFluxAlertCase {
+	return []translateFluxAlertCase{
 		{
 			name: "GitRepository NewArtifact without payload repo maps to sync_success on the default repo",
 			alert: FluxAlertEvent{
@@ -122,6 +280,11 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 			},
 			wantOK: false,
 		},
+	}
+}
+
+func translateFluxAlertKustomizationCases(now time.Time) []translateFluxAlertCase {
+	return []translateFluxAlertCase{
 		{
 			name: "Kustomization Progressing maps to deploy_started",
 			alert: FluxAlertEvent{
@@ -144,6 +307,11 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 			wantSHA:    "abcdef1234",
 			wantDetail: "reconciliation in progress",
 		},
+	}
+}
+
+func translateFluxAlertOtherCases(now time.Time) []translateFluxAlertCase {
+	return []translateFluxAlertCase{
 		{
 			name: "HelmRelease ReconciliationSucceeded maps to deploy_success",
 			alert: FluxAlertEvent{
@@ -293,41 +461,21 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 			wantOK: false,
 		},
 	}
+}
+
+func translateFluxAlertCases(now time.Time) []translateFluxAlertCase {
+	return append(append(translateFluxAlertGitRepoCases(now), translateFluxAlertKustomizationCases(now)...), translateFluxAlertOtherCases(now)...)
+}
+
+func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
+	tests := translateFluxAlertCases(now)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := TranslateFluxAlertToDeployEvent(tc.alert)
-			if ok != tc.wantOK {
-				t.Fatalf("TranslateFluxAlertToDeployEvent() ok = %v, wantOK = %v", ok, tc.wantOK)
-			}
-			if !tc.wantOK {
-				return
-			}
-			if got.Event != tc.wantEvent {
-				t.Errorf("Event = %q, want %q", got.Event, tc.wantEvent)
-			}
-			if got.Status != tc.wantStatus {
-				t.Errorf("Status = %q, want %q", got.Status, tc.wantStatus)
-			}
-			if got.JobName != tc.wantJob {
-				t.Errorf("JobName = %q, want %q", got.JobName, tc.wantJob)
-			}
-			if got.Repo != tc.wantRepo {
-				t.Errorf("Repo = %q, want %q", got.Repo, tc.wantRepo)
-			}
-			if got.CommitSHA != tc.wantSHA {
-				t.Errorf("CommitSHA = %q, want %q", got.CommitSHA, tc.wantSHA)
-			}
-			if got.Details != tc.wantDetail {
-				t.Errorf("Details = %q, want %q", got.Details, tc.wantDetail)
-			}
-			if got.SourceKind != tc.wantKind {
-				t.Errorf("SourceKind = %q, want %q", got.SourceKind, tc.wantKind)
-			}
-			if got.Timestamp.IsZero() {
-				t.Errorf("Timestamp is zero, expected set timestamp")
-			}
+			runTranslateFluxAlertCase(t, tc)
 		})
 	}
 }
@@ -335,21 +483,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 func TestHandleFluxWebhook(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name           string
-		endpoint       string
-		payload        string
-		withRiver      bool
-		riverFail      bool
-		downstreamFail bool
-		pgReg          *PostgresPRRegistry
-		wantStatusCode int
-		wantStatus     string
-		wantEvent      string
-		wantJobName    string
-		wantPRNumber   int
-		wantRiverJobs  int
-	}{
+	tests := []handleFluxWebhookCase{
 		{
 			name:           "POST /webhooks/flux valid kustomization without river",
 			endpoint:       "/webhooks/flux",
@@ -411,44 +545,11 @@ func TestHandleFluxWebhook(t *testing.T) {
 			wantJobName:    "webhooks-router",
 		},
 		{
-			name:      "POST /webhooks/flux ignores pre-image kustomization deploy_started event without inserting river jobs",
-			endpoint:  "/webhooks/flux",
-			payload:   `{"involvedObject":{"kind":"Kustomization","name":"aerial-core","namespace":"flux-system"},"severity":"info","reason":"Progressing","message":"progressing","metadata":{"revision":"main@sha1:12345"}}`,
-			withRiver: true,
-			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
-				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-					if strings.Contains(sql, "SELECT pr_number, branch, target_id FROM pr_registry") {
-						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							if len(dest) >= 3 {
-								if p, ok := dest[0].(*int); ok {
-									*p = 896
-								}
-								if b, ok := dest[1].(*string); ok {
-									*b = "feat/test"
-								}
-								if t, ok := dest[2].(*string); ok {
-									*t = "1555405874565091380"
-								}
-							}
-							return nil
-						}}
-					}
-					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
-						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							if len(dest) >= 2 {
-								if s, ok := dest[0].(*string); ok {
-									*s = "merged"
-								}
-								if b, ok := dest[1].(*[]byte); ok {
-									*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
-								}
-							}
-							return nil
-						}}
-					}
-					return mockVanadisPgxRow{}
-				},
-			}),
+			name:           "POST /webhooks/flux ignores pre-image kustomization deploy_started event without inserting river jobs",
+			endpoint:       "/webhooks/flux",
+			payload:        `{"involvedObject":{"kind":"Kustomization","name":"aerial-core","namespace":"flux-system"},"severity":"info","reason":"Progressing","message":"progressing","metadata":{"revision":"main@sha1:12345"}}`,
+			withRiver:      true,
+			pgReg:          NewPostgresPRRegistry(newMockPreImageKustomizationPool("merged")),
 			wantStatusCode: http.StatusOK,
 			wantStatus:     "ignored",
 			wantEvent:      "deploy_started",
@@ -457,44 +558,11 @@ func TestHandleFluxWebhook(t *testing.T) {
 			wantRiverJobs:  0,
 		},
 		{
-			name:      "POST /webhooks/flux ignores pre-image kustomization deploy_success event without inserting river jobs",
-			endpoint:  "/webhooks/flux",
-			payload:   `{"involvedObject":{"kind":"Kustomization","name":"aerial-core","namespace":"flux-system"},"severity":"info","reason":"ReconciliationSucceeded","message":"reconciled","metadata":{"revision":"main@sha1:12345"}}`,
-			withRiver: true,
-			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
-				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-					if strings.Contains(sql, "SELECT pr_number, branch, target_id FROM pr_registry") {
-						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							if len(dest) >= 3 {
-								if p, ok := dest[0].(*int); ok {
-									*p = 896
-								}
-								if b, ok := dest[1].(*string); ok {
-									*b = "feat/test"
-								}
-								if t, ok := dest[2].(*string); ok {
-									*t = "1555405874565091380"
-								}
-							}
-							return nil
-						}}
-					}
-					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
-						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							if len(dest) >= 2 {
-								if s, ok := dest[0].(*string); ok {
-									*s = "synced"
-								}
-								if b, ok := dest[1].(*[]byte); ok {
-									*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
-								}
-							}
-							return nil
-						}}
-					}
-					return mockVanadisPgxRow{}
-				},
-			}),
+			name:           "POST /webhooks/flux ignores pre-image kustomization deploy_success event without inserting river jobs",
+			endpoint:       "/webhooks/flux",
+			payload:        `{"involvedObject":{"kind":"Kustomization","name":"aerial-core","namespace":"flux-system"},"severity":"info","reason":"ReconciliationSucceeded","message":"reconciled","metadata":{"revision":"main@sha1:12345"}}`,
+			withRiver:      true,
+			pgReg:          NewPostgresPRRegistry(newMockPreImageKustomizationPool("synced")),
 			wantStatusCode: http.StatusOK,
 			wantStatus:     "ignored",
 			wantEvent:      "deploy_success",
@@ -507,59 +575,7 @@ func TestHandleFluxWebhook(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := newTestRouter(Config{SystemChannelID: "123456789012345678"}, nil, tc.pgReg, nil)
-			if tc.downstreamFail {
-				srv.SetDispatcher(&mockOutboundDispatcher{directMessageErr: errors.New("dispatch failed")})
-			}
-			var mockRiver *mockRiverInserter
-			if tc.withRiver {
-				mockRiver = &mockRiverInserter{}
-				if tc.riverFail {
-					mockRiver.err = errors.New("river insert failed")
-				}
-				srv.SetRiverClient(mockRiver)
-			}
-
-			req := httptest.NewRequest(http.MethodPost, tc.endpoint, strings.NewReader(tc.payload))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-
-			srv.Routes().ServeHTTP(w, req)
-
-			if w.Code != tc.wantStatusCode {
-				t.Fatalf("status code = %d, want %d (body: %s)", w.Code, tc.wantStatusCode, w.Body.String())
-			}
-
-			if tc.wantStatus != "" {
-				var res map[string]any
-				if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if gotStatus, _ := res["status"].(string); gotStatus != tc.wantStatus {
-					t.Errorf("status = %q, want %q", gotStatus, tc.wantStatus)
-				}
-				if tc.wantEvent != "" {
-					if gotEvent, _ := res["event"].(string); gotEvent != tc.wantEvent {
-						t.Errorf("event = %q, want %q", gotEvent, tc.wantEvent)
-					}
-				}
-				if tc.wantJobName != "" {
-					if gotJob, _ := res["job_name"].(string); gotJob != tc.wantJobName {
-						t.Errorf("job_name = %q, want %q", gotJob, tc.wantJobName)
-					}
-				}
-				if tc.wantPRNumber != 0 {
-					if gotPR, _ := res["pr_number"].(float64); int(gotPR) != tc.wantPRNumber {
-						t.Errorf("pr_number = %v, want %d", res["pr_number"], tc.wantPRNumber)
-					}
-				}
-			}
-
-			if tc.withRiver && mockRiver != nil {
-				if len(mockRiver.insertedDeployJobs) != tc.wantRiverJobs {
-					t.Errorf("inserted river jobs = %d, want %d", len(mockRiver.insertedDeployJobs), tc.wantRiverJobs)
-				}
-			}
+			runHandleFluxWebhookCase(t, tc)
 		})
 	}
 }
