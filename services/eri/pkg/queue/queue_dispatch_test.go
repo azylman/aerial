@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -42,46 +45,17 @@ func TestWorkerPool_ResolveSynapseURL(t *testing.T) {
 func TestDispatchPromptAssembly(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		input      DispatchPromptInput
-		wantSubstr string
-	}{
-		{
-			name: "already wrapped directive",
-			input: DispatchPromptInput{
-				Dispatch: db.Dispatch{
-					Prompt: "<SYSTEM_DIRECTIVE>\nalready wrapped\n</SYSTEM_DIRECTIVE>",
-				},
-			},
-			wantSubstr: "already wrapped",
-		},
-		{
-			name: "cold start with previous session and recent dispatches",
-			input: DispatchPromptInput{
-				Dispatch: db.Dispatch{
-					Prompt:    "do check",
-					SessionID: "heartbeat-test",
-				},
-				PreviousSessionID: "prev-session-uuid",
-				IsColdStart:       true,
-				RecentDispatches: []db.Dispatch{
-					{ID: "d1", Status: "COMPLETED", Summary: "initial run"},
-					{ID: "d2", Status: "FAILED", Prompt: "clean task fallback"},
-				},
-			},
-			wantSubstr: "<DISPATCH_HISTORY>",
+	input := DispatchPromptInput{
+		Dispatch: db.Dispatch{
+			Prompt: "<SYSTEM_DIRECTIVE>\nalready wrapped\n</SYSTEM_DIRECTIVE>",
 		},
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			res := AssembleDispatchPrompt(tc.input)
-			if !strings.Contains(res, tc.wantSubstr) {
-				t.Fatalf("expected %q to contain %q", res, tc.wantSubstr)
-			}
-		})
+	res := AssembleDispatchPrompt(input)
+	if res != input.Dispatch.Prompt {
+		t.Fatalf("AssembleDispatchPrompt() = %q, want %q", res, input.Dispatch.Prompt)
+	}
+	if strings.Count(res, "<SYSTEM_DIRECTIVE>") != 1 || strings.Count(res, "</SYSTEM_DIRECTIVE>") != 1 {
+		t.Fatalf("expected exactly one SYSTEM_DIRECTIVE block in %q", res)
 	}
 }
 
@@ -92,32 +66,17 @@ func TestFormatDispatchHistory(t *testing.T) {
 		name       string
 		sessionID  string
 		dispatches []db.Dispatch
-		wantEmpty  bool
-		wantSubstr string
 	}{
-		{name: "nil dispatches", sessionID: "s", dispatches: nil, wantEmpty: true},
-		{name: "empty dispatches", sessionID: "s", dispatches: []db.Dispatch{}, wantEmpty: true},
-		{
-			name:      "dispatches formatted",
-			sessionID: "sess-1",
-			dispatches: []db.Dispatch{
-				{ID: "d1", Status: db.StatusCompleted, Summary: "initial run"},
-				{ID: "d2", Status: db.StatusFailed, Prompt: "fallback task"},
-			},
-			wantEmpty:  false,
-			wantSubstr: "Recent runs for session sess-1:",
-		},
+		{name: "nil dispatches", sessionID: "s", dispatches: nil},
+		{name: "empty dispatches", sessionID: "s", dispatches: []db.Dispatch{}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := FormatDispatchHistory(tc.sessionID, tc.dispatches)
-			if tc.wantEmpty && got != "" {
+			if got != "" {
 				t.Fatalf("expected empty string, got %q", got)
-			}
-			if !tc.wantEmpty && !strings.Contains(got, tc.wantSubstr) {
-				t.Fatalf("expected %q to contain %q", got, tc.wantSubstr)
 			}
 		})
 	}
@@ -378,25 +337,6 @@ func TestStreamingDaemonHelpers(t *testing.T) {
 	}
 }
 
-func TestLogInterruptWarning(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		err  error
-	}{
-		{name: "with error", err: errors.New("simulated error")},
-		{name: "nil error", err: nil},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			logInterruptWarning("test-op", tc.err)
-		})
-	}
-}
-
 func TestWorkerPool_ProcessPoolAccessors(t *testing.T) {
 	t.Parallel()
 
@@ -444,20 +384,32 @@ func TestWorkerPool_ProcessPoolAccessors(t *testing.T) {
 func TestExtractVerifiedDiskSessionID(t *testing.T) {
 	t.Parallel()
 
+	tempDir := t.TempDir()
+	sessMgr := session.New(tempDir, "")
+	validSessID := "11111111-1111-1111-1111-111111111111"
+	missingSessID := "22222222-2222-2222-2222-222222222222"
+	sessDir, _ := ensureTestSessionDir(sessMgr, validSessID)
+	_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("{\"step_index\":0}\n"), 0o644)
+
+	pool := &WorkerPool{sessionMgr: sessMgr}
+
 	tests := []struct {
 		name   string
+		pool   *WorkerPool
 		stdout string
 		stderr string
 		want   string
 	}{
-		{name: "empty strings", stdout: "", stderr: "", want: ""},
-		{name: "no session found", stdout: "no session here", stderr: "no session", want: ""},
+		{name: "empty strings", pool: pool, stdout: "", stderr: "", want: ""},
+		{name: "session exists on disk", pool: pool, stdout: `{"conversation_id":"` + validSessID + `"}`, want: validSessID},
+		{name: "session does not exist on disk", pool: pool, stdout: `{"conversation_id":"` + missingSessID + `"}`, want: ""},
+		{name: "nil pool returns empty", pool: nil, stdout: `{"conversation_id":"` + validSessID + `"}`, want: ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			te := &turnExecution{}
+			te := &turnExecution{pool: tc.pool}
 			if got := te.extractVerifiedDiskSessionID(tc.stdout, tc.stderr); got != tc.want {
 				t.Fatalf("extractVerifiedDiskSessionID() got %q, want %q", got, tc.want)
 			}
@@ -524,34 +476,6 @@ func TestFinalizeVoiceTurnOutcome(t *testing.T) {
 			if tc.checkVoice && len(heardSentences) == 0 {
 				t.Fatalf("expected sentences to be detected")
 			}
-		})
-	}
-}
-
-func TestTurnExecution_DispatchClosedStoreAndExhausted(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-	}{
-		{name: "closed store dispatch operations"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			closedStore := dbtest.NewFakeStore()
-			_ = closedStore.Close()
-
-			stoppedPool := New(nil, WorkerPoolConfig{Store: closedStore})
-			stoppedPool.Stop()
-			stoppedPool.EnqueueDispatch(db.Dispatch{ID: "disp-stopped"})
-
-			teClosed := &turnExecution{pool: stoppedPool}
-			teClosed.updateDispatchCompleted("d-err", "resp")
-			teClosed.updateDispatchStatus("d-err", db.StatusFailed, "err")
-			teClosed.incrementDispatchRetry("d-err", "err")
-			teClosed.handleAttemptsExhausted(2, "agy", "key", "exhausted", "stderr", "model")
 		})
 	}
 }

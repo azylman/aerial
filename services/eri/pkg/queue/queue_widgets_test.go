@@ -155,11 +155,16 @@ func assertStatusWidgetDelivery(t *testing.T, tc deliverStatusWidgetCase, p *Wor
 	if tc.expectDeliveredMessageID != "" && deliveredReq.MessageID != tc.expectDeliveredMessageID {
 		t.Fatalf("delivered MessageID = %q, want %q", deliveredReq.MessageID, tc.expectDeliveredMessageID)
 	}
-	for i, exp := range tc.expectDeliveredChunks {
-		got := deliveredReq.Chunks[i]
-		if got.ID != exp.ID || got.Status != exp.Status || got.ActiveStep != exp.ActiveStep {
-			t.Fatalf("chunk[%d] mismatch: got (ID=%q, Status=%q, ActiveStep=%q), want (ID=%q, Status=%q, ActiveStep=%q)",
-				i, got.ID, got.Status, got.ActiveStep, exp.ID, exp.Status, exp.ActiveStep)
+	if len(tc.expectDeliveredChunks) > 0 {
+		if len(deliveredReq.Chunks) != len(tc.expectDeliveredChunks) {
+			t.Fatalf("delivered chunks length mismatch: got %d, want %d", len(deliveredReq.Chunks), len(tc.expectDeliveredChunks))
+		}
+		for i, exp := range tc.expectDeliveredChunks {
+			got := deliveredReq.Chunks[i]
+			if got.ID != exp.ID || got.Status != exp.Status || got.ActiveStep != exp.ActiveStep {
+				t.Fatalf("chunk[%d] mismatch: got (ID=%q, Status=%q, ActiveStep=%q), want (ID=%q, Status=%q, ActiveStep=%q)",
+					i, got.ID, got.Status, got.ActiveStep, exp.ID, exp.Status, exp.ActiveStep)
+			}
 		}
 	}
 	if tc.expectEvictedBuildID != "" {
@@ -521,13 +526,16 @@ func TestWorkerPool_RedirectBuildPrompt(t *testing.T) {
 
 	tests := []redirectBuildPromptCase{
 		{name: "nil pool returns channelID", nilPool: true, channelID: "chan-1", prompt: "Continuous Delivery deployment completed for job eri", want: "chan-1"},
+		{name: "empty channelID returns empty", channelID: "", prompt: "Continuous Delivery deployment completed for job eri", want: ""},
 		{name: "empty prompt returns channelID", channelID: "chan-1", prompt: "", want: "chan-1"},
-		{name: "non build prompt returns channelID", channelID: "chan-1", prompt: "Hello world prompt", want: "chan-1"},
-		{name: "channel without suppression returns channelID", channelID: targetChan, prompt: "Continuous Delivery deployment completed for job eri", want: targetChan},
-		{name: "channel with suppression redirects to configured system channel", channelID: targetChan, prompt: "Continuous Delivery deployment completed for job eri", noBuildUpdates: true, systemChannel: sysChanSnowflake, want: sysChanSnowflake},
-		{name: "channel with suppression and default system channel resolves named channel via session state", channelID: targetChan, prompt: "Continuous Delivery deployment completed for job eri", noBuildUpdates: true, useMockSession: true, want: sysChanSnowflake},
-		{name: "thread with suppression on parent redirects to system channel", channelID: threadSnowflake, prompt: "Continuous Delivery deployment completed for job eri", parentNoBuildUpdates: true, cachedChannel: &discordgo.Channel{ID: threadSnowflake, ParentID: parentChan, Type: discordgo.ChannelTypeGuildPublicThread}, systemChannel: sysChanSnowflake, want: sysChanSnowflake},
+		{name: "non-build prompt not redirected", channelID: targetChan, prompt: "Check system health", noBuildUpdates: true, systemChannel: sysChanSnowflake, want: targetChan},
+		{name: "continuous delivery redirects target channel", channelID: targetChan, prompt: "Continuous Delivery deployment completed for job eri", noBuildUpdates: true, systemChannel: sysChanSnowflake, want: sysChanSnowflake},
+		{name: "vanadis build completed redirects target channel", channelID: targetChan, prompt: "Vanadis build build-99 completed", noBuildUpdates: true, systemChannel: sysChanSnowflake, want: sysChanSnowflake},
+		{name: "thread with suppression on parent redirects to system channel", channelID: threadSnowflake, prompt: "Vanadis build build-99 completed", parentNoBuildUpdates: true, cachedChannel: &discordgo.Channel{ID: threadSnowflake, ParentID: parentChan, Type: discordgo.ChannelTypeGuildPublicThread, Name: "build-thread"}, systemChannel: sysChanSnowflake, want: sysChanSnowflake},
 		{name: "thread without suppression on parent returns thread channelID", channelID: threadSnowflake, prompt: "Continuous Delivery deployment completed for job eri", cachedChannel: &discordgo.Channel{ID: threadSnowflake, ParentID: parentChan, Type: discordgo.ChannelTypeGuildPublicThread}, systemChannel: sysChanSnowflake, want: threadSnowflake},
+		{name: "build prompt without no_build_updates does not redirect", channelID: targetChan, prompt: "Continuous Delivery deployment completed for job eri", noBuildUpdates: false, systemChannel: sysChanSnowflake, want: targetChan},
+		{name: "unresolvable system channel falls back to target channel", channelID: targetChan, prompt: "Continuous Delivery deployment completed for job eri", noBuildUpdates: true, systemChannel: "nonexistent", want: targetChan},
+		{name: "resolves channel name system_channel via discord session", channelID: targetChan, prompt: "Continuous Delivery deployment completed for job eri", noBuildUpdates: true, systemChannel: "aerial-dev", useMockSession: true, want: sysChanSnowflake},
 	}
 
 	for _, tc := range tests {
