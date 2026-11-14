@@ -243,8 +243,41 @@ func TestClient(t *testing.T) {
 			if !ok {
 				t.Fatalf("transport = %T, want *transport", got.Transport)
 			}
-			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase {
-				t.Errorf("timeout %v base %T, want %v %T", got.Timeout, rt.base, tc.wantTimeout, tc.wantBase)
+			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || !rt.propagate {
+				t.Errorf("timeout %v base %T propagate %v, want %v %T true", got.Timeout, rt.base, rt.propagate, tc.wantTimeout, tc.wantBase)
+			}
+		})
+	}
+}
+
+func TestExternalClient(t *testing.T) {
+	t.Parallel()
+	base := &http.Transport{}
+	tests := []struct {
+		name        string
+		in          *http.Client
+		wantTimeout time.Duration
+		wantBase    http.RoundTripper
+	}{
+		{name: "nil client gets default transport", in: nil, wantBase: http.DefaultTransport},
+		{name: "settings and base transport are kept", in: &http.Client{Timeout: 20 * time.Second, Transport: base}, wantTimeout: 20 * time.Second, wantBase: base},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ExternalClient(tc.in)
+			if got == tc.in {
+				t.Fatal("ExternalClient must return a copy")
+			}
+			if tc.in != nil && tc.in.Transport != tc.wantBase {
+				t.Error("input client transport was mutated")
+			}
+			rt, ok := got.Transport.(*transport)
+			if !ok {
+				t.Fatalf("transport = %T, want *transport", got.Transport)
+			}
+			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || rt.propagate {
+				t.Errorf("timeout %v base %T propagate %v, want %v %T false", got.Timeout, rt.base, rt.propagate, tc.wantTimeout, tc.wantBase)
 			}
 		})
 	}
@@ -414,7 +447,7 @@ func runTransportCase(t *testing.T, tc transportTestCase) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := &http.Client{Transport: newTransport(tp, propagation.TraceContext{}, base)}
+	client := &http.Client{Transport: newTransport(tp, propagation.TraceContext{}, base, true)}
 	resp, err := client.Do(req)
 	if err == nil {
 		_ = resp.Body.Close()
@@ -470,11 +503,81 @@ func TestTransport(t *testing.T) {
 
 func TestTransport_DefaultBase(t *testing.T) {
 	t.Parallel()
-	if rt := Transport(nil).(*transport); rt.base != http.DefaultTransport {
-		t.Errorf("base = %T, want http.DefaultTransport", rt.base)
+	if rt := Transport(nil).(*transport); rt.base != http.DefaultTransport || !rt.propagate {
+		t.Errorf("base = %T propagate %v, want http.DefaultTransport true", rt.base, rt.propagate)
+	}
+	if rt := ExternalTransport(nil).(*transport); rt.base != http.DefaultTransport || rt.propagate {
+		t.Errorf("external base = %T propagate %v, want http.DefaultTransport false", rt.base, rt.propagate)
 	}
 	if originOnly(nil) != "" {
 		t.Error("originOnly(nil) should be empty")
+	}
+}
+
+func TestExternalTransport(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		parent     bool
+		status     int
+		path       string
+		wantSpans  int
+		wantStatus string
+		wantError  bool
+	}{
+		{name: "traced request records a client span", parent: true, status: http.StatusOK, path: "/api/v10/channels/1/messages?wait=true", wantSpans: 1, wantStatus: "200"},
+		{name: "rate limit is recorded but not an error", parent: true, status: http.StatusTooManyRequests, path: "/api/v10/channels/1/messages/2", wantSpans: 1, wantStatus: "429"},
+		{name: "server error marks the span", parent: true, status: http.StatusBadGateway, path: "/api/v10/gateway", wantSpans: 1, wantStatus: "502", wantError: true},
+		{name: "background request opens no root span", parent: false, status: http.StatusOK, path: "/api/v10/users/@me", wantSpans: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			headers := make(chan http.Header, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				headers <- r.Header.Clone()
+				w.WriteHeader(tc.status)
+			}))
+			t.Cleanup(srv.Close)
+			sr, tp := newRecorder(t)
+			ctx := context.Background()
+			if tc.parent {
+				ctx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": parentTraceparent})
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodPatch, srv.URL+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: newTransport(tp, propagation.TraceContext{}, nil, false)}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+
+			got := <-headers
+			if got.Get("Traceparent") != "" || got.Get("Tracestate") != "" {
+				t.Errorf("outbound trace headers leaked: traceparent=%q tracestate=%q", got.Get("Traceparent"), got.Get("Tracestate"))
+			}
+			spans := sr.Ended()
+			if len(spans) != tc.wantSpans {
+				t.Fatalf("got %d spans, want %d", len(spans), tc.wantSpans)
+			}
+			if tc.wantSpans == 0 {
+				return
+			}
+			s := spans[0]
+			if s.SpanKind() != trace.SpanKindClient || s.Parent().SpanID().String() != parentSpanID {
+				t.Errorf("span kind %v parent %s", s.SpanKind(), s.Parent().SpanID())
+			}
+			attrs := attrMap(s.Attributes())
+			if attrs["http.response.status_code"] != tc.wantStatus || attrs["http.request.method"] != http.MethodPatch || attrs["url.full"] != srv.URL {
+				t.Errorf("attrs = %v, want status %s method PATCH url.full %s", attrs, tc.wantStatus, srv.URL)
+			}
+			if (s.Status().Code == codes.Error) != tc.wantError {
+				t.Errorf("status = %+v, want error=%v", s.Status(), tc.wantError)
+			}
+		})
 	}
 }
 

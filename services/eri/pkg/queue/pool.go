@@ -155,6 +155,7 @@ type WorkerPool struct {
 	voiceProcessPool  runner.AgentPool
 	createThreadFn    func(channelID, title string) (string, error)
 	widgetDeliveryMu  sync.Mutex
+	widgetLockHolder  atomic.Pointer[widgetLockPath] // path holding widgetDeliveryMu; nil when free
 	widgetMu          sync.Mutex
 	widgetsByID       map[string]discord.StatusWidgetRequest
 	widgetOrder       []string

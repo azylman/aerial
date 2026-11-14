@@ -12,9 +12,71 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 )
+
+const (
+	spanWidgetLockWait = "widget.lock_wait"
+	spanWidgetDeliver  = "widget.deliver"
+	spanWidgetHydrate  = "widget.hydrate"
+
+	attrWidgetLockHolder = attribute.Key("aerial.widget.lock_holder")
+	attrWidgetHasStep    = attribute.Key("aerial.widget.has_step")
+	attrWidgetChunks     = attribute.Key("aerial.widget.chunks")
+)
+
+// widgetLockPath names the code path holding widgetDeliveryMu, recorded on widget.lock_wait spans.
+type widgetLockPath string
+
+const (
+	widgetLockDeliver widgetLockPath = "deliver"
+	widgetLockStep    widgetLockPath = "step"
+	widgetLockStart   widgetLockPath = "start"
+	widgetLockFinish  widgetLockPath = "finish"
+)
+
+// startWidgetSpan opens a child of the turn or request span carried by ctx. Without one it records
+// nothing, so widget calls made outside a trace never open orphan root spans.
+func (p *WorkerPool) startWidgetSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		return ctx, trace.SpanFromContext(ctx)
+	}
+	return p.tracer().Start(ctx, name, trace.WithAttributes(attrs...)) //nolint:spancheck // the caller owns and ends the span
+}
+
+// lockWidgetDelivery acquires widgetDeliveryMu inside a widget.lock_wait span naming the path that
+// held the lock when the wait began, then records path as the holder until unlockWidgetDelivery.
+func (p *WorkerPool) lockWidgetDelivery(ctx context.Context, path widgetLockPath) {
+	var attrs []attribute.KeyValue
+	if holder := p.widgetLockHolder.Load(); holder != nil {
+		attrs = append(attrs, attrWidgetLockHolder.String(string(*holder)))
+	}
+	_, span := p.startWidgetSpan(ctx, spanWidgetLockWait, attrs...)
+	p.widgetDeliveryMu.Lock()
+	span.End()
+	p.widgetLockHolder.Store(&path)
+}
+
+func (p *WorkerPool) unlockWidgetDelivery() {
+	p.widgetLockHolder.Store(nil)
+	p.widgetDeliveryMu.Unlock()
+}
+
+// widgetDeliverAttrs describes a widget edit without any of its content.
+func widgetDeliverAttrs(req discord.StatusWidgetRequest) []attribute.KeyValue {
+	hasStep := false
+	for _, c := range req.Chunks {
+		if c.ActiveStep != "" {
+			hasStep = true
+			break
+		}
+	}
+	return []attribute.KeyValue{attrWidgetHasStep.Bool(hasStep), attrWidgetChunks.Int(len(req.Chunks))}
+}
 
 func (p *WorkerPool) hasWarmChunkWidget(chunkID string) bool {
 	p.widgetMu.Lock()
@@ -144,7 +206,7 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-func (p *WorkerPool) ensureChunkWidgetHydrated(prompt, chunkID, buildID string) {
+func (p *WorkerPool) ensureChunkWidgetHydrated(ctx context.Context, prompt, chunkID, buildID string) {
 	if p.hasWarmChunkWidget(chunkID) {
 		return
 	}
@@ -153,14 +215,16 @@ func (p *WorkerPool) ensureChunkWidgetHydrated(prompt, chunkID, buildID string) 
 	if routerURL == "" || !ok {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, span := p.startWidgetSpan(ctx, spanWidgetHydrate)
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, routerURL+"/internal/widget/sync", strings.NewReader(bodyJSON))
 	if err != nil {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := tracing.Client(http.DefaultClient).Do(req)
 	if err != nil {
 		log.Printf("[WorkerPool] Warning syncing cold widget cache for chunk %s: %v", chunkID, err)
 		return
@@ -385,8 +449,11 @@ func (p *WorkerPool) DeliverStatusWidgetWithContext(ctx context.Context, req dis
 		return "", errors.New("discord session is not connected")
 	}
 
-	p.widgetDeliveryMu.Lock()
-	defer p.widgetDeliveryMu.Unlock()
+	ctx, span := p.startWidgetSpan(ctx, spanWidgetDeliver)
+	defer span.End()
+
+	p.lockWidgetDelivery(ctx, widgetLockDeliver)
+	defer p.unlockWidgetDelivery()
 
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -398,6 +465,7 @@ func (p *WorkerPool) DeliverStatusWidgetWithContext(ctx context.Context, req dis
 	p.ensureWidgetMapsLocked()
 	p.syncWidgetDeliveryStateLocked(&req)
 	p.widgetMu.Unlock()
+	span.SetAttributes(widgetDeliverAttrs(req)...)
 
 	msgID, err := p.sendWidgetRequest(ctx, sess, req)
 	if err != nil {
@@ -409,7 +477,7 @@ func (p *WorkerPool) DeliverStatusWidgetWithContext(ctx context.Context, req dis
 }
 
 // StartChunkStepTurn claims ownership of step streaming for a build chunk in an active turn.
-func (p *WorkerPool) StartChunkStepTurn(chunkID, buildID string, chunkIdx int, turnID string) {
+func (p *WorkerPool) StartChunkStepTurn(ctx context.Context, chunkID, buildID string, chunkIdx int, turnID string) {
 	if p == nil {
 		return
 	}
@@ -419,8 +487,8 @@ func (p *WorkerPool) StartChunkStepTurn(chunkID, buildID string, chunkIdx int, t
 		return
 	}
 
-	p.widgetDeliveryMu.Lock()
-	defer p.widgetDeliveryMu.Unlock()
+	p.lockWidgetDelivery(ctx, widgetLockStart)
+	defer p.unlockWidgetDelivery()
 
 	p.widgetMu.Lock()
 	p.ensureWidgetMapsLocked()
@@ -483,7 +551,7 @@ func (p *WorkerPool) prepareChunkStepDeliveryLocked(chunkID, turnID, stepText st
 }
 
 // FlushChunkActiveStep updates the active step for a chunk and delivers an in-place widget edit if currently running.
-func (p *WorkerPool) FlushChunkActiveStep(chunkID, turnID, stepText string) error {
+func (p *WorkerPool) FlushChunkActiveStep(ctx context.Context, chunkID, turnID, stepText string) error {
 	if p == nil {
 		return errors.New("worker pool is nil")
 	}
@@ -493,8 +561,11 @@ func (p *WorkerPool) FlushChunkActiveStep(chunkID, turnID, stepText string) erro
 		return nil
 	}
 
-	p.widgetDeliveryMu.Lock()
-	defer p.widgetDeliveryMu.Unlock()
+	ctx, span := p.startWidgetSpan(ctx, spanWidgetDeliver)
+	defer span.End()
+
+	p.lockWidgetDelivery(ctx, widgetLockStep)
+	defer p.unlockWidgetDelivery()
 
 	p.widgetMu.Lock()
 	p.ensureWidgetMapsLocked()
@@ -505,23 +576,18 @@ func (p *WorkerPool) FlushChunkActiveStep(chunkID, turnID, stepText string) erro
 		return nil
 	}
 
-	return p.deliverChunkStepWidget(*deliveryReq)
+	span.SetAttributes(widgetDeliverAttrs(*deliveryReq)...)
+	return p.deliverChunkStepWidget(ctx, *deliveryReq)
 }
 
 // deliverChunkStepWidget delivers a step edit and records the returned message ID so a sunk card stays tracked.
 // Callers must hold widgetDeliveryMu.
-func (p *WorkerPool) deliverChunkStepWidget(req discord.StatusWidgetRequest) error {
-	var msgID string
-	var err error
-	if p.cfg.WidgetDeliveryFunc != nil {
-		msgID, err = p.cfg.WidgetDeliveryFunc(req)
-	} else {
-		sess := p.DiscordSession()
-		if sess == nil {
-			return errors.New("discord session is not connected")
-		}
-		msgID, err = discord.DeliverStatusWidget(sess, req, time.Now())
+func (p *WorkerPool) deliverChunkStepWidget(ctx context.Context, req discord.StatusWidgetRequest) error {
+	sess := p.DiscordSession()
+	if sess == nil && p.cfg.WidgetDeliveryFunc == nil {
+		return errors.New("discord session is not connected")
 	}
+	msgID, err := p.sendWidgetRequest(ctx, sess, req)
 	if err != nil {
 		return err
 	}
@@ -546,7 +612,7 @@ func (p *WorkerPool) finishChunkStepTurnLocked(chunkID, turnID string) (*discord
 }
 
 // FinishChunkStepTurn disowns step streaming for a chunk and clears its active step on the widget.
-func (p *WorkerPool) FinishChunkStepTurn(chunkID, turnID string) {
+func (p *WorkerPool) FinishChunkStepTurn(ctx context.Context, chunkID, turnID string) {
 	if p == nil {
 		return
 	}
@@ -556,8 +622,8 @@ func (p *WorkerPool) FinishChunkStepTurn(chunkID, turnID string) {
 		return
 	}
 
-	p.widgetDeliveryMu.Lock()
-	defer p.widgetDeliveryMu.Unlock()
+	p.lockWidgetDelivery(ctx, widgetLockFinish)
+	defer p.unlockWidgetDelivery()
 
 	p.widgetMu.Lock()
 	p.ensureWidgetMapsLocked()
@@ -571,7 +637,7 @@ func (p *WorkerPool) FinishChunkStepTurn(chunkID, turnID string) {
 	if p.cfg.WidgetDeliveryFunc == nil && p.DiscordSession() == nil {
 		return
 	}
-	if err := p.deliverChunkStepWidget(*deliveryReq); err != nil {
+	if err := p.deliverChunkStepWidget(ctx, *deliveryReq); err != nil {
 		log.Printf("[WorkerPool] Warning delivering finish chunk step widget: %v", err)
 	}
 }

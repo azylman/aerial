@@ -2757,7 +2757,7 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 				}
 			}
 			for cID, step := range tc.priorSteps {
-				p.StartChunkStepTurn(cID, tc.req.ID, -1, "test-turn")
+				p.StartChunkStepTurn(context.Background(), cID, tc.req.ID, -1, "test-turn")
 				p.widgetMu.Lock()
 				p.activeChunkSteps[cID] = step
 				p.widgetMu.Unlock()
@@ -3139,11 +3139,11 @@ func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
 			t.Parallel()
 			if tc.nilPool {
 				var p *WorkerPool
-				if err := p.FlushChunkActiveStep(tc.chunkID, tc.turnID, tc.stepText); err == nil {
+				if err := p.FlushChunkActiveStep(context.Background(), tc.chunkID, tc.turnID, tc.stepText); err == nil {
 					t.Fatalf("expected error from nil pool FlushChunkActiveStep")
 				}
-				p.StartChunkStepTurn(tc.chunkID, "b1", 0, tc.turnID)
-				p.FinishChunkStepTurn(tc.chunkID, tc.turnID)
+				p.StartChunkStepTurn(context.Background(), tc.chunkID, "b1", 0, tc.turnID)
+				p.FinishChunkStepTurn(context.Background(), tc.chunkID, tc.turnID)
 				return
 			}
 			var deliveredMu sync.Mutex
@@ -3183,13 +3183,13 @@ func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
 			if tc.mismatchedTurn {
 				assignedTurn = "t-actual"
 			}
-			p.StartChunkStepTurn(tc.chunkID, "build-"+tc.chunkID, 0, assignedTurn)
-			p.ensureChunkWidgetHydrated("Prompt for "+tc.chunkID, tc.chunkID, "build-"+tc.chunkID)
-			err := p.FlushChunkActiveStep(tc.chunkID, tc.turnID, tc.stepText)
+			p.StartChunkStepTurn(context.Background(), tc.chunkID, "build-"+tc.chunkID, 0, assignedTurn)
+			p.ensureChunkWidgetHydrated(context.Background(), "Prompt for "+tc.chunkID, tc.chunkID, "build-"+tc.chunkID)
+			err := p.FlushChunkActiveStep(context.Background(), tc.chunkID, tc.turnID, tc.stepText)
 			if (err != nil) != tc.expectFlushErr {
 				t.Fatalf("FlushChunkActiveStep err = %v, expectFlushErr = %v", err, tc.expectFlushErr)
 			}
-			p.FinishChunkStepTurn(tc.chunkID, tc.turnID)
+			p.FinishChunkStepTurn(context.Background(), tc.chunkID, tc.turnID)
 
 			deliveredMu.Lock()
 			reqs := append([]discord.StatusWidgetRequest(nil), deliveredReqs...)
@@ -4310,7 +4310,7 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 
 			if tc.syncBadURL {
 				pBad := &WorkerPool{cfg: WorkerPoolConfig{SynapseURL: "://bad-url", VanadisURL: "http://vanadis.aerial/api/"}}
-				pBad.ensureChunkWidgetHydrated("Build ID: b1", "c1", "b1")
+				pBad.ensureChunkWidgetHydrated(context.Background(), "Build ID: b1", "c1", "b1")
 			}
 
 			if tc.seedWidget || tc.seedOutdatedWidget {

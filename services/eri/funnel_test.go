@@ -623,6 +623,9 @@ func TestConnectDiscordFunnel_DisabledAndLifecycle(t *testing.T) {
 		t.Fatalf("Expected non-nil discordgo.Session")
 	}
 	defer func() { _ = s.Close() }()
+	if s.Client.Timeout != 20*time.Second || s.Client.Transport == nil {
+		t.Errorf("REST client timeout %v transport %T, want 20s with a traced transport", s.Client.Timeout, s.Client.Transport)
+	}
 
 	sNilCtx := connectDiscordFunnel(nil, store, pool, "mock-nil-ctx-token")
 	if sNilCtx == nil {

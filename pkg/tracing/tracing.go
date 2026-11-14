@@ -152,6 +152,17 @@ func Client(c *http.Client) *http.Client {
 	return &out
 }
 
+// ExternalClient returns a copy of c (a zero client when nil) whose transport is wrapped with
+// ExternalTransport, keeping its timeout and other settings. Use it for third-party APIs.
+func ExternalClient(c *http.Client) *http.Client {
+	var out http.Client
+	if c != nil {
+		out = *c
+	}
+	out.Transport = ExternalTransport(out.Transport)
+	return &out
+}
+
 // ContextWithTraceparent returns ctx carrying the remote span context parsed from a W3C
 // traceparent value persisted on queued work (see Traceparent). Empty or malformed values
 // return ctx unchanged.
@@ -249,23 +260,36 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // Transport wraps base (http.DefaultTransport when nil) with client spans and traceparent
 // injection. The url.full attribute is reduced to scheme://host.
 func Transport(base http.RoundTripper) http.RoundTripper {
-	return newTransport(otel.GetTracerProvider(), otel.GetTextMapPropagator(), base)
+	return newTransport(otel.GetTracerProvider(), otel.GetTextMapPropagator(), base, true)
 }
 
-func newTransport(tp trace.TracerProvider, prop propagation.TextMapPropagator, base http.RoundTripper) http.RoundTripper {
+// ExternalTransport wraps base (http.DefaultTransport when nil) for third-party APIs: it records
+// a client span only when the request context already carries a span (background calls stay
+// untraced instead of opening orphan roots) and never adds trace headers to the request.
+func ExternalTransport(base http.RoundTripper) http.RoundTripper {
+	return newTransport(otel.GetTracerProvider(), otel.GetTextMapPropagator(), base, false)
+}
+
+func newTransport(tp trace.TracerProvider, prop propagation.TextMapPropagator, base http.RoundTripper, propagate bool) http.RoundTripper {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return &transport{base: base, tracer: tp.Tracer(ScopeName), prop: prop}
+	return &transport{base: base, tracer: tp.Tracer(ScopeName), prop: prop, propagate: propagate}
 }
 
 type transport struct {
 	base   http.RoundTripper
 	tracer trace.Tracer
 	prop   propagation.TextMapPropagator
+	// propagate injects trace headers and traces untraced requests as roots; external
+	// transports leave both off.
+	propagate bool
 }
 
 func (t *transport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if !t.propagate && !trace.SpanContextFromContext(r.Context()).IsValid() {
+		return t.base.RoundTrip(r)
+	}
 	ctx, span := t.tracer.Start(r.Context(), r.Method,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
@@ -276,8 +300,11 @@ func (t *transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	)
 	defer span.End()
 
-	out := r.Clone(ctx)
-	t.prop.Inject(ctx, propagation.HeaderCarrier(out.Header))
+	out := r.WithContext(ctx)
+	if t.propagate {
+		out = r.Clone(ctx)
+		t.prop.Inject(ctx, propagation.HeaderCarrier(out.Header))
+	}
 	resp, err := t.base.RoundTrip(out)
 	if err != nil {
 		span.SetStatus(codes.Error, Redact(transportErrorMessage(err)))
