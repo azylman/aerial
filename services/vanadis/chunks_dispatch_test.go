@@ -478,12 +478,13 @@ func TestVanadisServer_MemoryBusIntegration(t *testing.T) {
 	}
 
 	wrapped := &ackBus{Bus: memBus, onHandled: func() { close(done) }}
-	bus := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+	stopBus, err := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return wrapped, nil
 	})
-	if bus == nil {
-		t.Fatal("expected non-nil bus from initVanadisJetStreamWithFactory")
+	if err != nil || stopBus == nil {
+		t.Fatalf("expected non-nil stopBus and nil error from initVanadisJetStreamWithFactory, got err=%v", err)
 	}
+	defer stopBus()
 
 	ev := pubsub.DispatchOutcomeEvent{
 		DispatchID:     "disp-bus-1",
@@ -517,16 +518,40 @@ func TestVanadisServer_BusAndJetStreamInit(t *testing.T) {
 	server := NewVanadisServer(Config{}, nil, nil)
 
 	// initVanadisJetStream empty natsURL
-	if bus := initVanadisJetStream(ctx, server, ""); bus != nil {
-		t.Error("expected nil bus for empty natsURL")
+	if stop, err := initVanadisJetStream(ctx, server, ""); err != nil || stop == nil {
+		t.Errorf("expected non-nil stop and nil error for empty natsURL, got err=%v", err)
 	}
 
 	// initVanadisJetStreamWithFactory error branch
 	errFactory := func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return nil, errors.New("nats connect error")
 	}
-	if bus := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", errFactory); bus != nil {
-		t.Error("expected nil bus when factory returns error")
+	if stop, err := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", errFactory); err == nil || stop != nil {
+		t.Errorf("expected error and nil stop when factory returns error, got err=%v", err)
+	}
+
+	// ensure core streams error branch
+	errStreamsBus := &errCoreStreamsBus{Bus: pubsub.NewMemoryBus(), err: errors.New("stream failure")}
+	if stop, err := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return errStreamsBus, nil
+	}); err == nil || stop != nil {
+		t.Errorf("expected error and nil stop when EnsureCoreStreams fails, got err=%v", err)
+	}
+
+	// subscribe vanadis-dispatch error branch
+	errDispatchSubBus := &errQueueSubBus{Bus: pubsub.NewMemoryBus(), matchSubject: "aerial.dispatch.*", err: errors.New("dispatch sub failure")}
+	if stop, err := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return errDispatchSubBus, nil
+	}); err == nil || stop != nil {
+		t.Errorf("expected error and nil stop when ConsumeQueue dispatch fails, got err=%v", err)
+	}
+
+	// subscribe vanadis-chunk error branch
+	errChunkSubBus := &errQueueSubBus{Bus: pubsub.NewMemoryBus(), matchSubject: "aerial.jobs.vanadis.chunk", err: errors.New("chunk sub failure")}
+	if stop, err := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return errChunkSubBus, nil
+	}); err == nil || stop != nil {
+		t.Errorf("expected error and nil stop when StartJobConsumers fails, got err=%v", err)
 	}
 
 	// initVanadisJetStreamWithFactory success branch
@@ -535,10 +560,36 @@ func TestVanadisServer_BusAndJetStreamInit(t *testing.T) {
 	successFactory := func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return memBus, nil
 	}
-	if bus := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", successFactory); bus == nil {
-		t.Error("expected non-nil bus when factory succeeds")
+	stop, err := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", successFactory)
+	if err != nil || stop == nil {
+		t.Errorf("expected non-nil stop and nil error when factory succeeds, got err=%v", err)
 	}
 	if server.Bus() != memBus {
 		t.Error("expected server.Bus() to equal configured bus")
 	}
+	stop()
+}
+
+type errCoreStreamsBus struct {
+	pubsub.Bus
+
+	err error
+}
+
+func (b *errCoreStreamsBus) EnsureCoreStreams(ctx context.Context) error {
+	return b.err
+}
+
+type errQueueSubBus struct {
+	pubsub.Bus
+
+	matchSubject string
+	err          error
+}
+
+func (b *errQueueSubBus) ConsumeQueue(ctx context.Context, subject, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	if b.matchSubject == "" || subject == b.matchSubject {
+		return nil, b.err
+	}
+	return b.Bus.ConsumeQueue(ctx, subject, queue, handler)
 }

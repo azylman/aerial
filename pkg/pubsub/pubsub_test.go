@@ -1336,4 +1336,15 @@ func TestJetStreamBus_DispatchAndMessageSettlement(t *testing.T) {
 	if err := busNilNC.Close(); err != nil {
 		t.Errorf("Close with nil nc failed: %v", err)
 	}
+
+	// 8. ConsumerStats coverage
+	var nilJSBus *JetStreamBus
+	if _, _, err := nilJSBus.ConsumerStats(context.Background(), "stream", "consumer"); err == nil {
+		t.Error("expected error from nil bus ConsumerStats")
+	}
+	memBusStats := NewMemoryBus()
+	defer memBusStats.Close()
+	if p, inf, err := memBusStats.ConsumerStats(context.Background(), "stream", "consumer"); err != nil || p != 0 || inf != 0 {
+		t.Errorf("MemoryBus.ConsumerStats = (%d, %d, %v), want (0, 0, nil)", p, inf, err)
+	}
 }

@@ -317,7 +317,11 @@ func (b *JetStreamBus) ConsumerStats(ctx context.Context, stream, consumer strin
 	if b == nil || b.js == nil {
 		return 0, 0, errors.New("pubsub: jetstream context is nil")
 	}
-	info, err := b.js.ConsumerInfo(stream, consumer)
+	var opts []nats.JSOpt
+	if ctx != nil {
+		opts = append(opts, nats.Context(ctx))
+	}
+	info, err := b.js.ConsumerInfo(stream, consumer, opts...)
 	if err != nil {
 		return 0, 0, fmt.Errorf("consumer info %s/%s: %w", stream, consumer, err)
 	}

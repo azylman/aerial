@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"slices"
@@ -228,10 +229,15 @@ func collectJetStreamQueueMetrics(ctx context.Context, q consumerStatsQuerier) e
 
 	queuePending := make(map[string]int64)
 	queueInFlight := make(map[string]int64)
+	var firstErr error
 	for _, target := range synapseConsumerTargets {
 		pending, inFlight, err := q.ConsumerStats(ctx, target.stream, target.consumer)
 		if err != nil {
-			return fmt.Errorf("consumer stats %s/%s: %w", target.stream, target.consumer, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("consumer stats %s/%s: %w", target.stream, target.consumer, err)
+			}
+			log.Printf("[synapse] [metrics] warning querying consumer stats for %s/%s: %v", target.stream, target.consumer, err)
+			continue
 		}
 		queuePending[target.queue] += pending
 		queueInFlight[target.queue] += inFlight
@@ -242,7 +248,7 @@ func collectJetStreamQueueMetrics(ctx context.Context, q consumerStatsQuerier) e
 	for queue, f := range queueInFlight {
 		QueueDepth.WithLabelValues(queue, "in_flight").Set(float64(f))
 	}
-	return nil
+	return firstErr
 }
 
 func resolveJobQueueAndKind(args any) (string, string) {

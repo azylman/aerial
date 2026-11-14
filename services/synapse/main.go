@@ -1320,7 +1320,10 @@ func runServer(ctx context.Context, cfgSrc *httpkit.Reloadable[Config], onReady 
 	dispatcher.SetKubeConfig(cfg.KubeAPIServer, cfg.KubeToken)
 	server.SetDispatcher(dispatcher)
 
-	stopJetStream := initSynapseJetStream(ctx, server, cfg.NATSURL)
+	stopJetStream, err := initSynapseJetStream(ctx, server, cfg.NATSURL)
+	if err != nil {
+		return err
+	}
 	defer stopJetStream()
 
 	var dbPool *pgxpool.Pool

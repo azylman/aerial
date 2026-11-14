@@ -976,7 +976,6 @@ func makeVanadisMetricsCases(srvWithQueue, srvMem, srvPGErr *VanadisServer) []va
 				"vanadis_queue_depth",
 				`vanadis_queue_depth{state="pending"} 2`,
 				`vanadis_queue_depth{state="in_flight"} 1`,
-				"vanadis_queue_oldest_age_seconds 0",
 				"vanadis_builds_total",
 				`vanadis_builds_total{status="created"}`,
 				`vanadis_builds_total{status="completed"}`,

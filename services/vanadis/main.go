@@ -1275,36 +1275,49 @@ var newVanadisBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) 
 	return pubsub.NewJetStreamBus(ctx, url)
 }
 
-func initVanadisJetStream(ctx context.Context, server *VanadisServer, natsURL string) pubsub.Bus {
+func initVanadisJetStream(ctx context.Context, server *VanadisServer, natsURL string) (func(), error) {
 	return initVanadisJetStreamWithFactory(ctx, server, natsURL, newVanadisBusFn)
 }
 
-func initVanadisJetStreamWithFactory(ctx context.Context, server *VanadisServer, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
+func initVanadisJetStreamWithFactory(ctx context.Context, server *VanadisServer, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) (func(), error) {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {
 		log.Println("[vanadis] warning: nats_url is not configured; event bus disabled")
-		return nil
+		return func() {}, nil
 	}
 	b, err := factory(ctx, natsURL)
 	if err != nil {
-		log.Printf("[vanadis] warning: failed to connect to nats at %s: %v", natsURL, err)
-		return nil
+		return nil, fmt.Errorf("connect to nats at %s: %w", natsURL, err)
 	}
 	server.SetBus(b)
 	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
-		log.Printf("[vanadis] warning: failed to ensure core streams: %v", err)
+		if closeErr := b.Close(); closeErr != nil {
+			log.Printf("[vanadis] warning: failed closing bus: %v", closeErr)
+		}
+		server.SetBus(nil)
+		return nil, fmt.Errorf("ensure core streams: %w", err)
 	}
 	if _, err := b.ConsumeQueue(ctx, "aerial.dispatch.*", "vanadis-dispatch", server.HandleDispatchOutcomeEvent); err != nil {
-		log.Printf("[vanadis] warning: failed to subscribe vanadis-dispatch: %v", err)
-	} else {
-		log.Println("[vanadis] Subscribed vanadis-dispatch queue consumer to aerial.dispatch.*")
+		if closeErr := b.Close(); closeErr != nil {
+			log.Printf("[vanadis] warning: failed closing bus: %v", closeErr)
+		}
+		server.SetBus(nil)
+		return nil, fmt.Errorf("subscribe vanadis-dispatch: %w", err)
 	}
+	log.Println("[vanadis] Subscribed vanadis-dispatch queue consumer to aerial.dispatch.*")
 	if err := server.StartJobConsumers(ctx); err != nil {
-		log.Printf("[vanadis] warning: failed to subscribe vanadis-chunk: %v", err)
-	} else {
-		log.Println("[vanadis] Subscribed vanadis-chunk queue consumer to aerial.jobs.vanadis.chunk")
+		if closeErr := b.Close(); closeErr != nil {
+			log.Printf("[vanadis] warning: failed closing bus: %v", closeErr)
+		}
+		server.SetBus(nil)
+		return nil, fmt.Errorf("subscribe vanadis-chunk: %w", err)
 	}
-	return b
+	log.Println("[vanadis] Subscribed vanadis-chunk queue consumer to aerial.jobs.vanadis.chunk")
+	return func() {
+		if closeErr := b.Close(); closeErr != nil {
+			log.Printf("[vanadis] bus close error: %v", closeErr)
+		}
+	}, nil
 }
 
 func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error {
@@ -1320,15 +1333,17 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	}
 
 	natsURL := firstNonEmpty(cfg.NATSURL, os.Getenv("NATS_URL"))
-	bus := initVanadisJetStream(ctx, server, natsURL)
+	cleanupBus, err := initVanadisJetStream(ctx, server, natsURL)
+	if err != nil {
+		if cleanupDB != nil {
+			cleanupDB(context.Background())
+		}
+		return err
+	}
+	defer cleanupBus()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)
 	if err != nil {
-		if bus != nil {
-			if closeErr := bus.Close(); closeErr != nil {
-				log.Printf("[vanadis] bus close error: %v", closeErr)
-			}
-		}
 		if cleanupDB != nil {
 			cleanupDB(context.Background())
 		}
@@ -1356,11 +1371,6 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	defer shutdownCancel()
 	if shutErr := httpServer.Shutdown(shutdownCtx); shutErr != nil && !errors.Is(shutErr, http.ErrServerClosed) {
 		log.Printf("[vanadis] HTTP shutdown error: %v", shutErr)
-	}
-	if bus != nil {
-		if closeErr := bus.Close(); closeErr != nil {
-			log.Printf("[vanadis] bus close error: %v", closeErr)
-		}
 	}
 	if cleanupDB != nil {
 		cleanupDB(shutdownCtx)
