@@ -517,48 +517,48 @@ func TestVanadisMCP_Tools(t *testing.T) {
 			rec := httptest.NewRecorder()
 
 			handler(rec, req)
-
-			respBytes := rec.Body.Bytes()
-			var rpcResp struct {
-				ID     int             `json:"id"`
-				Result json.RawMessage `json:"result"`
-				Error  *struct {
-					Code    int    `json:"code"`
-					Message string `json:"message"`
-				} `json:"error"`
-			}
-			if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
-				t.Fatalf("failed to decode JSON-RPC response: %v, raw: %s", err, string(respBytes))
-			}
-
-			if tc.wantToolErr {
-				var toolResult struct {
-					IsError bool `json:"isError"`
-				}
-				_ = json.Unmarshal(rpcResp.Result, &toolResult)
-				isErr := toolResult.IsError || rpcResp.Error != nil
-				if !isErr {
-					t.Fatalf("expected tool or RPC error, got success response: %s", string(respBytes))
-				}
-				if tc.wantSubstr != "" && !strings.Contains(string(respBytes), tc.wantSubstr) {
-					t.Fatalf("response %s does not contain expected error substring %q", string(respBytes), tc.wantSubstr)
-				}
-			} else {
-				if rpcResp.Error != nil {
-					t.Fatalf("unexpected RPC error: %+v", rpcResp.Error)
-				}
-				var toolResult struct {
-					IsError bool `json:"isError"`
-				}
-				_ = json.Unmarshal(rpcResp.Result, &toolResult)
-				if toolResult.IsError {
-					t.Fatalf("unexpected tool error in result: %s", string(rpcResp.Result))
-				}
-				if tc.wantSubstr != "" && !strings.Contains(string(respBytes), tc.wantSubstr) {
-					t.Fatalf("response %s does not contain expected substring %q", string(respBytes), tc.wantSubstr)
-				}
-			}
+			assertVanadisMCPToolResult(t, rec.Body.Bytes(), tc.wantToolErr, tc.wantSubstr)
 			_ = widgetSyncedBuildID
 		})
+	}
+}
+
+func assertVanadisMCPToolResult(t *testing.T, respBytes []byte, wantToolErr bool, wantSubstr string) {
+	t.Helper()
+	var rpcResp struct {
+		ID     int             `json:"id"`
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
+		t.Fatalf("failed to decode JSON-RPC response: %v, raw: %s", err, string(respBytes))
+	}
+	var toolResult struct {
+		IsError bool `json:"isError"`
+	}
+	_ = json.Unmarshal(rpcResp.Result, &toolResult)
+
+	if wantToolErr {
+		isErr := toolResult.IsError || rpcResp.Error != nil
+		if !isErr {
+			t.Fatalf("expected tool or RPC error, got success response: %s", string(respBytes))
+		}
+		if wantSubstr != "" && !strings.Contains(string(respBytes), wantSubstr) {
+			t.Fatalf("response %s does not contain expected error substring %q", string(respBytes), wantSubstr)
+		}
+		return
+	}
+
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected RPC error: %+v", rpcResp.Error)
+	}
+	if toolResult.IsError {
+		t.Fatalf("unexpected tool error in result: %s", string(rpcResp.Result))
+	}
+	if wantSubstr != "" && !strings.Contains(string(respBytes), wantSubstr) {
+		t.Fatalf("response %s does not contain expected substring %q", string(respBytes), wantSubstr)
 	}
 }

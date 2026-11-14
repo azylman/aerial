@@ -7,16 +7,17 @@ import (
 	"testing"
 )
 
-func TestFindSymbolSpan(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		content   string
-		symbol    string
-		wantStart int
-		wantEnd   int
-		wantOK    bool
-	}{
+type findSymbolSpanCase struct {
+	name      string
+	content   string
+	symbol    string
+	wantStart int
+	wantEnd   int
+	wantOK    bool
+}
+
+func findSymbolSpanTestCases() []findSymbolSpanCase {
+	return []findSymbolSpanCase{
 		{
 			name:      "multi-line func",
 			content:   "package p\n\nfunc Foo() {\n\tx := 1\n\t_ = x\n}\n",
@@ -186,6 +187,11 @@ func TestFindSymbolSpan(t *testing.T) {
 			wantOK:    false,
 		},
 	}
+}
+
+func TestFindSymbolSpan(t *testing.T) {
+	t.Parallel()
+	tests := findSymbolSpanTestCases()
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,39 +204,17 @@ func TestFindSymbolSpan(t *testing.T) {
 	}
 }
 
-func TestResolveSymbolSpans(t *testing.T) {
-	t.Parallel()
-	shareRoot := t.TempDir()
-	aerialDir := filepath.Join(shareRoot, "aerial")
-	if err := os.MkdirAll(filepath.Join(aerialDir, "pkg"), 0o755); err != nil {
-		t.Fatalf("failed to create test dir: %v", err)
-	}
+type resolveSymbolSpansCase struct {
+	name            string
+	repo            string
+	targetFiles     []string
+	targetSymbols   []string
+	wantLines       []string
+	wantAllResolved bool
+}
 
-	fooContent := "package pkg\n\nfunc Foo() {\n\tSharedCall()\n}\n\nfunc Helper() {\n\treturn\n}\n\nfunc Common() {\n\treturn\n}\n"
-	barContent := "package pkg\n\nfunc Bar() {\n\tHelper()\n\tSharedCall()\n}\n\nfunc Common() {\n\treturn\n}\n"
-	bazContent := "package pkg\n\nfunc Baz() {\n\treturn\n}\n\nfunc ComputeBaz() {\n\treturn\n}\n"
-	bazTestContent := "package pkg\n\nimport \"testing\"\n\nfunc Test(t *testing.T) {}\n\nfunc TestBaz_Subcase(t *testing.T) {\n\t// exercises Baz via route\n}\n\nfunc TestBazAndComputeBaz(t *testing.T) {\n\tBaz()\n\tComputeBaz()\n}\n\nfunc TestOtherBodyOnly(t *testing.T) {\n\tOnlyInBody()\n}\n\nconst testFixtureConst = 42\n"
-	if err := os.WriteFile(filepath.Join(aerialDir, "pkg/foo.go"), []byte(fooContent), 0o600); err != nil {
-		t.Fatalf("failed to write foo.go: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(aerialDir, "pkg/bar.go"), []byte(barContent), 0o600); err != nil {
-		t.Fatalf("failed to write bar.go: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(aerialDir, "pkg/baz.go"), []byte(bazContent), 0o600); err != nil {
-		t.Fatalf("failed to write baz.go: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(aerialDir, "pkg/baz_test.go"), []byte(bazTestContent), 0o600); err != nil {
-		t.Fatalf("failed to write baz_test.go: %v", err)
-	}
-
-	tests := []struct {
-		name            string
-		repo            string
-		targetFiles     []string
-		targetSymbols   []string
-		wantLines       []string
-		wantAllResolved bool
-	}{
+func resolveSymbolSpansTestCases() []resolveSymbolSpansCase {
+	return []resolveSymbolSpansCase{
 		{
 			name:            "all top-level symbols resolved",
 			repo:            "azylman/aerial",
@@ -336,6 +320,34 @@ func TestResolveSymbolSpans(t *testing.T) {
 			wantAllResolved: false,
 		},
 	}
+}
+
+func TestResolveSymbolSpans(t *testing.T) {
+	t.Parallel()
+	shareRoot := t.TempDir()
+	aerialDir := filepath.Join(shareRoot, "aerial")
+	if err := os.MkdirAll(filepath.Join(aerialDir, "pkg"), 0o755); err != nil {
+		t.Fatalf("failed to create test dir: %v", err)
+	}
+
+	fooContent := "package pkg\n\nfunc Foo() {\n\tSharedCall()\n}\n\nfunc Helper() {\n\treturn\n}\n\nfunc Common() {\n\treturn\n}\n"
+	barContent := "package pkg\n\nfunc Bar() {\n\tHelper()\n\tSharedCall()\n}\n\nfunc Common() {\n\treturn\n}\n"
+	bazContent := "package pkg\n\nfunc Baz() {\n\treturn\n}\n\nfunc ComputeBaz() {\n\treturn\n}\n"
+	bazTestContent := "package pkg\n\nimport \"testing\"\n\nfunc Test(t *testing.T) {}\n\nfunc TestBaz_Subcase(t *testing.T) {\n\t// exercises Baz via route\n}\n\nfunc TestBazAndComputeBaz(t *testing.T) {\n\tBaz()\n\tComputeBaz()\n}\n\nfunc TestOtherBodyOnly(t *testing.T) {\n\tOnlyInBody()\n}\n\nconst testFixtureConst = 42\n"
+	if err := os.WriteFile(filepath.Join(aerialDir, "pkg/foo.go"), []byte(fooContent), 0o600); err != nil {
+		t.Fatalf("failed to write foo.go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(aerialDir, "pkg/bar.go"), []byte(barContent), 0o600); err != nil {
+		t.Fatalf("failed to write bar.go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(aerialDir, "pkg/baz.go"), []byte(bazContent), 0o600); err != nil {
+		t.Fatalf("failed to write baz.go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(aerialDir, "pkg/baz_test.go"), []byte(bazTestContent), 0o600); err != nil {
+		t.Fatalf("failed to write baz_test.go: %v", err)
+	}
+
+	tests := resolveSymbolSpansTestCases()
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
