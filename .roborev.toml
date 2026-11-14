@@ -1,6 +1,6 @@
 agent = "claude-code"
 review_agent = "claude-code"
-model = "opus"
+model = "sonnet"
 review_reasoning = "thorough"
 default_branch = "main"
 
