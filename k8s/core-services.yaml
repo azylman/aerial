@@ -1803,3 +1803,92 @@ spec:
   selector:
     app.kubernetes.io/name: infisical
   type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nats-jetstream-data
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app.kubernetes.io/name: nats
+  name: nats
+  namespace: default
+spec:
+  replicas: 1
+  serviceName: nats
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nats
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: quiet-zero
+      containers:
+        - name: nats
+          image: nats:2-alpine
+          args:
+            - "-js"
+            - "-sd"
+            - "/data/jetstream"
+            - "-m"
+            - "8222"
+          ports:
+            - containerPort: 4222
+              name: client
+              protocol: TCP
+            - containerPort: 8222
+              name: monitor
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz?js-enabled-only=true
+              port: 8222
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - mountPath: /data/jetstream
+              name: jetstream-data
+      volumes:
+        - name: jetstream-data
+          persistentVolumeClaim:
+            claimName: nats-jetstream-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: default
+spec:
+  ports:
+    - name: client
+      port: 4222
+      protocol: TCP
+      targetPort: 4222
+    - name: monitor
+      port: 8222
+      protocol: TCP
+      targetPort: 8222
+  selector:
+    app.kubernetes.io/name: nats
+  type: ClusterIP
+
