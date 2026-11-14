@@ -76,52 +76,59 @@ func TestPostBrainJSON_Traceparent(t *testing.T) {
 	}
 }
 
+type dispatchChunkTurnSpanCase struct {
+	name       string
+	status     int
+	wantErr    bool
+	wantStatus codes.Code
+}
+
+func runDispatchChunkTurnSpanCase(t *testing.T, tc dispatchChunkTurnSpanCase) {
+	t.Helper()
+	var got string
+	srv := brainStub(t, tc.status, &got)
+	build := mkBuild("build-trace", "1555000111", "Trace Build", "Trace Build", "")
+	chunks := []VanadisChunk{mkChunk("build-trace-chunk-1", "build-trace", 0, "Task 1", "Do it", "", "running")}
+	s := NewVanadisServer(Config{BrainURL: srv.URL}, nil, nil, srv.Client())
+	if err := s.dispatchChunkTurn(context.Background(), build, chunks, 0, ""); (err != nil) != tc.wantErr {
+		t.Fatalf("dispatchChunkTurn err = %v, wantErr %v", err, tc.wantErr)
+	}
+	// eri's request is a child of the client span, which is a child of the chunk span.
+	reqTraceID := traceparentContext(got).TraceID()
+	var span sdktrace.ReadOnlySpan
+	for _, s := range spanRecorder.Ended() {
+		if s.Name() == "vanadis.dispatch_chunk" && s.SpanContext().TraceID() == reqTraceID {
+			span = s
+		}
+	}
+	if span == nil {
+		t.Fatalf("no chunk dispatch span in eri request trace %s", reqTraceID)
+	}
+	if span.Parent().IsValid() || span.SpanKind() != trace.SpanKindProducer {
+		t.Errorf("chunk span parent valid=%v kind=%v, want root producer", span.Parent().IsValid(), span.SpanKind())
+	}
+	attrs := map[string]string{}
+	for _, kv := range span.Attributes() {
+		attrs[string(kv.Key)] = kv.Value.String()
+	}
+	if len(attrs) != 3 || attrs["vanadis.build.id"] != "build-trace" || attrs["vanadis.chunk.id"] != "build-trace-chunk-1" || attrs["vanadis.chunk.index"] != "1" {
+		t.Errorf("attributes = %v, want only build id, chunk id and index", attrs)
+	}
+	if span.Status().Code != tc.wantStatus || (tc.wantStatus == codes.Error && span.Status().Description != "dispatch failed") {
+		t.Errorf("status = %+v, want %v", span.Status(), tc.wantStatus)
+	}
+}
+
 func TestDispatchChunkTurn_Span(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name       string
-		status     int
-		wantErr    bool
-		wantStatus codes.Code
-	}{
+	tests := []dispatchChunkTurnSpanCase{
 		{name: "chunk dispatch is the parent of eri's request", status: http.StatusAccepted, wantStatus: codes.Unset},
 		{name: "rejected dispatch marks the span with a generic status", status: http.StatusBadRequest, wantErr: true, wantStatus: codes.Error},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var got string
-			srv := brainStub(t, tc.status, &got)
-			build := mkBuild("build-trace", "1555000111", "Trace Build", "Trace Build", "")
-			chunks := []VanadisChunk{mkChunk("build-trace-chunk-1", "build-trace", 0, "Task 1", "Do it", "", "running")}
-			s := NewVanadisServer(Config{BrainURL: srv.URL}, nil, nil, srv.Client())
-			if err := s.dispatchChunkTurn(context.Background(), build, chunks, 0, ""); (err != nil) != tc.wantErr {
-				t.Fatalf("dispatchChunkTurn err = %v, wantErr %v", err, tc.wantErr)
-			}
-			// eri's request is a child of the client span, which is a child of the chunk span.
-			reqTraceID := traceparentContext(got).TraceID()
-			var span sdktrace.ReadOnlySpan
-			for _, s := range spanRecorder.Ended() {
-				if s.Name() == "vanadis.dispatch_chunk" && s.SpanContext().TraceID() == reqTraceID {
-					span = s
-				}
-			}
-			if span == nil {
-				t.Fatalf("no chunk dispatch span in eri request trace %s", reqTraceID)
-			}
-			if span.Parent().IsValid() || span.SpanKind() != trace.SpanKindProducer {
-				t.Errorf("chunk span parent valid=%v kind=%v, want root producer", span.Parent().IsValid(), span.SpanKind())
-			}
-			attrs := map[string]string{}
-			for _, kv := range span.Attributes() {
-				attrs[string(kv.Key)] = kv.Value.String()
-			}
-			if len(attrs) != 3 || attrs["vanadis.build.id"] != "build-trace" || attrs["vanadis.chunk.id"] != "build-trace-chunk-1" || attrs["vanadis.chunk.index"] != "1" {
-				t.Errorf("attributes = %v, want only build id, chunk id and index", attrs)
-			}
-			if span.Status().Code != tc.wantStatus || (tc.wantStatus == codes.Error && span.Status().Description != "dispatch failed") {
-				t.Errorf("status = %+v, want %v", span.Status(), tc.wantStatus)
-			}
+			runDispatchChunkTurnSpanCase(t, tc)
 		})
 	}
 }
