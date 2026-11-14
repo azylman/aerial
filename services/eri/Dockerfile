@@ -175,8 +175,17 @@ ENV RUSTUP_HOME="/usr/local/rustup" \
     CARGO_HOME="/usr/local/cargo" \
     PATH="/usr/local/cargo/bin:/usr/local/go/bin:/root/go/bin:${PATH}"
 
-# Install official Antigravity CLI binary
-RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
+# Install the Antigravity CLI from a pinned, sha256-verified GitHub release so agy only
+# changes when this pin is edited (never on cache busts or new upstream releases).
+# To upgrade, bump both AGY_VERSION and AGY_SHA256 (agy_cli_linux_x64.tar.gz asset digest).
+ARG AGY_VERSION=1.5.9
+ARG AGY_SHA256=8b1f5e56779f2434a0af36f1b715a8392a084de550f8c68bc79821f95fabf3fa
+RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/google-antigravity/antigravity-cli/releases/download/${AGY_VERSION}/agy_cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz && \
+    echo "${AGY_SHA256}  /tmp/agy.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/agy.tar.gz -O antigravity > /usr/local/bin/agy && \
+    chmod 0755 /usr/local/bin/agy && \
+    rm /tmp/agy.tar.gz && \
+    /usr/local/bin/agy --version
 # Disable agy background self-updater (https://www.antigravity.google/docs/cli/troubleshooting); agy versions must only change on image rebuild.
 ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
 
