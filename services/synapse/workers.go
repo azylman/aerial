@@ -20,12 +20,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Metric collectors for River queues and worker execution telemetry.
+// Metric collectors for JetStream queues and worker execution telemetry.
 var (
 	JobsEnqueuedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "synapse_jobs_enqueued_total",
-			Help: "Total number of River jobs enqueued, skipped as duplicate, or failed on enqueue.",
+			Help: "Total number of jobs enqueued, skipped as duplicate, or failed on enqueue.",
 		},
 		[]string{"queue", "kind", "status"},
 	)
@@ -33,7 +33,7 @@ var (
 	JobsProcessedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "synapse_jobs_processed_total",
-			Help: "Total number of River jobs processed by worker execution status.",
+			Help: "Total number of jobs processed by worker execution status.",
 		},
 		[]string{"queue", "kind", "status"},
 	)
@@ -41,7 +41,7 @@ var (
 	JobDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "synapse_job_duration_seconds",
-			Help:    "Execution duration of River jobs in seconds.",
+			Help:    "Execution duration of jobs in seconds.",
 			Buckets: prometheus.DefBuckets,
 		},
 		[]string{"queue", "kind"},
@@ -50,7 +50,7 @@ var (
 	JobRetriesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "synapse_job_retries_total",
-			Help: "Total number of River job retry attempts by reason.",
+			Help: "Total number of job retry attempts by reason.",
 		},
 		[]string{"queue", "kind", "reason"},
 	)
@@ -58,7 +58,7 @@ var (
 	JobsDroppedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "synapse_jobs_dropped_total",
-			Help: "Total number of River jobs dropped or cancelled by reason.",
+			Help: "Total number of jobs dropped or cancelled by reason.",
 		},
 		[]string{"queue", "kind", "reason"},
 	)
@@ -66,17 +66,9 @@ var (
 	QueueDepth = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "synapse_queue_depth",
-			Help: "Current depth of River queues partitioned by state.",
+			Help: "Current depth of queues partitioned by state.",
 		},
 		[]string{"queue", "state"},
-	)
-
-	QueueOldestAgeSeconds = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "synapse_queue_oldest_age_seconds",
-			Help: "Oldest pending job age in seconds across available, retryable, and scheduled states.",
-		},
-		[]string{"queue"},
 	)
 
 	DiscordGatewayLatencySeconds = prometheus.NewGauge(
@@ -121,14 +113,12 @@ func init() {
 	registerCollector(JobRetriesTotal)
 	registerCollector(JobsDroppedTotal)
 	registerCollector(QueueDepth)
-	registerCollector(QueueOldestAgeSeconds)
 	registerCollector(DiscordGatewayLatencySeconds)
 
 	for _, q := range knownQueues {
 		for _, s := range knownStates {
 			QueueDepth.WithLabelValues(q, s).Set(0)
 		}
-		QueueOldestAgeSeconds.WithLabelValues(q).Set(0)
 	}
 	DiscordGatewayLatencySeconds.Set(0)
 }
@@ -203,7 +193,6 @@ func collectJetStreamQueueMetrics(ctx context.Context, q consumerStatsQuerier) e
 	for _, queue := range knownQueues {
 		QueueDepth.WithLabelValues(queue, "pending").Set(0)
 		QueueDepth.WithLabelValues(queue, "in_flight").Set(0)
-		QueueOldestAgeSeconds.WithLabelValues(queue).Set(0)
 	}
 	if q == nil {
 		return nil
@@ -233,19 +222,49 @@ func collectJetStreamQueueMetrics(ctx context.Context, q consumerStatsQuerier) e
 	return firstErr
 }
 
+func normalizeJobArgs(args any) any {
+	switch a := args.(type) {
+	case *GitHubWebhookArgs:
+		if a != nil {
+			return *a
+		}
+	case *DeployWebhookArgs:
+		if a != nil {
+			return *a
+		}
+	case *MergeConflictArgs:
+		if a != nil {
+			return *a
+		}
+	case *DiscordIngressArgs:
+		if a != nil {
+			return *a
+		}
+	case *DiscordInteractionArgs:
+		if a != nil {
+			return *a
+		}
+	case *WidgetSyncArgs:
+		if a != nil {
+			return *a
+		}
+	}
+	return args
+}
+
 func resolveJobQueueAndKind(args any) (string, string) {
-	switch args.(type) {
-	case GitHubWebhookArgs, *GitHubWebhookArgs:
+	switch normalizeJobArgs(args).(type) {
+	case GitHubWebhookArgs:
 		return QueueDefault, "github_webhook"
-	case DeployWebhookArgs, *DeployWebhookArgs:
+	case DeployWebhookArgs:
 		return QueueDefault, "deploy_webhook"
-	case MergeConflictArgs, *MergeConflictArgs:
+	case MergeConflictArgs:
 		return QueueMergeConflict, "merge_conflict"
-	case DiscordIngressArgs, *DiscordIngressArgs:
+	case DiscordIngressArgs:
 		return QueueDiscordIngress, "discord_ingress"
-	case DiscordInteractionArgs, *DiscordInteractionArgs:
+	case DiscordInteractionArgs:
 		return QueueDiscordInteraction, "discord_interaction"
-	case WidgetSyncArgs, *WidgetSyncArgs:
+	case WidgetSyncArgs:
 		return QueueWidgetSync, "widget_sync"
 	default:
 		return QueueDefault, "unknown"

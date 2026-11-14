@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -308,9 +307,6 @@ func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
 	}); bus == nil {
 		t.Error("expected non-nil bus even if subscribe fails")
 	}
-	if worker.IsSubscribed() {
-		t.Error("expected worker not subscribed when subscribe fails")
-	}
 
 	// Unmarshal error on bad JSON payload
 	unmarshalDone := make(chan struct{})
@@ -320,9 +316,6 @@ func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
 	})
 	if bus == nil {
 		t.Fatal("expected non-nil bus")
-	}
-	if !worker.IsSubscribed() {
-		t.Error("expected worker subscribed when subscribe succeeds")
 	}
 
 	if err := memBus.Publish(ctx, "aerial.turn.completed", "bad-turn-1", "not-a-valid-json"); err != nil {
@@ -397,69 +390,5 @@ func TestCoven_TurnCompletedConsumerRetriesAndDrop(t *testing.T) {
 	// Delivery attempt >= 5 drops message and returns nil
 	if err := captureBus.handler(ctx, &mockPubsubMsg{data: data, delivered: 5}); err != nil {
 		t.Errorf("expected nil error on attempt 5, got %v", err)
-	}
-}
-
-func TestCoven_ReconnectFn(t *testing.T) {
-	ctx := context.Background()
-	var (
-		busMu sync.Mutex
-		bus   pubsub.Bus
-	)
-	worker := NewWorker(WorkerConfig{})
-	reconnect := makeCovenReconnectFn(&busMu, &bus, worker, "nats://mock")
-
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-	var factoryCalls int
-	oldFactory := newCovenBusFn
-	defer func() { newCovenBusFn = oldFactory }()
-	newCovenBusFn = func(_ context.Context, _ string) (pubsub.Bus, error) {
-		factoryCalls++
-		return memBus, nil
-	}
-
-	// 1. When bus is nil and init succeeds, it stores bus, subscribes worker, and returns nil
-	if err := reconnect(ctx); err != nil {
-		t.Fatalf("unexpected reconnect err: %v", err)
-	}
-	if bus == nil {
-		t.Fatal("expected non-nil bus after reconnect")
-	}
-	if !worker.IsSubscribed() {
-		t.Fatal("expected worker subscribed after reconnect")
-	}
-	if factoryCalls != 1 {
-		t.Fatalf("factoryCalls = %d, want 1", factoryCalls)
-	}
-
-	// 2. When worker is already subscribed, returns nil immediately without calling factory
-	if err := reconnect(ctx); err != nil {
-		t.Fatalf("unexpected err when worker already subscribed: %v", err)
-	}
-	if factoryCalls != 1 {
-		t.Fatalf("factoryCalls = %d, want 1 (should not recreate bus when subscribed)", factoryCalls)
-	}
-
-	// 3. When worker is unsubscribed but bus is already present, it resubscribes on existing bus without creating new bus
-	worker.SetSubscribed(false)
-	if err := reconnect(ctx); err != nil {
-		t.Fatalf("unexpected err on resubscribing existing bus: %v", err)
-	}
-	if !worker.IsSubscribed() {
-		t.Fatal("expected worker subscribed after resubscribing existing bus")
-	}
-	if factoryCalls != 1 {
-		t.Fatalf("factoryCalls = %d, want 1 (should not call factory when bus exists)", factoryCalls)
-	}
-
-	// 4. When factory fails, returns error
-	worker.SetSubscribed(false)
-	bus = nil
-	newCovenBusFn = func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return nil, errors.New("conn fail")
-	}
-	if err := reconnect(ctx); err == nil {
-		t.Fatal("expected error when factory fails")
 	}
 }

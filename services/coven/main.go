@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -54,7 +53,6 @@ func subscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) erro
 		log.Printf("[Coven] warning: failed to subscribe coven-turns: %v", err)
 		return err
 	}
-	worker.SetSubscribed(true)
 	log.Println("[Coven] Subscribed coven-turns durable consumer to aerial.turn.completed")
 	return nil
 }
@@ -75,30 +73,6 @@ func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL 
 		}
 	}
 	return b
-}
-
-func makeCovenReconnectFn(busMu *sync.Mutex, bus *pubsub.Bus, worker *Worker, natsURL string) func(context.Context) error {
-	return func(rCtx context.Context) error {
-		busMu.Lock()
-		defer busMu.Unlock()
-		if worker != nil && worker.IsSubscribed() {
-			return nil
-		}
-		if *bus == nil {
-			newBus := initCovenJetStream(rCtx, worker, natsURL)
-			if newBus != nil {
-				*bus = newBus
-			}
-		} else if worker != nil {
-			if subErr := subscribeCovenTurns(rCtx, *bus, worker); subErr != nil {
-				log.Printf("[Coven] warning: subscription reconnect failed: %v", subErr)
-			}
-		}
-		if worker != nil && worker.IsSubscribed() {
-			return nil
-		}
-		return errors.New("jetstream subscription reconnect failed")
-	}
 }
 
 // RunApp bootstraps the coven MCP HTTP server with graceful shutdown.
@@ -131,11 +105,6 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	toolHandler := NewToolHandler(cfg, store, ollama, publisher)
 	server := NewServer(toolHandler)
 
-	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), cfg.NATSURL)
-	var (
-		busMu sync.Mutex
-		bus   pubsub.Bus
-	)
 	worker := NewWorker(WorkerConfig{
 		Store:           store,
 		Ollama:          ollama,
@@ -145,16 +114,11 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		InitialDelay:    DefaultWorkerInitialDelay,
 		TickInterval:    DefaultWorkerTickInterval,
 	})
-	worker.reconnectFn = makeCovenReconnectFn(&busMu, &bus, worker, natsURL)
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
 
-	busMu.Lock()
-	bus = initCovenJetStream(ctx, worker, natsURL)
-	busMu.Unlock()
+	bus := initCovenJetStream(ctx, worker, cfg.NATSURL)
 	defer func() {
-		busMu.Lock()
-		defer busMu.Unlock()
 		if bus != nil {
 			if closeErr := bus.Close(); closeErr != nil {
 				log.Printf("[Coven] bus close error: %v", closeErr)

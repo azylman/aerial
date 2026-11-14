@@ -683,7 +683,6 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			wantCode: http.StatusOK,
 			wantBodySubs: []string{
 				"synapse_queue_depth",
-				"synapse_queue_oldest_age_seconds",
 				"synapse_discord_gateway_latency_seconds 0.042",
 			},
 		},

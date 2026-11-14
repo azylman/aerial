@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log"
-	"os"
 	"strings"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -42,7 +41,7 @@ func attachEriEventBusWithFactory(ctx context.Context, pool *queue.WorkerPool, f
 	if pool == nil {
 		return nil
 	}
-	natsURL := firstNonEmpty(os.Getenv("NATS_URL"), pool.NATSURL())
+	natsURL := strings.TrimSpace(pool.NATSURL())
 	if natsURL == "" {
 		log.Printf("[WorkerPool] Warning: NATS_URL is not configured; event bus disabled")
 		return nil
@@ -57,13 +56,4 @@ func attachEriEventBusWithFactory(ctx context.Context, pool *queue.WorkerPool, f
 			log.Printf("[WorkerPool] Warning closing event bus: %v", closeErr)
 		}
 	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if s := strings.TrimSpace(v); s != "" {
-			return s
-		}
-	}
-	return ""
 }
