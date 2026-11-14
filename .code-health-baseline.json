@@ -1,8 +1,5 @@
 {
   "files": {
-    "services/coven/memory_test.go": {
-      "lines": 9015
-    },
     "services/eri/handlers_test.go": {
       "lines": 2019
     },
