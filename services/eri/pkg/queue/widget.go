@@ -526,6 +526,9 @@ func (p *WorkerPool) FinishChunkStepTurn(ctx context.Context, chunkID, turnID st
 		return
 	}
 
+	ctx, span := p.startWidgetSpan(ctx, spanWidgetDeliver)
+	defer span.End()
+
 	p.lockWidgetDelivery(ctx, widgetLockFinish)
 	defer p.unlockWidgetDelivery()
 
@@ -537,6 +540,8 @@ func (p *WorkerPool) FinishChunkStepTurn(ctx context.Context, chunkID, turnID st
 	if !ok {
 		return
 	}
+
+	span.SetAttributes(widgetDeliverAttrs(*deliveryReq)...)
 
 	if p.cfg.WidgetDeliveryFunc == nil && p.DiscordSession() == nil {
 		return
