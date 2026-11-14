@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -302,26 +303,87 @@ func TestEvaluateProceduralCandidateAdmission(t *testing.T) {
 	}
 }
 
+type sqlStoreProceduralCandidatesCase struct {
+	name        string
+	action      string
+	nilDB       bool
+	cand        ProceduralCandidate
+	ids         []int64
+	prNum       int
+	queryErr    error
+	execErr     error
+	rowSQL      string
+	rowsSQL     string
+	wantErr     bool
+	wantCount   int
+	wantID      int64
+	wantNoQuery bool
+}
+
+func runSQLStoreProceduralCandidatesCase(t *testing.T, tc sqlStoreProceduralCandidatesCase, dbMem *sql.DB) {
+	t.Helper()
+	var capturedQuery string
+	var store *SQLStore
+	if tc.nilDB {
+		store = &SQLStore{}
+	} else {
+		store = NewSQLStore(queryMockDBTX{
+			dbMem:         dbMem,
+			queryErr:      tc.queryErr,
+			execErr:       tc.execErr,
+			rowSQL:        tc.rowSQL,
+			rowsSQL:       tc.rowsSQL,
+			capturedQuery: &capturedQuery,
+		})
+	}
+
+	ctx := context.Background()
+	switch tc.action {
+	case "insert":
+		id, err := store.InsertProceduralCandidate(ctx, tc.cand)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("InsertProceduralCandidate() err = %v, wantErr = %v", err, tc.wantErr)
+		}
+		if tc.wantID > 0 && id != tc.wantID {
+			t.Errorf("InsertProceduralCandidate() id = %d, want %d", id, tc.wantID)
+		}
+	case "get_pending":
+		cands, err := store.GetPendingProceduralCandidates(ctx)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("GetPendingProceduralCandidates() err = %v, wantErr = %v", err, tc.wantErr)
+		}
+		if len(cands) != tc.wantCount {
+			t.Errorf("GetPendingProceduralCandidates() count = %d, want %d", len(cands), tc.wantCount)
+		}
+	default:
+		runSQLStoreProceduralStatusAction(t, store, tc, capturedQuery)
+	}
+}
+
+func runSQLStoreProceduralStatusAction(t *testing.T, store *SQLStore, tc sqlStoreProceduralCandidatesCase, capturedQuery string) {
+	t.Helper()
+	ctx := context.Background()
+	switch tc.action {
+	case "mark_consolidated":
+		err := store.MarkProceduralCandidatesConsolidated(ctx, tc.ids, tc.prNum)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("MarkProceduralCandidatesConsolidated() err = %v, wantErr = %v", err, tc.wantErr)
+		}
+	case "mark_skipped":
+		err := store.MarkProceduralCandidatesSkipped(ctx, tc.ids)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("MarkProceduralCandidatesSkipped() err = %v, wantErr = %v", err, tc.wantErr)
+		}
+	}
+	if tc.wantNoQuery && capturedQuery != "" {
+		t.Errorf("expected no query for empty IDs, got: %s", capturedQuery)
+	}
+}
+
 func TestSQLStore_ProceduralCandidates(t *testing.T) {
 	dbMem := setupTestDBMem(t)
-	ctx := context.Background()
 
-	tests := []struct {
-		name        string
-		action      string
-		nilDB       bool
-		cand        ProceduralCandidate
-		ids         []int64
-		prNum       int
-		queryErr    error
-		execErr     error
-		rowSQL      string
-		rowsSQL     string
-		wantErr     bool
-		wantCount   int
-		wantID      int64
-		wantNoQuery bool
-	}{
+	tests := []sqlStoreProceduralCandidatesCase{
 		{
 			name:    "InsertNilDB",
 			action:  "insert",
@@ -459,55 +521,7 @@ func TestSQLStore_ProceduralCandidates(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var capturedQuery string
-			var store *SQLStore
-			if tc.nilDB {
-				store = &SQLStore{}
-			} else {
-				store = NewSQLStore(queryMockDBTX{
-					dbMem:         dbMem,
-					queryErr:      tc.queryErr,
-					execErr:       tc.execErr,
-					rowSQL:        tc.rowSQL,
-					rowsSQL:       tc.rowsSQL,
-					capturedQuery: &capturedQuery,
-				})
-			}
-
-			switch tc.action {
-			case "insert":
-				id, err := store.InsertProceduralCandidate(ctx, tc.cand)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("InsertProceduralCandidate() err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if tc.wantID > 0 && id != tc.wantID {
-					t.Errorf("InsertProceduralCandidate() id = %d, want %d", id, tc.wantID)
-				}
-			case "get_pending":
-				cands, err := store.GetPendingProceduralCandidates(ctx)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("GetPendingProceduralCandidates() err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if len(cands) != tc.wantCount {
-					t.Errorf("GetPendingProceduralCandidates() count = %d, want %d", len(cands), tc.wantCount)
-				}
-			case "mark_consolidated":
-				err := store.MarkProceduralCandidatesConsolidated(ctx, tc.ids, tc.prNum)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("MarkProceduralCandidatesConsolidated() err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if tc.wantNoQuery && capturedQuery != "" {
-					t.Errorf("expected no query for empty IDs, got: %s", capturedQuery)
-				}
-			case "mark_skipped":
-				err := store.MarkProceduralCandidatesSkipped(ctx, tc.ids)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("MarkProceduralCandidatesSkipped() err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if tc.wantNoQuery && capturedQuery != "" {
-					t.Errorf("expected no query for empty IDs, got: %s", capturedQuery)
-				}
-			}
+			runSQLStoreProceduralCandidatesCase(t, tc, dbMem)
 		})
 	}
 }
@@ -535,23 +549,23 @@ func TestFormatProceduralCandidateEmbeddingText(t *testing.T) {
 	}
 }
 
-func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
-	ctx := context.Background()
+type processThreadFactsProceduralCase struct {
+	name                 string
+	llmResp              string
+	storeFailOp          string
+	storeFailErr         error
+	ollamaErr            error
+	preexistingCandidate *ProceduralCandidate
+	trajectoryCalls      []string
+	wantCandidateCount   int
+	wantPromptContains   string
+	wantEmbeddedText     string
+	wantWatermark        bool
+	wantErr              bool
+}
 
-	tests := []struct {
-		name                 string
-		llmResp              string
-		storeFailOp          string
-		storeFailErr         error
-		ollamaErr            error
-		preexistingCandidate *ProceduralCandidate
-		trajectoryCalls      []string
-		wantCandidateCount   int
-		wantPromptContains   string
-		wantEmbeddedText     string
-		wantWatermark        bool
-		wantErr              bool
-	}{
+func processThreadFactsProceduralCases() []processThreadFactsProceduralCase {
+	return []processThreadFactsProceduralCase{
 		{
 			name: "SuccessAdmitCandidate",
 			llmResp: `{
@@ -704,56 +718,74 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 			wantWatermark:      true,
 		},
 	}
+}
 
+func setupProcessThreadFactsProceduralStore(tc processThreadFactsProceduralCase) *TestMemStore {
+	mem := newTestMemStore()
+	mem.unextractedTurns["th-proc"] = []Message{
+		{ID: "m1", RowID: 1, Content: "user prompt", Status: "PENDING"},
+	}
+	if len(tc.trajectoryCalls) > 0 {
+		mem.threadToolCalls["th-proc"] = tc.trajectoryCalls
+	}
+	if tc.preexistingCandidate != nil {
+		_, _ = mem.InsertProceduralCandidate(context.Background(), *tc.preexistingCandidate)
+	}
+	if tc.storeFailOp != "" {
+		mem.SetFail(tc.storeFailOp, tc.storeFailErr)
+	}
+	return mem
+}
+
+func assertProcessThreadFactsProceduralResults(t *testing.T, tc processThreadFactsProceduralCase, mem *TestMemStore, capturedPrompt, lastText string) {
+	t.Helper()
+	if tc.wantPromptContains != "" && !strings.Contains(capturedPrompt, tc.wantPromptContains) {
+		t.Errorf("prompt missing %q:\n%s", tc.wantPromptContains, capturedPrompt)
+	}
+	if len(mem.proceduralCandidates) != tc.wantCandidateCount {
+		t.Errorf("candidate count = %d, want %d", len(mem.proceduralCandidates), tc.wantCandidateCount)
+	}
+	if tc.wantEmbeddedText != "" && lastText != tc.wantEmbeddedText {
+		t.Errorf("embedded text = %q, want %q", lastText, tc.wantEmbeddedText)
+	}
+	if tc.wantWatermark {
+		if mem.watermarks["th-proc"] != 1 {
+			t.Errorf("watermark = %d, want 1", mem.watermarks["th-proc"])
+		}
+	} else {
+		if wm, ok := mem.watermarks["th-proc"]; ok && wm != 0 {
+			t.Errorf("watermark unexpectedly advanced to %d, want not advanced", wm)
+		}
+	}
+}
+
+func runProcessThreadFactsProceduralCase(t *testing.T, tc processThreadFactsProceduralCase) {
+	t.Helper()
+	ctx := context.Background()
+	mem := setupProcessThreadFactsProceduralStore(tc)
+	client := &MockOllamaClient{
+		embedding: testEmbedding(1.0),
+		err:       tc.ollamaErr,
+	}
+
+	var capturedPrompt string
+	llm := func(_ context.Context, prompt string) (string, error) {
+		capturedPrompt = prompt
+		return tc.llmResp, nil
+	}
+
+	err := processThreadFacts(ctx, mem, client, llm, "th-proc")
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("processThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	assertProcessThreadFactsProceduralResults(t, tc, mem, capturedPrompt, client.lastText)
+}
+
+func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
+	tests := processThreadFactsProceduralCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mem := newTestMemStore()
-			mem.unextractedTurns["th-proc"] = []Message{
-				{ID: "m1", RowID: 1, Content: "user prompt", Status: "PENDING"},
-			}
-			if len(tc.trajectoryCalls) > 0 {
-				mem.threadToolCalls["th-proc"] = tc.trajectoryCalls
-			}
-			if tc.preexistingCandidate != nil {
-				_, _ = mem.InsertProceduralCandidate(ctx, *tc.preexistingCandidate)
-			}
-			if tc.storeFailOp != "" {
-				mem.SetFail(tc.storeFailOp, tc.storeFailErr)
-			}
-
-			client := &MockOllamaClient{
-				embedding: testEmbedding(1.0),
-				err:       tc.ollamaErr,
-			}
-
-			var capturedPrompt string
-			llm := func(_ context.Context, prompt string) (string, error) {
-				capturedPrompt = prompt
-				return tc.llmResp, nil
-			}
-
-			err := processThreadFacts(ctx, mem, client, llm, "th-proc")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("processThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantPromptContains != "" && !strings.Contains(capturedPrompt, tc.wantPromptContains) {
-				t.Errorf("prompt missing %q:\n%s", tc.wantPromptContains, capturedPrompt)
-			}
-			if len(mem.proceduralCandidates) != tc.wantCandidateCount {
-				t.Errorf("candidate count = %d, want %d", len(mem.proceduralCandidates), tc.wantCandidateCount)
-			}
-			if tc.wantEmbeddedText != "" && client.lastText != tc.wantEmbeddedText {
-				t.Errorf("embedded text = %q, want %q", client.lastText, tc.wantEmbeddedText)
-			}
-			if tc.wantWatermark {
-				if mem.watermarks["th-proc"] != 1 {
-					t.Errorf("watermark = %d, want 1", mem.watermarks["th-proc"])
-				}
-			} else {
-				if wm, ok := mem.watermarks["th-proc"]; ok && wm != 0 {
-					t.Errorf("watermark unexpectedly advanced to %d, want not advanced", wm)
-				}
-			}
+			runProcessThreadFactsProceduralCase(t, tc)
 		})
 	}
 }
@@ -769,6 +801,21 @@ func testProcCand(id int64, skill, trigger string, avoid []string, emb []float32
 		Embedding:   emb,
 		Status:      "pending",
 	}
+}
+
+func makeProceduralCandidateBatch(startID int64, count int) []ProceduralCandidate {
+	cands := make([]ProceduralCandidate, count)
+	for i := range count {
+		cands[i] = ProceduralCandidate{
+			ID:        startID + int64(i),
+			Domain:    "discord",
+			Trigger:   "psql missing",
+			Steps:     []string{"use python"},
+			Avoid:     []string{"avoid psql"},
+			Embedding: testEmbeddingAt(2, 1.0),
+		}
+	}
+	return cands
 }
 
 func testDiskSkill(name, domain, relPath, content string, emb []float32) DiskSkill {
@@ -902,6 +949,89 @@ Body content text here.`,
 	}
 }
 
+type scanCustomSkillsCase struct {
+	name            string
+	nonExistentRoot bool
+	entries         []diskEntry
+	mockClient      *MockOllamaClient
+	wantSkillLen    int
+	wantRelPaths    []string
+	wantEmbsNil     bool
+	wantErr         bool
+	errContains     string
+}
+
+type diskEntry struct {
+	relPath string
+	content string
+	isDir   bool
+}
+
+func setupScanCustomSkillsDir(t *testing.T, tc scanCustomSkillsCase) string {
+	t.Helper()
+	if tc.nonExistentRoot {
+		return filepath.Join(t.TempDir(), "nonexistent")
+	}
+	rootDir := t.TempDir()
+	for _, entry := range tc.entries {
+		fullPath := filepath.Join(rootDir, entry.relPath)
+		if entry.isDir {
+			if err := os.MkdirAll(fullPath, 0o755); err != nil {
+				t.Fatalf("failed to create dir %s: %v", fullPath, err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatalf("failed to create parent dir for %s: %v", fullPath, err)
+		}
+		if err := os.WriteFile(fullPath, []byte(entry.content), 0o644); err != nil {
+			t.Fatalf("failed to write test file %s: %v", fullPath, err)
+		}
+	}
+	return rootDir
+}
+
+func assertScanCustomSkillsResults(t *testing.T, tc scanCustomSkillsCase, skills []DiskSkill) {
+	t.Helper()
+	if len(skills) != tc.wantSkillLen {
+		t.Fatalf("skills len = %d, want %d", len(skills), tc.wantSkillLen)
+	}
+	for i, wantRel := range tc.wantRelPaths {
+		if skills[i].RelPath != wantRel {
+			t.Errorf("skill[%d].RelPath = %q, want %q", i, skills[i].RelPath, wantRel)
+		}
+	}
+	if tc.wantEmbsNil {
+		for i, s := range skills {
+			if len(s.Embedding) != 0 {
+				t.Errorf("skill[%d] embedding is not nil", i)
+			}
+		}
+	}
+}
+
+func runScanCustomSkillsCase(t *testing.T, tc scanCustomSkillsCase) {
+	t.Helper()
+	rootDir := setupScanCustomSkillsDir(t, tc)
+
+	var client OllamaClient
+	if tc.mockClient != nil {
+		client = tc.mockClient
+	}
+
+	skills, err := ScanCustomSkills(context.Background(), rootDir, client)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ScanCustomSkills() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr {
+		if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+			t.Errorf("error %q does not contain %q", err.Error(), tc.errContains)
+		}
+		return
+	}
+	assertScanCustomSkillsResults(t, tc, skills)
+}
+
 func TestScanCustomSkills(t *testing.T) {
 	validSkillMD := `---
 name: sample-skill
@@ -917,23 +1047,7 @@ invalid yaml without name or closing
 	nilEmbMD := strings.Replace(validSkillMD, "sample-skill", "nil-emb", 1)
 	errEmbMD := strings.Replace(validSkillMD, "sample-skill", "err-emb", 1)
 
-	type diskEntry struct {
-		relPath string
-		content string
-		isDir   bool
-	}
-
-	tests := []struct {
-		name            string
-		nonExistentRoot bool
-		entries         []diskEntry
-		mockClient      *MockOllamaClient
-		wantSkillLen    int
-		wantRelPaths    []string
-		wantEmbsNil     bool
-		wantErr         bool
-		errContains     string
-	}{
+	tests := []scanCustomSkillsCase{
 		{
 			name: "ValidSkillsScannedBothDomains",
 			entries: []diskEntry{
@@ -1005,76 +1119,25 @@ invalid yaml without name or closing
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			rootDir := filepath.Join(t.TempDir(), "nonexistent")
-			if !tc.nonExistentRoot {
-				rootDir = t.TempDir()
-				for _, entry := range tc.entries {
-					fullPath := filepath.Join(rootDir, entry.relPath)
-					if entry.isDir {
-						if err := os.MkdirAll(fullPath, 0o755); err != nil {
-							t.Fatalf("failed to create dir %s: %v", fullPath, err)
-						}
-					} else {
-						if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-							t.Fatalf("failed to create parent dir for %s: %v", fullPath, err)
-						}
-						if err := os.WriteFile(fullPath, []byte(entry.content), 0o644); err != nil {
-							t.Fatalf("failed to write test file %s: %v", fullPath, err)
-						}
-					}
-				}
-			}
-
-			var client OllamaClient
-			if tc.mockClient != nil {
-				client = tc.mockClient
-			}
-
-			skills, err := ScanCustomSkills(context.Background(), rootDir, client)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ScanCustomSkills() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
-					t.Errorf("error %q does not contain %q", err.Error(), tc.errContains)
-				}
-				return
-			}
-			if len(skills) != tc.wantSkillLen {
-				t.Fatalf("skills len = %d, want %d", len(skills), tc.wantSkillLen)
-			}
-			for i, wantRel := range tc.wantRelPaths {
-				if skills[i].RelPath != wantRel {
-					t.Errorf("skill[%d].RelPath = %q, want %q", i, skills[i].RelPath, wantRel)
-				}
-			}
-			if tc.wantEmbsNil {
-				for i, s := range skills {
-					if len(s.Embedding) != 0 {
-						t.Errorf("skill[%d] embedding is not nil", i)
-					}
-				}
-			}
+			runScanCustomSkillsCase(t, tc)
 		})
 	}
 }
 
-func TestPlanSkillConsolidation(t *testing.T) {
-	skillA := testDiskSkill("ha-ops", "discord", "custom-skills/discord/ha-ops/SKILL.md", "content", testEmbedding2D(1.0, 0.0))
-	skillB := testDiskSkill("deploy-flow", "common", "custom-skills/common/deploy-flow/SKILL.md", "content", testEmbedding2D(0.0, 1.0))
-	diskSkills := []DiskSkill{skillA, skillB}
+type planSkillConsolidationCase struct {
+	name              string
+	pending           []ProceduralCandidate
+	diskSkills        []DiskSkill
+	wantBatches       int
+	wantActions       []string
+	wantDomains       []string
+	wantCandCount     []int
+	wantRequireReview []bool
+	wantSkipped       []int64
+}
 
-	tests := []struct {
-		name              string
-		pending           []ProceduralCandidate
-		diskSkills        []DiskSkill
-		wantBatches       int
-		wantActions       []string
-		wantDomains       []string
-		wantCandCount     []int
-		wantRequireReview []bool
-		wantSkipped       []int64
-	}{
+func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidationCase {
+	return []planSkillConsolidationCase{
 		{
 			name: "BlockedCoreSkillsRoutedWithRequireReview",
 			pending: []ProceduralCandidate{
@@ -1126,7 +1189,6 @@ func TestPlanSkillConsolidation(t *testing.T) {
 		{
 			name: "CaseB_UnloadedRoutingMissHighSimilarityToExistingSkill",
 			pending: []ProceduralCandidate{
-				// Cosine similarity to skillA (1, 0) is 0.80 >= 0.72
 				testProcCand(40, "", "routing miss trigger", nil, testEmbedding2D(0.80, 0.60)),
 			},
 			diskSkills:        diskSkills,
@@ -1139,7 +1201,6 @@ func TestPlanSkillConsolidation(t *testing.T) {
 		{
 			name: "CaseB_UnmatchedLoadedSkillRoutingMiss",
 			pending: []ProceduralCandidate{
-				// LoadedSkill "unknown" not in diskSkills, similarity to skillB (0, 1) is 0.80 >= 0.72
 				testProcCand(45, "unknown-skill", "routing miss trigger 2", nil, testEmbedding2D(0.60, 0.80)),
 			},
 			diskSkills:        diskSkills,
@@ -1152,7 +1213,6 @@ func TestPlanSkillConsolidation(t *testing.T) {
 		{
 			name: "CaseC_NovelWorkflowCliqueFormsCreateBatch",
 			pending: []ProceduralCandidate{
-				// Both candidates have similarity 1.0 to each other, but orthogonal to skillA and skillB
 				testProcCand(50, "", "novel workflow step 1", nil, testEmbeddingAt(2, 1.0)),
 				testProcCand(51, "", "novel workflow step 2", nil, testEmbeddingAt(2, 1.0)),
 			},
@@ -1175,14 +1235,8 @@ func TestPlanSkillConsolidation(t *testing.T) {
 			wantBatches: 0,
 		},
 		{
-			name: "CaseD_ShortCandidatesFiveRepeatsEmitAlertBatch",
-			pending: []ProceduralCandidate{
-				{ID: 71, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 72, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 73, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 74, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-				{ID: 75, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
-			},
+			name:              "CaseD_ShortCandidatesFiveRepeatsEmitAlertBatch",
+			pending:           makeProceduralCandidateBatch(71, 5),
 			diskSkills:        diskSkills,
 			wantBatches:       1,
 			wantActions:       []string{"ALERT"},
@@ -1193,7 +1247,6 @@ func TestPlanSkillConsolidation(t *testing.T) {
 		{
 			name: "CaseC_DissimilarCandidatesDoNotFormClique",
 			pending: []ProceduralCandidate{
-				// Orthogonal to each other (sim = 0) and orthogonal to disk skills
 				testProcCand(60, "", "cand a", nil, testEmbeddingAt(2, 1.0)),
 				testProcCand(61, "", "cand b", nil, testEmbeddingAt(3, 1.0)),
 			},
@@ -1206,7 +1259,7 @@ func TestPlanSkillConsolidation(t *testing.T) {
 				testProcCand(1, "incident-triage", "blocked unmatched", nil, nil),
 				testProcCand(2, "ha-ops", "case a 1", nil, nil),
 				testProcCand(3, "ha-ops", "case a 2", nil, nil),
-				testProcCand(4, "", "case b miss", nil, testEmbedding2D(0.0, 1.0)), // sim 1.0 to skillB
+				testProcCand(4, "", "case b miss", nil, testEmbedding2D(0.0, 1.0)),
 				testProcCand(5, "self-improvement", "case c 1", nil, testEmbeddingAt(4, 1.0)),
 				testProcCand(6, "", "case c 2", nil, testEmbeddingAt(4, 1.0)),
 			},
@@ -1219,35 +1272,57 @@ func TestPlanSkillConsolidation(t *testing.T) {
 			wantSkipped:       nil,
 		},
 	}
+}
 
+func assertPlanSkillBatches(t *testing.T, batches []SkillConsolidationBatch, tc planSkillConsolidationCase) {
+	t.Helper()
+	if len(batches) != tc.wantBatches {
+		t.Fatalf("batches len = %d, want %d", len(batches), tc.wantBatches)
+	}
+	for i, wantAct := range tc.wantActions {
+		if batches[i].Action != wantAct {
+			t.Errorf("batch[%d].Action = %q, want %q", i, batches[i].Action, wantAct)
+		}
+		if batches[i].Domain != tc.wantDomains[i] {
+			t.Errorf("batch[%d].Domain = %q, want %q", i, batches[i].Domain, tc.wantDomains[i])
+		}
+		if len(batches[i].Candidates) != tc.wantCandCount[i] {
+			t.Errorf("batch[%d].Candidates len = %d, want %d", i, len(batches[i].Candidates), tc.wantCandCount[i])
+		}
+		if i < len(tc.wantRequireReview) && batches[i].RequireReview != tc.wantRequireReview[i] {
+			t.Errorf("batch[%d].RequireReview = %v, want %v", i, batches[i].RequireReview, tc.wantRequireReview[i])
+		}
+	}
+}
+
+func assertPlanSkillSkipped(t *testing.T, skipped []int64, wantSkipped []int64) {
+	t.Helper()
+	if len(skipped) != len(wantSkipped) {
+		t.Fatalf("skipped len = %d, want %d", len(skipped), len(wantSkipped))
+	}
+	for i, wantID := range wantSkipped {
+		if skipped[i] != wantID {
+			t.Errorf("skipped[%d] = %d, want %d", i, skipped[i], wantID)
+		}
+	}
+}
+
+func runPlanSkillConsolidationCase(t *testing.T, tc planSkillConsolidationCase) {
+	t.Helper()
+	batches, skipped := PlanSkillConsolidation(tc.pending, tc.diskSkills)
+	assertPlanSkillBatches(t, batches, tc)
+	assertPlanSkillSkipped(t, skipped, tc.wantSkipped)
+}
+
+func TestPlanSkillConsolidation(t *testing.T) {
+	skillA := testDiskSkill("ha-ops", "discord", "custom-skills/discord/ha-ops/SKILL.md", "content", testEmbedding2D(1.0, 0.0))
+	skillB := testDiskSkill("deploy-flow", "common", "custom-skills/common/deploy-flow/SKILL.md", "content", testEmbedding2D(0.0, 1.0))
+	diskSkills := []DiskSkill{skillA, skillB}
+
+	tests := planSkillConsolidationCases(diskSkills)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			batches, skipped := PlanSkillConsolidation(tc.pending, tc.diskSkills)
-			if len(batches) != tc.wantBatches {
-				t.Fatalf("batches len = %d, want %d", len(batches), tc.wantBatches)
-			}
-			for i, wantAct := range tc.wantActions {
-				if batches[i].Action != wantAct {
-					t.Errorf("batch[%d].Action = %q, want %q", i, batches[i].Action, wantAct)
-				}
-				if batches[i].Domain != tc.wantDomains[i] {
-					t.Errorf("batch[%d].Domain = %q, want %q", i, batches[i].Domain, tc.wantDomains[i])
-				}
-				if len(batches[i].Candidates) != tc.wantCandCount[i] {
-					t.Errorf("batch[%d].Candidates len = %d, want %d", i, len(batches[i].Candidates), tc.wantCandCount[i])
-				}
-				if i < len(tc.wantRequireReview) && batches[i].RequireReview != tc.wantRequireReview[i] {
-					t.Errorf("batch[%d].RequireReview = %v, want %v", i, batches[i].RequireReview, tc.wantRequireReview[i])
-				}
-			}
-			if len(skipped) != len(tc.wantSkipped) {
-				t.Fatalf("skipped len = %d, want %d", len(skipped), len(tc.wantSkipped))
-			}
-			for i, wantID := range tc.wantSkipped {
-				if skipped[i] != wantID {
-					t.Errorf("skipped[%d] = %d, want %d", i, skipped[i], wantID)
-				}
-			}
+			runPlanSkillConsolidationCase(t, tc)
 		})
 	}
 }
