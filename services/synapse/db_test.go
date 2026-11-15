@@ -217,15 +217,6 @@ func postgresPRRegistryTransitionCases() []postgresPRRegistryUnitCase {
 		{name: "AtomicTransitionConflict empty repo guard", op: "AtomicTransitionConflict", repo: "", prNumber: 42},
 		{name: "AtomicTransitionConflict prNumber zero guard", op: "AtomicTransitionConflict", repo: "azylman/aerial", prNumber: 0},
 
-		// ShouldSuppressConflictPrompt
-		{name: "ShouldSuppressConflictPrompt success true", op: "ShouldSuppressConflictPrompt", repo: "azylman/aerial", prNumber: 42, wantUpdated: true, wantSQLSubstr: "COALESCE(metadata->>'chunk_id', '')"},
-		{name: "ShouldSuppressConflictPrompt success false", op: "ShouldSuppressConflictPrompt", repo: "azylman/aerial", prNumber: 42, wantUpdated: false},
-		{name: "ShouldSuppressConflictPrompt not found", op: "ShouldSuppressConflictPrompt", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
-		{name: "ShouldSuppressConflictPrompt db error", op: "ShouldSuppressConflictPrompt", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
-		{name: "ShouldSuppressConflictPrompt nil pool guard", op: "ShouldSuppressConflictPrompt", nilPool: true, repo: "azylman/aerial", prNumber: 42, wantUpdated: false},
-		{name: "ShouldSuppressConflictPrompt empty repo guard", op: "ShouldSuppressConflictPrompt", repo: "", prNumber: 42, wantUpdated: false},
-		{name: "ShouldSuppressConflictPrompt prNumber zero guard", op: "ShouldSuppressConflictPrompt", repo: "azylman/aerial", prNumber: 0, wantUpdated: false},
-
 		// AtomicTransitionDeployFailed
 		{name: "AtomicTransitionDeployFailed success", op: "AtomicTransitionDeployFailed", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "100000000000000001", wantTarget: "100000000000000001", wantUpdated: true},
 		{name: "AtomicTransitionDeployFailed not found", op: "AtomicTransitionDeployFailed", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantTarget: "", wantUpdated: false},
@@ -651,15 +642,6 @@ func executePRRegistryCheckOps(ctx context.Context, t *testing.T, reg *PostgresP
 		}
 		if updated != tc.wantUpdated {
 			t.Errorf("updated = %v, want %v", updated, tc.wantUpdated)
-		}
-		return true
-	case "ShouldSuppressConflictPrompt":
-		gotSuppressed, err := reg.ShouldSuppressConflictPrompt(ctx, tc.repo, tc.prNumber)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("ShouldSuppressConflictPrompt err = %v, wantErr = %v", err, tc.wantErr)
-		}
-		if gotSuppressed != tc.wantUpdated {
-			t.Errorf("gotSuppressed = %v, want %v", gotSuppressed, tc.wantUpdated)
 		}
 		return true
 	default:

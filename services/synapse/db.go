@@ -66,7 +66,6 @@ type PRRegistryUpdater interface {
 	MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (transitioned bool, err error)
 	HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error)
 	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error
-	ShouldSuppressConflictPrompt(ctx context.Context, repo string, prNumber int) (bool, error)
 }
 
 type pgxQueryExecer interface {
@@ -739,32 +738,6 @@ func (r *PostgresPRRegistry) UpdatePRStatus(ctx context.Context, repo string, pr
 		return fmt.Errorf("update pr status: %w", err)
 	}
 	return nil
-}
-
-// ShouldSuppressConflictPrompt reports whether conflict remediation prompt dispatch should be
-// suppressed by Synapse because the PR is managed by an active build orchestrator that handles
-// conflicts via the published aerial.pr.conflict event.
-func (r *PostgresPRRegistry) ShouldSuppressConflictPrompt(ctx context.Context, repo string, prNumber int) (bool, error) {
-	repo = normalizeRepo(repo)
-	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
-		return false, nil
-	}
-	const query = `
-		SELECT EXISTS (
-			SELECT 1 FROM pr_registry
-			WHERE repo = $1 AND pr_number = $2
-			  AND (
-			      COALESCE(metadata->>'chunk_id', '') != ''
-			      OR COALESCE(metadata->>'build_id', '') != ''
-			      OR COALESCE(metadata->>'orchestrated', '') = 'true'
-			  )
-		);`
-	var suppressed bool
-	found, err := r.queryRowScan(ctx, "should suppress conflict prompt", query, []any{&suppressed}, repo, prNumber)
-	if err != nil || !found {
-		return false, err
-	}
-	return suppressed, nil
 }
 
 // extractStringSliceFromMetadata extracts a slice of strings stored under key in metadata JSONB.

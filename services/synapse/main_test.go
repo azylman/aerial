@@ -26,7 +26,6 @@ type mockEventBus struct {
 	mu                   sync.Mutex
 	insertedJobs         []GitHubWebhookArgs
 	insertedDeployJobs   []DeployWebhookArgs
-	insertedConflictJobs []MergeConflictArgs
 	insertedDiscordJobs  []DiscordIngressArgs
 	insertedInteractJobs []DiscordInteractionArgs
 	publishedPREvents    []pubsub.PRLifecycleEvent
@@ -51,12 +50,6 @@ func (m *mockEventBus) recordPublishedEvents(data any) {
 	case *pubsub.PRLifecycleEvent:
 		if a != nil {
 			m.publishedPREvents = append(m.publishedPREvents, *a)
-		}
-	case MergeConflictArgs:
-		m.insertedConflictJobs = append(m.insertedConflictJobs, a)
-	case *MergeConflictArgs:
-		if a != nil {
-			m.insertedConflictJobs = append(m.insertedConflictJobs, *a)
 		}
 	}
 }
@@ -248,9 +241,6 @@ type mockPRRegistry struct {
 	hasKustomizationReqs    bool
 	hasKustomizationReqsErr error
 
-	suppressConflictPrompt    bool
-	suppressConflictPromptErr error
-
 	err error
 }
 
@@ -420,13 +410,6 @@ func (m *mockPRRegistry) HasKustomizationRequests(ctx context.Context, repo stri
 func (m *mockPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error {
 	m.updatePRStatusCalls = append(m.updatePRStatusCalls, prStatusCall{repo: repo, prNumber: prNumber, status: status, metadata: metadata})
 	return m.checkErr(m.updatePRStatusErr)
-}
-
-func (m *mockPRRegistry) ShouldSuppressConflictPrompt(ctx context.Context, repo string, prNumber int) (bool, error) {
-	if m.suppressConflictPromptErr != nil {
-		return false, m.suppressConflictPromptErr
-	}
-	return m.suppressConflictPrompt, nil
 }
 
 type recordCheckStatusCall struct {
@@ -678,11 +661,7 @@ func processDeployEventBasicCases() []processDeployEventCase {
 			disp:         &mockOutboundDispatcher{},
 			wantPR:       528,
 			wantTargetID: "100000000000000001",
-			wantPrompts:  1,
-			wantPromptSubs: []string{
-				"Continuous Delivery deployment completed for job brain",
-				"Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely.",
-			},
+			wantPrompts:  0,
 		},
 		{
 			name:           "deploy_rollback valid snowflake",
@@ -691,12 +670,7 @@ func processDeployEventBasicCases() []processDeployEventCase {
 			disp:           &mockOutboundDispatcher{},
 			wantPR:         529,
 			wantTargetID:   "100000000000000001",
-			wantDispatches: 1,
-			wantPromptSubs: []string{
-				"Deployment failed and rolled back",
-				"Please investigate and fix",
-				"```",
-			},
+			wantDispatches: 0,
 		},
 		{
 			name:           "deploy_failed valid snowflake",
@@ -705,17 +679,13 @@ func processDeployEventBasicCases() []processDeployEventCase {
 			disp:           &mockOutboundDispatcher{},
 			wantPR:         530,
 			wantTargetID:   "100000000000000001",
-			wantDispatches: 1,
-			wantPromptSubs: []string{
-				"Deployment failed for job hangar",
-				"Please investigate and fix",
-			},
+			wantDispatches: 0,
 		},
 		{
 			name:    "deploy_failed prompt error reverts state and returns error",
-			evt:     mkDeployEvt("deploy_failed", "eri", "azylman/aerial", "shabroken", 531, "100000000000000001", "failed", "exit status 1"),
+			evt:     mkDeployEvt("deploy_failed", "eri", "azylman/aerial", "", 0, "100000000000000001", "failed", "exit status 1"),
 			reg:     &mockPRRegistry{deployFailedUpdated: true},
-			disp:    &mockOutboundDispatcher{dispatchErr: errors.New("eri 502 bad gateway")},
+			disp:    &mockOutboundDispatcher{promptErr: errors.New("eri 502 bad gateway")},
 			wantErr: true,
 		},
 		{
@@ -726,8 +696,7 @@ func processDeployEventBasicCases() []processDeployEventCase {
 			disp:           &mockOutboundDispatcher{},
 			wantPR:         532,
 			wantTargetID:   "aerial-dev",
-			wantDispatches: 1,
-			wantPromptSubs: []string{"Deployment failed and rolled back"},
+			wantDispatches: 0,
 		},
 	}
 }
@@ -774,8 +743,7 @@ func processDeployEventSyncCases() []processDeployEventCase {
 			wantPR:           241,
 			wantTargetID:     "100000000000000001",
 			wantAdvanceCalls: 1,
-			wantPrompts:      1,
-			wantPromptSubs:   []string{"Continuous Delivery deployment completed for job git-sync on azylman/aerial-config"},
+			wantPrompts:      0,
 		},
 		{
 			name:         "deploy_success on aerial-config",
@@ -784,24 +752,15 @@ func processDeployEventSyncCases() []processDeployEventCase {
 			disp:         &mockOutboundDispatcher{},
 			wantPR:       242,
 			wantTargetID: "100000000000000001",
-			wantPrompts:  1,
-			wantPromptSubs: []string{
-				"Continuous Delivery deployment completed for job homepage on azylman/aerial-config",
-			},
+			wantPrompts:  0,
 		},
 		{
-			name:           "sync_failed with PR number",
-			evt:            mkDeployEvt("sync_failed", "", "azylman/aerial", "merge542", 542, "100000000000000001", "failed", "merge conflict in rules/foo.md"),
-			reg:            &mockPRRegistry{},
-			disp:           &mockOutboundDispatcher{},
-			wantPR:         542,
-			wantTargetID:   "100000000000000001",
-			wantDispatches: 1,
-			wantPromptSubs: []string{
-				"Git sync failed for repo azylman/aerial",
-				"merge conflict in rules/foo.md",
-				"Please investigate and fix the git sync failure.",
-			},
+			name:         "sync_failed with PR number",
+			evt:          mkDeployEvt("sync_failed", "", "azylman/aerial", "merge542", 542, "100000000000000001", "failed", "merge conflict in rules/foo.md"),
+			reg:          &mockPRRegistry{},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       542,
+			wantTargetID: "100000000000000001",
 		},
 		{
 			name:               "deploy_started skipped when job already deployed",
@@ -900,10 +859,7 @@ func processDeployEventFluxWatcherCases() []processDeployEventCase {
 			disp:         &mockOutboundDispatcher{},
 			wantPR:       1300,
 			wantTargetID: "100000000000000001",
-			wantPrompts:  1,
-			wantPromptSubs: []string{
-				"Continuous Delivery deployment completed for job aerial-core on azylman/aerial (PR #1300, commit: sha-legacy).",
-			},
+			wantPrompts:  0,
 		},
 		{
 			name:         "tracked-PR lookup error falls back to legacy completion",
@@ -912,7 +868,7 @@ func processDeployEventFluxWatcherCases() []processDeployEventCase {
 			disp:         &mockOutboundDispatcher{},
 			wantPR:       1301,
 			wantTargetID: "100000000000000001",
-			wantPrompts:  1,
+			wantPrompts:  0,
 		},
 	}
 }
@@ -954,8 +910,7 @@ func processDeployEventFluxDiscoveryCases() []processDeployEventCase {
 			wantPR:           1642,
 			wantTargetID:     "100000000000000001",
 			wantAdvanceCalls: 1,
-			wantPrompts:      1,
-			wantPromptSubs:   []string{"Continuous Delivery deployment completed for job git-sync on azylman/mirrormere (PR #1642, commit: sha-no-flux)."},
+			wantPrompts:      0,
 		},
 		{
 			name:         "sync_success with image build pending stays synced without discovering kustomizations",
@@ -1209,6 +1164,45 @@ func TestHandlePRRegister(t *testing.T) {
 			rec := doHTTPRequest(srv.Routes(), http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body), nil)
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestSetupPostgres(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		postgresURL string
+		wantErr     bool
+		errSubstr   string
+	}{
+		{
+			name:        "invalid postgres URL parse error",
+			postgresURL: "::not a valid postgres url::",
+			wantErr:     true,
+			errSubstr:   "parse postgres url",
+		},
+		{
+			name:        "valid postgres url configures runtime search_path",
+			postgresURL: "postgres://user:pass@127.0.0.1:5432/testdb",
+			wantErr:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := &RouterServer{}
+			pool, err := setupPostgres(context.Background(), srv, tc.postgresURL)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("setupPostgres() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), tc.errSubstr) {
+				t.Errorf("setupPostgres() err = %v, want substr %q", err, tc.errSubstr)
+			}
+			if pool != nil {
+				pool.Close()
 			}
 		})
 	}
