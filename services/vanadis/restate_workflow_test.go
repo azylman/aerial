@@ -297,6 +297,22 @@ func TestWorkflowExecutionHelpers(t *testing.T) {
 	launched, err = executeLaunchChunk(ctx, srv, "b-wf", chunks[0])
 	require.NoError(t, err)
 	assert.False(t, launched)
+
+	// executeCompleteWorkflowBuild completes build and dispatches completed build wake with completed chunk count
+	var wakePromptSent string
+	tsWake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		wakePromptSent = req["prompt"]
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer tsWake.Close()
+
+	srv.cfg = Config{BrainURL: tsWake.URL}
+	srv.httpClient = tsWake.Client()
+	require.NoError(t, executeCompleteWorkflowBuild(ctx, srv, "b-wf"))
+	assert.Contains(t, wakePromptSent, "2 chunks completed")
 }
 
 func TestRestateIngressClientHelpers(t *testing.T) {
