@@ -441,7 +441,7 @@ type widgetMockMsgWithErrors struct {
 }
 
 func (m *widgetMockMsgWithErrors) Data() []byte        { return m.payload }
-func (m *widgetMockMsgWithErrors) Subject() string     { return "aerial.coalesced.vanadis_widget.test" }
+func (m *widgetMockMsgWithErrors) Subject() string     { return "aerial.coalesced.widget_sync.build.test" }
 func (m *widgetMockMsgWithErrors) Header() nats.Header { return nil }
 func (m *widgetMockMsgWithErrors) NumDelivered() uint64 {
 	if m.delivered > 0 {

@@ -492,6 +492,7 @@ func TestSubjectHelpers(t *testing.T) {
 		{"coven extract empty", SubjectCovenExtractCoalesced("   "), "aerial.coalesced.coven_extract.unknown"},
 		{"coven extract sanitize wildcards", SubjectCovenExtractCoalesced("thread*>1"), "aerial.coalesced.coven_extract.thread-1"},
 		{"build widget sync normal", SubjectBuildWidgetSyncCoalesced("build-123"), "aerial.coalesced.widget_sync.build.build-123"},
+		{"build widget sync matches wildcard root", SubjectBuildWidgetSyncWildcard, "aerial.coalesced.widget_sync.build.*"},
 		{"build widget sync empty", SubjectBuildWidgetSyncCoalesced(""), "aerial.coalesced.widget_sync.build.unknown"},
 		{"pr widget sync with slash", SubjectPRWidgetSyncCoalesced("azylman/aerial", 123), "aerial.coalesced.widget_sync.pr.azylman.aerial.123"},
 		{"pr widget sync empty repo", SubjectPRWidgetSyncCoalesced("  ", 456), "aerial.coalesced.widget_sync.pr.unknown.456"},

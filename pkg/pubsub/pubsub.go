@@ -35,6 +35,8 @@ const (
 	SubjectAerialTurnCompleted        = "aerial.turn.completed"
 	SubjectAerialTurnTranscriptSynced = "aerial.turn.transcript_synced"
 	SubjectCovenExtractPrefix         = "aerial.coalesced.coven_extract."
+	SubjectBuildWidgetSyncPrefix      = "aerial.coalesced.widget_sync.build."
+	SubjectBuildWidgetSyncWildcard    = SubjectBuildWidgetSyncPrefix + "*"
 	SubjectProsperaReportJob          = "aerial.jobs.prospera.report"
 	SubjectProsperaVoicemailJob       = "aerial.jobs.prospera.voicemail"
 	SubjectProsperaSMSJob             = "aerial.jobs.prospera.sms"
@@ -248,7 +250,7 @@ func SubjectBuildWidgetSyncCoalesced(buildID string) string {
 	if t == "" {
 		t = "unknown"
 	}
-	return "aerial.coalesced.widget_sync.build." + t
+	return SubjectBuildWidgetSyncPrefix + t
 }
 
 // SubjectPRWidgetSyncCoalesced returns the coalesced subject for PR widget sync.
