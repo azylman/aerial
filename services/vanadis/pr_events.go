@@ -300,11 +300,8 @@ func (s *VanadisServer) ProcessPRLifecycleEvent(ctx context.Context, ev pubsub.P
 	case "deploy_success":
 		return s.handlePRDeploySuccess(ctx, chunk, build)
 	case "sync_success":
-		if chunk.Mode == "action" {
-			s.syncBuildWidget(ctx, build.ID, "")
-			return nil
-		}
-		return s.handlePRDeploySuccess(ctx, chunk, build)
+		s.syncBuildWidget(ctx, build.ID, "")
+		return nil
 	case "closed_unmerged":
 		return s.handlePRClosedUnmerged(ctx, chunk)
 	default:
@@ -535,6 +532,27 @@ func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *Vanadi
 		if err := s.resolveRestateAwakeable(ctx, chunk.DeployAwakeableID, "deploy_success"); err != nil {
 			log.Printf("[vanadis] warning resolving deploy awakeable %s: %v", chunk.DeployAwakeableID, err)
 		}
+		s.syncBuildWidget(ctx, build.ID, "")
+		return nil
+	}
+
+	chunkStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
+	buildStatus := strings.ToLower(strings.TrimSpace(build.Status))
+	if chunkStatus == "failed" || chunkStatus == "cancelled" || buildStatus == "failed" || buildStatus == "cancelled" {
+		log.Printf("[vanadis] chunk %s or build %s is in %s/%s; skipping deploy completion", chunk.ID, build.ID, chunk.Status, build.Status)
+		s.syncBuildWidget(ctx, build.ID, "")
+		return nil
+	}
+
+	if chunkStatus != "completed" {
+		if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
+			return fmt.Errorf("update chunk %s to completed on deploy_success: %w", chunk.ID, err)
+		}
+		RecordChunkTotal("completed")
+		s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunk.ID}, "")
+	}
+	if err := s.reconcileBuild(ctx, build.ID, "deploy_success"); err != nil {
+		return fmt.Errorf("reconcile build %s on deploy_success: %w", build.ID, err)
 	}
 	s.syncBuildWidget(ctx, build.ID, "")
 	return nil

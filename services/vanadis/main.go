@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -123,6 +124,7 @@ func LoadConfigFromEnv() Config { return LoadConfig(os.Getenv("CONFIG_PATH")) }
 type ExecuteChunkArgs struct {
 	BuildID    string `json:"build_id"`
 	ChunkIndex int    `json:"chunk_index"`
+	ChunkID    string `json:"chunk_id,omitempty"`
 }
 
 func capChunkEffort(effort string) string {
@@ -248,6 +250,7 @@ type VanadisStore interface {
 	GetBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error)
 	ListBuilds(ctx context.Context, limit int) ([]VanadisBuildEntry, error)
 	UpdateChunkStatus(ctx context.Context, chunkID, status string) error
+	ReserveChunkForLaunch(ctx context.Context, chunkID string) error
 	SetChunkAwakeables(ctx context.Context, chunkID, mergeAwakeableID, deployAwakeableID string) error
 	UpdateBuildStatus(ctx context.Context, buildID, status string) error
 	UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
@@ -670,6 +673,9 @@ type VanadisServer struct {
 	store      VanadisStore
 	bus        pubsub.Bus
 	queueStats consumerStatsQuerier
+
+	launchMu      sync.Mutex
+	localLaunched map[string]map[string]bool
 }
 
 // NewVanadisServer constructs a new VanadisServer instance.
@@ -780,6 +786,9 @@ func (s *VanadisServer) enqueueExecuteChunk(ctx context.Context, args ExecuteChu
 		return errors.New("event bus not configured")
 	}
 	msgID := fmt.Sprintf("vanadis:chunk:%s:%d", args.BuildID, args.ChunkIndex)
+	if strings.TrimSpace(args.ChunkID) != "" {
+		msgID = fmt.Sprintf("vanadis:chunk:%s:%s", args.BuildID, strings.TrimSpace(args.ChunkID))
+	}
 	return s.bus.Publish(ctx, "aerial.jobs.vanadis.chunk", msgID, args)
 }
 
@@ -807,7 +816,7 @@ func (s *VanadisServer) HandleExecuteChunkJob(ctx context.Context, msg pubsub.Me
 		return nil
 	}
 	isFinalAttempt := msg.NumDelivered() >= 3
-	err := s.ProcessExecuteChunk(ctx, args.BuildID, args.ChunkIndex, isFinalAttempt)
+	err := s.ProcessExecuteChunk(ctx, args.BuildID, args.ChunkIndex, isFinalAttempt, args.ChunkID)
 	if err != nil {
 		settleFailedChunk(msg, isFinalAttempt)
 	}
@@ -844,7 +853,7 @@ func (s *VanadisServer) handleFinalDispatchFailure(ctx context.Context, build *V
 }
 
 // ProcessExecuteChunk loads build state, formats the chunk prompt, and dispatches it to Brain.
-func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string, chunkIndex int, isFinalAttempt bool) error {
+func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string, chunkIndex int, isFinalAttempt bool, targetChunkID ...string) error {
 	if s == nil || s.store == nil {
 		return errors.New("vanadis store not configured")
 	}
@@ -860,20 +869,21 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 		log.Printf("[vanadis] build %s has status %q (not running), skipping chunk %d", buildID, build.Status, chunkIndex)
 		return nil
 	}
-	activeIdx := -1
-	for i := range chunks {
-		if chunks[i].ChunkIndex == chunkIndex {
-			activeIdx = i
-			break
-		}
+	var desiredID string
+	if len(targetChunkID) > 0 {
+		desiredID = strings.TrimSpace(targetChunkID[0])
 	}
-	if activeIdx < 0 {
-		return fmt.Errorf("chunk index %d not found in build %s", chunkIndex, buildID)
+	activeIdx, err := findTargetChunkIndex(chunks, chunkIndex, desiredID, buildID)
+	if err != nil {
+		return err
 	}
 	chunk := chunks[activeIdx]
 	if chunk.Status == "pr_opened" || isChunkMergedOrDoneStatus(chunk.Status) {
 		log.Printf("[vanadis] chunk %s (index %d) already in status %q, skipping", chunk.ID, chunkIndex, chunk.Status)
 		return nil
+	}
+	if err := checkChunkDependenciesReady(chunk, chunks); err != nil {
+		return err
 	}
 	if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "running"); err != nil {
 		return fmt.Errorf("update chunk %s status to running: %w", chunk.ID, err)

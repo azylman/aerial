@@ -166,3 +166,71 @@ func TestDispatchChunkTurn_FormatPromptError(t *testing.T) {
 		t.Fatal("expected error on empty chunks")
 	}
 }
+
+func TestCheckChunkDependenciesReady(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		chunk     VanadisChunk
+		allChunks []VanadisChunk
+		wantErr   bool
+	}{
+		{
+			name:      "pr mode dependency completed",
+			chunk:     VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{ID: "c1", Mode: "pr", Status: "completed"}},
+			wantErr:   false,
+		},
+		{
+			name:      "pr mode dependency merged",
+			chunk:     VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{ID: "c1", Mode: "pr", Status: "merged"}},
+			wantErr:   false,
+		},
+		{
+			name:      "pr mode dependency deploying",
+			chunk:     VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{ID: "c1", Mode: "pr", Status: "deploying"}},
+			wantErr:   false,
+		},
+		{
+			name:      "pr mode dependency deploy_failed",
+			chunk:     VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{ID: "c1", Mode: "pr", Status: "deploy_failed"}},
+			wantErr:   false,
+		},
+		{
+			name:      "pr mode dependency not ready",
+			chunk:     VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{ID: "c1", Mode: "pr", Status: "coding"}},
+			wantErr:   true,
+		},
+		{
+			name:      "action mode dependency merged is not enough",
+			chunk:     VanadisChunk{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{ID: "c1", Mode: "pr", Status: "merged"}},
+			wantErr:   true,
+		},
+		{
+			name:      "action mode dependency completed succeeds",
+			chunk:     VanadisChunk{ID: "c2", Mode: "action", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{ID: "c1", Mode: "action", Status: "completed"}},
+			wantErr:   false,
+		},
+		{
+			name:      "missing dependency",
+			chunk:     VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c_missing"}},
+			allChunks: []VanadisChunk{{ID: "c1", Mode: "pr", Status: "completed"}},
+			wantErr:   true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkChunkDependenciesReady(tc.chunk, tc.allChunks)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("checkChunkDependenciesReady() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}

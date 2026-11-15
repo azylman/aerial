@@ -373,3 +373,43 @@ func TestResolveCIFailureDetails(t *testing.T) {
 		})
 	}
 }
+
+func TestCleanRepoNameAndTruncate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		repo     string
+		wantRepo string
+		str      string
+		maxRunes int
+		wantStr  string
+	}{
+		{
+			name:     "slash repo",
+			repo:     "azylman/aerial",
+			wantRepo: "aerial",
+			str:      "short",
+			maxRunes: 10,
+			wantStr:  "short",
+		},
+		{
+			name:     "no slash repo",
+			repo:     "aerial",
+			wantRepo: "aerial",
+			str:      "long string that will truncate",
+			maxRunes: 4,
+			wantStr:  "long... (truncated)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := cleanRepoName(tc.repo); got != tc.wantRepo {
+				t.Fatalf("cleanRepoName(%q) = %q, want %q", tc.repo, got, tc.wantRepo)
+			}
+			if got := truncatePromptRunes(tc.str, tc.maxRunes); got != tc.wantStr {
+				t.Fatalf("truncatePromptRunes(%q, %d) = %q, want %q", tc.str, tc.maxRunes, got, tc.wantStr)
+			}
+		})
+	}
+}

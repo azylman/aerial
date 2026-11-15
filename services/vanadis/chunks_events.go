@@ -25,18 +25,23 @@ func (s *VanadisServer) handleCompletedDispatchOutcome(ctx context.Context, ev p
 			log.Printf("[vanadis] stalled chunk check for %s failed: %v", ev.VanadisChunkID, err)
 		}
 	}
-	if res == nil || !res.Advanced {
+	if res == nil || res.ChunkMode != "action" {
 		return nil
 	}
-	RecordChunkTotal("completed")
-	s.syncBuildWidget(ctx, res.BuildID, "")
-	s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{ev.VanadisChunkID}, "")
-	if res.BuildCompleted {
-		RecordBuildTotal("completed")
-		s.publishExternalEvent(ctx, "vanadis_build", "completed", []string{res.BuildID}, "")
-		s.dispatchCompletedBuildWake(ctx, res)
+	if res.Advanced {
+		RecordChunkTotal("completed")
+		s.syncBuildWidget(ctx, res.BuildID, "")
+		s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{ev.VanadisChunkID}, "")
+		if res.BuildCompleted {
+			RecordBuildTotal("completed")
+			s.publishExternalEvent(ctx, "vanadis_build", "completed", []string{res.BuildID}, "")
+			s.dispatchCompletedBuildWake(ctx, res)
+		}
 	}
-	s.notifyRestateActionChunkCompleted(ctx, ev.VanadisChunkID)
+	if err := s.notifyRestateActionChunkCompleted(ctx, ev.VanadisChunkID); err != nil {
+		log.Printf("[vanadis] notify restate action chunk %s completed error: %v", ev.VanadisChunkID, err)
+		return err
+	}
 	return nil
 }
 
