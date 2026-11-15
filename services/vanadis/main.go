@@ -537,14 +537,14 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]Van
 	var builds []VanadisBuild
 	var buildIDs []string
 	for rows.Next() {
-		b, err := scanBuild(rows)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan vanadis build: %w", err)
+		b, scanBuildErr := scanBuild(rows)
+		if scanBuildErr != nil {
+			return nil, fmt.Errorf("failed to scan vanadis build: %w", scanBuildErr)
 		}
 		builds = append(builds, b)
 		buildIDs = append(buildIDs, b.ID)
 	}
-	if err := rows.Err(); err != nil {
+	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating vanadis builds: %w", err)
 	}
 	if len(builds) == 0 {
@@ -1069,7 +1069,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req CreateBuildRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err = json.Unmarshal(body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json payload")
 		return
 	}
@@ -1396,7 +1396,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 
 	restateCtx, restateCancel := context.WithCancel(ctx)
 	defer restateCancel()
-	if _, err := startRestateServer(restateCtx, server); err != nil && !errors.Is(err, ErrRestateDisabled) {
+	if _, err = startRestateServer(restateCtx, server); err != nil && !errors.Is(err, ErrRestateDisabled) {
 		log.Printf("[vanadis] warning: failed starting restate server: %v", err)
 	}
 

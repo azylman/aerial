@@ -26,7 +26,7 @@ func assertSessionSummarySyncTransitions(ctx context.Context, t *testing.T, stor
 	}
 
 	updateSummary := SessionSummary{SessionID: "sess-1", Summary: "Updated", LastIndexedStep: 25, SummaryStepWatermark: 25, IsSettled: true}
-	if err := store.UpsertSessionSummary(ctx, updateSummary); err != nil {
+	if err = store.UpsertSessionSummary(ctx, updateSummary); err != nil {
 		t.Fatalf("UpsertSessionSummary update failed: %v", err)
 	}
 	syncStates, err = store.GetSessionSyncStates(ctx)
@@ -34,7 +34,7 @@ func assertSessionSummarySyncTransitions(ctx context.Context, t *testing.T, stor
 		t.Fatalf("unexpected state after update: %+v, err: %v", syncStates["sess-1"], err)
 	}
 
-	if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-1", LastIndexedStep: -2}); err != nil {
+	if err = store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-1", LastIndexedStep: -2}); err != nil {
 		t.Fatalf("UpsertSessionSummary reset failed: %v", err)
 	}
 	syncStates, err = store.GetSessionSyncStates(ctx)

@@ -256,8 +256,8 @@ func (p *GitHubSkillPublisher) resolveMainCommitAndTree(ctx context.Context) (ma
 		return "", "", fmt.Errorf("github: failed to get heads/main: %w", err)
 	}
 	var mainRef ghRef
-	if err := json.Unmarshal(mainRefData, &mainRef); err != nil {
-		return "", "", fmt.Errorf("github: failed to parse heads/main: %w", err)
+	if unmarshalErr := json.Unmarshal(mainRefData, &mainRef); unmarshalErr != nil {
+		return "", "", fmt.Errorf("github: failed to parse heads/main: %w", unmarshalErr)
 	}
 	mainCommitSHA = strings.TrimSpace(mainRef.Object.SHA)
 	if mainCommitSHA == "" {
@@ -300,8 +300,8 @@ func (p *GitHubSkillPublisher) createSkillCommitAndBranch(ctx context.Context, m
 		return "", "", fmt.Errorf("github: failed to create tree: %w", err)
 	}
 	var treeResp ghCreateTreeResponse
-	if err := json.Unmarshal(treeData, &treeResp); err != nil {
-		return "", "", fmt.Errorf("github: failed to parse created tree: %w", err)
+	if unmarshalErr := json.Unmarshal(treeData, &treeResp); unmarshalErr != nil {
+		return "", "", fmt.Errorf("github: failed to parse created tree: %w", unmarshalErr)
 	}
 	newTreeSHA := strings.TrimSpace(treeResp.SHA)
 	if newTreeSHA == "" {
@@ -747,7 +747,7 @@ func compileSkillBatch(ctx context.Context, store Store, llmFunc LLMClientFunc, 
 
 	action := strings.ToUpper(strings.TrimSpace(designerResp.Action))
 	if action == actionNoop {
-		if err := store.MarkProceduralCandidatesSkipped(ctx, batchIDs); err != nil {
+		if err = store.MarkProceduralCandidatesSkipped(ctx, batchIDs); err != nil {
 			log.Printf("[coven-skills] warning marking NOOP candidates skipped: %v", err)
 		}
 		return

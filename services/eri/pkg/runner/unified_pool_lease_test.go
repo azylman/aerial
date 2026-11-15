@@ -457,7 +457,7 @@ func TestUnifiedProcessPool_PrewarmAndLeaseResilience(t *testing.T) {
 
 	pool.MarkDirty()
 	pool.WaitBackground()
-	if err := pool.prewarmTarget(ctx, "discord:worker-0"); err != nil || dBefore.State() == StateClosed {
+	if err = pool.prewarmTarget(ctx, "discord:worker-0"); err != nil || dBefore.State() == StateClosed {
 		t.Fatalf("MarkDirty or prewarmTarget while locked failed: %v", err)
 	}
 

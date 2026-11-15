@@ -113,8 +113,8 @@ const messageSelectCols = "id, COALESCE(row_id, 0) AS row_id, thread_id, guild_i
 // InsertMessage stores a new message in the database.
 func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 	defer recordTranscriptQuery("insert_message", time.Now(), &err)
-	if err := s.checkDB(); err != nil {
-		return err
+	if checkDBErr := s.checkDB(); checkDBErr != nil {
+		return checkDBErr
 	}
 	if msg.ID == "" {
 		return fmt.Errorf("message id cannot be empty")
@@ -253,8 +253,8 @@ func (s *SQLStore) ResetMessageToPendingWithRestart(ctx context.Context, id, rea
 
 func (s *SQLStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) (results []Message, err error) {
 	defer recordTranscriptQuery("get_pending_messages", time.Now(), &err)
-	if err := s.checkDB(); err != nil {
-		return nil, err
+	if checkDBErr := s.checkDB(); checkDBErr != nil {
+		return nil, checkDBErr
 	}
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()

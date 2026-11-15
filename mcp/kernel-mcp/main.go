@@ -288,13 +288,13 @@ func (s *Server) toolBrowserClick(ctx context.Context, args ClickArgs) (string, 
 	}
 
 	var cr ClickResult
-	if err := json.Unmarshal(raw, &cr); err != nil || !cr.Found {
+	if err = json.Unmarshal(raw, &cr); err != nil || !cr.Found {
 		return "Element not found for selector: " + args.Selector, true
 	}
 
 	if cr.HasRect {
 		jx, jy := JitterCoord(cr.X, cr.Y, cr.Width, cr.Height)
-		if err := s.client.DispatchTrustedClick(ctx, jx, jy); err != nil {
+		if err = s.client.DispatchTrustedClick(ctx, jx, jy); err != nil {
 			return fmt.Sprintf("Dispatch trusted click failed: %v", err), true
 		}
 	}
@@ -327,23 +327,23 @@ func (s *Server) toolBrowserType(ctx context.Context, args TypeArgs) (string, bo
 	}
 
 	var fr FocusResult
-	if err := json.Unmarshal(raw, &fr); err != nil || !fr.Found {
+	if err = json.Unmarshal(raw, &fr); err != nil || !fr.Found {
 		return "Element not found for selector: " + args.Selector, true
 	}
 
 	if fr.HasRect {
-		if err := s.client.DispatchTrustedClick(ctx, fr.X, fr.Y); err != nil {
+		if err = s.client.DispatchTrustedClick(ctx, fr.X, fr.Y); err != nil {
 			// best effort trusted click
 			_ = err
 		}
 	}
 
-	if err := s.client.InsertText(ctx, args.Text); err != nil {
+	if err = s.client.InsertText(ctx, args.Text); err != nil {
 		return fmt.Sprintf("Input.insertText failed: %v", err), true
 	}
 
 	dispatchScript := BuildDispatchInputEventsScript(args.Selector)
-	if _, err := s.client.EvaluateJS(ctx, dispatchScript, true, true); err != nil {
+	if _, err = s.client.EvaluateJS(ctx, dispatchScript, true, true); err != nil {
 		// best effort event dispatch
 		_ = err
 	}
@@ -369,7 +369,7 @@ func (s *Server) toolBrowserScreenshot(ctx context.Context, args ScreenshotArgs)
 	if err != nil {
 		return textResult(fmt.Sprintf("Screenshot capture failed: %v", err), true)
 	}
-	if img, err := base64.StdEncoding.DecodeString(data); err == nil && len(img) > 0 {
+	if img, decodeStringErr := base64.StdEncoding.DecodeString(data); decodeStringErr == nil && len(img) > 0 {
 		return &mcp.CallToolResult{Content: []mcp.Content{
 			&mcp.ImageContent{MIMEType: "image/" + format, Data: img},
 			&mcp.TextContent{Text: fmt.Sprintf("Screenshot captured (%s)", format)},
@@ -447,13 +447,13 @@ func (s *Server) toolAmazonAddToCart(ctx context.Context, args AmazonAddToCartAr
 		Height       int    `json:"height"`
 		ProductTitle string `json:"productTitle"`
 	}
-	if err := json.Unmarshal(raw, &btnRes); err != nil || !btnRes.Found {
+	if err = json.Unmarshal(raw, &btnRes); err != nil || !btnRes.Found {
 		return "Add to cart button not found for ASIN: " + asin, true
 	}
 
 	if btnRes.HasRect {
 		jx, jy := JitterCoord(btnRes.X, btnRes.Y, btnRes.Width, btnRes.Height)
-		if err := s.client.DispatchTrustedClick(ctx, jx, jy); err != nil {
+		if err = s.client.DispatchTrustedClick(ctx, jx, jy); err != nil {
 			return fmt.Sprintf("Click add to cart failed: %v", err), true
 		}
 	}

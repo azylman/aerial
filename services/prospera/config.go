@@ -201,7 +201,7 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 	}
 
 	var ycfg ProsperaYAMLConfig
-	if err := yaml.Unmarshal(data, &ycfg); err != nil {
+	if err = yaml.Unmarshal(data, &ycfg); err != nil {
 		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
 	}
 
@@ -210,7 +210,7 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 		eriURL = strings.TrimSpace(getenv("ERI_URL"))
 	}
 
-	if err := validateProsperaYAML(ycfg, cleanPath, eriURL); err != nil {
+	if err = validateProsperaYAML(ycfg, cleanPath, eriURL); err != nil {
 		return nil, err
 	}
 

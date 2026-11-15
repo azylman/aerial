@@ -386,7 +386,7 @@ func TestPostgresStore_GetBuild_And_ListBuilds_MockDB(t *testing.T) {
 	}
 
 	// ListBuilds nil store
-	if _, err := nilStore.ListBuilds(ctx, 10); err == nil {
+	if _, err = nilStore.ListBuilds(ctx, 10); err == nil {
 		t.Fatal("expected error on nil store ListBuilds")
 	}
 
@@ -396,7 +396,7 @@ func TestPostgresStore_GetBuild_And_ListBuilds_MockDB(t *testing.T) {
 			return nil, errors.New("query builds error")
 		},
 	})
-	if _, err := sListErr.ListBuilds(ctx, 0); err == nil {
+	if _, err = sListErr.ListBuilds(ctx, 0); err == nil {
 		t.Fatal("expected error on query builds error")
 	}
 
@@ -420,7 +420,7 @@ func TestPostgresStore_GetBuild_And_ListBuilds_MockDB(t *testing.T) {
 			return nil, errors.New("query chunks error")
 		},
 	})
-	if _, err := sListChunksErr.ListBuilds(ctx, 50); err == nil {
+	if _, err = sListChunksErr.ListBuilds(ctx, 50); err == nil {
 		t.Fatal("expected error on chunks query error in ListBuilds")
 	}
 

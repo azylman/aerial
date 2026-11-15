@@ -277,11 +277,11 @@ func TestStreamingDaemon_HandshakeFailures(t *testing.T) {
 			return nil, nil, nil, nil, errors.New("spawn binary not found")
 		},
 	}
-	if _, err := StartStreamingDaemon(context.Background(), cfgForSession("00000000-0000-0000-0000-000000000001"), mock); err == nil || !strings.Contains(err.Error(), "failed spawning daemon") {
+	if _, err = StartStreamingDaemon(context.Background(), cfgForSession("00000000-0000-0000-0000-000000000001"), mock); err == nil || !strings.Contains(err.Error(), "failed spawning daemon") {
 		t.Fatalf("expected spawn error, got: %v", err)
 	}
 
-	if _, err := StartStreamingDaemon(context.Background(), DaemonConfig{AgyBin: "nonexistent-executable-binary-12345", SessionID: "00000000-0000-0000-0000-000000000001"}, nil); err == nil || !strings.Contains(err.Error(), "failed spawning daemon") {
+	if _, err = StartStreamingDaemon(context.Background(), DaemonConfig{AgyBin: "nonexistent-executable-binary-12345", SessionID: "00000000-0000-0000-0000-000000000001"}, nil); err == nil || !strings.Contains(err.Error(), "failed spawning daemon") {
 		t.Fatalf("expected spawn error with nil spawner, got: %v", err)
 	}
 
@@ -1465,7 +1465,7 @@ func TestStreamingDaemon_TurnEnvFile(t *testing.T) {
 		Sink:      sink2,
 		CreatedAt: time.Now(),
 	}
-	if err := h.daemon.Send("turn 2", turn2); err != nil {
+	if err = h.daemon.Send("turn 2", turn2); err != nil {
 		t.Fatalf("send turn 2 failed: %v", err)
 	}
 

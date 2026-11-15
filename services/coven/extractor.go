@@ -528,7 +528,7 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 	transcript := formatExtractableTurns(turns)
 	if strings.TrimSpace(transcript) == "" {
 		log.Printf("[Memory] Empty extractable turns for thread %s, marking watermark.", threadID)
-		if err := store.UpdateConversationFactWatermark(ctx, threadID, maxRowID); err != nil {
+		if err = store.UpdateConversationFactWatermark(ctx, threadID, maxRowID); err != nil {
 			log.Printf("[Memory] Warning updating conversation fact watermark for empty transcript (thread=%s): %v", threadID, err)
 		}
 		return nil
@@ -680,7 +680,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 
 	// Tier 1: len(neighbors) == 0 (maxSim < 0.60)
 	if len(neighbors) == 0 {
-		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
+		if _, err = store.InsertFact(ctx, item.FactText, emb); err != nil {
 			log.Printf("[Memory] Error inserting Tier 1 fact: %v", err)
 			return false
 		}
@@ -690,7 +690,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 
 	// Tier 2: neighbors[0].Score > 0.88
 	if neighbors[0].Score > 0.88 {
-		if err := store.ReinforceFact(ctx, neighbors[0].Fact.ID); err != nil {
+		if err = store.ReinforceFact(ctx, neighbors[0].Fact.ID); err != nil {
 			log.Printf("[Memory] Error reinforcing Tier 2 fact id=%d: %v", neighbors[0].Fact.ID, err)
 			return false
 		}
@@ -700,7 +700,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 
 	// Tier 3: 0.60 <= neighbors[0].Score <= 0.88
 	if llmFunc == nil {
-		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
+		if _, err = store.InsertFact(ctx, item.FactText, emb); err != nil {
 			log.Printf("[Memory] Error inserting Tier 3 fallback fact: %v", err)
 			return false
 		}
@@ -712,7 +712,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 	resp, err := llmFunc(ctx, reconcilePrompt)
 	if err != nil {
 		log.Printf("[Memory] Tier 3 reconciliation LLM error: %v", err)
-		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
+		if _, err = store.InsertFact(ctx, item.FactText, emb); err != nil {
 			log.Printf("[Memory] Error inserting Tier 3 fallback fact on LLM error: %v", err)
 			return false
 		}

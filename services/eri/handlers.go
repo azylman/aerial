@@ -902,8 +902,8 @@ func handleTranscriptSteps(store db.TranscriptStore) http.HandlerFunc {
 		contextWindow := 2
 		contextStr := strings.TrimSpace(r.URL.Query().Get("context"))
 		if contextStr != "" {
-			c, err := strconv.Atoi(contextStr)
-			if err != nil {
+			c, atoiErr := strconv.Atoi(contextStr)
+			if atoiErr != nil {
 				writeErr(w, http.StatusBadRequest, "context parameter must be an integer")
 				return
 			}

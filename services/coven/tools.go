@@ -207,13 +207,13 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 
 	// 1. Explicit overwrite via supersedes_id
 	if args.SupersedesID > 0 {
-		err := h.store.UpdateFact(ctx, args.SupersedesID, factText, emb)
-		if err != nil {
+		updateFactErr := h.store.UpdateFact(ctx, args.SupersedesID, factText, emb)
+		if updateFactErr != nil {
 			RecordOperation("store", "error", time.Since(start).Seconds())
-			if errors.Is(err, ErrFactNotFound) {
+			if errors.Is(updateFactErr, ErrFactNotFound) {
 				return MemoryStoreOutput{}, fmt.Errorf("fact with id %d not found to supersede", args.SupersedesID)
 			}
-			return MemoryStoreOutput{}, fmt.Errorf("failed to supersede fact: %w", err)
+			return MemoryStoreOutput{}, fmt.Errorf("failed to supersede fact: %w", updateFactErr)
 		}
 		RecordFactStored("updated")
 		RecordOperation("store", "success", time.Since(start).Seconds())
@@ -229,7 +229,7 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 	dup, sim, err := h.store.FindDuplicateFact(ctx, emb, 0.85)
 	if err == nil && dup != nil {
 		log.Printf("[Memory] Reinforcing duplicate fact %d (sim=%.2f, text=%q)", dup.ID, sim, dup.FactText)
-		if err := h.store.ReinforceFact(ctx, dup.ID); err != nil {
+		if err = h.store.ReinforceFact(ctx, dup.ID); err != nil {
 			RecordOperation("store", "error", time.Since(start).Seconds())
 			return MemoryStoreOutput{}, fmt.Errorf("failed to reinforce duplicate fact: %w", err)
 		}

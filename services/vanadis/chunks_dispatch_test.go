@@ -324,7 +324,7 @@ func TestVanadisServer_MemoryBusIntegration(t *testing.T) {
 		Status:         "completed",
 		CompletedAt:    time.Now().UTC(),
 	}
-	if err := memBus.Publish(ctx, "aerial.dispatch.completed", "disp-bus-1", ev); err != nil {
+	if err = memBus.Publish(ctx, "aerial.dispatch.completed", "disp-bus-1", ev); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 

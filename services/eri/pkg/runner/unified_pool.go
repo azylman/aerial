@@ -734,7 +734,7 @@ func (p *UnifiedProcessPool) ExecuteEphemeral(ctx context.Context, targetKey, pr
 	}
 	sink := NewThrowawayTurnSink()
 	turnCtx := &TurnContext{Ctx: ctx, TurnID: uuid.New().String(), Prompt: prompt, Sink: sink, CreatedAt: time.Now()}
-	if err := daemon.Send(prompt, turnCtx); err != nil {
+	if err = daemon.Send(prompt, turnCtx); err != nil {
 		return "", fmt.Errorf("failed sending turn to ephemeral daemon %q: %w", targetKey, err)
 	}
 	res, err := sink.ResultContext(ctx)

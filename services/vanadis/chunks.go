@@ -624,7 +624,7 @@ func (s *PostgresVanadisStore) UpdateChunk(ctx context.Context, buildID, chunkRe
 		return nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", ErrBuildConflict, c.ID, c.Status)
 	}
 
-	if err := applyChunkUpdates(&c, req, normEffort); err != nil {
+	if err = applyChunkUpdates(&c, req, normEffort); err != nil {
 		return nil, err
 	}
 
@@ -771,9 +771,9 @@ func (s *PostgresVanadisStore) AppendChunks(ctx context.Context, buildID string,
 	now := time.Now().UTC()
 	appended := make([]VanadisChunk, 0, len(inputs))
 	for _, in := range inputs {
-		newChunk, err := buildAppendedChunk(buildID, in, nextIdx, prevChunkID, usedIDs, now)
-		if err != nil {
-			return nil, err
+		newChunk, buildErr := buildAppendedChunk(buildID, in, nextIdx, prevChunkID, usedIDs, now)
+		if buildErr != nil {
+			return nil, buildErr
 		}
 		appended = append(appended, newChunk)
 		prevChunkID = newChunk.ID
@@ -1078,7 +1078,7 @@ func (s *VanadisServer) handleUpdateBuild(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req UpdateBuildRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err = json.Unmarshal(body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json payload")
 		return
 	}
@@ -1121,7 +1121,7 @@ func (s *VanadisServer) handleUpdateChunk(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req UpdateChunkRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err = json.Unmarshal(body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json payload")
 		return
 	}
@@ -1141,7 +1141,7 @@ func (s *VanadisServer) handleAppendChunks(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req AppendChunksRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err = json.Unmarshal(body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json payload")
 		return
 	}

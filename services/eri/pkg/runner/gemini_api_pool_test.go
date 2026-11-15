@@ -552,7 +552,7 @@ func TestGeminiAPISession_PersistenceAndHydrationCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if err := sess.Send("First prompt", &TurnContext{TurnID: "turn-persist-1", Prompt: "First prompt", Sink: newMockTurnSink()}); err != nil {
+	if err = sess.Send("First prompt", &TurnContext{TurnID: "turn-persist-1", Prompt: "First prompt", Sink: newMockTurnSink()}); err != nil {
 		t.Fatalf("unexpected send error: %v", err)
 	}
 	transcriptFile := filepath.Join(tmpDir, "brain", "persisted-session", ".system_generated", "logs", "transcript.jsonl")
