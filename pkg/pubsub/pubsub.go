@@ -26,13 +26,22 @@ const (
 
 // Subject prefixes and well-known subjects.
 const (
-	SubjectAerialDispatchPrefix  = "aerial.dispatch."
-	SubjectAerialEventsPrefix    = "aerial.events."
-	SubjectAerialTurnPrefix      = "aerial.turn."
-	SubjectAerialPRPrefix        = "aerial.pr."
-	SubjectAerialJobsPrefix      = "aerial.jobs."
-	SubjectAerialCoalescedPrefix = "aerial.coalesced."
-	SubjectAerialTurnCompleted   = "aerial.turn.completed"
+	SubjectAerialDispatchPrefix       = "aerial.dispatch."
+	SubjectAerialEventsPrefix         = "aerial.events."
+	SubjectAerialTurnPrefix           = "aerial.turn."
+	SubjectAerialPRPrefix             = "aerial.pr."
+	SubjectAerialJobsPrefix           = "aerial.jobs."
+	SubjectAerialCoalescedPrefix      = "aerial.coalesced."
+	SubjectAerialTurnCompleted        = "aerial.turn.completed"
+	SubjectAerialTurnTranscriptSynced = "aerial.turn.transcript_synced"
+	SubjectCovenExtractPrefix         = "aerial.coalesced.coven_extract."
+	SubjectProsperaReportJob          = "aerial.jobs.prospera.report"
+	SubjectProsperaVoicemailJob       = "aerial.jobs.prospera.voicemail"
+	SubjectProsperaSMSJob             = "aerial.jobs.prospera.sms"
+	SubjectEriPromptJob               = "aerial.jobs.eri.prompt"
+	SubjectEriDispatchJob             = "aerial.jobs.eri.dispatch"
+	SubjectEriDiscordMessageJob       = "aerial.jobs.eri.discord_message"
+	SubjectHaroOneShotJob             = "aerial.jobs.haro.oneshot"
 )
 
 // Well-known headers.
@@ -107,12 +116,146 @@ type ExternalEvent struct {
 	OccurredAt    time.Time `json:"occurred_at"`
 }
 
+// TranscriptSyncedEvent represents transcript indexing completion on aerial.turn.transcript_synced.
+type TranscriptSyncedEvent struct {
+	SessionID      string    `json:"session_id"`
+	ConversationID string    `json:"conversation_id"`
+	StepsInserted  int       `json:"steps_inserted"`
+	SyncedAt       time.Time `json:"synced_at"`
+}
+
 // TurnCompletedEvent represents an agent conversation turn completion on aerial.turn.completed.
 type TurnCompletedEvent struct {
 	SessionID      string    `json:"session_id"`
 	ConversationID string    `json:"conversation_id,omitempty"`
 	Source         string    `json:"source"`
 	CompletedAt    time.Time `json:"completed_at"`
+	Status         string    `json:"status,omitempty"`
+	DurationMs     int64     `json:"duration_ms,omitempty"`
+	InputTokens    int       `json:"input_tokens,omitempty"`
+	OutputTokens   int       `json:"output_tokens,omitempty"`
+	TotalTokens    int       `json:"total_tokens,omitempty"`
+}
+
+// CovenExtractJobArgs contains arguments for coalesced Coven thread fact extraction.
+type CovenExtractJobArgs struct {
+	ThreadID  string `json:"thread_id"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// WidgetSyncJobArgs contains arguments for coalesced widget sync jobs.
+type WidgetSyncJobArgs struct {
+	BuildID  string `json:"build_id,omitempty"`
+	Banner   string `json:"banner,omitempty"`
+	Repo     string `json:"repo,omitempty"`
+	PRNumber int    `json:"pr_number,omitempty"`
+	Status   string `json:"status,omitempty"`
+}
+
+// ProsperaReportJobArgs contains arguments for post-call report generation jobs.
+type ProsperaReportJobArgs struct {
+	CallID string `json:"call_id"`
+}
+
+// ProsperaVoicemailJobArgs contains arguments for voicemail transcription and notification jobs.
+type ProsperaVoicemailJobArgs struct {
+	CallID       string `json:"call_id"`
+	RecordingSID string `json:"recording_sid,omitempty"`
+	RecordingURL string `json:"recording_url"`
+	DurationSec  int    `json:"duration_sec,omitempty"`
+}
+
+// ProsperaSMSJobArgs contains arguments for inbound SMS processing and routing jobs.
+type ProsperaSMSJobArgs struct {
+	MessageSID    string   `json:"message_sid"`
+	FromNumber    string   `json:"from_number"`
+	ToNumber      string   `json:"to_number"`
+	Body          string   `json:"body"`
+	MediaURLs     []string `json:"media_urls,omitempty"`
+	RelatedCallID string   `json:"related_call_id,omitempty"`
+}
+
+// EriPromptJobArgs contains arguments for asynchronous Eri prompt execution jobs.
+type EriPromptJobArgs struct {
+	ChannelID      string `json:"channel_id"`
+	Prompt         string `json:"prompt"`
+	Effort         string `json:"effort,omitempty"`
+	Silent         bool   `json:"silent,omitempty"`
+	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
+	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+	DispatchID     string `json:"dispatch_id,omitempty"`
+}
+
+// EriDispatchJobArgs contains arguments for asynchronous Eri dispatch execution jobs.
+type EriDispatchJobArgs struct {
+	ID             string `json:"id,omitempty"`
+	Source         string `json:"source"`
+	SessionID      string `json:"session_id,omitempty"`
+	TargetID       string `json:"target_id,omitempty"`
+	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+	Prompt         string `json:"prompt"`
+	Effort         string `json:"effort,omitempty"`
+	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
+}
+
+// EriDiscordMessageJobArgs contains arguments for asynchronous Discord message delivery jobs.
+type EriDiscordMessageJobArgs struct {
+	ChannelID string `json:"channel_id"`
+	Content   string `json:"content"`
+}
+
+// HaroOneShotJobArgs contains arguments for durable one-shot scheduled execution jobs.
+type HaroOneShotJobArgs struct {
+	ID       string    `json:"id,omitempty"`
+	ThreadID string    `json:"thread_id"`
+	Prompt   string    `json:"prompt"`
+	Effort   string    `json:"effort,omitempty"`
+	RunAt    time.Time `json:"run_at"`
+}
+
+func cleanSubjectToken(token string) string {
+	t := strings.TrimSpace(token)
+	if t == "" {
+		return "unknown"
+	}
+	t = strings.ReplaceAll(t, "*", "-")
+	t = strings.ReplaceAll(t, ">", "-")
+	t = strings.ReplaceAll(t, " ", "-")
+	for strings.Contains(t, "--") {
+		t = strings.ReplaceAll(t, "--", "-")
+	}
+	t = strings.Trim(t, ".-")
+	if t == "" {
+		return "unknown"
+	}
+	return t
+}
+
+// SubjectCovenExtractCoalesced returns the coalesced subject for a thread's fact extraction.
+func SubjectCovenExtractCoalesced(threadID string) string {
+	t := cleanSubjectToken(threadID)
+	t = strings.ReplaceAll(t, ".", "-")
+	if t == "" {
+		t = "unknown"
+	}
+	return SubjectCovenExtractPrefix + t
+}
+
+// SubjectBuildWidgetSyncCoalesced returns the coalesced subject for build widget sync.
+func SubjectBuildWidgetSyncCoalesced(buildID string) string {
+	t := cleanSubjectToken(buildID)
+	t = strings.ReplaceAll(t, ".", "-")
+	if t == "" {
+		t = "unknown"
+	}
+	return "aerial.coalesced.widget_sync.build." + t
+}
+
+// SubjectPRWidgetSyncCoalesced returns the coalesced subject for PR widget sync.
+func SubjectPRWidgetSyncCoalesced(repo string, prNumber int) string {
+	r := strings.ReplaceAll(strings.TrimSpace(repo), "/", ".")
+	r = cleanSubjectToken(r)
+	return fmt.Sprintf("aerial.coalesced.widget_sync.pr.%s.%d", r, prNumber)
 }
 
 // PRRolloutState tracks Kubernetes / GitOps rollout progress across jobs and Kustomizations.

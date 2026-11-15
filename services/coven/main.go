@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -57,10 +58,18 @@ func subscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) erro
 	return nil
 }
 
-var subscribeRetryInterval = 5 * time.Second
+var subscribeRetryIntervalNs atomic.Int64
+
+func init() {
+	subscribeRetryIntervalNs.Store(int64(5 * time.Second))
+}
+
+func getSubscribeRetryInterval() time.Duration {
+	return time.Duration(subscribeRetryIntervalNs.Load())
+}
 
 func retrySubscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) {
-	ticker := time.NewTicker(subscribeRetryInterval)
+	ticker := time.NewTicker(getSubscribeRetryInterval())
 	defer ticker.Stop()
 	for {
 		select {

@@ -2,6 +2,7 @@ package pubsub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -392,27 +393,35 @@ func TestEnsureCoreStreams(t *testing.T) {
 		t.Error("EnsureCoreStreams with nil bus expected error, got nil")
 	}
 
-	// Verify JetStream stream config subjects include aerial.pr.>
-	mjs := &mockJetStream{
-		existingStreams: make(map[string]*nats.StreamInfo),
-	}
+	mjs := &mockJetStream{existingStreams: make(map[string]*nats.StreamInfo)}
 	jsBus := newJetStreamBusWithContext(nil, mjs)
 	if err := jsBus.EnsureCoreStreams(context.Background()); err != nil {
 		t.Fatalf("jsBus.EnsureCoreStreams failed: %v", err)
 	}
-	eventsStream, ok := mjs.existingStreams[StreamAerialEvents]
-	if !ok {
-		t.Fatalf("stream %s not found in mockJetStream", StreamAerialEvents)
+	checks := []struct {
+		stream  string
+		subject string
+	}{
+		{StreamAerialEvents, SubjectAerialPRPrefix + "merged"},
+		{StreamAerialEvents, SubjectAerialTurnTranscriptSynced},
+		{StreamAerialJobs, SubjectEriPromptJob},
+		{StreamAerialCoalesced, SubjectCovenExtractCoalesced("thread-test")},
 	}
-	matched := false
-	for _, pattern := range eventsStream.Config.Subjects {
-		if matchSubject(pattern, SubjectAerialPRPrefix+"merged") {
-			matched = true
-			break
+	for _, chk := range checks {
+		st, ok := mjs.existingStreams[chk.stream]
+		if !ok {
+			t.Fatalf("stream %s not found in mockJetStream", chk.stream)
 		}
-	}
-	if !matched {
-		t.Errorf("AERIAL_EVENTS subjects %v do not match %s", eventsStream.Config.Subjects, SubjectAerialPRPrefix+"merged")
+		matched := false
+		for _, p := range st.Config.Subjects {
+			if matchSubject(p, chk.subject) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Errorf("%s subjects %v do not match %s", chk.stream, st.Config.Subjects, chk.subject)
+		}
 	}
 }
 
@@ -443,6 +452,122 @@ func TestMatchSubject(t *testing.T) {
 			got := matchSubject(tc.pattern, tc.subject)
 			if got != tc.want {
 				t.Errorf("matchSubject(%q, %q) = %v, want %v", tc.pattern, tc.subject, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSubjectHelpers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name, got, want string
+	}{
+		{"coven extract normal", SubjectCovenExtractCoalesced("thread-123"), "aerial.coalesced.coven_extract.thread-123"},
+		{"coven extract empty", SubjectCovenExtractCoalesced("   "), "aerial.coalesced.coven_extract.unknown"},
+		{"coven extract sanitize wildcards", SubjectCovenExtractCoalesced("thread*>1"), "aerial.coalesced.coven_extract.thread-1"},
+		{"build widget sync normal", SubjectBuildWidgetSyncCoalesced("build-123"), "aerial.coalesced.widget_sync.build.build-123"},
+		{"build widget sync empty", SubjectBuildWidgetSyncCoalesced(""), "aerial.coalesced.widget_sync.build.unknown"},
+		{"pr widget sync with slash", SubjectPRWidgetSyncCoalesced("azylman/aerial", 123), "aerial.coalesced.widget_sync.pr.azylman.aerial.123"},
+		{"pr widget sync empty repo", SubjectPRWidgetSyncCoalesced("  ", 456), "aerial.coalesced.widget_sync.pr.unknown.456"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.got != tc.want {
+				t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContracts_JSONWireFormat(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 14, 16, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		payload  any
+		wantJSON string
+	}{
+		{
+			name:     "TranscriptSyncedEvent",
+			payload:  TranscriptSyncedEvent{SessionID: "s1", ConversationID: "c1", StepsInserted: 3, SyncedAt: fixedTime},
+			wantJSON: `{"session_id":"s1","conversation_id":"c1","steps_inserted":3,"synced_at":"2026-11-14T16:00:00Z"}`,
+		},
+		{
+			name: "TurnCompletedEvent_telemetry",
+			payload: TurnCompletedEvent{
+				SessionID: "s1", CompletedAt: fixedTime, Status: "ok", DurationMs: 10, TotalTokens: 100,
+			},
+			wantJSON: `{"session_id":"s1","source":"","completed_at":"2026-11-14T16:00:00Z","status":"ok","duration_ms":10,"total_tokens":100}`,
+		},
+		{
+			name:     "TurnCompletedEvent_minimal",
+			payload:  TurnCompletedEvent{SessionID: "s2", Source: "src", CompletedAt: fixedTime},
+			wantJSON: `{"session_id":"s2","source":"src","completed_at":"2026-11-14T16:00:00Z"}`,
+		},
+		{
+			name:     "CovenExtractJobArgs",
+			payload:  CovenExtractJobArgs{ThreadID: "t1", SessionID: "s1"},
+			wantJSON: `{"thread_id":"t1","session_id":"s1"}`,
+		},
+		{
+			name:     "WidgetSyncJobArgs_build",
+			payload:  WidgetSyncJobArgs{BuildID: "b1", Status: "ok"},
+			wantJSON: `{"build_id":"b1","status":"ok"}`,
+		},
+		{
+			name:     "WidgetSyncJobArgs_pr",
+			payload:  WidgetSyncJobArgs{Repo: "r1", PRNumber: 1, Status: "open"},
+			wantJSON: `{"repo":"r1","pr_number":1,"status":"open"}`,
+		},
+		{
+			name:     "ProsperaReportJobArgs",
+			payload:  ProsperaReportJobArgs{CallID: "c1"},
+			wantJSON: `{"call_id":"c1"}`,
+		},
+		{
+			name:     "ProsperaVoicemailJobArgs",
+			payload:  ProsperaVoicemailJobArgs{CallID: "c1", RecordingURL: "http://u", DurationSec: 30},
+			wantJSON: `{"call_id":"c1","recording_url":"http://u","duration_sec":30}`,
+		},
+		{
+			name:     "ProsperaSMSJobArgs",
+			payload:  ProsperaSMSJobArgs{MessageSID: "m1", FromNumber: "+1", ToNumber: "+2", Body: "hi"},
+			wantJSON: `{"message_sid":"m1","from_number":"+1","to_number":"+2","body":"hi"}`,
+		},
+		{
+			name:     "EriPromptJobArgs",
+			payload:  EriPromptJobArgs{ChannelID: "c1", Prompt: "p1", Silent: true},
+			wantJSON: `{"channel_id":"c1","prompt":"p1","silent":true}`,
+		},
+		{
+			name:     "EriDispatchJobArgs",
+			payload:  EriDispatchJobArgs{Source: "s", TargetID: "t1", Prompt: "p1"},
+			wantJSON: `{"source":"s","target_id":"t1","prompt":"p1"}`,
+		},
+		{
+			name:     "EriDiscordMessageJobArgs",
+			payload:  EriDiscordMessageJobArgs{ChannelID: "c1", Content: "msg"},
+			wantJSON: `{"channel_id":"c1","content":"msg"}`,
+		},
+		{
+			name:     "HaroOneShotJobArgs",
+			payload:  HaroOneShotJobArgs{ThreadID: "t1", Prompt: "p1", RunAt: fixedTime},
+			wantJSON: `{"thread_id":"t1","prompt":"p1","run_at":"2026-11-14T16:00:00Z"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b, err := json.Marshal(tc.payload)
+			if err != nil {
+				t.Fatalf("Marshal(%s): %v", tc.name, err)
+			}
+			if string(b) != tc.wantJSON {
+				t.Errorf("%s wire JSON mismatch:\ngot:  %s\nwant: %s", tc.name, string(b), tc.wantJSON)
 			}
 		})
 	}
