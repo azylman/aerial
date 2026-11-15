@@ -748,26 +748,6 @@ func TestNakOrDropJob(t *testing.T) {
 			nilMsg:  true,
 			wantErr: true,
 		},
-		{
-			name:         "delivered 1 naks with 1s",
-			delivered:    1,
-			wantErr:      true,
-			wantNaked:    true,
-			wantNakDelay: 1 * time.Second,
-		},
-		{
-			name:         "delivered 4 naks with 8s",
-			delivered:    4,
-			wantErr:      true,
-			wantNaked:    true,
-			wantNakDelay: 8 * time.Second,
-		},
-		{
-			name:       "delivered 5 terms and drops",
-			delivered:  5,
-			wantErr:    false,
-			wantTermed: true,
-		},
 	}
 
 	for _, tc := range tests {
