@@ -12,17 +12,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/tracing"
-	"github.com/azylman/aerial/services/eri/pkg/env"
-	"github.com/azylman/aerial/services/eri/pkg/guard"
-	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/eri/pkg/env"
+	"github.com/azylman/aerial/services/eri/pkg/guard"
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 )
 
 const (

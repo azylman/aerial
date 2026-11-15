@@ -19,8 +19,8 @@ import (
 
 // ServerConfig defines the connection parameters for an outbound MCP server.
 type ServerConfig struct {
-	Name      string            `json:"name" yaml:"name"`
-	ServerURL string            `json:"serverUrl" yaml:"server_url"`
+	Name      string            `json:"name"              yaml:"name"`
+	ServerURL string            `json:"serverUrl"         yaml:"server_url"`
 	Headers   map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
 }
 

@@ -10,11 +10,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 type recordedRequest struct {

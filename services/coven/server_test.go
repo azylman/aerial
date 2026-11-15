@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
-
 	_ "modernc.org/sqlite"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 // serverRequestCase is the shared row shape for the Routes and handleMCP tests:

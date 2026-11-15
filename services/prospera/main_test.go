@@ -11,9 +11,10 @@ import (
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
-	_ "modernc.org/sqlite"
 )
 
 func TestRunApp_Validation(t *testing.T) {

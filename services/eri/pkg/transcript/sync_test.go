@@ -13,11 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
-	"github.com/nats-io/nats.go"
 )
 
 func TestShouldRunTranscriptSync_TableDriven(t *testing.T) {

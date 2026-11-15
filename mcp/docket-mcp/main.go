@@ -18,12 +18,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/ollama"
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/google/jsonschema-go/jsonschema"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/ollama"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // Server encapsulates HTTP routes, Vikunja client, and SQL task store for docket-mcp.
@@ -264,7 +265,7 @@ var ErrTaskNotFound = errors.New("not found in project graph")
 
 // ListArgs are the list tool arguments; the schema defaults status to "open".
 type ListArgs struct {
-	Status   string `json:"status,omitempty" jsonschema:"Status filter: 'open', 'completed', 'wont_do', 'all'"`
+	Status   string `json:"status,omitempty"    jsonschema:"Status filter: 'open', 'completed', 'wont_do', 'all'"`
 	ParentID *int64 `json:"parent_id,omitempty" jsonschema:"Optional parent task ID to filter by."`
 }
 
@@ -311,9 +312,9 @@ func (s *Server) listTasks(ctx context.Context, status string, parentID *int64) 
 
 // SearchArgs are the search tool arguments; the schema defaults status to "open" and limit to 10.
 type SearchArgs struct {
-	Query  string `json:"query" jsonschema:"Search query text."`
+	Query  string `json:"query"            jsonschema:"Search query text."`
 	Status string `json:"status,omitempty" jsonschema:"Status filter: 'open', 'completed', 'wont_do', 'all' (default 'open')"`
-	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum number of results to return (default 10)."`
+	Limit  int    `json:"limit,omitempty"  jsonschema:"Maximum number of results to return (default 10)."`
 }
 
 func (s *Server) toolSearch(ctx context.Context, args SearchArgs) (string, bool) {
@@ -466,12 +467,12 @@ func (s *Server) wireCreateRelations(ctx context.Context, taskID int64, parentID
 
 // CreateArgs are the create tool arguments.
 type CreateArgs struct {
-	Title       string  `json:"title" jsonschema:"Task title (required)."`
+	Title       string  `json:"title"                 jsonschema:"Task title (required)."`
 	Description string  `json:"description,omitempty" jsonschema:"Task description in markdown."`
-	ParentID    *int64  `json:"parent_id,omitempty" jsonschema:"Optional parent task ID."`
-	Blocks      []int64 `json:"blocks,omitempty" jsonschema:"Optional task IDs that this new task blocks."`
-	BlockedBy   []int64 `json:"blocked_by,omitempty" jsonschema:"Optional task IDs that block this new task."`
-	Related     []int64 `json:"related,omitempty" jsonschema:"Optional related task IDs."`
+	ParentID    *int64  `json:"parent_id,omitempty"   jsonschema:"Optional parent task ID."`
+	Blocks      []int64 `json:"blocks,omitempty"      jsonschema:"Optional task IDs that this new task blocks."`
+	BlockedBy   []int64 `json:"blocked_by,omitempty"  jsonschema:"Optional task IDs that block this new task."`
+	Related     []int64 `json:"related,omitempty"     jsonschema:"Optional related task IDs."`
 }
 
 func (s *Server) toolCreate(ctx context.Context, args CreateArgs) (string, bool) {
@@ -523,8 +524,8 @@ func (s *Server) toolCreate(ctx context.Context, args CreateArgs) (string, bool)
 
 // UpdateArgs are the update tool arguments; nil fields are left unchanged.
 type UpdateArgs struct {
-	ID          int64   `json:"id" jsonschema:"Task ID to update."`
-	Title       *string `json:"title,omitempty" jsonschema:"New task title."`
+	ID          int64   `json:"id"                    jsonschema:"Task ID to update."`
+	Title       *string `json:"title,omitempty"       jsonschema:"New task title."`
 	Description *string `json:"description,omitempty" jsonschema:"New task description."`
 }
 
@@ -586,7 +587,7 @@ func (s *Server) toolUpdate(ctx context.Context, args UpdateArgs) (string, bool)
 
 // CommentArgs are the comment tool arguments.
 type CommentArgs struct {
-	ID   int64  `json:"id" jsonschema:"Task ID to comment on."`
+	ID   int64  `json:"id"   jsonschema:"Task ID to comment on."`
 	Text string `json:"text" jsonschema:"Comment text."`
 }
 
@@ -603,9 +604,9 @@ func (s *Server) toolComment(ctx context.Context, args CommentArgs) (string, boo
 
 // LinkArgs are the link tool arguments.
 type LinkArgs struct {
-	ID       int64  `json:"id" jsonschema:"Source task ID."`
-	TargetID int64  `json:"target_id" jsonschema:"Target task ID."`
-	Type     string `json:"type" jsonschema:"Relation type: 'parent', 'blocks', or 'related'."`
+	ID       int64  `json:"id"               jsonschema:"Source task ID."`
+	TargetID int64  `json:"target_id"        jsonschema:"Target task ID."`
+	Type     string `json:"type"             jsonschema:"Relation type: 'parent', 'blocks', or 'related'."`
 	Remove   bool   `json:"remove,omitempty" jsonschema:"Whether to remove the relation (default false)."`
 }
 
@@ -707,9 +708,9 @@ func (s *Server) closeWontDo(ctx context.Context, id int64, reason string, openS
 
 // CloseArgs are the close tool arguments.
 type CloseArgs struct {
-	ID         int64  `json:"id" jsonschema:"Task ID to close."`
+	ID         int64  `json:"id"         jsonschema:"Task ID to close."`
 	Resolution string `json:"resolution" jsonschema:"Resolution: 'completed' or 'wont_do'."`
-	Reason     string `json:"reason" jsonschema:"Required explanation for closing the task."`
+	Reason     string `json:"reason"     jsonschema:"Required explanation for closing the task."`
 }
 
 func (s *Server) toolClose(ctx context.Context, args CloseArgs) (string, bool) {

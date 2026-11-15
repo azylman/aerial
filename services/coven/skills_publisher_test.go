@@ -13,8 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	_ "modernc.org/sqlite"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 type validateCompiledSkillMarkdownCase struct {

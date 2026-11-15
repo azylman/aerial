@@ -10,9 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/bwmarrin/discordgo"
 )
 
 func (p *WorkerPool) SetCreateThreadFunc(fn func(channelID, title string) (string, error)) {

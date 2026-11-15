@@ -9,11 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/bwmarrin/discordgo"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // recordedParent starts and ends a span on an in-memory recorder and returns a context carrying

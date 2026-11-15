@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	pgvector "github.com/pgvector/pgvector-go"
+
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 )
 
 const (

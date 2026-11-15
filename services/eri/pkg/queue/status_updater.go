@@ -9,9 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/bwmarrin/discordgo"
 )
 
 const (

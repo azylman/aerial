@@ -10,12 +10,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/azylman/aerial/pkg/tracing"
-	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 // InterchangeablePoolConfig specifies sizing and naming configuration for an InterchangeablePool.

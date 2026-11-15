@@ -17,10 +17,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // LLMClientFunc defines the interface function for sending prompts to an LLM.

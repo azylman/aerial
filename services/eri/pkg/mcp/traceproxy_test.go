@@ -13,14 +13,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/guard"
-	"github.com/azylman/aerial/services/eri/pkg/mcp"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/services/eri/pkg/guard"
+	"github.com/azylman/aerial/services/eri/pkg/mcp"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 // endedSpans delivers each span as it ends; the proxy ends its span after the response is

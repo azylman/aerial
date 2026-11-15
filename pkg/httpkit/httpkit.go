@@ -17,8 +17,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 var (

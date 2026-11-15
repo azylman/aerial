@@ -7,10 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // TracerScope is the instrumentation scope for spans eri emits around agent turns.

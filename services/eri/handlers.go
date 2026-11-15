@@ -19,6 +19,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/pkg/tracing"
@@ -32,8 +35,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
-	"github.com/bwmarrin/discordgo"
-	"github.com/google/uuid"
 )
 
 type PromptRequest struct {
@@ -763,7 +764,6 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		// Standard JSON response mode
 		if pool == nil {
 			metrics.RecordVoiceTTFR("json", "error", time.Since(reqStart))
 			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "worker pool is uninitialized"})

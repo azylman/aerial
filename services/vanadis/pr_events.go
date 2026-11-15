@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 func isDependabotBranch(branch string) bool {

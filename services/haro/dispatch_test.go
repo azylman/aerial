@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/nats-io/nats.go"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 type memoryMsg struct {

@@ -12,12 +12,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/metrics"
-	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
+
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 // PoolConfig specifies parameters for initializing and configuring UnifiedProcessPool.

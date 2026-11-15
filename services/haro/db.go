@@ -14,8 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 var sqliteTestInitHook func(string) (*sql.DB, error)

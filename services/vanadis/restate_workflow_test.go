@@ -14,10 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 func TestBuildWorkflow_Reflection(t *testing.T) {

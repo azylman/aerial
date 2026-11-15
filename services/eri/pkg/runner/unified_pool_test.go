@@ -13,8 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/google/uuid"
+
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 func (p *UnifiedProcessPool) HasDaemon(targetKey string) bool {

@@ -11,9 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/ollama"
-	"gopkg.in/yaml.v3"
 )
 
 // Config holds runtime configuration for docket-mcp.

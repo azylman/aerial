@@ -12,9 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)

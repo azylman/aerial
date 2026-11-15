@@ -7,12 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/bwmarrin/discordgo"
-	"go.opentelemetry.io/otel/trace"
 )
 
 func (te *turnExecution) getThreadSummary(threadID string) (string, string) {

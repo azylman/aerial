@@ -15,9 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/bwmarrin/discordgo"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // Metric collectors for JetStream queues and worker execution telemetry.

@@ -9,11 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/google/uuid"
 )
 
 var newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
