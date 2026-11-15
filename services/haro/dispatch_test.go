@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -229,98 +230,126 @@ func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 			t.Parallel()
 			db := setupTestDB(t)
 			ctx := context.Background()
+			seedDispatchHeartbeat(ctx, t, db, tc.seedScheduleType, tc.seedScheduleID, now)
+			seedDispatchRun(ctx, t, db, tc.seedRunID, tc.seedScheduleType, tc.seedScheduleID, now)
 
-			if tc.seedScheduleID != "" && tc.seedScheduleType == "heartbeat" {
-				hb := HeartbeatSchedule{
-					ID:          tc.seedScheduleID,
-					TargetID:    "1234567890",
-					TitlePrefix: "HB Test",
-					CronExpr:    "*/5 * * * *",
-					Prompt:      "prompt",
-					Timezone:    "UTC",
-					NextRunAt:   now,
-					Enabled:     true,
-				}
-				if err := InsertHeartbeatSchedule(ctx, db, hb); err != nil {
-					t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
-				}
-			}
-
-			if tc.seedRunID != "" {
-				run := ScheduleRun{
-					ID:           tc.seedRunID,
-					ScheduleID:   tc.seedScheduleID,
-					ScheduleType: tc.seedScheduleType,
-					TargetID:     "1234567890",
-					ThreadID:     "thread-" + tc.seedScheduleID,
-					Title:        "Run Title",
-					Prompt:       "Run Prompt",
-					Status:       "running",
-					StartedAt:    now,
-				}
-				if err := CreateScheduleRun(ctx, db, run); err != nil {
-					t.Fatalf("CreateScheduleRun failed: %v", err)
-				}
-			}
-
-			var payload []byte
-			if tc.rawPayload != "" {
-				payload = []byte(tc.rawPayload)
-			} else if tc.event != nil {
-				var err error
-				payload, err = json.Marshal(tc.event)
-				if err != nil {
-					t.Fatalf("Marshal event: %v", err)
-				}
-			}
-
-			msg := &memoryMsg{data: payload, subject: "aerial.dispatch.completed"}
+			msg := &memoryMsg{data: dispatchPayload(t, tc.rawPayload, tc.event), subject: "aerial.dispatch.completed"}
 			err := HandleDispatchOutcome(ctx, db, msg)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("HandleDispatchOutcome() error = %v, wantErr = %v", err, tc.wantErr)
 			}
-
 			if tc.wantNaked != msg.naked {
 				t.Errorf("msg.naked = %v, want %v", msg.naked, tc.wantNaked)
 			}
 
-			if tc.seedRunID != "" && tc.wantRunStatus != "" {
-				run, err := GetScheduleRun(ctx, db, tc.seedRunID)
-				if err != nil {
-					t.Fatalf("GetScheduleRun failed: %v", err)
-				}
-				if run.Status != tc.wantRunStatus {
-					t.Errorf("run.Status = %q, want %q", run.Status, tc.wantRunStatus)
-				}
-				if tc.wantRunError != "" && run.Error != tc.wantRunError {
-					t.Errorf("run.Error = %q, want %q", run.Error, tc.wantRunError)
-				}
-				if tc.wantCheckCalculated {
-					if run.CompletedAt == nil || run.CompletedAt.IsZero() {
-						t.Errorf("expected non-zero run.CompletedAt")
-					}
-					if run.DurationMs <= 0 {
-						t.Errorf("expected run.DurationMs > 0, got %d", run.DurationMs)
-					}
-				}
-			}
-
-			if tc.seedScheduleID != "" && tc.seedScheduleType == "heartbeat" {
-				hb, err := GetHeartbeatSchedule(ctx, db, tc.seedScheduleID)
-				if err != nil {
-					t.Fatalf("GetHeartbeatSchedule failed: %v", err)
-				}
-				if tc.wantWatermarkTime != nil {
-					if hb.LastCompletedAt == nil || !hb.LastCompletedAt.Equal(*tc.wantWatermarkTime) {
-						t.Errorf("hb.LastCompletedAt = %v, want %v", hb.LastCompletedAt, *tc.wantWatermarkTime)
-					}
-				} else {
-					if hb.LastCompletedAt != nil {
-						t.Errorf("expected hb.LastCompletedAt = nil, got %v", hb.LastCompletedAt)
-					}
-				}
-			}
+			assertRunStatus(ctx, t, db, tc.seedRunID, tc.wantRunStatus, tc.wantRunError, tc.wantCheckCalculated)
+			assertHeartbeatWatermark(ctx, t, db, tc.seedScheduleType, tc.seedScheduleID, tc.wantWatermarkTime)
 		})
+	}
+}
+
+// seedDispatchHeartbeat inserts a heartbeat schedule when the row seeds one; it is a no-op for other schedule types.
+func seedDispatchHeartbeat(ctx context.Context, t *testing.T, db *sql.DB, scheduleType, scheduleID string, now time.Time) {
+	t.Helper()
+	if scheduleID == "" || scheduleType != "heartbeat" {
+		return
+	}
+	hb := HeartbeatSchedule{
+		ID:          scheduleID,
+		TargetID:    "1234567890",
+		TitlePrefix: "HB Test",
+		CronExpr:    "*/5 * * * *",
+		Prompt:      "prompt",
+		Timezone:    "UTC",
+		NextRunAt:   now,
+		Enabled:     true,
+	}
+	if err := InsertHeartbeatSchedule(ctx, db, hb); err != nil {
+		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+	}
+}
+
+// seedDispatchRun inserts a running schedule run when runID is set.
+func seedDispatchRun(ctx context.Context, t *testing.T, db *sql.DB, runID, scheduleType, scheduleID string, now time.Time) {
+	t.Helper()
+	if runID == "" {
+		return
+	}
+	run := ScheduleRun{
+		ID:           runID,
+		ScheduleID:   scheduleID,
+		ScheduleType: scheduleType,
+		TargetID:     "1234567890",
+		ThreadID:     "thread-" + scheduleID,
+		Title:        "Run Title",
+		Prompt:       "Run Prompt",
+		Status:       "running",
+		StartedAt:    now,
+	}
+	if err := CreateScheduleRun(ctx, db, run); err != nil {
+		t.Fatalf("CreateScheduleRun failed: %v", err)
+	}
+}
+
+// dispatchPayload returns the raw payload verbatim when set, otherwise the JSON-encoded event (nil when neither is set).
+func dispatchPayload(t *testing.T, raw string, event *pubsub.DispatchOutcomeEvent) []byte {
+	t.Helper()
+	if raw != "" {
+		return []byte(raw)
+	}
+	if event == nil {
+		return nil
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal event: %v", err)
+	}
+	return payload
+}
+
+// assertRunStatus checks the stored run's status, error, and derived timings; it is a no-op when runID or wantStatus is empty.
+func assertRunStatus(ctx context.Context, t *testing.T, db *sql.DB, runID, wantStatus, wantError string, wantTimingsDerived bool) {
+	t.Helper()
+	if runID == "" || wantStatus == "" {
+		return
+	}
+	run, err := GetScheduleRun(ctx, db, runID)
+	if err != nil {
+		t.Fatalf("GetScheduleRun failed: %v", err)
+	}
+	if run.Status != wantStatus {
+		t.Errorf("run.Status = %q, want %q", run.Status, wantStatus)
+	}
+	if wantError != "" && run.Error != wantError {
+		t.Errorf("run.Error = %q, want %q", run.Error, wantError)
+	}
+	if !wantTimingsDerived {
+		return
+	}
+	if run.CompletedAt == nil || run.CompletedAt.IsZero() {
+		t.Errorf("expected non-zero run.CompletedAt")
+	}
+	if run.DurationMs <= 0 {
+		t.Errorf("expected run.DurationMs > 0, got %d", run.DurationMs)
+	}
+}
+
+// assertHeartbeatWatermark checks a seeded heartbeat's LastCompletedAt equals want (nil means it must stay unset);
+// it is a no-op when the row seeded no heartbeat schedule.
+func assertHeartbeatWatermark(ctx context.Context, t *testing.T, db *sql.DB, scheduleType, scheduleID string, want *time.Time) {
+	t.Helper()
+	if scheduleID == "" || scheduleType != "heartbeat" {
+		return
+	}
+	hb, err := GetHeartbeatSchedule(ctx, db, scheduleID)
+	if err != nil {
+		t.Fatalf("GetHeartbeatSchedule failed: %v", err)
+	}
+	switch {
+	case want == nil && hb.LastCompletedAt != nil:
+		t.Errorf("expected hb.LastCompletedAt = nil, got %v", hb.LastCompletedAt)
+	case want != nil && (hb.LastCompletedAt == nil || !hb.LastCompletedAt.Equal(*want)):
+		t.Errorf("hb.LastCompletedAt = %v, want %v", hb.LastCompletedAt, *want)
 	}
 }
 

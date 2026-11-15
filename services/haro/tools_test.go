@@ -426,14 +426,101 @@ func TestToolHandler_ScheduleAndList(t *testing.T) {
 	testToolHandlerClosedDB(ctx, t, cfg)
 }
 
-func TestToolHandler_UpdateAndCancel(t *testing.T) {
+// newMemoryToolHandler opens an in-memory haro DB and returns a ToolHandler over it; the DB closes on test cleanup.
+func newMemoryToolHandler(t *testing.T) (*ToolHandler, *sql.DB) {
+	t.Helper()
 	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
 	db, err := OpenDB(cfg)
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}
-	defer db.Close()
-	h := NewToolHandler(cfg, db)
+	t.Cleanup(func() { _ = db.Close() })
+	return NewToolHandler(cfg, db), db
+}
+
+func TestToolHandler_UpdateCronSchedule(t *testing.T) {
+	h, db := newMemoryToolHandler(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	for _, c := range []CronSchedule{
+		{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "prompt", Timezone: "America/Los_Angeles", NextRunAt: now, Enabled: true, Effort: "medium"},
+		{ID: "c-tokyo", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "prompt", Timezone: "Asia/Tokyo", NextRunAt: now, Enabled: true, Effort: "medium"},
+	} {
+		if err := InsertCronSchedule(ctx, db, c); err != nil {
+			t.Fatalf("InsertCronSchedule %s error: %v", c.ID, err)
+		}
+	}
+
+	// Rows run sequentially and share the seeded schedules: later c-tokyo rows depend on the timezone stored by earlier ones.
+	eff, expr, prompt, prefix, tzUTC := "high", "0 12 * * *", "updated", "NewPrefix", "UTC"
+	cron9, cron1730, tzNY, badExpr := "0 9 * * *", "30 17 * * *", "America/New_York", "not-a-cron"
+	tests := []struct {
+		name       string
+		args       UpdateCronScheduleArgs
+		wantErrMsg string
+		wantEffort string
+		wantTZ     string
+		wantClock  string
+	}{
+		{"full update recomputes next run", UpdateCronScheduleArgs{ScheduleID: "c1", Effort: &eff, CronExpression: &expr, Prompt: &prompt, TitlePrefix: &prefix, Timezone: &tzUTC}, "", "high", "UTC", "12:00"},
+		{"cron-only update uses stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron9}, "", "", "Asia/Tokyo", "09:00"},
+		{"timezone-only update recomputes with stored cron", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Timezone: &tzNY}, "", "", "America/New_York", "09:00"},
+		{"cron-only update after timezone change uses new stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron1730}, "", "", "America/New_York", "17:30"},
+		{"content-only update leaves next_run_at untouched", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Prompt: &prompt}, "", "", "", ""},
+		{"missing schedule_id", UpdateCronScheduleArgs{ScheduleID: "  "}, "'schedule_id' is required", "", "", ""},
+		{"invalid cron expression", UpdateCronScheduleArgs{ScheduleID: "c1", CronExpression: &badExpr}, "invalid cron expression", "", "", ""},
+		{"non-existent schedule", UpdateCronScheduleArgs{ScheduleID: "missing-id", Effort: &eff}, "failed to update recurring schedule", "", "", ""},
+		{"non-existent schedule with cron change", UpdateCronScheduleArgs{ScheduleID: "missing-id", CronExpression: &cron9}, "failed to update recurring schedule", "", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := h.UpdateCronSchedule(ctx, tc.args)
+			if tc.wantErrMsg != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+				}
+				return
+			}
+			if err != nil || out.Status != "success" {
+				t.Fatalf("UpdateCronSchedule = %+v, err: %v", out, err)
+			}
+			if tc.wantEffort != "" && out.Effort != tc.wantEffort {
+				t.Errorf("Effort = %q, want %q", out.Effort, tc.wantEffort)
+			}
+			assertNextRunClock(t, out.NextRunAt, tc.wantTZ, tc.wantClock)
+		})
+	}
+}
+
+// assertNextRunClock checks nextRunAt falls within the next day at wantClock in wantTZ; an empty wantClock means
+// next_run_at must be omitted.
+func assertNextRunClock(t *testing.T, nextRunAt, wantTZ, wantClock string) {
+	t.Helper()
+	if wantClock == "" {
+		if nextRunAt != "" {
+			t.Fatalf("expected no next_run_at, got %q", nextRunAt)
+		}
+		return
+	}
+	got, err := time.Parse(time.RFC3339, nextRunAt)
+	if err != nil {
+		t.Fatalf("parse next_run_at %q: %v", nextRunAt, err)
+	}
+	loc, err := time.LoadLocation(wantTZ)
+	if err != nil {
+		t.Fatalf("LoadLocation %q: %v", wantTZ, err)
+	}
+	if clock := got.In(loc).Format("15:04"); clock != wantClock {
+		t.Fatalf("next_run_at %s in %s = %s, want %s", nextRunAt, wantTZ, clock, wantClock)
+	}
+	if d := time.Until(got); d <= 0 || d > 25*time.Hour {
+		t.Fatalf("next_run_at %s not within the next day", nextRunAt)
+	}
+}
+
+func TestToolHandler_CancelSchedule(t *testing.T) {
+	h, db := newMemoryToolHandler(t)
 	ctx := context.Background()
 
 	now := time.Now().UTC()
@@ -446,95 +533,27 @@ func TestToolHandler_UpdateAndCancel(t *testing.T) {
 		t.Fatalf("InsertOneShotSchedule error: %v", err)
 	}
 
-	eff, expr, prompt, prefix, tz := "high", "0 12 * * *", "updated", "NewPrefix", "UTC"
-	upRes, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{
-		ScheduleID: "c1", Effort: &eff, CronExpression: &expr, Prompt: &prompt, TitlePrefix: &prefix, Timezone: &tz,
-	})
-	if err != nil || upRes.Status != "success" || upRes.Effort != "high" || upRes.NextRunAt == "" {
-		t.Fatalf("unexpected UpdateCronSchedule output: %+v, err: %v", upRes, err)
-	}
-
-	tokyo := CronSchedule{ID: "c-tokyo", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "prompt", Timezone: "Asia/Tokyo", NextRunAt: now, Enabled: true, Effort: "medium"}
-	if err := InsertCronSchedule(ctx, db, tokyo); err != nil {
-		t.Fatalf("InsertCronSchedule error: %v", err)
-	}
-	cron9, cron1730, tzNY := "0 9 * * *", "30 17 * * *", "America/New_York"
-	nextRunTests := []struct {
-		name      string
-		args      UpdateCronScheduleArgs
-		wantTZ    string
-		wantClock string
-	}{
-		{"cron-only update uses stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron9}, "Asia/Tokyo", "09:00"},
-		{"timezone-only update recomputes with stored cron", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Timezone: &tzNY}, "America/New_York", "09:00"},
-		{"cron-only update after timezone change uses new stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron1730}, "America/New_York", "17:30"},
-		{"content-only update leaves next_run_at untouched", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Prompt: &prompt}, "", ""},
-	}
-	for _, tc := range nextRunTests {
-		t.Run(tc.name, func(t *testing.T) {
-			out, err := h.UpdateCronSchedule(ctx, tc.args)
-			if err != nil {
-				t.Fatalf("UpdateCronSchedule error: %v", err)
-			}
-			if tc.wantClock == "" {
-				if out.NextRunAt != "" {
-					t.Fatalf("expected no next_run_at, got %q", out.NextRunAt)
-				}
-				return
-			}
-			got, err := time.Parse(time.RFC3339, out.NextRunAt)
-			if err != nil {
-				t.Fatalf("parse next_run_at %q: %v", out.NextRunAt, err)
-			}
-			loc, _ := time.LoadLocation(tc.wantTZ)
-			if clock := got.In(loc).Format("15:04"); clock != tc.wantClock {
-				t.Fatalf("next_run_at %s in %s = %s, want %s", out.NextRunAt, tc.wantTZ, clock, tc.wantClock)
-			}
-			if d := time.Until(got); d <= 0 || d > 25*time.Hour {
-				t.Fatalf("next_run_at %s not within the next day", out.NextRunAt)
-			}
-		})
-	}
-
-	badExpr := "not-a-cron"
-	updateErrTests := []struct {
-		name       string
-		args       UpdateCronScheduleArgs
-		wantErrMsg string
-	}{
-		{"missing schedule_id", UpdateCronScheduleArgs{ScheduleID: "  "}, "'schedule_id' is required"},
-		{"invalid cron expression", UpdateCronScheduleArgs{ScheduleID: "c1", CronExpression: &badExpr}, "invalid cron expression"},
-		{"non-existent schedule", UpdateCronScheduleArgs{ScheduleID: "missing-id", Effort: &eff}, "failed to update recurring schedule"},
-		{"non-existent schedule with cron change", UpdateCronScheduleArgs{ScheduleID: "missing-id", CronExpression: &cron9}, "failed to update recurring schedule"},
-	}
-	for _, tc := range updateErrTests {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := h.UpdateCronSchedule(ctx, tc.args)
-			if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
-				t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
-			}
-		})
-	}
-
-	for _, id := range []string{"c1", "s1"} {
-		if out, err := h.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: id}); err != nil || out.Status != "success" {
-			t.Fatalf("CancelSchedule %s failed: %v", id, err)
-		}
-	}
-
-	cancelErrTests := []struct {
+	tests := []struct {
 		name       string
 		id         string
 		wantErrMsg string
 	}{
+		{"cancels recurring schedule", "c1", ""},
+		{"cancels one-shot schedule", "s1", ""},
 		{"empty schedule_id", "  ", "'schedule_id' is required"},
 		{"non-existent schedule", "missing-id", "not found"},
 	}
-	for _, tc := range cancelErrTests {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := h.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: tc.id})
-			if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
-				t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+			out, err := h.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: tc.id})
+			if tc.wantErrMsg != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+				}
+				return
+			}
+			if err != nil || out.Status != "success" {
+				t.Fatalf("CancelSchedule %s = %+v, err: %v", tc.id, out, err)
 			}
 		})
 	}
