@@ -33,7 +33,7 @@ func syncPRWidgetGuardCases() []syncPRWidgetCase {
 			prNumber: 0,
 		},
 		{
-			name: "riverClient configured queues WidgetSyncArgs without inline HTTP dispatch", useMockReg: true, useInserter: true,
+			name: "bus configured queues WidgetSyncArgs without inline HTTP dispatch", useMockReg: true, useInserter: true,
 			mockTargetID: "100000000000000001", mockBranch: "feat/queued", repo: "aerial", prNumber: 101, wantQueued: 1, wantQueuedStatus: "",
 		},
 		{
@@ -45,7 +45,7 @@ func syncPRWidgetGuardCases() []syncPRWidgetCase {
 			repo: "azylman/aerial", prNumber: 101, prQueryErr: errors.New("status lookup failed"), wantQueued: 1, wantQueuedStatus: "",
 		},
 		{
-			name: "riverClient insert error returns error", useMockReg: true, useInserter: true,
+			name: "bus insert error returns error", useMockReg: true, useInserter: true,
 			inserterErr: errors.New("db insert failure"), repo: "azylman/aerial", prNumber: 101, wantErr: true,
 		},
 	}
@@ -416,9 +416,9 @@ func runSyncPRWidgetMockRegCase(ctx context.Context, t *testing.T, tc syncPRWidg
 	}
 	srv := newTestRouter(Config{}, nil, reg, mockDisp)
 	srv.setPRWidgetState(ctx, tc.repo, tc.prNumber, "conflict", "banner")
-	var inserter *mockRiverInserter
+	var inserter *mockEventBus
 	if tc.useInserter {
-		inserter = &mockRiverInserter{err: tc.inserterErr}
+		inserter = &mockEventBus{err: tc.inserterErr}
 		srv.SetEventBus(inserter)
 	}
 	err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber)
@@ -451,9 +451,9 @@ func runSyncPRWidgetPgxCase(ctx context.Context, t *testing.T, tc syncPRWidgetCa
 
 	pgReg := NewPostgresPRRegistry(pool, WithVanadisClient(tsVanadis.URL, tsVanadis.Client()))
 	srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), pgReg, mockDisp)
-	var inserter *mockRiverInserter
+	var inserter *mockEventBus
 	if tc.useInserter {
-		inserter = &mockRiverInserter{err: tc.inserterErr}
+		inserter = &mockEventBus{err: tc.inserterErr}
 		srv.SetEventBus(inserter)
 	}
 	if tc.prDBBanner != "" {
@@ -608,7 +608,7 @@ func scanPRRegistryFullRow(tc syncPRWidgetCase, prStart, prUpdate time.Time) pgx
 	}}
 }
 
-func assertSyncPRWidgetQueued(t *testing.T, tc syncPRWidgetCase, inserter *mockRiverInserter) {
+func assertSyncPRWidgetQueued(t *testing.T, tc syncPRWidgetCase, inserter *mockEventBus) {
 	t.Helper()
 	if inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued {
 		t.Fatalf("expected %d queued widget sync jobs, got %+v", tc.wantQueued, inserter)
@@ -1055,8 +1055,8 @@ func TestSyncBuildWidget_Unit(t *testing.T) {
 	tests := []syncBuildWidgetCase{
 		{name: "nil server returns clean nil", useNilServer: true, buildID: "build-123"},
 		{name: "empty buildID returns clean nil", buildID: ""},
-		{name: "riverClient configured queues WidgetSyncArgs without inline HTTP dispatch", useMockReg: true, useInserter: true, buildID: "build-101", banner: "Build running", wantQueued: 1},
-		{name: "riverClient insert error returns error", useMockReg: true, useInserter: true, inserterErr: errors.New("db insert failure"), buildID: "build-101", wantErr: true},
+		{name: "bus configured queues WidgetSyncArgs without inline HTTP dispatch", useMockReg: true, useInserter: true, buildID: "build-101", banner: "Build running", wantQueued: 1},
+		{name: "bus insert error returns error", useMockReg: true, useInserter: true, inserterErr: errors.New("db insert failure"), buildID: "build-101", wantErr: true},
 		{name: "non-Postgres registry fallback returns clean nil", useMockReg: true, buildID: "build-102", wantErr: false},
 		{name: "Postgres registry calls vanadis build widget sync successfully", buildID: "build-103", banner: "Chunk 1 running", vanadisStatus: http.StatusOK, wantErr: false},
 		{
@@ -1144,7 +1144,7 @@ func newSyncBuildWidgetServer(tc syncBuildWidgetCase) *httptest.Server {
 	}))
 }
 
-func setupSyncBuildWidgetRouter(tc syncBuildWidgetCase, tsVanadis *httptest.Server) (*RouterServer, *mockRiverInserter) {
+func setupSyncBuildWidgetRouter(tc syncBuildWidgetCase, tsVanadis *httptest.Server) (*RouterServer, *mockEventBus) {
 	mockDisp := &mockOutboundDispatcher{}
 	var reg PRRegistryUpdater
 	if tc.useMockReg {
@@ -1157,15 +1157,15 @@ func setupSyncBuildWidgetRouter(tc syncBuildWidgetCase, tsVanadis *httptest.Serv
 	}
 
 	srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), reg, mockDisp)
-	var inserter *mockRiverInserter
+	var inserter *mockEventBus
 	if tc.useInserter {
-		inserter = &mockRiverInserter{err: tc.inserterErr}
+		inserter = &mockEventBus{err: tc.inserterErr}
 		srv.SetEventBus(inserter)
 	}
 	return srv, inserter
 }
 
-func assertSyncBuildWidgetQueue(t *testing.T, tc syncBuildWidgetCase, inserter *mockRiverInserter) {
+func assertSyncBuildWidgetQueue(t *testing.T, tc syncBuildWidgetCase, inserter *mockEventBus) {
 	t.Helper()
 	if tc.wantQueued > 0 {
 		if inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued {
@@ -1195,11 +1195,11 @@ func TestRouterServer_HandleInternalWidgetSync(t *testing.T) {
 		{name: "MissingAllFieldsReturns400", body: `{}`, wantStatus: http.StatusBadRequest, wantSubstr: "build_id or repo and pr_number are required"},
 		{name: "EmptyBuildIDAndEmptyRepoReturns400", body: `{"build_id":"","repo":"","pr_number":0}`, wantStatus: http.StatusBadRequest, wantSubstr: "build_id or repo and pr_number are required"},
 		{name: "RepoWithoutPRNumberReturns400", body: `{"repo":"azylman/aerial","pr_number":0}`, wantStatus: http.StatusBadRequest, wantSubstr: "build_id or repo and pr_number are required"},
-		{name: "ValidBuildIDWithRiver", body: `{"build_id":"build-777","banner":"Building chunk 0"}`, useInserter: true, wantStatus: http.StatusAccepted, wantSubstr: `"status":"accepted"`, wantQueued: 1},
-		{name: "ValidRepoAndPRNumberWithRiver", body: `{"repo":"azylman/aerial","pr_number":202}`, useInserter: true, wantStatus: http.StatusAccepted, wantSubstr: `"status":"accepted"`, wantQueued: 1},
-		{name: "RiverInsertErrorOnBuildIDReturns500", body: `{"build_id":"build-888"}`, useInserter: true, inserterErr: errors.New("river pool full"), wantStatus: http.StatusInternalServerError, wantSubstr: "failed to sync build widget"},
-		{name: "RiverInsertErrorOnPRReturns500", body: `{"repo":"azylman/aerial","pr_number":203}`, useInserter: true, inserterErr: errors.New("river pool full"), wantStatus: http.StatusInternalServerError, wantSubstr: "failed to sync pr widget"},
-		{name: "ValidBuildIDDirectWithoutRiver", body: `{"build_id":"build-999","banner":"Direct sync"}`, vanadisStatus: http.StatusOK, wantStatus: http.StatusAccepted, wantSubstr: `"build_id":"build-999"`},
+		{name: "ValidBuildIDWithBus", body: `{"build_id":"build-777","banner":"Building chunk 0"}`, useInserter: true, wantStatus: http.StatusAccepted, wantSubstr: `"status":"accepted"`, wantQueued: 1},
+		{name: "ValidRepoAndPRNumberWithBus", body: `{"repo":"azylman/aerial","pr_number":202}`, useInserter: true, wantStatus: http.StatusAccepted, wantSubstr: `"status":"accepted"`, wantQueued: 1},
+		{name: "BusInsertErrorOnBuildIDReturns500", body: `{"build_id":"build-888"}`, useInserter: true, inserterErr: errors.New("bus pool full"), wantStatus: http.StatusInternalServerError, wantSubstr: "failed to sync build widget"},
+		{name: "BusInsertErrorOnPRReturns500", body: `{"repo":"azylman/aerial","pr_number":203}`, useInserter: true, inserterErr: errors.New("bus pool full"), wantStatus: http.StatusInternalServerError, wantSubstr: "failed to sync pr widget"},
+		{name: "ValidBuildIDDirectWithoutBus", body: `{"build_id":"build-999","banner":"Direct sync"}`, vanadisStatus: http.StatusOK, wantStatus: http.StatusAccepted, wantSubstr: `"build_id":"build-999"`},
 	}
 
 	for _, tc := range tests {
@@ -1226,9 +1226,9 @@ func TestRouterServer_HandleInternalWidgetSync(t *testing.T) {
 			disp := &mockOutboundDispatcher{}
 
 			srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), reg, disp)
-			var inserter *mockRiverInserter
+			var inserter *mockEventBus
 			if tc.useInserter {
-				inserter = &mockRiverInserter{err: tc.inserterErr}
+				inserter = &mockEventBus{err: tc.inserterErr}
 				srv.SetEventBus(inserter)
 			}
 
@@ -1256,7 +1256,7 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 		name           string
 		nilServer      bool
 		isEnqueue      bool
-		hasRiver       bool
+		hasBus         bool
 		hasDispatcher  bool
 		wantDispatchID string
 		args           MergeConflictArgs
@@ -1272,12 +1272,12 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 			wantPrompts:    1,
 		},
 		{
-			name: "enqueueMergeConflict with river client enqueues", isEnqueue: true, hasRiver: true,
+			name: "enqueueMergeConflict with bus client enqueues", isEnqueue: true, hasBus: true,
 			args:         MergeConflictArgs{Repo: "aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-2", PRNumber: 544, TargetID: "100000000000000001"},
 			wantEnqueued: 1,
 		},
 		{
-			name: "enqueueMergeConflict without river client dispatches directly", isEnqueue: true, hasDispatcher: true,
+			name: "enqueueMergeConflict without bus client dispatches directly", isEnqueue: true, hasDispatcher: true,
 			wantDispatchID: "conflict-azylman-aerial-545-sha-conflict-3",
 			args:           MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-3", PRNumber: 545, TargetID: "100000000000000001"},
 			wantPrompts:    1,
@@ -1288,12 +1288,12 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			disp := &mockOutboundDispatcher{}
-			river := &mockRiverInserter{}
+			bus := &mockEventBus{}
 			var srv *RouterServer
 			if !tc.nilServer {
 				srv = newTestRouter(Config{}, nil, nil, disp)
-				if tc.hasRiver {
-					srv.SetEventBus(river)
+				if tc.hasBus {
+					srv.SetEventBus(bus)
 				}
 			}
 
@@ -1307,9 +1307,9 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected err: %v", err)
 			}
-			if tc.hasRiver {
-				if len(river.insertedConflictJobs) != tc.wantEnqueued {
-					t.Errorf("insertedConflictJobs = %d, want %d", len(river.insertedConflictJobs), tc.wantEnqueued)
+			if tc.hasBus {
+				if len(bus.insertedConflictJobs) != tc.wantEnqueued {
+					t.Errorf("insertedConflictJobs = %d, want %d", len(bus.insertedConflictJobs), tc.wantEnqueued)
 				}
 			}
 			if tc.hasDispatcher {

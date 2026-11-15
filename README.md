@@ -40,7 +40,7 @@ Aerial separates generic platform orchestration from private homelab state using
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
 │ Real-time Voice (Cockpit)    │ HTTP REST & Event Webhooks   │ Discord Gateway Funnel        │
 │ • Parakeet TDT STT (senses)  │ • /prompt (Prompt Injection) │ • synapse Gateway WebSocket   │
-│ • Kokoro-82M TTS (senses)    │ • /voice/ask (Voice Pipeline)│ • Catch-up Sweeps & River Q   │
+│ • Kokoro-82M TTS (senses)    │ • /voice/ask (Voice Pipeline)│ • Catch-up Sweeps & JetStream │
 │ • Wyoming Protocol (:10300)  │ • /discord/message Outbound  │ • POST /discord/ingress       │
 │ • WebRTC & Audio Streaming   │ • Cloudflare Tunnel Webhooks │ • pjev System-1 Classifier    │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
@@ -341,7 +341,7 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 - **Single-Click Anonymous Admin Access**: Instant dashboard access without login friction.
 - **Persistent Backend**: Dashboards and user settings persist in SQLite (`GF_DATABASE_TYPE=sqlite3`) with dashboards provisioned from JSON definitions.
 - **Pre-Provisioned Dashboard Suite**:
-  - **`⚡ Aerial Core & Operations` (`core-telemetry.json`)**: Live turn execution latency (p50/p90/p95/p99), token usage, active worker pool depth, CAS task states, runner error taxonomy, Discord gateway latency (`synapse_discord_gateway_latency_seconds`), River queue metrics, classifier triage decisions, and GitSync reconcile runs.
+  - **`⚡ Aerial Core & Operations` (`core-telemetry.json`)**: Live turn execution latency (p50/p90/p95/p99), token usage, active worker pool depth, CAS task states, runner error taxonomy, Discord gateway latency (`synapse_discord_gateway_latency_seconds`), JetStream queue metrics, classifier triage decisions, and GitSync reconcile runs.
   - **`🐘 PostgreSQL Overview` (`postgres-overview.json`)**: CloudNativePG active backends, connection pool state, buffer cache hit ratio (>99%), commits/rollbacks, tuple read/write velocity, and lock contention.
   - **`🐳 Cluster Pods & Containers Overview` (`docker-overview.json`)**: Per-container CPU %, working set memory curves, network RX/TX, and CFS CPU throttling periods via cAdvisor.
   - **`🖥️ Host System & Hardware Overview` (`host-system-overview.json`)**: Host CPU load breakdown, thermal sensors per core, RAM utilization, root disk space, and load averages from Node Exporter.
@@ -377,10 +377,10 @@ Aerial uses an automated, event-driven GitOps continuous deployment pipeline:
 | :--- | :--- | :--- |
 | **`postgres`** | `5432` | CloudNativePG 2-instance PostgreSQL 18 + `pgvector` cluster with native `:9187` Prometheus metrics for production state, CAS task queues, semantic memory, PR registry, schedules, and Vanadis build queues. |
 | **`eri`** | `8080` | Multi-protocol Go execution daemon running `agy`, PostgreSQL session memory, multiplexed Discord ingress from `synapse`, Voice (`/voice/ask`), HTTP (`/prompt`) ingress, System-1 triage via `pjev`, Prometheus metrics (`:8080/metrics`), and `SIGHUP` configuration hot-reloading. Mounted `:ro`. |
-| **`synapse`** | `4020` | Ingress gateway and event-driven router owning Discord Gateway WebSocket, startup catch-up sweeps, River queues (`discord_ingress`, `discord_interaction`), and GitHub/Flux webhook dispatch. |
+| **`synapse`** | `4020` | Ingress gateway and event-driven router owning Discord Gateway WebSocket, startup catch-up sweeps, NATS JetStream queues (`discord_ingress`, `discord_interaction`), and GitHub/Flux webhook dispatch. |
 | **`haro`** | `4005` | Persistent scheduling, heartbeat, and event-watch orchestration service (`http://haro.aerial/mcp`) evaluating cron, one-shot, and event triggers and dispatching due turns to `eri`. |
 | **`coven`** | `4008` | Semantic fact extraction, hybrid RRF memory search, ACT-R memory decay, and procedural skill synthesis MCP service (`http://coven.aerial/mcp`). |
-| **`vanadis`** | `4025` | Autonomous multi-chunk build queue orchestrator backed by PostgreSQL and River with JIT symbol line-slice resolution. |
+| **`vanadis`** | `4025` | Autonomous multi-chunk build queue orchestrator backed by PostgreSQL and NATS JetStream with JIT symbol line-slice resolution. |
 | **`prospera`** | `8080` | Autonomous Twilio media-streaming voice and telephone call agent. |
 | **`coredns`** | `53` | Kubernetes CoreDNS daemon rewriting internal DNS queries (`*.aerial`, `*.lan` -> `*.default.svc.cluster.local`). |
 | **`infisical`** | `8080` | Centralized secret management and automated rotation backed by Valkey 9 (`:6379`), dynamically syncing secrets into Kubernetes Secrets (`shared-secrets`). |
@@ -633,7 +633,7 @@ While `azylman/aerial`'s base `k8s/*.yaml` manifests are completely single-node 
 
 - **Multi-User Security & Admin Privilege Enforcement**: In shared or multi-user channels, messages from users are automatically checked against `admin_users` in `config.yaml`. Only authorized admins (`is_admin: true`) can modify system instructions, edit system configuration (`config.yaml`), manage Kubernetes workloads, or alter cron schedules.
 - **Fail-Closed Default-Deny Server Containment**: Set `channels.default.mode: "ignore"` to contain Aerial exclusively to allowlisted channels on shared Discord servers.
-- **Discord Funnel Hardening**: River transactional queue buffering on `synapse` guarantees message delivery across deployment restarts, thread ID deduplication recovery resolves Discord error 160004 race conditions seamlessly, and message staleness TTL is set to 30 minutes to prevent dropped messages during deployment bursts.
+- **Discord Funnel Hardening**: NATS JetStream durable queue buffering on `synapse` guarantees message delivery across deployment restarts, thread ID deduplication recovery resolves Discord error 160004 race conditions seamlessly, and message staleness TTL is set to 30 minutes to prevent dropped messages during deployment bursts.
 - **Zero Plaintext Tokens**: GitHub PATs and database secrets are passed in-memory ephemerally and never written to `.git/config` on disk.
 - **Automated Token Redaction**: All subprocess logs, errors, and GitOps reconcile streams pass through multi-pattern token sanitizers (`pkg/sanitizer`) to redact sensitive credentials.
 - **Infisical Secret Governance**: Secrets are centralized in Infisical and injected dynamically into Kubernetes Secrets (`shared-secrets`), eliminating plaintext `.env` files on disk.

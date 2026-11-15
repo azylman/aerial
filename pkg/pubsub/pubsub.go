@@ -240,42 +240,144 @@ func (b *JetStreamBus) PublishWithHeader(ctx context.Context, subject string, ms
 	return nil
 }
 
-// Subscribe establishes a durable pub/sub fan-out subscription.
+// Subscribe establishes a pub/sub fan-out subscription. A non-empty durable
+// binds to an explicitly managed durable consumer (see ensureDurableConsumer)
+// whose deliver group equals the durable name, so overlapping pods share it
+// during rolling updates and no pod ever deletes it on Unsubscribe. An empty
+// durable creates a library-owned ephemeral consumer that is removed on
+// Unsubscribe.
 func (b *JetStreamBus) Subscribe(ctx context.Context, subject string, durable string, handler Handler) (Subscription, error) {
-	opts := []nats.SubOpt{
-		nats.ManualAck(),
-		nats.AckWait(30 * time.Second),
-	}
 	if durable != "" {
-		opts = append(opts, nats.Durable(durable))
+		return b.bindDurable(ctx, subject, durable, handler)
 	}
-
 	sub, err := b.js.Subscribe(subject, func(m *nats.Msg) {
 		b.dispatch(m, handler)
-	}, opts...)
+	}, nats.ManualAck(), nats.AckWait(durableAckWait))
 	if err != nil {
 		return nil, fmt.Errorf("subscribe to %s: %w", subject, err)
 	}
 	return &jsSubscription{sub: sub}, nil
 }
 
-// ConsumeQueue establishes a competing-consumer work queue subscription.
+// ConsumeQueue establishes a competing-consumer work queue subscription bound
+// to the explicitly managed durable consumer named queue.
 func (b *JetStreamBus) ConsumeQueue(ctx context.Context, subject string, queue string, handler Handler) (Subscription, error) {
-	opts := []nats.SubOpt{
-		nats.ManualAck(),
-		nats.AckWait(30 * time.Second),
+	if queue == "" {
+		return nil, fmt.Errorf("queue subscribe to %s: queue name is required", subject)
 	}
-	if queue != "" {
-		opts = append(opts, nats.Durable(queue))
-	}
+	return b.bindDurable(ctx, subject, queue, handler)
+}
 
-	sub, err := b.js.QueueSubscribe(subject, queue, func(m *nats.Msg) {
+// bindDurable ensures the durable consumer exists and attaches a queue
+// subscription to it with nats.Bind, which never deletes the consumer.
+func (b *JetStreamBus) bindDurable(ctx context.Context, subject, durable string, handler Handler) (Subscription, error) {
+	stream, err := b.ensureDurableConsumer(ctx, subject, durable)
+	if err != nil {
+		return nil, err
+	}
+	sub, err := b.js.QueueSubscribe(subject, durable, func(m *nats.Msg) {
 		b.dispatch(m, handler)
-	}, opts...)
+	}, nats.Bind(stream, durable), nats.ManualAck())
 	if err != nil {
 		return nil, fmt.Errorf("queue subscribe to %s: %w", subject, err)
 	}
 	return &jsSubscription{sub: sub}, nil
+}
+
+// durableAckWait is the redelivery timeout for all consumers created by the bus.
+const durableAckWait = 30 * time.Second
+
+// durableDeliverSubject is deterministic so concurrent creators on different
+// pods submit identical configs and subscriptions keep receiving even if the
+// consumer is recreated underneath them.
+func durableDeliverSubject(stream, durable string) string {
+	return "_DELIVER." + stream + "." + durable
+}
+
+// durableConsumerConfig returns the desired push consumer config for durable.
+func durableConsumerConfig(stream, subject, durable string) *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable:        durable,
+		FilterSubject:  subject,
+		AckPolicy:      nats.AckExplicitPolicy,
+		AckWait:        durableAckWait,
+		DeliverPolicy:  nats.DeliverAllPolicy,
+		DeliverGroup:   durable,
+		DeliverSubject: durableDeliverSubject(stream, durable),
+	}
+}
+
+// durableCompatible reports whether an existing consumer can be bound as-is:
+// a push consumer filtering subject with a deliver group equal to durable.
+func durableCompatible(cfg *nats.ConsumerConfig, subject, durable string) bool {
+	return cfg.DeliverSubject != "" && cfg.FilterSubject == subject && cfg.DeliverGroup == durable
+}
+
+// isConsumerExists reports whether AddConsumer lost a creation race.
+func isConsumerExists(err error) bool {
+	if errors.Is(err, nats.ErrConsumerNameAlreadyInUse) {
+		return true
+	}
+	var apiErr *nats.APIError
+	return errors.As(err, &apiErr) &&
+		(apiErr.ErrorCode == nats.JSErrCodeConsumerAlreadyExists || apiErr.ErrorCode == nats.JSErrCodeConsumerNameExists)
+}
+
+// ensureDurableConsumer makes sure a durable push consumer compatible with a
+// bound queue subscription exists for subject and returns its stream.
+// Compatible consumers are left untouched. Incompatible ones (legacy consumers
+// without a deliver group, a different group or filter, or pull consumers) are
+// recreated starting right after their ack floor: nothing at or below the floor
+// is redelivered and no unacked message is skipped, but messages acked out of
+// order above the floor may be redelivered, so delivery stays at-least-once and
+// handlers must be idempotent.
+//
+// Concurrent migrations are tolerated but not serialized: JetStream has no
+// conditional delete, so two pods that both read the legacy consumer may each
+// delete and recreate it. The deterministic deliver subject and group keep
+// every pod's bound subscription receiving from whichever consumer survives;
+// the cost is redelivery of messages acked in that window, which the
+// at-least-once contract above already requires handlers to absorb.
+func (b *JetStreamBus) ensureDurableConsumer(ctx context.Context, subject, durable string) (string, error) {
+	opts := jsContextOpts(ctx)
+	stream, err := b.js.StreamNameBySubject(subject, opts...)
+	if err != nil {
+		return "", fmt.Errorf("resolve stream for %s: %w", subject, err)
+	}
+	desired := durableConsumerConfig(stream, subject, durable)
+
+	info, err := b.js.ConsumerInfo(stream, durable, opts...)
+	switch {
+	case err == nil && durableCompatible(&info.Config, subject, durable):
+		return stream, nil
+	case err == nil:
+		desired.DeliverPolicy = nats.DeliverByStartSequencePolicy
+		desired.OptStartSeq = info.AckFloor.Stream + 1
+		log.Printf("[pubsub] migrating consumer %s/%s (filter %q, group %q) to bound deliver group, resuming at stream seq %d",
+			stream, durable, info.Config.FilterSubject, info.Config.DeliverGroup, desired.OptStartSeq)
+		if err := b.js.DeleteConsumer(stream, durable, opts...); err != nil && !errors.Is(err, nats.ErrConsumerNotFound) {
+			return "", fmt.Errorf("delete incompatible consumer %s/%s: %w", stream, durable, err)
+		}
+	case !errors.Is(err, nats.ErrConsumerNotFound):
+		return "", fmt.Errorf("consumer info %s/%s: %w", stream, durable, err)
+	}
+
+	_, err = b.js.AddConsumer(stream, desired, opts...)
+	if err == nil {
+		return stream, nil
+	}
+	if !isConsumerExists(err) {
+		return "", fmt.Errorf("add consumer %s/%s: %w", stream, durable, err)
+	}
+	// Another pod created it first; bind only if it is compatible.
+	info, err = b.js.ConsumerInfo(stream, durable, opts...)
+	if err != nil {
+		return "", fmt.Errorf("consumer info %s/%s after create race: %w", stream, durable, err)
+	}
+	if !durableCompatible(&info.Config, subject, durable) {
+		return "", fmt.Errorf("consumer %s/%s was concurrently created with an incompatible config", stream, durable)
+	}
+	return stream, nil
 }
 
 // EnsureCoreStreams registers and reconciles the 3 primary JetStream streams.
@@ -348,15 +450,19 @@ func (b *JetStreamBus) ConsumerStats(ctx context.Context, stream, consumer strin
 	if b == nil || b.js == nil {
 		return 0, 0, errors.New("pubsub: jetstream context is nil")
 	}
-	var opts []nats.JSOpt
-	if ctx != nil {
-		opts = append(opts, nats.Context(ctx))
-	}
-	info, err := b.js.ConsumerInfo(stream, consumer, opts...)
+	info, err := b.js.ConsumerInfo(stream, consumer, jsContextOpts(ctx)...)
 	if err != nil {
 		return 0, 0, fmt.Errorf("consumer info %s/%s: %w", stream, consumer, err)
 	}
 	return int64(info.NumPending), int64(info.NumAckPending), nil
+}
+
+// jsContextOpts scopes JetStream API requests to ctx when one is provided.
+func jsContextOpts(ctx context.Context) []nats.JSOpt {
+	if ctx == nil {
+		return nil
+	}
+	return []nats.JSOpt{nats.Context(ctx)}
 }
 
 func (b *JetStreamBus) dispatch(m *nats.Msg, handler Handler) {

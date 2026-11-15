@@ -390,7 +390,7 @@ func assertPromptContains(t *testing.T, prompt string, wants []string) {
 func TestFormatChunkPrompt(t *testing.T) {
 	t.Parallel()
 	build := mkBuild("build-999", "1555000111", "Build Vanadis Queue Execution Pipeline", "Build Vanadis Queue", "")
-	build.SharedContext = "Architecture: River queue backed by PostgreSQL."
+	build.SharedContext = "Architecture: JetStream queue backed by NATS."
 	c1 := mkChunk("build-999-chunk-1", "", 0, "Task 1: Schema", "Create SQL tables", "", "merged")
 	c1.TargetFiles, c1.PRNumber = []string{"brain/schema.sql"}, 101
 	c2 := mkChunk("build-999-chunk-2", "", 1, "Task 2: Service", "Create vanadis service", "high", "running")
@@ -409,7 +409,7 @@ func TestFormatChunkPrompt(t *testing.T) {
 		}
 	}
 	p0, err := FormatChunkPrompt(build, chunks, 0)
-	if err != nil || !strings.Contains(p0, "(none — this is the first chunk)") || !strings.Contains(p0, "DO NOT implement these remaining chunks in this turn") || !strings.Contains(p0, "=== Shared Build Context ===\nArchitecture: River queue backed by PostgreSQL.") {
+	if err != nil || !strings.Contains(p0, "(none — this is the first chunk)") || !strings.Contains(p0, "DO NOT implement these remaining chunks in this turn") || !strings.Contains(p0, "=== Shared Build Context ===\nArchitecture: JetStream queue backed by NATS.") {
 		t.Fatalf("unexpected prompt for chunk 0:\n%s (err=%v)", p0, err)
 	}
 	p1, err := FormatChunkPrompt(build, chunks, 1)
@@ -418,7 +418,7 @@ func TestFormatChunkPrompt(t *testing.T) {
 	}
 	wantsP1 := []string{
 		"[VANADIS BUILD CHUNK EXECUTION]", "Build ID: build-999", "Build Title: Build Vanadis Queue Execution Pipeline",
-		"=== Build Objective ===\nBuild Vanadis Queue", "=== Shared Build Context ===\nArchitecture: River queue backed by PostgreSQL.",
+		"=== Build Objective ===\nBuild Vanadis Queue", "=== Shared Build Context ===\nArchitecture: JetStream queue backed by NATS.",
 		"[Chunk 1/3] Task 1: Schema (aerial, PR #101)", "=== Active Chunk (Chunk 2 of 3) ===", "Repository: aerial",
 		"Target Files: vanadis/main.go, vanadis/main_test.go", "Target Symbols: VanadisServer, FormatChunkPrompt",
 		"- [Chunk 3/3] Task 3: Webhook Advancement (aerial)", "optimizing all design and implementation choices for the `Build Objective`",

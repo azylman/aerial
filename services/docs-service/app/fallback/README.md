@@ -15,7 +15,7 @@ flowchart TB
         DiscordUser(["Discord User / Gateway"])
         WebBrowser(["Web Browser / Client"])
         Synapse["synapse (:4020)
-• Discord Gateway WebSocket & River Ingress
+• Discord Gateway WebSocket & JetStream Ingress
 • GitHub, Flux & Infisical Webhooks"]
         LanGW["lan-gateway (:80 / :443)
 NGINX Gateway Fabric"]
@@ -42,7 +42,7 @@ STT, TTS, Embeddings & Wyoming"]
     subgraph Persistence ["💾 Persistence & GitOps"]
         Postgres[("postgres (:5432 / :9187)
 • CloudNativePG PostgreSQL 18 + pgvector
-• River Task Queues & PR Registry
+• CAS Task Queues & PR Registry
 • Vector RAG & State Persistence")]
         Flux["flux-system
 Flux CD k3s Reconciler (./k8s)"]
