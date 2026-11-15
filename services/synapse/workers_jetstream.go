@@ -77,11 +77,25 @@ func handleJetStreamJob[T any](msg pubsub.Message, maxDeliver uint64, jobName st
 	return nil
 }
 
-// HandleGitHubJob processes an aerial.jobs.synapse.github job message from JetStream.
+type finalAttemptKey struct{}
+
+func withFinalAttempt(ctx context.Context, isFinal bool) context.Context {
+	return context.WithValue(ctx, finalAttemptKey{}, isFinal)
+}
+
+func isFinalAttemptFromContext(ctx context.Context) bool {
+	v, ok := ctx.Value(finalAttemptKey{}).(bool)
+	return ok && v
+}
+
+// HandleGitHubJob processes an aerial.jobs.synapse.github job message from JetStream,
+// marking final delivery attempts so terminal image promotion failures transition PRs to deploy_failed.
 func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) error {
+	isFinal := msg.NumDelivered() >= maxDeliverGitHubWebhook
+	jobCtx := withFinalAttempt(ctx, isFinal)
 	return handleJetStreamJob(msg, maxDeliverGitHubWebhook, "github", func(args GitHubWebhookArgs) error {
-		log.Printf("[synapse] [jetstream] processing github job event=%s delivery=%s", args.Event, args.Delivery)
-		_, err := s.ProcessGitHubEvent(ctx, args.Event, args.Delivery, args.Body)
+		log.Printf("[synapse] [jetstream] processing github job event=%s delivery=%s final=%v", args.Event, args.Delivery, isFinal)
+		_, err := s.ProcessGitHubEvent(jobCtx, args.Event, args.Delivery, args.Body)
 		return err
 	})
 }

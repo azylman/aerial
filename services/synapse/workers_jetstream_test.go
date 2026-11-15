@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -683,6 +686,173 @@ func TestJobArgsKindsAndResolveJobQueueAndKind(t *testing.T) {
 			if gotQueue != tc.wantQueue || gotKind != tc.wantKind {
 				t.Errorf("resolveJobQueueAndKind(%T) = (%q, %q), want (%q, %q)", tc.args, gotQueue, gotKind, tc.wantQueue, tc.wantKind)
 			}
+		})
+	}
+}
+
+type handleImagePromotionCase struct {
+	name             string
+	numDelivered     uint64
+	promoteErr       error
+	wantErr          bool
+	wantTerm         bool
+	wantDeployFailed int
+	wantDeployEvents int
+}
+
+func runHandleImagePromotionCase(t *testing.T, tc handleImagePromotionCase) {
+	t.Helper()
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/actions/runs/") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"total_count": 1,
+				"jobs": [
+					{
+						"id": 1,
+						"name": "Build & Push Container Images (eri)",
+						"status": "completed",
+						"conclusion": "success"
+					}
+				]
+			}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	bus := &mockEventBus{}
+	reg := &mockPRRegistry{
+		resolveTargetID:     "100000000000000001",
+		resolveBranch:       "feat/test",
+		deployFailedUpdated: true,
+	}
+	disp := &mockOutboundDispatcher{
+		kustomizationsByImage: map[string][]fluxKustomizationRef{
+			"aerial-eri": {{Namespace: "flux-system", Name: "aerial-core"}},
+		},
+		promoteErr: tc.promoteErr,
+	}
+	cfg := Config{
+		GitHubAPIURL:    mockServer.URL,
+		DefaultOwner:    true,
+		SystemChannelID: "100000000000000001",
+	}
+	srv := newTestRouter(cfg, mockServer.Client(), reg, disp)
+	srv.bus = bus
+
+	payload := `{
+		"action": "completed",
+		"workflow_run": {
+			"id": 100,
+			"name": "Continuous Delivery",
+			"head_sha": "sha123",
+			"head_branch": "main",
+			"status": "completed",
+			"conclusion": "success",
+			"pull_requests": [
+				{
+					"number": 42,
+					"head": {"ref": "feat/test", "sha": "sha123"}
+				}
+			]
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+	msgData, err := json.Marshal(GitHubWebhookArgs{
+		Event:    "workflow_run",
+		Delivery: "del-wf-100",
+		Body:     []byte(payload),
+	})
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	memMsg := &synapseMemoryMsg{
+		data:         msgData,
+		numDelivered: tc.numDelivered,
+	}
+
+	err = srv.HandleGitHubJob(context.Background(), memMsg)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("HandleGitHubJob() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if memMsg.termed != tc.wantTerm {
+		t.Errorf("memMsg.termed = %v, want %v", memMsg.termed, tc.wantTerm)
+	}
+	if len(reg.deployFailedCalls) != tc.wantDeployFailed {
+		t.Errorf("len(deployFailedCalls) = %d, want %d", len(reg.deployFailedCalls), tc.wantDeployFailed)
+	}
+
+	deployEventsCount := 0
+	for _, ev := range bus.publishedPREvents {
+		if ev.Event == "deploy_failed" {
+			deployEventsCount++
+			if ev.Repo != "azylman/aerial" || ev.PRNumber != 42 || ev.Status != "deploy_failed" {
+				t.Errorf("unexpected deploy_failed event content: %+v", ev)
+			}
+		}
+	}
+	if deployEventsCount != tc.wantDeployEvents {
+		t.Errorf("deploy_failed events count = %d, want %d", deployEventsCount, tc.wantDeployEvents)
+	}
+}
+
+func TestHandleImagePromotionMessage_TerminalFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []handleImagePromotionCase{
+		{
+			name:             "transient promote error delivery 1 leaves PR deploying for retry",
+			numDelivered:     1,
+			promoteErr:       errors.New("kube api transient conflict"),
+			wantErr:          true,
+			wantTerm:         false,
+			wantDeployFailed: 0,
+			wantDeployEvents: 0,
+		},
+		{
+			name:             "transient promote error delivery 4 leaves PR deploying for retry",
+			numDelivered:     4,
+			promoteErr:       errors.New("kube api transient conflict"),
+			wantErr:          true,
+			wantTerm:         false,
+			wantDeployFailed: 0,
+			wantDeployEvents: 0,
+		},
+		{
+			name:             "terminal promote error delivery 5 transitions to deploy_failed and terms message",
+			numDelivered:     5,
+			promoteErr:       errors.New("kube api persistent failure"),
+			wantErr:          false,
+			wantTerm:         true,
+			wantDeployFailed: 1,
+			wantDeployEvents: 1,
+		},
+		{
+			name:             "terminal promote error delivery 6 transitions to deploy_failed",
+			numDelivered:     6,
+			promoteErr:       errors.New("kube api persistent failure"),
+			wantErr:          false,
+			wantTerm:         true,
+			wantDeployFailed: 1,
+			wantDeployEvents: 1,
+		},
+		{
+			name:             "successful promote delivery 1 completes without deploy_failed",
+			numDelivered:     1,
+			promoteErr:       nil,
+			wantErr:          false,
+			wantTerm:         false,
+			wantDeployFailed: 0,
+			wantDeployEvents: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runHandleImagePromotionCase(t, tc)
 		})
 	}
 }
