@@ -64,6 +64,12 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "prospera_app_test.db")
 
+	origBusFn := newProsperaBusFn
+	newProsperaBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
+		return pubsub.NewMemoryBus(), nil
+	}
+	defer func() { newProsperaBusFn = origBusFn }()
+
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("failed to open sqlite: %v", err)
@@ -112,68 +118,87 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	}
 	_ = db.Close()
 
+	cfg := &Config{
+		Port:                  "0",
+		DatabaseURL:           "sqlite://" + dbPath,
+		DefaultDiscordChannel: "prospera",
+		NATSURL:               "nats://127.0.0.1:4222",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	appDone := make(chan error, 1)
+
+	go func() {
+		appDone <- RunApp(ctx, newTestConfigSource(cfg))
+	}()
+
+	cancel()
+
+	select {
+	case err := <-appDone:
+		if err != nil {
+			t.Fatalf("RunApp() shutdown error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunApp() did not shut down within timeout")
+	}
+}
+
+func TestSetupProsperaBus(t *testing.T) {
 	tests := []struct {
 		name       string
 		natsURL    string
 		busFactory func(context.Context, string) (pubsub.Bus, error)
-		wantBus    bool
+		wantNil    bool
 	}{
 		{
-			name:    "without nats url",
-			natsURL: "",
-			wantBus: false,
+			name:    "empty url returns nil",
+			natsURL: "   ",
+			wantNil: true,
 		},
 		{
-			name:    "with nats url success",
+			name:    "bus factory error returns nil",
 			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(_ context.Context, _ string) (pubsub.Bus, error) {
+			busFactory: func(context.Context, string) (pubsub.Bus, error) {
+				return nil, errors.New("connection failed")
+			},
+			wantNil: true,
+		},
+		{
+			name:    "successful bus sets event bus and consumers",
+			natsURL: "nats://127.0.0.1:4222",
+			busFactory: func(context.Context, string) (pubsub.Bus, error) {
 				return pubsub.NewMemoryBus(), nil
 			},
-			wantBus: true,
+			wantNil: false,
 		},
 		{
-			name:    "with nats url failure",
+			name:    "consumer start failure logs and returns bus",
 			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(_ context.Context, _ string) (pubsub.Bus, error) {
-				return nil, errors.New("connection refused")
+			busFactory: func(context.Context, string) (pubsub.Bus, error) {
+				return &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaReportJob}, nil
 			},
-			wantBus: false,
+			wantNil: false,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			origBusFn := newProsperaBusFn
-			defer func() {
-				newProsperaBusFn = origBusFn
-			}()
+			defer func() { newProsperaBusFn = origBusFn }()
 			if tc.busFactory != nil {
 				newProsperaBusFn = tc.busFactory
 			}
 
-			cfg := &Config{
-				Port:                  "0",
-				DatabaseURL:           "sqlite://" + dbPath,
-				DefaultDiscordChannel: "prospera",
-				NATSURL:               tc.natsURL,
+			server, _, _ := setupTestServer()
+			bus := setupProsperaBus(context.Background(), server, tc.natsURL)
+			if (bus == nil) != tc.wantNil {
+				t.Fatalf("setupProsperaBus() nil = %v, wantNil = %v", bus == nil, tc.wantNil)
 			}
-
-			ctx, cancel := context.WithCancel(context.Background())
-			appDone := make(chan error, 1)
-
-			go func() {
-				appDone <- RunApp(ctx, newTestConfigSource(cfg))
-			}()
-
-			cancel()
-
-			select {
-			case err := <-appDone:
-				if err != nil {
-					t.Fatalf("RunApp() shutdown error = %v", err)
+			if !tc.wantNil {
+				if server.EventBus() != bus {
+					t.Fatalf("server.EventBus() = %v, want %v", server.EventBus(), bus)
 				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("RunApp() did not shut down within timeout")
 			}
 		})
 	}
