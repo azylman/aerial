@@ -274,6 +274,211 @@ func TestInterchangeablePool_ContextCancellation(t *testing.T) {
 	}
 }
 
+func TestInterchangeablePool_BoundedOverflowAndQueueing(t *testing.T) {
+	t.Parallel()
+	mock := createTestSpawner()
+	underlying := NewUnifiedProcessPool(PoolConfig{}, mock)
+	t.Cleanup(func() { _ = underlying.Close() })
+
+	// Pool with 1 prewarmed worker and MaxOverflow: 1
+	pool := NewInterchangeablePool(underlying, InterchangeablePoolConfig{
+		WorkerCount: 1,
+		MaxOverflow: 1,
+		KeyPrefix:   "test:overflow",
+	})
+	t.Cleanup(func() { _ = pool.Close() })
+
+	ctx := context.Background()
+
+	// 1. Lease 1 takes the 1 prewarmed worker.
+	l1, err := pool.AcquireLease(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("unexpected error acquiring l1: %v", err)
+	}
+	if isl1, ok := l1.(*interchangeableSessionLease); !ok || isl1.IsOverflow() {
+		t.Errorf("expected l1 to not be overflow")
+	}
+
+	// 2. Lease 2 takes the 1 overflow slot.
+	l2, err := pool.AcquireLease(ctx, "req-2")
+	if err != nil {
+		t.Fatalf("unexpected error acquiring l2: %v", err)
+	}
+	if isl2, ok := l2.(*interchangeableSessionLease); !ok || !isl2.IsOverflow() {
+		t.Errorf("expected l2 to be overflow")
+	}
+
+	// 3. Lease 3 with timeout should block and fail with DeadlineExceeded because both slots are busy.
+	ctxTimeout, cancelTimeout := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancelTimeout()
+	_, err = pool.AcquireLease(ctxTimeout, "req-3")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded for l3, got: %v", err)
+	}
+
+	// 4. Release overflow lease l2. Now an overflow slot opens up.
+	if err := l2.Release(); err != nil {
+		t.Fatalf("unexpected error releasing l2: %v", err)
+	}
+
+	// 5. Now lease 4 can successfully acquire the overflow slot.
+	l4, err := pool.AcquireLease(ctx, "req-4")
+	if err != nil {
+		t.Fatalf("unexpected error acquiring l4: %v", err)
+	}
+	if isl4, ok := l4.(*interchangeableSessionLease); !ok || !isl4.IsOverflow() {
+		t.Errorf("expected l4 to be overflow")
+	}
+	_ = l4.Release()
+	_ = l1.Release()
+	pool.WaitBackground()
+}
+
+func TestInterchangeablePool_BoundedOverflow_ContextCancellation(t *testing.T) {
+	t.Parallel()
+	mock := createTestSpawner()
+	underlying := NewUnifiedProcessPool(PoolConfig{}, mock)
+	t.Cleanup(func() { _ = underlying.Close() })
+
+	pool := NewInterchangeablePool(underlying, InterchangeablePoolConfig{
+		WorkerCount: 1,
+		MaxOverflow: 1,
+	})
+	t.Cleanup(func() { _ = pool.Close() })
+
+	ctx := context.Background()
+	l1, err := pool.AcquireLease(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("l1 error: %v", err)
+	}
+	defer l1.Release()
+	l2, err := pool.AcquireLease(ctx, "req-2")
+	if err != nil {
+		t.Fatalf("l2 error: %v", err)
+	}
+	defer l2.Release()
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	doneCh := make(chan error, 1)
+	go func() {
+		_, err := pool.AcquireLease(cancelCtx, "req-wait")
+		doneCh <- err
+	}()
+
+	cancel()
+
+	select {
+	case err := <-doneCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cancelled lease acquisition")
+	}
+}
+
+func TestInterchangeablePool_BoundedOverflow_WaitingForWorkerReturn(t *testing.T) {
+	t.Parallel()
+	mock := createTestSpawner()
+	underlying := NewUnifiedProcessPool(PoolConfig{}, mock)
+	t.Cleanup(func() { _ = underlying.Close() })
+
+	pool := NewInterchangeablePool(underlying, InterchangeablePoolConfig{
+		WorkerCount: 1,
+		MaxOverflow: 1,
+	})
+	t.Cleanup(func() { _ = pool.Close() })
+
+	ctx := context.Background()
+	l1, err := pool.AcquireLease(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("l1: %v", err)
+	}
+	l2, err := pool.AcquireLease(ctx, "req-2")
+	if err != nil {
+		t.Fatalf("l2: %v", err)
+	}
+	defer l2.Release()
+
+	l3Ch := make(chan SessionLease, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		l, err := pool.AcquireLease(ctx, "req-3")
+		if err != nil {
+			errCh <- err
+			return
+		}
+		l3Ch <- l
+	}()
+
+	_ = l1.Release()
+
+	select {
+	case l3 := <-l3Ch:
+		if isl, ok := l3.(*interchangeableSessionLease); !ok || isl.IsOverflow() {
+			t.Errorf("expected l3 to acquire prewarmed worker, got overflow: %v", isl.IsOverflow())
+		}
+		_ = l3.Release()
+	case err := <-errCh:
+		t.Fatalf("unexpected error for l3: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for l3 to acquire returned prewarmed worker")
+	}
+}
+
+func TestInterchangeablePool_BoundedOverflow_PoolCloseWhileWaiting(t *testing.T) {
+	t.Parallel()
+	mock := createTestSpawner()
+	underlying := NewUnifiedProcessPool(PoolConfig{}, mock)
+	t.Cleanup(func() { _ = underlying.Close() })
+
+	pool := NewInterchangeablePool(underlying, InterchangeablePoolConfig{
+		WorkerCount: 1,
+		MaxOverflow: 1,
+	})
+
+	ctx := context.Background()
+	l1, err := pool.AcquireLease(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("l1: %v", err)
+	}
+	defer l1.Release()
+	l2, err := pool.AcquireLease(ctx, "req-2")
+	if err != nil {
+		t.Fatalf("l2: %v", err)
+	}
+	defer l2.Release()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := pool.AcquireLease(ctx, "req-3")
+		errCh <- err
+	}()
+
+	_ = pool.Close()
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "closed") {
+			t.Fatalf("expected closed error, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pool close to unblock waiter")
+	}
+}
+
+func TestTurnError_Unwrap(t *testing.T) {
+	t.Parallel()
+	baseErr := errors.New("underlying error")
+	te := &TurnError{Err: baseErr, Usage: AgyUsage{InputTokens: 5}}
+	if !errors.Is(te, baseErr) {
+		t.Fatalf("expected errors.Is match")
+	}
+	if u := te.Unwrap(); !errors.Is(u, baseErr) {
+		t.Fatalf("expected Unwrap = %v", baseErr)
+	}
+}
+
 func checkInterchangeableNilPool(ctx context.Context, t *testing.T) {
 	t.Helper()
 	var nilPool *InterchangeablePool
