@@ -27,18 +27,10 @@ type Config struct {
 	Ollama           ollama.Config `yaml:"ollama"`
 }
 
-// LoadConfig loads configuration from path or default locations with environment overrides.
-func LoadConfig(path string) (*Config, error) {
-	resolved := path
-	if strings.TrimSpace(resolved) == "" {
-		resolved = httpkit.ResolveConfigPathWithLocal(
-			"CONFIG_PATH",
-			"docket-mcp.yaml",
-			"/etc/docket-mcp/config.yaml",
-			"config.yaml",
-		)
-	}
-
+// LoadConfig loads configuration from path (built-in defaults only when path is
+// empty) and applies overrides read through getenv. Callers inject os.Getenv in
+// production so tests never see the process environment.
+func LoadConfig(path string, getenv func(string) string) (*Config, error) {
 	cfg := &Config{
 		Port:            "8080",
 		VikunjaURL:      "",
@@ -52,15 +44,28 @@ func LoadConfig(path string) (*Config, error) {
 		},
 	}
 
-	if err := loadConfigFile(resolved, cfg); err != nil {
+	if err := loadConfigFile(strings.TrimSpace(path), cfg); err != nil {
 		return nil, err
 	}
 
-	applyEnvOverrides(cfg)
+	applyEnvOverrides(cfg, getenv)
 	return cfg, nil
 }
 
+// resolveConfigPath picks the config file from CONFIG_PATH or the default locations.
+func resolveConfigPath() string {
+	return httpkit.ResolveConfigPathWithLocal(
+		"CONFIG_PATH",
+		"docket-mcp.yaml",
+		"/etc/docket-mcp/config.yaml",
+		"config.yaml",
+	)
+}
+
 func loadConfigFile(resolved string, cfg *Config) error {
+	if resolved == "" {
+		return nil
+	}
 	fi, err := os.Stat(resolved)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -81,31 +86,31 @@ func loadConfigFile(resolved string, cfg *Config) error {
 	return nil
 }
 
-func applyEnvOverrides(cfg *Config) {
-	if p := strings.TrimSpace(os.Getenv("PORT")); p != "" {
+func applyEnvOverrides(cfg *Config, getenv func(string) string) {
+	if p := strings.TrimSpace(getenv("PORT")); p != "" {
 		cfg.Port = p
 	}
-	if vu := strings.TrimSpace(os.Getenv("VIKUNJA_URL")); vu != "" {
+	if vu := strings.TrimSpace(getenv("VIKUNJA_URL")); vu != "" {
 		cfg.VikunjaURL = vu
 	}
-	if vu := strings.TrimSpace(os.Getenv("VIKUNJA_USERNAME")); vu != "" {
+	if vu := strings.TrimSpace(getenv("VIKUNJA_USERNAME")); vu != "" {
 		cfg.VikunjaUsername = vu
 	}
-	if vp := strings.TrimSpace(os.Getenv("VIKUNJA_PASSWORD")); vp != "" {
+	if vp := strings.TrimSpace(getenv("VIKUNJA_PASSWORD")); vp != "" {
 		cfg.VikunjaPassword = vp
 	}
-	if pidStr := strings.TrimSpace(os.Getenv("DEFAULT_PROJECT_ID")); pidStr != "" {
+	if pidStr := strings.TrimSpace(getenv("DEFAULT_PROJECT_ID")); pidStr != "" {
 		if pid, err := strconv.ParseInt(pidStr, 10, 64); err == nil && pid > 0 {
 			cfg.DefaultProjectID = pid
 		}
 	}
-	if dsn := httpkit.BuildPostgresDSN(os.Getenv, "docket"); dsn != "" {
+	if dsn := httpkit.BuildPostgresDSN(getenv, "docket"); dsn != "" {
 		cfg.DatabaseURL = dsn
 	}
-	if ob := strings.TrimSpace(os.Getenv("OLLAMA_BASE_URL")); ob != "" {
+	if ob := strings.TrimSpace(getenv("OLLAMA_BASE_URL")); ob != "" {
 		cfg.Ollama.BaseURL = ob
 	}
-	if om := strings.TrimSpace(os.Getenv("OLLAMA_MODEL")); om != "" {
+	if om := strings.TrimSpace(getenv("OLLAMA_MODEL")); om != "" {
 		cfg.Ollama.Model = om
 	}
 }

@@ -706,26 +706,14 @@ type loadConfigTestCase struct {
 
 func runLoadConfigCase(t *testing.T, tc loadConfigTestCase) {
 	t.Helper()
-	t.Setenv("PORT", "")
-	t.Setenv("VIKUNJA_URL", "")
-	t.Setenv("VIKUNJA_USERNAME", "")
-	t.Setenv("VIKUNJA_PASSWORD", "")
-	t.Setenv("DEFAULT_PROJECT_ID", "")
-	t.Setenv("POSTGRES_URL", "")
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("POSTGRES_PASSWORD", "")
-	t.Setenv("POSTGRES_HOST", "")
-	t.Setenv("POSTGRES_PORT", "")
-	t.Setenv("POSTGRES_USER", "")
-	t.Setenv("POSTGRES_DB", "")
-	t.Setenv("OLLAMA_BASE_URL", "")
-	t.Setenv("OLLAMA_MODEL", "")
-
-	if tc.envKey != "" {
-		t.Setenv(tc.envKey, tc.envVal)
+	getenv := func(key string) string {
+		if key == tc.envKey {
+			return tc.envVal
+		}
+		return ""
 	}
 
-	cfg, err := LoadConfig(tc.path)
+	cfg, err := LoadConfig(tc.path, getenv)
 	if tc.wantErr {
 		if err == nil {
 			t.Fatalf("expected error, got nil")
@@ -927,6 +915,7 @@ func loadConfigTestCases(validYAML, invalidYAML, emptyYAML, tempDir string) []lo
 }
 
 func TestLoadConfig(t *testing.T) {
+	t.Parallel()
 	tempDir := t.TempDir()
 	validYAML := filepath.Join(tempDir, "config.yaml")
 	if err := os.WriteFile(validYAML, []byte("port: \"9090\"\nvikunja_url: \"http://custom-vikunja:3456\"\ndefault_project_id: 42\n"), 0o600); err != nil {
@@ -946,6 +935,7 @@ func TestLoadConfig(t *testing.T) {
 	tests := loadConfigTestCases(validYAML, invalidYAML, emptyYAML, tempDir)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			runLoadConfigCase(t, tc)
 		})
 	}
