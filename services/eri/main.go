@@ -23,6 +23,8 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/ambient"
@@ -37,7 +39,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
-	"github.com/bwmarrin/discordgo"
 )
 
 // syncBrainEnvironment provisions rules, skills, hooks and MCP configs with provisioner.

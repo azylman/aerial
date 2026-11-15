@@ -34,13 +34,13 @@ func NewToolHandler(cfgSrc ConfigSource, store Store, twilio TwilioClient, sessi
 
 // InitiateCallArgs defines input arguments for initiate_call.
 type InitiateCallArgs struct {
-	To               string    `json:"to" jsonschema:"Destination phone number in E.164 format (10-digit US numbers and 11-digit numbers starting with 1 are normalized; spaces, dashes, dots, slashes and parens are stripped; anything else is rejected)"`
-	Message          string    `json:"message,omitempty" jsonschema:"Opening spoken greeting or task instruction"`
-	Mode             string    `json:"mode,omitempty" jsonschema:"Operating mode: 'conversation' for interactive bidirectional dialog or 'notify' for one-way spoken announcement (default 'conversation')"`
-	DTMFSequence     string    `json:"dtmf_sequence,omitempty" jsonschema:"Optional pre-connect DTMF sequence"`
+	To               string    `json:"to"                           jsonschema:"Destination phone number in E.164 format (10-digit US numbers and 11-digit numbers starting with 1 are normalized; spaces, dashes, dots, slashes and parens are stripped; anything else is rejected)"`
+	Message          string    `json:"message,omitempty"            jsonschema:"Opening spoken greeting or task instruction"`
+	Mode             string    `json:"mode,omitempty"               jsonschema:"Operating mode: 'conversation' for interactive bidirectional dialog or 'notify' for one-way spoken announcement (default 'conversation')"`
+	DTMFSequence     string    `json:"dtmf_sequence,omitempty"      jsonschema:"Optional pre-connect DTMF sequence"`
 	DiscordChannelID string    `json:"discord_channel_id,omitempty" jsonschema:"Target Discord channel for transcripts and updates"`
-	DiscordThreadID  string    `json:"discord_thread_id,omitempty" jsonschema:"Target Discord thread for updates"`
-	Brief            CallBrief `json:"brief,omitempty" jsonschema:"Call brief defining intent and approval firewall"`
+	DiscordThreadID  string    `json:"discord_thread_id,omitempty"  jsonschema:"Target Discord thread for updates"`
+	Brief            CallBrief `json:"brief,omitempty"              jsonschema:"Call brief defining intent and approval firewall"`
 }
 
 // InitiateCallOutput defines return payload for initiate_call.
@@ -52,8 +52,8 @@ type InitiateCallOutput struct {
 
 // SteerCallArgs defines input arguments for steer_call.
 type SteerCallArgs struct {
-	CallID  string `json:"call_id" jsonschema:"Active call ID to steer"`
-	Message string `json:"message" jsonschema:"Guidance or message text to inject (max 500 chars)"`
+	CallID  string `json:"call_id"        jsonschema:"Active call ID to steer"`
+	Message string `json:"message"        jsonschema:"Guidance or message text to inject (max 500 chars)"`
 	Mode    string `json:"mode,omitempty" jsonschema:"Steer mode: 'guidance' to instruct the assistant on behavior/strategy without speaking verbatim, or 'say' to ask the assistant to say the message out loud immediately, wording not guaranteed verbatim (default 'guidance')"`
 }
 
@@ -96,9 +96,9 @@ type ListCallsOutput struct {
 
 // SendSMSArgs defines input arguments for send_sms.
 type SendSMSArgs struct {
-	To            string `json:"to" jsonschema:"Destination phone number in E.164 format (10-digit US numbers and 11-digit numbers starting with 1 are normalized; spaces, dashes, dots, slashes and parens are stripped; anything else is rejected)"`
-	Body          string `json:"body" jsonschema:"Message body text"`
-	From          string `json:"from,omitempty" jsonschema:"Optional sender phone number in E.164 format, normalized like to; defaults to the configured from-number"`
+	To            string `json:"to"                        jsonschema:"Destination phone number in E.164 format (10-digit US numbers and 11-digit numbers starting with 1 are normalized; spaces, dashes, dots, slashes and parens are stripped; anything else is rejected)"`
+	Body          string `json:"body"                      jsonschema:"Message body text"`
+	From          string `json:"from,omitempty"            jsonschema:"Optional sender phone number in E.164 format, normalized like to; defaults to the configured from-number"`
 	RelatedCallID string `json:"related_call_id,omitempty" jsonschema:"Optional associated call ID"`
 }
 

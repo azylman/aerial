@@ -13,9 +13,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 // --- Shared Test Mocks & Helpers ---

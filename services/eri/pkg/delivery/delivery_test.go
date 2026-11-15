@@ -7,8 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/bwmarrin/discordgo"
+
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 type splitMessageTestCase struct {

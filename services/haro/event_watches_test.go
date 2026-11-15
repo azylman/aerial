@@ -11,9 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestPureHelpers_MapArgExtractors(t *testing.T) {

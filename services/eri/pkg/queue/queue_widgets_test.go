@@ -9,13 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
-	"github.com/bwmarrin/discordgo"
 )
 
 type deliverStatusWidgetCase struct {

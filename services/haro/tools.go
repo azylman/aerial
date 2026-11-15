@@ -121,12 +121,12 @@ func NewToolHandler(cfg *Config, database *sql.DB) *ToolHandler {
 }
 
 type ScheduleRecurringArgs struct {
-	ChannelID      string `json:"channel_id" jsonschema:"Discord Channel ID where fresh threads will be spawned."`
-	CronExpression string `json:"cron_expression" jsonschema:"Standard 5-field cron expression (e.g. '0 20 * * 5') or macro (@daily, @weekly, @monthly)."`
-	Prompt         string `json:"prompt" jsonschema:"Instructions to execute on every occurrence."`
+	ChannelID      string `json:"channel_id"             jsonschema:"Discord Channel ID where fresh threads will be spawned."`
+	CronExpression string `json:"cron_expression"        jsonschema:"Standard 5-field cron expression (e.g. '0 20 * * 5') or macro (@daily, @weekly, @monthly)."`
+	Prompt         string `json:"prompt"                 jsonschema:"Instructions to execute on every occurrence."`
 	TitlePrefix    string `json:"title_prefix,omitempty" jsonschema:"Title prefix for spawned threads (e.g. 'Weekly Meal Plan')."`
-	Timezone       string `json:"timezone,omitempty" jsonschema:"Timezone for evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone."`
-	Effort         string `json:"effort,omitempty" jsonschema:"Effort tier for the routine: 'high' (primary high-effort model), 'medium' (medium-effort model), or 'low' (lightweight low-effort model). Defaults to 'medium'."`
+	Timezone       string `json:"timezone,omitempty"     jsonschema:"Timezone for evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone."`
+	Effort         string `json:"effort,omitempty"       jsonschema:"Effort tier for the routine: 'high' (primary high-effort model), 'medium' (medium-effort model), or 'low' (lightweight low-effort model). Defaults to 'medium'."`
 }
 
 type ScheduleRecurringOutput struct {
@@ -188,10 +188,10 @@ func (h *ToolHandler) ScheduleRecurring(ctx context.Context, args ScheduleRecurr
 type ScheduleOnceArgs struct {
 	TargetID string `json:"target_id,omitempty" jsonschema:"Target Discord thread ID or channel ID where reminder will be delivered."`
 	ThreadID string `json:"thread_id,omitempty" jsonschema:"Target Discord thread ID or channel ID where reminder will be delivered."`
-	RunAt    string `json:"run_at" jsonschema:"ISO 8601 timestamp (e.g. '2026-08-28T21:00:00Z') or relative duration (e.g. '30m', '2h', '1d')."`
-	Prompt   string `json:"prompt" jsonschema:"Content/instructions of the reminder."`
-	Timezone string `json:"timezone,omitempty" jsonschema:"Timezone for absolute timestamp evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone."`
-	Effort   string `json:"effort,omitempty" jsonschema:"Effort tier: 'low' (lightweight low-effort model), 'medium' (medium-effort model), or 'high' (primary high-effort model). Defaults to 'medium'."`
+	RunAt    string `json:"run_at"              jsonschema:"ISO 8601 timestamp (e.g. '2026-08-28T21:00:00Z') or relative duration (e.g. '30m', '2h', '1d')."`
+	Prompt   string `json:"prompt"              jsonschema:"Content/instructions of the reminder."`
+	Timezone string `json:"timezone,omitempty"  jsonschema:"Timezone for absolute timestamp evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone."`
+	Effort   string `json:"effort,omitempty"    jsonschema:"Effort tier: 'low' (lightweight low-effort model), 'medium' (medium-effort model), or 'high' (primary high-effort model). Defaults to 'medium'."`
 }
 
 type ScheduleOnceOutput struct {
@@ -372,12 +372,12 @@ func (h *ToolHandler) CancelSchedule(ctx context.Context, args CancelScheduleArg
 }
 
 type UpdateCronScheduleArgs struct {
-	ScheduleID     string  `json:"schedule_id" jsonschema:"The ID of the recurring cron schedule to update."`
-	Effort         *string `json:"effort,omitempty" jsonschema:"Effort tier for the routine: 'high' (primary high-effort model), 'medium' (medium-effort model), or 'low' (lightweight low-effort model)."`
+	ScheduleID     string  `json:"schedule_id"               jsonschema:"The ID of the recurring cron schedule to update."`
+	Effort         *string `json:"effort,omitempty"          jsonschema:"Effort tier for the routine: 'high' (primary high-effort model), 'medium' (medium-effort model), or 'low' (lightweight low-effort model)."`
 	CronExpression *string `json:"cron_expression,omitempty" jsonschema:"New 5-field cron expression or macro."`
-	Prompt         *string `json:"prompt,omitempty" jsonschema:"New prompt instructions to execute on every occurrence."`
-	TitlePrefix    *string `json:"title_prefix,omitempty" jsonschema:"New title prefix for spawned threads."`
-	Timezone       *string `json:"timezone,omitempty" jsonschema:"New timezone for evaluation."`
+	Prompt         *string `json:"prompt,omitempty"          jsonschema:"New prompt instructions to execute on every occurrence."`
+	TitlePrefix    *string `json:"title_prefix,omitempty"    jsonschema:"New title prefix for spawned threads."`
+	Timezone       *string `json:"timezone,omitempty"        jsonschema:"New timezone for evaluation."`
 }
 
 type UpdateCronScheduleOutput struct {
@@ -483,14 +483,14 @@ func getMapBool(args map[string]any, keys ...string) (*bool, bool) {
 
 // ScheduleHeartbeatArgs defines arguments for the schedule_heartbeat MCP tool.
 type ScheduleHeartbeatArgs struct {
-	ChannelID      string `json:"channel_id,omitempty" jsonschema:"Discord Channel ID for heartbeat alerts."`
-	TargetID       string `json:"target_id,omitempty" jsonschema:"Alias for channel_id."`
-	TitlePrefix    string `json:"title_prefix,omitempty" jsonschema:"Title prefix for spawned heartbeat alert threads (default: 'Heartbeat Alert')."`
+	ChannelID      string `json:"channel_id,omitempty"      jsonschema:"Discord Channel ID for heartbeat alerts."`
+	TargetID       string `json:"target_id,omitempty"       jsonschema:"Alias for channel_id."`
+	TitlePrefix    string `json:"title_prefix,omitempty"    jsonschema:"Title prefix for spawned heartbeat alert threads (default: 'Heartbeat Alert')."`
 	CronExpression string `json:"cron_expression,omitempty" jsonschema:"Standard 5-field cron expression or macro evaluated periodically by Haro."`
-	CronExpr       string `json:"cron_expr,omitempty" jsonschema:"Alias for cron_expression."`
-	Prompt         string `json:"prompt" jsonschema:"Silent evaluation instructions or edge-triggered condition check."`
-	Timezone       string `json:"timezone,omitempty" jsonschema:"Timezone for cron evaluation (e.g. 'America/Los_Angeles' or 'UTC'). Defaults to configured server timezone."`
-	Effort         string `json:"effort,omitempty" jsonschema:"Effort tier: 'low', 'medium', or 'high'. Defaults to 'medium'."`
+	CronExpr       string `json:"cron_expr,omitempty"       jsonschema:"Alias for cron_expression."`
+	Prompt         string `json:"prompt"                    jsonschema:"Silent evaluation instructions or edge-triggered condition check."`
+	Timezone       string `json:"timezone,omitempty"        jsonschema:"Timezone for cron evaluation (e.g. 'America/Los_Angeles' or 'UTC'). Defaults to configured server timezone."`
+	Effort         string `json:"effort,omitempty"          jsonschema:"Effort tier: 'low', 'medium', or 'high'. Defaults to 'medium'."`
 }
 
 func (a ScheduleHeartbeatArgs) toMap() map[string]any {
@@ -524,17 +524,17 @@ func (a ScheduleHeartbeatArgs) toMap() map[string]any {
 
 // UpdateHeartbeatArgs defines arguments for the update_heartbeat MCP tool.
 type UpdateHeartbeatArgs struct {
-	ScheduleID     string `json:"schedule_id,omitempty" jsonschema:"The ID of the heartbeat schedule to update."`
-	ID             string `json:"id,omitempty" jsonschema:"Alias for schedule_id."`
-	ChannelID      string `json:"channel_id,omitempty" jsonschema:"New target Discord channel ID."`
-	TargetID       string `json:"target_id,omitempty" jsonschema:"Alias for channel_id."`
+	ScheduleID     string `json:"schedule_id,omitempty"     jsonschema:"The ID of the heartbeat schedule to update."`
+	ID             string `json:"id,omitempty"              jsonschema:"Alias for schedule_id."`
+	ChannelID      string `json:"channel_id,omitempty"      jsonschema:"New target Discord channel ID."`
+	TargetID       string `json:"target_id,omitempty"       jsonschema:"Alias for channel_id."`
 	CronExpression string `json:"cron_expression,omitempty" jsonschema:"New cron expression."`
-	CronExpr       string `json:"cron_expr,omitempty" jsonschema:"Alias for cron_expression."`
-	Prompt         string `json:"prompt,omitempty" jsonschema:"New prompt instructions."`
-	TitlePrefix    string `json:"title_prefix,omitempty" jsonschema:"New title prefix."`
-	Timezone       string `json:"timezone,omitempty" jsonschema:"New timezone for evaluation."`
-	Effort         string `json:"effort,omitempty" jsonschema:"New effort tier: 'low', 'medium', or 'high'."`
-	Enabled        *bool  `json:"enabled,omitempty" jsonschema:"Whether the heartbeat schedule is enabled."`
+	CronExpr       string `json:"cron_expr,omitempty"       jsonschema:"Alias for cron_expression."`
+	Prompt         string `json:"prompt,omitempty"          jsonschema:"New prompt instructions."`
+	TitlePrefix    string `json:"title_prefix,omitempty"    jsonschema:"New title prefix."`
+	Timezone       string `json:"timezone,omitempty"        jsonschema:"New timezone for evaluation."`
+	Effort         string `json:"effort,omitempty"          jsonschema:"New effort tier: 'low', 'medium', or 'high'."`
+	Enabled        *bool  `json:"enabled,omitempty"         jsonschema:"Whether the heartbeat schedule is enabled."`
 }
 
 func (a UpdateHeartbeatArgs) toMap() map[string]any {
@@ -578,13 +578,13 @@ func (a UpdateHeartbeatArgs) toMap() map[string]any {
 // WatchEventArgs defines arguments for the watch_event MCP tool.
 type WatchEventArgs struct {
 	ChannelID  string `json:"channel_id,omitempty" jsonschema:"Target Discord channel ID or thread ID."`
-	TargetID   string `json:"target_id,omitempty" jsonschema:"Alias for channel_id."`
-	ThreadID   string `json:"thread_id,omitempty" jsonschema:"Alias for channel_id."`
-	Source     string `json:"source" jsonschema:"Event source (e.g. 'flux', 'vanadis_build', 'vanadis_chunk', 'camera')."`
-	Target     string `json:"target" jsonschema:"Identifier of the target entity being watched."`
-	EventType  string `json:"event_type" jsonschema:"Type of event to watch (e.g. 'sync_success', 'completed', 'merged')."`
-	Prompt     string `json:"prompt" jsonschema:"Instructions to execute when the event triggers."`
-	Effort     string `json:"effort,omitempty" jsonschema:"Effort tier: 'low', 'medium', or 'high'. Defaults to 'medium'."`
+	TargetID   string `json:"target_id,omitempty"  jsonschema:"Alias for channel_id."`
+	ThreadID   string `json:"thread_id,omitempty"  jsonschema:"Alias for channel_id."`
+	Source     string `json:"source"               jsonschema:"Event source (e.g. 'flux', 'vanadis_build', 'vanadis_chunk', 'camera')."`
+	Target     string `json:"target"               jsonschema:"Identifier of the target entity being watched."`
+	EventType  string `json:"event_type"           jsonschema:"Type of event to watch (e.g. 'sync_success', 'completed', 'merged')."`
+	Prompt     string `json:"prompt"               jsonschema:"Instructions to execute when the event triggers."`
+	Effort     string `json:"effort,omitempty"     jsonschema:"Effort tier: 'low', 'medium', or 'high'. Defaults to 'medium'."`
 	Persistent *bool  `json:"persistent,omitempty" jsonschema:"Whether the event watch trigger remains active after firing (default false)."`
 }
 
@@ -623,7 +623,7 @@ func (a WatchEventArgs) toMap() map[string]any {
 // ListEventWatchesArgs defines arguments for the list_event_watches MCP tool.
 type ListEventWatchesArgs struct {
 	ChannelID string `json:"channel_id,omitempty" jsonschema:"Optional Discord channel ID filter."`
-	TargetID  string `json:"target_id,omitempty" jsonschema:"Alias for channel_id filter."`
+	TargetID  string `json:"target_id,omitempty"  jsonschema:"Alias for channel_id filter."`
 }
 
 func (a ListEventWatchesArgs) toMap() map[string]any {
@@ -639,8 +639,8 @@ func (a ListEventWatchesArgs) toMap() map[string]any {
 
 // CancelEventWatchArgs defines arguments for the cancel_event_watch MCP tool.
 type CancelEventWatchArgs struct {
-	WatchID    string `json:"watch_id,omitempty" jsonschema:"The ID of the event watch trigger to cancel."`
-	ID         string `json:"id,omitempty" jsonschema:"Alias for watch_id."`
+	WatchID    string `json:"watch_id,omitempty"    jsonschema:"The ID of the event watch trigger to cancel."`
+	ID         string `json:"id,omitempty"          jsonschema:"Alias for watch_id."`
 	ScheduleID string `json:"schedule_id,omitempty" jsonschema:"Alias for watch_id."`
 }
 

@@ -17,9 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/gorilla/websocket"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 type mainFakeCDPState struct {

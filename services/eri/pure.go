@@ -9,10 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
-	"github.com/bwmarrin/discordgo"
 )
 
 const discordErrCodeThreadAlreadyCreated = 160004

@@ -17,9 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/ollama"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type memoryTaskStore struct {

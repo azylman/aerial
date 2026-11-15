@@ -8,8 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"gopkg.in/yaml.v3"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
@@ -27,13 +28,13 @@ func ResolveConfigPath(fallbackPath string) string {
 }
 
 type QuickLaunchLink struct {
-	Name        string `json:"name" yaml:"name"`
-	URL         string `json:"url" yaml:"url"`
-	Icon        string `json:"icon,omitempty" yaml:"icon,omitempty"`
+	Name        string `json:"name"                  yaml:"name"`
+	URL         string `json:"url"                   yaml:"url"`
+	Icon        string `json:"icon,omitempty"        yaml:"icon,omitempty"`
 	Description string `json:"description,omitempty" yaml:"description,omitempty"`
-	Target      string `json:"target,omitempty" yaml:"target,omitempty"`
-	IsCore      bool   `json:"is_core,omitempty" yaml:"is_core,omitempty"`
-	IsCustom    bool   `json:"is_custom,omitempty" yaml:"is_custom,omitempty"`
+	Target      string `json:"target,omitempty"      yaml:"target,omitempty"`
+	IsCore      bool   `json:"is_core,omitempty"     yaml:"is_core,omitempty"`
+	IsCustom    bool   `json:"is_custom,omitempty"   yaml:"is_custom,omitempty"`
 }
 
 // DefaultQuickLaunchLinks returns the core default gateway launch targets.

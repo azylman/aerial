@@ -7,9 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/bwmarrin/discordgo"
 )
 
 func TestDeriveThreadTitle_TableDriven(t *testing.T) {

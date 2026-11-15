@@ -10,9 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/google/uuid"
 )
 
 // EventWebhookRequest represents an inbound generic event trigger webhook payload.

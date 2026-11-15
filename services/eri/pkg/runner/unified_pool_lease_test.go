@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/google/uuid"
+
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 func TestUnifiedProcessPool_SessionPropagation_Suite(t *testing.T) {

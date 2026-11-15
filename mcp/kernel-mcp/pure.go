@@ -11,8 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"gopkg.in/yaml.v3"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 // Stealth Chrome version constants.

@@ -9,10 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/config"
-	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/bwmarrin/discordgo"
 	"golang.org/x/sync/singleflight"
+
+	"github.com/azylman/aerial/services/eri/pkg/config"
+	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
 // ChannelSnapshot holds immutable channel metadata to avoid cross-goroutine pointer races.

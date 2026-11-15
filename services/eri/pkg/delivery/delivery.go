@@ -9,9 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
-	"github.com/bwmarrin/discordgo"
 )
 
 const MaxDiscordMessageLength = 2000

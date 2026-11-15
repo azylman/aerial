@@ -12,8 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/bwmarrin/discordgo"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 const (

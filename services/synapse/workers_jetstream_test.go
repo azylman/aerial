@@ -11,9 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/bwmarrin/discordgo"
 	"github.com/nats-io/nats.go"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 type synapseMemoryMsg struct {

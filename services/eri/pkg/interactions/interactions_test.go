@@ -13,13 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/bwmarrin/discordgo"
 )
 
 type capturedRequest struct {

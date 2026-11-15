@@ -14,6 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
@@ -21,8 +24,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
-	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/codes"
 )
 
 type oneShotScheduleRequest struct {

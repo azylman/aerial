@@ -11,13 +11,14 @@ import (
 	// Embed fallback timezone database.
 	_ "time/tzdata"
 
+	"github.com/bwmarrin/discordgo"
+	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/singleflight"
+
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/bwmarrin/discordgo"
-	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/sync/singleflight"
 )
 
 const (

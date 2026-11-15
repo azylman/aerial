@@ -11,9 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/jackc/pgx/v5"
 )
 
 func TestIsWaitingForImageBuild(t *testing.T) {

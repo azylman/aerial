@@ -67,6 +67,7 @@ linters:
     - spancheck
     - sqlclosecheck
     - staticcheck
+    - tagalign
     - testableexamples
     - thelper
     - tparallel
@@ -88,6 +89,9 @@ linters:
       replace-local: true
     perfsprint:
       error-format: false
+    tagalign:
+      align: true
+      sort: false
     dupl:
       threshold: 100
     dupword:
@@ -225,8 +229,15 @@ linters:
       - examples$
 formatters:
   enable:
+    - gci
     - gofmt
     - gofumpt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/azylman)
   exclusions:
     generated: lax
     paths:

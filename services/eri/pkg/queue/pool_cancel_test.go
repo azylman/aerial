@@ -6,11 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
+	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 type cancelDispatchFixture struct {

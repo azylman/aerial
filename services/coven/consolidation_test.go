@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
-
 	_ "modernc.org/sqlite"
 )
 

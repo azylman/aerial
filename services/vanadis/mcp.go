@@ -7,8 +7,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 // MCPChunkBrief captures the concise chunk fields exposed in MCP build listings.
@@ -25,7 +26,7 @@ type MCPChunkBrief struct {
 
 // MCPGetBuildArgs defines arguments for get_build tool.
 type MCPGetBuildArgs struct {
-	BuildID  string `json:"build_id,omitempty" jsonschema:"Vanadis build identifier (e.g. 'build-1793405777-309e5517')."`
+	BuildID  string `json:"build_id,omitempty"  jsonschema:"Vanadis build identifier (e.g. 'build-1793405777-309e5517')."`
 	ThreadID string `json:"thread_id,omitempty" jsonschema:"Discord thread identifier or snowflake to inspect."`
 }
 
@@ -49,8 +50,8 @@ type MCPGetBuildOutput struct {
 
 // MCPGetChunkArgs defines arguments for get_chunk tool.
 type MCPGetChunkArgs struct {
-	ChunkID  string `json:"chunk_id,omitempty" jsonschema:"Unique chunk identifier to inspect directly."`
-	BuildID  string `json:"build_id,omitempty" jsonschema:"Parent Vanadis build identifier when resolving via chunk_ref."`
+	ChunkID  string `json:"chunk_id,omitempty"  jsonschema:"Unique chunk identifier to inspect directly."`
+	BuildID  string `json:"build_id,omitempty"  jsonschema:"Parent Vanadis build identifier when resolving via chunk_ref."`
 	ChunkRef string `json:"chunk_ref,omitempty" jsonschema:"Chunk identifier or 0-based chunk_index within the parent build."`
 }
 
@@ -63,9 +64,9 @@ type MCPGetChunkOutput struct {
 
 // MCPUpdateBuildArgs defines arguments for update_build tool.
 type MCPUpdateBuildArgs struct {
-	BuildID       string `json:"build_id" jsonschema:"Vanadis build identifier to mutate."`
-	Title         string `json:"title,omitempty" jsonschema:"New build title replacing existing title."`
-	Objective     string `json:"objective,omitempty" jsonschema:"New build objective replacing existing objective."`
+	BuildID       string `json:"build_id"                 jsonschema:"Vanadis build identifier to mutate."`
+	Title         string `json:"title,omitempty"          jsonschema:"New build title replacing existing title."`
+	Objective     string `json:"objective,omitempty"      jsonschema:"New build objective replacing existing objective."`
 	SharedContext string `json:"shared_context,omitempty" jsonschema:"New shared build context replacing existing context."`
 }
 
@@ -77,16 +78,16 @@ type MCPUpdateBuildOutput struct {
 
 // MCPUpdateChunkArgs defines arguments for update_chunk tool.
 type MCPUpdateChunkArgs struct {
-	BuildID       string    `json:"build_id" jsonschema:"Parent Vanadis build identifier containing the chunk."`
-	ChunkRef      string    `json:"chunk_ref" jsonschema:"Chunk identifier or 0-based chunk_index of the chunk to mutate."`
-	Mode          *string   `json:"mode,omitempty" jsonschema:"Optional new mode for the chunk ('pr' or 'action')."`
-	Repo          string    `json:"repo,omitempty" jsonschema:"Target repository for the chunk."`
-	Title         string    `json:"title,omitempty" jsonschema:"New title for the chunk."`
-	Instructions  string    `json:"instructions,omitempty" jsonschema:"New instructions for the chunk."`
-	TargetFiles   []string  `json:"target_files,omitempty" jsonschema:"Target files to inspect or modify."`
+	BuildID       string    `json:"build_id"                 jsonschema:"Parent Vanadis build identifier containing the chunk."`
+	ChunkRef      string    `json:"chunk_ref"                jsonschema:"Chunk identifier or 0-based chunk_index of the chunk to mutate."`
+	Mode          *string   `json:"mode,omitempty"           jsonschema:"Optional new mode for the chunk ('pr' or 'action')."`
+	Repo          string    `json:"repo,omitempty"           jsonschema:"Target repository for the chunk."`
+	Title         string    `json:"title,omitempty"          jsonschema:"New title for the chunk."`
+	Instructions  string    `json:"instructions,omitempty"   jsonschema:"New instructions for the chunk."`
+	TargetFiles   []string  `json:"target_files,omitempty"   jsonschema:"Target files to inspect or modify."`
 	TargetSymbols []string  `json:"target_symbols,omitempty" jsonschema:"Target symbols to inspect or modify."`
-	Effort        string    `json:"effort,omitempty" jsonschema:"Effort level ('low', 'medium', 'high')."`
-	DependsOn     *[]string `json:"depends_on,omitempty" jsonschema:"Optional replacement dependency chunk IDs or indices."`
+	Effort        string    `json:"effort,omitempty"         jsonschema:"Effort level ('low', 'medium', 'high')."`
+	DependsOn     *[]string `json:"depends_on,omitempty"     jsonschema:"Optional replacement dependency chunk IDs or indices."`
 }
 
 // MCPUpdateChunkOutput defines output for update_chunk tool.
@@ -97,22 +98,22 @@ type MCPUpdateChunkOutput struct {
 
 // MCPCreateChunkItem defines a single chunk input for MCP chunk operations.
 type MCPCreateChunkItem struct {
-	ID                 string   `json:"id,omitempty" jsonschema:"Optional unique chunk identifier (1..120 chars)."`
-	Mode               string   `json:"mode,omitempty" jsonschema:"Chunk execution mode ('pr' or 'action')."`
-	Repo               string   `json:"repo,omitempty" jsonschema:"Optional target repository override."`
-	Title              string   `json:"title" jsonschema:"Chunk title."`
-	Instructions       string   `json:"instructions" jsonschema:"Chunk instructions."`
-	TargetFiles        []string `json:"target_files,omitempty" jsonschema:"Target files for this chunk."`
-	TargetSymbols      []string `json:"target_symbols,omitempty" jsonschema:"Target symbols for this chunk."`
-	Effort             string   `json:"effort,omitempty" jsonschema:"Effort level ('low', 'medium', 'high')."`
+	ID                 string   `json:"id,omitempty"                  jsonschema:"Optional unique chunk identifier (1..120 chars)."`
+	Mode               string   `json:"mode,omitempty"                jsonschema:"Chunk execution mode ('pr' or 'action')."`
+	Repo               string   `json:"repo,omitempty"                jsonschema:"Optional target repository override."`
+	Title              string   `json:"title"                         jsonschema:"Chunk title."`
+	Instructions       string   `json:"instructions"                  jsonschema:"Chunk instructions."`
+	TargetFiles        []string `json:"target_files,omitempty"        jsonschema:"Target files for this chunk."`
+	TargetSymbols      []string `json:"target_symbols,omitempty"      jsonschema:"Target symbols for this chunk."`
+	Effort             string   `json:"effort,omitempty"              jsonschema:"Effort level ('low', 'medium', 'high')."`
 	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty" jsonschema:"Acceptance criteria checklist."`
-	DependsOn          []string `json:"depends_on,omitempty" jsonschema:"Optional list of chunk IDs or 0-based indices this chunk depends on."`
+	DependsOn          []string `json:"depends_on,omitempty"          jsonschema:"Optional list of chunk IDs or 0-based indices this chunk depends on."`
 }
 
 // MCPAppendChunkArgs defines arguments for append_chunk tool.
 type MCPAppendChunkArgs struct {
 	BuildID string               `json:"build_id" jsonschema:"Vanadis build identifier to append chunks to."`
-	Chunks  []MCPCreateChunkItem `json:"chunks" jsonschema:"List of new pending chunks to append."`
+	Chunks  []MCPCreateChunkItem `json:"chunks"   jsonschema:"List of new pending chunks to append."`
 }
 
 // MCPAppendChunkOutput defines output for append_chunk tool.
@@ -124,7 +125,7 @@ type MCPAppendChunkOutput struct {
 
 // MCPRemoveChunkArgs defines arguments for remove_chunk tool.
 type MCPRemoveChunkArgs struct {
-	BuildID  string `json:"build_id" jsonschema:"Parent Vanadis build identifier containing the chunk."`
+	BuildID  string `json:"build_id"  jsonschema:"Parent Vanadis build identifier containing the chunk."`
 	ChunkRef string `json:"chunk_ref" jsonschema:"Chunk identifier or 0-based chunk_index to remove."`
 }
 
@@ -139,7 +140,7 @@ type MCPRemoveChunkOutput struct {
 // MCPFailChunkArgs defines arguments for fail_chunk tool.
 type MCPFailChunkArgs struct {
 	ChunkID string `json:"chunk_id" jsonschema:"Chunk ID to mark as failed"`
-	Reason  string `json:"reason" jsonschema:"Detailed explanation of the unrecoverable blocker"`
+	Reason  string `json:"reason"   jsonschema:"Detailed explanation of the unrecoverable blocker"`
 }
 
 // MCPFailChunkOutput defines output for fail_chunk tool.

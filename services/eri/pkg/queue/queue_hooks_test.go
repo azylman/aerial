@@ -17,6 +17,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -24,8 +27,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
-	"github.com/bwmarrin/discordgo"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {

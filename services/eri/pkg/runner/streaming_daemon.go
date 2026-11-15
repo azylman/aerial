@@ -15,10 +15,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/metrics"
-	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 // TurnSink receives streaming notifications and results during an active turn.

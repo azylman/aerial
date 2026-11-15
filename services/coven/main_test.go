@@ -12,8 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/nats-io/nats.go"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 func TestLoadConfigFile_EriKeysAndEnv(t *testing.T) {

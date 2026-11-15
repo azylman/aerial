@@ -20,6 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+	_ "modernc.org/sqlite"
+
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -27,8 +30,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/bwmarrin/discordgo"
-	_ "modernc.org/sqlite"
 )
 
 func TestSyncBrainEnvironment(t *testing.T) {

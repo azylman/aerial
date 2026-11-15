@@ -7,12 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+	"github.com/nats-io/nats.go"
+
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/bwmarrin/discordgo"
-	"github.com/nats-io/nats.go"
 )
 
 func TestEriJetStreamInit(t *testing.T) {
