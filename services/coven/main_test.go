@@ -801,10 +801,10 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 	if err := subscribeCovenExtract(ctx, memBus, nil); err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
-	if err := subscribeCovenConsumers(ctx, nil, worker); err != nil {
+	if err := (&covenConsumers{}).subscribeAll(ctx, nil, worker); err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
-	if err := subscribeCovenConsumers(ctx, memBus, nil); err != nil {
+	if err := (&covenConsumers{}).subscribeAll(ctx, memBus, nil); err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
 
@@ -816,16 +816,16 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 	if err := subscribeCovenExtract(ctx, brokenSub, worker); err == nil {
 		t.Error("expected error when subscribe fails")
 	}
-	if err := subscribeCovenConsumers(ctx, brokenSub, worker); err == nil {
+	if err := (&covenConsumers{}).subscribeAll(ctx, brokenSub, worker); err == nil {
 		t.Error("expected error when subscribe fails")
 	}
 
 	brokenTranscript := &brokenBus{Bus: memBus, failDurable: "coven-transcript-synced"}
-	if err := subscribeCovenConsumers(ctx, brokenTranscript, worker); err == nil {
+	if err := (&covenConsumers{}).subscribeAll(ctx, brokenTranscript, worker); err == nil {
 		t.Error("expected error when subscribe coven-transcript-synced fails")
 	}
 	brokenExtract := &brokenBus{Bus: memBus, failDurable: "coven-extract"}
-	if err := subscribeCovenConsumers(ctx, brokenExtract, worker); err == nil {
+	if err := (&covenConsumers{}).subscribeAll(ctx, brokenExtract, worker); err == nil {
 		t.Error("expected error when subscribe coven-extract fails")
 	}
 

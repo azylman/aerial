@@ -176,11 +176,6 @@ func (c *covenConsumers) subscribeAll(ctx context.Context, b pubsub.Bus, worker 
 	return nil
 }
 
-func subscribeCovenConsumers(ctx context.Context, b pubsub.Bus, worker *Worker) error {
-	var consumers covenConsumers
-	return consumers.subscribeAll(ctx, b, worker)
-}
-
 var subscribeRetryIntervalNs atomic.Int64
 
 func init() {
