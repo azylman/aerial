@@ -4,13 +4,25 @@ Whenever a change requires **≥ 2 PRs**—whether across multiple repositories 
 
 ## 1. Architect/Planner Up-Front Inspection, Cross-Repo Sequencing & Scope Inventory
 - **Removal of Build-Level `"repo"` & Cross-Repo Ordering**: Vanadis builds do NOT define a build-level `"repo"`. Repository routing is determined strictly per-chunk on `'pr'` chunks (`"azylman/mirrormere"`, `"azylman/aerial-sidecars"`, `"azylman/aerial"`, `"azylman/aerial-config"`). Order chunks strictly by deployment dependency (e.g., upstream service endpoints in Chunks 1–2 -> shared package / collector changes in Chunk 3 -> `aerial-config` job specs in Chunk 4). Vanadis and `synapse` track all repositories on a single Discord status widget, suppress intermediate deployment wakes, and advance chunks automatically through final rollout.
+- **DAG Orchestration (`depends_on`) & Two-Milestone Unblocking Rules**:
+  - **Default Linear Chain vs. Explicit DAG**: If all chunks in `POST /builds` omit `depends_on`, chunk `i > 0` defaults to `depends_on: [chunks[i-1].ID]`. If any chunk specifies `depends_on` (including `"depends_on": []` for root chunks), explicit DAG mode is used with up to `maxParallelChunks = 4` concurrent chunks.
+  - **Static DAG Validation Invariants**: Kahn's topological sort rejects unknown chunk references, self-dependencies, and cycles with `400 Bad Request` (`ErrInvalidBuildInput`). Any two concurrent `"mode": "pr"` chunks targeting the same `repo` (where neither is an ancestor of the other in `depends_on`) MUST declare non-empty, disjoint `target_files` so parallel PR branches never collide or produce merge conflicts.
+  - **Two-Milestone Unblocking Semantics**:
+    - `ReadyForCode` (`merged`): Satisfied when an upstream `"mode": "pr"` chunk merges (`aerial.pr.merged`), or when an upstream `"mode": "action"` chunk completes (`aerial.dispatch.completed`). Unblocks downstream `"mode": "pr"` chunks immediately upon merge without waiting for image rollout or cluster deployment.
+    - `ReadyForRuntime` (`deployed` / `completed`): Satisfied when an upstream `"mode": "pr"` chunk completes cluster deployment (`aerial.pr.deploy_success` or no-deploy `aerial.pr.sync_success`), or when an upstream `"mode": "action"` chunk completes (`aerial.dispatch.completed`). Required before unblocking downstream `"mode": "action"` verification chunks and final build completion.
+- **4-Phase Cutover & Migration Sequencing Rule**: Whenever a build replaces an execution path, queue consumer, storage table, or service boundary, structure chunks up front into four distinct phases:
+  1. **Additive / Dark-Launch (`"mode": "pr"`)**: Deploy the new workflow, consumer, or schema alongside the existing path without switching live entrypoints, verified via hermetic unit/integration tests (`httptest.Server` + in-memory mocks).
+  2. **Pre-Cutover Readiness Gate (`"mode": "action"`)**: Verify the dark-launched component live in-cluster using strictly read-only / non-mutating probes (health endpoints, Restate `/deployments` registration, consumer readiness, and `400 Bad Request` validation rejection checks). **Strict Hermeticity Boundary**: Live `"mode": "action"` chunks MUST NEVER inject synthetic builds, fake PR numbers (e.g. `999901`), or synthetic NATS lifecycle events into production `vanadis`, `restate`, `eri`, or Discord threads—all synthetic DAG/workflow state-machine simulation belongs strictly in hermetic Go unit tests.
+  3. **Cutover & Legacy Purge (`"mode": "pr"`)**: Switch the live entrypoint and remove legacy code/columns only *after* the pre-cutover readiness `action` chunk succeeds.
+  4. **Post-Cutover Boundary Gate (`"mode": "action"`)**: Verify pod readiness, zero error logs, and static boundary invariants after legacy code is removed.
+- **In-Flight Control-Plane Continuity Rule**: When a build modifies `vanadis`, `synapse`, `eri`, `haro`, or `nats` (the control plane executing the build itself), require the cutover chunk to preserve a fallback for already-running builds started under the prior state so the active build never strands itself mid-flight.
 - **Per-Chunk Mode (`"mode": "pr"` vs. `"mode": "action"`)**:
   - Builds can interleave `'pr'` and `'action'` chunks in any order; each individual chunk has a single immutable mode:
   - `"mode": "pr"` (default when mode is omitted or empty): Code modifications authored in an ephemeral scratch workspace resulting in a git branch, Pull Request, CI checks, and deployment tracking. Requires a non-empty chunk-level `"repo"`, and non-empty `"target_files"` and `"target_symbols"`.
   - `"mode": "action"`: Live operational action chunk executing against cluster services, host processes, or operational APIs in the active environment (no branch/PR). Requires empty `"repo"` (`""`), empty `"target_files"` (`[]`), empty `"target_symbols"` (`[]`), and `pr_number IS NULL`.
   - Advancement: a merged PR chunk starts the next chunk on merge only when that next chunk is a `"pr"` chunk; if the next chunk is an `"action"` chunk, or the merged PR was the build's last chunk, Vanadis waits for the PR to deploy before advancing or completing the build.
 - **Harness-Driven Action Chunk Lifecycle & Completion**:
-  - Action chunk completion is **100% harness-driven** in `eri`: when a Vanadis action chunk turn completes with `turnStatus == "success"`, the `eri` worker harness publishes a `DispatchOutcomeEvent` to NATS JetStream (`aerial.dispatch.completed`). Vanadis consumes the event via `HandleDispatchOutcomeEvent` on `vanadis-dispatch`, transitions the running action chunk to `completed`, updates the Discord status widget, and either enqueues the next chunk in River or marks the build `completed` and wakes the thread. Action chunk workers do NOT manually invoke completion tools or output magic sentinel strings.
+  - Action chunk completion is **100% harness-driven** in `eri`: when a Vanadis action chunk turn completes with `turnStatus == "success"`, the `eri` worker harness publishes a `DispatchOutcomeEvent` to NATS JetStream (`aerial.dispatch.completed`). Vanadis consumes the event via `HandleDispatchOutcomeEvent` on `vanadis-dispatch`, transitions the running action chunk to `completed`, updates the Discord status widget, and advances dependent chunks in the DAG or marks the build `completed` and wakes the thread. Action chunk workers do NOT manually invoke completion tools or output magic sentinel strings.
   - In Completed Chunks Ledgers, completed action chunks render as:
     `- [Chunk X/Y] <Title> (action, completed)`
 - **Action Chunk Failure Handling (`fail_chunk` MCP Tool & Eri Fallback)**:
@@ -29,22 +41,59 @@ Whenever a change requires **≥ 2 PRs**—whether across multiple repositories 
   "shared_context": "Cross-chunk contracts, structural signatures, shared mock contracts, and anti-pattern guardrails.",
   "chunks": [
     {
+      "id": "chunk-1-dark-launch-service",
       "mode": "pr",
       "repo": "azylman/aerial",
-      "title": "Upstream Service Endpoint and Schema",
+      "title": "Dark Launch New Workflow Service",
       "effort": "medium",
-      "target_files": ["services/eri/pkg/queue/pool.go"],
-      "target_symbols": ["WorkerPoolConfig", "TestWorkerPool_ConfigInjection"],
-      "instructions": "Chunk-specific implementation contracts, edge cases, and must-not-change boundaries."
+      "depends_on": [],
+      "target_files": ["services/vanadis/pkg/workflow/service.go", "services/vanadis/pkg/workflow/service_test.go"],
+      "target_symbols": ["WorkflowService", "TestWorkflowService_Execution"],
+      "instructions": "Implement additive workflow service side-by-side with existing path without switching entrypoints. Verify via hermetic tests."
     },
     {
+      "id": "chunk-2-dark-launch-schema",
+      "mode": "pr",
+      "repo": "azylman/aerial",
+      "title": "Additive Database Schema Migration",
+      "effort": "low",
+      "depends_on": [],
+      "target_files": ["services/eri/pkg/db/schema.sql"],
+      "target_symbols": ["vanadis_builds", "vanadis_chunks"],
+      "instructions": "Add additive columns with default values. Non-overlapping target_files allows parallel execution with chunk-1."
+    },
+    {
+      "id": "chunk-3-pre-cutover-readiness-gate",
       "mode": "action",
       "repo": "",
-      "title": "Restart Service and Verify Cluster Readiness",
+      "title": "Verify Pre-Cutover Service Readiness",
       "effort": "low",
+      "depends_on": ["chunk-1-dark-launch-service", "chunk-2-dark-launch-schema"],
       "target_files": [],
       "target_symbols": [],
-      "instructions": "Execute verification commands against live services. Completion is harness-driven upon clean turn exit."
+      "instructions": "Read-only live action gate. Verify service health endpoints, Restate deployment registrations, and 400 Bad Request rejection invariants. Strictly non-mutating (no synthetic PRs or builds in prod)."
+    },
+    {
+      "id": "chunk-4-cutover-and-purge",
+      "mode": "pr",
+      "repo": "azylman/aerial",
+      "title": "Cut Over Entrypoint and Purge",
+      "effort": "medium",
+      "depends_on": ["chunk-3-pre-cutover-readiness-gate"],
+      "target_files": ["services/vanadis/pkg/api/handlers.go", "services/synapse/conflicts.go"],
+      "target_symbols": ["CreateBuildHandler", "PurgeLegacyHandler"],
+      "instructions": "Switch live entrypoint to the verified workflow and purge legacy code. Maintain in-flight control-plane continuity fallback."
+    },
+    {
+      "id": "chunk-5-post-cutover-boundary-gate",
+      "mode": "action",
+      "repo": "",
+      "title": "Verify Post-Cutover Clean Boundaries",
+      "effort": "low",
+      "depends_on": ["chunk-4-cutover-and-purge"],
+      "target_files": [],
+      "target_symbols": [],
+      "instructions": "Verify pod health, zero error logs, and static boundary invariants (e.g. rg -i legacy returns 0 matches)."
     }
   ]
 }
