@@ -44,33 +44,25 @@ var (
 
 // Config holds runtime configuration for the Vanadis orchestrator service.
 type Config struct {
-	Port                string
-	PostgresURL         string
-	BrainURL            string
-	EriURL              string
-	SynapseURL          string
-	NATSURL             string
-	RestatePort         string
-	RestateIngressURL   string
-	RestateAdminURL     string
-	RestateAdvertiseURL string
-	GitHubAPIURL        string
-	GitHubToken         string
+	Port         string
+	PostgresURL  string
+	BrainURL     string
+	EriURL       string
+	SynapseURL   string
+	NATSURL      string
+	GitHubAPIURL string
+	GitHubToken  string
 }
 
 // VanadisYAMLConfig defines the declarative file schema for /config/vanadis.yaml.
 type VanadisYAMLConfig struct {
-	Port                string `yaml:"port"`
-	PostgresURL         string `yaml:"postgres_url"`
-	EriURL              string `yaml:"eri_url"`
-	SynapseURL          string `yaml:"synapse_url"`
-	NATSURL             string `yaml:"nats_url"`
-	RestatePort         string `yaml:"restate_port"`
-	RestateIngressURL   string `yaml:"restate_ingress_url"`
-	RestateAdminURL     string `yaml:"restate_admin_url"`
-	RestateAdvertiseURL string `yaml:"restate_advertise_url"`
-	GitHubAPIURL        string `yaml:"github_api_url"`
-	GitHubToken         string `yaml:"github_token"`
+	Port         string `yaml:"port"`
+	PostgresURL  string `yaml:"postgres_url"`
+	EriURL       string `yaml:"eri_url"`
+	SynapseURL   string `yaml:"synapse_url"`
+	NATSURL      string `yaml:"nats_url"`
+	GitHubAPIURL string `yaml:"github_api_url"`
+	GitHubToken  string `yaml:"github_token"`
 }
 
 var vanadisFallbackConfigPath = "/config/vanadis.yaml"
@@ -111,18 +103,14 @@ func LoadConfig(configPath string) Config {
 	pgURL := firstNonEmpty(httpkit.BuildPostgresDSN(os.Getenv, "aerial"), strings.TrimSpace(fileCfg.PostgresURL))
 	eriURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL)), "/")
 	return Config{
-		Port:                firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
-		PostgresURL:         pgURL,
-		BrainURL:            eriURL,
-		EriURL:              eriURL,
-		SynapseURL:          strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("SYNAPSE_URL"), fileCfg.SynapseURL)), "/"),
-		NATSURL:             firstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL),
-		RestatePort:         firstNonEmpty(os.Getenv("RESTATE_PORT"), fileCfg.RestatePort, "9080"),
-		RestateIngressURL:   strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("RESTATE_INGRESS_URL"), fileCfg.RestateIngressURL)), "/"),
-		RestateAdminURL:     strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("RESTATE_ADMIN_URL"), fileCfg.RestateAdminURL)), "/"),
-		RestateAdvertiseURL: strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("VANADIS_RESTATE_ADVERTISE_URL"), fileCfg.RestateAdvertiseURL)), "/"),
-		GitHubAPIURL:        strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("GITHUB_API_URL"), fileCfg.GitHubAPIURL, "https://api.github.com")), "/"),
-		GitHubToken:         firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT"), fileCfg.GitHubToken),
+		Port:         firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
+		PostgresURL:  pgURL,
+		BrainURL:     eriURL,
+		EriURL:       eriURL,
+		SynapseURL:   strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("SYNAPSE_URL"), fileCfg.SynapseURL)), "/"),
+		NATSURL:      firstNonEmpty(os.Getenv("NATS_URL"), strings.TrimSpace(fileCfg.NATSURL)),
+		GitHubAPIURL: strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("GITHUB_API_URL"), fileCfg.GitHubAPIURL, "https://api.github.com")), "/"),
+		GitHubToken:  firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT"), fileCfg.GitHubToken),
 	}
 }
 
@@ -1405,8 +1393,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		log.Println("[vanadis] PostgreSQL store initialized")
 	}
 
-	natsURL := firstNonEmpty(cfg.NATSURL, os.Getenv("NATS_URL"))
-	cleanupBus, err := initVanadisJetStream(ctx, server, natsURL)
+	cleanupBus, err := initVanadisJetStream(ctx, server, cfg.NATSURL)
 	if err != nil {
 		if cleanupDB != nil {
 			cleanupDB(context.Background())
