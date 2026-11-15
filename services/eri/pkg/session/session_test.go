@@ -536,6 +536,46 @@ func claudeExtractTurnCases(t0, t1 time.Time) []extractLastTurnErrorCase {
 			since:     t0,
 			wantError: "",
 		},
+		{
+			name:   "claude transcript extracts synthetic rate limit reply",
+			convID: "s-claude-synth-rate-limit",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Check status"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"isApiErrorMessage":true,"error":"rate_limit","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You've hit your 5-hour limit · resets 12:10pm (America/Los_Angeles)"}]}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "claude synthetic reply (error=rate_limit): You've hit your 5-hour limit · resets 12:10pm (America/Los_Angeles)",
+		},
+		{
+			name:   "claude transcript extracts top level error with content text",
+			convID: "s-claude-err-with-content",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Run query"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"error":"api_req_failed","message":{"model":"claude-3-5-sonnet","role":"assistant","content":"Upstream cloudflare 502"}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "api_req_failed: Upstream cloudflare 502",
+		},
+		{
+			name:   "claude transcript extracts top level error when content contains it",
+			convID: "s-claude-err-contained",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Run query"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"error":"overloaded","message":{"model":"claude-3-5-sonnet","role":"assistant","content":"The server is overloaded right now"}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "overloaded",
+		},
+		{
+			name:   "claude transcript extracts synthetic error without content",
+			convID: "s-claude-synth-empty-content",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Run query"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"error":"rate_limit","message":{"model":"<synthetic>","role":"assistant","content":""}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "rate_limit",
+		},
 	}
 }
 
@@ -680,6 +720,17 @@ func TestExtractResponseSince(t *testing.T) {
 		},
 		{name: "claude transcript synthetic placeholder only returns empty", convID: "s-claude-synthetic-placeholder", claudeTranscript: fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Hi"}}`, t0.Format(time.RFC3339Nano)) + "\n" + fmt.Sprintf(`{"type":"assistant","timestamp":%q,"isApiErrorMessage":false,"error":null,"message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","usage":{"output_tokens":0},"content":[{"type":"text","text":"No response requested."}]}}`, t1.Format(time.RFC3339Nano)) + "\n", since: t0, wantResp: ""},
 		{name: "claude transcript synthetic rate limit only returns empty", convID: "s-claude-synthetic-rate-limit", claudeTranscript: fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Hi"}}`, t0.Format(time.RFC3339Nano)) + "\n" + fmt.Sprintf(`{"type":"assistant","timestamp":%q,"isApiErrorMessage":true,"error":"rate_limit","message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","usage":{"output_tokens":0},"content":[{"type":"text","text":"You've hit your 5-hour limit · resets 12:10pm (America/Los_Angeles)"}]}}`, t1.Format(time.RFC3339Nano)) + "\n", since: t0, wantResp: ""},
+		{
+			name:   "claude transcript intermediate assistant text before synthetic rate limit returns empty",
+			convID: "s-claude-intermediate-then-rate-limit",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Hi"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"message":{"model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"Working on step 1..."}]}}`, t1.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"isApiErrorMessage":true,"error":"rate_limit","message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","usage":{"output_tokens":0},"content":[{"type":"text","text":"You've hit your 5-hour limit · resets 12:10pm (America/Los_Angeles)"}]}}`, t1.Add(time.Second).Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:    t0,
+			wantResp: "",
+		},
 		{name: "claude transcript real reply before synthetic placeholder returns real reply", convID: "s-claude-real-then-synthetic", claudeTranscript: fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Hi"}}`, t0.Format(time.RFC3339Nano)) + "\n" + fmt.Sprintf(`{"type":"assistant","timestamp":%q,"message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"Deploy is green"}]}}`, t1.Format(time.RFC3339Nano)) + "\n" + fmt.Sprintf(`{"type":"assistant","timestamp":%q,"isApiErrorMessage":false,"error":null,"message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","usage":{"output_tokens":0},"content":[{"type":"text","text":"No response requested."}]}}`, t1.Add(time.Second).Format(time.RFC3339Nano)) + "\n", since: t0, wantResp: "Deploy is green"},
 		{
 			name:             "claude transcript canceled context returns empty",
