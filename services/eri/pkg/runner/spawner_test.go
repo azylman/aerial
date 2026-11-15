@@ -8,8 +8,12 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // MockProcessHandle simulates a running process in tests.
@@ -242,5 +246,221 @@ func TestOSProcessHandle_And_DefaultDaemonSpawner(t *testing.T) {
 	})
 	if err == nil || stdin != nil || stdout != nil || stderr != nil || dHandle != nil {
 		t.Errorf("expected all nil on spawn error")
+	}
+}
+
+func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. Binary with sibling .old backup retries and exhausts retries.
+	missingWithOldBin := filepath.Join(tempDir, "missing-with-old")
+	if err := os.WriteFile(missingWithOldBin+".12345.old", []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("failed creating old backup: %v", err)
+	}
+
+	// 2. Binary with non-executable file during replacement.
+	nonExecBin := filepath.Join(tempDir, "non-exec-bin")
+	if err := os.WriteFile(nonExecBin, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+		t.Fatalf("failed creating non-executable bin: %v", err)
+	}
+
+	// 3. Simulated transient failure recovering on second attempt using mock spawn seam.
+	recoveryAttempts := 0
+	mockRecoverySpawn := func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+		recoveryAttempts++
+		if recoveryAttempts == 1 {
+			return nil, nil, nil, nil, syscall.ETXTBSY
+		}
+		inR, inW := io.Pipe()
+		outR, outW := io.Pipe()
+		errR, errW := io.Pipe()
+		closeQuietlyAll(inR, outW, errW)
+		return inW, outR, errR, NewMockProcessHandle(12345), nil
+	}
+
+	// Track attempt counts for exhaustion and cancellation cases
+	missingAttempts := 0
+	wrappedMissingSpawn := func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+		missingAttempts++
+		return spawnOnce(ctx, bin, args, cfg)
+	}
+
+	nonExecAttempts := 0
+	wrappedNonExecSpawn := func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+		nonExecAttempts++
+		return spawnOnce(ctx, bin, args, cfg)
+	}
+
+	// Deterministic cancellation seam: cancel context inside the first failure so retry timer wait hits ctx.Done().
+	cancelCtx, cancelFn := context.WithCancel(context.Background())
+	defer cancelFn()
+	cancelAttempts := 0
+	mockCancelSpawn := func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+		cancelAttempts++
+		cancelFn()
+		return nil, nil, nil, nil, syscall.ETXTBSY
+	}
+
+	tests := []struct {
+		name          string
+		ctx           context.Context
+		bin           string
+		retryDelays   []time.Duration
+		spawnOnceFn   func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)
+		expectSuccess bool
+		expectErrSub  string
+		assertCtxErr  bool
+	}{
+		{
+			name:          "missing_binary_with_old_sibling_retries_and_fails_after_exhaustion",
+			ctx:           context.Background(),
+			bin:           missingWithOldBin,
+			retryDelays:   []time.Duration{time.Millisecond, time.Millisecond},
+			spawnOnceFn:   wrappedMissingSpawn,
+			expectSuccess: false,
+		},
+		{
+			name:          "non_executable_binary_during_replacement_retries_and_fails",
+			ctx:           context.Background(),
+			bin:           nonExecBin,
+			retryDelays:   []time.Duration{time.Millisecond, time.Millisecond},
+			spawnOnceFn:   wrappedNonExecSpawn,
+			expectSuccess: false,
+		},
+		{
+			name:          "recovering_binary_succeeds_on_retry",
+			ctx:           context.Background(),
+			bin:           "dummy-binary",
+			retryDelays:   []time.Duration{time.Millisecond, 2 * time.Millisecond},
+			spawnOnceFn:   mockRecoverySpawn,
+			expectSuccess: true,
+		},
+		{
+			name:          "context_cancellation_during_wait_returns_context_error",
+			ctx:           cancelCtx,
+			bin:           missingWithOldBin,
+			retryDelays:   []time.Duration{500 * time.Millisecond},
+			spawnOnceFn:   mockCancelSpawn,
+			expectSuccess: false,
+			expectErrSub:  "failed spawning daemon",
+			assertCtxErr:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spawner := &DefaultDaemonSpawner{
+				RetryDelays: tc.retryDelays,
+				spawnOnceFn: tc.spawnOnceFn,
+			}
+			stdin, stdout, stderr, handle, err := spawner.Spawn(tc.ctx, DaemonConfig{
+				AgyBin: tc.bin,
+			})
+			if !tc.expectSuccess {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.expectErrSub != "" && !strings.Contains(err.Error(), tc.expectErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tc.expectErrSub, err)
+				}
+				if tc.assertCtxErr && !errors.Is(err, context.Canceled) {
+					t.Fatalf("expected errors.Is(err, context.Canceled), got %v", err)
+				}
+				return
+			}
+
+			if err != nil || stdin == nil || stdout == nil || stderr == nil || handle == nil {
+				t.Fatalf("expected success with valid pipes and handle, got err: %v", err)
+			}
+			closeQuietlyAll(stdin, stdout, stderr)
+			_ = handle.Kill()
+			_ = handle.Wait()
+		})
+	}
+
+	if missingAttempts != 3 {
+		t.Errorf("expected missing binary to exhaust 3 attempts, got %d", missingAttempts)
+	}
+	if nonExecAttempts != 3 {
+		t.Errorf("expected non-exec binary to exhaust 3 attempts, got %d", nonExecAttempts)
+	}
+	if recoveryAttempts != 2 {
+		t.Errorf("expected recovering case to take exactly 2 attempts, got %d", recoveryAttempts)
+	}
+	if cancelAttempts != 1 {
+		t.Errorf("expected cancel case to attempt once before canceling wait, got %d", cancelAttempts)
+	}
+}
+
+func TestTransientBinarySpawnHelperFunctions(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Relative path with Cwd check
+	cwdSubdir := filepath.Join(tempDir, "subproject")
+	if err := os.MkdirAll(cwdSubdir, 0o755); err != nil {
+		t.Fatalf("failed creating subdir: %v", err)
+	}
+	relBin := "./bin/custom-agy"
+	absRelTarget := filepath.Join(cwdSubdir, relBin)
+	if err := os.MkdirAll(filepath.Dir(absRelTarget), 0o755); err != nil {
+		t.Fatalf("failed creating target dir: %v", err)
+	}
+	if hasActiveBinaryReplacement(relBin, cwdSubdir) {
+		t.Errorf("expected false before file creation")
+	}
+	if err := os.WriteFile(absRelTarget+".123.old", []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("failed creating old backup in cwd: %v", err)
+	}
+	if !hasActiveBinaryReplacement(relBin, cwdSubdir) {
+		t.Errorf("expected true for relative bin with .old in Cwd")
+	}
+
+	// PATH lookup test for non-slash binary
+	binName := "test-custom-bin-unique"
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", tempDir+":"+origPath)
+
+	if hasActiveBinaryReplacement(binName, "") {
+		t.Errorf("expected false when no file exists")
+	}
+
+	// Create non-executable in tempDir (which is in PATH)
+	targetInPath := filepath.Join(tempDir, binName)
+	if err := os.WriteFile(targetInPath, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("failed creating target: %v", err)
+	}
+
+	if !hasActiveBinaryReplacement(binName, "") {
+		t.Errorf("expected true for non-executable binary found in PATH")
+	}
+
+	// Make executable
+	if err := os.Chmod(targetInPath, 0o755); err != nil {
+		t.Fatalf("failed chmod: %v", err)
+	}
+	if hasActiveBinaryReplacement(binName, "") {
+		t.Errorf("expected false for executable binary with no .old sibling")
+	}
+
+	// Add .old sibling
+	oldPath := targetInPath + ".999.old"
+	if err := os.WriteFile(oldPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("failed creating oldPath: %v", err)
+	}
+	if !hasActiveBinaryReplacement(binName, "") {
+		t.Errorf("expected true for binary with .old sibling in PATH")
+	}
+
+	// Default delays fallback in Spawn
+	spawnerDefault := &DefaultDaemonSpawner{}
+	in, out, errR, ph, err := spawnerDefault.Spawn(nil, DaemonConfig{
+		AgyBin: "/nonexistent/binary/that/never/exists",
+	})
+	if err == nil {
+		closeQuietlyAll(in, out, errR)
+		if ph != nil {
+			_ = ph.Kill()
+		}
+		t.Errorf("expected spawn error with default spawner delays")
 	}
 }
