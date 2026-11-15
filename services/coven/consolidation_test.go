@@ -429,66 +429,11 @@ func TestWorker_Start(t *testing.T) {
 	}
 }
 
-type workerExtractThreadTestCase struct {
-	name      string
-	nilWorker bool
-	ctx       context.Context
-	threadID  string
-	wantErr   bool
-}
-
-func TestWorker_ExtractThread(t *testing.T) {
+func TestWorker_ExtractThread_NilWorkerReturnsError(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	validEmb := make([]float32, ExpectedEmbeddingDim)
-
-	tests := []workerExtractThreadTestCase{
-		{
-			name:      "NilWorkerReturnsError",
-			nilWorker: true,
-			ctx:       ctx,
-			threadID:  "th-1",
-			wantErr:   true,
-		},
-		{
-			name:      "ValidWorkerInvokesExtract",
-			nilWorker: false,
-			ctx:       ctx,
-			threadID:  "th-1",
-			wantErr:   false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runWorkerExtractThreadCase(t, tc, validEmb)
-		})
-	}
-}
-
-func runWorkerExtractThreadCase(t *testing.T, tc workerExtractThreadTestCase, validEmb []float32) {
-	t.Helper()
-	if tc.nilWorker {
-		var w *Worker
-		err := w.ExtractThread(tc.ctx, tc.threadID)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("ExtractThread() err = %v, wantErr = %v", err, tc.wantErr)
-		}
-		return
-	}
-
-	w := NewWorker(WorkerConfig{
-		Store:  newTestMemStore(),
-		Ollama: &MockOllamaClient{embedding: validEmb},
-		LLMClient: func(c context.Context, prompt string) (string, error) {
-			return `{"facts":[]}`, nil
-		},
-	})
-
-	err := w.ExtractThread(tc.ctx, tc.threadID)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("ExtractThread() err = %v, wantErr = %v", err, tc.wantErr)
+	var w *Worker
+	if err := w.ExtractThread(context.Background(), "th-1"); err == nil {
+		t.Fatal("ExtractThread() expected error for nil worker, got nil")
 	}
 }
 

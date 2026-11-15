@@ -28,7 +28,7 @@ func initCovenJetStream(ctx context.Context, worker *Worker, natsURL string) pub
 	return initCovenJetStreamWithFactory(ctx, worker, natsURL, newCovenBusFn)
 }
 
-func handleTranscriptSyncedEvent(ctx context.Context, msg pubsub.Message, bus pubsub.Bus, worker *Worker) error {
+func handleTranscriptSyncedEvent(ctx context.Context, msg pubsub.Message, bus pubsub.Bus) error {
 	var ev pubsub.TranscriptSyncedEvent
 	if err := json.Unmarshal(msg.Data(), &ev); err != nil {
 		log.Printf("[Coven] warning: failed to unmarshal transcript synced event: %v", err)
@@ -37,16 +37,12 @@ func handleTranscriptSyncedEvent(ctx context.Context, msg pubsub.Message, bus pu
 	if strings.TrimSpace(ev.ConversationID) == "" || strings.TrimSpace(ev.SessionID) == "healthcheck-ping" {
 		return nil
 	}
-	if bus != nil {
-		msgID := fmt.Sprintf("coven:extract:%s:%d", ev.ConversationID, time.Now().UnixNano())
-		args := pubsub.CovenExtractJobArgs{
-			ThreadID:  ev.ConversationID,
-			SessionID: ev.SessionID,
-		}
-		return bus.Publish(ctx, pubsub.SubjectCovenExtractCoalesced(ev.ConversationID), msgID, args)
+	msgID := fmt.Sprintf("coven:extract:%s:%d", ev.ConversationID, time.Now().UnixNano())
+	args := pubsub.CovenExtractJobArgs{
+		ThreadID:  ev.ConversationID,
+		SessionID: ev.SessionID,
 	}
-	// Invariant: when bus is nil (e.g. testing or disconnected), fallback to direct worker.ExtractThread.
-	return worker.ExtractThread(ctx, ev.ConversationID)
+	return bus.Publish(ctx, pubsub.SubjectCovenExtractCoalesced(ev.ConversationID), msgID, args)
 }
 
 func nakBackoffDelay(numDelivered uint64) time.Duration {
@@ -109,12 +105,12 @@ func subscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) erro
 	return nil
 }
 
-func subscribeCovenTranscriptSynced(ctx context.Context, b pubsub.Bus, worker *Worker) error {
-	if b == nil || worker == nil {
+func subscribeCovenTranscriptSynced(ctx context.Context, b pubsub.Bus) error {
+	if b == nil {
 		return nil
 	}
 	_, err := b.Subscribe(ctx, pubsub.SubjectAerialTurnTranscriptSynced, "coven-transcript-synced", func(msgCtx context.Context, msg pubsub.Message) error {
-		if err := handleTranscriptSyncedEvent(msgCtx, msg, b, worker); err != nil {
+		if err := handleTranscriptSyncedEvent(msgCtx, msg, b); err != nil {
 			if msg.NumDelivered() < 5 {
 				return err
 			}
@@ -166,7 +162,7 @@ func (c *covenConsumers) subscribeAll(ctx context.Context, b pubsub.Bus, worker 
 		c.subscribedTurns = true
 	}
 	if !c.subscribedTranscriptSynced {
-		if err := subscribeCovenTranscriptSynced(ctx, b, worker); err != nil {
+		if err := subscribeCovenTranscriptSynced(ctx, b); err != nil {
 			return err
 		}
 		c.subscribedTranscriptSynced = true

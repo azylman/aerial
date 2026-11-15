@@ -500,40 +500,31 @@ func TestNakBackoffDelay(t *testing.T) {
 type handleTranscriptSyncedEventTestCase struct {
 	name             string
 	msgData          string
-	useBus           bool
 	busFail          bool
-	worker           *Worker
 	wantErr          bool
 	wantCoalescedJob bool
-	checkWater       bool
-	wantWater        int64
 }
 
-func runHandleTranscriptSyncedEventCase(ctx context.Context, t *testing.T, tc handleTranscriptSyncedEventTestCase, memStore *TestMemStore) {
+func runHandleTranscriptSyncedEventCase(ctx context.Context, t *testing.T, tc handleTranscriptSyncedEventTestCase) {
 	t.Helper()
 	msg := &mockPubsubMsg{data: []byte(tc.msgData), delivered: 1}
 
-	var bus pubsub.Bus
-	var memBus *pubsub.MemoryBus
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
 	receivedChan := make(chan pubsub.CovenExtractJobArgs, 1)
-	if tc.useBus {
-		memBus = pubsub.NewMemoryBus()
-		defer memBus.Close()
-		if tc.wantCoalescedJob {
-			_, _ = memBus.Subscribe(ctx, pubsub.SubjectCovenExtractCoalesced("th-sync-1"), "test-sub", func(_ context.Context, m pubsub.Message) error {
-				var args pubsub.CovenExtractJobArgs
-				_ = json.Unmarshal(m.Data(), &args)
-				receivedChan <- args
-				return nil
-			})
-		}
-		if tc.busFail {
-			_ = memBus.Close()
-		}
-		bus = memBus
+	if tc.wantCoalescedJob {
+		_, _ = memBus.Subscribe(ctx, pubsub.SubjectCovenExtractCoalesced("th-sync-1"), "test-sub", func(_ context.Context, m pubsub.Message) error {
+			var args pubsub.CovenExtractJobArgs
+			_ = json.Unmarshal(m.Data(), &args)
+			receivedChan <- args
+			return nil
+		})
+	}
+	if tc.busFail {
+		_ = memBus.Close()
 	}
 
-	err := handleTranscriptSyncedEvent(ctx, msg, bus, tc.worker)
+	err := handleTranscriptSyncedEvent(ctx, msg, memBus)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("handleTranscriptSyncedEvent() err = %v, wantErr = %v", err, tc.wantErr)
 	}
@@ -552,33 +543,10 @@ func runHandleTranscriptSyncedEventCase(ctx context.Context, t *testing.T, tc ha
 			t.Errorf("received coalesced extract args = %+v, want %+v", receivedArgs, expected)
 		}
 	}
-	if tc.checkWater && tc.worker != nil {
-		if w := memStore.watermarks["th-sync-1"]; w != tc.wantWater {
-			t.Errorf("watermark = %d, want %d", w, tc.wantWater)
-		}
-	}
 }
 
 func TestHandleTranscriptSyncedEvent_Scenarios(t *testing.T) {
 	ctx := context.Background()
-
-	validEmb := make([]float32, ExpectedEmbeddingDim)
-	client := &MockOllamaClient{embedding: validEmb}
-	llm := func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts":[]}`, nil
-	}
-
-	memStore := newTestMemStore()
-	memStore.activeThreads = []string{"th-sync-1"}
-	memStore.unextractedTurns["th-sync-1"] = []Message{
-		{RowID: 10, Content: "user fact", ResponseText: "acknowledged"},
-	}
-
-	worker := NewWorker(WorkerConfig{
-		Store:     memStore,
-		Ollama:    client,
-		LLMClient: llm,
-	})
 
 	tests := []handleTranscriptSyncedEventTestCase{
 		{
@@ -596,29 +564,19 @@ func TestHandleTranscriptSyncedEvent_Scenarios(t *testing.T) {
 		{
 			name:             "BusPublishesCoalescedExtractJob",
 			msgData:          `{"session_id":"sess-1","conversation_id":"th-sync-1"}`,
-			useBus:           true,
 			wantCoalescedJob: true,
 		},
 		{
 			name:    "BusPublishErrorReturnsError",
 			msgData: `{"session_id":"sess-1","conversation_id":"th-sync-1"}`,
-			useBus:  true,
 			busFail: true,
 			wantErr: true,
-		},
-		{
-			name:       "BusNilFallsBackToWorkerSuccess",
-			msgData:    `{"session_id":"sess-1","conversation_id":"th-sync-1"}`,
-			useBus:     false,
-			worker:     worker,
-			checkWater: true,
-			wantWater:  10,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runHandleTranscriptSyncedEventCase(ctx, t, tc, memStore)
+			runHandleTranscriptSyncedEventCase(ctx, t, tc)
 		})
 	}
 }
@@ -834,10 +792,7 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 	defer memBus.Close()
 
 	// Nil bus or nil worker returns nil safely
-	if err := subscribeCovenTranscriptSynced(ctx, nil, worker); err != nil {
-		t.Errorf("expected nil error, got %v", err)
-	}
-	if err := subscribeCovenTranscriptSynced(ctx, memBus, nil); err != nil {
+	if err := subscribeCovenTranscriptSynced(ctx, nil); err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
 	if err := subscribeCovenExtract(ctx, nil, worker); err != nil {
@@ -855,7 +810,7 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 
 	// Broken subscribe returns error
 	brokenSub := &brokenBus{Bus: memBus, errOnSubscribe: true}
-	if err := subscribeCovenTranscriptSynced(ctx, brokenSub, worker); err == nil {
+	if err := subscribeCovenTranscriptSynced(ctx, brokenSub); err == nil {
 		t.Error("expected error when subscribe fails")
 	}
 	if err := subscribeCovenExtract(ctx, brokenSub, worker); err == nil {
@@ -883,7 +838,7 @@ func TestCoven_SubscriptionEdgeCases(t *testing.T) {
 	// Delivery attempt < 5 returns error on closed bus (publish fails)
 	openBus := pubsub.NewMemoryBus()
 	captureClosed := &captureSubscribeBus{Bus: openBus}
-	if err := subscribeCovenTranscriptSynced(ctx, captureClosed, worker); err != nil {
+	if err := subscribeCovenTranscriptSynced(ctx, captureClosed); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	_ = openBus.Close()
