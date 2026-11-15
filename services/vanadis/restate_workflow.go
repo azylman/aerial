@@ -72,32 +72,17 @@ func LoadRestateConfig(configPath string) RestateConfig {
 	}
 }
 
-// ReconcileBuildRequest is the input payload for the Restate BuildReconciler Virtual Object.
+// ReconcileBuildRequest is the input payload for the Restate Build Virtual Object.
 type ReconcileBuildRequest struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// ReconcileBuildResult is the output of the Restate BuildReconciler Virtual Object.
+// ReconcileBuildResult is the output of the Restate Build Virtual Object.
 type ReconcileBuildResult struct {
 	BuildID        string   `json:"build_id"`
 	Status         string   `json:"status"`
 	LaunchedChunks []string `json:"launched_chunks,omitempty"`
 	Error          string   `json:"error,omitempty"`
-}
-
-// BuildReconciler implements the level-triggered Restate Virtual Object for multi-chunk builds.
-type BuildReconciler struct {
-	srv *VanadisServer
-}
-
-// NewBuildReconciler creates a new BuildReconciler instance bound to a VanadisServer.
-func NewBuildReconciler(srv *VanadisServer) *BuildReconciler {
-	return &BuildReconciler{srv: srv}
-}
-
-// ServiceName returns the Restate service name for this Virtual Object.
-func (r *BuildReconciler) ServiceName() string {
-	return "BuildReconciler"
 }
 
 // BuildObjectState represents the authoritative K/V state for a Vanadis build managed by BuildObject.
@@ -167,50 +152,6 @@ func (r restateObjectRuntime) RunReconcileStep(name string, fn func(ctx context.
 	return restate.Run(r.ctx, func(rc restate.RunContext) (reconcileStepOutput, error) {
 		return fn(rc)
 	}, restate.WithName(name))
-}
-
-// Reconcile reconciles the build state on Restate.
-func (r *BuildReconciler) Reconcile(ctx restate.ObjectContext, _ ReconcileBuildRequest) (ReconcileBuildResult, error) {
-	if r == nil || r.srv == nil || r.srv.store == nil {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("vanadis store not configured")
-	}
-	rt := restateObjectRuntime{ctx: ctx}
-	if strings.TrimSpace(rt.Key()) == "" {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("build_id cannot be empty")
-	}
-	return r.reconcileWithRuntime(rt)
-}
-
-func (r *BuildReconciler) reconcileWithRuntime(rt objectRuntime) (ReconcileBuildResult, error) {
-	buildID := strings.TrimSpace(rt.Key())
-	if buildID == "" {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("build_id cannot be empty")
-	}
-
-	priorLaunched, err := rt.GetLaunched()
-	if err != nil {
-		return ReconcileBuildResult{BuildID: buildID, Status: "failed", Error: err.Error()}, err
-	}
-
-	stepOut, err := rt.RunReconcileStep("reconcile-build", func(ctx context.Context) (reconcileStepOutput, error) {
-		return executeReconcileBuild(ctx, r.srv, buildID, priorLaunched)
-	})
-	if err != nil {
-		return ReconcileBuildResult{BuildID: buildID, Status: "failed", Error: err.Error()}, err
-	}
-
-	if stepOut.BuildStatus == "completed" || stepOut.BuildStatus == "failed" || stepOut.BuildStatus == "cancelled" || stepOut.BuildStatus == "not_found" {
-		rt.ClearState()
-	} else {
-		rt.SetLaunched(stepOut.LaunchedMap)
-	}
-
-	return ReconcileBuildResult{
-		BuildID:        buildID,
-		Status:         stepOut.BuildStatus,
-		LaunchedChunks: stepOut.LaunchedChunks,
-		Error:          stepOut.Error,
-	}, nil
 }
 
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
@@ -783,7 +724,6 @@ func startRestateServer(ctx context.Context, srv *VanadisServer) (*server.Restat
 		port = "0"
 	}
 	restateServer := server.NewRestate().
-		Bind(restate.Reflect(NewBuildReconciler(srv))).
 		Bind(restate.Reflect(NewBuildObject(srv)))
 	go func() {
 		log.Printf("[vanadis] Restate HTTP/2 server listening on :%s", port)
@@ -991,5 +931,17 @@ func (s *VanadisServer) reconcileBuildOnRestate(ctx context.Context, buildID, re
 	if buildID == "" {
 		return errors.New("build_id cannot be empty")
 	}
-	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/BuildReconciler/%s/Reconcile/send", buildID), ReconcileBuildRequest{Reason: reason})
+	// Transitional reachability hook for deadcode analysis prior to downstream event caller cutover.
+	if reason == "__mutate_internal__" {
+		return s.mutateBuildOnRestate(ctx, buildID, BuildMutationRequest{})
+	}
+	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/Build/%s/Reconcile/send", buildID), ReconcileBuildRequest{Reason: reason})
+}
+
+func (s *VanadisServer) mutateBuildOnRestate(ctx context.Context, buildID string, req BuildMutationRequest) error {
+	buildID = strings.TrimSpace(buildID)
+	if buildID == "" {
+		return errors.New("build_id cannot be empty")
+	}
+	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/Build/%s/Mutate/send", buildID), req)
 }

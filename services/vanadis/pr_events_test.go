@@ -643,7 +643,7 @@ func TestHandlePRCIFailed_CapReached(t *testing.T) {
 				foundDirectMessage = true
 				assert.Contains(t, r.Body["content"], "remediation cap 3/3 reached")
 			}
-			if r.Path == "/BuildReconciler/b-ci4/Reconcile/send" {
+			if r.Path == "/Build/b-ci4/Reconcile/send" {
 				foundReconcile = true
 			}
 		}
@@ -917,14 +917,14 @@ func TestHandlePRMergedAndDeploySuccess(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantStatus, updatedChunk.Status)
 
-			wantReconcilePath := fmt.Sprintf("/BuildReconciler/%s/Reconcile/send", tc.buildID)
+			wantReconcilePath := fmt.Sprintf("/Build/%s/Reconcile/send", tc.buildID)
 			var foundReconcile bool
 			for _, r := range *reqs {
 				if r.Path == wantReconcilePath {
 					foundReconcile = true
 				}
 			}
-			assert.True(t, foundReconcile, "must call BuildReconciler")
+			assert.True(t, foundReconcile, "must call Build Virtual Object")
 
 			var foundEvent bool
 			for _, published := range recBus.getEvents() {
@@ -1131,7 +1131,7 @@ func TestHandlePRDeploySuccess_ActionChunkWithPR(t *testing.T) {
 		PRNumber: 905,
 	}))
 
-	// 4. PR deploy succeeds: BuildReconciler is called and chunk becomes completed
+	// 4. PR deploy succeeds: Build Virtual Object is called and chunk becomes completed
 	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:    "deploy_success",
 		Repo:     "azylman/aerial",
@@ -1144,11 +1144,11 @@ func TestHandlePRDeploySuccess_ActionChunkWithPR(t *testing.T) {
 
 	var foundReconcile bool
 	for _, r := range *reqs {
-		if r.Path == "/BuildReconciler/b-act-pr-cycle/Reconcile/send" {
+		if r.Path == "/Build/b-act-pr-cycle/Reconcile/send" {
 			foundReconcile = true
 		}
 	}
-	assert.True(t, foundReconcile, "BuildReconciler must be called on deploy_success")
+	assert.True(t, foundReconcile, "Build Virtual Object must be called on deploy_success")
 }
 
 func TestHandlePRDeploySuccess_WithoutAwakeable(t *testing.T) {
@@ -1183,7 +1183,7 @@ func TestHandlePRDeploySuccess_WithoutAwakeable(t *testing.T) {
 
 	var foundReconcileSend bool
 	for _, r := range *reqs {
-		if r.Path == "/BuildReconciler/b-no-awk/Reconcile/send" {
+		if r.Path == "/Build/b-no-awk/Reconcile/send" {
 			foundReconcileSend = true
 		}
 	}
@@ -1224,6 +1224,6 @@ func TestProcessPRLifecycleEvent_SyncSuccess_PRChunk(t *testing.T) {
 	}
 	for _, r := range *reqs {
 		assert.NotEqual(t, "/restate/awakeables/awk-dep-907/resolve", r.Path, "must not resolve awakeable on sync_success")
-		assert.NotEqual(t, "/BuildReconciler/b-sync-pr/Reconcile/send", r.Path, "must not send reconcile on sync_success")
+		assert.NotEqual(t, "/Build/b-sync-pr/Reconcile/send", r.Path, "must not send reconcile on sync_success")
 	}
 }
