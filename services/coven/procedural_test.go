@@ -564,157 +564,88 @@ type processThreadFactsProceduralCase struct {
 	wantErr              bool
 }
 
+// proceduralResp renders an extraction LLM response with no facts and the given
+// procedural candidate JSON objects.
+func proceduralResp(candidates ...string) string {
+	return `{"facts": [], "procedural_candidates": [` + strings.Join(candidates, ", ") + `]}`
+}
+
+// pendingProcCand is a pending, already-embedded candidate for the bedroom-light trigger.
+func pendingProcCand(loadedSkill string) *ProceduralCandidate {
+	return &ProceduralCandidate{LoadedSkill: loadedSkill, Trigger: "turning on bedroom light when dark", Embedding: testEmbedding(1.0), Status: "pending"}
+}
+
 func processThreadFactsProceduralCases() []processThreadFactsProceduralCase {
+	const bedroomLight = `{"loaded_skill": "ha-operations", "trigger": "turning on bedroom light when dark", "steps": ["step 1"]}`
+	const validTask = `{"trigger": "valid procedural task step", "steps": ["s1"]}`
 	return []processThreadFactsProceduralCase{
 		{
 			name: "SuccessAdmitCandidate",
-			llmResp: `{
-				"facts": [],
-				"procedural_candidates": [
-					{
-						"domain": "discord",
-						"loaded_skill": "ha-operations",
-						"trigger": "turning on bedroom light when dark",
-						"steps": ["check sensor", "call ha_write_tool"],
-						"avoid": ["avoid loop"]
-					}
-				]
-			}`,
+			llmResp: proceduralResp(`{"domain": "discord", "loaded_skill": "ha-operations", "trigger": "turning on bedroom light when dark",
+				"steps": ["check sensor", "call ha_write_tool"], "avoid": ["avoid loop"]}`),
 			wantCandidateCount: 1,
 			wantEmbeddedText:   "Steps: check sensor; call ha_write_tool\nAvoid: avoid loop",
 			wantWatermark:      true,
 		},
 		{
-			name: "RejectCandidateAdmissionEmptyTrigger",
-			llmResp: `{
-				"facts": [],
-				"procedural_candidates": [
-					{
-						"trigger": "   ",
-						"steps": ["step 1"]
-					}
-				]
-			}`,
-			wantCandidateCount: 0,
-			wantWatermark:      true,
+			name:          "RejectCandidateAdmissionEmptyTrigger",
+			llmResp:       proceduralResp(`{"trigger": "   ", "steps": ["step 1"]}`),
+			wantWatermark: true,
 		},
 		{
-			name: "RejectCandidateAdmissionEphemeralTelemetry",
-			llmResp: `{
-				"facts": [],
-				"procedural_candidates": [
-					{
-						"trigger": "deploying PR #999 to production",
-						"steps": ["step 1"]
-					}
-				]
-			}`,
-			wantCandidateCount: 0,
-			wantWatermark:      true,
+			name:          "RejectCandidateAdmissionEphemeralTelemetry",
+			llmResp:       proceduralResp(`{"trigger": "deploying PR #999 to production", "steps": ["step 1"]}`),
+			wantWatermark: true,
 		},
 		{
-			name: "SkipNearDuplicateSameLoadedSkill",
-			preexistingCandidate: &ProceduralCandidate{
-				LoadedSkill: "ha-operations",
-				Trigger:     "turning on bedroom light when dark",
-				Embedding:   testEmbedding(1.0),
-				Status:      "pending",
-			},
-			llmResp: `{
-				"facts": [],
-				"procedural_candidates": [
-					{
-						"loaded_skill": "ha-operations",
-						"trigger": "turning on bedroom light when dark",
-						"steps": ["step 1"]
-					}
-				]
-			}`,
-			wantCandidateCount: 1,
-			wantWatermark:      true,
+			name:                 "SkipNearDuplicateSameLoadedSkill",
+			preexistingCandidate: pendingProcCand("ha-operations"),
+			llmResp:              proceduralResp(bedroomLight),
+			wantCandidateCount:   1,
+			wantWatermark:        true,
 		},
 		{
-			name: "DifferentLoadedSkillAdmitted",
-			preexistingCandidate: &ProceduralCandidate{
-				LoadedSkill: "other-skill",
-				Trigger:     "turning on bedroom light when dark",
-				Embedding:   testEmbedding(1.0),
-				Status:      "pending",
-			},
-			llmResp: `{
-				"facts": [],
-				"procedural_candidates": [
-					{
-						"loaded_skill": "ha-operations",
-						"trigger": "turning on bedroom light when dark",
-						"steps": ["step 1"]
-					}
-				]
-			}`,
-			wantCandidateCount: 2,
-			wantWatermark:      true,
+			name:                 "DifferentLoadedSkillAdmitted",
+			preexistingCandidate: pendingProcCand("other-skill"),
+			llmResp:              proceduralResp(bedroomLight),
+			wantCandidateCount:   2,
+			wantWatermark:        true,
 		},
 		{
 			name: "CapAtThreeCandidates",
-			llmResp: `{
-				"facts": [],
-				"procedural_candidates": [
-					{"loaded_skill": "skill-1", "trigger": "procedural task step number 1", "steps": ["s1"]},
-					{"loaded_skill": "skill-2", "trigger": "procedural task step number 2", "steps": ["s2"]},
-					{"loaded_skill": "skill-3", "trigger": "procedural task step number 3", "steps": ["s3"]},
-					{"loaded_skill": "skill-4", "trigger": "procedural task step number 4", "steps": ["s4"]},
-					{"loaded_skill": "skill-5", "trigger": "procedural task step number 5", "steps": ["s5"]}
-				]
-			}`,
+			llmResp: proceduralResp(
+				`{"loaded_skill": "skill-1", "trigger": "procedural task step number 1", "steps": ["s1"]}`,
+				`{"loaded_skill": "skill-2", "trigger": "procedural task step number 2", "steps": ["s2"]}`,
+				`{"loaded_skill": "skill-3", "trigger": "procedural task step number 3", "steps": ["s3"]}`,
+				`{"loaded_skill": "skill-4", "trigger": "procedural task step number 4", "steps": ["s4"]}`,
+				`{"loaded_skill": "skill-5", "trigger": "procedural task step number 5", "steps": ["s5"]}`,
+			),
 			wantCandidateCount: 3,
 			wantWatermark:      true,
 		},
 		{
 			name:      "EmbeddingFailureContinues",
 			ollamaErr: errors.New("ollama down"),
-			llmResp: `{
-				"facts": [],
-				"procedural_candidates": [
-					{"trigger": "valid procedural task step", "steps": ["s1"]}
-				]
-			}`,
-			wantCandidateCount: 0,
-			wantWatermark:      false,
+			llmResp:   proceduralResp(validTask),
 		},
 		{
-			name:         "StoreGetPendingErrorContinues",
-			storeFailOp:  "GetPendingProceduralCandidates",
-			storeFailErr: errors.New("db read failure"),
-			llmResp: `{
-				"facts": [],
-				"procedural_candidates": [
-					{"trigger": "valid procedural task step", "steps": ["s1"]}
-				]
-			}`,
+			name:               "StoreGetPendingErrorContinues",
+			storeFailOp:        "GetPendingProceduralCandidates",
+			storeFailErr:       errors.New("db read failure"),
+			llmResp:            proceduralResp(validTask),
 			wantCandidateCount: 1,
-			wantWatermark:      false,
 		},
 		{
 			name:         "StoreInsertErrorContinues",
 			storeFailOp:  "InsertProceduralCandidate",
 			storeFailErr: errors.New("db insert failure"),
-			llmResp: `{
-				"facts": [],
-				"procedural_candidates": [
-					{"trigger": "valid procedural task step", "steps": ["s1"]}
-				]
-			}`,
-			wantCandidateCount: 0,
-			wantWatermark:      false,
+			llmResp:      proceduralResp(validTask),
 		},
 		{
-			name: "LoadedSkillsInPrompt",
-			trajectoryCalls: []string{
-				"read_file(...) [SKILL_LOADED: ha-operations]",
-			},
+			name:               "LoadedSkillsInPrompt",
+			trajectoryCalls:    []string{"read_file(...) [SKILL_LOADED: ha-operations]"},
 			llmResp:            `{"facts": []}`,
 			wantPromptContains: "LOADED SKILLS IN TURN:\n- ha-operations",
-			wantCandidateCount: 0,
 			wantWatermark:      true,
 		},
 	}

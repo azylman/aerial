@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,231 +18,34 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestServer_Endpoints(t *testing.T) {
-	oldCounters, oldMeta := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
-	defer func() {
-		httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldCounters, oldMeta
-	}()
-
-	store := newTestMemStore()
-	_, _ = store.InsertFact(context.Background(), "Server fact test", testEmbedding(1.0))
-	handler := NewToolHandler(&Config{}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
-	server := NewServer(handler)
-	ts := httptest.NewServer(server.Routes())
-	defer ts.Close()
-
-	tests := []serverEndpointTestCase{
-		{
-			name:       "Health",
-			method:     http.MethodGet,
-			path:       "/health",
-			wantStatus: http.StatusOK,
-			wantSubstr: `{"status":"ok"}`,
-		},
-		{
-			name:       "CoverageFlush",
-			method:     http.MethodGet,
-			path:       "/debug/coverage/flush",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "CoverageFlushError",
-			method:     http.MethodGet,
-			path:       "/debug/coverage/flush",
-			counterErr: errors.New("flush err"),
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "FactsJSON",
-			method:     http.MethodGet,
-			path:       "/facts?limit=10&offset=0",
-			wantStatus: http.StatusOK,
-			wantSubstr: `"facts"`,
-		},
-		{
-			name:       "FactsStoreError",
-			method:     http.MethodGet,
-			path:       "/facts",
-			storeFail:  "GetFactsPaginated",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "FactsMethodNotAllowed",
-			method:     http.MethodPost,
-			path:       "/facts",
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:       "ContextJSON",
-			method:     http.MethodGet,
-			path:       "/context?q=test&limit=5",
-			wantStatus: http.StatusOK,
-			wantSubstr: `"context"`,
-		},
-		{
-			name:       "ContextPlaintext",
-			method:     http.MethodGet,
-			path:       "/context?q=test&limit=5",
-			headers:    map[string]string{"Accept": "text/plain"},
-			wantStatus: http.StatusOK,
-			wantSubstr: "<retrieved_memory>",
-		},
-		{
-			name:       "ContextMethodNotAllowed",
-			method:     http.MethodPost,
-			path:       "/context",
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:       "ConsolidateOK",
-			method:     http.MethodPost,
-			path:       "/consolidate",
-			wantStatus: http.StatusOK,
-			wantSubstr: `"consolidated":0`,
-		},
-		{
-			name:       "ConsolidateStoreError",
-			method:     http.MethodPost,
-			path:       "/consolidate",
-			storeFail:  "GetAllFactsWithEmbeddings",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "ConsolidateMethodNotAllowed",
-			method:     http.MethodGet,
-			path:       "/consolidate",
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:       "Metrics",
-			method:     http.MethodGet,
-			path:       "/metrics",
-			wantStatus: http.StatusOK,
-			wantSubstr: "coven_facts_total",
-		},
-		{
-			name:       "MCPDirectMetricsRoute",
-			method:     http.MethodGet,
-			path:       "/metrics",
-			directMCP:  true,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MCPDirectConsolidateRoute",
-			method:     http.MethodPost,
-			path:       "/consolidate",
-			directMCP:  true,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MCPGetProbe",
-			method:     http.MethodGet,
-			path:       "/mcp",
-			wantStatus: http.StatusOK,
-			wantSubstr: "Aerial Memory MCP Server",
-		},
-		{
-			name:       "MCPMethodNotAllowed",
-			method:     http.MethodPut,
-			path:       "/mcp",
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:       "MCPEmptyBody",
-			method:     http.MethodPost,
-			path:       "/mcp",
-			body:       "",
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "MCPReadError",
-			method:     http.MethodPost,
-			path:       "/mcp",
-			directMCP:  true,
-			errReader:  true,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "MCPDirectHealthRoute",
-			method:     http.MethodGet,
-			path:       "/health",
-			directMCP:  true,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MCPDirectFlushRoute",
-			method:     http.MethodGet,
-			path:       "/debug/coverage/flush",
-			directMCP:  true,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MCPDirectFactsRoute",
-			method:     http.MethodGet,
-			path:       "/facts",
-			directMCP:  true,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MCPDirectContextRoute",
-			method:     http.MethodGet,
-			path:       "/context?q=test",
-			directMCP:  true,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MCPDoublePrefixNormalized",
-			method:     http.MethodPost,
-			path:       "/mcp",
-			body:       `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"memory_memory_search","arguments":{"query":"test"}}}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MCPStoreToolCall",
-			method:     http.MethodPost,
-			path:       "/mcp",
-			body:       `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_store","arguments":{"fact_text":"tool call store"}}}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MCPForgetToolCall",
-			method:     http.MethodPost,
-			path:       "/mcp",
-			body:       `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_forget","arguments":{"fact_id":1}}}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MCPToolsListDocumentsAdmissionGate",
-			method:     http.MethodPost,
-			path:       "/mcp",
-			body:       `{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}`,
-			wantStatus: http.StatusOK,
-			wantSubstr: "admission gate constraints",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runServerEndpointCase(t, tc, store, server, ts)
-		})
-	}
-}
-
-type serverEndpointTestCase struct {
+// serverRequestCase is the shared row shape for the Routes and handleMCP tests:
+// one request against one handler, asserting status and an optional body substring.
+type serverRequestCase struct {
 	name       string
 	method     string
 	path       string
 	headers    map[string]string
-	body       string
+	body       io.Reader
 	counterErr error
 	storeFail  string
-	directMCP  bool
-	errReader  bool
 	wantStatus int
 	wantSubstr string
 }
 
-func runServerEndpointCase(t *testing.T, tc serverEndpointTestCase, store *TestMemStore, server *Server, ts *httptest.Server) {
+// newServerFixture builds a Server over an in-memory store seeded with one fact
+// and restores the httpkit coverage-flush hooks when the test ends.
+func newServerFixture(t *testing.T) (*TestMemStore, *Server) {
+	t.Helper()
+	oldCounters, oldMeta := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
+	t.Cleanup(func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldCounters, oldMeta })
+
+	store := newTestMemStore()
+	_, _ = store.InsertFact(context.Background(), "Server fact test", testEmbedding(1.0))
+	handler := NewToolHandler(&Config{}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
+	return store, NewServer(handler)
+}
+
+func assertServerRequest(t *testing.T, handler http.Handler, store *TestMemStore, tc serverRequestCase) {
 	t.Helper()
 	httpkit.WriteCountersDirFn = func(string) error { return tc.counterErr }
 	httpkit.WriteMetaDirFn = func(string) error { return tc.counterErr }
@@ -250,57 +54,79 @@ func runServerEndpointCase(t *testing.T, tc serverEndpointTestCase, store *TestM
 		defer store.SetFail("", nil)
 	}
 
-	if tc.directMCP {
-		runServerDirectMCP(t, tc, server)
-		return
-	}
-
-	runServerHTTP(t, tc, ts)
-}
-
-func runServerDirectMCP(t *testing.T, tc serverEndpointTestCase, server *Server) {
-	t.Helper()
-	var rBody io.Reader
-	if tc.errReader {
-		rBody = &mockErrReadCloser{}
-	} else if tc.body != "" {
-		rBody = strings.NewReader(tc.body)
-	}
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(tc.method, tc.path, rBody)
-	server.handleMCP(rec, req)
-	if rec.Code != tc.wantStatus {
-		t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
-	}
-}
-
-func runServerHTTP(t *testing.T, tc serverEndpointTestCase, ts *httptest.Server) {
-	t.Helper()
-	var bodyReader io.Reader
-	if tc.body != "" {
-		bodyReader = strings.NewReader(tc.body)
-	}
-	req, err := http.NewRequest(tc.method, ts.URL+tc.path, bodyReader)
-	if err != nil {
-		t.Fatalf("http.NewRequest failed: %v", err)
-	}
+	req := httptest.NewRequest(tc.method, tc.path, tc.body)
 	for k, v := range tc.headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := ts.Client().Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
 
-	if resp.StatusCode != tc.wantStatus {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+	if rec.Code != tc.wantStatus {
+		t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
 	}
-	if tc.wantSubstr != "" {
-		respBytes, _ := io.ReadAll(resp.Body)
-		if !strings.Contains(string(respBytes), tc.wantSubstr) {
-			t.Errorf("response %q missing %q", string(respBytes), tc.wantSubstr)
-		}
+	if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+		t.Errorf("response %q missing %q", rec.Body.String(), tc.wantSubstr)
+	}
+}
+
+func TestServer_Routes(t *testing.T) {
+	store, server := newServerFixture(t)
+	routes := server.Routes()
+
+	tests := []serverRequestCase{
+		{name: "Health", method: http.MethodGet, path: "/health", wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
+		{name: "CoverageFlush", method: http.MethodGet, path: "/debug/coverage/flush", wantStatus: http.StatusOK},
+		{name: "CoverageFlushError", method: http.MethodGet, path: "/debug/coverage/flush", counterErr: errors.New("flush err"), wantStatus: http.StatusInternalServerError},
+		{name: "Metrics", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusOK, wantSubstr: "coven_facts_total"},
+		{name: "FactsJSON", method: http.MethodGet, path: "/facts?limit=10&offset=0", wantStatus: http.StatusOK, wantSubstr: `"facts"`},
+		{name: "FactsStoreError", method: http.MethodGet, path: "/facts", storeFail: "GetFactsPaginated", wantStatus: http.StatusInternalServerError},
+		{name: "FactsMethodNotAllowed", method: http.MethodPost, path: "/facts", wantStatus: http.StatusMethodNotAllowed},
+		{name: "ContextJSON", method: http.MethodGet, path: "/context?q=test&limit=5", wantStatus: http.StatusOK, wantSubstr: `"context"`},
+		{name: "ContextPlaintext", method: http.MethodGet, path: "/context?q=test&limit=5", headers: map[string]string{"Accept": "text/plain"}, wantStatus: http.StatusOK, wantSubstr: "<retrieved_memory>"},
+		{name: "ContextMethodNotAllowed", method: http.MethodPost, path: "/context", wantStatus: http.StatusMethodNotAllowed},
+		{name: "ConsolidateOK", method: http.MethodPost, path: "/consolidate", wantStatus: http.StatusOK, wantSubstr: `"consolidated":0`},
+		{name: "ConsolidateStoreError", method: http.MethodPost, path: "/consolidate", storeFail: "GetAllFactsWithEmbeddings", wantStatus: http.StatusInternalServerError},
+		{name: "ConsolidateMethodNotAllowed", method: http.MethodGet, path: "/consolidate", wantStatus: http.StatusMethodNotAllowed},
+		{name: "MCPRoute", method: http.MethodGet, path: "/mcp", wantStatus: http.StatusOK, wantSubstr: "Aerial Memory MCP Server"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assertServerRequest(t, routes, store, tc)
+		})
+	}
+}
+
+// mcpToolCallBody renders a JSON-RPC tools/call request body.
+func mcpToolCallBody(id int, name, args string) io.Reader {
+	return strings.NewReader(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`, id, name, args))
+}
+
+func TestServer_HandleMCP(t *testing.T) {
+	store, server := newServerFixture(t)
+	handler := http.HandlerFunc(server.handleMCP)
+
+	tests := []serverRequestCase{
+		{name: "MCPDirectHealthRoute", method: http.MethodGet, path: "/health", wantStatus: http.StatusOK},
+		{name: "MCPDirectFlushRoute", method: http.MethodGet, path: "/debug/coverage/flush", wantStatus: http.StatusOK},
+		{name: "MCPDirectMetricsRoute", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusOK},
+		{name: "MCPDirectFactsRoute", method: http.MethodGet, path: "/facts", wantStatus: http.StatusOK},
+		{name: "MCPDirectContextRoute", method: http.MethodGet, path: "/context?q=test", wantStatus: http.StatusOK},
+		{name: "MCPDirectConsolidateRoute", method: http.MethodPost, path: "/consolidate", wantStatus: http.StatusOK},
+		{name: "MCPGetProbe", method: http.MethodGet, path: "/mcp", wantStatus: http.StatusOK, wantSubstr: "Aerial Memory MCP Server"},
+		{name: "MCPMethodNotAllowed", method: http.MethodPut, path: "/mcp", wantStatus: http.StatusMethodNotAllowed},
+		{name: "MCPEmptyBody", method: http.MethodPost, path: "/mcp", wantStatus: http.StatusBadRequest},
+		{name: "MCPReadError", method: http.MethodPost, path: "/mcp", body: &mockErrReadCloser{}, wantStatus: http.StatusBadRequest},
+		{name: "MCPDoublePrefixNormalized", method: http.MethodPost, path: "/mcp", body: mcpToolCallBody(1, "memory_memory_search", `{"query":"test"}`), wantStatus: http.StatusOK},
+		{name: "MCPStoreToolCall", method: http.MethodPost, path: "/mcp", body: mcpToolCallBody(2, "memory_store", `{"fact_text":"tool call store"}`), wantStatus: http.StatusOK},
+		{name: "MCPForgetToolCall", method: http.MethodPost, path: "/mcp", body: mcpToolCallBody(3, "memory_forget", `{"fact_id":1}`), wantStatus: http.StatusOK},
+		{name: "MCPToolsListDocumentsAdmissionGate", method: http.MethodPost, path: "/mcp", body: strings.NewReader(`{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}`), wantStatus: http.StatusOK, wantSubstr: "admission gate constraints"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assertServerRequest(t, handler, store, tc)
+		})
 	}
 }
 
