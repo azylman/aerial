@@ -432,6 +432,8 @@ ollama:
 			t.Setenv("DATABASE_URL", "postgres://localhost/test")
 			t.Setenv("ERI_URL", "")
 			t.Setenv("ERI_LLM_URL", "")
+			t.Setenv("PR_REGISTER_URL", "")
+			t.Setenv("SYNAPSE_PR_REGISTER_URL", "")
 			t.Setenv("CUSTOM_SKILLS_DIR", tc.envSkillsDir)
 			t.Setenv("GITHUB_PAT", tc.envPAT)
 			t.Setenv("CONFIG_REPO_OWNER", tc.envOwner)
@@ -458,8 +460,8 @@ ollama:
 			if cfg.ConfigRepoName != tc.wantRepo {
 				t.Errorf("ConfigRepoName = %q, want %q", cfg.ConfigRepoName, tc.wantRepo)
 			}
-			if cfg.BrainPRRegisterURL != tc.wantBrainReg {
-				t.Errorf("BrainPRRegisterURL = %q, want %q", cfg.BrainPRRegisterURL, tc.wantBrainReg)
+			if cfg.PRRegisterURL != tc.wantBrainReg {
+				t.Errorf("PRRegisterURL = %q, want %q", cfg.PRRegisterURL, tc.wantBrainReg)
 			}
 			if cfg.SystemChannelID != tc.wantChannelID {
 				t.Errorf("SystemChannelID = %q, want %q", cfg.SystemChannelID, tc.wantChannelID)
@@ -497,17 +499,17 @@ ollama:
 	_ = os.WriteFile(noPRRegFile, []byte(strings.Replace(baseContent, `pr_register_url: "http://synapse.aerial/internal/pr/register"`, `pr_register_url: ""`, 1)), 0o644)
 
 	tests := []struct {
-		name         string
-		path         string
-		wantErr      bool
-		wantBrainURL string
-		wantBrainLLM string
+		name       string
+		path       string
+		wantErr    bool
+		wantEriURL string
+		wantEriLLM string
 	}{
 		{
-			name:         "ValidBrainURLs",
-			path:         validFile,
-			wantBrainURL: "http://custom-eri:8000",
-			wantBrainLLM: "http://custom-proxy:9000/v1/llm",
+			name:       "ValidBrainURLs",
+			path:       validFile,
+			wantEriURL: "http://custom-eri:8000",
+			wantEriLLM: "http://custom-proxy:9000/v1/llm",
 		},
 		{
 			name:    "MissingBrainURLFails",
@@ -538,11 +540,11 @@ ollama:
 			if tc.wantErr {
 				return
 			}
-			if cfg.BrainURL != tc.wantBrainURL {
-				t.Errorf("BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
+			if cfg.EriURL != tc.wantEriURL {
+				t.Errorf("EriURL = %q, want %q", cfg.EriURL, tc.wantEriURL)
 			}
-			if cfg.BrainLLMURL != tc.wantBrainLLM {
-				t.Errorf("BrainLLMURL = %q, want %q", cfg.BrainLLMURL, tc.wantBrainLLM)
+			if cfg.EriLLMURL != tc.wantEriLLM {
+				t.Errorf("EriLLMURL = %q, want %q", cfg.EriLLMURL, tc.wantEriLLM)
 			}
 		})
 	}

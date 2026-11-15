@@ -56,7 +56,6 @@ func TestServer_ScheduleRoutesDispatchViaMCP(t *testing.T) {
 		{"mcp dispatch schedules", http.MethodGet, "/schedules", "", http.StatusOK},
 		{"mcp dispatch metrics", http.MethodGet, "/metrics", "", http.StatusOK},
 		{"mcp dispatch schedules runs", http.MethodGet, "/schedules/runs", "", http.StatusOK},
-		{"mcp dispatch schedules oneshot invalid", http.MethodPost, "/schedules/oneshot", `{}`, http.StatusBadRequest},
 	}
 
 	for _, tc := range tests {
@@ -184,6 +183,58 @@ func TestServer_Metrics_Table(t *testing.T) {
 					t.Errorf("expected body to contain %q, body:\n%s", sub, body)
 				}
 			}
+		})
+	}
+}
+
+func TestServer_RecoverFailedEventTrigger(t *testing.T) {
+	server, ts := setupTestServer(t)
+	defer ts.Close()
+	ctx := context.Background()
+
+	closedDB, _ := OpenDB(&Config{DatabaseURL: ":memory:"})
+	_ = closedDB.Close()
+	sClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
+
+	tests := []struct {
+		name   string
+		server *Server
+		trig   EventTrigger
+	}{
+		{
+			name:   "persistent trigger with valid db",
+			server: server,
+			trig: EventTrigger{
+				ID:         "trig-p-1",
+				ChannelID:  "chan-1",
+				Source:     "github",
+				Target:     "repo",
+				EventType:  "push",
+				Prompt:     "test prompt",
+				Persistent: true,
+			},
+		},
+		{
+			name:   "non persistent trigger with closed db logs error",
+			server: sClosed,
+			trig: EventTrigger{
+				ID:         "trig-np-err",
+				Persistent: false,
+			},
+		},
+		{
+			name:   "persistent trigger with closed db logs error",
+			server: sClosed,
+			trig: EventTrigger{
+				ID:         "trig-p-err",
+				Persistent: true,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.server.recoverFailedEventTrigger(ctx, tc.trig)
 		})
 	}
 }

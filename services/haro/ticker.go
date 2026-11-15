@@ -188,38 +188,42 @@ func (d *HTTPPromptDispatcher) DispatchPrompt(ctx context.Context, req PromptDis
 }
 
 func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req DispatchRequest) (DispatchResponse, error) {
+	if d == nil {
+		return DispatchResponse{}, errors.New("dispatcher is nil")
+	}
 	if strings.TrimSpace(req.Prompt) == "" {
 		return DispatchResponse{}, errors.New("dispatch prompt cannot be empty")
 	}
 	if strings.TrimSpace(req.Source) == "" {
 		return DispatchResponse{}, errors.New("dispatch source cannot be empty")
 	}
-	if bus := d.getBus(); bus != nil {
-		dispatchID := strings.TrimSpace(req.ID)
-		if dispatchID == "" {
-			dispatchID = uuid.New().String()
-		}
-		args := pubsub.EriDispatchJobArgs{
-			ID:           dispatchID,
-			Source:       req.Source,
-			SessionID:    req.SessionID,
-			TargetID:     req.TargetID,
-			Prompt:       req.Prompt,
-			Effort:       req.Effort,
-			SkipIfActive: req.SkipIfActive,
-		}
-		msgID := "eri:dispatch:" + dispatchID
-		if err := bus.Publish(ctx, pubsub.SubjectEriDispatchJob, msgID, args); err != nil {
-			return DispatchResponse{}, err
-		}
-		return DispatchResponse{
-			Status:     "accepted",
-			DispatchID: dispatchID,
-			MessageID:  dispatchID,
-			SessionID:  req.SessionID,
-		}, nil
+	bus := d.getBus()
+	if bus == nil {
+		return DispatchResponse{}, errors.New("event bus is not configured")
 	}
-	return postBrainJSON[DispatchRequest, DispatchResponse](ctx, d, "/dispatch", "dispatch", req)
+	dispatchID := strings.TrimSpace(req.ID)
+	if dispatchID == "" {
+		dispatchID = uuid.New().String()
+	}
+	args := pubsub.EriDispatchJobArgs{
+		ID:           dispatchID,
+		Source:       req.Source,
+		SessionID:    req.SessionID,
+		TargetID:     req.TargetID,
+		Prompt:       req.Prompt,
+		Effort:       req.Effort,
+		SkipIfActive: req.SkipIfActive,
+	}
+	msgID := "eri:dispatch:" + dispatchID
+	if err := bus.Publish(ctx, pubsub.SubjectEriDispatchJob, msgID, args); err != nil {
+		return DispatchResponse{}, err
+	}
+	return DispatchResponse{
+		Status:     "accepted",
+		DispatchID: dispatchID,
+		MessageID:  dispatchID,
+		SessionID:  req.SessionID,
+	}, nil
 }
 
 type Ticker struct {

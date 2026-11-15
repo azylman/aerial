@@ -58,8 +58,8 @@ func NewServer(handler *ToolHandler, dispatcher ...PromptDispatcher) *Server {
 	var disp PromptDispatcher
 	if len(dispatcher) > 0 && dispatcher[0] != nil {
 		disp = dispatcher[0]
-	} else if handler.cfg != nil && strings.TrimSpace(handler.cfg.BrainURL) != "" {
-		disp = NewHTTPPromptDispatcher(handler.cfg.BrainURL)
+	} else if handler.cfg != nil && strings.TrimSpace(handler.cfg.EriURL) != "" {
+		disp = NewHTTPPromptDispatcher(handler.cfg.EriURL)
 	}
 
 	opts := &mcp.StreamableHTTPOptions{
@@ -214,7 +214,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/schedules", s.handleSchedules)
 	mux.HandleFunc("/schedules/runs", s.handleScheduleRuns)
-	mux.HandleFunc("/schedules/oneshot", s.handleScheduleOneShot)
 
 	mcpBridge := tracing.Middleware("haro", http.HandlerFunc(s.handleMCP))
 	mux.Handle("/mcp", mcpBridge)
@@ -250,10 +249,6 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/schedules/runs" {
 		s.handleScheduleRuns(w, r)
-		return
-	}
-	if r.URL.Path == "/schedules/oneshot" {
-		s.handleScheduleOneShot(w, r)
 		return
 	}
 
@@ -387,60 +382,6 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpkit.WriteJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) handleScheduleOneShot(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-
-	if s.handler == nil || s.handler.db == nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
-		return
-	}
-
-	var req CreateOneShotRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
-		return
-	}
-
-	threadID := strings.TrimSpace(req.ThreadID)
-	prompt := strings.TrimSpace(req.Prompt)
-	if threadID == "" || prompt == "" || req.RunAt.IsZero() {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "thread_id, prompt, and run_at are required"})
-		return
-	}
-
-	schedID := strings.TrimSpace(req.ID)
-	if schedID == "" {
-		schedID = uuid.New().String()
-	}
-
-	effort := normalizeScheduleEffort(req.Effort)
-
-	sched := OneShotSchedule{
-		ID:        schedID,
-		ThreadID:  threadID,
-		Prompt:    prompt,
-		Effort:    effort,
-		RunAt:     req.RunAt.UTC(),
-		CreatedAt: time.Now().UTC(),
-	}
-
-	if err := InsertOneShotSchedule(r.Context(), s.handler.db, sched); err != nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-
-	s.InvalidateSchedulesCache()
-
-	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-		"status": "ok",
-		"id":     schedID,
-	})
 }
 
 // HandleOneShotJob ingests a durable HaroOneShotJobArgs and inserts it idempotently into the database.

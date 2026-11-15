@@ -45,13 +45,14 @@ ollama:
 		envEriURL     string
 		envEriLLMURL  string
 		envPRRegURL   string
+		envSynapseURL string
 		wantEriURL    string
 		wantEriLLMURL string
 		wantPRRegURL  string
 		wantDB        string
 	}{
 		{
-			name:          "eri yaml loaded and copied to both eri and brain fields",
+			name:          "eri yaml loaded with eri and pr register fields",
 			path:          eriFile,
 			envDB:         "postgres://localhost/testdb",
 			wantEriURL:    "http://eri.aerial",
@@ -68,6 +69,15 @@ ollama:
 			wantEriURL:    "http://env.eri:8088",
 			wantEriLLMURL: "http://env.eri:8088/internal/llm",
 			wantPRRegURL:  "http://env.synapse:4020/internal/pr/register",
+		},
+		{
+			name:          "synapse pr register url env fallback",
+			path:          eriFile,
+			envDB:         "postgres://localhost/testdb",
+			envSynapseURL: "http://fallback.synapse:4020/internal/pr/register",
+			wantEriURL:    "http://eri.aerial",
+			wantEriLLMURL: "http://eri.aerial/internal/llm",
+			wantPRRegURL:  "http://fallback.synapse:4020/internal/pr/register",
 		},
 		{
 			name:          "decomposed POSTGRES_PASSWORD resolution",
@@ -92,19 +102,20 @@ ollama:
 			t.Setenv("ERI_URL", tc.envEriURL)
 			t.Setenv("ERI_LLM_URL", tc.envEriLLMURL)
 			t.Setenv("PR_REGISTER_URL", tc.envPRRegURL)
+			t.Setenv("SYNAPSE_PR_REGISTER_URL", tc.envSynapseURL)
 
 			cfg, err := LoadConfig(tc.path)
 			if err != nil {
 				t.Fatalf("LoadConfig() error = %v", err)
 			}
-			if cfg.EriURL != tc.wantEriURL || cfg.BrainURL != tc.wantEriURL {
-				t.Errorf("EriURL = %q, BrainURL = %q, want %q", cfg.EriURL, cfg.BrainURL, tc.wantEriURL)
+			if cfg.EriURL != tc.wantEriURL {
+				t.Errorf("EriURL = %q, want %q", cfg.EriURL, tc.wantEriURL)
 			}
-			if cfg.EriLLMURL != tc.wantEriLLMURL || cfg.BrainLLMURL != tc.wantEriLLMURL {
-				t.Errorf("EriLLMURL = %q, BrainLLMURL = %q, want %q", cfg.EriLLMURL, cfg.BrainLLMURL, tc.wantEriLLMURL)
+			if cfg.EriLLMURL != tc.wantEriLLMURL {
+				t.Errorf("EriLLMURL = %q, want %q", cfg.EriLLMURL, tc.wantEriLLMURL)
 			}
-			if cfg.PRRegisterURL != tc.wantPRRegURL || cfg.BrainPRRegisterURL != tc.wantPRRegURL {
-				t.Errorf("PRRegisterURL = %q, BrainPRRegisterURL = %q, want %q", cfg.PRRegisterURL, cfg.BrainPRRegisterURL, tc.wantPRRegURL)
+			if cfg.PRRegisterURL != tc.wantPRRegURL {
+				t.Errorf("PRRegisterURL = %q, want %q", cfg.PRRegisterURL, tc.wantPRRegURL)
 			}
 			if tc.wantDB != "" && cfg.DatabaseURL != tc.wantDB {
 				t.Errorf("DatabaseURL = %q, want %q", cfg.DatabaseURL, tc.wantDB)

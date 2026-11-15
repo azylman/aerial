@@ -57,7 +57,7 @@ func TestPostBrainJSON_Traceparent(t *testing.T) {
 			if tc.withParent {
 				ctx = parentCtx
 			}
-			if _, err := postBrainJSON[DispatchRequest, DispatchResponse](ctx, NewHTTPPromptDispatcher(srv.URL), "/dispatch", "dispatch", DispatchRequest{Source: "heartbeat"}); err != nil {
+			if _, err := postBrainJSON[PromptDispatchRequest, PromptDispatchResponse](ctx, NewHTTPPromptDispatcher(srv.URL), "/prompt", "prompt dispatch", PromptDispatchRequest{Prompt: "heartbeat"}); err != nil {
 				t.Fatalf("postBrainJSON: %v", err)
 			}
 			id := traceparentTraceID(got)
