@@ -565,6 +565,7 @@ func assertVanadisMCPToolResult(t *testing.T, respBytes []byte, wantToolErr bool
 
 func TestToMCPChunkBriefs(t *testing.T) {
 	t.Parallel()
+
 	chunks := []VanadisChunk{
 		{ID: "c1", DependsOn: nil},
 	}

@@ -48,6 +48,9 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 			if _, _, err := s.RemoveChunk(ctx, "b1", "c1"); err == nil {
 				t.Error("expected error on RemoveChunk")
 			}
+			if err := s.SetChunkAwakeables(ctx, "c1", "m1", "d1"); err == nil {
+				t.Error("expected error on SetChunkAwakeables")
+			}
 		}
 	})
 
@@ -622,6 +625,23 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 			t.Errorf("expected ErrBuildNotFound, got %v", err)
 		}
 
+		// Select build db error (L90)
+		sBuildErr := newMockStore(mockDB{
+			beginFn: func(context.Context) (pgx.Tx, error) {
+				return &mockTx{
+					queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
+						if strings.Contains(sql, "FROM vanadis_chunks") {
+							return mockActChunkRow("action", "running")
+						}
+						return &mockRow{err: errors.New("db build error")}
+					},
+				}, nil
+			},
+		})
+		if _, err := sBuildErr.CompleteActionChunk(ctx, "c1"); err == nil {
+			t.Error("expected error on build query error")
+		}
+
 		// Non-action mode (mode = "pr") -> no-op returns matched: true, advanced: false
 		sPRMode := newMockStore(mockDB{
 			beginFn: func(context.Context) (pgx.Tx, error) {
@@ -749,8 +769,8 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 				*dest[10].(*[]string) = []string{}
 				*dest[11].(*string) = cStatus
 				*dest[12].(*int) = 0
-				*dest[13].(*sql.NullTime) = sql.NullTime{}
-				*dest[14].(*sql.NullTime) = sql.NullTime{}
+				*dest[13].(*sql.NullTime) = sql.NullTime{Time: time.Now(), Valid: true}
+				*dest[14].(*sql.NullTime) = sql.NullTime{Time: time.Now(), Valid: true}
 				*dest[15].(*time.Time) = time.Now()
 				*dest[16].(*time.Time) = time.Now()
 				*dest[17].(*string) = "b1"
@@ -856,6 +876,40 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 		bGot, cGot, ok, err := sSuccess.FailChunk(ctx, "c1", "unrecoverable failure")
 		if err != nil || !ok || bGot.Status != "failed" || cGot.Status != "failed" {
 			t.Fatalf("expected success on FailChunk, got b=%+v c=%+v ok=%v err=%v", bGot, cGot, ok, err)
+		}
+	})
+
+	t.Run("SetChunkAwakeables_MockDB", func(t *testing.T) {
+		s := newMockStore(mockDB{})
+		if err := s.SetChunkAwakeables(ctx, "", "m1", "d1"); err == nil {
+			t.Error("expected error on empty chunk ID")
+		}
+
+		sExecErr := newMockStore(mockDB{
+			execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+				return pgconn.CommandTag{}, errors.New("exec error")
+			},
+		})
+		if err := sExecErr.SetChunkAwakeables(ctx, "c1", "m1", "d1"); err == nil {
+			t.Error("expected error on exec failure")
+		}
+
+		sNotFound := newMockStore(mockDB{
+			execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+				return pgconn.NewCommandTag("UPDATE 0"), nil
+			},
+		})
+		if err := sNotFound.SetChunkAwakeables(ctx, "c1", "m1", "d1"); !errors.Is(err, ErrChunkNotFound) {
+			t.Errorf("expected ErrChunkNotFound, got %v", err)
+		}
+
+		sSuccess := newMockStore(mockDB{
+			execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			},
+		})
+		if err := sSuccess.SetChunkAwakeables(ctx, "c1", "m1", "d1"); err != nil {
+			t.Errorf("expected success, got %v", err)
 		}
 	})
 }
