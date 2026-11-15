@@ -145,7 +145,7 @@ func TestResolveJetStreamJobCoords(t *testing.T) {
 	}
 }
 
-func initInsertRiverJobBus(ctx context.Context, busErr error, busReceived chan struct{}) pubsub.Bus {
+func initTestJobBus(ctx context.Context, busErr error, busReceived chan struct{}) pubsub.Bus {
 	memBus := pubsub.NewMemoryBus()
 	if busErr != nil {
 		_ = memBus.Close()
@@ -205,7 +205,7 @@ func TestPublishJetStreamJob(t *testing.T) {
 			srv := &RouterServer{}
 			busReceived := make(chan struct{}, 1)
 			if tc.hasBus {
-				memBus := initInsertRiverJobBus(ctx, tc.busErr, busReceived)
+				memBus := initTestJobBus(ctx, tc.busErr, busReceived)
 				t.Cleanup(func() { _ = memBus.Close() })
 				srv.SetEventBus(memBus)
 			}

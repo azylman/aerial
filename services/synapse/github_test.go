@@ -22,7 +22,7 @@ type ghWebhookTestCase struct {
 	name, path, wantMetricSubstr string
 	body                         io.Reader
 	headers                      map[string]string
-	river                        *mockRiverInserter
+	bus                          *mockEventBus
 	hasBus                       bool
 	wantStatus, wantInserted     int
 }
@@ -32,9 +32,9 @@ func assertGitHubWebhookResponse(t *testing.T, tc ghWebhookTestCase, rec *httpte
 	if rec.Code != tc.wantStatus {
 		t.Fatalf("expected status %d, got %d", tc.wantStatus, rec.Code)
 	}
-	if tc.wantInserted > 0 && tc.river != nil {
-		if len(tc.river.insertedJobs) != tc.wantInserted {
-			t.Fatalf("expected %d inserted jobs, got %d", tc.wantInserted, len(tc.river.insertedJobs))
+	if tc.wantInserted > 0 && tc.bus != nil {
+		if len(tc.bus.insertedJobs) != tc.wantInserted {
+			t.Fatalf("expected %d inserted jobs, got %d", tc.wantInserted, len(tc.bus.insertedJobs))
 		}
 		var resp map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -43,8 +43,8 @@ func assertGitHubWebhookResponse(t *testing.T, tc ghWebhookTestCase, rec *httpte
 		if resp["status"] != "accepted" || resp["event"] != tc.headers["X-GitHub-Event"] || resp["delivery"] != tc.headers["X-GitHub-Delivery"] {
 			t.Errorf("unexpected response body: %+v", resp)
 		}
-		if tc.river.insertedJobs[0].Event != tc.headers["X-GitHub-Event"] || tc.river.insertedJobs[0].Delivery != tc.headers["X-GitHub-Delivery"] {
-			t.Errorf("unexpected inserted jobs: %+v", tc.river.insertedJobs)
+		if tc.bus.insertedJobs[0].Event != tc.headers["X-GitHub-Event"] || tc.bus.insertedJobs[0].Delivery != tc.headers["X-GitHub-Delivery"] {
+			t.Errorf("unexpected inserted jobs: %+v", tc.bus.insertedJobs)
 		}
 	}
 	if tc.wantMetricSubstr != "" {
@@ -59,8 +59,8 @@ func runGitHubWebhookCase(t *testing.T, tc ghWebhookTestCase) {
 	t.Helper()
 	t.Parallel()
 	srv := NewRouterServer(fixedConfig(Config{}), nil)
-	if tc.river != nil {
-		srv.SetEventBus(tc.river)
+	if tc.bus != nil {
+		srv.SetEventBus(tc.bus)
 	}
 	busCh := make(chan string, 1)
 	if tc.hasBus {
@@ -99,10 +99,10 @@ func TestHandleGitHubWebhook(t *testing.T) {
 		{name: "missing X-GitHub-Event header", path: "/api/webhooks/github", body: strings.NewReader(`{}`), wantStatus: http.StatusBadRequest},
 		{name: "read error in body", path: "/api/webhooks/github", body: errReader{}, headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusBadRequest},
 		{name: "bus nil", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, wantStatus: http.StatusInternalServerError},
-		{name: "bus publish error", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, river: &mockRiverInserter{err: errors.New("simulated database failure")}, wantStatus: http.StatusInternalServerError},
-		{name: "api path success", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, river: &mockRiverInserter{}, wantStatus: http.StatusOK, wantInserted: 1},
+		{name: "bus publish error", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, bus: &mockEventBus{err: errors.New("simulated database failure")}, wantStatus: http.StatusInternalServerError},
+		{name: "api path success", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, bus: &mockEventBus{}, wantStatus: http.StatusOK, wantInserted: 1},
 		{name: "bus only success", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-bus-1"}, hasBus: true, wantStatus: http.StatusOK},
-		{name: "legacy path success", path: "/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, river: &mockRiverInserter{}, wantStatus: http.StatusOK, wantInserted: 1},
+		{name: "legacy path success", path: "/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, bus: &mockEventBus{}, wantStatus: http.StatusOK, wantInserted: 1},
 	}
 
 	for _, tc := range tests {
@@ -126,7 +126,7 @@ type ghEventCase struct {
 	priorEvent           *ghPriorEvent
 	reg                  *mockPRRegistry
 	disp                 *mockOutboundDispatcher
-	river                *mockRiverInserter
+	bus                  *mockEventBus
 	spyNoGitHubHit       bool
 	systemChannelID      string
 	autoUpdateAuthors    []string
@@ -371,8 +371,8 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 	t.Helper()
 	t.Parallel()
 	var inserters []pubsub.Bus
-	if tc.river != nil {
-		inserters = append(inserters, tc.river)
+	if tc.bus != nil {
+		inserters = append(inserters, tc.bus)
 	}
 	var reg PRRegistryUpdater
 	if tc.reg != nil {

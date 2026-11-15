@@ -20,7 +20,7 @@ import (
 
 // --- Shared Test Mocks & Helpers ---
 
-type mockRiverInserter struct {
+type mockEventBus struct {
 	pubsub.Bus
 
 	mu                     sync.Mutex
@@ -33,7 +33,7 @@ type mockRiverInserter struct {
 	err                    error
 }
 
-func (m *mockRiverInserter) Publish(ctx context.Context, subject, msgID string, data any) error {
+func (m *mockEventBus) Publish(ctx context.Context, subject, msgID string, data any) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.err != nil {

@@ -848,15 +848,15 @@ func TestHandleFluxWebhookSourceRepo(t *testing.T) {
 				disp = &mockOutboundDispatcher{sourceRepo: tc.sourceRepo, sourceRepoErr: tc.sourceErr}
 			}
 			srv := newTestRouter(Config{}, nil, nil, disp)
-			river := &mockRiverInserter{}
-			srv.SetEventBus(river)
+			bus := &mockEventBus{}
+			srv.SetEventBus(bus)
 			req := httptest.NewRequest(http.MethodPost, "/webhooks/flux", strings.NewReader(tc.payload))
 			w := httptest.NewRecorder()
 			srv.Routes().ServeHTTP(w, req)
-			if w.Code != http.StatusAccepted || len(river.insertedDeployJobs) != 1 {
-				t.Fatalf("status = %d, inserted = %d; want 202 and one deploy job (body %s)", w.Code, len(river.insertedDeployJobs), w.Body.String())
+			if w.Code != http.StatusAccepted || len(bus.insertedDeployJobs) != 1 {
+				t.Fatalf("status = %d, inserted = %d; want 202 and one deploy job (body %s)", w.Code, len(bus.insertedDeployJobs), w.Body.String())
 			}
-			if got := river.insertedDeployJobs[0].Event.Repo; got != tc.wantRepo {
+			if got := bus.insertedDeployJobs[0].Event.Repo; got != tc.wantRepo {
 				t.Errorf("repo = %q, want %q", got, tc.wantRepo)
 			}
 		})

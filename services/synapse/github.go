@@ -1038,7 +1038,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		defer s.onProcessed(event, delivery)
 	}
 	res = &ResolvedGitHubEvent{Event: event, Delivery: delivery}
-	// Triggers are only evaluated after successful processing to prevent destructive trigger claiming during transient errors/River retries.
+	// Triggers are only evaluated after successful processing to prevent destructive trigger claiming during transient errors/JetStream retries.
 	defer func() {
 		if err == nil {
 			s.evaluateGitHubEventTriggers(ctx, res, body)

@@ -29,7 +29,7 @@ func gatewaySpanOptions(channelID string) []trace.SpanStartOption {
 }
 
 // discordJobSpanOptions configure the consumer span a Discord job opens under the gateway trace
-// persisted on its args. It covers River pickup through every retry until eri accepts the event,
+// persisted on its args. It covers JetStream pickup through every retry until eri accepts the event,
 // so queue wait shows as the gap between the gateway span and this one.
 func discordJobSpanOptions(queue string) []trace.SpanStartOption {
 	return []trace.SpanStartOption{

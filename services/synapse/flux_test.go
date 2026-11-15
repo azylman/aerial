@@ -113,8 +113,8 @@ type handleFluxWebhookCase struct {
 	name           string
 	endpoint       string
 	payload        string
-	withRiver      bool
-	riverFail      bool
+	withBus        bool
+	busFail        bool
 	downstreamFail bool
 	pgReg          *PostgresPRRegistry
 	wantStatusCode int
@@ -122,7 +122,7 @@ type handleFluxWebhookCase struct {
 	wantEvent      string
 	wantJobName    string
 	wantPRNumber   int
-	wantRiverJobs  int
+	wantBusJobs    int
 }
 
 func assertFluxResponse(t *testing.T, body []byte, wantStatus, wantEvent, wantJob string, wantPR int) {
@@ -160,13 +160,13 @@ func runHandleFluxWebhookCase(t *testing.T, tc handleFluxWebhookCase) {
 	if tc.downstreamFail {
 		srv.SetDispatcher(&mockOutboundDispatcher{directMessageErr: errors.New("dispatch failed")})
 	}
-	var mockRiver *mockRiverInserter
-	if tc.withRiver {
-		mockRiver = &mockRiverInserter{}
-		if tc.riverFail {
-			mockRiver.err = errors.New("river insert failed")
+	var mockBus *mockEventBus
+	if tc.withBus {
+		mockBus = &mockEventBus{}
+		if tc.busFail {
+			mockBus.err = errors.New("bus insert failed")
 		}
-		srv.SetEventBus(mockRiver)
+		srv.SetEventBus(mockBus)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, tc.endpoint, strings.NewReader(tc.payload))
@@ -181,9 +181,9 @@ func runHandleFluxWebhookCase(t *testing.T, tc handleFluxWebhookCase) {
 
 	assertFluxResponse(t, w.Body.Bytes(), tc.wantStatus, tc.wantEvent, tc.wantJobName, tc.wantPRNumber)
 
-	if tc.withRiver && mockRiver != nil {
-		if len(mockRiver.insertedDeployJobs) != tc.wantRiverJobs {
-			t.Errorf("inserted river jobs = %d, want %d", len(mockRiver.insertedDeployJobs), tc.wantRiverJobs)
+	if tc.withBus && mockBus != nil {
+		if len(mockBus.insertedDeployJobs) != tc.wantBusJobs {
+			t.Errorf("inserted bus jobs = %d, want %d", len(mockBus.insertedDeployJobs), tc.wantBusJobs)
 		}
 	}
 }
@@ -485,7 +485,7 @@ func TestHandleFluxWebhook(t *testing.T) {
 
 	tests := []handleFluxWebhookCase{
 		{
-			name:           "POST /webhooks/flux valid kustomization without river",
+			name:           "POST /webhooks/flux valid kustomization without bus",
 			endpoint:       "/webhooks/flux",
 			payload:        `{"involvedObject":{"kind":"Kustomization","name":"synapse","namespace":"flux-system"},"severity":"info","reason":"ReconciliationSucceeded","message":"reconciliation ok"}`,
 			wantStatusCode: http.StatusOK,
@@ -494,7 +494,7 @@ func TestHandleFluxWebhook(t *testing.T) {
 			wantJobName:    "synapse",
 		},
 		{
-			name:           "POST /api/webhooks/flux valid gitrepository without river",
+			name:           "POST /api/webhooks/flux valid gitrepository without bus",
 			endpoint:       "/api/webhooks/flux",
 			payload:        `{"involvedObject":{"kind":"GitRepository","name":"aerial-config","namespace":"flux-system"},"severity":"info","reason":"NewArtifact","message":"sync ok","metadata":{"revision":"main@sha1:abcdef1234"}}`,
 			wantStatusCode: http.StatusOK,
@@ -516,26 +516,26 @@ func TestHandleFluxWebhook(t *testing.T) {
 			wantStatusCode: http.StatusBadRequest,
 		},
 		{
-			name:           "POST /webhooks/flux with river inserts job",
+			name:           "POST /webhooks/flux with bus inserts job",
 			endpoint:       "/webhooks/flux",
 			payload:        `{"involvedObject":{"kind":"Kustomization","name":"brain","namespace":"flux-system"},"severity":"info","reason":"Progressing","message":"progressing","metadata":{"revision":"sha1:12345"}}`,
-			withRiver:      true,
+			withBus:        true,
 			wantStatusCode: http.StatusAccepted,
 			wantStatus:     "accepted",
 			wantEvent:      "deploy_started",
 			wantJobName:    "brain",
-			wantRiverJobs:  1,
+			wantBusJobs:    1,
 		},
 		{
-			name:           "POST /webhooks/flux with river failure returns 500",
+			name:           "POST /webhooks/flux with bus failure returns 500",
 			endpoint:       "/webhooks/flux",
 			payload:        `{"involvedObject":{"kind":"Kustomization","name":"brain","namespace":"flux-system"},"severity":"info","reason":"Progressing"}`,
-			withRiver:      true,
-			riverFail:      true,
+			withBus:        true,
+			busFail:        true,
 			wantStatusCode: http.StatusInternalServerError,
 		},
 		{
-			name:           "POST /webhooks/flux without river error processing event returns 200 with result",
+			name:           "POST /webhooks/flux without bus error processing event returns 200 with result",
 			endpoint:       "/webhooks/flux",
 			payload:        `{"involvedObject":{"kind":"Kustomization","name":"webhooks-router","namespace":"flux-system"},"severity":"error","reason":"ReconciliationFailed","message":"broken deploy"}`,
 			downstreamFail: true,
@@ -545,30 +545,30 @@ func TestHandleFluxWebhook(t *testing.T) {
 			wantJobName:    "webhooks-router",
 		},
 		{
-			name:           "POST /webhooks/flux ignores pre-image kustomization deploy_started event without inserting river jobs",
+			name:           "POST /webhooks/flux ignores pre-image kustomization deploy_started event without inserting bus jobs",
 			endpoint:       "/webhooks/flux",
 			payload:        `{"involvedObject":{"kind":"Kustomization","name":"aerial-core","namespace":"flux-system"},"severity":"info","reason":"Progressing","message":"progressing","metadata":{"revision":"main@sha1:12345"}}`,
-			withRiver:      true,
+			withBus:        true,
 			pgReg:          NewPostgresPRRegistry(newMockPreImageKustomizationPool("merged")),
 			wantStatusCode: http.StatusOK,
 			wantStatus:     "ignored",
 			wantEvent:      "deploy_started",
 			wantJobName:    "aerial-core",
 			wantPRNumber:   896,
-			wantRiverJobs:  0,
+			wantBusJobs:    0,
 		},
 		{
-			name:           "POST /webhooks/flux ignores pre-image kustomization deploy_success event without inserting river jobs",
+			name:           "POST /webhooks/flux ignores pre-image kustomization deploy_success event without inserting bus jobs",
 			endpoint:       "/webhooks/flux",
 			payload:        `{"involvedObject":{"kind":"Kustomization","name":"aerial-core","namespace":"flux-system"},"severity":"info","reason":"ReconciliationSucceeded","message":"reconciled","metadata":{"revision":"main@sha1:12345"}}`,
-			withRiver:      true,
+			withBus:        true,
 			pgReg:          NewPostgresPRRegistry(newMockPreImageKustomizationPool("synced")),
 			wantStatusCode: http.StatusOK,
 			wantStatus:     "ignored",
 			wantEvent:      "deploy_success",
 			wantJobName:    "aerial-core",
 			wantPRNumber:   896,
-			wantRiverJobs:  0,
+			wantBusJobs:    0,
 		},
 	}
 
