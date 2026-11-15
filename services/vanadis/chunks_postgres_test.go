@@ -364,32 +364,6 @@ func TestPostgresVanadisStore_ReserveChunkForLaunch(t *testing.T) {
 	}
 }
 
-func TestPostgresVanadisStore_SetChunkAwakeables(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		chunkID   string
-		db        dbScript
-		wantErrIs error
-		wantErr   bool
-	}{
-		{name: "nil receiver", chunkID: "c1", db: dbScript{bare: nilReceiver}, wantErr: true},
-		{name: "nil db", chunkID: "c1", db: dbScript{bare: nilDB}, wantErr: true},
-		{name: "empty chunk id", chunkID: "", wantErr: true},
-		{name: "exec error", chunkID: "c1", db: dbScript{execErr: errors.New("exec error")}, wantErr: true},
-		{name: "no rows updated", chunkID: "c1", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrChunkNotFound},
-		{name: "success", chunkID: "c1"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store, _ := tc.db.open()
-			err := store.SetChunkAwakeables(context.Background(), tc.chunkID, "m1", "d1")
-			assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
-		})
-	}
-}
-
 type genericMockRow struct {
 	scanFn func(dest ...any) error
 }

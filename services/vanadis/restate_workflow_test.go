@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,36 +20,29 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
-func TestBuildWorkflow_Reflection(t *testing.T) {
+func TestBuildReconciler_Reflection(t *testing.T) {
 	t.Parallel()
 
 	srv := &VanadisServer{}
-	wf := NewBuildWorkflow(srv)
-	require.NotNil(t, wf)
-	assert.Equal(t, "BuildWorkflow", wf.ServiceName())
-
 	rec := NewBuildReconciler(srv)
 	assert.Equal(t, "BuildReconciler", rec.ServiceName())
 
-	// Exercise runtime adapter methods on concrete restateSharedRuntime, restateWorkflowRuntime, and restateObjectRuntime types
-	var sr workflowSharedRuntime = restateSharedRuntime{}
-	assert.NotNil(t, sr)
-	var wr workflowRuntime = restateWorkflowRuntime{}
-	assert.NotNil(t, wr)
+	// Exercise runtime adapter methods on concrete restateObjectRuntime type
+	var or objectRuntime = restateObjectRuntime{}
+	assert.NotNil(t, or)
 
 	// restate.Reflect panics if handler signatures are invalid
 	require.NotPanics(t, func() {
-		def := restate.Reflect(wf)
+		def := restate.Reflect(rec)
 		require.NotNil(t, def)
-		_ = restate.Reflect(rec)
 	})
 }
 
-func TestBuildWorkflow_Run_EmptyBuildID(t *testing.T) {
+func TestBuildReconciler_Reconcile_EmptyBuildID(t *testing.T) {
 	t.Parallel()
 
-	wf := NewBuildWorkflow(nil)
-	res, err := wf.Run(nil, RunBuildWorkflowRequest{BuildID: ""})
+	rec := NewBuildReconciler(nil)
+	res, err := rec.Reconcile(nil, ReconcileBuildRequest{Reason: "test"})
 	require.Error(t, err)
 	assert.Empty(t, res.BuildID)
 }
@@ -260,283 +251,14 @@ func TestComputeEligibleChunksToLaunch(t *testing.T) {
 	}
 }
 
-func TestApplyAwakeableResolution(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		state      *workflowChunkRuntimeState
-		eventType  string
-		val        string
-		inErr      error
-		wantStatus string
-		wantErr    bool
-	}{
-		{
-			name:       "nil state returns error",
-			state:      nil,
-			eventType:  "merge",
-			wantErr:    true,
-			wantStatus: "",
-		},
-		{
-			name:       "awakeable error resolves to failed",
-			state:      &workflowChunkRuntimeState{},
-			eventType:  "merge",
-			inErr:      errors.New("timeout"),
-			wantStatus: "failed",
-			wantErr:    true,
-		},
-		{
-			name:       "failed value resolves to failed",
-			state:      &workflowChunkRuntimeState{},
-			eventType:  "merge",
-			val:        "failed",
-			wantStatus: "failed",
-			wantErr:    false,
-		},
-		{
-			name:       "cancelled value resolves to failed",
-			state:      &workflowChunkRuntimeState{},
-			eventType:  "merge",
-			val:        "cancelled",
-			wantStatus: "failed",
-			wantErr:    false,
-		},
-		{
-			name:       "merge success updates codeReady",
-			state:      &workflowChunkRuntimeState{},
-			eventType:  "merge",
-			val:        "merged",
-			wantStatus: "merged",
-			wantErr:    false,
-		},
-		{
-			name:       "deploy success updates codeReady and runtimeReady",
-			state:      &workflowChunkRuntimeState{},
-			eventType:  "deploy",
-			val:        "deploy_success",
-			wantStatus: "completed",
-			wantErr:    false,
-		},
-		{
-			name:       "action success updates codeReady and runtimeReady",
-			state:      &workflowChunkRuntimeState{},
-			eventType:  "action",
-			val:        "completed",
-			wantStatus: "completed",
-			wantErr:    false,
-		},
-		{
-			name:       "unknown event type returns error",
-			state:      &workflowChunkRuntimeState{},
-			eventType:  "unknown",
-			val:        "ok",
-			wantStatus: "",
-			wantErr:    true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			status, err := applyAwakeableResolution(tc.state, tc.eventType, tc.val, tc.inErr)
-			if tc.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-			assert.Equal(t, tc.wantStatus, status)
-
-			if tc.state != nil && tc.wantStatus == "merged" {
-				assert.True(t, tc.state.codeReady)
-				assert.False(t, tc.state.runtimeReady)
-			}
-			if tc.state != nil && tc.wantStatus == "completed" {
-				assert.True(t, tc.state.codeReady)
-				assert.True(t, tc.state.runtimeReady)
-			}
-		})
-	}
-}
-
-func TestWorkflowStateHelpers(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now()
-	chunks := []VanadisChunk{
-		{ID: "c1", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "Chunk 1", Status: "completed", StartedAt: now, CompletedAt: now},
-		{ID: "c2", ChunkIndex: 1, Mode: "action", Repo: "", Title: "Chunk 2", Status: "running", StartedAt: now},
-	}
-
-	summaries := chunksToSummaries(chunks)
-	require.Len(t, summaries, 2)
-	assert.Equal(t, "c1", summaries[0].ID)
-	assert.Equal(t, "completed", summaries[0].Status)
-	assert.Equal(t, "c2", summaries[1].ID)
-	assert.Equal(t, "running", summaries[1].Status)
-
-	states := map[string]*workflowChunkRuntimeState{
-		"c1": {runtimeReady: true},
-		"c2": {runtimeReady: false},
-		"c3": {runtimeReady: true},
-	}
-	assert.Equal(t, 2, countCompletedChunksFromStates(states))
-	assert.False(t, isWorkflowBuildComplete([]string{"c1", "c2", "c3"}, states))
-
-	states["c2"].runtimeReady = true
-	assert.True(t, isWorkflowBuildComplete([]string{"c1", "c2", "c3"}, states))
-
-	// Active running count
-	states["c1"].launched = true
-	states["c1"].codeReady = false
-	states["c2"].launched = true
-	states["c2"].codeReady = true
-	assert.Equal(t, 1, countActiveRunningChunks([]string{"c1", "c2", "c3"}, states))
-}
-
-func TestInitializeWorkflowStates_And_TerminalResult(t *testing.T) {
-	t.Parallel()
-
-	chunks := []VanadisChunk{
-		{ID: "c1", Mode: "pr", Status: "completed"},
-		{ID: "c2", Mode: "pr", Status: "merged"},
-		{ID: "c3", Mode: "action", Status: "pending"},
-	}
-
-	states, order := initializeWorkflowStates(chunks)
-	require.Equal(t, []string{"c1", "c2", "c3"}, order)
-	assert.True(t, states["c1"].codeReady)
-	assert.True(t, states["c1"].runtimeReady)
-	assert.True(t, states["c2"].codeReady)
-	assert.False(t, states["c2"].runtimeReady)
-	assert.False(t, states["c3"].launched)
-
-	snap := &workflowBuildSnapshot{
-		Build:  &VanadisBuild{ID: "b1", Status: "completed"},
-		Chunks: chunks,
-	}
-	res := terminalWorkflowResult("b1", snap)
-	assert.Equal(t, "b1", res.BuildID)
-	assert.Equal(t, "completed", res.Status)
-	assert.Equal(t, 3, res.TotalChunks)
-	assert.Equal(t, 2, res.CompletedChunks)
-}
-
-func TestSelectChunkWaitSlot(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		state *workflowChunkRuntimeState
-		want  string
-	}{
-		{
-			name:  "nil state returns empty",
-			state: nil,
-			want:  "",
-		},
-		{
-			name:  "unlaunched pr chunk returns empty",
-			state: &workflowChunkRuntimeState{chunk: VanadisChunk{Mode: "pr"}, launched: false},
-			want:  "",
-		},
-		{
-			name:  "completed pr chunk returns empty",
-			state: &workflowChunkRuntimeState{chunk: VanadisChunk{Mode: "pr"}, launched: true, codeReady: true, runtimeReady: true},
-			want:  "",
-		},
-		{
-			name:  "launched pr chunk waiting on merge returns merge",
-			state: &workflowChunkRuntimeState{chunk: VanadisChunk{Mode: "pr"}, launched: true, codeReady: false},
-			want:  "merge",
-		},
-		{
-			name:  "merged pr chunk waiting on deploy returns deploy",
-			state: &workflowChunkRuntimeState{chunk: VanadisChunk{Mode: "pr"}, launched: true, codeReady: true, runtimeReady: false},
-			want:  "deploy",
-		},
-		{
-			name:  "launched action chunk waiting on completion returns action",
-			state: &workflowChunkRuntimeState{chunk: VanadisChunk{Mode: "action"}, launched: true, runtimeReady: false},
-			want:  "action",
-		},
-		{
-			name:  "completed action chunk returns empty",
-			state: &workflowChunkRuntimeState{chunk: VanadisChunk{Mode: "action"}, launched: true, runtimeReady: true},
-			want:  "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, selectChunkWaitSlot(tc.state))
-		})
-	}
-}
-
-func TestReconcileWorkflowDAGSnapshot(t *testing.T) {
-	t.Parallel()
-
-	order := []string{"c1", "c-del"}
-	states := map[string]*workflowChunkRuntimeState{
-		"c1":    {chunk: VanadisChunk{ID: "c1", Title: "old"}, launched: true, codeReady: true},
-		"c-del": {chunk: VanadisChunk{ID: "c-del", Title: "removed"}},
-	}
-	reconcileWorkflowDAGSnapshot(nil, &order, states)
-	assert.Equal(t, []string{"c1", "c-del"}, order)
-
-	snap := &workflowBuildSnapshot{
-		Chunks: []VanadisChunk{
-			{ID: "c1", Title: "updated"},
-			{ID: "c2", Title: "added"},
-		},
-	}
-	reconcileWorkflowDAGSnapshot(snap, &order, states)
-	assert.Equal(t, []string{"c1", "c2"}, order)
-	assert.NotContains(t, states, "c-del")
-	assert.Equal(t, "updated", states["c1"].chunk.Title)
-	assert.True(t, states["c1"].codeReady)
-	assert.Equal(t, "added", states["c2"].chunk.Title)
-}
-
-func TestProcessChunkAwakeable_Unmatched(t *testing.T) {
-	t.Parallel()
-
-	states := map[string]*workflowChunkRuntimeState{
-		"c1": {launched: false},
-		"c2": {
-			launched:        true,
-			mergeAwakeable:  &fakeWorkflowAwakeable{id: "awk-m"},
-			deployAwakeable: &fakeWorkflowAwakeable{id: "awk-d"},
-		},
-		"c3": {
-			launched:        true,
-			actionAwakeable: &fakeWorkflowAwakeable{id: "awk-a"},
-		},
-	}
-	handled, err := processChunkAwakeable(nil, nil, "b1", nil, []string{"c1", "c2", "c3"}, states)
-	assert.False(t, handled)
-	assert.NoError(t, err)
-
-	unmatched := &fakeWorkflowPromise{name: "other"}
-	handled, err = processChunkAwakeable(nil, nil, "b1", unmatched, []string{"c1", "c2", "c3"}, states)
-	assert.False(t, handled)
-	assert.NoError(t, err)
-}
-
 func TestWorkflowExecutionHelpers(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
 	// nil server / nil store
 	assert.Error(t, executeCompleteWorkflowBuild(ctx, nil, "b1"))
-	assert.Error(t, executeLaunchChunk(ctx, nil, "b1", VanadisChunk{}, "", ""))
-	assert.Error(t, executeCancelWorkflowBuild(ctx, nil, "b1", "reason"))
-	assert.Error(t, executeAwakeableStatusUpdate(ctx, nil, "b1", "c1", "Title", "merge", "merged"))
-	_, err := fetchWorkflowSnapshot(ctx, nil, "b1")
+	launched, err := executeLaunchChunk(ctx, nil, "b1", VanadisChunk{})
+	assert.False(t, launched)
 	assert.Error(t, err)
 
 	store := newMemoryVanadisStore()
@@ -551,25 +273,20 @@ func TestWorkflowExecutionHelpers(t *testing.T) {
 	t.Cleanup(func() { _ = memBus.Close() })
 	srv := &VanadisServer{store: store, bus: memBus}
 
-	// fetchWorkflowSnapshot
-	snap, err := fetchWorkflowSnapshot(ctx, srv, "b-wf")
+	// executeLaunchChunk enqueues execute chunk and reserves in running status
+	launched, err = executeLaunchChunk(ctx, srv, "b-wf", chunks[0])
 	require.NoError(t, err)
-	assert.Equal(t, "b-wf", snap.Build.ID)
-	assert.Len(t, snap.Chunks, 2)
-
-	// executeLaunchChunk persists awakeable IDs and enqueues execute chunk
-	err = executeLaunchChunk(ctx, srv, "b-wf", chunks[0], "m1", "d1")
-	require.NoError(t, err)
+	assert.True(t, launched)
 	gotChunk, _, err := store.GetChunk(ctx, "c1")
 	require.NoError(t, err)
-	assert.Equal(t, "m1", gotChunk.MergeAwakeableID)
-	assert.Equal(t, "d1", gotChunk.DeployAwakeableID)
 	assert.Equal(t, "running", gotChunk.Status, "enqueued chunk must be reserved in running status")
 
 	// executeLaunchChunk on already opened PR does not enqueue execute chunk
 	srv.bus = nil
 	chunks[0].Status = "pr_opened"
-	require.NoError(t, executeLaunchChunk(ctx, srv, "b-wf", chunks[0], "m2", "d2"))
+	launched, err = executeLaunchChunk(ctx, srv, "b-wf", chunks[0])
+	require.NoError(t, err)
+	assert.False(t, launched)
 }
 
 func TestRestateIngressClientHelpers(t *testing.T) {
@@ -587,9 +304,9 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	store := newMemoryVanadisStore()
 	b := VanadisBuild{ID: "b-restate", ThreadID: "123456789012345678", Objective: "test ingress", Status: "running"}
 	chunks := []VanadisChunk{
-		{ID: "c1", BuildID: "b-restate", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "c1", Instructions: "do c1", Status: "pr_opened", PRNumber: 42, MergeAwakeableID: "awk-m1", DeployAwakeableID: "awk-d1"},
-		{ID: "c2", BuildID: "b-restate", ChunkIndex: 1, Mode: "action", Title: "c2", Instructions: "do c2", Status: "completed", DeployAwakeableID: "awk-a2"},
-		{ID: "c3", BuildID: "b-restate", ChunkIndex: 2, Mode: "action", Title: "c3", Instructions: "do c3", Status: "failed", DeployAwakeableID: "awk-a3"},
+		{ID: "c1", BuildID: "b-restate", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "c1", Instructions: "do c1", Status: "pr_opened", PRNumber: 42},
+		{ID: "c2", BuildID: "b-restate", ChunkIndex: 1, Mode: "action", Title: "c2", Instructions: "do c2", Status: "completed"},
+		{ID: "c3", BuildID: "b-restate", ChunkIndex: 2, Mode: "action", Title: "c3", Instructions: "do c3", Status: "failed"},
 	}
 	require.NoError(t, store.CreateBuild(ctx, b, chunks))
 
@@ -601,12 +318,6 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 
 	require.NoError(t, srv.launchCreatedBuild(ctx, "b-restate"))
 	require.NoError(t, srv.launchBuildOnRestate(ctx, "b-restate"))
-	require.NoError(t, srv.cancelRestateBuildWorkflow(ctx, "b-restate", "test cancel"))
-	require.NoError(t, srv.notifyRestateDAGMutation(ctx, "b-restate", "append_chunks"))
-
-	assert.NoError(t, srv.notifyRestateActionChunkCompleted(ctx, "c2"))
-	assert.NoError(t, srv.notifyRestateActionChunkCompleted(ctx, "c3"), "failed action chunk must not be notified as completed")
-	srv.notifyRestateChunkFailed(ctx, "c1")
 
 	// Test that an action chunk completing a build under Restate dispatches completed wake prompt
 	var wakePromptSent string
@@ -627,7 +338,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	}
 	bAct := VanadisBuild{ID: "b-act-single", ThreadID: "123456789012345678", Objective: "test act wake", Status: "running"}
 	cAct := []VanadisChunk{
-		{ID: "c-act-single", BuildID: "b-act-single", ChunkIndex: 0, Mode: "action", Title: "act 1", Status: "running", DeployAwakeableID: "awk-act-single"},
+		{ID: "c-act-single", BuildID: "b-act-single", ChunkIndex: 0, Mode: "action", Title: "act 1", Status: "running"},
 	}
 	require.NoError(t, store.CreateBuild(ctx, bAct, cAct))
 	require.NoError(t, srvWake.handleCompletedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
@@ -638,6 +349,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 
 	// Test action chunk completes with Restate failure: error is returned and redelivery retries reconciliation
 	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("restate error"))
 	}))
@@ -645,7 +357,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 
 	bRetry := VanadisBuild{ID: "b-act-retry", ThreadID: "123456789012345678", Objective: "test act retry", Status: "running"}
 	cRetry := []VanadisChunk{
-		{ID: "c-act-retry-1", BuildID: "b-act-retry", ChunkIndex: 0, Mode: "action", Title: "act 1", Status: "running", DeployAwakeableID: "awk-act-retry"},
+		{ID: "c-act-retry-1", BuildID: "b-act-retry", ChunkIndex: 0, Mode: "action", Title: "act 1", Status: "running"},
 	}
 	require.NoError(t, store.CreateBuild(ctx, bRetry, cRetry))
 	srv500Wake := &VanadisServer{
@@ -667,37 +379,24 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	}))
 
 	assert.Equal(t, []string{
-		"/BuildWorkflow/b-restate/Run/send",
-		"/BuildWorkflow/b-restate/Run/send",
-		"/BuildWorkflow/b-restate/Cancel/send",
-		"/BuildWorkflow/b-restate/MutateDAG/send",
-		"/restate/awakeables/awk-a2/resolve",
-		"/restate/awakeables/awk-m1/resolve",
-		"/restate/awakeables/awk-d1/resolve",
-		"/restate/awakeables/awk-act-single/resolve",
-		"/restate/awakeables/awk-act-retry/resolve",
+		"/BuildReconciler/b-restate/Reconcile/send",
+		"/BuildReconciler/b-restate/Reconcile/send",
+		"/BuildReconciler/b-act-single/Reconcile/send",
+		"/BuildReconciler/b-act-retry/Reconcile/send",
+		"/BuildReconciler/b-act-retry/Reconcile/send",
 	}, paths)
 
 	// Error and no-op edge cases for ingress helpers
 	var nilSrv *VanadisServer
 	assert.Error(t, nilSrv.postRestateIngressJSON(ctx, "/test", nil))
-	assert.Error(t, srv.startRestateBuildWorkflow(ctx, ""))
 	assert.Error(t, srv.reconcileBuildOnRestate(ctx, "", "created"))
-	assert.NoError(t, srv.cancelRestateBuildWorkflow(ctx, "", "r"))
-	assert.NoError(t, srv.notifyRestateDAGMutation(ctx, "", "a"))
-	assert.NoError(t, srv.resolveRestateAwakeable(ctx, "", "v"))
-	assert.NoError(t, srv.notifyRestateActionChunkCompleted(ctx, ""))
-	srv.notifyRestateChunkFailed(ctx, "")
-	srv.notifyRestateChunkFailed(ctx, "nonexistent")
 
 	srv500 := &VanadisServer{
 		restateCfg: RestateConfig{RestateIngressURL: ts500.URL},
 		store:      store,
 		httpClient: ts500.Client(),
 	}
-	assert.Error(t, srv500.startRestateBuildWorkflow(ctx, "b-restate"))
-	assert.Error(t, srv500.notifyRestateActionChunkCompleted(ctx, "c2"))
-	srv500.notifyRestateChunkFailed(ctx, "c1")
+	assert.Error(t, srv500.reconcileBuildOnRestate(ctx, "b-restate", "created"))
 }
 
 func TestRestateLaunchCreatedBuild_LocalAndActionPR(t *testing.T) {
@@ -732,14 +431,6 @@ func TestRestateLaunchCreatedBuild_LocalAndActionPR(t *testing.T) {
 	cReserved, _, err := store.GetChunk(ctx, "c-ll-0")
 	require.NoError(t, err)
 	assert.Equal(t, "running", cReserved.Status)
-
-	bActPR := VanadisBuild{ID: "b-act-pr", Objective: "act pr", Status: "running"}
-	cActPR := []VanadisChunk{
-		{ID: "c-act-pr", BuildID: "b-act-pr", ChunkIndex: 0, Mode: "action", Status: "completed", PRNumber: 50},
-	}
-	require.NoError(t, store.CreateBuild(ctx, bActPR, cActPR))
-	assert.NoError(t, srvNoRestate.notifyRestateActionChunkCompleted(ctx, "c-act-pr"))
-	assert.NoError(t, srvNoRestate.notifyRestateActionChunkCompleted(ctx, "nonexistent-chunk"))
 }
 
 func TestLocalLaunchedCache(t *testing.T) {
@@ -811,229 +502,6 @@ func TestLoadRestateConfig(t *testing.T) {
 	assert.Equal(t, "9080", rcfgBad.RestatePort)
 
 	assert.Equal(t, "", cleanRestatePortEnv("http://localhost:9080"))
-}
-
-type fakeWorkflowPromise struct {
-	name       string
-	val        string
-	err        restate.TerminalError
-	resolveErr restate.TerminalError
-}
-
-func (p *fakeWorkflowPromise) Result() (string, restate.TerminalError) { return p.val, p.err }
-func (p *fakeWorkflowPromise) Resolve(v string) restate.TerminalError {
-	if p.resolveErr != nil {
-		return p.resolveErr
-	}
-	p.val = v
-	return nil
-}
-
-type fakeWorkflowAwakeable struct {
-	id  string
-	val string
-	err restate.TerminalError
-}
-
-func (a *fakeWorkflowAwakeable) Result() (string, restate.TerminalError) { return a.val, a.err }
-
-type fakeWorkflowRuntime struct {
-	promises   map[string]*fakeWorkflowPromise
-	awakeables []*fakeWorkflowAwakeable
-	waitStep   func(step int, rt *fakeWorkflowRuntime, futures []any) (any, error)
-	stepCount  int
-}
-
-func newFakeWorkflowRuntime(waitStep func(step int, rt *fakeWorkflowRuntime, futures []any) (any, error)) *fakeWorkflowRuntime {
-	return &fakeWorkflowRuntime{
-		promises: make(map[string]*fakeWorkflowPromise),
-		waitStep: waitStep,
-	}
-}
-
-func (r *fakeWorkflowRuntime) Promise(name string) workflowPromise {
-	if p, ok := r.promises[name]; ok {
-		return p
-	}
-	p := &fakeWorkflowPromise{name: name}
-	r.promises[name] = p
-	return p
-}
-
-func (r *fakeWorkflowRuntime) Awakeable() (string, workflowAwakeable) {
-	awk := &fakeWorkflowAwakeable{id: fmt.Sprintf("awk-%d", len(r.awakeables)+1)}
-	r.awakeables = append(r.awakeables, awk)
-	return awk.id, awk
-}
-
-func (r *fakeWorkflowRuntime) Run(fn func(context.Context) error) restate.TerminalError {
-	if err := fn(context.Background()); err != nil {
-		return restate.TerminalErrorf("%v", err)
-	}
-	return nil
-}
-
-func (r *fakeWorkflowRuntime) RunSnapshot(srv *VanadisServer, buildID string) (*workflowBuildSnapshot, restate.TerminalError) {
-	snap, err := fetchWorkflowSnapshot(context.Background(), srv, buildID)
-	if err != nil {
-		return nil, restate.TerminalErrorf("%v", err)
-	}
-	return snap, nil
-}
-
-func (r *fakeWorkflowRuntime) WaitFirst(futures ...any) (any, error) {
-	r.stepCount++
-	return r.waitStep(r.stepCount, r, futures)
-}
-
-func TestBuildWorkflow_StateMachineWithRuntime(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	store := newMemoryVanadisStore()
-	memBus := pubsub.NewMemoryBus()
-	t.Cleanup(func() { _ = memBus.Close() })
-	srv := &VanadisServer{store: store, bus: memBus}
-	wf := NewBuildWorkflow(srv)
-
-	// 1. Shared signal handlers (cancelWithRuntime & mutateDAGWithRuntime)
-	rtSignals := newFakeWorkflowRuntime(nil)
-	require.NoError(t, wf.cancelWithRuntime(rtSignals, CancelBuildWorkflowRequest{}))
-	assert.Equal(t, "cancelled", rtSignals.promises["cancel"].val)
-
-	dagPromise, ok := rtSignals.Promise("dag_mutation").(*fakeWorkflowPromise)
-	require.Truef(t, ok, "dag_mutation promise is %T, want *fakeWorkflowPromise", rtSignals.Promise("dag_mutation"))
-	dagPromise.resolveErr = restate.TerminalErrorf("already resolved")
-	require.NoError(t, wf.mutateDAGWithRuntime(rtSignals, DAGMutationSignalRequest{}))
-	assert.Equal(t, "mutated", rtSignals.promises["dag_mutation_1"].val)
-
-	// 2. Full DAG workflow: PR chunk (merge -> deploy) + DAG mutation reload + dependent Action chunk -> completed
-	b := VanadisBuild{ID: "b-dag", ThreadID: "123456789012345678", Objective: "dag run", Status: "pending"}
-	chunks := []VanadisChunk{
-		{ID: "c1", BuildID: "b-dag", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "PR 1", Instructions: "do c1", Status: "pending"},
-		{ID: "c2", BuildID: "b-dag", ChunkIndex: 1, Mode: "action", Title: "Action 2", Instructions: "do c2", Status: "pending", DependsOn: []string{"c1"}},
-	}
-	require.NoError(t, store.CreateBuild(ctx, b, chunks))
-
-	rtDAG := newFakeWorkflowRuntime(func(step int, rt *fakeWorkflowRuntime, futures []any) (any, error) {
-		switch step {
-		case 1:
-			// Trigger DAG mutation reload first
-			return rt.promises["dag_mutation"], nil
-		case 2:
-			// Resolve PR chunk merge awakeable
-			rt.awakeables[0].val = "merged"
-			return rt.awakeables[0], nil
-		case 3:
-			// Resolve PR chunk deploy awakeable
-			rt.awakeables[1].val = "deploy_success"
-			return rt.awakeables[1], nil
-		case 4:
-			// Resolve dependent Action chunk awakeable
-			rt.awakeables[2].val = "completed"
-			return rt.awakeables[2], nil
-		default:
-			return nil, errors.New("unexpected step")
-		}
-	})
-
-	res, err := wf.runWithRuntime(rtDAG, RunBuildWorkflowRequest{BuildID: "b-dag"})
-	require.NoError(t, err)
-	assert.Equal(t, "completed", res.Status)
-	assert.Equal(t, 2, res.CompletedChunks)
-
-	// 3. Cancellation signal mid-flight
-	bCancel := VanadisBuild{ID: "b-canc", ThreadID: "123456789012345678", Objective: "cancel run", Status: "running"}
-	cCancel := []VanadisChunk{
-		{ID: "cc1", BuildID: "b-canc", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "PR", Instructions: "do", Status: "pending"},
-	}
-	require.NoError(t, store.CreateBuild(ctx, bCancel, cCancel))
-
-	rtCancel := newFakeWorkflowRuntime(func(step int, rt *fakeWorkflowRuntime, futures []any) (any, error) {
-		rt.promises["cancel"].val = "aborted by user"
-		return rt.promises["cancel"], nil
-	})
-	resCancel, err := wf.runWithRuntime(rtCancel, RunBuildWorkflowRequest{BuildID: "b-canc"})
-	require.NoError(t, err)
-	assert.Equal(t, "cancelled", resCancel.Status)
-
-	// 4. Chunk awakeable failure terminates workflow with failed status
-	bFail := VanadisBuild{ID: "b-fail-wf", ThreadID: "123456789012345678", Objective: "fail run", Status: "running"}
-	cFail := []VanadisChunk{
-		{ID: "cf1", BuildID: "b-fail-wf", ChunkIndex: 0, Mode: "action", Title: "Act", Instructions: "do", Status: "pending"},
-	}
-	require.NoError(t, store.CreateBuild(ctx, bFail, cFail))
-
-	rtFail := newFakeWorkflowRuntime(func(step int, rt *fakeWorkflowRuntime, futures []any) (any, error) {
-		rt.awakeables[0].val = "failed"
-		return rt.awakeables[0], nil
-	})
-	resFail, err := wf.runWithRuntime(rtFail, RunBuildWorkflowRequest{BuildID: "b-fail-wf"})
-	require.Error(t, err)
-	assert.Equal(t, "failed", resFail.Status)
-
-	// 5. PR -> PR chain driven through PR lifecycle events and awakeable resolver
-	var rtPRChain *fakeWorkflowRuntime
-	tsIngress := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if after, ok := strings.CutPrefix(r.URL.Path, "/restate/awakeables/"); ok {
-			awkID := strings.TrimSuffix(after, "/resolve")
-			var resolvedVal string
-			_ = json.NewDecoder(r.Body).Decode(&resolvedVal)
-			for _, awk := range rtPRChain.awakeables {
-				if awk.id == awkID {
-					awk.val = resolvedVal
-				}
-			}
-		}
-		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer tsIngress.Close()
-
-	srv.restateCfg.RestateIngressURL = tsIngress.URL
-	srv.httpClient = tsIngress.Client()
-
-	bPRChain := VanadisBuild{ID: "b-pr-chain", ThreadID: "123456789012345678", Objective: "pr->pr chain", Status: "pending"}
-	cPRChain := []VanadisChunk{
-		{ID: "c-pr1", BuildID: "b-pr-chain", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "PR 1", Instructions: "do pr1", Status: "pending", PRNumber: 501, TargetFiles: []string{"a.go"}},
-		{ID: "c-pr2", BuildID: "b-pr-chain", ChunkIndex: 1, Mode: "pr", Repo: "azylman/aerial", Title: "PR 2", Instructions: "do pr2", Status: "pending", PRNumber: 502, DependsOn: []string{"c-pr1"}, TargetFiles: []string{"b.go"}},
-	}
-	require.NoError(t, store.CreateBuild(ctx, bPRChain, cPRChain))
-
-	postAdvancePR := func(prNum int, event string) error {
-		return srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:    event,
-			Repo:     "azylman/aerial",
-			PRNumber: prNum,
-		})
-	}
-
-	rtPRChain = newFakeWorkflowRuntime(func(step int, rt *fakeWorkflowRuntime, futures []any) (any, error) {
-		switch step {
-		case 1:
-			errAdv1 := postAdvancePR(501, "merged")
-			assert.NoError(t, errAdv1)
-		case 2:
-			errAdv2 := postAdvancePR(501, "deploy_success")
-			assert.NoError(t, errAdv2)
-		case 3:
-			errAdv3 := postAdvancePR(502, "merged")
-			assert.NoError(t, errAdv3)
-		case 4:
-			errAdv4 := postAdvancePR(502, "deploy_success")
-			assert.NoError(t, errAdv4)
-		}
-		for _, f := range futures {
-			if awk, ok := f.(*fakeWorkflowAwakeable); ok && awk.val != "" {
-				return awk, nil
-			}
-		}
-		return nil, fmt.Errorf("no resolved awakeable at step %d", step)
-	})
-
-	resPRChain, err := wf.runWithRuntime(rtPRChain, RunBuildWorkflowRequest{BuildID: "b-pr-chain"})
-	require.NoError(t, err)
-	assert.Equal(t, "completed", resPRChain.Status)
-	assert.Equal(t, 2, resPRChain.CompletedChunks)
 }
 
 type fakeObjectRuntime struct {

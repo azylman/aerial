@@ -72,24 +72,6 @@ func LoadRestateConfig(configPath string) RestateConfig {
 	}
 }
 
-// RunBuildWorkflowRequest is the input payload for the Restate BuildWorkflow.
-type RunBuildWorkflowRequest struct {
-	BuildID string `json:"build_id"`
-}
-
-// RunBuildWorkflowResult is the terminal output of the Restate BuildWorkflow.
-type RunBuildWorkflowResult struct {
-	BuildID         string `json:"build_id"`
-	Status          string `json:"status"`
-	TotalChunks     int    `json:"total_chunks"`
-	CompletedChunks int    `json:"completed_chunks"`
-}
-
-// CancelBuildWorkflowRequest is the input for the Cancel shared signal handler.
-type CancelBuildWorkflowRequest struct {
-	Reason string `json:"reason,omitempty"`
-}
-
 // ReconcileBuildRequest is the input payload for the Restate BuildReconciler Virtual Object.
 type ReconcileBuildRequest struct {
 	Reason string `json:"reason,omitempty"`
@@ -275,12 +257,15 @@ func launchReconcileEligibleChunks(ctx context.Context, srv *VanadisServer, buil
 		if st == nil {
 			continue
 		}
-		if err := executeLaunchChunk(ctx, srv, buildID, st.chunk, "", ""); err != nil {
+		launched, err := executeLaunchChunk(ctx, srv, buildID, st.chunk)
+		if err != nil {
 			return nil, nil, fmt.Errorf("launch chunk %s: %w", cID, err)
 		}
 		st.launched = true
 		launchedMap[cID] = true
-		launchedChunks = append(launchedChunks, cID)
+		if launched {
+			launchedChunks = append(launchedChunks, cID)
+		}
 	}
 
 	if len(launchedChunks) > 0 {
@@ -349,261 +334,11 @@ func executeReconcileBuild(ctx context.Context, srv *VanadisServer, buildID stri
 	}, nil
 }
 
-// DAGMutationSignalRequest is the input for the MutateDAG shared signal handler.
-type DAGMutationSignalRequest struct {
-	Action string `json:"action,omitempty"`
-}
-
-// BuildWorkflow implements the durable Restate DAG workflow for multi-chunk builds.
-type BuildWorkflow struct {
-	srv *VanadisServer
-}
-
-// NewBuildWorkflow creates a new BuildWorkflow instance bound to a VanadisServer.
-func NewBuildWorkflow(srv *VanadisServer) *BuildWorkflow {
-	return &BuildWorkflow{srv: srv}
-}
-
-// ServiceName returns the Restate service name for this workflow.
-func (w *BuildWorkflow) ServiceName() string {
-	return "BuildWorkflow"
-}
-
-type workflowPromise interface {
-	Result() (string, restate.TerminalError)
-	Resolve(value string) restate.TerminalError
-}
-
-type workflowAwakeable interface {
-	Result() (string, restate.TerminalError)
-}
-
-type workflowSharedRuntime interface {
-	Promise(name string) workflowPromise
-}
-
-type workflowRuntime interface {
-	workflowSharedRuntime
-	Run(fn func(context.Context) error) restate.TerminalError
-	RunSnapshot(srv *VanadisServer, buildID string) (*workflowBuildSnapshot, restate.TerminalError)
-	Awakeable() (string, workflowAwakeable)
-	WaitFirst(futures ...any) (any, error)
-}
-
-type restateSharedRuntime struct {
-	ctx restate.WorkflowSharedContext
-}
-
-func (r restateSharedRuntime) Promise(name string) workflowPromise {
-	return restate.Promise[string](r.ctx, name)
-}
-
-type restateWorkflowRuntime struct {
-	ctx restate.WorkflowContext
-}
-
-func (r restateWorkflowRuntime) Promise(name string) workflowPromise {
-	return restate.Promise[string](r.ctx, name)
-}
-
-func (r restateWorkflowRuntime) Awakeable() (string, workflowAwakeable) {
-	awk := restate.Awakeable[string](r.ctx)
-	return awk.Id(), awk
-}
-
-func (r restateWorkflowRuntime) Run(fn func(context.Context) error) restate.TerminalError {
-	return restate.RunVoid(r.ctx, func(rc restate.RunContext) error {
-		return fn(rc)
-	})
-}
-
-func (r restateWorkflowRuntime) RunSnapshot(srv *VanadisServer, buildID string) (*workflowBuildSnapshot, restate.TerminalError) {
-	return restate.Run(r.ctx, func(rc restate.RunContext) (*workflowBuildSnapshot, error) {
-		return fetchWorkflowSnapshot(rc, srv, buildID)
-	})
-}
-
-func (r restateWorkflowRuntime) WaitFirst(futures ...any) (any, error) {
-	rf := make([]restate.Future, 0, len(futures))
-	for _, f := range futures {
-		if fut, ok := f.(restate.Future); ok && fut != nil {
-			rf = append(rf, fut)
-		}
-	}
-	return restate.WaitFirst(r.ctx, rf...)
-}
-
-// Cancel is a shared workflow handler allowing external callers to signal cancellation.
-func (w *BuildWorkflow) Cancel(ctx restate.WorkflowSharedContext, req CancelBuildWorkflowRequest) error {
-	return w.cancelWithRuntime(restateSharedRuntime{ctx: ctx}, req)
-}
-
-func (w *BuildWorkflow) cancelWithRuntime(rt workflowSharedRuntime, req CancelBuildWorkflowRequest) error {
-	reason := strings.TrimSpace(req.Reason)
-	if reason == "" {
-		reason = "cancelled"
-	}
-	return rt.Promise("cancel").Resolve(reason)
-}
-
-// MutateDAG is a shared workflow handler signaling that the DAG has been modified.
-func (w *BuildWorkflow) MutateDAG(ctx restate.WorkflowSharedContext, req DAGMutationSignalRequest) error {
-	return w.mutateDAGWithRuntime(restateSharedRuntime{ctx: ctx}, req)
-}
-
-func (w *BuildWorkflow) mutateDAGWithRuntime(rt workflowSharedRuntime, req DAGMutationSignalRequest) error {
-	action := strings.TrimSpace(req.Action)
-	if action == "" {
-		action = "mutated"
-	}
-	if err := rt.Promise("dag_mutation").Resolve(action); err == nil {
-		return nil
-	}
-	for i := 1; i <= 100; i++ {
-		if err := rt.Promise(fmt.Sprintf("dag_mutation_%d", i)).Resolve(action); err == nil {
-			return nil
-		}
-	}
-	return errors.New("failed to resolve dag mutation signal")
-}
-
 type workflowChunkRuntimeState struct {
-	chunk           VanadisChunk
-	launched        bool
-	codeReady       bool
-	runtimeReady    bool
-	mergeAwakeable  workflowAwakeable
-	deployAwakeable workflowAwakeable
-	actionAwakeable workflowAwakeable
-}
-
-type workflowBuildSnapshot struct {
-	Build  *VanadisBuild  `json:"build"`
-	Chunks []VanadisChunk `json:"chunks"`
-}
-
-// Run executes the durable build DAG workflow under Restate.
-func (w *BuildWorkflow) Run(ctx restate.WorkflowContext, req RunBuildWorkflowRequest) (RunBuildWorkflowResult, error) {
-	return w.runWithRuntime(restateWorkflowRuntime{ctx: ctx}, req)
-}
-
-func (w *BuildWorkflow) runWithRuntime(rt workflowRuntime, req RunBuildWorkflowRequest) (RunBuildWorkflowResult, error) {
-	buildID := strings.TrimSpace(req.BuildID)
-	if buildID == "" {
-		return RunBuildWorkflowResult{}, restate.TerminalErrorf("build_id cannot be empty")
-	}
-
-	snapshot, rErr := rt.RunSnapshot(w.srv, buildID)
-	if rErr != nil {
-		return RunBuildWorkflowResult{BuildID: buildID, Status: "failed"}, rErr
-	}
-
-	if isTerminalBuildStatus(snapshot.Build.Status) {
-		return terminalWorkflowResult(buildID, snapshot), nil
-	}
-
-	ensureBuildRunning(rt, w.srv, buildID, snapshot.Build.Status)
-
-	chunkStates, chunkOrder := initializeWorkflowStates(snapshot.Chunks)
-
-	return w.executeWorkflowLoop(rt, buildID, chunkOrder, chunkStates)
-}
-
-func ensureBuildRunning(rt workflowRuntime, srv *VanadisServer, buildID string, status string) {
-	if status != "pending" {
-		return
-	}
-	_ = rt.Run(func(ctx context.Context) error {
-		return srv.store.UpdateBuildStatus(ctx, buildID, "running")
-	})
-}
-
-func (w *BuildWorkflow) executeWorkflowLoop(rt workflowRuntime, buildID string, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (RunBuildWorkflowResult, error) {
-	cancelPromise := rt.Promise("cancel")
-	dagMutationPromise := rt.Promise("dag_mutation")
-	mutationCount := 0
-
-	for {
-		if isWorkflowBuildComplete(chunkOrder, chunkStates) {
-			return completeWorkflowBuild(rt, w.srv, buildID, chunkOrder, chunkStates)
-		}
-
-		launchEligibleChunks(rt, w.srv, buildID, chunkOrder, chunkStates)
-
-		waitFuts := buildWorkflowWaitFutures(cancelPromise, dagMutationPromise, chunkOrder, chunkStates)
-		firstDone, waitErr := rt.WaitFirst(waitFuts...)
-		if waitErr != nil {
-			return RunBuildWorkflowResult{BuildID: buildID, Status: "failed"}, waitErr
-		}
-
-		if firstDone == cancelPromise {
-			return cancelWorkflowBuild(rt, w.srv, buildID, cancelPromise, chunkOrder, chunkStates)
-		}
-
-		if firstDone == dagMutationPromise {
-			mutationCount++
-			dagMutationPromise = reloadWorkflowDAG(rt, w.srv, buildID, &chunkOrder, chunkStates, mutationCount)
-			continue
-		}
-
-		if handled, pErr := processChunkAwakeable(rt, w.srv, buildID, firstDone, chunkOrder, chunkStates); handled {
-			if pErr != nil {
-				return RunBuildWorkflowResult{
-					BuildID:         buildID,
-					Status:          "failed",
-					TotalChunks:     len(chunkOrder),
-					CompletedChunks: countCompletedChunksFromStates(chunkStates),
-				}, pErr
-			}
-		}
-	}
-}
-
-func fetchWorkflowSnapshot(ctx context.Context, srv *VanadisServer, buildID string) (*workflowBuildSnapshot, error) {
-	if srv == nil || srv.store == nil {
-		return nil, errors.New("vanadis store not configured")
-	}
-	b, chs, err := srv.store.GetBuild(ctx, buildID)
-	if err != nil {
-		return nil, err
-	}
-	return &workflowBuildSnapshot{Build: b, Chunks: chs}, nil
-}
-
-func terminalWorkflowResult(buildID string, snapshot *workflowBuildSnapshot) RunBuildWorkflowResult {
-	completedCount := 0
-	for _, c := range snapshot.Chunks {
-		if c.Status == "completed" || c.Status == "merged" {
-			completedCount++
-		}
-	}
-	return RunBuildWorkflowResult{
-		BuildID:         buildID,
-		Status:          snapshot.Build.Status,
-		TotalChunks:     len(snapshot.Chunks),
-		CompletedChunks: completedCount,
-	}
-}
-
-func initializeWorkflowStates(chunks []VanadisChunk) (map[string]*workflowChunkRuntimeState, []string) {
-	chunkStates := make(map[string]*workflowChunkRuntimeState, len(chunks))
-	chunkOrder := make([]string, 0, len(chunks))
-	for _, c := range chunks {
-		chunkOrder = append(chunkOrder, c.ID)
-		cs := &workflowChunkRuntimeState{chunk: c}
-		switch strings.ToLower(c.Status) {
-		case "completed":
-			cs.launched = true
-			cs.codeReady = true
-			cs.runtimeReady = true
-		case "merged":
-			cs.launched = true
-			cs.codeReady = true
-			cs.runtimeReady = false
-		}
-		chunkStates[c.ID] = cs
-	}
-	return chunkStates, chunkOrder
+	chunk        VanadisChunk
+	launched     bool
+	codeReady    bool
+	runtimeReady bool
 }
 
 func executeCompleteWorkflowBuild(ctx context.Context, srv *VanadisServer, buildID string) error {
@@ -638,266 +373,24 @@ func executeCompleteWorkflowBuild(ctx context.Context, srv *VanadisServer, build
 	return nil
 }
 
-func completeWorkflowBuild(rt workflowRuntime, srv *VanadisServer, buildID string, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (RunBuildWorkflowResult, error) {
-	_ = rt.Run(func(ctx context.Context) error {
-		return executeCompleteWorkflowBuild(ctx, srv, buildID)
-	})
-	return RunBuildWorkflowResult{
-		BuildID:         buildID,
-		Status:          "completed",
-		TotalChunks:     len(chunkOrder),
-		CompletedChunks: countCompletedChunksFromStates(chunkStates),
-	}, nil
-}
-
-func executeLaunchChunk(ctx context.Context, srv *VanadisServer, buildID string, chunk VanadisChunk, mergeAwkID, deployAwkID string) error {
+func executeLaunchChunk(ctx context.Context, srv *VanadisServer, buildID string, chunk VanadisChunk) (bool, error) {
 	if srv == nil || srv.store == nil {
-		return errors.New("vanadis store not configured")
-	}
-	if mergeAwkID != "" || deployAwkID != "" {
-		if err := srv.store.SetChunkAwakeables(ctx, chunk.ID, mergeAwkID, deployAwkID); err != nil {
-			return err
-		}
+		return false, errors.New("vanadis store not configured")
 	}
 	if chunk.PRNumber > 0 || strings.EqualFold(chunk.Status, "pr_opened") {
-		return nil
+		return false, nil
 	}
 	if err := srv.enqueueExecuteChunk(ctx, ExecuteChunkArgs{
 		BuildID:    buildID,
 		ChunkIndex: chunk.ChunkIndex,
 		ChunkID:    chunk.ID,
 	}); err != nil {
-		return err
+		return false, err
 	}
-	return srv.store.ReserveChunkForLaunch(ctx, chunk.ID)
-}
-
-func launchEligibleChunks(rt workflowRuntime, srv *VanadisServer, buildID string, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) {
-	eligibleIDs := computeEligibleChunksToLaunch(chunkOrder, chunkStates, maxParallelChunks)
-	if len(eligibleIDs) == 0 {
-		return
+	if err := srv.store.ReserveChunkForLaunch(ctx, chunk.ID); err != nil {
+		return false, err
 	}
-
-	for _, cid := range eligibleIDs {
-		cs := chunkStates[cid]
-		if strings.ToLower(cs.chunk.Mode) == "pr" {
-			launchPRChunk(rt, srv, buildID, cs)
-		} else {
-			launchActionChunk(rt, srv, buildID, cs)
-		}
-	}
-
-	_ = rt.Run(func(ctx context.Context) error {
-		srv.syncBuildWidget(ctx, buildID, "")
-		return nil
-	})
-}
-
-func launchPRChunk(rt workflowRuntime, srv *VanadisServer, buildID string, cs *workflowChunkRuntimeState) {
-	currChunk := cs.chunk
-	cs.launched = true
-
-	mAwkID, mAwk := rt.Awakeable()
-	dAwkID, dAwk := rt.Awakeable()
-	cs.mergeAwakeable = mAwk
-	cs.deployAwakeable = dAwk
-
-	_ = rt.Run(func(ctx context.Context) error {
-		return executeLaunchChunk(ctx, srv, buildID, currChunk, mAwkID, dAwkID)
-	})
-}
-
-func launchActionChunk(rt workflowRuntime, srv *VanadisServer, buildID string, cs *workflowChunkRuntimeState) {
-	currChunk := cs.chunk
-	cs.launched = true
-
-	aAwkID, aAwk := rt.Awakeable()
-	cs.actionAwakeable = aAwk
-
-	_ = rt.Run(func(ctx context.Context) error {
-		return executeLaunchChunk(ctx, srv, buildID, currChunk, "", aAwkID)
-	})
-}
-
-func selectChunkWaitSlot(cs *workflowChunkRuntimeState) string {
-	if cs == nil || !cs.launched {
-		return ""
-	}
-	if strings.ToLower(cs.chunk.Mode) == "pr" {
-		if !cs.codeReady {
-			return "merge"
-		}
-		if !cs.runtimeReady {
-			return "deploy"
-		}
-		return ""
-	}
-	if !cs.runtimeReady {
-		return "action"
-	}
-	return ""
-}
-
-func buildWorkflowWaitFutures(cancelPromise, dagMutationPromise any, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) []any {
-	waitFuts := make([]any, 0, len(chunkOrder)+2)
-	waitFuts = append(waitFuts, cancelPromise, dagMutationPromise)
-
-	for _, cid := range chunkOrder {
-		cs := chunkStates[cid]
-		switch selectChunkWaitSlot(cs) {
-		case "merge":
-			if cs.mergeAwakeable != nil {
-				waitFuts = append(waitFuts, cs.mergeAwakeable)
-			}
-		case "deploy":
-			if cs.deployAwakeable != nil {
-				waitFuts = append(waitFuts, cs.deployAwakeable)
-			}
-		case "action":
-			if cs.actionAwakeable != nil {
-				waitFuts = append(waitFuts, cs.actionAwakeable)
-			}
-		}
-	}
-	return waitFuts
-}
-
-func executeCancelWorkflowBuild(ctx context.Context, srv *VanadisServer, buildID, reason string) error {
-	if srv == nil || srv.store == nil {
-		return errors.New("vanadis store not configured")
-	}
-	if err := srv.store.UpdateBuildStatus(ctx, buildID, "cancelled"); err != nil {
-		log.Printf("[vanadis] warning: failed updating build status: %v", err)
-	}
-	srv.syncBuildWidget(ctx, buildID, "Build cancelled: "+reason)
-	return nil
-}
-
-func cancelWorkflowBuild(rt workflowRuntime, srv *VanadisServer, buildID string, cancelPromise workflowPromise, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (RunBuildWorkflowResult, error) {
-	reason := "cancelled"
-	if cancelPromise != nil {
-		reason, _ = cancelPromise.Result()
-	}
-	_ = rt.Run(func(ctx context.Context) error {
-		return executeCancelWorkflowBuild(ctx, srv, buildID, reason)
-	})
-	return RunBuildWorkflowResult{
-		BuildID:         buildID,
-		Status:          "cancelled",
-		TotalChunks:     len(chunkOrder),
-		CompletedChunks: countCompletedChunksFromStates(chunkStates),
-	}, nil
-}
-
-func reconcileWorkflowDAGSnapshot(newSnap *workflowBuildSnapshot, chunkOrder *[]string, chunkStates map[string]*workflowChunkRuntimeState) {
-	if newSnap == nil || chunkOrder == nil {
-		return
-	}
-	newOrder := make([]string, 0, len(newSnap.Chunks))
-	newIDs := make(map[string]bool, len(newSnap.Chunks))
-	for _, c := range newSnap.Chunks {
-		newOrder = append(newOrder, c.ID)
-		newIDs[c.ID] = true
-		if _, exists := chunkStates[c.ID]; !exists {
-			chunkStates[c.ID] = &workflowChunkRuntimeState{chunk: c}
-		} else {
-			chunkStates[c.ID].chunk = c
-		}
-	}
-	for cid := range chunkStates {
-		if !newIDs[cid] {
-			delete(chunkStates, cid)
-		}
-	}
-	*chunkOrder = newOrder
-}
-
-func reloadWorkflowDAG(rt workflowRuntime, srv *VanadisServer, buildID string, chunkOrder *[]string, chunkStates map[string]*workflowChunkRuntimeState, count int) workflowPromise {
-	newSnap, err := rt.RunSnapshot(srv, buildID)
-	if err == nil && newSnap != nil {
-		reconcileWorkflowDAGSnapshot(newSnap, chunkOrder, chunkStates)
-	}
-	return rt.Promise(fmt.Sprintf("dag_mutation_%d", count))
-}
-
-func processChunkAwakeable(rt workflowRuntime, srv *VanadisServer, buildID string, firstDone any, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (bool, error) {
-	if firstDone == nil {
-		return false, nil
-	}
-	for _, cid := range chunkOrder {
-		cs := chunkStates[cid]
-		if !cs.launched {
-			continue
-		}
-
-		var eventType, val string
-		var awkErr error
-		switch {
-		case cs.mergeAwakeable != nil && firstDone == cs.mergeAwakeable:
-			eventType = "merge"
-			val, awkErr = cs.mergeAwakeable.Result()
-		case cs.deployAwakeable != nil && firstDone == cs.deployAwakeable:
-			eventType = "deploy"
-			val, awkErr = cs.deployAwakeable.Result()
-		case cs.actionAwakeable != nil && firstDone == cs.actionAwakeable:
-			eventType = "action"
-			val, awkErr = cs.actionAwakeable.Result()
-		default:
-			continue
-		}
-
-		status, err := handleAwakeableOutcome(rt, srv, buildID, cs, eventType, val, awkErr)
-		if status == "failed" {
-			if err == nil {
-				err = restate.TerminalErrorf("chunk %s %s awakeable resolved to %s", cs.chunk.ID, eventType, val)
-			} else {
-				err = restate.TerminalErrorf("chunk %s %s awakeable error: %v", cs.chunk.ID, eventType, err)
-			}
-			return true, err
-		}
-		return true, nil
-	}
-	return false, nil
-}
-
-func executeAwakeableStatusUpdate(ctx context.Context, srv *VanadisServer, buildID, chunkID, title, eventType, newStatus string) error {
-	if srv == nil || srv.store == nil {
-		return errors.New("vanadis store not configured")
-	}
-	if newStatus == "failed" {
-		if uErr := srv.store.UpdateChunkStatus(ctx, chunkID, "failed"); uErr != nil {
-			log.Printf("[vanadis] warning: failed updating chunk status: %v", uErr)
-		}
-		if uErr := srv.store.UpdateBuildStatus(ctx, buildID, "failed"); uErr != nil {
-			log.Printf("[vanadis] warning: failed updating build status: %v", uErr)
-		}
-		srv.syncBuildWidget(ctx, buildID, fmt.Sprintf("Chunk %s %s failed", title, eventType))
-		srv.publishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunkID}, eventType)
-		srv.publishExternalEvent(ctx, "vanadis_build", "failed", []string{buildID}, eventType)
-		return nil
-	}
-	if uErr := srv.store.UpdateChunkStatus(ctx, chunkID, newStatus); uErr != nil {
-		log.Printf("[vanadis] warning: failed updating chunk status: %v", uErr)
-	}
-	switch newStatus {
-	case "completed":
-		srv.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunkID}, "")
-	case "merged":
-		srv.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunkID}, "")
-	}
-	srv.syncBuildWidget(ctx, buildID, "")
-	return nil
-}
-
-func handleAwakeableOutcome(rt workflowRuntime, srv *VanadisServer, buildID string, cs *workflowChunkRuntimeState, eventType, val string, inErr error) (string, error) {
-	newStatus, aErr := applyAwakeableResolution(cs, eventType, val, inErr)
-	_ = rt.Run(func(ctx context.Context) error {
-		return executeAwakeableStatusUpdate(ctx, srv, buildID, cs.chunk.ID, cs.chunk.Title, eventType, newStatus)
-	})
-	if newStatus == "failed" {
-		return "failed", aErr
-	}
-	return newStatus, nil
+	return true, nil
 }
 
 func isWorkflowBuildComplete(chunkOrder []string, states map[string]*workflowChunkRuntimeState) bool {
@@ -965,40 +458,6 @@ func computeEligibleChunksToLaunch(chunkOrder []string, states map[string]*workf
 	return eligibleIDs
 }
 
-func applyAwakeableResolution(cs *workflowChunkRuntimeState, eventType, val string, err error) (string, error) {
-	if cs == nil {
-		return "", errors.New("chunk state is nil")
-	}
-	if err != nil || strings.EqualFold(val, "failed") || strings.EqualFold(val, "cancelled") {
-		return "failed", err
-	}
-	switch eventType {
-	case "merge":
-		cs.codeReady = true
-		return "merged", nil
-	case "deploy":
-		cs.codeReady = true
-		cs.runtimeReady = true
-		return "completed", nil
-	case "action":
-		cs.codeReady = true
-		cs.runtimeReady = true
-		return "completed", nil
-	default:
-		return "", fmt.Errorf("unknown awakeable event type: %s", eventType)
-	}
-}
-
-func countCompletedChunksFromStates(states map[string]*workflowChunkRuntimeState) int {
-	count := 0
-	for _, s := range states {
-		if s != nil && s.runtimeReady {
-			count++
-		}
-	}
-	return count
-}
-
 func chunksToSummaries(list []VanadisChunk) []VanadisChunkSummary {
 	summaries := make([]VanadisChunkSummary, len(list))
 	for i, c := range list {
@@ -1031,7 +490,6 @@ func startRestateServer(ctx context.Context, srv *VanadisServer) (*server.Restat
 		port = "0"
 	}
 	restateServer := server.NewRestate().
-		Bind(restate.Reflect(NewBuildWorkflow(srv))).
 		Bind(restate.Reflect(NewBuildReconciler(srv)))
 	go func() {
 		log.Printf("[vanadis] Restate HTTP/2 server listening on :%s", port)
@@ -1140,40 +598,8 @@ func (s *VanadisServer) postRestateIngressJSON(ctx context.Context, path string,
 	return nil
 }
 
-func (s *VanadisServer) startRestateBuildWorkflow(ctx context.Context, buildID string) error {
-	buildID = strings.TrimSpace(buildID)
-	if buildID == "" {
-		return errors.New("build_id cannot be empty")
-	}
-	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/BuildWorkflow/%s/Run/send", buildID), RunBuildWorkflowRequest{BuildID: buildID})
-}
-
-func (s *VanadisServer) cancelRestateBuildWorkflow(ctx context.Context, buildID, reason string) error {
-	buildID = strings.TrimSpace(buildID)
-	if buildID == "" {
-		return nil
-	}
-	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/BuildWorkflow/%s/Cancel/send", buildID), CancelBuildWorkflowRequest{Reason: reason})
-}
-
-func (s *VanadisServer) notifyRestateDAGMutation(ctx context.Context, buildID, action string) error {
-	buildID = strings.TrimSpace(buildID)
-	if buildID == "" {
-		return nil
-	}
-	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/BuildWorkflow/%s/MutateDAG/send", buildID), DAGMutationSignalRequest{Action: action})
-}
-
-func (s *VanadisServer) resolveRestateAwakeable(ctx context.Context, awakeableID, value string) error {
-	awakeableID = strings.TrimSpace(awakeableID)
-	if awakeableID == "" {
-		return nil
-	}
-	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/restate/awakeables/%s/resolve", awakeableID), value)
-}
-
 func (s *VanadisServer) launchBuildOnRestate(ctx context.Context, buildID string) error {
-	return s.startRestateBuildWorkflow(ctx, buildID)
+	return s.reconcileBuild(ctx, buildID, "created")
 }
 
 func (s *VanadisServer) getLocalLaunched(buildID string) map[string]bool {
@@ -1244,47 +670,7 @@ func reconstructLaunchedChunks(chunks []VanadisChunk) map[string]bool {
 }
 
 func (s *VanadisServer) launchCreatedBuild(ctx context.Context, buildID string) error {
-	if s != nil && strings.TrimSpace(s.restateCfg.RestateIngressURL) != "" {
-		return s.startRestateBuildWorkflow(ctx, buildID)
-	}
 	return s.reconcileBuild(ctx, buildID, "created")
-}
-
-func (s *VanadisServer) notifyRestateActionChunkCompleted(ctx context.Context, chunkID string) error {
-	if s == nil || s.store == nil || strings.TrimSpace(chunkID) == "" {
-		return nil
-	}
-	chunk, _, err := s.store.GetChunk(ctx, chunkID)
-	if err != nil {
-		if errors.Is(err, ErrChunkNotFound) {
-			return nil
-		}
-		return err
-	}
-	if chunk == nil {
-		return nil
-	}
-	if chunk.Mode != "action" || chunk.Status != "completed" {
-		return nil
-	}
-	// Action chunk with an attached PR must not be completed at end of dispatch turn;
-	// it must await deploy_success resolving its deploy_awakeable_id.
-	if chunk.PRNumber > 0 {
-		log.Printf("[vanadis] action chunk %s has attached PR #%d; skipping end-of-turn awakeable resolution (awaiting PR deployment)", chunk.ID, chunk.PRNumber)
-		return nil
-	}
-	if strings.TrimSpace(chunk.DeployAwakeableID) != "" {
-		if err := s.resolveRestateAwakeable(ctx, chunk.DeployAwakeableID, "completed"); err != nil {
-			log.Printf("[vanadis] warning: failed resolving action awakeable for chunk %s: %v", chunk.ID, err)
-			return err
-		}
-		return nil
-	}
-	if err := s.reconcileBuild(ctx, chunk.BuildID, "action_completed"); err != nil {
-		log.Printf("[vanadis] warning: failed reconciling build %s on action %s completed: %v", chunk.BuildID, chunk.ID, err)
-		return err
-	}
-	return nil
 }
 
 func (s *VanadisServer) reconcileBuild(ctx context.Context, buildID, reason string) error {
@@ -1312,24 +698,4 @@ func (s *VanadisServer) reconcileBuildOnRestate(ctx context.Context, buildID, re
 		return errors.New("build_id cannot be empty")
 	}
 	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/BuildReconciler/%s/Reconcile/send", buildID), ReconcileBuildRequest{Reason: reason})
-}
-
-func (s *VanadisServer) notifyRestateChunkFailed(ctx context.Context, chunkID string) {
-	if s == nil || s.store == nil || strings.TrimSpace(s.restateCfg.RestateIngressURL) == "" || strings.TrimSpace(chunkID) == "" {
-		return
-	}
-	chunk, _, err := s.store.GetChunk(ctx, chunkID)
-	if err != nil || chunk == nil {
-		return
-	}
-	if chunk.MergeAwakeableID != "" {
-		if err := s.resolveRestateAwakeable(ctx, chunk.MergeAwakeableID, "failed"); err != nil {
-			log.Printf("[vanadis] warning: failed resolving merge awakeable failure for chunk %s: %v", chunk.ID, err)
-		}
-	}
-	if chunk.DeployAwakeableID != "" {
-		if err := s.resolveRestateAwakeable(ctx, chunk.DeployAwakeableID, "failed"); err != nil {
-			log.Printf("[vanadis] warning: failed resolving deploy awakeable failure for chunk %s: %v", chunk.ID, err)
-		}
-	}
 }

@@ -274,26 +274,6 @@ func (m *memoryVanadisStore) ReserveChunkForLaunch(_ context.Context, chunkID st
 	return ErrChunkNotFound
 }
 
-func (m *memoryVanadisStore) SetChunkAwakeables(_ context.Context, chunkID, mergeAwakeableID, deployAwakeableID string) error {
-	if m.updateChunkErr != nil {
-		return m.updateChunkErr
-	}
-	now := time.Now().UTC()
-	for bID, list := range m.chunks {
-		for i := range list {
-			if list[i].ID != chunkID {
-				continue
-			}
-			list[i].MergeAwakeableID = mergeAwakeableID
-			list[i].DeployAwakeableID = deployAwakeableID
-			list[i].UpdatedAt = now
-			m.chunks[bID] = list
-			return nil
-		}
-	}
-	return ErrChunkNotFound
-}
-
 func (m *memoryVanadisStore) setBuild(id string, fn func(*VanadisBuild)) error {
 	if m.updateBuildErr != nil {
 		return m.updateBuildErr
@@ -550,7 +530,7 @@ func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID stri
 
 	allDone := true
 	for _, c := range list {
-		if c.Status != "completed" && c.Status != "merged" {
+		if c.Status != "completed" {
 			allDone = false
 			break
 		}
@@ -853,7 +833,7 @@ func (m *memoryVanadisStore) ResetChunkForSynchronize(_ context.Context, chunkID
 			list[i].CIFailCount = 0
 			list[i].CIChecks = make(map[string]string)
 			list[i].Banner = ""
-			if list[i].Status == "failed" {
+			if list[i].Status == "failed" || list[i].Status == "deploy_failed" {
 				list[i].Status = "pr_opened"
 				list[i].CompletedAt = time.Time{}
 			}
