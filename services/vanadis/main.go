@@ -251,7 +251,6 @@ type VanadisStore interface {
 	ListBuilds(ctx context.Context, limit int) ([]VanadisBuildEntry, error)
 	UpdateChunkStatus(ctx context.Context, chunkID, status string) error
 	ReserveChunkForLaunch(ctx context.Context, chunkID string) error
-	SetChunkAwakeables(ctx context.Context, chunkID, mergeAwakeableID, deployAwakeableID string) error
 	UpdateBuildStatus(ctx context.Context, buildID, status string) error
 	UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
 	GetChunk(ctx context.Context, chunkID string) (*VanadisChunk, *VanadisBuild, error)
@@ -592,26 +591,6 @@ func (s *PostgresVanadisStore) execUpdateByID(ctx context.Context, idLabel, id, 
 // UpdateChunkStatus updates the lifecycle status of a VanadisChunk.
 func (s *PostgresVanadisStore) UpdateChunkStatus(ctx context.Context, chunkID, status string) error {
 	return s.execUpdateByID(ctx, "chunk id", chunkID, "status", status, false, `UPDATE vanadis_chunks SET status = $1, started_at = CASE WHEN $1 IN ('running', 'coding') THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END, completed_at = CASE WHEN $1 IN ('merged', 'completed', 'failed', 'cancelled') THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis chunk status", ErrChunkNotFound)
-}
-
-// SetChunkAwakeables persists the merge and deploy awakeable IDs on a chunk.
-func (s *PostgresVanadisStore) SetChunkAwakeables(ctx context.Context, chunkID, mergeAwakeableID, deployAwakeableID string) error {
-	if s == nil || s.db == nil {
-		return errors.New("database connection is nil")
-	}
-	chunkID = strings.TrimSpace(chunkID)
-	if chunkID == "" {
-		return errors.New("chunk id cannot be empty")
-	}
-	const q = `UPDATE vanadis_chunks SET merge_awakeable_id = $1, deploy_awakeable_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`
-	tag, err := s.db.Exec(ctx, q, strings.TrimSpace(mergeAwakeableID), strings.TrimSpace(deployAwakeableID), chunkID)
-	if err != nil {
-		return fmt.Errorf("failed to set chunk awakeables: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrChunkNotFound
-	}
-	return nil
 }
 
 // UpdateBuildStatus updates the lifecycle status of a VanadisBuild.
@@ -1180,7 +1159,7 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.cancelBuildChunksAndPrompts(r.Context(), id, existing, existingChunks)
-	if err := s.cancelRestateBuildWorkflow(r.Context(), id, "cancelled"); err != nil {
+	if err := s.reconcileBuildOnRestate(r.Context(), id, "cancelled"); err != nil {
 		log.Printf("[vanadis] warning: failed signaling restate cancel for build %s: %v", id, err)
 	}
 	RecordBuildTotal("cancelled")
