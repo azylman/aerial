@@ -976,7 +976,9 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 		}
 		targetID = firstNonEmpty(tID, targetID)
 	}
-	targetID = firstNonEmpty(targetID, s.cfgSrc.Current().SystemChannelID)
+	if s.cfgSrc != nil {
+		targetID = firstNonEmpty(targetID, s.cfgSrc.Current().SystemChannelID)
+	}
 	actionDesc, fixDesc := "Deployment failed", "deployment failure"
 	if evt.Event == "deploy_rollback" {
 		actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
@@ -992,6 +994,7 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 			dmMsg = ""
 		}
 	}
+	_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_failed", "deploy_failed")
 	prompt := formatErrorDetailsBlock(
 		fmt.Sprintf("%s for job %s on %s (PR #%d, commit: %s).", actionDesc, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
 		evt.Details, "", fmt.Sprintf("Please investigate and fix the %s.", fixDesc),
@@ -1015,6 +1018,7 @@ func (s *RouterServer) handleDeploySyncFailed(ctx context.Context, evt DeployEve
 			dmMsg = ""
 		}
 	}
+	_ = s.publishDeployLifecycleEvent(ctx, evt, "sync_failed", "deploy_failed")
 	prompt := formatErrorDetailsBlock(header, evt.Details, "", "Please investigate and fix the git sync failure.")
 	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
 }
@@ -1104,6 +1108,7 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 	prefix := formatDirectMessagePrefix(evt.PRNumber, evt.Repo)
 	switch evt.Event {
 	case "deploy_started":
+		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_started", "deploying")
 		if evt.PRNumber > 0 {
 			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
 				log.Printf("[synapse] [widget] warning syncing deploy_started widget: %v", err)
@@ -1116,6 +1121,7 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 			return &evt, s.handleDeploySyncSuccess(ctx, evt, true)
 		}
 
+		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
 		if s.shouldSuppressDuplicateDeploySuccess(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber) {
 			s.reconcileStuckDeployingPRWidget(ctx, evt.Repo, evt.PRNumber)
 			log.Printf("[synapse] [deploy] suppressing duplicate deploy_success for repo=%s job=%s pr=%d commit=%s",
@@ -1208,9 +1214,11 @@ func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEv
 	}
 	if syncHasExpected {
 		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "synced", "")
+		_ = s.publishDeployLifecycleEvent(ctx, evt, "sync_success", "synced")
 	} else {
 		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
 		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
+		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
 	}
 	if err := s.advanceVanadisChunkOnSync(ctx, evt.Repo, evt.PRNumber, syncHasExpected); err != nil {
 		return err

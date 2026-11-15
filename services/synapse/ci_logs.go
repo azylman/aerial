@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 var (
@@ -274,7 +276,27 @@ func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *Res
 	}
 	details = s.resolveCIFailureDetails(ctx, res, details, checkURL)
 	s.populateMissingBranch(ctx, res)
+	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        "ci_failed",
+		Repo:         res.Repo,
+		PRNumber:     res.PRNumber,
+		Branch:       res.Branch,
+		HeadSHA:      res.HeadSHA,
+		TargetID:     res.TargetID,
+		Status:       "ci_failed",
+		CheckName:    res.CheckName,
+		CheckState:   "failed",
+		CheckURL:     checkURL,
+		Details:      details,
+		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
+		Quiet:        isDependabotBranch(res.Branch),
+		OccurredAt:   time.Now().UTC(),
+	})
 	if s.checkRemediationCapReached(ctx, res) {
+		return nil
+	}
+	if s.bus != nil {
+		log.Printf("[synapse] [ci_failed] suppressing ci failure /prompt dispatch for %s#%d (handled by Vanadis via aerial.pr.ci_failed)", res.Repo, res.PRNumber)
 		return nil
 	}
 	return s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL, res.Branch)

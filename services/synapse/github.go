@@ -15,12 +15,52 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 // GitHubIssueComment represents a comment on a GitHub issue or pull request.
 type GitHubIssueComment struct {
 	ID   int64  `json:"id"`
 	Body string `json:"body"`
+}
+
+func (s *RouterServer) publishPRLifecycleEvent(ctx context.Context, ev pubsub.PRLifecycleEvent) error {
+	if s == nil || s.bus == nil {
+		return nil
+	}
+	ev.Repo = normalizeRepo(ev.Repo)
+	if ev.OccurredAt.IsZero() {
+		ev.OccurredAt = time.Now().UTC()
+	}
+	subject := pubsub.SubjectAerialPRPrefix + strings.TrimSpace(ev.Event)
+	msgID := fmt.Sprintf("pr-life-%s-%d-%s-%d", strings.ReplaceAll(ev.Repo, "/", "-"), ev.PRNumber, ev.Event, ev.OccurredAt.UnixNano())
+	if err := s.bus.Publish(ctx, subject, msgID, ev); err != nil {
+		log.Printf("[synapse] [pr_lifecycle] error publishing event %s for %s#%d: %v", ev.Event, ev.Repo, ev.PRNumber, err)
+		return err
+	}
+	return nil
+}
+
+func (s *RouterServer) loadPRRolloutState(ctx context.Context, repo string, prNum int) *pubsub.PRRolloutState {
+	if s == nil || s.registry == nil || prNum <= 0 || strings.TrimSpace(repo) == "" {
+		return nil
+	}
+	pgReg, ok := s.registry.(*PostgresPRRegistry)
+	if !ok || pgReg == nil || pgReg.pool == nil {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var metaBytes []byte
+	err := pgReg.pool.QueryRow(qCtx, `SELECT COALESCE(metadata, '{}'::jsonb) FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`, normalizeRepo(repo), prNum).Scan(&metaBytes)
+	if err != nil || len(metaBytes) == 0 {
+		return nil
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(metaBytes, &meta); err != nil || meta == nil {
+		return nil
+	}
+	return buildPRRolloutState(meta)
 }
 
 func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
@@ -73,6 +113,18 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 		return err
 	}
 	if updated {
+		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        "conflict",
+			Repo:         repo,
+			PRNumber:     prNumber,
+			Branch:       branch,
+			HeadSHA:      headSHA,
+			TargetID:     targetID,
+			Status:       "conflict",
+			RolloutState: s.loadPRRolloutState(ctx, repo, prNumber),
+			Quiet:        isDependabotBranch(branch),
+			OccurredAt:   time.Now().UTC(),
+		})
 		args := MergeConflictArgs{Repo: repo, PRNumber: prNumber, Branch: branch, HeadSHA: headSHA, TargetID: targetID}
 		return s.enqueueMergeConflict(ctx, args)
 	}
@@ -127,8 +179,18 @@ func (s *RouterServer) handleStaleOpenPR(ctx context.Context, repo string, prNum
 	if s.registry == nil {
 		return
 	}
-	if _, closeErr := s.registry.UpdatePRClosedUnmerged(ctx, repo, prNumber); closeErr != nil {
+	if targetID, closeErr := s.registry.UpdatePRClosedUnmerged(ctx, repo, prNumber); closeErr != nil {
 		log.Printf("[synapse] [registry] warning closing stale PR #%d with missing head ref: %v", prNumber, closeErr)
+	} else {
+		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        "closed_unmerged",
+			Repo:         repo,
+			PRNumber:     prNumber,
+			TargetID:     targetID,
+			Status:       "closed_unmerged",
+			RolloutState: s.loadPRRolloutState(ctx, repo, prNumber),
+			OccurredAt:   time.Now().UTC(),
+		})
 	}
 }
 
@@ -229,6 +291,18 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	}
 	s.setPRWidgetState(ctx, repo, prNum, "deployed", "")
 	s.recordDeploySuccessDispatched(repo, "git-merge", headSHA, prNum)
+	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        "deploy_success",
+		Repo:         repo,
+		PRNumber:     prNum,
+		HeadSHA:      headSHA,
+		TargetID:     targetID,
+		Status:       "deployed",
+		JobName:      "git-merge",
+		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
+		Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
+		OccurredAt:   time.Now().UTC(),
+	})
 	if err := s.advanceVanadisChunk(ctx, repo, prNum); err != nil {
 		return err
 	}
@@ -236,7 +310,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	if err != nil {
 		return err
 	}
-	if !vanadisPR {
+	if !vanadisPR && s.bus == nil {
 		return s.dispatchDeploymentSuccessPrompt(ctx, targetID, "git-merge", repo, headSHA, prNum, "")
 	}
 	if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
@@ -295,6 +369,17 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 			log.Printf("[synapse] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
 			return fmt.Errorf("transition pr deploying: %w", err)
 		}
+		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        "deploy_started",
+			Repo:         repo,
+			PRNumber:     prNum,
+			HeadSHA:      headSHA,
+			TargetID:     targetID,
+			Status:       "deploying",
+			RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
+			Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
+			OccurredAt:   time.Now().UTC(),
+		})
 	}
 
 	// Phase c: write every image tag before any reconcile so one reconcile renders all of them.
@@ -706,6 +791,19 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 			return err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        "merged",
+			Repo:         res.Repo,
+			PRNumber:     res.PRNumber,
+			Branch:       res.Branch,
+			HeadSHA:      res.HeadSHA,
+			MergeSHA:     res.MergeSHA,
+			TargetID:     res.TargetID,
+			Status:       "merged",
+			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
+			Quiet:        isDependabotBranch(res.Branch),
+			OccurredAt:   time.Now().UTC(),
+		})
 		if err := s.advanceVanadisChunkOnMerge(ctx, res.Repo, res.PRNumber); err != nil {
 			return err
 		}
@@ -719,6 +817,18 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 		return err
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
+	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        "closed_unmerged",
+		Repo:         res.Repo,
+		PRNumber:     res.PRNumber,
+		Branch:       res.Branch,
+		HeadSHA:      res.HeadSHA,
+		TargetID:     res.TargetID,
+		Status:       "closed_unmerged",
+		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
+		Quiet:        isDependabotBranch(res.Branch),
+		OccurredAt:   time.Now().UTC(),
+	})
 	if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "pr_closed_unmerged"); err != nil {
 		return err
 	}
@@ -782,6 +892,18 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 			return err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        "synchronize",
+			Repo:         res.Repo,
+			PRNumber:     res.PRNumber,
+			Branch:       res.Branch,
+			HeadSHA:      res.HeadSHA,
+			Title:        pr.Title,
+			TargetID:     res.TargetID,
+			Status:       "open",
+			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
+			OccurredAt:   time.Now().UTC(),
+		})
 		if res.TargetID != "" {
 			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
 				log.Printf("[synapse] [widget] warning syncing pr_sync widget for %s#%d: %v", res.Repo, res.PRNumber, err)
@@ -860,6 +982,21 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 			return nil, err
 		}
 	}
+	if res.Action == "opened" && res.PRNumber > 0 {
+		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        "opened",
+			Repo:         res.Repo,
+			PRNumber:     res.PRNumber,
+			Branch:       res.Branch,
+			HeadSHA:      res.HeadSHA,
+			Title:        p.PullRequest.Title,
+			TargetID:     res.TargetID,
+			Status:       "open",
+			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
+			Quiet:        isDependabotBranch(res.Branch),
+			OccurredAt:   time.Now().UTC(),
+		})
+	}
 	return res, nil
 }
 
@@ -885,6 +1022,20 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 		log.Printf("[synapse] [registry] warning recording check status for %s#%d check %q: %v", res.Repo, res.PRNumber, res.CheckName, err)
 		return
 	}
+	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        "check_updated",
+		Repo:         res.Repo,
+		PRNumber:     res.PRNumber,
+		Branch:       res.Branch,
+		HeadSHA:      res.HeadSHA,
+		TargetID:     res.TargetID,
+		Status:       "open",
+		CheckName:    res.CheckName,
+		CheckState:   checkState,
+		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
+		Quiet:        isDependabotBranch(res.Branch),
+		OccurredAt:   time.Now().UTC(),
+	})
 	if updated {
 		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
 			log.Printf("[synapse] [widget] warning syncing pr widget for %s#%d: %v", res.Repo, res.PRNumber, err)
@@ -987,6 +1138,19 @@ func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *Resolv
 			return err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        "merged",
+			Repo:         res.Repo,
+			PRNumber:     res.PRNumber,
+			Branch:       res.Branch,
+			HeadSHA:      res.HeadSHA,
+			MergeSHA:     res.MergeSHA,
+			TargetID:     res.TargetID,
+			Status:       "merged",
+			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
+			Quiet:        isDependabotBranch(res.Branch),
+			OccurredAt:   time.Now().UTC(),
+		})
 		if err := s.advanceVanadisChunkOnMerge(ctx, res.Repo, res.PRNumber); err != nil {
 			return err
 		}
