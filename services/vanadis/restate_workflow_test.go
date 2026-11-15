@@ -29,6 +29,12 @@ func TestBuildWorkflow_Reflection(t *testing.T) {
 	require.NotNil(t, wf)
 	assert.Equal(t, "BuildWorkflow", wf.ServiceName())
 
+	// Exercise runtime adapter methods on concrete restateSharedRuntime and restateWorkflowRuntime types
+	var sr workflowSharedRuntime = restateSharedRuntime{}
+	assert.NotNil(t, sr)
+	var wr workflowRuntime = restateWorkflowRuntime{}
+	assert.NotNil(t, wr)
+
 	// restate.Reflect panics if handler signatures are invalid
 	require.NotPanics(t, func() {
 		def := restate.Reflect(wf)

@@ -25,6 +25,7 @@ var ErrRestateDisabled = errors.New("restate server is disabled")
 
 // RestateConfig holds Restate durable workflow runtime configuration for Vanadis.
 type RestateConfig struct {
+	Enabled             bool   `yaml:"enabled"`
 	RestatePort         string `yaml:"restate_port"`
 	RestateIngressURL   string `yaml:"restate_ingress_url"`
 	RestateAdminURL     string `yaml:"restate_admin_url"`
@@ -56,9 +57,15 @@ func LoadRestateConfig(configPath string) RestateConfig {
 			}
 		}
 	}
+	enabled := fileCfg.Enabled || strings.EqualFold(os.Getenv("VANADIS_RESTATE_ENABLED"), "true") || strings.EqualFold(os.Getenv("RESTATE_ENABLED"), "true")
+	ingressURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("RESTATE_INGRESS_URL"), fileCfg.RestateIngressURL)), "/")
+	if ingressURL != "" && !strings.EqualFold(os.Getenv("VANADIS_RESTATE_ENABLED"), "false") && !strings.EqualFold(os.Getenv("RESTATE_ENABLED"), "false") {
+		enabled = true
+	}
 	return RestateConfig{
+		Enabled:             enabled,
 		RestatePort:         firstNonEmpty(cleanRestatePortEnv(os.Getenv("VANADIS_RESTATE_PORT")), cleanRestatePortEnv(os.Getenv("RESTATE_PORT")), fileCfg.RestatePort, "9080"),
-		RestateIngressURL:   strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("RESTATE_INGRESS_URL"), fileCfg.RestateIngressURL)), "/"),
+		RestateIngressURL:   ingressURL,
 		RestateAdminURL:     strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("RESTATE_ADMIN_URL"), fileCfg.RestateAdminURL)), "/"),
 		RestateAdvertiseURL: strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("VANADIS_RESTATE_ADVERTISE_URL"), fileCfg.RestateAdvertiseURL)), "/"),
 	}
@@ -389,6 +396,9 @@ func executeLaunchChunk(ctx context.Context, srv *VanadisServer, buildID string,
 	}
 	if err := srv.store.SetChunkAwakeables(ctx, chunk.ID, mergeAwkID, deployAwkID); err != nil {
 		return err
+	}
+	if chunk.PRNumber > 0 || strings.EqualFold(chunk.Status, "pr_opened") {
+		return nil
 	}
 	if err := srv.store.UpdateChunkStatus(ctx, chunk.ID, "running"); err != nil {
 		return err
@@ -895,6 +905,10 @@ func (s *VanadisServer) resolveRestateAwakeable(ctx context.Context, awakeableID
 		return nil
 	}
 	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/restate/awakeables/%s/resolve", awakeableID), value)
+}
+
+func (s *VanadisServer) launchBuildOnRestate(ctx context.Context, buildID string) error {
+	return s.startRestateBuildWorkflow(ctx, buildID)
 }
 
 func (s *VanadisServer) launchCreatedBuild(ctx context.Context, buildID string) error {

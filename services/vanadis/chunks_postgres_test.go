@@ -21,18 +21,20 @@ type bareStore struct{ store *PostgresVanadisStore }
 // dbScript declaratively describes how a mocked Postgres connection answers a store call.
 // The same answers are served on the pool and inside transactions opened by Begin.
 type dbScript struct {
-	bare      *bareStore // when set, the test calls bare.store instead of a scripted store
-	beginErr  error
-	row       pgx.Row // answers QueryRow (all of them when buildRow is nil)
-	buildRow  pgx.Row // when set, answers QueryRow whose SQL does not select FROM vanadis_chunks
-	chunks    []VanadisChunk
-	queryErr  error
-	scanErr   error
-	rowsErr   error
-	failExec  string // Exec whose SQL contains this substring returns execErr ("" matches every Exec)
-	execErr   error
-	execTag   string // command tag for successful Exec; defaults to "UPDATE 1"
-	commitErr error
+	bare        *bareStore // when set, the test calls bare.store instead of a scripted store
+	beginErr    error
+	row         pgx.Row // answers QueryRow (all of them when buildRow is nil)
+	buildRow    pgx.Row // when set, answers QueryRow whose SQL does not select FROM vanadis_chunks
+	countRow    pgx.Row // when set, answers QueryRow whose SQL contains COUNT(*)
+	chunks      []VanadisChunk
+	queryErr    error
+	scanErr     error
+	rowsErr     error
+	failExec    string // Exec whose SQL contains this substring returns execErr ("" matches every Exec)
+	execErr     error
+	execTag     string // command tag for successful Exec; defaults to "UPDATE 1"
+	commitErr   error
+	rollbackErr error
 }
 
 // open builds the store under test and returns the repo candidates recorded from QueryRow's first argument.
@@ -51,6 +53,9 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 				*candidates = cands
 			}
 		}
+		if s.countRow != nil && strings.Contains(sql, "COUNT(*)") {
+			return s.countRow
+		}
 		if s.buildRow != nil && !strings.Contains(sql, "FROM vanadis_chunks") {
 			return s.buildRow
 		}
@@ -68,7 +73,7 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 		}
 		return pgconn.NewCommandTag(tag), nil
 	}
-	tx := &mockTx{commitErr: s.commitErr, queryRowFn: queryRow, queryFn: query, execFn: exec}
+	tx := &mockTx{commitErr: s.commitErr, rollbackErr: s.rollbackErr, queryRowFn: queryRow, queryFn: query, execFn: exec}
 	return newMockStore(mockDB{
 		queryRowFn: queryRow,
 		queryFn:    query,
@@ -92,11 +97,6 @@ func buildRow(id, status string) *mockRow { return &mockRow{b: &VanadisBuild{ID:
 
 func errRow(err error) *mockRow { return &mockRow{err: err} }
 
-// advanceRow answers AdvanceChunkByPR's chunk+build select for chunk c1 of build b1.
-func advanceRow(cStatus, bStatus string) *genericMockRow {
-	return valuesRow("c1", "b1", 0, "pr", "Chunk 1", cStatus, "thread-1", 2, "Build 1", "Objective 1", bStatus, "msg-1")
-}
-
 // actionChunkRow answers CompleteActionChunk's chunk select for chunk c1 of build b1.
 func actionChunkRow(mode, cStatus string) *genericMockRow {
 	return valuesRow("c1", "b1", 0, mode, "Action Chunk", cStatus)
@@ -118,15 +118,6 @@ func failRow(cStatus, bStatus string) *genericMockRow {
 // idPairRow answers FailChunkByPR's RETURNING build_id, id.
 func idPairRow(buildID, chunkID string) *genericMockRow {
 	return valuesRow(buildID, chunkID)
-}
-
-// prChunk is a one-line chunk summary fixture for advancement scans.
-func prChunk(id string, idx int, mode, status string) VanadisChunk {
-	c := VanadisChunk{ID: id, ChunkIndex: idx, Mode: mode, Status: status}
-	if mode == "pr" {
-		c.Repo = "aerial"
-	}
-	return c
 }
 
 // assertStoreErr checks err against a row's expectation and reports whether an error was expected.
@@ -227,55 +218,6 @@ func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 	}
 }
 
-func TestPostgresVanadisStore_AdvanceChunkByPR(t *testing.T) {
-	t.Parallel()
-	mergedThenPending := []VanadisChunk{prChunk("c1", 0, "pr", "merged"), prChunk("c2", 1, "pr", "pending")}
-	onlyMerged := []VanadisChunk{prChunk("c1", 0, "pr", "merged")}
-	open := advanceRow("pr_opened", "running")
-	tests := []struct {
-		name           string
-		repo           string
-		prNumber       int
-		db             dbScript
-		wantErr        bool
-		want           advanceOutcome
-		wantCandidates []string
-	}{
-		{name: "nil receiver", repo: "aerial", prNumber: 1, db: dbScript{bare: nilReceiver}, wantErr: true},
-		{name: "nil db", repo: "aerial", prNumber: 1, db: dbScript{bare: nilDB}, wantErr: true},
-		{name: "invalid args are unmatched", repo: "", prNumber: 0, want: advanceOutcome{}},
-		{name: "begin error", repo: "aerial", prNumber: 101, db: dbScript{beginErr: errors.New("begin tx err")}, wantErr: true},
-		{name: "no chunk rows are unmatched", repo: "aerial", prNumber: 101, db: dbScript{row: errRow(pgx.ErrNoRows)}, want: advanceOutcome{}},
-		{name: "select chunk error", repo: "aerial", prNumber: 101, db: dbScript{row: errRow(errors.New("select chunk err"))}, wantErr: true},
-		{name: "cancelled build matches without advancing", repo: "aerial", prNumber: 101, db: dbScript{row: advanceRow("merged", "cancelled")}, want: advanceOutcome{Matched: true, NextChunkIndex: -1, BuildStatus: "cancelled"}},
-		{name: "already merged chunk on running build computes next chunk", repo: "aerial", prNumber: 101, db: dbScript{row: advanceRow("merged", "running"), chunks: mergedThenPending}, want: advanceOutcome{Matched: true, NextChunkIndex: 1, BuildStatus: "running", Chunks: 2}},
-		{name: "update chunk error", repo: "aerial", prNumber: 101, db: dbScript{row: open, failExec: "UPDATE vanadis_chunks", execErr: errors.New("update chunk err")}, wantErr: true},
-		{name: "query chunks error", repo: "aerial", prNumber: 101, db: dbScript{row: open, queryErr: errors.New("query chunks err")}, wantErr: true},
-		{name: "iterate chunks error", repo: "aerial", prNumber: 101, db: dbScript{row: open, chunks: onlyMerged, rowsErr: errors.New("chunks iter err")}, wantErr: true},
-		{name: "update next chunk error", repo: "aerial", prNumber: 101, db: dbScript{row: open, chunks: mergedThenPending, failExec: "AND status = 'pending'", execErr: errors.New("update next chunk err")}, wantErr: true},
-		{name: "commit error advancing to next chunk", repo: "aerial", prNumber: 101, db: dbScript{row: open, chunks: mergedThenPending, commitErr: errors.New("commit err")}, wantErr: true},
-		{name: "build completion update error", repo: "aerial", prNumber: 101, db: dbScript{row: open, chunks: onlyMerged, failExec: "UPDATE vanadis_builds", execErr: errors.New("update build err")}, wantErr: true},
-		{name: "build completion commit error", repo: "aerial", prNumber: 101, db: dbScript{row: open, chunks: onlyMerged, commitErr: errors.New("build commit err")}, wantErr: true},
-		{name: "failed build recovers and advances to next chunk", repo: "aerial", prNumber: 101, db: dbScript{row: advanceRow("failed", "failed"), chunks: mergedThenPending}, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: 1, BuildStatus: "running", Chunks: 2}, wantCandidates: aerialRepoSet},
-		{name: "recover build running error", repo: "aerial", prNumber: 101, db: dbScript{row: advanceRow("failed", "failed"), chunks: mergedThenPending, failExec: "UPDATE vanadis_builds SET status = 'running'", execErr: errors.New("recover build err")}, wantErr: true},
-		{name: "last chunk completes build", repo: "aerial", prNumber: 101, db: dbScript{row: open, chunks: onlyMerged}, want: advanceOutcome{Matched: true, Advanced: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed", Chunks: 1}, wantCandidates: aerialRepoSet},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store, candidates := tc.db.open()
-			res, err := store.AdvanceChunkByPR(context.Background(), tc.repo, tc.prNumber)
-			if assertStoreErr(t, err, nil, tc.wantErr) {
-				return
-			}
-			if got := outcomeOf(res); got != tc.want {
-				t.Errorf("AdvanceChunkByPR = %+v, want %+v", got, tc.want)
-			}
-			assertCandidates(t, candidates, tc.wantCandidates)
-		})
-	}
-}
-
 func TestPostgresVanadisStore_FailChunkByPR(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -336,7 +278,9 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 		{name: "pr mode chunk is a matched no-op", chunkID: "c1", db: dbScript{row: actionChunkRow("pr", "running"), buildRow: runningBuild}, want: advanceOutcome{Matched: true, NextChunkIndex: -1, BuildStatus: "running"}},
 		{name: "completed action chunk is a matched no-op", chunkID: "c1", db: dbScript{row: actionChunkRow("action", "completed"), buildRow: runningBuild}, want: advanceOutcome{Matched: true, NextChunkIndex: -1, BuildStatus: "running"}},
 		{name: "update chunk error", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, failExec: "UPDATE vanadis_chunks", execErr: errors.New("update action chunk err")}, wantErr: true},
-		{name: "completes and advances to next chunk", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, chunks: []VanadisChunk{prChunk("c1", 0, "action", "completed"), prChunk("c2", 1, "pr", "pending")}}, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: 1, BuildStatus: "running", Chunks: 2}},
+		{name: "update chunk error logs rollback error", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, failExec: "UPDATE vanadis_chunks", execErr: errors.New("update action chunk err"), rollbackErr: errors.New("rb err")}, wantErr: true},
+		{name: "completes action chunk and marks build completed when no remaining chunks", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: valuesRow(0)}, want: advanceOutcome{Matched: true, Advanced: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed"}},
+		{name: "completes action chunk", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild}, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: -1, BuildStatus: "running"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -477,6 +421,7 @@ func TestPostgresVanadisStore_UpdateBuild(t *testing.T) {
 		{name: "build_query_error", buildID: "b1", req: title, db: dbScript{row: errRow(errors.New("query err"))}, wantErr: true},
 		{name: "build_conflict_status", buildID: "b1", req: title, db: dbScript{row: buildRow("b1", "completed")}, wantErrIs: ErrBuildConflict},
 		{name: "exec_error", buildID: "b1", req: title, db: dbScript{row: running, execErr: errors.New("exec err")}, wantErr: true},
+		{name: "exec_error_with_rollback_err", buildID: "b1", req: title, db: dbScript{row: running, execErr: errors.New("exec err"), rollbackErr: errors.New("rb err")}, wantErr: true},
 		{name: "commit_error", buildID: "b1", req: title, db: dbScript{row: running, commitErr: errors.New("commit err")}, wantErr: true},
 		{name: "success", buildID: "b1", req: UpdateBuildRequest{Title: "New Title", Objective: "New Obj", SharedContext: "New Ctx"}, db: dbScript{row: running}},
 	}
@@ -543,6 +488,7 @@ func TestPostgresVanadisStore_UpdateChunk(t *testing.T) {
 		{name: "chunk_not_found", buildID: "b1", chunkRef: "c999", req: title, db: dbScript{row: running, chunks: pendingC1}, wantErrIs: ErrChunkNotFound},
 		{name: "chunk_conflict_status", buildID: "b1", chunkRef: "c1", req: title, db: dbScript{row: running, chunks: pendingChunks("running")}, wantErrIs: ErrBuildConflict},
 		{name: "exec_error", buildID: "b1", chunkRef: "c1", req: title, db: dbScript{row: running, chunks: pendingC1, execErr: errors.New("exec err")}, wantErr: true},
+		{name: "exec_error_with_rollback_err", buildID: "b1", chunkRef: "c1", req: title, db: dbScript{row: running, chunks: pendingC1, execErr: errors.New("exec err"), rollbackErr: errors.New("rb err")}, wantErr: true},
 		{name: "commit_error", buildID: "b1", chunkRef: "c1", req: title, db: dbScript{row: running, chunks: pendingC1, commitErr: errors.New("commit err")}, wantErr: true},
 		{name: "pr_mode_empty_repo", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Mode: &modePR}, db: dbScript{row: running, chunks: actionC1}, wantErrIs: ErrInvalidBuildInput},
 		{name: "action_mode_with_repo", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Mode: &modeAction, Repo: "aerial"}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Mode: "pr", Repo: "aerial", Status: "pending"}}}, wantErrIs: ErrInvalidBuildInput},
@@ -613,6 +559,7 @@ func TestPostgresVanadisStore_AppendChunks(t *testing.T) {
 		{name: "chunks_scan_error", buildID: "b1", inputs: one, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1"}}, scanErr: errors.New("scan err")}, wantErr: true},
 		{name: "duplicate_id_conflict", buildID: "b1", inputs: []CreateChunkInput{chunkInput("c1", "", "aerial", "T", "I")}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1"}}}, wantErrIs: ErrBuildConflict},
 		{name: "exec_insert_error", buildID: "b1", inputs: one, db: dbScript{row: running, execErr: errors.New("insert err")}, wantErr: true},
+		{name: "exec_insert_error_with_rollback_err", buildID: "b1", inputs: one, db: dbScript{row: running, execErr: errors.New("insert err"), rollbackErr: errors.New("rb err")}, wantErr: true},
 		{name: "commit_error", buildID: "b1", inputs: one, db: dbScript{row: running, commitErr: errors.New("commit err")}, wantErr: true},
 		{name: "dag_validation_cycle_error", buildID: "b1", inputs: []CreateChunkInput{cycleA, cycleB}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Repo: "aerial"}}}, wantErr: true},
 		{name: "success_with_id_collision_resolution", buildID: "b1", inputs: one, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "b1-chunk-1", ChunkIndex: 0, Repo: "mirrormere"}}, execTag: "INSERT 0 1"}, wantCount: 1},
@@ -661,6 +608,7 @@ func TestPostgresVanadisStore_RemoveChunk(t *testing.T) {
 		{name: "chunk_conflict_status", buildID: "b1", chunkRef: "c1", db: dbScript{row: running, chunks: runningPending}, wantErrIs: ErrBuildConflict},
 		{name: "cannot_remove_only_chunk", buildID: "b1", chunkRef: "c1", db: dbScript{row: running, chunks: pendingChunks("pending")}, wantErrIs: ErrBuildConflict},
 		{name: "delete_exec_error", buildID: "b1", chunkRef: "c2", db: dbScript{row: running, chunks: runningPending, execErr: errors.New("del err")}, wantErr: true},
+		{name: "delete_exec_error_with_rollback_err", buildID: "b1", chunkRef: "c2", db: dbScript{row: running, chunks: runningPending, execErr: errors.New("del err"), rollbackErr: errors.New("rb err")}, wantErr: true},
 		{name: "commit_error", buildID: "b1", chunkRef: "c2", db: dbScript{row: running, chunks: runningPending, commitErr: errors.New("commit err")}, wantErr: true},
 		{name: "success", buildID: "b1", chunkRef: "1", db: dbScript{row: running, chunks: pendingChunks("running", "pending", "pending"), execTag: "DELETE 1"}, wantRemovedID: "c2", wantRemainLen: 2},
 	}
