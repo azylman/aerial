@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -531,25 +532,14 @@ func TestWorkflowExecutionHelpers(t *testing.T) {
 	assert.Equal(t, "b-wf", snap.Build.ID)
 	assert.Len(t, snap.Chunks, 2)
 
-	// executeLaunchChunk
+	// executeLaunchChunk persists awakeable IDs and transitions chunk to running
 	err = executeLaunchChunk(ctx, srv, "b-wf", chunks[0], "m1", "d1")
 	require.NoError(t, err)
-
-	// executeAwakeableStatusUpdate success
-	err = executeAwakeableStatusUpdate(ctx, srv, "b-wf", "c1", "c1", "merge", "merged")
+	gotChunk, _, err := store.GetChunk(ctx, "c1")
 	require.NoError(t, err)
-
-	// executeAwakeableStatusUpdate failure
-	err = executeAwakeableStatusUpdate(ctx, srv, "b-wf", "c1", "c1", "deploy", "failed")
-	require.NoError(t, err)
-
-	// executeCancelWorkflowBuild
-	err = executeCancelWorkflowBuild(ctx, srv, "b-wf", "user cancelled")
-	require.NoError(t, err)
-
-	// executeCompleteWorkflowBuild
-	err = executeCompleteWorkflowBuild(ctx, srv, "b-wf")
-	require.NoError(t, err)
+	assert.Equal(t, "m1", gotChunk.MergeAwakeableID)
+	assert.Equal(t, "d1", gotChunk.DeployAwakeableID)
+	assert.Equal(t, "running", gotChunk.Status)
 }
 
 func TestRestateIngressClientHelpers(t *testing.T) {
@@ -796,4 +786,66 @@ func TestBuildWorkflow_StateMachineWithRuntime(t *testing.T) {
 	resFail, err := wf.runWithRuntime(rtFail, RunBuildWorkflowRequest{BuildID: "b-fail-wf"})
 	require.Error(t, err)
 	assert.Equal(t, "failed", resFail.Status)
+
+	// 5. PR -> PR chain driven through real HTTP advance-pr and awakeable resolver
+	var rtPRChain *fakeWorkflowRuntime
+	tsIngress := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if after, ok := strings.CutPrefix(r.URL.Path, "/restate/awakeables/"); ok {
+			awkID := strings.TrimSuffix(after, "/resolve")
+			var resolvedVal string
+			_ = json.NewDecoder(r.Body).Decode(&resolvedVal)
+			for _, awk := range rtPRChain.awakeables {
+				if awk.id == awkID {
+					awk.val = resolvedVal
+				}
+			}
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer tsIngress.Close()
+
+	srv.restateCfg.RestateIngressURL = tsIngress.URL
+	srv.httpClient = tsIngress.Client()
+
+	bPRChain := VanadisBuild{ID: "b-pr-chain", ThreadID: "123456789012345678", Objective: "pr->pr chain", Status: "pending"}
+	cPRChain := []VanadisChunk{
+		{ID: "c-pr1", BuildID: "b-pr-chain", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "PR 1", Instructions: "do pr1", Status: "pending", PRNumber: 501, TargetFiles: []string{"a.go"}},
+		{ID: "c-pr2", BuildID: "b-pr-chain", ChunkIndex: 1, Mode: "pr", Repo: "azylman/aerial", Title: "PR 2", Instructions: "do pr2", Status: "pending", PRNumber: 502, DependsOn: []string{"c-pr1"}, TargetFiles: []string{"b.go"}},
+	}
+	require.NoError(t, store.CreateBuild(ctx, bPRChain, cPRChain))
+
+	postAdvancePR := func(prNum int) VanadisAdvancementResult {
+		body := fmt.Sprintf(`{"repo":"azylman/aerial","pr_number":%d}`, prNum)
+		req := httptest.NewRequest(http.MethodPost, "/chunks/advance-pr", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var out VanadisAdvancementResult
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+		return out
+	}
+
+	rtPRChain = newFakeWorkflowRuntime(func(step int, rt *fakeWorkflowRuntime, futures []any) (any, error) {
+		switch step {
+		case 1:
+			adv1 := postAdvancePR(501)
+			assert.True(t, adv1.Advanced)
+			assert.False(t, adv1.BuildCompleted)
+		case 3:
+			adv2 := postAdvancePR(502)
+			assert.True(t, adv2.Advanced)
+			assert.False(t, adv2.BuildCompleted, "Restate-managed build should suppress BuildCompleted in advance-pr response")
+		}
+		for _, f := range futures {
+			if awk, ok := f.(*fakeWorkflowAwakeable); ok && awk.val != "" {
+				return awk, nil
+			}
+		}
+		return nil, fmt.Errorf("no resolved awakeable at step %d", step)
+	})
+
+	resPRChain, err := wf.runWithRuntime(rtPRChain, RunBuildWorkflowRequest{BuildID: "b-pr-chain"})
+	require.NoError(t, err)
+	assert.Equal(t, "completed", resPRChain.Status)
+	assert.Equal(t, 2, resPRChain.CompletedChunks)
 }

@@ -346,6 +346,7 @@ func executeCompleteWorkflowBuild(ctx context.Context, srv *VanadisServer, build
 	if err := srv.store.UpdateBuildStatus(ctx, buildID, "completed"); err != nil {
 		return err
 	}
+	RecordBuildTotal("completed")
 	b, chs, err := srv.store.GetBuild(ctx, buildID)
 	if err == nil {
 		if !b.Quiet {
@@ -888,18 +889,13 @@ func (s *VanadisServer) launchCreatedBuild(ctx context.Context, buildID string, 
 	return s.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: buildID, ChunkIndex: 0})
 }
 
-func findMergedChunkAndNextMode(chunks []VanadisChunk, mergedIdx, nextIdx int) (*VanadisChunk, string) {
-	var mergedChunk *VanadisChunk
-	var nextChunkMode string
+func findChunkByIndex(chunks []VanadisChunk, idx int) *VanadisChunk {
 	for i := range chunks {
-		if chunks[i].ChunkIndex == mergedIdx {
-			mergedChunk = &chunks[i]
-		}
-		if nextIdx >= 0 && chunks[i].ChunkIndex == nextIdx {
-			nextChunkMode = strings.ToLower(strings.TrimSpace(chunks[i].Mode))
+		if chunks[i].ChunkIndex == idx {
+			return &chunks[i]
 		}
 	}
-	return mergedChunk, nextChunkMode
+	return nil
 }
 
 func (s *VanadisServer) notifyRestateChunkPRAdvanced(ctx context.Context, res *VanadisAdvancementResult) bool {
@@ -910,7 +906,7 @@ func (s *VanadisServer) notifyRestateChunkPRAdvanced(ctx context.Context, res *V
 	if err != nil {
 		return false
 	}
-	mergedChunk, nextChunkMode := findMergedChunkAndNextMode(chunks, res.MergedChunkIndex, res.NextChunkIndex)
+	mergedChunk := findChunkByIndex(chunks, res.MergedChunkIndex)
 	if mergedChunk == nil || (mergedChunk.MergeAwakeableID == "" && mergedChunk.DeployAwakeableID == "") {
 		return false
 	}
@@ -919,7 +915,7 @@ func (s *VanadisServer) notifyRestateChunkPRAdvanced(ctx context.Context, res *V
 			log.Printf("[vanadis] warning: failed resolving merge awakeable for chunk %s: %v", mergedChunk.ID, err)
 		}
 	}
-	if (!res.Advanced || res.NextChunkIndex < 0 || nextChunkMode != "pr") && mergedChunk.DeployAwakeableID != "" {
+	if mergedChunk.DeployAwakeableID != "" {
 		if err := s.resolveRestateAwakeable(ctx, mergedChunk.DeployAwakeableID, "deploy_success"); err != nil {
 			log.Printf("[vanadis] warning: failed resolving deploy awakeable for chunk %s: %v", mergedChunk.ID, err)
 		}

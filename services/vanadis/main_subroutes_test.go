@@ -7,10 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/nats-io/nats.go"
 )
 
 func TestMain_PromptFormattingAndSettleHelpers(t *testing.T) {
@@ -395,21 +393,6 @@ func TestVanadisServer_StoreHTTPEndpointErrors(t *testing.T) {
 	}
 }
 
-type mockMsgWithErrors struct {
-	termErr error
-	nakErr  error
-}
-
-func (m *mockMsgWithErrors) Data() []byte                     { return []byte("bad json") }
-func (m *mockMsgWithErrors) Subject() string                  { return "sub" }
-func (m *mockMsgWithErrors) Header() nats.Header              { return nil }
-func (m *mockMsgWithErrors) NumDelivered() uint64             { return 1 }
-func (m *mockMsgWithErrors) Ack() error                       { return nil }
-func (m *mockMsgWithErrors) NakWithDelay(time.Duration) error { return m.nakErr }
-func (m *mockMsgWithErrors) Term() error                      { return m.termErr }
-func (m *mockMsgWithErrors) Snooze(time.Duration) error       { return nil }
-func (m *mockMsgWithErrors) InProgress() error                { return nil }
-
 func TestVanadisServer_ExecuteAndDispatchPlumbing(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -433,7 +416,7 @@ func TestVanadisServer_ExecuteAndDispatchPlumbing(t *testing.T) {
 		t.Fatalf("expected nil on completed chunk, got %v", err)
 	}
 
-	badMsg := &mockMsgWithErrors{}
+	badMsg := &memoryMsg{data: []byte("bad json")}
 	if err := srvProc.HandleExecuteChunkJob(ctx, badMsg); err != nil {
 		t.Fatalf("expected nil on unmarshal error, got %v", err)
 	}
