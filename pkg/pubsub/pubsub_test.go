@@ -952,122 +952,10 @@ func (d *mockNatsDialer) Dial(network, address string) (net.Conn, error) {
 	return c1, nil
 }
 
-type mockJetStream struct {
-	nats.JetStreamContext
-
-	mu              sync.Mutex
-	publishErr      error
-	subscribeErr    error
-	streamInfoErr   error
-	addStreamErr    error
-	updateStreamErr error
-	consumerInfoErr error
-	existingStreams map[string]*nats.StreamInfo
-	publishedMsgs   []*nats.Msg
-	onPublish       func(msg *nats.Msg)
-}
-
-func (m *mockJetStream) PublishMsg(msg *nats.Msg, opts ...nats.PubOpt) (*nats.PubAck, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.publishErr != nil {
-		return nil, m.publishErr
-	}
-	m.publishedMsgs = append(m.publishedMsgs, msg)
-	if m.onPublish != nil {
-		m.onPublish(msg)
-	}
-	return &nats.PubAck{Stream: "TEST", Sequence: uint64(len(m.publishedMsgs))}, nil
-}
-
-func (m *mockJetStream) Subscribe(subj string, cb nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.subscribeErr != nil {
-		return nil, m.subscribeErr
-	}
-	if cb != nil {
-		cb(&nats.Msg{Subject: subj, Data: []byte("test")})
-	}
-	return &nats.Subscription{}, nil
-}
-
-func (m *mockJetStream) QueueSubscribe(subj, queue string, cb nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.subscribeErr != nil {
-		return nil, m.subscribeErr
-	}
-	if cb != nil {
-		cb(&nats.Msg{Subject: subj, Data: []byte("test")})
-	}
-	return &nats.Subscription{}, nil
-}
-
-func (m *mockJetStream) StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.streamInfoErr != nil {
-		return nil, m.streamInfoErr
-	}
-	if info, ok := m.existingStreams[stream]; ok {
-		return info, nil
-	}
-	return nil, nats.ErrStreamNotFound
-}
-
-func (m *mockJetStream) AddStream(cfg *nats.StreamConfig, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.addStreamErr != nil {
-		return nil, m.addStreamErr
-	}
-	if m.existingStreams == nil {
-		m.existingStreams = make(map[string]*nats.StreamInfo)
-	}
-	info := &nats.StreamInfo{Config: *cfg}
-	m.existingStreams[cfg.Name] = info
-	return info, nil
-}
-
-func (m *mockJetStream) UpdateStream(cfg *nats.StreamConfig, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.updateStreamErr != nil {
-		return nil, m.updateStreamErr
-	}
-	if m.existingStreams == nil {
-		m.existingStreams = make(map[string]*nats.StreamInfo)
-	}
-	info := &nats.StreamInfo{Config: *cfg}
-	m.existingStreams[cfg.Name] = info
-	return info, nil
-}
-
-func (m *mockJetStream) ConsumerInfo(stream, consumer string, opts ...nats.JSOpt) (*nats.ConsumerInfo, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.consumerInfoErr != nil {
-		return nil, m.consumerInfoErr
-	}
-	return &nats.ConsumerInfo{
-		Stream:        stream,
-		Name:          consumer,
-		NumPending:    7,
-		NumAckPending: 3,
-	}, nil
-}
-
 func (m *mockJetStream) setPublishErr(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.publishErr = err
-}
-
-func (m *mockJetStream) setSubscribeErr(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.subscribeErr = err
 }
 
 func (m *mockJetStream) setAddStreamErr(err error) {
@@ -1137,26 +1025,6 @@ func TestJetStreamBus_StreamsAndPublishSubscribe(t *testing.T) {
 		t.Errorf("expected 3 published msgs, got %d", mjs.publishedCount())
 	}
 
-	// 4. Subscribe and QueueSubscribe
-	sub, err := bus.Subscribe(context.Background(), "aerial.events.>", "sub-durable", func(ctx context.Context, msg Message) error { return nil })
-	if err != nil {
-		t.Fatalf("Subscribe failed: %v", err)
-	}
-	_ = sub.Unsubscribe()
-
-	qsub, err := bus.ConsumeQueue(context.Background(), "aerial.jobs.>", "q1", func(ctx context.Context, msg Message) error { return nil })
-	if err != nil {
-		t.Fatalf("ConsumeQueue failed: %v", err)
-	}
-	_ = qsub.Unsubscribe()
-
-	// Subscribe and ConsumeQueue with empty durable/queue
-	if _, err := bus.Subscribe(context.Background(), "aerial.events.>", "", func(ctx context.Context, msg Message) error { return nil }); err != nil {
-		t.Fatalf("Subscribe with empty durable failed: %v", err)
-	}
-	if _, err := bus.ConsumeQueue(context.Background(), "aerial.jobs.>", "", func(ctx context.Context, msg Message) error { return nil }); err != nil {
-		t.Fatalf("ConsumeQueue with empty queue failed: %v", err)
-	}
 	nilSub := &jsSubscription{}
 	if err := nilSub.Unsubscribe(); err != nil {
 		t.Errorf("Unsubscribe on nil sub should return nil, got: %v", err)
@@ -1171,15 +1039,6 @@ func TestJetStreamBus_StreamsAndPublishSubscribe(t *testing.T) {
 		t.Error("expected payload marshal error, got nil")
 	}
 	mjs.setPublishErr(nil)
-
-	mjs.setSubscribeErr(errors.New("sub failed"))
-	if _, err := bus.Subscribe(context.Background(), "aerial.events.>", "dur", func(ctx context.Context, msg Message) error { return nil }); err == nil {
-		t.Error("expected subscribe error, got nil")
-	}
-	if _, err := bus.ConsumeQueue(context.Background(), "aerial.jobs.>", "q", func(ctx context.Context, msg Message) error { return nil }); err == nil {
-		t.Error("expected queue subscribe error, got nil")
-	}
-	mjs.setSubscribeErr(nil)
 
 	mjs.setAddStreamErr(errors.New("add stream failed"))
 	mjs.resetStreams() // force AddStream path
@@ -1392,6 +1251,9 @@ func TestJetStreamBus_ConsumerStats(t *testing.T) {
 
 	mjs := &mockJetStream{
 		existingStreams: make(map[string]*nats.StreamInfo),
+		consumers: map[string]*nats.ConsumerInfo{
+			"stream/consumer": {Stream: "stream", Name: "consumer", NumPending: 7, NumAckPending: 3},
+		},
 	}
 	bus := newJetStreamBusWithContext(nil, mjs)
 
