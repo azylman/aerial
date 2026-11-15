@@ -24,7 +24,6 @@ import (
 	_ "time/tzdata"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/ambient"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
@@ -747,6 +746,11 @@ func startLeaderHandoff(
 		}
 		syncLLM := buildSyncLLM(rawLLM, cur.LowEffortModel, cur.Model)
 		transcript.StartTranscriptSync(leaderCtx, txStore, cfg, "", syncLLM, 5*time.Minute)
+		if pool != nil && pool.EventBus() != nil {
+			if subErr := transcript.StartTurnTranscriptSyncSubscriber(leaderCtx, pool.EventBus(), txStore, cfg, "", func() transcript.LLMClientFunc { return syncLLM }); subErr != nil {
+				log.Printf("[TranscriptSync] Warning starting turn transcript sync subscriber: %v", subErr)
+			}
+		}
 	}()
 
 	stopHandoff := func() {
@@ -1042,7 +1046,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		ActiveTurns:      activeTurns,
 	})
 	defer attachEriEventBus(ctx, pool)()
-	initTurnTranscriptSyncSubscriber(ctx, pool.EventBus(), txStore, cfg, cur, ephemeralPool)
 	pool.HoldUntilLeader()
 	pool.Start()
 
@@ -1094,22 +1097,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	defer stopHandoff()
 
 	return serveBrainHTTP(ctx, ln, mux, cur.Model, leaderErrCh)
-}
-
-func initTurnTranscriptSyncSubscriber(ctx context.Context, bus pubsub.Bus, txStore db.TranscriptStore, cfg *config.Config, cur *config.ConfigData, ephemeralPool *runner.InterchangeablePool) {
-	if bus == nil {
-		return
-	}
-	getLLM := func() transcript.LLMClientFunc {
-		var rawLLM func(context.Context, string, string) (string, error)
-		if ephemeralPool != nil {
-			rawLLM = ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer")
-		}
-		return buildSyncLLM(rawLLM, cur.LowEffortModel, cur.Model)
-	}
-	if subErr := transcript.StartTurnTranscriptSyncSubscriber(ctx, bus, txStore, cfg, "", getLLM); subErr != nil {
-		log.Printf("[TranscriptSync] Warning starting turn transcript sync subscriber: %v", subErr)
-	}
 }
 
 // setupTracing installs the global tracer provider and propagator from the config at path
