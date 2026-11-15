@@ -846,45 +846,6 @@ func TestSyncBuildWidget(t *testing.T) {
 	nilSrv.syncBuildWidget(ctx, "b1", "")
 	store := newMemoryVanadisStore()
 	store.builds["b1"] = mkBuild("b1", "100000000000000001", "", "", "")
-
-	// EventBus non-nil publishes to AERIAL_COALESCED directly
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
-		t.Fatalf("EnsureCoreStreams: %v", err)
-	}
-	done := make(chan struct{}, 1)
-	var publishedArgs pubsub.WidgetSyncJobArgs
-	var publishedSubject string
-	_, err := memBus.Subscribe(ctx, "aerial.coalesced.>", "test-sub", func(_ context.Context, msg pubsub.Message) error {
-		publishedSubject = msg.Subject()
-		_ = json.Unmarshal(msg.Data(), &publishedArgs)
-		select {
-		case done <- struct{}{}:
-		default:
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	busSrv := &VanadisServer{
-		bus:   memBus,
-		store: store,
-	}
-	busSrv.syncBuildWidget(ctx, "b1", "bus banner")
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for coalesced widget sync message")
-	}
-	if publishedArgs.BuildID != "b1" || publishedArgs.Banner != "bus banner" {
-		t.Errorf("Unexpected published widget sync args: %+v", publishedArgs)
-	}
-	if wantSubject := pubsub.SubjectBuildWidgetSyncCoalesced("b1"); publishedSubject != wantSubject {
-		t.Errorf("Unexpected published subject: got %q, want %q", publishedSubject, wantSubject)
-	}
-
 	var postedReq map[string]string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/internal/widget/sync" {

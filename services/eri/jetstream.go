@@ -235,9 +235,6 @@ func handleEriDispatchJob(ctx context.Context, store db.Store, pool *queue.Worke
 		dispatchID = uuid.New().String()
 	}
 	sessionID := strings.TrimSpace(req.SessionID)
-	if sessionID == "" {
-		sessionID = dispatchID
-	}
 
 	if store == nil {
 		publishDispatchDropOutcome(ctx, bus, dispatchID, req.Source, sessionID, req.TargetID, "failed", "database store not configured")

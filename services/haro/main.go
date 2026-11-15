@@ -117,21 +117,10 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	}
 	defer httpkit.CloseWarn(database, "database on shutdown")
 
-	// Invariant: ticker goroutine must be bound to a child context and strictly
-	// awaited on all exit paths before closing the database to prevent goroutine leaks
-	// and use-after-close on database shutdown.
+	// Invariant: initialize JetStream and configure dispatcher.SetEventBus before
+	// starting the background ticker goroutine, and await the ticker goroutine on
+	// all exit paths before closing the database.
 	dispatcher := NewHTTPPromptDispatcher(cfg.BrainURL)
-	tickerCtx, tickerCancel := context.WithCancel(ctx)
-	var tickerWg sync.WaitGroup
-	tickerWg.Go(func() {
-		ticker := NewTicker(database, dispatcher, 30*time.Second)
-		ticker.Start(tickerCtx)
-	})
-	defer func() {
-		tickerCancel()
-		tickerWg.Wait()
-	}()
-
 	toolHandler := NewToolHandler(cfg, database)
 	server := NewServer(toolHandler, dispatcher)
 
@@ -142,6 +131,17 @@ func RunApp(ctx context.Context, cfg *Config) error {
 				log.Printf("[Haro] bus close error: %v", closeErr)
 			}
 		}
+	}()
+
+	tickerCtx, tickerCancel := context.WithCancel(ctx)
+	var tickerWg sync.WaitGroup
+	tickerWg.Go(func() {
+		ticker := NewTicker(database, dispatcher, 30*time.Second)
+		ticker.Start(tickerCtx)
+	})
+	defer func() {
+		tickerCancel()
+		tickerWg.Wait()
 	}()
 
 	httpServer := &http.Server{

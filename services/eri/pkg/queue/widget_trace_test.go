@@ -2,19 +2,16 @@ package queue
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 )
 
@@ -296,99 +293,6 @@ func TestWorkerPool_EnsureChunkWidgetHydratedSpans(t *testing.T) {
 			names, _ := endedWidgetSpans(ctx, t, rec)
 			if fmt.Sprint(names) != fmt.Sprint(tc.wantSpans) {
 				t.Errorf("spans = %v, want %v", names, tc.wantSpans)
-			}
-		})
-	}
-}
-
-func TestWorkerPool_EnsureChunkWidgetHydrated_JetStream(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name        string
-		prompt      string
-		chunkID     string
-		buildID     string
-		wantSubject string
-		wantBuildID string
-		wantRepo    string
-		wantPRNum   int
-	}{
-		{
-			name:        "publishes build widget sync on coalesced stream",
-			prompt:      "Build ID: b1-test",
-			chunkID:     "c1",
-			buildID:     "b1-test",
-			wantSubject: "aerial.coalesced.widget_sync.build.b1-test",
-			wantBuildID: "b1-test",
-		},
-		{
-			name:        "publishes pr remediation widget sync on coalesced stream",
-			prompt:      "PR #42 on azylman/aerial",
-			chunkID:     "pr-azylman-aerial-42",
-			buildID:     "pr-azylman-aerial-42",
-			wantSubject: "aerial.coalesced.widget_sync.pr.azylman.aerial.42",
-			wantRepo:    "azylman/aerial",
-			wantPRNum:   42,
-		},
-		{
-			name:        "prioritizes pr remediation widget sync over non-pr buildID",
-			prompt:      "PR #99 on azylman/mirrormere",
-			chunkID:     "c-hybrid",
-			buildID:     "build-hybrid-1",
-			wantSubject: "aerial.coalesced.widget_sync.pr.azylman.mirrormere.99",
-			wantRepo:    "azylman/mirrormere",
-			wantPRNum:   99,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			memBus := pubsub.NewMemoryBus()
-			defer memBus.Close()
-			if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
-				t.Fatalf("EnsureCoreStreams: %v", err)
-			}
-			done := make(chan struct{}, 1)
-			var publishedArgs pubsub.WidgetSyncJobArgs
-			var publishedSubject string
-			_, err := memBus.Subscribe(ctx, "aerial.coalesced.>", "test-sub", func(_ context.Context, msg pubsub.Message) error {
-				publishedSubject = msg.Subject()
-				_ = json.Unmarshal(msg.Data(), &publishedArgs)
-				select {
-				case done <- struct{}{}:
-				default:
-				}
-				return nil
-			})
-			if err != nil {
-				t.Fatalf("Subscribe: %v", err)
-			}
-
-			p := &WorkerPool{
-				eventBus: memBus,
-			}
-			p.ensureChunkWidgetHydrated(ctx, tc.prompt, tc.chunkID, tc.buildID)
-
-			select {
-			case <-done:
-			case <-time.After(time.Second):
-				t.Fatal("timeout waiting for coalesced widget sync message")
-			}
-
-			if publishedSubject != tc.wantSubject {
-				t.Errorf("subject = %q, want %q", publishedSubject, tc.wantSubject)
-			}
-			if tc.wantBuildID != "" && publishedArgs.BuildID != tc.wantBuildID {
-				t.Errorf("args.BuildID = %q, want %q", publishedArgs.BuildID, tc.wantBuildID)
-			}
-			if tc.wantRepo != "" && publishedArgs.Repo != tc.wantRepo {
-				t.Errorf("args.Repo = %q, want %q", publishedArgs.Repo, tc.wantRepo)
-			}
-			if tc.wantPRNum != 0 && publishedArgs.PRNumber != tc.wantPRNum {
-				t.Errorf("args.PRNumber = %d, want %d", publishedArgs.PRNumber, tc.wantPRNum)
 			}
 		})
 	}

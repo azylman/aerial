@@ -280,6 +280,54 @@ func TestHandlePRRolloutUpdated(t *testing.T) {
 	assert.Equal(t, []string{"eri"}, updatedChunk.RolloutState.ExpectedJobs)
 }
 
+func TestCiRemediationDispatchID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		chunkID   string
+		headSHA   string
+		failCount int
+		expected  string
+	}{
+		{
+			name:      "sha present",
+			chunkID:   "c1",
+			headSHA:   "abc1234",
+			failCount: 1,
+			expected:  "vanadis-c1-cifail-abc1234-1",
+		},
+		{
+			name:      "sha with whitespace trimmed",
+			chunkID:   "c1",
+			headSHA:   "  def5678  \n",
+			failCount: 2,
+			expected:  "vanadis-c1-cifail-def5678-2",
+		},
+		{
+			name:      "empty sha fallback",
+			chunkID:   "c2",
+			headSHA:   "",
+			failCount: 3,
+			expected:  "vanadis-c2-cifail-3",
+		},
+		{
+			name:      "whitespace-only sha fallback",
+			chunkID:   "c3",
+			headSHA:   "   \t  ",
+			failCount: 1,
+			expected:  "vanadis-c3-cifail-1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.expected, ciRemediationDispatchID(tc.chunkID, tc.headSHA, tc.failCount))
+		})
+	}
+}
+
 func TestHandlePRCIFailed_Remediation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -314,6 +362,7 @@ func TestHandlePRCIFailed_Remediation(t *testing.T) {
 		for _, r := range *reqs {
 			if r.Path == "/dispatch" {
 				foundDispatch = true
+				assert.Equal(t, "vanadis-c-ci1-cifail-sha601-2", r.Body["id"])
 				assert.Equal(t, "vanadis-c-ci1", r.Body["session_id"])
 				assert.Equal(t, "123456789012345678", r.Body["target_id"])
 				assert.Equal(t, true, r.Body["skip_if_active"])
@@ -324,6 +373,105 @@ func TestHandlePRCIFailed_Remediation(t *testing.T) {
 		assert.True(t, foundDispatch, "expected POST /dispatch to be called")
 		assert.Empty(t, recBus.getEvents(), "no external events expected on non-terminal remediation")
 	})
+}
+
+func TestHandlePRCIFailed_DispatchIDVariants(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("empty or whitespace head sha falls back to legacy dispatch id", func(t *testing.T) {
+		t.Parallel()
+		srv, store, recBus, reqs := setupTestServer(t)
+		build := mkBuild("b-ci-empty", "123456789012345678", "Build", "Obj", "running")
+		chunk := mkChunk("c-ci-empty", "b-ci-empty", 0, "Chunk", "Instr", "medium", "pr_opened")
+		chunk.PRNumber = 602
+		chunk.Repo = "azylman/aerial"
+		chunk.CIFailCount = 0
+		require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
+
+		ev := pubsub.PRLifecycleEvent{
+			Event:     "ci_failed",
+			Repo:      "azylman/aerial",
+			PRNumber:  602,
+			Branch:    "feat/test",
+			HeadSHA:   "   ",
+			CheckName: "Go Unit Tests",
+			Details:   "Failure details",
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
+
+		var foundDispatch bool
+		for _, r := range *reqs {
+			if r.Path == "/dispatch" {
+				foundDispatch = true
+				assert.Equal(t, "vanadis-c-ci-empty-cifail-1", r.Body["id"])
+			}
+		}
+		assert.True(t, foundDispatch, "expected POST /dispatch to be called")
+		assert.Empty(t, recBus.getEvents())
+	})
+
+	t.Run("multi-commit sequence across synchronize produces distinct dispatch IDs", func(t *testing.T) {
+		t.Parallel()
+		srv, store, recBus, reqs := setupTestServer(t)
+		build := mkBuild("b-ci-seq", "123456789012345678", "Build", "Obj", "running")
+		chunk := mkChunk("c-ci-seq", "b-ci-seq", 0, "Chunk", "Instr", "medium", "pr_opened")
+		chunk.PRNumber = 603
+		chunk.Repo = "azylman/aerial"
+		chunk.CIFailCount = 0
+		require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
+
+		// 1. CI fails on commit 1
+		evFail1 := pubsub.PRLifecycleEvent{
+			Event:     "ci_failed",
+			Repo:      "azylman/aerial",
+			PRNumber:  603,
+			Branch:    "feat/test",
+			HeadSHA:   "sha001",
+			CheckName: "Go Unit Tests",
+			Details:   "fail 1",
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, evFail1))
+
+		// 2. Synchronize event resets CI fail count
+		evSync := pubsub.PRLifecycleEvent{
+			Event:    "synchronize",
+			Repo:     "azylman/aerial",
+			PRNumber: 603,
+			Branch:   "feat/test",
+			HeadSHA:  "sha002",
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, evSync))
+
+		// 3. CI fails on commit 2
+		evFail2 := pubsub.PRLifecycleEvent{
+			Event:     "ci_failed",
+			Repo:      "azylman/aerial",
+			PRNumber:  603,
+			Branch:    "feat/test",
+			HeadSHA:   "sha002",
+			CheckName: "Go Unit Tests",
+			Details:   "fail 2",
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, evFail2))
+
+		var dispatchIDs []string
+		for _, r := range *reqs {
+			if r.Path == "/dispatch" {
+				dispatchIDs = append(dispatchIDs, r.Body["id"].(string))
+			}
+		}
+		require.Len(t, dispatchIDs, 2)
+		assert.Equal(t, "vanadis-c-ci-seq-cifail-sha001-1", dispatchIDs[0])
+		assert.Equal(t, "vanadis-c-ci-seq-cifail-sha002-1", dispatchIDs[1])
+		assert.NotEqual(t, dispatchIDs[0], dispatchIDs[1])
+		assert.Empty(t, recBus.getEvents())
+	})
+}
+
+func TestHandlePRCIFailed_CapReached(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
 
 	t.Run("attempt > 3 triggers remediation cap failure and alerts", func(t *testing.T) {
 		t.Parallel()

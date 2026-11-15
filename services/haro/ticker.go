@@ -67,12 +67,15 @@ type PromptDispatcher interface {
 type HTTPPromptDispatcher struct {
 	brainURL   string
 	httpClient *http.Client
+	busMu      sync.RWMutex
 	bus        pubsub.Bus
 }
 
 func (d *HTTPPromptDispatcher) SetEventBus(bus pubsub.Bus) {
 	if d != nil {
+		d.busMu.Lock()
 		d.bus = bus
+		d.busMu.Unlock()
 	}
 }
 
@@ -80,6 +83,8 @@ func (d *HTTPPromptDispatcher) EventBus() pubsub.Bus {
 	if d == nil {
 		return nil
 	}
+	d.busMu.RLock()
+	defer d.busMu.RUnlock()
 	return d.bus
 }
 
@@ -185,7 +190,7 @@ func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req DispatchRequest
 	if strings.TrimSpace(req.Source) == "" {
 		return DispatchResponse{}, errors.New("dispatch source cannot be empty")
 	}
-	if d != nil && d.bus != nil {
+	if bus := d.EventBus(); bus != nil {
 		dispatchID := strings.TrimSpace(req.ID)
 		if dispatchID == "" {
 			dispatchID = uuid.New().String()
@@ -200,7 +205,7 @@ func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req DispatchRequest
 			SkipIfActive: req.SkipIfActive,
 		}
 		msgID := "eri:dispatch:" + dispatchID
-		if err := d.bus.Publish(ctx, pubsub.SubjectEriDispatchJob, msgID, args); err != nil {
+		if err := bus.Publish(ctx, pubsub.SubjectEriDispatchJob, msgID, args); err != nil {
 			return DispatchResponse{}, err
 		}
 		return DispatchResponse{

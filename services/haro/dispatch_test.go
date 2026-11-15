@@ -102,6 +102,18 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 	}
 }
 
+func outcomeEvent(id, source, status, errStr string, start, end time.Time, dur int64) *pubsub.DispatchOutcomeEvent {
+	return &pubsub.DispatchOutcomeEvent{
+		DispatchID:  id,
+		Source:      source,
+		Status:      status,
+		Error:       errStr,
+		StartedAt:   start,
+		CompletedAt: end,
+		DurationMs:  dur,
+	}
+}
+
 func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
@@ -127,58 +139,73 @@ func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 		},
 		{
 			name:             "healthcheck ping is ignored",
-			seedScheduleType: "heartbeat", seedScheduleID: "hb-ping", seedRunID: "healthcheck-ping",
-			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "healthcheck-ping", Status: "completed"},
-			wantRunStatus: "running",
+			seedScheduleType: "heartbeat",
+			seedScheduleID:   "hb-ping",
+			seedRunID:        "healthcheck-ping",
+			event:            outcomeEvent("healthcheck-ping", "", "completed", "", time.Time{}, time.Time{}, 0),
+			wantRunStatus:    "running",
 		},
 		{
 			name:      "unknown dispatch id naks with delay for retry",
-			event:     &pubsub.DispatchOutcomeEvent{DispatchID: "disp-unknown", Status: "completed"},
+			event:     outcomeEvent("disp-unknown", "", "completed", "", time.Time{}, time.Time{}, 0),
 			wantNaked: true,
 		},
 		{
 			name:  "non-heartbeat source like vanadis is ignored without nak",
-			event: &pubsub.DispatchOutcomeEvent{DispatchID: "disp-vanadis-chunk", Source: "vanadis", Status: "completed"},
+			event: outcomeEvent("disp-vanadis-chunk", "vanadis", "completed", "", time.Time{}, time.Time{}, 0),
 		},
 		{
-			name:             "heartbeat completed updates run and advances watermark",
-			seedScheduleType: "heartbeat", seedScheduleID: "hb-disp-1", seedRunID: "run-hb-1",
-			event:             &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-1", Status: "completed", StartedAt: now, CompletedAt: now.Add(5 * time.Second), DurationMs: 5000},
+			name:              "heartbeat completed updates run and advances watermark",
+			seedScheduleType:  "heartbeat",
+			seedScheduleID:    "hb-disp-1",
+			seedRunID:         "run-hb-1",
+			event:             outcomeEvent("run-hb-1", "", "completed", "", now, now.Add(5*time.Second), 5000),
 			wantRunStatus:     "completed",
 			wantWatermarkTime: &now,
 		},
 		{
 			name:             "heartbeat failed updates run and does not advance watermark",
-			seedScheduleType: "heartbeat", seedScheduleID: "hb-disp-2", seedRunID: "run-hb-2",
-			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-2", Status: "failed", Error: "connection refused", StartedAt: now, CompletedAt: now.Add(2 * time.Second), DurationMs: 2000},
-			wantRunStatus: "failed",
-			wantRunError:  "connection refused",
+			seedScheduleType: "heartbeat",
+			seedScheduleID:   "hb-disp-2",
+			seedRunID:        "run-hb-2",
+			event:            outcomeEvent("run-hb-2", "", "failed", "connection refused", now, now.Add(2*time.Second), 2000),
+			wantRunStatus:    "failed",
+			wantRunError:     "connection refused",
 		},
 		{
 			name:             "heartbeat skipped_active updates run and does not advance watermark",
-			seedScheduleType: "heartbeat", seedScheduleID: "hb-disp-skip", seedRunID: "run-hb-skip",
-			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-skip", Status: "skipped_active", StartedAt: now, CompletedAt: now},
-			wantRunStatus: "skipped_active",
+			seedScheduleType: "heartbeat",
+			seedScheduleID:   "hb-disp-skip",
+			seedRunID:        "run-hb-skip",
+			event:            outcomeEvent("run-hb-skip", "", "skipped_active", "", now, now, 0),
+			wantRunStatus:    "skipped_active",
 		},
 		{
 			name:             "cron completed updates run without touching heartbeat watermark",
-			seedScheduleType: "cron", seedScheduleID: "cron-disp-1", seedRunID: "run-cron-1",
-			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-cron-1", Status: "completed", StartedAt: now, CompletedAt: now.Add(10 * time.Second), DurationMs: 10000},
-			wantRunStatus: "completed",
+			seedScheduleType: "cron",
+			seedScheduleID:   "cron-disp-1",
+			seedRunID:        "run-cron-1",
+			event:            outcomeEvent("run-cron-1", "", "completed", "", now, now.Add(10*time.Second), 10000),
+			wantRunStatus:    "completed",
 		},
 		{
-			name:             "heartbeat completed with zero duration and zero completedAt calculates both",
-			seedScheduleType: "heartbeat", seedScheduleID: "hb-disp-zero", seedRunID: "run-hb-zero",
-			event:               &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-zero", Status: "completed", StartedAt: now},
+			name:                "heartbeat completed with zero duration and zero completedAt calculates both",
+			seedScheduleType:    "heartbeat",
+			seedScheduleID:      "hb-disp-zero",
+			seedRunID:           "run-hb-zero",
+			event:               outcomeEvent("run-hb-zero", "", "completed", "", now, time.Time{}, 0),
 			wantRunStatus:       "completed",
 			wantWatermarkTime:   &now,
 			wantCheckCalculated: true,
 		},
 		{
 			name:             "terminal completed run ignores subsequent outcome event",
-			seedScheduleType: "heartbeat", seedScheduleID: "hb-disp-term", seedRunID: "run-hb-term", seedRunStatus: "completed",
-			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-term", Status: "failed", Error: "late failure"},
-			wantRunStatus: "completed",
+			seedScheduleType: "heartbeat",
+			seedScheduleID:   "hb-disp-term",
+			seedRunID:        "run-hb-term",
+			seedRunStatus:    "completed",
+			event:            outcomeEvent("run-hb-term", "", "failed", "late failure", time.Time{}, time.Time{}, 0),
+			wantRunStatus:    "completed",
 		},
 	}
 
@@ -189,6 +216,7 @@ func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 			ctx := context.Background()
 			seedDispatchHeartbeat(ctx, t, db, tc.seedScheduleType, tc.seedScheduleID, now)
 			seedDispatchRun(ctx, t, db, tc.seedRunID, tc.seedScheduleType, tc.seedScheduleID, tc.seedRunStatus, now)
+
 			msg := &memoryMsg{data: dispatchPayload(t, tc.rawPayload, tc.event), subject: "aerial.dispatch.completed"}
 			err := HandleDispatchOutcome(ctx, db, msg)
 			if (err != nil) != tc.wantErr {
@@ -225,14 +253,14 @@ func seedDispatchHeartbeat(ctx context.Context, t *testing.T, db *sql.DB, schedu
 	}
 }
 
-// seedDispatchRun inserts a schedule run when runID is set (defaulting to "running" if status is empty).
-func seedDispatchRun(ctx context.Context, t *testing.T, db *sql.DB, runID, scheduleType, scheduleID, status string, now time.Time) {
+// seedDispatchRun inserts a schedule run with the given status (defaulting to "running") when runID is set.
+func seedDispatchRun(ctx context.Context, t *testing.T, db *sql.DB, runID, scheduleType, scheduleID, runStatus string, now time.Time) {
 	t.Helper()
 	if runID == "" {
 		return
 	}
-	if status == "" {
-		status = "running"
+	if runStatus == "" {
+		runStatus = "running"
 	}
 	run := ScheduleRun{
 		ID:           runID,
@@ -242,7 +270,7 @@ func seedDispatchRun(ctx context.Context, t *testing.T, db *sql.DB, runID, sched
 		ThreadID:     "thread-" + scheduleID,
 		Title:        "Run Title",
 		Prompt:       "Run Prompt",
-		Status:       status,
+		Status:       runStatus,
 		StartedAt:    now,
 	}
 	if err := CreateScheduleRun(ctx, db, run); err != nil {

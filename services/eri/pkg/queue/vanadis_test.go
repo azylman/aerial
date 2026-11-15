@@ -3,7 +3,6 @@ package queue
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -176,14 +175,9 @@ func TestWorkerPool_PublishDispatchOutcome_JetStream(t *testing.T) {
 				deliveredMu.Unlock()
 			}
 
-			// Check attempted publishes for dispatch outcomes
+			// Check attempted publishes
 			trackBus.mu.Lock()
-			var gotPublishes []string
-			for _, pubSubject := range trackBus.publishes {
-				if strings.HasPrefix(pubSubject, pubsub.SubjectAerialDispatchPrefix) {
-					gotPublishes = append(gotPublishes, pubSubject)
-				}
-			}
+			gotPublishes := append([]string(nil), trackBus.publishes...)
 			trackBus.mu.Unlock()
 
 			if len(gotPublishes) != tc.wantAttemptPubs {
