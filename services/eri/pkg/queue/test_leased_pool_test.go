@@ -365,6 +365,9 @@ func (s *testRunnerAgentSession) setSessionID(id string) {
 	s.mu.Unlock()
 }
 
+// Send mirrors runner.StreamingDaemon.Send: the turn's context travels in turn.Ctx.
+//
+//nolint:contextcheck,nolintlint // contextcheck reads this doc directive; golangci sees no in-body issue.
 func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) error {
 	if turn != nil && turn.Sink != nil {
 		turn.Sink.OnTurnStarted()
@@ -422,18 +425,17 @@ func (s *testRunnerAgentSession) extractRescueResponse(turn *runner.TurnContext)
 	if s.pool.cfg.SessionManager == nil {
 		return ""
 	}
+	if turn == nil {
+		return ""
+	}
 	resSess := s.SessionID()
-	if resSess == "" && turn != nil {
+	if resSess == "" {
 		resSess = turn.SessionID
 	}
 	if resSess == "" {
 		return ""
 	}
-	var since time.Time
-	if turn != nil {
-		since = turn.CreatedAt
-	}
-	resc := s.pool.cfg.SessionManager.ExtractResponseSince(resSess, since)
+	resc := s.pool.cfg.SessionManager.ExtractResponseSinceContext(turn.Ctx, resSess, turn.CreatedAt)
 	if runner.IsSubstantiveResponse(resc) && !strings.HasPrefix(resc, "[Tool Call Requested]:") {
 		return strings.TrimSpace(resc)
 	}

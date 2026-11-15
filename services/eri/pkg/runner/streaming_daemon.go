@@ -447,6 +447,11 @@ func (d *StreamingDaemon) syncTurnEnvFile(turnCtx *TurnContext) error {
 	return os.Chmod(turnEnvFile, 0o644)
 }
 
+// Send hands prompt to the daemon as a new turn. The turn's context travels in turnCtx.Ctx (set
+// by every lease's Execute); contextcheck cannot
+// see through that, so Send is exempt from its caller analysis.
+//
+//nolint:contextcheck,nolintlint // contextcheck reads this doc directive; golangci sees no in-body issue.
 func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	d.stdinMu.Lock()
 	defer d.stdinMu.Unlock()

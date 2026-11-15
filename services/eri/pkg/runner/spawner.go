@@ -177,9 +177,6 @@ func hasActiveBinaryReplacement(bin string, cwd string) bool {
 }
 
 func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	bin := cfg.AgyBin
 	if cfg.IsClaude() {
 		bin = cfg.ClaudeBin

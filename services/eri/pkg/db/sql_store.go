@@ -99,9 +99,6 @@ func (s *SQLStore) AcquireLeaderLock(ctx context.Context) (func(), error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	sqlDB, ok := s.db.(*sql.DB)
 	if !ok {
 		return func() {}, ctx.Err()
@@ -121,7 +118,8 @@ func (s *SQLStore) AcquireLeaderLock(ctx context.Context) (func(), error) {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			unlockCtx, cancel := context.WithTimeout(context.Background(), defaultExecTimeout)
+			// Release usually runs at shutdown, after ctx is canceled; the unlock gets its own timeout.
+			unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultExecTimeout)
 			defer cancel()
 			_, unlockErr := conn.ExecContext(unlockCtx, unlockQuery)
 			if closeErr := errors.Join(unlockErr, conn.Close()); closeErr != nil {

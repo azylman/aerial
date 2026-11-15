@@ -248,7 +248,9 @@ func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 	return resStr, nil
 }
 
-func (p *Provider) triggerBackgroundRefresh() {
+// triggerBackgroundRefresh refreshes the cache stale-while-revalidate. The refresh outlives the
+// request that noticed staleness, so it keeps ctx's values but not its cancellation.
+func (p *Provider) triggerBackgroundRefresh(ctx context.Context) {
 	if !p.refreshing.CompareAndSwap(0, 1) {
 		return
 	}
@@ -258,7 +260,7 @@ func (p *Provider) triggerBackgroundRefresh() {
 		if p.cfg.TimeoutMs > 0 {
 			timeout = time.Duration(p.cfg.TimeoutMs) * time.Millisecond
 		}
-		bgCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 		defer cancel()
 		if _, err := p.fetchAndRender(bgCtx); err != nil {
 			log.Printf("[Ambient] SWR background refresh warning: %v", err)
@@ -280,7 +282,7 @@ func (p *Provider) Retrieve(ctx context.Context) (string, error) {
 	}
 
 	if withinHardTTL && cached != "" {
-		p.triggerBackgroundRefresh()
+		p.triggerBackgroundRefresh(ctx)
 		return cached, nil
 	}
 

@@ -240,7 +240,7 @@ func runRecoverInterruptedCase(t *testing.T, tc recoverInterruptedCase) {
 		pool.SetDiscordSession(&discordgo.Session{})
 	}
 
-	RecoverInterrupted(store, pool)
+	RecoverInterrupted(t.Context(), store, pool)
 	waitForCompletion(t, doneCh, 3*time.Second, tc.name)
 
 	mu.Lock()
@@ -261,10 +261,10 @@ func runRecoverInterruptedCase(t *testing.T, tc recoverInterruptedCase) {
 func TestRecoverInterrupted(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	RecoverInterrupted(nil, nil)
+	RecoverInterrupted(t.Context(), nil, nil)
 	closedStore := setupTestStore(t)
 	_ = closedStore.Close()
-	RecoverInterrupted(closedStore, NewWorkerPool(WorkerPoolConfig{Store: closedStore}))
+	RecoverInterrupted(t.Context(), closedStore, NewWorkerPool(WorkerPoolConfig{Store: closedStore}))
 
 	tests := []recoverInterruptedCase{
 		{name: "FIFORecoveryAndScheduleRuns", seedMessages: []db.Message{{ID: "m1", ThreadID: "th-same", Status: db.StatusPending, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m2", ThreadID: "th-same", Status: db.StatusProcessing, CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute)}, {ID: "m3", ThreadID: "th-same", Status: db.StatusCompleted, CreatedAt: now.Add(-15 * time.Minute)}}, wantCompletedIDs: []string{"m1", "m2"}},
@@ -693,7 +693,7 @@ func verifyShutdownRecovery(t *testing.T, store db.Store, msg db.Message) {
 	})
 	newPool.Start()
 	defer newPool.Stop()
-	RecoverInterrupted(store, newPool)
+	RecoverInterrupted(t.Context(), store, newPool)
 	waitForCompletion(t, newDoneCh, 5*time.Second, "recovered message")
 
 	mu.Lock()
@@ -889,7 +889,7 @@ func TestWorkerPool_HoldUntilLeaderAndRecovery_Isolation(t *testing.T) {
 	}
 
 	// RecoverInterrupted resets PROCESSING orphans, releases leaderHold, and enqueues all PENDING items.
-	RecoverInterrupted(store, pool)
+	RecoverInterrupted(t.Context(), store, pool)
 	waitForCompletion(t, msgDone, 5*time.Second, "recovered messages")
 	waitForCompletion(t, dispDone, 5*time.Second, "recovered dispatches")
 	waitPoolIdle(t, pool, 3*time.Second)

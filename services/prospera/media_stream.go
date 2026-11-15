@@ -136,14 +136,14 @@ func (m *CallSessionManager) GetRecordingWAV(callID string) []byte {
 }
 
 // SteerCall injects an instruction turn into an active call session.
-func (m *CallSessionManager) SteerCall(callID, message, mode string) error {
+func (m *CallSessionManager) SteerCall(ctx context.Context, callID, message, mode string) error {
 	sess, ok := m.GetSession(callID)
 	if !ok {
 		return fmt.Errorf("session: call %q is not currently active", callID)
 	}
 
 	if m.store != nil {
-		if err := m.store.AppendOwnerInstruction(context.Background(), callID, OwnerInstruction{
+		if err := m.store.AppendOwnerInstruction(ctx, callID, OwnerInstruction{
 			Instruction: message,
 			Mode:        mode,
 			CreatedAt:   time.Now().UTC(),
@@ -156,12 +156,12 @@ func (m *CallSessionManager) SteerCall(callID, message, mode string) error {
 }
 
 // HandleAMDWebhook handles an inbound AMD webhook by routing to the matching session.
-func (m *CallSessionManager) HandleAMDWebhook(providerCallSID, answeredBy string) error {
+func (m *CallSessionManager) HandleAMDWebhook(ctx context.Context, providerCallSID, answeredBy string) error {
 	sess, ok := m.GetSessionByProviderSID(providerCallSID)
 	if !ok {
 		// Attempt to resolve callID from store
 		if m.store != nil {
-			call, err := m.store.GetCallByProviderSID(context.Background(), providerCallSID)
+			call, err := m.store.GetCallByProviderSID(ctx, providerCallSID)
 			if err == nil && call != nil {
 				sess, ok = m.GetSession(call.CallID)
 			}

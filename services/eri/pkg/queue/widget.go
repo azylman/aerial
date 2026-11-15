@@ -335,9 +335,6 @@ func (p *WorkerPool) DeliverStatusWidgetWithContext(ctx context.Context, req dis
 	if p == nil {
 		return "", errors.New("worker pool is nil")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}

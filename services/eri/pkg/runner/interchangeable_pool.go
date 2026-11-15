@@ -149,11 +149,13 @@ func (p *InterchangeablePool) releaseWorkerKey(workerKey string, isOverflow bool
 		}
 		p.evictOverflow(workerKey)
 	} else {
-		p.rotateAndRelease(workerKey)
+		p.rotateAndRelease(p.ctx, workerKey)
 	}
 }
 
-func (p *InterchangeablePool) rotateAndRelease(workerKey string) {
+// rotateAndRelease rotates the worker's daemon in the background, bounded by ctx (the pool's
+// lifetime), then returns it to the free list.
+func (p *InterchangeablePool) rotateAndRelease(ctx context.Context, workerKey string) {
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
@@ -164,11 +166,7 @@ func (p *InterchangeablePool) rotateAndRelease(workerKey string) {
 
 	go func() {
 		defer p.bgWg.Done()
-		parentCtx := p.ctx
-		if parentCtx == nil {
-			parentCtx = context.Background()
-		}
-		rotCtx, cancel := context.WithTimeout(parentCtx, 35*time.Second)
+		rotCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
 		defer cancel()
 		if p.underlying != nil {
 			if _, err := p.underlying.RotateDaemon(rotCtx, workerKey, ""); err != nil && !errors.Is(err, context.Canceled) && !p.closed.Load() {

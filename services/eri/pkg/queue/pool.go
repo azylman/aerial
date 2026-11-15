@@ -694,13 +694,7 @@ func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTur
 	if p == nil || p.cfg.Store == nil {
 		return
 	}
-	parentCtx := context.Background()
-	if ctx != nil {
-		parentCtx = ctx
-	} else if p.ctx != nil {
-		parentCtx = p.ctx
-	}
-	checkCtx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	sessions, err := p.cfg.Store.FindUnrotatedSessions(checkCtx, session.DefaultMaxSessionTurns)

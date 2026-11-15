@@ -241,7 +241,7 @@ func RunProxyApp(ctx context.Context, cfg *Config) error {
 	}
 
 	log.Println("[Discord-MCP] Shutting down gracefully...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer shutdownCancel()
 
 	if shutErr := srv.Shutdown(shutdownCtx); shutErr != nil && !errors.Is(shutErr, http.ErrServerClosed) {

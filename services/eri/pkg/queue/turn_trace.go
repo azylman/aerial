@@ -237,8 +237,9 @@ func (te *turnExecution) endTurnSpan() {
 		return
 	}
 	usage := te.turnTokenUsage
-	if usage == (runner.TokenUsage{}) {
-		ctx, cancel := context.WithTimeout(context.Background(), turnSinkCloseGrace)
+	if usage == (runner.TokenUsage{}) && te.turnCtx != nil {
+		// The turn context is usually canceled by now; the late-usage grace must outlive it.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(te.turnCtx), turnSinkCloseGrace)
 		usage = te.lateSinkUsage(ctx)
 		cancel()
 	}
@@ -375,10 +376,20 @@ func (te *turnExecution) clearActiveTurn() {
 }
 
 // logf logs a turn-scoped line through slog with the turn span in context, so eri's JSON log
-// line carries trace_id and span_id and Grafana's trace-to-logs link finds it.
+// line carries trace_id and span_id and Grafana's trace-to-logs link finds it. Callers holding a
+// narrower step context use logCtxf instead.
 func (te *turnExecution) logf(format string, args ...any) {
-	ctx := context.Background()
+	ctx := te.turnCtxValue()
 	if te != nil && te.turnSpan != nil {
+		ctx = trace.ContextWithSpan(ctx, te.turnSpan)
+	}
+	te.logCtxf(ctx, format, args...)
+}
+
+// logCtxf logs a turn-scoped line with ctx, attributing it to the turn span when ctx carries no
+// span of its own.
+func (te *turnExecution) logCtxf(ctx context.Context, format string, args ...any) {
+	if te != nil && te.turnSpan != nil && !trace.SpanContextFromContext(ctx).IsValid() {
 		ctx = trace.ContextWithSpan(ctx, te.turnSpan)
 	}
 	logger := slog.Default()

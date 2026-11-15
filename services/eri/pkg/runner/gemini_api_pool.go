@@ -389,6 +389,10 @@ func loadVoiceRulesSystemPrompt(dataDir string) string {
 	return strings.Join(parts, "\n\n")
 }
 
+// NewGeminiAPIPool builds a pool from cfg. The MCP dispatcher prime it starts is fire-and-forget warmup on its own 10s budget, owned by no
+// caller, so the constructor is exempt from contextcheck's caller analysis.
+//
+//nolint:contextcheck,nolintlint // contextcheck reads this doc directive; golangci sees no in-body issue.
 func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://generativelanguage.googleapis.com"
@@ -906,6 +910,11 @@ func (s *GeminiAPISession) finalizeTurnHistory(prompt, resText string, totalUsag
 	}
 }
 
+// Send streams one turn for prompt. The turn's context travels in turn.Ctx (set by the lease's
+// Execute); contextcheck cannot see
+// through that, so Send is exempt from its caller analysis.
+//
+//nolint:contextcheck,nolintlint // contextcheck reads this doc directive; golangci sees no in-body issue.
 func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 	if s.isPoolClosed() {
 		return s.failTurn(turn, errors.New("gemini api pool is closed"))

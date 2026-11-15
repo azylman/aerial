@@ -197,10 +197,6 @@ func (d *DefaultWebhookDispatcher) dispatch(ctx context.Context, hook string, en
 		return valErr
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	timeout := endpoint.GetTimeout()
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

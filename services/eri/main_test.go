@@ -165,14 +165,14 @@ func (m *mockMainDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConf
 func TestCreateReloadConfigFunc(t *testing.T) {
 	t.Run("invalid YAML with alert", func(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
-		CreateReloadConfigFunc(newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
+		CreateReloadConfigFunc(t.Context(), newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
 			return errors.New("simulated invalid YAML error")
 		}), WithSkipEnvironmentSync())("TestReload")
 	})
 
 	t.Run("supplier success updating model", func(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
-		CreateReloadConfigFunc(newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
+		CreateReloadConfigFunc(t.Context(), newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
 			active.Update(&config.ConfigData{Model: "gemini-2.5-flash"})
 			return nil
 		}), WithSkipEnvironmentSync())("TestReloadSuccess")
@@ -187,7 +187,7 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 			d.APIKey = "test-api-key"
 			d.SystemPrompt = "test system prompt"
 		})
-		reloadFn := CreateReloadConfigFunc(cfg, WithReloadSupplier(func(active *config.Config) error { return nil }))
+		reloadFn := CreateReloadConfigFunc(t.Context(), cfg, WithReloadSupplier(func(active *config.Config) error { return nil }))
 		reloadFn("TestSource")
 
 		blockerHome := filepath.Join(tmpDir, "blocked_home")
@@ -203,7 +203,7 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 		tmpFile := filepath.Join(t.TempDir(), "blocking_file")
 		_ = os.WriteFile(tmpFile, []byte("file"), 0o644)
 		cfg.Update(&config.ConfigData{GeminiHomeDir: tmpFile})
-		CreateReloadConfigFunc(cfg,
+		CreateReloadConfigFunc(t.Context(), cfg,
 			WithReloadSupplier(func(active *config.Config) error { return nil }),
 			WithProvisioner(env.NewFromConfig(cfg)),
 		)("test-provisioner-error")
@@ -241,7 +241,7 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 			},
 		})
 
-		CreateReloadConfigFunc(cfg,
+		CreateReloadConfigFunc(t.Context(), cfg,
 			WithSkipEnvironmentSync(),
 			WithReloadSupplier(func(active *config.Config) error {
 				active.Update(&config.ConfigData{

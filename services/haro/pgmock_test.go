@@ -148,7 +148,7 @@ func handlePgConn(conn net.Conn) {
 func TestMockPostgresConnection(t *testing.T) {
 	addr := startMockPostgres(t)
 	dsn := "postgres://mock_user:mock_pass@" + addr + "/mock_db?sslmode=disable"
-	db, err := OpenDB(&Config{DatabaseURL: dsn})
+	db, err := OpenDB(t.Context(), &Config{DatabaseURL: dsn})
 	if err != nil {
 		t.Fatalf("OpenDB with mock postgres failed: %v", err)
 	}

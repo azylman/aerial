@@ -216,7 +216,7 @@ func (h *ToolHandler) InitiateCall(ctx context.Context, args InitiateCallArgs) (
 }
 
 // SteerCall executes the steer_call tool.
-func (h *ToolHandler) SteerCall(_ context.Context, args SteerCallArgs) (SteerCallOutput, error) {
+func (h *ToolHandler) SteerCall(ctx context.Context, args SteerCallArgs) (SteerCallOutput, error) {
 	callID := strings.TrimSpace(args.CallID)
 	if callID == "" {
 		return SteerCallOutput{}, fmt.Errorf("steer_call: call_id is required")
@@ -239,7 +239,7 @@ func (h *ToolHandler) SteerCall(_ context.Context, args SteerCallArgs) (SteerCal
 		return SteerCallOutput{}, fmt.Errorf("steer_call: session manager unavailable")
 	}
 
-	if err := h.sessionMgr.SteerCall(callID, msg, mode); err != nil {
+	if err := h.sessionMgr.SteerCall(ctx, callID, msg, mode); err != nil {
 		return SteerCallOutput{}, fmt.Errorf("steer_call: %w", err)
 	}
 

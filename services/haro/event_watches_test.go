@@ -343,7 +343,7 @@ func testClaimEventTriggers(ctx context.Context, t *testing.T, db *sql.DB) {
 }
 
 func TestDB_EventTriggers(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 
 	mockBuilds := map[string]string{
@@ -593,7 +593,7 @@ func testEventWatchHandleListAndCancel(ctx context.Context, t *testing.T, db *sq
 }
 
 func TestEventWatchTools(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 
 	mockBuilds := map[string]string{
@@ -716,12 +716,12 @@ func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
 }
 
 func TestHandleExternalEvent_Scenarios(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 
 	seedExternalEventTriggers(ctx, db)
 
-	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	closedDB, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}
@@ -846,7 +846,7 @@ func (a *ackSubscribeBus) Subscribe(ctx context.Context, subject, durable string
 }
 
 func TestHaro_EventsConsumerIntegration(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 
 	_ = InsertEventTrigger(ctx, db, EventTrigger{
@@ -918,7 +918,7 @@ func TestHaro_InitJetStreamEdgeCases(t *testing.T) {
 	defer memBus.Close()
 
 	// Test handler delivery retry capping
-	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	closedDB, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}

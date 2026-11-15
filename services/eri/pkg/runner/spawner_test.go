@@ -453,7 +453,7 @@ func TestTransientBinarySpawnHelperFunctions(t *testing.T) {
 
 	// Default delays fallback in Spawn
 	spawnerDefault := &DefaultDaemonSpawner{}
-	in, out, errR, ph, err := spawnerDefault.Spawn(nil, DaemonConfig{
+	in, out, errR, ph, err := spawnerDefault.Spawn(t.Context(), DaemonConfig{
 		AgyBin: "/nonexistent/binary/that/never/exists",
 	})
 	if err == nil {

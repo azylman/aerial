@@ -156,13 +156,13 @@ func checkCachedThreadForMessage(s *discordgo.Session, msgID string) (string, bo
 	return "", false
 }
 
-func resolveNewThreadTitle(content, msgID string, shouldSummarize bool) string {
+func resolveNewThreadTitle(ctx context.Context, content, msgID string, shouldSummarize bool) string {
 	title := ""
 	if shouldSummarize {
 		if cls := currentFunnelClassifier(); cls != nil {
 			select {
 			case titleSummarizeSem <- struct{}{}:
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				var sumErr error
 				title, sumErr = cls.SummarizeThreadTitle(ctx, content)
 				cancel()
@@ -213,7 +213,7 @@ func recoverExistingThreadOnConflict(s *discordgo.Session, msgID, channelID, gui
 	return msgID, true
 }
 
-func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummarize ...bool) (string, bool) {
+func getOrCreateThreadID(ctx context.Context, s *discordgo.Session, m *discordgo.Message, allowSummarize ...bool) (string, bool) {
 	if m == nil {
 		return "", false
 	}
@@ -242,7 +242,7 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummar
 	}
 
 	shouldSummarize := len(allowSummarize) == 0 || allowSummarize[0]
-	title := resolveNewThreadTitle(m.Content, m.ID, shouldSummarize)
+	title := resolveNewThreadTitle(ctx, m.Content, m.ID, shouldSummarize)
 
 	if s == nil || s.Token == "" {
 		return m.ChannelID, false
@@ -548,7 +548,7 @@ func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, stor
 		}
 	}
 
-	targetThreadID, _ := getOrCreateThreadID(s, m)
+	targetThreadID, _ := getOrCreateThreadID(ctx, s, m)
 	msg, err := buildAndInsertFunnelMessage(ctx, s, store, m, targetThreadID, m.Timestamp, extraRoleNames)
 	if err != nil {
 		return "", err
@@ -688,12 +688,6 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 	if token == "" {
 		log.Println("Discord funnel disabled: DISCORD_BOT_TOKEN/DISCORD_TOKEN not configured")
 		return nil
-	}
-
-	if ctx == nil {
-		cCtx, cancel := context.WithCancel(context.Background())
-		cancel()
-		ctx = cCtx
 	}
 
 	dg, err := discordgo.New("Bot " + token)

@@ -102,15 +102,15 @@ type ScheduleRun struct {
 	Model        string     `json:"model,omitempty"`
 }
 
-func OpenDB(cfg *Config) (*sql.DB, error) {
+func OpenDB(ctx context.Context, cfg *Config) (*sql.DB, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
-	return openDB(cfg.DatabaseURL)
+	return openDB(ctx, cfg.DatabaseURL)
 }
 
-func NewDB(cfg *Config) (*sql.DB, error) {
-	return OpenDB(cfg)
+func NewDB(ctx context.Context, cfg *Config) (*sql.DB, error) {
+	return OpenDB(ctx, cfg)
 }
 
 var (
@@ -121,7 +121,7 @@ var (
 	postgresRetryAfter = time.After
 )
 
-func openDB(dsn string) (*sql.DB, error) {
+func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	trimmed := strings.TrimSpace(dsn)
 	if trimmed == "" {
 		return nil, fmt.Errorf("db: connection string cannot be empty")
@@ -140,8 +140,8 @@ func openDB(dsn string) (*sql.DB, error) {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		database, err = sql.Open("pgx", trimmed)
 		if err == nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			err = database.PingContext(ctx)
+			pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			err = database.PingContext(pingCtx)
 			cancel()
 			if err == nil {
 				break

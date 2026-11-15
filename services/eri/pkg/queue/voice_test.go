@@ -715,20 +715,20 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 			tc.te.updateMessageStatus("m1", "failed", "err")
 			tc.te.updateMessageCompleted("m1", "resp")
 			tc.te.incrementMessageRetry("m1", "retry-err")
-			tc.te.saveSessionID(threadID, "s1")
+			tc.te.saveSessionID(t.Context(), threadID, "s1")
 			tc.te.rotateSessionID(threadID, "s2")
 			cnt, err := tc.te.incrementSessionTurnCount(threadID)
 			if (err != nil) != tc.wantErr || cnt != tc.wantCount {
 				t.Errorf("incrementSessionTurnCount() = (%d, %v), want (%d, err=%v)", cnt, err, tc.wantCount, tc.wantErr)
 			}
 			_, _ = tc.te.getSessionID(threadID)
-			_ = tc.te.getPreviousSessionID(threadID)
+			_ = tc.te.getPreviousSessionID(t.Context(), threadID)
 			schedErr := tc.te.createOneShotSchedule(oneShotScheduleRequest{ID: "os-" + tc.name, ThreadID: threadID, Prompt: "p", RunAt: time.Now().UTC()})
 			if (schedErr != nil) != tc.wantSchedErr {
 				t.Errorf("createOneShotSchedule() err = %v, wantSchedErr = %v", schedErr, tc.wantSchedErr)
 			}
-			tc.te.saveThreadSummary(threadID, "sum", "m1")
-			_, _ = tc.te.getThreadSummary(threadID)
+			tc.te.saveThreadSummary(t.Context(), threadID, "sum", "m1")
+			_, _ = tc.te.getThreadSummary(t.Context(), threadID)
 			_, _ = tc.te.getRecentThreadMessages(threadID, 10)
 		})
 	}
@@ -799,7 +799,7 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 		},
 		policy: config.ChannelPolicy{AmbientContext: &config.AmbientContextConfig{}},
 	}
-	_, _ = teSumClassifier.resolveSummarizerLLMAndModel()
+	_, _ = teSumClassifier.resolveSummarizerLLMAndModel(t.Context())
 	_ = teSumClassifier.resolveAmbientPromptContext(context.Background())
 	_ = teSumClassifier.fetchTurnHistory(context.Background(), 5)
 	teSnowflakeHist := &turnExecution{threadID: "123456789012345678", pool: &WorkerPool{cfg: WorkerPoolConfig{DiscordSession: dgHist, Store: fake}}}
@@ -906,10 +906,10 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 
 	mockDrain := &mockDrainErrStore{Store: fake, messages: []db.Message{{ID: "m1", ThreadID: "t1", Status: db.StatusProcessing, RestartCount: 5, RetryCount: 5}}}
 	pDrain := New(nil, WorkerPoolConfig{Store: mockDrain})
-	RecoverInterrupted(mockDrain, pDrain)
-	RecoverInterrupted(nil, nil)
-	RecoverInterrupted(fake, nil)
-	RecoverInterrupted(nil, &WorkerPool{})
+	RecoverInterrupted(t.Context(), mockDrain, pDrain)
+	RecoverInterrupted(t.Context(), nil, nil)
+	RecoverInterrupted(t.Context(), fake, nil)
+	RecoverInterrupted(t.Context(), nil, &WorkerPool{})
 	pDrain.Stop()
 
 	recStore := setupTestStore(t)
@@ -917,7 +917,7 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-poison", ThreadID: "t-rec-poison", AuthorID: "u1", Content: "poison content with a rather long snippet that exceeds sixty characters easily", Status: db.StatusProcessing, RetryCount: 5})
 	pRec := New(nil, WorkerPoolConfig{Store: recStore, NotifierFunc: func(b, k, d string) string { return "poison alert" }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return nil }})
 	t.Cleanup(pRec.Stop)
-	RecoverInterrupted(recStore, pRec)
+	RecoverInterrupted(t.Context(), recStore, pRec)
 
 	p := New(nil, WorkerPoolConfig{Store: fake})
 	p.EnqueueBurst()

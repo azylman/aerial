@@ -595,7 +595,7 @@ func resolveInternalAttachmentFilename(u *url.URL, filename string) (string, err
 }
 
 // ResolveAndFetchInternalAttachment fetches and validates any file payload from an internal .aerial endpoint.
-func ResolveAndFetchInternalAttachment(rawURL, filename string) (*Attachment, error) {
+func ResolveAndFetchInternalAttachment(ctx context.Context, rawURL, filename string) (*Attachment, error) {
 	if !isInternalAerialHTTPURL(rawURL) {
 		return nil, fmt.Errorf("%w: url %q is not an allowed internal .aerial endpoint", ErrInvalidInternalAttachment, rawURL)
 	}
@@ -610,7 +610,7 @@ func ResolveAndFetchInternalAttachment(rawURL, filename string) (*Attachment, er
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -653,7 +653,8 @@ func ResolveAndFetchInternalAttachment(rawURL, filename string) (*Attachment, er
 
 // ResolveAndFetchInternalImage fetches and validates an image from an internal .aerial endpoint.
 func ResolveAndFetchInternalImage(rawURL string) (*Attachment, error) {
-	att, err := ResolveAndFetchInternalAttachment(rawURL, "")
+	// Markdown image rendering has no caller context; the fetch keeps its own 5s timeout.
+	att, err := ResolveAndFetchInternalAttachment(context.Background(), rawURL, "")
 	if err != nil {
 		return nil, err
 	}
