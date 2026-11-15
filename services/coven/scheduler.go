@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"log"
-	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -65,21 +63,6 @@ func NewWorker(cfg WorkerConfig) *Worker {
 	}
 }
 
-// HandleTurnCompletedEvent handles an incoming turn completed event from JetStream.
-func (w *Worker) HandleTurnCompletedEvent(ctx context.Context, ev pubsub.TurnCompletedEvent) error {
-	if strings.TrimSpace(ev.SessionID) == "healthcheck-ping" {
-		return nil
-	}
-	if w.store == nil || w.ollama == nil || w.llmClient == nil {
-		return nil
-	}
-	if err := ExtractActiveConversationFacts(ctx, w.store, w.ollama, w.llmClient, 24); err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("[Coven Worker] Immediate fact extraction on turn completion failed: %v", err)
-		return err
-	}
-	return nil
-}
-
 // ExtractThread extracts facts for a single thread within a 2-minute timeout.
 func (w *Worker) ExtractThread(ctx context.Context, threadID string) error {
 	if w == nil {
@@ -132,9 +115,9 @@ func (w *Worker) RunStartupCatchUp(ctx context.Context) {
 }
 
 // Tick performs scheduled maintenance operations for the given tick count.
-// Invariant: Turn event ingestion is event-driven via JetStream durable consumer
-// coven-turns backed by RunStartupCatchUp on boot and pubsub auto-reconnect
-// (nats.MaxReconnects(-1)); legacy 120-tick DB fallback polling is retired.
+// Invariant: Turn event ingestion is event-driven via JetStream durable consumers
+// (coven-transcript-synced -> coven-extract) backed by RunStartupCatchUp on boot
+// and pubsub auto-reconnect (nats.MaxReconnects(-1)); legacy 120-tick DB fallback polling is retired.
 func (w *Worker) Tick(ctx context.Context, tick int64) {
 	// Daily: fact consolidation dreaming (tick % 2880 == 60)
 	if tick%2880 == 60 {
