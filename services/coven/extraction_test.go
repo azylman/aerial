@@ -1217,3 +1217,153 @@ func assertReconcileTierResults(t *testing.T, tc reconcileCandidateFactTierTestC
 		t.Errorf("expected neighbor %d to be deleted from store, but it remains", tc.neighborID)
 	}
 }
+
+type extractThreadFactsTestCase struct {
+	name          string
+	ctx           context.Context
+	threadID      string
+	nilStore      bool
+	nilClient     bool
+	nilLLM        bool
+	storeFailOp   string
+	turns         []Message
+	llmResp       string
+	llmErr        error
+	wantErr       bool
+	wantWatermark int64
+}
+
+func TestExtractThreadFacts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	validEmb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []extractThreadFactsTestCase{
+		{
+			name:     "NilStoreFails",
+			ctx:      ctx,
+			threadID: "th-1",
+			nilStore: true,
+			wantErr:  true,
+		},
+		{
+			name:     "NilLLMFails",
+			ctx:      ctx,
+			threadID: "th-1",
+			nilLLM:   true,
+			wantErr:  true,
+		},
+		{
+			name:     "EmptyThreadIDFails",
+			ctx:      ctx,
+			threadID: "",
+			wantErr:  true,
+		},
+		{
+			name:     "WhitespaceThreadIDFails",
+			ctx:      ctx,
+			threadID: "   ",
+			wantErr:  true,
+		},
+		{
+			name:        "StoreQueryErrorReturnsError",
+			ctx:         ctx,
+			threadID:    "th-err",
+			storeFailOp: "GetUnextractedAdminTurns",
+			wantErr:     true,
+		},
+		{
+			name:     "LLMErrorReturnsError",
+			ctx:      ctx,
+			threadID: "th-llm-err",
+			turns: []Message{
+				{Content: "turn 1", ResponseText: "resp 1", RowID: 20},
+			},
+			llmErr:  errors.New("llm down"),
+			wantErr: true,
+		},
+		{
+			name:     "EmptyTranscriptMarksWatermarkAndSucceeds",
+			ctx:      ctx,
+			threadID: "th-empty",
+			turns: []Message{
+				{Content: "   ", ResponseText: "   ", RowID: 15},
+			},
+			wantErr:       false,
+			wantWatermark: 15,
+		},
+		{
+			name:     "SuccessReconcilesAndAdvancesWatermark",
+			ctx:      ctx,
+			threadID: "th-success",
+			turns: []Message{
+				{Content: "User likes oolong tea", ResponseText: "Noted.", RowID: 40},
+			},
+			llmResp:       `{"facts":[{"action":"ADD","fact_text":"User likes oolong tea","importance_score":0.9}]}`,
+			wantErr:       false,
+			wantWatermark: 40,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runExtractThreadFactsCase(t, tc, validEmb)
+		})
+	}
+}
+
+func buildExtractThreadFactsMemStore(tc extractThreadFactsTestCase) *TestMemStore {
+	if tc.nilStore {
+		return nil
+	}
+	memStore := newTestMemStore()
+	tid := strings.TrimSpace(tc.threadID)
+	if tid != "" {
+		memStore.unextractedTurns[tid] = tc.turns
+		for _, trn := range tc.turns {
+			if trn.RowID > memStore.maxRowIDs[tid] {
+				memStore.maxRowIDs[tid] = trn.RowID
+			}
+		}
+	}
+	if tc.storeFailOp != "" {
+		memStore.SetFail(tc.storeFailOp, errors.New("simulated error"))
+	}
+	return memStore
+}
+
+func runExtractThreadFactsCase(t *testing.T, tc extractThreadFactsTestCase, validEmb []float32) {
+	t.Helper()
+	memStore := buildExtractThreadFactsMemStore(tc)
+	var store Store
+	if memStore != nil {
+		store = memStore
+	}
+
+	var client OllamaClient
+	if !tc.nilClient {
+		client = &MockOllamaClient{embedding: validEmb}
+	}
+
+	var llm LLMClientFunc
+	if !tc.nilLLM {
+		llm = func(c context.Context, prompt string) (string, error) {
+			if tc.llmErr != nil {
+				return "", tc.llmErr
+			}
+			return tc.llmResp, nil
+		}
+	}
+
+	err := ExtractThreadFacts(tc.ctx, store, client, llm, tc.threadID)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ExtractThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantWatermark > 0 && memStore != nil {
+		tid := strings.TrimSpace(tc.threadID)
+		if memStore.watermarks[tid] != tc.wantWatermark {
+			t.Errorf("watermark for %s = %d, want %d", tid, memStore.watermarks[tid], tc.wantWatermark)
+		}
+	}
+}

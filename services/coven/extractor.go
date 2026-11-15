@@ -206,6 +206,16 @@ func ExtractActiveConversationFacts(ctx context.Context, store Store, client Oll
 	return nil
 }
 
+// ExtractThreadFacts extracts and reconciles facts for a single conversation thread.
+// It returns any error directly to allow JetStream retries.
+func ExtractThreadFacts(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, threadID string) error {
+	trimmed := strings.TrimSpace(threadID)
+	if store == nil || llmFunc == nil || trimmed == "" {
+		return errors.New("extract thread facts: invalid arguments (nil store, nil llmFunc, or empty threadID)")
+	}
+	return processThreadFacts(ctx, store, client, llmFunc, trimmed)
+}
+
 var (
 	durableDirectiveRegex    = regexp.MustCompile(`(?i)\b(always|never|strictly|must|invariant|prefers|allergic)\b`)
 	ephemeralTelemetryRegex  = regexp.MustCompile(`(?i)\b(PR\s*#\d+|pull request #\d+|chunk-\d+|build-\d+-[0-9a-f]+|vanadis_chunk|commit\s+[0-9a-f]{7,40}|auto-merge armed|awaiting delivery|currently in progress)\b`)

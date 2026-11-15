@@ -28,12 +28,74 @@ func initCovenJetStream(ctx context.Context, worker *Worker, natsURL string) pub
 	return initCovenJetStreamWithFactory(ctx, worker, natsURL, newCovenBusFn)
 }
 
+func handleTranscriptSyncedEvent(ctx context.Context, msg pubsub.Message, bus pubsub.Bus, worker *Worker) error {
+	if msg == nil {
+		return nil
+	}
+	var ev pubsub.TranscriptSyncedEvent
+	if err := json.Unmarshal(msg.Data(), &ev); err != nil {
+		log.Printf("[Coven] warning: failed to unmarshal transcript synced event: %v", err)
+		return nil
+	}
+	if strings.TrimSpace(ev.ConversationID) == "" || strings.TrimSpace(ev.SessionID) == "healthcheck-ping" {
+		return nil
+	}
+	if bus != nil {
+		msgID := fmt.Sprintf("coven:extract:%s:%d", ev.ConversationID, time.Now().UnixNano())
+		args := pubsub.CovenExtractJobArgs{
+			ThreadID:  ev.ConversationID,
+			SessionID: ev.SessionID,
+		}
+		return bus.Publish(ctx, pubsub.SubjectCovenExtractCoalesced(ev.ConversationID), msgID, args)
+	}
+	if worker != nil {
+		return worker.ExtractThread(ctx, ev.ConversationID)
+	}
+	return nil
+}
+
+func nakBackoffDelay(numDelivered uint64) time.Duration {
+	if numDelivered <= 1 {
+		return 1 * time.Second
+	}
+	shift := min(numDelivered-1, 4)
+	return time.Duration(1<<shift) * time.Second
+}
+
+func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Worker) error {
+	if msg == nil {
+		return nil
+	}
+	var args pubsub.CovenExtractJobArgs
+	if err := json.Unmarshal(msg.Data(), &args); err != nil {
+		log.Printf("[Coven] error unmarshaling coven extract job: %v", err)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[Coven] warning: error terming coven extract job: %v", termErr)
+		}
+		return nil
+	}
+	if worker == nil {
+		return nil
+	}
+	if err := worker.ExtractThread(ctx, args.ThreadID); err != nil {
+		if msg.NumDelivered() >= 5 {
+			log.Printf("[Coven] dropping coven extract job for thread %s after %d delivery attempts: %v", args.ThreadID, msg.NumDelivered(), err)
+			if termErr := msg.Term(); termErr != nil {
+				log.Printf("[Coven] warning: error terming coven extract job: %v", termErr)
+			}
+			return nil
+		}
+		if nakErr := msg.NakWithDelay(nakBackoffDelay(msg.NumDelivered())); nakErr != nil {
+			log.Printf("[Coven] warning: error naking coven extract job: %v", nakErr)
+		}
+		return err
+	}
+	return nil
+}
+
 func subscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) error {
 	if b == nil || worker == nil {
 		return nil
-	}
-	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
-		log.Printf("[Coven] warning: failed to ensure core streams: %v", err)
 	}
 	_, err := b.Subscribe(ctx, "aerial.turn.completed", "coven-turns", func(msgCtx context.Context, msg pubsub.Message) error {
 		var ev pubsub.TurnCompletedEvent
@@ -58,6 +120,62 @@ func subscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) erro
 	return nil
 }
 
+func subscribeCovenTranscriptSynced(ctx context.Context, b pubsub.Bus, worker *Worker) error {
+	if b == nil || worker == nil {
+		return nil
+	}
+	_, err := b.Subscribe(ctx, pubsub.SubjectAerialTurnTranscriptSynced, "coven-transcript-synced", func(msgCtx context.Context, msg pubsub.Message) error {
+		if err := handleTranscriptSyncedEvent(msgCtx, msg, b, worker); err != nil {
+			if msg.NumDelivered() < 5 {
+				return err
+			}
+			log.Printf("[Coven] dropping transcript synced event after %d delivery attempts: %v", msg.NumDelivered(), err)
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("[Coven] warning: failed to subscribe coven-transcript-synced: %v", err)
+		return err
+	}
+	log.Println("[Coven] Subscribed coven-transcript-synced durable consumer to " + pubsub.SubjectAerialTurnTranscriptSynced)
+	return nil
+}
+
+func subscribeCovenExtract(ctx context.Context, b pubsub.Bus, worker *Worker) error {
+	if b == nil || worker == nil {
+		return nil
+	}
+	_, err := b.Subscribe(ctx, "aerial.coalesced.coven_extract.>", "coven-extract", func(msgCtx context.Context, msg pubsub.Message) error {
+		return handleCovenExtractJob(msgCtx, msg, worker)
+	})
+	if err != nil {
+		log.Printf("[Coven] warning: failed to subscribe coven-extract: %v", err)
+		return err
+	}
+	log.Println("[Coven] Subscribed coven-extract durable consumer to aerial.coalesced.coven_extract.>")
+	return nil
+}
+
+func subscribeCovenConsumers(ctx context.Context, b pubsub.Bus, worker *Worker) error {
+	if b == nil || worker == nil {
+		return nil
+	}
+	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
+		log.Printf("[Coven] warning: failed to ensure core streams: %v", err)
+	}
+	if err := subscribeCovenTurns(ctx, b, worker); err != nil {
+		return err
+	}
+	if err := subscribeCovenTranscriptSynced(ctx, b, worker); err != nil {
+		return err
+	}
+	if err := subscribeCovenExtract(ctx, b, worker); err != nil {
+		return err
+	}
+	return nil
+}
+
 var subscribeRetryIntervalNs atomic.Int64
 
 func init() {
@@ -69,6 +187,10 @@ func getSubscribeRetryInterval() time.Duration {
 }
 
 func retrySubscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) {
+	retrySubscribeCovenConsumers(ctx, b, worker)
+}
+
+func retrySubscribeCovenConsumers(ctx context.Context, b pubsub.Bus, worker *Worker) {
 	ticker := time.NewTicker(getSubscribeRetryInterval())
 	defer ticker.Stop()
 	for {
@@ -76,8 +198,8 @@ func retrySubscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker)
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := subscribeCovenTurns(ctx, b, worker); err == nil {
-				log.Println("[Coven] Subscribed coven-turns durable consumer to aerial.turn.completed on retry")
+			if err := subscribeCovenConsumers(ctx, b, worker); err == nil {
+				log.Println("[Coven] Subscribed coven consumers on retry")
 				return
 			}
 		}
@@ -95,9 +217,9 @@ func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL 
 		return nil
 	}
 	if worker != nil {
-		if subErr := subscribeCovenTurns(ctx, b, worker); subErr != nil {
-			log.Printf("[Coven] warning: failed initial coven-turns subscription: %v; will retry in background", subErr)
-			go retrySubscribeCovenTurns(ctx, b, worker)
+		if subErr := subscribeCovenConsumers(ctx, b, worker); subErr != nil {
+			log.Printf("[Coven] warning: failed initial coven consumers subscription: %v; will retry in background", subErr)
+			go retrySubscribeCovenConsumers(ctx, b, worker)
 		}
 	}
 	return b

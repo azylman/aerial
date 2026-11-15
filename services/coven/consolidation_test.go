@@ -429,6 +429,134 @@ func TestWorker_Start(t *testing.T) {
 	}
 }
 
+type workerExtractThreadTestCase struct {
+	name      string
+	nilWorker bool
+	nilStore  bool
+	nilLLM    bool
+	ctx       context.Context
+	threadID  string
+	storeFail string
+	llmErr    error
+	turns     []Message
+	wantErr   bool
+	wantWater int64
+}
+
+func TestWorker_ExtractThread(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	validEmb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []workerExtractThreadTestCase{
+		{
+			name:      "NilWorkerReturnsError",
+			nilWorker: true,
+			ctx:       ctx,
+			threadID:  "th-1",
+			wantErr:   true,
+		},
+		{
+			name:     "InvalidThreadIDReturnsError",
+			ctx:      ctx,
+			threadID: "   ",
+			wantErr:  true,
+		},
+		{
+			name:      "StoreErrorReturnsError",
+			ctx:       ctx,
+			threadID:  "th-store-err",
+			storeFail: "GetUnextractedAdminTurns",
+			wantErr:   true,
+		},
+		{
+			name:     "ExtractSuccessAdvancesWatermark",
+			ctx:      ctx,
+			threadID: "th-succ",
+			turns: []Message{
+				{Content: "User likes cold brew", ResponseText: "Got it.", RowID: 55},
+			},
+			wantErr:   false,
+			wantWater: 55,
+		},
+		{
+			name:     "CanceledContextReturnsError",
+			ctx:      canceledCtx,
+			threadID: "th-cancel",
+			turns: []Message{
+				{Content: "User likes tea", ResponseText: "Got it.", RowID: 60},
+			},
+			llmErr:  context.Canceled,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runWorkerExtractThreadCase(t, tc, validEmb)
+		})
+	}
+}
+
+func runWorkerExtractThreadCase(t *testing.T, tc workerExtractThreadTestCase, validEmb []float32) {
+	t.Helper()
+	if tc.nilWorker {
+		var w *Worker
+		err := w.ExtractThread(tc.ctx, tc.threadID)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("ExtractThread() err = %v, wantErr = %v", err, tc.wantErr)
+		}
+		return
+	}
+
+	mem := newTestMemStore()
+	if tc.threadID != "" {
+		mem.unextractedTurns[tc.threadID] = tc.turns
+		for _, trn := range tc.turns {
+			if trn.RowID > mem.maxRowIDs[tc.threadID] {
+				mem.maxRowIDs[tc.threadID] = trn.RowID
+			}
+		}
+	}
+	if tc.storeFail != "" {
+		mem.SetFail(tc.storeFail, errors.New("simulated failure"))
+	}
+
+	var store Store = mem
+	if tc.nilStore {
+		store = nil
+	}
+
+	var client OllamaClient = &MockOllamaClient{embedding: validEmb}
+	var llm LLMClientFunc
+	if !tc.nilLLM {
+		llm = func(c context.Context, prompt string) (string, error) {
+			if tc.llmErr != nil {
+				return "", tc.llmErr
+			}
+			return `{"facts":[{"action":"ADD","fact_text":"User likes cold brew","importance_score":0.9}]}`, nil
+		}
+	}
+
+	w := NewWorker(WorkerConfig{
+		Store:     store,
+		Ollama:    client,
+		LLMClient: llm,
+	})
+
+	err := w.ExtractThread(tc.ctx, tc.threadID)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ExtractThread() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantWater > 0 && mem.watermarks[tc.threadID] != tc.wantWater {
+		t.Errorf("watermark = %d, want %d", mem.watermarks[tc.threadID], tc.wantWater)
+	}
+}
+
 func TestSQLStore_GetAllFactsWithEmbeddings(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 	ctx := context.Background()
