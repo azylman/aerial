@@ -102,16 +102,42 @@ func assertJobMsgOutcome(t *testing.T, pubMsg pubsub.Message, wantTermed, wantNa
 	}
 }
 
+func assertConsumerHandlers(t *testing.T, bus pubsub.Bus) {
+	t.Helper()
+	cBus, _ := bus.(*captureConsumerBus)
+	for _, subj := range []string{
+		pubsub.SubjectProsperaReportJob,
+		pubsub.SubjectProsperaVoicemailJob,
+		pubsub.SubjectProsperaSMSJob,
+	} {
+		cBus.mu.Lock()
+		h := cBus.handlers[subj]
+		cBus.mu.Unlock()
+		if h == nil {
+			t.Fatalf("missing handler for %s", subj)
+		}
+		if hErr := h(context.Background(), nil); hErr == nil {
+			t.Errorf("expected error invoking handler with nil msg on %s", subj)
+		}
+	}
+}
+
 func TestServer_StartJobConsumers(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name           string
+		nilServer      bool
 		setupBus       func() (pubsub.Bus, error)
 		failSubject    string
 		assertHandlers bool
 		wantErr        bool
 	}{
+		{
+			name:      "nil server returns nil bus and ignores set",
+			nilServer: true,
+			wantErr:   false,
+		},
 		{
 			name: "nil bus returns nil",
 			setupBus: func() (pubsub.Bus, error) {
@@ -160,31 +186,25 @@ func TestServer_StartJobConsumers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			server, _, _ := setupTestServer()
-			bus, _ := tc.setupBus()
+			var server *Server
+			if !tc.nilServer {
+				server, _, _ = setupTestServer()
+			}
+			var bus pubsub.Bus
+			if tc.setupBus != nil {
+				bus, _ = tc.setupBus()
+			}
 			server.SetEventBus(bus)
+			if tc.nilServer && server.EventBus() != nil {
+				t.Fatalf("server.EventBus() = %v, want nil", server.EventBus())
+			}
 
 			err := server.StartJobConsumers(context.Background())
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("StartJobConsumers() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.assertHandlers {
-				cBus, _ := bus.(*captureConsumerBus)
-				for _, subj := range []string{
-					pubsub.SubjectProsperaReportJob,
-					pubsub.SubjectProsperaVoicemailJob,
-					pubsub.SubjectProsperaSMSJob,
-				} {
-					cBus.mu.Lock()
-					h := cBus.handlers[subj]
-					cBus.mu.Unlock()
-					if h == nil {
-						t.Fatalf("missing handler for %s", subj)
-					}
-					if hErr := h(context.Background(), nil); hErr == nil {
-						t.Errorf("expected error invoking handler with nil msg on %s", subj)
-					}
-				}
+				assertConsumerHandlers(t, bus)
 			}
 		})
 	}
@@ -338,6 +358,15 @@ func TestServer_HandleVoicemailJob(t *testing.T) {
 			wantNakDelay: 2 * time.Second,
 		},
 		{
+			name:         "reporter error drops after max deliveries",
+			callID:       "c1",
+			recordingURL: "http://rec.wav",
+			delivered:    5,
+			reporterErr:  true,
+			wantErr:      false,
+			wantTermed:   true,
+		},
+		{
 			name:         "successful voicemail processing transitions call to delivered",
 			callID:       "call-vm-ok",
 			recordingURL: "http://rec.wav",
@@ -436,6 +465,13 @@ func TestServer_HandleSMSJob(t *testing.T) {
 			wantErr:      true,
 			wantNaked:    true,
 			wantNakDelay: 8 * time.Second,
+		},
+		{
+			name:        "reporter error drops after max deliveries",
+			msg:         &mockJobMsg{data: []byte(`{"message_sid":"SM1","body":"hello"}`), delivered: 5},
+			reporterErr: true,
+			wantErr:     false,
+			wantTermed:  true,
 		},
 		{
 			name: "successful sms delivery returns nil",
