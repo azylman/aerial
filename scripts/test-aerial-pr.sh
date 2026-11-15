@@ -1130,7 +1130,7 @@ REPO_DIR="$TEST_ROOT/aerial"
 mkdir -p "$STATE_DIR" "$REPO_DIR"
 
 awk '/^  cat > \/usr\/local\/bin\/roborev <<'\''EOF'\''$/ { flag=1; next } flag && /^EOF$/ { flag=0; exit } flag { print }' "$ENTRYPOINT_FILE" \
-  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/usr/local/bin/sync-gemini-settings|$MOCK_SYNC_SETTINGS|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g; s|/root/.roborev/claude-oauth-token|$STATE_DIR/claude-oauth-token|g" > "$WRAPPER_SCRIPT"
+  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/usr/local/bin/sync-gemini-settings|$MOCK_SYNC_SETTINGS|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g; s|/root/.roborev/claude-oauth-token|$STATE_DIR/claude-oauth-token|g; s|/root/.codex/auth.json|$STATE_DIR/codex-auth.json|g" > "$WRAPPER_SCRIPT"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$MOCK_SYNC_SETTINGS"
 printf 'secret-pw\n' > "$STATE_DIR/postgres-password"
 
@@ -1226,6 +1226,38 @@ if grep -q "\[token=\]" "$CALL_LOG" &&
   echo 'claude_fallback_gemini:ok'
 fi
 
+# Subtests for Codex primary reviewer and 3-tier fallback chain
+cat << 'CODEX_BIN_EOF' > "$TEST_ROOT/bin/codex"
+#!/usr/bin/env bash
+exit 0
+CODEX_BIN_EOF
+chmod +x "$TEST_ROOT/bin/codex"
+
+# Subtest 3d: Codex auth exists + codex exists -> normalizes gemini and claude-code to codex
+printf '{"auth_mode":"chatgpt"}\n' > "$STATE_DIR/codex-auth.json"
+printf 'test-claude-token-123\n' > "$STATE_DIR/claude-oauth-token"
+: > "$CALL_LOG"
+(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough >/dev/null 2>&1)
+if grep -q -- "--agent codex" "$CALL_LOG"; then
+  echo 'codex_remap_gemini:ok'
+fi
+
+# Subtest 3e: Codex removed -> falls back to claude-code when claude token exists
+rm -f "$STATE_DIR/codex-auth.json"
+: > "$CALL_LOG"
+(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning thorough >/dev/null 2>&1)
+if grep -q -- "--agent claude-code" "$CALL_LOG"; then
+  echo 'codex_fallback_claude:ok'
+fi
+
+# Subtest 3f: Both codex and claude removed -> falls back to gemini
+rm -f "$STATE_DIR/claude-oauth-token"
+: > "$CALL_LOG"
+(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning thorough >/dev/null 2>&1)
+if grep -q -- "--agent gemini" "$CALL_LOG"; then
+  echo 'codex_fallback_gemini:ok'
+fi
+
 AGY_WRAPPER="$TEST_ROOT/agy-wrapper.sh"
 MOCK_AGY_REAL="$TEST_ROOT/agy.real"
 AGY_LOG="$TEST_ROOT/agy.log"
@@ -1251,6 +1283,9 @@ assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'head_shortcircuit:o
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_remap_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper exports CLAUDE_CODE_OAUTH_TOKEN and remaps --agent gemini to claude-code when token exists"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_remap_gemini_eq:ok' && echo true || echo false)" "github-runner roborev wrapper remaps --agent=gemini to claude-code when token exists"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_fallback_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper unsets CLAUDE_CODE_OAUTH_TOKEN and remaps --agent claude-code to gemini when token is absent"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_remap_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper remaps --agent gemini to codex when codex auth and binary exist"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_fallback_claude:ok' && echo true || echo false)" "github-runner roborev wrapper falls back from codex to claude-code when claude token exists"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_fallback_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper falls back from codex to gemini when both codex and claude are absent"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'agy_model_pin:ok' && echo true || echo false)" "github-runner agy wrapper pins --model gemini-4-hydrogen-low on headless invocations while preserving --version, subcommands, and explicit --model"
 
 # Case 18: Vanadis PR attach and direct attachment in submit_scratch

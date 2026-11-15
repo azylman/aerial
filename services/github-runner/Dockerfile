@@ -96,8 +96,9 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack && \
     node --version && \
     npm --version && \
-    npm install -g @anthropic-ai/claude-code && \
-    claude --version
+    npm install -g @anthropic-ai/claude-code @openai/codex && \
+    claude --version && \
+    codex --version
 COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
 
