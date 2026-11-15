@@ -1255,3 +1255,63 @@ func TestPREvents_EdgeBranches(t *testing.T) {
 		assert.True(t, foundWakePrompt, "expected completion wake prompt")
 	})
 }
+
+func TestHandlePRDeploySuccess_ActionChunkWithPR(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv, store, _, reqs := setupTestServer(t)
+	build := mkBuild("b-act-pr-cycle", "123456789012345678", "Build", "Action with PR", "running")
+	chunk := mkChunk("c-act-pr-1", "b-act-pr-cycle", 0, "Action Chunk", "Fix code", "medium", "running")
+	chunk.Mode = "action"
+	chunk.Repo = ""
+	chunk.DeployAwakeableID = "awk-deploy-act-1"
+	require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
+
+	// 1. Attach PR to action chunk
+	_, _, _, err := store.AttachChunkPR(ctx, AttachChunkPRRequest{
+		ChunkID:  "c-act-pr-1",
+		PRNumber: 905,
+		Repo:     "azylman/aerial",
+	})
+	require.NoError(t, err)
+
+	// 2. End-of-turn dispatch outcome arrives: must NOT resolve awakeable for action chunk with attached PR
+	assert.False(t, srv.notifyRestateActionChunkCompleted(ctx, "c-act-pr-1"), "notifyRestateActionChunkCompleted must be skipped for chunk with attached PR")
+
+	// 3. PR merges: chunk transitions to merged but does NOT complete build
+	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:    "merged",
+		Repo:     "azylman/aerial",
+		PRNumber: 905,
+	}))
+
+	cAfterMerge, bAfterMerge, err := store.GetChunk(ctx, "c-act-pr-1")
+	require.NoError(t, err)
+	assert.Equal(t, "merged", cAfterMerge.Status)
+	assert.Equal(t, "running", bAfterMerge.Status, "build must remain running while action chunk awaits deployment")
+
+	// 4. Sync succeeds: progress only, must NOT resolve deployment awakeable for action chunk
+	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:    "sync_success",
+		Repo:     "azylman/aerial",
+		PRNumber: 905,
+	}))
+	for _, r := range *reqs {
+		assert.NotEqual(t, "/restate/awakeables/awk-deploy-act-1/resolve", r.Path, "sync_success must not resolve deploy awakeable")
+	}
+
+	// 5. PR deploy succeeds: deploy awakeable is resolved
+	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:    "deploy_success",
+		Repo:     "azylman/aerial",
+		PRNumber: 905,
+	}))
+
+	var foundAwkResolve bool
+	for _, r := range *reqs {
+		if r.Path == "/restate/awakeables/awk-deploy-act-1/resolve" {
+			foundAwkResolve = true
+		}
+	}
+	assert.True(t, foundAwkResolve, "deploy_awakeable must be resolved on deploy_success")
+}

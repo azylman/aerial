@@ -78,8 +78,8 @@ func TestVanadisStore_AttachChunkPR_ExistingErrors_MockDB(t *testing.T) {
 		t.Error("expected error on general queryRow error")
 	}
 
-	// Action chunk rejected
-	sActionReject := newMockStore(mockDB{
+	// Action chunk requires repo
+	sActionNoRepo := newMockStore(mockDB{
 		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
 			if strings.Contains(sql, "SELECT mode") {
 				return &genericMockRow{scanFn: func(dest ...any) error {
@@ -90,8 +90,8 @@ func TestVanadisStore_AttachChunkPR_ExistingErrors_MockDB(t *testing.T) {
 			return &mockRow{err: pgx.ErrNoRows}
 		},
 	})
-	if _, _, _, err := sActionReject.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"}); err == nil || !errors.Is(err, ErrBuildConflict) {
-		t.Errorf("expected ErrBuildConflict on action chunk attach PR, got %v", err)
+	if _, _, _, err := sActionNoRepo.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: ""}); err == nil || !strings.Contains(err.Error(), "repo is required") {
+		t.Errorf("expected repo is required error on action chunk attach PR with empty repo, got %v", err)
 	}
 }
 
@@ -139,65 +139,50 @@ func TestVanadisStore_AttachChunkPR_ExistingConflict_MockDB(t *testing.T) {
 	}
 }
 
+func newAttachSuccessStore(mode string, captureCandidates *[]string) *PostgresVanadisStore {
+	return newMockStore(mockDB{
+		queryRowFn: func(_ context.Context, sql string, args ...any) pgx.Row {
+			if strings.Contains(sql, "SELECT mode") {
+				return &genericMockRow{scanFn: func(dest ...any) error {
+					*dest[0].(*string) = mode
+					return nil
+				}}
+			}
+			if captureCandidates != nil && len(args) >= 3 {
+				if cands, ok := args[2].([]string); ok {
+					*captureCandidates = cands
+				}
+			}
+			return &genericMockRow{scanFn: func(dest ...any) error {
+				if len(dest) == 3 {
+					*dest[0].(*string) = "b-" + mode
+					*dest[1].(*string) = "c-" + mode
+					*dest[2].(*string) = "thread-" + mode
+					return nil
+				}
+				*dest[0].(*string) = "thread-" + mode
+				return nil
+			}}
+		},
+	})
+}
+
 func TestVanadisStore_AttachChunkPR_ExistingSuccess_MockDB(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
 	// Success without repo
-	sNoRepo := newMockStore(mockDB{
-		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
-			if strings.Contains(sql, "SELECT mode") {
-				return &genericMockRow{scanFn: func(dest ...any) error {
-					*dest[0].(*string) = "pr"
-					return nil
-				}}
-			}
-			return &genericMockRow{scanFn: func(dest ...any) error {
-				if len(dest) == 3 {
-					*dest[0].(*string) = "b1"
-					*dest[1].(*string) = "c1"
-					*dest[2].(*string) = "thread-123"
-					return nil
-				}
-				*dest[0].(*string) = "thread-123"
-				return nil
-			}}
-		},
-	})
-	bID, cID, threadID, err := sNoRepo.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: ""})
-	if err != nil || bID != "b1" || cID != "c1" || threadID != "thread-123" {
+	sNoRepo := newAttachSuccessStore("pr", nil)
+	bID, cID, threadID, err := sNoRepo.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "c-pr", PRNumber: 101, Repo: ""})
+	if err != nil || bID != "b-pr" || cID != "c-pr" || threadID != "thread-pr" {
 		t.Errorf("unexpected AttachChunkPR result: bID=%q cID=%q threadID=%q err=%v", bID, cID, threadID, err)
 	}
 
 	// Success with repo candidates
 	var capturedAttachCandidates []string
-	sWithRepo := newMockStore(mockDB{
-		queryRowFn: func(_ context.Context, sql string, args ...any) pgx.Row {
-			if strings.Contains(sql, "SELECT mode") {
-				return &genericMockRow{scanFn: func(dest ...any) error {
-					*dest[0].(*string) = "pr"
-					return nil
-				}}
-			}
-			if len(args) >= 3 {
-				if cands, ok := args[2].([]string); ok {
-					capturedAttachCandidates = cands
-				}
-			}
-			return &genericMockRow{scanFn: func(dest ...any) error {
-				if len(dest) == 3 {
-					*dest[0].(*string) = "b1"
-					*dest[1].(*string) = "c1"
-					*dest[2].(*string) = "thread-123"
-					return nil
-				}
-				*dest[0].(*string) = "thread-123"
-				return nil
-			}}
-		},
-	})
-	bIDRepo, cIDRepo, threadIDWithRepo, err := sWithRepo.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"})
-	if err != nil || bIDRepo != "b1" || cIDRepo != "c1" || threadIDWithRepo != "thread-123" {
+	sWithRepo := newAttachSuccessStore("pr", &capturedAttachCandidates)
+	bIDRepo, cIDRepo, threadIDWithRepo, err := sWithRepo.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "c-pr", PRNumber: 101, Repo: "aerial"})
+	if err != nil || bIDRepo != "b-pr" || cIDRepo != "c-pr" || threadIDWithRepo != "thread-pr" {
 		t.Errorf("unexpected AttachChunkPR with repo result: bID=%q cID=%q threadID=%q err=%v", bIDRepo, cIDRepo, threadIDWithRepo, err)
 	}
 	if !slices.Equal(capturedAttachCandidates, []string{"aerial", "azylman/aerial"}) {

@@ -102,7 +102,12 @@ run_preflight_verification() {
 }
 
 # Pre-dispatch global flag parsing (allows --repo and --vanadis-chunk before or after command)
-VANADIS_CHUNK_ID="${AERIAL_VANADIS_CHUNK_ID:-${VANADIS_CHUNK_ID:-}}"
+VANADIS_CHUNK_ID_EXPLICIT=""
+if [ "${AERIAL_NO_VANADIS_CHUNK:-0}" = "1" ]; then
+    VANADIS_CHUNK_ID=""
+else
+    VANADIS_CHUNK_ID="${AERIAL_VANADIS_CHUNK_ID:-${VANADIS_CHUNK_ID:-}}"
+fi
 PRE_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -126,10 +131,12 @@ while [ $# -gt 0 ]; do
                 exit 1
             fi
             VANADIS_CHUNK_ID="$2"
+            VANADIS_CHUNK_ID_EXPLICIT="$2"
             shift 2
             ;;
         --vanadis-chunk=*)
             VANADIS_CHUNK_ID="${1#*=}"
+            VANADIS_CHUNK_ID_EXPLICIT="${1#*=}"
             shift 1
             ;;
         *)
@@ -316,6 +323,8 @@ resolve_target_id() {
 
 resolve_vanadis_chunk_id() {
     if [ -n "${1:-}" ]; then echo "$1"; return; fi
+    if [ -n "${VANADIS_CHUNK_ID_EXPLICIT:-}" ]; then echo "${VANADIS_CHUNK_ID_EXPLICIT}"; return; fi
+    if [ "${AERIAL_NO_VANADIS_CHUNK:-0}" = "1" ]; then echo ""; return; fi
     if [ -n "${VANADIS_CHUNK_ID:-}" ]; then echo "${VANADIS_CHUNK_ID}"; return; fi
     if [ -n "${AERIAL_VANADIS_CHUNK_ID:-}" ]; then echo "${AERIAL_VANADIS_CHUNK_ID}"; return; fi
     echo ""
@@ -361,7 +370,7 @@ attach_pr_in_vanadis() {
         attempt=$((attempt + 1))
     done
 
-    echo "⚠️ [aerial-pr] Warning: Failed to attach PR #${pr_num} to Vanadis (${vanadis_url}) after ${max_attempts} attempts: ${attach_resp:-unreachable}" >&2
+    echo "❌ [aerial-pr] ERROR: Failed to attach PR #${pr_num} to Vanadis (${vanadis_url}) after ${max_attempts} attempts: ${attach_resp:-unreachable}" >&2
     return 1
 }
 
@@ -657,7 +666,7 @@ submit_scratch() {
     local commit_msg_explicit=0
     local pr_body=""
     local pr_body_file=""
-    local vanadis_chunk_id="$(resolve_vanadis_chunk_id)"
+    local vanadis_chunk_id="$(resolve_vanadis_chunk_id "${VANADIS_CHUNK_ID_EXPLICIT:-}")"
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -681,10 +690,12 @@ submit_scratch() {
                     exit 1
                 fi
                 vanadis_chunk_id="$2"
+                VANADIS_CHUNK_ID_EXPLICIT="$2"
                 shift 2
                 ;;
             --vanadis-chunk=*)
                 vanadis_chunk_id="${1#*=}"
+                VANADIS_CHUNK_ID_EXPLICIT="${1#*=}"
                 shift 1
                 ;;
             --async|-a)
@@ -1029,9 +1040,6 @@ submit_scratch() {
     local pr_node_id
     pr_node_id=$(echo "$pr_resp" | jq -r '.node_id // empty')
 
-    # Enable native GitHub auto-merge (SQUASH)
-    enable_github_auto_merge "$pr_node_id" "$pr_num"
-
     # Attach PR directly to Vanadis (for both multi-chunk and standalone Tier 0 PRs)
     local vanadis_url
     vanadis_url=$(resolve_vanadis_url 2>/dev/null || true)
@@ -1052,8 +1060,8 @@ submit_scratch() {
             if [ -n "$returned_thread" ]; then
                 target_id="$returned_thread"
             fi
-        elif [ -n "$vanadis_chunk_id" ]; then
-            echo "ERROR: Failed to attach PR #${pr_num} to Vanadis chunk '${vanadis_chunk_id}'." >&2
+        else
+            echo "ERROR: Failed to attach PR #${pr_num} to Vanadis (chunk: '${vanadis_chunk_id:-standalone}')." >&2
             if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
                 echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
                 SCRATCH_DIR_CLEANUP=""
@@ -1085,28 +1093,24 @@ submit_scratch() {
 
     if [ -n "$brain_reg_url" ]; then
         if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then
-            if [ -n "$pr_trailer" ]; then
-                echo "⚠️ [aerial-pr] Warning: Brain registration unreachable; relying on synapse PR trailer self-healing for PR #${pr_num}." >&2
-            else
-                if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                    echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                    SCRATCH_DIR_CLEANUP=""
-                fi
-                exit 1
-            fi
-        fi
-    else
-        if [ -n "$pr_trailer" ]; then
-            echo "⚠️ [aerial-pr] Warning: Brain registration URL unset; relying on synapse PR trailer self-healing for PR #${pr_num}." >&2
-        else
-            echo "ERROR: No PR registration endpoint available (AERIAL_PR_REGISTER_URL, SYNAPSE_URL, or synapse_url in config.yaml must be set)." >&2
+            echo "ERROR: Failed to register PR #${pr_num} in PostgreSQL pr_registry (${brain_reg_url})." >&2
             if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
                 echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
                 SCRATCH_DIR_CLEANUP=""
             fi
             exit 1
         fi
+    else
+        echo "ERROR: No PR registration endpoint available (AERIAL_PR_REGISTER_URL, SYNAPSE_URL, or synapse_url in config.yaml must be set)." >&2
+        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+            SCRATCH_DIR_CLEANUP=""
+        fi
+        exit 1
     fi
+
+    # Enable native GitHub auto-merge (SQUASH) only after PR attach and registration succeed
+    enable_github_auto_merge "$pr_node_id" "$pr_num"
 
     # Asynchronous Submission: Disarm cleanup trap and remove scratch workspace immediately
     if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then

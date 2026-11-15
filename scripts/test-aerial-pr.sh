@@ -243,15 +243,31 @@ VANADIS_ENV_CHECK=$(bash -c "
 ")
 assert_eq "chunk-from-env-456" "$VANADIS_ENV_CHECK" "AERIAL_VANADIS_CHUNK_ID populates VANADIS_CHUNK_ID automatically"
 
+VANADIS_NO_CHUNK_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    export AERIAL_VANADIS_CHUNK_ID=chunk-from-env-456
+    export AERIAL_NO_VANADIS_CHUNK=1
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    echo \"\${VANADIS_CHUNK_ID}\"
+")
+assert_eq "" "$VANADIS_NO_CHUNK_CHECK" "AERIAL_NO_VANADIS_CHUNK=1 leaves VANADIS_CHUNK_ID empty"
+
 VANADIS_OVERRIDE_CHECK=$(bash -c "
     REPO_TEST_MODE=1
     export AERIAL_VANADIS_CHUNK_ID=chunk-from-env-456
     source \"${AERIAL_PR}\" --vanadis-chunk=chunk-cli-override-789 --source-only 2>/dev/null || true
-    local_init=\$(grep 'local vanadis_chunk_id=' \"${AERIAL_PR}\")
-    _check_local() { eval \"\$local_init\"; echo \"\$vanadis_chunk_id\"; }
-    echo \"\${VANADIS_CHUNK_ID}:\$(_check_local)\"
+    echo \"\${VANADIS_CHUNK_ID}:\$(resolve_vanadis_chunk_id)\"
 ")
 assert_eq "chunk-cli-override-789:chunk-cli-override-789" "$VANADIS_OVERRIDE_CHECK" "--vanadis-chunk CLI flag overrides AERIAL_VANADIS_CHUNK_ID in both global and submit_scratch scope"
+
+VANADIS_CLI_OVERRIDE_NO_CHUNK=$(bash -c "
+    REPO_TEST_MODE=1
+    export AERIAL_NO_VANADIS_CHUNK=1
+    export AERIAL_VANADIS_CHUNK_ID=chunk-from-env-456
+    source \"${AERIAL_PR}\" --vanadis-chunk=chunk-cli-override-999 --source-only 2>/dev/null || true
+    echo \"\${VANADIS_CHUNK_ID}:\$(resolve_vanadis_chunk_id)\"
+")
+assert_eq "chunk-cli-override-999:chunk-cli-override-999" "$VANADIS_CLI_OVERRIDE_NO_CHUNK" "--vanadis-chunk CLI flag overrides AERIAL_NO_VANADIS_CHUNK=1 in both global and submit_scratch scope"
 
 VANADIS_ENV_RESOLUTION_CHECK=$(bash -c "
     REPO_TEST_MODE=1
@@ -278,11 +294,21 @@ VANADIS_ENV_RESOLUTION_CHECK=$(bash -c "
 EOF
     r4=\$(unset AERIAL_VANADIS_CHUNK_ID VANADIS_CHUNK_ID; ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-v1\" resolve_vanadis_chunk_id)
     [ -z \"\$r4\" ] && echo \"vc4:ok\" || echo \"vc4:fail:\$r4\"
+
+    # Subtest 5: AERIAL_NO_VANADIS_CHUNK=1 prevents resolving chunk ID from env
+    r5=\$(AERIAL_NO_VANADIS_CHUNK=1 AERIAL_VANADIS_CHUNK_ID=\"chunk-from-aerial-env\" resolve_vanadis_chunk_id)
+    [ -z \"\$r5\" ] && echo \"vc5:ok\" || echo \"vc5:fail:\$r5\"
+
+    # Subtest 6: Explicit arg overrides AERIAL_NO_VANADIS_CHUNK=1
+    r6=\$(AERIAL_NO_VANADIS_CHUNK=1 resolve_vanadis_chunk_id 'chunk-override-no-chunk')
+    [ \"\$r6\" = \"chunk-override-no-chunk\" ] && echo \"vc6:ok\" || echo \"vc6:fail:\$r6\"
 ")
 assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc1:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: explicit arg takes priority"
 assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc2:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: resolves from VANADIS_CHUNK_ID env"
 assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc3:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: resolves from AERIAL_VANADIS_CHUNK_ID env"
 assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc4:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: ignores transcript.jsonl and returns empty when env vars unset"
+assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc5:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: respects AERIAL_NO_VANADIS_CHUNK=1"
+assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc6:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: explicit arg overrides AERIAL_NO_VANADIS_CHUNK=1"
 
 # Case 9b: verify_vanadis_chunk_active guards against submitting PR for cancelled chunks
 VANADIS_GUARD_CHECK=$(bash -c "
@@ -956,6 +982,8 @@ EOF
                 printf '{\"number\":77,\"html_url\":\"https://github.com/azylman/aerial/pull/77\",\"node_id\":\"PR_kwDO77\"}\n201'
             elif [[ \"\$*\" == *'graphql'* ]]; then
                 printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
+                printf '{\"status\":\"attached\",\"build_id\":\"b-77\",\"chunk_id\":\"chunk-77\",\"thread_id\":\"100000000000000001\"}'
             elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
                 printf '{\"status\":\"registered\"}'
             fi
@@ -994,6 +1022,8 @@ EOF
                 printf '[{\"number\":77,\"title\":\"feat: initial attempt\",\"body\":\"Existing PR body\",\"html_url\":\"https://github.com/azylman/aerial/pull/77\",\"node_id\":\"PR_kwDO77\"}]'
             elif [[ \"\$*\" == *'graphql'* ]]; then
                 printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
+                printf '{\"status\":\"attached\",\"build_id\":\"b-77\",\"chunk_id\":\"chunk-77\",\"thread_id\":\"100000000000000001\"}'
             elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
                 printf '{\"status\":\"registered\"}'
             fi
@@ -1095,6 +1125,8 @@ EOF
                 printf '[{\"number\":88,\"title\":\"feat: existing branch\",\"body\":\"Existing PR body\",\"html_url\":\"https://github.com/azylman/aerial/pull/88\",\"node_id\":\"PR_kwDO88\"}]'
             elif [[ \"\$*\" == *'graphql'* ]]; then
                 printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
+                printf '{\"status\":\"attached\",\"build_id\":\"b-88\",\"chunk_id\":\"chunk-88\",\"thread_id\":\"100000000000000001\"}'
             elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
                 printf '{\"status\":\"registered\"}'
             fi
@@ -1428,6 +1460,91 @@ EOF
     fi
 ")
 assert_eq "true" "$(echo "$SUBMIT_VANADIS_CHECK" | grep -q 'submit_vanadis_attach:ok' && echo true || echo false)" "submit_scratch attaches PR to Vanadis and registers with Synapse without vanadis_chunk_id"
+
+# Subtest 8 & 9: submit_scratch fails closed on attach-pr or pr/register failure
+SUBMIT_FAIL_CLOSED_CHECK=$(bash -c "
+    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-fail-remote.XXXXXX)
+    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-fail-up.XXXXXX)
+    WORK_DIR1=\$(mktemp -d /tmp/aerial-pr-fail-work1.XXXXXX)
+    WORK_DIR2=\$(mktemp -d /tmp/aerial-pr-fail-work2.XXXXXX)
+    trap 'rm -rf \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\" \"\$WORK_DIR1\" \"\$WORK_DIR2\"' EXIT
+
+    git init -q --bare \"\$REMOTE_DIR\"
+    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
+    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
+    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
+    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
+    mkdir -p \"\$UPSTREAM_DIR/scripts\"
+    cat << 'EOF' > \"\$UPSTREAM_DIR/scripts/verify.sh\"
+#!/bin/sh
+exit 0
+EOF
+    chmod +x \"\$UPSTREAM_DIR/scripts/verify.sh\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'init'
+    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
+
+    export GITHUB_PAT='mock_pat'
+    export VANADIS_URL='http://vanadis.aerial:8080'
+    export AERIAL_PR_REGISTER_URL='http://synapse.aerial:4020/internal/pr/register'
+    export AERIAL_VANADIS_ATTACH_RETRIES=1
+    export AERIAL_VANADIS_ATTACH_RETRY_DELAY=0
+    export AERIAL_PR_REGISTER_RETRIES=1
+    export AERIAL_PR_REGISTER_RETRY_DELAY=0
+
+    # Subtest 8: attach-pr failure causes submit_scratch to exit non-zero and preserve workspace
+    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR1\"
+    git -C \"\$WORK_DIR1\" config user.name 'Tester'
+    git -C \"\$WORK_DIR1\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR1\" checkout -q -b feat/fail-attach
+    echo 'Summary' > \"\$WORK_DIR1/PR_DESCRIPTION.md\"
+    echo 'content' > \"\$WORK_DIR1/file.txt\"
+
+    (
+        REPO_TEST_MODE=1
+        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+        curl() {
+            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
+                printf '{\"number\":89,\"html_url\":\"https://github.com/azylman/aerial/pull/89\",\"node_id\":\"PR_kwDO89\"}\n201'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
+                printf '500 Internal Server Error'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                printf '{\"status\":\"registered\"}'
+            fi
+        }
+        export -f curl
+        submit_scratch \"\$WORK_DIR1\" 'feat: fail attach' --vanadis-chunk 'chunk-89' >/dev/null 2>&1
+    ) && echo 'attach_fail:unexpected_success' || echo 'attach_fail:ok'
+
+    # Subtest 9: pr/register failure causes submit_scratch to exit non-zero
+    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR2\"
+    git -C \"\$WORK_DIR2\" config user.name 'Tester'
+    git -C \"\$WORK_DIR2\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR2\" checkout -q -b feat/fail-reg
+    echo 'Summary' > \"\$WORK_DIR2/PR_DESCRIPTION.md\"
+    echo 'content' > \"\$WORK_DIR2/file.txt\"
+
+    (
+        REPO_TEST_MODE=1
+        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+        curl() {
+            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
+                printf '{\"number\":90,\"html_url\":\"https://github.com/azylman/aerial/pull/90\",\"node_id\":\"PR_kwDO90\"}\n201'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
+                printf '{\"status\":\"attached\",\"build_id\":\"b-90\",\"chunk_id\":\"chunk-90\",\"thread_id\":\"199999999999999999\"}'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                printf '500 Server Error'
+            fi
+        }
+        export -f curl
+        submit_scratch \"\$WORK_DIR2\" 'feat: fail reg' --vanadis-chunk 'chunk-90' >/dev/null 2>&1
+    ) && echo 'reg_fail:unexpected_success' || echo 'reg_fail:ok'
+")
+assert_eq "true" "$(echo "$SUBMIT_FAIL_CLOSED_CHECK" | grep -q 'attach_fail:ok' && echo true || echo false)" "submit_scratch fails non-zero when vanadis attach-pr returns HTTP 500"
+assert_eq "true" "$(echo "$SUBMIT_FAIL_CLOSED_CHECK" | grep -q 'reg_fail:ok' && echo true || echo false)" "submit_scratch fails non-zero when internal pr/register returns HTTP 500"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"

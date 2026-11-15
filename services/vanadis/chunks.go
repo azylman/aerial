@@ -232,7 +232,20 @@ func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkI
 		return "", "", "", fmt.Errorf("check chunk mode %s: %w", chunkID, chkErr)
 	}
 	if mode == "action" {
-		return "", "", "", fmt.Errorf("%w: action chunk cannot attach a pull request", ErrBuildConflict)
+		repo := normalizeRepo(req.Repo)
+		if repo == "" {
+			return "", "", "", errors.New("repo is required to attach PR to action chunk")
+		}
+		const qAction = `UPDATE vanadis_chunks c SET repo = $1, pr_number = $2, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $3 AND c.status != 'cancelled' AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
+		var buildID, returnChunkID, threadID string
+		err := s.db.QueryRow(ctx, qAction, repo, req.PRNumber, chunkID).Scan(&buildID, &returnChunkID, &threadID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return "", "", "", s.resolveAttachChunkPRError(ctx, chunkID, repo, req.PRNumber)
+			}
+			return "", "", "", fmt.Errorf("attach action chunk pr %s#%d: %w", repo, req.PRNumber, err)
+		}
+		return buildID, returnChunkID, threadID, nil
 	}
 
 	candidates := repoMatchCandidates(req.Repo)
@@ -1127,51 +1140,62 @@ func resolveWidgetBanner(widgetStatus string, req SyncChunkPRWidgetRequest) stri
 	return ""
 }
 
+func resolveWidgetChunkRepo(c VanadisChunk) string {
+	if c.Mode == "action" {
+		if c.PRNumber > 0 && strings.TrimSpace(c.Repo) != "" {
+			return c.Repo
+		}
+		return "action"
+	}
+	return firstNonEmpty(c.Repo, "aerial")
+}
+
+func buildStatusWidgetChunk(c VanadisChunk, req SyncChunkPRWidgetRequest, widgetStatus *string) StatusWidgetChunk {
+	chunkRepo := resolveWidgetChunkRepo(c)
+	chunkStatus := normalizeWidgetStatus(c.Status)
+	completedAt := c.CompletedAt
+	var activeStep string
+	switch {
+	case req.PRNumber > 0 && c.PRNumber == req.PRNumber && req.PRFound:
+		chunkStatus = resolveVanadisChunkWidgetStatus(c.Status, req.PRStatus)
+		if (chunkStatus == "failed" || chunkStatus == "conflict") && *widgetStatus != "completed" {
+			*widgetStatus = "failed"
+		}
+		if isVanadisChunkStreamingPhase(chunkStatus) {
+			activeStep = strings.TrimSpace(req.ActiveStep)
+			if activeStep == "" {
+				activeStep = FormatChunkActiveStep(c)
+			}
+			completedAt = time.Time{}
+		}
+	case chunkStatus == "completed":
+		chunkStatus = "deployed"
+	case isVanadisChunkStreamingPhase(chunkStatus):
+		activeStep = FormatChunkActiveStep(c)
+		if chunkStatus == "merged" && (activeStep == "" || *widgetStatus == "completed") {
+			chunkStatus = "deployed"
+			activeStep = ""
+		}
+	}
+	return StatusWidgetChunk{
+		ID:          c.ID,
+		Index:       c.ChunkIndex,
+		Repo:        chunkRepo,
+		Title:       c.Title,
+		Status:      chunkStatus,
+		ActiveStep:  activeStep,
+		PRNumber:    c.PRNumber,
+		StartedAt:   c.StartedAt,
+		CompletedAt: completedAt,
+		UpdatedAt:   c.UpdatedAt,
+	}
+}
+
 func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncChunkPRWidgetRequest) StatusWidgetRequest {
 	widgetStatus := firstNonEmpty(normalizeWidgetStatus(build.Status), "running")
 	wChunks := make([]StatusWidgetChunk, len(chunks))
 	for i, c := range chunks {
-		chunkRepo := firstNonEmpty(c.Repo, "aerial")
-		if c.Mode == "action" {
-			chunkRepo = "action"
-		}
-		chunkStatus := normalizeWidgetStatus(c.Status)
-		completedAt := c.CompletedAt
-		var activeStep string
-		switch {
-		case req.PRNumber > 0 && c.PRNumber == req.PRNumber && req.PRFound:
-			chunkStatus = resolveVanadisChunkWidgetStatus(c.Status, req.PRStatus)
-			if (chunkStatus == "failed" || chunkStatus == "conflict") && widgetStatus != "completed" {
-				widgetStatus = "failed"
-			}
-			if isVanadisChunkStreamingPhase(chunkStatus) {
-				activeStep = strings.TrimSpace(req.ActiveStep)
-				if activeStep == "" {
-					activeStep = FormatChunkActiveStep(c)
-				}
-				completedAt = time.Time{}
-			}
-		case chunkStatus == "completed":
-			chunkStatus = "deployed"
-		case isVanadisChunkStreamingPhase(chunkStatus):
-			activeStep = FormatChunkActiveStep(c)
-			if chunkStatus == "merged" && (activeStep == "" || widgetStatus == "completed") {
-				chunkStatus = "deployed"
-				activeStep = ""
-			}
-		}
-		wChunks[i] = StatusWidgetChunk{
-			ID:          c.ID,
-			Index:       c.ChunkIndex,
-			Repo:        chunkRepo,
-			Title:       c.Title,
-			Status:      chunkStatus,
-			ActiveStep:  activeStep,
-			PRNumber:    c.PRNumber,
-			StartedAt:   c.StartedAt,
-			CompletedAt: completedAt,
-			UpdatedAt:   c.UpdatedAt,
-		}
+		wChunks[i] = buildStatusWidgetChunk(c, req, &widgetStatus)
 	}
 	if widgetStatus == "failed" && req.PRFound && req.PRNumber > 0 && !hasFailedWidgetChunk(wChunks) {
 		widgetStatus = "running"

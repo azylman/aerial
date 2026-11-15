@@ -314,7 +314,7 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_vanadis_chunks_build_index UNIQUE (build_id, chunk_index),
-    CONSTRAINT vanadis_chunks_mode_check CHECK ((mode = 'pr' AND repo <> '') OR (mode = 'action' AND repo = '' AND pr_number IS NULL))
+    CONSTRAINT vanadis_chunks_mode_check CHECK ((mode = 'pr' AND repo <> '') OR (mode = 'action' AND ((repo = '' AND pr_number IS NULL) OR (repo <> '' AND pr_number IS NOT NULL))))
 );
 
 CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_build_status ON vanadis_chunks (build_id, status);
