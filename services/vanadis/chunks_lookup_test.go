@@ -88,8 +88,7 @@ func TestPostgresVanadisStore_GetChunkByPR(t *testing.T) {
 						if tc.rowErr != nil {
 							return tc.rowErr
 						}
-						*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*bool) = "c1", "b1", 0, "low", true
-						return nil
+						return scanValues(dest, "c1", "b1", 0, "low", true)
 					}}
 				},
 				queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {

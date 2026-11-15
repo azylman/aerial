@@ -31,12 +31,11 @@ type mockRow struct {
 	err error
 }
 
-func fillBuildDest(b VanadisBuild, dest []any) {
+func fillBuildDest(b VanadisBuild, dest []any) error {
 	if len(dest) == 11 {
-		*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*string), *dest[8].(*bool), *dest[9].(*time.Time), *dest[10].(*time.Time) = b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt
-		return
+		return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
 	}
-	*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*string), *dest[8].(*time.Time), *dest[9].(*time.Time) = b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.CreatedAt, b.UpdatedAt
+	return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.CreatedAt, b.UpdatedAt)
 }
 
 func (r *mockRow) Scan(dest ...any) error {
@@ -44,7 +43,7 @@ func (r *mockRow) Scan(dest ...any) error {
 		return r.err
 	}
 	if r.b != nil && (len(dest) == 10 || len(dest) == 11) {
-		fillBuildDest(*r.b, dest)
+		return fillBuildDest(*r.b, dest)
 	}
 	return nil
 }
@@ -77,24 +76,20 @@ func (r *mockRows) Scan(dest ...any) error {
 		return r.scanErr
 	}
 	if len(r.builds) > 0 {
-		fillBuildDest(r.builds[r.idx-1], dest)
-		return nil
+		return fillBuildDest(r.builds[r.idx-1], dest)
 	}
 	if len(r.items) > 0 {
 		c := r.items[r.idx-1]
 		if len(dest) == 10 {
-			*dest[0].(*string), *dest[1].(*int), *dest[2].(*string), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*int), *dest[7].(*sql.NullTime), *dest[8].(*sql.NullTime), *dest[9].(*time.Time) = c.ID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.UpdatedAt
-			return nil
+			return scanValues(dest, c.ID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.UpdatedAt)
 		}
 		if len(dest) == 18 {
-			*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*[]string), *dest[8].(*[]string), *dest[9].(*string), *dest[10].(*[]string), *dest[11].(*string), *dest[12].(*int), *dest[13].(*int), *dest[14].(*sql.NullTime), *dest[15].(*sql.NullTime), *dest[16].(*time.Time), *dest[17].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
-			return nil
+			return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
 		}
 		if len(dest) == 25 {
 			rawCIChecks := []byte(`{"lint":"passed"}`)
 			rawRolloutState := []byte(`{"expected_jobs":["eri"]}`)
-			*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*[]string), *dest[8].(*[]string), *dest[9].(*string), *dest[10].(*[]string), *dest[11].(*string), *dest[12].(*int), *dest[13].(*int), *dest[14].(*[]string), *dest[15].(*int), *dest[16].(*[]byte), *dest[17].(*[]byte), *dest[18].(*string), *dest[19].(*string), *dest[20].(*string), *dest[21].(*sql.NullTime), *dest[22].(*sql.NullTime), *dest[23].(*time.Time), *dest[24].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
-			return nil
+			return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
 		}
 	}
 	return nil

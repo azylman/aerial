@@ -190,10 +190,7 @@ func TestPostgresStore_ResolveAttachChunkPRError_MockDB(t *testing.T) {
 	// 1. Chunk does not exist
 	sNotExist := newMockStore(mockDB{
 		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
-			return &genericMockRow{scanFn: func(dest ...any) error {
-				*dest[0].(*bool) = false
-				return nil
-			}}
+			return valuesRow(false)
 		},
 	})
 	err := sNotExist.resolveAttachChunkPRError(ctx, "c1", "aerial", 10)
@@ -204,10 +201,7 @@ func TestPostgresStore_ResolveAttachChunkPRError_MockDB(t *testing.T) {
 	// 2. Repo is empty
 	sRepoEmpty := newMockStore(mockDB{
 		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
-			return &genericMockRow{scanFn: func(dest ...any) error {
-				*dest[0].(*bool) = true
-				return nil
-			}}
+			return valuesRow(true)
 		},
 	})
 	err = sRepoEmpty.resolveAttachChunkPRError(ctx, "c1", "", 10)
@@ -220,10 +214,7 @@ func TestPostgresStore_ResolveAttachChunkPRError_MockDB(t *testing.T) {
 	sCancelled := newMockStore(mockDB{
 		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
 			callCount++
-			return &genericMockRow{scanFn: func(dest ...any) error {
-				*dest[0].(*bool) = true
-				return nil
-			}}
+			return valuesRow(true)
 		},
 	})
 	err = sCancelled.resolveAttachChunkPRError(ctx, "c1", "aerial", 10)
@@ -236,14 +227,8 @@ func TestPostgresStore_ResolveAttachChunkPRError_MockDB(t *testing.T) {
 	sMismatched := newMockStore(mockDB{
 		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
 			checkCount++
-			return &genericMockRow{scanFn: func(dest ...any) error {
-				if checkCount == 1 {
-					*dest[0].(*bool) = true // exists
-				} else {
-					*dest[0].(*bool) = false // not cancelled
-				}
-				return nil
-			}}
+			// First check: chunk exists; second check: chunk is not cancelled.
+			return valuesRow(checkCount == 1)
 		},
 	})
 	err = sMismatched.resolveAttachChunkPRError(ctx, "c1", "aerial", 10)
@@ -257,10 +242,7 @@ func TestPostgresStore_ResolveAttachChunkPRError_MockDB(t *testing.T) {
 		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
 			if strings.Contains(sql, "SELECT mode FROM vanadis_chunks") {
 				modeChecked = true
-				return &genericMockRow{scanFn: func(dest ...any) error {
-					*dest[0].(*string) = "pr"
-					return nil
-				}}
+				return valuesRow("pr")
 			}
 			return &mockRow{err: errors.New("update chunk pr db err")}
 		},
@@ -323,12 +305,7 @@ func TestPostgresStore_AttachStandalonePR_MockDB(t *testing.T) {
 			return pgconn.NewCommandTag(""), nil
 		},
 		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return &genericMockRow{scanFn: func(dest ...any) error {
-				*dest[0].(*string) = "b-exist"
-				*dest[1].(*string) = "c-exist"
-				*dest[2].(*string) = "th-exist"
-				return nil
-			}}
+			return valuesRow("b-exist", "c-exist", "th-exist")
 		},
 	}
 	sCommitErr := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return txCommitErr, nil }})
@@ -342,12 +319,7 @@ func TestPostgresStore_AttachStandalonePR_MockDB(t *testing.T) {
 			return pgconn.NewCommandTag(""), nil
 		},
 		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return &genericMockRow{scanFn: func(dest ...any) error {
-				*dest[0].(*string) = "b-exist"
-				*dest[1].(*string) = "c-exist"
-				*dest[2].(*string) = "th-exist"
-				return nil
-			}}
+			return valuesRow("b-exist", "c-exist", "th-exist")
 		},
 	}
 	sSuccess := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return txSuccess, nil }})
@@ -402,20 +374,17 @@ func TestPostgresStore_CompleteActionChunk_And_FailChunk_MockDB_Errors(t *testin
 		t.Fatalf("expected ErrChunkNotFound, got %v", err)
 	}
 
-	// Lock build ErrNoRows on CompleteActionChunk
+	// Lock build ErrNoRows on CompleteActionChunk. The FK cascade plus the chunk
+	// FOR UPDATE lock make this unreachable against the real schema; the case pins
+	// CompleteActionChunk's defensive ErrNoRows -> ErrBuildNotFound mapping so a
+	// schema or lock-order change surfaces as a typed error, not a raw pgx one.
 	callScan := 0
 	txNoBuild := &mockTx{
 		queryRowFn: func(context.Context, string, ...any) pgx.Row {
 			callScan++
 			return &genericMockRow{scanFn: func(dest ...any) error {
 				if callScan == 1 {
-					*dest[0].(*string) = "c1"
-					*dest[1].(*string) = "b1"
-					*dest[2].(*int) = 0
-					*dest[3].(*string) = "action"
-					*dest[4].(*string) = "Title"
-					*dest[5].(*string) = "running"
-					return nil
+					return scanValues(dest, "c1", "b1", 0, "action", "Title", "running")
 				}
 				return pgx.ErrNoRows
 			}}

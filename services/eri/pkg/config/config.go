@@ -978,37 +978,43 @@ func isContainerColdBoot(paths ...string) bool {
 	return false
 }
 
+// coldBootPollInterval is how often waitForColdBootConfig re-checks the
+// candidate paths while waiting for git-sync to populate them.
+const coldBootPollInterval = 10 * time.Millisecond
+
+// firstPopulatedConfig returns the first path that is a non-empty regular file.
+func firstPopulatedConfig(paths []string) (string, bool) {
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			return p, true
+		}
+	}
+	return "", false
+}
+
 func waitForColdBootConfig(paths []string, timeout time.Duration) {
 	if len(paths) == 0 {
 		return
 	}
-	for _, p := range paths {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
+	ticker := time.NewTicker(coldBootPollInterval)
+	defer ticker.Stop()
+	deadline := time.NewTimer(max(timeout, 0))
+	defer deadline.Stop()
+	for timedOut := false; ; {
+		if p, ok := firstPopulatedConfig(paths); ok {
 			log.Printf("[Config] Cold-boot configuration detected at %s", p)
 			return
 		}
-	}
-	if timeout <= 0 {
-		log.Printf("[Config] Cold-boot wait timed out after %v, proceeding with search", timeout)
-		return
-	}
-
-	deadline := time.Now().Add(timeout)
-	for {
-		for _, p := range paths {
-			if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
-				log.Printf("[Config] Cold-boot configuration detected at %s", p)
-				return
-			}
+		if timedOut {
+			log.Printf("[Config] Cold-boot wait timed out after %v, proceeding with search", timeout)
+			return
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			break
+		select {
+		case <-deadline.C:
+			timedOut = true
+		case <-ticker.C:
 		}
-		sleepDur := min(remaining, 10*time.Millisecond)
-		time.Sleep(sleepDur)
 	}
-	log.Printf("[Config] Cold-boot wait timed out after %v, proceeding with search", timeout)
 }
 
 // LoadConfigFromLookup loads configuration searching the given paths and applying

@@ -22,6 +22,8 @@ linters:
     - exhaustive
     - exptostd
     - fatcontext
+    - forbidigo
+    - forcetypeassert
     - funlen
     - gocheckcompilerdirectives
     - gochecksumtype
@@ -85,6 +87,10 @@ linters:
       package-average: 10.0
     exhaustive:
       default-signifies-exhaustive: true
+    forbidigo:
+      forbid:
+        - pattern: ^time\.Sleep$
+          msg: use channels, deadline-bounded condition polling, or an injected clock instead of time.Sleep
     gomoddirectives:
       replace-local: true
     perfsprint:

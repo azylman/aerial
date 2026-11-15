@@ -153,7 +153,10 @@ func TestWriteResponse_TableDriven(t *testing.T) {
 
 			WriteResponse(w, req, "test-svc", []byte("payload"))
 			if !tc.errWriter {
-				rec := w.(*httptest.ResponseRecorder)
+				rec, ok := w.(*httptest.ResponseRecorder)
+				if !ok {
+					t.Fatalf("writer is %T, want *httptest.ResponseRecorder", w)
+				}
 				if rec.Body.String() != "payload" {
 					t.Errorf("WriteResponse body = %q, want 'payload'", rec.Body.String())
 				}

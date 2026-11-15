@@ -672,7 +672,11 @@ func TestConsoleServerLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen failed: %v", err)
 	}
-	port := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+	addr, ok := l.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address is %T, want *net.TCPAddr", l.Addr())
+	}
+	port := strconv.Itoa(addr.Port)
 	_ = l.Close()
 
 	ghMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

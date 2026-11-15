@@ -509,7 +509,7 @@ func TestUnifiedSessionLease_ExecuteFailure_MarksDirty(t *testing.T) {
 	if _, execErr := lease.Execute(ctx, &TurnContext{TurnID: "t1", Prompt: "p", Ctx: ctx}); execErr == nil {
 		t.Fatalf("expected Execute error, got nil")
 	}
-	if !lease.(*unifiedSessionLease).daemon.IsDirty() {
+	if !requireType[*unifiedSessionLease](t, lease).daemon.IsDirty() {
 		t.Errorf("expected daemon to be marked dirty after execution failure")
 	}
 }
@@ -522,7 +522,7 @@ func TestUnifiedSessionLease_DirectMarkDirty(t *testing.T) {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
 	defer lease.Release()
-	uLease := lease.(*unifiedSessionLease)
+	uLease := requireType[*unifiedSessionLease](t, lease)
 	if uLease.daemon.IsDirty() {
 		t.Fatalf("expected daemon to not be dirty initially")
 	}
@@ -541,7 +541,7 @@ func TestUnifiedSessionLease_Release_RotationFailurePaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
-	lease1.(*unifiedSessionLease).turnCount = 2
+	requireType[*unifiedSessionLease](t, lease1).turnCount = 2
 	pool1.Close()
 	if relErr := lease1.Release(); relErr == nil {
 		t.Errorf("expected Release error when RotateDaemon fails on closed pool")
@@ -557,7 +557,7 @@ func TestUnifiedSessionLease_Release_RotationFailurePaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
-	lease2.(*unifiedSessionLease).turnCount = 2
+	requireType[*unifiedSessionLease](t, lease2).turnCount = 2
 	if relErr := lease2.Release(); !errors.Is(relErr, cbErr) {
 		t.Errorf("expected persistence error %v, got %v", cbErr, relErr)
 	}
@@ -619,40 +619,14 @@ func TestIsDaemonMatch_Comprehensive(t *testing.T) {
 	}
 }
 
-func TestAgentPool_InterfacesAndMockBehavior(t *testing.T) {
-	t.Parallel()
-	var _ AgentPool = (*UnifiedProcessPool)(nil)
-	var _ AgentSession = (*StreamingDaemon)(nil)
-	var _ AgentPool = (*mockVoicePool)(nil)
-	var _ AgentSession = (*mockVoiceSession)(nil)
-	var _ AgentPool = NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "fake-key"})
-
-	pool := newMockVoicePool("test-model")
-	ctx := context.Background()
-	if err := pool.Initialize(ctx); err != nil || pool.initCalled != 1 {
-		t.Fatalf("unexpected init error: err=%v called=%d", err, pool.initCalled)
-	}
-	sess1, err := pool.GetOrCreateSession(ctx, "device-a", "")
-	sess2, err2 := pool.GetOrCreateSession(ctx, "device-a", "")
-	if err != nil || err2 != nil || sess1 != sess2 || sess1.SessionID() != "device-a" {
-		t.Fatalf("unexpected session: sess1=%v sess2=%v err=%v", sess1, sess2, err)
-	}
-	var receivedPrompt string
-	sess1.(*mockVoiceSession).sendFn = func(prompt string, turn *TurnContext) error {
-		receivedPrompt = prompt
-		return nil
-	}
-	if err := sess1.Send("test prompt", nil); err != nil || receivedPrompt != "test prompt" {
-		t.Fatalf("unexpected Send: %v, got %q", err, receivedPrompt)
-	}
-	pool.getErr = errors.New("mock pool is closed")
-	if err := pool.Close(); err != nil {
-		t.Fatalf("unexpected close error: %v", err)
-	}
-	if _, err := pool.GetOrCreateSession(ctx, "device-b", ""); err == nil {
-		t.Fatal("expected error on closed mock pool")
-	}
-}
+// Compile-time interface checks for pool/session implementations and the
+// mocks other tests in this package substitute for them.
+var (
+	_ AgentPool    = (*UnifiedProcessPool)(nil)
+	_ AgentSession = (*StreamingDaemon)(nil)
+	_ AgentPool    = (*mockVoicePool)(nil)
+	_ AgentSession = (*mockVoiceSession)(nil)
+)
 
 func runUnifiedSessionLeaseWriters(wg *sync.WaitGroup, lease *unifiedSessionLease, writers, iterations int) {
 	for i := range writers {

@@ -404,12 +404,17 @@ func testDBOpenFilesAndViews(t *testing.T, tmpDir string) {
 	}
 	sqliteTestInitHook = oldHook
 
-	origMax, origBase := postgresMaxAttempts, postgresRetryBase
-	postgresMaxAttempts, postgresRetryBase = 1, time.Millisecond
+	origMax, origBase, origAfter := postgresMaxAttempts, postgresRetryBase, postgresRetryAfter
+	postgresMaxAttempts, postgresRetryBase = 2, time.Millisecond
+	postgresRetryAfter = func(time.Duration) <-chan time.Time {
+		fired := make(chan time.Time, 1)
+		fired <- time.Time{}
+		return fired
+	}
 	_, errPg := openDB("postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
-	postgresMaxAttempts, postgresRetryBase = origMax, origBase
-	if errPg == nil {
-		t.Error("expected postgres connection failure")
+	postgresMaxAttempts, postgresRetryBase, postgresRetryAfter = origMax, origBase, origAfter
+	if errPg == nil || !strings.Contains(errPg.Error(), "after 2 attempts") {
+		t.Errorf("openDB error = %v, want postgres connection failure after 2 attempts", errPg)
 	}
 }
 

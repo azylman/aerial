@@ -571,11 +571,19 @@ func TestTransport(t *testing.T) {
 
 func TestTransport_DefaultBase(t *testing.T) {
 	t.Parallel()
-	if rt := Transport(nil).(*transport); rt.base != http.DefaultTransport || !rt.propagate {
+	rt, ok := Transport(nil).(*transport)
+	if !ok {
+		t.Fatalf("Transport(nil) is %T, want *transport", Transport(nil))
+	}
+	if rt.base != http.DefaultTransport || !rt.propagate {
 		t.Errorf("base = %T propagate %v, want http.DefaultTransport true", rt.base, rt.propagate)
 	}
-	if rt := ExternalTransport(nil).(*transport); rt.base != http.DefaultTransport || rt.propagate {
-		t.Errorf("external base = %T propagate %v, want http.DefaultTransport false", rt.base, rt.propagate)
+	ext, ok := ExternalTransport(nil).(*transport)
+	if !ok {
+		t.Fatalf("ExternalTransport(nil) is %T, want *transport", ExternalTransport(nil))
+	}
+	if ext.base != http.DefaultTransport || ext.propagate {
+		t.Errorf("external base = %T propagate %v, want http.DefaultTransport false", ext.base, ext.propagate)
 	}
 	if originOnly(nil) != "" {
 		t.Error("originOnly(nil) should be empty")

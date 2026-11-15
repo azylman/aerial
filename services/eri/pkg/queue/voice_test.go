@@ -626,7 +626,11 @@ func (p *queueMockVoiceProcessPool) AcquireLease(ctx context.Context, targetKey 
 	if err != nil {
 		return nil, err
 	}
-	return &mockVoiceSessionLease{pool: p, sess: sess.(*queueMockVoiceSession), targetKey: targetKey}, nil
+	voiceSess, ok := sess.(*queueMockVoiceSession)
+	if !ok {
+		return nil, fmt.Errorf("session is %T, want *queueMockVoiceSession", sess)
+	}
+	return &mockVoiceSessionLease{pool: p, sess: voiceSess, targetKey: targetKey}, nil
 }
 
 type mockVoiceSessionLease struct {
