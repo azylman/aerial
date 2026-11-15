@@ -2,10 +2,12 @@ package pubsub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -392,27 +394,35 @@ func TestEnsureCoreStreams(t *testing.T) {
 		t.Error("EnsureCoreStreams with nil bus expected error, got nil")
 	}
 
-	// Verify JetStream stream config subjects include aerial.pr.>
-	mjs := &mockJetStream{
-		existingStreams: make(map[string]*nats.StreamInfo),
-	}
+	mjs := &mockJetStream{existingStreams: make(map[string]*nats.StreamInfo)}
 	jsBus := newJetStreamBusWithContext(nil, mjs)
 	if err := jsBus.EnsureCoreStreams(context.Background()); err != nil {
 		t.Fatalf("jsBus.EnsureCoreStreams failed: %v", err)
 	}
-	eventsStream, ok := mjs.existingStreams[StreamAerialEvents]
-	if !ok {
-		t.Fatalf("stream %s not found in mockJetStream", StreamAerialEvents)
+	checks := []struct {
+		stream  string
+		subject string
+	}{
+		{StreamAerialEvents, SubjectAerialPRPrefix + "merged"},
+		{StreamAerialEvents, SubjectAerialTurnTranscriptSynced},
+		{StreamAerialJobs, SubjectEriPromptJob},
+		{StreamAerialCoalesced, SubjectCovenExtractCoalesced("thread-test")},
 	}
-	matched := false
-	for _, pattern := range eventsStream.Config.Subjects {
-		if matchSubject(pattern, SubjectAerialPRPrefix+"merged") {
-			matched = true
-			break
+	for _, chk := range checks {
+		st, ok := mjs.existingStreams[chk.stream]
+		if !ok {
+			t.Fatalf("stream %s not found in mockJetStream", chk.stream)
 		}
-	}
-	if !matched {
-		t.Errorf("AERIAL_EVENTS subjects %v do not match %s", eventsStream.Config.Subjects, SubjectAerialPRPrefix+"merged")
+		matched := false
+		for _, p := range st.Config.Subjects {
+			if matchSubject(p, chk.subject) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Errorf("%s subjects %v do not match %s", chk.stream, st.Config.Subjects, chk.subject)
+		}
 	}
 }
 
@@ -431,8 +441,19 @@ func TestMatchSubject(t *testing.T) {
 		{pattern: "aerial.events.*", subject: "aerial.events.github.push", want: false},
 		{pattern: "aerial.turn.completed", subject: "aerial.turn.completed", want: true},
 		{pattern: "aerial.turn.completed", subject: "aerial.turn.failed", want: false},
+		{pattern: "aerial.turn.>", subject: SubjectAerialTurnTranscriptSynced, want: true},
 		{pattern: "aerial.jobs.>", subject: "aerial.events.foo", want: false},
 		{pattern: "aerial.jobs.foo.bar", subject: "aerial.jobs.foo", want: false},
+		{pattern: "aerial.jobs.>", subject: SubjectProsperaReportJob, want: true},
+		{pattern: "aerial.jobs.>", subject: SubjectProsperaVoicemailJob, want: true},
+		{pattern: "aerial.jobs.>", subject: SubjectProsperaSMSJob, want: true},
+		{pattern: "aerial.jobs.>", subject: SubjectEriPromptJob, want: true},
+		{pattern: "aerial.jobs.>", subject: SubjectEriDispatchJob, want: true},
+		{pattern: "aerial.jobs.>", subject: SubjectEriDiscordMessageJob, want: true},
+		{pattern: "aerial.jobs.>", subject: SubjectHaroOneShotJob, want: true},
+		{pattern: "aerial.coalesced.>", subject: SubjectCovenExtractCoalesced("thread-123"), want: true},
+		{pattern: "aerial.coalesced.>", subject: SubjectBuildWidgetSyncCoalesced("build-456"), want: true},
+		{pattern: "aerial.coalesced.>", subject: SubjectPRWidgetSyncCoalesced("azylman/aerial", 789), want: true},
 		{pattern: "aerial.*.events", subject: "aerial.custom.events", want: true},
 		{pattern: "aerial.*.events", subject: "aerial.custom.other", want: false},
 	}
@@ -443,6 +464,69 @@ func TestMatchSubject(t *testing.T) {
 			got := matchSubject(tc.pattern, tc.subject)
 			if got != tc.want {
 				t.Errorf("matchSubject(%q, %q) = %v, want %v", tc.pattern, tc.subject, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSubjectHelpers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name, got, want string
+	}{
+		{"coven extract", SubjectCovenExtractCoalesced("  thread-abc  "), "aerial.coalesced.coven_extract.thread-abc"},
+		{"build widget sync", SubjectBuildWidgetSyncCoalesced("  build-999  "), "aerial.coalesced.widget_sync.build.build-999"},
+		{"pr widget sync with slash", SubjectPRWidgetSyncCoalesced("  azylman/aerial  ", 123), "aerial.coalesced.widget_sync.pr.azylman.aerial.123"},
+		{"pr widget sync without slash", SubjectPRWidgetSyncCoalesced("mirrormere", 456), "aerial.coalesced.widget_sync.pr.mirrormere.456"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.got != tc.want {
+				t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContracts_JSONRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	fixedTime := time.Date(2026, 11, 14, 16, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		payload  any
+		target   any
+		expected any
+	}{
+		{"TranscriptSyncedEvent", TranscriptSyncedEvent{"s1", "c1", 3, fixedTime}, &TranscriptSyncedEvent{}, TranscriptSyncedEvent{"s1", "c1", 3, fixedTime}},
+		{"TurnCompletedEvent_telemetry", TurnCompletedEvent{SessionID: "s1", CompletedAt: fixedTime, Status: "ok", DurationMs: 10, TotalTokens: 100}, &TurnCompletedEvent{}, TurnCompletedEvent{SessionID: "s1", CompletedAt: fixedTime, Status: "ok", DurationMs: 10, TotalTokens: 100}},
+		{"TurnCompletedEvent_minimal", TurnCompletedEvent{SessionID: "s2", Source: "src", CompletedAt: fixedTime}, &TurnCompletedEvent{}, TurnCompletedEvent{SessionID: "s2", Source: "src", CompletedAt: fixedTime}},
+		{"CovenExtractJobArgs", CovenExtractJobArgs{"t1", "s1"}, &CovenExtractJobArgs{}, CovenExtractJobArgs{"t1", "s1"}},
+		{"WidgetSyncJobArgs_build", WidgetSyncJobArgs{BuildID: "b1", Status: "ok"}, &WidgetSyncJobArgs{}, WidgetSyncJobArgs{BuildID: "b1", Status: "ok"}},
+		{"WidgetSyncJobArgs_pr", WidgetSyncJobArgs{Repo: "r1", PRNumber: 1, Status: "open"}, &WidgetSyncJobArgs{}, WidgetSyncJobArgs{Repo: "r1", PRNumber: 1, Status: "open"}},
+		{"ProsperaReportJobArgs", ProsperaReportJobArgs{"c1"}, &ProsperaReportJobArgs{}, ProsperaReportJobArgs{"c1"}},
+		{"ProsperaVoicemailJobArgs", ProsperaVoicemailJobArgs{"c1", "r1", "http://u", 30}, &ProsperaVoicemailJobArgs{}, ProsperaVoicemailJobArgs{"c1", "r1", "http://u", 30}},
+		{"ProsperaSMSJobArgs", ProsperaSMSJobArgs{"m1", "+1", "+2", "hi", []string{"http://m"}, "c1"}, &ProsperaSMSJobArgs{}, ProsperaSMSJobArgs{"m1", "+1", "+2", "hi", []string{"http://m"}, "c1"}},
+		{"EriPromptJobArgs", EriPromptJobArgs{ChannelID: "c1", Prompt: "p1", Silent: true}, &EriPromptJobArgs{}, EriPromptJobArgs{ChannelID: "c1", Prompt: "p1", Silent: true}},
+		{"EriDispatchJobArgs", EriDispatchJobArgs{Source: "s", TargetID: "t1", Prompt: "p1"}, &EriDispatchJobArgs{}, EriDispatchJobArgs{Source: "s", TargetID: "t1", Prompt: "p1"}},
+		{"EriDiscordMessageJobArgs", EriDiscordMessageJobArgs{"c1", "msg"}, &EriDiscordMessageJobArgs{}, EriDiscordMessageJobArgs{"c1", "msg"}},
+		{"HaroOneShotJobArgs", HaroOneShotJobArgs{ThreadID: "t1", Prompt: "p1", RunAt: fixedTime}, &HaroOneShotJobArgs{}, HaroOneShotJobArgs{ThreadID: "t1", Prompt: "p1", RunAt: fixedTime}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b, err := json.Marshal(tc.payload)
+			if err != nil {
+				t.Fatalf("Marshal(%s): %v", tc.name, err)
+			}
+			if err := json.Unmarshal(b, tc.target); err != nil {
+				t.Fatalf("Unmarshal(%s): %v", tc.name, err)
+			}
+			if !reflect.DeepEqual(reflect.ValueOf(tc.target).Elem().Interface(), tc.expected) {
+				t.Errorf("%s mismatch", tc.name)
 			}
 		})
 	}
