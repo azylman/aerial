@@ -33,7 +33,7 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`console`**: Web status HUD rendering live queue state, schedules, memory, and turn health.
   - **`docs`**: Living documentation portal serving architectural specifications and runbooks.
   - **`agentsview`**: Web observability dashboard rendering agent session transcripts and tool traces.
-  - **`synapse`**: Event-driven ingress router (`:4020`) owning the live Discord Gateway WebSocket connection, startup catch-up sweeps, and River-backed message/interaction ingestion to `eri`, plus routing GitHub push/CI webhooks to Flux CD (`FLUX_RECEIVER_URL`), updating `ConfigMap/aerial-image-tags` in `flux-system` and triggering Flux Kustomization reconciliation (`postBuild.substituteFrom`) on CI image promotions, `/webhooks/flux` deployment notifications, and Vanadis chunk progression.
+  - **`synapse`**: Event-driven ingress router (`:4020`) owning the live Discord Gateway WebSocket connection, startup catch-up sweeps, and NATS JetStream-backed message/interaction ingestion to `eri`, plus routing GitHub push/CI webhooks to Flux CD (`FLUX_RECEIVER_URL`), updating `ConfigMap/aerial-image-tags` in `flux-system` and triggering Flux Kustomization reconciliation (`postBuild.substituteFrom`) on CI image promotions, `/webhooks/flux` deployment notifications, and Vanadis chunk progression.
   - **`edge-gateway`**: NGINX Gateway Fabric ingress gateway (`HTTPRoute`s on `:4021`) exposing secure external tunnel webhooks into the cluster mesh.
 
 - **Observability, AI Inference & Supporting Services**:
