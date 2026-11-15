@@ -29,9 +29,6 @@ func initCovenJetStream(ctx context.Context, worker *Worker, natsURL string) pub
 }
 
 func handleTranscriptSyncedEvent(ctx context.Context, msg pubsub.Message, bus pubsub.Bus, worker *Worker) error {
-	if msg == nil {
-		return nil
-	}
 	var ev pubsub.TranscriptSyncedEvent
 	if err := json.Unmarshal(msg.Data(), &ev); err != nil {
 		log.Printf("[Coven] warning: failed to unmarshal transcript synced event: %v", err)
@@ -48,10 +45,8 @@ func handleTranscriptSyncedEvent(ctx context.Context, msg pubsub.Message, bus pu
 		}
 		return bus.Publish(ctx, pubsub.SubjectCovenExtractCoalesced(ev.ConversationID), msgID, args)
 	}
-	if worker != nil {
-		return worker.ExtractThread(ctx, ev.ConversationID)
-	}
-	return nil
+	// Invariant: when bus is nil (e.g. testing or disconnected), fallback to direct worker.ExtractThread.
+	return worker.ExtractThread(ctx, ev.ConversationID)
 }
 
 func nakBackoffDelay(numDelivered uint64) time.Duration {
@@ -63,18 +58,12 @@ func nakBackoffDelay(numDelivered uint64) time.Duration {
 }
 
 func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Worker) error {
-	if msg == nil {
-		return nil
-	}
 	var args pubsub.CovenExtractJobArgs
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
 		log.Printf("[Coven] error unmarshaling coven extract job: %v", err)
 		if termErr := msg.Term(); termErr != nil {
 			log.Printf("[Coven] warning: error terming coven extract job: %v", termErr)
 		}
-		return nil
-	}
-	if worker == nil {
 		return nil
 	}
 	if err := worker.ExtractThread(ctx, args.ThreadID); err != nil {
@@ -157,23 +146,43 @@ func subscribeCovenExtract(ctx context.Context, b pubsub.Bus, worker *Worker) er
 	return nil
 }
 
-func subscribeCovenConsumers(ctx context.Context, b pubsub.Bus, worker *Worker) error {
+type covenConsumers struct {
+	subscribedTurns            bool
+	subscribedTranscriptSynced bool
+	subscribedExtract          bool
+}
+
+func (c *covenConsumers) subscribeAll(ctx context.Context, b pubsub.Bus, worker *Worker) error {
 	if b == nil || worker == nil {
 		return nil
 	}
 	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
 		log.Printf("[Coven] warning: failed to ensure core streams: %v", err)
 	}
-	if err := subscribeCovenTurns(ctx, b, worker); err != nil {
-		return err
+	if !c.subscribedTurns {
+		if err := subscribeCovenTurns(ctx, b, worker); err != nil {
+			return err
+		}
+		c.subscribedTurns = true
 	}
-	if err := subscribeCovenTranscriptSynced(ctx, b, worker); err != nil {
-		return err
+	if !c.subscribedTranscriptSynced {
+		if err := subscribeCovenTranscriptSynced(ctx, b, worker); err != nil {
+			return err
+		}
+		c.subscribedTranscriptSynced = true
 	}
-	if err := subscribeCovenExtract(ctx, b, worker); err != nil {
-		return err
+	if !c.subscribedExtract {
+		if err := subscribeCovenExtract(ctx, b, worker); err != nil {
+			return err
+		}
+		c.subscribedExtract = true
 	}
 	return nil
+}
+
+func subscribeCovenConsumers(ctx context.Context, b pubsub.Bus, worker *Worker) error {
+	var consumers covenConsumers
+	return consumers.subscribeAll(ctx, b, worker)
 }
 
 var subscribeRetryIntervalNs atomic.Int64
@@ -186,11 +195,7 @@ func getSubscribeRetryInterval() time.Duration {
 	return time.Duration(subscribeRetryIntervalNs.Load())
 }
 
-func retrySubscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) {
-	retrySubscribeCovenConsumers(ctx, b, worker)
-}
-
-func retrySubscribeCovenConsumers(ctx context.Context, b pubsub.Bus, worker *Worker) {
+func retrySubscribeCovenConsumers(ctx context.Context, b pubsub.Bus, worker *Worker, consumers *covenConsumers) {
 	ticker := time.NewTicker(getSubscribeRetryInterval())
 	defer ticker.Stop()
 	for {
@@ -198,7 +203,7 @@ func retrySubscribeCovenConsumers(ctx context.Context, b pubsub.Bus, worker *Wor
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := subscribeCovenConsumers(ctx, b, worker); err == nil {
+			if err := consumers.subscribeAll(ctx, b, worker); err == nil {
 				log.Println("[Coven] Subscribed coven consumers on retry")
 				return
 			}
@@ -217,9 +222,10 @@ func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL 
 		return nil
 	}
 	if worker != nil {
-		if subErr := subscribeCovenConsumers(ctx, b, worker); subErr != nil {
+		consumers := &covenConsumers{}
+		if subErr := consumers.subscribeAll(ctx, b, worker); subErr != nil {
 			log.Printf("[Coven] warning: failed initial coven consumers subscription: %v; will retry in background", subErr)
-			go retrySubscribeCovenConsumers(ctx, b, worker)
+			go retrySubscribeCovenConsumers(ctx, b, worker, consumers)
 		}
 	}
 	return b
