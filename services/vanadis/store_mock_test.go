@@ -927,6 +927,115 @@ func (m *memoryVanadisStore) RemoveChunk(_ context.Context, buildID, chunkRef st
 	return &removed, remaining, nil
 }
 
+func (m *memoryVanadisStore) RecordPRCheckStatus(_ context.Context, chunkID, checkName, checkState string) error {
+	now := time.Now().UTC()
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].ID != chunkID {
+				continue
+			}
+			if list[i].CIChecks == nil {
+				list[i].CIChecks = make(map[string]string)
+			}
+			list[i].CIChecks[checkName] = checkState
+			list[i].UpdatedAt = now
+			m.chunks[bID] = list
+			return nil
+		}
+	}
+	return ErrChunkNotFound
+}
+
+func (m *memoryVanadisStore) RecordPRRolloutState(_ context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error {
+	now := time.Now().UTC()
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].ID != chunkID {
+				continue
+			}
+			list[i].RolloutState = rolloutState
+			if status != "" {
+				list[i].Status = status
+			}
+			list[i].UpdatedAt = now
+			m.chunks[bID] = list
+			return nil
+		}
+	}
+	return ErrChunkNotFound
+}
+
+func (m *memoryVanadisStore) ResetChunkForSynchronize(_ context.Context, chunkID, buildID string) error {
+	now := time.Now().UTC()
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].ID != chunkID {
+				continue
+			}
+			list[i].CIFailCount = 0
+			list[i].CIChecks = make(map[string]string)
+			list[i].Banner = ""
+			if list[i].Status == "failed" {
+				list[i].Status = "pr_opened"
+				list[i].MergeAwakeableID = ""
+				list[i].DeployAwakeableID = ""
+				list[i].CompletedAt = time.Time{}
+			}
+			list[i].UpdatedAt = now
+			m.chunks[bID] = list
+			if b, ok := m.builds[buildID]; ok {
+				if b.Status == "failed" {
+					b.Status = "running"
+					b.UpdatedAt = now
+					m.builds[buildID] = b
+				}
+			}
+			return nil
+		}
+	}
+	return ErrChunkNotFound
+}
+
+func (m *memoryVanadisStore) IncrementChunkCIFailCount(_ context.Context, chunkID, banner string) (int, error) {
+	now := time.Now().UTC()
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].ID != chunkID {
+				continue
+			}
+			if list[i].Status == "failed" || list[i].Status == "completed" || list[i].Status == "merged" {
+				return list[i].CIFailCount, nil
+			}
+			list[i].CIFailCount++
+			list[i].Status = "ci_failed"
+			list[i].Banner = banner
+			list[i].UpdatedAt = now
+			m.chunks[bID] = list
+			return list[i].CIFailCount, nil
+		}
+	}
+	return 0, ErrChunkNotFound
+}
+
+func (m *memoryVanadisStore) UpdateChunkBannerAndStatus(_ context.Context, chunkID, status, banner string) error {
+	now := time.Now().UTC()
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].ID != chunkID {
+				continue
+			}
+			if status != "" {
+				list[i].Status = status
+			}
+			list[i].Banner = banner
+			list[i].UpdatedAt = now
+			m.chunks[bID] = list
+			return nil
+		}
+	}
+	return ErrChunkNotFound
+}
+
 type mockChunkBus struct {
 	pubsub.Bus
 

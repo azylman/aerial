@@ -51,8 +51,10 @@ func (s *VanadisServer) handleCompletedDispatchOutcome(ctx context.Context, ev p
 	}
 	RecordChunkTotal("completed")
 	s.syncBuildWidget(ctx, res.BuildID, "")
+	s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{ev.VanadisChunkID}, "")
 	if res.BuildCompleted {
 		RecordBuildTotal("completed")
+		s.publishExternalEvent(ctx, "vanadis_build", "completed", []string{res.BuildID}, "")
 		s.dispatchCompletedBuildWake(ctx, res)
 	}
 	if s.notifyRestateActionChunkCompleted(ctx, ev.VanadisChunkID) {
