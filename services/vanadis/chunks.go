@@ -899,6 +899,10 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 		if err := s.launchBuildOnRestate(r.Context(), buildID); err != nil {
 			log.Printf("[vanadis] warning: failed to launch standalone build %s on restate: %v", buildID, err)
 		}
+	} else if s.restateCfg.Enabled {
+		if err := s.reconcileBuildOnRestate(r.Context(), buildID, "pr_attached"); err != nil {
+			log.Printf("[vanadis] warning: failed to reconcile build %s on attach pr on restate: %v", buildID, err)
+		}
 	}
 	s.syncBuildWidget(r.Context(), buildID, "")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
@@ -1077,8 +1081,8 @@ func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Reque
 
 func (s *VanadisServer) syncBuildAndNotifyMutation(ctx context.Context, buildID, action string) {
 	s.syncBuildWidget(ctx, buildID, "")
-	if err := s.notifyRestateDAGMutation(ctx, buildID, action); err != nil {
-		log.Printf("[vanadis] warning: failed signaling restate dag mutation on %s for build %s: %v", action, buildID, err)
+	if err := s.reconcileBuildOnRestate(ctx, buildID, action); err != nil {
+		log.Printf("[vanadis] warning: failed reconciling restate build on %s for build %s: %v", action, buildID, err)
 	}
 }
 

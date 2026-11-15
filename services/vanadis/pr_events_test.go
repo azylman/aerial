@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -636,19 +637,19 @@ func TestHandlePRCIFailed_CapReached(t *testing.T) {
 		assert.Equal(t, "failed", updatedBuild.Status)
 		assert.Contains(t, updatedChunk.Banner, "CI remediation cap (3/3) reached")
 
-		var foundDirectMessage, foundAwakeableReject bool
+		var foundDirectMessage, foundReconcile bool
 		for _, r := range *reqs {
 			if r.Path == "/discord/message" {
 				foundDirectMessage = true
 				assert.Contains(t, r.Body["content"], "remediation cap 3/3 reached")
 			}
-			if r.Path == "/restate/awakeables/awk-m-ci/resolve" {
-				foundAwakeableReject = true
+			if r.Path == "/BuildReconciler/b-ci4/Reconcile/send" {
+				foundReconcile = true
 			}
 		}
 		assert.True(t, foundDirectMessage, "expected POST /discord/message")
-		assert.True(t, foundAwakeableReject, "expected awakeable to be failed in restate")
-		assert.Empty(t, recBus.getEvents(), "awakeable path must not publish external events from handler")
+		assert.True(t, foundReconcile, "expected reconcile to be sent to restate")
+		assert.NotEmpty(t, recBus.getEvents(), "must publish external events on failure cap")
 	})
 
 	t.Run("attempt > 3 triggers remediation cap failure for non-awakeable chunks and publishes external events", func(t *testing.T) {
@@ -859,72 +860,81 @@ func TestHandlePRConflict_DeployFailed_SyncFailed(t *testing.T) {
 	})
 }
 
-func TestHandlePRMerged(t *testing.T) {
+func TestHandlePRMergedAndDeploySuccess(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
 
-	t.Run("resolves merge_awakeable_id when present", func(t *testing.T) {
-		t.Parallel()
-		srv, store, recBus, reqs := setupTestServer(t)
-		build := mkBuild("b-m1", "123456789012345678", "Build", "Obj", "running")
-		chunk := mkChunk("c-m1", "b-m1", 0, "Chunk", "Instr", "medium", "pr_opened")
-		chunk.PRNumber = 801
-		chunk.Repo = "azylman/aerial"
-		chunk.MergeAwakeableID = "awk-merge-801"
-		require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
+	tests := []struct {
+		name       string
+		event      string
+		buildID    string
+		chunkID    string
+		prNum      int
+		initStatus string
+		wantStatus string
+		wantEvent  string
+	}{
+		{
+			name:       "merged event sets status to merged and reconciles",
+			event:      "merged",
+			buildID:    "b-m1",
+			chunkID:    "c-m1",
+			prNum:      801,
+			initStatus: "pr_opened",
+			wantStatus: "merged",
+			wantEvent:  "merged",
+		},
+		{
+			name:       "deploy_success event sets status to completed and reconciles",
+			event:      "deploy_success",
+			buildID:    "b-d1",
+			chunkID:    "c-d1",
+			prNum:      901,
+			initStatus: "merged",
+			wantStatus: "completed",
+			wantEvent:  "completed",
+		},
+	}
 
-		ev := pubsub.PRLifecycleEvent{
-			Event:    "merged",
-			Repo:     "azylman/aerial",
-			PRNumber: 801,
-		}
-		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			srv, store, recBus, reqs := setupTestServer(t)
+			build := mkBuild(tc.buildID, "123456789012345678", "Build", "Obj", "running")
+			chunk := mkChunk(tc.chunkID, tc.buildID, 0, "Chunk", "Instr", "medium", tc.initStatus)
+			chunk.PRNumber = tc.prNum
+			chunk.Repo = "azylman/aerial"
+			require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
 
-		updatedChunk, _, err := store.GetChunk(ctx, "c-m1")
-		require.NoError(t, err)
-		assert.Equal(t, "merged", updatedChunk.Status)
-
-		var foundAwkResolve bool
-		for _, r := range *reqs {
-			if r.Path == "/restate/awakeables/awk-merge-801/resolve" {
-				foundAwkResolve = true
+			ev := pubsub.PRLifecycleEvent{
+				Event:    tc.event,
+				Repo:     "azylman/aerial",
+				PRNumber: tc.prNum,
 			}
-		}
-		assert.True(t, foundAwkResolve)
-		assert.Empty(t, recBus.getEvents(), "awakeable path must not publish duplicate external events")
-	})
-}
+			require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
 
-func TestHandlePRDeploySuccess(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
+			updatedChunk, _, err := store.GetChunk(ctx, tc.chunkID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantStatus, updatedChunk.Status)
 
-	t.Run("resolves deploy_awakeable_id when present", func(t *testing.T) {
-		t.Parallel()
-		srv, store, recBus, reqs := setupTestServer(t)
-		build := mkBuild("b-d1", "123456789012345678", "Build", "Obj", "running")
-		chunk := mkChunk("c-d1", "b-d1", 0, "Chunk", "Instr", "medium", "merged")
-		chunk.PRNumber = 901
-		chunk.Repo = "azylman/aerial"
-		chunk.DeployAwakeableID = "awk-deploy-901"
-		require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
-
-		ev := pubsub.PRLifecycleEvent{
-			Event:    "deploy_success",
-			Repo:     "azylman/aerial",
-			PRNumber: 901,
-		}
-		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
-
-		var foundAwkResolve bool
-		for _, r := range *reqs {
-			if r.Path == "/restate/awakeables/awk-deploy-901/resolve" {
-				foundAwkResolve = true
+			wantReconcilePath := fmt.Sprintf("/BuildReconciler/%s/Reconcile/send", tc.buildID)
+			var foundReconcile bool
+			for _, r := range *reqs {
+				if r.Path == wantReconcilePath {
+					foundReconcile = true
+				}
 			}
-		}
-		assert.True(t, foundAwkResolve)
-		assert.Empty(t, recBus.getEvents(), "awakeable path must not publish duplicate external events")
-	})
+			assert.True(t, foundReconcile, "must call BuildReconciler")
+
+			var foundEvent bool
+			for _, published := range recBus.getEvents() {
+				if published.Source == "vanadis_chunk" && published.EventType == tc.wantEvent {
+					foundEvent = true
+				}
+			}
+			assert.True(t, foundEvent, "must publish expected external event")
+		})
+	}
 }
 
 func TestHandlePRClosedUnmerged(t *testing.T) {
@@ -1092,7 +1102,6 @@ func TestHandlePRDeploySuccess_ActionChunkWithPR(t *testing.T) {
 	chunk := mkChunk("c-act-pr-1", "b-act-pr-cycle", 0, "Action Chunk", "Fix code", "medium", "running")
 	chunk.Mode = "action"
 	chunk.Repo = ""
-	chunk.DeployAwakeableID = "awk-deploy-act-1"
 	require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
 
 	// 1. Attach PR to action chunk
@@ -1103,10 +1112,7 @@ func TestHandlePRDeploySuccess_ActionChunkWithPR(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// 2. End-of-turn dispatch outcome arrives: must NOT resolve awakeable for action chunk with attached PR
-	assert.NoError(t, srv.notifyRestateActionChunkCompleted(ctx, "c-act-pr-1"), "notifyRestateActionChunkCompleted must be skipped for chunk with attached PR")
-
-	// 3. PR merges: chunk transitions to merged but does NOT complete build
+	// 2. PR merges: chunk transitions to merged but does NOT complete build
 	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:    "merged",
 		Repo:     "azylman/aerial",
@@ -1118,30 +1124,31 @@ func TestHandlePRDeploySuccess_ActionChunkWithPR(t *testing.T) {
 	assert.Equal(t, "merged", cAfterMerge.Status)
 	assert.Equal(t, "running", bAfterMerge.Status, "build must remain running while action chunk awaits deployment")
 
-	// 4. Sync succeeds: progress only, must NOT resolve deployment awakeable for action chunk
+	// 3. Sync succeeds: progress only, must NOT reconcile on sync_success
 	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:    "sync_success",
 		Repo:     "azylman/aerial",
 		PRNumber: 905,
 	}))
-	for _, r := range *reqs {
-		assert.NotEqual(t, "/restate/awakeables/awk-deploy-act-1/resolve", r.Path, "sync_success must not resolve deploy awakeable")
-	}
 
-	// 5. PR deploy succeeds: deploy awakeable is resolved
+	// 4. PR deploy succeeds: BuildReconciler is called and chunk becomes completed
 	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:    "deploy_success",
 		Repo:     "azylman/aerial",
 		PRNumber: 905,
 	}))
 
-	var foundAwkResolve bool
+	cAfterDeploy, _, err := store.GetChunk(ctx, "c-act-pr-1")
+	require.NoError(t, err)
+	assert.Equal(t, "completed", cAfterDeploy.Status)
+
+	var foundReconcile bool
 	for _, r := range *reqs {
-		if r.Path == "/restate/awakeables/awk-deploy-act-1/resolve" {
-			foundAwkResolve = true
+		if r.Path == "/BuildReconciler/b-act-pr-cycle/Reconcile/send" {
+			foundReconcile = true
 		}
 	}
-	assert.True(t, foundAwkResolve, "deploy_awakeable must be resolved on deploy_success")
+	assert.True(t, foundReconcile, "BuildReconciler must be called on deploy_success")
 }
 
 func TestHandlePRDeploySuccess_WithoutAwakeable(t *testing.T) {

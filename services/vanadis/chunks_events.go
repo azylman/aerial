@@ -28,19 +28,26 @@ func (s *VanadisServer) handleCompletedDispatchOutcome(ctx context.Context, ev p
 	if res == nil || res.ChunkMode != "action" {
 		return nil
 	}
-	if res.Advanced {
-		RecordChunkTotal("completed")
-		s.syncBuildWidget(ctx, res.BuildID, "")
-		s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{ev.VanadisChunkID}, "")
-		if res.BuildCompleted {
-			RecordBuildTotal("completed")
-			s.publishExternalEvent(ctx, "vanadis_build", "completed", []string{res.BuildID}, "")
-			s.dispatchCompletedBuildWake(ctx, res)
+	if !res.Advanced {
+		if res.ChunkMode == "action" && s.restateCfg.RestateIngressURL != "" {
+			if c, _, gErr := s.store.GetChunk(ctx, ev.VanadisChunkID); gErr == nil && c != nil && c.Status == "completed" {
+				return s.reconcileBuildOnRestate(ctx, res.BuildID, "action_completed")
+			}
 		}
+		return nil
 	}
-	if err := s.notifyRestateActionChunkCompleted(ctx, ev.VanadisChunkID); err != nil {
-		log.Printf("[vanadis] notify restate action chunk %s completed error: %v", ev.VanadisChunkID, err)
-		return err
+	RecordChunkTotal("completed")
+	s.syncBuildWidget(ctx, res.BuildID, "")
+	s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{ev.VanadisChunkID}, "")
+	if res.BuildCompleted {
+		RecordBuildTotal("completed")
+		s.publishExternalEvent(ctx, "vanadis_build", "completed", []string{res.BuildID}, "")
+		s.dispatchCompletedBuildWake(ctx, res)
+	}
+	if s.restateCfg.RestateIngressURL != "" {
+		if err := s.reconcileBuildOnRestate(ctx, res.BuildID, "action_completed"); err != nil {
+			return err
+		}
 	}
 	return nil
 }

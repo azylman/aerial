@@ -95,8 +95,8 @@ func (s *PostgresVanadisStore) ResetChunkForSynchronize(ctx context.Context, chu
 SET ci_fail_count = 0,
     ci_checks = '{}'::jsonb,
     banner = '',
-    status = CASE WHEN status = 'failed' THEN 'pr_opened' ELSE status END,
-    completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END,
+    status = CASE WHEN status IN ('failed', 'deploy_failed') THEN 'pr_opened' ELSE status END,
+    completed_at = CASE WHEN status IN ('failed', 'deploy_failed') THEN NULL ELSE completed_at END,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = $1;`
 	tag, err := s.db.Exec(ctx, chunkQ, chunkID)
@@ -367,11 +367,17 @@ func (s *VanadisServer) handlePROpened(ctx context.Context, ev pubsub.PRLifecycl
 }
 
 func (s *VanadisServer) handlePRSynchronize(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) error {
+	wasDeployFailed := strings.EqualFold(chunk.Status, "deploy_failed")
 	if err := s.store.ResetChunkForSynchronize(ctx, chunk.ID, build.ID); err != nil {
 		log.Printf("[vanadis] warning resetting chunk %s on synchronize: %v", chunk.ID, err)
 		return err
 	}
 	s.syncBuildWidget(ctx, build.ID, "")
+	if wasDeployFailed {
+		if err := s.reconcileBuildOnRestate(ctx, build.ID, "synchronize"); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -456,10 +462,10 @@ func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecy
 			log.Printf("[vanadis] warning sending cap direct message to thread %s: %v", build.ThreadID, err)
 		}
 
-		s.notifyRestateChunkFailed(ctx, chunk.ID)
-		if chunk.MergeAwakeableID == "" && chunk.DeployAwakeableID == "" {
-			s.publishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunk.ID}, "ci_remediation_cap_reached")
-			s.publishExternalEvent(ctx, "vanadis_build", "failed", []string{build.ID}, "ci_remediation_cap_reached")
+		s.publishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunk.ID}, "ci_remediation_cap_reached")
+		s.publishExternalEvent(ctx, "vanadis_build", "failed", []string{build.ID}, "ci_remediation_cap_reached")
+		if err := s.reconcileBuildOnRestate(ctx, build.ID, "ci_failed_cap"); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -513,29 +519,15 @@ func (s *VanadisServer) handlePRMerged(ctx context.Context, chunk *VanadisChunk,
 		}
 	}
 	RecordChunkTotal("merged")
-
-	if strings.TrimSpace(chunk.MergeAwakeableID) != "" {
-		if err := s.resolveRestateAwakeable(ctx, chunk.MergeAwakeableID, "merged"); err != nil {
-			log.Printf("[vanadis] warning resolving merge awakeable %s: %v", chunk.MergeAwakeableID, err)
-		}
-		s.syncBuildWidget(ctx, build.ID, "")
-		return nil
-	}
-
-	s.syncBuildWidget(ctx, build.ID, "")
 	s.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunk.ID}, "")
+	s.syncBuildWidget(ctx, build.ID, "")
+	if err := s.reconcileBuildOnRestate(ctx, build.ID, "merged"); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) error {
-	if strings.TrimSpace(chunk.DeployAwakeableID) != "" {
-		if err := s.resolveRestateAwakeable(ctx, chunk.DeployAwakeableID, "deploy_success"); err != nil {
-			log.Printf("[vanadis] warning resolving deploy awakeable %s: %v", chunk.DeployAwakeableID, err)
-		}
-		s.syncBuildWidget(ctx, build.ID, "")
-		return nil
-	}
-
 	chunkStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
 	buildStatus := strings.ToLower(strings.TrimSpace(build.Status))
 	if chunkStatus == "failed" || chunkStatus == "cancelled" || buildStatus == "failed" || buildStatus == "cancelled" {
@@ -544,17 +536,17 @@ func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *Vanadi
 		return nil
 	}
 
-	if chunkStatus != "completed" {
+	if !strings.EqualFold(chunk.Status, "completed") {
 		if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
 			return fmt.Errorf("update chunk %s to completed on deploy_success: %w", chunk.ID, err)
 		}
 		RecordChunkTotal("completed")
 		s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunk.ID}, "")
+		s.syncBuildWidget(ctx, build.ID, "")
 	}
-	if err := s.reconcileBuild(ctx, build.ID, "deploy_success"); err != nil {
-		return fmt.Errorf("reconcile build %s on deploy_success: %w", build.ID, err)
+	if err := s.reconcileBuildOnRestate(ctx, build.ID, "deploy_success"); err != nil {
+		return err
 	}
-	s.syncBuildWidget(ctx, build.ID, "")
 	return nil
 }
 

@@ -119,7 +119,7 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 
 	// If this chunk completed the build (all chunks done), mark the build completed.
 	var remainingCount int
-	const checkRemainingSQL = `SELECT COUNT(*) FROM vanadis_chunks WHERE build_id = $1 AND id != $2 AND status NOT IN ('completed', 'merged');`
+	const checkRemainingSQL = `SELECT COUNT(*) FROM vanadis_chunks WHERE build_id = $1 AND id != $2 AND status != 'completed';`
 	if err := tx.QueryRow(ctx, checkRemainingSQL, bID, cID).Scan(&remainingCount); err == nil && remainingCount == 0 {
 		const updateBuildSQL = `UPDATE vanadis_builds SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
 		if _, err := tx.Exec(ctx, updateBuildSQL, bID); err == nil {
@@ -211,10 +211,6 @@ func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason st
 	return &b, &c, true, nil
 }
 
-func isTerminalBuildStatus(status string) bool {
-	return status == "cancelled"
-}
-
 func formatChunkLedgerLabel(c VanadisChunkSummary) string {
 	if c.Mode == "action" {
 		return "(action, completed)"
@@ -258,10 +254,12 @@ func isShutdownInterruptionReason(reason string) bool {
 func (s *VanadisServer) handleChunkFailureTransition(ctx context.Context, build *VanadisBuild, chunk *VanadisChunk, reason string) {
 	RecordChunkTotal("failed")
 	RecordBuildTotal("failed")
-	s.notifyRestateChunkFailed(ctx, chunk.ID)
-	if chunk.MergeAwakeableID == "" && chunk.DeployAwakeableID == "" {
-		s.publishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunk.ID}, reason)
-		s.publishExternalEvent(ctx, "vanadis_build", "failed", []string{build.ID}, reason)
+	s.publishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunk.ID}, reason)
+	s.publishExternalEvent(ctx, "vanadis_build", "failed", []string{build.ID}, reason)
+	if s.restateCfg.RestateIngressURL != "" {
+		if rErr := s.reconcileBuildOnRestate(ctx, build.ID, "chunk_failed"); rErr != nil {
+			log.Printf("[vanadis] warning: failed reconciling build %s on chunk failure: %v", build.ID, rErr)
+		}
 	}
 
 	totalChunks := chunk.ChunkIndex + 1
