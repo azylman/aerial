@@ -670,7 +670,7 @@ type prAutoMergeDisabledTestCase struct {
 	apiMerged             bool
 	registryUpdated       bool
 	registryTargetID      string
-	wantConflictEnqueued  int
+	wantConflictPublished int
 	wantErr               bool
 	wantFailedNonRoboRev  string
 }
@@ -737,8 +737,14 @@ func runPRAutoMergeDisabledCase(ctx context.Context, t *testing.T, tc prAutoMerg
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("handlePRAutoMergeDisabledAction err = %v, wantErr = %v", err, tc.wantErr)
 	}
-	if len(bus.insertedConflictJobs) != tc.wantConflictEnqueued {
-		t.Fatalf("insertedConflictJobs len = %d, want %d", len(bus.insertedConflictJobs), tc.wantConflictEnqueued)
+	conflictCount := 0
+	for _, evt := range bus.publishedPREvents {
+		if evt.Event == "conflict" {
+			conflictCount++
+		}
+	}
+	if conflictCount != tc.wantConflictPublished {
+		t.Fatalf("published conflict events = %d, want %d", conflictCount, tc.wantConflictPublished)
 	}
 	if tc.wantFailedNonRoboRev != "" {
 		val, ok := srv.nonRoboRevFailedSHAs.Load(prCheckKey(tc.resRepo, tc.resPRNum))
@@ -770,7 +776,7 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			apiState:              "open",
 			registryUpdated:       true,
 			registryTargetID:      "100000000000000001",
-			wantConflictEnqueued:  1,
+			wantConflictPublished: 1,
 			wantFailedNonRoboRev:  "sha102",
 		},
 		{
@@ -783,7 +789,7 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			payloadMergeableState: "",
 			registryUpdated:       true,
 			registryTargetID:      "100000000000000001",
-			wantConflictEnqueued:  1,
+			wantConflictPublished: 1,
 			wantFailedNonRoboRev:  "sha103",
 		},
 		{
@@ -794,7 +800,7 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			resHeadSHA:            "sha104",
 			payloadMergeable:      &trueVal,
 			payloadMergeableState: "",
-			wantConflictEnqueued:  0,
+			wantConflictPublished: 0,
 		},
 		{
 			name:                  "unknown state with empty repo normalization skips API lookup and ignores non-conflict",
@@ -804,7 +810,7 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			resHeadSHA:            "sha107",
 			payloadMergeableState: "unknown",
 			ghAPIStatus:           http.StatusInternalServerError,
-			wantConflictEnqueued:  0,
+			wantConflictPublished: 0,
 		},
 		{
 			name:                  "unknown state where API returns merged PR is ignored cleanly",
@@ -816,7 +822,7 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			apiMergeableState:     "dirty",
 			apiHeadSHA:            "sha109",
 			apiMerged:             true,
-			wantConflictEnqueued:  0,
+			wantConflictPublished: 0,
 		},
 		{
 			name:                  "unknown state where API returns closed PR is ignored cleanly",
@@ -828,7 +834,7 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			apiMergeableState:     "dirty",
 			apiHeadSHA:            "sha110",
 			apiState:              "closed",
-			wantConflictEnqueued:  0,
+			wantConflictPublished: 0,
 		},
 		{
 			name:                  "unknown state where API returns superseded head SHA is ignored cleanly",
@@ -840,7 +846,7 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			apiMergeableState:     "dirty",
 			apiHeadSHA:            "sha111-newer",
 			apiState:              "open",
-			wantConflictEnqueued:  0,
+			wantConflictPublished: 0,
 		},
 		{
 			name:                  "unknown state where API returns HTTP 500 propagates error",
@@ -851,7 +857,7 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			payloadMergeableState: "unknown",
 			ghAPIStatus:           http.StatusInternalServerError,
 			wantErr:               true,
-			wantConflictEnqueued:  0,
+			wantConflictPublished: 0,
 		},
 		{
 			name:                  "registry returns updated false skips enqueuing conflict job",
@@ -861,7 +867,7 @@ func TestHandlePRAutoMergeDisabledAction(t *testing.T) {
 			resHeadSHA:            "sha115",
 			payloadMergeableState: "dirty",
 			registryUpdated:       false,
-			wantConflictEnqueued:  0,
+			wantConflictPublished: 0,
 			wantFailedNonRoboRev:  "sha115",
 		},
 	}

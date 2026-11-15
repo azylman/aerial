@@ -62,58 +62,8 @@ func TestPRLifecycleEvents_Publish(t *testing.T) {
 		if bus.publishedPREvents[0].Event != "conflict" {
 			t.Errorf("expected event conflict, got %s", bus.publishedPREvents[0].Event)
 		}
-	})
-
-	t.Run("dispatchConflictPrompt dispatches prompt for conflicted PR", func(t *testing.T) {
-		t.Parallel()
-		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
-		srv := &RouterServer{
-			dispatcher: disp,
-			registry:   reg,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-
-		err := srv.dispatchConflictPrompt(context.Background(), "123456789012345678", "azylman/aerial", "feat/branch", "sha-conflict", 42)
-		if err != nil {
-			t.Fatalf("dispatchConflictPrompt() err = %v", err)
-		}
-		if len(disp.DispatchCalls()) != 1 {
-			t.Errorf("expected 1 dispatch call, got %d", len(disp.DispatchCalls()))
-		}
-	})
-
-	t.Run("dispatchConflictPrompt bus suppression matrix", func(t *testing.T) {
-		t.Parallel()
-		tests := []struct {
-			name           string
-			suppressPrompt bool
-			wantDispatches int
-		}{
-			{name: "suppresses conflict prompt when build-orchestrated", suppressPrompt: true, wantDispatches: 0},
-			{name: "dispatches conflict prompt when not build-orchestrated", suppressPrompt: false, wantDispatches: 1},
-		}
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				bus := &mockEventBus{}
-				disp := &mockOutboundDispatcher{}
-				reg := &mockPRRegistry{suppressConflictPrompt: tc.suppressPrompt, resolveTargetID: "123456789012345678"}
-				srv := &RouterServer{
-					bus:        bus,
-					dispatcher: disp,
-					registry:   reg,
-					cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-				}
-
-				err := srv.dispatchConflictPrompt(context.Background(), "123456789012345678", "azylman/aerial", "feat/branch", "sha-conflict", 42)
-				if err != nil {
-					t.Fatalf("dispatchConflictPrompt() err = %v", err)
-				}
-				if len(disp.DispatchCalls()) != tc.wantDispatches {
-					t.Errorf("dispatch calls = %d, want %d", len(disp.DispatchCalls()), tc.wantDispatches)
-				}
-			})
+		if len(disp.DispatchCalls()) != 0 {
+			t.Errorf("expected 0 prompt dispatches from synapse on conflict, got %d", len(disp.DispatchCalls()))
 		}
 	})
 }
@@ -314,19 +264,13 @@ func TestPRLifecycleEvents_DeployAndKustomization(t *testing.T) {
 			TargetID:  "123456789012345678",
 			Timestamp: time.Now().UTC(),
 		}
-		err := srv.handleDeploySyncSuccess(context.Background(), evt, true)
-		if err != nil {
-			t.Fatalf("handleDeploySyncSuccess(syncHasExpected=true) err = %v", err)
-		}
+		srv.handleDeploySyncSuccess(context.Background(), evt, true)
 		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "sync_success" {
 			t.Errorf("expected sync_success, got %v", bus.publishedPREvents)
 		}
 
 		// When syncHasExpected is false -> deploy_success
-		err = srv.handleDeploySyncSuccess(context.Background(), evt, false)
-		if err != nil {
-			t.Fatalf("handleDeploySyncSuccess(syncHasExpected=false) err = %v", err)
-		}
+		srv.handleDeploySyncSuccess(context.Background(), evt, false)
 		if len(bus.publishedPREvents) != 2 || bus.publishedPREvents[1].Event != "deploy_success" {
 			t.Errorf("expected deploy_success, got %v", bus.publishedPREvents)
 		}

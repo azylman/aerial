@@ -81,7 +81,6 @@ var (
 
 const (
 	QueueDefault            = "default"
-	QueueMergeConflict      = "merge_conflict"
 	QueueDiscordIngress     = "discord_ingress"
 	QueueDiscordInteraction = "discord_interaction"
 )
@@ -89,7 +88,6 @@ const (
 var (
 	knownQueues = []string{
 		QueueDefault,
-		QueueMergeConflict,
 		QueueDiscordIngress,
 		QueueDiscordInteraction,
 	}
@@ -181,7 +179,6 @@ type synapseConsumerTarget struct {
 var synapseConsumerTargets = []synapseConsumerTarget{
 	{stream: "AERIAL_JOBS", consumer: "synapse-github", queue: QueueDefault},
 	{stream: "AERIAL_JOBS", consumer: "synapse-deploy", queue: QueueDefault},
-	{stream: "AERIAL_JOBS", consumer: "synapse-merge-conflict", queue: QueueMergeConflict},
 	{stream: "AERIAL_JOBS", consumer: "synapse-discord-ingress", queue: QueueDiscordIngress},
 	{stream: "AERIAL_JOBS", consumer: "synapse-discord-interaction", queue: QueueDiscordInteraction},
 }
@@ -229,10 +226,6 @@ func normalizeJobArgs(args any) any {
 		if a != nil {
 			return *a
 		}
-	case *MergeConflictArgs:
-		if a != nil {
-			return *a
-		}
 	case *DiscordIngressArgs:
 		if a != nil {
 			return *a
@@ -251,8 +244,6 @@ func resolveJobQueueAndKind(args any) (string, string) {
 		return QueueDefault, "github_webhook"
 	case DeployWebhookArgs:
 		return QueueDefault, "deploy_webhook"
-	case MergeConflictArgs:
-		return QueueMergeConflict, "merge_conflict"
 	case DiscordIngressArgs:
 		return QueueDiscordIngress, "discord_ingress"
 	case DiscordInteractionArgs:
@@ -290,15 +281,6 @@ type GitHubWebhookArgs struct {
 type DeployWebhookArgs struct {
 	IdempotencyKey string      `json:"idempotency_key,omitempty"`
 	Event          DeployEvent `json:"event"`
-}
-
-// MergeConflictArgs contains payload data for durable background processing of PR merge conflicts.
-type MergeConflictArgs struct {
-	Repo     string `json:"repo"`
-	PRNumber int    `json:"pr_number"`
-	Branch   string `json:"branch"`
-	HeadSHA  string `json:"head_sha"`
-	TargetID string `json:"target_id"`
 }
 
 // DiscordMessageIngressRequest represents the payload delivered to Eri for message ingress.

@@ -141,8 +141,7 @@ func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo st
 			Quiet:        isDependabotBranch(branch),
 			OccurredAt:   time.Now().UTC(),
 		})
-		args := MergeConflictArgs{Repo: repo, PRNumber: prNumber, Branch: branch, HeadSHA: headSHA, TargetID: targetID}
-		return s.enqueueMergeConflict(ctx, args)
+		return nil
 	}
 	return nil
 }

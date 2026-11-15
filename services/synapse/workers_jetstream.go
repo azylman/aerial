@@ -17,9 +17,6 @@ func resolveJetStreamJobCoords(args any) (string, string) {
 		return "aerial.jobs.synapse.github", "github:" + a.Delivery
 	case DeployWebhookArgs:
 		return "aerial.jobs.synapse.deploy", "deploy:" + a.IdempotencyKey
-	case MergeConflictArgs:
-		bucket := time.Now().Unix() / 900
-		return "aerial.jobs.synapse.merge_conflict", fmt.Sprintf("conflict:%s:%d:%d", a.Repo, a.PRNumber, bucket)
 	case DiscordIngressArgs:
 		return "aerial.jobs.synapse.discord_ingress", "discord:msg:" + a.MessageID
 	case DiscordInteractionArgs:
@@ -32,7 +29,6 @@ func resolveJetStreamJobCoords(args any) (string, string) {
 const (
 	maxDeliverGitHubWebhook      uint64 = 5
 	maxDeliverDeployWebhook      uint64 = 5
-	maxDeliverMergeConflict      uint64 = 5
 	maxDeliverDiscordIngress     uint64 = 30
 	maxDeliverDiscordInteraction uint64 = 1
 )
@@ -106,14 +102,6 @@ func (s *RouterServer) HandleDeployJob(ctx context.Context, msg pubsub.Message) 
 		log.Printf("[synapse] [jetstream] processing deploy job event=%s job_name=%s", args.Event.Event, args.Event.JobName)
 		_, err := s.ProcessDeployEvent(ctx, args.Event)
 		return err
-	})
-}
-
-// HandleMergeConflictJob processes an aerial.jobs.synapse.merge_conflict job message from JetStream.
-func (s *RouterServer) HandleMergeConflictJob(ctx context.Context, msg pubsub.Message) error {
-	return handleJetStreamJob(msg, maxDeliverMergeConflict, "merge conflict", func(args MergeConflictArgs) error {
-		log.Printf("[synapse] [jetstream] processing merge conflict job repo=%s pr=%d", args.Repo, args.PRNumber)
-		return s.ProcessMergeConflict(ctx, args)
 	})
 }
 
@@ -209,7 +197,7 @@ func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubs
 	return nil
 }
 
-// StartJobConsumers registers the 5 durable consumers for Synapse on AERIAL_JOBS.
+// StartJobConsumers registers the durable consumers for Synapse on AERIAL_JOBS.
 func (s *RouterServer) StartJobConsumers(ctx context.Context) error {
 	if s == nil || s.bus == nil {
 		return nil
@@ -222,7 +210,6 @@ func (s *RouterServer) StartJobConsumers(ctx context.Context) error {
 	specs := []consumerSpec{
 		{"aerial.jobs.synapse.github", "synapse-github", s.HandleGitHubJob},
 		{"aerial.jobs.synapse.deploy", "synapse-deploy", s.HandleDeployJob},
-		{"aerial.jobs.synapse.merge_conflict", "synapse-merge-conflict", s.HandleMergeConflictJob},
 		{"aerial.jobs.synapse.discord_ingress", "synapse-discord-ingress", s.HandleDiscordIngressJob},
 		{"aerial.jobs.synapse.discord_interaction", "synapse-discord-interaction", s.HandleDiscordInteractionJob},
 	}
