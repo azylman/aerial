@@ -20,30 +20,16 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
-func TestBuildReconciler_Reflection(t *testing.T) {
-	t.Parallel()
-
-	srv := &VanadisServer{}
-	rec := NewBuildReconciler(srv)
-	assert.Equal(t, "BuildReconciler", rec.ServiceName())
-
-	// Exercise runtime adapter methods on concrete restateObjectRuntime type
-	var or objectRuntime = restateObjectRuntime{}
-	assert.NotNil(t, or)
-
-	// restate.Reflect panics if handler signatures are invalid
-	require.NotPanics(t, func() {
-		def := restate.Reflect(rec)
-		require.NotNil(t, def)
-	})
-}
-
 func TestBuildObject_Reflection(t *testing.T) {
 	t.Parallel()
 
 	srv := &VanadisServer{}
 	bo := NewBuildObject(srv)
 	assert.Equal(t, "Build", bo.ServiceName())
+
+	// Exercise runtime adapter methods on concrete restateObjectRuntime type
+	var or objectRuntime = restateObjectRuntime{}
+	assert.NotNil(t, or)
 
 	// restate.Reflect panics if handler signatures are invalid
 	require.NotPanics(t, func() {
@@ -62,11 +48,11 @@ func TestBuildObject_Reflection(t *testing.T) {
 	assert.Empty(t, resMutNil.BuildID)
 }
 
-func TestBuildReconciler_Reconcile_EmptyBuildID(t *testing.T) {
+func TestBuildObject_Reconcile_EmptyBuildID(t *testing.T) {
 	t.Parallel()
 
-	rec := NewBuildReconciler(nil)
-	res, err := rec.Reconcile(nil, ReconcileBuildRequest{Reason: "test"})
+	bo := NewBuildObject(nil)
+	res, err := bo.Reconcile(nil, ReconcileBuildRequest{Reason: "test"})
 	require.Error(t, err)
 	assert.Empty(t, res.BuildID)
 }
@@ -402,18 +388,25 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		DispatchID:     "d-act-retry-1",
 	}))
 
+	require.NoError(t, srv.mutateBuildOnRestate(ctx, "b-restate", BuildMutationRequest{
+		Action:  "chunk_merged",
+		ChunkID: "c1",
+	}))
+
 	assert.Equal(t, []string{
-		"/BuildReconciler/b-restate/Reconcile/send",
-		"/BuildReconciler/b-restate/Reconcile/send",
-		"/BuildReconciler/b-act-single/Reconcile/send",
-		"/BuildReconciler/b-act-retry/Reconcile/send",
-		"/BuildReconciler/b-act-retry/Reconcile/send",
+		"/Build/b-restate/Reconcile/send",
+		"/Build/b-restate/Reconcile/send",
+		"/Build/b-act-single/Reconcile/send",
+		"/Build/b-act-retry/Reconcile/send",
+		"/Build/b-act-retry/Reconcile/send",
+		"/Build/b-restate/Mutate/send",
 	}, paths)
 
 	// Error and no-op edge cases for ingress helpers
 	var nilSrv *VanadisServer
 	assert.Error(t, nilSrv.postRestateIngressJSON(ctx, "/test", nil))
 	assert.Error(t, srv.reconcileBuildOnRestate(ctx, "", "created"))
+	assert.Error(t, srv.mutateBuildOnRestate(ctx, "", BuildMutationRequest{Action: "chunk_merged"}))
 
 	srv500 := &VanadisServer{
 		restateCfg: RestateConfig{RestateIngressURL: ts500.URL},
@@ -421,6 +414,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		httpClient: ts500.Client(),
 	}
 	assert.Error(t, srv500.reconcileBuildOnRestate(ctx, "b-restate", "created"))
+	assert.Error(t, srv500.mutateBuildOnRestate(ctx, "b-restate", BuildMutationRequest{Action: "chunk_merged"}))
 }
 
 func TestRestateLaunchCreatedBuild_LocalAndActionPR(t *testing.T) {
@@ -612,7 +606,7 @@ func (f *fakeObjectRuntime) RunReconcileStep(name string, fn func(ctx context.Co
 	return fn(context.Background())
 }
 
-func TestBuildReconciler_DeriveReconcileChunkStates(t *testing.T) {
+func TestBuildObject_DeriveReconcileChunkStates(t *testing.T) {
 	t.Parallel()
 
 	chunks := []VanadisChunk{
@@ -676,7 +670,7 @@ func TestBuildReconciler_DeriveReconcileChunkStates(t *testing.T) {
 	assert.True(t, states["c-pend-prior"].launched)
 }
 
-func TestBuildReconciler_ReconcileAndExecution(t *testing.T) {
+func TestBuildObject_ReconcileAndExecution(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
@@ -684,7 +678,7 @@ func TestBuildReconciler_ReconcileAndExecution(t *testing.T) {
 	memBus := pubsub.NewMemoryBus()
 	t.Cleanup(func() { _ = memBus.Close() })
 	srv := &VanadisServer{store: memStore, bus: memBus}
-	rec := NewBuildReconciler(srv)
+	rec := NewBuildObject(srv)
 
 	// GetLaunched error
 	rtErrGet := newFakeObjectRuntime("b1")
@@ -757,7 +751,7 @@ func TestBuildReconciler_ReconcileAndExecution(t *testing.T) {
 	assert.Equal(t, "completed", resAlreadyTerminal.Status)
 }
 
-func TestBuildReconciler_EdgeCasesAndFailures(t *testing.T) {
+func TestBuildObject_EdgeCasesAndFailures(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
@@ -765,7 +759,7 @@ func TestBuildReconciler_EdgeCasesAndFailures(t *testing.T) {
 	memBus := pubsub.NewMemoryBus()
 	t.Cleanup(func() { _ = memBus.Close() })
 	srv := &VanadisServer{store: memStore, bus: memBus}
-	rec := NewBuildReconciler(srv)
+	rec := NewBuildObject(srv)
 
 	// 5. Action chunk dependency: dependent chunk only unblocks on action chunk completed
 	bAction := VanadisBuild{ID: "b-action", ThreadID: "th-act", Objective: "test action", Status: "running"}
@@ -1130,7 +1124,7 @@ func TestReconcileBuild(t *testing.T) {
 	require.NoError(t, srv.reconcileBuild(ctx, "b-rec", "created"))
 
 	assert.Equal(t, []string{
-		"/BuildReconciler/b-rec/Reconcile/send",
+		"/Build/b-rec/Reconcile/send",
 	}, paths)
 
 	// Local reconciliation when Restate ingress is unconfigured
