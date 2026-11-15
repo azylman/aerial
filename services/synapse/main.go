@@ -94,7 +94,6 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealthz)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.Handle("POST /internal/pr/register", tracedIngress(s.handlePRRegister))
-	mux.Handle("POST /internal/widget/sync", tracedIngress(s.handleInternalWidgetSync))
 	mux.Handle("POST /api/webhooks/github", tracedIngress(s.handleGitHubWebhook))
 	mux.Handle("POST /webhooks/github", tracedIngress(s.handleGitHubWebhook))
 	mux.Handle("POST /api/webhooks/flux", tracedIngress(s.handleFluxWebhook))
@@ -220,40 +219,6 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		"pr_number": req.PRNumber,
 		"target_id": targetID,
 	})
-}
-
-func (s *RouterServer) handleInternalWidgetSync(w http.ResponseWriter, r *http.Request) {
-	var req WidgetSyncArgs
-	if !readWebhookJSON(w, r, 1<<20, &req) {
-		return
-	}
-	if buildID := strings.TrimSpace(req.BuildID); buildID != "" {
-		if err := s.SyncBuildWidget(r.Context(), buildID, req.Banner); err != nil {
-			log.Printf("[synapse] [widget] failed to sync build widget for %s: %v", buildID, err)
-			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to sync build widget"})
-			return
-		}
-		httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
-			"status":   "accepted",
-			"build_id": buildID,
-		})
-		return
-	}
-	if repo := strings.TrimSpace(req.Repo); repo != "" && req.PRNumber > 0 {
-		normRepo := normalizeRepo(repo)
-		if err := s.SyncPRWidget(r.Context(), normRepo, req.PRNumber); err != nil {
-			log.Printf("[synapse] [widget] failed to sync pr widget for %s#%d: %v", normRepo, req.PRNumber, err)
-			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to sync pr widget"})
-			return
-		}
-		httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
-			"status":    "accepted",
-			"repo":      normRepo,
-			"pr_number": req.PRNumber,
-		})
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "build_id or repo and pr_number are required"})
 }
 
 func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {

@@ -388,12 +388,6 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 
 	tests := []extractActiveConversationFactsTestCase{
 		{
-			name:      "OverlappingExecutionSkipped",
-			ctx:       ctx,
-			threads:   []string{"th-overlap"},
-			lockMutex: true,
-		},
-		{
 			name:     "NilStoreFails",
 			ctx:      ctx,
 			nilStore: true,
@@ -898,7 +892,6 @@ type extractActiveConversationFactsTestCase struct {
 	storeFailOp   string
 	llmResp       string
 	llmErr        error
-	lockMutex     bool
 	seedNearest   bool
 	wantErr       bool
 	wantWatermark int64
@@ -932,10 +925,6 @@ func buildExtractionTestMemStore(tc extractActiveConversationFactsTestCase, vali
 
 func runExtractActiveConversationFactsCase(t *testing.T, tc extractActiveConversationFactsTestCase, validEmb []float32) {
 	t.Helper()
-	if tc.lockMutex {
-		extractionMutex.Lock()
-		defer extractionMutex.Unlock()
-	}
 	var store Store
 	var memStore *TestMemStore
 	if !tc.nilStore {
@@ -961,9 +950,6 @@ func runExtractActiveConversationFactsCase(t *testing.T, tc extractActiveConvers
 	err := ExtractActiveConversationFacts(tc.ctx, store, client, llm, 24)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ExtractActiveConversationFacts() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.lockMutex && !extractionRerunRequested.Load() {
-		t.Errorf("expected extractionRerunRequested to be true when extractionMutex is locked")
 	}
 	if tc.wantWatermark > 0 && memStore != nil {
 		for _, tid := range tc.threads {

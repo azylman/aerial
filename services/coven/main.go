@@ -78,33 +78,6 @@ func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Work
 	return nil
 }
 
-func subscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) error {
-	if b == nil || worker == nil {
-		return nil
-	}
-	_, err := b.Subscribe(ctx, "aerial.turn.completed", "coven-turns", func(msgCtx context.Context, msg pubsub.Message) error {
-		var ev pubsub.TurnCompletedEvent
-		if unmarshalErr := json.Unmarshal(msg.Data(), &ev); unmarshalErr != nil {
-			log.Printf("[Coven] warning: failed to unmarshal turn completed event: %v", unmarshalErr)
-			return nil
-		}
-		if err := worker.HandleTurnCompletedEvent(msgCtx, ev); err != nil {
-			if msg.NumDelivered() < 5 {
-				return err
-			}
-			log.Printf("[Coven] dropping turn completed event %s after %d delivery attempts: %v", ev.SessionID, msg.NumDelivered(), err)
-			return nil
-		}
-		return nil
-	})
-	if err != nil {
-		log.Printf("[Coven] warning: failed to subscribe coven-turns: %v", err)
-		return err
-	}
-	log.Println("[Coven] Subscribed coven-turns durable consumer to aerial.turn.completed")
-	return nil
-}
-
 func subscribeCovenTranscriptSynced(ctx context.Context, b pubsub.Bus) error {
 	if b == nil {
 		return nil
@@ -143,7 +116,6 @@ func subscribeCovenExtract(ctx context.Context, b pubsub.Bus, worker *Worker) er
 }
 
 type covenConsumers struct {
-	subscribedTurns            bool
 	subscribedTranscriptSynced bool
 	subscribedExtract          bool
 }
@@ -154,12 +126,6 @@ func (c *covenConsumers) subscribeAll(ctx context.Context, b pubsub.Bus, worker 
 	}
 	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
 		log.Printf("[Coven] warning: failed to ensure core streams: %v", err)
-	}
-	if !c.subscribedTurns {
-		if err := subscribeCovenTurns(ctx, b, worker); err != nil {
-			return err
-		}
-		c.subscribedTurns = true
 	}
 	if !c.subscribedTranscriptSynced {
 		if err := subscribeCovenTranscriptSynced(ctx, b); err != nil {

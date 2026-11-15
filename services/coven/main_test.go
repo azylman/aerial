@@ -129,133 +129,6 @@ func (a *ackSubscribeBus) Subscribe(ctx context.Context, subject, durable string
 	})
 }
 
-func TestHandleTurnCompletedEvent_Scenarios(t *testing.T) {
-	ctx := context.Background()
-
-	validEmb := make([]float32, ExpectedEmbeddingDim)
-	client := &MockOllamaClient{embedding: validEmb}
-	llm := func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts":[]}`, nil
-	}
-
-	memStorePing := newTestMemStore()
-	memStorePing.activeThreads = []string{"th-ping-1"}
-	memStorePing.unextractedTurns["th-ping-1"] = []Message{
-		{RowID: 15, Content: "ping message", ResponseText: "pong response"},
-	}
-	workerPing := NewWorker(WorkerConfig{
-		Store:     memStorePing,
-		Ollama:    client,
-		LLMClient: llm,
-	})
-
-	memStoreErr := newTestMemStore()
-	memStoreErr.SetFail("GetActiveConversationsForExtraction", errors.New("query failed"))
-	workerErr := NewWorker(WorkerConfig{
-		Store:     memStoreErr,
-		Ollama:    client,
-		LLMClient: llm,
-	})
-
-	tests := []struct {
-		name        string
-		worker      *Worker
-		ev          pubsub.TurnCompletedEvent
-		wantErr     bool
-		checkStore  *TestMemStore
-		checkThread string
-		wantWater   int64
-	}{
-		{
-			name:        "healthcheck ping returns nil without extraction",
-			worker:      workerPing,
-			ev:          pubsub.TurnCompletedEvent{SessionID: "healthcheck-ping", Source: "test"},
-			wantErr:     false,
-			checkStore:  memStorePing,
-			checkThread: "th-ping-1",
-			wantWater:   0,
-		},
-		{
-			name:    "extraction failure is logged and returns error for redelivery",
-			worker:  workerErr,
-			ev:      pubsub.TurnCompletedEvent{SessionID: "sess-err", Source: "discord"},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.worker.HandleTurnCompletedEvent(ctx, tc.ev)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("HandleTurnCompletedEvent() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.checkStore != nil {
-				if w := tc.checkStore.watermarks[tc.checkThread]; w != tc.wantWater {
-					t.Errorf("watermark for %s = %d, want %d", tc.checkThread, w, tc.wantWater)
-				}
-			}
-		})
-	}
-}
-
-func TestCoven_TurnsConsumerIntegration(t *testing.T) {
-	ctx := context.Background()
-
-	memStore := newTestMemStore()
-	memStore.activeThreads = []string{"th-int-1"}
-	memStore.unextractedTurns["th-int-1"] = []Message{
-		{RowID: 25, Content: "I prefer dark theme", ResponseText: "Understood"},
-	}
-
-	validEmb := make([]float32, ExpectedEmbeddingDim)
-	client := &MockOllamaClient{embedding: validEmb}
-	llm := func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts":[]}`, nil
-	}
-
-	worker := NewWorker(WorkerConfig{
-		Store:     memStore,
-		Ollama:    client,
-		LLMClient: llm,
-	})
-
-	done := make(chan struct{})
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-
-	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
-		t.Fatalf("EnsureCoreStreams: %v", err)
-	}
-
-	wrapped := &ackSubscribeBus{Bus: memBus, onHandled: func() { close(done) }}
-	bus := initCovenJetStreamWithFactory(ctx, worker, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return wrapped, nil
-	})
-	if bus == nil {
-		t.Fatal("expected non-nil bus")
-	}
-
-	ev := pubsub.TurnCompletedEvent{
-		SessionID:      "sess-int-1",
-		ConversationID: "th-int-1",
-		Source:         "discord",
-		CompletedAt:    time.Now().UTC(),
-	}
-	if err := memBus.Publish(ctx, "aerial.turn.completed", "turn-1", ev); err != nil {
-		t.Fatalf("Publish: %v", err)
-	}
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for turn completed event delivery")
-	}
-
-	if memStore.watermarks["th-int-1"] != 25 {
-		t.Errorf("watermark = %d, want 25", memStore.watermarks["th-int-1"])
-	}
-}
-
 type brokenBus struct {
 	pubsub.Bus
 
@@ -324,7 +197,7 @@ func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
 		t.Fatal("expected non-nil bus")
 	}
 
-	if err := memBus.Publish(ctx, "aerial.turn.completed", "bad-turn-1", "not-a-valid-json"); err != nil {
+	if err := memBus.Publish(ctx, pubsub.SubjectAerialTurnTranscriptSynced, "bad-sync-1", "not-a-valid-json"); err != nil {
 		t.Fatalf("Publish bad json: %v", err)
 	}
 
@@ -424,7 +297,6 @@ func (m *mockPubsubMsg) InProgress() error            { return nil }
 type captureSubscribeBus struct {
 	pubsub.Bus
 
-	handler  pubsub.Handler
 	handlers map[string]pubsub.Handler
 }
 
@@ -433,45 +305,7 @@ func (c *captureSubscribeBus) Subscribe(ctx context.Context, subject, durable st
 		c.handlers = make(map[string]pubsub.Handler)
 	}
 	c.handlers[durable] = handler
-	if durable == "coven-turns" {
-		c.handler = handler
-	}
 	return c.Bus.Subscribe(ctx, subject, durable, handler)
-}
-
-func TestCoven_TurnCompletedConsumerRetriesAndDrop(t *testing.T) {
-	ctx := context.Background()
-	memStore := newTestMemStore()
-	memStore.SetFail("GetActiveConversationsForExtraction", errors.New("query failed"))
-	worker := NewWorker(WorkerConfig{
-		Store:     memStore,
-		Ollama:    &MockOllamaClient{embedding: make([]float32, ExpectedEmbeddingDim)},
-		LLMClient: func(context.Context, string) (string, error) { return `{"facts":[]}`, nil },
-	})
-
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-	captureBus := &captureSubscribeBus{Bus: memBus}
-
-	bus := initCovenJetStreamWithFactory(ctx, worker, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return captureBus, nil
-	})
-	if bus == nil || captureBus.handler == nil {
-		t.Fatal("expected non-nil bus and captured handler")
-	}
-
-	ev := pubsub.TurnCompletedEvent{SessionID: "sess-retry", Source: "discord"}
-	data, _ := json.Marshal(ev)
-
-	// Delivery attempt < 5 returns error to allow JetStream redelivery
-	if err := captureBus.handler(ctx, &mockPubsubMsg{data: data, delivered: 1}); err == nil {
-		t.Error("expected error on attempt 1")
-	}
-
-	// Delivery attempt >= 5 drops message and returns nil
-	if err := captureBus.handler(ctx, &mockPubsubMsg{data: data, delivered: 5}); err != nil {
-		t.Errorf("expected nil error on attempt 5, got %v", err)
-	}
 }
 
 func TestNakBackoffDelay(t *testing.T) {
