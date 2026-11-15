@@ -580,6 +580,24 @@ func CreateScheduleRun(ctx context.Context, database *sql.DB, r ScheduleRun) err
 	return err
 }
 
+func HasRunningHeartbeatRun(ctx context.Context, database *sql.DB, scheduleID string, since time.Time) (bool, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return false, err
+	}
+	scheduleID = strings.TrimSpace(scheduleID)
+	if scheduleID == "" {
+		return false, nil
+	}
+	query := `SELECT COUNT(*) FROM schedule_runs WHERE schedule_id = $1 AND schedule_type = 'heartbeat' AND status = 'running' AND started_at >= $2`
+	var count int
+	err = database.QueryRowContext(ctx, query, scheduleID, since).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func GetScheduleRun(ctx context.Context, database *sql.DB, id string) (*ScheduleRun, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
