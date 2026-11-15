@@ -1234,10 +1234,13 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 				}
 				completedAt = time.Time{}
 			}
+		case chunkStatus == "completed":
+			chunkStatus = "deployed"
 		case isVanadisChunkStreamingPhase(chunkStatus):
 			activeStep = FormatChunkActiveStep(c)
-		case chunkStatus == "merged" || (c.Mode == "action" && chunkStatus == "completed"):
-			chunkStatus = "deployed"
+			if chunkStatus == "merged" && activeStep == "" {
+				chunkStatus = "deployed"
+			}
 		}
 		wChunks[i] = StatusWidgetChunk{
 			ID:          c.ID,

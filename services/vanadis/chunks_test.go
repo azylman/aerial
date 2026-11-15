@@ -362,6 +362,23 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 			wantStatus:   "completed",
 			wantSkipSink: false,
 		},
+		{
+			name: "maps merged chunk without active step to deployed status",
+			build: VanadisBuild{
+				ID:              "build-merged-idle",
+				Status:          "running",
+				StatusMessageID: "msg-merged-idle",
+				Title:           "Test Merged Idle Widget",
+			},
+			chunks: []VanadisChunk{
+				{ID: "c-merged-idle", ChunkIndex: 0, Mode: "pr", Repo: "aerial", Status: "merged", PRNumber: 120},
+			},
+			req: SyncChunkPRWidgetRequest{
+				BuildID: "build-merged-idle",
+			},
+			wantStatus:   "running",
+			wantSkipSink: false,
+		},
 	}
 	for _, tc := range syncWidgetTests {
 		t.Run("sync_widget_"+tc.name, func(t *testing.T) {
@@ -378,7 +395,7 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 			if len(got.Chunks) > 0 && len(tc.chunks) > 0 && tc.chunks[0].Mode == "action" && got.Chunks[0].Repo != "action" {
 				t.Errorf("buildSyncWidgetRequest Chunk[0].Repo = %q, want action", got.Chunks[0].Repo)
 			}
-			if len(got.Chunks) > 0 && len(tc.chunks) > 0 && tc.chunks[0].Mode == "action" && tc.chunks[0].Status == "completed" && got.Chunks[0].Status != "deployed" {
+			if len(got.Chunks) > 0 && len(tc.chunks) > 0 && (tc.chunks[0].Status == "completed" || (tc.chunks[0].Status == "merged" && tc.req.PRNumber == 0)) && got.Chunks[0].Status != "deployed" {
 				t.Errorf("buildSyncWidgetRequest Chunk[0].Status = %q, want deployed", got.Chunks[0].Status)
 			}
 			if tc.wantZeroCompletedAt && len(got.Chunks) > 0 && !got.Chunks[0].CompletedAt.IsZero() {
