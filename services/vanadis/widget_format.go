@@ -225,8 +225,26 @@ func FormatChunkActiveStep(chunk VanadisChunk) string {
 	return ""
 }
 
-// HandleCoalescedWidgetMessage processes an aerial.coalesced.widget_sync.build.* message from JetStream,
-// as published by syncBuildWidget, and posts or edits the build's Discord status card.
+func (s *VanadisServer) resolveCoalescedWidgetBuildID(ctx context.Context, payload pubsub.WidgetSyncJobArgs) (string, error) {
+	buildID := strings.TrimSpace(payload.BuildID)
+	if buildID != "" {
+		return buildID, nil
+	}
+	if strings.TrimSpace(payload.Repo) == "" || payload.PRNumber <= 0 {
+		return "", nil
+	}
+	lookup, err := s.store.GetChunkByPR(ctx, strings.TrimSpace(payload.Repo), payload.PRNumber)
+	if err != nil {
+		return "", err
+	}
+	if lookup != nil && lookup.Matched {
+		return strings.TrimSpace(lookup.BuildID), nil
+	}
+	return "", nil
+}
+
+// HandleCoalescedWidgetMessage processes an aerial.coalesced.widget_sync.> message from JetStream,
+// as published by syncBuildWidget or PR widget sync events, and posts or edits the build's Discord status card.
 func (s *VanadisServer) HandleCoalescedWidgetMessage(ctx context.Context, msg pubsub.Message) error {
 	if s == nil || s.store == nil {
 		if termErr := msg.Term(); termErr != nil {
@@ -234,10 +252,7 @@ func (s *VanadisServer) HandleCoalescedWidgetMessage(ctx context.Context, msg pu
 		}
 		return nil
 	}
-	var payload struct {
-		BuildID string `json:"build_id"`
-		Banner  string `json:"banner"`
-	}
+	var payload pubsub.WidgetSyncJobArgs
 	if err := json.Unmarshal(msg.Data(), &payload); err != nil {
 		log.Printf("[vanadis] failed to unmarshal coalesced widget message: %v", err)
 		if termErr := msg.Term(); termErr != nil {
@@ -245,7 +260,10 @@ func (s *VanadisServer) HandleCoalescedWidgetMessage(ctx context.Context, msg pu
 		}
 		return nil
 	}
-	buildID := strings.TrimSpace(payload.BuildID)
+	buildID, err := s.resolveCoalescedWidgetBuildID(ctx, payload)
+	if err != nil {
+		return err
+	}
 	if buildID == "" {
 		if ackErr := msg.Ack(); ackErr != nil {
 			log.Printf("[vanadis] warning: failed acknowledging empty build widget message: %v", ackErr)

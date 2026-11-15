@@ -819,10 +819,10 @@ func (s *VanadisServer) StartJobConsumers(ctx context.Context) error {
 		return err
 	}
 	log.Println("[vanadis] Subscribed vanadis-chunk queue consumer to aerial.jobs.vanadis.chunk")
-	if _, err := s.bus.ConsumeQueue(ctx, pubsub.SubjectBuildWidgetSyncWildcard, "vanadis-widget", s.HandleCoalescedWidgetMessage); err != nil {
+	if _, err := s.bus.ConsumeQueue(ctx, "aerial.coalesced.widget_sync.>", "vanadis-widget", s.HandleCoalescedWidgetMessage); err != nil {
 		return err
 	}
-	log.Printf("[vanadis] Subscribed vanadis-widget queue consumer to %s", pubsub.SubjectBuildWidgetSyncWildcard)
+	log.Printf("[vanadis] Subscribed vanadis-widget queue consumer to %s", "aerial.coalesced.widget_sync.>")
 	return nil
 }
 

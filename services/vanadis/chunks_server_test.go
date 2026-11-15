@@ -80,8 +80,11 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 
 	t.Run("POST_AttachChunkPR", func(t *testing.T) {
 		sAttach, _, cAttachIDs := setupTestStoreWithBuild()
+		busAttach := &mockChunkBus{}
 		srvAttach := NewVanadisServer(Config{}, sAttach, nil)
+		srvAttach.SetBus(busAttach)
 		muxAttach := SetupMux(srvAttach)
+
 		doAttachReq := func(method, path string, body string) *httptest.ResponseRecorder {
 			var r *http.Request
 			if body != "" {
@@ -102,6 +105,9 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &res)
 		if res["status"] != "attached" || res["thread_id"] == "" || res["build_id"] == "" || res["chunk_id"] == "" {
 			t.Errorf("unexpected attach response: %+v", res)
+		}
+		if busAttach.widgetCalls == 0 {
+			t.Errorf("expected widget sync published on attach-pr, got 0")
 		}
 
 		// Standalone attach test
