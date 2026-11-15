@@ -93,12 +93,18 @@ func prepareInterruptedMessages(ctx context.Context, store db.Store, pool *Worke
 	return ready
 }
 
-func resetOrFailInterruptedDispatch(ctx context.Context, store db.Store, d *db.Dispatch, maxAttempts int) bool {
+func resetOrFailInterruptedDispatch(ctx context.Context, store db.Store, pool *WorkerPool, d *db.Dispatch, maxAttempts int) bool {
 	isPoison, poisonReason, isInstantCrashLoop := evaluatePoisonPill(d.Status, d.RestartCount, d.RetryCount, maxAttempts, d.UpdatedAt)
 	if isPoison {
 		log.Printf("[Startup Recovery] Dispatch %s exceeded max restarts/retries (%s). Marking FAILED.", d.ID, poisonReason)
 		if err := store.UpdateDispatchStatus(ctx, d.ID, db.StatusFailed, poisonReason); err != nil {
 			log.Printf("[Startup Recovery] Failed to update dispatch %s status to FAILED: %v", d.ID, err)
+		}
+		if pool != nil && pool.EventBus() != nil {
+			now := time.Now().UTC()
+			if err := pool.publishDispatchOutcome(ctx, *d, "failed", poisonReason, now, now); err != nil {
+				log.Printf("[Startup Recovery] Warning publishing dispatch outcome for %s: %v", d.ID, err)
+			}
 		}
 		return false
 	}
@@ -115,7 +121,7 @@ func resetOrFailInterruptedDispatch(ctx context.Context, store db.Store, d *db.D
 	return true
 }
 
-func prepareInterruptedDispatches(ctx context.Context, store db.Store, maxAttempts int) []db.Dispatch {
+func prepareInterruptedDispatches(ctx context.Context, store db.Store, pool *WorkerPool, maxAttempts int) []db.Dispatch {
 	dispatches, err := store.GetPendingOrProcessingDispatches(ctx, 0)
 	if err != nil {
 		log.Printf("[Startup Recovery] Error querying pending/processing dispatches: %v", err)
@@ -123,7 +129,7 @@ func prepareInterruptedDispatches(ctx context.Context, store db.Store, maxAttemp
 	}
 	var ready []db.Dispatch
 	for _, d := range dispatches {
-		if resetOrFailInterruptedDispatch(ctx, store, &d, maxAttempts) {
+		if resetOrFailInterruptedDispatch(ctx, store, pool, &d, maxAttempts) {
 			ready = append(ready, d)
 		}
 	}
@@ -170,7 +176,7 @@ func RecoverInterrupted(store db.Store, pool *WorkerPool) {
 	}
 
 	msgs := prepareInterruptedMessages(ctx, store, pool, maxAttempts)
-	disps := prepareInterruptedDispatches(ctx, store, maxAttempts)
+	disps := prepareInterruptedDispatches(ctx, store, pool, maxAttempts)
 
 	if pool.ReleaseLeaderHold() {
 		msgs, disps = mergeHeldPendingEntries(ctx, store, msgs, disps)

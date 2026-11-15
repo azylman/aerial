@@ -154,6 +154,48 @@ func TestPRLifecycleEvents_Publish(t *testing.T) {
 			t.Errorf("expected event conflict, got %s", bus.publishedPREvents[0].Event)
 		}
 	})
+
+	t.Run("dispatchConflictPrompt suppresses conflict prompt when bus is active and PR is Vanadis-owned", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{}
+		disp := &mockOutboundDispatcher{}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: true}
+		srv := &RouterServer{
+			bus:        bus,
+			dispatcher: disp,
+			registry:   reg,
+			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+
+		err := srv.dispatchConflictPrompt(context.Background(), "123456789012345678", "azylman/aerial", "feat/branch", "sha-conflict", 42)
+		if err != nil {
+			t.Fatalf("dispatchConflictPrompt() err = %v", err)
+		}
+		if len(disp.PromptCalls()) != 0 || len(disp.DispatchCalls()) != 0 {
+			t.Errorf("expected conflict prompt to be suppressed when bus is active and PR is Vanadis-owned, got prompt=%d dispatch=%d", len(disp.PromptCalls()), len(disp.DispatchCalls()))
+		}
+	})
+
+	t.Run("dispatchConflictPrompt dispatches prompt when bus is active and PR is not Vanadis-owned", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{}
+		disp := &mockOutboundDispatcher{}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: false}
+		srv := &RouterServer{
+			bus:        bus,
+			dispatcher: disp,
+			registry:   reg,
+			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+
+		err := srv.dispatchConflictPrompt(context.Background(), "123456789012345678", "azylman/aerial", "feat/branch", "sha-conflict", 42)
+		if err != nil {
+			t.Fatalf("dispatchConflictPrompt() err = %v", err)
+		}
+		if len(disp.DispatchCalls()) != 1 {
+			t.Errorf("expected conflict prompt to be dispatched when PR is not Vanadis-owned, got %d calls", len(disp.DispatchCalls()))
+		}
+	})
 }
 
 func TestPRLifecycleEvents_GitHubEvents(t *testing.T) {
