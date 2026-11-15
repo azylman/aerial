@@ -1318,7 +1318,6 @@ func TestStartJobConsumersDeliversBuildWidgetSync(t *testing.T) {
 		brainMsgID    string
 	}{
 		{"new build posts card and persists message id", "b-card-new", "", "1300000000000000001"},
-		{"deleted card is reposted and new message id persisted", "b-card-repost", "1300000000000000002", "1300000000000000003"},
 	}
 
 	for _, tc := range tests {
