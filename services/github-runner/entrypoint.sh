@@ -323,7 +323,7 @@ cat > /usr/local/bin/sync-gemini-settings <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_DEFAULTS='{"model": "gemini-4-argon-low", "trustedWorkspaces": ["/app", "/actions-runner"], "useG1Credits": true}'
+BASE_DEFAULTS='{"model": "gemini-4-hydrogen-low", "trustedWorkspaces": ["/app", "/actions-runner"], "useG1Credits": true}'
 PERMS_FILE="/root/.gemini/antigravity-cli/permissions.json"
 TARGET_SETTINGS="/root/.gemini/antigravity-cli/settings.json"
 TMP_SETTINGS="/root/.gemini/antigravity-cli/.settings.json.tmp.$$"
@@ -369,7 +369,7 @@ if [[ "${1:-}" == -* ]]; then
     esac
   done
   if [[ "${inject_model}" -eq 1 ]]; then
-    exec /usr/local/bin/agy.real --model "${AGY_DEFAULT_MODEL:-gemini-4-argon-low}" "$@"
+    exec /usr/local/bin/agy.real --model "${AGY_DEFAULT_MODEL:-gemini-4-hydrogen-low}" "$@"
   fi
 fi
 

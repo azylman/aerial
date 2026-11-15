@@ -1238,7 +1238,7 @@ chmod +x "$AGY_WRAPPER" "$MOCK_AGY_REAL"
 "$AGY_WRAPPER" --version
 "$AGY_WRAPPER" models
 "$AGY_WRAPPER" --model gemini-4-argon-medium --print "explicit"
-if grep -q "^--model gemini-4-argon-low --output-format stream-json --print-timeout 30m --add-dir /repo --prompt --version in prompt$" "$AGY_LOG" &&
+if grep -q "^--model gemini-4-hydrogen-low --output-format stream-json --print-timeout 30m --add-dir /repo --prompt --version in prompt$" "$AGY_LOG" &&
    grep -q "^--version$" "$AGY_LOG" &&
    grep -q "^models$" "$AGY_LOG" &&
    grep -q "^--model gemini-4-argon-medium --print explicit$" "$AGY_LOG"; then
@@ -1251,7 +1251,7 @@ assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'head_shortcircuit:o
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_remap_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper exports CLAUDE_CODE_OAUTH_TOKEN and remaps --agent gemini to claude-code when token exists"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_remap_gemini_eq:ok' && echo true || echo false)" "github-runner roborev wrapper remaps --agent=gemini to claude-code when token exists"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_fallback_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper unsets CLAUDE_CODE_OAUTH_TOKEN and remaps --agent claude-code to gemini when token is absent"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'agy_model_pin:ok' && echo true || echo false)" "github-runner agy wrapper pins --model gemini-4-argon-low on headless invocations while preserving --version, subcommands, and explicit --model"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'agy_model_pin:ok' && echo true || echo false)" "github-runner agy wrapper pins --model gemini-4-hydrogen-low on headless invocations while preserving --version, subcommands, and explicit --model"
 
 # Case 18: Vanadis PR attach and direct attachment in submit_scratch
 VANADIS_ATTACH_CHECK=$(bash -c "
