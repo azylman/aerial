@@ -534,7 +534,7 @@ func TestTranscriptStore_FakeStore_CRUD_And_SyncStates(t *testing.T) {
 	if err != nil || len(syncStates) != 0 {
 		t.Fatalf("expected 0 sync states, got %d, err: %v", len(syncStates), err)
 	}
-	if err := store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: ""}); err == nil {
+	if err = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: ""}); err == nil {
 		t.Errorf("expected error for empty session ID")
 	}
 
@@ -543,7 +543,7 @@ func TestTranscriptStore_FakeStore_CRUD_And_SyncStates(t *testing.T) {
 		SessionID: "sess-1", ThreadID: "th-1", Summary: "Debugged interface",
 		LastIndexedStep: 10, LastMtime: now, SummaryStepWatermark: 5, IsSettled: false,
 	}
-	if err := store.UpsertSessionSummary(ctx, summary); err != nil {
+	if err = store.UpsertSessionSummary(ctx, summary); err != nil {
 		t.Fatalf("UpsertSessionSummary failed: %v", err)
 	}
 	syncStates, err = store.GetSessionSyncStates(ctx)
@@ -552,7 +552,7 @@ func TestTranscriptStore_FakeStore_CRUD_And_SyncStates(t *testing.T) {
 	}
 
 	updateSummary := db.SessionSummary{SessionID: "sess-1", Summary: "Updated", LastIndexedStep: 25, SummaryStepWatermark: 25, IsSettled: true, Embedding: []float32{1.0, 2.0}}
-	if err := store.UpsertSessionSummary(ctx, updateSummary); err != nil {
+	if err = store.UpsertSessionSummary(ctx, updateSummary); err != nil {
 		t.Fatalf("UpsertSessionSummary update failed: %v", err)
 	}
 	syncStates, err = store.GetSessionSyncStates(ctx)
@@ -560,7 +560,7 @@ func TestTranscriptStore_FakeStore_CRUD_And_SyncStates(t *testing.T) {
 		t.Fatalf("unexpected state after update: %+v, err: %v", syncStates["sess-1"], err)
 	}
 
-	if err := store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-1", LastIndexedStep: 30, IsSettled: false}); err != nil {
+	if err = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-1", LastIndexedStep: 30, IsSettled: false}); err != nil {
 		t.Fatalf("UpsertSessionSummary unsettle failed: %v", err)
 	}
 	syncStates, err = store.GetSessionSyncStates(ctx)
@@ -568,7 +568,7 @@ func TestTranscriptStore_FakeStore_CRUD_And_SyncStates(t *testing.T) {
 		t.Fatalf("expected IsSettled=false after LastIndexedStep > SummaryStepWatermark, got %+v", syncStates["sess-1"])
 	}
 
-	if err := store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-1", LastIndexedStep: -2}); err != nil {
+	if err = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-1", LastIndexedStep: -2}); err != nil {
 		t.Fatalf("UpsertSessionSummary reset failed: %v", err)
 	}
 	syncStates, err = store.GetSessionSyncStates(ctx)
@@ -603,7 +603,7 @@ func TestTranscriptStore_FakeStore_BatchInsertTranscriptSteps(t *testing.T) {
 		{SessionID: "sess-steps-1", StepIndex: 1, StepType: "tool_call", ToolName: "run_command", Content: "DIFFERENT CONTENT IGNORED"},
 		{SessionID: "sess-steps-1", StepIndex: 3, StepType: "model_response", Content: "Deployment completed"},
 	}
-	if err := store.BatchInsertTranscriptSteps(ctx, dupSteps); err != nil {
+	if err = store.BatchInsertTranscriptSteps(ctx, dupSteps); err != nil {
 		t.Fatalf("BatchInsertTranscriptSteps with duplicates failed: %v", err)
 	}
 

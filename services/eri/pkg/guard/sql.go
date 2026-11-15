@@ -78,7 +78,7 @@ func (c *livePgxConn) PrepareAndExplain(ctx context.Context, sqlStr string) ([]S
 		return nil, nil, nil
 	}
 	defer func() {
-		if err := tx.Rollback(ctx); err != nil {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
 			return
 		}
 	}()

@@ -293,9 +293,9 @@ func (s *SQLStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID
 	if lastRowID <= 0 {
 		endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&limit=1",
 			s.getBrainURL(), url.QueryEscape(threadID))
-		tasks, err := s.fetchTasks(ctx, endpoint)
-		if err != nil {
-			return "", nil, err
+		tasks, fetchTasksErr := s.fetchTasks(ctx, endpoint)
+		if fetchTasksErr != nil {
+			return "", nil, fetchTasksErr
 		}
 		var summary string
 		if len(tasks) > 0 {
@@ -500,8 +500,8 @@ func (s *SQLStore) fetchTranscriptSteps(ctx context.Context, sessionCSV, sinceRF
 
 // GetThreadTrajectoryContext queries the trajectory context (retrieved facts and tool calls) for an active thread.
 func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error) {
-	if err := s.checkDB(); err != nil {
-		return nil, nil, err
+	if checkDBErr := s.checkDB(); checkDBErr != nil {
+		return nil, nil, checkDBErr
 	}
 	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return nil, nil, nil

@@ -317,7 +317,7 @@ func TestInterchangeablePool_BoundedOverflowAndQueueing(t *testing.T) {
 	}
 
 	// 4. Release overflow lease l2. Now an overflow slot opens up.
-	if err := l2.Release(); err != nil {
+	if err = l2.Release(); err != nil {
 		t.Fatalf("unexpected error releasing l2: %v", err)
 	}
 

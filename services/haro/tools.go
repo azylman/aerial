@@ -715,7 +715,7 @@ func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, 
 		CreatedAt:   now,
 	}
 
-	if err := InsertHeartbeatSchedule(ctx, db, hb); err != nil {
+	if err = InsertHeartbeatSchedule(ctx, db, hb); err != nil {
 		return nil, fmt.Errorf("failed to persist heartbeat schedule: %w", err)
 	}
 
@@ -802,7 +802,7 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any)
 		return nil, err
 	}
 
-	if err := applyHeartbeatContentUpdates(args, sched); err != nil {
+	if err = applyHeartbeatContentUpdates(args, sched); err != nil {
 		return nil, err
 	}
 
@@ -812,14 +812,14 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any)
 	}
 
 	if recomputeNextRun && sched.Enabled {
-		nextRun, err := CalculateNextCronRun(sched.CronExpr, sched.Timezone, time.Now().UTC())
-		if err != nil {
-			return nil, err
+		nextRun, calculateErr := CalculateNextCronRun(sched.CronExpr, sched.Timezone, time.Now().UTC())
+		if calculateErr != nil {
+			return nil, calculateErr
 		}
 		sched.NextRunAt = nextRun
 	}
 
-	if err := UpdateHeartbeatSchedule(ctx, db, *sched); err != nil {
+	if err = UpdateHeartbeatSchedule(ctx, db, *sched); err != nil {
 		return nil, fmt.Errorf("failed to update heartbeat schedule: %w", err)
 	}
 
@@ -879,7 +879,7 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extr
 		return nil, err
 	}
 
-	if err := ValidateLiveEventTarget(ctx, db, normSource, normTarget); err != nil {
+	if err = ValidateLiveEventTarget(ctx, db, normSource, normTarget); err != nil {
 		return nil, err
 	}
 
@@ -896,7 +896,7 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extr
 		Persistent: persistent,
 	}
 
-	if err := InsertEventTrigger(ctx, db, trigger); err != nil {
+	if err = InsertEventTrigger(ctx, db, trigger); err != nil {
 		return nil, fmt.Errorf("failed to persist event trigger: %w", err)
 	}
 

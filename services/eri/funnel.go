@@ -162,9 +162,9 @@ func resolveNewThreadTitle(ctx context.Context, content, msgID string, shouldSum
 		if cls := currentFunnelClassifier(); cls != nil {
 			select {
 			case titleSummarizeSem <- struct{}{}:
-				ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				sumCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				var sumErr error
-				title, sumErr = cls.SummarizeThreadTitle(ctx, content)
+				title, sumErr = cls.SummarizeThreadTitle(sumCtx, content)
 				cancel()
 				<-titleSummarizeSem
 				if sumErr != nil {

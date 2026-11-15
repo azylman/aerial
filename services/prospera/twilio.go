@@ -475,7 +475,7 @@ func (c *HTTPTwilioClient) searchAndPurchasePhoneNumber(ctx context.Context, are
 			PhoneNumber string `json:"phone_number"`
 		} `json:"available_phone_numbers"`
 	}
-	if err := json.NewDecoder(sResp.Body).Decode(&searchRes); err != nil {
+	if err = json.NewDecoder(sResp.Body).Decode(&searchRes); err != nil {
 		return "", fmt.Errorf("twilio: decode available numbers: %w", err)
 	}
 	if len(searchRes.AvailablePhoneNumbers) == 0 {

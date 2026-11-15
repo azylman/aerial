@@ -749,17 +749,17 @@ func TestDB_CronOperations(t *testing.T) {
 
 	// Advance next run
 	newNext := now.Add(24 * time.Hour)
-	if err := AdvanceCronNextRun(ctx, db, cron1.ID, newNext); err != nil {
+	if err = AdvanceCronNextRun(ctx, db, cron1.ID, newNext); err != nil {
 		t.Fatalf("AdvanceCronNextRun() err = %v", err)
 	}
 
 	// Advance non-existent schedule fails
-	if err := AdvanceCronNextRun(ctx, db, "missing-cron", newNext); err == nil {
+	if err = AdvanceCronNextRun(ctx, db, "missing-cron", newNext); err == nil {
 		t.Errorf("AdvanceCronNextRun() on missing ID expected error, got nil")
 	}
 
 	// Advance empty ID fails
-	if err := AdvanceCronNextRun(ctx, db, "", newNext); err == nil {
+	if err = AdvanceCronNextRun(ctx, db, "", newNext); err == nil {
 		t.Errorf("AdvanceCronNextRun() on empty ID expected error, got nil")
 	}
 

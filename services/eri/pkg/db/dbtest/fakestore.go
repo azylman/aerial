@@ -1192,7 +1192,8 @@ func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []db.T
 
 func (f *FakeStore) SearchSessionSummaries(ctx context.Context, stack string, embedding []float32, queryText string, limit int, minScore float64) ([]db.SessionSummary, error) {
 	return withFakeLock(f, "SearchSessionSummaries", func() ([]db.SessionSummary, error) {
-		hasEmbedding, queryText := len(embedding) == db.ExpectedEmbeddingDim, strings.TrimSpace(queryText)
+		hasEmbedding := len(embedding) == db.ExpectedEmbeddingDim
+		queryText = strings.TrimSpace(queryText)
 		hasText := queryText != ""
 		if (!hasEmbedding && !hasText) || !fakeStackMatches(stack) {
 			return nil, nil

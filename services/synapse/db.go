@@ -469,7 +469,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 
 	var meta map[string]any
 	if len(metaBytes) > 0 {
-		if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		if err = json.Unmarshal(metaBytes, &meta); err != nil {
 			log.Printf("[synapse] [registry] failed to unmarshal metadata for job deploy: %v", err)
 		}
 	}
@@ -484,10 +484,10 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 
 	if len(remaining) > 0 {
 		updateQuery := `UPDATE pr_registry SET status = 'deploying', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', to_jsonb($1::text[])), '{deployed_jobs}', to_jsonb($2::text[])), updated_at = CURRENT_TIMESTAMP WHERE id = $3 AND status IN ('deploying', 'merged', 'synced')`
-		if _, err := tx.Exec(qCtx, updateQuery, remaining, deployedJobs, id); err != nil {
+		if _, err = tx.Exec(qCtx, updateQuery, remaining, deployedJobs, id); err != nil {
 			return "", 0, "", "", false, fmt.Errorf("update remaining jobs: %w", err)
 		}
-		if err := tx.Commit(qCtx); err != nil {
+		if err = tx.Commit(qCtx); err != nil {
 			return "", 0, "", "", false, fmt.Errorf("commit remaining jobs tx: %w", err)
 		}
 		return targetID, prNum, mergeSHA, repoOut, false, nil

@@ -489,7 +489,7 @@ func (s *Server) toolCreate(ctx context.Context, args CreateArgs) (string, bool)
 		return err.Error(), true
 	}
 
-	if err := validateCreateRelations(ctx, src, args.ParentID, args.Blocks, args.BlockedBy, args.Related); err != nil {
+	if err = validateCreateRelations(ctx, src, args.ParentID, args.Blocks, args.BlockedBy, args.Related); err != nil {
 		return err.Error(), true
 	}
 
@@ -503,11 +503,11 @@ func (s *Server) toolCreate(ctx context.Context, args CreateArgs) (string, bool)
 	var emb []float32
 	if s.ollamaClient != nil {
 		text := args.Title + "\n" + args.Description
-		if genEmb, err := s.ollamaClient.GenerateEmbedding(ctx, text, false, 3); err == nil {
+		if genEmb, generateEmbeddingErr := s.ollamaClient.GenerateEmbedding(ctx, text, false, 3); generateEmbeddingErr == nil {
 			emb = genEmb
 		}
 	}
-	if err := s.store.UpdateTaskEmbeddingAndResolution(ctx, task.ID, emb, ""); err != nil {
+	if err = s.store.UpdateTaskEmbeddingAndResolution(ctx, task.ID, emb, ""); err != nil {
 		log.Printf("[docket-mcp] update embedding error: %v", err)
 	}
 
@@ -558,13 +558,13 @@ func (s *Server) toolUpdate(ctx context.Context, args UpdateArgs) (string, bool)
 	var emb []float32
 	if s.ollamaClient != nil {
 		text := updated.Title + "\n" + updated.Description
-		if genEmb, err := s.ollamaClient.GenerateEmbedding(ctx, text, false, 3); err == nil {
+		if genEmb, generateEmbeddingErr := s.ollamaClient.GenerateEmbedding(ctx, text, false, 3); generateEmbeddingErr == nil {
 			emb = genEmb
 		}
 	}
 
 	if len(emb) > 0 {
-		if err := s.store.UpdateTaskEmbedding(ctx, args.ID, emb); err != nil {
+		if err = s.store.UpdateTaskEmbedding(ctx, args.ID, emb); err != nil {
 			log.Printf("[docket-mcp] update embedding error: %v", err)
 		}
 	}
@@ -736,7 +736,7 @@ func (s *Server) toolClose(ctx context.Context, args CloseArgs) (string, bool) {
 	if err != nil {
 		return err.Error(), true
 	}
-	if err := ValidateCloseGuard(nodesBefore, args.ID, args.Resolution); err != nil {
+	if err = ValidateCloseGuard(nodesBefore, args.ID, args.Resolution); err != nil {
 		return err.Error(), true
 	}
 
@@ -744,13 +744,13 @@ func (s *Server) toolClose(ctx context.Context, args CloseArgs) (string, bool) {
 	var closedIDs []int64
 	if args.Resolution == taskStatusCompleted {
 		closedIDs = []int64{args.ID}
-		if err := s.closeCompleted(ctx, args.ID, args.Reason, now); err != nil {
+		if err = s.closeCompleted(ctx, args.ID, args.Reason, now); err != nil {
 			return err.Error(), true
 		}
 	} else {
 		openSubIDs := CollectOpenSubtreeIDs(nodesBefore, args.ID)
 		closedIDs = append([]int64{args.ID}, openSubIDs...)
-		if err := s.closeWontDo(ctx, args.ID, args.Reason, openSubIDs, now); err != nil {
+		if err = s.closeWontDo(ctx, args.ID, args.Reason, openSubIDs, now); err != nil {
 			return err.Error(), true
 		}
 	}

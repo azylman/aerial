@@ -152,7 +152,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 			"callSid":   "CA_twilio_123",
 		},
 	}
-	if err := twilioWS.WriteJSON(startMsg); err != nil {
+	if err = twilioWS.WriteJSON(startMsg); err != nil {
 		t.Fatalf("write start event: %v", err)
 	}
 

@@ -339,13 +339,13 @@ func TestCoalescedStream_SupersededSequence(t *testing.T) {
 	}
 
 	// Publish message 1
-	if err := bus.Publish(context.Background(), "aerial.coalesced.device.1", "state-v1", []byte("v1")); err != nil {
+	if err = bus.Publish(context.Background(), "aerial.coalesced.device.1", "state-v1", []byte("v1")); err != nil {
 		t.Fatalf("Publish 1 failed: %v", err)
 	}
 	<-msg1Received
 
 	// Publish message 2 to the exact same subject to supersede message 1
-	if err := bus.Publish(context.Background(), "aerial.coalesced.device.1", "state-v2", []byte("v2")); err != nil {
+	if err = bus.Publish(context.Background(), "aerial.coalesced.device.1", "state-v2", []byte("v2")); err != nil {
 		t.Fatalf("Publish 2 failed: %v", err)
 	}
 
@@ -1057,7 +1057,7 @@ func TestNewJetStreamBus_Validation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJetStreamBus with mock dialer failed: %v", err)
 	}
-	if err := bus.Close(); err != nil {
+	if err = bus.Close(); err != nil {
 		t.Errorf("bus.Close failed: %v", err)
 	}
 

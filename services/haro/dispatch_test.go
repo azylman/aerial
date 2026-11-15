@@ -67,7 +67,7 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 
 	// 2. Advance to T1
 	t1 := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
-	if err := AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t1); err != nil {
+	if err = AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t1); err != nil {
 		t.Fatalf("AdvanceHeartbeatLastCompletedAt T1 failed: %v", err)
 	}
 	loaded, err = GetHeartbeatSchedule(ctx, db, "hb-mono-1")
@@ -80,7 +80,7 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 
 	// 3. Advance to T2 (later)
 	t2 := time.Date(2026, 11, 14, 2, 0, 0, 0, time.UTC)
-	if err := AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t2); err != nil {
+	if err = AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t2); err != nil {
 		t.Fatalf("AdvanceHeartbeatLastCompletedAt T2 failed: %v", err)
 	}
 	loaded, err = GetHeartbeatSchedule(ctx, db, "hb-mono-1")
@@ -93,7 +93,7 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 
 	// 4. Attempt advance to earlier timestamp T0 (monotonic invariant: should stay T2)
 	t0 := time.Date(2026, 11, 14, 0, 30, 0, 0, time.UTC)
-	if err := AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t0); err != nil {
+	if err = AdvanceHeartbeatLastCompletedAt(ctx, db, "hb-mono-1", t0); err != nil {
 		t.Fatalf("AdvanceHeartbeatLastCompletedAt T0 failed: %v", err)
 	}
 	loaded, err = GetHeartbeatSchedule(ctx, db, "hb-mono-1")
@@ -422,7 +422,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 		Effort:   "high",
 		RunAt:    now.Add(10 * time.Minute),
 	}
-	if err := memBus.Publish(ctx, pubsub.SubjectHaroOneShotJob, "os-bus-integration", oneShotJob); err != nil {
+	if err = memBus.Publish(ctx, pubsub.SubjectHaroOneShotJob, "os-bus-integration", oneShotJob); err != nil {
 		t.Fatalf("Publish one-shot: %v", err)
 	}
 	select {

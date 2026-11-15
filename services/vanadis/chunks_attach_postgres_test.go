@@ -219,7 +219,7 @@ func TestVanadisStore_AttachChunkPR_Standalone_MockDB(t *testing.T) {
 			}, nil
 		},
 	})
-	if _, _, _, err := sExistingErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
+	if _, _, _, err = sExistingErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
 		t.Error("expected error on existing lookup db failure")
 	}
 
@@ -229,7 +229,7 @@ func TestVanadisStore_AttachChunkPR_Standalone_MockDB(t *testing.T) {
 			return nil, errors.New("begin standalone tx err")
 		},
 	})
-	if _, _, _, err := sStandaloneBeginErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
+	if _, _, _, err = sStandaloneBeginErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
 		t.Error("expected error on begin tx failure in standalone attach")
 	}
 
@@ -246,19 +246,19 @@ func TestVanadisStore_AttachChunkPR_Standalone_MockDB(t *testing.T) {
 			}, nil
 		},
 	})
-	if _, _, _, err := sLockErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
+	if _, _, _, err = sLockErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
 		t.Error("expected error on advisory lock failure")
 	}
 
 	// Standalone attach: insert build error
 	sInsertBuildErr := mockTxWithExecErr("INSERT INTO vanadis_builds", "insert build err")
-	if _, _, _, err := sInsertBuildErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
+	if _, _, _, err = sInsertBuildErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
 		t.Error("expected error on insert build failure in standalone attach")
 	}
 
 	// Standalone attach: insert chunk error
 	sInsertChunkErr := mockTxWithExecErr("INSERT INTO vanadis_chunks", "insert chunk err")
-	if _, _, _, err := sInsertChunkErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
+	if _, _, _, err = sInsertChunkErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
 		t.Error("expected error on insert chunk failure in standalone attach")
 	}
 
@@ -273,7 +273,7 @@ func TestVanadisStore_AttachChunkPR_Standalone_MockDB(t *testing.T) {
 			}, nil
 		},
 	})
-	if _, _, _, err := sStandaloneCommitErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
+	if _, _, _, err = sStandaloneCommitErr.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "", PRNumber: 101, Repo: "aerial"}); err == nil {
 		t.Error("expected error on commit failure in standalone attach")
 	}
 

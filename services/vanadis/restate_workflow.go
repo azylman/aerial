@@ -231,8 +231,8 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 
 	stepOut, err := rt.RunReconcileStep(stepName, func(ctx context.Context) (reconcileStepOutput, error) {
 		if mutation != nil {
-			if err := executeBuildMutation(ctx, b.srv, buildID, *mutation); err != nil {
-				return reconcileStepOutput{}, err
+			if executeErr := executeBuildMutation(ctx, b.srv, buildID, *mutation); executeErr != nil {
+				return reconcileStepOutput{}, executeErr
 			}
 		}
 		return executeReconcileBuild(ctx, b.srv, buildID, priorLaunched)
@@ -509,7 +509,7 @@ func executeReconcileBuild(ctx context.Context, srv *VanadisServer, buildID stri
 	}
 
 	if b.Status == statusPending {
-		if err := srv.store.UpdateBuildStatus(ctx, buildID, "running"); err != nil {
+		if err = srv.store.UpdateBuildStatus(ctx, buildID, "running"); err != nil {
 			return reconcileStepOutput{}, fmt.Errorf("update build %s to running: %w", buildID, err)
 		}
 		b.Status = statusRunning
@@ -521,15 +521,15 @@ func executeReconcileBuild(ctx context.Context, srv *VanadisServer, buildID stri
 
 	chunkOrder, states := deriveReconcileChunkStates(chunks, priorLaunched)
 
-	if failedOut, ok, err := checkFailedOrCancelledChunks(ctx, srv, b, chunks, priorLaunched); err != nil || ok {
-		if err != nil {
-			return reconcileStepOutput{}, err
+	if failedOut, ok, checkErr := checkFailedOrCancelledChunks(ctx, srv, b, chunks, priorLaunched); checkErr != nil || ok {
+		if checkErr != nil {
+			return reconcileStepOutput{}, checkErr
 		}
 		return failedOut, nil
 	}
 
 	if isWorkflowBuildComplete(chunkOrder, states) {
-		if err := executeCompleteWorkflowBuild(ctx, srv, buildID); err != nil {
+		if err = executeCompleteWorkflowBuild(ctx, srv, buildID); err != nil {
 			return reconcileStepOutput{}, fmt.Errorf("complete build %s: %w", buildID, err)
 		}
 		return reconcileStepOutput{

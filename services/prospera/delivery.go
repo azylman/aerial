@@ -446,13 +446,13 @@ func (r *Reporter) transcribeViaWhisper(ctx context.Context, cfg *Config, audioB
 	if err != nil {
 		return "", err
 	}
-	if _, err := part.Write(audioBytes); err != nil {
+	if _, err = part.Write(audioBytes); err != nil {
 		return "", err
 	}
-	if err := writer.WriteField("model", "whisper-1"); err != nil {
+	if err = writer.WriteField("model", "whisper-1"); err != nil {
 		return "", err
 	}
-	if err := writer.Close(); err != nil {
+	if err = writer.Close(); err != nil {
 		return "", err
 	}
 
