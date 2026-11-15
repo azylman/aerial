@@ -44,6 +44,11 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
 
 ### Review Panel Composition & Subagent Execution Invariants
 - **The Girl Gang (4 Disciplines)**: 3 domain specialists dynamically tailored to the change (e.g., Systems/Concurrency, Architecture, Security, Data Integrity, or PWA/Frontend when user-facing UI is touched) + 1 mandatory Adversarial Devil's Advocate.
+- **DAG Disjointness, Non-Mutating Pre-Cutover Action Gate & Control-Plane Continuity Checks**:
+  During Tier 2/3 plan audits, the Devil's Advocate and Architecture reviewers MUST explicitly verify the following invariants across any proposed Vanadis build plan:
+  1. **Parallel Same-Repo PR Disjointness**: Any concurrent `"mode": "pr"` chunks targeting the same `repo` (neither is an ancestor of the other in `depends_on`) declare non-empty, disjoint `target_files`. Flag any overlapping file targets as fatal merge-conflict risks.
+  2. **Non-Mutating Pre-Cutover Action Gate**: Any multi-chunk migration or cutover plan that flips live entrypoints, replaces queue consumers, or purges legacy paths includes a preceding `"mode": "action"` readiness gate chunk. Ensure action chunks adhere strictly to the **Hermeticity Boundary**: live operational probes must be read-only / non-mutating (health checks, `/deployments` inspection, `400 Bad Request` validation rejection tests) and NEVER inject synthetic builds, fake PR numbers (e.g. `999901`), or synthetic NATS events into production services.
+  3. **In-Flight Control-Plane Continuity**: Any plan modifying `vanadis`, `synapse`, `eri`, `haro`, or `nats` preserves compatibility and fallback paths for already-running builds initiated under the prior state so active builds never strand themselves mid-flight.
 - **Single Consolidated Review Subagent**: Always run The Girl Gang inside a **single `research` subagent** (`role: "TheGirlGangReviewer"`, `TypeName: "research"`). Never spawn multiple parallel review subagents or emit intermediate waiting prose while a subagent is running. Once parallel work is complete, stop calling tools with empty text so `agy` suspends until the reactive `<SYSTEM_MESSAGE>` wakeup arrives (never busy-poll `manage_subagents list` or read a running subagent's `transcript.jsonl` to check status).
 
 ---
