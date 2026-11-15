@@ -17,6 +17,9 @@ import (
 	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
+// categoryInternalClusterDomain flags internal cluster hostnames in commit scans.
+const categoryInternalClusterDomain = "InternalClusterDomain"
+
 // GuardScanURL is the loopback URL for eri's internal guard scan endpoint.
 var GuardScanURL = "http://127.0.0.1:8080/internal/guard/scan"
 
@@ -39,7 +42,7 @@ type PatternRule struct {
 // Strictly contains generic patterns without any hardcoded personal PII.
 var BuiltinPatterns = []PatternRule{
 	{Category: "RFC1918_192_168", Regex: regexp.MustCompile(`\b192\.168\.\d{1,3}\.\d{1,3}\b`)},
-	{Category: "InternalClusterDomain", Regex: regexp.MustCompile(`(?i)\b[a-zA-Z0-9_-]+\.(?:aerial|lan)\b`)},
+	{Category: categoryInternalClusterDomain, Regex: regexp.MustCompile(`(?i)\b[a-zA-Z0-9_-]+\.(?:aerial|lan)\b`)},
 	{Category: "GitHubPAT", Regex: regexp.MustCompile(`\b(ghp|github_pat|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,80}\b`)},
 	{Category: "PrivateKey", Regex: regexp.MustCompile(`-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`)},
 	{Category: "DiscordWebhook", Regex: regexp.MustCompile(`https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+`)},
@@ -50,7 +53,7 @@ var BuiltinPatterns = []PatternRule{
 
 // gitCmdRunner executes git commands. Package variable to enable hermetic mocking in tests.
 var gitCmdRunner = func(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command(binGit, args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -382,7 +385,7 @@ func ScanTextForSecrets(text, sourceLabel string, patterns []PatternRule) []Viol
 		}
 
 		for _, p := range patterns {
-			if p.Category == "RFC1918_192_168" || p.Category == "InternalClusterDomain" {
+			if p.Category == "RFC1918_192_168" || p.Category == categoryInternalClusterDomain {
 				continue
 			}
 			if sample := p.Regex.FindString(line); sample != "" {
@@ -466,7 +469,7 @@ func scanViaLoopbackOrLocal(diff, text, sourceLabel string, checkTestFiles, igno
 		if ignoreInternalDomain {
 			filtered := make([]PatternRule, 0, len(patterns))
 			for _, p := range patterns {
-				if p.Category != "InternalClusterDomain" {
+				if p.Category != categoryInternalClusterDomain {
 					filtered = append(filtered, p)
 				}
 			}
@@ -503,7 +506,7 @@ func unwrapShellScriptCommand(tokens []string) (string, bool) {
 		return "", false
 	}
 	bin := strings.ToLower(filepath.Base(tokens[0]))
-	if bin != "bash" && bin != "sh" && bin != "zsh" {
+	if bin != binBash && bin != "sh" && bin != "zsh" {
 		return "", false
 	}
 	for i, t := range tokens {
@@ -543,7 +546,7 @@ func matchGitCommitTokens(tokens []string) (bool, string) {
 		return false, ""
 	}
 	bin := strings.ToLower(filepath.Base(tokens[0]))
-	if bin != "git" {
+	if bin != binGit {
 		return false, ""
 	}
 	var foundDir string
@@ -555,7 +558,7 @@ func matchGitCommitTokens(tokens []string) (bool, string) {
 			i++
 		case strings.HasPrefix(tok, "-C") && len(tok) > 2:
 			foundDir = strings.TrimPrefix(tok, "-C")
-		case tok == "commit":
+		case tok == gitSubcommandCommit:
 			return true, foundDir
 		}
 	}
@@ -702,13 +705,13 @@ func hasGitCommitAllFlags(tokens []string) bool {
 		return false
 	}
 	bin := strings.ToLower(filepath.Base(tokens[0]))
-	if bin != "git" {
+	if bin != binGit {
 		return false
 	}
 	isCommit := false
 	hasAll := false
 	for _, tok := range tokens[1:] {
-		if tok == "commit" {
+		if tok == gitSubcommandCommit {
 			isCommit = true
 		}
 		if tok == "-a" || tok == "--all" || strings.HasPrefix(tok, "-a") || (strings.HasPrefix(tok, "-") && !strings.HasPrefix(tok, "--") && strings.Contains(tok, "a")) {
@@ -816,7 +819,7 @@ func collectCommitDiff(dir, cmdLine string) string {
 func CheckCommit(toolName string, args ToolArgs) *Decision {
 	normalizedName := normalizeToolName(toolName)
 
-	if normalizedName != "run_command" && normalizedName != "bash" {
+	if normalizedName != toolRunCommand && normalizedName != toolBash {
 		return CheckOutboundSecrets(toolName, args)
 	}
 
@@ -847,7 +850,7 @@ func CheckCommit(toolName string, args ToolArgs) *Decision {
 	}
 
 	ignoreInternalDomain := IsCoreAerial(dir, args.CommandLine)
-	violations := scanViaLoopbackOrLocal(diff, args.CommandLine, "commit", false, ignoreInternalDomain)
+	violations := scanViaLoopbackOrLocal(diff, args.CommandLine, string(ModeCommit), false, ignoreInternalDomain)
 	if len(violations) > 0 {
 		return &Decision{
 			Decision: DecisionDeny,
@@ -869,9 +872,9 @@ func CheckOutboundSecrets(toolName string, args ToolArgs) *Decision {
 	var textToScan string
 
 	switch {
-	case cleanName == "run_command" || cleanName == "bash":
+	case cleanName == toolRunCommand || cleanName == toolBash:
 		textToScan = args.CommandLine
-	case cleanName == "call_mcp_tool" || strings.HasPrefix(cleanName, "mcp_") || strings.HasPrefix(rawLower, "mcp_") || strings.HasPrefix(rawLower, "mcp:"):
+	case cleanName == toolCallMCPTool || strings.HasPrefix(cleanName, "mcp_") || strings.HasPrefix(rawLower, "mcp_") || strings.HasPrefix(rawLower, "mcp:"):
 		parts := []string{
 			args.CommandLine,
 			string(args.Arguments),
@@ -912,7 +915,7 @@ func isInfisicalMCPCall(toolName string, args ToolArgs) bool {
 		parts := strings.Split(strings.TrimSpace(toolName), "__")
 		return strings.EqualFold(strings.Join(parts[1:len(parts)-1], "__"), infisicalMCPServer)
 	}
-	if normalizeToolName(toolName) != "call_mcp_tool" {
+	if normalizeToolName(toolName) != toolCallMCPTool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(args.ServerName), infisicalMCPServer) ||

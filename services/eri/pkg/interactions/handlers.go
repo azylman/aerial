@@ -20,6 +20,9 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
+// noScheduleAction is shown when no upcoming schedule can be resolved.
+const noScheduleAction = "none scheduled"
+
 var (
 	deployProgressDelay = 3 * time.Second
 	pollerTimeout       = 14*time.Minute + 30*time.Second
@@ -180,7 +183,7 @@ func (r *Router) resolveNextScheduleAction(ctx context.Context) string {
 func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) string {
 	haroURL := strings.TrimRight(strings.TrimSpace(explicitHaroURL), "/")
 	if haroURL == "" {
-		return "none scheduled"
+		return noScheduleAction
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
@@ -188,17 +191,17 @@ func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) stri
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, haroURL+"/schedules", nil)
 	if err != nil {
-		return "none scheduled"
+		return noScheduleAction
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "none scheduled"
+		return noScheduleAction
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "none scheduled"
+		return noScheduleAction
 	}
 
 	var schedData struct {
@@ -213,7 +216,7 @@ func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) stri
 		} `json:"one_shots"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&schedData); err != nil {
-		return "none scheduled"
+		return noScheduleAction
 	}
 
 	now := time.Now().UTC()
@@ -239,7 +242,7 @@ func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) stri
 	if earliestDesc != "" {
 		return earliestDesc
 	}
-	return "none scheduled"
+	return noScheduleAction
 }
 
 func (r *Router) handleRotate(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
@@ -338,7 +341,7 @@ func (r *Router) handleInterrupt(ctx context.Context, s *discordgo.Session, i *d
 
 func (r *Router) handleMode(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
 	targetChannelID := getChannelOption(data.Options, "channel", i.ChannelID)
-	modeVal := getStringOption(data.Options, "mode", "")
+	modeVal := getStringOption(data.Options, optionMode, "")
 
 	// Bare call: return active configuration ephemerally (<10ms)
 	if modeVal == "" {
@@ -374,7 +377,7 @@ func (r *Router) handleMode(ctx context.Context, s *discordgo.Session, i *discor
 		return
 	}
 
-	r.spawnDeployProgress(ctx, s, i.Interaction, "mode", targetChannelID, modeVal)
+	r.spawnDeployProgress(ctx, s, i.Interaction, optionMode, targetChannelID, modeVal)
 }
 
 func (r *Router) handleIgnoreBots(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
@@ -416,7 +419,7 @@ func (r *Router) handleIgnoreBots(ctx context.Context, s *discordgo.Session, i *
 
 	enabledVal := getBoolOption(data.Options, "enabled", false)
 	valStr := strconv.FormatBool(enabledVal)
-	r.spawnDeployProgress(ctx, s, i.Interaction, "ignore_bots", targetChannelID, valStr)
+	r.spawnDeployProgress(ctx, s, i.Interaction, optionIgnoreBots, targetChannelID, valStr)
 }
 
 func (r *Router) spawnDeployProgress(ctx context.Context, s *discordgo.Session, interaction *discordgo.Interaction, key, channelID, val string) {
@@ -480,9 +483,9 @@ func (r *Router) applyChannelPolicyUpdate(ctx context.Context, channelID, key, v
 	if r.deps.GitOpsChannelUpdater != nil {
 		mutateFn := func(p *config.ChannelPolicy) {
 			switch key {
-			case "mode":
+			case optionMode:
 				p.Mode = val
-			case "ignore_bots":
+			case optionIgnoreBots:
 				b := (val == "true")
 				p.IgnoreBots = &b
 			}
@@ -499,9 +502,9 @@ func (r *Router) applyChannelPolicyUpdate(ctx context.Context, channelID, key, v
 	if cur != nil && cur.Channels != nil {
 		pol := cur.Channels[channelID]
 		switch key {
-		case "mode":
+		case optionMode:
 			pol.Mode = val
-		case "ignore_bots":
+		case optionIgnoreBots:
 			b := (val == "true")
 			pol.IgnoreBots = &b
 		}

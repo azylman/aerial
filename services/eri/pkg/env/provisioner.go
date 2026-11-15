@@ -15,6 +15,9 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
+// sharedAgentsSkillsDir is the built-in skills tree on the read-only engine checkout.
+const sharedAgentsSkillsDir = "/share/aerial/.agents/skills"
+
 // Provisioner manages filesystem provisioning and synchronization of ~/.gemini runtime environments.
 type Provisioner struct {
 	homeDir              string
@@ -48,7 +51,7 @@ func New(homeDir, dataDir string) *Provisioner {
 			skillsDir = "/opt/superpowers/skills"
 		}
 	}
-	agentsSkillsDir := "/share/aerial/.agents/skills"
+	agentsSkillsDir := sharedAgentsSkillsDir
 	if fi, err := statAgentsSkills(agentsSkillsDir); err != nil || !fi.IsDir() {
 		agentsSkillsDir = "/app/.agents/skills"
 	}

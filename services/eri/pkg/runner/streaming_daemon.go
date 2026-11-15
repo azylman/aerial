@@ -414,14 +414,14 @@ func marshalPromptPayload(isClaude bool, payloadPrompt string) ([]byte, error) {
 			Message claudeUserMessage `json:"message"`
 		}
 		return json.Marshal(claudeUserInput{
-			Type: "user",
+			Type: eventUser,
 			Message: claudeUserMessage{
-				Role:    "user",
+				Role:    roleUser,
 				Content: payloadPrompt,
 			},
 		})
 	}
-	return json.Marshal(streamInputPayload{Event: "user", Message: streamInputMessage{Content: payloadPrompt}})
+	return json.Marshal(streamInputPayload{Event: eventUser, Message: streamInputMessage{Content: payloadPrompt}})
 }
 
 func (d *StreamingDaemon) syncTurnEnvFile(turnCtx *TurnContext) error {
@@ -714,7 +714,7 @@ func ExtractToolDetail(toolName string, params map[string]any, fallbackCmd strin
 			}
 			return ""
 		}
-	case "call_mcp_tool":
+	case toolCallMCPTool:
 		if tn := extractFirstString(params, "ToolName", "tool_name", "tool"); tn != "" {
 			return tn
 		}
@@ -750,7 +750,7 @@ func ExtractToolDetail(toolName string, params map[string]any, fallbackCmd strin
 func applyStepUpdateSubmap(f *stepUpdateFields, su map[string]any) {
 	f.su = su
 	state := strings.ToUpper(extractFirstString(su, "state", "status"))
-	typ := strings.ToLower(extractFirstString(su, "type", "step_type"))
+	typ := strings.ToLower(extractFirstString(su, fieldType, "step_type"))
 	f.stepIdx, f.hasStepIdx = extractStepIndex(su)
 	if tn := extractFirstString(su, "tool_name"); tn != "" {
 		f.toolName = tn
@@ -764,7 +764,7 @@ func applyStepUpdateSubmap(f *stepUpdateFields, su map[string]any) {
 	case "DONE":
 		f.toolEndStatus = "ok"
 	case "ERROR":
-		f.toolEndStatus = "error"
+		f.toolEndStatus = statusError
 	}
 	f.isSubagent = typ == "subagent"
 	if typ == "tool_call" || typ == "tool" || typ == "subagent" {
@@ -822,7 +822,7 @@ func isShellReadCommand(cmd string) bool {
 func extractActivatedSkill(toolName string, toolParams map[string]any, cmdName string) (string, bool) {
 	clean := strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(toolName), "mcp_"), "call_mcp_tool_"))
 	switch clean {
-	case "edit_file", "write_file", "replace_file_content", "multi_replace_file_content", "delete_file", "grep_search", "find_by_name", "call_mcp_tool":
+	case "edit_file", "write_file", "replace_file_content", "multi_replace_file_content", "delete_file", "grep_search", "find_by_name", toolCallMCPTool:
 		return "", false
 	case "run_command", "execute_command", "bash", "sh":
 		cl := extractFirstString(toolParams, "CommandLine", "command_line", "command", "cmd")
@@ -874,7 +874,7 @@ func (d *StreamingDaemon) recordToolStart(stepIdx int, hasStepIdx bool, call Too
 func matchFallbackInFlightTool(tools map[int]inFlightToolCall, toolName string, params map[string]any) (int, inFlightToolCall, bool) {
 	cTool, _ := ExtractMCPToolInfo(toolName, params)
 	for idx, rec := range tools {
-		if rec.call.Name == toolName || rec.call.Name == cTool || toolName == "call_mcp_tool" || len(tools) == 1 {
+		if rec.call.Name == toolName || rec.call.Name == cTool || toolName == toolCallMCPTool || len(tools) == 1 {
 			return idx, rec, true
 		}
 	}
@@ -971,8 +971,8 @@ func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map
 	if isNewToolStart && (canonicalTool != "" || f.cmdName != "") {
 		toolForSink := canonicalTool
 		cmdForSink := f.cmdName
-		if f.toolName == "call_mcp_tool" {
-			toolForSink = "call_mcp_tool"
+		if f.toolName == toolCallMCPTool {
+			toolForSink = toolCallMCPTool
 		} else if canonicalTool == cmdForSink {
 			cmdForSink = ""
 		}
@@ -1003,7 +1003,7 @@ func extractErrorsArray(errs []any) string {
 			continue
 		}
 		if em, ok := e.(map[string]any); ok {
-			if msg := extractFirstString(em, "message", "error", "text"); msg != "" {
+			if msg := extractFirstString(em, "message", fieldError, fieldText); msg != "" {
 				errStrs = append(errStrs, msg)
 			}
 		}
@@ -1024,12 +1024,12 @@ func isClaudeResultError(raw, resObj map[string]any) bool {
 	if sub == "" && resObj != nil {
 		sub = extractFirstString(resObj, "subtype")
 	}
-	return strings.HasPrefix(strings.ToLower(sub), "error")
+	return strings.HasPrefix(strings.ToLower(sub), subtypeErrorPrefix)
 }
 
 func extractResultErrors(raw, resObj map[string]any, isErr bool) string {
 	if isErr {
-		if s, ok := raw["result"].(string); ok && strings.TrimSpace(s) != "" {
+		if s, ok := raw[fieldResult].(string); ok && strings.TrimSpace(s) != "" {
 			return s
 		}
 	}
@@ -1048,7 +1048,7 @@ func extractResultErrors(raw, resObj map[string]any, isErr bool) string {
 
 func extractResultStatusAndError(raw map[string]any) (status, errMsg string) {
 	var resObj map[string]any
-	if r, ok := raw["result"].(map[string]any); ok {
+	if r, ok := raw[fieldResult].(map[string]any); ok {
 		resObj = r
 	}
 	for _, m := range []map[string]any{resObj, raw} {
@@ -1059,7 +1059,7 @@ func extractResultStatusAndError(raw map[string]any) (status, errMsg string) {
 			status = extractFirstString(m, "status")
 		}
 		if errMsg == "" {
-			errMsg = extractFirstString(m, "error")
+			errMsg = extractFirstString(m, fieldError)
 		}
 	}
 
@@ -1116,7 +1116,7 @@ func (d *StreamingDaemon) deliverResultToSink(activeTurn *TurnContext, raw map[s
 		currentModel = strings.TrimSpace(activeTurn.Model)
 	}
 	if currentModel == "" {
-		currentModel = "default"
+		currentModel = defaultModelLabel
 	}
 
 	respStr := extractResponseString(raw)
@@ -1209,7 +1209,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 
 	event, ok := raw["event"].(string)
 	if !ok {
-		event, ok = raw["type"].(string)
+		event, ok = raw[fieldType].(string)
 	}
 	if !ok {
 		log.Printf("[StreamingDaemon] NDJSON line missing string event/type field: %v", raw)
@@ -1218,7 +1218,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 
 	// Handle Claude "system" init event before inflight check, as it may latch the session ID
 	if event == "system" {
-		if extractFirstString(raw, "subtype") == "init" {
+		if extractFirstString(raw, "subtype") == eventInit {
 			if sessID := extractFirstString(raw, "session_id"); sessID != "" && IsValidUUID(sessID) {
 				d.mu.Lock()
 				d.sessionID = sessID
@@ -1242,13 +1242,13 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 	switch event {
 	case "step_update":
 		d.handleStepUpdateEvent(activeTurn, raw)
-	case "result":
+	case eventResult:
 		d.handleResultEvent(raw)
 	case "stream_event":
 		d.handleClaudeStreamEvent(activeTurn, raw)
 	case "assistant":
 		d.handleClaudeAssistantEvent(activeTurn, raw)
-	case "user":
+	case eventUser:
 		d.handleClaudeUserEvent(activeTurn, raw)
 	}
 }
@@ -1259,7 +1259,7 @@ func (d *StreamingDaemon) handleClaudeStreamEvent(activeTurn *TurnContext, raw m
 		return
 	}
 	d.recordStreamEventUsage(activeTurn, extractFirstString(raw, "parent_tool_use_id"), ev)
-	switch extractFirstString(ev, "type") {
+	switch extractFirstString(ev, fieldType) {
 	case "message_start":
 		d.mu.Lock()
 		d.stepCount++
@@ -1268,9 +1268,9 @@ func (d *StreamingDaemon) handleClaudeStreamEvent(activeTurn *TurnContext, raw m
 		d.notifyStepBoundary(activeTurn, stepIdx)
 	case "content_block_delta":
 		if delta, ok := ev["delta"].(map[string]any); ok && delta != nil {
-			switch extractFirstString(delta, "type") {
+			switch extractFirstString(delta, fieldType) {
 			case "text_delta":
-				if text := extractFirstString(delta, "text"); text != "" && activeTurn.Sink != nil {
+				if text := extractFirstString(delta, fieldText); text != "" && activeTurn.Sink != nil {
 					activeTurn.Sink.OnTextDelta(text)
 				}
 			case "thinking_delta":
@@ -1288,7 +1288,7 @@ func (d *StreamingDaemon) handleClaudeAssistantEvent(activeTurn *TurnContext, ra
 		return
 	}
 	d.recordStreamUsage(activeTurn, msg)
-	contents, ok := msg["content"].([]any)
+	contents, ok := msg[fieldContent].([]any)
 	d.recordAssistantOrigin(activeTurn, raw, msg, contents)
 	if !ok {
 		return
@@ -1301,7 +1301,7 @@ func (d *StreamingDaemon) handleClaudeAssistantEvent(activeTurn *TurnContext, ra
 		if !ok || bMap == nil {
 			continue
 		}
-		if extractFirstString(bMap, "type") != "tool_use" {
+		if extractFirstString(bMap, fieldType) != "tool_use" {
 			continue
 		}
 
@@ -1338,8 +1338,8 @@ func (d *StreamingDaemon) handleClaudeAssistantEvent(activeTurn *TurnContext, ra
 		if isNewStart && activeTurn.Sink != nil {
 			toolForSink := canonicalTool
 			cmdForSink := cmdDetail
-			if toolName == "call_mcp_tool" {
-				toolForSink = "call_mcp_tool"
+			if toolName == toolCallMCPTool {
+				toolForSink = toolCallMCPTool
 			} else if canonicalTool == cmdForSink {
 				cmdForSink = ""
 			}
@@ -1363,11 +1363,11 @@ func (d *StreamingDaemon) recordAssistantOrigin(activeTurn *TurnContext, raw, ms
 	}
 	var parts []string
 	for _, block := range contents {
-		if bMap, ok := block.(map[string]any); ok && extractFirstString(bMap, "type") == "text" {
-			parts = append(parts, extractFirstString(bMap, "text"))
+		if bMap, ok := block.(map[string]any); ok && extractFirstString(bMap, fieldType) == blockTypeText {
+			parts = append(parts, extractFirstString(bMap, fieldText))
 		}
 	}
-	activeTurn.syntheticReply = &claudeSyntheticReply{text: strings.TrimSpace(strings.Join(parts, "\n")), errType: extractFirstString(raw, "error")}
+	activeTurn.syntheticReply = &claudeSyntheticReply{text: strings.TrimSpace(strings.Join(parts, "\n")), errType: extractFirstString(raw, fieldError)}
 }
 
 // syntheticOnlyReplyError returns the turn's failure when its only assistant output was written by
@@ -1391,7 +1391,7 @@ func (d *StreamingDaemon) handleClaudeUserEvent(activeTurn *TurnContext, raw map
 	if !ok || msg == nil {
 		return
 	}
-	contents, ok := msg["content"].([]any)
+	contents, ok := msg[fieldContent].([]any)
 	if !ok {
 		return
 	}
@@ -1401,14 +1401,14 @@ func (d *StreamingDaemon) handleClaudeUserEvent(activeTurn *TurnContext, raw map
 		if !ok || bMap == nil {
 			continue
 		}
-		if extractFirstString(bMap, "type") != "tool_result" {
+		if extractFirstString(bMap, fieldType) != "tool_result" {
 			continue
 		}
 
 		toolUseID := extractFirstString(bMap, "tool_use_id")
 		status := "ok"
 		if isErr, ok := bMap["is_error"].(bool); ok && isErr {
-			status = "error"
+			status = statusError
 		}
 
 		d.inflightMu.Lock()
@@ -1456,16 +1456,16 @@ func extractResponseString(raw map[string]any) string {
 	if b, ok := raw["is_error"].(bool); ok && b {
 		isErr = true
 	}
-	if sub := extractFirstString(raw, "subtype"); strings.HasPrefix(strings.ToLower(sub), "error") {
+	if sub := extractFirstString(raw, "subtype"); strings.HasPrefix(strings.ToLower(sub), subtypeErrorPrefix) {
 		isErr = true
 	}
 
-	keys := []string{"response", "result", "content", "text"}
-	if resObj, ok := raw["result"].(map[string]any); ok {
+	keys := []string{"response", fieldResult, fieldContent, fieldText}
+	if resObj, ok := raw[fieldResult].(map[string]any); ok {
 		if b, ok := resObj["is_error"].(bool); ok && b {
 			isErr = true
 		}
-		if sub := extractFirstString(resObj, "subtype"); strings.HasPrefix(strings.ToLower(sub), "error") {
+		if sub := extractFirstString(resObj, "subtype"); strings.HasPrefix(strings.ToLower(sub), subtypeErrorPrefix) {
 			isErr = true
 		}
 		for _, k := range keys {
@@ -1474,8 +1474,8 @@ func extractResponseString(raw map[string]any) string {
 			}
 		}
 	}
-	for _, k := range []string{"response", "result", "content", "text"} {
-		if k == "result" && isErr {
+	for _, k := range []string{"response", fieldResult, fieldContent, fieldText} {
+		if k == fieldResult && isErr {
 			continue
 		}
 		if resp, ok := raw[k].(string); ok && strings.TrimSpace(resp) != "" {

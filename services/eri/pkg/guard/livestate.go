@@ -40,12 +40,12 @@ func isLiveStateRemovalTarget(p string) bool {
 // CheckLiveState evaluates tool calls against the live SSH state invariant.
 func CheckLiveState(toolName string, args ToolArgs) *Decision {
 	switch normalizeToolName(toolName) {
-	case "replace_file_content", "write_to_file", "edit_file", "write_file", "edit", "multiedit", "write":
+	case toolReplaceFileContent, toolWriteToFile, toolEditFile, toolWriteFile, toolEdit, toolMultiEdit, toolWrite:
 		if IsLiveStatePath(args.FilePath()) {
 			return &Decision{Decision: DecisionDeny, Reason: LiveStateDenyReason}
 		}
 
-	case "run_command", "bash":
+	case toolRunCommand, toolBash:
 		if inspectRunCommand(args.CommandLine, args.Cwd, IsLiveStatePath, isLiveStateRemovalTarget) {
 			return &Decision{Decision: DecisionDeny, Reason: LiveStateDenyReason}
 		}

@@ -46,7 +46,7 @@ func handlePoisonPillMessage(ctx context.Context, store db.Store, pool *WorkerPo
 	}
 	agyBin, apiKey := pool.runnerCredentials()
 	notif := pool.cfg.NotifierFunc(agyBin, apiKey, desc)
-	if m.AuthorID != "http-client" && pool.cfg.DeliveryFunc != nil {
+	if m.AuthorID != httpClientAuthorID && pool.cfg.DeliveryFunc != nil {
 		if err := pool.cfg.DeliveryFunc(pool.getDiscordSession(), m.ThreadID, notif); err != nil {
 			log.Printf("[Startup Recovery] Failed to deliver poison pill notice for message %s: %v", m.ID, err)
 		}
@@ -102,7 +102,7 @@ func resetOrFailInterruptedDispatch(ctx context.Context, store db.Store, pool *W
 		}
 		if pool != nil && pool.EventBus() != nil {
 			now := time.Now().UTC()
-			if err := pool.publishDispatchOutcome(ctx, *d, "failed", poisonReason, now, now); err != nil {
+			if err := pool.publishDispatchOutcome(ctx, *d, outcomeFailed, poisonReason, now, now); err != nil {
 				log.Printf("[Startup Recovery] Warning publishing dispatch outcome for %s: %v", d.ID, err)
 			}
 		}

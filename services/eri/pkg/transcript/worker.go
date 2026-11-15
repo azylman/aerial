@@ -15,6 +15,15 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
+// Step vocabulary for synthesized transcript steps.
+const (
+	stepTypeUserInput       = "USER_INPUT"
+	stepTypeTool            = "TOOL"
+	stepTypePlannerResponse = "PLANNER_RESPONSE"
+	stepSourceUserExplicit  = "USER_EXPLICIT"
+	stepStatusDone          = "DONE"
+)
+
 type rawTranscriptStep struct {
 	StepIndex int           `json:"step_index"`
 	Source    string        `json:"source"`
@@ -447,7 +456,7 @@ func resolveStepToolAssociation(raw rawTranscriptStep, pendingToolNames []string
 	if isIDPairedStep(raw) {
 		return effectiveToolName, pendingToolNames
 	}
-	if raw.Type == "GENERIC" || raw.Type == "TOOL" || raw.Type == "RUN_COMMAND" {
+	if raw.Type == "GENERIC" || raw.Type == stepTypeTool || raw.Type == "RUN_COMMAND" {
 		if len(pendingToolNames) > 0 {
 			if effectiveToolName == "" {
 				effectiveToolName = pendingToolNames[0]
@@ -456,7 +465,7 @@ func resolveStepToolAssociation(raw rawTranscriptStep, pendingToolNames []string
 		}
 		return effectiveToolName, nextPending
 	}
-	if raw.Type == "PLANNER_RESPONSE" {
+	if raw.Type == stepTypePlannerResponse {
 		if len(raw.ToolCalls) > 0 {
 			nextPending = make([]string, 0, len(raw.ToolCalls))
 			for _, tc := range raw.ToolCalls {
@@ -483,17 +492,17 @@ func (st *transcriptScanState) recordStep(raw rawTranscriptStep) {
 
 	// Extract Step 0 prompt shortcut
 	trimmedContent := strings.TrimSpace(raw.Content)
-	if raw.Type == "USER_INPUT" || raw.Source == "USER_EXPLICIT" {
+	if raw.Type == stepTypeUserInput || raw.Source == stepSourceUserExplicit {
 		trimmedContent = CleanPromptEnvelope(trimmedContent)
 	}
-	if raw.StepIndex == 0 && (raw.Type == "USER_INPUT" || raw.Source == "USER_EXPLICIT") && st.step0Prompt == "" {
+	if raw.StepIndex == 0 && (raw.Type == stepTypeUserInput || raw.Source == stepSourceUserExplicit) && st.step0Prompt == "" {
 		st.step0Prompt = trimmedContent
-	} else if raw.Type == "USER_INPUT" && st.step0Prompt == "" {
+	} else if raw.Type == stepTypeUserInput && st.step0Prompt == "" {
 		st.step0Prompt = trimmedContent
 	}
 
 	// Collect dialogue lines for settled session summary
-	if (raw.Type == "USER_INPUT" || raw.Type == "PLANNER_RESPONSE") && trimmedContent != "" && len(st.dialogueLines) < 20 {
+	if (raw.Type == stepTypeUserInput || raw.Type == stepTypePlannerResponse) && trimmedContent != "" && len(st.dialogueLines) < 20 {
 		st.dialogueLines = append(st.dialogueLines, fmt.Sprintf("%s: %s", raw.Type, trimmedContent))
 	}
 
@@ -553,9 +562,9 @@ func (st *transcriptScanState) parseClaudeUserEntry(claude claudeEntry) bool {
 	if err := json.Unmarshal(claude.Message.Content, &promptStr); err == nil {
 		raw := rawTranscriptStep{
 			StepIndex: st.maxStepIndex + 1,
-			Source:    "USER_EXPLICIT",
-			Type:      "USER_INPUT",
-			Status:    "DONE",
+			Source:    stepSourceUserExplicit,
+			Type:      stepTypeUserInput,
+			Status:    stepStatusDone,
 			CreatedAt: claude.Timestamp,
 			Content:   promptStr,
 		}
@@ -577,14 +586,14 @@ func (st *transcriptScanState) parseClaudeToolResultBlocks(blocks []claudeConten
 			continue
 		}
 		isToolResult = true
-		status := "DONE"
+		status := stepStatusDone
 		if b.IsError {
 			status = "ERROR"
 		}
 		st.recordStep(rawTranscriptStep{
 			StepIndex:  st.maxStepIndex + 1,
-			Source:     "TOOL",
-			Type:       "TOOL",
+			Source:     stepTypeTool,
+			Type:       stepTypeTool,
 			Status:     status,
 			CreatedAt:  timestamp,
 			Content:    extractClaudeBlockText(b.Content),
@@ -636,8 +645,8 @@ func (st *transcriptScanState) parseClaudeAssistantEntry(claude claudeEntry) boo
 		raw := rawTranscriptStep{
 			StepIndex: st.maxStepIndex + 1,
 			Source:    "MODEL",
-			Type:      "PLANNER_RESPONSE",
-			Status:    "DONE",
+			Type:      stepTypePlannerResponse,
+			Status:    stepStatusDone,
 			CreatedAt: claude.Timestamp,
 			Content:   strings.Join(textParts, "\n"),
 			Thinking:  strings.Join(thinkingParts, "\n"),
@@ -652,8 +661,8 @@ func (st *transcriptScanState) parseClaudeAssistantEntry(claude claudeEntry) boo
 		raw := rawTranscriptStep{
 			StepIndex: st.maxStepIndex + 1,
 			Source:    "MODEL",
-			Type:      "PLANNER_RESPONSE",
-			Status:    "DONE",
+			Type:      stepTypePlannerResponse,
+			Status:    stepStatusDone,
 			CreatedAt: claude.Timestamp,
 			Content:   text,
 		}

@@ -271,7 +271,7 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 }
 
 func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string) bool {
-	if m.AuthorID == "http-client" {
+	if m.AuthorID == httpClientAuthorID {
 		return true
 	}
 	aliases := []string{"aerial"}
@@ -303,7 +303,7 @@ func isNonUnknownTarget(raw string) bool {
 }
 
 func isDirectedAtOther(m db.Message, botUserID string, botRoleIDs []string) bool {
-	if m.AuthorID == "http-client" || isTier1Wake(m, botUserID, botRoleIDs) {
+	if m.AuthorID == httpClientAuthorID || isTier1Wake(m, botUserID, botRoleIDs) {
 		return false
 	}
 	if m.HasStructuredFields() {

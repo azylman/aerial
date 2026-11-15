@@ -13,7 +13,7 @@ func populateUsage(res *TurnResult, raw map[string]any) {
 	if u, ok := raw["usage"].(map[string]any); ok {
 		usageObj = u
 	}
-	if resObj, ok := raw["result"].(map[string]any); ok {
+	if resObj, ok := raw[fieldResult].(map[string]any); ok {
 		if u, ok := resObj["usage"].(map[string]any); ok {
 			usageObj = u
 		}
@@ -84,7 +84,7 @@ func (d *StreamingDaemon) recordStreamUsage(turn *TurnContext, msg map[string]an
 // message being streamed (per parent tool call, since subagent streams interleave) and message_delta
 // reports its final usage without repeating the ID.
 func (d *StreamingDaemon) recordStreamEventUsage(turn *TurnContext, parentToolUseID string, ev map[string]any) {
-	switch extractFirstString(ev, "type") {
+	switch extractFirstString(ev, fieldType) {
 	case "message_start":
 		msg, ok := ev["message"].(map[string]any)
 		if !ok {

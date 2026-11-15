@@ -53,11 +53,11 @@ func CheckSchedule(payload Payload, args ToolArgs) *Decision {
 		if args.NormalizedAction() == "list" {
 			return &Decision{Decision: DecisionDeny, Reason: SubagentPollDenyReason}
 		}
-	case "view_file", "read_file", "read":
+	case toolViewFile, toolReadFile, toolRead:
 		if isTaskLogPath(args.FilePath()) {
 			return &Decision{Decision: DecisionDeny, Reason: TaskPollDenyReason}
 		}
-	case "run_command", "bash":
+	case toolRunCommand, toolBash:
 		return checkScheduleRunCommand(args, payload.IsClaude())
 	}
 	return &Decision{Decision: DecisionAllow}
@@ -73,7 +73,7 @@ func checkScheduleRunCommand(args ToolArgs, isClaude bool) *Decision {
 
 	var overwrite map[string]any
 	if rewritten := stripGoTestVerbose(rewritePythonInlineQuotes(args.CommandLine)); rewritten != args.CommandLine {
-		overwrite = map[string]any{"CommandLine": rewritten}
+		overwrite = map[string]any{argCommandLine: rewritten}
 	}
 	if !isClaude && !args.IsDaemonBool() && args.WaitMs() != MaxSyncWaitMs {
 		if overwrite == nil {

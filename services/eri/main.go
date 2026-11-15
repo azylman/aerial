@@ -396,7 +396,7 @@ func computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey 
 		b.WriteString(hex.EncodeToString(keyHash[:]))
 		b.WriteString("\n")
 	}
-	if voiceEngine != "gemini_api" {
+	if voiceEngine != config.VoiceEngineGeminiAPI {
 		b.WriteString("processEngine:")
 		b.WriteString(cur.GetEngine())
 		b.WriteString("\nclaudeBin:")
@@ -455,7 +455,7 @@ func createVoiceProcessPool(ctx context.Context, cfg *config.Config, voiceHome, 
 			prewarmedTargets = cfg.VoicePrewarmedTargets()
 		} else {
 			cur = config.DefaultConfigData()
-			voiceEngine = "agy"
+			voiceEngine = config.EngineAgy
 			prewarmedTargets = []string{}
 		}
 
@@ -471,7 +471,7 @@ func createVoiceProcessPool(ctx context.Context, cfg *config.Config, voiceHome, 
 
 		ambRetriever := initVoiceAmbientRetriever(ctx, cur)
 
-		if voiceEngine == "gemini_api" {
+		if voiceEngine == config.VoiceEngineGeminiAPI {
 			pool, model, apiKey, servers, ok := buildGeminiVoicePool(cur, effectiveLow, prewarmedTargets, memoryRetriever, ambRetriever)
 			if ok {
 				voicePool = pool
@@ -479,10 +479,10 @@ func createVoiceProcessPool(ctx context.Context, cfg *config.Config, voiceHome, 
 				effectiveAPIKey = apiKey
 				mcpServers = servers
 			} else {
-				voiceEngine = "agy"
+				voiceEngine = config.EngineAgy
 			}
 		}
-		if voiceEngine != "gemini_api" {
+		if voiceEngine != config.VoiceEngineGeminiAPI {
 			effectiveModel = effectiveLow
 			if cur != nil && strings.TrimSpace(cur.Voice.Model) != "" {
 				effectiveModel = strings.TrimSpace(cur.Voice.Model)
@@ -826,7 +826,7 @@ func (t *reloadTrigger) Trigger() {
 func handleGitSyncReload(trigger *reloadTrigger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		trigger.Trigger()
-		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "queued"})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{jsonKeyStatus: "queued"})
 	})
 }
 
@@ -1021,9 +1021,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	defer closeAllBrainPools(allPools)
 
 	switch cur.GetEngine() {
-	case "agy":
+	case config.EngineAgy:
 		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()), metrics.RecordUsageJSON)
-	case "claude":
+	case config.EngineClaude:
 		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultClaudeUsageRunner(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), testing.Testing()), metrics.RecordClaudeUsageJSON)
 	}
 

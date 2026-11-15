@@ -17,6 +17,14 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// JSON-RPC envelope fields for MCP requests.
+const (
+	jsonrpcVersionKey = "jsonrpc"
+	jsonrpcVersion    = "2.0"
+	jsonrpcMethodKey  = "method"
+	jsonrpcParamsKey  = "params"
+)
+
 // ServerConfig defines the connection parameters for an outbound MCP server.
 type ServerConfig struct {
 	Name      string            `json:"name"              yaml:"name"`
@@ -124,8 +132,8 @@ func extractMCPSessionID(h http.Header) string {
 
 func (d *DefaultDispatcher) sendInitializedNotification(ctx context.Context, srv ServerConfig, sessID string) {
 	notifyReqBody, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "notifications/initialized",
+		jsonrpcVersionKey: jsonrpcVersion,
+		jsonrpcMethodKey:  "notifications/initialized",
 	})
 	if err != nil {
 		return
@@ -181,10 +189,10 @@ func (d *DefaultDispatcher) EnsureSession(ctx context.Context, serverName string
 	}
 
 	initReqBody, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "initialize",
-		"params": map[string]any{
+		jsonrpcVersionKey: jsonrpcVersion,
+		"id":              1,
+		jsonrpcMethodKey:  "initialize",
+		jsonrpcParamsKey: map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{},
 			"clientInfo": map[string]any{
@@ -317,10 +325,10 @@ func (d *DefaultDispatcher) fetchServerTools(ctx context.Context, srv ServerConf
 	d.mu.RUnlock()
 
 	reqBody, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "tools/list",
-		"params":  map[string]any{},
+		jsonrpcVersionKey: jsonrpcVersion,
+		"id":              1,
+		jsonrpcMethodKey:  "tools/list",
+		jsonrpcParamsKey:  map[string]any{},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal tools/list payload: %w", err)
@@ -478,10 +486,10 @@ func (d *DefaultDispatcher) Execute(ctx context.Context, name string, args map[s
 	callArgs := prepareToolCallArgs(args)
 
 	reqBody, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "tools/call",
-		"params": map[string]any{
+		jsonrpcVersionKey: jsonrpcVersion,
+		"id":              1,
+		jsonrpcMethodKey:  "tools/call",
+		jsonrpcParamsKey: map[string]any{
 			"name":      name,
 			"arguments": callArgs,
 		},

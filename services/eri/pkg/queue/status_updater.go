@@ -15,6 +15,29 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
+// Status updater phases.
+const (
+	phaseThinking   = "thinking"
+	phaseTool       = "tool"
+	phaseResponding = "responding"
+	phaseBackoff    = "backoff"
+)
+
+// Runner step event vocabulary consumed by HandleStep.
+const (
+	eventStepUpdate  = "step_update"
+	stepTypeThinking = "thinking"
+	stepTypeTool     = "tool"
+	stepTypeToolCall = "tool_call"
+	toolCallMCPTool  = "call_mcp_tool"
+)
+
+// verbExecuting is the default status verb for an active tool.
+const verbExecuting = "Executing"
+
+// fallbackToolLabel names a tool whose name is empty after prefix stripping.
+const fallbackToolLabel = "tool"
+
 const (
 	DefaultStatusTickerInterval    = 1500 * time.Millisecond
 	DefaultStatusDebounceDelay     = 1500 * time.Millisecond
@@ -35,15 +58,15 @@ func resolveToolVerb(toolName string) string {
 	case cleanLower == "read_file" || cleanLower == "view_file":
 		return "Reading"
 	case cleanLower == "run_command" || cleanLower == "execute_command" || cleanLower == "bash" || cleanLower == "sh":
-		return "Executing"
-	case strings.HasPrefix(lower, "call_mcp_tool") || cleanLower == "call_mcp_tool":
+		return verbExecuting
+	case strings.HasPrefix(lower, toolCallMCPTool) || cleanLower == toolCallMCPTool:
 		return "Calling"
 	case cleanLower == "grep_search" || cleanLower == "find_by_name" || cleanLower == "search_web" || cleanLower == "web_search":
 		return "Searching"
 	case cleanLower == "invoke_subagent" || cleanLower == "define_subagent":
 		return "Spawning"
 	default:
-		return "Executing"
+		return verbExecuting
 	}
 }
 
@@ -64,8 +87,8 @@ func FormatToolStatus(toolName, commandName string, elapsed time.Duration) strin
 	clean := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(toolName), "mcp_"), "call_mcp_tool_")
 	cleanLower := strings.ToLower(clean)
 	if cleanLower == "" {
-		cleanLower = "tool"
-		clean = "tool"
+		cleanLower = fallbackToolLabel
+		clean = fallbackToolLabel
 	}
 	sec := max(elapsed.Seconds(), 0.1)
 
@@ -73,7 +96,7 @@ func FormatToolStatus(toolName, commandName string, elapsed time.Duration) strin
 	if isFileTool(cleanLower) && cmd != "" {
 		cmd = filepath.Base(cmd)
 	}
-	if strings.HasPrefix(rawLower, "call_mcp_tool_") && cmd == "" && cleanLower != "call_mcp_tool" {
+	if strings.HasPrefix(rawLower, "call_mcp_tool_") && cmd == "" && cleanLower != toolCallMCPTool {
 		cmd = clean
 	}
 	if len([]rune(cmd)) > 28 {
@@ -82,7 +105,7 @@ func FormatToolStatus(toolName, commandName string, elapsed time.Duration) strin
 
 	var text string
 	switch {
-	case verb == "Executing" && (cleanLower == "run_command" || cleanLower == "execute_command" || cleanLower == "bash" || cleanLower == "sh"):
+	case verb == verbExecuting && (cleanLower == "run_command" || cleanLower == "execute_command" || cleanLower == "bash" || cleanLower == "sh"):
 		if cmd == "" {
 			cmd = "command"
 		}
@@ -240,24 +263,24 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 	typ := ev.ResolvedType()
 	var shouldTriggerFlush bool
 	switch typ {
-	case "thinking":
-		u.phase, u.activeCommand, u.dirty = "thinking", "", true
-	case "tool_call", "tool":
+	case stepTypeThinking:
+		u.phase, u.activeCommand, u.dirty = phaseThinking, "", true
+	case stepTypeToolCall, stepTypeTool:
 		toolName := ev.ResolvedToolName()
 		if ev.State == "DONE" || ev.State == "ERROR" {
-			if u.activeTool == toolName || toolName == "" || u.activeCommand == toolName || u.activeTool == "call_mcp_tool" || toolName == "call_mcp_tool" {
+			if u.activeTool == toolName || toolName == "" || u.activeCommand == toolName || u.activeTool == toolCallMCPTool || toolName == toolCallMCPTool {
 				if u.activeTool != "" {
 					u.lastCompletedTool, u.lastCompletedCommand, u.lastCompletedAt, u.lastCompletedElapsed = u.activeTool, u.activeCommand, time.Now(), time.Since(u.toolStart)
 				}
-				u.activeTool, u.activeCommand, u.phase, u.dirty = "", "", "thinking", true
+				u.activeTool, u.activeCommand, u.phase, u.dirty = "", "", phaseThinking, true
 			}
 		} else {
-			u.activeTool, u.activeCommand, u.toolStart, u.lastCompletedTool, u.lastCompletedCommand, u.phase, u.dirty, shouldTriggerFlush = toolName, ev.ResolvedToolDetail(), time.Now(), "", "", "tool", true, true
+			u.activeTool, u.activeCommand, u.toolStart, u.lastCompletedTool, u.lastCompletedCommand, u.phase, u.dirty, shouldTriggerFlush = toolName, ev.ResolvedToolDetail(), time.Now(), "", "", phaseTool, true, true
 		}
 	case "agent_response", "text_delta":
 		u.activeCommand = ""
-		if u.phase != "responding" {
-			u.phase, u.dirty, shouldTriggerFlush = "responding", true, true
+		if u.phase != phaseResponding {
+			u.phase, u.dirty, shouldTriggerFlush = phaseResponding, true, true
 		}
 	}
 	u.mu.Unlock()
@@ -276,7 +299,7 @@ func (u *StatusUpdater) SetCapacityBackoff(delay time.Duration) {
 		u.mu.Unlock()
 		return
 	}
-	u.phase, u.activeTool, u.activeCommand, u.lastCompletedTool, u.lastCompletedCommand, u.backoffUntil, u.dirty = "backoff", "", "", "", "", time.Now().Add(delay), true
+	u.phase, u.activeTool, u.activeCommand, u.lastCompletedTool, u.lastCompletedCommand, u.backoffUntil, u.dirty = phaseBackoff, "", "", "", "", time.Now().Add(delay), true
 	u.mu.Unlock()
 	u.triggerFlush()
 }
@@ -288,7 +311,7 @@ func (u *StatusUpdater) MarkTurnStarted() {
 	}
 	u.mu.Lock()
 	u.turnStart = time.Now()
-	if u.phase == "backoff" {
+	if u.phase == phaseBackoff {
 		u.phase, u.backoffUntil, u.dirty = "", time.Time{}, true
 	}
 	u.mu.Unlock()
@@ -324,17 +347,17 @@ func (u *StatusUpdater) Start() {
 
 func (u *StatusUpdater) currentStatusText() string {
 	switch u.phase {
-	case "backoff":
+	case phaseBackoff:
 		return FormatCapacityBackoffStatus(time.Until(u.backoffUntil))
-	case "tool":
+	case phaseTool:
 		if u.activeTool != "" {
 			return FormatToolStatus(u.activeTool, u.activeCommand, time.Since(u.toolStart))
 		}
 		fallthrough
-	case "responding":
+	case phaseResponding:
 		sec := max(time.Since(u.turnStart).Seconds(), 0.1)
 		return fmt.Sprintf("✍️ Generating response... (%.1fs)", sec)
-	case "thinking":
+	case phaseThinking:
 		if u.activeTool == "" && u.lastCompletedTool != "" && time.Since(u.lastCompletedAt) < u.toolLatchDuration {
 			return FormatToolStatus(u.lastCompletedTool, u.lastCompletedCommand, u.lastCompletedElapsed)
 		}
@@ -358,8 +381,8 @@ func (u *StatusUpdater) prepareFlushPayloadLocked() (string, string, bool) {
 		return "", "", false
 	}
 	hasToolActivity := u.hasToolActivityLocked()
-	isBackoff := u.phase == "backoff"
-	hasActivePhase := hasToolActivity || isBackoff || u.phase == "thinking" || u.phase == "responding"
+	isBackoff := u.phase == phaseBackoff
+	hasActivePhase := hasToolActivity || isBackoff || u.phase == phaseThinking || u.phase == phaseResponding
 	if !u.dirty && (u.statusMessageID == "" || !hasActivePhase) {
 		return "", "", false
 	}

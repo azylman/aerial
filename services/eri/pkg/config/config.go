@@ -18,6 +18,41 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 )
 
+// Channel effort tiers returned by ChannelPolicy.GetEffort.
+const (
+	EffortLow    = "low"
+	EffortMedium = "medium"
+	EffortHigh   = "high"
+)
+
+// Canonical wake modes returned by ChannelPolicy.GetWakeMode.
+const (
+	WakeModeMention    = "mention"
+	WakeModeClassifier = "classifier"
+	WakeModeAll        = "all"
+)
+
+// Channel interaction modes accepted in ChannelPolicy.Mode.
+const (
+	channelModeThread     = "thread"
+	channelModeThreads    = "threads"
+	channelModeIgnore     = "ignore"
+	channelModeMention    = "mention"
+	channelModeClassifier = "classifier"
+	channelModeChannel    = "channel"
+	channelModeDisabled   = "disabled"
+)
+
+// defaultChannelKey names the fallback policy entry in the channels map.
+const defaultChannelKey = "default"
+
+// Execution engines returned by GetEngine and VoiceEngine.
+const (
+	EngineAgy            = "agy"
+	EngineClaude         = "claude"
+	VoiceEngineGeminiAPI = "gemini_api"
+)
+
 var ConfigSearchPaths = []string{
 	"/local/config.yaml",
 	"/share/aerial-config/config.yaml",
@@ -70,25 +105,25 @@ type ChannelPolicy struct {
 // GetEffort returns the normalized effort tier for this channel policy ("low", "medium", or "high"), defaulting to "high".
 func (p ChannelPolicy) GetEffort() string {
 	switch strings.ToLower(strings.TrimSpace(p.Effort)) {
-	case "low":
-		return "low"
-	case "medium":
-		return "medium"
+	case EffortLow:
+		return EffortLow
+	case EffortMedium:
+		return EffortMedium
 	default:
-		return "high"
+		return EffortHigh
 	}
 }
 
 // IsThread reports whether the channel policy specifies thread-based interaction.
 func (p ChannelPolicy) IsThread() bool {
 	m := strings.ToLower(strings.TrimSpace(p.Mode))
-	return m == "thread" || m == "threads"
+	return m == channelModeThread || m == channelModeThreads
 }
 
 // IsIgnored reports whether the channel policy specifies an ignored/disabled channel.
 func (p ChannelPolicy) IsIgnored() bool {
 	m := strings.ToLower(strings.TrimSpace(p.Mode))
-	return m == "ignore" || m == "disabled"
+	return m == channelModeIgnore || m == channelModeDisabled
 }
 
 // GetWakeMode returns the effective wake mode for this channel policy.
@@ -97,26 +132,26 @@ func (p ChannelPolicy) GetWakeMode() string {
 	if p.WakeMode != "" {
 		wm := strings.ToLower(strings.TrimSpace(p.WakeMode))
 		switch wm {
-		case "mention", "mentions", "direct":
-			return "mention"
-		case "classifier", "ambient":
-			return "classifier"
-		case "all", "always":
-			return "all"
+		case WakeModeMention, "mentions", "direct":
+			return WakeModeMention
+		case WakeModeClassifier, "ambient":
+			return WakeModeClassifier
+		case WakeModeAll, "always":
+			return WakeModeAll
 		}
 	}
 	m := strings.ToLower(strings.TrimSpace(p.Mode))
 	switch m {
-	case "mention":
-		return "mention"
-	case "classifier", "channel":
-		return "classifier"
-	case "thread", "threads":
-		return "all"
-	case "ignore", "disabled":
-		return "ignore"
+	case channelModeMention:
+		return WakeModeMention
+	case channelModeClassifier, channelModeChannel:
+		return WakeModeClassifier
+	case channelModeThread, channelModeThreads:
+		return WakeModeAll
+	case channelModeIgnore, channelModeDisabled:
+		return channelModeIgnore
 	}
-	return "all"
+	return WakeModeAll
 }
 
 // GetAmbientWakeThreshold returns the ambient wake threshold, defaulting to 0.50 for classifier mode and 0.0 otherwise.
@@ -125,7 +160,7 @@ func (p ChannelPolicy) GetAmbientWakeThreshold() float64 {
 		return *p.AmbientWakeThreshold
 	}
 	m := strings.ToLower(strings.TrimSpace(p.Mode))
-	if m == "classifier" || m == "channel" {
+	if m == channelModeClassifier || m == channelModeChannel {
 		return 0.50
 	}
 	return 0.0
@@ -576,8 +611,8 @@ func DefaultConfigData() *ConfigData {
 		SystemChannel: "aerial-dev",
 		AdminUsers:    []string{},
 		Channels: map[string]ChannelPolicy{
-			"default": {
-				Mode:       "threads",
+			defaultChannelKey: {
+				Mode:       channelModeThreads,
 				IgnoreBots: &defaultIgnoreBots,
 			},
 		},
@@ -594,7 +629,7 @@ func DefaultConfigData() *ConfigData {
 			Ephemeral: make(map[string]MCPServerConfig),
 		},
 		Voice: VoiceConfig{
-			Engine:           "agy",
+			Engine:           EngineAgy,
 			PrewarmedTargets: []string{"kiosk"},
 			AllowedTools:     nil,
 		},
@@ -618,7 +653,7 @@ func DefaultConfigData() *ConfigData {
 		DaemonIdleTimeout:         24 * time.Hour,
 		MaxConcurrentDaemons:      40,
 		MaxBackgroundTaskDuration: 2 * time.Hour,
-		Engine:                    "agy",
+		Engine:                    EngineAgy,
 		ClaudeBin:                 "claude",
 		NATSURL:                   "",
 	}
@@ -643,7 +678,7 @@ func (c *Config) Get() *ConfigData {
 // Engine returns the process-wide execution engine ("claude" or "agy"), defaulting to "agy".
 func (c *Config) Engine() string {
 	if c == nil {
-		return "agy"
+		return EngineAgy
 	}
 	return c.Current().GetEngine()
 }
@@ -651,12 +686,12 @@ func (c *Config) Engine() string {
 // GetEngine returns the process-wide execution engine ("claude" or "agy"), defaulting to "agy".
 func (c *ConfigData) GetEngine() string {
 	if c == nil {
-		return "agy"
+		return EngineAgy
 	}
-	if strings.EqualFold(strings.TrimSpace(c.Engine), "claude") {
-		return "claude"
+	if strings.EqualFold(strings.TrimSpace(c.Engine), EngineClaude) {
+		return EngineClaude
 	}
-	return "agy"
+	return EngineAgy
 }
 
 // VoicePrewarmedTargets returns a defensive copy of configured voice daemon targets to eagerly pre-warm.
@@ -687,7 +722,7 @@ func (c *ConfigData) VoiceAllowedTools() []string {
 // VoiceEngine returns the configured voice engine ("agy" or "gemini_api"), defaulting to "agy".
 func (c *Config) VoiceEngine() string {
 	if c == nil {
-		return "agy"
+		return EngineAgy
 	}
 	return c.Current().VoiceEngine()
 }
@@ -695,14 +730,14 @@ func (c *Config) VoiceEngine() string {
 // VoiceEngine returns the configured voice engine ("agy" or "gemini_api"), defaulting to "agy".
 func (c *ConfigData) VoiceEngine() string {
 	if c == nil {
-		return "agy"
+		return EngineAgy
 	}
 	engine := strings.ToLower(strings.TrimSpace(c.Voice.Engine))
 	switch engine {
-	case "gemini_api", "gemini", "direct_api":
-		return "gemini_api"
+	case VoiceEngineGeminiAPI, "gemini", "direct_api":
+		return VoiceEngineGeminiAPI
 	default:
-		return "agy"
+		return EngineAgy
 	}
 }
 

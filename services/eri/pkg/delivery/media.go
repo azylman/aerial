@@ -18,6 +18,16 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+// fallbackImageBaseName names an image attachment whose URL has no usable file name.
+const fallbackImageBaseName = "image.jpg"
+
+// Audio extensions that need MIME sniffing corrections.
+const (
+	extWAV = ".wav"
+	extOGG = ".ogg"
+	extM4A = ".m4a"
+)
+
 const (
 	MaxAttachmentsPerMessage = 10
 	MaxAttachmentSizeBytes   = 8 * 1024 * 1024 // 8 MB
@@ -107,11 +117,11 @@ func formatUnavailableFallback(altText, baseName string) string {
 func sanitizeImageURLFallbackBaseName(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "image.jpg"
+		return fallbackImageBaseName
 	}
 	b := filepath.Base(u.Path)
 	if b == "" || b == "." || b == "/" {
-		return "image.jpg"
+		return fallbackImageBaseName
 	}
 	return b
 }
@@ -226,10 +236,10 @@ var validMediaExts = map[string]bool{
 	".jpeg": true,
 	".gif":  true,
 	".webp": true,
-	".wav":  true,
+	extWAV:  true,
 	".mp3":  true,
-	".ogg":  true,
-	".m4a":  true,
+	extOGG:  true,
+	extM4A:  true,
 	".flac": true,
 }
 
@@ -517,10 +527,10 @@ var extMIMEMap = map[string]string{
 	".jpeg": "image/jpeg",
 	".gif":  "image/gif",
 	".webp": "image/webp",
-	".wav":  "audio/wav",
+	extWAV:  "audio/wav",
 	".mp3":  "audio/mpeg",
-	".ogg":  "audio/ogg",
-	".m4a":  "audio/mp4",
+	extOGG:  "audio/ogg",
+	extM4A:  "audio/mp4",
 	".flac": "audio/flac",
 	".json": "application/json",
 	".pdf":  "application/pdf",
@@ -533,9 +543,9 @@ func resolveFallbackMIMEType(mimeType, ext string) string {
 		if mapped, ok := extMIMEMap[ext]; ok {
 			return mapped
 		}
-	case mimeType == "application/ogg" && ext == ".ogg":
+	case mimeType == "application/ogg" && ext == extOGG:
 		return "audio/ogg"
-	case mimeType == "video/mp4" && ext == ".m4a":
+	case mimeType == "video/mp4" && ext == extM4A:
 		return "audio/mp4"
 	}
 	return mimeType
@@ -558,7 +568,7 @@ func detectMediaMIMETypeBytes(data []byte, ext string) (string, error) {
 
 	if !strings.HasPrefix(mimeType, "image/") && !strings.HasPrefix(mimeType, "audio/") {
 		mimeType = resolveFallbackMIMEType(mimeType, ext)
-	} else if strings.HasPrefix(mimeType, "audio/") && ext == ".wav" && (mimeType == "audio/wave" || mimeType == "audio/x-wav") {
+	} else if strings.HasPrefix(mimeType, "audio/") && ext == extWAV && (mimeType == "audio/wave" || mimeType == "audio/x-wav") {
 		mimeType = "audio/wav"
 	}
 
@@ -589,7 +599,7 @@ func resolveInternalAttachmentFilename(u *url.URL, filename string) (string, err
 	baseName := filepath.Base(u.Path)
 	ext := filepath.Ext(baseName)
 	if ext == "" || baseName == "" || baseName == "." || baseName == "/" {
-		baseName = "image.jpg"
+		baseName = fallbackImageBaseName
 	}
 	return baseName, nil
 }

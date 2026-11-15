@@ -64,9 +64,9 @@ func (r *Router) dispatchCommand(ctx context.Context, s *discordgo.Session, i *d
 		r.handleRotate(ctx, s, i, data)
 	case "interrupt":
 		r.handleInterrupt(ctx, s, i, data)
-	case "mode":
+	case optionMode:
 		r.handleMode(ctx, s, i, data)
-	case "ignore_bots":
+	case optionIgnoreBots:
 		r.handleIgnoreBots(ctx, s, i, data)
 	default:
 		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{

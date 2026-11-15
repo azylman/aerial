@@ -52,7 +52,7 @@ func validateChannelPolicy(name string, p *ChannelPolicy, isDefault bool, target
 	}
 	if isDefault || p.Mode != "" {
 		m := strings.ToLower(strings.TrimSpace(p.Mode))
-		if m != "thread" && m != "threads" && m != "classifier" && m != "mention" && m != "ignore" && m != "channel" && m != "disabled" {
+		if m != channelModeThread && m != channelModeThreads && m != channelModeClassifier && m != channelModeMention && m != channelModeIgnore && m != channelModeChannel && m != channelModeDisabled {
 			log.Printf("[Config] Validation error: %s mode must be 'threads', 'channel', 'ignore', or 'disabled' (or 'thread', 'classifier', 'mention'), got %q in %s.", prefix, p.Mode, targetPath)
 			return fmt.Errorf("%s mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", prefix, p.Mode)
 		}
@@ -66,7 +66,7 @@ func validateChannelPolicy(name string, p *ChannelPolicy, isDefault bool, target
 	}
 	if p.WakeMode != "" {
 		switch strings.ToLower(strings.TrimSpace(p.WakeMode)) {
-		case "mention", "mentions", "direct", "classifier", "ambient", "all", "always":
+		case WakeModeMention, "mentions", "direct", WakeModeClassifier, "ambient", WakeModeAll, "always":
 			p.WakeMode = p.GetWakeMode()
 		default:
 			log.Printf("[Config] Validation error: %s wake_mode must be 'mention', 'classifier', or 'all', got %q in %s.", prefix, p.WakeMode, targetPath)
@@ -75,7 +75,7 @@ func validateChannelPolicy(name string, p *ChannelPolicy, isDefault bool, target
 	}
 	if p.Effort != "" {
 		switch eLower := strings.ToLower(strings.TrimSpace(p.Effort)); eLower {
-		case "low", "medium", "high":
+		case EffortLow, EffortMedium, EffortHigh:
 			p.Effort = eLower
 		default:
 			log.Printf("[Config] Validation error: %s effort must be 'low', 'medium', or 'high', got %q in %s.", prefix, p.Effort, targetPath)
@@ -114,10 +114,10 @@ func validateChannels(parsed *ConfigData, targetPath string) error {
 		return fmt.Errorf("channels.default is required")
 	}
 
-	defPolicy, hasDefault := parsed.Channels["default"]
+	defPolicy, hasDefault := parsed.Channels[defaultChannelKey]
 	if !hasDefault {
 		for k, v := range parsed.Channels {
-			if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(k)), "#") == "default" {
+			if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(k)), "#") == defaultChannelKey {
 				defPolicy = v
 				hasDefault = true
 				break
@@ -130,13 +130,13 @@ func validateChannels(parsed *ConfigData, targetPath string) error {
 		return fmt.Errorf("channels.default is required")
 	}
 
-	if err := validateChannelPolicy("default", &defPolicy, true, targetPath); err != nil {
+	if err := validateChannelPolicy(defaultChannelKey, &defPolicy, true, targetPath); err != nil {
 		return err
 	}
-	parsed.Channels["default"] = defPolicy
+	parsed.Channels[defaultChannelKey] = defPolicy
 
 	for k, policy := range parsed.Channels {
-		if k == "default" {
+		if k == defaultChannelKey {
 			continue
 		}
 		if err := validateChannelPolicy(k, &policy, false, targetPath); err != nil {
@@ -199,16 +199,16 @@ func IsAdmin(adminUsers []string, identifiers ...string) bool {
 }
 
 func resolveDefaultChannelPolicy(channels map[string]ChannelPolicy) ChannelPolicy {
-	def, hasDef := getChannelPolicyRaw(channels, "default")
+	def, hasDef := getChannelPolicyRaw(channels, defaultChannelKey)
 	if !hasDef {
 		defaultIgnoreBots := true
 		return ChannelPolicy{
-			Mode:       "threads",
+			Mode:       channelModeThreads,
 			IgnoreBots: &defaultIgnoreBots,
 		}
 	}
 	if def.Mode == "" {
-		def.Mode = "threads"
+		def.Mode = channelModeThreads
 	}
 	return def
 }

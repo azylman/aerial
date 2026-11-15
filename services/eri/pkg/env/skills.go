@@ -102,8 +102,8 @@ func warnRootLevelSkills(srcBase string) {
 }
 
 func (p *Provisioner) sourceSkillDirs() []string {
-	sourceDirs := []string{p.customSkillsDir, "/share/aerial/.agents/skills"}
-	if p.agentsSkillsDir != "" && p.agentsSkillsDir != "/share/aerial/.agents/skills" {
+	sourceDirs := []string{p.customSkillsDir, sharedAgentsSkillsDir}
+	if p.agentsSkillsDir != "" && p.agentsSkillsDir != sharedAgentsSkillsDir {
 		sourceDirs = append(sourceDirs, p.agentsSkillsDir)
 	}
 	return sourceDirs

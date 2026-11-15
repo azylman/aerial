@@ -95,7 +95,7 @@ type streamInputMessage struct {
 }
 
 func buildClaudeDaemonArgs(cfg DaemonConfig) []string {
-	args := []string{"-p", "--verbose", "--dangerously-skip-permissions", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages"}
+	args := []string{"-p", "--verbose", "--dangerously-skip-permissions", "--input-format", formatStreamJSON, "--output-format", formatStreamJSON, "--include-partial-messages"}
 	if cfg.ResumeSession && cfg.SessionID != "" {
 		args = append(args, "--resume", cfg.SessionID)
 	} else if cfg.SessionID != "" {
@@ -120,7 +120,7 @@ func BuildDaemonArgs(cfg DaemonConfig) []string {
 		return buildClaudeDaemonArgs(cfg)
 	}
 
-	args := []string{"--dangerously-skip-permissions", "--input-format", "stream-json", "--output-format", "stream-json"}
+	args := []string{"--dangerously-skip-permissions", "--input-format", formatStreamJSON, "--output-format", formatStreamJSON}
 	if cfg.SessionID != "" {
 		args = append(args, "--conversation", cfg.SessionID)
 	}

@@ -23,6 +23,13 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
+// Turn and runner outcome labels recorded in metrics, traces and dispatch events.
+const (
+	outcomeSuccess = "success"
+	outcomeFailed  = "failed"
+	outcomeError   = "error"
+)
+
 type oneShotScheduleRequest struct {
 	ID       string    `json:"id"`
 	ThreadID string    `json:"thread_id"`
@@ -117,7 +124,7 @@ func (te *turnExecution) handleRetryBackoff(attempt, maxAttempts int, errDetail,
 			return true
 		}
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-		te.cancelBurstOnShutdown("failed", true)
+		te.cancelBurstOnShutdown(outcomeFailed, true)
 		return true
 	}
 }
@@ -173,10 +180,10 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 		te.deliverDiscordSuccess(cleanText, attachments)
 	}
 
-	metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
+	metrics.RecordTurnCompleted(outcomeSuccess, te.triggerType, currentModel, time.Since(te.execStart))
 	tokenChannel := te.resolveTokenChannel()
 	metrics.RecordTokens(currentModel, tokenChannel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
-	te.turnStatus, te.turnResponseText = "success", cleanText
+	te.turnStatus, te.turnResponseText = outcomeSuccess, cleanText
 	te.finalized.Store(true)
 	te.finalizeBurstMessages(te.burst, db.StatusCompleted, cleanText, "completed", "", currentModel, true, true)
 
@@ -186,7 +193,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 		te.logf("[WorkerPool] Dispatch %s (session: %s) completed successfully on attempt %d/%d", te.dispatch.ID, te.threadID, attempt, maxAttempts)
 	} else {
 		te.logf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
-		te.publishTurnCompleted("success")
+		te.publishTurnCompleted(outcomeSuccess)
 	}
 	return true, ""
 }
@@ -360,7 +367,7 @@ func (te *turnExecution) handleCapacityBlip(errDetail string, resetDur time.Dura
 	metrics.RecordTurnCompleted("capacity_exhausted", te.triggerType, currentModel, time.Since(te.execStart))
 	pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
 	te.deliverQuotaNotice(pauseMsg, "capacity pause notice")
-	te.failBurstWithStatus("failed", reason, currentModel)
+	te.failBurstWithStatus(outcomeFailed, reason, currentModel)
 	return false
 }
 
@@ -403,7 +410,7 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, runAt, scheduled, isAlreadyRetry)
 	te.deliverQuotaNotice(pauseMsg, "quota pause notice")
 	reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=%t] %s", resetDur, scheduled, sanitizeErrorText(errDetail))
-	te.failBurstWithStatus("failed", reason, currentModel)
+	te.failBurstWithStatus(outcomeFailed, reason, currentModel)
 	return false
 }
 
@@ -444,14 +451,14 @@ func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink 
 		OnThinking: func() {
 			respondingNotified.Store(false)
 			if statusUpdater != nil {
-				statusUpdater.HandleStep(&runner.StepUpdateEvent{Event: "step_update", StepType: "thinking"})
+				statusUpdater.HandleStep(&runner.StepUpdateEvent{Event: eventStepUpdate, StepType: stepTypeThinking})
 			}
 		},
 		OnToolCall: func(toolName, commandName string) {
 			respondingNotified.Store(false)
 			if statusUpdater != nil && (toolName != "" || commandName != "") {
 				statusUpdater.HandleStep(&runner.StepUpdateEvent{
-					Event: "step_update", State: "RUNNING", Type: "tool_call", ToolName: toolName,
+					Event: eventStepUpdate, State: "RUNNING", Type: stepTypeToolCall, ToolName: toolName,
 					ToolDetail: commandName,
 					ToolInfo: &runner.StepToolInfo{
 						Detail:     commandName,
@@ -467,14 +474,14 @@ func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink 
 				if status != "ok" {
 					state = "ERROR"
 				}
-				statusUpdater.HandleStep(&runner.StepUpdateEvent{Event: "step_update", State: state, Type: "tool_call", ToolName: toolName})
+				statusUpdater.HandleStep(&runner.StepUpdateEvent{Event: eventStepUpdate, State: state, Type: stepTypeToolCall, ToolName: toolName})
 			}
 		},
 		OnSkillActivated: func(skillName, source string) { metrics.RecordSkillActivation(skillName, source) },
 		OnTextDelta: func(delta string) {
 			if statusUpdater != nil && !respondingNotified.Load() && strings.TrimSpace(delta) != "" {
 				if respondingNotified.CompareAndSwap(false, true) {
-					statusUpdater.HandleStep(&runner.StepUpdateEvent{Event: "step_update", StepType: "agent_response"})
+					statusUpdater.HandleStep(&runner.StepUpdateEvent{Event: eventStepUpdate, StepType: "agent_response"})
 				}
 			}
 		},
@@ -492,8 +499,8 @@ func calculateCapacityBackoff(attempt int, resetDur time.Duration) time.Duration
 
 func (te *turnExecution) failBurst(err error) {
 	te.stopIndicators()
-	metrics.RecordTurnCompleted("failed", te.triggerType, "system", time.Since(te.execStart))
-	te.failBurstWithStatus("failed", err.Error(), "")
+	metrics.RecordTurnCompleted(outcomeFailed, te.triggerType, "system", time.Since(te.execStart))
+	te.failBurstWithStatus(outcomeFailed, err.Error(), "")
 }
 
 func (te *turnExecution) stopIndicators() {
@@ -511,7 +518,7 @@ func (te *turnExecution) failBurstWithStatus(turnStatus, errText, model string) 
 	te.turnStatus = turnStatus
 	te.turnError = sanitizedErr
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-	te.finalizeBurstMessages(te.burst, db.StatusFailed, sanitizedErr, "failed", sanitizedErr, model, true, false)
+	te.finalizeBurstMessages(te.burst, db.StatusFailed, sanitizedErr, outcomeFailed, sanitizedErr, model, true, false)
 }
 
 func (te *turnExecution) completeAmbientMessage(m db.Message, info WakeInfo) {

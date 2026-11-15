@@ -258,7 +258,7 @@ func (te *turnExecution) endTurnSpan() {
 // any status other than success, and ends it.
 func finishTurnSpan(span trace.Span, model string, usage runner.AgyUsage, status string) {
 	span.SetAttributes(turnSpanEndAttributes(model, usage, status)...)
-	if status != "" && status != "success" {
+	if status != "" && status != outcomeSuccess {
 		span.SetStatus(codes.Error, status)
 	}
 	span.End()
