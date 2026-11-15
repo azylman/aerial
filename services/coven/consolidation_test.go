@@ -429,6 +429,14 @@ func TestWorker_Start(t *testing.T) {
 	}
 }
 
+func TestWorker_ExtractThread_NilWorkerReturnsError(t *testing.T) {
+	t.Parallel()
+	var w *Worker
+	if err := w.ExtractThread(context.Background(), "th-1"); err == nil {
+		t.Fatal("ExtractThread() expected error for nil worker, got nil")
+	}
+}
+
 func TestSQLStore_GetAllFactsWithEmbeddings(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 	ctx := context.Background()

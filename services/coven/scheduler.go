@@ -80,6 +80,16 @@ func (w *Worker) HandleTurnCompletedEvent(ctx context.Context, ev pubsub.TurnCom
 	return nil
 }
 
+// ExtractThread extracts facts for a single thread within a 2-minute timeout.
+func (w *Worker) ExtractThread(ctx context.Context, threadID string) error {
+	if w == nil {
+		return errors.New("coven worker is nil")
+	}
+	extractCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return ExtractThreadFacts(extractCtx, w.store, w.ollama, w.llmClient, threadID)
+}
+
 // Start begins the maintenance worker, executing a startup catch-up extraction sweep
 // followed by the periodic maintenance loop (dreaming/pruning), running until ctx is canceled.
 func (w *Worker) Start(ctx context.Context) error {

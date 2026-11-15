@@ -1217,3 +1217,82 @@ func assertReconcileTierResults(t *testing.T, tc reconcileCandidateFactTierTestC
 		t.Errorf("expected neighbor %d to be deleted from store, but it remains", tc.neighborID)
 	}
 }
+
+type extractThreadFactsTestCase struct {
+	name     string
+	ctx      context.Context
+	threadID string
+	nilStore bool
+	nilLLM   bool
+	wantErr  bool
+}
+
+func TestExtractThreadFacts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	validEmb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []extractThreadFactsTestCase{
+		{
+			name:     "NilStoreFails",
+			ctx:      ctx,
+			threadID: "th-1",
+			nilStore: true,
+			wantErr:  true,
+		},
+		{
+			name:     "NilLLMFails",
+			ctx:      ctx,
+			threadID: "th-1",
+			nilLLM:   true,
+			wantErr:  true,
+		},
+		{
+			name:     "EmptyThreadIDFails",
+			ctx:      ctx,
+			threadID: "",
+			wantErr:  true,
+		},
+		{
+			name:     "WhitespaceThreadIDFails",
+			ctx:      ctx,
+			threadID: "   ",
+			wantErr:  true,
+		},
+		{
+			name:     "ValidArgumentsSuccess",
+			ctx:      ctx,
+			threadID: "th-valid",
+			wantErr:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runExtractThreadFactsCase(t, tc, validEmb)
+		})
+	}
+}
+
+func runExtractThreadFactsCase(t *testing.T, tc extractThreadFactsTestCase, validEmb []float32) {
+	t.Helper()
+	var store Store
+	if !tc.nilStore {
+		store = newTestMemStore()
+	}
+
+	client := &MockOllamaClient{embedding: validEmb}
+
+	var llm LLMClientFunc
+	if !tc.nilLLM {
+		llm = func(c context.Context, prompt string) (string, error) {
+			return `{"facts":[]}`, nil
+		}
+	}
+
+	err := ExtractThreadFacts(tc.ctx, store, client, llm, tc.threadID)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ExtractThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+}
