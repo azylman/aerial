@@ -168,21 +168,58 @@ func TestUpdatedForCurrentMainHelpers(t *testing.T) {
 	}
 }
 
-func TestFailedCheckTrackerHelpers(t *testing.T) {
-	t.Parallel()
+type failedCheckTrackerTestCase struct {
+	name                    string
+	nilServer               bool
+	repo                    string
+	prNumber                int
+	headSHA                 string
+	presetHeadSHA           string
+	presetFailedChecks      []string
+	presetClearChecks       []string
+	wantEmitAdditional      []bool
+	presetNonRoboRevBlocked bool
+	evalCheck               string
+	wantRecover             bool
+}
 
-	tests := []struct {
-		name               string
-		nilServer          bool
-		repo               string
-		prNumber           int
-		headSHA            string
-		presetHeadSHA      string
-		presetFailedChecks []string
-		presetClearChecks  []string
-		evalCheck          string
-		wantRecover        bool
-	}{
+func runFailedCheckTrackerCase(t *testing.T, tc failedCheckTrackerTestCase) {
+	t.Helper()
+	t.Parallel()
+	var srv *RouterServer
+	if !tc.nilServer {
+		srv = &RouterServer{}
+	}
+	if srv != nil && tc.presetNonRoboRevBlocked {
+		srv.nonRoboRevFailedSHAs.Store(prCheckKey(tc.repo, tc.prNumber), tc.presetHeadSHA)
+	}
+	if srv != nil && tc.presetHeadSHA != "" {
+		for i, c := range tc.presetFailedChecks {
+			emit := srv.recordFailedCheckRun(tc.repo, tc.prNumber, tc.presetHeadSHA, c)
+			if i < len(tc.wantEmitAdditional) && emit != tc.wantEmitAdditional[i] {
+				t.Errorf("recordFailedCheckRun(%q) emitAdditional = %v, want %v", c, emit, tc.wantEmitAdditional[i])
+			}
+		}
+		for _, c := range tc.presetClearChecks {
+			srv.clearActiveFailedCheckRun(tc.repo, tc.prNumber, tc.presetHeadSHA, c)
+		}
+	}
+	var got bool
+	switch {
+	case isGateAggregatorCheck(tc.evalCheck):
+		got = srv.canRecoverCheckSuccess(context.Background(), tc.repo, tc.prNumber, tc.evalCheck, tc.headSHA)
+	case isRoboRevCheck(tc.evalCheck):
+		got = srv.canRecoverRoboRevSuccess(context.Background(), tc.repo, tc.prNumber, tc.headSHA)
+	default:
+		got = srv.canRecoverNonGateCheckSuccess(tc.repo, tc.prNumber, tc.evalCheck, tc.headSHA)
+	}
+	if got != tc.wantRecover {
+		t.Fatalf("canRecover(%q) = %v, want %v", tc.evalCheck, got, tc.wantRecover)
+	}
+}
+
+func failedCheckTrackerCasesPart1() []failedCheckTrackerTestCase {
+	return []failedCheckTrackerTestCase{
 		{
 			name:        "nil server returns false",
 			nilServer:   true,
@@ -254,6 +291,11 @@ func TestFailedCheckTrackerHelpers(t *testing.T) {
 			evalCheck:          "Unit Tests",
 			wantRecover:        false,
 		},
+	}
+}
+
+func failedCheckTrackerCasesPart2() []failedCheckTrackerTestCase {
+	return []failedCheckTrackerTestCase{
 		{
 			name:               "two checks failed: one cleared active and one succeeds recovers",
 			repo:               "azylman/aerial",
@@ -275,27 +317,82 @@ func TestFailedCheckTrackerHelpers(t *testing.T) {
 			evalCheck:          "Unit Tests",
 			wantRecover:        false,
 		},
+		{
+			name:               "roborev failing first returns false, then unit tests returns emitAdditional true",
+			repo:               "azylman/aerial",
+			prNumber:           16,
+			headSHA:            "sha16",
+			presetHeadSHA:      "sha16",
+			presetFailedChecks: []string{"roborev", "Unit Tests"},
+			wantEmitAdditional: []bool{false, true},
+			evalCheck:          "Unit Tests",
+			wantRecover:        false,
+		},
+		{
+			name:               "duplicate check failure for unit tests returns emitAdditional false",
+			repo:               "azylman/aerial",
+			prNumber:           17,
+			headSHA:            "sha17",
+			presetHeadSHA:      "sha17",
+			presetFailedChecks: []string{"roborev", "Unit Tests", "Unit Tests"},
+			wantEmitAdditional: []bool{false, true, false},
+			evalCheck:          "Unit Tests",
+			wantRecover:        false,
+		},
+		{
+			name:                    "multi-check recovery: clearing roborev first leaves non-roborev active preventing roborev recovery",
+			repo:                    "azylman/aerial",
+			prNumber:                18,
+			headSHA:                 "sha18",
+			presetHeadSHA:           "sha18",
+			presetFailedChecks:      []string{"roborev", "Unit Tests"},
+			presetNonRoboRevBlocked: true,
+			evalCheck:               "roborev",
+			wantRecover:             false,
+		},
+		{
+			name:               "multi-check recovery: clearing non-roborev clears blocker and allows roborev recovery",
+			repo:               "azylman/aerial",
+			prNumber:           19,
+			headSHA:            "sha19",
+			presetHeadSHA:      "sha19",
+			presetFailedChecks: []string{"roborev", "Unit Tests"},
+			presetClearChecks:  []string{"Unit Tests"},
+			evalCheck:          "roborev",
+			wantRecover:        true,
+		},
+		{
+			name:                    "multi-check recovery: non-roborev succeeds after roborev cleared recovers",
+			repo:                    "azylman/aerial",
+			prNumber:                20,
+			headSHA:                 "sha20",
+			presetHeadSHA:           "sha20",
+			presetFailedChecks:      []string{"roborev", "Unit Tests"},
+			presetClearChecks:       []string{"roborev"},
+			presetNonRoboRevBlocked: true,
+			evalCheck:               "Unit Tests",
+			wantRecover:             true,
+		},
+		{
+			name:               "gate check success blocked when roborev has active failure",
+			repo:               "azylman/aerial",
+			prNumber:           21,
+			headSHA:            "sha21",
+			presetHeadSHA:      "sha21",
+			presetFailedChecks: []string{"roborev"},
+			evalCheck:          "CI Gate",
+			wantRecover:        false,
+		},
 	}
+}
 
+func TestFailedCheckTrackerHelpers(t *testing.T) {
+	t.Parallel()
+
+	tests := append(failedCheckTrackerCasesPart1(), failedCheckTrackerCasesPart2()...)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var srv *RouterServer
-			if !tc.nilServer {
-				srv = &RouterServer{}
-			}
-			if srv != nil && tc.presetHeadSHA != "" {
-				for _, c := range tc.presetFailedChecks {
-					srv.recordFailedCheckRun(tc.repo, tc.prNumber, tc.presetHeadSHA, c)
-				}
-				for _, c := range tc.presetClearChecks {
-					srv.clearActiveFailedCheckRun(tc.repo, tc.prNumber, tc.presetHeadSHA, c)
-				}
-			}
-			got := srv.canRecoverNonGateCheckSuccess(tc.repo, tc.prNumber, tc.evalCheck, tc.headSHA)
-			if got != tc.wantRecover {
-				t.Fatalf("canRecoverNonGateCheckSuccess() = %v, want %v", got, tc.wantRecover)
-			}
+			runFailedCheckTrackerCase(t, tc)
 		})
 	}
 }
@@ -600,7 +697,42 @@ func TestAnalyzeBuildChecks_Unit(t *testing.T) {
 	}
 }
 
-func TestFailedCheckRunTracking_Unit(t *testing.T) {
+func TestFailedCheckRunTracking_Validation(t *testing.T) {
+	t.Parallel()
+	srv := &RouterServer{}
+	repo := "azylman/aerial"
+	pr := 42
+	sha1 := "abc1234"
+
+	var nilSrv *RouterServer
+	nilSrv.recordFailedCheckRun(repo, pr, sha1, "lint")
+	if nilSrv.loadMatchingFailedCheckState(repo, pr, sha1) != nil {
+		t.Errorf("expected nil for nil server")
+	}
+	if nilSrv.hasActiveRoboRevFailure(repo, pr, sha1) {
+		t.Errorf("expected false for nil server hasActiveRoboRevFailure")
+	}
+	if srv.hasActiveRoboRevFailure("", pr, sha1) {
+		t.Errorf("expected false for empty repo")
+	}
+	if srv.hasActiveRoboRevFailure(repo, 0, sha1) {
+		t.Errorf("expected false for pr <= 0")
+	}
+	if srv.hasActiveRoboRevFailure(repo, pr, "") {
+		t.Errorf("expected false for empty sha")
+	}
+	if srv.hasActiveRoboRevFailure(repo, pr, sha1) {
+		t.Errorf("expected false before any failures recorded")
+	}
+
+	srv.recordFailedCheckRun("", pr, sha1, "lint")
+	srv.recordFailedCheckRun(repo, 0, sha1, "lint")
+	srv.recordFailedCheckRun(repo, pr, "", "lint")
+	srv.recordFailedCheckRun(repo, pr, "0000000000000000000000000000000000000000", "lint")
+	srv.recordFailedCheckRun(repo, pr, sha1, "")
+}
+
+func TestFailedCheckRunTracking_Flow(t *testing.T) {
 	t.Parallel()
 	srv := &RouterServer{}
 	repo := "azylman/aerial"
@@ -608,24 +740,31 @@ func TestFailedCheckRunTracking_Unit(t *testing.T) {
 	sha1 := "abc1234"
 	sha2 := "def5678"
 
-	var nilSrv *RouterServer
-	nilSrv.recordFailedCheckRun(repo, pr, sha1, "lint")
-	if nilSrv.loadMatchingFailedCheckState(repo, pr, sha1) != nil {
-		t.Errorf("expected nil for nil server")
+	if srv.recordFailedCheckRun(repo, pr, sha1, "roborev") {
+		t.Errorf("expected false for first failure on sha1")
 	}
-	srv.recordFailedCheckRun("", pr, sha1, "lint")
-	srv.recordFailedCheckRun(repo, 0, sha1, "lint")
-	srv.recordFailedCheckRun(repo, pr, "", "lint")
-	srv.recordFailedCheckRun(repo, pr, "0000000000000000000000000000000000000000", "lint")
-	srv.recordFailedCheckRun(repo, pr, sha1, "")
+	if !srv.hasActiveRoboRevFailure(repo, pr, sha1) {
+		t.Errorf("expected true after recording roborev failure")
+	}
+	if !srv.recordFailedCheckRun(repo, pr, sha1, "lint") {
+		t.Errorf("expected true for second distinct failure on sha1")
+	}
+	if srv.recordFailedCheckRun(repo, pr, sha1, "lint") {
+		t.Errorf("expected false for duplicate failure")
+	}
+	if !srv.recordFailedCheckRun(repo, pr, sha1, "unit") {
+		t.Errorf("expected true for third distinct failure on sha1")
+	}
 
-	srv.recordFailedCheckRun(repo, pr, sha1, "lint")
-	srv.recordFailedCheckRun(repo, pr, sha1, "unit")
 	state := srv.loadMatchingFailedCheckState(repo, pr, sha1)
-	if state == nil || len(state.activeFailed) != 2 {
-		t.Fatalf("expected state with 2 active failed, got %v", state)
+	if state == nil || len(state.activeFailed) != 2 || !state.roboRevActiveFailed {
+		t.Fatalf("expected state with 2 active non-roborev and roborev active failed, got %v", state)
 	}
 
+	srv.clearActiveFailedCheckRun(repo, pr, sha1, "roborev")
+	if srv.hasActiveRoboRevFailure(repo, pr, sha1) {
+		t.Errorf("expected false after clearing roborev active failure")
+	}
 	srv.clearActiveFailedCheckRun(repo, pr, sha1, "lint")
 	srv.clearActiveFailedCheckRun(repo, pr, sha1, "")
 	srv.clearActiveFailedCheckRun(repo, pr, "other-sha", "unit")

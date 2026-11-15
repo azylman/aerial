@@ -124,6 +124,7 @@ type ghEventCase struct {
 	delivery             string
 	payload              string
 	priorEvent           *ghPriorEvent
+	priorEvents          []ghPriorEvent
 	reg                  *mockPRRegistry
 	disp                 *mockOutboundDispatcher
 	bus                  *mockEventBus
@@ -160,6 +161,7 @@ type ghEventCase struct {
 	wantRecordCheckState string
 	wantUpdatedBranchHit string
 	wantReconciles       []fluxKustomizationRef
+	wantCIFailedChecks   []string
 }
 
 func TestProcessGitHubEvent(t *testing.T) {
@@ -364,8 +366,12 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 	t.Helper()
 	t.Parallel()
 	var inserters []pubsub.Bus
-	if tc.bus != nil {
-		inserters = append(inserters, tc.bus)
+	activeBus := tc.bus
+	if activeBus == nil && len(tc.wantCIFailedChecks) > 0 {
+		activeBus = &mockEventBus{}
+	}
+	if activeBus != nil {
+		inserters = append(inserters, activeBus)
 	}
 	var reg PRRegistryUpdater
 	if tc.reg != nil {
@@ -383,6 +389,11 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 			t.Fatalf("priorEvent failed: %v", err)
 		}
 	}
+	for i, pe := range tc.priorEvents {
+		if _, err := srv.ProcessGitHubEvent(ctx, pe.event, pe.delivery, []byte(pe.payload)); err != nil {
+			t.Fatalf("priorEvents[%d] failed: %v", i, err)
+		}
+	}
 
 	res, err := srv.ProcessGitHubEvent(ctx, tc.event, tc.delivery, []byte(tc.payload))
 	if (err != nil) != tc.wantErr {
@@ -392,6 +403,20 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 		return
 	}
 	assertEventResult(t, tc, res, ghPaths)
+	if len(tc.wantCIFailedChecks) > 0 {
+		if activeBus == nil {
+			t.Fatalf("wantCIFailedChecks specified but no bus available")
+		}
+		var gotChecks []string
+		for _, evt := range activeBus.publishedPREvents {
+			if evt.Event == "ci_failed" {
+				gotChecks = append(gotChecks, firstNonEmpty(evt.CheckName, evt.JobName))
+			}
+		}
+		if !slices.Equal(gotChecks, tc.wantCIFailedChecks) {
+			t.Errorf("ci_failed event checks = %v, want %v", gotChecks, tc.wantCIFailedChecks)
+		}
+	}
 }
 
 func processGitHubEventTestCases() []ghEventCase {
@@ -401,8 +426,9 @@ func processGitHubEventTestCases() []ghEventCase {
 	p4 := processGitHubEventCasesPart4()
 	p5 := processGitHubEventCasesPart5()
 	p6 := processGitHubEventCasesPart6()
+	p7 := processGitHubEventCasesPart7()
 	p8 := processGitHubEventCasesPart8()
-	total := len(p1) + len(p2) + len(p3) + len(p4) + len(p5) + len(p6) + len(p8)
+	total := len(p1) + len(p2) + len(p3) + len(p4) + len(p5) + len(p6) + len(p7) + len(p8)
 	all := make([]ghEventCase, 0, total)
 	all = append(all, p1...)
 	all = append(all, p2...)
@@ -410,6 +436,7 @@ func processGitHubEventTestCases() []ghEventCase {
 	all = append(all, p4...)
 	all = append(all, p5...)
 	all = append(all, p6...)
+	all = append(all, p7...)
 	all = append(all, p8...)
 	return all
 }
@@ -774,6 +801,117 @@ func processGitHubEventCasesPart4() []ghEventCase {
 			wantRecordCheckCalls: 1,
 			wantRecordCheckState: "passed",
 			wantCIFailedCalls:    1,
+		},
+	}
+}
+
+func processGitHubEventCasesPart7() []ghEventCase {
+	return []ghEventCase{
+		{
+			name: "roborev failure followed by lint failure on same head_sha emits both events", event: "check_run", delivery: "del-cr-lint-fail-after-roborev",
+			priorEvent: &ghPriorEvent{
+				event:    "check_run",
+				delivery: "del-cr-roborev-fail-multi",
+				payload:  `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"multihead1","status":"completed","conclusion":"failure","pull_requests":[{"number":601,"head":{"ref":"feat/m1","sha":"multihead1"}}]}}`,
+			},
+			payload:            `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"multihead1","status":"completed","conclusion":"failure","pull_requests":[{"number":601,"head":{"ref":"feat/m1","sha":"multihead1"}}]}}`,
+			reg:                &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedResults: []bool{true, false}},
+			wantPR:             601,
+			wantHeadSHA:        "multihead1",
+			wantCIFailedCalls:  2,
+			wantCIFailedChecks: []string{"roborev", "Lint"},
+		},
+		{
+			name: "duplicate failure delivery for same check emits 0 additional events", event: "check_run", delivery: "del-cr-lint-dup-fail",
+			priorEvent: &ghPriorEvent{
+				event:    "check_run",
+				delivery: "del-cr-lint-first-fail",
+				payload:  `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"multihead2","status":"completed","conclusion":"failure","pull_requests":[{"number":602,"head":{"ref":"feat/m2","sha":"multihead2"}}]}}`,
+			},
+			payload:            `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"multihead2","status":"completed","conclusion":"failure","pull_requests":[{"number":602,"head":{"ref":"feat/m2","sha":"multihead2"}}]}}`,
+			reg:                &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedResults: []bool{true, false}},
+			wantPR:             602,
+			wantHeadSHA:        "multihead2",
+			wantCIFailedCalls:  2,
+			wantCIFailedChecks: []string{"Lint"},
+		},
+		{
+			name: "same-commit rerun failure after in_progress emits ci_failed again", event: "check_run", delivery: "del-cr-lint-rerun-fail",
+			priorEvents: []ghPriorEvent{
+				{
+					event:    "check_run",
+					delivery: "del-cr-lint-run1-fail",
+					payload:  `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"multihead3","status":"completed","conclusion":"failure","pull_requests":[{"number":603,"head":{"ref":"feat/m3","sha":"multihead3"}}]}}`,
+				},
+				{
+					event:    "check_run",
+					delivery: "del-cr-lint-run2-progress",
+					payload:  `{"action":"in_progress","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"multihead3","status":"in_progress","pull_requests":[{"number":603,"head":{"ref":"feat/m3","sha":"multihead3"}}]}}`,
+				},
+			},
+			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"multihead3","status":"completed","conclusion":"failure","pull_requests":[{"number":603,"head":{"ref":"feat/m3","sha":"multihead3"}}]}}`,
+			reg:                  &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedResults: []bool{true, false}},
+			wantPR:               603,
+			wantHeadSHA:          "multihead3",
+			wantCIFailedCalls:    2,
+			wantCIFailedChecks:   []string{"Lint", "Lint"},
+			wantRecordCheckCalls: 1,
+		},
+		{
+			name: "multi-check recovery roborev succeeds first then lint succeeds recovers and calls UpdatePRSync", event: "check_run", delivery: "del-cr-lint-succ-after-roborev-succ",
+			priorEvents: []ghPriorEvent{
+				{
+					event:    "check_run",
+					delivery: "del-cr-roborev-fail-4a",
+					payload:  `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"multihead4a","status":"completed","conclusion":"failure","pull_requests":[{"number":604,"head":{"ref":"feat/m4a","sha":"multihead4a"}}]}}`,
+				},
+				{
+					event:    "check_run",
+					delivery: "del-cr-lint-fail-4a",
+					payload:  `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"multihead4a","status":"completed","conclusion":"failure","pull_requests":[{"number":604,"head":{"ref":"feat/m4a","sha":"multihead4a"}}]}}`,
+				},
+				{
+					event:    "check_run",
+					delivery: "del-cr-roborev-succ-4a",
+					payload:  `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"multihead4a","status":"completed","conclusion":"success","pull_requests":[{"number":604,"head":{"ref":"feat/m4a","sha":"multihead4a"}}]}}`,
+				},
+			},
+			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"multihead4a","status":"completed","conclusion":"success","pull_requests":[{"number":604,"head":{"ref":"feat/m4a","sha":"multihead4a"}}]}}`,
+			reg:                  &mockPRRegistry{ciFailedTargetID: "100000000000000001", syncTargetID: "100000000000000001", ciFailedResults: []bool{true, false}},
+			wantPR:               604,
+			wantHeadSHA:          "multihead4a",
+			wantTargetID:         "100000000000000001",
+			wantCIFailedCalls:    2,
+			wantSyncCalls:        1,
+			wantRecordCheckCalls: 2,
+		},
+		{
+			name: "multi-check recovery lint succeeds first then roborev succeeds recovers and calls UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-succ-after-lint-succ",
+			priorEvents: []ghPriorEvent{
+				{
+					event:    "check_run",
+					delivery: "del-cr-roborev-fail-4b",
+					payload:  `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"multihead4b","status":"completed","conclusion":"failure","pull_requests":[{"number":605,"head":{"ref":"feat/m4b","sha":"multihead4b"}}]}}`,
+				},
+				{
+					event:    "check_run",
+					delivery: "del-cr-lint-fail-4b",
+					payload:  `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"multihead4b","status":"completed","conclusion":"failure","pull_requests":[{"number":605,"head":{"ref":"feat/m4b","sha":"multihead4b"}}]}}`,
+				},
+				{
+					event:    "check_run",
+					delivery: "del-cr-lint-succ-4b",
+					payload:  `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"multihead4b","status":"completed","conclusion":"success","pull_requests":[{"number":605,"head":{"ref":"feat/m4b","sha":"multihead4b"}}]}}`,
+				},
+			},
+			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"multihead4b","status":"completed","conclusion":"success","pull_requests":[{"number":605,"head":{"ref":"feat/m4b","sha":"multihead4b"}}]}}`,
+			reg:                  &mockPRRegistry{ciFailedTargetID: "100000000000000001", syncTargetID: "100000000000000001", ciFailedResults: []bool{true, false}},
+			wantPR:               605,
+			wantHeadSHA:          "multihead4b",
+			wantTargetID:         "100000000000000001",
+			wantCIFailedCalls:    2,
+			wantSyncCalls:        1,
+			wantRecordCheckCalls: 2,
 		},
 	}
 }
