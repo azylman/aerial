@@ -150,7 +150,7 @@ channels:
 		Author:    &discordgo.User{ID: "user-1", Username: "testuser", Bot: false},
 	}
 
-	targetThreadID, isThread := getOrCreateThreadID(s, dmMsg)
+	targetThreadID, isThread := getOrCreateThreadID(t.Context(), s, dmMsg)
 	if targetThreadID != "chan-dm" || isThread {
 		t.Errorf("Expected DM targetThreadID chan-dm and false, got: %s, %t", targetThreadID, isThread)
 	}
@@ -394,22 +394,22 @@ channels:
 	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "111222333", GuildID: "guild-1", Name: "general", Type: discordgo.ChannelTypeGuildText})
 	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "thread-444", GuildID: "guild-1", ParentID: "111222333", Name: "discussion-thread", Type: discordgo.ChannelTypeGuildPublicThread})
 
-	if thID, isTh := getOrCreateThreadID(s, nil); thID != "" || isTh {
+	if thID, isTh := getOrCreateThreadID(t.Context(), s, nil); thID != "" || isTh {
 		t.Errorf("Expected empty string and false for nil message, got %s, %t", thID, isTh)
 	}
 
 	dmMsg := &discordgo.Message{ID: "msg-dm", ChannelID: "chan-dm", Content: "Hello Aerial", Author: &discordgo.User{ID: "user-1"}}
-	if thID, isTh := getOrCreateThreadID(s, dmMsg); thID != "chan-dm" || isTh {
+	if thID, isTh := getOrCreateThreadID(t.Context(), s, dmMsg); thID != "chan-dm" || isTh {
 		t.Errorf("Expected DM to return chan-dm and false, got %s, %t", thID, isTh)
 	}
 
 	msgGeneral := &discordgo.Message{ID: "msg-general-1", ChannelID: "111222333", GuildID: "guild-1", Content: "Hello in general", Author: &discordgo.User{ID: "user-1", Username: "alice"}}
-	if thID, isTh := getOrCreateThreadID(s, msgGeneral); thID != "111222333" || isTh {
+	if thID, isTh := getOrCreateThreadID(t.Context(), s, msgGeneral); thID != "111222333" || isTh {
 		t.Errorf("Expected channel mode to return 111222333 and false, got %s, %t", thID, isTh)
 	}
 
 	msgInThread := &discordgo.Message{ID: "msg-thread-1", ChannelID: "thread-444", GuildID: "guild-1", Content: "Follow up in thread", Author: &discordgo.User{ID: "user-1", Username: "alice"}}
-	if thID, isTh := getOrCreateThreadID(s, msgInThread); thID != "thread-444" || !isTh {
+	if thID, isTh := getOrCreateThreadID(t.Context(), s, msgInThread); thID != "thread-444" || !isTh {
 		t.Errorf("Expected existing thread to return thread-444 and true, got %s, %t", thID, isTh)
 	}
 
@@ -417,13 +417,13 @@ channels:
 	queue.InvalidateChannelCache(threadID1)
 	defer queue.InvalidateChannelCache(threadID1)
 	queue.CacheDiscordChannel(&discordgo.Channel{ID: threadID1, GuildID: "guild-1", ParentID: "chan-threads-555", Type: discordgo.ChannelTypeGuildPublicThread})
-	if thID, isTh := getOrCreateThreadID(s, &discordgo.Message{ID: threadID1, ChannelID: "chan-threads-555", GuildID: "guild-1"}); thID != threadID1 || !isTh {
+	if thID, isTh := getOrCreateThreadID(t.Context(), s, &discordgo.Message{ID: threadID1, ChannelID: "chan-threads-555", GuildID: "guild-1"}); thID != threadID1 || !isTh {
 		t.Errorf("Expected in-memory cache hit (%s, true), got (%s, %t)", threadID1, thID, isTh)
 	}
 
 	threadID2 := "th-state-102"
 	_ = s.State.ChannelAdd(&discordgo.Channel{ID: threadID2, GuildID: "guild-1", ParentID: "chan-threads-555", Type: discordgo.ChannelTypeGuildPublicThread})
-	if thID, isTh := getOrCreateThreadID(s, &discordgo.Message{ID: threadID2, ChannelID: "chan-threads-555", GuildID: "guild-1"}); thID != threadID2 || !isTh {
+	if thID, isTh := getOrCreateThreadID(t.Context(), s, &discordgo.Message{ID: threadID2, ChannelID: "chan-threads-555", GuildID: "guild-1"}); thID != threadID2 || !isTh {
 		t.Errorf("Expected session state hit (%s, true), got (%s, %t)", threadID2, thID, isTh)
 	}
 
@@ -431,10 +431,10 @@ channels:
 	_ = sNoToken.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
 	_ = sNoToken.State.ChannelAdd(&discordgo.Channel{ID: "chan-threads-555", GuildID: "guild-1", Name: "dev-chat", Type: discordgo.ChannelTypeGuildText})
 	msgDev := &discordgo.Message{ID: "msg-dev-1", ChannelID: "chan-threads-555", GuildID: "guild-1", Content: "Start a new thread please", Author: &discordgo.User{ID: "user-1", Username: "alice"}}
-	if thID, isTh := getOrCreateThreadID(sNoToken, msgDev); thID != "chan-threads-555" || isTh {
+	if thID, isTh := getOrCreateThreadID(t.Context(), sNoToken, msgDev); thID != "chan-threads-555" || isTh {
 		t.Errorf("Expected threads mode without active REST to return chan-threads-555 and false, got %s, %t", thID, isTh)
 	}
-	if thID, _ := getOrCreateThreadID(sNoToken, msgDev, false); thID != "chan-threads-555" {
+	if thID, _ := getOrCreateThreadID(t.Context(), sNoToken, msgDev, false); thID != "chan-threads-555" {
 		t.Errorf("expected chan-threads-555 with allowSummarize=false")
 	}
 
@@ -446,7 +446,7 @@ channels:
 	SetFunnelPool(pool)
 	defer SetFunnelPool(nil)
 
-	if thIDFail, _ := getOrCreateThreadID(sNoToken, msgDev, true); thIDFail != "chan-threads-555" {
+	if thIDFail, _ := getOrCreateThreadID(t.Context(), sNoToken, msgDev, true); thIDFail != "chan-threads-555" {
 		t.Errorf("expected chan-threads-555 on summarizer failure")
 	}
 
@@ -456,7 +456,7 @@ channels:
 		<-titleSummarizeSem
 		<-titleSummarizeSem
 	}()
-	if thID2, _ := getOrCreateThreadID(sNoToken, msgDev, true); thID2 != "chan-threads-555" {
+	if thID2, _ := getOrCreateThreadID(t.Context(), sNoToken, msgDev, true); thID2 != "chan-threads-555" {
 		t.Errorf("expected chan-threads-555 when semaphore saturated")
 	}
 }
@@ -531,7 +531,7 @@ channels:
 				Author:    &discordgo.User{ID: "user-42", Username: "test-user"},
 			}
 
-			targetID, isThread := getOrCreateThreadID(s, m)
+			targetID, isThread := getOrCreateThreadID(t.Context(), s, m)
 			if targetID != tt.wantThreadID || isThread != tt.wantIsThread {
 				t.Fatalf("getOrCreateThreadID() = (%q, %t); want (%q, %t)", targetID, isThread, tt.wantThreadID, tt.wantIsThread)
 			}
@@ -604,7 +604,7 @@ func TestConnectDiscordFunnel_OpenerContextCanceled(t *testing.T) {
 }
 
 func TestConnectDiscordFunnel_DisabledAndLifecycle(t *testing.T) {
-	if dg := connectDiscordFunnel(nil, nil, nil, ""); dg != nil {
+	if dg := connectDiscordFunnel(t.Context(), nil, nil, ""); dg != nil {
 		t.Errorf("Expected nil session for empty token, got %v", dg)
 	}
 
@@ -627,12 +627,6 @@ func TestConnectDiscordFunnel_DisabledAndLifecycle(t *testing.T) {
 	if s.Client.Timeout != 20*time.Second || s.Client.Transport == nil {
 		t.Errorf("REST client timeout %v transport %T, want 20s with a traced transport", s.Client.Timeout, s.Client.Transport)
 	}
-
-	sNilCtx := connectDiscordFunnel(nil, store, pool, "mock-nil-ctx-token")
-	if sNilCtx == nil {
-		t.Fatalf("Expected non-nil discordgo.Session for nil ctx")
-	}
-	_ = sNilCtx.Close()
 
 	if activeInteractionRouter.Load() == nil {
 		t.Errorf("Expected activeInteractionRouter to be initialized")

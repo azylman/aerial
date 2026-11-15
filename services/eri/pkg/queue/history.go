@@ -181,9 +181,6 @@ func formatHistoryContent(m HistoryMessage, capContent historyContentCap) string
 }
 
 func fetchDiscordChannelMessagesWithRetry(ctx context.Context, dg *discordgo.Session, channelID, beforeID string, limit int) ([]*discordgo.Message, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	var lastErr error
 	for attempt := range historyFetchMaxAttempts {
 		if attempt > 0 {

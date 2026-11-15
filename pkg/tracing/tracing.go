@@ -144,7 +144,8 @@ func Init(ctx context.Context, service, path string) (Config, func()) {
 		cfg.Enabled = false
 	}
 	return cfg, func() {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Runs at shutdown, usually after ctx is canceled; the flush gets its own grace period.
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if err := shutdown(flushCtx); err != nil {
 			log.Printf("[Tracing] Shutdown failed: %v", err)

@@ -310,7 +310,7 @@ func runWorkerPoolCancellationCase(t *testing.T, tt workerPoolCancellationCase) 
 							return
 						default:
 						}
-						if m, _ := getMessage(store, "msg-"+tt.name); m != nil && m.RetryCount > 0 {
+						if m, _ := store.GetMessage(ctx, "msg-"+tt.name); m != nil && m.RetryCount > 0 {
 							pool.cancel()
 							return
 						}

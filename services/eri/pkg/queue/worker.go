@@ -196,13 +196,14 @@ func (te *turnExecution) incrementMessageRetry(id, errorMsg string) {
 	}
 }
 
-func (te *turnExecution) saveSessionID(threadID, sessionID string) {
+func (te *turnExecution) saveSessionID(ctx context.Context, threadID, sessionID string) {
 	if te == nil || te.isEphemeral || te.isInterrupted() {
 		return
 	}
 	if s := te.store(); s != nil {
-		if err := s.SaveSessionID(context.Background(), threadID, sessionID); err != nil {
-			te.logf("[Worker] Warning saving session ID for thread %s: %v", threadID, err)
+		// A session ID the daemon already adopted must persist even if the turn is canceled meanwhile.
+		if err := s.SaveSessionID(context.WithoutCancel(ctx), threadID, sessionID); err != nil {
+			te.logCtxf(ctx, "[Worker] Warning saving session ID for thread %s: %v", threadID, err)
 		}
 	}
 }
@@ -258,11 +259,11 @@ func (te *turnExecution) getSessionID(threadID string) (string, error) {
 	return "", nil
 }
 
-func (te *turnExecution) getPreviousSessionID(threadID string) string {
+func (te *turnExecution) getPreviousSessionID(ctx context.Context, threadID string) string {
 	if s := te.store(); s != nil {
-		id, err := s.GetPreviousSessionID(context.Background(), threadID)
+		id, err := s.GetPreviousSessionID(ctx, threadID)
 		if err != nil {
-			te.logf("[WorkerPool] Warning getting previous session ID for %s: %v", threadID, err)
+			te.logCtxf(ctx, "[WorkerPool] Warning getting previous session ID for %s: %v", threadID, err)
 		}
 		return id
 	}
@@ -387,7 +388,7 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 	te.activeSessionMu.Unlock()
 
 	if currSess != "" && isCold && !isEphem {
-		te.saveSessionID(te.threadID, currSess)
+		te.saveSessionID(te.turnCtxValue(), te.threadID, currSess)
 	}
 	return true
 }
@@ -688,10 +689,10 @@ func (te *turnExecution) classifyAmbientMessages(msgs []db.Message) (float64, st
 	var score float64
 	var reason string
 	if len(msgs) == 1 {
-		res := te.pool.cfg.Classifier.Classify(te.pool.ctx, msgs[0], recentContext)
+		res := te.pool.cfg.Classifier.Classify(te.turnCtxValue(), msgs[0], recentContext)
 		score, reason = res.Confidence, res.Reason
 	} else {
-		res := te.pool.cfg.Classifier.ClassifyBurst(te.pool.ctx, msgs, recentContext)
+		res := te.pool.cfg.Classifier.ClassifyBurst(te.turnCtxValue(), msgs, recentContext)
 		score, reason = res.Confidence, res.Reason
 	}
 	channelName := te.effectiveName
@@ -734,7 +735,7 @@ func (te *turnExecution) runChannelAmbientTriage() bool {
 		te.activeSessionMu.Lock()
 		te.currentSessionID = ""
 		te.activeSessionMu.Unlock()
-		te.saveSessionID(te.threadID, "")
+		te.saveSessionID(te.turnCtxValue(), te.threadID, "")
 	}
 
 	metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Add(float64(len(te.burst)))
@@ -901,7 +902,7 @@ func (te *turnExecution) buildLeaseTurnContext(runCtx context.Context, currentMo
 	}
 	te.activeSessionMu.Unlock()
 	if shouldSave {
-		te.saveSessionID(te.threadID, leaseSess)
+		te.saveSessionID(runCtx, te.threadID, leaseSess)
 	}
 	scopeInst := config.LoadScopeInstructions(te.effectiveName)
 	var memParts []string
@@ -1293,7 +1294,7 @@ func (te *turnExecution) executeWithRetries() {
 
 	initialRetryCount := te.initialRetryCount()
 
-	attemptCfg := te.resolveAttemptConfig(0)
+	attemptCfg := te.resolveAttemptConfig(te.turnCtxValue(), 0)
 	currentAgyBin := attemptCfg.agyBin
 	currentAPIKey := attemptCfg.apiKey
 
@@ -1306,7 +1307,7 @@ func (te *turnExecution) executeWithRetries() {
 			te.finalizeInterruptedTurn(currentModel)
 			return
 		}
-		cfg := te.resolveAttemptConfig(attempt)
+		cfg := te.resolveAttemptConfig(te.turnCtxValue(), attempt)
 		currentModel = cfg.model
 		currentTimeout := cfg.timeoutMinutes
 		currentAgyBin = cfg.agyBin

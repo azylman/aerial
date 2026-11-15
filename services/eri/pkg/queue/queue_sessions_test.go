@@ -688,13 +688,13 @@ func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadless
 
 	var pool *WorkerPool
 	if tc.coldWidgetSync {
-		_, err := memBus.Subscribe(context.Background(), "aerial.coalesced.>", "test-headless-sub", func(_ context.Context, msg pubsub.Message) error {
+		_, err := memBus.Subscribe(context.Background(), "aerial.coalesced.>", "test-headless-sub", func(ctx context.Context, msg pubsub.Message) error {
 			var args pubsub.WidgetSyncJobArgs
 			_ = json.Unmarshal(msg.Data(), &args)
 			syncedPayload.Repo = args.Repo
 			syncedPayload.PRNumber = args.PRNumber
 			if pool != nil {
-				_, _ = pool.DeliverStatusWidget(discord.StatusWidgetRequest{
+				_, _ = pool.DeliverStatusWidgetWithContext(ctx, discord.StatusWidgetRequest{
 					ChannelID: "chan-build",
 					ID:        "build-streaming-live",
 					MessageID: "widget-msg-seed",
@@ -1018,7 +1018,7 @@ func TestRecoverInterrupted_Dispatches(t *testing.T) {
 	})
 	defer pool.Stop()
 
-	RecoverInterrupted(store, pool)
+	RecoverInterrupted(t.Context(), store, pool)
 
 	doneWg.Wait()
 

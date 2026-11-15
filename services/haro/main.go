@@ -111,7 +111,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("app: eri URL cannot be empty")
 	}
 
-	database, err := openDBFn(cfg)
+	database, err := openDBFn(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -166,7 +166,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	}
 
 	log.Println("Shutting down Scheduler MCP server gracefully...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer shutdownCancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {

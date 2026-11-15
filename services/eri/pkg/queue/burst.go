@@ -225,6 +225,11 @@ func (p *WorkerPool) waitForNextQueueItem(scopeKey string, state *threadWorkerSt
 	}
 }
 
+// runThreadWorker drains one scope's queue for as long as the pool lives. Turns run on the pool's
+// lifetime context (p.ctx), never on an enqueuer's request context: one worker serves many
+// enqueuers and must outlive each of their requests.
+//
+//nolint:contextcheck,nolintlint // contextcheck reads this to exempt the pool-lifetime worker from callers' contexts; golangci sees no in-body issue.
 func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) {
 	defer p.wg.Done()
 

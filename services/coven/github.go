@@ -393,7 +393,8 @@ func (p *GitHubSkillPublisher) PublishSkillChanges(ctx context.Context, changes 
 	if err != nil {
 		// Clean up branch ref on PR creation failure
 		delEndpoint := fmt.Sprintf("/repos/%s/%s/git/refs/heads/%s", p.owner, p.repo, branchName)
-		if _, delErr := p.doRequest(context.Background(), http.MethodDelete, delEndpoint, nil); delErr != nil {
+		// Cleanup must run even when ctx is what failed the PR creation.
+		if _, delErr := p.doRequest(context.WithoutCancel(ctx), http.MethodDelete, delEndpoint, nil); delErr != nil {
 			log.Printf("[coven-github] warning deleting orphan branch %s: %v", branchName, delErr)
 		}
 		return 0, fmt.Errorf("github: failed to create pull request: %w", err)

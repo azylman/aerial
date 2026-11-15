@@ -108,8 +108,7 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 		t.Errorf("expected error from closedStore.GetPendingOrProcessingMessages, got nil")
 	}
 
-	var nilCtx context.Context
-	if rel, err := store.AcquireLeaderLock(nilCtx); err != nil || rel == nil {
+	if rel, err := store.AcquireLeaderLock(t.Context()); err != nil || rel == nil {
 		t.Fatalf("AcquireLeaderLock on SQLite store failed: %v", err)
 	} else {
 		rel()

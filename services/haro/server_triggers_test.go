@@ -14,7 +14,7 @@ func TestDirectDB_SummaryAndRunsErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	closedDB, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestServer_RecoverFailedEventTrigger(t *testing.T) {
 	defer ts.Close()
 	ctx := context.Background()
 
-	closedDB, _ := OpenDB(&Config{DatabaseURL: ":memory:"})
+	closedDB, _ := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
 	_ = closedDB.Close()
 	sClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
 

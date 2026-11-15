@@ -486,12 +486,12 @@ func TestCallSessionManager_SessionRegistryAndAccessors(t *testing.T) {
 	mgrWithStore := NewCallSessionManager(staticConfig{cfg: &Config{}}, store, nil, nil, tokenMgr)
 	sessActive := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "call-steer-store"})
 	mgrWithStore.registerSession("call-steer-store", sessActive)
-	_ = mgrWithStore.SteerCall("call-steer-store", "be polite", "guidance")
+	_ = mgrWithStore.SteerCall(t.Context(), "call-steer-store", "be polite", "guidance")
 
-	if err := sessionMgr.SteerCall("missing-call", "msg", "say"); err == nil {
+	if err := sessionMgr.SteerCall(t.Context(), "missing-call", "msg", "say"); err == nil {
 		t.Error("SteerCall on missing session should return error")
 	}
-	if err := sessionMgr.HandleAMDWebhook("missing-sid", "human"); err == nil {
+	if err := sessionMgr.HandleAMDWebhook(t.Context(), "missing-sid", "human"); err == nil {
 		t.Error("HandleAMDWebhook on missing SID should return error")
 	}
 	if err := sessionMgr.EndCall("missing-call"); err == nil {
@@ -787,7 +787,7 @@ func TestCallSessionManager_HandleAMDWebhookByProviderSID(t *testing.T) {
 	_ = store.BindProviderCallSID(context.Background(), callLookup, provLookup)
 	sessLookup := NewMediaStreamSession(MediaStreamSessionConfig{CallID: callLookup})
 	sessionMgr.registerSession(callLookup, sessLookup)
-	if err := sessionMgr.HandleAMDWebhook(provLookup, "human"); err != nil {
+	if err := sessionMgr.HandleAMDWebhook(t.Context(), provLookup, "human"); err != nil {
 		t.Errorf("HandleAMDWebhook via store lookup failed: %v", err)
 	}
 	sessionMgr.deregisterSession(callLookup)
@@ -946,25 +946,25 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 
 func exerciseBridgeSteerAndAMD(t *testing.T, sessionMgr *CallSessionManager, callID, providerSID string) {
 	t.Helper()
-	if err := sessionMgr.SteerCall(callID, "Focus on price confirmation", "guidance"); err != nil {
+	if err := sessionMgr.SteerCall(t.Context(), callID, "Focus on price confirmation", "guidance"); err != nil {
 		t.Fatalf("SteerCall(guidance) error: %v", err)
 	}
-	if err := sessionMgr.SteerCall(callID, "Understood, thank you", "say"); err != nil {
+	if err := sessionMgr.SteerCall(t.Context(), callID, "Understood, thank you", "say"); err != nil {
 		t.Fatalf("SteerCall(say) error: %v", err)
 	}
-	if err := sessionMgr.SteerCall(callID, "test_dtmf_trigger", "guidance"); err != nil {
+	if err := sessionMgr.SteerCall(t.Context(), callID, "test_dtmf_trigger", "guidance"); err != nil {
 		t.Fatalf("trigger dtmf err: %v", err)
 	}
-	if err := sessionMgr.SteerCall(callID, "test_calendar_trigger", "guidance"); err != nil {
+	if err := sessionMgr.SteerCall(t.Context(), callID, "test_calendar_trigger", "guidance"); err != nil {
 		t.Fatalf("trigger calendar err: %v", err)
 	}
-	if err := sessionMgr.SteerCall(callID, "test_memory_trigger", "guidance"); err != nil {
+	if err := sessionMgr.SteerCall(t.Context(), callID, "test_memory_trigger", "guidance"); err != nil {
 		t.Fatalf("trigger memory err: %v", err)
 	}
-	if err := sessionMgr.HandleAMDWebhook(providerSID, "human"); err != nil {
+	if err := sessionMgr.HandleAMDWebhook(t.Context(), providerSID, "human"); err != nil {
 		t.Fatalf("HandleAMDWebhook() error: %v", err)
 	}
-	if err := sessionMgr.SteerCall(callID, "test_end_trigger", "guidance"); err != nil {
+	if err := sessionMgr.SteerCall(t.Context(), callID, "test_end_trigger", "guidance"); err != nil {
 		t.Fatalf("trigger end_call err: %v", err)
 	}
 }

@@ -396,7 +396,7 @@ func (b *JetStreamBus) Subscribe(ctx context.Context, subject string, durable st
 		return b.bindDurable(ctx, subject, durable, handler)
 	}
 	sub, err := b.js.Subscribe(subject, func(m *nats.Msg) {
-		b.dispatch(m, handler)
+		b.dispatch(ctx, m, handler)
 	}, nats.ManualAck(), nats.AckWait(durableAckWait))
 	if err != nil {
 		return nil, fmt.Errorf("subscribe to %s: %w", subject, err)
@@ -421,7 +421,7 @@ func (b *JetStreamBus) bindDurable(ctx context.Context, subject, durable string,
 		return nil, err
 	}
 	sub, err := b.js.QueueSubscribe(subject, durable, func(m *nats.Msg) {
-		b.dispatch(m, handler)
+		b.dispatch(ctx, m, handler)
 	}, nats.Bind(stream, durable), nats.ManualAck())
 	if err != nil {
 		return nil, fmt.Errorf("queue subscribe to %s: %w", subject, err)
@@ -610,8 +610,11 @@ func jsContextOpts(ctx context.Context) []nats.JSOpt {
 	return []nats.JSOpt{nats.Context(ctx)}
 }
 
-func (b *JetStreamBus) dispatch(m *nats.Msg, handler Handler) {
-	ctx := context.Background()
+// dispatch runs handler for m. Deliveries keep the subscriber's context values but not its
+// cancellation (a delivery is settled by ack/nak, not by the subscribe call's lifetime); the
+// publisher's trace arrives through m's headers.
+func (b *JetStreamBus) dispatch(subCtx context.Context, m *nats.Msg, handler Handler) {
+	ctx := context.WithoutCancel(subCtx)
 	if m.Header != nil {
 		carrier := propagation.HeaderCarrier(http.Header(m.Header))
 		ctx = propagation.TraceContext{}.Extract(ctx, carrier)

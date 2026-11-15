@@ -670,7 +670,7 @@ type resolveFetchInternalImageCase struct {
 
 func runResolveFetchInternalImageCase(t *testing.T, tc resolveFetchInternalImageCase) {
 	t.Helper()
-	att, err := ResolveAndFetchInternalAttachment(tc.rawURL, tc.filename)
+	att, err := ResolveAndFetchInternalAttachment(t.Context(), tc.rawURL, tc.filename)
 	if tc.wantErr {
 		if err == nil {
 			t.Fatalf("expected error for %s, got nil", tc.rawURL)

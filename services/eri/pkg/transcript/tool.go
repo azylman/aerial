@@ -49,9 +49,6 @@ func ExecuteTranscriptSearch(
 	if store == nil {
 		return SearchResult{}, fmt.Errorf("transcript store cannot be nil")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if ctx.Err() != nil {
 		return SearchResult{}, ctx.Err()
 	}
@@ -115,9 +112,6 @@ func GetTranscriptStepWindow(
 ) (StepWindowResult, error) {
 	if store == nil {
 		return StepWindowResult{}, fmt.Errorf("transcript store cannot be nil")
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 	if ctx.Err() != nil {
 		return StepWindowResult{}, ctx.Err()

@@ -70,8 +70,8 @@ func (r *Router) handleQuota(s *discordgo.Session, i *discordgo.InteractionCreat
 	}
 }
 
-func (r *Router) handleStatus(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+func (r *Router) handleStatus(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
 	factCount, latestFactStr := r.fetchMemoryFactStatus(ctx)
@@ -242,7 +242,7 @@ func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) stri
 	return "none scheduled"
 }
 
-func (r *Router) handleRotate(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
+func (r *Router) handleRotate(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
@@ -258,7 +258,7 @@ func (r *Router) handleRotate(s *discordgo.Session, i *discordgo.InteractionCrea
 	targetThreadID := i.ChannelID
 
 	newSessionID := uuid.New().String()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	if r.deps.Store != nil {
@@ -294,12 +294,12 @@ func (r *Router) drainThreadPendingMessages(ctx context.Context, targetThreadID 
 	queue.DrainThreadPendingMessages(ctx, r.deps.Store, targetThreadID, queue.InterruptedByOperatorReason)
 }
 
-func (r *Router) handleInterrupt(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
+func (r *Router) handleInterrupt(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
 	drainQueue := getBoolOption(data.Options, "drain_queue", true)
 	reset := getBoolOption(data.Options, "reset", false)
 	targetThreadID := i.ChannelID
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	pool := r.getPool()
@@ -336,7 +336,7 @@ func (r *Router) handleInterrupt(s *discordgo.Session, i *discordgo.InteractionC
 	}
 }
 
-func (r *Router) handleMode(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
+func (r *Router) handleMode(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
 	targetChannelID := getChannelOption(data.Options, "channel", i.ChannelID)
 	modeVal := getStringOption(data.Options, "mode", "")
 
@@ -374,10 +374,10 @@ func (r *Router) handleMode(s *discordgo.Session, i *discordgo.InteractionCreate
 		return
 	}
 
-	r.spawnDeployProgress(s, i.Interaction, "mode", targetChannelID, modeVal)
+	r.spawnDeployProgress(ctx, s, i.Interaction, "mode", targetChannelID, modeVal)
 }
 
-func (r *Router) handleIgnoreBots(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
+func (r *Router) handleIgnoreBots(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
 	targetChannelID := getChannelOption(data.Options, "channel", i.ChannelID)
 	hasEnabled := hasOption(data.Options, "enabled")
 
@@ -416,22 +416,22 @@ func (r *Router) handleIgnoreBots(s *discordgo.Session, i *discordgo.Interaction
 
 	enabledVal := getBoolOption(data.Options, "enabled", false)
 	valStr := strconv.FormatBool(enabledVal)
-	r.spawnDeployProgress(s, i.Interaction, "ignore_bots", targetChannelID, valStr)
+	r.spawnDeployProgress(ctx, s, i.Interaction, "ignore_bots", targetChannelID, valStr)
 }
 
-func (r *Router) spawnDeployProgress(s *discordgo.Session, interaction *discordgo.Interaction, key, channelID, val string) {
+func (r *Router) spawnDeployProgress(ctx context.Context, s *discordgo.Session, interaction *discordgo.Interaction, key, channelID, val string) {
 	r.bgWg.Go(func() {
-		r.trackDeployProgress(s, interaction, key, channelID, val)
+		r.trackDeployProgress(ctx, s, interaction, key, channelID, val)
 	})
 }
 
-func (r *Router) trackDeployProgress(s *discordgo.Session, interaction *discordgo.Interaction, key, channelID, val string) {
+func (r *Router) trackDeployProgress(ctx context.Context, s *discordgo.Session, interaction *discordgo.Interaction, key, channelID, val string) {
 	// Guarded by commit mutex to prevent concurrent GitOps collisions
 	r.configCommitMu.Lock()
 	defer r.configCommitMu.Unlock()
 
 	// Hard poller cutoff to prevent Discord interaction token expiration
-	pollerCtx, cancel := context.WithTimeout(context.Background(), pollerTimeout)
+	pollerCtx, cancel := context.WithTimeout(ctx, pollerTimeout)
 	defer cancel()
 
 	initialMsg := fmt.Sprintf("⚙️ Applying channel policy change for <#%s> (`%s: %s`)... `[1/5: Commit Trigger]` (elapsed: 1s)", channelID, key, val)

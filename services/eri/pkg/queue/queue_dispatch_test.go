@@ -553,7 +553,7 @@ func TestTurnExecution_ResolveAttemptConfig(t *testing.T) {
 			}
 			defer te.pool.Stop()
 
-			cfg := te.resolveAttemptConfig(0)
+			cfg := te.resolveAttemptConfig(t.Context(), 0)
 			if cfg.model != tc.wantModel {
 				t.Fatalf("cfg.model = %q, want %q", cfg.model, tc.wantModel)
 			}

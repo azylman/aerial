@@ -70,7 +70,7 @@ func voicePoolWiringCases() []voicePoolWiringCase {
 
 func runVoicePoolWiringCase(t *testing.T, tc voicePoolWiringCase, voiceHome string, spawner runner.DaemonSpawner) {
 	t.Helper()
-	pool := createVoiceProcessPool(tc.cfg, voiceHome, "fallback-model", "", spawner)
+	pool := createVoiceProcessPool(t.Context(), tc.cfg, voiceHome, "fallback-model", "", spawner)
 	defer pool.Close()
 
 	dynPool, ok := pool.(*runner.DynamicVoicePool)
@@ -117,7 +117,7 @@ func runVoicePoolHotReload(t *testing.T, voiceHome string) {
 		},
 	}
 
-	pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", "8123", trackingSpawner)
+	pool := createVoiceProcessPool(t.Context(), cfg, voiceHome, "fallback-model", "8123", trackingSpawner)
 	defer pool.Close()
 
 	dynPool, ok := pool.(*runner.DynamicVoicePool)

@@ -163,7 +163,8 @@ func handleEriPromptJob(ctx context.Context, store db.Store, pool *queue.WorkerP
 		return errors.New("database store not configured")
 	}
 
-	insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Once accepted, the prompt must persist even if the delivery is canceled mid-insert.
+	insertCtx, insertCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer insertCancel()
 	if err := store.InsertMessage(insertCtx, record); err != nil {
 		return fmt.Errorf("failed inserting prompt message: %w", err)
@@ -264,7 +265,8 @@ func handleEriDispatchJob(ctx context.Context, store db.Store, pool *queue.Worke
 	}
 
 	d := buildDispatchRecord(req, dispatchID, sessionID, tracing.Traceparent(ctx))
-	insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Once accepted, the dispatch must persist even if the delivery is canceled mid-insert.
+	insertCtx, insertCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer insertCancel()
 	inserted, err := store.InsertDispatch(insertCtx, d)
 	if err != nil {

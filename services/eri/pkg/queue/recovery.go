@@ -164,12 +164,11 @@ func mergeHeldPendingEntries(ctx context.Context, store db.Store, msgs []db.Mess
 
 // RecoverInterrupted resumes all PENDING and PROCESSING messages and dispatches from the database on startup in chronological order.
 // Orphaned PROCESSING entries are reset to PENDING before releasing any canary leader hold on the pool.
-func RecoverInterrupted(store db.Store, pool *WorkerPool) {
+func RecoverInterrupted(ctx context.Context, store db.Store, pool *WorkerPool) {
 	if store == nil || pool == nil {
 		return
 	}
 
-	ctx := context.Background()
 	maxAttempts := pool.cfg.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 3

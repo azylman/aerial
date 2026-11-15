@@ -527,7 +527,7 @@ func (s *Server) handleTwilioAMD(w http.ResponseWriter, r *http.Request) {
 	call := s.resolveAndBindCall(r.Context(), r, callSid)
 
 	if s.sessionMgr != nil && callSid != "" {
-		if amdErr := s.sessionMgr.HandleAMDWebhook(callSid, answeredBy); amdErr != nil {
+		if amdErr := s.sessionMgr.HandleAMDWebhook(r.Context(), callSid, answeredBy); amdErr != nil {
 			log.Printf("server: handle amd webhook: %v", amdErr)
 		}
 	}
@@ -602,7 +602,8 @@ func (s *Server) triggerPostCallReportIfPending(ctx context.Context, callID stri
 	s.bgWg.Add(1)
 	go func(id string) {
 		defer s.bgWg.Done()
-		if delivErr := s.reporter.DeliverCallReport(context.Background(), id); delivErr != nil {
+		// The report outlives the request that triggered it.
+		if delivErr := s.reporter.DeliverCallReport(context.WithoutCancel(ctx), id); delivErr != nil {
 			log.Printf("server: deliver call report: %v", delivErr)
 		}
 	}(cleanID)
@@ -642,10 +643,12 @@ func (s *Server) handleTwilioVoicemail(w http.ResponseWriter, r *http.Request) {
 		log.Printf("server: publish voicemail job failed for %s, falling back to goroutine: %v", call.CallID, pubErr)
 	}
 
+	// Processing outlives the webhook request that triggered it.
+	bgCtx := context.WithoutCancel(r.Context())
 	s.bgWg.Add(1)
 	go func(id, url string) {
 		defer s.bgWg.Done()
-		if procErr := s.reporter.ProcessVoicemailRecording(context.Background(), id, url); procErr != nil {
+		if procErr := s.reporter.ProcessVoicemailRecording(bgCtx, id, url); procErr != nil {
 			log.Printf("server: process voicemail recording: %v", procErr)
 		}
 	}(call.CallID, recURL)
@@ -740,10 +743,12 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("server: publish sms job failed for %s, falling back to goroutine: %v", msgSid, pubErr)
 	}
 
+	// Delivery outlives the webhook request that triggered it.
+	bgCtx := context.WithoutCancel(r.Context())
 	s.bgWg.Add(1)
 	go func(vMsg VoiceMessage) {
 		defer s.bgWg.Done()
-		if delivErr := s.reporter.DeliverInboundSMS(context.Background(), vMsg); delivErr != nil {
+		if delivErr := s.reporter.DeliverInboundSMS(bgCtx, vMsg); delivErr != nil {
 			log.Printf("server: deliver inbound sms: %v", delivErr)
 		}
 	}(msg)

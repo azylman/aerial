@@ -155,7 +155,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 
 			var got dispatchObservation
 			msg := &nats.Msg{Subject: tc.subject, Reply: tc.reply, Sub: sub, Data: []byte(tc.data), Header: tc.header}
-			bus.dispatch(msg, func(ctx context.Context, msg Message) error {
+			bus.dispatch(t.Context(), msg, func(ctx context.Context, msg Message) error {
 				got = dispatchObservation{invoked: true, subject: msg.Subject(), data: string(msg.Data()), numDelivered: msg.NumDelivered()}
 				if spanCtx := trace.SpanContextFromContext(ctx); spanCtx.IsValid() {
 					got.traceID = spanCtx.TraceID().String()
