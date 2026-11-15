@@ -596,6 +596,34 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	assert.True(t, srv.notifyRestateActionChunkCompleted(ctx, "c2"))
 	srv.notifyRestateChunkFailed(ctx, "c1")
 
+	// Test that an action chunk completing a build under Restate dispatches completed wake prompt
+	var wakePromptSent string
+	tsWake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		wakePromptSent = req["prompt"]
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer tsWake.Close()
+
+	srvWake := &VanadisServer{
+		cfg:        Config{BrainURL: tsWake.URL},
+		restateCfg: RestateConfig{RestateIngressURL: ts.URL},
+		store:      store,
+		httpClient: ts.Client(),
+	}
+	bAct := VanadisBuild{ID: "b-act-single", ThreadID: "123456789012345678", Objective: "test act wake", Status: "running"}
+	cAct := []VanadisChunk{
+		{ID: "c-act-single", BuildID: "b-act-single", ChunkIndex: 0, Mode: "action", Title: "act 1", Status: "running", DeployAwakeableID: "awk-act-single"},
+	}
+	require.NoError(t, store.CreateBuild(ctx, bAct, cAct))
+	require.NoError(t, srvWake.handleCompletedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
+		VanadisChunkID: "c-act-single",
+		DispatchID:     "d-act-1",
+	}))
+	assert.NotEmpty(t, wakePromptSent)
+
 	assert.Equal(t, []string{
 		"/BuildWorkflow/b-restate/Run/send",
 		"/BuildWorkflow/b-restate/Cancel/send",
@@ -605,6 +633,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		"/restate/awakeables/awk-a2/resolve",
 		"/restate/awakeables/awk-m1/resolve",
 		"/restate/awakeables/awk-d1/resolve",
+		"/restate/awakeables/awk-act-single/resolve",
 	}, paths)
 
 	// Error and no-op edge cases for ingress helpers

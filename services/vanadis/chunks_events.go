@@ -51,13 +51,14 @@ func (s *VanadisServer) handleCompletedDispatchOutcome(ctx context.Context, ev p
 	}
 	RecordChunkTotal("completed")
 	s.syncBuildWidget(ctx, res.BuildID, "")
-	if s.notifyRestateActionChunkCompleted(ctx, ev.VanadisChunkID) {
-		return nil
-	}
 	if res.BuildCompleted {
 		RecordBuildTotal("completed")
 		s.dispatchCompletedBuildWake(ctx, res)
-	} else if res.NextChunkIndex >= 0 {
+	}
+	if s.notifyRestateActionChunkCompleted(ctx, ev.VanadisChunkID) {
+		return nil
+	}
+	if !res.BuildCompleted && res.NextChunkIndex >= 0 {
 		if err := s.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: res.NextChunkIndex}); err != nil {
 			log.Printf("[vanadis] failed to enqueue next chunk %d for build %s: %v", res.NextChunkIndex, res.BuildID, err)
 			return err
