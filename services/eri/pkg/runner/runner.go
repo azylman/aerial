@@ -14,6 +14,7 @@ var (
 	reUUIDInText                 = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 	reUpdateStream               = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
 	reGeneralSession             = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
+	reQuotaResetClock            = regexp.MustCompile(`(?i)\bresets(?:\s+at)?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))\b(?:\s*\(([^)]+)\))?`)
 	reQuotaResetIn               = regexp.MustCompile(`(?i)(?:resets in|reset after|resets)\s+([-0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
 	reWhitespace                 = regexp.MustCompile(`\s+`)
 	safeCmdRegex                 = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
@@ -399,10 +400,8 @@ func IsQuotaPause(errDetail, stderr string) bool {
 		strings.Contains(combined, "exhausted your capacity on this model") ||
 		strings.Contains(combined, "brain bucket resets in") ||
 		strings.Contains(combined, "claude ai usage limit reached") ||
-		strings.Contains(combined, "you've hit your limit") ||
-		strings.Contains(combined, "you’ve hit your limit") ||
-		strings.Contains(combined, "rate_limit_error") ||
-		strings.Contains(combined, "claude synthetic reply (error=rate_limit)") {
+		((strings.Contains(combined, "you've hit your") || strings.Contains(combined, "you’ve hit your")) && strings.Contains(combined, "limit")) ||
+		strings.Contains(combined, "rate_limit") {
 		return true
 	}
 	hasQuotaWord := strings.Contains(combined, "quota") ||
@@ -425,11 +424,54 @@ func IsCapacityBlip(errDetail, stderr string) bool {
 	if hasCapacityPhrases(combined) {
 		return true
 	}
-	if strings.Contains(combined, "individual quota reached") || strings.Contains(combined, "upgrade your subscription") || strings.Contains(combined, "exceeded your current quota") {
+	if strings.Contains(combined, "individual quota reached") ||
+		strings.Contains(combined, "upgrade your subscription") ||
+		strings.Contains(combined, "exceeded your current quota") ||
+		strings.Contains(combined, "you've hit your") ||
+		strings.Contains(combined, "you’ve hit your") ||
+		strings.Contains(combined, "usage limit") ||
+		strings.Contains(combined, "rate_limit") {
 		return false
 	}
 	dur, exact := ExtractQuotaResetDuration(errDetail, stderr)
 	return exact && dur <= 5*time.Second
+}
+
+func parseWallClockResetDuration(clockStr, tzName string, now time.Time) (time.Duration, bool) {
+	loc := now.Location()
+	if loc == nil {
+		loc = time.UTC
+	}
+	if trimmedTZ := strings.TrimSpace(tzName); trimmedTZ != "" {
+		if loaded, err := time.LoadLocation(trimmedTZ); err == nil {
+			loc = loaded
+		}
+	}
+
+	cleanClock := strings.ToUpper(reWhitespace.ReplaceAllString(clockStr, ""))
+	var parsed time.Time
+	var err error
+	if strings.Contains(cleanClock, ":") {
+		parsed, err = time.ParseInLocation("3:04PM", cleanClock, loc)
+	} else {
+		parsed, err = time.ParseInLocation("3PM", cleanClock, loc)
+	}
+	if err != nil {
+		return 0, false
+	}
+
+	nowInLoc := now.In(loc)
+	target := time.Date(nowInLoc.Year(), nowInLoc.Month(), nowInLoc.Day(), parsed.Hour(), parsed.Minute(), 0, 0, loc)
+
+	if !target.After(nowInLoc) && nowInLoc.Sub(target) <= 5*time.Minute {
+		return time.Minute, true
+	}
+	if !target.After(nowInLoc) && nowInLoc.Sub(target) > 5*time.Minute {
+		target = target.AddDate(0, 0, 1)
+	}
+
+	diff := min(max(target.Sub(nowInLoc), time.Minute), 24*time.Hour)
+	return diff, true
 }
 
 func parseMatchedResetDuration(matchText string) (time.Duration, bool) {
@@ -447,8 +489,17 @@ func parseMatchedResetDuration(matchText string) (time.Duration, bool) {
 	return d, true
 }
 
-func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
+func extractQuotaResetDurationAt(errDetail, stderr string, now time.Time) (time.Duration, bool) {
 	combined := strings.ToLower(errDetail + "\n" + stderr)
+	if match := reQuotaResetClock.FindStringSubmatch(errDetail + "\n" + stderr); len(match) > 1 {
+		var tz string
+		if len(match) > 2 {
+			tz = match[2]
+		}
+		if d, ok := parseWallClockResetDuration(match[1], tz, now); ok {
+			return d, true
+		}
+	}
 	match := reQuotaResetIn.FindStringSubmatch(errDetail + "\n" + stderr)
 	if len(match) > 1 {
 		if d, ok := parseMatchedResetDuration(match[1]); ok {
@@ -459,6 +510,10 @@ func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
 		return 70 * time.Second, false
 	}
 	return 20 * time.Minute, false
+}
+
+func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
+	return extractQuotaResetDurationAt(errDetail, stderr, time.Now())
 }
 
 func IsYieldTrap(exitCode int, stdout, stderr string) (bool, int) {

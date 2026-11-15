@@ -79,9 +79,12 @@ func TestIsQuotaPause(t *testing.T) {
 		{name: "Google capacity exhausted reset after 1s", errDetail: "API error (attempt 1): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 1s.", want: true},
 		{name: "Claude AI usage limit reached", errDetail: "Claude AI usage limit reached. Resets in 2h 30m.", want: true},
 		{name: "Claude rate limit error", stderr: "rate_limit_error: usage limit exceeded, resets in 10m", want: true},
+		{name: "Claude rate limit bare keyword in errDetail", errDetail: "API call failed with rate_limit", want: true},
 		{name: "Claude usage limit phrase with resets prefix", errDetail: "Your usage limit resets 3pm.", want: true},
 		{name: "Claude CLI hit your limit straight apostrophe", errDetail: "You've hit your limit · resets 3pm (America/Los_Angeles)", want: true},
 		{name: "Claude CLI hit your limit curly apostrophe", stderr: "You’ve hit your limit · resets 3pm (America/Los_Angeles)", want: true},
+		{name: "Claude CLI hit your 5-hour limit curly apostrophe", errDetail: "You’ve hit your 5-hour limit · resets 5:50pm (America/Los_Angeles)", want: true},
+		{name: "Claude CLI hit your daily limit with resets at", errDetail: "You've hit your daily limit · resets at 12:00am", want: true},
 		{name: "Claude synthetic 5-hour limit reply", errDetail: "claude synthetic reply (error=rate_limit): You've hit your 5-hour limit · resets 12:10pm (America/Los_Angeles)", want: true},
 		{name: "Claude synthetic rate limit reply in stderr", stderr: "claude synthetic reply (error=rate_limit): limit reached", want: true},
 		{name: "Claude synthetic resume placeholder", errDetail: "claude synthetic reply (error=none): No response requested."},
@@ -94,8 +97,18 @@ func TestIsQuotaPause(t *testing.T) {
 }
 
 func TestExtractQuotaResetDuration(t *testing.T) {
+	locLA, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("failed to load America/Los_Angeles: %v", err)
+	}
+	locNY, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("failed to load America/New_York: %v", err)
+	}
+
 	for _, tc := range []struct {
 		name, errDetail, stderr string
+		now                     time.Time
 		wantDur                 time.Duration
 		wantExact               bool
 	}{
@@ -115,8 +128,84 @@ func TestExtractQuotaResetDuration(t *testing.T) {
 		{name: "Negative duration clamped to 0s", errDetail: "Resets in -5s.", wantExact: true},
 		{name: "Clamped > 24h to 24h", errDetail: "Resets in 48h.", wantDur: 24 * time.Hour, wantExact: true},
 		{name: "Unparseable duration fallback 20m", errDetail: "Resets in abcdefg.", wantDur: 20 * time.Minute},
+		{
+			name:      "Wall clock same-day reset with timezone parens",
+			errDetail: "You've hit your 5-hour limit · resets 12:10pm (America/Los_Angeles)",
+			now:       time.Date(2026, 11, 14, 10, 0, 0, 0, locLA),
+			wantDur:   2*time.Hour + 10*time.Minute,
+			wantExact: true,
+		},
+		{
+			name:      "Wall clock same-day reset without timezone parens",
+			errDetail: "Your usage limit resets 3pm.",
+			now:       time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC),
+			wantDur:   5 * time.Hour,
+			wantExact: true,
+		},
+		{
+			name:      "Wall clock next-day reset with timezone parens",
+			errDetail: "You've hit your 5-hour limit · resets 12:10pm (America/Los_Angeles)",
+			now:       time.Date(2026, 11, 14, 14, 0, 0, 0, locLA),
+			wantDur:   22*time.Hour + 10*time.Minute,
+			wantExact: true,
+		},
+		{
+			name:      "Wall clock next-day reset without timezone parens",
+			errDetail: "resets at 3pm",
+			now:       time.Date(2026, 11, 14, 16, 0, 0, 0, time.UTC),
+			wantDur:   23 * time.Hour,
+			wantExact: true,
+		},
+		{
+			name:      "Wall clock reset-minute clock skew within 5 minutes past",
+			errDetail: "You've hit your 5-hour limit · resets 12:10pm (America/Los_Angeles)",
+			now:       time.Date(2026, 11, 14, 12, 12, 0, 0, locLA),
+			wantDur:   time.Minute,
+			wantExact: true,
+		},
+		{
+			name:      "Wall clock reset-minute exact target time",
+			errDetail: "You've hit your 5-hour limit · resets 12:10pm (America/Los_Angeles)",
+			now:       time.Date(2026, 11, 14, 12, 10, 0, 0, locLA),
+			wantDur:   time.Minute,
+			wantExact: true,
+		},
+		{
+			name:      "Wall clock reset within 1 minute in future clamped to 1m",
+			errDetail: "resets 12:10pm (America/Los_Angeles)",
+			now:       time.Date(2026, 11, 14, 12, 9, 45, 0, locLA),
+			wantDur:   time.Minute,
+			wantExact: true,
+		},
+		{
+			name:      "Wall clock reset with invalid timezone fallback to now location",
+			errDetail: "resets 3pm (Invalid_Unknown_Zone)",
+			now:       time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC),
+			wantDur:   5 * time.Hour,
+			wantExact: true,
+		},
+		{
+			name:      "Wall clock reset regex matched but unparseable clock string fallback to 20m",
+			errDetail: "resets 99:99pm",
+			now:       time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC),
+			wantDur:   20 * time.Minute,
+			wantExact: false,
+		},
+		{
+			name:      "Wall clock next-day reset exceeding 24h across fall-back DST transition clamped to 24h",
+			errDetail: "resets 12:15am (America/New_York)",
+			now:       time.Date(2026, 11, 1, 0, 30, 0, 0, locNY),
+			wantDur:   24 * time.Hour,
+			wantExact: true,
+		},
 	} {
-		gotDur, gotExact := ExtractQuotaResetDuration(tc.errDetail, tc.stderr)
+		var gotDur time.Duration
+		var gotExact bool
+		if !tc.now.IsZero() {
+			gotDur, gotExact = extractQuotaResetDurationAt(tc.errDetail, tc.stderr, tc.now)
+		} else {
+			gotDur, gotExact = ExtractQuotaResetDuration(tc.errDetail, tc.stderr)
+		}
 		if gotDur != tc.wantDur || gotExact != tc.wantExact {
 			t.Errorf("%s: ExtractQuotaResetDuration() = (%v, %v), want (%v, %v)", tc.name, gotDur, gotExact, tc.wantDur, tc.wantExact)
 		}
@@ -133,6 +222,10 @@ func TestIsCapacityBlip(t *testing.T) {
 		{name: "Model capacity marker without reset time", errDetail: "exhausted your capacity on this model", want: true},
 		{name: "Rate limit reached phrase", errDetail: "Rate limit reached on model gemini-2.5-pro", want: true},
 		{name: "Short reset duration <= 5s without subscription phrases", errDetail: "RESOURCE_EXHAUSTED (code 429). Resets in 3s.", want: true},
+		{name: "Claude hit your limit straight apostrophe is not blip", errDetail: "You've hit your 5-hour limit · resets 12:10pm (America/Los_Angeles)"},
+		{name: "Claude hit your limit curly apostrophe is not blip", stderr: "You’ve hit your limit · resets 3pm (America/Los_Angeles)"},
+		{name: "Claude rate_limit keyword is not blip", errDetail: "rate_limit error encountered, backing off"},
+		{name: "Usage limit is not capacity blip even with short reset countdown", errDetail: "Usage limit reached. Resets in 2s."},
 		{name: "Subscription quota exhaustion with short countdown", errDetail: "Individual quota reached. Please upgrade your subscription. Resets in 2s."},
 		{name: "Multi-hour individual quota pause", errDetail: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h 54m."},
 		{name: "Subscription phrase upgrade prompt", errDetail: "Please upgrade your subscription to increase your limits."},
