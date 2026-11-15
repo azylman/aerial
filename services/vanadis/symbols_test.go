@@ -268,6 +268,9 @@ func TestFormatChunkPromptWithShareRoot(t *testing.T) {
 			if !strings.Contains(prompt, tc.wantSpanText) {
 				t.Fatalf("prompt missing expected span text %q:\n%s", tc.wantSpanText, prompt)
 			}
+			if !strings.Contains(prompt, "9. Strict Phase & Target-File Boundary Discipline:") {
+				t.Fatalf("prompt missing expected boundary discipline instruction:\n%s", prompt)
+			}
 			hasGrep := strings.Contains(prompt, "Run after init:")
 			if hasGrep != tc.wantGrepCmd {
 				t.Fatalf("prompt contains Run after init: %v, want %v", hasGrep, tc.wantGrepCmd)
