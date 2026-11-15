@@ -1153,10 +1153,18 @@ type publishTurnCompletedCase struct {
 	sessionID      string
 	conversationID string
 	source         string
+	status         string
+	durationMs     int64
+	usage          *runner.TokenUsage
 	wantErr        bool
 	errContains    string
 	wantSubject    string
 	wantSource     string
+	wantStatus     string
+	wantDurationMs int64
+	wantInputTok   int
+	wantOutputTok  int
+	wantTotalTok   int
 }
 
 type turnCompletedDelivery struct {
@@ -1208,7 +1216,7 @@ func assertPublishTurnCompletedScenario(t *testing.T, tc publishTurnCompletedCas
 	pool.SetEventBus(memBus)
 	tracker := newTurnCompletedTracker(t, memBus, "aerial.turn.*", "test-sub")
 
-	err := pool.publishTurnCompleted(context.Background(), tc.sessionID, tc.conversationID, tc.source)
+	err := pool.publishTurnCompleted(context.Background(), tc.sessionID, tc.conversationID, tc.source, tc.status, tc.durationMs, tc.usage)
 	if tc.wantErr {
 		if err == nil {
 			t.Fatalf("expected error containing %q, got nil", tc.errContains)
@@ -1235,6 +1243,21 @@ func assertPublishTurnCompletedScenario(t *testing.T, tc publishTurnCompletedCas
 	if gotMsg.event.Source != tc.wantSource {
 		t.Errorf("event.Source = %q, want %q", gotMsg.event.Source, tc.wantSource)
 	}
+	if gotMsg.event.Status != tc.wantStatus {
+		t.Errorf("event.Status = %q, want %q", gotMsg.event.Status, tc.wantStatus)
+	}
+	if gotMsg.event.DurationMs != tc.wantDurationMs {
+		t.Errorf("event.DurationMs = %d, want %d", gotMsg.event.DurationMs, tc.wantDurationMs)
+	}
+	if gotMsg.event.InputTokens != tc.wantInputTok {
+		t.Errorf("event.InputTokens = %d, want %d", gotMsg.event.InputTokens, tc.wantInputTok)
+	}
+	if gotMsg.event.OutputTokens != tc.wantOutputTok {
+		t.Errorf("event.OutputTokens = %d, want %d", gotMsg.event.OutputTokens, tc.wantOutputTok)
+	}
+	if gotMsg.event.TotalTokens != tc.wantTotalTok {
+		t.Errorf("event.TotalTokens = %d, want %d", gotMsg.event.TotalTokens, tc.wantTotalTok)
+	}
 	if gotMsg.event.CompletedAt.IsZero() {
 		t.Errorf("expected non-zero CompletedAt")
 	}
@@ -1260,18 +1283,34 @@ func TestWorkerPool_PublishTurnCompleted_Scenarios(t *testing.T) {
 			sessionID:      "sess-voice-1",
 			conversationID: "conv-voice-1",
 			source:         "voice",
+			status:         "success",
+			durationMs:     1250,
+			usage:          &runner.TokenUsage{InputTokens: 100, OutputTokens: 50, TotalTokens: 150},
 			wantErr:        false,
 			wantSubject:    "aerial.turn.completed",
 			wantSource:     "voice",
+			wantStatus:     "success",
+			wantDurationMs: 1250,
+			wantInputTok:   100,
+			wantOutputTok:  50,
+			wantTotalTok:   150,
 		},
 		{
 			name:           "successful publish defaults empty source to discord",
 			sessionID:      "sess-discord-1",
 			conversationID: "conv-discord-1",
 			source:         "",
+			status:         "failed",
+			durationMs:     500,
+			usage:          nil,
 			wantErr:        false,
 			wantSubject:    "aerial.turn.completed",
 			wantSource:     "discord",
+			wantStatus:     "failed",
+			wantDurationMs: 500,
+			wantInputTok:   0,
+			wantOutputTok:  0,
+			wantTotalTok:   0,
 		},
 	}
 
@@ -1328,6 +1367,9 @@ func TestWorkerPool_ProcessInteractiveTurn_PublishesTurnCompleted(t *testing.T) 
 	}
 	if gotMsg.event.Source != "discord" {
 		t.Errorf("event.Source = %q, want %q", gotMsg.event.Source, "discord")
+	}
+	if gotMsg.event.Status != "success" {
+		t.Errorf("event.Status = %q, want %q", gotMsg.event.Status, "success")
 	}
 	if gotMsg.event.CompletedAt.IsZero() {
 		t.Errorf("expected non-zero CompletedAt")

@@ -746,6 +746,11 @@ func startLeaderHandoff(
 		}
 		syncLLM := buildSyncLLM(rawLLM, cur.LowEffortModel, cur.Model)
 		transcript.StartTranscriptSync(leaderCtx, txStore, cfg, "", syncLLM, 5*time.Minute)
+		if pool != nil && pool.EventBus() != nil {
+			if subErr := transcript.StartTurnTranscriptSyncSubscriber(leaderCtx, pool.EventBus(), txStore, cfg, "", func() transcript.LLMClientFunc { return syncLLM }); subErr != nil {
+				log.Printf("[TranscriptSync] Warning starting turn transcript sync subscriber: %v", subErr)
+			}
+		}
 	}()
 
 	stopHandoff := func() {
