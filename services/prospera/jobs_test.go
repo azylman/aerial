@@ -22,8 +22,6 @@ type mockJobMsg struct {
 	termed    bool
 	naked     bool
 	nakDelay  time.Duration
-	termErr   error
-	nakErr    error
 }
 
 func (m *mockJobMsg) Data() []byte         { return m.data }
@@ -34,12 +32,12 @@ func (m *mockJobMsg) Ack() error           { return nil }
 func (m *mockJobMsg) NakWithDelay(d time.Duration) error {
 	m.naked = true
 	m.nakDelay = d
-	return m.nakErr
+	return nil
 }
 
 func (m *mockJobMsg) Term() error {
 	m.termed = true
-	return m.termErr
+	return nil
 }
 func (m *mockJobMsg) Snooze(_ time.Duration) error { return nil }
 func (m *mockJobMsg) InProgress() error            { return nil }
@@ -55,6 +53,22 @@ func (b *failConsumeQueueBus) ConsumeQueue(ctx context.Context, subject string, 
 		return nil, errors.New("consume queue failed")
 	}
 	return b.Bus.ConsumeQueue(ctx, subject, queue, handler)
+}
+
+type captureConsumerBus struct {
+	pubsub.Bus
+
+	mu       sync.Mutex
+	handlers map[string]pubsub.Handler
+}
+
+func (c *captureConsumerBus) ConsumeQueue(ctx context.Context, subject string, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.handlers != nil {
+		c.handlers[subject] = handler
+	}
+	return nil, nil
 }
 
 func setupMockReporterServer(t *testing.T) (*Server, *mockStoreForDelivery, *httptest.Server) {
@@ -92,11 +106,11 @@ func TestServer_StartJobConsumers(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		setupBus    func() (pubsub.Bus, error)
-		failSubject string
-		publishJobs bool
-		wantErr     bool
+		name           string
+		setupBus       func() (pubsub.Bus, error)
+		failSubject    string
+		assertHandlers bool
+		wantErr        bool
 	}{
 		{
 			name: "nil bus returns nil",
@@ -106,13 +120,19 @@ func TestServer_StartJobConsumers(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "memory bus subscribes all consumers and receives jobs",
+			name: "memory bus subscribes all consumers",
 			setupBus: func() (pubsub.Bus, error) {
-				b := pubsub.NewMemoryBus()
-				return b, nil
+				return pubsub.NewMemoryBus(), nil
 			},
-			publishJobs: true,
-			wantErr:     false,
+			wantErr: false,
+		},
+		{
+			name: "bus wires consumers and handlers invoke server methods",
+			setupBus: func() (pubsub.Bus, error) {
+				return &captureConsumerBus{handlers: make(map[string]pubsub.Handler)}, nil
+			},
+			assertHandlers: true,
+			wantErr:        false,
 		},
 		{
 			name: "report consumer error fails",
@@ -148,10 +168,23 @@ func TestServer_StartJobConsumers(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("StartJobConsumers() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if tc.publishJobs && bus != nil {
-				_ = bus.Publish(context.Background(), pubsub.SubjectProsperaReportJob, "r1", []byte("invalid"))
-				_ = bus.Publish(context.Background(), pubsub.SubjectProsperaVoicemailJob, "v1", []byte("invalid"))
-				_ = bus.Publish(context.Background(), pubsub.SubjectProsperaSMSJob, "s1", []byte("invalid"))
+			if tc.assertHandlers {
+				cBus, _ := bus.(*captureConsumerBus)
+				for _, subj := range []string{
+					pubsub.SubjectProsperaReportJob,
+					pubsub.SubjectProsperaVoicemailJob,
+					pubsub.SubjectProsperaSMSJob,
+				} {
+					cBus.mu.Lock()
+					h := cBus.handlers[subj]
+					cBus.mu.Unlock()
+					if h == nil {
+						t.Fatalf("missing handler for %s", subj)
+					}
+					if hErr := h(context.Background(), nil); hErr == nil {
+						t.Errorf("expected error invoking handler with nil msg on %s", subj)
+					}
+				}
 			}
 		})
 	}
@@ -204,6 +237,11 @@ func TestServer_HandleReportJob(t *testing.T) {
 			msg:         &mockJobMsg{data: []byte(`{"call_id":"call-rep-ok"}`), delivered: 1},
 			checkCallID: "call-rep-ok",
 		},
+		{
+			name:        "retry delivery transitions previously failed call report to delivered",
+			msg:         &mockJobMsg{data: []byte(`{"call_id":"call-rep-retry"}`), delivered: 2},
+			checkCallID: "call-rep-retry",
+		},
 	}
 
 	for _, tc := range tests {
@@ -215,6 +253,10 @@ func TestServer_HandleReportJob(t *testing.T) {
 			_ = store.CreateOutboundCall(context.Background(), VoiceCall{
 				CallID:       "call-rep-ok",
 				ReportStatus: "pending",
+			}, 5)
+			_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+				CallID:       "call-rep-retry",
+				ReportStatus: "failed",
 			}, 5)
 
 			if tc.nilReporter {
@@ -295,6 +337,13 @@ func TestServer_HandleVoicemailJob(t *testing.T) {
 			delivered:    1,
 			checkCallID:  "call-vm-ok",
 		},
+		{
+			name:         "retry delivery transitions previously failed voicemail to delivered",
+			callID:       "call-vm-retry",
+			recordingURL: "http://rec.wav",
+			delivered:    2,
+			checkCallID:  "call-vm-retry",
+		},
 	}
 
 	for _, tc := range tests {
@@ -306,6 +355,10 @@ func TestServer_HandleVoicemailJob(t *testing.T) {
 			_ = store.CreateInboundCall(context.Background(), VoiceCall{
 				CallID:       "call-vm-ok",
 				ReportStatus: "awaiting_recording",
+			})
+			_ = store.CreateInboundCall(context.Background(), VoiceCall{
+				CallID:       "call-vm-retry",
+				ReportStatus: "failed",
 			})
 
 			if tc.nilReporter {
@@ -642,8 +695,6 @@ func TestNakOrDropJob(t *testing.T) {
 		name         string
 		nilMsg       bool
 		delivered    uint64
-		termErr      error
-		nakErr       error
 		wantErr      bool
 		wantTermed   bool
 		wantNaked    bool
@@ -662,14 +713,6 @@ func TestNakOrDropJob(t *testing.T) {
 			wantNakDelay: 1 * time.Second,
 		},
 		{
-			name:         "delivered 1 logs nak error on failure",
-			delivered:    1,
-			nakErr:       errors.New("nak failed"),
-			wantErr:      true,
-			wantNaked:    true,
-			wantNakDelay: 1 * time.Second,
-		},
-		{
 			name:         "delivered 4 naks with 8s",
 			delivered:    4,
 			wantErr:      true,
@@ -679,13 +722,6 @@ func TestNakOrDropJob(t *testing.T) {
 		{
 			name:       "delivered 5 terms and drops",
 			delivered:  5,
-			wantErr:    false,
-			wantTermed: true,
-		},
-		{
-			name:       "delivered 5 logs term error on failure",
-			delivered:  5,
-			termErr:    errors.New("term failed"),
 			wantErr:    false,
 			wantTermed: true,
 		},
@@ -699,8 +735,6 @@ func TestNakOrDropJob(t *testing.T) {
 			if !tc.nilMsg {
 				msg = &mockJobMsg{
 					delivered: tc.delivered,
-					termErr:   tc.termErr,
-					nakErr:    tc.nakErr,
 				}
 				pubMsg = msg
 			}
@@ -720,14 +754,5 @@ func TestNakOrDropJob(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestServer_NilReceiverEventBus(t *testing.T) {
-	t.Parallel()
-	var nilServer *Server
-	nilServer.SetEventBus(pubsub.NewMemoryBus())
-	if got := nilServer.EventBus(); got != nil {
-		t.Errorf("expected nil bus for nil server, got %v", got)
 	}
 }

@@ -34,6 +34,7 @@ func setupTestToolHandler() (*ToolHandler, *mockStoreForDelivery, *mockTwilioFor
 type toolHandlerInitiateCallTestCase struct {
 	name     string
 	args     InitiateCallArgs
+	bindErr  error
 	wantErr  bool
 	wantMode string
 }
@@ -74,6 +75,16 @@ func TestToolHandler_InitiateCall(t *testing.T) {
 			wantMode: "notify",
 		},
 		{
+			name: "valid initiate call with bind error logs warning",
+			args: InitiateCallArgs{
+				To:      "+15105550199",
+				Message: "Hello, this is an automated confirmation call.",
+			},
+			bindErr:  errors.New("bind provider sid error"),
+			wantErr:  false,
+			wantMode: "conversation",
+		},
+		{
 			name: "invalid phone number",
 			args: InitiateCallArgs{
 				To:      "not-a-number",
@@ -101,6 +112,9 @@ func TestToolHandler_InitiateCall(t *testing.T) {
 func runToolHandlerInitiateCallCase(t *testing.T, tc toolHandlerInitiateCallTestCase) {
 	t.Helper()
 	handler, store, twilioMock := setupTestToolHandler()
+	if tc.bindErr != nil {
+		store.bindErr = tc.bindErr
+	}
 
 	out, err := handler.InitiateCall(context.Background(), tc.args)
 	if (err != nil) != tc.wantErr {

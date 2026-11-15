@@ -214,7 +214,8 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 		return fmt.Errorf("reporter: call %q not found", callID)
 	}
 
-	ok, err := r.store.TransitionReportStatus(ctx, callID, []string{"pending"}, "processing", "")
+	// Allow transition from pending or previously failed attempts to re-enter processing on retry
+	ok, err := r.store.TransitionReportStatus(ctx, callID, []string{"pending", "failed"}, "processing", "")
 	if err != nil {
 		return fmt.Errorf("reporter: transition status to processing: %w", err)
 	}
@@ -358,7 +359,8 @@ func (r *Reporter) ProcessVoicemailRecording(ctx context.Context, callID, record
 		return fmt.Errorf("reporter: call %q not found", callID)
 	}
 
-	ok, err := r.store.TransitionReportStatus(ctx, callID, []string{"awaiting_recording"}, "processing", "")
+	// Allow transition from awaiting_recording or previously failed attempts to re-enter processing on retry
+	ok, err := r.store.TransitionReportStatus(ctx, callID, []string{"awaiting_recording", "failed"}, "processing", "")
 	if err != nil {
 		return fmt.Errorf("reporter: transition status to processing: %w", err)
 	}

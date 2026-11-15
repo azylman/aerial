@@ -760,6 +760,11 @@ func TestMediaStreamSession_NilConnAndDialFallbacks(t *testing.T) {
 	sessHelpers.sendTwilioMedia([]byte{0x01})
 	sessHelpers.sendTwilioClear()
 	sessHelpers.sendTwilioMark("mark")
+
+	sessHelpers.streamSID = "MZ-helpers"
+	sessHelpers.sendTwilioMedia([]byte{0x01})
+	sessHelpers.sendTwilioClear()
+	sessHelpers.sendTwilioMark("mark")
 	if err := sessHelpers.sendGeminiJSON(map[string]any{}); err == nil {
 		t.Error("expected error when sending JSON with nil conn")
 	}

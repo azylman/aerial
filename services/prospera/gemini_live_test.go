@@ -284,7 +284,16 @@ func runConsultCalendarCase(t *testing.T, tc consultTestCase) {
 		calURL = server.URL
 	}
 
-	client := NewHTTPContextConsultClient(calURL, "")
+	mockRT := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return http.DefaultTransport.RoundTrip(r)
+	})
+	customClient := &http.Client{Transport: mockRT, Timeout: 5 * time.Second}
+	client := NewHTTPContextConsultClient(calURL, "", func(c *HTTPContextConsultClient) {
+		c.httpClient = customClient
+	})
+	if client.httpClient != customClient {
+		t.Errorf("expected custom client")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
