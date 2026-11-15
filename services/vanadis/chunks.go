@@ -957,7 +957,8 @@ func resolveWidgetChunkRepo(c VanadisChunk) string {
 	return firstNonEmpty(c.Repo, "aerial")
 }
 
-func buildStatusWidgetChunk(c VanadisChunk, req SyncChunkPRWidgetRequest, widgetStatus *string) StatusWidgetChunk {
+func buildStatusWidgetChunk(c VanadisChunk, req SyncChunkPRWidgetRequest, widgetStatus *string, deployUIURL ...string) StatusWidgetChunk {
+	baseURL := firstNonEmpty(deployUIURL...)
 	chunkRepo := resolveWidgetChunkRepo(c)
 	chunkStatus := normalizeWidgetStatus(c.Status)
 	completedAt := c.CompletedAt
@@ -971,14 +972,14 @@ func buildStatusWidgetChunk(c VanadisChunk, req SyncChunkPRWidgetRequest, widget
 		if isVanadisChunkStreamingPhase(chunkStatus) {
 			activeStep = strings.TrimSpace(req.ActiveStep)
 			if activeStep == "" {
-				activeStep = FormatChunkActiveStep(c)
+				activeStep = FormatChunkActiveStep(c, baseURL)
 			}
 			completedAt = time.Time{}
 		}
 	case chunkStatus == "completed":
 		chunkStatus = "deployed"
 	case isVanadisChunkStreamingPhase(chunkStatus):
-		activeStep = FormatChunkActiveStep(c)
+		activeStep = FormatChunkActiveStep(c, baseURL)
 		if chunkStatus == "merged" && (activeStep == "" || *widgetStatus == "completed") {
 			chunkStatus = "deployed"
 			activeStep = ""
@@ -998,11 +999,12 @@ func buildStatusWidgetChunk(c VanadisChunk, req SyncChunkPRWidgetRequest, widget
 	}
 }
 
-func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncChunkPRWidgetRequest) StatusWidgetRequest {
+func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncChunkPRWidgetRequest, deployUIURL ...string) StatusWidgetRequest {
 	widgetStatus := firstNonEmpty(normalizeWidgetStatus(build.Status), "running")
+	baseURL := firstNonEmpty(deployUIURL...)
 	wChunks := make([]StatusWidgetChunk, len(chunks))
 	for i, c := range chunks {
-		wChunks[i] = buildStatusWidgetChunk(c, req, &widgetStatus)
+		wChunks[i] = buildStatusWidgetChunk(c, req, &widgetStatus, baseURL)
 	}
 	if widgetStatus == "failed" && req.PRFound && req.PRNumber > 0 && !hasFailedWidgetChunk(wChunks) {
 		widgetStatus = "running"

@@ -415,6 +415,8 @@ spec:
     spec:
       containers:
         - env:
+            - name: CONFIG_PATH
+              value: /share/aerial-config/services/vanadis/vanadis.yaml
             - name: PORT
               value: "4025"
             - name: ERI_URL
