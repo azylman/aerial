@@ -730,9 +730,9 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 	})
 	vanadisPR, err := s.isVanadisPR(ctx, pr.Repo, pr.PRNumber)
 	if err != nil {
-		return err
+		log.Printf("[synapse] [flux-watch] warning checking vanadis PR for %s#%d: %v", pr.Repo, pr.PRNumber, err)
 	}
-	if s.bus == nil || pubErr != nil || !vanadisPR {
+	if s.bus == nil || pubErr != nil || !vanadisPR || err != nil {
 		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
 			log.Printf("[synapse] [flux-watch] error dispatching deploy_success for %s#%d: %v", pr.Repo, pr.PRNumber, err)
 		}

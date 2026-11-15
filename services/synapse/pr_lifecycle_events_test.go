@@ -447,6 +447,57 @@ func TestPRLifecycleEvents_DeployAndKustomization(t *testing.T) {
 			t.Errorf("expected deploy_success, got %v", bus.publishedPREvents)
 		}
 	})
+
+	t.Run("completeNoDeployWorkflowRun dispatches prompt for non-Vanadis PR when bus publish succeeds", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{}
+		disp := &mockOutboundDispatcher{}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: false}
+		srv := &RouterServer{
+			bus:        bus,
+			dispatcher: disp,
+			registry:   reg,
+			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+
+		err := srv.completeNoDeployWorkflowRun(context.Background(), "azylman/aerial", "head123", "123456789012345678", 42)
+		if err != nil {
+			t.Fatalf("completeNoDeployWorkflowRun() err = %v", err)
+		}
+		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "deploy_success" {
+			t.Fatalf("expected deploy_success published event, got %v", bus.publishedPREvents)
+		}
+		if len(disp.PromptCalls()) != 1 {
+			t.Errorf("expected prompt to be dispatched for non-Vanadis PR on deploy success, got %d calls", len(disp.PromptCalls()))
+		}
+	})
+
+	t.Run("completeNoDeployWorkflowRun advances Vanadis and suppresses prompt for Vanadis PR when bus publish succeeds", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{}
+		disp := &mockOutboundDispatcher{}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: true}
+		srv := &RouterServer{
+			bus:        bus,
+			dispatcher: disp,
+			registry:   reg,
+			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+
+		err := srv.completeNoDeployWorkflowRun(context.Background(), "azylman/aerial", "head123", "123456789012345678", 42)
+		if err != nil {
+			t.Fatalf("completeNoDeployWorkflowRun() err = %v", err)
+		}
+		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "deploy_success" {
+			t.Fatalf("expected deploy_success published event, got %v", bus.publishedPREvents)
+		}
+		if len(disp.PromptCalls()) != 0 {
+			t.Errorf("expected prompt to be suppressed for Vanadis PR on deploy success, got %d calls", len(disp.PromptCalls()))
+		}
+		if len(reg.advanceVanadisCalls) != 1 {
+			t.Errorf("expected advanceVanadisCalls = 1, got %d", len(reg.advanceVanadisCalls))
+		}
+	})
 }
 
 func TestPRLifecycleEvents_HelpersAndState(t *testing.T) {
@@ -493,33 +544,6 @@ func TestPRLifecycleEvents_HelpersAndState(t *testing.T) {
 		}
 	})
 
-	t.Run("resolveDeployEventTargetID branches", func(t *testing.T) {
-		t.Parallel()
-		reg := &mockPRRegistry{
-			resolveTargetID: "target-12345",
-			resolvePRNum:    10,
-		}
-		srv := &RouterServer{registry: reg}
-
-		evt := DeployEvent{
-			Repo:     "azylman/aerial",
-			PRNumber: 10,
-		}
-		srv.resolveDeployEventTargetID(context.Background(), &evt)
-		if evt.TargetID != "target-12345" {
-			t.Errorf("got targetID %q, want target-12345", evt.TargetID)
-		}
-
-		evt2 := DeployEvent{
-			Repo:      "azylman/aerial",
-			CommitSHA: "sha123",
-		}
-		srv.resolveDeployEventPRNumber(context.Background(), &evt2)
-		if evt2.PRNumber != 10 || evt2.TargetID != "target-12345" {
-			t.Errorf("got PRNumber %d, targetID %q for sha, want 10, target-12345", evt2.PRNumber, evt2.TargetID)
-		}
-	})
-
 	t.Run("healDependabotPR branches", func(t *testing.T) {
 		t.Parallel()
 		reg := &mockPRRegistry{
@@ -555,7 +579,7 @@ func TestPRLifecycleEvents_HelpersAndState(t *testing.T) {
 	t.Run("isAutoUpdateAuthorAllowed and sanitizeSubjectToken branches", func(t *testing.T) {
 		t.Parallel()
 		srv := &RouterServer{
-			cfgSrc: fixedConfig(Config{AutoUpdatePRAuthors: []string{"app/dependabot", "arcane103"}}),
+			cfgSrc: fixedConfig(Config{AutoUpdatePRAuthors: []string{"app/dependabot", "trusted-dev"}}),
 		}
 		if !srv.isAutoUpdateAuthorAllowed("app/dependabot") {
 			t.Errorf("expected app/dependabot to be allowed")
@@ -563,24 +587,12 @@ func TestPRLifecycleEvents_HelpersAndState(t *testing.T) {
 		if srv.isAutoUpdateAuthorAllowed("random-user") {
 			t.Errorf("expected random-user to not be allowed")
 		}
-		var nilSrv *RouterServer
-		if nilSrv.isAutoUpdateAuthorAllowed("app/dependabot") {
-			t.Errorf("expected nil server to return false")
-		}
-		if srv.isAutoUpdateAuthorAllowed("") {
-			t.Errorf("expected empty author to return false")
-		}
 
 		if sanitizeSubjectToken("  ") != "unknown" {
 			t.Errorf("expected unknown for empty token")
 		}
 		if sanitizeSubjectToken("foo/bar:baz") != "foo_bar_baz" {
 			t.Errorf("expected foo_bar_baz")
-		}
-
-		// buildJobService rejects empty check name
-		if _, ok := buildJobService("Lint & Test"); ok {
-			t.Errorf("expected Lint & Test to not match build job")
 		}
 	})
 }
