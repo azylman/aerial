@@ -833,11 +833,11 @@ spec:
       app.kubernetes.io/name: victoriametrics
   storageDataPath: /victoria-metrics-data
   volumes:
-    - name: storage
+    - name: data
       persistentVolumeClaim:
         claimName: victoriametrics-pvc
   volumeMounts:
-    - name: storage
+    - name: data
       mountPath: /victoria-metrics-data
   securityContext:
     fsGroup: 65533
@@ -2331,6 +2331,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   annotations:
+    kustomize.toolkit.fluxcd.io/force: "enabled"
     reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: docket-store
@@ -2340,6 +2341,7 @@ spec:
   replicas: 1
   selector:
     matchLabels:
+      app.kubernetes.io/component: docket-store
       app.kubernetes.io/name: docket-store
   strategy:
     rollingUpdate:
@@ -2349,6 +2351,7 @@ spec:
   template:
     metadata:
       labels:
+        app.kubernetes.io/component: docket-store
         app.kubernetes.io/name: docket-store
     spec:
       containers:
