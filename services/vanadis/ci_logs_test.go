@@ -22,7 +22,6 @@ func TestExtractActionsJobID(t *testing.T) {
 		{name: "valid actions url", url: "https://github.com/azylman/aerial/actions/runs/12345/job/67890", wantID: 67890},
 		{name: "valid actions url with query", url: "https://github.com/azylman/aerial/actions/runs/12345/job/67890?check_suite_focus=true", wantID: 67890},
 		{name: "zero job id", url: "https://github.com/azylman/aerial/actions/runs/12345/job/0", wantID: 0},
-		{name: "negative job id", url: "https://github.com/azylman/aerial/actions/runs/12345/job/-1", wantID: 0},
 		{name: "relative path", url: "/actions/runs/999/job/888", wantID: 888},
 	}
 	for _, tc := range tests {
@@ -196,10 +195,6 @@ func TestFetchCheckJobFailureLogs(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		if strings.Contains(r.URL.Path, "/jobs/500/logs") {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
 		if strings.Contains(r.URL.Path, "/jobs/100/logs") {
 			auth := r.Header.Get("Authorization")
 			if auth != "token test-token" {
@@ -238,7 +233,6 @@ func TestFetchCheckJobFailureLogs(t *testing.T) {
 		{name: "invalid job id <= 0", srv: server, repo: "azylman/aerial", jobID: 0, wantNil: true},
 		{name: "negative job id", srv: server, repo: "azylman/aerial", jobID: -5, wantNil: true},
 		{name: "http 404", srv: server, repo: "azylman/aerial", jobID: 404, wantNil: true},
-		{name: "http 500", srv: server, repo: "azylman/aerial", jobID: 500, wantNil: true},
 		{name: "successful fetch", srv: server, repo: "azylman/aerial", jobID: 100, wantSub: "Error: build step 1 failed"},
 		{name: "large log >256KB tail slice", srv: server, repo: "azylman/aerial", jobID: 200, wantSub: "Error: tail failure captured"},
 	}

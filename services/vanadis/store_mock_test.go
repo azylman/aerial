@@ -977,6 +977,8 @@ func (m *memoryVanadisStore) ResetChunkForSynchronize(_ context.Context, chunkID
 			list[i].Banner = ""
 			if list[i].Status == "failed" {
 				list[i].Status = "pr_opened"
+				list[i].MergeAwakeableID = ""
+				list[i].DeployAwakeableID = ""
 				list[i].CompletedAt = time.Time{}
 			}
 			list[i].UpdatedAt = now

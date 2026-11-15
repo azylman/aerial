@@ -637,6 +637,114 @@ func TestHandlePRMerged(t *testing.T) {
 	})
 }
 
+func TestHandlePRMerged_RevivalAndFallback(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("synchronize then merged after CI remediation cap advances chunk and publishes merged event", func(t *testing.T) {
+		t.Parallel()
+		srv, store, recBus, _ := setupTestServer(t)
+		build := mkBuild("b-revive", "123456789012345678", "Build", "Obj", "running")
+		chunk1 := mkChunk("c-revive-1", "b-revive", 0, "Chunk 1", "Instr", "medium", "pr_opened")
+		chunk1.PRNumber = 803
+		chunk1.Repo = "azylman/aerial"
+		chunk1.CIFailCount = 3
+		chunk1.MergeAwakeableID = "awk-revive-803"
+		chunk2 := mkChunk("c-revive-2", "b-revive", 1, "Chunk 2", "Instr", "medium", "pending")
+		chunk2.Repo = "azylman/aerial"
+		require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk1, chunk2}))
+
+		// 1. CI failure triggers remediation cap failure (4th failure)
+		evCI := pubsub.PRLifecycleEvent{
+			Event:     "ci_failed",
+			Repo:      "azylman/aerial",
+			PRNumber:  803,
+			CheckName: "Go Unit Tests",
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, evCI))
+
+		c1, b, err := store.GetChunk(ctx, "c-revive-1")
+		require.NoError(t, err)
+		assert.Equal(t, "failed", c1.Status)
+		assert.Equal(t, "failed", b.Status)
+
+		// 2. Synchronize event revives chunk and build
+		evSync := pubsub.PRLifecycleEvent{
+			Event:    "synchronize",
+			Repo:     "azylman/aerial",
+			PRNumber: 803,
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, evSync))
+
+		c1, b, err = store.GetChunk(ctx, "c-revive-1")
+		require.NoError(t, err)
+		assert.Equal(t, "pr_opened", c1.Status)
+		assert.Equal(t, "running", b.Status)
+		assert.Empty(t, c1.MergeAwakeableID, "consumed awakeable ID should be cleared on synchronize revival")
+
+		// 3. Merged event arrives: should advance chunk 2 and publish vanadis_chunk.merged
+		evMerged := pubsub.PRLifecycleEvent{
+			Event:    "merged",
+			Repo:     "azylman/aerial",
+			PRNumber: 803,
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, evMerged))
+
+		c1, _, err = store.GetChunk(ctx, "c-revive-1")
+		require.NoError(t, err)
+		assert.Equal(t, "merged", c1.Status)
+
+		c2, _, err := store.GetChunk(ctx, "c-revive-2")
+		require.NoError(t, err)
+		assert.Equal(t, "running", c2.Status)
+
+		events := recBus.getEvents()
+		var mergedEventFound bool
+		for _, ev := range events {
+			if ev.Source == "vanadis_chunk" && ev.EventType == "merged" && len(ev.Targets) == 1 && ev.Targets[0] == "c-revive-1" {
+				mergedEventFound = true
+			}
+		}
+		assert.True(t, mergedEventFound, "expected vanadis_chunk.merged event after revival")
+	})
+
+	t.Run("fallback to legacy advance when awakeable resolve fails", func(t *testing.T) {
+		t.Parallel()
+		srv, store, recBus, _ := setupTestServer(t)
+		// Point RestateIngressURL to non-existent endpoint to simulate awakeable failure
+		srv.restateCfg.RestateIngressURL = "http://127.0.0.1:0"
+		build := mkBuild("b-m-err", "123456789012345678", "Build", "Obj", "running")
+		chunk1 := mkChunk("c-m-err-1", "b-m-err", 0, "Chunk 1", "Instr", "medium", "pr_opened")
+		chunk1.PRNumber = 804
+		chunk1.Repo = "azylman/aerial"
+		chunk1.MergeAwakeableID = "awk-error-804"
+		chunk2 := mkChunk("c-m-err-2", "b-m-err", 1, "Chunk 2", "Instr", "medium", "pending")
+		chunk2.Repo = "azylman/aerial"
+		require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk1, chunk2}))
+
+		ev := pubsub.PRLifecycleEvent{
+			Event:    "merged",
+			Repo:     "azylman/aerial",
+			PRNumber: 804,
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
+
+		updatedChunk1, _, err := store.GetChunk(ctx, "c-m-err-1")
+		require.NoError(t, err)
+		assert.Equal(t, "merged", updatedChunk1.Status)
+
+		updatedChunk2, _, err := store.GetChunk(ctx, "c-m-err-2")
+		require.NoError(t, err)
+		assert.Equal(t, "running", updatedChunk2.Status)
+
+		events := recBus.getEvents()
+		require.Len(t, events, 1)
+		assert.Equal(t, "vanadis_chunk", events[0].Source)
+		assert.Equal(t, "merged", events[0].EventType)
+		assert.Equal(t, []string{"c-m-err-1"}, events[0].Targets)
+	})
+}
+
 func TestHandlePRDeploySuccess(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -716,6 +824,40 @@ func TestHandlePRDeploySuccess(t *testing.T) {
 		}
 		assert.True(t, chunkCompleted, "expected vanadis_chunk.completed external event")
 		assert.True(t, buildCompleted, "expected vanadis_build.completed external event")
+	})
+
+	t.Run("fallback to legacy complete when deploy awakeable resolve fails", func(t *testing.T) {
+		t.Parallel()
+		srv, store, recBus, _ := setupTestServer(t)
+		srv.restateCfg.RestateIngressURL = "http://127.0.0.1:0"
+		build := mkBuild("b-d-fallback", "123456789012345678", "Build", "Obj", "running")
+		chunk := mkChunk("c-d-fallback", "b-d-fallback", 0, "Chunk", "Instr", "medium", "merged")
+		chunk.PRNumber = 903
+		chunk.Repo = "azylman/aerial"
+		chunk.DeployAwakeableID = "awk-deploy-err"
+		require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
+
+		ev := pubsub.PRLifecycleEvent{
+			Event:    "deploy_success",
+			Repo:     "azylman/aerial",
+			PRNumber: 903,
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
+
+		updatedChunk, updatedBuild, err := store.GetChunk(ctx, "c-d-fallback")
+		require.NoError(t, err)
+		assert.Equal(t, "completed", updatedChunk.Status)
+		assert.Equal(t, "completed", updatedBuild.Status)
+
+		events := recBus.getEvents()
+		var chunkCompleted bool
+		for _, ev := range events {
+			if ev.Source == "vanadis_chunk" && ev.EventType == "completed" {
+				chunkCompleted = true
+				assert.Equal(t, []string{"c-d-fallback"}, ev.Targets)
+			}
+		}
+		assert.True(t, chunkCompleted, "expected vanadis_chunk.completed on fallback")
 	})
 }
 

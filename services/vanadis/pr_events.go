@@ -63,6 +63,7 @@ func (s *PostgresVanadisStore) RecordPRRolloutState(ctx context.Context, chunkID
 }
 
 // ResetChunkForSynchronize resets ci_fail_count, clears ci_checks and banner, and recovers failed chunk/build.
+// When reviving a chunk from 'failed', consumed awakeable IDs are cleared so subsequent PR events fall back to legacy advancement.
 func (s *PostgresVanadisStore) ResetChunkForSynchronize(ctx context.Context, chunkID, buildID string) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
@@ -72,7 +73,16 @@ func (s *PostgresVanadisStore) ResetChunkForSynchronize(ctx context.Context, chu
 	if chunkID == "" || buildID == "" {
 		return errors.New("chunk_id and build_id cannot be empty")
 	}
-	const chunkQ = `UPDATE vanadis_chunks SET ci_fail_count = 0, ci_checks = '{}'::jsonb, banner = '', status = CASE WHEN status = 'failed' THEN 'pr_opened' ELSE status END, completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
+	const chunkQ = `UPDATE vanadis_chunks
+SET ci_fail_count = 0,
+    ci_checks = '{}'::jsonb,
+    banner = '',
+    merge_awakeable_id = CASE WHEN status = 'failed' THEN NULL ELSE merge_awakeable_id END,
+    deploy_awakeable_id = CASE WHEN status = 'failed' THEN NULL ELSE deploy_awakeable_id END,
+    status = CASE WHEN status = 'failed' THEN 'pr_opened' ELSE status END,
+    completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = $1;`
 	tag, err := s.db.Exec(ctx, chunkQ, chunkID)
 	if err != nil {
 		return fmt.Errorf("reset chunk for synchronize: %w", err)
@@ -88,6 +98,7 @@ func (s *PostgresVanadisStore) ResetChunkForSynchronize(ctx context.Context, chu
 }
 
 // IncrementChunkCIFailCount increments ci_fail_count, marks chunk as ci_failed, and sets banner.
+// If the chunk is already terminal ('failed', 'completed', 'merged'), the counter is not incremented and status is preserved.
 func (s *PostgresVanadisStore) IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string) (int, error) {
 	if s == nil || s.db == nil {
 		return 0, errors.New("database connection is nil")
@@ -96,7 +107,13 @@ func (s *PostgresVanadisStore) IncrementChunkCIFailCount(ctx context.Context, ch
 	if chunkID == "" {
 		return 0, errors.New("chunk_id cannot be empty")
 	}
-	const q = `UPDATE vanadis_chunks SET ci_fail_count = ci_fail_count + 1, status = 'ci_failed', banner = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING ci_fail_count;`
+	const q = `UPDATE vanadis_chunks
+SET ci_fail_count = CASE WHEN status IN ('failed', 'completed', 'merged') THEN ci_fail_count ELSE ci_fail_count + 1 END,
+    status = CASE WHEN status IN ('failed', 'completed', 'merged') THEN status ELSE 'ci_failed' END,
+    banner = CASE WHEN status IN ('failed', 'completed', 'merged') THEN banner ELSE $1 END,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = $2
+RETURNING ci_fail_count;`
 	var count int
 	err := s.db.QueryRow(ctx, q, strings.TrimSpace(banner), chunkID).Scan(&count)
 	if err != nil {
@@ -133,9 +150,6 @@ func (s *VanadisServer) publishExternalEvent(ctx context.Context, source, eventT
 		return
 	}
 	evID := fmt.Sprintf("%s-%s-%s", source, eventType, strings.Join(targets, "-"))
-	if contextHeader != "" {
-		evID = fmt.Sprintf("%s-%s", evID, contextHeader)
-	}
 	payload := pubsub.ExternalEvent{
 		EventID:       evID,
 		Source:        source,
@@ -475,7 +489,10 @@ func (s *VanadisServer) handlePRMerged(ctx context.Context, ev pubsub.PRLifecycl
 	RecordChunkTotal("merged")
 	if chunk.MergeAwakeableID != "" {
 		if err := s.resolveRestateAwakeable(ctx, chunk.MergeAwakeableID, "merged"); err != nil {
-			log.Printf("[vanadis] warning resolving merge awakeable %s: %v", chunk.MergeAwakeableID, err)
+			log.Printf("[vanadis] warning resolving merge awakeable %s: %v; falling back to legacy advancement", chunk.MergeAwakeableID, err)
+			s.advanceLegacyChunkByPR(ctx, ev.Repo, ev.PRNumber)
+			s.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunk.ID}, "")
+			return nil
 		}
 		s.syncBuildWidget(ctx, build.ID, "")
 	} else {
@@ -483,6 +500,16 @@ func (s *VanadisServer) handlePRMerged(ctx context.Context, ev pubsub.PRLifecycl
 		s.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunk.ID}, "")
 	}
 	return nil
+}
+
+func (s *VanadisServer) completeLegacyChunkDeploy(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) {
+	if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
+		log.Printf("[vanadis] warning updating chunk %s to completed: %v", chunk.ID, err)
+	}
+	if err := s.completeBuildIfAllChunksFinished(ctx, build.ID); err != nil {
+		log.Printf("[vanadis] warning completing build %s: %v", build.ID, err)
+	}
+	s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunk.ID}, "")
 }
 
 func (s *VanadisServer) completeBuildIfAllChunksFinished(ctx context.Context, buildID string) error {
@@ -521,16 +548,12 @@ func (s *VanadisServer) completeBuildIfAllChunksFinished(ctx context.Context, bu
 func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) error {
 	if chunk.DeployAwakeableID != "" {
 		if err := s.resolveRestateAwakeable(ctx, chunk.DeployAwakeableID, "deploy_success"); err != nil {
-			log.Printf("[vanadis] warning resolving deploy awakeable %s: %v", chunk.DeployAwakeableID, err)
+			log.Printf("[vanadis] warning resolving deploy awakeable %s: %v; falling back to legacy completion", chunk.DeployAwakeableID, err)
+			s.completeLegacyChunkDeploy(ctx, chunk, build)
+			return nil
 		}
 	} else {
-		if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
-			log.Printf("[vanadis] warning updating chunk %s to completed: %v", chunk.ID, err)
-		}
-		if err := s.completeBuildIfAllChunksFinished(ctx, build.ID); err != nil {
-			log.Printf("[vanadis] warning completing build %s: %v", build.ID, err)
-		}
-		s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunk.ID}, "")
+		s.completeLegacyChunkDeploy(ctx, chunk, build)
 	}
 	return nil
 }
