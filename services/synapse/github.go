@@ -348,21 +348,24 @@ func resolveImagesWorkloadsAndNames(repo string, images []string) ([]string, []s
 }
 
 func (s *RouterServer) startWorkflowRunPRDeploying(ctx context.Context, repo string, prNum int, headSHA, targetID string, workloads []string) error {
-	if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, workloads); err != nil {
+	tID, err := s.registry.TransitionDeploying(ctx, repo, prNum, workloads)
+	if err != nil {
 		log.Printf("[synapse] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
 		return fmt.Errorf("transition pr deploying: %w", err)
 	}
-	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        "deploy_started",
-		Repo:         repo,
-		PRNumber:     prNum,
-		HeadSHA:      headSHA,
-		TargetID:     targetID,
-		Status:       "deploying",
-		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
-		Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
-		OccurredAt:   time.Now().UTC(),
-	})
+	if tID != "" {
+		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        "deploy_started",
+			Repo:         repo,
+			PRNumber:     prNum,
+			HeadSHA:      headSHA,
+			TargetID:     firstNonEmpty(targetID, tID),
+			Status:       "deploying",
+			RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
+			Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
+			OccurredAt:   time.Now().UTC(),
+		})
+	}
 	return nil
 }
 

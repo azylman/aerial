@@ -55,6 +55,16 @@ func TestComputeNextChunkIndex(t *testing.T) {
 			currentIdx: 1,
 			want:       0,
 		},
+		{
+			name: "deploying chunks are treated as already merged and never selected as next or fallback",
+			chunks: []VanadisChunkSummary{
+				{ChunkIndex: 0, Status: "completed"},
+				{ChunkIndex: 1, Status: "deploying"},
+				{ChunkIndex: 2, Status: "completed"},
+			},
+			currentIdx: 2,
+			want:       -1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -703,6 +713,16 @@ func TestScanVanadisChunkSummaries(t *testing.T) {
 	}
 	if sumsPR[0].Status != "merged" {
 		t.Errorf("expected c-pr status merged, got %s", sumsPR[0].Status)
+	}
+
+	rowsPRCompleted := &mockRows{
+		items: []VanadisChunk{
+			{ID: "c-pr-done", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Status: "completed"},
+		},
+	}
+	sumsPRDone, err := scanVanadisChunkSummaries(rowsPRCompleted, "c-pr-done")
+	if err != nil || len(sumsPRDone) != 1 || sumsPRDone[0].Status != "completed" {
+		t.Fatalf("expected c-pr-done status completed preserved, got %+v (err=%v)", sumsPRDone, err)
 	}
 
 	// 2. Scan error

@@ -782,18 +782,22 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 	for _, ref := range refs {
 		names = append(names, ref.Name)
 	}
-	if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, names); err != nil {
+	tID, err := s.registry.TransitionDeploying(ctx, repo, prNum, names)
+	if err != nil {
 		return false, fmt.Errorf("transition pr %s#%d deploying: %w", repo, prNum, err)
 	}
-	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        "deploy_started",
-		Repo:         repo,
-		PRNumber:     prNum,
-		Status:       "deploying",
-		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
-		Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
-		OccurredAt:   time.Now().UTC(),
-	})
+	if tID != "" {
+		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        "deploy_started",
+			Repo:         repo,
+			PRNumber:     prNum,
+			TargetID:     tID,
+			Status:       "deploying",
+			RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
+			Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
+			OccurredAt:   time.Now().UTC(),
+		})
+	}
 	requests := newKustomizationRequests(refs, time.Now().UTC())
 	if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
 		return false, fmt.Errorf("record kustomization requests for %s#%d: %w", repo, prNum, err)
