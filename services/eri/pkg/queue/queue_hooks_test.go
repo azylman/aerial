@@ -25,23 +25,25 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/bwmarrin/discordgo"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
-	cases := []struct {
+	tests := []struct {
 		name         string
 		model        string
 		threadID     string
 		channelName  string
 		mockOutput   string
-		wantContains []string
+		wantChannel  string
+		wantDeltas   map[string]float64
 		wantExcludes string
 	}{
-		{name: "NamedChannel", model: "test-token-model", threadID: "chan-token-test-1", mockOutput: `{"conversation_id":"c1111111-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":150,"output_tokens":75,"thinking_tokens":30,"cache_read_tokens":10,"total_tokens":265}}`, wantContains: []string{`aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="total"} 265`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="input"} 150`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="output"} 75`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="thinking"} 30`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="cache_read"} 10`}},
-		{name: "SnowflakeChannelSanitized", model: "test-snowflake-model", threadID: "1534436119888793750", mockOutput: `{"conversation_id":"c2222222-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":100,"output_tokens":50,"thinking_tokens":20,"cache_read_tokens":5,"total_tokens":175}}`, wantContains: []string{`aerial_brain_tokens_total{channel="unknown",model="test-snowflake-model",type="total"} 175`}, wantExcludes: "1534436119888793750"},
-		{name: "BurstChannelNameFallback", model: "test-burst-chan-model", threadID: "low_effort:1534436119888793750", channelName: "#aerial-dev", mockOutput: `{"conversation_id":"c3333333-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":80,"output_tokens":20,"total_tokens":100}}`, wantContains: []string{`aerial_brain_tokens_total{channel="aerial-dev",model="test-burst-chan-model",type="total"} 100`}, wantExcludes: "low_effort:1534436119888793750"},
+		{name: "NamedChannel", model: "test-token-model", threadID: "chan-token-test-1", mockOutput: `{"conversation_id":"c1111111-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":150,"output_tokens":75,"thinking_tokens":30,"cache_read_tokens":10,"total_tokens":265}}`, wantChannel: "chan-token-test-1", wantDeltas: map[string]float64{"input": 150, "output": 75, "thinking": 30, "cache_read": 10, "total": 265}},
+		{name: "SnowflakeChannelSanitized", model: "test-snowflake-model", threadID: "1534436119888793750", mockOutput: `{"conversation_id":"c2222222-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":100,"output_tokens":50,"thinking_tokens":20,"cache_read_tokens":5,"total_tokens":175}}`, wantChannel: "unknown", wantDeltas: map[string]float64{"input": 100, "output": 50, "thinking": 20, "cache_read": 5, "total": 175}, wantExcludes: "1534436119888793750"},
+		{name: "BurstChannelNameFallback", model: "test-burst-chan-model", threadID: "low_effort:1534436119888793750", channelName: "#aerial-dev", mockOutput: `{"conversation_id":"c3333333-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":80,"output_tokens":20,"total_tokens":100}}`, wantChannel: "aerial-dev", wantDeltas: map[string]float64{"input": 80, "output": 20, "thinking": 0, "cache_read": 0, "total": 100}, wantExcludes: "low_effort:1534436119888793750"},
 	}
-	for _, tc := range cases {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			store := setupTestStore(t)
 			pool := New(nil, WorkerPoolConfig{
@@ -53,6 +55,13 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 			})
 			pool.Start()
 			defer pool.Stop()
+
+			// TokensTotal is process-global and accumulates across -count runs,
+			// so assert only the delta this row's burst produced.
+			baseline := make(map[string]float64, len(tc.wantDeltas))
+			for tokenType := range tc.wantDeltas {
+				baseline[tokenType] = testutil.ToFloat64(metrics.TokensTotal.WithLabelValues(tokenType, tc.model, tc.wantChannel))
+			}
 
 			t0 := time.Now().UTC()
 			msg := db.Message{
@@ -67,15 +76,16 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 			_ = insertMessage(store, msg)
 			pool.processBurst([]db.Message{msg})
 
-			rec := httptest.NewRecorder()
-			metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-			body := rec.Body.String()
-			for _, sub := range tc.wantContains {
-				if !strings.Contains(body, sub) {
-					t.Errorf("metrics body missing %q:\n%s", sub, body)
+			for tokenType, want := range tc.wantDeltas {
+				got := testutil.ToFloat64(metrics.TokensTotal.WithLabelValues(tokenType, tc.model, tc.wantChannel)) - baseline[tokenType]
+				if got != want {
+					t.Errorf("tokens_total{type=%q,model=%q,channel=%q} delta = %v, want %v", tokenType, tc.model, tc.wantChannel, got, want)
 				}
 			}
-			if tc.wantExcludes != "" && strings.Contains(body, tc.wantExcludes) {
+
+			rec := httptest.NewRecorder()
+			metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			if body := rec.Body.String(); tc.wantExcludes != "" && strings.Contains(body, tc.wantExcludes) {
 				t.Errorf("metrics body should not contain %q:\n%s", tc.wantExcludes, body)
 			}
 		})
