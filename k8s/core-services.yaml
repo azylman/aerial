@@ -602,27 +602,6 @@ spec:
               memory: 64Mi
       imagePullSecrets:
         - name: ghcr-creds
-      initContainers:
-        - command:
-            - /bin/sh
-            - -c
-            - |
-              for db in aerial infisical; do psql -h postgres -U aerial -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '$db'" | grep -q 1 || psql -h postgres -U aerial -d postgres -c "CREATE DATABASE $db;"; done && psql -h postgres -U aerial -d aerial -c "CREATE EXTENSION IF NOT EXISTS vector;"
-          env:
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
-          image: ghcr.io/cloudnative-pg/postgresql:18
-          name: init-aerial-db
-          resources:
-            limits:
-              cpu: 100m
-              memory: 128Mi
-            requests:
-              cpu: 10m
-              memory: 32Mi
       restartPolicy: OnFailure
 ---
 apiVersion: v1

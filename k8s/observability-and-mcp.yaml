@@ -642,61 +642,58 @@ spec:
     app.kubernetes.io/name: node-exporter
   type: ClusterIP
 ---
-apiVersion: v1
-data:
-  anomaly-rules.yml: |
-    groups:
-      - name: aerial_anomaly_detection
-        interval: 30s
-        rules:
-          - record: aerial_anomaly_score:host_cpu
-            expr: |
-              (
-                max(1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m]))) * 100
-                - median_over_time((max(1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m]))) * 100)[2h])
-              ) / (1.4826 * mad_over_time((max(1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m]))) * 100)[2h]) + 1.0)
-          - record: aerial_anomaly_score:postgres_deadlocks
-            expr: |
-              (
-                sum(increase(pg_stat_database_deadlocks{datname!~"template.*"}[1h]))
-                - median_over_time((sum(increase(pg_stat_database_deadlocks{datname!~"template.*"}[1h])))[6h])
-              ) / (1.4826 * mad_over_time((sum(increase(pg_stat_database_deadlocks{datname!~"template.*"}[1h])))[6h]) + 0.1)
-          - record: aerial_anomaly_score:eri_runner_errors
-            expr: |
-              (
-                sum(rate(aerial_brain_runner_errors_total[5m])) * 60
-                - median_over_time((sum(rate(aerial_brain_runner_errors_total[5m])) * 60)[2h])
-              ) / (1.4826 * mad_over_time((sum(rate(aerial_brain_runner_errors_total[5m])) * 60)[2h]) + 0.1)
-          - record: aerial_anomaly_score:zscore
-            expr: |
-              zscore_over_time(aerial_brain_runner_errors_total[2h])
-  ingestion-rules.yml: |
-    groups:
-      - name: observability_ingestion
-        interval: 1m
-        rules:
-          - alert: VictoriaLogsIngestionStalled
-            expr: |
-              sum(increase(vl_rows_ingested_total{job="victorialogs"}[15m])) == 0
-              or absent(vl_rows_ingested_total{job="victorialogs"})
-            for: 5m
-            labels:
-              severity: critical
-            annotations:
-              summary: VictoriaLogs has ingested no log rows for 15 minutes
-          - alert: VictoriaTracesIngestionStalled
-            expr: |
-              sum(increase(vt_rows_ingested_total{job="victoriatraces"}[15m])) == 0
-              or absent(vt_rows_ingested_total{job="victoriatraces"})
-            for: 5m
-            labels:
-              severity: warning
-            annotations:
-              summary: VictoriaTraces has ingested no spans for 15 minutes
-kind: ConfigMap
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
 metadata:
-  name: vmalert-rules
+  name: aerial-observability-rules
   namespace: default
+spec:
+  groups:
+    - name: aerial_anomaly_detection
+      interval: 30s
+      rules:
+        - record: aerial_anomaly_score:host_cpu
+          expr: |
+            (
+              max(1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m]))) * 100
+              - median_over_time((max(1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m]))) * 100)[2h])
+            ) / (1.4826 * mad_over_time((max(1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m]))) * 100)[2h]) + 1.0)
+        - record: aerial_anomaly_score:postgres_deadlocks
+          expr: |
+            (
+              sum(increase(pg_stat_database_deadlocks{datname!~"template.*"}[1h]))
+              - median_over_time((sum(increase(pg_stat_database_deadlocks{datname!~"template.*"}[1h])))[6h])
+            ) / (1.4826 * mad_over_time((sum(increase(pg_stat_database_deadlocks{datname!~"template.*"}[1h])))[6h]) + 0.1)
+        - record: aerial_anomaly_score:eri_runner_errors
+          expr: |
+            (
+              sum(rate(aerial_brain_runner_errors_total[5m])) * 60
+              - median_over_time((sum(rate(aerial_brain_runner_errors_total[5m])) * 60)[2h])
+            ) / (1.4826 * mad_over_time((sum(rate(aerial_brain_runner_errors_total[5m])) * 60)[2h]) + 0.1)
+        - record: aerial_anomaly_score:zscore
+          expr: |
+            zscore_over_time(aerial_brain_runner_errors_total[2h])
+    - name: observability_ingestion
+      interval: 1m
+      rules:
+        - alert: VictoriaLogsIngestionStalled
+          expr: |
+            sum(increase(vl_rows_ingested_total{job="victorialogs"}[15m])) == 0
+            or absent(vl_rows_ingested_total{job="victorialogs"})
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: VictoriaLogs has ingested no log rows for 15 minutes
+        - alert: VictoriaTracesIngestionStalled
+          expr: |
+            sum(increase(vt_rows_ingested_total{job="victoriatraces"}[15m])) == 0
+            or absent(vt_rows_ingested_total{job="victoriatraces"})
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: VictoriaTraces has ingested no spans for 15 minutes
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -745,162 +742,116 @@ subjects:
     name: victoriametrics-sa
     namespace: default
 ---
-apiVersion: v1
-data:
-  prometheus.yml: |
-    global:
-      scrape_interval: 15s
-    scrape_config_files:
-      - "/share/aerial-config/services/victoriametrics/scrape.yml"
-    scrape_configs:
-      - job_name: kubernetes-services
-        kubernetes_sd_configs:
-          - role: service
-            namespaces:
-              names:
-                - default
-        relabel_configs:
-          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
-            action: keep
-            regex: "true"
-          - source_labels: [__meta_kubernetes_service_port_number, __meta_kubernetes_service_annotation_prometheus_io_port]
-            action: keep_if_equal
-          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
-            action: replace
-            target_label: __metrics_path__
-            regex: (.+)
-          - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_service_annotation_prometheus_io_port]
-            action: replace
-            regex: (.+);(.+)
-            replacement: $1:$2
-            target_label: __address__
-          - source_labels: [__meta_kubernetes_service_name]
-            action: replace
-            target_label: job
-          - source_labels: [__meta_kubernetes_service_name]
-            action: replace
-            target_label: instance
-          - action: labelmap
-            regex: __meta_kubernetes_service_annotation_prometheus_io_label_(.+)
-      - job_name: node-exporter
-        static_configs:
-          - targets:
-              - node-exporter.default.svc.cluster.local:9100
-kind: ConfigMap
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
 metadata:
-  name: victoriametrics-scrape
+  name: kubernetes-services
   namespace: default
+spec:
+  discoveryRole: service
+  namespaceSelector:
+    matchNames:
+      - default
+  selector: {}
+  endpoints:
+    - interval: 15s
+      relabelConfigs:
+        - action: keep
+          regex: "true"
+          source_labels:
+            - __meta_kubernetes_service_annotation_prometheus_io_scrape
+        - action: keep_if_equal
+          source_labels:
+            - __meta_kubernetes_service_port_number
+            - __meta_kubernetes_service_annotation_prometheus_io_port
+        - action: replace
+          regex: (.+)
+          source_labels:
+            - __meta_kubernetes_service_annotation_prometheus_io_path
+          target_label: __metrics_path__
+        - action: replace
+          regex: (.+);(.+)
+          replacement: $1:$2
+          source_labels:
+            - __meta_kubernetes_service_name
+            - __meta_kubernetes_service_annotation_prometheus_io_port
+          target_label: __address__
+        - action: replace
+          source_labels:
+            - __meta_kubernetes_service_name
+          target_label: job
+        - action: replace
+          source_labels:
+            - __meta_kubernetes_service_name
+          target_label: instance
+        - action: labelmap
+          regex: __meta_kubernetes_service_annotation_prometheus_io_label_(.+)
 ---
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMStaticScrape
 metadata:
-  annotations:
-    reloader.stakater.com/auto: "true"
-  labels:
-    app.kubernetes.io/name: victoriametrics
+  name: node-exporter
+  namespace: default
+spec:
+  jobName: node-exporter
+  targetEndpoints:
+    - targets:
+        - node-exporter.default.svc.cluster.local:9100
+      interval: "15s"
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMStaticScrape
+metadata:
+  name: postgres-cnpg
+  namespace: default
+spec:
+  jobName: postgres-cnpg
+  targetEndpoints:
+    - targets:
+        - postgres:9187
+      interval: "15s"
+      labels:
+        instance: postgres-cnpg
+        role: database
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMSingle
+metadata:
   name: victoriametrics
   namespace: default
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
+  image:
+    repository: victoriametrics/victoria-metrics
+    tag: v1.155.0
+  port: "8428"
+  retentionPeriod: "5y"
+  removePvcAfterDelete: false
+  selectAllByDefault: true
+  serviceAccountName: victoriametrics-sa
+  podMetadata:
+    labels:
       app.kubernetes.io/name: victoriametrics
-  strategy:
-    type: Recreate
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: victoriametrics
-    spec:
-      containers:
-        - args:
-            - -httpListenAddr=:8428
-            - -storageDataPath=/victoria-metrics-data
-            - -retentionPeriod=5y
-            - -loggerFormat=json
-            - -promscrape.config=/etc/victoriametrics/prometheus.yml
-            - -promscrape.config.strictParse=false
-            - -vmalert.proxyURL=http://vmalert:8880
-          envFrom:
-            - secretRef:
-                name: victoriametrics-secret
-          image: victoriametrics/victoria-metrics:v1.155.0
-          name: victoriametrics
-          ports:
-            - containerPort: 8428
-              name: http
-              protocol: TCP
-          resources:
-            limits:
-              cpu: "1"
-              memory: 1Gi
-            requests:
-              cpu: 100m
-              memory: 256Mi
-          volumeMounts:
-            - mountPath: /victoria-metrics-data
-              name: storage
-            - mountPath: /etc/victoriametrics
-              name: victoriametrics-scrape
-            - mountPath: /share
-              name: share
-              readOnly: true
-      initContainers:
-        - args:
-            - --repo=${AERIAL_CONFIG_REPO_URL:=https://github.com/azylman/aerial-config.git}
-            - --ref=main
-            - --root=/share/.sync/aerial-config
-            - --link=/share/aerial-config
-            - --period=30s
-          env:
-            - name: GIT_CONFIG_COUNT
-              value: "1"
-            - name: GIT_CONFIG_KEY_0
-              value: safe.directory
-            - name: GIT_CONFIG_VALUE_0
-              value: '*'
-            - name: GITSYNC_USERNAME
-              value: x-access-token
-            - name: GITSYNC_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: GITHUB_PAT
-                  name: git-sync-secret
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          name: git-sync-aerial-config
-          resources:
-            limits:
-              cpu: 200m
-              memory: 256Mi
-            requests:
-              cpu: 10m
-              memory: 32Mi
-          restartPolicy: Always
-          startupProbe:
-            exec:
-              command:
-                - git
-                - -C
-                - /share/aerial-config
-                - rev-parse
-                - HEAD
-            failureThreshold: 60
-            periodSeconds: 1
-          volumeMounts:
-            - mountPath: /share
-              name: share
-      securityContext:
-        fsGroup: 65533
-      serviceAccountName: victoriametrics-sa
-      volumes:
-        - name: storage
-          persistentVolumeClaim:
-            claimName: victoriametrics-pvc
-        - configMap:
-            name: victoriametrics-scrape
-          name: victoriametrics-scrape
-        - emptyDir: {}
-          name: share
+  storageDataPath: /victoria-metrics-data
+  volumes:
+    - name: storage
+      persistentVolumeClaim:
+        claimName: victoriametrics-pvc
+  volumeMounts:
+    - name: storage
+      mountPath: /victoria-metrics-data
+  securityContext:
+    fsGroup: 65533
+  resources:
+    limits:
+      cpu: "1"
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  extraArgs:
+    loggerFormat: json
+    promscrape.config.strictParse: "false"
+    vmalert.proxyURL: http://vmalert:8880
 ---
 apiVersion: v1
 kind: Service
@@ -921,57 +872,35 @@ spec:
     app.kubernetes.io/name: victoriametrics
   type: ClusterIP
 ---
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMAlert
 metadata:
-  labels:
-    app.kubernetes.io/name: vmalert
   name: vmalert
   namespace: default
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
+  image:
+    repository: victoriametrics/vmalert
+    tag: v1.155.0
+  port: "8880"
+  evaluationInterval: "30s"
+  selectAllByDefault: true
+  podMetadata:
+    labels:
       app.kubernetes.io/name: vmalert
-  strategy:
-    rollingUpdate:
-      maxSurge: 25%
-      maxUnavailable: 25%
-    type: RollingUpdate
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: vmalert
-    spec:
-      containers:
-        - args:
-            - -rule=/etc/vmalert/rules/*.yml
-            - -datasource.url=http://victoriametrics:8428
-            - -remoteWrite.url=http://victoriametrics:8428
-            - -evaluationInterval=30s
-            - -loggerFormat=json
-            - -notifier.blackhole
-          image: victoriametrics/vmalert:v1.155.0
-          name: vmalert
-          ports:
-            - containerPort: 8880
-              name: http
-              protocol: TCP
-          resources:
-            limits:
-              cpu: 200m
-              memory: 256Mi
-            requests:
-              cpu: 25m
-              memory: 64Mi
-          volumeMounts:
-            - mountPath: /etc/vmalert/rules
-              name: rules
-      volumes:
-        - configMap:
-            defaultMode: 420
-            name: vmalert-rules
-          name: rules
+  datasource:
+    url: "http://victoriametrics:8428"
+  remoteWrite:
+    url: "http://victoriametrics:8428"
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 25m
+      memory: 64Mi
+  extraArgs:
+    loggerFormat: json
+    notifier.blackhole: "true"
 ---
 apiVersion: v1
 kind: Service
@@ -1294,25 +1223,6 @@ spec:
               name: share
               readOnly: true
       initContainers:
-        - command:
-            - /bin/sh
-            - -c
-            - psql -h postgres -U aerial -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'grafana'" | grep -q 1 || psql -h postgres -U aerial -d postgres -c "CREATE DATABASE grafana;"
-          env:
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
-          image: ghcr.io/cloudnative-pg/postgresql:18
-          name: init-grafana-db
-          resources:
-            limits:
-              cpu: 100m
-              memory: 128Mi
-            requests:
-              cpu: 10m
-              memory: 32Mi
         - args:
             - --repo=${AERIAL_REPO_URL:=https://github.com/azylman/aerial.git}
             - --ref=main
@@ -2441,27 +2351,6 @@ spec:
       labels:
         app.kubernetes.io/name: docket-store
     spec:
-      initContainers:
-        - command:
-            - /bin/sh
-            - -c
-            - |
-              psql -h postgres -U aerial -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'docket'" | grep -q 1 || psql -h postgres -U aerial -d postgres -c "CREATE DATABASE docket;" && psql -h postgres -U aerial -d docket -c "CREATE EXTENSION IF NOT EXISTS vector;"
-          env:
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: POSTGRES_PASSWORD
-                  name: postgres-secret
-          image: ghcr.io/cloudnative-pg/postgresql:18
-          name: init-docket-db
-          resources:
-            limits:
-              cpu: 100m
-              memory: 128Mi
-            requests:
-              cpu: 10m
-              memory: 32Mi
       containers:
         - env:
             - name: VIKUNJA_SERVICE_PUBLICURL
