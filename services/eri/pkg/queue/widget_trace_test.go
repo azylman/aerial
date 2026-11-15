@@ -4,9 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -279,20 +276,10 @@ func TestWorkerPool_EnsureChunkWidgetHydratedSpans(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			bodies := make(chan string, 1)
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				b, _ := io.ReadAll(r.Body)
-				bodies <- r.URL.Path + " " + string(b)
-			}))
-			t.Cleanup(srv.Close)
 			p, rec, ctx := newWidgetTracePool(t, tc.traced)
-			p.cfg.SynapseURL = srv.URL
 
 			p.ensureChunkWidgetHydrated(ctx, "Build ID: b1", "c1", "b1")
 
-			if got, want := <-bodies, `/internal/widget/sync {"build_id":"b1"}`; got != want {
-				t.Errorf("sync request = %q, want %q", got, want)
-			}
 			names, _ := endedWidgetSpans(ctx, t, rec)
 			if fmt.Sprint(names) != fmt.Sprint(tc.wantSpans) {
 				t.Errorf("spans = %v, want %v", names, tc.wantSpans)

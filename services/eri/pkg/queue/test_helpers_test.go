@@ -10,8 +10,6 @@ import (
 	"image"
 	"image/png"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -25,6 +23,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -75,33 +74,56 @@ func getPreviousSessionID(store db.Store, threadID string) (string, error) {
 	return store.GetPreviousSessionID(context.Background(), threadID)
 }
 
-func newMockHaroOneShotServer(t testing.TB) (*httptest.Server, func(threadID string) []oneShotScheduleRequest) {
+func newMockHaroOneShotBus(t testing.TB) (pubsub.Bus, func(threadID string) []oneShotScheduleRequest) {
 	t.Helper()
 	var mu sync.Mutex
 	var requests []oneShotScheduleRequest
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && (r.URL.Path == "/schedules/oneshot" || strings.HasSuffix(r.URL.Path, "/schedules/oneshot")) {
-			var req oneShotScheduleRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			mu.Lock()
-			requests = append(requests, req)
-			mu.Unlock()
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"status":"ok","id":"` + req.ID + `"}`))
-			return
+	memBus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = memBus.Close() })
+
+	ctx := context.Background()
+	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
+		t.Fatalf("EnsureCoreStreams: %v", err)
+	}
+
+	cond := sync.NewCond(&mu)
+
+	_, err := memBus.Subscribe(ctx, "aerial.jobs.haro.oneshot", "test-oneshot-mock-sub", func(_ context.Context, msg pubsub.Message) error {
+		var args pubsub.HaroOneShotJobArgs
+		if err := json.Unmarshal(msg.Data(), &args); err != nil {
+			return err
 		}
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(func() { srv.Close() })
+		mu.Lock()
+		requests = append(requests, oneShotScheduleRequest{
+			ID:       args.ID,
+			ThreadID: args.ThreadID,
+			Prompt:   args.Prompt,
+			Effort:   args.Effort,
+			RunAt:    args.RunAt,
+		})
+		cond.Broadcast()
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 
 	getter := func(threadID string) []oneShotScheduleRequest {
 		mu.Lock()
 		defer mu.Unlock()
+		for len(requests) == 0 {
+			// Wait with a goroutine-backed timeout broadcast so cond.Wait does not block forever
+			timeout := time.AfterFunc(500*time.Millisecond, func() {
+				mu.Lock()
+				cond.Broadcast()
+				mu.Unlock()
+			})
+			cond.Wait()
+			timeout.Stop()
+			break
+		}
 		var res []oneShotScheduleRequest
 		for _, req := range requests {
 			if threadID == "" || req.ThreadID == threadID {
@@ -110,7 +132,7 @@ func newMockHaroOneShotServer(t testing.TB) (*httptest.Server, func(threadID str
 		}
 		return res
 	}
-	return srv, getter
+	return memBus, getter
 }
 
 func getSessionTurnCount(store db.Store, sessionKey string) (int, error) {

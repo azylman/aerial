@@ -98,12 +98,7 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	te.executeWithRetries()
 }
 
-var (
-	vanadisChunkIDPromptRegex     = regexp.MustCompile(`(?m)^Chunk ID:\s*(\S+)`)
-	vanadisBuildIDPromptRegex     = regexp.MustCompile(`(?m)^Build ID:\s*(\S+)`)
-	vanadisActiveChunkHeaderRegex = regexp.MustCompile(`(?i)===\s*Active Chunk\s*\(Chunk\s+(\d+)\s+of\s+\d+\)\s*===`)
-	standalonePRRemediationRegex  = regexp.MustCompile(`PR #(\d+)\s+on\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:on|for repo)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+\((?:commit: [^,]+,\s*)?PR #(\d+)`)
-)
+var standalonePRRemediationRegex = regexp.MustCompile(`PR #(\d+)\s+on\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:on|for repo)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+\((?:commit: [^,]+,\s*)?PR #(\d+)`)
 
 func extractPRRemediationTarget(prompt string) (repo string, prNum int, ok bool) {
 	m := standalonePRRemediationRegex.FindStringSubmatch(prompt)
@@ -116,16 +111,6 @@ func extractPRRemediationTarget(prompt string) (repo string, prNum int, ok bool)
 	}
 	prNum, err := strconv.Atoi(prNumStr)
 	return repo, prNum, err == nil && prNum > 0
-}
-
-func extractDispatchWidgetSyncPayload(prompt, buildID string) (string, bool) {
-	if repo, prNum, ok := extractPRRemediationTarget(prompt); ok {
-		return fmt.Sprintf(`{"repo":%q,"pr_number":%d}`, repo, prNum), true
-	}
-	if buildID != "" && !strings.HasPrefix(buildID, "pr-") {
-		return fmt.Sprintf(`{"build_id":%q}`, buildID), true
-	}
-	return "", false
 }
 
 func extractVanadisDispatchInfo(d *db.Dispatch) (chunkID, buildID string, chunkIdx int) {
@@ -146,22 +131,25 @@ func extractVanadisDispatchInfo(d *db.Dispatch) (chunkID, buildID string, chunkI
 			chunkID = strings.TrimSpace(after)
 		}
 	}
-	if chunkID == "" {
-		if m := vanadisChunkIDPromptRegex.FindStringSubmatch(d.Prompt); len(m) >= 2 {
-			chunkID = strings.TrimSpace(m[1])
-		}
-	}
-	if m := vanadisBuildIDPromptRegex.FindStringSubmatch(d.Prompt); len(m) >= 2 {
-		buildID = strings.TrimSpace(m[1])
-	}
-	if m := vanadisActiveChunkHeaderRegex.FindStringSubmatch(d.Prompt); len(m) >= 2 {
-		if idx, err := strconv.Atoi(m[1]); err == nil && idx >= 1 {
-			chunkIdx = idx - 1
-		}
-	}
-	if buildID == "" && strings.HasPrefix(chunkID, "build-") {
+	if strings.HasPrefix(chunkID, "build-") {
 		if idx := strings.LastIndex(chunkID, "-chunk-"); idx > 0 {
 			buildID = chunkID[:idx]
+		}
+	}
+	if buildID == "" {
+		if after, ok := strings.CutPrefix(d.SessionID, "vanadis-"); ok {
+			if idx := strings.LastIndex(after, "-chunk-"); idx > 0 {
+				buildID = after[:idx]
+			}
+		}
+	}
+	if buildID == "" {
+		if t := runner.NormalizeEnvTargetID(d.TargetID); strings.HasPrefix(t, "build-") {
+			if idx := strings.LastIndex(t, "-chunk-"); idx > 0 {
+				buildID = t[:idx]
+			} else {
+				buildID = t
+			}
 		}
 	}
 	if chunkID == "" {
