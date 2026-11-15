@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +14,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 )
 
@@ -95,23 +93,6 @@ func (p *WorkerPool) hasWarmChunkWidget(chunkID string) bool {
 	return false
 }
 
-func (p *WorkerPool) resolveSynapseURL() string {
-	if p == nil {
-		return ""
-	}
-	if u := strings.TrimSpace(p.cfg.SynapseURL); u != "" {
-		return strings.TrimRight(u, "/")
-	}
-	if p.appCfg != nil {
-		if cur := p.appCfg.Current(); cur != nil {
-			if u := strings.TrimSpace(cur.SynapseURL); u != "" {
-				return strings.TrimRight(u, "/")
-			}
-		}
-	}
-	return ""
-}
-
 func publishCoalescedWidgetSync(ctx context.Context, bus pubsub.Bus, prompt, buildID string) bool {
 	if bus == nil {
 		return false
@@ -143,27 +124,9 @@ func (p *WorkerPool) ensureChunkWidgetHydrated(ctx context.Context, prompt, chun
 	ctx, span := p.startWidgetSpan(ctx, spanWidgetHydrate)
 	defer span.End()
 
-	if p != nil && publishCoalescedWidgetSync(ctx, p.eventBus, prompt, buildID) {
-		return
+	if p != nil {
+		publishCoalescedWidgetSync(ctx, p.eventBus, prompt, buildID)
 	}
-	routerURL := p.resolveSynapseURL()
-	bodyJSON, ok := extractDispatchWidgetSyncPayload(prompt, buildID)
-	if routerURL == "" || !ok {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, routerURL+"/internal/widget/sync", strings.NewReader(bodyJSON))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := tracing.Client(http.DefaultClient).Do(req)
-	if err != nil {
-		log.Printf("[WorkerPool] Warning syncing cold widget cache for chunk %s: %v", chunkID, err)
-		return
-	}
-	_ = resp.Body.Close()
 }
 
 func (p *WorkerPool) ensureWidgetMapsLocked() {

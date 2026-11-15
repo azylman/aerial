@@ -204,12 +204,12 @@ func TestCancelDispatches(t *testing.T) {
 			wantRemainingIDs: []string{"disp-other", "msg-1"},
 		},
 		{
-			name:    "drain queued dispatch by build_id in prompt",
+			name:    "drain queued dispatch by build_id",
 			buildID: "b-build-42",
 			fixture: cancelDispatchFixture{
 				queuedDispatches: []*db.Dispatch{
-					{ID: "disp-b42-1", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: b-build-42\nChunk 1"},
-					{ID: "disp-other", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: b-build-99\nChunk 1"},
+					{ID: "disp-b42-1", TargetID: "b-build-42", Prompt: "Chunk 1"},
+					{ID: "disp-other", TargetID: "b-build-99", Prompt: "Chunk 1"},
 				},
 			},
 			wantCancelledIDs: []string{"disp-b42-1"},

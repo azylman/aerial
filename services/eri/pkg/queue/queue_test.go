@@ -1088,11 +1088,11 @@ func runProcessBurstQuotaPauseCase(t *testing.T, tc processBurstQuotaPauseCase) 
 	var deliveredTexts []string
 	var mu sync.Mutex
 	doneCh := make(chan struct{}, len(tc.messages))
-	haroSrv, getOneShots := newMockHaroOneShotServer(t)
+	haroBus, getOneShots := newMockHaroOneShotBus(t)
 
 	cfg := WorkerPoolConfig{
 		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
-		HaroURL: haroSrv.URL,
+		EventBus: haroBus,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			runnerCalls++

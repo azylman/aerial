@@ -839,71 +839,20 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 		wantChunkID string
 		wantBuildID string
 		wantIdx     int
-		wantPayload string
-		wantSyncOK  bool
 	}{
 		{
-			name:        "vanadis session ID with build and active chunk header",
-			dispatch:    db.Dispatch{SessionID: "vanadis-chunk-42", Prompt: "Build ID: build-99\n=== Active Chunk (Chunk 2 of 3) ===\nChunk ID: chunk-42"},
+			name:        "vanadis session ID with chunk suffix",
+			dispatch:    db.Dispatch{SessionID: "vanadis-chunk-42"},
 			wantChunkID: "chunk-42",
+			wantBuildID: "",
+			wantIdx:     -1,
+		},
+		{
+			name:        "vanadis session ID with build and chunk suffix",
+			dispatch:    db.Dispatch{SessionID: "vanadis-build-99-chunk-42"},
+			wantChunkID: "build-99-chunk-42",
 			wantBuildID: "build-99",
-			wantIdx:     1,
-			wantPayload: `{"build_id":"build-99"}`,
-			wantSyncOK:  true,
-		},
-		{
-			name:        "vanadis chunk ID from prompt when session ID is thread",
-			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "CI failure\nBuild ID: build-77\nChunk ID: chunk-7"},
-			wantChunkID: "chunk-7",
-			wantBuildID: "build-77",
 			wantIdx:     -1,
-			wantPayload: `{"build_id":"build-77"}`,
-			wantSyncOK:  true,
-		},
-		{
-			name:        "vanadis chunk PR CI failure infers build ID and extracts PR sync payload",
-			dispatch:    db.Dispatch{SessionID: "vanadis-build-123-chunk-3", Prompt: "❌ **GitHub Check Failed (`build`)** on azylman/mirrormere (commit: abc1234, PR #733, branch: `feat/test`).\n\nChunk ID: build-123-chunk-3"},
-			wantChunkID: "build-123-chunk-3",
-			wantBuildID: "build-123",
-			wantIdx:     -1,
-			wantPayload: `{"repo":"azylman/mirrormere","pr_number":733}`,
-			wantSyncOK:  true,
-		},
-		{
-			name:        "standalone PR CI failure remediation prompt",
-			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "❌ **GitHub Check Failed (`lint`)** on azylman/aerial (commit: abc1234, PR #1250, branch: `feat/test`)."},
-			wantChunkID: "pr-azylman/aerial-1250",
-			wantBuildID: "pr-azylman/aerial-1250",
-			wantIdx:     0,
-			wantPayload: `{"repo":"azylman/aerial","pr_number":1250}`,
-			wantSyncOK:  true,
-		},
-		{
-			name:        "standalone PR merge conflict remediation prompt",
-			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "⚠️ **Merge Conflict Detected** on PR #1250 on azylman/aerial (branch: `feat/test`)."},
-			wantChunkID: "pr-azylman/aerial-1250",
-			wantBuildID: "pr-azylman/aerial-1250",
-			wantIdx:     0,
-			wantPayload: `{"repo":"azylman/aerial","pr_number":1250}`,
-			wantSyncOK:  true,
-		},
-		{
-			name:        "standalone PR Nomad deployment failure remediation prompt",
-			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "🚨 **Nomad Deployment Failure (`eri`)** on azylman/aerial (PR #1250, branch: `main`)."},
-			wantChunkID: "pr-azylman/aerial-1250",
-			wantBuildID: "pr-azylman/aerial-1250",
-			wantIdx:     0,
-			wantPayload: `{"repo":"azylman/aerial","pr_number":1250}`,
-			wantSyncOK:  true,
-		},
-		{
-			name:        "standalone PR Hangar sync failure remediation prompt",
-			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "🚨 **Hangar GitOps Sync Failure** for repo azylman/aerial (PR #1250, branch: `main`)."},
-			wantChunkID: "pr-azylman/aerial-1250",
-			wantBuildID: "pr-azylman/aerial-1250",
-			wantIdx:     0,
-			wantPayload: `{"repo":"azylman/aerial","pr_number":1250}`,
-			wantSyncOK:  true,
 		},
 		{
 			name:        "structured vanadis_chunk_id populated directly",
@@ -911,8 +860,6 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantChunkID: "build-200-chunk-1",
 			wantBuildID: "build-200",
 			wantIdx:     -1,
-			wantPayload: `{"build_id":"build-200"}`,
-			wantSyncOK:  true,
 		},
 		{
 			name:        "structured target_id with build prefix fallback",
@@ -920,8 +867,20 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantChunkID: "build-300-chunk-2",
 			wantBuildID: "build-300",
 			wantIdx:     -1,
-			wantPayload: `{"build_id":"build-300"}`,
-			wantSyncOK:  true,
+		},
+		{
+			name:        "structured target_id build-only and chunk ID",
+			dispatch:    db.Dispatch{TargetID: "build-400", VanadisChunkID: "chunk-4"},
+			wantChunkID: "chunk-4",
+			wantBuildID: "build-400",
+			wantIdx:     -1,
+		},
+		{
+			name:        "standalone PR CI failure remediation prompt",
+			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "❌ **GitHub Check Failed (`lint`)** on azylman/aerial (commit: abc1234, PR #1250, branch: `feat/test`)."},
+			wantChunkID: "pr-azylman/aerial-1250",
+			wantBuildID: "pr-azylman/aerial-1250",
+			wantIdx:     0,
 		},
 		{
 			name:        "unrelated dispatch returns empty",
@@ -929,8 +888,6 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantChunkID: "",
 			wantBuildID: "",
 			wantIdx:     -1,
-			wantPayload: "",
-			wantSyncOK:  false,
 		},
 	}
 
@@ -945,11 +902,6 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			if chunkID != tc.wantChunkID || buildID != tc.wantBuildID || idx != tc.wantIdx {
 				t.Fatalf("extractVanadisDispatchInfo() = (%q, %q, %d), want (%q, %q, %d)",
 					chunkID, buildID, idx, tc.wantChunkID, tc.wantBuildID, tc.wantIdx)
-			}
-			payload, ok := extractDispatchWidgetSyncPayload(tc.dispatch.Prompt, buildID)
-			if ok != tc.wantSyncOK || payload != tc.wantPayload {
-				t.Fatalf("extractDispatchWidgetSyncPayload() = (%q, %v), want (%q, %v)",
-					payload, ok, tc.wantPayload, tc.wantSyncOK)
 			}
 		})
 	}

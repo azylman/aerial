@@ -96,7 +96,7 @@ type WorkerPoolConfig struct {
 	Pools                                                                        map[PoolKey]runner.AgentPool
 	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool runner.AgentPool
 	Classifier                                                                   *classifier.Classifier
-	HaroURL, SynapseURL, NATSURL                                                 string
+	NATSURL                                                                      string
 	EventBus                                                                     pubsub.Bus
 
 	// Optional hooks for testing/custom overrides
@@ -1025,10 +1025,17 @@ func matchesDispatchTarget(d *db.Dispatch, dispatchID, buildID string) bool {
 	if dispatchID != "" && d.ID == dispatchID {
 		return true
 	}
-	if buildID != "" && (strings.Contains(d.Prompt, "Build ID: "+buildID+"\n") ||
-		strings.HasPrefix(d.SessionID, "vanadis-"+buildID+"-chunk-") ||
-		strings.Contains(d.Prompt, "Chunk ID: "+buildID+"-chunk-")) {
-		return true
+	if buildID != "" {
+		if strings.TrimSpace(d.TargetID) == buildID {
+			return true
+		}
+		if strings.HasPrefix(strings.TrimSpace(d.VanadisChunkID), buildID+"-chunk-") {
+			return true
+		}
+		_, bID, _ := extractVanadisDispatchInfo(d)
+		if bID == buildID {
+			return true
+		}
 	}
 	return false
 }

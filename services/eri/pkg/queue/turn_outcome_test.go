@@ -42,10 +42,10 @@ func runCapacityBlipCase(t *testing.T, tt capacityBlipCase) {
 	var deliveredText string
 	doneCh := make(chan struct{}, 1)
 	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "thread"}}})
-	haroSrv, getOneShots := newMockHaroOneShotServer(t)
+	haroBus, getOneShots := newMockHaroOneShotBus(t)
 	pool := New(appCfg, WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, tmpDir), Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
-		RetryDelayOverride: 10 * time.Millisecond, MaxAttempts: tt.maxAttempts, HaroURL: haroSrv.URL,
+		RetryDelayOverride: 10 * time.Millisecond, MaxAttempts: tt.maxAttempts, EventBus: haroBus,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			attemptCount++
@@ -480,11 +480,11 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 
 			cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
 			doneCh := make(chan struct{})
-			haroSrv, getOneShots := newMockHaroOneShotServer(t)
+			haroBus, getOneShots := newMockHaroOneShotBus(t)
 			pool := New(cfg, WorkerPoolConfig{
 				ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
 				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1, MaxAttempts: 1,
-				HaroURL: haroSrv.URL,
+				EventBus: haroBus,
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == db.StatusFailed {
 						select {
