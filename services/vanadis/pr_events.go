@@ -132,7 +132,10 @@ func (s *VanadisServer) publishExternalEvent(ctx context.Context, source, eventT
 	if s == nil || s.bus == nil {
 		return
 	}
-	evID := fmt.Sprintf("%s-%s-%d", source, eventType, time.Now().UnixNano())
+	evID := fmt.Sprintf("%s-%s-%s", source, eventType, strings.Join(targets, "-"))
+	if contextHeader != "" {
+		evID = fmt.Sprintf("%s-%s", evID, contextHeader)
+	}
 	payload := pubsub.ExternalEvent{
 		EventID:       evID,
 		Source:        source,
@@ -359,17 +362,28 @@ func (s *VanadisServer) handlePRRolloutUpdated(ctx context.Context, ev pubsub.PR
 }
 
 func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
+	if chunk.Status == "failed" || chunk.Status == "completed" || chunk.Status == "merged" {
+		return nil
+	}
+	if build.Status == "failed" || build.Status == "completed" || build.Status == "cancelled" {
+		return nil
+	}
+	if isGateAggregatorCheck(ev.CheckName) {
+		return nil
+	}
+
 	banner := fmt.Sprintf("CI check %q failed", ev.CheckName)
 	failCount, err := s.store.IncrementChunkCIFailCount(ctx, chunk.ID, banner)
 	if err != nil {
 		log.Printf("[vanadis] warning incrementing ci fail count for %s: %v", chunk.ID, err)
+		return err
 	}
 	s.syncBuildWidget(ctx, build.ID, banner)
 
 	if failCount <= maxCIRemediationAttempts {
 		details := s.resolveCIFailureDetails(ctx, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
 		prompt := s.formatCIFailurePrompt(ev, details)
-		return s.dispatchBrainDispatch(ctx, BrainDispatchRequest{
+		if err := s.dispatchBrainDispatch(ctx, BrainDispatchRequest{
 			ID:             fmt.Sprintf("vanadis-%s-cifail-%d", chunk.ID, failCount),
 			Source:         "vanadis",
 			SessionID:      "vanadis-" + chunk.ID,
@@ -378,26 +392,33 @@ func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecy
 			Prompt:         prompt,
 			Effort:         capChunkEffort(chunk.Effort),
 			SkipIfActive:   true,
-		})
+		}); err != nil {
+			log.Printf("[vanadis] warning dispatching ci remediation for %s: %v", chunk.ID, err)
+		}
+		return nil
 	}
 
-	if _, _, _, err := s.store.FailChunk(ctx, chunk.ID, "ci_remediation_cap_reached"); err != nil {
-		log.Printf("[vanadis] warning failing chunk %s on cap reached: %v", chunk.ID, err)
-	}
-	capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts)
-	if err := s.store.UpdateChunkBannerAndStatus(ctx, chunk.ID, "failed", capBanner); err != nil {
-		log.Printf("[vanadis] warning updating banner for chunk %s on cap reached: %v", chunk.ID, err)
-	}
-	s.syncBuildWidget(ctx, build.ID, capBanner)
+	if failCount == maxCIRemediationAttempts+1 {
+		if _, _, _, err := s.store.FailChunk(ctx, chunk.ID, "ci_remediation_cap_reached"); err != nil {
+			log.Printf("[vanadis] warning failing chunk %s on cap reached: %v", chunk.ID, err)
+		}
+		capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts)
+		if err := s.store.UpdateChunkBannerAndStatus(ctx, chunk.ID, "failed", capBanner); err != nil {
+			log.Printf("[vanadis] warning updating banner for chunk %s on cap reached: %v", chunk.ID, err)
+		}
+		s.syncBuildWidget(ctx, build.ID, capBanner)
 
-	alertMsg := fmt.Sprintf("🛑 [%s#%d] CI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", ev.Repo, ev.PRNumber, ev.CheckName, failCount, maxCIRemediationAttempts, maxCIRemediationAttempts)
-	if err := s.dispatchDirectMessage(ctx, build.ThreadID, alertMsg); err != nil {
-		log.Printf("[vanadis] warning sending cap direct message to thread %s: %v", build.ThreadID, err)
-	}
+		alertMsg := fmt.Sprintf("🛑 [%s#%d] CI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", ev.Repo, ev.PRNumber, ev.CheckName, failCount, maxCIRemediationAttempts, maxCIRemediationAttempts)
+		if err := s.dispatchDirectMessage(ctx, build.ThreadID, alertMsg); err != nil {
+			log.Printf("[vanadis] warning sending cap direct message to thread %s: %v", build.ThreadID, err)
+		}
 
-	s.notifyRestateChunkFailed(ctx, chunk.ID)
-	s.publishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunk.ID}, "ci_remediation_cap_reached")
-	s.publishExternalEvent(ctx, "vanadis_build", "failed", []string{build.ID}, "ci_remediation_cap_reached")
+		s.notifyRestateChunkFailed(ctx, chunk.ID)
+		if chunk.MergeAwakeableID == "" && chunk.DeployAwakeableID == "" {
+			s.publishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunk.ID}, "ci_remediation_cap_reached")
+			s.publishExternalEvent(ctx, "vanadis_build", "failed", []string{build.ID}, "ci_remediation_cap_reached")
+		}
+	}
 	return nil
 }
 
@@ -459,8 +480,8 @@ func (s *VanadisServer) handlePRMerged(ctx context.Context, ev pubsub.PRLifecycl
 		s.syncBuildWidget(ctx, build.ID, "")
 	} else {
 		s.advanceLegacyChunkByPR(ctx, ev.Repo, ev.PRNumber)
+		s.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunk.ID}, "")
 	}
-	s.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunk.ID}, "")
 	return nil
 }
 
@@ -509,8 +530,8 @@ func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *Vanadi
 		if err := s.completeBuildIfAllChunksFinished(ctx, build.ID); err != nil {
 			log.Printf("[vanadis] warning completing build %s: %v", build.ID, err)
 		}
+		s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunk.ID}, "")
 	}
-	s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunk.ID}, "")
 	return nil
 }
 

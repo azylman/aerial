@@ -353,16 +353,18 @@ func executeCompleteWorkflowBuild(ctx context.Context, srv *VanadisServer, build
 	}
 	b, chs, err := srv.store.GetBuild(ctx, buildID)
 	if err == nil {
-		srv.publishExternalEvent(ctx, "vanadis_build", "completed", []string{buildID}, "")
-		if !alreadyCompleted && !b.Quiet {
-			res := &VanadisAdvancementResult{
-				BuildID:   b.ID,
-				ThreadID:  b.ThreadID,
-				Objective: b.Objective,
-				Tier:      b.Tier,
-				Chunks:    chunksToSummaries(chs),
+		if !alreadyCompleted {
+			srv.publishExternalEvent(ctx, "vanadis_build", "completed", []string{buildID}, "")
+			if !b.Quiet {
+				res := &VanadisAdvancementResult{
+					BuildID:   b.ID,
+					ThreadID:  b.ThreadID,
+					Objective: b.Objective,
+					Tier:      b.Tier,
+					Chunks:    chunksToSummaries(chs),
+				}
+				srv.dispatchCompletedBuildWake(ctx, res)
 			}
-			srv.dispatchCompletedBuildWake(ctx, res)
 		}
 		srv.syncBuildWidget(ctx, buildID, "Build completed successfully")
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -22,7 +23,31 @@ type recordedRequest struct {
 	Raw  []byte
 }
 
-func setupTestServer(t *testing.T) (*VanadisServer, *memoryVanadisStore, *pubsub.MemoryBus, *[]recordedRequest) {
+type eventRecordingBus struct {
+	pubsub.Bus
+
+	mu     sync.Mutex
+	events []pubsub.ExternalEvent
+}
+
+func (b *eventRecordingBus) Publish(ctx context.Context, subject, msgID string, data any) error {
+	if strings.HasPrefix(subject, "aerial.events.") {
+		if ev, ok := data.(pubsub.ExternalEvent); ok {
+			b.mu.Lock()
+			b.events = append(b.events, ev)
+			b.mu.Unlock()
+		}
+	}
+	return b.Bus.Publish(ctx, subject, msgID, data)
+}
+
+func (b *eventRecordingBus) getEvents() []pubsub.ExternalEvent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]pubsub.ExternalEvent(nil), b.events...)
+}
+
+func setupTestServer(t *testing.T) (*VanadisServer, *memoryVanadisStore, *eventRecordingBus, *[]recordedRequest) {
 	t.Helper()
 	var reqs []recordedRequest
 	var mu sync.Mutex
@@ -39,8 +64,9 @@ func setupTestServer(t *testing.T) (*VanadisServer, *memoryVanadisStore, *pubsub
 	t.Cleanup(ts.Close)
 
 	store := newMemoryVanadisStore()
-	bus := pubsub.NewMemoryBus()
-	t.Cleanup(func() { _ = bus.Close() })
+	memBus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = memBus.Close() })
+	recBus := &eventRecordingBus{Bus: memBus}
 
 	srv := NewVanadisServer(Config{
 		BrainURL:     ts.URL,
@@ -48,9 +74,9 @@ func setupTestServer(t *testing.T) (*VanadisServer, *memoryVanadisStore, *pubsub
 		GitHubAPIURL: ts.URL,
 	}, store, ts.Client())
 	srv.restateCfg.RestateIngressURL = ts.URL
-	srv.SetBus(bus)
+	srv.SetBus(recBus)
 
-	return srv, store, bus, &reqs
+	return srv, store, recBus, &reqs
 }
 
 func TestHandlePRLifecycleEvent_Validation(t *testing.T) {
@@ -254,13 +280,13 @@ func TestHandlePRRolloutUpdated(t *testing.T) {
 	assert.Equal(t, []string{"eri"}, updatedChunk.RolloutState.ExpectedJobs)
 }
 
-func TestHandlePRCIFailed(t *testing.T) {
+func TestHandlePRCIFailed_Remediation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("attempt <= 3 dispatches brain remediation", func(t *testing.T) {
 		t.Parallel()
-		srv, store, _, reqs := setupTestServer(t)
+		srv, store, recBus, reqs := setupTestServer(t)
 		build := mkBuild("b-ci1", "123456789012345678", "Build", "Obj", "running")
 		chunk := mkChunk("c-ci1", "b-ci1", 0, "Chunk", "Instr", "medium", "pr_opened")
 		chunk.PRNumber = 601
@@ -296,11 +322,12 @@ func TestHandlePRCIFailed(t *testing.T) {
 			}
 		}
 		assert.True(t, foundDispatch, "expected POST /dispatch to be called")
+		assert.Empty(t, recBus.getEvents(), "no external events expected on non-terminal remediation")
 	})
 
 	t.Run("attempt > 3 triggers remediation cap failure and alerts", func(t *testing.T) {
 		t.Parallel()
-		srv, store, _, reqs := setupTestServer(t)
+		srv, store, recBus, reqs := setupTestServer(t)
 		build := mkBuild("b-ci4", "123456789012345678", "Build", "Obj", "running")
 		chunk := mkChunk("c-ci4", "b-ci4", 0, "Chunk", "Instr", "medium", "pr_opened")
 		chunk.PRNumber = 604
@@ -336,7 +363,104 @@ func TestHandlePRCIFailed(t *testing.T) {
 		}
 		assert.True(t, foundDirectMessage, "expected POST /discord/message")
 		assert.True(t, foundAwakeableReject, "expected awakeable to be failed in restate")
+		assert.Empty(t, recBus.getEvents(), "awakeable path must not publish external events from handler")
 	})
+
+	t.Run("attempt > 3 triggers remediation cap failure for non-awakeable chunks and publishes external events", func(t *testing.T) {
+		t.Parallel()
+		srv, store, recBus, _ := setupTestServer(t)
+		build := mkBuild("b-ci4-legacy", "123456789012345678", "Build", "Obj", "running")
+		chunk := mkChunk("c-ci4-legacy", "b-ci4-legacy", 0, "Chunk", "Instr", "medium", "pr_opened")
+		chunk.PRNumber = 605
+		chunk.Repo = "azylman/aerial"
+		chunk.CIFailCount = 3
+		require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
+
+		ev := pubsub.PRLifecycleEvent{
+			Event:     "ci_failed",
+			Repo:      "azylman/aerial",
+			PRNumber:  605,
+			CheckName: "Go Unit Tests",
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
+
+		updatedChunk, updatedBuild, err := store.GetChunk(ctx, "c-ci4-legacy")
+		require.NoError(t, err)
+		assert.Equal(t, 4, updatedChunk.CIFailCount)
+		assert.Equal(t, "failed", updatedChunk.Status)
+		assert.Equal(t, "failed", updatedBuild.Status)
+
+		events := recBus.getEvents()
+		var chunkFailed, buildFailed bool
+		for _, ev := range events {
+			if ev.Source == "vanadis_chunk" && ev.EventType == "failed" {
+				chunkFailed = true
+				assert.Equal(t, []string{"c-ci4-legacy"}, ev.Targets)
+			}
+			if ev.Source == "vanadis_build" && ev.EventType == "failed" {
+				buildFailed = true
+				assert.Equal(t, []string{"b-ci4-legacy"}, ev.Targets)
+			}
+		}
+		assert.True(t, chunkFailed, "expected vanadis_chunk.failed external event")
+		assert.True(t, buildFailed, "expected vanadis_build.failed external event")
+	})
+}
+
+func TestHandlePRCIFailed_SkipConditions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		buildStatus string
+		chunkStatus string
+		checkName   string
+		startCount  int
+	}{
+		{
+			name:        "skips gate aggregator check",
+			buildStatus: "running",
+			chunkStatus: "pr_opened",
+			checkName:   "CI Gate",
+			startCount:  0,
+		},
+		{
+			name:        "skips when chunk is already terminal",
+			buildStatus: "failed",
+			chunkStatus: "failed",
+			checkName:   "Go Unit Tests",
+			startCount:  4,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv, store, recBus, reqs := setupTestServer(t)
+			build := mkBuild("b-skip-"+tc.name, "123456789012345678", "Build", "Obj", tc.buildStatus)
+			chunk := mkChunk("c-skip-"+tc.name, build.ID, 0, "Chunk", "Instr", "medium", tc.chunkStatus)
+			chunk.PRNumber = 699
+			chunk.Repo = "azylman/aerial"
+			chunk.CIFailCount = tc.startCount
+			require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
+
+			ev := pubsub.PRLifecycleEvent{
+				Event:     "ci_failed",
+				Repo:      "azylman/aerial",
+				PRNumber:  699,
+				CheckName: tc.checkName,
+			}
+			require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
+
+			updatedChunk, _, err := store.GetChunk(ctx, chunk.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.startCount, updatedChunk.CIFailCount)
+			assert.Equal(t, tc.chunkStatus, updatedChunk.Status)
+			assert.Empty(t, recBus.getEvents())
+			assert.Empty(t, *reqs)
+		})
+	}
 }
 
 func TestHandlePRConflict_DeployFailed_SyncFailed(t *testing.T) {
@@ -450,7 +574,7 @@ func TestHandlePRMerged(t *testing.T) {
 
 	t.Run("resolves merge_awakeable_id when present", func(t *testing.T) {
 		t.Parallel()
-		srv, store, _, reqs := setupTestServer(t)
+		srv, store, recBus, reqs := setupTestServer(t)
 		build := mkBuild("b-m1", "123456789012345678", "Build", "Obj", "running")
 		chunk := mkChunk("c-m1", "b-m1", 0, "Chunk", "Instr", "medium", "pr_opened")
 		chunk.PRNumber = 801
@@ -476,11 +600,12 @@ func TestHandlePRMerged(t *testing.T) {
 			}
 		}
 		assert.True(t, foundAwkResolve)
+		assert.Empty(t, recBus.getEvents(), "awakeable path must not publish duplicate external events")
 	})
 
 	t.Run("advances chunk by PR for pre-Restate builds", func(t *testing.T) {
 		t.Parallel()
-		srv, store, _, _ := setupTestServer(t)
+		srv, store, recBus, _ := setupTestServer(t)
 		build := mkBuild("b-m2", "123456789012345678", "Build", "Obj", "running")
 		chunk1 := mkChunk("c-m2-1", "b-m2", 0, "Chunk 1", "Instr", "medium", "pr_opened")
 		chunk1.PRNumber = 802
@@ -499,6 +624,16 @@ func TestHandlePRMerged(t *testing.T) {
 		updatedChunk1, _, err := store.GetChunk(ctx, "c-m2-1")
 		require.NoError(t, err)
 		assert.Equal(t, "merged", updatedChunk1.Status)
+
+		updatedChunk2, _, err := store.GetChunk(ctx, "c-m2-2")
+		require.NoError(t, err)
+		assert.Equal(t, "running", updatedChunk2.Status)
+
+		events := recBus.getEvents()
+		require.Len(t, events, 1)
+		assert.Equal(t, "vanadis_chunk", events[0].Source)
+		assert.Equal(t, "merged", events[0].EventType)
+		assert.Equal(t, []string{"c-m2-1"}, events[0].Targets)
 	})
 }
 
@@ -508,7 +643,7 @@ func TestHandlePRDeploySuccess(t *testing.T) {
 
 	t.Run("resolves deploy_awakeable_id when present", func(t *testing.T) {
 		t.Parallel()
-		srv, store, _, reqs := setupTestServer(t)
+		srv, store, recBus, reqs := setupTestServer(t)
 		build := mkBuild("b-d1", "123456789012345678", "Build", "Obj", "running")
 		chunk := mkChunk("c-d1", "b-d1", 0, "Chunk", "Instr", "medium", "merged")
 		chunk.PRNumber = 901
@@ -530,11 +665,12 @@ func TestHandlePRDeploySuccess(t *testing.T) {
 			}
 		}
 		assert.True(t, foundAwkResolve)
+		assert.Empty(t, recBus.getEvents(), "awakeable path must not publish duplicate external events")
 	})
 
 	t.Run("completes pre-restate build and dispatches completed prompt with directive", func(t *testing.T) {
 		t.Parallel()
-		srv, store, _, reqs := setupTestServer(t)
+		srv, store, recBus, reqs := setupTestServer(t)
 		build := mkBuild("b-d2", "123456789012345678", "Build", "Test Objective", "running")
 		chunk := mkChunk("c-d2", "b-d2", 0, "Chunk Title", "Instr", "medium", "merged")
 		chunk.PRNumber = 902
@@ -565,6 +701,21 @@ func TestHandlePRDeploySuccess(t *testing.T) {
 			}
 		}
 		assert.True(t, foundCompletedPrompt)
+
+		events := recBus.getEvents()
+		var chunkCompleted, buildCompleted bool
+		for _, ev := range events {
+			if ev.Source == "vanadis_chunk" && ev.EventType == "completed" {
+				chunkCompleted = true
+				assert.Equal(t, []string{"c-d2"}, ev.Targets)
+			}
+			if ev.Source == "vanadis_build" && ev.EventType == "completed" {
+				buildCompleted = true
+				assert.Equal(t, []string{"b-d2"}, ev.Targets)
+			}
+		}
+		assert.True(t, chunkCompleted, "expected vanadis_chunk.completed external event")
+		assert.True(t, buildCompleted, "expected vanadis_build.completed external event")
 	})
 }
 

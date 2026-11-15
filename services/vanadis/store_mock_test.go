@@ -1001,6 +1001,9 @@ func (m *memoryVanadisStore) IncrementChunkCIFailCount(_ context.Context, chunkI
 			if list[i].ID != chunkID {
 				continue
 			}
+			if list[i].Status == "failed" || list[i].Status == "completed" || list[i].Status == "merged" {
+				return list[i].CIFailCount, nil
+			}
 			list[i].CIFailCount++
 			list[i].Status = "ci_failed"
 			list[i].Banner = banner
