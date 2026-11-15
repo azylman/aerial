@@ -44,14 +44,29 @@ func (m *memoryMsg) Term() error                        { m.termed = true; retur
 func (m *memoryMsg) Snooze(_ time.Duration) error       { return nil }
 func (m *memoryMsg) InProgress() error                  { return nil }
 
+// outcomeBuild is a running build created at a fixed instant.
+func outcomeBuild(id, threadID, objective string) *VanadisBuild {
+	return &VanadisBuild{ID: id, ThreadID: threadID, Status: "running", Objective: objective, CreatedAt: time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)}
+}
+
+// actionChunk is an action-mode chunk of buildID at chunk index idx.
+func actionChunk(id, buildID string, idx int, status, title string) VanadisChunk {
+	return VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "action", Status: status, Title: title}
+}
+
+// outcomeEvent is a dispatch outcome for chunkID.
+func outcomeEvent(dispatchID, chunkID, status, errMsg string) *pubsub.DispatchOutcomeEvent {
+	return &pubsub.DispatchOutcomeEvent{DispatchID: dispatchID, VanadisChunkID: chunkID, Status: status, Error: errMsg}
+}
+
 func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
-
 	tests := []struct {
 		name          string
+		nilServer     bool
 		nilStore      bool
+		getBuildErr   error
 		seedBuild     *VanadisBuild
 		seedChunks    []VanadisChunk
 		rawPayload    string
@@ -63,378 +78,198 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 		wantWake      bool
 		wantStatus    string
 	}{
+		{name: "nil store returns error", nilStore: true, rawPayload: `{"status":"completed","vanadis_chunk_id":"c1"}`, wantErr: true},
+		{name: "nil server returns error", nilServer: true, wantErr: true},
+		{name: "completed event surfaces store failure", getBuildErr: errors.New("db error"), event: outcomeEvent("d1", "c1", "completed", ""), wantErr: true},
+		{name: "failed event surfaces store failure", getBuildErr: errors.New("db error"), event: outcomeEvent("d1", "c1", "failed", ""), wantErr: true},
+		{name: "malformed json returns nil to ack poison pill", rawPayload: `{"status": invalid-json`},
 		{
-			name:       "nil store returns error",
-			nilStore:   true,
-			rawPayload: `{"status":"completed","vanadis_chunk_id":"c1"}`,
-			wantErr:    true,
+			name:       "healthcheck ping is ignored",
+			seedBuild:  outcomeBuild("b-ping", "", ""),
+			seedChunks: []VanadisChunk{actionChunk("c1", "b-ping", 0, "running", "Ping Step")},
+			event:      outcomeEvent("healthcheck-ping", "c1", "completed", ""),
+			wantStatus: "running",
 		},
+		{name: "empty vanadis chunk id is ignored", event: outcomeEvent("disp-1", "", "completed", "")},
 		{
-			name:       "malformed json returns nil to ack poison pill",
-			rawPayload: `{"status": invalid-json`,
-			wantErr:    false,
-		},
-		{
-			name: "healthcheck ping is ignored",
-			seedBuild: &VanadisBuild{
-				ID:        "b-ping",
-				Status:    "running",
-				CreatedAt: now,
-			},
-			seedChunks: []VanadisChunk{
-				{
-					ID:         "c1",
-					BuildID:    "b-ping",
-					ChunkIndex: 0,
-					Mode:       "action",
-					Status:     "running",
-					Title:      "Ping Step",
-				},
-			},
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:     "healthcheck-ping",
-				VanadisChunkID: "c1",
-				Status:         "completed",
-			},
-			wantErr:    false,
+			name:       "unhandled status returns nil",
+			seedBuild:  outcomeBuild("b-running", "", ""),
+			seedChunks: []VanadisChunk{actionChunk("c1", "b-running", 0, "running", "Running Step")},
+			event:      outcomeEvent("disp-1", "c1", "running", ""),
 			wantStatus: "running",
 		},
 		{
-			name: "empty vanadis chunk id is ignored",
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:     "disp-1",
-				VanadisChunkID: "",
-				Status:         "completed",
-			},
-			wantErr: false,
-		},
-		{
-			name: "unhandled status returns nil",
-			seedBuild: &VanadisBuild{
-				ID:        "b-running",
-				Status:    "running",
-				CreatedAt: now,
-			},
+			name:      "completed action chunk advances to next chunk",
+			seedBuild: outcomeBuild("b-act", "th-1", ""),
 			seedChunks: []VanadisChunk{
-				{
-					ID:         "c1",
-					BuildID:    "b-running",
-					ChunkIndex: 0,
-					Mode:       "action",
-					Status:     "running",
-					Title:      "Running Step",
-				},
+				actionChunk("c-act-1", "b-act", 0, "running", "Action Step 1"),
+				actionChunk("c-act-2", "b-act", 1, "pending", "Action Step 2"),
 			},
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:     "disp-1",
-				VanadisChunkID: "c1",
-				Status:         "running",
-			},
-			wantErr:    false,
-			wantStatus: "running",
+			event:         outcomeEvent("disp-act-1", "c-act-1", "completed", ""),
+			wantNextQueue: true, wantNextIndex: 1, wantWidget: true, wantStatus: "completed",
 		},
 		{
-			name: "completed action chunk advances to next chunk",
-			seedBuild: &VanadisBuild{
-				ID:        "b-act",
-				ThreadID:  "th-1",
-				Status:    "running",
-				CreatedAt: now,
-			},
+			name:       "completed final action chunk completes build and wakes thread",
+			seedBuild:  outcomeBuild("b-final", "th-final", "Complete all chunks"),
+			seedChunks: []VanadisChunk{actionChunk("c-final-1", "b-final", 0, "running", "Final Step")},
+			event:      outcomeEvent("disp-final", "c-final-1", "completed", ""),
+			wantWidget: true, wantWake: true, wantStatus: "completed",
+		},
+		{
+			name:       "failed chunk transitions to failed and wakes thread",
+			seedBuild:  outcomeBuild("b-fail", "th-fail", "Try chunk"),
+			seedChunks: []VanadisChunk{actionChunk("c-fail-1", "b-fail", 0, "running", "Failing Step")},
+			event:      outcomeEvent("disp-fail", "c-fail-1", "failed", "command timed out"),
+			wantWidget: true, wantWake: true, wantStatus: "failed",
+		},
+		{
+			name:       "timeout chunk treated as failed",
+			seedBuild:  outcomeBuild("b-to", "th-to", "Timeout test"),
+			seedChunks: []VanadisChunk{actionChunk("c-to-1", "b-to", 0, "running", "Timeout Step")},
+			event:      outcomeEvent("disp-to", "c-to-1", "timeout", ""),
+			wantWidget: true, wantWake: true, wantStatus: "failed",
+		},
+		{name: "non-existent chunk returns nil without error", seedBuild: &VanadisBuild{ID: "b-empty", Status: "running"}, event: outcomeEvent("disp-missing", "c-nonexistent", "completed", "")},
+		{name: "failed non-existent chunk returns nil without error", seedBuild: &VanadisBuild{ID: "b-empty-fail", Status: "running"}, event: outcomeEvent("disp-missing-fail", "c-missing-fail", "failed", "")},
+		{
+			name:       "failed chunk with empty error uses status fallback",
+			seedBuild:  outcomeBuild("b-fail-noerr", "th-fail-noerr", "Try fallback error"),
+			seedChunks: []VanadisChunk{actionChunk("c-fail-noerr-1", "b-fail-noerr", 0, "running", "Failing Step Without Error")},
+			event:      outcomeEvent("disp-fail-noerr", "c-fail-noerr-1", "failed", ""),
+			wantWidget: true, wantWake: true, wantStatus: "failed",
+		},
+		{
+			name:      "redelivered completed action chunk re-enqueues next running chunk",
+			seedBuild: outcomeBuild("b-redeliver", "th-redeliver", "Multi chunk build"),
 			seedChunks: []VanadisChunk{
-				{
-					ID:         "c-act-1",
-					BuildID:    "b-act",
-					ChunkIndex: 0,
-					Mode:       "action",
-					Status:     "running",
-					Title:      "Action Step 1",
-				},
-				{
-					ID:         "c-act-2",
-					BuildID:    "b-act",
-					ChunkIndex: 1,
-					Mode:       "action",
-					Status:     "pending",
-					Title:      "Action Step 2",
-				},
+				actionChunk("c-redeliver-0", "b-redeliver", 0, "completed", "Already Completed Step"),
+				actionChunk("c-redeliver-1", "b-redeliver", 1, "running", "Running Next Step Needs Enqueue"),
 			},
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:     "disp-act-1",
-				VanadisChunkID: "c-act-1",
-				Status:         "completed",
-			},
-			wantErr:       false,
-			wantNextQueue: true,
-			wantNextIndex: 1,
-			wantWidget:    true,
-			wantStatus:    "completed",
-		},
-		{
-			name: "completed final action chunk completes build and wakes thread",
-			seedBuild: &VanadisBuild{
-				ID:        "b-final",
-				ThreadID:  "th-final",
-				Status:    "running",
-				Objective: "Complete all chunks",
-				CreatedAt: now,
-			},
-			seedChunks: []VanadisChunk{
-				{
-					ID:         "c-final-1",
-					BuildID:    "b-final",
-					ChunkIndex: 0,
-					Mode:       "action",
-					Status:     "running",
-					Title:      "Final Step",
-				},
-			},
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:     "disp-final",
-				VanadisChunkID: "c-final-1",
-				Status:         "completed",
-			},
-			wantErr:    false,
-			wantWidget: true,
-			wantWake:   true,
-			wantStatus: "completed",
-		},
-		{
-			name: "failed chunk transitions to failed and wakes thread",
-			seedBuild: &VanadisBuild{
-				ID:        "b-fail",
-				ThreadID:  "th-fail",
-				Status:    "running",
-				Objective: "Try chunk",
-				CreatedAt: now,
-			},
-			seedChunks: []VanadisChunk{
-				{
-					ID:         "c-fail-1",
-					BuildID:    "b-fail",
-					ChunkIndex: 0,
-					Mode:       "action",
-					Status:     "running",
-					Title:      "Failing Step",
-				},
-			},
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:     "disp-fail",
-				VanadisChunkID: "c-fail-1",
-				Status:         "failed",
-				Error:          "command timed out",
-			},
-			wantErr:    false,
-			wantWidget: true,
-			wantWake:   true,
-			wantStatus: "failed",
-		},
-		{
-			name: "timeout chunk treated as failed",
-			seedBuild: &VanadisBuild{
-				ID:        "b-to",
-				ThreadID:  "th-to",
-				Status:    "running",
-				Objective: "Timeout test",
-				CreatedAt: now,
-			},
-			seedChunks: []VanadisChunk{
-				{
-					ID:         "c-to-1",
-					BuildID:    "b-to",
-					ChunkIndex: 0,
-					Mode:       "action",
-					Status:     "running",
-					Title:      "Timeout Step",
-				},
-			},
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:     "disp-to",
-				VanadisChunkID: "c-to-1",
-				Status:         "timeout",
-			},
-			wantErr:    false,
-			wantWidget: true,
-			wantWake:   true,
-			wantStatus: "failed",
-		},
-		{
-			name: "non-existent chunk returns nil without error",
-			seedBuild: &VanadisBuild{
-				ID:     "b-empty",
-				Status: "running",
-			},
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:     "disp-missing",
-				VanadisChunkID: "c-nonexistent",
-				Status:         "completed",
-			},
-			wantErr: false,
-		},
-		{
-			name: "failed non-existent chunk returns nil without error",
-			seedBuild: &VanadisBuild{
-				ID:     "b-empty-fail",
-				Status: "running",
-			},
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:     "disp-missing-fail",
-				VanadisChunkID: "c-missing-fail",
-				Status:         "failed",
-			},
-			wantErr: false,
-		},
-		{
-			name: "failed chunk with empty error uses status fallback",
-			seedBuild: &VanadisBuild{
-				ID:        "b-fail-noerr",
-				ThreadID:  "th-fail-noerr",
-				Status:    "running",
-				Objective: "Try fallback error",
-				CreatedAt: now,
-			},
-			seedChunks: []VanadisChunk{
-				{
-					ID:         "c-fail-noerr-1",
-					BuildID:    "b-fail-noerr",
-					ChunkIndex: 0,
-					Mode:       "action",
-					Status:     "running",
-					Title:      "Failing Step Without Error",
-				},
-			},
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:     "disp-fail-noerr",
-				VanadisChunkID: "c-fail-noerr-1",
-				Status:         "failed",
-				Error:          "",
-			},
-			wantErr:    false,
-			wantWidget: true,
-			wantWake:   true,
-			wantStatus: "failed",
-		},
-		{
-			name: "redelivered completed action chunk re-enqueues next running chunk",
-			seedBuild: &VanadisBuild{
-				ID:        "b-redeliver",
-				ThreadID:  "th-redeliver",
-				Status:    "running",
-				Objective: "Multi chunk build",
-				CreatedAt: now,
-			},
-			seedChunks: []VanadisChunk{
-				{
-					ID:         "c-redeliver-0",
-					BuildID:    "b-redeliver",
-					ChunkIndex: 0,
-					Mode:       "action",
-					Status:     "completed",
-					Title:      "Already Completed Step",
-				},
-				{
-					ID:         "c-redeliver-1",
-					BuildID:    "b-redeliver",
-					ChunkIndex: 1,
-					Mode:       "action",
-					Status:     "running",
-					Title:      "Running Next Step Needs Enqueue",
-				},
-			},
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:     "disp-redeliver",
-				VanadisChunkID: "c-redeliver-0",
-				Status:         "completed",
-			},
-			wantErr:       false,
-			wantNextQueue: true,
-			wantNextIndex: 1,
-			wantStatus:    "completed",
+			event:         outcomeEvent("disp-redeliver", "c-redeliver-0", "completed", ""),
+			wantNextQueue: true, wantNextIndex: 1, wantStatus: "completed",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mu sync.Mutex
-			var widgetCalls int
-			var wakeCalls int
-
-			tsMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				defer mu.Unlock()
-				switch r.URL.Path {
-				case "/internal/widget/sync":
-					widgetCalls++
-					httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-				case "/prompt":
-					wakeCalls++
-					httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-				default:
-					http.NotFound(w, r)
-				}
-			}))
-			defer tsMock.Close()
-
-			var store VanadisStore
-			var mem *memoryVanadisStore
-			if !tc.nilStore {
-				mem = newMemoryVanadisStore()
-				if tc.seedBuild != nil {
-					mem.builds[tc.seedBuild.ID] = *tc.seedBuild
-				}
-				if len(tc.seedChunks) > 0 {
-					mem.chunks[tc.seedBuild.ID] = tc.seedChunks
-				}
-				store = mem
-			}
-
+			brain := newDispatchBrainServer(t)
+			store, mem := newDispatchOutcomeStore(tc.nilStore, tc.getBuildErr, tc.seedBuild, tc.seedChunks)
 			bus := &mockChunkBus{}
-			server := NewVanadisServer(Config{BrainURL: tsMock.URL}, store, tsMock.Client())
-			server.SetBus(bus)
-
-			var payloadBytes []byte
-			if tc.rawPayload != "" {
-				payloadBytes = []byte(tc.rawPayload)
-			} else if tc.event != nil {
-				var err error
-				payloadBytes, err = json.Marshal(tc.event)
-				if err != nil {
-					t.Fatalf("marshal event: %v", err)
-				}
+			var server *VanadisServer
+			if !tc.nilServer {
+				server = NewVanadisServer(Config{BrainURL: brain.URL}, store, brain.Client())
+				server.SetBus(bus)
 			}
 
-			msg := &memoryMsg{data: payloadBytes, subject: "aerial.dispatch.completed"}
+			msg := &memoryMsg{data: dispatchOutcomePayload(t, tc.rawPayload, tc.event), subject: "aerial.dispatch.completed"}
 			err := server.HandleDispatchOutcomeEvent(context.Background(), msg)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("HandleDispatchOutcomeEvent() error = %v, wantErr = %v", err, tc.wantErr)
 			}
 
-			mu.Lock()
-			gotWidget := widgetCalls > 0 || bus.widgetCalls > 0
-			gotWake := wakeCalls > 0
-			mu.Unlock()
-
-			if gotWidget != tc.wantWidget {
+			widgetCalls, wakeCalls := brain.calls()
+			if gotWidget := widgetCalls > 0 || bus.widgetCalls > 0; gotWidget != tc.wantWidget {
 				t.Errorf("widget sync called = %v, want %v", gotWidget, tc.wantWidget)
 			}
-			if gotWake != tc.wantWake {
+			if gotWake := wakeCalls > 0; gotWake != tc.wantWake {
 				t.Errorf("wake prompt called = %v, want %v", gotWake, tc.wantWake)
 			}
-			if tc.wantNextQueue {
-				if len(bus.published) == 0 {
-					t.Errorf("expected chunk job published, got 0")
-				} else if bus.published[0].ChunkIndex != tc.wantNextIndex {
-					t.Errorf("published chunk index = %d, want %d", bus.published[0].ChunkIndex, tc.wantNextIndex)
-				}
-			}
-			if tc.wantStatus != "" && mem != nil && tc.event != nil {
-				c, _, _ := mem.GetChunk(context.Background(), tc.event.VanadisChunkID)
-				if c != nil && c.Status != tc.wantStatus {
-					t.Errorf("chunk status = %q, want %q", c.Status, tc.wantStatus)
-				}
-			}
+			assertPublishedChunkIndex(t, bus, tc.wantNextQueue, tc.wantNextIndex)
+			assertDispatchedChunkStatus(t, mem, tc.event, tc.wantStatus)
 		})
+	}
+}
+
+// dispatchBrainServer fakes eri's widget-sync and wake-prompt endpoints and
+// counts how often each was hit.
+type dispatchBrainServer struct {
+	*httptest.Server
+
+	mu          sync.Mutex
+	widgetCalls int
+	wakeCalls   int
+}
+
+func newDispatchBrainServer(t *testing.T) *dispatchBrainServer {
+	t.Helper()
+	b := &dispatchBrainServer{}
+	b.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		switch r.URL.Path {
+		case "/internal/widget/sync":
+			b.widgetCalls++
+			httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		case "/prompt":
+			b.wakeCalls++
+			httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(b.Close)
+	return b
+}
+
+func (b *dispatchBrainServer) calls() (widget, wake int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.widgetCalls, b.wakeCalls
+}
+
+// newDispatchOutcomeStore returns a store failing every GetBuild with
+// getBuildErr when set; otherwise it behaves like seedMemoryStore.
+func newDispatchOutcomeStore(nilStore bool, getBuildErr error, seedBuild *VanadisBuild, seedChunks []VanadisChunk) (VanadisStore, *memoryVanadisStore) {
+	if getBuildErr != nil {
+		return &errVanadisStore{getBuildErr: getBuildErr}, nil
+	}
+	return seedMemoryStore(nilStore, seedBuild, seedChunks)
+}
+
+// dispatchOutcomePayload returns rawPayload verbatim when set, otherwise the
+// JSON encoding of event (nil when both are empty).
+func dispatchOutcomePayload(t *testing.T, rawPayload string, event *pubsub.DispatchOutcomeEvent) []byte {
+	t.Helper()
+	if rawPayload != "" {
+		return []byte(rawPayload)
+	}
+	if event == nil {
+		return nil
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	return data
+}
+
+// assertPublishedChunkIndex checks that the first published chunk job targets
+// wantIndex; it is a no-op unless wantPublished is set.
+func assertPublishedChunkIndex(t *testing.T, bus *mockChunkBus, wantPublished bool, wantIndex int) {
+	t.Helper()
+	if !wantPublished {
+		return
+	}
+	if len(bus.published) == 0 {
+		t.Errorf("expected chunk job published, got 0")
+		return
+	}
+	if bus.published[0].ChunkIndex != wantIndex {
+		t.Errorf("published chunk index = %d, want %d", bus.published[0].ChunkIndex, wantIndex)
+	}
+}
+
+// assertDispatchedChunkStatus checks the stored status of the event's chunk;
+// it is a no-op when want is empty or there is no store or event to inspect.
+func assertDispatchedChunkStatus(t *testing.T, mem *memoryVanadisStore, event *pubsub.DispatchOutcomeEvent, want string) {
+	t.Helper()
+	if want == "" || mem == nil || event == nil {
+		return
+	}
+	c, _, _ := mem.GetChunk(context.Background(), event.VanadisChunkID)
+	if c != nil && c.Status != want {
+		t.Errorf("chunk status = %q, want %q", c.Status, want)
 	}
 }
 
@@ -609,122 +444,127 @@ func (b *errQueueSubBus) ConsumeQueue(ctx context.Context, subject, queue string
 	return b.Bus.ConsumeQueue(ctx, subject, queue, handler)
 }
 
-func TestChunksAction_And_Events_Helpers(t *testing.T) {
+func TestValidateChunkModeAndRepo(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	tests := []struct {
+		name          string
+		mode          string
+		repo          string
+		targetFiles   []string
+		targetSymbols []string
+		wantErr       bool
+	}{
+		{"invalid mode", "invalid-mode", "aerial", nil, nil, true},
+		{"pr with empty repo", "pr", "", nil, nil, true},
+		{"action with repo", "action", "aerial", nil, nil, true},
+		{"action with target files", "action", "", []string{"file.go"}, nil, true},
+		{"action with target symbols", "action", "", nil, []string{"Sym"}, true},
+		{"valid action", "action", "", nil, nil, false},
+		{"valid pr", "pr", "azylman/aerial", []string{"file.go"}, []string{"Sym"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateChunkModeAndRepo(0, tc.mode, tc.repo, tc.targetFiles, tc.targetSymbols)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateChunkModeAndRepo(%q, %q) error = %v, wantErr %v", tc.mode, tc.repo, err, tc.wantErr)
+			}
+		})
+	}
+}
 
-	// 1. validateChunkModeAndRepo
-	if err := validateChunkModeAndRepo(0, "invalid-mode", "aerial", nil, nil); err == nil {
-		t.Fatal("expected error on invalid mode")
+// createdBuildStore returns a memory store holding seedBuild and seedChunks
+// created through CreateBuild, or an empty store when seedBuild is nil.
+func createdBuildStore(t *testing.T, seedBuild *VanadisBuild, seedChunks []VanadisChunk) *memoryVanadisStore {
+	t.Helper()
+	mem := newMemoryVanadisStore()
+	if seedBuild == nil {
+		return mem
 	}
-	if err := validateChunkModeAndRepo(0, "pr", "", nil, nil); err == nil {
-		t.Fatal("expected error on pr with empty repo")
+	if err := mem.CreateBuild(context.Background(), *seedBuild, seedChunks); err != nil {
+		t.Fatalf("CreateBuild(%s): %v", seedBuild.ID, err)
 	}
-	if err := validateChunkModeAndRepo(0, "action", "aerial", nil, nil); err == nil {
-		t.Fatal("expected error on action with repo")
-	}
-	if err := validateChunkModeAndRepo(0, "action", "", []string{"file.go"}, nil); err == nil {
-		t.Fatal("expected error on action with target_files")
-	}
-	if err := validateChunkModeAndRepo(0, "action", "", nil, []string{"Sym"}); err == nil {
-		t.Fatal("expected error on action with target_symbols")
-	}
-	if err := validateChunkModeAndRepo(0, "action", "", nil, nil); err != nil {
-		t.Fatalf("unexpected error on valid action: %v", err)
-	}
-	if err := validateChunkModeAndRepo(0, "pr", "azylman/aerial", []string{"file.go"}, []string{"Sym"}); err != nil {
-		t.Fatalf("unexpected error on valid pr: %v", err)
-	}
+	return mem
+}
 
-	// 3. failChunkInternal
-	var nilSrv *VanadisServer
-	if _, _, _, err := nilSrv.failChunkInternal(ctx, "c1", "reason"); err == nil {
-		t.Fatal("expected error on nil server failChunkInternal")
+func TestVanadisServer_FailChunkInternal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		nilServer  bool
+		seedBuild  *VanadisBuild
+		seedChunks []VanadisChunk
+		chunkID    string
+		reason     string
+		wantErr    bool
+		wantFailed bool
+		wantFound  bool
+	}{
+		{"nil server", true, nil, nil, "c1", "reason", true, false, false},
+		{"empty chunk id", false, nil, nil, "", "reason", true, false, false},
+		{"empty reason", false, nil, nil, "c1", "", true, false, false},
+		{
+			"shutdown interruption is not a failure", false,
+			&VanadisBuild{ID: "b-shut", ThreadID: "th-1", Objective: "shut"},
+			[]VanadisChunk{{ID: "c-shut", BuildID: "b-shut", Title: "c-shut"}},
+			"c-shut", "interrupted by shutdown", false, false, true,
+		},
+		{
+			"running chunk fails", false,
+			&VanadisBuild{ID: "b-f", ThreadID: "th-fail", Objective: "fail obj"},
+			[]VanadisChunk{{ID: "c-f", BuildID: "b-f", Title: "c-f", Status: "running"}},
+			"c-f", "test fail reason", false, true, true,
+		},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var srv *VanadisServer
+			if !tc.nilServer {
+				srv = &VanadisServer{store: createdBuildStore(t, tc.seedBuild, tc.seedChunks)}
+			}
+			build, chunk, failed, err := srv.failChunkInternal(context.Background(), tc.chunkID, tc.reason)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("failChunkInternal() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if failed != tc.wantFailed {
+				t.Errorf("failed = %v, want %v", failed, tc.wantFailed)
+			}
+			if gotFound := build != nil && chunk != nil; gotFound != tc.wantFound {
+				t.Errorf("build and chunk returned = %v, want %v", gotFound, tc.wantFound)
+			}
+		})
+	}
+}
 
-	memStore := newMemoryVanadisStore()
-	srv := &VanadisServer{store: memStore}
-	if _, _, _, err := srv.failChunkInternal(ctx, "", "reason"); err == nil {
-		t.Fatal("expected error on empty chunkID")
+func TestVanadisServer_RetryNextRunningChunkEnqueue(t *testing.T) {
+	t.Parallel()
+	retryBuild := &VanadisBuild{ID: "b-ret", Status: "running"}
+	retryChunks := []VanadisChunk{
+		{ID: "c-ret-0", BuildID: "b-ret", ChunkIndex: 0, Status: "completed"},
+		{ID: "c-ret-1", BuildID: "b-ret", ChunkIndex: 1, Status: "running"},
 	}
-	if _, _, _, err := srv.failChunkInternal(ctx, "c1", ""); err == nil {
-		t.Fatal("expected error on empty reason")
+	tests := []struct {
+		name       string
+		seedBuild  *VanadisBuild
+		seedChunks []VanadisChunk
+		res        *VanadisAdvancementResult
+		wantErr    bool
+	}{
+		{"nil result", nil, nil, nil, false},
+		{"pr mode is skipped", nil, nil, &VanadisAdvancementResult{ChunkMode: "pr"}, false},
+		{"non-running build is skipped", nil, nil, &VanadisAdvancementResult{ChunkMode: "action", BuildStatus: "completed"}, false},
+		{"missing build", nil, nil, &VanadisAdvancementResult{ChunkMode: "action", BuildStatus: "running", BuildID: "non-existent"}, true},
+		{"enqueue without bus fails", retryBuild, retryChunks, &VanadisAdvancementResult{ChunkMode: "action", BuildStatus: "running", BuildID: "b-ret", MergedChunkIndex: 0}, true},
 	}
-
-	// Shutdown interruption reason
-	b1 := VanadisBuild{ID: "b-shut", ThreadID: "th-1", Objective: "shut"}
-	c1 := VanadisChunk{ID: "c-shut", BuildID: "b-shut", Title: "c-shut"}
-	_ = memStore.CreateBuild(ctx, b1, []VanadisChunk{c1})
-	bGot, cGot, failed, err := srv.failChunkInternal(ctx, "c-shut", "interrupted by shutdown")
-	if err != nil || failed || bGot == nil || cGot == nil {
-		t.Fatalf("expected no fail on shutdown interruption, got err=%v failed=%v", err, failed)
-	}
-
-	// Normal fail chunk
-	bFail := VanadisBuild{ID: "b-f", ThreadID: "th-fail", Objective: "fail obj"}
-	cFail := VanadisChunk{ID: "c-f", BuildID: "b-f", Title: "c-f", Status: "running"}
-	_ = memStore.CreateBuild(ctx, bFail, []VanadisChunk{cFail})
-	bF, cF, failedF, errF := srv.failChunkInternal(ctx, "c-f", "test fail reason")
-	if errF != nil || !failedF || bF == nil || cF == nil {
-		t.Fatalf("expected failed=true, got err=%v failed=%v", errF, failedF)
-	}
-
-	// 4. retryNextRunningChunkEnqueue
-	if err := srv.retryNextRunningChunkEnqueue(ctx, nil); err != nil {
-		t.Fatalf("expected nil for nil res: %v", err)
-	}
-	if err := srv.retryNextRunningChunkEnqueue(ctx, &VanadisAdvancementResult{ChunkMode: "pr"}); err != nil {
-		t.Fatalf("expected nil for non-action mode: %v", err)
-	}
-	if err := srv.retryNextRunningChunkEnqueue(ctx, &VanadisAdvancementResult{ChunkMode: "action", BuildStatus: "completed"}); err != nil {
-		t.Fatalf("expected nil for non-running status: %v", err)
-	}
-	if err := srv.retryNextRunningChunkEnqueue(ctx, &VanadisAdvancementResult{ChunkMode: "action", BuildStatus: "running", BuildID: "non-existent"}); err == nil {
-		t.Fatal("expected error for non-existent build")
-	}
-
-	// Next running chunk enqueue
-	bRetry := VanadisBuild{ID: "b-ret", Status: "running"}
-	cRet0 := VanadisChunk{ID: "c-ret-0", BuildID: "b-ret", ChunkIndex: 0, Status: "completed"}
-	cRet1 := VanadisChunk{ID: "c-ret-1", BuildID: "b-ret", ChunkIndex: 1, Status: "running"}
-	_ = memStore.CreateBuild(ctx, bRetry, []VanadisChunk{cRet0, cRet1})
-	// Without bus -> enqueue fails
-	err = srv.retryNextRunningChunkEnqueue(ctx, &VanadisAdvancementResult{
-		ChunkMode:        "action",
-		BuildStatus:      "running",
-		BuildID:          "b-ret",
-		MergedChunkIndex: 0,
-	})
-	if err == nil {
-		t.Fatal("expected error on enqueue without bus")
-	}
-
-	// 5. handleFailedDispatchOutcome
-	err = srv.handleFailedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
-		VanadisChunkID: "c-not-found",
-		Status:         "failed",
-	})
-	if err != nil {
-		t.Fatalf("expected nil on not found chunk: %v", err)
-	}
-
-	// 6. HandleDispatchOutcomeEvent
-	var nilSrvEvents *VanadisServer
-	if err := nilSrvEvents.HandleDispatchOutcomeEvent(ctx, &memoryMsg{}); err == nil {
-		t.Fatal("expected error on nil server HandleDispatchOutcomeEvent")
-	}
-
-	// 7. handleCompletedDispatchOutcome with store error
-	storeErr := &errVanadisStore{getBuildErr: errors.New("db error")}
-	srvStoreErr := &VanadisServer{store: storeErr}
-	completedData, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "d1", VanadisChunkID: "c1", Status: "completed"})
-	if err := srvStoreErr.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: completedData}); err == nil {
-		t.Fatal("expected error on CompleteActionChunk store failure")
-	}
-
-	// 8. handleFailedDispatchOutcome with internal fail error
-	failedData, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "d1", VanadisChunkID: "c1", Status: "failed"})
-	if err := srvStoreErr.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: failedData}); err == nil {
-		t.Fatal("expected error on failChunkInternal store failure")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := &VanadisServer{store: createdBuildStore(t, tc.seedBuild, tc.seedChunks)}
+			err := srv.retryNextRunningChunkEnqueue(context.Background(), tc.res)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("retryNextRunningChunkEnqueue() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
 	}
 }
