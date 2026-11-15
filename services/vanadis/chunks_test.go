@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -16,76 +17,102 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
-func TestHelpers_WidgetStatus(t *testing.T) {
-	normTests := []struct {
+func TestNormalizeWidgetStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
 		in   string
 		want string
 	}{
-		{"ci_failed", "failed"},
-		{"deploy_failed", "failed"},
-		{"RUNNING", "running"},
-		{"open", "open"},
+		{"ci_failed", "ci_failed", "failed"},
+		{"deploy_failed", "deploy_failed", "failed"},
+		{"RUNNING", "RUNNING", "running"},
+		{"open", "open", "open"},
 	}
-	for _, tc := range normTests {
-		t.Run("normalize_"+tc.in, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := normalizeWidgetStatus(tc.in); got != tc.want {
 				t.Errorf("normalizeWidgetStatus(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
+}
 
-	resolveTests := []struct {
+func TestResolveVanadisChunkWidgetStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
 		chunkStatus string
 		prStatus    string
 		want        string
 	}{
-		{"failed", "open", "open"},
-		{"merged", "open", "merged"},
-		{"failed", "deployed", "deployed"},
-		{"pending", "deployed", "deployed"},
-		{"pending", "deploying", "deploying"},
-		{"pending", "synced", "synced"},
-		{"pending", "failed", "failed"},
-		{"pending", "conflict", "conflict"},
-		{"pending", "merged", "merged"},
-		{"merged", "closed", "merged"},
-		{"pending", "closed", "failed"},
-		{"coding", "unknown", "coding"},
-		{"", "", "open"},
+		{"failed_open", "failed", "open", "open"},
+		{"merged_open", "merged", "open", "merged"},
+		{"failed_deployed", "failed", "deployed", "deployed"},
+		{"pending_deployed", "pending", "deployed", "deployed"},
+		{"pending_deploying", "pending", "deploying", "deploying"},
+		{"pending_synced", "pending", "synced", "synced"},
+		{"pending_failed", "pending", "failed", "failed"},
+		{"pending_conflict", "pending", "conflict", "conflict"},
+		{"pending_merged", "pending", "merged", "merged"},
+		{"merged_closed", "merged", "closed", "merged"},
+		{"pending_closed", "pending", "closed", "failed"},
+		{"coding_unknown", "coding", "unknown", "coding"},
+		{"empty", "", "", "open"},
 	}
-	for _, tc := range resolveTests {
-		t.Run("resolve_"+tc.chunkStatus+"_"+tc.prStatus, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := resolveVanadisChunkWidgetStatus(tc.chunkStatus, tc.prStatus); got != tc.want {
 				t.Errorf("resolveVanadisChunkWidgetStatus(%q, %q) = %q, want %q", tc.chunkStatus, tc.prStatus, got, tc.want)
 			}
 		})
 	}
+}
 
-	streamingTests := []struct {
+func TestIsVanadisChunkStreamingPhase(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
 		in   string
 		want bool
 	}{
-		{"open", true},
-		{"pr_opened", true},
-		{"merged", true},
-		{"synced", true},
-		{"deploying", true},
-		{"deployed", false},
-		{"failed", false},
-		{"pending", false},
-		{"running", false},
-		{"", false},
-		{"  OPEN  ", true},
+		{"open", "open", true},
+		{"pr_opened", "pr_opened", true},
+		{"merged", "merged", true},
+		{"synced", "synced", true},
+		{"deploying", "deploying", true},
+		{"deployed", "deployed", false},
+		{"failed", "failed", false},
+		{"pending", "pending", false},
+		{"running", "running", false},
+		{"empty", "", false},
+		{"padded_uppercase_open", "  OPEN  ", true},
 	}
-	for _, tc := range streamingTests {
-		t.Run("streaming_"+tc.in, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := isVanadisChunkStreamingPhase(tc.in); got != tc.want {
 				t.Errorf("isVanadisChunkStreamingPhase(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}
+}
 
-	syncWidgetTests := []struct {
+// widgetBuild is a one-line VanadisBuild fixture for widget sync tests.
+func widgetBuild(id, status, statusMessageID, title string, createdAt time.Time) VanadisBuild {
+	return VanadisBuild{ID: id, Status: status, StatusMessageID: statusMessageID, Title: title, CreatedAt: createdAt}
+}
+
+// widgetPRReq is a one-line widget sync request for a found aerial PR.
+func widgetPRReq(buildID string, prNumber int, prStatus, activeStep string) SyncChunkPRWidgetRequest {
+	return SyncChunkPRWidgetRequest{BuildID: buildID, Repo: "aerial", PRNumber: prNumber, PRStatus: prStatus, ActiveStep: activeStep, PRFound: true}
+}
+
+func TestBuildSyncWidgetRequest(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
 		name                string
 		build               VanadisBuild
 		chunks              []VanadisChunk
@@ -93,313 +120,46 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 		wantStatus          string
 		wantSkipSink        bool
 		wantActiveStep      string
+		wantChunkRepo       string
+		wantChunkStatus     string
 		wantZeroCompletedAt bool
 	}{
-		{
-			name: "preserves active step and allows sink when chunk is open and build running with message",
-			build: VanadisBuild{
-				ID:              "build-1",
-				Status:          "running",
-				StatusMessageID: "msg-123",
-				Title:           "Test Build",
-				CreatedAt:       time.Unix(1760000000, 0),
-			},
-			chunks: []VanadisChunk{
-				{ID: "c1", ChunkIndex: 0, PRNumber: 101, Status: "open"},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID:    "build-1",
-				Repo:       "aerial",
-				PRNumber:   101,
-				PRStatus:   "open",
-				ActiveStep: "Waiting on CI (2/5 passed)",
-				PRFound:    true,
-			},
-			wantStatus:     "running",
-			wantSkipSink:   false,
-			wantActiveStep: "Waiting on CI (2/5 passed)",
-		},
-		{
-			name: "sets active step on pr_opened chunk",
-			build: VanadisBuild{
-				ID:              "build-2",
-				Status:          "running",
-				StatusMessageID: "msg-456",
-				Title:           "Test Build 2",
-			},
-			chunks: []VanadisChunk{
-				{ID: "c2", ChunkIndex: 0, PRNumber: 102, Status: "pr_opened"},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID:    "build-2",
-				Repo:       "aerial",
-				PRNumber:   102,
-				PRStatus:   "open",
-				ActiveStep: "Waiting on CI (3/3 passed)",
-				PRFound:    true,
-			},
-			wantStatus:     "running",
-			wantSkipSink:   false,
-			wantActiveStep: "Waiting on CI (3/3 passed)",
-		},
-		{
-			name: "omits skipsink when build status message ID is empty",
-			build: VanadisBuild{
-				ID:              "build-3",
-				Status:          "running",
-				StatusMessageID: "",
-				Title:           "Test Build 3",
-			},
-			chunks: []VanadisChunk{
-				{ID: "c3", ChunkIndex: 0, PRNumber: 103, Status: "open"},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID:    "build-3",
-				Repo:       "aerial",
-				PRNumber:   103,
-				PRStatus:   "open",
-				ActiveStep: "Waiting on CI (1/2 passed)",
-				PRFound:    true,
-			},
-			wantStatus:     "running",
-			wantSkipSink:   false,
-			wantActiveStep: "Waiting on CI (1/2 passed)",
-		},
-		{
-			name: "omits skipsink and active step when pr status is failed",
-			build: VanadisBuild{
-				ID:              "build-4",
-				Status:          "running",
-				StatusMessageID: "msg-789",
-				Title:           "Test Build 4",
-			},
-			chunks: []VanadisChunk{
-				{ID: "c4", ChunkIndex: 0, PRNumber: 104, Status: "pr_opened"},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID:    "build-4",
-				Repo:       "aerial",
-				PRNumber:   104,
-				PRStatus:   "failed",
-				ActiveStep: "Waiting on CI (0/2 passed)",
-				PRFound:    true,
-			},
-			wantStatus:     "failed",
-			wantSkipSink:   false,
-			wantActiveStep: "",
-		},
-		{
-			name: "omits skipsink when active step is whitespace",
-			build: VanadisBuild{
-				ID:              "build-5",
-				Status:          "running",
-				StatusMessageID: "msg-999",
-				Title:           "Test Build 5",
-			},
-			chunks: []VanadisChunk{
-				{ID: "c5", ChunkIndex: 0, PRNumber: 105, Status: "open"},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID:    "build-5",
-				Repo:       "aerial",
-				PRNumber:   105,
-				PRStatus:   "open",
-				ActiveStep: "   ",
-				PRFound:    true,
-			},
-			wantStatus:     "running",
-			wantSkipSink:   false,
-			wantActiveStep: "",
-		},
-		{
-			name: "preserves active step and allows sink when chunk is merged",
-			build: VanadisBuild{
-				ID:              "build-merged",
-				Status:          "running",
-				StatusMessageID: "msg-merged",
-				Title:           "Test Build Merged",
-			},
-			chunks: []VanadisChunk{
-				{ID: "c-merged", ChunkIndex: 0, PRNumber: 106, Status: "open"},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID:    "build-merged",
-				Repo:       "aerial",
-				PRNumber:   106,
-				PRStatus:   "merged",
-				ActiveStep: "Building container images (1/2 completed)",
-				PRFound:    true,
-			},
-			wantStatus:     "running",
-			wantSkipSink:   false,
-			wantActiveStep: "Building container images (1/2 completed)",
-		},
-		{
-			name: "preserves active step and allows sink when chunk is synced",
-			build: VanadisBuild{
-				ID:              "build-synced",
-				Status:          "running",
-				StatusMessageID: "msg-synced",
-				Title:           "Test Build Synced",
-			},
-			chunks: []VanadisChunk{
-				{ID: "c-synced", ChunkIndex: 0, PRNumber: 107, Status: "merged"},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID:    "build-synced",
-				Repo:       "aerial",
-				PRNumber:   107,
-				PRStatus:   "synced",
-				ActiveStep: "Building container images (2/2 completed)",
-				PRFound:    true,
-			},
-			wantStatus:     "running",
-			wantSkipSink:   false,
-			wantActiveStep: "Building container images (2/2 completed)",
-		},
-		{
-			name: "preserves active step and allows sink when chunk is deploying",
-			build: VanadisBuild{
-				ID:              "build-deploying",
-				Status:          "running",
-				StatusMessageID: "msg-deploying",
-				Title:           "Test Build Deploying",
-			},
-			chunks: []VanadisChunk{
-				{ID: "c-deploying", ChunkIndex: 0, PRNumber: 108, Status: "synced"},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID:    "build-deploying",
-				Repo:       "aerial",
-				PRNumber:   108,
-				PRStatus:   "deploying",
-				ActiveStep: "`eri`: 🔄 starting",
-				PRFound:    true,
-			},
-			wantStatus:     "running",
-			wantSkipSink:   false,
-			wantActiveStep: "`eri`: 🔄 starting",
-		},
-		{
-			name: "clears active step on deployed chunk",
-			build: VanadisBuild{
-				ID:              "build-deployed",
-				Status:          "running",
-				StatusMessageID: "msg-deployed",
-				Title:           "Test Build Deployed",
-			},
-			chunks: []VanadisChunk{
-				{ID: "c-deployed", ChunkIndex: 0, PRNumber: 109, Status: "deploying"},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID:    "build-deployed",
-				Repo:       "aerial",
-				PRNumber:   109,
-				PRStatus:   "deployed",
-				ActiveStep: "All jobs healthy",
-				PRFound:    true,
-			},
-			wantStatus:     "running",
-			wantSkipSink:   false,
-			wantActiveStep: "",
-		},
-		{
-			name: "recovers failed build and failed chunk on open pr",
-			build: VanadisBuild{
-				ID:              "build-recover",
-				Status:          "failed",
-				StatusMessageID: "msg-recover",
-				Title:           "Test Build Recover",
-				CreatedAt:       time.Unix(1760000000, 0),
-			},
-			chunks: []VanadisChunk{
-				{ID: "c-recover", ChunkIndex: 0, PRNumber: 110, Status: "failed", CompletedAt: time.Unix(1760001000, 0)},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID:    "build-recover",
-				Repo:       "aerial",
-				PRNumber:   110,
-				PRStatus:   "open",
-				ActiveStep: "Waiting on CI (1/4 passed)",
-				PRFound:    true,
-			},
-			wantStatus:          "running",
-			wantSkipSink:        false,
-			wantActiveStep:      "Waiting on CI (1/4 passed)",
-			wantZeroCompletedAt: true,
-		},
-		{
-			name: "resolves repo to action for action chunk",
-			build: VanadisBuild{
-				ID:              "build-action-widget",
-				Status:          "running",
-				StatusMessageID: "msg-action",
-				Title:           "Test Action Widget",
-			},
-			chunks: []VanadisChunk{
-				{ID: "c-action", ChunkIndex: 0, Mode: "action", Repo: "", Status: "running"},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID: "build-action-widget",
-			},
-			wantStatus:   "running",
-			wantSkipSink: false,
-		},
-		{
-			name: "maps completed action chunk to deployed status",
-			build: VanadisBuild{
-				ID:              "build-action-completed",
-				Status:          "completed",
-				StatusMessageID: "msg-action-completed",
-				Title:           "Test Action Completed Widget",
-			},
-			chunks: []VanadisChunk{
-				{ID: "c-action-done", ChunkIndex: 0, Mode: "action", Repo: "", Status: "completed"},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID: "build-action-completed",
-			},
-			wantStatus:   "completed",
-			wantSkipSink: false,
-		},
-		{
-			name: "maps merged chunk without active step to deployed status",
-			build: VanadisBuild{
-				ID:              "build-merged-idle",
-				Status:          "running",
-				StatusMessageID: "msg-merged-idle",
-				Title:           "Test Merged Idle Widget",
-			},
-			chunks: []VanadisChunk{
-				{ID: "c-merged-idle", ChunkIndex: 0, Mode: "pr", Repo: "aerial", Status: "merged", PRNumber: 120},
-			},
-			req: SyncChunkPRWidgetRequest{
-				BuildID: "build-merged-idle",
-			},
-			wantStatus:   "running",
-			wantSkipSink: false,
-		},
+		{name: "preserves active step and allows sink when chunk is open and build running with message", build: widgetBuild("build-1", "running", "msg-123", "Test Build", time.Unix(1760000000, 0)), chunks: []VanadisChunk{{ID: "c1", ChunkIndex: 0, PRNumber: 101, Status: "open"}}, req: widgetPRReq("build-1", 101, "open", "Waiting on CI (2/5 passed)"), wantStatus: "running", wantActiveStep: "Waiting on CI (2/5 passed)"},
+		{name: "sets active step on pr_opened chunk", build: widgetBuild("build-2", "running", "msg-456", "Test Build 2", time.Time{}), chunks: []VanadisChunk{{ID: "c2", ChunkIndex: 0, PRNumber: 102, Status: "pr_opened"}}, req: widgetPRReq("build-2", 102, "open", "Waiting on CI (3/3 passed)"), wantStatus: "running", wantActiveStep: "Waiting on CI (3/3 passed)"},
+		{name: "omits skipsink when build status message ID is empty", build: widgetBuild("build-3", "running", "", "Test Build 3", time.Time{}), chunks: []VanadisChunk{{ID: "c3", ChunkIndex: 0, PRNumber: 103, Status: "open"}}, req: widgetPRReq("build-3", 103, "open", "Waiting on CI (1/2 passed)"), wantStatus: "running", wantActiveStep: "Waiting on CI (1/2 passed)"},
+		{name: "omits skipsink and active step when pr status is failed", build: widgetBuild("build-4", "running", "msg-789", "Test Build 4", time.Time{}), chunks: []VanadisChunk{{ID: "c4", ChunkIndex: 0, PRNumber: 104, Status: "pr_opened"}}, req: widgetPRReq("build-4", 104, "failed", "Waiting on CI (0/2 passed)"), wantStatus: "failed", wantActiveStep: ""},
+		{name: "omits skipsink when active step is whitespace", build: widgetBuild("build-5", "running", "msg-999", "Test Build 5", time.Time{}), chunks: []VanadisChunk{{ID: "c5", ChunkIndex: 0, PRNumber: 105, Status: "open"}}, req: widgetPRReq("build-5", 105, "open", "   "), wantStatus: "running", wantActiveStep: ""},
+		{name: "preserves active step and allows sink when chunk is merged", build: widgetBuild("build-merged", "running", "msg-merged", "Test Build Merged", time.Time{}), chunks: []VanadisChunk{{ID: "c-merged", ChunkIndex: 0, PRNumber: 106, Status: "open"}}, req: widgetPRReq("build-merged", 106, "merged", "Building container images (1/2 completed)"), wantStatus: "running", wantActiveStep: "Building container images (1/2 completed)"},
+		{name: "preserves active step and allows sink when chunk is synced", build: widgetBuild("build-synced", "running", "msg-synced", "Test Build Synced", time.Time{}), chunks: []VanadisChunk{{ID: "c-synced", ChunkIndex: 0, PRNumber: 107, Status: "merged"}}, req: widgetPRReq("build-synced", 107, "synced", "Building container images (2/2 completed)"), wantStatus: "running", wantActiveStep: "Building container images (2/2 completed)"},
+		{name: "preserves active step and allows sink when chunk is deploying", build: widgetBuild("build-deploying", "running", "msg-deploying", "Test Build Deploying", time.Time{}), chunks: []VanadisChunk{{ID: "c-deploying", ChunkIndex: 0, PRNumber: 108, Status: "synced"}}, req: widgetPRReq("build-deploying", 108, "deploying", "`eri`: 🔄 starting"), wantStatus: "running", wantActiveStep: "`eri`: 🔄 starting"},
+		{name: "clears active step on deployed chunk", build: widgetBuild("build-deployed", "running", "msg-deployed", "Test Build Deployed", time.Time{}), chunks: []VanadisChunk{{ID: "c-deployed", ChunkIndex: 0, PRNumber: 109, Status: "deploying"}}, req: widgetPRReq("build-deployed", 109, "deployed", "All jobs healthy"), wantStatus: "running", wantActiveStep: ""},
+		{name: "recovers failed build and failed chunk on open pr", build: widgetBuild("build-recover", "failed", "msg-recover", "Test Build Recover", time.Unix(1760000000, 0)), chunks: []VanadisChunk{{ID: "c-recover", ChunkIndex: 0, PRNumber: 110, Status: "failed", CompletedAt: time.Unix(1760001000, 0)}}, req: widgetPRReq("build-recover", 110, "open", "Waiting on CI (1/4 passed)"), wantStatus: "running", wantActiveStep: "Waiting on CI (1/4 passed)", wantZeroCompletedAt: true},
+		{name: "resolves repo to action for action chunk", build: widgetBuild("build-action-widget", "running", "msg-action", "Test Action Widget", time.Time{}), chunks: []VanadisChunk{{ID: "c-action", ChunkIndex: 0, Mode: "action", Repo: "", Status: "running"}}, req: SyncChunkPRWidgetRequest{BuildID: "build-action-widget"}, wantStatus: "running", wantChunkRepo: "action"},
+		{name: "maps completed action chunk to deployed status", build: widgetBuild("build-action-completed", "completed", "msg-action-completed", "Test Action Completed Widget", time.Time{}), chunks: []VanadisChunk{{ID: "c-action-done", ChunkIndex: 0, Mode: "action", Repo: "", Status: "completed"}}, req: SyncChunkPRWidgetRequest{BuildID: "build-action-completed"}, wantStatus: "completed", wantChunkRepo: "action", wantChunkStatus: "deployed"},
+		{name: "maps merged chunk without active step to deployed status", build: widgetBuild("build-merged-idle", "running", "msg-merged-idle", "Test Merged Idle Widget", time.Time{}), chunks: []VanadisChunk{{ID: "c-merged-idle", ChunkIndex: 0, Mode: "pr", Repo: "aerial", Status: "merged", PRNumber: 120}}, req: SyncChunkPRWidgetRequest{BuildID: "build-merged-idle"}, wantStatus: "running", wantChunkStatus: "deployed"},
 	}
-	for _, tc := range syncWidgetTests {
-		t.Run("sync_widget_"+tc.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := buildSyncWidgetRequest(tc.build, tc.chunks, tc.req)
-			if got.Status != tc.wantStatus {
-				t.Errorf("buildSyncWidgetRequest Status = %q, want %q", got.Status, tc.wantStatus)
+			if got.Status != tc.wantStatus || got.SkipSink != tc.wantSkipSink {
+				t.Errorf("buildSyncWidgetRequest Status = %q SkipSink = %v, want %q %v", got.Status, got.SkipSink, tc.wantStatus, tc.wantSkipSink)
 			}
-			if got.SkipSink != tc.wantSkipSink {
-				t.Errorf("buildSyncWidgetRequest SkipSink = %v, want %v", got.SkipSink, tc.wantSkipSink)
+			if len(got.Chunks) != 1 {
+				t.Fatalf("buildSyncWidgetRequest returned %d chunks, want 1", len(got.Chunks))
 			}
-			if len(got.Chunks) > 0 && got.Chunks[0].ActiveStep != tc.wantActiveStep {
-				t.Errorf("buildSyncWidgetRequest Chunk[0].ActiveStep = %q, want %q", got.Chunks[0].ActiveStep, tc.wantActiveStep)
+			c := got.Chunks[0]
+			if c.ActiveStep != tc.wantActiveStep {
+				t.Errorf("buildSyncWidgetRequest Chunk[0].ActiveStep = %q, want %q", c.ActiveStep, tc.wantActiveStep)
 			}
-			if len(got.Chunks) > 0 && len(tc.chunks) > 0 && tc.chunks[0].Mode == "action" && got.Chunks[0].Repo != "action" {
-				t.Errorf("buildSyncWidgetRequest Chunk[0].Repo = %q, want action", got.Chunks[0].Repo)
+			if tc.wantChunkRepo != "" && c.Repo != tc.wantChunkRepo {
+				t.Errorf("buildSyncWidgetRequest Chunk[0].Repo = %q, want %q", c.Repo, tc.wantChunkRepo)
 			}
-			if len(got.Chunks) > 0 && len(tc.chunks) > 0 && (tc.chunks[0].Status == "completed" || (tc.chunks[0].Status == "merged" && tc.req.PRNumber == 0)) && got.Chunks[0].Status != "deployed" {
-				t.Errorf("buildSyncWidgetRequest Chunk[0].Status = %q, want deployed", got.Chunks[0].Status)
+			if tc.wantChunkStatus != "" && c.Status != tc.wantChunkStatus {
+				t.Errorf("buildSyncWidgetRequest Chunk[0].Status = %q, want %q", c.Status, tc.wantChunkStatus)
 			}
-			if tc.wantZeroCompletedAt && len(got.Chunks) > 0 && !got.Chunks[0].CompletedAt.IsZero() {
-				t.Errorf("buildSyncWidgetRequest Chunk[0].CompletedAt = %v, want zero", got.Chunks[0].CompletedAt)
+			if tc.wantZeroCompletedAt && !c.CompletedAt.IsZero() {
+				t.Errorf("buildSyncWidgetRequest Chunk[0].CompletedAt = %v, want zero", c.CompletedAt)
 			}
 			if !tc.build.CreatedAt.IsZero() && !got.StartedAt.Equal(tc.build.CreatedAt) {
 				t.Errorf("buildSyncWidgetRequest StartedAt = %v, want %v", got.StartedAt, tc.build.CreatedAt)
@@ -450,207 +210,230 @@ func setupTestStoreWithBuild() (*memoryVanadisStore, string, []string) {
 	return s, buildID, []string{"chunk-1", "chunk-2"}
 }
 
-func TestVanadisStore_ChunkLifecycle(t *testing.T) {
-	ctx := context.Background()
+func setTestBuildStatus(s *memoryVanadisStore, bID, status string) {
+	b := s.builds[bID]
+	b.Status = status
+	s.builds[bID] = b
+}
 
-	t.Run("GetChunk_Success", func(t *testing.T) {
-		s, bID, cIDs := setupTestStoreWithBuild()
-		c, b, err := s.GetChunk(ctx, cIDs[0])
-		if err != nil || c == nil || b == nil {
-			t.Fatalf("GetChunk error: %v, c=%v, b=%v", err, c, b)
+// attachPRs links prs[i] to chunk-(i+1) of the setupTestStoreWithBuild fixture.
+func attachPRs(t *testing.T, s *memoryVanadisStore, prs ...int) {
+	t.Helper()
+	for i, pr := range prs {
+		if _, _, _, err := s.AttachChunkPR(context.Background(), AttachChunkPRRequest{ChunkID: fmt.Sprintf("chunk-%d", i+1), PRNumber: pr, Repo: "aerial"}); err != nil {
+			t.Fatalf("attach pr %d: %v", pr, err)
 		}
-		if c.ID != cIDs[0] || b.ID != bID {
-			t.Errorf("got c.ID=%q, b.ID=%q, want %q, %q", c.ID, b.ID, cIDs[0], bID)
-		}
-	})
+	}
+}
 
-	t.Run("GetChunk_NotFound", func(t *testing.T) {
-		s, _, _ := setupTestStoreWithBuild()
-		c, b, err := s.GetChunk(ctx, "nonexistent")
-		if !errors.Is(err, ErrChunkNotFound) || c != nil || b != nil {
-			t.Errorf("expected ErrChunkNotFound, got err=%v", err)
+// replayPREvents applies earlier CI-failure and merge webhooks for aerial PRs, in that order.
+func replayPREvents(t *testing.T, s *memoryVanadisStore, failedPRs, mergedPRs []int) {
+	t.Helper()
+	for _, pr := range failedPRs {
+		if _, _, _, err := s.FailChunkByPR(context.Background(), "aerial", pr); err != nil {
+			t.Fatalf("fail pr %d: %v", pr, err)
 		}
-	})
+	}
+	for _, pr := range mergedPRs {
+		if _, err := s.AdvanceChunkByPR(context.Background(), "aerial", pr); err != nil {
+			t.Fatalf("advance pr %d: %v", pr, err)
+		}
+	}
+}
 
-	t.Run("GetChunk_BuildNotFound", func(t *testing.T) {
-		s, _, cIDs := setupTestStoreWithBuild()
-		delete(s.builds, "build-test-1")
-		c, b, err := s.GetChunk(ctx, cIDs[0])
-		if !errors.Is(err, ErrBuildNotFound) || c != nil || b != nil {
-			t.Errorf("expected ErrBuildNotFound, got err=%v", err)
-		}
-	})
-
-	t.Run("AttachChunkPR_Success", func(t *testing.T) {
-		s, _, cIDs := setupTestStoreWithBuild()
-		_, _, threadID, err := s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"})
-		if err != nil || threadID != "123456789012345678" {
-			t.Fatalf("AttachChunkPR err=%v, threadID=%q", err, threadID)
-		}
-		c, _, _ := s.GetChunk(ctx, cIDs[0])
-		if c.PRNumber != 101 || c.Status != "pr_opened" {
-			t.Errorf("expected pr_number=101, status=pr_opened, got %+v", c)
-		}
-
-		_, _, threadID, err = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 102, Repo: "aerial"})
-		if err != nil || threadID != "123456789012345678" {
-			t.Fatalf("AttachChunkPR overwrite err=%v, threadID=%q", err, threadID)
-		}
-		c, _, _ = s.GetChunk(ctx, cIDs[0])
-		if c.PRNumber != 102 {
-			t.Errorf("expected overwritten pr_number=102, got %d", c.PRNumber)
-		}
-	})
-
-	t.Run("AttachChunkPR_Errors", func(t *testing.T) {
-		tests := []struct {
-			name        string
-			chunkID     string
-			repo        string
-			buildStatus string
-			chunkStatus string
-			wantErr     error
-			wantSubstr  string
-		}{
-			{name: "mismatched repo", chunkID: "chunk-1", repo: "other-repo", wantSubstr: "does not match"},
-			{name: "chunk not found", chunkID: "missing", repo: "aerial", wantErr: ErrChunkNotFound},
-			{name: "empty chunk ID and empty repo", chunkID: "", repo: "", wantSubstr: "repo is required for standalone attach"},
-			{name: "parent build completed returns ErrBuildConflict", chunkID: "chunk-1", repo: "aerial", buildStatus: "completed", wantErr: ErrBuildConflict},
-			{name: "parent build cancelled returns ErrBuildConflict", chunkID: "chunk-1", repo: "aerial", buildStatus: "cancelled", wantErr: ErrBuildConflict},
-			{name: "chunk cancelled returns ErrBuildConflict", chunkID: "chunk-1", repo: "aerial", chunkStatus: "cancelled", wantErr: ErrBuildConflict},
-		}
-
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				s, bID, cIDs := setupTestStoreWithBuild()
-				_, _, _, _ = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"})
-				if tc.buildStatus != "" {
-					b := s.builds[bID]
-					b.Status = tc.buildStatus
-					s.builds[bID] = b
+func TestVanadisStore_GetChunk(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		chunkID      string
+		missingBuild bool
+		wantErrIs    error
+		wantChunkID  string
+		wantBuildID  string
+	}{
+		{name: "found", chunkID: "chunk-1", wantChunkID: "chunk-1", wantBuildID: "build-test-1"},
+		{name: "chunk not found", chunkID: "nonexistent", wantErrIs: ErrChunkNotFound},
+		{name: "build not found", chunkID: "chunk-1", missingBuild: true, wantErrIs: ErrBuildNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, bID, _ := setupTestStoreWithBuild()
+			if tc.missingBuild {
+				delete(s.builds, bID)
+			}
+			c, b, err := s.GetChunk(context.Background(), tc.chunkID)
+			if assertStoreErr(t, err, tc.wantErrIs, false) {
+				if c != nil || b != nil {
+					t.Errorf("GetChunk returned chunk %+v build %+v alongside error", c, b)
 				}
-				if tc.chunkStatus != "" {
-					setTestChunkStatus(s, bID, tc.chunkID, tc.chunkStatus)
-				}
-				_, _, _, err := s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: tc.chunkID, PRNumber: 101, Repo: tc.repo})
-				if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
-					t.Errorf("expected error %v, got %v", tc.wantErr, err)
-				}
-				if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
-					t.Errorf("expected error containing %q, got %v", tc.wantSubstr, err)
-				}
-			})
-		}
-	})
+				return
+			}
+			if c.ID != tc.wantChunkID || b.ID != tc.wantBuildID {
+				t.Errorf("got c.ID=%q, b.ID=%q, want %q, %q", c.ID, b.ID, tc.wantChunkID, tc.wantBuildID)
+			}
+		})
+	}
+}
 
-	t.Run("GetChunkByPR_Lifecycle", func(t *testing.T) {
-		s, bID, cIDs := setupTestStoreWithBuild()
-		_, _, _, _ = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"})
+func TestVanadisStore_AttachChunkPR(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		priorPR      int
+		buildStatus  string
+		chunkStatus  string
+		chunkID      string
+		repo         string
+		prNumber     int
+		wantErrIs    error
+		wantSubstr   string
+		wantThreadID string
+		wantPR       int
+		wantStatus   string
+	}{
+		{name: "attaches pr to pending chunk", chunkID: "chunk-1", repo: "aerial", prNumber: 101, wantThreadID: "123456789012345678", wantPR: 101, wantStatus: "pr_opened"},
+		{name: "overwrites previously attached pr", priorPR: 101, chunkID: "chunk-1", repo: "aerial", prNumber: 102, wantThreadID: "123456789012345678", wantPR: 102, wantStatus: "pr_opened"},
+		{name: "mismatched repo", priorPR: 101, chunkID: "chunk-1", repo: "other-repo", prNumber: 101, wantSubstr: "does not match"},
+		{name: "chunk not found", priorPR: 101, chunkID: "missing", repo: "aerial", prNumber: 101, wantErrIs: ErrChunkNotFound},
+		{name: "empty chunk ID and empty repo", priorPR: 101, chunkID: "", repo: "", prNumber: 101, wantSubstr: "repo is required for standalone attach"},
+		{name: "parent build completed returns ErrBuildConflict", priorPR: 101, buildStatus: "completed", chunkID: "chunk-1", repo: "aerial", prNumber: 101, wantErrIs: ErrBuildConflict},
+		{name: "parent build cancelled returns ErrBuildConflict", priorPR: 101, buildStatus: "cancelled", chunkID: "chunk-1", repo: "aerial", prNumber: 101, wantErrIs: ErrBuildConflict},
+		{name: "chunk cancelled returns ErrBuildConflict", priorPR: 101, chunkStatus: "cancelled", chunkID: "chunk-1", repo: "aerial", prNumber: 101, wantErrIs: ErrBuildConflict},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, bID, _ := setupTestStoreWithBuild()
+			if tc.priorPR > 0 {
+				attachPRs(t, s, tc.priorPR)
+			}
+			if tc.buildStatus != "" {
+				setTestBuildStatus(s, bID, tc.buildStatus)
+			}
+			if tc.chunkStatus != "" {
+				setTestChunkStatus(s, bID, tc.chunkID, tc.chunkStatus)
+			}
+			_, _, threadID, err := s.AttachChunkPR(context.Background(), AttachChunkPRRequest{ChunkID: tc.chunkID, PRNumber: tc.prNumber, Repo: tc.repo})
+			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+			}
+			if assertStoreErr(t, err, tc.wantErrIs, tc.wantSubstr != "") {
+				return
+			}
+			c, _, _ := s.GetChunk(context.Background(), tc.chunkID)
+			if threadID != tc.wantThreadID || c.PRNumber != tc.wantPR || c.Status != tc.wantStatus {
+				t.Errorf("AttachChunkPR thread=%q chunk pr=%d status=%q, want %q %d %q", threadID, c.PRNumber, c.Status, tc.wantThreadID, tc.wantPR, tc.wantStatus)
+			}
+		})
+	}
+}
 
-		res, err := s.GetChunkByPR(ctx, "aerial", 101)
-		if err != nil || res == nil || !res.Matched || !res.HasRemainingChunks || res.BuildID != bID || res.ChunkID != cIDs[0] || res.NextChunkMode != "action" {
-			t.Fatalf("unexpected GetChunkByPR result: %+v, err: %v", res, err)
-		}
+func TestVanadisStore_GetChunkByPR(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		buildStatus string
+		repo        string
+		prNumber    int
+		want        VanadisChunkPRLookup
+	}{
+		{name: "matches attached pr with next action chunk", buildStatus: "running", repo: "aerial", prNumber: 101, want: VanadisChunkPRLookup{Matched: true, ChunkID: "chunk-1", BuildID: "build-test-1", Effort: "low", HasRemainingChunks: true, NextChunkMode: "action"}},
+		{name: "unknown pr is unmatched", buildStatus: "running", repo: "aerial", prNumber: 999},
+		{name: "cancelled build is unmatchable", buildStatus: "cancelled", repo: "aerial", prNumber: 101},
+		{name: "invalid params are unmatched", buildStatus: "running", repo: "", prNumber: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, bID, _ := setupTestStoreWithBuild()
+			attachPRs(t, s, 101)
+			setTestBuildStatus(s, bID, tc.buildStatus)
+			got, err := s.GetChunkByPR(context.Background(), tc.repo, tc.prNumber)
+			if err != nil {
+				t.Fatalf("GetChunkByPR: %v", err)
+			}
+			if *got != tc.want {
+				t.Errorf("GetChunkByPR = %+v, want %+v", *got, tc.want)
+			}
+		})
+	}
+}
 
-		emptyRes, err := s.GetChunkByPR(ctx, "aerial", 999)
-		if err != nil || emptyRes.Matched {
-			t.Fatalf("expected unmatched, got %+v", emptyRes)
-		}
+func TestVanadisStore_AdvanceChunkByPR(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		prs             []int
+		failedPRs       []int
+		mergedPRs       []int
+		repo            string
+		prNumber        int
+		want            advanceOutcome
+		wantBuildStatus string
+	}{
+		{name: "first merge advances to next chunk", prs: []int{101, 102}, repo: "aerial", prNumber: 101, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: 1, BuildStatus: "running", Chunks: 2}, wantBuildStatus: "running"},
+		{name: "merge recovers failed build and chunk", prs: []int{111}, failedPRs: []int{111}, repo: "aerial", prNumber: 111, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: 1, BuildStatus: "running", Chunks: 2}, wantBuildStatus: "running"},
+		{name: "repeat merge does not advance", prs: []int{101, 102}, mergedPRs: []int{101}, repo: "aerial", prNumber: 101, want: advanceOutcome{Matched: true, NextChunkIndex: 1, BuildStatus: "running", Chunks: 2}, wantBuildStatus: "running"},
+		{name: "last merge completes build", prs: []int{101, 102}, mergedPRs: []int{101}, repo: "aerial", prNumber: 102, want: advanceOutcome{Matched: true, Advanced: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed", Chunks: 2}, wantBuildStatus: "completed"},
+		{name: "repeat merge on completed build returns chunks without advancing", prs: []int{101, 102}, mergedPRs: []int{101, 102}, repo: "aerial", prNumber: 102, want: advanceOutcome{Matched: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed", Chunks: 2}, wantBuildStatus: "completed"},
+		{name: "unknown pr is unmatched", prs: []int{101, 102}, repo: "aerial", prNumber: 999, wantBuildStatus: "running"},
+		{name: "invalid params are unmatched", prs: []int{101, 102}, repo: "", prNumber: 0, wantBuildStatus: "running"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, bID, _ := setupTestStoreWithBuild()
+			attachPRs(t, s, tc.prs...)
+			replayPREvents(t, s, tc.failedPRs, tc.mergedPRs)
+			res, err := s.AdvanceChunkByPR(context.Background(), tc.repo, tc.prNumber)
+			if err != nil {
+				t.Fatalf("AdvanceChunkByPR: %v", err)
+			}
+			if got := outcomeOf(res); got != tc.want {
+				t.Errorf("AdvanceChunkByPR = %+v, want %+v", got, tc.want)
+			}
+			if b, _, _ := s.GetBuild(context.Background(), bID); b.Status != tc.wantBuildStatus {
+				t.Errorf("stored build status = %q, want %q", b.Status, tc.wantBuildStatus)
+			}
+		})
+	}
+}
 
-		b := s.builds[bID]
-		b.Status = "cancelled"
-		s.builds[bID] = b
-		cancRes, err := s.GetChunkByPR(ctx, "aerial", 101)
-		if err != nil || cancRes.Matched {
-			t.Errorf("expected cancelled build to be unmatchable, got %+v", cancRes)
-		}
-
-		invRes, err := s.GetChunkByPR(ctx, "", 0)
-		if err != nil || invRes.Matched {
-			t.Errorf("expected empty lookup for invalid params, got %+v", invRes)
-		}
-	})
-
-	t.Run("AdvanceChunkByPR_Lifecycle", func(t *testing.T) {
-		s, bID, cIDs := setupTestStoreWithBuild()
-		_, _, _, _ = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"})
-		_, _, _, _ = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[1], PRNumber: 102, Repo: "aerial"})
-
-		adv1, err := s.AdvanceChunkByPR(ctx, "aerial", 101)
-		if err != nil || adv1 == nil || !adv1.Matched || !adv1.Advanced || adv1.BuildCompleted || adv1.NextChunkIndex != 1 {
-			t.Fatalf("unexpected adv1: %+v, err: %v", adv1, err)
-		}
-
-		sRec, bRecID, cRecIDs := setupTestStoreWithBuild()
-		_, _, _, _ = sRec.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cRecIDs[0], PRNumber: 111, Repo: "aerial"})
-		_, _, _, _ = sRec.FailChunkByPR(ctx, "aerial", 111)
-		advRecov, err := sRec.AdvanceChunkByPR(ctx, "aerial", 111)
-		if err != nil || advRecov == nil || !advRecov.Matched || !advRecov.Advanced || advRecov.BuildStatus != "running" || advRecov.NextChunkIndex != 1 {
-			t.Fatalf("expected failed build/chunk to recover on PR merge, got %+v, err: %v", advRecov, err)
-		}
-		if bRec, _, _ := sRec.GetBuild(ctx, bRecID); bRec.Status != "running" {
-			t.Fatalf("expected recovered build status running, got %q", bRec.Status)
-		}
-
-		adv1Repeat, err := s.AdvanceChunkByPR(ctx, "aerial", 101)
-		if err != nil || adv1Repeat == nil || !adv1Repeat.Matched || adv1Repeat.Advanced {
-			t.Fatalf("expected adv1Repeat to not advance, got %+v", adv1Repeat)
-		}
-
-		adv2, err := s.AdvanceChunkByPR(ctx, "aerial", 102)
-		if err != nil || adv2 == nil || !adv2.Matched || !adv2.Advanced || !adv2.BuildCompleted || adv2.NextChunkIndex != -1 || adv2.BuildStatus != "completed" {
-			t.Fatalf("unexpected adv2: %+v, err: %v", adv2, err)
-		}
-
-		adv2Repeat, err := s.AdvanceChunkByPR(ctx, "aerial", 102)
-		if err != nil || adv2Repeat == nil || !adv2Repeat.Matched || adv2Repeat.Advanced || !adv2Repeat.BuildCompleted || len(adv2Repeat.Chunks) != 2 {
-			t.Fatalf("expected adv2Repeat to return completed with chunks populated and Advanced=false, got %+v, err: %v", adv2Repeat, err)
-		}
-
-		b, _, _ := s.GetBuild(ctx, bID)
-		if b.Status != "completed" {
-			t.Errorf("expected build status completed, got %q", b.Status)
-		}
-
-		advUnmatched, err := s.AdvanceChunkByPR(ctx, "aerial", 999)
-		if err != nil || advUnmatched.Matched {
-			t.Errorf("expected unmatched advance, got %+v", advUnmatched)
-		}
-
-		advInvalid, err := s.AdvanceChunkByPR(ctx, "", 0)
-		if err != nil || advInvalid.Matched {
-			t.Errorf("expected unmatched advance for invalid params, got %+v", advInvalid)
-		}
-	})
-
-	t.Run("FailChunkByPR_Lifecycle", func(t *testing.T) {
-		s, bID, cIDs := setupTestStoreWithBuild()
-		_, _, _, _ = s.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"})
-
-		bIDGot, cIDGot, failed, err := s.FailChunkByPR(ctx, "aerial", 101)
-		if err != nil || !failed || bIDGot != bID || cIDGot != cIDs[0] {
-			t.Fatalf("FailChunkByPR got (%s, %s, %v, %v)", bIDGot, cIDGot, failed, err)
-		}
-		c, b, _ := s.GetChunk(ctx, cIDs[0])
-		if c.Status != "failed" || b.Status != "failed" {
-			t.Errorf("expected failed status, got c=%s, b=%s", c.Status, b.Status)
-		}
-
-		_, _, repeatFailed, _ := s.FailChunkByPR(ctx, "aerial", 101)
-		if repeatFailed {
-			t.Error("expected second fail call to not fail already failed chunk")
-		}
-
-		_, _, unkFailed, _ := s.FailChunkByPR(ctx, "aerial", 999)
-		if unkFailed {
-			t.Error("expected fail on unknown PR to return false")
-		}
-
-		_, _, invFailed, _ := s.FailChunkByPR(ctx, "", 0)
-		if invFailed {
-			t.Error("expected fail on invalid args to return false")
-		}
-	})
+func TestVanadisStore_FailChunkByPR(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		failedPRs       []int
+		repo            string
+		prNumber        int
+		wantFailed      bool
+		wantBuildID     string
+		wantChunkID     string
+		wantChunkStatus string
+		wantBuildStatus string
+	}{
+		{name: "fails attached chunk and running build", repo: "aerial", prNumber: 101, wantFailed: true, wantBuildID: "build-test-1", wantChunkID: "chunk-1", wantChunkStatus: "failed", wantBuildStatus: "failed"},
+		{name: "already failed chunk is not failed again", failedPRs: []int{101}, repo: "aerial", prNumber: 101, wantChunkStatus: "failed", wantBuildStatus: "failed"},
+		{name: "unknown pr does not fail", repo: "aerial", prNumber: 999, wantChunkStatus: "pr_opened", wantBuildStatus: "running"},
+		{name: "invalid args do not fail", repo: "", prNumber: 0, wantChunkStatus: "pr_opened", wantBuildStatus: "running"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, _, _ := setupTestStoreWithBuild()
+			attachPRs(t, s, 101)
+			replayPREvents(t, s, tc.failedPRs, nil)
+			bID, cID, failed, err := s.FailChunkByPR(context.Background(), tc.repo, tc.prNumber)
+			if err != nil || failed != tc.wantFailed || bID != tc.wantBuildID || cID != tc.wantChunkID {
+				t.Fatalf("FailChunkByPR = (%q, %q, %v, %v), want (%q, %q, %v, nil)", bID, cID, failed, err, tc.wantBuildID, tc.wantChunkID, tc.wantFailed)
+			}
+			c, b, _ := s.GetChunk(context.Background(), "chunk-1")
+			if c.Status != tc.wantChunkStatus || b.Status != tc.wantBuildStatus {
+				t.Errorf("stored chunk=%q build=%q, want chunk=%q build=%q", c.Status, b.Status, tc.wantChunkStatus, tc.wantBuildStatus)
+			}
+		})
+	}
 }
 
 func TestRepoMatching_TableDriven(t *testing.T) {
@@ -836,6 +619,18 @@ func TestVanadisStore_UpdateBuild(t *testing.T) {
 	}
 }
 
+// seededStore returns a memory store holding build (when non-nil) and its chunks.
+func seededStore(build *VanadisBuild, chunks []VanadisChunk) *memoryVanadisStore {
+	s := newMemoryVanadisStore()
+	if build != nil {
+		s.builds[build.ID] = *build
+	}
+	if build != nil && len(chunks) > 0 {
+		s.chunks[build.ID] = chunks
+	}
+	return s
+}
+
 func TestVanadisStore_UpdateChunk(t *testing.T) {
 	ctx := context.Background()
 	tests := []struct {
@@ -958,31 +753,11 @@ func TestVanadisStore_UpdateChunk(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newMemoryVanadisStore()
-			if tc.storeErr != nil {
-				s.updateChunkErr = tc.storeErr
-			}
-			if tc.seedBuild != nil {
-				s.builds[tc.seedBuild.ID] = *tc.seedBuild
-			}
-			if len(tc.seedChunks) > 0 {
-				s.chunks[tc.seedBuild.ID] = tc.seedChunks
-			}
+			s := seededStore(tc.seedBuild, tc.seedChunks)
+			s.updateChunkErr = tc.storeErr
 			got, err := s.UpdateChunk(ctx, tc.buildID, tc.chunkRef, tc.req)
-			if tc.wantErrIs != nil {
-				if !errors.Is(err, tc.wantErrIs) {
-					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
-				}
+			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return
-			}
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
 			}
 			if got.Repo != tc.wantRepo || got.Title != tc.wantTitle || got.Instructions != tc.wantInstr || got.Effort != tc.wantEffort || len(got.TargetFiles) != tc.wantFilesLen || len(got.TargetSymbols) != tc.wantSymsLen {
 				t.Errorf("unexpected updated chunk: %+v", got)
@@ -1114,31 +889,11 @@ func TestVanadisStore_AppendChunks(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newMemoryVanadisStore()
-			if tc.storeErr != nil {
-				s.appendChunksErr = tc.storeErr
-			}
-			if tc.seedBuild != nil {
-				s.builds[tc.seedBuild.ID] = *tc.seedBuild
-			}
-			if len(tc.seedChunks) > 0 {
-				s.chunks[tc.seedBuild.ID] = tc.seedChunks
-			}
+			s := seededStore(tc.seedBuild, tc.seedChunks)
+			s.appendChunksErr = tc.storeErr
 			got, err := s.AppendChunks(ctx, tc.buildID, tc.inputs)
-			if tc.wantErrIs != nil {
-				if !errors.Is(err, tc.wantErrIs) {
-					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
-				}
+			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return
-			}
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
 			}
 			if len(got) != tc.wantCount {
 				t.Fatalf("got %d chunks, want %d", len(got), tc.wantCount)
@@ -1248,31 +1003,11 @@ func TestVanadisStore_RemoveChunk(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newMemoryVanadisStore()
-			if tc.storeErr != nil {
-				s.removeChunkErr = tc.storeErr
-			}
-			if tc.seedBuild != nil {
-				s.builds[tc.seedBuild.ID] = *tc.seedBuild
-			}
-			if len(tc.seedChunks) > 0 {
-				s.chunks[tc.seedBuild.ID] = tc.seedChunks
-			}
+			s := seededStore(tc.seedBuild, tc.seedChunks)
+			s.removeChunkErr = tc.storeErr
 			removed, remaining, err := s.RemoveChunk(ctx, tc.buildID, tc.chunkRef)
-			if tc.wantErrIs != nil {
-				if !errors.Is(err, tc.wantErrIs) {
-					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
-				}
+			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return
-			}
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
 			}
 			if removed.ID != tc.wantRemovedID {
 				t.Errorf("removed.ID = %q, want %q", removed.ID, tc.wantRemovedID)
@@ -1286,26 +1021,60 @@ func TestVanadisStore_RemoveChunk(t *testing.T) {
 
 const wantStallNotice = "[VANADIS CHUNK STALLED]\nYour previous turn for chunk c-stall ended without a successful `aerial-pr.sh submit` and without calling the vanadis MCP tool fail_chunk, so no PR was linked. This is the single stall retry: reuse the existing scratch workspace from your prior attempt if it still exists instead of re-initializing, finish the remaining implementation and verification in the foreground, then submit with `--vanadis-chunk c-stall` or call fail_chunk with the blocker. If this turn also ends without either, the chunk and build will be failed.\n\n"
 
+// stallDispatch is the observable shape of one /dispatch request made by a stall re-dispatch.
+type stallDispatch struct {
+	ID, SessionID, TargetID, ChunkID, Notice string
+	SkipIfActive                             bool
+}
+
+// stallBrain records /dispatch and /prompt traffic from ProcessStalledChunkCheck.
+type stallBrain struct {
+	mu           sync.Mutex
+	dispatchCode int
+	dispatches   []stallDispatch
+	wakeTails    []string
+}
+
+func (b *stallBrain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch r.URL.Path {
+	case "/dispatch":
+		var req BrainDispatchRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		notice, _, _ := strings.Cut(req.Prompt, "[VANADIS BUILD CHUNK EXECUTION]")
+		b.dispatches = append(b.dispatches, stallDispatch{ID: req.ID, SessionID: req.SessionID, TargetID: req.TargetID, ChunkID: req.VanadisChunkID, Notice: notice, SkipIfActive: req.SkipIfActive})
+		w.WriteHeader(b.dispatchCode)
+	case "/prompt":
+		var p map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		b.wakeTails = append(b.wakeTails, p["prompt"][strings.LastIndex(p["prompt"], "\n")+1:])
+		w.WriteHeader(http.StatusAccepted)
+	default:
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
 func TestProcessStalledChunkCheck(t *testing.T) {
 	t.Parallel()
 	if NewVanadisServer(Config{}, nil, nil).ProcessStalledChunkCheck(context.Background(), "c-stall") == nil {
 		t.Fatal("expected error when store is nil")
 	}
+	redispatch := []stallDispatch{{ID: "vanadis-c-stall-turn-1", SessionID: "vanadis-c-stall", TargetID: "123456789012345678", ChunkID: "c-stall", Notice: wantStallNotice, SkipIfActive: true}}
 	tests := []struct {
 		name                         string
 		claimID, status, buildStatus string
 		prNumber, priorNudges        int
 		dispatchID                   string
 		dispatchCode                 int
-		wantNotices                  []string
-		wantSessions                 []string
+		wantDispatches               []stallDispatch
 		wantChunkStatus              string
 		wantBuildStatus              string
 		wantWakeTails                []string
 	}{
-		{name: "first stall re-dispatches with notice", claimID: "c-stall", status: "running", buildStatus: "running", dispatchCode: http.StatusAccepted, wantNotices: []string{wantStallNotice}, wantSessions: []string{"vanadis-c-stall"}, wantChunkStatus: "running", wantBuildStatus: "running"},
+		{name: "first stall re-dispatches with notice", claimID: "c-stall", status: "running", buildStatus: "running", dispatchCode: http.StatusAccepted, wantDispatches: redispatch, wantChunkStatus: "running", wantBuildStatus: "running"},
 		{name: "second stall fails chunk and wakes thread", claimID: "c-stall", status: "running", buildStatus: "running", priorNudges: 1, dispatchCode: http.StatusAccepted, wantChunkStatus: "failed", wantBuildStatus: "failed", wantWakeTails: []string{"Chunk 1/1 (Stalled Chunk) failed: chunk stalled twice: its turn ended without submitting a PR or calling fail_chunk, both on the original dispatch and on the stall re-dispatch"}},
-		{name: "re-dispatch failure fails chunk", claimID: "c-stall", status: "running", buildStatus: "running", dispatchCode: http.StatusInternalServerError, wantNotices: []string{wantStallNotice}, wantSessions: []string{"vanadis-c-stall"}, wantChunkStatus: "failed", wantBuildStatus: "failed", wantWakeTails: []string{"Chunk 1/1 (Stalled Chunk) failed: chunk stalled (turn ended without submitting a PR or calling fail_chunk) and the stall re-dispatch failed: /dispatch returned status 500:"}},
+		{name: "re-dispatch failure fails chunk", claimID: "c-stall", status: "running", buildStatus: "running", dispatchCode: http.StatusInternalServerError, wantDispatches: redispatch, wantChunkStatus: "failed", wantBuildStatus: "failed", wantWakeTails: []string{"Chunk 1/1 (Stalled Chunk) failed: chunk stalled (turn ended without submitting a PR or calling fail_chunk) and the stall re-dispatch failed: /dispatch returned status 500:"}},
 		{name: "linked pr is left alone", claimID: "c-stall", status: "pr_opened", buildStatus: "running", prNumber: 9, dispatchCode: http.StatusAccepted, wantChunkStatus: "pr_opened", wantBuildStatus: "running"},
 		{name: "missing chunk is skipped", claimID: "c-gone", status: "running", buildStatus: "running", dispatchCode: http.StatusAccepted, wantChunkStatus: "running", wantBuildStatus: "running"},
 		{name: "duplicate delivery with mismatched dispatch id is noop", claimID: "c-stall", status: "running", buildStatus: "running", priorNudges: 1, dispatchID: "vanadis-c-stall-turn-0", dispatchCode: http.StatusAccepted, wantChunkStatus: "running", wantBuildStatus: "running"},
@@ -1313,30 +1082,8 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mu sync.Mutex
-			var notices, sessions, wakeTails, targetIDs, chunkIDs []string
-			var dispatchReqs []BrainDispatchRequest
-			brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				defer mu.Unlock()
-				switch r.URL.Path {
-				case "/dispatch":
-					var req BrainDispatchRequest
-					_ = json.NewDecoder(r.Body).Decode(&req)
-					dispatchReqs = append(dispatchReqs, req)
-					notice, _, _ := strings.Cut(req.Prompt, "[VANADIS BUILD CHUNK EXECUTION]")
-					notices, sessions = append(notices, notice), append(sessions, req.SessionID)
-					targetIDs, chunkIDs = append(targetIDs, req.TargetID), append(chunkIDs, req.VanadisChunkID)
-					w.WriteHeader(tc.dispatchCode)
-				case "/prompt":
-					var p map[string]string
-					_ = json.NewDecoder(r.Body).Decode(&p)
-					wakeTails = append(wakeTails, p["prompt"][strings.LastIndex(p["prompt"], "\n")+1:])
-					w.WriteHeader(http.StatusAccepted)
-				default:
-					w.WriteHeader(http.StatusOK)
-				}
-			}))
+			recorder := &stallBrain{dispatchCode: tc.dispatchCode}
+			brain := httptest.NewServer(recorder)
 			defer brain.Close()
 			store := newMemoryVanadisStore()
 			c := mkChunk("c-stall", "b-stall", 0, "Stalled Chunk", "do it", "low", tc.status)
@@ -1348,21 +1095,13 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			b, chunks, _ := store.GetBuild(context.Background(), "b-stall")
-			mu.Lock()
-			defer mu.Unlock()
-			if !reflect.DeepEqual(notices, tc.wantNotices) || !reflect.DeepEqual(sessions, tc.wantSessions) {
-				t.Fatalf("dispatches notices=%q sessions=%v, want notices=%q sessions=%v", notices, sessions, tc.wantNotices, tc.wantSessions)
+			recorder.mu.Lock()
+			defer recorder.mu.Unlock()
+			if !reflect.DeepEqual(recorder.dispatches, tc.wantDispatches) {
+				t.Fatalf("dispatches = %+v, want %+v", recorder.dispatches, tc.wantDispatches)
 			}
-			if tc.name == "first stall re-dispatches with notice" {
-				if !reflect.DeepEqual(targetIDs, []string{"123456789012345678"}) || !reflect.DeepEqual(chunkIDs, []string{"c-stall"}) {
-					t.Fatalf("dispatches targetIDs=%v chunkIDs=%v, want [123456789012345678], [c-stall]", targetIDs, chunkIDs)
-				}
-				if len(dispatchReqs) != 1 || dispatchReqs[0].ID != "vanadis-c-stall-turn-1" || !dispatchReqs[0].SkipIfActive {
-					t.Fatalf("dispatchReqs = %+v, want ID 'vanadis-c-stall-turn-1' and SkipIfActive true", dispatchReqs)
-				}
-			}
-			if !reflect.DeepEqual(wakeTails, tc.wantWakeTails) {
-				t.Fatalf("wake tails = %q, want %q", wakeTails, tc.wantWakeTails)
+			if !reflect.DeepEqual(recorder.wakeTails, tc.wantWakeTails) {
+				t.Fatalf("wake tails = %q, want %q", recorder.wakeTails, tc.wantWakeTails)
 			}
 			if chunks[0].Status != tc.wantChunkStatus || b.Status != tc.wantBuildStatus {
 				t.Fatalf("chunk=%q build=%q, want chunk=%q build=%q", chunks[0].Status, b.Status, tc.wantChunkStatus, tc.wantBuildStatus)
