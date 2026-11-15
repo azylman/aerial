@@ -233,6 +233,13 @@ func TestServer_HandleReportJob(t *testing.T) {
 			wantNakDelay: 1 * time.Second,
 		},
 		{
+			name:        "reporter error drops after max deliveries",
+			msg:         &mockJobMsg{data: []byte(`{"call_id":"c1"}`), delivered: 5},
+			reporterErr: true,
+			wantErr:     false,
+			wantTermed:  true,
+		},
+		{
 			name:        "successful delivery transitions pending call report to delivered",
 			msg:         &mockJobMsg{data: []byte(`{"call_id":"call-rep-ok"}`), delivered: 1},
 			checkCallID: "call-rep-ok",

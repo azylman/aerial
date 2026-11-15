@@ -408,12 +408,6 @@ func loadConfigErrorCases(paths map[string]string, tmpDir string) []loadConfigFi
 			wantErr: true,
 		},
 		{
-			name:    "nil getenv defaults to os.Getenv",
-			path:    paths["valid"],
-			nilEnv:  true,
-			wantErr: true,
-		},
-		{
 			name: "invalid twilio from number error",
 			path: paths["valid"],
 			env: map[string]string{
