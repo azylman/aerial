@@ -86,6 +86,12 @@ default_backup_agent = "claude-code"
 review_backup_agent = "claude-code"
 default_backup_model = "sonnet"
 review_backup_model = "sonnet"
+EOF
+)
+    # roborev reads synthesis backups only inside [ci] and [review.panels.*];
+    # a top-level synthesis_backup_* key is silently ignored.
+    CI_SYNTHESIS_BACKUP='synthesis_backup_agent = "claude-code"'
+    PANEL_SYNTHESIS_BACKUP=$(cat <<'EOF'
 synthesis_backup_agent = "claude-code"
 synthesis_backup_model = "sonnet"
 EOF
@@ -94,9 +100,10 @@ EOF
     BACKUP_AGENT_SETTINGS=$(cat <<'EOF'
 default_backup_agent = "gemini"
 review_backup_agent = "gemini"
-synthesis_backup_agent = "gemini"
 EOF
 )
+    CI_SYNTHESIS_BACKUP='synthesis_backup_agent = "gemini"'
+    PANEL_SYNTHESIS_BACKUP='synthesis_backup_agent = "gemini"'
   fi
 
   cat > /root/.roborev/config.toml <<EOF
@@ -132,6 +139,7 @@ agents = ["codex"]
 review_types = ["default", "test-value"]
 min_severity = "medium"
 upsert_comments = true
+${CI_SYNTHESIS_BACKUP}
 
 [review]
 default_panel = "ci"
@@ -150,6 +158,7 @@ review_type = "test-value"
 members = ["default", "test-value"]
 synthesis_agent = "codex"
 synthesis_model = "gpt-6.1-sol"
+${PANEL_SYNTHESIS_BACKUP}
 
 review_guidelines = """
 Global Aerial Stack & Cluster Invariants (applies across all repositories):
@@ -833,6 +842,13 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
     elif grep -q "^Skipped:" "${raw_out}"; then
       cat "${raw_out}"
       exit 0
+    elif grep -qi "quota" "${raw_out}"; then
+      # The stateless ci review below has no agent failover, so after a quota
+      # failure it can only post a misleading "Review Skipped (quota)" comment
+      # that hides member reviews the backup agent already completed.
+      cat "${raw_out}" >&2
+      echo "ERROR: roborev daemon review failed on agent quota (exit ${rc}); not falling back to stateless ci review" >&2
+      exit 1
     else
       cat "${raw_out}" >&2
       echo "WARN: roborev daemon review did not complete (exit ${rc}); falling back to stateless ci review" >&2
