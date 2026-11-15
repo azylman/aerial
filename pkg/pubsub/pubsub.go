@@ -327,8 +327,17 @@ func isConsumerExists(err error) bool {
 // bound queue subscription exists for subject and returns its stream.
 // Compatible consumers are left untouched. Incompatible ones (legacy consumers
 // without a deliver group, a different group or filter, or pull consumers) are
-// recreated starting right after their ack floor so no acked message is
-// redelivered and no unacked message is skipped.
+// recreated starting right after their ack floor: nothing at or below the floor
+// is redelivered and no unacked message is skipped, but messages acked out of
+// order above the floor may be redelivered, so delivery stays at-least-once and
+// handlers must be idempotent.
+//
+// Concurrent migrations are tolerated but not serialized: JetStream has no
+// conditional delete, so two pods that both read the legacy consumer may each
+// delete and recreate it. The deterministic deliver subject and group keep
+// every pod's bound subscription receiving from whichever consumer survives;
+// the cost is redelivery of messages acked in that window, which the
+// at-least-once contract above already requires handlers to absorb.
 func (b *JetStreamBus) ensureDurableConsumer(ctx context.Context, subject, durable string) (string, error) {
 	opts := jsContextOpts(ctx)
 	stream, err := b.js.StreamNameBySubject(subject, opts...)

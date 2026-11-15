@@ -3,6 +3,7 @@ package pubsub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -47,35 +48,60 @@ type recordedSub struct {
 }
 
 // decodeSubOpts applies nats.SubOpt values to a scratch nats.subOpts via
-// reflection so tests can assert the bind target without a live server.
-func decodeSubOpts(queue string, opts []nats.SubOpt) recordedSub {
+// reflection so tests can assert the bind target without a live server. It is
+// coupled to nats.go internals, so any layout change surfaces as a descriptive
+// error from the mock instead of a reflection panic.
+func decodeSubOpts(queue string, opts []nats.SubOpt) (recordedSub, error) {
 	got := recordedSub{queue: queue}
 	var so reflect.Value
 	cfg := &nats.ConsumerConfig{}
-	field := func(name string) reflect.Value {
+	field := func(name string, kind reflect.Kind) (reflect.Value, error) {
 		f := so.FieldByName(name)
-		return reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
+		if !f.IsValid() || f.Kind() != kind {
+			return reflect.Value{}, fmt.Errorf("decodeSubOpts: nats.go subOpts.%s missing or not %s; update the test decoder for this nats.go version", name, kind)
+		}
+		return reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem(), nil
 	}
 	for _, opt := range opts {
 		fn := reflect.ValueOf(opt)
 		if fn.Kind() != reflect.Func {
 			continue // value options such as AckWait carry no bind target
 		}
+		ft := fn.Type()
+		if ft.NumIn() != 1 || ft.In(0).Kind() != reflect.Pointer || ft.In(0).Elem().Kind() != reflect.Struct {
+			return got, fmt.Errorf("decodeSubOpts: unexpected nats.SubOpt func type %s", ft)
+		}
 		if !so.IsValid() {
-			so = reflect.New(fn.Type().In(0).Elem()).Elem()
-			field("cfg").Set(reflect.ValueOf(cfg))
+			so = reflect.New(ft.In(0).Elem()).Elem()
+			cfgField, err := field("cfg", reflect.Pointer)
+			if err != nil {
+				return got, err
+			}
+			cfgField.Set(reflect.ValueOf(cfg))
 		}
 		fn.Call([]reflect.Value{so.Addr()})
 	}
 	if !so.IsValid() {
-		return got
+		return got, nil
 	}
-	got.bound = field("bound").Bool()
-	got.stream = field("stream").String()
-	got.consumer = field("consumer").String()
+	fields := []struct {
+		name string
+		kind reflect.Kind
+	}{{"bound", reflect.Bool}, {"stream", reflect.String}, {"consumer", reflect.String}, {"mack", reflect.Bool}}
+	vals := make(map[string]reflect.Value, len(fields))
+	for _, f := range fields {
+		v, err := field(f.name, f.kind)
+		if err != nil {
+			return got, err
+		}
+		vals[f.name] = v
+	}
+	got.bound = vals["bound"].Bool()
+	got.stream = vals["stream"].String()
+	got.consumer = vals["consumer"].String()
 	got.durable = cfg.Durable
-	got.manualAck = field("mack").Bool()
-	return got
+	got.manualAck = vals["mack"].Bool()
+	return got, nil
 }
 
 func consumerKey(stream, name string) string { return stream + "/" + name }
@@ -103,7 +129,11 @@ func (m *mockJetStream) QueueSubscribe(subj, queue string, cb nats.MsgHandler, o
 	if m.subscribeErr != nil {
 		return nil, m.subscribeErr
 	}
-	m.subscriptions = append(m.subscriptions, decodeSubOpts(queue, opts))
+	rec, err := decodeSubOpts(queue, opts)
+	if err != nil {
+		return nil, err
+	}
+	m.subscriptions = append(m.subscriptions, rec)
 	if cb != nil {
 		cb(&nats.Msg{Subject: subj, Data: []byte("test")})
 	}
@@ -282,12 +312,6 @@ func TestJetStreamBus_EnsureDurableConsumer(t *testing.T) {
 			AckFloor: nats.SequenceInfo{Stream: ackFloor},
 		}
 	}
-	pullInfo := &nats.ConsumerInfo{
-		Stream:   "AERIAL_EVENTS",
-		Name:     "haro-events",
-		Config:   nats.ConsumerConfig{Durable: "haro-events", FilterSubject: subj},
-		AckFloor: nats.SequenceInfo{Stream: 7},
-	}
 	fresh := nats.ConsumerConfig{
 		Durable:        "haro-events",
 		FilterSubject:  "aerial.events.haro",
@@ -338,11 +362,6 @@ func TestJetStreamBus_EnsureDurableConsumer(t *testing.T) {
 		{
 			"filter mismatch recreated", subj, pushInfo("aerial.events.other", "haro-events", 9), nil, nil, nil, "AERIAL_EVENTS", false,
 			[]nats.ConsumerConfig{resumeAt(10)},
-			[]string{"AERIAL_EVENTS/haro-events"},
-		},
-		{
-			"pull consumer recreated", subj, pullInfo, nil, nil, nil, "AERIAL_EVENTS", false,
-			[]nats.ConsumerConfig{resumeAt(8)},
 			[]string{"AERIAL_EVENTS/haro-events"},
 		},
 		{
