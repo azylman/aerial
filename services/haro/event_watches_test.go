@@ -93,9 +93,11 @@ func TestPureHelpers_ValidateEventWatchSpec(t *testing.T) {
 		{"vanadis_build invalid target regex", "vanadis_build", "invalid_build", "completed", nil, "", "", "", true},
 		// vanadis_chunk
 		{"vanadis_chunk merged", "vanadis_chunk", "build-123-chunk-1", "merged", nil, "vanadis_chunk", "build-123-chunk-1", "merged", false},
+		{"vanadis_chunk completed", "vanadis_chunk", "chunk-6-vanadis-pr-events", "completed", nil, "vanadis_chunk", "chunk-6-vanadis-pr-events", "completed", false},
 		{"vanadis_chunk failed", "vanadis_chunk", "anyprefix-chunk-99", "failed", nil, "vanadis_chunk", "anyprefix-chunk-99", "failed", false},
-		{"vanadis_chunk invalid event_type", "vanadis_chunk", "build-123-chunk-1", "completed", nil, "", "", "", true},
-		{"vanadis_chunk invalid target", "vanadis_chunk", "build-123", "merged", nil, "", "", "", true},
+		{"vanadis_chunk invalid event_type", "vanadis_chunk", "build-123-chunk-1", "running", nil, "", "", "", true},
+		{"vanadis_chunk invalid target empty", "vanadis_chunk", "", "merged", nil, "", "", "", true},
+		{"vanadis_chunk invalid target characters", "vanadis_chunk", "chunk/with/slashes", "merged", nil, "", "", "", true},
 		// flux
 		{"flux bare repo sync_success", "flux", "aerial", "sync_success", nil, "flux", "azylman/aerial", "sync_success", false},
 		{"flux full repo sync_failed", "flux", "azylman/aerial-config", "sync_failed", nil, "flux", "azylman/aerial-config", "sync_failed", false},

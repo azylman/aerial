@@ -100,7 +100,7 @@ func IsNumericSnowflake(id string) bool {
 
 var (
 	reVanadisBuild    = regexp.MustCompile(`^build-[a-z0-9-]+$`)
-	reVanadisChunk    = regexp.MustCompile(`^.+?-chunk-[0-9]+$`)
+	reVanadisChunk    = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`)
 	reAllDigits       = regexp.MustCompile(`^[0-9]+$`)
 	reHexSHA          = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 	managedEventRepos = map[string]bool{
@@ -122,11 +122,11 @@ func validateVanadisBuild(target, eventType, normEventType string) (string, erro
 }
 
 func validateVanadisChunk(target, eventType, normEventType string) (string, error) {
-	if normEventType != "merged" && normEventType != "failed" {
-		return "", fmt.Errorf("invalid event_type %q for vanadis_chunk: expected 'merged' or 'failed'", eventType)
+	if normEventType != "merged" && normEventType != "completed" && normEventType != "failed" {
+		return "", fmt.Errorf("invalid event_type %q for vanadis_chunk: expected 'merged', 'completed', or 'failed'", eventType)
 	}
 	if !reVanadisChunk.MatchString(target) {
-		return "", fmt.Errorf("invalid target %q for vanadis_chunk: must match '^.+?-chunk-[0-9]+$'", target)
+		return "", fmt.Errorf("invalid target %q for vanadis_chunk: must match '^[a-zA-Z0-9_-]{1,120}$'", target)
 	}
 	return target, nil
 }
