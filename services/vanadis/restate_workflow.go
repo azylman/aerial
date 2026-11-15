@@ -9,17 +9,60 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
+	"gopkg.in/yaml.v3"
 )
 
 const maxParallelChunks = 4
 
 // ErrRestateDisabled is returned when the Restate server is intentionally disabled.
 var ErrRestateDisabled = errors.New("restate server is disabled")
+
+// RestateConfig holds Restate durable workflow runtime configuration for Vanadis.
+type RestateConfig struct {
+	RestatePort         string `yaml:"restate_port"`
+	RestateIngressURL   string `yaml:"restate_ingress_url"`
+	RestateAdminURL     string `yaml:"restate_admin_url"`
+	RestateAdvertiseURL string `yaml:"restate_advertise_url"`
+}
+
+func cleanRestatePortEnv(raw string) string {
+	v := strings.TrimSpace(raw)
+	if strings.Contains(v, "://") {
+		return ""
+	}
+	return v
+}
+
+// LoadRestateConfig loads Restate configuration from an optional YAML file with environment variable overrides.
+func LoadRestateConfig(configPath string) RestateConfig {
+	var fileCfg RestateConfig
+	target := strings.TrimSpace(configPath)
+	if fi, err := os.Stat(target); err != nil || fi.Size() == 0 {
+		target = ""
+		if fi, err := os.Stat(vanadisFallbackConfigPath); err == nil && fi.Size() > 0 {
+			target = vanadisFallbackConfigPath
+		}
+	}
+	if target != "" {
+		if data, err := os.ReadFile(target); err == nil {
+			if err := yaml.Unmarshal(data, &fileCfg); err != nil {
+				log.Printf("[vanadis] Warning: failed to parse restate yaml config at %s: %v", target, err)
+			}
+		}
+	}
+	return RestateConfig{
+		RestatePort:         firstNonEmpty(cleanRestatePortEnv(os.Getenv("VANADIS_RESTATE_PORT")), cleanRestatePortEnv(os.Getenv("RESTATE_PORT")), fileCfg.RestatePort, "9080"),
+		RestateIngressURL:   strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("RESTATE_INGRESS_URL"), fileCfg.RestateIngressURL)), "/"),
+		RestateAdminURL:     strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("RESTATE_ADMIN_URL"), fileCfg.RestateAdminURL)), "/"),
+		RestateAdvertiseURL: strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("VANADIS_RESTATE_ADVERTISE_URL"), fileCfg.RestateAdvertiseURL)), "/"),
+	}
+}
 
 // RunBuildWorkflowRequest is the input payload for the Restate BuildWorkflow.
 type RunBuildWorkflowRequest struct {
@@ -59,33 +102,98 @@ func (w *BuildWorkflow) ServiceName() string {
 	return "BuildWorkflow"
 }
 
+type workflowPromise interface {
+	Result() (string, restate.TerminalError)
+	Resolve(value string) restate.TerminalError
+}
+
+type workflowAwakeable interface {
+	Result() (string, restate.TerminalError)
+}
+
+type workflowSharedRuntime interface {
+	Promise(name string) workflowPromise
+}
+
+type workflowRuntime interface {
+	workflowSharedRuntime
+	Run(fn func(context.Context) error) restate.TerminalError
+	RunSnapshot(srv *VanadisServer, buildID string) (*workflowBuildSnapshot, restate.TerminalError)
+	Awakeable() (string, workflowAwakeable)
+	WaitFirst(futures ...any) (any, error)
+}
+
+type restateSharedRuntime struct {
+	ctx restate.WorkflowSharedContext
+}
+
+func (r restateSharedRuntime) Promise(name string) workflowPromise {
+	return restate.Promise[string](r.ctx, name)
+}
+
+type restateWorkflowRuntime struct {
+	ctx restate.WorkflowContext
+}
+
+func (r restateWorkflowRuntime) Promise(name string) workflowPromise {
+	return restate.Promise[string](r.ctx, name)
+}
+
+func (r restateWorkflowRuntime) Awakeable() (string, workflowAwakeable) {
+	awk := restate.Awakeable[string](r.ctx)
+	return awk.Id(), awk
+}
+
+func (r restateWorkflowRuntime) Run(fn func(context.Context) error) restate.TerminalError {
+	return restate.RunVoid(r.ctx, func(rc restate.RunContext) error {
+		return fn(rc)
+	})
+}
+
+func (r restateWorkflowRuntime) RunSnapshot(srv *VanadisServer, buildID string) (*workflowBuildSnapshot, restate.TerminalError) {
+	return restate.Run(r.ctx, func(rc restate.RunContext) (*workflowBuildSnapshot, error) {
+		return fetchWorkflowSnapshot(rc, srv, buildID)
+	})
+}
+
+func (r restateWorkflowRuntime) WaitFirst(futures ...any) (any, error) {
+	rf := make([]restate.Future, 0, len(futures))
+	for _, f := range futures {
+		if fut, ok := f.(restate.Future); ok && fut != nil {
+			rf = append(rf, fut)
+		}
+	}
+	return restate.WaitFirst(r.ctx, rf...)
+}
+
 // Cancel is a shared workflow handler allowing external callers to signal cancellation.
 func (w *BuildWorkflow) Cancel(ctx restate.WorkflowSharedContext, req CancelBuildWorkflowRequest) error {
+	return w.cancelWithRuntime(restateSharedRuntime{ctx: ctx}, req)
+}
+
+func (w *BuildWorkflow) cancelWithRuntime(rt workflowSharedRuntime, req CancelBuildWorkflowRequest) error {
 	reason := strings.TrimSpace(req.Reason)
 	if reason == "" {
 		reason = "cancelled"
 	}
-	if ctx == nil {
-		return nil
-	}
-	return restate.Promise[string](ctx, "cancel").Resolve(reason)
+	return rt.Promise("cancel").Resolve(reason)
 }
 
 // MutateDAG is a shared workflow handler signaling that the DAG has been modified.
 func (w *BuildWorkflow) MutateDAG(ctx restate.WorkflowSharedContext, req DAGMutationSignalRequest) error {
+	return w.mutateDAGWithRuntime(restateSharedRuntime{ctx: ctx}, req)
+}
+
+func (w *BuildWorkflow) mutateDAGWithRuntime(rt workflowSharedRuntime, req DAGMutationSignalRequest) error {
 	action := strings.TrimSpace(req.Action)
 	if action == "" {
 		action = "mutated"
 	}
-	if ctx == nil {
-		return nil
-	}
-	if err := restate.Promise[string](ctx, "dag_mutation").Resolve(action); err == nil {
+	if err := rt.Promise("dag_mutation").Resolve(action); err == nil {
 		return nil
 	}
 	for i := 1; i <= 100; i++ {
-		p := restate.Promise[string](ctx, fmt.Sprintf("dag_mutation_%d", i))
-		if err := p.Resolve(action); err == nil {
+		if err := rt.Promise(fmt.Sprintf("dag_mutation_%d", i)).Resolve(action); err == nil {
 			return nil
 		}
 	}
@@ -97,9 +205,9 @@ type workflowChunkRuntimeState struct {
 	launched        bool
 	codeReady       bool
 	runtimeReady    bool
-	mergeAwakeable  restate.AwakeableFuture[string]
-	deployAwakeable restate.AwakeableFuture[string]
-	actionAwakeable restate.AwakeableFuture[string]
+	mergeAwakeable  workflowAwakeable
+	deployAwakeable workflowAwakeable
+	actionAwakeable workflowAwakeable
 }
 
 type workflowBuildSnapshot struct {
@@ -109,12 +217,16 @@ type workflowBuildSnapshot struct {
 
 // Run executes the durable build DAG workflow under Restate.
 func (w *BuildWorkflow) Run(ctx restate.WorkflowContext, req RunBuildWorkflowRequest) (RunBuildWorkflowResult, error) {
+	return w.runWithRuntime(restateWorkflowRuntime{ctx: ctx}, req)
+}
+
+func (w *BuildWorkflow) runWithRuntime(rt workflowRuntime, req RunBuildWorkflowRequest) (RunBuildWorkflowResult, error) {
 	buildID := strings.TrimSpace(req.BuildID)
 	if buildID == "" {
 		return RunBuildWorkflowResult{}, restate.TerminalErrorf("build_id cannot be empty")
 	}
 
-	snapshot, rErr := loadWorkflowSnapshot(ctx, w.srv, buildID)
+	snapshot, rErr := rt.RunSnapshot(w.srv, buildID)
 	if rErr != nil {
 		return RunBuildWorkflowResult{BuildID: buildID, Status: "failed"}, rErr
 	}
@@ -123,72 +235,51 @@ func (w *BuildWorkflow) Run(ctx restate.WorkflowContext, req RunBuildWorkflowReq
 		return terminalWorkflowResult(buildID, snapshot), nil
 	}
 
-	ensureBuildRunning(ctx, w.srv, buildID, snapshot.Build.Status)
+	ensureBuildRunning(rt, w.srv, buildID, snapshot.Build.Status)
 
 	chunkStates, chunkOrder := initializeWorkflowStates(snapshot.Chunks)
 
-	if ctx == nil {
-		if isWorkflowBuildComplete(chunkOrder, chunkStates) {
-			return completeWorkflowBuild(nil, w.srv, buildID, chunkOrder, chunkStates)
-		}
-		launchEligibleChunks(nil, w.srv, buildID, chunkOrder, chunkStates)
-		return RunBuildWorkflowResult{
-			BuildID:         buildID,
-			Status:          "running",
-			TotalChunks:     len(chunkOrder),
-			CompletedChunks: countCompletedChunksFromStates(chunkStates),
-		}, nil
-	}
-
-	return w.executeWorkflowLoop(ctx, buildID, chunkOrder, chunkStates)
+	return w.executeWorkflowLoop(rt, buildID, chunkOrder, chunkStates)
 }
 
-func ensureBuildRunning(ctx restate.WorkflowContext, srv *VanadisServer, buildID string, status string) {
+func ensureBuildRunning(rt workflowRuntime, srv *VanadisServer, buildID string, status string) {
 	if status != "pending" {
 		return
 	}
-	if ctx == nil {
-		if srv != nil && srv.store != nil {
-			if err := srv.store.UpdateBuildStatus(context.Background(), buildID, "running"); err != nil {
-				log.Printf("[vanadis] warning: failed updating build status to running: %v", err)
-			}
-		}
-		return
-	}
-	_ = restate.RunVoid(ctx, func(rc restate.RunContext) error {
-		return srv.store.UpdateBuildStatus(rc, buildID, "running")
+	_ = rt.Run(func(ctx context.Context) error {
+		return srv.store.UpdateBuildStatus(ctx, buildID, "running")
 	})
 }
 
-func (w *BuildWorkflow) executeWorkflowLoop(ctx restate.WorkflowContext, buildID string, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (RunBuildWorkflowResult, error) {
-	cancelPromise := restate.Promise[string](ctx, "cancel")
-	dagMutationPromise := restate.Promise[string](ctx, "dag_mutation")
+func (w *BuildWorkflow) executeWorkflowLoop(rt workflowRuntime, buildID string, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (RunBuildWorkflowResult, error) {
+	cancelPromise := rt.Promise("cancel")
+	dagMutationPromise := rt.Promise("dag_mutation")
 	mutationCount := 0
 
 	for {
 		if isWorkflowBuildComplete(chunkOrder, chunkStates) {
-			return completeWorkflowBuild(ctx, w.srv, buildID, chunkOrder, chunkStates)
+			return completeWorkflowBuild(rt, w.srv, buildID, chunkOrder, chunkStates)
 		}
 
-		launchEligibleChunks(ctx, w.srv, buildID, chunkOrder, chunkStates)
+		launchEligibleChunks(rt, w.srv, buildID, chunkOrder, chunkStates)
 
 		waitFuts := buildWorkflowWaitFutures(cancelPromise, dagMutationPromise, chunkOrder, chunkStates)
-		firstDone, waitErr := restate.WaitFirst(ctx, waitFuts...)
+		firstDone, waitErr := rt.WaitFirst(waitFuts...)
 		if waitErr != nil {
 			return RunBuildWorkflowResult{BuildID: buildID, Status: "failed"}, waitErr
 		}
 
 		if firstDone == cancelPromise {
-			return cancelWorkflowBuild(ctx, w.srv, buildID, cancelPromise, chunkOrder, chunkStates)
+			return cancelWorkflowBuild(rt, w.srv, buildID, cancelPromise, chunkOrder, chunkStates)
 		}
 
 		if firstDone == dagMutationPromise {
 			mutationCount++
-			dagMutationPromise = reloadWorkflowDAG(ctx, w.srv, buildID, &chunkOrder, chunkStates, mutationCount)
+			dagMutationPromise = reloadWorkflowDAG(rt, w.srv, buildID, &chunkOrder, chunkStates, mutationCount)
 			continue
 		}
 
-		if handled, pErr := processChunkAwakeable(ctx, w.srv, buildID, firstDone, chunkOrder, chunkStates); handled {
+		if handled, pErr := processChunkAwakeable(rt, w.srv, buildID, firstDone, chunkOrder, chunkStates); handled {
 			if pErr != nil {
 				return RunBuildWorkflowResult{
 					BuildID:         buildID,
@@ -210,19 +301,6 @@ func fetchWorkflowSnapshot(ctx context.Context, srv *VanadisServer, buildID stri
 		return nil, err
 	}
 	return &workflowBuildSnapshot{Build: b, Chunks: chs}, nil
-}
-
-func loadWorkflowSnapshot(ctx restate.WorkflowContext, srv *VanadisServer, buildID string) (*workflowBuildSnapshot, restate.TerminalError) {
-	if ctx == nil {
-		snap, err := fetchWorkflowSnapshot(context.Background(), srv, buildID)
-		if err != nil {
-			return nil, restate.TerminalErrorf("%v", err)
-		}
-		return snap, nil
-	}
-	return restate.Run(ctx, func(rc restate.RunContext) (*workflowBuildSnapshot, error) {
-		return fetchWorkflowSnapshot(rc, srv, buildID)
-	})
 }
 
 func terminalWorkflowResult(buildID string, snapshot *workflowBuildSnapshot) RunBuildWorkflowResult {
@@ -285,16 +363,10 @@ func executeCompleteWorkflowBuild(ctx context.Context, srv *VanadisServer, build
 	return nil
 }
 
-func completeWorkflowBuild(ctx restate.WorkflowContext, srv *VanadisServer, buildID string, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (RunBuildWorkflowResult, error) {
-	if ctx == nil {
-		if err := executeCompleteWorkflowBuild(context.Background(), srv, buildID); err != nil {
-			return RunBuildWorkflowResult{BuildID: buildID, Status: "failed"}, err
-		}
-	} else {
-		_ = restate.RunVoid(ctx, func(rc restate.RunContext) error {
-			return executeCompleteWorkflowBuild(rc, srv, buildID)
-		})
-	}
+func completeWorkflowBuild(rt workflowRuntime, srv *VanadisServer, buildID string, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (RunBuildWorkflowResult, error) {
+	_ = rt.Run(func(ctx context.Context) error {
+		return executeCompleteWorkflowBuild(ctx, srv, buildID)
+	})
 	return RunBuildWorkflowResult{
 		BuildID:         buildID,
 		Status:          "completed",
@@ -319,7 +391,7 @@ func executeLaunchChunk(ctx context.Context, srv *VanadisServer, buildID string,
 	})
 }
 
-func launchEligibleChunks(ctx restate.WorkflowContext, srv *VanadisServer, buildID string, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) {
+func launchEligibleChunks(rt workflowRuntime, srv *VanadisServer, buildID string, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) {
 	eligibleIDs := computeEligibleChunksToLaunch(chunkOrder, chunkStates, maxParallelChunks)
 	if len(eligibleIDs) == 0 {
 		return
@@ -328,80 +400,82 @@ func launchEligibleChunks(ctx restate.WorkflowContext, srv *VanadisServer, build
 	for _, cid := range eligibleIDs {
 		cs := chunkStates[cid]
 		if strings.ToLower(cs.chunk.Mode) == "pr" {
-			launchPRChunk(ctx, srv, buildID, cs)
+			launchPRChunk(rt, srv, buildID, cs)
 		} else {
-			launchActionChunk(ctx, srv, buildID, cs)
+			launchActionChunk(rt, srv, buildID, cs)
 		}
 	}
 
-	if ctx == nil {
-		if srv != nil {
-			srv.syncBuildWidget(context.Background(), buildID, "")
-		}
-		return
-	}
-	_ = restate.RunVoid(ctx, func(rc restate.RunContext) error {
-		srv.syncBuildWidget(rc, buildID, "")
+	_ = rt.Run(func(ctx context.Context) error {
+		srv.syncBuildWidget(ctx, buildID, "")
 		return nil
 	})
 }
 
-func launchPRChunk(ctx restate.WorkflowContext, srv *VanadisServer, buildID string, cs *workflowChunkRuntimeState) {
+func launchPRChunk(rt workflowRuntime, srv *VanadisServer, buildID string, cs *workflowChunkRuntimeState) {
 	currChunk := cs.chunk
 	cs.launched = true
 
-	if ctx == nil {
-		if err := executeLaunchChunk(context.Background(), srv, buildID, currChunk, "m-id", "d-id"); err != nil {
-			log.Printf("[vanadis] warning: failed executing pr chunk launch: %v", err)
-		}
-		return
-	}
-	mAwk := restate.Awakeable[string](ctx)
-	dAwk := restate.Awakeable[string](ctx)
+	mAwkID, mAwk := rt.Awakeable()
+	dAwkID, dAwk := rt.Awakeable()
 	cs.mergeAwakeable = mAwk
 	cs.deployAwakeable = dAwk
 
-	_ = restate.RunVoid(ctx, func(rc restate.RunContext) error {
-		return executeLaunchChunk(rc, srv, buildID, currChunk, mAwk.Id(), dAwk.Id())
+	_ = rt.Run(func(ctx context.Context) error {
+		return executeLaunchChunk(ctx, srv, buildID, currChunk, mAwkID, dAwkID)
 	})
 }
 
-func launchActionChunk(ctx restate.WorkflowContext, srv *VanadisServer, buildID string, cs *workflowChunkRuntimeState) {
+func launchActionChunk(rt workflowRuntime, srv *VanadisServer, buildID string, cs *workflowChunkRuntimeState) {
 	currChunk := cs.chunk
 	cs.launched = true
 
-	if ctx == nil {
-		if err := executeLaunchChunk(context.Background(), srv, buildID, currChunk, "", "a-id"); err != nil {
-			log.Printf("[vanadis] warning: failed executing action chunk launch: %v", err)
-		}
-		return
-	}
-	aAwk := restate.Awakeable[string](ctx)
+	aAwkID, aAwk := rt.Awakeable()
 	cs.actionAwakeable = aAwk
 
-	_ = restate.RunVoid(ctx, func(rc restate.RunContext) error {
-		return executeLaunchChunk(rc, srv, buildID, currChunk, "", aAwk.Id())
+	_ = rt.Run(func(ctx context.Context) error {
+		return executeLaunchChunk(ctx, srv, buildID, currChunk, "", aAwkID)
 	})
 }
 
-func buildWorkflowWaitFutures(cancelPromise, dagMutationPromise restate.Future, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) []restate.Future {
-	waitFuts := make([]restate.Future, 0, len(chunkOrder)+2)
+func selectChunkWaitSlot(cs *workflowChunkRuntimeState) string {
+	if cs == nil || !cs.launched {
+		return ""
+	}
+	if strings.ToLower(cs.chunk.Mode) == "pr" {
+		if !cs.codeReady {
+			return "merge"
+		}
+		if !cs.runtimeReady {
+			return "deploy"
+		}
+		return ""
+	}
+	if !cs.runtimeReady {
+		return "action"
+	}
+	return ""
+}
+
+func buildWorkflowWaitFutures(cancelPromise, dagMutationPromise any, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) []any {
+	waitFuts := make([]any, 0, len(chunkOrder)+2)
 	waitFuts = append(waitFuts, cancelPromise, dagMutationPromise)
 
 	for _, cid := range chunkOrder {
 		cs := chunkStates[cid]
-		if !cs.launched {
-			continue
-		}
-		if strings.ToLower(cs.chunk.Mode) == "pr" {
-			if !cs.codeReady && cs.mergeAwakeable != nil {
+		switch selectChunkWaitSlot(cs) {
+		case "merge":
+			if cs.mergeAwakeable != nil {
 				waitFuts = append(waitFuts, cs.mergeAwakeable)
 			}
-			if cs.codeReady && !cs.runtimeReady && cs.deployAwakeable != nil {
+		case "deploy":
+			if cs.deployAwakeable != nil {
 				waitFuts = append(waitFuts, cs.deployAwakeable)
 			}
-		} else if !cs.runtimeReady && cs.actionAwakeable != nil {
-			waitFuts = append(waitFuts, cs.actionAwakeable)
+		case "action":
+			if cs.actionAwakeable != nil {
+				waitFuts = append(waitFuts, cs.actionAwakeable)
+			}
 		}
 	}
 	return waitFuts
@@ -418,20 +492,14 @@ func executeCancelWorkflowBuild(ctx context.Context, srv *VanadisServer, buildID
 	return nil
 }
 
-func cancelWorkflowBuild(ctx restate.WorkflowContext, srv *VanadisServer, buildID string, cancelPromise restate.DurablePromise[string], chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (RunBuildWorkflowResult, error) {
+func cancelWorkflowBuild(rt workflowRuntime, srv *VanadisServer, buildID string, cancelPromise workflowPromise, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (RunBuildWorkflowResult, error) {
 	reason := "cancelled"
 	if cancelPromise != nil {
 		reason, _ = cancelPromise.Result()
 	}
-	if ctx == nil {
-		if err := executeCancelWorkflowBuild(context.Background(), srv, buildID, reason); err != nil {
-			log.Printf("[vanadis] warning: failed executing cancel workflow build: %v", err)
-		}
-	} else {
-		_ = restate.RunVoid(ctx, func(rc restate.RunContext) error {
-			return executeCancelWorkflowBuild(rc, srv, buildID, reason)
-		})
-	}
+	_ = rt.Run(func(ctx context.Context) error {
+		return executeCancelWorkflowBuild(ctx, srv, buildID, reason)
+	})
 	return RunBuildWorkflowResult{
 		BuildID:         buildID,
 		Status:          "cancelled",
@@ -440,42 +508,38 @@ func cancelWorkflowBuild(ctx restate.WorkflowContext, srv *VanadisServer, buildI
 	}, nil
 }
 
-func reloadWorkflowDAG(ctx restate.WorkflowContext, srv *VanadisServer, buildID string, chunkOrder *[]string, chunkStates map[string]*workflowChunkRuntimeState, count int) restate.DurablePromise[string] {
-	var newSnap *workflowBuildSnapshot
-	var err error
-	if ctx == nil {
-		newSnap, err = fetchWorkflowSnapshot(context.Background(), srv, buildID)
-	} else {
-		newSnap, err = restate.Run(ctx, func(rc restate.RunContext) (*workflowBuildSnapshot, error) {
-			return fetchWorkflowSnapshot(rc, srv, buildID)
-		})
+func reconcileWorkflowDAGSnapshot(newSnap *workflowBuildSnapshot, chunkOrder *[]string, chunkStates map[string]*workflowChunkRuntimeState) {
+	if newSnap == nil || chunkOrder == nil {
+		return
 	}
-	if err == nil && newSnap != nil {
-		newOrder := make([]string, 0, len(newSnap.Chunks))
-		newIDs := make(map[string]bool, len(newSnap.Chunks))
-		for _, c := range newSnap.Chunks {
-			newOrder = append(newOrder, c.ID)
-			newIDs[c.ID] = true
-			if _, exists := chunkStates[c.ID]; !exists {
-				chunkStates[c.ID] = &workflowChunkRuntimeState{chunk: c}
-			} else {
-				chunkStates[c.ID].chunk = c
-			}
+	newOrder := make([]string, 0, len(newSnap.Chunks))
+	newIDs := make(map[string]bool, len(newSnap.Chunks))
+	for _, c := range newSnap.Chunks {
+		newOrder = append(newOrder, c.ID)
+		newIDs[c.ID] = true
+		if _, exists := chunkStates[c.ID]; !exists {
+			chunkStates[c.ID] = &workflowChunkRuntimeState{chunk: c}
+		} else {
+			chunkStates[c.ID].chunk = c
 		}
-		for cid := range chunkStates {
-			if !newIDs[cid] {
-				delete(chunkStates, cid)
-			}
+	}
+	for cid := range chunkStates {
+		if !newIDs[cid] {
+			delete(chunkStates, cid)
 		}
-		*chunkOrder = newOrder
 	}
-	if ctx == nil {
-		return nil
-	}
-	return restate.Promise[string](ctx, fmt.Sprintf("dag_mutation_%d", count))
+	*chunkOrder = newOrder
 }
 
-func processChunkAwakeable(ctx restate.WorkflowContext, srv *VanadisServer, buildID string, firstDone restate.Future, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (bool, error) {
+func reloadWorkflowDAG(rt workflowRuntime, srv *VanadisServer, buildID string, chunkOrder *[]string, chunkStates map[string]*workflowChunkRuntimeState, count int) workflowPromise {
+	newSnap, err := rt.RunSnapshot(srv, buildID)
+	if err == nil && newSnap != nil {
+		reconcileWorkflowDAGSnapshot(newSnap, chunkOrder, chunkStates)
+	}
+	return rt.Promise(fmt.Sprintf("dag_mutation_%d", count))
+}
+
+func processChunkAwakeable(rt workflowRuntime, srv *VanadisServer, buildID string, firstDone any, chunkOrder []string, chunkStates map[string]*workflowChunkRuntimeState) (bool, error) {
 	if firstDone == nil {
 		return false, nil
 	}
@@ -501,7 +565,7 @@ func processChunkAwakeable(ctx restate.WorkflowContext, srv *VanadisServer, buil
 			continue
 		}
 
-		status, err := handleAwakeableOutcome(ctx, srv, buildID, cs, eventType, val, awkErr)
+		status, err := handleAwakeableOutcome(rt, srv, buildID, cs, eventType, val, awkErr)
 		if status == "failed" {
 			if err == nil {
 				err = restate.TerminalErrorf("chunk %s %s awakeable resolved to %s", cs.chunk.ID, eventType, val)
@@ -536,17 +600,11 @@ func executeAwakeableStatusUpdate(ctx context.Context, srv *VanadisServer, build
 	return nil
 }
 
-func handleAwakeableOutcome(ctx restate.WorkflowContext, srv *VanadisServer, buildID string, cs *workflowChunkRuntimeState, eventType, val string, inErr error) (string, error) {
+func handleAwakeableOutcome(rt workflowRuntime, srv *VanadisServer, buildID string, cs *workflowChunkRuntimeState, eventType, val string, inErr error) (string, error) {
 	newStatus, aErr := applyAwakeableResolution(cs, eventType, val, inErr)
-	if ctx == nil {
-		if err := executeAwakeableStatusUpdate(context.Background(), srv, buildID, cs.chunk.ID, cs.chunk.Title, eventType, newStatus); err != nil {
-			log.Printf("[vanadis] warning: failed executing awakeable status update: %v", err)
-		}
-	} else {
-		_ = restate.RunVoid(ctx, func(rc restate.RunContext) error {
-			return executeAwakeableStatusUpdate(rc, srv, buildID, cs.chunk.ID, cs.chunk.Title, eventType, newStatus)
-		})
-	}
+	_ = rt.Run(func(ctx context.Context) error {
+		return executeAwakeableStatusUpdate(ctx, srv, buildID, cs.chunk.ID, cs.chunk.Title, eventType, newStatus)
+	})
 	if newStatus == "failed" {
 		return "failed", aErr
 	}
@@ -673,12 +731,15 @@ func startRestateServer(ctx context.Context, srv *VanadisServer) (*server.Restat
 	if srv == nil {
 		return nil, errors.New("vanadis server is nil")
 	}
-	port := strings.TrimSpace(srv.cfg.RestatePort)
+	port := strings.TrimSpace(srv.restateCfg.RestatePort)
 	if port == "disabled" || port == "-1" {
 		return nil, ErrRestateDisabled
 	}
 	if port == "" {
 		port = "9080"
+	}
+	if (srv.cfg.Port == "0" || srv.cfg.Port == "-1") && port == "9080" {
+		port = "0"
 	}
 	restateServer := server.NewRestate().Bind(restate.Reflect(NewBuildWorkflow(srv)))
 	go func() {
@@ -688,8 +749,8 @@ func startRestateServer(ctx context.Context, srv *VanadisServer) (*server.Restat
 		}
 	}()
 
-	if srv.cfg.RestateAdminURL != "" && srv.cfg.RestateAdvertiseURL != "" {
-		go autoRegisterRestateDeployment(ctx, srv.cfg.RestateAdminURL, srv.cfg.RestateAdvertiseURL)
+	if srv.restateCfg.RestateAdminURL != "" && srv.restateCfg.RestateAdvertiseURL != "" {
+		go autoRegisterRestateDeployment(ctx, srv.restateCfg.RestateAdminURL, srv.restateCfg.RestateAdvertiseURL)
 	}
 
 	return restateServer, nil
@@ -750,4 +811,152 @@ func registerRestateDeployment(ctx context.Context, adminURL, advertiseURL strin
 		return fmt.Errorf("restate admin returned status %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+func (s *VanadisServer) postRestateIngressJSON(ctx context.Context, path string, payload any) error {
+	if s == nil {
+		return errors.New("vanadis server is nil")
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(s.restateCfg.RestateIngressURL), "/")
+	if baseURL == "" {
+		return nil
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal restate ingress payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create restate ingress request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := s.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("post restate ingress %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, rErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if rErr != nil {
+			return fmt.Errorf("restate ingress %s returned status %d (read error: %w)", path, resp.StatusCode, rErr)
+		}
+		return fmt.Errorf("restate ingress %s returned status %d: %s", path, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+func (s *VanadisServer) startRestateBuildWorkflow(ctx context.Context, buildID string) error {
+	buildID = strings.TrimSpace(buildID)
+	if buildID == "" {
+		return errors.New("build_id cannot be empty")
+	}
+	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/BuildWorkflow/%s/Run/send", buildID), RunBuildWorkflowRequest{BuildID: buildID})
+}
+
+func (s *VanadisServer) cancelRestateBuildWorkflow(ctx context.Context, buildID, reason string) error {
+	buildID = strings.TrimSpace(buildID)
+	if buildID == "" {
+		return nil
+	}
+	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/BuildWorkflow/%s/Cancel/send", buildID), CancelBuildWorkflowRequest{Reason: reason})
+}
+
+func (s *VanadisServer) notifyRestateDAGMutation(ctx context.Context, buildID, action string) error {
+	buildID = strings.TrimSpace(buildID)
+	if buildID == "" {
+		return nil
+	}
+	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/BuildWorkflow/%s/MutateDAG/send", buildID), DAGMutationSignalRequest{Action: action})
+}
+
+func (s *VanadisServer) resolveRestateAwakeable(ctx context.Context, awakeableID, value string) error {
+	awakeableID = strings.TrimSpace(awakeableID)
+	if awakeableID == "" {
+		return nil
+	}
+	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/restate/awakeables/%s/resolve", awakeableID), value)
+}
+
+func (s *VanadisServer) launchCreatedBuild(ctx context.Context, buildID string, useRestate bool) error {
+	if s != nil && useRestate && strings.TrimSpace(s.restateCfg.RestateIngressURL) != "" {
+		return s.startRestateBuildWorkflow(ctx, buildID)
+	}
+	return s.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: buildID, ChunkIndex: 0})
+}
+
+func findMergedChunkAndNextMode(chunks []VanadisChunk, mergedIdx, nextIdx int) (*VanadisChunk, string) {
+	var mergedChunk *VanadisChunk
+	var nextChunkMode string
+	for i := range chunks {
+		if chunks[i].ChunkIndex == mergedIdx {
+			mergedChunk = &chunks[i]
+		}
+		if nextIdx >= 0 && chunks[i].ChunkIndex == nextIdx {
+			nextChunkMode = strings.ToLower(strings.TrimSpace(chunks[i].Mode))
+		}
+	}
+	return mergedChunk, nextChunkMode
+}
+
+func (s *VanadisServer) notifyRestateChunkPRAdvanced(ctx context.Context, res *VanadisAdvancementResult) bool {
+	if s == nil || s.store == nil || strings.TrimSpace(s.restateCfg.RestateIngressURL) == "" || res == nil || !res.Matched {
+		return false
+	}
+	_, chunks, err := s.store.GetBuild(ctx, res.BuildID)
+	if err != nil {
+		return false
+	}
+	mergedChunk, nextChunkMode := findMergedChunkAndNextMode(chunks, res.MergedChunkIndex, res.NextChunkIndex)
+	if mergedChunk == nil || (mergedChunk.MergeAwakeableID == "" && mergedChunk.DeployAwakeableID == "") {
+		return false
+	}
+	if res.Advanced && mergedChunk.MergeAwakeableID != "" {
+		if err := s.resolveRestateAwakeable(ctx, mergedChunk.MergeAwakeableID, "merged"); err != nil {
+			log.Printf("[vanadis] warning: failed resolving merge awakeable for chunk %s: %v", mergedChunk.ID, err)
+		}
+	}
+	if (!res.Advanced || res.NextChunkIndex < 0 || nextChunkMode != "pr") && mergedChunk.DeployAwakeableID != "" {
+		if err := s.resolveRestateAwakeable(ctx, mergedChunk.DeployAwakeableID, "deploy_success"); err != nil {
+			log.Printf("[vanadis] warning: failed resolving deploy awakeable for chunk %s: %v", mergedChunk.ID, err)
+		}
+	}
+	return true
+}
+
+func (s *VanadisServer) notifyRestateActionChunkCompleted(ctx context.Context, chunkID string) bool {
+	if s == nil || s.store == nil || strings.TrimSpace(s.restateCfg.RestateIngressURL) == "" || strings.TrimSpace(chunkID) == "" {
+		return false
+	}
+	chunk, _, err := s.store.GetChunk(ctx, chunkID)
+	if err != nil || chunk == nil || chunk.DeployAwakeableID == "" {
+		return false
+	}
+	if err := s.resolveRestateAwakeable(ctx, chunk.DeployAwakeableID, "completed"); err != nil {
+		log.Printf("[vanadis] warning: failed resolving action awakeable for chunk %s: %v", chunk.ID, err)
+	}
+	return true
+}
+
+func (s *VanadisServer) notifyRestateChunkFailed(ctx context.Context, chunkID string) {
+	if s == nil || s.store == nil || strings.TrimSpace(s.restateCfg.RestateIngressURL) == "" || strings.TrimSpace(chunkID) == "" {
+		return
+	}
+	chunk, _, err := s.store.GetChunk(ctx, chunkID)
+	if err != nil || chunk == nil {
+		return
+	}
+	if chunk.MergeAwakeableID != "" {
+		if err := s.resolveRestateAwakeable(ctx, chunk.MergeAwakeableID, "failed"); err != nil {
+			log.Printf("[vanadis] warning: failed resolving merge awakeable failure for chunk %s: %v", chunk.ID, err)
+		}
+	}
+	if chunk.DeployAwakeableID != "" {
+		if err := s.resolveRestateAwakeable(ctx, chunk.DeployAwakeableID, "failed"); err != nil {
+			log.Printf("[vanadis] warning: failed resolving deploy awakeable failure for chunk %s: %v", chunk.ID, err)
+		}
+	}
 }

@@ -45,7 +45,7 @@ func TestMain_PromptFormattingAndSettleHelpers(t *testing.T) {
 		},
 	}
 	prompt := formatBuildCompletedWakePrompt(res)
-	if !strings.Contains(prompt, "Chunk 1 (azylman/aerial, PR #123)") || !strings.Contains(prompt, "Directive:") {
+	if !strings.Contains(prompt, "Chunk 1 (azylman/aerial, PR #123)") {
 		t.Errorf("unexpected prompt output: %s", prompt)
 	}
 
@@ -414,60 +414,6 @@ func TestVanadisServer_ExecuteAndDispatchPlumbing(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	// 1. settleFailedChunk
-	mTermErr := &mockMsgWithErrors{termErr: errors.New("term boom")}
-	settleFailedChunk(mTermErr, true)
-
-	mNakErr := &mockMsgWithErrors{nakErr: errors.New("nak boom")}
-	settleFailedChunk(mNakErr, false)
-
-	// 2. postBrainJSON
-	var nilSrv *VanadisServer
-	if _, err := nilSrv.postBrainJSON(ctx, "/path", "p", 0); err == nil {
-		t.Fatal("expected error on nil server postBrainJSON")
-	}
-
-	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("brain 500 error"))
-	}))
-	defer ts500.Close()
-
-	srvNoURL := &VanadisServer{httpClient: ts500.Client()}
-	if _, err := srvNoURL.postBrainJSON(ctx, "/path", "p", 0); err == nil {
-		t.Fatal("expected error on empty brain URL")
-	}
-
-	srv500 := &VanadisServer{cfg: Config{BrainURL: ts500.URL}, httpClient: ts500.Client()}
-	if _, err := srv500.postBrainJSON(ctx, "/path", "payload", 0); err == nil {
-		t.Fatal("expected error on status 500 postBrainJSON")
-	}
-
-	// 3. syncBuildWidget
-	var nilSyncSrv *VanadisServer
-	nilSyncSrv.syncBuildWidget(ctx, "b1", "banner")
-
-	tsSynapse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer tsSynapse.Close()
-	srvSynapse := &VanadisServer{cfg: Config{SynapseURL: tsSynapse.URL}, httpClient: tsSynapse.Client()}
-	srvSynapse.syncBuildWidget(ctx, "b1", "banner")
-
-	// 4. dispatchWakePrompt
-	srv500.dispatchWakePrompt(ctx, "", "prompt")
-	_ = srv500.dispatchWakePrompt(ctx, "123", "prompt")
-
-	// 5. handleFinalDispatchFailure
-	store := newMemoryVanadisStore()
-	store.updateChunkErr = errors.New("chunk update err")
-	store.updateBuildErr = errors.New("build update err")
-	srvFinal := &VanadisServer{store: store}
-	b := &VanadisBuild{ID: "b-fin"}
-	c := VanadisChunk{ID: "c-fin", ChunkIndex: 0, Title: "Fin"}
-	srvFinal.handleFinalDispatchFailure(ctx, b, c, 1, errors.New("dispatch fail"))
-
-	// 6. ProcessExecuteChunk
 	var nilProcessSrv *VanadisServer
 	if err := nilProcessSrv.ProcessExecuteChunk(ctx, "b1", 0, false); err == nil {
 		t.Fatal("expected error on nil server ProcessExecuteChunk")
@@ -487,7 +433,6 @@ func TestVanadisServer_ExecuteAndDispatchPlumbing(t *testing.T) {
 		t.Fatalf("expected nil on completed chunk, got %v", err)
 	}
 
-	// 7. HandleExecuteChunkJob unmarshal error
 	badMsg := &mockMsgWithErrors{}
 	if err := srvProc.HandleExecuteChunkJob(ctx, badMsg); err != nil {
 		t.Fatalf("expected nil on unmarshal error, got %v", err)

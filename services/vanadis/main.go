@@ -650,6 +650,7 @@ type StatusWidgetRequest struct {
 // VanadisServer manages HTTP endpoints and JetStream worker coordination for Vanadis builds.
 type VanadisServer struct {
 	cfg        Config
+	restateCfg RestateConfig
 	httpClient *http.Client
 	store      VanadisStore
 	bus        pubsub.Bus
@@ -662,7 +663,7 @@ func NewVanadisServer(cfg Config, store VanadisStore, httpClient *http.Client) *
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	// Traced so eri turns join the chunk dispatch span (and widget/wake posts carry traceparent).
-	return &VanadisServer{cfg: cfg, httpClient: tracing.Client(httpClient), store: store}
+	return &VanadisServer{cfg: cfg, restateCfg: LoadRestateConfig(os.Getenv("CONFIG_PATH")), httpClient: tracing.Client(httpClient), store: store}
 }
 
 // SetStore updates the VanadisStore backing the server.
@@ -1123,7 +1124,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.syncBuildWidget(r.Context(), build.ID, "")
-	if err := s.enqueueExecuteChunk(r.Context(), ExecuteChunkArgs{BuildID: buildID, ChunkIndex: 0}); err != nil {
+	if err := s.launchCreatedBuild(r.Context(), buildID, strings.EqualFold(r.URL.Query().Get("engine"), "restate")); err != nil {
 		if statusErr := s.store.UpdateBuildStatus(r.Context(), buildID, "failed"); statusErr != nil {
 			log.Printf("[vanadis] warning marking build %s failed after enqueue error: %v", buildID, statusErr)
 		}
@@ -1187,6 +1188,9 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.cancelBuildChunksAndPrompts(r.Context(), id, existing, existingChunks)
+	if err := s.cancelRestateBuildWorkflow(r.Context(), id, "cancelled"); err != nil {
+		log.Printf("[vanadis] warning: failed signaling restate cancel for build %s: %v", id, err)
+	}
 	RecordBuildTotal("cancelled")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "build_id": id})
 }

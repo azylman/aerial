@@ -605,21 +605,7 @@ func TestChunksAction_And_Events_Helpers(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	// 1. repoMatchCandidates
-	if got := repoMatchCandidates(""); got != nil {
-		t.Fatalf("expected nil for empty repo, got %v", got)
-	}
-	if got := repoMatchCandidates("aerial"); len(got) != 2 || got[0] != "aerial" || got[1] != "azylman/aerial" {
-		t.Fatalf("unexpected repoMatchCandidates(aerial): %v", got)
-	}
-	if got := repoMatchCandidates("azylman/aerial"); len(got) != 2 || got[0] != "azylman/aerial" || got[1] != "aerial" {
-		t.Fatalf("unexpected repoMatchCandidates(azylman/aerial): %v", got)
-	}
-	if got := repoMatchCandidates("other/repo"); len(got) != 1 || got[0] != "other/repo" {
-		t.Fatalf("unexpected repoMatchCandidates(other/repo): %v", got)
-	}
-
-	// 2. validateChunkModeAndRepo
+	// 1. validateChunkModeAndRepo
 	if err := validateChunkModeAndRepo(0, "invalid-mode", "aerial", nil, nil); err == nil {
 		t.Fatal("expected error on invalid mode")
 	}

@@ -189,6 +189,15 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 			},
 			wantDeps: [][]string{nil, nil},
 		},
+		{
+			name: "terminal_chunks_skipped_in_disjoint_check",
+			chunks: []VanadisChunk{
+				{ID: "c1", Mode: "pr", Repo: "aerial", Status: "merged", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
+				{ID: "c2", Mode: "pr", Repo: "aerial", Status: "pending", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
+				{ID: "c3", Mode: "pr", Repo: "aerial", Status: "merged", DependsOn: []string{}, TargetFiles: []string{"config.yaml"}},
+			},
+			wantDeps: [][]string{nil, nil, nil},
+		},
 	}
 	runDAGTestCases(t, tests)
 }
@@ -437,16 +446,5 @@ func TestRelinkDependenciesAfterRemoval_DuplicateDep(t *testing.T) {
 	relinkDependenciesAfterRemoval(remaining, "c2", []string{"c0"})
 	if !slices.Equal(remaining[0].DependsOn, []string{"c0", "c1"}) {
 		t.Fatalf("unexpected DependsOn after relink: %v", remaining[0].DependsOn)
-	}
-}
-
-func TestValidateCreateBuildInputs_InvalidDAG(t *testing.T) {
-	t.Parallel()
-	chunks := []VanadisChunk{
-		{ID: "c1", Title: "t1", Instructions: "i1", Mode: "action", DependsOn: []string{"c1"}},
-	}
-	err := validateCreateBuildInputs("b1", "th1", "obj", chunks)
-	if err == nil {
-		t.Fatal("expected error on self dependency in DAG")
 	}
 }

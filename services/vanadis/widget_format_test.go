@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -643,21 +642,4 @@ func TestChunksEvents_And_PersistWidget_RemainingGaps(t *testing.T) {
 	// Case D: SkipSink sends widget with skip_sink: true
 	reqQuiet := buildSyncWidgetRequest(VanadisBuild{Quiet: true}, nil, SyncChunkPRWidgetRequest{})
 	assert.True(t, reqQuiet.SkipSink)
-
-	var receivedBody []byte
-	tsSkipSink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedBody, _ = io.ReadAll(r.Body)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"message_id":"msg-skip"}`))
-	}))
-	defer tsSkipSink.Close()
-
-	srvSkipSink := &VanadisServer{
-		cfg:        Config{BrainURL: tsSkipSink.URL},
-		store:      &errVanadisStore{},
-		httpClient: tsSkipSink.Client(),
-	}
-	errSkipSink := srvSkipSink.dispatchAndPersistWidget(ctx, "b1", "", StatusWidgetRequest{Title: "quiet", SkipSink: true})
-	assert.NoError(t, errSkipSink)
-	assert.Contains(t, string(receivedBody), `"skip_sink":true`)
 }

@@ -157,12 +157,18 @@ func buildTransitiveClosure(out []VanadisChunk, idMap map[string]int) [][]bool {
 func validateConcurrentDisjointPRChunks(out []VanadisChunk, reach [][]bool) error {
 	N := len(out)
 	for i := range N {
+		if isTerminalChunkStatus(out[i].Status) {
+			continue
+		}
 		modeI, err := normalizeChunkMode(out[i].Mode)
 		if err != nil || modeI != "pr" {
 			continue
 		}
 		repoI := normalizeRepo(out[i].Repo)
 		for j := i + 1; j < N; j++ {
+			if isTerminalChunkStatus(out[j].Status) {
+				continue
+			}
 			modeJ, err := normalizeChunkMode(out[j].Mode)
 			if err != nil || modeJ != "pr" {
 				continue

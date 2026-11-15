@@ -1137,7 +1137,7 @@ func (s *VanadisServer) handleAdvanceChunkPR(w http.ResponseWriter, r *http.Requ
 			RecordBuildTotal("completed")
 		}
 	}
-	if res != nil && res.Matched && !res.BuildCompleted && res.NextChunkIndex >= 0 {
+	if !s.notifyRestateChunkPRAdvanced(r.Context(), res) && res != nil && res.Matched && !res.BuildCompleted && res.NextChunkIndex >= 0 {
 		if err := s.enqueueExecuteChunk(r.Context(), ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: res.NextChunkIndex}); err != nil {
 			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue next chunk %d: %v", res.NextChunkIndex, err))
 			return
@@ -1162,6 +1162,7 @@ func (s *VanadisServer) handleFailChunkPR(w http.ResponseWriter, r *http.Request
 	if failed {
 		RecordChunkTotal("failed")
 		RecordBuildTotal("failed")
+		s.notifyRestateChunkFailed(r.Context(), chunkID)
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"build_id": buildID,
@@ -1418,6 +1419,13 @@ func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Reque
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"chunk": chunks[idx], "build": build})
 }
 
+func (s *VanadisServer) syncBuildAndNotifyMutation(ctx context.Context, buildID, action string) {
+	s.syncBuildWidget(ctx, buildID, "")
+	if err := s.notifyRestateDAGMutation(ctx, buildID, action); err != nil {
+		log.Printf("[vanadis] warning: failed signaling restate dag mutation on %s for build %s: %v", action, buildID, err)
+	}
+}
+
 func (s *VanadisServer) handleUpdateChunk(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 	if err != nil {
@@ -1434,7 +1442,7 @@ func (s *VanadisServer) handleUpdateChunk(w http.ResponseWriter, r *http.Request
 		writeStoreErr(w, err)
 		return
 	}
-	s.syncBuildWidget(r.Context(), buildID, "")
+	s.syncBuildAndNotifyMutation(r.Context(), buildID, "update_chunk")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "chunk": chunk})
 }
 
@@ -1454,7 +1462,7 @@ func (s *VanadisServer) handleAppendChunks(w http.ResponseWriter, r *http.Reques
 		writeStoreErr(w, err)
 		return
 	}
-	s.syncBuildWidget(r.Context(), buildID, "")
+	s.syncBuildAndNotifyMutation(r.Context(), buildID, "append_chunks")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "appended", "build_id": buildID, "chunks": appended})
 }
 
@@ -1464,7 +1472,7 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 		writeStoreErr(w, err)
 		return
 	}
-	s.syncBuildWidget(r.Context(), buildID, "")
+	s.syncBuildAndNotifyMutation(r.Context(), buildID, "remove_chunk")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":           "removed",
 		"build_id":         buildID,

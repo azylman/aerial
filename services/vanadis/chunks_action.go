@@ -257,6 +257,7 @@ func (s *VanadisServer) failChunkInternal(ctx context.Context, chunkID, reason s
 	if transitioned && build != nil && chunk != nil {
 		RecordChunkTotal("failed")
 		RecordBuildTotal("failed")
+		s.notifyRestateChunkFailed(ctx, chunk.ID)
 
 		totalChunks := chunk.ChunkIndex + 1
 		if _, allChunks, bErr := s.store.GetBuild(ctx, build.ID); bErr == nil && len(allChunks) > 0 {
