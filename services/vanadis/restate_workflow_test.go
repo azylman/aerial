@@ -38,6 +38,30 @@ func TestBuildReconciler_Reflection(t *testing.T) {
 	})
 }
 
+func TestBuildObject_Reflection(t *testing.T) {
+	t.Parallel()
+
+	srv := &VanadisServer{}
+	bo := NewBuildObject(srv)
+	assert.Equal(t, "Build", bo.ServiceName())
+
+	// restate.Reflect panics if handler signatures are invalid
+	require.NotPanics(t, func() {
+		def := restate.Reflect(bo)
+		require.NotNil(t, def)
+	})
+
+	// Direct reflection call on nil or empty build_id
+	nilBO := NewBuildObject(nil)
+	resNil, errNil := nilBO.Reconcile(nil, ReconcileBuildRequest{Reason: "test"})
+	require.Error(t, errNil)
+	assert.Empty(t, resNil.BuildID)
+
+	resMutNil, errMutNil := nilBO.Mutate(nil, BuildMutationRequest{Action: "chunk_merged"})
+	require.Error(t, errMutNil)
+	assert.Empty(t, resMutNil.BuildID)
+}
+
 func TestBuildReconciler_Reconcile_EmptyBuildID(t *testing.T) {
 	t.Parallel()
 
@@ -507,6 +531,8 @@ func TestLoadRestateConfig(t *testing.T) {
 type fakeObjectRuntime struct {
 	key            string
 	launched       map[string]bool
+	state          *BuildObjectState
+	getStateErr    error
 	getLaunchedErr error
 	runStepErr     error
 	stepsRun       []string
@@ -540,9 +566,42 @@ func (f *fakeObjectRuntime) SetLaunched(launched map[string]bool) {
 	maps.Copy(f.launched, launched)
 }
 
+func (f *fakeObjectRuntime) GetState() (*BuildObjectState, error) {
+	if f.getStateErr != nil {
+		return nil, f.getStateErr
+	}
+	if f.state == nil {
+		return nil, nil
+	}
+	cp := *f.state
+	if f.state.Launched != nil {
+		cp.Launched = make(map[string]bool, len(f.state.Launched))
+		maps.Copy(cp.Launched, f.state.Launched)
+	}
+	if f.state.Chunks != nil {
+		cp.Chunks = make([]VanadisChunk, len(f.state.Chunks))
+		copy(cp.Chunks, f.state.Chunks)
+	}
+	return &cp, nil
+}
+
+func (f *fakeObjectRuntime) SetState(state BuildObjectState) {
+	cp := state
+	if state.Launched != nil {
+		cp.Launched = make(map[string]bool, len(state.Launched))
+		maps.Copy(cp.Launched, state.Launched)
+	}
+	if state.Chunks != nil {
+		cp.Chunks = make([]VanadisChunk, len(state.Chunks))
+		copy(cp.Chunks, state.Chunks)
+	}
+	f.state = &cp
+}
+
 func (f *fakeObjectRuntime) ClearState() {
 	f.cleared = true
 	f.launched = make(map[string]bool)
+	f.state = nil
 }
 
 func (f *fakeObjectRuntime) RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error) {
@@ -800,6 +859,251 @@ func TestBuildReconciler_EdgeCasesAndFailures(t *testing.T) {
 	memStore.updateBuildErr = errors.New("cannot update build to failed")
 	_, errRecFailBuild := executeReconcileBuild(ctx, srv, "b-fail-rec-err", nil)
 	assert.Error(t, errRecFailBuild)
+	memStore.updateBuildErr = nil
+}
+
+func TestBuildObject_ReconcileAndMutate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	memStore := newMemoryVanadisStore()
+	memBus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = memBus.Close() })
+	srv := &VanadisServer{store: memStore, bus: memBus}
+	bo := NewBuildObject(srv)
+
+	testBuildObjectRuntimeErrors(t, bo)
+
+	// 1. Initial Reconcile without prior state: hydrations from Postgres and SetState persistence
+	b1 := VanadisBuild{ID: "b-bo-1", ThreadID: "th-bo-1", Objective: "test bo", Status: "pending"}
+	c1 := []VanadisChunk{
+		{ID: "c-bo-0", BuildID: "b-bo-1", ChunkIndex: 0, Mode: "pr", Status: "running"},
+		{ID: "c-bo-1", BuildID: "b-bo-1", ChunkIndex: 1, Mode: "pr", Status: "pending", DependsOn: []string{"c-bo-0"}},
+	}
+	require.NoError(t, memStore.CreateBuild(ctx, b1, c1))
+
+	rt1 := newFakeObjectRuntime("b-bo-1")
+	res1, err1 := bo.reconcileWithRuntime(rt1)
+	require.NoError(t, err1)
+	assert.Equal(t, "running", res1.Status)
+	assert.Equal(t, []string{"c-bo-0"}, res1.LaunchedChunks)
+	assert.False(t, rt1.cleared)
+	require.NotNil(t, rt1.state)
+	assert.Equal(t, "running", rt1.state.Build.Status)
+	assert.True(t, rt1.state.Launched["c-bo-0"])
+	assert.True(t, rt1.launched["c-bo-0"])
+
+	// 2. Mutate: chunk_merged
+	resMerged, errMerged := bo.mutateWithRuntime(rt1, BuildMutationRequest{
+		Action:  "chunk_merged",
+		ChunkID: "c-bo-0",
+	})
+	require.NoError(t, errMerged)
+	assert.Equal(t, "running", resMerged.Status)
+	assert.Equal(t, []string{"c-bo-1"}, resMerged.LaunchedChunks)
+	assert.True(t, rt1.launched["c-bo-1"])
+	assert.True(t, rt1.state.Launched["c-bo-1"])
+	c0Loaded, _, err := memStore.GetChunk(ctx, "c-bo-0")
+	require.NoError(t, err)
+	assert.Equal(t, "merged", c0Loaded.Status)
+
+	// 3. Mutate: chunk_deploy_success
+	resDep, errDep := bo.mutateWithRuntime(rt1, BuildMutationRequest{
+		Action:  "chunk_deploy_success",
+		ChunkID: "c-bo-0",
+	})
+	require.NoError(t, errDep)
+	assert.Equal(t, "running", resDep.Status)
+	c0AfterDep, _, err := memStore.GetChunk(ctx, "c-bo-0")
+	require.NoError(t, err)
+	assert.Equal(t, "completed", c0AfterDep.Status)
+
+	// 4. Mutate: action_completed on action chunk
+	bAct := VanadisBuild{ID: "b-bo-act", Status: "running"}
+	cAct := []VanadisChunk{
+		{ID: "c-act-0", BuildID: "b-bo-act", ChunkIndex: 0, Mode: "action", Status: "running"},
+	}
+	require.NoError(t, memStore.CreateBuild(ctx, bAct, cAct))
+	rtAct := newFakeObjectRuntime("b-bo-act")
+	resAct, errAct := bo.mutateWithRuntime(rtAct, BuildMutationRequest{
+		Action:  "action_completed",
+		ChunkID: "c-act-0",
+	})
+	require.NoError(t, errAct)
+	assert.Equal(t, "completed", resAct.Status)
+	assert.True(t, rtAct.cleared)
+
+	// 5. Mutate: chunk_failed
+	bFail := VanadisBuild{ID: "b-bo-fail", Status: "running"}
+	cFail := []VanadisChunk{
+		{ID: "c-fail-0", BuildID: "b-bo-fail", ChunkIndex: 0, Mode: "pr", Status: "running"},
+	}
+	require.NoError(t, memStore.CreateBuild(ctx, bFail, cFail))
+	rtFail := newFakeObjectRuntime("b-bo-fail")
+	resFail, errFail := bo.mutateWithRuntime(rtFail, BuildMutationRequest{
+		Action:  "chunk_failed",
+		ChunkID: "c-fail-0",
+		Reason:  "compilation error",
+	})
+	require.NoError(t, errFail)
+	assert.Equal(t, "failed", resFail.Status)
+	assert.Contains(t, resFail.Error, "c-fail-0")
+	assert.True(t, rtFail.cleared)
+
+	// 6. Mutate: cancelled
+	bCancel := VanadisBuild{ID: "b-bo-cancel", Status: "running"}
+	cCancel := []VanadisChunk{
+		{ID: "c-cancel-0", BuildID: "b-bo-cancel", ChunkIndex: 0, Mode: "pr", Status: "running"},
+	}
+	require.NoError(t, memStore.CreateBuild(ctx, bCancel, cCancel))
+	rtCancel := newFakeObjectRuntime("b-bo-cancel")
+	resCancel, errCancel := bo.mutateWithRuntime(rtCancel, BuildMutationRequest{
+		Action: "cancelled",
+	})
+	require.NoError(t, errCancel)
+	assert.Equal(t, "cancelled", resCancel.Status)
+	assert.True(t, rtCancel.cleared)
+	bCancelLoaded, _, err := memStore.GetBuild(ctx, "b-bo-cancel")
+	require.NoError(t, err)
+	assert.Equal(t, "cancelled", bCancelLoaded.Status)
+
+	testBuildMutationErrorBranches(t, srv, memStore)
+}
+
+func testBuildObjectRuntimeErrors(t *testing.T, bo *BuildObject) {
+	t.Helper()
+	// Runtime error cases on empty build ID
+	rtEmpty := newFakeObjectRuntime("  ")
+	_, errEmptyRec := bo.reconcileWithRuntime(rtEmpty)
+	require.Error(t, errEmptyRec)
+	_, errEmptyMut := bo.mutateWithRuntime(rtEmpty, BuildMutationRequest{Action: "chunk_merged"})
+	require.Error(t, errEmptyMut)
+
+	// Runtime error cases on GetState error
+	rtErrState := newFakeObjectRuntime("b-err")
+	rtErrState.getStateErr = errors.New("get state failed")
+	resErrState, errErrState := bo.reconcileWithRuntime(rtErrState)
+	require.Error(t, errErrState)
+	assert.Equal(t, "failed", resErrState.Status)
+
+	resErrMutState, errErrMutState := bo.mutateWithRuntime(rtErrState, BuildMutationRequest{Action: "chunk_merged"})
+	require.Error(t, errErrMutState)
+	assert.Equal(t, "failed", resErrMutState.Status)
+
+	// Runtime error cases on GetLaunched error
+	rtErrLaunched := newFakeObjectRuntime("b-err")
+	rtErrLaunched.getLaunchedErr = errors.New("get launched failed")
+	resErrLaunched, errErrLaunched := bo.reconcileWithRuntime(rtErrLaunched)
+	require.Error(t, errErrLaunched)
+	assert.Equal(t, "failed", resErrLaunched.Status)
+
+	resErrMutLaunched, errErrMutLaunched := bo.mutateWithRuntime(rtErrLaunched, BuildMutationRequest{Action: "chunk_merged"})
+	require.Error(t, errErrMutLaunched)
+	assert.Equal(t, "failed", resErrMutLaunched.Status)
+
+	// Step error cases
+	rtErrStep := newFakeObjectRuntime("b-err")
+	rtErrStep.runStepErr = errors.New("step run failed")
+	resErrStep, errErrStep := bo.reconcileWithRuntime(rtErrStep)
+	require.Error(t, errErrStep)
+	assert.Equal(t, "failed", resErrStep.Status)
+
+	resErrMutStep, errErrMutStep := bo.mutateWithRuntime(rtErrStep, BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"})
+	require.Error(t, errErrMutStep)
+	assert.Equal(t, "failed", resErrMutStep.Status)
+}
+
+func testBuildMutationErrorBranches(t *testing.T, srv *VanadisServer, memStore *memoryVanadisStore) {
+	t.Helper()
+	ctx := context.Background()
+
+	// Cancel on already terminal build
+	errTerminalCancel := executeBuildMutation(ctx, srv, "b-bo-cancel", BuildMutationRequest{Action: "cancelled"})
+	require.NoError(t, errTerminalCancel)
+
+	// Cancel on nonexistent build returns nil
+	errMissingCancel := executeBuildMutation(ctx, srv, "b-nonexistent", BuildMutationRequest{Action: "cancelled"})
+	require.NoError(t, errMissingCancel)
+
+	tests := []struct {
+		name        string
+		req         BuildMutationRequest
+		buildID     string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "unsupported action",
+			req:         BuildMutationRequest{Action: "unknown_action"},
+			buildID:     "b1",
+			wantErr:     true,
+			errContains: "unsupported mutation action",
+		},
+		{
+			name:        "chunk_merged missing chunk_id",
+			req:         BuildMutationRequest{Action: "chunk_merged", ChunkID: ""},
+			buildID:     "b1",
+			wantErr:     true,
+			errContains: "chunk_id required",
+		},
+		{
+			name:        "chunk_deploy_success missing chunk_id",
+			req:         BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: ""},
+			buildID:     "b1",
+			wantErr:     true,
+			errContains: "chunk_id required",
+		},
+		{
+			name:        "action_completed missing chunk_id",
+			req:         BuildMutationRequest{Action: "action_completed", ChunkID: ""},
+			buildID:     "b1",
+			wantErr:     true,
+			errContains: "chunk_id required",
+		},
+		{
+			name:        "chunk_failed missing chunk_id",
+			req:         BuildMutationRequest{Action: "chunk_failed", ChunkID: ""},
+			buildID:     "b1",
+			wantErr:     true,
+			errContains: "chunk_id required",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := executeBuildMutation(ctx, srv, tc.buildID, tc.req)
+			if tc.wantErr {
+				require.Error(t, err)
+				if tc.errContains != "" {
+					assert.Contains(t, err.Error(), tc.errContains)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+
+	// executeBuildMutation store errors
+	var nilSrv *VanadisServer
+	assert.Error(t, executeBuildMutation(ctx, nilSrv, "b1", BuildMutationRequest{Action: "cancelled"}))
+
+	memStore.updateChunkErr = errors.New("update chunk db err")
+	assert.Error(t, executeBuildMutation(ctx, srv, "b-bo-1", BuildMutationRequest{Action: "chunk_merged", ChunkID: "c-bo-1"}))
+	memStore.updateChunkErr = nil
+
+	assert.Error(t, executeBuildMutation(ctx, srv, "b-bo-1", BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c-nonexistent"}))
+
+	assert.Error(t, executeBuildMutation(ctx, srv, "b-bo-1", BuildMutationRequest{Action: "action_completed", ChunkID: "c-nonexistent"}))
+
+	assert.Error(t, executeBuildMutation(ctx, srv, "b-bo-1", BuildMutationRequest{Action: "chunk_failed", ChunkID: "c-nonexistent"}))
+
+	memStore.getErr = errors.New("get build db err")
+	assert.Error(t, executeBuildMutation(ctx, srv, "b-bo-1", BuildMutationRequest{Action: "cancelled"}))
+	memStore.getErr = nil
+
+	memStore.updateBuildErr = errors.New("update build db err")
+	assert.Error(t, executeBuildMutation(ctx, srv, "b-bo-1", BuildMutationRequest{Action: "cancelled"}))
 	memStore.updateBuildErr = nil
 }
 
