@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -586,7 +588,9 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 	}
 
 	// configureServerEventBus with dispatcher
-	disp := NewHTTPPromptDispatcher("http://localhost:8080")
+	dispSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer dispSrv.Close()
+	disp := NewHTTPPromptDispatcher(dispSrv.URL)
 	serverWithDisp := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), disp)
 	memBusInit := pubsub.NewMemoryBus()
 	defer memBusInit.Close()

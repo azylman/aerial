@@ -674,6 +674,70 @@ func TestAnalyzeTestFile(t *testing.T) {
 }
 
 func analyzeTestCases() []analyzeTestCase {
+	return append(analyzeTestCasesBase(), analyzeTestCasesPorts()...)
+}
+
+func analyzeTestCasesPorts() []analyzeTestCase {
+	return []analyzeTestCase{
+		{
+			name: "reserved live localhost daemon ports in test HTTP calls detected",
+			content: `package pkg
+
+import (
+	"context"
+	"net/http"
+)
+
+func TestReservedPorts(ctx context.Context) {
+	_, _ = http.Get("http://localhost:8080")
+	_, _ = http.Post("http://127.0.0.1:4020/webhook", "application/json", nil)
+	_, _ = http.NewRequest(http.MethodGet, "http://[::1]:8081", nil)
+	_, _ = http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost:8082/builds", nil)
+	_ = NewHTTPPromptDispatcher("http://localhost:8083")
+	_ = haro.NewHTTPPromptDispatcher("http://localhost:8083")
+	_, _ = newRequestWithContext(ctx, http.MethodGet, "http://localhost:8090/test", nil)
+	_, _ = http.Get("http://localhost:8070/call")
+	_, _ = http.Get("http://localhost:9070/status")
+	_, _ = http.Get("http://localhost:8088/alt")
+}
+`,
+			wantViolations: []string{
+				"sample_test.go:9: call to http.Get targeting reserved live daemon port 8080 in tests is prohibited; use httptest.Server or mock transport instead",
+				"sample_test.go:10: call to http.Post targeting reserved live daemon port 4020 in tests is prohibited; use httptest.Server or mock transport instead",
+				"sample_test.go:11: call to http.NewRequest targeting reserved live daemon port 8081 in tests is prohibited; use httptest.Server or mock transport instead",
+				"sample_test.go:12: call to http.NewRequestWithContext targeting reserved live daemon port 8082 in tests is prohibited; use httptest.Server or mock transport instead",
+				"sample_test.go:13: call to NewHTTPPromptDispatcher targeting reserved live daemon port 8083 in tests is prohibited; use httptest.Server or mock transport instead",
+				"sample_test.go:14: call to NewHTTPPromptDispatcher targeting reserved live daemon port 8083 in tests is prohibited; use httptest.Server or mock transport instead",
+				"sample_test.go:15: call to newRequestWithContext targeting reserved live daemon port 8090 in tests is prohibited; use httptest.Server or mock transport instead",
+				"sample_test.go:16: call to http.Get targeting reserved live daemon port 8070 in tests is prohibited; use httptest.Server or mock transport instead",
+				"sample_test.go:17: call to http.Get targeting reserved live daemon port 9070 in tests is prohibited; use httptest.Server or mock transport instead",
+				"sample_test.go:18: call to http.Get targeting reserved live daemon port 8088 in tests is prohibited; use httptest.Server or mock transport instead",
+			},
+		},
+		{
+			name: "safe non-reserved or dynamic HTTP calls produce no violations",
+			content: `package pkg
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+)
+
+func TestAllowedCalls(ctx context.Context, srvURL string) {
+	_, _ = http.Get(srvURL)
+	_, _ = http.Get("http://localhost:54321")
+	_, _ = http.Get("http://example.com:8080")
+	_, _ = http.NewRequest(http.MethodGet, "http://localhost:18080", nil)
+	_ = NewHTTPPromptDispatcher(srvURL)
+	fmt.Println("http://localhost:8080")
+}
+`,
+		},
+	}
+}
+
+func analyzeTestCasesBase() []analyzeTestCase {
 	return []analyzeTestCase{
 		{
 			name: "clean test file produces no violations",

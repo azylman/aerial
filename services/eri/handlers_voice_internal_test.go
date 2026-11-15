@@ -661,3 +661,37 @@ func TestHandleInternalGitHubGitProxy(t *testing.T) {
 		}
 	})
 }
+
+type testNonFlusherWriter struct {
+	header http.Header
+	code   int
+	buf    bytes.Buffer
+}
+
+func (n *testNonFlusherWriter) Header() http.Header {
+	if n.header == nil {
+		n.header = make(http.Header)
+	}
+	return n.header
+}
+func (n *testNonFlusherWriter) Write(b []byte) (int, error) { return n.buf.Write(b) }
+func (n *testNonFlusherWriter) WriteHeader(code int)        { n.code = code }
+
+func TestStreamProxyResponse_NonFlusher(t *testing.T) {
+	t.Parallel()
+	w := &testNonFlusherWriter{}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"X-Custom": []string{"val"}, "Connection": []string{"close"}},
+		Body:       io.NopCloser(strings.NewReader("hello proxy")),
+	}
+	streamProxyResponse(w, resp)
+	if w.code != http.StatusOK || w.buf.String() != "hello proxy" {
+		t.Fatalf("unexpected streamProxyResponse result: code=%d, body=%q", w.code, w.buf.String())
+	}
+}
+
+func TestCleanTempDir_ErrorBranch(t *testing.T) {
+	t.Parallel()
+	cleanTempDir("/dev/null/impossible-path-that-fails-removeall")
+}

@@ -21,6 +21,7 @@ import (
 // InterchangeablePoolConfig specifies sizing and naming configuration for an InterchangeablePool.
 type InterchangeablePoolConfig struct {
 	WorkerCount int    // defaults to 2 if <= 0
+	MaxOverflow int    // defaults to 4 if <= 0
 	KeyPrefix   string // defaults to "ephemeral:worker" if empty
 	// CaptureContent records each ephemeral run's prompt and response on its invoke_agent span
 	// (tracing's capture_content).
@@ -38,6 +39,7 @@ type InterchangeablePool struct {
 	capture     bool // record prompt/response on invoke_agent spans
 	overflowSeq atomic.Uint64
 	available   chan string
+	overflowSem chan struct{}
 	mu          sync.Mutex
 	closed      atomic.Bool
 	closeOnce   sync.Once
@@ -54,6 +56,10 @@ func NewInterchangeablePool(underlying *UnifiedProcessPool, cfg InterchangeableP
 	if workerCount <= 0 {
 		workerCount = 2
 	}
+	maxOverflow := cfg.MaxOverflow
+	if maxOverflow <= 0 {
+		maxOverflow = 4
+	}
 	keyPrefix := strings.TrimSpace(cfg.KeyPrefix)
 	if keyPrefix == "" {
 		keyPrefix = "ephemeral:worker"
@@ -69,10 +75,12 @@ func NewInterchangeablePool(underlying *UnifiedProcessPool, cfg InterchangeableP
 		underlying.UpdatePrewarmedTargets(workers)
 	}
 
+	overflowSem := make(chan struct{}, maxOverflow)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	return &InterchangeablePool{
 		underlying: underlying, workers: workers, keyPrefix: keyPrefix, capture: cfg.CaptureContent,
-		available: available, ctx: ctx, cancel: cancel,
+		available: available, overflowSem: overflowSem, ctx: ctx, cancel: cancel,
 	}
 }
 
@@ -96,15 +104,36 @@ func (p *InterchangeablePool) acquireWorkerSlot(ctx context.Context) (string, bo
 	if err := ctx.Err(); err != nil {
 		return "", false, err
 	}
+
+	// 1. Try available prewarmed worker first.
 	select {
 	case key := <-p.available:
 		return key, false, nil
 	default:
-		prefix := p.keyPrefix
-		if prefix == "" {
-			prefix = "ephemeral:worker"
-		}
-		return fmt.Sprintf("%s-ondemand-%d", prefix, p.overflowSeq.Add(1)), true, nil
+	}
+
+	// 2. Try non-blocking overflow allocation.
+	select {
+	case p.overflowSem <- struct{}{}:
+		return fmt.Sprintf("%s-ondemand-%d", p.keyPrefix, p.overflowSeq.Add(1)), true, nil
+	default:
+	}
+
+	// 3. Both prewarmed workers and overflow slots are exhausted.
+	// Wait for an available worker, an overflow slot, context cancellation, or pool shutdown.
+	var poolDone <-chan struct{}
+	if p.ctx != nil {
+		poolDone = p.ctx.Done()
+	}
+	select {
+	case <-ctx.Done():
+		return "", false, ctx.Err()
+	case <-poolDone:
+		return "", false, errors.New("interchangeable pool is closed")
+	case key := <-p.available:
+		return key, false, nil
+	case p.overflowSem <- struct{}{}:
+		return fmt.Sprintf("%s-ondemand-%d", p.keyPrefix, p.overflowSeq.Add(1)), true, nil
 	}
 }
 
@@ -113,6 +142,10 @@ func (p *InterchangeablePool) releaseWorkerKey(workerKey string, isOverflow bool
 		return
 	}
 	if isOverflow {
+		select {
+		case <-p.overflowSem:
+		default:
+		}
 		p.evictOverflow(workerKey)
 	} else {
 		p.rotateAndRelease(workerKey)
@@ -130,7 +163,11 @@ func (p *InterchangeablePool) rotateAndRelease(workerKey string) {
 
 	go func() {
 		defer p.bgWg.Done()
-		rotCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
+		parentCtx := p.ctx
+		if parentCtx == nil {
+			parentCtx = context.Background()
+		}
+		rotCtx, cancel := context.WithTimeout(parentCtx, 35*time.Second)
 		defer cancel()
 		if p.underlying != nil {
 			if _, err := p.underlying.RotateDaemon(rotCtx, workerKey, ""); err != nil && !errors.Is(err, context.Canceled) && !p.closed.Load() {
@@ -249,7 +286,7 @@ func (p *InterchangeablePool) EphemeralLLMFunc(targetKey string) LLMFunc {
 
 // Model returns the model the worker daemons run, or "" when the pool is uninitialized.
 func (p *InterchangeablePool) Model() string {
-	if p == nil {
+	if p == nil || p.underlying == nil {
 		return ""
 	}
 	return p.underlying.Model()
@@ -324,12 +361,20 @@ func (p *InterchangeablePool) AcquireLease(ctx context.Context, targetKey string
 		return nil, err
 	}
 	if p.underlying == nil {
-		p.returnWorker(workerKey)
+		if isOverflow {
+			p.releaseWorkerKey(workerKey, true)
+		} else {
+			p.returnWorker(workerKey)
+		}
 		return nil, errors.New("underlying pool is nil")
 	}
 	lease, err := p.underlying.AcquireLease(ctx, workerKey)
 	if err != nil {
-		p.returnWorker(workerKey)
+		if isOverflow {
+			p.releaseWorkerKey(workerKey, true)
+		} else {
+			p.returnWorker(workerKey)
+		}
 		return nil, err
 	}
 	return &interchangeableSessionLease{

@@ -10,6 +10,7 @@ import (
 	"go/token"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -869,7 +870,100 @@ func checkBannedTestCall(call *ast.CallExpr) string {
 	if isSelectorNamed(call.Fun, "syscall", "Kill") {
 		return "raw syscall.Kill in tests is prohibited; use dependency-injected signal or process-kill functions"
 	}
+	if reason := checkReservedPortCall(call); reason != "" {
+		return reason
+	}
 	return ""
+}
+
+func checkReservedPortCall(call *ast.CallExpr) string {
+	callName, urlExpr := getCallTargetURL(call)
+	if callName == "" || urlExpr == nil {
+		return ""
+	}
+	lit, ok := urlExpr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return ""
+	}
+	val, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		val = strings.Trim(lit.Value, "`\"")
+	}
+	u, err := url.Parse(val)
+	if err != nil || u.Host == "" {
+		if u2, err2 := url.Parse("http://" + val); err2 == nil {
+			u = u2
+		} else {
+			return ""
+		}
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if !isLoopbackHost(host) || !isReservedDaemonPort(port) {
+		return ""
+	}
+	return fmt.Sprintf("call to %s targeting reserved live daemon port %s in tests is prohibited; use httptest.Server or mock transport instead", callName, port)
+}
+
+func getCallTargetURL(call *ast.CallExpr) (string, ast.Expr) {
+	if isSelectorNamed(call.Fun, "http", "Get") {
+		if len(call.Args) >= 1 {
+			return "http.Get", call.Args[0]
+		}
+	}
+	if isSelectorNamed(call.Fun, "http", "Post") {
+		if len(call.Args) >= 1 {
+			return "http.Post", call.Args[0]
+		}
+	}
+	if isSelectorNamed(call.Fun, "http", "NewRequest") {
+		if len(call.Args) >= 2 {
+			return "http.NewRequest", call.Args[1]
+		}
+	}
+	if isSelectorNamed(call.Fun, "http", "NewRequestWithContext") {
+		if len(call.Args) >= 3 {
+			return "http.NewRequestWithContext", call.Args[2]
+		}
+	}
+	if ident, ok := call.Fun.(*ast.Ident); ok {
+		switch ident.Name {
+		case "NewHTTPPromptDispatcher":
+			if len(call.Args) >= 1 {
+				return "NewHTTPPromptDispatcher", call.Args[0]
+			}
+		case "newRequestWithContext":
+			if len(call.Args) >= 3 {
+				return "newRequestWithContext", call.Args[2]
+			}
+		}
+	}
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if sel.Sel.Name == "NewHTTPPromptDispatcher" {
+			if len(call.Args) >= 1 {
+				return "NewHTTPPromptDispatcher", call.Args[0]
+			}
+		}
+	}
+	return "", nil
+}
+
+func isLoopbackHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
+func isReservedDaemonPort(port string) bool {
+	switch port {
+	case "8080", "8088", "4020", "8081", "8082", "8083", "8090", "8070", "9070":
+		return true
+	default:
+		return false
+	}
 }
 
 func isBannedClosureFieldName(name string) bool {
