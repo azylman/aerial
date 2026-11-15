@@ -499,16 +499,7 @@ func TestVanadisMCP_Tools(t *testing.T) {
 				srvStore = nil
 			}
 
-			var widgetSyncedBuildID string
-			syncWidgetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var req map[string]string
-				_ = json.NewDecoder(r.Body).Decode(&req)
-				widgetSyncedBuildID = req["build_id"]
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer syncWidgetSrv.Close()
-
-			srv := NewVanadisServer(Config{Port: "0", SynapseURL: syncWidgetSrv.URL}, srvStore, syncWidgetSrv.Client())
+			srv := NewVanadisServer(Config{Port: "0"}, srvStore, nil)
 			handler := srv.newMCPHandler()
 
 			reqBody := `{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"` + tc.toolName + `","arguments":` + tc.args + `}}`
@@ -518,7 +509,6 @@ func TestVanadisMCP_Tools(t *testing.T) {
 
 			handler(rec, req)
 			assertVanadisMCPToolResult(t, rec.Body.Bytes(), tc.wantToolErr, tc.wantSubstr)
-			_ = widgetSyncedBuildID
 		})
 	}
 }

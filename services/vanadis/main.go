@@ -48,7 +48,6 @@ type Config struct {
 	PostgresURL  string
 	BrainURL     string
 	EriURL       string
-	SynapseURL   string
 	NATSURL      string
 	GitHubAPIURL string
 	GitHubToken  string
@@ -59,7 +58,6 @@ type VanadisYAMLConfig struct {
 	Port         string `yaml:"port"`
 	PostgresURL  string `yaml:"postgres_url"`
 	EriURL       string `yaml:"eri_url"`
-	SynapseURL   string `yaml:"synapse_url"`
 	NATSURL      string `yaml:"nats_url"`
 	GitHubAPIURL string `yaml:"github_api_url"`
 	GitHubToken  string `yaml:"github_token"`
@@ -107,7 +105,6 @@ func LoadConfig(configPath string) Config {
 		PostgresURL:  pgURL,
 		BrainURL:     eriURL,
 		EriURL:       eriURL,
-		SynapseURL:   strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("SYNAPSE_URL"), fileCfg.SynapseURL)), "/"),
 		NATSURL:      firstNonEmpty(os.Getenv("NATS_URL"), strings.TrimSpace(fileCfg.NATSURL)),
 		GitHubAPIURL: strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("GITHUB_API_URL"), fileCfg.GitHubAPIURL, "https://api.github.com")), "/"),
 		GitHubToken:  firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT"), fileCfg.GitHubToken),
@@ -726,7 +723,7 @@ func (s *VanadisServer) postBrainJSON(ctx context.Context, path string, payload 
 }
 
 func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner string) {
-	if s == nil {
+	if s == nil || s.bus == nil {
 		return
 	}
 	cleanBuildID := strings.TrimSpace(buildID)
@@ -734,46 +731,13 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner str
 		return
 	}
 	cleanBanner := strings.TrimSpace(banner)
-	if s.bus != nil {
-		args := pubsub.WidgetSyncJobArgs{
-			BuildID: cleanBuildID,
-			Banner:  cleanBanner,
-		}
-		msgID := fmt.Sprintf("widget:build:%s:%d", cleanBuildID, time.Now().UnixNano())
-		if err := s.bus.Publish(ctx, pubsub.SubjectBuildWidgetSyncCoalesced(cleanBuildID), msgID, args); err == nil {
-			return
-		}
+	args := pubsub.WidgetSyncJobArgs{
+		BuildID: cleanBuildID,
+		Banner:  cleanBanner,
 	}
-	if s.httpClient == nil {
-		return
-	}
-	routerURL := strings.TrimRight(strings.TrimSpace(s.cfg.SynapseURL), "/")
-	if routerURL == "" {
-		return
-	}
-	payload := map[string]string{
-		"build_id": cleanBuildID,
-		"banner":   cleanBanner,
-	}
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("[vanadis] warning: marshal widget sync payload failed for build %s: %v", cleanBuildID, err)
-		return
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, routerURL+"/internal/widget/sync", bytes.NewReader(bodyBytes))
-	if err != nil {
-		log.Printf("[vanadis] warning: create widget sync request failed for build %s: %v", cleanBuildID, err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		log.Printf("[vanadis] warning: post widget sync failed for build %s: %v", cleanBuildID, err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("[vanadis] warning: widget sync for build %s returned status %d", cleanBuildID, resp.StatusCode)
+	msgID := fmt.Sprintf("widget:build:%s:%d", cleanBuildID, time.Now().UnixNano())
+	if err := s.bus.Publish(ctx, pubsub.SubjectBuildWidgetSyncCoalesced(cleanBuildID), msgID, args); err != nil {
+		log.Printf("[vanadis] warning: publish coalesced widget sync failed for build %s: %v", cleanBuildID, err)
 	}
 }
 
@@ -1009,11 +973,7 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,
 		"POST /builds": server.handleCreateBuild, "POST /runs": server.handleCreateBuild,
 		"/builds/": server.handleBuildByID, "/runs/": server.handleBuildByID,
-		"/chunks/by-pr":              server.handleChunkByPR,
 		"/chunks/attach-pr":          server.handleAttachChunkPR,
-		"/chunks/advance-pr":         server.handleAdvanceChunkPR,
-		"/chunks/fail-pr":            server.handleFailChunkPR,
-		"/chunks/sync-pr-widget":     server.handleSyncPRWidget,
 		"/chunks/":                   server.handleChunkByID,
 		"/mcp":                       mcpHandler,
 		"/sse":                       mcpHandler,
@@ -1131,7 +1091,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.syncBuildWidget(r.Context(), build.ID, "")
-	if err := s.launchCreatedBuild(r.Context(), buildID, strings.EqualFold(r.URL.Query().Get("engine"), "restate")); err != nil {
+	if err := s.launchCreatedBuild(r.Context(), buildID); err != nil {
 		if statusErr := s.store.UpdateBuildStatus(r.Context(), buildID, "failed"); statusErr != nil {
 			log.Printf("[vanadis] warning marking build %s failed after enqueue error: %v", buildID, statusErr)
 		}

@@ -489,28 +489,46 @@ func (s *VanadisServer) advanceLegacyChunkByPR(ctx context.Context, repo string,
 	}
 }
 
+func (s *VanadisServer) isNextUnmergedChunkAction(ctx context.Context, buildID string, currentChunkIdx int) bool {
+	if s == nil || s.store == nil || buildID == "" {
+		return false
+	}
+	_, chunks, err := s.store.GetBuild(ctx, buildID)
+	if err != nil || len(chunks) == 0 {
+		return false
+	}
+	for _, c := range chunks {
+		if c.ChunkIndex > currentChunkIdx && c.Status != "completed" && c.Status != "merged" {
+			return c.Mode == "action"
+		}
+	}
+	return false
+}
+
 func (s *VanadisServer) handlePRMerged(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
 	if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "merged"); err != nil {
 		log.Printf("[vanadis] warning updating chunk %s to merged: %v", chunk.ID, err)
 	}
 	RecordChunkTotal("merged")
+
 	if chunk.MergeAwakeableID != "" {
-		if err := s.resolveRestateAwakeable(ctx, chunk.MergeAwakeableID, "merged"); err != nil {
-			log.Printf("[vanadis] warning resolving merge awakeable %s: %v; falling back to legacy advancement", chunk.MergeAwakeableID, err)
-			s.advanceLegacyChunkByPR(ctx, ev.Repo, ev.PRNumber)
-			s.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunk.ID}, "")
+		if err := s.resolveRestateAwakeable(ctx, chunk.MergeAwakeableID, "merged"); err == nil {
+			s.syncBuildWidget(ctx, build.ID, "")
 			return nil
 		}
-		s.syncBuildWidget(ctx, build.ID, "")
-	} else {
-		s.advanceLegacyChunkByPR(ctx, ev.Repo, ev.PRNumber)
-		s.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunk.ID}, "")
+		log.Printf("[vanadis] warning resolving merge awakeable %s; falling back to legacy advancement", chunk.MergeAwakeableID)
 	}
+
+	if !s.isNextUnmergedChunkAction(ctx, build.ID, chunk.ChunkIndex) {
+		s.advanceLegacyChunkByPR(ctx, ev.Repo, ev.PRNumber)
+	}
+	s.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunk.ID}, "")
 	return nil
 }
 
 func (s *VanadisServer) completeLegacyChunkDeploy(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) {
 	wasCompleted := chunk.Status == "completed"
+	s.advanceLegacyChunkByPR(ctx, chunk.Repo, chunk.PRNumber)
 	if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
 		log.Printf("[vanadis] warning updating chunk %s to completed: %v", chunk.ID, err)
 	}

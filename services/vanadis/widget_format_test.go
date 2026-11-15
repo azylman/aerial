@@ -537,60 +537,6 @@ func TestHandleCoalescedWidgetMessage_StoreError_And_AckErrors(t *testing.T) {
 	assert.Error(t, srvFail.HandleCoalescedWidgetMessage(ctx, msgDispatchTermErr))
 }
 
-func TestHandleSyncPRWidget_ErrorBranches(t *testing.T) {
-	t.Parallel()
-
-	// 1. BuildID specified, but dispatchAndPersistWidget fails
-	store := newMemoryVanadisStore()
-	b := VanadisBuild{ID: "b-fail", ThreadID: "123", Objective: "test"}
-	c := []VanadisChunk{{ID: "c1", BuildID: "b-fail", Title: "c1"}}
-	_ = store.CreateBuild(context.Background(), b, c)
-
-	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer ts500.Close()
-
-	srv := &VanadisServer{
-		cfg:        Config{BrainURL: ts500.URL},
-		store:      store,
-		httpClient: ts500.Client(),
-	}
-
-	mux := srv.Routes()
-
-	req1 := httptest.NewRequest(http.MethodPost, "/chunks/sync-pr-widget", strings.NewReader(`{"build_id":"b-fail"}`))
-	rec1 := httptest.NewRecorder()
-	mux.ServeHTTP(rec1, req1)
-	if rec1.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 on dispatch fail, got %d", rec1.Code)
-	}
-
-	// 2. Repo + PRNumber, but GetChunkByPR fails
-	sErr := &errVanadisStore{getChunkByPRErr: errors.New("lookup fail")}
-	srvErr := &VanadisServer{store: sErr}
-	muxErr := srvErr.Routes()
-
-	req2 := httptest.NewRequest(http.MethodPost, "/chunks/sync-pr-widget", strings.NewReader(`{"repo":"aerial","pr_number":42}`))
-	rec2 := httptest.NewRecorder()
-	muxErr.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 on GetChunkByPR fail, got %d", rec2.Code)
-	}
-
-	// 3. Repo + PRNumber, GetChunkByPR matches, but GetBuild fails
-	sErr2 := &errVanadisStore{getBuildErr: errors.New("getbuild fail")}
-	srvErr2 := &VanadisServer{store: sErr2}
-	muxErr2 := srvErr2.Routes()
-
-	req3 := httptest.NewRequest(http.MethodPost, "/chunks/sync-pr-widget", strings.NewReader(`{"repo":"aerial","pr_number":42}`))
-	rec3 := httptest.NewRecorder()
-	muxErr2.ServeHTTP(rec3, req3)
-	if rec3.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 on GetBuild fail, got %d", rec3.Code)
-	}
-}
-
 func TestChunksEvents_And_PersistWidget_RemainingGaps(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

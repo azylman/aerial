@@ -48,40 +48,6 @@ func classifyCheckState(status, conclusion string) string {
 	}
 }
 
-func formatCIChecksActiveStep(prStatus, ciChecksJSON string) string {
-	if !strings.EqualFold(strings.TrimSpace(prStatus), "open") {
-		return ""
-	}
-	trimmedJSON := strings.TrimSpace(ciChecksJSON)
-	if trimmedJSON == "" || trimmedJSON == "{}" {
-		return ""
-	}
-	var checks map[string]string
-	if err := json.Unmarshal([]byte(trimmedJSON), &checks); err != nil || len(checks) == 0 {
-		return ""
-	}
-	var total, passed, failed int
-	for _, state := range checks {
-		s := strings.ToLower(strings.TrimSpace(state))
-		switch s {
-		case "passed":
-			passed++
-			total++
-		case "failed":
-			failed++
-			total++
-		default:
-			if s != "" {
-				total++
-			}
-		}
-	}
-	if failed > 0 || total == 0 {
-		return ""
-	}
-	return fmt.Sprintf("Waiting on CI (%d/%d passed)", passed, total)
-}
-
 func extractStringMapFromMetadata(meta map[string]any, key string) map[string]string {
 	if meta == nil {
 		return nil
@@ -217,111 +183,26 @@ func analyzeBuildChecks(checks map[string]string) (checkJobs []string, passedBui
 	return checkJobs, passedBuildJobs, total, passed, failed
 }
 
-func resolveRolloutCandidateJobs(meta map[string]any, checkJobs []string) []string {
-	jobs := extractJobsFromMetadata(meta)
-	startedJobs := extractStringSliceFromMetadata(meta, "started_jobs")
-	deployedJobs := extractStringSliceFromMetadata(meta, "deployed_jobs")
-
-	combined := append(append(append([]string(nil), jobs...), startedJobs...), deployedJobs...)
-	if candidateJobs := dedupeTrimmedStrings(combined); len(candidateJobs) > 0 {
-		sort.Strings(candidateJobs)
-		return candidateJobs
-	}
-	return checkJobs
-}
-
-func formatSingleJobRolloutState(job, cleanStatus string, deployedSet, startedSet map[string]bool, jobStates map[string]string, passedBuildJobs map[string]bool, hasStartedJobs bool) string {
-	jKey := strings.ToLower(strings.TrimSpace(job))
-	switch {
-	case deployedSet[jKey]:
-		return fmt.Sprintf("`%s`: ✅ healthy", job)
-	case startedSet[jKey] && strings.EqualFold(jobStates[jKey], "verifying_health"):
-		return fmt.Sprintf("`%s`: 🔄 verifying health", job)
-	case startedSet[jKey]:
-		return fmt.Sprintf("`%s`: 🔄 starting", job)
-	case (!hasStartedJobs && cleanStatus == "deploying") || passedBuildJobs[jKey]:
-		return fmt.Sprintf("`%s`: 🔄 starting", job)
-	default:
-		return fmt.Sprintf("`%s`: ⏳ building image", job)
-	}
-}
-
-func formatPerJobRolloutStatus(allJobs []string, cleanStatus string, startedJobs, deployedJobs []string, jobStates map[string]string, passedBuildJobs map[string]bool) string {
-	deployedSet := make(map[string]bool, len(deployedJobs))
-	for _, j := range deployedJobs {
-		deployedSet[strings.ToLower(strings.TrimSpace(j))] = true
-	}
-	startedSet := make(map[string]bool, len(startedJobs))
-	for _, j := range startedJobs {
-		startedSet[strings.ToLower(strings.TrimSpace(j))] = true
-	}
-	hasStartedJobs := len(startedJobs) > 0
-
-	lines := make([]string, 0, len(allJobs))
-	for _, j := range allJobs {
-		lines = append(lines, formatSingleJobRolloutState(j, cleanStatus, deployedSet, startedSet, jobStates, passedBuildJobs, hasStartedJobs))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func formatPRWidgetActiveStep(prStatus, ciChecksJSON, metadataJSON string) string {
-	cleanStatus := strings.ToLower(strings.TrimSpace(prStatus))
-	if cleanStatus == "open" {
-		return formatCIChecksActiveStep(prStatus, ciChecksJSON)
-	}
-	if cleanStatus != "merged" && cleanStatus != "synced" && cleanStatus != "deploying" {
-		return ""
-	}
-
-	var meta map[string]any
-	if trimmedMeta := strings.TrimSpace(metadataJSON); trimmedMeta != "" && trimmedMeta != "{}" {
-		if err := json.Unmarshal([]byte(trimmedMeta), &meta); err != nil {
-			meta = nil
-		}
-	}
-
-	checks := extractChecksFromJSONOrMetadata(ciChecksJSON, meta)
-	checkJobs, passedBuildJobs, total, passed, failed := analyzeBuildChecks(checks)
-
-	if failed > 0 {
-		return ""
-	}
-	if rollout, ok := formatKustomizationRolloutStatus(cleanStatus, meta); ok {
-		return rollout
-	}
-	allJobs := resolveRolloutCandidateJobs(meta, checkJobs)
-	if len(allJobs) > 0 {
-		startedJobs := extractStringSliceFromMetadata(meta, "started_jobs")
-		deployedJobs := extractStringSliceFromMetadata(meta, "deployed_jobs")
-		jobStates := extractStringMapFromMetadata(meta, "job_states")
-		return formatPerJobRolloutStatus(allJobs, cleanStatus, startedJobs, deployedJobs, jobStates, passedBuildJobs)
-	}
-
-	if (cleanStatus == "merged" || cleanStatus == "synced") && total > 0 && failed == 0 {
-		return fmt.Sprintf("Building container images (%d/%d completed)", passed, total)
-	}
-
-	return ""
-}
-
 func prCheckKey(repo string, prNumber int) string {
 	return fmt.Sprintf("%s#%d", normalizeRepo(repo), prNumber)
 }
 
 func (s *RouterServer) recordFailedCISHA(repo string, prNumber int, headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
+	normRepo := normalizeRepo(repo)
+	if s == nil || normRepo == "" || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
 		return false
 	}
-	prev, loaded := s.failedCheckSHAs.Swap(prCheckKey(repo, prNumber), headSHA)
+	prev, loaded := s.failedCheckSHAs.Swap(prCheckKey(normRepo, prNumber), headSHA)
 	return !loaded || !strings.EqualFold(fmt.Sprint(prev), headSHA)
 }
 
 func (s *RouterServer) clearFailedCISHA(repo string, prNumber int) {
-	if s == nil || prNumber <= 0 {
+	normRepo := normalizeRepo(repo)
+	if s == nil || normRepo == "" || prNumber <= 0 {
 		return
 	}
-	key := prCheckKey(repo, prNumber)
+	key := prCheckKey(normRepo, prNumber)
 	s.failedCheckSHAs.Delete(key)
 	s.nonRoboRevFailedSHAs.Delete(key)
 	s.cancelledCheckSHAs.Delete(key)

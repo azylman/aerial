@@ -897,47 +897,11 @@ func (s *VanadisServer) resolveRestateAwakeable(ctx context.Context, awakeableID
 	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/restate/awakeables/%s/resolve", awakeableID), value)
 }
 
-func (s *VanadisServer) launchCreatedBuild(ctx context.Context, buildID string, useRestate bool) error {
-	if s != nil && useRestate && strings.TrimSpace(s.restateCfg.RestateIngressURL) != "" {
+func (s *VanadisServer) launchCreatedBuild(ctx context.Context, buildID string) error {
+	if s != nil && strings.TrimSpace(s.restateCfg.RestateIngressURL) != "" {
 		return s.startRestateBuildWorkflow(ctx, buildID)
 	}
 	return s.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: buildID, ChunkIndex: 0})
-}
-
-func findChunkByIndex(chunks []VanadisChunk, idx int) *VanadisChunk {
-	for i := range chunks {
-		if chunks[i].ChunkIndex == idx {
-			return &chunks[i]
-		}
-	}
-	return nil
-}
-
-func (s *VanadisServer) notifyRestateChunkPRAdvanced(ctx context.Context, res *VanadisAdvancementResult) bool {
-	if s == nil || s.store == nil || strings.TrimSpace(s.restateCfg.RestateIngressURL) == "" || res == nil || !res.Matched {
-		return false
-	}
-	_, chunks, err := s.store.GetBuild(ctx, res.BuildID)
-	if err != nil {
-		return false
-	}
-	mergedChunk := findChunkByIndex(chunks, res.MergedChunkIndex)
-	if mergedChunk == nil || (mergedChunk.MergeAwakeableID == "" && mergedChunk.DeployAwakeableID == "") {
-		return false
-	}
-	if res.Advanced && mergedChunk.MergeAwakeableID != "" {
-		if err := s.resolveRestateAwakeable(ctx, mergedChunk.MergeAwakeableID, "merged"); err != nil {
-			log.Printf("[vanadis] warning: failed resolving merge awakeable for chunk %s: %v", mergedChunk.ID, err)
-			return false
-		}
-	}
-	if mergedChunk.DeployAwakeableID != "" {
-		if err := s.resolveRestateAwakeable(ctx, mergedChunk.DeployAwakeableID, "deploy_success"); err != nil {
-			log.Printf("[vanadis] warning: failed resolving deploy awakeable for chunk %s: %v", mergedChunk.ID, err)
-			return false
-		}
-	}
-	return true
 }
 
 func (s *VanadisServer) notifyRestateActionChunkCompleted(ctx context.Context, chunkID string) bool {

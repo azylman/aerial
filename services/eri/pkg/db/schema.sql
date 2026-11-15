@@ -242,7 +242,6 @@ CREATE TABLE IF NOT EXISTS pr_registry (
     target_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open',
     title TEXT NOT NULL DEFAULT '',
-    status_message_id TEXT NOT NULL DEFAULT '',
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,

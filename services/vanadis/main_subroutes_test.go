@@ -7,8 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 func TestMain_PromptFormattingAndSettleHelpers(t *testing.T) {
@@ -97,46 +95,6 @@ func TestMain_PromptFormattingAndSettleHelpers(t *testing.T) {
 	}
 }
 
-func TestInitVanadisJetStreamWithFactory(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	srv := &VanadisServer{}
-
-	// empty nats URL -> no-op cleanup, nil error
-	cleanup, err := initVanadisJetStreamWithFactory(ctx, srv, "", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	cleanup()
-
-	// factory returns error
-	_, err = initVanadisJetStreamWithFactory(ctx, srv, "nats://bad", func(ctx context.Context, url string) (pubsub.Bus, error) {
-		return nil, errors.New("conn err")
-	})
-	if err == nil {
-		t.Fatal("expected error on factory error")
-	}
-
-	// factory returns closed bus -> EnsureCoreStreams error
-	_, err = initVanadisJetStreamWithFactory(ctx, srv, "nats://closed", func(ctx context.Context, url string) (pubsub.Bus, error) {
-		b := pubsub.NewMemoryBus()
-		_ = b.Close()
-		return b, nil
-	})
-	if err == nil {
-		t.Fatal("expected error on closed bus")
-	}
-
-	// successful initialization
-	cleanupSuccess, err := initVanadisJetStreamWithFactory(ctx, srv, "nats://ok", func(ctx context.Context, url string) (pubsub.Bus, error) {
-		return pubsub.NewMemoryBus(), nil
-	})
-	if err != nil {
-		t.Fatalf("unexpected error on success: %v", err)
-	}
-	cleanupSuccess()
-}
-
 func TestInitPostgres(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -146,204 +104,6 @@ func TestInitPostgres(t *testing.T) {
 	_, err := initPostgres(ctx, srv, ":::invalid-url")
 	if err == nil {
 		t.Fatal("expected error on invalid postgres url")
-	}
-}
-
-func TestHandleListBuilds_And_SubRoutes(t *testing.T) {
-	t.Parallel()
-
-	// store is nil
-	nilSrv := &VanadisServer{}
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/builds", nil)
-	nilSrv.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", rec.Code)
-	}
-
-	// bad request on /builds/ without id
-	store := newMemoryVanadisStore()
-	srv := &VanadisServer{store: store}
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodDelete, "/builds/", nil)
-	srv.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", rec.Code)
-	}
-
-	// subroutes error handling
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/builds/b1/unknown", nil)
-	srv.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/builds/b1/chunks", nil)
-	srv.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405, got %d", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/builds/b1/other/sub", nil)
-	srv.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/builds/b1/chunks/c1/too/deep", nil)
-	srv.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", rec.Code)
-	}
-}
-
-func TestVanadisServer_BuildAndChunk_Subroutes_Extended(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	store := newMemoryVanadisStore()
-	b1 := VanadisBuild{ID: "b-ext", ThreadID: "th-1", Objective: "test ext", Status: "running"}
-	c1 := VanadisChunk{ID: "c-ext-1", BuildID: "b-ext", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "C1", Status: "pending"}
-	c2 := VanadisChunk{ID: "c-ext-2", BuildID: "b-ext", ChunkIndex: 1, Mode: "action", Title: "C2", Status: "pending"}
-	_ = store.CreateBuild(ctx, b1, []VanadisChunk{c1, c2})
-
-	srv := &VanadisServer{store: store}
-	mux := srv.Routes()
-
-	// 1. handleChunkByID
-	// nil store
-	srvNil := &VanadisServer{}
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/chunks/c-ext-1", nil)
-	srvNil.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on nil store, got %d", rec.Code)
-	}
-
-	// method not allowed
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/chunks/c-ext-1", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on POST /chunks/c-ext-1, got %d", rec.Code)
-	}
-
-	// empty chunk ID
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/chunks/", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 on GET /chunks/, got %d", rec.Code)
-	}
-
-	// not found
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/chunks/nonexistent", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404 on nonexistent chunk, got %d", rec.Code)
-	}
-
-	// success
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/chunks/c-ext-1", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 on valid chunk, got %d", rec.Code)
-	}
-
-	// 2. handleBuildRoot
-	// method not allowed (DELETE on /builds/b-ext)
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodDelete, "/builds/b-ext", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on DELETE /builds/b-ext, got %d", rec.Code)
-	}
-
-	// GET build success
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/builds/b-ext", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 on GET /builds/b-ext, got %d", rec.Code)
-	}
-
-	// GET build not found
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/builds/b-none", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404 on GET /builds/b-none, got %d", rec.Code)
-	}
-
-	// 3. handleBuildCancel
-	// non-POST
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/builds/b-ext/cancel", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on GET /builds/b-ext/cancel, got %d", rec.Code)
-	}
-
-	// cancel running build
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/builds/b-ext/cancel", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 on POST /builds/b-ext/cancel, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// conflict on cancelling completed build
-	bTerm := VanadisBuild{ID: "b-term", ThreadID: "th-1", Objective: "term", Status: "completed"}
-	_ = store.CreateBuild(ctx, bTerm, []VanadisChunk{{ID: "c-term", BuildID: "b-term", Title: "ct"}})
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/builds/b-term/cancel", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Errorf("expected 409 on cancelling completed build, got %d", rec.Code)
-	}
-
-	// 4. handleBuildChunkRoutes
-	bChunk := VanadisBuild{ID: "b-chk", ThreadID: "th-1", Objective: "chk", Status: "running"}
-	cChk1 := VanadisChunk{ID: "c-chk-1", BuildID: "b-chk", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "Chk1", Status: "pending"}
-	cChk2 := VanadisChunk{ID: "c-chk-2", BuildID: "b-chk", ChunkIndex: 1, Mode: "action", Title: "Chk2", Status: "pending"}
-	_ = store.CreateBuild(ctx, bChunk, []VanadisChunk{cChk1, cChk2})
-
-	// unsupported method
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPut, "/builds/b-chk/chunks/c-chk-1", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on PUT /builds/b-chk/chunks/c-chk-1, got %d", rec.Code)
-	}
-
-	// GET chunk via build route
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/builds/b-chk/chunks/c-chk-1", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 on GET /builds/b-chk/chunks/c-chk-1, got %d", rec.Code)
-	}
-
-	// PATCH chunk via build route
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPatch, "/builds/b-chk/chunks/c-chk-1", strings.NewReader(`{"title":"Updated Title"}`))
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 on PATCH /builds/b-chk/chunks/c-chk-1, got %d", rec.Code)
-	}
-
-	// DELETE chunk via build route
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodDelete, "/builds/b-chk/chunks/c-chk-2", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 on DELETE /builds/b-chk/chunks/c-chk-2, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -370,17 +130,8 @@ func TestVanadisServer_StoreHTTPEndpointErrors(t *testing.T) {
 		return rec.Code
 	}
 
-	if code := doReq(http.MethodGet, "/chunks/by-pr?repo=aerial&pr_number=101", ""); code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on GetChunkByPR err, got %d", code)
-	}
 	if code := doReq(http.MethodPost, "/chunks/attach-pr", `{"repo":"aerial","pr_number":101}`); code != http.StatusInternalServerError {
 		t.Errorf("expected 500 on AttachChunkPR err, got %d", code)
-	}
-	if code := doReq(http.MethodPost, "/chunks/advance-pr", `{"repo":"aerial","pr_number":101}`); code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on AdvanceChunkPR err, got %d", code)
-	}
-	if code := doReq(http.MethodPost, "/chunks/fail-pr", `{"repo":"aerial","pr_number":101}`); code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on FailChunkPR err, got %d", code)
 	}
 	if code := doReq(http.MethodGet, "/chunks/c1", ""); code != http.StatusInternalServerError {
 		t.Errorf("expected 500 on GetChunk err, got %d", code)

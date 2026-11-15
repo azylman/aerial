@@ -20,7 +20,6 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -38,7 +37,6 @@ type RouterServer struct {
 	failedCheckSHAs          sync.Map
 	failedCheckRuns          sync.Map
 	updatedForCurrentMain    sync.Map
-	buildCompletedDispatched sync.Map
 	deploySuccessDispatched  sync.Map
 	queueStats               consumerStatsQuerier
 	gatewayLatencyFn         func() time.Duration
@@ -162,7 +160,6 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	rawTargetID := strings.TrimSpace(req.TargetID)
 	req.TargetID = NormalizeDiscordTargetID(rawTargetID)
 	req.Title = strings.TrimSpace(req.Title)
-	chunkID := strings.TrimSpace(req.VanadisChunkID)
 
 	if req.Repo == "" {
 		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "repo cannot be empty"})
@@ -180,26 +177,16 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "head_sha cannot be empty"})
 		return
 	}
-	if chunkID == "" {
-		if rawTargetID == "" || (!IsValidDiscordSnowflake(req.TargetID) && IsHeadlessSessionKey(rawTargetID)) {
-			req.TargetID = s.resolveHeadlessPRTargetID(r.Context(), req.Repo, req.PRNumber)
-		}
-		if !IsValidDiscordSnowflake(req.TargetID) {
-			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
-			return
-		}
+	if rawTargetID == "" || (!IsValidDiscordSnowflake(req.TargetID) && IsHeadlessSessionKey(rawTargetID)) {
+		req.TargetID = s.resolveHeadlessPRTargetID(r.Context(), req.Repo, req.PRNumber)
+	}
+	if !IsValidDiscordSnowflake(req.TargetID) {
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
+		return
 	}
 
 	targetID, err := s.registry.RegisterPR(r.Context(), req)
 	if err != nil {
-		if errors.Is(err, ErrVanadisChunkNotFound) {
-			httpkit.WriteJSON(w, http.StatusNotFound, map[string]string{"error": "vanadis chunk not found"})
-			return
-		}
-		if errors.Is(err, ErrVanadisChunkCancelled) {
-			httpkit.WriteJSON(w, http.StatusConflict, map[string]string{"error": "vanadis chunk or build is cancelled"})
-			return
-		}
 		if errors.Is(err, ErrInvalidTargetID) || strings.Contains(err.Error(), "target_id") {
 			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
 			return
@@ -207,10 +194,6 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[synapse] Failed to register PR #%d (%s): %v", req.PRNumber, req.Repo, err)
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to register PR"})
 		return
-	}
-
-	if err := s.SyncPRWidget(r.Context(), req.Repo, req.PRNumber); err != nil {
-		log.Printf("[synapse] failed to sync initial PR widget for %s#%d: %v", req.Repo, req.PRNumber, err)
 	}
 
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
@@ -365,386 +348,6 @@ func (s *RouterServer) ResolveThreadForPR(ctx context.Context, repo string, prNu
 	return targetID, err
 }
 
-func (s *RouterServer) setPRWidgetState(ctx context.Context, repo string, prNumber int, status, banner string) {
-	if s == nil || s.registry == nil || repo == "" || prNumber <= 0 {
-		return
-	}
-	pgReg, ok := s.registry.(*PostgresPRRegistry)
-	if !ok || pgReg == nil || pgReg.pool == nil {
-		return
-	}
-	qCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	query := `
-		UPDATE pr_registry
-		SET status = CASE
-		        WHEN $3 = '' OR status IN ('deployed', 'closed') THEN status
-		        WHEN $3 = 'synced' AND status = 'deploying' THEN status
-		        ELSE $3
-		    END,
-		    metadata = CASE
-		        WHEN $3 = 'deployed' THEN jsonb_set(
-		            jsonb_set(
-		                CASE
-		                    WHEN $4 != '' THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{banner}', to_jsonb($4::text), true)
-		                    ELSE COALESCE(metadata, '{}'::jsonb) - 'banner'
-		                END,
-		                '{jobs}', '[]'::jsonb, true
-		            ),
-		            '{deployed_jobs}', COALESCE(metadata->'started_jobs', metadata->'deployed_jobs', '[]'::jsonb), true
-		        )
-		        WHEN $4 != '' THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{banner}', to_jsonb($4::text), true)
-		        ELSE COALESCE(metadata, '{}'::jsonb) - 'banner'
-		    END,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $1 AND pr_number = $2
-		  AND NOT ($3 = 'deployed' AND status <> 'deployed' AND COALESCE(jsonb_typeof(metadata->'` + kustomizationRequestsKey + `') = 'object', false))`
-	if _, err := pgReg.pool.Exec(qCtx, query, normalizeRepo(repo), prNumber, strings.TrimSpace(status), strings.TrimSpace(banner)); err != nil {
-		log.Printf("[synapse] [widget] warning updating pr widget state for %s#%d: %v", repo, prNumber, err)
-	}
-}
-
-func (s *RouterServer) resolvePRWidgetSyncStatus(ctx context.Context, repo string, prNumber int) string {
-	if s == nil || s.registry == nil || repo == "" || prNumber <= 0 {
-		return ""
-	}
-	pgReg, ok := s.registry.(*PostgresPRRegistry)
-	if !ok || pgReg == nil || pgReg.pool == nil {
-		return ""
-	}
-	qCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-	defer cancel()
-	var status string
-	if err := pgReg.pool.QueryRow(qCtx, "SELECT status FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1", normalizeRepo(repo), prNumber).Scan(&status); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(status)
-}
-
-func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber int) error {
-	if s == nil || s.dispatcher == nil || s.registry == nil || repo == "" || prNumber <= 0 {
-		return nil
-	}
-	args := WidgetSyncArgs{
-		Repo:     normalizeRepo(repo),
-		PRNumber: prNumber,
-	}
-	if s.bus != nil {
-		args.Status = s.resolvePRWidgetSyncStatus(ctx, args.Repo, prNumber)
-		if err := s.publishJetStreamJob(ctx, args); err != nil {
-			log.Printf("[synapse] [widget] error enqueuing widget sync into jetstream: %v", err)
-			return fmt.Errorf("enqueue widget sync: %w", err)
-		}
-		return nil
-	}
-	return s.ProcessWidgetSync(ctx, args)
-}
-
-func (s *RouterServer) SyncBuildWidget(ctx context.Context, buildID, banner string) error {
-	buildID = strings.TrimSpace(buildID)
-	banner = strings.TrimSpace(banner)
-	if s == nil || s.dispatcher == nil || s.registry == nil || buildID == "" {
-		return nil
-	}
-	args := WidgetSyncArgs{
-		BuildID: buildID,
-		Banner:  banner,
-	}
-	if s.bus != nil {
-		if err := s.publishJetStreamJob(ctx, args); err != nil {
-			log.Printf("[synapse] [widget] error enqueuing build widget sync into jetstream: %v", err)
-			return fmt.Errorf("enqueue build widget sync: %w", err)
-		}
-		return nil
-	}
-	return s.ProcessWidgetSync(ctx, args)
-}
-
-func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArgs) error {
-	if s == nil || s.dispatcher == nil || s.registry == nil {
-		return nil
-	}
-	if buildID := strings.TrimSpace(args.BuildID); buildID != "" {
-		pgReg, ok := s.registry.(*PostgresPRRegistry)
-		if !ok || pgReg == nil {
-			return nil
-		}
-		qCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-		return s.syncVanadisBuildWidget(qCtx, pgReg, buildID, strings.TrimSpace(args.Banner))
-	}
-
-	repo := normalizeRepo(args.Repo)
-	prNumber := args.PRNumber
-	if repo == "" || prNumber <= 0 {
-		return nil
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	pgReg, ok := s.registry.(*PostgresPRRegistry)
-	if !ok || pgReg == nil || pgReg.pool == nil {
-		targetID, branch, _, _, err := s.registry.ResolvePRByNumber(qCtx, repo, prNumber)
-		if err != nil {
-			log.Printf("[synapse] [widget] resolve pr error: %v", err)
-		}
-		if targetID == "" || isDependabotBranch(branch) {
-			return nil
-		}
-		widgetReq := StatusWidgetRequest{
-			ChannelID: targetID,
-			ID:        fmt.Sprintf("pr-%s-%d", repo, prNumber),
-			Title:     branch,
-			Status:    "open",
-			Chunks: []StatusWidgetChunk{
-				{
-					Index:    0,
-					Repo:     repo,
-					Title:    branch,
-					Status:   "open",
-					PRNumber: prNumber,
-				},
-			},
-		}
-		_, err = s.dispatcher.DispatchWidget(qCtx, widgetReq)
-		return err
-	}
-
-	return s.syncSinglePRWidget(qCtx, pgReg, repo, prNumber, true)
-}
-
-// sweepOlderDeployedPRWidgets marks older in-flight PRs deployed once a newer one is. Watcher-tracked
-// rollouts still deploying are excluded: only the Kustomization watcher completes them, so their
-// completion wake or failure alert is never skipped.
-func (s *RouterServer) sweepOlderDeployedPRWidgets(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int) {
-	sweepQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', '[]'::jsonb, true), '{deployed_jobs}', COALESCE(metadata->'started_jobs', metadata->'deployed_jobs', '[]'::jsonb), true), updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number < $2 AND status IN ('merged', 'synced', 'deploying', 'deploy_failed') AND NOT (status IN ('merged', 'synced') AND COALESCE((metadata->'ci_checks')::text, '') LIKE '%Build & Push (%') AND NOT (status = 'deploying' AND COALESCE(jsonb_typeof(metadata->'` + kustomizationRequestsKey + `') = 'object', false)) RETURNING pr_number`
-	rows, sErr := pgReg.pool.Query(qCtx, sweepQuery, repo, prNumber)
-	if sErr != nil || rows == nil {
-		return
-	}
-	var olderPRs []int
-	for rows.Next() {
-		var oldPR int
-		if rows.Scan(&oldPR) == nil && oldPR > 0 {
-			olderPRs = append(olderPRs, oldPR)
-		}
-	}
-	rows.Close()
-	for _, oldPR := range olderPRs {
-		if wErr := s.syncSinglePRWidget(qCtx, pgReg, repo, oldPR, false); wErr != nil {
-			log.Printf("[synapse] [widget] warning syncing older deployed PR %s#%d: %v", repo, oldPR, wErr)
-		}
-	}
-}
-
-func (s *RouterServer) postVanadisSyncWidget(qCtx context.Context, pgReg *PostgresPRRegistry, payload map[string]any) (bool, error) {
-	var syncRes struct {
-		Matched bool   `json:"matched"`
-		BuildID string `json:"build_id"`
-	}
-	if err := pgReg.postVanadisJSON(qCtx, "/chunks/sync-pr-widget", "sync chunk widget", "sync vanadis pr widget", payload, &syncRes); err != nil {
-		return false, err
-	}
-	return syncRes.Matched, nil
-}
-
-func (s *RouterServer) syncVanadisChunkPRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, prStatus, prBanner, activeStep string, prFound bool) (bool, error) {
-	return s.postVanadisSyncWidget(qCtx, pgReg, map[string]any{
-		"repo":        repo,
-		"pr_number":   prNumber,
-		"pr_status":   prStatus,
-		"pr_banner":   prBanner,
-		"active_step": activeStep,
-		"pr_found":    prFound,
-	})
-}
-
-func (s *RouterServer) syncVanadisBuildWidget(qCtx context.Context, pgReg *PostgresPRRegistry, buildID, banner string) error {
-	_, err := s.postVanadisSyncWidget(qCtx, pgReg, map[string]any{
-		"build_id":  buildID,
-		"pr_banner": banner,
-	})
-	return err
-}
-
-func shouldSkipWidgetSink(msgID, activeStep, status string) bool {
-	if msgID == "" || activeStep == "" {
-		return false
-	}
-	switch status {
-	case "open", "merged", "synced", "deploying":
-		return true
-	default:
-		return false
-	}
-}
-
-func prWidgetBanner(status, banner string) string {
-	if status == "failed" || status == "conflict" {
-		return banner
-	}
-	return ""
-}
-
-func hasMetadataVanadisChunkID(metadataJSON string) bool {
-	var meta struct {
-		VanadisChunkID string `json:"vanadis_chunk_id"`
-	}
-	if strings.TrimSpace(metadataJSON) == "" || json.Unmarshal([]byte(metadataJSON), &meta) != nil {
-		return false
-	}
-	return strings.TrimSpace(meta.VanadisChunkID) != ""
-}
-
-func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, allowSweep bool) error {
-	prQuery := `SELECT target_id, title, status, status_message_id, created_at, updated_at, COALESCE(metadata->>'banner', ''), COALESCE((metadata->'ci_checks')::text, '{}'), COALESCE(metadata::text, '{}'), COALESCE(branch, '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
-	var targetID, title, prStatus, prMsgID, prBanner, ciChecksJSON, metadataJSON, branch string
-	var prCreatedAt, prUpdatedAt time.Time
-	prErr := pgReg.pool.QueryRow(qCtx, prQuery, repo, prNumber).Scan(&targetID, &title, &prStatus, &prMsgID, &prCreatedAt, &prUpdatedAt, &prBanner, &ciChecksJSON, &metadataJSON, &branch)
-	if prErr != nil && !errors.Is(prErr, pgx.ErrNoRows) {
-		return fmt.Errorf("sync pr widget query pr: %w", prErr)
-	}
-	prFound := prErr == nil
-	if prFound && isDependabotBranch(branch) {
-		return nil
-	}
-
-	if allowSweep && prFound && strings.EqualFold(strings.TrimSpace(prStatus), "deployed") {
-		s.sweepOlderDeployedPRWidgets(qCtx, pgReg, repo, prNumber)
-	}
-
-	activeStep := formatPRWidgetActiveStep(prStatus, ciChecksJSON, metadataJSON)
-
-	// 1. Ask vanadis to sync widget if this PR belongs to a vanadis chunk
-	matched, err := s.syncVanadisChunkPRWidget(qCtx, pgReg, repo, prNumber, prStatus, prBanner, activeStep, prFound)
-	if err != nil {
-		return err
-	}
-	if matched || hasMetadataVanadisChunkID(metadataJSON) {
-		return nil
-	}
-
-	// 2. Standalone PR in pr_registry
-	if !prFound || targetID == "" {
-		return nil
-	}
-
-	finalStatus := firstNonEmpty(normalizeWidgetStatus(prStatus), "open")
-	widgetBanner := prWidgetBanner(finalStatus, prBanner)
-	widgetTitle := firstNonEmpty(title, fmt.Sprintf("PR #%d", prNumber))
-
-	widgetReq := StatusWidgetRequest{
-		ChannelID: targetID,
-		MessageID: prMsgID,
-		ID:        fmt.Sprintf("pr-%s-%d", repo, prNumber),
-		Title:     widgetTitle,
-		Status:    finalStatus,
-		Banner:    widgetBanner,
-		SkipSink:  shouldSkipWidgetSink(prMsgID, activeStep, finalStatus),
-		StartedAt: prCreatedAt,
-		Chunks: []StatusWidgetChunk{
-			{
-				Index:      0,
-				Repo:       repo,
-				Title:      widgetTitle,
-				Status:     finalStatus,
-				PRNumber:   prNumber,
-				StartedAt:  prCreatedAt,
-				UpdatedAt:  prUpdatedAt,
-				ActiveStep: activeStep,
-			},
-		},
-	}
-
-	newMsgID, dispErr := s.dispatcher.DispatchWidget(qCtx, widgetReq)
-	if dispErr != nil {
-		return fmt.Errorf("dispatch pr widget: %w", dispErr)
-	}
-	if newMsgID != "" && newMsgID != prMsgID {
-		updatePRMsgQuery := `UPDATE pr_registry SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE repo = $2 AND pr_number = $3`
-		if _, execErr := pgReg.pool.Exec(qCtx, updatePRMsgQuery, newMsgID, repo, prNumber); execErr != nil {
-			log.Printf("[synapse] [widget] warning updating pr status_message_id: %v", execErr)
-		}
-	}
-	return nil
-}
-
-type vanadisPromptOpts struct {
-	silent, skipIfActive        bool
-	chunkID, effort, dispatchID string
-}
-
-func resolvePostgresVanadisOpts(ctx context.Context, pgReg *PostgresPRRegistry, repo string, prNum int, opts *vanadisPromptOpts) {
-	if pgReg == nil {
-		return
-	}
-	matched, chunkID, effort, err := pgReg.ResolveVanadisChunkForPR(ctx, repo, prNum)
-	if err == nil && matched && strings.TrimSpace(chunkID) != "" {
-		opts.chunkID = strings.TrimSpace(chunkID)
-		if effort != "" {
-			opts.effort = effort
-		}
-		return
-	}
-	if persisted := pgReg.getPersistedVanadisChunkID(ctx, repo, prNum); persisted != "" {
-		opts.chunkID = persisted
-	}
-}
-
-func (s *RouterServer) vanadisPromptOpts(ctx context.Context, repo string, prNum int) vanadisPromptOpts {
-	if prNum <= 0 {
-		return vanadisPromptOpts{}
-	}
-	opts := vanadisPromptOpts{silent: true, effort: "medium"}
-	if s == nil || s.registry == nil {
-		return opts
-	}
-	if pgReg, ok := s.registry.(*PostgresPRRegistry); ok {
-		resolvePostgresVanadisOpts(ctx, pgReg, repo, prNum, &opts)
-	}
-	return opts
-}
-
-func (s *RouterServer) isVanadisPR(ctx context.Context, repo string, prNum int) (bool, error) {
-	if s.registry == nil || prNum <= 0 {
-		return false, nil
-	}
-	return s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
-}
-
-// advanceVanadisChunkOnMerge starts the next chunk on merge only when it is a
-// PR chunk; every other case waits for the deploy path to advance the build.
-func (s *RouterServer) advanceVanadisChunkOnMerge(ctx context.Context, repo string, prNumber int) error {
-	if s.registry == nil || prNumber <= 0 {
-		return nil
-	}
-	advance, err := s.registry.AdvancesVanadisChunkOnMerge(ctx, repo, prNumber)
-	if err != nil {
-		return err
-	}
-	if !advance {
-		return nil
-	}
-	return s.advanceVanadisChunk(ctx, repo, prNumber)
-}
-
-func (s *RouterServer) advanceVanadisChunkOnSync(ctx context.Context, repo string, prNumber int, syncHasExpected bool) error {
-	if s.registry == nil || prNumber <= 0 {
-		return nil
-	}
-	if syncHasExpected {
-		advance, err := s.registry.AdvancesVanadisChunkOnMerge(ctx, repo, prNumber)
-		if err != nil {
-			return err
-		}
-		if !advance {
-			log.Printf("[synapse] [vanadis] deferring chunk advancement on sync_success for %s#%d until deploy_success", repo, prNumber)
-			return nil
-		}
-	}
-	return s.advanceVanadisChunk(ctx, repo, prNumber)
-}
-
 func (s *RouterServer) isValidAlertTarget(targetID string) bool {
 	clean := strings.TrimSpace(targetID)
 	if IsValidDiscordSnowflake(clean) {
@@ -754,105 +357,48 @@ func (s *RouterServer) isValidAlertTarget(targetID string) bool {
 	return sys != "" && clean == sys && IsValidDiscordChannel(clean)
 }
 
-func isValidVanadisChunkID(id string) bool {
-	id = strings.TrimSpace(id)
-	if len(id) < 1 || len(id) > 120 {
-		return false
-	}
-	for i := range len(id) {
-		c := id[i]
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
-			return false
-		}
-	}
-	return true
+type alertPromptOpts struct {
+	silent       bool
+	skipIfActive bool
+	effort       string
+	dispatchID   string
 }
 
-func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string, vOpts ...vanadisPromptOpts) error {
+func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string, aOpts ...alertPromptOpts) error {
 	if s.dispatcher == nil {
 		return nil
 	}
-	var opt vanadisPromptOpts
-	if len(vOpts) > 0 {
-		opt = vOpts[0]
+	var opt alertPromptOpts
+	if len(aOpts) > 0 {
+		opt = aOpts[0]
 	}
-	if !opt.silent && !s.isValidAlertTarget(targetID) {
-		return nil
-	}
-	if !opt.silent && dmMsg != "" {
+	if dmMsg != "" && s.isValidAlertTarget(targetID) {
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: dmMsg}); err != nil {
 			log.Printf("[synapse] [dispatcher] warning dispatching %s direct message: %v", label, err)
 		}
 	}
 	if opt.silent {
-		normTarget := NormalizeDiscordTargetID(targetID)
-		if !IsValidDiscordSnowflake(normTarget) {
-			normTarget = ""
-		}
-		cID := strings.TrimSpace(opt.chunkID)
-		if !isValidVanadisChunkID(cID) {
-			cID = ""
-		}
 		req := DispatchRequest{
-			ID:             opt.dispatchID,
-			Source:         "webhook",
-			Prompt:         prompt,
-			Effort:         firstNonEmpty(opt.effort, "medium"),
-			TargetID:       normTarget,
-			VanadisChunkID: cID,
-			SkipIfActive:   opt.skipIfActive,
-		}
-		if cID != "" {
-			req.SessionID = "vanadis-" + cID
+			ID:           opt.dispatchID,
+			Source:       "synapse",
+			TargetID:     targetID,
+			Prompt:       prompt,
+			Effort:       opt.effort,
+			SkipIfActive: opt.skipIfActive,
 		}
 		if err := s.dispatcher.DispatchBackground(ctx, req); err != nil {
-			log.Printf("[synapse] [dispatcher] error dispatching %s background dispatch: %v", label, err)
-			return fmt.Errorf("dispatch %s background dispatch: %w", label, err)
+			log.Printf("[synapse] [dispatcher] error dispatching background %s prompt: %v", label, err)
+			return fmt.Errorf("dispatch background %s prompt: %w", label, err)
 		}
 		return nil
 	}
-	req := PromptRequest{ChannelID: targetID, Prompt: prompt, Effort: opt.effort}
+	if !s.isValidAlertTarget(targetID) {
+		return nil
+	}
+	req := PromptRequest{ChannelID: targetID, Prompt: prompt}
 	if err := s.dispatcher.DispatchPrompt(ctx, req); err != nil {
 		log.Printf("[synapse] [dispatcher] error dispatching %s prompt: %v", label, err)
 		return fmt.Errorf("dispatch %s prompt: %w", label, err)
-	}
-	return nil
-}
-
-func (s *RouterServer) isBuildCompletedDispatched(buildID string) bool {
-	clean := strings.TrimSpace(buildID)
-	if clean == "" {
-		return false
-	}
-	_, ok := s.buildCompletedDispatched.Load(clean)
-	return ok
-}
-
-func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prNumber int) error {
-	if s.registry == nil || prNumber <= 0 {
-		return nil
-	}
-	res, err := s.registry.AdvanceVanadisChunkByPR(ctx, repo, prNumber)
-	if err != nil {
-		return err
-	}
-	if res == nil || !res.Matched {
-		return nil
-	}
-	if res.Advanced {
-		s.evaluateVanadisAdvancementTriggers(ctx, repo, prNumber, res)
-	}
-	if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
-		log.Printf("[synapse] [vanadis] warning syncing chunk widget for %s#%d: %v", repo, prNumber, err)
-	}
-	if res.BuildCompleted && !s.isBuildCompletedDispatched(res.BuildID) {
-		prompt := formatVanadisBuildCompletedPrompt(res)
-		if err := s.dispatchAlertWithPrompt(ctx, res.ThreadID, "vanadis_build_completed", "", prompt); err != nil {
-			return err
-		}
-		if clean := strings.TrimSpace(res.BuildID); clean != "" {
-			s.buildCompletedDispatched.Store(clean, true)
-		}
 	}
 	return nil
 }
@@ -941,6 +487,10 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 		}
 		targetID = firstNonEmpty(tID, targetID)
 	}
+	_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_failed", "deploy_failed")
+	if evt.PRNumber > 0 && s.bus != nil {
+		return nil
+	}
 	if s.cfgSrc != nil {
 		targetID = firstNonEmpty(targetID, s.cfgSrc.Current().SystemChannelID)
 	}
@@ -949,43 +499,35 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 		actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
 	}
 	dmMsg := fmt.Sprintf("💥 %s%s for %s. Following up...", prefix, actionDesc, evt.JobName)
-	banner := "Deployment failed for " + evt.JobName
-	if evt.Event == "deploy_rollback" {
-		banner = "Deployment failed and rolled back for " + evt.JobName
-	}
+	var aOpts []alertPromptOpts
 	if evt.PRNumber > 0 {
-		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deploy_failed", banner)
-		if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err == nil {
-			dmMsg = ""
-		}
+		dmMsg = ""
+		aOpts = append(aOpts, alertPromptOpts{silent: true, skipIfActive: true, effort: "medium"})
 	}
-	_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_failed", "deploy_failed")
 	prompt := formatErrorDetailsBlock(
 		fmt.Sprintf("%s for job %s on %s (PR #%d, commit: %s).", actionDesc, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
 		evt.Details, "", fmt.Sprintf("Please investigate and fix the %s.", fixDesc),
 	)
-	if err := s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber)); err != nil {
-		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deploying", "")
-		return err
-	}
-	return nil
+	return s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt, aOpts...)
 }
 
 func (s *RouterServer) handleDeploySyncFailed(ctx context.Context, evt DeployEvent, prefix string) error {
+	_ = s.publishDeployLifecycleEvent(ctx, evt, "sync_failed", "deploy_failed")
+	if evt.PRNumber > 0 && s.bus != nil {
+		return nil
+	}
 	header := fmt.Sprintf("Git sync failed for repo %s (commit: %s, PR #%d).", evt.Repo, evt.CommitSHA, evt.PRNumber)
 	if evt.PRNumber == 0 {
 		header = fmt.Sprintf("Git sync failed for repo %s (commit: %s).", evt.Repo, evt.CommitSHA)
 	}
 	dmMsg := fmt.Sprintf("⚠️ %sGit file sync failed. Following up...", prefix)
+	var aOpts []alertPromptOpts
 	if evt.PRNumber > 0 {
-		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deploy_failed", "Git file sync failed")
-		if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err == nil {
-			dmMsg = ""
-		}
+		dmMsg = ""
+		aOpts = append(aOpts, alertPromptOpts{silent: true, skipIfActive: true, effort: "medium"})
 	}
-	_ = s.publishDeployLifecycleEvent(ctx, evt, "sync_failed", "deploy_failed")
 	prompt := formatErrorDetailsBlock(header, evt.Details, "", "Please investigate and fix the git sync failure.")
-	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
+	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, aOpts...)
 }
 
 func (s *RouterServer) isWaitingForImageBuild(ctx context.Context, repo string, prNumber int) bool {
@@ -1064,9 +606,6 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 	}
 
 	if !s.isValidAlertTarget(evt.TargetID) || s.dispatcher == nil {
-		if evt.Event == "sync_success" && evt.PRNumber > 0 {
-			return &evt, s.advanceVanadisChunkOnSync(ctx, evt.Repo, evt.PRNumber, syncHasExpected)
-		}
 		return &evt, nil
 	}
 
@@ -1074,12 +613,6 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 	switch evt.Event {
 	case "deploy_started":
 		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_started", "deploying")
-		if evt.PRNumber > 0 {
-			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
-				log.Printf("[synapse] [widget] warning syncing deploy_started widget: %v", err)
-				return &evt, err
-			}
-		}
 		return &evt, nil
 	case "deploy_success":
 		if s.shouldTreatDeploySuccessAsSync(ctx, evt) {
@@ -1087,16 +620,12 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		}
 
 		if s.shouldSuppressDuplicateDeploySuccess(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber) {
-			s.reconcileStuckDeployingPRWidget(ctx, evt.Repo, evt.PRNumber)
 			log.Printf("[synapse] [deploy] suppressing duplicate deploy_success for repo=%s job=%s pr=%d commit=%s",
 				evt.Repo, evt.JobName, evt.PRNumber, evt.CommitSHA)
 			return &evt, nil
 		}
 		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
 		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
-		if evt.PRNumber > 0 {
-			s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
-		}
 		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 	case "deploy_rollback", "deploy_failed":
 		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
@@ -1106,27 +635,6 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		return &evt, s.handleDeploySyncFailed(ctx, evt, prefix)
 	}
 	return &evt, nil
-}
-
-func (s *RouterServer) reconcileStuckDeployingPRWidget(ctx context.Context, repo string, prNum int) {
-	if s == nil || s.registry == nil || repo == "" || prNum <= 0 {
-		return
-	}
-	pgReg, ok := s.registry.(*PostgresPRRegistry)
-	if !ok || pgReg == nil || pgReg.pool == nil {
-		return
-	}
-	normRepo := normalizeRepo(repo)
-	qCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-	defer cancel()
-	var status string
-	err := pgReg.pool.QueryRow(qCtx, `SELECT status FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`, normRepo, prNum).Scan(&status)
-	if err == nil && strings.EqualFold(strings.TrimSpace(status), "deploying") {
-		s.setPRWidgetState(ctx, repo, prNum, "deployed", "")
-		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-			log.Printf("[synapse] [widget] warning syncing reconciled stuck deploying widget for %s#%d: %v", repo, prNum, err)
-		}
-	}
 }
 
 func (s *RouterServer) recordDeploySuccessDispatched(repo, jobName, commitSHA string, prNum int) {
@@ -1178,33 +686,15 @@ func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEv
 		return nil
 	}
 	if syncHasExpected {
-		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "synced", "")
 		_ = s.publishDeployLifecycleEvent(ctx, evt, "sync_success", "synced")
-	} else {
-		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
-		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
-		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
-	}
-	if err := s.advanceVanadisChunkOnSync(ctx, evt.Repo, evt.PRNumber, syncHasExpected); err != nil {
-		return err
-	}
-	if syncHasExpected {
-		if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
-			log.Printf("[synapse] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
-		}
 		return nil
 	}
-	vanadisPR, err := s.isVanadisPR(ctx, evt.Repo, evt.PRNumber)
-	if err != nil {
-		return err
+	s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
+	_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
+	if evt.PRNumber > 0 && s.bus != nil {
+		return nil
 	}
-	if !vanadisPR {
-		return s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, firstNonEmpty(evt.JobName, "git-sync"), evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
-	}
-	if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
-		log.Printf("[synapse] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
-	}
-	return nil
+	return s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, firstNonEmpty(evt.JobName, "git-sync"), evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 }
 
 func (s *RouterServer) isDependabotPRNumber(ctx context.Context, repo string, prNum int) bool {
@@ -1219,24 +709,12 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
 		return nil
 	}
+	if prNum > 0 && s.bus != nil {
+		return nil
+	}
 	if s.isDependabotPRNumber(ctx, repo, prNum) {
 		log.Printf("[synapse] [dependabot] suppressing deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
 		return nil
-	}
-
-	vanadisPR, err := s.isVanadisPR(ctx, repo, prNum)
-	if err != nil {
-		return err
-	}
-	if vanadisPR {
-		log.Printf("[synapse] [vanadis] suppressing deploy_success /prompt wake and advancing chunk for %s#%d (job=%s)", repo, prNum, jobName)
-		return s.advanceVanadisChunk(ctx, repo, prNum)
-	}
-
-	if prNum > 0 {
-		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-			log.Printf("[synapse] [widget] warning syncing deploy_success widget: %v", err)
-		}
 	}
 
 	repoPart := ""
@@ -1256,7 +734,7 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 	return s.dispatchAlertWithPrompt(ctx, targetID, "deploy_success", "", strings.Join(lines, "\n"))
 }
 
-func setupPostgres(ctx context.Context, server *RouterServer, postgresURL, vanadisURL string) (*pgxpool.Pool, error) {
+func setupPostgres(ctx context.Context, server *RouterServer, postgresURL string) (*pgxpool.Pool, error) {
 	poolConfig, err := pgxpool.ParseConfig(postgresURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres url: %w", err)
@@ -1274,7 +752,7 @@ func setupPostgres(ctx context.Context, server *RouterServer, postgresURL, vanad
 	if err != nil {
 		return nil, fmt.Errorf("create pgxpool: %w", err)
 	}
-	server.SetRegistry(NewPostgresPRRegistry(pool, WithVanadisClient(vanadisURL, server.httpClient)))
+	server.SetRegistry(NewPostgresPRRegistry(pool))
 	log.Println("[synapse] PostgreSQL PR registry initialized")
 	return pool, nil
 }
@@ -1301,7 +779,7 @@ func runServer(ctx context.Context, cfgSrc *httpkit.Reloadable[Config], onReady 
 
 	var dbPool *pgxpool.Pool
 	if cfg.PostgresURL != "" {
-		pool, err := setupPostgres(ctx, server, cfg.PostgresURL, cfg.VanadisURL)
+		pool, err := setupPostgres(ctx, server, cfg.PostgresURL)
 		if err != nil {
 			return err
 		}

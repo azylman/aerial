@@ -105,32 +105,7 @@ func TestResolveJetStreamJobCoords(t *testing.T) {
 			wantSubject: "aerial.jobs.synapse.discord_interaction",
 			wantPrefix:  "discord:ix:ix-222",
 		},
-		{
-			name:        "WidgetSyncArgs build",
-			args:        WidgetSyncArgs{BuildID: "b-123"},
-			wantSubject: "aerial.coalesced.widget_sync.build.b-123",
-			wantPrefix:  "widget:build:b-123",
-		},
-		{
-			name:        "*WidgetSyncArgs build",
-			args:        &WidgetSyncArgs{BuildID: "b-456"},
-			wantSubject: "aerial.coalesced.widget_sync.build.b-456",
-			wantPrefix:  "widget:build:b-456",
-		},
-		{
-			name:        "WidgetSyncArgs pr",
-			args:        WidgetSyncArgs{Repo: "azylman/aerial", PRNumber: 77},
-			wantSubject: "aerial.coalesced.widget_sync.pr.azylman.aerial.77",
-			wantPrefix:  "widget:pr:azylman/aerial:77",
-		},
-		{
-			name:        "*WidgetSyncArgs pr",
-			args:        &WidgetSyncArgs{Repo: "azylman/aerial", PRNumber: 78},
-			wantSubject: "aerial.coalesced.widget_sync.pr.azylman.aerial.78",
-			wantPrefix:  "widget:pr:azylman/aerial:78",
-		},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -290,8 +265,8 @@ func jetstreamWebhookAndDeployCases() []jetstreamHandlerCase {
 		{
 			name:         "HandleDeployJob error processing payload below limit",
 			handlerType:  "deploy",
-			payload:      `{"idempotency_key":"k-2","event":{"event":"deploy_started","repo":"azylman/aerial","pr_number":10,"target_id":"100000000000000001"}}`,
-			dispErrType:  "widget_err",
+			payload:      `{"idempotency_key":"k-2","event":{"event":"deploy_failed","repo":"azylman/aerial","pr_number":0,"target_id":"100000000000000001"}}`,
+			dispErrType:  "prompt_err",
 			withMockReg:  true,
 			numDelivered: 1,
 			wantErr:      true,
@@ -300,8 +275,8 @@ func jetstreamWebhookAndDeployCases() []jetstreamHandlerCase {
 		{
 			name:         "HandleDeployJob error processing payload at limit terms",
 			handlerType:  "deploy",
-			payload:      `{"idempotency_key":"k-2","event":{"event":"deploy_started","repo":"azylman/aerial","pr_number":10,"target_id":"100000000000000001"}}`,
-			dispErrType:  "widget_err",
+			payload:      `{"idempotency_key":"k-2","event":{"event":"deploy_failed","repo":"azylman/aerial","pr_number":0,"target_id":"100000000000000001"}}`,
+			dispErrType:  "prompt_err",
 			withMockReg:  true,
 			numDelivered: 5,
 			wantErr:      false,
@@ -398,32 +373,6 @@ func jetstreamDiscordAndWidgetCases() []jetstreamHandlerCase {
 			wantErr:      false,
 			wantTerm:     true,
 		},
-		{
-			name:        "HandleWidgetSyncJob malformed json",
-			handlerType: "widget",
-			payload:     `{bad json`,
-			wantTerm:    true,
-		},
-		{
-			name:         "HandleWidgetSyncJob dispatch error below limit",
-			handlerType:  "widget",
-			payload:      `{"repo":"azylman/aerial","pr_number":99}`,
-			dispErrType:  "widget_err",
-			withMockReg:  true,
-			numDelivered: 1,
-			wantErr:      true,
-			wantTerm:     false,
-		},
-		{
-			name:         "HandleWidgetSyncJob dispatch error at limit terms",
-			handlerType:  "widget",
-			payload:      `{"repo":"azylman/aerial","pr_number":99}`,
-			dispErrType:  "widget_err",
-			withMockReg:  true,
-			numDelivered: 5,
-			wantErr:      false,
-			wantTerm:     true,
-		},
 	}
 }
 
@@ -453,8 +402,6 @@ func TestJetStreamJobHandlers(t *testing.T) {
 				disp.discordMessageErr = errors.New("request returned status 500 Internal Server Error")
 			case "interaction_err":
 				disp.discordInteractionErr = errors.New("interaction dispatch failed")
-			case "widget_err":
-				disp.widgetErr = errors.New("widget dispatch failed")
 			case "prompt_err":
 				disp.promptErr = errors.New("prompt dispatch failed")
 				disp.dispatchErr = errors.New("dispatch background failed")
@@ -462,8 +409,9 @@ func TestJetStreamJobHandlers(t *testing.T) {
 			srv.SetDispatcher(disp)
 			if tc.withMockReg {
 				srv.registry = &mockPRRegistry{
-					resolveTargetID: "100000000000000001",
-					resolveBranch:   "main",
+					resolveTargetID:     "100000000000000001",
+					resolveBranch:       "main",
+					deployFailedUpdated: true,
 				}
 			}
 
@@ -491,8 +439,6 @@ func TestJetStreamJobHandlers(t *testing.T) {
 				err = srv.HandleDiscordIngressJob(testCtx, memMsg)
 			case "interaction":
 				err = srv.HandleDiscordInteractionJob(testCtx, memMsg)
-			case "widget":
-				err = srv.HandleWidgetSyncJob(testCtx, memMsg)
 			}
 
 			if (err != nil) != tc.wantErr {
@@ -512,7 +458,6 @@ type wiringDispatcher struct {
 	onBackground  func()
 	onMessage     func()
 	onInteraction func()
-	onWidget      func()
 }
 
 func (w *wiringDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
@@ -545,14 +490,6 @@ func (w *wiringDispatcher) DispatchDiscordInteraction(ctx context.Context, ix *d
 		w.onInteraction()
 	}
 	return err
-}
-
-func (w *wiringDispatcher) DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error) {
-	id, err := w.mockOutboundDispatcher.DispatchWidget(ctx, payload)
-	if w.onWidget != nil {
-		w.onWidget()
-	}
-	return id, err
 }
 
 func TestStartJobConsumersAndPublishWiring(t *testing.T) {
@@ -591,17 +528,10 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	conflictCh := make(chan struct{}, 1)
 	ingressCh := make(chan struct{}, 1)
 	interactionCh := make(chan struct{}, 1)
-	widgetCh := make(chan struct{}, 1)
 
 	disp.onDirect = func() {
 		select {
 		case deployCh <- struct{}{}:
-		default:
-		}
-	}
-	disp.onWidget = func() {
-		select {
-		case widgetCh <- struct{}{}:
 		default:
 		}
 	}
@@ -648,7 +578,7 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 		},
 		{
 			name:   "merge_conflict",
-			args:   MergeConflictArgs{Repo: "azylman/aerial", PRNumber: 10, TargetID: "100000000000000001"},
+			args:   MergeConflictArgs{Repo: "azylman/aerial", PRNumber: 42, TargetID: "100000000000000001"},
 			signal: conflictCh,
 		},
 		{
@@ -660,11 +590,6 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 			name:   "discord_interaction",
 			args:   DiscordInteractionArgs{InteractionID: "wire-ix"},
 			signal: interactionCh,
-		},
-		{
-			name:   "widget_sync",
-			args:   WidgetSyncArgs{Repo: "azylman/aerial", PRNumber: 10},
-			signal: widgetCh,
 		},
 	}
 
@@ -706,24 +631,6 @@ func TestJobArgsKindsAndResolveJobQueueAndKind(t *testing.T) {
 			args:      DeployWebhookArgs{},
 			wantKind:  "deploy_webhook",
 			wantQueue: QueueDefault,
-		},
-		{
-			name:      "DeployWebhookArgs pointer",
-			args:      &DeployWebhookArgs{},
-			wantKind:  "deploy_webhook",
-			wantQueue: QueueDefault,
-		},
-		{
-			name:      "WidgetSyncArgs value",
-			args:      WidgetSyncArgs{},
-			wantKind:  "widget_sync",
-			wantQueue: QueueWidgetSync,
-		},
-		{
-			name:      "WidgetSyncArgs pointer",
-			args:      &WidgetSyncArgs{},
-			wantKind:  "widget_sync",
-			wantQueue: QueueWidgetSync,
 		},
 		{
 			name:      "MergeConflictArgs value",

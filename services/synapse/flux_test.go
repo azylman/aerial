@@ -45,18 +45,18 @@ func scanPreImageStatusRow(status string, dest ...any) error {
 	return nil
 }
 
-func newMockPreImageKustomizationPool(status string) *mockVanadisPgxPool {
-	return &mockVanadisPgxPool{
+func newMockPreImageKustomizationPool(status string) *mockSynapsePgxPool {
+	return &mockSynapsePgxPool{
 		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
 			if strings.Contains(sql, "SELECT pr_number, branch, target_id FROM pr_registry") {
-				return mockVanadisPgxRow{scanFn: scanPreImagePRRow}
+				return mockSynapsePgxRow{scanFn: scanPreImagePRRow}
 			}
 			if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
-				return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+				return mockSynapsePgxRow{scanFn: func(dest ...any) error {
 					return scanPreImageStatusRow(status, dest...)
 				}}
 			}
-			return mockVanadisPgxRow{}
+			return mockSynapsePgxRow{}
 		},
 	}
 }

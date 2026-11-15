@@ -581,18 +581,10 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		httpClient: ts.Client(),
 	}
 
-	require.NoError(t, srv.launchCreatedBuild(ctx, "b-restate", true))
+	require.NoError(t, srv.launchCreatedBuild(ctx, "b-restate"))
 	require.NoError(t, srv.cancelRestateBuildWorkflow(ctx, "b-restate", "test cancel"))
 	require.NoError(t, srv.notifyRestateDAGMutation(ctx, "b-restate", "append_chunks"))
 
-	resAdv := &VanadisAdvancementResult{
-		Matched:          true,
-		Advanced:         true,
-		BuildID:          "b-restate",
-		MergedChunkIndex: 0,
-		NextChunkIndex:   1,
-	}
-	assert.True(t, srv.notifyRestateChunkPRAdvanced(ctx, resAdv))
 	assert.True(t, srv.notifyRestateActionChunkCompleted(ctx, "c2"))
 	srv.notifyRestateChunkFailed(ctx, "c1")
 
@@ -628,8 +620,6 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		"/BuildWorkflow/b-restate/Run/send",
 		"/BuildWorkflow/b-restate/Cancel/send",
 		"/BuildWorkflow/b-restate/MutateDAG/send",
-		"/restate/awakeables/awk-m1/resolve",
-		"/restate/awakeables/awk-d1/resolve",
 		"/restate/awakeables/awk-a2/resolve",
 		"/restate/awakeables/awk-m1/resolve",
 		"/restate/awakeables/awk-d1/resolve",
@@ -643,7 +633,6 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	assert.NoError(t, srv.cancelRestateBuildWorkflow(ctx, "", "r"))
 	assert.NoError(t, srv.notifyRestateDAGMutation(ctx, "", "a"))
 	assert.NoError(t, srv.resolveRestateAwakeable(ctx, "", "v"))
-	assert.False(t, srv.notifyRestateChunkPRAdvanced(ctx, nil))
 	assert.False(t, srv.notifyRestateActionChunkCompleted(ctx, ""))
 	srv.notifyRestateChunkFailed(ctx, "")
 	srv.notifyRestateChunkFailed(ctx, "nonexistent")
@@ -659,7 +648,6 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		httpClient: ts500.Client(),
 	}
 	assert.Error(t, srv500.startRestateBuildWorkflow(ctx, "b-restate"))
-	assert.False(t, srv500.notifyRestateChunkPRAdvanced(ctx, resAdv))
 	assert.False(t, srv500.notifyRestateActionChunkCompleted(ctx, "c2"))
 	srv500.notifyRestateChunkFailed(ctx, "c1")
 
@@ -829,7 +817,7 @@ func TestBuildWorkflow_StateMachineWithRuntime(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, "failed", resFail.Status)
 
-	// 5. PR -> PR chain driven through real HTTP advance-pr and awakeable resolver
+	// 5. PR -> PR chain driven through PR lifecycle events and awakeable resolver
 	var rtPRChain *fakeWorkflowRuntime
 	tsIngress := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if after, ok := strings.CutPrefix(r.URL.Path, "/restate/awakeables/"); ok {
@@ -856,27 +844,28 @@ func TestBuildWorkflow_StateMachineWithRuntime(t *testing.T) {
 	}
 	require.NoError(t, store.CreateBuild(ctx, bPRChain, cPRChain))
 
-	postAdvancePR := func(prNum int) VanadisAdvancementResult {
-		body := fmt.Sprintf(`{"repo":"azylman/aerial","pr_number":%d}`, prNum)
-		req := httptest.NewRequest(http.MethodPost, "/chunks/advance-pr", strings.NewReader(body))
-		rec := httptest.NewRecorder()
-		srv.Routes().ServeHTTP(rec, req)
-		require.Equal(t, http.StatusOK, rec.Code)
-		var out VanadisAdvancementResult
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-		return out
+	postAdvancePR := func(prNum int, event string) error {
+		return srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:    event,
+			Repo:     "azylman/aerial",
+			PRNumber: prNum,
+		})
 	}
 
 	rtPRChain = newFakeWorkflowRuntime(func(step int, rt *fakeWorkflowRuntime, futures []any) (any, error) {
 		switch step {
 		case 1:
-			adv1 := postAdvancePR(501)
-			assert.True(t, adv1.Advanced)
-			assert.False(t, adv1.BuildCompleted)
+			errAdv1 := postAdvancePR(501, "merged")
+			assert.NoError(t, errAdv1)
+		case 2:
+			errAdv2 := postAdvancePR(501, "deploy_success")
+			assert.NoError(t, errAdv2)
 		case 3:
-			adv2 := postAdvancePR(502)
-			assert.True(t, adv2.Advanced)
-			assert.True(t, adv2.BuildCompleted, "advance-pr should preserve BuildCompleted for event trigger evaluation")
+			errAdv3 := postAdvancePR(502, "merged")
+			assert.NoError(t, errAdv3)
+		case 4:
+			errAdv4 := postAdvancePR(502, "deploy_success")
+			assert.NoError(t, errAdv4)
 		}
 		for _, f := range futures {
 			if awk, ok := f.(*fakeWorkflowAwakeable); ok && awk.val != "" {

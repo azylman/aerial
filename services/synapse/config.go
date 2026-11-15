@@ -26,7 +26,6 @@ type Config struct {
 	FluxReceiverURL     string
 	BrainURL            string
 	EriURL              string
-	VanadisURL          string
 	NATSURL             string
 	SystemChannelID     string
 	DiscordToken        string
@@ -41,7 +40,6 @@ type RouterYAMLConfig struct {
 	Port                string            `yaml:"port"`
 	FluxReceiverURL     string            `yaml:"flux_receiver_url"`
 	EriURL              string            `yaml:"eri_url"`
-	VanadisURL          string            `yaml:"vanadis_url"`
 	NATSURL             string            `yaml:"nats_url"`
 	SystemChannelID     string            `yaml:"system_channel_id"`
 	SystemChannel       string            `yaml:"system_channel"`
@@ -162,7 +160,6 @@ func synapseRestartRequired(old, next *Config) bool {
 		old.FluxReceiverURL != next.FluxReceiverURL ||
 		old.KubeAPIServer != next.KubeAPIServer ||
 		old.KubeToken != next.KubeToken ||
-		old.VanadisURL != next.VanadisURL ||
 		old.NATSURL != next.NATSURL
 }
 
@@ -236,7 +233,6 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		FluxReceiverURL:     strings.TrimRight(firstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
 		BrainURL:            strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
 		EriURL:              strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
-		VanadisURL:          strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL), "/"),
 		NATSURL:             firstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
 		SystemChannelID:     strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
 		DiscordToken:        os.Getenv("DISCORD_TOKEN"),
@@ -365,49 +361,9 @@ func formatErrorDetailsBlock(header, details, extraLine, footer string) string {
 	return strings.Join(lines, "\n")
 }
 
-func normalizeWidgetStatus(dbStatus string) string {
-	switch strings.ToLower(strings.TrimSpace(dbStatus)) {
-	case "ci_failed", "deploy_failed":
-		return "failed"
-	default:
-		return strings.ToLower(strings.TrimSpace(dbStatus))
-	}
-}
-
-func formatVanadisBuildCompletedPrompt(res *VanadisAdvancementResult) string {
-	if res == nil {
-		return ""
-	}
-	total := len(res.Chunks)
-	lines := []string{
-		fmt.Sprintf("Vanadis build %s completed (Tier %d, %d chunks merged).", res.BuildID, res.Tier, total),
-	}
-	if obj := strings.TrimSpace(res.Objective); obj != "" {
-		lines = append(lines, "Objective: "+obj)
-	}
-	if total > 0 {
-		lines = append(lines, "", "Merged Chunks Ledger:")
-		for _, c := range res.Chunks {
-			cRepo := strings.TrimSpace(c.Repo)
-			if cRepo == "" {
-				cRepo = "azylman/aerial"
-			}
-			prLabel := fmt.Sprintf(" (%s)", cRepo)
-			if c.PRNumber > 0 {
-				prLabel = fmt.Sprintf(" (%s, PR #%d)", cRepo, c.PRNumber)
-			}
-			line := fmt.Sprintf("- Chunk %d/%d: %s%s", c.ChunkIndex+1, total, c.Title, prLabel)
-			lines = append(lines, line)
-		}
-	}
-	lines = append(lines, "", "All Vanadis build chunks have merged into main. Summarize the completed build and verification outcomes for the user.")
-	return strings.Join(lines, "\n")
-}
-
 const (
-	maxPromptRunes           = 1500
-	maxCIRemediationAttempts = 3
-	maxRoboRevCommentRunes   = 4000
+	maxPromptRunes         = 1500
+	maxRoboRevCommentRunes = 4000
 )
 
 func truncatePromptDetails(s string) string {

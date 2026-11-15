@@ -419,8 +419,6 @@ spec:
               value: "4025"
             - name: ERI_URL
               value: http://eri.aerial
-            - name: SYNAPSE_URL
-              value: http://synapse.aerial
             - name: NATS_URL
               value: nats://nats.aerial:4222
             - name: RESTATE_INGRESS_URL
@@ -1245,8 +1243,6 @@ spec:
               value: /share/aerial-config/services/synapse/synapse.yaml
             - name: ERI_URL
               value: http://eri.aerial
-            - name: VANADIS_URL
-              value: http://vanadis.aerial
             - name: FLUX_RECEIVER_URL
               value: http://notification-controller.flux-system.svc.cluster.local/
             - name: DISCORD_TOKEN

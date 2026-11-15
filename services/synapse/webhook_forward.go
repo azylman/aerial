@@ -63,13 +63,12 @@ const aerialPRMetadataPrefix = "<!-- aerial-pr:"
 
 // AerialPRMetadata captures structured metadata trailers in PR descriptions.
 type AerialPRMetadata struct {
-	TargetID       string `json:"target_id,omitempty"`
-	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
-	BotID          string `json:"bot_id,omitempty"`
+	TargetID string `json:"target_id,omitempty"`
+	BotID    string `json:"bot_id,omitempty"`
 }
 
 func (m AerialPRMetadata) OK() bool {
-	return m.TargetID != "" || m.VanadisChunkID != "" || m.BotID != ""
+	return m.TargetID != "" || m.BotID != ""
 }
 
 // ParseAerialPRMetadata extracts the Aerial PR metadata JSON payload from a markdown body.
@@ -88,13 +87,12 @@ func ParseAerialPRMetadata(body string) AerialPRMetadata {
 		return AerialPRMetadata{}
 	}
 	targetID := NormalizeDiscordTargetID(trailer.TargetID)
-	if !IsValidDiscordSnowflake(targetID) {
+	if !IsValidDiscordSnowflake(targetID) && !IsHeadlessSessionKey(targetID) {
 		targetID = ""
 	}
 	return AerialPRMetadata{
-		TargetID:       targetID,
-		VanadisChunkID: strings.TrimSpace(trailer.VanadisChunkID),
-		BotID:          strings.TrimSpace(trailer.BotID),
+		TargetID: targetID,
+		BotID:    strings.TrimSpace(trailer.BotID),
 	}
 }
 

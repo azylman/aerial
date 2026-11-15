@@ -1039,34 +1039,6 @@ func (s *VanadisServer) handleChunkByID(w http.ResponseWriter, r *http.Request) 
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"chunk": chunk, "build": build})
 }
 
-func (s *VanadisServer) handleChunkByPR(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil {
-		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
-		return
-	}
-	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
-	prNumStr := strings.TrimSpace(r.URL.Query().Get("pr_number"))
-	if repo == "" || prNumStr == "" {
-		writeErr(w, http.StatusBadRequest, "repo and pr_number are required")
-		return
-	}
-	prNum, err := strconv.Atoi(prNumStr)
-	if err != nil || prNum <= 0 {
-		writeErr(w, http.StatusBadRequest, "invalid pr_number")
-		return
-	}
-	lookup, err := s.store.GetChunkByPR(r.Context(), repo, prNum)
-	if err != nil {
-		writeStoreErr(w, err)
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, lookup)
-}
-
 func decodeChunkPRPost[T any](s *VanadisServer, w http.ResponseWriter, r *http.Request, missingMsg string, valid func(*T) bool) (T, bool) {
 	var zero T
 	if s.store == nil {
@@ -1113,62 +1085,6 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 		"build_id":  buildID,
 		"chunk_id":  chunkID,
 		"thread_id": threadID,
-	})
-}
-
-func (s *VanadisServer) handleAdvanceChunkPR(w http.ResponseWriter, r *http.Request) {
-	req, ok := decodeChunkPRPost(s, w, r, "repo and valid pr_number are required", func(req *ChunkPRRequest) bool {
-		req.Repo = strings.TrimSpace(req.Repo)
-		return req.Repo != "" && req.PRNumber > 0
-	})
-	if !ok {
-		return
-	}
-	res, err := s.store.AdvanceChunkByPR(r.Context(), req.Repo, req.PRNumber)
-	if err != nil {
-		writeStoreErr(w, err)
-		return
-	}
-	restateManaged := s.notifyRestateChunkPRAdvanced(r.Context(), res)
-	if res != nil && res.Matched {
-		if res.Advanced {
-			RecordChunkTotal("merged")
-		}
-		if res.BuildCompleted && res.Advanced {
-			RecordBuildTotal("completed")
-		}
-	}
-	if !restateManaged && res != nil && res.Matched && !res.BuildCompleted && res.NextChunkIndex >= 0 {
-		if err := s.enqueueExecuteChunk(r.Context(), ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: res.NextChunkIndex}); err != nil {
-			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue next chunk %d: %v", res.NextChunkIndex, err))
-			return
-		}
-	}
-	httpkit.WriteJSON(w, http.StatusOK, res)
-}
-
-func (s *VanadisServer) handleFailChunkPR(w http.ResponseWriter, r *http.Request) {
-	req, ok := decodeChunkPRPost(s, w, r, "repo and valid pr_number are required", func(req *ChunkPRRequest) bool {
-		req.Repo = strings.TrimSpace(req.Repo)
-		return req.Repo != "" && req.PRNumber > 0
-	})
-	if !ok {
-		return
-	}
-	buildID, chunkID, failed, err := s.store.FailChunkByPR(r.Context(), req.Repo, req.PRNumber)
-	if err != nil {
-		writeStoreErr(w, err)
-		return
-	}
-	if failed {
-		RecordChunkTotal("failed")
-		RecordBuildTotal("failed")
-		s.notifyRestateChunkFailed(r.Context(), chunkID)
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"build_id": buildID,
-		"chunk_id": chunkID,
-		"failed":   failed,
 	})
 }
 
@@ -1272,38 +1188,6 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 	}
 }
 
-func (s *VanadisServer) recoverBuildOnPRSync(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk, req SyncChunkPRWidgetRequest) {
-	if s == nil || s.store == nil || !req.PRFound || req.PRNumber <= 0 || build == nil {
-		return
-	}
-	for i := range chunks {
-		c := &chunks[i]
-		if c.PRNumber == req.PRNumber && normalizeWidgetStatus(c.Status) == "failed" {
-			if isVanadisChunkStreamingPhase(resolveVanadisChunkWidgetStatus(c.Status, req.PRStatus)) {
-				if err := s.store.UpdateChunkStatus(ctx, c.ID, "pr_opened"); err == nil {
-					c.Status = "pr_opened"
-					c.CompletedAt = time.Time{}
-				}
-			}
-		}
-	}
-	if normalizeWidgetStatus(build.Status) == "failed" {
-		hasFailure := false
-		for _, c := range chunks {
-			norm := normalizeWidgetStatus(c.Status)
-			if norm == "failed" || norm == "conflict" {
-				hasFailure = true
-				break
-			}
-		}
-		if !hasFailure {
-			if err := s.store.UpdateBuildStatus(ctx, build.ID, "running"); err == nil {
-				build.Status = "running"
-			}
-		}
-	}
-}
-
 func (s *VanadisServer) dispatchAndPersistWidget(ctx context.Context, buildID, existingMsgID string, req StatusWidgetRequest) error {
 	respBody, err := s.postBrainJSON(ctx, "/discord/widget", req, 4<<10)
 	if err != nil {
@@ -1318,73 +1202,6 @@ func (s *VanadisServer) dispatchAndPersistWidget(ctx context.Context, buildID, e
 		}
 	}
 	return nil
-}
-
-func (s *VanadisServer) handleSyncPRWidget(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil {
-		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "failed to read request body")
-		return
-	}
-	var req SyncChunkPRWidgetRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json payload")
-		return
-	}
-	req.BuildID = strings.TrimSpace(req.BuildID)
-	req.Repo = strings.TrimSpace(req.Repo)
-	if req.BuildID != "" {
-		build, chunks, err := s.store.GetBuild(r.Context(), req.BuildID)
-		if errors.Is(err, ErrBuildNotFound) {
-			httpkit.WriteJSON(w, http.StatusOK, map[string]any{"matched": false})
-			return
-		}
-		if err != nil {
-			writeStoreErr(w, err)
-			return
-		}
-		s.recoverBuildOnPRSync(r.Context(), build, chunks, req)
-		widgetReq := buildSyncWidgetRequest(*build, chunks, req)
-		if err := s.dispatchAndPersistWidget(r.Context(), build.ID, build.StatusMessageID, widgetReq); err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"matched": true, "build_id": build.ID})
-		return
-	}
-	if req.Repo == "" || req.PRNumber <= 0 {
-		writeErr(w, http.StatusBadRequest, "repo and valid pr_number are required")
-		return
-	}
-	lookup, err := s.store.GetChunkByPR(r.Context(), req.Repo, req.PRNumber)
-	if err != nil {
-		writeStoreErr(w, err)
-		return
-	}
-	if !lookup.Matched {
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"matched": false})
-		return
-	}
-	build, chunks, err := s.store.GetBuild(r.Context(), lookup.BuildID)
-	if err != nil {
-		writeStoreErr(w, err)
-		return
-	}
-	s.recoverBuildOnPRSync(r.Context(), build, chunks, req)
-	widgetReq := buildSyncWidgetRequest(*build, chunks, req)
-	if err := s.dispatchAndPersistWidget(r.Context(), build.ID, build.StatusMessageID, widgetReq); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"matched": true, "build_id": build.ID})
 }
 
 func (s *VanadisServer) handleUpdateBuild(w http.ResponseWriter, r *http.Request, buildID string) {

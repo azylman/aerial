@@ -82,7 +82,6 @@ var (
 const (
 	QueueDefault            = "default"
 	QueueMergeConflict      = "merge_conflict"
-	QueueWidgetSync         = "widget_sync"
 	QueueDiscordIngress     = "discord_ingress"
 	QueueDiscordInteraction = "discord_interaction"
 )
@@ -91,7 +90,6 @@ var (
 	knownQueues = []string{
 		QueueDefault,
 		QueueMergeConflict,
-		QueueWidgetSync,
 		QueueDiscordIngress,
 		QueueDiscordInteraction,
 	}
@@ -186,7 +184,6 @@ var synapseConsumerTargets = []synapseConsumerTarget{
 	{stream: "AERIAL_JOBS", consumer: "synapse-merge-conflict", queue: QueueMergeConflict},
 	{stream: "AERIAL_JOBS", consumer: "synapse-discord-ingress", queue: QueueDiscordIngress},
 	{stream: "AERIAL_JOBS", consumer: "synapse-discord-interaction", queue: QueueDiscordInteraction},
-	{stream: "AERIAL_COALESCED", consumer: "synapse-widget-sync", queue: QueueWidgetSync},
 }
 
 func collectJetStreamQueueMetrics(ctx context.Context, q consumerStatsQuerier) error {
@@ -244,10 +241,6 @@ func normalizeJobArgs(args any) any {
 		if a != nil {
 			return *a
 		}
-	case *WidgetSyncArgs:
-		if a != nil {
-			return *a
-		}
 	}
 	return args
 }
@@ -264,8 +257,6 @@ func resolveJobQueueAndKind(args any) (string, string) {
 		return QueueDiscordIngress, "discord_ingress"
 	case DiscordInteractionArgs:
 		return QueueDiscordInteraction, "discord_interaction"
-	case WidgetSyncArgs:
-		return QueueWidgetSync, "widget_sync"
 	default:
 		return QueueDefault, "unknown"
 	}
@@ -301,15 +292,6 @@ type DeployWebhookArgs struct {
 	Event          DeployEvent `json:"event"`
 }
 
-// WidgetSyncArgs contains payload data for Discord PR and build widget updates.
-type WidgetSyncArgs struct {
-	Repo     string `json:"repo,omitempty"`
-	PRNumber int    `json:"pr_number,omitempty"`
-	BuildID  string `json:"build_id,omitempty"`
-	Banner   string `json:"banner,omitempty"`
-	Status   string `json:"status,omitempty"`
-}
-
 // MergeConflictArgs contains payload data for durable background processing of PR merge conflicts.
 type MergeConflictArgs struct {
 	Repo     string `json:"repo"`
@@ -342,33 +324,6 @@ type DiscordInteractionArgs struct {
 	Traceparent   string                 `json:"traceparent,omitempty"`
 }
 
-// StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
-type StatusWidgetChunk struct {
-	Index       int       `json:"index"`
-	Repo        string    `json:"repo"`
-	Title       string    `json:"title"`
-	Status      string    `json:"status"`
-	PRNumber    int       `json:"pr_number,omitempty"`
-	StartedAt   time.Time `json:"started_at,omitempty"`
-	CompletedAt time.Time `json:"completed_at,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
-	ActiveStep  string    `json:"active_step,omitempty"`
-}
-
-// StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.
-type StatusWidgetRequest struct {
-	ChannelID string              `json:"channel_id"`
-	MessageID string              `json:"message_id,omitempty"`
-	ID        string              `json:"id"`
-	Tier      int                 `json:"tier,omitempty"`
-	Title     string              `json:"title"`
-	Status    string              `json:"status"`
-	Banner    string              `json:"banner,omitempty"`
-	Chunks    []StatusWidgetChunk `json:"chunks"`
-	SkipSink  bool                `json:"skip_sink,omitempty"`
-	StartedAt time.Time           `json:"started_at,omitempty"`
-}
-
 type GitPushEventRequest struct {
 	Repo     string `json:"repo"`
 	Ref      string `json:"ref"`
@@ -393,14 +348,13 @@ type PromptRequest struct {
 }
 
 type DispatchRequest struct {
-	ID             string `json:"id,omitempty"`
-	Source         string `json:"source"`
-	SessionID      string `json:"session_id,omitempty"`
-	TargetID       string `json:"target_id,omitempty"`
-	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
-	Prompt         string `json:"prompt"`
-	Effort         string `json:"effort,omitempty"`
-	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
+	ID           string `json:"id,omitempty"`
+	Source       string `json:"source"`
+	SessionID    string `json:"session_id,omitempty"`
+	TargetID     string `json:"target_id,omitempty"`
+	Prompt       string `json:"prompt"`
+	Effort       string `json:"effort,omitempty"`
+	SkipIfActive bool   `json:"skip_if_active,omitempty"`
 }
 
 type DirectMessageRequest struct {
@@ -419,7 +373,6 @@ type OutboundDispatcher interface {
 	DiscoverRepoKustomizations(ctx context.Context, repo string) ([]fluxKustomizationRef, error)
 	DispatchPrompt(ctx context.Context, req PromptRequest) error
 	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
-	DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error)
 	DispatchBackground(ctx context.Context, req DispatchRequest) error
 	DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error
 	DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error
@@ -1079,48 +1032,6 @@ func (d *DefaultOutboundDispatcher) DispatchDirectMessage(ctx context.Context, r
 
 func (d *DefaultOutboundDispatcher) DispatchBackground(ctx context.Context, req DispatchRequest) error {
 	return d.postBrainWithRetry(ctx, "/dispatch", "dispatch", "brain dispatch", "", d.maxAttempts, 1500*time.Millisecond, true, req)
-}
-
-func (d *DefaultOutboundDispatcher) DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error) {
-	if strings.TrimSpace(d.brainURL) == "" {
-		return "", errors.New("brain URL is not configured")
-	}
-	if !IsValidDiscordSnowflake(payload.ChannelID) {
-		return "", fmt.Errorf("invalid discord snowflake channel id: %q", payload.ChannelID)
-	}
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("marshal widget request: %w", err)
-	}
-	endpoint := d.brainURL + "/discord/widget"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", fmt.Errorf("create widget request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := d.httpClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("dispatch widget request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return "", fmt.Errorf("read widget response body: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("brain widget returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var res struct {
-		Status    string `json:"status"`
-		MessageID string `json:"message_id"`
-	}
-	if err := json.Unmarshal(respBody, &res); err != nil {
-		return "", fmt.Errorf("decode widget response: %w", err)
-	}
-	return res.MessageID, nil
 }
 
 func (d *DefaultOutboundDispatcher) postDiscordInternalJSON(ctx context.Context, client *http.Client, timeout time.Duration, path, reqLabel, statusLabel string, payload any) error {

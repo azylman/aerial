@@ -1039,8 +1039,11 @@ func (m *memoryVanadisStore) UpdateChunkBannerAndStatus(_ context.Context, chunk
 type mockChunkBus struct {
 	pubsub.Bus
 
-	published []ExecuteChunkArgs
-	err       error
+	published     []ExecuteChunkArgs
+	widgetCalls   int
+	widgetBuildID string
+	widgetBanner  string
+	err           error
 }
 
 func (m *mockChunkBus) Publish(ctx context.Context, subject, msgID string, data any) error {
@@ -1049,6 +1052,17 @@ func (m *mockChunkBus) Publish(ctx context.Context, subject, msgID string, data 
 	}
 	if a, ok := data.(ExecuteChunkArgs); ok {
 		m.published = append(m.published, a)
+		return nil
+	}
+	if strings.HasPrefix(subject, "aerial.coalesced.widget_sync.build.") {
+		m.widgetCalls++
+		if a, ok := data.(pubsub.WidgetSyncJobArgs); ok {
+			m.widgetBuildID = a.BuildID
+			m.widgetBanner = a.Banner
+		}
+		return nil
+	}
+	if strings.HasPrefix(subject, "aerial.events.") {
 		return nil
 	}
 	if m.Bus != nil {

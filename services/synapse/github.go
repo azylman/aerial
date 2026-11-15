@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,21 @@ func (s *RouterServer) loadPRRolloutState(ctx context.Context, repo string, prNu
 		return nil
 	}
 	return buildPRRolloutState(meta)
+}
+
+// newGitHubRequest builds an authenticated GitHub REST request against the
+// live config snapshot's API URL and token.
+func (s *RouterServer) newGitHubRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	cfg := s.cfgSrc.Current()
+	req, err := http.NewRequestWithContext(ctx, method, firstNonEmpty(cfg.GitHubAPIURL, "https://api.github.com")+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if cfg.GitHubToken != "" {
+		req.Header.Set("Authorization", "token "+cfg.GitHubToken)
+	}
+	return req, nil
 }
 
 func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
@@ -289,7 +305,6 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	if deferred, err := s.deferPRToWatcher(ctx, repo, prNum); deferred || err != nil {
 		return err
 	}
-	s.setPRWidgetState(ctx, repo, prNum, "deployed", "")
 	s.recordDeploySuccessDispatched(repo, "git-merge", headSHA, prNum)
 	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:        "deploy_success",
@@ -303,19 +318,6 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 		Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
 		OccurredAt:   time.Now().UTC(),
 	})
-	if err := s.advanceVanadisChunk(ctx, repo, prNum); err != nil {
-		return err
-	}
-	vanadisPR, err := s.isVanadisPR(ctx, repo, prNum)
-	if err != nil {
-		return err
-	}
-	if !vanadisPR {
-		return s.dispatchDeploymentSuccessPrompt(ctx, targetID, "git-merge", repo, headSHA, prNum, "")
-	}
-	if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-		log.Printf("[synapse] [widget] warning syncing workflow_run widget for %s#%d: %v", repo, prNum, err)
-	}
 	return nil
 }
 
@@ -398,9 +400,6 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 		if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
 			log.Printf("[synapse] [dispatcher] error recording kustomization requests for %s#%d: %v", repo, prNum, err)
 			return fmt.Errorf("record kustomization requests: %w", err)
-		}
-		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-			log.Printf("[synapse] [widget] warning syncing workflow_run deploying widget for %s#%d: %v", repo, prNum, err)
 		}
 	}
 	return s.reconcileImageKustomizations(ctx, refs, requests)
@@ -711,9 +710,45 @@ func (s *RouterServer) healDependabotPR(ctx context.Context, res *ResolvedGitHub
 	if targetID == "" {
 		return
 	}
-	if _, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, "", targetID, ""); err != nil {
+	if _, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, "", targetID); err != nil {
 		log.Printf("[synapse] [registry] warning self-healing dependabot PR %s#%d on CI failure: %v", res.Repo, res.PRNumber, err)
 	}
+}
+
+func (s *RouterServer) populateMissingBranch(ctx context.Context, res *ResolvedGitHubEvent) {
+	if res == nil || s.registry == nil {
+		return
+	}
+	if res.PRNumber <= 0 || strings.TrimSpace(res.Branch) != "" {
+		return
+	}
+	_, branch, _, _, err := s.registry.ResolvePRByNumber(ctx, normalizeRepo(res.Repo), res.PRNumber)
+	if err == nil && branch != "" {
+		res.Branch = branch
+	}
+}
+
+func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
+	if res == nil {
+		return nil
+	}
+	s.populateMissingBranch(ctx, res)
+	return s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        "ci_failed",
+		Repo:         res.Repo,
+		PRNumber:     res.PRNumber,
+		Branch:       res.Branch,
+		HeadSHA:      res.HeadSHA,
+		TargetID:     res.TargetID,
+		Status:       "ci_failed",
+		CheckName:    res.CheckName,
+		CheckState:   "failed",
+		CheckURL:     checkURL,
+		Details:      details,
+		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
+		Quiet:        isDependabotBranch(res.Branch),
+		OccurredAt:   time.Now().UTC(),
+	})
 }
 
 func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
@@ -804,12 +839,6 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 			Quiet:        isDependabotBranch(res.Branch),
 			OccurredAt:   time.Now().UTC(),
 		})
-		if err := s.advanceVanadisChunkOnMerge(ctx, res.Repo, res.PRNumber); err != nil {
-			return err
-		}
-		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-			log.Printf("[synapse] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
-		}
 		return nil
 	}
 	targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
@@ -829,12 +858,6 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 		Quiet:        isDependabotBranch(res.Branch),
 		OccurredAt:   time.Now().UTC(),
 	})
-	if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "pr_closed_unmerged"); err != nil {
-		return err
-	}
-	if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-		log.Printf("[synapse] [widget] warning syncing pr_closed widget for %s#%d: %v", res.Repo, res.PRNumber, err)
-	}
 	return nil
 }
 
@@ -871,13 +894,17 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 	} else if meta.BotID == "" && !cfg.DefaultOwner {
 		shouldRegister = false
 	}
-	if shouldRegister && s.registry != nil && (meta.TargetID != "" || meta.VanadisChunkID != "") && (res.Action != "closed" || pr.Merged) {
+	targetID := meta.TargetID
+	if IsHeadlessSessionKey(targetID) {
+		targetID = s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
+	}
+	if shouldRegister && s.registry != nil && targetID != "" && (res.Action != "closed" || pr.Merged) {
 		// Self-heal DB registration only; initial Discord widget delivery on opened is owned by Brain's /internal/pr/register to avoid duplicate message creation races.
-		resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, pr.Title, meta.TargetID, meta.VanadisChunkID)
+		resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, pr.Title, targetID)
 		if err != nil {
 			return err
 		}
-		res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, meta.TargetID)
+		res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, targetID)
 	}
 	switch res.Action {
 	case "closed":
@@ -904,11 +931,6 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
 			OccurredAt:   time.Now().UTC(),
 		})
-		if res.TargetID != "" {
-			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-				log.Printf("[synapse] [widget] warning syncing pr_sync widget for %s#%d: %v", res.Repo, res.PRNumber, err)
-			}
-		}
 	case "auto_merge_disabled":
 		return s.handlePRAutoMergeDisabledAction(ctx, res, pr)
 	}
@@ -936,7 +958,7 @@ func (s *RouterServer) handleDependabotPROpen(ctx context.Context, res *Resolved
 	if targetID == "" {
 		return
 	}
-	resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, targetID, "")
+	resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, targetID)
 	if err != nil {
 		log.Printf("[synapse] [registry] warning registering dependabot PR %s#%d: %v", res.Repo, res.PRNumber, err)
 		return
@@ -1036,11 +1058,7 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 		Quiet:        isDependabotBranch(res.Branch),
 		OccurredAt:   time.Now().UTC(),
 	})
-	if updated {
-		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-			log.Printf("[synapse] [widget] warning syncing pr widget for %s#%d: %v", res.Repo, res.PRNumber, err)
-		}
-	}
+	_ = updated
 }
 
 func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
@@ -1068,11 +1086,6 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 			return nil, err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		if targetID != "" {
-			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-				log.Printf("[synapse] [widget] warning syncing pr_open widget for %s#%d: %v", res.Repo, res.PRNumber, err)
-			}
-		}
 	}
 
 	s.recordCheckRunStatus(ctx, res)
@@ -1151,9 +1164,6 @@ func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *Resolv
 			Quiet:        isDependabotBranch(res.Branch),
 			OccurredAt:   time.Now().UTC(),
 		})
-		if err := s.advanceVanadisChunkOnMerge(ctx, res.Repo, res.PRNumber); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -1326,4 +1336,32 @@ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string
 		}
 	}
 	return dedupeTrimmedStrings(rawImages), nil
+}
+
+func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
+	repo = normalizeRepo(repo)
+	if s == nil || repo == "" || prNumber <= 0 {
+		return ""
+	}
+	var comments []GitHubIssueComment
+	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repo, prNumber)
+	if err := s.getGitHubJSON(ctx, path, 2<<20, &comments); err != nil {
+		log.Printf("[synapse] [github] warning fetching roborev comments for %s#%d: %v", repo, prNumber, err)
+		return ""
+	}
+	shortSHA := strings.TrimSpace(headSHA)
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	for _, comment := range slices.Backward(comments) {
+		body := strings.TrimSpace(comment.Body)
+		if !strings.Contains(body, "## roborev:") {
+			continue
+		}
+		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
+			continue
+		}
+		return truncatePromptRunes(body, maxRoboRevCommentRunes)
+	}
+	return ""
 }

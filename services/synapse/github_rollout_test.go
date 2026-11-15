@@ -421,25 +421,24 @@ func TestIsCachedFailedCISHA(t *testing.T) {
 func TestParseAerialPRMetadata(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, body, wantTarget, wantChunk, wantBotID string
-		wantOK                                       bool
+		name, body, wantTarget, wantBotID string
+		wantOK                            bool
 	}{
 		{name: "no trailer", body: "Standard PR body\n<!-- regular comment -->"},
 		{name: "unclosed trailer", body: "Body\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\"}"},
 		{name: "invalid json", body: "Body\n<!-- aerial-pr: {bad-json} -->"},
-		{name: "invalid target and empty chunk", body: "Body\n<!-- aerial-pr: {\"target_id\":\"bad\",\"vanadis_chunk_id\":\"\"} -->"},
-		{name: "valid target and chunk", body: "<!-- x -->\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"vanadis_chunk_id\":\"chunk-2\"} -->", wantTarget: "100000000000000002", wantChunk: "chunk-2", wantOK: true},
-		{name: "discord prefixed target and pool prefix", body: "<!-- aerial-pr: {\"target_id\":\"stateful_medium:discord-100000000000000002\",\"vanadis_chunk_id\":\"\"} -->", wantTarget: "100000000000000002", wantChunk: "", wantOK: true},
-		{name: "valid chunk only", body: "<!-- aerial-pr: {\"target_id\":\"\",\"vanadis_chunk_id\":\"chunk-only\"} -->", wantChunk: "chunk-only", wantOK: true},
+		{name: "invalid target and empty", body: "Body\n<!-- aerial-pr: {\"target_id\":\"bad\"} -->"},
+		{name: "valid target", body: "<!-- x -->\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\"} -->", wantTarget: "100000000000000002", wantOK: true},
+		{name: "discord prefixed target and pool prefix", body: "<!-- aerial-pr: {\"target_id\":\"stateful_medium:discord-100000000000000002\"} -->", wantTarget: "100000000000000002", wantOK: true},
 		{name: "valid bot id only", body: "<!-- aerial-pr: {\"bot_id\":\"eri-sub\"} -->", wantBotID: "eri-sub", wantOK: true},
-		{name: "valid target chunk and bot id", body: "<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"vanadis_chunk_id\":\"chunk-3\",\"bot_id\":\"eri-sub\"} -->", wantTarget: "100000000000000002", wantChunk: "chunk-3", wantBotID: "eri-sub", wantOK: true},
+		{name: "valid target and bot id", body: "<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"bot_id\":\"eri-sub\"} -->", wantTarget: "100000000000000002", wantBotID: "eri-sub", wantOK: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := ParseAerialPRMetadata(tc.body)
-			if got.OK() != tc.wantOK || got.TargetID != tc.wantTarget || got.VanadisChunkID != tc.wantChunk || got.BotID != tc.wantBotID {
-				t.Fatalf("ParseAerialPRMetadata() = %+v (ok=%v), want target=%q chunk=%q bot=%q ok=%v", got, got.OK(), tc.wantTarget, tc.wantChunk, tc.wantBotID, tc.wantOK)
+			if got.OK() != tc.wantOK || got.TargetID != tc.wantTarget || got.BotID != tc.wantBotID {
+				t.Fatalf("ParseAerialPRMetadata() = %+v (ok=%v), want target=%q bot=%q ok=%v", got, got.OK(), tc.wantTarget, tc.wantBotID, tc.wantOK)
 			}
 		})
 	}
@@ -480,131 +479,6 @@ func TestClassifyCheckState_Unit(t *testing.T) {
 	}
 }
 
-func TestFormatCIChecksActiveStep_Unit(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name         string
-		prStatus     string
-		ciChecksJSON string
-		metadataJSON string
-		wantLegacy   string
-		want         string
-	}{
-		{name: "non-open status merged legacy empty", prStatus: "merged", ciChecksJSON: `{"lint":"passed"}`, wantLegacy: "", want: "Building container images (1/1 completed)"},
-		{name: "non-open status closed", prStatus: "closed", ciChecksJSON: `{"lint":"passed"}`, wantLegacy: "", want: ""},
-		{name: "non-open status ci_failed", prStatus: "ci_failed", ciChecksJSON: `{"lint":"passed"}`, wantLegacy: "", want: ""},
-		{name: "empty ciChecksJSON", prStatus: "open", ciChecksJSON: "", wantLegacy: "", want: ""},
-		{name: "empty JSON object", prStatus: "open", ciChecksJSON: "{}", wantLegacy: "", want: ""},
-		{name: "invalid JSON", prStatus: "open", ciChecksJSON: "not-json", wantLegacy: "", want: ""},
-		{name: "single check passed", prStatus: "open", ciChecksJSON: `{"test":"passed"}`, wantLegacy: "Waiting on CI (1/1 passed)", want: "Waiting on CI (1/1 passed)"},
-		{name: "multiple checks all passed", prStatus: "open", ciChecksJSON: `{"lint":"passed","unit":"passed","integration":"passed"}`, wantLegacy: "Waiting on CI (3/3 passed)", want: "Waiting on CI (3/3 passed)"},
-		{name: "mixed passed and pending", prStatus: "open", ciChecksJSON: `{"lint":"passed","build":"pending","unit":"passed"}`, wantLegacy: "Waiting on CI (2/3 passed)", want: "Waiting on CI (2/3 passed)"},
-		{name: "all pending", prStatus: "open", ciChecksJSON: `{"lint":"pending","unit":"pending"}`, wantLegacy: "Waiting on CI (0/2 passed)", want: "Waiting on CI (0/2 passed)"},
-		{name: "any check failed returns empty", prStatus: "open", ciChecksJSON: `{"lint":"passed","unit":"failed"}`, wantLegacy: "", want: ""},
-
-		// Post-merge tests for formatPRWidgetActiveStep
-		{
-			name:         "merged with candidate jobs and started verifying_health",
-			prStatus:     "merged",
-			metadataJSON: `{"jobs":["eri","haro"],"started_jobs":["eri"],"deployed_jobs":[],"job_states":{"eri":"verifying_health"}}`,
-			want:         "`eri`: 🔄 verifying health\n`haro`: ⏳ building image",
-		},
-		{
-			name:         "synced with deployed job and starting job",
-			prStatus:     "synced",
-			metadataJSON: `{"jobs":["coven","eri"],"started_jobs":["eri"],"deployed_jobs":["coven"]}`,
-			want:         "`coven`: ✅ healthy\n`eri`: 🔄 starting",
-		},
-		{
-			name:         "deploying status with empty started_jobs defaults candidate jobs to starting",
-			prStatus:     "deploying",
-			metadataJSON: `{"jobs":["eri","haro"]}`,
-			want:         "`eri`: 🔄 starting\n`haro`: 🔄 starting",
-		},
-		{
-			name:         "merged with buildJobRegex service matches in ci_checks",
-			prStatus:     "merged",
-			ciChecksJSON: `{"Build & Push Images (mesh-proxy)":"passed","Build & Push Images (eri)":"in_progress"}`,
-			want:         "`eri`: ⏳ building image\n`mesh-proxy`: 🔄 starting",
-		},
-		{
-			name:         "merged with only unexpanded matrix build check falls back to container images count",
-			prStatus:     "merged",
-			ciChecksJSON: `{"Build & Push Images to GHCR (${{ matrix.service }})":"passed","CI Gate":"passed"}`,
-			want:         "Building container images (2/2 completed)",
-		},
-		{
-			name:         "merged with unexpanded matrix build check alongside real service renders only real service",
-			prStatus:     "merged",
-			ciChecksJSON: `{"Build & Push Images to GHCR (${{ matrix.service }})":"passed","Build & Push Images to GHCR (eri)":"in_progress"}`,
-			want:         "`eri`: ⏳ building image",
-		},
-		{
-			name:         "merged with non-matching ci_checks falls back to container images count",
-			prStatus:     "merged",
-			ciChecksJSON: `{"Docker Build":"passed","Test Gate":"passed"}`,
-			want:         "Building container images (2/2 completed)",
-		},
-		{
-			name:         "merged with failed check returns empty",
-			prStatus:     "merged",
-			ciChecksJSON: `{"Docker Build":"failed","Test Gate":"passed"}`,
-			metadataJSON: `{"jobs":["eri"]}`,
-			want:         "",
-		},
-		{
-			name:         "merged fallback to meta ci_checks when ciChecksJSON is empty",
-			prStatus:     "merged",
-			metadataJSON: `{"ci_checks":{"Docker Build":"passed"}}`,
-			want:         "Building container images (1/1 completed)",
-		},
-		{
-			name:         "deploying kustomizations none rolled out",
-			prStatus:     "deploying",
-			metadataJSON: `{"jobs":["eri"],"kustomization_requests":{"marida-core":{"namespace":"flux-system","requested_at":"t1"},"aerial-core":{"namespace":"flux-system","requested_at":"t1"}}}`,
-			want:         "`aerial-core`: 🔄 rolling out\n`marida-core`: 🔄 rolling out",
-		},
-		{
-			name:         "deploying kustomizations partially rolled out",
-			prStatus:     "deploying",
-			metadataJSON: `{"kustomization_requests":{"marida-core":{"namespace":"flux-system","requested_at":"t1"},"aerial-core":{"namespace":"flux-system","requested_at":"t1"}},"deployed_kustomizations":["aerial-core"]}`,
-			want:         "`aerial-core`: ✅ rolled out\n`marida-core`: 🔄 rolling out",
-		},
-		{
-			name:         "deploying kustomizations all rolled out",
-			prStatus:     "deploying",
-			metadataJSON: `{"kustomization_requests":{"marida-core":{"namespace":"apps","requested_at":"t1"},"aerial-core":{"namespace":"flux-system","requested_at":"t1"}},"deployed_kustomizations":["aerial-core","marida-core"]}`,
-			want:         "`aerial-core`: ✅ rolled out\n`marida-core`: ✅ rolled out",
-		},
-		{
-			name:         "deploying legacy empty kustomization requests falls back to jobs",
-			prStatus:     "deploying",
-			metadataJSON: `{"jobs":["eri"],"kustomization_requests":{},"deployed_jobs":["eri"]}`,
-			want:         "`eri`: ✅ healthy",
-		},
-		{
-			name:     "unsupported status returns empty",
-			prStatus: "deployed",
-			want:     "",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			gotLegacy := formatCIChecksActiveStep(tc.prStatus, tc.ciChecksJSON)
-			if tc.metadataJSON == "" && tc.prStatus == "open" {
-				if gotLegacy != tc.wantLegacy {
-					t.Fatalf("formatCIChecksActiveStep(%q, %q) = %q, want %q", tc.prStatus, tc.ciChecksJSON, gotLegacy, tc.wantLegacy)
-				}
-			}
-			got := formatPRWidgetActiveStep(tc.prStatus, tc.ciChecksJSON, tc.metadataJSON)
-			if got != tc.want {
-				t.Fatalf("formatPRWidgetActiveStep(%q, %q, %q) = %q, want %q", tc.prStatus, tc.ciChecksJSON, tc.metadataJSON, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestExtractStringMapFromMetadata_Unit(t *testing.T) {
 	t.Parallel()
 
@@ -636,6 +510,148 @@ func TestExtractStringMapFromMetadata_Unit(t *testing.T) {
 	gotStr := extractStringMapFromMetadata(metaStr, "job_states")
 	if gotStr["cadvisor"] != "healthy" {
 		t.Errorf("unexpected map from string map: %+v", gotStr)
+	}
+}
+
+func TestExtractChecksFromJSONOrMetadata_Unit(t *testing.T) {
+	t.Parallel()
+	res := extractChecksFromJSONOrMetadata(`{"lint":"passed"}`, nil)
+	if res["lint"] != "passed" {
+		t.Errorf("expected lint passed, got %v", res)
+	}
+	resBad := extractChecksFromJSONOrMetadata(`{bad`, map[string]any{"ci_checks": map[string]any{"unit": "passed"}})
+	if resBad["unit"] != "passed" {
+		t.Errorf("expected unit passed, got %v", resBad)
+	}
+	resMapStr := extractChecksFromJSONOrMetadata("", map[string]any{"ci_checks": map[string]string{"build": "failed"}})
+	if resMapStr["build"] != "failed" {
+		t.Errorf("expected build failed, got %v", resMapStr)
+	}
+	if extractChecksFromJSONOrMetadata("", nil) != nil {
+		t.Errorf("expected nil for empty checks and nil meta")
+	}
+}
+
+func TestRecordFailedCISHA_Unit(t *testing.T) {
+	t.Parallel()
+	var nilSrv *RouterServer
+	if nilSrv.recordFailedCISHA("azylman/aerial", 42, "sha1") {
+		t.Errorf("expected false for nil server")
+	}
+	nilSrv.clearFailedCISHA("azylman/aerial", 42)
+
+	srv := &RouterServer{}
+	if srv.recordFailedCISHA("", 42, "sha1") {
+		t.Errorf("expected false for empty repo")
+	}
+	if srv.recordFailedCISHA("azylman/aerial", 0, "sha1") {
+		t.Errorf("expected false for pr <= 0")
+	}
+	if srv.recordFailedCISHA("azylman/aerial", 42, "") {
+		t.Errorf("expected false for empty sha")
+	}
+	if srv.recordFailedCISHA("azylman/aerial", 42, "0000000000000000000000000000000000000000") {
+		t.Errorf("expected false for zero sha")
+	}
+
+	if !srv.recordFailedCISHA("azylman/aerial", 42, "sha1") {
+		t.Errorf("expected true on initial record")
+	}
+	if srv.recordFailedCISHA("azylman/aerial", 42, "sha1") {
+		t.Errorf("expected false on duplicate record")
+	}
+
+	srv.clearFailedCISHA("azylman/aerial", 0)
+	srv.clearFailedCISHA("azylman/aerial", 42)
+	if srv.isCachedFailedCISHA("azylman/aerial", 42, "sha1") {
+		t.Errorf("expected sha1 to be cleared")
+	}
+}
+
+func TestPublishDeployLifecycleEvent_Unit(t *testing.T) {
+	t.Parallel()
+	bus := &mockEventBus{}
+	srv := &RouterServer{bus: bus}
+	evt := DeployEvent{
+		Repo:     "azylman/aerial",
+		PRNumber: 42,
+	}
+	if err := srv.publishDeployLifecycleEvent(context.Background(), evt, "deploy_success", "deployed"); err != nil {
+		t.Fatalf("publishDeployLifecycleEvent() err = %v", err)
+	}
+	if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].JobName != "git-sync" {
+		t.Errorf("expected jobName git-sync, got %v", bus.publishedPREvents)
+	}
+}
+
+func TestAnalyzeBuildChecks_Unit(t *testing.T) {
+	t.Parallel()
+	jobs, passedJobs, total, passed, failed := analyzeBuildChecks(map[string]string{
+		"Build & Push Images (eri)": "passed",
+		"Lint":                      "failed",
+		"Test":                      "in_progress",
+		"":                          "",
+	})
+	if total != 3 || passed != 1 || failed != 1 {
+		t.Errorf("got total=%d passed=%d failed=%d", total, passed, failed)
+	}
+	if !passedJobs["eri"] || len(jobs) != 1 || jobs[0] != "eri" {
+		t.Errorf("unexpected jobs=%v passedJobs=%v", jobs, passedJobs)
+	}
+}
+
+func TestFailedCheckRunTracking_Unit(t *testing.T) {
+	t.Parallel()
+	srv := &RouterServer{}
+	repo := "azylman/aerial"
+	pr := 42
+	sha1 := "abc1234"
+	sha2 := "def5678"
+
+	var nilSrv *RouterServer
+	nilSrv.recordFailedCheckRun(repo, pr, sha1, "lint")
+	if nilSrv.loadMatchingFailedCheckState(repo, pr, sha1) != nil {
+		t.Errorf("expected nil for nil server")
+	}
+	srv.recordFailedCheckRun("", pr, sha1, "lint")
+	srv.recordFailedCheckRun(repo, 0, sha1, "lint")
+	srv.recordFailedCheckRun(repo, pr, "", "lint")
+	srv.recordFailedCheckRun(repo, pr, "0000000000000000000000000000000000000000", "lint")
+	srv.recordFailedCheckRun(repo, pr, sha1, "")
+
+	srv.recordFailedCheckRun(repo, pr, sha1, "lint")
+	srv.recordFailedCheckRun(repo, pr, sha1, "unit")
+	state := srv.loadMatchingFailedCheckState(repo, pr, sha1)
+	if state == nil || len(state.activeFailed) != 2 {
+		t.Fatalf("expected state with 2 active failed, got %v", state)
+	}
+
+	srv.clearActiveFailedCheckRun(repo, pr, sha1, "lint")
+	srv.clearActiveFailedCheckRun(repo, pr, sha1, "")
+	srv.clearActiveFailedCheckRun(repo, pr, "other-sha", "unit")
+
+	if srv.canRecoverNonGateCheckSuccess(repo, pr, "", sha1) {
+		t.Errorf("expected false for empty check")
+	}
+	if srv.canRecoverNonGateCheckSuccess(repo, pr, "non-existent", sha1) {
+		t.Errorf("expected false for never-failed check")
+	}
+	if !srv.canRecoverNonGateCheckSuccess(repo, pr, "unit", sha1) {
+		t.Errorf("expected true recovering last active failed check")
+	}
+
+	srv.recordFailedCheckRun(repo, pr, sha2, "lint")
+	state2 := srv.loadMatchingFailedCheckState(repo, pr, sha2)
+	if state2 == nil || state2.headSHA != sha2 || len(state2.activeFailed) != 1 {
+		t.Fatalf("expected reset state for sha2, got %v", state2)
+	}
+
+	if srv.hasCancelledCheckForSHA(repo, pr, sha1) {
+		t.Errorf("expected false when no cancelled check")
+	}
+	srv.cancelledCheckSHAs.Store(prCheckKey(repo, pr), sha1)
+	if !srv.hasCancelledCheckForSHA(repo, pr, sha1) {
+		t.Errorf("expected true after storing cancelled check")
 	}
 }
 
