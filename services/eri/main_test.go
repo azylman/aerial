@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -713,27 +715,27 @@ func runBrainAppLifecycleClaudeEngine(t *testing.T, cfg *config.Config) {
 	}
 }
 
-func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
-	newLifecycleCfg := func(t *testing.T, mutators ...func(*config.ConfigData)) (string, *config.Config) {
-		t.Helper()
-		tmpDir := t.TempDir()
-		_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0o755)
-		_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0o755)
-		cfg := newTestConfig(func(d *config.ConfigData) {
-			d.Port = "0"
-			d.AgyBin = "/bin/true"
-			d.Model = "gemini-2.5-flash"
-			d.SystemPrompt = "test"
-			d.GeminiHomeDir = tmpDir
-			d.DataDir = filepath.Join(tmpDir, "data")
-			d.DatabaseURL = ":memory:"
-			for _, m := range mutators {
-				m(d)
-			}
-		})
-		return tmpDir, cfg
-	}
+func newLifecycleCfg(t *testing.T, mutators ...func(*config.ConfigData)) (string, *config.Config) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0o755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0o755)
+	cfg := newTestConfig(func(d *config.ConfigData) {
+		d.Port = "0"
+		d.AgyBin = "/bin/true"
+		d.Model = "gemini-2.5-flash"
+		d.SystemPrompt = "test"
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
+		d.DatabaseURL = ":memory:"
+		for _, m := range mutators {
+			m(d)
+		}
+	})
+	return tmpDir, cfg
+}
 
+func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 	t.Run("PrewarmedWorkers", func(t *testing.T) {
 		tmpDir, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
 			d.DiscordToken = "mock-discord-token"
@@ -861,6 +863,26 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 	})
 }
 
+func TestRunBrainApp_EventBusTranscriptSyncSubscriber(t *testing.T) {
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	oldNewBus := newBusFn
+	newBusFn = func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return memBus, nil
+	}
+	defer func() { newBusFn = oldNewBus }()
+
+	_, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
+		d.NATSURL = "nats://127.0.0.1:4222"
+	})
+
+	_, cancel, wait := runBrainAppUntilReady(t, cfg)
+	cancel()
+	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("unexpected error from RunBrainApp: %v", err)
+	}
+}
+
 func hasEnv(envs []string, target string) bool {
 	return slices.Contains(envs, target)
 }
@@ -895,5 +917,122 @@ func TestBrainAppOptions_FunctionalOptionMutators(t *testing.T) {
 	opts.onReload("test")
 	if !called {
 		t.Errorf("expected onReload to be invoked")
+	}
+}
+
+type failSubscribeBus struct {
+	pubsub.Bus
+}
+
+func (b *failSubscribeBus) ConsumeQueue(ctx context.Context, subject, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	return nil, errors.New("simulated subscribe failure")
+}
+
+type initTranscriptSubscriberCase struct {
+	name          string
+	nilBus        bool
+	failSubscribe bool
+	withEphemeral bool
+	publishTurn   bool
+}
+
+func runInitTranscriptSubscriberCase(t *testing.T, tc initTranscriptSubscriberCase) {
+	t.Helper()
+	ctx := t.Context()
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+
+	var bus pubsub.Bus = memBus
+	if tc.nilBus {
+		bus = nil
+	} else if tc.failSubscribe {
+		bus = &failSubscribeBus{Bus: memBus}
+	}
+
+	store := dbtest.NewFakeStore()
+	tmpDir := t.TempDir()
+	cfg := config.NewFromData(&config.ConfigData{
+		DataDir: tmpDir,
+		Model:   "gemini-2.5-flash",
+	})
+	cur := cfg.Current()
+
+	var ephemeralPool *runner.InterchangeablePool
+	if tc.withEphemeral {
+		pcfg := runner.PoolConfig{
+			Engine:        "agy",
+			GeminiHomeDir: tmpDir,
+			Model:         "gemini-2.5-flash",
+			Cwd:           tmpDir,
+		}
+		ephemeralPool = newWorkerInterchangeablePool(pcfg, newMockMainDaemonSpawner(), "ephemeral:worker", false)
+		defer func() { _ = ephemeralPool.Close() }()
+	}
+
+	syncedCh := make(chan pubsub.TranscriptSyncedEvent, 1)
+	if !tc.nilBus && !tc.failSubscribe {
+		_, _ = memBus.Subscribe(ctx, pubsub.SubjectAerialTurnTranscriptSynced, "test-sub", func(_ context.Context, msg pubsub.Message) error {
+			var ev pubsub.TranscriptSyncedEvent
+			if err := json.Unmarshal(msg.Data(), &ev); err == nil {
+				select {
+				case syncedCh <- ev:
+				default:
+				}
+			}
+			return nil
+		})
+	}
+
+	initTurnTranscriptSyncSubscriber(ctx, bus, store, cfg, cur, ephemeralPool)
+
+	if tc.publishTurn {
+		turnEv := pubsub.TurnCompletedEvent{
+			SessionID:      "sub-turn-sess",
+			ConversationID: "sub-turn-conv",
+			Source:         "discord",
+			CompletedAt:    time.Now().UTC(),
+		}
+		if pubErr := memBus.Publish(ctx, pubsub.SubjectAerialTurnCompleted, "turn-1", turnEv); pubErr != nil {
+			t.Fatalf("publish turn event: %v", pubErr)
+		}
+		select {
+		case ev := <-syncedCh:
+			if ev.SessionID != "sub-turn-sess" {
+				t.Errorf("ev.SessionID = %q, want %q", ev.SessionID, "sub-turn-sess")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for TranscriptSyncedEvent")
+		}
+	}
+}
+
+func TestInitTurnTranscriptSyncSubscriber_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []initTranscriptSubscriberCase{
+		{
+			name:   "nil bus returns immediately",
+			nilBus: true,
+		},
+		{
+			name:          "subscribe queue error logged gracefully",
+			failSubscribe: true,
+		},
+		{
+			name:          "success without ephemeral pool and processes turn",
+			publishTurn:   true,
+			withEphemeral: false,
+		},
+		{
+			name:          "success with ephemeral pool and processes turn",
+			publishTurn:   true,
+			withEphemeral: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runInitTranscriptSubscriberCase(t, tc)
+		})
 	}
 }

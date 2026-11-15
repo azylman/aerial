@@ -22,7 +22,9 @@ type SyncOptions struct {
 	TailLimit         int           `json:"tail_limit"`
 	ClaudeProjectsDir string        `json:"claude_projects_dir,omitempty"`
 	// MCPServers lists configured MCP server names used to normalize agy mcp_<server>_<tool> names.
-	MCPServers []string `json:"mcp_servers,omitempty"`
+	MCPServers []string      `json:"mcp_servers,omitempty"`
+	Embedder   EmbedderFunc  `json:"-"`
+	LLMFunc    LLMClientFunc `json:"-"`
 }
 
 // SyncStats records metrics from a transcript synchronization execution.

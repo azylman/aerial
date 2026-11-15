@@ -60,6 +60,91 @@ func normalizeSyncOptions(brainDir string, opts SyncOptions) (string, SyncOption
 	return targetBrainDir, opts, nil
 }
 
+// SyncSessionTranscript indexes a single session's transcript file into transcript_steps and sessions
+// without scanning the entire brain directory. When sessionID is empty, it falls back to SyncTranscripts.
+func SyncSessionTranscript(
+	ctx context.Context,
+	store db.TranscriptStore,
+	brainDir, sessionID string,
+	opts ...SyncOptions,
+) (SyncStats, error) {
+	start := time.Now()
+	var stats SyncStats
+
+	if store == nil {
+		return stats, fmt.Errorf("transcript store cannot be nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var opt SyncOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	} else {
+		opt = DefaultSyncOptions()
+	}
+
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return SyncTranscripts(ctx, store, brainDir, opt.Embedder, opt.LLMFunc, opt)
+	}
+
+	targetBrainDir, opt, err := normalizeSyncOptions(brainDir, opt)
+	if err != nil {
+		return stats, err
+	}
+
+	transcriptPath := findTranscriptFile(targetBrainDir, sessionID)
+	if transcriptPath == "" {
+		stats.Duration = time.Since(start)
+		return stats, nil
+	}
+
+	fi, err := os.Stat(transcriptPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			stats.Duration = time.Since(start)
+			return stats, nil
+		}
+		stats.Duration = time.Since(start)
+		return stats, fmt.Errorf("stat transcript %s: %w", transcriptPath, err)
+	}
+	mtime := fi.ModTime().UTC()
+	stats.Scanned++
+
+	syncStates, err := store.GetSessionSyncStates(ctx)
+	if err != nil {
+		stats.Duration = time.Since(start)
+		return stats, fmt.Errorf("load session sync states: %w", err)
+	}
+
+	engine := engineForPath(targetBrainDir, transcriptPath)
+	state, exists := syncStates[sessionID]
+	if exists && !mtime.Truncate(time.Millisecond).After(state.LastMtime.Truncate(time.Millisecond)) {
+		stats.SkippedUnchanged++
+		if state.Engine == "" {
+			if err := store.SetSessionEngine(ctx, sessionID, engine); err != nil {
+				log.Printf("[Transcript] SetSessionEngine error for session %s: %v", sessionID, err)
+			}
+		}
+		stats.Duration = time.Since(start)
+		return stats, nil
+	}
+
+	if err := syncSingleSession(ctx, store, sessionID, engine, transcriptPath, mtime, state, exists, opt.Embedder, opt.LLMFunc, opt, &stats); err != nil {
+		stats.Errors++
+		stats.Duration = time.Since(start)
+		return stats, fmt.Errorf("sync single session %s: %w", sessionID, err)
+	}
+	stats.Synced++
+
+	backfillToolKinds(ctx, store, opt.MCPServers)
+	backfillSessionEngines(ctx, store)
+	stats.Duration = time.Since(start)
+	return stats, nil
+}
+
 // SyncTranscripts scans the brain directory and Claude project directories for session transcripts,
 // reconciles modification times against the database, ingests new steps, and updates debounced macro summaries.
 func SyncTranscripts(
@@ -78,6 +163,13 @@ func SyncTranscripts(
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	if embedder == nil {
+		embedder = opts.Embedder
+	}
+	if llmFunc == nil {
+		llmFunc = opts.LLMFunc
 	}
 
 	targetBrainDir, opts, err := normalizeSyncOptions(brainDir, opts)
