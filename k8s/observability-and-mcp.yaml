@@ -827,6 +827,7 @@ spec:
   retentionPeriod: "5y"
   removePvcAfterDelete: false
   selectAllByDefault: true
+  ingestOnlyMode: false
   serviceAccountName: victoriametrics-sa
   podMetadata:
     labels:
@@ -869,7 +870,7 @@ spec:
       protocol: TCP
       targetPort: 8428
   selector:
-    app.kubernetes.io/name: victoriametrics
+    app.kubernetes.io/name: vmsingle
   type: ClusterIP
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
