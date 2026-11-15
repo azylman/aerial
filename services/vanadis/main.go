@@ -450,7 +450,7 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 	if buildID == "" {
 		return nil, nil, errors.New("build id cannot be empty")
 	}
-	const buildQuery = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at FROM vanadis_builds WHERE id = $1;`
+	const buildQuery = `SELECT ` + buildColumns + ` FROM vanadis_builds WHERE id = $1;`
 	b, err := scanBuild(s.db.QueryRow(ctx, buildQuery, buildID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -523,7 +523,7 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]Van
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	const buildQuery = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at FROM vanadis_builds ORDER BY created_at DESC, id DESC LIMIT $1;`
+	const buildQuery = `SELECT ` + buildColumns + ` FROM vanadis_builds ORDER BY created_at DESC, id DESC LIMIT $1;`
 	rows, err := s.db.Query(ctx, buildQuery, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query vanadis builds: %w", err)
@@ -939,6 +939,11 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+// buildColumns is the vanadis_builds SELECT list scanBuild consumes, in its destination order.
+// Every query whose rows go through scanBuild must select exactly these columns.
+const buildColumns = `id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at`
+
+// scanBuild scans one row selected with buildColumns.
 func scanBuild(s rowScanner) (VanadisBuild, error) {
 	var b VanadisBuild
 	err := s.Scan(&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt)

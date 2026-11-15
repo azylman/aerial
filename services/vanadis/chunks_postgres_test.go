@@ -433,8 +433,8 @@ func TestPostgresVanadisStore_UpdateBuild(t *testing.T) {
 			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return
 			}
-			if got == nil || got.Title != tc.req.Title {
-				t.Fatalf("unexpected updated build: %+v", got)
+			if got == nil || got.Title != tc.req.Title || got.Objective != tc.req.Objective || got.SharedContext != tc.req.SharedContext {
+				t.Fatalf("updated build = %+v, want title/objective/shared_context from %+v", got, tc.req)
 			}
 		})
 	}
