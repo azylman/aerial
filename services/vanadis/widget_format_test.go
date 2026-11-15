@@ -602,7 +602,7 @@ func TestChunksEvents_And_PersistWidget_RemainingGaps(t *testing.T) {
 		DispatchID:     "d1",
 	}))
 
-	// Case B: L59-61 in chunks_events.go (res.Advanced == true, NextChunkIndex >= 0, s.enqueueExecuteChunk returns error)
+	// Case B: L59-61 in chunks_events.go has been purged with Restate BuildWorkflow cutover.
 	storeAdvance := &errVanadisStore{
 		completeRes: &VanadisAdvancementResult{
 			Advanced:       true,
@@ -616,7 +616,7 @@ func TestChunksEvents_And_PersistWidget_RemainingGaps(t *testing.T) {
 		VanadisChunkID: "c1",
 		DispatchID:     "d1",
 	})
-	assert.Error(t, errAdvance)
+	assert.NoError(t, errAdvance)
 
 	// Case C: L1312-1313 in chunks.go (UpdateBuildStatusMessageID fails and logs warning)
 	tsMsg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

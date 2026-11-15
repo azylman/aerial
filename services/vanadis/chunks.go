@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,14 +52,10 @@ type VanadisAdvancementResult struct {
 
 // VanadisChunkPRLookup represents the result of looking up a chunk by repository and PR number.
 type VanadisChunkPRLookup struct {
-	Matched            bool   `json:"matched"`
-	ChunkID            string `json:"chunk_id,omitempty"`
-	BuildID            string `json:"build_id,omitempty"`
-	Effort             string `json:"effort,omitempty"`
-	HasRemainingChunks bool   `json:"has_remaining_chunks"`
-	// NextChunkMode is the mode ("pr" or "action") of the chunk AdvanceChunkByPR
-	// would start once this chunk merges, or "" when the build would complete.
-	NextChunkMode string `json:"next_chunk_mode,omitempty"`
+	Matched bool   `json:"matched"`
+	ChunkID string `json:"chunk_id,omitempty"`
+	BuildID string `json:"build_id,omitempty"`
+	Effort  string `json:"effort,omitempty"`
 }
 
 // AttachChunkPRRequest represents the payload for POST /chunks/attach-pr.
@@ -356,200 +351,6 @@ func (s *PostgresVanadisStore) resolveAttachChunkPRError(ctx context.Context, ch
 		return fmt.Errorf("%w: chunk %s or parent build is cancelled", ErrBuildConflict, chunkID)
 	}
 	return fmt.Errorf("chunk %s cannot attach pr %d (mismatched repo)", chunkID, prNumber)
-}
-
-func computeNextChunkIndex(chunks []VanadisChunkSummary, currentIdx int) int {
-	nextChunkIdx := -1
-	fallbackIdx := -1
-	for _, cs := range chunks {
-		if !isChunkMergedOrDoneStatus(cs.Status) {
-			if cs.ChunkIndex > currentIdx && (nextChunkIdx == -1 || cs.ChunkIndex < nextChunkIdx) {
-				nextChunkIdx = cs.ChunkIndex
-			} else if fallbackIdx == -1 {
-				fallbackIdx = cs.ChunkIndex
-			}
-		}
-	}
-	if nextChunkIdx == -1 {
-		return fallbackIdx
-	}
-	return nextChunkIdx
-}
-
-func scanVanadisChunkSummaries(rows pgx.Rows, mergedChunkID string) ([]VanadisChunkSummary, error) {
-	var allChunks []VanadisChunkSummary
-	for rows.Next() {
-		var cs VanadisChunkSummary
-		var startedAt, completedAt sql.NullTime
-		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Mode, &cs.Repo, &cs.Title, &cs.Status, &cs.PRNumber, &startedAt, &completedAt, &cs.UpdatedAt); scanErr != nil {
-			return nil, fmt.Errorf("scan vanadis chunk summary: %w", scanErr)
-		}
-		if startedAt.Valid {
-			cs.StartedAt = startedAt.Time
-		}
-		if completedAt.Valid {
-			cs.CompletedAt = completedAt.Time
-		}
-		if cs.ID == mergedChunkID {
-			if cs.Mode == "action" || cs.Status == "completed" {
-				cs.Status = "completed"
-			} else {
-				cs.Status = "merged"
-			}
-			if cs.CompletedAt.IsZero() {
-				cs.CompletedAt = time.Now().UTC()
-			}
-		}
-		allChunks = append(allChunks, cs)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate vanadis chunk summaries: %w", err)
-	}
-	return allChunks, nil
-}
-
-func isTerminalBuildStatus(status string) bool {
-	return status == "cancelled"
-}
-
-func advanceToNextChunk(ctx context.Context, tx pgx.Tx, buildID string, nextChunkIdx int, cStatus string, allChunks []VanadisChunkSummary, res *VanadisAdvancementResult) (*VanadisAdvancementResult, error) {
-	if res.BuildStatus == "failed" {
-		const recoverBuildQuery = `UPDATE vanadis_builds SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
-		if _, err := tx.Exec(ctx, recoverBuildQuery, buildID); err != nil {
-			return nil, fmt.Errorf("recover vanadis build running: %w", err)
-		}
-		res.BuildStatus = "running"
-	}
-	const updateNextChunkQuery = `UPDATE vanadis_chunks SET status = 'running', started_at = COALESCE(started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE build_id = $1 AND chunk_index = $2 AND status = 'pending'`
-	if _, err := tx.Exec(ctx, updateNextChunkQuery, buildID, nextChunkIdx); err != nil {
-		return nil, fmt.Errorf("update next vanadis chunk running: %w", err)
-	}
-	now := time.Now().UTC()
-	for i := range allChunks {
-		if allChunks[i].ChunkIndex == nextChunkIdx && allChunks[i].Status == "pending" {
-			allChunks[i].Status = "running"
-			if allChunks[i].StartedAt.IsZero() {
-				allChunks[i].StartedAt = now
-			}
-			allChunks[i].UpdatedAt = now
-			break
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit vanadis chunk advance tx: %w", err)
-	}
-	res.Advanced = !isChunkDoneStatus(cStatus)
-	res.NextChunkIndex = nextChunkIdx
-	res.BuildCompleted = false
-	res.Chunks = allChunks
-	return res, nil
-}
-
-func completeBuild(ctx context.Context, tx pgx.Tx, buildID string, cStatus string, allChunks []VanadisChunkSummary, res *VanadisAdvancementResult) (*VanadisAdvancementResult, error) {
-	if res.BuildStatus != "completed" {
-		const updateBuildQuery = `UPDATE vanadis_builds SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
-		if _, err := tx.Exec(ctx, updateBuildQuery, buildID); err != nil {
-			return nil, fmt.Errorf("update vanadis build completed: %w", err)
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit vanadis build completed tx: %w", err)
-	}
-	res.Advanced = !isChunkDoneStatus(cStatus)
-	res.BuildStatus = "completed"
-	res.NextChunkIndex = -1
-	res.BuildCompleted = true
-	res.Chunks = allChunks
-	return res, nil
-}
-
-func queryAndAdvanceChunks(ctx context.Context, tx pgx.Tx, buildID, chunkID, cStatus string, chunkIdx int, res *VanadisAdvancementResult) (*VanadisAdvancementResult, error) {
-	const chunksQuery = `SELECT id, chunk_index, mode, repo, title, status, COALESCE(pr_number, 0), started_at, completed_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
-	rows, err := tx.Query(ctx, chunksQuery, buildID)
-	if err != nil {
-		return nil, fmt.Errorf("query vanadis build chunks for advance: %w", err)
-	}
-	defer rows.Close()
-
-	allChunks, err := scanVanadisChunkSummaries(rows, chunkID)
-	if err != nil {
-		return nil, err
-	}
-
-	nextChunkIdx := computeNextChunkIndex(allChunks, chunkIdx)
-	if nextChunkIdx >= 0 {
-		return advanceToNextChunk(ctx, tx, buildID, nextChunkIdx, cStatus, allChunks, res)
-	}
-
-	return completeBuild(ctx, tx, buildID, cStatus, allChunks, res)
-}
-
-// AdvanceChunkByPR advances a chunk to merged and computes the next chunk index or marks the build completed.
-func (s *PostgresVanadisStore) AdvanceChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
-	if s == nil || s.db == nil {
-		return nil, errors.New("database connection is nil")
-	}
-	candidates := repoMatchCandidates(repo)
-	if len(candidates) == 0 || prNumber <= 0 {
-		return &VanadisAdvancementResult{Matched: false}, nil
-	}
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin vanadis advance tx: %w", err)
-	}
-	defer func() {
-		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			log.Printf("[vanadis] advance tx rollback error: %v", rbErr)
-		}
-	}()
-
-	const selectChunkQuery = `
-		SELECT c.id, c.build_id, c.chunk_index, c.mode, c.title, c.status, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, COALESCE(b.status_message_id, '')
-		FROM vanadis_chunks c
-		JOIN vanadis_builds b ON c.build_id = b.id
-		WHERE c.repo = ANY($1) AND c.pr_number = $2
-		ORDER BY c.updated_at DESC LIMIT 1 FOR UPDATE`
-
-	var chunkID, buildID, cTitle, cStatus, threadID, bTitle, objective, bStatus, bStatusMsgID, cMode string
-	var chunkIdx, tier int
-	err = tx.QueryRow(ctx, selectChunkQuery, candidates, prNumber).Scan(
-		&chunkID, &buildID, &chunkIdx, &cMode, &cTitle, &cStatus, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return &VanadisAdvancementResult{Matched: false}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("select vanadis chunk by pr: %w", err)
-	}
-
-	res := &VanadisAdvancementResult{
-		Matched:          true,
-		Advanced:         false,
-		BuildID:          buildID,
-		ThreadID:         threadID,
-		Tier:             tier,
-		Title:            bTitle,
-		Objective:        objective,
-		BuildStatus:      bStatus,
-		StatusMessageID:  bStatusMsgID,
-		MergedChunkIndex: chunkIdx,
-		MergedChunkTitle: cTitle,
-		NextChunkIndex:   -1,
-		BuildCompleted:   bStatus == "completed",
-	}
-
-	if isTerminalBuildStatus(bStatus) {
-		return res, nil
-	}
-
-	if !isChunkDoneStatus(cStatus) {
-		const updateChunkQuery = `UPDATE vanadis_chunks SET status = 'merged', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = $1`
-		if _, err := tx.Exec(ctx, updateChunkQuery, chunkID); err != nil {
-			return nil, fmt.Errorf("update vanadis chunk merged: %w", err)
-		}
-	}
-
-	return queryAndAdvanceChunks(ctx, tx, buildID, chunkID, cStatus, chunkIdx, res)
 }
 
 // FailChunkByPR marks a non-terminal chunk and its running build as failed.
@@ -1093,6 +894,11 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		writeStoreErr(w, err)
 		return
+	}
+	if strings.TrimSpace(req.ChunkID) == "" && s.restateCfg.Enabled {
+		if err := s.launchBuildOnRestate(r.Context(), buildID); err != nil {
+			log.Printf("[vanadis] warning: failed to launch standalone build %s on restate: %v", buildID, err)
+		}
 	}
 	s.syncBuildWidget(r.Context(), buildID, "")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
