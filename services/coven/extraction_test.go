@@ -691,29 +691,29 @@ func TestReconcileCandidateFact_Tiers(t *testing.T) {
 
 	tests := []reconcileCandidateFactTierTestCase{
 		{name: "NilStoreSafe", nilStore: true, item: valid},
-		{name: "NilClientSafe", nilClient: true, item: valid},
-		{name: "UnadmittedTooShort", item: ExtractedFactItem{FactText: "short"}},
-		{name: "UnadmittedNoopAction", item: ExtractedFactItem{Action: "NOOP", FactText: "User discussed the weather today in detail"}},
-		{name: "UnadmittedDeleteAction", item: ExtractedFactItem{Action: "DELETE", FactText: "Obsolete fact text should not be inserted or reinforced"}},
-		{name: "EmbeddingErrorLogged", item: valid, ollamaErr: errors.New("embed fail")},
-		{name: "FindNearestErrorLogged", item: valid, storeFailOp: "FindNearestScoredFacts"},
+		{name: "NilClientSafe", nilClient: true, item: valid, want: reconcileUnchanged},
+		{name: "UnadmittedTooShort", item: ExtractedFactItem{FactText: "short"}, want: reconcileUnchanged},
+		{name: "UnadmittedNoopAction", item: ExtractedFactItem{Action: "NOOP", FactText: "User discussed the weather today in detail"}, want: reconcileUnchanged},
+		{name: "UnadmittedDeleteAction", item: ExtractedFactItem{Action: "DELETE", FactText: "Obsolete fact text should not be inserted or reinforced"}, want: reconcileUnchanged},
+		{name: "EmbeddingErrorLogged", item: valid, ollamaErr: errors.New("embed fail"), want: reconcileUnchanged},
+		{name: "FindNearestErrorLogged", item: valid, storeFailOp: "FindNearestScoredFacts", want: reconcileUnchanged},
 		{name: "Tier1_NoNeighbors_Insert", item: valid, want: reconcileInserted},
-		{name: "Tier1_InsertErrorLogged", item: valid, storeFailOp: "InsertFact"},
+		{name: "Tier1_InsertErrorLogged", item: valid, storeFailOp: "InsertFact", want: reconcileUnchanged},
 		{name: "Tier2_HighSimReinforce", item: valid, neighborEmb: highSimEmb, want: reconcileReinforced},
-		{name: "Tier2_ReinforceErrorLogged", item: valid, neighborEmb: highSimEmb, storeFailOp: "ReinforceFact"},
+		{name: "Tier2_ReinforceErrorLogged", item: valid, neighborEmb: highSimEmb, storeFailOp: "ReinforceFact", want: reconcileUnchanged},
 		{name: "Tier3_NilLLM_FallbackInsert", item: valid, neighborEmb: tier3Emb, nilLLM: true, want: reconcileInserted},
 		{name: "Tier3_LLMError_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmErr: errors.New("timeout"), want: reconcileInserted},
 		{name: "Tier3_ParseError_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: "invalid json", want: reconcileInserted},
 		{name: "Tier3_EmptyFacts_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[]}`, want: reconcileInserted},
 		{name: "Tier3_ValidUpdate", item: valid, neighborEmb: tier3Emb, llmResp: update10, want: reconcileUpdated},
 		{name: "Tier3_UnwhitelistedUpdate_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"UPDATE","supersedes_id":999,"fact_text":"Updated text here"}]}`, want: reconcileInserted},
-		{name: "Tier3_UpdateStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: update10, storeFailOp: "UpdateFact"},
+		{name: "Tier3_UpdateStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: update10, storeFailOp: "UpdateFact", want: reconcileUnchanged},
 		{name: "Tier3_ValidDelete", item: valid, neighborEmb: tier3Emb, llmResp: delete10, want: reconcileDeleted},
-		{name: "Tier3_UnwhitelistedDelete_NOOP", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"DELETE","delete_id":999}]}`},
-		{name: "Tier3_DeleteStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: delete10, storeFailOp: "DeleteFact"},
+		{name: "Tier3_UnwhitelistedDelete_NOOP", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"DELETE","delete_id":999}]}`, want: reconcileUnchanged},
+		{name: "Tier3_DeleteStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: delete10, storeFailOp: "DeleteFact", want: reconcileUnchanged},
 		{name: "Tier3_NOOP", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP"}]}`, want: reconcileReinforced},
 		{name: "Tier3_NOOP_ExplicitSupersedesID", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP","supersedes_id":10}]}`, want: reconcileReinforced},
-		{name: "Tier3_NOOP_ReinforceErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP"}]}`, storeFailOp: "ReinforceFact"},
+		{name: "Tier3_NOOP_ReinforceErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP"}]}`, storeFailOp: "ReinforceFact", want: reconcileUnchanged},
 		{name: "Tier3_ADD", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"ADD"}]}`, want: reconcileInserted},
 		{name: "Tier3_DefaultUnknownAction", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"OTHER"}]}`, want: reconcileInserted},
 	}
@@ -984,6 +984,7 @@ type reconcileOutcome int
 
 const (
 	reconcileUnasserted reconcileOutcome = iota
+	reconcileUnchanged
 	reconcileInserted
 	reconcileReinforced
 	reconcileUpdated
@@ -1046,11 +1047,23 @@ func runReconcileCandidateFactTierCase(t *testing.T, tc reconcileCandidateFactTi
 
 func assertReconcileOutcome(t *testing.T, mem *TestMemStore, hasNeighbor bool, want reconcileOutcome) {
 	t.Helper()
+	seeded := 0
+	if hasNeighbor {
+		seeded = 1
+	}
 	neighbor := mem.facts[reconcileNeighborID]
 	switch want {
+	case reconcileUnchanged:
+		if len(mem.facts) != seeded {
+			t.Errorf("store has %d facts, want %d (unchanged)", len(mem.facts), seeded)
+		}
+		if hasNeighbor && (neighbor == nil || neighbor.FactText != "Existing neighbor text" || neighbor.ReinforceCount != 1) {
+			t.Errorf("expected neighbor %d to be untouched, got %+v", reconcileNeighborID, neighbor)
+		}
 	case reconcileInserted:
-		if !hasNeighbor && len(mem.facts) == 0 {
-			t.Errorf("expected fact to be inserted, but store has 0 facts")
+		// A fallback insert adds a new fact alongside any seeded neighbor.
+		if len(mem.facts) != seeded+1 {
+			t.Errorf("store has %d facts, want %d after insert", len(mem.facts), seeded+1)
 		}
 	case reconcileReinforced:
 		if neighbor.ReinforceCount < 2 {
