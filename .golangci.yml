@@ -214,14 +214,6 @@ linters:
           - nestif
         path: services/synapse/pr_lifecycle_events_test\.go
       - linters:
-          - cyclop
-          - funlen
-          - gocognit
-          - gocyclo
-          - maintidx
-          - nestif
-        path: services/haro/(dispatch|tools)_test\.go
-      - linters:
           - funlen
         path: services/coven/(extraction|procedural|server|skills_publisher)_test\.go
       - linters:
