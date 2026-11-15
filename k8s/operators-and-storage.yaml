@@ -129,6 +129,99 @@ spec:
   method: barmanObjectStore
   schedule: 0 0 3 * * *
 ---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: postgres-aerial
+  namespace: default
+spec:
+  cluster:
+    name: postgres
+  databaseReclaimPolicy: retain
+  ensure: present
+  extensions:
+    - ensure: present
+      name: vector
+  name: aerial
+  owner: aerial
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: postgres-infisical
+  namespace: default
+spec:
+  cluster:
+    name: postgres
+  databaseReclaimPolicy: retain
+  ensure: present
+  name: infisical
+  owner: aerial
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: postgres-grafana
+  namespace: default
+spec:
+  cluster:
+    name: postgres
+  databaseReclaimPolicy: retain
+  ensure: present
+  name: grafana
+  owner: aerial
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: postgres-docket
+  namespace: default
+spec:
+  cluster:
+    name: postgres
+  databaseReclaimPolicy: retain
+  ensure: present
+  extensions:
+    - ensure: present
+      name: vector
+  name: docket
+  owner: aerial
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: victoriametrics
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://victoriametrics.github.io/helm-charts/
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: vm-operator
+  namespace: default
+spec:
+  chart:
+    spec:
+      chart: victoria-metrics-operator
+      sourceRef:
+        kind: HelmRepository
+        name: victoriametrics
+        namespace: flux-system
+      version: 0.68.2
+  interval: 30m
+  values:
+    admissionWebhooks:
+      enabled: false
+    crds:
+      cleanup:
+        enabled: false
+      plain: true
+    fullnameOverride: vm-operator
+    operator:
+      disable_prometheus_converter: true
+---
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:

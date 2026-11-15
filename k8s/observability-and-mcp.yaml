@@ -723,6 +723,14 @@ rules:
       - get
       - list
       - watch
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -1570,6 +1578,22 @@ rules:
       - gitrepositories
       - helmrepositories
       - ocirepositories
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - postgresql.cnpg.io
+    resources:
+      - "*"
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - operator.victoriametrics.com
+    resources:
+      - "*"
     verbs:
       - get
       - list
@@ -2670,6 +2694,7 @@ rules:
       - metrics.k8s.io
       - cert-manager.io
       - postgresql.cnpg.io
+      - operator.victoriametrics.com
       - external-secrets.io
       - actions.github.com
       - source.toolkit.fluxcd.io
