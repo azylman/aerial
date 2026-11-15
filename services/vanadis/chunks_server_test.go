@@ -1,161 +1,144 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/azylman/aerial/pkg/httpkit"
 )
 
-func TestServer_ChunkEndpoints(t *testing.T) {
-	memStore, _, cIDs := setupTestStoreWithBuild()
-	if _, _, _, err := memStore.AttachChunkPR(context.Background(), AttachChunkPRRequest{ChunkID: cIDs[0], PRNumber: 101, Repo: "aerial"}); err != nil {
-		t.Fatalf("AttachChunkPR failed: %v", err)
+// seedMemoryStore returns nil when nilStore is set, otherwise an in-memory
+// store holding seedBuild (if any) and its seedChunks.
+func seedMemoryStore(nilStore bool, seedBuild *VanadisBuild, seedChunks []VanadisChunk) (VanadisStore, *memoryVanadisStore) {
+	if nilStore {
+		return nil, nil
 	}
-
-	tsBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/discord/widget" {
-			httpkit.WriteJSON(w, http.StatusOK, map[string]string{"message_id": "msg-new-widget-1"})
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer tsBrain.Close()
-
-	srv := NewVanadisServer(Config{BrainURL: tsBrain.URL}, memStore, tsBrain.Client())
-	mux := SetupMux(srv)
-
-	doReq := func(method, path string, body string) *httptest.ResponseRecorder {
-		var r *http.Request
-		if body != "" {
-			r = httptest.NewRequest(method, path, strings.NewReader(body))
-			r.Header.Set("Content-Type", "application/json")
-		} else {
-			r = httptest.NewRequest(method, path, nil)
-		}
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, r)
-		return rec
+	mem := newMemoryVanadisStore()
+	if seedBuild != nil {
+		mem.builds[seedBuild.ID] = *seedBuild
 	}
+	if len(seedChunks) > 0 {
+		mem.chunks[seedBuild.ID] = seedChunks
+	}
+	return mem, mem
+}
 
-	t.Run("GET_ChunkByID", func(t *testing.T) {
-		rec := doReq(http.MethodGet, "/chunks/"+cIDs[0], "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+// serveChunkRequest routes one request through srv's SetupMux. errBody swaps the
+// request body for a reader that always fails.
+func serveChunkRequest(srv *VanadisServer, method, path, body string, errBody bool) *httptest.ResponseRecorder {
+	var req *http.Request
+	switch {
+	case errBody:
+		req = httptest.NewRequest(method, path, errorReader{})
+	case body != "":
+		req = httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+	default:
+		req = httptest.NewRequest(method, path, nil)
+	}
+	rec := httptest.NewRecorder()
+	SetupMux(srv).ServeHTTP(rec, req)
+	return rec
+}
+
+// assertJSONFields checks that each wantPresent key in the JSON object body is
+// set to a non-null, non-empty value, and that "status" equals wantStatus when
+// wantStatus is non-empty.
+func assertJSONFields(t *testing.T, body []byte, wantStatus string, wantPresent []string) {
+	t.Helper()
+	if wantStatus == "" && len(wantPresent) == 0 {
+		return
+	}
+	var res map[string]any
+	if err := json.Unmarshal(body, &res); err != nil {
+		t.Fatalf("decode response %s: %v", body, err)
+	}
+	if wantStatus != "" && res["status"] != wantStatus {
+		t.Errorf("status = %v, want %q (response %+v)", res["status"], wantStatus, res)
+	}
+	for _, key := range wantPresent {
+		if v, ok := res[key]; !ok || v == nil || v == "" {
+			t.Errorf("response field %q missing or empty: %+v", key, res)
 		}
-		var res map[string]any
-		_ = json.Unmarshal(rec.Body.Bytes(), &res)
-		if res["chunk"] == nil || res["build"] == nil {
-			t.Errorf("missing chunk or build in response: %+v", res)
-		}
+	}
+}
 
-		rec404 := doReq(http.MethodGet, "/chunks/missing-chunk-id", "")
-		if rec404.Code != http.StatusNotFound {
-			t.Errorf("expected 404, got %d", rec404.Code)
-		}
-
-		rec400 := doReq(http.MethodGet, "/chunks/", "")
-		if rec400.Code != http.StatusBadRequest {
-			t.Errorf("expected 400 for empty id, got %d", rec400.Code)
-		}
-
-		rec405 := doReq(http.MethodPost, "/chunks/"+cIDs[0], "")
-		if rec405.Code != http.StatusMethodNotAllowed {
-			t.Errorf("expected 405, got %d", rec405.Code)
-		}
-
-		srvNil := NewVanadisServer(Config{}, nil, nil)
-		muxNil := SetupMux(srvNil)
-		rec500 := httptest.NewRecorder()
-		muxNil.ServeHTTP(rec500, httptest.NewRequest(http.MethodGet, "/chunks/"+cIDs[0], nil))
-		if rec500.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500 when store is nil, got %d", rec500.Code)
-		}
-	})
-
-	t.Run("POST_AttachChunkPR", func(t *testing.T) {
-		sAttach, _, cAttachIDs := setupTestStoreWithBuild()
-		busAttach := &mockChunkBus{}
-		srvAttach := NewVanadisServer(Config{}, sAttach, nil)
-		srvAttach.SetBus(busAttach)
-		muxAttach := SetupMux(srvAttach)
-
-		doAttachReq := func(method, path string, body string) *httptest.ResponseRecorder {
-			var r *http.Request
-			if body != "" {
-				r = httptest.NewRequest(method, path, strings.NewReader(body))
-			} else {
-				r = httptest.NewRequest(method, path, nil)
+func TestVanadisServer_HandleChunkByID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		nilStore    bool
+		method      string
+		path        string
+		wantCode    int
+		wantPresent []string
+	}{
+		{"ok", false, http.MethodGet, "/chunks/chunk-1", http.StatusOK, []string{"chunk", "build"}},
+		{"not_found", false, http.MethodGet, "/chunks/missing-chunk-id", http.StatusNotFound, nil},
+		{"empty_id", false, http.MethodGet, "/chunks/", http.StatusBadRequest, nil},
+		{"method_not_allowed", false, http.MethodPost, "/chunks/chunk-1", http.StatusMethodNotAllowed, nil},
+		{"nil_store", true, http.MethodGet, "/chunks/chunk-1", http.StatusInternalServerError, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var store VanadisStore
+			if !tc.nilStore {
+				store, _, _ = setupTestStoreWithBuild()
 			}
-			rec := httptest.NewRecorder()
-			muxAttach.ServeHTTP(rec, r)
-			return rec
-		}
-
-		rec := doAttachReq(http.MethodPost, "/chunks/attach-pr", fmt.Sprintf(`{"chunk_id":%q,"pr_number":103,"repo":"aerial"}`, cAttachIDs[0]))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
-		}
-		var res map[string]string
-		_ = json.Unmarshal(rec.Body.Bytes(), &res)
-		if res["status"] != "attached" || res["thread_id"] == "" || res["build_id"] == "" || res["chunk_id"] == "" {
-			t.Errorf("unexpected attach response: %+v", res)
-		}
-		if busAttach.widgetCalls == 0 {
-			t.Errorf("expected widget sync published on attach-pr, got 0")
-		}
-
-		// Standalone attach test
-		recStandalone := doAttachReq(http.MethodPost, "/chunks/attach-pr", `{"chunk_id":"","repo":"aerial","pr_number":401,"branch":"feature-1","title":"Feature 1"}`)
-		if recStandalone.Code != http.StatusOK {
-			t.Fatalf("expected 200 for standalone attach, got %d: %s", recStandalone.Code, recStandalone.Body.String())
-		}
-		var saRes map[string]string
-		_ = json.Unmarshal(recStandalone.Body.Bytes(), &saRes)
-		if saRes["status"] != "attached" || saRes["build_id"] == "" || saRes["chunk_id"] == "" {
-			t.Fatalf("unexpected standalone attach res: %+v", saRes)
-		}
-
-		rec404 := doAttachReq(http.MethodPost, "/chunks/attach-pr", `{"chunk_id":"missing-chunk","pr_number":101,"repo":"aerial"}`)
-		if rec404.Code != http.StatusNotFound {
-			t.Errorf("expected 404 for missing chunk, got %d: %s", rec404.Code, rec404.Body.String())
-		}
-
-		recErrReader := httptest.NewRecorder()
-		muxAttach.ServeHTTP(recErrReader, httptest.NewRequest(http.MethodPost, "/chunks/attach-pr", errorReader{}))
-		if recErrReader.Code != http.StatusBadRequest {
-			t.Errorf("expected 400 on errorReader, got %d", recErrReader.Code)
-		}
-
-		for _, bad := range []string{
-			`{invalid-json`,
-			`{"chunk_id":"","repo":"","pr_number":101}`,
-			`{"chunk_id":"chunk-1","pr_number":0}`,
-		} {
-			recBad := doAttachReq(http.MethodPost, "/chunks/attach-pr", bad)
-			if recBad.Code != http.StatusBadRequest {
-				t.Errorf("expected 400 for bad body %s, got %d", bad, recBad.Code)
+			rec := serveChunkRequest(NewVanadisServer(Config{}, store, nil), tc.method, tc.path, "", false)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("got status %d, want %d: %s", rec.Code, tc.wantCode, rec.Body.String())
 			}
-		}
+			assertJSONFields(t, rec.Body.Bytes(), "", tc.wantPresent)
+		})
+	}
+}
 
-		rec405 := doAttachReq(http.MethodGet, "/chunks/attach-pr", "")
-		if rec405.Code != http.StatusMethodNotAllowed {
-			t.Errorf("expected 405, got %d", rec405.Code)
-		}
-
-		srvNil := NewVanadisServer(Config{}, nil, nil)
-		muxNil := SetupMux(srvNil)
-		rec500 := httptest.NewRecorder()
-		muxNil.ServeHTTP(rec500, httptest.NewRequest(http.MethodPost, "/chunks/attach-pr", strings.NewReader(`{}`)))
-		if rec500.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500 when store is nil, got %d", rec500.Code)
-		}
-	})
+func TestVanadisServer_HandleAttachChunkPR(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		nilStore    bool
+		errBody     bool
+		method      string
+		body        string
+		wantCode    int
+		wantStatus  string
+		wantPresent []string
+		wantWidget  bool
+	}{
+		{"attach_existing_chunk", false, false, http.MethodPost, `{"chunk_id":"chunk-1","pr_number":103,"repo":"aerial"}`, http.StatusOK, "attached", []string{"thread_id", "build_id", "chunk_id"}, true},
+		{"attach_standalone", false, false, http.MethodPost, `{"chunk_id":"","repo":"aerial","pr_number":401,"branch":"feature-1","title":"Feature 1"}`, http.StatusOK, "attached", []string{"build_id", "chunk_id"}, true},
+		{"missing_chunk", false, false, http.MethodPost, `{"chunk_id":"missing-chunk","pr_number":101,"repo":"aerial"}`, http.StatusNotFound, "", nil, false},
+		{"body_read_error", false, true, http.MethodPost, "", http.StatusBadRequest, "", nil, false},
+		{"invalid_json", false, false, http.MethodPost, `{invalid-json`, http.StatusBadRequest, "", nil, false},
+		{"missing_chunk_id_and_repo", false, false, http.MethodPost, `{"chunk_id":"","repo":"","pr_number":101}`, http.StatusBadRequest, "", nil, false},
+		{"zero_pr_number", false, false, http.MethodPost, `{"chunk_id":"chunk-1","pr_number":0}`, http.StatusBadRequest, "", nil, false},
+		{"method_not_allowed", false, false, http.MethodGet, "", http.StatusMethodNotAllowed, "", nil, false},
+		{"nil_store", true, false, http.MethodPost, `{}`, http.StatusInternalServerError, "", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var store VanadisStore
+			if !tc.nilStore {
+				store, _, _ = setupTestStoreWithBuild()
+			}
+			bus := &mockChunkBus{}
+			srv := NewVanadisServer(Config{}, store, nil)
+			srv.SetBus(bus)
+			rec := serveChunkRequest(srv, tc.method, "/chunks/attach-pr", tc.body, tc.errBody)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("got status %d, want %d: %s", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			assertJSONFields(t, rec.Body.Bytes(), tc.wantStatus, tc.wantPresent)
+			if gotWidget := bus.widgetCalls > 0; gotWidget != tc.wantWidget {
+				t.Errorf("widget sync published = %v, want %v", gotWidget, tc.wantWidget)
+			}
+		})
+	}
 }
 
 func TestServer_MutationEndpoints(t *testing.T) {
@@ -227,36 +210,12 @@ func TestServer_MutationEndpoints(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var store VanadisStore
-			if !tc.nilStore {
-				mem := newMemoryVanadisStore()
-				if tc.seedBuild != nil {
-					mem.builds[tc.seedBuild.ID] = *tc.seedBuild
-				}
-				if len(tc.seedChunks) > 0 {
-					mem.chunks[tc.seedBuild.ID] = tc.seedChunks
-				}
-				store = mem
-			}
+			store, _ := seedMemoryStore(tc.nilStore, tc.seedBuild, tc.seedChunks)
 
 			bus := &mockChunkBus{}
 			srv := NewVanadisServer(Config{}, store, nil)
 			srv.SetBus(bus)
-			mux := SetupMux(srv)
-
-			var req *http.Request
-			switch {
-			case tc.useErrBody:
-				req = httptest.NewRequest(tc.method, tc.path, errorReader{})
-			case tc.body != "":
-				req = httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
-				req.Header.Set("Content-Type", "application/json")
-			default:
-				req = httptest.NewRequest(tc.method, tc.path, nil)
-			}
-
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
+			rec := serveChunkRequest(srv, tc.method, tc.path, tc.body, tc.useErrBody)
 			if rec.Code != tc.wantCode {
 				t.Fatalf("got status %d, want %d: %s", rec.Code, tc.wantCode, rec.Body.String())
 			}
