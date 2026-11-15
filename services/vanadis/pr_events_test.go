@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -229,26 +230,87 @@ func TestHandlePRSynchronize(t *testing.T) {
 func TestHandlePRCheckUpdated(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	srv, store, _, _ := setupTestServer(t)
 
-	build := mkBuild("b-chk", "123456789012345678", "Build", "Obj", "running")
-	chunk := mkChunk("c-chk", "b-chk", 0, "Chunk", "Instr", "medium", "pr_opened")
-	chunk.PRNumber = 400
-	chunk.Repo = "azylman/aerial"
-	require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
-
-	ev := pubsub.PRLifecycleEvent{
-		Event:      "check_updated",
-		Repo:       "azylman/aerial",
-		PRNumber:   400,
-		CheckName:  "lint",
-		CheckState: "passed",
+	tests := []struct {
+		name               string
+		initialStatus      string
+		initialBanner      string
+		initialChecks      map[string]string
+		checkName          string
+		checkState         string
+		expectedStatus     string
+		expectedBanner     string
+		expectedCheckState string
+	}{
+		{
+			name:               "initial pr_opened records check state",
+			initialStatus:      "pr_opened",
+			initialBanner:      "",
+			initialChecks:      nil,
+			checkName:          "lint",
+			checkState:         "passed",
+			expectedStatus:     "pr_opened",
+			expectedBanner:     "",
+			expectedCheckState: "passed",
+		},
+		{
+			name:               "ci_failed chunk with single check passing recovers to pr_opened",
+			initialStatus:      "ci_failed",
+			initialBanner:      "CI check \"lint\" failed",
+			initialChecks:      map[string]string{"lint": "failed"},
+			checkName:          "lint",
+			checkState:         "passed",
+			expectedStatus:     "pr_opened",
+			expectedBanner:     "",
+			expectedCheckState: "passed",
+		},
+		{
+			name:               "ci_failed chunk with multiple checks stays ci_failed if another check remains failed",
+			initialStatus:      "ci_failed",
+			initialBanner:      "CI check \"lint\" failed",
+			initialChecks:      map[string]string{"lint": "failed", "test": "failed"},
+			checkName:          "lint",
+			checkState:         "passed",
+			expectedStatus:     "ci_failed",
+			expectedBanner:     "CI check \"lint\" failed",
+			expectedCheckState: "passed",
+		},
 	}
-	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
 
-	updatedChunk, _, err := store.GetChunk(ctx, "c-chk")
-	require.NoError(t, err)
-	assert.Equal(t, "passed", updatedChunk.CIChecks["lint"])
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv, store, _, _ := setupTestServer(t)
+
+			bID := "b-" + tc.name
+			cID := "c-" + tc.name
+			build := mkBuild(bID, "123456789012345678", "Build", "Obj", "running")
+			chunk := mkChunk(cID, bID, 0, "Chunk", "Instr", "medium", tc.initialStatus)
+			chunk.PRNumber = 400
+			chunk.Repo = "azylman/aerial"
+			chunk.Banner = tc.initialBanner
+			if tc.initialChecks != nil {
+				chunk.CIChecks = make(map[string]string)
+				maps.Copy(chunk.CIChecks, tc.initialChecks)
+			}
+			require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
+
+			ev := pubsub.PRLifecycleEvent{
+				Event:      "check_updated",
+				Repo:       "azylman/aerial",
+				PRNumber:   400,
+				CheckName:  tc.checkName,
+				CheckState: tc.checkState,
+			}
+			require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
+
+			updatedChunk, _, err := store.GetChunk(ctx, cID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expectedCheckState, updatedChunk.CIChecks[tc.checkName])
+			assert.Equal(t, tc.expectedStatus, updatedChunk.Status)
+			assert.Equal(t, tc.expectedBanner, updatedChunk.Banner)
+		})
+	}
 }
 
 func TestHandlePRRolloutUpdated(t *testing.T) {
@@ -412,7 +474,9 @@ func TestHandlePRCIFailed_Remediation(t *testing.T) {
 		updatedChunk, _, err := store.GetChunk(ctx, "c-ci1")
 		require.NoError(t, err)
 		assert.Equal(t, 2, updatedChunk.CIFailCount)
+		assert.Equal(t, "ci_failed", updatedChunk.Status)
 		assert.Contains(t, updatedChunk.Banner, "CI check \"Go Unit Tests\" failed")
+		assert.Equal(t, "failed", updatedChunk.CIChecks["Go Unit Tests"])
 
 		var foundDispatch bool
 		for _, r := range *reqs {
@@ -428,6 +492,21 @@ func TestHandlePRCIFailed_Remediation(t *testing.T) {
 		}
 		assert.True(t, foundDispatch, "expected POST /dispatch to be called")
 		assert.Empty(t, recBus.getEvents(), "no external events expected on non-terminal remediation")
+
+		rerunEv := pubsub.PRLifecycleEvent{
+			Event:      "check_updated",
+			Repo:       "azylman/aerial",
+			PRNumber:   601,
+			CheckName:  "Go Unit Tests",
+			CheckState: "passed",
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, rerunEv))
+
+		recoveredChunk, _, err := store.GetChunk(ctx, "c-ci1")
+		require.NoError(t, err)
+		assert.Equal(t, "pr_opened", recoveredChunk.Status)
+		assert.Empty(t, recoveredChunk.Banner)
+		assert.Equal(t, "passed", recoveredChunk.CIChecks["Go Unit Tests"])
 	})
 }
 
@@ -945,8 +1024,12 @@ func TestPostgresVanadisStore_PREventMethods(t *testing.T) {
 
 	t.Run("happy paths succeed", func(t *testing.T) {
 		t.Parallel()
+		var capturedSQL string
+		var capturedArgs []any
 		sOK := newMockStore(mockDB{
 			execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				capturedSQL = sql
+				capturedArgs = args
 				return pgconn.NewCommandTag("UPDATE 1"), nil
 			},
 			queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
@@ -955,6 +1038,11 @@ func TestPostgresVanadisStore_PREventMethods(t *testing.T) {
 		})
 
 		assert.NoError(t, sOK.RecordPRCheckStatus(ctx, "c1", "lint", "passed"))
+		assert.Contains(t, capturedSQL, "jsonb_set")
+		assert.Contains(t, capturedSQL, "jsonb_each_text")
+		assert.Contains(t, capturedSQL, "status = 'ci_failed'")
+		assert.Contains(t, capturedSQL, "'pr_opened'")
+		assert.Equal(t, []any{"lint", "passed", "c1"}, capturedArgs)
 		assert.NoError(t, sOK.RecordPRRolloutState(ctx, "c1", "deploying", &pubsub.PRRolloutState{ExpectedJobs: []string{"eri"}}))
 		assert.NoError(t, sOK.ResetChunkForSynchronize(ctx, "c1", "b1"))
 		count, err := sOK.IncrementChunkCIFailCount(ctx, "c1", "banner")
