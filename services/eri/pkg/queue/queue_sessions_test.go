@@ -998,14 +998,14 @@ func TestRecoverInterrupted_Dispatches(t *testing.T) {
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
-	var failedEvents []pubsub.DispatchOutcomeEvent
-	var busMu sync.Mutex
+	outcomePublished := make(chan pubsub.DispatchOutcomeEvent, 1)
 	_, _ = memBus.Subscribe(ctx, "aerial.dispatch.failed", "test-sub", func(msgCtx context.Context, msg pubsub.Message) error {
 		var ev pubsub.DispatchOutcomeEvent
 		if uErr := json.Unmarshal(msg.Data(), &ev); uErr == nil {
-			busMu.Lock()
-			failedEvents = append(failedEvents, ev)
-			busMu.Unlock()
+			select {
+			case outcomePublished <- ev:
+			default:
+			}
 		}
 		return msg.Ack()
 	})
@@ -1044,13 +1044,15 @@ func TestRecoverInterrupted_Dispatches(t *testing.T) {
 		t.Fatalf("expected poison pill dispatch to be marked FAILED, got %+v", poisonDisp)
 	}
 
-	busMu.Lock()
-	defer busMu.Unlock()
-	if len(failedEvents) != 1 {
-		t.Fatalf("expected 1 dispatch outcome published on poison pill recovery, got %d", len(failedEvents))
+	var poisonEv pubsub.DispatchOutcomeEvent
+	select {
+	case poisonEv = <-outcomePublished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for poison pill dispatch outcome event")
 	}
-	if failedEvents[0].DispatchID != "disp-rec-poison" || failedEvents[0].Status != "failed" {
-		t.Errorf("unexpected delivered event: %+v", failedEvents[0])
+
+	if poisonEv.DispatchID != "disp-rec-poison" || poisonEv.Status != "failed" {
+		t.Errorf("unexpected delivered event: %+v", poisonEv)
 	}
 }
 
