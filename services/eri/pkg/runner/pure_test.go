@@ -8,16 +8,16 @@ import (
 	"time"
 )
 
-func assertContainsAndOmits(t *testing.T, target string, contains, omits []string, context any) {
+func assertContainsAndOmits(t *testing.T, target string, contains, omits []string, label any) {
 	t.Helper()
 	for _, c := range contains {
 		if !strings.Contains(target, c) {
-			t.Errorf("%+v missing %q in %s", context, c, target)
+			t.Errorf("%+v missing %q in %s", label, c, target)
 		}
 	}
 	for _, o := range omits {
 		if strings.Contains(target, o) {
-			t.Errorf("%+v should omit %q in %s", context, o, target)
+			t.Errorf("%+v should omit %q in %s", label, o, target)
 		}
 	}
 }

@@ -662,7 +662,7 @@ func (c *Classifier) isSystemOne() bool {
 	return strings.EqualFold(cur.ClassifierProtocol, "systemone") && cur.ClassifierURL != ""
 }
 
-func (c *Classifier) executeSystemOneAttempt(ctx context.Context, httpClient *http.Client, endpointURL string, reqBytes []byte) (systemOneResponse, time.Duration, bool, error) {
+func (*Classifier) executeSystemOneAttempt(ctx context.Context, httpClient *http.Client, endpointURL string, reqBytes []byte) (systemOneResponse, time.Duration, bool, error) {
 	start := time.Now()
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(reqBytes))
 	if reqErr != nil {

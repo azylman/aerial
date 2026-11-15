@@ -132,7 +132,7 @@ func (p *Provisioner) SyncHooks() error {
 	hooksJSONContent := defaultCanonicalHooksJSON
 	if hooksDir != "" {
 		sourceHooksJSON := filepath.Join(hooksDir, "hooks.json")
-		if data, err := os.ReadFile(sourceHooksJSON); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		if data, err := os.ReadFile(sourceHooksJSON); err == nil && strings.TrimSpace(string(data)) != "" {
 			hooksJSONContent = string(data)
 		}
 	}

@@ -624,7 +624,7 @@ func (s *GeminiAPISession) failTurn(turn *TurnContext, err error) error {
 	return sanitized
 }
 
-func (s *GeminiAPISession) processSSEPart(part geminiPart, turn *TurnContext, started *bool, fullText *strings.Builder, pendingParts *[]geminiPart) {
+func (*GeminiAPISession) processSSEPart(part geminiPart, turn *TurnContext, started *bool, fullText *strings.Builder, pendingParts *[]geminiPart) {
 	if part.FunctionCall != nil {
 		*pendingParts = append(*pendingParts, part)
 	}
@@ -819,7 +819,7 @@ func propagateThoughtSignature(pendingParts []geminiPart) {
 	}
 }
 
-func (s *GeminiAPISession) executeSingleToolCall(ctx context.Context, dispatcher MCPDispatcher, fc *geminiFunctionCall, turn *TurnContext) geminiPart {
+func (*GeminiAPISession) executeSingleToolCall(ctx context.Context, dispatcher MCPDispatcher, fc *geminiFunctionCall, turn *TurnContext) geminiPart {
 	argsDesc := ExtractToolDetail(fc.Name, fc.Args, "")
 	if argsDesc == "" && len(fc.Args) > 0 {
 		if b, bErr := json.Marshal(fc.Args); bErr == nil {
@@ -1059,7 +1059,7 @@ var _ SessionLease = (*geminiSessionLease)(nil)
 func (l *geminiSessionLease) SessionID() string         { return l.sessionID }
 func (l *geminiSessionLease) PreviousSessionID() string { return l.prevSessID }
 func (l *geminiSessionLease) IsCold() bool              { return l.isCold }
-func (l *geminiSessionLease) IsEphemeral() bool         { return false }
+func (*geminiSessionLease) IsEphemeral() bool           { return false }
 func (l *geminiSessionLease) TurnCount() int            { return l.turnCount }
 
 func (l *geminiSessionLease) MarkDirty() {

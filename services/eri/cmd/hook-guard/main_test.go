@@ -12,7 +12,7 @@ import (
 
 type errWriter struct{}
 
-func (e *errWriter) Write(p []byte) (int, error) {
+func (*errWriter) Write(p []byte) (int, error) {
 	return 0, errors.New("simulated write error")
 }
 

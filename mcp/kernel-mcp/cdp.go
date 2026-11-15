@@ -81,7 +81,7 @@ func (c *CDPClient) getActivePageTarget(ctx context.Context) (string, string, er
 	resolvedHost := ResolveCDPHost(ctx, c.cfg.CDPHost)
 	listURL := fmt.Sprintf("http://%s/json/list", net.JoinHostPort(resolvedHost, c.cfg.CDPPort))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, http.NoBody)
 	if err != nil {
 		return "", "", fmt.Errorf("create cdp list request error: %w", err)
 	}

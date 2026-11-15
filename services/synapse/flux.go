@@ -229,11 +229,11 @@ func gitRepoSlug(rawURL string) string {
 	ref := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(rawURL), "/"), ".git")
 	if i := strings.Index(ref, "://"); i != -1 {
 		ref = ref[i+3:]
-		if j := strings.Index(ref, "/"); j != -1 {
-			ref = ref[j+1:]
-		} else {
+		j := strings.Index(ref, "/")
+		if j == -1 {
 			return ""
 		}
+		ref = ref[j+1:]
 	} else if i := strings.Index(ref, ":"); i != -1 {
 		ref = ref[i+1:]
 	}

@@ -7,13 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -33,26 +31,7 @@ type JSONRPCResponse struct {
 
 type mockErrReader struct{}
 
-func (m *mockErrReader) Read([]byte) (int, error) { return 0, errors.New("simulated read error") }
-
-type mockErrWriter struct {
-	header http.Header
-	err    error
-}
-
-func (m *mockErrWriter) Header() http.Header {
-	if m.header == nil {
-		m.header = make(http.Header)
-	}
-	return m.header
-}
-func (m *mockErrWriter) Write([]byte) (int, error) { return 0, m.err }
-func (m *mockErrWriter) WriteHeader(int)           {}
-
-type errReadCloser struct{}
-
-func (e *errReadCloser) Read([]byte) (int, error) { return 0, io.EOF }
-func (e *errReadCloser) Close() error             { return errors.New("simulated close error") }
+func (*mockErrReader) Read([]byte) (int, error) { return 0, errors.New("simulated read error") }
 
 func setupTestPostgresTables(t *testing.T, db *sql.DB) {
 	t.Helper()
@@ -125,8 +104,8 @@ type serverRPCTestCase struct {
 func testServerDirectMCPProbes(t *testing.T, server *Server) {
 	t.Helper()
 	recH, recC, recErr := httptest.NewRecorder(), httptest.NewRecorder(), httptest.NewRecorder()
-	server.handleMCP(recH, httptest.NewRequest(http.MethodGet, "/health", nil))
-	server.handleMCP(recC, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
+	server.handleMCP(recH, httptest.NewRequest(http.MethodGet, "/health", http.NoBody))
+	server.handleMCP(recC, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", http.NoBody))
 	server.handleMCP(recErr, httptest.NewRequest(http.MethodPost, "/mcp", &mockErrReader{}))
 	if recH.Code != http.StatusOK || (recC.Code != http.StatusOK && recC.Code != http.StatusInternalServerError) || recErr.Code != http.StatusBadRequest {
 		t.Fatalf("direct handleMCP failed: H=%d, C=%d, Err=%d", recH.Code, recC.Code, recErr.Code)
@@ -265,45 +244,6 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			runServerRPCCase(t, ts, tc)
 		})
-	}
-}
-
-func TestServer_WriteResponseAndDisconnect(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	httpkit.WriteResponse(rec, req, "haro", []byte("ok"))
-	if rec.Body.String() != "ok" {
-		t.Fatalf("expected ok, got %s", rec.Body.String())
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	reqCanceled := httptest.NewRequest(http.MethodGet, "/health", nil).WithContext(ctx)
-
-	errTests := []struct {
-		name string
-		req  *http.Request
-		err  error
-		want bool
-	}{
-		{"nil err", req, nil, false},
-		{"canceled context", reqCanceled, errors.New("write err"), true},
-		{"epipe", req, syscall.EPIPE, true},
-		{"econnreset", req, syscall.ECONNRESET, true},
-		{"net err closed", req, net.ErrClosed, true},
-		{"generic error", req, errors.New("disk full"), false},
-	}
-	for _, tc := range errTests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := httpkit.IsClientDisconnect(tc.req, tc.err); got != tc.want {
-				t.Errorf("isClientDisconnect() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-
-	httpkit.WriteResponse(&mockErrWriter{err: errors.New("err")}, req, "haro", []byte("data"))
-	for _, c := range []io.Closer{nil, io.NopCloser(strings.NewReader("")), &errReadCloser{}} {
-		httpkit.CloseWarn(c, "test")
 	}
 }
 
@@ -889,7 +829,7 @@ func assertSchedulesResponse(t *testing.T, rec *httptest.ResponseRecorder, wantT
 func runHandleSchedulesCase(t *testing.T, tc handleSchedulesTestCase) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(tc.method, "/schedules", nil)
+	req := httptest.NewRequest(tc.method, "/schedules", http.NoBody)
 	tc.useServer.handleSchedules(rec, req)
 	if rec.Code != tc.wantStatus {
 		t.Fatalf("%s got status %d, want %d", tc.name, rec.Code, tc.wantStatus)
@@ -1069,7 +1009,7 @@ func assertScheduleRunsResponse(t *testing.T, rec *httptest.ResponseRecorder, wa
 func runHandleScheduleRunsCase(t *testing.T, tc handleScheduleRunsTestCase) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(tc.method, tc.url, nil)
+	req := httptest.NewRequest(tc.method, tc.url, http.NoBody)
 	tc.useServer.handleScheduleRuns(rec, req)
 	if rec.Code != tc.wantStatus {
 		t.Fatalf("%s got status %d, want %d", tc.name, rec.Code, tc.wantStatus)

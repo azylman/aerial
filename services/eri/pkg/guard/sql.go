@@ -195,7 +195,7 @@ func (d *pgxDescriber) Describe(ctx context.Context, sqlStr string) (*SQLStateme
 	return info, nil
 }
 
-func (d *pgxDescriber) populateOIDMetadata(ctx context.Context, conn sqlCatalogConn, info *SQLStatementInfo) {
+func (*pgxDescriber) populateOIDMetadata(ctx context.Context, conn sqlCatalogConn, info *SQLStatementInfo) {
 	for oid := range info.TableColCounts {
 		rows, qErr := conn.QueryCatalog(ctx,
 			"SELECT c.relname, count(a.attnum)::text FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid WHERE c.oid = $1 AND a.attnum > 0 AND NOT a.attisdropped GROUP BY c.relname",
@@ -210,7 +210,7 @@ func (d *pgxDescriber) populateOIDMetadata(ctx context.Context, conn sqlCatalogC
 	}
 }
 
-func (d *pgxDescriber) populateExplainPlan(ctx context.Context, conn sqlCatalogConn, info *SQLStatementInfo, explainRaw []byte) {
+func (*pgxDescriber) populateExplainPlan(ctx context.Context, conn sqlCatalogConn, info *SQLStatementInfo, explainRaw []byte) {
 	if len(explainRaw) == 0 {
 		return
 	}

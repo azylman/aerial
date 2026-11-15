@@ -399,8 +399,8 @@ func NewDefaultOutboundDispatcher(brainURL string, client *http.Client) *Default
 	}
 }
 
-func (d *DefaultOutboundDispatcher) SetFluxReceiverURL(url string) {
-	d.fluxReceiverURL = strings.TrimRight(url, "/")
+func (d *DefaultOutboundDispatcher) SetFluxReceiverURL(receiverURL string) {
+	d.fluxReceiverURL = strings.TrimRight(receiverURL, "/")
 }
 
 func (d *DefaultOutboundDispatcher) SetKubeConfig(apiServer, token string) {
@@ -903,7 +903,7 @@ func (d *DefaultOutboundDispatcher) watchKube(ctx context.Context, path string, 
 	query.Set("watch", "1")
 	query.Set("allowWatchBookmarks", "true")
 	query.Set("resourceVersion", resourceVersion)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.kubeAPIServer+path+"?"+query.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.kubeAPIServer+path+"?"+query.Encode(), http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("create kube watch %s request: %w", path, err)
 	}

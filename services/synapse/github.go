@@ -711,8 +711,8 @@ func isZeroSHA(sha string) bool {
 }
 
 var (
-	squashCommitPRRegex = regexp.MustCompile(`\(#([1-9][0-9]*)\)\s*$`)
-	mergeCommitPRRegex  = regexp.MustCompile(`^Merge pull request #([1-9][0-9]*)\b`)
+	squashCommitPRRegex = regexp.MustCompile(`\(#([1-9]\d*)\)\s*$`)
+	mergeCommitPRRegex  = regexp.MustCompile(`^Merge pull request #([1-9]\d*)\b`)
 )
 
 func extractPRNumberFromCommitMessage(msg string) int {
@@ -916,7 +916,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	return err
 }
 
-func (s *RouterServer) processGitHubPingEvent(delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
+func (*RouterServer) processGitHubPingEvent(delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
 	var p GitHubPingPayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil, fmt.Errorf("unmarshal ping payload: %w", err)

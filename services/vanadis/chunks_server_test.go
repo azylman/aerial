@@ -35,7 +35,7 @@ func serveChunkRequest(srv *VanadisServer, method, path, body string, errBody bo
 		req = httptest.NewRequest(method, path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 	default:
-		req = httptest.NewRequest(method, path, nil)
+		req = httptest.NewRequest(method, path, http.NoBody)
 	}
 	rec := httptest.NewRecorder()
 	SetupMux(srv).ServeHTTP(rec, req)

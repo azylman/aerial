@@ -286,7 +286,7 @@ func ParseK8sClusterState(deploymentsData, podsData []byte, now time.Time) ([]Se
 }
 
 func fetchK8sJSON(ctx context.Context, targetURL, bearerToken, desc string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, http.NoBody)
 	if err != nil {
 		return nil, err
 	}

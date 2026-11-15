@@ -156,7 +156,7 @@ func scanBlockEnd(lines []string, startIdx int) int {
 }
 
 func isColumn0Line(line string) bool {
-	if len(line) == 0 {
+	if line == "" {
 		return false
 	}
 	b := line[0]

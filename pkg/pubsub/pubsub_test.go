@@ -962,7 +962,7 @@ func TestMemoryBus_ClosedAndErrorPaths(t *testing.T) {
 		t.Error("expected error snoozing message on closed bus, got nil")
 	}
 
-	// cloneHeader(nil)
+	// A nil header clones to an empty, non-nil header.
 	if h := cloneHeader(nil); h == nil {
 		t.Error("expected non-nil header from cloneHeader(nil)")
 	}
@@ -1034,7 +1034,7 @@ func TestIsMessageNotFoundError(t *testing.T) {
 func TestNewJetStreamBus_Validation(t *testing.T) {
 	t.Parallel()
 
-	// NewJetStreamBusFromConn(nil)
+	// A nil connection is rejected.
 	if _, err := NewJetStreamBusFromConn(nil); err == nil {
 		t.Error("expected error for nil conn, got nil")
 	}
@@ -1082,7 +1082,7 @@ func TestNewJetStreamBus_Validation(t *testing.T) {
 
 type mockNatsDialer struct{}
 
-func (d *mockNatsDialer) Dial(network, address string) (net.Conn, error) {
+func (*mockNatsDialer) Dial(network, address string) (net.Conn, error) {
 	c1, c2 := net.Pipe()
 	go func() {
 		defer c2.Close()

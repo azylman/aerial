@@ -51,10 +51,10 @@ func (r *mockRow) Scan(dest ...any) error {
 
 // sqlTopLevel walks sql and calls visit for every byte outside string literals
 // and parentheses, stopping early when visit returns false.
-func sqlTopLevel(sql string, visit func(i int) bool) {
+func sqlTopLevel(query string, visit func(i int) bool) {
 	depth, inStr := 0, false
-	for i := range len(sql) {
-		switch c := sql[i]; {
+	for i := range len(query) {
+		switch c := query[i]; {
 		case c == '\'':
 			inStr = !inStr
 		case inStr:
@@ -84,10 +84,10 @@ func sqlKeywordAt(upper string, i int, w string) bool {
 // RETURNING list when present, else the top-level SELECT list. Commas nested in
 // parentheses or string literals do not split columns. It returns 0 when sql
 // yields no column list (plain INSERT/UPDATE/DELETE).
-func selectedColumnCount(sql string) int {
-	upper := strings.ToUpper(sql)
+func selectedColumnCount(query string) int {
+	upper := strings.ToUpper(query)
 	var start int
-	end := len(sql)
+	end := len(query)
 	selectEnd, fromAt, returningEnd := -1, -1, -1
 	sqlTopLevel(upper, func(i int) bool {
 		switch {
@@ -111,7 +111,7 @@ func selectedColumnCount(sql string) int {
 	default:
 		return 0
 	}
-	list := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(sql[start:end]), ";"))
+	list := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(query[start:end]), ";"))
 	if list == "" {
 		return 0
 	}
@@ -164,20 +164,20 @@ func (r columnCheckedRows) Scan(dest ...any) error {
 
 // checkedQuery and checkedQueryRow apply the column-count check to whatever a
 // scripted mock returns, so every store test catches SQL/Scan drift.
-func checkedQuery(sql string) func(pgx.Rows, error) (pgx.Rows, error) {
+func checkedQuery(query string) func(pgx.Rows, error) (pgx.Rows, error) {
 	return func(rows pgx.Rows, err error) (pgx.Rows, error) {
 		if err != nil || rows == nil {
 			return rows, err
 		}
-		return columnCheckedRows{Rows: rows, cols: selectedColumnCount(sql)}, nil
+		return columnCheckedRows{Rows: rows, cols: selectedColumnCount(query)}, nil
 	}
 }
 
-func checkedQueryRow(sql string, row pgx.Row) pgx.Row {
+func checkedQueryRow(query string, row pgx.Row) pgx.Row {
 	if row == nil {
 		return nil
 	}
-	return columnCheckedRow{Row: row, cols: selectedColumnCount(sql)}
+	return columnCheckedRow{Row: row, cols: selectedColumnCount(query)}
 }
 
 type mockRows struct {
@@ -189,7 +189,7 @@ type mockRows struct {
 	scanErr, rowsErr error
 }
 
-func (r *mockRows) Close()     {}
+func (*mockRows) Close()       {}
 func (r *mockRows) Err() error { return r.rowsErr }
 func (r *mockRows) Next() bool {
 	if len(r.builds) > 0 {
@@ -236,23 +236,23 @@ type mockTx struct {
 	commitErr, rollbackErr error
 }
 
-func (t *mockTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+func (t *mockTx) Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 	if t.execFn != nil {
-		return t.execFn(ctx, sql, args...)
+		return t.execFn(ctx, query, args...)
 	}
 	return pgconn.NewCommandTag("INSERT 0 1"), nil
 }
 
-func (t *mockTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+func (t *mockTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
 	if t.queryFn != nil {
-		return checkedQuery(sql)(t.queryFn(ctx, sql, args...))
+		return checkedQuery(query)(t.queryFn(ctx, query, args...))
 	}
 	return &mockRows{}, nil
 }
 
-func (t *mockTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+func (t *mockTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
 	if t.queryRowFn != nil {
-		return checkedQueryRow(sql, t.queryRowFn(ctx, sql, args...))
+		return checkedQueryRow(query, t.queryRowFn(ctx, query, args...))
 	}
 	return &mockRow{}
 }
@@ -591,21 +591,22 @@ func (m *memoryVanadisStore) FailChunkByPR(_ context.Context, repo string, prNum
 	}
 	for bID, list := range m.chunks {
 		for i := range list {
-			if reposMatch(list[i].Repo, repo) && list[i].PRNumber == prNumber && list[i].Status != "merged" && list[i].Status != "failed" {
-				list[i].Status = "failed"
-				now := time.Now().UTC()
-				if list[i].CompletedAt.IsZero() {
-					list[i].CompletedAt = now
-				}
-				list[i].UpdatedAt = now
-				m.chunks[bID] = list
-				b := m.builds[bID]
-				if b.Status == "running" {
-					b.Status = "failed"
-					m.builds[bID] = b
-				}
-				return bID, list[i].ID, true, nil
+			if !reposMatch(list[i].Repo, repo) || list[i].PRNumber != prNumber || list[i].Status == "merged" || list[i].Status == "failed" {
+				continue
 			}
+			list[i].Status = "failed"
+			now := time.Now().UTC()
+			if list[i].CompletedAt.IsZero() {
+				list[i].CompletedAt = now
+			}
+			list[i].UpdatedAt = now
+			m.chunks[bID] = list
+			b := m.builds[bID]
+			if b.Status == "running" {
+				b.Status = "failed"
+				m.builds[bID] = b
+			}
+			return bID, list[i].ID, true, nil
 		}
 	}
 	return "", "", false, nil

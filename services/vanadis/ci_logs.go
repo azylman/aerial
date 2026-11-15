@@ -16,10 +16,10 @@ import (
 )
 
 var (
-	actionsJobIDRegex = regexp.MustCompile(`/actions/runs/[0-9]+/job/([0-9]+)`)
-	ghaTimestampRegex = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z ?`)
+	actionsJobIDRegex = regexp.MustCompile(`/actions/runs/\d+/job/(\d+)`)
+	ghaTimestampRegex = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z ?`)
 	ansiEscapeRegex   = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-	goCoordinateRegex = regexp.MustCompile(`\.go:[0-9]+`)
+	goCoordinateRegex = regexp.MustCompile(`\.go:\d+`)
 
 	ciPlumbingPrefixes = []string{
 		"##[group]",

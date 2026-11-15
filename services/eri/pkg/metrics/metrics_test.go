@@ -52,7 +52,7 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	}
 
 	handler := Handler()
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -146,7 +146,7 @@ func TestRecordTokens_AutoCalculatesTotalWhenZero(t *testing.T) {
 	RecordTokens("gemini-test-model", "test-chan", 120, 80, 50, 20, 0)
 
 	handler := Handler()
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -195,7 +195,7 @@ func TestRecordRunnerExecution_SourceLabelAndBuckets(t *testing.T) {
 	RecordRunnerExecution("error", "gemini-2.5-flash", "voice", 50*time.Millisecond)
 
 	handler := Handler()
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -228,7 +228,7 @@ func TestRecordVoiceTTFR(t *testing.T) {
 	RecordVoiceTTFR("sse", "success", 250*time.Millisecond)
 
 	handler := Handler()
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -251,7 +251,7 @@ func TestRecordToolAndSkillExecution(t *testing.T) {
 	RecordSkillActivation("", "")
 
 	handler := Handler()
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

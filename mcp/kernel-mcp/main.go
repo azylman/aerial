@@ -71,7 +71,7 @@ func NewServer(cfg *Config, client *CDPClient) *Server {
 }
 
 // HandleHealth handles the GET /health readiness endpoint.
-func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
+func (*Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)

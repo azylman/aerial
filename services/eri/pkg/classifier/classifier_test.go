@@ -36,9 +36,9 @@ func NewClassifier(opts ...Option) *Classifier {
 
 type classifierMockProcessHandle struct{ pid int }
 
-func (m *classifierMockProcessHandle) Pid() int    { return m.pid }
-func (m *classifierMockProcessHandle) Kill() error { return nil }
-func (m *classifierMockProcessHandle) Wait() error { return nil }
+func (m *classifierMockProcessHandle) Pid() int  { return m.pid }
+func (*classifierMockProcessHandle) Kill() error { return nil }
+func (*classifierMockProcessHandle) Wait() error { return nil }
 
 type classifierMockSpawner struct {
 	spawnFn func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error)

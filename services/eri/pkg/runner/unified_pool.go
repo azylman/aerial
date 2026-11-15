@@ -954,7 +954,7 @@ func (l *unifiedSessionLease) SessionID() string {
 
 func (l *unifiedSessionLease) PreviousSessionID() string { return l.prevSessID }
 func (l *unifiedSessionLease) IsCold() bool              { return l.isCold }
-func (l *unifiedSessionLease) IsEphemeral() bool         { return false }
+func (*unifiedSessionLease) IsEphemeral() bool           { return false }
 func (l *unifiedSessionLease) TurnCount() int            { return l.turnCount }
 func (l *unifiedSessionLease) MarkDirty() {
 	if l != nil {

@@ -739,7 +739,7 @@ func testHTTPEndpointsBuildCancel(t *testing.T, srv *VanadisServer, memStore *me
 func testHTTPEndpointsListAndFilter(t *testing.T, srv *VanadisServer, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) {
 	t.Helper()
 	wPost := httptest.NewRecorder()
-	srv.handleListBuilds(wPost, httptest.NewRequest(http.MethodPost, "/builds", nil))
+	srv.handleListBuilds(wPost, httptest.NewRequest(http.MethodPost, "/builds", http.NoBody))
 	if wPost.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 on handleListBuilds POST, got %d", wPost.Code)
 	}
@@ -1081,7 +1081,7 @@ func makeVanadisMetricsCases(srvWithQueue, srvMem, srvPGErr *VanadisServer) []va
 func runVanadisMetricsCase(t *testing.T, tc vanadisMetricsCase) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(tc.method, tc.url, nil)
+	req := httptest.NewRequest(tc.method, tc.url, http.NoBody)
 	tc.server.handleMetrics(rec, req)
 	if rec.Code != tc.wantStatus {
 		t.Fatalf("handleMetrics() status = %d, want %d", rec.Code, tc.wantStatus)
@@ -1184,7 +1184,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	cCancel := mkChunk("c-to-cancel", "b-to-cancel", 0, "Cancel Chunk", "inst", "medium", "pending")
 	_ = memStore.CreateBuild(ctx, bCancel, []VanadisChunk{cCancel})
 	recCancel := httptest.NewRecorder()
-	srv.handleBuildCancel(recCancel, httptest.NewRequest(http.MethodPost, "/builds/b-to-cancel/cancel", nil), "b-to-cancel")
+	srv.handleBuildCancel(recCancel, httptest.NewRequest(http.MethodPost, "/builds/b-to-cancel/cancel", http.NoBody), "b-to-cancel")
 	if recCancel.Code != http.StatusOK {
 		t.Fatalf("handleBuildCancel status = %d, want %d", recCancel.Code, http.StatusOK)
 	}

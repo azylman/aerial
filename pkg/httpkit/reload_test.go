@@ -212,7 +212,7 @@ func TestReloadable_Handler(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			r := NewReloadable(&testCfg{Port: "8080", Model: "a"}, fixtureLoader(tc.nextCfg, tc.loadErr), portChanged)
-			req := httptest.NewRequest(tc.method, "/-/reload", nil)
+			req := httptest.NewRequest(tc.method, "/-/reload", http.NoBody)
 			req.RemoteAddr = tc.remoteAddr
 			rec := httptest.NewRecorder()
 
@@ -269,7 +269,7 @@ func TestLoopbackOnly(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			req := httptest.NewRequest(http.MethodPost, "/-/reload", nil)
+			req := httptest.NewRequest(http.MethodPost, "/-/reload", http.NoBody)
 			req.RemoteAddr = tc.remoteAddr
 			rec := httptest.NewRecorder()
 

@@ -279,7 +279,7 @@ func TestRoutes_HealthAndCoverage(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 

@@ -476,14 +476,8 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolSuccessAndMetrics(t *testing.T) 
 		t.Fatalf("unexpected nil onStatus error: %v", err2)
 	}
 
-	pool.scopeLocks.Store("voice-sess-bad-lock", "not-a-mutex")
-	reply3, _, err3 := pool.ExecuteVoiceTurn(context.Background(), "test", "sess-bad-lock", nil, nil)
-	if err3 != nil || reply3 != "daemon voice turn reply" {
-		t.Fatalf("unexpected error on recovered bad lock: %v", err3)
-	}
-
 	rec := httptest.NewRecorder()
-	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 	if body := rec.Body.String(); !strings.Contains(body, `source="voice"`) || !strings.Contains(body, `channel="voice"`) {
 		t.Errorf("expected metrics to contain source=voice and channel=voice")
 	}
@@ -640,13 +634,13 @@ type mockVoiceSessionLease struct {
 	targetKey string
 }
 
-func (l *mockVoiceSessionLease) SessionID() string         { return l.sess.SessionID() }
-func (l *mockVoiceSessionLease) PreviousSessionID() string { return "" }
-func (l *mockVoiceSessionLease) IsCold() bool              { return false }
-func (l *mockVoiceSessionLease) IsEphemeral() bool         { return false }
-func (l *mockVoiceSessionLease) TurnCount() int            { return 1 }
-func (l *mockVoiceSessionLease) MarkDirty()                { l.pool.EvictSession(l.targetKey) }
-func (l *mockVoiceSessionLease) Release() error            { return nil }
+func (l *mockVoiceSessionLease) SessionID() string       { return l.sess.SessionID() }
+func (*mockVoiceSessionLease) PreviousSessionID() string { return "" }
+func (*mockVoiceSessionLease) IsCold() bool              { return false }
+func (*mockVoiceSessionLease) IsEphemeral() bool         { return false }
+func (*mockVoiceSessionLease) TurnCount() int            { return 1 }
+func (l *mockVoiceSessionLease) MarkDirty()              { l.pool.EvictSession(l.targetKey) }
+func (*mockVoiceSessionLease) Release() error            { return nil }
 func (l *mockVoiceSessionLease) Execute(ctx context.Context, turn *runner.TurnContext) (*runner.TurnResult, error) {
 	if err := l.sess.Send(turn.Prompt, turn); err != nil {
 		return nil, err

@@ -53,7 +53,7 @@ type mockCloseErrReader struct {
 	io.Reader
 }
 
-func (m *mockCloseErrReader) Close() error {
+func (*mockCloseErrReader) Close() error {
 	return errors.New("simulated close error")
 }
 

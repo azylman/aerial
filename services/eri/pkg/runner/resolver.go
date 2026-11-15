@@ -22,7 +22,7 @@ type TurnResolver struct{}
 
 func NewTurnResolver() *TurnResolver { return &TurnResolver{} }
 
-func (r *TurnResolver) Resolve(ctx context.Context, res *TurnResult, err error, sessionID string) TurnOutcome {
+func (*TurnResolver) Resolve(ctx context.Context, res *TurnResult, err error, sessionID string) TurnOutcome {
 	outcome := TurnOutcome{SessionID: sessionID, RawError: err}
 	if res != nil {
 		outcome.Usage, outcome.Duration = res.Usage, res.Duration

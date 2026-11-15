@@ -68,7 +68,7 @@ func TestRecordClaudeUsageJSON(t *testing.T) {
 				return
 			}
 			rec := httptest.NewRecorder()
-			Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 			if !strings.Contains(rec.Body.String(), tc.wantCheck) {
 				t.Errorf("missing %q in:\n%s", tc.wantCheck, rec.Body.String())
 			}
@@ -176,7 +176,7 @@ func TestRecordUsageJSON(t *testing.T) {
 		}
 		if tc.wantCheck != "" {
 			rec := httptest.NewRecorder()
-			Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 			if !strings.Contains(rec.Body.String(), tc.wantCheck) {
 				t.Errorf("%s: missing %q in:\n%s", tc.name, tc.wantCheck, rec.Body.String())
 			}

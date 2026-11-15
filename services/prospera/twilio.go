@@ -301,7 +301,7 @@ func (c *HTTPTwilioClient) IsCallActive(ctx context.Context, providerCallSID str
 	}
 
 	endpoint := fmt.Sprintf("%s/2010-04-01/Accounts/%s/Calls/%s.json", c.baseURL, c.accountSID, providerCallSID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return false, err
 	}
@@ -414,7 +414,7 @@ type incomingNumberRecord struct {
 
 func (c *HTTPTwilioClient) listIncomingPhoneNumbers(ctx context.Context) ([]incomingNumberRecord, error) {
 	endpoint := fmt.Sprintf("%s/2010-04-01/Accounts/%s/IncomingPhoneNumbers.json", c.baseURL, c.accountSID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -454,7 +454,7 @@ func (c *HTTPTwilioClient) searchAndPurchasePhoneNumber(ctx context.Context, are
 		areaCode = "510"
 	}
 	searchEndpoint := fmt.Sprintf("%s/2010-04-01/Accounts/%s/AvailablePhoneNumbers/US/Local.json?AreaCode=%s", c.baseURL, c.accountSID, areaCode)
-	sReq, err := http.NewRequestWithContext(ctx, http.MethodGet, searchEndpoint, nil)
+	sReq, err := http.NewRequestWithContext(ctx, http.MethodGet, searchEndpoint, http.NoBody)
 	if err != nil {
 		return "", err
 	}
@@ -553,7 +553,7 @@ func (c *HTTPTwilioClient) DownloadRecording(ctx context.Context, recordingURL s
 		redirectClient.Transport = c.httpClient.Transport
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, recordingURL, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, recordingURL, http.NoBody)
 	if err != nil {
 		return nil, "", err
 	}

@@ -400,7 +400,7 @@ type mockSequentialPool struct {
 	onInit     func(name string)
 }
 
-func (m *mockSequentialPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
+func (*mockSequentialPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
 	return nil, nil
 }
 
@@ -412,7 +412,7 @@ func (m *mockSequentialPool) Initialize(ctx context.Context) error {
 	return nil
 }
 
-func (m *mockSequentialPool) Close() error {
+func (*mockSequentialPool) Close() error {
 	return nil
 }
 

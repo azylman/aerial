@@ -36,7 +36,7 @@ type mockSynapsePgxRows struct {
 	scanRowFn func(idx int, dest ...any) error
 }
 
-func (r *mockSynapsePgxRows) Close()     {}
+func (*mockSynapsePgxRows) Close()       {}
 func (r *mockSynapsePgxRows) Err() error { return r.rowsErr }
 func (r *mockSynapsePgxRows) Next() bool {
 	limit := max(r.totalRows, len(r.intItems))
@@ -761,35 +761,35 @@ func executePRRegistryJobTransitionOps(ctx context.Context, t *testing.T, reg *P
 	t.Helper()
 	switch tc.op {
 	case "AtomicTransitionDeployedByJob":
-		gotTarget, gotPR, _, gotRepo, updated, err := reg.AtomicTransitionDeployedByJob(ctx, tc.jobName)
+		got, err := reg.AtomicTransitionDeployedByJob(ctx, tc.jobName)
 		if (err != nil) != tc.wantErr {
 			t.Fatalf("AtomicTransitionDeployedByJob err = %v, wantErr = %v", err, tc.wantErr)
 		}
-		if updated != tc.wantUpdated {
-			t.Errorf("updated = %v, want %v", updated, tc.wantUpdated)
+		if got.Updated != tc.wantUpdated {
+			t.Errorf("updated = %v, want %v", got.Updated, tc.wantUpdated)
 		}
-		if gotTarget != tc.wantTarget {
-			t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+		if got.TargetID != tc.wantTarget {
+			t.Errorf("gotTarget = %q, want %q", got.TargetID, tc.wantTarget)
 		}
-		if gotPR != tc.wantPRNum {
-			t.Errorf("gotPR = %d, want %d", gotPR, tc.wantPRNum)
+		if got.PRNumber != tc.wantPRNum {
+			t.Errorf("gotPR = %d, want %d", got.PRNumber, tc.wantPRNum)
 		}
-		if tc.repo != "" && gotRepo != tc.repo {
-			t.Errorf("gotRepo = %q, want %q", gotRepo, tc.repo)
+		if tc.repo != "" && got.Repo != tc.repo {
+			t.Errorf("gotRepo = %q, want %q", got.Repo, tc.repo)
 		}
 	case "AtomicTransitionDeployFailedByJob":
-		gotTarget, gotPR, _, _, updated, err := reg.AtomicTransitionDeployFailedByJob(ctx, tc.jobName)
+		got, err := reg.AtomicTransitionDeployFailedByJob(ctx, tc.jobName)
 		if (err != nil) != tc.wantErr {
 			t.Fatalf("AtomicTransitionDeployFailedByJob err = %v, wantErr = %v", err, tc.wantErr)
 		}
-		if updated != tc.wantUpdated {
-			t.Errorf("updated = %v, want %v", updated, tc.wantUpdated)
+		if got.Updated != tc.wantUpdated {
+			t.Errorf("updated = %v, want %v", got.Updated, tc.wantUpdated)
 		}
-		if gotTarget != tc.wantTarget {
-			t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+		if got.TargetID != tc.wantTarget {
+			t.Errorf("gotTarget = %q, want %q", got.TargetID, tc.wantTarget)
 		}
-		if gotPR != tc.wantPRNum {
-			t.Errorf("gotPR = %d, want %d", gotPR, tc.wantPRNum)
+		if got.PRNumber != tc.wantPRNum {
+			t.Errorf("gotPR = %d, want %d", got.PRNumber, tc.wantPRNum)
 		}
 	default:
 		return false

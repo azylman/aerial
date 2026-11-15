@@ -406,11 +406,11 @@ func TestGeminiAPIPool_PrewarmedAndClose(t *testing.T) {
 
 type errMockDispatcher struct{}
 
-func (d *errMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
+func (*errMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
 	return nil, errors.New("declarations query failed")
 }
 
-func (d *errMockDispatcher) Execute(ctx context.Context, name string, args map[string]any) (string, error) {
+func (*errMockDispatcher) Execute(ctx context.Context, name string, args map[string]any) (string, error) {
 	return "", errors.New("execute failed")
 }
 
@@ -665,10 +665,11 @@ func assertNoDisallowedKeys(t *testing.T, m map[string]any, path string, disallo
 				t.Errorf("found disallowed key %q at path %s", k, path)
 			}
 		}
-		if childMap, ok := v.(map[string]any); ok {
-			assertNoDisallowedKeys(t, childMap, path+"."+k, disallowed)
-		} else if childSlice, ok := v.([]any); ok {
-			for idx, elem := range childSlice {
+		switch child := v.(type) {
+		case map[string]any:
+			assertNoDisallowedKeys(t, child, path+"."+k, disallowed)
+		case []any:
+			for idx, elem := range child {
 				if elemMap, ok := elem.(map[string]any); ok {
 					assertNoDisallowedKeys(t, elemMap, fmt.Sprintf("%s.%s[%d]", path, k, idx), disallowed)
 				}
@@ -819,11 +820,11 @@ func TestGeminiAPIPool_LoadVoiceRulesFromDataDir(t *testing.T) {
 
 type fallbackMockDispatcher struct{}
 
-func (d *fallbackMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
+func (*fallbackMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
 	return []geminiFunctionDeclaration{{Name: "test_tool", Description: "a test tool"}}, nil
 }
 
-func (d *fallbackMockDispatcher) Execute(ctx context.Context, name string, args map[string]any) (string, error) {
+func (*fallbackMockDispatcher) Execute(ctx context.Context, name string, args map[string]any) (string, error) {
 	return `{"status":"ok"}`, nil
 }
 

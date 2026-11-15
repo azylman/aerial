@@ -44,7 +44,7 @@ var BuiltinPatterns = []PatternRule{
 	{Category: "RFC1918_192_168", Regex: regexp.MustCompile(`\b192\.168\.\d{1,3}\.\d{1,3}\b`)},
 	{Category: categoryInternalClusterDomain, Regex: regexp.MustCompile(`(?i)\b[a-zA-Z0-9_-]+\.(?:aerial|lan)\b`)},
 	{Category: "GitHubPAT", Regex: regexp.MustCompile(`\b(ghp|github_pat|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,80}\b`)},
-	{Category: "PrivateKey", Regex: regexp.MustCompile(`-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`)},
+	{Category: "PrivateKey", Regex: regexp.MustCompile(`-{5}BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-{5}`)},
 	{Category: "DiscordWebhook", Regex: regexp.MustCompile(`https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+`)},
 	{Category: "SlackWebhook", Regex: regexp.MustCompile(`https://hooks\.slack\.com/services/T[0-9A-Z]+/B[0-9A-Z]+/[0-9A-Za-z]+`)},
 	{Category: "GenericAPIKey", Regex: regexp.MustCompile(`\b(sk-[a-zA-Z0-9]{20,80})\b`)},
@@ -291,7 +291,7 @@ func parseDiffHeaderLine(line string, st *diffParseState) bool {
 }
 
 func iterateDiffAddedLines(diff string, checkTestFiles bool, onAddedLine func(content, file string, lineNum int)) {
-	if len(diff) == 0 {
+	if diff == "" {
 		return
 	}
 
@@ -350,7 +350,7 @@ func ScanDiffForSecrets(diff string, checkTestFiles bool, patterns []PatternRule
 
 // ScanDiffWithPatterns parses a unified diff and checks added lines against the supplied patterns.
 func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRule) []Violation {
-	if len(diff) == 0 || len(patterns) == 0 {
+	if diff == "" || len(patterns) == 0 {
 		return nil
 	}
 

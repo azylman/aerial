@@ -202,7 +202,7 @@ func (w workloadSource) watch(ctx context.Context, kube *DefaultOutboundDispatch
 	return kube.WatchFluxWorkloads(ctx, w.path, resourceVersion)
 }
 
-func (w workloadSource) apply(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink, eventType string, _ json.RawMessage) error {
+func (workloadSource) apply(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink, eventType string, _ json.RawMessage) error {
 	if eventType == watchEventDeleted {
 		return nil
 	}

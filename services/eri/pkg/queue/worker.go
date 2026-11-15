@@ -540,7 +540,8 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 			}
 		}
 	}()
-	defer te.markTurnActive()()
+	markTurnInactive := te.markTurnActive()
+	defer markTurnInactive()
 
 	if !te.runPreTurnHook() {
 		return
@@ -644,7 +645,7 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 }
 
 func shouldEvaluateAmbientWake(mode string, isThread, isHTTP bool) bool {
-	return strings.ToLower(mode) == "channel" && !isThread && !isHTTP
+	return strings.EqualFold(mode, "channel") && !isThread && !isHTTP
 }
 
 func (te *turnExecution) resolveWakeHookOverride() string {

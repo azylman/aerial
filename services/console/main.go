@@ -214,7 +214,7 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, data any) {
 }
 
 func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerContainerJSON, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/containers/json", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/containers/json", http.NoBody)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -275,7 +275,7 @@ func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTa
 	}
 
 	reqURL := strings.TrimRight(brainURL, "/") + "/tasks"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
 	if err != nil {
 		return []ActiveTaskStatus{}, err
 	}
@@ -340,7 +340,7 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 		return fallback
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(gitsyncURL, "/")+"/status", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(gitsyncURL, "/")+"/status", http.NoBody)
 	if err != nil {
 		fallback.Error = err.Error()
 		return fallback

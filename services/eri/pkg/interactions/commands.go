@@ -114,11 +114,10 @@ func RegisterGuildCommands(s *discordgo.Session, appID, guildID string) ([]*disc
 		return nil, fmt.Errorf("nil or uninitialized discord session")
 	}
 	if appID == "" {
-		if s.State != nil && s.State.User != nil && s.State.User.ID != "" {
-			appID = s.State.User.ID
-		} else {
+		if s.State == nil || s.State.User == nil || s.State.User.ID == "" {
 			return nil, fmt.Errorf("empty appID and session state user is empty")
 		}
+		appID = s.State.User.ID
 	}
 	if guildID == "" {
 		return nil, fmt.Errorf("empty guildID")

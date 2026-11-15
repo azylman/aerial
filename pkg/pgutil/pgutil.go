@@ -70,7 +70,7 @@ func extractArrayString(src any) (content string, empty bool, err error) {
 }
 
 func parsePGArrayContent(content string) ([]string, error) {
-	if len(content) == 0 {
+	if content == "" {
 		return []string{}, nil
 	}
 	var res []string

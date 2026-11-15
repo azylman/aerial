@@ -468,11 +468,11 @@ func assertSyncSettingsOAuth(t *testing.T, tc syncSettingsCase, configDir string
 		t.Errorf("expected trustedWorkspaces in OAuth mode, got %v", parsed["trustedWorkspaces"])
 	}
 	installBytes, err := os.ReadFile(filepath.Join(configDir, "installation_id"))
-	if err != nil || len(strings.TrimSpace(string(installBytes))) == 0 {
+	if err != nil || strings.TrimSpace(string(installBytes)) == "" {
 		t.Fatalf("expected non-empty installation_id, err=%v", err)
 	}
 	jetskiBytes, err := os.ReadFile(filepath.Join(configDir, "jetski_state.pbtxt"))
-	if err != nil || len(strings.TrimSpace(string(jetskiBytes))) == 0 {
+	if err != nil || strings.TrimSpace(string(jetskiBytes)) == "" {
 		t.Fatalf("expected non-empty jetski_state.pbtxt, err=%v", err)
 	}
 	if tc.seedOAuthSource {

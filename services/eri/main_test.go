@@ -133,9 +133,9 @@ func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
 
 type mockMainProcessHandle struct{ pid int }
 
-func (m *mockMainProcessHandle) Pid() int    { return m.pid }
-func (m *mockMainProcessHandle) Kill() error { return nil }
-func (m *mockMainProcessHandle) Wait() error { return nil }
+func (m *mockMainProcessHandle) Pid() int  { return m.pid }
+func (*mockMainProcessHandle) Kill() error { return nil }
+func (*mockMainProcessHandle) Wait() error { return nil }
 
 type mockMainDaemonSpawner struct {
 	SpawnFn func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error)
@@ -294,7 +294,7 @@ func TestRegisterGitSyncReload(t *testing.T) {
 			trigger := &reloadTrigger{pending: make(chan struct{}, 1)}
 			mux := http.NewServeMux()
 			registerGitSyncReload(mux, trigger)
-			req := httptest.NewRequest(tc.method, "/-/reload", nil)
+			req := httptest.NewRequest(tc.method, "/-/reload", http.NoBody)
 			req.RemoteAddr = tc.remoteAddr
 			w := httptest.NewRecorder()
 
@@ -604,9 +604,9 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 
 type mockErrProcessHandle struct{}
 
-func (m *mockErrProcessHandle) Pid() int    { return 99999 }
-func (m *mockErrProcessHandle) Kill() error { return errors.New("simulated kill error") }
-func (m *mockErrProcessHandle) Wait() error { return nil }
+func (*mockErrProcessHandle) Pid() int    { return 99999 }
+func (*mockErrProcessHandle) Kill() error { return errors.New("simulated kill error") }
+func (*mockErrProcessHandle) Wait() error { return nil }
 
 func newTrackingSpawner(mu *sync.Mutex, seen map[string]runner.DaemonConfig, allSpawned chan struct{}) *mockMainDaemonSpawner {
 	var once sync.Once

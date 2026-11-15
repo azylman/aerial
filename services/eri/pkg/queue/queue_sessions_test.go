@@ -260,7 +260,7 @@ func TestFormatUnrotatedSessionLine(t *testing.T) {
 			t.Parallel()
 			for _, ch := range tc.cachedChans {
 				CacheDiscordChannel(ch)
-				defer InvalidateChannelCache(ch.ID)
+				t.Cleanup(func() { InvalidateChannelCache(ch.ID) })
 			}
 			if got := formatUnrotatedSessionLine(nil, tc.session); got != tc.expected {
 				t.Errorf("got %q, want %q", got, tc.expected)

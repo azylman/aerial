@@ -723,7 +723,7 @@ type mockAcquireLeaseFailPool struct {
 	runner.AgentPool
 }
 
-func (m *mockAcquireLeaseFailPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
+func (*mockAcquireLeaseFailPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
 	return nil, errors.New("lease acquisition failed")
 }
 

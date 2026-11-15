@@ -409,7 +409,7 @@ func runDownloadRecordingCase(t *testing.T, tc downloadRecordingTestCase) {
 	if err != nil {
 		t.Fatalf("DownloadRecording() unexpected error: %v", err)
 	}
-	if string(data) != string(tc.mockBody) {
+	if !bytes.Equal(data, tc.mockBody) {
 		t.Fatalf("DownloadRecording() data = %q, want %q", string(data), string(tc.mockBody))
 	}
 	if contentType != tc.mockType {

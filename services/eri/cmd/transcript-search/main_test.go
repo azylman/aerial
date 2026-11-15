@@ -881,7 +881,7 @@ func TestRunCLIEdges(t *testing.T) {
 
 type failingWriter struct{}
 
-func (f *failingWriter) Write(p []byte) (n int, err error) {
+func (*failingWriter) Write(p []byte) (n int, err error) {
 	return 0, errors.New("simulated disk full write error")
 }
 

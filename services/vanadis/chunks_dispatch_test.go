@@ -25,9 +25,9 @@ type memoryMsg struct {
 	nakDelay     time.Duration
 }
 
-func (m *memoryMsg) Data() []byte        { return m.data }
-func (m *memoryMsg) Subject() string     { return m.subject }
-func (m *memoryMsg) Header() nats.Header { return nil }
+func (m *memoryMsg) Data() []byte      { return m.data }
+func (m *memoryMsg) Subject() string   { return m.subject }
+func (*memoryMsg) Header() nats.Header { return nil }
 func (m *memoryMsg) NumDelivered() uint64 {
 	if m.numDelivered > 0 {
 		return m.numDelivered
@@ -42,8 +42,8 @@ func (m *memoryMsg) Ack() error {
 
 func (m *memoryMsg) NakWithDelay(d time.Duration) error { m.nakDelay = d; return nil }
 func (m *memoryMsg) Term() error                        { m.termed = true; return nil }
-func (m *memoryMsg) Snooze(_ time.Duration) error       { return nil }
-func (m *memoryMsg) InProgress() error                  { return nil }
+func (*memoryMsg) Snooze(_ time.Duration) error         { return nil }
+func (*memoryMsg) InProgress() error                    { return nil }
 
 // outcomeBuild is a running build created at a fixed instant.
 func outcomeBuild(id, threadID, objective string) *VanadisBuild {

@@ -152,5 +152,5 @@ func TestMockPostgresConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenDB with mock postgres failed: %v", err)
 	}
-	defer db.Close()
+	db.Close()
 }

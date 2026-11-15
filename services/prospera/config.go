@@ -74,7 +74,7 @@ type ProsperaYAMLConfig struct {
 	TwilioFromNumber      string `yaml:"twilio_from_number"`
 }
 
-var e164Regex = regexp.MustCompile(`^\+[1-9][0-9]{1,14}$`)
+var e164Regex = regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
 
 // NormalizeE164 normalizes a raw phone number into strict ITU-T E.164 format (+[1-9][0-9]{1,14}).
 func NormalizeE164(raw string) (string, error) {

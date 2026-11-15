@@ -185,7 +185,7 @@ func NewClaudeUsageRunner(client *http.Client, baseURL, token string) UsageRunne
 	return func(ctx context.Context) ([]byte, error) {
 		runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		req, err := http.NewRequestWithContext(runCtx, http.MethodGet, endpoint, nil)
+		req, err := http.NewRequestWithContext(runCtx, http.MethodGet, endpoint, http.NoBody)
 		if err != nil {
 			return nil, err
 		}

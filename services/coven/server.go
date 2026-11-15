@@ -104,7 +104,7 @@ func (s *Server) Routes() http.Handler {
 	return mux
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (*Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	httpkit.WriteResponse(w, r, "coven", []byte(`{"status":"ok"}`))

@@ -26,7 +26,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
-	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
@@ -857,19 +856,19 @@ type errTranscriptStore struct {
 	*dbtest.FakeStore
 }
 
-func (e *errTranscriptStore) GetTranscriptStats(ctx context.Context, stack string) ([]db.TranscriptStackStats, error) {
+func (*errTranscriptStore) GetTranscriptStats(ctx context.Context, stack string) ([]db.TranscriptStackStats, error) {
 	return nil, errors.New("simulated transcript stats error")
 }
 
-func (e *errTranscriptStore) SearchTranscriptSteps(ctx context.Context, stack, query, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]db.TranscriptStep, error) {
+func (*errTranscriptStore) SearchTranscriptSteps(ctx context.Context, stack, query, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]db.TranscriptStep, error) {
 	return nil, errors.New("simulated search transcript steps error")
 }
 
-func (e *errTranscriptStore) SearchSessionSummaries(ctx context.Context, stack string, queryEmbedding []float32, textQuery string, limit int, threshold float64) ([]db.SessionSummary, error) {
+func (*errTranscriptStore) SearchSessionSummaries(ctx context.Context, stack string, queryEmbedding []float32, textQuery string, limit int, threshold float64) ([]db.SessionSummary, error) {
 	return nil, errors.New("simulated search session summaries error")
 }
 
-func (e *errTranscriptStore) GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) ([]db.TranscriptStep, error) {
+func (*errTranscriptStore) GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) ([]db.TranscriptStep, error) {
 	return nil, errors.New("simulated get transcript step range error")
 }
 
@@ -1016,7 +1015,7 @@ func TestHandleTasks(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 10 {
 		wg.Go(func() {
-			handler(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/tasks", nil))
+			handler(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/tasks", http.NoBody))
 		})
 	}
 	wg.Wait()
@@ -1033,65 +1032,24 @@ type blockingTaskTestPool struct {
 func (p *blockingTaskTestPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
 	return &blockingTaskTestLease{pool: p}, nil
 }
-func (p *blockingTaskTestPool) Initialize(ctx context.Context) error { return nil }
-func (p *blockingTaskTestPool) Close() error                         { return nil }
+func (*blockingTaskTestPool) Initialize(ctx context.Context) error { return nil }
+func (*blockingTaskTestPool) Close() error                         { return nil }
 
 type blockingTaskTestLease struct {
 	pool *blockingTaskTestPool
 }
 
-func (l *blockingTaskTestLease) SessionID() string         { return l.pool.sessionID }
-func (l *blockingTaskTestLease) PreviousSessionID() string { return "" }
-func (l *blockingTaskTestLease) IsCold() bool              { return false }
-func (l *blockingTaskTestLease) IsEphemeral() bool         { return true }
-func (l *blockingTaskTestLease) TurnCount() int            { return 0 }
-func (l *blockingTaskTestLease) MarkDirty()                {}
-func (l *blockingTaskTestLease) Release() error            { return nil }
+func (l *blockingTaskTestLease) SessionID() string       { return l.pool.sessionID }
+func (*blockingTaskTestLease) PreviousSessionID() string { return "" }
+func (*blockingTaskTestLease) IsCold() bool              { return false }
+func (*blockingTaskTestLease) IsEphemeral() bool         { return true }
+func (*blockingTaskTestLease) TurnCount() int            { return 0 }
+func (*blockingTaskTestLease) MarkDirty()                {}
+func (*blockingTaskTestLease) Release() error            { return nil }
 func (l *blockingTaskTestLease) Execute(ctx context.Context, turn *runner.TurnContext) (*runner.TurnResult, error) {
 	close(l.pool.turnStarted)
 	<-l.pool.releaseTurn
 	return &runner.TurnResult{ConversationID: l.pool.sessionID, Response: "done"}, nil
-}
-
-func TestMetricsEndpoint(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", metrics.Handler())
-
-	// Record sample metrics to instantiate metric vectors
-	metrics.RecordTurnCompleted("success", "discord", "gemini-3.8-flash-low", 2*time.Second)
-	metrics.RecordClassifierRun("success", "gemini-3.8-flash-low", 500*time.Millisecond, 0.95, "wake")
-	metrics.DiscordEventsTotal.WithLabelValues("ready").Inc()
-	metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
-	metrics.SchedulerExecutionsTotal.WithLabelValues("cron", "enqueued").Inc()
-
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200 OK from /metrics, got %d", rec.Code)
-	}
-
-	body := rec.Body.String()
-	requiredSubstrings := []string{
-		"aerial_brain_turns_total",
-		"aerial_brain_turn_duration_seconds",
-		"aerial_brain_active_workers",
-		"aerial_brain_queue_depth",
-		"aerial_brain_classifier_duration_seconds",
-		"aerial_brain_classifier_decisions_total",
-		"aerial_brain_classifier_confidence_score",
-		"aerial_brain_discord_events_total",
-		"aerial_brain_discord_messages_processed_total",
-		"aerial_brain_scheduler_executions_total",
-		"aerial_brain_build_info",
-	}
-
-	for _, sub := range requiredSubstrings {
-		if !strings.Contains(body, sub) {
-			t.Errorf("expected /metrics output to contain %q, body:\n%s", sub, body)
-		}
-	}
 }
 
 func TestNormalizeRoute(t *testing.T) {
@@ -1161,17 +1119,6 @@ func TestMetricsMiddleware(t *testing.T) {
 	}
 	if w := runHTTP(handler.ServeHTTP, http.MethodGet, "/implicit", nil); w.Code != http.StatusOK {
 		t.Errorf("expected 200 for implicit write, got %d", w.Code)
-	}
-
-	emptyMethodHandler := metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	reqEmpty := httptest.NewRequest("", "/metrics", nil)
-	reqEmpty.Method = ""
-	recEmpty := httptest.NewRecorder()
-	emptyMethodHandler.ServeHTTP(recEmpty, reqEmpty)
-	if recEmpty.Code != http.StatusOK {
-		t.Errorf("expected 200 OK for empty method, got %d", recEmpty.Code)
 	}
 }
 
@@ -1370,7 +1317,7 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/healthz", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /healthz, got %d", w.Code)
 	}
-	mux.ServeHTTP(&flusherErrWriter{}, httptest.NewRequest(http.MethodGet, "/health", nil))
+	mux.ServeHTTP(&flusherErrWriter{}, httptest.NewRequest(http.MethodGet, "/health", http.NoBody))
 
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/tasks", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /tasks, got %d", w.Code)

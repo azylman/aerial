@@ -86,7 +86,7 @@ func TestHermeticTransport_BlocksNonLoopbackAndReservedPorts(t *testing.T) {
 		t.Fatal("expected error on nil request")
 	}
 
-	reqExternal, err := http.NewRequest(http.MethodGet, "http://example.com/test", nil)
+	reqExternal, err := http.NewRequest(http.MethodGet, "http://example.com/test", http.NoBody)
 	if err != nil {
 		t.Fatalf("failed to build request: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestHermeticTransport_BlocksNonLoopbackAndReservedPorts(t *testing.T) {
 	}
 
 	for _, port := range []string{"8080", "8088", "4020", "8081", "8082", "8083", "8090", "8070", "9070"} {
-		reqReserved, err := http.NewRequest(http.MethodGet, "http://localhost:"+port+"/test", nil)
+		reqReserved, err := http.NewRequest(http.MethodGet, "http://localhost:"+port+"/test", http.NoBody)
 		if err != nil {
 			t.Fatalf("failed to build request: %v", err)
 		}

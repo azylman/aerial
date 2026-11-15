@@ -222,7 +222,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
+func (*RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		fieldStatus: "ok",
 		"service":   "synapse",

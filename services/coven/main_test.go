@@ -293,18 +293,18 @@ type mockPubsubMsg struct {
 }
 
 func (m *mockPubsubMsg) Data() []byte         { return m.data }
-func (m *mockPubsubMsg) Subject() string      { return "aerial.turn.completed" }
-func (m *mockPubsubMsg) Header() nats.Header  { return nil }
+func (*mockPubsubMsg) Subject() string        { return "aerial.turn.completed" }
+func (*mockPubsubMsg) Header() nats.Header    { return nil }
 func (m *mockPubsubMsg) NumDelivered() uint64 { return m.delivered }
-func (m *mockPubsubMsg) Ack() error           { return nil }
+func (*mockPubsubMsg) Ack() error             { return nil }
 func (m *mockPubsubMsg) NakWithDelay(d time.Duration) error {
 	m.naked = true
 	m.nakDelay = d
 	return nil
 }
-func (m *mockPubsubMsg) Term() error                  { m.termed = true; return nil }
-func (m *mockPubsubMsg) Snooze(_ time.Duration) error { return nil }
-func (m *mockPubsubMsg) InProgress() error            { return nil }
+func (m *mockPubsubMsg) Term() error                { m.termed = true; return nil }
+func (*mockPubsubMsg) Snooze(_ time.Duration) error { return nil }
+func (*mockPubsubMsg) InProgress() error            { return nil }
 
 type captureSubscribeBus struct {
 	pubsub.Bus

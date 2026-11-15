@@ -300,7 +300,7 @@ func dedupeTrimmedStrings(items []string) []string {
 
 // Discord Snowflake and Channel Name validation
 var (
-	snowflakeRegex   = regexp.MustCompile(`^[0-9]{17,20}$`)
+	snowflakeRegex   = regexp.MustCompile(`^\d{17,20}$`)
 	channelNameRegex = regexp.MustCompile(`^#?[a-z0-9_-]{1,100}$`)
 )
 

@@ -171,7 +171,7 @@ func (c *HTTPContextConsultClient) ConsultMemory(ctx context.Context, query stri
 	}
 
 	endpoint := fmt.Sprintf("%s/context?q=%s", c.covenURL, url.QueryEscape(query))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return "", err
 	}

@@ -521,11 +521,11 @@ func (m *MockOllamaClient) GenerateEmbedding(ctx context.Context, text string, i
 
 type mockErrReadCloser struct{}
 
-func (m *mockErrReadCloser) Read(p []byte) (n int, err error) {
+func (*mockErrReadCloser) Read(p []byte) (n int, err error) {
 	return 0, errors.New("simulated read error")
 }
 
-func (m *mockErrReadCloser) Close() error {
+func (*mockErrReadCloser) Close() error {
 	return nil
 }
 

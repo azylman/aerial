@@ -22,20 +22,20 @@ type memoryMsg struct {
 	numDelivered uint64
 }
 
-func (m *memoryMsg) Data() []byte        { return m.data }
-func (m *memoryMsg) Subject() string     { return m.subject }
-func (m *memoryMsg) Header() nats.Header { return nil }
+func (m *memoryMsg) Data() []byte      { return m.data }
+func (m *memoryMsg) Subject() string   { return m.subject }
+func (*memoryMsg) Header() nats.Header { return nil }
 func (m *memoryMsg) NumDelivered() uint64 {
 	if m.numDelivered > 0 {
 		return m.numDelivered
 	}
 	return 1
 }
-func (m *memoryMsg) Ack() error                         { return nil }
+func (*memoryMsg) Ack() error                           { return nil }
 func (m *memoryMsg) NakWithDelay(_ time.Duration) error { m.naked = true; return nil }
-func (m *memoryMsg) Term() error                        { return nil }
-func (m *memoryMsg) Snooze(_ time.Duration) error       { return nil }
-func (m *memoryMsg) InProgress() error                  { return nil }
+func (*memoryMsg) Term() error                          { return nil }
+func (*memoryMsg) Snooze(_ time.Duration) error         { return nil }
+func (*memoryMsg) InProgress() error                    { return nil }
 
 func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 	t.Parallel()
@@ -609,7 +609,7 @@ type failEnsureBus struct {
 	pubsub.Bus
 }
 
-func (f *failEnsureBus) EnsureCoreStreams(_ context.Context) error {
+func (*failEnsureBus) EnsureCoreStreams(_ context.Context) error {
 	return errors.New("simulated stream creation failure")
 }
 
@@ -617,7 +617,7 @@ type failQueueBus struct {
 	pubsub.Bus
 }
 
-func (f *failQueueBus) ConsumeQueue(_ context.Context, _, _ string, _ pubsub.Handler) (pubsub.Subscription, error) {
+func (*failQueueBus) ConsumeQueue(_ context.Context, _, _ string, _ pubsub.Handler) (pubsub.Subscription, error) {
 	return nil, errors.New("simulated queue subscription failure")
 }
 
@@ -625,6 +625,6 @@ type failSubBus struct {
 	pubsub.Bus
 }
 
-func (f *failSubBus) Subscribe(_ context.Context, _, _ string, _ pubsub.Handler) (pubsub.Subscription, error) {
+func (*failSubBus) Subscribe(_ context.Context, _, _ string, _ pubsub.Handler) (pubsub.Subscription, error) {
 	return nil, errors.New("simulated subscription failure")
 }

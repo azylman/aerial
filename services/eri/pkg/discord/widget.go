@@ -121,8 +121,6 @@ func AccentColor(status string) int {
 		return 0xEF4444 // crimson
 	case statusPaused, statusStalled, statusCancelled:
 		return 0xF59E0B // amber
-	case statusRunning, statusCoding, statusDeploying, statusOpen, statusPROpened, statusMerged, statusSynced, statusPending:
-		fallthrough
 	default:
 		return 0xA855F7 // purple
 	}
@@ -145,8 +143,6 @@ func statusBadge(status string) string {
 		return "✅"
 	case statusFailed, statusConflict, statusError:
 		return "❌"
-	case statusPending:
-		fallthrough
 	default:
 		return "⏳"
 	}

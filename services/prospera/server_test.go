@@ -398,7 +398,7 @@ func TestServer_Health(t *testing.T) {
 	server, _, _ := setupTestServer()
 	mux := server.Routes()
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/health", http.NoBody)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -449,7 +449,7 @@ func TestTwilioWebhook_StreamUnauthorized(t *testing.T) {
 	server, _, _ := setupTestServer()
 	mux := server.Routes()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/webhooks/twilio/stream/bad-token", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/webhooks/twilio/stream/bad-token", http.NoBody)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -495,7 +495,7 @@ func TestServer_ToWSSAndRouteGuards(t *testing.T) {
 		t.Parallel()
 		srv := &Server{}
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/api/webhooks/twilio/stream/tok", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/webhooks/twilio/stream/tok", http.NoBody)
 		srv.handleTwilioStream(rec, req)
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("status = %d, want 503", rec.Code)
@@ -588,7 +588,7 @@ func TestServer_ToWSSAndRouteGuards(t *testing.T) {
 		}
 
 		// GET ready banner
-		reqGet := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+		reqGet := httptest.NewRequest(http.MethodGet, "/mcp", http.NoBody)
 		recGet := httptest.NewRecorder()
 		mux.ServeHTTP(recGet, reqGet)
 		if recGet.Code != http.StatusOK || !strings.Contains(recGet.Body.String(), "Prospera") {
@@ -896,9 +896,9 @@ type failResponseWriter struct {
 	header http.Header
 }
 
-func (f *failResponseWriter) Header() http.Header       { return f.header }
-func (f *failResponseWriter) WriteHeader(int)           {}
-func (f *failResponseWriter) Write([]byte) (int, error) { return 0, errors.New("write error") }
+func (f *failResponseWriter) Header() http.Header     { return f.header }
+func (*failResponseWriter) WriteHeader(int)           {}
+func (*failResponseWriter) Write([]byte) (int, error) { return 0, errors.New("write error") }
 
 func TestWriteXML_Error(t *testing.T) {
 	t.Parallel()
@@ -1124,7 +1124,7 @@ func TestServer_ReloadEndpointSwapsLiveConfig(t *testing.T) {
 			twilioMock := &mockTwilioForDelivery{}
 			server := NewServer(cfgSrc, newMockStoreForDelivery(), twilioMock, nil, nil, nil)
 
-			req := httptest.NewRequest(http.MethodPost, "/-/reload", nil)
+			req := httptest.NewRequest(http.MethodPost, "/-/reload", http.NoBody)
 			req.RemoteAddr = "127.0.0.1:5555"
 			rec := httptest.NewRecorder()
 			server.Routes().ServeHTTP(rec, req)

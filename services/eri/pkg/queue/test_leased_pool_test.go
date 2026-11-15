@@ -174,7 +174,7 @@ func (p *testRunnerAgentPool) HasSession(targetKey string) bool {
 	return exists
 }
 
-func (p *testRunnerAgentPool) Initialize(ctx context.Context) error { return nil }
+func (*testRunnerAgentPool) Initialize(ctx context.Context) error { return nil }
 func (p *testRunnerAgentPool) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -208,7 +208,7 @@ func (l *testSessionLease) SessionID() string {
 }
 func (l *testSessionLease) PreviousSessionID() string { return l.prevSessID }
 func (l *testSessionLease) IsCold() bool              { return l.isCold }
-func (l *testSessionLease) IsEphemeral() bool         { return false }
+func (*testSessionLease) IsEphemeral() bool           { return false }
 func (l *testSessionLease) TurnCount() int            { return l.turnCount }
 func (l *testSessionLease) MarkDirty() {
 	if l != nil && l.pool != nil {
@@ -467,7 +467,7 @@ func (s *testRunnerAgentSession) processParsedAgyOutput(turn *runner.TurnContext
 	if parsed.Error != "" {
 		return s.handleParsedError(turn, parsed, reportErr)
 	}
-	if parsed.Status != "" && strings.ToUpper(parsed.Status) != "SUCCESS" {
+	if parsed.Status != "" && !strings.EqualFold(parsed.Status, "SUCCESS") {
 		return s.handleParsedStatus(turn, parsed, reportErr)
 	}
 	return parsed.Response, nil
