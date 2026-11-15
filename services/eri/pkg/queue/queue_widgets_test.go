@@ -110,72 +110,91 @@ func setupStatusWidgetPool(tc deliverStatusWidgetCase, mockSess *discordgo.Sessi
 	return p
 }
 
-func assertRetainedWidgetSteps(t *testing.T, p *WorkerPool, tc deliverStatusWidgetCase) {
+func assertRetainedWidgetSteps(t *testing.T, p *WorkerPool, buildID string, want map[string]string) {
 	t.Helper()
-	if len(tc.expectRetainedWidgetSteps) == 0 {
+	if len(want) == 0 {
 		return
 	}
 	p.widgetMu.Lock()
-	cachedWidget, hasWidget := p.widgetsByID[tc.req.ID]
+	cachedWidget, hasWidget := p.widgetsByID[buildID]
 	p.widgetMu.Unlock()
 	if !hasWidget {
-		t.Fatalf("expected widget %q in cache", tc.req.ID)
+		t.Fatalf("expected widget %q in cache", buildID)
 	}
-	for cID, wantStep := range tc.expectRetainedWidgetSteps {
-		found := false
-		for _, c := range cachedWidget.Chunks {
-			if c.ID == cID {
-				found = true
-				if c.ActiveStep != wantStep {
-					t.Fatalf("cached widget chunk %q ActiveStep = %q, want %q", cID, c.ActiveStep, wantStep)
-				}
-				break
-			}
-		}
+	gotSteps := make(map[string]string, len(cachedWidget.Chunks))
+	for _, c := range cachedWidget.Chunks {
+		gotSteps[c.ID] = c.ActiveStep
+	}
+	for cID, wantStep := range want {
+		gotStep, found := gotSteps[cID]
 		if !found {
 			t.Fatalf("cached widget missing chunk %q", cID)
+		}
+		if gotStep != wantStep {
+			t.Fatalf("cached widget chunk %q ActiveStep = %q, want %q", cID, gotStep, wantStep)
 		}
 	}
 }
 
-func assertStatusWidgetDelivery(t *testing.T, tc deliverStatusWidgetCase, p *WorkerPool, deliveredChanID string, deliveredReq discord.StatusWidgetRequest, msgID string, err error) {
+// assertWidgetDeliveryResult checks the DeliverStatusWidget return values and
+// reports whether the delivery succeeded (so post-delivery state is checkable).
+func assertWidgetDeliveryResult(t *testing.T, msgID string, err error, wantMsgID, wantErrContains string) bool {
 	t.Helper()
-	if tc.expectErrContains != "" {
-		if err == nil || !strings.Contains(err.Error(), tc.expectErrContains) {
-			t.Fatalf("expected error containing %q, got %v", tc.expectErrContains, err)
+	if wantErrContains != "" {
+		if err == nil || !strings.Contains(err.Error(), wantErrContains) {
+			t.Fatalf("expected error containing %q, got %v", wantErrContains, err)
 		}
-		return
+		return false
 	}
-	if err != nil || msgID != tc.expectMsgID {
+	if err != nil || msgID != wantMsgID {
 		t.Fatalf("unexpected delivery: err=%v msgID=%q", err, msgID)
 	}
-	if tc.expectDeliveredChannelID != "" && deliveredChanID != tc.expectDeliveredChannelID {
-		t.Fatalf("delivered ChannelID = %q, want %q", deliveredChanID, tc.expectDeliveredChannelID)
+	return true
+}
+
+func assertDeliveredTarget(t *testing.T, gotChanID, gotMsgID, wantChanID, wantMsgID string) {
+	t.Helper()
+	if wantChanID != "" && gotChanID != wantChanID {
+		t.Fatalf("delivered ChannelID = %q, want %q", gotChanID, wantChanID)
 	}
-	if tc.expectDeliveredMessageID != "" && deliveredReq.MessageID != tc.expectDeliveredMessageID {
-		t.Fatalf("delivered MessageID = %q, want %q", deliveredReq.MessageID, tc.expectDeliveredMessageID)
+	if wantMsgID != "" && gotMsgID != wantMsgID {
+		t.Fatalf("delivered MessageID = %q, want %q", gotMsgID, wantMsgID)
 	}
-	if len(tc.expectDeliveredChunks) > 0 {
-		if len(deliveredReq.Chunks) != len(tc.expectDeliveredChunks) {
-			t.Fatalf("delivered chunks length mismatch: got %d, want %d", len(deliveredReq.Chunks), len(tc.expectDeliveredChunks))
+}
+
+func assertDeliveredChunks(t *testing.T, got, want []discord.StatusWidgetChunk) {
+	t.Helper()
+	if len(want) == 0 {
+		return
+	}
+	if len(got) != len(want) {
+		t.Fatalf("delivered chunks length mismatch: got %d, want %d", len(got), len(want))
+	}
+	for i, exp := range want {
+		g := got[i]
+		if g.ID != exp.ID || g.Status != exp.Status || g.ActiveStep != exp.ActiveStep {
+			t.Fatalf("chunk[%d] mismatch: got (ID=%q, Status=%q, ActiveStep=%q), want (ID=%q, Status=%q, ActiveStep=%q)",
+				i, g.ID, g.Status, g.ActiveStep, exp.ID, exp.Status, exp.ActiveStep)
 		}
-		for i, exp := range tc.expectDeliveredChunks {
-			got := deliveredReq.Chunks[i]
-			if got.ID != exp.ID || got.Status != exp.Status || got.ActiveStep != exp.ActiveStep {
-				t.Fatalf("chunk[%d] mismatch: got (ID=%q, Status=%q, ActiveStep=%q), want (ID=%q, Status=%q, ActiveStep=%q)",
-					i, got.ID, got.Status, got.ActiveStep, exp.ID, exp.Status, exp.ActiveStep)
-			}
-		}
 	}
-	if tc.expectEvictedBuildID != "" {
-		p.widgetMu.Lock()
-		_, exists := p.widgetsByID[tc.expectEvictedBuildID]
-		p.widgetMu.Unlock()
-		if exists {
-			t.Fatalf("expected build %q to be evicted from widgetsByID", tc.expectEvictedBuildID)
-		}
+}
+
+func assertWidgetEvicted(t *testing.T, p *WorkerPool, buildID string) {
+	t.Helper()
+	if buildID == "" {
+		return
 	}
-	for _, cID := range tc.expectDisownedChunkIDs {
+	p.widgetMu.Lock()
+	_, exists := p.widgetsByID[buildID]
+	p.widgetMu.Unlock()
+	if exists {
+		t.Fatalf("expected build %q to be evicted from widgetsByID", buildID)
+	}
+}
+
+func assertChunksDisowned(t *testing.T, p *WorkerPool, chunkIDs []string) {
+	t.Helper()
+	for _, cID := range chunkIDs {
 		p.widgetMu.Lock()
 		turn, okTurn := p.activeChunkTurns[cID]
 		step, okStep := p.activeChunkSteps[cID]
@@ -187,7 +206,6 @@ func assertStatusWidgetDelivery(t *testing.T, tc deliverStatusWidgetCase, p *Wor
 			t.Fatalf("expected chunk %q to have step deleted from activeChunkSteps, found step %q", cID, step)
 		}
 	}
-	assertRetainedWidgetSteps(t, p, tc)
 }
 
 func runDeliverStatusWidgetCase(t *testing.T, tc deliverStatusWidgetCase, mockSess *discordgo.Session) {
@@ -232,7 +250,14 @@ func runDeliverStatusWidgetCase(t *testing.T, tc deliverStatusWidgetCase, mockSe
 		p.widgetMu.Unlock()
 	}
 	msgID, err := p.DeliverStatusWidget(tc.req)
-	assertStatusWidgetDelivery(t, tc, p, deliveredChanID, deliveredReq, msgID, err)
+	if !assertWidgetDeliveryResult(t, msgID, err, tc.expectMsgID, tc.expectErrContains) {
+		return
+	}
+	assertDeliveredTarget(t, deliveredChanID, deliveredReq.MessageID, tc.expectDeliveredChannelID, tc.expectDeliveredMessageID)
+	assertDeliveredChunks(t, deliveredReq.Chunks, tc.expectDeliveredChunks)
+	assertWidgetEvicted(t, p, tc.expectEvictedBuildID)
+	assertChunksDisowned(t, p, tc.expectDisownedChunkIDs)
+	assertRetainedWidgetSteps(t, p, tc.req.ID, tc.expectRetainedWidgetSteps)
 }
 
 func deliverStatusWidgetTestCases() []deliverStatusWidgetCase {
