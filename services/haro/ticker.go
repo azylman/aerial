@@ -67,6 +67,29 @@ type PromptDispatcher interface {
 type HTTPPromptDispatcher struct {
 	brainURL   string
 	httpClient *http.Client
+	busMu      sync.RWMutex
+	bus        pubsub.Bus
+}
+
+func (d *HTTPPromptDispatcher) SetEventBus(bus pubsub.Bus) {
+	if d != nil {
+		d.busMu.Lock()
+		d.bus = bus
+		d.busMu.Unlock()
+	}
+}
+
+func (d *HTTPPromptDispatcher) EventBus() pubsub.Bus {
+	return d.getBus()
+}
+
+func (d *HTTPPromptDispatcher) getBus() pubsub.Bus {
+	if d == nil {
+		return nil
+	}
+	d.busMu.RLock()
+	defer d.busMu.RUnlock()
+	return d.bus
 }
 
 func NewHTTPPromptDispatcher(brainURL string) *HTTPPromptDispatcher {
@@ -165,6 +188,37 @@ func (d *HTTPPromptDispatcher) DispatchPrompt(ctx context.Context, req PromptDis
 }
 
 func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req DispatchRequest) (DispatchResponse, error) {
+	if strings.TrimSpace(req.Prompt) == "" {
+		return DispatchResponse{}, errors.New("dispatch prompt cannot be empty")
+	}
+	if strings.TrimSpace(req.Source) == "" {
+		return DispatchResponse{}, errors.New("dispatch source cannot be empty")
+	}
+	if bus := d.getBus(); bus != nil {
+		dispatchID := strings.TrimSpace(req.ID)
+		if dispatchID == "" {
+			dispatchID = uuid.New().String()
+		}
+		args := pubsub.EriDispatchJobArgs{
+			ID:           dispatchID,
+			Source:       req.Source,
+			SessionID:    req.SessionID,
+			TargetID:     req.TargetID,
+			Prompt:       req.Prompt,
+			Effort:       req.Effort,
+			SkipIfActive: req.SkipIfActive,
+		}
+		msgID := "eri:dispatch:" + dispatchID
+		if err := bus.Publish(ctx, pubsub.SubjectEriDispatchJob, msgID, args); err != nil {
+			return DispatchResponse{}, err
+		}
+		return DispatchResponse{
+			Status:     "accepted",
+			DispatchID: dispatchID,
+			MessageID:  dispatchID,
+			SessionID:  req.SessionID,
+		}, nil
+	}
 	return postBrainJSON[DispatchRequest, DispatchResponse](ctx, d, "/dispatch", "dispatch", req)
 }
 
@@ -607,6 +661,11 @@ func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Mes
 		}
 		log.Printf("[Haro] error querying schedule run for %s: %v", dispatchID, err)
 		return err
+	}
+
+	switch strings.ToLower(strings.TrimSpace(run.Status)) {
+	case "completed", "failed", "stale", "skipped_active":
+		return nil
 	}
 
 	status := strings.ToLower(strings.TrimSpace(ev.Status))

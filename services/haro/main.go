@@ -33,6 +33,19 @@ func initHaroJetStream(ctx context.Context, server *Server, database *sql.DB, na
 	return initHaroJetStreamWithFactory(ctx, server, database, natsURL, newBusFn)
 }
 
+type eventBusSetter interface {
+	SetEventBus(bus pubsub.Bus)
+}
+
+func configureServerEventBus(server *Server, b pubsub.Bus) {
+	if server == nil || server.dispatcher == nil {
+		return
+	}
+	if eb, ok := server.dispatcher.(eventBusSetter); ok {
+		eb.SetEventBus(b)
+	}
+}
+
 func initHaroJetStreamWithFactory(ctx context.Context, server *Server, database *sql.DB, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {
@@ -53,6 +66,14 @@ func initHaroJetStreamWithFactory(ctx context.Context, server *Server, database 
 	} else {
 		log.Println("[Haro] Subscribed haro-dispatch queue consumer to aerial.dispatch.*")
 	}
+	if _, err := b.ConsumeQueue(ctx, pubsub.SubjectHaroOneShotJob, "haro-oneshot", func(msgCtx context.Context, msg pubsub.Message) error {
+		return HandleOneShotJob(msgCtx, server, database, msg)
+	}); err != nil {
+		log.Printf("[Haro] warning: failed to subscribe haro-oneshot: %v", err)
+	} else {
+		log.Println("[Haro] Subscribed haro-oneshot queue consumer to " + pubsub.SubjectHaroOneShotJob)
+	}
+	configureServerEventBus(server, b)
 	if server != nil {
 		if _, err := b.Subscribe(ctx, "aerial.events.>", "haro-events", func(msgCtx context.Context, msg pubsub.Message) error {
 			var ev pubsub.ExternalEvent

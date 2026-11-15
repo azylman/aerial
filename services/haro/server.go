@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log"
@@ -440,6 +441,58 @@ func (s *Server) handleScheduleOneShot(w http.ResponseWriter, r *http.Request) {
 		"status": "ok",
 		"id":     schedID,
 	})
+}
+
+// HandleOneShotJob ingests a durable HaroOneShotJobArgs and inserts it idempotently into the database.
+func HandleOneShotJob(ctx context.Context, server *Server, database *sql.DB, msg pubsub.Message) error {
+	if msg == nil {
+		return errors.New("message cannot be nil")
+	}
+	dbHandle := database
+	if dbHandle == nil && server != nil && server.handler != nil {
+		dbHandle = server.handler.db
+	}
+	if dbHandle == nil {
+		return errors.New("database not initialized")
+	}
+
+	var args pubsub.HaroOneShotJobArgs
+	if err := json.Unmarshal(msg.Data(), &args); err != nil {
+		log.Printf("[Haro] warning: failed to unmarshal one-shot job: %v", err)
+		return nil
+	}
+
+	threadID := strings.TrimSpace(args.ThreadID)
+	prompt := strings.TrimSpace(args.Prompt)
+	if threadID == "" || prompt == "" || args.RunAt.IsZero() {
+		log.Printf("[Haro] warning: invalid one-shot job payload: thread_id, prompt, and run_at are required")
+		return nil
+	}
+
+	schedID := strings.TrimSpace(args.ID)
+	if schedID == "" {
+		schedID = uuid.New().String()
+	}
+
+	sched := OneShotSchedule{
+		ID:        schedID,
+		ThreadID:  threadID,
+		Prompt:    prompt,
+		Effort:    normalizeScheduleEffort(args.Effort),
+		RunAt:     args.RunAt.UTC(),
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := InsertOneShotSchedule(ctx, dbHandle, sched); err != nil {
+		log.Printf("[Haro] failed to insert one-shot schedule %s: %v", schedID, err)
+		return err
+	}
+
+	if server != nil {
+		server.InvalidateSchedulesCache()
+	}
+
+	return nil
 }
 
 func (s *Server) recoverFailedEventTrigger(ctx context.Context, trig EventTrigger) {

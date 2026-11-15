@@ -3,13 +3,17 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 func setupTestDB(t *testing.T) *sql.DB {
@@ -478,6 +482,203 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 	}
 }
 
+func TestHTTPPromptDispatcher_Dispatch_EventBus(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
+		t.Fatalf("EnsureCoreStreams: %v", err)
+	}
+
+	done := make(chan struct{}, 1)
+	var gotArgs pubsub.EriDispatchJobArgs
+	var gotSubject string
+	_, err := memBus.Subscribe(ctx, "aerial.jobs.>", "test-sub", func(_ context.Context, msg pubsub.Message) error {
+		gotSubject = msg.Subject()
+		_ = json.Unmarshal(msg.Data(), &gotArgs)
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"accepted","dispatch_id":"mock-id"}`))
+	}))
+	defer srv.Close()
+
+	disp := NewHTTPPromptDispatcher(srv.URL)
+	disp.SetEventBus(memBus)
+
+	req := DispatchRequest{
+		ID:           "disp-eb-1",
+		Source:       "heartbeat",
+		SessionID:    "heartbeat-1",
+		TargetID:     "chan-1",
+		Prompt:       "run prompt",
+		Effort:       "medium",
+		SkipIfActive: true,
+	}
+	resp, err := disp.Dispatch(ctx, req)
+	if err != nil {
+		t.Fatalf("Dispatch() unexpected error: %v", err)
+	}
+	if resp.Status != "accepted" || resp.DispatchID != "disp-eb-1" {
+		t.Errorf("resp = %+v, want accepted/disp-eb-1", resp)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for dispatched job message")
+	}
+
+	if gotSubject != pubsub.SubjectEriDispatchJob {
+		t.Errorf("subject = %q, want %q", gotSubject, pubsub.SubjectEriDispatchJob)
+	}
+	if gotArgs.ID != "disp-eb-1" || gotArgs.Source != "heartbeat" || gotArgs.Prompt != "run prompt" {
+		t.Errorf("gotArgs = %+v", gotArgs)
+	}
+
+	// Dispatch with empty ID defaults to generated UUID
+	reqEmptyID := DispatchRequest{
+		Source: "heartbeat",
+		Prompt: "auto id prompt",
+	}
+	respEmptyID, err := disp.Dispatch(ctx, reqEmptyID)
+	if err != nil {
+		t.Fatalf("Dispatch() with empty ID error: %v", err)
+	}
+	if respEmptyID.DispatchID == "" {
+		t.Errorf("expected auto-generated dispatch ID")
+	}
+
+	// Dispatch with empty prompt returns error
+	if _, err := disp.Dispatch(ctx, DispatchRequest{Source: "heartbeat", Prompt: "   "}); err == nil {
+		t.Errorf("expected error for empty prompt")
+	}
+
+	// Dispatch with empty source returns error
+	if _, err := disp.Dispatch(ctx, DispatchRequest{Source: "", Prompt: "valid prompt"}); err == nil {
+		t.Errorf("expected error for empty source")
+	}
+}
+
+func TestHTTPPromptDispatcher_ConcurrentBusSafety(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
+		t.Fatalf("EnsureCoreStreams: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"accepted","dispatch_id":"mock-id"}`))
+	}))
+	defer srv.Close()
+
+	disp := NewHTTPPromptDispatcher(srv.URL)
+	var wg sync.WaitGroup
+	const iterations = 50
+
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := range iterations {
+			if i%2 == 0 {
+				disp.SetEventBus(memBus)
+			} else {
+				disp.SetEventBus(nil)
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			_ = disp.EventBus()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := range iterations {
+			_, _ = disp.Dispatch(ctx, DispatchRequest{
+				ID:     fmt.Sprintf("disp-race-%d", i),
+				Source: "heartbeat",
+				Prompt: "test prompt",
+			})
+		}
+	}()
+
+	wg.Wait()
+}
+
+func TestHandleOneShotJob_Scenarios(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+
+	// Nil message returns error
+	if err := HandleOneShotJob(ctx, nil, db, nil); err == nil {
+		t.Error("expected error for nil message")
+	}
+
+	// Nil database returns error
+	msgValid := &memoryMsg{data: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}
+	if err := HandleOneShotJob(ctx, nil, nil, msgValid); err == nil {
+		t.Error("expected error for nil database")
+	}
+
+	// Invalid JSON drops cleanly
+	msgBadJSON := &memoryMsg{data: []byte(`not-json`)}
+	if err := HandleOneShotJob(ctx, nil, db, msgBadJSON); err != nil {
+		t.Errorf("expected nil error for bad json, got %v", err)
+	}
+
+	// Missing required fields drops cleanly
+	msgMissing := &memoryMsg{data: []byte(`{"thread_id":""}`)}
+	if err := HandleOneShotJob(ctx, nil, db, msgMissing); err != nil {
+		t.Errorf("expected nil error for missing fields, got %v", err)
+	}
+
+	// Valid insert succeeds
+	if err := HandleOneShotJob(ctx, nil, db, msgValid); err != nil {
+		t.Fatalf("HandleOneShotJob valid failed: %v", err)
+	}
+	sched, err := GetOneShotSchedule(ctx, db, "os-valid-1")
+	if err != nil {
+		t.Fatalf("GetOneShotSchedule failed: %v", err)
+	}
+	if sched.Prompt != "p1" || sched.ThreadID != "th-1" {
+		t.Errorf("unexpected schedule: %+v", sched)
+	}
+
+	// Duplicate insert is idempotent (no error, remains valid)
+	if err := HandleOneShotJob(ctx, nil, db, msgValid); err != nil {
+		t.Fatalf("HandleOneShotJob duplicate failed: %v", err)
+	}
+
+	// Server invalidates cache on insert
+	toolHandler := NewToolHandler(&Config{DatabaseURL: ":memory:"}, db)
+	srv := NewServer(toolHandler)
+	msgWithServer := &memoryMsg{data: []byte(fmt.Sprintf(`{"thread_id":"th-2","prompt":"p2","run_at":%q}`, now.Format(time.RFC3339)))}
+	if err := HandleOneShotJob(ctx, srv, nil, msgWithServer); err != nil {
+		t.Fatalf("HandleOneShotJob with server failed: %v", err)
+	}
+}
+
 func TestNewHTTPPromptDispatcher_Validation(t *testing.T) {
 	t.Run("empty URL panics", func(t *testing.T) {
 		defer func() {
@@ -627,14 +828,15 @@ func TestDB_DeleteByID(t *testing.T) {
 	_ = InsertOneShotSchedule(ctx, db, OneShotSchedule{ID: "del-test-1", ThreadID: "th-1", RunAt: time.Now()})
 
 	tests := []struct {
-		name        string
-		nilDB       bool
-		query       string
-		emptyErrMsg string
-		errPrefix   string
-		id          string
-		wantErr     bool
-		wantDeleted bool
+		name            string
+		nilDB           bool
+		query           string
+		emptyErrMsg     string
+		errPrefix       string
+		id              string
+		wantErr         bool
+		wantErrContains string
+		wantDeleted     bool
 	}{
 		{
 			name:        "NilDB",
@@ -645,20 +847,22 @@ func TestDB_DeleteByID(t *testing.T) {
 			wantDeleted: false,
 		},
 		{
-			name:        "EmptyIDCustomMessage",
-			query:       "DELETE FROM one_shot_schedules WHERE id = $1",
-			emptyErrMsg: "custom id required",
-			id:          "   ",
-			wantErr:     true,
-			wantDeleted: false,
+			name:            "EmptyIDCustomMessage",
+			query:           "DELETE FROM one_shot_schedules WHERE id = $1",
+			emptyErrMsg:     "custom id required",
+			id:              "   ",
+			wantErr:         true,
+			wantErrContains: "custom id required",
+			wantDeleted:     false,
 		},
 		{
-			name:        "BadQuerySyntax",
-			query:       "DELETE FROM non_existent_table_xyz WHERE id = $1",
-			errPrefix:   "failed to delete test item",
-			id:          "del-test-1",
-			wantErr:     true,
-			wantDeleted: false,
+			name:            "BadQuerySyntax",
+			query:           "DELETE FROM non_existent_table_xyz WHERE id = $1",
+			errPrefix:       "failed to delete test item",
+			id:              "del-test-1",
+			wantErr:         true,
+			wantErrContains: "failed to delete test item",
+			wantDeleted:     false,
 		},
 		{
 			name:        "SuccessExisting",
@@ -685,6 +889,11 @@ func TestDB_DeleteByID(t *testing.T) {
 			deleted, err := deleteByID(ctx, targetDB, tc.query, tc.emptyErrMsg, tc.errPrefix, tc.id)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("deleteByID() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErrContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Errorf("deleteByID() err = %v, wantErrContains = %q", err, tc.wantErrContains)
+				}
 			}
 			if deleted != tc.wantDeleted {
 				t.Errorf("deleteByID() deleted = %v, want %v", deleted, tc.wantDeleted)
