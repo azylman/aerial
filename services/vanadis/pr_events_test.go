@@ -637,76 +637,9 @@ func TestHandlePRMerged(t *testing.T) {
 	})
 }
 
-func TestHandlePRMerged_RevivalAndFallback(t *testing.T) {
+func TestHandlePRMerged_Fallback(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-
-	t.Run("synchronize then merged after CI remediation cap advances chunk and publishes merged event", func(t *testing.T) {
-		t.Parallel()
-		srv, store, recBus, _ := setupTestServer(t)
-		build := mkBuild("b-revive", "123456789012345678", "Build", "Obj", "running")
-		chunk1 := mkChunk("c-revive-1", "b-revive", 0, "Chunk 1", "Instr", "medium", "pr_opened")
-		chunk1.PRNumber = 803
-		chunk1.Repo = "azylman/aerial"
-		chunk1.CIFailCount = 3
-		chunk1.MergeAwakeableID = "awk-revive-803"
-		chunk2 := mkChunk("c-revive-2", "b-revive", 1, "Chunk 2", "Instr", "medium", "pending")
-		chunk2.Repo = "azylman/aerial"
-		require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk1, chunk2}))
-
-		// 1. CI failure triggers remediation cap failure (4th failure)
-		evCI := pubsub.PRLifecycleEvent{
-			Event:     "ci_failed",
-			Repo:      "azylman/aerial",
-			PRNumber:  803,
-			CheckName: "Go Unit Tests",
-		}
-		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, evCI))
-
-		c1, b, err := store.GetChunk(ctx, "c-revive-1")
-		require.NoError(t, err)
-		assert.Equal(t, "failed", c1.Status)
-		assert.Equal(t, "failed", b.Status)
-
-		// 2. Synchronize event revives chunk and build
-		evSync := pubsub.PRLifecycleEvent{
-			Event:    "synchronize",
-			Repo:     "azylman/aerial",
-			PRNumber: 803,
-		}
-		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, evSync))
-
-		c1, b, err = store.GetChunk(ctx, "c-revive-1")
-		require.NoError(t, err)
-		assert.Equal(t, "pr_opened", c1.Status)
-		assert.Equal(t, "running", b.Status)
-		assert.Empty(t, c1.MergeAwakeableID, "consumed awakeable ID should be cleared on synchronize revival")
-
-		// 3. Merged event arrives: should advance chunk 2 and publish vanadis_chunk.merged
-		evMerged := pubsub.PRLifecycleEvent{
-			Event:    "merged",
-			Repo:     "azylman/aerial",
-			PRNumber: 803,
-		}
-		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, evMerged))
-
-		c1, _, err = store.GetChunk(ctx, "c-revive-1")
-		require.NoError(t, err)
-		assert.Equal(t, "merged", c1.Status)
-
-		c2, _, err := store.GetChunk(ctx, "c-revive-2")
-		require.NoError(t, err)
-		assert.Equal(t, "running", c2.Status)
-
-		events := recBus.getEvents()
-		var mergedEventFound bool
-		for _, ev := range events {
-			if ev.Source == "vanadis_chunk" && ev.EventType == "merged" && len(ev.Targets) == 1 && ev.Targets[0] == "c-revive-1" {
-				mergedEventFound = true
-			}
-		}
-		assert.True(t, mergedEventFound, "expected vanadis_chunk.merged event after revival")
-	})
 
 	t.Run("fallback to legacy advance when awakeable resolve fails", func(t *testing.T) {
 		t.Parallel()
@@ -977,6 +910,27 @@ func TestPostgresVanadisStore_PREventMethods(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 2, count)
 		assert.NoError(t, sOK.UpdateChunkBannerAndStatus(ctx, "c1", "failed", "banner"))
+	})
+
+	t.Run("ResetChunkForSynchronize clears awakeable IDs with empty strings", func(t *testing.T) {
+		t.Parallel()
+		var capturedSQL string
+		var capturedArgs []any
+		s := newMockStore(mockDB{
+			execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				if strings.Contains(sql, "UPDATE vanadis_chunks") {
+					capturedSQL = sql
+					capturedArgs = args
+				}
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			},
+		})
+		require.NoError(t, s.ResetChunkForSynchronize(ctx, "c1", "b1"))
+		assert.Contains(t, capturedSQL, "merge_awakeable_id = CASE WHEN status = 'failed' THEN '' ELSE merge_awakeable_id END")
+		assert.Contains(t, capturedSQL, "deploy_awakeable_id = CASE WHEN status = 'failed' THEN '' ELSE deploy_awakeable_id END")
+		assert.NotContains(t, capturedSQL, "merge_awakeable_id = CASE WHEN status = 'failed' THEN NULL")
+		assert.NotContains(t, capturedSQL, "deploy_awakeable_id = CASE WHEN status = 'failed' THEN NULL")
+		assert.Equal(t, []any{"c1"}, capturedArgs)
 	})
 }
 

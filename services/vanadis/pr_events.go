@@ -77,8 +77,8 @@ func (s *PostgresVanadisStore) ResetChunkForSynchronize(ctx context.Context, chu
 SET ci_fail_count = 0,
     ci_checks = '{}'::jsonb,
     banner = '',
-    merge_awakeable_id = CASE WHEN status = 'failed' THEN NULL ELSE merge_awakeable_id END,
-    deploy_awakeable_id = CASE WHEN status = 'failed' THEN NULL ELSE deploy_awakeable_id END,
+    merge_awakeable_id = CASE WHEN status = 'failed' THEN '' ELSE merge_awakeable_id END,
+    deploy_awakeable_id = CASE WHEN status = 'failed' THEN '' ELSE deploy_awakeable_id END,
     status = CASE WHEN status = 'failed' THEN 'pr_opened' ELSE status END,
     completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END,
     updated_at = CURRENT_TIMESTAMP
