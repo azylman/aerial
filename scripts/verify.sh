@@ -202,13 +202,13 @@ run_golangci_lint() {
         if has_cmd golangci-lint; then
             export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}"
             # shellcheck disable=SC2086
-            (cd "$svc" && golangci-lint run --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" $targets)
+            (cd "$svc" && golangci-lint run --concurrency "${AERIAL_LINT_CONCURRENCY:-4}" --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" $targets)
         elif has_docker; then
             # shellcheck disable=SC2086
             docker run --rm \
                 -v "$REPO_ROOT:/workspace" -w "/workspace/$svc" \
                 golangci/golangci-lint:v2.15.0 \
-                golangci-lint run --path-prefix="$svc/" --config /workspace/.golangci.yml $targets
+                golangci-lint run --concurrency "${AERIAL_LINT_CONCURRENCY:-4}" --path-prefix="$svc/" --config /workspace/.golangci.yml $targets
         else
             echo "🚨 [Aerial Verify] Error: Neither golangci-lint nor docker found in PATH." >&2
             exit 1

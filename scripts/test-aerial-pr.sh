@@ -486,6 +486,85 @@ REBASE_STAGED_CHECK=$(bash -c "
 assert_eq "true" "$(echo "$REBASE_STAGED_CHECK" | grep -q 'rebase_clean:ok' && echo true || echo false)" "rebase_staged_changes rebases onto advanced upstream and keeps changes staged"
 assert_eq "true" "$(echo "$REBASE_STAGED_CHECK" | grep -q 'rebase_conflict:aborted_cleanly' && echo true || echo false)" "rebase_staged_changes fails closed on merge conflict, restores staged changes, and preserves workspace"
 
+# Case 11b: rebase_staged_changes preserves intermediate remote branch commits when remote advances after checkout
+REBASE_REMOTE_ADVANCE_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-adv-remote.XXXXXX)
+    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-adv-work.XXXXXX)
+    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-adv-up.XXXXXX)
+    trap 'rm -rf \"\$REMOTE_DIR\" \"\$WORK_DIR\" \"\$UPSTREAM_DIR\"' EXIT
+
+    git init -q --bare \"\$REMOTE_DIR\"
+    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
+    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
+    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
+    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
+    echo 'base' > \"\$UPSTREAM_DIR/base.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'base'
+    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
+
+    # Create feature branch on origin with initial commit
+    git -C \"\$UPSTREAM_DIR\" checkout -q -b feat/test
+    echo 'remote-c1' > \"\$UPSTREAM_DIR/file1.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'c1'
+    git -C \"\$UPSTREAM_DIR\" push -q -u origin feat/test
+
+    # Clone into WORK_DIR at feat/test (at commit 1)
+    git clone -q -b feat/test \"\$REMOTE_DIR\" \"\$WORK_DIR\"
+    git -C \"\$WORK_DIR\" config user.name 'Tester'
+    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
+
+    # Remote advances with commit 2 while scratch checkout is open
+    echo 'remote-c2' > \"\$UPSTREAM_DIR/file2.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'c2 remote'
+    git -C \"\$UPSTREAM_DIR\" push -q origin feat/test
+    C2_SHA=\$(git -C \"\$UPSTREAM_DIR\" rev-parse HEAD)
+
+    # In WORK_DIR, user stages a local modification
+    cd \"\$WORK_DIR\"
+    echo 'local-c3' > file3.txt
+    git add file3.txt
+
+    # Run rebase_staged_changes
+    if rebase_staged_changes main 'feat: local' 2>/dev/null; then
+        # file2.txt must exist with remote content (not reverted)
+        if [ -f file2.txt ] && [ \"\$(cat file2.txt)\" = 'remote-c2' ]; then
+            # file2.txt must NOT be staged as deletion
+            if ! git diff --cached --name-status | grep -q '^D.*file2\.txt'; then
+                # file3.txt must be staged
+                if git diff --cached --name-only | grep -q '^file3\.txt$'; then
+                    echo 'adv_rebase:ok'
+                fi
+            fi
+        fi
+    fi
+
+    # Commit and push via push_scratch_branch
+    git commit -q -m 'feat: local'
+    if push_scratch_branch feat/test 2>/dev/null; then
+        REMOTE_HEAD=\$(git -C \"\$REMOTE_DIR\" rev-parse refs/heads/feat/test)
+        if git merge-base --is-ancestor \"\$C2_SHA\" \"\$REMOTE_HEAD\"; then
+            echo 'adv_push:ok'
+        fi
+    fi
+
+    # Advance remote with commit 4
+    echo 'remote-c4' > \"\$UPSTREAM_DIR/file4.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'c4 remote'
+    git -C \"\$UPSTREAM_DIR\" push -f -q origin feat/test
+
+    # Local diverged without rebase; push_scratch_branch must fail closed
+    echo 'local-c5' > file5.txt
+    git add . && git commit -q -m 'c5 local diverged'
+    if ! push_scratch_branch feat/test 2>/dev/null; then
+        echo 'diverged_push_rejected:ok'
+    fi
+")
+assert_eq "true" "$(echo "$REBASE_REMOTE_ADVANCE_CHECK" | grep -q 'adv_rebase:ok' && echo true || echo false)" "rebase_staged_changes preserves intermediate remote branch commits when remote advances"
+assert_eq "true" "$(echo "$REBASE_REMOTE_ADVANCE_CHECK" | grep -q 'adv_push:ok' && echo true || echo false)" "push_scratch_branch preserves advanced remote commits when pushing rebased changes"
+assert_eq "true" "$(echo "$REBASE_REMOTE_ADVANCE_CHECK" | grep -q 'diverged_push_rejected:ok' && echo true || echo false)" "push_scratch_branch rejects pushing over un-incorporated remote advances"
+
 # Case 12: override_roborev validation, mock execution, comment verification, rerun fallback, and output formatting
 ROBOREV_OVERRIDE_CHECK=$(
     REPO_TEST_MODE=1
