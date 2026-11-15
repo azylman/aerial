@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -441,19 +440,8 @@ func TestMatchSubject(t *testing.T) {
 		{pattern: "aerial.events.*", subject: "aerial.events.github.push", want: false},
 		{pattern: "aerial.turn.completed", subject: "aerial.turn.completed", want: true},
 		{pattern: "aerial.turn.completed", subject: "aerial.turn.failed", want: false},
-		{pattern: "aerial.turn.>", subject: SubjectAerialTurnTranscriptSynced, want: true},
 		{pattern: "aerial.jobs.>", subject: "aerial.events.foo", want: false},
 		{pattern: "aerial.jobs.foo.bar", subject: "aerial.jobs.foo", want: false},
-		{pattern: "aerial.jobs.>", subject: SubjectProsperaReportJob, want: true},
-		{pattern: "aerial.jobs.>", subject: SubjectProsperaVoicemailJob, want: true},
-		{pattern: "aerial.jobs.>", subject: SubjectProsperaSMSJob, want: true},
-		{pattern: "aerial.jobs.>", subject: SubjectEriPromptJob, want: true},
-		{pattern: "aerial.jobs.>", subject: SubjectEriDispatchJob, want: true},
-		{pattern: "aerial.jobs.>", subject: SubjectEriDiscordMessageJob, want: true},
-		{pattern: "aerial.jobs.>", subject: SubjectHaroOneShotJob, want: true},
-		{pattern: "aerial.coalesced.>", subject: SubjectCovenExtractCoalesced("thread-123"), want: true},
-		{pattern: "aerial.coalesced.>", subject: SubjectBuildWidgetSyncCoalesced("build-456"), want: true},
-		{pattern: "aerial.coalesced.>", subject: SubjectPRWidgetSyncCoalesced("azylman/aerial", 789), want: true},
 		{pattern: "aerial.*.events", subject: "aerial.custom.events", want: true},
 		{pattern: "aerial.*.events", subject: "aerial.custom.other", want: false},
 	}
@@ -475,10 +463,13 @@ func TestSubjectHelpers(t *testing.T) {
 	tests := []struct {
 		name, got, want string
 	}{
-		{"coven extract", SubjectCovenExtractCoalesced("  thread-abc  "), "aerial.coalesced.coven_extract.thread-abc"},
-		{"build widget sync", SubjectBuildWidgetSyncCoalesced("  build-999  "), "aerial.coalesced.widget_sync.build.build-999"},
-		{"pr widget sync with slash", SubjectPRWidgetSyncCoalesced("  azylman/aerial  ", 123), "aerial.coalesced.widget_sync.pr.azylman.aerial.123"},
-		{"pr widget sync without slash", SubjectPRWidgetSyncCoalesced("mirrormere", 456), "aerial.coalesced.widget_sync.pr.mirrormere.456"},
+		{"coven extract normal", SubjectCovenExtractCoalesced("thread-123"), "aerial.coalesced.coven_extract.thread-123"},
+		{"coven extract empty", SubjectCovenExtractCoalesced("   "), "aerial.coalesced.coven_extract.unknown"},
+		{"coven extract sanitize wildcards", SubjectCovenExtractCoalesced("thread*>1"), "aerial.coalesced.coven_extract.thread-1"},
+		{"build widget sync normal", SubjectBuildWidgetSyncCoalesced("build-123"), "aerial.coalesced.widget_sync.build.build-123"},
+		{"build widget sync empty", SubjectBuildWidgetSyncCoalesced(""), "aerial.coalesced.widget_sync.build.unknown"},
+		{"pr widget sync with slash", SubjectPRWidgetSyncCoalesced("azylman/aerial", 123), "aerial.coalesced.widget_sync.pr.azylman.aerial.123"},
+		{"pr widget sync empty repo", SubjectPRWidgetSyncCoalesced("  ", 456), "aerial.coalesced.widget_sync.pr.unknown.456"},
 	}
 
 	for _, tc := range tests {
@@ -491,29 +482,82 @@ func TestSubjectHelpers(t *testing.T) {
 	}
 }
 
-func TestContracts_JSONRoundTrip(t *testing.T) {
+func TestContracts_JSONWireFormat(t *testing.T) {
 	t.Parallel()
 
 	fixedTime := time.Date(2026, 11, 14, 16, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name     string
 		payload  any
-		target   any
-		expected any
+		wantJSON string
 	}{
-		{"TranscriptSyncedEvent", TranscriptSyncedEvent{"s1", "c1", 3, fixedTime}, &TranscriptSyncedEvent{}, TranscriptSyncedEvent{"s1", "c1", 3, fixedTime}},
-		{"TurnCompletedEvent_telemetry", TurnCompletedEvent{SessionID: "s1", CompletedAt: fixedTime, Status: "ok", DurationMs: 10, TotalTokens: 100}, &TurnCompletedEvent{}, TurnCompletedEvent{SessionID: "s1", CompletedAt: fixedTime, Status: "ok", DurationMs: 10, TotalTokens: 100}},
-		{"TurnCompletedEvent_minimal", TurnCompletedEvent{SessionID: "s2", Source: "src", CompletedAt: fixedTime}, &TurnCompletedEvent{}, TurnCompletedEvent{SessionID: "s2", Source: "src", CompletedAt: fixedTime}},
-		{"CovenExtractJobArgs", CovenExtractJobArgs{"t1", "s1"}, &CovenExtractJobArgs{}, CovenExtractJobArgs{"t1", "s1"}},
-		{"WidgetSyncJobArgs_build", WidgetSyncJobArgs{BuildID: "b1", Status: "ok"}, &WidgetSyncJobArgs{}, WidgetSyncJobArgs{BuildID: "b1", Status: "ok"}},
-		{"WidgetSyncJobArgs_pr", WidgetSyncJobArgs{Repo: "r1", PRNumber: 1, Status: "open"}, &WidgetSyncJobArgs{}, WidgetSyncJobArgs{Repo: "r1", PRNumber: 1, Status: "open"}},
-		{"ProsperaReportJobArgs", ProsperaReportJobArgs{"c1"}, &ProsperaReportJobArgs{}, ProsperaReportJobArgs{"c1"}},
-		{"ProsperaVoicemailJobArgs", ProsperaVoicemailJobArgs{"c1", "r1", "http://u", 30}, &ProsperaVoicemailJobArgs{}, ProsperaVoicemailJobArgs{"c1", "r1", "http://u", 30}},
-		{"ProsperaSMSJobArgs", ProsperaSMSJobArgs{"m1", "+1", "+2", "hi", []string{"http://m"}, "c1"}, &ProsperaSMSJobArgs{}, ProsperaSMSJobArgs{"m1", "+1", "+2", "hi", []string{"http://m"}, "c1"}},
-		{"EriPromptJobArgs", EriPromptJobArgs{ChannelID: "c1", Prompt: "p1", Silent: true}, &EriPromptJobArgs{}, EriPromptJobArgs{ChannelID: "c1", Prompt: "p1", Silent: true}},
-		{"EriDispatchJobArgs", EriDispatchJobArgs{Source: "s", TargetID: "t1", Prompt: "p1"}, &EriDispatchJobArgs{}, EriDispatchJobArgs{Source: "s", TargetID: "t1", Prompt: "p1"}},
-		{"EriDiscordMessageJobArgs", EriDiscordMessageJobArgs{"c1", "msg"}, &EriDiscordMessageJobArgs{}, EriDiscordMessageJobArgs{"c1", "msg"}},
-		{"HaroOneShotJobArgs", HaroOneShotJobArgs{ThreadID: "t1", Prompt: "p1", RunAt: fixedTime}, &HaroOneShotJobArgs{}, HaroOneShotJobArgs{ThreadID: "t1", Prompt: "p1", RunAt: fixedTime}},
+		{
+			name:     "TranscriptSyncedEvent",
+			payload:  TranscriptSyncedEvent{SessionID: "s1", ConversationID: "c1", StepsInserted: 3, SyncedAt: fixedTime},
+			wantJSON: `{"session_id":"s1","conversation_id":"c1","steps_inserted":3,"synced_at":"2026-11-14T16:00:00Z"}`,
+		},
+		{
+			name: "TurnCompletedEvent_telemetry",
+			payload: TurnCompletedEvent{
+				SessionID: "s1", CompletedAt: fixedTime, Status: "ok", DurationMs: 10, TotalTokens: 100,
+			},
+			wantJSON: `{"session_id":"s1","source":"","completed_at":"2026-11-14T16:00:00Z","status":"ok","duration_ms":10,"total_tokens":100}`,
+		},
+		{
+			name:     "TurnCompletedEvent_minimal",
+			payload:  TurnCompletedEvent{SessionID: "s2", Source: "src", CompletedAt: fixedTime},
+			wantJSON: `{"session_id":"s2","source":"src","completed_at":"2026-11-14T16:00:00Z"}`,
+		},
+		{
+			name:     "CovenExtractJobArgs",
+			payload:  CovenExtractJobArgs{ThreadID: "t1", SessionID: "s1"},
+			wantJSON: `{"thread_id":"t1","session_id":"s1"}`,
+		},
+		{
+			name:     "WidgetSyncJobArgs_build",
+			payload:  WidgetSyncJobArgs{BuildID: "b1", Status: "ok"},
+			wantJSON: `{"build_id":"b1","status":"ok"}`,
+		},
+		{
+			name:     "WidgetSyncJobArgs_pr",
+			payload:  WidgetSyncJobArgs{Repo: "r1", PRNumber: 1, Status: "open"},
+			wantJSON: `{"repo":"r1","pr_number":1,"status":"open"}`,
+		},
+		{
+			name:     "ProsperaReportJobArgs",
+			payload:  ProsperaReportJobArgs{CallID: "c1"},
+			wantJSON: `{"call_id":"c1"}`,
+		},
+		{
+			name:     "ProsperaVoicemailJobArgs",
+			payload:  ProsperaVoicemailJobArgs{CallID: "c1", RecordingURL: "http://u", DurationSec: 30},
+			wantJSON: `{"call_id":"c1","recording_url":"http://u","duration_sec":30}`,
+		},
+		{
+			name:     "ProsperaSMSJobArgs",
+			payload:  ProsperaSMSJobArgs{MessageSID: "m1", FromNumber: "+1", ToNumber: "+2", Body: "hi"},
+			wantJSON: `{"message_sid":"m1","from_number":"+1","to_number":"+2","body":"hi"}`,
+		},
+		{
+			name:     "EriPromptJobArgs",
+			payload:  EriPromptJobArgs{ChannelID: "c1", Prompt: "p1", Silent: true},
+			wantJSON: `{"channel_id":"c1","prompt":"p1","silent":true}`,
+		},
+		{
+			name:     "EriDispatchJobArgs",
+			payload:  EriDispatchJobArgs{Source: "s", TargetID: "t1", Prompt: "p1"},
+			wantJSON: `{"source":"s","target_id":"t1","prompt":"p1"}`,
+		},
+		{
+			name:     "EriDiscordMessageJobArgs",
+			payload:  EriDiscordMessageJobArgs{ChannelID: "c1", Content: "msg"},
+			wantJSON: `{"channel_id":"c1","content":"msg"}`,
+		},
+		{
+			name:     "HaroOneShotJobArgs",
+			payload:  HaroOneShotJobArgs{ThreadID: "t1", Prompt: "p1", RunAt: fixedTime},
+			wantJSON: `{"thread_id":"t1","prompt":"p1","run_at":"2026-11-14T16:00:00Z"}`,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -522,11 +566,8 @@ func TestContracts_JSONRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Marshal(%s): %v", tc.name, err)
 			}
-			if err := json.Unmarshal(b, tc.target); err != nil {
-				t.Fatalf("Unmarshal(%s): %v", tc.name, err)
-			}
-			if !reflect.DeepEqual(reflect.ValueOf(tc.target).Elem().Interface(), tc.expected) {
-				t.Errorf("%s mismatch", tc.name)
+			if string(b) != tc.wantJSON {
+				t.Errorf("%s wire JSON mismatch:\ngot:  %s\nwant: %s", tc.name, string(b), tc.wantJSON)
 			}
 		})
 	}

@@ -213,19 +213,49 @@ type HaroOneShotJobArgs struct {
 	RunAt    time.Time `json:"run_at"`
 }
 
+func cleanSubjectToken(token string) string {
+	t := strings.TrimSpace(token)
+	if t == "" {
+		return "unknown"
+	}
+	t = strings.ReplaceAll(t, "*", "-")
+	t = strings.ReplaceAll(t, ">", "-")
+	t = strings.ReplaceAll(t, " ", "-")
+	for strings.Contains(t, "--") {
+		t = strings.ReplaceAll(t, "--", "-")
+	}
+	t = strings.Trim(t, ".-")
+	if t == "" {
+		return "unknown"
+	}
+	return t
+}
+
 // SubjectCovenExtractCoalesced returns the coalesced subject for a thread's fact extraction.
 func SubjectCovenExtractCoalesced(threadID string) string {
-	return SubjectCovenExtractPrefix + strings.TrimSpace(threadID)
+	t := cleanSubjectToken(threadID)
+	t = strings.ReplaceAll(t, ".", "-")
+	if t == "" {
+		t = "unknown"
+	}
+	return SubjectCovenExtractPrefix + t
 }
 
 // SubjectBuildWidgetSyncCoalesced returns the coalesced subject for build widget sync.
 func SubjectBuildWidgetSyncCoalesced(buildID string) string {
-	return "aerial.coalesced.widget_sync.build." + strings.TrimSpace(buildID)
+	t := cleanSubjectToken(buildID)
+	t = strings.ReplaceAll(t, ".", "-")
+	if t == "" {
+		t = "unknown"
+	}
+	return "aerial.coalesced.widget_sync.build." + t
 }
 
 // SubjectPRWidgetSyncCoalesced returns the coalesced subject for PR widget sync.
 func SubjectPRWidgetSyncCoalesced(repo string, prNumber int) string {
-	return fmt.Sprintf("aerial.coalesced.widget_sync.pr.%s.%d", strings.ReplaceAll(strings.TrimSpace(repo), "/", "."), prNumber)
+	r := strings.ReplaceAll(strings.TrimSpace(repo), "/", ".")
+	r = cleanSubjectToken(r)
+	return fmt.Sprintf("aerial.coalesced.widget_sync.pr.%s.%d", r, prNumber)
 }
 
 // PRRolloutState tracks Kubernetes / GitOps rollout progress across jobs and Kustomizations.
