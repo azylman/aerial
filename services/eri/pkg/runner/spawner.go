@@ -2,10 +2,16 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
 )
 
 // ProcessHandle abstracts an operating system process.
@@ -69,23 +75,24 @@ func (h *OSProcessHandle) Wait() error {
 	return nil
 }
 
-// DefaultDaemonSpawner launches an agy OS subprocess.
-type DefaultDaemonSpawner struct{}
+var defaultSpawnRetryDelays = []time.Duration{
+	50 * time.Millisecond,
+	100 * time.Millisecond,
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+	1 * time.Second,
+	1500 * time.Millisecond,
+	1600 * time.Millisecond,
+}
 
-func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	bin := cfg.AgyBin
-	if cfg.IsClaude() {
-		bin = cfg.ClaudeBin
-		if bin == "" {
-			bin = "claude"
-		}
-	} else if bin == "" {
-		bin = "agy"
-	}
-	cmd := exec.CommandContext(ctx, bin, BuildDaemonArgs(cfg)...)
+// DefaultDaemonSpawner launches an agy OS subprocess.
+type DefaultDaemonSpawner struct {
+	RetryDelays []time.Duration
+	spawnOnceFn func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)
+}
+
+func spawnOnce(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	cmd := exec.CommandContext(ctx, bin, args...)
 	ConfigureProcessGroup(cmd)
 	cmd.Dir = cfg.Cwd
 	cmd.Env = cfg.Env
@@ -116,4 +123,104 @@ func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.
 		return nil, nil, nil, nil, fmt.Errorf("failed to start daemon process: %w", err)
 	}
 	return stdin, stdout, stderr, &OSProcessHandle{cmd: cmd}, nil
+}
+
+func isTransientBinarySpawnError(bin string, cwd string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ETXTBSY) {
+		return true
+	}
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+		return hasActiveBinaryReplacement(bin, cwd)
+	}
+	return false
+}
+
+func hasActiveBinaryReplacement(bin string, cwd string) bool {
+	if bin == "" {
+		return false
+	}
+
+	var candidates []string
+	switch {
+	case filepath.IsAbs(bin):
+		candidates = []string{filepath.Clean(bin)}
+	case strings.Contains(bin, "/"):
+		if cwd != "" {
+			candidates = []string{filepath.Join(cwd, bin)}
+		} else {
+			candidates = []string{filepath.Clean(bin)}
+		}
+	default:
+		candidates = append(candidates, filepath.Join("/usr/local/bin", bin))
+		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+			if dir != "" {
+				candidates = append(candidates, filepath.Join(dir, bin))
+			}
+		}
+	}
+
+	for _, cand := range candidates {
+		matches, err := filepath.Glob(cand + ".*.old")
+		if err == nil && len(matches) > 0 {
+			return true
+		}
+		info, err := os.Stat(cand)
+		if err == nil && info.Mode().IsRegular() && (info.Mode().Perm()&0o111 == 0) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	bin := cfg.AgyBin
+	if cfg.IsClaude() {
+		bin = cfg.ClaudeBin
+		if bin == "" {
+			bin = "claude"
+		}
+	} else if bin == "" {
+		bin = "agy"
+	}
+	args := BuildDaemonArgs(cfg)
+
+	delays := s.RetryDelays
+	if len(delays) == 0 {
+		delays = defaultSpawnRetryDelays
+	}
+
+	spawnFn := spawnOnce
+	if s.spawnOnceFn != nil {
+		spawnFn = s.spawnOnceFn
+	}
+
+	attempt := 0
+	for {
+		stdin, stdout, stderr, handle, err := spawnFn(ctx, bin, args, cfg)
+		if err == nil {
+			return stdin, stdout, stderr, handle, nil
+		}
+
+		if attempt >= len(delays) || !isTransientBinarySpawnError(bin, cfg.Cwd, err) {
+			return nil, nil, nil, nil, err
+		}
+
+		delay := delays[attempt]
+		attempt++
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, nil, nil, nil, fmt.Errorf("failed spawning daemon: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
