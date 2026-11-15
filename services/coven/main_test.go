@@ -360,6 +360,13 @@ func (r *retrySubscribeBus) Subscribe(ctx context.Context, subject, durable stri
 	return sub, err
 }
 
+func setSubscribeRetryIntervalForTest(d time.Duration) func() {
+	prev := subscribeRetryIntervalNs.Swap(int64(d))
+	return func() {
+		subscribeRetryIntervalNs.Store(prev)
+	}
+}
+
 func TestCoven_RetrySubscribeCovenTurns(t *testing.T) {
 	restore := setSubscribeRetryIntervalForTest(5 * time.Millisecond)
 	defer restore()

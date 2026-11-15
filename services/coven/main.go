@@ -68,13 +68,6 @@ func getSubscribeRetryInterval() time.Duration {
 	return time.Duration(subscribeRetryIntervalNs.Load())
 }
 
-func setSubscribeRetryIntervalForTest(d time.Duration) func() {
-	prev := subscribeRetryIntervalNs.Swap(int64(d))
-	return func() {
-		subscribeRetryIntervalNs.Store(prev)
-	}
-}
-
 func retrySubscribeCovenTurns(ctx context.Context, b pubsub.Bus, worker *Worker) {
 	ticker := time.NewTicker(getSubscribeRetryInterval())
 	defer ticker.Stop()
