@@ -52,7 +52,7 @@ func validateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, target
 	return nil
 }
 
-// CompleteActionChunk transitions a running action chunk to completed and advances the build.
+// CompleteActionChunk transitions a running action chunk to completed and returns advancement info.
 func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID string) (*VanadisAdvancementResult, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("database connection is nil")
@@ -72,9 +72,10 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 		}
 	}()
 
-	var c VanadisChunk
-	const selectChunkSQL = `SELECT id, build_id, chunk_index, mode, title, status FROM vanadis_chunks WHERE id = $1 FOR UPDATE;`
-	if err := tx.QueryRow(ctx, selectChunkSQL, chunkID).Scan(&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Title, &c.Status); err != nil {
+	var cID, bID, cTitle, cStatus, cMode string
+	var chunkIdx, prNumber int
+	const selectChunkSQL = `SELECT id, build_id, chunk_index, mode, title, status, COALESCE(pr_number, 0) FROM vanadis_chunks WHERE id = $1 FOR UPDATE;`
+	if err := tx.QueryRow(ctx, selectChunkSQL, chunkID).Scan(&cID, &bID, &chunkIdx, &cMode, &cTitle, &cStatus, &prNumber); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrChunkNotFound
 		}
@@ -83,11 +84,11 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 
 	var b VanadisBuild
 	const selectBuildSQL = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, status, COALESCE(status_message_id, '') FROM vanadis_builds WHERE id = $1 FOR UPDATE;`
-	if err := tx.QueryRow(ctx, selectBuildSQL, c.BuildID).Scan(&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.Status, &b.StatusMessageID); err != nil {
+	if err := tx.QueryRow(ctx, selectBuildSQL, bID).Scan(&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.Status, &b.StatusMessageID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrBuildNotFound
 		}
-		return nil, fmt.Errorf("lock action build %s: %w", c.BuildID, err)
+		return nil, fmt.Errorf("lock action build %s: %w", bID, err)
 	}
 
 	res := &VanadisAdvancementResult{
@@ -100,23 +101,39 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 		Objective:        b.Objective,
 		BuildStatus:      b.Status,
 		StatusMessageID:  b.StatusMessageID,
-		MergedChunkIndex: c.ChunkIndex,
-		MergedChunkTitle: c.Title,
-		ChunkMode:        c.Mode,
+		MergedChunkIndex: chunkIdx,
+		MergedChunkTitle: cTitle,
+		ChunkMode:        cMode,
 		NextChunkIndex:   -1,
 		BuildCompleted:   b.Status == "completed",
 	}
 
-	if c.Mode != "action" || c.Status != "running" || b.Status != "running" {
+	if cMode != "action" || cStatus != "running" || b.Status != "running" || prNumber > 0 {
 		return res, nil
 	}
 
 	const updateChunkSQL = `UPDATE vanadis_chunks SET status = 'completed', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
-	if _, err := tx.Exec(ctx, updateChunkSQL, c.ID); err != nil {
-		return nil, fmt.Errorf("mark action chunk %s completed: %w", c.ID, err)
+	if _, err := tx.Exec(ctx, updateChunkSQL, cID); err != nil {
+		return nil, fmt.Errorf("mark action chunk %s completed: %w", cID, err)
 	}
 
-	return queryAndAdvanceChunks(ctx, tx, b.ID, c.ID, c.Status, c.ChunkIndex, res)
+	// If this chunk completed the build (all chunks done), mark the build completed.
+	var remainingCount int
+	const checkRemainingSQL = `SELECT COUNT(*) FROM vanadis_chunks WHERE build_id = $1 AND id != $2 AND status NOT IN ('completed', 'merged');`
+	if err := tx.QueryRow(ctx, checkRemainingSQL, bID, cID).Scan(&remainingCount); err == nil && remainingCount == 0 {
+		const updateBuildSQL = `UPDATE vanadis_builds SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
+		if _, err := tx.Exec(ctx, updateBuildSQL, bID); err == nil {
+			res.BuildCompleted = true
+			res.BuildStatus = "completed"
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit complete action chunk tx: %w", err)
+	}
+
+	res.Advanced = true
+	return res, nil
 }
 
 // FailChunk marks a non-terminal chunk and its parent build as failed.
@@ -192,6 +209,10 @@ func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason st
 	b.Status = "failed"
 	b.UpdatedAt = now
 	return &b, &c, true, nil
+}
+
+func isTerminalBuildStatus(status string) bool {
+	return status == "cancelled"
 }
 
 func formatChunkLedgerLabel(c VanadisChunkSummary) string {

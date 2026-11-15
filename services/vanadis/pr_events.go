@@ -64,7 +64,6 @@ func (s *PostgresVanadisStore) RecordPRRolloutState(ctx context.Context, chunkID
 }
 
 // ResetChunkForSynchronize resets ci_fail_count, clears ci_checks and banner, and recovers failed chunk/build.
-// When reviving a chunk from 'failed', consumed awakeable IDs are cleared so subsequent PR events fall back to legacy advancement.
 func (s *PostgresVanadisStore) ResetChunkForSynchronize(ctx context.Context, chunkID, buildID string) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
@@ -78,8 +77,6 @@ func (s *PostgresVanadisStore) ResetChunkForSynchronize(ctx context.Context, chu
 SET ci_fail_count = 0,
     ci_checks = '{}'::jsonb,
     banner = '',
-    merge_awakeable_id = CASE WHEN status = 'failed' THEN '' ELSE merge_awakeable_id END,
-    deploy_awakeable_id = CASE WHEN status = 'failed' THEN '' ELSE deploy_awakeable_id END,
     status = CASE WHEN status = 'failed' THEN 'pr_opened' ELSE status END,
     completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END,
     updated_at = CURRENT_TIMESTAMP
@@ -281,7 +278,7 @@ func (s *VanadisServer) ProcessPRLifecycleEvent(ctx context.Context, ev pubsub.P
 	case "sync_failed":
 		return s.handlePRSyncFailed(ctx, ev, chunk, build)
 	case "merged":
-		return s.handlePRMerged(ctx, ev, chunk, build)
+		return s.handlePRMerged(ctx, chunk, build)
 	case "deploy_success":
 		return s.handlePRDeploySuccess(ctx, chunk, build)
 	case "sync_success":
@@ -345,6 +342,11 @@ func (s *VanadisServer) handlePROpened(ctx context.Context, ev pubsub.PRLifecycl
 		return err
 	}
 	RecordBuildTotal("created")
+	if s.restateCfg.Enabled {
+		if err := s.launchBuildOnRestate(ctx, buildID); err != nil {
+			return err
+		}
+	}
 	s.syncBuildWidget(ctx, buildID, "")
 	return nil
 }
@@ -483,124 +485,34 @@ func (s *VanadisServer) handlePRSyncFailed(ctx context.Context, ev pubsub.PRLife
 	return s.dispatchWakePrompt(ctx, build.ThreadID, prompt)
 }
 
-func (s *VanadisServer) advanceLegacyChunkByPR(ctx context.Context, repo string, prNumber int) {
-	res, err := s.store.AdvanceChunkByPR(ctx, repo, prNumber)
-	if err != nil || res == nil || !res.Matched {
-		return
-	}
-	s.syncBuildWidget(ctx, res.BuildID, "")
-	if !res.BuildCompleted && res.NextChunkIndex >= 0 {
-		if qErr := s.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: res.NextChunkIndex}); qErr != nil {
-			log.Printf("[vanadis] warning enqueueing next chunk for build %s: %v", res.BuildID, qErr)
-		}
-	}
-}
-
-func (s *VanadisServer) isNextUnmergedChunkAction(ctx context.Context, buildID string, currentChunkIdx int) bool {
-	if s == nil || s.store == nil || buildID == "" {
-		return false
-	}
-	_, chunks, err := s.store.GetBuild(ctx, buildID)
-	if err != nil || len(chunks) == 0 {
-		return false
-	}
-	for _, c := range chunks {
-		if c.ChunkIndex > currentChunkIdx && c.Status != "completed" && c.Status != "merged" {
-			return c.Mode == "action"
-		}
-	}
-	return false
-}
-
-func (s *VanadisServer) handlePRMerged(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
-	if chunk.Status != "completed" {
+func (s *VanadisServer) handlePRMerged(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) error {
+	if !strings.EqualFold(chunk.Status, "merged") && !strings.EqualFold(chunk.Status, "completed") {
 		if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "merged"); err != nil {
 			log.Printf("[vanadis] warning updating chunk %s to merged: %v", chunk.ID, err)
 		}
 	}
 	RecordChunkTotal("merged")
 
-	if chunk.MergeAwakeableID != "" {
-		if err := s.resolveRestateAwakeable(ctx, chunk.MergeAwakeableID, "merged"); err == nil {
-			s.syncBuildWidget(ctx, build.ID, "")
-			return nil
+	if strings.TrimSpace(chunk.MergeAwakeableID) != "" {
+		if err := s.resolveRestateAwakeable(ctx, chunk.MergeAwakeableID, "merged"); err != nil {
+			log.Printf("[vanadis] warning resolving merge awakeable %s: %v", chunk.MergeAwakeableID, err)
 		}
-		log.Printf("[vanadis] warning resolving merge awakeable %s; falling back to legacy advancement", chunk.MergeAwakeableID)
-	}
-
-	if chunk.Mode == "action" {
-		// Action chunk with attached PR awaits deployment before completing/advancing
 		s.syncBuildWidget(ctx, build.ID, "")
-		s.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunk.ID}, "")
 		return nil
 	}
 
-	if !s.isNextUnmergedChunkAction(ctx, build.ID, chunk.ChunkIndex) {
-		s.advanceLegacyChunkByPR(ctx, ev.Repo, ev.PRNumber)
-	}
+	s.syncBuildWidget(ctx, build.ID, "")
 	s.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunk.ID}, "")
 	return nil
 }
 
-func (s *VanadisServer) completeLegacyChunkDeploy(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) {
-	wasCompleted := chunk.Status == "completed"
-	s.advanceLegacyChunkByPR(ctx, chunk.Repo, chunk.PRNumber)
-	if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
-		log.Printf("[vanadis] warning updating chunk %s to completed: %v", chunk.ID, err)
-	}
-	if wasCompleted {
-		return
-	}
-	if err := s.completeBuildIfAllChunksFinished(ctx, build.ID); err != nil {
-		log.Printf("[vanadis] warning completing build %s: %v", build.ID, err)
-	}
-	s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunk.ID}, "")
-}
-
-func (s *VanadisServer) completeBuildIfAllChunksFinished(ctx context.Context, buildID string) error {
-	b, allChunks, err := s.store.GetBuild(ctx, buildID)
-	if err != nil || b == nil {
-		return err
-	}
-	for _, c := range allChunks {
-		finished := c.Status == "completed" || (c.Status == "merged" && b.Status == "completed")
-		if !finished {
-			s.syncBuildWidget(ctx, b.ID, "")
-			return nil
-		}
-	}
-	if b.Status != "completed" {
-		if err := s.store.UpdateBuildStatus(ctx, b.ID, "completed"); err != nil {
-			log.Printf("[vanadis] warning updating build status to completed for %s: %v", b.ID, err)
-			return err
-		}
-	}
-	RecordBuildTotal("completed")
-	s.syncBuildWidget(ctx, b.ID, "Build completed successfully")
-	s.publishExternalEvent(ctx, "vanadis_build", "completed", []string{b.ID}, "")
-	if !b.Quiet {
-		res := &VanadisAdvancementResult{
-			BuildID:   b.ID,
-			ThreadID:  b.ThreadID,
-			Objective: b.Objective,
-			Tier:      b.Tier,
-			Chunks:    chunksToSummaries(allChunks),
-		}
-		s.dispatchCompletedBuildWake(ctx, res)
-	}
-	return nil
-}
-
 func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) error {
-	if chunk.DeployAwakeableID != "" {
+	if strings.TrimSpace(chunk.DeployAwakeableID) != "" {
 		if err := s.resolveRestateAwakeable(ctx, chunk.DeployAwakeableID, "deploy_success"); err != nil {
-			log.Printf("[vanadis] warning resolving deploy awakeable %s: %v; falling back to legacy completion", chunk.DeployAwakeableID, err)
-			s.completeLegacyChunkDeploy(ctx, chunk, build)
-			return nil
+			log.Printf("[vanadis] warning resolving deploy awakeable %s: %v", chunk.DeployAwakeableID, err)
 		}
-	} else {
-		s.completeLegacyChunkDeploy(ctx, chunk, build)
 	}
+	s.syncBuildWidget(ctx, build.ID, "")
 	return nil
 }
 

@@ -100,17 +100,16 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 			wantStatus: "running",
 		},
 		{
-			name:      "completed action chunk advances to next chunk",
+			name:      "completed action chunk notifies completion and syncs widget",
 			seedBuild: outcomeBuild("b-act", "th-1", ""),
 			seedChunks: []VanadisChunk{
 				actionChunk("c-act-1", "b-act", 0, "running", "Action Step 1"),
-				actionChunk("c-act-2", "b-act", 1, "pending", "Action Step 2"),
 			},
-			event:         outcomeEvent("disp-act-1", "c-act-1", "completed", ""),
-			wantNextQueue: true, wantNextIndex: 1, wantWidget: true, wantStatus: "completed",
+			event:      outcomeEvent("disp-act-1", "c-act-1", "completed", ""),
+			wantWidget: true, wantWake: true, wantStatus: "completed",
 		},
 		{
-			name:       "completed final action chunk completes build and wakes thread",
+			name:       "completed final action chunk marks completed",
 			seedBuild:  outcomeBuild("b-final", "th-final", "Complete all chunks"),
 			seedChunks: []VanadisChunk{actionChunk("c-final-1", "b-final", 0, "running", "Final Step")},
 			event:      outcomeEvent("disp-final", "c-final-1", "completed", ""),
@@ -138,16 +137,6 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 			seedChunks: []VanadisChunk{actionChunk("c-fail-noerr-1", "b-fail-noerr", 0, "running", "Failing Step Without Error")},
 			event:      outcomeEvent("disp-fail-noerr", "c-fail-noerr-1", "failed", ""),
 			wantWidget: true, wantWake: true, wantStatus: "failed",
-		},
-		{
-			name:      "redelivered completed action chunk re-enqueues next running chunk",
-			seedBuild: outcomeBuild("b-redeliver", "th-redeliver", "Multi chunk build"),
-			seedChunks: []VanadisChunk{
-				actionChunk("c-redeliver-0", "b-redeliver", 0, "completed", "Already Completed Step"),
-				actionChunk("c-redeliver-1", "b-redeliver", 1, "running", "Running Next Step Needs Enqueue"),
-			},
-			event:         outcomeEvent("disp-redeliver", "c-redeliver-0", "completed", ""),
-			wantNextQueue: true, wantNextIndex: 1, wantStatus: "completed",
 		},
 	}
 
@@ -533,38 +522,6 @@ func TestVanadisServer_FailChunkInternal(t *testing.T) {
 			}
 			if gotFound := build != nil && chunk != nil; gotFound != tc.wantFound {
 				t.Errorf("build and chunk returned = %v, want %v", gotFound, tc.wantFound)
-			}
-		})
-	}
-}
-
-func TestVanadisServer_RetryNextRunningChunkEnqueue(t *testing.T) {
-	t.Parallel()
-	retryBuild := &VanadisBuild{ID: "b-ret", Status: "running"}
-	retryChunks := []VanadisChunk{
-		{ID: "c-ret-0", BuildID: "b-ret", ChunkIndex: 0, Status: "completed"},
-		{ID: "c-ret-1", BuildID: "b-ret", ChunkIndex: 1, Status: "running"},
-	}
-	tests := []struct {
-		name       string
-		seedBuild  *VanadisBuild
-		seedChunks []VanadisChunk
-		res        *VanadisAdvancementResult
-		wantErr    bool
-	}{
-		{"nil result", nil, nil, nil, false},
-		{"pr mode is skipped", nil, nil, &VanadisAdvancementResult{ChunkMode: "pr"}, false},
-		{"non-running build is skipped", nil, nil, &VanadisAdvancementResult{ChunkMode: "action", BuildStatus: "completed"}, false},
-		{"missing build", nil, nil, &VanadisAdvancementResult{ChunkMode: "action", BuildStatus: "running", BuildID: "non-existent"}, true},
-		{"enqueue without bus fails", retryBuild, retryChunks, &VanadisAdvancementResult{ChunkMode: "action", BuildStatus: "running", BuildID: "b-ret", MergedChunkIndex: 0}, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := &VanadisServer{store: createdBuildStore(t, tc.seedBuild, tc.seedChunks)}
-			err := srv.retryNextRunningChunkEnqueue(context.Background(), tc.res)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("retryNextRunningChunkEnqueue() error = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
 	}

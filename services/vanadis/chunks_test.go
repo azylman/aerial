@@ -227,17 +227,12 @@ func attachPRs(t *testing.T, s *memoryVanadisStore, prs ...int) {
 	}
 }
 
-// replayPREvents applies earlier CI-failure and merge webhooks for aerial PRs, in that order.
-func replayPREvents(t *testing.T, s *memoryVanadisStore, failedPRs, mergedPRs []int) {
+// replayPREvents applies earlier CI-failure webhooks for aerial PRs.
+func replayPREvents(t *testing.T, s *memoryVanadisStore, failedPRs []int) {
 	t.Helper()
 	for _, pr := range failedPRs {
 		if _, _, _, err := s.FailChunkByPR(context.Background(), "aerial", pr); err != nil {
 			t.Fatalf("fail pr %d: %v", pr, err)
-		}
-	}
-	for _, pr := range mergedPRs {
-		if _, err := s.AdvanceChunkByPR(context.Background(), "aerial", pr); err != nil {
-			t.Fatalf("advance pr %d: %v", pr, err)
 		}
 	}
 }
@@ -339,7 +334,7 @@ func TestVanadisStore_GetChunkByPR(t *testing.T) {
 		prNumber    int
 		want        VanadisChunkPRLookup
 	}{
-		{name: "matches attached pr with next action chunk", buildStatus: "running", repo: "aerial", prNumber: 101, want: VanadisChunkPRLookup{Matched: true, ChunkID: "chunk-1", BuildID: "build-test-1", Effort: "low", HasRemainingChunks: true, NextChunkMode: "action"}},
+		{name: "matches attached pr with next action chunk", buildStatus: "running", repo: "aerial", prNumber: 101, want: VanadisChunkPRLookup{Matched: true, ChunkID: "chunk-1", BuildID: "build-test-1", Effort: "low"}},
 		{name: "unknown pr is unmatched", buildStatus: "running", repo: "aerial", prNumber: 999},
 		{name: "cancelled build is unmatchable", buildStatus: "cancelled", repo: "aerial", prNumber: 101},
 		{name: "invalid params are unmatched", buildStatus: "running", repo: "", prNumber: 0},
@@ -356,46 +351,6 @@ func TestVanadisStore_GetChunkByPR(t *testing.T) {
 			}
 			if *got != tc.want {
 				t.Errorf("GetChunkByPR = %+v, want %+v", *got, tc.want)
-			}
-		})
-	}
-}
-
-func TestVanadisStore_AdvanceChunkByPR(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name            string
-		prs             []int
-		failedPRs       []int
-		mergedPRs       []int
-		repo            string
-		prNumber        int
-		want            advanceOutcome
-		wantBuildStatus string
-	}{
-		{name: "first merge advances to next chunk", prs: []int{101, 102}, repo: "aerial", prNumber: 101, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: 1, BuildStatus: "running", Chunks: 2}, wantBuildStatus: "running"},
-		{name: "merge recovers failed build and chunk", prs: []int{111}, failedPRs: []int{111}, repo: "aerial", prNumber: 111, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: 1, BuildStatus: "running", Chunks: 2}, wantBuildStatus: "running"},
-		{name: "repeat merge does not advance", prs: []int{101, 102}, mergedPRs: []int{101}, repo: "aerial", prNumber: 101, want: advanceOutcome{Matched: true, NextChunkIndex: 1, BuildStatus: "running", Chunks: 2}, wantBuildStatus: "running"},
-		{name: "last merge completes build", prs: []int{101, 102}, mergedPRs: []int{101}, repo: "aerial", prNumber: 102, want: advanceOutcome{Matched: true, Advanced: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed", Chunks: 2}, wantBuildStatus: "completed"},
-		{name: "repeat merge on completed build returns chunks without advancing", prs: []int{101, 102}, mergedPRs: []int{101, 102}, repo: "aerial", prNumber: 102, want: advanceOutcome{Matched: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed", Chunks: 2}, wantBuildStatus: "completed"},
-		{name: "unknown pr is unmatched", prs: []int{101, 102}, repo: "aerial", prNumber: 999, wantBuildStatus: "running"},
-		{name: "invalid params are unmatched", prs: []int{101, 102}, repo: "", prNumber: 0, wantBuildStatus: "running"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s, bID, _ := setupTestStoreWithBuild()
-			attachPRs(t, s, tc.prs...)
-			replayPREvents(t, s, tc.failedPRs, tc.mergedPRs)
-			res, err := s.AdvanceChunkByPR(context.Background(), tc.repo, tc.prNumber)
-			if err != nil {
-				t.Fatalf("AdvanceChunkByPR: %v", err)
-			}
-			if got := outcomeOf(res); got != tc.want {
-				t.Errorf("AdvanceChunkByPR = %+v, want %+v", got, tc.want)
-			}
-			if b, _, _ := s.GetBuild(context.Background(), bID); b.Status != tc.wantBuildStatus {
-				t.Errorf("stored build status = %q, want %q", b.Status, tc.wantBuildStatus)
 			}
 		})
 	}
@@ -424,7 +379,7 @@ func TestVanadisStore_FailChunkByPR(t *testing.T) {
 			t.Parallel()
 			s, _, _ := setupTestStoreWithBuild()
 			attachPRs(t, s, 101)
-			replayPREvents(t, s, tc.failedPRs, nil)
+			replayPREvents(t, s, tc.failedPRs)
 			bID, cID, failed, err := s.FailChunkByPR(context.Background(), tc.repo, tc.prNumber)
 			if err != nil || failed != tc.wantFailed || bID != tc.wantBuildID || cID != tc.wantChunkID {
 				t.Fatalf("FailChunkByPR = (%q, %q, %v, %v), want (%q, %q, %v, nil)", bID, cID, failed, err, tc.wantBuildID, tc.wantChunkID, tc.wantFailed)
