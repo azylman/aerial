@@ -1248,9 +1248,22 @@ override_roborev() {
         exit 1
     fi
 
-    # 2. Post override comment on PR issue
-    local comment_body comment_payload comment_raw comment_code
-    comment_body=$(cat <<EOF
+    # 2. Check for existing override comment or post override comment on PR issue
+    local comments_raw comments_code comments_resp existing_comment_id=""
+    comments_raw=$(gh_api_call -X GET "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/issues/${pr_num}/comments?per_page=100")
+    comments_code=$(echo "$comments_raw" | tail -n1)
+    comments_resp=$(echo "$comments_raw" | sed '$d')
+
+    if [ -n "$comments_code" ] && [ "$comments_code" -ge 200 ] && [ "$comments_code" -lt 300 ]; then
+        existing_comment_id=$(echo "$comments_resp" | jq -r --arg sha "${short_sha}" '[if type == "array" then .[] else empty end | objects | select((.body // "") | (contains("## roborev-override") and contains($sha))) | .id] | first // empty')
+    fi
+
+    local comment_id=""
+    if [ -n "$existing_comment_id" ]; then
+        comment_id="$existing_comment_id"
+    else
+        local comment_body comment_payload comment_raw comment_code
+        comment_body=$(cat <<EOF
 ## roborev-override (\`${short_sha}\`)
 
 **Commit:** \`${head_sha}\`
@@ -1258,20 +1271,22 @@ override_roborev() {
 ${rebuttal}
 EOF
 )
-    comment_payload=$(jq -n --arg b "$comment_body" '{body: $b}')
-    comment_raw=$(gh_api_call -H "Content-Type: application/json" -X POST -d "$comment_payload" \
-        "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/issues/${pr_num}/comments")
-    comment_code=$(echo "$comment_raw" | tail -n1)
+        comment_payload=$(jq -n --arg b "$comment_body" '{body: $b}')
+        comment_raw=$(gh_api_call -H "Content-Type: application/json" -X POST -d "$comment_payload" \
+            "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/issues/${pr_num}/comments")
+        comment_code=$(echo "$comment_raw" | tail -n1)
 
-    if [ -z "$comment_code" ] || [ "$comment_code" -lt 200 ] || [ "$comment_code" -ge 300 ]; then
-        local comment_resp
-        comment_resp=$(echo "$comment_raw" | sed '$d')
-        echo "ERROR: Failed to post override comment on PR #${pr_num} (HTTP ${comment_code}): ${comment_resp}" >&2
-        exit 1
+        if [ -z "$comment_code" ] || [ "$comment_code" -lt 200 ] || [ "$comment_code" -ge 300 ]; then
+            local comment_resp
+            comment_resp=$(echo "$comment_raw" | sed '$d')
+            echo "ERROR: Failed to post override comment on PR #${pr_num} (HTTP ${comment_code}): ${comment_resp}" >&2
+            exit 1
+        fi
+        comment_id=$(echo "$comment_raw" | sed '$d' | jq -r '.id // empty')
     fi
 
     # 3. Locate single latest RoboRev workflow run for head_sha
-    local runs_raw runs_code runs_resp run_id
+    local runs_raw runs_code runs_resp target_run run_id run_status
     runs_raw=$(gh_api_call -X GET "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?head_sha=${head_sha}")
     runs_code=$(echo "$runs_raw" | tail -n1)
     runs_resp=$(echo "$runs_raw" | sed '$d')
@@ -1281,25 +1296,68 @@ EOF
         exit 1
     fi
 
-    run_id=$(echo "$runs_resp" | jq -r '
-        ([.workflow_runs[]? | select(.name == "RoboRev Code Review" or (.path // "" | endswith("roborev.yml"))) | .id] | first) //
-        ([.workflow_runs[]? | select(.name == "Continuous Delivery" or .name == "Validate Configuration" or (.path // "" | (endswith("docker-publish.yml") or endswith("ci.yml") or endswith("validate.yml")))) | .id] | first) //
+    target_run=$(echo "$runs_resp" | jq -c '
+        ([.workflow_runs[]? | select(.name == "RoboRev Code Review" or (.path // "" | endswith("roborev.yml")))] | first) //
+        ([.workflow_runs[]? | select(.name == "Continuous Delivery" or .name == "Validate Configuration" or (.path // "" | (endswith("docker-publish.yml") or endswith("ci.yml") or endswith("validate.yml"))))] | first) //
         empty
     ')
+    run_id=$(echo "$target_run" | jq -r '.id // empty')
+    run_status=$(echo "$target_run" | jq -r '.status // empty')
+
     if [ -z "$run_id" ]; then
         echo "ERROR: No RoboRev workflow run found for commit ${short_sha} on PR #${pr_num}." >&2
         exit 1
     fi
 
     # 4. Trigger workflow re-run (rerun-failed-jobs falling back to rerun)
+    wait_for_workflow_completed() {
+        local target_run_id="$1"
+        local max_attempts="${AERIAL_RERUN_WAIT_ATTEMPTS:-60}"
+        local wait_delay="${AERIAL_RERUN_WAIT_DELAY:-5}"
+        local attempt=0
+        local poll_raw poll_code poll_resp cur_status=""
+
+        while [ "$attempt" -lt "$max_attempts" ]; do
+            attempt=$((attempt + 1))
+            poll_raw=$(gh_api_call -X GET "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${target_run_id}")
+            poll_code=$(echo "$poll_raw" | tail -n1)
+            poll_resp=$(echo "$poll_raw" | sed '$d')
+            if [ -n "$poll_code" ] && [ "$poll_code" -ge 200 ] && [ "$poll_code" -lt 300 ]; then
+                cur_status=$(echo "$poll_resp" | jq -r '.status // empty')
+                if [ "$cur_status" = "completed" ]; then
+                    return 0
+                fi
+            fi
+            if [ "$attempt" -lt "$max_attempts" ]; then
+                [ "${wait_delay}" -gt 0 ] && sleep "${wait_delay}"
+            fi
+        done
+        return 1
+    }
+
+    if [ -n "$run_status" ] && [ "$run_status" != "completed" ]; then
+        wait_for_workflow_completed "$run_id" || true
+    fi
+
     local rerun_raw rerun_code
     rerun_raw=$(gh_api_call -X POST "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun-failed-jobs")
     rerun_code=$(echo "$rerun_raw" | tail -n1)
+
+    if [ "$rerun_code" = "403" ] || [ "$rerun_code" = "409" ]; then
+        wait_for_workflow_completed "$run_id" || true
+        rerun_raw=$(gh_api_call -X POST "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun-failed-jobs")
+        rerun_code=$(echo "$rerun_raw" | tail -n1)
+    fi
 
     if [ -z "$rerun_code" ] || [ "$rerun_code" -lt 200 ] || [ "$rerun_code" -ge 300 ]; then
         echo "⚠️ rerun-failed-jobs returned HTTP ${rerun_code}; attempting fallback to full workflow rerun..." >&2
         rerun_raw=$(gh_api_call -X POST "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun")
         rerun_code=$(echo "$rerun_raw" | tail -n1)
+        if [ "$rerun_code" = "403" ] || [ "$rerun_code" = "409" ]; then
+            wait_for_workflow_completed "$run_id" || true
+            rerun_raw=$(gh_api_call -X POST "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun")
+            rerun_code=$(echo "$rerun_raw" | tail -n1)
+        fi
         if [ -z "$rerun_code" ] || [ "$rerun_code" -lt 200 ] || [ "$rerun_code" -ge 300 ]; then
             local rerun_resp
             rerun_resp=$(echo "$rerun_raw" | sed '$d')

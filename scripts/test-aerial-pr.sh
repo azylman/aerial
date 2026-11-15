@@ -813,6 +813,95 @@ ROBOREV_OVERRIDE_CHECK=$(
     else
         echo "unified_wf:fail:$out10"
     fi
+
+    # Subtest 11: Awaiting in_progress workflow run to reach completed before rerun-failed-jobs
+    POLL_LOG="$(mktemp /tmp/roborev-poll-log.XXXXXX)"
+    POLL_COUNT_FILE="$(mktemp /tmp/roborev-poll-count.XXXXXX)"
+    echo 0 > "$POLL_COUNT_FILE"
+    curl() {
+        local url=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                http://*|https://*) url="$1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        if [[ "$url" =~ /pulls/42 ]]; then
+            echo '{"state":"open","head":{"sha":"44556677889900aabbccddeeff00112233445566"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
+            echo '200'
+        elif [[ "$url" =~ /issues/42/comments ]]; then
+            echo '{"id":606}'
+            echo '201'
+        elif [[ "$url" =~ /actions/runs\? ]]; then
+            echo '{"workflow_runs":[{"id":445566,"name":"RoboRev Code Review","status":"in_progress"}]}'
+            echo '200'
+        elif [[ "$url" =~ /actions/runs/445566/rerun-failed-jobs ]]; then
+            echo "rerun-failed-jobs-called" >> "$POLL_LOG"
+            echo '{"status":"queued"}'
+            echo '201'
+        elif [[ "$url" =~ /actions/runs/445566 ]]; then
+            local cnt=$(( $(cat "$POLL_COUNT_FILE") + 1 ))
+            echo "$cnt" > "$POLL_COUNT_FILE"
+            if [ "$cnt" -lt 2 ]; then
+                echo "poll:in_progress" >> "$POLL_LOG"
+                echo '{"id":445566,"status":"in_progress"}'
+                echo '200'
+            else
+                echo "poll:completed" >> "$POLL_LOG"
+                echo '{"id":445566,"status":"completed"}'
+                echo '200'
+            fi
+        fi
+    }
+    out11=$(AERIAL_RERUN_WAIT_DELAY=0 override_roborev --repo aerial 42 "Testing in-progress wait")
+    poll_entries=$(cat "$POLL_LOG" 2>/dev/null || echo "")
+    rm -f "$POLL_LOG" "$POLL_COUNT_FILE"
+    if echo "$out11" | jq -e '.status == "overridden" and .run_id == 445566' >/dev/null 2>&1 && \
+       [ "$poll_entries" = "$(printf 'poll:in_progress\npoll:completed\nrerun-failed-jobs-called')" ]; then
+        echo "wait_in_progress:ok"
+    else
+        echo "wait_in_progress:fail:poll_entries=$poll_entries:out=$out11"
+    fi
+
+    # Subtest 12: Skipping duplicate comment creation when existing roborev-override comment is present
+    POST_COMMENT_FILE="$(mktemp /tmp/roborev-post-comment.XXXXXX)"
+    curl() {
+        local url=""
+        local method="GET"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -X) method="$2"; shift 2 ;;
+                http://*|https://*) url="$1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        if [[ "$url" =~ /pulls/42 ]]; then
+            echo '{"state":"open","head":{"sha":"5566778899aabbccddeeff001122334455667788"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
+            echo '200'
+        elif [[ "$url" =~ /issues/42/comments\?per_page=100 ]]; then
+            echo '[{"id":707,"body":"## roborev-override (`5566778`)\n\n**Commit:** `5566778899aabbccddeeff001122334455667788`\n**Technical Rebuttal:**\nPrior override"}]'
+            echo '200'
+        elif [[ "$url" =~ /issues/42/comments ]]; then
+            echo "duplicate-comment-posted" > "$POST_COMMENT_FILE"
+            echo '{"id":999}'
+            echo '201'
+        elif [[ "$url" =~ /actions/runs\? ]]; then
+            echo '{"workflow_runs":[{"id":556677,"name":"RoboRev Code Review","status":"completed"}]}'
+            echo '200'
+        elif [[ "$url" =~ /actions/runs/556677/rerun-failed-jobs ]]; then
+            echo '{"status":"queued"}'
+            echo '201'
+        fi
+    }
+    out12=$(override_roborev --repo aerial 42 "Testing duplicate comment suppression")
+    dup_called=$(cat "$POST_COMMENT_FILE" 2>/dev/null || echo "")
+    rm -f "$POST_COMMENT_FILE"
+    if echo "$out12" | jq -e '.status == "overridden" and .run_id == 556677' >/dev/null 2>&1 && \
+       [ -z "$dup_called" ]; then
+        echo "skip_duplicate_comment:ok"
+    else
+        echo "skip_duplicate_comment:fail:dup_called=$dup_called:out=$out12"
+    fi
 )
 assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val1:ok' && echo true || echo false)" "override_roborev validates missing PR number"
 assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val1b:ok' && echo true || echo false)" "override_roborev validates non-numeric PR number"
@@ -826,6 +915,8 @@ assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'happy_path:ok' && 
 assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'fallback_rerun:ok' && echo true || echo false)" "override_roborev falls back to full workflow rerun when rerun-failed-jobs returns 4xx"
 assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'flags_test:ok' && echo true || echo false)" "override_roborev supports -f reason file"
 assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'unified_wf:ok' && echo true || echo false)" "override_roborev resolves Continuous Delivery workflow run when roborev.yml is absent"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'wait_in_progress:ok' && echo true || echo false)" "override_roborev waits for in_progress workflow run to reach completed before rerun-failed-jobs"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'skip_duplicate_comment:ok' && echo true || echo false)" "override_roborev skips duplicate comment creation when existing roborev-override comment exists"
 
 CLI_DISPATCH_CHECK=$(bash -c "
     \"${AERIAL_PR}\" override-roborev 2>&1 || true
