@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	_ "modernc.org/sqlite"
 )
 
@@ -60,7 +61,6 @@ func TestRunApp_Validation(t *testing.T) {
 }
 
 func TestRunApp_Lifecycle(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "prospera_app_test.db")
 
@@ -112,28 +112,70 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	}
 	_ = db.Close()
 
-	cfg := &Config{
-		Port:                  "0",
-		DatabaseURL:           "sqlite://" + dbPath,
-		DefaultDiscordChannel: "prospera",
+	tests := []struct {
+		name       string
+		natsURL    string
+		busFactory func(context.Context, string) (pubsub.Bus, error)
+		wantBus    bool
+	}{
+		{
+			name:    "without nats url",
+			natsURL: "",
+			wantBus: false,
+		},
+		{
+			name:    "with nats url success",
+			natsURL: "nats://127.0.0.1:4222",
+			busFactory: func(_ context.Context, _ string) (pubsub.Bus, error) {
+				return pubsub.NewMemoryBus(), nil
+			},
+			wantBus: true,
+		},
+		{
+			name:    "with nats url failure",
+			natsURL: "nats://127.0.0.1:4222",
+			busFactory: func(_ context.Context, _ string) (pubsub.Bus, error) {
+				return nil, errors.New("connection refused")
+			},
+			wantBus: false,
+		},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	appDone := make(chan error, 1)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origBusFn := newProsperaBusFn
+			defer func() {
+				newProsperaBusFn = origBusFn
+			}()
+			if tc.busFactory != nil {
+				newProsperaBusFn = tc.busFactory
+			}
 
-	go func() {
-		appDone <- RunApp(ctx, newTestConfigSource(cfg))
-	}()
+			cfg := &Config{
+				Port:                  "0",
+				DatabaseURL:           "sqlite://" + dbPath,
+				DefaultDiscordChannel: "prospera",
+				NATSURL:               tc.natsURL,
+			}
 
-	cancel()
+			ctx, cancel := context.WithCancel(context.Background())
+			appDone := make(chan error, 1)
 
-	select {
-	case err := <-appDone:
-		if err != nil {
-			t.Fatalf("RunApp() shutdown error = %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunApp() did not shut down within timeout")
+			go func() {
+				appDone <- RunApp(ctx, newTestConfigSource(cfg))
+			}()
+
+			cancel()
+
+			select {
+			case err := <-appDone:
+				if err != nil {
+					t.Fatalf("RunApp() shutdown error = %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("RunApp() did not shut down within timeout")
+			}
+		})
 	}
 }
 
@@ -358,6 +400,7 @@ func TestProsperaRestartRequired(t *testing.T) {
 		{name: "twilio token change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok2", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
 		{name: "google mcp change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp-2", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
 		{name: "coven change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven-2", GeminiLiveModel: "live-1"}, want: true},
+		{name: "nats url change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1", NATSURL: "nats://nats.aerial:4222"}, want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

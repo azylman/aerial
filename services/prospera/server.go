@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -34,7 +37,189 @@ type Server struct {
 	toolHandler   *ToolHandler
 	mcpServer     *mcp.Server
 	streamHandler http.Handler
+	busMu         sync.RWMutex
+	bus           pubsub.Bus
 	bgWg          sync.WaitGroup
+}
+
+// SetEventBus sets the pubsub.Bus used for durable job queueing.
+func (s *Server) SetEventBus(b pubsub.Bus) {
+	if s == nil {
+		return
+	}
+	s.busMu.Lock()
+	defer s.busMu.Unlock()
+	s.bus = b
+}
+
+// EventBus returns the current pubsub.Bus instance.
+func (s *Server) EventBus() pubsub.Bus {
+	if s == nil {
+		return nil
+	}
+	s.busMu.RLock()
+	defer s.busMu.RUnlock()
+	return s.bus
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if t := strings.TrimSpace(v); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+func nakBackoffDelay(numDelivered uint64) time.Duration {
+	if numDelivered <= 1 {
+		return 1 * time.Second
+	}
+	shift := min(numDelivered-1, 4)
+	return time.Duration(1<<shift) * time.Second
+}
+
+func nakOrDropJob(msg pubsub.Message, jobName, entityID string, err error) error {
+	if msg == nil {
+		return err
+	}
+	delivered := msg.NumDelivered()
+	if delivered >= 5 {
+		log.Printf("prospera: dropping %s job for %s after %d deliveries: %v", jobName, entityID, delivered, err)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("prospera: term %s job after max deliveries: %v", jobName, termErr)
+		}
+		return nil
+	}
+	if nakErr := msg.NakWithDelay(nakBackoffDelay(delivered)); nakErr != nil {
+		log.Printf("prospera: nak %s job error: %v", jobName, nakErr)
+	}
+	return err
+}
+
+// StartJobConsumers subscribes durable competing-consumer queue subscriptions on AERIAL_JOBS.
+func (s *Server) StartJobConsumers(ctx context.Context) error {
+	bus := s.EventBus()
+	if bus == nil {
+		return nil
+	}
+
+	if _, err := bus.ConsumeQueue(ctx, pubsub.SubjectProsperaReportJob, "prospera-report", func(msgCtx context.Context, msg pubsub.Message) error {
+		return s.HandleReportJob(msgCtx, msg)
+	}); err != nil {
+		return fmt.Errorf("subscribe prospera-report consumer: %w", err)
+	}
+
+	if _, err := bus.ConsumeQueue(ctx, pubsub.SubjectProsperaVoicemailJob, "prospera-voicemail", func(msgCtx context.Context, msg pubsub.Message) error {
+		return s.HandleVoicemailJob(msgCtx, msg)
+	}); err != nil {
+		return fmt.Errorf("subscribe prospera-voicemail consumer: %w", err)
+	}
+
+	if _, err := bus.ConsumeQueue(ctx, pubsub.SubjectProsperaSMSJob, "prospera-sms", func(msgCtx context.Context, msg pubsub.Message) error {
+		return s.HandleSMSJob(msgCtx, msg)
+	}); err != nil {
+		return fmt.Errorf("subscribe prospera-sms consumer: %w", err)
+	}
+
+	return nil
+}
+
+// HandleReportJob handles asynchronous post-call report delivery jobs from AERIAL_JOBS.
+func (s *Server) HandleReportJob(ctx context.Context, msg pubsub.Message) error {
+	if msg == nil {
+		return errors.New("message cannot be nil")
+	}
+	if s.reporter == nil {
+		return errors.New("reporter is nil")
+	}
+	var args pubsub.ProsperaReportJobArgs
+	if err := json.Unmarshal(msg.Data(), &args); err != nil {
+		log.Printf("prospera: unmarshal report job error: %v", err)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("prospera: term invalid report job: %v", termErr)
+		}
+		return nil
+	}
+	callID := strings.TrimSpace(args.CallID)
+	if callID == "" {
+		log.Printf("prospera: empty call_id in report job")
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("prospera: term empty call_id report job: %v", termErr)
+		}
+		return nil
+	}
+
+	if err := s.reporter.DeliverCallReport(ctx, callID); err != nil {
+		return nakOrDropJob(msg, "report", callID, err)
+	}
+	return nil
+}
+
+// HandleVoicemailJob handles asynchronous voicemail processing jobs from AERIAL_JOBS.
+func (s *Server) HandleVoicemailJob(ctx context.Context, msg pubsub.Message) error {
+	if msg == nil {
+		return errors.New("message cannot be nil")
+	}
+	var args pubsub.ProsperaVoicemailJobArgs
+	if err := json.Unmarshal(msg.Data(), &args); err != nil {
+		log.Printf("prospera: unmarshal voicemail job error: %v", err)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("prospera: term invalid voicemail job: %v", termErr)
+		}
+		return nil
+	}
+	callID := strings.TrimSpace(args.CallID)
+	recURL := strings.TrimSpace(args.RecordingURL)
+	if callID == "" || recURL == "" {
+		log.Printf("prospera: missing call_id or recording_url in voicemail job")
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("prospera: term incomplete voicemail job: %v", termErr)
+		}
+		return nil
+	}
+
+	if s.reporter == nil {
+		return errors.New("reporter is nil")
+	}
+
+	if err := s.reporter.ProcessVoicemailRecording(ctx, callID, recURL); err != nil {
+		return nakOrDropJob(msg, "voicemail", callID, err)
+	}
+	return nil
+}
+
+// HandleSMSJob handles asynchronous inbound SMS processing jobs from AERIAL_JOBS.
+func (s *Server) HandleSMSJob(ctx context.Context, msg pubsub.Message) error {
+	if msg == nil {
+		return errors.New("message cannot be nil")
+	}
+	if s.reporter == nil {
+		return errors.New("reporter is nil")
+	}
+	var args pubsub.ProsperaSMSJobArgs
+	if err := json.Unmarshal(msg.Data(), &args); err != nil {
+		log.Printf("prospera: unmarshal sms job error: %v", err)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("prospera: term invalid sms job: %v", termErr)
+		}
+		return nil
+	}
+
+	voiceMsg := VoiceMessage{
+		MessageSID:    args.MessageSID,
+		Direction:     "inbound",
+		FromNumber:    args.FromNumber,
+		ToNumber:      args.ToNumber,
+		Body:          args.Body,
+		MediaURLs:     args.MediaURLs,
+		RelatedCallID: args.RelatedCallID,
+	}
+
+	if err := s.reporter.DeliverInboundSMS(ctx, voiceMsg); err != nil {
+		return nakOrDropJob(msg, "sms", args.MessageSID, err)
+	}
+	return nil
 }
 
 // Wait blocks until all in-flight background webhook tasks (reports, voicemails) finish.
@@ -397,14 +582,29 @@ func (s *Server) handleTwilioStatus(w http.ResponseWriter, r *http.Request) {
 // triggerPostCallReportIfPending asynchronously dispatches post-call report delivery
 // when a terminal Twilio status webhook arrives. The atomic CAS ("pending" -> "processing")
 // is performed inside Reporter.DeliverCallReport so the report is not left permanently stuck.
-func (s *Server) triggerPostCallReportIfPending(_ context.Context, callID string) {
+// When an event bus is configured, the job is published to AERIAL_JOBS with fallback to bgWg.
+func (s *Server) triggerPostCallReportIfPending(ctx context.Context, callID string) {
+	cleanID := strings.TrimSpace(callID)
+	if cleanID == "" {
+		return
+	}
+	if bus := s.EventBus(); bus != nil {
+		msgID := "prospera:report:" + cleanID
+		args := pubsub.ProsperaReportJobArgs{CallID: cleanID}
+		pubErr := bus.Publish(ctx, pubsub.SubjectProsperaReportJob, msgID, args)
+		if pubErr == nil {
+			return
+		}
+		log.Printf("server: publish report job failed for %s, falling back to goroutine: %v", cleanID, pubErr)
+	}
+
 	s.bgWg.Add(1)
 	go func(id string) {
 		defer s.bgWg.Done()
 		if delivErr := s.reporter.DeliverCallReport(context.Background(), id); delivErr != nil {
 			log.Printf("server: deliver call report: %v", delivErr)
 		}
-	}(callID)
+	}(cleanID)
 }
 
 func (s *Server) handleTwilioVoicemail(w http.ResponseWriter, r *http.Request) {
@@ -420,16 +620,34 @@ func (s *Server) handleTwilioVoicemail(w http.ResponseWriter, r *http.Request) {
 	recURL := r.PostForm.Get("RecordingUrl")
 	callSid := r.PostForm.Get("CallSid")
 	call := s.resolveAndBindCall(r.Context(), r, callSid)
-
-	if call != nil && recURL != "" && s.reporter != nil {
-		s.bgWg.Add(1)
-		go func(id, url string) {
-			defer s.bgWg.Done()
-			if procErr := s.reporter.ProcessVoicemailRecording(context.Background(), id, url); procErr != nil {
-				log.Printf("server: process voicemail recording: %v", procErr)
-			}
-		}(call.CallID, recURL)
+	if call == nil || recURL == "" || s.reporter == nil {
+		writeXML(w, "<Response/>")
+		return
 	}
+
+	recSID := r.PostForm.Get("RecordingSid")
+	if bus := s.EventBus(); bus != nil {
+		msgID := "prospera:vm:" + call.CallID + ":" + recSID
+		args := pubsub.ProsperaVoicemailJobArgs{
+			CallID:       call.CallID,
+			RecordingSID: recSID,
+			RecordingURL: recURL,
+		}
+		pubErr := bus.Publish(r.Context(), pubsub.SubjectProsperaVoicemailJob, msgID, args)
+		if pubErr == nil {
+			writeXML(w, "<Response/>")
+			return
+		}
+		log.Printf("server: publish voicemail job failed for %s, falling back to goroutine: %v", call.CallID, pubErr)
+	}
+
+	s.bgWg.Add(1)
+	go func(id, url string) {
+		defer s.bgWg.Done()
+		if procErr := s.reporter.ProcessVoicemailRecording(context.Background(), id, url); procErr != nil {
+			log.Printf("server: process voicemail recording: %v", procErr)
+		}
+	}(call.CallID, recURL)
 
 	writeXML(w, "<Response/>")
 }
@@ -498,11 +716,36 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.reporter != nil {
-		if delivErr := s.reporter.DeliverInboundSMS(r.Context(), msg); delivErr != nil {
+	if s.reporter == nil {
+		writeXML(w, "<Response/>")
+		return
+	}
+
+	if bus := s.EventBus(); bus != nil {
+		msgID := "prospera:sms:" + firstNonEmpty(msgSid, strconv.FormatInt(time.Now().UnixNano(), 10))
+		args := pubsub.ProsperaSMSJobArgs{
+			MessageSID:    msgSid,
+			FromNumber:    normFrom,
+			ToNumber:      normTo,
+			Body:          body,
+			MediaURLs:     mediaURLs,
+			RelatedCallID: relatedID,
+		}
+		pubErr := bus.Publish(r.Context(), pubsub.SubjectProsperaSMSJob, msgID, args)
+		if pubErr == nil {
+			writeXML(w, "<Response/>")
+			return
+		}
+		log.Printf("server: publish sms job failed for %s, falling back to goroutine: %v", msgSid, pubErr)
+	}
+
+	s.bgWg.Add(1)
+	go func(vMsg VoiceMessage) {
+		defer s.bgWg.Done()
+		if delivErr := s.reporter.DeliverInboundSMS(context.Background(), vMsg); delivErr != nil {
 			log.Printf("server: deliver inbound sms: %v", delivErr)
 		}
-	}
+	}(msg)
 
 	writeXML(w, "<Response/>")
 }
