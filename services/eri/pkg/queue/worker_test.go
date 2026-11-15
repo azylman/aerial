@@ -1380,3 +1380,73 @@ func TestWorkerPool_ProcessInteractiveTurn_PublishesTurnCompleted(t *testing.T) 
 		t.Errorf("expected non-zero CompletedAt")
 	}
 }
+
+func TestTurnExecution_CreateOneShotSchedule_JetStream(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
+		t.Fatalf("EnsureCoreStreams: %v", err)
+	}
+
+	done := make(chan struct{}, 1)
+	var gotArgs pubsub.HaroOneShotJobArgs
+	var gotSubject string
+	_, err := memBus.Subscribe(ctx, "aerial.jobs.>", "test-oneshot-sub", func(_ context.Context, msg pubsub.Message) error {
+		gotSubject = msg.Subject()
+		_ = json.Unmarshal(msg.Data(), &gotArgs)
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	pool := &WorkerPool{
+		eventBus: memBus,
+	}
+	te := &turnExecution{
+		pool: pool,
+	}
+
+	runAt := time.Date(2026, 11, 14, 18, 0, 0, 0, time.UTC)
+	schedReq := oneShotScheduleRequest{
+		ID:       "retry-task-123",
+		ThreadID: "thread-456",
+		Prompt:   "retry prompt",
+		Effort:   "high",
+		RunAt:    runAt,
+	}
+	if err := te.createOneShotSchedule(schedReq); err != nil {
+		t.Fatalf("createOneShotSchedule: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for haro one shot job message")
+	}
+
+	if gotSubject != pubsub.SubjectHaroOneShotJob {
+		t.Errorf("subject = %q, want %q", gotSubject, pubsub.SubjectHaroOneShotJob)
+	}
+	if gotArgs.ID != "retry-task-123" {
+		t.Errorf("args.ID = %q, want %q", gotArgs.ID, "retry-task-123")
+	}
+	if gotArgs.ThreadID != "thread-456" {
+		t.Errorf("args.ThreadID = %q, want %q", gotArgs.ThreadID, "thread-456")
+	}
+	if gotArgs.Prompt != "retry prompt" {
+		t.Errorf("args.Prompt = %q, want %q", gotArgs.Prompt, "retry prompt")
+	}
+	if gotArgs.Effort != "high" {
+		t.Errorf("args.Effort = %q, want %q", gotArgs.Effort, "high")
+	}
+	if !gotArgs.RunAt.Equal(runAt) {
+		t.Errorf("args.RunAt = %v, want %v", gotArgs.RunAt, runAt)
+	}
+}

@@ -204,7 +204,7 @@ func InsertOneShotSchedule(ctx context.Context, database *sql.DB, s OneShotSched
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = time.Now().UTC()
 	}
-	query := `INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6)`
+	query := `INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING`
 	_, err = database.ExecContext(ctx, query, s.ID, s.ThreadID, s.Prompt, s.RunAt, s.CreatedAt, normalizeScheduleEffort(s.Effort))
 	return err
 }

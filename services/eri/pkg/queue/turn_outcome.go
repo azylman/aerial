@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -33,12 +34,32 @@ type oneShotScheduleRequest struct {
 }
 
 func (te *turnExecution) createOneShotSchedule(s oneShotScheduleRequest) error {
+	schedID := strings.TrimSpace(s.ID)
+	if schedID == "" {
+		schedID = uuid.New().String()
+	}
+
+	if te != nil && te.pool != nil && te.pool.eventBus != nil {
+		args := pubsub.HaroOneShotJobArgs{
+			ID:       schedID,
+			ThreadID: s.ThreadID,
+			Prompt:   s.Prompt,
+			Effort:   s.Effort,
+			RunAt:    s.RunAt,
+		}
+		msgID := fmt.Sprintf("haro:oneshot:%s:%d", schedID, s.RunAt.Unix())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return te.pool.eventBus.Publish(ctx, pubsub.SubjectHaroOneShotJob, msgID, args)
+	}
+
 	if te == nil || te.pool == nil || strings.TrimSpace(te.pool.cfg.HaroURL) == "" {
 		return errors.New("haro URL is not configured")
 	}
 
 	haroURL := strings.TrimRight(strings.TrimSpace(te.pool.cfg.HaroURL), "/")
 
+	s.ID = schedID
 	bodyBytes, err := json.Marshal(s)
 	if err != nil {
 		return err
@@ -394,6 +415,9 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	var scheduled bool
 	if !isAlreadyRetry && !te.isDispatch() {
 		oneShotID := uuid.New().String()
+		if len(te.burst) > 0 && te.burst[0].ID != "" {
+			oneShotID = "retry-" + te.burst[0].ID
+		}
 		oneShot := oneShotScheduleRequest{
 			ID:       oneShotID,
 			ThreadID: te.threadID,

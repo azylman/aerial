@@ -102,6 +102,18 @@ func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 	}
 }
 
+func outcomeEvent(id, source, status, errStr string, start, end time.Time, dur int64) *pubsub.DispatchOutcomeEvent {
+	return &pubsub.DispatchOutcomeEvent{
+		DispatchID:  id,
+		Source:      source,
+		Status:      status,
+		Error:       errStr,
+		StartedAt:   start,
+		CompletedAt: end,
+		DurationMs:  dur,
+	}
+}
+
 func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
@@ -112,6 +124,7 @@ func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 		seedScheduleType    string
 		seedScheduleID      string
 		seedRunID           string
+		seedRunStatus       string
 		event               *pubsub.DispatchOutcomeEvent
 		wantErr             bool
 		wantRunStatus       string
@@ -123,53 +136,30 @@ func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 		{
 			name:       "corrupt json returns nil to ack poison pill",
 			rawPayload: `{"status": corrupt-json`,
-			wantErr:    false,
 		},
 		{
 			name:             "healthcheck ping is ignored",
 			seedScheduleType: "heartbeat",
 			seedScheduleID:   "hb-ping",
 			seedRunID:        "healthcheck-ping",
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID: "healthcheck-ping",
-				Status:     "completed",
-			},
-			wantErr:           false,
-			wantRunStatus:     "running",
-			wantWatermarkTime: nil,
+			event:            outcomeEvent("healthcheck-ping", "", "completed", "", time.Time{}, time.Time{}, 0),
+			wantRunStatus:    "running",
 		},
 		{
-			name: "unknown dispatch id naks with delay for retry",
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID: "disp-unknown",
-				Status:     "completed",
-			},
-			wantErr:   false,
+			name:      "unknown dispatch id naks with delay for retry",
+			event:     outcomeEvent("disp-unknown", "", "completed", "", time.Time{}, time.Time{}, 0),
 			wantNaked: true,
 		},
 		{
-			name: "non-heartbeat source like vanadis is ignored without nak",
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID: "disp-vanadis-chunk",
-				Source:     "vanadis",
-				Status:     "completed",
-			},
-			wantErr:   false,
-			wantNaked: false,
+			name:  "non-heartbeat source like vanadis is ignored without nak",
+			event: outcomeEvent("disp-vanadis-chunk", "vanadis", "completed", "", time.Time{}, time.Time{}, 0),
 		},
 		{
-			name:             "heartbeat completed updates run and advances watermark",
-			seedScheduleType: "heartbeat",
-			seedScheduleID:   "hb-disp-1",
-			seedRunID:        "run-hb-1",
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:  "run-hb-1",
-				Status:      "completed",
-				StartedAt:   now,
-				CompletedAt: now.Add(5 * time.Second),
-				DurationMs:  5000,
-			},
-			wantErr:           false,
+			name:              "heartbeat completed updates run and advances watermark",
+			seedScheduleType:  "heartbeat",
+			seedScheduleID:    "hb-disp-1",
+			seedRunID:         "run-hb-1",
+			event:             outcomeEvent("run-hb-1", "", "completed", "", now, now.Add(5*time.Second), 5000),
 			wantRunStatus:     "completed",
 			wantWatermarkTime: &now,
 		},
@@ -178,50 +168,44 @@ func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 			seedScheduleType: "heartbeat",
 			seedScheduleID:   "hb-disp-2",
 			seedRunID:        "run-hb-2",
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:  "run-hb-2",
-				Status:      "failed",
-				Error:       "connection refused",
-				StartedAt:   now,
-				CompletedAt: now.Add(2 * time.Second),
-				DurationMs:  2000,
-			},
-			wantErr:           false,
-			wantRunStatus:     "failed",
-			wantRunError:      "connection refused",
-			wantWatermarkTime: nil,
+			event:            outcomeEvent("run-hb-2", "", "failed", "connection refused", now, now.Add(2*time.Second), 2000),
+			wantRunStatus:    "failed",
+			wantRunError:     "connection refused",
+		},
+		{
+			name:             "heartbeat skipped_active updates run and does not advance watermark",
+			seedScheduleType: "heartbeat",
+			seedScheduleID:   "hb-disp-skip",
+			seedRunID:        "run-hb-skip",
+			event:            outcomeEvent("run-hb-skip", "", "skipped_active", "", now, now, 0),
+			wantRunStatus:    "skipped_active",
 		},
 		{
 			name:             "cron completed updates run without touching heartbeat watermark",
 			seedScheduleType: "cron",
 			seedScheduleID:   "cron-disp-1",
 			seedRunID:        "run-cron-1",
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:  "run-cron-1",
-				Status:      "completed",
-				StartedAt:   now,
-				CompletedAt: now.Add(10 * time.Second),
-				DurationMs:  10000,
-			},
-			wantErr:       false,
-			wantRunStatus: "completed",
+			event:            outcomeEvent("run-cron-1", "", "completed", "", now, now.Add(10*time.Second), 10000),
+			wantRunStatus:    "completed",
 		},
 		{
-			name:             "heartbeat completed with zero duration and zero completedAt calculates both",
-			seedScheduleType: "heartbeat",
-			seedScheduleID:   "hb-disp-zero",
-			seedRunID:        "run-hb-zero",
-			event: &pubsub.DispatchOutcomeEvent{
-				DispatchID:  "run-hb-zero",
-				Status:      "completed",
-				StartedAt:   now,
-				CompletedAt: time.Time{},
-				DurationMs:  0,
-			},
-			wantErr:             false,
+			name:                "heartbeat completed with zero duration and zero completedAt calculates both",
+			seedScheduleType:    "heartbeat",
+			seedScheduleID:      "hb-disp-zero",
+			seedRunID:           "run-hb-zero",
+			event:               outcomeEvent("run-hb-zero", "", "completed", "", now, time.Time{}, 0),
 			wantRunStatus:       "completed",
 			wantWatermarkTime:   &now,
 			wantCheckCalculated: true,
+		},
+		{
+			name:             "terminal completed run ignores subsequent outcome event",
+			seedScheduleType: "heartbeat",
+			seedScheduleID:   "hb-disp-term",
+			seedRunID:        "run-hb-term",
+			seedRunStatus:    "completed",
+			event:            outcomeEvent("run-hb-term", "", "failed", "late failure", time.Time{}, time.Time{}, 0),
+			wantRunStatus:    "completed",
 		},
 	}
 
@@ -231,7 +215,7 @@ func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 			db := setupTestDB(t)
 			ctx := context.Background()
 			seedDispatchHeartbeat(ctx, t, db, tc.seedScheduleType, tc.seedScheduleID, now)
-			seedDispatchRun(ctx, t, db, tc.seedRunID, tc.seedScheduleType, tc.seedScheduleID, now)
+			seedDispatchRun(ctx, t, db, tc.seedRunID, tc.seedScheduleType, tc.seedScheduleID, tc.seedRunStatus, now)
 
 			msg := &memoryMsg{data: dispatchPayload(t, tc.rawPayload, tc.event), subject: "aerial.dispatch.completed"}
 			err := HandleDispatchOutcome(ctx, db, msg)
@@ -269,11 +253,14 @@ func seedDispatchHeartbeat(ctx context.Context, t *testing.T, db *sql.DB, schedu
 	}
 }
 
-// seedDispatchRun inserts a running schedule run when runID is set.
-func seedDispatchRun(ctx context.Context, t *testing.T, db *sql.DB, runID, scheduleType, scheduleID string, now time.Time) {
+// seedDispatchRun inserts a schedule run with the given status (defaulting to "running") when runID is set.
+func seedDispatchRun(ctx context.Context, t *testing.T, db *sql.DB, runID, scheduleType, scheduleID, runStatus string, now time.Time) {
 	t.Helper()
 	if runID == "" {
 		return
+	}
+	if runStatus == "" {
+		runStatus = "running"
 	}
 	run := ScheduleRun{
 		ID:           runID,
@@ -283,7 +270,7 @@ func seedDispatchRun(ctx context.Context, t *testing.T, db *sql.DB, runID, sched
 		ThreadID:     "thread-" + scheduleID,
 		Title:        "Run Title",
 		Prompt:       "Run Prompt",
-		Status:       "running",
+		Status:       runStatus,
 		StartedAt:    now,
 	}
 	if err := CreateScheduleRun(ctx, db, run); err != nil {
@@ -449,6 +436,32 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 	if updatedHB.LastCompletedAt == nil || !updatedHB.LastCompletedAt.Equal(now) {
 		t.Errorf("updatedHB.LastCompletedAt = %v, want %v", updatedHB.LastCompletedAt, now)
 	}
+
+	// Verify haro-oneshot consumer consumes from SubjectHaroOneShotJob
+	oneshotDone := make(chan struct{})
+	wrapped.onHandled = func() { close(oneshotDone) }
+	oneShotJob := pubsub.HaroOneShotJobArgs{
+		ID:       "os-bus-integration",
+		ThreadID: "th-bus-oneshot",
+		Prompt:   "bus oneshot prompt",
+		Effort:   "high",
+		RunAt:    now.Add(10 * time.Minute),
+	}
+	if err := memBus.Publish(ctx, pubsub.SubjectHaroOneShotJob, "os-bus-integration", oneShotJob); err != nil {
+		t.Fatalf("Publish one-shot: %v", err)
+	}
+	select {
+	case <-oneshotDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for one-shot delivery")
+	}
+	osSched, err := GetOneShotSchedule(ctx, db, "os-bus-integration")
+	if err != nil {
+		t.Fatalf("GetOneShotSchedule failed: %v", err)
+	}
+	if osSched.Prompt != "bus oneshot prompt" || osSched.Effort != "high" {
+		t.Errorf("unexpected oneshot schedule: %+v", osSched)
+	}
 }
 
 func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
@@ -598,6 +611,20 @@ func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 		return errSubBus, nil
 	}); bus == nil {
 		t.Error("expected non-nil bus despite Subscribe error")
+	}
+
+	// configureServerEventBus with dispatcher
+	disp := NewHTTPPromptDispatcher("http://localhost:8080")
+	serverWithDisp := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, db), disp)
+	memBusInit := pubsub.NewMemoryBus()
+	defer memBusInit.Close()
+	if bus := initHaroJetStreamWithFactory(ctx, serverWithDisp, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return memBusInit, nil
+	}); bus == nil {
+		t.Error("expected non-nil bus")
+	}
+	if disp.EventBus() == nil {
+		t.Error("expected event bus to be configured on dispatcher")
 	}
 }
 

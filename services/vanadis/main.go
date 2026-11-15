@@ -735,12 +735,12 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner str
 	}
 	cleanBanner := strings.TrimSpace(banner)
 	if s.bus != nil {
-		payload := map[string]string{
-			"build_id": cleanBuildID,
-			"banner":   cleanBanner,
+		args := pubsub.WidgetSyncJobArgs{
+			BuildID: cleanBuildID,
+			Banner:  cleanBanner,
 		}
-		subject := "aerial.coalesced.vanadis_widget." + cleanBuildID
-		if err := s.bus.Publish(ctx, subject, "", payload); err == nil {
+		msgID := fmt.Sprintf("widget:build:%s:%d", cleanBuildID, time.Now().UnixNano())
+		if err := s.bus.Publish(ctx, pubsub.SubjectBuildWidgetSyncCoalesced(cleanBuildID), msgID, args); err == nil {
 			return
 		}
 	}
@@ -845,6 +845,8 @@ func (s *VanadisServer) StartJobConsumers(ctx context.Context) error {
 	if _, err := s.bus.ConsumeQueue(ctx, "aerial.jobs.vanadis.chunk", "vanadis-chunk", s.HandleExecuteChunkJob); err != nil {
 		return err
 	}
+	// Retain vanadis-widget queue consumer on aerial.coalesced.vanadis_widget.* for draining
+	// in-flight messages until Chunk 8 cutover when legacy widget sync paths are retired.
 	_, err := s.bus.ConsumeQueue(ctx, "aerial.coalesced.vanadis_widget.*", "vanadis-widget", s.HandleCoalescedWidgetMessage)
 	return err
 }
