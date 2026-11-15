@@ -394,6 +394,75 @@ verify_vanadis_chunk_active() {
     return 0
 }
 
+format_vanadis_chunk_context() {
+    local chunk_id="${1:-}"
+    if [ -z "$chunk_id" ]; then
+        return 0
+    fi
+
+    local vanadis_base
+    vanadis_base="$(resolve_vanadis_url 2>/dev/null || true)"
+    if [ -z "$vanadis_base" ] && [ -n "${VANADIS_FALLBACK_URL:-}" ]; then
+        vanadis_base="${VANADIS_FALLBACK_URL%/}"
+    fi
+    if [ -z "$vanadis_base" ]; then
+        return 0
+    fi
+
+    local chunk_resp=""
+    chunk_resp="$(curl -sS --connect-timeout 3 --max-time 5 "${vanadis_base}/chunks/${chunk_id}" 2>/dev/null || true)"
+    if [ -z "$chunk_resp" ] && [ -n "${VANADIS_FALLBACK_URL:-}" ] && [ "$vanadis_base" != "${VANADIS_FALLBACK_URL%/}" ]; then
+        chunk_resp="$(curl -sS --connect-timeout 3 --max-time 5 "${VANADIS_FALLBACK_URL%/}/chunks/${chunk_id}" 2>/dev/null || true)"
+        if [ -n "$chunk_resp" ]; then
+            vanadis_base="${VANADIS_FALLBACK_URL%/}"
+        fi
+    fi
+
+    if [ -z "$chunk_resp" ] || ! echo "$chunk_resp" | jq -e '.chunk.id != null and .chunk.id != ""' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local build_id
+    build_id="$(echo "$chunk_resp" | jq -r '.chunk.build_id // .build.id // empty' 2>/dev/null || true)"
+
+    local build_resp=""
+    if [ -n "$build_id" ]; then
+        build_resp="$(curl -sS --connect-timeout 3 --max-time 5 "${vanadis_base}/builds/${build_id}" 2>/dev/null || true)"
+        if [ -z "$build_resp" ] && [ -n "${VANADIS_FALLBACK_URL:-}" ] && [ "$vanadis_base" != "${VANADIS_FALLBACK_URL%/}" ]; then
+            build_resp="$(curl -sS --connect-timeout 3 --max-time 5 "${VANADIS_FALLBACK_URL%/}/builds/${build_id}" 2>/dev/null || true)"
+        fi
+    fi
+
+    local chunks_json=""
+    if [ -n "$build_resp" ] && echo "$build_resp" | jq -e '.chunks | type == "array" and length > 0' >/dev/null 2>&1; then
+        chunks_json="$(echo "$build_resp" | jq -c '.chunks')"
+    else
+        chunks_json="$(echo "$chunk_resp" | jq -c '[.chunk]')"
+    fi
+
+    jq -r -n \
+        --argjson chunk "$(echo "$chunk_resp" | jq -c '.chunk')" \
+        --argjson build "$(echo "$chunk_resp" | jq -c '.build // {}')" \
+        --argjson chunks "$chunks_json" '
+        $chunk as $c |
+        $build as $b |
+        $chunks as $all_chunks |
+        ($all_chunks | length) as $total |
+        (($c.chunk_index // 0) + 1) as $idx |
+        ([$c.target_files[]?] | join(", ")) as $tf |
+        [
+          "## Vanadis Build Context",
+          "- **Build**: \($b.id // $c.build_id // "unknown") — \($b.title // "Untitled Build")",
+          (if ($b.objective != null and ($b.objective | test("\\S"))) then "- **Build Objective**: \($b.objective | gsub("\r?\n"; " ") | gsub("^[[:space:]]+|[[:space:]]+$"; ""))" else empty end),
+          "- **Active Chunk (\($idx) of \($total))**: \($c.id) — \($c.title // "Untitled Chunk")",
+          (if ($tf != "") then "- **Active Chunk Target Files**: \($tf)" else empty end),
+          "- **Build Chunks Roadmap**:",
+          ($all_chunks[] | "- [Chunk \((.chunk_index // 0) + 1)/\($total)] \(.id): \(.title // "Untitled") (\(.mode // "unknown"), \(.status // "unknown"))"),
+          "- **Scope Boundary (RoboRev & Review Guidance)**: This PR implements ONLY the active chunk listed above. Caller cutover, downstream lifecycle wiring, and legacy code removal assigned to downstream chunks in the roadmap are intentionally deferred to their respective chunks and must not be flagged as incomplete or dead wiring in this PR."
+        ] | join("\n")
+    ' 2>/dev/null || return 0
+}
+
 enable_github_auto_merge() {
     local node_id="$1"
     local pr_num="${2:-}"
@@ -881,6 +950,19 @@ submit_scratch() {
         exit 1
     fi
 
+    # Append Vanadis build/chunk context to PR description if chunk ID is set and not already present
+    if [ -n "$vanadis_chunk_id" ] && [[ "$pr_body" != *"## Vanadis Build Context"* ]]; then
+        local vanadis_ctx=""
+        vanadis_ctx="$(format_vanadis_chunk_context "$vanadis_chunk_id" || true)"
+        if [ -n "$vanadis_ctx" ]; then
+            if [ -n "$pr_body" ]; then
+                pr_body="${pr_body}"$'\n\n'"${vanadis_ctx}"
+            else
+                pr_body="$vanadis_ctx"
+            fi
+        fi
+    fi
+
     # Defensively clamp body length to 60,000 characters (GitHub API limit is 65,536)
     local max_body_len=60000
     if [ "${#pr_body}" -gt "$max_body_len" ]; then
@@ -949,7 +1031,13 @@ submit_scratch() {
     fi
 
     # 5. Commit (preserves complete multi-line commit message in git history)
-    git commit -m "$commit_msg" >/dev/null
+    local full_commit_msg="$commit_msg"
+    local commit_body
+    commit_body="$(printf '%s\n' "$pr_body" | grep -v '^<!-- aerial-pr: .* -->$' || true)"
+    if [ -n "$commit_body" ] && [[ "$commit_msg" != *"$commit_body"* ]]; then
+        full_commit_msg="${clean_title}"$'\n\n'"${commit_body}"
+    fi
+    git commit -m "$full_commit_msg" >/dev/null
 
     local branch
     branch=$(git rev-parse --abbrev-ref HEAD)

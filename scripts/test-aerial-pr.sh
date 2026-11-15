@@ -1637,6 +1637,106 @@ EOF
 assert_eq "true" "$(echo "$SUBMIT_FAIL_CLOSED_CHECK" | grep -q 'attach_fail:ok' && echo true || echo false)" "submit_scratch fails non-zero when vanadis attach-pr returns HTTP 500"
 assert_eq "true" "$(echo "$SUBMIT_FAIL_CLOSED_CHECK" | grep -q 'reg_fail:ok' && echo true || echo false)" "submit_scratch fails non-zero when internal pr/register returns HTTP 500"
 
+# Subtest 10: submit_scratch with --vanadis-chunk injects PR description and Vanadis context into commit body and PR body
+SUBMIT_VANADIS_CONTEXT_CHECK=$(bash -c "
+    LOCAL_TMP_DIR=\$(mktemp -d /tmp/aerial-pr-ctx-tmp.XXXXXX)
+    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-ctx-remote.XXXXXX)
+    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-ctx-up.XXXXXX)
+    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-ctx-work.XXXXXX)
+    PAYLOAD_LOG=\$(mktemp /tmp/aerial-ctx-payloads.XXXXXX)
+    trap 'rm -rf \"\$LOCAL_TMP_DIR\" \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\" \"\$WORK_DIR\" \"\$PAYLOAD_LOG\"' EXIT
+
+    git init -q --bare \"\$REMOTE_DIR\"
+    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
+    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
+    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
+    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
+    mkdir -p \"\$UPSTREAM_DIR/scripts\"
+    cat << 'EOF' > \"\$UPSTREAM_DIR/scripts/verify.sh\"
+#!/bin/sh
+exit 0
+EOF
+    chmod +x \"\$UPSTREAM_DIR/scripts/verify.sh\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'init'
+    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
+
+    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
+    git -C \"\$WORK_DIR\" config user.name 'Tester'
+    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR\" checkout -q -b feat/ctx-branch
+    cat << 'EOF' > \"\$WORK_DIR/PR_DESCRIPTION.md\"
+### Summary
+Detailed feature explanation and design context.
+EOF
+    echo 'some code change' > \"\$WORK_DIR/file.txt\"
+
+    export GITHUB_PAT='mock_pat'
+    export VANADIS_URL='http://vanadis.aerial:8080'
+    export AERIAL_PR_REGISTER_URL='http://synapse.aerial:4020/internal/pr/register'
+    export AERIAL_TARGET_ID='100000000000000002'
+
+    (
+        REPO_TEST_MODE=1
+        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+        curl() {
+            if [[ \"\$*\" == *'/chunks/chunk-91'* ]]; then
+                printf '{\"chunk\":{\"id\":\"chunk-91\",\"build_id\":\"b-91\",\"chunk_index\":0,\"title\":\"Chunk 1 Title\",\"target_files\":[\"scripts/aerial-pr.sh\"],\"mode\":\"code\",\"status\":\"running\"},\"build\":{\"id\":\"b-91\",\"title\":\"Build 91 Title\",\"objective\":\"Build 91 Objective\"}}'
+            elif [[ \"\$*\" == *'/builds/b-91'* ]]; then
+                printf '{\"build\":{\"id\":\"b-91\",\"title\":\"Build 91 Title\",\"objective\":\"Build 91 Objective\"},\"chunks\":[{\"id\":\"chunk-91\",\"title\":\"Chunk 1 Title\",\"chunk_index\":0,\"mode\":\"code\",\"status\":\"running\"},{\"id\":\"chunk-92\",\"title\":\"Chunk 2 Title\",\"chunk_index\":1,\"mode\":\"code\",\"status\":\"pending\"}]}'
+            elif [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
+                for arg in \"\$@\"; do
+                    if [[ \"\$arg\" =~ ^\{.*\"body\".* ]]; then
+                        echo \"PR_PAYLOAD:\$(echo \"\$arg\" | tr '\n' ' ')\" >> \"\$PAYLOAD_LOG\"
+                    fi
+                done
+                printf '{\"number\":91,\"html_url\":\"https://github.com/azylman/aerial/pull/91\",\"node_id\":\"PR_kwDO91\"}\n201'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
+                printf '{\"status\":\"attached\",\"build_id\":\"b-91\",\"chunk_id\":\"chunk-91\",\"thread_id\":\"199999999999999999\"}'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                printf '{\"status\":\"registered\",\"target_id\":\"199999999999999999\"}'
+            fi
+        }
+        push_scratch_branch() {
+            # Capture latest git commit message before remote push / workspace cleanup
+            git log -1 --pretty=%B > \"\$LOCAL_TMP_DIR/last_commit_msg\"
+            return 0
+        }
+        export -f curl push_scratch_branch
+        submit_scratch \"\$WORK_DIR\" 'feat: add vanadis context' --vanadis-chunk 'chunk-91' >/dev/null 2>&1
+    )
+
+    pr_pl=\$(grep '^PR_PAYLOAD:' \"\$PAYLOAD_LOG\" | sed 's/^PR_PAYLOAD://')
+    pr_body=\$(echo \"\$pr_pl\" | jq -r '.body // empty')
+    commit_msg=\$(cat \"\$LOCAL_TMP_DIR/last_commit_msg\" 2>/dev/null || echo \"\")
+    rm -f \"\$LOCAL_TMP_DIR/last_commit_msg\"
+
+    b_ok=0
+    c_ok=0
+    if echo \"\$pr_body\" | grep -q '## Vanadis Build Context' && \
+       echo \"\$pr_body\" | grep -q 'Active Chunk' && \
+       echo \"\$pr_body\" | grep -q 'chunk-91' && \
+       echo \"\$pr_body\" | grep -q 'Roadmap' && \
+       echo \"\$pr_body\" | grep -q 'Scope Boundary'; then
+        b_ok=1
+    fi
+
+    if echo \"\$commit_msg\" | grep -q 'feat: add vanadis context' && \
+       echo \"\$commit_msg\" | grep -q 'Detailed feature explanation and design context' && \
+       echo \"\$commit_msg\" | grep -q '## Vanadis Build Context' && \
+       ! echo \"\$commit_msg\" | grep -q '<!-- aerial-pr:'; then
+        c_ok=1
+    fi
+
+    if [ \"\$b_ok\" -eq 1 ] && [ \"\$c_ok\" -eq 1 ]; then
+        echo 'vanadis_ctx_submit:ok'
+    else
+        echo \"vanadis_ctx_submit:fail:b_ok=\$b_ok:c_ok=\$c_ok:commit_msg=\$commit_msg:pr_body=\$pr_body\"
+    fi
+")
+assert_eq "true" "$(echo "$SUBMIT_VANADIS_CONTEXT_CHECK" | grep -q 'vanadis_ctx_submit:ok' && echo true || echo false)" "submit_scratch injects PR_DESCRIPTION and Vanadis Build Context into PR body and commit body"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then
