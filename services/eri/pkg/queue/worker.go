@@ -977,8 +977,10 @@ func (te *turnExecution) enrichFailureFromTranscript(outcome runner.TurnOutcome,
 	targetSess := te.resolveAndPersistSessionID(outcome.SessionID, stdout, stderr, !isSessionCorruption && te.currentSessionID == "")
 	if targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
 		if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(te.poolCtx(), targetSess, te.execStart); tErr == nil && transcriptErr != "" {
-			te.logf("[Queue] Extracted turn error from session %s transcript: %s", targetSess, transcriptErr)
-			return transcriptErr, transcriptErr
+			if shouldReplaceWithTranscriptError(errDetail, stderr, transcriptErr) {
+				te.logf("[Queue] Extracted turn error from session %s transcript: %s", targetSess, transcriptErr)
+				return transcriptErr, transcriptErr
+			}
 		}
 	}
 	return errDetail, stderr
