@@ -427,4 +427,32 @@ func TestFormatChunkPromptWithShareRoot(t *testing.T) {
 			}
 		})
 	}
+
+	// Test ledger with completed action chunk
+	actionCompleted := mkChunk("chunk-0", "", 0, "Action 0", "Do", "", "completed")
+	actionCompleted.Mode = "action"
+	chunksWithAction := []VanadisChunk{actionCompleted, c1}
+	pWithAction, err := formatChunkPromptWithShareRoot(build, chunksWithAction, 1, shareRoot)
+	if err != nil {
+		t.Fatalf("unexpected error formatting with action chunk: %v", err)
+	}
+	if !strings.Contains(pWithAction, "(action, completed)") {
+		t.Fatalf("expected '(action, completed)' in ledger, got: %s", pWithAction)
+	}
+}
+
+func TestSymbols_IdentAndCommentHelpers(t *testing.T) {
+	t.Parallel()
+
+	if !isIdentByte('5') {
+		t.Fatal("expected '5' to be ident byte")
+	}
+	if containsIdent("foo", "") {
+		t.Fatal("empty ident should return false")
+	}
+	// test backtick in line comment search
+	idx := findCommentSlashIndex("var x = `test // not comment` // real comment")
+	if idx != 30 {
+		t.Fatalf("expected comment index 30, got %d", idx)
+	}
 }

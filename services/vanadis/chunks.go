@@ -1129,6 +1129,7 @@ func (s *VanadisServer) handleAdvanceChunkPR(w http.ResponseWriter, r *http.Requ
 		writeStoreErr(w, err)
 		return
 	}
+	restateManaged := s.notifyRestateChunkPRAdvanced(r.Context(), res)
 	if res != nil && res.Matched {
 		if res.Advanced {
 			RecordChunkTotal("merged")
@@ -1137,7 +1138,7 @@ func (s *VanadisServer) handleAdvanceChunkPR(w http.ResponseWriter, r *http.Requ
 			RecordBuildTotal("completed")
 		}
 	}
-	if res != nil && res.Matched && !res.BuildCompleted && res.NextChunkIndex >= 0 {
+	if !restateManaged && res != nil && res.Matched && !res.BuildCompleted && res.NextChunkIndex >= 0 {
 		if err := s.enqueueExecuteChunk(r.Context(), ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: res.NextChunkIndex}); err != nil {
 			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue next chunk %d: %v", res.NextChunkIndex, err))
 			return
@@ -1162,6 +1163,7 @@ func (s *VanadisServer) handleFailChunkPR(w http.ResponseWriter, r *http.Request
 	if failed {
 		RecordChunkTotal("failed")
 		RecordBuildTotal("failed")
+		s.notifyRestateChunkFailed(r.Context(), chunkID)
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"build_id": buildID,
@@ -1219,16 +1221,22 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 		chunkStatus := normalizeWidgetStatus(c.Status)
 		completedAt := c.CompletedAt
 		var activeStep string
-		if req.PRNumber > 0 && c.PRNumber == req.PRNumber && req.PRFound {
+		switch {
+		case req.PRNumber > 0 && c.PRNumber == req.PRNumber && req.PRFound:
 			chunkStatus = resolveVanadisChunkWidgetStatus(c.Status, req.PRStatus)
 			if (chunkStatus == "failed" || chunkStatus == "conflict") && widgetStatus != "completed" {
 				widgetStatus = "failed"
 			}
 			if isVanadisChunkStreamingPhase(chunkStatus) {
 				activeStep = strings.TrimSpace(req.ActiveStep)
+				if activeStep == "" {
+					activeStep = FormatChunkActiveStep(c)
+				}
 				completedAt = time.Time{}
 			}
-		} else if chunkStatus == "merged" || (c.Mode == "action" && chunkStatus == "completed") {
+		case isVanadisChunkStreamingPhase(chunkStatus):
+			activeStep = FormatChunkActiveStep(c)
+		case chunkStatus == "merged" || (c.Mode == "action" && chunkStatus == "completed"):
 			chunkStatus = "deployed"
 		}
 		wChunks[i] = StatusWidgetChunk{
@@ -1255,6 +1263,7 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 		Title:     firstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
 		Status:    widgetStatus,
 		Banner:    resolveWidgetBanner(widgetStatus, req),
+		SkipSink:  build.Quiet,
 		Chunks:    wChunks,
 		StartedAt: build.CreatedAt,
 	}
@@ -1411,6 +1420,13 @@ func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Reque
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"chunk": chunks[idx], "build": build})
 }
 
+func (s *VanadisServer) syncBuildAndNotifyMutation(ctx context.Context, buildID, action string) {
+	s.syncBuildWidget(ctx, buildID, "")
+	if err := s.notifyRestateDAGMutation(ctx, buildID, action); err != nil {
+		log.Printf("[vanadis] warning: failed signaling restate dag mutation on %s for build %s: %v", action, buildID, err)
+	}
+}
+
 func (s *VanadisServer) handleUpdateChunk(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 	if err != nil {
@@ -1427,7 +1443,7 @@ func (s *VanadisServer) handleUpdateChunk(w http.ResponseWriter, r *http.Request
 		writeStoreErr(w, err)
 		return
 	}
-	s.syncBuildWidget(r.Context(), buildID, "")
+	s.syncBuildAndNotifyMutation(r.Context(), buildID, "update_chunk")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "chunk": chunk})
 }
 
@@ -1447,7 +1463,7 @@ func (s *VanadisServer) handleAppendChunks(w http.ResponseWriter, r *http.Reques
 		writeStoreErr(w, err)
 		return
 	}
-	s.syncBuildWidget(r.Context(), buildID, "")
+	s.syncBuildAndNotifyMutation(r.Context(), buildID, "append_chunks")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "appended", "build_id": buildID, "chunks": appended})
 }
 
@@ -1457,7 +1473,7 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 		writeStoreErr(w, err)
 		return
 	}
-	s.syncBuildWidget(r.Context(), buildID, "")
+	s.syncBuildAndNotifyMutation(r.Context(), buildID, "remove_chunk")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":           "removed",
 		"build_id":         buildID,

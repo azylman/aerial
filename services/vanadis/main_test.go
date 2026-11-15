@@ -691,6 +691,7 @@ func testHTTPEndpointsBuildCancel(t *testing.T, srv *VanadisServer, memStore *me
 	srv.cfg.BrainURL = cancelBrainSrv.URL
 	srv.cfg.SynapseURL = cancelBrainSrv.URL
 	srv.httpClient = cancelBrainSrv.Client()
+	srv.SetBus(nil)
 	_ = memStore.UpdateChunkStatus(context.Background(), buildID+"-chunk-1", "merged")
 	_ = memStore.UpdateChunkStatus(context.Background(), "custom-chunk-2", "running")
 	memStore.updateChunkErr = errors.New("simulated chunk cancel update err")

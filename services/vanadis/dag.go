@@ -157,12 +157,18 @@ func buildTransitiveClosure(out []VanadisChunk, idMap map[string]int) [][]bool {
 func validateConcurrentDisjointPRChunks(out []VanadisChunk, reach [][]bool) error {
 	N := len(out)
 	for i := range N {
+		if isTerminalChunkStatus(out[i].Status) {
+			continue
+		}
 		modeI, err := normalizeChunkMode(out[i].Mode)
 		if err != nil || modeI != "pr" {
 			continue
 		}
 		repoI := normalizeRepo(out[i].Repo)
 		for j := i + 1; j < N; j++ {
+			if isTerminalChunkStatus(out[j].Status) {
+				continue
+			}
 			modeJ, err := normalizeChunkMode(out[j].Mode)
 			if err != nil || modeJ != "pr" {
 				continue
@@ -256,15 +262,16 @@ func marshalJSONBOrEmpty(v any) []byte {
 // removing removedID and replacing it with removedDeps.
 func relinkDependenciesAfterRemoval(remaining []VanadisChunk, removedID string, removedDeps []string) {
 	for i := range remaining {
-		if !slices.Contains(remaining[i].DependsOn, removedID) {
+		c := &remaining[i]
+		if !slices.Contains(c.DependsOn, removedID) {
 			continue
 		}
-		newDeps := make([]string, 0, len(remaining[i].DependsOn)+len(removedDeps))
+		newDeps := make([]string, 0, len(c.DependsOn)+len(removedDeps))
 		seen := make(map[string]bool)
-		for _, dep := range remaining[i].DependsOn {
+		for _, dep := range c.DependsOn {
 			if dep == removedID {
 				for _, rd := range removedDeps {
-					if rd != remaining[i].ID && !seen[rd] {
+					if rd != c.ID && !seen[rd] {
 						seen[rd] = true
 						newDeps = append(newDeps, rd)
 					}
@@ -274,7 +281,7 @@ func relinkDependenciesAfterRemoval(remaining []VanadisChunk, removedID string, 
 				newDeps = append(newDeps, dep)
 			}
 		}
-		remaining[i].DependsOn = newDeps
+		c.DependsOn = newDeps
 	}
 }
 

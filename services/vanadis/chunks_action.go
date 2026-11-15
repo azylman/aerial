@@ -225,7 +225,7 @@ func formatBuildCompletedWakePrompt(res *VanadisAdvancementResult) string {
 			lines = append(lines, fmt.Sprintf("- Chunk %d/%d: %s %s", c.ChunkIndex+1, total, c.Title, formatChunkLedgerLabel(c)))
 		}
 	}
-	lines = append(lines, "", "All Vanadis build chunks have completed. Review the work and formulate the final substantive deliverable to the user.")
+	lines = append(lines, "", "Directive: Concisely summarize the completed build and deployment, and either suggest the next steps from the discussion or explicitly call out that all work is completed.")
 	return strings.Join(lines, "\n")
 }
 
@@ -235,7 +235,7 @@ func isShutdownInterruptionReason(reason string) bool {
 }
 
 func (s *VanadisServer) failChunkInternal(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
-	if s.store == nil {
+	if s == nil || s.store == nil {
 		return nil, nil, false, errors.New("vanadis store not configured")
 	}
 	chunkID = strings.TrimSpace(chunkID)
@@ -257,6 +257,7 @@ func (s *VanadisServer) failChunkInternal(ctx context.Context, chunkID, reason s
 	if transitioned && build != nil && chunk != nil {
 		RecordChunkTotal("failed")
 		RecordBuildTotal("failed")
+		s.notifyRestateChunkFailed(ctx, chunk.ID)
 
 		totalChunks := chunk.ChunkIndex + 1
 		if _, allChunks, bErr := s.store.GetBuild(ctx, build.ID); bErr == nil && len(allChunks) > 0 {
