@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -127,21 +128,7 @@ func filterVanadisChunkEnv(env []string) []string {
 // or pooled worker keys ("heartbeat-*", "dispatch-*", "worker-*", "vanadis-*", or colon-scoped
 // pool keys like "discord:worker-0" and "ephemeral:worker-0").
 func NormalizeEnvTargetID(id string) string {
-	clean := strings.TrimSpace(id)
-	if clean == "" {
-		return ""
-	}
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		suffix := strings.TrimSpace(clean[idx+1:])
-		if !strings.HasPrefix(suffix, "discord-") {
-			return ""
-		}
-		clean = suffix
-	}
-	if strings.HasPrefix(clean, "heartbeat-") || strings.HasPrefix(clean, "dispatch-") || strings.HasPrefix(clean, "worker-") || strings.HasPrefix(clean, "vanadis-") {
-		return ""
-	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
+	return session.NormalizeEnvTargetID(id)
 }
 
 // BuildAgyEnv constructs the process environment slice for agy execution.
@@ -218,31 +205,9 @@ func SanitizeDaemonTargetKey(targetKey string) string {
 }
 
 // FormatTurnEnvFileContent formats the per-daemon turn environment file sourced by BASH_ENV.
-// It unsets BASH_ENV first so nested bash invocations do not re-source the file and clobber
-// local overrides, followed by exporting or unsetting AERIAL_TARGET_ID and AERIAL_VANADIS_CHUNK_ID.
+// It delegates to session.FormatTurnEnvFileContent.
 func FormatTurnEnvFileContent(targetID, vanadisChunkID string) string {
-	var sb strings.Builder
-	sb.WriteString("unset BASH_ENV\n")
-
-	normTarget := NormalizeEnvTargetID(targetID)
-	if normTarget != "" {
-		sb.WriteString("export AERIAL_TARGET_ID='")
-		sb.WriteString(strings.ReplaceAll(normTarget, "'", `'\''`))
-		sb.WriteString("'\n")
-	} else {
-		sb.WriteString("unset AERIAL_TARGET_ID\n")
-	}
-
-	cleanChunk := strings.TrimSpace(vanadisChunkID)
-	if cleanChunk != "" {
-		sb.WriteString("export AERIAL_VANADIS_CHUNK_ID='")
-		sb.WriteString(strings.ReplaceAll(cleanChunk, "'", `'\''`))
-		sb.WriteString("'\n")
-	} else {
-		sb.WriteString("unset AERIAL_VANADIS_CHUNK_ID\n")
-	}
-
-	return sb.String()
+	return session.FormatTurnEnvFileContent(targetID, vanadisChunkID)
 }
 
 // ParseInitEvent extracts conversation ID from an NDJSON line containing {"event":"init"}.

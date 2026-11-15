@@ -281,7 +281,13 @@ func (s *VanadisServer) ProcessPRLifecycleEvent(ctx context.Context, ev pubsub.P
 		return s.handlePRSyncFailed(ctx, ev, chunk, build)
 	case "merged":
 		return s.handlePRMerged(ctx, ev, chunk, build)
-	case "deploy_success", "sync_success":
+	case "deploy_success":
+		return s.handlePRDeploySuccess(ctx, chunk, build)
+	case "sync_success":
+		if chunk.Mode == "action" {
+			s.syncBuildWidget(ctx, build.ID, "")
+			return nil
+		}
 		return s.handlePRDeploySuccess(ctx, chunk, build)
 	case "closed_unmerged":
 		return s.handlePRClosedUnmerged(ctx, chunk)
@@ -506,8 +512,10 @@ func (s *VanadisServer) isNextUnmergedChunkAction(ctx context.Context, buildID s
 }
 
 func (s *VanadisServer) handlePRMerged(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
-	if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "merged"); err != nil {
-		log.Printf("[vanadis] warning updating chunk %s to merged: %v", chunk.ID, err)
+	if chunk.Status != "completed" {
+		if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "merged"); err != nil {
+			log.Printf("[vanadis] warning updating chunk %s to merged: %v", chunk.ID, err)
+		}
 	}
 	RecordChunkTotal("merged")
 
@@ -517,6 +525,13 @@ func (s *VanadisServer) handlePRMerged(ctx context.Context, ev pubsub.PRLifecycl
 			return nil
 		}
 		log.Printf("[vanadis] warning resolving merge awakeable %s; falling back to legacy advancement", chunk.MergeAwakeableID)
+	}
+
+	if chunk.Mode == "action" {
+		// Action chunk with attached PR awaits deployment before completing/advancing
+		s.syncBuildWidget(ctx, build.ID, "")
+		s.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunk.ID}, "")
+		return nil
 	}
 
 	if !s.isNextUnmergedChunkAction(ctx, build.ID, chunk.ChunkIndex) {

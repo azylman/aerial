@@ -378,7 +378,12 @@ func (m *memoryVanadisStore) attachToExistingChunk(chunkID string, req AttachChu
 			if list[i].Status == "cancelled" || m.builds[bID].Status == "cancelled" || m.builds[bID].Status == "completed" {
 				return "", "", "", ErrBuildConflict
 			}
-			if repo != "" && !reposMatch(list[i].Repo, repo) {
+			if list[i].Mode == "action" {
+				if repo == "" {
+					return "", "", "", errors.New("repo is required to attach PR to action chunk")
+				}
+				list[i].Repo = repo
+			} else if repo != "" && !reposMatch(list[i].Repo, repo) {
 				return "", "", "", fmt.Errorf("chunk %s repo %q does not match %q", chunkID, list[i].Repo, repo)
 			}
 			list[i].PRNumber = req.PRNumber

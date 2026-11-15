@@ -912,6 +912,12 @@ func (s *VanadisServer) notifyRestateActionChunkCompleted(ctx context.Context, c
 	if err != nil || chunk == nil || chunk.DeployAwakeableID == "" {
 		return false
 	}
+	// Action chunk with an attached PR must not be completed at end of dispatch turn;
+	// it must await deploy_success resolving its deploy_awakeable_id.
+	if chunk.PRNumber > 0 {
+		log.Printf("[vanadis] action chunk %s has attached PR #%d; skipping end-of-turn awakeable resolution (awaiting PR deployment)", chunk.ID, chunk.PRNumber)
+		return false
+	}
 	if err := s.resolveRestateAwakeable(ctx, chunk.DeployAwakeableID, "completed"); err != nil {
 		log.Printf("[vanadis] warning: failed resolving action awakeable for chunk %s: %v", chunk.ID, err)
 		return false
