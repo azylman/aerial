@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -713,27 +715,27 @@ func runBrainAppLifecycleClaudeEngine(t *testing.T, cfg *config.Config) {
 	}
 }
 
-func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
-	newLifecycleCfg := func(t *testing.T, mutators ...func(*config.ConfigData)) (string, *config.Config) {
-		t.Helper()
-		tmpDir := t.TempDir()
-		_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0o755)
-		_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0o755)
-		cfg := newTestConfig(func(d *config.ConfigData) {
-			d.Port = "0"
-			d.AgyBin = "/bin/true"
-			d.Model = "gemini-2.5-flash"
-			d.SystemPrompt = "test"
-			d.GeminiHomeDir = tmpDir
-			d.DataDir = filepath.Join(tmpDir, "data")
-			d.DatabaseURL = ":memory:"
-			for _, m := range mutators {
-				m(d)
-			}
-		})
-		return tmpDir, cfg
-	}
+func newLifecycleCfg(t *testing.T, mutators ...func(*config.ConfigData)) (string, *config.Config) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0o755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0o755)
+	cfg := newTestConfig(func(d *config.ConfigData) {
+		d.Port = "0"
+		d.AgyBin = "/bin/true"
+		d.Model = "gemini-2.5-flash"
+		d.SystemPrompt = "test"
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
+		d.DatabaseURL = ":memory:"
+		for _, m := range mutators {
+			m(d)
+		}
+	})
+	return tmpDir, cfg
+}
 
+func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 	t.Run("PrewarmedWorkers", func(t *testing.T) {
 		tmpDir, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
 			d.DiscordToken = "mock-discord-token"
@@ -859,6 +861,73 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 
 		runBrainAppLifecycleClaudeEngine(t, cfg)
 	})
+}
+
+func TestRunBrainApp_EventBusTranscriptSyncSubscriber(t *testing.T) {
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	oldNewBus := newBusFn
+	newBusFn = func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return memBus, nil
+	}
+	defer func() { newBusFn = oldNewBus }()
+
+	syncedCh := make(chan pubsub.TranscriptSyncedEvent, 1)
+	_, _ = memBus.Subscribe(context.Background(), pubsub.SubjectAerialTurnTranscriptSynced, "test-verify-runbrainapp", func(_ context.Context, msg pubsub.Message) error {
+		var ev pubsub.TranscriptSyncedEvent
+		if err := json.Unmarshal(msg.Data(), &ev); err == nil {
+			select {
+			case syncedCh <- ev:
+			default:
+			}
+		}
+		return nil
+	})
+
+	_, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
+		d.NATSURL = "nats://127.0.0.1:4222"
+	})
+
+	_, cancel, wait := runBrainAppUntilReady(t, cfg)
+	defer func() {
+		cancel()
+		if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("unexpected error from RunBrainApp: %v", err)
+		}
+	}()
+
+	turnEv := pubsub.TurnCompletedEvent{
+		SessionID:      "run-brain-app-sess",
+		ConversationID: "conv-1",
+		Source:         "discord",
+		CompletedAt:    time.Now().UTC(),
+	}
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(5 * time.Second)
+
+	var msgSeq atomic.Int64
+	publishNext := func() {
+		seq := msgSeq.Add(1)
+		_ = memBus.Publish(context.Background(), pubsub.SubjectAerialTurnCompleted, fmt.Sprintf("turn-%d", seq), turnEv)
+	}
+
+	// Publish immediately, then repeat on ticks until leader handoff activates the subscriber.
+	publishNext()
+
+	for {
+		select {
+		case ev := <-syncedCh:
+			if ev.SessionID != "run-brain-app-sess" {
+				t.Errorf("ev.SessionID = %q, want %q", ev.SessionID, "run-brain-app-sess")
+			}
+			return
+		case <-ticker.C:
+			publishNext()
+		case <-timeout:
+			t.Fatal("timed out waiting for TranscriptSyncedEvent from RunBrainApp subscriber")
+		}
+	}
 }
 
 func hasEnv(envs []string, target string) bool {
