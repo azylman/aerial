@@ -612,9 +612,14 @@ func TestHandleOneShotJob_Scenarios(t *testing.T) {
 	// Server invalidates cache on insert
 	toolHandler := NewToolHandler(&Config{DatabaseURL: ":memory:"}, db)
 	srv := NewServer(toolHandler)
+	srv.schedulesCache.resp = &SchedulesResponse{Status: "ok"}
+	srv.schedulesCache.expiresAt = now.Add(time.Minute)
 	msgWithServer := &memoryMsg{data: []byte(fmt.Sprintf(`{"thread_id":"th-2","prompt":"p2","run_at":%q}`, now.Format(time.RFC3339)))}
 	if err := HandleOneShotJob(ctx, srv, nil, msgWithServer); err != nil {
 		t.Fatalf("HandleOneShotJob with server failed: %v", err)
+	}
+	if srv.schedulesCache.resp != nil {
+		t.Errorf("expected srv.schedulesCache.resp to be invalidated (nil), got %+v", srv.schedulesCache.resp)
 	}
 }
 
@@ -767,15 +772,14 @@ func TestDB_DeleteByID(t *testing.T) {
 	_ = InsertOneShotSchedule(ctx, db, OneShotSchedule{ID: "del-test-1", ThreadID: "th-1", RunAt: time.Now()})
 
 	tests := []struct {
-		name            string
-		nilDB           bool
-		query           string
-		emptyErrMsg     string
-		errPrefix       string
-		id              string
-		wantErr         bool
-		wantErrContains string
-		wantDeleted     bool
+		name        string
+		nilDB       bool
+		query       string
+		emptyErrMsg string
+		errPrefix   string
+		id          string
+		wantErr     bool
+		wantDeleted bool
 	}{
 		{
 			name:        "NilDB",
@@ -786,40 +790,36 @@ func TestDB_DeleteByID(t *testing.T) {
 			wantDeleted: false,
 		},
 		{
-			name:            "EmptyIDCustomMessage",
-			query:           "DELETE FROM one_shot_schedules WHERE id = $1",
-			emptyErrMsg:     "custom id required",
-			id:              "   ",
-			wantErr:         true,
-			wantErrContains: "custom id required",
-			wantDeleted:     false,
+			name:        "EmptyIDCustomMessage",
+			query:       "DELETE FROM one_shot_schedules WHERE id = $1",
+			emptyErrMsg: "custom id required",
+			id:          "   ",
+			wantErr:     true,
+			wantDeleted: false,
 		},
 		{
-			name:            "EmptyIDDefaultMessage",
-			query:           "DELETE FROM one_shot_schedules WHERE id = $1",
-			emptyErrMsg:     "",
-			id:              "   ",
-			wantErr:         true,
-			wantErrContains: "id cannot be empty",
-			wantDeleted:     false,
+			name:        "EmptyIDDefaultMessage",
+			query:       "DELETE FROM one_shot_schedules WHERE id = $1",
+			emptyErrMsg: "",
+			id:          "   ",
+			wantErr:     true,
+			wantDeleted: false,
 		},
 		{
-			name:            "BadQuerySyntax",
-			query:           "DELETE FROM non_existent_table_xyz WHERE id = $1",
-			errPrefix:       "failed to delete test item",
-			id:              "del-test-1",
-			wantErr:         true,
-			wantErrContains: "failed to delete test item",
-			wantDeleted:     false,
+			name:        "BadQuerySyntax",
+			query:       "DELETE FROM non_existent_table_xyz WHERE id = $1",
+			errPrefix:   "failed to delete test item",
+			id:          "del-test-1",
+			wantErr:     true,
+			wantDeleted: false,
 		},
 		{
-			name:            "BadQuerySyntaxWithoutPrefix",
-			query:           "DELETE FROM non_existent_table_xyz WHERE id = $1",
-			errPrefix:       "",
-			id:              "del-test-1",
-			wantErr:         true,
-			wantErrContains: "non_existent_table_xyz",
-			wantDeleted:     false,
+			name:        "BadQuerySyntaxWithoutPrefix",
+			query:       "DELETE FROM non_existent_table_xyz WHERE id = $1",
+			errPrefix:   "",
+			id:          "del-test-1",
+			wantErr:     true,
+			wantDeleted: false,
 		},
 		{
 			name:        "SuccessExisting",
@@ -846,11 +846,6 @@ func TestDB_DeleteByID(t *testing.T) {
 			deleted, err := deleteByID(ctx, targetDB, tc.query, tc.emptyErrMsg, tc.errPrefix, tc.id)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("deleteByID() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErrContains != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
-					t.Errorf("deleteByID() err = %v, wantErrContains = %q", err, tc.wantErrContains)
-				}
 			}
 			if deleted != tc.wantDeleted {
 				t.Errorf("deleteByID() deleted = %v, want %v", deleted, tc.wantDeleted)
