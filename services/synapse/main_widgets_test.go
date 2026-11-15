@@ -1190,7 +1190,7 @@ func TestRouterServer_ProcessMergeConflict(t *testing.T) {
 	}{
 		{name: "nil server is a no-op", nilServer: true},
 		{
-			name:           "valid conflict dispatches a skip-if-active prompt",
+			name:           "valid conflict dispatches a queued conflict prompt",
 			args:           MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-1", PRNumber: 543, TargetID: "100000000000000001"},
 			wantDispatchID: "conflict-azylman-aerial-543-sha-conflict-1",
 		},
@@ -1263,7 +1263,7 @@ func TestRouterServer_EnqueueMergeConflict(t *testing.T) {
 	}
 }
 
-// assertConflictDispatch checks that exactly one skip-if-active conflict
+// assertConflictDispatch checks that exactly one queued conflict
 // prompt with wantID was dispatched, or none when wantID is empty.
 func assertConflictDispatch(t *testing.T, disp *mockOutboundDispatcher, wantID string) {
 	t.Helper()
@@ -1280,8 +1280,8 @@ func assertConflictDispatch(t *testing.T, disp *mockOutboundDispatcher, wantID s
 	if calls[0].ID != wantID {
 		t.Errorf("DispatchCalls[0].ID = %q, want %q", calls[0].ID, wantID)
 	}
-	if !calls[0].SkipIfActive {
-		t.Errorf("DispatchCalls[0].SkipIfActive = false, want true")
+	if calls[0].SkipIfActive {
+		t.Errorf("DispatchCalls[0].SkipIfActive = true, want false")
 	}
 }
 

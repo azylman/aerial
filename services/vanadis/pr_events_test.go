@@ -420,7 +420,7 @@ func TestHandlePRCIFailed_Remediation(t *testing.T) {
 				assert.Equal(t, "vanadis-c-ci1-cifail-sha601-2", r.Body["id"])
 				assert.Equal(t, "vanadis-c-ci1", r.Body["session_id"])
 				assert.Equal(t, "123456789012345678", r.Body["target_id"])
-				assert.Equal(t, true, r.Body["skip_if_active"])
+				assert.Empty(t, r.Body["skip_if_active"])
 				assert.Contains(t, r.Body["prompt"].(string), "Go Unit Tests")
 				assert.Contains(t, r.Body["prompt"].(string), "--- FAIL: TestA")
 			}
@@ -701,7 +701,7 @@ func TestHandlePRConflict_DeployFailed_SyncFailed(t *testing.T) {
 				assert.Equal(t, "vanadis-c-conf", r.Body["session_id"])
 				assert.Equal(t, "123456789012345678", r.Body["target_id"])
 				assert.Equal(t, "c-conf", r.Body["vanadis_chunk_id"])
-				assert.Equal(t, true, r.Body["skip_if_active"])
+				assert.Empty(t, r.Body["skip_if_active"])
 				assert.Equal(t, "medium", r.Body["effort"])
 				assert.Contains(t, r.Body["prompt"].(string), "Merge conflict detected")
 			}

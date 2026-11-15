@@ -405,7 +405,6 @@ func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecy
 			VanadisChunkID: chunk.ID,
 			Prompt:         prompt,
 			Effort:         capChunkEffort(chunk.Effort),
-			SkipIfActive:   true,
 		}); err != nil {
 			log.Printf("[vanadis] warning dispatching ci remediation for %s: %v", chunk.ID, err)
 		}
@@ -452,7 +451,6 @@ func (s *VanadisServer) handlePRConflict(ctx context.Context, ev pubsub.PRLifecy
 		VanadisChunkID: chunk.ID,
 		Prompt:         prompt,
 		Effort:         capChunkEffort(chunk.Effort),
-		SkipIfActive:   true,
 	})
 }
 
@@ -533,6 +531,7 @@ func (s *VanadisServer) completeBuildIfAllChunksFinished(ctx context.Context, bu
 	for _, c := range allChunks {
 		finished := c.Status == "completed" || (c.Status == "merged" && b.Status == "completed")
 		if !finished {
+			s.syncBuildWidget(ctx, b.ID, "")
 			return nil
 		}
 	}
