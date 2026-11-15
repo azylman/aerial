@@ -123,6 +123,7 @@ type loadConfigFileTestCase struct {
 	wantMaxConcurrent      int
 	wantAllowFromLen       int
 	wantFirstAllowFrom     string
+	wantNATSURL            string
 }
 
 func TestLoadConfigFile_TableDriven(t *testing.T) {
@@ -170,6 +171,8 @@ max_concurrent_calls: 2
 		"bad_calls":        strings.Replace(validYAML, `max_concurrent_calls: 2`, `max_concurrent_calls: 0`, 1),
 		"twilio": validYAML + `twilio_account_sid: "AC_from_yaml"
 twilio_from_number: "(510) 555-0999"
+`,
+		"nats": validYAML + `nats_url: "nats://nats.aerial:4222"
 `,
 	}
 
@@ -301,6 +304,27 @@ func loadConfigValidCases(paths map[string]string) []loadConfigFileTestCase {
 			wantPort:             "4019",
 			wantTwilioAccountSID: "AC_override_env",
 			wantTwilioFromNumber: "+15105550111",
+		},
+		{
+			name: "nats_url loaded from yaml",
+			path: paths["nats"],
+			env: map[string]string{
+				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
+			},
+			wantErr:     false,
+			wantPort:    "4019",
+			wantNATSURL: "nats://nats.aerial:4222",
+		},
+		{
+			name: "nats_url in env overrides yaml",
+			path: paths["nats"],
+			env: map[string]string{
+				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
+				"NATS_URL":     "nats://override.aerial:4222",
+			},
+			wantErr:     false,
+			wantPort:    "4019",
+			wantNATSURL: "nats://override.aerial:4222",
 		},
 	}
 }
@@ -464,6 +488,7 @@ func assertLoadedConfig(t *testing.T, tc loadConfigFileTestCase, cfg *Config) {
 		{cfg.CovenURL, tc.wantCovenURL, "CovenURL"},
 		{cfg.WhisperURL, tc.wantWhisperURL, "WhisperURL"},
 		{cfg.DefaultDiscordChannel, tc.wantDiscordChannel, "DefaultDiscordChannel"},
+		{cfg.NATSURL, tc.wantNATSURL, "NATSURL"},
 	}
 	for _, c := range strChecks {
 		if c.want != "" && c.got != c.want {

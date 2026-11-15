@@ -45,6 +45,7 @@ type Config struct {
 	CallbackWindowMinutes int
 	MaxConcurrentCalls    int
 	AllowFrom             []string
+	NATSURL               string
 }
 
 // ConfigSource yields the live configuration snapshot. Callers read Current()
@@ -56,6 +57,7 @@ type ConfigSource interface {
 // ProsperaYAMLConfig defines the declarative file schema for prospera.yaml.
 type ProsperaYAMLConfig struct {
 	Port                  string `yaml:"port"`
+	NATSURL               string `yaml:"nats_url"`
 	EriURL                string `yaml:"eri_url"`
 	GoogleMCPURL          string `yaml:"google_mcp_url"`
 	CovenURL              string `yaml:"coven_url"`
@@ -239,8 +241,14 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 		return nil, err
 	}
 
+	natsURL := strings.TrimSpace(getenv("NATS_URL"))
+	if natsURL == "" {
+		natsURL = strings.TrimSpace(ycfg.NATSURL)
+	}
+
 	return &Config{
 		Port:                  strings.TrimSpace(ycfg.Port),
+		NATSURL:               natsURL,
 		DatabaseURL:           dbURL,
 		TwilioAccountSID:      twilioAccountSID,
 		TwilioAuthToken:       strings.TrimSpace(getenv("TWILIO_AUTH_TOKEN")),

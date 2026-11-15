@@ -14,8 +14,13 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 )
+
+var newProsperaBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
+	return pubsub.NewJetStreamBus(ctx, url)
+}
 
 var transcriptBatchInterval = 5 * time.Second
 
@@ -51,6 +56,26 @@ func flushActiveSessions(ctx context.Context, sessionMgr *CallSessionManager, re
 	}
 }
 
+func setupProsperaBus(ctx context.Context, server *Server, rawNATSURL string) pubsub.Bus {
+	natsURL := strings.TrimSpace(rawNATSURL)
+	if natsURL == "" {
+		return nil
+	}
+	bus, busErr := newProsperaBusFn(ctx, natsURL)
+	if busErr != nil {
+		log.Printf("prospera: failed to connect to nats at %s: %v", natsURL, busErr)
+		return nil
+	}
+	if streamErr := pubsub.EnsureCoreStreams(ctx, bus); streamErr != nil {
+		log.Printf("prospera: failed to ensure core streams: %v", streamErr)
+	}
+	server.SetEventBus(bus)
+	if consErr := server.StartJobConsumers(ctx); consErr != nil {
+		log.Printf("prospera: failed to start job consumers: %v", consErr)
+	}
+	return bus
+}
+
 // RunApp bootstraps and runs the Prospera service HTTP server with graceful shutdown.
 // Startup-bound settings (listen port, database, Twilio credentials, consult
 // endpoints) are read once here; everything else is read per request from cfgSrc.
@@ -84,6 +109,10 @@ func RunApp(ctx context.Context, cfgSrc *httpkit.Reloadable[Config]) error {
 	reporter := NewReporter(cfgSrc, store, twilioClient, WithReporterRecordingProvider(sessionMgr.GetRecordingWAV))
 
 	server := NewServer(cfgSrc, store, twilioClient, tokenMgr, sessionMgr, reporter)
+
+	if bus := setupProsperaBus(ctx, server, cfg.NATSURL); bus != nil {
+		defer httpkit.CloseWarn(bus, "prospera event bus on shutdown")
+	}
 
 	httpServer := &http.Server{
 		Addr:              ":" + port,
@@ -137,7 +166,8 @@ func prosperaRestartRequired(old, next *Config) bool {
 		old.TwilioAccountSID != next.TwilioAccountSID ||
 		old.TwilioAuthToken != next.TwilioAuthToken ||
 		old.GoogleMCPURL != next.GoogleMCPURL ||
-		old.CovenURL != next.CovenURL
+		old.CovenURL != next.CovenURL ||
+		old.NATSURL != next.NATSURL
 }
 
 var (

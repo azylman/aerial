@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 	_ "modernc.org/sqlite"
 )
 
@@ -60,9 +61,14 @@ func TestRunApp_Validation(t *testing.T) {
 }
 
 func TestRunApp_Lifecycle(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "prospera_app_test.db")
+
+	origBusFn := newProsperaBusFn
+	newProsperaBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
+		return pubsub.NewMemoryBus(), nil
+	}
+	defer func() { newProsperaBusFn = origBusFn }()
 
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -116,6 +122,7 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		Port:                  "0",
 		DatabaseURL:           "sqlite://" + dbPath,
 		DefaultDiscordChannel: "prospera",
+		NATSURL:               "nats://127.0.0.1:4222",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -134,6 +141,66 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("RunApp() did not shut down within timeout")
+	}
+}
+
+func TestSetupProsperaBus(t *testing.T) {
+	tests := []struct {
+		name       string
+		natsURL    string
+		busFactory func(context.Context, string) (pubsub.Bus, error)
+		wantNil    bool
+	}{
+		{
+			name:    "empty url returns nil",
+			natsURL: "   ",
+			wantNil: true,
+		},
+		{
+			name:    "bus factory error returns nil",
+			natsURL: "nats://127.0.0.1:4222",
+			busFactory: func(context.Context, string) (pubsub.Bus, error) {
+				return nil, errors.New("connection failed")
+			},
+			wantNil: true,
+		},
+		{
+			name:    "successful bus sets event bus and consumers",
+			natsURL: "nats://127.0.0.1:4222",
+			busFactory: func(context.Context, string) (pubsub.Bus, error) {
+				return pubsub.NewMemoryBus(), nil
+			},
+			wantNil: false,
+		},
+		{
+			name:    "consumer start failure logs and returns bus",
+			natsURL: "nats://127.0.0.1:4222",
+			busFactory: func(context.Context, string) (pubsub.Bus, error) {
+				return &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaReportJob}, nil
+			},
+			wantNil: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origBusFn := newProsperaBusFn
+			defer func() { newProsperaBusFn = origBusFn }()
+			if tc.busFactory != nil {
+				newProsperaBusFn = tc.busFactory
+			}
+
+			server, _, _ := setupTestServer()
+			bus := setupProsperaBus(context.Background(), server, tc.natsURL)
+			if (bus == nil) != tc.wantNil {
+				t.Fatalf("setupProsperaBus() nil = %v, wantNil = %v", bus == nil, tc.wantNil)
+			}
+			if !tc.wantNil {
+				if server.EventBus() != bus {
+					t.Fatalf("server.EventBus() = %v, want %v", server.EventBus(), bus)
+				}
+			}
+		})
 	}
 }
 
@@ -358,6 +425,7 @@ func TestProsperaRestartRequired(t *testing.T) {
 		{name: "twilio token change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok2", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
 		{name: "google mcp change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp-2", CovenURL: "http://coven", GeminiLiveModel: "live-1"}, want: true},
 		{name: "coven change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven-2", GeminiLiveModel: "live-1"}, want: true},
+		{name: "nats url change", next: Config{Port: "8080", DatabaseURL: "postgres://db/aerial", TwilioAccountSID: "AC1", TwilioAuthToken: "tok", GoogleMCPURL: "http://google-mcp", CovenURL: "http://coven", GeminiLiveModel: "live-1", NATSURL: "nats://nats.aerial:4222"}, want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

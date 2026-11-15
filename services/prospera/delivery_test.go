@@ -38,6 +38,7 @@ type mockStoreForDelivery struct {
 	opErr          error
 	bindErr        error
 	updateStateErr error
+	transErr       error
 }
 
 func newMockStoreForDelivery() *mockStoreForDelivery {
@@ -193,6 +194,9 @@ func (m *mockStoreForDelivery) SetVoicemailRecording(ctx context.Context, callID
 func (m *mockStoreForDelivery) TransitionReportStatus(ctx context.Context, callID string, allowedFrom []string, toStatus, summary string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.transErr != nil {
+		return false, m.transErr
+	}
 	c, ok := m.calls[callID]
 	if !ok {
 		return false, nil
@@ -478,6 +482,17 @@ func TestDeliverCallReport(t *testing.T) {
 			wantDelivered: false,
 		},
 		{
+			name:          "retry after failed status succeeds",
+			initialStatus: "failed",
+			direction:     "outbound",
+			fromNumber:    "+15105550100",
+			toNumber:      "+15105550199",
+			geminiCode:    http.StatusOK,
+			geminiResp:    `{"candidates":[{"content":{"parts":[{"text":"Retry call resolved."}]}}]}`,
+			wantDelivered: true,
+			wantWith:      "+15105550199",
+		},
+		{
 			name:          "inbound call formats with caller from number",
 			initialStatus: "pending",
 			direction:     "inbound",
@@ -635,6 +650,13 @@ func TestProcessVoicemailRecording(t *testing.T) {
 		{
 			name:          "already delivered skipped",
 			initialStatus: "delivered",
+			wantStatus:    "delivered",
+		},
+		{
+			name:          "retry after failed status succeeds",
+			initialStatus: "failed",
+			whisperCode:   http.StatusOK,
+			whisperResp:   `{"text":"Retry succeeded."}`,
 			wantStatus:    "delivered",
 		},
 	}
@@ -826,6 +848,17 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 		if err := fallbackReporter.DeliverCallReport(context.Background(), "call-fallback-sum"); err != nil {
 			t.Fatalf("unexpected error in fallback report: %v", err)
 		}
+
+		storeTransErr := newMockStoreForDelivery()
+		_ = storeTransErr.CreateOutboundCall(context.Background(), VoiceCall{
+			CallID:       "call-trans-err",
+			ReportStatus: "pending",
+		}, 5)
+		storeTransErr.transErr = errors.New("transition failed")
+		transReporter := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain"}}, storeTransErr, &mockTwilioForDelivery{})
+		if err := transReporter.DeliverCallReport(context.Background(), "call-trans-err"); err == nil {
+			t.Fatal("expected error on transition failure")
+		}
 	})
 
 	t.Run("process voicemail recording error cases", func(t *testing.T) {
@@ -867,6 +900,17 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 		}}, store, &mockTwilioForDelivery{audioData: []byte("wav")}, WithReporterHTTPClient(discordFailSrv.Client()))
 		if err := discordFailReporter.ProcessVoicemailRecording(context.Background(), "call-discord-fail", "https://rec"); err == nil {
 			t.Fatal("expected error when discord delivery fails")
+		}
+
+		storeVMTransErr := newMockStoreForDelivery()
+		_ = storeVMTransErr.CreateInboundCall(context.Background(), VoiceCall{
+			CallID:       "call-vm-trans-err",
+			ReportStatus: "awaiting_recording",
+		})
+		storeVMTransErr.transErr = errors.New("transition failed")
+		vmTransReporter := NewReporter(staticConfig{cfg: &Config{BrainURL: "http://brain"}}, storeVMTransErr, &mockTwilioForDelivery{})
+		if err := vmTransReporter.ProcessVoicemailRecording(context.Background(), "call-vm-trans-err", "https://rec"); err == nil {
+			t.Fatal("expected error on transition failure")
 		}
 	})
 
