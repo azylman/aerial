@@ -7,191 +7,38 @@ import (
 	"testing"
 )
 
-type findSymbolSpanCase struct {
-	name      string
-	content   string
-	symbol    string
-	wantStart int
-	wantEnd   int
-	wantOK    bool
-}
-
-func findSymbolSpanTestCases() []findSymbolSpanCase {
-	return []findSymbolSpanCase{
-		{
-			name:      "multi-line func",
-			content:   "package p\n\nfunc Foo() {\n\tx := 1\n\t_ = x\n}\n",
-			symbol:    "Foo",
-			wantStart: 3,
-			wantEnd:   6,
-			wantOK:    true,
-		},
-		{
-			name:      "single-line func",
-			content:   "package p\nfunc Bar() { return }\n",
-			symbol:    "Bar",
-			wantStart: 2,
-			wantEnd:   2,
-			wantOK:    true,
-		},
-		{
-			name:      "multi-line parameter list and return type",
-			content:   "package p\n\nfunc Complex(\n\ta int,\n\tb string,\n) (int, error) {\n\treturn a, nil\n}\n",
-			symbol:    "Complex",
-			wantStart: 3,
-			wantEnd:   8,
-			wantOK:    true,
-		},
-		{
-			name:      "struct type declaration",
-			content:   "package p\n\ntype MyStruct struct {\n\tFieldA string\n\tFieldB int\n}\n",
-			symbol:    "MyStruct",
-			wantStart: 3,
-			wantEnd:   6,
-			wantOK:    true,
-		},
-		{
-			name:      "interface type declaration",
-			content:   "package p\n\ntype MyInterface interface {\n\tDoWork() error\n}\n",
-			symbol:    "MyInterface",
-			wantStart: 3,
-			wantEnd:   5,
-			wantOK:    true,
-		},
-		{
-			name:      "raw backtick string with column 0 brace",
-			content:   "package p\n\nfunc WithRaw() string {\n\tconst s = `\n}\n`\n\treturn s\n}\n",
-			symbol:    "WithRaw",
-			wantStart: 3,
-			wantEnd:   8,
-			wantOK:    true,
-		},
-		{
-			name:      "receiver qualified symbol",
-			content:   "package p\n\nfunc (s *Server) HandleReq() error {\n\treturn nil\n}\n",
-			symbol:    "*Server.HandleReq",
-			wantStart: 3,
-			wantEnd:   5,
-			wantOK:    true,
-		},
-		{
-			name:      "receiver symbol with trailing parens",
-			content:   "package p\n\nfunc (s *Server) HandleReq() error {\n\treturn nil\n}\n",
-			symbol:    "*Server.HandleReq()",
-			wantStart: 3,
-			wantEnd:   5,
-			wantOK:    true,
-		},
-		{
-			name:      "single-line type alias",
-			content:   "package p\n\ntype UserID string\n",
-			symbol:    "UserID",
-			wantStart: 3,
-			wantEnd:   3,
-			wantOK:    true,
-		},
-		{
-			name:      "fallback pass call site line",
-			content:   "package p\n\nfunc Worker() {\n\tHelperFunc()\n}\n",
-			symbol:    "HelperFunc",
-			wantStart: 4,
-			wantEnd:   4,
-			wantOK:    true,
-		},
-		{
-			name:      "prefix boundary non-match",
-			content:   "package p\n\nfunc MyFoo() {}\n",
-			symbol:    "Foo",
-			wantStart: 0,
-			wantEnd:   0,
-			wantOK:    false,
-		},
-		{
-			name:      "suffix boundary non-match",
-			content:   "package p\n\nfunc FooBar() {}\n",
-			symbol:    "Foo",
-			wantStart: 0,
-			wantEnd:   0,
-			wantOK:    false,
-		},
-		{
-			name:      "url with slashes inside double quotes",
-			content:   "package p\n\nconst URL = \"http://example.com/Foo\"\n",
-			symbol:    "URL",
-			wantStart: 3,
-			wantEnd:   3,
-			wantOK:    true,
-		},
-		{
-			name:      "escaped quote inside string before comment marker",
-			content:   "package p\n\nconst Msg = \"escaped \\\" quote // ignored\"\n",
-			symbol:    "Msg",
-			wantStart: 3,
-			wantEnd:   3,
-			wantOK:    true,
-		},
-		{
-			name:      "var block closed with paren",
-			content:   "package p\n\nvar (\n\tAlpha = 1\n\tBeta = 2\n)\n",
-			symbol:    "var",
-			wantStart: 3,
-			wantEnd:   6,
-			wantOK:    true,
-		},
-		{
-			name:      "unclosed block terminated by next declaration",
-			content:   "package p\n\nfunc Unclosed() {\n\tx := 1\nfunc Next() {}\n",
-			symbol:    "Unclosed",
-			wantStart: 3,
-			wantEnd:   4,
-			wantOK:    true,
-		},
-		{
-			name:      "unclosed block reaching eof",
-			content:   "package p\n\nfunc UnclosedEOF() {\n\tx := 1\n",
-			symbol:    "UnclosedEOF",
-			wantStart: 3,
-			wantEnd:   5,
-			wantOK:    true,
-		},
-		{
-			name:      "commented line ignored",
-			content:   "package p\n\n// func Commented() {\n// }\nfunc Active() {\n\treturn\n}\n",
-			symbol:    "Commented",
-			wantStart: 0,
-			wantEnd:   0,
-			wantOK:    false,
-		},
-		{
-			name:      "empty content",
-			content:   "",
-			symbol:    "Foo",
-			wantStart: 0,
-			wantEnd:   0,
-			wantOK:    false,
-		},
-		{
-			name:      "empty symbol",
-			content:   "package p\n\nfunc Foo() {}\n",
-			symbol:    "   ",
-			wantStart: 0,
-			wantEnd:   0,
-			wantOK:    false,
-		},
-		{
-			name:      "symbol not found",
-			content:   "package p\n\nfunc Foo() {}\n",
-			symbol:    "Bar",
-			wantStart: 0,
-			wantEnd:   0,
-			wantOK:    false,
-		},
-	}
-}
-
 func TestFindSymbolSpan(t *testing.T) {
 	t.Parallel()
-	tests := findSymbolSpanTestCases()
+	tests := []struct {
+		name      string
+		content   string
+		symbol    string
+		wantStart int
+		wantEnd   int
+		wantOK    bool
+	}{
+		{"multi-line func", "package p\n\nfunc Foo() {\n\tx := 1\n\t_ = x\n}\n", "Foo", 3, 6, true},
+		{"single-line func", "package p\nfunc Bar() { return }\n", "Bar", 2, 2, true},
+		{"multi-line parameter list and return type", "package p\n\nfunc Complex(\n\ta int,\n\tb string,\n) (int, error) {\n\treturn a, nil\n}\n", "Complex", 3, 8, true},
+		{"struct type declaration", "package p\n\ntype MyStruct struct {\n\tFieldA string\n\tFieldB int\n}\n", "MyStruct", 3, 6, true},
+		{"interface type declaration", "package p\n\ntype MyInterface interface {\n\tDoWork() error\n}\n", "MyInterface", 3, 5, true},
+		{"raw backtick string with column 0 brace", "package p\n\nfunc WithRaw() string {\n\tconst s = `\n}\n`\n\treturn s\n}\n", "WithRaw", 3, 8, true},
+		{"receiver qualified symbol", "package p\n\nfunc (s *Server) HandleReq() error {\n\treturn nil\n}\n", "*Server.HandleReq", 3, 5, true},
+		{"receiver symbol with trailing parens", "package p\n\nfunc (s *Server) HandleReq() error {\n\treturn nil\n}\n", "*Server.HandleReq()", 3, 5, true},
+		{"single-line type alias", "package p\n\ntype UserID string\n", "UserID", 3, 3, true},
+		{"fallback pass call site line", "package p\n\nfunc Worker() {\n\tHelperFunc()\n}\n", "HelperFunc", 4, 4, true},
+		{"prefix boundary non-match", "package p\n\nfunc MyFoo() {}\n", "Foo", 0, 0, false},
+		{"suffix boundary non-match", "package p\n\nfunc FooBar() {}\n", "Foo", 0, 0, false},
+		{"url with slashes inside double quotes", "package p\n\nconst URL = \"http://example.com/Foo\"\n", "URL", 3, 3, true},
+		{"escaped quote inside string before comment marker", "package p\n\nconst Msg = \"escaped \\\" quote // ignored\"\n", "Msg", 3, 3, true},
+		{"var block closed with paren", "package p\n\nvar (\n\tAlpha = 1\n\tBeta = 2\n)\n", "var", 3, 6, true},
+		{"unclosed block terminated by next declaration", "package p\n\nfunc Unclosed() {\n\tx := 1\nfunc Next() {}\n", "Unclosed", 3, 4, true},
+		{"unclosed block reaching eof", "package p\n\nfunc UnclosedEOF() {\n\tx := 1\n", "UnclosedEOF", 3, 5, true},
+		{"commented line ignored", "package p\n\n// func Commented() {\n// }\nfunc Active() {\n\treturn\n}\n", "Commented", 0, 0, false},
+		{"empty content", "", "Foo", 0, 0, false},
+		{"empty symbol", "package p\n\nfunc Foo() {}\n", "   ", 0, 0, false},
+		{"symbol not found", "package p\n\nfunc Foo() {}\n", "Bar", 0, 0, false},
+	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
