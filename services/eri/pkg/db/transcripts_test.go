@@ -41,10 +41,10 @@ func assertSessionSummarySyncTransitions(ctx context.Context, t *testing.T, stor
 	if err != nil || syncStates["sess-1"].LastIndexedStep != -1 {
 		t.Fatalf("expected LastIndexedStep=-1, got %+v", syncStates["sess-1"])
 	}
-	if states, err := store.GetSessionSyncStates(nil); err != nil || states == nil {
+	if states, err := store.GetSessionSyncStates(nil); err != nil || states == nil { //nolint:contextcheck // exercises the store's nil-ctx tolerance
 		t.Errorf("expected non-nil states on nil ctx: %v", err)
 	}
-	if err := store.UpsertSessionSummary(nil, summary); err != nil {
+	if err := store.UpsertSessionSummary(nil, summary); err != nil { //nolint:contextcheck // exercises the store's nil-ctx tolerance
 		t.Errorf("expected nil error on UpsertSessionSummary with nil ctx: %v", err)
 	}
 }

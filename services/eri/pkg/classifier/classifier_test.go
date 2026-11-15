@@ -256,7 +256,6 @@ func TestClassify_LLM(t *testing.T) {
 		timeoutWait bool
 		burst       []db.Message
 		useBurst    bool
-		useNilCtx   bool
 		checkParse  bool
 		wantConf    float64
 		wantReason  string
@@ -271,7 +270,6 @@ func TestClassify_LLM(t *testing.T) {
 		{name: "ClampedHigh", llmOut: `{"confidence": 1.5, "reason": "high"}`, wantConf: 1.0, wantReason: "high"},
 		{name: "EmptyBurstReturnsZero", useBurst: true, wantConf: 0.0, wantReason: "empty target burst"},
 		{name: "ClassifyBurstValid", llmOut: `{"confidence": 0.9, "reason": "burst query"}`, burst: []db.Message{{Content: "m1"}, {Content: "m2"}}, useBurst: true, wantConf: 0.9, wantReason: "burst query"},
-		{name: "NilContextGraceful", llmOut: `{"confidence": 0.8, "reason": "ok"}`, burst: []db.Message{{Content: "msg"}}, useNilCtx: true, wantConf: 0.8, wantReason: "ok"},
 		{name: "NilLLMFuncError", nilLLM: true, burst: []db.Message{{Content: "msg"}}, wantConf: 0.0, wantReason: "no LLMFunc configured"},
 		{name: "EmptyModelError", blankModel: true, burst: []db.Message{{Content: "msg"}}, wantConf: 0.0, wantReason: "model is not configured"},
 		{name: "TimeoutHandling", timeoutWait: true, burst: []db.Message{{Content: "msg"}}, wantConf: 0.0, wantReason: "classifier error"},
@@ -308,10 +306,7 @@ func TestClassify_LLM(t *testing.T) {
 				}
 			}
 
-			var ctx context.Context
-			if !tc.useNilCtx {
-				ctx = context.Background()
-			}
+			ctx := t.Context()
 			var res ClassificationResult
 			switch {
 			case tc.useBurst:

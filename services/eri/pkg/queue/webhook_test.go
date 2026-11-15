@@ -262,9 +262,9 @@ func TestWebhookDispatcher_ValidationAndGuardBranches(t *testing.T) {
 	defer ts.Close()
 
 	dispWithNilClient := &DefaultWebhookDispatcher{client: nil}
-	resp, err := dispWithNilClient.CallWakeHook(nil, &config.WebhookEndpoint{URL: ts.URL}, &WakeRequest{ChannelID: "c1"})
+	resp, err := dispWithNilClient.CallWakeHook(t.Context(), &config.WebhookEndpoint{URL: ts.URL}, &WakeRequest{ChannelID: "c1"})
 	if err != nil || resp.Override != "wake" {
-		t.Fatalf("unexpected response with nil client and nil ctx: resp=%+v err=%v", resp, err)
+		t.Fatalf("unexpected response with nil client: resp=%+v err=%v", resp, err)
 	}
 
 	assertWebhookDispatcherNetworkAndPayloadErrors(t, dispatcher)

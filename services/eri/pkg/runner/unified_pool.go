@@ -176,9 +176,6 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 	if p.isClosed() {
 		return fmt.Errorf("process pool is closed")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	for _, target := range p.cfg.PrewarmedTargets {
 		if p.isClosed() {
 			return fmt.Errorf("process pool is closed")
@@ -331,11 +328,11 @@ func (p *UnifiedProcessPool) spawnStreamingDaemonWithRetry(ctx context.Context, 
 	_, span := startChildOf(ctx, spanDaemonSpawn, trace.WithAttributes(attrAgentEngine.String(daemonCfg.engineName())))
 	defer span.End()
 	attempts := 1
-	daemon, spawnErr := StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)
+	daemon, spawnErr := StartStreamingDaemon(p.ctx, daemonCfg, p.spawner) //nolint:contextcheck // daemon outlives the turn and dies with the pool (see doc)
 	if spawnErr != nil && strings.Contains(spawnErr.Error(), "daemon startup timed out waiting for init event") && p.ctx.Err() == nil && ctx.Err() == nil {
 		log.Printf("[UnifiedProcessPool] Warning: cold-start handshake timed out for target %q; retrying once...", targetKey)
 		attempts++
-		daemon, spawnErr = StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)
+		daemon, spawnErr = StartStreamingDaemon(p.ctx, daemonCfg, p.spawner) //nolint:contextcheck // daemon outlives the turn and dies with the pool (see doc)
 	}
 	span.SetAttributes(attrDaemonAttempts.Int(attempts))
 	if spawnErr != nil {
@@ -602,19 +599,23 @@ func (p *UnifiedProcessPool) MarkDirty() {
 	}
 
 	for _, target := range toPrewarm {
-		go func(tKey string) {
-			defer p.bgWg.Done()
-			defer func() {
-				p.mu.Lock()
-				delete(p.prewarming, tKey)
-				p.mu.Unlock()
-			}()
-			initCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
-			defer cancel()
-			if err := p.prewarmTarget(initCtx, tKey); err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("[UnifiedProcessPool] Warning: re-warming prewarmed target %q failed: %v", tKey, err)
-			}
-		}(target)
+		go p.rewarmTarget(p.ctx, target)
+	}
+}
+
+// rewarmTarget re-spawns a prewarmed target evicted by MarkDirty. ctx is the pool's lifetime:
+// the re-warm belongs to the pool, not to whoever marked it dirty.
+func (p *UnifiedProcessPool) rewarmTarget(ctx context.Context, tKey string) {
+	defer p.bgWg.Done()
+	defer func() {
+		p.mu.Lock()
+		delete(p.prewarming, tKey)
+		p.mu.Unlock()
+	}()
+	initCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
+	if err := p.prewarmTarget(initCtx, tKey); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("[UnifiedProcessPool] Warning: re-warming prewarmed target %q failed: %v", tKey, err)
 	}
 }
 
@@ -732,7 +733,7 @@ func (p *UnifiedProcessPool) ExecuteEphemeral(ctx context.Context, targetKey, pr
 		return "", fmt.Errorf("failed to acquire ephemeral daemon for %q: %w", targetKey, err)
 	}
 	sink := NewThrowawayTurnSink()
-	turnCtx := &TurnContext{TurnID: uuid.New().String(), Prompt: prompt, Sink: sink, CreatedAt: time.Now()}
+	turnCtx := &TurnContext{Ctx: ctx, TurnID: uuid.New().String(), Prompt: prompt, Sink: sink, CreatedAt: time.Now()}
 	if err := daemon.Send(prompt, turnCtx); err != nil {
 		return "", fmt.Errorf("failed sending turn to ephemeral daemon %q: %w", targetKey, err)
 	}
@@ -741,7 +742,7 @@ func (p *UnifiedProcessPool) ExecuteEphemeral(ctx context.Context, targetKey, pr
 		return "", err
 	}
 	if should, _ := p.ShouldRotate(daemon); should {
-		go func() {
+		go func() { //nolint:contextcheck // rotation is pool upkeep bounded by the pool's lifetime, not this request
 			rotCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
 			defer cancel()
 			if _, rotErr := p.RotateDaemon(rotCtx, targetKey, ""); rotErr != nil {

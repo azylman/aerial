@@ -517,7 +517,7 @@ func runServer(ctx context.Context, cfg *Config) error {
 		return err
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer shutdownCancel()
 
 	return httpServer.Shutdown(shutdownCtx)

@@ -456,10 +456,6 @@ func (c *Classifier) resolveTitleModel() string {
 }
 
 func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) ClassificationResult {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	now := time.Now()
 	if c.Clock != nil {
 		now = c.Clock()
@@ -755,10 +751,6 @@ func (c *Classifier) evaluateSystemOneResponse(endpointURL, modelName string, du
 }
 
 func (c *Classifier) classifySystemOne(ctx context.Context, targetBurst []db.Message, recentContext []db.Message) ClassificationResult {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	cur := c.cfg.Current()
 	endpointURL := ""
 	if cur != nil {
@@ -927,9 +919,6 @@ func (c *Classifier) SummarizeThreadTitle(ctx context.Context, question string) 
 	)
 
 	callCtx := ctx
-	if callCtx == nil {
-		callCtx = context.Background()
-	}
 	if _, hasDeadline := callCtx.Deadline(); !hasDeadline {
 		timeout := c.Timeout
 		if timeout <= 0 {

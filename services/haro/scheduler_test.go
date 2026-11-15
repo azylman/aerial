@@ -17,12 +17,12 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
-func setupTestDB(t *testing.T) *sql.DB {
+func setupTestDB(ctx context.Context, t *testing.T) *sql.DB {
 	t.Helper()
 	tempPath := filepath.Join(t.TempDir(), fmt.Sprintf("test_%d.db", time.Now().UnixNano()))
-	db, err := OpenDB(&Config{DatabaseURL: tempPath})
+	db, err := OpenDB(ctx, &Config{DatabaseURL: tempPath})
 	if err != nil {
-		t.Fatalf("setupTestDB OpenDB() failed: %v", err)
+		t.Fatalf("setupTestDB OpenDB(t.Context(), ) failed: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = db.Close()
@@ -630,7 +630,7 @@ func TestHTTPPromptDispatcher_ConcurrentBusSafety(t *testing.T) {
 
 func TestHandleOneShotJob_Scenarios(t *testing.T) {
 	t.Parallel()
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 
@@ -695,7 +695,7 @@ func TestNewHTTPPromptDispatcher_Validation(t *testing.T) {
 }
 
 func TestDB_CronOperations(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 
@@ -774,7 +774,7 @@ func TestDB_CronOperations(t *testing.T) {
 }
 
 func TestDB_OneShotOperations(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 
@@ -826,7 +826,7 @@ func TestDB_OneShotOperations(t *testing.T) {
 }
 
 func TestDB_DeleteByID(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 
 	_ = InsertOneShotSchedule(ctx, db, OneShotSchedule{ID: "del-test-1", ThreadID: "th-1", RunAt: time.Now()})
@@ -907,7 +907,7 @@ func TestDB_DeleteByID(t *testing.T) {
 }
 
 func TestDB_ScheduleRunsAndPruning(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 
@@ -988,9 +988,9 @@ func TestDB_NilDBGuards(t *testing.T) {
 		{"InsertHeartbeatSchedule", InsertHeartbeatSchedule(ctx, nil, HeartbeatSchedule{})},
 		{"ListHeartbeatSchedules", func() error { _, err := ListHeartbeatSchedules(ctx, nil, ""); return err }()},
 		{"GetCronSchedule", func() error { _, err := GetCronSchedule(ctx, nil, "id"); return err }()},
-		{"GetCronSchedule empty id", func() error { _, err := GetCronSchedule(ctx, setupTestDB(t), "  "); return err }()},
+		{"GetCronSchedule empty id", func() error { _, err := GetCronSchedule(ctx, setupTestDB(ctx, t), "  "); return err }()},
 		{"GetOneShotSchedule", func() error { _, err := GetOneShotSchedule(ctx, nil, "id"); return err }()},
-		{"GetOneShotSchedule empty id", func() error { _, err := GetOneShotSchedule(ctx, setupTestDB(t), "  "); return err }()},
+		{"GetOneShotSchedule empty id", func() error { _, err := GetOneShotSchedule(ctx, setupTestDB(ctx, t), "  "); return err }()},
 		{"GetHeartbeatSchedule", func() error { _, err := GetHeartbeatSchedule(ctx, nil, "id"); return err }()},
 		{"UpdateHeartbeatSchedule", UpdateHeartbeatSchedule(ctx, nil, HeartbeatSchedule{ID: "id"})},
 		{"GetDueHeartbeatSchedules", func() error { _, err := GetDueHeartbeatSchedules(ctx, nil, now); return err }()},
@@ -1044,7 +1044,7 @@ type evaluateDueSchedulesTestCase struct {
 
 func runEvaluateDueSchedulesCase(t *testing.T, tc evaluateDueSchedulesTestCase) {
 	t.Helper()
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC).Add(tc.evaluateNowOffset)
 
@@ -1299,7 +1299,7 @@ func TestTicker_EvaluateDueSchedules_Scenarios(t *testing.T) {
 }
 
 func TestTicker_GuardsAndPruning(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	mock := &mockDispatcher{response: PromptDispatchResponse{Status: "ok"}}
 	ticker := NewTicker(db, mock, 30*time.Second)
 
@@ -1341,7 +1341,7 @@ func TestTicker_GuardsAndPruning(t *testing.T) {
 }
 
 func TestTicker_StartLifecycle(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	mock := &mockDispatcher{response: PromptDispatchResponse{Status: "ok"}}
 	ticker := NewTicker(db, mock, 10*time.Millisecond)
 

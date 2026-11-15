@@ -381,8 +381,8 @@ func TestFetchDiscordChannelHistory_Table(t *testing.T) {
 	}{
 		{"non-snowflake returns error", context.Background(), dgSuccess, "chan-test", 10, 0, "", "", true},
 		{"canceled context aborts retry", canceledCtx, dgErr, "123456789012345678", 10, 0, "", "", true},
-		{"persistent error fails after retries", nil, dgErr, "123456789012345678", 10, 0, "", "", true},
-		{"transient error succeeds on retry", nil, dgFlaky, "123456789012345678", 10, 3, "Aerial", "Assistant", false},
+		{"persistent error fails after retries", context.Background(), dgErr, "123456789012345678", 10, 0, "", "", true},
+		{"transient error succeeds on retry", context.Background(), dgFlaky, "123456789012345678", 10, 3, "Aerial", "Assistant", false},
 		{"discord REST success role mappings", context.Background(), dgSuccess, "123456789012345678", 10, 3, "Aerial", "Assistant", false},
 	}
 

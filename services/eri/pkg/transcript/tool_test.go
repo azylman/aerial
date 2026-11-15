@@ -341,7 +341,6 @@ type executeTranscriptSearchCase struct {
 	nilStore     bool
 	closedStore  bool
 	cancelCtx    bool
-	nilCtx       bool
 	embedderType string
 	stack        string
 	query        string
@@ -370,9 +369,6 @@ func setupSearchStore(t *testing.T, tc executeTranscriptSearchCase) db.Transcrip
 }
 
 func setupSearchContext(tc executeTranscriptSearchCase) context.Context {
-	if tc.nilCtx {
-		return nil
-	}
 	ctx := context.Background()
 	if tc.cancelCtx {
 		var cancel context.CancelFunc
@@ -538,8 +534,7 @@ func TestExecuteTranscriptSearch(t *testing.T) {
 			wantTotal:    1,
 		},
 		{
-			name:     "nil ctx and default limit",
-			nilCtx:   true,
+			name:     "default limit and unknown mode fall back to auto",
 			query:    "any",
 			mode:     "unknown_mode",
 			limit:    0,
@@ -604,7 +599,6 @@ type getTranscriptStepWindowCase struct {
 	nilStore    bool
 	closedStore bool
 	cancelCtx   bool
-	nilCtx      bool
 	sessionID   string
 	stepIndex   int
 	context     int
@@ -641,9 +635,6 @@ func setupStepWindowStore(tc getTranscriptStepWindowCase) db.TranscriptStore {
 }
 
 func setupStepWindowContext(tc getTranscriptStepWindowCase) context.Context {
-	if tc.nilCtx {
-		return nil
-	}
 	ctx := context.Background()
 	if tc.cancelCtx {
 		var cancel context.CancelFunc
@@ -721,16 +712,6 @@ func TestGetTranscriptStepWindow(t *testing.T) {
 			context:    2,
 			wantErr:    true,
 			wantSubstr: "context canceled",
-		},
-		{
-			name:        "nil context succeeds with background",
-			nilCtx:      true,
-			sessionID:   "sess-win-1",
-			stepIndex:   5,
-			context:     2,
-			wantCount:   5,
-			wantContext: 2,
-			wantCenter:  5,
 		},
 		{
 			name:        "normal center step window",

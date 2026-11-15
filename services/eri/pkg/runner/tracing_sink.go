@@ -137,9 +137,6 @@ var (
 // NewTracingTurnSink wraps inner so spans are children of the span carried by turnCtx and
 // are created with that span's tracer provider (a noop when tracing is disabled).
 func NewTracingTurnSink(turnCtx context.Context, inner TurnSink) *TracingTurnSink {
-	if turnCtx == nil {
-		turnCtx = context.Background()
-	}
 	turn := trace.SpanFromContext(turnCtx)
 	s := &TracingTurnSink{
 		inner: inner, tracer: turn.TracerProvider().Tracer(TracerScope), turn: turn,

@@ -16,21 +16,22 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
-func (te *turnExecution) getThreadSummary(threadID string) (string, string) {
+func (te *turnExecution) getThreadSummary(ctx context.Context, threadID string) (string, string) {
 	if s := te.store(); s != nil {
-		sum, msgID, err := s.GetThreadSummary(context.Background(), threadID)
+		sum, msgID, err := s.GetThreadSummary(ctx, threadID)
 		if err != nil {
-			te.logf("[WorkerPool] Warning getting thread summary for %s: %v", threadID, err)
+			te.logCtxf(ctx, "[WorkerPool] Warning getting thread summary for %s: %v", threadID, err)
 		}
 		return sum, msgID
 	}
 	return "", ""
 }
 
-func (te *turnExecution) saveThreadSummary(threadID, summary, lastMsgID string) {
+func (te *turnExecution) saveThreadSummary(ctx context.Context, threadID, summary, lastMsgID string) {
 	if s := te.store(); s != nil {
-		if err := s.SaveThreadSummary(context.Background(), threadID, summary, lastMsgID); err != nil {
-			te.logf("[WorkerPool] Warning: Failed to save thread summary to DB for thread %s: %v", threadID, err)
+		// The summary was already paid for; persist it even if the turn is canceled meanwhile.
+		if err := s.SaveThreadSummary(context.WithoutCancel(ctx), threadID, summary, lastMsgID); err != nil {
+			te.logCtxf(ctx, "[WorkerPool] Warning: Failed to save thread summary to DB for thread %s: %v", threadID, err)
 		}
 	}
 }
@@ -182,13 +183,13 @@ func applyAppConfigOverrides(cfg *attemptConfig, appCfg *config.Config) {
 	}
 }
 
-func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
+func (te *turnExecution) resolveAttemptConfig(ctx context.Context, attempt int) attemptConfig {
 	var cfg attemptConfig
 	if te.pool == nil {
 		return cfg
 	}
 	if attempt > 1 {
-		te.logf("[WorkerPool] Resolving attempt %d config for thread %s", attempt, te.threadID)
+		te.logCtxf(ctx, "[WorkerPool] Resolving attempt %d config for thread %s", attempt, te.threadID)
 	}
 	te.pool.mu.Lock()
 	cfg.model, cfg.lowEffortModel, cfg.mediumEffortModel = te.pool.cfg.Model, te.pool.cfg.LowEffortModel, te.pool.cfg.MediumEffortModel
@@ -286,7 +287,7 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 			if !te.isEphemeral && targetSess != te.previousSessionID && targetSess != te.currentSessionID {
 				te.logf("[Queue] Synchronizing active session for thread %s: %s -> %s", te.threadID, te.currentSessionID, targetSess)
 				te.currentSessionID = targetSess
-				te.saveSessionID(te.threadID, targetSess)
+				te.saveSessionID(te.turnCtxValue(), te.threadID, targetSess)
 			} else if te.isEphemeral && targetSess != te.currentSessionID {
 				te.logf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with ephemeral session %s", te.currentSessionID, te.threadID, targetSess)
 			}
@@ -324,7 +325,7 @@ func (te *turnExecution) fetchThreadHistoryBefore(fetchCtx context.Context, befo
 	span.SetAttributes(attrPromptHistoryCount.Int(len(turnHistory)))
 	if err != nil {
 		recordSpanError(span, err)
-		te.logf("[WorkerPool] Warning: History fetch failed for thread %s: %v", te.threadID, err)
+		te.logCtxf(fetchCtx, "[WorkerPool] Warning: History fetch failed for thread %s: %v", te.threadID, err)
 	}
 	return turnHistory
 }
@@ -336,11 +337,11 @@ func (te *turnExecution) resolveColdStartPreviousSessionID(ctx context.Context, 
 	prevID := te.previousSessionID
 	if prevID == "" {
 		_, span := te.startPromptStep(ctx, spanPromptPrevSessionID)
-		prevID = te.getPreviousSessionID(te.threadID)
+		prevID = te.getPreviousSessionID(ctx, te.threadID)
 		span.End()
 	}
 	if prevID != "" {
-		te.logf("[WorkerPool] Injected previous session identifier (%s) into prompt for thread %s", prevID, te.threadID)
+		te.logCtxf(ctx, "[WorkerPool] Injected previous session identifier (%s) into prompt for thread %s", prevID, te.threadID)
 	}
 	return prevID
 }
@@ -354,12 +355,12 @@ func (te *turnExecution) resolveAmbientPromptContext(ctx context.Context) string
 	actx, ambErr := te.pool.cfg.AmbientResolver(stepCtx, te.policy.AmbientContext)
 	if ambErr != nil {
 		recordSpanError(span, ambErr)
-		te.logf("[WorkerPool] Warning resolving ambient context for channel %s: %v", te.effectiveName, ambErr)
+		te.logCtxf(ctx, "[WorkerPool] Warning resolving ambient context for channel %s: %v", te.effectiveName, ambErr)
 		return ""
 	}
 	trimmed := strings.TrimSpace(actx)
 	if trimmed != "" {
-		te.logf("[WorkerPool] Injected ambient context into prompt for #%s", te.effectiveName)
+		te.logCtxf(ctx, "[WorkerPool] Injected ambient context into prompt for #%s", te.effectiveName)
 		return trimmed
 	}
 	return ""
@@ -409,7 +410,7 @@ func (te *turnExecution) buildTurnPrompt(ctx context.Context) {
 	var prevContext string
 	if isColdStart && prevID != "" && te.pool != nil && te.pool.sessionMgr != nil {
 		_, prevSpan := te.startPromptStep(ctx, spanPromptPreviousSession)
-		prevContext = te.pool.sessionMgr.ExtractResponseSince(prevID, time.Time{})
+		prevContext = te.pool.sessionMgr.ExtractResponseSinceContext(ctx, prevID, time.Time{})
 		prevSpan.SetAttributes(attrPromptPrevSessionChars.Int(len(prevContext)))
 		prevSpan.End()
 	}
@@ -418,10 +419,10 @@ func (te *turnExecution) buildTurnPrompt(ctx context.Context) {
 	instructions := config.LoadScopeInstructions(te.effectiveName)
 	instrSpan.End()
 	if instructions != "" {
-		te.logf("[WorkerPool] Injected channel instructions for #%s into prompt", te.effectiveName)
+		te.logCtxf(ctx, "[WorkerPool] Injected channel instructions for #%s into prompt", te.effectiveName)
 	}
 	if te.injectedHookContext != "" {
-		te.logf("[WorkerPool] Injected coordination context into prompt for thread %s", te.threadID)
+		te.logCtxf(ctx, "[WorkerPool] Injected coordination context into prompt for thread %s", te.threadID)
 	}
 
 	ambientCtx := te.resolveAmbientPromptContext(ctx)
@@ -466,8 +467,8 @@ func latestHistoryMessageID(histMsgs []HistoryMessage) string {
 	return latestMsgID
 }
 
-func (te *turnExecution) resolveSummarizerLLMAndModel() (LLMFunc, string) {
-	cfg := te.resolveAttemptConfig(0)
+func (te *turnExecution) resolveSummarizerLLMAndModel(ctx context.Context) (LLMFunc, string) {
+	cfg := te.resolveAttemptConfig(ctx, 0)
 	llmFn := te.pool.cfg.LLMFunc
 	if llmFn == nil && te.pool.cfg.Classifier != nil && te.pool.cfg.Classifier.LLMFunc != nil {
 		llmFn = te.pool.cfg.Classifier.LLMFunc
@@ -514,7 +515,7 @@ func (te *turnExecution) resolveThreadColdStartSummary(ctx context.Context, getT
 // summarizer: a stale summary is still injected, and the next successful turn-end refresh catches it up.
 func (te *turnExecution) loadThreadColdStartSummary(ctx context.Context, getTurnHistory func(context.Context, int) []HistoryMessage) (string, string) {
 	_, loadSpan := te.startPromptStep(ctx, spanPromptSummaryLoad)
-	cachedSum, lastMsgID := te.getThreadSummary(te.threadID)
+	cachedSum, lastMsgID := te.getThreadSummary(ctx, te.threadID)
 	loadSpan.End()
 	if cachedSum == "" {
 		return "", summaryOutcomeNoHistory
@@ -543,13 +544,13 @@ func (te *turnExecution) refreshThreadSummaryAtTurnEnd(ctx context.Context) {
 	span.SetAttributes(attrPromptSummaryOutcome.String(outcome))
 	recordSpanError(span, err)
 	if err != nil {
-		te.logf("[WorkerPool] Warning: turn-end thread summary refresh failed for thread %s: %v", te.threadID, err)
+		te.logCtxf(ctx, "[WorkerPool] Warning: turn-end thread summary refresh failed for thread %s: %v", te.threadID, err)
 	}
 }
 
 func (te *turnExecution) runTurnEndSummaryRefresh(ctx context.Context) (string, error) {
 	_, loadSpan := te.startPromptStep(ctx, spanPromptSummaryLoad)
-	cachedSum, lastMsgID := te.getThreadSummary(te.threadID)
+	cachedSum, lastMsgID := te.getThreadSummary(ctx, te.threadID)
 	loadSpan.End()
 	histMsgs := dropNextBurstMessages(te.fetchLatestThreadHistory(ctx, turnEndSummaryFetch), newestBurstMessageID(te.burst))
 	watermark := latestHistoryMessageID(histMsgs)
@@ -568,13 +569,13 @@ func (te *turnExecution) runTurnEndSummaryRefresh(ctx context.Context) (string, 
 		opts = append(opts, WithPriorSummary(cachedSum, lastMsgID))
 	}
 	trace.SpanFromContext(ctx).SetAttributes(attrPromptSummaryHadPrior.Bool(hadPrior))
-	llmFn, flashModel := te.resolveSummarizerLLMAndModel()
+	llmFn, flashModel := te.resolveSummarizerLLMAndModel(ctx)
 	newSum, err := SummarizeThreadHistoryWithGroup(ctx, te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs, opts...)
 	if err != nil {
 		return summaryOutcomeFailed, err
 	}
 	_, saveSpan := te.startPromptStep(ctx, spanPromptSummarySave)
-	te.saveThreadSummary(te.threadID, newSum, watermark)
+	te.saveThreadSummary(ctx, te.threadID, newSum, watermark)
 	saveSpan.End()
 	return summaryOutcomeRefreshed, nil
 }
@@ -624,7 +625,7 @@ func (te *turnExecution) resolveColdStartLookbackMessages(ctx context.Context, i
 	if !te.isEphemeral && (isColdStart || isChannelMode) {
 		lookbackMsgs := getTurnHistory(ctx, coldStartLookbackLimit)
 		if len(lookbackMsgs) > 0 {
-			te.logf("[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
+			te.logCtxf(ctx, "[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
 		}
 		return lookbackMsgs
 	}
@@ -636,7 +637,7 @@ func (te *turnExecution) buildColdStartLookback(ctx context.Context, snap Channe
 	if isColdStart && summarizesThread(snap, isChannelMode) {
 		summary = te.resolveThreadColdStartSummary(ctx, getTurnHistory)
 		if summary != "" {
-			te.logf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", te.threadID)
+			te.logCtxf(ctx, "[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", te.threadID)
 		}
 	}
 
@@ -734,7 +735,7 @@ func (te *turnExecution) fetchRecentDispatches(ctx context.Context, s db.Store, 
 	rec, err := s.GetRecentSessionDispatches(stepCtx, sessionID, 10)
 	if err != nil {
 		recordSpanError(span, err)
-		te.logf("[WorkerPool] Warning getting recent session dispatches for %s: %v", sessionID, err)
+		te.logCtxf(ctx, "[WorkerPool] Warning getting recent session dispatches for %s: %v", sessionID, err)
 		return nil
 	}
 	span.SetAttributes(attrPromptDispatchCount.Int(len(rec)))

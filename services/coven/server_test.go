@@ -202,7 +202,7 @@ func TestOpenDB(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := OpenDB(tc.cfg)
+			db, err := OpenDB(t.Context(), tc.cfg)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("OpenDB() err = %v, wantErr = %v", err, tc.wantErr)
 			}

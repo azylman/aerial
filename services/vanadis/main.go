@@ -1383,7 +1383,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	cleanupBus, err := initVanadisJetStream(ctx, server, cfg.NATSURL)
 	if err != nil {
 		if cleanupDB != nil {
-			cleanupDB(context.Background())
+			cleanupDB(context.WithoutCancel(ctx))
 		}
 		return err
 	}
@@ -1399,7 +1399,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	ln, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)
 	if err != nil {
 		if cleanupDB != nil {
-			cleanupDB(context.Background())
+			cleanupDB(context.WithoutCancel(ctx))
 		}
 		return fmt.Errorf("listening on port %s: %w", cfg.Port, err)
 	}
@@ -1421,7 +1421,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	case runErr = <-errChan:
 	}
 	log.Println("[vanadis] Shutting down gracefully...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer shutdownCancel()
 	if shutErr := httpServer.Shutdown(shutdownCtx); shutErr != nil && !errors.Is(shutErr, http.ErrServerClosed) {
 		log.Printf("[vanadis] HTTP shutdown error: %v", shutErr)

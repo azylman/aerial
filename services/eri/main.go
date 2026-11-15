@@ -105,7 +105,7 @@ func ensureConfigDefaults(cfg *config.Config) {
 	}
 }
 
-func executeConfigReload(source string, cfg *config.Config, options *reloadConfigOptions) {
+func executeConfigReload(ctx context.Context, source string, cfg *config.Config, options *reloadConfigOptions) {
 	if cfg == nil {
 		return
 	}
@@ -125,7 +125,7 @@ func executeConfigReload(source string, cfg *config.Config, options *reloadConfi
 	config.RegisterConfigTokens(cfg)
 
 	if !options.skipEnvironmentSync && options.provisioner != nil {
-		if err := options.provisioner.Sync(context.Background(), cfg); err != nil {
+		if err := options.provisioner.Sync(ctx, cfg); err != nil {
 			log.Printf("[%s] Warning: env sync error: %v", source, err)
 		}
 	}
@@ -160,7 +160,7 @@ func executeConfigReload(source string, cfg *config.Config, options *reloadConfi
 	}
 }
 
-func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(source string) {
+func CreateReloadConfigFunc(ctx context.Context, cfg *config.Config, opts ...ReloadOption) func(source string) {
 	options := &reloadConfigOptions{
 		reloadSupplier: config.Reload,
 	}
@@ -183,7 +183,7 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 			}
 		}()
 		log.Printf("[%s] Changes detected. Reloading configuration, system rules, and skills...", source)
-		executeConfigReload(source, cfg, options)
+		executeConfigReload(ctx, source, cfg, options)
 	}
 }
 
@@ -304,7 +304,7 @@ func buildPoolEnv(baseEnv []string, runtimeBase string, timezone ...string) []st
 	return result
 }
 
-func initVoiceAmbientRetriever(cur *config.ConfigData) runner.AmbientContextRetriever {
+func initVoiceAmbientRetriever(ctx context.Context, cur *config.ConfigData) runner.AmbientContextRetriever {
 	ambCfg := cur.VoiceAmbientContext()
 	if ambCfg == nil {
 		return nil
@@ -317,7 +317,7 @@ func initVoiceAmbientRetriever(cur *config.ConfigData) runner.AmbientContextRetr
 		return nil
 	}
 	go func() {
-		primeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		primeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		if err := p.Prime(primeCtx); err != nil {
 			log.Printf("[INIT] Ambient context prime warning: %v", err)
@@ -440,7 +440,7 @@ func computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey 
 // wrapped in runner.DynamicVoicePool with a factory closure evaluating cfg.Current() dynamically.
 // mcpProxyPort points agy/Claude voice daemons at the loopback MCP trace proxy ("" when tracing
 // is off), exactly as basePoolCfg does for the Discord and ephemeral pools.
-func createVoiceProcessPool(cfg *config.Config, voiceHome, lowEffortModel, mcpProxyPort string, spawner runner.DaemonSpawner, memRetriever ...runner.MemoryRetriever) runner.AgentPool {
+func createVoiceProcessPool(ctx context.Context, cfg *config.Config, voiceHome, lowEffortModel, mcpProxyPort string, spawner runner.DaemonSpawner, memRetriever ...runner.MemoryRetriever) runner.AgentPool {
 	var memoryRetriever runner.MemoryRetriever
 	if len(memRetriever) > 0 {
 		memoryRetriever = memRetriever[0]
@@ -469,7 +469,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome, lowEffortModel, mcpPr
 		var effectiveAPIKey string
 		var mcpServers []runner.MCPServerConfig
 
-		ambRetriever := initVoiceAmbientRetriever(cur)
+		ambRetriever := initVoiceAmbientRetriever(ctx, cur)
 
 		if voiceEngine == "gemini_api" {
 			pool, model, apiKey, servers, ok := buildGeminiVoicePool(cur, effectiveLow, prewarmedTargets, memoryRetriever, ambRetriever)
@@ -510,9 +510,6 @@ func newWorkerInterchangeablePool(pCfg runner.PoolConfig, spawner runner.DaemonS
 }
 
 func PrewarmProcessPoolsSequentially(ctx context.Context, pools ...runner.AgentPool) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	go func() {
 		prewarmCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
@@ -571,6 +568,7 @@ func resolveBrainModelDefaults(cur *config.ConfigData) (lowEffortModel, mediumEf
 }
 
 func buildBrainProcessPools(
+	ctx context.Context,
 	cfg *config.Config,
 	cur *config.ConfigData,
 	sessionMgr *session.Manager,
@@ -620,7 +618,7 @@ func buildBrainProcessPools(
 
 	discordPools, discordPoolList := buildDiscordPools(basePoolCfg, discordHome, cur.Model, mediumEffortModel, lowEffortModel, spawner)
 	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), spawner, "ephemeral:worker", traceContent)
-	voicePool := createVoiceProcessPool(cfg, voiceHome, lowEffortModel, mcpProxyPort, spawner, memoryRetriever)
+	voicePool := createVoiceProcessPool(ctx, cfg, voiceHome, lowEffortModel, mcpProxyPort, spawner, memoryRetriever)
 	allPools := append(append([]runner.AgentPool{}, discordPoolList...), ephemeralPool, voicePool)
 
 	return discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome
@@ -664,8 +662,9 @@ func newAmbientContextResolver(cfg *config.Config) func(ctx context.Context, amb
 			if pErr != nil {
 				return "", fmt.Errorf("failed to create ambient provider: %w", pErr)
 			}
+			// Priming the shared, cached provider outlives the turn that first created it.
 			go func() {
-				primeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				primeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 				defer cancel()
 				if err := prov.Prime(primeCtx); err != nil {
 					log.Printf("[WorkerPool] Ambient context prime warning: %v", err)
@@ -739,7 +738,7 @@ func startLeaderHandoff(
 		if leaderCtx.Err() != nil {
 			return
 		}
-		queue.RecoverInterrupted(store, pool)
+		queue.RecoverInterrupted(leaderCtx, store, pool)
 		PrewarmProcessPoolsSequentially(leaderCtx, allPools...)
 		var rawLLM func(context.Context, string, string) (string, error)
 		if ephemeralPool != nil {
@@ -936,7 +935,8 @@ func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, mode
 	select {
 	case <-ctx.Done():
 		log.Println("Shutting down Aerial Brain gracefully...")
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// ctx is already canceled here; the drain gets its own grace period.
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer shutdownCancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("HTTP shutdown error: %v", err)
@@ -946,7 +946,7 @@ func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, mode
 	case err := <-errChan:
 		return err
 	case err := <-leaderErrCh:
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer shutdownCancel()
 		return errors.Join(err, srv.Shutdown(shutdownCtx))
 	}
@@ -1017,7 +1017,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(cfg, cur, sessionMgr, appOpts.processSpawner, mcpProxyPort, appOpts.traceContent)
+	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(ctx, cfg, cur, sessionMgr, appOpts.processSpawner, mcpProxyPort, appOpts.traceContent)
 	defer closeAllBrainPools(allPools)
 
 	switch cur.GetEngine() {
@@ -1056,7 +1056,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	if appOpts.onReload != nil {
 		reloadOpts = append(reloadOpts, func(o *reloadConfigOptions) { o.onReload = appOpts.onReload })
 	}
-	reloadConfig := CreateReloadConfigFunc(cfg, reloadOpts...)
+	reloadConfig := CreateReloadConfigFunc(ctx, cfg, reloadOpts...)
 
 	stopHup := startSIGHUPReloadLoop(ctx, appOpts.hupChan, reloadConfig)
 	defer stopHup()

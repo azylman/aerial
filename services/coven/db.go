@@ -636,14 +636,14 @@ func (s *SQLStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactW
 }
 
 // OpenDB initializes database connection based on config.
-func OpenDB(cfg *Config) (*sql.DB, error) {
+func OpenDB(ctx context.Context, cfg *Config) (*sql.DB, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
-	return openDB(cfg.DatabaseURL)
+	return openDB(ctx, cfg.DatabaseURL)
 }
 
-func openDB(connStr string) (*sql.DB, error) {
+func openDB(ctx context.Context, connStr string) (*sql.DB, error) {
 	if sqliteTestInitHook != nil {
 		return sqliteTestInitHook(connStr)
 	}
@@ -655,7 +655,9 @@ func openDB(connStr string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// The ping keeps its own 5s budget even if ctx is already canceled; RunApp's lifecycle handles
+	// shutdown right after startup.
+	pingCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := db.PingContext(pingCtx); err != nil {
 		httpkit.CloseWarn(db, "database on ping failure")

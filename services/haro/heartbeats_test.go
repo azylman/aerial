@@ -242,7 +242,7 @@ func testHeartbeatDueAdvanceDelete(ctx context.Context, t *testing.T, db *sql.DB
 }
 
 func TestHeartbeatDB_Operations(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
 
@@ -257,7 +257,7 @@ func TestHeartbeatDB_Operations(t *testing.T) {
 }
 
 func TestHeartbeatTools_HandleScheduleHeartbeat(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -343,7 +343,7 @@ func TestHeartbeatTools_HandleScheduleHeartbeat(t *testing.T) {
 }
 
 func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 
 	// Seed an existing heartbeat
@@ -444,7 +444,7 @@ func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
 }
 
 func TestToolHandler_ListSchedules_WithHeartbeats(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 	handler := NewToolHandler(&Config{Timezone: "UTC"}, db)
 
@@ -597,7 +597,7 @@ func assertHeartbeatNextRunAdvanced(ctx context.Context, t *testing.T, db *sql.D
 
 func runEvaluateDueHeartbeatsCase(ctx context.Context, t *testing.T, tc evaluateDueHeartbeatsTestCase, now time.Time) {
 	t.Helper()
-	db := setupTestDB(t)
+	db := setupTestDB(ctx, t)
 
 	hb := HeartbeatSchedule{
 		ID:          tc.hbID,

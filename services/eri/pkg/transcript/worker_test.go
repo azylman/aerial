@@ -509,7 +509,6 @@ type syncTranscriptsErrorCase struct {
 	emptyBrainDir       bool
 	nonExistentBrainDir bool
 	cancelCtx           bool
-	nilCtx              bool
 	hasSession          bool
 	socketFile          bool
 	emptyFile           bool
@@ -556,12 +555,6 @@ func syncTranscriptsErrorCases() []syncTranscriptsErrorCase {
 			zeroOpts:          true,
 			wantErr:           true,
 			isContextCanceled: true,
-		},
-		{
-			name:       "nil context falls back to background without error",
-			hasSession: true,
-			nilCtx:     true,
-			wantSynced: 1,
 		},
 		{
 			name:              "error loading session sync states propagated",
@@ -666,9 +659,6 @@ func setupErrorCaseFiles(t *testing.T, tempDir string, tc syncTranscriptsErrorCa
 }
 
 func setupErrorCaseContext(tc syncTranscriptsErrorCase) (context.Context, context.CancelFunc) {
-	if tc.nilCtx {
-		return nil, func() {}
-	}
 	ctx := context.Background()
 	if tc.cancelCtx {
 		cctx, cancel := context.WithCancel(ctx)

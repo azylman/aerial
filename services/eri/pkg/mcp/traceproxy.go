@@ -259,7 +259,7 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rp := &httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
+		Rewrite: func(pr *httputil.ProxyRequest) { //nolint:contextcheck // pr.Out.Context() is the inbound request's context
 			u := *upstream
 			pr.Out.URL = &u
 			pr.Out.Host = ""

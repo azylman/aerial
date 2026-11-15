@@ -136,7 +136,7 @@ func (te *turnExecution) resolveTurnOutcome(runCtx context.Context, turnRes *run
 		stderr = turnRes.Stderr
 	}
 	if !outcome.IsSuccess && targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil {
-		if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(te.poolCtx(), targetSess, te.execStart); tErr == nil && transcriptErr != "" {
+		if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(context.WithoutCancel(runCtx), targetSess, te.execStart); tErr == nil && transcriptErr != "" {
 			if shouldReplaceWithTranscriptError(outcome.ErrorDetail, stderr, transcriptErr) {
 				outcome.ErrorDetail = transcriptErr
 				stderr = transcriptErr

@@ -367,7 +367,7 @@ func TestRouter_AuthAndDispatch(t *testing.T) {
 					t.Fatalf("expected getPool to invoke PoolProvider")
 				}
 			}
-			router.Handle(session, tc.interaction)
+			router.Handle(t.Context(), session, tc.interaction)
 
 			reqs := transport.Requests()
 			if len(reqs) != tc.wantRequests {
@@ -475,7 +475,7 @@ func runHandleStatusCase(t *testing.T, tc statusTestCase, memSrvURL string) {
 	defer haroSrv.Close()
 
 	router, _, transport, session := setupStatusRouter(tc, memSrvURL, haroSrv.URL)
-	router.Handle(session, mkCmd("int-status", "chan-1", "admin-123", "status"))
+	router.Handle(t.Context(), session, mkCmd("int-status", "chan-1", "admin-123", "status"))
 
 	reqs := transport.Requests()
 	if len(reqs) != 1 {
@@ -550,7 +550,7 @@ func TestRouter_HandleQuota(t *testing.T) {
 				router.deps.QuotaProvider = func() []metrics.QuotaGroup { return g }
 				router.deps.QuotaTimeProvider = func() time.Time { return u }
 			}
-			router.Handle(session, mkCmd("int-quota", "chan-1", "admin-123", "quota"))
+			router.Handle(t.Context(), session, mkCmd("int-quota", "chan-1", "admin-123", "quota"))
 			reqs := transport.Requests()
 			if len(reqs) != 1 {
 				t.Fatalf("expected 1 request, got %d", len(reqs))
@@ -624,7 +624,7 @@ func runSessionAndQueueCommandCase(t *testing.T, tc sessionQueueTestCase) {
 		router.deps.Pool = newMockProcessPools(targetChan)
 	}
 
-	router.Handle(session, mkCmd("int-"+tc.name, targetChan, "admin-123", tc.cmdName, tc.opts...))
+	router.Handle(t.Context(), session, mkCmd("int-"+tc.name, targetChan, "admin-123", tc.cmdName, tc.opts...))
 
 	reqs := transport.Requests()
 	if len(reqs) != tc.wantRequests {
@@ -682,8 +682,8 @@ func handleDeployProgressTest(t *testing.T, router *Router, session *discordgo.S
 	if tc.testTimeout {
 		oldTimeout, oldD := pollerTimeout, deployProgressDelay
 		pollerTimeout, deployProgressDelay = 5*time.Millisecond, 100*time.Millisecond
-		router.trackDeployProgress(session, interaction, "mode", "chan-1", "thread")
-		router.trackDeployProgress(newMockDiscordSession(&mockTransport{respCode: http.StatusInternalServerError}), interaction, "mode", "chan-1", "thread")
+		router.trackDeployProgress(t.Context(), session, interaction, "mode", "chan-1", "thread")
+		router.trackDeployProgress(t.Context(), newMockDiscordSession(&mockTransport{respCode: http.StatusInternalServerError}), interaction, "mode", "chan-1", "thread")
 		pollerTimeout, deployProgressDelay = oldTimeout, oldD
 		return
 	}
@@ -692,7 +692,7 @@ func handleDeployProgressTest(t *testing.T, router *Router, session *discordgo.S
 		fn(&captured)
 		return "sha", nil
 	}
-	router.trackDeployProgress(session, interaction, tc.testMutateKey, "chan-1", tc.testMutateVal)
+	router.trackDeployProgress(t.Context(), session, interaction, tc.testMutateKey, "chan-1", tc.testMutateVal)
 	if tc.testMutateKey == "mode" && captured.Mode != tc.testMutateVal {
 		t.Errorf("expected Mode %q, got %q", tc.testMutateVal, captured.Mode)
 	}
@@ -717,7 +717,7 @@ func runConfigMutationCase(t *testing.T, tc configMutationTestCase) {
 	if tc.cmdName == "ignore_bots" {
 		chID = "chan-2"
 	}
-	router.Handle(session, mkCmd("int-"+tc.name, chID, "admin-123", tc.cmdName, tc.opts...))
+	router.Handle(t.Context(), session, mkCmd("int-"+tc.name, chID, "admin-123", tc.cmdName, tc.opts...))
 	router.bgWg.Wait()
 
 	reqs := transport.Requests()

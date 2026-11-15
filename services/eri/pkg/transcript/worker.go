@@ -92,9 +92,6 @@ func SyncSessionTranscript(
 	if store == nil {
 		return stats, fmt.Errorf("transcript store cannot be nil")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 
 	var opt SyncOptions
 	if len(opts) > 0 {
@@ -176,9 +173,6 @@ func SyncTranscripts(
 
 	if store == nil {
 		return stats, fmt.Errorf("transcript store cannot be nil")
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 
 	if embedder == nil {

@@ -268,7 +268,7 @@ func runGatewayMessageCreateCase(ctx context.Context, t *testing.T, tc gatewayMe
 			t.Errorf("insertedDiscordJobs = %d, want %d", len(bus.insertedDiscordJobs), tc.wantEnqueued)
 		}
 		for _, job := range bus.insertedDiscordJobs {
-			assertRootTraceparent(t, job.Traceparent)
+			assertRootTraceparent(ctx, t, job.Traceparent)
 		}
 	} else if !tc.nilServer {
 		calls := disp.DiscordMessageCalls()
@@ -400,7 +400,7 @@ func runGatewayInteractionCreateCase(ctx context.Context, t *testing.T, tc gatew
 			t.Errorf("insertedInteractJobs = %d, want %d", len(bus.insertedInteractJobs), tc.wantEnqueued)
 		}
 		for _, job := range bus.insertedInteractJobs {
-			assertRootTraceparent(t, job.Traceparent)
+			assertRootTraceparent(ctx, t, job.Traceparent)
 		}
 	} else if !tc.nilServer {
 		calls := disp.DiscordInteractionCalls()

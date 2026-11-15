@@ -517,7 +517,7 @@ func executeCDPErrorAction(ctx context.Context, client *CDPClient, action string
 		_ = client.EnsureConnection(ctx)
 		return client.InsertText(ctx, "trigger detach")
 	case "settle-cancel":
-		cancelCtx, cancelFn := context.WithCancel(context.Background())
+		cancelCtx, cancelFn := context.WithCancel(ctx)
 		cancelFn()
 		client.cfg.SettleDelay = 500 * time.Millisecond
 		client.waitSettleBestEffort(cancelCtx)
@@ -534,7 +534,7 @@ func executeCDPErrorAction(ctx context.Context, client *CDPClient, action string
 		return client.InsertText(ctx, "should error")
 	case "send-cdp-canceled-ctx":
 		_ = client.EnsureConnection(ctx)
-		cancelCtx, cancelFn := context.WithCancel(context.Background())
+		cancelCtx, cancelFn := context.WithCancel(ctx)
 		cancelFn()
 		_, err := client.sendCDPDirect(cancelCtx, client.activeConn, "Test.withheld", nil, "")
 		return err
@@ -550,7 +550,7 @@ func executeCDPErrorAction(ctx context.Context, client *CDPClient, action string
 		return err
 	case "send-cdp-late-cancel":
 		_ = client.EnsureConnection(ctx)
-		lateCtx, lateCancel := context.WithCancel(context.Background())
+		lateCtx, lateCancel := context.WithCancel(ctx)
 		defer lateCancel()
 		time.AfterFunc(20*time.Millisecond, lateCancel)
 		_, err := client.sendCDPDirect(lateCtx, client.activeConn, "Test.withheld", nil, "")

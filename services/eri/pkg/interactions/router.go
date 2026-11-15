@@ -1,6 +1,7 @@
 package interactions
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
@@ -53,20 +54,20 @@ func extractCallerUser(i *discordgo.InteractionCreate) *discordgo.User {
 	return i.User
 }
 
-func (r *Router) dispatchCommand(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
+func (r *Router) dispatchCommand(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
 	switch data.Name {
 	case "status":
-		r.handleStatus(s, i)
+		r.handleStatus(ctx, s, i)
 	case "quota":
 		r.handleQuota(s, i)
 	case "rotate":
-		r.handleRotate(s, i, data)
+		r.handleRotate(ctx, s, i, data)
 	case "interrupt":
-		r.handleInterrupt(s, i, data)
+		r.handleInterrupt(ctx, s, i, data)
 	case "mode":
-		r.handleMode(s, i, data)
+		r.handleMode(ctx, s, i, data)
 	case "ignore_bots":
-		r.handleIgnoreBots(s, i, data)
+		r.handleIgnoreBots(ctx, s, i, data)
 	default:
 		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -81,7 +82,9 @@ func (r *Router) dispatchCommand(s *discordgo.Session, i *discordgo.InteractionC
 }
 
 // Handle processes incoming interaction events, enforces admin permissions, and dispatches to handlers.
-func (r *Router) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {
+// Handling is detached from ctx's cancellation: once the interaction is accepted, its Discord
+// response and follow-ups must complete even if the ingress request goes away.
+func (r *Router) Handle(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if s == nil || s.Ratelimiter == nil || i == nil || i.Interaction == nil || i.ID == "" {
 		return
 	}
@@ -114,5 +117,5 @@ func (r *Router) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	r.dispatchCommand(s, i, i.ApplicationCommandData())
+	r.dispatchCommand(context.WithoutCancel(ctx), s, i, i.ApplicationCommandData())
 }

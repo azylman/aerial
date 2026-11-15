@@ -198,7 +198,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		port = DefaultPort
 	}
 
-	database, err := OpenDB(cfg)
+	database, err := OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -267,7 +267,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	}
 
 	log.Println("Shutting down Coven MCP server gracefully...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer shutdownCancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {

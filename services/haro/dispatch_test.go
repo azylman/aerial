@@ -39,7 +39,7 @@ func (m *memoryMsg) InProgress() error                  { return nil }
 
 func TestHeartbeatDB_AdvanceLastCompletedAtMonotonic(t *testing.T) {
 	t.Parallel()
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 
 	hb := HeartbeatSchedule{
@@ -188,7 +188,7 @@ func TestHandleDispatchOutcome_Scenarios(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db := setupTestDB(t)
+			db := setupTestDB(t.Context(), t)
 			ctx := context.Background()
 			seedDispatchHeartbeat(ctx, t, db, tc.seedScheduleType, tc.seedScheduleID, now)
 			seedDispatchRun(ctx, t, db, tc.seedRunID, tc.seedScheduleType, tc.seedScheduleID, tc.seedRunStatus, now)
@@ -330,7 +330,7 @@ func (a *ackBus) ConsumeQueue(ctx context.Context, subject, queue string, handle
 
 func TestHaro_MemoryBusIntegration(t *testing.T) {
 	t.Parallel()
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 	now := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
 
@@ -441,7 +441,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 
 func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 	t.Parallel()
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 	now := time.Date(2026, 11, 14, 2, 0, 0, 0, time.UTC)
 
@@ -454,7 +454,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 	}
 
 	// 2. Database error during GetScheduleRun returns error
-	closedDB := setupTestDB(t)
+	closedDB := setupTestDB(t.Context(), t)
 	closedDB.Close()
 	failEvBytes, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "run-on-closed-db", Status: "completed"})
 	if err := HandleDispatchOutcome(ctx, closedDB, &memoryMsg{data: failEvBytes}); err == nil {
@@ -527,7 +527,7 @@ func TestHandleDispatchOutcome_EdgeCasesAndCoverage(t *testing.T) {
 
 func TestHaroDB_RunAndWatermarkValidationGaps(t *testing.T) {
 	t.Parallel()
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	ctx := context.Background()
 
 	// AdvanceHeartbeatLastCompletedAt error paths

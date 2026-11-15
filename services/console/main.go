@@ -641,7 +641,7 @@ func RunConsoleServer(ctx context.Context, cfg ConsoleConfig) error {
 	select {
 	case <-ctx.Done():
 		log.Println("Shutting down aerial-console server gracefully...")
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer shutdownCancel()
 		return srv.Shutdown(shutdownCtx)
 	case err := <-serverErr:

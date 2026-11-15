@@ -311,7 +311,7 @@ func testToolHandlerClosedDB(ctx context.Context, t *testing.T, cfg *Config) {
 func testToolHandlerList(ctx context.Context, t *testing.T, h *ToolHandler, db *sql.DB, now time.Time) {
 	t.Helper()
 	sZero := OneShotSchedule{ID: "s-zero", ThreadID: "t-zero", Prompt: "p", RunAt: now.Add(time.Hour)}
-	if err := InsertOneShotSchedule(nil, db, sZero); err != nil {
+	if err := InsertOneShotSchedule(nil, db, sZero); err != nil { //nolint:contextcheck // exercises nil-ctx tolerance
 		t.Fatalf("InsertOneShotSchedule nil ctx error: %v", err)
 	}
 	listZero, err := ListOneShotSchedules(ctx, db, "t-zero")
@@ -363,7 +363,7 @@ func TestToolHandler_ScheduleAndList(t *testing.T) {
 	testToolHandlerGuardsAndNilDB(t)
 
 	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
-	db, err := OpenDB(cfg)
+	db, err := OpenDB(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestToolHandler_ScheduleAndList(t *testing.T) {
 func newMemoryToolHandler(t *testing.T) (*ToolHandler, *sql.DB) {
 	t.Helper()
 	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
-	db, err := OpenDB(cfg)
+	db, err := OpenDB(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}

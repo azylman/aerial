@@ -430,7 +430,7 @@ func TestExtractSkillFromTarget(t *testing.T) {
 	}
 
 	var gotMemQuery string
-	injected := injectRetrievedContext(nil, "full prompt envelope", "raw query", func(context.Context) (string, error) {
+	injected := injectRetrievedContext(t.Context(), "full prompt envelope", "raw query", func(context.Context) (string, error) {
 		return "<ambient_context>amb</ambient_context>", nil
 	}, time.Second, func(_ context.Context, q string) (string, error) {
 		gotMemQuery = q

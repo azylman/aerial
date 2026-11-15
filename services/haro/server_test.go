@@ -75,7 +75,7 @@ func setupTestPostgresTables(t *testing.T, db *sql.DB) {
 func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	cfg := &Config{DatabaseURL: ":memory:", Timezone: DefaultTimezone, Port: "8080"}
-	db, err := OpenDB(cfg)
+	db, err := OpenDB(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestNewServer_NilHandlerPanics(t *testing.T) {
 }
 
 func TestNewServer_BrainURLDispatcherConstruction(t *testing.T) {
-	db := setupTestDB(t)
+	db := setupTestDB(t.Context(), t)
 	sWithURL := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:", EriURL: "http://eri:8080"}, db))
 	if sWithURL.dispatcher == nil {
 		t.Error("expected non-nil dispatcher when EriURL is configured")
@@ -373,7 +373,7 @@ type dbOpTestCase struct {
 func testDBOpenFilesAndViews(t *testing.T, tmpDir string) {
 	t.Helper()
 	for _, p := range []string{filepath.Join(tmpDir, "fresh1.db"), filepath.Join(tmpDir, "fresh2.db") + "?cache=shared"} {
-		fdb, err := openDB(p)
+		fdb, err := openDB(t.Context(), p)
 		if err != nil {
 			t.Fatalf("openDB %s failed: %v", p, err)
 		}
@@ -382,7 +382,7 @@ func testDBOpenFilesAndViews(t *testing.T, tmpDir string) {
 
 	blockerFile := filepath.Join(tmpDir, "blocker.txt")
 	_ = os.WriteFile(blockerFile, []byte("data"), 0o644)
-	if _, err := openDB(filepath.Join(blockerFile, "sub", "db.sqlite")); err == nil {
+	if _, err := openDB(t.Context(), filepath.Join(blockerFile, "sub", "db.sqlite")); err == nil {
 		t.Error("expected directory blocker error")
 	}
 
@@ -393,13 +393,13 @@ func testDBOpenFilesAndViews(t *testing.T, tmpDir string) {
 	}
 	_, _ = vdb.Exec("CREATE VIEW cron_schedules AS SELECT 1 AS id;")
 	_ = vdb.Close()
-	if _, err := openDB(viewDBPath); err == nil {
+	if _, err := openDB(t.Context(), viewDBPath); err == nil {
 		t.Error("expected error creating schema on conflicting view database")
 	}
 
 	oldHook := sqliteTestInitHook
 	sqliteTestInitHook = nil
-	if _, err := openDB(":memory:"); err == nil {
+	if _, err := openDB(t.Context(), ":memory:"); err == nil {
 		t.Error("expected error for unhooked :memory:")
 	}
 	sqliteTestInitHook = oldHook
@@ -411,10 +411,17 @@ func testDBOpenFilesAndViews(t *testing.T, tmpDir string) {
 		fired <- time.Time{}
 		return fired
 	}
-	_, errPg := openDB("postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
+	_, errPg := openDB(t.Context(), "postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
+	canceledCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	postgresRetryAfter = func(time.Duration) <-chan time.Time { return nil } // never fires: only ctx can end the wait
+	_, errCanceled := openDB(canceledCtx, "postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
 	postgresMaxAttempts, postgresRetryBase, postgresRetryAfter = origMax, origBase, origAfter
 	if errPg == nil || !strings.Contains(errPg.Error(), "after 2 attempts") {
 		t.Errorf("openDB error = %v, want postgres connection failure after 2 attempts", errPg)
+	}
+	if !errors.Is(errCanceled, context.Canceled) || !strings.Contains(errCanceled.Error(), "after 1 attempts") {
+		t.Errorf("openDB canceled error = %v, want context.Canceled after 1 attempts", errCanceled)
 	}
 }
 
@@ -561,18 +568,18 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 	}
 	for _, tc := range cfgTests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewDB(tc.cfg); (err != nil) != tc.wantErr {
-				t.Fatalf("NewDB() err=%v", err)
+			if _, err := NewDB(t.Context(), tc.cfg); (err != nil) != tc.wantErr {
+				t.Fatalf("NewDB(t.Context(), ) err=%v", err)
 			}
-			if _, err := OpenDB(tc.cfg); (err != nil) != tc.wantErr {
-				t.Fatalf("OpenDB() err=%v", err)
+			if _, err := OpenDB(t.Context(), tc.cfg); (err != nil) != tc.wantErr {
+				t.Fatalf("OpenDB(t.Context(), ) err=%v", err)
 			}
 		})
 	}
 
 	testDBOpenFilesAndViews(t, t.TempDir())
 
-	db, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	db, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}
@@ -583,7 +590,7 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	closedDB, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
 	if err != nil {
 		t.Fatalf("OpenDB closed failed: %v", err)
 	}
@@ -969,7 +976,7 @@ func TestHandleSchedules_Table(t *testing.T) {
 		DurationMs:   200,
 	})
 
-	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	closedDB, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}
@@ -1099,7 +1106,7 @@ func TestHandleScheduleRuns_Table(t *testing.T) {
 		})
 	}
 
-	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	closedDB, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}

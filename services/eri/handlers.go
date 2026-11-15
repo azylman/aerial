@@ -174,7 +174,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		insertCtx, insertCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second) // persists even if the caller disconnects
 		if err := store.InsertMessage(insertCtx, msg); err != nil {
 			insertCancel()
 			log.Printf("Failed to insert HTTP prompt message %s to DB: %v", msgID, err)
@@ -354,7 +354,7 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 
 		d := buildDispatchRecord(req, dispatchID, sessionID, tracing.Traceparent(r.Context()))
 
-		insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		insertCtx, insertCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second) // persists even if the caller disconnects
 		inserted, err := store.InsertDispatch(insertCtx, d)
 		if err != nil {
 			insertCancel()
@@ -962,7 +962,7 @@ func cleanTempDir(dir string) {
 	}
 }
 
-func stageInternalLLMAttachments(atts []InternalLLMAttachment) (string, string, int, error) {
+func stageInternalLLMAttachments(ctx context.Context, atts []InternalLLMAttachment) (string, string, int, error) {
 	if len(atts) == 0 {
 		return "", "", http.StatusOK, nil
 	}
@@ -980,7 +980,7 @@ func stageInternalLLMAttachments(atts []InternalLLMAttachment) (string, string, 
 
 	stagedFiles := make([]stagedAttachmentFile, 0, len(atts))
 	for _, a := range atts {
-		att, err := delivery.ResolveAndFetchInternalAttachment(a.URL, a.Filename)
+		att, err := delivery.ResolveAndFetchInternalAttachment(ctx, a.URL, a.Filename)
 		if err != nil {
 			cleanTempDir(tmpDir)
 			if errors.Is(err, delivery.ErrInvalidInternalAttachment) {
@@ -1040,7 +1040,7 @@ func handleInternalLLM(llmFn func(context.Context, string, string) (string, erro
 			return
 		}
 
-		tmpDir, attBlock, statusCode, err := stageInternalLLMAttachments(req.Attachments)
+		tmpDir, attBlock, statusCode, err := stageInternalLLMAttachments(r.Context(), req.Attachments)
 		if err != nil {
 			writeErr(w, statusCode, err.Error())
 			return
@@ -1320,7 +1320,7 @@ func handleInternalDiscordInteraction(store db.Store, pool *queue.WorkerPool) ht
 			})
 			activeInteractionRouter.Store(router)
 		}
-		router.Handle(dgSession, ic)
+		router.Handle(r.Context(), dgSession, ic)
 
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
 			"status": "ok",
