@@ -303,11 +303,13 @@ func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
 	// Subscribe failure logs warning but returns bus
 	worker := NewWorker(WorkerConfig{})
 	brokenSub := &brokenBus{Bus: memBus, errOnSubscribe: true}
-	if bus := initCovenJetStreamWithFactory(ctx, worker, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+	subCtx, subCancel := context.WithCancel(ctx)
+	if bus := initCovenJetStreamWithFactory(subCtx, worker, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return brokenSub, nil
 	}); bus == nil {
 		t.Error("expected non-nil bus even if subscribe fails")
 	}
+	subCancel()
 
 	// Unmarshal error on bad JSON payload
 	unmarshalDone := make(chan struct{})
@@ -359,9 +361,8 @@ func (r *retrySubscribeBus) Subscribe(ctx context.Context, subject, durable stri
 }
 
 func TestCoven_RetrySubscribeCovenTurns(t *testing.T) {
-	origInterval := subscribeRetryInterval
-	defer func() { subscribeRetryInterval = origInterval }()
-	subscribeRetryInterval = 5 * time.Millisecond
+	restore := setSubscribeRetryIntervalForTest(5 * time.Millisecond)
+	defer restore()
 
 	ctx := t.Context()
 
