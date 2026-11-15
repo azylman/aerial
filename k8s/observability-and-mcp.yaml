@@ -2619,3 +2619,168 @@ spec:
   selector:
     app.kubernetes.io/name: docket-mcp
   type: ClusterIP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: headlamp-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: headlamp-readonly
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - persistentvolumeclaims
+      - events
+      - configmaps
+      - namespaces
+      - nodes
+      - serviceaccounts
+      - persistentvolumes
+      - replicationcontrollers
+      - resourcequotas
+      - limitranges
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+      - batch
+      - autoscaling
+      - networking.k8s.io
+      - gateway.networking.k8s.io
+      - gateway.nginx.org
+      - policy
+      - rbac.authorization.k8s.io
+      - storage.k8s.io
+      - coordination.k8s.io
+      - discovery.k8s.io
+      - events.k8s.io
+      - node.k8s.io
+      - apiextensions.k8s.io
+      - metrics.k8s.io
+      - cert-manager.io
+      - postgresql.cnpg.io
+      - external-secrets.io
+      - actions.github.com
+      - source.toolkit.fluxcd.io
+      - kustomize.toolkit.fluxcd.io
+      - helm.toolkit.fluxcd.io
+      - notification.toolkit.fluxcd.io
+      - image.toolkit.fluxcd.io
+    resources:
+      - "*"
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: headlamp-readonly-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: headlamp-readonly
+subjects:
+  - kind: ServiceAccount
+    name: headlamp-sa
+    namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: headlamp
+  name: headlamp
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: headlamp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: headlamp
+    spec:
+      serviceAccountName: headlamp-sa
+      initContainers:
+        - command:
+            - /bin/sh
+            - -c
+            - mkdir -p /build/plugins && cp -r /plugins/* /build/plugins/
+          image: ghcr.io/headlamp-k8s/headlamp-plugin-flux:v0.7.0
+          imagePullPolicy: IfNotPresent
+          name: headlamp-plugin-flux
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          volumeMounts:
+            - mountPath: /build/plugins
+              name: plugins
+      containers:
+        - args:
+            - -in-cluster
+            - -in-cluster-context-name=main
+            - -unsafe-use-service-account-token
+            - -plugins-dir=/build/plugins
+          image: ghcr.io/headlamp-k8s/headlamp:v0.46.0
+          imagePullPolicy: IfNotPresent
+          name: headlamp
+          ports:
+            - containerPort: 4466
+              name: http
+              protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
+          volumeMounts:
+            - mountPath: /build/plugins
+              name: plugins
+      volumes:
+        - emptyDir: {}
+          name: plugins
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: headlamp
+  namespace: default
+spec:
+  ports:
+    - name: http
+      port: 4466
+      protocol: TCP
+      targetPort: 4466
+    - name: http-default
+      port: 80
+      protocol: TCP
+      targetPort: 4466
+  selector:
+    app.kubernetes.io/name: headlamp
+  type: ClusterIP
+

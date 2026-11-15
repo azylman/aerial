@@ -331,18 +331,11 @@ func (m *memoryVanadisStore) GetChunkByPR(_ context.Context, repo string, prNumb
 		}
 		for _, c := range list {
 			if reposMatch(c.Repo, repo) && c.PRNumber == prNumber {
-				hasRemaining := slices.ContainsFunc(list, func(c2 VanadisChunk) bool { return c2.ChunkIndex > c.ChunkIndex })
-				summaries := make([]VanadisChunkSummary, 0, len(list))
-				for _, c2 := range list {
-					summaries = append(summaries, VanadisChunkSummary{ID: c2.ID, ChunkIndex: c2.ChunkIndex, Mode: c2.Mode, Status: c2.Status})
-				}
 				return &VanadisChunkPRLookup{
-					Matched:            true,
-					ChunkID:            c.ID,
-					BuildID:            bID,
-					Effort:             capChunkEffort(c.Effort),
-					HasRemainingChunks: hasRemaining,
-					NextChunkMode:      nextChunkModeAfter(summaries, c.ID, c.ChunkIndex),
+					Matched: true,
+					ChunkID: c.ID,
+					BuildID: bID,
+					Effort:  capChunkEffort(c.Effort),
 				}, nil
 			}
 		}
@@ -452,161 +445,6 @@ func (m *memoryVanadisStore) attachStandalonePR(req AttachChunkPRRequest) (strin
 	return buildID, newChunkID, threadID, nil
 }
 
-func (m *memoryVanadisStore) findChunkByPR(repo string, prNumber int) (string, int, bool) {
-	for bID, list := range m.chunks {
-		for i := range list {
-			if reposMatch(list[i].Repo, repo) && list[i].PRNumber == prNumber {
-				return bID, i, true
-			}
-		}
-	}
-	return "", -1, false
-}
-
-func summarizeChunkList(list []VanadisChunk) []VanadisChunkSummary {
-	summaries := make([]VanadisChunkSummary, len(list))
-	for i, c := range list {
-		summaries[i] = VanadisChunkSummary{
-			ID:          c.ID,
-			ChunkIndex:  c.ChunkIndex,
-			Repo:        c.Repo,
-			Title:       c.Title,
-			Status:      c.Status,
-			PRNumber:    c.PRNumber,
-			StartedAt:   c.StartedAt,
-			CompletedAt: c.CompletedAt,
-			UpdatedAt:   c.UpdatedAt,
-		}
-	}
-	return summaries
-}
-
-func findNextUnmergedChunkIdx(list []VanadisChunk, currentChunkIdx int) int {
-	nextChunkIdx := -1
-	fallbackIdx := -1
-	for _, cs := range list {
-		if isChunkMergedOrDoneStatus(cs.Status) {
-			continue
-		}
-		if cs.ChunkIndex > currentChunkIdx && (nextChunkIdx == -1 || cs.ChunkIndex < nextChunkIdx) {
-			nextChunkIdx = cs.ChunkIndex
-		} else if fallbackIdx == -1 {
-			fallbackIdx = cs.ChunkIndex
-		}
-	}
-	if nextChunkIdx == -1 {
-		return fallbackIdx
-	}
-	return nextChunkIdx
-}
-
-func (m *memoryVanadisStore) activateNextPendingChunk(buildID string, nextIdx int, now time.Time) []VanadisChunkSummary {
-	list := m.chunks[buildID]
-	for ci := range list {
-		if list[ci].ChunkIndex == nextIdx && list[ci].Status == "pending" {
-			list[ci].Status = "running"
-			if list[ci].StartedAt.IsZero() {
-				list[ci].StartedAt = now
-			}
-			list[ci].UpdatedAt = now
-			m.chunks[buildID] = list
-			break
-		}
-	}
-	return summarizeChunkList(m.chunks[buildID])
-}
-
-func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
-	if m.updateChunkErr != nil {
-		return nil, m.updateChunkErr
-	}
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return &VanadisAdvancementResult{Matched: false}, nil
-	}
-	bID, idx, ok := m.findChunkByPR(repo, prNumber)
-	if !ok {
-		return &VanadisAdvancementResult{Matched: false}, nil
-	}
-	b := m.builds[bID]
-	list := m.chunks[bID]
-	target := list[idx]
-	if b.Status == "cancelled" {
-		return &VanadisAdvancementResult{
-			Matched:          true,
-			Advanced:         false,
-			BuildID:          bID,
-			ThreadID:         b.ThreadID,
-			Tier:             b.Tier,
-			Title:            firstNonEmpty(b.Title, b.Objective),
-			Objective:        b.Objective,
-			BuildStatus:      b.Status,
-			StatusMessageID:  b.StatusMessageID,
-			MergedChunkIndex: target.ChunkIndex,
-			MergedChunkTitle: target.Title,
-			NextChunkIndex:   -1,
-			BuildCompleted:   b.Status == "completed",
-		}, nil
-	}
-
-	wasMerged := isChunkDoneStatus(target.Status)
-	now := time.Now().UTC()
-	if !wasMerged {
-		list[idx].Status = "merged"
-	}
-	if list[idx].CompletedAt.IsZero() {
-		list[idx].CompletedAt = now
-	}
-	list[idx].UpdatedAt = now
-	m.chunks[bID] = list
-
-	summaries := summarizeChunkList(list)
-	nextChunkIdx := findNextUnmergedChunkIdx(list, target.ChunkIndex)
-
-	if nextChunkIdx >= 0 {
-		if b.Status == "failed" {
-			b.Status = "running"
-			m.builds[bID] = b
-		}
-		updatedSummaries := m.activateNextPendingChunk(bID, nextChunkIdx, now)
-		return &VanadisAdvancementResult{
-			Matched:          true,
-			Advanced:         !wasMerged,
-			BuildID:          bID,
-			ThreadID:         b.ThreadID,
-			Tier:             b.Tier,
-			Title:            firstNonEmpty(b.Title, b.Objective),
-			Objective:        b.Objective,
-			BuildStatus:      b.Status,
-			StatusMessageID:  b.StatusMessageID,
-			MergedChunkIndex: target.ChunkIndex,
-			MergedChunkTitle: target.Title,
-			NextChunkIndex:   nextChunkIdx,
-			BuildCompleted:   false,
-			Chunks:           updatedSummaries,
-		}, nil
-	}
-
-	b.Status = "completed"
-	m.builds[bID] = b
-	return &VanadisAdvancementResult{
-		Matched:          true,
-		Advanced:         !wasMerged,
-		BuildID:          bID,
-		ThreadID:         b.ThreadID,
-		Tier:             b.Tier,
-		Title:            firstNonEmpty(b.Title, b.Objective),
-		Objective:        b.Objective,
-		BuildStatus:      "completed",
-		StatusMessageID:  b.StatusMessageID,
-		MergedChunkIndex: target.ChunkIndex,
-		MergedChunkTitle: target.Title,
-		NextChunkIndex:   -1,
-		BuildCompleted:   true,
-		Chunks:           summaries,
-	}, nil
-}
-
 func (m *memoryVanadisStore) FailChunkByPR(_ context.Context, repo string, prNumber int) (string, string, bool, error) {
 	if m.updateChunkErr != nil {
 		return "", "", false, m.updateChunkErr
@@ -676,7 +514,7 @@ func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID stri
 		NextChunkIndex:   -1,
 		BuildCompleted:   b.Status == "completed",
 	}
-	if target.Mode != "action" || target.Status != "running" || b.Status != "running" {
+	if target.Mode != "action" || target.Status != "running" || b.Status != "running" || target.PRNumber > 0 {
 		return res, nil
 	}
 
@@ -686,28 +524,22 @@ func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID stri
 	list[idx].UpdatedAt = now
 	m.chunks[bID] = list
 
-	nextIdx := -1
-	for j := idx + 1; j < len(list); j++ {
-		if !isChunkDoneStatus(list[j].Status) {
-			nextIdx = list[j].ChunkIndex
+	allDone := true
+	for _, c := range list {
+		if c.Status != "completed" && c.Status != "merged" {
+			allDone = false
 			break
 		}
 	}
-
-	res.Advanced = true
-	res.Chunks = summarizeChunkList(list)
-	if nextIdx >= 0 {
-		_ = m.activateNextPendingChunk(bID, nextIdx, now)
-		res.NextChunkIndex = nextIdx
-		res.BuildCompleted = false
-		return res, nil
+	if allDone {
+		b.Status = "completed"
+		b.UpdatedAt = now
+		m.builds[bID] = b
+		res.BuildCompleted = true
+		res.BuildStatus = "completed"
 	}
 
-	b.Status = "completed"
-	b.UpdatedAt = now
-	m.builds[bID] = b
-	res.BuildStatus = "completed"
-	res.BuildCompleted = true
+	res.Advanced = true
 	return res, nil
 }
 
@@ -999,8 +831,6 @@ func (m *memoryVanadisStore) ResetChunkForSynchronize(_ context.Context, chunkID
 			list[i].Banner = ""
 			if list[i].Status == "failed" {
 				list[i].Status = "pr_opened"
-				list[i].MergeAwakeableID = ""
-				list[i].DeployAwakeableID = ""
 				list[i].CompletedAt = time.Time{}
 			}
 			list[i].UpdatedAt = now

@@ -74,24 +74,63 @@ func formatCIChecksActiveStep(prStatus, ciChecksJSON string) string {
 	return fmt.Sprintf("Waiting on CI (%d/%d passed)", passed, total)
 }
 
-func formatSingleJobRolloutState(job, cleanStatus string, deployedSet, startedSet map[string]bool, jobStates map[string]string, passedBuildJobs map[string]bool, hasStartedJobs bool) string {
+func (s *VanadisServer) deployUIURL() string {
+	if s == nil {
+		return ""
+	}
+	if u := strings.TrimRight(strings.TrimSpace(s.cfg.DeployUIURL), "/"); u != "" {
+		return u
+	}
+	if strings.TrimSpace(s.cfg.ConfigPath) != "" {
+		return strings.TrimRight(strings.TrimSpace(LoadConfig(s.cfg.ConfigPath).DeployUIURL), "/")
+	}
+	return ""
+}
+
+func formatDeployTargetLabel(name, kind, deployUIURL string) string {
+	base := strings.TrimRight(strings.TrimSpace(deployUIURL), "/")
+	if base == "" {
+		return fmt.Sprintf("`%s`", name)
+	}
+	cleanName := strings.TrimSpace(name)
+	var route string
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "kustomization":
+		route = fmt.Sprintf("%s/c/main/flux/kustomize/kustomizations/flux-system/%s", base, cleanName)
+	default:
+		switch strings.ToLower(cleanName) {
+		case "git-sync":
+			route = base + "/c/main/flux/sources"
+		case "github-runner":
+			route = base + "/c/main/flux/helmreleases"
+		default:
+			route = fmt.Sprintf("%s/c/main/deployments/default/%s", base, cleanName)
+		}
+	}
+	return fmt.Sprintf("[`%s`](%s)", name, route)
+}
+
+func formatSingleJobRolloutState(job, cleanStatus string, deployedSet, startedSet map[string]bool, jobStates map[string]string, passedBuildJobs map[string]bool, hasStartedJobs bool, deployUIURL ...string) string {
+	baseURL := firstNonEmpty(deployUIURL...)
+	label := formatDeployTargetLabel(job, "job", baseURL)
 	jKey := strings.ToLower(strings.TrimSpace(job))
 	switch {
 	case deployedSet[jKey]:
-		return fmt.Sprintf("`%s`: ✅ healthy", job)
+		return label + ": ✅ healthy"
 	case startedSet[jKey] && strings.EqualFold(jobStates[jKey], "verifying_health"):
-		return fmt.Sprintf("`%s`: 🔄 verifying health", job)
+		return label + ": 🔄 verifying health"
 	case startedSet[jKey]:
-		return fmt.Sprintf("`%s`: 🔄 starting", job)
+		return label + ": 🔄 starting"
 	case (!hasStartedJobs && cleanStatus == "deploying") || passedBuildJobs[jKey]:
-		return fmt.Sprintf("`%s`: 🔄 starting", job)
+		return label + ": 🔄 starting"
 	default:
-		return fmt.Sprintf("`%s`: ⏳ building image", job)
+		return label + ": ⏳ building image"
 	}
 }
 
 // formatPerJobRolloutStatus formats per-job deployment rollout states.
-func formatPerJobRolloutStatus(allJobs []string, cleanStatus string, startedJobs, deployedJobs []string, jobStates map[string]string, passedBuildJobs map[string]bool) string {
+func formatPerJobRolloutStatus(allJobs []string, cleanStatus string, startedJobs, deployedJobs []string, jobStates map[string]string, passedBuildJobs map[string]bool, deployUIURL ...string) string {
+	baseURL := firstNonEmpty(deployUIURL...)
 	deployedSet := make(map[string]bool, len(deployedJobs))
 	for _, j := range deployedJobs {
 		deployedSet[strings.ToLower(strings.TrimSpace(j))] = true
@@ -104,16 +143,17 @@ func formatPerJobRolloutStatus(allJobs []string, cleanStatus string, startedJobs
 
 	lines := make([]string, 0, len(allJobs))
 	for _, j := range allJobs {
-		lines = append(lines, formatSingleJobRolloutState(j, cleanStatus, deployedSet, startedSet, jobStates, passedBuildJobs, hasStartedJobs))
+		lines = append(lines, formatSingleJobRolloutState(j, cleanStatus, deployedSet, startedSet, jobStates, passedBuildJobs, hasStartedJobs, baseURL))
 	}
 	return strings.Join(lines, "\n")
 }
 
 // formatKustomizationRolloutStatus renders a deploying PR's recorded Kustomizations one per line.
-func formatKustomizationRolloutStatus(cleanStatus string, kustomizationStatuses map[string]string) (string, bool) {
+func formatKustomizationRolloutStatus(cleanStatus string, kustomizationStatuses map[string]string, deployUIURL ...string) (string, bool) {
 	if cleanStatus != "deploying" || len(kustomizationStatuses) == 0 {
 		return "", false
 	}
+	baseURL := firstNonEmpty(deployUIURL...)
 	names := make([]string, 0, len(kustomizationStatuses))
 	for name := range kustomizationStatuses {
 		names = append(names, name)
@@ -126,7 +166,8 @@ func formatKustomizationRolloutStatus(cleanStatus string, kustomizationStatuses 
 		if status == "deployed" || status == "healthy" || status == "rolled_out" {
 			state = "✅ rolled out"
 		}
-		lines = append(lines, fmt.Sprintf("`%s`: %s", name, state))
+		label := formatDeployTargetLabel(name, "kustomization", baseURL)
+		lines = append(lines, label+": "+state)
 	}
 	return strings.Join(lines, "\n"), true
 }
@@ -180,8 +221,9 @@ func resolveCandidateJobs(rs *pubsub.PRRolloutState, checkJobs []string) []strin
 	return checkJobs
 }
 
-// FormatChunkActiveStep formats the dynamic active_step string for a VanadisChunk.
-func FormatChunkActiveStep(chunk VanadisChunk) string {
+// FormatChunkActiveStep formats the dynamic active_step string for a VanadisChunk with optional Headlamp deep-link URLs.
+func FormatChunkActiveStep(chunk VanadisChunk, deployUIURL ...string) string {
+	baseURL := firstNonEmpty(deployUIURL...)
 	cleanStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
 	if cleanStatus == "open" || cleanStatus == "pr_opened" {
 		if len(chunk.CIChecks) > 0 {
@@ -201,7 +243,7 @@ func FormatChunkActiveStep(chunk VanadisChunk) string {
 	}
 
 	if chunk.RolloutState != nil && len(chunk.RolloutState.KustomizationStatuses) > 0 {
-		if rollout, ok := formatKustomizationRolloutStatus(cleanStatus, chunk.RolloutState.KustomizationStatuses); ok {
+		if rollout, ok := formatKustomizationRolloutStatus(cleanStatus, chunk.RolloutState.KustomizationStatuses, baseURL); ok {
 			return rollout
 		}
 	}
@@ -215,7 +257,7 @@ func FormatChunkActiveStep(chunk VanadisChunk) string {
 			deployedJobs = chunk.RolloutState.DeployedJobs
 			jobStates = chunk.RolloutState.JobStates
 		}
-		return formatPerJobRolloutStatus(allJobs, cleanStatus, startedJobs, deployedJobs, jobStates, passedBuildJobs)
+		return formatPerJobRolloutStatus(allJobs, cleanStatus, startedJobs, deployedJobs, jobStates, passedBuildJobs, baseURL)
 	}
 
 	if (cleanStatus == "merged" || cleanStatus == "synced") && total > 0 && failed == 0 {
@@ -284,7 +326,7 @@ func (s *VanadisServer) HandleCoalescedWidgetMessage(ctx context.Context, msg pu
 		BuildID:  buildID,
 		PRBanner: payload.Banner,
 	}
-	widgetReq := buildSyncWidgetRequest(*build, chunks, syncReq)
+	widgetReq := buildSyncWidgetRequest(*build, chunks, syncReq, s.deployUIURL())
 	if err := s.dispatchAndPersistWidget(ctx, build.ID, build.StatusMessageID, widgetReq); err != nil {
 		log.Printf("[vanadis] warning: dispatchAndPersistWidget failed for build %s: %v", buildID, err)
 		if msg.NumDelivered() >= 3 {
