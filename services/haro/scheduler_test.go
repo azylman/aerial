@@ -991,6 +991,7 @@ func TestDB_NilDBGuards(t *testing.T) {
 		{"UpdateHeartbeatSchedule", UpdateHeartbeatSchedule(ctx, nil, HeartbeatSchedule{ID: "id"})},
 		{"GetDueHeartbeatSchedules", func() error { _, err := GetDueHeartbeatSchedules(ctx, nil, now); return err }()},
 		{"AdvanceHeartbeatNextRun", AdvanceHeartbeatNextRun(ctx, nil, "id", now)},
+		{"HasRunningHeartbeatRun", func() error { _, err := HasRunningHeartbeatRun(ctx, nil, "id", now); return err }()},
 	}
 
 	for _, tc := range tests {

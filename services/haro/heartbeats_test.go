@@ -249,6 +249,11 @@ func TestHeartbeatDB_Operations(t *testing.T) {
 	hb1 := testHeartbeatInsertAndGet(ctx, t, db, now)
 	testHeartbeatListAndUpdate(ctx, t, db, hb1)
 	testHeartbeatDueAdvanceDelete(ctx, t, db, now)
+
+	hasRunningEmpty, err := HasRunningHeartbeatRun(ctx, db, "", now)
+	if err != nil || hasRunningEmpty {
+		t.Errorf("HasRunningHeartbeatRun with empty scheduleID got (%v, %v), want (false, nil)", hasRunningEmpty, err)
+	}
 }
 
 func TestHeartbeatTools_HandleScheduleHeartbeat(t *testing.T) {
@@ -500,6 +505,7 @@ type evaluateDueHeartbeatsTestCase struct {
 	nextRunAt         time.Time
 	dispatcherStatus  string
 	dispatcherErr     error
+	seedRunningRun    bool
 	wantDispatched    bool
 	wantSkippedRun    bool
 	wantStaleRun      bool
@@ -526,8 +532,8 @@ func assertHeartbeatDispatch(t *testing.T, mock *mockDispatcher, tc evaluateDueH
 	if !strings.Contains(req.Prompt, `<\HEARTBEAT_INSTRUCTIONS>`) {
 		t.Errorf("dispatcher prompt missing <\\HEARTBEAT_INSTRUCTIONS> wrapper:\n%s", req.Prompt)
 	}
-	if req.SessionID != "heartbeat-"+tc.hbID {
-		t.Errorf("req.SessionID = %q, want 'heartbeat-%s'", req.SessionID, tc.hbID)
+	if req.SessionID != "" {
+		t.Errorf("req.SessionID = %q, want empty string", req.SessionID)
 	}
 	if req.Source != "heartbeat" {
 		t.Errorf("req.Source = %q, want 'heartbeat'", req.Source)
@@ -542,6 +548,13 @@ func assertHeartbeatScheduleRuns(t *testing.T, db *sql.DB, tc evaluateDueHeartbe
 	var runCount int
 	var runStatus, runPrompt, runType string
 	_ = db.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), ''), COALESCE(MAX(prompt), ''), COALESCE(MAX(schedule_type), '') FROM schedule_runs WHERE schedule_id = ?", tc.hbID).Scan(&runCount, &runStatus, &runPrompt, &runType)
+
+	if tc.seedRunningRun {
+		if runCount != 1 || runStatus != "running" {
+			t.Errorf("expected 1 running run for seeded active heartbeat %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
+		}
+		return
+	}
 
 	if tc.wantSkippedRun && runCount != 0 {
 		t.Errorf("expected 0 runs for skipped active heartbeat %s, got count=%d", tc.hbID, runCount)
@@ -596,6 +609,25 @@ func runEvaluateDueHeartbeatsCase(ctx context.Context, t *testing.T, tc evaluate
 		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
 	}
 
+	if tc.seedRunningRun {
+		seededRun := ScheduleRun{
+			ID:           "existing-" + tc.hbID,
+			ScheduleID:   tc.hbID,
+			ScheduleType: "heartbeat",
+			MessageID:    "existing-msg-" + tc.hbID,
+			TargetID:     hb.TargetID,
+			ThreadID:     "heartbeat-" + tc.hbID,
+			Title:        hb.TitlePrefix,
+			Prompt:       hb.Prompt,
+			Status:       "running",
+			StartedAt:    now.Add(-5 * time.Minute),
+			Effort:       hb.Effort,
+		}
+		if err := CreateScheduleRun(ctx, db, seededRun); err != nil {
+			t.Fatalf("CreateScheduleRun seeded run failed: %v", err)
+		}
+	}
+
 	dispStatus := "ok"
 	if tc.dispatcherStatus != "" {
 		dispStatus = tc.dispatcherStatus
@@ -634,6 +666,14 @@ func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
 			dispatcherStatus: "skipped_active",
 			wantDispatched:   true,
 			wantSkippedRun:   true,
+		},
+		{
+			name:           "in-flight schedule run skipped without dispatch",
+			hbID:           "hb-in-flight",
+			cronExpr:       "*/5 * * * *",
+			nextRunAt:      now.Add(-1 * time.Minute),
+			seedRunningRun: true,
+			wantDispatched: false,
 		},
 		{
 			name:           "stale heartbeat overdue by more than 24h",

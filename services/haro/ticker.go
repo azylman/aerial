@@ -537,12 +537,18 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 	}
 
 	sessionKey := "heartbeat-" + hb.ID
+	if active, activeErr := HasRunningHeartbeatRun(ctx, t.db, hb.ID, now.Add(-2*time.Hour)); activeErr == nil && active {
+		RecordScheduleRun("heartbeat", "skipped_active")
+		slog.Info("Skipping heartbeat run: schedule has an active run in progress", "id", hb.ID, "target_id", hb.TargetID, "thread_id", sessionKey)
+		return
+	}
+
 	runID := uuid.NewString()
 	wrappedPrompt := BuildHeartbeatPrompt(hb, now)
 	req := DispatchRequest{
 		ID:           runID,
 		Source:       "heartbeat",
-		SessionID:    sessionKey,
+		SessionID:    "",
 		TargetID:     strings.TrimSpace(hb.TargetID),
 		Prompt:       wrappedPrompt,
 		Effort:       hb.Effort,
