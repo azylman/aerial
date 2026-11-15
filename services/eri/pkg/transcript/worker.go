@@ -60,6 +60,24 @@ func normalizeSyncOptions(brainDir string, opts SyncOptions) (string, SyncOption
 	return targetBrainDir, opts, nil
 }
 
+// isSessionUnchanged reports whether the session has already been indexed, has not modified since LastMtime,
+// and does not require an idle settling pass. If unchanged and missing an engine attribute, it backfills the engine.
+func isSessionUnchanged(ctx context.Context, store db.TranscriptStore, sessionID, engine string, mtime time.Time, state db.SessionSyncState, exists bool, idleThreshold time.Duration) bool {
+	if !exists {
+		return false
+	}
+	needsSettling := !state.IsSettled && time.Since(mtime) > idleThreshold
+	if needsSettling || mtime.Truncate(time.Millisecond).After(state.LastMtime.Truncate(time.Millisecond)) {
+		return false
+	}
+	if state.Engine == "" {
+		if err := store.SetSessionEngine(ctx, sessionID, engine); err != nil {
+			log.Printf("[Transcript] SetSessionEngine error for session %s: %v", sessionID, err)
+		}
+	}
+	return true
+}
+
 // SyncSessionTranscript indexes a single session's transcript file into transcript_steps and sessions
 // without scanning the entire brain directory. When sessionID is empty, it falls back to SyncTranscripts.
 func SyncSessionTranscript(
@@ -121,13 +139,8 @@ func SyncSessionTranscript(
 
 	engine := engineForPath(targetBrainDir, transcriptPath)
 	state, exists := syncStates[sessionID]
-	if exists && !mtime.Truncate(time.Millisecond).After(state.LastMtime.Truncate(time.Millisecond)) {
+	if isSessionUnchanged(ctx, store, sessionID, engine, mtime, state, exists, opt.IdleThreshold) {
 		stats.SkippedUnchanged++
-		if state.Engine == "" {
-			if err := store.SetSessionEngine(ctx, sessionID, engine); err != nil {
-				log.Printf("[Transcript] SetSessionEngine error for session %s: %v", sessionID, err)
-			}
-		}
 		stats.Duration = time.Since(start)
 		return stats, nil
 	}
@@ -214,13 +227,8 @@ func SyncTranscripts(
 		stats.Scanned++
 
 		state, exists := syncStates[sessionID]
-		if exists && !mtime.Truncate(time.Millisecond).After(state.LastMtime.Truncate(time.Millisecond)) {
+		if isSessionUnchanged(ctx, store, sessionID, found.engine, mtime, state, exists, opts.IdleThreshold) {
 			stats.SkippedUnchanged++
-			if state.Engine == "" {
-				if err := store.SetSessionEngine(ctx, sessionID, found.engine); err != nil {
-					log.Printf("[Transcript] SetSessionEngine error for session %s: %v", sessionID, err)
-				}
-			}
 			continue
 		}
 

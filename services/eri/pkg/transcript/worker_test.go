@@ -272,6 +272,31 @@ func advancedScenarioCases() []syncTranscriptsScenarioCase {
 			idleThreshold: 10 * time.Minute,
 			wantSummaries: 1,
 		},
+		{
+			name: "unsettled session revisited once idle threshold passes even if mtime unchanged",
+			priorSummary: &db.SessionSummary{
+				SessionID:       "sess-unsettled-revisit",
+				Summary:         "Initial prompt before settling",
+				LastIndexedStep: 0,
+				LastMtime:       time.Now().Add(-2 * time.Hour),
+				IsSettled:       false,
+			},
+			files: []sessionFileFixture{
+				{
+					sessionID: "sess-unsettled-revisit",
+					content: strings.Join([]string{
+						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Initial prompt before settling"}`,
+						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Task complete"}`,
+					}, "\n") + "\n",
+					age: 2 * time.Hour,
+				},
+			},
+			idleThreshold:     10 * time.Minute,
+			wantSummaries:     1,
+			wantSettled:       new(true),
+			wantStepsInserted: 1,
+			wantLastIndexed:   1,
+		},
 	}
 }
 

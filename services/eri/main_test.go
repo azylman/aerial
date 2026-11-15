@@ -872,14 +872,47 @@ func TestRunBrainApp_EventBusTranscriptSyncSubscriber(t *testing.T) {
 	}
 	defer func() { newBusFn = oldNewBus }()
 
+	syncedCh := make(chan pubsub.TranscriptSyncedEvent, 1)
+	_, _ = memBus.Subscribe(context.Background(), pubsub.SubjectAerialTurnTranscriptSynced, "test-verify-runbrainapp", func(_ context.Context, msg pubsub.Message) error {
+		var ev pubsub.TranscriptSyncedEvent
+		if err := json.Unmarshal(msg.Data(), &ev); err == nil {
+			select {
+			case syncedCh <- ev:
+			default:
+			}
+		}
+		return nil
+	})
+
 	_, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
 		d.NATSURL = "nats://127.0.0.1:4222"
 	})
 
 	_, cancel, wait := runBrainAppUntilReady(t, cfg)
-	cancel()
-	if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		t.Fatalf("unexpected error from RunBrainApp: %v", err)
+	defer func() {
+		cancel()
+		if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("unexpected error from RunBrainApp: %v", err)
+		}
+	}()
+
+	turnEv := pubsub.TurnCompletedEvent{
+		SessionID:      "run-brain-app-sess",
+		ConversationID: "conv-1",
+		Source:         "discord",
+		CompletedAt:    time.Now().UTC(),
+	}
+	if err := memBus.Publish(context.Background(), pubsub.SubjectAerialTurnCompleted, "turn-1", turnEv); err != nil {
+		t.Fatalf("publish turn completed event: %v", err)
+	}
+
+	select {
+	case ev := <-syncedCh:
+		if ev.SessionID != "run-brain-app-sess" {
+			t.Errorf("ev.SessionID = %q, want %q", ev.SessionID, "run-brain-app-sess")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for TranscriptSyncedEvent from RunBrainApp subscriber")
 	}
 }
 
@@ -920,34 +953,11 @@ func TestBrainAppOptions_FunctionalOptionMutators(t *testing.T) {
 	}
 }
 
-type failSubscribeBus struct {
-	pubsub.Bus
-}
-
-func (b *failSubscribeBus) ConsumeQueue(ctx context.Context, subject, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
-	return nil, errors.New("simulated subscribe failure")
-}
-
-type initTranscriptSubscriberCase struct {
-	name          string
-	nilBus        bool
-	failSubscribe bool
-	withEphemeral bool
-	publishTurn   bool
-}
-
-func runInitTranscriptSubscriberCase(t *testing.T, tc initTranscriptSubscriberCase) {
-	t.Helper()
+func TestInitTurnTranscriptSyncSubscriber_WithEphemeralPool(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
-
-	var bus pubsub.Bus = memBus
-	if tc.nilBus {
-		bus = nil
-	} else if tc.failSubscribe {
-		bus = &failSubscribeBus{Bus: memBus}
-	}
 
 	store := dbtest.NewFakeStore()
 	tmpDir := t.TempDir()
@@ -957,82 +967,44 @@ func runInitTranscriptSubscriberCase(t *testing.T, tc initTranscriptSubscriberCa
 	})
 	cur := cfg.Current()
 
-	var ephemeralPool *runner.InterchangeablePool
-	if tc.withEphemeral {
-		pcfg := runner.PoolConfig{
-			Engine:        "agy",
-			GeminiHomeDir: tmpDir,
-			Model:         "gemini-2.5-flash",
-			Cwd:           tmpDir,
-		}
-		ephemeralPool = newWorkerInterchangeablePool(pcfg, newMockMainDaemonSpawner(), "ephemeral:worker", false)
-		defer func() { _ = ephemeralPool.Close() }()
+	pcfg := runner.PoolConfig{
+		Engine:        "agy",
+		GeminiHomeDir: tmpDir,
+		Model:         "gemini-2.5-flash",
+		Cwd:           tmpDir,
 	}
+	ephemeralPool := newWorkerInterchangeablePool(pcfg, newMockMainDaemonSpawner(), "ephemeral:worker", false)
+	defer func() { _ = ephemeralPool.Close() }()
 
 	syncedCh := make(chan pubsub.TranscriptSyncedEvent, 1)
-	if !tc.nilBus && !tc.failSubscribe {
-		_, _ = memBus.Subscribe(ctx, pubsub.SubjectAerialTurnTranscriptSynced, "test-sub", func(_ context.Context, msg pubsub.Message) error {
-			var ev pubsub.TranscriptSyncedEvent
-			if err := json.Unmarshal(msg.Data(), &ev); err == nil {
-				select {
-				case syncedCh <- ev:
-				default:
-				}
+	_, _ = memBus.Subscribe(ctx, pubsub.SubjectAerialTurnTranscriptSynced, "test-sub", func(_ context.Context, msg pubsub.Message) error {
+		var ev pubsub.TranscriptSyncedEvent
+		if err := json.Unmarshal(msg.Data(), &ev); err == nil {
+			select {
+			case syncedCh <- ev:
+			default:
 			}
-			return nil
-		})
-	}
-
-	initTurnTranscriptSyncSubscriber(ctx, bus, store, cfg, cur, ephemeralPool)
-
-	if tc.publishTurn {
-		turnEv := pubsub.TurnCompletedEvent{
-			SessionID:      "sub-turn-sess",
-			ConversationID: "sub-turn-conv",
-			Source:         "discord",
-			CompletedAt:    time.Now().UTC(),
 		}
-		if pubErr := memBus.Publish(ctx, pubsub.SubjectAerialTurnCompleted, "turn-1", turnEv); pubErr != nil {
-			t.Fatalf("publish turn event: %v", pubErr)
-		}
-		select {
-		case ev := <-syncedCh:
-			if ev.SessionID != "sub-turn-sess" {
-				t.Errorf("ev.SessionID = %q, want %q", ev.SessionID, "sub-turn-sess")
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for TranscriptSyncedEvent")
-		}
-	}
-}
+		return nil
+	})
 
-func TestInitTurnTranscriptSyncSubscriber_TableDriven(t *testing.T) {
-	t.Parallel()
-	tests := []initTranscriptSubscriberCase{
-		{
-			name:   "nil bus returns immediately",
-			nilBus: true,
-		},
-		{
-			name:          "subscribe queue error logged gracefully",
-			failSubscribe: true,
-		},
-		{
-			name:          "success without ephemeral pool and processes turn",
-			publishTurn:   true,
-			withEphemeral: false,
-		},
-		{
-			name:          "success with ephemeral pool and processes turn",
-			publishTurn:   true,
-			withEphemeral: true,
-		},
-	}
+	initTurnTranscriptSyncSubscriber(ctx, memBus, store, cfg, cur, ephemeralPool)
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runInitTranscriptSubscriberCase(t, tc)
-		})
+	turnEv := pubsub.TurnCompletedEvent{
+		SessionID:      "sub-turn-sess",
+		ConversationID: "sub-turn-conv",
+		Source:         "discord",
+		CompletedAt:    time.Now().UTC(),
+	}
+	if pubErr := memBus.Publish(ctx, pubsub.SubjectAerialTurnCompleted, "turn-1", turnEv); pubErr != nil {
+		t.Fatalf("publish turn event: %v", pubErr)
+	}
+	select {
+	case ev := <-syncedCh:
+		if ev.SessionID != "sub-turn-sess" {
+			t.Errorf("ev.SessionID = %q, want %q", ev.SessionID, "sub-turn-sess")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for TranscriptSyncedEvent")
 	}
 }

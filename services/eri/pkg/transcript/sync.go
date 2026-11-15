@@ -50,6 +50,11 @@ func buildSyncOptions(cfg *config.Config, targetBrainDir string, llmFunc LLMClie
 			opts.ClaudeProjectsDir = filepath.Join(homeDir, ".claude", "projects")
 		}
 		opts.MCPServers = configuredMCPServerNames(cfg.Current())
+		var roots []string
+		if targetBrainDir != "" {
+			roots = append(roots, targetBrainDir)
+		}
+		opts.Embedder = NewOllamaEmbedder(cfg, roots...)
 	}
 	opts.LLMFunc = llmFunc
 	return opts
@@ -95,28 +100,12 @@ func RunTranscriptSync(ctx context.Context, store db.TranscriptStore, cfg *confi
 
 	targetBrainDir := resolveTargetBrainDir(cfg, brainDir)
 
-	var embedder EmbedderFunc
-	if cfg != nil {
-		var roots []string
-		if targetBrainDir != "" {
-			roots = append(roots, targetBrainDir)
-		}
-		cur := cfg.Current()
-		if cur != nil {
-			_ = cur.Ollama.BaseURL
-			_ = cur.Ollama.Model
-			_ = cur.LowEffortModel
-		}
-		embedder = NewOllamaEmbedder(cfg, roots...)
-	}
-
 	syncCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	opts := buildSyncOptions(cfg, targetBrainDir, llmFunc)
-	opts.Embedder = embedder
 
-	stats, err := SyncTranscripts(syncCtx, store, targetBrainDir, embedder, llmFunc, opts)
+	stats, err := SyncTranscripts(syncCtx, store, targetBrainDir, opts.Embedder, llmFunc, opts)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Printf("[TranscriptSync] Sync error: %v", err)

@@ -7,7 +7,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
 func TestEriJetStreamInit(t *testing.T) {
@@ -121,29 +120,5 @@ func TestAttachEriEventBus_DefaultAndEnvURL(t *testing.T) {
 				t.Errorf("capturedURL = %q, want %q", capturedURL, tc.expectedURL)
 			}
 		})
-	}
-}
-
-func TestAttachEriEventBus_WiresTranscriptSyncSubscriber(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-
-	pool := queue.New(nil, queue.WorkerPoolConfig{
-		NATSURL: "nats://127.0.0.1:4222",
-	})
-	cleanup := attachEriEventBusWithFactory(ctx, pool, func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return memBus, nil
-	})
-	defer cleanup()
-
-	if pool.EventBus() == nil {
-		t.Fatal("expected non-nil event bus")
-	}
-
-	subErr := transcript.StartTurnTranscriptSyncSubscriber(ctx, pool.EventBus(), nil, nil, "", nil)
-	if subErr != nil {
-		t.Fatalf("unexpected error starting subscriber: %v", subErr)
 	}
 }

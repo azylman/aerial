@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -260,17 +262,48 @@ func (b *failPublishBus) Publish(ctx context.Context, subject, msgID string, dat
 }
 
 type handleTurnCompletedTestCase struct {
-	name              string
-	nilMsg            bool
-	rawJSON           string
-	event             pubsub.TurnCompletedEvent
-	hasTranscript     bool
-	transcriptData    string
-	failPublish       bool
-	wantErr           bool
-	errContains       string
-	wantPublished     bool
-	wantStepsInserted int
+	name                  string
+	nilMsg                bool
+	rawJSON               string
+	event                 pubsub.TurnCompletedEvent
+	hasTranscript         bool
+	transcriptData        string
+	withEmbedderServer    bool
+	failPublish           bool
+	wantErr               bool
+	errContains           string
+	wantPublished         bool
+	wantStepsInserted     int
+	wantNonEmptyEmbedding bool
+}
+
+func setupTestEmbedderServer(t *testing.T, enabled bool) *httptest.Server {
+	t.Helper()
+	if !enabled {
+		return nil
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		vec := make([]float32, db.ExpectedEmbeddingDim)
+		vec[0] = 0.5
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": vec})
+	}))
+}
+
+func assertStoredEmbedding(ctx context.Context, t *testing.T, store db.TranscriptStore, tc handleTurnCompletedTestCase) {
+	t.Helper()
+	if !tc.wantNonEmptyEmbedding {
+		return
+	}
+	sums, err := store.SearchSessionSummaries(ctx, "", nil, "hello", 10, -1.0)
+	if err != nil {
+		t.Fatalf("SearchSessionSummaries failed: %v", err)
+	}
+	if len(sums) == 0 {
+		t.Fatalf("expected stored session summary, got none")
+	}
+	if len(sums[0].Embedding) == 0 {
+		t.Errorf("expected non-empty Embedding in stored session summary, got empty")
+	}
 }
 
 func buildHandleTurnCompletedMsg(t *testing.T, tc handleTurnCompletedTestCase) pubsub.Message {
@@ -353,8 +386,21 @@ func runHandleTurnCompletedTest(t *testing.T, tc handleTurnCompletedTestCase) {
 		bus = &failPublishBus{Bus: memBus}
 	}
 
+	embedSrv := setupTestEmbedderServer(t, tc.withEmbedderServer)
+	if embedSrv != nil {
+		defer embedSrv.Close()
+	}
+
+	cfgData := &config.ConfigData{DataDir: tempDir}
+	if embedSrv != nil {
+		cfgData.Ollama = config.OllamaConfig{
+			BaseURL: embedSrv.URL,
+			Model:   "all-minilm",
+		}
+	}
+	cfg := config.NewFromData(cfgData)
+
 	msg := buildHandleTurnCompletedMsg(t, tc)
-	cfg := config.NewFromData(&config.ConfigData{DataDir: tempDir})
 	err := HandleTurnCompletedTranscriptSync(ctx, msg, bus, store, cfg, brainDir, nil)
 	if tc.wantErr {
 		if err == nil {
@@ -370,6 +416,7 @@ func runHandleTurnCompletedTest(t *testing.T, tc handleTurnCompletedTestCase) {
 	}
 
 	assertHandleTurnPublished(t, publishedCh, tc)
+	assertStoredEmbedding(ctx, t, store, tc)
 }
 
 func TestHandleTurnCompletedTranscriptSync_TableDriven(t *testing.T) {
@@ -423,6 +470,21 @@ func TestHandleTurnCompletedTranscriptSync_TableDriven(t *testing.T) {
 			transcriptData:    sampleJSONL,
 			wantPublished:     true,
 			wantStepsInserted: 2,
+		},
+		{
+			name: "valid turn with embedder configured stores non-empty embedding",
+			event: pubsub.TurnCompletedEvent{
+				SessionID:      "sess-with-emb",
+				ConversationID: "conv-with-emb",
+				Source:         "discord",
+				CompletedAt:    time.Now().UTC(),
+			},
+			hasTranscript:         true,
+			transcriptData:        sampleJSONL,
+			withEmbedderServer:    true,
+			wantPublished:         true,
+			wantStepsInserted:     2,
+			wantNonEmptyEmbedding: true,
 		},
 		{
 			name: "valid turn without transcript file unconditionally publishes event with zero steps",

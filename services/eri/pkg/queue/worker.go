@@ -429,7 +429,7 @@ func (p *WorkerPool) publishTurnCompleted(ctx context.Context, sessionID, conver
 	return bus.Publish(ctx, pubsub.SubjectAerialTurnCompleted, msgID, ev)
 }
 
-func (te *turnExecution) publishTurnCompleted(status string, durationMs int64, usage *runner.TokenUsage) {
+func (te *turnExecution) publishTurnCompleted(status string) {
 	if te == nil || te.pool == nil {
 		return
 	}
@@ -451,15 +451,9 @@ func (te *turnExecution) publishTurnCompleted(status string, durationMs int64, u
 	if source == "" || strings.HasPrefix(source, "dispatch:") {
 		source = "discord"
 	}
-	if durationMs == 0 && !te.execStart.IsZero() {
-		durationMs = time.Since(te.execStart).Milliseconds()
-	}
-	if usage == nil && (te.turnTokenUsage.TotalTokens > 0 || te.turnTokenUsage.InputTokens > 0 || te.turnTokenUsage.OutputTokens > 0) {
-		usage = &te.turnTokenUsage
-	}
 	pubCtx, cancel := context.WithTimeout(context.WithoutCancel(te.turnCtxValue()), 5*time.Second)
 	defer cancel()
-	if err := te.pool.publishTurnCompleted(pubCtx, sessionID, conversationID, source, status, durationMs, usage); err != nil {
+	if err := te.pool.publishTurnCompleted(pubCtx, sessionID, conversationID, source, status, te.turnDurationMs, &te.turnTokenUsage); err != nil {
 		te.logf("[WorkerPool] Warning publishing turn completed for %s: %v", sessionID, err)
 	}
 }
