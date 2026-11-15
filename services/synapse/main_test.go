@@ -30,6 +30,7 @@ type mockEventBus struct {
 	insertedConflictJobs   []MergeConflictArgs
 	insertedDiscordJobs    []DiscordIngressArgs
 	insertedInteractJobs   []DiscordInteractionArgs
+	publishedPREvents      []pubsub.PRLifecycleEvent
 	err                    error
 }
 
@@ -39,18 +40,18 @@ func (m *mockEventBus) Publish(ctx context.Context, subject, msgID string, data 
 	if m.err != nil {
 		return m.err
 	}
+	m.recordPublishedEvents(data)
+	m.recordPublishedJobs(data)
+	return nil
+}
+
+func (m *mockEventBus) recordPublishedEvents(data any) {
 	switch a := data.(type) {
-	case GitHubWebhookArgs:
-		m.insertedJobs = append(m.insertedJobs, a)
-	case *GitHubWebhookArgs:
+	case pubsub.PRLifecycleEvent:
+		m.publishedPREvents = append(m.publishedPREvents, a)
+	case *pubsub.PRLifecycleEvent:
 		if a != nil {
-			m.insertedJobs = append(m.insertedJobs, *a)
-		}
-	case DeployWebhookArgs:
-		m.insertedDeployJobs = append(m.insertedDeployJobs, a)
-	case *DeployWebhookArgs:
-		if a != nil {
-			m.insertedDeployJobs = append(m.insertedDeployJobs, *a)
+			m.publishedPREvents = append(m.publishedPREvents, *a)
 		}
 	case WidgetSyncArgs:
 		m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, a)
@@ -63,6 +64,23 @@ func (m *mockEventBus) Publish(ctx context.Context, subject, msgID string, data 
 	case *MergeConflictArgs:
 		if a != nil {
 			m.insertedConflictJobs = append(m.insertedConflictJobs, *a)
+		}
+	}
+}
+
+func (m *mockEventBus) recordPublishedJobs(data any) {
+	switch a := data.(type) {
+	case GitHubWebhookArgs:
+		m.insertedJobs = append(m.insertedJobs, a)
+	case *GitHubWebhookArgs:
+		if a != nil {
+			m.insertedJobs = append(m.insertedJobs, *a)
+		}
+	case DeployWebhookArgs:
+		m.insertedDeployJobs = append(m.insertedDeployJobs, a)
+	case *DeployWebhookArgs:
+		if a != nil {
+			m.insertedDeployJobs = append(m.insertedDeployJobs, *a)
 		}
 	case DiscordIngressArgs:
 		m.insertedDiscordJobs = append(m.insertedDiscordJobs, a)
@@ -77,7 +95,6 @@ func (m *mockEventBus) Publish(ctx context.Context, subject, msgID string, data 
 			m.insertedInteractJobs = append(m.insertedInteractJobs, *a)
 		}
 	}
-	return nil
 }
 
 type errReader struct{}

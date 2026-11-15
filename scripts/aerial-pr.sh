@@ -321,17 +321,62 @@ resolve_vanadis_chunk_id() {
     echo ""
 }
 
+resolve_vanadis_url() {
+    local vanadis_base="${VANADIS_URL:-$(read_config_yaml_val vanadis_url)}"
+    if [ -n "$vanadis_base" ]; then
+        echo "${vanadis_base%/}"
+        return 0
+    fi
+    return 1
+}
+
+attach_pr_in_vanadis() {
+    local vanadis_url="$1"
+    local attach_payload="$2"
+    local pr_num="$3"
+    local max_attempts="${AERIAL_VANADIS_ATTACH_RETRIES:-3}"
+    local delay="${AERIAL_VANADIS_ATTACH_RETRY_DELAY:-1}"
+    local attempt=1
+    local attach_resp=""
+
+    while [ "$attempt" -le "$max_attempts" ]; do
+        attach_resp=$(curl -s --connect-timeout 2 -m 5 -X POST \
+            -H "Content-Type: application/json" \
+            -d "$attach_payload" \
+            "${vanadis_url%/}/chunks/attach-pr" 2>/dev/null || true)
+        if [ -n "$attach_resp" ] && echo "$attach_resp" | jq -e '.status == "attached"' >/dev/null 2>&1; then
+            local resolved_thread
+            resolved_thread=$(echo "$attach_resp" | jq -r '.thread_id // empty' 2>/dev/null || true)
+            echo "🔗 [aerial-pr] Attached PR #${pr_num} to Vanadis (thread: ${resolved_thread:-none})." >&2
+            echo "$attach_resp"
+            return 0
+        fi
+        if [ "$attempt" -lt "$max_attempts" ]; then
+            echo "⚠️ [aerial-pr] Warning: PR #${pr_num} Vanadis attachment attempt ${attempt}/${max_attempts} failed (${vanadis_url}): ${attach_resp:-unreachable}. Retrying in ${delay}s..." >&2
+            if [ "$delay" -gt 0 ] 2>/dev/null; then
+                sleep "$delay"
+                delay=$((delay * 2))
+            fi
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    echo "⚠️ [aerial-pr] Warning: Failed to attach PR #${pr_num} to Vanadis (${vanadis_url}) after ${max_attempts} attempts: ${attach_resp:-unreachable}" >&2
+    return 1
+}
+
 verify_vanadis_chunk_active() {
     local chunk_id="${1:-}"
     if [ -z "$chunk_id" ]; then
         return 0
     fi
-    local vanadis_base="${VANADIS_URL:-$(read_config_yaml_val vanadis_url)}"
+    local vanadis_base
+    vanadis_base=$(resolve_vanadis_url 2>/dev/null || true)
     if [ -z "$vanadis_base" ]; then
         return 0
     fi
     local resp=""
-    if resp=$(curl -sS --connect-timeout 2 --max-time 4 "${vanadis_base%/}/chunks/${chunk_id}" 2>/dev/null); then
+    if resp=$(curl -sS --connect-timeout 2 --max-time 4 "${vanadis_base}/chunks/${chunk_id}" 2>/dev/null); then
         if [ -n "$resp" ] && echo "$resp" | jq -e '.chunk.status == "cancelled" or .build.status == "cancelled"' >/dev/null 2>&1; then
             echo "ERROR: Vanadis chunk ${chunk_id} (or parent build) is cancelled; aborting PR submission." >&2
             exit 1
@@ -922,6 +967,43 @@ submit_scratch() {
     # Enable native GitHub auto-merge (SQUASH)
     enable_github_auto_merge "$pr_node_id" "$pr_num"
 
+    # Attach PR directly to Vanadis (for both multi-chunk and standalone Tier 0 PRs)
+    local vanadis_url
+    vanadis_url=$(resolve_vanadis_url 2>/dev/null || true)
+    if [ -n "$vanadis_url" ]; then
+        local attach_payload
+        attach_payload=$(jq -n \
+            --arg chunk_id "$vanadis_chunk_id" \
+            --argjson pr_number "$pr_num" \
+            --arg repo "${REPO_NAME}" \
+            --arg branch "$branch" \
+            --arg title "$clean_title" \
+            --arg target_id "$target_id" \
+            '{chunk_id: $chunk_id, pr_number: $pr_number, repo: $repo, branch: $branch, title: $title, target_id: $target_id}')
+        local vanadis_attach_out
+        if vanadis_attach_out=$(attach_pr_in_vanadis "$vanadis_url" "$attach_payload" "$pr_num"); then
+            local returned_thread
+            returned_thread=$(echo "$vanadis_attach_out" | jq -r '.thread_id // empty' 2>/dev/null || true)
+            if [ -n "$returned_thread" ]; then
+                target_id="$returned_thread"
+            fi
+        elif [ -n "$vanadis_chunk_id" ]; then
+            echo "ERROR: Failed to attach PR #${pr_num} to Vanadis chunk '${vanadis_chunk_id}'." >&2
+            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+                SCRATCH_DIR_CLEANUP=""
+            fi
+            exit 1
+        fi
+    elif [ -n "$vanadis_chunk_id" ]; then
+        echo "ERROR: Cannot attach PR #${pr_num} to Vanadis chunk '${vanadis_chunk_id}': Vanadis URL could not be resolved." >&2
+        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+            SCRATCH_DIR_CLEANUP=""
+        fi
+        exit 1
+    fi
+
     # Register PR in PostgreSQL pr_registry via internal endpoint
     local brain_reg_url
     brain_reg_url=$(resolve_pr_register_url 2>/dev/null || true)
@@ -934,8 +1016,7 @@ submit_scratch() {
         --arg head_sha "$commit_sha" \
         --arg target_id "$target_id" \
         --arg title "$clean_title" \
-        --arg vanadis_chunk_id "$vanadis_chunk_id" \
-        '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: "{}", vanadis_chunk_id: $vanadis_chunk_id}')
+        '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: "{}"}')
 
     if [ -n "$brain_reg_url" ]; then
         if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then

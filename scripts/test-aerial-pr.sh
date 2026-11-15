@@ -6,6 +6,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AERIAL_PR="${SCRIPT_DIR}/aerial-pr.sh"
 
+# Hermetic test environment: clear ambient vanadis chunk environment variables
+unset AERIAL_VANADIS_CHUNK_ID VANADIS_CHUNK_ID
+
 PASSED=0
 FAILED=0
 
@@ -1146,6 +1149,147 @@ assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_remap_gemini
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_remap_gemini_eq:ok' && echo true || echo false)" "github-runner roborev wrapper remaps --agent=gemini to claude-code when token exists"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_fallback_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper unsets CLAUDE_CODE_OAUTH_TOKEN and remaps --agent claude-code to gemini when token is absent"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'agy_model_pin:ok' && echo true || echo false)" "github-runner agy wrapper pins --model gemini-4-argon-low on headless invocations while preserving --version, subcommands, and explicit --model"
+
+# Case 18: Vanadis PR attach and direct attachment in submit_scratch
+VANADIS_ATTACH_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+
+    # Subtest 1: resolve_vanadis_url resolves from env
+    r1=\$(VANADIS_URL=\"http://vanadis.aerial:8080/\" resolve_vanadis_url)
+    [ \"\$r1\" = \"http://vanadis.aerial:8080\" ] && echo 'v_url1:ok'
+
+    # Subtest 2: resolve_vanadis_url resolves from config.yaml
+    TMP_CFG=\$(mktemp /tmp/aerial-cfg.XXXXXX)
+    echo 'vanadis_url: \"http://vanadis-cfg.aerial:8080\"' > \"\$TMP_CFG\"
+    r2=\$(unset VANADIS_URL; CONFIG_PATH=\"\$TMP_CFG\" resolve_vanadis_url)
+    [ \"\$r2\" = \"http://vanadis-cfg.aerial:8080\" ] && echo 'v_url2:ok'
+    rm -f \"\$TMP_CFG\"
+
+    # Subtest 3: resolve_vanadis_url returns empty when unset
+    r3=\$(unset VANADIS_URL; CONFIG_PATH=\"/dev/null\" resolve_vanadis_url || true)
+    [ -z \"\$r3\" ] && echo 'v_url3:ok'
+
+    # Subtest 4: attach_pr_in_vanadis succeeds on attempt 1
+    ATTEMPT_FILE=\$(mktemp /tmp/vanadis-att.XXXXXX)
+    curl() {
+        echo 'hit' >> \"\$ATTEMPT_FILE\"
+        printf '{\"status\":\"attached\",\"build_id\":\"b-1\",\"chunk_id\":\"c-1\",\"thread_id\":\"th-12345\"}'
+    }
+    export -f curl
+    out4=\$(AERIAL_VANADIS_ATTACH_RETRIES=3 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-1\"}' 101 2>/dev/null)
+    [ \"\$(echo \"\$out4\" | jq -r '.thread_id')\" = \"th-12345\" ] && echo 'att1:ok'
+    rm -f \"\$ATTEMPT_FILE\"
+
+    # Subtest 5: attach_pr_in_vanadis retries transient error
+    ATTEMPT_FILE=\$(mktemp /tmp/vanadis-att.XXXXXX)
+    curl() {
+        echo 'hit' >> \"\$ATTEMPT_FILE\"
+        if [ \$(wc -l < \"\$ATTEMPT_FILE\") -eq 1 ]; then
+            printf '500 Server Error'
+        else
+            printf '{\"status\":\"attached\",\"build_id\":\"b-2\",\"chunk_id\":\"c-2\",\"thread_id\":\"th-67890\"}'
+        fi
+    }
+    export -f curl
+    out5=\$(AERIAL_VANADIS_ATTACH_RETRIES=3 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-2\"}' 102 2>/dev/null)
+    [ \"\$(echo \"\$out5\" | jq -r '.thread_id')\" = \"th-67890\" ] && [ \"\$(wc -l < \"\$ATTEMPT_FILE\")\" -eq 2 ] && echo 'att2:ok'
+    rm -f \"\$ATTEMPT_FILE\"
+
+    # Subtest 6: attach_pr_in_vanadis fails after max attempts
+    ATTEMPT_FILE=\$(mktemp /tmp/vanadis-att.XXXXXX)
+    curl() {
+        echo 'hit' >> \"\$ATTEMPT_FILE\"
+        printf '503 Service Unavailable'
+    }
+    export -f curl
+    out6=\$(AERIAL_VANADIS_ATTACH_RETRIES=3 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-3\"}' 103 2>/dev/null || echo 'failed')
+    [ \"\$out6\" = 'failed' ] && [ \"\$(wc -l < \"\$ATTEMPT_FILE\")\" -eq 3 ] && echo 'att3:ok'
+    rm -f \"\$ATTEMPT_FILE\"
+")
+assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url1:ok' && echo true || echo false)" "resolve_vanadis_url resolves from VANADIS_URL env"
+assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url2:ok' && echo true || echo false)" "resolve_vanadis_url resolves from config.yaml"
+assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url3:ok' && echo true || echo false)" "resolve_vanadis_url returns empty and non-zero when unset"
+assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att1:ok' && echo true || echo false)" "attach_pr_in_vanadis succeeds on first attempt"
+assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att2:ok' && echo true || echo false)" "attach_pr_in_vanadis retries transient error and succeeds"
+assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att3:ok' && echo true || echo false)" "attach_pr_in_vanadis fails after exhausting retries"
+
+# Subtest 7: submit_scratch attaches PR to Vanadis and registers with Synapse without vanadis_chunk_id
+SUBMIT_VANADIS_CHECK=$(bash -c "
+    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-van-remote.XXXXXX)
+    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-van-up.XXXXXX)
+    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-van-work.XXXXXX)
+    PAYLOAD_LOG=\$(mktemp /tmp/aerial-payloads.XXXXXX)
+    trap 'rm -rf \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\" \"\$WORK_DIR\" \"\$PAYLOAD_LOG\"' EXIT
+
+    git init -q --bare \"\$REMOTE_DIR\"
+    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
+    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
+    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
+    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
+    mkdir -p \"\$UPSTREAM_DIR/scripts\"
+    cat << 'EOF' > \"\$UPSTREAM_DIR/scripts/verify.sh\"
+#!/bin/sh
+exit 0
+EOF
+    chmod +x \"\$UPSTREAM_DIR/scripts/verify.sh\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'init'
+    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
+
+    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
+    git -C \"\$WORK_DIR\" config user.name 'Tester'
+    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR\" checkout -q -b feat/van-branch
+    echo 'Summary' > \"\$WORK_DIR/PR_DESCRIPTION.md\"
+    echo 'content' > \"\$WORK_DIR/file.txt\"
+
+    export GITHUB_PAT='mock_pat'
+    export VANADIS_URL='http://vanadis.aerial:8080'
+    export AERIAL_PR_REGISTER_URL='http://synapse.aerial:4020/internal/pr/register'
+    export AERIAL_TARGET_ID='100000000000000001'
+
+    out=\$(
+        REPO_TEST_MODE=1
+        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+        curl() {
+            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
+                printf '{\"number\":88,\"html_url\":\"https://github.com/azylman/aerial/pull/88\",\"node_id\":\"PR_kwDO88\"}\n201'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
+                for arg in \"\$@\"; do
+                    if [[ \"\$arg\" =~ ^\{.*\"chunk_id\".* ]]; then
+                        echo \"ATTACH_PAYLOAD:\$(echo \"\$arg\" | tr '\n' ' ')\" >> \"\$PAYLOAD_LOG\"
+                    fi
+                done
+                printf '{\"status\":\"attached\",\"build_id\":\"b-88\",\"chunk_id\":\"chunk-88\",\"thread_id\":\"199999999999999999\"}'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                for arg in \"\$@\"; do
+                    if [[ \"\$arg\" =~ ^\{.*\"repo\".* ]]; then
+                        echo \"REG_PAYLOAD:\$(echo \"\$arg\" | tr '\n' ' ')\" >> \"\$PAYLOAD_LOG\"
+                    fi
+                done
+                printf '{\"status\":\"registered\",\"target_id\":\"199999999999999999\"}'
+            fi
+        }
+        export -f curl
+        submit_scratch \"\$WORK_DIR\" 'feat: vanadis attach test' --vanadis-chunk 'chunk-88' >/dev/null 2>&1
+    )
+
+    attach_pl=\$(grep '^ATTACH_PAYLOAD:' \"\$PAYLOAD_LOG\" | sed 's/^ATTACH_PAYLOAD://')
+    reg_pl=\$(grep '^REG_PAYLOAD:' \"\$PAYLOAD_LOG\" | sed 's/^REG_PAYLOAD://')
+
+    if [ \"\$(echo \"\$attach_pl\" | jq -r '.chunk_id')\" = 'chunk-88' ] && \
+       [ \"\$(echo \"\$attach_pl\" | jq -r '.pr_number')\" -eq 88 ] && \
+       [ \"\$(echo \"\$reg_pl\" | jq -r '.pr_number')\" -eq 88 ] && \
+       [ \"\$(echo \"\$reg_pl\" | jq -r '.target_id')\" = '199999999999999999' ] && \
+       [ -z \"\$(echo \"\$reg_pl\" | jq -r '.vanadis_chunk_id // empty')\" ]; then
+        echo 'submit_vanadis_attach:ok'
+    else
+        echo \"submit_vanadis_attach:fail:attach=\$attach_pl:reg=\$reg_pl\"
+    fi
+")
+assert_eq "true" "$(echo "$SUBMIT_VANADIS_CHECK" | grep -q 'submit_vanadis_attach:ok' && echo true || echo false)" "submit_scratch attaches PR to Vanadis and registers with Synapse without vanadis_chunk_id"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"

@@ -108,6 +108,8 @@ linters:
         - (*database/sql.Rows).Close
         - (io.Closer).Close
         - (io.ReadCloser).Close
+        - (*github.com/azylman/aerial/services/synapse.RouterServer).publishPRLifecycleEvent
+        - (*github.com/azylman/aerial/services/synapse.RouterServer).publishDeployLifecycleEvent
     funlen:
       lines: 150
       statements: -1
@@ -204,9 +206,13 @@ linters:
         path: _test\.go
         text: "SA1012:"
       - linters:
+          - cyclop
+          - funlen
           - gocognit
+          - gocyclo
+          - maintidx
           - nestif
-        path: services/synapse/main_widgets_test\.go
+        path: services/synapse/(main_widgets|pr_lifecycle_events)_test\.go
       - linters:
           - cyclop
           - funlen

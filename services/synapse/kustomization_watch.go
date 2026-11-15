@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 // errWatchExpired signals that the watch resourceVersion is gone (410) and the watcher must re-list.
@@ -689,6 +691,16 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		return fmt.Errorf("mark %s deployed for %s#%d: %w", name, pr.Repo, pr.PRNumber, err)
 	}
 	if !transitioned {
+		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        "rollout_updated",
+			Repo:         pr.Repo,
+			PRNumber:     pr.PRNumber,
+			JobName:      name,
+			Status:       "deploying",
+			RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
+			Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
+			OccurredAt:   time.Now().UTC(),
+		})
 		if err := s.SyncPRWidget(ctx, pr.Repo, pr.PRNumber); err != nil {
 			log.Printf("[synapse] [widget] warning syncing rollout widget for %s#%d: %v", pr.Repo, pr.PRNumber, err)
 		}
@@ -703,8 +715,27 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			targetID = resolved
 		}
 	}
-	if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
-		log.Printf("[synapse] [flux-watch] error dispatching deploy_success for %s#%d: %v", pr.Repo, pr.PRNumber, err)
+	pubErr := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        "deploy_success",
+		Repo:         pr.Repo,
+		PRNumber:     pr.PRNumber,
+		HeadSHA:      pr.HeadSHA,
+		MergeSHA:     pr.MergeSHA,
+		TargetID:     targetID,
+		Status:       "deployed",
+		JobName:      name,
+		RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
+		Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
+		OccurredAt:   time.Now().UTC(),
+	})
+	vanadisPR, err := s.isVanadisPR(ctx, pr.Repo, pr.PRNumber)
+	if err != nil {
+		log.Printf("[synapse] [flux-watch] warning checking vanadis PR for %s#%d: %v", pr.Repo, pr.PRNumber, err)
+	}
+	if s.bus == nil || pubErr != nil || !vanadisPR || err != nil {
+		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
+			log.Printf("[synapse] [flux-watch] error dispatching deploy_success for %s#%d: %v", pr.Repo, pr.PRNumber, err)
+		}
 	}
 	return nil
 }
@@ -793,6 +824,15 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 	if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, names); err != nil {
 		return false, fmt.Errorf("transition pr %s#%d deploying: %w", repo, prNum, err)
 	}
+	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        "deploy_started",
+		Repo:         repo,
+		PRNumber:     prNum,
+		Status:       "deploying",
+		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
+		Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
+		OccurredAt:   time.Now().UTC(),
+	})
 	requests := newKustomizationRequests(refs, time.Now().UTC())
 	if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
 		return false, fmt.Errorf("record kustomization requests for %s#%d: %w", repo, prNum, err)

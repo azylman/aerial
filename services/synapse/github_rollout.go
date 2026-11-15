@@ -9,6 +9,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 func isRoboRevCheck(checkName string) bool {
@@ -109,6 +112,47 @@ func extractStringMapFromMetadata(meta map[string]any, key string) map[string]st
 		}
 	}
 	return out
+}
+
+func buildPRRolloutState(meta map[string]any) *pubsub.PRRolloutState {
+	if meta == nil {
+		return nil
+	}
+	expectedJobs := extractJobsFromMetadata(meta)
+	startedJobs := extractStringSliceFromMetadata(meta, "started_jobs")
+	deployedJobs := extractStringSliceFromMetadata(meta, "deployed_jobs")
+	jobStates := extractStringMapFromMetadata(meta, "job_states")
+	kustStatuses := extractStringMapFromMetadata(meta, "kustomization_statuses")
+	if len(expectedJobs) == 0 && len(startedJobs) == 0 && len(deployedJobs) == 0 && len(jobStates) == 0 && len(kustStatuses) == 0 {
+		return nil
+	}
+	return &pubsub.PRRolloutState{
+		ExpectedJobs:          expectedJobs,
+		StartedJobs:           startedJobs,
+		DeployedJobs:          deployedJobs,
+		JobStates:             jobStates,
+		KustomizationStatuses: kustStatuses,
+	}
+}
+
+func (s *RouterServer) publishDeployLifecycleEvent(ctx context.Context, evt DeployEvent, eventName, status string) error {
+	jobName := evt.JobName
+	if (eventName == "deploy_success" || eventName == "sync_success") && jobName == "" {
+		jobName = "git-sync"
+	}
+	return s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        eventName,
+		Repo:         evt.Repo,
+		PRNumber:     evt.PRNumber,
+		MergeSHA:     evt.CommitSHA,
+		JobName:      jobName,
+		Details:      evt.Details,
+		TargetID:     evt.TargetID,
+		Status:       status,
+		RolloutState: s.loadPRRolloutState(ctx, evt.Repo, evt.PRNumber),
+		Quiet:        s.isDependabotPRNumber(ctx, evt.Repo, evt.PRNumber),
+		OccurredAt:   time.Now().UTC(),
+	})
 }
 
 func extractChecksFromJSONOrMetadata(ciChecksJSON string, meta map[string]any) map[string]string {
