@@ -306,6 +306,15 @@ func isChunkDoneStatus(status string) bool {
 	}
 }
 
+func isChunkMergedOrDoneStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "merged", "deploying", "completed":
+		return true
+	default:
+		return false
+	}
+}
+
 func isValidVanadisChunkID(id string) bool {
 	id = strings.TrimSpace(id)
 	if len(id) < 1 || len(id) > 120 {
@@ -856,7 +865,7 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 		return fmt.Errorf("chunk index %d not found in build %s", chunkIndex, buildID)
 	}
 	chunk := chunks[activeIdx]
-	if chunk.Status == "pr_opened" || isChunkDoneStatus(chunk.Status) {
+	if chunk.Status == "pr_opened" || isChunkMergedOrDoneStatus(chunk.Status) {
 		log.Printf("[vanadis] chunk %s (index %d) already in status %q, skipping", chunk.ID, chunkIndex, chunk.Status)
 		return nil
 	}

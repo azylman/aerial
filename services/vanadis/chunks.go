@@ -348,7 +348,7 @@ func computeNextChunkIndex(chunks []VanadisChunkSummary, currentIdx int) int {
 	nextChunkIdx := -1
 	fallbackIdx := -1
 	for _, cs := range chunks {
-		if !isChunkDoneStatus(cs.Status) {
+		if !isChunkMergedOrDoneStatus(cs.Status) {
 			if cs.ChunkIndex > currentIdx && (nextChunkIdx == -1 || cs.ChunkIndex < nextChunkIdx) {
 				nextChunkIdx = cs.ChunkIndex
 			} else if fallbackIdx == -1 {
@@ -377,7 +377,7 @@ func scanVanadisChunkSummaries(rows pgx.Rows, mergedChunkID string) ([]VanadisCh
 			cs.CompletedAt = completedAt.Time
 		}
 		if cs.ID == mergedChunkID {
-			if cs.Mode == "action" {
+			if cs.Mode == "action" || cs.Status == "completed" {
 				cs.Status = "completed"
 			} else {
 				cs.Status = "merged"
@@ -424,7 +424,7 @@ func advanceToNextChunk(ctx context.Context, tx pgx.Tx, buildID string, nextChun
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit vanadis chunk advance tx: %w", err)
 	}
-	res.Advanced = cStatus != "merged"
+	res.Advanced = !isChunkDoneStatus(cStatus)
 	res.NextChunkIndex = nextChunkIdx
 	res.BuildCompleted = false
 	res.Chunks = allChunks
@@ -441,7 +441,7 @@ func completeBuild(ctx context.Context, tx pgx.Tx, buildID string, cStatus strin
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit vanadis build completed tx: %w", err)
 	}
-	res.Advanced = cStatus != "merged"
+	res.Advanced = !isChunkDoneStatus(cStatus)
 	res.BuildStatus = "completed"
 	res.NextChunkIndex = -1
 	res.BuildCompleted = true
@@ -528,7 +528,7 @@ func (s *PostgresVanadisStore) AdvanceChunkByPR(ctx context.Context, repo string
 		return res, nil
 	}
 
-	if cStatus != "merged" {
+	if !isChunkDoneStatus(cStatus) {
 		const updateChunkQuery = `UPDATE vanadis_chunks SET status = 'merged', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = $1`
 		if _, err := tx.Exec(ctx, updateChunkQuery, chunkID); err != nil {
 			return nil, fmt.Errorf("update vanadis chunk merged: %w", err)
@@ -1154,8 +1154,9 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 			chunkStatus = "deployed"
 		case isVanadisChunkStreamingPhase(chunkStatus):
 			activeStep = FormatChunkActiveStep(c)
-			if chunkStatus == "merged" && activeStep == "" {
+			if chunkStatus == "merged" && (activeStep == "" || widgetStatus == "completed") {
 				chunkStatus = "deployed"
+				activeStep = ""
 			}
 		}
 		wChunks[i] = StatusWidgetChunk{
