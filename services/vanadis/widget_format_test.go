@@ -220,12 +220,14 @@ func TestHandleCoalescedWidgetMessage(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		srv        *VanadisServer
-		payload    string
-		wantTermed bool
-		wantAcked  bool
-		wantErr    bool
+		name              string
+		srv               *VanadisServer
+		payload           string
+		wantTermed        bool
+		wantAcked         bool
+		wantErr           bool
+		wantBuildID       string
+		wantBuildStatusID string
 	}{
 		{
 			name:       "nil server or store terms message",
@@ -248,6 +250,46 @@ func TestHandleCoalescedWidgetMessage(t *testing.T) {
 			},
 			payload:   `{"build_id":"   "}`,
 			wantAcked: true,
+		},
+		{
+			name: "pr-keyed lookup resolves build_id and syncs widget",
+			srv: func() *VanadisServer {
+				store := newMemoryVanadisStore()
+				b := VanadisBuild{ID: "b-pr", ThreadID: "123", Objective: "test"}
+				c := []VanadisChunk{{ID: "c1", BuildID: "b-pr", Title: "c1", Instructions: "do c1", Repo: "aerial", PRNumber: 101}}
+				_ = store.CreateBuild(context.Background(), b, c)
+
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"message_id":"msg-pr"}`))
+				}))
+
+				return &VanadisServer{
+					cfg:        Config{BrainURL: ts.URL},
+					store:      store,
+					httpClient: ts.Client(),
+				}
+			}(),
+			payload:           `{"repo":"aerial","pr_number":101,"banner":"PR Banner"}`,
+			wantBuildID:       "b-pr",
+			wantBuildStatusID: "msg-pr",
+			wantAcked:         true,
+		},
+		{
+			name: "pr-keyed lookup unmatched acks message cleanly",
+			srv: &VanadisServer{
+				store: newMemoryVanadisStore(),
+			},
+			payload:   `{"repo":"aerial","pr_number":999}`,
+			wantAcked: true,
+		},
+		{
+			name: "pr-keyed lookup store error returns error without acking",
+			srv: &VanadisServer{
+				store: &errVanadisStore{getChunkByPRErr: errors.New("db lookup failed")},
+			},
+			payload: `{"repo":"aerial","pr_number":101}`,
+			wantErr: true,
 		},
 		{
 			name: "build not found acks message",
@@ -316,6 +358,11 @@ func TestHandleCoalescedWidgetMessage(t *testing.T) {
 			}
 			assert.Equal(t, tc.wantTermed, msg.termed)
 			assert.Equal(t, tc.wantAcked, msg.acked)
+			if tc.wantBuildID != "" && tc.srv != nil && tc.srv.store != nil {
+				b, _, err := tc.srv.store.GetBuild(context.Background(), tc.wantBuildID)
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantBuildStatusID, b.StatusMessageID)
+			}
 		})
 	}
 }

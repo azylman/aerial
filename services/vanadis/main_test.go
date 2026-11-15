@@ -1367,6 +1367,19 @@ func TestStartJobConsumersDeliversBuildWidgetSync(t *testing.T) {
 	}
 }
 
+type spyJobConsumerBus struct {
+	pubsub.Bus
+
+	onConsumeQueue func(subject, queue string)
+}
+
+func (s *spyJobConsumerBus) ConsumeQueue(ctx context.Context, subject, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	if s.onConsumeQueue != nil {
+		s.onConsumeQueue(subject, queue)
+	}
+	return s.Bus.ConsumeQueue(ctx, subject, queue, handler)
+}
+
 func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1389,10 +1402,24 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
-	srv.SetBus(memBus)
+
+	var widgetSubscribed bool
+	spyBus := &spyJobConsumerBus{
+		Bus: memBus,
+		onConsumeQueue: func(subject, queue string) {
+			if subject == "aerial.coalesced.widget_sync.>" && queue == "vanadis-widget" {
+				widgetSubscribed = true
+			}
+		},
+	}
+	srv.SetBus(spyBus)
 
 	if err := srv.StartJobConsumers(ctx); err != nil {
 		t.Fatalf("StartJobConsumers() error: %v", err)
+	}
+
+	if !widgetSubscribed {
+		t.Fatal("expected StartJobConsumers to subscribe vanadis-widget to aerial.coalesced.widget_sync.>")
 	}
 
 	if err := srv.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: "b-wire", ChunkIndex: 0}); err != nil {

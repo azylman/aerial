@@ -1080,6 +1080,7 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 		writeStoreErr(w, err)
 		return
 	}
+	s.syncBuildWidget(r.Context(), buildID, "")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
 		"status":    "attached",
 		"build_id":  buildID,
