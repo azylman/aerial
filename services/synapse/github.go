@@ -336,17 +336,7 @@ func (s *RouterServer) shouldDispatchWorkflowRunImages(ctx context.Context, repo
 	return true
 }
 
-func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) error {
-	if !s.shouldDispatchWorkflowRunImages(ctx, repo, headBranch, conclusion, prNum) {
-		return nil
-	}
-	images, err := s.resolveWorkflowRunImages(ctx, repo, runID)
-	if err != nil {
-		log.Printf("[synapse] [dispatcher] error resolving images for workflow run %d (%s): %v", runID, repo, err)
-		return fmt.Errorf("resolve workflow run images: %w", err)
-	}
-
-	// Phase a: resolve image names and discover every owning Kustomization once.
+func resolveImagesWorkloadsAndNames(repo string, images []string) ([]string, []string) {
 	var imageNames, workloads []string
 	for _, img := range images {
 		if _, imageName, workload := resolveImageTag(repo, img); workload != "" {
@@ -354,7 +344,41 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 			workloads = append(workloads, workload)
 		}
 	}
-	imageNames, workloads = dedupeTrimmedStrings(imageNames), dedupeTrimmedStrings(workloads)
+	return dedupeTrimmedStrings(imageNames), dedupeTrimmedStrings(workloads)
+}
+
+func (s *RouterServer) startWorkflowRunPRDeploying(ctx context.Context, repo string, prNum int, headSHA, targetID string, workloads []string) error {
+	if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, workloads); err != nil {
+		log.Printf("[synapse] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
+		return fmt.Errorf("transition pr deploying: %w", err)
+	}
+	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        "deploy_started",
+		Repo:         repo,
+		PRNumber:     prNum,
+		HeadSHA:      headSHA,
+		TargetID:     targetID,
+		Status:       "deploying",
+		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
+		Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
+		OccurredAt:   time.Now().UTC(),
+	})
+	return nil
+}
+
+func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) error {
+	if !s.shouldDispatchWorkflowRunImages(ctx, repo, headBranch, conclusion, prNum) {
+		return nil
+	}
+	finalAttempt := isFinalAttemptFromContext(ctx)
+	images, err := s.resolveWorkflowRunImages(ctx, repo, runID)
+	if err != nil {
+		log.Printf("[synapse] [dispatcher] error resolving images for workflow run %d (%s): %v", runID, repo, err)
+		return fmt.Errorf("resolve workflow run images: %w", err)
+	}
+
+	// Phase a: resolve image names and discover every owning Kustomization once.
+	imageNames, workloads := resolveImagesWorkloadsAndNames(repo, images)
 	if len(workloads) == 0 {
 		return s.completeNoDeployWorkflowRun(ctx, repo, headSHA, targetID, prNum)
 	}
@@ -367,25 +391,16 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 
 	// Phase b: mark the PR deploying before any tag can roll out.
 	if len(refs) > 0 && trackPR {
-		if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, workloads); err != nil {
-			log.Printf("[synapse] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
-			return fmt.Errorf("transition pr deploying: %w", err)
+		if err := s.startWorkflowRunPRDeploying(ctx, repo, prNum, headSHA, targetID, workloads); err != nil {
+			return err
 		}
-		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        "deploy_started",
-			Repo:         repo,
-			PRNumber:     prNum,
-			HeadSHA:      headSHA,
-			TargetID:     targetID,
-			Status:       "deploying",
-			RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
-			Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
-			OccurredAt:   time.Now().UTC(),
-		})
 	}
 
 	// Phase c: write every image tag before any reconcile so one reconcile renders all of them.
 	if err := s.promoteWorkflowRunImages(ctx, images, ImageReadyEventRequest{Repo: repo, CommitSHA: headSHA, PRNumber: prNum, TargetID: targetID}); err != nil {
+		if finalAttempt && trackPR {
+			s.handleImagePromotionDeployFailed(ctx, repo, prNum, headBranch, headSHA, targetID, err)
+		}
 		return err
 	}
 	if len(refs) == 0 {
@@ -395,14 +410,88 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	// Phases d+e: durably record every reconcile request before patching any of them, so a watch event can
 	// never observe a request that is not yet recorded. A crash or failure between record and patch is
 	// repaired by the watcher re-patching the recorded value. Sync the widget after recording (rollout lines).
+	return s.recordAndReconcileKustomizations(ctx, repo, prNum, headBranch, headSHA, targetID, refs, trackPR, finalAttempt)
+}
+
+func (s *RouterServer) recordAndReconcileKustomizations(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, refs []fluxKustomizationRef, trackPR, finalAttempt bool) error {
 	requests := newKustomizationRequests(refs, time.Now().UTC())
 	if trackPR {
 		if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
 			log.Printf("[synapse] [dispatcher] error recording kustomization requests for %s#%d: %v", repo, prNum, err)
+			if finalAttempt {
+				s.handleImagePromotionDeployFailed(ctx, repo, prNum, headBranch, headSHA, targetID, err)
+			}
 			return fmt.Errorf("record kustomization requests: %w", err)
 		}
 	}
-	return s.reconcileImageKustomizations(ctx, refs, requests)
+	if err := s.reconcileImageKustomizations(ctx, refs, requests); err != nil {
+		if finalAttempt && trackPR {
+			hasReqs, checkErr := s.registry.HasKustomizationRequests(ctx, repo, prNum)
+			if checkErr == nil && !hasReqs {
+				s.handleImagePromotionDeployFailed(ctx, repo, prNum, headBranch, headSHA, targetID, err)
+			}
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, causeErr error) {
+	if s == nil || s.registry == nil || prNum <= 0 {
+		return
+	}
+	tID, branch, hSHA, mSHA, err := s.registry.ResolvePRByNumber(ctx, repo, prNum)
+	if err != nil {
+		log.Printf("[synapse] [dispatcher] warning: failed resolving pr %s#%d: %v", repo, prNum, err)
+	}
+	if targetID == "" {
+		targetID = tID
+	}
+	if headSHA == "" {
+		headSHA = hSHA
+	}
+	if branch == "" {
+		branch = headBranch
+	}
+	mergeSHA := mSHA
+	if mergeSHA == "" {
+		mergeSHA = headSHA
+	}
+
+	newTID, updated, fErr := s.registry.AtomicTransitionDeployFailed(ctx, repo, prNum)
+	if fErr != nil {
+		log.Printf("[synapse] [dispatcher] error transitioning pr %s#%d to deploy_failed: %v", repo, prNum, fErr)
+		return
+	}
+	if !updated {
+		return
+	}
+	if newTID != "" {
+		targetID = newTID
+	}
+	if targetID == "" && s.cfgSrc != nil {
+		targetID = strings.TrimSpace(s.cfgSrc.Current().SystemChannelID)
+	}
+
+	errMsg := ""
+	if causeErr != nil {
+		errMsg = causeErr.Error()
+	}
+
+	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        "deploy_failed",
+		Repo:         repo,
+		PRNumber:     prNum,
+		Branch:       branch,
+		HeadSHA:      headSHA,
+		MergeSHA:     mergeSHA,
+		TargetID:     targetID,
+		Status:       "deploy_failed",
+		Details:      errMsg,
+		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
+		Quiet:        isDependabotBranch(branch) || s.isDependabotPRNumber(ctx, repo, prNum),
+		OccurredAt:   time.Now().UTC(),
+	})
 }
 
 // promoteWorkflowRunImages promotes every image concurrently and waits for all of them.

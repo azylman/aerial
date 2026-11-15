@@ -1088,3 +1088,240 @@ func processGitHubEventCasesPart8() []ghEventCase {
 		},
 	}
 }
+
+type dispatchWorkflowRunImagesCase struct {
+	name                   string
+	isFinalAttempt         bool
+	targetID               string
+	headSHA                string
+	resolveErr             error
+	deployFailedTID        string
+	deployFailedErr        error
+	deployFailedNotUpdated bool
+	promoteErr             error
+	recordErr              error
+	reconcileErr           error
+	hasKustReqs            bool
+	nilReg                 bool
+	prNum                  int
+	wantErr                bool
+	wantDeployFailed       int
+	wantDeployEvents       int
+	wantTargetID           string
+}
+
+func runDispatchWorkflowRunImagesCase(ctx context.Context, t *testing.T, tc dispatchWorkflowRunImagesCase) {
+	t.Helper()
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/actions/runs/") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"total_count": 1,
+				"jobs": [
+					{
+						"id": 1,
+						"name": "Build & Push Container Images (eri)",
+						"status": "completed",
+						"conclusion": "success"
+					}
+				]
+			}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	bus := &mockEventBus{}
+	var reg PRRegistryUpdater
+	var mockReg *mockPRRegistry
+	if !tc.nilReg {
+		mockReg = &mockPRRegistry{
+			resolveTargetID:         tc.targetID,
+			resolveBranch:           "feat/test",
+			resolveHeadSHA:          "sha-reg-123",
+			resolveErr:              tc.resolveErr,
+			deployFailedTargetID:    tc.deployFailedTID,
+			deployFailedUpdated:     !tc.deployFailedNotUpdated && tc.deployFailedErr == nil,
+			deployFailedErr:         tc.deployFailedErr,
+			kustomizationRequestErr: tc.recordErr,
+			hasKustomizationReqs:    tc.hasKustReqs,
+		}
+		reg = mockReg
+	}
+	reconcileErrs := make(map[string]error)
+	if tc.reconcileErr != nil {
+		reconcileErrs["aerial-core"] = tc.reconcileErr
+	}
+	disp := &mockOutboundDispatcher{
+		kustomizationsByImage: map[string][]fluxKustomizationRef{
+			"aerial-eri": {{Namespace: "flux-system", Name: "aerial-core"}},
+		},
+		promoteErr:    tc.promoteErr,
+		reconcileErrs: reconcileErrs,
+	}
+	cfg := Config{
+		GitHubAPIURL:    mockServer.URL,
+		DefaultOwner:    true,
+		SystemChannelID: "100000000000000001",
+	}
+	srv := newTestRouter(cfg, mockServer.Client(), reg, disp)
+	srv.bus = bus
+
+	headSHA := "sha123"
+	if tc.headSHA != "" {
+		headSHA = tc.headSHA
+	}
+	testCtx := ctx
+	if tc.isFinalAttempt {
+		testCtx = withFinalAttempt(ctx, true)
+	}
+	err := srv.dispatchWorkflowRunImages(testCtx, "azylman/aerial", 1, "main", "success", headSHA, tc.targetID, tc.prNum)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("dispatchWorkflowRunImages() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if mockReg != nil && len(mockReg.deployFailedCalls) != tc.wantDeployFailed {
+		t.Errorf("len(deployFailedCalls) = %d, want %d", len(mockReg.deployFailedCalls), tc.wantDeployFailed)
+	}
+	deployEventsCount := 0
+	for _, ev := range bus.publishedPREvents {
+		if ev.Event == "deploy_failed" {
+			deployEventsCount++
+			if ev.Repo != "azylman/aerial" || ev.PRNumber != 42 || ev.Status != "deploy_failed" {
+				t.Errorf("unexpected deploy_failed event: %+v", ev)
+			}
+			if tc.wantTargetID != "" && ev.TargetID != tc.wantTargetID {
+				t.Errorf("event.TargetID = %q, want %q", ev.TargetID, tc.wantTargetID)
+			}
+		}
+	}
+	if deployEventsCount != tc.wantDeployEvents {
+		t.Errorf("deploy_failed events count = %d, want %d", deployEventsCount, tc.wantDeployEvents)
+	}
+}
+
+func TestDispatchWorkflowRunImages_ImagePromotionDeployFailed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []dispatchWorkflowRunImagesCase{
+		{
+			name:             "transient promote error leaves PR deploying",
+			isFinalAttempt:   false,
+			targetID:         "100000000000000001",
+			promoteErr:       errors.New("transient error"),
+			prNum:            42,
+			wantErr:          true,
+			wantDeployFailed: 0,
+			wantDeployEvents: 0,
+		},
+		{
+			name:             "terminal promote error transitions to deploy_failed",
+			isFinalAttempt:   true,
+			targetID:         "100000000000000001",
+			promoteErr:       errors.New("terminal error"),
+			prNum:            42,
+			wantErr:          true,
+			wantDeployFailed: 1,
+			wantDeployEvents: 1,
+			wantTargetID:     "100000000000000001",
+		},
+		{
+			name:             "terminal promote error with empty targetID adopts transition targetID",
+			isFinalAttempt:   true,
+			targetID:         "",
+			deployFailedTID:  "100000000000000002",
+			promoteErr:       errors.New("terminal error"),
+			prNum:            42,
+			wantErr:          true,
+			wantDeployFailed: 1,
+			wantDeployEvents: 1,
+			wantTargetID:     "100000000000000002",
+		},
+		{
+			name:             "terminal promote error with resolve error falls back to system channel",
+			isFinalAttempt:   true,
+			targetID:         "",
+			resolveErr:       errors.New("db resolve error"),
+			promoteErr:       errors.New("terminal error"),
+			prNum:            42,
+			wantErr:          true,
+			wantDeployFailed: 1,
+			wantDeployEvents: 1,
+			wantTargetID:     "100000000000000001",
+		},
+		{
+			name:             "terminal promote error with atomic transition error logs warning and skips publish",
+			isFinalAttempt:   true,
+			targetID:         "100000000000000001",
+			deployFailedErr:  errors.New("db error"),
+			promoteErr:       errors.New("terminal error"),
+			prNum:            42,
+			wantErr:          true,
+			wantDeployFailed: 0,
+			wantDeployEvents: 0,
+		},
+		{
+			name:                   "terminal promote error with atomic transition not updated skips publish",
+			isFinalAttempt:         true,
+			targetID:               "100000000000000001",
+			deployFailedNotUpdated: true,
+			promoteErr:             errors.New("terminal error"),
+			prNum:                  42,
+			wantErr:                true,
+			wantDeployFailed:       1,
+			wantDeployEvents:       0,
+		},
+		{
+			name:             "terminal record kustomizations error transitions to deploy_failed",
+			isFinalAttempt:   true,
+			targetID:         "100000000000000001",
+			recordErr:        errors.New("db record error"),
+			prNum:            42,
+			wantErr:          true,
+			wantDeployFailed: 1,
+			wantDeployEvents: 1,
+			wantTargetID:     "100000000000000001",
+		},
+		{
+			name:             "terminal reconcile error with requests recorded relies on watcher repair without deploy_failed",
+			isFinalAttempt:   true,
+			targetID:         "100000000000000001",
+			reconcileErr:     errors.New("flux api error"),
+			hasKustReqs:      true,
+			prNum:            42,
+			wantErr:          true,
+			wantDeployFailed: 0,
+			wantDeployEvents: 0,
+		},
+		{
+			name:             "terminal promote error with nil registry skips deploy_failed",
+			isFinalAttempt:   true,
+			targetID:         "100000000000000001",
+			nilReg:           true,
+			promoteErr:       errors.New("terminal error"),
+			prNum:            42,
+			wantErr:          true,
+			wantDeployFailed: 0,
+			wantDeployEvents: 0,
+		},
+		{
+			name:             "success completes without deploy_failed",
+			isFinalAttempt:   true,
+			targetID:         "100000000000000001",
+			promoteErr:       nil,
+			hasKustReqs:      true,
+			prNum:            42,
+			wantErr:          false,
+			wantDeployFailed: 0,
+			wantDeployEvents: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runDispatchWorkflowRunImagesCase(ctx, t, tc)
+		})
+	}
+}
