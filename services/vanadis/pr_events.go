@@ -503,8 +503,12 @@ func (s *VanadisServer) handlePRMerged(ctx context.Context, ev pubsub.PRLifecycl
 }
 
 func (s *VanadisServer) completeLegacyChunkDeploy(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) {
+	wasCompleted := chunk.Status == "completed"
 	if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
 		log.Printf("[vanadis] warning updating chunk %s to completed: %v", chunk.ID, err)
+	}
+	if wasCompleted {
+		return
 	}
 	if err := s.completeBuildIfAllChunksFinished(ctx, build.ID); err != nil {
 		log.Printf("[vanadis] warning completing build %s: %v", build.ID, err)
@@ -518,16 +522,15 @@ func (s *VanadisServer) completeBuildIfAllChunksFinished(ctx context.Context, bu
 		return err
 	}
 	for _, c := range allChunks {
-		if c.Status != "completed" && c.Status != "merged" {
+		if c.Status != "completed" {
 			return nil
 		}
 	}
-	if b.Status == "completed" {
-		return nil
-	}
-	if err := s.store.UpdateBuildStatus(ctx, b.ID, "completed"); err != nil {
-		log.Printf("[vanadis] warning updating build status to completed for %s: %v", b.ID, err)
-		return err
+	if b.Status != "completed" {
+		if err := s.store.UpdateBuildStatus(ctx, b.ID, "completed"); err != nil {
+			log.Printf("[vanadis] warning updating build status to completed for %s: %v", b.ID, err)
+			return err
+		}
 	}
 	RecordBuildTotal("completed")
 	s.syncBuildWidget(ctx, b.ID, "Build completed successfully")

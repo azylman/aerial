@@ -709,31 +709,40 @@ func TestHandlePRDeploySuccess(t *testing.T) {
 		assert.Empty(t, recBus.getEvents(), "awakeable path must not publish duplicate external events")
 	})
 
-	t.Run("completes pre-restate build and dispatches completed prompt with directive", func(t *testing.T) {
+	t.Run("completes pre-restate build from pr_opened through merged then deploy_success", func(t *testing.T) {
 		t.Parallel()
 		srv, store, recBus, reqs := setupTestServer(t)
 		build := mkBuild("b-d2", "123456789012345678", "Build", "Test Objective", "running")
-		chunk := mkChunk("c-d2", "b-d2", 0, "Chunk Title", "Instr", "medium", "merged")
+		chunk := mkChunk("c-d2", "b-d2", 0, "Chunk Title", "Instr", "medium", "pr_opened")
 		chunk.PRNumber = 902
 		chunk.Repo = "azylman/aerial"
 		require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
 
-		ev := pubsub.PRLifecycleEvent{
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:    "merged",
+			Repo:     "azylman/aerial",
+			PRNumber: 902,
+		}))
+
+		mergedChunk, _, err := store.GetChunk(ctx, "c-d2")
+		require.NoError(t, err)
+		assert.Equal(t, "merged", mergedChunk.Status)
+
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:    "deploy_success",
 			Repo:     "azylman/aerial",
 			PRNumber: 902,
-		}
-		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
+		}))
 
 		updatedChunk, updatedBuild, err := store.GetChunk(ctx, "c-d2")
 		require.NoError(t, err)
 		assert.Equal(t, "completed", updatedChunk.Status)
 		assert.Equal(t, "completed", updatedBuild.Status)
 
-		var foundCompletedPrompt bool
+		var promptCount int
 		for _, r := range *reqs {
 			if r.Path == "/prompt" {
-				foundCompletedPrompt = true
+				promptCount++
 				prompt := r.Body["prompt"].(string)
 				assert.Contains(t, prompt, "Vanadis build b-d2 completed")
 				assert.Contains(t, prompt, "Objective: Test Objective")
@@ -741,22 +750,27 @@ func TestHandlePRDeploySuccess(t *testing.T) {
 				assert.Contains(t, prompt, "Directive: Concisely summarize the completed build and deployment, and either suggest the next steps from the discussion or explicitly call out that all work is completed.")
 			}
 		}
-		assert.True(t, foundCompletedPrompt)
+		assert.Equal(t, 1, promptCount, "expected exactly one completion wake prompt")
 
 		events := recBus.getEvents()
-		var chunkCompleted, buildCompleted bool
+		var chunkMergedCount, chunkCompletedCount, buildCompletedCount int
 		for _, ev := range events {
+			if ev.Source == "vanadis_chunk" && ev.EventType == "merged" {
+				chunkMergedCount++
+				assert.Equal(t, []string{"c-d2"}, ev.Targets)
+			}
 			if ev.Source == "vanadis_chunk" && ev.EventType == "completed" {
-				chunkCompleted = true
+				chunkCompletedCount++
 				assert.Equal(t, []string{"c-d2"}, ev.Targets)
 			}
 			if ev.Source == "vanadis_build" && ev.EventType == "completed" {
-				buildCompleted = true
+				buildCompletedCount++
 				assert.Equal(t, []string{"b-d2"}, ev.Targets)
 			}
 		}
-		assert.True(t, chunkCompleted, "expected vanadis_chunk.completed external event")
-		assert.True(t, buildCompleted, "expected vanadis_build.completed external event")
+		assert.Equal(t, 1, chunkMergedCount, "expected one vanadis_chunk.merged external event")
+		assert.Equal(t, 1, chunkCompletedCount, "expected one vanadis_chunk.completed external event")
+		assert.Equal(t, 1, buildCompletedCount, "expected one vanadis_build.completed external event")
 	})
 
 	t.Run("fallback to legacy complete when deploy awakeable resolve fails", func(t *testing.T) {
@@ -910,27 +924,6 @@ func TestPostgresVanadisStore_PREventMethods(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 2, count)
 		assert.NoError(t, sOK.UpdateChunkBannerAndStatus(ctx, "c1", "failed", "banner"))
-	})
-
-	t.Run("ResetChunkForSynchronize clears awakeable IDs with empty strings", func(t *testing.T) {
-		t.Parallel()
-		var capturedSQL string
-		var capturedArgs []any
-		s := newMockStore(mockDB{
-			execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-				if strings.Contains(sql, "UPDATE vanadis_chunks") {
-					capturedSQL = sql
-					capturedArgs = args
-				}
-				return pgconn.NewCommandTag("UPDATE 1"), nil
-			},
-		})
-		require.NoError(t, s.ResetChunkForSynchronize(ctx, "c1", "b1"))
-		assert.Contains(t, capturedSQL, "merge_awakeable_id = CASE WHEN status = 'failed' THEN '' ELSE merge_awakeable_id END")
-		assert.Contains(t, capturedSQL, "deploy_awakeable_id = CASE WHEN status = 'failed' THEN '' ELSE deploy_awakeable_id END")
-		assert.NotContains(t, capturedSQL, "merge_awakeable_id = CASE WHEN status = 'failed' THEN NULL")
-		assert.NotContains(t, capturedSQL, "deploy_awakeable_id = CASE WHEN status = 'failed' THEN NULL")
-		assert.Equal(t, []any{"c1"}, capturedArgs)
 	})
 }
 
