@@ -522,7 +522,8 @@ func (s *VanadisServer) completeBuildIfAllChunksFinished(ctx context.Context, bu
 		return err
 	}
 	for _, c := range allChunks {
-		if c.Status != "completed" {
+		finished := c.Status == "completed" || (c.Status == "merged" && b.Status == "completed")
+		if !finished {
 			return nil
 		}
 	}

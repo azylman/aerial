@@ -960,9 +960,9 @@ func TestPREvents_EdgeBranches(t *testing.T) {
 
 	t.Run("handlePRDeploySuccess multi chunk not all done", func(t *testing.T) {
 		t.Parallel()
-		srv, store, _, _ := setupTestServer(t)
+		srv, store, recBus, reqs := setupTestServer(t)
 		build := mkBuild("b-multi", "123456789012345678", "Build", "Obj", "running")
-		chunk1 := mkChunk("c-m1", "b-multi", 0, "Chunk 1", "Instr", "medium", "completed")
+		chunk1 := mkChunk("c-m1", "b-multi", 0, "Chunk 1", "Instr", "medium", "merged")
 		chunk2 := mkChunk("c-m2", "b-multi", 1, "Chunk 2", "Instr", "medium", "pending")
 		chunk1.PRNumber = 881
 		chunk2.PRNumber = 882
@@ -978,8 +978,71 @@ func TestPREvents_EdgeBranches(t *testing.T) {
 		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
 
 		// Build should still be running because chunk 2 is pending
-		_, b, err := store.GetChunk(ctx, "c-m1")
+		c1, b, err := store.GetChunk(ctx, "c-m1")
 		require.NoError(t, err)
+		assert.Equal(t, "completed", c1.Status)
 		assert.Equal(t, "running", b.Status)
+
+		for _, ev := range recBus.getEvents() {
+			assert.NotEqual(t, "vanadis_build", ev.Source, "build should not be completed")
+		}
+		for _, r := range *reqs {
+			assert.NotEqual(t, "/prompt", r.Path, "completion wake should not be sent")
+		}
+	})
+
+	t.Run("handlePRDeploySuccess completes build when earlier chunk stays merged", func(t *testing.T) {
+		t.Parallel()
+		srv, store, recBus, reqs := setupTestServer(t)
+		build := mkBuild("b-merged-earlier", "123456789012345678", "Build", "Docs and Code", "running")
+		chunk1 := mkChunk("c-me-1", "b-merged-earlier", 0, "Docs Chunk", "Instr", "medium", "merged")
+		chunk1.PRNumber = 883
+		chunk1.Repo = "azylman/aerial"
+		chunk2 := mkChunk("c-me-2", "b-merged-earlier", 1, "Code Chunk", "Instr", "medium", "pr_opened")
+		chunk2.PRNumber = 884
+		chunk2.Repo = "azylman/aerial"
+		require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk1, chunk2}))
+
+		// 1. Chunk 2 merges -> AdvanceChunkByPR sets build status to 'completed'
+		evMerged := pubsub.PRLifecycleEvent{
+			Event:    "merged",
+			Repo:     "azylman/aerial",
+			PRNumber: 884,
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, evMerged))
+
+		c2, b, err := store.GetChunk(ctx, "c-me-2")
+		require.NoError(t, err)
+		assert.Equal(t, "merged", c2.Status)
+		assert.Equal(t, "completed", b.Status)
+
+		// 2. Chunk 2 deploy succeeds -> should complete build even though chunk 1 stayed 'merged'
+		evDeploy := pubsub.PRLifecycleEvent{
+			Event:    "deploy_success",
+			Repo:     "azylman/aerial",
+			PRNumber: 884,
+		}
+		require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, evDeploy))
+
+		c2, b, err = store.GetChunk(ctx, "c-me-2")
+		require.NoError(t, err)
+		assert.Equal(t, "completed", c2.Status)
+		assert.Equal(t, "completed", b.Status)
+
+		var buildCompletedEvent bool
+		for _, ev := range recBus.getEvents() {
+			if ev.Source == "vanadis_build" && ev.EventType == "completed" {
+				buildCompletedEvent = true
+			}
+		}
+		assert.True(t, buildCompletedEvent, "expected vanadis_build.completed event")
+
+		var foundWakePrompt bool
+		for _, r := range *reqs {
+			if r.Path == "/prompt" {
+				foundWakePrompt = true
+			}
+		}
+		assert.True(t, foundWakePrompt, "expected completion wake prompt")
 	})
 }
