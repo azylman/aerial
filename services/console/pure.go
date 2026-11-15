@@ -12,6 +12,31 @@ import (
 	"unicode/utf8"
 )
 
+const (
+	chipTypeContainer     = "container"
+	healthStarting        = "starting"
+	healthHealthy         = "healthy"
+	healthUnhealthy       = "unhealthy"
+	statusDegraded        = "degraded"
+	statusError           = "error"
+	statusCompleted       = "completed"
+	statusFailed          = "failed"
+	statusPending         = "pending"
+	statusActive          = "active"
+	statusQueued          = "queued"
+	statusInProgress      = "in_progress"
+	conclusionFailure     = "failure"
+	conclusionSuccess     = "success"
+	stageAwaitingPull     = "awaiting_pull"
+	stagePulling          = "pulling"
+	stageSwapping         = "swapping"
+	stageBuilding         = "building"
+	stageLive             = "live"
+	containerStateRunning = "running"
+	serviceOllama         = "ollama"
+	serviceAgentsview     = "agentsview"
+)
+
 var sensitiveKeys = []string{
 	"GEMINI_HARNESS_API_KEY",
 	"AERIAL_GEMINI_API_KEY",
@@ -62,14 +87,14 @@ func shortenSHA(s string) string {
 
 // containerChipStatusAndDuration computes the chip status, conclusion, and uptime duration for a container.
 func containerChipStatusAndDuration(c DockerContainerJSON, now time.Time) (status, conclusion, duration string) {
-	status = "completed"
-	conclusion = "success"
-	if c.Health != nil && c.Health.Status == "starting" {
-		status = "active"
+	status = statusCompleted
+	conclusion = conclusionSuccess
+	if c.Health != nil && c.Health.Status == healthStarting {
+		status = statusActive
 		conclusion = ""
-	} else if c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy") {
-		status = "failed"
-		conclusion = "failure"
+	} else if c.State != containerStateRunning || (c.Health != nil && c.Health.Status == healthUnhealthy) {
+		status = statusFailed
+		conclusion = conclusionFailure
 	}
 
 	duration = "0s"
@@ -352,11 +377,11 @@ func BuildDocketTaskDetailUpstreamURL(docketBaseURL, requestPath string) (target
 // If any service is unhealthy, the cluster is considered degraded.
 func CalculateClusterStatus(services []ServiceStatus) string {
 	for _, s := range services {
-		if s.Status == "unhealthy" {
-			return "degraded"
+		if s.Status == healthUnhealthy {
+			return statusDegraded
 		}
 	}
-	return "healthy"
+	return healthHealthy
 }
 
 // FormatUptimeString converts seconds into a human-readable duration format (%ds, %dm, %dh).
@@ -435,7 +460,7 @@ func IsCoreAerialContainer(c DockerContainerJSON) bool {
 	svcName = strings.ToLower(svcName)
 
 	switch svcName {
-	case "agentsview", "watchtower", "autoheal", "ollama":
+	case serviceAgentsview, "watchtower", "autoheal", serviceOllama:
 		return false
 	}
 
@@ -488,8 +513,8 @@ func ExtractServiceNameFromJobName(jobName string) string {
 		"github-mcp",
 		"infisical-mcp",
 		"synapse",
-		"ollama",
-		"agentsview",
+		serviceOllama,
+		serviceAgentsview,
 		"docs",
 	}
 	for _, s := range services {
@@ -536,18 +561,18 @@ func ParseMatrixJobChips(jobs []GitHubJob, now time.Time) []MatrixJobChip {
 		}
 		seen[svc] = true
 
-		chipStatus := "pending"
+		chipStatus := statusPending
 		switch j.Status {
-		case "in_progress":
-			chipStatus = "active"
-		case "completed":
+		case statusInProgress:
+			chipStatus = statusActive
+		case statusCompleted:
 			switch j.Conclusion {
-			case "success":
-				chipStatus = "completed"
-			case "failure":
-				chipStatus = "failed"
+			case conclusionSuccess:
+				chipStatus = statusCompleted
+			case conclusionFailure:
+				chipStatus = statusFailed
 			default:
-				chipStatus = "pending"
+				chipStatus = statusPending
 			}
 		}
 
@@ -597,7 +622,7 @@ func BuildContainerChips(rawContainers []DockerContainerJSON, now time.Time) []M
 			Status:     status,
 			Conclusion: conclusion,
 			Duration:   durStr,
-			Type:       "container",
+			Type:       chipTypeContainer,
 		})
 	}
 	return chips
@@ -638,10 +663,10 @@ func BuildTargetContainerChips(rawContainers []DockerContainerJSON, targets []st
 		if !found {
 			chips = append(chips, MatrixJobChip{
 				Name:       svc,
-				Status:     "active",
+				Status:     statusActive,
 				Conclusion: "",
-				Duration:   "pending",
-				Type:       "container",
+				Duration:   statusPending,
+				Type:       chipTypeContainer,
 			})
 			continue
 		}
@@ -655,10 +680,10 @@ func BuildTargetContainerChips(rawContainers []DockerContainerJSON, targets []st
 		if !isRecentlyRecreated {
 			chips = append(chips, MatrixJobChip{
 				Name:       svc,
-				Status:     "active",
+				Status:     statusActive,
 				Conclusion: "",
-				Duration:   "pending",
-				Type:       "container",
+				Duration:   statusPending,
+				Type:       chipTypeContainer,
 			})
 			continue
 		}
@@ -670,7 +695,7 @@ func BuildTargetContainerChips(rawContainers []DockerContainerJSON, targets []st
 			Status:     status,
 			Conclusion: conclusion,
 			Duration:   durStr,
-			Type:       "container",
+			Type:       chipTypeContainer,
 		})
 	}
 
@@ -724,14 +749,14 @@ func GetMimeType(filename string) string {
 }
 
 var stageRank = map[string]int{
-	"swapping":      6,
-	"pulling":       5,
-	"building":      4,
-	"awaiting_pull": 3,
-	"queued":        2,
-	"failed":        1,
-	"degraded":      1,
-	"live":          0,
+	stageSwapping:     6,
+	stagePulling:      5,
+	stageBuilding:     4,
+	stageAwaitingPull: 3,
+	statusQueued:      2,
+	statusFailed:      1,
+	statusDegraded:    1,
+	stageLive:         0,
 }
 
 // CalculateDeployStatus evaluates active deployment stages with deterministic precedence:
@@ -743,7 +768,7 @@ func CalculateDeployStatus(deployments []DeploymentStatus) string {
 
 	for _, d := range deployments {
 		if rank, ok := stageRank[d.Stage]; ok {
-			if rank > bestRank || (rank == bestRank && d.Stage == "failed" && bestStage == "degraded") {
+			if rank > bestRank || (rank == bestRank && d.Stage == statusFailed && bestStage == statusDegraded) {
 				bestRank = rank
 				bestStage = d.Stage
 			}
@@ -760,7 +785,7 @@ func IsDeployOngoing(target any) bool {
 	switch v := target.(type) {
 	case string:
 		switch v {
-		case "queued", "building", "awaiting_pull", "pulling", "swapping":
+		case statusQueued, stageBuilding, stageAwaitingPull, stagePulling, stageSwapping:
 			return true
 		}
 		return false

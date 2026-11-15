@@ -11,6 +11,37 @@ import (
 	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
+// Schedule types shared by the schedule tables, metrics labels and run records.
+const (
+	scheduleTypeCron       = "cron"
+	scheduleTypeOneShot    = "one_shot"
+	scheduleTypeHeartbeat  = "heartbeat"
+	scheduleTypeEventWatch = "event_watch"
+)
+
+// Run, tool-response and build event status values.
+const (
+	statusCompleted     = "completed"
+	statusFailed        = "failed"
+	statusStale         = "stale"
+	statusSkippedActive = "skipped_active"
+	statusMerged        = "merged"
+	statusSuccess       = "success"
+)
+
+// Reasoning effort levels accepted for scheduled turns.
+const (
+	effortLow    = "low"
+	effortMedium = "medium"
+	effortHigh   = "high"
+)
+
+// Event-watch sources emitted by vanadis.
+const (
+	sourceVanadisBuild = "vanadis_build"
+	sourceVanadisChunk = "vanadis_chunk"
+)
+
 // IsScheduleStale reports whether scheduledAt is more overdue than maxOverdue relative to now.
 func IsScheduleStale(scheduledAt, now time.Time, maxOverdue time.Duration) bool {
 	return maxOverdue > 0 && now.Sub(scheduledAt) > maxOverdue
@@ -76,8 +107,8 @@ EOF
 func NormalizeEffort(effort string) (string, error) {
 	switch eff := strings.ToLower(strings.TrimSpace(effort)); eff {
 	case "":
-		return "low", nil
-	case "low", "medium", "high":
+		return effortLow, nil
+	case effortLow, effortMedium, effortHigh:
 		return eff, nil
 	default:
 		return "", fmt.Errorf("invalid effort tier %q: expected 'low', 'medium', or 'high'", effort)
@@ -112,7 +143,7 @@ var (
 )
 
 func validateVanadisBuild(target, eventType, normEventType string) (string, error) {
-	if normEventType != "completed" && normEventType != "failed" {
+	if normEventType != statusCompleted && normEventType != statusFailed {
 		return "", fmt.Errorf("invalid event_type %q for vanadis_build: expected 'completed' or 'failed'", eventType)
 	}
 	if !reVanadisBuild.MatchString(target) || strings.Contains(target, "-chunk-") {
@@ -122,7 +153,7 @@ func validateVanadisBuild(target, eventType, normEventType string) (string, erro
 }
 
 func validateVanadisChunk(target, eventType, normEventType string) (string, error) {
-	if normEventType != "merged" && normEventType != "completed" && normEventType != "failed" {
+	if normEventType != statusMerged && normEventType != statusCompleted && normEventType != statusFailed {
 		return "", fmt.Errorf("invalid event_type %q for vanadis_chunk: expected 'merged', 'completed', or 'failed'", eventType)
 	}
 	if !reVanadisChunk.MatchString(target) {
@@ -198,9 +229,9 @@ func ValidateEventWatchSpec(source, target, eventType string, extraSources ...st
 	}
 
 	switch normSource {
-	case "vanadis_build":
+	case sourceVanadisBuild:
 		normTarget, err = validateVanadisBuild(normTarget, eventType, normEventType)
-	case "vanadis_chunk":
+	case sourceVanadisChunk:
 		normTarget, err = validateVanadisChunk(normTarget, eventType, normEventType)
 	case "flux":
 		normTarget, err = validateFlux(normTarget, eventType, normEventType)

@@ -114,7 +114,7 @@ func (s *SQLTaskStore) SearchTasksRRF(ctx context.Context, embedding []float32, 
 	}
 	filter := strings.TrimSpace(statusFilter)
 	if filter == "" {
-		filter = "open"
+		filter = taskStatusOpen
 	}
 
 	hasVector := len(embedding) == 384

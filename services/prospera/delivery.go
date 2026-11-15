@@ -15,6 +15,13 @@ import (
 	"time"
 )
 
+const (
+	reportStatusPending    = "pending"
+	reportStatusFailed     = "failed"
+	reportStatusProcessing = "processing"
+	reportStatusDelivered  = "delivered"
+)
+
 var untrustedTranscriptTagRegex = regexp.MustCompile(`(?i)</?untrusted_transcript[^>]*>`)
 
 // BuildPostCallSummaryPrompt strips case-insensitive </?untrusted_transcript> tags from speaker turns
@@ -98,7 +105,7 @@ func resolveDiscordChannel(cfg *Config, channelID string) string {
 	if cfg != nil && cfg.DefaultDiscordChannel != "" {
 		return cfg.DefaultDiscordChannel
 	}
-	return "prospera"
+	return serviceName
 }
 
 func (r *Reporter) postDiscordMessage(ctx context.Context, cfg *Config, channelID, threadID, content string, attachments []discordAttachmentPayload) error {
@@ -169,7 +176,7 @@ func (r *Reporter) FlushLiveTranscript(ctx context.Context, callID string) error
 	for _, turn := range newTurns {
 		speaker := "Prospera"
 		switch strings.ToLower(turn.Role) {
-		case "user", "caller", "human":
+		case roleUser, "caller", "human":
 			speaker = "Caller"
 		case "system":
 			speaker = "System"
@@ -215,7 +222,7 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 	}
 
 	// Allow transition from pending or previously failed attempts to re-enter processing on retry
-	ok, err := r.store.TransitionReportStatus(ctx, callID, []string{"pending", "failed"}, "processing", "")
+	ok, err := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusPending, reportStatusFailed}, reportStatusProcessing, "")
 	if err != nil {
 		return fmt.Errorf("reporter: transition status to processing: %w", err)
 	}
@@ -235,7 +242,7 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 	}
 
 	withNumber := call.ToNumber
-	if call.Direction == "inbound" {
+	if call.Direction == directionInbound {
 		withNumber = call.FromNumber
 	}
 
@@ -257,12 +264,12 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 	}
 
 	if postErr := r.postDiscordMessage(ctx, cfg, channel, call.DiscordThreadID, msgContent, attachments); postErr != nil {
-		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{"processing"}, "failed", "discord post failed: "+postErr.Error()); transErr != nil {
+		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusFailed, "discord post failed: "+postErr.Error()); transErr != nil {
 			log.Printf("reporter: transition report status to failed: %v", transErr)
 		}
 		return postErr
 	}
-	if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{"processing"}, "delivered", summary); transErr != nil {
+	if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusDelivered, summary); transErr != nil {
 		log.Printf("reporter: transition report status to delivered: %v", transErr)
 	}
 	return nil
@@ -360,7 +367,7 @@ func (r *Reporter) ProcessVoicemailRecording(ctx context.Context, callID, record
 	}
 
 	// Allow transition from awaiting_recording or previously failed attempts to re-enter processing on retry
-	ok, err := r.store.TransitionReportStatus(ctx, callID, []string{"awaiting_recording", "failed"}, "processing", "")
+	ok, err := r.store.TransitionReportStatus(ctx, callID, []string{"awaiting_recording", reportStatusFailed}, reportStatusProcessing, "")
 	if err != nil {
 		return fmt.Errorf("reporter: transition status to processing: %w", err)
 	}
@@ -374,7 +381,7 @@ func (r *Reporter) ProcessVoicemailRecording(ctx context.Context, callID, record
 
 	audioBytes, contentType, err := r.twilio.DownloadRecording(ctx, recordingURL)
 	if err != nil {
-		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{"processing"}, "failed", "download failed: "+err.Error()); transErr != nil {
+		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusFailed, "download failed: "+err.Error()); transErr != nil {
 			log.Printf("reporter: transition status to failed: %v", transErr)
 		}
 		return fmt.Errorf("reporter: download recording: %w", err)
@@ -399,13 +406,13 @@ func (r *Reporter) ProcessVoicemailRecording(ctx context.Context, callID, record
 		call.FromNumber, call.CallID, transcript)
 
 	if err := r.postDiscordMessage(ctx, cfg, channel, call.DiscordThreadID, msgContent, []discordAttachmentPayload{att}); err != nil {
-		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{"processing"}, "failed", "discord post failed: "+err.Error()); transErr != nil {
+		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusFailed, "discord post failed: "+err.Error()); transErr != nil {
 			log.Printf("reporter: transition status to failed: %v", transErr)
 		}
 		return err
 	}
 
-	if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{"processing"}, "delivered", transcript); transErr != nil {
+	if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusDelivered, transcript); transErr != nil {
 		log.Printf("reporter: transition status to delivered: %v", transErr)
 	}
 	return nil

@@ -328,7 +328,7 @@ func (c *HTTPTwilioClient) IsCallActive(ctx context.Context, providerCallSID str
 	}
 
 	switch strings.ToLower(result.Status) {
-	case "queued", "ringing", "in-progress":
+	case "queued", "ringing", callStateInProgress:
 		return true, nil
 	default:
 		return false, nil

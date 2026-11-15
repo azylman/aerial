@@ -8,6 +8,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+const (
+	statusSuccess = "success"
+)
+
 var (
 	FactsTotal = prometheus.NewGauge(
 		prometheus.GaugeOpts{
@@ -44,7 +48,7 @@ var (
 
 var (
 	knownOps         = []string{"search", "store", "forget", "context", "extract", "consolidate"}
-	knownStatuses    = []string{"success", "error"}
+	knownStatuses    = []string{statusSuccess, "error"}
 	knownFactActions = []string{"inserted", "updated", "reinforced", "deleted"}
 )
 

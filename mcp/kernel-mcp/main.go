@@ -23,6 +23,10 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
+const (
+	resultKeyTrusted = "trusted"
+)
+
 var (
 	runServerFn = runServer
 	exitFn      = log.Fatalf
@@ -296,10 +300,10 @@ func (s *Server) toolBrowserClick(ctx context.Context, args ClickArgs) (string, 
 	}
 
 	out, err := json.Marshal(map[string]any{
-		"clicked": true,
-		"trusted": cr.HasRect,
-		"tag":     cr.Tag,
-		"text":    cr.Text,
+		"clicked":        true,
+		resultKeyTrusted: cr.HasRect,
+		"tag":            cr.Tag,
+		"text":           cr.Text,
 	})
 	if err != nil {
 		return fmt.Sprintf("Failed to encode click result: %v", err), true
@@ -345,8 +349,8 @@ func (s *Server) toolBrowserType(ctx context.Context, args TypeArgs) (string, bo
 	}
 
 	out, err := json.Marshal(map[string]any{
-		"typed":   true,
-		"trusted": true,
+		"typed":          true,
+		resultKeyTrusted: true,
 	})
 	if err != nil {
 		return fmt.Sprintf("Failed to encode type result: %v", err), true
@@ -464,10 +468,10 @@ func (s *Server) toolAmazonAddToCart(ctx context.Context, args AmazonAddToCartAr
 	unmarshalOptional(countRaw, &cartCount)
 
 	out, err := json.Marshal(map[string]any{
-		"added":        true,
-		"trusted":      btnRes.HasRect,
-		"productTitle": btnRes.ProductTitle,
-		"cartCount":    cartCount,
+		"added":          true,
+		resultKeyTrusted: btnRes.HasRect,
+		"productTitle":   btnRes.ProductTitle,
+		"cartCount":      cartCount,
 	})
 	if err != nil {
 		return fmt.Sprintf("Failed to encode add to cart result: %v", err), true

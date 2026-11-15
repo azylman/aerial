@@ -38,7 +38,7 @@ func validateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, target
 		if normalizeRepo(repo) == "" {
 			return fmt.Errorf("chunk[%d] repo is required for pr mode", idx)
 		}
-	case "action":
+	case chunkModeAction:
 		if strings.TrimSpace(repo) != "" {
 			return fmt.Errorf("chunk[%d] action chunk must have empty repo", idx)
 		}
@@ -105,10 +105,10 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 		MergedChunkTitle: cTitle,
 		ChunkMode:        cMode,
 		NextChunkIndex:   -1,
-		BuildCompleted:   b.Status == "completed",
+		BuildCompleted:   b.Status == statusCompleted,
 	}
 
-	if cMode != "action" || cStatus != "running" || b.Status != "running" || prNumber > 0 {
+	if cMode != chunkModeAction || cStatus != statusRunning || b.Status != statusRunning || prNumber > 0 {
 		return res, nil
 	}
 
@@ -124,7 +124,7 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 		const updateBuildSQL = `UPDATE vanadis_builds SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
 		if _, err := tx.Exec(ctx, updateBuildSQL, bID); err == nil {
 			res.BuildCompleted = true
-			res.BuildStatus = "completed"
+			res.BuildStatus = statusCompleted
 		}
 	}
 
@@ -185,7 +185,7 @@ func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason st
 	c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), nonNilSlice(c.AcceptanceCriteria)
 	c.Effort = capChunkEffort(c.Effort)
 
-	if isChunkDoneStatus(c.Status) || c.Status == "failed" || b.Status == "completed" || b.Status == "cancelled" {
+	if isChunkDoneStatus(c.Status) || c.Status == statusFailed || b.Status == statusCompleted || b.Status == statusCancelled {
 		return &b, &c, false, nil
 	}
 
@@ -203,16 +203,16 @@ func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason st
 	}
 
 	now := time.Now().UTC()
-	c.Status = "failed"
+	c.Status = statusFailed
 	c.CompletedAt = now
 	c.UpdatedAt = now
-	b.Status = "failed"
+	b.Status = statusFailed
 	b.UpdatedAt = now
 	return &b, &c, true, nil
 }
 
 func formatChunkLedgerLabel(c VanadisChunkSummary) string {
-	if c.Mode == "action" {
+	if c.Mode == chunkModeAction {
 		return "(action, completed)"
 	}
 	cRepo := strings.TrimSpace(c.Repo)

@@ -565,7 +565,7 @@ func (s *SQLStore) InsertProceduralCandidate(ctx context.Context, cand Procedura
 	}
 	domain := strings.TrimSpace(cand.Domain)
 	if domain == "" {
-		domain = "discord"
+		domain = domainDiscord
 	}
 	status := strings.TrimSpace(cand.Status)
 	if status == "" {

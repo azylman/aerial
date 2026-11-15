@@ -26,7 +26,7 @@ var (
 			Name: "vanadis_chunks_active",
 			Help: "Number of active Vanadis chunks across non-completed builds by status.",
 		},
-		[]string{"status"},
+		[]string{fieldStatus},
 	)
 
 	// BuildsTotal tracks total Vanadis builds by lifecycle or terminal status.
@@ -35,7 +35,7 @@ var (
 			Name: "vanadis_builds_total",
 			Help: "Total number of Vanadis builds by lifecycle status.",
 		},
-		[]string{"status"},
+		[]string{fieldStatus},
 	)
 
 	// ChunksTotal tracks total Vanadis chunks by lifecycle event status.
@@ -44,7 +44,7 @@ var (
 			Name: "vanadis_chunks_total",
 			Help: "Total number of Vanadis chunks by lifecycle event status.",
 		},
-		[]string{"status"},
+		[]string{fieldStatus},
 	)
 
 	// QueueDepth tracks chunk execution jobs in the Vanadis JetStream queue categorized by state.
@@ -66,11 +66,11 @@ var (
 )
 
 var (
-	knownQueueStates         = []string{"running", "queued"}
-	knownChunkActiveStatuses = []string{"pending", "running", "pr_opened"}
-	knownBuildStatuses       = []string{"created", "completed", "failed", "cancelled"}
-	knownChunkStatuses       = []string{"dispatched", "merged", "completed", "failed", "cancelled"}
-	knownQueueDepthStates    = []string{"pending", "in_flight"}
+	knownQueueStates         = []string{statusRunning, statusQueued}
+	knownChunkActiveStatuses = []string{statusPending, statusRunning, statusPROpened}
+	knownBuildStatuses       = []string{"created", statusCompleted, statusFailed, statusCancelled}
+	knownChunkStatuses       = []string{"dispatched", statusMerged, statusCompleted, statusFailed, statusCancelled}
+	knownQueueDepthStates    = []string{statusPending, "in_flight"}
 )
 
 func registerVanadisCollector(c prometheus.Collector) {
@@ -129,21 +129,21 @@ func (s *VanadisServer) collectBuildMetrics(ctx context.Context) {
 	var pendingChunks, runningChunks, prOpenedChunks float64
 	for _, b := range builds {
 		switch b.QueueState {
-		case "running":
+		case statusRunning:
 			runningBuilds++
-		case "queued":
+		case statusQueued:
 			queuedBuilds++
 		}
-		if b.QueueState == "completed" {
+		if b.QueueState == statusCompleted {
 			continue
 		}
 		for _, c := range b.Chunks {
 			switch c.Status {
-			case "pending":
+			case statusPending:
 				pendingChunks++
-			case "running", "coding":
+			case statusRunning, statusCoding:
 				runningChunks++
-			case "pr_opened":
+			case statusPROpened:
 				prOpenedChunks++
 			}
 		}

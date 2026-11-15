@@ -200,8 +200,8 @@ func (p *GitHubPoller) commitPolledRunsAndPruneJobs(repos []string, allActiveRun
 
 	// Sort runs: active runs first (newest CreatedAt first), then completed runs (newest CreatedAt first)
 	sort.SliceStable(allRuns, func(i, j int) bool {
-		iActive := allRuns[i].Status == "queued" || allRuns[i].Status == "in_progress"
-		jActive := allRuns[j].Status == "queued" || allRuns[j].Status == "in_progress"
+		iActive := allRuns[i].Status == statusQueued || allRuns[i].Status == statusInProgress
+		jActive := allRuns[j].Status == statusQueued || allRuns[j].Status == statusInProgress
 		if iActive != jActive {
 			return iActive
 		}
@@ -210,7 +210,7 @@ func (p *GitHubPoller) commitPolledRunsAndPruneJobs(repos []string, allActiveRun
 
 	hasActive := false
 	for _, r := range allRuns {
-		if r.Status == "in_progress" || r.Status == "queued" {
+		if r.Status == statusInProgress || r.Status == statusQueued {
 			hasActive = true
 		}
 	}
@@ -300,10 +300,10 @@ func (p *GitHubPoller) processPolledWorkflowRuns(ctx context.Context, repo, newE
 	hasActive := false
 	for _, r := range runs {
 		allActiveRunIDs[r.ID] = true
-		if r.Status == "in_progress" || r.Status == "queued" || time.Since(r.UpdatedAt) < 10*time.Minute {
+		if r.Status == statusInProgress || r.Status == statusQueued || time.Since(r.UpdatedAt) < 10*time.Minute {
 			p.fetchJobsForRun(ctx, r.ID, repo)
 		}
-		if r.Status == "in_progress" || r.Status == "queued" {
+		if r.Status == statusInProgress || r.Status == statusQueued {
 			hasActive = true
 		}
 	}
@@ -349,7 +349,7 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allAc
 		p.mu.RLock()
 		for _, r := range p.cachedRunsByRepo[repo] {
 			allActiveRunIDs[r.ID] = true
-			if r.Status == "in_progress" || r.Status == "queued" {
+			if r.Status == statusInProgress || r.Status == statusQueued {
 				hasActive = true
 			}
 		}

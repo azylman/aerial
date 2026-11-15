@@ -296,13 +296,13 @@ func (s *RouterServer) teeGitHubWebhook(ctx context.Context, reqPath string, r *
 	}
 
 	switch event {
-	case "pull_request":
+	case ghEventPullRequest:
 		s.teeGitHubPREvent(ctx, reqPath, fwdHeaders, body)
 	case "push":
 		s.teeGitHubPushEvent(ctx, reqPath, fwdHeaders, body)
-	case "check_run":
+	case ghEventCheckRun:
 		s.teeGitHubCheckRunEvent(ctx, reqPath, fwdHeaders, body)
-	case "workflow_run":
+	case ghEventWorkflowRun:
 		s.teeGitHubWorkflowRunEvent(ctx, reqPath, fwdHeaders, body)
 	}
 }

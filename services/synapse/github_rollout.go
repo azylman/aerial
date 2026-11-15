@@ -14,6 +14,16 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
+const (
+	statusFailed       = "failed"
+	statusPassed       = "passed"
+	statusPending      = "pending"
+	ghStatusCompleted  = "completed"
+	conclusionSuccess  = "success"
+	conclusionFailure  = "failure"
+	conclusionTimedOut = "timed_out"
+)
+
 func isRoboRevCheck(checkName string) bool {
 	trimmed := strings.TrimSpace(checkName)
 	return strings.EqualFold(trimmed, "roborev") || strings.EqualFold(trimmed, "RoboRev Code Review")
@@ -27,22 +37,22 @@ func isGateAggregatorCheck(checkName string) bool {
 func classifyCheckState(status, conclusion string) string {
 	s := strings.ToLower(strings.TrimSpace(status))
 	c := strings.ToLower(strings.TrimSpace(conclusion))
-	if s == "completed" {
+	if s == ghStatusCompleted {
 		switch c {
-		case "success", "neutral", "skipped":
-			return "passed"
-		case "failure", "timed_out", "cancelled", "action_required":
-			return "failed"
+		case conclusionSuccess, "neutral", "skipped":
+			return statusPassed
+		case conclusionFailure, conclusionTimedOut, "cancelled", "action_required":
+			return statusFailed
 		default:
 			return ""
 		}
 	}
 	switch s {
-	case "queued", "in_progress", "waiting", "requested", "pending":
-		return "pending"
+	case "queued", "in_progress", "waiting", "requested", statusPending:
+		return statusPending
 	default:
 		if s != "" {
-			return "pending"
+			return statusPending
 		}
 		return ""
 	}
@@ -103,8 +113,8 @@ func buildPRRolloutState(meta map[string]any) *pubsub.PRRolloutState {
 
 func (s *RouterServer) publishDeployLifecycleEvent(ctx context.Context, evt DeployEvent, eventName, status string) error {
 	jobName := evt.JobName
-	if (eventName == "deploy_success" || eventName == "sync_success") && jobName == "" {
-		jobName = "git-sync"
+	if (eventName == eventDeploySuccess || eventName == eventSyncSuccess) && jobName == "" {
+		jobName = jobGitSync
 	}
 	return s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:        eventName,
@@ -153,10 +163,10 @@ func analyzeBuildChecks(checks map[string]string) (checkJobs []string, passedBui
 	for checkName, state := range checks {
 		s := strings.ToLower(strings.TrimSpace(state))
 		switch s {
-		case "passed":
+		case statusPassed:
 			passed++
 			total++
-		case "failed":
+		case statusFailed:
 			failed++
 			total++
 		default:
@@ -167,7 +177,7 @@ func analyzeBuildChecks(checks map[string]string) (checkJobs []string, passedBui
 
 		if svc, ok := buildJobService(checkName); ok {
 			matchedServices[svc] = struct{}{}
-			if s == "passed" {
+			if s == statusPassed {
 				passedBuildJobs[strings.ToLower(svc)] = true
 			}
 		}
@@ -403,11 +413,11 @@ func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNum
 	hasPending := false
 	for _, cr := range checkRuns.CheckRuns {
 		state := classifyCheckState(cr.Status, cr.Conclusion)
-		if !isGateAggregatorCheck(cr.Name) && state == "failed" {
+		if !isGateAggregatorCheck(cr.Name) && state == statusFailed {
 			s.failedCheckSHAs.Store(key, headSHA)
 			return true
 		}
-		if state == "pending" {
+		if state == statusPending {
 			hasPending = true
 		}
 	}
@@ -462,7 +472,7 @@ func (s *RouterServer) canRecoverCheckSuccess(ctx context.Context, repo string, 
 }
 
 func (s *RouterServer) isStaleOrIgnoredCIFailure(ctx context.Context, res *ResolvedGitHubEvent) bool {
-	if s.registry == nil || (res.Conclusion != "failure" && res.Conclusion != "timed_out") {
+	if s.registry == nil || (res.Conclusion != conclusionFailure && res.Conclusion != conclusionTimedOut) {
 		return true
 	}
 	if isGateAggregatorCheck(res.CheckName) && !s.hasCancelledCheckForSHA(res.Repo, res.PRNumber, res.HeadSHA) {

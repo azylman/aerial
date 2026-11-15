@@ -15,6 +15,14 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 )
 
+const (
+	jobGitSync        = "git-sync"
+	severityError     = "error"
+	kindKustomization = "Kustomization"
+	kindConfigMap     = "ConfigMap"
+	reasonProgressing = "Progressing"
+)
+
 // FluxInvolvedObject identifies the resource associated with a Flux notification event.
 type FluxInvolvedObject struct {
 	Kind      string `json:"kind"`
@@ -88,21 +96,21 @@ func TranslateFluxAlertToDeployEvent(alert FluxAlertEvent) (DeployEvent, bool) {
 		switch {
 		case reason == "NewArtifact" || reason == "GitOperationSucceeded":
 			return DeployEvent{
-				Event:      "sync_success",
-				Status:     "success",
+				Event:      eventSyncSuccess,
+				Status:     conclusionSuccess,
 				SourceKind: kind,
-				JobName:    "git-sync",
+				JobName:    jobGitSync,
 				Repo:       repo,
 				CommitSHA:  commitSHA,
 				Details:    alert.Message,
 				Timestamp:  ts,
 			}, true
-		case severity == "error" || reason == "GitOperationFailed":
+		case severity == severityError || reason == "GitOperationFailed":
 			return DeployEvent{
-				Event:      "sync_failed",
-				Status:     "failed",
+				Event:      eventSyncFailed,
+				Status:     statusFailed,
 				SourceKind: kind,
-				JobName:    "git-sync",
+				JobName:    jobGitSync,
 				Repo:       repo,
 				CommitSHA:  commitSHA,
 				Details:    alert.Message,
@@ -112,12 +120,12 @@ func TranslateFluxAlertToDeployEvent(alert FluxAlertEvent) (DeployEvent, bool) {
 			return DeployEvent{}, false
 		}
 
-	case "Kustomization", "HelmRelease":
+	case kindKustomization, "HelmRelease":
 		jobName := strings.TrimSpace(alert.InvolvedObject.Name)
 		switch {
-		case reason == "Progressing":
+		case reason == reasonProgressing:
 			return DeployEvent{
-				Event:      "deploy_started",
+				Event:      eventDeployStarted,
 				Status:     "started",
 				SourceKind: kind,
 				JobName:    jobName,
@@ -128,8 +136,8 @@ func TranslateFluxAlertToDeployEvent(alert FluxAlertEvent) (DeployEvent, bool) {
 			}, true
 		case reason == "ReconciliationSucceeded":
 			return DeployEvent{
-				Event:      "deploy_success",
-				Status:     "success",
+				Event:      eventDeploySuccess,
+				Status:     conclusionSuccess,
 				SourceKind: kind,
 				JobName:    jobName,
 				Repo:       repo,
@@ -137,10 +145,10 @@ func TranslateFluxAlertToDeployEvent(alert FluxAlertEvent) (DeployEvent, bool) {
 				Details:    alert.Message,
 				Timestamp:  ts,
 			}, true
-		case severity == "error" || isFluxFailureReason(reason):
+		case severity == severityError || isFluxFailureReason(reason):
 			return DeployEvent{
-				Event:      "deploy_failed",
-				Status:     "failed",
+				Event:      eventDeployFailed,
+				Status:     statusFailed,
 				SourceKind: kind,
 				JobName:    jobName,
 				Repo:       repo,
@@ -181,7 +189,7 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 
 	var alert FluxAlertEvent
 	if err := json.Unmarshal(body, &alert); err != nil {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: errMsgInvalidJSONPayload})
 		return
 	}
 
@@ -193,8 +201,8 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 		log.Printf("[synapse] [flux] ignoring unhandled flux alert: kind=%s name=%s reason=%s severity=%s",
 			alert.InvolvedObject.Kind, alert.InvolvedObject.Name, alert.Reason, alert.Severity)
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-			"status":  "ignored",
-			"message": "unhandled flux alert event",
+			fieldStatus: "ignored",
+			"message":   "unhandled flux alert event",
 		})
 		return
 	}
@@ -479,7 +487,7 @@ func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error)
 			UpdatedNumberScheduled: st.UpdatedNumberScheduled,
 			NumberAvailable:        st.NumberAvailable,
 			ProgressDeadlineExceeded: slices.ContainsFunc(st.Conditions, func(c fluxCondition) bool {
-				return c.Type == "Progressing" && c.Status == "False" && c.Reason == "ProgressDeadlineExceeded"
+				return c.Type == reasonProgressing && c.Status == "False" && c.Reason == "ProgressDeadlineExceeded"
 			}),
 		})
 	}
@@ -711,7 +719,7 @@ type fluxKustomizationObject struct {
 
 func (k fluxKustomizationObject) substitutesImageTags() bool {
 	for _, src := range k.Spec.PostBuild.SubstituteFrom {
-		if src.Kind == "ConfigMap" && src.Name == imageTagsConfigMapName {
+		if src.Kind == kindConfigMap && src.Name == imageTagsConfigMapName {
 			return true
 		}
 	}

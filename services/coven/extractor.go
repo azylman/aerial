@@ -24,6 +24,11 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
+const (
+	actionNoop               = "NOOP"
+	rejectEphemeralTelemetry = "ephemeral_telemetry"
+)
+
 // LLMClientFunc defines the interface function for sending prompts to an LLM.
 type LLMClientFunc func(ctx context.Context, prompt string) (string, error)
 
@@ -202,7 +207,7 @@ var (
 // EvaluateCandidateAdmission deterministically evaluates an extracted fact candidate.
 func EvaluateCandidateAdmission(item ExtractedFactItem) (admit bool, reason string) {
 	action := strings.ToUpper(strings.TrimSpace(item.Action))
-	if action == "NOOP" {
+	if action == actionNoop {
 		return false, "noop_action"
 	}
 	if action == "DELETE" {
@@ -222,7 +227,7 @@ func EvaluateCandidateAdmission(item ExtractedFactItem) (admit bool, reason stri
 
 	isDurable := durableDirectiveRegex.MatchString(trimmedText)
 	if ephemeralTelemetryRegex.MatchString(trimmedText) && !isDurable {
-		return false, "ephemeral_telemetry"
+		return false, rejectEphemeralTelemetry
 	}
 
 	return true, "admitted"
@@ -238,14 +243,14 @@ func EvaluateProceduralCandidateAdmission(item ExtractedProceduralItem) (admit b
 		return false, "trigger_too_short"
 	}
 	if ephemeralTelemetryRegex.MatchString(trimmedTrigger) && !durableDirectiveRegex.MatchString(trimmedTrigger) {
-		return false, "ephemeral_telemetry"
+		return false, rejectEphemeralTelemetry
 	}
 
 	validSteps := false
 	for _, s := range item.Steps {
 		if trimmed := strings.TrimSpace(s); trimmed != "" {
 			if ephemeralTelemetryRegex.MatchString(trimmed) && !durableDirectiveRegex.MatchString(trimmed) {
-				return false, "ephemeral_telemetry"
+				return false, rejectEphemeralTelemetry
 			}
 			validSteps = true
 		}
@@ -254,7 +259,7 @@ func EvaluateProceduralCandidateAdmission(item ExtractedProceduralItem) (admit b
 	for _, a := range item.Avoid {
 		if trimmed := strings.TrimSpace(a); trimmed != "" {
 			if ephemeralTelemetryRegex.MatchString(trimmed) && !durableDirectiveRegex.MatchString(trimmed) {
-				return false, "ephemeral_telemetry"
+				return false, rejectEphemeralTelemetry
 			}
 			validAvoid = true
 		}
@@ -441,7 +446,7 @@ func stageSingleProceduralCandidate(ctx context.Context, store Store, client Oll
 
 	domain := strings.TrimSpace(item.Domain)
 	if domain == "" {
-		domain = "discord"
+		domain = domainDiscord
 	}
 	steps := item.Steps
 	if steps == nil {
@@ -624,7 +629,7 @@ func applyReconcileDecision(ctx context.Context, store Store, item ExtractedFact
 		}
 		RecordFactStored("inserted")
 		return true
-	case "NOOP":
+	case actionNoop:
 		targetID := dec.SupersedesID
 		if !validIDs[targetID] {
 			targetID = neighbors[0].Fact.ID

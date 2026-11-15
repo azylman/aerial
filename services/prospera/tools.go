@@ -151,20 +151,20 @@ func (h *ToolHandler) InitiateCall(ctx context.Context, args InitiateCallArgs) (
 		channelID = cfg.DefaultDiscordChannel
 	}
 	if channelID == "" {
-		channelID = "prospera"
+		channelID = serviceName
 	}
 
 	callID := "call-" + uuid.NewString()
 	call := VoiceCall{
 		CallID:           callID,
-		Direction:        "outbound",
+		Direction:        directionOutbound,
 		State:            "initiated",
 		FromNumber:       fromNumber,
 		ToNumber:         normTo,
 		DiscordChannelID: channelID,
 		DiscordThreadID:  args.DiscordThreadID,
 		Brief:            sanitizedBrief,
-		ReportStatus:     "pending",
+		ReportStatus:     reportStatusPending,
 		StartedAt:        time.Now().UTC(),
 		UpdatedAt:        time.Now().UTC(),
 	}
@@ -199,7 +199,7 @@ func (h *ToolHandler) InitiateCall(ctx context.Context, args InitiateCallArgs) (
 		AsyncAmd:               "true",
 	})
 	if err != nil {
-		if updateErr := h.store.UpdateCallState(ctx, callID, "failed", err.Error(), ""); updateErr != nil {
+		if updateErr := h.store.UpdateCallState(ctx, callID, callStateFailed, err.Error(), ""); updateErr != nil {
 			log.Printf("prospera: update call state failed: %v", updateErr)
 		}
 		return InitiateCallOutput{}, fmt.Errorf("initiate_call: twilio create call: %w", err)
@@ -360,7 +360,7 @@ func (h *ToolHandler) SendSMS(ctx context.Context, args SendSMSArgs) (SendSMSOut
 
 	msg := VoiceMessage{
 		MessageSID:       msgSID,
-		Direction:        "outbound",
+		Direction:        directionOutbound,
 		FromNumber:       normFrom,
 		ToNumber:         normTo,
 		Body:             body,
@@ -450,7 +450,7 @@ func RegisterProsperaMCPTools(s *mcp.Server, h *ToolHandler) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "end_call",
+		Name:        endCallToolName,
 		Description: "Terminate an active phone call, hang up the provider leg, and trigger post-call summarization.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args EndCallArgs) (*mcp.CallToolResult, EndCallOutput, error) {
 		out, err := h.EndCall(ctx, args)

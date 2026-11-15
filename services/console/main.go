@@ -247,15 +247,15 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerCont
 		createdAt := time.Unix(c.Created, 0).UTC()
 		uptimeSec := max(int64(now.Sub(createdAt).Seconds()), 0)
 
-		status := "healthy"
+		status := healthHealthy
 		statusLower := strings.ToLower(c.Status)
 		switch {
 		case strings.Contains(statusLower, "(unhealthy)"):
-			status = "unhealthy"
+			status = healthUnhealthy
 		case strings.Contains(statusLower, "starting") || strings.Contains(statusLower, "(health: starting)"):
-			status = "starting"
-		case c.State != "running":
-			status = "unhealthy"
+			status = healthStarting
+		case c.State != containerStateRunning:
+			status = healthUnhealthy
 		}
 
 		services = append(services, ServiceStatus{
@@ -375,8 +375,8 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 func synthesizeContainersFromServices(services []ServiceStatus, now time.Time) []DockerContainerJSON {
 	out := make([]DockerContainerJSON, 0, len(services))
 	for _, svc := range services {
-		state := "running"
-		if svc.Status == "unhealthy" {
+		state := containerStateRunning
+		if svc.Status == healthUnhealthy {
 			state = "exited"
 		}
 		out = append(out, DockerContainerJSON{
@@ -463,19 +463,19 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 		if err != nil || len(services) == 0 {
 			uptimeSec := int64(time.Since(startTime).Seconds())
 			services = []ServiceStatus{
-				{Name: "brain", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "haro", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "coven", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "kernel-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "infisical-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "synapse", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "console", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "brain", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "haro", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "coven", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "discord-mcp", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "kernel-mcp", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "github-mcp", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "infisical-mcp", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "synapse", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: serviceOllama, Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: serviceAgentsview, Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "autoheal", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "proxy", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "console", Status: healthHealthy, UptimeSeconds: uptimeSec, LastCheckTime: now},
 			}
 		}
 

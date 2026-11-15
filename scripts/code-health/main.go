@@ -20,6 +20,10 @@ import (
 )
 
 const (
+	newHTTPPromptDispatcherFunc = "NewHTTPPromptDispatcher"
+)
+
+const (
 	maxFileLines             = 1500
 	maxDepth                 = 5
 	minCloneFuncLines        = 20
@@ -928,9 +932,9 @@ func getCallTargetURL(call *ast.CallExpr) (string, ast.Expr) {
 	}
 	if ident, ok := call.Fun.(*ast.Ident); ok {
 		switch ident.Name {
-		case "NewHTTPPromptDispatcher":
+		case newHTTPPromptDispatcherFunc:
 			if len(call.Args) >= 1 {
-				return "NewHTTPPromptDispatcher", call.Args[0]
+				return newHTTPPromptDispatcherFunc, call.Args[0]
 			}
 		case "newRequestWithContext":
 			if len(call.Args) >= 3 {
@@ -939,9 +943,9 @@ func getCallTargetURL(call *ast.CallExpr) (string, ast.Expr) {
 		}
 	}
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-		if sel.Sel.Name == "NewHTTPPromptDispatcher" {
+		if sel.Sel.Name == newHTTPPromptDispatcherFunc {
 			if len(call.Args) >= 1 {
-				return "NewHTTPPromptDispatcher", call.Args[0]
+				return newHTTPPromptDispatcherFunc, call.Args[0]
 			}
 		}
 	}

@@ -18,7 +18,14 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
+)
+
+const (
+	fieldMetadata      = "metadata"
+	queryLabelSelector = "labelSelector"
+	unknownLabel       = "unknown"
 )
 
 // Metric collectors for JetStream queues and worker execution telemetry.
@@ -28,7 +35,7 @@ var (
 			Name: "synapse_jobs_enqueued_total",
 			Help: "Total number of jobs enqueued, skipped as duplicate, or failed on enqueue.",
 		},
-		[]string{"queue", "kind", "status"},
+		[]string{labelQueue, fieldKind, fieldStatus},
 	)
 
 	JobsProcessedTotal = prometheus.NewCounterVec(
@@ -36,7 +43,7 @@ var (
 			Name: "synapse_jobs_processed_total",
 			Help: "Total number of jobs processed by worker execution status.",
 		},
-		[]string{"queue", "kind", "status"},
+		[]string{labelQueue, fieldKind, fieldStatus},
 	)
 
 	JobDurationSeconds = prometheus.NewHistogramVec(
@@ -45,7 +52,7 @@ var (
 			Help:    "Execution duration of jobs in seconds.",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"queue", "kind"},
+		[]string{labelQueue, fieldKind},
 	)
 
 	JobRetriesTotal = prometheus.NewCounterVec(
@@ -53,7 +60,7 @@ var (
 			Name: "synapse_job_retries_total",
 			Help: "Total number of job retry attempts by reason.",
 		},
-		[]string{"queue", "kind", "reason"},
+		[]string{labelQueue, fieldKind, "reason"},
 	)
 
 	JobsDroppedTotal = prometheus.NewCounterVec(
@@ -61,7 +68,7 @@ var (
 			Name: "synapse_jobs_dropped_total",
 			Help: "Total number of jobs dropped or cancelled by reason.",
 		},
-		[]string{"queue", "kind", "reason"},
+		[]string{labelQueue, fieldKind, "reason"},
 	)
 
 	QueueDepth = prometheus.NewGaugeVec(
@@ -69,7 +76,7 @@ var (
 			Name: "synapse_queue_depth",
 			Help: "Current depth of queues partitioned by state.",
 		},
-		[]string{"queue", "state"},
+		[]string{labelQueue, "state"},
 	)
 
 	DiscordGatewayLatencySeconds = prometheus.NewGauge(
@@ -92,7 +99,7 @@ var (
 		QueueDiscordIngress,
 		QueueDiscordInteraction,
 	}
-	knownStates = []string{"pending", "in_flight"}
+	knownStates = []string{statusPending, "in_flight"}
 )
 
 func registerCollector(c prometheus.Collector) {
@@ -126,10 +133,10 @@ func RecordJobEnqueued(queue, kind, status string) {
 		queue = QueueDefault
 	}
 	if kind == "" {
-		kind = "unknown"
+		kind = unknownLabel
 	}
 	if status == "" {
-		status = "unknown"
+		status = unknownLabel
 	}
 	JobsEnqueuedTotal.WithLabelValues(queue, kind, status).Inc()
 }
@@ -140,10 +147,10 @@ func RecordJobRetry(queue, kind, reason string) {
 		queue = QueueDefault
 	}
 	if kind == "" {
-		kind = "unknown"
+		kind = unknownLabel
 	}
 	if reason == "" {
-		reason = "unknown"
+		reason = unknownLabel
 	}
 	JobRetriesTotal.WithLabelValues(queue, kind, reason).Inc()
 }
@@ -154,10 +161,10 @@ func RecordJobDropped(queue, kind, reason string) {
 		queue = QueueDefault
 	}
 	if kind == "" {
-		kind = "unknown"
+		kind = unknownLabel
 	}
 	if reason == "" {
-		reason = "unknown"
+		reason = unknownLabel
 	}
 	JobsDroppedTotal.WithLabelValues(queue, kind, reason).Inc()
 }
@@ -178,10 +185,10 @@ type synapseConsumerTarget struct {
 }
 
 var synapseConsumerTargets = []synapseConsumerTarget{
-	{stream: "AERIAL_JOBS", consumer: "synapse-github", queue: QueueDefault},
-	{stream: "AERIAL_JOBS", consumer: "synapse-deploy", queue: QueueDefault},
-	{stream: "AERIAL_JOBS", consumer: "synapse-discord-ingress", queue: QueueDiscordIngress},
-	{stream: "AERIAL_JOBS", consumer: "synapse-discord-interaction", queue: QueueDiscordInteraction},
+	{stream: pubsub.StreamAerialJobs, consumer: "synapse-github", queue: QueueDefault},
+	{stream: pubsub.StreamAerialJobs, consumer: "synapse-deploy", queue: QueueDefault},
+	{stream: pubsub.StreamAerialJobs, consumer: "synapse-discord-ingress", queue: QueueDiscordIngress},
+	{stream: pubsub.StreamAerialJobs, consumer: "synapse-discord-interaction", queue: QueueDiscordInteraction},
 }
 
 func collectJetStreamQueueMetrics(ctx context.Context, q consumerStatsQuerier) error {
@@ -250,7 +257,7 @@ func resolveJobQueueAndKind(args any) (string, string) {
 	case DiscordInteractionArgs:
 		return QueueDiscordInteraction, "discord_interaction"
 	default:
-		return QueueDefault, "unknown"
+		return QueueDefault, unknownLabel
 	}
 }
 
@@ -470,8 +477,8 @@ func resolveImageTag(repo, imageRef string) (tagKey, imageName, workloadName str
 func (d *DefaultOutboundDispatcher) createOrRetryImageTagConfigMap(ctx context.Context, client *http.Client, token, tagKey, commitSHA string, doPatch func() (int, []byte, error)) error {
 	postBody, err := json.Marshal(map[string]any{
 		"apiVersion": "v1",
-		"kind":       "ConfigMap",
-		"metadata": map[string]string{
+		fieldKind:    kindConfigMap,
+		fieldMetadata: map[string]string{
 			"name":      "aerial-image-tags",
 			"namespace": "flux-system",
 		},
@@ -523,8 +530,8 @@ func (d *DefaultOutboundDispatcher) upsertImageTagConfigMap(ctx context.Context,
 
 	patchBody, err := json.Marshal(map[string]any{
 		"apiVersion": "v1",
-		"kind":       "ConfigMap",
-		"metadata": map[string]string{
+		fieldKind:    kindConfigMap,
+		fieldMetadata: map[string]string{
 			"name":      "aerial-image-tags",
 			"namespace": "flux-system",
 		},
@@ -683,7 +690,7 @@ const fluxManagedSelector = fluxKustomizationNameLabel
 
 // kustomizationSelector selects every object applied by ref.
 func kustomizationSelector(ref fluxKustomizationRef) url.Values {
-	return url.Values{"labelSelector": {fluxKustomizationNameLabel + "=" + ref.Name + "," + fluxKustomizationNamespaceLabel + "=" + ref.Namespace}}
+	return url.Values{queryLabelSelector: {fluxKustomizationNameLabel + "=" + ref.Name + "," + fluxKustomizationNamespaceLabel + "=" + ref.Namespace}}
 }
 
 // ListKustomizationConfigMaps lists when each ConfigMap applied by ref last changed.
@@ -719,7 +726,7 @@ func (d *DefaultOutboundDispatcher) ListKustomizationWorkloads(ctx context.Conte
 
 // ListFluxWorkloadsVersion lists workloads at path and returns list resourceVersion for watching.
 func (d *DefaultOutboundDispatcher) ListFluxWorkloadsVersion(ctx context.Context, path string) (string, error) {
-	body, err := d.kubeJSON(ctx, http.MethodGet, path+"?"+url.Values{"labelSelector": {fluxManagedSelector}}.Encode(), "", nil)
+	body, err := d.kubeJSON(ctx, http.MethodGet, path+"?"+url.Values{queryLabelSelector: {fluxManagedSelector}}.Encode(), "", nil)
 	if err != nil {
 		return "", fmt.Errorf("list flux workloads: %w", err)
 	}
@@ -736,7 +743,7 @@ func (d *DefaultOutboundDispatcher) ListFluxWorkloadsVersion(ctx context.Context
 
 // WatchFluxWorkloads opens a kube watch stream of the Flux-managed workloads at path from resourceVersion.
 func (d *DefaultOutboundDispatcher) WatchFluxWorkloads(ctx context.Context, path, resourceVersion string) (io.ReadCloser, error) {
-	return d.watchKube(ctx, path, url.Values{"labelSelector": {fluxManagedSelector}}, resourceVersion)
+	return d.watchKube(ctx, path, url.Values{queryLabelSelector: {fluxManagedSelector}}, resourceVersion)
 }
 
 func (d *DefaultOutboundDispatcher) listWorkloadImages(ctx context.Context) ([]workloadImageRef, error) {
@@ -785,7 +792,7 @@ func (d *DefaultOutboundDispatcher) DiscoverImageKustomizations(ctx context.Cont
 // the same value is idempotent.
 func (d *DefaultOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef, requestedAt string) error {
 	patchBody, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{
+		fieldMetadata: map[string]any{
 			"annotations": map[string]string{fluxReconcileRequestedAtAnnotation: requestedAt},
 		},
 	})
@@ -803,7 +810,7 @@ func (d *DefaultOutboundDispatcher) ReconcileKustomization(ctx context.Context, 
 func (d *DefaultOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error) {
 	namespace := cmp.Or(strings.TrimSpace(obj.Namespace), fluxSystemNamespace)
 	source := fluxSourceRef{Kind: obj.Kind, Name: strings.TrimSpace(obj.Name), Namespace: namespace}
-	if obj.Kind == "Kustomization" {
+	if obj.Kind == kindKustomization {
 		body, err := d.kubeJSON(ctx, http.MethodGet, kustomizationPath(fluxKustomizationRef{Namespace: namespace, Name: source.Name}), "", nil)
 		if err != nil {
 			return "", fmt.Errorf("get kustomization %s/%s: %w", namespace, source.Name, err)

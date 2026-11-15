@@ -25,12 +25,12 @@ func (s *VanadisServer) handleCompletedDispatchOutcome(ctx context.Context, ev p
 			log.Printf("[vanadis] stalled chunk check for %s failed: %v", ev.VanadisChunkID, err)
 		}
 	}
-	if res == nil || res.ChunkMode != "action" {
+	if res == nil || res.ChunkMode != chunkModeAction {
 		return nil
 	}
 	if !res.Advanced {
-		if res.ChunkMode == "action" && s.restateCfg.RestateIngressURL != "" {
-			if c, _, gErr := s.store.GetChunk(ctx, ev.VanadisChunkID); gErr == nil && c != nil && c.Status == "completed" {
+		if res.ChunkMode == chunkModeAction && s.restateCfg.RestateIngressURL != "" {
+			if c, _, gErr := s.store.GetChunk(ctx, ev.VanadisChunkID); gErr == nil && c != nil && c.Status == statusCompleted {
 				return s.reconcileBuildOnRestate(ctx, res.BuildID, "action_completed")
 			}
 		}
@@ -85,9 +85,9 @@ func (s *VanadisServer) HandleDispatchOutcomeEvent(ctx context.Context, msg pubs
 	}
 
 	switch strings.ToLower(strings.TrimSpace(ev.Status)) {
-	case "completed":
+	case statusCompleted:
 		return s.handleCompletedDispatchOutcome(ctx, ev)
-	case "failed", "timeout":
+	case statusFailed, "timeout":
 		return s.handleFailedDispatchOutcome(ctx, ev)
 	default:
 		return nil

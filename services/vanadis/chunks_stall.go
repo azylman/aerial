@@ -140,7 +140,7 @@ func (s *PostgresVanadisStore) ClaimStalledChunk(ctx context.Context, chunkID st
 
 // judgeStalledChunk is the pure stall decision shared by every store implementation.
 func judgeStalledChunk(c VanadisChunk, buildStatus string, nudges int) StalledChunkVerdict {
-	if c.Mode != "pr" || c.Status != "running" || c.PRNumber != 0 || buildStatus != "running" {
+	if c.Mode != "pr" || c.Status != statusRunning || c.PRNumber != 0 || buildStatus != statusRunning {
 		return StalledChunkVerdictNone
 	}
 	if nudges == 0 {
