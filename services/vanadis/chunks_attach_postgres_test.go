@@ -157,6 +157,13 @@ func TestVanadisStore_AttachChunkPR_ExistingSuccess_MockDB(t *testing.T) {
 	if !slices.Equal(capturedAttachCandidates, []string{"aerial", "azylman/aerial"}) {
 		t.Errorf("AttachChunkPR candidates = %v, want [aerial azylman/aerial]", capturedAttachCandidates)
 	}
+
+	// Success with action chunk
+	sActionSuccess := newAttachSuccessStore("action", nil)
+	bIDAct, cIDAct, threadIDAct, err := sActionSuccess.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "c-act", PRNumber: 101, Repo: "aerial"})
+	if err != nil || bIDAct != "b-action" || cIDAct != "c-action" || threadIDAct != "thread-action" {
+		t.Errorf("unexpected AttachChunkPR action chunk result: bID=%q cID=%q threadID=%q err=%v", bIDAct, cIDAct, threadIDAct, err)
+	}
 }
 
 func mockTxWithExecErr(matchSQL, errMsg string) *PostgresVanadisStore {

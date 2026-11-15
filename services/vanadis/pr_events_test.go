@@ -1104,7 +1104,7 @@ func TestHandlePRDeploySuccess_ActionChunkWithPR(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. End-of-turn dispatch outcome arrives: must NOT resolve awakeable for action chunk with attached PR
-	assert.False(t, srv.notifyRestateActionChunkCompleted(ctx, "c-act-pr-1"), "notifyRestateActionChunkCompleted must be skipped for chunk with attached PR")
+	assert.NoError(t, srv.notifyRestateActionChunkCompleted(ctx, "c-act-pr-1"), "notifyRestateActionChunkCompleted must be skipped for chunk with attached PR")
 
 	// 3. PR merges: chunk transitions to merged but does NOT complete build
 	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
@@ -1142,4 +1142,81 @@ func TestHandlePRDeploySuccess_ActionChunkWithPR(t *testing.T) {
 		}
 	}
 	assert.True(t, foundAwkResolve, "deploy_awakeable must be resolved on deploy_success")
+}
+
+func TestHandlePRDeploySuccess_WithoutAwakeable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv, store, bus, reqs := setupTestServer(t)
+	build := mkBuild("b-no-awk", "123456789012345678", "Build", "Reconciler deploy_success", "running")
+	chunk := mkChunk("c-no-awk-1", "b-no-awk", 0, "PR Chunk", "Fix code", "medium", "merged")
+	chunk.Mode = "pr"
+	chunk.Repo = "azylman/aerial"
+	chunk.PRNumber = 906
+	chunk.DeployAwakeableID = ""
+	require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
+
+	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:    "deploy_success",
+		Repo:     "azylman/aerial",
+		PRNumber: 906,
+	}))
+
+	cAfter, _, err := store.GetChunk(ctx, "c-no-awk-1")
+	require.NoError(t, err)
+	assert.Equal(t, "completed", cAfter.Status)
+
+	var foundChunkCompletedEvent bool
+	for _, p := range bus.events {
+		if p.Source == "vanadis_chunk" && p.EventType == "completed" {
+			foundChunkCompletedEvent = true
+		}
+	}
+	assert.True(t, foundChunkCompletedEvent, "vanadis_chunk.completed event must be published")
+
+	var foundReconcileSend bool
+	for _, r := range *reqs {
+		if r.Path == "/BuildReconciler/b-no-awk/Reconcile/send" {
+			foundReconcileSend = true
+		}
+	}
+	assert.True(t, foundReconcileSend, "reconcile request must be sent on deploy_success when deploy awakeable is empty")
+
+	// Error returning when status update fails
+	store.updateChunkErr = errors.New("cannot update chunk")
+	chunk.Status = "merged"
+	require.Error(t, srv.handlePRDeploySuccess(ctx, &chunk, &build))
+	store.updateChunkErr = nil
+}
+
+func TestProcessPRLifecycleEvent_SyncSuccess_PRChunk(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv, store, bus, reqs := setupTestServer(t)
+	build := mkBuild("b-sync-pr", "123456789012345678", "Build", "PR sync_success", "running")
+	chunk := mkChunk("c-sync-pr-1", "b-sync-pr", 0, "PR Chunk", "Fix code", "medium", "merged")
+	chunk.Mode = "pr"
+	chunk.Repo = "azylman/aerial"
+	chunk.PRNumber = 907
+	chunk.DeployAwakeableID = "awk-dep-907"
+	require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
+
+	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:    "sync_success",
+		Repo:     "azylman/aerial",
+		PRNumber: 907,
+	}))
+
+	cAfter, bAfter, err := store.GetChunk(ctx, "c-sync-pr-1")
+	require.NoError(t, err)
+	assert.Equal(t, "merged", cAfter.Status, "chunk status must remain merged on sync_success")
+	assert.Equal(t, "running", bAfter.Status, "build must remain running on sync_success")
+
+	for _, p := range bus.events {
+		assert.False(t, p.Source == "vanadis_chunk" && p.EventType == "completed", "must not publish completed event on sync_success")
+	}
+	for _, r := range *reqs {
+		assert.NotEqual(t, "/restate/awakeables/awk-dep-907/resolve", r.Path, "must not resolve awakeable on sync_success")
+		assert.NotEqual(t, "/BuildReconciler/b-sync-pr/Reconcile/send", r.Path, "must not send reconcile on sync_success")
+	}
 }

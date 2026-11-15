@@ -338,6 +338,32 @@ func TestPostgresVanadisStore_FailChunk(t *testing.T) {
 	}
 }
 
+func TestPostgresVanadisStore_ReserveChunkForLaunch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		chunkID   string
+		db        dbScript
+		wantErrIs error
+		wantErr   bool
+	}{
+		{name: "nil receiver", chunkID: "c1", db: dbScript{bare: nilReceiver}, wantErr: true},
+		{name: "nil db", chunkID: "c1", db: dbScript{bare: nilDB}, wantErr: true},
+		{name: "empty chunk id", chunkID: "  ", wantErr: true},
+		{name: "exec error", chunkID: "c1", db: dbScript{failExec: "UPDATE vanadis_chunks", execErr: errors.New("exec error")}, wantErr: true},
+		{name: "chunk not found", chunkID: "c1", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrChunkNotFound},
+		{name: "reserves chunk successfully", chunkID: "c1", db: dbScript{execTag: "UPDATE 1"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, _ := tc.db.open()
+			err := store.ReserveChunkForLaunch(context.Background(), tc.chunkID)
+			assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
+		})
+	}
+}
+
 func TestPostgresVanadisStore_SetChunkAwakeables(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

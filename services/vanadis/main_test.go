@@ -561,6 +561,51 @@ func TestProcessExecuteChunk(t *testing.T) {
 	httpkit.WriteJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
 }
 
+func TestProcessExecuteChunk_TargetIDAndDependencies(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"queued"}`))
+	}))
+	defer brainSrv.Close()
+
+	memStore := newMemoryVanadisStore()
+	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, brainSrv.Client())
+
+	// Test chunk dependency ordering check and targeting by explicit chunkID
+	cDep0 := mkChunk("c-dep-0", "b-deps", 0, "C0", "I0", "medium", "pending")
+	cDepPending := mkChunk("c-dep-pending", "b-deps", 1, "C1", "I1", "medium", "pending")
+	cDepPending.DependsOn = []string{"c-dep-0"}
+	_ = memStore.CreateBuild(ctx, mkBuild("b-deps", "thread-888", "", "", "running"), []VanadisChunk{cDep0, cDepPending})
+
+	if err := srv.ProcessExecuteChunk(ctx, "b-deps", 1, false, "c-dep-pending"); err == nil || !strings.Contains(err.Error(), "dependency c-dep-0 is not yet completed") {
+		t.Fatalf("expected dependency incomplete error, got %v", err)
+	}
+	if err := srv.ProcessExecuteChunk(ctx, "b-deps", 0, false, "nonexistent-id"); err == nil || !strings.Contains(err.Error(), "not found in build") {
+		t.Fatalf("expected chunk id not found error, got %v", err)
+	}
+	_ = memStore.UpdateChunkStatus(ctx, "c-dep-0", "merged")
+	if err := srv.ProcessExecuteChunk(ctx, "b-deps", 99, false, "c-dep-pending"); err != nil {
+		t.Fatalf("expected successful execution when targeted by chunkID, got %v", err)
+	}
+
+	// Action chunk depending on PR chunk requires completed status (not just merged)
+	cPR0 := mkChunk("c-pr-0", "b-deps-act", 0, "P0", "I0", "medium", "merged")
+	cActPending := mkChunk("c-act-pending", "b-deps-act", 1, "A1", "I1", "medium", "pending")
+	cActPending.Mode = "action"
+	cActPending.Repo = ""
+	cActPending.DependsOn = []string{"c-pr-0"}
+	_ = memStore.CreateBuild(ctx, mkBuild("b-deps-act", "thread-888", "", "", "running"), []VanadisChunk{cPR0, cActPending})
+	if err := srv.ProcessExecuteChunk(ctx, "b-deps-act", 1, false, "c-act-pending"); err == nil || !strings.Contains(err.Error(), "dependency c-pr-0 is not yet completed") {
+		t.Fatalf("expected action chunk dependency error when PR is only merged, got %v", err)
+	}
+	_ = memStore.UpdateChunkStatus(ctx, "c-pr-0", "completed")
+	if err := srv.ProcessExecuteChunk(ctx, "b-deps-act", 1, false, "c-act-pending"); err != nil {
+		t.Fatalf("expected action chunk dependency satisfied, got %v", err)
+	}
+}
+
 func testHTTPEndpointsBasicAndFlush(t *testing.T, srv *VanadisServer, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) {
 	t.Helper()
 	checkCode := func(method, path string, body io.Reader, want int) {

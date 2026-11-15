@@ -60,3 +60,54 @@ func markChunkDispatchSpan(span trace.Span, err error) {
 		span.SetStatus(codes.Error, "dispatch failed")
 	}
 }
+
+func findTargetChunkIndex(chunks []VanadisChunk, chunkIndex int, desiredID, buildID string) (int, error) {
+	if desiredID != "" {
+		for i := range chunks {
+			if chunks[i].ID == desiredID {
+				return i, nil
+			}
+		}
+		return -1, fmt.Errorf("chunk id %s (index %d) not found in build %s", desiredID, chunkIndex, buildID)
+	}
+	for i := range chunks {
+		if chunks[i].ChunkIndex == chunkIndex {
+			return i, nil
+		}
+	}
+	return -1, fmt.Errorf("chunk index %d not found in build %s", chunkIndex, buildID)
+}
+
+func isPRDependencyCodeReady(other VanadisChunk) bool {
+	status := strings.ToLower(strings.TrimSpace(other.Status))
+	if status == "completed" {
+		return true
+	}
+	if strings.ToLower(strings.TrimSpace(other.Mode)) == "pr" {
+		switch status {
+		case "merged", "deploying", "deploy_failed":
+			return true
+		}
+	}
+	return false
+}
+
+func checkChunkDependenciesReady(chunk VanadisChunk, chunks []VanadisChunk) error {
+	for _, depID := range chunk.DependsOn {
+		depReady := false
+		for _, other := range chunks {
+			if other.ID == depID {
+				if strings.ToLower(strings.TrimSpace(chunk.Mode)) == "pr" {
+					depReady = isPRDependencyCodeReady(other)
+				} else {
+					depReady = strings.EqualFold(strings.TrimSpace(other.Status), "completed")
+				}
+				break
+			}
+		}
+		if !depReady {
+			return fmt.Errorf("chunk %s dependency %s is not yet completed", chunk.ID, depID)
+		}
+	}
+	return nil
+}

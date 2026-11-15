@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,7 +30,10 @@ func TestBuildWorkflow_Reflection(t *testing.T) {
 	require.NotNil(t, wf)
 	assert.Equal(t, "BuildWorkflow", wf.ServiceName())
 
-	// Exercise runtime adapter methods on concrete restateSharedRuntime and restateWorkflowRuntime types
+	rec := NewBuildReconciler(srv)
+	assert.Equal(t, "BuildReconciler", rec.ServiceName())
+
+	// Exercise runtime adapter methods on concrete restateSharedRuntime, restateWorkflowRuntime, and restateObjectRuntime types
 	var sr workflowSharedRuntime = restateSharedRuntime{}
 	assert.NotNil(t, sr)
 	var wr workflowRuntime = restateWorkflowRuntime{}
@@ -39,6 +43,7 @@ func TestBuildWorkflow_Reflection(t *testing.T) {
 	require.NotPanics(t, func() {
 		def := restate.Reflect(wf)
 		require.NotNil(t, def)
+		_ = restate.Reflect(rec)
 	})
 }
 
@@ -552,14 +557,19 @@ func TestWorkflowExecutionHelpers(t *testing.T) {
 	assert.Equal(t, "b-wf", snap.Build.ID)
 	assert.Len(t, snap.Chunks, 2)
 
-	// executeLaunchChunk persists awakeable IDs and transitions chunk to running
+	// executeLaunchChunk persists awakeable IDs and enqueues execute chunk
 	err = executeLaunchChunk(ctx, srv, "b-wf", chunks[0], "m1", "d1")
 	require.NoError(t, err)
 	gotChunk, _, err := store.GetChunk(ctx, "c1")
 	require.NoError(t, err)
 	assert.Equal(t, "m1", gotChunk.MergeAwakeableID)
 	assert.Equal(t, "d1", gotChunk.DeployAwakeableID)
-	assert.Equal(t, "running", gotChunk.Status)
+	assert.Equal(t, "running", gotChunk.Status, "enqueued chunk must be reserved in running status")
+
+	// executeLaunchChunk on already opened PR does not enqueue execute chunk
+	srv.bus = nil
+	chunks[0].Status = "pr_opened"
+	require.NoError(t, executeLaunchChunk(ctx, srv, "b-wf", chunks[0], "m2", "d2"))
 }
 
 func TestRestateIngressClientHelpers(t *testing.T) {
@@ -578,7 +588,8 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	b := VanadisBuild{ID: "b-restate", ThreadID: "123456789012345678", Objective: "test ingress", Status: "running"}
 	chunks := []VanadisChunk{
 		{ID: "c1", BuildID: "b-restate", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "c1", Instructions: "do c1", Status: "pr_opened", PRNumber: 42, MergeAwakeableID: "awk-m1", DeployAwakeableID: "awk-d1"},
-		{ID: "c2", BuildID: "b-restate", ChunkIndex: 1, Mode: "action", Title: "c2", Instructions: "do c2", Status: "running", DeployAwakeableID: "awk-a2"},
+		{ID: "c2", BuildID: "b-restate", ChunkIndex: 1, Mode: "action", Title: "c2", Instructions: "do c2", Status: "completed", DeployAwakeableID: "awk-a2"},
+		{ID: "c3", BuildID: "b-restate", ChunkIndex: 2, Mode: "action", Title: "c3", Instructions: "do c3", Status: "failed", DeployAwakeableID: "awk-a3"},
 	}
 	require.NoError(t, store.CreateBuild(ctx, b, chunks))
 
@@ -589,10 +600,12 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	}
 
 	require.NoError(t, srv.launchCreatedBuild(ctx, "b-restate"))
+	require.NoError(t, srv.launchBuildOnRestate(ctx, "b-restate"))
 	require.NoError(t, srv.cancelRestateBuildWorkflow(ctx, "b-restate", "test cancel"))
 	require.NoError(t, srv.notifyRestateDAGMutation(ctx, "b-restate", "append_chunks"))
 
-	assert.True(t, srv.notifyRestateActionChunkCompleted(ctx, "c2"))
+	assert.NoError(t, srv.notifyRestateActionChunkCompleted(ctx, "c2"))
+	assert.NoError(t, srv.notifyRestateActionChunkCompleted(ctx, "c3"), "failed action chunk must not be notified as completed")
 	srv.notifyRestateChunkFailed(ctx, "c1")
 
 	// Test that an action chunk completing a build under Restate dispatches completed wake prompt
@@ -623,7 +636,38 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	}))
 	assert.NotEmpty(t, wakePromptSent)
 
+	// Test action chunk completes with Restate failure: error is returned and redelivery retries reconciliation
+	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("restate error"))
+	}))
+	defer ts500.Close()
+
+	bRetry := VanadisBuild{ID: "b-act-retry", ThreadID: "123456789012345678", Objective: "test act retry", Status: "running"}
+	cRetry := []VanadisChunk{
+		{ID: "c-act-retry-1", BuildID: "b-act-retry", ChunkIndex: 0, Mode: "action", Title: "act 1", Status: "running", DeployAwakeableID: "awk-act-retry"},
+	}
+	require.NoError(t, store.CreateBuild(ctx, bRetry, cRetry))
+	srv500Wake := &VanadisServer{
+		restateCfg: RestateConfig{RestateIngressURL: ts500.URL},
+		store:      store,
+		httpClient: ts500.Client(),
+	}
+	require.Error(t, srv500Wake.handleCompletedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
+		VanadisChunkID: "c-act-retry-1",
+		DispatchID:     "d-act-retry-1",
+	}))
+	cLoaded, _, err := store.GetChunk(ctx, "c-act-retry-1")
+	require.NoError(t, err)
+	assert.Equal(t, "completed", cLoaded.Status)
+	// On redelivery with healthy Restate, reconciliation retries and succeeds for already-completed chunk
+	require.NoError(t, srvWake.handleCompletedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
+		VanadisChunkID: "c-act-retry-1",
+		DispatchID:     "d-act-retry-1",
+	}))
+
 	assert.Equal(t, []string{
+		"/BuildWorkflow/b-restate/Run/send",
 		"/BuildWorkflow/b-restate/Run/send",
 		"/BuildWorkflow/b-restate/Cancel/send",
 		"/BuildWorkflow/b-restate/MutateDAG/send",
@@ -631,33 +675,117 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		"/restate/awakeables/awk-m1/resolve",
 		"/restate/awakeables/awk-d1/resolve",
 		"/restate/awakeables/awk-act-single/resolve",
+		"/restate/awakeables/awk-act-retry/resolve",
 	}, paths)
 
 	// Error and no-op edge cases for ingress helpers
 	var nilSrv *VanadisServer
 	assert.Error(t, nilSrv.postRestateIngressJSON(ctx, "/test", nil))
 	assert.Error(t, srv.startRestateBuildWorkflow(ctx, ""))
+	assert.Error(t, srv.reconcileBuildOnRestate(ctx, "", "created"))
 	assert.NoError(t, srv.cancelRestateBuildWorkflow(ctx, "", "r"))
 	assert.NoError(t, srv.notifyRestateDAGMutation(ctx, "", "a"))
 	assert.NoError(t, srv.resolveRestateAwakeable(ctx, "", "v"))
-	assert.False(t, srv.notifyRestateActionChunkCompleted(ctx, ""))
+	assert.NoError(t, srv.notifyRestateActionChunkCompleted(ctx, ""))
 	srv.notifyRestateChunkFailed(ctx, "")
 	srv.notifyRestateChunkFailed(ctx, "nonexistent")
 
-	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("restate error"))
-	}))
-	defer ts500.Close()
 	srv500 := &VanadisServer{
 		restateCfg: RestateConfig{RestateIngressURL: ts500.URL},
 		store:      store,
 		httpClient: ts500.Client(),
 	}
 	assert.Error(t, srv500.startRestateBuildWorkflow(ctx, "b-restate"))
-	assert.False(t, srv500.notifyRestateActionChunkCompleted(ctx, "c2"))
+	assert.Error(t, srv500.notifyRestateActionChunkCompleted(ctx, "c2"))
 	srv500.notifyRestateChunkFailed(ctx, "c1")
+}
 
+func TestRestateLaunchCreatedBuild_LocalAndActionPR(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMemoryVanadisStore()
+
+	memBus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = memBus.Close() })
+	bLocalLaunch := VanadisBuild{ID: "b-local-launch", ThreadID: "123456789012345678", Objective: "test local launch", Status: "pending"}
+	cLocalLaunch := []VanadisChunk{
+		{ID: "c-ll-0", BuildID: "b-local-launch", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "PR 0", Instructions: "do", Status: "pending"},
+	}
+	require.NoError(t, store.CreateBuild(ctx, bLocalLaunch, cLocalLaunch))
+	published := make(chan ExecuteChunkArgs, 1)
+	_, errSub := memBus.Subscribe(ctx, "aerial.jobs.vanadis.chunk", "local-launch-sub", func(_ context.Context, msg pubsub.Message) error {
+		var args ExecuteChunkArgs
+		_ = json.Unmarshal(msg.Data(), &args)
+		published <- args
+		return nil
+	})
+	require.NoError(t, errSub)
+	srvNoRestate := &VanadisServer{store: store, bus: memBus}
+	require.NoError(t, srvNoRestate.launchCreatedBuild(ctx, "b-local-launch"))
+	select {
+	case publishedArgs := <-published:
+		assert.Equal(t, "b-local-launch", publishedArgs.BuildID)
+		assert.Equal(t, "c-ll-0", publishedArgs.ChunkID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for published chunk job")
+	}
+	cReserved, _, err := store.GetChunk(ctx, "c-ll-0")
+	require.NoError(t, err)
+	assert.Equal(t, "running", cReserved.Status)
+
+	bActPR := VanadisBuild{ID: "b-act-pr", Objective: "act pr", Status: "running"}
+	cActPR := []VanadisChunk{
+		{ID: "c-act-pr", BuildID: "b-act-pr", ChunkIndex: 0, Mode: "action", Status: "completed", PRNumber: 50},
+	}
+	require.NoError(t, store.CreateBuild(ctx, bActPR, cActPR))
+	assert.NoError(t, srvNoRestate.notifyRestateActionChunkCompleted(ctx, "c-act-pr"))
+	assert.NoError(t, srvNoRestate.notifyRestateActionChunkCompleted(ctx, "nonexistent-chunk"))
+}
+
+func TestLocalLaunchedCache(t *testing.T) {
+	t.Parallel()
+	var nilS *VanadisServer
+	assert.Nil(t, nilS.getLocalLaunched("b1"))
+	nilS.setLocalLaunched("b1", "running", map[string]bool{"c1": true})
+
+	s := &VanadisServer{}
+	assert.Nil(t, s.getLocalLaunched("b1"))
+	s.setLocalLaunched("b1", "running", map[string]bool{"c1": true, "c2": true})
+	got := s.getLocalLaunched("b1")
+	assert.Equal(t, map[string]bool{"c1": true, "c2": true}, got)
+	got["c3"] = true
+	assert.False(t, s.getLocalLaunched("b1")["c3"])
+
+	s.setLocalLaunched("b1", "completed", got)
+	assert.Nil(t, s.getLocalLaunched("b1"))
+}
+
+func TestReconstructLaunchedChunks(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	chunks := []VanadisChunk{
+		{ID: "c0", ChunkIndex: 0, Status: "running", CreatedAt: now, UpdatedAt: now.Add(time.Second)},
+		{ID: "c1", ChunkIndex: 1, Status: "running", CreatedAt: now, UpdatedAt: now},
+		{ID: "c2", ChunkIndex: 2, Status: "pr_opened", PRNumber: 42},
+		{ID: "c3", ChunkIndex: 3, Status: "pending"},
+	}
+	launched := reconstructLaunchedChunks(chunks)
+	assert.True(t, launched["c0"])
+	assert.True(t, launched["c1"])
+	assert.True(t, launched["c2"])
+	assert.False(t, launched["c3"])
+
+	chunks2 := []VanadisChunk{
+		{ID: "c0", ChunkIndex: 0, Status: "running", CreatedAt: now, UpdatedAt: now},
+		{ID: "c1", ChunkIndex: 1, Status: "pending", PRNumber: 10},
+	}
+	launched2 := reconstructLaunchedChunks(chunks2)
+	assert.True(t, launched2["c0"])
+	assert.True(t, launched2["c1"])
+}
+
+func TestLoadRestateConfig(t *testing.T) {
+	t.Parallel()
 	tmpYAML := t.TempDir() + "/restate.yaml"
 	require.NoError(t, os.WriteFile(tmpYAML, []byte("restate_port: \"9099\"\nrestate_ingress_url: \"http://restate:8080/\"\nrestate_admin_url: \"http://restate:9070/\"\nrestate_advertise_url: \"http://vanadis:9099/\"\n"), 0o600))
 	rcfg := LoadRestateConfig(tmpYAML)
@@ -665,6 +793,24 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	assert.Equal(t, "http://restate:8080", rcfg.RestateIngressURL)
 	assert.Equal(t, "http://restate:9070", rcfg.RestateAdminURL)
 	assert.Equal(t, "http://vanadis:9099", rcfg.RestateAdvertiseURL)
+
+	rcfgDefault := LoadRestateConfig("")
+	assert.Equal(t, "9080", rcfgDefault.RestatePort)
+
+	rcfgMissing := LoadRestateConfig(t.TempDir() + "/nonexistent.yaml")
+	assert.Equal(t, "9080", rcfgMissing.RestatePort)
+
+	tmpYAMLDisabled := t.TempDir() + "/disabled.yaml"
+	require.NoError(t, os.WriteFile(tmpYAMLDisabled, []byte("restate_port: \"disabled\"\n"), 0o600))
+	rcfgDis := LoadRestateConfig(tmpYAMLDisabled)
+	assert.Equal(t, "disabled", rcfgDis.RestatePort)
+
+	tmpYAMLBad := t.TempDir() + "/bad.yaml"
+	require.NoError(t, os.WriteFile(tmpYAMLBad, []byte(":::invalid"), 0o600))
+	rcfgBad := LoadRestateConfig(tmpYAMLBad)
+	assert.Equal(t, "9080", rcfgBad.RestatePort)
+
+	assert.Equal(t, "", cleanRestatePortEnv("http://localhost:9080"))
 }
 
 type fakeWorkflowPromise struct {
@@ -888,4 +1034,349 @@ func TestBuildWorkflow_StateMachineWithRuntime(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "completed", resPRChain.Status)
 	assert.Equal(t, 2, resPRChain.CompletedChunks)
+}
+
+type fakeObjectRuntime struct {
+	key            string
+	launched       map[string]bool
+	getLaunchedErr error
+	runStepErr     error
+	stepsRun       []string
+	cleared        bool
+}
+
+func newFakeObjectRuntime(key string) *fakeObjectRuntime {
+	return &fakeObjectRuntime{
+		key: key,
+	}
+}
+
+func (f *fakeObjectRuntime) Key() string {
+	return f.key
+}
+
+func (f *fakeObjectRuntime) GetLaunched() (map[string]bool, error) {
+	if f.getLaunchedErr != nil {
+		return nil, f.getLaunchedErr
+	}
+	if f.launched == nil {
+		return nil, nil
+	}
+	cp := make(map[string]bool, len(f.launched))
+	maps.Copy(cp, f.launched)
+	return cp, nil
+}
+
+func (f *fakeObjectRuntime) SetLaunched(launched map[string]bool) {
+	f.launched = make(map[string]bool, len(launched))
+	maps.Copy(f.launched, launched)
+}
+
+func (f *fakeObjectRuntime) ClearState() {
+	f.cleared = true
+	f.launched = make(map[string]bool)
+}
+
+func (f *fakeObjectRuntime) RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error) {
+	f.stepsRun = append(f.stepsRun, name)
+	if f.runStepErr != nil {
+		return reconcileStepOutput{}, f.runStepErr
+	}
+	return fn(context.Background())
+}
+
+func TestBuildReconciler_DeriveReconcileChunkStates(t *testing.T) {
+	t.Parallel()
+
+	chunks := []VanadisChunk{
+		{ID: "c-comp", Status: "completed"},
+		{ID: "c-m-pr", Mode: "pr", Status: "merged"},
+		{ID: "c-m-act", Mode: "action", Status: "merged"},
+		{ID: "c-dep-pr", Mode: "pr", Status: "deploying"},
+		{ID: "c-dep-act", Mode: "action", Status: "deploying"},
+		{ID: "c-prop", Status: "pr_opened"},
+		{ID: "c-cifail", Status: "ci_failed"},
+		{ID: "c-conf", Status: "conflict"},
+		{ID: "c-depfail", Mode: "pr", Status: "deploy_failed"},
+		{ID: "c-code", Status: "coding"},
+		{ID: "c-run-created-new", Status: "running"},
+		{ID: "c-run-created-prior", Status: "running"},
+		{ID: "c-run-created-pr", Status: "running", PRNumber: 123},
+		{ID: "c-pend-new", Status: "pending"},
+		{ID: "c-pend-prior", Status: "pending"},
+	}
+
+	priorLaunched := map[string]bool{
+		"c-run-created-prior": true,
+		"c-pend-prior":        true,
+	}
+
+	order, states := deriveReconcileChunkStates(chunks, priorLaunched)
+	assert.Len(t, order, len(chunks))
+
+	assert.True(t, states["c-comp"].launched)
+	assert.True(t, states["c-comp"].codeReady)
+	assert.True(t, states["c-comp"].runtimeReady)
+
+	assert.True(t, states["c-m-pr"].launched)
+	assert.True(t, states["c-m-pr"].codeReady)
+	assert.False(t, states["c-m-pr"].runtimeReady)
+
+	assert.True(t, states["c-m-act"].launched)
+	assert.False(t, states["c-m-act"].codeReady)
+	assert.False(t, states["c-m-act"].runtimeReady)
+
+	assert.True(t, states["c-dep-pr"].codeReady)
+	assert.False(t, states["c-dep-act"].codeReady)
+
+	assert.True(t, states["c-prop"].launched)
+	assert.False(t, states["c-prop"].codeReady)
+
+	assert.True(t, states["c-cifail"].launched)
+	assert.True(t, states["c-conf"].launched)
+	assert.True(t, states["c-depfail"].launched)
+	assert.True(t, states["c-depfail"].codeReady)
+	assert.False(t, states["c-depfail"].runtimeReady)
+	assert.True(t, states["c-code"].launched)
+
+	// on "created", unlaunched running chunk without PRNumber is NOT launched yet
+	assert.False(t, states["c-run-created-new"].launched)
+	assert.True(t, states["c-run-created-prior"].launched)
+	assert.True(t, states["c-run-created-pr"].launched)
+
+	// pending chunks
+	assert.False(t, states["c-pend-new"].launched)
+	assert.True(t, states["c-pend-prior"].launched)
+}
+
+func TestBuildReconciler_ReconcileAndExecution(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	memStore := newMemoryVanadisStore()
+	memBus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = memBus.Close() })
+	srv := &VanadisServer{store: memStore, bus: memBus}
+	rec := NewBuildReconciler(srv)
+
+	// GetLaunched error
+	rtErrGet := newFakeObjectRuntime("b1")
+	rtErrGet.getLaunchedErr = errors.New("storage get error")
+	resErrGet, err := rec.reconcileWithRuntime(rtErrGet)
+	require.Error(t, err)
+	assert.Equal(t, "failed", resErrGet.Status)
+
+	// Step error
+	rtErrStep := newFakeObjectRuntime("b1")
+	rtErrStep.runStepErr = errors.New("step execution error")
+	resErrStep, err := rec.reconcileWithRuntime(rtErrStep)
+	require.Error(t, err)
+	assert.Equal(t, "failed", resErrStep.Status)
+
+	// Build not found returns terminal not_found and clears state
+	rtNotFound := newFakeObjectRuntime("b-missing")
+	resNotFound, err := rec.reconcileWithRuntime(rtNotFound)
+	require.NoError(t, err)
+	assert.Equal(t, "not_found", resNotFound.Status)
+	assert.True(t, rtNotFound.cleared)
+
+	// 2. Initial creation launch on "created"
+	bCreate := VanadisBuild{ID: "b-create", ThreadID: "th-1", Objective: "test create", Status: "pending"}
+	cCreate := []VanadisChunk{
+		{ID: "c0", BuildID: "b-create", ChunkIndex: 0, Mode: "pr", Status: "running"},
+		{ID: "c1", BuildID: "b-create", ChunkIndex: 1, Mode: "pr", Status: "pending", DependsOn: []string{"c0"}},
+	}
+	require.NoError(t, memStore.CreateBuild(ctx, bCreate, cCreate))
+
+	rtCreate := newFakeObjectRuntime("b-create")
+	resCreate, err := rec.reconcileWithRuntime(rtCreate)
+	require.NoError(t, err)
+	assert.Equal(t, "running", resCreate.Status)
+	assert.Equal(t, []string{"c0"}, resCreate.LaunchedChunks)
+	assert.True(t, rtCreate.launched["c0"])
+	assert.False(t, rtCreate.cleared)
+
+	// Verify build status was moved to "running"
+	bLoaded, _, err := memStore.GetBuild(ctx, "b-create")
+	require.NoError(t, err)
+	assert.Equal(t, "running", bLoaded.Status)
+
+	// 3. In-flight handover: running chunk already in Postgres does not double-launch on subsequent reconcile
+	resHandover, err := rec.reconcileWithRuntime(rtCreate)
+	require.NoError(t, err)
+	assert.Equal(t, "running", resHandover.Status)
+	assert.Empty(t, resHandover.LaunchedChunks)
+
+	// 4. PR chunk merged unblocks dependent PR chunk, but build stays running until deploy_success completes it
+	require.NoError(t, memStore.UpdateChunkStatus(ctx, "c0", "merged"))
+	resMerged, err := rec.reconcileWithRuntime(rtCreate)
+	require.NoError(t, err)
+	assert.Equal(t, "running", resMerged.Status)
+	assert.Equal(t, []string{"c1"}, resMerged.LaunchedChunks)
+	assert.True(t, rtCreate.launched["c1"])
+	assert.False(t, rtCreate.cleared)
+
+	// Complete both chunks -> completes build and clears state
+	require.NoError(t, memStore.UpdateChunkStatus(ctx, "c0", "completed"))
+	require.NoError(t, memStore.UpdateChunkStatus(ctx, "c1", "completed"))
+	resComp, err := rec.reconcileWithRuntime(rtCreate)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", resComp.Status)
+	assert.True(t, rtCreate.cleared)
+
+	// Reconcile already terminal build returns terminal status immediately
+	resAlreadyTerminal, err := rec.reconcileWithRuntime(rtCreate)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", resAlreadyTerminal.Status)
+}
+
+func TestBuildReconciler_EdgeCasesAndFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	memStore := newMemoryVanadisStore()
+	memBus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = memBus.Close() })
+	srv := &VanadisServer{store: memStore, bus: memBus}
+	rec := NewBuildReconciler(srv)
+
+	// 5. Action chunk dependency: dependent chunk only unblocks on action chunk completed
+	bAction := VanadisBuild{ID: "b-action", ThreadID: "th-act", Objective: "test action", Status: "running"}
+	cAction := []VanadisChunk{
+		{ID: "ca0", BuildID: "b-action", ChunkIndex: 0, Mode: "action", Status: "merged"},
+		{ID: "ca1", BuildID: "b-action", ChunkIndex: 1, Mode: "pr", Status: "pending", DependsOn: []string{"ca0"}},
+	}
+	require.NoError(t, memStore.CreateBuild(ctx, bAction, cAction))
+	rtAction := newFakeObjectRuntime("b-action")
+	resActMerged, err := rec.reconcileWithRuntime(rtAction)
+	require.NoError(t, err)
+	// ca0 is action chunk in "merged", so codeReady=false; ca1 cannot launch
+	assert.Empty(t, resActMerged.LaunchedChunks)
+
+	// When ca0 completes, ca1 launches
+	require.NoError(t, memStore.UpdateChunkStatus(ctx, "ca0", "completed"))
+	resActComp, err := rec.reconcileWithRuntime(rtAction)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ca1"}, resActComp.LaunchedChunks)
+
+	// 6. Chunk failure terminates build with failed status, dispatches fail wake, and clears state
+	bFail := VanadisBuild{ID: "b-fail-rec", ThreadID: "th-fail", Objective: "test fail", Status: "running"}
+	cFail := []VanadisChunk{
+		{ID: "cf0", BuildID: "b-fail-rec", ChunkIndex: 0, Mode: "pr", Status: "failed"},
+	}
+	require.NoError(t, memStore.CreateBuild(ctx, bFail, cFail))
+	rtFail := newFakeObjectRuntime("b-fail-rec")
+	resFail, err := rec.reconcileWithRuntime(rtFail)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", resFail.Status)
+	assert.Contains(t, resFail.Error, "chunk cf0 failed")
+	assert.True(t, rtFail.cleared)
+
+	bFailLoaded, _, err := memStore.GetBuild(ctx, "b-fail-rec")
+	require.NoError(t, err)
+	assert.Equal(t, "failed", bFailLoaded.Status)
+
+	// 7. Store failure branch in executeReconcileBuild
+	memStore.getErr = errors.New("db disconnect")
+	_, errStore := executeReconcileBuild(ctx, srv, "b-create", nil)
+	assert.Error(t, errStore)
+	memStore.getErr = nil
+
+	// 7b. Pending build status update failure
+	bPendingErr := VanadisBuild{ID: "b-pending-err", Status: "pending"}
+	cPendingErr := []VanadisChunk{{ID: "c-pe0", BuildID: "b-pending-err", ChunkIndex: 0, Mode: "pr", Status: "pending"}}
+	require.NoError(t, memStore.CreateBuild(ctx, bPendingErr, cPendingErr))
+	memStore.updateBuildErr = errors.New("cannot update build to running")
+	_, errPendingFail := executeReconcileBuild(ctx, srv, "b-pending-err", nil)
+	assert.Error(t, errPendingFail)
+	memStore.updateBuildErr = nil
+
+	// 7c. Complete build update failure
+	bCompErr := VanadisBuild{ID: "b-comp-err", Status: "running"}
+	cCompErr := []VanadisChunk{{ID: "cce0", BuildID: "b-comp-err", ChunkIndex: 0, Mode: "action", Status: "completed"}}
+	require.NoError(t, memStore.CreateBuild(ctx, bCompErr, cCompErr))
+	memStore.updateBuildErr = errors.New("cannot complete build")
+	_, errCompFail := executeReconcileBuild(ctx, srv, "b-comp-err", nil)
+	assert.Error(t, errCompFail)
+	memStore.updateBuildErr = nil
+
+	// 8. Launch chunk error branch in launchReconcileEligibleChunks
+	bLaunchErr := VanadisBuild{ID: "b-launch-err", ThreadID: "th-launch", Objective: "launch err", Status: "running"}
+	cLaunchErr := []VanadisChunk{
+		{ID: "cle0", BuildID: "b-launch-err", ChunkIndex: 0, Mode: "pr", Status: "pending"},
+	}
+	require.NoError(t, memStore.CreateBuild(ctx, bLaunchErr, cLaunchErr))
+	srvNoBus := &VanadisServer{store: memStore, bus: nil}
+	_, errLaunchFail := executeReconcileBuild(ctx, srvNoBus, "b-launch-err", nil)
+	assert.Error(t, errLaunchFail)
+
+	// 9. Fail build dispatch error and update status error branches
+	bDispatchErr := VanadisBuild{ID: "b-disp-err", ThreadID: "th-disp-err", Objective: "obj", Status: "running"}
+	cDispatchErr := []VanadisChunk{{ID: "c-de0", BuildID: "b-disp-err", ChunkIndex: 0, Mode: "pr", Status: "failed"}}
+	require.NoError(t, memStore.CreateBuild(ctx, bDispatchErr, cDispatchErr))
+	srvErrBrain := &VanadisServer{
+		cfg:   Config{BrainURL: "http://127.0.0.1:99999"}, // invalid brain port to trigger dErr != nil
+		store: memStore,
+		httpClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, errors.New("brain unavailable")
+		})},
+	}
+	resFailBrain, errFailBrain := executeReconcileBuild(ctx, srvErrBrain, "b-disp-err", nil)
+	require.NoError(t, errFailBrain)
+	assert.Equal(t, "failed", resFailBrain.BuildStatus)
+
+	// 10. Chunk failure in executeReconcileBuild with executeFailBuild error
+	bFailReconcileErr := VanadisBuild{ID: "b-fail-rec-err", Status: "running"}
+	cFailReconcileErr := []VanadisChunk{{ID: "c-fre0", BuildID: "b-fail-rec-err", Mode: "pr", Status: "failed"}}
+	require.NoError(t, memStore.CreateBuild(ctx, bFailReconcileErr, cFailReconcileErr))
+	memStore.updateBuildErr = errors.New("cannot update build to failed")
+	_, errRecFailBuild := executeReconcileBuild(ctx, srv, "b-fail-rec-err", nil)
+	assert.Error(t, errRecFailBuild)
+	memStore.updateBuildErr = nil
+}
+
+func TestReconcileBuild(t *testing.T) {
+	ctx := context.Background()
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"Accepted"}`))
+	}))
+	defer ts.Close()
+
+	memStore := newMemoryVanadisStore()
+	memBus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = memBus.Close() })
+	srv := &VanadisServer{
+		store:      memStore,
+		bus:        memBus,
+		restateCfg: RestateConfig{RestateIngressURL: ts.URL},
+		httpClient: ts.Client(),
+	}
+
+	require.NoError(t, srv.reconcileBuild(ctx, "b-rec", "created"))
+
+	assert.Equal(t, []string{
+		"/BuildReconciler/b-rec/Reconcile/send",
+	}, paths)
+
+	// Local reconciliation when Restate ingress is unconfigured
+	srvLocal := &VanadisServer{
+		store:      memStore,
+		bus:        memBus,
+		restateCfg: RestateConfig{RestateIngressURL: ""},
+	}
+	bLocal := VanadisBuild{ID: "b-local", Status: "running"}
+	cLocal := []VanadisChunk{{ID: "cl0", BuildID: "b-local", ChunkIndex: 0, Mode: "action", Status: "completed"}}
+	require.NoError(t, memStore.CreateBuild(ctx, bLocal, cLocal))
+	require.NoError(t, srvLocal.reconcileBuild(ctx, "b-local", "deploy_success"))
+	bFinished, _, err := memStore.GetBuild(ctx, "b-local")
+	require.NoError(t, err)
+	assert.Equal(t, "completed", bFinished.Status)
+
+	// Error branches
+	assert.Error(t, srvLocal.reconcileBuild(ctx, "", "deploy_success"))
+	var nilSrv *VanadisServer
+	assert.Error(t, nilSrv.reconcileBuild(ctx, "b-local", "deploy_success"))
 }

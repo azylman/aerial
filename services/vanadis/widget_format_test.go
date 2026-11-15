@@ -484,6 +484,10 @@ func (s *errVanadisStore) UpdateBuildStatusMessageID(ctx context.Context, buildI
 	return errors.New("simulated update status message id err")
 }
 
+func (s *errVanadisStore) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {
+	return errors.New("simulated reserve chunk for launch err")
+}
+
 type widgetMockMsgWithErrors struct {
 	payload   []byte
 	ackErr    error

@@ -250,6 +250,30 @@ func (m *memoryVanadisStore) UpdateChunkStatus(_ context.Context, chunkID, statu
 	return ErrChunkNotFound
 }
 
+func (m *memoryVanadisStore) ReserveChunkForLaunch(_ context.Context, chunkID string) error {
+	if m.updateChunkErr != nil {
+		return m.updateChunkErr
+	}
+	now := time.Now().UTC()
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].ID != chunkID {
+				continue
+			}
+			if !isTerminalChunkStatus(list[i].Status) && list[i].Status != "merged" {
+				list[i].Status = "running"
+				if list[i].StartedAt.IsZero() {
+					list[i].StartedAt = now
+				}
+			}
+			list[i].UpdatedAt = now
+			m.chunks[bID] = list
+			return nil
+		}
+	}
+	return ErrChunkNotFound
+}
+
 func (m *memoryVanadisStore) SetChunkAwakeables(_ context.Context, chunkID, mergeAwakeableID, deployAwakeableID string) error {
 	if m.updateChunkErr != nil {
 		return m.updateChunkErr

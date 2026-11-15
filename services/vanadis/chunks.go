@@ -1136,3 +1136,24 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 		"chunks":           remaining,
 	})
 }
+
+// ReserveChunkForLaunch transitions a pending or enqueued chunk to running, recording started_at if not already set.
+// It preserves later states such as pr_opened, coding, deploying, and deploy_failed, along with terminal statuses.
+func (s *PostgresVanadisStore) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {
+	if s == nil || s.db == nil {
+		return errors.New("database connection is nil")
+	}
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return errors.New("chunk id cannot be empty")
+	}
+	const q = `UPDATE vanadis_chunks SET status = CASE WHEN status IN ('pending', 'queued') THEN 'running' ELSE status END, started_at = CASE WHEN status IN ('pending', 'queued') THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
+	tag, err := s.db.Exec(ctx, q, chunkID)
+	if err != nil {
+		return fmt.Errorf("reserve chunk %s for launch: %w", chunkID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrChunkNotFound
+	}
+	return nil
+}
