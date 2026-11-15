@@ -484,7 +484,7 @@ func findNextUnmergedChunkIdx(list []VanadisChunk, currentChunkIdx int) int {
 	nextChunkIdx := -1
 	fallbackIdx := -1
 	for _, cs := range list {
-		if isChunkDoneStatus(cs.Status) {
+		if isChunkMergedOrDoneStatus(cs.Status) {
 			continue
 		}
 		if cs.ChunkIndex > currentChunkIdx && (nextChunkIdx == -1 || cs.ChunkIndex < nextChunkIdx) {
@@ -548,9 +548,11 @@ func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, pr
 		}, nil
 	}
 
-	wasMerged := target.Status == "merged"
+	wasMerged := isChunkDoneStatus(target.Status)
 	now := time.Now().UTC()
-	list[idx].Status = "merged"
+	if !wasMerged {
+		list[idx].Status = "merged"
+	}
 	if list[idx].CompletedAt.IsZero() {
 		list[idx].CompletedAt = now
 	}

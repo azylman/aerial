@@ -51,7 +51,7 @@ func (s *PostgresVanadisStore) RecordPRRolloutState(ctx context.Context, chunkID
 		return errors.New("chunk_id cannot be empty")
 	}
 	rsJSON := marshalJSONBOrEmpty(rolloutState)
-	const q = `UPDATE vanadis_chunks SET rollout_state = $1::jsonb, status = CASE WHEN $2 != '' THEN $2 ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`
+	const q = `UPDATE vanadis_chunks SET rollout_state = $1::jsonb, status = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN status WHEN $2 != '' THEN $2 ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`
 	tag, err := s.db.Exec(ctx, q, rsJSON, strings.TrimSpace(status), chunkID)
 	if err != nil {
 		return fmt.Errorf("record pr rollout state: %w", err)
@@ -363,7 +363,7 @@ func (s *VanadisServer) handlePRCheckUpdated(ctx context.Context, ev pubsub.PRLi
 
 func (s *VanadisServer) handlePRRolloutUpdated(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
 	status := ""
-	if ev.Event == "deploy_started" {
+	if ev.Event == "deploy_started" && chunk.Status != "completed" && chunk.Status != "failed" && chunk.Status != "cancelled" {
 		status = "deploying"
 	}
 	if ev.RolloutState != nil {
