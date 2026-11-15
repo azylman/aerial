@@ -31,21 +31,153 @@ type mockRow struct {
 	err error
 }
 
+// fillBuildDest answers scanBuild's 11 destinations; any other shape is a drifted query.
 func fillBuildDest(b VanadisBuild, dest []any) error {
-	if len(dest) == 11 {
-		return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
+	if len(dest) != 11 {
+		return fmt.Errorf("scan build: %d destinations, want 11", len(dest))
 	}
-	return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.CreatedAt, b.UpdatedAt)
+	return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
 }
 
 func (r *mockRow) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
 	}
-	if r.b != nil && (len(dest) == 10 || len(dest) == 11) {
+	if r.b != nil {
 		return fillBuildDest(*r.b, dest)
 	}
 	return nil
+}
+
+// sqlTopLevel walks sql and calls visit for every byte outside string literals
+// and parentheses, stopping early when visit returns false.
+func sqlTopLevel(sql string, visit func(i int) bool) {
+	depth, inStr := 0, false
+	for i := range len(sql) {
+		switch c := sql[i]; {
+		case c == '\'':
+			inStr = !inStr
+		case inStr:
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+		case depth == 0 && !visit(i):
+			return
+		}
+	}
+}
+
+// sqlKeywordAt reports whether upper holds the keyword w as a whole word at i.
+func sqlKeywordAt(upper string, i int, w string) bool {
+	ident := func(j int) bool {
+		if j < 0 || j >= len(upper) {
+			return false
+		}
+		c := upper[j]
+		return c == '_' || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	}
+	return strings.HasPrefix(upper[i:], w) && !ident(i-1) && !ident(i+len(w))
+}
+
+// selectedColumnCount returns how many columns sql yields: the top-level
+// RETURNING list when present, else the top-level SELECT list. Commas nested in
+// parentheses or string literals do not split columns. It returns 0 when sql
+// yields no column list (plain INSERT/UPDATE/DELETE).
+func selectedColumnCount(sql string) int {
+	upper := strings.ToUpper(sql)
+	var start int
+	end := len(sql)
+	selectEnd, fromAt, returningEnd := -1, -1, -1
+	sqlTopLevel(upper, func(i int) bool {
+		switch {
+		case selectEnd < 0 && sqlKeywordAt(upper, i, "SELECT"):
+			selectEnd = i + len("SELECT")
+		case selectEnd >= 0 && fromAt < 0 && sqlKeywordAt(upper, i, "FROM"):
+			fromAt = i
+		case sqlKeywordAt(upper, i, "RETURNING"):
+			returningEnd = i + len("RETURNING")
+		}
+		return true
+	})
+	switch {
+	case returningEnd >= 0:
+		start = returningEnd
+	case selectEnd >= 0:
+		start = selectEnd
+		if fromAt >= 0 {
+			end = fromAt
+		}
+	default:
+		return 0
+	}
+	list := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(sql[start:end]), ";"))
+	if list == "" {
+		return 0
+	}
+	cols := 1
+	sqlTopLevel(list, func(i int) bool {
+		if list[i] == ',' {
+			cols++
+		}
+		return true
+	})
+	return cols
+}
+
+// checkColumnCount rejects a Scan whose destination count differs from the
+// columns the SQL selects, mirroring pgx's column-count mismatch error.
+func checkColumnCount(cols int, dest []any) error {
+	if cols > 0 && cols != len(dest) {
+		return fmt.Errorf("number of field descriptions must equal number of destinations, got %d and %d", cols, len(dest))
+	}
+	return nil
+}
+
+// columnCheckedRow wraps a scripted pgx.Row with its SQL's selected column count.
+type columnCheckedRow struct {
+	pgx.Row
+
+	cols int
+}
+
+func (r columnCheckedRow) Scan(dest ...any) error {
+	if err := checkColumnCount(r.cols, dest); err != nil {
+		return err
+	}
+	return r.Row.Scan(dest...)
+}
+
+// columnCheckedRows wraps scripted pgx.Rows with their SQL's selected column count.
+type columnCheckedRows struct {
+	pgx.Rows
+
+	cols int
+}
+
+func (r columnCheckedRows) Scan(dest ...any) error {
+	if err := checkColumnCount(r.cols, dest); err != nil {
+		return err
+	}
+	return r.Rows.Scan(dest...)
+}
+
+// checkedQuery and checkedQueryRow apply the column-count check to whatever a
+// scripted mock returns, so every store test catches SQL/Scan drift.
+func checkedQuery(sql string) func(pgx.Rows, error) (pgx.Rows, error) {
+	return func(rows pgx.Rows, err error) (pgx.Rows, error) {
+		if err != nil || rows == nil {
+			return rows, err
+		}
+		return columnCheckedRows{Rows: rows, cols: selectedColumnCount(sql)}, nil
+	}
+}
+
+func checkedQueryRow(sql string, row pgx.Row) pgx.Row {
+	if row == nil {
+		return nil
+	}
+	return columnCheckedRow{Row: row, cols: selectedColumnCount(sql)}
 }
 
 type mockRows struct {
@@ -113,14 +245,14 @@ func (t *mockTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comm
 
 func (t *mockTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	if t.queryFn != nil {
-		return t.queryFn(ctx, sql, args...)
+		return checkedQuery(sql)(t.queryFn(ctx, sql, args...))
 	}
 	return &mockRows{}, nil
 }
 
 func (t *mockTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	if t.queryRowFn != nil {
-		return t.queryRowFn(ctx, sql, args...)
+		return checkedQueryRow(sql, t.queryRowFn(ctx, sql, args...))
 	}
 	return &mockRow{}
 }
@@ -143,14 +275,14 @@ func (db *mockDB) Exec(ctx context.Context, s string, a ...any) (pgconn.CommandT
 
 func (db *mockDB) Query(ctx context.Context, s string, a ...any) (pgx.Rows, error) {
 	if db.queryFn != nil {
-		return db.queryFn(ctx, s, a...)
+		return checkedQuery(s)(db.queryFn(ctx, s, a...))
 	}
 	return &mockRows{}, nil
 }
 
 func (db *mockDB) QueryRow(ctx context.Context, s string, a ...any) pgx.Row {
 	if db.queryRowFn != nil {
-		return db.queryRowFn(ctx, s, a...)
+		return checkedQueryRow(s, db.queryRowFn(ctx, s, a...))
 	}
 	return &mockRow{}
 }

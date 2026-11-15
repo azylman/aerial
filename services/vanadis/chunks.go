@@ -192,7 +192,7 @@ func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*V
 		return nil, nil, ErrChunkNotFound
 	}
 	c := chunks[0]
-	const buildQuery = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at FROM vanadis_builds WHERE id = $1;`
+	const buildQuery = `SELECT ` + buildColumns + ` FROM vanadis_builds WHERE id = $1;`
 	b, err := scanBuild(s.db.QueryRow(ctx, buildQuery, c.BuildID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -406,7 +406,7 @@ func (s *PostgresVanadisStore) UpdateBuild(ctx context.Context, buildID string, 
 		}
 	}()
 
-	const buildQuery = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, created_at, updated_at FROM vanadis_builds WHERE id = $1 FOR UPDATE;`
+	const buildQuery = `SELECT ` + buildColumns + ` FROM vanadis_builds WHERE id = $1 FOR UPDATE;`
 	b, err := scanBuild(tx.QueryRow(ctx, buildQuery, buildID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -441,7 +441,7 @@ func (s *PostgresVanadisStore) UpdateBuild(ctx context.Context, buildID string, 
 }
 
 func lockRunningBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) ([]VanadisChunk, error) {
-	const buildQuery = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at FROM vanadis_builds WHERE id = $1 FOR UPDATE;`
+	const buildQuery = `SELECT ` + buildColumns + ` FROM vanadis_builds WHERE id = $1 FOR UPDATE;`
 	b, err := scanBuild(tx.QueryRow(ctx, buildQuery, buildID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
