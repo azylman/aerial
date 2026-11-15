@@ -424,6 +424,7 @@ spec:
                   - console
                   - prospera
                   - victoriametrics
+                  - vmsingle
                   - vision
                   - gatus
                   - scratch-service

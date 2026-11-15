@@ -742,6 +742,36 @@ subjects:
     name: victoriametrics-sa
     namespace: default
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: victoriametrics-sa
+  namespace: default
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: victoriametrics-sa
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: victoriametrics-sa
+subjects:
+  - kind: ServiceAccount
+    name: victoriametrics-sa
+    namespace: default
+---
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMServiceScrape
 metadata:
@@ -758,32 +788,32 @@ spec:
       relabelConfigs:
         - action: keep
           regex: "true"
-          source_labels:
+          sourceLabels:
             - __meta_kubernetes_service_annotation_prometheus_io_scrape
         - action: keep_if_equal
-          source_labels:
+          sourceLabels:
             - __meta_kubernetes_service_port_number
             - __meta_kubernetes_service_annotation_prometheus_io_port
         - action: replace
           regex: (.+)
-          source_labels:
+          sourceLabels:
             - __meta_kubernetes_service_annotation_prometheus_io_path
-          target_label: __metrics_path__
+          targetLabel: __metrics_path__
         - action: replace
           regex: (.+);(.+)
           replacement: $1:$2
-          source_labels:
+          sourceLabels:
             - __meta_kubernetes_service_name
             - __meta_kubernetes_service_annotation_prometheus_io_port
-          target_label: __address__
+          targetLabel: __address__
         - action: replace
-          source_labels:
+          sourceLabels:
             - __meta_kubernetes_service_name
-          target_label: job
+          targetLabel: job
         - action: replace
-          source_labels:
+          sourceLabels:
             - __meta_kubernetes_service_name
-          target_label: instance
+          targetLabel: instance
         - action: labelmap
           regex: __meta_kubernetes_service_annotation_prometheus_io_label_(.+)
 ---
