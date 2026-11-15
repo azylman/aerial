@@ -612,7 +612,7 @@ func matchGitWorktreeOrSubmodule(dir string, match func(string) bool) bool {
 	if !filepath.IsAbs(gitDir) {
 		gitDir = filepath.Join(dir, gitDir)
 	}
-	if cfgData, err := os.ReadFile(filepath.Join(gitDir, "config")); err == nil && match(string(cfgData)) {
+	if cfgData, readFileErr := os.ReadFile(filepath.Join(gitDir, "config")); readFileErr == nil && match(string(cfgData)) {
 		return true
 	}
 	commonData, err := os.ReadFile(filepath.Join(gitDir, "commondir"))

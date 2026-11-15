@@ -1036,7 +1036,7 @@ func GetScheduleRunsPaginated(ctx context.Context, database *sql.DB, limit, offs
 
 	countQuery := "SELECT COUNT(*) FROM schedule_runs" + whereClause
 	var total int
-	if err := database.QueryRowContext(ctx, countQuery, filterArgs...).Scan(&total); err != nil {
+	if err = database.QueryRowContext(ctx, countQuery, filterArgs...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("failed to count schedule runs: %w", err)
 	}
 

@@ -825,7 +825,7 @@ func scanLinesForResponse(ctx context.Context, lines []string, since time.Time) 
 		if ctx != nil && ctx.Err() != nil {
 			return ""
 		}
-		line := strings.TrimSpace(line)
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -1023,7 +1023,7 @@ func getLastStepIndex(filePath string) (int, error) {
 
 		lines := strings.Split(strings.TrimRight(string(buf[:n]), "\r\n"), "\n")
 		for _, line := range slices.Backward(lines) {
-			line := strings.TrimSpace(line)
+			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
 			}

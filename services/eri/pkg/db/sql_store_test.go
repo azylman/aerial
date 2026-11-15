@@ -93,8 +93,8 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 
 	_ = store.InsertMessage(ctx, Message{ID: "m-proc-1", ThreadID: "t1", Status: StatusProcessing})
 	_ = store.InsertMessage(ctx, Message{ID: "m-proc-2", ThreadID: "t1", Status: StatusProcessing})
-	if msgs, err := store.GetPendingOrProcessingMessages(ctx, 1); err != nil || len(msgs) != 1 {
-		t.Fatalf("expected limit truncation to 1, got %d (err: %v)", len(msgs), err)
+	if msgs, getErr := store.GetPendingOrProcessingMessages(ctx, 1); getErr != nil || len(msgs) != 1 {
+		t.Fatalf("expected limit truncation to 1, got %d (err: %v)", len(msgs), getErr)
 	}
 
 	tmpPath := filepath.Join(t.TempDir(), "closed-delegation.db")

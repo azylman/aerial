@@ -798,7 +798,7 @@ func (m *memoryVanadisStore) UpdateChunk(_ context.Context, buildID, chunkRef st
 	if c.Status != "pending" {
 		return nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", ErrBuildConflict, c.ID, c.Status)
 	}
-	if err := applyChunkUpdates(&c, req, normEffort); err != nil {
+	if err = applyChunkUpdates(&c, req, normEffort); err != nil {
 		return nil, err
 	}
 	normDeps, err := validateUpdateChunkDAG(list, idx, c)

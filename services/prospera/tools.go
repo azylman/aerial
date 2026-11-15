@@ -174,7 +174,7 @@ func (h *ToolHandler) InitiateCall(ctx context.Context, args InitiateCallArgs) (
 		maxConcurrent = cfg.MaxConcurrentCalls
 	}
 
-	if err := h.store.CreateOutboundCall(ctx, call, maxConcurrent); err != nil {
+	if err = h.store.CreateOutboundCall(ctx, call, maxConcurrent); err != nil {
 		return InitiateCallOutput{}, fmt.Errorf("initiate_call: store create call: %w", err)
 	}
 

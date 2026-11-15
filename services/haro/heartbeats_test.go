@@ -185,7 +185,7 @@ func testHeartbeatListAndUpdate(ctx context.Context, t *testing.T, db *sql.DB, h
 
 	hb1.TitlePrefix = "Updated Title"
 	hb1.Effort = "high"
-	if err := UpdateHeartbeatSchedule(ctx, db, hb1); err != nil {
+	if err = UpdateHeartbeatSchedule(ctx, db, hb1); err != nil {
 		t.Fatalf("UpdateHeartbeatSchedule failed: %v", err)
 	}
 	updated, err := GetHeartbeatSchedule(ctx, db, "hb-op-1")
@@ -218,17 +218,17 @@ func testHeartbeatDueAdvanceDelete(ctx context.Context, t *testing.T, db *sql.DB
 	}
 
 	nextTime := now.Add(2 * time.Hour)
-	if err := AdvanceHeartbeatNextRun(ctx, db, "hb-op-1", nextTime); err != nil {
+	if err = AdvanceHeartbeatNextRun(ctx, db, "hb-op-1", nextTime); err != nil {
 		t.Fatalf("AdvanceHeartbeatNextRun failed: %v", err)
 	}
 	advanced, _ := GetHeartbeatSchedule(ctx, db, "hb-op-1")
 	if !advanced.NextRunAt.Equal(nextTime) {
 		t.Errorf("advanced NextRunAt = %v, want %v", advanced.NextRunAt, nextTime)
 	}
-	if err := AdvanceHeartbeatNextRun(ctx, db, "missing", nextTime); err == nil {
+	if err = AdvanceHeartbeatNextRun(ctx, db, "missing", nextTime); err == nil {
 		t.Error("expected error advancing missing heartbeat")
 	}
-	if err := AdvanceHeartbeatNextRun(ctx, db, "  ", nextTime); err == nil {
+	if err = AdvanceHeartbeatNextRun(ctx, db, "  ", nextTime); err == nil {
 		t.Error("expected error advancing empty id")
 	}
 

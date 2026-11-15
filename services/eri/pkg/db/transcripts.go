@@ -126,8 +126,8 @@ func (s *SQLTranscriptStore) checkWriter() error {
 
 func (s *SQLTranscriptStore) GetSessionSyncStates(ctx context.Context) (results map[string]SessionSyncState, err error) {
 	defer recordTranscriptQuery("get_session_sync_states", time.Now(), &err)
-	if err := s.checkWriter(); err != nil {
-		return nil, err
+	if checkWriterErr := s.checkWriter(); checkWriterErr != nil {
+		return nil, checkWriterErr
 	}
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -163,8 +163,8 @@ func (s *SQLTranscriptStore) GetSessionSyncStates(ctx context.Context) (results 
 
 func (s *SQLTranscriptStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) (err error) {
 	defer recordTranscriptQuery("upsert_session_summary", time.Now(), &err)
-	if err := s.checkWriter(); err != nil {
-		return err
+	if checkWriterErr := s.checkWriter(); checkWriterErr != nil {
+		return checkWriterErr
 	}
 	if strings.TrimSpace(summary.SessionID) == "" {
 		return fmt.Errorf("session ID cannot be empty")
@@ -294,8 +294,8 @@ func (s *SQLTranscriptStore) BackfillToolKinds(ctx context.Context, mapper func(
 func (s *SQLTranscriptStore) backfillToolKinds(ctx context.Context, mapper func(string) string, batchSize int, budget time.Duration) (updated int64, err error) {
 	start := time.Now()
 	defer recordTranscriptQuery("backfill_tool_kinds", start, &err)
-	if err := s.checkWriter(); err != nil {
-		return 0, err
+	if checkWriterErr := s.checkWriter(); checkWriterErr != nil {
+		return 0, checkWriterErr
 	}
 	if mapper == nil {
 		return 0, fmt.Errorf("tool kind mapper cannot be nil")
@@ -369,8 +369,8 @@ const sessionEngineBatchSize = 500
 // It returns the number of sessions updated.
 func (s *SQLTranscriptStore) BackfillSessionEngines(ctx context.Context, infer func(toolNames []string) string) (updated int64, err error) {
 	defer recordTranscriptQuery("backfill_session_engines", time.Now(), &err)
-	if err := s.checkWriter(); err != nil {
-		return 0, err
+	if checkWriterErr := s.checkWriter(); checkWriterErr != nil {
+		return 0, checkWriterErr
 	}
 	if infer == nil {
 		return 0, fmt.Errorf("engine inference func cannot be nil")
@@ -720,8 +720,8 @@ func buildSearchTranscriptStepsQuery(stack, queryText, sessionFilter, toolFilter
 
 func (s *SQLTranscriptStore) SearchTranscriptSteps(ctx context.Context, stack, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) (results []TranscriptStep, err error) {
 	defer recordTranscriptQuery("search_transcript_steps", time.Now(), &err)
-	if err := s.checkDB(); err != nil {
-		return nil, err
+	if checkDBErr := s.checkDB(); checkDBErr != nil {
+		return nil, checkDBErr
 	}
 	stack = strings.TrimSpace(stack)
 	queryText, sessionFilter, toolFilter = strings.TrimSpace(queryText), strings.TrimSpace(sessionFilter), strings.TrimSpace(toolFilter)
@@ -749,8 +749,8 @@ func (s *SQLTranscriptStore) SearchTranscriptSteps(ctx context.Context, stack, q
 
 func (s *SQLTranscriptStore) GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) (results []TranscriptStep, err error) {
 	defer recordTranscriptQuery("get_transcript_step_range", time.Now(), &err)
-	if err := s.checkDB(); err != nil {
-		return nil, err
+	if checkDBErr := s.checkDB(); checkDBErr != nil {
+		return nil, checkDBErr
 	}
 	stack, sessionID = strings.TrimSpace(stack), strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -779,8 +779,8 @@ ORDER BY t.stack ASC, t.step_index ASC;`
 // covers every stack in the shared index.
 func (s *SQLTranscriptStore) GetTranscriptStats(ctx context.Context, stack string) (results []TranscriptStackStats, err error) {
 	defer recordTranscriptQuery("get_transcript_stats", time.Now(), &err)
-	if err := s.checkDB(); err != nil {
-		return nil, err
+	if checkDBErr := s.checkDB(); checkDBErr != nil {
+		return nil, checkDBErr
 	}
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()

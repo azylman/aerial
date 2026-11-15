@@ -504,8 +504,8 @@ func (b *JetStreamBus) ensureDurableConsumer(ctx context.Context, subject, durab
 		desired.OptStartSeq = info.AckFloor.Stream + 1
 		log.Printf("[pubsub] migrating consumer %s/%s (filter %q, group %q) to bound deliver group, resuming at stream seq %d",
 			stream, durable, info.Config.FilterSubject, info.Config.DeliverGroup, desired.OptStartSeq)
-		if err := b.js.DeleteConsumer(stream, durable, opts...); err != nil && !errors.Is(err, nats.ErrConsumerNotFound) {
-			return "", fmt.Errorf("delete incompatible consumer %s/%s: %w", stream, durable, err)
+		if deleteConsumerErr := b.js.DeleteConsumer(stream, durable, opts...); deleteConsumerErr != nil && !errors.Is(deleteConsumerErr, nats.ErrConsumerNotFound) {
+			return "", fmt.Errorf("delete incompatible consumer %s/%s: %w", stream, durable, deleteConsumerErr)
 		}
 	case !errors.Is(err, nats.ErrConsumerNotFound):
 		return "", fmt.Errorf("consumer info %s/%s: %w", stream, durable, err)

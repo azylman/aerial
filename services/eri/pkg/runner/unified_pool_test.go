@@ -254,7 +254,7 @@ func TestUnifiedProcessPool_GetOrCreateAndReuse(t *testing.T) {
 	if err != nil || d1 != d2 || reuseSpawnCount.Load() != 1 {
 		t.Fatalf("reuse failed: d1=%p d2=%p count=%d", d1, d2, reuseSpawnCount.Load())
 	}
-	if err := d1.Close(); err != nil {
+	if err = d1.Close(); err != nil {
 		t.Fatalf("failed closing d1: %v", err)
 	}
 	d3, err := reusePool.GetOrCreate(ctx, "thread-1", "")

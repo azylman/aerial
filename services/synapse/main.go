@@ -794,9 +794,9 @@ func runServer(ctx context.Context, cfgSrc *httpkit.Reloadable[Config], onReady 
 
 	var dbPool *pgxpool.Pool
 	if cfg.PostgresURL != "" {
-		pool, err := setupPostgres(ctx, server, cfg.PostgresURL)
-		if err != nil {
-			return err
+		pool, setupPostgresErr := setupPostgres(ctx, server, cfg.PostgresURL)
+		if setupPostgresErr != nil {
+			return setupPostgresErr
 		}
 		dbPool = pool
 		defer dbPool.Close()

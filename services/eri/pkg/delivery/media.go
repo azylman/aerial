@@ -716,7 +716,7 @@ func ResolveAndValidateLocalImage(rawPath string, baseDir string) (*Attachment, 
 	}
 
 	// 7. Read full file data into memory buffer
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
+	if _, err = f.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("failed to rewind file: %w", err)
 	}
 

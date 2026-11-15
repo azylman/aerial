@@ -137,9 +137,13 @@ linters:
       enable:
         - nilness
         - reflectvaluecompare
+        - shadow
         - sortslice
         - timeformat
         - unusedwrite
+      settings:
+        shadow:
+          strict: false
     modernize:
       disable:
         - omitzero

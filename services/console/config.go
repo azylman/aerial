@@ -264,8 +264,8 @@ func LoadConfigFile(path string, lookup func(string) string) (ConsoleConfig, err
 	if kubeAPIServer == "" {
 		host := strings.TrimSpace(lookup("KUBERNETES_SERVICE_HOST"))
 		if host != "" {
-			port := firstNonEmptyPort(lookup("KUBERNETES_SERVICE_PORT"), "443")
-			kubeAPIServer = "https://" + net.JoinHostPort(host, port)
+			kubePort := firstNonEmptyPort(lookup("KUBERNETES_SERVICE_PORT"), "443")
+			kubeAPIServer = "https://" + net.JoinHostPort(host, kubePort)
 		}
 	}
 

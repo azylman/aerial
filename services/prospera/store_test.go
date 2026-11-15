@@ -587,7 +587,7 @@ func TestPGStore_VoiceMessages(t *testing.T) {
 		ToNumber:   "+15105550199",
 		Body:       "reminder",
 	}
-	if _, err := store.SaveVoiceMessage(ctx, msgZero); err != nil {
+	if _, err = store.SaveVoiceMessage(ctx, msgZero); err != nil {
 		t.Fatalf("SaveVoiceMessage(msgZero) error = %v", err)
 	}
 

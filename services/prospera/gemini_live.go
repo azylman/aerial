@@ -71,7 +71,7 @@ func (c *HTTPContextConsultClient) ConsultCalendar(ctx context.Context, _ string
 		return "", err
 	}
 	if sessionID != "" {
-		if _, _, err := c.doMCPRequest(ctx, sessionID, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)); err != nil {
+		if _, _, err = c.doMCPRequest(ctx, sessionID, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)); err != nil {
 			return "", err
 		}
 	}
