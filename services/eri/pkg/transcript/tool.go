@@ -8,10 +8,17 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
+// Transcript search modes.
+const (
+	searchModeAuto     = "auto"
+	searchModeSteps    = "steps"
+	searchModeSessions = "sessions"
+)
+
 func normalizeSearchMode(mode string) string {
 	normalized := strings.ToLower(strings.TrimSpace(mode))
-	if normalized != "sessions" && normalized != "steps" {
-		return "auto"
+	if normalized != searchModeSessions && normalized != searchModeSteps {
+		return searchModeAuto
 	}
 	return normalized
 }
@@ -65,7 +72,7 @@ func ExecuteTranscriptSearch(
 
 	normalizedMode := normalizeSearchMode(opts.Mode)
 
-	if trimmedQuery == "" && (normalizedMode != "steps" || sessID == "") {
+	if trimmedQuery == "" && (normalizedMode != searchModeSteps || sessID == "") {
 		return SearchResult{
 			Query: trimmedQuery,
 			Mode:  normalizedMode,
@@ -78,7 +85,7 @@ func ExecuteTranscriptSearch(
 	}
 
 	// 1. Session Summaries Search
-	if (normalizedMode == "sessions" || normalizedMode == "auto") && trimmedQuery != "" {
+	if (normalizedMode == searchModeSessions || normalizedMode == searchModeAuto) && trimmedQuery != "" {
 		sessions, err := searchSessionSummariesHelper(ctx, store, embedder, opts.Stack, trimmedQuery, limit)
 		if err != nil {
 			return SearchResult{}, fmt.Errorf("search session summaries: %w", err)
@@ -90,7 +97,7 @@ func ExecuteTranscriptSearch(
 	}
 
 	// 2. Transcript Steps Search
-	if normalizedMode == "steps" || normalizedMode == "auto" {
+	if normalizedMode == searchModeSteps || normalizedMode == searchModeAuto {
 		steps, err := store.SearchTranscriptSteps(ctx, opts.Stack, trimmedQuery, sessID, opts.ToolFilter, limit, opts.Since)
 		if err != nil {
 			return SearchResult{}, fmt.Errorf("search transcript steps: %w", err)

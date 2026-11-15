@@ -229,10 +229,6 @@ linters:
           - maintidx
           - nestif
         path: services/synapse/pr_lifecycle_events_test\.go
-      # Temporary: eri's goconst cleanup lands in the next build chunk, which removes this rule.
-      - linters:
-          - goconst
-        path: services/eri/
       - linters:
           - containedctx
         path: services/eri/pkg/(queue/(pool|worker)|runner/(interchangeable_pool|streaming_daemon|unified_pool))\.go

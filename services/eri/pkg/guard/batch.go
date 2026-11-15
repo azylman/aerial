@@ -14,6 +14,18 @@ import (
 	"time"
 )
 
+// Invocation categories tracked by the batch guard.
+const (
+	categoryRead = "read"
+	categoryEdit = "edit"
+)
+
+// Environment variable names that hold the scratch workspace path.
+const (
+	envScratchDir        = "SCRATCH_DIR"
+	envScratchDirCompact = "SCRATCHDIR"
+)
+
 const (
 	// DefaultBatchDir is the canonical temporary directory for batch guard conversation states.
 	DefaultBatchDir = "/tmp/aerial-batch-guard"
@@ -40,17 +52,17 @@ var (
 	rootSharedPkgs       = map[string]bool{"httpkit": true, "ollama": true, "pgutil": true, "sanitizer": true}
 	unscopedTargets      = map[string]bool{"./...": true, "brain/...": true, "services/eri/...": true, "...": true}
 	gitGlobalValFlags    = map[string]bool{"-C": true, "-c": true, "--git-dir": true, "--work-tree": true, "--namespace": true, "--super-prefix": true, "--config-env": true}
-	gitStatusFormatFlags = map[string]bool{"--short": true, "--porcelain": true, "--long": true, "--help": true, "-h": true, "-v": true, "--verbose": true}
-	gitDiffSummaryFlags  = map[string]bool{"--stat": true, "--shortstat": true, "--numstat": true, "--summary": true, "--name-only": true, "--name-status": true, "--dirstat": true, "--check": true, "--quiet": true, "--exit-code": true, "-s": true, "--no-patch": true, "-h": true, "--help": true}
+	gitStatusFormatFlags = map[string]bool{"--short": true, "--porcelain": true, "--long": true, flagHelp: true, "-h": true, "-v": true, "--verbose": true}
+	gitDiffSummaryFlags  = map[string]bool{"--stat": true, "--shortstat": true, "--numstat": true, "--summary": true, "--name-only": true, "--name-status": true, "--dirstat": true, "--check": true, flagQuiet: true, "--exit-code": true, "-s": true, "--no-patch": true, "-h": true, flagHelp: true}
 	gitDiffValFlags      = map[string]bool{"-U": true, "--unified": true, "-O": true, "-S": true, "-G": true, "--diff-filter": true, "--inter-hunk-context": true}
 	scratchVarPrefixes   = []struct {
 		prefix string
 		envKey string
 	}{
-		{"${SCRATCH_DIR}", "SCRATCH_DIR"},
-		{"$SCRATCH_DIR", "SCRATCH_DIR"},
-		{"${SCRATCHDIR}", "SCRATCHDIR"},
-		{"$SCRATCHDIR", "SCRATCHDIR"},
+		{"${SCRATCH_DIR}", envScratchDir},
+		{"$SCRATCH_DIR", envScratchDir},
+		{"${SCRATCHDIR}", envScratchDirCompact},
+		{"$SCRATCHDIR", envScratchDirCompact},
 	}
 )
 
@@ -134,7 +146,7 @@ func stripLeadingEnv(fields []string) []string {
 
 func isUnscopedVerify(args []string) bool {
 	for _, f := range args {
-		if f == "--staged" || f == "-h" || f == "--help" {
+		if f == "--staged" || f == "-h" || f == flagHelp {
 			return false
 		}
 	}
@@ -209,9 +221,9 @@ func splitSubmoduleTestTarget(pkgArg string) (modDir, relPkg string, ok bool) {
 			rest = parts[2]
 		}
 		return parts[0] + "/" + parts[1], formatSubmoduleRelPkg(rest), true
-	case "pkg":
+	case dirPkg:
 		if rootSharedPkgs[parts[1]] {
-			return "pkg", "./" + strings.TrimPrefix(trimmed, "pkg/"), true
+			return dirPkg, "./" + strings.TrimPrefix(trimmed, "pkg/"), true
 		}
 	}
 	return "", "", false
@@ -306,9 +318,9 @@ func isUnbatchedGitMutation(cmd string) bool {
 	}
 
 	parts := strings.Fields(trimmed)
-	if len(parts) >= 2 && parts[0] == "git" {
+	if len(parts) >= 2 && parts[0] == binGit {
 		sub := parts[1]
-		if sub == "add" || sub == "commit" {
+		if sub == "add" || sub == gitSubcommandCommit {
 			return true
 		}
 	}
@@ -322,7 +334,7 @@ func expandScratchEnvPrefix(p string) string {
 			rest := strings.TrimPrefix(p, sv.prefix)
 			base := filepath.ToSlash(strings.TrimSpace(os.Getenv(sv.envKey)))
 			if base == "" {
-				base = "/share/aerial"
+				base = sharedEngineRoot
 			}
 			return strings.TrimRight(base, "/") + rest
 		}
@@ -359,10 +371,10 @@ func normalizeBatchTarget(path string) string {
 			return "/share/" + repo + "/" + strings.Join(parts[i+1:], "/")
 		}
 	}
-	for _, key := range []string{"SCRATCH_DIR", "SCRATCHDIR"} {
+	for _, key := range []string{envScratchDir, envScratchDirCompact} {
 		envDir := strings.TrimRight(filepath.ToSlash(strings.TrimSpace(os.Getenv(key))), "/")
 		if envDir != "" && envDir != "/" && strings.HasPrefix(p, envDir+"/") {
-			return "/share/aerial" + strings.TrimPrefix(p, envDir)
+			return sharedEngineRoot + strings.TrimPrefix(p, envDir)
 		}
 	}
 	return p
@@ -370,11 +382,11 @@ func normalizeBatchTarget(path string) string {
 
 func categorizeInvocation(toolName string, args ToolArgs) (category, target string) {
 	switch normalizeToolName(toolName) {
-	case "view_file", "read_file", "read":
-		return "read", normalizeBatchTarget(args.FilePath())
-	case "replace_file_content", "write_to_file", "edit_file", "write_file", "edit", "multiedit", "write":
-		return "edit", normalizeBatchTarget(args.FilePath())
-	case "run_command", "bash":
+	case toolViewFile, toolReadFile, toolRead:
+		return categoryRead, normalizeBatchTarget(args.FilePath())
+	case toolReplaceFileContent, toolWriteToFile, toolEditFile, toolWriteFile, toolEdit, toolMultiEdit, toolWrite:
+		return categoryEdit, normalizeBatchTarget(args.FilePath())
+	case toolRunCommand, toolBash:
 		cmd := strings.TrimSpace(args.CommandLine)
 		if isUnscopedTest(cmd) {
 			return "unscoped_test", cmd
@@ -534,14 +546,14 @@ func opportunisticGC(dir string, now time.Time) {
 func readsSinceLastTargetEdit(records []ToolInvocation, target string) []ToolInvocation {
 	startIdx := 0
 	for i, record := range slices.Backward(records) {
-		if record.Category == "edit" && record.Target == target {
+		if record.Category == categoryEdit && record.Target == target {
 			startIdx = i + 1
 			break
 		}
 	}
 	var reads []ToolInvocation
 	for _, r := range records[startIdx:] {
-		if r.Category == "read" && r.Target == target && r.StartLine > 0 && r.EndLine >= r.StartLine {
+		if r.Category == categoryRead && r.Target == target && r.StartLine > 0 && r.EndLine >= r.StartLine {
 			reads = append(reads, r)
 		}
 	}
@@ -631,7 +643,7 @@ func overwriteCommandLine(d *Decision, cmdLine string) {
 	if rewritten == cmdLine {
 		return
 	}
-	d.Overwrite = map[string]any{"CommandLine": rewritten}
+	d.Overwrite = map[string]any{argCommandLine: rewritten}
 }
 
 // CheckBatch evaluates tool batching and thrash invariants using the active state directory and system time.
@@ -669,7 +681,7 @@ func shapeGitStatus(cmdLine string) string {
 	for _, seg := range splitPipelineWithOffsets(cmdLine) {
 		tokens := tokenizeWithOffsets(seg.text, seg.offset)
 		idx := skipEnvAndDockerExec(tokens)
-		if idx >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != "git" {
+		if idx >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != binGit {
 			continue
 		}
 		subIdx := findGitSubcommand(tokens, idx)
@@ -693,7 +705,7 @@ func shapeGitStatus(cmdLine string) string {
 func isGitLogBounded(args []locatedToken) bool {
 	for _, tok := range args {
 		val := strings.TrimRight(tok.value, ")")
-		if val == "-n" || val == "--max-count" || val == "-h" || val == "--help" || strings.HasPrefix(val, "--max-count=") {
+		if val == "-n" || val == flagMaxCount || val == "-h" || val == flagHelp || strings.HasPrefix(val, "--max-count=") {
 			return true
 		}
 		if strings.HasPrefix(val, "-n") && len(val) > 2 && val[2] >= '0' && val[2] <= '9' {
@@ -755,7 +767,7 @@ func inspectGitBatchCommand(cmdLine string) *Decision {
 	for _, seg := range splitPipelineWithOffsets(cmdLine) {
 		tokens := tokenizeWithOffsets(seg.text, seg.offset)
 		idx := skipEnvAndDockerExec(tokens)
-		if idx >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != "git" {
+		if idx >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != binGit {
 			continue
 		}
 		subIdx := findGitSubcommand(tokens, idx)
@@ -781,7 +793,7 @@ func inspectGitBatchCommand(cmdLine string) *Decision {
 }
 
 func checkStatelessBatchRules(normalizedTool string, args ToolArgs) *Decision {
-	if normalizedTool == "run_command" || normalizedTool == "bash" {
+	if normalizedTool == toolRunCommand || normalizedTool == toolBash {
 		if isUnscopedTest(args.CommandLine) {
 			return &Decision{
 				Decision: DecisionDeny,
@@ -798,7 +810,7 @@ func checkStatelessBatchRules(normalizedTool string, args ToolArgs) *Decision {
 			return dec
 		}
 	}
-	if (normalizedTool == "read_file" || normalizedTool == "view_file" || normalizedTool == "read") && isTranscriptLogPath(args.FilePath()) {
+	if (normalizedTool == toolReadFile || normalizedTool == toolViewFile || normalizedTool == toolRead) && isTranscriptLogPath(args.FilePath()) {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Direct read_file/view_file on raw session transcripts (transcript*.jsonl) is prohibited because each JSONL line can exceed 30KB and floods the context window. Use the 'transcript-search' CLI skill or targeted 'jq' / 'rg -m 20' queries via run_command instead.",
@@ -843,13 +855,13 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 
 		effStart, effEnd := args.StartLine, args.EndLine
 		var readOverwritten bool
-		if category == "read" {
+		if category == categoryRead {
 			effStart, effEnd, readOverwritten = shapeReadFileRange(target, args.StartLine, args.EndLine, priorRecords)
 		}
 
 		// Allowed: invalidate prior reads on edit and record invocation
-		if category == "edit" && target != "" {
-			state.Records = removeTargetInvocations(state.Records, "read", target)
+		if category == categoryEdit && target != "" {
+			state.Records = removeTargetInvocations(state.Records, categoryRead, target)
 		}
 		inv := ToolInvocation{
 			Timestamp: ts,
@@ -871,7 +883,7 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		decision = &Decision{Decision: DecisionAllow}
 		if readOverwritten {
 			overwriteReadRange(decision, effStart, effEnd)
-		} else if normalizedTool == "run_command" || normalizedTool == "bash" {
+		} else if normalizedTool == toolRunCommand || normalizedTool == toolBash {
 			overwriteCommandLine(decision, args.CommandLine)
 		}
 		return nil
@@ -906,7 +918,7 @@ func RecordPreInvocationWithDir(payload Payload, dir string, now time.Time) *Inv
 func rollbackFailedEdit(records []ToolInvocation, target string, stepIdx int) ([]ToolInvocation, bool) {
 	matchIdx := -1
 	for i, record := range slices.Backward(records) {
-		if record.Category == "edit" && record.Target == target {
+		if record.Category == categoryEdit && record.Target == target {
 			if stepIdx <= 0 || record.StepIdx == stepIdx {
 				return append(records[:i], records[i+1:]...), true
 			} else if matchIdx < 0 {
@@ -988,7 +1000,7 @@ func reapOrphanedChildProcessGroups(procDir string, parentPID, selfPID int, sign
 
 func resolveProcDir(dir string) string {
 	if dir == DefaultBatchDir {
-		return "/proc"
+		return procRoot
 	}
 	return filepath.Join(dir, "proc")
 }
@@ -1007,10 +1019,10 @@ func RecordPostBatch(payload Payload, args ToolArgs) *InvocationResponse {
 // and reaps orphaned background command process groups on successful terminal submit commands.
 func RecordPostBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *InvocationResponse {
 	normTool := normalizeToolName(payload.ToolCall.Name)
-	if strings.TrimSpace(payload.Error) == "" && (normTool == "run_command" || normTool == "bash") && isTerminalSubmitCommand(args.CommandLine) {
+	if strings.TrimSpace(payload.Error) == "" && (normTool == toolRunCommand || normTool == toolBash) && isTerminalSubmitCommand(args.CommandLine) {
 		reapOrphanedParentChildren(resolveProcDir(dir))
 	}
-	if cat, target := categorizeInvocation(payload.ToolCall.Name, args); strings.TrimSpace(payload.Error) != "" && cat == "edit" && target != "" {
+	if cat, target := categorizeInvocation(payload.ToolCall.Name, args); strings.TrimSpace(payload.Error) != "" && cat == categoryEdit && target != "" {
 		safeID := sanitizeID(payload.ConversationID)
 		if err := withStateLock(dir, safeID, func() error {
 			state := loadState(dir, safeID, now)

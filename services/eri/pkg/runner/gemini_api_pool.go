@@ -24,6 +24,14 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 )
 
+// Gemini schema and content vocabulary.
+const (
+	schemaKeyType    = "type"
+	schemaTypeObject = "OBJECT"
+	roleUser         = "user"
+	roleModel        = "model"
+)
+
 var apiKeyQueryRegex = regexp.MustCompile(`([?&]key=)[^&]+`)
 
 type (
@@ -37,10 +45,10 @@ type (
 
 func cleanParameters(schema map[string]any) map[string]any {
 	res := cleanSchemaNode(schema)
-	if t, ok := res["type"].(string); !ok || t == "" {
-		res["type"] = "OBJECT"
+	if t, ok := res[schemaKeyType].(string); !ok || t == "" {
+		res[schemaKeyType] = schemaTypeObject
 	}
-	if res["type"] == "OBJECT" && res["properties"] == nil {
+	if res[schemaKeyType] == schemaTypeObject && res["properties"] == nil {
 		res["properties"] = map[string]any{}
 	}
 	return res
@@ -126,25 +134,25 @@ func parseSliceTypes(types []string) (string, bool) {
 		}
 	}
 	if primaryType == "" {
-		primaryType = "OBJECT"
+		primaryType = schemaTypeObject
 	}
 	return primaryType, isNullable
 }
 
 func normalizeSchemaTypeField(cp map[string]any) {
-	if types, ok := toStringSlice(cp["type"]); ok {
+	if types, ok := toStringSlice(cp[schemaKeyType]); ok {
 		primaryType, isNullable := parseSliceTypes(types)
-		cp["type"] = primaryType
+		cp[schemaKeyType] = primaryType
 		if isNullable {
 			cp["nullable"] = true
 		}
 		return
 	}
-	if t, ok := cp["type"].(string); ok {
+	if t, ok := cp[schemaKeyType].(string); ok {
 		if strings.EqualFold(t, "null") {
-			cp["type"], cp["nullable"] = "OBJECT", true
+			cp[schemaKeyType], cp["nullable"] = schemaTypeObject, true
 		} else {
-			cp["type"] = normalizeSchemaType(t)
+			cp[schemaKeyType] = normalizeSchemaType(t)
 		}
 	}
 }
@@ -154,7 +162,7 @@ func findNullableUnionTarget(items []map[string]any) map[string]any {
 		return nil
 	}
 	isNull := func(m map[string]any) bool {
-		t, ok := m["type"].(string)
+		t, ok := m[schemaKeyType].(string)
 		return ok && strings.EqualFold(t, "null")
 	}
 	if isNull(items[0]) && !isNull(items[1]) {
@@ -182,12 +190,12 @@ func collapseNullableUnion(cp map[string]any, unionKey string) {
 	delete(cp, unionKey)
 	cleanedNonNull := cleanSchemaNode(nonNull)
 	for k, v := range cleanedNonNull {
-		if _, exists := cp[k]; !exists || k == "type" {
+		if _, exists := cp[k]; !exists || k == schemaKeyType {
 			cp[k] = v
 		}
 	}
-	if t, ok := cleanedNonNull["type"]; ok {
-		cp["type"] = t
+	if t, ok := cleanedNonNull[schemaKeyType]; ok {
+		cp[schemaKeyType] = t
 	}
 	cp["nullable"] = true
 }
@@ -225,7 +233,7 @@ func cleanSchemaItemsAndUnions(cp map[string]any) {
 
 func cleanSchemaNode(schema map[string]any) map[string]any {
 	if schema == nil {
-		return map[string]any{"type": "OBJECT"}
+		return map[string]any{schemaKeyType: schemaTypeObject}
 	}
 	cp := make(map[string]any, len(schema))
 	for k, v := range schema {
@@ -240,10 +248,10 @@ func cleanSchemaNode(schema map[string]any) map[string]any {
 	}
 	cleanSchemaProperties(cp)
 	cleanSchemaItemsAndUnions(cp)
-	if t, ok := cp["type"].(string); (!ok || t == "") && cp["anyOf"] == nil && cp["oneOf"] == nil && cp["allOf"] == nil {
-		cp["type"] = "OBJECT"
+	if t, ok := cp[schemaKeyType].(string); (!ok || t == "") && cp["anyOf"] == nil && cp["oneOf"] == nil && cp["allOf"] == nil {
+		cp[schemaKeyType] = schemaTypeObject
 	}
-	if cp["type"] == "OBJECT" && cp["properties"] == nil {
+	if cp[schemaKeyType] == schemaTypeObject && cp["properties"] == nil {
 		cp["properties"] = map[string]any{}
 	}
 	return cp
@@ -554,9 +562,9 @@ func (s *GeminiAPISession) hydrateHistory() {
 		role := ""
 		switch entry.Type {
 		case "USER_INPUT":
-			role = "user"
+			role = roleUser
 		case "PLANNER_RESPONSE":
-			role = "model"
+			role = roleModel
 		}
 		if role != "" {
 			loaded = append(loaded, geminiContent{Role: role, Parts: []geminiPart{{Text: entry.Content}}})
@@ -585,8 +593,8 @@ func (s *GeminiAPISession) appendTranscript(userPrompt, modelResponse string) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	u, err1 := json.Marshal(map[string]any{"source": "USER_EXPLICIT", "type": "USER_INPUT", "content": userPrompt, "created_at": now})
-	m, err2 := json.Marshal(map[string]any{"source": "MODEL", "type": "PLANNER_RESPONSE", "content": modelResponse, "created_at": now})
+	u, err1 := json.Marshal(map[string]any{"source": "USER_EXPLICIT", fieldType: "USER_INPUT", fieldContent: userPrompt, "created_at": now})
+	m, err2 := json.Marshal(map[string]any{"source": "MODEL", fieldType: "PLANNER_RESPONSE", fieldContent: modelResponse, "created_at": now})
 	if err1 != nil || err2 != nil {
 		return
 	}
@@ -748,7 +756,7 @@ func (s *GeminiAPISession) buildStreamEndpoint() (string, *http.Client, *geminiC
 }
 
 func (s *GeminiAPISession) recordRateLimitMetric(body []byte, rErr error) {
-	targetModel := "default"
+	targetModel := defaultModelLabel
 	if s.pool != nil && s.pool.cfg.Model != "" {
 		targetModel = s.pool.cfg.Model
 	}
@@ -833,7 +841,7 @@ func (s *GeminiAPISession) executeSingleToolCall(ctx context.Context, dispatcher
 	}
 	status := "ok"
 	if execErr != nil {
-		status = "error"
+		status = statusError
 	}
 	canonicalTool, mcpServer := ExtractMCPToolInfo(fc.Name, fc.Args)
 	if turn != nil && turn.Sink != nil {
@@ -841,7 +849,7 @@ func (s *GeminiAPISession) executeSingleToolCall(ctx context.Context, dispatcher
 	}
 	respMap := map[string]any{"output": toolOutput}
 	if execErr != nil {
-		respMap = map[string]any{"error": execErr.Error()}
+		respMap = map[string]any{fieldError: execErr.Error()}
 	}
 	return geminiPart{FunctionResponse: &geminiFunctionResp{Name: fc.Name, Response: respMap}}
 }
@@ -892,8 +900,8 @@ func (s *GeminiAPISession) runEmptyTextFallbackStream(ctx context.Context, clien
 func (s *GeminiAPISession) finalizeTurnHistory(prompt, resText string, totalUsage AgyUsage, turn *TurnContext) {
 	if strings.TrimSpace(resText) != "" {
 		s.history = append(s.history,
-			geminiContent{Role: "user", Parts: []geminiPart{{Text: prompt}}},
-			geminiContent{Role: "model", Parts: []geminiPart{{Text: resText}}},
+			geminiContent{Role: roleUser, Parts: []geminiPart{{Text: prompt}}},
+			geminiContent{Role: roleModel, Parts: []geminiPart{{Text: resText}}},
 		)
 	}
 	maxTurns := 10
@@ -938,7 +946,7 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 	tools, dispatcher, payloadPrompt := s.resolveTurnToolsAndPrompt(ctx, prompt, turn)
 
 	workingContents := append(append([]geminiContent(nil), s.history...), geminiContent{
-		Role:  "user",
+		Role:  roleUser,
 		Parts: []geminiPart{{Text: payloadPrompt}},
 	})
 
@@ -974,8 +982,8 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 
 		modelParts, funcParts := s.executePendingToolCalls(ctx, dispatcher, pendingParts, turn)
 		workingContents = append(workingContents,
-			geminiContent{Role: "model", Parts: modelParts},
-			geminiContent{Role: "user", Parts: funcParts},
+			geminiContent{Role: roleModel, Parts: modelParts},
+			geminiContent{Role: roleUser, Parts: funcParts},
 		)
 	}
 

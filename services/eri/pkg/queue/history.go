@@ -21,6 +21,12 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
+// Speaker roles rendered in channel history.
+const (
+	roleUser      = "User"
+	roleAssistant = "Assistant"
+)
+
 const (
 	maxHistoryAge                  = 4 * time.Hour
 	maxHistoryContentRunes         = 1000
@@ -160,16 +166,16 @@ func formatHistoryAuthor(m HistoryMessage) (string, string) {
 	}, strings.TrimSpace(m.AuthorName))
 	role := strings.TrimSpace(m.Role)
 	if role == "" {
-		role = "User"
+		role = roleUser
 	}
 	if author == "" {
-		if role == "Assistant" {
+		if role == roleAssistant {
 			author = "Aerial"
 		} else {
-			author = "User"
+			author = roleUser
 		}
 	}
-	if role == "User" && !strings.HasPrefix(author, "@") {
+	if role == roleUser && !strings.HasPrefix(author, "@") {
 		author = "@" + author
 	}
 	return author, role
@@ -217,12 +223,12 @@ func fetchDiscordHistory(ctx context.Context, dg *discordgo.Session, metricSourc
 	}
 	discordMsgs, err := fetchDiscordChannelMessagesWithRetry(ctx, dg, channelID, before, limit)
 	if err != nil {
-		metrics.RecordChannelHistoryFetch(metricSource, "error", time.Since(start), 0)
+		metrics.RecordChannelHistoryFetch(metricSource, outcomeError, time.Since(start), 0)
 		log.Printf("[Queue] Discord ChannelMessages failed for %s after %d attempts: %v", channelID, historyFetchMaxAttempts, err)
 		return nil, err
 	}
 	results := convertDiscordMessagesToHistory(dg, discordMsgs)
-	metrics.RecordChannelHistoryFetch(metricSource, "success", time.Since(start), len(results))
+	metrics.RecordChannelHistoryFetch(metricSource, outcomeSuccess, time.Since(start), len(results))
 	return results, nil
 }
 
@@ -249,11 +255,11 @@ func convertDiscordMessagesToHistory(dg *discordgo.Session, discordMsgs []*disco
 			continue
 		}
 		dbm := convertDiscordMessageToDBMessage(dm, "", discordMsgs...)
-		role, authorName := "User", "User"
+		role, authorName := roleUser, roleUser
 		if dm.Author != nil {
 			authorName = dbm.AuthorName
 			if (botUserID != "" && dm.Author.ID == botUserID) || strings.EqualFold(dm.Author.Username, botUsername) || strings.EqualFold(dm.Author.Username, "aerial") {
-				role = "Assistant"
+				role = roleAssistant
 			} else if dm.Author.Bot {
 				role = "Bot"
 			}

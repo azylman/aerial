@@ -12,6 +12,30 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 )
 
+// Widget status values shared by the accent, badge and progress helpers.
+const (
+	statusRunning        = "running"
+	statusCoding         = "coding"
+	statusPending        = "pending"
+	statusOpen           = "open"
+	statusPROpened       = "pr_opened"
+	statusMerged         = "merged"
+	statusSynced         = "synced"
+	statusDeploying      = "deploying"
+	statusDeployed       = "deployed"
+	statusCompleted      = "completed"
+	statusSuccess        = "success"
+	statusGreen          = "green"
+	statusFailed         = "failed"
+	statusConflict       = "conflict"
+	statusClosed         = "closed"
+	statusError          = "error"
+	statusCancelled      = "cancelled"
+	statusCancelledError = "cancelled_error"
+	statusPaused         = "paused"
+	statusStalled        = "stalled"
+)
+
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
 type StatusWidgetChunk struct {
 	ID            string    `json:"id,omitempty"`
@@ -91,13 +115,13 @@ func shouldSinkWidget(s DiscordWidgetSender, channelID, messageID string, now ti
 func AccentColor(status string) int {
 	norm := strings.ToLower(strings.TrimSpace(status))
 	switch norm {
-	case "completed", "deployed", "success", "green":
+	case statusCompleted, statusDeployed, statusSuccess, statusGreen:
 		return 0x10B981 // emerald
-	case "failed", "conflict", "closed", "error", "cancelled_error":
+	case statusFailed, statusConflict, statusClosed, statusError, statusCancelledError:
 		return 0xEF4444 // crimson
-	case "paused", "stalled", "cancelled":
+	case statusPaused, statusStalled, statusCancelled:
 		return 0xF59E0B // amber
-	case "running", "coding", "deploying", "open", "pr_opened", "merged", "synced", "pending":
+	case statusRunning, statusCoding, statusDeploying, statusOpen, statusPROpened, statusMerged, statusSynced, statusPending:
 		fallthrough
 	default:
 		return 0xA855F7 // purple
@@ -107,21 +131,21 @@ func AccentColor(status string) int {
 func statusBadge(status string) string {
 	norm := strings.ToLower(strings.TrimSpace(status))
 	switch norm {
-	case "running", "coding":
+	case statusRunning, statusCoding:
 		return "🔨"
-	case "pr_opened", "open":
+	case statusPROpened, statusOpen:
 		return "👀"
-	case "merged":
+	case statusMerged:
 		return "🔀"
-	case "synced":
+	case statusSynced:
 		return "🔄"
-	case "deploying":
+	case statusDeploying:
 		return "🚀"
-	case "deployed", "completed", "success":
+	case statusDeployed, statusCompleted, statusSuccess:
 		return "✅"
-	case "failed", "conflict", "error":
+	case statusFailed, statusConflict, statusError:
 		return "❌"
-	case "pending":
+	case statusPending:
 		fallthrough
 	default:
 		return "⏳"
@@ -172,9 +196,9 @@ func formatChunkRuntimeSuffix(c StatusWidgetChunk) string {
 	}
 	norm := strings.ToLower(strings.TrimSpace(c.Status))
 	switch norm {
-	case "running", "coding", "pr_opened", "open", "merged", "synced", "deploying":
+	case statusRunning, statusCoding, statusPROpened, statusOpen, statusMerged, statusSynced, statusDeploying:
 		return fmt.Sprintf(" *(started <t:%d:R>)*", c.StartedAt.Unix())
-	case "deployed", "completed", "success", "failed", "conflict", "closed", "error", "cancelled":
+	case statusDeployed, statusCompleted, statusSuccess, statusFailed, statusConflict, statusClosed, statusError, statusCancelled:
 		end := c.CompletedAt
 		if end.IsZero() {
 			end = c.UpdatedAt
@@ -223,7 +247,7 @@ func collapseCompletedWidgetChunks(chunks []StatusWidgetChunk) ([]StatusWidgetCh
 
 	for i, c := range chunks {
 		norm := strings.ToLower(strings.TrimSpace(c.Status))
-		isCompleted := (norm == "merged" || norm == "deployed" || norm == "completed" || norm == "success")
+		isCompleted := (norm == statusMerged || norm == statusDeployed || norm == statusCompleted || norm == statusSuccess)
 		if isCompleted && i < len(chunks)-5 {
 			collapsedMerged = append(collapsedMerged, c)
 		} else {
@@ -311,7 +335,7 @@ func resolveWidgetStartedAt(req StatusWidgetRequest) time.Time {
 func isWidgetCompleted(req StatusWidgetRequest) bool {
 	status := strings.ToLower(strings.TrimSpace(req.Status))
 	switch status {
-	case "completed", "deployed", "success", "green":
+	case statusCompleted, statusDeployed, statusSuccess, statusGreen:
 	default:
 		return false
 	}
@@ -319,7 +343,7 @@ func isWidgetCompleted(req StatusWidgetRequest) bool {
 	for _, c := range req.Chunks {
 		chunkStatus := strings.ToLower(strings.TrimSpace(c.Status))
 		switch chunkStatus {
-		case "running", "coding", "pr_opened", "open", "merged", "synced", "deploying", "pending":
+		case statusRunning, statusCoding, statusPROpened, statusOpen, statusMerged, statusSynced, statusDeploying, statusPending:
 			return false
 		}
 	}

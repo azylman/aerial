@@ -253,7 +253,7 @@ func getOrCreateThreadID(ctx context.Context, s *discordgo.Session, m *discordgo
 		if IsThreadAlreadyExistsError(err) && queue.IsNumericSnowflake(m.ID) {
 			return recoverExistingThreadOnConflict(s, m.ID, m.ChannelID, guildID)
 		}
-		metrics.RecordThreadCreated("error")
+		metrics.RecordThreadCreated(outcomeError)
 		log.Printf("Failed to create Discord thread for message %s (channel %s): %v", m.ID, m.ChannelID, err)
 		return m.ChannelID, false
 	}

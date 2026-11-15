@@ -412,7 +412,7 @@ func inspectPsqlPipeline(cmdLine string, describer SQLDescriber) *Decision {
 	if rewritten != cmdLine {
 		return &Decision{
 			Decision:  DecisionAllow,
-			Overwrite: map[string]any{"CommandLine": rewritten},
+			Overwrite: map[string]any{argCommandLine: rewritten},
 		}
 	}
 	return &Decision{Decision: DecisionAllow}

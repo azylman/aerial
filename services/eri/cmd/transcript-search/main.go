@@ -17,6 +17,12 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
+// Subcommands: get fetches one session's transcript; search is the default.
+const (
+	subcommandGet    = "get"
+	subcommandSearch = "search"
+)
+
 type CLIConfig struct {
 	Command string
 	Query   string
@@ -37,10 +43,10 @@ func splitSubcommandAndArgs(args []string) (string, []string, error) {
 	}
 	first := args[0]
 	switch first {
-	case "stats", "search", "get":
+	case "stats", subcommandSearch, subcommandGet:
 		return first, args[1:], nil
 	default:
-		return "search", args, nil
+		return subcommandSearch, args, nil
 	}
 }
 
@@ -82,7 +88,7 @@ func validateParsedCLIConfig(cfg *CLIConfig, positional []string) error {
 	if cfg.Context < 0 {
 		return fmt.Errorf("context window size must be non-negative")
 	}
-	if cfg.Command == "get" {
+	if cfg.Command == subcommandGet {
 		if strings.TrimSpace(cfg.Session) == "" && len(positional) > 0 {
 			cfg.Session = positional[0]
 		}
@@ -93,7 +99,7 @@ func validateParsedCLIConfig(cfg *CLIConfig, positional []string) error {
 			return fmt.Errorf("step index is required and must be non-negative for get command (usage: transcript-search get --session <id> --step <N>)")
 		}
 	}
-	if cfg.Command == "search" && cfg.Query == "" && len(positional) > 0 {
+	if cfg.Command == subcommandSearch && cfg.Query == "" && len(positional) > 0 {
 		cfg.Query = strings.Join(positional, " ")
 	}
 	return nil
@@ -429,7 +435,7 @@ func runCLI(ctx context.Context, args []string, out io.Writer) error {
 	switch cfg.Command {
 	case "stats":
 		return runStatsCLI(ctx, cfg, out)
-	case "get":
+	case subcommandGet:
 		return runGetCLI(ctx, cfg, out)
 	default:
 		return runSearchCLI(ctx, cfg, out)

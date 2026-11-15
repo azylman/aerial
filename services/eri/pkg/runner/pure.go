@@ -15,6 +15,18 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
+// defaultDaemonTargetKey replaces a daemon target key that sanitizes to empty.
+const defaultDaemonTargetKey = "default"
+
+// mcpServerNative labels tool calls that are not routed through an MCP server.
+const mcpServerNative = "native"
+
+// mcpServerUnknown and toolNameUnknown label tool calls whose server or name cannot be resolved.
+const (
+	mcpServerUnknown = "unknown"
+	toolNameUnknown  = "unknown"
+)
+
 // AgyEnvInput holds environment configuration parameters.
 type AgyEnvInput struct {
 	BaseEnv        []string
@@ -188,7 +200,7 @@ func mcpTraceEnv(port, daemonID string) []string {
 func SanitizeDaemonTargetKey(targetKey string) string {
 	trimmed := strings.TrimSpace(targetKey)
 	if trimmed == "" {
-		return "default"
+		return defaultDaemonTargetKey
 	}
 	var sb strings.Builder
 	for _, r := range trimmed {
@@ -200,7 +212,7 @@ func SanitizeDaemonTargetKey(targetKey string) string {
 	}
 	out := sb.String()
 	if out == "" {
-		return "default"
+		return defaultDaemonTargetKey
 	}
 	return out
 }
@@ -220,7 +232,7 @@ func ParseInitEvent(line string) (string, bool) {
 		return "", false
 	}
 	var probe sessionProbe
-	if json.Unmarshal([]byte(trimmed), &probe) == nil && (probe.Event == "init" || probe.Type == "init") && probe.extractUUID() != "" {
+	if json.Unmarshal([]byte(trimmed), &probe) == nil && (probe.Event == eventInit || probe.Type == eventInit) && probe.extractUUID() != "" {
 		return probe.extractUUID(), true
 	}
 	return "", false
@@ -237,7 +249,7 @@ func CleanUnescapedString(s string) string {
 
 func extractCallMCPToolInfo(params map[string]any) (string, string) {
 	if params == nil {
-		return "call_mcp_tool", "unknown"
+		return toolCallMCPTool, mcpServerUnknown
 	}
 	var sName, tName string
 	if s, ok := params["ServerName"].(string); ok {
@@ -250,20 +262,20 @@ func extractCallMCPToolInfo(params map[string]any) (string, string) {
 		return tName, sName
 	}
 	if tName != "" {
-		return tName, "unknown"
+		return tName, mcpServerUnknown
 	}
 	if sName != "" {
-		return "call_mcp_tool", sName
+		return toolCallMCPTool, sName
 	}
-	return "call_mcp_tool", "unknown"
+	return toolCallMCPTool, mcpServerUnknown
 }
 
 // ExtractMCPToolInfo extracts the canonical tool name and MCP server namespace.
 func ExtractMCPToolInfo(toolName string, params map[string]any) (string, string) {
 	if toolName = strings.TrimSpace(toolName); toolName == "" {
-		return "unknown", "native"
+		return toolNameUnknown, mcpServerNative
 	}
-	if toolName == "call_mcp_tool" {
+	if toolName == toolCallMCPTool {
 		return extractCallMCPToolInfo(params)
 	}
 	if strings.HasPrefix(toolName, "mcp__") {
@@ -272,7 +284,7 @@ func ExtractMCPToolInfo(toolName string, params map[string]any) (string, string)
 			return parts[1], parts[0]
 		}
 		if len(parts) == 1 && parts[0] != "" {
-			return parts[0], "unknown"
+			return parts[0], mcpServerUnknown
 		}
 	}
 	if strings.HasPrefix(toolName, "mcp_") {
@@ -281,16 +293,16 @@ func ExtractMCPToolInfo(toolName string, params map[string]any) (string, string)
 			return parts[1], parts[0]
 		}
 		if len(parts) == 1 && parts[0] != "" {
-			return parts[0], "unknown"
+			return parts[0], mcpServerUnknown
 		}
 	}
-	return toolName, "native"
+	return toolName, mcpServerNative
 }
 
 // mcpCallTarget maps ExtractMCPToolInfo's result to the MCP server and tool of an MCP call,
 // or "", "" for native tools and calls whose server is unknown.
 func mcpCallTarget(canonicalTool, mcpServer string) (server, tool string) {
-	if mcpServer == "native" || mcpServer == "unknown" {
+	if mcpServer == mcpServerNative || mcpServer == mcpServerUnknown {
 		return "", ""
 	}
 	return mcpServer, canonicalTool

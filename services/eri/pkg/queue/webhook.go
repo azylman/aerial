@@ -157,7 +157,7 @@ func validateWebhookDispatchArgs(d *DefaultWebhookDispatcher, endpoint *config.W
 
 func classifyWebhookDispatchStatus(ctx, timeoutCtx context.Context, err error) string {
 	if err == nil {
-		return "success"
+		return outcomeSuccess
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "timeout"
@@ -165,7 +165,7 @@ func classifyWebhookDispatchStatus(ctx, timeoutCtx context.Context, err error) s
 	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 		return "canceled"
 	}
-	return "error"
+	return outcomeError
 }
 
 func readAndDecodeWebhookResponse(httpResp *http.Response, respDest any) error {
@@ -287,7 +287,7 @@ func buildPostTurnRequest(te *turnExecution) *PostTurnRequest {
 	}
 	status := te.turnStatus
 	if status == "" {
-		status = "failed"
+		status = outcomeFailed
 	}
 	return &PostTurnRequest{
 		ChannelID: channelID, ThreadID: te.threadID, Status: status,

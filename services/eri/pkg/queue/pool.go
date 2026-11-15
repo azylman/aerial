@@ -61,26 +61,26 @@ type PoolKey struct {
 // AllValidPoolKeys returns the 5 valid Discord PoolKey combinations in deterministic order.
 func AllValidPoolKeys() []PoolKey {
 	return []PoolKey{
-		{Ephemeral: false, Effort: "high"},
-		{Ephemeral: false, Effort: "medium"},
-		{Ephemeral: false, Effort: "low"},
-		{Ephemeral: true, Effort: "medium"},
-		{Ephemeral: true, Effort: "low"},
+		{Ephemeral: false, Effort: config.EffortHigh},
+		{Ephemeral: false, Effort: config.EffortMedium},
+		{Ephemeral: false, Effort: config.EffortLow},
+		{Ephemeral: true, Effort: config.EffortMedium},
+		{Ephemeral: true, Effort: config.EffortLow},
 	}
 }
 
 // ResolvePoolKey normalizes effort and resolves the target PoolKey, rejecting (ephemeral: true, effort: "high").
 func ResolvePoolKey(ephemeral *bool, effort string) (PoolKey, error) {
 	eff := strings.ToLower(strings.TrimSpace(effort))
-	if eff != "low" && eff != "medium" {
-		eff = "high"
+	if eff != config.EffortLow && eff != config.EffortMedium {
+		eff = config.EffortHigh
 	}
-	isEphem := eff == "low" || eff == "medium"
+	isEphem := eff == config.EffortLow || eff == config.EffortMedium
 	if ephemeral != nil {
 		isEphem = *ephemeral
 	}
-	if isEphem && eff == "high" {
-		return PoolKey{Ephemeral: true, Effort: "high"}, errors.New("ephemeral: true cannot be combined with high effort")
+	if isEphem && eff == config.EffortHigh {
+		return PoolKey{Ephemeral: true, Effort: config.EffortHigh}, errors.New("ephemeral: true cannot be combined with high effort")
 	}
 	return PoolKey{Ephemeral: isEphem, Effort: eff}, nil
 }
@@ -288,9 +288,9 @@ func initWorkerPools(appCfg *config.Config, isExplicitAppCfg bool, cfg WorkerPoo
 			pools[k] = cfg.Pools[k]
 		}
 	}
-	highKey := PoolKey{Ephemeral: false, Effort: "high"}
-	lowEphemKey := PoolKey{Ephemeral: true, Effort: "low"}
-	medEphemKey := PoolKey{Ephemeral: true, Effort: "medium"}
+	highKey := PoolKey{Ephemeral: false, Effort: config.EffortHigh}
+	lowEphemKey := PoolKey{Ephemeral: true, Effort: config.EffortLow}
+	medEphemKey := PoolKey{Ephemeral: true, Effort: config.EffortMedium}
 	if pools[highKey] == nil && cfg.ProcessPool != nil {
 		pools[highKey] = cfg.ProcessPool
 	}
@@ -428,9 +428,9 @@ func applyWorkerPoolServiceDefaults(appCfg *config.Config, cfg *WorkerPoolConfig
 // resolveDefaultSummarizerLLM resolves an EphemeralLLMFunc for summarization from configured agent pools.
 func resolveDefaultSummarizerLLM(pools map[PoolKey]runner.AgentPool) LLMFunc {
 	for _, candidate := range []runner.AgentPool{
-		pools[PoolKey{Ephemeral: true, Effort: "low"}],
-		pools[PoolKey{Ephemeral: false, Effort: "low"}],
-		pools[PoolKey{Ephemeral: false, Effort: "high"}],
+		pools[PoolKey{Ephemeral: true, Effort: config.EffortLow}],
+		pools[PoolKey{Ephemeral: false, Effort: config.EffortLow}],
+		pools[PoolKey{Ephemeral: false, Effort: config.EffortHigh}],
 	} {
 		if candidate == nil {
 			continue
@@ -866,9 +866,9 @@ func (p *WorkerPool) StatefulProcessPools() []*runner.UnifiedProcessPool {
 	}
 	var out []*runner.UnifiedProcessPool
 	for _, k := range []PoolKey{
-		{Ephemeral: false, Effort: "high"},
-		{Ephemeral: false, Effort: "medium"},
-		{Ephemeral: false, Effort: "low"},
+		{Ephemeral: false, Effort: config.EffortHigh},
+		{Ephemeral: false, Effort: config.EffortMedium},
+		{Ephemeral: false, Effort: config.EffortLow},
 	} {
 		if up := unwrapUnifiedPool(p.Pool(k)); up != nil {
 			out = append(out, up)
@@ -884,23 +884,23 @@ func (p *WorkerPool) ProcessPool() *runner.UnifiedProcessPool {
 
 // LowEffortProcessPool returns the configured runner.UnifiedProcessPool for low effort turns.
 func (p *WorkerPool) LowEffortProcessPool() *runner.UnifiedProcessPool {
-	if up := unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: false, Effort: "low"})); up != nil {
+	if up := unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: false, Effort: config.EffortLow})); up != nil {
 		return up
 	}
-	return unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: true, Effort: "low"}))
+	return unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: true, Effort: config.EffortLow}))
 }
 
 // MediumEffortProcessPool returns the configured runner.UnifiedProcessPool for medium effort turns.
 func (p *WorkerPool) MediumEffortProcessPool() *runner.UnifiedProcessPool {
-	if up := unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: false, Effort: "medium"})); up != nil {
+	if up := unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: false, Effort: config.EffortMedium})); up != nil {
 		return up
 	}
-	return unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: true, Effort: "medium"}))
+	return unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: true, Effort: config.EffortMedium}))
 }
 
 // AgentPool returns the configured primary runner.AgentPool.
 func (p *WorkerPool) AgentPool() runner.AgentPool {
-	return p.Pool(PoolKey{Ephemeral: false, Effort: "high"})
+	return p.Pool(PoolKey{Ephemeral: false, Effort: config.EffortHigh})
 }
 
 func (p *WorkerPool) registerActiveTurn(scopeKey string, te *turnExecution) {
@@ -1234,9 +1234,9 @@ func (p *WorkerPool) InterruptThread(ctx context.Context, threadID string, drain
 
 func (p *WorkerPool) poolModelForEffort(effort string) string {
 	switch effort {
-	case "low":
+	case config.EffortLow:
 		return p.LowEffortModel()
-	case "medium":
+	case config.EffortMedium:
 		return p.MediumEffortModel()
 	default:
 		return p.GetRuntimeConfig()

@@ -11,6 +11,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
@@ -134,16 +135,16 @@ func buildDiscordPools(basePoolCfg func(home, model string, prewarmed []string) 
 	for _, k := range queue.AllValidPoolKeys() {
 		model := highModel
 		switch k.Effort {
-		case "medium":
+		case config.EffortMedium:
 			model = medModel
-		case "low":
+		case config.EffortLow:
 			model = lowModel
 		}
 		var p runner.AgentPool
 		switch {
 		case !k.Ephemeral:
 			p = runner.NewUnifiedProcessPool(basePoolCfg(discordHome, model, nil), spawner)
-		case k.Effort == "medium":
+		case k.Effort == config.EffortMedium:
 			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:medium-worker-0", "discord:medium-worker-1"}), spawner, "discord:medium-worker", false)
 		default:
 			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:worker-0", "discord:worker-1"}), spawner, "discord:worker", false)

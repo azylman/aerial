@@ -48,7 +48,7 @@ type PromptRequest struct {
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
-	httpkit.WriteJSON(w, status, map[string]string{"error": msg})
+	httpkit.WriteJSON(w, status, map[string]string{jsonKeyError: msg})
 }
 
 func writeStoreErr(w http.ResponseWriter, entity string, err error) {
@@ -74,10 +74,10 @@ func resolvePromptEffort(model, effort string) string {
 	}
 	modelLower := strings.ToLower(model)
 	if strings.Contains(modelLower, "medium") {
-		return "medium"
+		return config.EffortMedium
 	}
 	if strings.Contains(modelLower, "flash") {
-		return "low"
+		return config.EffortLow
 	}
 	return ""
 }
@@ -116,7 +116,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		channelID := resolvePromptChannelID(req.ChannelID, pool)
-		if !validateSnowflakeID(w, channelID, "channel_id") {
+		if !validateSnowflakeID(w, channelID, jsonKeyChannelID) {
 			return
 		}
 
@@ -135,9 +135,9 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 		if active {
 			httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-				"status":     "skipped_active",
-				"channel_id": channelID,
-				"session_id": channelID,
+				jsonKeyStatus:    "skipped_active",
+				jsonKeyChannelID: channelID,
+				jsonKeySessionID: channelID,
 			})
 			return
 		}
@@ -188,11 +188,11 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		httpkit.WriteJSON(w, http.StatusAccepted, map[string]string{
-			"status":     "accepted",
-			"channel_id": channelID,
-			"session_id": channelID,
-			"message_id": msgID,
-			"message":    "Prompt execution enqueued in background",
+			jsonKeyStatus:    "accepted",
+			jsonKeyChannelID: channelID,
+			jsonKeySessionID: channelID,
+			jsonKeyMessageID: msgID,
+			"message":        "Prompt execution enqueued in background",
 		})
 	}
 }
@@ -239,7 +239,7 @@ func validateDispatchRequest(req *DispatchRequest) error {
 		}
 	}
 	effort := strings.ToLower(strings.TrimSpace(req.Effort))
-	if effort != "" && effort != "low" && effort != "medium" && effort != "high" {
+	if effort != "" && effort != config.EffortLow && effort != config.EffortMedium && effort != config.EffortHigh {
 		return errors.New("Invalid payload: 'effort' must be 'low', 'medium', or 'high'")
 	}
 	req.TargetID = runner.NormalizeEnvTargetID(req.TargetID)
@@ -267,9 +267,9 @@ func handleSkipActiveDispatch(ctx context.Context, w http.ResponseWriter, store 
 	}
 	if active {
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-			"status":      "skipped_active",
-			"dispatch_id": dispatchID,
-			"session_id":  sessionID,
+			jsonKeyStatus:     "skipped_active",
+			jsonKeyDispatchID: dispatchID,
+			jsonKeySessionID:  sessionID,
 		})
 		return true
 	}
@@ -288,10 +288,10 @@ func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store d
 	}
 	if exists {
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-			"status":      "already_exists",
-			"dispatch_id": dispatchID,
-			"message_id":  dispatchID,
-			"session_id":  sessionID,
+			jsonKeyStatus:     "already_exists",
+			jsonKeyDispatchID: dispatchID,
+			jsonKeyMessageID:  dispatchID,
+			jsonKeySessionID:  sessionID,
 		})
 		return true
 	}
@@ -366,10 +366,10 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 
 		if !inserted {
 			httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-				"status":      "already_exists",
-				"dispatch_id": dispatchID,
-				"message_id":  dispatchID,
-				"session_id":  sessionID,
+				jsonKeyStatus:     "already_exists",
+				jsonKeyDispatchID: dispatchID,
+				jsonKeyMessageID:  dispatchID,
+				jsonKeySessionID:  sessionID,
 			})
 			return
 		}
@@ -379,10 +379,10 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		httpkit.WriteJSON(w, http.StatusAccepted, map[string]string{
-			"status":      "accepted",
-			"dispatch_id": dispatchID,
-			"message_id":  dispatchID,
-			"session_id":  sessionID,
+			jsonKeyStatus:     "accepted",
+			jsonKeyDispatchID: dispatchID,
+			jsonKeyMessageID:  dispatchID,
+			jsonKeySessionID:  sessionID,
 		})
 	}
 }
@@ -432,7 +432,7 @@ func handleCancelDispatch(store db.Store, pools ...*queue.WorkerPool) http.Handl
 				}
 			}
 		}
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "cancelled_count": len(cancelledIDs), "cancelled_ids": cancelledIDs})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{jsonKeyStatus: "ok", "cancelled_count": len(cancelledIDs), "cancelled_ids": cancelledIDs})
 	}
 }
 
@@ -461,11 +461,11 @@ func readPostJSONWithLimit(w http.ResponseWriter, r *http.Request, dst any, maxB
 		log.Printf("[HTTP] Warning closing request body: %v", closeErr)
 	}
 	if err != nil {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{jsonKeyError: "Failed to read request body"})
 		return false
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON payload"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{jsonKeyError: "Invalid JSON payload"})
 		return false
 	}
 	return true
@@ -564,7 +564,7 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		targetID := resolveDirectMessageTarget(pool, req)
-		if !validateSnowflakeID(w, targetID, "channel_id") {
+		if !validateSnowflakeID(w, targetID, jsonKeyChannelID) {
 			return
 		}
 
@@ -588,7 +588,7 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "sent", "channel_id": targetID})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{jsonKeyStatus: "sent", jsonKeyChannelID: targetID})
 	}
 }
 
@@ -604,7 +604,7 @@ func handleStatusWidget(pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		targetID := strings.TrimSpace(req.ChannelID)
-		if !validateSnowflakeID(w, targetID, "channel_id") {
+		if !validateSnowflakeID(w, targetID, jsonKeyChannelID) {
 			return
 		}
 
@@ -619,7 +619,7 @@ func handleStatusWidget(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "message_id": msgID})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{jsonKeyStatus: "ok", jsonKeyMessageID: msgID})
 	}
 }
 
@@ -658,7 +658,7 @@ func resolveVoiceAskSessionID(req VoiceAskRequest) (string, string) {
 func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.WorkerPool, req VoiceAskRequest, sessionID string, reqStart time.Time) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "Streaming not supported by client connection"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{jsonKeyError: "Streaming not supported by client connection"})
 		return
 	}
 
@@ -697,13 +697,13 @@ func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.Worke
 		switch event {
 		case "reply", "delta", "sentence":
 			recordTTFR("success")
-		case "error":
-			recordTTFR("error")
+		case sseEventError:
+			recordTTFR(outcomeError)
 		}
 	}
 
 	onStatus := func(status string) {
-		emitSSE("status", map[string]string{"status": status})
+		emitSSE(sseEventStatus, map[string]string{jsonKeyStatus: status})
 	}
 
 	onSentence := func(sentence string) {
@@ -711,7 +711,7 @@ func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.Worke
 	}
 
 	if pool == nil {
-		emitSSE("error", map[string]string{"error": "worker pool is uninitialized"})
+		emitSSE(sseEventError, map[string]string{jsonKeyError: "worker pool is uninitialized"})
 		emitSSE("done", map[string]any{})
 		return
 	}
@@ -720,7 +720,7 @@ func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.Worke
 	if turnErr != nil {
 		if r.Context().Err() == nil {
 			sanitizedErr := sanitizer.SanitizeString(turnErr.Error())
-			emitSSE("error", map[string]string{"error": sanitizedErr})
+			emitSSE(sseEventError, map[string]string{jsonKeyError: sanitizedErr})
 			emitSSE("done", map[string]any{})
 		}
 		return
@@ -735,7 +735,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 		reqStart := time.Now()
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
-			httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+			httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{jsonKeyError: "Method not allowed"})
 			return
 		}
 
@@ -745,7 +745,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 		}
 		if strings.TrimSpace(req.Prompt) == "" {
 			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "Invalid payload: 'prompt' field is required and cannot be empty",
+				jsonKeyError: "Invalid payload: 'prompt' field is required and cannot be empty",
 			})
 			return
 		}
@@ -753,7 +753,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 		sessionID, errMsg := resolveVoiceAskSessionID(req)
 		if errMsg != "" {
 			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{
-				"error": errMsg,
+				jsonKeyError: errMsg,
 			})
 			return
 		}
@@ -765,16 +765,16 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		if pool == nil {
-			metrics.RecordVoiceTTFR("json", "error", time.Since(reqStart))
-			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "worker pool is uninitialized"})
+			metrics.RecordVoiceTTFR("json", outcomeError, time.Since(reqStart))
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{jsonKeyError: "worker pool is uninitialized"})
 			return
 		}
 
 		reply, convID, turnErr := pool.ExecuteVoiceTurn(r.Context(), req.Prompt, sessionID, nil)
 		if turnErr != nil {
-			metrics.RecordVoiceTTFR("json", "error", time.Since(reqStart))
+			metrics.RecordVoiceTTFR("json", outcomeError, time.Since(reqStart))
 			sanitizedErr := sanitizer.SanitizeString(turnErr.Error())
-			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": sanitizedErr})
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{jsonKeyError: sanitizedErr})
 			return
 		}
 
@@ -871,7 +871,7 @@ func handleTranscriptStats(store db.TranscriptStore) http.HandlerFunc {
 			"total_sessions": totalSessions,
 			"total_steps":    totalSteps,
 			"stacks":         stacks,
-			"status":         "ok",
+			jsonKeyStatus:    "ok",
 		})
 	}
 }
@@ -1263,8 +1263,8 @@ func handleInternalDiscordMessage(store db.Store, pool *queue.WorkerPool) http.H
 			return
 		}
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-			"status":     status,
-			"message_id": req.Message.ID,
+			jsonKeyStatus:    status,
+			jsonKeyMessageID: req.Message.ID,
 		})
 	}
 }
@@ -1323,7 +1323,7 @@ func handleInternalDiscordInteraction(store db.Store, pool *queue.WorkerPool) ht
 		router.Handle(r.Context(), dgSession, ic)
 
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-			"status": "ok",
+			jsonKeyStatus: "ok",
 		})
 	}
 }
@@ -1412,7 +1412,7 @@ func handleInternalGuardScan() http.HandlerFunc {
 
 		var req GuardScanRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
+			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{jsonKeyError: "Invalid request payload"})
 			return
 		}
 

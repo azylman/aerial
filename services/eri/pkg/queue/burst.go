@@ -10,6 +10,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
+	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -20,20 +21,20 @@ func (p *WorkerPool) Enqueue(msg db.Message) { p.EnqueueBurst(msg) }
 func resolveMessageEffort(m db.Message) string {
 	effort := strings.ToLower(strings.TrimSpace(m.Effort))
 	switch effort {
-	case "medium", "low", "high":
+	case config.EffortMedium, config.EffortLow, config.EffortHigh:
 		return effort
 	}
 	if effort != "" {
-		return "high"
+		return config.EffortHigh
 	}
 	model := strings.ToLower(strings.TrimSpace(m.Model))
 	if strings.Contains(model, "medium") {
-		return "medium"
+		return config.EffortMedium
 	}
 	if strings.Contains(model, "flash") {
-		return "low"
+		return config.EffortLow
 	}
-	return "high"
+	return config.EffortHigh
 }
 
 func (p *WorkerPool) resolveScopeKey(m db.Message) string {
@@ -42,13 +43,13 @@ func (p *WorkerPool) resolveScopeKey(m db.Message) string {
 	k, err := ResolvePoolKey(&falseVal, resolveMessageEffort(m))
 	if err == nil && p != nil && (p.Pool(k) != nil || p.Pool(PoolKey{Ephemeral: true, Effort: k.Effort}) != nil) {
 		switch k {
-		case PoolKey{Ephemeral: true, Effort: "low"}:
+		case PoolKey{Ephemeral: true, Effort: config.EffortLow}:
 			return "low_effort:" + baseKey
-		case PoolKey{Ephemeral: true, Effort: "medium"}:
+		case PoolKey{Ephemeral: true, Effort: config.EffortMedium}:
 			return "medium_effort:" + baseKey
-		case PoolKey{Ephemeral: false, Effort: "low"}:
+		case PoolKey{Ephemeral: false, Effort: config.EffortLow}:
 			return "stateful_low:" + baseKey
-		case PoolKey{Ephemeral: false, Effort: "medium"}:
+		case PoolKey{Ephemeral: false, Effort: config.EffortMedium}:
 			return "stateful_medium:" + baseKey
 		}
 	}
@@ -414,16 +415,16 @@ func resolveBurstEffort(burst []db.Message) string {
 	hasLow := false
 	for _, m := range burst {
 		switch resolveMessageEffort(m) {
-		case "medium":
-			return "medium"
-		case "low":
+		case config.EffortMedium:
+			return config.EffortMedium
+		case config.EffortLow:
 			hasLow = true
 		}
 	}
 	if hasLow {
-		return "low"
+		return config.EffortLow
 	}
-	return "high"
+	return config.EffortHigh
 }
 
 // CoalesceBurstPrompt formats a burst of messages into a single coalesced multi-message prompt turn.
@@ -683,7 +684,7 @@ func AssembleTurnPrompt(input TurnPromptInput) string {
 
 // isDiscordMessage returns true if the message originated from Discord rather than HTTP (/prompt).
 func isDiscordMessage(m db.Message) bool {
-	return m.AuthorID != "http-client"
+	return m.AuthorID != httpClientAuthorID
 }
 
 func sanitizePromptHeaderField(s string) string {
@@ -714,15 +715,15 @@ func resolveBurstPoolKey(burst []db.Message) (PoolKey, error) {
 func fallbackEffortForModel(model string, isEphem bool) string {
 	switch {
 	case strings.Contains(model, "medium"):
-		return "medium"
+		return config.EffortMedium
 	case strings.Contains(model, "flash"):
-		return "low"
+		return config.EffortLow
 	case strings.Contains(model, "pro"):
-		return "high"
+		return config.EffortHigh
 	case isEphem:
-		return "medium"
+		return config.EffortMedium
 	default:
-		return "low"
+		return config.EffortLow
 	}
 }
 
@@ -731,17 +732,17 @@ func resolveDispatchEffort(d db.Dispatch, isEphem bool) string {
 	if eff == "" {
 		eff = fallbackEffortForModel(strings.ToLower(strings.TrimSpace(d.Model)), isEphem)
 	}
-	if isEphem && eff == "high" {
-		eff = "medium"
+	if isEphem && eff == config.EffortHigh {
+		eff = config.EffortMedium
 	}
 	switch eff {
-	case "low", "medium", "high":
+	case config.EffortLow, config.EffortMedium, config.EffortHigh:
 		return eff
 	default:
 		if isEphem {
-			return "medium"
+			return config.EffortMedium
 		}
-		return "low"
+		return config.EffortLow
 	}
 }
 
@@ -769,7 +770,7 @@ func (te *turnExecution) resolveExecutionPool() (runner.AgentPool, PoolKey, erro
 		return te.pool.Pool(altKey), k, nil
 	}
 	te.logf("[Worker] Notice: pool for %+v is nil, falling back to primary processPool for thread %s", k, te.threadID)
-	return te.pool.Pool(PoolKey{Ephemeral: false, Effort: "high"}), k, nil
+	return te.pool.Pool(PoolKey{Ephemeral: false, Effort: config.EffortHigh}), k, nil
 }
 
 type daemonGetter interface {

@@ -22,6 +22,12 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
+// httpClientAuthorID marks messages injected over the HTTP prompt endpoint rather than Discord.
+const httpClientAuthorID = "http-client"
+
+// triggerSourceDiscord labels turns triggered by Discord messages.
+const triggerSourceDiscord = "discord"
+
 type wakeInfo = WakeInfo
 
 type turnExecution struct {
@@ -308,10 +314,10 @@ func (p *WorkerPool) resolveBurstScopeLock(burst []db.Message, scopeKeyOpt []str
 }
 
 func resolveBurstTriggerType(firstMsg db.Message) string {
-	if firstMsg.AuthorID == "http-client" {
+	if firstMsg.AuthorID == httpClientAuthorID {
 		return "http"
 	}
-	return "discord"
+	return triggerSourceDiscord
 }
 
 func (te *turnExecution) runPostTurnHook() {
@@ -333,7 +339,7 @@ func (te *turnExecution) handleBurstPanic(r any) {
 	te.logf("[WorkerPool] Panic in processBurst for thread %s: %v", te.threadID, r)
 	te.stopIndicators()
 	metrics.RecordTurnCompleted("panic", te.triggerType, te.pool.GetRuntimeConfig(), time.Since(te.execStart))
-	te.failBurstWithStatus("failed", fmt.Sprintf("panic: %v", r), "")
+	te.failBurstWithStatus(outcomeFailed, fmt.Sprintf("panic: %v", r), "")
 }
 
 func (te *turnExecution) acquirePoolAndLease() bool {
@@ -410,7 +416,7 @@ func (p *WorkerPool) publishTurnCompleted(ctx context.Context, sessionID, conver
 
 	source = strings.TrimSpace(source)
 	if source == "" {
-		source = "discord"
+		source = triggerSourceDiscord
 	}
 
 	ev := pubsub.TurnCompletedEvent{
@@ -451,7 +457,7 @@ func (te *turnExecution) publishTurnCompleted(status string) {
 	conversationID := strings.TrimSpace(te.threadID)
 	source := strings.TrimSpace(te.triggerType)
 	if source == "" || strings.HasPrefix(source, "dispatch:") {
-		source = "discord"
+		source = triggerSourceDiscord
 	}
 	pubCtx, cancel := context.WithTimeout(context.WithoutCancel(te.turnCtxValue()), 5*time.Second)
 	defer cancel()
@@ -595,7 +601,7 @@ func (te *turnExecution) claimAndFilterStale() bool {
 
 func isHTTPClientBurst(burst []db.Message) bool {
 	for _, m := range burst {
-		if m.AuthorID != "http-client" {
+		if m.AuthorID != httpClientAuthorID {
 			return false
 		}
 	}
@@ -805,7 +811,7 @@ func (te *turnExecution) rescheduleBurst(delaySeconds int) {
 	for _, m := range te.burst {
 		if m.RetryCount+1 >= maxAttempts {
 			te.logf("[WorkerPool] Message %s in thread %s exceeded max retry attempts (%d). Marking FAILED.", m.ID, te.threadID, maxAttempts)
-			te.finalizeBurstMessages([]db.Message{m}, db.StatusFailed, "[EXHAUSTED_PRE_TURN_RETRIES]", "failed", "[EXHAUSTED_PRE_TURN_RETRIES]", "", true, false)
+			te.finalizeBurstMessages([]db.Message{m}, db.StatusFailed, "[EXHAUSTED_PRE_TURN_RETRIES]", outcomeFailed, "[EXHAUSTED_PRE_TURN_RETRIES]", "", true, false)
 			continue
 		}
 		te.incrementMessageRetry(m.ID, "pre_turn_deferred")
@@ -856,7 +862,7 @@ func (te *turnExecution) checkGlobalQuotaLockout(currentAPIKey, currentModel str
 	metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
 	pauseMsg := notifier.FormatQuotaPauseMessage(remaining, lockedUntil, false, false)
 	te.deliverQuotaNotice(pauseMsg, "quota pause message")
-	te.failBurstWithStatus("failed", reason, currentModel)
+	te.failBurstWithStatus(outcomeFailed, reason, currentModel)
 	return true
 }
 
@@ -1107,7 +1113,7 @@ func (te *turnExecution) handleNonTransientFailure(attempt, maxAttempts int, cur
 	te.stopIndicators()
 	if te.pool.ctx.Err() != nil {
 		te.logf("[WorkerPool] Pool shutting down during non-transient error for thread %s. Resetting to PENDING.", te.threadID)
-		te.cancelBurstOnShutdown("failed", false)
+		te.cancelBurstOnShutdown(outcomeFailed, false)
 		return
 	}
 
@@ -1122,10 +1128,10 @@ func (te *turnExecution) handleNonTransientFailure(attempt, maxAttempts int, cur
 	if hasCurr {
 		te.rotateSessionID(te.threadID, "")
 	}
-	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
+	metrics.RecordTurnCompleted(outcomeFailed, te.triggerType, currentModel, time.Since(te.execStart))
 	te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "execution failed with non-transient error", "non-transient failure notice")
 	te.incrementTurnRetries(errDetail)
-	te.failBurstWithStatus("failed", errDetail, currentModel)
+	te.failBurstWithStatus(outcomeFailed, errDetail, currentModel)
 	te.logf("[WorkerPool] %d message(s) in thread %s marked FAILED due to non-transient error (attempt %d/%d): %s", len(te.burst), te.threadID, attempt, maxAttempts, errDetail)
 }
 
@@ -1135,12 +1141,12 @@ func (te *turnExecution) handleAttemptsExhausted(maxAttempts int, currentAgyBin,
 	if te.pool.ctx.Err() != nil {
 		te.logf("[WorkerPool] Pool shutting down during turn for thread %s. Suppressing exhaustion alert and resetting to PENDING for deployment recovery.", te.threadID)
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-		te.cancelBurstOnShutdown("failed", true)
+		te.cancelBurstOnShutdown(outcomeFailed, true)
 		return
 	}
 	te.deliverFailureNotice(currentAgyBin, currentAPIKey, lastErrDetail, lastStderr, fmt.Sprintf("execution failed after exhausting %d attempts", maxAttempts), "exhaustion notice")
-	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
-	te.failBurstWithStatus("failed", lastErrDetail, currentModel)
+	metrics.RecordTurnCompleted(outcomeFailed, te.triggerType, currentModel, time.Since(te.execStart))
+	te.failBurstWithStatus(outcomeFailed, lastErrDetail, currentModel)
 	te.logf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting all %d attempts", len(te.burst), te.threadID, maxAttempts)
 }
 
@@ -1203,7 +1209,7 @@ func (te *turnExecution) dispatchFailedAttempt(attempt, maxAttempts int, isTrans
 		te.logf("[WorkerPool] Turn execution cancelled due to pool shutdown (thread: %s, attempt: %d/%d). Resetting to PENDING for clean deployment recovery.", te.threadID, attempt, maxAttempts)
 		te.stopIndicators()
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-		te.cancelBurstOnShutdown("failed", false)
+		te.cancelBurstOnShutdown(outcomeFailed, false)
 		return false
 	}
 
@@ -1326,7 +1332,7 @@ func (te *turnExecution) executeWithRetries() {
 		te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 
 		if te.isInterrupted() {
-			metrics.RecordRunnerExecution("error", currentModel, te.triggerType, runDur)
+			metrics.RecordRunnerExecution(outcomeError, currentModel, te.triggerType, runDur)
 			te.logf("[WorkerPool] Turn execution interrupted by operator (thread: %s, attempt: %d/%d). Aborting retries.", te.threadID, attempt, maxAttempts)
 			te.finalizeInterruptedTurn(currentModel)
 			return
@@ -1336,7 +1342,7 @@ func (te *turnExecution) executeWithRetries() {
 		isFailure, isTransient, isSessionCorruption := st.isFailure, st.isTransient, st.isSessionCorruption
 		errDetail, stdout, resp, stderr := st.errDetail, st.stdout, st.resp, st.stderr
 		lastErrDetail, lastStderr = "", ""
-		runStatus := "success"
+		runStatus := outcomeSuccess
 		if isFailure {
 			accumulatedUsage.InputTokens += outcome.Usage.InputTokens
 			accumulatedUsage.OutputTokens += outcome.Usage.OutputTokens
@@ -1349,7 +1355,7 @@ func (te *turnExecution) executeWithRetries() {
 			promptToSend = te.turnPrompt
 			errDetail, stderr = te.enrichFailureFromTranscript(outcome, stdout, stderr, isSessionCorruption)
 			lastErrDetail, lastStderr = errDetail, stderr
-			runStatus = "error"
+			runStatus = outcomeError
 		}
 		metrics.RecordRunnerExecution(runStatus, currentModel, te.triggerType, runDur)
 

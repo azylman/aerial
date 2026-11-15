@@ -19,7 +19,7 @@ func (p *WorkerPool) publishDispatchOutcome(ctx context.Context, d db.Dispatch, 
 	}
 
 	normStatus := strings.ToLower(strings.TrimSpace(status))
-	if normStatus == "success" {
+	if normStatus == outcomeSuccess {
 		normStatus = "completed"
 	}
 	if normStatus == "" {

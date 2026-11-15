@@ -17,6 +17,13 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 )
 
+// Build chunk status values the widget groups into phases.
+const (
+	chunkStatusFailed   = "failed"
+	chunkStatusOpen     = "open"
+	chunkStatusPROpened = "pr_opened"
+)
+
 const (
 	spanWidgetLockWait = "widget.lock_wait"
 	spanWidgetDeliver  = "widget.deliver"
@@ -146,7 +153,7 @@ func (p *WorkerPool) ensureWidgetMapsLocked() {
 
 func isWidgetChunkInProgress(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "running", "coding", "in_progress", "failed", "ci_failed", "deploy_failed", "conflict":
+	case "running", "coding", "in_progress", chunkStatusFailed, "ci_failed", "deploy_failed", "conflict":
 		return true
 	default:
 		return false
@@ -155,7 +162,7 @@ func isWidgetChunkInProgress(status string) bool {
 
 func isWidgetChunkWaitingOnCI(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "open", "pr_opened", "merged", "synced", "deploying":
+	case chunkStatusOpen, chunkStatusPROpened, "merged", "synced", "deploying":
 		return true
 	default:
 		return false
@@ -164,12 +171,12 @@ func isWidgetChunkWaitingOnCI(status string) bool {
 
 func sameWidgetChunkPhase(a, b string) bool {
 	normA := strings.ToLower(strings.TrimSpace(a))
-	if normA == "pr_opened" {
-		normA = "open"
+	if normA == chunkStatusPROpened {
+		normA = chunkStatusOpen
 	}
 	normB := strings.ToLower(strings.TrimSpace(b))
-	if normB == "pr_opened" {
-		normB = "open"
+	if normB == chunkStatusPROpened {
+		normB = chunkStatusOpen
 	}
 	return normA != "" && normA == normB
 }

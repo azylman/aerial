@@ -209,11 +209,11 @@ func (te *turnExecution) resolveAttemptConfig(ctx context.Context, attempt int) 
 	effort, reqModel := te.turnEffortAndModel()
 
 	switch effort {
-	case "medium":
+	case config.EffortMedium:
 		if strings.TrimSpace(cfg.mediumEffortModel) != "" {
 			cfg.model = cfg.mediumEffortModel
 		}
-	case "low":
+	case config.EffortLow:
 		if strings.TrimSpace(cfg.lowEffortModel) != "" {
 			cfg.model = cfg.lowEffortModel
 		}
@@ -533,7 +533,7 @@ func (te *turnExecution) loadThreadColdStartSummary(ctx context.Context, getTurn
 // waits behind it, and ctx cancellation (shutdown, /interrupt) aborts it. Failures only leave the previous
 // summary in place; the turn outcome is already final.
 func (te *turnExecution) refreshThreadSummaryAtTurnEnd(ctx context.Context) {
-	if te.turnStatus != "success" || !te.summarizeThread || te.isDispatch() || te.isEphemeral {
+	if te.turnStatus != outcomeSuccess || !te.summarizeThread || te.isDispatch() || te.isEphemeral {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, DefaultTurnEndSummaryTimeout)
@@ -598,7 +598,7 @@ func newestBurstMessageID(burst []db.Message) string {
 func dropNextBurstMessages(msgs []HistoryMessage, newestBurstID string) []HistoryMessage {
 	var cutoff string
 	for _, m := range msgs {
-		if m.Role != "Assistant" && compareSnowflakeIDs(m.ID, newestBurstID) > 0 && (cutoff == "" || compareSnowflakeIDs(m.ID, cutoff) < 0) {
+		if m.Role != roleAssistant && compareSnowflakeIDs(m.ID, newestBurstID) > 0 && (cutoff == "" || compareSnowflakeIDs(m.ID, cutoff) < 0) {
 			cutoff = m.ID
 		}
 	}

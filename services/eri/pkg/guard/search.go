@@ -208,10 +208,10 @@ var grepDiscoveryLongFlags = map[string]bool{
 	"--files":               true,
 	"--count":               true,
 	"--count-matches":       true,
-	"--quiet":               true,
+	flagQuiet:               true,
 	"--silent":              true,
-	"--help":                true,
-	"--version":             true,
+	flagHelp:                true,
+	flagVersion:             true,
 }
 
 // splitPipeline splits a shell command line on ;, &&, ||, and | respecting single and double quotes.
@@ -334,10 +334,10 @@ func CheckSearch(toolName string, args ToolArgs) *Decision {
 // CheckSearchWithSQL evaluates search and psql commands using the provided SQLDescriber.
 func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) *Decision {
 	normalizedName := normalizeToolName(toolName)
-	if normalizedName == "call_mcp_tool" || isClaudeMCPToolName(toolName) {
+	if normalizedName == toolCallMCPTool || isClaudeMCPToolName(toolName) {
 		return inspectMCPToolCall(args, time.Now())
 	}
-	if normalizedName != "run_command" && normalizedName != "bash" && normalizedName != "grep_search" && normalizedName != "find_by_name" {
+	if normalizedName != toolRunCommand && normalizedName != toolBash && normalizedName != "grep_search" && normalizedName != "find_by_name" {
 		return &Decision{Decision: DecisionAllow}
 	}
 
@@ -354,8 +354,8 @@ func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) 
 		}
 
 		bin := filepath.Base(strings.TrimLeft(tokens[0], "("))
-		if (bin == "sh" || bin == "bash") && len(tokens) >= 3 && tokens[1] == "-c" {
-			if dec := CheckSearchWithSQL("run_command", ToolArgs{CommandLine: tokens[2], Cwd: args.Cwd}, describer); dec != nil && dec.Decision == DecisionDeny {
+		if (bin == "sh" || bin == binBash) && len(tokens) >= 3 && tokens[1] == "-c" {
+			if dec := CheckSearchWithSQL(toolRunCommand, ToolArgs{CommandLine: tokens[2], Cwd: args.Cwd}, describer); dec != nil && dec.Decision == DecisionDeny {
 				return dec
 			}
 			continue
@@ -380,10 +380,10 @@ func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) 
 }
 
 func inspectSearchSegment(bin string, tokens []string, fromPipe bool) *Decision {
-	if bin == "git" {
+	if bin == binGit {
 		subcmd, subTokens := extractGitSubcommand(tokens)
 		switch subcmd {
-		case "grep":
+		case binGrep:
 			return inspectGrepCommand("git-grep", subTokens, fromPipe)
 		case "log":
 			return inspectGitLogCommand(subTokens)
@@ -442,7 +442,7 @@ func atoiOrZero(s string) int {
 }
 
 func parseGitLogLimitFlag(t, nextToken string) (matched, consumeNext bool, count int) {
-	if t == "-n" || t == "--max-count" {
+	if t == "-n" || t == flagMaxCount {
 		return true, nextToken != "", atoiOrZero(nextToken)
 	}
 	if strings.HasPrefix(t, "-n") && len(t) > 2 {
@@ -501,8 +501,8 @@ var gitShowSafeFlags = map[string]bool{
 	"--name-only":   true,
 	"--name-status": true,
 	"--oneline":     true,
-	"--quiet":       true,
-	"--help":        true,
+	flagQuiet:       true,
+	flagHelp:        true,
 }
 
 func inspectGitShowCommand(tokens []string) *Decision {
@@ -526,7 +526,7 @@ func inspectGitShowCommand(tokens []string) *Decision {
 
 func isGrepOrSearchBinary(bin string) bool {
 	switch bin {
-	case "grep", "egrep", "fgrep", "rg", "ag", "ack", "strings":
+	case binGrep, "egrep", "fgrep", "rg", "ag", "ack", binStrings:
 		return true
 	default:
 		return false
@@ -561,7 +561,7 @@ func isGrepDiscoveryFlag(t string) bool {
 }
 
 func consumesGrepMatchCountArg(t, nextToken string) bool {
-	if t == "--max-count" {
+	if t == flagMaxCount {
 		return nextToken != ""
 	}
 	if hasShortFlag(t, 'm') {
@@ -621,7 +621,7 @@ func isRuntimeStateDir(clean string) bool {
 
 func validateFindPathToken(t, cwd string) *Decision {
 	clean := filepath.Clean(t)
-	if clean == "/" || clean == "/proc" || clean == "/sys" || clean == "/dev" || clean == "/root" {
+	if clean == "/" || clean == procRoot || clean == "/sys" || clean == "/dev" || clean == "/root" {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Unconstrained root search detected. Avoid searching the root filesystem ('/') or system directories directly. Scope searches to specific package or workspace directories.",
@@ -655,7 +655,7 @@ func inspectFindCommand(tokens []string, cwd string) *Decision {
 	hasMaxdepth := false
 	for i := 1; i < len(tokens); i++ {
 		t := tokens[i]
-		if t == "-help" || t == "--help" || t == "-version" || t == "--version" {
+		if t == "-help" || t == flagHelp || t == "-version" || t == flagVersion {
 			return nil
 		}
 		if t == "-maxdepth" || t == "--maxdepth" {
@@ -690,7 +690,7 @@ func inspectFindCommand(tokens []string, cwd string) *Decision {
 
 func validateGrepPathToken(pt string) *Decision {
 	clean := filepath.Clean(pt)
-	if clean == "/" || clean == "/proc" || clean == "/sys" || clean == "/dev" {
+	if clean == "/" || clean == procRoot || clean == "/sys" || clean == "/dev" {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Unconstrained root search detected. Avoid searching the root filesystem ('/') or system directories directly. Scope searches to specific package or workspace directories.",
@@ -726,17 +726,17 @@ func validateGrepPathToken(pt string) *Decision {
 }
 
 func isStandardGrep(bin string) bool {
-	return bin == "grep" || bin == "egrep" || bin == "fgrep"
+	return bin == binGrep || bin == "egrep" || bin == "fgrep"
 }
 
 var broadSearchPaths = map[string]bool{
 	".":                      true,
 	"..":                     true,
 	"services":               true,
-	"pkg":                    true,
+	dirPkg:                   true,
 	"mcp":                    true,
 	"/share":                 true,
-	"/share/aerial":          true,
+	sharedEngineRoot:         true,
 	"/share/aerial/services": true,
 	"/share/aerial/pkg":      true,
 	"/share/aerial/mcp":      true,
@@ -767,8 +767,8 @@ func countDirectoryTargets(pathTokens []string) int {
 
 var grepNoPatternLongFlags = map[string]bool{
 	"--files":   true,
-	"--help":    true,
-	"--version": true,
+	flagHelp:    true,
+	flagVersion: true,
 }
 
 var grepPatternFlags = map[string]bool{
@@ -871,7 +871,7 @@ func parseGrepTokens(bin string, tokens []string) grepScanFlags {
 		flags.pathTokens = append(flags.pathTokens, t)
 	}
 
-	if bin == "strings" {
+	if bin == binStrings {
 		flags.pathTokens = collectNonFlagTokens(tokens[1:])
 	}
 
@@ -910,7 +910,7 @@ func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
 		}
 	}
 
-	if bin == "strings" || (fromPipe && len(flags.pathTokens) == 0) {
+	if bin == binStrings || (fromPipe && len(flags.pathTokens) == 0) {
 		return nil
 	}
 

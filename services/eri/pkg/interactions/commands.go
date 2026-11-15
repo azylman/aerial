@@ -8,6 +8,12 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+// Slash-command option names, also used as channel setting keys.
+const (
+	optionMode       = "mode"
+	optionIgnoreBots = "ignore_bots"
+)
+
 var registeredGuilds sync.Map
 
 // CommandDefinitions returns the canonical slice of Aerial's Discord slash commands.
@@ -58,12 +64,12 @@ func CommandDefinitions() []*discordgo.ApplicationCommand {
 			},
 		},
 		{
-			Name:        "mode",
+			Name:        optionMode,
 			Description: "Inspect or reconfigure channel wake mode",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
 					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "mode",
+					Name:        optionMode,
 					Description: "Operational mode for the channel",
 					Required:    false,
 					Choices: []*discordgo.ApplicationCommandOptionChoice{
@@ -82,7 +88,7 @@ func CommandDefinitions() []*discordgo.ApplicationCommand {
 			},
 		},
 		{
-			Name:        "ignore_bots",
+			Name:        optionIgnoreBots,
 			Description: "Toggle peer bot message gating for a channel",
 			Options: []*discordgo.ApplicationCommandOption{
 				{

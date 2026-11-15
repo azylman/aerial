@@ -8,7 +8,7 @@ import (
 
 // ProtectedPrefixes defines the read-only volume mounts that must not be mutated.
 var ProtectedPrefixes = []string{
-	"/share/aerial",
+	sharedEngineRoot,
 	"/share/aerial-config",
 }
 
@@ -19,19 +19,19 @@ const ShareDenyReason = "Target is mounted read-only (:ro). Direct edits and mut
 	"to author and verify your changes safely."
 
 var mutatingGitSubcommands = map[string]bool{
-	"add":         true,
-	"commit":      true,
-	"checkout":    true,
-	"switch":      true,
-	"merge":       true,
-	"rebase":      true,
-	"reset":       true,
-	"pull":        true,
-	"push":        true,
-	"apply":       true,
-	"cherry-pick": true,
-	"revert":      true,
-	"stash":       true,
+	"add":               true,
+	gitSubcommandCommit: true,
+	"checkout":          true,
+	"switch":            true,
+	"merge":             true,
+	"rebase":            true,
+	"reset":             true,
+	"pull":              true,
+	"push":              true,
+	"apply":             true,
+	"cherry-pick":       true,
+	"revert":            true,
+	"stash":             true,
 }
 
 var mutatingBinaries = map[string]bool{
@@ -45,7 +45,7 @@ var mutatingBinaries = map[string]bool{
 	"tee":      true,
 	"chmod":    true,
 	"chown":    true,
-	"install":  true,
+	binInstall: true,
 	"ln":       true,
 	"truncate": true,
 }
@@ -132,7 +132,7 @@ func CheckShare(toolName string, args ToolArgs) *Decision {
 	normalizedName := normalizeToolName(toolName)
 
 	switch normalizedName {
-	case "replace_file_content", "write_to_file", "edit_file", "write_file", "edit", "multiedit", "write":
+	case toolReplaceFileContent, toolWriteToFile, toolEditFile, toolWriteFile, toolEdit, toolMultiEdit, toolWrite:
 		if IsProtectedPath(args.FilePath()) {
 			return &Decision{
 				Decision: DecisionDeny,
@@ -140,7 +140,7 @@ func CheckShare(toolName string, args ToolArgs) *Decision {
 			}
 		}
 
-	case "run_command", "bash":
+	case toolRunCommand, toolBash:
 		if inspectRunCommand(args.CommandLine, args.Cwd, IsProtectedPath, IsProtectedPath) {
 			return &Decision{
 				Decision: DecisionDeny,
@@ -234,9 +234,9 @@ func mutationTargets(bin string, args []string) []string {
 	var positional []string
 	for i, arg := range args {
 		switch {
-		case (bin == "cp" || bin == "install" || bin == "ln") && arg == "-t" && i+1 < len(args):
+		case (bin == "cp" || bin == binInstall || bin == "ln") && arg == "-t" && i+1 < len(args):
 			return []string{args[i+1]}
-		case (bin == "cp" || bin == "install" || bin == "ln") && strings.HasPrefix(arg, "--target-directory="):
+		case (bin == "cp" || bin == binInstall || bin == "ln") && strings.HasPrefix(arg, "--target-directory="):
 			return []string{strings.TrimPrefix(arg, "--target-directory=")}
 		case !strings.HasPrefix(arg, "-"):
 			positional = append(positional, arg)
@@ -244,7 +244,7 @@ func mutationTargets(bin string, args []string) []string {
 	}
 
 	switch bin {
-	case "cp", "install", "ln":
+	case "cp", binInstall, "ln":
 		if len(positional) == 0 {
 			return nil
 		}
@@ -295,7 +295,7 @@ func inspectRunCommand(cmd, cwd string, protected, removal func(string) bool) bo
 		cmdBin := strings.ToLower(filepath.Base(tokens[0]))
 
 		// Inspect git operations
-		if cmdBin == "git" {
+		if cmdBin == binGit {
 			targetsProtected := gitCommandTargets(tokens, protected)
 			if (cwdProtected || targetsProtected) && isGitMutating(tokens[1:]) {
 				return true

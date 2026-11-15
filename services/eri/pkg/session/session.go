@@ -43,6 +43,17 @@ const DefaultMaxQuotaPauseDBBytes = 3 * 1024 * 1024
 // SourceAmbient represents ambient chat messages appended to session transcripts.
 const SourceAmbient = "AMBIENT"
 
+// Transcript vocabulary shared by the session scanners.
+const (
+	stepTypeUserInput      = "USER_INPUT"
+	blockTypeToolResult    = "tool_result"
+	transcriptFileName     = "transcript.jsonl"
+	transcriptFullFileName = "transcript_full.jsonl"
+	runtimeDiscord         = "discord"
+	runtimeVoice           = "voice"
+	runtimeEphemeral       = "ephemeral"
+)
+
 // Manager manages session directories, transcripts, and activity tracking
 // with explicitly injected homeDir and dataDir paths.
 type Manager struct {
@@ -116,7 +127,7 @@ func findLastUserInputIdx(lines []string) int {
 			Content string `json:"content"`
 		}
 		if err := json.Unmarshal([]byte(line), &step); err == nil {
-			if step.Type == "USER_INPUT" && !isAmbientInput(step.Source, step.Content) {
+			if step.Type == stepTypeUserInput && !isAmbientInput(step.Source, step.Content) {
 				lastUserInputIdx = i
 			}
 		}
@@ -188,7 +199,7 @@ func latestModTimeInSessionDir(sessDir string) time.Time {
 
 	// 1. Transcripts in .system_generated/logs/
 	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
-	for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+	for _, name := range []string{transcriptFileName, transcriptFullFileName} {
 		if fi, err := os.Stat(filepath.Join(logsDir, name)); err == nil && !fi.IsDir() {
 			if fi.ModTime().After(latest) {
 				latest = fi.ModTime()
@@ -300,7 +311,7 @@ func (m *Manager) claudeProjectBaseDirs() []string {
 				}
 			}
 		} else {
-			for _, runtime := range []string{"discord", "voice", "ephemeral"} {
+			for _, runtime := range []string{runtimeDiscord, runtimeVoice, runtimeEphemeral} {
 				baseDirs = append(baseDirs, filepath.Join(runtimesDir, runtime, ".claude", "projects"))
 			}
 		}
@@ -395,7 +406,7 @@ func (m *Manager) ClaudeSessionExistsOnDisk(sessionID string) bool {
 }
 
 func appendDataDirRuntimePaths(dataDir, convID string, seen map[string]bool, res []string) []string {
-	for _, runtime := range []string{"discord", "voice", "ephemeral"} {
+	for _, runtime := range []string{runtimeDiscord, runtimeVoice, runtimeEphemeral} {
 		for _, variant := range []string{"antigravity-cli", "antigravity"} {
 			p := filepath.Join(dataDir, "runtimes", runtime, ".gemini", variant, "brain", convID)
 			if !seen[p] {
@@ -553,7 +564,7 @@ func extractErrorFromStepLine(line string, cutoff time.Time) (errMsg string, bef
 	if isStepBefore(step.CreatedAt, cutoff) {
 		return "", true
 	}
-	if step.Type == "GENERIC" || step.Type == "USER_INPUT" {
+	if step.Type == "GENERIC" || step.Type == stepTypeUserInput {
 		return "", false
 	}
 
@@ -607,7 +618,7 @@ func extractClaudeToolResultError(raw json.RawMessage) string {
 		return ""
 	}
 	for _, b := range blocks {
-		if b.Type != "tool_result" || !b.IsError {
+		if b.Type != blockTypeToolResult || !b.IsError {
 			continue
 		}
 		var contentStr string
@@ -758,7 +769,7 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 	targetDirs := m.getTargetDirs(cleanID)
 
 	for _, dir := range targetDirs {
-		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
+		for _, name := range []string{transcriptFullFileName, transcriptFileName} {
 			tPath := filepath.Join(dir, ".system_generated", "logs", name)
 			lines, ok := readTranscriptTailLines(tPath)
 			if !ok {
@@ -944,7 +955,7 @@ func (m *Manager) ExtractResponseSinceContext(ctx context.Context, convID string
 	targetDirs := m.getTargetDirs(cleanID)
 
 	for _, dir := range targetDirs {
-		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
+		for _, name := range []string{transcriptFullFileName, transcriptFileName} {
 			tPath := filepath.Join(dir, ".system_generated", "logs", name)
 			if resp := extractResponseFromTranscriptFile(ctx, tPath, since); resp != "" {
 				return resp
@@ -1040,7 +1051,7 @@ func (m *Manager) conversationCandidateDirs() []string {
 	var dirs []string
 	if m.dataDir != "" {
 		dirs = append(dirs, filepath.Join(m.dataDir, "conversations"))
-		for _, runtime := range []string{"discord", "voice", "ephemeral"} {
+		for _, runtime := range []string{runtimeDiscord, runtimeVoice, runtimeEphemeral} {
 			dirs = append(dirs,
 				filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity-cli", "conversations"),
 				filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity", "conversations"),
@@ -1079,7 +1090,7 @@ func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
 
 	// 2. Check transcript.jsonl non-empty status
 	for _, dir := range m.getTargetDirs(cleanID) {
-		tPath := filepath.Join(dir, ".system_generated", "logs", "transcript.jsonl")
+		tPath := filepath.Join(dir, ".system_generated", "logs", transcriptFileName)
 		if fi, err := os.Stat(tPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
 			return true
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1103,7 +1114,7 @@ func (m *Manager) GetTranscriptSize(sessionID string) int64 {
 	var maxSize int64
 	for _, sessDir := range m.getTargetDirs(cleanID) {
 		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
-		for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+		for _, name := range []string{transcriptFileName, transcriptFullFileName} {
 			filePath := filepath.Join(logsDir, name)
 			if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
 				if fi.Size() > maxSize {
@@ -1159,7 +1170,7 @@ func isClaudeToolResultContent(content json.RawMessage) bool {
 	}
 	if err := json.Unmarshal(content, &blocks); err == nil && len(blocks) > 0 {
 		for _, b := range blocks {
-			if b.Type == "tool_result" {
+			if b.Type == blockTypeToolResult {
 				return true
 			}
 		}
@@ -1195,7 +1206,7 @@ func countStepsInClaudeTranscript(filePath string) int {
 			} `json:"message"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err == nil {
-			if entry.Type == "assistant" || entry.Type == "tool_result" {
+			if entry.Type == "assistant" || entry.Type == blockTypeToolResult {
 				steps++
 			} else if entry.Type == "user" && isClaudeToolResultContent(entry.Message.Content) {
 				steps++
@@ -1220,7 +1231,7 @@ func (m *Manager) CountTranscriptSteps(sessionID string) int {
 	var maxSteps int
 	for _, sessDir := range m.getTargetDirs(cleanID) {
 		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
-		for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+		for _, name := range []string{transcriptFileName, transcriptFullFileName} {
 			filePath := filepath.Join(logsDir, name)
 			lastIdx, err := getLastStepIndex(filePath)
 			if err == nil && lastIdx >= 0 {
@@ -1256,7 +1267,7 @@ func countTurnsInTranscript(filePath string) int {
 	var turns int
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || !strings.Contains(line, "USER_INPUT") {
+		if line == "" || !strings.Contains(line, stepTypeUserInput) {
 			continue
 		}
 		var step struct {
@@ -1265,7 +1276,7 @@ func countTurnsInTranscript(filePath string) int {
 			Content string `json:"content"`
 		}
 		if err := json.Unmarshal([]byte(line), &step); err == nil {
-			if step.Type == "USER_INPUT" && !isAmbientInput(step.Source, step.Content) {
+			if step.Type == stepTypeUserInput && !isAmbientInput(step.Source, step.Content) {
 				turns++
 			}
 		}
@@ -1309,7 +1320,7 @@ func (m *Manager) CountTranscriptTurns(sessionID string) int {
 	var maxTurns int
 	for _, sessDir := range m.getTargetDirs(cleanID) {
 		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
-		for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+		for _, name := range []string{transcriptFileName, transcriptFullFileName} {
 			filePath := filepath.Join(logsDir, name)
 			if turns := countTurnsInTranscript(filePath); turns > maxTurns {
 				maxTurns = turns

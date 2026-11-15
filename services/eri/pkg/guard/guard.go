@@ -7,6 +7,47 @@ import (
 	"maps"
 )
 
+// Tool names the guards inspect.
+const (
+	toolBash               = "bash"
+	toolRunCommand         = "run_command"
+	toolCallMCPTool        = "call_mcp_tool"
+	toolRead               = "read"
+	toolEdit               = "edit"
+	toolReadFile           = "read_file"
+	toolViewFile           = "view_file"
+	toolEditFile           = "edit_file"
+	toolWriteFile          = "write_file"
+	toolReplaceFileContent = "replace_file_content"
+	toolWriteToFile        = "write_to_file"
+	toolMultiEdit          = "multiedit"
+	toolWrite              = "write"
+)
+
+// argCommandLine is the tool argument key carrying a shell command.
+const argCommandLine = "CommandLine"
+
+// Shell binaries, subcommands and flags the command parsers recognize.
+const (
+	binBash             = "bash"
+	binGit              = "git"
+	binGrep             = "grep"
+	binStrings          = "strings"
+	binInstall          = "install"
+	gitSubcommandCommit = "commit"
+	flagHelp            = "--help"
+	flagQuiet           = "--quiet"
+	flagVersion         = "--version"
+	flagMaxCount        = "--max-count"
+)
+
+// Filesystem roots and directory names the guards treat specially.
+const (
+	sharedEngineRoot = "/share/aerial"
+	procRoot         = "/proc"
+	dirPkg           = "pkg"
+)
+
 // Mode represents the guard operating mode.
 type Mode string
 
@@ -66,7 +107,7 @@ func mergeClaudeOverwrite(toolInput json.RawMessage, overwrite map[string]any) m
 	}
 	for k, v := range overwrite {
 		switch k {
-		case "CommandLine":
+		case argCommandLine:
 			merged["command"] = v
 		case "StartLine":
 			merged["offset"] = v
@@ -160,7 +201,7 @@ func evaluateGuardMode(payload Payload, args ToolArgs, mode string) *Decision {
 		return CheckBatch(payload, args)
 	case "search":
 		return CheckSearch(payload.ToolCall.Name, args)
-	case "commit":
+	case string(ModeCommit):
 		return CheckCommit(payload.ToolCall.Name, args)
 	default:
 		return evaluateAllGuards(payload, args)
@@ -188,7 +229,7 @@ func evaluateAllGuards(payload Payload, args ToolArgs) *Decision {
 				mergedOverwrite = make(map[string]any)
 			}
 			mergedOverwrite[k] = v
-			if k == "CommandLine" {
+			if k == argCommandLine {
 				if s, ok := v.(string); ok {
 					args.CommandLine = s
 				}

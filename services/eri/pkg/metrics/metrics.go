@@ -13,6 +13,21 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// Shared Prometheus label names.
+const (
+	labelStatus = "status"
+	labelModel  = "model"
+	labelSource = "source"
+	labelReason = "reason"
+	labelType   = "type"
+)
+
+// Fallback label values recorded when a caller passes an empty label.
+const (
+	unknownLabelValue = "unknown"
+	defaultModelLabel = "default"
+)
+
 var (
 	// Registry is the dedicated Prometheus registry for Aerial Brain.
 	Registry = prometheus.NewRegistry()
@@ -25,7 +40,7 @@ var (
 			Name: "aerial_brain_turns_total",
 			Help: "Total number of execution turns processed by Aerial Brain.",
 		},
-		[]string{"status", "trigger_type", "model"},
+		[]string{labelStatus, "trigger_type", labelModel},
 	)
 
 	// MCPTraceAnnouncementsTotal counts agy hook announcements reaching the loopback MCP trace
@@ -45,7 +60,7 @@ var (
 			Help:    "Execution duration of turns processed by Aerial Brain in seconds.",
 			Buckets: []float64{0.5, 1.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0},
 		},
-		[]string{"status", "trigger_type", "model"},
+		[]string{labelStatus, "trigger_type", labelModel},
 	)
 
 	// TokensTotal and related metrics track LLM token consumption.
@@ -54,7 +69,7 @@ var (
 			Name: "aerial_brain_tokens_total",
 			Help: "Total number of LLM tokens consumed by Aerial Brain turns.",
 		},
-		[]string{"type", "model", "channel"},
+		[]string{labelType, labelModel, "channel"},
 	)
 
 	ActiveWorkers = prometheus.NewGauge(
@@ -84,7 +99,7 @@ var (
 			Name: "aerial_brain_runner_executions_total",
 			Help: "Total number of Antigravity CLI (agy) subprocess executions.",
 		},
-		[]string{"status", "model", "source"},
+		[]string{labelStatus, labelModel, labelSource},
 	)
 
 	RunnerDurationSeconds = prometheus.NewHistogramVec(
@@ -93,7 +108,7 @@ var (
 			Help:    "Execution duration of Antigravity CLI subprocesses in seconds.",
 			Buckets: []float64{0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0},
 		},
-		[]string{"status", "model", "source"},
+		[]string{labelStatus, labelModel, labelSource},
 	)
 
 	RunnerErrorsTotal = prometheus.NewCounterVec(
@@ -101,7 +116,7 @@ var (
 			Name: "aerial_brain_runner_errors_total",
 			Help: "Total categorized errors encountered during runner subprocess execution.",
 		},
-		[]string{"error_type", "model"},
+		[]string{"error_type", labelModel},
 	)
 
 	// YieldTrapEventsTotal tracks yield trap telemetry.
@@ -110,7 +125,7 @@ var (
 			Name: "aerial_brain_yield_trap_total",
 			Help: "Total background task yield trap events intercepted by Aerial Brain.",
 		},
-		[]string{"action", "source", "model"},
+		[]string{"action", labelSource, labelModel},
 	)
 
 	// DaemonsActive and related metrics track persistent daemon and background task telemetry.
@@ -126,7 +141,7 @@ var (
 			Name: "aerial_brain_daemon_spawns_total",
 			Help: "Total number of agy daemon initializations.",
 		},
-		[]string{"reason"},
+		[]string{labelReason},
 	)
 
 	DaemonPrunesTotal = prometheus.NewCounterVec(
@@ -134,7 +149,7 @@ var (
 			Name: "aerial_brain_daemon_prunes_total",
 			Help: "Total number of agy daemon prunings.",
 		},
-		[]string{"reason"},
+		[]string{labelReason},
 	)
 
 	DaemonMemoryBytes = prometheus.NewGauge(
@@ -158,7 +173,7 @@ var (
 			Help:    "Time to first response for voice interactions in seconds.",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 5.0, 10.0},
 		},
-		[]string{"mode", "status"},
+		[]string{"mode", labelStatus},
 	)
 
 	// ClassifierDurationSeconds and related metrics track ambient relevance classifier telemetry.
@@ -168,7 +183,7 @@ var (
 			Help:    "Latency of ambient message relevance classification in seconds.",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 15.0},
 		},
-		[]string{"status", "model"},
+		[]string{labelStatus, labelModel},
 	)
 
 	ClassifierDecisionsTotal = prometheus.NewCounterVec(
@@ -176,7 +191,7 @@ var (
 			Name: "aerial_brain_classifier_decisions_total",
 			Help: "Total number of ambient classifier triage decisions.",
 		},
-		[]string{"decision", "model"},
+		[]string{"decision", labelModel},
 	)
 
 	ClassifierConfidenceScore = prometheus.NewHistogram(
@@ -194,7 +209,7 @@ var (
 			Help:    "Latency of Discord thread title summarization in seconds.",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0},
 		},
-		[]string{"status", "model"},
+		[]string{labelStatus, labelModel},
 	)
 
 	// DiscordEventsTotal and related metrics track Discord funnel and gateway telemetry.
@@ -226,7 +241,7 @@ var (
 			Name: "aerial_brain_discord_threads_created_total",
 			Help: "Total Discord thread creation attempts in forum/text channels.",
 		},
-		[]string{"status"},
+		[]string{labelStatus},
 	)
 
 	// DiscordDeliveriesTotal and related metrics track Discord outbound delivery telemetry.
@@ -235,7 +250,7 @@ var (
 			Name: "aerial_brain_discord_deliveries_total",
 			Help: "Total outbound Discord response deliveries attempted.",
 		},
-		[]string{"status"},
+		[]string{labelStatus},
 	)
 
 	DiscordDeliveryDurationSeconds = prometheus.NewHistogramVec(
@@ -244,7 +259,7 @@ var (
 			Help:    "Latency of outbound Discord message delivery in seconds.",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0},
 		},
-		[]string{"status"},
+		[]string{labelStatus},
 	)
 
 	DiscordMessagesChunkedTotal = prometheus.NewCounter(
@@ -260,7 +275,7 @@ var (
 			Name: "aerial_brain_scheduler_executions_total",
 			Help: "Total executions of scheduled cron and one-shot routines.",
 		},
-		[]string{"schedule_type", "status"},
+		[]string{"schedule_type", labelStatus},
 	)
 
 	SchedulerExecutionDurationSeconds = prometheus.NewHistogramVec(
@@ -278,7 +293,7 @@ var (
 			Name: "aerial_brain_memory_operations_total",
 			Help: "Total count of semantic memory operations (extract vs search).",
 		},
-		[]string{"op", "status"},
+		[]string{"op", labelStatus},
 	)
 
 	MemorySearchDurationSeconds = prometheus.NewHistogram(
@@ -294,7 +309,7 @@ var (
 			Name: "aerial_brain_embeddings_generated_total",
 			Help: "Total vector embeddings generated via Ollama or local model.",
 		},
-		[]string{"model", "type", "status"},
+		[]string{labelModel, labelType, labelStatus},
 	)
 
 	EmbeddingDurationSeconds = prometheus.NewHistogramVec(
@@ -303,7 +318,7 @@ var (
 			Help:    "Latency of vector embedding generation in seconds.",
 			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0},
 		},
-		[]string{"model", "type", "status"},
+		[]string{labelModel, labelType, labelStatus},
 	)
 
 	// DBQueryDurationSeconds tracks database query latency telemetry.
@@ -313,7 +328,7 @@ var (
 			Help:    "Database query execution latency by symbolic operation name.",
 			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5},
 		},
-		[]string{"op", "status"},
+		[]string{"op", labelStatus},
 	)
 
 	// HTTPRequestsTotal and related metrics track HTTP ingress API telemetry.
@@ -322,7 +337,7 @@ var (
 			Name: "aerial_brain_http_requests_total",
 			Help: "Total HTTP requests served by Aerial Brain.",
 		},
-		[]string{"endpoint", "method", "status"},
+		[]string{"endpoint", "method", labelStatus},
 	)
 
 	HTTPRequestDurationSeconds = prometheus.NewHistogramVec(
@@ -331,7 +346,7 @@ var (
 			Help:    "HTTP request latency in seconds by endpoint and method.",
 			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
 		},
-		[]string{"endpoint", "method", "status"},
+		[]string{"endpoint", "method", labelStatus},
 	)
 
 	HTTPInFlightRequests = prometheus.NewGauge(
@@ -347,7 +362,7 @@ var (
 			Name: "aerial_brain_channel_history_fetches_total",
 			Help: "Total channel history context fetches during turn bootstrapping.",
 		},
-		[]string{"source", "status"},
+		[]string{labelSource, labelStatus},
 	)
 
 	ChannelHistoryFetchDurationSeconds = prometheus.NewHistogramVec(
@@ -356,7 +371,7 @@ var (
 			Help:    "Latency of channel history context fetching in seconds.",
 			Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0},
 		},
-		[]string{"source"},
+		[]string{labelSource},
 	)
 
 	ChannelHistoryMessagesCount = prometheus.NewHistogram(
@@ -373,7 +388,7 @@ var (
 			Name: "aerial_brain_config_reloads_total",
 			Help: "Total hot-reload events triggered by SIGHUP, HTTP trigger, or sidecar.",
 		},
-		[]string{"source", "status"},
+		[]string{labelSource, labelStatus},
 	)
 
 	// WebhooksDispatchedTotal and related metrics track lifecycle webhook telemetry.
@@ -382,7 +397,7 @@ var (
 			Name: "aerial_brain_webhooks_dispatched_total",
 			Help: "Total lifecycle webhook requests dispatched by Aerial Brain.",
 		},
-		[]string{"hook", "status"},
+		[]string{"hook", labelStatus},
 	)
 
 	WebhookDurationSeconds = prometheus.NewHistogramVec(
@@ -400,7 +415,7 @@ var (
 			Name: "aerial_brain_session_rotations_total",
 			Help: "Total count of session rotations triggered by phase, scope, and reason.",
 		},
-		[]string{"phase", "scope", "reason"},
+		[]string{"phase", "scope", labelReason},
 	)
 
 	BuildInfo = prometheus.NewGaugeVec(
@@ -417,7 +432,7 @@ var (
 			Name: "aerial_brain_tool_calls_total",
 			Help: "Total number of tool calls executed by Aerial Brain turns.",
 		},
-		[]string{"tool", "mcp_server", "status"},
+		[]string{"tool", "mcp_server", labelStatus},
 	)
 
 	ToolDurationSeconds = prometheus.NewHistogramVec(
@@ -434,7 +449,7 @@ var (
 			Name: "aerial_brain_skill_invocations_total",
 			Help: "Total number of skill activations observed via SKILL.md reads or dispatches.",
 		},
-		[]string{"skill", "source"},
+		[]string{"skill", labelSource},
 	)
 )
 
@@ -525,13 +540,13 @@ func Handler() http.Handler {
 // RecordTurnCompleted records a finished turn with its duration, status, trigger type, and model.
 func RecordTurnCompleted(status, triggerType, model string, duration time.Duration) {
 	if status == "" {
-		status = "unknown"
+		status = unknownLabelValue
 	}
 	if triggerType == "" {
 		triggerType = "direct"
 	}
 	if model == "" {
-		model = "default"
+		model = defaultModelLabel
 	}
 	TurnsTotal.WithLabelValues(status, triggerType, model).Inc()
 	TurnDurationSeconds.WithLabelValues(status, triggerType, model).Observe(duration.Seconds())
@@ -562,7 +577,7 @@ func SanitizeChannelLabel(channel string) string {
 	}
 	channel = strings.TrimPrefix(channel, "#")
 	if channel == "" || (len(channel) >= 36 && isUUIDString(channel[len(channel)-36:])) {
-		return "unknown"
+		return unknownLabelValue
 	}
 	// Check if channel is numeric snowflake
 	isNumeric := true
@@ -573,7 +588,7 @@ func SanitizeChannelLabel(channel string) string {
 		}
 	}
 	if isNumeric {
-		return "unknown"
+		return unknownLabelValue
 	}
 	return channel
 }
@@ -581,7 +596,7 @@ func SanitizeChannelLabel(channel string) string {
 // RecordTokens records LLM token usage categorized by token type, model, and channel.
 func RecordTokens(model, channel string, input, output, thinking, cacheRead, total int) {
 	if model == "" {
-		model = "default"
+		model = defaultModelLabel
 	}
 	channel = SanitizeChannelLabel(channel)
 	if total <= 0 && (input > 0 || output > 0 || thinking > 0 || cacheRead > 0) {
@@ -607,13 +622,13 @@ func RecordTokens(model, channel string, input, output, thinking, cacheRead, tot
 // RecordRunnerExecution records runner subprocess duration and status with its caller source.
 func RecordRunnerExecution(status, model, source string, duration time.Duration) {
 	if status == "" {
-		status = "unknown"
+		status = unknownLabelValue
 	}
 	if model == "" {
-		model = "default"
+		model = defaultModelLabel
 	}
 	if source == "" {
-		source = "unknown"
+		source = unknownLabelValue
 	}
 	RunnerExecutionsTotal.WithLabelValues(status, model, source).Inc()
 	RunnerDurationSeconds.WithLabelValues(status, model, source).Observe(duration.Seconds())
@@ -622,10 +637,10 @@ func RecordRunnerExecution(status, model, source string, duration time.Duration)
 // RecordRunnerError records categorized error occurrences.
 func RecordRunnerError(errorType, model string) {
 	if errorType == "" {
-		errorType = "unknown"
+		errorType = unknownLabelValue
 	}
 	if model == "" {
-		model = "default"
+		model = defaultModelLabel
 	}
 	RunnerErrorsTotal.WithLabelValues(errorType, model).Inc()
 }
@@ -636,10 +651,10 @@ func RecordYieldTrap(action, source, model string) {
 		action = "resumed"
 	}
 	if source == "" {
-		source = "unknown"
+		source = unknownLabelValue
 	}
 	if model == "" {
-		model = "default"
+		model = defaultModelLabel
 	}
 	YieldTrapEventsTotal.WithLabelValues(action, source, model).Inc()
 }
@@ -647,13 +662,13 @@ func RecordYieldTrap(action, source, model string) {
 // RecordClassifierRun records ambient classifier execution duration, status, and confidence score.
 func RecordClassifierRun(status, model string, duration time.Duration, score float64, decision string) {
 	if status == "" {
-		status = "unknown"
+		status = unknownLabelValue
 	}
 	if model == "" {
-		model = "default"
+		model = defaultModelLabel
 	}
 	if decision == "" {
-		decision = "unknown"
+		decision = unknownLabelValue
 	}
 	ClassifierDurationSeconds.WithLabelValues(status, model).Observe(duration.Seconds())
 	ClassifierDecisionsTotal.WithLabelValues(decision, model).Inc()
@@ -665,10 +680,10 @@ func RecordClassifierRun(status, model string, duration time.Duration, score flo
 // RecordThreadTitleDuration records thread title summarization latency and status.
 func RecordThreadTitleDuration(status, model string, duration time.Duration) {
 	if status == "" {
-		status = "unknown"
+		status = unknownLabelValue
 	}
 	if model == "" {
-		model = "default"
+		model = defaultModelLabel
 	}
 	ThreadTitleDurationSeconds.WithLabelValues(status, model).Observe(duration.Seconds())
 }
@@ -676,7 +691,7 @@ func RecordThreadTitleDuration(status, model string, duration time.Duration) {
 // RecordDelivery records Discord outbound message delivery outcome and latency.
 func RecordDelivery(status string, duration time.Duration) {
 	if status == "" {
-		status = "unknown"
+		status = unknownLabelValue
 	}
 	DiscordDeliveriesTotal.WithLabelValues(status).Inc()
 	DiscordDeliveryDurationSeconds.WithLabelValues(status).Observe(duration.Seconds())
@@ -690,7 +705,7 @@ func RecordMessageChunked() {
 // RecordThreadCreated records thread creation outcomes.
 func RecordThreadCreated(status string) {
 	if status == "" {
-		status = "unknown"
+		status = unknownLabelValue
 	}
 	DiscordThreadsCreatedTotal.WithLabelValues(status).Inc()
 }
@@ -698,13 +713,13 @@ func RecordThreadCreated(status string) {
 // RecordEmbedding records embedding generation count and latency.
 func RecordEmbedding(model, embedType, status string, duration time.Duration) {
 	if model == "" {
-		model = "default"
+		model = defaultModelLabel
 	}
 	if embedType == "" {
 		embedType = "document"
 	}
 	if status == "" {
-		status = "unknown"
+		status = unknownLabelValue
 	}
 	EmbeddingsGeneratedTotal.WithLabelValues(model, embedType, status).Inc()
 	EmbeddingDurationSeconds.WithLabelValues(model, embedType, status).Observe(duration.Seconds())
@@ -713,10 +728,10 @@ func RecordEmbedding(model, embedType, status string, duration time.Duration) {
 // RecordDBQuery records database query duration with bounded symbolic operation name.
 func RecordDBQuery(op, status string, duration time.Duration) {
 	if op == "" {
-		op = "unknown"
+		op = unknownLabelValue
 	}
 	if status == "" {
-		status = "unknown"
+		status = unknownLabelValue
 	}
 	DBQueryDurationSeconds.WithLabelValues(op, status).Observe(duration.Seconds())
 }
@@ -724,7 +739,7 @@ func RecordDBQuery(op, status string, duration time.Duration) {
 // RecordHTTPRequest records HTTP request count and latency.
 func RecordHTTPRequest(endpoint, method, status string, duration time.Duration) {
 	if endpoint == "" {
-		endpoint = "unknown"
+		endpoint = unknownLabelValue
 	}
 	if method == "" {
 		method = "GET"
@@ -739,10 +754,10 @@ func RecordHTTPRequest(endpoint, method, status string, duration time.Duration) 
 // RecordChannelHistoryFetch records context bootstrapping duration and message count.
 func RecordChannelHistoryFetch(source, status string, duration time.Duration, count int) {
 	if source == "" {
-		source = "unknown"
+		source = unknownLabelValue
 	}
 	if status == "" {
-		status = "unknown"
+		status = unknownLabelValue
 	}
 	ChannelHistoryFetchesTotal.WithLabelValues(source, status).Inc()
 	ChannelHistoryFetchDurationSeconds.WithLabelValues(source).Observe(duration.Seconds())
@@ -754,10 +769,10 @@ func RecordChannelHistoryFetch(source, status string, duration time.Duration, co
 // RecordWebhookDispatch records a lifecycle webhook dispatch outcome and duration.
 func RecordWebhookDispatch(hook, status string, duration time.Duration) {
 	if hook == "" {
-		hook = "unknown"
+		hook = unknownLabelValue
 	}
 	if status == "" {
-		status = "unknown"
+		status = unknownLabelValue
 	}
 	WebhooksDispatchedTotal.WithLabelValues(hook, status).Inc()
 	WebhookDurationSeconds.WithLabelValues(hook).Observe(duration.Seconds())
@@ -777,8 +792,8 @@ func NormalizeRotationReason(reason string) string {
 		return "db_bytes"
 	case strings.Contains(r, "size") || strings.Contains(r, "bytes"):
 		return "bytes"
-	case r == "" || r == "unknown":
-		return "unknown"
+	case r == "" || r == unknownLabelValue:
+		return unknownLabelValue
 	default:
 		return "other"
 	}
@@ -787,7 +802,7 @@ func NormalizeRotationReason(reason string) string {
 // RecordSessionRotation records a session rotation event with phase, scope, and reason.
 func RecordSessionRotation(phase, scope, reason string) {
 	if phase == "" {
-		phase = "unknown"
+		phase = unknownLabelValue
 	}
 	if scope == "" {
 		scope = "thread"
@@ -799,10 +814,10 @@ func RecordSessionRotation(phase, scope, reason string) {
 // RecordVoiceTTFR records time to first response latency for voice interactions categorized by mode (sse, json) and status (success, error).
 func RecordVoiceTTFR(mode, status string, duration time.Duration) {
 	if mode == "" {
-		mode = "unknown"
+		mode = unknownLabelValue
 	}
 	if status == "" {
-		status = "unknown"
+		status = unknownLabelValue
 	}
 	if duration < 0 {
 		duration = 0
@@ -814,7 +829,7 @@ func RecordVoiceTTFR(mode, status string, duration time.Duration) {
 func RecordToolExecution(tool, mcpServer, status string, duration time.Duration) {
 	tool = strings.TrimSpace(tool)
 	if tool == "" {
-		tool = "unknown"
+		tool = unknownLabelValue
 	}
 	mcpServer = strings.TrimSpace(mcpServer)
 	if mcpServer == "" {
@@ -835,11 +850,11 @@ func RecordToolExecution(tool, mcpServer, status string, duration time.Duration)
 func RecordSkillActivation(skill, source string) {
 	skill = strings.TrimSpace(skill)
 	if skill == "" {
-		skill = "unknown"
+		skill = unknownLabelValue
 	}
 	source = strings.TrimSpace(source)
 	if source == "" {
-		source = "unknown"
+		source = unknownLabelValue
 	}
 	SkillInvocationsTotal.WithLabelValues(skill, source).Inc()
 }

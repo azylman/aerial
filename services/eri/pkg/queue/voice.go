@@ -56,9 +56,9 @@ func (p *WorkerPool) executeCustomVoiceRunner(ctx context.Context, turnPrompt, d
 	} else {
 		reply, conv, err = p.cfg.VoiceRunnerFunc(ctx, turnPrompt, deviceKey, onStatus)
 	}
-	runStatus := "success"
+	runStatus := outcomeSuccess
 	if err != nil {
-		runStatus = "error"
+		runStatus = outcomeError
 	}
 	metrics.RecordRunnerExecution(runStatus, p.LowEffortModel(), "voice", time.Since(start))
 	return reply, conv, true, err
@@ -71,14 +71,14 @@ func (p *WorkerPool) resolveVoiceAgentPool() runner.AgentPool {
 		return p.voiceProcessPool
 	}
 	if p.pools != nil {
-		return p.pools[PoolKey{Ephemeral: false, Effort: "high"}]
+		return p.pools[PoolKey{Ephemeral: false, Effort: config.EffortHigh}]
 	}
 	return nil
 }
 
 func finalizeVoiceTurnOutcome(ctx context.Context, outcome runner.TurnOutcome, turnErr error, activeSession, model string, start time.Time, sink *runner.BufferingTurnSink, detector *SentenceDetector, sentenceCb func(string)) (string, string, error) {
 	if outcome.IsSuccess {
-		metrics.RecordRunnerExecution("success", model, "voice", time.Since(start))
+		metrics.RecordRunnerExecution(outcomeSuccess, model, "voice", time.Since(start))
 		if outcome.Usage.TotalTokens > 0 {
 			metrics.RecordTokens(model, "voice", outcome.Usage.InputTokens, outcome.Usage.OutputTokens, outcome.Usage.ThinkingTokens, outcome.Usage.CacheReadTokens, outcome.Usage.TotalTokens)
 		}
@@ -95,7 +95,7 @@ func finalizeVoiceTurnOutcome(ctx context.Context, outcome runner.TurnOutcome, t
 		return outcome.Response, outcome.SessionID, nil
 	}
 
-	metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+	metrics.RecordRunnerExecution(outcomeError, model, "voice", time.Since(start))
 	if turnErr != nil {
 		return "", activeSession, turnErr
 	}
@@ -139,7 +139,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	spanCtx, span := startTurnSpan(ctx, p.tracer(), turnSpanSpec{
 		conversationID: deviceKey, agentName: p.cfg.AgentName, triggerType: voiceTriggerType, pickup: start,
 	})
-	turnStatus, turnUsage, reply := "failed", runner.TokenUsage{}, ""
+	turnStatus, turnUsage, reply := outcomeFailed, runner.TokenUsage{}, ""
 	defer func() {
 		if p.cfg.TraceContent {
 			span.SetAttributes(runner.ContentAttributes(turnPrompt, reply)...)
@@ -168,7 +168,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 
 	lease, lErr := procPool.AcquireLease(spanCtx, deviceKey)
 	if lErr != nil {
-		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+		metrics.RecordRunnerExecution(outcomeError, model, "voice", time.Since(start))
 		return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", lErr)
 	}
 	defer func() {
@@ -203,11 +203,11 @@ const voiceTriggerType = "voice"
 func voiceTurnStatus(ctx context.Context, outcome runner.TurnOutcome) string {
 	switch {
 	case outcome.IsSuccess:
-		return "success"
+		return outcomeSuccess
 	case ctx.Err() != nil:
 		return "cancelled"
 	default:
-		return "failed"
+		return outcomeFailed
 	}
 }
 
