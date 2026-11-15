@@ -585,14 +585,6 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	require.NoError(t, srv.cancelRestateBuildWorkflow(ctx, "b-restate", "test cancel"))
 	require.NoError(t, srv.notifyRestateDAGMutation(ctx, "b-restate", "append_chunks"))
 
-	resAdv := &VanadisAdvancementResult{
-		Matched:          true,
-		Advanced:         true,
-		BuildID:          "b-restate",
-		MergedChunkIndex: 0,
-		NextChunkIndex:   1,
-	}
-	assert.True(t, srv.notifyRestateChunkPRAdvanced(ctx, resAdv))
 	assert.True(t, srv.notifyRestateActionChunkCompleted(ctx, "c2"))
 	srv.notifyRestateChunkFailed(ctx, "c1")
 
@@ -628,8 +620,6 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		"/BuildWorkflow/b-restate/Run/send",
 		"/BuildWorkflow/b-restate/Cancel/send",
 		"/BuildWorkflow/b-restate/MutateDAG/send",
-		"/restate/awakeables/awk-m1/resolve",
-		"/restate/awakeables/awk-d1/resolve",
 		"/restate/awakeables/awk-a2/resolve",
 		"/restate/awakeables/awk-m1/resolve",
 		"/restate/awakeables/awk-d1/resolve",
@@ -643,7 +633,6 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	assert.NoError(t, srv.cancelRestateBuildWorkflow(ctx, "", "r"))
 	assert.NoError(t, srv.notifyRestateDAGMutation(ctx, "", "a"))
 	assert.NoError(t, srv.resolveRestateAwakeable(ctx, "", "v"))
-	assert.False(t, srv.notifyRestateChunkPRAdvanced(ctx, nil))
 	assert.False(t, srv.notifyRestateActionChunkCompleted(ctx, ""))
 	srv.notifyRestateChunkFailed(ctx, "")
 	srv.notifyRestateChunkFailed(ctx, "nonexistent")
@@ -659,7 +648,6 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		httpClient: ts500.Client(),
 	}
 	assert.Error(t, srv500.startRestateBuildWorkflow(ctx, "b-restate"))
-	assert.False(t, srv500.notifyRestateChunkPRAdvanced(ctx, resAdv))
 	assert.False(t, srv500.notifyRestateActionChunkCompleted(ctx, "c2"))
 	srv500.notifyRestateChunkFailed(ctx, "c1")
 
