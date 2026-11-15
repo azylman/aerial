@@ -66,9 +66,10 @@ func (te *turnExecution) createOneShotSchedule(s oneShotScheduleRequest) error {
 }
 
 var rateLimitKeywords = []string{
-	"503", "high demand", "rate limit", "resource_exhausted", "429", "quota",
+	"503", "high demand", "rate limit", "rate_limit", "resource_exhausted", "429", "quota",
 	"too many requests", "overloaded", "service unavailable", "resource has been exhausted",
 	"individual quota reached", "please upgrade your subscription",
+	"usage limit", "you've hit your", "you’ve hit your",
 }
 
 func isRateLimitError(errDetail string, extraStrs ...string) bool {
@@ -88,6 +89,21 @@ func isRateLimitError(errDetail string, extraStrs ...string) bool {
 		}
 	}
 	return false
+}
+
+func shouldReplaceWithTranscriptError(currentErr, currentStderr, transcriptErr string) bool {
+	if transcriptErr == "" {
+		return false
+	}
+	if !runner.IsQuotaPause(currentErr, currentStderr) {
+		return true
+	}
+	if !runner.IsQuotaPause(transcriptErr, "") {
+		return false
+	}
+	_, transcriptExact := runner.ExtractQuotaResetDuration(transcriptErr, "")
+	_, currentExact := runner.ExtractQuotaResetDuration(currentErr, currentStderr)
+	return transcriptExact || !currentExact
 }
 
 func (te *turnExecution) handleRetryBackoff(attempt, maxAttempts int, errDetail, currentModel string) (shutdown bool) {
@@ -132,8 +148,10 @@ func (te *turnExecution) resolveTurnOutcome(runCtx context.Context, turnRes *run
 	}
 	if !outcome.IsSuccess && targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil {
 		if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(te.poolCtx(), targetSess, te.execStart); tErr == nil && transcriptErr != "" {
-			outcome.ErrorDetail = transcriptErr
-			stderr = transcriptErr
+			if shouldReplaceWithTranscriptError(outcome.ErrorDetail, stderr, transcriptErr) {
+				outcome.ErrorDetail = transcriptErr
+				stderr = transcriptErr
+			}
 		}
 	}
 	return outcome, stderr

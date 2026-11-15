@@ -339,6 +339,11 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 			expectedFinalStatus: db.StatusFailed, wantDeliveredSubstr: "resets in", checkQuotaSchedule: true, checkQuotaDbError: true,
 		},
 		{
+			name: "ClaudeSyntheticRateLimit_WallClockReset_QuotaPause", threadID: "thread-claude-quota-wallclock", daemonUUID: "f5555555-6666-7777-8888-999999999999", presetSessionInDB: "f5555555-6666-7777-8888-999999999999",
+			turnResponses:       []string{`{"event":"result","result":{"status":"ERROR","exit_code":1,"error":"claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)"}}` + "\n"},
+			expectedFinalStatus: db.StatusFailed, wantDeliveredSubstr: "resets in", checkQuotaSchedule: true, checkQuotaDbError: true,
+		},
+		{
 			name: "QuotaPause_RotatesBloatedSession", threadID: "thread-quota-bloat-rotation", daemonUUID: "b3333333-4444-5555-6666-777777777777", presetSessionInDB: "b3333333-4444-5555-6666-777777777777",
 			turnResponses: []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}` + "\n"},
 			transcriptContent: fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}

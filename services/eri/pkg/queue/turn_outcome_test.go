@@ -1061,3 +1061,264 @@ func TestTurnExecution_IsQuotaRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestIsRateLimitError_ExtendedClaudeKeywords(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		errDetail string
+		extraStrs []string
+		want      bool
+	}{
+		{name: "ClaudeRateLimit", errDetail: "rate_limit: request throttled", want: true},
+		{name: "ClaudeUsageLimit", errDetail: "You have reached your usage limit", want: true},
+		{name: "ClaudeYouveHitYourLimit", errDetail: "you've hit your limit for today", want: true},
+		{name: "ClaudeYouveHitYourLimitCurly", errDetail: "you’ve hit your limit for today", want: true},
+		{name: "ExtraStrsContainsRateLimit", errDetail: "upstream error", extraStrs: []string{"rate_limit"}, want: true},
+		{name: "ExtraStrsContainsUsageLimit", errDetail: "request failed", extraStrs: []string{"server error", "usage limit reached"}, want: true},
+		{name: "ExtraStrsContainsYouveHitYour", errDetail: "failed", extraStrs: []string{"you've hit your limit"}, want: true},
+		{name: "ExtraStrsContainsYouveHitYourCurly", errDetail: "failed", extraStrs: []string{"you’ve hit your limit"}, want: true},
+		{name: "ResourceExhausted", errDetail: "RESOURCE_EXHAUSTED", want: true},
+		{name: "Code429", errDetail: "HTTP 429 Too Many Requests", want: true},
+		{name: "DiskQuotaExceeded", errDetail: "write error: disk quota exceeded", want: false},
+		{name: "GenericError", errDetail: "syntax error in file.go", want: false},
+		{name: "EmptyString", errDetail: "", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isRateLimitError(tc.errDetail, tc.extraStrs...); got != tc.want {
+				t.Errorf("isRateLimitError(%q, %v) = %t, want %t", tc.errDetail, tc.extraStrs, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldReplaceWithTranscriptError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		currentErr    string
+		currentStderr string
+		transcriptErr string
+		want          bool
+	}{
+		{
+			name:          "EmptyTranscriptError",
+			currentErr:    "exit status 1",
+			currentStderr: "unknown error",
+			transcriptErr: "",
+			want:          false,
+		},
+		{
+			name:          "NonQuotaCurrent_ToolErrorTranscript",
+			currentErr:    "exit status 1",
+			currentStderr: "command failed",
+			transcriptErr: "tool execution failed: command not found",
+			want:          true,
+		},
+		{
+			name:          "NonQuotaCurrent_QuotaTranscript",
+			currentErr:    "exit status 1",
+			currentStderr: "command failed",
+			transcriptErr: "RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 30m.",
+			want:          true,
+		},
+		{
+			name:          "QuotaCurrent_ToolErrorTranscript_ProtectsActiveQuotaPause",
+			currentErr:    "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+			currentStderr: "",
+			transcriptErr: "tool execution failed: command not found",
+			want:          false,
+		},
+		{
+			name:          "QuotaCurrentInStderr_GenericTranscript_ProtectsActiveQuotaPause",
+			currentErr:    "exit status 1",
+			currentStderr: "RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 30m.",
+			transcriptErr: "exit status 127",
+			want:          false,
+		},
+		{
+			name:          "BareQuotaCurrent_ExactQuotaTranscript_UpgradesResetDuration",
+			currentErr:    "rate_limit: You've hit your usage limit",
+			currentStderr: "",
+			transcriptErr: "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+			want:          true,
+		},
+		{
+			name:          "BareQuotaCurrent_ExactResetInTranscript_UpgradesResetDuration",
+			currentErr:    "rate_limit: You've hit your usage limit",
+			currentStderr: "",
+			transcriptErr: "RESOURCE_EXHAUSTED: quota reached. resets in 45m.",
+			want:          true,
+		},
+		{
+			name:          "ExactQuotaCurrent_BareQuotaTranscript_PreservesExactDuration",
+			currentErr:    "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+			currentStderr: "",
+			transcriptErr: "rate_limit: You've hit your usage limit",
+			want:          false,
+		},
+		{
+			name:          "ExactQuotaCurrent_ExactQuotaTranscript_PermitsReplacement",
+			currentErr:    "RESOURCE_EXHAUSTED: quota reached. resets in 10m.",
+			currentStderr: "",
+			transcriptErr: "RESOURCE_EXHAUSTED: quota reached. resets in 5m.",
+			want:          true,
+		},
+		{
+			name:          "BareQuotaCurrent_BareQuotaTranscript_PermitsReplacement",
+			currentErr:    "rate_limit: You've hit your usage limit",
+			currentStderr: "",
+			transcriptErr: "rate_limit: You've hit your usage limit",
+			want:          true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldReplaceWithTranscriptError(tc.currentErr, tc.currentStderr, tc.transcriptErr); got != tc.want {
+				t.Errorf("shouldReplaceWithTranscriptError(%q, %q, %q) = %t, want %t", tc.currentErr, tc.currentStderr, tc.transcriptErr, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTurnExecution_ResolveTurnOutcome_TranscriptGuard(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                 string
+		execErr              error
+		turnStderr           string
+		transcriptErr        string
+		wantOutcomeErrDetail string
+		wantStderr           string
+	}{
+		{
+			name:                 "NonQuota_ReplacedByTranscriptError",
+			execErr:              errors.New("exit status 1"),
+			turnStderr:           "command failed",
+			transcriptErr:        "tool execution error: file not found",
+			wantOutcomeErrDetail: "tool execution error: file not found",
+			wantStderr:           "tool execution error: file not found",
+		},
+		{
+			name:                 "QuotaWithExactDuration_NotDowngradedByToolError",
+			execErr:              errors.New("claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)"),
+			turnStderr:           "",
+			transcriptErr:        "tool execution error: file not found",
+			wantOutcomeErrDetail: "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+			wantStderr:           "",
+		},
+		{
+			name:                 "BareQuota_UpgradedByExactTranscriptError",
+			execErr:              errors.New("rate_limit: You've hit your usage limit"),
+			turnStderr:           "",
+			transcriptErr:        "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+			wantOutcomeErrDetail: "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+			wantStderr:           "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sessID := uuid.New().String()
+			tempHome, tempData := t.TempDir(), t.TempDir()
+			sessMgr := session.New(tempHome, tempData)
+			sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
+			_ = os.MkdirAll(sessDir, 0o755)
+			if tc.transcriptErr != "" {
+				_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":%q,"created_at":%q}`+"\n", tc.transcriptErr, time.Now().UTC().Format(time.RFC3339))), 0o644)
+			}
+			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
+				SessionManager: sessMgr,
+			})
+			defer pool.Stop()
+
+			te := &turnExecution{
+				pool:             pool,
+				currentSessionID: sessID,
+				execStart:        time.Now().Add(-time.Minute),
+			}
+			turnRes := &runner.TurnResult{Stderr: tc.turnStderr}
+			outcome, stderr := te.resolveTurnOutcome(context.Background(), turnRes, tc.execErr)
+			if outcome.ErrorDetail != tc.wantOutcomeErrDetail {
+				t.Errorf("outcome.ErrorDetail = %q, want %q", outcome.ErrorDetail, tc.wantOutcomeErrDetail)
+			}
+			if stderr != tc.wantStderr {
+				t.Errorf("stderr = %q, want %q", stderr, tc.wantStderr)
+			}
+		})
+	}
+}
+
+func TestTurnExecution_EnrichFailureFromTranscript_TranscriptGuard(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		initialErr    string
+		initialStderr string
+		transcriptErr string
+		wantErrDetail string
+		wantStderr    string
+	}{
+		{
+			name:          "NonQuota_EnrichedFromTranscript",
+			initialErr:    "exit status 1",
+			initialStderr: "command failed",
+			transcriptErr: "tool execution failed: command not found",
+			wantErrDetail: "tool execution failed: command not found",
+			wantStderr:    "tool execution failed: command not found",
+		},
+		{
+			name:          "QuotaExact_ProtectedFromDowngrade",
+			initialErr:    "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+			initialStderr: "original stderr",
+			transcriptErr: "tool execution failed: command not found",
+			wantErrDetail: "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+			wantStderr:    "original stderr",
+		},
+		{
+			name:          "BareQuota_UpgradedFromTranscript",
+			initialErr:    "rate_limit: You've hit your usage limit",
+			initialStderr: "bare quota",
+			transcriptErr: "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+			wantErrDetail: "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+			wantStderr:    "claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sessID := uuid.New().String()
+			tempHome, tempData := t.TempDir(), t.TempDir()
+			sessMgr := session.New(tempHome, tempData)
+			sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
+			_ = os.MkdirAll(sessDir, 0o755)
+			if tc.transcriptErr != "" {
+				_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":%q,"created_at":%q}`+"\n", tc.transcriptErr, time.Now().UTC().Format(time.RFC3339))), 0o644)
+			}
+			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
+				SessionManager: sessMgr,
+			})
+			defer pool.Stop()
+
+			te := &turnExecution{
+				pool:             pool,
+				currentSessionID: sessID,
+				execStart:        time.Now().Add(-time.Minute),
+			}
+			outcome := runner.TurnOutcome{
+				SessionID:   sessID,
+				ErrorDetail: tc.initialErr,
+			}
+			gotErrDetail, gotStderr := te.enrichFailureFromTranscript(outcome, "", tc.initialStderr, false)
+			if gotErrDetail != tc.wantErrDetail {
+				t.Errorf("gotErrDetail = %q, want %q", gotErrDetail, tc.wantErrDetail)
+			}
+			if gotStderr != tc.wantStderr {
+				t.Errorf("gotStderr = %q, want %q", gotStderr, tc.wantStderr)
+			}
+		})
+	}
+}
