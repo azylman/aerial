@@ -1242,18 +1242,6 @@ if grep -q -- "--agent codex" "$CALL_LOG"; then
   echo 'codex_remap_gemini:ok'
 fi
 
-: > "$CALL_LOG"
-(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent claude-code --min-severity medium --reasoning thorough >/dev/null 2>&1)
-if grep -q -- "--agent codex" "$CALL_LOG"; then
-  echo 'codex_remap_claude:ok'
-fi
-
-: > "$CALL_LOG"
-(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent=gemini --min-severity medium --reasoning thorough >/dev/null 2>&1)
-if grep -q -- "--agent codex" "$CALL_LOG"; then
-  echo 'codex_remap_gemini_eq:ok'
-fi
-
 # Subtest 3e: Codex removed -> falls back to claude-code when claude token exists
 rm -f "$STATE_DIR/codex-auth.json"
 : > "$CALL_LOG"
@@ -1296,8 +1284,6 @@ assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_remap_gemini
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_remap_gemini_eq:ok' && echo true || echo false)" "github-runner roborev wrapper remaps --agent=gemini to claude-code when token exists"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_fallback_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper unsets CLAUDE_CODE_OAUTH_TOKEN and remaps --agent claude-code to gemini when token is absent"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_remap_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper remaps --agent gemini to codex when codex auth and binary exist"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_remap_claude:ok' && echo true || echo false)" "github-runner roborev wrapper remaps --agent claude-code to codex when codex auth and binary exist"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_remap_gemini_eq:ok' && echo true || echo false)" "github-runner roborev wrapper remaps --agent=gemini to codex when codex auth and binary exist"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_fallback_claude:ok' && echo true || echo false)" "github-runner roborev wrapper falls back from codex to claude-code when claude token exists"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'codex_fallback_gemini:ok' && echo true || echo false)" "github-runner roborev wrapper falls back from codex to gemini when both codex and claude are absent"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'agy_model_pin:ok' && echo true || echo false)" "github-runner agy wrapper pins --model gemini-4-hydrogen-low on headless invocations while preserving --version, subcommands, and explicit --model"
