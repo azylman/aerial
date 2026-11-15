@@ -100,17 +100,34 @@ func (r *BuildReconciler) ServiceName() string {
 	return "BuildReconciler"
 }
 
+// BuildObjectState represents the authoritative K/V state for a Vanadis build managed by BuildObject.
+type BuildObjectState struct {
+	Build    VanadisBuild    `json:"build"`
+	Chunks   []VanadisChunk  `json:"chunks"`
+	Launched map[string]bool `json:"launched,omitempty"`
+}
+
+// BuildMutationRequest represents a typed mutation payload targeting BuildObject.
+type BuildMutationRequest struct {
+	Action  string `json:"action"`
+	ChunkID string `json:"chunk_id,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
 type reconcileStepOutput struct {
-	BuildStatus    string          `json:"build_status"`
-	LaunchedChunks []string        `json:"launched_chunks,omitempty"`
-	LaunchedMap    map[string]bool `json:"launched_map,omitempty"`
-	Error          string          `json:"error,omitempty"`
+	BuildStatus    string            `json:"build_status"`
+	LaunchedChunks []string          `json:"launched_chunks,omitempty"`
+	LaunchedMap    map[string]bool   `json:"launched_map,omitempty"`
+	Error          string            `json:"error,omitempty"`
+	State          *BuildObjectState `json:"state,omitempty"`
 }
 
 type objectRuntime interface {
 	Key() string
 	GetLaunched() (map[string]bool, error)
 	SetLaunched(launched map[string]bool)
+	GetState() (*BuildObjectState, error)
+	SetState(state BuildObjectState)
 	ClearState()
 	RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error)
 }
@@ -132,6 +149,14 @@ func (r restateObjectRuntime) SetLaunched(launched map[string]bool) {
 		launched = make(map[string]bool)
 	}
 	restate.Set(r.ctx, "launched", launched)
+}
+
+func (r restateObjectRuntime) GetState() (*BuildObjectState, error) {
+	return restate.Get[*BuildObjectState](r.ctx, "state")
+}
+
+func (r restateObjectRuntime) SetState(state BuildObjectState) {
+	restate.Set(r.ctx, "state", &state)
 }
 
 func (r restateObjectRuntime) ClearState() {
@@ -186,6 +211,212 @@ func (r *BuildReconciler) reconcileWithRuntime(rt objectRuntime) (ReconcileBuild
 		LaunchedChunks: stepOut.LaunchedChunks,
 		Error:          stepOut.Error,
 	}, nil
+}
+
+// BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
+type BuildObject struct {
+	srv *VanadisServer
+}
+
+// NewBuildObject creates a new BuildObject instance bound to a VanadisServer.
+func NewBuildObject(srv *VanadisServer) *BuildObject {
+	return &BuildObject{srv: srv}
+}
+
+// ServiceName returns the Restate service name for this Virtual Object.
+func (b *BuildObject) ServiceName() string {
+	return "Build"
+}
+
+// Reconcile reconciles the build state on Restate.
+func (b *BuildObject) Reconcile(ctx restate.ObjectContext, req ReconcileBuildRequest) (ReconcileBuildResult, error) {
+	_ = req
+	if b == nil || b.srv == nil || b.srv.store == nil {
+		return ReconcileBuildResult{}, restate.TerminalErrorf("vanadis store not configured")
+	}
+	rt := restateObjectRuntime{ctx: ctx}
+	if strings.TrimSpace(rt.Key()) == "" {
+		return ReconcileBuildResult{}, restate.TerminalErrorf("build_id cannot be empty")
+	}
+	return b.reconcileWithRuntime(rt)
+}
+
+func (b *BuildObject) reconcileWithRuntime(rt objectRuntime) (ReconcileBuildResult, error) {
+	return b.executeObjectTransition(rt, "reconcile-build", nil)
+}
+
+// Mutate applies a mutation to the build and reconciles state.
+func (b *BuildObject) Mutate(ctx restate.ObjectContext, req BuildMutationRequest) (ReconcileBuildResult, error) {
+	if b == nil || b.srv == nil || b.srv.store == nil {
+		return ReconcileBuildResult{}, restate.TerminalErrorf("vanadis store not configured")
+	}
+	rt := restateObjectRuntime{ctx: ctx}
+	if strings.TrimSpace(rt.Key()) == "" {
+		return ReconcileBuildResult{}, restate.TerminalErrorf("build_id cannot be empty")
+	}
+	return b.mutateWithRuntime(rt, req)
+}
+
+func (b *BuildObject) mutateWithRuntime(rt objectRuntime, req BuildMutationRequest) (ReconcileBuildResult, error) {
+	return b.executeObjectTransition(rt, "mutate-build", &req)
+}
+
+func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string, mutation *BuildMutationRequest) (ReconcileBuildResult, error) {
+	buildID := strings.TrimSpace(rt.Key())
+	if buildID == "" {
+		return ReconcileBuildResult{}, restate.TerminalErrorf("build_id cannot be empty")
+	}
+
+	priorState, err := rt.GetState()
+	if err != nil {
+		return ReconcileBuildResult{BuildID: buildID, Status: "failed", Error: err.Error()}, err
+	}
+
+	priorLaunched, err := rt.GetLaunched()
+	if err != nil {
+		return ReconcileBuildResult{BuildID: buildID, Status: "failed", Error: err.Error()}, err
+	}
+
+	if priorState != nil && len(priorState.Launched) > 0 {
+		if priorLaunched == nil {
+			priorLaunched = make(map[string]bool, len(priorState.Launched))
+		}
+		for k, v := range priorState.Launched {
+			if v {
+				priorLaunched[k] = true
+			}
+		}
+	}
+
+	stepOut, err := rt.RunReconcileStep(stepName, func(ctx context.Context) (reconcileStepOutput, error) {
+		if mutation != nil {
+			if err := executeBuildMutation(ctx, b.srv, buildID, *mutation); err != nil {
+				return reconcileStepOutput{}, err
+			}
+		}
+		return executeReconcileBuild(ctx, b.srv, buildID, priorLaunched)
+	})
+	if err != nil {
+		return ReconcileBuildResult{BuildID: buildID, Status: "failed", Error: err.Error()}, err
+	}
+
+	if stepOut.BuildStatus == "completed" || stepOut.BuildStatus == "failed" || stepOut.BuildStatus == "cancelled" || stepOut.BuildStatus == "not_found" {
+		rt.ClearState()
+	} else {
+		if stepOut.State != nil {
+			rt.SetState(*stepOut.State)
+		}
+		rt.SetLaunched(stepOut.LaunchedMap)
+	}
+
+	return ReconcileBuildResult{
+		BuildID:        buildID,
+		Status:         stepOut.BuildStatus,
+		LaunchedChunks: stepOut.LaunchedChunks,
+		Error:          stepOut.Error,
+	}, nil
+}
+
+func executeBuildMutation(ctx context.Context, srv *VanadisServer, buildID string, req BuildMutationRequest) error {
+	if srv == nil || srv.store == nil {
+		return errors.New("vanadis store not configured")
+	}
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	switch action {
+	case "chunk_merged":
+		return applyMutationChunkMerged(ctx, srv, buildID, req.ChunkID)
+	case "chunk_deploy_success":
+		return applyMutationChunkDeploySuccess(ctx, srv, req.ChunkID)
+	case "action_completed":
+		return applyMutationActionCompleted(ctx, srv, req.ChunkID)
+	case "chunk_failed":
+		return applyMutationChunkFailed(ctx, srv, req.ChunkID, req.Reason)
+	case "cancelled":
+		return applyMutationCancelled(ctx, srv, buildID)
+	default:
+		return fmt.Errorf("unsupported mutation action: %q", req.Action)
+	}
+}
+
+func applyMutationChunkMerged(ctx context.Context, srv *VanadisServer, buildID, chunkID string) error {
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return fmt.Errorf("%w: chunk_id required for chunk_merged", ErrInvalidBuildInput)
+	}
+	if err := srv.store.UpdateChunkStatus(ctx, chunkID, "merged"); err != nil {
+		return fmt.Errorf("update chunk %s to merged: %w", chunkID, err)
+	}
+	RecordChunkTotal("merged")
+	srv.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunkID}, "")
+	srv.syncBuildWidget(ctx, buildID, "")
+	return nil
+}
+
+func applyMutationChunkDeploySuccess(ctx context.Context, srv *VanadisServer, chunkID string) error {
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return fmt.Errorf("%w: chunk_id required for chunk_deploy_success", ErrInvalidBuildInput)
+	}
+	chunk, build, err := srv.store.GetChunk(ctx, chunkID)
+	if err != nil {
+		return fmt.Errorf("get chunk %s: %w", chunkID, err)
+	}
+	if !strings.EqualFold(chunk.Status, "completed") {
+		if err := srv.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
+			return fmt.Errorf("update chunk %s to completed on deploy_success: %w", chunk.ID, err)
+		}
+		RecordChunkTotal("completed")
+		srv.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunk.ID}, "")
+		if build != nil {
+			srv.syncBuildWidget(ctx, build.ID, "")
+		}
+	}
+	return nil
+}
+
+func applyMutationActionCompleted(ctx context.Context, srv *VanadisServer, chunkID string) error {
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return fmt.Errorf("%w: chunk_id required for action_completed", ErrInvalidBuildInput)
+	}
+	if _, err := srv.store.CompleteActionChunk(ctx, chunkID); err != nil {
+		return fmt.Errorf("complete action chunk %s: %w", chunkID, err)
+	}
+	return nil
+}
+
+func applyMutationChunkFailed(ctx context.Context, srv *VanadisServer, chunkID, reason string) error {
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return fmt.Errorf("%w: chunk_id required for chunk_failed", ErrInvalidBuildInput)
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "chunk failed"
+	}
+	if _, _, _, err := srv.failChunkInternal(ctx, chunkID, reason); err != nil {
+		return fmt.Errorf("fail chunk %s: %w", chunkID, err)
+	}
+	return nil
+}
+
+func applyMutationCancelled(ctx context.Context, srv *VanadisServer, buildID string) error {
+	existing, existingChunks, err := srv.store.GetBuild(ctx, buildID)
+	if err != nil {
+		if errors.Is(err, ErrBuildNotFound) {
+			return nil
+		}
+		return fmt.Errorf("get build %s on cancel: %w", buildID, err)
+	}
+	if existing.Status == "completed" || existing.Status == "failed" {
+		return nil
+	}
+	if err := srv.store.UpdateBuildStatus(ctx, buildID, "cancelled"); err != nil {
+		return fmt.Errorf("update build %s status to cancelled: %w", buildID, err)
+	}
+	srv.cancelBuildChunksAndPrompts(ctx, buildID, existing, existingChunks)
+	RecordBuildTotal("cancelled")
+	return nil
 }
 
 func deriveReconcileChunkStates(chunks []VanadisChunk, priorLaunched map[string]bool) ([]string, map[string]*workflowChunkRuntimeState) {
@@ -275,6 +506,51 @@ func launchReconcileEligibleChunks(ctx context.Context, srv *VanadisServer, buil
 	return launchedChunks, launchedMap, nil
 }
 
+func checkTerminalBuildStatus(b *VanadisBuild, chunks []VanadisChunk, priorLaunched map[string]bool) *reconcileStepOutput {
+	if b.Status != "completed" && b.Status != "failed" && b.Status != "cancelled" {
+		return nil
+	}
+	out := &reconcileStepOutput{
+		BuildStatus: b.Status,
+		State: &BuildObjectState{
+			Build:    *b,
+			Chunks:   chunks,
+			Launched: priorLaunched,
+		},
+	}
+	if b.Status == "failed" {
+		for _, c := range chunks {
+			if strings.EqualFold(c.Status, "failed") || strings.EqualFold(c.Status, "cancelled") {
+				out.Error = fmt.Sprintf("chunk %s %s", c.ID, c.Status)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func checkFailedOrCancelledChunks(ctx context.Context, srv *VanadisServer, b *VanadisBuild, chunks []VanadisChunk, priorLaunched map[string]bool) (reconcileStepOutput, bool, error) {
+	for _, c := range chunks {
+		statusLower := strings.ToLower(strings.TrimSpace(c.Status))
+		if statusLower == "failed" || statusLower == "cancelled" {
+			failReason := fmt.Sprintf("chunk %s %s", c.ID, c.Status)
+			if err := executeFailBuild(ctx, srv, b.ID, failReason); err != nil {
+				return reconcileStepOutput{}, false, err
+			}
+			return reconcileStepOutput{
+				BuildStatus: "failed",
+				Error:       failReason,
+				State: &BuildObjectState{
+					Build:    *b,
+					Chunks:   chunks,
+					Launched: priorLaunched,
+				},
+			}, true, nil
+		}
+	}
+	return reconcileStepOutput{}, false, nil
+}
+
 func executeReconcileBuild(ctx context.Context, srv *VanadisServer, buildID string, priorLaunched map[string]bool) (reconcileStepOutput, error) {
 	if srv == nil || srv.store == nil {
 		return reconcileStepOutput{}, errors.New("vanadis store not configured")
@@ -287,8 +563,8 @@ func executeReconcileBuild(ctx context.Context, srv *VanadisServer, buildID stri
 		return reconcileStepOutput{}, fmt.Errorf("get build %s: %w", buildID, err)
 	}
 
-	if b.Status == "completed" || b.Status == "failed" || b.Status == "cancelled" {
-		return reconcileStepOutput{BuildStatus: b.Status}, nil
+	if terminalOut := checkTerminalBuildStatus(b, chunks, priorLaunched); terminalOut != nil {
+		return *terminalOut, nil
 	}
 
 	if b.Status == "pending" {
@@ -304,22 +580,25 @@ func executeReconcileBuild(ctx context.Context, srv *VanadisServer, buildID stri
 
 	chunkOrder, states := deriveReconcileChunkStates(chunks, priorLaunched)
 
-	for _, c := range chunks {
-		statusLower := strings.ToLower(strings.TrimSpace(c.Status))
-		if statusLower == "failed" || statusLower == "cancelled" {
-			failReason := fmt.Sprintf("chunk %s %s", c.ID, c.Status)
-			if err := executeFailBuild(ctx, srv, buildID, failReason); err != nil {
-				return reconcileStepOutput{}, err
-			}
-			return reconcileStepOutput{BuildStatus: "failed", Error: failReason}, nil
+	if failedOut, ok, err := checkFailedOrCancelledChunks(ctx, srv, b, chunks, priorLaunched); err != nil || ok {
+		if err != nil {
+			return reconcileStepOutput{}, err
 		}
+		return failedOut, nil
 	}
 
 	if isWorkflowBuildComplete(chunkOrder, states) {
 		if err := executeCompleteWorkflowBuild(ctx, srv, buildID); err != nil {
 			return reconcileStepOutput{}, fmt.Errorf("complete build %s: %w", buildID, err)
 		}
-		return reconcileStepOutput{BuildStatus: "completed"}, nil
+		return reconcileStepOutput{
+			BuildStatus: "completed",
+			State: &BuildObjectState{
+				Build:    *b,
+				Chunks:   chunks,
+				Launched: priorLaunched,
+			},
+		}, nil
 	}
 
 	launchedChunks, launchedMap, err := launchReconcileEligibleChunks(ctx, srv, buildID, chunkOrder, states, priorLaunched)
@@ -327,10 +606,24 @@ func executeReconcileBuild(ctx context.Context, srv *VanadisServer, buildID stri
 		return reconcileStepOutput{}, err
 	}
 
+	// Refresh chunks from states/updates for state snapshot
+	currentChunks := make([]VanadisChunk, len(chunks))
+	copy(currentChunks, chunks)
+	for i := range currentChunks {
+		if cs := states[currentChunks[i].ID]; cs != nil {
+			currentChunks[i] = cs.chunk
+		}
+	}
+
 	return reconcileStepOutput{
 		BuildStatus:    b.Status,
 		LaunchedChunks: launchedChunks,
 		LaunchedMap:    launchedMap,
+		State: &BuildObjectState{
+			Build:    *b,
+			Chunks:   currentChunks,
+			Launched: launchedMap,
+		},
 	}, nil
 }
 
@@ -490,7 +783,8 @@ func startRestateServer(ctx context.Context, srv *VanadisServer) (*server.Restat
 		port = "0"
 	}
 	restateServer := server.NewRestate().
-		Bind(restate.Reflect(NewBuildReconciler(srv)))
+		Bind(restate.Reflect(NewBuildReconciler(srv))).
+		Bind(restate.Reflect(NewBuildObject(srv)))
 	go func() {
 		log.Printf("[vanadis] Restate HTTP/2 server listening on :%s", port)
 		if err := restateServer.Start(ctx, ":"+port); err != nil && !errors.Is(err, context.Canceled) {
