@@ -80,6 +80,10 @@ func (d *HTTPPromptDispatcher) SetEventBus(bus pubsub.Bus) {
 }
 
 func (d *HTTPPromptDispatcher) EventBus() pubsub.Bus {
+	return d.getBus()
+}
+
+func (d *HTTPPromptDispatcher) getBus() pubsub.Bus {
 	if d == nil {
 		return nil
 	}
@@ -190,7 +194,7 @@ func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req DispatchRequest
 	if strings.TrimSpace(req.Source) == "" {
 		return DispatchResponse{}, errors.New("dispatch source cannot be empty")
 	}
-	if bus := d.EventBus(); bus != nil {
+	if bus := d.getBus(); bus != nil {
 		dispatchID := strings.TrimSpace(req.ID)
 		if dispatchID == "" {
 			dispatchID = uuid.New().String()

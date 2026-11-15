@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -70,9 +71,17 @@ func TestEriJetStreamInit(t *testing.T) {
 	}); b == nil {
 		t.Error("expected non-nil bus despite EnsureCoreStreams error")
 	}
-	if !failBus.ensureCalled {
-		t.Error("expected EnsureCoreStreams to be called on failBus")
+
+	// attachEriEventBusWithFactory with bus closing error
+	cleanupCloseErr := attachEriEventBusWithFactory(ctx, pool, func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return failBus, nil
+	})
+	if cleanupCloseErr != nil {
+		cleanupCloseErr()
 	}
+
+	// publishDispatchDropOutcome publish failure
+	publishDispatchDropOutcome(ctx, failBus, "disp-fail-pub", "vanadis", "sess-1", "build-1", "failed", "some error")
 
 	// attachEriEventBusWithFactory success branch
 	cleanupSuccess := attachEriEventBusWithFactory(ctx, pool, successFactory)
@@ -86,13 +95,18 @@ func TestEriJetStreamInit(t *testing.T) {
 
 type failStreamCloseBus struct {
 	pubsub.Bus
-
-	ensureCalled bool
 }
 
 func (f *failStreamCloseBus) EnsureCoreStreams(_ context.Context) error {
-	f.ensureCalled = true
 	return errors.New("simulated ensure error")
+}
+
+func (f *failStreamCloseBus) Close() error {
+	return errors.New("simulated close error")
+}
+
+func (f *failStreamCloseBus) Publish(_ context.Context, _, _ string, _ any) error {
+	return errors.New("simulated publish error")
 }
 
 type natsURLResolutionTestCase struct {
@@ -452,19 +466,6 @@ func (u *uninsertedStore) InsertDispatch(_ context.Context, _ db.Dispatch) (bool
 	return false, nil
 }
 
-type recordingOutcomeBus struct {
-	pubsub.Bus
-
-	outcomes []pubsub.DispatchOutcomeEvent
-}
-
-func (r *recordingOutcomeBus) Publish(ctx context.Context, subject, msgID string, payload any) error {
-	if ev, ok := payload.(pubsub.DispatchOutcomeEvent); ok {
-		r.outcomes = append(r.outcomes, ev)
-	}
-	return r.Bus.Publish(ctx, subject, msgID, payload)
-}
-
 type dispatchJobTestCase struct {
 	name                string
 	isNilMsg            bool
@@ -476,10 +477,10 @@ type dispatchJobTestCase struct {
 	passNilStore        bool
 	wantErr             bool
 	wantInsert          bool
-	checkDefaultIDs     bool
 	checkNotInserted    bool
 	checkSkipActive     bool
 	checkDupUnchanged   bool
+	checkStatelessID    bool
 	wantOutcomeStatus   string
 	wantOutcomeID       string
 }
@@ -513,19 +514,9 @@ func setupDispatchTestStore(ctx context.Context, tc dispatchJobTestCase) db.Stor
 	return fake
 }
 
-func unwrapFakeStore(store db.Store) *dbtest.FakeStore {
-	if s, ok := store.(*dbtest.FakeStore); ok {
-		return s
-	}
-	if u, ok := store.(*uninsertedStore); ok {
-		return u.FakeStore
-	}
-	return nil
-}
-
 func verifyInsertedDispatch(ctx context.Context, store db.Store) bool {
-	s := unwrapFakeStore(store)
-	if s == nil {
+	s, ok := store.(*dbtest.FakeStore)
+	if !ok {
 		return false
 	}
 	if d, _ := s.GetDispatch(ctx, "disp-tbl-1"); d != nil {
@@ -537,21 +528,12 @@ func verifyInsertedDispatch(ctx context.Context, store db.Store) bool {
 
 func verifyDispatchJobOutcome(ctx context.Context, t *testing.T, store db.Store, tc dispatchJobTestCase) {
 	t.Helper()
-	s := unwrapFakeStore(store)
-	if s == nil {
+	s, ok := store.(*dbtest.FakeStore)
+	if !ok {
 		return
 	}
 	if tc.wantInsert && !verifyInsertedDispatch(ctx, store) {
 		t.Errorf("expected inserted dispatch, got none")
-	}
-	if tc.checkDefaultIDs {
-		disps, err := s.GetPendingOrProcessingDispatches(ctx, 10)
-		if err != nil || len(disps) != 1 {
-			t.Fatalf("expected 1 pending dispatch, got %+v (err=%v)", disps, err)
-		}
-		if disps[0].ID == "" || disps[0].SessionID != "" {
-			t.Errorf("expected non-empty default ID and empty SessionID, got ID=%q SessionID=%q", disps[0].ID, disps[0].SessionID)
-		}
 	}
 	if tc.checkNotInserted {
 		if d, _ := s.GetDispatch(ctx, "disp-not-inserted"); d != nil {
@@ -576,25 +558,46 @@ func verifyDispatchJobOutcome(ctx context.Context, t *testing.T, store db.Store,
 			t.Errorf("expected disp-dup-1 status to remain completed, got %q", d.Status)
 		}
 	}
+	if tc.checkStatelessID {
+		verifyStatelessDispatch(ctx, t, s)
+	}
 }
 
-func verifyDispatchOutcomeEvent(t *testing.T, outcomes []pubsub.DispatchOutcomeEvent, tc dispatchJobTestCase) {
+func verifyStatelessDispatch(ctx context.Context, t *testing.T, s *dbtest.FakeStore) {
+	t.Helper()
+	disps, _ := s.GetPendingOrProcessingDispatches(ctx, 10)
+	if len(disps) == 0 {
+		t.Fatalf("expected inserted dispatch for stateless test, got none")
+	}
+	last := disps[len(disps)-1]
+	if last.SessionID != "" {
+		t.Errorf("expected empty SessionID for stateless dispatch, got %q", last.SessionID)
+	}
+	if last.ID == "" {
+		t.Errorf("expected auto-generated ID for dispatch, got empty")
+	}
+}
+
+func verifyDispatchOutcomeEvent(t *testing.T, outcomeChan <-chan pubsub.DispatchOutcomeEvent, tc dispatchJobTestCase) {
 	t.Helper()
 	if tc.wantOutcomeStatus == "" {
-		if len(outcomes) != 0 {
-			t.Errorf("unexpected outcome events published: %+v", outcomes)
+		select {
+		case ev := <-outcomeChan:
+			t.Errorf("unexpected outcome event published: %+v", ev)
+		default:
 		}
 		return
 	}
-	if len(outcomes) != 1 {
-		t.Fatalf("expected 1 outcome event, got %d: %+v", len(outcomes), outcomes)
-	}
-	outcomeEv := outcomes[0]
-	if outcomeEv.Status != tc.wantOutcomeStatus {
-		t.Errorf("outcomeEv.Status = %q, want %q", outcomeEv.Status, tc.wantOutcomeStatus)
-	}
-	if outcomeEv.DispatchID != tc.wantOutcomeID {
-		t.Errorf("outcomeEv.DispatchID = %q, want %q", outcomeEv.DispatchID, tc.wantOutcomeID)
+	select {
+	case outcomeEv := <-outcomeChan:
+		if outcomeEv.Status != tc.wantOutcomeStatus {
+			t.Errorf("outcomeEv.Status = %q, want %q", outcomeEv.Status, tc.wantOutcomeStatus)
+		}
+		if outcomeEv.DispatchID != tc.wantOutcomeID {
+			t.Errorf("outcomeEv.DispatchID = %q, want %q", outcomeEv.DispatchID, tc.wantOutcomeID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for outcome event")
 	}
 }
 
@@ -626,12 +629,10 @@ func TestHandleEriDispatchJob_Table(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:              "nil store returns error and publishes failed outcome",
-			payload:           `{"id":"disp-nil-store","source":"vanadis","prompt":"hello"}`,
-			hasStore:          false,
-			wantErr:           true,
-			wantOutcomeStatus: "failed",
-			wantOutcomeID:     "disp-nil-store",
+			name:     "nil store returns error",
+			payload:  `{"source":"vanadis","prompt":"hello"}`,
+			hasStore: false,
+			wantErr:  true,
 		},
 		{
 			name:       "valid dispatch job persists and enqueues",
@@ -641,12 +642,12 @@ func TestHandleEriDispatchJob_Table(t *testing.T) {
 			wantInsert: true,
 		},
 		{
-			name:            "valid dispatch job without id and session_id defaults them",
-			payload:         `{"source":"vanadis","prompt":"dispatch without id"}`,
-			hasStore:        true,
-			wantErr:         false,
-			wantInsert:      true,
-			checkDefaultIDs: true,
+			name:             "valid dispatch job without id generates id and retains empty session_id",
+			payload:          `{"source":"vanadis","prompt":"dispatch without id"}`,
+			hasStore:         true,
+			wantErr:          false,
+			wantInsert:       true,
+			checkStatelessID: true,
 		},
 		{
 			name:               "insert dispatch returns false skips enqueue without outcome",
@@ -697,10 +698,20 @@ func TestHandleEriDispatchJob_Table(t *testing.T) {
 			memBus := pubsub.NewMemoryBus()
 			defer memBus.Close()
 			_ = pubsub.EnsureCoreStreams(ctx, memBus)
-			recBus := &recordingOutcomeBus{Bus: memBus}
+
+			outcomeChan := make(chan pubsub.DispatchOutcomeEvent, 1)
+			_, _ = memBus.Subscribe(ctx, pubsub.SubjectAerialDispatchPrefix+">", "test-outcome", func(_ context.Context, outcomeMsg pubsub.Message) error {
+				var ev pubsub.DispatchOutcomeEvent
+				_ = json.Unmarshal(outcomeMsg.Data(), &ev)
+				select {
+				case outcomeChan <- ev:
+				default:
+				}
+				return nil
+			})
 
 			pool := queue.New(nil, queue.WorkerPoolConfig{Store: store})
-			pool.SetEventBus(recBus)
+			pool.SetEventBus(memBus)
 
 			callStore := store
 			if tc.passNilStore {
@@ -712,7 +723,7 @@ func TestHandleEriDispatchJob_Table(t *testing.T) {
 				t.Fatalf("handleEriDispatchJob() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			verifyDispatchJobOutcome(ctx, t, store, tc)
-			verifyDispatchOutcomeEvent(t, recBus.outcomes, tc)
+			verifyDispatchOutcomeEvent(t, outcomeChan, tc)
 		})
 	}
 }

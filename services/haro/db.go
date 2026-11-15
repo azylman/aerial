@@ -522,15 +522,24 @@ func deleteByID(ctx context.Context, database *sql.DB, query, emptyErrMsg, errPr
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return false, fmt.Errorf("%s", emptyErrMsg)
+		if emptyErrMsg != "" {
+			return false, fmt.Errorf("%s", emptyErrMsg)
+		}
+		return false, fmt.Errorf("id cannot be empty")
 	}
 	res, err := database.ExecContext(ctx, query, id)
 	if err != nil {
-		return false, fmt.Errorf("%s: %w", errPrefix, err)
+		if errPrefix != "" {
+			return false, fmt.Errorf("%s: %w", errPrefix, err)
+		}
+		return false, err
 	}
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("%s: failed to determine rows affected: %w", errPrefix, err)
+		if errPrefix != "" {
+			return false, fmt.Errorf("%s: failed to determine rows affected: %w", errPrefix, err)
+		}
+		return false, fmt.Errorf("failed to determine rows affected: %w", err)
 	}
 	return rowsAffected > 0, nil
 }

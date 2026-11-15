@@ -234,6 +234,8 @@ func handleEriDispatchJob(ctx context.Context, store db.Store, pool *queue.Worke
 	if dispatchID == "" {
 		dispatchID = uuid.New().String()
 	}
+	// Invariant: empty SessionID represents a stateless (ephemeral) dispatch turn and must
+	// not default to dispatchID, matching HTTP POST /dispatch and burst pool routing.
 	sessionID := strings.TrimSpace(req.SessionID)
 
 	if store == nil {

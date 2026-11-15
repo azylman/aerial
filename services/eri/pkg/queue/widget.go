@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 )
@@ -110,8 +112,38 @@ func (p *WorkerPool) resolveSynapseURL() string {
 	return ""
 }
 
+func publishCoalescedWidgetSync(ctx context.Context, bus pubsub.Bus, prompt, buildID string) bool {
+	if bus == nil {
+		return false
+	}
+	if repo, prNum, ok := extractPRRemediationTarget(prompt); ok {
+		args := pubsub.WidgetSyncJobArgs{
+			Repo:     repo,
+			PRNumber: prNum,
+		}
+		msgID := fmt.Sprintf("widget:pr:%s:%d:%d", repo, prNum, time.Now().UnixNano())
+		return bus.Publish(ctx, pubsub.SubjectPRWidgetSyncCoalesced(repo, prNum), msgID, args) == nil
+	}
+	cleanBuildID := strings.TrimSpace(buildID)
+	if cleanBuildID != "" && !strings.HasPrefix(cleanBuildID, "pr-") {
+		args := pubsub.WidgetSyncJobArgs{
+			BuildID: cleanBuildID,
+			Banner:  "",
+		}
+		msgID := fmt.Sprintf("widget:build:%s:%d", cleanBuildID, time.Now().UnixNano())
+		return bus.Publish(ctx, pubsub.SubjectBuildWidgetSyncCoalesced(cleanBuildID), msgID, args) == nil
+	}
+	return false
+}
+
 func (p *WorkerPool) ensureChunkWidgetHydrated(ctx context.Context, prompt, chunkID, buildID string) {
 	if p.hasWarmChunkWidget(chunkID) {
+		return
+	}
+	ctx, span := p.startWidgetSpan(ctx, spanWidgetHydrate)
+	defer span.End()
+
+	if p != nil && publishCoalescedWidgetSync(ctx, p.eventBus, prompt, buildID) {
 		return
 	}
 	routerURL := p.resolveSynapseURL()
@@ -119,8 +151,6 @@ func (p *WorkerPool) ensureChunkWidgetHydrated(ctx context.Context, prompt, chun
 	if routerURL == "" || !ok {
 		return
 	}
-	ctx, span := p.startWidgetSpan(ctx, spanWidgetHydrate)
-	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, routerURL+"/internal/widget/sync", strings.NewReader(bodyJSON))
