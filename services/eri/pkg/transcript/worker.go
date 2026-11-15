@@ -145,12 +145,15 @@ func SyncSessionTranscript(
 		return stats, nil
 	}
 
-	if err := syncSingleSession(ctx, store, sessionID, engine, transcriptPath, mtime, state, exists, opt.Embedder, opt.LLMFunc, opt, &stats); err != nil {
+	synced, err := syncSingleSession(ctx, store, sessionID, engine, transcriptPath, mtime, state, exists, opt.Embedder, opt.LLMFunc, opt, &stats)
+	if err != nil {
 		stats.Errors++
 		stats.Duration = time.Since(start)
 		return stats, fmt.Errorf("sync single session %s: %w", sessionID, err)
 	}
-	stats.Synced++
+	if synced {
+		stats.Synced++
+	}
 
 	backfillToolKinds(ctx, store, opt.MCPServers)
 	backfillSessionEngines(ctx, store)
@@ -236,10 +239,11 @@ func SyncTranscripts(
 			break
 		}
 
-		if err := syncSingleSession(ctx, store, sessionID, found.engine, transcriptPath, mtime, state, exists, embedder, llmFunc, opts, &stats); err != nil {
+		synced, err := syncSingleSession(ctx, store, sessionID, found.engine, transcriptPath, mtime, state, exists, embedder, llmFunc, opts, &stats)
+		if err != nil {
 			stats.Errors++
 			log.Printf("[Transcript] Error syncing session %s: %v", sessionID, err)
-		} else {
+		} else if synced {
 			stats.Synced++
 		}
 	}
@@ -791,6 +795,12 @@ func buildTranscriptStepsToInsert(
 	return stepsToInsert
 }
 
+const settledSummaryPromptPrefix = "Summarize the following agent conversation transcript in 2-3 concise sentences."
+
+func isEphemeralSummarizerPrompt(prompt string) bool {
+	return strings.HasPrefix(strings.TrimSpace(prompt), settledSummaryPromptPrefix)
+}
+
 func generateSettledSummaryText(
 	ctx context.Context,
 	sessionID string,
@@ -801,7 +811,7 @@ func generateSettledSummaryText(
 ) string {
 	summaryText := ""
 	if isSettled && llmFunc != nil && len(dialogueLines) > 0 {
-		prompt := "Summarize the following agent conversation transcript in 2-3 concise sentences. Focus on technical entities, tools executed, and outcomes.\n\nTranscript:\n" + strings.Join(dialogueLines, "\n")
+		prompt := settledSummaryPromptPrefix + " Focus on technical entities, tools executed, and outcomes.\n\nTranscript:\n" + strings.Join(dialogueLines, "\n")
 		if res, err := llmFunc(ctx, prompt); err == nil && strings.TrimSpace(res) != "" {
 			summaryText = strings.TrimSpace(res)
 		}
@@ -931,10 +941,13 @@ func syncSingleSession(
 	llmFunc LLMClientFunc,
 	opts SyncOptions,
 	stats *SyncStats,
-) error {
+) (bool, error) {
 	st, err := scanSessionTranscriptFile(transcriptPath, stats)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if isEphemeralSummarizerPrompt(st.step0Prompt) {
+		return false, nil
 	}
 
 	watermark := computeSessionWatermark(exists, st.firstParsedStep, state)
@@ -948,7 +961,7 @@ func syncSingleSession(
 	if hasSummaryRecord {
 		if err := store.UpsertSessionSummary(ctx, summaryRecord); err != nil {
 			log.Printf("[Transcript] UpsertSessionSummary error for session %s: %v", sessionID, err)
-			return err
+			return false, err
 		}
 		if shouldSummarize {
 			stats.SummariesGenerated++
@@ -958,5 +971,5 @@ func syncSingleSession(
 	// 2. Batch insert child transcript steps now that parent session summary is guaranteed to exist.
 	insertTranscriptSteps(ctx, store, sessionID, stepsToInsert, hasSummaryRecord, summaryRecord, watermark, stats)
 
-	return nil
+	return true, nil
 }

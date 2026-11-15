@@ -36,6 +36,19 @@ func runSharedAssetsLinkFail(t *testing.T, p *Provisioner, tmpHome string) {
 	p.linkOrCopyAsset(srcFile, filepath.Join(tmpHome, "file_blocker", "target.txt"))
 }
 
+func assertIsolatedEphemeralStorage(t *testing.T, p *Provisioner, tmpData string) {
+	t.Helper()
+	p.linkSharedSessionStorage(tmpData, filepath.Join(tmpData, "brain"), filepath.Join(tmpData, "conversations"))
+	ephHome := p.runtimeHomeDir(TargetEphemeral)
+	ephCliBrain := filepath.Join(ephHome, ".gemini", "antigravity-cli", "brain")
+	_ = os.MkdirAll(filepath.Dir(ephCliBrain), 0o755)
+	_ = os.Symlink(filepath.Join(tmpData, "brain"), ephCliBrain)
+	p.provisionRuntimeSharedAssets(ephHome)
+	if fi, err := os.Lstat(ephCliBrain); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		t.Fatalf("expected ephemeral brain to be isolated directory, got fi=%v err=%v", fi, err)
+	}
+}
+
 func runProvisionRuntimeSharedAssetsCase(t *testing.T, tc sharedAssetsCase) {
 	t.Helper()
 	origSymlink := symlinkRuntimeAsset
@@ -90,7 +103,7 @@ func runProvisionRuntimeSharedAssetsCase(t *testing.T, tc sharedAssetsCase) {
 	p.provisionRuntimeSharedAssets(runtimeHome)
 
 	if !tc.emptyDataDir {
-		p.linkSharedSessionStorage(tmpData, filepath.Join(tmpData, "brain"), filepath.Join(tmpData, "conversations"))
+		assertIsolatedEphemeralStorage(t, p, tmpData)
 	}
 
 	settingsDst := filepath.Join(runtimeGemini, "antigravity-cli", "settings.json")

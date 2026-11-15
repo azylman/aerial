@@ -208,8 +208,9 @@ func advancedScenarioCases() []syncTranscriptsScenarioCase {
 			wantSettled:       new(false),
 		},
 		{
-			name: "batch limit caps synced sessions",
+			name: "batch limit caps synced sessions and skips summarizer transcripts",
 			files: []sessionFileFixture{
+				{sessionID: "sess-batch-000-summarizer", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>\nSummarize the following agent conversation transcript in 2-3 concise sentences. Focus on technical entities, tools executed, and outcomes.\n</USER_REQUEST>"}` + "\n", age: 1 * time.Hour},
 				{sessionID: "sess-batch-001", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Batch task 1"}` + "\n", age: 1 * time.Hour},
 				{sessionID: "sess-batch-002", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Batch task 2"}` + "\n", age: 1 * time.Hour},
 				{sessionID: "sess-batch-003", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Batch task 3"}` + "\n", age: 1 * time.Hour},

@@ -909,7 +909,11 @@ func assertSyncRulesOutput(t *testing.T, tc syncRulesCase, p *Provisioner) {
 			t.Errorf("expected CLAUDE.md in %s runtime: %v", target, err)
 		}
 		rtClaudeProjects := filepath.Join(p.runtimeHomeDir(target), ".claude", "projects")
-		if fi, err := os.Lstat(rtClaudeProjects); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		if target == TargetEphemeral {
+			if fi, err := os.Lstat(rtClaudeProjects); err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+				t.Errorf("expected isolated projects dir in %s runtime: %v", target, err)
+			}
+		} else if fi, err := os.Lstat(rtClaudeProjects); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 			t.Errorf("expected projects symlink in %s runtime: %v", target, err)
 		}
 	}

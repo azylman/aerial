@@ -365,6 +365,11 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		filepath.Join(runtimeGemini, "mcp_oauth_tokens.json"),
 	)
 
+	if p.dataDir != "" && filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetEphemeral)) {
+		isolateEphemeralSessionStorage(runtimeHome, runtimeGemini)
+		return
+	}
+
 	// Unify brain transcripts and conversations across runtimes into shared storage
 	canonicalBrain := filepath.Join(p.dataDir, "brain")
 	canonicalConversations := filepath.Join(p.dataDir, "conversations")
@@ -387,6 +392,21 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		if sErr := symlinkRuntimeAsset(canonicalClaudeProjects, runtimeProjects); sErr != nil {
 			log.Printf("[Env] Warning: failed to link shared claude projects %s -> %s: %v", runtimeProjects, canonicalClaudeProjects, sErr)
 		}
+	}
+}
+
+func isolateEphemeralSessionStorage(runtimeHome, runtimeGemini string) {
+	for _, dir := range []string{
+		filepath.Join(runtimeGemini, "antigravity-cli", "brain"),
+		filepath.Join(runtimeGemini, "brain"),
+		filepath.Join(runtimeGemini, "antigravity-cli", "conversations"),
+		filepath.Join(runtimeGemini, "conversations"),
+		filepath.Join(runtimeHome, ".claude", "projects"),
+	} {
+		if fi, err := os.Lstat(dir); err == nil && (fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir()) {
+			ignore(os.Remove(dir))
+		}
+		ignore(os.MkdirAll(dir, 0o755))
 	}
 }
 

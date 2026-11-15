@@ -269,7 +269,7 @@ func (p *Provisioner) chownProvisionedPaths() {
 		ignore(chownPath(rtHome, 1000, 1000))
 		base := filepath.Join(rtHome, ".gemini")
 		ignore(chownPath(base, 1000, 1000))
-		for _, sub := range []string{"rules", "config"} {
+		for _, sub := range []string{"rules", "config", "brain", "conversations"} {
 			chownTree(filepath.Join(base, sub))
 		}
 		cliDir := filepath.Join(base, "antigravity-cli")
