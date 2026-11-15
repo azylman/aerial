@@ -6,6 +6,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AERIAL_PR="${SCRIPT_DIR}/aerial-pr.sh"
 
+# Hermetic test environment: clear ambient vanadis chunk environment variables
+unset AERIAL_VANADIS_CHUNK_ID VANADIS_CHUNK_ID
+
 PASSED=0
 FAILED=0
 

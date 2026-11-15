@@ -987,7 +987,21 @@ submit_scratch() {
             if [ -n "$returned_thread" ]; then
                 target_id="$returned_thread"
             fi
+        elif [ -n "$vanadis_chunk_id" ]; then
+            echo "ERROR: Failed to attach PR #${pr_num} to Vanadis chunk '${vanadis_chunk_id}'." >&2
+            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+                SCRATCH_DIR_CLEANUP=""
+            fi
+            exit 1
         fi
+    elif [ -n "$vanadis_chunk_id" ]; then
+        echo "ERROR: Cannot attach PR #${pr_num} to Vanadis chunk '${vanadis_chunk_id}': Vanadis URL could not be resolved." >&2
+        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+            SCRATCH_DIR_CLEANUP=""
+        fi
+        exit 1
     fi
 
     # Register PR in PostgreSQL pr_registry via internal endpoint

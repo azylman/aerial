@@ -276,7 +276,7 @@ func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *Res
 	}
 	details = s.resolveCIFailureDetails(ctx, res, details, checkURL)
 	s.populateMissingBranch(ctx, res)
-	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+	pubErr := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:        "ci_failed",
 		Repo:         res.Repo,
 		PRNumber:     res.PRNumber,
@@ -295,9 +295,11 @@ func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *Res
 	if s.checkRemediationCapReached(ctx, res) {
 		return nil
 	}
-	if s.bus != nil {
-		log.Printf("[synapse] [ci_failed] suppressing ci failure /prompt dispatch for %s#%d (handled by Vanadis via aerial.pr.ci_failed)", res.Repo, res.PRNumber)
-		return nil
+	if s.bus != nil && pubErr == nil {
+		if vanadisPR, err := s.isVanadisPR(ctx, res.Repo, res.PRNumber); err == nil && vanadisPR {
+			log.Printf("[synapse] [ci_failed] suppressing ci failure /prompt dispatch for %s#%d (handled by Vanadis via aerial.pr.ci_failed)", res.Repo, res.PRNumber)
+			return nil
+		}
 	}
 	return s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL, res.Branch)
 }

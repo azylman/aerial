@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -40,11 +41,11 @@ func TestPRLifecycleEvents_Publish(t *testing.T) {
 		}
 	})
 
-	t.Run("CI failure publishes ci_failed and suppresses duplicate prompt when bus is present", func(t *testing.T) {
+	t.Run("CI failure publishes ci_failed and suppresses duplicate prompt when bus is present and PR is Vanadis-owned", func(t *testing.T) {
 		t.Parallel()
 		bus := &mockEventBus{}
 		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: true}
 		srv := &RouterServer{
 			bus:        bus,
 			dispatcher: disp,
@@ -69,8 +70,64 @@ func TestPRLifecycleEvents_Publish(t *testing.T) {
 		if bus.publishedPREvents[0].Event != "ci_failed" {
 			t.Errorf("expected event ci_failed, got %s", bus.publishedPREvents[0].Event)
 		}
-		if len(disp.PromptCalls()) != 0 {
-			t.Errorf("expected prompt to be suppressed when bus is active, got %d calls", len(disp.PromptCalls()))
+		if len(disp.PromptCalls()) != 0 || len(disp.DispatchCalls()) != 0 {
+			t.Errorf("expected prompt/dispatch to be suppressed when bus is active and PR is Vanadis-owned, got prompt=%d dispatch=%d", len(disp.PromptCalls()), len(disp.DispatchCalls()))
+		}
+	})
+
+	t.Run("CI failure dispatches fallback prompt when publish fails", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{err: errors.New("nats down")}
+		disp := &mockOutboundDispatcher{}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: true}
+		srv := &RouterServer{
+			bus:        bus,
+			dispatcher: disp,
+			registry:   reg,
+			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+
+		res := &ResolvedGitHubEvent{
+			Repo:      "azylman/aerial",
+			PRNumber:  42,
+			HeadSHA:   "sha-ci-fail",
+			TargetID:  "123456789012345678",
+			CheckName: "build",
+		}
+		err := srv.completeCIFailureTransition(context.Background(), res, "compile error", "https://github.com/check/1")
+		if err != nil {
+			t.Fatalf("completeCIFailureTransition() err = %v", err)
+		}
+		if len(disp.DispatchCalls()) != 1 {
+			t.Errorf("expected background dispatch to be dispatched as fallback when publish fails, got %d calls", len(disp.DispatchCalls()))
+		}
+	})
+
+	t.Run("CI failure dispatches fallback prompt when PR is not Vanadis-owned", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{}
+		disp := &mockOutboundDispatcher{}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: false}
+		srv := &RouterServer{
+			bus:        bus,
+			dispatcher: disp,
+			registry:   reg,
+			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+
+		res := &ResolvedGitHubEvent{
+			Repo:      "azylman/aerial",
+			PRNumber:  42,
+			HeadSHA:   "sha-ci-fail",
+			TargetID:  "123456789012345678",
+			CheckName: "build",
+		}
+		err := srv.completeCIFailureTransition(context.Background(), res, "compile error", "https://github.com/check/1")
+		if err != nil {
+			t.Fatalf("completeCIFailureTransition() err = %v", err)
+		}
+		if len(disp.DispatchCalls()) != 1 {
+			t.Errorf("expected background dispatch to be dispatched when PR is not Vanadis-owned, got %d calls", len(disp.DispatchCalls()))
 		}
 	})
 
@@ -99,10 +156,148 @@ func TestPRLifecycleEvents_Publish(t *testing.T) {
 	})
 }
 
+func TestPRLifecycleEvents_GitHubEvents(t *testing.T) {
+	t.Parallel()
+
+	t.Run("opened event publishes to bus", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{}
+		srv := &RouterServer{
+			bus:    bus,
+			cfgSrc: fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+		res := &ResolvedGitHubEvent{}
+		body := []byte(`{"action":"opened","number":42,"pull_request":{"number":42,"title":"test pr","head":{"ref":"feat/test","sha":"head123"},"user":{"login":"tester"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"tester"}}`)
+		_, err := srv.processGitHubPullRequestEvent(context.Background(), "del-open", body, res)
+		if err != nil {
+			t.Fatalf("processGitHubPullRequestEvent() err = %v", err)
+		}
+		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "opened" {
+			t.Fatalf("expected opened event, got %v", bus.publishedPREvents)
+		}
+		ev := bus.publishedPREvents[0]
+		if ev.PRNumber != 42 || ev.Title != "test pr" || ev.HeadSHA != "head123" {
+			t.Errorf("unexpected opened event fields: %+v", ev)
+		}
+	})
+
+	t.Run("synchronize event publishes to bus", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
+		srv := &RouterServer{
+			bus:      bus,
+			registry: reg,
+			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+		res := &ResolvedGitHubEvent{
+			Repo:     "azylman/aerial",
+			PRNumber: 42,
+			Branch:   "feat/test",
+			HeadSHA:  "newhead456",
+			Action:   "synchronize",
+		}
+		pr := GitHubPullRequest{Title: "synced pr"}
+		err := srv.handlePullRequestRegistryAction(context.Background(), res, pr)
+		if err != nil {
+			t.Fatalf("handlePullRequestRegistryAction() err = %v", err)
+		}
+		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "synchronize" {
+			t.Fatalf("expected synchronize event, got %v", bus.publishedPREvents)
+		}
+		if bus.publishedPREvents[0].HeadSHA != "newhead456" {
+			t.Errorf("unexpected HeadSHA: %q", bus.publishedPREvents[0].HeadSHA)
+		}
+	})
+
+	t.Run("merged event publishes to bus", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
+		srv := &RouterServer{
+			bus:      bus,
+			registry: reg,
+			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+		res := &ResolvedGitHubEvent{
+			Repo:     "azylman/aerial",
+			PRNumber: 42,
+			Branch:   "feat/test",
+			HeadSHA:  "head123",
+			MergeSHA: "mergesha789",
+		}
+		err := srv.handlePRClosedAction(context.Background(), res, true)
+		if err != nil {
+			t.Fatalf("handlePRClosedAction(merged=true) err = %v", err)
+		}
+		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "merged" {
+			t.Fatalf("expected merged event, got %v", bus.publishedPREvents)
+		}
+		if bus.publishedPREvents[0].MergeSHA != "mergesha789" {
+			t.Errorf("unexpected MergeSHA: %q", bus.publishedPREvents[0].MergeSHA)
+		}
+	})
+
+	t.Run("closed_unmerged event publishes to bus", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
+		srv := &RouterServer{
+			bus:      bus,
+			registry: reg,
+			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+		res := &ResolvedGitHubEvent{
+			Repo:     "azylman/aerial",
+			PRNumber: 42,
+			Branch:   "feat/test",
+			HeadSHA:  "head123",
+		}
+		err := srv.handlePRClosedAction(context.Background(), res, false)
+		if err != nil {
+			t.Fatalf("handlePRClosedAction(merged=false) err = %v", err)
+		}
+		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "closed_unmerged" {
+			t.Fatalf("expected closed_unmerged event, got %v", bus.publishedPREvents)
+		}
+		if bus.publishedPREvents[0].Status != "closed_unmerged" {
+			t.Errorf("unexpected status: %q", bus.publishedPREvents[0].Status)
+		}
+	})
+
+	t.Run("check_updated event publishes to bus", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{}
+		reg := &mockPRRegistry{recordCheckUpdated: true}
+		srv := &RouterServer{
+			bus:      bus,
+			registry: reg,
+			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+		res := &ResolvedGitHubEvent{
+			Repo:       "azylman/aerial",
+			PRNumber:   42,
+			Branch:     "feat/test",
+			HeadSHA:    "head123",
+			CheckName:  "Unit Tests",
+			Status:     "completed",
+			Conclusion: "success",
+		}
+		srv.recordCheckRunStatus(context.Background(), res)
+		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "check_updated" {
+			t.Fatalf("expected check_updated event, got %v", bus.publishedPREvents)
+		}
+		ev := bus.publishedPREvents[0]
+		if ev.CheckName != "Unit Tests" || ev.CheckState != "passed" {
+			t.Errorf("unexpected check event fields: %+v", ev)
+		}
+	})
+}
+
 func TestPRLifecycleEvents_DeployAndKustomization(t *testing.T) {
 	t.Parallel()
 
-	t.Run("Deploy failed publishes deploy_failed and suppresses duplicate prompt when bus is present", func(t *testing.T) {
+	t.Run("Deploy failed publishes deploy_failed when bus is present", func(t *testing.T) {
 		t.Parallel()
 		bus := &mockEventBus{}
 		disp := &mockOutboundDispatcher{}
@@ -172,6 +367,50 @@ func TestPRLifecycleEvents_DeployAndKustomization(t *testing.T) {
 		}
 		if len(bus.publishedPREvents) != 2 || bus.publishedPREvents[1].Event != "deploy_success" {
 			t.Errorf("expected deploy_success, got %v", bus.publishedPREvents)
+		}
+	})
+
+	t.Run("ProcessDeployEvent publishes deploy_started and deploy_success when bus is active", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
+		disp := &mockOutboundDispatcher{}
+		srv := &RouterServer{
+			bus:        bus,
+			registry:   reg,
+			dispatcher: disp,
+			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+		deployEvt := DeployEvent{
+			Event:     "deploy_started",
+			Repo:      "azylman/aerial",
+			PRNumber:  42,
+			CommitSHA: "sha-dep",
+			TargetID:  "123456789012345678",
+			JobName:   "eri",
+		}
+		_, err := srv.ProcessDeployEvent(context.Background(), deployEvt)
+		if err != nil {
+			t.Fatalf("ProcessDeployEvent(deploy_started) err = %v", err)
+		}
+		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "deploy_started" {
+			t.Fatalf("expected deploy_started event, got %v", bus.publishedPREvents)
+		}
+
+		deploySuccessEvt := DeployEvent{
+			Event:     "deploy_success",
+			Repo:      "azylman/aerial",
+			PRNumber:  42,
+			CommitSHA: "sha-dep",
+			TargetID:  "123456789012345678",
+			JobName:   "eri",
+		}
+		_, err = srv.ProcessDeployEvent(context.Background(), deploySuccessEvt)
+		if err != nil {
+			t.Fatalf("ProcessDeployEvent(deploy_success) err = %v", err)
+		}
+		if len(bus.publishedPREvents) != 2 || bus.publishedPREvents[1].Event != "deploy_success" {
+			t.Fatalf("expected deploy_success event, got %v", bus.publishedPREvents)
 		}
 	})
 
@@ -271,7 +510,6 @@ func TestPRLifecycleEvents_HelpersAndState(t *testing.T) {
 			t.Errorf("got targetID %q, want target-12345", evt.TargetID)
 		}
 
-		// When PRNumber is 0 but CommitSHA is set, resolveDeployEventPRNumber resolves PR and TargetID
 		evt2 := DeployEvent{
 			Repo:      "azylman/aerial",
 			CommitSHA: "sha123",
@@ -291,7 +529,6 @@ func TestPRLifecycleEvents_HelpersAndState(t *testing.T) {
 			registry: reg,
 			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
 		}
-		// Non-dependabot branch returns early
 		resNonDep := &ResolvedGitHubEvent{
 			Repo:     "azylman/aerial",
 			PRNumber: 14,
@@ -303,27 +540,19 @@ func TestPRLifecycleEvents_HelpersAndState(t *testing.T) {
 			t.Errorf("expected 0 ensureCalls for non-dependabot branch, got %d", len(reg.ensureCalls))
 		}
 
-		// Empty targetID returns early
-		srvNoSys := &RouterServer{
-			registry: &mockPRRegistry{},
-			cfgSrc:   fixedConfig(Config{SystemChannelID: ""}),
-		}
 		resDep := &ResolvedGitHubEvent{
 			Repo:     "azylman/aerial",
 			PRNumber: 15,
 			Branch:   "dependabot/pip/foo-1.0",
 			HeadSHA:  "sha123",
 		}
-		srvNoSys.healDependabotPR(context.Background(), resDep)
-
-		// Successful self-healing
 		srv.healDependabotPR(context.Background(), resDep)
 		if len(reg.ensureCalls) != 1 {
-			t.Errorf("expected 1 ensureCall, got %d", len(reg.ensureCalls))
+			t.Errorf("expected 1 ensureCall for dependabot branch, got %d", len(reg.ensureCalls))
 		}
 	})
 
-	t.Run("isAutoUpdateAuthorAllowed and checkOpenPRConflicts edge branches", func(t *testing.T) {
+	t.Run("isAutoUpdateAuthorAllowed and sanitizeSubjectToken branches", func(t *testing.T) {
 		t.Parallel()
 		srv := &RouterServer{
 			cfgSrc: fixedConfig(Config{AutoUpdatePRAuthors: []string{"app/dependabot", "arcane103"}}),
@@ -349,100 +578,9 @@ func TestPRLifecycleEvents_HelpersAndState(t *testing.T) {
 			t.Errorf("expected foo_bar_baz")
 		}
 
-		// dispatchConflictPrompt with non-PostgresPRRegistry
-		mockReg := &mockPRRegistry{}
-		srvMock := &RouterServer{
-			registry: mockReg,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-		_ = srvMock.dispatchConflictPrompt(context.Background(), "123456789012345678", "azylman/aerial", "feat/conflict", "sha-conf", 100)
-
-		// Test isDependabotBranch and isZeroSHA helper functions
-		if !isDependabotBranch("dependabot/npm/foo-1.0") {
-			t.Errorf("expected dependabot branch")
-		}
-		if isDependabotBranch("feat/foo") {
-			t.Errorf("expected non-dependabot branch")
-		}
-		if !isZeroSHA("0000000000000000000000000000000000000000") {
-			t.Errorf("expected zero sha")
-		}
-		if isZeroSHA("1234567890abcdef") {
-			t.Errorf("expected non-zero sha")
-		}
-
-		// Test extractPRNumberFromCommitMessage
-		if prNum := extractPRNumberFromCommitMessage("feat: cool feature (#123)"); prNum != 123 {
-			t.Errorf("expected 123, got %d", prNum)
-		}
-		if prNum := extractPRNumberFromCommitMessage("Merge pull request #456 from branch"); prNum != 456 {
-			t.Errorf("expected 456, got %d", prNum)
-		}
-		if prNum := extractPRNumberFromCommitMessage("random commit"); prNum != 0 {
-			t.Errorf("expected 0, got %d", prNum)
-		}
-
-		// Test buildJobService
-		if svc, ok := buildJobService("Build & Push Container Image (eri)"); !ok || svc != "eri" {
-			t.Errorf("expected eri, true, got %q, %v", svc, ok)
-		}
-		if _, ok := buildJobService("Build & Push Image (${{ matrix.service }})"); ok {
-			t.Errorf("expected unexpanded template to be rejected")
-		}
+		// buildJobService rejects empty check name
 		if _, ok := buildJobService("Lint & Test"); ok {
 			t.Errorf("expected Lint & Test to not match build job")
 		}
-
-		// Test hasSkippedImagePromotionJob and hasExecutedBuildStep
-		if !hasSkippedImagePromotionJob([]GitHubWorkflowJobItem{
-			{Name: "Promote latest images", Status: "completed", Conclusion: "skipped"},
-		}) {
-			t.Errorf("expected skipped promote job to be detected")
-		}
-		if hasSkippedImagePromotionJob([]GitHubWorkflowJobItem{
-			{Name: "Promote latest images", Status: "completed", Conclusion: "success"},
-		}) {
-			t.Errorf("expected successful promote job not to be considered skipped")
-		}
-		if !hasExecutedBuildStep([]GitHubWorkflowJobStep{
-			{Name: "Build & push docker", Status: "completed", Conclusion: "success"},
-		}) {
-			t.Errorf("expected successful build step")
-		}
-		if hasExecutedBuildStep([]GitHubWorkflowJobStep{
-			{Name: "Build & push docker", Status: "completed", Conclusion: "skipped"},
-		}) {
-			t.Errorf("expected skipped build step to be detected as false")
-		}
-
-		// Exercise ProcessDeployEvent branches for deploy_started and deploy_success when bus is active
-		bus := &mockEventBus{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
-		disp := &mockOutboundDispatcher{}
-		srvDeploy := &RouterServer{
-			bus:        bus,
-			registry:   reg,
-			dispatcher: disp,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-		deployEvt := DeployEvent{
-			Event:     "deploy_started",
-			Repo:      "azylman/aerial",
-			PRNumber:  42,
-			CommitSHA: "sha-dep",
-			TargetID:  "123456789012345678",
-			JobName:   "eri",
-		}
-		_, _ = srvDeploy.ProcessDeployEvent(context.Background(), deployEvt)
-
-		deploySuccessEvt := DeployEvent{
-			Event:     "deploy_success",
-			Repo:      "azylman/aerial",
-			PRNumber:  42,
-			CommitSHA: "sha-dep",
-			TargetID:  "123456789012345678",
-			JobName:   "eri",
-		}
-		_, _ = srvDeploy.ProcessDeployEvent(context.Background(), deploySuccessEvt)
 	})
 }

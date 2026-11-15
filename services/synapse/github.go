@@ -291,7 +291,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	}
 	s.setPRWidgetState(ctx, repo, prNum, "deployed", "")
 	s.recordDeploySuccessDispatched(repo, "git-merge", headSHA, prNum)
-	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+	pubErr := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:        "deploy_success",
 		Repo:         repo,
 		PRNumber:     prNum,
@@ -310,7 +310,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	if err != nil {
 		return err
 	}
-	if !vanadisPR && s.bus == nil {
+	if !vanadisPR && (s.bus == nil || pubErr != nil) {
 		return s.dispatchDeploymentSuccessPrompt(ctx, targetID, "git-merge", repo, headSHA, prNum, "")
 	}
 	if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {

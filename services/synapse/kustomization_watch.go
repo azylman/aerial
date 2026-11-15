@@ -715,7 +715,7 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			targetID = resolved
 		}
 	}
-	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+	pubErr := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:        "deploy_success",
 		Repo:         pr.Repo,
 		PRNumber:     pr.PRNumber,
@@ -728,7 +728,11 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
 		OccurredAt:   time.Now().UTC(),
 	})
-	if s.bus == nil {
+	vanadisPR, err := s.isVanadisPR(ctx, pr.Repo, pr.PRNumber)
+	if err != nil {
+		return err
+	}
+	if s.bus == nil || pubErr != nil || !vanadisPR {
 		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
 			log.Printf("[synapse] [flux-watch] error dispatching deploy_success for %s#%d: %v", pr.Repo, pr.PRNumber, err)
 		}

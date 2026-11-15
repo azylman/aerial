@@ -1121,13 +1121,13 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 			return &evt, s.handleDeploySyncSuccess(ctx, evt, true)
 		}
 
-		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
 		if s.shouldSuppressDuplicateDeploySuccess(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber) {
 			s.reconcileStuckDeployingPRWidget(ctx, evt.Repo, evt.PRNumber)
 			log.Printf("[synapse] [deploy] suppressing duplicate deploy_success for repo=%s job=%s pr=%d commit=%s",
 				evt.Repo, evt.JobName, evt.PRNumber, evt.CommitSHA)
 			return &evt, nil
 		}
+		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
 		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
 		if evt.PRNumber > 0 {
 			s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
