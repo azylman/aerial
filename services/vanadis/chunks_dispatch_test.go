@@ -553,6 +553,14 @@ func TestVanadisServer_BusAndJetStreamInit(t *testing.T) {
 		t.Errorf("expected error and nil stop when ConsumeQueue dispatch fails, got err=%v", err)
 	}
 
+	// subscribe vanadis-pr-events error branch
+	errPRSubBus := &errQueueSubBus{Bus: pubsub.NewMemoryBus(), matchSubject: "aerial.pr.>", err: errors.New("pr sub failure")}
+	if stop, err := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return errPRSubBus, nil
+	}); err == nil || stop != nil {
+		t.Errorf("expected error and nil stop when ConsumeQueue pr-events fails, got err=%v", err)
+	}
+
 	// subscribe vanadis-chunk error branch
 	errChunkSubBus := &errQueueSubBus{Bus: pubsub.NewMemoryBus(), matchSubject: "aerial.jobs.vanadis.chunk", err: errors.New("chunk sub failure")}
 	if stop, err := initVanadisJetStreamWithFactory(ctx, server, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {

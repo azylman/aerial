@@ -353,6 +353,7 @@ func executeCompleteWorkflowBuild(ctx context.Context, srv *VanadisServer, build
 	}
 	b, chs, err := srv.store.GetBuild(ctx, buildID)
 	if err == nil {
+		srv.publishExternalEvent(ctx, "vanadis_build", "completed", []string{buildID}, "")
 		if !alreadyCompleted && !b.Quiet {
 			res := &VanadisAdvancementResult{
 				BuildID:   b.ID,
@@ -596,10 +597,18 @@ func executeAwakeableStatusUpdate(ctx context.Context, srv *VanadisServer, build
 			log.Printf("[vanadis] warning: failed updating build status: %v", uErr)
 		}
 		srv.syncBuildWidget(ctx, buildID, fmt.Sprintf("Chunk %s %s failed", title, eventType))
+		srv.publishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunkID}, eventType)
+		srv.publishExternalEvent(ctx, "vanadis_build", "failed", []string{buildID}, eventType)
 		return nil
 	}
 	if uErr := srv.store.UpdateChunkStatus(ctx, chunkID, newStatus); uErr != nil {
 		log.Printf("[vanadis] warning: failed updating chunk status: %v", uErr)
+	}
+	switch newStatus {
+	case "completed":
+		srv.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunkID}, "")
+	case "merged":
+		srv.publishExternalEvent(ctx, "vanadis_chunk", "merged", []string{chunkID}, "")
 	}
 	srv.syncBuildWidget(ctx, buildID, "")
 	return nil

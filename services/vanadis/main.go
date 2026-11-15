@@ -261,6 +261,11 @@ type VanadisStore interface {
 	UpdateChunk(ctx context.Context, buildID, chunkRef string, req UpdateChunkRequest) (*VanadisChunk, error)
 	AppendChunks(ctx context.Context, buildID string, inputs []CreateChunkInput) ([]VanadisChunk, error)
 	RemoveChunk(ctx context.Context, buildID, chunkRef string) (*VanadisChunk, []VanadisChunk, error)
+	RecordPRCheckStatus(ctx context.Context, chunkID, checkName, checkState string) error
+	RecordPRRolloutState(ctx context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error
+	ResetChunkForSynchronize(ctx context.Context, chunkID, buildID string) error
+	IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string) (int, error)
+	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
 }
 
 type pgxQueryExecer interface {
@@ -1370,6 +1375,14 @@ func initVanadisJetStreamWithFactory(ctx context.Context, server *VanadisServer,
 		return nil, fmt.Errorf("subscribe vanadis-dispatch: %w", err)
 	}
 	log.Println("[vanadis] Subscribed vanadis-dispatch queue consumer to aerial.dispatch.*")
+	if _, err := b.ConsumeQueue(ctx, "aerial.pr.>", "vanadis-pr-events", server.HandlePRLifecycleEvent); err != nil {
+		if closeErr := b.Close(); closeErr != nil {
+			log.Printf("[vanadis] warning: failed closing bus: %v", closeErr)
+		}
+		server.SetBus(nil)
+		return nil, fmt.Errorf("subscribe vanadis-pr-events: %w", err)
+	}
+	log.Println("[vanadis] Subscribed vanadis-pr-events queue consumer to aerial.pr.>")
 	if err := server.StartJobConsumers(ctx); err != nil {
 		if closeErr := b.Close(); closeErr != nil {
 			log.Printf("[vanadis] warning: failed closing bus: %v", closeErr)

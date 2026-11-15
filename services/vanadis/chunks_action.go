@@ -258,6 +258,8 @@ func (s *VanadisServer) failChunkInternal(ctx context.Context, chunkID, reason s
 		RecordChunkTotal("failed")
 		RecordBuildTotal("failed")
 		s.notifyRestateChunkFailed(ctx, chunk.ID)
+		s.publishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunk.ID}, reason)
+		s.publishExternalEvent(ctx, "vanadis_build", "failed", []string{build.ID}, reason)
 
 		totalChunks := chunk.ChunkIndex + 1
 		if _, allChunks, bErr := s.store.GetBuild(ctx, build.ID); bErr == nil && len(allChunks) > 0 {
