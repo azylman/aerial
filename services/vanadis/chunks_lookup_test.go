@@ -55,6 +55,7 @@ func TestPostgresVanadisStore_GetChunkByPR(t *testing.T) {
 	}
 	tests := []struct {
 		name           string
+		bare           *bareStore
 		repo           string
 		prNumber       int
 		rowErr         error
@@ -65,6 +66,8 @@ func TestPostgresVanadisStore_GetChunkByPR(t *testing.T) {
 		wantLookup     VanadisChunkPRLookup
 		wantCandidates []string
 	}{
+		{name: "nil receiver errors", bare: nilReceiver, repo: "aerial", prNumber: 1, wantErr: true},
+		{name: "nil db errors", bare: nilDB, repo: "aerial", prNumber: 1, wantErr: true},
 		{name: "invalid args return unmatched", repo: "", prNumber: 0, wantLookup: VanadisChunkPRLookup{}},
 		{name: "no rows returns unmatched", repo: "aerial", prNumber: 101, rowErr: pgx.ErrNoRows, wantLookup: VanadisChunkPRLookup{}, wantCandidates: []string{"aerial", "azylman/aerial"}},
 		{name: "chunk query error propagates", repo: "aerial", prNumber: 101, rowErr: errors.New("db error"), wantErr: true, wantCandidates: []string{"aerial", "azylman/aerial"}},
@@ -96,6 +99,9 @@ func TestPostgresVanadisStore_GetChunkByPR(t *testing.T) {
 					return &mockRows{items: tc.chunks, scanErr: tc.chunksScanErr}, nil
 				},
 			})
+			if tc.bare != nil {
+				s = tc.bare.store
+			}
 			got, err := s.GetChunkByPR(context.Background(), tc.repo, tc.prNumber)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetChunkByPR() err = %v, wantErr %v", err, tc.wantErr)
