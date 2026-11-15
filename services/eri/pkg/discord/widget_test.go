@@ -176,7 +176,7 @@ func assertVanadisWidgetInner(t *testing.T, comps []discordgo.MessageComponent) 
 	if !ok {
 		t.Fatalf("expected chunk 1 to be *discordgo.Section, got %T", comps[2])
 	}
-	c1Text := c1Sec.Components[0].(*discordgo.TextDisplay)
+	c1Text := requireComponent[*discordgo.TextDisplay](t, c1Sec.Components[0])
 	if c1Text.Content != "🔀 **`aerial`**: Schema migration" {
 		t.Errorf("unexpected chunk 1 row text: %q", c1Text.Content)
 	}
@@ -188,7 +188,7 @@ func assertVanadisWidgetInner(t *testing.T, comps []discordgo.MessageComponent) 
 	if !ok {
 		t.Fatalf("expected chunk 2 to be *discordgo.Section, got %T", comps[3])
 	}
-	c2Text := c2Sec.Components[0].(*discordgo.TextDisplay)
+	c2Text := requireComponent[*discordgo.TextDisplay](t, c2Sec.Components[0])
 	if c2Text.Content != "🚀 **`aerial`**: Silent prompt\n-# ↳ `aerial`: ⏳ building image\n-# ↳ `synapse`: 🔄 starting" {
 		t.Errorf("unexpected chunk 2 row text: %q", c2Text.Content)
 	}
@@ -212,12 +212,12 @@ func assertVanadisWidgetEmptyTitleFallback(t *testing.T, now time.Time) {
 	if err != nil {
 		t.Fatalf("BuildStatusWidgetComponents empty title failed: %v", err)
 	}
-	emptyContainer := emptyTitleComps[0].(*discordgo.Container)
-	emptyHeader := emptyContainer.Components[0].(*discordgo.TextDisplay)
+	emptyContainer := requireComponent[*discordgo.Container](t, emptyTitleComps[0])
+	emptyHeader := requireComponent[*discordgo.TextDisplay](t, emptyContainer.Components[0])
 	if emptyHeader.Content != "### 🛠️ Vanadis Build" {
 		t.Errorf("expected fallback header '### 🛠️ Vanadis Build', got %q", emptyHeader.Content)
 	}
-	fallbackChunk := emptyContainer.Components[1].(*discordgo.TextDisplay)
+	fallbackChunk := requireComponent[*discordgo.TextDisplay](t, emptyContainer.Components[1])
 	if fallbackChunk.Content != "⏳ **`aerial`**: Fallback repo chunk" {
 		t.Errorf("expected fallback chunk '⏳ **`aerial`**: Fallback repo chunk', got %q", fallbackChunk.Content)
 	}
@@ -334,12 +334,12 @@ func TestBuildStatusWidgetComponents_StandalonePR(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildStatusWidgetComponents failed: %v", err)
 	}
-	container := comps[0].(*discordgo.Container)
+	container := requireComponent[*discordgo.Container](t, comps[0])
 	if container.AccentColor == nil || *container.AccentColor != 0x10B981 {
 		t.Errorf("expected emerald color 0x10B981, got %v", container.AccentColor)
 	}
 
-	header := container.Components[0].(*discordgo.TextDisplay)
+	header := requireComponent[*discordgo.TextDisplay](t, container.Components[0])
 	if !strings.Contains(header.Content, "Pull Request #123 · `aerial`") {
 		t.Errorf("unexpected standalone PR header: %s", header.Content)
 	}
@@ -372,7 +372,7 @@ func TestBuildStatusWidgetComponents_CeilingGuard(t *testing.T) {
 		t.Fatalf("failed to build components: %v", err)
 	}
 
-	container := comps[0].(*discordgo.Container)
+	container := requireComponent[*discordgo.Container](t, comps[0])
 	foundSummary := false
 	for _, c := range container.Components {
 		if td, ok := c.(*discordgo.TextDisplay); ok {
@@ -663,28 +663,28 @@ func TestFormatChunkDuration(t *testing.T) {
 
 func assertChunkRuntimeBasicChunks(t *testing.T, container *discordgo.Container) {
 	t.Helper()
-	c0Sec := container.Components[1].(*discordgo.Section)
-	c0Text := c0Sec.Components[0].(*discordgo.TextDisplay)
+	c0Sec := requireComponent[*discordgo.Section](t, container.Components[1])
+	c0Text := requireComponent[*discordgo.TextDisplay](t, c0Sec.Components[0])
 	if c0Text.Content != "✅ **`aerial`**: Completed chunk with duration *(4m 12s)*" {
 		t.Errorf("unexpected chunk 0 text: %q", c0Text.Content)
 	}
 
-	c1Text := container.Components[2].(*discordgo.TextDisplay)
+	c1Text := requireComponent[*discordgo.TextDisplay](t, container.Components[2])
 	if c1Text.Content != "🔨 **`aerial`**: Active chunk with relative timestamp *(started <t:1760000000:R>)*" {
 		t.Errorf("unexpected chunk 1 text: %q", c1Text.Content)
 	}
 
-	c2Text := container.Components[3].(*discordgo.TextDisplay)
+	c2Text := requireComponent[*discordgo.TextDisplay](t, container.Components[3])
 	if c2Text.Content != "⏳ **`aerial`**: Pending chunk with no runtime" {
 		t.Errorf("unexpected chunk 2 text: %q", c2Text.Content)
 	}
 
-	c3Text := container.Components[4].(*discordgo.TextDisplay)
+	c3Text := requireComponent[*discordgo.TextDisplay](t, container.Components[4])
 	if c3Text.Content != "✅ **`aerial`**: Completed chunk missing UpdatedAt" {
 		t.Errorf("unexpected chunk 3 text: %q", c3Text.Content)
 	}
 
-	footerText := container.Components[5].(*discordgo.TextDisplay)
+	footerText := requireComponent[*discordgo.TextDisplay](t, container.Components[5])
 	if footerText.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
 		t.Errorf("unexpected footer text: %q", footerText.Content)
 	}
@@ -699,8 +699,8 @@ func assertChunkRuntimeTopLevelStartedAt(t *testing.T, req StatusWidgetRequest, 
 	if err != nil {
 		t.Fatalf("BuildStatusWidgetComponents with StartedAt failed: %v", err)
 	}
-	containerTop := compsTop[0].(*discordgo.Container)
-	footerTop := containerTop.Components[5].(*discordgo.TextDisplay)
+	containerTop := requireComponent[*discordgo.Container](t, compsTop[0])
+	footerTop := requireComponent[*discordgo.TextDisplay](t, containerTop.Components[5])
 	if footerTop.Content != "*Started <t:1759999000:R> · Updated <t:1760000500:R>*" {
 		t.Errorf("unexpected footer text with earlier top-level StartedAt: %q", footerTop.Content)
 	}
@@ -712,8 +712,8 @@ func assertChunkRuntimeTopLevelStartedAt(t *testing.T, req StatusWidgetRequest, 
 	if err != nil {
 		t.Fatalf("BuildStatusWidgetComponents with later StartedAt failed: %v", err)
 	}
-	containerLater := compsLater[0].(*discordgo.Container)
-	footerLater := containerLater.Components[5].(*discordgo.TextDisplay)
+	containerLater := requireComponent[*discordgo.Container](t, compsLater[0])
+	footerLater := requireComponent[*discordgo.TextDisplay](t, containerLater.Components[5])
 	if footerLater.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
 		t.Errorf("unexpected footer text with later top-level StartedAt: %q", footerLater.Content)
 	}
@@ -745,8 +745,8 @@ func assertChunkRuntimeCompletedBuilds(t *testing.T, req StatusWidgetRequest, no
 	if err != nil {
 		t.Fatalf("BuildStatusWidgetComponents completed build failed: %v", err)
 	}
-	containerCompleted := compsCompleted[0].(*discordgo.Container)
-	footerCompleted := containerCompleted.Components[3].(*discordgo.TextDisplay)
+	containerCompleted := requireComponent[*discordgo.Container](t, compsCompleted[0])
+	footerCompleted := requireComponent[*discordgo.TextDisplay](t, containerCompleted.Components[3])
 	if footerCompleted.Content != "*Started <t:1760000000:R> · Duration 6m 12s*" {
 		t.Errorf("unexpected footer text for completed build: %q", footerCompleted.Content)
 	}
@@ -771,8 +771,8 @@ func assertChunkRuntimeCompletedBuilds(t *testing.T, req StatusWidgetRequest, no
 	if err != nil {
 		t.Fatalf("BuildStatusWidgetComponents completed fallback failed: %v", err)
 	}
-	containerFallback := compsFallback[0].(*discordgo.Container)
-	footerFallback := containerFallback.Components[2].(*discordgo.TextDisplay)
+	containerFallback := requireComponent[*discordgo.Container](t, compsFallback[0])
+	footerFallback := requireComponent[*discordgo.TextDisplay](t, containerFallback.Components[2])
 	if footerFallback.Content != "*Started <t:1760000000:R> · Duration 8m 20s*" {
 		t.Errorf("unexpected footer text for completed fallback build: %q", footerFallback.Content)
 	}
@@ -789,8 +789,8 @@ func assertChunkRuntimeCompletedBuilds(t *testing.T, req StatusWidgetRequest, no
 	if err != nil {
 		t.Fatalf("BuildStatusWidgetComponents with deploying chunk failed: %v", err)
 	}
-	containerDeploying := compsDeploying[0].(*discordgo.Container)
-	footerDeploying := containerDeploying.Components[4].(*discordgo.TextDisplay)
+	containerDeploying := requireComponent[*discordgo.Container](t, compsDeploying[0])
+	footerDeploying := requireComponent[*discordgo.TextDisplay](t, containerDeploying.Components[4])
 	if footerDeploying.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
 		t.Errorf("unexpected footer text for build with deploying chunk: %q", footerDeploying.Content)
 	}
@@ -848,7 +848,7 @@ func TestBuildStatusWidgetComponents_ChunkRuntimes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildStatusWidgetComponents failed: %v", err)
 	}
-	container := comps[0].(*discordgo.Container)
+	container := requireComponent[*discordgo.Container](t, comps[0])
 	assertChunkRuntimeBasicChunks(t, container)
 	assertChunkRuntimeTopLevelStartedAt(t, req, now)
 	assertChunkRuntimeCompletedBuilds(t, req, now, start, completedAt)
@@ -1104,4 +1104,16 @@ func TestExtractMessageComponentsText(t *testing.T) {
 			}
 		})
 	}
+}
+
+// requireComponent asserts a widget component's concrete type, failing the
+// test with the actual type on mismatch.
+func requireComponent[T discordgo.MessageComponent](t *testing.T, c discordgo.MessageComponent) T {
+	t.Helper()
+	got, ok := c.(T)
+	if !ok {
+		var want T
+		t.Fatalf("component is %T, want %T", c, want)
+	}
+	return got
 }

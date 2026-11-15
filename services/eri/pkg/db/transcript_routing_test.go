@@ -508,7 +508,11 @@ func runPurgeMigratedLocalCase(t *testing.T, tc purgeMigratedLocalCase, sharedDS
 	breakDBFixture(t, primary, shared, tc.breakLocal, tc.breakShared)
 	opener := &testOpener{pools: map[string]*sql.DB{sharedDSN: shared}}
 	cfg := config.NewFromData(&config.ConfigData{DatabaseURL: testDSNStackA, Transcripts: tc.transcripts})
-	store := NewRoutedTranscriptStore(cfg, primary, opener.open).(*routedTranscriptStore)
+	routed := NewRoutedTranscriptStore(cfg, primary, opener.open)
+	store, ok := routed.(*routedTranscriptStore)
+	if !ok {
+		t.Fatalf("NewRoutedTranscriptStore returned %T, want *routedTranscriptStore", routed)
+	}
 
 	deleted, err := store.purgeMigratedLocalTranscripts(context.Background(), tc.batchSize, tc.budget)
 	if tc.wantErr != "" {

@@ -55,8 +55,27 @@ func (r *mockSynapsePgxRows) Scan(dest ...any) error {
 		return r.scanRowFn(r.idx-1, dest...)
 	}
 	if len(r.intItems) > 0 {
-		*dest[0].(*int) = r.intItems[r.idx-1]
-		return nil
+		return scanValues(dest, r.intItems[r.idx-1])
+	}
+	return nil
+}
+
+// scanValues assigns vals positionally into Scan destinations and, like a real
+// pgx Scan, returns an error when a destination cannot hold its value instead
+// of panicking. A nil val leaves that destination untouched.
+func scanValues(dest []any, vals ...any) error {
+	if len(vals) > len(dest) {
+		return fmt.Errorf("scan: %d values for %d destinations", len(vals), len(dest))
+	}
+	for i, v := range vals {
+		if v == nil {
+			continue
+		}
+		ptr, val := reflect.ValueOf(dest[i]), reflect.ValueOf(v)
+		if ptr.Kind() != reflect.Pointer || ptr.IsNil() || ptr.Elem().Type() != val.Type() {
+			return fmt.Errorf("scan column %d: destination %T cannot hold %T", i, dest[i], v)
+		}
+		ptr.Elem().Set(val)
 	}
 	return nil
 }
@@ -396,7 +415,7 @@ func scanMockPRRegistryDestTypes(dest []any, tc postgresPRRegistryUnitCase) {
 	}
 }
 
-func scanMockPRRegistryDestPos(dest []any, tc postgresPRRegistryUnitCase) {
+func scanMockPRRegistryDestPos(dest []any, tc postgresPRRegistryUnitCase) error {
 	if len(dest) >= 2 {
 		if sPtr, ok := dest[0].(*string); ok && tc.targetIDReturn != "" {
 			*sPtr = tc.targetIDReturn
@@ -419,12 +438,9 @@ func scanMockPRRegistryDestPos(dest []any, tc postgresPRRegistryUnitCase) {
 		}
 	}
 	if len(dest) == 5 {
-		*dest[0].(*int64) = 100
-		*dest[1].(*string) = tc.targetIDReturn
-		*dest[2].(*int) = tc.wantPRNum
-		*dest[3].(*string) = tc.mergeSHAReturn
-		*dest[4].(*string) = tc.repo
+		return scanValues(dest, int64(100), tc.targetIDReturn, tc.wantPRNum, tc.mergeSHAReturn, tc.repo)
 	}
+	return nil
 }
 
 func scanMockPRRegistryRow(dest []any, tc postgresPRRegistryUnitCase) error {
@@ -435,8 +451,7 @@ func scanMockPRRegistryRow(dest []any, tc postgresPRRegistryUnitCase) error {
 		return tc.mockScanErr
 	}
 	scanMockPRRegistryDestTypes(dest, tc)
-	scanMockPRRegistryDestPos(dest, tc)
-	return nil
+	return scanMockPRRegistryDestPos(dest, tc)
 }
 
 func scanMockPRRegistryTxRow(dest []any, tc postgresPRRegistryUnitCase) error {
@@ -444,16 +459,11 @@ func scanMockPRRegistryTxRow(dest []any, tc postgresPRRegistryUnitCase) error {
 		return tc.mockSelectErr
 	}
 	if len(dest) == 6 {
-		*dest[0].(*int64) = 101
-		*dest[1].(*string) = tc.targetIDReturn
-		*dest[2].(*int) = tc.wantPRNum
-		*dest[3].(*string) = tc.mergeSHAReturn
-		*dest[4].(*string) = tc.repo
+		meta := []byte("{}")
 		if tc.metaJSON != "" {
-			*dest[5].(*[]byte) = []byte(tc.metaJSON)
-		} else {
-			*dest[5].(*[]byte) = []byte("{}")
+			meta = []byte(tc.metaJSON)
 		}
+		return scanValues(dest, int64(101), tc.targetIDReturn, tc.wantPRNum, tc.mergeSHAReturn, tc.repo, meta)
 	}
 	return nil
 }
@@ -463,22 +473,14 @@ func scanMockPRRegistryRows(idx int, dest []any, tc postgresPRRegistryUnitCase) 
 		return tc.mockScanErr
 	}
 	if len(dest) == 8 {
-		*dest[0].(*int64) = int64(200 + idx)
-		*dest[1].(*string) = "azylman/aerial"
-		*dest[2].(*int) = 200 + idx
-		*dest[3].(*string) = "main"
-		*dest[4].(*string) = "headsha"
-		*dest[5].(*string) = "mergesha"
-		*dest[6].(*string) = "100000000000000001"
+		var meta any // nil leaves the metadata destination untouched
 		if tc.metaJSON != "" {
-			*dest[7].(*[]byte) = []byte(tc.metaJSON)
+			meta = []byte(tc.metaJSON)
 		}
-		return nil
+		return scanValues(dest, int64(200+idx), "azylman/aerial", 200+idx, "main", "headsha", "mergesha", "100000000000000001", meta)
 	}
 	if len(dest) == 3 {
-		*dest[0].(*string) = "arcane103"
-		*dest[1].(*string) = "wrap it up"
-		*dest[2].(*string) = "done"
+		return scanValues(dest, "arcane103", "wrap it up", "done")
 	}
 	return nil
 }

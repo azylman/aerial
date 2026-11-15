@@ -207,7 +207,7 @@ func assertSendSuiteSuccess(t *testing.T, tc sendTestCase, sess AgentSession, se
 		t.Fatalf("unexpected Send error: %v", sendErr)
 	}
 	if tc.expectEmptyHist {
-		if hist := sess.(*GeminiAPISession).History(); len(hist) != 0 {
+		if hist := requireType[*GeminiAPISession](t, sess).History(); len(hist) != 0 {
 			t.Errorf("expected empty history, got %d", len(hist))
 		}
 		return
@@ -230,7 +230,7 @@ func runSendSuiteSequential(t *testing.T, tc sendTestCase, sess AgentSession) {
 			t.Fatalf("turn %d failed: %v", i, err)
 		}
 	}
-	hist := sess.(*GeminiAPISession).History()
+	hist := requireType[*GeminiAPISession](t, sess).History()
 	if len(hist) != tc.expectMaxHistory || (tc.expectHistFirst != "" && hist[0].Parts[0].Text != tc.expectHistFirst) || (tc.expectHistLast != "" && hist[len(hist)-1].Parts[0].Text != tc.expectHistLast) {
 		t.Errorf("history mismatch: len=%d, first=%q, last=%q", len(hist), hist[0].Parts[0].Text, hist[len(hist)-1].Parts[0].Text)
 	}
@@ -334,7 +334,7 @@ func TestGeminiAPIPool_AccessorsAndNilPool(t *testing.T) {
 		t.Errorf("expected non-nil HTTPClient")
 	}
 	sess, err := pool.GetOrCreateSession(context.Background(), "target-123", "custom-uuid")
-	if err != nil || sess.(*GeminiAPISession).TargetKey() != "target-123" || sess.SessionID() != "custom-uuid" {
+	if err != nil || requireType[*GeminiAPISession](t, sess).TargetKey() != "target-123" || sess.SessionID() != "custom-uuid" {
 		t.Errorf("unexpected session: %v, %v", sess, err)
 	}
 	targets := pool.PrewarmedTargets()
@@ -692,9 +692,9 @@ func assertDeeplyNestedSchema(t *testing.T) {
 		if _, hasAddl := probe["additionalProperties"]; hasAddl {
 			t.Fatalf("level %d had additionalProperties", level)
 		}
-		probe = probe["properties"].(map[string]any)["nested"].(map[string]any)
+		probe = requireType[map[string]any](t, requireType[map[string]any](t, probe["properties"])["nested"])
 	}
-	if leaf := probe["properties"].(map[string]any)["leaf"].(map[string]any); leaf["type"] != "STRING" {
+	if leaf := requireType[map[string]any](t, requireType[map[string]any](t, probe["properties"])["leaf"]); leaf["type"] != "STRING" {
 		t.Fatalf("leaf not preserved: %+v", leaf)
 	}
 }
@@ -719,14 +719,14 @@ func TestCleanParameters_StripsDisallowedKeys(t *testing.T) {
 	cleaned := cleanParameters(complexSchema)
 	disallowed := []string{"additionalproperties", "$schema", "title", "default", "$ref", "$id", "definitions"}
 	assertNoDisallowedKeys(t, cleaned, "root", disallowed)
-	props := cleaned["properties"].(map[string]any)
-	if cleaned["type"] != "OBJECT" || props["prompt"].(map[string]any)["type"] != "STRING" || props["empty_child"].(map[string]any)["type"] != "OBJECT" {
+	props := requireType[map[string]any](t, cleaned["properties"])
+	if cleaned["type"] != "OBJECT" || requireType[map[string]any](t, props["prompt"])["type"] != "STRING" || requireType[map[string]any](t, props["empty_child"])["type"] != "OBJECT" {
 		t.Errorf("cleaned schema types mismatch: %+v", cleaned)
 	}
-	if optList := props["optional_list"].(map[string]any); optList["type"] != "ARRAY" || optList["nullable"] != true {
+	if optList := requireType[map[string]any](t, props["optional_list"]); optList["type"] != "ARRAY" || optList["nullable"] != true {
 		t.Errorf("expected optional_list ARRAY nullable: %+v", optList)
 	}
-	if revNull := props["reversed_null"].(map[string]any); revNull["type"] != "STRING" || revNull["nullable"] != true {
+	if revNull := requireType[map[string]any](t, props["reversed_null"]); revNull["type"] != "STRING" || revNull["nullable"] != true {
 		t.Errorf("expected reversed_null STRING nullable: %+v", revNull)
 	}
 	assertDeeplyNestedSchema(t)
@@ -1007,7 +1007,7 @@ func runGeminiAPISessionRetrieverCase(t *testing.T, tc retrieverTestCase) {
 	if strings.Count(wireText, tc.expectedWireTag) != 1 || !strings.Contains(wireText, tc.expectedContent) {
 		t.Errorf("wireText mismatch for %s: %s", tc.expectedWireTag, wireText)
 	}
-	hist := sess.(*GeminiAPISession).History()
+	hist := requireType[*GeminiAPISession](t, sess).History()
 	if len(hist) != 2 || hist[0].Role != "user" || !strings.Contains(hist[0].Parts[0].Text, tc.expectedHistoryClean) || hist[1].Parts[0].Text != tc.modelResponse {
 		t.Errorf("history mismatch: %+v", hist)
 	}
@@ -1265,4 +1265,16 @@ func TestGeminiSessionLease_IsEphemeralAndMarkDirty(t *testing.T) {
 
 	var nilLease *geminiSessionLease
 	nilLease.MarkDirty()
+}
+
+// requireType asserts v's concrete type, failing the test with the actual
+// type on mismatch.
+func requireType[T any](t *testing.T, v any) T {
+	t.Helper()
+	got, ok := v.(T)
+	if !ok {
+		var want T
+		t.Fatalf("value is %T, want %T", v, want)
+	}
+	return got
 }

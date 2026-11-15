@@ -54,13 +54,13 @@ func TestUnifiedProcessPool_LeaseActiveTurnMatchesDaemonEnv(t *testing.T) {
 			if err != nil {
 				t.Fatalf("AcquireLease: %v", err)
 			}
-			turn := lease.(ActiveTurnOwner).ActiveTurn()
+			turn := requireType[ActiveTurnOwner](t, lease).ActiveTurn()
 			_ = lease.Release()
 			other, err := second.AcquireLease(context.Background(), "discord-1")
 			if err != nil {
 				t.Fatalf("AcquireLease second pool: %v", err)
 			}
-			otherTurn := other.(ActiveTurnOwner).ActiveTurn()
+			otherTurn := requireType[ActiveTurnOwner](t, other).ActiveTurn()
 			_ = other.Release()
 
 			if turn.Target != "discord" || turn.DaemonID == "" || turn.DaemonID == otherTurn.DaemonID {

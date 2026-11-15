@@ -447,8 +447,16 @@ func runAmbientContextCloneAndPolicyTests(t *testing.T, src *AmbientContextConfi
 	cloned := cloneAmbientContextConfig(src)
 	cloned.CacheTTL, cloned.Tools[0].Name = "99s", "mutated"
 	cloned.Tools[0].Arguments["entity_id"] = "light.bedroom"
-	cloned.Tools[0].Arguments["nested"].(map[string]any)["key"] = "mutated_val"
-	cloned.Tools[0].Arguments["tags"].([]any)[0] = "mutated_tag"
+	nested, ok := cloned.Tools[0].Arguments["nested"].(map[string]any)
+	if !ok {
+		t.Fatalf("cloned nested argument is %T, want map[string]any", cloned.Tools[0].Arguments["nested"])
+	}
+	nested["key"] = "mutated_val"
+	tags, ok := cloned.Tools[0].Arguments["tags"].([]any)
+	if !ok {
+		t.Fatalf("cloned tags argument is %T, want []any", cloned.Tools[0].Arguments["tags"])
+	}
+	tags[0] = "mutated_tag"
 	cloned.Tools[0].Arguments["val"] = 99
 
 	if src.CacheTTL != "20s" || src.Tools[0].Name != "ha" || src.Tools[0].Arguments["entity_id"] != "light.kitchen" || src.Tools[0].Arguments["val"] == 99 || cloneAmbientContextConfig(nil) != nil || cloneInterfaceMap(nil) != nil {

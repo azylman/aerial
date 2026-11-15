@@ -749,7 +749,9 @@ func TestBuildWorkflow_StateMachineWithRuntime(t *testing.T) {
 	require.NoError(t, wf.cancelWithRuntime(rtSignals, CancelBuildWorkflowRequest{}))
 	assert.Equal(t, "cancelled", rtSignals.promises["cancel"].val)
 
-	rtSignals.Promise("dag_mutation").(*fakeWorkflowPromise).resolveErr = restate.TerminalErrorf("already resolved")
+	dagPromise, ok := rtSignals.Promise("dag_mutation").(*fakeWorkflowPromise)
+	require.Truef(t, ok, "dag_mutation promise is %T, want *fakeWorkflowPromise", rtSignals.Promise("dag_mutation"))
+	dagPromise.resolveErr = restate.TerminalErrorf("already resolved")
 	require.NoError(t, wf.mutateDAGWithRuntime(rtSignals, DAGMutationSignalRequest{}))
 	assert.Equal(t, "mutated", rtSignals.promises["dag_mutation_1"].val)
 

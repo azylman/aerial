@@ -353,7 +353,9 @@ func TestTraceProxy_StreamsSSE(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: first\n\n"))
-		w.(http.Flusher).Flush()
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Errorf("flush first SSE event: %v", err)
+		}
 		<-release
 		_, _ = w.Write([]byte("data: second\n\n"))
 	}))
