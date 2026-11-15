@@ -818,10 +818,12 @@ func (s *VanadisServer) StartJobConsumers(ctx context.Context) error {
 	if _, err := s.bus.ConsumeQueue(ctx, "aerial.jobs.vanadis.chunk", "vanadis-chunk", s.HandleExecuteChunkJob); err != nil {
 		return err
 	}
-	// Retain vanadis-widget queue consumer on aerial.coalesced.vanadis_widget.* for draining
-	// in-flight messages until Chunk 8 cutover when legacy widget sync paths are retired.
-	_, err := s.bus.ConsumeQueue(ctx, "aerial.coalesced.vanadis_widget.*", "vanadis-widget", s.HandleCoalescedWidgetMessage)
-	return err
+	log.Println("[vanadis] Subscribed vanadis-chunk queue consumer to aerial.jobs.vanadis.chunk")
+	if _, err := s.bus.ConsumeQueue(ctx, pubsub.SubjectBuildWidgetSyncWildcard, "vanadis-widget", s.HandleCoalescedWidgetMessage); err != nil {
+		return err
+	}
+	log.Printf("[vanadis] Subscribed vanadis-widget queue consumer to %s", pubsub.SubjectBuildWidgetSyncWildcard)
+	return nil
 }
 
 func (s *VanadisServer) handleFinalDispatchFailure(ctx context.Context, build *VanadisBuild, chunk VanadisChunk, totalChunks int, dispatchErr error) {
@@ -1359,9 +1361,8 @@ func initVanadisJetStreamWithFactory(ctx context.Context, server *VanadisServer,
 			log.Printf("[vanadis] warning: failed closing bus: %v", closeErr)
 		}
 		server.SetBus(nil)
-		return nil, fmt.Errorf("subscribe vanadis-chunk: %w", err)
+		return nil, fmt.Errorf("start vanadis job consumers: %w", err)
 	}
-	log.Println("[vanadis] Subscribed vanadis-chunk queue consumer to aerial.jobs.vanadis.chunk")
 	return func() {
 		if closeErr := b.Close(); closeErr != nil {
 			log.Printf("[vanadis] bus close error: %v", closeErr)

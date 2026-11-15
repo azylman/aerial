@@ -1291,6 +1291,82 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 	}
 }
 
+// statusMessageSignalStore signals once the build card's message ID has been persisted,
+// letting tests wait on the end of the consumer pipeline without sleeping.
+type statusMessageSignalStore struct {
+	*memoryVanadisStore
+
+	persisted chan struct{}
+}
+
+func (s *statusMessageSignalStore) UpdateBuildStatusMessageID(ctx context.Context, id, msgID string) error {
+	err := s.memoryVanadisStore.UpdateBuildStatusMessageID(ctx, id, msgID)
+	select {
+	case s.persisted <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+func TestStartJobConsumersDeliversBuildWidgetSync(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		buildID       string
+		existingMsgID string
+		brainMsgID    string
+	}{
+		{"new build posts card and persists message id", "b-card-new", "", "1300000000000000001"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+
+			brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/discord/widget" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				httpkit.WriteJSON(w, http.StatusOK, map[string]string{"message_id": tc.brainMsgID})
+			}))
+			defer brainSrv.Close()
+
+			store := &statusMessageSignalStore{memoryVanadisStore: newMemoryVanadisStore(), persisted: make(chan struct{}, 1)}
+			build := mkBuild(tc.buildID, "123456789012345678", "Card", "obj", "running")
+			build.StatusMessageID = tc.existingMsgID
+			if err := store.CreateBuild(ctx, build, []VanadisChunk{mkChunk(tc.buildID+"-c0", tc.buildID, 0, "C0", "I0", "medium", "pending")}); err != nil {
+				t.Fatalf("CreateBuild() error: %v", err)
+			}
+			srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, store, brainSrv.Client())
+
+			memBus := pubsub.NewMemoryBus()
+			defer memBus.Close()
+			srv.SetBus(memBus)
+			if err := srv.StartJobConsumers(ctx); err != nil {
+				t.Fatalf("StartJobConsumers() error: %v", err)
+			}
+
+			srv.syncBuildWidget(ctx, tc.buildID, "")
+
+			select {
+			case <-store.persisted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for build widget sync to persist the card message id")
+			}
+			got, _, err := store.GetBuild(ctx, tc.buildID)
+			if err != nil {
+				t.Fatalf("GetBuild() error: %v", err)
+			}
+			if got.StatusMessageID != tc.brainMsgID {
+				t.Fatalf("status_message_id = %q, want %q", got.StatusMessageID, tc.brainMsgID)
+			}
+		})
+	}
+}
+
 func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

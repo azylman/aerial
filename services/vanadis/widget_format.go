@@ -225,7 +225,8 @@ func FormatChunkActiveStep(chunk VanadisChunk) string {
 	return ""
 }
 
-// HandleCoalescedWidgetMessage processes an aerial.coalesced.vanadis_widget.* message from JetStream.
+// HandleCoalescedWidgetMessage processes an aerial.coalesced.widget_sync.build.* message from JetStream,
+// as published by syncBuildWidget, and posts or edits the build's Discord status card.
 func (s *VanadisServer) HandleCoalescedWidgetMessage(ctx context.Context, msg pubsub.Message) error {
 	if s == nil || s.store == nil {
 		if termErr := msg.Term(); termErr != nil {
