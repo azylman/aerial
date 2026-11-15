@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -995,9 +996,24 @@ func TestRecoverInterrupted_Dispatches(t *testing.T) {
 	doneWg := sync.WaitGroup{}
 	doneWg.Add(2)
 
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	outcomePublished := make(chan pubsub.DispatchOutcomeEvent, 1)
+	_, _ = memBus.Subscribe(ctx, "aerial.dispatch.failed", "test-sub", func(msgCtx context.Context, msg pubsub.Message) error {
+		var ev pubsub.DispatchOutcomeEvent
+		if uErr := json.Unmarshal(msg.Data(), &ev); uErr == nil {
+			select {
+			case outcomePublished <- ev:
+			default:
+			}
+		}
+		return msg.Ack()
+	})
+
 	pool := NewWorkerPool(WorkerPoolConfig{
 		Store:          store,
 		TimeoutMinutes: 1,
+		EventBus:       memBus,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			mu.Lock()
 			if strings.Contains(prompt, "pending prompt") {
@@ -1026,6 +1042,17 @@ func TestRecoverInterrupted_Dispatches(t *testing.T) {
 	poisonDisp, err := store.GetDispatch(ctx, "disp-rec-poison")
 	if err != nil || poisonDisp == nil || poisonDisp.Status != db.StatusFailed {
 		t.Fatalf("expected poison pill dispatch to be marked FAILED, got %+v", poisonDisp)
+	}
+
+	var poisonEv pubsub.DispatchOutcomeEvent
+	select {
+	case poisonEv = <-outcomePublished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for poison pill dispatch outcome event")
+	}
+
+	if poisonEv.DispatchID != "disp-rec-poison" || poisonEv.Status != "failed" {
+		t.Errorf("unexpected delivered event: %+v", poisonEv)
 	}
 }
 

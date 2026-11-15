@@ -444,7 +444,16 @@ func (s *VanadisServer) handlePRConflict(ctx context.Context, ev pubsub.PRLifecy
 	}
 	s.syncBuildWidget(ctx, build.ID, banner)
 	prompt := s.formatConflictPrompt(ev)
-	return s.dispatchWakePrompt(ctx, build.ThreadID, prompt)
+	return s.dispatchBrainDispatch(ctx, BrainDispatchRequest{
+		ID:             conflictRemediationDispatchID(chunk.ID, ev.HeadSHA),
+		Source:         "vanadis",
+		SessionID:      "vanadis-" + chunk.ID,
+		TargetID:       build.ThreadID,
+		VanadisChunkID: chunk.ID,
+		Prompt:         prompt,
+		Effort:         capChunkEffort(chunk.Effort),
+		SkipIfActive:   true,
+	})
 }
 
 func (s *VanadisServer) handlePRDeployFailed(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
@@ -573,4 +582,16 @@ func ciRemediationDispatchID(chunkID, headSHA string, failCount int) string {
 		return fmt.Sprintf("vanadis-%s-cifail-%s-%d", chunkID, cleanSHA, failCount)
 	}
 	return fmt.Sprintf("vanadis-%s-cifail-%d", chunkID, failCount)
+}
+
+func conflictRemediationDispatchID(chunkID, headSHA string) string {
+	cleanSHA := strings.TrimSpace(headSHA)
+	if cleanSHA != "" {
+		shortSHA := cleanSHA
+		if len(shortSHA) > 7 {
+			shortSHA = shortSHA[:7]
+		}
+		return fmt.Sprintf("vanadis-conflict-%s-%s", chunkID, shortSHA)
+	}
+	return "vanadis-conflict-" + chunkID
 }
