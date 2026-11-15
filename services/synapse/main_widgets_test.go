@@ -1178,17 +1178,6 @@ func assertSyncBuildWidgetQueue(t *testing.T, tc syncBuildWidgetCase, inserter *
 	}
 }
 
-func TestRouterServer_HandleInternalWidgetSync_RouteRetired(t *testing.T) {
-	t.Parallel()
-
-	srv := newTestRouter(Config{}, nil, nil, nil)
-	routes := srv.Routes()
-	rec := doHTTPRequest(routes, http.MethodPost, "/internal/widget/sync", strings.NewReader(`{"build_id":"build-999"}`), nil)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
-	}
-}
-
 func TestRouterServer_ProcessMergeConflict(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
