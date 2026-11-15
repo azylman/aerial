@@ -1953,6 +1953,8 @@ spec:
           env:
             - name: RESTATE_BASE_DIR
               value: /restate-data
+            - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
+              value: "256 MiB"
           ports:
             - containerPort: 8080
               name: ingress
