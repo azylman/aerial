@@ -554,8 +554,8 @@ type checkOpenPRConflictsTestCase struct {
 	autoUpdateAuthors     []string
 	listPRsStatus         int
 	useNilRegistry        bool
-	useRiver              bool
-	riverErr              error
+	useBus                bool
+	busErr                error
 	conflictErr           error
 	openPRs               []GitHubPullRequest
 	prResponses           []string
@@ -718,10 +718,10 @@ func runCheckOpenPRConflictsCase(ctx context.Context, t *testing.T, tc checkOpen
 	}
 	mockDisp := &mockOutboundDispatcher{}
 	var inserters []pubsub.Bus
-	var mockRiver *mockRiverInserter
-	if tc.useRiver {
-		mockRiver = &mockRiverInserter{err: tc.riverErr}
-		inserters = append(inserters, mockRiver)
+	var mockBus *mockEventBus
+	if tc.useBus {
+		mockBus = &mockEventBus{err: tc.busErr}
+		inserters = append(inserters, mockBus)
 	}
 	srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL, GitHubToken: "test-token", AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: true}, nil, mockReg, mockDisp, inserters...)
 	for prNum, sha := range tc.presetFailedSHAs {
@@ -745,8 +745,8 @@ func runCheckOpenPRConflictsCase(ctx context.Context, t *testing.T, tc checkOpen
 
 	assertConflictCheckCacheAndPuts(t, tc, srv, gotUpdated)
 	assertConflictCheckRegistryCalls(t, tc, mockReg)
-	if mockRiver != nil && len(mockRiver.insertedConflictJobs) != tc.wantConflictQueued {
-		t.Errorf("insertedConflictJobs = %d, want %d", len(mockRiver.insertedConflictJobs), tc.wantConflictQueued)
+	if mockBus != nil && len(mockBus.insertedConflictJobs) != tc.wantConflictQueued {
+		t.Errorf("insertedConflictJobs = %d, want %d", len(mockBus.insertedConflictJobs), tc.wantConflictQueued)
 	}
 	assertConflictCheckDispatcherCalls(t, tc, mockDisp)
 }
@@ -871,8 +871,8 @@ func checkOpenPRConflictsCasesPart1() []checkOpenPRConflictsTestCase {
 func checkOpenPRConflictsCasesPart2() []checkOpenPRConflictsTestCase {
 	return []checkOpenPRConflictsTestCase{
 		{
-			name:               "409 conflict with river client enqueues MergeConflictArgs on merge_conflict queue",
-			useRiver:           true,
+			name:               "409 conflict with bus client enqueues MergeConflictArgs on merge_conflict queue",
+			useBus:             true,
 			autoUpdateAuthors:  []string{"trusted-author"},
 			openPRs:            []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
 			prStatusCodes:      []int{http.StatusConflict},
@@ -885,9 +885,9 @@ func checkOpenPRConflictsCasesPart2() []checkOpenPRConflictsTestCase {
 			wantUpdatedPRs:     []string{"/repos/azylman/aerial/pulls/543/update-branch"},
 		},
 		{
-			name:              "river insert error on conflict logs warning without failing check",
-			useRiver:          true,
-			riverErr:          errors.New("river insert failed"),
+			name:              "bus insert error on conflict logs warning without failing check",
+			useBus:            true,
+			busErr:            errors.New("bus insert failed"),
 			autoUpdateAuthors: []string{"trusted-author"},
 			openPRs:           []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
 			prStatusCodes:     []int{http.StatusConflict},

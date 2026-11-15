@@ -188,8 +188,8 @@ type gatewayMessageCreateCase struct {
 	authorID        string
 	refGuildID      string
 	msgGuildID      string
-	hasRiver        bool
-	riverErr        bool
+	hasBus          bool
+	busErr          bool
 	directErr       bool
 	hasRolesInState bool
 	mentionRoles    []string
@@ -230,16 +230,16 @@ func runGatewayMessageCreateCase(ctx context.Context, t *testing.T, tc gatewayMe
 	if tc.directErr {
 		disp.discordMessageErr = errors.New("dispatch direct error")
 	}
-	river := &mockRiverInserter{}
-	if tc.riverErr {
-		river.err = errors.New("river insert error")
+	bus := &mockEventBus{}
+	if tc.busErr {
+		bus.err = errors.New("bus insert error")
 	}
 
 	var srv *RouterServer
 	if !tc.nilServer {
 		srv = newTestRouter(Config{}, nil, nil, disp)
-		if tc.hasRiver {
-			srv.SetEventBus(river)
+		if tc.hasBus {
+			srv.SetEventBus(bus)
 		}
 	}
 
@@ -263,11 +263,11 @@ func runGatewayMessageCreateCase(ctx context.Context, t *testing.T, tc gatewayMe
 	mc := buildGatewayMessage(tc)
 	handleGatewayMessageCreate(ctx, srv, session, mc)
 
-	if tc.hasRiver {
-		if len(river.insertedDiscordJobs) != tc.wantEnqueued {
-			t.Errorf("insertedDiscordJobs = %d, want %d", len(river.insertedDiscordJobs), tc.wantEnqueued)
+	if tc.hasBus {
+		if len(bus.insertedDiscordJobs) != tc.wantEnqueued {
+			t.Errorf("insertedDiscordJobs = %d, want %d", len(bus.insertedDiscordJobs), tc.wantEnqueued)
 		}
-		for _, job := range river.insertedDiscordJobs {
+		for _, job := range bus.insertedDiscordJobs {
 			assertRootTraceparent(t, job.Traceparent)
 		}
 	} else if !tc.nilServer {
@@ -301,7 +301,7 @@ func TestHandleGatewayMessageCreate(t *testing.T) {
 			authorID:  "bot-id-123",
 		},
 		{
-			name:          "direct dispatch fallback when river is nil",
+			name:          "direct dispatch fallback when bus is nil",
 			botUserID:     "bot-id-123",
 			authorID:      "user-456",
 			msgGuildID:    "guild-1",
@@ -310,18 +310,18 @@ func TestHandleGatewayMessageCreate(t *testing.T) {
 			wantProcessed: 1,
 		},
 		{
-			name:         "river enqueue when river is configured",
+			name:         "bus enqueue when bus is configured",
 			botUserID:    "bot-id-123",
 			authorID:     "user-456",
-			hasRiver:     true,
+			hasBus:       true,
 			wantEnqueued: 1,
 		},
 		{
-			name:         "river insert error handled cleanly",
+			name:         "bus insert error handled cleanly",
 			botUserID:    "bot-id-123",
 			authorID:     "user-456",
-			hasRiver:     true,
-			riverErr:     true,
+			hasBus:       true,
+			busErr:       true,
 			wantEnqueued: 0,
 		},
 		{
@@ -357,8 +357,8 @@ type gatewayInteractionCreateCase struct {
 	nilServer       bool
 	nilInteraction  bool
 	interactionType discordgo.InteractionType
-	hasRiver        bool
-	riverErr        bool
+	hasBus          bool
+	busErr          bool
 	directErr       bool
 	wantEnqueued    int
 	wantProcessed   int
@@ -370,16 +370,16 @@ func runGatewayInteractionCreateCase(ctx context.Context, t *testing.T, tc gatew
 	if tc.directErr {
 		disp.discordInteractionErr = errors.New("dispatch direct error")
 	}
-	river := &mockRiverInserter{}
-	if tc.riverErr {
-		river.err = errors.New("river insert error")
+	bus := &mockEventBus{}
+	if tc.busErr {
+		bus.err = errors.New("bus insert error")
 	}
 
 	var srv *RouterServer
 	if !tc.nilServer {
 		srv = newTestRouter(Config{}, nil, nil, disp)
-		if tc.hasRiver {
-			srv.SetEventBus(river)
+		if tc.hasBus {
+			srv.SetEventBus(bus)
 		}
 	}
 
@@ -395,11 +395,11 @@ func runGatewayInteractionCreateCase(ctx context.Context, t *testing.T, tc gatew
 
 	handleGatewayInteractionCreate(ctx, srv, ic)
 
-	if tc.hasRiver {
-		if len(river.insertedInteractJobs) != tc.wantEnqueued {
-			t.Errorf("insertedInteractJobs = %d, want %d", len(river.insertedInteractJobs), tc.wantEnqueued)
+	if tc.hasBus {
+		if len(bus.insertedInteractJobs) != tc.wantEnqueued {
+			t.Errorf("insertedInteractJobs = %d, want %d", len(bus.insertedInteractJobs), tc.wantEnqueued)
 		}
-		for _, job := range river.insertedInteractJobs {
+		for _, job := range bus.insertedInteractJobs {
 			assertRootTraceparent(t, job.Traceparent)
 		}
 	} else if !tc.nilServer {
@@ -428,21 +428,21 @@ func TestHandleGatewayInteractionCreate(t *testing.T) {
 			interactionType: discordgo.InteractionMessageComponent,
 		},
 		{
-			name:            "direct dispatch fallback when river is nil",
+			name:            "direct dispatch fallback when bus is nil",
 			interactionType: discordgo.InteractionApplicationCommand,
 			wantProcessed:   1,
 		},
 		{
-			name:            "river enqueue when river is configured",
+			name:            "bus enqueue when bus is configured",
 			interactionType: discordgo.InteractionApplicationCommand,
-			hasRiver:        true,
+			hasBus:          true,
 			wantEnqueued:    1,
 		},
 		{
-			name:            "river insert error handled cleanly",
+			name:            "bus insert error handled cleanly",
 			interactionType: discordgo.InteractionApplicationCommand,
-			hasRiver:        true,
-			riverErr:        true,
+			hasBus:          true,
+			busErr:          true,
 			wantEnqueued:    0,
 		},
 		{
@@ -788,7 +788,7 @@ type sweepTestCase struct {
 	userGuildsErr       bool
 	messagesResp        []*discordgo.Message
 	messagesErrCode     int
-	hasRiver            bool
+	hasBus              bool
 	runSecondSweep      bool
 
 	wantFetchCalls  int
@@ -871,14 +871,14 @@ func assertCatchUpSweepTransport(t *testing.T, tc sweepTestCase, transport *mock
 	}
 }
 
-func assertCatchUpSweepRiver(t *testing.T, tc sweepTestCase, river *mockRiverInserter) {
+func assertCatchUpSweepBus(t *testing.T, tc sweepTestCase, bus *mockEventBus) {
 	t.Helper()
-	if len(river.insertedDiscordJobs) != len(tc.wantEnqueuedIDs) {
-		t.Errorf("insertedDiscordJobs = %d, want %d", len(river.insertedDiscordJobs), len(tc.wantEnqueuedIDs))
+	if len(bus.insertedDiscordJobs) != len(tc.wantEnqueuedIDs) {
+		t.Errorf("insertedDiscordJobs = %d, want %d", len(bus.insertedDiscordJobs), len(tc.wantEnqueuedIDs))
 	}
 	for idx, wantID := range tc.wantEnqueuedIDs {
-		if idx < len(river.insertedDiscordJobs) && river.insertedDiscordJobs[idx].MessageID != wantID {
-			t.Errorf("job[%d] MessageID = %q, want %q", idx, river.insertedDiscordJobs[idx].MessageID, wantID)
+		if idx < len(bus.insertedDiscordJobs) && bus.insertedDiscordJobs[idx].MessageID != wantID {
+			t.Errorf("job[%d] MessageID = %q, want %q", idx, bus.insertedDiscordJobs[idx].MessageID, wantID)
 		}
 	}
 }
@@ -907,11 +907,11 @@ func assertCatchUpSweepServer(t *testing.T, tc sweepTestCase, srv *RouterServer,
 	}
 }
 
-func assertCatchUpSweepResults(t *testing.T, tc sweepTestCase, srv *RouterServer, disp *mockOutboundDispatcher, river *mockRiverInserter, transport *mockDiscordTransport) {
+func assertCatchUpSweepResults(t *testing.T, tc sweepTestCase, srv *RouterServer, disp *mockOutboundDispatcher, bus *mockEventBus, transport *mockDiscordTransport) {
 	t.Helper()
 	assertCatchUpSweepTransport(t, tc, transport)
-	if tc.hasRiver {
-		assertCatchUpSweepRiver(t, tc, river)
+	if tc.hasBus {
+		assertCatchUpSweepBus(t, tc, bus)
 		return
 	}
 	assertCatchUpSweepServer(t, tc, srv, disp)
@@ -927,12 +927,12 @@ func runDiscordCatchUpSweepCase(ctx context.Context, t *testing.T, tc sweepTestC
 	}
 
 	disp := &mockOutboundDispatcher{}
-	river := &mockRiverInserter{}
+	bus := &mockEventBus{}
 	var srv *RouterServer
 	if !tc.nilServer {
 		srv = newTestRouter(Config{}, nil, nil, disp)
-		if tc.hasRiver {
-			srv.SetEventBus(river)
+		if tc.hasBus {
+			srv.SetEventBus(bus)
 		}
 	}
 
@@ -956,7 +956,7 @@ func runDiscordCatchUpSweepCase(ctx context.Context, t *testing.T, tc sweepTestC
 		runDiscordCatchUpSweep(targetCtx, session, srv, tc.now)
 	}
 
-	assertCatchUpSweepResults(t, tc, srv, disp, river, transport)
+	assertCatchUpSweepResults(t, tc, srv, disp, bus, transport)
 
 	if tc.channelID != "" && tc.wantWatermark != "" {
 		wm := getChannelWatermark(tc.channelID)
@@ -1049,13 +1049,13 @@ func discordCatchUpSweepCases(baseNow time.Time, minSnow, staleSnow, freshSnow1,
 			wantWatermark:   freshSnow2,
 		},
 		{
-			name:            "river client enqueue in chronological order",
+			name:            "bus client enqueue in chronological order",
 			now:             baseNow,
 			botUserID:       "bot-123",
 			channelID:       "chan-sweep-7",
 			guildID:         "guild-123",
 			lastMessageID:   freshSnow2,
-			hasRiver:        true,
+			hasBus:          true,
 			messagesResp:    []*discordgo.Message{freshMsg2, freshMsg1},
 			wantFetchCalls:  1,
 			wantAfterQuery:  minSnow,
@@ -1179,7 +1179,7 @@ func TestEnqueueDiscordMessageDirect(t *testing.T) {
 		authorID      string
 		refGuildID    string
 		msgGuildID    string
-		hasRiver      bool
+		hasBus        bool
 		wantProcessed int
 	}{
 		{

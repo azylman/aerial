@@ -697,11 +697,11 @@ func runPRAutoMergeDisabledCase(ctx context.Context, t *testing.T, tc prAutoMerg
 		conflictTargetID: tc.registryTargetID,
 		conflictUpdated:  tc.registryUpdated,
 	}
-	river := &mockRiverInserter{}
+	bus := &mockEventBus{}
 	cfg := Config{
 		GitHubAPIURL: mockServer.URL,
 	}
-	srv := newTestRouter(cfg, mockServer.Client(), reg, nil, river)
+	srv := newTestRouter(cfg, mockServer.Client(), reg, nil, bus)
 
 	res := &ResolvedGitHubEvent{
 		Event:    "pull_request",
@@ -721,8 +721,8 @@ func runPRAutoMergeDisabledCase(ctx context.Context, t *testing.T, tc prAutoMerg
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("handlePRAutoMergeDisabledAction err = %v, wantErr = %v", err, tc.wantErr)
 	}
-	if len(river.insertedConflictJobs) != tc.wantConflictEnqueued {
-		t.Fatalf("insertedConflictJobs len = %d, want %d", len(river.insertedConflictJobs), tc.wantConflictEnqueued)
+	if len(bus.insertedConflictJobs) != tc.wantConflictEnqueued {
+		t.Fatalf("insertedConflictJobs len = %d, want %d", len(bus.insertedConflictJobs), tc.wantConflictEnqueued)
 	}
 	if tc.wantFailedNonRoboRev != "" {
 		val, ok := srv.nonRoboRevFailedSHAs.Load(prCheckKey(tc.resRepo, tc.resPRNum))
@@ -1032,8 +1032,8 @@ func TestHandleGitHubWebhook_TeeAndForwarding(t *testing.T) {
 					"aerial": "http://127.0.0.1:9999", // self, must never be called
 				},
 			}
-			river := &mockRiverInserter{}
-			srv := newTestRouter(cfg, serverA.Client(), reg, nil, river)
+			bus := &mockEventBus{}
+			srv := newTestRouter(cfg, serverA.Client(), reg, nil, bus)
 
 			headers := map[string]string{
 				"X-Github-Event":    tc.event,
