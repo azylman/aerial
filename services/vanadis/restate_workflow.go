@@ -343,13 +343,17 @@ func executeCompleteWorkflowBuild(ctx context.Context, srv *VanadisServer, build
 	if srv == nil || srv.store == nil {
 		return errors.New("vanadis store not configured")
 	}
+	prevBuild, _, prevErr := srv.store.GetBuild(ctx, buildID)
+	alreadyCompleted := prevErr == nil && prevBuild != nil && prevBuild.Status == "completed"
 	if err := srv.store.UpdateBuildStatus(ctx, buildID, "completed"); err != nil {
 		return err
 	}
-	RecordBuildTotal("completed")
+	if !alreadyCompleted {
+		RecordBuildTotal("completed")
+	}
 	b, chs, err := srv.store.GetBuild(ctx, buildID)
 	if err == nil {
-		if !b.Quiet {
+		if !alreadyCompleted && !b.Quiet {
 			res := &VanadisAdvancementResult{
 				BuildID:   b.ID,
 				ThreadID:  b.ThreadID,
@@ -913,11 +917,13 @@ func (s *VanadisServer) notifyRestateChunkPRAdvanced(ctx context.Context, res *V
 	if res.Advanced && mergedChunk.MergeAwakeableID != "" {
 		if err := s.resolveRestateAwakeable(ctx, mergedChunk.MergeAwakeableID, "merged"); err != nil {
 			log.Printf("[vanadis] warning: failed resolving merge awakeable for chunk %s: %v", mergedChunk.ID, err)
+			return false
 		}
 	}
 	if mergedChunk.DeployAwakeableID != "" {
 		if err := s.resolveRestateAwakeable(ctx, mergedChunk.DeployAwakeableID, "deploy_success"); err != nil {
 			log.Printf("[vanadis] warning: failed resolving deploy awakeable for chunk %s: %v", mergedChunk.ID, err)
+			return false
 		}
 	}
 	return true
@@ -933,6 +939,7 @@ func (s *VanadisServer) notifyRestateActionChunkCompleted(ctx context.Context, c
 	}
 	if err := s.resolveRestateAwakeable(ctx, chunk.DeployAwakeableID, "completed"); err != nil {
 		log.Printf("[vanadis] warning: failed resolving action awakeable for chunk %s: %v", chunk.ID, err)
+		return false
 	}
 	return true
 }

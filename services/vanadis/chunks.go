@@ -1130,11 +1130,6 @@ func (s *VanadisServer) handleAdvanceChunkPR(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	restateManaged := s.notifyRestateChunkPRAdvanced(r.Context(), res)
-	if restateManaged && res != nil {
-		// Suppress BuildCompleted in the legacy advance-pr response when Restate
-		// manages the workflow so BuildWorkflow is the sole owner of the completion wake.
-		res.BuildCompleted = false
-	}
 	if res != nil && res.Matched {
 		if res.Advanced {
 			RecordChunkTotal("merged")

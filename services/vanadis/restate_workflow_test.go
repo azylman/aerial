@@ -495,9 +495,22 @@ func TestProcessChunkAwakeable_Unmatched(t *testing.T) {
 
 	states := map[string]*workflowChunkRuntimeState{
 		"c1": {launched: false},
-		"c2": {launched: true},
+		"c2": {
+			launched:        true,
+			mergeAwakeable:  &fakeWorkflowAwakeable{id: "awk-m"},
+			deployAwakeable: &fakeWorkflowAwakeable{id: "awk-d"},
+		},
+		"c3": {
+			launched:        true,
+			actionAwakeable: &fakeWorkflowAwakeable{id: "awk-a"},
+		},
 	}
-	handled, err := processChunkAwakeable(nil, nil, "b1", nil, []string{"c1", "c2"}, states)
+	handled, err := processChunkAwakeable(nil, nil, "b1", nil, []string{"c1", "c2", "c3"}, states)
+	assert.False(t, handled)
+	assert.NoError(t, err)
+
+	unmatched := &fakeWorkflowPromise{name: "other"}
+	handled, err = processChunkAwakeable(nil, nil, "b1", unmatched, []string{"c1", "c2", "c3"}, states)
 	assert.False(t, handled)
 	assert.NoError(t, err)
 }
@@ -617,8 +630,8 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		httpClient: ts500.Client(),
 	}
 	assert.Error(t, srv500.startRestateBuildWorkflow(ctx, "b-restate"))
-	assert.True(t, srv500.notifyRestateChunkPRAdvanced(ctx, resAdv))
-	assert.True(t, srv500.notifyRestateActionChunkCompleted(ctx, "c2"))
+	assert.False(t, srv500.notifyRestateChunkPRAdvanced(ctx, resAdv))
+	assert.False(t, srv500.notifyRestateActionChunkCompleted(ctx, "c2"))
 	srv500.notifyRestateChunkFailed(ctx, "c1")
 
 	tmpYAML := t.TempDir() + "/restate.yaml"
@@ -834,7 +847,7 @@ func TestBuildWorkflow_StateMachineWithRuntime(t *testing.T) {
 		case 3:
 			adv2 := postAdvancePR(502)
 			assert.True(t, adv2.Advanced)
-			assert.False(t, adv2.BuildCompleted, "Restate-managed build should suppress BuildCompleted in advance-pr response")
+			assert.True(t, adv2.BuildCompleted, "advance-pr should preserve BuildCompleted for event trigger evaluation")
 		}
 		for _, f := range futures {
 			if awk, ok := f.(*fakeWorkflowAwakeable); ok && awk.val != "" {

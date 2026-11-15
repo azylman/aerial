@@ -484,7 +484,7 @@ func findNextUnmergedChunkIdx(list []VanadisChunk, currentChunkIdx int) int {
 	nextChunkIdx := -1
 	fallbackIdx := -1
 	for _, cs := range list {
-		if cs.Status == "merged" {
+		if isChunkDoneStatus(cs.Status) {
 			continue
 		}
 		if cs.ChunkIndex > currentChunkIdx && (nextChunkIdx == -1 || cs.ChunkIndex < nextChunkIdx) {
