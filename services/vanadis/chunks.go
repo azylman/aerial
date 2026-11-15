@@ -17,6 +17,34 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 )
 
+const (
+	chunkModeAction    = "action"
+	fieldBuild         = "build"
+	fieldStatus        = "status"
+	fieldBuildID       = "build_id"
+	fieldChunks        = "chunks"
+	fieldChunk         = "chunk"
+	statusUpdated      = "updated"
+	statusCIFailed     = "ci_failed"
+	statusFailed       = "failed"
+	statusDeployed     = "deployed"
+	statusDeploying    = "deploying"
+	statusSynced       = "synced"
+	statusConflict     = "conflict"
+	statusMerged       = "merged"
+	statusOpen         = "open"
+	statusRunning      = "running"
+	statusPending      = "pending"
+	statusCompleted    = "completed"
+	statusCancelled    = "cancelled"
+	statusQueued       = "queued"
+	statusCoding       = "coding"
+	statusPROpened     = "pr_opened"
+	statusDeployFailed = "deploy_failed"
+	statusPassed       = "passed"
+	statusNotFound     = "not_found"
+)
+
 // VanadisChunkSummary captures a lightweight view of a chunk for advancement outputs.
 type VanadisChunkSummary struct {
 	ID          string    `json:"id"`
@@ -132,8 +160,8 @@ func resolveChunkRef(chunks []VanadisChunk, chunkRef string) int {
 
 func normalizeWidgetStatus(dbStatus string) string {
 	switch strings.ToLower(strings.TrimSpace(dbStatus)) {
-	case "ci_failed", "deploy_failed":
-		return "failed"
+	case statusCIFailed, statusDeployFailed:
+		return statusFailed
 	default:
 		return strings.ToLower(strings.TrimSpace(dbStatus))
 	}
@@ -142,28 +170,28 @@ func normalizeWidgetStatus(dbStatus string) string {
 func resolveVanadisChunkWidgetStatus(chunkStatus, prDBStatus string) string {
 	cStat := normalizeWidgetStatus(chunkStatus)
 	switch normalizeWidgetStatus(prDBStatus) {
-	case "deployed":
-		return "deployed"
-	case "deploying":
-		return "deploying"
-	case "synced":
-		return "synced"
-	case "failed":
-		return "failed"
-	case "conflict":
-		return "conflict"
-	case "merged":
-		return "merged"
+	case statusDeployed:
+		return statusDeployed
+	case statusDeploying:
+		return statusDeploying
+	case statusSynced:
+		return statusSynced
+	case statusFailed:
+		return statusFailed
+	case statusConflict:
+		return statusConflict
+	case statusMerged:
+		return statusMerged
 	case "closed":
-		if cStat == "merged" {
-			return "merged"
+		if cStat == statusMerged {
+			return statusMerged
 		}
-		return "failed"
-	case "open", "pr_opened":
-		if cStat == "merged" {
-			return "merged"
+		return statusFailed
+	case statusOpen, statusPROpened:
+		if cStat == statusMerged {
+			return statusMerged
 		}
-		return "open"
+		return statusOpen
 	default:
 		return firstNonEmpty(cStat, "open")
 	}
@@ -227,7 +255,7 @@ func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkI
 		}
 		return "", "", "", fmt.Errorf("check chunk mode %s: %w", chunkID, chkErr)
 	}
-	if mode == "action" {
+	if mode == chunkModeAction {
 		repo := normalizeRepo(req.Repo)
 		if repo == "" {
 			return "", "", "", errors.New("repo is required to attach PR to action chunk")
@@ -319,7 +347,7 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req Attac
 		Repo:         repo,
 		Title:        title,
 		Instructions: objective,
-		Status:       "pr_opened",
+		Status:       statusPROpened,
 		PRNumber:     req.PRNumber,
 		DependsOn:    []string{},
 		StartedAt:    now,
@@ -414,7 +442,7 @@ func (s *PostgresVanadisStore) UpdateBuild(ctx context.Context, buildID string, 
 		}
 		return nil, fmt.Errorf("lock build %s: %w", buildID, err)
 	}
-	if b.Status != "running" {
+	if b.Status != statusRunning {
 		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, b.Status)
 	}
 
@@ -449,7 +477,7 @@ func lockRunningBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) (
 		}
 		return nil, fmt.Errorf("lock build %s: %w", buildID, err)
 	}
-	if b.Status != "running" {
+	if b.Status != statusRunning {
 		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, b.Status)
 	}
 
@@ -508,19 +536,19 @@ func applyChunkUpdates(c *VanadisChunk, req UpdateChunkRequest, normEffort strin
 	newRepo := c.Repo
 	if repo := strings.TrimSpace(req.Repo); repo != "" {
 		newRepo = normalizeRepo(repo)
-	} else if newMode == "action" {
+	} else if newMode == chunkModeAction {
 		newRepo = ""
 	}
 	newTargetFiles := c.TargetFiles
 	if req.TargetFiles != nil {
 		newTargetFiles = nonNilSlice(req.TargetFiles)
-	} else if newMode == "action" {
+	} else if newMode == chunkModeAction {
 		newTargetFiles = []string{}
 	}
 	newTargetSymbols := c.TargetSymbols
 	if req.TargetSymbols != nil {
 		newTargetSymbols = nonNilSlice(req.TargetSymbols)
-	} else if newMode == "action" {
+	} else if newMode == chunkModeAction {
 		newTargetSymbols = []string{}
 	}
 
@@ -529,7 +557,7 @@ func applyChunkUpdates(c *VanadisChunk, req UpdateChunkRequest, normEffort strin
 		if newRepo == "" {
 			return fmt.Errorf("%w: repo is required for pr mode", ErrInvalidBuildInput)
 		}
-	case "action":
+	case chunkModeAction:
 		if newRepo != "" {
 			return fmt.Errorf("%w: action chunk must have empty repo", ErrInvalidBuildInput)
 		}
@@ -592,7 +620,7 @@ func (s *PostgresVanadisStore) UpdateChunk(ctx context.Context, buildID, chunkRe
 		return nil, ErrChunkNotFound
 	}
 	c := chunks[idx]
-	if c.Status != "pending" {
+	if c.Status != statusPending {
 		return nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", ErrBuildConflict, c.ID, c.Status)
 	}
 
@@ -695,7 +723,7 @@ func buildAppendedChunk(buildID string, in CreateChunkInput, nextIdx int, prevCh
 		TargetSymbols:      nonNilSlice(in.TargetSymbols),
 		Effort:             eff,
 		AcceptanceCriteria: nonNilSlice(in.AcceptanceCriteria),
-		Status:             "pending",
+		Status:             statusPending,
 		DependsOn:          deps,
 		CreatedAt:          now,
 		UpdatedAt:          now,
@@ -799,7 +827,7 @@ func (s *PostgresVanadisStore) RemoveChunk(ctx context.Context, buildID, chunkRe
 		return nil, nil, ErrChunkNotFound
 	}
 	removed := existing[removeIdx]
-	if removed.Status != "pending" {
+	if removed.Status != statusPending {
 		return nil, nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", ErrBuildConflict, removed.ID, removed.Status)
 	}
 	if len(existing) <= 1 {
@@ -851,7 +879,7 @@ func (s *VanadisServer) handleChunkByID(w http.ResponseWriter, r *http.Request) 
 		writeStoreErr(w, err)
 		return
 	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"chunk": chunk, "build": build})
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldChunk: chunk, fieldBuild: build})
 }
 
 func decodeChunkPRPost[T any](s *VanadisServer, w http.ResponseWriter, r *http.Request, missingMsg string, valid func(*T) bool) (T, bool) {
@@ -906,10 +934,10 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 	}
 	s.syncBuildWidget(r.Context(), buildID, "")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-		"status":    "attached",
-		"build_id":  buildID,
-		"chunk_id":  chunkID,
-		"thread_id": threadID,
+		fieldStatus:  "attached",
+		fieldBuildID: buildID,
+		"chunk_id":   chunkID,
+		"thread_id":  threadID,
 	})
 }
 
@@ -925,7 +953,7 @@ func (s *VanadisServer) dispatchCompletedBuildWake(ctx context.Context, res *Van
 
 func isVanadisChunkStreamingPhase(chunkStatus string) bool {
 	switch strings.ToLower(strings.TrimSpace(chunkStatus)) {
-	case "open", "pr_opened", "merged", "synced", "deploying":
+	case statusOpen, statusPROpened, statusMerged, statusSynced, statusDeploying:
 		return true
 	default:
 		return false
@@ -934,7 +962,7 @@ func isVanadisChunkStreamingPhase(chunkStatus string) bool {
 
 func hasFailedWidgetChunk(chunks []StatusWidgetChunk) bool {
 	for _, c := range chunks {
-		if c.Status == "failed" || c.Status == "conflict" {
+		if c.Status == statusFailed || c.Status == statusConflict {
 			return true
 		}
 	}
@@ -942,7 +970,7 @@ func hasFailedWidgetChunk(chunks []StatusWidgetChunk) bool {
 }
 
 func resolveWidgetBanner(widgetStatus string, req SyncChunkPRWidgetRequest) string {
-	if (widgetStatus == "failed" || widgetStatus == "conflict") && req.PRFound {
+	if (widgetStatus == statusFailed || widgetStatus == statusConflict) && req.PRFound {
 		return req.PRBanner
 	}
 	if req.PRNumber == 0 && strings.TrimSpace(req.PRBanner) != "" {
@@ -952,11 +980,11 @@ func resolveWidgetBanner(widgetStatus string, req SyncChunkPRWidgetRequest) stri
 }
 
 func resolveWidgetChunkRepo(c VanadisChunk) string {
-	if c.Mode == "action" {
+	if c.Mode == chunkModeAction {
 		if c.PRNumber > 0 && strings.TrimSpace(c.Repo) != "" {
 			return c.Repo
 		}
-		return "action"
+		return chunkModeAction
 	}
 	return firstNonEmpty(c.Repo, "aerial")
 }
@@ -970,8 +998,8 @@ func buildStatusWidgetChunk(c VanadisChunk, req SyncChunkPRWidgetRequest, widget
 	switch {
 	case req.PRNumber > 0 && c.PRNumber == req.PRNumber && req.PRFound:
 		chunkStatus = resolveVanadisChunkWidgetStatus(c.Status, req.PRStatus)
-		if (chunkStatus == "failed" || chunkStatus == "conflict") && *widgetStatus != "completed" {
-			*widgetStatus = "failed"
+		if (chunkStatus == statusFailed || chunkStatus == statusConflict) && *widgetStatus != statusCompleted {
+			*widgetStatus = statusFailed
 		}
 		if isVanadisChunkStreamingPhase(chunkStatus) {
 			activeStep = strings.TrimSpace(req.ActiveStep)
@@ -980,12 +1008,12 @@ func buildStatusWidgetChunk(c VanadisChunk, req SyncChunkPRWidgetRequest, widget
 			}
 			completedAt = time.Time{}
 		}
-	case chunkStatus == "completed":
-		chunkStatus = "deployed"
+	case chunkStatus == statusCompleted:
+		chunkStatus = statusDeployed
 	case isVanadisChunkStreamingPhase(chunkStatus):
 		activeStep = FormatChunkActiveStep(c, baseURL)
-		if chunkStatus == "merged" && (activeStep == "" || *widgetStatus == "completed") {
-			chunkStatus = "deployed"
+		if chunkStatus == statusMerged && (activeStep == "" || *widgetStatus == statusCompleted) {
+			chunkStatus = statusDeployed
 			activeStep = ""
 		}
 	}
@@ -1010,8 +1038,8 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 	for i, c := range chunks {
 		wChunks[i] = buildStatusWidgetChunk(c, req, &widgetStatus, baseURL)
 	}
-	if widgetStatus == "failed" && req.PRFound && req.PRNumber > 0 && !hasFailedWidgetChunk(wChunks) {
-		widgetStatus = "running"
+	if widgetStatus == statusFailed && req.PRFound && req.PRNumber > 0 && !hasFailedWidgetChunk(wChunks) {
+		widgetStatus = statusRunning
 	}
 	return StatusWidgetRequest{
 		ChannelID: build.ThreadID,
@@ -1062,7 +1090,7 @@ func (s *VanadisServer) handleUpdateBuild(w http.ResponseWriter, r *http.Request
 	if strings.TrimSpace(req.Title) != "" {
 		s.syncBuildWidget(r.Context(), buildID, "")
 	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "build": updated})
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldStatus: statusUpdated, fieldBuild: updated})
 }
 
 func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
@@ -1076,7 +1104,7 @@ func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Reque
 		writeStoreErr(w, ErrChunkNotFound)
 		return
 	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"chunk": chunks[idx], "build": build})
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldChunk: chunks[idx], fieldBuild: build})
 }
 
 func (s *VanadisServer) syncBuildAndNotifyMutation(ctx context.Context, buildID, action string) {
@@ -1103,7 +1131,7 @@ func (s *VanadisServer) handleUpdateChunk(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.syncBuildAndNotifyMutation(r.Context(), buildID, "update_chunk")
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "updated", "chunk": chunk})
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldStatus: statusUpdated, fieldChunk: chunk})
 }
 
 func (s *VanadisServer) handleAppendChunks(w http.ResponseWriter, r *http.Request, buildID string) {
@@ -1123,7 +1151,7 @@ func (s *VanadisServer) handleAppendChunks(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.syncBuildAndNotifyMutation(r.Context(), buildID, "append_chunks")
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "appended", "build_id": buildID, "chunks": appended})
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldStatus: "appended", fieldBuildID: buildID, fieldChunks: appended})
 }
 
 func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
@@ -1134,10 +1162,10 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 	}
 	s.syncBuildAndNotifyMutation(r.Context(), buildID, "remove_chunk")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":           "removed",
-		"build_id":         buildID,
+		fieldStatus:        "removed",
+		fieldBuildID:       buildID,
 		"removed_chunk_id": removed.ID,
-		"chunks":           remaining,
+		fieldChunks:        remaining,
 	})
 }
 

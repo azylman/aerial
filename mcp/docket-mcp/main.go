@@ -27,6 +27,10 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
+const (
+	errMsgInvalidID = "parameter 'id' must be a positive integer"
+)
+
 // Server encapsulates HTTP routes, Vikunja client, and SQL task store for docket-mcp.
 type Server struct {
 	cfg           *Config
@@ -75,7 +79,7 @@ func (s *Server) HandleMCPStreamable(w http.ResponseWriter, r *http.Request) {
 	httpkit.ServeMCPStream(w, r, s.streamHandler, "docket-mcp ready\n", "docket_", "")
 }
 
-var taskStatusFilters = []any{"open", "completed", "wont_do", "all"}
+var taskStatusFilters = []any{taskStatusOpen, taskStatusCompleted, taskStatusWontDo, taskStatusAll}
 
 func (s *Server) registerTools(srv *mcp.Server) {
 	listSchema := inputSchema[ListArgs]()
@@ -87,7 +91,7 @@ func (s *Server) registerTools(srv *mcp.Server) {
 	setEnum(linkSchema, "type", "", "parent", "blocks", "related")
 	linkSchema.Properties["remove"].Default = json.RawMessage(`false`)
 	closeSchema := inputSchema[CloseArgs]()
-	setEnum(closeSchema, "resolution", "", "completed", "wont_do")
+	setEnum(closeSchema, "resolution", "", taskStatusCompleted, taskStatusWontDo)
 
 	addTextTool(srv, &mcp.Tool{
 		Name:        "ready",
@@ -296,7 +300,7 @@ func (s *Server) listTasks(ctx context.Context, status string, parentID *int64) 
 
 	var summaries []TaskSummary
 	for _, node := range nodes {
-		if status != "all" && node.Status != status {
+		if status != taskStatusAll && node.Status != status {
 			continue
 		}
 		if parentID != nil {
@@ -362,7 +366,7 @@ type ShowArgs struct {
 
 func (s *Server) toolShow(ctx context.Context, args ShowArgs) (string, bool) {
 	if args.ID <= 0 {
-		return "parameter 'id' must be a positive integer", true
+		return errMsgInvalidID, true
 	}
 
 	hydrated, err := s.showTask(ctx, args.ID)
@@ -424,9 +428,9 @@ func validateCreateRelations(ctx context.Context, src NodeSource, parentID *int6
 		role string
 		ids  []int64
 	}
-	refs := []ref{{"blocked", blocks}, {"blocker", blockedBy}, {"related", related}}
+	refs := []ref{{"blocked", blocks}, {"blocker", blockedBy}, {relationRelated, related}}
 	if parentID != nil {
-		refs = append([]ref{{"parent", []int64{*parentID}}}, refs...)
+		refs = append([]ref{{relationParent, []int64{*parentID}}}, refs...)
 	}
 	for _, r := range refs {
 		for _, id := range r.ids {
@@ -510,7 +514,7 @@ func (s *Server) toolCreate(ctx context.Context, args CreateArgs) (string, bool)
 	summary := TaskSummary{
 		ID:        task.ID,
 		Title:     task.Title,
-		Status:    "open",
+		Status:    taskStatusOpen,
 		ParentID:  args.ParentID,
 		BlockedBy: args.BlockedBy,
 		Blocks:    args.Blocks,
@@ -531,7 +535,7 @@ type UpdateArgs struct {
 
 func (s *Server) toolUpdate(ctx context.Context, args UpdateArgs) (string, bool) {
 	if args.ID <= 0 {
-		return "parameter 'id' must be a positive integer", true
+		return errMsgInvalidID, true
 	}
 
 	task, err := s.vikunja.GetTask(ctx, args.ID)
@@ -620,12 +624,12 @@ func (s *Server) toolLink(ctx context.Context, args LinkArgs) (string, bool) {
 
 	var kind string
 	switch args.Type {
-	case "parent":
+	case relationParent:
 		kind = "parenttask"
 	case "blocks":
 		kind = "blocking"
-	case "related":
-		kind = "related"
+	case relationRelated:
+		kind = relationRelated
 	default:
 		return fmt.Sprintf("invalid relation type: %q (must be parent, blocks, or related)", args.Type), true
 	}
@@ -637,7 +641,7 @@ func (s *Server) toolLink(ctx context.Context, args LinkArgs) (string, bool) {
 		return fmt.Sprintf("relation %s between task %d and %d removed", args.Type, args.ID, args.TargetID), false
 	}
 
-	if args.Type != "related" {
+	if args.Type != relationRelated {
 		src, err := s.newNodeSource(ctx)
 		if err != nil {
 			return err.Error(), true
@@ -666,7 +670,7 @@ func (s *Server) closeCompleted(ctx context.Context, id int64, reason string, no
 	if err := s.vikunja.CreateComment(ctx, id, "Closed as completed: "+reason); err != nil {
 		log.Printf("[docket-mcp] comment error: %v", err)
 	}
-	if err := s.store.UpdateTaskResolutionBatch(ctx, []int64{id}, "completed"); err != nil {
+	if err := s.store.UpdateTaskResolutionBatch(ctx, []int64{id}, taskStatusCompleted); err != nil {
 		log.Printf("[docket-mcp] update resolution error: %v", err)
 	}
 	return nil
@@ -700,7 +704,7 @@ func (s *Server) closeWontDo(ctx context.Context, id int64, reason string, openS
 		}
 	}
 	closedIDs := append([]int64{id}, openSubIDs...)
-	if err := s.store.UpdateTaskResolutionBatch(ctx, closedIDs, "wont_do"); err != nil {
+	if err := s.store.UpdateTaskResolutionBatch(ctx, closedIDs, taskStatusWontDo); err != nil {
 		log.Printf("[docket-mcp] update resolution batch error: %v", err)
 	}
 	return nil
@@ -715,12 +719,12 @@ type CloseArgs struct {
 
 func (s *Server) toolClose(ctx context.Context, args CloseArgs) (string, bool) {
 	if args.ID <= 0 {
-		return "parameter 'id' must be a positive integer", true
+		return errMsgInvalidID, true
 	}
 	if strings.TrimSpace(args.Reason) == "" {
 		return "parameter 'reason' cannot be empty", true
 	}
-	if args.Resolution != "completed" && args.Resolution != "wont_do" {
+	if args.Resolution != taskStatusCompleted && args.Resolution != taskStatusWontDo {
 		return fmt.Sprintf("invalid resolution: %q (must be 'completed' or 'wont_do')", args.Resolution), true
 	}
 
@@ -738,7 +742,7 @@ func (s *Server) toolClose(ctx context.Context, args CloseArgs) (string, bool) {
 
 	now := time.Now().UTC()
 	var closedIDs []int64
-	if args.Resolution == "completed" {
+	if args.Resolution == taskStatusCompleted {
 		closedIDs = []int64{args.ID}
 		if err := s.closeCompleted(ctx, args.ID, args.Reason, now); err != nil {
 			return err.Error(), true

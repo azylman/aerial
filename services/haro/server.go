@@ -20,6 +20,10 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
+const (
+	fieldError = "error"
+)
+
 type Server struct {
 	handler        *ToolHandler
 	dispatcher     PromptDispatcher
@@ -259,12 +263,12 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
-		httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{fieldError: "method not allowed"})
 		return
 	}
 
 	if s.handler == nil || s.handler.db == nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "database not initialized"})
 		return
 	}
 
@@ -285,25 +289,25 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 
 	metrics, err := GetScheduleSummaryMetrics(ctx, db)
 	if err != nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: err.Error()})
 		return
 	}
 
 	crons, err := ListCronSchedules(ctx, db, "")
 	if err != nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: err.Error()})
 		return
 	}
 
 	heartbeats, err := ListHeartbeatSchedules(ctx, db, "")
 	if err != nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: err.Error()})
 		return
 	}
 
 	oneshots, err := ListOneShotSchedules(ctx, db, "")
 	if err != nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: err.Error()})
 		return
 	}
 
@@ -328,12 +332,12 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
-		httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{fieldError: "method not allowed"})
 		return
 	}
 
 	if s.handler == nil || s.handler.db == nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "database not initialized"})
 		return
 	}
 
@@ -355,7 +359,7 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 
 	runs, total, err := GetScheduleRunsPaginated(r.Context(), s.handler.db, limit, offset, scheduleID, status)
 	if err != nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: err.Error()})
 		return
 	}
 
@@ -457,20 +461,20 @@ func (s *Server) fireClaimedTrigger(ctx context.Context, trig EventTrigger, cont
 	}
 	prompt := FormatEventTriggerPrompt(contextHeader, trig.Prompt)
 	start := time.Now()
-	_, dispErr := traceFire(ctx, "event_watch", trig.ID, func(dispCtx context.Context) (PromptDispatchResponse, error) {
+	_, dispErr := traceFire(ctx, scheduleTypeEventWatch, trig.ID, func(dispCtx context.Context) (PromptDispatchResponse, error) {
 		return s.dispatcher.DispatchPrompt(dispCtx, PromptDispatchRequest{
 			ChannelID: trig.ChannelID,
 			Prompt:    prompt,
 			Effort:    trig.Effort,
 		})
 	})
-	RecordScheduleDispatchDuration("event_watch", time.Since(start).Seconds())
+	RecordScheduleDispatchDuration(scheduleTypeEventWatch, time.Since(start).Seconds())
 	if dispErr != nil {
-		RecordScheduleRun("event_watch", "failed")
+		RecordScheduleRun(scheduleTypeEventWatch, statusFailed)
 		s.recoverFailedEventTrigger(ctx, trig)
 		return dispErr
 	}
-	RecordScheduleRun("event_watch", "completed")
+	RecordScheduleRun(scheduleTypeEventWatch, statusCompleted)
 	return nil
 }
 

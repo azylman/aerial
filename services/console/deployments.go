@@ -98,7 +98,7 @@ func reconciliationMatchesCommit(recon *ReconciliationStatus, depCommit string) 
 
 func attachContainerChips(dep *DeploymentStatus, groupContainers []DockerContainerJSON, gitSync GitSyncStatusResponse, refTime time.Time) {
 	for _, chip := range dep.MatrixJobs {
-		if chip.Type == "container" {
+		if chip.Type == chipTypeContainer {
 			return
 		}
 	}
@@ -147,7 +147,7 @@ func detectRecentContainerSwap(run GitHubRun, shortSHA, currentCommit string, ae
 	}
 	for _, c := range aerialContainers {
 		createdAt := time.Unix(c.Created, 0).UTC()
-		if createdAt.After(run.CreatedAt.Add(-30*time.Second)) || (c.Health != nil && c.Health.Status == "starting") {
+		if createdAt.After(run.CreatedAt.Add(-30*time.Second)) || (c.Health != nil && c.Health.Status == healthStarting) {
 			return true
 		}
 	}
@@ -177,12 +177,12 @@ func evaluateSuccessfulCIRun(
 		ciElapsed = refTime.Sub(run.CreatedAt)
 	}
 	if len(runJobs) > 0 && !hasContainerBuilds {
-		return "live", "completed", "", 100, false
+		return stageLive, statusCompleted, "", 100, false
 	}
 	if hasContainerBuilds && !hasRecentContainerSwap && !isHangarActive && ciElapsed > 120*time.Second {
-		return "failed", "completed", "Hangar reconciliation timed out (>120s)", 55, false
+		return statusFailed, statusCompleted, "Hangar reconciliation timed out (>120s)", 55, false
 	}
-	return "awaiting_pull", "completed", "", 55, false
+	return stageAwaitingPull, statusCompleted, "", 55, false
 }
 
 func evaluateCompletedCIRun(
@@ -194,15 +194,15 @@ func evaluateCompletedCIRun(
 	refTime time.Time,
 ) (stage, ciStatus, commitMsgOverride string, progress int, skip bool) {
 	if refTime.Sub(run.UpdatedAt) >= 30*time.Minute && refTime.Sub(run.CreatedAt) >= 30*time.Minute {
-		return "", "pending", "", 0, false
+		return "", statusPending, "", 0, false
 	}
 	switch run.Conclusion {
-	case "failure", "cancelled":
-		return "failed", "failed", "", 40, false
-	case "success":
+	case conclusionFailure, "cancelled":
+		return statusFailed, statusFailed, "", 40, false
+	case conclusionSuccess:
 		return evaluateSuccessfulCIRun(run, runJobs, shortSHA, currentCommit, gitSync, aerialContainers, refTime)
 	default:
-		return "", "pending", "", 0, false
+		return "", statusPending, "", 0, false
 	}
 }
 
@@ -216,21 +216,21 @@ func evaluateCIRunStage(
 	refTime time.Time,
 ) (stage, ciStatus, commitMsgOverride string, progress int) {
 	switch run.Status {
-	case "queued":
-		return "queued", "pending", "", 15
-	case "in_progress":
+	case statusQueued:
+		return statusQueued, statusPending, "", 15
+	case statusInProgress:
 		progress := 25
 		if len(ciChips) > 0 {
 			doneCount := 0
 			for _, c := range ciChips {
-				if c.Status == "completed" {
+				if c.Status == statusCompleted {
 					doneCount++
 				}
 			}
 			progress = 20 + int(float64(doneCount)/float64(len(ciChips))*30)
 		}
-		return "building", "active", "", progress
-	case "completed":
+		return stageBuilding, statusActive, "", progress
+	case statusCompleted:
 		stage, ciStatus, commitMsgOverride, progress, skip := evaluateCompletedCIRun(
 			run, runJobs, shortSHA, currentCommit, gitSync, aerialContainers, refTime,
 		)
@@ -239,7 +239,7 @@ func evaluateCIRunStage(
 		}
 		return stage, ciStatus, commitMsgOverride, progress
 	default:
-		return "", "pending", "", 0
+		return "", statusPending, "", 0
 	}
 }
 
@@ -284,21 +284,21 @@ func applyCIRunToDeployment(
 		dep.StartedAt = run.CreatedAt
 	}
 
-	hangarStatus := "pending"
+	hangarStatus := statusPending
 	switch {
-	case stage == "awaiting_pull":
-		hangarStatus = "active"
-	case stage == "failed" && commitMsg == "Hangar reconciliation timed out (>120s)":
-		hangarStatus = "failed"
-	case stage == "live":
-		hangarStatus = "completed"
+	case stage == stageAwaitingPull:
+		hangarStatus = statusActive
+	case stage == statusFailed && commitMsg == "Hangar reconciliation timed out (>120s)":
+		hangarStatus = statusFailed
+	case stage == stageLive:
+		hangarStatus = statusCompleted
 	}
 
-	step4Status := "pending"
-	step5Status := "pending"
-	if stage == "live" {
-		step4Status = "completed"
-		step5Status = "completed"
+	step4Status := statusPending
+	step5Status := statusPending
+	if stage == stageLive {
+		step4Status = statusCompleted
+		step5Status = statusCompleted
 	}
 
 	dep.Stage = stage
@@ -350,7 +350,7 @@ func ingestGitHubRun(
 }
 
 func isReconciliationReportable(recon *ReconciliationStatus) bool {
-	return recon != nil && (recon.Active || recon.State == "failed" || recon.State == "pulling" || recon.State == "swapping" || recon.State == "healthy")
+	return recon != nil && (recon.Active || recon.State == statusFailed || recon.State == stagePulling || recon.State == stageSwapping || recon.State == healthHealthy)
 }
 
 func resolveReconciliationSHA(recon *ReconciliationStatus, runs []GitHubRun, currentCommit string) string {
@@ -365,44 +365,44 @@ func resolveReconciliationSHA(recon *ReconciliationStatus, runs []GitHubRun, cur
 
 func applyReconciliationState(dep *DeploymentStatus, recon *ReconciliationStatus) {
 	switch recon.State {
-	case "healthy":
-		if stageRank[dep.Stage] < stageRank["live"] {
-			dep.Stage = "live"
+	case healthHealthy:
+		if stageRank[dep.Stage] < stageRank[stageLive] {
+			dep.Stage = stageLive
 			dep.Progress = 100
 		}
 		if len(dep.Steps) < 5 {
 			dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "completed", "completed")
 		} else {
 			for i := range dep.Steps {
-				dep.Steps[i].Status = "completed"
+				dep.Steps[i].Status = statusCompleted
 			}
 		}
-	case "pulling":
-		if stageRank[dep.Stage] < stageRank["pulling"] {
-			dep.Stage = "pulling"
+	case stagePulling:
+		if stageRank[dep.Stage] < stageRank[stagePulling] {
+			dep.Stage = stagePulling
 			dep.Progress = 55
 		}
 		if len(dep.Steps) < 5 {
 			dep.Steps = buildDeploymentSteps("completed", "completed", "active", "pending", "pending")
 		} else {
-			dep.Steps[1].Status = "completed"
-			dep.Steps[2].Status = "active"
+			dep.Steps[1].Status = statusCompleted
+			dep.Steps[2].Status = statusActive
 		}
-	case "swapping":
-		if stageRank[dep.Stage] < stageRank["swapping"] {
-			dep.Stage = "swapping"
+	case stageSwapping:
+		if stageRank[dep.Stage] < stageRank[stageSwapping] {
+			dep.Stage = stageSwapping
 			dep.Progress = 60
 		}
 		if len(dep.Steps) < 5 {
 			dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "active", "active")
 		} else {
-			dep.Steps[1].Status = "completed"
-			dep.Steps[2].Status = "completed"
-			dep.Steps[3].Status = "active"
-			dep.Steps[4].Status = "active"
+			dep.Steps[1].Status = statusCompleted
+			dep.Steps[2].Status = statusCompleted
+			dep.Steps[3].Status = statusActive
+			dep.Steps[4].Status = statusActive
 		}
-	case "failed":
-		dep.Stage = "failed"
+	case statusFailed:
+		dep.Stage = statusFailed
 		dep.Progress = 55
 		failMsg := "Hangar reconciliation failed"
 		if recon.Error != "" {
@@ -412,7 +412,7 @@ func applyReconciliationState(dep *DeploymentStatus, recon *ReconciliationStatus
 		if len(dep.Steps) < 5 {
 			dep.Steps = buildDeploymentSteps("completed", "completed", "failed", "pending", "pending")
 		} else {
-			dep.Steps[2].Status = "failed"
+			dep.Steps[2].Status = statusFailed
 		}
 	}
 }
@@ -503,9 +503,9 @@ func summarizeContainerGroup(groupContainers []DockerContainerJSON, refTime time
 			minUptimeSec = uptimeSec
 		}
 		switch {
-		case c.Health != nil && c.Health.Status == "starting":
+		case c.Health != nil && c.Health.Status == healthStarting:
 			hasStarting = true
-		case c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy"):
+		case c.State != containerStateRunning || (c.Health != nil && c.Health.Status == healthUnhealthy):
 			hasDegraded = true
 		default:
 			healthyCount++
@@ -526,60 +526,60 @@ func isHangarActiveForGroup(recon *ReconciliationStatus, groupSHA string) bool {
 }
 
 func applyGroupDegradedState(dep *DeploymentStatus) {
-	dep.Stage = "degraded"
+	dep.Stage = statusDegraded
 	dep.Progress = 85
 	if len(dep.Steps) < 5 {
 		dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "completed", "failed")
 	} else {
-		dep.Steps[3].Status = "completed"
-		dep.Steps[4].Status = "failed"
+		dep.Steps[3].Status = statusCompleted
+		dep.Steps[4].Status = statusFailed
 	}
 }
 
 func applyGroupSwappingState(dep *DeploymentStatus, healthyCount, totalCount int) {
-	if stageRank[dep.Stage] < stageRank["swapping"] {
-		dep.Stage = "swapping"
+	if stageRank[dep.Stage] < stageRank[stageSwapping] {
+		dep.Stage = stageSwapping
 		progress := 60
 		if totalCount > 0 {
 			progress = 60 + int(float64(healthyCount)/float64(totalCount)*25)
 		}
 		dep.Progress = progress
 	}
-	swapStatus := "active"
+	swapStatus := statusActive
 	if len(dep.Steps) < 5 {
 		dep.Steps = buildDeploymentSteps("completed", "completed", "completed", swapStatus, "active")
 	} else {
-		dep.Steps[1].Status = "completed"
-		dep.Steps[2].Status = "completed"
+		dep.Steps[1].Status = statusCompleted
+		dep.Steps[2].Status = statusCompleted
 		dep.Steps[3].Status = swapStatus
-		dep.Steps[4].Status = "active"
+		dep.Steps[4].Status = statusActive
 	}
 }
 
 func applyGroupPullingState(dep *DeploymentStatus) {
-	if stageRank[dep.Stage] < stageRank["pulling"] {
-		dep.Stage = "pulling"
+	if stageRank[dep.Stage] < stageRank[stagePulling] {
+		dep.Stage = stagePulling
 		dep.Progress = 55
 	}
 	if len(dep.Steps) < 5 {
 		dep.Steps = buildDeploymentSteps("completed", "completed", "active", "pending", "pending")
 	} else {
-		dep.Steps[1].Status = "completed"
-		dep.Steps[2].Status = "active"
-		dep.Steps[3].Status = "pending"
-		dep.Steps[4].Status = "pending"
+		dep.Steps[1].Status = statusCompleted
+		dep.Steps[2].Status = statusActive
+		dep.Steps[3].Status = statusPending
+		dep.Steps[4].Status = statusPending
 	}
 }
 
 func applyGroupLiveGraceState(dep *DeploymentStatus, groupContainers []DockerContainerJSON, gitSync GitSyncStatusResponse, refTime time.Time) {
-	if dep.Stage == "" || dep.Stage == "awaiting_pull" || stageRank[dep.Stage] <= stageRank["live"] {
-		dep.Stage = "live"
+	if dep.Stage == "" || dep.Stage == stageAwaitingPull || stageRank[dep.Stage] <= stageRank[stageLive] {
+		dep.Stage = stageLive
 		dep.Progress = 100
 		if len(dep.Steps) < 5 {
 			dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "completed", "completed")
 		} else {
 			for i := range dep.Steps {
-				dep.Steps[i].Status = "completed"
+				dep.Steps[i].Status = statusCompleted
 			}
 		}
 		attachContainerChips(dep, groupContainers, gitSync, refTime)
@@ -599,8 +599,8 @@ func applyContainerGroupState(
 	}
 
 	isHangarActive := isHangarActiveForGroup(gitSync.Reconciliation, groupSHA)
-	isHangarSwapping := isHangarActive && gitSync.Reconciliation.State == "swapping"
-	isHangarPulling := isHangarActive && gitSync.Reconciliation.State == "pulling"
+	isHangarSwapping := isHangarActive && gitSync.Reconciliation.State == stageSwapping
+	isHangarPulling := isHangarActive && gitSync.Reconciliation.State == stagePulling
 
 	switch {
 	case hasDegraded:
@@ -624,10 +624,10 @@ func compareDeployments(a, b DeploymentStatus) bool {
 		return rankA > rankB
 	}
 	if a.Stage != b.Stage {
-		if a.Stage == "failed" && b.Stage == "degraded" {
+		if a.Stage == statusFailed && b.Stage == statusDegraded {
 			return true
 		}
-		if a.Stage == "degraded" && b.Stage == "failed" {
+		if a.Stage == statusDegraded && b.Stage == statusFailed {
 			return false
 		}
 	}

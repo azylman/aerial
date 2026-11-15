@@ -15,6 +15,21 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	schemaKeyType = "type"
+)
+
+const (
+	geminiTypeObject     = "OBJECT"
+	geminiTypeString     = "STRING"
+	schemaKeyProperties  = "properties"
+	schemaKeyDescription = "description"
+	schemaKeyRequired    = "required"
+	argDigits            = "digits"
+	argQuery             = "query"
+	endCallToolName      = "end_call"
+)
+
 // ContextConsultClient queries external context (calendar, memory) mid-call.
 type ContextConsultClient interface {
 	ConsultCalendar(ctx context.Context, query, startISO, endISO string) (string, error)
@@ -366,61 +381,61 @@ func BuildGeminiSetupMessage(model, systemPrompt string, opts ...string) GeminiS
 					Name:        "send_dtmf",
 					Description: "Send DTMF touch-tones during the call for interactive phone menus (IVR)",
 					Parameters: map[string]any{
-						"type": "OBJECT",
-						"properties": map[string]any{
-							"digits": map[string]any{
-								"type":        "STRING",
-								"description": "Sequence of DTMF digits 0-9, *, #, and w for 500ms pause",
+						schemaKeyType: geminiTypeObject,
+						schemaKeyProperties: map[string]any{
+							argDigits: map[string]any{
+								schemaKeyType:        geminiTypeString,
+								schemaKeyDescription: "Sequence of DTMF digits 0-9, *, #, and w for 500ms pause",
 							},
 						},
-						"required": []string{"digits"},
+						schemaKeyRequired: []string{argDigits},
 					},
 				},
 				{
 					Name:        "consult_calendar",
 					Description: "Consult the owner's calendar for events, commitments, or schedule availability when the brief allows date/time flexibility or requires checking whether a proposed slot is free. Do not call if the task is strictly limited to a fixed date/time and alternative dates are not permitted.",
 					Parameters: map[string]any{
-						"type": "OBJECT",
-						"properties": map[string]any{
-							"query": map[string]any{
-								"type":        "STRING",
-								"description": "Keywords or topic to search on calendar",
+						schemaKeyType: geminiTypeObject,
+						schemaKeyProperties: map[string]any{
+							argQuery: map[string]any{
+								schemaKeyType:        geminiTypeString,
+								schemaKeyDescription: "Keywords or topic to search on calendar",
 							},
 							"start_iso": map[string]any{
-								"type":        "STRING",
-								"description": "Optional ISO 8601 start timestamp filter",
+								schemaKeyType:        geminiTypeString,
+								schemaKeyDescription: "Optional ISO 8601 start timestamp filter",
 							},
 							"end_iso": map[string]any{
-								"type":        "STRING",
-								"description": "Optional ISO 8601 end timestamp filter",
+								schemaKeyType:        geminiTypeString,
+								schemaKeyDescription: "Optional ISO 8601 end timestamp filter",
 							},
 						},
-						"required": []string{"query"},
+						schemaKeyRequired: []string{argQuery},
 					},
 				},
 				{
 					Name:        "consult_memory",
 					Description: "Consult the owner's long-term memory for dietary restrictions, allergies, preferences, family/household details, or addresses. MUST be called whenever asked about any detail not explicitly provided in the call brief—never assume 'none' without checking.",
 					Parameters: map[string]any{
-						"type": "OBJECT",
-						"properties": map[string]any{
-							"query": map[string]any{
-								"type":        "STRING",
-								"description": "Subject or question to look up in memory",
+						schemaKeyType: geminiTypeObject,
+						schemaKeyProperties: map[string]any{
+							argQuery: map[string]any{
+								schemaKeyType:        geminiTypeString,
+								schemaKeyDescription: "Subject or question to look up in memory",
 							},
 						},
-						"required": []string{"query"},
+						schemaKeyRequired: []string{argQuery},
 					},
 				},
 				{
-					Name:        "end_call",
+					Name:        endCallToolName,
 					Description: "Politely hang up and conclude the phone call once the errand or conversation is done",
 					Parameters: map[string]any{
-						"type": "OBJECT",
-						"properties": map[string]any{
+						schemaKeyType: geminiTypeObject,
+						schemaKeyProperties: map[string]any{
 							"reason": map[string]any{
-								"type":        "STRING",
-								"description": "Short explanation of why the call concluded",
+								schemaKeyType:        geminiTypeString,
+								schemaKeyDescription: "Short explanation of why the call concluded",
 							},
 						},
 					},
@@ -469,7 +484,7 @@ func BuildGeminiAudioChunk(pcm16LEBytes []byte) GeminiRealtimeInput {
 // BuildGeminiClientContent constructs a mid-call steer or instruction turn.
 func BuildGeminiClientContent(text, role string) GeminiClientContentMessage {
 	if role == "" {
-		role = "user"
+		role = roleUser
 	}
 	return GeminiClientContentMessage{
 		ClientContent: GeminiClientContent{

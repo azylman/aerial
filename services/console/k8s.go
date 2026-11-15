@@ -224,13 +224,13 @@ func evaluateDeploymentStatus(dep k8sDeployment, pods []k8sPod, now time.Time) (
 
 	switch {
 	case hasCrashloop:
-		return "unhealthy", uptimeSec
+		return healthUnhealthy, uptimeSec
 	case hasPending || (readyReplicas < replicas):
-		return "starting", uptimeSec
+		return healthStarting, uptimeSec
 	case readyReplicas >= replicas && replicas > 0:
-		return "healthy", uptimeSec
+		return healthHealthy, uptimeSec
 	default:
-		return "unhealthy", uptimeSec
+		return healthUnhealthy, uptimeSec
 	}
 }
 

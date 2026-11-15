@@ -32,6 +32,11 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
+const (
+	effortLow    = "low"
+	effortMedium = "medium"
+)
+
 var (
 	// ErrBuildNotFound indicates a requested VanadisBuild does not exist in PostgreSQL.
 	ErrBuildNotFound = errors.New("vanadis build not found")
@@ -129,17 +134,17 @@ type ExecuteChunkArgs struct {
 
 func capChunkEffort(effort string) string {
 	if strings.EqualFold(strings.TrimSpace(effort), "low") {
-		return "low"
+		return effortLow
 	}
-	return "medium"
+	return effortMedium
 }
 
 func normalizeChunkEffort(effort string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "", "medium", "high":
-		return "medium", nil
-	case "low":
-		return "low", nil
+	case "", effortMedium, "high":
+		return effortMedium, nil
+	case effortLow:
+		return effortLow, nil
 	default:
 		return "", fmt.Errorf("invalid chunk effort %q: must be 'low', 'medium', or 'high'", effort)
 	}
@@ -205,20 +210,20 @@ type VanadisBuildEntry struct {
 // ClassifyBuildQueueState computes the overall queue state ("running", "queued", or "completed") based on buildStatus and child chunks.
 func ClassifyBuildQueueState(buildStatus string, chunks []VanadisChunk) string {
 	switch strings.ToLower(strings.TrimSpace(buildStatus)) {
-	case "completed", "merged", "failed", "cancelled", "canceled":
-		return "completed"
-	case "running":
+	case statusCompleted, statusMerged, statusFailed, statusCancelled, "canceled":
+		return statusCompleted
+	case statusRunning:
 		for _, c := range chunks {
-			if strings.ToLower(strings.TrimSpace(c.Status)) != "pending" {
-				return "running"
+			if strings.ToLower(strings.TrimSpace(c.Status)) != statusPending {
+				return statusRunning
 			}
 		}
 		if len(chunks) > 0 {
-			return "queued"
+			return statusQueued
 		}
-		return "running"
+		return statusRunning
 	default:
-		return "queued"
+		return statusQueued
 	}
 }
 
@@ -228,13 +233,13 @@ func SummarizeBuildEntry(build VanadisBuild, chunks []VanadisChunk) VanadisBuild
 	var completed, running, pending, failed int
 	for _, c := range chunks {
 		switch strings.ToLower(strings.TrimSpace(c.Status)) {
-		case "completed", "merged":
+		case statusCompleted, statusMerged:
 			completed++
-		case "running", "coding", "pr_opened", "deploying":
+		case statusRunning, statusCoding, statusPROpened, statusDeploying:
 			running++
-		case "failed":
+		case statusFailed:
 			failed++
-		case "pending":
+		case statusPending:
 			pending++
 		}
 	}
@@ -296,8 +301,8 @@ func normalizeChunkMode(raw string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", "pr":
 		return "pr", nil
-	case "action":
-		return "action", nil
+	case chunkModeAction:
+		return chunkModeAction, nil
 	default:
 		return "", fmt.Errorf("invalid chunk mode %q: must be 'pr' or 'action'", raw)
 	}
@@ -305,7 +310,7 @@ func normalizeChunkMode(raw string) (string, error) {
 
 func isChunkDoneStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "merged", "completed":
+	case statusMerged, statusCompleted:
 		return true
 	default:
 		return false
@@ -314,7 +319,7 @@ func isChunkDoneStatus(status string) bool {
 
 func isChunkMergedOrDoneStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "merged", "deploying", "completed":
+	case statusMerged, statusDeploying, statusCompleted:
 		return true
 	default:
 		return false
@@ -378,7 +383,7 @@ func execInsertVanadisChunk(ctx context.Context, tx pgx.Tx, buildID string, c Va
 	}
 	if !c.StartedAt.IsZero() {
 		startedAt = c.StartedAt
-	} else if cStatus == "running" || cStatus == "coding" {
+	} else if cStatus == statusRunning || cStatus == statusCoding {
 		startedAt = time.Now().UTC()
 	}
 	if !c.CompletedAt.IsZero() {
@@ -495,13 +500,13 @@ func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), nonNilSlice(c.AcceptanceCriteria)
 		c.DependsOn = nonNilSlice(c.DependsOn)
 		c.Effort = capChunkEffort(c.Effort)
-		if len(rawCIChecks) > 0 && string(rawCIChecks) != "null" && string(rawCIChecks) != "{}" {
+		if len(rawCIChecks) > 0 && string(rawCIChecks) != jsonNull && string(rawCIChecks) != "{}" {
 			var checks map[string]string
 			if err := json.Unmarshal(rawCIChecks, &checks); err == nil {
 				c.CIChecks = checks
 			}
 		}
-		if len(rawRolloutState) > 0 && string(rawRolloutState) != "null" && string(rawRolloutState) != "{}" {
+		if len(rawRolloutState) > 0 && string(rawRolloutState) != jsonNull && string(rawRolloutState) != "{}" {
 			var rs pubsub.PRRolloutState
 			if err := json.Unmarshal(rawRolloutState, &rs); err == nil {
 				c.RolloutState = &rs
@@ -844,7 +849,7 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 	if err != nil {
 		return fmt.Errorf("get build %s: %w", buildID, err)
 	}
-	if build.Status != "running" {
+	if build.Status != statusRunning {
 		log.Printf("[vanadis] build %s has status %q (not running), skipping chunk %d", buildID, build.Status, chunkIndex)
 		return nil
 	}
@@ -857,7 +862,7 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 		return err
 	}
 	chunk := chunks[activeIdx]
-	if chunk.Status == "pr_opened" || isChunkMergedOrDoneStatus(chunk.Status) {
+	if chunk.Status == statusPROpened || isChunkMergedOrDoneStatus(chunk.Status) {
 		log.Printf("[vanadis] chunk %s (index %d) already in status %q, skipping", chunk.ID, chunkIndex, chunk.Status)
 		return nil
 	}
@@ -868,7 +873,7 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 		return fmt.Errorf("update chunk %s status to running: %w", chunk.ID, err)
 	}
 	now := time.Now().UTC()
-	chunks[activeIdx].Status = "running"
+	chunks[activeIdx].Status = statusRunning
 	if chunks[activeIdx].StartedAt.IsZero() {
 		chunks[activeIdx].StartedAt = now
 	}
@@ -997,7 +1002,7 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 func (s *VanadisServer) Routes() http.Handler { return SetupMux(s) }
 
 func (s *VanadisServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	httpkit.WriteJSON(w, http.StatusOK, map[string]string{fieldStatus: "ok"})
 }
 
 func parseCreateBuildChunks(buildID string, now time.Time, rawChunks []CreateChunkInput) ([]VanadisChunk, error) {
@@ -1022,7 +1027,7 @@ func parseCreateBuildChunks(buildID string, now time.Time, rawChunks []CreateChu
 			if repo == "" {
 				return nil, fmt.Errorf("chunk[%d] repo is required for pr mode", i)
 			}
-		case "action":
+		case chunkModeAction:
 			if strings.TrimSpace(c.Repo) != "" {
 				return nil, fmt.Errorf("chunk[%d] action chunk must have empty repo", i)
 			}
@@ -1037,10 +1042,10 @@ func parseCreateBuildChunks(buildID string, now time.Time, rawChunks []CreateChu
 		if err != nil {
 			return nil, fmt.Errorf("chunk[%d] invalid effort: %w", i, err)
 		}
-		status := "pending"
+		status := statusPending
 		var startedAt time.Time
 		if i == 0 {
-			status = "running"
+			status = statusRunning
 			startedAt = now
 		}
 		chunks[i] = VanadisChunk{
@@ -1088,7 +1093,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	now := time.Now().UTC()
 	build := VanadisBuild{
 		ID: buildID, ThreadID: threadID, Tier: tier, Title: firstNonEmpty(strings.TrimSpace(req.Title), objective),
-		Objective: objective, SharedContext: strings.TrimSpace(req.SharedContext), Status: "running", Quiet: req.Quiet, CreatedAt: now, UpdatedAt: now,
+		Objective: objective, SharedContext: strings.TrimSpace(req.SharedContext), Status: statusRunning, Quiet: req.Quiet, CreatedAt: now, UpdatedAt: now,
 	}
 	chunks, err := parseCreateBuildChunks(buildID, now, req.Chunks)
 	if err != nil {
@@ -1110,14 +1115,14 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	}
 	RecordBuildTotal("created")
 	httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
-		"status": "accepted", "build_id": build.ID, "thread_id": build.ThreadID, "tier": build.Tier,
-		"status_message_id": build.StatusMessageID, "chunk_count": len(chunks), "first_chunk_id": chunks[0].ID, "chunks": chunks,
+		fieldStatus: "accepted", fieldBuildID: build.ID, "thread_id": build.ThreadID, "tier": build.Tier,
+		"status_message_id": build.StatusMessageID, "chunk_count": len(chunks), "first_chunk_id": chunks[0].ID, fieldChunks: chunks,
 	})
 }
 
 func isCancellableChunkStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "pending", "running", "coding":
+	case statusPending, statusRunning, statusCoding:
 		return true
 	default:
 		return false
@@ -1136,15 +1141,15 @@ func (s *VanadisServer) cancelBuildChunksAndPrompts(ctx context.Context, buildID
 			}
 		}
 		RecordChunkTotal("cancelled")
-		existingChunks[i].Status = "cancelled"
+		existingChunks[i].Status = statusCancelled
 		existingChunks[i].CompletedAt = now
 		existingChunks[i].UpdatedAt = now
 	}
-	if _, err := s.postBrainJSON(ctx, "/dispatch/cancel", map[string]string{"build_id": buildID}, 4<<10); err != nil {
+	if _, err := s.postBrainJSON(ctx, "/dispatch/cancel", map[string]string{fieldBuildID: buildID}, 4<<10); err != nil {
 		log.Printf("[vanadis] warning: failed cancelling pending brain dispatches for build %s: %v", buildID, err)
 	}
 	if existing != nil {
-		existing.Status = "cancelled"
+		existing.Status = statusCancelled
 		s.syncBuildWidget(ctx, buildID, "")
 	}
 }
@@ -1155,7 +1160,7 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	existing, existingChunks, gErr := s.store.GetBuild(r.Context(), id)
-	if gErr == nil && existing != nil && (existing.Status == "completed" || existing.Status == "failed") {
+	if gErr == nil && existing != nil && (existing.Status == statusCompleted || existing.Status == statusFailed) {
 		writeErr(w, http.StatusConflict, fmt.Sprintf("cannot cancel build in terminal status %q", existing.Status))
 		return
 	}
@@ -1168,7 +1173,7 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 		log.Printf("[vanadis] warning: failed signaling restate cancel for build %s: %v", id, err)
 	}
 	RecordBuildTotal("cancelled")
-	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "build_id": id})
+	httpkit.WriteJSON(w, http.StatusOK, map[string]string{fieldStatus: statusCancelled, fieldBuildID: id})
 }
 
 func (s *VanadisServer) handleBuildRoot(w http.ResponseWriter, r *http.Request, id string) {
@@ -1179,7 +1184,7 @@ func (s *VanadisServer) handleBuildRoot(w http.ResponseWriter, r *http.Request, 
 			writeStoreErr(w, err)
 			return
 		}
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"build": build, "chunks": chunks, "entry": SummarizeBuildEntry(*build, chunks)})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldBuild: build, fieldChunks: chunks, "entry": SummarizeBuildEntry(*build, chunks)})
 	case http.MethodPatch:
 		s.handleUpdateBuild(w, r, id)
 	default:
@@ -1225,7 +1230,7 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 		switch parts[1] {
 		case "cancel":
 			s.handleBuildCancel(w, r, id)
-		case "chunks":
+		case fieldChunks:
 			if hasTrailingSlash && (r.Method == http.MethodGet || r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
 				writeErr(w, http.StatusBadRequest, "chunk_ref is required")
 				return
@@ -1239,7 +1244,7 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 			writeErr(w, http.StatusNotFound, "not found")
 		}
 	case 3:
-		if parts[1] == "chunks" {
+		if parts[1] == fieldChunks {
 			chunkRef := strings.TrimSpace(parts[2])
 			if chunkRef == "" {
 				writeErr(w, http.StatusBadRequest, "chunk_ref is required")
@@ -1277,11 +1282,11 @@ func (s *VanadisServer) handleListBuilds(w http.ResponseWriter, r *http.Request)
 	filtered := make([]VanadisBuildEntry, 0, len(allBuilds))
 	for _, b := range allBuilds {
 		switch b.QueueState {
-		case "running":
+		case statusRunning:
 			running++
-		case "queued":
+		case statusQueued:
 			queued++
-		case "completed":
+		case statusCompleted:
 			completed++
 		}
 		if (qFilter == "" || strings.EqualFold(b.QueueState, qFilter)) && (sFilter == "" || strings.EqualFold(b.QueueState, sFilter) || strings.EqualFold(b.Status, sFilter)) {
@@ -1289,7 +1294,7 @@ func (s *VanadisServer) handleListBuilds(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status": "ok", "total": len(filtered), "running_count": running,
+		fieldStatus: "ok", "total": len(filtered), "running_count": running,
 		"queued_count": queued, "completed_count": completed, "builds": filtered,
 	})
 }

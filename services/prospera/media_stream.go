@@ -14,6 +14,14 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	roleUser           = "user"
+	twilioEventMedia   = "media"
+	twilioEventMark    = "mark"
+	twilioKeyEvent     = "event"
+	twilioKeyStreamSid = "streamSid"
+)
+
 // SessionManagerOption configures CallSessionManager.
 type SessionManagerOption func(*CallSessionManager)
 
@@ -222,14 +230,14 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 	var openingGreeting, voicemailMsg, systemPrompt, language string
 	if call != nil {
 		openingGreeting = call.Brief.Task
-		if call.Direction == "inbound" || openingGreeting == "" {
+		if call.Direction == directionInbound || openingGreeting == "" {
 			openingGreeting = "Answer the incoming call with a warm, brief greeting (such as 'Hi, this is Aerial, how can I help you?') and let the caller state why they are calling."
 		}
 		voicemailMsg = ResolveVoicemailMessage(call.Brief, openingGreeting)
 		mode := ModeConversation
 		if call.Brief.Mode == string(ModeNotify) {
 			mode = ModeNotify
-		} else if call.Direction == "inbound" || call.CallbackOfCallID != "" {
+		} else if call.Direction == directionInbound || call.CallbackOfCallID != "" {
 			mode = ModeCallback
 		}
 		language = call.Brief.Language
@@ -492,11 +500,11 @@ func (s *MediaStreamSession) dispatchTwilioEvent(ctx context.Context, msg twilio
 		if msg.Start != nil {
 			s.handleTwilioStart(ctx, msg.Start.StreamSid, msg.Start.CallSid)
 		}
-	case "media":
+	case twilioEventMedia:
 		if msg.Media != nil && msg.Media.Payload != "" {
 			s.handleInboundTwilioMedia(msg.Media.Payload)
 		}
-	case "mark":
+	case twilioEventMark:
 		if msg.Mark != nil && msg.Mark.Name == "hangup" {
 			s.handleTwilioHangupMark(ctx)
 			return true
@@ -755,7 +763,7 @@ func (s *MediaStreamSession) flushTranscriptBuf(ctx context.Context, role string
 	s.mu.Lock()
 	text := strings.TrimSpace(buf.String())
 	buf.Reset()
-	if role == "user" && text != "" {
+	if role == roleUser && text != "" {
 		s.userTurns++
 		if s.userTurns >= 2 {
 			s.amd.MarkConversationActive()
@@ -811,14 +819,14 @@ func (s *MediaStreamSession) executeToolCall(ctx context.Context, fc GeminiFunct
 		s.toolConsultCalendar(ctx, fc)
 	case "consult_memory":
 		s.toolConsultMemory(ctx, fc)
-	case "end_call":
+	case endCallToolName:
 		s.toolEndCall(fc)
 	}
 }
 
 func (s *MediaStreamSession) toolSendDTMF(fc GeminiFunctionCall) {
 	var digits string
-	if rawDigits, ok := fc.Args["digits"].(string); ok {
+	if rawDigits, ok := fc.Args[argDigits].(string); ok {
 		digits = rawDigits
 	}
 	dtmfBytes, err := SynthesizeDTMFMuLaw(digits)
@@ -830,7 +838,7 @@ func (s *MediaStreamSession) toolSendDTMF(fc GeminiFunctionCall) {
 		return
 	}
 	s.enqueueOutboundUlaw(dtmfBytes)
-	resp := BuildGeminiToolResponse(fc.ID, map[string]any{"status": "sent", "digits": digits})
+	resp := BuildGeminiToolResponse(fc.ID, map[string]any{fieldStatus: "sent", argDigits: digits})
 	if sendErr := s.sendGeminiJSON(resp); sendErr != nil {
 		log.Printf("prospera: send tool response err: %v", sendErr)
 	}
@@ -853,7 +861,7 @@ func (s *MediaStreamSession) sendGeminiToolResult(callID string, res string, err
 
 func (s *MediaStreamSession) toolConsultCalendar(ctx context.Context, fc GeminiFunctionCall) {
 	var q, start, end string
-	if v, ok := fc.Args["query"].(string); ok {
+	if v, ok := fc.Args[argQuery].(string); ok {
 		q = v
 	}
 	if v, ok := fc.Args["start_iso"].(string); ok {
@@ -872,7 +880,7 @@ func (s *MediaStreamSession) toolConsultCalendar(ctx context.Context, fc GeminiF
 
 func (s *MediaStreamSession) toolConsultMemory(ctx context.Context, fc GeminiFunctionCall) {
 	var q string
-	if v, ok := fc.Args["query"].(string); ok {
+	if v, ok := fc.Args[argQuery].(string); ok {
 		q = v
 	}
 	if s.consultClient == nil {
@@ -888,7 +896,7 @@ func (s *MediaStreamSession) toolEndCall(fc GeminiFunctionCall) {
 	if v, ok := fc.Args["reason"].(string); ok {
 		reason = v
 	}
-	resp := BuildGeminiToolResponse(fc.ID, map[string]any{"status": "ending", "reason": reason})
+	resp := BuildGeminiToolResponse(fc.ID, map[string]any{fieldStatus: "ending", "reason": reason})
 	if sendErr := s.sendGeminiJSON(resp); sendErr != nil {
 		log.Printf("prospera: send tool response err: %v", sendErr)
 	}
@@ -1029,9 +1037,9 @@ func (s *MediaStreamSession) sendTwilioMedia(frame []byte) {
 
 	payload := base64.StdEncoding.EncodeToString(frame)
 	msg := map[string]any{
-		"event":     "media",
-		"streamSid": streamSID,
-		"media": map[string]string{
+		twilioKeyEvent:     twilioEventMedia,
+		twilioKeyStreamSid: streamSID,
+		twilioEventMedia: map[string]string{
 			"payload": payload,
 		},
 	}
@@ -1051,8 +1059,8 @@ func (s *MediaStreamSession) sendTwilioClear() {
 	}
 
 	msg := map[string]any{
-		"event":     "clear",
-		"streamSid": streamSID,
+		twilioKeyEvent:     "clear",
+		twilioKeyStreamSid: streamSID,
 	}
 	s.sendTwilioJSON(msg)
 }
@@ -1066,9 +1074,9 @@ func (s *MediaStreamSession) sendTwilioMark(name string) {
 	}
 
 	msg := map[string]any{
-		"event":     "mark",
-		"streamSid": streamSID,
-		"mark": map[string]string{
+		twilioKeyEvent:     twilioEventMark,
+		twilioKeyStreamSid: streamSID,
+		twilioEventMark: map[string]string{
 			"name": name,
 		},
 	}

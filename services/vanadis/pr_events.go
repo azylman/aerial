@@ -287,15 +287,15 @@ func (s *VanadisServer) ProcessPRLifecycleEvent(ctx context.Context, ev pubsub.P
 		return s.handlePRCheckUpdated(ctx, ev, chunk, build)
 	case "deploy_started", "rollout_updated":
 		return s.handlePRRolloutUpdated(ctx, ev, chunk, build)
-	case "ci_failed":
+	case statusCIFailed:
 		return s.handlePRCIFailed(ctx, ev, chunk, build)
-	case "conflict":
+	case statusConflict:
 		return s.handlePRConflict(ctx, ev, chunk, build)
-	case "deploy_failed":
+	case statusDeployFailed:
 		return s.handlePRDeployFailed(ctx, ev, chunk, build)
 	case "sync_failed":
 		return s.handlePRSyncFailed(ctx, ev, chunk, build)
-	case "merged":
+	case statusMerged:
 		return s.handlePRMerged(ctx, chunk, build)
 	case "deploy_success":
 		return s.handlePRDeploySuccess(ctx, chunk, build)
@@ -330,7 +330,7 @@ func (s *VanadisServer) handlePROpened(ctx context.Context, ev pubsub.PRLifecycl
 		Tier:      0,
 		Title:     title,
 		Objective: objective,
-		Status:    "running",
+		Status:    statusRunning,
 		Quiet:     quiet,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -344,9 +344,9 @@ func (s *VanadisServer) handlePROpened(ctx context.Context, ev pubsub.PRLifecycl
 		Repo:         normalizeRepo(ev.Repo),
 		Title:        title,
 		Instructions: objective,
-		Status:       "pr_opened",
+		Status:       statusPROpened,
 		PRNumber:     ev.PRNumber,
-		Effort:       "medium",
+		Effort:       effortMedium,
 		DependsOn:    []string{},
 		StartedAt:    now,
 		CreatedAt:    now,
@@ -393,8 +393,8 @@ func (s *VanadisServer) handlePRCheckUpdated(ctx context.Context, ev pubsub.PRLi
 
 func (s *VanadisServer) handlePRRolloutUpdated(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
 	status := ""
-	if ev.Event == "deploy_started" && chunk.Status != "completed" && chunk.Status != "failed" && chunk.Status != "cancelled" {
-		status = "deploying"
+	if ev.Event == "deploy_started" && chunk.Status != statusCompleted && chunk.Status != statusFailed && chunk.Status != statusCancelled {
+		status = statusDeploying
 	}
 	if ev.RolloutState != nil {
 		if err := s.store.RecordPRRolloutState(ctx, chunk.ID, status, ev.RolloutState); err != nil {
@@ -406,10 +406,10 @@ func (s *VanadisServer) handlePRRolloutUpdated(ctx context.Context, ev pubsub.PR
 }
 
 func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
-	if chunk.Status == "failed" || chunk.Status == "completed" || chunk.Status == "merged" {
+	if chunk.Status == statusFailed || chunk.Status == statusCompleted || chunk.Status == statusMerged {
 		return nil
 	}
-	if build.Status == "failed" || build.Status == "completed" || build.Status == "cancelled" {
+	if build.Status == statusFailed || build.Status == statusCompleted || build.Status == statusCancelled {
 		return nil
 	}
 	if isGateAggregatorCheck(ev.CheckName) {
@@ -435,7 +435,7 @@ func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecy
 		prompt := s.formatCIFailurePrompt(ev, details)
 		if err := s.dispatchBrainDispatch(ctx, BrainDispatchRequest{
 			ID:             ciRemediationDispatchID(chunk.ID, ev.HeadSHA, failCount),
-			Source:         "vanadis",
+			Source:         serviceName,
 			SessionID:      "vanadis-" + chunk.ID,
 			TargetID:       build.ThreadID,
 			VanadisChunkID: chunk.ID,
@@ -472,7 +472,7 @@ func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecy
 }
 
 func (s *VanadisServer) handlePRConflict(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
-	status := "conflict"
+	status := statusConflict
 	banner := "Merge conflict detected"
 	if err := s.store.UpdateChunkBannerAndStatus(ctx, chunk.ID, status, banner); err != nil {
 		log.Printf("[vanadis] warning updating banner for chunk %s on conflict: %v", chunk.ID, err)
@@ -481,7 +481,7 @@ func (s *VanadisServer) handlePRConflict(ctx context.Context, ev pubsub.PRLifecy
 	prompt := s.formatConflictPrompt(ev)
 	return s.dispatchBrainDispatch(ctx, BrainDispatchRequest{
 		ID:             conflictRemediationDispatchID(chunk.ID, ev.HeadSHA),
-		Source:         "vanadis",
+		Source:         serviceName,
 		SessionID:      "vanadis-" + chunk.ID,
 		TargetID:       build.ThreadID,
 		VanadisChunkID: chunk.ID,
@@ -491,7 +491,7 @@ func (s *VanadisServer) handlePRConflict(ctx context.Context, ev pubsub.PRLifecy
 }
 
 func (s *VanadisServer) handlePRDeployFailed(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
-	status := "deploy_failed"
+	status := statusDeployFailed
 	banner := "Deployment failed for " + firstNonEmpty(ev.JobName, "service")
 	if err := s.store.UpdateChunkBannerAndStatus(ctx, chunk.ID, status, banner); err != nil {
 		log.Printf("[vanadis] warning updating banner for chunk %s on deploy failure: %v", chunk.ID, err)
@@ -502,7 +502,7 @@ func (s *VanadisServer) handlePRDeployFailed(ctx context.Context, ev pubsub.PRLi
 }
 
 func (s *VanadisServer) handlePRSyncFailed(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
-	status := "deploy_failed"
+	status := statusDeployFailed
 	banner := "Git file sync failed"
 	if err := s.store.UpdateChunkBannerAndStatus(ctx, chunk.ID, status, banner); err != nil {
 		log.Printf("[vanadis] warning updating banner for chunk %s on sync failure: %v", chunk.ID, err)
@@ -530,7 +530,7 @@ func (s *VanadisServer) handlePRMerged(ctx context.Context, chunk *VanadisChunk,
 func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) error {
 	chunkStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
 	buildStatus := strings.ToLower(strings.TrimSpace(build.Status))
-	if chunkStatus == "failed" || chunkStatus == "cancelled" || buildStatus == "failed" || buildStatus == "cancelled" {
+	if chunkStatus == statusFailed || chunkStatus == statusCancelled || buildStatus == statusFailed || buildStatus == statusCancelled {
 		log.Printf("[vanadis] chunk %s or build %s is in %s/%s; skipping deploy completion", chunk.ID, build.ID, chunk.Status, build.Status)
 		s.syncBuildWidget(ctx, build.ID, "")
 		return nil

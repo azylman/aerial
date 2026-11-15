@@ -16,6 +16,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	cdpParamType   = "type"
+	cdpParamButton = "button"
+)
+
 // TargetInfo represents a CDP target returned from /json/list.
 type TargetInfo struct {
 	ID                   string `json:"id"`
@@ -374,21 +379,21 @@ func (c *CDPClient) ensureStealthSessionLocked(ctx context.Context) error {
 // DispatchTrustedClick performs a realistic 3-step mouse click sequence via CDP.
 func (c *CDPClient) DispatchTrustedClick(ctx context.Context, x, y int) error {
 	if _, err := c.SendCDP(ctx, "Input.dispatchMouseEvent", map[string]any{
-		"type":   "mouseMoved",
-		"x":      x,
-		"y":      y,
-		"button": "none",
+		cdpParamType:   "mouseMoved",
+		"x":            x,
+		"y":            y,
+		cdpParamButton: "none",
 	}); err != nil {
 		return fmt.Errorf("mouseMoved: %w", err)
 	}
 
 	if _, err := c.SendCDP(ctx, "Input.dispatchMouseEvent", map[string]any{
-		"type":       "mousePressed",
-		"x":          x,
-		"y":          y,
-		"button":     "left",
-		"buttons":    1,
-		"clickCount": 1,
+		cdpParamType:   "mousePressed",
+		"x":            x,
+		"y":            y,
+		cdpParamButton: "left",
+		"buttons":      1,
+		"clickCount":   1,
 	}); err != nil {
 		return fmt.Errorf("mousePressed: %w", err)
 	}
@@ -396,12 +401,12 @@ func (c *CDPClient) DispatchTrustedClick(ctx context.Context, x, y int) error {
 	c.waitSettleBestEffort(ctx)
 
 	if _, err := c.SendCDP(ctx, "Input.dispatchMouseEvent", map[string]any{
-		"type":       "mouseReleased",
-		"x":          x,
-		"y":          y,
-		"button":     "left",
-		"buttons":    0,
-		"clickCount": 1,
+		cdpParamType:   "mouseReleased",
+		"x":            x,
+		"y":            y,
+		cdpParamButton: "left",
+		"buttons":      0,
+		"clickCount":   1,
 	}); err != nil {
 		return fmt.Errorf("mouseReleased: %w", err)
 	}

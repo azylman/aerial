@@ -185,10 +185,10 @@ func normCtxAndDB(ctx context.Context, database *sql.DB) (context.Context, error
 
 func normalizeScheduleEffort(effort string) string {
 	switch eff := strings.ToLower(strings.TrimSpace(effort)); eff {
-	case "low", "medium", "high":
+	case effortLow, effortMedium, effortHigh:
 		return eff
 	default:
-		return "medium"
+		return effortMedium
 	}
 }
 
@@ -234,7 +234,7 @@ func InsertHeartbeatSchedule(ctx context.Context, database *sql.DB, h HeartbeatS
 	}
 	effort, err := NormalizeEffort(h.Effort)
 	if err != nil {
-		effort = "low"
+		effort = effortLow
 	}
 	query := `INSERT INTO heartbeat_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 	_, err = database.ExecContext(ctx, query, h.ID, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, effort, h.NextRunAt, h.Enabled, h.CreatedAt)
@@ -342,7 +342,7 @@ func getScheduleByID[T any](ctx context.Context, database *sql.DB, id, label, qu
 
 func GetCronSchedule(ctx context.Context, database *sql.DB, id string) (*CronSchedule, error) {
 	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE id = $1`
-	return getScheduleByID(ctx, database, id, "cron", query, scanCronSchedule)
+	return getScheduleByID(ctx, database, id, scheduleTypeCron, query, scanCronSchedule)
 }
 
 func GetOneShotSchedule(ctx context.Context, database *sql.DB, id string) (*OneShotSchedule, error) {
@@ -352,7 +352,7 @@ func GetOneShotSchedule(ctx context.Context, database *sql.DB, id string) (*OneS
 
 func GetHeartbeatSchedule(ctx context.Context, database *sql.DB, id string) (*HeartbeatSchedule, error) {
 	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low'), last_completed_at FROM heartbeat_schedules WHERE id = $1`
-	return getScheduleByID(ctx, database, id, "heartbeat", query, scanHeartbeatSchedule)
+	return getScheduleByID(ctx, database, id, scheduleTypeHeartbeat, query, scanHeartbeatSchedule)
 }
 
 func execScheduleUpdate(ctx context.Context, database *sql.DB, label, id, query string, args ...any) error {
@@ -385,7 +385,7 @@ func UpdateHeartbeatSchedule(ctx context.Context, database *sql.DB, h HeartbeatS
 	}
 	id := strings.TrimSpace(h.ID)
 	query := `UPDATE heartbeat_schedules SET target_id = $1, title_prefix = $2, cron_expr = $3, prompt = $4, timezone = $5, effort = $6, next_run_at = $7, enabled = $8 WHERE id = $9`
-	return execScheduleUpdate(ctx, database, "heartbeat", id, query, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, effort, h.NextRunAt, h.Enabled, id)
+	return execScheduleUpdate(ctx, database, scheduleTypeHeartbeat, id, query, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, effort, h.NextRunAt, h.Enabled, id)
 }
 
 func UpdateCronSchedule(ctx context.Context, database *sql.DB, id string, effort, cronExpr, prompt, titlePrefix, timezone *string, nextRunAt *time.Time) error {
@@ -494,7 +494,7 @@ func GetDueCronSchedules(ctx context.Context, database *sql.DB, now time.Time) (
 }
 
 func AdvanceCronNextRun(ctx context.Context, database *sql.DB, id string, nextRun time.Time) error {
-	return advanceScheduleNextRun(ctx, database, "cron_schedules", "cron", id, nextRun)
+	return advanceScheduleNextRun(ctx, database, "cron_schedules", scheduleTypeCron, id, nextRun)
 }
 
 func GetDueHeartbeatSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]HeartbeatSchedule, error) {
@@ -503,7 +503,7 @@ func GetDueHeartbeatSchedules(ctx context.Context, database *sql.DB, now time.Ti
 }
 
 func AdvanceHeartbeatNextRun(ctx context.Context, database *sql.DB, id string, nextRun time.Time) error {
-	return advanceScheduleNextRun(ctx, database, "heartbeat_schedules", "heartbeat", id, nextRun)
+	return advanceScheduleNextRun(ctx, database, "heartbeat_schedules", scheduleTypeHeartbeat, id, nextRun)
 }
 
 func AdvanceHeartbeatLastCompletedAt(ctx context.Context, database *sql.DB, id string, completedAt time.Time) error {
@@ -519,7 +519,7 @@ func AdvanceHeartbeatLastCompletedAt(ctx context.Context, database *sql.DB, id s
 	if isSQLiteDBFn(database) {
 		query = `UPDATE heartbeat_schedules SET last_completed_at = MAX(COALESCE(last_completed_at, $1), $1) WHERE id = $2`
 	}
-	return execScheduleUpdate(ctx, database, "heartbeat", id, query, completedAt, id)
+	return execScheduleUpdate(ctx, database, scheduleTypeHeartbeat, id, query, completedAt, id)
 }
 
 func GetDueOneShotSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]OneShotSchedule, error) {
@@ -697,7 +697,7 @@ func ValidateLiveEventTarget(ctx context.Context, database *sql.DB, source, targ
 	}
 	baseURL := strings.TrimSpace(GetVanadisURL())
 	switch source {
-	case "vanadis_build", "vanadis_chunk":
+	case sourceVanadisBuild, sourceVanadisChunk:
 		return validateVanadisTarget(ctx, baseURL, source, target)
 	}
 	return nil
@@ -709,13 +709,13 @@ func validateVanadisTarget(ctx context.Context, baseURL, source, target string) 
 	}
 	pathPrefix := "builds"
 	terminalStates := map[string]bool{
-		"completed": true, "merged": true, "failed": true, "cancelled": true, "canceled": true,
+		statusCompleted: true, statusMerged: true, statusFailed: true, "cancelled": true, "canceled": true,
 	}
 	entityName := "vanadis build"
-	if source == "vanadis_chunk" {
+	if source == sourceVanadisChunk {
 		pathPrefix = "chunks"
 		terminalStates = map[string]bool{
-			"merged": true, "completed": true, "failed": true,
+			statusMerged: true, statusCompleted: true, statusFailed: true,
 		}
 		entityName = "vanadis chunk"
 	}
@@ -748,7 +748,7 @@ func validateVanadisTarget(ctx context.Context, baseURL, source, target string) 
 		return fmt.Errorf("failed to decode %s %q response: %w", entityName, target, err)
 	}
 	var status string
-	if source == "vanadis_chunk" {
+	if source == sourceVanadisChunk {
 		status = firstNonEmpty(res.Chunk.Status, res.Status)
 	} else {
 		status = firstNonEmpty(res.Build.Status, res.Status)
@@ -770,7 +770,7 @@ func InsertEventTrigger(ctx context.Context, database *sql.DB, t EventTrigger) e
 	}
 	effort, err := NormalizeEffort(t.Effort)
 	if err != nil {
-		effort = "medium"
+		effort = effortMedium
 	}
 	query := `INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 	_, err = database.ExecContext(ctx, query, t.ID, t.ChannelID, t.Source, t.Target, t.EventType, t.Prompt, effort, t.CreatedAt, t.Persistent)
@@ -956,7 +956,7 @@ func compute24hRunMetrics(ctx context.Context, database *sql.DB) (int, float64, 
 		}
 		totalRuns++
 		normStatus := strings.ToLower(strings.TrimSpace(status))
-		if normStatus == "completed" || normStatus == "enqueued" || normStatus == "success" {
+		if normStatus == statusCompleted || normStatus == "enqueued" || normStatus == statusSuccess {
 			successCount++
 		}
 	}

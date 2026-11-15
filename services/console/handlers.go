@@ -375,7 +375,7 @@ func handleBuildDetailFetchError(w http.ResponseWriter, r *http.Request, targetU
 	if statusCode == 0 {
 		log.Printf("[Console] Upstream vanadis detail request failed (%s): %v", targetURL, fetchErr)
 		writeJSON(w, r, http.StatusServiceUnavailable, BuildDetailAPIResponse{
-			Status: "degraded",
+			Status: statusDegraded,
 			Error:  "Vanadis service unreachable. Retrying...",
 			Chunks: []VanadisChunkDTO{},
 		})
@@ -391,14 +391,14 @@ func handleBuildDetailFetchError(w http.ResponseWriter, r *http.Request, targetU
 			errMsg = upstreamErrMsg
 		}
 		writeJSON(w, r, statusCode, BuildDetailAPIResponse{
-			Status: "error",
+			Status: statusError,
 			Error:  errMsg,
 			Chunks: []VanadisChunkDTO{},
 		})
 		return
 	}
 	writeJSON(w, r, http.StatusBadGateway, BuildDetailAPIResponse{
-		Status: "error",
+		Status: statusError,
 		Error:  "Failed to decode upstream vanadis response",
 		Chunks: []VanadisChunkDTO{},
 	})
@@ -421,7 +421,7 @@ func buildDetailHandler(vanadisBaseURL string) http.HandlerFunc {
 			}
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			writeJSON(w, r, http.StatusBadRequest, BuildDetailAPIResponse{
-				Status: "error",
+				Status: statusError,
 				Error:  err.Error(),
 				Chunks: []VanadisChunkDTO{},
 			})

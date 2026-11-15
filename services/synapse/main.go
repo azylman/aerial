@@ -24,6 +24,24 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
+const (
+	fieldError               = "error"
+	fieldStatus              = "status"
+	fieldKind                = "kind"
+	labelQueue               = "queue"
+	fieldEvent               = "event"
+	fieldPRNumber            = "pr_number"
+	fieldJobName             = "job_name"
+	errMsgInvalidJSONPayload = "invalid json payload"
+	statusAccepted           = "accepted"
+	eventSyncSuccess         = "sync_success"
+	eventSyncFailed          = "sync_failed"
+	eventDeployStarted       = "deploy_started"
+	eventDeploySuccess       = "deploy_success"
+	eventDeployFailed        = "deploy_failed"
+	eventDeployRollback      = "deploy_rollback"
+)
+
 // RouterServer handles webhook requests and orchestrates secret synchronization.
 type RouterServer struct {
 	cfgSrc                   ConfigSource
@@ -67,7 +85,7 @@ func (s *RouterServer) SetGatewayLatencyFn(fn func() time.Duration) { s.gatewayL
 func readWebhookBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes))
 	if err != nil {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "failed to read body"})
 		return nil, false
 	}
 	return body, true
@@ -79,7 +97,7 @@ func readWebhookJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst
 		return false
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: errMsgInvalidJSONPayload})
 		return false
 	}
 	return true
@@ -145,7 +163,7 @@ func (s *RouterServer) resolveHeadlessPRTargetID(ctx context.Context, repo strin
 
 func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) {
 	if s == nil || s.registry == nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "registry not initialized"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "registry not initialized"})
 		return
 	}
 
@@ -162,53 +180,53 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	req.Title = strings.TrimSpace(req.Title)
 
 	if req.Repo == "" {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "repo cannot be empty"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "repo cannot be empty"})
 		return
 	}
 	if req.PRNumber <= 0 {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "pr_number must be greater than 0"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "pr_number must be greater than 0"})
 		return
 	}
 	if req.Branch == "" {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "branch cannot be empty"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "branch cannot be empty"})
 		return
 	}
 	if req.HeadSHA == "" {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "head_sha cannot be empty"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "head_sha cannot be empty"})
 		return
 	}
 	if rawTargetID == "" || (!IsValidDiscordSnowflake(req.TargetID) && IsHeadlessSessionKey(rawTargetID)) {
 		req.TargetID = s.resolveHeadlessPRTargetID(r.Context(), req.Repo, req.PRNumber)
 	}
 	if !IsValidDiscordSnowflake(req.TargetID) {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "target_id must be a valid Discord snowflake (17-20 digits)"})
 		return
 	}
 
 	targetID, err := s.registry.RegisterPR(r.Context(), req)
 	if err != nil {
 		if errors.Is(err, ErrInvalidTargetID) || strings.Contains(err.Error(), "target_id") {
-			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
+			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "target_id must be a valid Discord snowflake (17-20 digits)"})
 			return
 		}
 		log.Printf("[synapse] Failed to register PR #%d (%s): %v", req.PRNumber, req.Repo, err)
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to register PR"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "Failed to register PR"})
 		return
 	}
 
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":    "registered",
-		"repo":      req.Repo,
-		"pr_number": req.PRNumber,
-		"target_id": targetID,
+		fieldStatus:   "registered",
+		"repo":        req.Repo,
+		fieldPRNumber: req.PRNumber,
+		"target_id":   targetID,
 	})
 }
 
 func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":  "ok",
-		"service": "synapse",
-		"time":    time.Now().UTC().Format(time.RFC3339),
+		fieldStatus: "ok",
+		"service":   "synapse",
+		"time":      time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
@@ -244,13 +262,13 @@ func deployEventIdempotencyKey(evt DeployEvent, originPrefix string) string {
 func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *http.Request, evt DeployEvent, originPrefix string) {
 	s.enrichDeployEventPRAndTarget(r.Context(), &evt)
 	logPrefix := firstNonEmpty(originPrefix, "deploy")
-	if (evt.Event == "deploy_started" || evt.Event == "deploy_success") && s.shouldTreatDeploySuccessAsSync(r.Context(), evt) {
+	if (evt.Event == eventDeployStarted || evt.Event == eventDeploySuccess) && s.shouldTreatDeploySuccessAsSync(r.Context(), evt) {
 		log.Printf("[synapse] [%s] ignoring pre-image %s for %s on %s#%d (waiting for image build)", logPrefix, evt.Event, evt.JobName, evt.Repo, evt.PRNumber)
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-			"status":    "ignored",
-			"event":     evt.Event,
-			"job_name":  evt.JobName,
-			"pr_number": evt.PRNumber,
+			fieldStatus:   "ignored",
+			fieldEvent:    evt.Event,
+			fieldJobName:  evt.JobName,
+			fieldPRNumber: evt.PRNumber,
 		})
 		return
 	}
@@ -258,13 +276,13 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 		idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
 		if err := s.publishJetStreamJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
 			log.Printf("[synapse] [%s] ERROR: failed to publish job to jetstream: %v", logPrefix, err)
-			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to persist webhook"})
 			return
 		}
 		httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
-			"status":   "accepted",
-			"event":    evt.Event,
-			"job_name": evt.JobName,
+			fieldStatus:  statusAccepted,
+			fieldEvent:   evt.Event,
+			fieldJobName: evt.JobName,
 		})
 		return
 	}
@@ -274,11 +292,11 @@ func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *htt
 		log.Printf("[synapse] [%s] error processing event: %v", logPrefix, err)
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":    "accepted",
-		"event":     processed.Event,
-		"job_name":  processed.JobName,
-		"pr_number": processed.PRNumber,
-		"target_id": processed.TargetID,
+		fieldStatus:   statusAccepted,
+		fieldEvent:    processed.Event,
+		fieldJobName:  processed.JobName,
+		fieldPRNumber: processed.PRNumber,
+		"target_id":   processed.TargetID,
 	})
 }
 
@@ -435,13 +453,13 @@ func (s *RouterServer) resolveDeployEventTargetID(ctx context.Context, evt *Depl
 func (s *RouterServer) enrichDeployEventPRAndTarget(ctx context.Context, evt *DeployEvent) {
 	s.resolveDeployEventPRNumber(ctx, evt)
 	s.resolveDeployEventTargetID(ctx, evt)
-	if evt.TargetID == "" && (evt.Event == "deploy_failed" || evt.Event == "deploy_rollback" || evt.Event == "sync_failed") {
+	if evt.TargetID == "" && (evt.Event == eventDeployFailed || evt.Event == eventDeployRollback || evt.Event == eventSyncFailed) {
 		evt.TargetID = strings.TrimSpace(s.cfgSrc.Current().SystemChannelID)
 	}
 }
 
 func (s *RouterServer) handleDeployStartedRegistry(ctx context.Context, evt DeployEvent) bool {
-	if s.registry == nil || evt.PRNumber == 0 || evt.Event != "deploy_started" || evt.JobName == "" {
+	if s.registry == nil || evt.PRNumber == 0 || evt.Event != eventDeployStarted || evt.JobName == "" {
 		return false
 	}
 	if s.shouldTreatDeploySuccessAsSync(ctx, evt) {
@@ -463,7 +481,7 @@ func (s *RouterServer) handleDeployStartedRegistry(ctx context.Context, evt Depl
 }
 
 func (s *RouterServer) recordDeploySyncExpectedJobs(ctx context.Context, evt DeployEvent) bool {
-	if evt.Event != "sync_success" || evt.PRNumber == 0 {
+	if evt.Event != eventSyncSuccess || evt.PRNumber == 0 {
 		return false
 	}
 	syncHasExpected := len(dedupeTrimmedStrings(evt.ExpectedJobs)) > 0
@@ -495,7 +513,7 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 		targetID = firstNonEmpty(targetID, s.cfgSrc.Current().SystemChannelID)
 	}
 	actionDesc, fixDesc := "Deployment failed", "deployment failure"
-	if evt.Event == "deploy_rollback" {
+	if evt.Event == eventDeployRollback {
 		actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
 	}
 	dmMsg := fmt.Sprintf("💥 %s%s for %s. Following up...", prefix, actionDesc, evt.JobName)
@@ -547,7 +565,7 @@ func (s *RouterServer) isWaitingForImageBuild(ctx context.Context, repo string, 
 		return false
 	}
 	normStatus := strings.ToLower(strings.TrimSpace(status))
-	if normStatus != "open" && normStatus != "merged" && normStatus != "synced" {
+	if normStatus != prOpen && normStatus != prMerged && normStatus != "synced" {
 		return false
 	}
 	var meta map[string]any
@@ -566,14 +584,14 @@ func (s *RouterServer) isWaitingForImageBuild(ctx context.Context, repo string, 
 }
 
 func (s *RouterServer) shouldTreatDeploySuccessAsSync(ctx context.Context, evt DeployEvent) bool {
-	return evt.SourceKind == "Kustomization" && s.isWaitingForImageBuild(ctx, evt.Repo, evt.PRNumber)
+	return evt.SourceKind == kindKustomization && s.isWaitingForImageBuild(ctx, evt.Repo, evt.PRNumber)
 }
 
 // isDeployEventOwnedByWatcher reports whether evt concerns a PR whose rollout completion is tracked by the
 // Kustomization watcher: such PRs ignore Kustomization alerts and never complete from a deploy_success
 // event, since live Kustomization status is the only source of truth for them.
 func (s *RouterServer) isDeployEventOwnedByWatcher(ctx context.Context, evt DeployEvent) bool {
-	if s.registry == nil || evt.PRNumber <= 0 || (evt.SourceKind != "Kustomization" && evt.Event != "deploy_success") {
+	if s.registry == nil || evt.PRNumber <= 0 || (evt.SourceKind != kindKustomization && evt.Event != eventDeploySuccess) {
 		return false
 	}
 	tracked, err := s.registry.HasKustomizationRequests(ctx, evt.Repo, evt.PRNumber)
@@ -611,10 +629,10 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 
 	prefix := formatDirectMessagePrefix(evt.PRNumber, evt.Repo)
 	switch evt.Event {
-	case "deploy_started":
+	case eventDeployStarted:
 		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_started", "deploying")
 		return &evt, nil
-	case "deploy_success":
+	case eventDeploySuccess:
 		if s.shouldTreatDeploySuccessAsSync(ctx, evt) {
 			s.handleDeploySyncSuccess(ctx, evt, true)
 			return &evt, nil
@@ -631,12 +649,12 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 			return &evt, nil
 		}
 		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
-	case "deploy_rollback", "deploy_failed":
+	case eventDeployRollback, eventDeployFailed:
 		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
-	case "sync_success":
+	case eventSyncSuccess:
 		s.handleDeploySyncSuccess(ctx, evt, syncHasExpected)
 		return &evt, nil
-	case "sync_failed":
+	case eventSyncFailed:
 		return &evt, s.handleDeploySyncFailed(ctx, evt, prefix)
 	}
 	return &evt, nil

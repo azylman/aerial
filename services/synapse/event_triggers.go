@@ -41,14 +41,14 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 
 	var req EventWebhookRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: errMsgInvalidJSONPayload})
 		return
 	}
 	source := strings.ToLower(strings.TrimSpace(req.Source))
 	eventType := strings.ToLower(strings.TrimSpace(req.EventType))
 	targets := dedupeTrimmedStrings(append([]string{req.Target}, req.Targets...))
 	if source == "" || eventType == "" || len(targets) == 0 {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "missing required fields"})
 		return
 	}
 
@@ -61,16 +61,16 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 	}
 
 	if s == nil || s.bus == nil {
-		httpkit.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event bus not initialized"})
+		httpkit.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{fieldError: "event bus not initialized"})
 		return
 	}
 
 	if err := s.evaluateEventTriggers(r.Context(), source, eventType, targets, contextHeader); err != nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to evaluate triggers"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to evaluate triggers"})
 		return
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":     "accepted",
+		fieldStatus:  statusAccepted,
 		"source":     source,
 		"targets":    targets,
 		"event_type": eventType,
@@ -89,7 +89,7 @@ func sanitizeSubjectToken(token string) string {
 	}
 	clean := sb.String()
 	if clean == "" {
-		return "unknown"
+		return unknownLabel
 	}
 	return clean
 }
@@ -134,7 +134,7 @@ func (s *RouterServer) evaluateEventTriggers(ctx context.Context, source, eventT
 }
 
 func (s *RouterServer) evaluateFluxEventTriggers(ctx context.Context, evt DeployEvent) {
-	if evt.Event != "sync_success" && evt.Event != "sync_failed" {
+	if evt.Event != eventSyncSuccess && evt.Event != eventSyncFailed {
 		return
 	}
 	repo := normalizeRepo(evt.Repo)
@@ -170,18 +170,18 @@ func resolveGitHubTriggerEventType(res *ResolvedGitHubEvent) string {
 		return ""
 	}
 	switch res.Event {
-	case "pull_request":
+	case ghEventPullRequest:
 		// GitHub generates test merge commit SHAs for unmerged PRs; require res.Merged to prevent false pr_merged triggers.
-		if res.Action == "closed" && res.Merged {
+		if res.Action == ghActionClosed && res.Merged {
 			return "pr_merged"
 		}
-	case "check_run", "workflow_run":
-		if res.Action == "completed" {
+	case ghEventCheckRun, ghEventWorkflowRun:
+		if res.Action == ghStatusCompleted {
 			switch res.Conclusion {
-			case "success":
+			case conclusionSuccess:
 				return "ci_passed"
-			case "failure", "timed_out":
-				return "ci_failed"
+			case conclusionFailure, conclusionTimedOut:
+				return prCIFailed
 			}
 		}
 	}
@@ -203,7 +203,7 @@ func (s *RouterServer) evaluateGitHubEventTriggers(ctx context.Context, res *Res
 	}
 
 	branch := strings.TrimPrefix(strings.TrimSpace(res.Branch), "refs/heads/")
-	if branch == "" && res.Event == "check_run" {
+	if branch == "" && res.Event == ghEventCheckRun {
 		branch = extractCheckRunHeadBranch(body)
 	}
 

@@ -19,6 +19,20 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
+const (
+	prCIFailed          = "ci_failed"
+	prClosedUnmerged    = "closed_unmerged"
+	prMerged            = "merged"
+	prOpen              = "open"
+	statusDeploying     = "deploying"
+	ghEventPullRequest  = "pull_request"
+	ghEventCheckRun     = "check_run"
+	ghEventWorkflowRun  = "workflow_run"
+	ghActionSynchronize = "synchronize"
+	ghActionOpened      = "opened"
+	ghActionClosed      = "closed"
+)
+
 // GitHubIssueComment represents a comment on a GitHub issue or pull request.
 type GitHubIssueComment struct {
 	ID   int64  `json:"id"`
@@ -198,11 +212,11 @@ func (s *RouterServer) handleStaleOpenPR(ctx context.Context, repo string, prNum
 		log.Printf("[synapse] [registry] warning closing stale PR #%d with missing head ref: %v", prNumber, closeErr)
 	} else {
 		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        "closed_unmerged",
+			Event:        prClosedUnmerged,
 			Repo:         repo,
 			PRNumber:     prNumber,
 			TargetID:     targetID,
-			Status:       "closed_unmerged",
+			Status:       prClosedUnmerged,
 			RolloutState: s.loadPRRolloutState(ctx, repo, prNumber),
 			OccurredAt:   time.Now().UTC(),
 		})
@@ -306,7 +320,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	}
 	s.recordDeploySuccessDispatched(repo, "git-merge", headSHA, prNum)
 	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        "deploy_success",
+		Event:        eventDeploySuccess,
 		Repo:         repo,
 		PRNumber:     prNum,
 		HeadSHA:      headSHA,
@@ -322,7 +336,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 
 func (s *RouterServer) shouldDispatchWorkflowRunImages(ctx context.Context, repo string, headBranch, conclusion string, prNum int) bool {
 	cfg := s.cfgSrc.Current()
-	if s.dispatcher == nil || conclusion != "success" || (headBranch != "main" && !strings.HasPrefix(headBranch, "refs/heads/main")) {
+	if s.dispatcher == nil || conclusion != conclusionSuccess || (headBranch != "main" && !strings.HasPrefix(headBranch, "refs/heads/main")) {
 		return false
 	}
 	if prNum > 0 {
@@ -354,12 +368,12 @@ func (s *RouterServer) startWorkflowRunPRDeploying(ctx context.Context, repo str
 	}
 	if tID != "" {
 		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        "deploy_started",
+			Event:        eventDeployStarted,
 			Repo:         repo,
 			PRNumber:     prNum,
 			HeadSHA:      headSHA,
 			TargetID:     firstNonEmpty(targetID, tID),
-			Status:       "deploying",
+			Status:       statusDeploying,
 			RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
 			Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
 			OccurredAt:   time.Now().UTC(),
@@ -481,14 +495,14 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 	}
 
 	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        "deploy_failed",
+		Event:        eventDeployFailed,
 		Repo:         repo,
 		PRNumber:     prNum,
 		Branch:       branch,
 		HeadSHA:      headSHA,
 		MergeSHA:     mergeSHA,
 		TargetID:     targetID,
-		Status:       "deploy_failed",
+		Status:       eventDeployFailed,
 		Details:      errMsg,
 		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
 		Quiet:        isDependabotBranch(branch) || s.isDependabotPRNumber(ctx, repo, prNum),
@@ -614,7 +628,7 @@ func hasExecutedBuildStep(steps []GitHubWorkflowJobStep) bool {
 			strings.Contains(nameLower, "docker push") || strings.Contains(nameLower, "push image") || strings.Contains(nameLower, "push docker")
 		if isPush {
 			hasPushStep = true
-			if step.Conclusion == "success" {
+			if step.Conclusion == conclusionSuccess {
 				return true
 			}
 		}
@@ -628,7 +642,7 @@ func hasSkippedImagePromotionJob(jobs []GitHubWorkflowJobItem) bool {
 	for _, job := range jobs {
 		nameLower := strings.ToLower(job.Name)
 		if strings.Contains(nameLower, "promote") && strings.Contains(nameLower, "latest") {
-			if job.Status == "completed" && job.Conclusion != "success" {
+			if job.Status == ghStatusCompleted && job.Conclusion != conclusionSuccess {
 				return true
 			}
 		}
@@ -718,7 +732,7 @@ func extractPRNumberFromCommitMessage(msg string) int {
 func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-Github-Event")
 	if strings.TrimSpace(event) == "" {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "missing X-GitHub-Event header"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "missing X-GitHub-Event header"})
 		return
 	}
 	delivery := r.Header.Get("X-Github-Delivery")
@@ -736,19 +750,19 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 	}
 	if s.bus == nil {
 		log.Printf("[synapse] [github] ERROR: event bus not initialized")
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "event bus not initialized"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "event bus not initialized"})
 		return
 	}
 	if err := s.publishJetStreamJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body}); err != nil {
 		log.Printf("[synapse] [github] ERROR: failed to publish job to jetstream: %v", err)
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to persist webhook"})
 		return
 	}
 
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":   "accepted",
-		"event":    event,
-		"delivery": delivery,
+		fieldStatus: statusAccepted,
+		fieldEvent:  event,
+		"delivery":  delivery,
 	})
 }
 
@@ -825,15 +839,15 @@ func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *Res
 	}
 	s.populateMissingBranch(ctx, res)
 	return s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        "ci_failed",
+		Event:        prCIFailed,
 		Repo:         res.Repo,
 		PRNumber:     res.PRNumber,
 		Branch:       res.Branch,
 		HeadSHA:      res.HeadSHA,
 		TargetID:     res.TargetID,
-		Status:       "ci_failed",
+		Status:       prCIFailed,
 		CheckName:    res.CheckName,
-		CheckState:   "failed",
+		CheckState:   statusFailed,
 		CheckURL:     checkURL,
 		Details:      details,
 		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
@@ -864,7 +878,7 @@ func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *Resolv
 	emitAdditional := false
 	if prNum > 0 && res.PRNumber == 0 {
 		res.PRNumber = prNum
-		if res.Event == "check_run" && !isGateAggregatorCheck(res.CheckName) {
+		if res.Event == ghEventCheckRun && !isGateAggregatorCheck(res.CheckName) {
 			if !isRoboRevCheck(res.CheckName) {
 				s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 			}
@@ -882,7 +896,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 		return nil
 	}
 	emitAdditional := false
-	if res.Event == "check_run" && res.PRNumber > 0 && res.HeadSHA != "" && !isGateAggregatorCheck(res.CheckName) {
+	if res.Event == ghEventCheckRun && res.PRNumber > 0 && res.HeadSHA != "" && !isGateAggregatorCheck(res.CheckName) {
 		if !isRoboRevCheck(res.CheckName) {
 			s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 		}
@@ -924,14 +938,14 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        "merged",
+			Event:        prMerged,
 			Repo:         res.Repo,
 			PRNumber:     res.PRNumber,
 			Branch:       res.Branch,
 			HeadSHA:      res.HeadSHA,
 			MergeSHA:     res.MergeSHA,
 			TargetID:     res.TargetID,
-			Status:       "merged",
+			Status:       prMerged,
 			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
 			Quiet:        isDependabotBranch(res.Branch),
 			OccurredAt:   time.Now().UTC(),
@@ -944,13 +958,13 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
 	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        "closed_unmerged",
+		Event:        prClosedUnmerged,
 		Repo:         res.Repo,
 		PRNumber:     res.PRNumber,
 		Branch:       res.Branch,
 		HeadSHA:      res.HeadSHA,
 		TargetID:     res.TargetID,
-		Status:       "closed_unmerged",
+		Status:       prClosedUnmerged,
 		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
 		Quiet:        isDependabotBranch(res.Branch),
 		OccurredAt:   time.Now().UTC(),
@@ -995,7 +1009,7 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 	if IsHeadlessSessionKey(targetID) {
 		targetID = s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
 	}
-	if shouldRegister && s.registry != nil && targetID != "" && (res.Action != "closed" || pr.Merged) {
+	if shouldRegister && s.registry != nil && targetID != "" && (res.Action != ghActionClosed || pr.Merged) {
 		// Self-heal DB registration only; initial Discord widget delivery on opened is owned by Brain's /internal/pr/register to avoid duplicate message creation races.
 		resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, pr.Title, targetID)
 		if err != nil {
@@ -1004,9 +1018,9 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 		res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, targetID)
 	}
 	switch res.Action {
-	case "closed":
+	case ghActionClosed:
 		return s.handlePRClosedAction(ctx, res, pr.Merged)
-	case "synchronize":
+	case ghActionSynchronize:
 		s.clearFailedCISHA(res.Repo, res.PRNumber)
 		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
@@ -1017,14 +1031,14 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        "synchronize",
+			Event:        ghActionSynchronize,
 			Repo:         res.Repo,
 			PRNumber:     res.PRNumber,
 			Branch:       res.Branch,
 			HeadSHA:      res.HeadSHA,
 			Title:        pr.Title,
 			TargetID:     res.TargetID,
-			Status:       "open",
+			Status:       prOpen,
 			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
 			OccurredAt:   time.Now().UTC(),
 		})
@@ -1045,7 +1059,7 @@ func isDependabotPR(p GitHubPullRequestPayload) bool {
 }
 
 func (s *RouterServer) handleDependabotPROpen(ctx context.Context, res *ResolvedGitHubEvent, p GitHubPullRequestPayload) {
-	if !isDependabotPR(p) || (res.Action != "opened" && res.Action != "reopened" && res.Action != "synchronize") {
+	if !isDependabotPR(p) || (res.Action != ghActionOpened && res.Action != "reopened" && res.Action != ghActionSynchronize) {
 		return
 	}
 	if s.registry == nil || res.PRNumber <= 0 {
@@ -1088,7 +1102,7 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 
 	s.handleDependabotPROpen(ctx, res, p)
 
-	if res.Action == "synchronize" && res.PRNumber > 0 {
+	if res.Action == ghActionSynchronize && res.PRNumber > 0 {
 		s.clearFailedCISHA(res.Repo, res.PRNumber)
 	}
 
@@ -1101,16 +1115,16 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 			return nil, err
 		}
 	}
-	if res.Action == "opened" && res.PRNumber > 0 {
+	if res.Action == ghActionOpened && res.PRNumber > 0 {
 		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        "opened",
+			Event:        ghActionOpened,
 			Repo:         res.Repo,
 			PRNumber:     res.PRNumber,
 			Branch:       res.Branch,
 			HeadSHA:      res.HeadSHA,
 			Title:        p.PullRequest.Title,
 			TargetID:     res.TargetID,
-			Status:       "open",
+			Status:       prOpen,
 			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
 			Quiet:        isDependabotBranch(res.Branch),
 			OccurredAt:   time.Now().UTC(),
@@ -1130,10 +1144,10 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 		return
 	}
 	checkState := classifyCheckState(res.Status, res.Conclusion)
-	if checkState == "" || checkState == "failed" {
+	if checkState == "" || checkState == statusFailed {
 		return
 	}
-	if checkState == "pending" {
+	if checkState == statusPending {
 		s.clearActiveFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
 	}
 	updated, err := s.registry.RecordPRCheckStatus(ctx, res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, checkState)
@@ -1148,7 +1162,7 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 		Branch:       res.Branch,
 		HeadSHA:      res.HeadSHA,
 		TargetID:     res.TargetID,
-		Status:       "open",
+		Status:       prOpen,
 		CheckName:    res.CheckName,
 		CheckState:   checkState,
 		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
@@ -1173,7 +1187,7 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	log.Printf("[synapse] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
 		res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
-	if p.Action == "completed" && res.Conclusion == "success" && res.PRNumber > 0 && s.registry != nil && s.canRecoverCheckSuccess(ctx, res.Repo, res.PRNumber, res.CheckName, res.HeadSHA) {
+	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && res.PRNumber > 0 && s.registry != nil && s.canRecoverCheckSuccess(ctx, res.Repo, res.PRNumber, res.CheckName, res.HeadSHA) {
 		s.clearFailedCISHA(res.Repo, res.PRNumber)
 		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
@@ -1192,7 +1206,7 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	if err := s.handleCIFailureTransition(ctx, res, details, checkURL); err != nil {
 		return nil, err
 	}
-	if p.Action == "completed" && res.Conclusion == "success" && isGateAggregatorCheck(res.CheckName) && res.PRNumber > 0 {
+	if p.Action == ghStatusCompleted && res.Conclusion == conclusionSuccess && isGateAggregatorCheck(res.CheckName) && res.PRNumber > 0 {
 		if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
 			log.Printf("[synapse] [github] error checking open pr conflicts on gate success for %s: %v", res.Repo, err)
 		}
@@ -1220,7 +1234,7 @@ func (s *RouterServer) processGitHubWorkflowRunEvent(ctx context.Context, delive
 	if err := s.handleCIFailureTransition(ctx, res, details, strings.TrimSpace(p.WorkflowRun.HTMLURL)); err != nil {
 		return nil, err
 	}
-	if p.Action == "completed" && p.WorkflowRun.Status == "completed" {
+	if p.Action == ghStatusCompleted && p.WorkflowRun.Status == ghStatusCompleted {
 		if err := s.dispatchWorkflowRunImages(ctx, res.Repo, p.WorkflowRun.ID, p.WorkflowRun.HeadBranch, p.WorkflowRun.Conclusion, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
 			return nil, err
 		}
@@ -1249,14 +1263,14 @@ func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *Resolv
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        "merged",
+			Event:        prMerged,
 			Repo:         res.Repo,
 			PRNumber:     res.PRNumber,
 			Branch:       res.Branch,
 			HeadSHA:      res.HeadSHA,
 			MergeSHA:     res.MergeSHA,
 			TargetID:     res.TargetID,
-			Status:       "merged",
+			Status:       prMerged,
 			RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
 			Quiet:        isDependabotBranch(res.Branch),
 			OccurredAt:   time.Now().UTC(),
@@ -1319,11 +1333,11 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 	switch event {
 	case "ping":
 		return s.processGitHubPingEvent(delivery, body, res)
-	case "pull_request":
+	case ghEventPullRequest:
 		return s.processGitHubPullRequestEvent(ctx, delivery, body, res)
-	case "check_run":
+	case ghEventCheckRun:
 		return s.processGitHubCheckRunEvent(ctx, delivery, body, res)
-	case "workflow_run":
+	case ghEventWorkflowRun:
 		return s.processGitHubWorkflowRunEvent(ctx, delivery, body, res)
 	case "push":
 		return s.processGitHubPushEvent(ctx, body, res)
@@ -1396,7 +1410,7 @@ func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha str
 	}
 	selected := prs[0]
 	for _, item := range prs[1:] {
-		if (selected.State != "closed" && item.State == "closed") || (selected.State == item.State && item.Number > selected.Number) {
+		if (selected.State != ghActionClosed && item.State == ghActionClosed) || (selected.State == item.State && item.Number > selected.Number) {
 			selected = item
 		}
 	}
@@ -1425,7 +1439,7 @@ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string
 
 	var rawImages []string
 	for _, job := range jobsResp.Jobs {
-		if job.Status != "completed" || job.Conclusion != "success" || !hasExecutedBuildStep(job.Steps) {
+		if job.Status != ghStatusCompleted || job.Conclusion != conclusionSuccess || !hasExecutedBuildStep(job.Steps) {
 			continue
 		}
 		if service, ok := buildJobService(job.Name); ok {

@@ -218,7 +218,7 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 		RecordFactStored("updated")
 		RecordOperation("store", "success", time.Since(start).Seconds())
 		return MemoryStoreOutput{
-			Status:  "success",
+			Status:  statusSuccess,
 			FactID:  args.SupersedesID,
 			Action:  "updated",
 			Message: "Fact updated successfully.",
@@ -236,7 +236,7 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 		RecordFactStored("reinforced")
 		RecordOperation("store", "success", time.Since(start).Seconds())
 		return MemoryStoreOutput{
-			Status:  "success",
+			Status:  statusSuccess,
 			FactID:  dup.ID,
 			Action:  "reinforced",
 			Message: "Fact reinforced successfully.",
@@ -253,7 +253,7 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 	RecordFactStored("inserted")
 	RecordOperation("store", "success", time.Since(start).Seconds())
 	return MemoryStoreOutput{
-		Status:  "success",
+		Status:  statusSuccess,
 		FactID:  id,
 		Action:  "inserted",
 		Message: "Fact inserted successfully.",
@@ -280,7 +280,7 @@ func (h *ToolHandler) MemoryForget(ctx context.Context, args MemoryForgetArgs) (
 	RecordFactStored("deleted")
 	RecordOperation("forget", "success", time.Since(start).Seconds())
 	return MemoryForgetOutput{
-		Status:  "success",
+		Status:  statusSuccess,
 		FactID:  args.FactID,
 		Message: "Fact deleted successfully.",
 	}, nil

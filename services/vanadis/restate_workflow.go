@@ -210,12 +210,12 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 
 	priorState, err := rt.GetState()
 	if err != nil {
-		return ReconcileBuildResult{BuildID: buildID, Status: "failed", Error: err.Error()}, err
+		return ReconcileBuildResult{BuildID: buildID, Status: statusFailed, Error: err.Error()}, err
 	}
 
 	priorLaunched, err := rt.GetLaunched()
 	if err != nil {
-		return ReconcileBuildResult{BuildID: buildID, Status: "failed", Error: err.Error()}, err
+		return ReconcileBuildResult{BuildID: buildID, Status: statusFailed, Error: err.Error()}, err
 	}
 
 	if priorState != nil && len(priorState.Launched) > 0 {
@@ -238,10 +238,10 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 		return executeReconcileBuild(ctx, b.srv, buildID, priorLaunched)
 	})
 	if err != nil {
-		return ReconcileBuildResult{BuildID: buildID, Status: "failed", Error: err.Error()}, err
+		return ReconcileBuildResult{BuildID: buildID, Status: statusFailed, Error: err.Error()}, err
 	}
 
-	if stepOut.BuildStatus == "completed" || stepOut.BuildStatus == "failed" || stepOut.BuildStatus == "cancelled" || stepOut.BuildStatus == "not_found" {
+	if stepOut.BuildStatus == statusCompleted || stepOut.BuildStatus == statusFailed || stepOut.BuildStatus == statusCancelled || stepOut.BuildStatus == statusNotFound {
 		rt.ClearState()
 	} else {
 		if stepOut.State != nil {
@@ -272,7 +272,7 @@ func executeBuildMutation(ctx context.Context, srv *VanadisServer, buildID strin
 		return applyMutationActionCompleted(ctx, srv, req.ChunkID)
 	case "chunk_failed":
 		return applyMutationChunkFailed(ctx, srv, req.ChunkID, req.Reason)
-	case "cancelled":
+	case statusCancelled:
 		return applyMutationCancelled(ctx, srv, buildID)
 	default:
 		return fmt.Errorf("unsupported mutation action: %q", req.Action)
@@ -349,7 +349,7 @@ func applyMutationCancelled(ctx context.Context, srv *VanadisServer, buildID str
 		}
 		return fmt.Errorf("get build %s on cancel: %w", buildID, err)
 	}
-	if existing.Status == "completed" || existing.Status == "failed" {
+	if existing.Status == statusCompleted || existing.Status == statusFailed {
 		return nil
 	}
 	if err := srv.store.UpdateBuildStatus(ctx, buildID, "cancelled"); err != nil {
@@ -367,19 +367,19 @@ func deriveReconcileChunkStates(chunks []VanadisChunk, priorLaunched map[string]
 		chunkOrder = append(chunkOrder, c.ID)
 		cs := &workflowChunkRuntimeState{chunk: c}
 		switch statusLower := strings.ToLower(strings.TrimSpace(c.Status)); statusLower {
-		case "completed":
+		case statusCompleted:
 			cs.launched = true
 			cs.codeReady = true
 			cs.runtimeReady = true
-		case "merged", "deploying", "deploy_failed":
+		case statusMerged, statusDeploying, statusDeployFailed:
 			cs.launched = true
 			cs.codeReady = strings.ToLower(c.Mode) == "pr"
 			cs.runtimeReady = false
-		case "pr_opened", "ci_failed", "conflict", "failed", "cancelled", "coding":
+		case statusPROpened, statusCIFailed, statusConflict, statusFailed, statusCancelled, statusCoding:
 			cs.launched = true
 			cs.codeReady = false
 			cs.runtimeReady = false
-		case "running":
+		case statusRunning:
 			cs.launched = (priorLaunched != nil && priorLaunched[c.ID]) || c.PRNumber > 0
 			cs.codeReady = false
 			cs.runtimeReady = false
@@ -448,7 +448,7 @@ func launchReconcileEligibleChunks(ctx context.Context, srv *VanadisServer, buil
 }
 
 func checkTerminalBuildStatus(b *VanadisBuild, chunks []VanadisChunk, priorLaunched map[string]bool) *reconcileStepOutput {
-	if b.Status != "completed" && b.Status != "failed" && b.Status != "cancelled" {
+	if b.Status != statusCompleted && b.Status != statusFailed && b.Status != statusCancelled {
 		return nil
 	}
 	out := &reconcileStepOutput{
@@ -459,7 +459,7 @@ func checkTerminalBuildStatus(b *VanadisBuild, chunks []VanadisChunk, priorLaunc
 			Launched: priorLaunched,
 		},
 	}
-	if b.Status == "failed" {
+	if b.Status == statusFailed {
 		for _, c := range chunks {
 			if strings.EqualFold(c.Status, "failed") || strings.EqualFold(c.Status, "cancelled") {
 				out.Error = fmt.Sprintf("chunk %s %s", c.ID, c.Status)
@@ -473,13 +473,13 @@ func checkTerminalBuildStatus(b *VanadisBuild, chunks []VanadisChunk, priorLaunc
 func checkFailedOrCancelledChunks(ctx context.Context, srv *VanadisServer, b *VanadisBuild, chunks []VanadisChunk, priorLaunched map[string]bool) (reconcileStepOutput, bool, error) {
 	for _, c := range chunks {
 		statusLower := strings.ToLower(strings.TrimSpace(c.Status))
-		if statusLower == "failed" || statusLower == "cancelled" {
+		if statusLower == statusFailed || statusLower == statusCancelled {
 			failReason := fmt.Sprintf("chunk %s %s", c.ID, c.Status)
 			if err := executeFailBuild(ctx, srv, b.ID, failReason); err != nil {
 				return reconcileStepOutput{}, false, err
 			}
 			return reconcileStepOutput{
-				BuildStatus: "failed",
+				BuildStatus: statusFailed,
 				Error:       failReason,
 				State: &BuildObjectState{
 					Build:    *b,
@@ -499,7 +499,7 @@ func executeReconcileBuild(ctx context.Context, srv *VanadisServer, buildID stri
 	b, chunks, err := srv.store.GetBuild(ctx, buildID)
 	if err != nil {
 		if errors.Is(err, ErrBuildNotFound) {
-			return reconcileStepOutput{BuildStatus: "not_found"}, nil
+			return reconcileStepOutput{BuildStatus: statusNotFound}, nil
 		}
 		return reconcileStepOutput{}, fmt.Errorf("get build %s: %w", buildID, err)
 	}
@@ -508,11 +508,11 @@ func executeReconcileBuild(ctx context.Context, srv *VanadisServer, buildID stri
 		return *terminalOut, nil
 	}
 
-	if b.Status == "pending" {
+	if b.Status == statusPending {
 		if err := srv.store.UpdateBuildStatus(ctx, buildID, "running"); err != nil {
 			return reconcileStepOutput{}, fmt.Errorf("update build %s to running: %w", buildID, err)
 		}
-		b.Status = "running"
+		b.Status = statusRunning
 	}
 
 	if priorLaunched == nil {
@@ -533,7 +533,7 @@ func executeReconcileBuild(ctx context.Context, srv *VanadisServer, buildID stri
 			return reconcileStepOutput{}, fmt.Errorf("complete build %s: %w", buildID, err)
 		}
 		return reconcileStepOutput{
-			BuildStatus: "completed",
+			BuildStatus: statusCompleted,
 			State: &BuildObjectState{
 				Build:    *b,
 				Chunks:   chunks,
@@ -580,7 +580,7 @@ func executeCompleteWorkflowBuild(ctx context.Context, srv *VanadisServer, build
 		return errors.New("vanadis store not configured")
 	}
 	prevBuild, _, prevErr := srv.store.GetBuild(ctx, buildID)
-	alreadyCompleted := prevErr == nil && prevBuild != nil && prevBuild.Status == "completed"
+	alreadyCompleted := prevErr == nil && prevBuild != nil && prevBuild.Status == statusCompleted
 	if err := srv.store.UpdateBuildStatus(ctx, buildID, "completed"); err != nil {
 		return err
 	}
@@ -863,7 +863,7 @@ func (s *VanadisServer) setLocalLaunched(buildID, status string, launched map[st
 	if s.localLaunched == nil {
 		s.localLaunched = make(map[string]map[string]bool)
 	}
-	if status == "completed" || status == "failed" || status == "cancelled" || status == "not_found" {
+	if status == statusCompleted || status == statusFailed || status == statusCancelled || status == statusNotFound {
 		delete(s.localLaunched, buildID)
 		return
 	}
@@ -881,9 +881,9 @@ func reconstructLaunchedChunks(chunks []VanadisChunk) map[string]bool {
 		}
 		statusLower := strings.ToLower(strings.TrimSpace(c.Status))
 		switch statusLower {
-		case "completed", "merged", "deploying", "deploy_failed", "pr_opened", "coding", "ci_failed", "conflict":
+		case statusCompleted, statusMerged, statusDeploying, statusDeployFailed, statusPROpened, statusCoding, statusCIFailed, statusConflict:
 			launched[c.ID] = true
-		case "running":
+		case statusRunning:
 			if c.ChunkIndex > 0 {
 				launched[c.ID] = true
 				continue

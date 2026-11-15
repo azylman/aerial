@@ -20,6 +20,11 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
+const (
+	serviceName = "prospera"
+	fieldStatus = "status"
+)
+
 // ReloadableConfigSource is a ConfigSource that also serves the loopback-only
 // git-sync reload webhook. *httpkit.Reloadable[Config] satisfies it.
 type ReloadableConfigSource interface {
@@ -209,7 +214,7 @@ func (s *Server) HandleSMSJob(ctx context.Context, msg pubsub.Message) error {
 
 	voiceMsg := VoiceMessage{
 		MessageSID:    args.MessageSID,
-		Direction:     "inbound",
+		Direction:     directionInbound,
 		FromNumber:    args.FromNumber,
 		ToNumber:      args.ToNumber,
 		Body:          args.Body,
@@ -243,7 +248,7 @@ func NewServer(
 
 	toolHandler := NewToolHandler(cfgSrc, store, twilio, sessionMgr, reporter)
 	mcpServer := mcp.NewServer(&mcp.Implementation{
-		Name:    "prospera",
+		Name:    serviceName,
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{Instructions: serverInstructions})
 	RegisterProsperaMCPTools(mcpServer, toolHandler)
@@ -300,9 +305,9 @@ func (s *Server) Routes() http.Handler {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-		"status":  "ok",
-		"service": "prospera",
-		"port":    s.cfgSrc.Current().Port,
+		fieldStatus: "ok",
+		"service":   serviceName,
+		"port":      s.cfgSrc.Current().Port,
 	})
 }
 
@@ -370,7 +375,7 @@ func (s *Server) handleTwilioVoice(w http.ResponseWriter, r *http.Request) {
 
 	existingCall := s.resolveAndBindCall(r.Context(), r, callSid)
 
-	if direction == "outbound-api" || (existingCall != nil && existingCall.Direction == "outbound") {
+	if direction == "outbound-api" || (existingCall != nil && existingCall.Direction == directionOutbound) {
 		s.handleOutboundVoiceConnect(cfg, w, existingCall)
 		return
 	}
@@ -438,12 +443,12 @@ func (s *Server) connectInboundStream(ctx context.Context, cfg *Config, w http.R
 	c := VoiceCall{
 		CallID:           callID,
 		ProviderCallSID:  callSid,
-		Direction:        "inbound",
-		State:            "in-progress",
+		Direction:        directionInbound,
+		State:            callStateInProgress,
 		FromNumber:       normFrom,
 		ToNumber:         normTo,
 		DiscordChannelID: cfg.DefaultDiscordChannel,
-		ReportStatus:     "pending",
+		ReportStatus:     reportStatusPending,
 		StartedAt:        time.Now().UTC(),
 		UpdatedAt:        time.Now().UTC(),
 	}
@@ -483,8 +488,8 @@ func (s *Server) routeVoicemailRecording(ctx context.Context, cfg *Config, w htt
 	c := VoiceCall{
 		CallID:           callID,
 		ProviderCallSID:  callSid,
-		Direction:        "inbound",
-		State:            "in-progress",
+		Direction:        directionInbound,
+		State:            callStateInProgress,
 		FromNumber:       normFrom,
 		ToNumber:         normTo,
 		DiscordChannelID: cfg.DefaultDiscordChannel,
@@ -543,7 +548,7 @@ func (s *Server) handleTwilioAMD(w http.ResponseWriter, r *http.Request) {
 
 func isTerminalState(status string) bool {
 	switch strings.ToLower(status) {
-	case "completed", "busy", "no-answer", "failed", "canceled":
+	case "completed", "busy", "no-answer", callStateFailed, "canceled":
 		return true
 	default:
 		return false
@@ -704,7 +709,7 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 
 	msg := VoiceMessage{
 		MessageSID:       msgSid,
-		Direction:        "inbound",
+		Direction:        directionInbound,
 		FromNumber:       normFrom,
 		ToNumber:         normTo,
 		Body:             body,

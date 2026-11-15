@@ -13,6 +13,12 @@ import (
 )
 
 const (
+	domainDiscord = "discord"
+	domainCommon  = "common"
+	actionEdit    = "EDIT"
+)
+
+const (
 	// DefaultSkillMatchMinSim is the minimum cosine similarity threshold for routing unloaded candidates to existing skills (Case B).
 	DefaultSkillMatchMinSim = 0.72
 	// DefaultSkillCliqueMinSim is the minimum pairwise similarity threshold for forming new skill candidate cliques (Case C).
@@ -172,7 +178,7 @@ func ParseSkillFrontmatter(raw string) (name, description, body string, err erro
 // sets RelPath to custom-skills/<domain>/<name>/SKILL.md, and generates embeddings over name + ": " + description.
 func ScanCustomSkills(ctx context.Context, customSkillsDir string, ollama OllamaClient) ([]DiskSkill, error) {
 	var skills []DiskSkill
-	domains := []string{"common", "discord"}
+	domains := []string{domainCommon, domainDiscord}
 
 	for _, domain := range domains {
 		domainDir := filepath.Join(customSkillsDir, domain)
@@ -265,7 +271,7 @@ func planLoadedSkillBatches(pending []ProceduralCandidate, diskSkillsByName map[
 		if len(group) >= 2 || hasCandidateWithAvoid(group) {
 			target := diskSkillsByName[name]
 			batches = append(batches, SkillConsolidationBatch{
-				Action:        "EDIT",
+				Action:        actionEdit,
 				TargetSkill:   target,
 				Domain:        target.Domain,
 				Candidates:    group,
@@ -321,7 +327,7 @@ func planUnloadedSkillBatches(remaining []ProceduralCandidate, diskSkills []Disk
 		group := caseBGroups[name]
 		target := diskSkillsByName[name]
 		batches = append(batches, SkillConsolidationBatch{
-			Action:        "EDIT",
+			Action:        actionEdit,
 			TargetSkill:   target,
 			Domain:        target.Domain,
 			Candidates:    group,
@@ -355,7 +361,7 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 
 func appendCliqueBatches(batches []SkillConsolidationBatch, cliques [][]ProceduralCandidate, action string) []SkillConsolidationBatch {
 	for _, clique := range cliques {
-		domain := "discord"
+		domain := domainDiscord
 		if len(clique) > 0 && clique[0].Domain != "" {
 			domain = clique[0].Domain
 		}
@@ -443,7 +449,7 @@ func ValidateCompiledSkillMarkdown(action, domain, rawMarkdown string, target *D
 
 	act := strings.ToUpper(strings.TrimSpace(action))
 	switch act {
-	case "EDIT":
+	case actionEdit:
 		if target == nil {
 			return "", "", "", fmt.Errorf("target skill required for EDIT action")
 		}
@@ -463,8 +469,8 @@ func ValidateCompiledSkillMarkdown(action, domain, rawMarkdown string, target *D
 			}
 		}
 		normDomain := strings.ToLower(strings.TrimSpace(domain))
-		if normDomain != "common" {
-			normDomain = "discord"
+		if normDomain != domainCommon {
+			normDomain = domainDiscord
 		}
 		relPath = fmt.Sprintf("custom-skills/%s/%s/SKILL.md", normDomain, name)
 
@@ -484,7 +490,7 @@ func buildSkillDesignerPrompt(batch SkillConsolidationBatch) string {
 	fmt.Fprintf(&sb, "Action: %s\n", batch.Action)
 	fmt.Fprintf(&sb, "Target Domain: %s\n", batch.Domain)
 
-	if batch.Action == "EDIT" && batch.TargetSkill != nil {
+	if batch.Action == actionEdit && batch.TargetSkill != nil {
 		fmt.Fprintf(&sb, "Target Skill Name: %s\n", batch.TargetSkill.Name)
 		fmt.Fprintf(&sb, "Target Skill RelPath: %s\n", batch.TargetSkill.RelPath)
 		fmt.Fprintf(&sb, "Target Skill Description: %s\n\n", batch.TargetSkill.Description)

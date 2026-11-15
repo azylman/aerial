@@ -10,6 +10,10 @@ import (
 	"strings"
 )
 
+const (
+	jsonNull = "null"
+)
+
 // normalizeAndValidateBuildDAG validates the build DAG: sequential default, Kahn's cycle detection, and concurrent same-repo disjoint target_files.
 func normalizeAndValidateBuildDAG(chunks []VanadisChunk) ([]VanadisChunk, error) {
 	if len(chunks) == 0 {
@@ -240,7 +244,7 @@ func validateCreateBuildInputs(buildID, threadID, objective string, chunks []Van
 
 func isTerminalChunkStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "merged", "completed", "failed", "cancelled":
+	case statusMerged, statusCompleted, statusFailed, statusCancelled:
 		return true
 	default:
 		return false
@@ -252,7 +256,7 @@ func marshalJSONBOrEmpty(v any) []byte {
 		return []byte("{}")
 	}
 	b, err := json.Marshal(v)
-	if err != nil || len(b) == 0 || string(b) == "null" {
+	if err != nil || len(b) == 0 || string(b) == jsonNull {
 		return []byte("{}")
 	}
 	return b

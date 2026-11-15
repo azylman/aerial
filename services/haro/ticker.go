@@ -304,13 +304,13 @@ func (t *Ticker) processDueCron(ctx context.Context, c CronSchedule, now time.Ti
 		staleRun := ScheduleRun{
 			ID:           runID,
 			ScheduleID:   c.ID,
-			ScheduleType: "cron",
+			ScheduleType: scheduleTypeCron,
 			MessageID:    runID,
 			TargetID:     c.TargetID,
 			ThreadID:     c.TargetID,
 			Title:        c.TitlePrefix,
 			Prompt:       c.Prompt,
-			Status:       "failed",
+			Status:       statusFailed,
 			StartedAt:    now,
 			CompletedAt:  &completedAt,
 			DurationMs:   0,
@@ -320,7 +320,7 @@ func (t *Ticker) processDueCron(ctx context.Context, c CronSchedule, now time.Ti
 		if createErr := CreateScheduleRun(ctx, t.db, staleRun); createErr != nil {
 			log.Printf("[Haro Ticker] Error creating stale schedule run for cron %s: %v", c.ID, createErr)
 		}
-		RecordScheduleRun("cron", "stale")
+		RecordScheduleRun(scheduleTypeCron, statusStale)
 		return
 	}
 
@@ -338,24 +338,24 @@ func (t *Ticker) processDueCron(ctx context.Context, c CronSchedule, now time.Ti
 		Effort:    c.Effort,
 	}
 	dispatchStart := time.Now()
-	resp, dispatchErr := traceFire(ctx, "cron", c.ID, func(ctx context.Context) (PromptDispatchResponse, error) {
+	resp, dispatchErr := traceFire(ctx, scheduleTypeCron, c.ID, func(ctx context.Context) (PromptDispatchResponse, error) {
 		return t.dispatcher.DispatchPrompt(ctx, req)
 	})
-	RecordScheduleDispatchDuration("cron", time.Since(dispatchStart).Seconds())
+	RecordScheduleDispatchDuration(scheduleTypeCron, time.Since(dispatchStart).Seconds())
 	completedAt := time.Now().UTC()
 	durationMs := completedAt.Sub(now).Milliseconds()
-	status := "completed"
+	status := statusCompleted
 	errMsg := ""
 	threadID := resp.ChannelID
 	if threadID == "" {
 		threadID = c.TargetID
 	}
 	if dispatchErr != nil {
-		status = "failed"
+		status = statusFailed
 		errMsg = dispatchErr.Error()
 		log.Printf("[Haro Ticker] Dispatch error for cron %s: %v", c.ID, dispatchErr)
 	}
-	RecordScheduleRun("cron", status)
+	RecordScheduleRun(scheduleTypeCron, status)
 	msgID := resp.MessageID
 	if msgID == "" {
 		msgID = runID
@@ -363,7 +363,7 @@ func (t *Ticker) processDueCron(ctx context.Context, c CronSchedule, now time.Ti
 	run := ScheduleRun{
 		ID:           runID,
 		ScheduleID:   c.ID,
-		ScheduleType: "cron",
+		ScheduleType: scheduleTypeCron,
 		MessageID:    msgID,
 		TargetID:     c.TargetID,
 		ThreadID:     threadID,
@@ -414,12 +414,12 @@ func (t *Ticker) processDueOneShot(ctx context.Context, s OneShotSchedule, now t
 		staleRun := ScheduleRun{
 			ID:           runID,
 			ScheduleID:   s.ID,
-			ScheduleType: "one_shot",
+			ScheduleType: scheduleTypeOneShot,
 			MessageID:    runID,
 			TargetID:     s.ThreadID,
 			ThreadID:     s.ThreadID,
 			Prompt:       s.Prompt,
-			Status:       "failed",
+			Status:       statusFailed,
 			StartedAt:    now,
 			CompletedAt:  &completedAt,
 			DurationMs:   0,
@@ -429,7 +429,7 @@ func (t *Ticker) processDueOneShot(ctx context.Context, s OneShotSchedule, now t
 		if createErr := CreateScheduleRun(ctx, t.db, staleRun); createErr != nil {
 			log.Printf("[Haro Ticker] Error creating stale schedule run for one-shot %s: %v", s.ID, createErr)
 		}
-		RecordScheduleRun("one_shot", "stale")
+		RecordScheduleRun(scheduleTypeOneShot, statusStale)
 		return
 	}
 
@@ -440,24 +440,24 @@ func (t *Ticker) processDueOneShot(ctx context.Context, s OneShotSchedule, now t
 		Effort:    s.Effort,
 	}
 	dispatchStart := time.Now()
-	resp, dispatchErr := traceFire(ctx, "one_shot", s.ID, func(ctx context.Context) (PromptDispatchResponse, error) {
+	resp, dispatchErr := traceFire(ctx, scheduleTypeOneShot, s.ID, func(ctx context.Context) (PromptDispatchResponse, error) {
 		return t.dispatcher.DispatchPrompt(ctx, req)
 	})
-	RecordScheduleDispatchDuration("one_shot", time.Since(dispatchStart).Seconds())
+	RecordScheduleDispatchDuration(scheduleTypeOneShot, time.Since(dispatchStart).Seconds())
 	completedAt := time.Now().UTC()
 	durationMs := completedAt.Sub(now).Milliseconds()
-	status := "completed"
+	status := statusCompleted
 	errMsg := ""
 	threadID := resp.ChannelID
 	if threadID == "" {
 		threadID = s.ThreadID
 	}
 	if dispatchErr != nil {
-		status = "failed"
+		status = statusFailed
 		errMsg = dispatchErr.Error()
 		log.Printf("[Haro Ticker] Dispatch error for one-shot %s: %v", s.ID, dispatchErr)
 	}
-	RecordScheduleRun("one_shot", status)
+	RecordScheduleRun(scheduleTypeOneShot, status)
 	msgID := resp.MessageID
 	if msgID == "" {
 		msgID = runID
@@ -465,7 +465,7 @@ func (t *Ticker) processDueOneShot(ctx context.Context, s OneShotSchedule, now t
 	run := ScheduleRun{
 		ID:           runID,
 		ScheduleID:   s.ID,
-		ScheduleType: "one_shot",
+		ScheduleType: scheduleTypeOneShot,
 		MessageID:    msgID,
 		TargetID:     s.ThreadID,
 		ThreadID:     threadID,
@@ -516,13 +516,13 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 		staleRun := ScheduleRun{
 			ID:           runID,
 			ScheduleID:   hb.ID,
-			ScheduleType: "heartbeat",
+			ScheduleType: scheduleTypeHeartbeat,
 			MessageID:    runID,
 			TargetID:     hb.TargetID,
 			ThreadID:     "heartbeat-" + hb.ID,
 			Title:        hb.TitlePrefix,
 			Prompt:       hb.Prompt,
-			Status:       "failed",
+			Status:       statusFailed,
 			StartedAt:    now,
 			CompletedAt:  &completedAt,
 			DurationMs:   0,
@@ -532,7 +532,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 		if createErr := CreateScheduleRun(ctx, t.db, staleRun); createErr != nil {
 			log.Printf("[Haro Ticker] Error creating stale schedule run for heartbeat %s: %v", hb.ID, createErr)
 		}
-		RecordScheduleRun("heartbeat", "stale")
+		RecordScheduleRun(scheduleTypeHeartbeat, statusStale)
 		return
 	}
 
@@ -543,7 +543,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 
 	sessionKey := "heartbeat-" + hb.ID
 	if active, activeErr := HasRunningHeartbeatRun(ctx, t.db, hb.ID, now.Add(-2*time.Hour)); activeErr == nil && active {
-		RecordScheduleRun("heartbeat", "skipped_active")
+		RecordScheduleRun(scheduleTypeHeartbeat, statusSkippedActive)
 		slog.Info("Skipping heartbeat run: schedule has an active run in progress", "id", hb.ID, "target_id", hb.TargetID, "thread_id", sessionKey)
 		return
 	}
@@ -552,7 +552,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 	wrappedPrompt := BuildHeartbeatPrompt(hb, now)
 	req := DispatchRequest{
 		ID:           runID,
-		Source:       "heartbeat",
+		Source:       scheduleTypeHeartbeat,
 		SessionID:    "",
 		TargetID:     strings.TrimSpace(hb.TargetID),
 		Prompt:       wrappedPrompt,
@@ -561,12 +561,12 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 	}
 
 	dispatchStart := time.Now()
-	resp, dispatchErr := traceFire(ctx, "heartbeat", hb.ID, func(ctx context.Context) (DispatchResponse, error) {
+	resp, dispatchErr := traceFire(ctx, scheduleTypeHeartbeat, hb.ID, func(ctx context.Context) (DispatchResponse, error) {
 		return t.dispatcher.Dispatch(ctx, req)
 	})
-	RecordScheduleDispatchDuration("heartbeat", time.Since(dispatchStart).Seconds())
-	if dispatchErr == nil && resp.Status == "skipped_active" {
-		RecordScheduleRun("heartbeat", "skipped_active")
+	RecordScheduleDispatchDuration(scheduleTypeHeartbeat, time.Since(dispatchStart).Seconds())
+	if dispatchErr == nil && resp.Status == statusSkippedActive {
+		RecordScheduleRun(scheduleTypeHeartbeat, statusSkippedActive)
 		slog.Info("Skipping heartbeat run: thread has an active turn in progress", "id", hb.ID, "target_id", hb.TargetID, "thread_id", sessionKey)
 		return
 	}
@@ -574,17 +574,17 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 		completedAt := time.Now().UTC()
 		durationMs := completedAt.Sub(now).Milliseconds()
 		log.Printf("[Haro Ticker] Dispatch error for heartbeat %s: %v", hb.ID, dispatchErr)
-		RecordScheduleRun("heartbeat", "failed")
+		RecordScheduleRun(scheduleTypeHeartbeat, statusFailed)
 		run := ScheduleRun{
 			ID:           runID,
 			ScheduleID:   hb.ID,
-			ScheduleType: "heartbeat",
+			ScheduleType: scheduleTypeHeartbeat,
 			MessageID:    runID,
 			TargetID:     hb.TargetID,
 			ThreadID:     sessionKey,
 			Title:        hb.TitlePrefix,
 			Prompt:       hb.Prompt,
-			Status:       "failed",
+			Status:       statusFailed,
 			StartedAt:    now,
 			CompletedAt:  &completedAt,
 			DurationMs:   durationMs,
@@ -601,7 +601,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 	run := ScheduleRun{
 		ID:           runID,
 		ScheduleID:   hb.ID,
-		ScheduleType: "heartbeat",
+		ScheduleType: scheduleTypeHeartbeat,
 		MessageID:    msgID,
 		TargetID:     hb.TargetID,
 		ThreadID:     sessionKey,
@@ -636,7 +636,7 @@ func calculateOutcomeTiming(ev pubsub.DispatchOutcomeEvent, runStartedAt time.Ti
 }
 
 func advanceHeartbeatWatermark(ctx context.Context, database *sql.DB, run *ScheduleRun, status string, startedAt time.Time) {
-	if status != "completed" || run.ScheduleType != "heartbeat" || startedAt.IsZero() {
+	if status != statusCompleted || run.ScheduleType != scheduleTypeHeartbeat || startedAt.IsZero() {
 		return
 	}
 	if err := AdvanceHeartbeatLastCompletedAt(ctx, database, run.ScheduleID, startedAt); err != nil {
@@ -658,7 +658,7 @@ func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Mes
 	if dispatchID == "" || dispatchID == "healthcheck-ping" {
 		return nil
 	}
-	if strings.TrimSpace(ev.Source) != "" && ev.Source != "heartbeat" {
+	if strings.TrimSpace(ev.Source) != "" && ev.Source != scheduleTypeHeartbeat {
 		return nil
 	}
 
@@ -675,7 +675,7 @@ func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Mes
 	}
 
 	switch strings.ToLower(strings.TrimSpace(run.Status)) {
-	case "completed", "failed", "stale", "skipped_active":
+	case statusCompleted, statusFailed, statusStale, statusSkippedActive:
 		return nil
 	}
 

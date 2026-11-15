@@ -180,7 +180,7 @@ fail_chunk is terminal: it fails the chunk and the whole build and wakes the bui
 // newMCPHandler constructs and returns the Streamable HTTP MCP server handler.
 func (s *VanadisServer) newMCPHandler() http.HandlerFunc {
 	mcpServer := mcp.NewServer(&mcp.Implementation{
-		Name:    "vanadis",
+		Name:    serviceName,
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{Instructions: serverInstructions})
 
@@ -216,7 +216,7 @@ func (s *VanadisServer) resolveTargetBuildID(ctx context.Context, buildID, threa
 			if latestAny == nil {
 				latestAny = b
 			}
-			if b.Status == "running" {
+			if b.Status == statusRunning {
 				latestRunning = b
 				break
 			}
@@ -339,7 +339,7 @@ func (s *VanadisServer) handleMCPUpdateBuild(ctx context.Context, args MCPUpdate
 	}
 
 	return MCPUpdateBuildOutput{
-		Status: "updated",
+		Status: statusUpdated,
 		Build:  updated,
 	}, nil
 }
@@ -387,7 +387,7 @@ func (s *VanadisServer) handleMCPUpdateChunk(ctx context.Context, args MCPUpdate
 	s.syncBuildWidget(ctx, buildID, "")
 
 	return MCPUpdateChunkOutput{
-		Status: "updated",
+		Status: statusUpdated,
 		Chunk:  updated,
 	}, nil
 }
@@ -461,7 +461,7 @@ func (s *VanadisServer) handleMCPFailChunk(ctx context.Context, args MCPFailChun
 	}
 
 	return MCPFailChunkOutput{
-		Status:  "failed",
+		Status:  statusFailed,
 		BuildID: buildID,
 		ChunkID: resChunkID,
 		Failed:  failed,

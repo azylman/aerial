@@ -29,6 +29,7 @@ linters:
     - gocheckcompilerdirectives
     - gochecksumtype
     - gocognit
+    - goconst
     - gocritic
     - gocyclo
     - godoclint
@@ -127,6 +128,9 @@ linters:
       ignore-comments: true
     gocognit:
       min-complexity: 30
+    goconst:
+      min-len: 3
+      min-occurrences: 3
     gocyclo:
       min-complexity: 20
     govet:
@@ -206,6 +210,7 @@ linters:
           - containedctx
           - errcheck
           - errchkjson
+          - goconst
           - gosec
           - gosmopolitan
           - nilnil
@@ -224,6 +229,10 @@ linters:
           - maintidx
           - nestif
         path: services/synapse/pr_lifecycle_events_test\.go
+      # Temporary: eri's goconst cleanup lands in the next build chunk, which removes this rule.
+      - linters:
+          - goconst
+        path: services/eri/
       - linters:
           - containedctx
         path: services/eri/pkg/(queue/(pool|worker)|runner/(interchangeable_pool|streaming_daemon|unified_pool))\.go

@@ -8,13 +8,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+const (
+	labelScheduleType = "schedule_type"
+)
+
 var (
 	SchedulesActive = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "haro_schedules_active",
 			Help: "Number of active persistent schedules by type.",
 		},
-		[]string{"schedule_type"},
+		[]string{labelScheduleType},
 	)
 
 	ScheduleRunsTotal = prometheus.NewCounterVec(
@@ -22,7 +26,7 @@ var (
 			Name: "haro_schedule_runs_total",
 			Help: "Total number of schedule runs executed by type and status.",
 		},
-		[]string{"schedule_type", "status"},
+		[]string{labelScheduleType, fieldStatus},
 	)
 
 	ScheduleDispatchDurationSeconds = prometheus.NewHistogramVec(
@@ -31,13 +35,13 @@ var (
 			Help:    "Dispatch duration of schedule runs in seconds.",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"schedule_type"},
+		[]string{labelScheduleType},
 	)
 )
 
 var (
-	knownScheduleTypes = []string{"cron", "one_shot", "heartbeat", "event_watch"}
-	knownRunStatuses   = []string{"completed", "failed", "stale", "skipped_active"}
+	knownScheduleTypes = []string{scheduleTypeCron, scheduleTypeOneShot, scheduleTypeHeartbeat, scheduleTypeEventWatch}
+	knownRunStatuses   = []string{statusCompleted, statusFailed, statusStale, statusSkippedActive}
 )
 
 func registerHaroCollector(c prometheus.Collector) {
@@ -75,12 +79,12 @@ func RecordScheduleDispatchDuration(scheduleType string, durationSeconds float64
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.handler != nil && s.handler.db != nil {
 		if summary, err := GetScheduleSummaryMetrics(r.Context(), s.handler.db); err == nil {
-			SchedulesActive.WithLabelValues("cron").Set(float64(summary.CronCount))
-			SchedulesActive.WithLabelValues("heartbeat").Set(float64(summary.HeartbeatCount))
-			SchedulesActive.WithLabelValues("one_shot").Set(float64(summary.OneShotCount))
+			SchedulesActive.WithLabelValues(scheduleTypeCron).Set(float64(summary.CronCount))
+			SchedulesActive.WithLabelValues(scheduleTypeHeartbeat).Set(float64(summary.HeartbeatCount))
+			SchedulesActive.WithLabelValues(scheduleTypeOneShot).Set(float64(summary.OneShotCount))
 		}
 		if triggers, err := ListEventTriggers(r.Context(), s.handler.db, ""); err == nil {
-			SchedulesActive.WithLabelValues("event_watch").Set(float64(len(triggers)))
+			SchedulesActive.WithLabelValues(scheduleTypeEventWatch).Set(float64(len(triggers)))
 		}
 	}
 	promhttp.Handler().ServeHTTP(w, r)

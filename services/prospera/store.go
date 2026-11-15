@@ -12,6 +12,13 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+const (
+	callStateFailed     = "failed"
+	callStateInProgress = "in-progress"
+	directionInbound    = "inbound"
+	directionOutbound   = "outbound"
+)
+
 var (
 	ErrMaxConcurrentCalls  = errors.New("store: max concurrent calls limit reached")
 	ErrDuplicateActiveDest = errors.New("store: active call to destination number already exists")
@@ -241,7 +248,7 @@ func (s *PGStore) insertCallTx(ctx context.Context, tx *sql.Tx, call VoiceCall) 
 
 	reportStatus := call.ReportStatus
 	if reportStatus == "" {
-		reportStatus = "pending"
+		reportStatus = reportStatusPending
 	}
 
 	query := `INSERT INTO voice_calls (
@@ -442,7 +449,7 @@ func (s *PGStore) UpdateCallState(ctx context.Context, callID, state, endReason,
 	now := time.Now().UTC()
 	var setEnded bool
 	switch state {
-	case "completed", "failed", "busy", "no-answer", "canceled":
+	case "completed", callStateFailed, "busy", "no-answer", "canceled":
 		setEnded = true
 	}
 
@@ -458,7 +465,7 @@ func (s *PGStore) UpdateCallState(ctx context.Context, callID, state, endReason,
 			updated_at = $5
 			WHERE call_id = $6`
 		args = []any{state, endReason, answeredBy, now, now, callID}
-	case state == "in-progress":
+	case state == callStateInProgress:
 		query = `UPDATE voice_calls SET 
 			state = $1, 
 			end_reason = CASE WHEN $2 != '' THEN $2 ELSE end_reason END, 

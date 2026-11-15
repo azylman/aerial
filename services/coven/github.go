@@ -687,8 +687,8 @@ func stageCompiledSkillInMemory(diskSkills []DiskSkill, name, relPath, domain, c
 		}
 	}
 	normDomain := strings.ToLower(strings.TrimSpace(domain))
-	if normDomain != "common" {
-		normDomain = "discord"
+	if normDomain != domainCommon {
+		normDomain = domainDiscord
 	}
 	return append(diskSkills, DiskSkill{
 		Name:       name,
@@ -746,14 +746,14 @@ func compileSkillBatch(ctx context.Context, store Store, llmFunc LLMClientFunc, 
 	}
 
 	action := strings.ToUpper(strings.TrimSpace(designerResp.Action))
-	if action == "NOOP" {
+	if action == actionNoop {
 		if err := store.MarkProceduralCandidatesSkipped(ctx, batchIDs); err != nil {
 			log.Printf("[coven-skills] warning marking NOOP candidates skipped: %v", err)
 		}
 		return
 	}
 
-	if action != "EDIT" && action != "CREATE" {
+	if action != actionEdit && action != "CREATE" {
 		log.Printf("[coven-skills] unknown designer action %q, skipping batch", designerResp.Action)
 		return
 	}
@@ -763,7 +763,7 @@ func compileSkillBatch(ctx context.Context, store Store, llmFunc LLMClientFunc, 
 		domain = designerResp.Domain
 	}
 	if domain == "" {
-		domain = "discord"
+		domain = domainDiscord
 	}
 
 	name, relPath, cleanedMD, err := ValidateCompiledSkillMarkdown(action, domain, designerResp.Markdown, batch.TargetSkill, state.diskSkills)

@@ -19,6 +19,10 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
+const (
+	watchEventDeleted = "DELETED"
+)
+
 // errWatchExpired signals that the watch resourceVersion is gone (410) and the watcher must re-list.
 var errWatchExpired = errors.New("kube watch resourceVersion expired")
 
@@ -61,7 +65,7 @@ func kustomizationReady(conditions []fluxCondition) (ready, failed bool, reason 
 	switch {
 	case c.Status == "True":
 		return true, false, reason
-	case c.Status != "False", c.Reason == "Progressing", c.Reason == "DependencyNotReady":
+	case c.Status != "False", c.Reason == reasonProgressing, c.Reason == "DependencyNotReady":
 		return false, false, reason
 	default:
 		return false, true, reason
@@ -171,7 +175,7 @@ func (k kustomizationSource) apply(ctx context.Context, _ *DefaultOutboundDispat
 		return fmt.Errorf("decode %s kustomization: %w", eventType, err)
 	}
 	obs := obj.observation(k.namespace)
-	if eventType == "DELETED" {
+	if eventType == watchEventDeleted {
 		return sink.applyKustomizationDeleted(ctx, obs.Ref)
 	}
 	return sink.applyKustomizationStatus(ctx, obs)
@@ -199,7 +203,7 @@ func (w workloadSource) watch(ctx context.Context, kube *DefaultOutboundDispatch
 }
 
 func (w workloadSource) apply(ctx context.Context, kube *DefaultOutboundDispatcher, sink rolloutSink, eventType string, _ json.RawMessage) error {
-	if eventType == "DELETED" {
+	if eventType == watchEventDeleted {
 		return nil
 	}
 	return recheckPendingRollouts(ctx, kube, sink)
@@ -312,7 +316,7 @@ func (w *kubeWatcher) consume(ctx context.Context, stream io.Reader) error {
 
 func (w *kubeWatcher) applyEvent(ctx context.Context, evt kubeWatchEvent) error {
 	switch evt.Type {
-	case "ADDED", "MODIFIED", "DELETED":
+	case "ADDED", "MODIFIED", watchEventDeleted:
 		return w.source.apply(ctx, w.kube, w.sink, evt.Type, evt.Object)
 	case "ERROR":
 		var status struct {
@@ -695,7 +699,7 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			Repo:         pr.Repo,
 			PRNumber:     pr.PRNumber,
 			JobName:      name,
-			Status:       "deploying",
+			Status:       statusDeploying,
 			RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
 			Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
 			OccurredAt:   time.Now().UTC(),
@@ -711,7 +715,7 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		}
 	}
 	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        "deploy_success",
+		Event:        eventDeploySuccess,
 		Repo:         pr.Repo,
 		PRNumber:     pr.PRNumber,
 		HeadSHA:      pr.HeadSHA,
@@ -734,9 +738,9 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 // watcher's re-list retries it.
 func (s *RouterServer) failKustomizationRollout(ctx context.Context, pr DeployingPR, name, reason string) error {
 	evt := DeployEvent{
-		Event:      "deploy_failed",
-		Status:     "failed",
-		SourceKind: "Kustomization",
+		Event:      eventDeployFailed,
+		Status:     statusFailed,
+		SourceKind: kindKustomization,
 		JobName:    name,
 		Repo:       pr.Repo,
 		CommitSHA:  firstNonEmpty(pr.MergeSHA, pr.HeadSHA),
@@ -754,7 +758,7 @@ func (s *RouterServer) failKustomizationRollout(ctx context.Context, pr Deployin
 // deferSyncToWatcher defers a sync_success with no image build pending to the Kustomization watcher: a
 // git fetch is not an apply, so a Flux-sourced repo's PR completes only once its change rolled out.
 func (s *RouterServer) deferSyncToWatcher(ctx context.Context, evt DeployEvent, syncHasExpected bool) (bool, error) {
-	if evt.Event != "sync_success" || syncHasExpected {
+	if evt.Event != eventSyncSuccess || syncHasExpected {
 		return false, nil
 	}
 	return s.deferPRToWatcher(ctx, evt.Repo, evt.PRNumber)
@@ -788,11 +792,11 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 	}
 	if tID != "" {
 		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-			Event:        "deploy_started",
+			Event:        eventDeployStarted,
 			Repo:         repo,
 			PRNumber:     prNum,
 			TargetID:     tID,
-			Status:       "deploying",
+			Status:       statusDeploying,
 			RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
 			Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
 			OccurredAt:   time.Now().UTC(),

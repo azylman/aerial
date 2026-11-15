@@ -18,6 +18,12 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+const (
+	fieldStatus  = "status"
+	fieldEffort  = "effort"
+	fieldMessage = "message"
+)
+
 var (
 	cronParser           = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	reRelative           = regexp.MustCompile(`^(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks)$`)
@@ -170,7 +176,7 @@ func handleScheduleRecurring(ctx context.Context, database *sql.DB, defaultTZ st
 	}
 
 	return ScheduleRecurringOutput{
-		Status: "success", ScheduleID: id, CronExpression: args.CronExpression,
+		Status: statusSuccess, ScheduleID: id, CronExpression: args.CronExpression,
 		NextRunAt: nextRun.Format(time.RFC3339), ChannelID: args.ChannelID, Effort: args.Effort,
 		Message: "Recurring schedule created successfully.",
 	}, nil
@@ -234,7 +240,7 @@ func handleScheduleOnce(ctx context.Context, database *sql.DB, args ScheduleOnce
 	}
 
 	return ScheduleOnceOutput{
-		Status: "success", ScheduleID: id, RunAt: targetTime.Format(time.RFC3339),
+		Status: statusSuccess, ScheduleID: id, RunAt: targetTime.Format(time.RFC3339),
 		Effort: effort, Message: "One-shot reminder scheduled successfully.",
 	}, nil
 }
@@ -334,12 +340,12 @@ func (h *ToolHandler) GetSchedule(ctx context.Context, args GetScheduleArgs) (Ge
 		return GetScheduleOutput{}, fmt.Errorf("failed to query recurring schedule %s: %w", id, err)
 	}
 	if o, err := GetOneShotSchedule(ctx, h.db, id); err == nil {
-		return GetScheduleOutput{Type: "one_shot", OneShot: o}, nil
+		return GetScheduleOutput{Type: scheduleTypeOneShot, OneShot: o}, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return GetScheduleOutput{}, fmt.Errorf("failed to query one-shot schedule %s: %w", id, err)
 	}
 	if hb, err := GetHeartbeatSchedule(ctx, h.db, id); err == nil {
-		return GetScheduleOutput{Type: "heartbeat", Heartbeat: hb}, nil
+		return GetScheduleOutput{Type: scheduleTypeHeartbeat, Heartbeat: hb}, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return GetScheduleOutput{}, fmt.Errorf("failed to query heartbeat schedule %s: %w", id, err)
 	}
@@ -368,7 +374,7 @@ func (h *ToolHandler) CancelSchedule(ctx context.Context, args CancelScheduleArg
 	if !deleted {
 		return CancelScheduleOutput{}, fmt.Errorf("schedule with ID %q not found", id)
 	}
-	return CancelScheduleOutput{Status: "success", ScheduleID: id, Message: "Schedule cancelled successfully."}, nil
+	return CancelScheduleOutput{Status: statusSuccess, ScheduleID: id, Message: "Schedule cancelled successfully."}, nil
 }
 
 type UpdateCronScheduleArgs struct {
@@ -407,7 +413,7 @@ func (h *ToolHandler) UpdateCronSchedule(ctx context.Context, args UpdateCronSch
 		return UpdateCronScheduleOutput{}, fmt.Errorf("failed to update recurring schedule: %w", err)
 	}
 
-	resp := UpdateCronScheduleOutput{Status: "success", ScheduleID: id, Message: "Recurring schedule updated successfully."}
+	resp := UpdateCronScheduleOutput{Status: statusSuccess, ScheduleID: id, Message: "Recurring schedule updated successfully."}
 	if args.Effort != nil {
 		resp.Effort = normalizeScheduleEffort(*args.Effort)
 	}
@@ -517,7 +523,7 @@ func (a ScheduleHeartbeatArgs) toMap() map[string]any {
 		m["timezone"] = a.Timezone
 	}
 	if a.Effort != "" {
-		m["effort"] = a.Effort
+		m[fieldEffort] = a.Effort
 	}
 	return m
 }
@@ -567,7 +573,7 @@ func (a UpdateHeartbeatArgs) toMap() map[string]any {
 		m["timezone"] = a.Timezone
 	}
 	if a.Effort != "" {
-		m["effort"] = a.Effort
+		m[fieldEffort] = a.Effort
 	}
 	if a.Enabled != nil {
 		m["enabled"] = *a.Enabled
@@ -612,7 +618,7 @@ func (a WatchEventArgs) toMap() map[string]any {
 		m["prompt"] = a.Prompt
 	}
 	if a.Effort != "" {
-		m["effort"] = a.Effort
+		m[fieldEffort] = a.Effort
 	}
 	if a.Persistent != nil {
 		m["persistent"] = *a.Persistent
@@ -714,13 +720,13 @@ func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, 
 	}
 
 	out := map[string]any{
-		"status":          "success",
+		fieldStatus:       statusSuccess,
 		"schedule_id":     id,
 		"cron_expression": cronExpr,
 		"next_run_at":     nextRun.Format(time.RFC3339),
 		"channel_id":      channelID,
-		"effort":          effort,
-		"message":         "Heartbeat schedule created successfully.",
+		fieldEffort:       effort,
+		fieldMessage:      "Heartbeat schedule created successfully.",
 	}
 	jsonBytes, err := json.Marshal(out)
 	if err != nil {
@@ -818,11 +824,11 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any)
 	}
 
 	out := map[string]any{
-		"status":      "success",
+		fieldStatus:   statusSuccess,
 		"schedule_id": id,
-		"message":     "Heartbeat schedule updated successfully.",
+		fieldMessage:  "Heartbeat schedule updated successfully.",
 		"next_run_at": sched.NextRunAt.Format(time.RFC3339),
-		"effort":      sched.Effort,
+		fieldEffort:   sched.Effort,
 		"enabled":     sched.Enabled,
 	}
 	jsonBytes, err := json.Marshal(out)
@@ -851,7 +857,7 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extr
 
 	effortStr := getMapString(args, "effort")
 	if effortStr == "" {
-		effortStr = "medium"
+		effortStr = effortMedium
 	}
 	effort, err := NormalizeEffort(effortStr)
 	if err != nil {
@@ -895,7 +901,7 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extr
 	}
 
 	// TOCTOU guard: re-verify target state after insertion.
-	if normSource == "vanadis_build" || normSource == "vanadis_chunk" {
+	if normSource == sourceVanadisBuild || normSource == sourceVanadisChunk {
 		if liveErr := ValidateLiveEventTarget(ctx, db, normSource, normTarget); liveErr != nil {
 			if _, delErr := DeleteEventTrigger(ctx, db, id); delErr != nil {
 				log.Printf("[Haro] failed to rollback event trigger %s: %v", id, delErr)
@@ -905,15 +911,15 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extr
 	}
 
 	out := map[string]any{
-		"status":     "success",
+		fieldStatus:  statusSuccess,
 		"watch_id":   id,
 		"channel_id": channelID,
 		"source":     normSource,
 		"target":     normTarget,
 		"event_type": normEventType,
-		"effort":     effort,
+		fieldEffort:  effort,
 		"persistent": trigger.Persistent,
-		"message":    "Event watch registered successfully.",
+		fieldMessage: "Event watch registered successfully.",
 	}
 	jsonBytes, err := json.Marshal(out)
 	if err != nil {
@@ -967,9 +973,9 @@ func HandleCancelEventWatch(ctx context.Context, db *sql.DB, args map[string]any
 	}
 
 	out := map[string]any{
-		"status":   "success",
-		"watch_id": id,
-		"message":  "Event watch cancelled successfully.",
+		fieldStatus:  statusSuccess,
+		"watch_id":   id,
+		fieldMessage: "Event watch cancelled successfully.",
 	}
 	jsonBytes, err := json.Marshal(out)
 	if err != nil {

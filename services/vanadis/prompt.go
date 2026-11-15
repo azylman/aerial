@@ -18,7 +18,7 @@ func formatPromptCompletedLedger(sb *strings.Builder, completed []VanadisChunk, 
 		return
 	}
 	for k, c := range completed {
-		if c.Mode == "action" && (c.Status == "completed" || c.Status == "merged") {
+		if c.Mode == chunkModeAction && (c.Status == statusCompleted || c.Status == statusMerged) {
 			fmt.Fprintf(sb, "- [Chunk %d/%d] %s (action, completed)\n", k+1, total, c.Title)
 		} else {
 			fmt.Fprintf(sb, "- [Chunk %d/%d] %s (%s, PR #%d)\n", k+1, total, c.Title, firstNonEmpty(normalizeRepo(c.Repo), normalizeRepo("aerial")), c.PRNumber)
@@ -28,7 +28,7 @@ func formatPromptCompletedLedger(sb *strings.Builder, completed []VanadisChunk, 
 }
 
 func formatPromptActiveChunk(sb *strings.Builder, active VanadisChunk, activeIdx, total int, activeRepo, shareRoot string) {
-	if active.Mode == "action" {
+	if active.Mode == chunkModeAction {
 		fmt.Fprintf(sb, "=== Active Chunk (Chunk %d of %d) ===\nChunk ID: %s\nTitle: %s\nChunk Mode: action\nInstructions:\n%s\n\n", activeIdx+1, total, active.ID, active.Title, active.Instructions)
 		return
 	}
@@ -52,7 +52,7 @@ func formatPromptRemainingChunks(sb *strings.Builder, remaining []VanadisChunk, 
 	}
 	sb.WriteString("DO NOT implement these remaining chunks in this turn—they are listed strictly for architectural boundary awareness.\n")
 	for k, c := range remaining {
-		if c.Mode == "action" {
+		if c.Mode == chunkModeAction {
 			fmt.Fprintf(sb, "- [Chunk %d/%d] %s (action)\n", activeIdx+2+k, total, c.Title)
 		} else {
 			fmt.Fprintf(sb, "- [Chunk %d/%d] %s (%s)\n", activeIdx+2+k, total, c.Title, firstNonEmpty(normalizeRepo(c.Repo), normalizeRepo("aerial")))
@@ -62,7 +62,7 @@ func formatPromptRemainingChunks(sb *strings.Builder, remaining []VanadisChunk, 
 }
 
 func formatPromptContract(sb *strings.Builder, active VanadisChunk, activeRepo, shareRoot string) {
-	if active.Mode == "action" {
+	if active.Mode == chunkModeAction {
 		fmt.Fprintf(sb, "=== Action Chunk Execution Contract ===\n"+
 			"1. Execute the operational instructions directly in this turn, adhering to the Build Objective and Shared Build Context.\n"+
 			"2. Iterate and diagnose until all acceptance criteria are verified.\n"+
@@ -92,7 +92,7 @@ func formatChunkPromptWithShareRoot(build VanadisBuild, chunks []VanadisChunk, a
 	}
 	total := len(chunks)
 	active := chunks[activeIdx]
-	isActionChunk := active.Mode == "action"
+	isActionChunk := active.Mode == chunkModeAction
 	activeRepo := ""
 	if !isActionChunk {
 		activeRepo = firstNonEmpty(normalizeRepo(active.Repo), normalizeRepo("aerial"))

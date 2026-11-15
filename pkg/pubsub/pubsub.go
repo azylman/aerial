@@ -16,6 +16,10 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 )
 
+const (
+	unknownSubjectToken = "unknown"
+)
+
 // Stream names across the cluster.
 const (
 	StreamAerialEvents    = "AERIAL_EVENTS"
@@ -218,7 +222,7 @@ type HaroOneShotJobArgs struct {
 func cleanSubjectToken(token string) string {
 	t := strings.TrimSpace(token)
 	if t == "" {
-		return "unknown"
+		return unknownSubjectToken
 	}
 	t = strings.ReplaceAll(t, "*", "-")
 	t = strings.ReplaceAll(t, ">", "-")
@@ -228,7 +232,7 @@ func cleanSubjectToken(token string) string {
 	}
 	t = strings.Trim(t, ".-")
 	if t == "" {
-		return "unknown"
+		return unknownSubjectToken
 	}
 	return t
 }
@@ -238,7 +242,7 @@ func SubjectCovenExtractCoalesced(threadID string) string {
 	t := cleanSubjectToken(threadID)
 	t = strings.ReplaceAll(t, ".", "-")
 	if t == "" {
-		t = "unknown"
+		t = unknownSubjectToken
 	}
 	return SubjectCovenExtractPrefix + t
 }
@@ -248,7 +252,7 @@ func SubjectBuildWidgetSyncCoalesced(buildID string) string {
 	t := cleanSubjectToken(buildID)
 	t = strings.ReplaceAll(t, ".", "-")
 	if t == "" {
-		t = "unknown"
+		t = unknownSubjectToken
 	}
 	return SubjectBuildWidgetSyncPrefix + t
 }

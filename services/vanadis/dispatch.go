@@ -12,6 +12,10 @@ import (
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
+const (
+	serviceName = "vanadis"
+)
+
 // dispatchChunkTurn renders the chunk prompt (optionally prefixed by a harness notice) and dispatches it to Brain
 // on the chunk's dedicated session with the capped chunk effort.
 func (s *VanadisServer) dispatchChunkTurn(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, activeIdx int, notice string) error {
@@ -25,7 +29,7 @@ func (s *VanadisServer) dispatchChunkTurn(ctx context.Context, build VanadisBuil
 	defer func() { markChunkDispatchSpan(span, err) }()
 	err = s.dispatchBrainDispatch(ctx, BrainDispatchRequest{
 		ID:             fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges),
-		Source:         "vanadis",
+		Source:         serviceName,
 		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
 		TargetID:       strings.TrimSpace(build.ThreadID),
 		VanadisChunkID: strings.TrimSpace(chunk.ID),
@@ -80,12 +84,12 @@ func findTargetChunkIndex(chunks []VanadisChunk, chunkIndex int, desiredID, buil
 
 func isPRDependencyCodeReady(other VanadisChunk) bool {
 	status := strings.ToLower(strings.TrimSpace(other.Status))
-	if status == "completed" {
+	if status == statusCompleted {
 		return true
 	}
 	if strings.ToLower(strings.TrimSpace(other.Mode)) == "pr" {
 		switch status {
-		case "merged", "deploying", "deploy_failed":
+		case statusMerged, statusDeploying, statusDeployFailed:
 			return true
 		}
 	}

@@ -56,10 +56,10 @@ func formatCIChecksActiveStep(prStatus, ciChecksJSON string) string {
 	for _, state := range checks {
 		s := strings.ToLower(strings.TrimSpace(state))
 		switch s {
-		case "passed":
+		case statusPassed:
 			passed++
 			total++
-		case "failed":
+		case statusFailed:
 			failed++
 			total++
 		default:
@@ -121,7 +121,7 @@ func formatSingleJobRolloutState(job, cleanStatus string, deployedSet, startedSe
 		return label + ": 🔄 verifying health"
 	case startedSet[jKey]:
 		return label + ": 🔄 starting"
-	case (!hasStartedJobs && cleanStatus == "deploying") || passedBuildJobs[jKey]:
+	case (!hasStartedJobs && cleanStatus == statusDeploying) || passedBuildJobs[jKey]:
 		return label + ": 🔄 starting"
 	default:
 		return label + ": ⏳ building image"
@@ -150,7 +150,7 @@ func formatPerJobRolloutStatus(allJobs []string, cleanStatus string, startedJobs
 
 // formatKustomizationRolloutStatus renders a deploying PR's recorded Kustomizations one per line.
 func formatKustomizationRolloutStatus(cleanStatus string, kustomizationStatuses map[string]string, deployUIURL ...string) (string, bool) {
-	if cleanStatus != "deploying" || len(kustomizationStatuses) == 0 {
+	if cleanStatus != statusDeploying || len(kustomizationStatuses) == 0 {
 		return "", false
 	}
 	baseURL := firstNonEmpty(deployUIURL...)
@@ -163,7 +163,7 @@ func formatKustomizationRolloutStatus(cleanStatus string, kustomizationStatuses 
 	for _, name := range names {
 		status := strings.ToLower(strings.TrimSpace(kustomizationStatuses[name]))
 		state := "🔄 rolling out"
-		if status == "deployed" || status == "healthy" || status == "rolled_out" {
+		if status == statusDeployed || status == "healthy" || status == "rolled_out" {
 			state = "✅ rolled out"
 		}
 		label := formatDeployTargetLabel(name, "kustomization", baseURL)
@@ -179,10 +179,10 @@ func analyzeChunkBuildChecks(checks map[string]string) (checkJobs []string, pass
 	for checkName, state := range checks {
 		s := strings.ToLower(strings.TrimSpace(state))
 		switch s {
-		case "passed":
+		case statusPassed:
 			passed++
 			total++
-		case "failed":
+		case statusFailed:
 			failed++
 			total++
 		default:
@@ -193,7 +193,7 @@ func analyzeChunkBuildChecks(checks map[string]string) (checkJobs []string, pass
 
 		if svc, ok := buildJobService(checkName); ok {
 			matchedServices[svc] = struct{}{}
-			if s == "passed" {
+			if s == statusPassed {
 				passedBuildJobs[strings.ToLower(svc)] = true
 			}
 		}
@@ -225,7 +225,7 @@ func resolveCandidateJobs(rs *pubsub.PRRolloutState, checkJobs []string) []strin
 func FormatChunkActiveStep(chunk VanadisChunk, deployUIURL ...string) string {
 	baseURL := firstNonEmpty(deployUIURL...)
 	cleanStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
-	if cleanStatus == "open" || cleanStatus == "pr_opened" {
+	if cleanStatus == statusOpen || cleanStatus == statusPROpened {
 		if len(chunk.CIChecks) > 0 {
 			if rawJSON, err := json.Marshal(chunk.CIChecks); err == nil {
 				return formatCIChecksActiveStep("open", string(rawJSON))
@@ -233,7 +233,7 @@ func FormatChunkActiveStep(chunk VanadisChunk, deployUIURL ...string) string {
 		}
 		return ""
 	}
-	if cleanStatus != "merged" && cleanStatus != "synced" && cleanStatus != "deploying" {
+	if cleanStatus != statusMerged && cleanStatus != statusSynced && cleanStatus != statusDeploying {
 		return ""
 	}
 
@@ -260,7 +260,7 @@ func FormatChunkActiveStep(chunk VanadisChunk, deployUIURL ...string) string {
 		return formatPerJobRolloutStatus(allJobs, cleanStatus, startedJobs, deployedJobs, jobStates, passedBuildJobs, baseURL)
 	}
 
-	if (cleanStatus == "merged" || cleanStatus == "synced") && total > 0 && failed == 0 {
+	if (cleanStatus == statusMerged || cleanStatus == statusSynced) && total > 0 && failed == 0 {
 		return fmt.Sprintf("Building container images (%d/%d completed)", passed, total)
 	}
 
