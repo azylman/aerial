@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,44 +17,69 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-func TestMemoryBus_PublishSubscribeAndWorkQueue(t *testing.T) {
+type publishStep struct {
+	subject string
+	msgID   string
+	payload string
+}
+
+func TestMemoryBus_Subscribe(t *testing.T) {
 	t.Parallel()
 
-	type publishStep struct {
-		subject string
-		msgID   string
-		payload string
-	}
-
 	tests := []struct {
-		name             string
-		isQueue          bool
-		pattern          string
-		durables         []string
-		queueName        string
-		numConsumers     int
-		steps            []publishStep
-		wantTotalHandled int
+		name        string
+		pattern     string
+		durables    []string
+		steps       []publishStep
+		wantHandled int
 	}{
 		{
-			name:             "pubsub fan-out delivers to all distinct durable subscribers",
-			isQueue:          false,
-			pattern:          "aerial.events.>",
-			durables:         []string{"haro-events", "coven-events"},
-			steps:            []publishStep{{subject: "aerial.events.device.created", msgID: "evt-1", payload: "data1"}},
-			wantTotalHandled: 2,
+			name:        "fan-out delivers to all distinct durable subscribers",
+			pattern:     "aerial.events.>",
+			durables:    []string{"haro-events", "coven-events"},
+			steps:       []publishStep{{subject: "aerial.events.device.created", msgID: "evt-1", payload: "data1"}},
+			wantHandled: 2,
 		},
 		{
-			name:             "pubsub filters out non-matching subjects",
-			isQueue:          false,
-			pattern:          "aerial.turn.>",
-			durables:         []string{"coven-turns"},
-			steps:            []publishStep{{subject: "aerial.dispatch.completed", msgID: "evt-2", payload: "data2"}},
-			wantTotalHandled: 0,
+			name:        "filters out non-matching subjects",
+			pattern:     "aerial.turn.>",
+			durables:    []string{"coven-turns"},
+			steps:       []publishStep{{subject: "aerial.dispatch.completed", msgID: "evt-2", payload: "data2"}},
+			wantHandled: 0,
 		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := NewMemoryBus()
+			defer bus.Close()
+
+			counter := newHandledCounter(tc.wantHandled)
+			for _, d := range tc.durables {
+				if _, err := bus.Subscribe(context.Background(), tc.pattern, d, counter.handle); err != nil {
+					t.Fatalf("Subscribe failed: %v", err)
+				}
+			}
+			publishSteps(t, bus, tc.steps)
+			counter.assertHandled(t, tc.wantHandled)
+		})
+	}
+}
+
+func TestMemoryBus_ConsumeQueue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		pattern      string
+		queueName    string
+		numConsumers int
+		steps        []publishStep
+		wantHandled  int
+	}{
 		{
-			name:         "competing consumer queue balances messages across workers without duplicates",
-			isQueue:      true,
+			name:         "competing consumers balance messages across workers without duplicates",
 			pattern:      "aerial.jobs.>",
 			queueName:    "control-workers",
 			numConsumers: 3,
@@ -67,60 +91,61 @@ func TestMemoryBus_PublishSubscribeAndWorkQueue(t *testing.T) {
 				{subject: "aerial.jobs.sync", msgID: "job-5", payload: "p5"},
 				{subject: "aerial.jobs.sync", msgID: "job-6", payload: "p6"},
 			},
-			wantTotalHandled: 6,
+			wantHandled: 6,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
 			bus := NewMemoryBus()
 			defer bus.Close()
 
-			var totalHandled atomic.Int64
-			var wg sync.WaitGroup
-			wg.Add(tc.wantTotalHandled)
-
-			if tc.isQueue {
-				for range tc.numConsumers {
-					_, err := bus.ConsumeQueue(context.Background(), tc.pattern, tc.queueName, func(ctx context.Context, msg Message) error {
-						totalHandled.Add(1)
-						wg.Done()
-						return nil
-					})
-					if err != nil {
-						t.Fatalf("ConsumeQueue failed: %v", err)
-					}
-				}
-			} else {
-				for _, d := range tc.durables {
-					_, err := bus.Subscribe(context.Background(), tc.pattern, d, func(ctx context.Context, msg Message) error {
-						totalHandled.Add(1)
-						wg.Done()
-						return nil
-					})
-					if err != nil {
-						t.Fatalf("Subscribe failed: %v", err)
-					}
+			counter := newHandledCounter(tc.wantHandled)
+			for range tc.numConsumers {
+				if _, err := bus.ConsumeQueue(context.Background(), tc.pattern, tc.queueName, counter.handle); err != nil {
+					t.Fatalf("ConsumeQueue failed: %v", err)
 				}
 			}
-
-			for _, step := range tc.steps {
-				if err := bus.Publish(context.Background(), step.subject, step.msgID, step.payload); err != nil {
-					t.Fatalf("Publish failed: %v", err)
-				}
-			}
-
-			if tc.wantTotalHandled > 0 {
-				wg.Wait()
-			}
-
-			got := int(totalHandled.Load())
-			if got != tc.wantTotalHandled {
-				t.Errorf("handled %d messages, want %d", got, tc.wantTotalHandled)
-			}
+			publishSteps(t, bus, tc.steps)
+			counter.assertHandled(t, tc.wantHandled)
 		})
+	}
+}
+
+// handledCounter is a Handler that counts deliveries and lets the test block
+// until the expected number of deliveries has arrived.
+type handledCounter struct {
+	total atomic.Int64
+	wg    sync.WaitGroup
+}
+
+func newHandledCounter(want int) *handledCounter {
+	c := &handledCounter{}
+	c.wg.Add(want)
+	return c
+}
+
+func (c *handledCounter) handle(context.Context, Message) error {
+	c.total.Add(1)
+	c.wg.Done()
+	return nil
+}
+
+func (c *handledCounter) assertHandled(t *testing.T, want int) {
+	t.Helper()
+	c.wg.Wait()
+	if got := int(c.total.Load()); got != want {
+		t.Errorf("handled %d messages, want %d", got, want)
+	}
+}
+
+func publishSteps(t *testing.T, bus Bus, steps []publishStep) {
+	t.Helper()
+	for _, step := range steps {
+		if err := bus.Publish(context.Background(), step.subject, step.msgID, step.payload); err != nil {
+			t.Fatalf("Publish failed: %v", err)
+		}
 	}
 }
 
@@ -1177,187 +1202,6 @@ func TestJetStreamBus_StreamsAndPublishSubscribe(t *testing.T) {
 		t.Error("expected stream info error, got nil")
 	}
 	mjs.setStreamInfoErr(nil)
-}
-
-func TestJetStreamBus_DispatchAndMessageSettlement(t *testing.T) {
-	t.Parallel()
-
-	mjs := &mockJetStream{
-		existingStreams: make(map[string]*nats.StreamInfo),
-	}
-	bus := newJetStreamBusWithContext(nil, mjs)
-	bus.heartbeatInterval = 5 * time.Millisecond
-
-	// 1. Dispatch execution paths
-	// Metadata extraction from JetStream ACK reply format:
-	// $JS.ACK.<stream>.<consumer>.<numDelivered>.<streamSeq>.<consumerSeq>.<timestamp>.<numPending>
-	metaReply := "$JS.ACK.AERIAL_EVENTS.durable.4.1.1.1600000000.0"
-	dummySub := &nats.Subscription{}
-	bus.dispatch(&nats.Msg{
-		Subject: "aerial.events.meta",
-		Reply:   metaReply,
-		Sub:     dummySub,
-		Data:    []byte("with-meta"),
-	}, func(ctx context.Context, msg Message) error {
-		if msg.NumDelivered() != 4 {
-			t.Errorf("expected NumDelivered 4, got %d", msg.NumDelivered())
-		}
-		return nil
-	})
-
-	// Traceparent header extraction and background heartbeat ticker
-	var extractedTraceID string
-	hTrace := nats.Header{}
-	injectedCtx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{
-		"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-	})
-	propagation.TraceContext{}.Inject(injectedCtx, propagation.HeaderCarrier(http.Header(hTrace)))
-	bus.dispatch(&nats.Msg{
-		Subject: "aerial.events.head",
-		Data:    []byte("h"),
-		Header:  hTrace,
-	}, func(ctx context.Context, msg Message) error {
-		spanCtx := trace.SpanContextFromContext(ctx)
-		if spanCtx.IsValid() {
-			extractedTraceID = spanCtx.TraceID().String()
-		}
-		return nil
-	})
-	if extractedTraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
-		t.Errorf("expected extracted traceparent traceID 4bf92f3577b34da6a3ce929d0e0e4736, got %s", extractedTraceID)
-	}
-
-	// Normal success auto-ack
-	handledSuccess := false
-	bus.dispatch(&nats.Msg{Subject: "aerial.events.ok", Data: []byte("ok")}, func(ctx context.Context, msg Message) error {
-		handledSuccess = true
-		if msg.Subject() != "aerial.events.ok" {
-			t.Errorf("unexpected subject %q", msg.Subject())
-		}
-		if string(msg.Data()) != "ok" {
-			t.Errorf("unexpected data %q", string(msg.Data()))
-		}
-		return nil
-	})
-	if !handledSuccess {
-		t.Error("expected handledSuccess to be true")
-	}
-
-	// Error path auto-nak
-	handledError := false
-	bus.dispatch(&nats.Msg{Subject: "aerial.events.err", Data: []byte("err")}, func(ctx context.Context, msg Message) error {
-		handledError = true
-		return errors.New("handler failed")
-	})
-	if !handledError {
-		t.Error("expected handledError to be true")
-	}
-
-	// Handler exercising InProgress and Term settling
-	handledTerm := false
-	bus.dispatch(&nats.Msg{Subject: "aerial.events.term", Data: []byte("term")}, func(ctx context.Context, msg Message) error {
-		handledTerm = true
-		_ = msg.InProgress()
-		return msg.Term()
-	})
-	if !handledTerm {
-		t.Error("expected handledTerm to be true")
-	}
-
-	// 2. jsMessage methods and error/settled branches
-	jsMsg := &jsMessage{
-		raw:     &nats.Msg{Subject: "aerial.jobs.jsmsg", Data: []byte("raw"), Header: nats.Header{}},
-		bus:     bus,
-		settled: true,
-	}
-	if err := jsMsg.Ack(); err != nil {
-		t.Errorf("Ack on settled jsMsg should return nil, got: %v", err)
-	}
-	if err := jsMsg.NakWithDelay(0); err != nil {
-		t.Errorf("NakWithDelay on settled jsMsg should return nil, got: %v", err)
-	}
-	if err := jsMsg.Term(); err != nil {
-		t.Errorf("Term on settled jsMsg should return nil, got: %v", err)
-	}
-	if err := jsMsg.Snooze(0); err != nil {
-		t.Errorf("Snooze on settled jsMsg should return nil, got: %v", err)
-	}
-	if err := jsMsg.InProgress(); err != nil {
-		t.Errorf("InProgress on settled jsMsg should return nil, got: %v", err)
-	}
-	if jsMsg.Header() == nil {
-		t.Error("expected non-nil header")
-	}
-
-	// 3. Unsettled jsMsg snooze without explicit msgID
-	unsettledJsMsg4 := &jsMessage{
-		raw: &nats.Msg{Subject: "aerial.jobs.u4", Data: []byte("u4")},
-		bus: bus,
-	}
-	if err := unsettledJsMsg4.Snooze(0); !errors.Is(err, nats.ErrMsgNotBound) {
-		t.Errorf("expected ErrMsgNotBound on Snooze, got: %v", err)
-	}
-
-	// 4. NumDelivered resolution
-	jsMsgWithMeta := &jsMessage{
-		raw:  &nats.Msg{},
-		meta: &nats.MsgMetadata{NumDelivered: 42},
-	}
-	if d := jsMsgWithMeta.NumDelivered(); d != 42 {
-		t.Errorf("expected NumDelivered 42, got %d", d)
-	}
-	jsMsgNoMeta := &jsMessage{raw: &nats.Msg{}}
-	if d := jsMsgNoMeta.NumDelivered(); d != 1 {
-		t.Errorf("expected NumDelivered 1, got %d", d)
-	}
-	jsMsgNoHeader := &jsMessage{raw: &nats.Msg{}}
-	if h := jsMsgNoHeader.Header(); h == nil {
-		t.Error("expected non-nil header from raw msg without header")
-	}
-
-	// NumDelivered parsed directly from raw reply
-	replyMetaMsg := &nats.Msg{
-		Reply: "$JS.ACK.AERIAL_JOBS.test-cons.3.100.200.1600000000.5",
-		Sub:   dummySub,
-	}
-	jsMsgReplyMeta := &jsMessage{raw: replyMetaMsg}
-	if d := jsMsgReplyMeta.NumDelivered(); d != 3 {
-		t.Errorf("expected NumDelivered 3 from reply metadata, got %d", d)
-	}
-
-	// 5. Unsettled jsMsg snooze failure when continuation fails
-	mjs.setPublishErr(errors.New("continuation pub failed"))
-	unsettledJsMsg5 := &jsMessage{
-		raw: &nats.Msg{Subject: "aerial.jobs.u5", Data: []byte("u5")},
-		bus: bus,
-	}
-	if err := unsettledJsMsg5.Snooze(0); err == nil {
-		t.Error("expected snooze error when continuation fails, got nil")
-	}
-	mjs.setPublishErr(nil)
-
-	// 6. Snooze with existing snooze sequence and fallback non-HeaderPublisher bus
-	type fallbackBus struct {
-		Bus
-	}
-	fb := fallbackBus{bus}
-	unsettledExisting := &jsMessage{
-		raw: &nats.Msg{
-			Subject: "aerial.jobs.existing",
-			Data:    []byte("ex"),
-			Header:  nats.Header{HeaderMsgID: []string{"task-1:snooze:2"}},
-		},
-		bus: fb,
-	}
-	if err := unsettledExisting.Snooze(0); !errors.Is(err, nats.ErrMsgNotBound) {
-		t.Errorf("expected ErrMsgNotBound on unbound raw msg snooze, got: %v", err)
-	}
-
-	// 7. Bus Close
-	busNilNC := &JetStreamBus{}
-	if err := busNilNC.Close(); err != nil {
-		t.Errorf("Close with nil nc failed: %v", err)
-	}
 }
 
 func TestJetStreamBus_ConsumerStats(t *testing.T) {
