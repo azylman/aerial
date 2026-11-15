@@ -398,7 +398,7 @@ func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecy
 		details := s.resolveCIFailureDetails(ctx, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
 		prompt := s.formatCIFailurePrompt(ev, details)
 		if err := s.dispatchBrainDispatch(ctx, BrainDispatchRequest{
-			ID:             ciRemediationDispatchID(chunk.ID, ev.HeadSHA, failCount),
+			ID:             fmt.Sprintf("vanadis-%s-cifail-%d", chunk.ID, failCount),
 			Source:         "vanadis",
 			SessionID:      "vanadis-" + chunk.ID,
 			TargetID:       build.ThreadID,
@@ -565,12 +565,4 @@ func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *Vanadi
 func (s *VanadisServer) handlePRClosedUnmerged(ctx context.Context, chunk *VanadisChunk) error {
 	_, _, _, err := s.failChunkInternal(ctx, chunk.ID, "pr_closed_unmerged")
 	return err
-}
-
-func ciRemediationDispatchID(chunkID, headSHA string, failCount int) string {
-	cleanSHA := strings.TrimSpace(headSHA)
-	if cleanSHA != "" {
-		return fmt.Sprintf("vanadis-%s-cifail-%s-%d", chunkID, cleanSHA, failCount)
-	}
-	return fmt.Sprintf("vanadis-%s-cifail-%d", chunkID, failCount)
 }

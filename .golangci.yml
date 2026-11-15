@@ -214,6 +214,9 @@ linters:
           - nestif
         path: services/synapse/pr_lifecycle_events_test\.go
       - linters:
+          - funlen
+        path: services/coven/(extraction|procedural|server|skills_publisher)_test\.go
+      - linters:
           - cyclop
           - dupl
           - funlen

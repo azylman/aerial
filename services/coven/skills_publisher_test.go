@@ -29,17 +29,7 @@ type validateCompiledSkillMarkdownCase struct {
 	errContains    string
 }
 
-// longSkillBodyText is a markdown body line long enough on its own to clear the
-// 100-character minimum, so validation failures come from the field under test.
-const longSkillBodyText = "Body text with enough length to pass the minimum character count of one hundred characters.\n"
-
-// skillMarkdown renders SKILL.md frontmatter for name and description followed by body.
-func skillMarkdown(name, description, body string) string {
-	return "---\nname: " + name + "\ndescription: " + description + "\n---\n" + body
-}
-
 func validateCompiledSkillMarkdownCases(validMarkdown string, targetSkill *DiskSkill, existingSkills []DiskSkill) []validateCompiledSkillMarkdownCase {
-	const longDesc = "This description is long enough to pass validation."
 	return []validateCompiledSkillMarkdownCase{
 		{
 			name:           "ValidCreateDiscordDomain",
@@ -86,30 +76,52 @@ func validateCompiledSkillMarkdownCases(validMarkdown string, targetSkill *DiskS
 			errContains: "invalid skill markdown frontmatter",
 		},
 		{
-			name:        "ErrInvalidSkillName",
-			action:      "CREATE",
-			rawMarkdown: skillMarkdown("Invalid_Name!", "Description that is at least twenty characters long.", "# Title\n"+longSkillBodyText),
+			name:   "ErrInvalidSkillName",
+			action: "CREATE",
+			rawMarkdown: `---
+name: Invalid_Name!
+description: Description that is at least twenty characters long.
+---
+# Title
+Body text with enough length to pass the minimum character count of one hundred characters.
+`,
 			wantErr:     true,
 			errContains: "invalid skill name",
 		},
 		{
-			name:        "ErrDescriptionTooShort",
-			action:      "CREATE",
-			rawMarkdown: skillMarkdown("valid-name", "short", "# Title\n"+longSkillBodyText),
+			name:   "ErrDescriptionTooShort",
+			action: "CREATE",
+			rawMarkdown: `---
+name: valid-name
+description: short
+---
+# Title
+Body text with enough length to pass the minimum character count of one hundred characters.
+`,
 			wantErr:     true,
 			errContains: "out of bounds [20, 500]",
 		},
 		{
-			name:        "ErrMarkdownTooShort",
-			action:      "CREATE",
-			rawMarkdown: skillMarkdown("valid-name", longDesc, "short"),
+			name:   "ErrMarkdownTooShort",
+			action: "CREATE",
+			rawMarkdown: `---
+name: valid-name
+description: This description is long enough to pass validation.
+---
+short`,
 			wantErr:     true,
 			errContains: "out of bounds [100, 16384]",
 		},
 		{
-			name:        "ErrBlockedCoreSkillName",
-			action:      "CREATE",
-			rawMarkdown: skillMarkdown("self-improvement", longDesc, "# Blocked Skill Body\n"+longSkillBodyText),
+			name:   "ErrBlockedCoreSkillName",
+			action: "CREATE",
+			rawMarkdown: `---
+name: self-improvement
+description: This description is long enough to pass validation.
+---
+# Blocked Skill Body
+Body text with enough length to pass the minimum character count of one hundred characters.
+`,
 			wantErr:     true,
 			errContains: "is a blocked core skill",
 		},
@@ -117,14 +129,21 @@ func validateCompiledSkillMarkdownCases(validMarkdown string, targetSkill *DiskS
 			name:        "ErrEditNilTarget",
 			action:      "EDIT",
 			rawMarkdown: validMarkdown,
+			target:      nil,
 			wantErr:     true,
 			errContains: "target skill required for EDIT",
 		},
 		{
-			name:        "ErrEditNameMismatch",
-			action:      "EDIT",
-			target:      targetSkill,
-			rawMarkdown: skillMarkdown("different-name", longDesc, "# Different Name\n"+longSkillBodyText),
+			name:   "ErrEditNameMismatch",
+			action: "EDIT",
+			target: targetSkill,
+			rawMarkdown: `---
+name: different-name
+description: This description is long enough to pass validation.
+---
+# Different Name
+Body text with enough length to pass the minimum character count of one hundred characters.
+`,
 			wantErr:     true,
 			errContains: "does not match target",
 		},
@@ -137,7 +156,13 @@ func validateCompiledSkillMarkdownCases(validMarkdown string, targetSkill *DiskS
 				RawContent:  strings.Repeat("a", 500),
 				Description: "long content target",
 			},
-			rawMarkdown: skillMarkdown("custom-workflow", longDesc, "# Small Body\nBody text that is at least 100 bytes long so length check passes.\n"),
+			rawMarkdown: `---
+name: custom-workflow
+description: This description is long enough to pass validation.
+---
+# Small Body
+Body text that is at least 100 bytes long so length check passes.
+`,
 			wantErr:     true,
 			errContains: "shrunk by >30%",
 		},
@@ -598,54 +623,241 @@ type publishSkillChangesCase struct {
 }
 
 func publishSkillChangesCases() []publishSkillChangesCase {
-	const pat, cfgRepo, channel = "pat-123", "aerial-config", "1562837549255495693"
-	ha := []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}}
-	haEdit := SkillFileChange{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo", CommitSummary: "update ha", Action: "EDIT"}
-	haReview := haEdit
-	haReview.RequireReview = true
-	haReviewWithCandidate := haReview
-	haReviewWithCandidate.CandidateIDs = []int64{101}
-	haReviewWithCandidate.Candidates = []ProceduralCandidate{{
-		ID:          101,
-		LoadedSkill: "self-improvement",
-		Trigger:     "when running recursive grep",
-		Steps:       []string{"pass --exclude-dir=.git"},
-		Avoid:       []string{"do not run bare grep -r"},
-	}}
-	deployCreate := SkillFileChange{RelPath: "custom-skills/common/deploy/SKILL.md", Content: "bar", CommitSummary: "add deploy", Action: "CREATE"}
-
 	return []publishSkillChangesCase{
-		{name: "MissingToken", repo: cfgRepo, changes: ha, wantErr: true, errSubstr: "missing GITHUB_PAT"},
-		{name: "ForbiddenAerialRepo", token: pat, repo: "aerial", changes: ha, wantErr: true, errSubstr: "publishing directly to aerial repository is forbidden"},
-		{name: "EmptyChangesReturnsZero", token: pat, repo: cfgRepo},
-		{name: "InvalidRelPathRoot", token: pat, repo: cfgRepo, changes: []SkillFileChange{{RelPath: "SKILL.md", Content: "foo"}}, wantErr: true, errSubstr: "invalid skill relative path"},
-		{name: "InvalidRelPathBadDomain", token: pat, repo: cfgRepo, changes: []SkillFileChange{{RelPath: "custom-skills/voice/ha/SKILL.md", Content: "foo"}}, wantErr: true, errSubstr: "invalid skill relative path"},
-		{name: "OpenCovenPRAlreadyExists", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{openPRRefs: []string{"update/coven-skills-999"}}},
-		{name: "ListPullsError", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{failListPRs: true}, wantErr: true, errSubstr: "failed to list open pull requests"},
-		{name: "GetMainRefError", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{failGetMainRef: true}, wantErr: true, errSubstr: "failed to get heads/main"},
-		{name: "EmptyMainRefSHAError", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{emptyMainRefSHA: true}, wantErr: true, errSubstr: "empty SHA for heads/main"},
-		{name: "GetCommitError", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{failGetCommit: true}, wantErr: true, errSubstr: "failed to get commit"},
-		{name: "EmptyBaseTreeSHAError", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{emptyBaseTreeSHA: true}, wantErr: true, errSubstr: "empty tree SHA"},
-		{name: "CreateTreeError", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{failCreateTree: true}, wantErr: true, errSubstr: "failed to create tree"},
-		{name: "EmptyCreatedTreeSHAError", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{emptyTreeSHA: true}, wantErr: true, errSubstr: "empty SHA for created tree"},
-		{name: "CreateCommitError", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{failCreateCommit: true}, wantErr: true, errSubstr: "failed to create commit"},
-		{name: "EmptyCreatedCommitSHAError", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{emptyCommitSHA: true}, wantErr: true, errSubstr: "empty SHA for created commit"},
-		{name: "CreateRefError", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{failCreateRef: true}, wantErr: true, errSubstr: "failed to create ref"},
-		{name: "CreatePRErrorCleansBranch", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{failCreatePR: true}, wantErr: true, errSubstr: "failed to create pull request"},
-		{name: "CreatePRErrorCleansBranchDeleteErrorHandled", token: pat, repo: cfgRepo, changes: ha, serverCfg: mockGitHubServerConfig{failCreatePR: true, failDeleteRef: true}, wantErr: true, errSubstr: "failed to create pull request"},
-		{name: "SuccessSingleChangeWithAutoMergeAndBrainRegister", token: pat, repo: cfgRepo, channelID: channel, changes: []SkillFileChange{haEdit}, wantPR: 42},
-		{name: "SuccessMultipleChangesWithoutChannelID", token: pat, repo: cfgRepo, changes: []SkillFileChange{haEdit, deployCreate}, wantPR: 42},
 		{
-			name: "SuccessAutoMergeAndBrainRegisterFailuresHandledBestEffort", token: pat, repo: cfgRepo, channelID: channel, changes: []SkillFileChange{haEdit},
-			serverCfg: mockGitHubServerConfig{failAutoMerge: true, failBrainReg: true}, wantPR: 42,
+			name:      "MissingToken",
+			token:     "",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			wantErr:   true,
+			errSubstr: "missing GITHUB_PAT",
 		},
 		{
-			name: "SuccessRequireReviewSkipsAutoMergeAndNotifiesSystemChannel", token: pat, repo: cfgRepo, channelID: channel, changes: []SkillFileChange{haReviewWithCandidate},
-			wantPR: 42, checkCalls: true, wantDiscordCalls: 1,
+			name:      "ForbiddenAerialRepo",
+			token:     "pat-123",
+			repo:      "aerial",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			wantErr:   true,
+			errSubstr: "publishing directly to aerial repository is forbidden",
 		},
 		{
-			name: "SuccessRequireReviewNotifyFailureHandledBestEffort", token: pat, repo: cfgRepo, channelID: channel, changes: []SkillFileChange{haReview},
-			serverCfg: mockGitHubServerConfig{failBrainReg: true}, wantPR: 42, checkCalls: true, wantDiscordCalls: 1,
+			name:    "EmptyChangesReturnsZero",
+			token:   "pat-123",
+			repo:    "aerial-config",
+			changes: nil,
+			wantPR:  0,
+			wantErr: false,
+		},
+		{
+			name:      "InvalidRelPathRoot",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "SKILL.md", Content: "foo"}},
+			wantErr:   true,
+			errSubstr: "invalid skill relative path",
+		},
+		{
+			name:      "InvalidRelPathBadDomain",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/voice/ha/SKILL.md", Content: "foo"}},
+			wantErr:   true,
+			errSubstr: "invalid skill relative path",
+		},
+		{
+			name:      "OpenCovenPRAlreadyExists",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{openPRRefs: []string{"update/coven-skills-999"}},
+			wantPR:    0,
+			wantErr:   false,
+		},
+		{
+			name:      "ListPullsError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failListPRs: true},
+			wantErr:   true,
+			errSubstr: "failed to list open pull requests",
+		},
+		{
+			name:      "GetMainRefError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failGetMainRef: true},
+			wantErr:   true,
+			errSubstr: "failed to get heads/main",
+		},
+		{
+			name:      "EmptyMainRefSHAError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{emptyMainRefSHA: true},
+			wantErr:   true,
+			errSubstr: "empty SHA for heads/main",
+		},
+		{
+			name:      "GetCommitError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failGetCommit: true},
+			wantErr:   true,
+			errSubstr: "failed to get commit",
+		},
+		{
+			name:      "EmptyBaseTreeSHAError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{emptyBaseTreeSHA: true},
+			wantErr:   true,
+			errSubstr: "empty tree SHA",
+		},
+		{
+			name:      "CreateTreeError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failCreateTree: true},
+			wantErr:   true,
+			errSubstr: "failed to create tree",
+		},
+		{
+			name:      "EmptyCreatedTreeSHAError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{emptyTreeSHA: true},
+			wantErr:   true,
+			errSubstr: "empty SHA for created tree",
+		},
+		{
+			name:      "CreateCommitError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failCreateCommit: true},
+			wantErr:   true,
+			errSubstr: "failed to create commit",
+		},
+		{
+			name:      "EmptyCreatedCommitSHAError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{emptyCommitSHA: true},
+			wantErr:   true,
+			errSubstr: "empty SHA for created commit",
+		},
+		{
+			name:      "CreateRefError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failCreateRef: true},
+			wantErr:   true,
+			errSubstr: "failed to create ref",
+		},
+		{
+			name:      "CreatePRErrorCleansBranch",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failCreatePR: true},
+			wantErr:   true,
+			errSubstr: "failed to create pull request",
+		},
+		{
+			name:      "CreatePRErrorCleansBranchDeleteErrorHandled",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failCreatePR: true, failDeleteRef: true},
+			wantErr:   true,
+			errSubstr: "failed to create pull request",
+		},
+		{
+			name:      "SuccessSingleChangeWithAutoMergeAndBrainRegister",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			channelID: "1562837549255495693",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo", CommitSummary: "update ha", Action: "EDIT"}},
+			wantPR:    42,
+			wantErr:   false,
+		},
+		{
+			name:      "SuccessMultipleChangesWithoutChannelID",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			channelID: "",
+			changes: []SkillFileChange{
+				{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo", CommitSummary: "update ha", Action: "EDIT"},
+				{RelPath: "custom-skills/common/deploy/SKILL.md", Content: "bar", CommitSummary: "add deploy", Action: "CREATE"},
+			},
+			wantPR:  42,
+			wantErr: false,
+		},
+		{
+			name:      "SuccessAutoMergeAndBrainRegisterFailuresHandledBestEffort",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			channelID: "1562837549255495693",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo", CommitSummary: "update ha", Action: "EDIT"}},
+			serverCfg: mockGitHubServerConfig{failAutoMerge: true, failBrainReg: true},
+			wantPR:    42,
+			wantErr:   false,
+		},
+		{
+			name:      "SuccessRequireReviewSkipsAutoMergeAndNotifiesSystemChannel",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			channelID: "1562837549255495693",
+			changes: []SkillFileChange{{
+				RelPath:       "custom-skills/discord/ha/SKILL.md",
+				Content:       "foo",
+				CommitSummary: "update ha",
+				Action:        "EDIT",
+				RequireReview: true,
+				CandidateIDs:  []int64{101},
+				Candidates: []ProceduralCandidate{{
+					ID:          101,
+					LoadedSkill: "self-improvement",
+					Trigger:     "when running recursive grep",
+					Steps:       []string{"pass --exclude-dir=.git"},
+					Avoid:       []string{"do not run bare grep -r"},
+				}},
+			}},
+			wantPR:             42,
+			wantErr:            false,
+			checkCalls:         true,
+			wantAutoMergeCalls: 0,
+			wantBrainRegCalls:  0,
+			wantDiscordCalls:   1,
+		},
+		{
+			name:      "SuccessRequireReviewNotifyFailureHandledBestEffort",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			channelID: "1562837549255495693",
+			changes: []SkillFileChange{{
+				RelPath:       "custom-skills/discord/ha/SKILL.md",
+				Content:       "foo",
+				CommitSummary: "update ha",
+				Action:        "EDIT",
+				RequireReview: true,
+			}},
+			serverCfg:          mockGitHubServerConfig{failBrainReg: true},
+			wantPR:             42,
+			wantErr:            false,
+			checkCalls:         true,
+			wantAutoMergeCalls: 0,
+			wantBrainRegCalls:  0,
+			wantDiscordCalls:   1,
 		},
 	}
 }
@@ -816,30 +1028,40 @@ type consolidateProceduralSkillsCase struct {
 	wantPendingIndices      []int
 }
 
-// haOpsCands is a single pending candidate scoped to the existing ha-ops skill.
-func haOpsCands(id int64) []ProceduralCandidate {
-	return []ProceduralCandidate{testProcCand(id, "ha-ops", "trigger 1", []string{"avoid this"}, nil)}
-}
-
-// unscopedCandPair is two candidates with no loaded skill and identical
-// embeddings, so the planner clusters them into one CREATE batch.
-func unscopedCandPair(firstID int64) []ProceduralCandidate {
-	return []ProceduralCandidate{
-		testProcCand(firstID, "", "trigger 1", nil, testEmbeddingAt(2, 1.0)),
-		testProcCand(firstID+1, "", "trigger 2", nil, testEmbeddingAt(2, 1.0)),
-	}
-}
-
 func consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD string) []consolidateProceduralSkillsCase {
-	createResp := fmt.Sprintf(`{"action":"CREATE","name":"new-flow","domain":"discord","commit_summary":"add new flow","markdown":%q}`, validNewSkillMD)
-	editResp := fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","domain":"discord","commit_summary":"update ha-ops","markdown":%q}`, validSkillMD)
 	return []consolidateProceduralSkillsCase{
-		{name: "ExtractionMutexLockedReturnsZero", lockExtraction: true},
-		{name: "NilStoreFails", nilStore: true, wantErr: true},
-		{name: "NilPublisherFails", nilPublisher: true, wantErr: true},
-		{name: "NilLLMFails", nilLLM: true, wantErr: true},
-		{name: "GetPendingCandidatesStoreError", storeFailOp: "GetPendingProceduralCandidates", wantErr: true},
-		{name: "NoPendingCandidatesReturnsZero"},
+		{
+			name:           "ExtractionMutexLockedReturnsZero",
+			lockExtraction: true,
+			wantPR:         0,
+			wantErr:        false,
+		},
+		{
+			name:     "NilStoreFails",
+			nilStore: true,
+			wantErr:  true,
+		},
+		{
+			name:         "NilPublisherFails",
+			nilPublisher: true,
+			wantErr:      true,
+		},
+		{
+			name:    "NilLLMFails",
+			nilLLM:  true,
+			wantErr: true,
+		},
+		{
+			name:        "GetPendingCandidatesStoreError",
+			storeFailOp: "GetPendingProceduralCandidates",
+			wantErr:     true,
+		},
+		{
+			name:    "NoPendingCandidatesReturnsZero",
+			cands:   nil,
+			wantPR:  0,
+			wantErr: false,
+		},
 		{
 			name:            "ScanCustomSkillsDirError",
 			cands:           []ProceduralCandidate{testProcCand(1, "ha-ops", "trigger", []string{"avoid"}, nil)},
@@ -852,35 +1074,129 @@ func consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD string) []co
 				testProcCand(10, "self-improvement", "trigger 1", nil, nil),
 				testProcCand(11, "writing-plans", "trigger 2", nil, nil),
 			},
+			wantPR:             0,
+			wantErr:            false,
+			wantMarkSkipped:    false,
 			wantPendingIndices: []int{0, 1},
 		},
-		{name: "LLMInvocationErrorBatchSkipped", cands: haOpsCands(20), llmErr: errors.New("llm execution error")},
-		{name: "LLMMalformedJSONBatchSkipped", cands: haOpsCands(21), llmResp: "not a json object"},
-		{name: "DesignerReturnsNOOPCandidateMarkedSkipped", cands: haOpsCands(22), llmResp: `{"action":"NOOP"}`, wantMarkSkipped: true},
-		{name: "DesignerReturnsUnknownActionBatchSkipped", cands: haOpsCands(23), llmResp: `{"action":"DELETE"}`},
-		{name: "DesignerValidationFailsBatchSkipped", cands: haOpsCands(24), llmResp: `{"action":"EDIT","name":"ha-ops","markdown":"short"}`},
-		{name: "PublisherFailsReturnsError", cands: unscopedCandPair(25), llmResp: createResp, pubErr: errors.New("github publish error"), wantErr: true},
-		{name: "SuccessCREATEBatch", cands: unscopedCandPair(30), llmResp: createResp, pubPR: 88, wantPR: 88, wantMarkConsolidate: true},
-		{name: "SuccessEDITBatch", cands: haOpsCands(40), llmResp: editResp, pubPR: 89, wantPR: 89, wantMarkConsolidate: true},
-		{name: "PublisherReturnsZeroPRAlreadyOpenCandidatesNotConsolidated", cands: haOpsCands(50), llmResp: editResp},
+		{
+			name: "LLMInvocationErrorBatchSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(20, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmErr:  errors.New("llm execution error"),
+			wantPR:  0,
+			wantErr: false,
+		},
+		{
+			name: "LLMMalformedJSONBatchSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(21, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp: "not a json object",
+			wantPR:  0,
+			wantErr: false,
+		},
+		{
+			name: "DesignerReturnsNOOPCandidateMarkedSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(22, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp:         `{"action":"NOOP"}`,
+			wantPR:          0,
+			wantErr:         false,
+			wantMarkSkipped: true,
+		},
+		{
+			name: "DesignerReturnsUnknownActionBatchSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(23, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp: `{"action":"DELETE"}`,
+			wantPR:  0,
+			wantErr: false,
+		},
+		{
+			name: "DesignerValidationFailsBatchSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(24, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp: `{"action":"EDIT","name":"ha-ops","markdown":"short"}`,
+			wantPR:  0,
+			wantErr: false,
+		},
+		{
+			name: "PublisherFailsReturnsError",
+			cands: []ProceduralCandidate{
+				testProcCand(25, "", "trigger 1", nil, testEmbeddingAt(2, 1.0)),
+				testProcCand(26, "", "trigger 2", nil, testEmbeddingAt(2, 1.0)),
+			},
+			llmResp: fmt.Sprintf(`{"action":"CREATE","name":"new-flow","domain":"discord","commit_summary":"add new flow","markdown":%q}`, validNewSkillMD),
+			pubErr:  errors.New("github publish error"),
+			wantErr: true,
+		},
+		{
+			name: "SuccessCREATEBatch",
+			cands: []ProceduralCandidate{
+				testProcCand(30, "", "trigger 1", nil, testEmbeddingAt(2, 1.0)),
+				testProcCand(31, "", "trigger 2", nil, testEmbeddingAt(2, 1.0)),
+			},
+			llmResp:             fmt.Sprintf(`{"action":"CREATE","name":"new-flow","domain":"discord","commit_summary":"add new flow","markdown":%q}`, validNewSkillMD),
+			pubPR:               88,
+			wantPR:              88,
+			wantErr:             false,
+			wantMarkConsolidate: true,
+		},
+		{
+			name: "SuccessEDITBatch",
+			cands: []ProceduralCandidate{
+				testProcCand(40, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp:             fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","domain":"discord","commit_summary":"update ha-ops","markdown":%q}`, validSkillMD),
+			pubPR:               89,
+			wantPR:              89,
+			wantErr:             false,
+			wantMarkConsolidate: true,
+		},
+		{
+			name: "PublisherReturnsZeroPRAlreadyOpenCandidatesNotConsolidated",
+			cands: []ProceduralCandidate{
+				testProcCand(50, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp:             fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","domain":"discord","commit_summary":"update ha-ops","markdown":%q}`, validSkillMD),
+			pubPR:               0,
+			wantPR:              0,
+			wantErr:             false,
+			wantMarkConsolidate: false,
+		},
 		{
 			name: "CollidingBatchesInSamePassDeferred",
 			cands: []ProceduralCandidate{
 				testProcCand(60, "ha-ops", "trigger 1", []string{"instruction 1"}, nil),
 				testProcCand(61, "", "trigger 2", nil, testEmbeddingAt(0, 1.0)),
 			},
-			llmResp:                 editResp,
+			llmResp:                 fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","domain":"discord","commit_summary":"update ha-ops","markdown":%q}`, validSkillMD),
 			pubPR:                   95,
 			wantPR:                  95,
+			wantErr:                 false,
 			wantChangesLen:          1,
 			wantConsolidatedIndices: []int{0},
 			wantPendingIndices:      []int{1},
 		},
-		{name: "ShortFrictionAlertBatchNotifiedAndMarkedSkipped", cands: makeProceduralCandidateBatch(81, 5), wantMarkSkipped: true, wantAlertsLen: 1},
+		{
+			name:            "ShortFrictionAlertBatchNotifiedAndMarkedSkipped",
+			cands:           makeProceduralCandidateBatch(81, 5),
+			wantPR:          0,
+			wantErr:         false,
+			wantMarkSkipped: true,
+			wantAlertsLen:   1,
+		},
 		{
 			name:               "ShortFrictionAlertErrorRetainsPending",
 			cands:              makeProceduralCandidateBatch(91, 5),
 			alertErr:           errors.New("alert post failed"),
+			wantPR:             0,
+			wantErr:            false,
 			wantAlertsLen:      1,
 			wantPendingIndices: []int{0, 1, 2, 3, 4},
 		},
