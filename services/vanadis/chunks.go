@@ -13,8 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 // VanadisChunkSummary captures a lightweight view of a chunk for advancement outputs.

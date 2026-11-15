@@ -18,9 +18,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/azylman/aerial/services/eri/pkg/mcp"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
-	"github.com/google/uuid"
 )
 
 var apiKeyQueryRegex = regexp.MustCompile(`([?&]key=)[^&]+`)

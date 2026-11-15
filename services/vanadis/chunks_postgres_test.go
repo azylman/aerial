@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -92,48 +94,30 @@ func errRow(err error) *mockRow { return &mockRow{err: err} }
 
 // advanceRow answers AdvanceChunkByPR's chunk+build select for chunk c1 of build b1.
 func advanceRow(cStatus, bStatus string) *genericMockRow {
-	return &genericMockRow{scanFn: func(dest ...any) error {
-		*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string) = "c1", "b1", 0, "pr", "Chunk 1", cStatus
-		*dest[6].(*string), *dest[7].(*int), *dest[8].(*string), *dest[9].(*string), *dest[10].(*string), *dest[11].(*string) = "thread-1", 2, "Build 1", "Objective 1", bStatus, "msg-1"
-		return nil
-	}}
+	return valuesRow("c1", "b1", 0, "pr", "Chunk 1", cStatus, "thread-1", 2, "Build 1", "Objective 1", bStatus, "msg-1")
 }
 
 // actionChunkRow answers CompleteActionChunk's chunk select for chunk c1 of build b1.
 func actionChunkRow(mode, cStatus string) *genericMockRow {
-	return &genericMockRow{scanFn: func(dest ...any) error {
-		*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string) = "c1", "b1", 0, mode, "Action Chunk", cStatus
-		return nil
-	}}
+	return valuesRow("c1", "b1", 0, mode, "Action Chunk", cStatus)
 }
 
 // actionBuildRow answers CompleteActionChunk's build select for build b1.
 func actionBuildRow(bStatus string) *genericMockRow {
-	return &genericMockRow{scanFn: func(dest ...any) error {
-		*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string) = "b1", "thread-1", 2, "Build 1", "Objective 1", bStatus, "msg-1"
-		return nil
-	}}
+	return valuesRow("b1", "thread-1", 2, "Build 1", "Objective 1", bStatus, "msg-1")
 }
 
 // failRow answers FailChunk's joined chunk+build select for action chunk c1 of build b1.
 func failRow(cStatus, bStatus string) *genericMockRow {
 	return &genericMockRow{scanFn: func(dest ...any) error {
 		now := time.Now()
-		*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string) = "c1", "b1", 0, "action", "", "Fail Chunk Title", "Instructions"
-		*dest[7].(*[]string), *dest[8].(*[]string), *dest[9].(*string), *dest[10].(*[]string), *dest[11].(*string), *dest[12].(*int) = []string{}, []string{}, "medium", []string{}, cStatus, 0
-		*dest[13].(*sql.NullTime), *dest[14].(*sql.NullTime), *dest[15].(*time.Time), *dest[16].(*time.Time) = sql.NullTime{Time: now, Valid: true}, sql.NullTime{Time: now, Valid: true}, now, now
-		*dest[17].(*string), *dest[18].(*string), *dest[19].(*int), *dest[20].(*string), *dest[21].(*string), *dest[22].(*string), *dest[23].(*string) = "b1", "thread-1", 2, "Build 1", "Objective 1", "Context", bStatus
-		*dest[24].(*string), *dest[25].(*time.Time), *dest[26].(*time.Time) = "msg-1", now, now
-		return nil
+		return scanValues(dest, "c1", "b1", 0, "action", "", "Fail Chunk Title", "Instructions", []string{}, []string{}, "medium", []string{}, cStatus, 0, sql.NullTime{Time: now, Valid: true}, sql.NullTime{Time: now, Valid: true}, now, now, "b1", "thread-1", 2, "Build 1", "Objective 1", "Context", bStatus, "msg-1", now, now)
 	}}
 }
 
 // idPairRow answers FailChunkByPR's RETURNING build_id, id.
 func idPairRow(buildID, chunkID string) *genericMockRow {
-	return &genericMockRow{scanFn: func(dest ...any) error {
-		*dest[0].(*string), *dest[1].(*string) = buildID, chunkID
-		return nil
-	}}
+	return valuesRow(buildID, chunkID)
 }
 
 // prChunk is a one-line chunk summary fixture for advancement scans.
@@ -440,6 +424,31 @@ type genericMockRow struct {
 	scanFn func(dest ...any) error
 }
 
+// valuesRow is a pgx.Row whose Scan assigns vals positionally via scanValues.
+func valuesRow(vals ...any) *genericMockRow {
+	return &genericMockRow{scanFn: func(dest ...any) error { return scanValues(dest, vals...) }}
+}
+
+// scanValues assigns vals positionally into Scan destinations and, like a real
+// pgx Scan, returns an error when a destination cannot hold its value instead
+// of panicking. A nil val leaves that destination untouched.
+func scanValues(dest []any, vals ...any) error {
+	if len(vals) > len(dest) {
+		return fmt.Errorf("scan: %d values for %d destinations", len(vals), len(dest))
+	}
+	for i, v := range vals {
+		if v == nil {
+			continue
+		}
+		ptr, val := reflect.ValueOf(dest[i]), reflect.ValueOf(v)
+		if ptr.Kind() != reflect.Pointer || ptr.IsNil() || ptr.Elem().Type() != val.Type() {
+			return fmt.Errorf("scan column %d: destination %T cannot hold %T", i, dest[i], v)
+		}
+		ptr.Elem().Set(val)
+	}
+	return nil
+}
+
 func (r *genericMockRow) Scan(dest ...any) error {
 	if r.scanFn != nil {
 		return r.scanFn(dest...)
@@ -708,10 +717,7 @@ func TestPostgresVanadisStore_ClaimStalledChunk(t *testing.T) {
 						if tc.scanErr != nil {
 							return tc.scanErr
 						}
-						*dest[0].(*string), *dest[1].(*string), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string) = tc.chunkID, "b1", tc.mode, "Stalled", tc.status
-						*dest[6].(*int), *dest[7].(*int) = tc.prNumber, tc.nudges
-						*dest[8].(*string), *dest[9].(*string), *dest[10].(*string), *dest[11].(*string) = "b1", "thread-1", "Objective", tc.buildStatus
-						return nil
+						return scanValues(dest, tc.chunkID, "b1", nil, tc.mode, "Stalled", tc.status, tc.prNumber, tc.nudges, "b1", "thread-1", "Objective", tc.buildStatus)
 					}}
 				},
 				execFn: func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {

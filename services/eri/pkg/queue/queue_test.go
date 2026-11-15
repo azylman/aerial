@@ -21,6 +21,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
+
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -28,8 +31,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
-	"github.com/bwmarrin/discordgo"
-	"github.com/google/uuid"
 )
 
 func TestWorkerPool_ConfigInjection(t *testing.T) {
@@ -1087,11 +1088,11 @@ func runProcessBurstQuotaPauseCase(t *testing.T, tc processBurstQuotaPauseCase) 
 	var deliveredTexts []string
 	var mu sync.Mutex
 	doneCh := make(chan struct{}, len(tc.messages))
-	haroSrv, getOneShots := newMockHaroOneShotServer(t)
+	haroBus, getOneShots := newMockHaroOneShotBus(t)
 
 	cfg := WorkerPoolConfig{
 		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
-		HaroURL: haroSrv.URL,
+		EventBus: haroBus,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			runnerCalls++

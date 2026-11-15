@@ -546,7 +546,7 @@ type checkOpenPRConflictsTestCase struct {
 	wantErrSubstr         string
 	wantConflict          bool
 	wantConflictPR        int
-	wantConflictQueued    int
+	wantConflictPublished int
 	wantPrompts           int
 	wantDispatches        int
 	wantPromptSubs        []string
@@ -725,8 +725,16 @@ func runCheckOpenPRConflictsCase(ctx context.Context, t *testing.T, tc checkOpen
 
 	assertConflictCheckCacheAndPuts(t, tc, srv, gotUpdated)
 	assertConflictCheckRegistryCalls(t, tc, mockReg)
-	if mockBus != nil && len(mockBus.insertedConflictJobs) != tc.wantConflictQueued {
-		t.Errorf("insertedConflictJobs = %d, want %d", len(mockBus.insertedConflictJobs), tc.wantConflictQueued)
+	if mockBus != nil && tc.wantConflictPublished > 0 {
+		conflictCount := 0
+		for _, evt := range mockBus.publishedPREvents {
+			if evt.Event == "conflict" {
+				conflictCount++
+			}
+		}
+		if conflictCount != tc.wantConflictPublished {
+			t.Errorf("published conflict events = %d, want %d", conflictCount, tc.wantConflictPublished)
+		}
 	}
 	assertConflictCheckDispatcherCalls(t, tc, mockDisp)
 }
@@ -833,17 +841,18 @@ func checkOpenPRConflictsCasesPart1() []checkOpenPRConflictsTestCase {
 			wantErrSubstr:     "list open prs",
 		},
 		{
-			name:              "422 merge conflict transitions and dispatches via background /dispatch without DM",
-			autoUpdateAuthors: []string{"trusted-author"},
-			openPRs:           []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
-			prStatusCodes:     []int{http.StatusUnprocessableEntity},
-			prResponses:       []string{`{"message":"merge conflict between base and head"}`},
-			wantConflict:      true,
-			wantConflictPR:    543,
-			wantDMs:           0,
-			wantDispatches:    1,
-			wantPromptSubs:    []string{"Merge conflict detected on PR #543"},
-			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/543/update-branch"},
+			name:                  "422 merge conflict transitions to conflict and publishes lifecycle event",
+			useBus:                true,
+			autoUpdateAuthors:     []string{"trusted-author"},
+			openPRs:               []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
+			prStatusCodes:         []int{http.StatusUnprocessableEntity},
+			prResponses:           []string{`{"message":"merge conflict between base and head"}`},
+			wantConflict:          true,
+			wantConflictPR:        543,
+			wantConflictPublished: 1,
+			wantDMs:               0,
+			wantDispatches:        0,
+			wantUpdatedPRs:        []string{"/repos/azylman/aerial/pulls/543/update-branch"},
 		},
 	}
 }
@@ -851,18 +860,18 @@ func checkOpenPRConflictsCasesPart1() []checkOpenPRConflictsTestCase {
 func checkOpenPRConflictsCasesPart2() []checkOpenPRConflictsTestCase {
 	return []checkOpenPRConflictsTestCase{
 		{
-			name:               "409 conflict with bus client enqueues MergeConflictArgs on merge_conflict queue",
-			useBus:             true,
-			autoUpdateAuthors:  []string{"trusted-author"},
-			openPRs:            []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
-			prStatusCodes:      []int{http.StatusConflict},
-			prResponses:        []string{`{"message":"Merge conflict"}`},
-			wantConflict:       true,
-			wantConflictPR:     543,
-			wantConflictQueued: 1,
-			wantDMs:            0,
-			wantDispatches:     0,
-			wantUpdatedPRs:     []string{"/repos/azylman/aerial/pulls/543/update-branch"},
+			name:                  "409 conflict with bus client publishes conflict event without enqueueing merge conflict job",
+			useBus:                true,
+			autoUpdateAuthors:     []string{"trusted-author"},
+			openPRs:               []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
+			prStatusCodes:         []int{http.StatusConflict},
+			prResponses:           []string{`{"message":"Merge conflict"}`},
+			wantConflict:          true,
+			wantConflictPR:        543,
+			wantConflictPublished: 1,
+			wantDMs:               0,
+			wantDispatches:        0,
+			wantUpdatedPRs:        []string{"/repos/azylman/aerial/pulls/543/update-branch"},
 		},
 		{
 			name:              "bus insert error on conflict logs warning without failing check",
@@ -889,6 +898,7 @@ func checkOpenPRConflictsCasesPart2() []checkOpenPRConflictsTestCase {
 		},
 		{
 			name:              "conflicted oldest PR transitions to conflict and advances to update next clean PR",
+			useBus:            true,
 			autoUpdateAuthors: []string{"trusted-author"},
 			openPRs: []GitHubPullRequest{
 				makeTestOpenPR(545, "feat/conflicted-1", "head545", "trusted-author"),
@@ -898,11 +908,12 @@ func checkOpenPRConflictsCasesPart2() []checkOpenPRConflictsTestCase {
 				`{"message":"merge conflict between base and head"}`,
 				`{"message":"Updating pull request branch."}`,
 			},
-			prStatusCodes:  []int{http.StatusUnprocessableEntity, http.StatusAccepted},
-			wantConflict:   true,
-			wantConflictPR: 545,
-			wantDMs:        0,
-			wantDispatches: 1,
+			prStatusCodes:         []int{http.StatusUnprocessableEntity, http.StatusAccepted},
+			wantConflict:          true,
+			wantConflictPR:        545,
+			wantConflictPublished: 1,
+			wantDMs:               0,
+			wantDispatches:        0,
 			wantUpdatedPRs: []string{
 				"/repos/azylman/aerial/pulls/545/update-branch",
 				"/repos/azylman/aerial/pulls/546/update-branch",
@@ -1289,27 +1300,6 @@ func resolvePRFromCommitSHATestCases() []resolvePRFromCommitSHATestCase {
 func TestMergeConflictAndDeployHelpers(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-
-	t.Run("nil router server returns nil", func(t *testing.T) {
-		t.Parallel()
-		var s *RouterServer
-		if err := s.enqueueMergeConflict(ctx, MergeConflictArgs{}); err != nil {
-			t.Errorf("enqueueMergeConflict(nil) = %v", err)
-		}
-		if err := s.ProcessMergeConflict(ctx, MergeConflictArgs{}); err != nil {
-			t.Errorf("ProcessMergeConflict(nil) = %v", err)
-		}
-	})
-
-	t.Run("enqueueMergeConflict with bus publish error propagates", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{err: errors.New("nats down")}
-		srv := &RouterServer{bus: bus}
-		err := srv.enqueueMergeConflict(ctx, MergeConflictArgs{Repo: "azylman/aerial", PRNumber: 10})
-		if err == nil {
-			t.Fatalf("expected error from publishJetStreamJob, got nil")
-		}
-	})
 
 	t.Run("resolveDeployEventTargetID handles empty target and resolution", func(t *testing.T) {
 		t.Parallel()

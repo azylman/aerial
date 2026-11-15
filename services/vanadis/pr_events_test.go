@@ -10,11 +10,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 type recordedRequest struct {
@@ -421,8 +422,8 @@ func TestHandlePRCIFailed_Remediation(t *testing.T) {
 				assert.Equal(t, "vanadis-c-ci1", r.Body["session_id"])
 				assert.Equal(t, "123456789012345678", r.Body["target_id"])
 				assert.Empty(t, r.Body["skip_if_active"])
-				assert.Contains(t, r.Body["prompt"].(string), "Go Unit Tests")
-				assert.Contains(t, r.Body["prompt"].(string), "--- FAIL: TestA")
+				assert.Contains(t, r.Body["prompt"], "Go Unit Tests")
+				assert.Contains(t, r.Body["prompt"], "--- FAIL: TestA")
 			}
 		}
 		assert.True(t, foundDispatch, "expected POST /dispatch to be called")
@@ -513,7 +514,9 @@ func TestHandlePRCIFailed_DispatchIDVariants(t *testing.T) {
 		var dispatchIDs []string
 		for _, r := range *reqs {
 			if r.Path == "/dispatch" {
-				dispatchIDs = append(dispatchIDs, r.Body["id"].(string))
+				id, ok := r.Body["id"].(string)
+				require.Truef(t, ok, "dispatch id is %T, want string", r.Body["id"])
+				dispatchIDs = append(dispatchIDs, id)
 			}
 		}
 		require.Len(t, dispatchIDs, 2)
@@ -558,7 +561,7 @@ func TestHandlePRCIFailed_CapReached(t *testing.T) {
 		for _, r := range *reqs {
 			if r.Path == "/discord/message" {
 				foundDirectMessage = true
-				assert.Contains(t, r.Body["content"].(string), "remediation cap 3/3 reached")
+				assert.Contains(t, r.Body["content"], "remediation cap 3/3 reached")
 			}
 			if r.Path == "/restate/awakeables/awk-m-ci/resolve" {
 				foundAwakeableReject = true
@@ -703,7 +706,7 @@ func TestHandlePRConflict_DeployFailed_SyncFailed(t *testing.T) {
 				assert.Equal(t, "c-conf", r.Body["vanadis_chunk_id"])
 				assert.Empty(t, r.Body["skip_if_active"])
 				assert.Equal(t, "medium", r.Body["effort"])
-				assert.Contains(t, r.Body["prompt"].(string), "Merge conflict detected")
+				assert.Contains(t, r.Body["prompt"], "Merge conflict detected")
 			}
 		}
 		assert.True(t, foundDispatch, "expected POST /dispatch to be called")
@@ -736,8 +739,8 @@ func TestHandlePRConflict_DeployFailed_SyncFailed(t *testing.T) {
 		for _, r := range *reqs {
 			if r.Path == "/prompt" {
 				foundPrompt = true
-				assert.Contains(t, r.Body["prompt"].(string), "Deployment failed for job aerial-eri")
-				assert.Contains(t, r.Body["prompt"].(string), "pod CrashLoopBackOff")
+				assert.Contains(t, r.Body["prompt"], "Deployment failed for job aerial-eri")
+				assert.Contains(t, r.Body["prompt"], "pod CrashLoopBackOff")
 			}
 		}
 		assert.True(t, foundPrompt)
@@ -769,8 +772,8 @@ func TestHandlePRConflict_DeployFailed_SyncFailed(t *testing.T) {
 		for _, r := range *reqs {
 			if r.Path == "/prompt" {
 				foundPrompt = true
-				assert.Contains(t, r.Body["prompt"].(string), "Git sync failed")
-				assert.Contains(t, r.Body["prompt"].(string), "git checkout conflict")
+				assert.Contains(t, r.Body["prompt"], "Git sync failed")
+				assert.Contains(t, r.Body["prompt"], "git checkout conflict")
 			}
 		}
 		assert.True(t, foundPrompt)
@@ -952,7 +955,8 @@ func TestHandlePRDeploySuccess(t *testing.T) {
 		for _, r := range *reqs {
 			if r.Path == "/prompt" {
 				promptCount++
-				prompt := r.Body["prompt"].(string)
+				prompt, ok := r.Body["prompt"].(string)
+				require.Truef(t, ok, "prompt is %T, want string", r.Body["prompt"])
 				assert.Contains(t, prompt, "Vanadis build b-d2 completed")
 				assert.Contains(t, prompt, "Objective: Test Objective")
 				assert.Contains(t, prompt, "Completed Chunks Ledger:")
@@ -1119,10 +1123,7 @@ func TestPostgresVanadisStore_PREventMethods(t *testing.T) {
 				return pgconn.NewCommandTag("UPDATE 1"), nil
 			},
 			queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-				return &genericMockRow{scanFn: func(dest ...any) error {
-					*dest[0].(*int) = 2
-					return nil
-				}}
+				return valuesRow(2)
 			},
 		})
 

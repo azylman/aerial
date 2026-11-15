@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/tracing"
-	"github.com/azylman/aerial/services/eri/pkg/session"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 // AgyEnvInput holds environment configuration parameters.

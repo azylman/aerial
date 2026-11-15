@@ -15,12 +15,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 type PromptDispatchRequest struct {

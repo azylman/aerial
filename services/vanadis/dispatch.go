@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // dispatchChunkTurn renders the chunk prompt (optionally prefixed by a harness notice) and dispatches it to Brain

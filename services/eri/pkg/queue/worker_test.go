@@ -272,10 +272,10 @@ func runPersistentDaemonTurnCase(t *testing.T, tc persistentDaemonTurnCase) {
 
 	var deliveredText string
 	doneCh := make(chan struct{})
-	haroSrv, getOneShots := newMockHaroOneShotServer(t)
+	haroBus, getOneShots := newMockHaroOneShotBus(t)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool: procPool, SessionManager: session.New(tmpHome, tempData),
-		Store: store, TimeoutMinutes: 1, HaroURL: haroSrv.URL,
+		Store: store, TimeoutMinutes: 1, EventBus: haroBus,
 		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
 			deliveredText = content
 			return nil

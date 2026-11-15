@@ -6,8 +6,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"gopkg.in/yaml.v3"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.

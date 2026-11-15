@@ -8,8 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	_ "modernc.org/sqlite"
+
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 )
 
 const sqliteSchema = `CREATE TABLE IF NOT EXISTS messages (

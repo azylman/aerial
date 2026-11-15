@@ -10,37 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
-	"go.opentelemetry.io/otel/attribute"
 )
-
-func TestWorkerPool_ResolveSynapseURL(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		pool *WorkerPool
-		want string
-	}{
-		{name: "nil pool", pool: nil, want: ""},
-		{name: "configured URL trimmed", pool: &WorkerPool{cfg: WorkerPoolConfig{SynapseURL: "http://synapse.local:4020///"}}, want: "http://synapse.local:4020"},
-		{name: "appCfg fallback", pool: &WorkerPool{appCfg: config.NewFromData(&config.ConfigData{SynapseURL: "http://synapse.cfg:4020///"})}, want: "http://synapse.cfg:4020"},
-		{name: "empty when unconfigured", pool: &WorkerPool{}, want: ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := tc.pool.resolveSynapseURL(); got != tc.want {
-				t.Fatalf("resolveSynapseURL() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
 
 func TestDispatchPromptAssembly(t *testing.T) {
 	t.Parallel()

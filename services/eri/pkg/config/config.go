@@ -13,8 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"gopkg.in/yaml.v3"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 var ConfigSearchPaths = []string{
@@ -29,41 +30,41 @@ var ConfigSearchPaths = []string{
 var SharedSecretsPath = "/secrets"
 
 type WebhookEndpoint struct {
-	URL             string `yaml:"url" json:"url"`
+	URL             string `yaml:"url"                  json:"url"`
 	TimeoutMs       int    `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
 	OnTimeoutAction string `yaml:"on_timeout,omitempty" json:"on_timeout,omitempty"` // "proceed", "drop", "retry", "classify", "wake"
 }
 
 type ChannelHooksConfig struct {
-	OnWake   *WebhookEndpoint `yaml:"on_wake,omitempty" json:"on_wake,omitempty"`
-	PreTurn  *WebhookEndpoint `yaml:"pre_turn,omitempty" json:"pre_turn,omitempty"`
+	OnWake   *WebhookEndpoint `yaml:"on_wake,omitempty"   json:"on_wake,omitempty"`
+	PreTurn  *WebhookEndpoint `yaml:"pre_turn,omitempty"  json:"pre_turn,omitempty"`
 	PostTurn *WebhookEndpoint `yaml:"post_turn,omitempty" json:"post_turn,omitempty"`
 }
 
 type AmbientToolConfig struct {
-	Name      string         `yaml:"name" json:"name"`
-	Server    string         `yaml:"server,omitempty" json:"server,omitempty"`
-	Tool      string         `yaml:"tool" json:"tool"`
+	Name      string         `yaml:"name"                json:"name"`
+	Server    string         `yaml:"server,omitempty"    json:"server,omitempty"`
+	Tool      string         `yaml:"tool"                json:"tool"`
 	Arguments map[string]any `yaml:"arguments,omitempty" json:"arguments,omitempty"`
 }
 
 type AmbientContextConfig struct {
-	CacheTTL     string              `yaml:"cache_ttl,omitempty" json:"cache_ttl,omitempty"`
-	TimeoutMs    int                 `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
+	CacheTTL     string              `yaml:"cache_ttl,omitempty"     json:"cache_ttl,omitempty"`
+	TimeoutMs    int                 `yaml:"timeout_ms,omitempty"    json:"timeout_ms,omitempty"`
 	TemplatePath string              `yaml:"template_path,omitempty" json:"template_path,omitempty"`
-	Template     string              `yaml:"template,omitempty" json:"template,omitempty"`
-	Tools        []AmbientToolConfig `yaml:"tools,omitempty" json:"tools,omitempty"`
+	Template     string              `yaml:"template,omitempty"      json:"template,omitempty"`
+	Tools        []AmbientToolConfig `yaml:"tools,omitempty"         json:"tools,omitempty"`
 }
 
 type ChannelPolicy struct {
-	Mode                 string                `yaml:"mode" json:"mode"`
-	Effort               string                `yaml:"effort,omitempty" json:"effort,omitempty"`
-	WakeMode             string                `yaml:"wake_mode,omitempty" json:"wake_mode,omitempty"`
-	IgnoreBots           *bool                 `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
+	Mode                 string                `yaml:"mode"                             json:"mode"`
+	Effort               string                `yaml:"effort,omitempty"                 json:"effort,omitempty"`
+	WakeMode             string                `yaml:"wake_mode,omitempty"              json:"wake_mode,omitempty"`
+	IgnoreBots           *bool                 `yaml:"ignore_bots,omitempty"            json:"ignore_bots,omitempty"`
 	AmbientWakeThreshold *float64              `yaml:"ambient_wake_threshold,omitempty" json:"ambient_wake_threshold,omitempty"`
-	NoBuildUpdates       bool                  `yaml:"no_build_updates,omitempty" json:"no_build_updates,omitempty"`
-	Hooks                ChannelHooksConfig    `yaml:"hooks,omitempty" json:"hooks,omitempty"`
-	AmbientContext       *AmbientContextConfig `yaml:"ambient_context,omitempty" json:"ambient_context,omitempty"`
+	NoBuildUpdates       bool                  `yaml:"no_build_updates,omitempty"       json:"no_build_updates,omitempty"`
+	Hooks                ChannelHooksConfig    `yaml:"hooks,omitempty"                  json:"hooks,omitempty"`
+	AmbientContext       *AmbientContextConfig `yaml:"ambient_context,omitempty"        json:"ambient_context,omitempty"`
 }
 
 // GetEffort returns the normalized effort tier for this channel policy ("low", "medium", or "high"), defaulting to "high".
@@ -155,16 +156,16 @@ func (e *WebhookEndpoint) GetOnTimeout(defaultAction string) string {
 }
 
 type OllamaConfig struct {
-	BaseURL     string `yaml:"base_url" json:"base_url"`
-	Model       string `yaml:"model" json:"model"`
+	BaseURL     string `yaml:"base_url"     json:"base_url"`
+	Model       string `yaml:"model"        json:"model"`
 	QueryPrefix string `yaml:"query_prefix" json:"query_prefix"`
-	NumCtx      int    `yaml:"num_ctx" json:"num_ctx"`
+	NumCtx      int    `yaml:"num_ctx"      json:"num_ctx"`
 }
 
 type TargetMcpConfig struct {
-	Common    map[string]json.RawMessage `yaml:"common,omitempty" json:"common,omitempty"`
-	Discord   map[string]json.RawMessage `yaml:"discord,omitempty" json:"discord,omitempty"`
-	Voice     map[string]json.RawMessage `yaml:"voice,omitempty" json:"voice,omitempty"`
+	Common    map[string]json.RawMessage `yaml:"common,omitempty"    json:"common,omitempty"`
+	Discord   map[string]json.RawMessage `yaml:"discord,omitempty"   json:"discord,omitempty"`
+	Voice     map[string]json.RawMessage `yaml:"voice,omitempty"     json:"voice,omitempty"`
 	Ephemeral map[string]json.RawMessage `yaml:"ephemeral,omitempty" json:"ephemeral,omitempty"`
 }
 
@@ -175,27 +176,27 @@ type SecretsConfig struct {
 
 // MCPServerConfig defines an MCP server configuration.
 type MCPServerConfig struct {
-	Command   string            `json:"command,omitempty" yaml:"command,omitempty"`
-	Args      []string          `json:"args,omitempty" yaml:"args,omitempty"`
-	Env       map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	Command   string            `json:"command,omitempty"   yaml:"command,omitempty"`
+	Args      []string          `json:"args,omitempty"      yaml:"args,omitempty"`
+	Env       map[string]string `json:"env,omitempty"       yaml:"env,omitempty"`
 	ServerURL string            `json:"serverUrl,omitempty" yaml:"server_url,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"   yaml:"headers,omitempty"`
 }
 
 // MCPServersConfig groups MCP server configurations by target category.
 type MCPServersConfig struct {
-	Common    map[string]MCPServerConfig `yaml:"common,omitempty" json:"common,omitempty"`
-	Eri       map[string]MCPServerConfig `yaml:"eri,omitempty" json:"eri,omitempty"`
-	Voice     map[string]MCPServerConfig `yaml:"voice,omitempty" json:"voice,omitempty"`
+	Common    map[string]MCPServerConfig `yaml:"common,omitempty"    json:"common,omitempty"`
+	Eri       map[string]MCPServerConfig `yaml:"eri,omitempty"       json:"eri,omitempty"`
+	Voice     map[string]MCPServerConfig `yaml:"voice,omitempty"     json:"voice,omitempty"`
 	Ephemeral map[string]MCPServerConfig `yaml:"ephemeral,omitempty" json:"ephemeral,omitempty"`
 }
 
 type VoiceConfig struct {
-	Engine           string                `yaml:"engine,omitempty" json:"engine,omitempty"`
-	Model            string                `yaml:"model,omitempty" json:"model,omitempty"`
+	Engine           string                `yaml:"engine,omitempty"            json:"engine,omitempty"`
+	Model            string                `yaml:"model,omitempty"             json:"model,omitempty"`
 	PrewarmedTargets []string              `yaml:"prewarmed_targets,omitempty" json:"prewarmed_targets,omitempty"`
-	AllowedTools     []string              `yaml:"allowed_tools,omitempty" json:"allowed_tools,omitempty"`
-	AmbientContext   *AmbientContextConfig `yaml:"ambient_context,omitempty" json:"ambient_context,omitempty"`
+	AllowedTools     []string              `yaml:"allowed_tools,omitempty"     json:"allowed_tools,omitempty"`
+	AmbientContext   *AmbientContextConfig `yaml:"ambient_context,omitempty"   json:"ambient_context,omitempty"`
 }
 
 // TranscriptsConfig points the transcript index at a shared database. Database names the
@@ -203,50 +204,50 @@ type VoiceConfig struct {
 // Stack labels the rows this instance writes (empty defaults to its own DatabaseURL DB name).
 type TranscriptsConfig struct {
 	Database string `yaml:"database,omitempty" json:"database,omitempty"`
-	Stack    string `yaml:"stack,omitempty" json:"stack,omitempty"`
+	Stack    string `yaml:"stack,omitempty"    json:"stack,omitempty"`
 }
 
 type ConfigData struct {
-	Model                     string                   `yaml:"model" json:"model"`
-	Timezone                  string                   `yaml:"timezone" json:"timezone"`
-	SystemChannel             string                   `yaml:"system_channel" json:"system_channel"`
-	AdminUsers                []string                 `yaml:"admin_users" json:"admin_users"`
-	Channels                  map[string]ChannelPolicy `yaml:"channels" json:"channels"`
-	Secrets                   SecretsConfig            `yaml:"secrets,omitempty" json:"secrets,omitempty"`
-	McpServers                TargetMcpConfig          `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
-	MCPServers                MCPServersConfig         `yaml:"-" json:"-"`
-	Voice                     VoiceConfig              `yaml:"voice,omitempty" json:"voice,omitempty"`
-	DatabaseURL               string                   `yaml:"database_url" json:"database_url"`
-	Port                      string                   `yaml:"port" json:"port"`
-	AgyBin                    string                   `yaml:"agy_bin" json:"agy_bin"`
-	APIKey                    string                   `yaml:"api_key" json:"api_key"`
-	HarnessAPIKey             string                   `yaml:"harness_api_key,omitempty" json:"harness_api_key,omitempty"`
-	SystemPrompt              string                   `yaml:"system_prompt" json:"system_prompt"`
-	DiscordToken              string                   `yaml:"discord_token" json:"discord_token"`
-	GitHubPAT                 string                   `yaml:"github_pat" json:"github_pat"`
-	Ollama                    OllamaConfig             `yaml:"ollama" json:"ollama"`
-	LowEffortModel            string                   `yaml:"low_effort_model" json:"low_effort_model"`
-	MediumEffortModel         string                   `yaml:"medium_effort_model" json:"medium_effort_model"`
-	ClassifierURL             string                   `yaml:"classifier_url,omitempty" json:"classifier_url,omitempty"`
-	ClassifierModel           string                   `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"`
-	ClassifierProtocol        string                   `yaml:"classifier_protocol,omitempty" json:"classifier_protocol,omitempty"`
-	ThreadTitleURL            string                   `yaml:"thread_title_url,omitempty" json:"thread_title_url,omitempty"`
-	ThreadTitleModel          string                   `yaml:"thread_title_model,omitempty" json:"thread_title_model,omitempty"`
-	GeminiHomeDir             string                   `yaml:"gemini_home_dir,omitempty" json:"gemini_home_dir,omitempty"`
-	DataDir                   string                   `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
-	MCPConfig                 string                   `yaml:"mcp_config,omitempty" json:"mcp_config,omitempty"`
-	DaemonIdleTimeout         time.Duration            `yaml:"daemon_idle_timeout,omitempty" json:"daemon_idle_timeout,omitempty"`
-	MaxConcurrentDaemons      int                      `yaml:"max_concurrent_daemons,omitempty" json:"max_concurrent_daemons,omitempty"`
+	Model                     string                   `yaml:"model"                                  json:"model"`
+	Timezone                  string                   `yaml:"timezone"                               json:"timezone"`
+	SystemChannel             string                   `yaml:"system_channel"                         json:"system_channel"`
+	AdminUsers                []string                 `yaml:"admin_users"                            json:"admin_users"`
+	Channels                  map[string]ChannelPolicy `yaml:"channels"                               json:"channels"`
+	Secrets                   SecretsConfig            `yaml:"secrets,omitempty"                      json:"secrets,omitempty"`
+	McpServers                TargetMcpConfig          `yaml:"mcp_servers,omitempty"                  json:"mcp_servers,omitempty"`
+	MCPServers                MCPServersConfig         `yaml:"-"                                      json:"-"`
+	Voice                     VoiceConfig              `yaml:"voice,omitempty"                        json:"voice,omitempty"`
+	DatabaseURL               string                   `yaml:"database_url"                           json:"database_url"`
+	Port                      string                   `yaml:"port"                                   json:"port"`
+	AgyBin                    string                   `yaml:"agy_bin"                                json:"agy_bin"`
+	APIKey                    string                   `yaml:"api_key"                                json:"api_key"`
+	HarnessAPIKey             string                   `yaml:"harness_api_key,omitempty"              json:"harness_api_key,omitempty"`
+	SystemPrompt              string                   `yaml:"system_prompt"                          json:"system_prompt"`
+	DiscordToken              string                   `yaml:"discord_token"                          json:"discord_token"`
+	GitHubPAT                 string                   `yaml:"github_pat"                             json:"github_pat"`
+	Ollama                    OllamaConfig             `yaml:"ollama"                                 json:"ollama"`
+	LowEffortModel            string                   `yaml:"low_effort_model"                       json:"low_effort_model"`
+	MediumEffortModel         string                   `yaml:"medium_effort_model"                    json:"medium_effort_model"`
+	ClassifierURL             string                   `yaml:"classifier_url,omitempty"               json:"classifier_url,omitempty"`
+	ClassifierModel           string                   `yaml:"classifier_model,omitempty"             json:"classifier_model,omitempty"`
+	ClassifierProtocol        string                   `yaml:"classifier_protocol,omitempty"          json:"classifier_protocol,omitempty"`
+	ThreadTitleURL            string                   `yaml:"thread_title_url,omitempty"             json:"thread_title_url,omitempty"`
+	ThreadTitleModel          string                   `yaml:"thread_title_model,omitempty"           json:"thread_title_model,omitempty"`
+	GeminiHomeDir             string                   `yaml:"gemini_home_dir,omitempty"              json:"gemini_home_dir,omitempty"`
+	DataDir                   string                   `yaml:"data_dir,omitempty"                     json:"data_dir,omitempty"`
+	MCPConfig                 string                   `yaml:"mcp_config,omitempty"                   json:"mcp_config,omitempty"`
+	DaemonIdleTimeout         time.Duration            `yaml:"daemon_idle_timeout,omitempty"          json:"daemon_idle_timeout,omitempty"`
+	MaxConcurrentDaemons      int                      `yaml:"max_concurrent_daemons,omitempty"       json:"max_concurrent_daemons,omitempty"`
 	MaxBackgroundTaskDuration time.Duration            `yaml:"max_background_task_duration,omitempty" json:"max_background_task_duration,omitempty"`
-	Engine                    string                   `yaml:"engine,omitempty" json:"engine,omitempty"`
-	ClaudeBin                 string                   `yaml:"claude_bin,omitempty" json:"claude_bin,omitempty"`
-	BotID                     string                   `yaml:"bot_id" json:"bot_id"`
-	SynapseURL                string                   `yaml:"synapse_url" json:"synapse_url"`
-	VanadisURL                string                   `yaml:"vanadis_url" json:"vanadis_url"`
-	HaroURL                   string                   `yaml:"haro_url" json:"haro_url"`
-	CovenURL                  string                   `yaml:"coven_url" json:"coven_url"`
-	NATSURL                   string                   `yaml:"nats_url" json:"nats_url"`
-	Transcripts               TranscriptsConfig        `yaml:"transcripts,omitempty" json:"transcripts,omitempty"`
+	Engine                    string                   `yaml:"engine,omitempty"                       json:"engine,omitempty"`
+	ClaudeBin                 string                   `yaml:"claude_bin,omitempty"                   json:"claude_bin,omitempty"`
+	BotID                     string                   `yaml:"bot_id"                                 json:"bot_id"`
+	SynapseURL                string                   `yaml:"synapse_url"                            json:"synapse_url"`
+	VanadisURL                string                   `yaml:"vanadis_url"                            json:"vanadis_url"`
+	HaroURL                   string                   `yaml:"haro_url"                               json:"haro_url"`
+	CovenURL                  string                   `yaml:"coven_url"                              json:"coven_url"`
+	NATSURL                   string                   `yaml:"nats_url"                               json:"nats_url"`
+	Transcripts               TranscriptsConfig        `yaml:"transcripts,omitempty"                  json:"transcripts,omitempty"`
 }
 
 func normalizePrewarmedTargets(targets []string) []string {
@@ -977,37 +978,43 @@ func isContainerColdBoot(paths ...string) bool {
 	return false
 }
 
+// coldBootPollInterval is how often waitForColdBootConfig re-checks the
+// candidate paths while waiting for git-sync to populate them.
+const coldBootPollInterval = 10 * time.Millisecond
+
+// firstPopulatedConfig returns the first path that is a non-empty regular file.
+func firstPopulatedConfig(paths []string) (string, bool) {
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			return p, true
+		}
+	}
+	return "", false
+}
+
 func waitForColdBootConfig(paths []string, timeout time.Duration) {
 	if len(paths) == 0 {
 		return
 	}
-	for _, p := range paths {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
+	ticker := time.NewTicker(coldBootPollInterval)
+	defer ticker.Stop()
+	deadline := time.NewTimer(max(timeout, 0))
+	defer deadline.Stop()
+	for timedOut := false; ; {
+		if p, ok := firstPopulatedConfig(paths); ok {
 			log.Printf("[Config] Cold-boot configuration detected at %s", p)
 			return
 		}
-	}
-	if timeout <= 0 {
-		log.Printf("[Config] Cold-boot wait timed out after %v, proceeding with search", timeout)
-		return
-	}
-
-	deadline := time.Now().Add(timeout)
-	for {
-		for _, p := range paths {
-			if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
-				log.Printf("[Config] Cold-boot configuration detected at %s", p)
-				return
-			}
+		if timedOut {
+			log.Printf("[Config] Cold-boot wait timed out after %v, proceeding with search", timeout)
+			return
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			break
+		select {
+		case <-deadline.C:
+			timedOut = true
+		case <-ticker.C:
 		}
-		sleepDur := min(remaining, 10*time.Millisecond)
-		time.Sleep(sleepDur)
 	}
-	log.Printf("[Config] Cold-boot wait timed out after %v, proceeding with search", timeout)
 }
 
 // LoadConfigFromLookup loads configuration searching the given paths and applying

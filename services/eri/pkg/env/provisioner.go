@@ -10,8 +10,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/google/uuid"
+
+	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
 // Provisioner manages filesystem provisioning and synchronization of ~/.gemini runtime environments.

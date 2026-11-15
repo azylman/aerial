@@ -893,11 +893,11 @@ func processGitHubEventCasesPart6() []ghEventCase {
 			wantPR:  542, wantAction: "closed", wantMergedCalls: 1, wantAdvanceCalls: 1, wantDMs: 0,
 		},
 		{
-			name: "pull_request auto_merge_disabled dispatches conflict DM and prompt", event: "pull_request", delivery: "del-amd",
+			name: "pull_request auto_merge_disabled transitions conflict without prompt", event: "pull_request", delivery: "del-amd",
 			payload:    `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"},"mergeable_state":"dirty"},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:        &mockPRRegistry{conflictTargetID: "100000000000000001", conflictUpdated: true},
 			disp:       &mockOutboundDispatcher{},
-			wantAction: "auto_merge_disabled", wantPR: 543, wantConflictCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
+			wantAction: "auto_merge_disabled", wantPR: 543, wantConflictCalls: 1, wantDMs: 0, wantDispatches: 0,
 		},
 		{
 			name: "pull_request auto_merge_disabled error propagating", event: "pull_request", delivery: "del-amd-err",
@@ -918,7 +918,7 @@ func processGitHubEventCasesPart6() []ghEventCase {
 			reg:               &mockPRRegistry{conflictTargetID: "100000000000000001", conflictUpdated: true},
 			disp:              &mockOutboundDispatcher{},
 			autoUpdateAuthors: []string{"trusted-author"},
-			wantConflictCalls: 1, wantGitPushes: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
+			wantConflictCalls: 1, wantGitPushes: 1, wantDMs: 0, wantDispatches: 0,
 		},
 		{
 			name: "pull_request closed merged UpdatePRMerged error", event: "pull_request", delivery: "del-pr-merged-err",

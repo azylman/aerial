@@ -119,8 +119,12 @@ func assertBatchInsertDuplicatesAndDirty(ctx context.Context, t *testing.T, stor
 	if err := store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-steps-1", Summary: "fix\x00ed\xfe"}); err != nil {
 		t.Fatalf("UpsertSessionSummary with dirty text failed: %v", err)
 	}
+	sqlStore, ok := store.(*SQLTranscriptStore)
+	if !ok {
+		t.Fatalf("store is %T, want *SQLTranscriptStore", store)
+	}
 	var storedSummary string
-	if err := store.(*SQLTranscriptStore).db.QueryRowContext(ctx, "SELECT summary FROM session_summaries WHERE session_id = 'sess-steps-1'").Scan(&storedSummary); err != nil || storedSummary != "fixed\uFFFD" {
+	if err := sqlStore.db.QueryRowContext(ctx, "SELECT summary FROM session_summaries WHERE session_id = 'sess-steps-1'").Scan(&storedSummary); err != nil || storedSummary != "fixed\uFFFD" {
 		t.Fatalf("dirty summary stored as %q (err: %v), want %q", storedSummary, err, "fixed\uFFFD")
 	}
 }

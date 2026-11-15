@@ -9,9 +9,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/tracing"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Server encapsulates the Streamable HTTP MCP server and auxiliary HTTP endpoints.

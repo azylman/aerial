@@ -16,10 +16,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 var (
@@ -87,14 +88,14 @@ type NavigateArgs struct {
 
 // EvaluateArgs are the browser_evaluate arguments.
 type EvaluateArgs struct {
-	Expression    string `json:"expression" jsonschema:"JavaScript code to execute."`
-	AwaitPromise  *bool  `json:"awaitPromise,omitempty" jsonschema:"Await a returned promise (default true)."`
+	Expression    string `json:"expression"              jsonschema:"JavaScript code to execute."`
+	AwaitPromise  *bool  `json:"awaitPromise,omitempty"  jsonschema:"Await a returned promise (default true)."`
 	ReturnByValue *bool  `json:"returnByValue,omitempty" jsonschema:"Return the result by value (default true)."`
 }
 
 // GetContentArgs are the browser_get_content arguments.
 type GetContentArgs struct {
-	Selector  string `json:"selector,omitempty" jsonschema:"CSS selector (default body; falls back to body when nothing matches)."`
+	Selector  string `json:"selector,omitempty"  jsonschema:"CSS selector (default body; falls back to body when nothing matches)."`
 	MaxLength int    `json:"maxLength,omitempty" jsonschema:"Maximum text characters to return (default 15000)."`
 	MaxChars  int    `json:"max_chars,omitempty" jsonschema:"Alias for maxLength, used only when maxLength is unset."`
 }
@@ -106,8 +107,8 @@ type ClickArgs struct {
 
 // TypeArgs are the browser_type arguments.
 type TypeArgs struct {
-	Selector string `json:"selector" jsonschema:"CSS selector of the input field."`
-	Text     string `json:"text" jsonschema:"Text to input."`
+	Selector string `json:"selector"        jsonschema:"CSS selector of the input field."`
+	Text     string `json:"text"            jsonschema:"Text to input."`
 	Clear    *bool  `json:"clear,omitempty" jsonschema:"Clear existing text before typing (default true)."`
 }
 
@@ -118,7 +119,7 @@ type ScreenshotArgs struct {
 
 // AmazonSearchArgs are the amazon_search arguments.
 type AmazonSearchArgs struct {
-	Query      string `json:"query" jsonschema:"Search keywords or product description."`
+	Query      string `json:"query"                jsonschema:"Search keywords or product description."`
 	MaxResults int    `json:"maxResults,omitempty" jsonschema:"Maximum number of results to extract (default 5)."`
 }
 

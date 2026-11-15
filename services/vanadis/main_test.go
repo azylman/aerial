@@ -14,11 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 func assertConfigDefaults(t *testing.T, cfg Config) {

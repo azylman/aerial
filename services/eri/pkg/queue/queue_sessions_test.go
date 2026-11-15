@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -21,8 +22,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
-	"github.com/bwmarrin/discordgo"
-	"github.com/google/uuid"
 )
 
 type mockErrSessionStore struct {
@@ -545,8 +544,6 @@ type dispatchExecutionHeadlessCase struct {
 	seedWidget         bool
 	coldWidgetSync     bool
 	seedOutdatedWidget bool
-	syncConnErr        bool
-	syncBadURL         bool
 	emitStep           bool
 	wantSyncedRepo     string
 	wantSyncedPRNumber int
@@ -555,32 +552,6 @@ type dispatchExecutionHeadlessCase struct {
 type headlessSyncedPayload struct {
 	Repo     string `json:"repo"`
 	PRNumber int    `json:"pr_number"`
-}
-
-func setupHeadlessRouterServer(poolPtr **WorkerPool, payload *headlessSyncedPayload, widgetDeliveredCh chan struct{}, syncConnErr bool) *httptest.Server {
-	routerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(payload)
-		if *poolPtr != nil {
-			_, _ = (*poolPtr).DeliverStatusWidget(discord.StatusWidgetRequest{
-				ChannelID: "chan-build",
-				ID:        "build-streaming-live",
-				MessageID: "widget-msg-seed",
-				Status:    "running",
-				Chunks: []discord.StatusWidgetChunk{
-					{ID: "build-streaming-live-chunk-1", Index: 0, Title: "Step Streaming", Status: "failed", PRNumber: 733},
-				},
-			})
-		}
-		select {
-		case <-widgetDeliveredCh:
-		default:
-		}
-		w.WriteHeader(http.StatusAccepted)
-	}))
-	if syncConnErr {
-		routerSrv.Close()
-	}
-	return routerSrv
 }
 
 func seedHeadlessWidget(pool *WorkerPool, seedOutdated bool, widgetDeliveredCh chan struct{}) {
@@ -633,12 +604,12 @@ func assertDeliveredWidgetsStep(t *testing.T, deliveredWidgets []discord.StatusW
 	}
 }
 
-func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, store db.Store, routerURL string, deliveredWidgetsMu *sync.Mutex, deliveredWidgets *[]discord.StatusWidgetRequest, widgetDeliveredCh chan struct{}, doneCh chan struct{}) *WorkerPool {
+func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, store db.Store, deliveredWidgetsMu *sync.Mutex, deliveredWidgets *[]discord.StatusWidgetRequest, widgetDeliveredCh chan struct{}, doneCh chan struct{}, bus pubsub.Bus) *WorkerPool {
 	t.Helper()
 	return NewWorkerPool(WorkerPoolConfig{
 		Store:          store,
 		TimeoutMinutes: 1,
-		SynapseURL:     routerURL,
+		EventBus:       bus,
 		DeliveryFunc: func(s *discordgo.Session, c, text string) error {
 			t.Errorf("unexpected Discord DeliveryFunc call for headless dispatch")
 			return nil
@@ -708,24 +679,44 @@ func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadless
 	var deliveredWidgets []discord.StatusWidgetRequest
 	widgetDeliveredCh := make(chan struct{}, 8)
 	var syncedPayload headlessSyncedPayload
+
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	if err := pubsub.EnsureCoreStreams(context.Background(), memBus); err != nil {
+		t.Fatalf("EnsureCoreStreams: %v", err)
+	}
+
 	var pool *WorkerPool
-
-	var routerURL string
-	if tc.coldWidgetSync || tc.syncConnErr {
-		srv := setupHeadlessRouterServer(&pool, &syncedPayload, widgetDeliveredCh, tc.syncConnErr)
-		if !tc.syncConnErr {
-			defer srv.Close()
+	if tc.coldWidgetSync {
+		_, err := memBus.Subscribe(context.Background(), "aerial.coalesced.>", "test-headless-sub", func(_ context.Context, msg pubsub.Message) error {
+			var args pubsub.WidgetSyncJobArgs
+			_ = json.Unmarshal(msg.Data(), &args)
+			syncedPayload.Repo = args.Repo
+			syncedPayload.PRNumber = args.PRNumber
+			if pool != nil {
+				_, _ = pool.DeliverStatusWidget(discord.StatusWidgetRequest{
+					ChannelID: "chan-build",
+					ID:        "build-streaming-live",
+					MessageID: "widget-msg-seed",
+					Status:    "running",
+					Chunks: []discord.StatusWidgetChunk{
+						{ID: "build-streaming-live-chunk-1", Index: 0, Title: "Step Streaming", Status: "failed", PRNumber: 733},
+					},
+				})
+			}
+			select {
+			case widgetDeliveredCh <- struct{}{}:
+			default:
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Subscribe: %v", err)
 		}
-		routerURL = srv.URL
 	}
 
-	pool = setupHeadlessWorkerPool(t, tc, store, routerURL, &deliveredWidgetsMu, &deliveredWidgets, widgetDeliveredCh, doneCh)
+	pool = setupHeadlessWorkerPool(t, tc, store, &deliveredWidgetsMu, &deliveredWidgets, widgetDeliveredCh, doneCh, memBus)
 	defer pool.Stop()
-
-	if tc.syncBadURL {
-		pBad := &WorkerPool{cfg: WorkerPoolConfig{SynapseURL: "://bad-url"}}
-		pBad.ensureChunkWidgetHydrated(context.Background(), "Build ID: b1", "c1", "b1")
-	}
 
 	if tc.seedWidget || tc.seedOutdatedWidget {
 		seedHeadlessWidget(pool, tc.seedOutdatedWidget, widgetDeliveredCh)
@@ -817,8 +808,6 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			respJSON:     `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"done"}`,
 			wantStatus:   db.StatusCompleted,
 			wantRespText: "done",
-			syncConnErr:  true,
-			syncBadURL:   true,
 		},
 	}
 

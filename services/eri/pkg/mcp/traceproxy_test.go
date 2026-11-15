@@ -13,14 +13,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/guard"
-	"github.com/azylman/aerial/services/eri/pkg/mcp"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/services/eri/pkg/guard"
+	"github.com/azylman/aerial/services/eri/pkg/mcp"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 // endedSpans delivers each span as it ends; the proxy ends its span after the response is
@@ -352,7 +353,9 @@ func TestTraceProxy_StreamsSSE(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: first\n\n"))
-		w.(http.Flusher).Flush()
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Errorf("flush first SSE event: %v", err)
+		}
 		<-release
 		_, _ = w.Write([]byte("data: second\n\n"))
 	}))

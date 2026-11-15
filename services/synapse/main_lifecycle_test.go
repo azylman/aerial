@@ -11,9 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/jackc/pgx/v5"
 )
 
 func TestIsWaitingForImageBuild(t *testing.T) {
@@ -380,10 +381,10 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			},
 		},
 		{
-			name:                "dispatchDeploymentSuccessPrompt dependabot branch suppresses wake and widget",
+			name:                "dispatchDeploymentSuccessPrompt with prNumber > 0 is suppressed",
 			isDeploymentSuccess: true,
+			prNumber:            558,
 			targetID:            validSnowflake,
-			branch:              "dependabot/github_actions/fetch-metadata-3",
 			wantPrompts:         0,
 			wantWidgets:         0,
 		},
@@ -444,7 +445,7 @@ func runResolveThreadCase(ctx context.Context, t *testing.T, tc resolveThreadCas
 		return
 	}
 
-	err := srv.dispatchDeploymentSuccessPrompt(ctx, tc.targetID, "brain", "azylman/aerial", "sha123", 558, "alloc-1")
+	err := srv.dispatchDeploymentSuccessPrompt(ctx, tc.targetID, "brain", "azylman/aerial", "sha123", tc.prNumber, "alloc-1")
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("dispatchDeploymentSuccessPrompt() err = %v, wantErr = %v", err, tc.wantErr)
 	}
@@ -810,5 +811,142 @@ func TestDeployRolloutSuppressionAndState(t *testing.T) {
 	srv.registry = NewPostgresPRRegistry(mockPool)
 	if rs := srv.loadPRRolloutState(ctx, "azylman/aerial", 1); rs == nil || len(rs.ExpectedJobs) != 1 {
 		t.Errorf("expected rollout state with 1 job, got %v", rs)
+	}
+
+	mockDeployedPool := &mockSynapsePgxPool{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return mockSynapsePgxRow{
+				scanFn: func(dest ...any) error {
+					if len(dest) > 0 {
+						if s, ok := dest[0].(*string); ok {
+							*s = "deployed"
+						}
+					}
+					return nil
+				},
+			}
+		},
+	}
+	srvDeployed := &RouterServer{registry: NewPostgresPRRegistry(mockDeployedPool)}
+	if !srvDeployed.shouldSuppressDuplicateDeploySuccess(ctx, "azylman/aerial", "new-job", "new-sha", 202) {
+		t.Errorf("expected suppression by postgres deployed status")
+	}
+}
+
+func TestDispatchAlertWithPrompt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	validSnowflake := "123456789012345678"
+
+	tests := []struct {
+		name          string
+		nilDispatcher bool
+		targetID      string
+		dmMsg         string
+		prompt        string
+		opt           *alertPromptOpts
+		dispatchErr   error
+		wantErr       bool
+		wantDMs       int
+		wantPrompts   int
+		wantBg        int
+	}{
+		{
+			name:          "nil dispatcher returns nil",
+			nilDispatcher: true,
+			targetID:      validSnowflake,
+			prompt:        "test prompt",
+		},
+		{
+			name:        "invalid target without silent is no-op",
+			targetID:    "invalid-snowflake",
+			prompt:      "test prompt",
+			wantPrompts: 0,
+		},
+		{
+			name:        "valid target with dm and prompt dispatches both",
+			targetID:    validSnowflake,
+			dmMsg:       "direct message alert",
+			prompt:      "prompt directive",
+			wantDMs:     1,
+			wantPrompts: 1,
+		},
+		{
+			name:        "prompt dispatch error returns error",
+			targetID:    validSnowflake,
+			prompt:      "prompt directive",
+			dispatchErr: errors.New("prompt dispatch failed"),
+			wantErr:     true,
+			wantPrompts: 1,
+		},
+		{
+			name:     "silent background dispatch",
+			targetID: validSnowflake,
+			prompt:   "background prompt",
+			opt: &alertPromptOpts{
+				silent:       true,
+				skipIfActive: true,
+				effort:       "high",
+				dispatchID:   "disp-1",
+			},
+			wantBg: 1,
+		},
+		{
+			name:     "silent background dispatch error returns error",
+			targetID: validSnowflake,
+			prompt:   "background prompt",
+			opt: &alertPromptOpts{
+				silent: true,
+			},
+			dispatchErr: errors.New("background dispatch failed"),
+			wantErr:     true,
+			wantBg:      1,
+		},
+		{
+			name:        "dmMsg dispatch error logs warning and continues to prompt",
+			targetID:    validSnowflake,
+			dmMsg:       "dm alert",
+			prompt:      "prompt directive",
+			dispatchErr: errors.New("dm error"),
+			wantErr:     true, // prompt also fails when dispatcher returns error
+			wantDMs:     1,
+			wantPrompts: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
+			var mockDisp *mockOutboundDispatcher
+			if !tc.nilDispatcher {
+				mockDisp = &mockOutboundDispatcher{
+					promptErr:        tc.dispatchErr,
+					dispatchErr:      tc.dispatchErr,
+					directMessageErr: tc.dispatchErr,
+				}
+				srv.SetDispatcher(mockDisp)
+			}
+
+			var aOpts []alertPromptOpts
+			if tc.opt != nil {
+				aOpts = append(aOpts, *tc.opt)
+			}
+			err := srv.dispatchAlertWithPrompt(ctx, tc.targetID, "test_alert", tc.dmMsg, tc.prompt, aOpts...)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("dispatchAlertWithPrompt() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if mockDisp != nil {
+				if len(mockDisp.DirectMessageCalls()) != tc.wantDMs {
+					t.Errorf("got %d DMs, want %d", len(mockDisp.DirectMessageCalls()), tc.wantDMs)
+				}
+				if len(mockDisp.PromptCalls()) != tc.wantPrompts {
+					t.Errorf("got %d prompts, want %d", len(mockDisp.PromptCalls()), tc.wantPrompts)
+				}
+				if len(mockDisp.DispatchCalls()) != tc.wantBg {
+					t.Errorf("got %d bg calls, want %d", len(mockDisp.DispatchCalls()), tc.wantBg)
+				}
+			}
+		})
 	}
 }

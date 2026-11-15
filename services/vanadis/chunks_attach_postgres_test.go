@@ -28,10 +28,7 @@ func TestVanadisStore_AttachChunkPR_ExistingErrors_MockDB(t *testing.T) {
 				return &mockRow{err: pgx.ErrNoRows}
 			}
 			if strings.Contains(sql, "SELECT EXISTS") {
-				return &genericMockRow{scanFn: func(dest ...any) error {
-					*dest[0].(*bool) = false
-					return nil
-				}}
+				return valuesRow(false)
 			}
 			return &mockRow{err: pgx.ErrNoRows}
 		},
@@ -44,22 +41,13 @@ func TestVanadisStore_AttachChunkPR_ExistingErrors_MockDB(t *testing.T) {
 	sMismatched := newMockStore(mockDB{
 		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
 			if strings.Contains(sql, "SELECT mode") {
-				return &genericMockRow{scanFn: func(dest ...any) error {
-					*dest[0].(*string) = "pr"
-					return nil
-				}}
+				return valuesRow("pr")
 			}
 			if strings.Contains(sql, "c.status = 'cancelled'") {
-				return &genericMockRow{scanFn: func(dest ...any) error {
-					*dest[0].(*bool) = false
-					return nil
-				}}
+				return valuesRow(false)
 			}
 			if strings.Contains(sql, "SELECT EXISTS") {
-				return &genericMockRow{scanFn: func(dest ...any) error {
-					*dest[0].(*bool) = true
-					return nil
-				}}
+				return valuesRow(true)
 			}
 			return &mockRow{err: pgx.ErrNoRows}
 		},
@@ -82,10 +70,7 @@ func TestVanadisStore_AttachChunkPR_ExistingErrors_MockDB(t *testing.T) {
 	sActionNoRepo := newMockStore(mockDB{
 		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
 			if strings.Contains(sql, "SELECT mode") {
-				return &genericMockRow{scanFn: func(dest ...any) error {
-					*dest[0].(*string) = "action"
-					return nil
-				}}
+				return valuesRow("action")
 			}
 			return &mockRow{err: pgx.ErrNoRows}
 		},
@@ -113,22 +98,13 @@ func TestVanadisStore_AttachChunkPR_ExistingConflict_MockDB(t *testing.T) {
 		sConflict := newMockStore(mockDB{
 			queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
 				if strings.Contains(sql, "SELECT mode") {
-					return &genericMockRow{scanFn: func(dest ...any) error {
-						*dest[0].(*string) = "pr"
-						return nil
-					}}
+					return valuesRow("pr")
 				}
 				if strings.Contains(sql, "c.status = 'cancelled'") {
-					return &genericMockRow{scanFn: func(dest ...any) error {
-						*dest[0].(*bool) = tc.isCancelled
-						return nil
-					}}
+					return valuesRow(tc.isCancelled)
 				}
 				if strings.Contains(sql, "SELECT EXISTS") {
-					return &genericMockRow{scanFn: func(dest ...any) error {
-						*dest[0].(*bool) = true
-						return nil
-					}}
+					return valuesRow(true)
 				}
 				return &mockRow{err: pgx.ErrNoRows}
 			},
@@ -143,10 +119,7 @@ func newAttachSuccessStore(mode string, captureCandidates *[]string) *PostgresVa
 	return newMockStore(mockDB{
 		queryRowFn: func(_ context.Context, sql string, args ...any) pgx.Row {
 			if strings.Contains(sql, "SELECT mode") {
-				return &genericMockRow{scanFn: func(dest ...any) error {
-					*dest[0].(*string) = mode
-					return nil
-				}}
+				return valuesRow(mode)
 			}
 			if captureCandidates != nil && len(args) >= 3 {
 				if cands, ok := args[2].([]string); ok {
@@ -155,13 +128,9 @@ func newAttachSuccessStore(mode string, captureCandidates *[]string) *PostgresVa
 			}
 			return &genericMockRow{scanFn: func(dest ...any) error {
 				if len(dest) == 3 {
-					*dest[0].(*string) = "b-" + mode
-					*dest[1].(*string) = "c-" + mode
-					*dest[2].(*string) = "thread-" + mode
-					return nil
+					return scanValues(dest, "b-"+mode, "c-"+mode, "thread-"+mode)
 				}
-				*dest[0].(*string) = "thread-" + mode
-				return nil
+				return scanValues(dest, "thread-"+mode)
 			}}
 		},
 	})
@@ -223,12 +192,7 @@ func TestVanadisStore_AttachChunkPR_Standalone_MockDB(t *testing.T) {
 		beginFn: func(context.Context) (pgx.Tx, error) {
 			return &mockTx{
 				queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
-					return &genericMockRow{scanFn: func(dest ...any) error {
-						*dest[0].(*string) = "b-existing"
-						*dest[1].(*string) = "c-existing"
-						*dest[2].(*string) = "thread-existing"
-						return nil
-					}}
+					return valuesRow("b-existing", "c-existing", "thread-existing")
 				},
 			}, nil
 		},

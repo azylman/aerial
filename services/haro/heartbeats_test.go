@@ -357,11 +357,17 @@ func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
 		t.Fatalf("failed to seed heartbeat: %v", err)
 	}
 	var seedMap map[string]any
-	tc := seedRes.Content[0].(*mcp.TextContent)
+	tc, ok := seedRes.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("seed result content is %T, want *mcp.TextContent", seedRes.Content[0])
+	}
 	if err := json.Unmarshal([]byte(tc.Text), &seedMap); err != nil {
 		t.Fatalf("unmarshal seed map failed: %v", err)
 	}
-	hbID := seedMap["schedule_id"].(string)
+	hbID, ok := seedMap["schedule_id"].(string)
+	if !ok {
+		t.Fatalf("schedule_id is %T, want string", seedMap["schedule_id"])
+	}
 
 	tests := []struct {
 		name    string

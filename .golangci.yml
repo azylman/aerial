@@ -22,6 +22,8 @@ linters:
     - exhaustive
     - exptostd
     - fatcontext
+    - forbidigo
+    - forcetypeassert
     - funlen
     - gocheckcompilerdirectives
     - gochecksumtype
@@ -67,6 +69,7 @@ linters:
     - spancheck
     - sqlclosecheck
     - staticcheck
+    - tagalign
     - testableexamples
     - thelper
     - tparallel
@@ -84,10 +87,17 @@ linters:
       package-average: 10.0
     exhaustive:
       default-signifies-exhaustive: true
+    forbidigo:
+      forbid:
+        - pattern: ^time\.Sleep$
+          msg: use channels, deadline-bounded condition polling, or an injected clock instead of time.Sleep
     gomoddirectives:
       replace-local: true
     perfsprint:
       error-format: false
+    tagalign:
+      align: true
+      sort: false
     dupl:
       threshold: 100
     dupword:
@@ -225,8 +235,15 @@ linters:
       - examples$
 formatters:
   enable:
+    - gci
     - gofmt
     - gofumpt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/azylman)
   exclusions:
     generated: lax
     paths:

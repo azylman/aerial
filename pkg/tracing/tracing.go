@@ -21,7 +21,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/sanitizer"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -32,6 +31,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	"gopkg.in/yaml.v3"
+
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 // ScopeName is the instrumentation scope used for spans created by this package.

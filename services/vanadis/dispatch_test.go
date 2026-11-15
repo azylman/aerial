@@ -6,11 +6,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // recordedParent starts and ends a span on its own in-memory recorder and returns a context

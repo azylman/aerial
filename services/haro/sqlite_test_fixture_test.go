@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/azylman/aerial/pkg/httpkit"
-
 	_ "modernc.org/sqlite"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 func initTestSQLite(trimmed string) (*sql.DB, error) {

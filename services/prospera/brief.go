@@ -17,20 +17,20 @@ const (
 // CallIdentity specifies assistant self-identification rules for a call.
 type CallIdentity struct {
 	Introduction string `json:"introduction,omitempty" jsonschema:"Spoken opening self-introduction or identity greeting when connecting"`
-	Disclose     string `json:"disclose,omitempty" jsonschema:"AI disclosure policy: 'when-asked', 'always', or 'never' (default 'when-asked')"`
+	Disclose     string `json:"disclose,omitempty"     jsonschema:"AI disclosure policy: 'when-asked', 'always', or 'never' (default 'when-asked')"`
 }
 
 // CallBrief contains the intent, context, boundaries, and approval rules for a phone call.
 type CallBrief struct {
-	Mode               string       `json:"mode,omitempty" jsonschema:"Operating mode: 'conversation' for interactive dialog or 'notify' for one-way announcement"`
-	Task               string       `json:"task,omitempty" jsonschema:"Primary objective, task instruction, or opening message for the call"`
-	Context            string       `json:"context,omitempty" jsonschema:"Background context, entity details, or reference notes for the conversation"`
-	Language           string       `json:"language,omitempty" jsonschema:"Spoken language code (e.g. 'en-US', default 'en-US')"`
-	Identity           CallIdentity `json:"identity,omitempty" jsonschema:"Assistant identity and AI disclosure configuration"`
-	Disclosures        []string     `json:"disclosures,omitempty" jsonschema:"Required disclosure statements or disclaimers to state during the call"`
-	Approvals          string       `json:"approvals,omitempty" jsonschema:"Financial and commitment boundary rules (default: ZERO SPEND AUTHORIZED)"`
-	VoicemailMessage   string       `json:"voicemail_message,omitempty" jsonschema:"Message to leave if answered by voicemail or answering machine"`
-	SuccessCriteria    string       `json:"success_criteria,omitempty" jsonschema:"Criteria defining whether the call successfully accomplished its objective"`
+	Mode               string       `json:"mode,omitempty"                 jsonschema:"Operating mode: 'conversation' for interactive dialog or 'notify' for one-way announcement"`
+	Task               string       `json:"task,omitempty"                 jsonschema:"Primary objective, task instruction, or opening message for the call"`
+	Context            string       `json:"context,omitempty"              jsonschema:"Background context, entity details, or reference notes for the conversation"`
+	Language           string       `json:"language,omitempty"             jsonschema:"Spoken language code (e.g. 'en-US', default 'en-US')"`
+	Identity           CallIdentity `json:"identity,omitempty"             jsonschema:"Assistant identity and AI disclosure configuration"`
+	Disclosures        []string     `json:"disclosures,omitempty"          jsonschema:"Required disclosure statements or disclaimers to state during the call"`
+	Approvals          string       `json:"approvals,omitempty"            jsonschema:"Financial and commitment boundary rules (default: ZERO SPEND AUTHORIZED)"`
+	VoicemailMessage   string       `json:"voicemail_message,omitempty"    jsonschema:"Message to leave if answered by voicemail or answering machine"`
+	SuccessCriteria    string       `json:"success_criteria,omitempty"     jsonschema:"Criteria defining whether the call successfully accomplished its objective"`
 	MaxDurationSeconds int          `json:"max_duration_seconds,omitempty" jsonschema:"Maximum duration in seconds before terminating the call (default 300, max 900)"`
 }
 

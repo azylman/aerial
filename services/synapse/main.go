@@ -16,12 +16,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // RouterServer handles webhook requests and orchestrates secret synchronization.
@@ -488,7 +488,7 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 		targetID = firstNonEmpty(tID, targetID)
 	}
 	_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_failed", "deploy_failed")
-	if evt.PRNumber > 0 && s.bus != nil {
+	if evt.PRNumber > 0 {
 		return nil
 	}
 	if s.cfgSrc != nil {
@@ -513,7 +513,7 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 
 func (s *RouterServer) handleDeploySyncFailed(ctx context.Context, evt DeployEvent, prefix string) error {
 	_ = s.publishDeployLifecycleEvent(ctx, evt, "sync_failed", "deploy_failed")
-	if evt.PRNumber > 0 && s.bus != nil {
+	if evt.PRNumber > 0 {
 		return nil
 	}
 	header := fmt.Sprintf("Git sync failed for repo %s (commit: %s, PR #%d).", evt.Repo, evt.CommitSHA, evt.PRNumber)
@@ -616,7 +616,8 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		return &evt, nil
 	case "deploy_success":
 		if s.shouldTreatDeploySuccessAsSync(ctx, evt) {
-			return &evt, s.handleDeploySyncSuccess(ctx, evt, true)
+			s.handleDeploySyncSuccess(ctx, evt, true)
+			return &evt, nil
 		}
 
 		if s.shouldSuppressDuplicateDeploySuccess(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber) {
@@ -626,11 +627,15 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		}
 		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
 		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
+		if evt.PRNumber > 0 {
+			return &evt, nil
+		}
 		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 	case "deploy_rollback", "deploy_failed":
 		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
 	case "sync_success":
-		return &evt, s.handleDeploySyncSuccess(ctx, evt, syncHasExpected)
+		s.handleDeploySyncSuccess(ctx, evt, syncHasExpected)
+		return &evt, nil
 	case "sync_failed":
 		return &evt, s.handleDeploySyncFailed(ctx, evt, prefix)
 	}
@@ -681,20 +686,16 @@ func (s *RouterServer) shouldSuppressDuplicateDeploySuccess(ctx context.Context,
 	return false
 }
 
-func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEvent, syncHasExpected bool) error {
+func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEvent, syncHasExpected bool) {
 	if evt.PRNumber <= 0 {
-		return nil
+		return
 	}
 	if syncHasExpected {
 		_ = s.publishDeployLifecycleEvent(ctx, evt, "sync_success", "synced")
-		return nil
+		return
 	}
 	s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
 	_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
-	if evt.PRNumber > 0 && s.bus != nil {
-		return nil
-	}
-	return s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, firstNonEmpty(evt.JobName, "git-sync"), evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 }
 
 func (s *RouterServer) isDependabotPRNumber(ctx context.Context, repo string, prNum int) bool {
@@ -706,14 +707,10 @@ func (s *RouterServer) isDependabotPRNumber(ctx context.Context, repo string, pr
 }
 
 func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targetID, jobName, repo, commitSHA string, prNum int, refID string) error {
-	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
+	if prNum > 0 {
 		return nil
 	}
-	if prNum > 0 && s.bus != nil {
-		return nil
-	}
-	if s.isDependabotPRNumber(ctx, repo, prNum) {
-		log.Printf("[synapse] [dependabot] suppressing deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
+	if s.dispatcher == nil || !s.isValidAlertTarget(targetID) {
 		return nil
 	}
 

@@ -15,10 +15,10 @@ import (
 	"syscall"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/tracing"
-
-	"gopkg.in/yaml.v3"
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.

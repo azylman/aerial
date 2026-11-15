@@ -498,10 +498,18 @@ func TestSessionCorruptionRetry_ReregistersActiveTurn(t *testing.T) {
 			_, span := sdktrace.NewTracerProvider().Tracer("test").Start(context.Background(), runner.OperationInvokeAgent)
 			te := &turnExecution{pool: pool, threadID: "dispatch-1", burst: []db.Message{{ID: "m-1", ThreadID: "dispatch-1"}}, activePool: procPool, lease: lease, turnSpan: span}
 			unmark := te.markTurnActive()
-			oldDaemon := lease.(runner.ActiveTurnOwner).ActiveTurn().DaemonID
+			oldOwner, ok := lease.(runner.ActiveTurnOwner)
+			if !ok {
+				t.Fatalf("lease is %T, want runner.ActiveTurnOwner", lease)
+			}
+			oldDaemon := oldOwner.ActiveTurn().DaemonID
 
 			te.handleSessionCorruptionRetry(1, 2, "", "", "corrupted", "", "model-1")
-			newDaemon := te.lease.(runner.ActiveTurnOwner).ActiveTurn().DaemonID
+			newOwner, ok := te.lease.(runner.ActiveTurnOwner)
+			if !ok {
+				t.Fatalf("replacement lease is %T, want runner.ActiveTurnOwner", te.lease)
+			}
+			newDaemon := newOwner.ActiveTurn().DaemonID
 			if got, ok := pool.ActiveTurns().Get(newDaemon); !ok || !got.Equal(span.SpanContext()) {
 				t.Errorf("replacement daemon %q not registered under the turn span", newDaemon)
 			}

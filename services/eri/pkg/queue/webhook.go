@@ -12,12 +12,13 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"go.opentelemetry.io/otel/codes"
 )
 
 // WakeRequest contains payload data sent to the on_wake ingress webhook.

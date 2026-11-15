@@ -14,8 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 var sqliteTestInitHook func(string) (*sql.DB, error)
@@ -115,6 +116,9 @@ func NewDB(cfg *Config) (*sql.DB, error) {
 var (
 	postgresMaxAttempts = 10
 	postgresRetryBase   = 500 * time.Millisecond
+	// postgresRetryAfter is the clock openDB waits on between connection
+	// attempts; tests swap it for an immediately-firing channel.
+	postgresRetryAfter = time.After
 )
 
 func openDB(dsn string) (*sql.DB, error) {
@@ -145,7 +149,10 @@ func openDB(dsn string) (*sql.DB, error) {
 			httpkit.CloseWarn(database, "database on ping failure")
 		}
 		log.Printf("[Scheduler DB] Waiting for PostgreSQL (attempt %d/%d): %v", attempt, maxAttempts, err)
-		time.Sleep(backoff)
+		if attempt == maxAttempts {
+			break
+		}
+		<-postgresRetryAfter(backoff)
 		backoff = min(time.Duration(float64(backoff)*1.5), 5*time.Second)
 	}
 	if err != nil {

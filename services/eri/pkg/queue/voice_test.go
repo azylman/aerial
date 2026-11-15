@@ -17,6 +17,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -25,11 +32,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
-	"github.com/bwmarrin/discordgo"
-	"go.opentelemetry.io/otel/codes"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	"go.opentelemetry.io/otel/trace"
 )
 
 type effortModelResolutionCase struct {
@@ -625,7 +627,11 @@ func (p *queueMockVoiceProcessPool) AcquireLease(ctx context.Context, targetKey 
 	if err != nil {
 		return nil, err
 	}
-	return &mockVoiceSessionLease{pool: p, sess: sess.(*queueMockVoiceSession), targetKey: targetKey}, nil
+	voiceSess, ok := sess.(*queueMockVoiceSession)
+	if !ok {
+		return nil, fmt.Errorf("session is %T, want *queueMockVoiceSession", sess)
+	}
+	return &mockVoiceSessionLease{pool: p, sess: voiceSess, targetKey: targetKey}, nil
 }
 
 type mockVoiceSessionLease struct {
@@ -682,12 +688,13 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 	fake := setupTestStore(t)
 	closedFake := setupTestStore(t)
 	_ = closedFake.Close()
-	haroSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(haroSrv.Close)
+	memBus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = memBus.Close() })
+	if err := pubsub.EnsureCoreStreams(context.Background(), memBus); err != nil {
+		t.Fatalf("EnsureCoreStreams: %v", err)
+	}
 
-	pFake := &WorkerPool{cfg: WorkerPoolConfig{Store: fake, HaroURL: haroSrv.URL}}
+	pFake := &WorkerPool{eventBus: memBus, cfg: WorkerPoolConfig{Store: fake, EventBus: memBus}}
 	pErr := &WorkerPool{cfg: WorkerPoolConfig{Store: &errQueueStore{Store: closedFake}}}
 
 	tests := []struct {
@@ -807,16 +814,12 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	_ = teSess.resolveAndPersistSessionID("sess-1", "", "", false)
 	teSess.isEphemeral = true
 	_ = teSess.resolveAndPersistSessionID("sess-2", "", "", true)
-	teFail := &turnExecution{threadID: "t-fail", pool: &WorkerPool{cfg: WorkerPoolConfig{HaroURL: "://bad-url", NotifierFunc: func(b, k, d string) string { return d }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return errors.New("err") }}}}
+	teFail := &turnExecution{threadID: "t-fail", pool: &WorkerPool{cfg: WorkerPoolConfig{NotifierFunc: func(b, k, d string) string { return d }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return errors.New("err") }}}}
 	teFail.deliverFailureNotice("bin", "key", "err "+strings.Repeat("x", 400), "rate limit 429", "prefix: ", "lbl")
 	teFail.deliverFailureNotice("bin", "key", "simple", "", "", "lbl")
 	_, _ = teFail.deliverSuccessAndFinalize(&runner.AgyResponse{Response: "   "}, runner.TokenUsage{}, "m", 1, 1)
 	teFail.deliverDiscordSuccess("hello", nil)
 	_ = teFail.createOneShotSchedule(oneShotScheduleRequest{ID: "os-bad", ThreadID: "t-fail", Prompt: "p", RunAt: now})
-	haroErrSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }))
-	t.Cleanup(haroErrSrv.Close)
-	teFail.pool.cfg.HaroURL = haroErrSrv.URL
-	_ = teFail.createOneShotSchedule(oneShotScheduleRequest{ID: "os-500", ThreadID: "t-fail", Prompt: "p", RunAt: now})
 	drainState := &threadWorkerState{ch: make(chan queueItem, 2)}
 	drainState.ch <- queueItem{dispatch: &db.Dispatch{ID: "d-held"}}
 	_, _ = drainBurstMessages(drainState, db.Message{ID: "m-init"})

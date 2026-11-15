@@ -9,9 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pgvector/pgvector-go"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 var (

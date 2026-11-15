@@ -12,11 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
-	"github.com/google/uuid"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // ReloadableConfigSource is a ConfigSource that also serves the loopback-only

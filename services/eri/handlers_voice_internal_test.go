@@ -13,11 +13,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/bwmarrin/discordgo"
 )
 
 type errReadCloser struct {

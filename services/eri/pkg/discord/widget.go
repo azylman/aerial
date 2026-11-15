@@ -7,8 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/bwmarrin/discordgo"
+
+	"github.com/azylman/aerial/services/eri/pkg/delivery"
 )
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.

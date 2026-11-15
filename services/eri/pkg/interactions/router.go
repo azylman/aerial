@@ -5,9 +5,10 @@ import (
 	"log"
 	"sync"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/bwmarrin/discordgo"
 )
 
 // Router routes incoming Discord application command interactions to their respective handlers.

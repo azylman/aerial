@@ -1,18 +1,18 @@
 package queue
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
-	"net/http"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -21,8 +21,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
-	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/codes"
 )
 
 type oneShotScheduleRequest struct {
@@ -34,56 +32,26 @@ type oneShotScheduleRequest struct {
 }
 
 func (te *turnExecution) createOneShotSchedule(s oneShotScheduleRequest) error {
+	if te == nil || te.pool == nil || te.pool.eventBus == nil {
+		return errors.New("event bus is nil")
+	}
+
 	schedID := strings.TrimSpace(s.ID)
 	if schedID == "" {
 		schedID = uuid.New().String()
 	}
 
-	if te != nil && te.pool != nil && te.pool.eventBus != nil {
-		args := pubsub.HaroOneShotJobArgs{
-			ID:       schedID,
-			ThreadID: s.ThreadID,
-			Prompt:   s.Prompt,
-			Effort:   s.Effort,
-			RunAt:    s.RunAt,
-		}
-		msgID := fmt.Sprintf("haro:oneshot:%s:%d", schedID, s.RunAt.Unix())
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return te.pool.eventBus.Publish(ctx, pubsub.SubjectHaroOneShotJob, msgID, args)
+	args := pubsub.HaroOneShotJobArgs{
+		ID:       schedID,
+		ThreadID: s.ThreadID,
+		Prompt:   s.Prompt,
+		Effort:   s.Effort,
+		RunAt:    s.RunAt,
 	}
-
-	if te == nil || te.pool == nil || strings.TrimSpace(te.pool.cfg.HaroURL) == "" {
-		return errors.New("haro URL is not configured")
-	}
-
-	haroURL := strings.TrimRight(strings.TrimSpace(te.pool.cfg.HaroURL), "/")
-
-	s.ID = schedID
-	bodyBytes, err := json.Marshal(s)
-	if err != nil {
-		return err
-	}
-
+	msgID := fmt.Sprintf("haro:oneshot:%s:%d", schedID, s.RunAt.Unix())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, haroURL+"/schedules/oneshot", bytes.NewReader(bodyBytes))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("haro returned status code %d", resp.StatusCode)
-	}
-	return nil
+	return te.pool.eventBus.Publish(ctx, pubsub.SubjectHaroOneShotJob, msgID, args)
 }
 
 var rateLimitKeywords = []string{

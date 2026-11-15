@@ -11,9 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/bwmarrin/discordgo"
 	"github.com/nats-io/nats.go"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 type synapseMemoryMsg struct {
@@ -40,7 +41,6 @@ func (m *synapseMemoryMsg) InProgress() error                  { return nil }
 
 func TestResolveJetStreamJobCoords(t *testing.T) {
 	t.Parallel()
-	nowSec := time.Now().Unix() / 900
 
 	tests := []struct {
 		name        string
@@ -71,18 +71,6 @@ func TestResolveJetStreamJobCoords(t *testing.T) {
 			args:        &DeployWebhookArgs{IdempotencyKey: "dep-key-2"},
 			wantSubject: "aerial.jobs.synapse.deploy",
 			wantPrefix:  "deploy:dep-key-2",
-		},
-		{
-			name:        "MergeConflictArgs",
-			args:        MergeConflictArgs{Repo: "azylman/aerial", PRNumber: 42},
-			wantSubject: "aerial.jobs.synapse.merge_conflict",
-			wantPrefix:  fmt.Sprintf("conflict:azylman/aerial:42:%d", nowSec),
-		},
-		{
-			name:        "*MergeConflictArgs",
-			args:        &MergeConflictArgs{Repo: "azylman/aerial", PRNumber: 43},
-			wantSubject: "aerial.jobs.synapse.merge_conflict",
-			wantPrefix:  fmt.Sprintf("conflict:azylman/aerial:43:%d", nowSec),
 		},
 		{
 			name:        "DiscordIngressArgs",
@@ -285,30 +273,6 @@ func jetstreamWebhookAndDeployCases() []jetstreamHandlerCase {
 			wantErr:      false,
 			wantTerm:     true,
 		},
-		{
-			name:        "HandleMergeConflictJob malformed json",
-			handlerType: "conflict",
-			payload:     `{bad json`,
-			wantTerm:    true,
-		},
-		{
-			name:         "HandleMergeConflictJob error dispatching prompt below limit",
-			handlerType:  "conflict",
-			payload:      `{"repo":"azylman/aerial","pr_number":42,"target_id":"100000000000000001"}`,
-			dispErrType:  "prompt_err",
-			numDelivered: 1,
-			wantErr:      true,
-			wantTerm:     false,
-		},
-		{
-			name:         "HandleMergeConflictJob error dispatching prompt at limit terms",
-			handlerType:  "conflict",
-			payload:      `{"repo":"azylman/aerial","pr_number":42,"target_id":"100000000000000001"}`,
-			dispErrType:  "prompt_err",
-			numDelivered: 5,
-			wantErr:      false,
-			wantTerm:     true,
-		},
 	}
 }
 
@@ -436,8 +400,6 @@ func TestJetStreamJobHandlers(t *testing.T) {
 				err = srv.HandleGitHubJob(testCtx, memMsg)
 			case "deploy":
 				err = srv.HandleDeployJob(testCtx, memMsg)
-			case "conflict":
-				err = srv.HandleMergeConflictJob(testCtx, memMsg)
 			case "ingress":
 				err = srv.HandleDiscordIngressJob(testCtx, memMsg)
 			case "interaction":
@@ -528,19 +490,12 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	}
 
 	deployCh := make(chan struct{}, 1)
-	conflictCh := make(chan struct{}, 1)
 	ingressCh := make(chan struct{}, 1)
 	interactionCh := make(chan struct{}, 1)
 
 	disp.onDirect = func() {
 		select {
 		case deployCh <- struct{}{}:
-		default:
-		}
-	}
-	disp.onBackground = func() {
-		select {
-		case conflictCh <- struct{}{}:
 		default:
 		}
 	}
@@ -578,11 +533,6 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 				},
 			},
 			signal: deployCh,
-		},
-		{
-			name:   "merge_conflict",
-			args:   MergeConflictArgs{Repo: "azylman/aerial", PRNumber: 42, TargetID: "100000000000000001"},
-			signal: conflictCh,
 		},
 		{
 			name:   "discord_ingress",
@@ -634,18 +584,6 @@ func TestJobArgsKindsAndResolveJobQueueAndKind(t *testing.T) {
 			args:      DeployWebhookArgs{},
 			wantKind:  "deploy_webhook",
 			wantQueue: QueueDefault,
-		},
-		{
-			name:      "MergeConflictArgs value",
-			args:      MergeConflictArgs{},
-			wantKind:  "merge_conflict",
-			wantQueue: QueueMergeConflict,
-		},
-		{
-			name:      "MergeConflictArgs pointer",
-			args:      &MergeConflictArgs{},
-			wantKind:  "merge_conflict",
-			wantQueue: QueueMergeConflict,
 		},
 		{
 			name:      "DiscordIngressArgs value",

@@ -3,10 +3,11 @@ package main
 import (
 	"net/http"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // tracedIngress wraps a webhook or internal ingress handler in a server span that starts (or
