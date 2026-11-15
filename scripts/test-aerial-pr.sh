@@ -521,10 +521,13 @@ REBASE_REMOTE_ADVANCE_CHECK=$(bash -c "
     git -C \"\$UPSTREAM_DIR\" push -q origin feat/test
     C2_SHA=\$(git -C \"\$UPSTREAM_DIR\" rev-parse HEAD)
 
-    # In WORK_DIR, user stages a local modification
+    # In WORK_DIR, user makes multiple commits and stages additional changes
     cd \"\$WORK_DIR\"
+    echo 'local-c2a' > file2a.txt
+    git add file2a.txt && git commit -q -m 'local commit 2a'
     echo 'local-c3' > file3.txt
     git add file3.txt
+    PRE_REBASE_HEAD=\$(git rev-parse HEAD)
 
     # Run rebase_staged_changes
     if rebase_staged_changes main 'feat: local' 2>/dev/null; then
@@ -532,8 +535,9 @@ REBASE_REMOTE_ADVANCE_CHECK=$(bash -c "
         if [ -f file2.txt ] && [ \"\$(cat file2.txt)\" = 'remote-c2' ]; then
             # file2.txt must NOT be staged as deletion
             if ! git diff --cached --name-status | grep -q '^D.*file2\.txt'; then
-                # file3.txt must be staged
-                if git diff --cached --name-only | grep -q '^file3\.txt$'; then
+                # file2a.txt (from prior commit) AND file3.txt (staged) must be staged
+                if git diff --cached --name-only | grep -q '^file2a\.txt$' && \
+                   git diff --cached --name-only | grep -q '^file3\.txt$'; then
                     echo 'adv_rebase:ok'
                 fi
             fi
@@ -546,6 +550,25 @@ REBASE_REMOTE_ADVANCE_CHECK=$(bash -c "
         REMOTE_HEAD=\$(git -C \"\$REMOTE_DIR\" rev-parse refs/heads/feat/test)
         if git merge-base --is-ancestor \"\$C2_SHA\" \"\$REMOTE_HEAD\"; then
             echo 'adv_push:ok'
+        fi
+    fi
+
+    # Test conflict restoration on remote advance:
+    # UPSTREAM_DIR pushes a conflicting change to file2a.txt
+    echo 'remote-conflict' > \"\$UPSTREAM_DIR/file2a.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'remote conflict'
+    git -C \"\$UPSTREAM_DIR\" push -f -q origin feat/test
+    # In WORK_DIR, modify file2a.txt locally
+    echo 'local-conflict' > \"\$WORK_DIR/file2a.txt\"
+    git -C \"\$WORK_DIR\" add file2a.txt
+    CONFLICT_HEAD=\$(git -C \"\$WORK_DIR\" rev-parse HEAD)
+    SCRATCH_DIR_CLEANUP=\"\$WORK_DIR\"
+    if ! rebase_staged_changes main 'feat: conflict' 2>/dev/null; then
+        # On conflict, workspace must be preserved and staged changes restored to CONFLICT_HEAD
+        if [ -z \"\$SCRATCH_DIR_CLEANUP\" ] && \
+           [ \"\$(git -C \"\$WORK_DIR\" rev-parse HEAD)\" = \"\$CONFLICT_HEAD\" ] && \
+           git -C \"\$WORK_DIR\" diff --cached --name-only | grep -q '^file2a\.txt$'; then
+            echo 'adv_conflict_restored:ok'
         fi
     fi
 
@@ -563,6 +586,7 @@ REBASE_REMOTE_ADVANCE_CHECK=$(bash -c "
 ")
 assert_eq "true" "$(echo "$REBASE_REMOTE_ADVANCE_CHECK" | grep -q 'adv_rebase:ok' && echo true || echo false)" "rebase_staged_changes preserves intermediate remote branch commits when remote advances"
 assert_eq "true" "$(echo "$REBASE_REMOTE_ADVANCE_CHECK" | grep -q 'adv_push:ok' && echo true || echo false)" "push_scratch_branch preserves advanced remote commits when pushing rebased changes"
+assert_eq "true" "$(echo "$REBASE_REMOTE_ADVANCE_CHECK" | grep -q 'adv_conflict_restored:ok' && echo true || echo false)" "rebase_staged_changes restores local state on remote advance conflict"
 assert_eq "true" "$(echo "$REBASE_REMOTE_ADVANCE_CHECK" | grep -q 'diverged_push_rejected:ok' && echo true || echo false)" "push_scratch_branch rejects pushing over un-incorporated remote advances"
 
 # Case 12: override_roborev validation, mock execution, comment verification, rerun fallback, and output formatting

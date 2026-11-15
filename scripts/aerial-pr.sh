@@ -566,17 +566,21 @@ rebase_staged_changes() {
             fi
             return 1
         else
+            local fork_point=""
+            fork_point=$(git merge-base "$head_sha" "$remote_branch_sha" 2>/dev/null || echo "")
+            if [ -n "$fork_point" ] && [ "$head_sha" != "$fork_point" ]; then
+                git reset --soft "$fork_point" >/dev/null 2>&1
+            fi
             local temp_sha=""
             if ! git diff --cached --quiet; then
                 git commit -q -m "temp: staged changes" >/dev/null 2>&1
                 temp_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-            elif [ "$head_sha" != "$remote_branch_sha" ]; then
-                temp_sha="$head_sha"
             fi
             git reset --hard "$remote_branch_sha" >/dev/null 2>&1
             if ! git merge-base --is-ancestor "$upstream_sha" HEAD 2>/dev/null; then
                 if ! git merge --no-edit -q "origin/${target_branch}" >/dev/null 2>&1; then
                     git merge --abort >/dev/null 2>&1 || true
+                    [ -n "$temp_sha" ] && git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$head_sha" >/dev/null 2>&1
                     echo "ERROR: Failed to merge origin/${target_branch} into ${current_branch} due to merge conflicts. Aborting submit." >&2
                     if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
                         echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
@@ -589,6 +593,7 @@ rebase_staged_changes() {
             if [ -n "$temp_sha" ]; then
                 if ! git cherry-pick -n "$temp_sha" >/dev/null 2>&1; then
                     git cherry-pick --abort >/dev/null 2>&1 || true
+                    git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$head_sha" >/dev/null 2>&1
                     echo "ERROR: Failed to apply staged changes onto updated remote branch ${current_branch} due to merge conflicts. Aborting submit." >&2
                     if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
                         echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
