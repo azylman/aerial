@@ -63,6 +63,9 @@ func assertExpectedConfig(t *testing.T, cfg Config, wantPort, wantPostgres, want
 func assertFileConfig(t *testing.T, cfg Config) {
 	t.Helper()
 	assertExpectedConfig(t, cfg, "4099", "postgres://u:p@db:5432/vanadis", "http://eri.aerial:8088", "http://eri.aerial:8088", "https://api.github.internal", "yaml-pat")
+	if cfg.DeployUIURL != "https://flux.lan.zylman.com" {
+		t.Fatalf("unexpected DeployUIURL: %q", cfg.DeployUIURL)
+	}
 }
 
 func assertEnvConfig(t *testing.T, cfg Config) {
@@ -108,7 +111,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 		})
 	}
 	yamlPath := filepath.Join(tmpDir, "vanadis.yaml")
-	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\neri_url: \"http://eri.aerial:8088/\"\ngithub_api_url: \"https://api.github.internal/\"\ngithub_token: \"yaml-pat\"\n"), 0o600)
+	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\neri_url: \"http://eri.aerial:8088/\"\ngithub_api_url: \"https://api.github.internal/\"\ngithub_token: \"yaml-pat\"\ndeploy_ui_url: \"https://flux.lan.zylman.com/\"\n"), 0o600)
 	vanadisFallbackConfigPath = yamlPath
 	assertFileConfig(t, LoadConfig(filepath.Join(tmpDir, "missing.yaml")))
 

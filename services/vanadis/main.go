@@ -51,6 +51,8 @@ type Config struct {
 	NATSURL      string
 	GitHubAPIURL string
 	GitHubToken  string
+	ConfigPath   string
+	DeployUIURL  string
 }
 
 // VanadisYAMLConfig defines the declarative file schema for /config/vanadis.yaml.
@@ -61,6 +63,7 @@ type VanadisYAMLConfig struct {
 	NATSURL      string `yaml:"nats_url"`
 	GitHubAPIURL string `yaml:"github_api_url"`
 	GitHubToken  string `yaml:"github_token"`
+	DeployUIURL  string `yaml:"deploy_ui_url"`
 }
 
 var vanadisFallbackConfigPath = "/config/vanadis.yaml"
@@ -108,6 +111,8 @@ func LoadConfig(configPath string) Config {
 		NATSURL:      firstNonEmpty(os.Getenv("NATS_URL"), strings.TrimSpace(fileCfg.NATSURL)),
 		GitHubAPIURL: strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("GITHUB_API_URL"), fileCfg.GitHubAPIURL, "https://api.github.com")), "/"),
 		GitHubToken:  firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT"), fileCfg.GitHubToken),
+		ConfigPath:   strings.TrimSpace(configPath),
+		DeployUIURL:  strings.TrimRight(strings.TrimSpace(fileCfg.DeployUIURL), "/"),
 	}
 }
 

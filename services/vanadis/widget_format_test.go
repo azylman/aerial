@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -636,4 +639,194 @@ func TestChunksEvents_And_PersistWidget_RemainingGaps(t *testing.T) {
 	// Case D: SkipSink sends widget with skip_sink: true
 	reqQuiet := buildSyncWidgetRequest(VanadisBuild{Quiet: true}, nil, SyncChunkPRWidgetRequest{})
 	assert.True(t, reqQuiet.SkipSink)
+}
+
+func TestFormatDeployTargetLabel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		target      string
+		kind        string
+		deployUIURL string
+		want        string
+	}{
+		{
+			name:        "empty base url preserves code block",
+			target:      "core-services",
+			kind:        "kustomization",
+			deployUIURL: "",
+			want:        "`core-services`",
+		},
+		{
+			name:        "whitespace base url preserves code block",
+			target:      "core-services",
+			kind:        "kustomization",
+			deployUIURL: "   ",
+			want:        "`core-services`",
+		},
+		{
+			name:        "kustomization with trailing slash in base url",
+			target:      "core-services",
+			kind:        "kustomization",
+			deployUIURL: "https://flux.lan.zylman.com/",
+			want:        "[`core-services`](https://flux.lan.zylman.com/c/main/flux/kustomize/kustomizations/flux-system/core-services)",
+		},
+		{
+			name:        "standard job deep link",
+			target:      "eri",
+			kind:        "job",
+			deployUIURL: "https://flux.lan.zylman.com",
+			want:        "[`eri`](https://flux.lan.zylman.com/c/main/deployments/default/eri)",
+		},
+		{
+			name:        "special git-sync route",
+			target:      "git-sync",
+			kind:        "job",
+			deployUIURL: "https://flux.lan.zylman.com",
+			want:        "[`git-sync`](https://flux.lan.zylman.com/c/main/flux/sources)",
+		},
+		{
+			name:        "special github-runner route",
+			target:      "github-runner",
+			kind:        "job",
+			deployUIURL: "https://flux.lan.zylman.com",
+			want:        "[`github-runner`](https://flux.lan.zylman.com/c/main/flux/helmreleases)",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatDeployTargetLabel(tc.target, tc.kind, tc.deployUIURL)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestVanadisServer_DeployUIURL(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "vanadis.yaml")
+	_ = os.WriteFile(cfgPath, []byte("deploy_ui_url: \"https://flux-file.lan.zylman.com/\"\n"), 0o600)
+
+	var nilSrv *VanadisServer
+	assert.Empty(t, nilSrv.deployUIURL())
+
+	srvConfigured := &VanadisServer{
+		cfg: Config{DeployUIURL: "https://flux.lan.zylman.com/"},
+	}
+	assert.Equal(t, "https://flux.lan.zylman.com", srvConfigured.deployUIURL())
+
+	srvFileFallback := &VanadisServer{
+		cfg: Config{ConfigPath: cfgPath},
+	}
+	assert.Equal(t, "https://flux-file.lan.zylman.com", srvFileFallback.deployUIURL())
+
+	srvEmpty := &VanadisServer{
+		cfg: Config{},
+	}
+	assert.Empty(t, srvEmpty.deployUIURL())
+}
+
+func TestFormatRolloutStatus_WithDeployUIURL(t *testing.T) {
+	t.Parallel()
+
+	baseURL := "https://flux.lan.zylman.com"
+
+	// Kustomization status with URL
+	kustStatus := map[string]string{
+		"aerial-core": "deployed",
+		"sidecars":    "progressing",
+	}
+	gotKust, ok := formatKustomizationRolloutStatus("deploying", kustStatus, baseURL)
+	assert.True(t, ok)
+	assert.Contains(t, gotKust, "[`aerial-core`](https://flux.lan.zylman.com/c/main/flux/kustomize/kustomizations/flux-system/aerial-core): ✅ rolled out")
+	assert.Contains(t, gotKust, "[`sidecars`](https://flux.lan.zylman.com/c/main/flux/kustomize/kustomizations/flux-system/sidecars): 🔄 rolling out")
+
+	// Single job rollout with URL
+	gotJob := formatSingleJobRolloutState("git-sync", "deploying", nil, map[string]bool{"git-sync": true}, nil, nil, true, baseURL)
+	assert.Equal(t, "[`git-sync`](https://flux.lan.zylman.com/c/main/flux/sources): 🔄 starting", gotJob)
+
+	gotRunner := formatSingleJobRolloutState("github-runner", "merged", nil, nil, nil, nil, false, baseURL)
+	assert.Equal(t, "[`github-runner`](https://flux.lan.zylman.com/c/main/flux/helmreleases): ⏳ building image", gotRunner)
+
+	gotDeploy := formatSingleJobRolloutState("eri", "deploying", map[string]bool{"eri": true}, nil, nil, nil, true, baseURL)
+	assert.Equal(t, "[`eri`](https://flux.lan.zylman.com/c/main/deployments/default/eri): ✅ healthy", gotDeploy)
+
+	// FormatChunkActiveStep with baseURL
+	chunk := VanadisChunk{
+		Status: "deploying",
+		RolloutState: &pubsub.PRRolloutState{
+			KustomizationStatuses: map[string]string{
+				"aerial-core": "healthy",
+			},
+		},
+	}
+	gotStep := FormatChunkActiveStep(chunk, baseURL)
+	assert.Equal(t, "[`aerial-core`](https://flux.lan.zylman.com/c/main/flux/kustomize/kustomizations/flux-system/aerial-core): ✅ rolled out", gotStep)
+
+	// FormatChunkActiveStep backward compatibility (empty deployUIURL)
+	gotLegacyStep := FormatChunkActiveStep(chunk)
+	assert.Equal(t, "`aerial-core`: ✅ rolled out", gotLegacyStep)
+}
+
+func TestHandleCoalescedWidgetMessage_WithDeployUIURL(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	store := newMemoryVanadisStore()
+	build := VanadisBuild{
+		ID:        "b-deep-link",
+		ThreadID:  "thread-123",
+		Objective: "test headlamp deep links",
+		Status:    "running",
+	}
+	chunks := []VanadisChunk{
+		{
+			ID:         "c-deep-link",
+			BuildID:    "b-deep-link",
+			ChunkIndex: 0,
+			Title:      "Chunk with rollout",
+			Status:     "deploying",
+			RolloutState: &pubsub.PRRolloutState{
+				KustomizationStatuses: map[string]string{
+					"aerial-core": "deployed",
+				},
+			},
+		},
+	}
+	require.NoError(t, store.CreateBuild(ctx, build, chunks))
+
+	var receivedReq StatusWidgetRequest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/discord/widget" {
+			_ = json.NewDecoder(r.Body).Decode(&receivedReq)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"message_id":"msg-456"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	srv := &VanadisServer{
+		cfg: Config{
+			BrainURL:    ts.URL,
+			DeployUIURL: "https://flux.lan.zylman.com",
+		},
+		store:      store,
+		httpClient: ts.Client(),
+	}
+
+	msg := &memoryMsg{
+		data: []byte(`{"build_id":"b-deep-link"}`),
+	}
+	err := srv.HandleCoalescedWidgetMessage(ctx, msg)
+	require.NoError(t, err)
+	assert.True(t, msg.acked)
+
+	require.Len(t, receivedReq.Chunks, 1)
+	assert.Equal(t, "[`aerial-core`](https://flux.lan.zylman.com/c/main/flux/kustomize/kustomizations/flux-system/aerial-core): ✅ rolled out", receivedReq.Chunks[0].ActiveStep)
 }
