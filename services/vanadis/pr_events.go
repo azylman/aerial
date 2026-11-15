@@ -21,6 +21,8 @@ func isDependabotBranch(branch string) bool {
 }
 
 // RecordPRCheckStatus updates or inserts a check into the chunk's ci_checks jsonb map.
+// If the updated check passes, the chunk is in 'ci_failed' status, and no check remains 'failed',
+// it automatically recovers status to 'pr_opened' and clears banner.
 func (s *PostgresVanadisStore) RecordPRCheckStatus(ctx context.Context, chunkID, checkName, checkState string) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
@@ -31,7 +33,23 @@ func (s *PostgresVanadisStore) RecordPRCheckStatus(ctx context.Context, chunkID,
 	if cID == "" || cName == "" {
 		return errors.New("chunk_id and check_name cannot be empty")
 	}
-	res, execErr := s.db.Exec(ctx, `UPDATE vanadis_chunks SET ci_checks = jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true), updated_at = CURRENT_TIMESTAMP WHERE id = $3;`, cName, cState, cID)
+	const q = `UPDATE vanadis_chunks
+SET ci_checks = jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true),
+    status = CASE
+        WHEN status = 'ci_failed' AND $2 = 'passed' AND NOT EXISTS (
+            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true)) WHERE value = 'failed'
+        ) THEN 'pr_opened'
+        ELSE status
+    END,
+    banner = CASE
+        WHEN status = 'ci_failed' AND $2 = 'passed' AND NOT EXISTS (
+            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true)) WHERE value = 'failed'
+        ) THEN ''
+        ELSE banner
+    END,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = $3;`
+	res, execErr := s.db.Exec(ctx, q, cName, cState, cID)
 	switch {
 	case execErr != nil:
 		return fmt.Errorf("record pr check status: %w", execErr)
@@ -391,6 +409,12 @@ func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecy
 	}
 	if isGateAggregatorCheck(ev.CheckName) {
 		return nil
+	}
+
+	if checkName := strings.TrimSpace(ev.CheckName); checkName != "" {
+		if err := s.store.RecordPRCheckStatus(ctx, chunk.ID, checkName, "failed"); err != nil {
+			log.Printf("[vanadis] warning recording pr check status on ci failure for %s: %v", chunk.ID, err)
+		}
 	}
 
 	banner := fmt.Sprintf("CI check %q failed", ev.CheckName)

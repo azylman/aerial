@@ -931,16 +931,35 @@ func (m *memoryVanadisStore) RemoveChunk(_ context.Context, buildID, chunkRef st
 }
 
 func (m *memoryVanadisStore) RecordPRCheckStatus(_ context.Context, chunkID, checkName, checkState string) error {
+	cID := strings.TrimSpace(chunkID)
+	cName := strings.TrimSpace(checkName)
+	cState := strings.TrimSpace(checkState)
+	if cID == "" || cName == "" {
+		return errors.New("chunk_id and check_name cannot be empty")
+	}
 	now := time.Now().UTC()
 	for bID, list := range m.chunks {
 		for i := range list {
-			if list[i].ID != chunkID {
+			if list[i].ID != cID {
 				continue
 			}
 			if list[i].CIChecks == nil {
 				list[i].CIChecks = make(map[string]string)
 			}
-			list[i].CIChecks[checkName] = checkState
+			list[i].CIChecks[cName] = cState
+			if cState == "passed" && list[i].Status == "ci_failed" {
+				hasFailed := false
+				for _, state := range list[i].CIChecks {
+					if state == "failed" {
+						hasFailed = true
+						break
+					}
+				}
+				if !hasFailed {
+					list[i].Status = "pr_opened"
+					list[i].Banner = ""
+				}
+			}
 			list[i].UpdatedAt = now
 			m.chunks[bID] = list
 			return nil
