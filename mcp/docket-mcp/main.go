@@ -925,7 +925,7 @@ var (
 )
 
 func main() {
-	cfg, err := LoadConfig("")
+	cfg, err := LoadConfig(resolveConfigPath(), os.Getenv)
 	if err != nil {
 		exitFn("[docket-mcp] Failed to load config: %v", err)
 		return
