@@ -161,6 +161,7 @@ type mockPRRegistry struct {
 	ciFailedTargetID     string
 	ciFailedUpdated      bool
 	ciFailedErr          error
+	ciFailedResults      []bool
 	ciFailedBySHAPRNum   int
 	ciFailedBySHATarget  string
 	ciFailedBySHAUpdated bool
@@ -339,6 +340,11 @@ func (m *mockPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo stri
 		return "", false, err
 	}
 	m.ciFailedCalls = append(m.ciFailedCalls, prCall{repo: repo, prNumber: prNumber})
+	if len(m.ciFailedResults) > 0 {
+		res := m.ciFailedResults[0]
+		m.ciFailedResults = m.ciFailedResults[1:]
+		return m.ciFailedTargetID, res, nil
+	}
 	return m.ciFailedTargetID, m.ciFailedUpdated, nil
 }
 

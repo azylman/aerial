@@ -842,14 +842,14 @@ func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *Res
 	})
 }
 
-func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
+func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string, emitAdditional bool) error {
 	s.healDependabotPR(ctx, res)
 	targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
 	if err != nil {
 		return err
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
-	if updated {
+	if updated || (emitAdditional && res.TargetID != "") {
 		return s.completeCIFailureTransition(ctx, res, details, checkURL)
 	}
 	return nil
@@ -861,14 +861,17 @@ func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *Resolv
 		return err
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
+	emitAdditional := false
 	if prNum > 0 && res.PRNumber == 0 {
 		res.PRNumber = prNum
-		if res.Event == "check_run" && !isRoboRevCheck(res.CheckName) && !isGateAggregatorCheck(res.CheckName) {
-			s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
-			s.recordFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
+		if res.Event == "check_run" && !isGateAggregatorCheck(res.CheckName) {
+			if !isRoboRevCheck(res.CheckName) {
+				s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+			}
+			emitAdditional = s.recordFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
 		}
 	}
-	if updated {
+	if updated || (emitAdditional && res.TargetID != "") {
 		return s.completeCIFailureTransition(ctx, res, details, checkURL)
 	}
 	return nil
@@ -878,13 +881,16 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	if s.isStaleOrIgnoredCIFailure(ctx, res) {
 		return nil
 	}
-	if res.Event == "check_run" && res.PRNumber > 0 && res.HeadSHA != "" && !isRoboRevCheck(res.CheckName) && !isGateAggregatorCheck(res.CheckName) {
-		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
-		s.recordFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
+	emitAdditional := false
+	if res.Event == "check_run" && res.PRNumber > 0 && res.HeadSHA != "" && !isGateAggregatorCheck(res.CheckName) {
+		if !isRoboRevCheck(res.CheckName) {
+			s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+		}
+		emitAdditional = s.recordFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
 	}
 	var err error
 	if res.PRNumber > 0 {
-		err = s.handleCIFailureByPRNumber(ctx, res, details, checkURL)
+		err = s.handleCIFailureByPRNumber(ctx, res, details, checkURL, emitAdditional)
 	} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
 		err = s.handleCIFailureByHeadSHA(ctx, res, details, checkURL)
 	}
@@ -1127,7 +1133,7 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 	if checkState == "" || checkState == "failed" {
 		return
 	}
-	if checkState == "pending" && !isRoboRevCheck(res.CheckName) {
+	if checkState == "pending" {
 		s.clearActiveFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
 	}
 	updated, err := s.registry.RecordPRCheckStatus(ctx, res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, checkState)

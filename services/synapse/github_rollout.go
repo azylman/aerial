@@ -209,18 +209,26 @@ func (s *RouterServer) clearFailedCISHA(repo string, prNumber int) {
 	s.failedCheckRuns.Delete(key)
 }
 
-type failedCheckState struct {
-	mu           sync.Mutex
-	headSHA      string
-	everFailed   map[string]bool
-	activeFailed map[string]bool
+func canonicalFailedCheckKey(checkName string) string {
+	if isRoboRevCheck(checkName) {
+		return "roborev"
+	}
+	return strings.ToLower(strings.TrimSpace(checkName))
 }
 
-func (s *RouterServer) recordFailedCheckRun(repo string, prNumber int, headSHA, checkName string) {
+type failedCheckState struct {
+	mu                  sync.Mutex
+	headSHA             string
+	everFailed          map[string]bool
+	activeFailed        map[string]bool
+	roboRevActiveFailed bool
+}
+
+func (s *RouterServer) recordFailedCheckRun(repo string, prNumber int, headSHA, checkName string) bool {
 	normHeadSHA := strings.TrimSpace(headSHA)
-	normCheck := strings.ToLower(strings.TrimSpace(checkName))
+	normCheck := canonicalFailedCheckKey(checkName)
 	if s == nil || prNumber <= 0 || normHeadSHA == "" || isZeroSHA(normHeadSHA) || normCheck == "" {
-		return
+		return false
 	}
 	key := prCheckKey(repo, prNumber)
 	val, _ := s.failedCheckRuns.LoadOrStore(key, &failedCheckState{
@@ -229,7 +237,7 @@ func (s *RouterServer) recordFailedCheckRun(repo string, prNumber int, headSHA, 
 	})
 	entry, ok := val.(*failedCheckState)
 	if !ok || entry == nil {
-		return
+		return false
 	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
@@ -238,9 +246,19 @@ func (s *RouterServer) recordFailedCheckRun(repo string, prNumber int, headSHA, 
 		entry.headSHA = normHeadSHA
 		entry.everFailed = make(map[string]bool)
 		entry.activeFailed = make(map[string]bool)
+		entry.roboRevActiveFailed = false
 	}
+	hadPriorFailure := len(entry.everFailed) > 0 || entry.roboRevActiveFailed
+	if isRoboRevCheck(checkName) {
+		wasActive := entry.roboRevActiveFailed
+		entry.everFailed["roborev"] = true
+		entry.roboRevActiveFailed = true
+		return hadPriorFailure && !wasActive
+	}
+	wasActive := entry.activeFailed[normCheck]
 	entry.everFailed[normCheck] = true
 	entry.activeFailed[normCheck] = true
+	return hadPriorFailure && !wasActive
 }
 
 func (s *RouterServer) loadMatchingFailedCheckState(repo string, prNumber int, headSHA string) *failedCheckState {
@@ -260,7 +278,7 @@ func (s *RouterServer) loadMatchingFailedCheckState(repo string, prNumber int, h
 }
 
 func (s *RouterServer) clearActiveFailedCheckRun(repo string, prNumber int, headSHA, checkName string) {
-	normCheck := strings.ToLower(strings.TrimSpace(checkName))
+	normCheck := canonicalFailedCheckKey(checkName)
 	if normCheck == "" {
 		return
 	}
@@ -272,12 +290,34 @@ func (s *RouterServer) clearActiveFailedCheckRun(repo string, prNumber int, head
 	defer entry.mu.Unlock()
 
 	if strings.EqualFold(entry.headSHA, strings.TrimSpace(headSHA)) {
-		delete(entry.activeFailed, normCheck)
+		if isRoboRevCheck(checkName) {
+			entry.roboRevActiveFailed = false
+		} else {
+			delete(entry.activeFailed, normCheck)
+		}
 	}
 }
 
+func (s *RouterServer) hasActiveRoboRevFailure(repo string, prNumber int, headSHA string) bool {
+	normHeadSHA := strings.TrimSpace(headSHA)
+	if s == nil || prNumber <= 0 || normHeadSHA == "" || isZeroSHA(normHeadSHA) {
+		return false
+	}
+	entry := s.loadMatchingFailedCheckState(repo, prNumber, normHeadSHA)
+	if entry == nil {
+		return false
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+
+	if strings.EqualFold(entry.headSHA, normHeadSHA) {
+		return entry.roboRevActiveFailed
+	}
+	return false
+}
+
 func (s *RouterServer) canRecoverNonGateCheckSuccess(repo string, prNumber int, checkName, headSHA string) bool {
-	normCheck := strings.ToLower(strings.TrimSpace(checkName))
+	normCheck := canonicalFailedCheckKey(checkName)
 	if normCheck == "" {
 		return false
 	}
@@ -286,13 +326,20 @@ func (s *RouterServer) canRecoverNonGateCheckSuccess(repo string, prNumber int, 
 		return false
 	}
 	entry.mu.Lock()
-	defer entry.mu.Unlock()
-
 	if !strings.EqualFold(entry.headSHA, strings.TrimSpace(headSHA)) || !entry.everFailed[normCheck] {
+		entry.mu.Unlock()
 		return false
 	}
 	delete(entry.activeFailed, normCheck)
-	return len(entry.activeFailed) == 0
+	allNonRoboRevCleared := len(entry.activeFailed) == 0
+	roboRevActive := entry.roboRevActiveFailed
+	entry.mu.Unlock()
+
+	if allNonRoboRevCleared {
+		s.nonRoboRevFailedSHAs.Delete(prCheckKey(repo, prNumber))
+		return !roboRevActive
+	}
+	return false
 }
 
 func (s *RouterServer) markUpdatedForCurrentMain(repo string, prNumber int) {
@@ -381,8 +428,17 @@ func (s *RouterServer) canRecoverRoboRevSuccess(ctx context.Context, repo string
 	if s == nil || prNumber <= 0 || headSHA == "" {
 		return false
 	}
+	s.clearActiveFailedCheckRun(repo, prNumber, headSHA, "roborev")
 	if blockedSHA, ok := s.nonRoboRevFailedSHAs.Load(prCheckKey(repo, prNumber)); ok && blockedSHA == headSHA {
 		return false
+	}
+	if entry := s.loadMatchingFailedCheckState(repo, prNumber, headSHA); entry != nil {
+		entry.mu.Lock()
+		match := strings.EqualFold(entry.headSHA, headSHA) && entry.everFailed["roborev"]
+		entry.mu.Unlock()
+		if match {
+			return true
+		}
 	}
 	comment := s.fetchLatestRoboRevComment(ctx, repo, prNumber, headSHA)
 	return comment != "" && !strings.Contains(comment, "## roborev: Review Passed")
@@ -391,6 +447,9 @@ func (s *RouterServer) canRecoverRoboRevSuccess(ctx context.Context, repo string
 func (s *RouterServer) canRecoverCheckSuccess(ctx context.Context, repo string, prNumber int, checkName, headSHA string) bool {
 	if isGateAggregatorCheck(checkName) {
 		headSHA = strings.TrimSpace(headSHA)
+		if s.hasActiveRoboRevFailure(repo, prNumber, headSHA) {
+			return false
+		}
 		if failedSHA, ok := s.nonRoboRevFailedSHAs.Load(prCheckKey(repo, prNumber)); ok && headSHA != "" && failedSHA == headSHA {
 			return true
 		}
