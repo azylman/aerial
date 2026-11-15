@@ -755,7 +755,7 @@ func TestFormatRolloutStatus_WithDeployUIURL(t *testing.T) {
 	gotDeploy := formatSingleJobRolloutState("eri", "deploying", map[string]bool{"eri": true}, nil, nil, nil, true, baseURL)
 	assert.Equal(t, "[`eri`](https://flux.lan.zylman.com/c/main/deployments/default/eri): ✅ healthy", gotDeploy)
 
-	// FormatChunkActiveStepWithBaseURL
+	// FormatChunkActiveStep with baseURL
 	chunk := VanadisChunk{
 		Status: "deploying",
 		RolloutState: &pubsub.PRRolloutState{
@@ -764,7 +764,7 @@ func TestFormatRolloutStatus_WithDeployUIURL(t *testing.T) {
 			},
 		},
 	}
-	gotStep := FormatChunkActiveStepWithBaseURL(chunk, baseURL)
+	gotStep := FormatChunkActiveStep(chunk, baseURL)
 	assert.Equal(t, "[`aerial-core`](https://flux.lan.zylman.com/c/main/flux/kustomize/kustomizations/flux-system/aerial-core): ✅ rolled out", gotStep)
 
 	// FormatChunkActiveStep backward compatibility (empty deployUIURL)

@@ -221,13 +221,9 @@ func resolveCandidateJobs(rs *pubsub.PRRolloutState, checkJobs []string) []strin
 	return checkJobs
 }
 
-// FormatChunkActiveStep formats the dynamic active_step string for a VanadisChunk.
-func FormatChunkActiveStep(chunk VanadisChunk) string {
-	return FormatChunkActiveStepWithBaseURL(chunk, "")
-}
-
-// FormatChunkActiveStepWithBaseURL formats the dynamic active_step string with optional Headlamp deep-link URLs.
-func FormatChunkActiveStepWithBaseURL(chunk VanadisChunk, deployUIURL string) string {
+// FormatChunkActiveStep formats the dynamic active_step string for a VanadisChunk with optional Headlamp deep-link URLs.
+func FormatChunkActiveStep(chunk VanadisChunk, deployUIURL ...string) string {
+	baseURL := firstNonEmpty(deployUIURL...)
 	cleanStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
 	if cleanStatus == "open" || cleanStatus == "pr_opened" {
 		if len(chunk.CIChecks) > 0 {
@@ -247,7 +243,7 @@ func FormatChunkActiveStepWithBaseURL(chunk VanadisChunk, deployUIURL string) st
 	}
 
 	if chunk.RolloutState != nil && len(chunk.RolloutState.KustomizationStatuses) > 0 {
-		if rollout, ok := formatKustomizationRolloutStatus(cleanStatus, chunk.RolloutState.KustomizationStatuses, deployUIURL); ok {
+		if rollout, ok := formatKustomizationRolloutStatus(cleanStatus, chunk.RolloutState.KustomizationStatuses, baseURL); ok {
 			return rollout
 		}
 	}
@@ -261,7 +257,7 @@ func FormatChunkActiveStepWithBaseURL(chunk VanadisChunk, deployUIURL string) st
 			deployedJobs = chunk.RolloutState.DeployedJobs
 			jobStates = chunk.RolloutState.JobStates
 		}
-		return formatPerJobRolloutStatus(allJobs, cleanStatus, startedJobs, deployedJobs, jobStates, passedBuildJobs, deployUIURL)
+		return formatPerJobRolloutStatus(allJobs, cleanStatus, startedJobs, deployedJobs, jobStates, passedBuildJobs, baseURL)
 	}
 
 	if (cleanStatus == "merged" || cleanStatus == "synced") && total > 0 && failed == 0 {

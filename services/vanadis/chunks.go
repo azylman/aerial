@@ -1166,14 +1166,14 @@ func buildStatusWidgetChunk(c VanadisChunk, req SyncChunkPRWidgetRequest, widget
 		if isVanadisChunkStreamingPhase(chunkStatus) {
 			activeStep = strings.TrimSpace(req.ActiveStep)
 			if activeStep == "" {
-				activeStep = FormatChunkActiveStepWithBaseURL(c, baseURL)
+				activeStep = FormatChunkActiveStep(c, baseURL)
 			}
 			completedAt = time.Time{}
 		}
 	case chunkStatus == "completed":
 		chunkStatus = "deployed"
 	case isVanadisChunkStreamingPhase(chunkStatus):
-		activeStep = FormatChunkActiveStepWithBaseURL(c, baseURL)
+		activeStep = FormatChunkActiveStep(c, baseURL)
 		if chunkStatus == "merged" && (activeStep == "" || *widgetStatus == "completed") {
 			chunkStatus = "deployed"
 			activeStep = ""
