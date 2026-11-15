@@ -23,15 +23,14 @@ import (
 type mockEventBus struct {
 	pubsub.Bus
 
-	mu                     sync.Mutex
-	insertedJobs           []GitHubWebhookArgs
-	insertedDeployJobs     []DeployWebhookArgs
-	insertedWidgetSyncJobs []WidgetSyncArgs
-	insertedConflictJobs   []MergeConflictArgs
-	insertedDiscordJobs    []DiscordIngressArgs
-	insertedInteractJobs   []DiscordInteractionArgs
-	publishedPREvents      []pubsub.PRLifecycleEvent
-	err                    error
+	mu                   sync.Mutex
+	insertedJobs         []GitHubWebhookArgs
+	insertedDeployJobs   []DeployWebhookArgs
+	insertedConflictJobs []MergeConflictArgs
+	insertedDiscordJobs  []DiscordIngressArgs
+	insertedInteractJobs []DiscordInteractionArgs
+	publishedPREvents    []pubsub.PRLifecycleEvent
+	err                  error
 }
 
 func (m *mockEventBus) Publish(ctx context.Context, subject, msgID string, data any) error {
@@ -52,12 +51,6 @@ func (m *mockEventBus) recordPublishedEvents(data any) {
 	case *pubsub.PRLifecycleEvent:
 		if a != nil {
 			m.publishedPREvents = append(m.publishedPREvents, *a)
-		}
-	case WidgetSyncArgs:
-		m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, a)
-	case *WidgetSyncArgs:
-		if a != nil {
-			m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, *a)
 		}
 	case MergeConflictArgs:
 		m.insertedConflictJobs = append(m.insertedConflictJobs, a)
@@ -119,12 +112,6 @@ func (l *loopbackOnlyTransport) RoundTrip(req *http.Request) (*http.Response, er
 		return nil, errors.New("hermetic test guard: blocked non-loopback HTTP call to " + req.URL.Host)
 	}
 	return l.base.RoundTrip(req)
-}
-
-type noopClusterTransport struct{}
-
-func (noopClusterTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"matched":false,"advanced":false,"fired":0,"triggers":[]}`))}, nil
 }
 
 func init() {
@@ -222,25 +209,6 @@ type mockPRRegistry struct {
 	listDeployingPRs []DeployingPR
 	listDeployingErr error
 
-	advanceVanadisCalls []prCall
-	advanceVanadisRes   *VanadisAdvancementResult
-	advanceVanadisErr   error
-
-	suppressVanadisCalls []prCall
-	suppressVanadisRes   bool
-	suppressVanadisErr   error
-	mergeAdvanceRes      bool
-	mergeAdvanceErr      error
-
-	failVanadisCalls   []prCall
-	failVanadisRes     bool
-	failVanadisErr     error
-	failVanadisBuildID string
-	failVanadisChunkID string
-
-	ciFailCount    int
-	ciFailCountErr error
-
 	recordCheckCalls   []recordCheckStatusCall
 	recordCheckUpdated bool
 	recordCheckErr     error
@@ -279,6 +247,9 @@ type mockPRRegistry struct {
 	markKustomizationsErr   error
 	hasKustomizationReqs    bool
 	hasKustomizationReqsErr error
+
+	suppressConflictPrompt    bool
+	suppressConflictPromptErr error
 
 	err error
 }
@@ -418,20 +389,6 @@ func (m *mockPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prN
 	return m.resolveTargetID, m.resolveBranch, m.resolveHeadSHA, "", nil
 }
 
-func (m *mockPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
-	m.advanceVanadisCalls = append(m.advanceVanadisCalls, prCall{repo: repo, prNumber: prNumber})
-	if err := m.checkErr(m.advanceVanadisErr); err != nil {
-		return nil, err
-	}
-	if m.advanceVanadisRes != nil {
-		return m.advanceVanadisRes, nil
-	}
-	if m.suppressVanadisRes {
-		return &VanadisAdvancementResult{Matched: true, Advanced: false}, nil
-	}
-	return &VanadisAdvancementResult{}, nil
-}
-
 func (m *mockPRRegistry) AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error {
 	m.appendPRJobsCalls = append(m.appendPRJobsCalls, prCall{repo: repo, prNumber: prNumber, jobs: jobs})
 	return m.checkErr(m.appendPRJobsErr)
@@ -465,36 +422,11 @@ func (m *mockPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumb
 	return m.checkErr(m.updatePRStatusErr)
 }
 
-func (m *mockPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
-	m.suppressVanadisCalls = append(m.suppressVanadisCalls, prCall{repo: repo, prNumber: prNumber})
-	if err := m.checkErr(m.suppressVanadisErr); err != nil {
-		return false, err
+func (m *mockPRRegistry) ShouldSuppressConflictPrompt(ctx context.Context, repo string, prNumber int) (bool, error) {
+	if m.suppressConflictPromptErr != nil {
+		return false, m.suppressConflictPromptErr
 	}
-	return m.suppressVanadisRes || (m.advanceVanadisRes != nil && m.advanceVanadisRes.Matched), nil
-}
-
-func (m *mockPRRegistry) AdvancesVanadisChunkOnMerge(ctx context.Context, repo string, prNumber int) (bool, error) {
-	if err := m.checkErr(m.mergeAdvanceErr); err != nil {
-		return false, err
-	}
-	return m.mergeAdvanceRes, nil
-}
-
-func (m *mockPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
-	m.failVanadisCalls = append(m.failVanadisCalls, prCall{repo: repo, prNumber: prNumber})
-	if err := m.checkErr(m.failVanadisErr); err != nil {
-		return false, err
-	}
-	return m.failVanadisRes, nil
-}
-
-func (m *mockPRRegistry) FailVanadisChunkDetailsByPR(ctx context.Context, repo string, prNumber int) (string, string, bool, error) {
-	failed, err := m.FailVanadisChunkByPR(ctx, repo, prNumber)
-	return m.failVanadisBuildID, m.failVanadisChunkID, failed, err
-}
-
-func (m *mockPRRegistry) IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error) {
-	return m.ciFailCount, m.checkErr(m.ciFailCountErr)
+	return m.suppressConflictPrompt, nil
 }
 
 type recordCheckStatusCall struct {
@@ -537,8 +469,8 @@ func (m *mockPRRegistry) RegisterPR(ctx context.Context, req PRRegisterRequest) 
 	return resolved, nil
 }
 
-func (m *mockPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error) {
-	m.ensureCalls = append(m.ensureCalls, prCall{repo: repo, prNumber: prNumber, headSHA: headSHA, sha: vanadisChunkID})
+func (m *mockPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID string) (string, error) {
+	m.ensureCalls = append(m.ensureCalls, prCall{repo: repo, prNumber: prNumber, headSHA: headSHA})
 	if err := m.checkErr(m.ensureErr); err != nil {
 		return "", err
 	}
@@ -586,13 +518,6 @@ func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp 
 	}
 	srv := NewRouterServer(fixedConfig(cfg), client)
 	if reg != nil {
-		if pgReg, ok := reg.(*PostgresPRRegistry); ok && pgReg != nil {
-			if pgReg.vanadisURL == "" {
-				pgReg.vanadisURL = "http://127.0.0.1:0"
-				pgReg.httpClient = &http.Client{Transport: noopClusterTransport{}}
-				pgReg.vanadisRetryDelay = 0
-			}
-		}
 		srv.SetRegistry(reg)
 	}
 	if disp != nil {
@@ -644,10 +569,10 @@ func scanBuildChecksRow(dest []any, status, checksJSON string) error {
 }
 
 func newMockBuildChecksPgRegistry(status string, checksJSON string, extraRowFns ...func(sql string) pgx.Row) *PostgresPRRegistry {
-	return NewPostgresPRRegistry(&mockVanadisPgxPool{
+	return NewPostgresPRRegistry(&mockSynapsePgxPool{
 		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
 			if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
-				return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+				return mockSynapsePgxRow{scanFn: func(dest ...any) error {
 					return scanBuildChecksRow(dest, status, checksJSON)
 				}}
 			}
@@ -656,7 +581,7 @@ func newMockBuildChecksPgRegistry(status string, checksJSON string, extraRowFns 
 					return row
 				}
 			}
-			return mockVanadisPgxRow{}
+			return mockSynapsePgxRow{}
 		},
 		execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 			return pgconn.NewCommandTag("UPDATE 1"), nil
@@ -879,36 +804,6 @@ func processDeployEventSyncCases() []processDeployEventCase {
 			},
 		},
 		{
-			name:    "deploy_started widget error propagation",
-			evt:     mkDeployEvt("deploy_started", "brain", "azylman/aerial", "sha_start_test", 603, "100000000000000001", "started", ""),
-			reg:     &mockPRRegistry{resolveTargetID: "100000000000000001"},
-			disp:    &mockOutboundDispatcher{widgetErr: errors.New("brain offline")},
-			wantErr: true,
-		},
-		{
-			name:             "sync_success advances Vanadis with valid targetID",
-			evt:              mkDeployEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_1", 301, "100000000000000001", "success", ""),
-			reg:              &mockPRRegistry{suppressVanadisRes: true},
-			disp:             &mockOutboundDispatcher{},
-			wantPR:           301,
-			wantTargetID:     "100000000000000001",
-			wantAdvanceCalls: 1,
-		},
-		{
-			name:             "sync_success advances Vanadis with empty targetID",
-			evt:              mkDeployEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_2", 302, "", "success", ""),
-			reg:              &mockPRRegistry{},
-			wantPR:           302,
-			wantAdvanceCalls: 1,
-		},
-		{
-			name:    "sync_success Vanadis advance error propagates",
-			evt:     mkDeployEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_3", 303, "100000000000000001", "success", ""),
-			reg:     &mockPRRegistry{advanceVanadisErr: errors.New("vanadis err")},
-			disp:    &mockOutboundDispatcher{},
-			wantErr: true,
-		},
-		{
 			name:               "deploy_started skipped when job already deployed",
 			evt:                mkDeployEvt("deploy_started", "coven", "azylman/aerial", "bc1d3ef", 971, "100000000000000001", "started", ""),
 			reg:                &mockPRRegistry{skipDeployingTransition: true},
@@ -932,186 +827,6 @@ func processDeployEventSyncCases() []processDeployEventCase {
 	}
 }
 
-func processDeployEventVanadisActionCases() []processDeployEventCase {
-	return []processDeployEventCase{
-		{
-			name: "sync_success with expected_jobs advances Vanadis when next chunk is a pr",
-			evt: DeployEvent{
-				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"coven", "db-migrate"},
-				Repo: "azylman/aerial", CommitSHA: "sha_sync_exp", PRNumber: 973, TargetID: "100000000000000001", Status: "success",
-			},
-			reg:              &mockPRRegistry{mergeAdvanceRes: true},
-			disp:             &mockOutboundDispatcher{},
-			wantPR:           973,
-			wantTargetID:     "100000000000000001",
-			wantAdvanceCalls: 1,
-		},
-		{
-			name:             "sync_success with registry expected jobs and empty targetID advances Vanadis when next chunk is a pr",
-			evt:              mkDeployEvt("sync_success", "git-sync", "azylman/aerial", "sha_sync_reg_exp", 974, "", "success", ""),
-			reg:              &mockPRRegistry{recordExpectedRes: true, mergeAdvanceRes: true},
-			wantPR:           974,
-			wantAdvanceCalls: 1,
-		},
-		{
-			name: "sync_success with expected_jobs defers Vanadis advancement when next chunk is an action", evt: DeployEvent{Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"}, Repo: "azylman/aerial", CommitSHA: "sha_sync_action_next", PRNumber: 981, TargetID: "100000000000000001", Status: "success"},
-			reg: &mockPRRegistry{advanceVanadisRes: &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-action-next", ThreadID: "100000000000000001", NextChunkIndex: 1}}, disp: &mockOutboundDispatcher{}, wantPR: 981, wantTargetID: "100000000000000001",
-		},
-		{
-			name: "deploy_success advances Vanadis when next chunk is an action", evt: mkDeployEvt("deploy_success", "eri", "azylman/aerial", "sha_deploy_action_next", 982, "100000000000000001", "success", ""),
-			reg: &mockPRRegistry{suppressVanadisRes: true, advanceVanadisRes: &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-action-next", ThreadID: "100000000000000001", NextChunkIndex: 1}}, disp: &mockOutboundDispatcher{}, wantPR: 982, wantTargetID: "100000000000000001", wantAdvanceCalls: 1,
-		},
-		{
-			name:             "sync_success tolerates RecordExpectedJobs error and advances when no expected jobs",
-			evt:              mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha_sync_err", 975, "100000000000000001", "success", ""),
-			reg:              &mockPRRegistry{recordExpectedErr: errors.New("record expected db error")},
-			disp:             &mockOutboundDispatcher{},
-			wantPR:           975,
-			wantTargetID:     "100000000000000001",
-			wantAdvanceCalls: 1,
-			wantPrompts:      1,
-			wantPromptSubs:   []string{"Continuous Delivery deployment completed for job git-sync on azylman/aerial-config"},
-		},
-		{
-			name: "sync_success with expected_jobs on final Vanadis chunk defers advancement until deploy_success",
-			evt:  DeployEvent{Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"}, Repo: "azylman/aerial", CommitSHA: "sha_final_defer", PRNumber: 976, TargetID: "100000000000000001", Status: "success"},
-			reg: &mockPRRegistry{
-				advanceVanadisRes: &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-final", ThreadID: "100000000000000001", BuildCompleted: true},
-			},
-			disp:             &mockOutboundDispatcher{},
-			wantPR:           976,
-			wantTargetID:     "100000000000000001",
-			wantAdvanceCalls: 0,
-			wantPrompts:      0,
-		},
-		{
-			name: "sync_success with expected_jobs and empty targetID on final Vanadis chunk defers advancement",
-			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial", "sha_final_empty_tid", 977, "", "success", ""),
-			reg: &mockPRRegistry{
-				recordExpectedRes: true,
-			},
-			wantPR:           977,
-			wantAdvanceCalls: 0,
-		},
-	}
-}
-
-func processDeployEventVanadisChunkCases() []processDeployEventCase {
-	return []processDeployEventCase{
-		{
-			name: "sync_success without expected_jobs on final Vanadis chunk advances and dispatches build completed prompt",
-			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha_final_sync_only", 978, "100000000000000001", "success", ""),
-			reg: &mockPRRegistry{
-				advanceVanadisRes: &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-skill-sync", ThreadID: "100000000000000001", BuildCompleted: true},
-			},
-			disp:             &mockOutboundDispatcher{},
-			wantPR:           978,
-			wantTargetID:     "100000000000000001",
-			wantAdvanceCalls: 1,
-			wantPrompts:      1,
-			wantPromptSubs:   []string{"Vanadis build build-skill-sync completed"},
-		},
-		{
-			name: "deploy_success on final Vanadis chunk suppresses deploy prompt and dispatches build completed prompt",
-			evt:  mkDeployEvt("deploy_success", "eri", "azylman/aerial", "sha_final_deploy", 979, "100000000000000001", "success", ""),
-			reg: &mockPRRegistry{
-				suppressVanadisRes: true,
-				advanceVanadisRes:  &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-final-deploy", ThreadID: "100000000000000001", BuildCompleted: true},
-			},
-			disp:             &mockOutboundDispatcher{},
-			wantPR:           979,
-			wantTargetID:     "100000000000000001",
-			wantAdvanceCalls: 1,
-			wantPrompts:      1,
-			wantPromptSubs:   []string{"Vanadis build build-final-deploy completed"},
-		},
-		{
-			name: "sync_success with expected_jobs AdvancesVanadisChunkOnMerge error propagates",
-			evt: DeployEvent{
-				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"},
-				Repo: "azylman/aerial", CommitSHA: "sha_final_err", PRNumber: 980, TargetID: "100000000000000001", Status: "success",
-			},
-			reg: &mockPRRegistry{
-				mergeAdvanceErr: errors.New("vanadis merge gate err"),
-			},
-			disp:    &mockOutboundDispatcher{},
-			wantErr: true,
-		},
-		{
-			name: "duplicate deploy_success for same PR suppressed",
-			evt:  mkDeployEvt("deploy_success", "brain", "azylman/aerial", "sha-dup-pr", 890, "100000000000000001", "success", ""),
-			extraEvts: []DeployEvent{
-				mkDeployEvt("deploy_success", "brain", "azylman/aerial", "sha-dup-pr", 890, "100000000000000001", "success", ""),
-			},
-			reg:          &mockPRRegistry{},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       890,
-			wantTargetID: "100000000000000001",
-			wantPrompts:  1,
-			wantPromptSubs: []string{
-				"Continuous Delivery deployment completed for job brain",
-			},
-		},
-		{
-			name: "duplicate deploy_success for same repo job and commitSHA suppressed",
-			evt:  mkDeployEvt("deploy_success", "cadvisor", "azylman/aerial", "sha-dup-sha", 0, "100000000000000001", "success", ""),
-			extraEvts: []DeployEvent{
-				mkDeployEvt("deploy_success", "cadvisor", "azylman/aerial", "sha-dup-sha", 0, "100000000000000001", "success", ""),
-			},
-			reg:          &mockPRRegistry{},
-			disp:         &mockOutboundDispatcher{},
-			wantTargetID: "100000000000000001",
-			wantPrompts:  1,
-			wantPromptSubs: []string{
-				"Continuous Delivery deployment completed for job cadvisor",
-			},
-		},
-		{
-			name: "deploy_success following sync_success without expected_jobs is suppressed",
-			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-sync-no-exp", 891, "100000000000000001", "success", ""),
-			extraEvts: []DeployEvent{
-				mkDeployEvt("deploy_success", "homepage", "azylman/aerial-config", "sha-sync-no-exp", 891, "100000000000000001", "success", ""),
-			},
-			reg:              &mockPRRegistry{},
-			disp:             &mockOutboundDispatcher{},
-			wantPR:           891,
-			wantTargetID:     "100000000000000001",
-			wantAdvanceCalls: 1,
-			wantPrompts:      1,
-			wantPromptSubs: []string{
-				"Continuous Delivery deployment completed for job git-sync on azylman/aerial-config",
-			},
-		},
-		{
-			name: "deploy_success suppressed when postgres pr_registry already has status deployed",
-			evt:  mkDeployEvt("deploy_success", "brain", "azylman/aerial", "sha-db-deployed", 892, "100000000000000001", "success", ""),
-			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
-				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-					if strings.Contains(sql, "SELECT status FROM pr_registry") {
-						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-							if len(dest) > 0 {
-								if s, ok := dest[0].(*string); ok {
-									*s = "deployed"
-								}
-							}
-							return nil
-						}}
-					}
-					return mockVanadisPgxRow{}
-				},
-			}),
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       892,
-			wantTargetID: "100000000000000001",
-			wantPrompts:  0,
-		},
-	}
-}
-
-func processDeployEventVanadisCases() []processDeployEventCase {
-	return append(processDeployEventVanadisActionCases(), processDeployEventVanadisChunkCases()...)
-}
-
 func processDeployEventFluxWatcherCases() []processDeployEventCase {
 	return []processDeployEventCase{
 		{
@@ -1129,7 +844,7 @@ func processDeployEventFluxWatcherCases() []processDeployEventCase {
 			pgReg: newMockBuildChecksPgRegistry("merged", `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
 				func(sql string) pgx.Row {
 					if strings.Contains(sql, "SET status = 'deploying'") || strings.Contains(sql, "SELECT target_id, title, status") {
-						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+						return mockSynapsePgxRow{scanFn: func(dest ...any) error {
 							if len(dest) > 0 {
 								if s, ok := dest[0].(*string); ok {
 									*s = "100000000000000001"
@@ -1141,7 +856,6 @@ func processDeployEventFluxWatcherCases() []processDeployEventCase {
 					return nil
 				},
 			),
-			disp:         &mockOutboundDispatcher{widgetErr: errors.New("unexpected widget sync for skipped deploy_started")},
 			wantPR:       89894,
 			wantTargetID: "100000000000000001",
 			wantPrompts:  0,
@@ -1208,7 +922,7 @@ func processDeployEventFluxDiscoveryCases() []processDeployEventCase {
 		{
 			name: "sync_success on a Flux-sourced repo defers completion to the kustomization watcher",
 			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-config-only", 1640, "100000000000000001", "success", ""),
-			reg:  &mockPRRegistry{suppressVanadisRes: true},
+			reg:  &mockPRRegistry{},
 			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
 				"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}, {Namespace: "flux-system", Name: "aerial-config-apps"}},
 			}},
@@ -1219,7 +933,7 @@ func processDeployEventFluxDiscoveryCases() []processDeployEventCase {
 			wantReconciles:     []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-config"}, {Namespace: "flux-system", Name: "aerial-config-apps"}},
 		},
 		{
-			name: "sync_success with empty targetID on a Flux-sourced repo defers instead of advancing Vanadis",
+			name: "sync_success with empty targetID on a Flux-sourced repo defers kustomization watcher",
 			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-config-only-2", 1641, "", "success", ""),
 			reg:  &mockPRRegistry{},
 			disp: &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{
@@ -1296,12 +1010,10 @@ func processDeployEventFluxCases() []processDeployEventCase {
 func processDeployEventCases() []processDeployEventCase {
 	basic := processDeployEventBasicCases()
 	sync := processDeployEventSyncCases()
-	vanadis := processDeployEventVanadisCases()
 	flux := processDeployEventFluxCases()
-	all := make([]processDeployEventCase, 0, len(basic)+len(sync)+len(vanadis)+len(flux))
+	all := make([]processDeployEventCase, 0, len(basic)+len(sync)+len(flux))
 	all = append(all, basic...)
 	all = append(all, sync...)
-	all = append(all, vanadis...)
 	all = append(all, flux...)
 	return all
 }
@@ -1369,9 +1081,6 @@ func assertDeployEventRegResults(t *testing.T, tc processDeployEventCase) {
 	if len(tc.wantDeployedJobs) > 0 && !reflect.DeepEqual(tc.reg.deployedJobCalls, tc.wantDeployedJobs) {
 		t.Errorf("deployedJobCalls = %v, want %v", tc.reg.deployedJobCalls, tc.wantDeployedJobs)
 	}
-	if len(tc.reg.advanceVanadisCalls) != tc.wantAdvanceCalls {
-		t.Errorf("advanceVanadisCalls = %d, want %d", len(tc.reg.advanceVanadisCalls), tc.wantAdvanceCalls)
-	}
 	var requested []string
 	for _, call := range tc.reg.kustomizationRequestCalls {
 		for name := range call {
@@ -1422,5 +1131,85 @@ func assertDeployEventDispResults(t *testing.T, tc processDeployEventCase) {
 				t.Errorf("prompt = %v, want substr %q", prompts, sub)
 			}
 		}
+	}
+}
+
+func TestHandlePRRegister(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		useNilReg  bool
+		regErr     error
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "nil registry returns 500",
+			useNilReg:  true,
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "invalid json returns 400",
+			body:       `{malformed`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "empty repo returns 400",
+			body:       `{"repo":"","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "zero pr_number returns 400",
+			body:       `{"repo":"azylman/aerial","pr_number":0,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "empty branch returns 400",
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"","head_sha":"sha123","target_id":"100000000000000001"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "empty head_sha returns 400",
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"","target_id":"100000000000000001"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid target_id returns 400",
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"bad"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "headless session key resolves system channel fallback and succeeds",
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"dispatch-uuid-1"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "valid request succeeds",
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "registry register error returns 500",
+			regErr:     errors.New("db insert fail"),
+			body:       `{"repo":"azylman/aerial","pr_number":42,"branch":"feat/test","head_sha":"sha123","target_id":"100000000000000001"}`,
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var reg PRRegistryUpdater
+			if !tc.useNilReg {
+				reg = &mockPRRegistry{registerErr: tc.regErr}
+			}
+			srv := newTestRouter(Config{SystemChannelID: "100000000000000001"}, nil, reg, &mockOutboundDispatcher{})
+			rec := doHTTPRequest(srv.Routes(), http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body), nil)
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
 	}
 }

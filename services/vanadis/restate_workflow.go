@@ -897,8 +897,8 @@ func (s *VanadisServer) resolveRestateAwakeable(ctx context.Context, awakeableID
 	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/restate/awakeables/%s/resolve", awakeableID), value)
 }
 
-func (s *VanadisServer) launchCreatedBuild(ctx context.Context, buildID string, useRestate bool) error {
-	if s != nil && useRestate && strings.TrimSpace(s.restateCfg.RestateIngressURL) != "" {
+func (s *VanadisServer) launchCreatedBuild(ctx context.Context, buildID string) error {
+	if s != nil && strings.TrimSpace(s.restateCfg.RestateIngressURL) != "" {
 		return s.startRestateBuildWorkflow(ctx, buildID)
 	}
 	return s.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: buildID, ChunkIndex: 0})

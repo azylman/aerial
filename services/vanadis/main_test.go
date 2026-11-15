@@ -35,9 +35,6 @@ func assertConfigDefaults(t *testing.T, cfg Config) {
 	if cfg.EriURL != "" {
 		t.Fatalf("unexpected EriURL default: %s", cfg.EriURL)
 	}
-	if cfg.SynapseURL != "" {
-		t.Fatalf("unexpected SynapseURL default: %s", cfg.SynapseURL)
-	}
 	if cfg.NATSURL != "" {
 		t.Fatalf("unexpected NATSURL default: %s", cfg.NATSURL)
 	}
@@ -49,13 +46,13 @@ func assertConfigDefaults(t *testing.T, cfg Config) {
 	}
 }
 
-func assertExpectedConfig(t *testing.T, cfg Config, wantPort, wantPostgres, wantBrain, wantEri, wantSynapse, wantGHURL, wantGHToken string) {
+func assertExpectedConfig(t *testing.T, cfg Config, wantPort, wantPostgres, wantBrain, wantEri, wantGHURL, wantGHToken string) {
 	t.Helper()
 	if cfg.Port != wantPort || cfg.PostgresURL != wantPostgres {
 		t.Fatalf("unexpected port or postgres_url: got port=%q pg=%q", cfg.Port, cfg.PostgresURL)
 	}
-	if cfg.BrainURL != wantBrain || cfg.EriURL != wantEri || cfg.SynapseURL != wantSynapse {
-		t.Fatalf("unexpected endpoints: got brain=%q eri=%q synapse=%q", cfg.BrainURL, cfg.EriURL, cfg.SynapseURL)
+	if cfg.BrainURL != wantBrain || cfg.EriURL != wantEri {
+		t.Fatalf("unexpected endpoints: got brain=%q eri=%q", cfg.BrainURL, cfg.EriURL)
 	}
 	if cfg.GitHubAPIURL != wantGHURL || cfg.GitHubToken != wantGHToken {
 		t.Fatalf("unexpected github config: got url=%q token=%q", cfg.GitHubAPIURL, cfg.GitHubToken)
@@ -64,12 +61,12 @@ func assertExpectedConfig(t *testing.T, cfg Config, wantPort, wantPostgres, want
 
 func assertFileConfig(t *testing.T, cfg Config) {
 	t.Helper()
-	assertExpectedConfig(t, cfg, "4099", "postgres://u:p@db:5432/vanadis", "http://eri.aerial:8088", "http://eri.aerial:8088", "http://router.aerial:4020", "https://api.github.internal", "yaml-pat")
+	assertExpectedConfig(t, cfg, "4099", "postgres://u:p@db:5432/vanadis", "http://eri.aerial:8088", "http://eri.aerial:8088", "https://api.github.internal", "yaml-pat")
 }
 
 func assertEnvConfig(t *testing.T, cfg Config) {
 	t.Helper()
-	assertExpectedConfig(t, cfg, "4030", "postgres://env:5432/db", "http://env-eri:8088", "http://env-eri:8088", "http://env-router:4020", "https://env-api.github.com", "env-token")
+	assertExpectedConfig(t, cfg, "4030", "postgres://env:5432/db", "http://env-eri:8088", "http://env-eri:8088", "https://env-api.github.com", "env-token")
 }
 
 func TestLoadConfigAndEnv(t *testing.T) {
@@ -79,7 +76,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	}()
 	for _, k := range []string{
 		"PORT", "DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
-		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "ERI_URL", "SYNAPSE_URL", "NATS_URL", "CONFIG_PATH",
+		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "ERI_URL", "NATS_URL", "CONFIG_PATH",
 		"GITHUB_API_URL", "GITHUB_TOKEN", "GITHUB_PAT",
 	} {
 		t.Setenv(k, "")
@@ -110,7 +107,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 		})
 	}
 	yamlPath := filepath.Join(tmpDir, "vanadis.yaml")
-	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\neri_url: \"http://eri.aerial:8088/\"\nsynapse_url: \"http://router.aerial:4020/\"\ngithub_api_url: \"https://api.github.internal/\"\ngithub_token: \"yaml-pat\"\n"), 0o600)
+	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\neri_url: \"http://eri.aerial:8088/\"\ngithub_api_url: \"https://api.github.internal/\"\ngithub_token: \"yaml-pat\"\n"), 0o600)
 	vanadisFallbackConfigPath = yamlPath
 	assertFileConfig(t, LoadConfig(filepath.Join(tmpDir, "missing.yaml")))
 
@@ -120,15 +117,9 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	t.Setenv("PORT", "4030")
 	t.Setenv("DATABASE_URL", "postgres://env:5432/db")
 	t.Setenv("ERI_URL", "http://env-eri:8088/")
-	t.Setenv("SYNAPSE_URL", "http://env-router:4020/")
 	t.Setenv("GITHUB_API_URL", "https://env-api.github.com/")
 	t.Setenv("GITHUB_TOKEN", "env-token")
 	assertEnvConfig(t, LoadConfigFromEnv())
-
-	t.Setenv("SYNAPSE_URL", "http://synapse-override:4020/")
-	if envCfg := LoadConfigFromEnv(); envCfg.SynapseURL != "http://synapse-override:4020" {
-		t.Fatalf("unexpected SYNAPSE_URL override: %+v", envCfg)
-	}
 
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("GITHUB_PAT", "pat-token-fallback")
@@ -505,7 +496,7 @@ func TestProcessExecuteChunk(t *testing.T) {
 	}))
 	defer brainSrv.Close()
 	memStore := newMemoryVanadisStore()
-	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, brainSrv.Client())
+	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, brainSrv.Client())
 	if err := srv.ProcessExecuteChunk(ctx, "nonexistent", 0, false); err != nil {
 		t.Fatalf("expected nil on missing build, got %v", err)
 	}
@@ -561,7 +552,7 @@ func TestProcessExecuteChunk(t *testing.T) {
 	closedURL := closedSrv.URL
 	closedSrv.Close()
 	memStore.updateBuildErr = errors.New("build fail update err")
-	_ = NewVanadisServer(Config{BrainURL: closedURL, SynapseURL: closedURL}, memStore, noopClient).ProcessExecuteChunk(ctx, "b-run", 1, true)
+	_ = NewVanadisServer(Config{BrainURL: closedURL}, memStore, noopClient).ProcessExecuteChunk(ctx, "b-run", 1, true)
 	memStore.updateBuildErr = nil
 	httpkit.WriteJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
 }
@@ -669,36 +660,28 @@ func testHTTPEndpointsBuildCancel(t *testing.T, srv *VanadisServer, memStore *me
 	memStore.updateBuildErr = errors.New("cancel db err")
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", nil, http.StatusInternalServerError)
 	memStore.updateBuildErr = nil
-	var cancelPromptBuildID, cancelWidgetSyncBuildID, cancelWidgetSyncBanner string
+	var cancelPromptBuildID string
 	cancelBrainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/dispatch/cancel":
+		if r.URL.Path == "/dispatch/cancel" {
 			var req map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			cancelPromptBuildID = req["build_id"]
 			httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "cancelled_count": 1})
 			return
-		case "/internal/widget/sync":
-			var req map[string]string
-			_ = json.NewDecoder(r.Body).Decode(&req)
-			cancelWidgetSyncBuildID = req["build_id"]
-			cancelWidgetSyncBanner = req["banner"]
-			httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok"})
-			return
 		}
 	}))
 	defer cancelBrainSrv.Close()
 	srv.cfg.BrainURL = cancelBrainSrv.URL
-	srv.cfg.SynapseURL = cancelBrainSrv.URL
 	srv.httpClient = cancelBrainSrv.Client()
-	srv.SetBus(nil)
+	cancelBus := &mockChunkBus{}
+	srv.SetBus(cancelBus)
 	_ = memStore.UpdateChunkStatus(context.Background(), buildID+"-chunk-1", "merged")
 	_ = memStore.UpdateChunkStatus(context.Background(), "custom-chunk-2", "running")
 	memStore.updateChunkErr = errors.New("simulated chunk cancel update err")
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusOK)
 	memStore.updateChunkErr = nil
-	if cancelPromptBuildID != buildID || cancelWidgetSyncBuildID != buildID || cancelWidgetSyncBanner != "" {
-		t.Fatalf("unexpected cancel notifications: promptBuildID=%q widgetSyncBuildID=%q banner=%q", cancelPromptBuildID, cancelWidgetSyncBuildID, cancelWidgetSyncBanner)
+	if cancelPromptBuildID != buildID || cancelBus.widgetBuildID != buildID || cancelBus.widgetBanner != "" {
+		t.Fatalf("unexpected cancel notifications: promptBuildID=%q widgetSyncBuildID=%q banner=%q", cancelPromptBuildID, cancelBus.widgetBuildID, cancelBus.widgetBanner)
 	}
 	_ = memStore.UpdateBuildStatus(context.Background(), buildID, "completed")
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusConflict)
@@ -885,71 +868,17 @@ func TestSyncBuildWidget(t *testing.T) {
 		t.Errorf("Unexpected published subject: got %q, want %q", publishedSubject, wantSubject)
 	}
 
-	var postedReq map[string]string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/internal/widget/sync" {
-			http.NotFound(w, r)
-			return
-		}
-		_ = json.NewDecoder(r.Body).Decode(&postedReq)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"status": "delivered",
-		})
-	}))
-	defer ts.Close()
-	srv := &VanadisServer{
-		cfg:        Config{SynapseURL: ts.URL},
-		httpClient: ts.Client(),
-		store:      store,
-	}
-	srv.syncBuildWidget(ctx, "b1", "test banner")
-	if postedReq["build_id"] != "b1" || postedReq["banner"] != "test banner" {
-		t.Errorf("Unexpected posted widget payload: %+v", postedReq)
-	}
-
-	// Empty SynapseURL returns early with zero HTTP requests
-	postedReq = nil
-	emptySynapseSrv := &VanadisServer{
-		cfg:        Config{SynapseURL: ""},
-		httpClient: ts.Client(),
-		store:      store,
-	}
-	emptySynapseSrv.syncBuildWidget(ctx, "b1", "banner")
-	if postedReq != nil {
-		t.Errorf("Expected nil postedReq for empty SynapseURL, got %+v", postedReq)
-	}
-
 	// Empty build ID early return
-	postedReq = nil
-	srv.syncBuildWidget(ctx, "   ", "banner")
-	if postedReq != nil {
-		t.Errorf("Expected nil postedReq for empty buildID, got %+v", postedReq)
-	}
+	busSrv.syncBuildWidget(ctx, "   ", "banner")
 
-	// Nil httpClient early return
-	nilClientSrv := &VanadisServer{cfg: Config{SynapseURL: ts.URL}}
-	nilClientSrv.syncBuildWidget(ctx, "b1", "")
+	// Nil bus early return
+	srvNoBus := &VanadisServer{store: store}
+	srvNoBus.syncBuildWidget(ctx, "b1", "banner")
 
-	// 500 error response status
-	tsErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer tsErr.Close()
-	srvErr := &VanadisServer{
-		cfg:        Config{SynapseURL: tsErr.URL},
-		httpClient: tsErr.Client(),
-	}
-	srvErr.syncBuildWidget(ctx, "b1", "")
-
-	// Bad URL request creation error (e.g. invalid control char in URL or closed server)
-	tsClosed := httptest.NewServer(http.NotFoundHandler())
-	closedURL := tsClosed.URL
-	tsClosed.Close()
-	srvClosed := &VanadisServer{
-		cfg:        Config{SynapseURL: closedURL},
-		httpClient: ts.Client(),
-	}
-	srvClosed.syncBuildWidget(ctx, "b1", "")
+	// Bus publish error
+	errBus := &mockChunkBus{err: errors.New("publish error")}
+	srvErrBus := &VanadisServer{bus: errBus, store: store}
+	srvErrBus.syncBuildWidget(ctx, "b1", "banner")
 }
 
 func TestClassifyAndSummarizeBuildEntry(t *testing.T) {
@@ -1211,57 +1140,27 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 		t.Fatalf("handleBuildCancel status = %d, want %d", recCancel.Code, http.StatusOK)
 	}
 
-	// 4. handleAdvanceChunkPR -> merged and completed
-	advStore := newMockStore(mockDB{
-		beginFn: func(ctx context.Context) (pgx.Tx, error) {
-			return &mockTx{
-				queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-					return &genericMockRow{scanFn: func(dest ...any) error {
-						*dest[0].(*string) = "c1"
-						*dest[1].(*string) = "b1"
-						*dest[2].(*int) = 0
-						*dest[3].(*string) = "pr"
-						*dest[4].(*string) = "Chunk 1"
-						*dest[5].(*string) = "pr_opened"
-						*dest[6].(*string) = "123456789012345678"
-						*dest[7].(*int) = 2
-						*dest[8].(*string) = "Build 1"
-						*dest[9].(*string) = "Objective 1"
-						*dest[10].(*string) = "running"
-						*dest[11].(*string) = "msg-1"
-						return nil
-					}}
-				},
-				queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-					c := mkChunk("c1", "b1", 0, "Chunk 1", "inst", "medium", "pr_opened")
-					return &mockRows{items: []VanadisChunk{c}}, nil
-				},
-			}, nil
-		},
-	})
-	srvAdv := NewVanadisServer(Config{}, advStore, noopClient)
-	srvAdv.SetBus(memBus)
-	recAdv := httptest.NewRecorder()
-	srvAdv.handleAdvanceChunkPR(recAdv, httptest.NewRequest(http.MethodPost, "/chunks/advance-pr", strings.NewReader(`{"repo":"aerial","pr_number":42}`)))
-	if recAdv.Code != http.StatusOK {
-		t.Fatalf("handleAdvanceChunkPR status = %d, want %d", recAdv.Code, http.StatusOK)
+	// 4. ProcessPRLifecycleEvent "merged" -> merged
+	bAdv := mkBuild("b-adv", "123456789012345678", "Adv Build", "obj", "running")
+	cAdv := mkChunk("c-adv", "b-adv", 0, "Chunk 1", "inst", "medium", "pr_opened")
+	cAdv.Repo = "aerial"
+	cAdv.PRNumber = 42
+	cAdv.Mode = "pr"
+	_ = memStore.CreateBuild(ctx, bAdv, []VanadisChunk{cAdv})
+	if err := srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:    "merged",
+		Repo:     "aerial",
+		PRNumber: 42,
+	}); err != nil {
+		t.Fatalf("ProcessPRLifecycleEvent(merged) err = %v", err)
 	}
 
-	// 5. handleFailChunkPR -> failed
-	failStore := newMockStore(mockDB{
-		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
-			return &genericMockRow{scanFn: func(dest ...any) error {
-				*dest[0].(*string) = "b-fail"
-				*dest[1].(*string) = "c-fail"
-				return nil
-			}}
-		},
-	})
-	srvFailPR := NewVanadisServer(Config{}, failStore, noopClient)
-	recFailPR := httptest.NewRecorder()
-	srvFailPR.handleFailChunkPR(recFailPR, httptest.NewRequest(http.MethodPost, "/chunks/fail-pr", strings.NewReader(`{"repo":"aerial","pr_number":43}`)))
-	if recFailPR.Code != http.StatusOK {
-		t.Fatalf("handleFailChunkPR status = %d, want %d", recFailPR.Code, http.StatusOK)
+	// 5. failChunkInternal records chunk and build metrics
+	bFail := mkBuild("b-fail", "123456789012345678", "Fail Build", "obj", "running")
+	cFail := mkChunk("c-fail", "b-fail", 0, "Fail Chunk", "inst", "medium", "running")
+	_ = memStore.CreateBuild(ctx, bFail, []VanadisChunk{cFail})
+	if _, _, _, err := srv.failChunkInternal(ctx, "c-fail", "test failure"); err != nil {
+		t.Fatalf("failChunkInternal err = %v", err)
 	}
 }
 
@@ -1372,7 +1271,7 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 			memStore := newMemoryVanadisStore()
 			c0 := mkChunk("c-0", "b-run", 0, "C0", "I0", "medium", "pending")
 			_ = memStore.CreateBuild(ctx, mkBuild("b-run", "123456789012345678", "Run", "obj", "running"), []VanadisChunk{c0})
-			srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, brainSrv.Client())
+			srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, brainSrv.Client())
 
 			msg := &memoryMsg{
 				data:         []byte(tc.rawPayload),
@@ -1410,7 +1309,7 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	memStore := newMemoryVanadisStore()
 	c0 := mkChunk("c-wire-0", "b-wire", 0, "C0", "I0", "medium", "pending")
 	_ = memStore.CreateBuild(ctx, mkBuild("b-wire", "123456789012345678", "Run", "obj", "running"), []VanadisChunk{c0})
-	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, brainSrv.Client())
+	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, brainSrv.Client())
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()

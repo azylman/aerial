@@ -30,26 +30,16 @@ func (s *RouterServer) ProcessMergeConflict(ctx context.Context, args MergeConfl
 }
 
 func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, repo, branch, headSHA string, prNum int) error {
-	if prNum > 0 && s.registry != nil {
-		if _, isPg := s.registry.(*PostgresPRRegistry); isPg {
-			s.setPRWidgetState(ctx, repo, prNum, "conflict", "Merge conflict detected")
-			if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-				log.Printf("[synapse] [widget] warning syncing conflict widget: %v", err)
-			}
-		}
-	}
-	if s.bus != nil {
-		if vanadisPR, err := s.isVanadisPR(ctx, repo, prNum); err == nil && vanadisPR {
-			log.Printf("[synapse] [conflict] suppressing conflict /prompt dispatch for %s#%d (handled by Vanadis via aerial.pr.conflict)", repo, prNum)
+	if s.bus != nil && s.registry != nil && prNum > 0 {
+		if suppressed, err := s.registry.ShouldSuppressConflictPrompt(ctx, repo, prNum); err == nil && suppressed {
+			log.Printf("[synapse] [conflict] suppressing conflict /prompt dispatch for %s#%d (handled by build orchestrator via aerial.pr.conflict)", repo, prNum)
 			return nil
 		}
 	}
 	shortRepo := firstNonEmpty(cleanRepoName(repo), "aerial")
 	cleanBranch := firstNonEmpty(strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/"), "<branch>")
 	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', merge origin/main to resolve conflicts, verify locally, and push to update the PR via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", prNum, repo, branch, headSHA, shortRepo, cleanBranch)
-	opts := s.vanadisPromptOpts(ctx, repo, prNum)
-	opts.silent, opts.effort = true, firstNonEmpty(opts.effort, "medium")
-	opts.dispatchID = fmt.Sprintf("conflict-%s-%d", strings.ReplaceAll(repo, "/", "-"), prNum)
+	opts := alertPromptOpts{silent: true, skipIfActive: true, effort: "medium", dispatchID: fmt.Sprintf("conflict-%s-%d", strings.ReplaceAll(repo, "/", "-"), prNum)}
 	if cleanSHA := strings.TrimSpace(headSHA); cleanSHA != "" {
 		opts.dispatchID += "-" + cleanSHA
 	}

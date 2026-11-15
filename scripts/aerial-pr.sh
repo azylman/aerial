@@ -539,6 +539,11 @@ rebase_staged_changes() {
         remote_branch_sha=$(git rev-parse --verify -q "refs/remotes/origin/${current_branch}" 2>/dev/null || echo "")
     fi
     if [ -n "$remote_branch_sha" ]; then
+        if git merge-base --is-ancestor "$upstream_sha" "$head_sha" 2>/dev/null && git merge-base --is-ancestor "$remote_branch_sha" "$head_sha" 2>/dev/null; then
+            REBASE_INCORPORATED_REMOTE_SHA="$remote_branch_sha"
+            git reset --soft "origin/${target_branch}" >/dev/null 2>&1
+            return 0
+        fi
         if git merge-base --is-ancestor "$remote_branch_sha" "$head_sha" 2>/dev/null; then
             [ "$head_sha" != "$remote_branch_sha" ] && git reset --soft "$remote_branch_sha" >/dev/null 2>&1
             if git merge-base --is-ancestor "$upstream_sha" "$remote_branch_sha" 2>/dev/null; then

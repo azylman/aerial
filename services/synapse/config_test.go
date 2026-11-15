@@ -16,7 +16,7 @@ var synapseConfigKeysToClear = []string{
 	"DATABASE_URL", "POSTGRES_URL", "POSTGRES_USER", "POSTGRES_PASSWORD",
 	"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB",
 	"DISCORD_TOKEN", "BOT_ID", "AERIAL_BOT_ID", "BRAIN_URL", "ERI_URL",
-	"FLUX_RECEIVER_URL", "VANADIS_URL", "HARO_URL", "HANGAR_URL", "NATS_URL",
+	"FLUX_RECEIVER_URL", "HARO_URL", "HANGAR_URL", "NATS_URL",
 	"SYSTEM_CHANNEL_ID", "AUTO_UPDATE_PR_AUTHORS",
 	"WEBHOOK_FORWARD_URLS", "SYNAPSE_DEFAULT_OWNER", "DEFAULT_OWNER", "AERIAL_DEFAULT_OWNER",
 }
@@ -135,7 +135,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		"GITHUB_PAT", "GITHUB_API_URL",
 		"DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
 		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
-		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "VANADIS_URL", "HARO_URL", "NATS_URL",
+		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "HARO_URL", "NATS_URL",
 		"SYSTEM_CHANNEL_ID", "CONFIG_PATH", "DISCORD_TOKEN",
 	}
 
@@ -148,9 +148,6 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				t.Setenv(k, v)
 			}
 			cfg := LoadConfigFromEnv()
-			if tc.wantEmptyURL && cfg.VanadisURL != "" {
-				t.Errorf("VanadisURL=%q, want empty when unset", cfg.VanadisURL)
-			}
 			for _, check := range []struct{ got, want, field string }{
 				{cfg.Port, tc.wantPort, "Port"},
 				{cfg.KubeAPIServer, tc.wantKubeServer, "KubeAPIServer"},
@@ -614,55 +611,10 @@ func runErrorBlockTests(t *testing.T) {
 	}
 }
 
-func runVanadisBuildPromptTests(t *testing.T) {
-	t.Helper()
-	vanadisPromptTests := []struct {
-		name    string
-		res     *VanadisAdvancementResult
-		wantSub []string
-		wantLen int
-	}{
-		{name: "formatVanadisBuildCompletedPrompt nil result", res: nil, wantLen: 0},
-		{
-			name: "formatVanadisBuildCompletedPrompt with chunks",
-			res: &VanadisAdvancementResult{
-				BuildID: "build-42", Tier: 2, Objective: "Complete feature migration",
-				Chunks: []VanadisChunkSummary{
-					{ChunkIndex: 0, Title: "Chunk One", PRNumber: 101},
-					{ChunkIndex: 1, Title: "Chunk Two", Repo: "", PRNumber: 0},
-				},
-			},
-			wantSub: []string{
-				"Vanadis build build-42 completed (Tier 2, 2 chunks merged).",
-				"Objective: Complete feature migration",
-				"Merged Chunks Ledger:",
-				"- Chunk 1/2: Chunk One (azylman/aerial, PR #101)",
-				"- Chunk 2/2: Chunk Two (azylman/aerial)",
-				"All Vanadis build chunks have merged into main.",
-			},
-		},
-	}
-	for _, tc := range vanadisPromptTests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := formatVanadisBuildCompletedPrompt(tc.res)
-			if tc.wantLen == 0 && tc.res == nil && got != "" {
-				t.Errorf("formatVanadisBuildCompletedPrompt(nil) = %q, want empty", got)
-			}
-			for _, sub := range tc.wantSub {
-				if !strings.Contains(got, sub) {
-					t.Errorf("formatVanadisBuildCompletedPrompt() missing %q: %s", sub, got)
-				}
-			}
-		})
-	}
-}
-
 func TestPromptAndContextFormatting(t *testing.T) {
 	t.Parallel()
 	runTruncatePromptTests(t)
 	runErrorBlockTests(t)
-	runVanadisBuildPromptTests(t)
 }
 
 func TestIs4xxClientError(t *testing.T) {
@@ -764,7 +716,6 @@ func TestSynapseRestartRequired(t *testing.T) {
 		FluxReceiverURL:     "http://flux/hook",
 		KubeAPIServer:       "https://10.0.0.1:443",
 		KubeToken:           "kube",
-		VanadisURL:          "http://vanadis",
 		SystemChannelID:     "111",
 		AutoUpdatePRAuthors: []string{"a"},
 		WebhookForwardURLs:  map[string]string{"marida": "http://marida:4020"},
@@ -787,7 +738,6 @@ func TestSynapseRestartRequired(t *testing.T) {
 		{name: "flux receiver url requires restart", next: withField(base, Config{FluxReceiverURL: "http://flux2/hook"}), want: true},
 		{name: "kube api server requires restart", next: withField(base, Config{KubeAPIServer: "https://10.0.0.2:443"}), want: true},
 		{name: "kube token requires restart", next: withField(base, Config{KubeToken: "kube2"}), want: true},
-		{name: "vanadis url requires restart", next: withField(base, Config{VanadisURL: "http://vanadis2"}), want: true},
 		{name: "nats url requires restart", next: withField(base, Config{NATSURL: "nats://nats2:4222"}), want: true},
 	}
 	for _, tc := range tests {
@@ -818,6 +768,14 @@ func TestLoadConfigFromEnvStrict(t *testing.T) {
 	if cfg == nil || cfg.Port != "5050" {
 		t.Errorf("cfg.Port = %v, want 5050", cfg)
 	}
+
+	// invalid yaml error branch
+	invalidYAML := filepath.Join(tmpDir, "invalid.yaml")
+	_ = os.WriteFile(invalidYAML, []byte("bad: [yaml"), 0o644)
+	t.Setenv("CONFIG_PATH", invalidYAML)
+	if _, err := loadConfigFromEnvStrict(); err == nil {
+		t.Errorf("expected error from loadConfigFromEnvStrict on bad yaml")
+	}
 }
 
 // withField returns base with every non-zero field of overlay copied over it.
@@ -830,4 +788,34 @@ func withField(base, overlay Config) Config {
 		}
 	}
 	return base
+}
+
+func TestIsHeadlessSessionKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{name: "dispatch prefix", id: "dispatch-12345", want: true},
+		{name: "heartbeat prefix", id: "heartbeat-service-1", want: true},
+		{name: "worker prefix", id: "worker-0", want: true},
+		{name: "pooled worker with discord prefix", id: "discord:worker-0", want: true},
+		{name: "medium worker with discord prefix", id: "discord:medium-worker-0", want: true},
+		{name: "ephemeral worker", id: "ephemeral:worker-1", want: true},
+		{name: "regular discord channel snowflake", id: "100000000000000001", want: false},
+		{name: "channel name", id: "aerial-dev", want: false},
+		{name: "empty id", id: "", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsHeadlessSessionKey(tc.id)
+			if got != tc.want {
+				t.Errorf("IsHeadlessSessionKey(%q) = %v, want %v", tc.id, got, tc.want)
+			}
+		})
+	}
 }

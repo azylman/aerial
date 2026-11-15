@@ -1,19 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,53 +26,17 @@ type DeployingPR struct {
 	Metadata map[string]any `json:"metadata"`
 }
 
-// VanadisChunkSummary holds condensed status metadata for a single chunk in a Vanadis build.
-type VanadisChunkSummary struct {
-	ID          string    `json:"id"`
-	ChunkIndex  int       `json:"chunk_index"`
-	Repo        string    `json:"repo,omitempty"`
-	Title       string    `json:"title"`
-	Status      string    `json:"status"`
-	PRNumber    int       `json:"pr_number,omitempty"`
-	StartedAt   time.Time `json:"started_at,omitempty"`
-	CompletedAt time.Time `json:"completed_at,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
-}
-
-// VanadisAdvancementResult describes the outcome of advancing a Vanadis build chunk upon PR merge.
-type VanadisAdvancementResult struct {
-	Matched          bool                  `json:"matched"`
-	Advanced         bool                  `json:"advanced"`
-	BuildID          string                `json:"build_id"`
-	ThreadID         string                `json:"thread_id"`
-	Tier             int                   `json:"tier"`
-	Title            string                `json:"title"`
-	Objective        string                `json:"objective"`
-	BuildStatus      string                `json:"build_status"`
-	StatusMessageID  string                `json:"status_message_id,omitempty"`
-	MergedChunkIndex int                   `json:"merged_chunk_index"`
-	MergedChunkTitle string                `json:"merged_chunk_title"`
-	NextChunkIndex   int                   `json:"next_chunk_index"`
-	BuildCompleted   bool                  `json:"build_completed"`
-	Chunks           []VanadisChunkSummary `json:"chunks,omitempty"`
-}
-
-var (
-	ErrVanadisChunkNotFound  = errors.New("vanadis chunk not found")
-	ErrVanadisChunkCancelled = errors.New("vanadis chunk or build is cancelled")
-	ErrInvalidTargetID       = errors.New("target_id must be a valid Discord snowflake (17-20 digits)")
-)
+var ErrInvalidTargetID = errors.New("target_id must be a valid Discord snowflake (17-20 digits)")
 
 // PRRegisterRequest defines the request payload for POST /internal/pr/register.
 type PRRegisterRequest struct {
-	Repo           string `json:"repo"`
-	PRNumber       int    `json:"pr_number"`
-	Branch         string `json:"branch"`
-	HeadSHA        string `json:"head_sha"`
-	TargetID       string `json:"target_id"`
-	Title          string `json:"title,omitempty"`
-	Metadata       string `json:"metadata,omitempty"`
-	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+	Repo     string `json:"repo"`
+	PRNumber int    `json:"pr_number"`
+	Branch   string `json:"branch"`
+	HeadSHA  string `json:"head_sha"`
+	TargetID string `json:"target_id"`
+	Title    string `json:"title,omitempty"`
+	Metadata string `json:"metadata,omitempty"`
 }
 
 // PRRegistryUpdater defines the interface for updating PR lifecycle state in PostgreSQL pr_registry.
@@ -97,14 +56,8 @@ type PRRegistryUpdater interface {
 	AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
 	AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (targetID string, prNumber int, mergeSHA, repo string, updated bool, err error)
 	ListDeployingPRs(ctx context.Context) ([]DeployingPR, error)
-	AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error)
-	ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error)
-	AdvancesVanadisChunkOnMerge(ctx context.Context, repo string, prNumber int) (bool, error)
-	FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error)
-	FailVanadisChunkDetailsByPR(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, failed bool, err error)
-	IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error)
 	RecordPRCheckStatus(ctx context.Context, repo string, prNumber int, headSHA, checkName, checkState string) (bool, error)
-	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error)
+	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID string) (string, error)
 	RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
 	HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error)
 	RecordPRJobState(ctx context.Context, jobName, jobState string) (repo string, prNumber int, updated bool, err error)
@@ -113,6 +66,7 @@ type PRRegistryUpdater interface {
 	MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (transitioned bool, err error)
 	HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error)
 	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error
+	ShouldSuppressConflictPrompt(ctx context.Context, repo string, prNumber int) (bool, error)
 }
 
 type pgxQueryExecer interface {
@@ -124,56 +78,17 @@ type pgxQueryExecer interface {
 
 // PostgresPRRegistry implements PRRegistryUpdater backed by a pgxpool.Pool.
 type PostgresPRRegistry struct {
-	pool              pgxQueryExecer
-	vanadisURL        string
-	httpClient        *http.Client
-	vanadisRetryDelay time.Duration
-	vanadisRetrySleep func(ctx context.Context, d time.Duration) error
+	pool pgxQueryExecer
 }
 
 // NewPostgresPRRegistry constructs a new PostgresPRRegistry.
-func NewPostgresPRRegistry(pool pgxQueryExecer, opts ...func(*PostgresPRRegistry)) *PostgresPRRegistry {
+func NewPostgresPRRegistry(pool pgxQueryExecer) *PostgresPRRegistry {
 	if typedPool, ok := pool.(*pgxpool.Pool); ok && typedPool == nil {
 		pool = nil
 	}
-	r := &PostgresPRRegistry{
-		pool:              pool,
-		httpClient:        tracing.Client(&http.Client{Timeout: 10 * time.Second}),
-		vanadisRetryDelay: 500 * time.Millisecond,
+	return &PostgresPRRegistry{
+		pool: pool,
 	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(r)
-		}
-	}
-	return r
-}
-
-// WithVanadisClient configures the Vanadis URL and HTTP client for PostgresPRRegistry.
-func WithVanadisClient(vanadisURL string, client *http.Client) func(*PostgresPRRegistry) {
-	return func(r *PostgresPRRegistry) {
-		if r == nil {
-			return
-		}
-		if vanadisURL != "" {
-			r.vanadisURL = strings.TrimRight(vanadisURL, "/")
-		}
-		if client != nil {
-			// Wrapped here so injected clients keep traceparent propagation to vanadis/haro.
-			r.httpClient = tracing.Client(client)
-		}
-	}
-}
-
-func (r *PostgresPRRegistry) getVanadisClient() (*http.Client, string) {
-	if r == nil {
-		return &http.Client{Timeout: 10 * time.Second}, ""
-	}
-	client := r.httpClient
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
-	return client, strings.TrimRight(r.vanadisURL, "/")
 }
 
 func (r *PostgresPRRegistry) queryRowScan(ctx context.Context, opName, query string, dest []any, args ...any) (bool, error) {
@@ -257,25 +172,6 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, r
 	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition deploy_failed", query)
 }
 
-func (r *PostgresPRRegistry) IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error) {
-	repo = normalizeRepo(repo)
-	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
-		return 0, nil
-	}
-	query := `
-		UPDATE pr_registry
-		SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{ci_fail_count}', to_jsonb(COALESCE((metadata->>'ci_fail_count')::int, 0) + 1), true),
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $1 AND pr_number = $2
-		RETURNING (metadata->>'ci_fail_count')::int;`
-	var count int
-	found, err := r.queryRowScan(ctx, "increment ci_fail_count", query, []any{&count}, repo, prNumber)
-	if err != nil || !found {
-		return 0, err
-	}
-	return count, nil
-}
-
 func (r *PostgresPRRegistry) RecordPRCheckStatus(ctx context.Context, repo string, prNumber int, headSHA, checkName, checkState string) (bool, error) {
 	repo = normalizeRepo(repo)
 	headSHA = strings.TrimSpace(headSHA)
@@ -331,20 +227,9 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterReque
 	}
 	targetID := NormalizeDiscordTargetID(req.TargetID)
 	title := strings.TrimSpace(req.Title)
-	chunkID := strings.TrimSpace(req.VanadisChunkID)
 	meta := strings.TrimSpace(req.Metadata)
 	if meta == "" {
 		meta = "{}"
-	}
-
-	if chunkID != "" {
-		threadID, err := r.attachVanadisChunkPR(ctx, repo, chunkID, req.PRNumber)
-		if err != nil {
-			return "", err
-		}
-		if normThread := NormalizeDiscordTargetID(threadID); IsValidDiscordSnowflake(normThread) {
-			targetID = normThread
-		}
 	}
 
 	if targetID == "" {
@@ -357,92 +242,27 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterReque
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', CASE WHEN $8 != '' THEN jsonb_set($7::jsonb, '{vanadis_chunk_id}', to_jsonb($8::text), true) ELSE $7::jsonb END, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = EXCLUDED.branch, head_sha = EXCLUDED.head_sha, target_id = EXCLUDED.target_id, title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END, status = CASE WHEN pr_registry.status IN ('merged', 'synced', 'deploying', 'deployed') THEN pr_registry.status ELSE 'open' END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb THEN (CASE WHEN pr_registry.status NOT IN ('merged', 'synced', 'deploying', 'deployed') THEN CASE WHEN pr_registry.head_sha IS DISTINCT FROM EXCLUDED.head_sha THEN CASE WHEN COALESCE((pr_registry.metadata->>'ci_fail_count')::int, 0) > 3 THEN ((COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks') - 'ci_fail_count' ELSE (COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) END) || EXCLUDED.metadata ELSE CASE WHEN pr_registry.status NOT IN ('merged', 'synced', 'deploying', 'deployed') THEN CASE WHEN pr_registry.head_sha IS DISTINCT FROM EXCLUDED.head_sha THEN CASE WHEN COALESCE((pr_registry.metadata->>'ci_fail_count')::int, 0) > 3 THEN ((COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks') - 'ci_fail_count' ELSE (COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner' END ELSE pr_registry.metadata END END, updated_at = CURRENT_TIMESTAMP;`
-	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, req.PRNumber, branch, headSHA, targetID, title, meta, chunkID); err != nil {
+	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = EXCLUDED.branch, head_sha = EXCLUDED.head_sha, target_id = EXCLUDED.target_id, title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END, status = CASE WHEN pr_registry.status IN ('merged', 'synced', 'deploying', 'deployed') THEN pr_registry.status ELSE 'open' END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb THEN (CASE WHEN pr_registry.status NOT IN ('merged', 'synced', 'deploying', 'deployed') THEN CASE WHEN pr_registry.head_sha IS DISTINCT FROM EXCLUDED.head_sha THEN CASE WHEN COALESCE((pr_registry.metadata->>'ci_fail_count')::int, 0) > 3 THEN ((COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks') - 'ci_fail_count' ELSE (COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) END) || EXCLUDED.metadata ELSE CASE WHEN pr_registry.status NOT IN ('merged', 'synced', 'deploying', 'deployed') THEN CASE WHEN pr_registry.head_sha IS DISTINCT FROM EXCLUDED.head_sha THEN CASE WHEN COALESCE((pr_registry.metadata->>'ci_fail_count')::int, 0) > 3 THEN ((COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks') - 'ci_fail_count' ELSE (COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner' END ELSE pr_registry.metadata END END, updated_at = CURRENT_TIMESTAMP;`
+	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, req.PRNumber, branch, headSHA, targetID, title, meta); err != nil {
 		return "", fmt.Errorf("register pr: %w", err)
 	}
 
 	return targetID, nil
 }
 
-func (r *PostgresPRRegistry) attachVanadisChunkPR(ctx context.Context, repo, chunkID string, prNumber int) (string, error) {
-	client, vURL := r.getVanadisClient()
-	if vURL == "" {
-		return "", errors.New("vanadis URL is not configured")
-	}
-	bodyBytes, err := json.Marshal(map[string]any{
-		"chunk_id":  chunkID,
-		"pr_number": prNumber,
-		"repo":      repo,
-	})
-	if err != nil {
-		return "", fmt.Errorf("marshal attach chunk request: %w", err)
-	}
-	var attachRes struct {
-		ThreadID string `json:"thread_id"`
-	}
-	err = r.doHTTPWithRetry(ctx, client, "attach vanadis chunk pr", func() (*http.Request, error) {
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/attach-pr", bytes.NewReader(bodyBytes))
-		if reqErr != nil {
-			return nil, reqErr
-		}
-		req.Header.Set("Content-Type", "application/json")
-		return req, nil
-	}, func(resp *http.Response) error {
-		if resp.StatusCode == http.StatusNotFound {
-			return ErrVanadisChunkNotFound
-		}
-		if resp.StatusCode == http.StatusConflict {
-			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-			if readErr != nil {
-				return fmt.Errorf("%w: status %d (read error: %w)", ErrVanadisChunkCancelled, resp.StatusCode, readErr)
-			}
-			return fmt.Errorf("%w: status %d (%s)", ErrVanadisChunkCancelled, resp.StatusCode, strings.TrimSpace(string(body)))
-		}
-		if resp.StatusCode != http.StatusOK {
-			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-			if readErr != nil {
-				return fmt.Errorf("attach vanadis chunk pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
-			}
-			return fmt.Errorf("attach vanadis chunk pr: unexpected status %d: %s", resp.StatusCode, string(body))
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&attachRes); err != nil {
-			return fmt.Errorf("decode attach chunk response: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(attachRes.ThreadID), nil
-}
-
-func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error) {
+func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID string) (string, error) {
 	repo = normalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return "", nil
 	}
-	targetID, vanadisChunkID = NormalizeDiscordTargetID(targetID), strings.TrimSpace(vanadisChunkID)
-	if vanadisChunkID != "" {
-		threadID, err := r.attachVanadisChunkPR(ctx, repo, vanadisChunkID, prNumber)
-		switch {
-		case err == nil:
-			if normThread := NormalizeDiscordTargetID(threadID); IsValidDiscordSnowflake(normThread) {
-				targetID = normThread
-			}
-		case errors.Is(err, ErrVanadisChunkCancelled):
-			return "", nil
-		case !errors.Is(err, ErrVanadisChunkNotFound):
-			return "", err
-		}
-	}
+	targetID = NormalizeDiscordTargetID(targetID)
 	if !IsValidDiscordSnowflake(targetID) {
 		return "", nil
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', CASE WHEN $7 != '' THEN jsonb_build_object('vanadis_chunk_id', $7::text) ELSE '{}'::jsonb END, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, head_sha = CASE WHEN pr_registry.head_sha = '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, target_id = CASE WHEN pr_registry.target_id = '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, title = CASE WHEN pr_registry.title = '' THEN EXCLUDED.title ELSE pr_registry.title END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb THEN COALESCE(pr_registry.metadata, '{}'::jsonb) || EXCLUDED.metadata ELSE pr_registry.metadata END, updated_at = CURRENT_TIMESTAMP;`
-	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, prNumber, strings.TrimSpace(branch), strings.TrimSpace(headSHA), targetID, strings.TrimSpace(title), vanadisChunkID); err != nil {
+	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, head_sha = CASE WHEN pr_registry.head_sha = '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, target_id = CASE WHEN pr_registry.target_id = '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, title = CASE WHEN pr_registry.title = '' THEN EXCLUDED.title ELSE pr_registry.title END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb THEN COALESCE(pr_registry.metadata, '{}'::jsonb) || EXCLUDED.metadata ELSE pr_registry.metadata END, updated_at = CURRENT_TIMESTAMP;`
+	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, prNumber, strings.TrimSpace(branch), strings.TrimSpace(headSHA), targetID, strings.TrimSpace(title)); err != nil {
 		return "", fmt.Errorf("ensure pr registered: %w", err)
 	}
 	return targetID, nil
@@ -762,244 +582,6 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 	return prs, rows.Err()
 }
 
-func (r *PostgresPRRegistry) postVanadisJSON(ctx context.Context, path, shortLabel, opName string, payload any, dst any) error {
-	client, vURL := r.getVanadisClient()
-	if vURL == "" {
-		return errors.New("vanadis URL is not configured")
-	}
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal %s request: %w", shortLabel, err)
-	}
-	return r.doHTTPWithRetry(ctx, client, opName, func() (*http.Request, error) {
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, vURL+path, bytes.NewReader(bodyBytes))
-		if reqErr != nil {
-			return nil, reqErr
-		}
-		req.Header.Set("Content-Type", "application/json")
-		return req, nil
-	}, func(resp *http.Response) error {
-		if resp.StatusCode != http.StatusOK {
-			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-			if readErr != nil {
-				return fmt.Errorf("%s: unexpected status %d (read error: %w)", opName, resp.StatusCode, readErr)
-			}
-			return fmt.Errorf("%s: unexpected status %d: %s", opName, resp.StatusCode, string(body))
-		}
-		if dst != nil {
-			if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
-				return fmt.Errorf("decode %s response: %w", shortLabel, err)
-			}
-		}
-		return nil
-	})
-}
-
-func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
-	repo = normalizeRepo(repo)
-	if r == nil || repo == "" || prNumber <= 0 {
-		return &VanadisAdvancementResult{Matched: false}, nil
-	}
-	var res VanadisAdvancementResult
-	payload := map[string]any{
-		"repo":      repo,
-		"pr_number": prNumber,
-	}
-	if err := r.postVanadisJSON(ctx, "/chunks/advance-pr", "advance chunk", "advance vanadis chunk by pr", payload, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-type vanadisChunkPRLookup struct {
-	Matched            bool   `json:"matched"`
-	ChunkID            string `json:"chunk_id,omitempty"`
-	BuildID            string `json:"build_id,omitempty"`
-	Effort             string `json:"effort,omitempty"`
-	HasRemainingChunks bool   `json:"has_remaining_chunks"`
-	NextChunkMode      string `json:"next_chunk_mode,omitempty"`
-}
-
-// advancesOnMerge reports whether a merged chunk PR may start the next chunk
-// immediately. Only a following PR chunk qualifies: action chunks, the final
-// chunk, and lookups from vanadis versions that predate next_chunk_mode all
-// wait for deploy so live work never runs ahead of the merged code.
-func advancesOnMerge(lookup *vanadisChunkPRLookup) bool {
-	return lookup != nil && lookup.Matched && lookup.NextChunkMode == "pr"
-}
-
-func isTransientVanadisStatus(code int) bool {
-	return code == http.StatusInternalServerError ||
-		code == http.StatusBadGateway ||
-		code == http.StatusServiceUnavailable ||
-		code == http.StatusGatewayTimeout ||
-		code == http.StatusTooManyRequests
-}
-
-func (r *PostgresPRRegistry) sleepRetry(ctx context.Context, delay time.Duration) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if r != nil && r.vanadisRetrySleep != nil {
-		return r.vanadisRetrySleep(ctx, delay)
-	}
-	if delay <= 0 {
-		return nil
-	}
-	select {
-	case <-time.After(delay):
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (r *PostgresPRRegistry) doHTTPWithRetry(ctx context.Context, client *http.Client, opName string, newReq func() (*http.Request, error), handleResp func(resp *http.Response) error) error {
-	const maxAttempts = 3
-	delay := 500 * time.Millisecond
-	if r != nil && r.vanadisRetryDelay >= 0 {
-		delay = r.vanadisRetryDelay
-	}
-	var lastErr error
-	for attempt := range maxAttempts {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		httpReq, err := newReq()
-		if err != nil {
-			return fmt.Errorf("create %s request: %w", opName, err)
-		}
-		resp, err := client.Do(httpReq)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			lastErr = fmt.Errorf("%s: %w", opName, err)
-			if attempt+1 >= maxAttempts {
-				return lastErr
-			}
-			if sleepErr := r.sleepRetry(ctx, delay); sleepErr != nil {
-				return sleepErr
-			}
-			continue
-		}
-
-		if isTransientVanadisStatus(resp.StatusCode) {
-			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-			resp.Body.Close()
-			if readErr != nil {
-				lastErr = fmt.Errorf("%s: unexpected status %d (read error: %w)", opName, resp.StatusCode, readErr)
-			} else {
-				lastErr = fmt.Errorf("%s: unexpected status %d: %s", opName, resp.StatusCode, string(body))
-			}
-			if attempt+1 >= maxAttempts {
-				return lastErr
-			}
-			if sleepErr := r.sleepRetry(ctx, delay); sleepErr != nil {
-				return sleepErr
-			}
-			continue
-		}
-
-		err = handleResp(resp)
-		resp.Body.Close()
-		return err
-	}
-	return lastErr
-}
-
-func (r *PostgresPRRegistry) getChunkByPR(ctx context.Context, repo string, prNumber int) (*vanadisChunkPRLookup, error) {
-	repo = normalizeRepo(repo)
-	if r == nil || repo == "" || prNumber <= 0 {
-		return &vanadisChunkPRLookup{Matched: false}, nil
-	}
-	client, vURL := r.getVanadisClient()
-	if vURL == "" {
-		return nil, errors.New("vanadis URL is not configured")
-	}
-	endpoint := fmt.Sprintf("%s/chunks/by-pr?repo=%s&pr_number=%d", vURL, url.QueryEscape(repo), prNumber)
-	var lookup vanadisChunkPRLookup
-	err := r.doHTTPWithRetry(ctx, client, "get chunk by pr", func() (*http.Request, error) {
-		return http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	}, func(resp *http.Response) error {
-		if resp.StatusCode != http.StatusOK {
-			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-			if readErr != nil {
-				return fmt.Errorf("get chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
-			}
-			return fmt.Errorf("get chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&lookup); err != nil {
-			return fmt.Errorf("decode get chunk by pr response: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &lookup, nil
-}
-
-func (r *PostgresPRRegistry) ResolveVanadisChunkForPR(ctx context.Context, repo string, prNumber int) (bool, string, string, error) {
-	lookup, err := r.getChunkByPR(ctx, repo, prNumber)
-	if err != nil {
-		return false, "", "", err
-	}
-	if lookup == nil || !lookup.Matched {
-		return false, "", "", nil
-	}
-	cleanEffort := "medium"
-	if strings.EqualFold(strings.TrimSpace(lookup.Effort), "low") {
-		cleanEffort = "low"
-	}
-	return true, strings.TrimSpace(lookup.ChunkID), cleanEffort, nil
-}
-
-func (r *PostgresPRRegistry) getPersistedVanadisChunkID(ctx context.Context, repo string, prNumber int) string {
-	repo = normalizeRepo(repo)
-	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
-		return ""
-	}
-	const query = `SELECT COALESCE(metadata->>'vanadis_chunk_id', '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`
-	var chunkID string
-	found, err := r.queryRowScan(ctx, "get persisted vanadis_chunk_id", query, []any{&chunkID}, repo, prNumber)
-	if err != nil || !found {
-		return ""
-	}
-	return strings.TrimSpace(chunkID)
-}
-
-func (r *PostgresPRRegistry) hasPersistedVanadisChunkID(ctx context.Context, repo string, prNumber int) bool {
-	return r.getPersistedVanadisChunkID(ctx, repo, prNumber) != ""
-}
-
-func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
-	lookup, err := r.getChunkByPR(ctx, repo, prNumber)
-	if err != nil {
-		if r.hasPersistedVanadisChunkID(ctx, repo, prNumber) {
-			return true, nil
-		}
-		return false, err
-	}
-	if lookup == nil || !lookup.Matched {
-		return false, nil
-	}
-	return true, nil
-}
-
-func (r *PostgresPRRegistry) AdvancesVanadisChunkOnMerge(ctx context.Context, repo string, prNumber int) (bool, error) {
-	lookup, err := r.getChunkByPR(ctx, repo, prNumber)
-	if err != nil {
-		return false, err
-	}
-	return advancesOnMerge(lookup), nil
-}
-
-func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
-	_, _, failed, err := r.FailVanadisChunkDetailsByPR(ctx, repo, prNumber)
-	return failed, err
-}
-
 func (r *PostgresPRRegistry) AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error {
 	repo = normalizeRepo(repo)
 	cleanJobs := dedupeTrimmedStrings(jobs)
@@ -1157,6 +739,32 @@ func (r *PostgresPRRegistry) UpdatePRStatus(ctx context.Context, repo string, pr
 		return fmt.Errorf("update pr status: %w", err)
 	}
 	return nil
+}
+
+// ShouldSuppressConflictPrompt reports whether conflict remediation prompt dispatch should be
+// suppressed by Synapse because the PR is managed by an active build orchestrator that handles
+// conflicts via the published aerial.pr.conflict event.
+func (r *PostgresPRRegistry) ShouldSuppressConflictPrompt(ctx context.Context, repo string, prNumber int) (bool, error) {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return false, nil
+	}
+	const query = `
+		SELECT EXISTS (
+			SELECT 1 FROM pr_registry
+			WHERE repo = $1 AND pr_number = $2
+			  AND (
+			      COALESCE(metadata->>'chunk_id', '') != ''
+			      OR COALESCE(metadata->>'build_id', '') != ''
+			      OR COALESCE(metadata->>'orchestrated', '') = 'true'
+			  )
+		);`
+	var suppressed bool
+	found, err := r.queryRowScan(ctx, "should suppress conflict prompt", query, []any{&suppressed}, repo, prNumber)
+	if err != nil || !found {
+		return false, err
+	}
+	return suppressed, nil
 }
 
 // extractStringSliceFromMetadata extracts a slice of strings stored under key in metadata JSONB.

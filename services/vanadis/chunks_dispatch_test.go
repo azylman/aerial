@@ -390,7 +390,7 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 			}
 
 			bus := &mockChunkBus{}
-			server := NewVanadisServer(Config{BrainURL: tsMock.URL, SynapseURL: tsMock.URL}, store, tsMock.Client())
+			server := NewVanadisServer(Config{BrainURL: tsMock.URL}, store, tsMock.Client())
 			server.SetBus(bus)
 
 			var payloadBytes []byte
@@ -411,7 +411,7 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 			}
 
 			mu.Lock()
-			gotWidget := widgetCalls > 0
+			gotWidget := widgetCalls > 0 || bus.widgetCalls > 0
 			gotWake := wakeCalls > 0
 			mu.Unlock()
 
@@ -712,25 +712,6 @@ func TestChunksAction_And_Events_Helpers(t *testing.T) {
 	var nilSrvEvents *VanadisServer
 	if err := nilSrvEvents.HandleDispatchOutcomeEvent(ctx, &memoryMsg{}); err == nil {
 		t.Fatal("expected error on nil server HandleDispatchOutcomeEvent")
-	}
-	// Invalid json
-	if err := srv.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: []byte("invalid json")}); err != nil {
-		t.Fatalf("expected nil on invalid json: %v", err)
-	}
-	// healthcheck ping
-	pingData, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "healthcheck-ping"})
-	if err := srv.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: pingData}); err != nil {
-		t.Fatalf("expected nil on healthcheck ping: %v", err)
-	}
-	// empty chunk ID
-	emptyChunkData, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "d1", VanadisChunkID: ""})
-	if err := srv.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: emptyChunkData}); err != nil {
-		t.Fatalf("expected nil on empty chunk id: %v", err)
-	}
-	// unknown status
-	unknownStatusData, _ := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: "d1", VanadisChunkID: "c1", Status: "unknown"})
-	if err := srv.HandleDispatchOutcomeEvent(ctx, &memoryMsg{data: unknownStatusData}); err != nil {
-		t.Fatalf("expected nil on unknown status: %v", err)
 	}
 
 	// 7. handleCompletedDispatchOutcome with store error

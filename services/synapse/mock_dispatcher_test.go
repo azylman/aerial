@@ -33,9 +33,6 @@ type mockOutboundDispatcher struct {
 	discordMessageFailCount int
 	discordMessageAttempts  int
 	discordInteractionErr   error
-	widgetErr               error
-	widgetReturnMsgID       string
-	widgetCalls             []StatusWidgetRequest
 	kustomizationsByImage   map[string][]fluxKustomizationRef
 	workloads               []workloadRollout
 	workloadsErr            error
@@ -146,21 +143,6 @@ func (m *mockOutboundDispatcher) DirectMessageCalls() []DirectMessageRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]DirectMessageRequest(nil), m.directMessageCalls...)
-}
-
-func (m *mockOutboundDispatcher) DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error) {
-	m.mu.Lock()
-	m.widgetCalls = append(m.widgetCalls, payload)
-	msgID := m.widgetReturnMsgID
-	err := m.widgetErr
-	m.mu.Unlock()
-	return msgID, err
-}
-
-func (m *mockOutboundDispatcher) WidgetCalls() []StatusWidgetRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]StatusWidgetRequest(nil), m.widgetCalls...)
 }
 
 func (m *mockOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error {

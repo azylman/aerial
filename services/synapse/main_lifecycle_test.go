@@ -160,15 +160,15 @@ type isWaitingForImageBuildCase struct {
 	wantResult bool
 }
 
-func newWaitingImageMockPool(status, metadata string, queryErr error) *mockVanadisPgxPool {
-	return &mockVanadisPgxPool{
+func newWaitingImageMockPool(status, metadata string, queryErr error) *mockSynapsePgxPool {
+	return &mockSynapsePgxPool{
 		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
 			if queryErr != nil {
-				return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+				return mockSynapsePgxRow{scanFn: func(dest ...any) error {
 					return queryErr
 				}}
 			}
-			return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+			return mockSynapsePgxRow{scanFn: func(dest ...any) error {
 				if len(dest) >= 2 {
 					if s, ok := dest[0].(*string); ok {
 						*s = status
@@ -394,52 +394,6 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			wantPrompts:         0,
 			wantWidgets:         0,
 		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression true",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			suppressVanadis:     true,
-			wantPrompts:         0,
-			wantDMs:             0,
-			wantWidgets:         1,
-		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt final Vanadis chunk advances build and dispatches completion prompt",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			suppressVanadis:     true,
-			advanceVanadisRes: &VanadisAdvancementResult{
-				Matched:        true,
-				Advanced:       true,
-				BuildID:        "build-done",
-				ThreadID:       validSnowflake,
-				BuildCompleted: true,
-			},
-			wantPrompts:    1,
-			wantPromptSubs: []string{"Vanadis build build-done completed"},
-			wantDMs:        0,
-			wantWidgets:    1,
-		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt final Vanadis chunk already advanced on merge syncs widget",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			suppressVanadis:     true,
-			advanceVanadisRes: &VanadisAdvancementResult{
-				Matched:  true,
-				Advanced: false,
-			},
-			wantPrompts: 0,
-			wantDMs:     0,
-			wantWidgets: 1,
-		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression DB error propagates",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			suppressVanadisErr:  errors.New("db check err"),
-			wantErr:             true,
-		},
 	}
 
 	for _, tc := range tests {
@@ -448,11 +402,6 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			runResolveThreadCase(ctx, t, tc)
 		})
 	}
-
-	testConflictPromptStandalone(ctx, t, validSnowflake)
-	testPostgresPRRegistrySyncs(ctx, t, validSnowflake)
-	testDispatchAlertWithPrompt(ctx, t, validSnowflake)
-	testVanadisSilentAutoFix(ctx, t, validSnowflake)
 }
 
 type resolveThreadCase struct {
@@ -462,9 +411,6 @@ type resolveThreadCase struct {
 	prNumber            int
 	targetID            string
 	branch              string
-	suppressVanadis     bool
-	suppressVanadisErr  error
-	advanceVanadisRes   *VanadisAdvancementResult
 	wantTargetID        string
 	wantErr             bool
 	wantPrompts         int
@@ -472,7 +418,6 @@ type resolveThreadCase struct {
 	wantDMs             int
 	wantWidgets         int
 	resolveErr          error
-	widgetErr           error
 }
 
 func runResolveThreadCase(ctx context.Context, t *testing.T, tc resolveThreadCase) {
@@ -480,15 +425,12 @@ func runResolveThreadCase(ctx context.Context, t *testing.T, tc resolveThreadCas
 	var mockReg PRRegistryUpdater
 	if !tc.useNilRegistry {
 		mockReg = &mockPRRegistry{
-			resolveTargetID:    tc.targetID,
-			resolveBranch:      tc.branch,
-			resolveErr:         tc.resolveErr,
-			suppressVanadisRes: tc.suppressVanadis,
-			suppressVanadisErr: tc.suppressVanadisErr,
-			advanceVanadisRes:  tc.advanceVanadisRes,
+			resolveTargetID: tc.targetID,
+			resolveBranch:   tc.branch,
+			resolveErr:      tc.resolveErr,
 		}
 	}
-	mockDisp := &mockOutboundDispatcher{widgetErr: tc.widgetErr}
+	mockDisp := &mockOutboundDispatcher{}
 	srv := newTestRouter(Config{}, nil, mockReg, mockDisp)
 
 	if !tc.isDeploymentSuccess {
@@ -523,127 +465,7 @@ func assertResolveThreadDispatcher(t *testing.T, mockDisp *mockOutboundDispatche
 	if len(mockDisp.DirectMessageCalls()) != tc.wantDMs {
 		t.Errorf("got %d DMs, want %d", len(mockDisp.DirectMessageCalls()), tc.wantDMs)
 	}
-	wCalls := mockDisp.WidgetCalls()
-	if len(wCalls) != tc.wantWidgets {
-		t.Errorf("got %d widgets, want %d", len(wCalls), tc.wantWidgets)
-	} else if tc.wantWidgets > 0 && wCalls[0].Status != "open" {
-		t.Errorf("got widget status %q, want \"open\"", wCalls[0].Status)
-	}
 }
-
-func testConflictPromptStandalone(ctx context.Context, t *testing.T, validSnowflake string) {
-	t.Helper()
-	srv := newTestRouter(Config{}, nil, nil, &mockOutboundDispatcher{})
-	if err := srv.dispatchConflictPrompt(ctx, validSnowflake, "azylman/aerial", "feat/x", "sha1", 0); err != nil {
-		t.Errorf("dispatchConflictPrompt(pr=0): %v", err)
-	}
-}
-
-func testPostgresPRRegistrySyncs(ctx context.Context, t *testing.T, validSnowflake string) {
-	t.Helper()
-	pool := &mockVanadisPgxPool{
-		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-			return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-				if len(dest) >= 1 {
-					if s, ok := dest[0].(*string); ok {
-						*s = validSnowflake
-					}
-				}
-				return nil
-			}}
-		},
-	}
-	dispPG := &mockOutboundDispatcher{}
-	srvPG := newTestRouter(Config{}, nil, NewPostgresPRRegistry(pool), dispPG)
-	if err := srvPG.dispatchConflictPrompt(ctx, validSnowflake, "azylman/aerial", "main", "sha1", 42); err != nil {
-		t.Errorf("dispatchConflictPrompt with pgReg: %v", err)
-	}
-	if err := srvPG.dispatchCIFailurePrompt(ctx, validSnowflake, "run", "azylman/aerial", "sha1", 42, "fail", "http://ci.test"); err != nil {
-		t.Errorf("dispatchCIFailurePrompt with pgReg: %v", err)
-	}
-	if err := srvPG.dispatchCIFailurePrompt(ctx, validSnowflake, "RoboRev Code Review", "azylman/aerial", "sha1", 42, "findings", "http://ci.test"); err != nil {
-		t.Errorf("dispatchCIFailurePrompt(roborev) with pgReg: %v", err)
-	}
-	pgDispatches := dispPG.DispatchCalls()
-	if len(pgDispatches) < 3 {
-		t.Fatalf("expected at least 3 dispatches from srvPG, got %d", len(pgDispatches))
-	}
-	if !strings.Contains(pgDispatches[0].Prompt, "Merge conflict detected on PR #42") || pgDispatches[0].TargetID != validSnowflake || pgDispatches[0].Source != "webhook" || pgDispatches[0].Effort != "medium" {
-		t.Errorf("expected silent medium-effort conflict dispatch with target_id for standalone PR, got %+v", pgDispatches[0])
-	}
-	if !strings.Contains(pgDispatches[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") || pgDispatches[1].TargetID != validSnowflake || pgDispatches[1].Source != "webhook" || pgDispatches[1].Effort != "medium" {
-		t.Errorf("expected silent medium-effort standard CI dispatch with target_id, got %+v", pgDispatches[1])
-	}
-	if !strings.Contains(pgDispatches[2].Prompt, "override-roborev 42") || pgDispatches[2].TargetID != validSnowflake || pgDispatches[2].Source != "webhook" || pgDispatches[2].Effort != "medium" {
-		t.Errorf("expected silent medium-effort roborev override dispatch with target_id, got %+v", pgDispatches[2])
-	}
-}
-
-func testDispatchAlertWithPrompt(ctx context.Context, t *testing.T, validSnowflake string) {
-	t.Helper()
-	dispAlert := &mockOutboundDispatcher{directMessageErr: errors.New("dm failed")}
-	srvAlert := newTestRouter(Config{}, nil, nil, dispAlert)
-	if err := srvAlert.dispatchAlertWithPrompt(ctx, validSnowflake, "alert", "dm text", "prompt text"); err != nil {
-		t.Errorf("dispatchAlertWithPrompt with dm err: %v", err)
-	}
-	if err := srvAlert.dispatchAlertWithPrompt(ctx, "stateful_medium:discord-"+validSnowflake, "silent_alert", "", "prompt text", vanadisPromptOpts{silent: true, chunkID: "c-alert"}); err != nil {
-		t.Errorf("dispatchAlertWithPrompt silent prefixed: %v", err)
-	}
-	if got := dispAlert.DispatchCalls(); len(got) != 1 || got[0].SessionID != "vanadis-c-alert" || got[0].TargetID != validSnowflake || got[0].VanadisChunkID != "c-alert" {
-		t.Errorf("expected single structured target_id, vanadis_chunk_id, and session_id in silent dispatch, got %+v", got)
-	}
-	// invalid chunkID should not populate SessionID or VanadisChunkID
-	if err := srvAlert.dispatchAlertWithPrompt(ctx, "stateful_medium:discord-"+validSnowflake, "silent_alert", "", "prompt text", vanadisPromptOpts{silent: true, chunkID: "bad:chunk:id"}); err != nil {
-		t.Errorf("dispatchAlertWithPrompt bad chunk id: %v", err)
-	}
-	if got := dispAlert.DispatchCalls(); len(got) != 2 || got[1].SessionID != "" || got[1].VanadisChunkID != "" {
-		t.Errorf("expected empty SessionID and VanadisChunkID on invalid chunk id, got %+v", got)
-	}
-}
-
-func testVanadisSilentAutoFix(ctx context.Context, t *testing.T, validSnowflake string) {
-	t.Helper()
-	dispVanadis := &mockOutboundDispatcher{}
-	srvVanadis := newTestRouter(Config{}, nil, &mockPRRegistry{suppressVanadisRes: true}, dispVanadis)
-	if err := srvVanadis.dispatchCIFailurePrompt(ctx, validSnowflake, "unit", "azylman/aerial", "sha1", 885, "err", "http://ci.test"); err != nil {
-		t.Errorf("dispatchCIFailurePrompt(vanadis): %v", err)
-	}
-	if err := srvVanadis.dispatchConflictPrompt(ctx, validSnowflake, "azylman/aerial", "feat/x", "sha1", 885); err != nil {
-		t.Errorf("dispatchConflictPrompt(vanadis): %v", err)
-	}
-	if len(dispVanadis.DirectMessageCalls()) != 0 {
-		t.Errorf("expected 0 DMs for Vanadis auto-fix, got %d", len(dispVanadis.DirectMessageCalls()))
-	}
-	vDispatches := dispVanadis.DispatchCalls()
-	if len(vDispatches) != 2 || vDispatches[0].Source != "webhook" || vDispatches[0].Effort != "medium" || vDispatches[1].Source != "webhook" || vDispatches[1].Effort != "medium" {
-		t.Errorf("expected 2 silent medium-effort dispatches for Vanadis auto-fix, got %+v", vDispatches)
-	}
-
-	tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/chunks/by-pr") {
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"matched":  true,
-				"chunk_id": "chunk-885",
-				"effort":   "low",
-			})
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(tsVanadis.Close)
-
-	dispVanadisPG := &mockOutboundDispatcher{}
-	srvVanadisPG := newTestRouter(Config{}, nil, NewPostgresPRRegistry(nil, WithVanadisClient(tsVanadis.URL, tsVanadis.Client())), dispVanadisPG)
-	if err := srvVanadisPG.dispatchCIFailurePrompt(ctx, validSnowflake, "unit", "azylman/aerial", "sha1", 885, "err", "http://ci.test"); err != nil {
-		t.Errorf("dispatchCIFailurePrompt(vanadis pg): %v", err)
-	}
-	vpgDispatches := dispVanadisPG.DispatchCalls()
-	if len(vpgDispatches) != 1 || vpgDispatches[0].Source != "webhook" || vpgDispatches[0].SessionID != "vanadis-chunk-885" || vpgDispatches[0].Effort != "low" || vpgDispatches[0].VanadisChunkID != "chunk-885" || vpgDispatches[0].TargetID != validSnowflake {
-		t.Errorf("expected silent low-effort dispatch with chunk-885 and target_id, got %+v", vpgDispatches)
-	}
-}
-
-// --- 8. Server Endpoints ---
 
 func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 	oldCountersFn := httpkit.WriteCountersDirFn
@@ -939,227 +761,54 @@ func runServerAppCase(t *testing.T, tc runServerLifecycleCase, cfgSrc *httpkit.R
 	}
 }
 
-// --- 9. Vanadis Build Queue Advancement & Wake Suppression Tests ---
-
-func TestAdvanceVanadisChunk(t *testing.T) {
+func TestDeployRolloutSuppressionAndState(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	validThread := "123456789012345678"
+	srv := &RouterServer{}
 
-	tests := []advanceVanadisCase{
-		{
-			name:           "nil registry is clean no-op",
-			useNilRegistry: true,
-			prNumber:       10,
-			wantErr:        false,
-		},
-		{
-			name:     "prNumber <= 0 is clean no-op",
-			prNumber: 0,
-			wantErr:  false,
-		},
-		{
-			name:       "unmatched result returns nil",
-			prNumber:   10,
-			advanceRes: &VanadisAdvancementResult{Matched: false},
-			wantErr:    false,
-		},
-		{
-			name:          "matched but already advanced result syncs widget and returns nil",
-			prNumber:      10,
-			advanceRes:    &VanadisAdvancementResult{Matched: true, Advanced: false},
-			dispWidgetErr: errors.New("transient widget error"),
-			wantErr:       false,
-		},
-		{
-			name:       "registry error returns error",
-			prNumber:   10,
-			advanceErr: errors.New("db failure"),
-			wantErr:    true,
-		},
-		{
-			name:     "mid-run chunk advancement syncs widget and succeeds",
-			prNumber: 42,
-			advanceRes: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         true,
-				BuildID:          "build-mid",
-				ThreadID:         validThread,
-				MergedChunkIndex: 0,
-				MergedChunkTitle: "Chunk One",
-				NextChunkIndex:   1,
-				BuildCompleted:   false,
-				Chunks: []VanadisChunkSummary{
-					{ChunkIndex: 0, Title: "Chunk One", Status: "merged"},
-					{ChunkIndex: 1, Title: "Chunk Two", Status: "pending"},
+	// deploy success suppression memory branches
+	srv.recordDeploySuccessDispatched("azylman/aerial", "test-job", "sha-deploy-1", 101)
+	if !srv.shouldSuppressDuplicateDeploySuccess(ctx, "azylman/aerial", "test-job", "sha-deploy-1", 101) {
+		t.Errorf("expected suppression by PR number")
+	}
+	if !srv.shouldSuppressDuplicateDeploySuccess(ctx, "azylman/aerial", "test-job", "sha-deploy-1", 0) {
+		t.Errorf("expected suppression by SHA")
+	}
+	if srv.shouldSuppressDuplicateDeploySuccess(ctx, "azylman/aerial", "diff-job", "diff-sha", 0) {
+		t.Errorf("unexpected suppression for unknown job/sha")
+	}
+
+	// loadPRRolloutState branches
+	var nilSrv *RouterServer
+	if nilSrv.loadPRRolloutState(ctx, "azylman/aerial", 1) != nil {
+		t.Errorf("expected nil for nil server")
+	}
+	if srv.loadPRRolloutState(ctx, "", 1) != nil {
+		t.Errorf("expected nil for empty repo")
+	}
+	if srv.loadPRRolloutState(ctx, "azylman/aerial", 0) != nil {
+		t.Errorf("expected nil for pr <= 0")
+	}
+	srv.registry = &mockPRRegistry{}
+	if srv.loadPRRolloutState(ctx, "azylman/aerial", 1) != nil {
+		t.Errorf("expected nil for non-postgres registry")
+	}
+	mockPool := &mockSynapsePgxPool{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return mockSynapsePgxRow{
+				scanFn: func(dest ...any) error {
+					if len(dest) > 0 {
+						if b, ok := dest[0].(*[]byte); ok {
+							*b = []byte(`{"jobs":["eri"]}`)
+						}
+					}
+					return nil
 				},
-			},
-			dispDirectErr: errors.New("transient dm error warning"),
-			wantErr:       false,
-		},
-		{
-			name:     "mid-run chunk advancement with widget error logs warning",
-			prNumber: 42,
-			advanceRes: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         true,
-				BuildID:          "build-mid",
-				ThreadID:         validThread,
-				MergedChunkIndex: 0,
-				MergedChunkTitle: "Chunk One",
-				NextChunkIndex:   1,
-				BuildCompleted:   false,
-			},
-			dispWidgetErr: errors.New("transient widget error"),
-			wantErr:       false,
-		},
-		{
-			name:     "final build completion dispatches widget sync and completion prompt",
-			prNumber: 42,
-			advanceRes: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         true,
-				BuildID:          "build-done",
-				ThreadID:         validThread,
-				Tier:             2,
-				Objective:        "Complete all chunks",
-				MergedChunkIndex: 1,
-				MergedChunkTitle: "Chunk Two",
-				NextChunkIndex:   -1,
-				BuildCompleted:   true,
-				Chunks: []VanadisChunkSummary{
-					{ChunkIndex: 0, Title: "Chunk One", Status: "merged", PRNumber: 41},
-					{ChunkIndex: 1, Title: "Chunk Two", Status: "merged", PRNumber: 42},
-				},
-			},
-			dispWidgetErr:  errors.New("widget err"),
-			repeatCall:     true,
-			wantErr:        false,
-			wantPrompts:    1,
-			wantPromptSubs: []string{"Vanadis build build-done completed"},
-			wantDMs:        0,
-		},
-		{
-			name:     "retry of already-completed build with Advanced false still dispatches completion prompt once",
-			prNumber: 42,
-			advanceRes: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         false,
-				BuildID:          "build-retry-done",
-				ThreadID:         validThread,
-				Tier:             2,
-				Objective:        "Complete all chunks on retry",
-				MergedChunkIndex: 1,
-				MergedChunkTitle: "Chunk Two",
-				NextChunkIndex:   -1,
-				BuildCompleted:   true,
-				Chunks: []VanadisChunkSummary{
-					{ChunkIndex: 0, Title: "Chunk One", Status: "merged", PRNumber: 41},
-					{ChunkIndex: 1, Title: "Chunk Two", Status: "merged", PRNumber: 42},
-				},
-			},
-			repeatCall:     true,
-			wantErr:        false,
-			wantPrompts:    1,
-			wantPromptSubs: []string{"Vanadis build build-retry-done completed", "Chunk 2/2: Chunk Two"},
-			wantDMs:        0,
-		},
-		{
-			name:     "final build completion prompt error propagates without marking dispatched",
-			prNumber: 42,
-			advanceRes: &VanadisAdvancementResult{
-				Matched:        true,
-				Advanced:       true,
-				BuildID:        "",
-				ThreadID:       validThread,
-				BuildCompleted: true,
-			},
-			dispPromptErr: errors.New("502 Bad Gateway"),
-			wantErr:       true,
-			wantPrompts:   1,
+			}
 		},
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runAdvanceVanadisCase(ctx, t, tc)
-		})
-	}
-}
-
-type advanceVanadisCase struct {
-	name           string
-	useNilRegistry bool
-	prNumber       int
-	advanceRes     *VanadisAdvancementResult
-	advanceErr     error
-	dispDirectErr  error
-	dispWidgetErr  error
-	dispPromptErr  error
-	repeatCall     bool
-	wantErr        bool
-	wantPrompts    int
-	wantPromptSubs []string
-	wantDMs        int
-}
-
-func runAdvanceVanadisCase(ctx context.Context, t *testing.T, tc advanceVanadisCase) {
-	t.Helper()
-	var reg PRRegistryUpdater
-	if !tc.useNilRegistry {
-		reg = &mockPRRegistry{
-			advanceVanadisRes: tc.advanceRes,
-			advanceVanadisErr: tc.advanceErr,
-		}
-	}
-	disp := &mockOutboundDispatcher{
-		directMessageErr: tc.dispDirectErr,
-		widgetErr:        tc.dispWidgetErr,
-		promptErr:        tc.dispPromptErr,
-	}
-	srv := newTestRouter(Config{}, nil, reg, disp)
-
-	err := srv.advanceVanadisChunk(ctx, "azylman/aerial", tc.prNumber)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("advanceVanadisChunk() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.repeatCall {
-		if err2 := srv.advanceVanadisChunk(ctx, "azylman/aerial", tc.prNumber); err2 != nil {
-			t.Fatalf("repeat advanceVanadisChunk() err = %v, want nil", err2)
-		}
-	}
-	if tc.useNilRegistry || tc.prNumber <= 0 {
-		assertAdvanceVanadisGuards(ctx, t, srv, tc.prNumber)
-	}
-	assertAdvanceVanadisDispatcher(t, disp, tc.wantPrompts, tc.wantPromptSubs, tc.wantDMs)
-}
-
-func assertAdvanceVanadisGuards(ctx context.Context, t *testing.T, srv *RouterServer, prNumber int) {
-	t.Helper()
-	if err := srv.advanceVanadisChunkOnMerge(ctx, "azylman/aerial", prNumber); err != nil {
-		t.Errorf("expected advanceVanadisChunkOnMerge nil error for guard case, got %v", err)
-	}
-	vanadisPR, err := srv.isVanadisPR(ctx, "azylman/aerial", prNumber)
-	if err != nil || vanadisPR {
-		t.Errorf("expected isVanadisPR false for guard case")
-	}
-	if err := srv.advanceVanadisChunkOnSync(ctx, "azylman/aerial", prNumber, true); err != nil {
-		t.Errorf("expected advanceVanadisChunkOnSync nil error for guard case, got %v", err)
-	}
-}
-
-func assertAdvanceVanadisDispatcher(t *testing.T, disp *mockOutboundDispatcher, wantPrompts int, wantPromptSubs []string, wantDMs int) {
-	t.Helper()
-	if len(disp.PromptCalls()) != wantPrompts {
-		t.Errorf("got %d prompts, want %d", len(disp.PromptCalls()), wantPrompts)
-	}
-	for _, sub := range wantPromptSubs {
-		if len(disp.PromptCalls()) == 0 || !strings.Contains(disp.PromptCalls()[0].Prompt, sub) {
-			t.Errorf("prompt missing %q: %+v", sub, disp.PromptCalls())
-		}
-	}
-	if len(disp.DirectMessageCalls()) != wantDMs {
-		t.Errorf("got %d DMs, want %d", len(disp.DirectMessageCalls()), wantDMs)
+	srv.registry = NewPostgresPRRegistry(mockPool)
+	if rs := srv.loadPRRolloutState(ctx, "azylman/aerial", 1); rs == nil || len(rs.ExpectedJobs) != 1 {
+		t.Errorf("expected rollout state with 1 job, got %v", rs)
 	}
 }

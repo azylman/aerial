@@ -40,97 +40,6 @@ func TestPRLifecycleEvents_Publish(t *testing.T) {
 			t.Errorf("expected non-zero OccurredAt")
 		}
 	})
-
-	t.Run("CI failure publishes ci_failed and suppresses duplicate prompt when bus is present and PR is Vanadis-owned", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: true}
-		srv := &RouterServer{
-			bus:        bus,
-			dispatcher: disp,
-			registry:   reg,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-
-		res := &ResolvedGitHubEvent{
-			Repo:      "azylman/aerial",
-			PRNumber:  42,
-			HeadSHA:   "sha-ci-fail",
-			TargetID:  "123456789012345678",
-			CheckName: "build",
-		}
-		err := srv.completeCIFailureTransition(context.Background(), res, "compile error", "https://github.com/check/1")
-		if err != nil {
-			t.Fatalf("completeCIFailureTransition() err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 {
-			t.Fatalf("expected 1 published event, got %d", len(bus.publishedPREvents))
-		}
-		if bus.publishedPREvents[0].Event != "ci_failed" {
-			t.Errorf("expected event ci_failed, got %s", bus.publishedPREvents[0].Event)
-		}
-		if len(disp.PromptCalls()) != 0 || len(disp.DispatchCalls()) != 0 {
-			t.Errorf("expected prompt/dispatch to be suppressed when bus is active and PR is Vanadis-owned, got prompt=%d dispatch=%d", len(disp.PromptCalls()), len(disp.DispatchCalls()))
-		}
-	})
-
-	t.Run("CI failure dispatches fallback prompt when publish fails", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{err: errors.New("nats down")}
-		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: true}
-		srv := &RouterServer{
-			bus:        bus,
-			dispatcher: disp,
-			registry:   reg,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-
-		res := &ResolvedGitHubEvent{
-			Repo:      "azylman/aerial",
-			PRNumber:  42,
-			HeadSHA:   "sha-ci-fail",
-			TargetID:  "123456789012345678",
-			CheckName: "build",
-		}
-		err := srv.completeCIFailureTransition(context.Background(), res, "compile error", "https://github.com/check/1")
-		if err != nil {
-			t.Fatalf("completeCIFailureTransition() err = %v", err)
-		}
-		if len(disp.DispatchCalls()) != 1 {
-			t.Errorf("expected background dispatch to be dispatched as fallback when publish fails, got %d calls", len(disp.DispatchCalls()))
-		}
-	})
-
-	t.Run("CI failure dispatches fallback prompt when PR is not Vanadis-owned", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: false}
-		srv := &RouterServer{
-			bus:        bus,
-			dispatcher: disp,
-			registry:   reg,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-
-		res := &ResolvedGitHubEvent{
-			Repo:      "azylman/aerial",
-			PRNumber:  42,
-			HeadSHA:   "sha-ci-fail",
-			TargetID:  "123456789012345678",
-			CheckName: "build",
-		}
-		err := srv.completeCIFailureTransition(context.Background(), res, "compile error", "https://github.com/check/1")
-		if err != nil {
-			t.Fatalf("completeCIFailureTransition() err = %v", err)
-		}
-		if len(disp.DispatchCalls()) != 1 {
-			t.Errorf("expected background dispatch to be dispatched when PR is not Vanadis-owned, got %d calls", len(disp.DispatchCalls()))
-		}
-	})
-
 	t.Run("transitionRegisteredConflict publishes conflict", func(t *testing.T) {
 		t.Parallel()
 		bus := &mockEventBus{}
@@ -155,34 +64,11 @@ func TestPRLifecycleEvents_Publish(t *testing.T) {
 		}
 	})
 
-	t.Run("dispatchConflictPrompt suppresses conflict prompt when bus is active and PR is Vanadis-owned", func(t *testing.T) {
+	t.Run("dispatchConflictPrompt dispatches prompt for conflicted PR", func(t *testing.T) {
 		t.Parallel()
-		bus := &mockEventBus{}
 		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: true}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
 		srv := &RouterServer{
-			bus:        bus,
-			dispatcher: disp,
-			registry:   reg,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-
-		err := srv.dispatchConflictPrompt(context.Background(), "123456789012345678", "azylman/aerial", "feat/branch", "sha-conflict", 42)
-		if err != nil {
-			t.Fatalf("dispatchConflictPrompt() err = %v", err)
-		}
-		if len(disp.PromptCalls()) != 0 || len(disp.DispatchCalls()) != 0 {
-			t.Errorf("expected conflict prompt to be suppressed when bus is active and PR is Vanadis-owned, got prompt=%d dispatch=%d", len(disp.PromptCalls()), len(disp.DispatchCalls()))
-		}
-	})
-
-	t.Run("dispatchConflictPrompt dispatches prompt when bus is active and PR is not Vanadis-owned", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: false}
-		srv := &RouterServer{
-			bus:        bus,
 			dispatcher: disp,
 			registry:   reg,
 			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
@@ -193,7 +79,41 @@ func TestPRLifecycleEvents_Publish(t *testing.T) {
 			t.Fatalf("dispatchConflictPrompt() err = %v", err)
 		}
 		if len(disp.DispatchCalls()) != 1 {
-			t.Errorf("expected conflict prompt to be dispatched when PR is not Vanadis-owned, got %d calls", len(disp.DispatchCalls()))
+			t.Errorf("expected 1 dispatch call, got %d", len(disp.DispatchCalls()))
+		}
+	})
+
+	t.Run("dispatchConflictPrompt bus suppression matrix", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name           string
+			suppressPrompt bool
+			wantDispatches int
+		}{
+			{name: "suppresses conflict prompt when build-orchestrated", suppressPrompt: true, wantDispatches: 0},
+			{name: "dispatches conflict prompt when not build-orchestrated", suppressPrompt: false, wantDispatches: 1},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				bus := &mockEventBus{}
+				disp := &mockOutboundDispatcher{}
+				reg := &mockPRRegistry{suppressConflictPrompt: tc.suppressPrompt, resolveTargetID: "123456789012345678"}
+				srv := &RouterServer{
+					bus:        bus,
+					dispatcher: disp,
+					registry:   reg,
+					cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+				}
+
+				err := srv.dispatchConflictPrompt(context.Background(), "123456789012345678", "azylman/aerial", "feat/branch", "sha-conflict", 42)
+				if err != nil {
+					t.Fatalf("dispatchConflictPrompt() err = %v", err)
+				}
+				if len(disp.DispatchCalls()) != tc.wantDispatches {
+					t.Errorf("dispatch calls = %d, want %d", len(disp.DispatchCalls()), tc.wantDispatches)
+				}
+			})
 		}
 	})
 }
@@ -490,35 +410,11 @@ func TestPRLifecycleEvents_DeployAndKustomization(t *testing.T) {
 		}
 	})
 
-	t.Run("completeNoDeployWorkflowRun dispatches prompt for non-Vanadis PR when bus publish succeeds", func(t *testing.T) {
+	t.Run("completeNoDeployWorkflowRun suppresses prompt when bus publish succeeds", func(t *testing.T) {
 		t.Parallel()
 		bus := &mockEventBus{}
 		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: false}
-		srv := &RouterServer{
-			bus:        bus,
-			dispatcher: disp,
-			registry:   reg,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-
-		err := srv.completeNoDeployWorkflowRun(context.Background(), "azylman/aerial", "head123", "123456789012345678", 42)
-		if err != nil {
-			t.Fatalf("completeNoDeployWorkflowRun() err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "deploy_success" {
-			t.Fatalf("expected deploy_success published event, got %v", bus.publishedPREvents)
-		}
-		if len(disp.PromptCalls()) != 1 {
-			t.Errorf("expected prompt to be dispatched for non-Vanadis PR on deploy success, got %d calls", len(disp.PromptCalls()))
-		}
-	})
-
-	t.Run("completeNoDeployWorkflowRun advances Vanadis and suppresses prompt for Vanadis PR when bus publish succeeds", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678", suppressVanadisRes: true}
+		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
 		srv := &RouterServer{
 			bus:        bus,
 			dispatcher: disp,
@@ -534,16 +430,9 @@ func TestPRLifecycleEvents_DeployAndKustomization(t *testing.T) {
 			t.Fatalf("expected deploy_success published event, got %v", bus.publishedPREvents)
 		}
 		if len(disp.PromptCalls()) != 0 {
-			t.Errorf("expected prompt to be suppressed for Vanadis PR on deploy success, got %d calls", len(disp.PromptCalls()))
-		}
-		if len(reg.advanceVanadisCalls) != 1 {
-			t.Errorf("expected advanceVanadisCalls = 1, got %d", len(reg.advanceVanadisCalls))
+			t.Errorf("expected prompt to be suppressed on deploy success, got %d calls", len(disp.PromptCalls()))
 		}
 	})
-}
-
-func TestPRLifecycleEvents_HelpersAndState(t *testing.T) {
-	t.Parallel()
 
 	t.Run("buildPRRolloutState extracts all fields from metadata", func(t *testing.T) {
 		t.Parallel()
@@ -615,6 +504,28 @@ func TestPRLifecycleEvents_HelpersAndState(t *testing.T) {
 		srv.healDependabotPR(context.Background(), resDep)
 		if len(reg.ensureCalls) != 1 {
 			t.Errorf("expected 1 ensureCall for dependabot branch, got %d", len(reg.ensureCalls))
+		}
+
+		// empty targetID branch
+		regNoTarget := &mockPRRegistry{resolveTargetID: ""}
+		srvNoTarget := &RouterServer{
+			registry: regNoTarget,
+			cfgSrc:   fixedConfig(Config{SystemChannelID: ""}),
+		}
+		srvNoTarget.healDependabotPR(context.Background(), resDep)
+		if len(regNoTarget.ensureCalls) != 0 {
+			t.Errorf("expected 0 ensureCalls on empty targetID, got %d", len(regNoTarget.ensureCalls))
+		}
+
+		// registry error branch
+		regErr := &mockPRRegistry{ensureErr: errors.New("db fail")}
+		srvErr := &RouterServer{
+			registry: regErr,
+			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+		}
+		srvErr.healDependabotPR(context.Background(), resDep)
+		if len(regErr.ensureCalls) != 1 {
+			t.Errorf("expected 1 ensureCall on registry error, got %d", len(regErr.ensureCalls))
 		}
 	})
 

@@ -149,7 +149,6 @@ type ghEventCase struct {
 	wantBackfillCalls    int
 	wantConflictCalls    int
 	wantAdvanceCalls     int
-	wantFailVanadis      int
 	wantEnsureCalls      int
 	wantGitPushes        int
 	wantPrompts          int
@@ -254,12 +253,6 @@ func assertEventRegistryLifecycleCalls(t *testing.T, tc ghEventCase) {
 	}
 	if len(tc.reg.conflictCalls) != tc.wantConflictCalls {
 		t.Errorf("conflictCalls = %d, want %d", len(tc.reg.conflictCalls), tc.wantConflictCalls)
-	}
-	if len(tc.reg.advanceVanadisCalls) != tc.wantAdvanceCalls {
-		t.Errorf("advanceVanadisCalls = %d, want %d", len(tc.reg.advanceVanadisCalls), tc.wantAdvanceCalls)
-	}
-	if len(tc.reg.failVanadisCalls) != tc.wantFailVanadis {
-		t.Errorf("failVanadisCalls = %d, want %d", len(tc.reg.failVanadisCalls), tc.wantFailVanadis)
 	}
 	if len(tc.reg.ensureCalls) != tc.wantEnsureCalls {
 		t.Errorf("ensureCalls = %d, want %d", len(tc.reg.ensureCalls), tc.wantEnsureCalls)
@@ -408,9 +401,8 @@ func processGitHubEventTestCases() []ghEventCase {
 	p4 := processGitHubEventCasesPart4()
 	p5 := processGitHubEventCasesPart5()
 	p6 := processGitHubEventCasesPart6()
-	p7 := processGitHubEventCasesPart7()
 	p8 := processGitHubEventCasesPart8()
-	total := len(p1) + len(p2) + len(p3) + len(p4) + len(p5) + len(p6) + len(p7) + len(p8)
+	total := len(p1) + len(p2) + len(p3) + len(p4) + len(p5) + len(p6) + len(p8)
 	all := make([]ghEventCase, 0, total)
 	all = append(all, p1...)
 	all = append(all, p2...)
@@ -418,7 +410,6 @@ func processGitHubEventTestCases() []ghEventCase {
 	all = append(all, p4...)
 	all = append(all, p5...)
 	all = append(all, p6...)
-	all = append(all, p7...)
 	all = append(all, p8...)
 	return all
 }
@@ -565,7 +556,7 @@ func processGitHubEventCasesPart2() []ghEventCase {
 		{
 			name: "pull_request closed and merged transitions registry", event: "pull_request", delivery: "del-pr-merged",
 			payload: `{"action":"closed","number":515,"pull_request":{"number":515,"head":{"ref":"feat/decouple","sha":"head111"},"merged":true,"merge_commit_sha":"merge111"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{mergeAdvanceRes: true, mergedTargetID: "target-merged-1"},
+			reg:     &mockPRRegistry{mergedTargetID: "target-merged-1"},
 			wantPR:  515, wantMergeSHA: "merge111", wantTargetID: "target-merged-1", wantMergedCalls: 1, wantAdvanceCalls: 1,
 		},
 	}
@@ -577,19 +568,12 @@ func processGitHubEventCasesPart3() []ghEventCase {
 			name: "pull_request closed unmerged transitions registry", event: "pull_request", delivery: "del-pr-closed",
 			payload: `{"action":"closed","number":516,"pull_request":{"number":516,"head":{"ref":"feat/discard","sha":"head222"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
 			reg:     &mockPRRegistry{closedTargetID: "target-closed-1"},
-			wantPR:  516, wantTargetID: "target-closed-1", wantClosedCalls: 1, wantFailVanadis: 1,
-		},
-		{
-			name: "pull_request closed unmerged failVanadisChunk error propagates", event: "pull_request", delivery: "del-pr-closed-fail-vanadis-err",
-			payload: `{"action":"closed","number":516,"pull_request":{"number":516,"head":{"ref":"feat/discard","sha":"head222"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{closedTargetID: "target-closed-1", failVanadisErr: errors.New("fail err")},
-			wantErr: true,
+			wantPR:  516, wantTargetID: "target-closed-1", wantClosedCalls: 1,
 		},
 		{
 			name: "pull_request synchronize transitions registry", event: "pull_request", delivery: "del-pr-sync",
 			payload: `{"action":"synchronize","number":517,"pull_request":{"number":517,"head":{"ref":"feat/update","sha":"newhead333"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
 			reg:     &mockPRRegistry{syncTargetID: "target-sync-1", resolveTargetID: "target-sync-1", resolveBranch: "feat/update"},
-			disp:    &mockOutboundDispatcher{widgetErr: errors.New("widget sync err")},
 			wantPR:  517, wantHeadSHA: "newhead333", wantTargetID: "target-sync-1", wantSyncCalls: 1,
 		},
 		{
@@ -617,8 +601,6 @@ func processGitHubEventCasesPart3() []ghEventCase {
 			wantPR:            518,
 			wantHeadSHA:       "cancelhead777",
 			wantCIFailedCalls: 1,
-			wantDispatches:    1,
-			wantPromptSubstr:  "Upstream job cancelled",
 		},
 		{
 			name: "check_run success for CI Gate recovers after prior check failure on same SHA", event: "check_run", delivery: "del-cr-ci-gate-recover-fail",
@@ -725,20 +707,6 @@ func processGitHubEventCasesPart4() []ghEventCase {
 			wantPR:  518, wantCIFailedCalls: 0,
 		},
 		{
-			name: "check_run failure for roborev enriches prompt with latest comment", event: "check_run", delivery: "del-cr-roborev",
-			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Failed","summary":"Found issues"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
-			reg:               &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedUpdated: true},
-			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Found SQL injection in query",
-		},
-		{
-			name: "check_run failure for roborev produces critical evaluation and override prompt", event: "check_run", delivery: "del-cr-roborev-override",
-			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Failed","summary":"Found issues"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
-			reg:               &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedUpdated: true},
-			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "override-roborev 525",
-		},
-		{
 			name: "check_run success for roborev calls UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-success",
 			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Succeeded","summary":"All clean"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
 			reg:                  &mockPRRegistry{syncTargetID: "100000000000000001"},
@@ -791,31 +759,27 @@ func processGitHubEventCasesPart4() []ghEventCase {
 			wantRecordCheckState: "passed",
 		},
 		{
-			name: "check_run failure for standard CI check produces standard fix prompt", event: "check_run", delivery: "del-cr-standard-ci-fail",
-			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Unit Tests","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
-			reg:               &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedUpdated: true},
-			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Please investigate and fix the failure by inspecting the failing logs",
+			name: "check_run success for roborev blocked by non-roborev failure ignores UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-blocked",
+			priorEvent: &ghPriorEvent{
+				event:    "check_run",
+				delivery: "del-cr-unit-fail",
+				payload:  `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Unit Tests","head_sha":"robo525abcdef","status":"completed","conclusion":"failure","pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
+			},
+			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Succeeded","summary":"All clean"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
+			reg:                  &mockPRRegistry{syncTargetID: "100000000000000001", ciFailedTargetID: "100000000000000001"},
+			wantPR:               525,
+			wantHeadSHA:          "robo525abcdef",
+			wantSyncCalls:        0,
+			wantConclusion:       "success",
+			wantRecordCheckCalls: 1,
+			wantRecordCheckState: "passed",
+			wantCIFailedCalls:    1,
 		},
 	}
 }
 
 func processGitHubEventCasesPart5() []ghEventCase {
 	return []ghEventCase{
-		{
-			name: "check_run failure with ciFailCount exceeding cap suppresses prompt and dispatches cap DM", event: "check_run", delivery: "del-cr-cap",
-			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
-			reg:               &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedUpdated: true, ciFailCount: 4},
-			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "remediation cap 3/3 reached", wantPrompts: 0, wantFailVanadis: 1,
-		},
-		{
-			name: "check_run failure with ciFailCount error still dispatches prompt", event: "check_run", delivery: "del-cr-failcount-err",
-			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
-			reg:               &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedUpdated: true, ciFailCountErr: errors.New("db error")},
-			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Lint",
-		},
 		{
 			name: "check_run timed_out with PR in payload transitions registry", event: "check_run", delivery: "del-cr-timeout",
 			payload: `{"action":"completed","check_run":{"name":"Tests","head_sha":"checkhead555","status":"completed","conclusion":"timed_out","pull_requests":[{"number":519,"head":{"ref":"feat/test","sha":"checkhead555"}}]},"repository":{"full_name":"azylman/aerial"}}`,
@@ -843,20 +807,20 @@ func processGitHubEventCasesPart5() []ghEventCase {
 		{
 			name: "push to main with resolved PR backfills merge SHA", event: "push", delivery: "del-push-main",
 			payload: `{"ref":"refs/heads/main","after":"pushsha999","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"pushsha999","message":"feat: merge pr"}}`,
-			reg:     &mockPRRegistry{mergeAdvanceRes: true, backfillTargetID: "target-backfill"},
+			reg:     &mockPRRegistry{backfillTargetID: "target-backfill"},
 			wantPR:  522, wantMergeSHA: "pushsha999", wantBackfillCalls: 1, wantAdvanceCalls: 1,
 		},
 		{
 			name: "push to main falls back to squash commit message when SHA lookup misses", event: "push", delivery: "del-push-msg-fallback",
 			payload: `{"ref":"refs/heads/main","after":"unindexedsha898","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"unindexedsha898","message":"refactor(runner): compact streaming daemon (chunk 3/5) (#898)\n\nDetailed body"}}`,
-			reg:     &mockPRRegistry{mergeAdvanceRes: true, backfillTargetID: "100000000000000003"},
+			reg:     &mockPRRegistry{backfillTargetID: "100000000000000003"},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  898, wantMergeSHA: "unindexedsha898", wantTargetID: "100000000000000003", wantSource: "commit_message", wantBackfillCalls: 1, wantAdvanceCalls: 1, wantGitPushes: 1,
 		},
 		{
 			name: "push to main falls back to merge commit message when SHA lookup misses", event: "push", delivery: "del-push-merge-msg-fallback",
 			payload: `{"ref":"refs/heads/main","after":"unindexedsha899","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"unindexedsha899","message":"Merge pull request #899 from azylman/feat/test\n\nMerge body"}}`,
-			reg:     &mockPRRegistry{mergeAdvanceRes: true, backfillTargetID: "100000000000000003"},
+			reg:     &mockPRRegistry{backfillTargetID: "100000000000000003"},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  899, wantMergeSHA: "unindexedsha899", wantTargetID: "100000000000000003", wantSource: "commit_message", wantBackfillCalls: 1, wantAdvanceCalls: 1, wantGitPushes: 1,
 		},
@@ -892,7 +856,7 @@ func processGitHubEventCasesPart5() []ghEventCase {
 		{
 			name: "push local PR resolution priority avoids GitHub API", event: "push", delivery: "del-push-local",
 			payload:        `{"ref":"refs/heads/main","after":"localsha123","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"localsha123","message":"feat: merged commit"}}`,
-			reg:            &mockPRRegistry{mergeAdvanceRes: true, resolvePRNum: 530, resolveBranch: "feat/local-resolved", resolveTargetID: "thread-local-530"},
+			reg:            &mockPRRegistry{resolvePRNum: 530, resolveBranch: "feat/local-resolved", resolveTargetID: "thread-local-530"},
 			spyNoGitHubHit: true, wantPR: 530, wantTargetID: "thread-local-530", wantMergeSHA: "localsha123", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
 		},
 	}
@@ -903,7 +867,7 @@ func processGitHubEventCasesPart6() []ghEventCase {
 		{
 			name: "push to main triggers DispatchGitPush", event: "push", delivery: "del-push-main-disp",
 			payload: `{"ref":"refs/heads/main","after":"maincommit123","repository":{"full_name":"azylman/aerial"}}`,
-			reg:     &mockPRRegistry{mergeAdvanceRes: true, resolvePRNum: 542, resolveBranch: "main", resolveTargetID: "100000000000000001"},
+			reg:     &mockPRRegistry{resolvePRNum: 542, resolveBranch: "main", resolveTargetID: "100000000000000001"},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  542, wantTargetID: "100000000000000001", wantGitPushes: 1, wantBackfillCalls: 1, wantAdvanceCalls: 1,
 		},
@@ -915,13 +879,6 @@ func processGitHubEventCasesPart6() []ghEventCase {
 			wantGitPushes: 0,
 		},
 		{
-			name: "check_run failure with valid snowflake triggers DispatchPrompt", event: "check_run", delivery: "del-cr-fail-prompt",
-			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Build Failed","summary":"Compilation error in brain/main.go:42"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
-			reg:               &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedUpdated: true},
-			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Service Unit Tests",
-		},
-		{
 			name: "check_run failure duplicate does not trigger prompt", event: "check_run", delivery: "del-cr-dup-prompt",
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Build Failed","summary":"Compilation error in brain/main.go:42"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedUpdated: false},
@@ -931,7 +888,7 @@ func processGitHubEventCasesPart6() []ghEventCase {
 		{
 			name: "pull_request closed and merged suppresses direct message", event: "pull_request", delivery: "del-pr-merge-disp",
 			payload: `{"action":"closed","number":542,"pull_request":{"number":542,"merged":true,"head":{"ref":"feat/batch1","sha":"head542"},"merge_commit_sha":"merge542"},"repository":{"full_name":"azylman/aerial"}}`,
-			reg:     &mockPRRegistry{mergeAdvanceRes: true, mergedTargetID: "100000000000000001"},
+			reg:     &mockPRRegistry{mergedTargetID: "100000000000000001"},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  542, wantAction: "closed", wantMergedCalls: 1, wantAdvanceCalls: 1, wantDMs: 0,
 		},
@@ -964,70 +921,6 @@ func processGitHubEventCasesPart6() []ghEventCase {
 			wantConflictCalls: 1, wantGitPushes: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
 		},
 		{
-			name: "merged non-final PR on azylman/mirrormere updates merged status and advances Vanadis chunk", event: "pull_request", delivery: "del-pr-mirrormere",
-			payload: `{"action":"closed","number":210,"pull_request":{"number":210,"head":{"ref":"feat/ui","sha":"head210"},"merged":true,"merge_commit_sha":"merge210"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{mergeAdvanceRes: true, mergedTargetID: "100000000000000002"},
-			disp:    &mockOutboundDispatcher{},
-			wantPR:  210, wantMergedCalls: 1, wantAdvanceCalls: 1, wantPrompts: 0,
-		},
-		{
-			name: "merged Vanadis PR not followed by a pr chunk on azylman/mirrormere defers Vanadis advance until deploy", event: "pull_request", delivery: "del-pr-mirrormere-final",
-			payload: `{"action":"closed","number":210,"pull_request":{"number":210,"head":{"ref":"feat/ui","sha":"head210"},"merged":true,"merge_commit_sha":"merge210"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{mergedTargetID: "100000000000000002"},
-			disp:    &mockOutboundDispatcher{},
-			wantPR:  210, wantMergedCalls: 1, wantAdvanceCalls: 0, wantPrompts: 0,
-		},
-		{
-			name: "merged PR on azylman/mirrormere merge gate lookup error propagates", event: "pull_request", delivery: "del-pr-mirrormere-gate-err",
-			payload: `{"action":"closed","number":210,"pull_request":{"number":210,"head":{"ref":"feat/ui","sha":"head210"},"merged":true,"merge_commit_sha":"merge210"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{mergedTargetID: "100000000000000002", mergeAdvanceErr: errors.New("simulated vanadis lookup error")},
-			disp:    &mockOutboundDispatcher{},
-			wantErr: true,
-		},
-		{
-			name: "workflow_run on main without built images advances Vanadis and dispatches git-merge prompt", event: "workflow_run", delivery: "del-wf-main-merge",
-			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge210","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 210, resolveBranch: "feat/ui", resolveTargetID: "100000000000000002"},
-			disp:    &mockOutboundDispatcher{},
-			wantPR:  210, wantAdvanceCalls: 1, wantPrompts: 1, wantPromptSubstr: "Continuous Delivery deployment completed for job git-merge on azylman/mirrormere",
-		},
-		{
-			name: "workflow_run on main advance Vanadis error propagates", event: "workflow_run", delivery: "del-wf-main-err",
-			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge211","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 211, resolveBranch: "feat/ui2", resolveTargetID: "100000000000000002", advanceVanadisErr: errors.New("simulated advance error")},
-			disp:    &mockOutboundDispatcher{},
-			wantErr: true,
-		},
-	}
-}
-
-func processGitHubEventCasesPart7() []ghEventCase {
-	return []ghEventCase{
-		{
-			name: "closed unmerged PR calls FailVanadisChunkByPR", event: "pull_request", delivery: "del-pr-discard",
-			payload: `{"action":"closed","number":212,"pull_request":{"number":212,"head":{"ref":"feat/discard","sha":"head212"},"merged":false},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{closedTargetID: "target-closed-m"},
-			wantPR:  212, wantClosedCalls: 1, wantFailVanadis: 1,
-		},
-		{
-			name: "push to azylman/aerial-sidecars backfills merge_sha and advances non-final Vanadis chunk", event: "push", delivery: "del-push-sidecars",
-			payload: `{"ref":"refs/heads/main","after":"sidecarsha1","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha1","message":"feat: merged sidecar (#310)"}}`,
-			reg:     &mockPRRegistry{mergeAdvanceRes: true, resolvePRNum: 310, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars"},
-			wantPR:  310, wantMergeSHA: "sidecarsha1", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
-		},
-		{
-			name: "push to azylman/aerial-sidecars defers Vanadis advance when next chunk is not a pr", event: "push", delivery: "del-push-sidecars-final",
-			payload: `{"ref":"refs/heads/main","after":"sidecarsha1","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha1","message":"feat: merged sidecar (#310)"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 310, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars"},
-			wantPR:  310, wantMergeSHA: "sidecarsha1", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 0,
-		},
-		{
-			name: "push to azylman/aerial-sidecars advance Vanadis error propagates", event: "push", delivery: "del-push-sidecars-adv-err",
-			payload: `{"ref":"refs/heads/main","after":"sidecarsha1","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha1","message":"feat: merged sidecar (#310)"}}`,
-			reg:     &mockPRRegistry{mergeAdvanceRes: true, resolvePRNum: 310, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars", advanceVanadisErr: errors.New("simulated advance error")},
-			wantErr: true,
-		},
-		{
 			name: "pull_request closed merged UpdatePRMerged error", event: "pull_request", delivery: "del-pr-merged-err",
 			payload: `{"action":"closed","number":215,"pull_request":{"number":215,"head":{"ref":"feat/ui3","sha":"head215"},"merged":true,"merge_commit_sha":"merge215"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
 			reg:     &mockPRRegistry{err: errors.New("merged db error")},
@@ -1047,35 +940,20 @@ func processGitHubEventCasesPart7() []ghEventCase {
 		},
 		{
 			name: "pull_request opened with aerial-pr trailer self-heals registration", event: "pull_request", delivery: "del-pr-trailer-open",
-			payload: `{"action":"opened","number":692,"pull_request":{"number":692,"title":"fix: chunk 2","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"vanadis_chunk_id\":\"build-1792510680-f4ce8eee-chunk-2\",\"jobs\":[\"kiosk-client\"]} -->","head":{"ref":"feat/chunk2","sha":"head692"}},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			payload: `{"action":"opened","number":692,"pull_request":{"number":692,"title":"fix: chunk 2","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"chunk_id\":\"build-1792510680-f4ce8eee-chunk-2\",\"jobs\":[\"kiosk-client\"]} -->","head":{"ref":"feat/chunk2","sha":"head692"}},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
 			reg:     &mockPRRegistry{resolveTargetID: "100000000000000002", resolveBranch: "feat/chunk2"}, wantPR: 692, wantTargetID: "100000000000000002", wantEnsureCalls: 1,
 		},
 		{
 			name: "pull_request with aerial-pr trailer EnsurePRRegistered error propagates", event: "pull_request", delivery: "del-pr-trailer-err",
-			payload: `{"action":"opened","number":693,"pull_request":{"number":693,"title":"fix: chunk 3","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"vanadis_chunk_id\":\"build-123-chunk-3\",\"jobs\":[]} -->","head":{"ref":"feat/chunk3","sha":"head693"}},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			payload: `{"action":"opened","number":693,"pull_request":{"number":693,"title":"fix: chunk 3","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"chunk_id\":\"build-123-chunk-3\",\"jobs\":[]} -->","head":{"ref":"feat/chunk3","sha":"head693"}},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
 			reg:     &mockPRRegistry{ensureErr: errors.New("ensure db error")}, wantErr: true,
 		},
 		{
-			name: "workflow_run on main with expected deploy jobs defers Vanadis and prompt until deploy_success", event: "workflow_run", delivery: "del-wf-mirrormere-expected",
-			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge220","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 220, resolveBranch: "feat/ui-deploy", resolveTargetID: "100000000000000002", hasExpectedRes: true},
+			name: "workflow_run on main with expected deploy jobs defers prompt until deploy_success", event: "workflow_run", delivery: "del-wf-mirrormere-expected",
+			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge222","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 222, resolveBranch: "feat/ui-deploy", resolveTargetID: "100000000000000002", hasExpectedRes: true},
 			disp:    &mockOutboundDispatcher{},
-			wantPR:  220, wantAdvanceCalls: 0, wantPrompts: 0,
-		},
-		{
-			name: "workflow_run on main without expected deploy jobs for Vanadis PR advances and syncs deployed widget", event: "workflow_run", delivery: "del-wf-mirrormere-no-expected",
-			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge221","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 221, resolveBranch: "feat/ui-no-deploy", resolveTargetID: "100000000000000002", hasExpectedRes: false, suppressVanadisRes: true},
-			disp:    &mockOutboundDispatcher{},
-			wantPR:  221, wantAdvanceCalls: 1, wantPrompts: 0,
-		},
-		{
-			name: "workflow_run on main for a Flux-sourced repo hands completion to the kustomization watcher", event: "workflow_run", delivery: "del-wf-aerial-config-flux",
-			payload:        `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge222","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial-config"}}`,
-			reg:            &mockPRRegistry{resolvePRNum: 222, resolveBranch: "feat/config-only", resolveTargetID: "100000000000000002", hasExpectedRes: false, suppressVanadisRes: true},
-			disp:           &mockOutboundDispatcher{repoKustomizations: map[string][]fluxKustomizationRef{"azylman/aerial-config": {{Namespace: "flux-system", Name: "aerial-config"}}}},
-			wantPR:         222,
-			wantReconciles: []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-config"}},
+			wantPR:  222, wantPrompts: 0,
 		},
 		{
 			name: "workflow_run on main kustomization discovery error propagates", event: "workflow_run", delivery: "del-wf-aerial-config-discover-err",
@@ -1096,13 +974,6 @@ func processGitHubEventCasesPart7() []ghEventCase {
 
 func processGitHubEventCasesPart8() []ghEventCase {
 	return []ghEventCase{
-		{
-			name: "workflow_run on main completeNoDeployWorkflowRun isVanadisPR error propagates", event: "workflow_run", delivery: "del-wf-mirrormere-is-vanadis-err",
-			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge221","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 221, resolveBranch: "feat/ui-no-deploy", resolveTargetID: "100000000000000002", hasExpectedRes: false, suppressVanadisErr: errors.New("simulated is vanadis pr error")},
-			disp:    &mockOutboundDispatcher{},
-			wantErr: true,
-		},
 		{
 			name:            "dependabot PR opened registers in pr_registry with system channel snowflake",
 			event:           "pull_request",
@@ -1150,7 +1021,6 @@ func processGitHubEventCasesPart8() []ghEventCase {
 			wantHeadSHA:       "depfailsha",
 			wantEnsureCalls:   1,
 			wantCIFailedCalls: 1,
-			wantDispatches:    1,
 			wantTargetID:      "100000000000000004",
 		},
 		{
@@ -1176,7 +1046,6 @@ func processGitHubEventCasesPart8() []ghEventCase {
 			wantPR:               891,
 			wantHeadSHA:          "failhead891",
 			wantCIFailedCalls:    1,
-			wantDispatches:       1,
 			wantUpdatedBranchHit: "/repos/azylman/mirrormere/pulls/894/update-branch",
 		},
 		{
@@ -1216,7 +1085,6 @@ func processGitHubEventCasesPart8() []ghEventCase {
 			wantHeadSHA:       "forksha711",
 			wantSyncCalls:     1,
 			wantCIFailedCalls: 1,
-			wantDispatches:    1,
 		},
 	}
 }

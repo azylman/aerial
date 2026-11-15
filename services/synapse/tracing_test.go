@@ -110,8 +110,6 @@ func runTraceparentDispatchCase(t *testing.T, target string, withParent bool, fa
 		respBody = `{"status":"queued"}`
 	case "discord":
 		respBody = `{"status":"ok"}`
-	case "widget":
-		respBody = `{"status":"ok","message_id":"msg-widget"}`
 	}
 	srv := newTraceparentServer(t, failFirst, respBody)
 	parentCtx, parentTraceID := recordedParent(t)
@@ -133,10 +131,6 @@ func runTraceparentDispatchCase(t *testing.T, target string, withParent bool, fa
 		}
 		if err := d.postDiscordInternalJSON(ctx, client, time.Minute, "/internal/discord/message", "discord message ingress", "discord ingress", DiscordMessageIngressRequest{}); err != nil {
 			t.Fatalf("postDiscordInternalJSON: %v", err)
-		}
-	case "widget":
-		if msgID, err := d.DispatchWidget(ctx, StatusWidgetRequest{ChannelID: "100000000000000001", ID: "widget-1"}); err != nil || msgID != "msg-widget" {
-			t.Fatalf("DispatchWidget = %q, %v", msgID, err)
 		}
 	}
 	assertTraceIDs(t, srv.traceIDs(), wantRequests, parentTraceID, withParent)
@@ -181,23 +175,6 @@ func TestPostDiscordInternalJSON_Traceparent(t *testing.T) {
 	}
 }
 
-func TestDispatchWidget_Traceparent(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		withParent bool
-	}{
-		{name: "widget post continues the caller's trace", withParent: true},
-		{name: "starts a trace when the caller has none"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runTraceparentDispatchCase(t, "widget", tc.withParent, 0, false, 1)
-		})
-	}
-}
-
 func TestDiscordInteractionWorker_ResumesGatewayTrace(t *testing.T) {
 	t.Parallel()
 	const persistedTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
@@ -230,33 +207,6 @@ func TestDiscordInteractionWorker_ResumesGatewayTrace(t *testing.T) {
 				t.Fatalf("HandleDiscordInteractionJob: %v", err)
 			}
 			assertTraceIDs(t, srv.traceIDs(), 1, persistedTraceID, tc.continuesParent)
-		})
-	}
-}
-
-func TestRegistryVanadisClient_Traceparent(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name         string
-		injectClient bool
-	}{
-		{name: "injected client is wrapped and propagates", injectClient: true},
-		{name: "default client propagates"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := newTraceparentServer(t, 0, `{"build_id":"b1","chunk_id":"c1","failed":true}`)
-			var client *http.Client
-			if tc.injectClient {
-				client = srv.Client()
-			}
-			reg := NewPostgresPRRegistry(nil, WithVanadisClient(srv.URL, client))
-			ctx, parentTraceID := recordedParent(t)
-			if _, _, failed, err := reg.FailVanadisChunkDetailsByPR(ctx, "azylman/aerial", 1); err != nil || !failed {
-				t.Fatalf("FailVanadisChunkDetailsByPR = %v, %v", failed, err)
-			}
-			assertTraceIDs(t, srv.traceIDs(), 1, parentTraceID, true)
 		})
 	}
 }

@@ -76,27 +76,6 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// FailVanadisChunkDetailsByPR marks a Vanadis chunk as failed by PR and returns the build ID and chunk ID.
-func (r *PostgresPRRegistry) FailVanadisChunkDetailsByPR(ctx context.Context, repo string, prNumber int) (string, string, bool, error) {
-	repo = normalizeRepo(repo)
-	if r == nil || repo == "" || prNumber <= 0 {
-		return "", "", false, nil
-	}
-	var res struct {
-		BuildID string `json:"build_id"`
-		ChunkID string `json:"chunk_id"`
-		Failed  bool   `json:"failed"`
-	}
-	payload := map[string]any{
-		"repo":      repo,
-		"pr_number": prNumber,
-	}
-	if err := r.postVanadisJSON(ctx, "/chunks/fail-pr", "fail chunk", "fail vanadis chunk by pr", payload, &res); err != nil {
-		return "", "", false, err
-	}
-	return res.BuildID, res.ChunkID, res.Failed, nil
-}
-
 func sanitizeSubjectToken(token string) string {
 	token = strings.TrimSpace(token)
 	var sb strings.Builder
@@ -166,52 +145,6 @@ func (s *RouterServer) evaluateFluxEventTriggers(ctx context.Context, evt Deploy
 		contextHeader = fmt.Sprintf("Flux git sync %s for %s: %s", evt.Event, repo, strings.TrimSpace(evt.Details))
 	}
 	s.fireEventTriggers(ctx, "flux", []string{repo}, evt.Event, contextHeader)
-}
-
-func (s *RouterServer) evaluateVanadisAdvancementTriggers(ctx context.Context, repo string, prNumber int, res *VanadisAdvancementResult) {
-	if res == nil || !res.Matched || !res.Advanced {
-		return
-	}
-	chunkID := fmt.Sprintf("%s-chunk-%d", res.BuildID, res.MergedChunkIndex+1)
-	for _, ch := range res.Chunks {
-		if ch.ChunkIndex == res.MergedChunkIndex && ch.ID != "" {
-			chunkID = ch.ID
-			break
-		}
-	}
-	if chunkID != "" {
-		s.fireEventTriggers(ctx, "vanadis_chunk", []string{chunkID}, "merged",
-			fmt.Sprintf("Vanadis chunk %s merged for %s#%d", chunkID, repo, prNumber))
-	}
-	if res.BuildCompleted && res.BuildID != "" {
-		s.fireEventTriggers(ctx, "vanadis_build", []string{res.BuildID}, "completed",
-			fmt.Sprintf("Vanadis build %s completed", res.BuildID))
-	}
-}
-
-func (s *RouterServer) evaluateVanadisFailureTriggers(ctx context.Context, buildID, chunkID, reason string) {
-	if chunkID != "" {
-		s.fireEventTriggers(ctx, "vanadis_chunk", []string{chunkID}, "failed",
-			fmt.Sprintf("Vanadis chunk %s failed: %s", chunkID, reason))
-	}
-	if buildID != "" {
-		s.fireEventTriggers(ctx, "vanadis_build", []string{buildID}, "failed",
-			fmt.Sprintf("Vanadis build %s failed: %s", buildID, reason))
-	}
-}
-
-func (s *RouterServer) failVanadisChunk(ctx context.Context, repo string, prNumber int, reason string) error {
-	if s.registry == nil || prNumber <= 0 {
-		return nil
-	}
-	buildID, chunkID, failed, err := s.registry.FailVanadisChunkDetailsByPR(ctx, repo, prNumber)
-	if err != nil {
-		return err
-	}
-	if failed {
-		s.evaluateVanadisFailureTriggers(ctx, buildID, chunkID, reason)
-	}
-	return nil
 }
 
 func extractCheckRunHeadBranch(body []byte) string {

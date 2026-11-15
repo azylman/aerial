@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -701,21 +700,17 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
 			OccurredAt:   time.Now().UTC(),
 		})
-		if err := s.SyncPRWidget(ctx, pr.Repo, pr.PRNumber); err != nil {
-			log.Printf("[synapse] [widget] warning syncing rollout widget for %s#%d: %v", pr.Repo, pr.PRNumber, err)
-		}
 		return nil
 	}
 	commitSHA := firstNonEmpty(pr.MergeSHA, pr.HeadSHA)
 	s.recordDeploySuccessDispatched(pr.Repo, name, commitSHA, pr.PRNumber)
-	s.setPRWidgetState(ctx, pr.Repo, pr.PRNumber, "deployed", "")
 	targetID := pr.TargetID
 	if targetID == "" {
 		if resolved, rErr := s.ResolveThreadForPR(ctx, pr.Repo, pr.PRNumber); rErr == nil {
 			targetID = resolved
 		}
 	}
-	pubErr := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:        "deploy_success",
 		Repo:         pr.Repo,
 		PRNumber:     pr.PRNumber,
@@ -728,14 +723,8 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 		Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
 		OccurredAt:   time.Now().UTC(),
 	})
-	vanadisPR, err := s.isVanadisPR(ctx, pr.Repo, pr.PRNumber)
-	if err != nil {
-		log.Printf("[synapse] [flux-watch] warning checking vanadis PR for %s#%d: %v", pr.Repo, pr.PRNumber, err)
-	}
-	if s.bus == nil || pubErr != nil || !vanadisPR || err != nil {
-		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
-			log.Printf("[synapse] [flux-watch] error dispatching deploy_success for %s#%d: %v", pr.Repo, pr.PRNumber, err)
-		}
+	if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
+		log.Printf("[synapse] [flux-watch] error dispatching deploy_success for %s#%d: %v", pr.Repo, pr.PRNumber, err)
 	}
 	return nil
 }
@@ -760,34 +749,6 @@ func (s *RouterServer) failKustomizationRollout(ctx context.Context, pr Deployin
 		return fmt.Errorf("report %s failure for %s#%d: %w", name, pr.Repo, pr.PRNumber, err)
 	}
 	return nil
-}
-
-// formatKustomizationRolloutStatus renders a deploying PR's recorded Kustomizations one per line
-// (sorted), done once listed in deployed_kustomizations, else pending. ok is false when the PR is not
-// deploying or recorded no requests, so callers fall back to legacy per-job rendering.
-func formatKustomizationRolloutStatus(cleanStatus string, meta map[string]any) (string, bool) {
-	requests := recordedKustomizationRequests(meta)
-	if cleanStatus != "deploying" || len(requests) == 0 {
-		return "", false
-	}
-	deployed := make(map[string]bool)
-	for _, name := range extractStringSliceFromMetadata(meta, deployedKustomizationsKey) {
-		deployed[strings.TrimSpace(name)] = true
-	}
-	names := make([]string, 0, len(requests))
-	for name := range requests {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	lines := make([]string, 0, len(names))
-	for _, name := range names {
-		state := "🔄 rolling out"
-		if deployed[name] {
-			state = "✅ rolled out"
-		}
-		lines = append(lines, fmt.Sprintf("`%s`: %s", name, state))
-	}
-	return strings.Join(lines, "\n"), true
 }
 
 // deferSyncToWatcher defers a sync_success with no image build pending to the Kustomization watcher: a
@@ -838,9 +799,6 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 		return false, fmt.Errorf("record kustomization requests for %s#%d: %w", repo, prNum, err)
 	}
 	log.Printf("[synapse] [deploy] deferring completion of %s#%d to the kustomization watcher (%s)", repo, prNum, strings.Join(names, ", "))
-	if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-		log.Printf("[synapse] [widget] warning syncing deploying widget for %s#%d: %v", repo, prNum, err)
-	}
 	return true, s.reconcileImageKustomizations(ctx, refs, requests)
 }
 

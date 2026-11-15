@@ -1343,7 +1343,7 @@ func TestProcessStalledChunkCheck(t *testing.T) {
 			c.PRNumber = tc.prNumber
 			_ = store.CreateBuild(context.Background(), mkBuild("b-stall", "123456789012345678", "T", "O", tc.buildStatus), []VanadisChunk{c})
 			store.stallNudges = map[string]int{"c-stall": tc.priorNudges}
-			srv := NewVanadisServer(Config{BrainURL: brain.URL, SynapseURL: brain.URL}, store, brain.Client())
+			srv := NewVanadisServer(Config{BrainURL: brain.URL}, store, brain.Client())
 			if err := srv.ProcessStalledChunkCheck(context.Background(), tc.claimID, tc.dispatchID); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -1390,7 +1390,7 @@ func TestServer_CompleteChunkRunsStallCheck(t *testing.T) {
 	defer brain.Close()
 	store := newMemoryVanadisStore()
 	_ = store.CreateBuild(context.Background(), mkBuild("b-done", "123456789012345678", "T", "O", "running"), []VanadisChunk{mkChunk("c-done", "b-done", 0, "Done", "do it", "", "running")})
-	server := NewVanadisServer(Config{BrainURL: brain.URL, SynapseURL: brain.URL}, store, brain.Client())
+	server := NewVanadisServer(Config{BrainURL: brain.URL}, store, brain.Client())
 	ev := pubsub.DispatchOutcomeEvent{
 		DispatchID:     "vanadis-c-done-turn-0",
 		VanadisChunkID: "c-done",

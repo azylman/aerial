@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -238,14 +239,12 @@ type dispatchWorkflowRunTestCase struct {
 	deployingErr     error
 	recordErr        error
 	hasExpectedErr   error
-	suppressVanadis  bool
-	widgetErr        error
 	wantPromoteCalls int
 	wantDeployJobs   []string
-	wantWidgetCalls  int
-	wantReconciles   []fluxKustomizationRef
-	wantRecorded     []string
-	wantErr          bool
+
+	wantReconciles []fluxKustomizationRef
+	wantRecorded   []string
+	wantErr        bool
 }
 
 func assertDispatchWorkflowRunDeployAndWidget(t *testing.T, tc dispatchWorkflowRunTestCase, disp *mockOutboundDispatcher, reg *mockPRRegistry) {
@@ -259,9 +258,6 @@ func assertDispatchWorkflowRunDeployAndWidget(t *testing.T, tc dispatchWorkflowR
 	}
 	if len(reg.deployingCalls) > 1 || !slices.Equal(gotDeployJobs, tc.wantDeployJobs) {
 		t.Errorf("deploying calls = %+v, want one call with jobs %v", reg.deployingCalls, tc.wantDeployJobs)
-	}
-	if tc.wantWidgetCalls > 0 && len(disp.WidgetCalls()) != tc.wantWidgetCalls {
-		t.Errorf("widgetCalls = %d, want %d", len(disp.WidgetCalls()), tc.wantWidgetCalls)
 	}
 }
 
@@ -314,7 +310,6 @@ func runDispatchWorkflowRunCase(ctx context.Context, t *testing.T, tc dispatchWo
 			promoteErr:            tc.promoteErr,
 			discoverErr:           tc.discoverErr,
 			reconcileErrs:         tc.reconcileErrs,
-			widgetErr:             tc.widgetErr,
 			kustomizationsByImage: owners,
 		}
 	}
@@ -322,9 +317,9 @@ func runDispatchWorkflowRunCase(ctx context.Context, t *testing.T, tc dispatchWo
 		deployingErr:            tc.deployingErr,
 		kustomizationRequestErr: tc.recordErr,
 		hasExpectedErr:          tc.hasExpectedErr,
-		suppressVanadisRes:      tc.suppressVanadis,
-		resolveTargetID:         "100000000000000001",
-		resolveBranch:           "feat/test",
+
+		resolveTargetID: "100000000000000001",
+		resolveBranch:   "feat/test",
 	}
 	srv := NewRouterServer(fixedConfig(Config{GitHubAPIURL: ts.URL}), ts.Client())
 	if disp != nil {
@@ -373,7 +368,6 @@ func dispatchWorkflowRunCasesPart1() []dispatchWorkflowRunTestCase {
 			jobsBody:         brainJob,
 			wantPromoteCalls: 1,
 			wantDeployJobs:   []string{"brain"},
-			wantWidgetCalls:  1,
 			wantReconciles:   []fluxKustomizationRef{core},
 			wantRecorded:     []string{"aerial-core"},
 		},
@@ -422,18 +416,6 @@ func dispatchWorkflowRunCasesPart1() []dispatchWorkflowRunTestCase {
 			wantErr:          true,
 		},
 		{
-			name:             "main success with widget sync warning still succeeds",
-			headBranch:       "main",
-			conclusion:       "success",
-			jobsBody:         brainJob,
-			widgetErr:        errors.New("transient widget error"),
-			wantPromoteCalls: 1,
-			wantDeployJobs:   []string{"brain"},
-			wantWidgetCalls:  1,
-			wantReconciles:   []fluxKustomizationRef{core},
-			wantRecorded:     []string{"aerial-core"},
-		},
-		{
 			name:       "jobs API 500 error",
 			headBranch: "main",
 			conclusion: "success",
@@ -448,14 +430,12 @@ func dispatchWorkflowRunCasesPart1() []dispatchWorkflowRunTestCase {
 			jobsBody:   `{"jobs":[]}`,
 		},
 		{
-			name:            "0 resolved images with hasExpectedErr and Vanadis widget sync warning",
-			headBranch:      "main",
-			conclusion:      "success",
-			jobsBody:        `{"jobs":[]}`,
-			hasExpectedErr:  errors.New("expected err"),
-			suppressVanadis: true,
-			widgetErr:       errors.New("widget sync err"),
-			wantErr:         true,
+			name:           "0 resolved images with hasExpectedErr propagates error",
+			headBranch:     "main",
+			conclusion:     "success",
+			jobsBody:       `{"jobs":[]}`,
+			hasExpectedErr: errors.New("expected err"),
+			wantErr:        true,
 		},
 		{
 			name:             "image without owning kustomization promotes then completes no-deploy",
@@ -1304,4 +1284,104 @@ func resolvePRFromCommitSHATestCases() []resolvePRFromCommitSHATestCase {
 			wantErrSubstr: "no pull requests associated",
 		},
 	}
+}
+
+func TestMergeConflictAndDeployHelpers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("nil router server returns nil", func(t *testing.T) {
+		t.Parallel()
+		var s *RouterServer
+		if err := s.enqueueMergeConflict(ctx, MergeConflictArgs{}); err != nil {
+			t.Errorf("enqueueMergeConflict(nil) = %v", err)
+		}
+		if err := s.ProcessMergeConflict(ctx, MergeConflictArgs{}); err != nil {
+			t.Errorf("ProcessMergeConflict(nil) = %v", err)
+		}
+	})
+
+	t.Run("enqueueMergeConflict with bus publish error propagates", func(t *testing.T) {
+		t.Parallel()
+		bus := &mockEventBus{err: errors.New("nats down")}
+		srv := &RouterServer{bus: bus}
+		err := srv.enqueueMergeConflict(ctx, MergeConflictArgs{Repo: "azylman/aerial", PRNumber: 10})
+		if err == nil {
+			t.Fatalf("expected error from publishJetStreamJob, got nil")
+		}
+	})
+
+	t.Run("resolveDeployEventTargetID handles empty target and resolution", func(t *testing.T) {
+		t.Parallel()
+		reg := &mockPRRegistry{resolveTargetID: "100000000000000001"}
+		srv := &RouterServer{registry: reg}
+
+		evt := &DeployEvent{Repo: "azylman/aerial", PRNumber: 10}
+		srv.resolveDeployEventTargetID(ctx, evt)
+		if evt.TargetID != "100000000000000001" {
+			t.Errorf("evt.TargetID = %q, want %q", evt.TargetID, "100000000000000001")
+		}
+
+		// Resolution error leaves targetID unchanged
+		regErr := &mockPRRegistry{resolveErr: errors.New("db error")}
+		srvErr := &RouterServer{registry: regErr}
+		evt2 := &DeployEvent{Repo: "azylman/aerial", PRNumber: 11}
+		srvErr.resolveDeployEventTargetID(ctx, evt2)
+		if evt2.TargetID != "" {
+			t.Errorf("evt2.TargetID = %q, want empty", evt2.TargetID)
+		}
+	})
+}
+
+func TestHealDependabotPRAndBranchHelpers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("populateMissingBranch branches", func(t *testing.T) {
+		t.Parallel()
+		var nilSrv *RouterServer
+		nilSrv.populateMissingBranch(ctx, nil)
+
+		srvNoReg := &RouterServer{}
+		srvNoReg.populateMissingBranch(ctx, &ResolvedGitHubEvent{PRNumber: 10})
+
+		srv := &RouterServer{
+			registry: &mockPRRegistry{resolveBranch: "feat/discovered"},
+		}
+		// PRNumber <= 0
+		srv.populateMissingBranch(ctx, &ResolvedGitHubEvent{PRNumber: 0})
+		// Branch already set
+		resBranch := &ResolvedGitHubEvent{PRNumber: 10, Branch: "feat/existing"}
+		srv.populateMissingBranch(ctx, resBranch)
+		if resBranch.Branch != "feat/existing" {
+			t.Errorf("expected branch unchanged, got %q", resBranch.Branch)
+		}
+		// ResolvePRByNumber success
+		resEmpty := &ResolvedGitHubEvent{PRNumber: 10, Branch: ""}
+		srv.populateMissingBranch(ctx, resEmpty)
+		if resEmpty.Branch != "feat/discovered" {
+			t.Errorf("expected branch to be populated, got %q", resEmpty.Branch)
+		}
+		// ResolvePRByNumber error
+		srvErr := &RouterServer{
+			registry: &mockPRRegistry{resolveErr: errors.New("not found")},
+		}
+		resNotFound := &ResolvedGitHubEvent{PRNumber: 11, Branch: ""}
+		srvErr.populateMissingBranch(ctx, resNotFound)
+		if resNotFound.Branch != "" {
+			t.Errorf("expected branch to remain empty, got %q", resNotFound.Branch)
+		}
+	})
+
+	t.Run("loadK8sCertPool invalid", func(t *testing.T) {
+		t.Parallel()
+		if pool := loadK8sCertPool(""); pool != nil {
+			t.Errorf("expected nil pool for empty path")
+		}
+		tmp := t.TempDir() + "/not-a-cert.pem"
+		_ = os.WriteFile(tmp, []byte("not a cert"), 0o600)
+		if pool := loadK8sCertPool(tmp); pool != nil {
+			t.Errorf("expected nil pool for non-cert file")
+		}
+	})
 }

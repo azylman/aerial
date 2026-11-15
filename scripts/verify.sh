@@ -544,6 +544,20 @@ check_no_imperative_ddl() {
     return 0
 }
 
+check_synapse_zero_vanadis() {
+    if [ -d "$REPO_ROOT/services/synapse" ]; then
+        local matches=""
+        matches=$(git grep -in "vanadis" "$REPO_ROOT/services/synapse" 2>/dev/null || true)
+        if [ -n "$matches" ]; then
+            echo "🚨 [Aerial Verify] Architecture Invariant Violation: services/synapse contains references to Vanadis:" >&2
+            echo "$matches" | sed 's/^/   • /' >&2
+            echo "   Synapse must be a pure edge ingestion, SHA correlation, and NATS fact publisher on aerial.pr.> with zero Vanadis knowledge." >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
 CODE_HEALTH_BIN=""
 
 ensure_code_health() {
@@ -690,6 +704,7 @@ if [ "$MODE" = "staged" ]; then
     check_rule_file_sizes
     check_dependabot_coverage
     check_no_imperative_ddl
+    check_synapse_zero_vanadis
     check_code_health
     check_staged_secrets
 
@@ -805,6 +820,7 @@ for svc in $GO_SERVICES; do
     run_deadcode "$svc"
 done
 check_no_imperative_ddl
+check_synapse_zero_vanadis
 check_code_health
 check_docker_compose
 run_atlas_validate

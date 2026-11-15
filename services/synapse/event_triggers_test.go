@@ -11,155 +11,6 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
-func newSequentialMockServer(t *testing.T, expectedPath string, defaultStatus int, statuses []int, body string) *httptest.Server {
-	t.Helper()
-	var reqIdx int
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != expectedPath {
-			http.NotFound(w, r)
-			return
-		}
-		status := defaultStatus
-		if len(statuses) > 0 {
-			if reqIdx < len(statuses) {
-				status = statuses[reqIdx]
-			} else {
-				status = statuses[len(statuses)-1]
-			}
-		}
-		reqIdx++
-		if status == 0 {
-			status = http.StatusOK
-		}
-		w.WriteHeader(status)
-		_, _ = w.Write([]byte(body))
-	}))
-	t.Cleanup(ts.Close)
-	return ts
-}
-
-func newVanadisTestRegistry(t *testing.T, nilRegistry bool, expectedPath string, defaultStatus int, statuses []int, body string) *PostgresPRRegistry {
-	t.Helper()
-	if nilRegistry {
-		return nil
-	}
-	ts := newSequentialMockServer(t, expectedPath, defaultStatus, statuses, body)
-	reg := NewPostgresPRRegistry(nil, WithVanadisClient(ts.URL, ts.Client()))
-	reg.vanadisRetryDelay = 0
-	return reg
-}
-
-type failVanadisChunkCase struct {
-	name         string
-	nilRegistry  bool
-	repo         string
-	prNumber     int
-	httpStatus   int
-	httpStatuses []int
-	httpBody     string
-	buildID      string
-	chunkID      string
-	wantFailed   bool
-	wantErr      bool
-}
-
-func runFailVanadisChunkDetailsCase(t *testing.T, tc failVanadisChunkCase) {
-	t.Helper()
-	reg := newVanadisTestRegistry(t, tc.nilRegistry, "/chunks/fail-pr", tc.httpStatus, tc.httpStatuses, tc.httpBody)
-	bID, cID, failed, err := reg.FailVanadisChunkDetailsByPR(context.Background(), tc.repo, tc.prNumber)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("FailVanadisChunkDetailsByPR() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if failed != tc.wantFailed {
-		t.Fatalf("FailVanadisChunkDetailsByPR() failed = %v, want %v", failed, tc.wantFailed)
-	}
-	if tc.wantFailed && (bID != tc.buildID || cID != tc.chunkID) {
-		t.Fatalf("FailVanadisChunkDetailsByPR() got bID=%q, cID=%q; want %q, %q", bID, cID, tc.buildID, tc.chunkID)
-	}
-}
-
-func TestFailVanadisChunkDetailsByPR(t *testing.T) {
-	t.Parallel()
-
-	tests := []failVanadisChunkCase{
-		{
-			name:        "nil registry returns false",
-			nilRegistry: true,
-			repo:        "azylman/aerial",
-			prNumber:    10,
-		},
-		{
-			name:     "empty repo returns false",
-			repo:     "",
-			prNumber: 10,
-		},
-		{
-			name:     "invalid prNumber returns false",
-			repo:     "azylman/aerial",
-			prNumber: 0,
-		},
-		{
-			name:       "server 500 error returns error",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			httpStatus: http.StatusInternalServerError,
-			httpBody:   `{"error":"internal err"}`,
-			wantErr:    true,
-		},
-		{
-			name:       "server 400 non-transient error returns error",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			httpStatus: http.StatusBadRequest,
-			httpBody:   `{"error":"bad request"}`,
-			wantErr:    true,
-		},
-		{
-			name:         "server retry 502 then 200 succeeds",
-			repo:         "azylman/aerial",
-			prNumber:     10,
-			httpStatuses: []int{http.StatusBadGateway, http.StatusOK},
-			httpBody:     `{"build_id":"build-123","chunk_id":"chunk-1","failed":true}`,
-			buildID:      "build-123",
-			chunkID:      "chunk-1",
-			wantFailed:   true,
-		},
-		{
-			name:       "invalid json returns error",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			httpStatus: http.StatusOK,
-			httpBody:   `{invalid-json`,
-			wantErr:    true,
-		},
-		{
-			name:       "not found / not failed returns false",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			httpStatus: http.StatusOK,
-			httpBody:   `{"failed":false}`,
-			wantFailed: false,
-		},
-		{
-			name:       "successful chunk fail updates and returns true",
-			repo:       "azylman/aerial",
-			prNumber:   10,
-			httpStatus: http.StatusOK,
-			httpBody:   `{"build_id":"build-123","chunk_id":"chunk-1","failed":true}`,
-			buildID:    "build-123",
-			chunkID:    "chunk-1",
-			wantFailed: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runFailVanadisChunkDetailsCase(t, tc)
-		})
-	}
-}
-
 func TestFireEventTriggers(t *testing.T) {
 	t.Parallel()
 
@@ -287,285 +138,6 @@ func TestEvaluateFluxEventTriggers(t *testing.T) {
 			}
 			if !strings.Contains(ev.ContextHeader, tc.wantPromptPart) {
 				t.Fatalf("contextHeader %q does not contain %q", ev.ContextHeader, tc.wantPromptPart)
-			}
-		})
-	}
-}
-
-type vanadisAdvancementTriggerCase struct {
-	name            string
-	res             *VanadisAdvancementResult
-	wantChunkTarget string
-	wantBuildTarget string
-	wantChunkFired  bool
-	wantBuildFired  bool
-}
-
-func runVanadisAdvancementTriggerCase(t *testing.T, tc vanadisAdvancementTriggerCase) {
-	t.Helper()
-	recBus := &recordingBus{}
-	mockDisp := &mockOutboundDispatcher{}
-	srv := NewRouterServer(fixedConfig(Config{}), nil)
-	srv.SetEventBus(recBus)
-	srv.SetDispatcher(mockDisp)
-
-	srv.evaluateVanadisAdvancementTriggers(context.Background(), "azylman/aerial", 42, tc.res)
-
-	var chunkFired, buildFired bool
-	recBus.mu.Lock()
-	events := append([]pubsub.ExternalEvent(nil), recBus.events...)
-	recBus.mu.Unlock()
-	for _, ev := range events {
-		if ev.Source == "vanadis_chunk" && ev.EventType == "merged" && len(ev.Targets) == 1 && ev.Targets[0] == tc.wantChunkTarget {
-			chunkFired = true
-		}
-		if ev.Source == "vanadis_build" && ev.EventType == "completed" && len(ev.Targets) == 1 && ev.Targets[0] == tc.wantBuildTarget {
-			buildFired = true
-		}
-	}
-	if chunkFired != tc.wantChunkFired {
-		t.Fatalf("chunkFired = %v, want %v", chunkFired, tc.wantChunkFired)
-	}
-	if buildFired != tc.wantBuildFired {
-		t.Fatalf("buildFired = %v, want %v", buildFired, tc.wantBuildFired)
-	}
-}
-
-func TestEvaluateVanadisAdvancementTriggers(t *testing.T) {
-	t.Parallel()
-
-	tests := []vanadisAdvancementTriggerCase{
-		{
-			name: "nil result is no-op",
-			res:  nil,
-		},
-		{
-			name: "unmatched result is no-op",
-			res: &VanadisAdvancementResult{
-				Matched:  false,
-				Advanced: false,
-			},
-		},
-		{
-			name: "not advanced is no-op",
-			res: &VanadisAdvancementResult{
-				Matched:  true,
-				Advanced: false,
-			},
-		},
-		{
-			name: "advanced with chunk resolved from Chunks slice",
-			res: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         true,
-				BuildID:          "build-abc",
-				MergedChunkIndex: 1,
-				Chunks: []VanadisChunkSummary{
-					{ChunkIndex: 0, ID: "build-abc-chunk-1"},
-					{ChunkIndex: 1, ID: "build-abc-chunk-custom-2"},
-				},
-			},
-			wantChunkFired:  true,
-			wantChunkTarget: "build-abc-chunk-custom-2",
-		},
-		{
-			name: "advanced with chunk fallback from index",
-			res: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         true,
-				BuildID:          "build-xyz",
-				MergedChunkIndex: 2,
-				Chunks:           nil,
-			},
-			wantChunkFired:  true,
-			wantChunkTarget: "build-xyz-chunk-3",
-		},
-		{
-			name: "build completed fires both chunk and build triggers",
-			res: &VanadisAdvancementResult{
-				Matched:          true,
-				Advanced:         true,
-				BuildCompleted:   true,
-				BuildID:          "build-full",
-				MergedChunkIndex: 0,
-				Chunks: []VanadisChunkSummary{
-					{ChunkIndex: 0, ID: "build-full-chunk-1"},
-				},
-			},
-			wantChunkFired:  true,
-			wantChunkTarget: "build-full-chunk-1",
-			wantBuildFired:  true,
-			wantBuildTarget: "build-full",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runVanadisAdvancementTriggerCase(t, tc)
-		})
-	}
-}
-
-type vanadisFailureTriggerCase struct {
-	name           string
-	buildID        string
-	chunkID        string
-	reason         string
-	wantChunkFired bool
-	wantBuildFired bool
-}
-
-func runVanadisFailureTriggerCase(t *testing.T, tc vanadisFailureTriggerCase) {
-	t.Helper()
-	recBus := &recordingBus{}
-	mockDisp := &mockOutboundDispatcher{}
-	srv := NewRouterServer(fixedConfig(Config{}), nil)
-	srv.SetEventBus(recBus)
-	srv.SetDispatcher(mockDisp)
-
-	srv.evaluateVanadisFailureTriggers(context.Background(), tc.buildID, tc.chunkID, tc.reason)
-
-	var chunkFired, buildFired bool
-	recBus.mu.Lock()
-	events := append([]pubsub.ExternalEvent(nil), recBus.events...)
-	recBus.mu.Unlock()
-	for _, ev := range events {
-		if ev.Source == "vanadis_chunk" && ev.EventType == "failed" {
-			chunkFired = true
-		}
-		if ev.Source == "vanadis_build" && ev.EventType == "failed" {
-			buildFired = true
-		}
-	}
-	if chunkFired != tc.wantChunkFired {
-		t.Fatalf("chunkFired = %v, want %v", chunkFired, tc.wantChunkFired)
-	}
-	if buildFired != tc.wantBuildFired {
-		t.Fatalf("buildFired = %v, want %v", buildFired, tc.wantBuildFired)
-	}
-}
-
-func TestEvaluateVanadisFailureTriggers(t *testing.T) {
-	t.Parallel()
-
-	tests := []vanadisFailureTriggerCase{
-		{
-			name:           "both empty is no-op",
-			buildID:        "",
-			chunkID:        "",
-			wantChunkFired: false,
-			wantBuildFired: false,
-		},
-		{
-			name:           "chunkID only fires chunk failure",
-			chunkID:        "build-1-chunk-2",
-			reason:         "ci failed",
-			wantChunkFired: true,
-			wantBuildFired: false,
-		},
-		{
-			name:           "buildID only fires build failure",
-			buildID:        "build-1",
-			reason:         "build cancelled",
-			wantChunkFired: false,
-			wantBuildFired: true,
-		},
-		{
-			name:           "both IDs fire both failure triggers",
-			buildID:        "build-1",
-			chunkID:        "build-1-chunk-1",
-			reason:         "remediation cap reached",
-			wantChunkFired: true,
-			wantBuildFired: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runVanadisFailureTriggerCase(t, tc)
-		})
-	}
-}
-
-func TestFailVanadisChunk(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		nilRegistry  bool
-		prNumber     int
-		failErr      bool
-		failed       bool
-		buildID      string
-		chunkID      string
-		wantTriggers bool
-		wantErr      bool
-	}{
-		{
-			name:        "nil registry is no-op",
-			nilRegistry: true,
-			prNumber:    10,
-		},
-		{
-			name:     "invalid prNumber is no-op",
-			prNumber: 0,
-		},
-		{
-			name:     "registry error returns error",
-			prNumber: 10,
-			failErr:  true,
-			wantErr:  true,
-		},
-		{
-			name:         "failed is false does not fire triggers",
-			prNumber:     10,
-			failed:       false,
-			wantTriggers: false,
-		},
-		{
-			name:         "failed is true fires triggers",
-			prNumber:     10,
-			failed:       true,
-			buildID:      "build-101",
-			chunkID:      "chunk-101",
-			wantTriggers: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mockReg := &mockPRRegistry{
-				failVanadisRes:     tc.failed,
-				failVanadisBuildID: tc.buildID,
-				failVanadisChunkID: tc.chunkID,
-			}
-			if tc.failErr {
-				mockReg.failVanadisErr = errors.New("simulated fail err")
-			}
-			recBus := &recordingBus{}
-			mockDisp := &mockOutboundDispatcher{}
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
-			srv.SetEventBus(recBus)
-			if !tc.nilRegistry {
-				srv.SetRegistry(mockReg)
-			}
-			srv.SetDispatcher(mockDisp)
-
-			err := srv.failVanadisChunk(context.Background(), "azylman/aerial", tc.prNumber, "test_reason")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("failVanadisChunk() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantTriggers {
-				if recBus.publishCount() != 2 {
-					t.Fatalf("expected 2 failure claim calls (chunk + build), got %d", recBus.publishCount())
-				}
-			} else if !tc.wantErr && !tc.nilRegistry && tc.prNumber > 0 {
-				if recBus.publishCount() != 0 {
-					t.Fatalf("expected 0 failure claim calls, got %d", recBus.publishCount())
-				}
 			}
 		})
 	}
@@ -891,50 +463,13 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 			wantSource:    "github",
 			wantEventType: "pr_merged",
 		},
-		{
-			name:          "ProcessGitHubEvent closed unmerged fires vanadis failure triggers",
-			testScenario:  "github_pr_closed_unmerged",
-			wantSource:    "vanadis_chunk",
-			wantEventType: "failed",
-		},
-		{
-			name:          "ProcessGitHubEvent closed unmerged with test merge sha fires vanadis failure triggers but not github merged",
-			testScenario:  "github_pr_closed_unmerged_with_test_merge_sha",
-			wantSource:    "vanadis_chunk",
-			wantEventType: "failed",
-		},
-		{
-			name:          "notifyRemediationCap fires vanadis failure triggers",
-			testScenario:  "notify_remediation_cap",
-			wantSource:    "vanadis_chunk",
-			wantEventType: "failed",
-		},
-		{
-			name:          "advanceVanadisChunk fires vanadis_chunk merged triggers",
-			testScenario:  "vanadis_advance",
-			wantSource:    "vanadis_chunk",
-			wantEventType: "merged",
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			recBus := &recordingBus{}
-			mockReg := &mockPRRegistry{
-				failVanadisRes:     true,
-				failVanadisBuildID: "build-integ-1",
-				failVanadisChunkID: "chunk-integ-1",
-				advanceVanadisRes: &VanadisAdvancementResult{
-					Matched:          true,
-					Advanced:         true,
-					BuildID:          "build-integ-1",
-					MergedChunkIndex: 0,
-					Chunks: []VanadisChunkSummary{
-						{ChunkIndex: 0, ID: "chunk-integ-1"},
-					},
-				},
-			}
+			mockReg := &mockPRRegistry{}
 			mockDisp := &mockOutboundDispatcher{}
 			srv := NewRouterServer(fixedConfig(Config{}), nil)
 			srv.SetEventBus(recBus)
@@ -951,20 +486,6 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 			case "github_pr_merged":
 				body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":true,"merge_commit_sha":"sha-merge-123","head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
 				_, _ = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged", body)
-			case "github_pr_closed_unmerged":
-				body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":false,"head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
-				_, _ = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-closed", body)
-			case "github_pr_closed_unmerged_with_test_merge_sha":
-				body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":false,"merge_commit_sha":"test-merge-sha-123","head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
-				_, _ = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-closed-test-merge", body)
-			case "notify_remediation_cap":
-				srv.notifyRemediationCap(ctx, &ResolvedGitHubEvent{
-					Repo:     "azylman/aerial",
-					PRNumber: 1,
-					TargetID: "100000000000000001",
-				}, 4)
-			case "vanadis_advance":
-				_ = srv.advanceVanadisChunk(ctx, "azylman/aerial", 1)
 			}
 
 			recBus.mu.Lock()
@@ -980,13 +501,6 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 			}
 			if !found {
 				t.Fatalf("expected bus event for source=%s eventType=%s, events = %+v", tc.wantSource, tc.wantEventType, events)
-			}
-			if tc.testScenario == "github_pr_closed_unmerged_with_test_merge_sha" {
-				for _, ev := range events {
-					if ev.Source == "github" && ev.EventType == "pr_merged" {
-						t.Fatalf("unexpected bus event for github pr_merged on unmerged PR: %+v", ev)
-					}
-				}
 			}
 		})
 	}
@@ -1015,5 +529,95 @@ func TestProcessGitHubEvent_TriggersEvaluatedOnlyOnSuccess(t *testing.T) {
 
 	if recBus.publishCount() != 0 {
 		t.Fatalf("expected no bus events on ProcessGitHubEvent error, got %d events: %+v", recBus.publishCount(), recBus.events)
+	}
+}
+
+func TestHandleEventsWebhook_MissingAndInvalidPayloads(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		body       string
+		setBus     bool
+		wantStatus int
+	}{
+		{
+			name:       "invalid json",
+			body:       "not-json",
+			setBus:     true,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "missing source",
+			body:       `{"event_type":"sync_success","target":"azylman/aerial"}`,
+			setBus:     true,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "missing event_type",
+			body:       `{"source":"flux","target":"azylman/aerial"}`,
+			setBus:     true,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "missing targets",
+			body:       `{"source":"flux","event_type":"sync_success"}`,
+			setBus:     true,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "bus uninitialized",
+			body:       `{"source":"flux","event_type":"sync_success","target":"azylman/aerial"}`,
+			setBus:     false,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "valid with custom context header",
+			body:       `{"source":"flux","event_type":"sync_success","target":"azylman/aerial","context_header":"custom header"}`,
+			setBus:     true,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "valid with details generated header",
+			body:       `{"source":"flux","event_type":"sync_success","target":"azylman/aerial","details":"5 files synced"}`,
+			setBus:     true,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "forward to peers",
+			body:       `{"source":"flux","event_type":"sync_success","target":"azylman/aerial"}`,
+			setBus:     true,
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			peerCalls := 0
+			peerTs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				peerCalls++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer peerTs.Close()
+
+			cfg := Config{}
+			if tc.name == "forward to peers" {
+				cfg.WebhookForwardURLs = map[string]string{"peer": peerTs.URL}
+			}
+			srv := NewRouterServer(fixedConfig(cfg), nil)
+			if tc.setBus {
+				srv.SetEventBus(&recordingBus{})
+			}
+			req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			srv.handleEventsWebhook(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("handleEventsWebhook() status = %d, want %d, body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.name == "forward to peers" && peerCalls == 0 {
+				t.Errorf("expected peer forward call")
+			}
+		})
 	}
 }

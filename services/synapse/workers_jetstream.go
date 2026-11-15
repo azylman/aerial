@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -25,14 +24,6 @@ func resolveJetStreamJobCoords(args any) (string, string) {
 		return "aerial.jobs.synapse.discord_ingress", "discord:msg:" + a.MessageID
 	case DiscordInteractionArgs:
 		return "aerial.jobs.synapse.discord_interaction", "discord:ix:" + a.InteractionID
-	case WidgetSyncArgs:
-		if strings.TrimSpace(a.BuildID) != "" {
-			return "aerial.coalesced.widget_sync.build." + strings.TrimSpace(a.BuildID),
-				fmt.Sprintf("widget:build:%s:%d", strings.TrimSpace(a.BuildID), time.Now().UnixNano())
-		}
-		repo := strings.ReplaceAll(normalizeRepo(a.Repo), "/", ".")
-		return fmt.Sprintf("aerial.coalesced.widget_sync.pr.%s.%d", repo, a.PRNumber),
-			fmt.Sprintf("widget:pr:%s:%d:%d", normalizeRepo(a.Repo), a.PRNumber, time.Now().UnixNano())
 	default:
 		return "", ""
 	}
@@ -44,7 +35,6 @@ const (
 	maxDeliverMergeConflict      uint64 = 5
 	maxDeliverDiscordIngress     uint64 = 30
 	maxDeliverDiscordInteraction uint64 = 1
-	maxDeliverWidgetSync         uint64 = 5
 )
 
 func nakBackoffDelay(numDelivered uint64) time.Duration {
@@ -205,15 +195,7 @@ func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubs
 	return nil
 }
 
-// HandleWidgetSyncJob processes an aerial.coalesced.widget_sync.> job message from JetStream.
-func (s *RouterServer) HandleWidgetSyncJob(ctx context.Context, msg pubsub.Message) error {
-	return handleJetStreamJob(msg, maxDeliverWidgetSync, "widget sync", func(args WidgetSyncArgs) error {
-		log.Printf("[synapse] [jetstream] processing widget sync job repo=%s pr=%d build_id=%s", args.Repo, args.PRNumber, args.BuildID)
-		return s.ProcessWidgetSync(ctx, args)
-	})
-}
-
-// StartJobConsumers registers the 6 durable consumers for Synapse on AERIAL_JOBS and AERIAL_COALESCED.
+// StartJobConsumers registers the 5 durable consumers for Synapse on AERIAL_JOBS.
 func (s *RouterServer) StartJobConsumers(ctx context.Context) error {
 	if s == nil || s.bus == nil {
 		return nil
@@ -229,7 +211,6 @@ func (s *RouterServer) StartJobConsumers(ctx context.Context) error {
 		{"aerial.jobs.synapse.merge_conflict", "synapse-merge-conflict", s.HandleMergeConflictJob},
 		{"aerial.jobs.synapse.discord_ingress", "synapse-discord-ingress", s.HandleDiscordIngressJob},
 		{"aerial.jobs.synapse.discord_interaction", "synapse-discord-interaction", s.HandleDiscordInteractionJob},
-		{"aerial.coalesced.widget_sync.>", "synapse-widget-sync", s.HandleWidgetSyncJob},
 	}
 	for _, spec := range specs {
 		if _, err := s.bus.ConsumeQueue(ctx, spec.subject, spec.queue, spec.handler); err != nil {
