@@ -222,13 +222,6 @@ linters:
           - maintidx
         path: services/vanadis/(chunks|chunks_dispatch|chunks_postgres|chunks_server|mcp|symbols)_test\.go
       - linters:
-          - cyclop
-          - funlen
-          - gocognit
-          - gocyclo
-          - nestif
-        path: services/eri/pkg/queue/(vanadis|queue_widgets)_test\.go
-      - linters:
           - containedctx
         path: services/eri/pkg/(queue/(pool|worker)|runner/(interchangeable_pool|streaming_daemon|unified_pool))\.go
       - linters:
