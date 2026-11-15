@@ -328,6 +328,61 @@ func TestCiRemediationDispatchID(t *testing.T) {
 	}
 }
 
+func TestConflictRemediationDispatchID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		chunkID  string
+		headSHA  string
+		expected string
+	}{
+		{
+			name:     "sha longer than 7 characters",
+			chunkID:  "c1",
+			headSHA:  "abcdef123456",
+			expected: "vanadis-conflict-c1-abcdef1",
+		},
+		{
+			name:     "sha exactly 7 characters",
+			chunkID:  "c1",
+			headSHA:  "abc1234",
+			expected: "vanadis-conflict-c1-abc1234",
+		},
+		{
+			name:     "sha shorter than 7 characters",
+			chunkID:  "c1",
+			headSHA:  "abc12",
+			expected: "vanadis-conflict-c1-abc12",
+		},
+		{
+			name:     "sha with whitespace trimmed",
+			chunkID:  "c1",
+			headSHA:  "  def5678abc  \n",
+			expected: "vanadis-conflict-c1-def5678",
+		},
+		{
+			name:     "empty sha fallback",
+			chunkID:  "c2",
+			headSHA:  "",
+			expected: "vanadis-conflict-c2",
+		},
+		{
+			name:     "whitespace-only sha fallback",
+			chunkID:  "c3",
+			headSHA:  "   \t  ",
+			expected: "vanadis-conflict-c3",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.expected, conflictRemediationDispatchID(tc.chunkID, tc.headSHA))
+		})
+	}
+}
+
 func TestHandlePRCIFailed_Remediation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -615,7 +670,7 @@ func TestHandlePRConflict_DeployFailed_SyncFailed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	t.Run("conflict updates banner and wakes with prompt", func(t *testing.T) {
+	t.Run("conflict updates banner and dispatches brain remediation", func(t *testing.T) {
 		t.Parallel()
 		srv, store, _, reqs := setupTestServer(t)
 		build := mkBuild("b-conf", "123456789012345678", "Build", "Obj", "running")
@@ -638,14 +693,20 @@ func TestHandlePRConflict_DeployFailed_SyncFailed(t *testing.T) {
 		assert.Equal(t, "conflict", updatedChunk.Status)
 		assert.Equal(t, "Merge conflict detected", updatedChunk.Banner)
 
-		var foundPrompt bool
+		var foundDispatch bool
 		for _, r := range *reqs {
-			if r.Path == "/prompt" {
-				foundPrompt = true
+			if r.Path == "/dispatch" {
+				foundDispatch = true
+				assert.Equal(t, "vanadis-conflict-c-conf-sha701", r.Body["id"])
+				assert.Equal(t, "vanadis-c-conf", r.Body["session_id"])
+				assert.Equal(t, "123456789012345678", r.Body["target_id"])
+				assert.Equal(t, "c-conf", r.Body["vanadis_chunk_id"])
+				assert.Equal(t, true, r.Body["skip_if_active"])
+				assert.Equal(t, "medium", r.Body["effort"])
 				assert.Contains(t, r.Body["prompt"].(string), "Merge conflict detected")
 			}
 		}
-		assert.True(t, foundPrompt)
+		assert.True(t, foundDispatch, "expected POST /dispatch to be called")
 	})
 
 	t.Run("deploy_failed updates banner and wakes with prompt", func(t *testing.T) {
