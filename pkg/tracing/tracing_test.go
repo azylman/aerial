@@ -631,21 +631,26 @@ func TestExternalTransport(t *testing.T) {
 			if len(spans) != tc.wantSpans {
 				t.Fatalf("got %d spans, want %d", len(spans), tc.wantSpans)
 			}
-			if tc.wantSpans == 0 {
-				return
-			}
-			s := spans[0]
-			if s.SpanKind() != trace.SpanKindClient || s.Parent().SpanID().String() != parentSpanID {
-				t.Errorf("span kind %v parent %s", s.SpanKind(), s.Parent().SpanID())
-			}
-			attrs := attrMap(s.Attributes())
-			if attrs["http.response.status_code"] != tc.wantStatus || attrs["http.request.method"] != http.MethodPatch || attrs["url.full"] != srv.URL {
-				t.Errorf("attrs = %v, want status %s method PATCH url.full %s", attrs, tc.wantStatus, srv.URL)
-			}
-			if (s.Status().Code == codes.Error) != tc.wantError {
-				t.Errorf("status = %+v, want error=%v", s.Status(), tc.wantError)
+			for _, s := range spans {
+				assertPatchClientSpan(t, s, srv.URL, tc.wantStatus, tc.wantError)
 			}
 		})
+	}
+}
+
+// assertPatchClientSpan checks that s is a client span parented to
+// parentSpanID that recorded a PATCH to wantURL with the given response status.
+func assertPatchClientSpan(t *testing.T, s sdktrace.ReadOnlySpan, wantURL, wantStatus string, wantError bool) {
+	t.Helper()
+	if s.SpanKind() != trace.SpanKindClient || s.Parent().SpanID().String() != parentSpanID {
+		t.Errorf("span kind %v parent %s", s.SpanKind(), s.Parent().SpanID())
+	}
+	attrs := attrMap(s.Attributes())
+	if attrs["http.response.status_code"] != wantStatus || attrs["http.request.method"] != http.MethodPatch || attrs["url.full"] != wantURL {
+		t.Errorf("attrs = %v, want status %s method PATCH url.full %s", attrs, wantStatus, wantURL)
+	}
+	if (s.Status().Code == codes.Error) != wantError {
+		t.Errorf("status = %+v, want error=%v", s.Status(), wantError)
 	}
 }
 

@@ -212,7 +212,7 @@ linters:
           - gocyclo
           - maintidx
           - nestif
-        path: services/synapse/(main_widgets|pr_lifecycle_events)_test\.go
+        path: services/synapse/pr_lifecycle_events_test\.go
       - linters:
           - cyclop
           - funlen
@@ -232,12 +232,6 @@ linters:
           - gocyclo
           - maintidx
         path: services/vanadis/(chunks|chunks_dispatch|chunks_postgres|chunks_server|mcp|symbols)_test\.go
-      - linters:
-          - cyclop
-          - funlen
-          - gocognit
-          - gocyclo
-        path: pkg/(pubsub/pubsub|tracing/tracing)_test\.go
       - linters:
           - cyclop
           - funlen

@@ -1248,39 +1248,64 @@ func TestRouterServer_HandleInternalWidgetSync(t *testing.T) {
 	}
 }
 
-func TestProcessMergeConflict_Table(t *testing.T) {
+func TestRouterServer_ProcessMergeConflict(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
 	tests := []struct {
 		name           string
 		nilServer      bool
-		isEnqueue      bool
-		hasBus         bool
-		hasDispatcher  bool
+		args           MergeConflictArgs
 		wantDispatchID string
+	}{
+		{name: "nil server is a no-op", nilServer: true},
+		{
+			name:           "valid conflict dispatches a skip-if-active prompt",
+			args:           MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-1", PRNumber: 543, TargetID: "100000000000000001"},
+			wantDispatchID: "conflict-azylman-aerial-543-sha-conflict-1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			disp := &mockOutboundDispatcher{}
+			var srv *RouterServer
+			if !tc.nilServer {
+				srv = newTestRouter(Config{}, nil, nil, disp)
+			}
+
+			if err := srv.ProcessMergeConflict(ctx, tc.args); err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			assertConflictDispatch(t, disp, tc.wantDispatchID)
+		})
+	}
+}
+
+func TestRouterServer_EnqueueMergeConflict(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		nilServer      bool
+		hasBus         bool
 		args           MergeConflictArgs
 		wantEnqueued   int
-		wantPrompts    int
+		wantDispatchID string
 	}{
-		{name: "ProcessMergeConflict nil server", nilServer: true},
-		{name: "enqueueMergeConflict nil server", nilServer: true, isEnqueue: true},
+		{name: "nil server is a no-op", nilServer: true},
 		{
-			name: "ProcessMergeConflict valid dispatch", hasDispatcher: true,
-			wantDispatchID: "conflict-azylman-aerial-543-sha-conflict-1",
-			args:           MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-1", PRNumber: 543, TargetID: "100000000000000001"},
-			wantPrompts:    1,
-		},
-		{
-			name: "enqueueMergeConflict with bus client enqueues", isEnqueue: true, hasBus: true,
+			name:         "bus client enqueues without dispatching",
+			hasBus:       true,
 			args:         MergeConflictArgs{Repo: "aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-2", PRNumber: 544, TargetID: "100000000000000001"},
 			wantEnqueued: 1,
 		},
 		{
-			name: "enqueueMergeConflict without bus client dispatches directly", isEnqueue: true, hasDispatcher: true,
-			wantDispatchID: "conflict-azylman-aerial-545-sha-conflict-3",
+			name:           "no bus client dispatches directly",
 			args:           MergeConflictArgs{Repo: "azylman/aerial", Branch: "feat/conflict", HeadSHA: "sha-conflict-3", PRNumber: 545, TargetID: "100000000000000001"},
-			wantPrompts:    1,
+			wantDispatchID: "conflict-azylman-aerial-545-sha-conflict-3",
 		},
 	}
 
@@ -1292,40 +1317,41 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 			var srv *RouterServer
 			if !tc.nilServer {
 				srv = newTestRouter(Config{}, nil, nil, disp)
-				if tc.hasBus {
-					srv.SetEventBus(bus)
-				}
-			}
-
-			var err error
-			if tc.isEnqueue {
-				err = srv.enqueueMergeConflict(ctx, tc.args)
-			} else {
-				err = srv.ProcessMergeConflict(ctx, tc.args)
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected err: %v", err)
 			}
 			if tc.hasBus {
-				if len(bus.insertedConflictJobs) != tc.wantEnqueued {
-					t.Errorf("insertedConflictJobs = %d, want %d", len(bus.insertedConflictJobs), tc.wantEnqueued)
-				}
+				srv.SetEventBus(bus)
 			}
-			if tc.hasDispatcher {
-				calls := disp.DispatchCalls()
-				if len(calls) != tc.wantPrompts {
-					t.Errorf("DispatchCalls = %d, want %d", len(calls), tc.wantPrompts)
-				} else if len(calls) > 0 {
-					if tc.wantDispatchID != "" && calls[0].ID != tc.wantDispatchID {
-						t.Errorf("DispatchCalls[0].ID = %q, want %q", calls[0].ID, tc.wantDispatchID)
-					}
-					if !calls[0].SkipIfActive {
-						t.Errorf("DispatchCalls[0].SkipIfActive = false, want true")
-					}
-				}
+
+			if err := srv.enqueueMergeConflict(ctx, tc.args); err != nil {
+				t.Fatalf("unexpected err: %v", err)
 			}
+			if len(bus.insertedConflictJobs) != tc.wantEnqueued {
+				t.Errorf("insertedConflictJobs = %d, want %d", len(bus.insertedConflictJobs), tc.wantEnqueued)
+			}
+			assertConflictDispatch(t, disp, tc.wantDispatchID)
 		})
+	}
+}
+
+// assertConflictDispatch checks that exactly one skip-if-active conflict
+// prompt with wantID was dispatched, or none when wantID is empty.
+func assertConflictDispatch(t *testing.T, disp *mockOutboundDispatcher, wantID string) {
+	t.Helper()
+	calls := disp.DispatchCalls()
+	if wantID == "" {
+		if len(calls) != 0 {
+			t.Errorf("DispatchCalls = %d, want 0", len(calls))
+		}
+		return
+	}
+	if len(calls) != 1 {
+		t.Fatalf("DispatchCalls = %d, want 1", len(calls))
+	}
+	if calls[0].ID != wantID {
+		t.Errorf("DispatchCalls[0].ID = %q, want %q", calls[0].ID, wantID)
+	}
+	if !calls[0].SkipIfActive {
+		t.Errorf("DispatchCalls[0].SkipIfActive = false, want true")
 	}
 }
 
