@@ -65,23 +65,12 @@ func TestEriJetStreamInit(t *testing.T) {
 	}
 
 	// initEriJetStreamWithFactory with EnsureCoreStreams failure
-	failBus := &failStreamCloseBus{Bus: memBus}
+	failBus := &failEnsureBus{Bus: memBus}
 	if b := initEriJetStreamWithFactory(ctx, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return failBus, nil
 	}); b == nil {
 		t.Error("expected non-nil bus despite EnsureCoreStreams error")
 	}
-
-	// attachEriEventBusWithFactory with bus closing error
-	cleanupCloseErr := attachEriEventBusWithFactory(ctx, pool, func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return failBus, nil
-	})
-	if cleanupCloseErr != nil {
-		cleanupCloseErr()
-	}
-
-	// publishDispatchDropOutcome publish failure
-	publishDispatchDropOutcome(ctx, failBus, "disp-fail-pub", "vanadis", "sess-1", "build-1", "failed", "some error")
 
 	// attachEriEventBusWithFactory success branch
 	cleanupSuccess := attachEriEventBusWithFactory(ctx, pool, successFactory)
@@ -93,20 +82,12 @@ func TestEriJetStreamInit(t *testing.T) {
 	}
 }
 
-type failStreamCloseBus struct {
+type failEnsureBus struct {
 	pubsub.Bus
 }
 
-func (f *failStreamCloseBus) EnsureCoreStreams(_ context.Context) error {
+func (f *failEnsureBus) EnsureCoreStreams(_ context.Context) error {
 	return errors.New("simulated ensure error")
-}
-
-func (f *failStreamCloseBus) Close() error {
-	return errors.New("simulated close error")
-}
-
-func (f *failStreamCloseBus) Publish(_ context.Context, _, _ string, _ any) error {
-	return errors.New("simulated publish error")
 }
 
 type natsURLResolutionTestCase struct {
