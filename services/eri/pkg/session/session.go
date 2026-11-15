@@ -638,6 +638,7 @@ func extractClaudeErrorFromLine(line string, cutoff time.Time) (errMsg string, b
 		Error     json.RawMessage `json:"error"`
 		Message   struct {
 			Role    string          `json:"role"`
+			Model   string          `json:"model"`
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
@@ -649,8 +650,14 @@ func extractClaudeErrorFromLine(line string, cutoff time.Time) (errMsg string, b
 	}
 
 	// 1. Error field at top level
-	if errMsg := extractClaudeTopLevelError(entry.Error); errMsg != "" {
-		return errMsg, false
+	if topErr := extractClaudeTopLevelError(entry.Error); topErr != "" {
+		text := strings.TrimSpace(extractAssistantText(entry.Message.Content))
+		if entry.Message.Model == ClaudeSyntheticModel && text != "" {
+			return fmt.Sprintf("claude synthetic reply (error=%s): %s", topErr, text), false
+		} else if text != "" && !strings.Contains(text, topErr) {
+			return fmt.Sprintf("%s: %s", topErr, text), false
+		}
+		return topErr, false
 	}
 
 	// 2. Type == "error"
@@ -865,8 +872,9 @@ func extractAssistantText(raw json.RawMessage) string {
 const ClaudeSyntheticModel = "<synthetic>"
 
 type claudeAssistantPayload struct {
-	Type      string `json:"type"`
-	Timestamp string `json:"timestamp"`
+	Type      string          `json:"type"`
+	Timestamp string          `json:"timestamp"`
+	Error     json.RawMessage `json:"error"`
 	Message   struct {
 		Role    string          `json:"role"`
 		Model   string          `json:"model"`
@@ -890,7 +898,13 @@ func scanClaudeLinesForResponse(ctx context.Context, lines []string, since time.
 		if isStepBefore(payload.Timestamp, since) {
 			return ""
 		}
-		if payload.Type != "assistant" || payload.Message.Model == ClaudeSyntheticModel {
+		if payload.Type != "assistant" {
+			continue
+		}
+		if payload.Message.Model == ClaudeSyntheticModel {
+			if extractClaudeTopLevelError(payload.Error) != "" {
+				return ""
+			}
 			continue
 		}
 		text := extractAssistantText(payload.Message.Content)
