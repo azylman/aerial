@@ -96,14 +96,14 @@ func TestNewServer_NilHandlerPanics(t *testing.T) {
 
 func TestNewServer_BrainURLDispatcherConstruction(t *testing.T) {
 	db := setupTestDB(t)
-	sWithURL := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:", BrainURL: "http://eri:8080"}, db))
+	sWithURL := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:", EriURL: "http://eri:8080"}, db))
 	if sWithURL.dispatcher == nil {
-		t.Error("expected non-nil dispatcher when BrainURL is configured")
+		t.Error("expected non-nil dispatcher when EriURL is configured")
 	}
 
-	sWithoutURL := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:", BrainURL: ""}, db))
+	sWithoutURL := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:", EriURL: ""}, db))
 	if sWithoutURL.dispatcher != nil {
-		t.Error("expected nil dispatcher when BrainURL is empty")
+		t.Error("expected nil dispatcher when EriURL is empty")
 	}
 }
 
@@ -1197,119 +1197,6 @@ func TestHandleScheduleRuns_Table(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runHandleScheduleRunsCase(t, tc)
-		})
-	}
-}
-
-func TestHandleScheduleOneShot_Table(t *testing.T) {
-	server, ts := setupTestServer(t)
-	defer ts.Close()
-
-	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
-	if err != nil {
-		t.Fatalf("OpenDB failed: %v", err)
-	}
-	_ = closedDB.Close()
-	serverClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
-
-	tests := []struct {
-		name       string
-		method     string
-		body       string
-		useServer  *Server
-		wantStatus int
-		wantID     string
-	}{
-		{
-			name:       "valid with custom id",
-			method:     http.MethodPost,
-			body:       fmt.Sprintf(`{"id":"os-custom-1","thread_id":"123","prompt":"test prompt","run_at":%q,"effort":"high"}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
-			useServer:  server,
-			wantStatus: http.StatusOK,
-			wantID:     "os-custom-1",
-		},
-		{
-			name:       "valid with auto-generated id",
-			method:     http.MethodPost,
-			body:       fmt.Sprintf(`{"thread_id":"123","prompt":"test prompt","run_at":%q}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
-			useServer:  server,
-			wantStatus: http.StatusOK,
-			wantID:     "",
-		},
-		{
-			name:       "missing thread_id",
-			method:     http.MethodPost,
-			body:       fmt.Sprintf(`{"prompt":"test prompt","run_at":%q}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
-			useServer:  server,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "missing prompt",
-			method:     http.MethodPost,
-			body:       fmt.Sprintf(`{"thread_id":"123","run_at":%q}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
-			useServer:  server,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "zero run_at",
-			method:     http.MethodPost,
-			body:       `{"thread_id":"123","prompt":"test prompt"}`,
-			useServer:  server,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "malformed json body",
-			method:     http.MethodPost,
-			body:       `{not valid json`,
-			useServer:  server,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "method not allowed get",
-			method:     http.MethodGet,
-			body:       "",
-			useServer:  server,
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:       "closed database error",
-			method:     http.MethodPost,
-			body:       fmt.Sprintf(`{"thread_id":"123","prompt":"test prompt","run_at":%q}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
-			useServer:  serverClosed,
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "nil server db error",
-			method:     http.MethodPost,
-			body:       fmt.Sprintf(`{"thread_id":"123","prompt":"test prompt","run_at":%q}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
-			useServer:  &Server{},
-			wantStatus: http.StatusInternalServerError,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(tc.method, "/schedules/oneshot", strings.NewReader(tc.body))
-			tc.useServer.handleScheduleOneShot(rec, req)
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("%s got status %d, want %d, body: %s", tc.name, rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantStatus == http.StatusOK {
-				var resp map[string]string
-				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-					t.Fatalf("failed to decode response: %v", err)
-				}
-				if resp["status"] != "ok" {
-					t.Errorf("expected status 'ok', got %q", resp["status"])
-				}
-				if tc.wantID != "" && resp["id"] != tc.wantID {
-					t.Errorf("expected id %q, got %q", tc.wantID, resp["id"])
-				}
-				if resp["id"] == "" {
-					t.Errorf("expected non-empty id")
-				}
-			}
 		})
 	}
 }

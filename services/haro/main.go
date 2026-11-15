@@ -106,9 +106,9 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	if port == "" {
 		return fmt.Errorf("app: port cannot be empty")
 	}
-	brainURL := strings.TrimSpace(cfg.BrainURL)
-	if brainURL == "" {
-		return fmt.Errorf("app: brain URL cannot be empty")
+	eriURL := strings.TrimSpace(cfg.EriURL)
+	if eriURL == "" {
+		return fmt.Errorf("app: eri URL cannot be empty")
 	}
 
 	database, err := openDBFn(cfg)
@@ -120,7 +120,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	// Invariant: ticker goroutine must be bound to a child context and strictly
 	// awaited on all exit paths before closing the database to prevent goroutine leaks
 	// and use-after-close on database shutdown.
-	dispatcher := NewHTTPPromptDispatcher(cfg.BrainURL)
+	dispatcher := NewHTTPPromptDispatcher(cfg.EriURL)
 	tickerCtx, tickerCancel := context.WithCancel(ctx)
 	var tickerWg sync.WaitGroup
 	tickerWg.Go(func() {

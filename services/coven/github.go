@@ -12,7 +12,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 var validSkillRelPathRegex = regexp.MustCompile(`^custom-skills/(common|discord)/[a-z0-9-]+/SKILL\.md$`)
@@ -29,28 +32,47 @@ type FrictionAlertNotifier interface {
 
 // GitHubSkillPublisherConfig configures GitHubSkillPublisher.
 type GitHubSkillPublisherConfig struct {
-	Token              string
-	Owner              string
-	Repo               string
-	BrainURL           string
-	BrainPRRegisterURL string
-	SystemChannelID    string
-	BaseURL            string
-	HTTPClient         *http.Client
-	Now                func() time.Time
+	Token           string
+	Owner           string
+	Repo            string
+	PRRegisterURL   string
+	SystemChannelID string
+	BaseURL         string
+	HTTPClient      *http.Client
+	Now             func() time.Time
+	Bus             pubsub.Bus
 }
 
 // GitHubSkillPublisher publishes procedural skill changes directly via GitHub HTTP API without git subprocesses.
 type GitHubSkillPublisher struct {
-	token              string
-	owner              string
-	repo               string
-	brainURL           string
-	brainPRRegisterURL string
-	systemChannelID    string
-	baseURL            string
-	httpClient         *http.Client
-	now                func() time.Time
+	token           string
+	owner           string
+	repo            string
+	prRegisterURL   string
+	systemChannelID string
+	baseURL         string
+	httpClient      *http.Client
+	now             func() time.Time
+	busMu           sync.RWMutex
+	bus             pubsub.Bus
+}
+
+// SetEventBus updates the pubsub bus used for notifications.
+func (p *GitHubSkillPublisher) SetEventBus(bus pubsub.Bus) {
+	if p != nil {
+		p.busMu.Lock()
+		p.bus = bus
+		p.busMu.Unlock()
+	}
+}
+
+func (p *GitHubSkillPublisher) getBus() pubsub.Bus {
+	if p == nil {
+		return nil
+	}
+	p.busMu.RLock()
+	defer p.busMu.RUnlock()
+	return p.bus
 }
 
 // NewGitHubSkillPublisher initializes a GitHubSkillPublisher instance.
@@ -75,18 +97,17 @@ func NewGitHubSkillPublisher(cfg GitHubSkillPublisherConfig) *GitHubSkillPublish
 	if repo == "" {
 		repo = DefaultConfigRepoName
 	}
-	brainURL := strings.TrimRight(strings.TrimSpace(cfg.BrainURL), "/")
-	brainPRRegisterURL := strings.TrimSpace(cfg.BrainPRRegisterURL)
+	prRegisterURL := strings.TrimSpace(cfg.PRRegisterURL)
 	return &GitHubSkillPublisher{
-		token:              strings.TrimSpace(cfg.Token),
-		owner:              owner,
-		repo:               repo,
-		brainURL:           brainURL,
-		brainPRRegisterURL: brainPRRegisterURL,
-		systemChannelID:    strings.TrimSpace(cfg.SystemChannelID),
-		baseURL:            baseURL,
-		httpClient:         httpClient,
-		now:                now,
+		token:           strings.TrimSpace(cfg.Token),
+		owner:           owner,
+		repo:            repo,
+		prRegisterURL:   prRegisterURL,
+		systemChannelID: strings.TrimSpace(cfg.SystemChannelID),
+		baseURL:         baseURL,
+		httpClient:      httpClient,
+		now:             now,
+		bus:             cfg.Bus,
 	}
 }
 
@@ -398,7 +419,7 @@ func (p *GitHubSkillPublisher) finalizePublishedSkillPR(ctx context.Context, prN
 			log.Printf("[coven-github] warning enabling auto-merge for PR #%d: %v", prNumber, err)
 		}
 	}
-	if p.systemChannelID != "" && p.brainPRRegisterURL != "" {
+	if p.systemChannelID != "" && p.prRegisterURL != "" {
 		if err := p.registerPRWithBrain(ctx, prNumber, branchName, commitSHA, prTitle); err != nil {
 			log.Printf("[coven-github] warning registering PR #%d in brain: %v", prNumber, err)
 		}
@@ -447,7 +468,7 @@ func (p *GitHubSkillPublisher) registerPRWithBrain(ctx context.Context, prNum in
 		return fmt.Errorf("failed to marshal registration payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.brainPRRegisterURL, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.prRegisterURL, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("failed to create registration request: %w", err)
 	}
@@ -471,31 +492,21 @@ func (p *GitHubSkillPublisher) registerPRWithBrain(ctx context.Context, prNum in
 	return nil
 }
 
-// NotifyShortFriction posts a recurring short-friction alert to the configured Discord system channel via Brain's /discord/message endpoint.
+// NotifyShortFriction posts a recurring short-friction alert to the configured Discord system channel via JetStream.
 func (p *GitHubSkillPublisher) NotifyShortFriction(ctx context.Context, content string) error {
 	if p.systemChannelID == "" || strings.TrimSpace(content) == "" {
 		return nil
 	}
-	brainURL := strings.TrimRight(strings.TrimSpace(p.brainURL), "/")
-	if brainURL == "" {
-		return errors.New("brain URL is not configured")
+	bus := p.getBus()
+	if bus == nil {
+		return errors.New("event bus is not configured")
 	}
-	msgURL := brainURL + "/discord/message"
-	body := fmt.Sprintf(`{"channel_id":%q,"content":%q}`, p.systemChannelID, content)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, msgURL, strings.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("failed to create friction alert request: %w", err)
+	msgID := fmt.Sprintf("coven:friction:%s:%d", p.systemChannelID, p.now().UnixNano())
+	payload := pubsub.EriDiscordMessageJobArgs{
+		ChannelID: p.systemChannelID,
+		Content:   content,
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("friction alert request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("friction alert returned status %d", resp.StatusCode)
-	}
-	return nil
+	return bus.Publish(ctx, pubsub.SubjectEriDiscordMessageJob, msgID, payload)
 }
 
 func formatShortFrictionAlert(batch SkillConsolidationBatch) string {

@@ -421,14 +421,6 @@ type ScheduleRunsResponse struct {
 	Runs   []ScheduleRunJSON `json:"runs"`
 }
 
-type CreateOneShotRequest struct {
-	ID       string    `json:"id"`
-	ThreadID string    `json:"thread_id"`
-	Prompt   string    `json:"prompt"`
-	RunAt    time.Time `json:"run_at"`
-	Effort   string    `json:"effort,omitempty"`
-}
-
 func buildRecurringScheduleWithDesc(id, targetID, titlePrefix, cronExpr, prompt, timezone, effort string, nextRunAt, createdAt time.Time, enabled bool) CronScheduleWithDesc {
 	return CronScheduleWithDesc{
 		ID:              id,

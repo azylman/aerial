@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	_ "modernc.org/sqlite"
 )
 
@@ -674,17 +675,22 @@ func runPublishSkillChangesCase(ctx context.Context, t *testing.T, tc publishSki
 	server := newMockGitHubServer(t, cfg)
 	defer server.Close()
 
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	_ = pubsub.EnsureCoreStreams(ctx, memBus)
+	bus := &mockFrictionBus{Bus: memBus, calls: &discordMsgCalls, failPublish: tc.serverCfg.failBrainReg}
+
 	fixedTime := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 	publisher := NewGitHubSkillPublisher(GitHubSkillPublisherConfig{
-		Token:              tc.token,
-		Owner:              "azylman",
-		Repo:               tc.repo,
-		BrainURL:           server.URL,
-		BrainPRRegisterURL: server.URL + "/internal/pr/register",
-		SystemChannelID:    tc.channelID,
-		BaseURL:            server.URL,
-		HTTPClient:         server.Client(),
-		Now:                func() time.Time { return fixedTime },
+		Token:           tc.token,
+		Owner:           "azylman",
+		Repo:            tc.repo,
+		PRRegisterURL:   server.URL + "/internal/pr/register",
+		SystemChannelID: tc.channelID,
+		BaseURL:         server.URL,
+		HTTPClient:      server.Client(),
+		Now:             func() time.Time { return fixedTime },
+		Bus:             bus,
 	})
 
 	prNum, err := publisher.PublishSkillChanges(ctx, tc.changes)
@@ -715,60 +721,114 @@ func TestGitHubSkillPublisher_PublishSkillChanges(t *testing.T) {
 	}
 }
 
+type mockFrictionBus struct {
+	pubsub.Bus
+
+	calls       *int
+	failPublish bool
+}
+
+func (m *mockFrictionBus) Publish(ctx context.Context, subject, msgID string, payload any) error {
+	if m.calls != nil {
+		*m.calls++
+	}
+	if m.failPublish {
+		return errors.New("simulated publish error")
+	}
+	return m.Bus.Publish(ctx, subject, msgID, payload)
+}
+
+type notifyShortFrictionCase struct {
+	name        string
+	channelID   string
+	content     string
+	bus         pubsub.Bus
+	wantErr     bool
+	errSubstr   string
+	wantSubject string
+}
+
+func runNotifyShortFrictionCase(ctx context.Context, t *testing.T, fixedTime time.Time, done <-chan struct{}, publishedSubject *string, publishedArgs *pubsub.EriDiscordMessageJobArgs, tc notifyShortFrictionCase) {
+	t.Helper()
+	p := &GitHubSkillPublisher{
+		systemChannelID: tc.channelID,
+		now:             func() time.Time { return fixedTime },
+	}
+	p.SetEventBus(tc.bus)
+
+	err := p.NotifyShortFriction(ctx, tc.content)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("NotifyShortFriction() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErr && tc.errSubstr != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
+			t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
+		}
+	}
+	if !tc.wantErr && tc.wantSubject != "" {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for pubsub message delivery")
+		}
+		if *publishedSubject != tc.wantSubject {
+			t.Errorf("subject = %q, want %q", *publishedSubject, tc.wantSubject)
+		}
+		if publishedArgs.ChannelID != tc.channelID || publishedArgs.Content != tc.content {
+			t.Errorf("publishedArgs = %+v, want channel=%q, content=%q", publishedArgs, tc.channelID, tc.content)
+		}
+	}
+}
+
 func TestGitHubSkillPublisher_NotifyShortFriction(t *testing.T) {
 	ctx := context.Background()
 
-	tests := []struct {
-		name       string
-		channelID  string
-		content    string
-		brainURL   string
-		respStatus int
-		clientErr  bool
-		wantErr    bool
-		errSubstr  string
-	}{
-		{name: "EmptyChannelIDNoop", channelID: "", content: "alert", wantErr: false},
-		{name: "EmptyContentNoop", channelID: "ch-1", content: "   ", wantErr: false},
-		{name: "UnconfiguredBrainURLFails", channelID: "ch-1", content: "alert", brainURL: "   ", wantErr: true, errSubstr: "brain URL is not configured"},
-		{name: "Success200", channelID: "ch-1", content: "alert", respStatus: http.StatusOK, wantErr: false},
-		{name: "ServerError500", channelID: "ch-1", content: "alert", respStatus: http.StatusInternalServerError, wantErr: true},
-		{name: "ClientError", channelID: "ch-1", content: "alert", clientErr: true, wantErr: true},
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
+		t.Fatalf("EnsureCoreStreams: %v", err)
+	}
+
+	errBus := &mockFrictionBus{Bus: memBus, failPublish: true}
+
+	done := make(chan struct{}, 1)
+	var publishedArgs pubsub.EriDiscordMessageJobArgs
+	var publishedSubject string
+	_, err := memBus.Subscribe(ctx, pubsub.SubjectEriDiscordMessageJob, "test-sub", func(_ context.Context, msg pubsub.Message) error {
+		publishedSubject = msg.Subject()
+		_ = json.Unmarshal(msg.Data(), &publishedArgs)
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	fixedTime := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+
+	tests := []notifyShortFrictionCase{
+		{name: "EmptyChannelIDNoop", channelID: "", content: "alert", bus: memBus, wantErr: false},
+		{name: "EmptyContentNoop", channelID: "ch-1", content: "   ", bus: memBus, wantErr: false},
+		{name: "NilBusFails", channelID: "ch-1", content: "alert", bus: nil, wantErr: true, errSubstr: "event bus is not configured"},
+		{name: "BusError", channelID: "ch-1", content: "alert", bus: errBus, wantErr: true, errSubstr: "simulated publish error"},
+		{name: "SuccessPublish", channelID: "1562837549255495693", content: "friction occurred", bus: memBus, wantErr: false, wantSubject: pubsub.SubjectEriDiscordMessageJob},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if tc.respStatus != 0 {
-					w.WriteHeader(tc.respStatus)
-				}
-			}))
-			defer server.Close()
-
-			targetURL := server.URL
-			if tc.brainURL != "" {
-				targetURL = tc.brainURL
-			} else if tc.clientErr {
-				targetURL = "http://127.0.0.1:0/bad"
-			}
-
-			p := &GitHubSkillPublisher{
-				systemChannelID: tc.channelID,
-				brainURL:        targetURL,
-				httpClient:      server.Client(),
-			}
-
-			err := p.NotifyShortFriction(ctx, tc.content)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("NotifyShortFriction() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr && tc.errSubstr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
-					t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
-				}
-			}
+			runNotifyShortFrictionCase(ctx, t, fixedTime, done, &publishedSubject, &publishedArgs, tc)
 		})
 	}
+
+	// Verify getBus on nil publisher
+	var nilPub *GitHubSkillPublisher
+	if nilPub.getBus() != nil {
+		t.Errorf("expected nil bus from nil publisher")
+	}
+	nilPub.SetEventBus(memBus) // should not panic
 }
 
 type mockSkillPublisher struct {

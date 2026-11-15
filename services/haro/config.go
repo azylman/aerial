@@ -35,17 +35,6 @@ type Config struct {
 	DatabaseURL       string
 	Timezone          string   `yaml:"timezone"`
 	Port              string   `yaml:"port"`
-	BrainURL          string   `yaml:"brain_url"`
-	EriURL            string   `yaml:"eri_url"`
-	VanadisURL        string   `yaml:"vanadis_url"`
-	NATSURL           string   `yaml:"nats_url"`
-	ExtraEventSources []string `yaml:"extra_event_sources"`
-}
-
-// SchedulerYAMLConfig defines the declarative file schema for /config/config.yaml.
-type SchedulerYAMLConfig struct {
-	Port              string   `yaml:"port"`
-	Timezone          string   `yaml:"timezone"`
 	EriURL            string   `yaml:"eri_url"`
 	VanadisURL        string   `yaml:"vanadis_url"`
 	NATSURL           string   `yaml:"nats_url"`
@@ -69,7 +58,14 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
 	}
 
-	var ycfg SchedulerYAMLConfig
+	var ycfg struct {
+		Port              string   `yaml:"port"`
+		Timezone          string   `yaml:"timezone"`
+		EriURL            string   `yaml:"eri_url"`
+		VanadisURL        string   `yaml:"vanadis_url"`
+		NATSURL           string   `yaml:"nats_url"`
+		ExtraEventSources []string `yaml:"extra_event_sources"`
+	}
 	if err := yaml.Unmarshal(data, &ycfg); err != nil {
 		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
 	}
@@ -135,7 +131,6 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		DatabaseURL:       cleanDB,
 		Timezone:          tz,
 		Port:              port,
-		BrainURL:          eriURL,
 		EriURL:            eriURL,
 		VanadisURL:        vanadisURL,
 		NATSURL:           natsURL,

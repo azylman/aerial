@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -370,108 +371,103 @@ func TestHTTPPromptDispatcher(t *testing.T) {
 	}
 }
 
+type mockErrBus struct {
+	pubsub.Bus
+}
+
+func (m *mockErrBus) Publish(ctx context.Context, subject, msgID string, data any) error {
+	return errors.New("simulated bus error")
+}
+
 type dispatchTestCase struct {
 	name            string
-	serverStatus    int
-	serverResponse  string
-	req             DispatchRequest
-	closeServer     bool
 	nilDispatcher   bool
+	withBus         bool
+	errBus          bool
+	req             DispatchRequest
 	wantErr         bool
 	wantErrContains string
-	wantDispatchID  string
+	wantStatus      string
 }
 
 func runDispatchCase(t *testing.T, tc dispatchTestCase) {
 	t.Helper()
-	disp, server, ctx := setupMockDispatcherServer(t, "/dispatch", tc.serverStatus, tc.serverResponse, tc.closeServer, tc.nilDispatcher, tc.name)
-	defer server.Close()
-
-	if resp, err := disp.Dispatch(ctx, tc.req); (err != nil) != tc.wantErr {
-		t.Fatalf("Dispatch() err = %v, wantErr = %v", err, tc.wantErr)
-	} else if tc.wantErr && tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
-		t.Fatalf("Dispatch() err = %v, want error containing %q", err, tc.wantErrContains)
-	} else if !tc.wantErr && resp.DispatchID != tc.wantDispatchID {
-		t.Errorf("resp.DispatchID = %q, want %q", resp.DispatchID, tc.wantDispatchID)
+	var disp *HTTPPromptDispatcher
+	if !tc.nilDispatcher {
+		disp = NewHTTPPromptDispatcher("http://eri:8080")
+		if tc.withBus {
+			memBus := pubsub.NewMemoryBus()
+			defer memBus.Close()
+			_ = pubsub.EnsureCoreStreams(context.Background(), memBus)
+			disp.SetEventBus(memBus)
+		} else if tc.errBus {
+			disp.SetEventBus(&mockErrBus{})
+		}
+	}
+	ctx := context.Background()
+	resp, err := disp.Dispatch(ctx, tc.req)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatal("Dispatch() expected error, got nil")
+		}
+		if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
+			t.Fatalf("Dispatch() err = %v, want error containing %q", err, tc.wantErrContains)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("Dispatch() unexpected error: %v", err)
+	}
+	if resp.Status != tc.wantStatus {
+		t.Errorf("resp.Status = %q, want %q", resp.Status, tc.wantStatus)
+	}
+	if resp.DispatchID == "" {
+		t.Error("expected non-empty DispatchID")
 	}
 }
 
 func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 	tests := []dispatchTestCase{
 		{
-			name:           "success accepted 202",
-			serverStatus:   http.StatusAccepted,
-			serverResponse: `{"status":"accepted","dispatch_id":"disp-1","message_id":"disp-1"}`,
-			req: DispatchRequest{
-				Source:       "heartbeat",
-				SessionID:    "heartbeat-hb-1",
-				TargetID:     "123456789",
-				Prompt:       "echo test",
-				Effort:       "low",
-				SkipIfActive: true,
-			},
-			wantDispatchID: "disp-1",
-		},
-		{
-			name:           "server returns error json 400",
-			serverStatus:   http.StatusBadRequest,
-			serverResponse: `{"error":"prompt cannot be empty"}`,
-			req: DispatchRequest{
-				Source: "heartbeat",
-			},
-			wantErr: true,
-		},
-		{
-			name:           "server returns non-json error 500",
-			serverStatus:   http.StatusInternalServerError,
-			serverResponse: `Internal Server Error`,
-			req: DispatchRequest{
-				Source: "heartbeat",
-				Prompt: "fail",
-			},
-			wantErr: true,
-		},
-		{
-			name:           "server returns invalid json on 200",
-			serverStatus:   http.StatusOK,
-			serverResponse: `not valid json`,
-			req: DispatchRequest{
-				Source: "heartbeat",
-				Prompt: "test invalid json",
-			},
-			wantErr: true,
-		},
-		{
-			name:        "closed server network error",
-			closeServer: true,
-			req: DispatchRequest{
-				Source: "heartbeat",
-				Prompt: "test closed",
-			},
-			wantErr: true,
-		},
-		{
-			name:          "nil dispatcher returns error",
-			nilDispatcher: true,
-			req:           DispatchRequest{Source: "heartbeat", Prompt: "test"},
-			wantErr:       true,
-		},
-		{
-			name:           "default http client used when httpClient is nil",
-			serverStatus:   http.StatusAccepted,
-			serverResponse: `{"status":"accepted","dispatch_id":"disp-nc","message_id":"disp-nc"}`,
-			req: DispatchRequest{
-				Source:    "heartbeat",
-				SessionID: "heartbeat-hb-nc",
-				Prompt:    "nil client test",
-			},
-			wantDispatchID: "disp-nc",
-		},
-		{
-			name:            "empty brain url fails fast",
-			req:             DispatchRequest{Source: "heartbeat", Prompt: "test default url"},
+			name:            "nil dispatcher returns error",
+			nilDispatcher:   true,
+			req:             DispatchRequest{Source: "heartbeat", Prompt: "test"},
 			wantErr:         true,
-			wantErrContains: "brain URL is not configured",
+			wantErrContains: "dispatcher is nil",
+		},
+		{
+			name:            "empty source returns error",
+			withBus:         true,
+			req:             DispatchRequest{Source: "  ", Prompt: "test"},
+			wantErr:         true,
+			wantErrContains: "source cannot be empty",
+		},
+		{
+			name:            "empty prompt returns error",
+			withBus:         true,
+			req:             DispatchRequest{Source: "heartbeat", Prompt: "  "},
+			wantErr:         true,
+			wantErrContains: "prompt cannot be empty",
+		},
+		{
+			name:            "bus not configured returns error",
+			withBus:         false,
+			req:             DispatchRequest{Source: "heartbeat", Prompt: "test"},
+			wantErr:         true,
+			wantErrContains: "event bus is not configured",
+		},
+		{
+			name:            "bus publish error returns error",
+			errBus:          true,
+			req:             DispatchRequest{Source: "heartbeat", Prompt: "test"},
+			wantErr:         true,
+			wantErrContains: "simulated bus error",
+		},
+		{
+			name:       "success accepted with bus",
+			withBus:    true,
+			req:        DispatchRequest{Source: "heartbeat", SessionID: "hb-1", TargetID: "123456789", Prompt: "echo test", Effort: "low", SkipIfActive: true},
+			wantStatus: "accepted",
 		},
 	}
 
@@ -480,6 +476,14 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			runDispatchCase(t, tc)
 		})
 	}
+}
+
+func TestHTTPPromptDispatcher_NilGuards(t *testing.T) {
+	var nilDisp *HTTPPromptDispatcher
+	if nilDisp.EventBus() != nil {
+		t.Error("expected nil bus")
+	}
+	nilDisp.SetEventBus(nil)
 }
 
 func TestHTTPPromptDispatcher_Dispatch_EventBus(t *testing.T) {

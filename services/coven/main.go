@@ -205,15 +205,14 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	defer httpkit.CloseWarn(database, "database on shutdown")
 
 	store := NewSQLStore(database)
-	store.SetBrainURL(cfg.BrainURL)
+	store.SetBrainURL(cfg.EriURL)
 	ollama := NewOllamaClient(&cfg.Ollama)
 	publisher := NewGitHubSkillPublisher(GitHubSkillPublisherConfig{
-		Token:              cfg.GitHubPAT,
-		Owner:              cfg.ConfigRepoOwner,
-		Repo:               cfg.ConfigRepoName,
-		BrainURL:           cfg.BrainURL,
-		BrainPRRegisterURL: cfg.BrainPRRegisterURL,
-		SystemChannelID:    cfg.SystemChannelID,
+		Token:           cfg.GitHubPAT,
+		Owner:           cfg.ConfigRepoOwner,
+		Repo:            cfg.ConfigRepoName,
+		PRRegisterURL:   cfg.PRRegisterURL,
+		SystemChannelID: cfg.SystemChannelID,
 	})
 	toolHandler := NewToolHandler(cfg, store, ollama, publisher)
 	server := NewServer(toolHandler)
@@ -221,7 +220,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	worker := NewWorker(WorkerConfig{
 		Store:           store,
 		Ollama:          ollama,
-		LLMClient:       HTTPBrainLLMClient(cfg.BrainLLMURL, nil),
+		LLMClient:       HTTPBrainLLMClient(cfg.EriLLMURL, nil),
 		Publisher:       publisher,
 		CustomSkillsDir: cfg.CustomSkillsDir,
 		InitialDelay:    DefaultWorkerInitialDelay,
@@ -231,6 +230,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	defer workerCancel()
 
 	bus := initCovenJetStream(ctx, worker, cfg.NATSURL)
+	publisher.SetEventBus(bus)
 	defer func() {
 		if bus != nil {
 			if closeErr := bus.Close(); closeErr != nil {

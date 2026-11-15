@@ -67,7 +67,6 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		errCh <- RunApp(ctx, &Config{
 			Port:        "59483",
 			DatabaseURL: tempDB,
-			BrainURL:    "http://127.0.0.1:59484",
 			EriURL:      "http://127.0.0.1:59484",
 			VanadisURL:  "http://127.0.0.1:59485",
 		})
@@ -104,11 +103,11 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	defer func() { postgresMaxAttempts, postgresRetryBase = origMax, origBase }()
 
 	for _, cfg := range []*Config{
-		{Port: "9999", DatabaseURL: "postgres://invalid:pass@127.0.0.1:59996/db?sslmode=disable", BrainURL: "http://127.0.0.1:59484"},
+		{Port: "9999", DatabaseURL: "postgres://invalid:pass@127.0.0.1:59996/db?sslmode=disable", EriURL: "http://127.0.0.1:59484"},
 		nil,
-		{Port: "", DatabaseURL: ":memory:", BrainURL: "http://127.0.0.1:59484"},
-		{Port: "-1", DatabaseURL: ":memory:", BrainURL: "http://127.0.0.1:59484"},
-		{Port: "8080", DatabaseURL: ":memory:", BrainURL: ""},
+		{Port: "", DatabaseURL: ":memory:", EriURL: "http://127.0.0.1:59484"},
+		{Port: "-1", DatabaseURL: ":memory:", EriURL: "http://127.0.0.1:59484"},
+		{Port: "8080", DatabaseURL: ":memory:", EriURL: ""},
 	} {
 		if err := RunApp(context.Background(), cfg); err == nil {
 			t.Errorf("expected error running app with %v", cfg)

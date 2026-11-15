@@ -57,40 +57,19 @@ type OllamaConfig struct {
 
 // Config represents runtime configuration for the memory MCP server.
 type Config struct {
-	Port               string       `yaml:"port"`
-	DatabaseURL        string       `yaml:"database_url"`
-	BrainURL           string       `yaml:"brain_url"`
-	EriURL             string       `yaml:"eri_url"`
-	BrainLLMURL        string       `yaml:"brain_llm_url"`
-	EriLLMURL          string       `yaml:"eri_llm_url"`
-	Ollama             OllamaConfig `yaml:"ollama"`
-	CustomSkillsDir    string       `yaml:"custom_skills_dir"`
-	RulesDir           string       `yaml:"rules_dir"`
-	GitHubPAT          string       `yaml:"github_pat"`
-	ConfigRepoOwner    string       `yaml:"config_repo_owner"`
-	ConfigRepoName     string       `yaml:"config_repo_name"`
-	BrainPRRegisterURL string       `yaml:"brain_pr_register_url"`
-	PRRegisterURL      string       `yaml:"pr_register_url"`
-	SystemChannelID    string       `yaml:"system_channel_id"`
-	NATSURL            string       `yaml:"nats_url"`
-}
-
-// MemoryYAMLConfig defines the declarative file schema for /config/config.yaml.
-type MemoryYAMLConfig struct {
-	Port             string       `yaml:"port"`
-	DatabaseURL      string       `yaml:"database_url"`
-	EriURL           string       `yaml:"eri_url"`
-	EriLLMURL        string       `yaml:"eri_llm_url"`
-	Ollama           OllamaConfig `yaml:"ollama"`
-	CustomSkillsDir  string       `yaml:"custom_skills_dir"`
-	RulesDir         string       `yaml:"rules_dir"`
-	GitHubPAT        string       `yaml:"github_pat"`
-	ConfigRepoOwner  string       `yaml:"config_repo_owner"`
-	ConfigRepoName   string       `yaml:"config_repo_name"`
-	PRRegisterURL    string       `yaml:"pr_register_url"`
-	EriPRRegisterURL string       `yaml:"eri_pr_register_url"`
-	SystemChannelID  string       `yaml:"system_channel_id"`
-	NATSURL          string       `yaml:"nats_url"`
+	Port            string       `yaml:"port"`
+	DatabaseURL     string       `yaml:"database_url"`
+	EriURL          string       `yaml:"eri_url"`
+	EriLLMURL       string       `yaml:"eri_llm_url"`
+	Ollama          OllamaConfig `yaml:"ollama"`
+	CustomSkillsDir string       `yaml:"custom_skills_dir"`
+	RulesDir        string       `yaml:"rules_dir"`
+	GitHubPAT       string       `yaml:"github_pat"`
+	ConfigRepoOwner string       `yaml:"config_repo_owner"`
+	ConfigRepoName  string       `yaml:"config_repo_name"`
+	PRRegisterURL   string       `yaml:"pr_register_url"`
+	SystemChannelID string       `yaml:"system_channel_id"`
+	NATSURL         string       `yaml:"nats_url"`
 }
 
 func resolveFirstNonEmpty(values ...string) string {
@@ -120,7 +99,22 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
 	}
 
-	var ycfg MemoryYAMLConfig
+	var ycfg struct {
+		Port             string       `yaml:"port"`
+		DatabaseURL      string       `yaml:"database_url"`
+		EriURL           string       `yaml:"eri_url"`
+		EriLLMURL        string       `yaml:"eri_llm_url"`
+		Ollama           OllamaConfig `yaml:"ollama"`
+		CustomSkillsDir  string       `yaml:"custom_skills_dir"`
+		RulesDir         string       `yaml:"rules_dir"`
+		GitHubPAT        string       `yaml:"github_pat"`
+		ConfigRepoOwner  string       `yaml:"config_repo_owner"`
+		ConfigRepoName   string       `yaml:"config_repo_name"`
+		PRRegisterURL    string       `yaml:"pr_register_url"`
+		EriPRRegisterURL string       `yaml:"eri_pr_register_url"`
+		SystemChannelID  string       `yaml:"system_channel_id"`
+		NATSURL          string       `yaml:"nats_url"`
+	}
 	if err := yaml.Unmarshal(data, &ycfg); err != nil {
 		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
 	}
@@ -137,7 +131,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	if eriLLMURL == "" {
 		return nil, fmt.Errorf("config: eri_llm_url is required in %s", cleanPath)
 	}
-	prRegisterURL := resolveFirstNonEmpty(os.Getenv("PR_REGISTER_URL"), ycfg.PRRegisterURL, ycfg.EriPRRegisterURL)
+	prRegisterURL := resolveFirstNonEmpty(os.Getenv("PR_REGISTER_URL"), os.Getenv("SYNAPSE_PR_REGISTER_URL"), ycfg.PRRegisterURL, ycfg.EriPRRegisterURL)
 	if prRegisterURL == "" {
 		return nil, fmt.Errorf("config: pr_register_url is required in %s", cleanPath)
 	}
@@ -182,21 +176,18 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	natsURL := resolveFirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL)
 
 	return &Config{
-		Port:               port,
-		DatabaseURL:        databaseURL,
-		BrainURL:           eriURL,
-		EriURL:             eriURL,
-		BrainLLMURL:        eriLLMURL,
-		EriLLMURL:          eriLLMURL,
-		CustomSkillsDir:    customSkillsDir,
-		RulesDir:           rulesDir,
-		GitHubPAT:          gitHubPAT,
-		ConfigRepoOwner:    configRepoOwner,
-		ConfigRepoName:     configRepoName,
-		BrainPRRegisterURL: prRegisterURL,
-		PRRegisterURL:      prRegisterURL,
-		SystemChannelID:    systemChannelID,
-		NATSURL:            natsURL,
+		Port:            port,
+		DatabaseURL:     databaseURL,
+		EriURL:          eriURL,
+		EriLLMURL:       eriLLMURL,
+		CustomSkillsDir: customSkillsDir,
+		RulesDir:        rulesDir,
+		GitHubPAT:       gitHubPAT,
+		ConfigRepoOwner: configRepoOwner,
+		ConfigRepoName:  configRepoName,
+		PRRegisterURL:   prRegisterURL,
+		SystemChannelID: systemChannelID,
+		NATSURL:         natsURL,
 		Ollama: OllamaConfig{
 			BaseURL:     ollamaBaseURL,
 			Model:       ollamaModel,

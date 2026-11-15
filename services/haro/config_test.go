@@ -167,9 +167,6 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if !tc.wantErr {
-				if cfg.BrainURL != tc.wantBrainURL {
-					t.Errorf("cfg.BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
-				}
 				if cfg.EriURL != tc.wantBrainURL {
 					t.Errorf("cfg.EriURL = %q, want %q", cfg.EriURL, tc.wantBrainURL)
 				}

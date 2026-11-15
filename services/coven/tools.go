@@ -65,9 +65,9 @@ type ToolHandler struct {
 
 // NewToolHandler creates a new ToolHandler instance.
 func NewToolHandler(cfg *Config, store Store, ollama OllamaClient, publisher ...SkillPublisher) *ToolHandler {
-	var brainURL string
+	var eriLLMURL string
 	if cfg != nil {
-		brainURL = cfg.BrainLLMURL
+		eriLLMURL = cfg.EriLLMURL
 	}
 	var pub SkillPublisher
 	if len(publisher) > 0 {
@@ -77,7 +77,7 @@ func NewToolHandler(cfg *Config, store Store, ollama OllamaClient, publisher ...
 		cfg:       cfg,
 		store:     store,
 		ollama:    ollama,
-		llmClient: HTTPBrainLLMClient(brainURL, nil),
+		llmClient: HTTPBrainLLMClient(eriLLMURL, nil),
 		publisher: pub,
 	}
 }
