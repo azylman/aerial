@@ -214,14 +214,6 @@ linters:
           - nestif
         path: services/synapse/pr_lifecycle_events_test\.go
       - linters:
-          - cyclop
-          - dupl
-          - funlen
-          - gocognit
-          - gocyclo
-          - maintidx
-        path: services/vanadis/(chunks_dispatch|chunks_server|mcp|symbols)_test\.go
-      - linters:
           - containedctx
         path: services/eri/pkg/(queue/(pool|worker)|runner/(interchangeable_pool|streaming_daemon|unified_pool))\.go
       - linters:

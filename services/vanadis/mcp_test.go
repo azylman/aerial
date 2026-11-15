@@ -128,7 +128,21 @@ func TestVanadisMCP_HTTPTransport(t *testing.T) {
 	}
 }
 
-func TestVanadisMCP_Tools(t *testing.T) {
+// vanadisMCPToolCase is one tools/call invocation against the seeded MCP fixture store.
+type vanadisMCPToolCase struct {
+	name        string
+	nilStore    bool
+	listErr     error
+	getErr      error
+	args        string
+	wantToolErr bool
+	wantSubstr  string
+}
+
+// newMCPToolsStore seeds two builds on thread 1234567890 (one running with a
+// running and a pending chunk, one completed) and one completed build on thread
+// 9876543210, then applies the injected list/get store errors.
+func newMCPToolsStore(listErr, getErr error) *memoryVanadisStore {
 	now := time.Now().UTC()
 	b1 := mkBuild("build-mcp-1", "1234567890", "Build 1 Title", "Objective 1", "running")
 	b1.SharedContext = "Context 1"
@@ -147,64 +161,67 @@ func TestVanadisMCP_Tools(t *testing.T) {
 	c1_1 := mkChunk("chunk-2", "build-mcp-1", 1, "Chunk 2", "Inst 2", "high", "pending")
 	c1_1.Repo = normalizeRepo("aerial")
 
-	setupStore := func() *memoryVanadisStore {
-		store := newMemoryVanadisStore()
-		_ = store.CreateBuild(context.Background(), b1, []VanadisChunk{c1_0, c1_1})
-		_ = store.CreateBuild(context.Background(), b2, []VanadisChunk{mkChunk("chunk-2-0", "build-mcp-2", 0, "C2", "I2", "low", "completed")})
-		_ = store.CreateBuild(context.Background(), b3, []VanadisChunk{mkChunk("chunk-3-0", "build-mcp-3", 0, "C3", "I3", "low", "completed")})
-		return store
-	}
+	store := newMemoryVanadisStore()
+	_ = store.CreateBuild(context.Background(), b1, []VanadisChunk{c1_0, c1_1})
+	_ = store.CreateBuild(context.Background(), b2, []VanadisChunk{mkChunk("chunk-2-0", "build-mcp-2", 0, "C2", "I2", "low", "completed")})
+	_ = store.CreateBuild(context.Background(), b3, []VanadisChunk{mkChunk("chunk-3-0", "build-mcp-3", 0, "C3", "I3", "low", "completed")})
+	store.listErr = listErr
+	store.getErr = getErr
+	return store
+}
 
-	tests := []struct {
-		name        string
-		nilStore    bool
-		listErr     error
-		getErr      error
-		toolName    string
-		args        string
-		wantToolErr bool
-		wantSubstr  string
-	}{
-		// get_build
+// callVanadisMCPTool sends one JSON-RPC tools/call request for toolName to a
+// fresh MCP handler backed by the seeded fixture store (or no store) and
+// returns the raw response body.
+func callVanadisMCPTool(t *testing.T, tc vanadisMCPToolCase, toolName string) []byte {
+	t.Helper()
+	var store VanadisStore = newMCPToolsStore(tc.listErr, tc.getErr)
+	if tc.nilStore {
+		store = nil
+	}
+	handler := NewVanadisServer(Config{Port: "0"}, store, nil).newMCPHandler()
+
+	reqBody := `{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"` + toolName + `","arguments":` + tc.args + `}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	return rec.Body.Bytes()
+}
+
+func TestVanadisMCP_GetBuild(t *testing.T) {
+	t.Parallel()
+	tests := []vanadisMCPToolCase{
 		{
 			name:        "get_build nil store",
 			nilStore:    true,
-			toolName:    "get_build",
 			args:        `{"build_id":"build-mcp-1"}`,
 			wantToolErr: true,
 			wantSubstr:  "vanadis store not configured",
 		},
 		{
 			name:        "get_build missing both ids",
-			toolName:    "get_build",
 			args:        `{}`,
 			wantToolErr: true,
 			wantSubstr:  "build_id or thread_id is required",
 		},
 		{
-			name:        "get_build by build_id success",
-			toolName:    "get_build",
-			args:        `{"build_id":"build-mcp-1"}`,
-			wantToolErr: false,
-			wantSubstr:  `"title":"Build 1 Title"`,
+			name:       "get_build by build_id success",
+			args:       `{"build_id":"build-mcp-1"}`,
+			wantSubstr: `"title":"Build 1 Title"`,
 		},
 		{
-			name:        "get_build by thread_id picks running",
-			toolName:    "get_build",
-			args:        `{"thread_id":"stateful_medium:discord-1234567890"}`,
-			wantToolErr: false,
-			wantSubstr:  `"id":"build-mcp-1"`,
+			name:       "get_build by thread_id picks running",
+			args:       `{"thread_id":"stateful_medium:discord-1234567890"}`,
+			wantSubstr: `"id":"build-mcp-1"`,
 		},
 		{
-			name:        "get_build by thread_id fallback to completed if no running",
-			toolName:    "get_build",
-			args:        `{"thread_id":"9876543210"}`,
-			wantToolErr: false,
-			wantSubstr:  `"id":"build-mcp-3"`,
+			name:       "get_build by thread_id fallback to completed if no running",
+			args:       `{"thread_id":"9876543210"}`,
+			wantSubstr: `"id":"build-mcp-3"`,
 		},
 		{
 			name:        "get_build by thread_id not found",
-			toolName:    "get_build",
 			args:        `{"thread_id":"5555555555"}`,
 			wantToolErr: true,
 			wantSubstr:  "no build found for thread",
@@ -212,7 +229,6 @@ func TestVanadisMCP_Tools(t *testing.T) {
 		{
 			name:        "get_build list builds store error",
 			listErr:     errors.New("simulated list failure"),
-			toolName:    "get_build",
 			args:        `{"thread_id":"1234567890"}`,
 			wantToolErr: true,
 			wantSubstr:  "simulated list failure",
@@ -220,31 +236,37 @@ func TestVanadisMCP_Tools(t *testing.T) {
 		{
 			name:        "get_build get store error",
 			getErr:      errors.New("simulated get failure"),
-			toolName:    "get_build",
 			args:        `{"build_id":"build-mcp-1"}`,
 			wantToolErr: true,
 			wantSubstr:  "simulated get failure",
 		},
+	}
 
-		// get_chunk
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertVanadisMCPToolResult(t, callVanadisMCPTool(t, tc, "get_build"), tc.wantToolErr, tc.wantSubstr)
+		})
+	}
+}
+
+func TestVanadisMCP_GetChunk(t *testing.T) {
+	t.Parallel()
+	tests := []vanadisMCPToolCase{
 		{
 			name:        "get_chunk nil store",
 			nilStore:    true,
-			toolName:    "get_chunk",
 			args:        `{"chunk_id":"chunk-1"}`,
 			wantToolErr: true,
 			wantSubstr:  "vanadis store not configured",
 		},
 		{
-			name:        "get_chunk by chunk_id success",
-			toolName:    "get_chunk",
-			args:        `{"chunk_id":"chunk-1"}`,
-			wantToolErr: false,
-			wantSubstr:  `"chunk":{"acceptance_criteria":[]`,
+			name:       "get_chunk by chunk_id success",
+			args:       `{"chunk_id":"chunk-1"}`,
+			wantSubstr: `"chunk":{"acceptance_criteria":[]`,
 		},
 		{
 			name:        "get_chunk by chunk_id not found",
-			toolName:    "get_chunk",
 			args:        `{"chunk_id":"nonexistent"}`,
 			wantToolErr: true,
 			wantSubstr:  "chunk not found",
@@ -252,42 +274,34 @@ func TestVanadisMCP_Tools(t *testing.T) {
 		{
 			name:        "get_chunk by chunk_id store error",
 			getErr:      errors.New("simulated get chunk failure"),
-			toolName:    "get_chunk",
 			args:        `{"chunk_id":"chunk-1"}`,
 			wantToolErr: true,
 			wantSubstr:  "simulated get chunk failure",
 		},
 		{
 			name:        "get_chunk missing args",
-			toolName:    "get_chunk",
 			args:        `{}`,
 			wantToolErr: true,
 			wantSubstr:  "chunk_id or both build_id and chunk_ref are required",
 		},
 		{
 			name:        "get_chunk missing chunk_ref when build_id provided",
-			toolName:    "get_chunk",
 			args:        `{"build_id":"build-mcp-1"}`,
 			wantToolErr: true,
 			wantSubstr:  "chunk_id or both build_id and chunk_ref are required",
 		},
 		{
-			name:        "get_chunk by build_id and chunk_ref string match success",
-			toolName:    "get_chunk",
-			args:        `{"build_id":"build-mcp-1","chunk_ref":"chunk-2"}`,
-			wantToolErr: false,
-			wantSubstr:  `"title":"Chunk 2"`,
+			name:       "get_chunk by build_id and chunk_ref string match success",
+			args:       `{"build_id":"build-mcp-1","chunk_ref":"chunk-2"}`,
+			wantSubstr: `"title":"Chunk 2"`,
 		},
 		{
-			name:        "get_chunk by build_id and chunk_ref index match success",
-			toolName:    "get_chunk",
-			args:        `{"build_id":"build-mcp-1","chunk_ref":"0"}`,
-			wantToolErr: false,
-			wantSubstr:  `"title":"Chunk 1"`,
+			name:       "get_chunk by build_id and chunk_ref index match success",
+			args:       `{"build_id":"build-mcp-1","chunk_ref":"0"}`,
+			wantSubstr: `"title":"Chunk 1"`,
 		},
 		{
 			name:        "get_chunk by build_id and chunk_ref not found",
-			toolName:    "get_chunk",
 			args:        `{"build_id":"build-mcp-1","chunk_ref":"99"}`,
 			wantToolErr: true,
 			wantSubstr:  "chunk ref 99 not found",
@@ -295,220 +309,222 @@ func TestVanadisMCP_Tools(t *testing.T) {
 		{
 			name:        "get_chunk by build_id get build error",
 			getErr:      errors.New("simulated get build failure"),
-			toolName:    "get_chunk",
 			args:        `{"build_id":"build-mcp-1","chunk_ref":"0"}`,
 			wantToolErr: true,
 			wantSubstr:  "simulated get build failure",
 		},
+	}
 
-		// update_build
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertVanadisMCPToolResult(t, callVanadisMCPTool(t, tc, "get_chunk"), tc.wantToolErr, tc.wantSubstr)
+		})
+	}
+}
+
+func TestVanadisMCP_UpdateBuild(t *testing.T) {
+	t.Parallel()
+	tests := []vanadisMCPToolCase{
 		{
 			name:        "update_build nil store",
 			nilStore:    true,
-			toolName:    "update_build",
 			args:        `{"build_id":"build-mcp-1","title":"New Title"}`,
 			wantToolErr: true,
 			wantSubstr:  "vanadis store not configured",
 		},
 		{
 			name:        "update_build missing build_id",
-			toolName:    "update_build",
 			args:        `{"build_id":"   ","title":"New Title"}`,
 			wantToolErr: true,
 			wantSubstr:  "build_id is required",
 		},
 		{
-			name:        "update_build success with title and widget sync",
-			toolName:    "update_build",
-			args:        `{"build_id":"build-mcp-1","title":"Updated MCP Title"}`,
-			wantToolErr: false,
-			wantSubstr:  `"status":"updated"`,
+			name:       "update_build success with title and widget sync",
+			args:       `{"build_id":"build-mcp-1","title":"Updated MCP Title"}`,
+			wantSubstr: `"status":"updated"`,
 		},
 		{
 			name:        "update_build conflict status",
-			toolName:    "update_build",
 			args:        `{"build_id":"build-mcp-2","title":"Conflict Title"}`,
 			wantToolErr: true,
 			wantSubstr:  "vanadis build state conflict",
 		},
+	}
 
-		// update_chunk
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertVanadisMCPToolResult(t, callVanadisMCPTool(t, tc, "update_build"), tc.wantToolErr, tc.wantSubstr)
+		})
+	}
+}
+
+func TestVanadisMCP_UpdateChunk(t *testing.T) {
+	t.Parallel()
+	tests := []vanadisMCPToolCase{
 		{
 			name:        "update_chunk nil store",
 			nilStore:    true,
-			toolName:    "update_chunk",
 			args:        `{"build_id":"build-mcp-1","chunk_ref":"1","title":"New Chunk Title"}`,
 			wantToolErr: true,
 			wantSubstr:  "vanadis store not configured",
 		},
 		{
 			name:        "update_chunk missing build_id or chunk_ref",
-			toolName:    "update_chunk",
 			args:        `{"build_id":"build-mcp-1","chunk_ref":""}`,
 			wantToolErr: true,
 			wantSubstr:  "build_id and chunk_ref are required",
 		},
 		{
 			name:        "update_chunk running chunk conflict",
-			toolName:    "update_chunk",
 			args:        `{"build_id":"build-mcp-1","chunk_ref":"0","title":"New Chunk Title"}`,
 			wantToolErr: true,
 			wantSubstr:  "vanadis build state conflict",
 		},
 		{
-			name:        "update_chunk pending chunk success",
-			toolName:    "update_chunk",
-			args:        `{"build_id":"build-mcp-1","chunk_ref":"1","title":"Updated Chunk 2 Title","effort":"high"}`,
-			wantToolErr: false,
-			wantSubstr:  `"status":"updated"`,
+			name:       "update_chunk pending chunk success",
+			args:       `{"build_id":"build-mcp-1","chunk_ref":"1","title":"Updated Chunk 2 Title","effort":"high"}`,
+			wantSubstr: `"status":"updated"`,
 		},
 		{
-			name:        "update_chunk mode update success",
-			toolName:    "update_chunk",
-			args:        `{"build_id":"build-mcp-1","chunk_ref":"1","mode":"action","title":"Switched to Action","instructions":"Run action"}`,
-			wantToolErr: false,
-			wantSubstr:  `"status":"updated"`,
+			name:       "update_chunk mode update success",
+			args:       `{"build_id":"build-mcp-1","chunk_ref":"1","mode":"action","title":"Switched to Action","instructions":"Run action"}`,
+			wantSubstr: `"status":"updated"`,
 		},
 		{
-			name:        "update_chunk empty mode treated as unset",
-			toolName:    "update_chunk",
-			args:        `{"build_id":"build-mcp-1","chunk_ref":"1","mode":"","title":"Updated Chunk 2 Title Again"}`,
-			wantToolErr: false,
-			wantSubstr:  `"status":"updated"`,
+			name:       "update_chunk empty mode treated as unset",
+			args:       `{"build_id":"build-mcp-1","chunk_ref":"1","mode":"","title":"Updated Chunk 2 Title Again"}`,
+			wantSubstr: `"status":"updated"`,
 		},
+	}
 
-		// append_chunk
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertVanadisMCPToolResult(t, callVanadisMCPTool(t, tc, "update_chunk"), tc.wantToolErr, tc.wantSubstr)
+		})
+	}
+}
+
+func TestVanadisMCP_AppendChunk(t *testing.T) {
+	t.Parallel()
+	tests := []vanadisMCPToolCase{
 		{
 			name:        "append_chunk nil store",
 			nilStore:    true,
-			toolName:    "append_chunk",
 			args:        `{"build_id":"build-mcp-1","chunks":[{"title":"C3","instructions":"I3"}]}`,
 			wantToolErr: true,
 			wantSubstr:  "vanadis store not configured",
 		},
 		{
 			name:        "append_chunk missing build_id",
-			toolName:    "append_chunk",
 			args:        `{"build_id":"","chunks":[{"title":"C3","instructions":"I3"}]}`,
 			wantToolErr: true,
 			wantSubstr:  "build_id is required",
 		},
 		{
 			name:        "append_chunk validation failure",
-			toolName:    "append_chunk",
 			args:        `{"build_id":"build-mcp-1","chunks":[]}`,
 			wantToolErr: true,
 			wantSubstr:  "invalid vanadis build input",
 		},
 		{
-			name:        "append_chunk success",
-			toolName:    "append_chunk",
-			args:        `{"build_id":"build-mcp-1","chunks":[{"repo":"aerial","title":"Part 3","instructions":"Do part 3","effort":"medium"}]}`,
-			wantToolErr: false,
-			wantSubstr:  `"status":"appended"`,
+			name:       "append_chunk success",
+			args:       `{"build_id":"build-mcp-1","chunks":[{"repo":"aerial","title":"Part 3","instructions":"Do part 3","effort":"medium"}]}`,
+			wantSubstr: `"status":"appended"`,
 		},
 		{
-			name:        "append_chunk action mode success",
-			toolName:    "append_chunk",
-			args:        `{"build_id":"build-mcp-1","chunks":[{"mode":"action","title":"Action Step","instructions":"Run migration","effort":"low"}]}`,
-			wantToolErr: false,
-			wantSubstr:  `"status":"appended"`,
+			name:       "append_chunk action mode success",
+			args:       `{"build_id":"build-mcp-1","chunks":[{"mode":"action","title":"Action Step","instructions":"Run migration","effort":"low"}]}`,
+			wantSubstr: `"status":"appended"`,
 		},
+	}
 
-		// remove_chunk
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertVanadisMCPToolResult(t, callVanadisMCPTool(t, tc, "append_chunk"), tc.wantToolErr, tc.wantSubstr)
+		})
+	}
+}
+
+func TestVanadisMCP_RemoveChunk(t *testing.T) {
+	t.Parallel()
+	tests := []vanadisMCPToolCase{
 		{
 			name:        "remove_chunk nil store",
 			nilStore:    true,
-			toolName:    "remove_chunk",
 			args:        `{"build_id":"build-mcp-1","chunk_ref":"1"}`,
 			wantToolErr: true,
 			wantSubstr:  "vanadis store not configured",
 		},
 		{
 			name:        "remove_chunk missing args",
-			toolName:    "remove_chunk",
 			args:        `{"build_id":"build-mcp-1","chunk_ref":""}`,
 			wantToolErr: true,
 			wantSubstr:  "build_id and chunk_ref are required",
 		},
 		{
 			name:        "remove_chunk running chunk conflict",
-			toolName:    "remove_chunk",
 			args:        `{"build_id":"build-mcp-1","chunk_ref":"0"}`,
 			wantToolErr: true,
 			wantSubstr:  "vanadis build state conflict",
 		},
 		{
-			name:        "remove_chunk pending chunk success",
-			toolName:    "remove_chunk",
-			args:        `{"build_id":"build-mcp-1","chunk_ref":"1"}`,
-			wantToolErr: false,
-			wantSubstr:  `"status":"removed"`,
+			name:       "remove_chunk pending chunk success",
+			args:       `{"build_id":"build-mcp-1","chunk_ref":"1"}`,
+			wantSubstr: `"status":"removed"`,
 		},
+	}
 
-		// fail_chunk
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertVanadisMCPToolResult(t, callVanadisMCPTool(t, tc, "remove_chunk"), tc.wantToolErr, tc.wantSubstr)
+		})
+	}
+}
+
+func TestVanadisMCP_FailChunk(t *testing.T) {
+	t.Parallel()
+	tests := []vanadisMCPToolCase{
 		{
 			name:        "fail_chunk nil store",
 			nilStore:    true,
-			toolName:    "fail_chunk",
 			args:        `{"chunk_id":"chunk-1","reason":"unrecoverable failure"}`,
 			wantToolErr: true,
 			wantSubstr:  "vanadis store not configured",
 		},
 		{
 			name:        "fail_chunk missing chunk_id",
-			toolName:    "fail_chunk",
 			args:        `{"chunk_id":"","reason":"unrecoverable failure"}`,
 			wantToolErr: true,
 			wantSubstr:  "chunk_id and reason are required",
 		},
 		{
 			name:        "fail_chunk missing reason",
-			toolName:    "fail_chunk",
 			args:        `{"chunk_id":"chunk-1","reason":""}`,
 			wantToolErr: true,
 			wantSubstr:  "chunk_id and reason are required",
 		},
 		{
 			name:        "fail_chunk chunk not found",
-			toolName:    "fail_chunk",
 			args:        `{"chunk_id":"nonexistent-chunk","reason":"unrecoverable failure"}`,
 			wantToolErr: true,
 			wantSubstr:  "chunk not found",
 		},
 		{
-			name:        "fail_chunk success",
-			toolName:    "fail_chunk",
-			args:        `{"chunk_id":"chunk-1","reason":"unrecoverable action error"}`,
-			wantToolErr: false,
-			wantSubstr:  `"status":"failed"`,
+			name:       "fail_chunk success",
+			args:       `{"chunk_id":"chunk-1","reason":"unrecoverable action error"}`,
+			wantSubstr: `"status":"failed"`,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := setupStore()
-			if tc.listErr != nil {
-				store.listErr = tc.listErr
-			}
-			if tc.getErr != nil {
-				store.getErr = tc.getErr
-			}
-			var srvStore VanadisStore = store
-			if tc.nilStore {
-				srvStore = nil
-			}
-
-			srv := NewVanadisServer(Config{Port: "0"}, srvStore, nil)
-			handler := srv.newMCPHandler()
-
-			reqBody := `{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"` + tc.toolName + `","arguments":` + tc.args + `}}`
-			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(reqBody))
-			req.Header.Set("Content-Type", "application/json")
-			rec := httptest.NewRecorder()
-
-			handler(rec, req)
-			assertVanadisMCPToolResult(t, rec.Body.Bytes(), tc.wantToolErr, tc.wantSubstr)
+			t.Parallel()
+			assertVanadisMCPToolResult(t, callVanadisMCPTool(t, tc, "fail_chunk"), tc.wantToolErr, tc.wantSubstr)
 		})
 	}
 }
