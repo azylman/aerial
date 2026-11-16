@@ -1058,6 +1058,15 @@ func TestPRRolloutStatus(t *testing.T) {
 			commitSHA: rolloutSHA,
 			wantDone:  true,
 		},
+		{
+			name: "cluster-scoped restatecluster links managed statefulset in cluster-named namespace",
+			workloads: []workloadRollout{
+				withChange(workloadRollout{Kind: "RestateCluster", Name: "restate-marida", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, Replicas: 1, ReadyConditionTrue: true}, rolloutClock(10, 1, 0), nil),
+				{Kind: "StatefulSet", Namespace: "restate-marida", Name: "restate", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, ObservedGeneration: 2, Replicas: 1, AvailableReplicas: 1, UpdateRevision: "restate-2", CurrentRevision: "restate-2"},
+			},
+			commitSHA: rolloutSHA,
+			wantDone:  true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
