@@ -2,17 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"reflect"
 	"slices"
-	"strings"
-	"sync"
 	"testing"
 	"time"
-
-	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 func TestNormalizeWidgetStatus(t *testing.T) {
@@ -279,135 +271,5 @@ func TestResolveChunkRef(t *testing.T) {
 				t.Errorf("resolveChunkRef() = %d, want %d", got, tc.wantIdx)
 			}
 		})
-	}
-}
-
-const wantStallNotice = "[VANADIS CHUNK STALLED]\nYour previous turn for chunk c-stall ended without a successful `aerial-pr.sh submit` and without calling the vanadis MCP tool fail_chunk, so no PR was linked. This is the single stall retry: reuse the existing scratch workspace from your prior attempt if it still exists instead of re-initializing, finish the remaining implementation and verification in the foreground, then submit with `--vanadis-chunk c-stall` or call fail_chunk with the blocker. If this turn also ends without either, the chunk and build will be failed.\n\n"
-
-// stallDispatch is the observable shape of one /dispatch request made by a stall re-dispatch.
-type stallDispatch struct {
-	ID, SessionID, TargetID, ChunkID, Notice string
-	SkipIfActive                             bool
-}
-
-// stallBrain records /dispatch and /prompt traffic from ProcessStalledChunkCheck.
-type stallBrain struct {
-	mu           sync.Mutex
-	dispatchCode int
-	dispatches   []stallDispatch
-	wakeTails    []string
-}
-
-func (b *stallBrain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	switch r.URL.Path {
-	case "/dispatch":
-		var req BrainDispatchRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		notice, _, _ := strings.Cut(req.Prompt, "[VANADIS BUILD CHUNK EXECUTION]")
-		b.dispatches = append(b.dispatches, stallDispatch{ID: req.ID, SessionID: req.SessionID, TargetID: req.TargetID, ChunkID: req.VanadisChunkID, Notice: notice, SkipIfActive: req.SkipIfActive})
-		w.WriteHeader(b.dispatchCode)
-	case "/prompt":
-		var p map[string]string
-		_ = json.NewDecoder(r.Body).Decode(&p)
-		b.wakeTails = append(b.wakeTails, p["prompt"][strings.LastIndex(p["prompt"], "\n")+1:])
-		w.WriteHeader(http.StatusAccepted)
-	default:
-		w.WriteHeader(http.StatusOK)
-	}
-}
-
-func TestProcessStalledChunkCheck(t *testing.T) {
-	t.Parallel()
-	if NewVanadisServer(Config{}, nil, nil).ProcessStalledChunkCheck(context.Background(), "c-stall") == nil {
-		t.Fatal("expected error when store is nil")
-	}
-	redispatch := []stallDispatch{{ID: "vanadis-c-stall-turn-1", SessionID: "vanadis-c-stall", TargetID: "123456789012345678", ChunkID: "c-stall", Notice: wantStallNotice, SkipIfActive: true}}
-	tests := []struct {
-		name                         string
-		claimID, status, buildStatus string
-		prNumber, priorNudges        int
-		dispatchID                   string
-		dispatchCode                 int
-		wantDispatches               []stallDispatch
-		wantChunkStatus              string
-		wantBuildStatus              string
-		wantWakeTails                []string
-	}{
-		{name: "first stall re-dispatches with notice", claimID: "c-stall", status: "running", buildStatus: "running", dispatchCode: http.StatusAccepted, wantDispatches: redispatch, wantChunkStatus: "running", wantBuildStatus: "running"},
-		{name: "second stall fails chunk and wakes thread", claimID: "c-stall", status: "running", buildStatus: "running", priorNudges: 1, dispatchCode: http.StatusAccepted, wantChunkStatus: "failed", wantBuildStatus: "failed", wantWakeTails: []string{"Chunk 1/1 (Stalled Chunk) failed: chunk stalled twice: its turn ended without submitting a PR or calling fail_chunk, both on the original dispatch and on the stall re-dispatch"}},
-		{name: "re-dispatch failure fails chunk", claimID: "c-stall", status: "running", buildStatus: "running", dispatchCode: http.StatusInternalServerError, wantDispatches: redispatch, wantChunkStatus: "failed", wantBuildStatus: "failed", wantWakeTails: []string{"Chunk 1/1 (Stalled Chunk) failed: chunk stalled (turn ended without submitting a PR or calling fail_chunk) and the stall re-dispatch failed: /dispatch returned status 500:"}},
-		{name: "linked pr is left alone", claimID: "c-stall", status: "pr_opened", buildStatus: "running", prNumber: 9, dispatchCode: http.StatusAccepted, wantChunkStatus: "pr_opened", wantBuildStatus: "running"},
-		{name: "missing chunk is skipped", claimID: "c-gone", status: "running", buildStatus: "running", dispatchCode: http.StatusAccepted, wantChunkStatus: "running", wantBuildStatus: "running"},
-		{name: "duplicate delivery with mismatched dispatch id is noop", claimID: "c-stall", status: "running", buildStatus: "running", priorNudges: 1, dispatchID: "vanadis-c-stall-turn-0", dispatchCode: http.StatusAccepted, wantChunkStatus: "running", wantBuildStatus: "running"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			recorder := &stallBrain{dispatchCode: tc.dispatchCode}
-			brain := httptest.NewServer(recorder)
-			defer brain.Close()
-			store := newMemoryVanadisStore()
-			c := mkChunk("c-stall", "b-stall", 0, "Stalled Chunk", "do it", "low", tc.status)
-			c.PRNumber = tc.prNumber
-			_ = store.CreateBuild(context.Background(), mkBuild("b-stall", "123456789012345678", "T", "O", tc.buildStatus), []VanadisChunk{c})
-			store.stallNudges = map[string]int{"c-stall": tc.priorNudges}
-			srv := NewVanadisServer(Config{BrainURL: brain.URL}, store, brain.Client())
-			if err := srv.ProcessStalledChunkCheck(context.Background(), tc.claimID, tc.dispatchID); err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			b, chunks, _ := store.GetBuild(context.Background(), "b-stall")
-			recorder.mu.Lock()
-			defer recorder.mu.Unlock()
-			if !reflect.DeepEqual(recorder.dispatches, tc.wantDispatches) {
-				t.Fatalf("dispatches = %+v, want %+v", recorder.dispatches, tc.wantDispatches)
-			}
-			if !reflect.DeepEqual(recorder.wakeTails, tc.wantWakeTails) {
-				t.Fatalf("wake tails = %q, want %q", recorder.wakeTails, tc.wantWakeTails)
-			}
-			if chunks[0].Status != tc.wantChunkStatus || b.Status != tc.wantBuildStatus {
-				t.Fatalf("chunk=%q build=%q, want chunk=%q build=%q", chunks[0].Status, b.Status, tc.wantChunkStatus, tc.wantBuildStatus)
-			}
-		})
-	}
-}
-
-func TestServer_CompleteChunkRunsStallCheck(t *testing.T) {
-	t.Parallel()
-	var mu sync.Mutex
-	var dispatches, targetIDs, chunkIDs []string
-	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/dispatch" {
-			var req BrainDispatchRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
-			mu.Lock()
-			dispatches = append(dispatches, req.SessionID)
-			targetIDs = append(targetIDs, req.TargetID)
-			chunkIDs = append(chunkIDs, req.VanadisChunkID)
-			mu.Unlock()
-		}
-		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer brain.Close()
-	store := newMemoryVanadisStore()
-	_ = store.CreateBuild(context.Background(), mkBuild("b-done", "123456789012345678", "T", "O", "running"), []VanadisChunk{mkChunk("c-done", "b-done", 0, "Done", "do it", "", "running")})
-	server := NewVanadisServer(Config{BrainURL: brain.URL}, store, brain.Client())
-	ev := pubsub.DispatchOutcomeEvent{
-		DispatchID:     "vanadis-c-done-turn-0",
-		VanadisChunkID: "c-done",
-		Status:         "completed",
-	}
-	evData, _ := json.Marshal(ev)
-	if err := server.HandleDispatchOutcomeEvent(context.Background(), &memoryMsg{data: evData, subject: "aerial.dispatch.completed"}); err != nil {
-		t.Fatalf("HandleDispatchOutcomeEvent failed: %v", err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if !reflect.DeepEqual(dispatches, []string{"vanadis-c-done"}) {
-		t.Fatalf("dispatches = %v, want [vanadis-c-done]", dispatches)
-	}
-	if !reflect.DeepEqual(targetIDs, []string{"123456789012345678"}) || !reflect.DeepEqual(chunkIDs, []string{"c-done"}) {
-		t.Fatalf("targetIDs = %v chunkIDs = %v, want [123456789012345678], [c-done]", targetIDs, chunkIDs)
 	}
 }

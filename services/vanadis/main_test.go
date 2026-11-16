@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azylman/aerial/pkg/httpkit"
@@ -162,63 +161,6 @@ func TestVanadisConsumerStatsQuerier(t *testing.T) {
 	}
 }
 
-func testPostgresVanadisStoreCreateValidation(ctx context.Context, t *testing.T, store *PostgresVanadisStore, validBuild VanadisBuild) {
-	t.Helper()
-	cases := []struct {
-		name   string
-		build  VanadisBuild
-		chunks []VanadisChunk
-	}{
-		{"empty build id", mkBuild("", "1", "", "o", ""), nil},
-		{"empty thread", mkBuild("b", "", "", "o", ""), nil},
-		{"empty objective", mkBuild("b", "1", "", "", ""), nil},
-		{"empty chunk id", validBuild, []VanadisChunk{mkChunk("", "", 0, "t", "i", "", "")}},
-		{"mismatched chunk build_id", validBuild, []VanadisChunk{mkChunk("c", "other", 0, "t", "i", "", "")}},
-		{"empty chunk title", validBuild, []VanadisChunk{mkChunk("c", "", 0, "", "i", "", "")}},
-		{"empty chunk instructions", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "", "", "")}},
-		{"invalid chunk effort", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "i", "ultra", "")}},
-		{"invalid chunk mode", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "bad-mode", Repo: "aerial", Title: "t", Instructions: "i", DependsOn: []string{}}}},
-		{"pr mode empty repo", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "pr", Repo: "", Title: "t", Instructions: "i", DependsOn: []string{}}}},
-		{"action mode with repo", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "aerial", Title: "t", Instructions: "i", DependsOn: []string{}}}},
-		{"action mode with files", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "", Title: "t", Instructions: "i", TargetFiles: []string{"f.go"}, DependsOn: []string{}}}},
-		{"action mode with symbols", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "", Title: "t", Instructions: "i", TargetSymbols: []string{"s"}, DependsOn: []string{}}}},
-	}
-	for _, tc := range cases {
-		if err := store.CreateBuild(ctx, tc.build, tc.chunks); err == nil {
-			t.Fatalf("expected error for case %s", tc.name)
-		}
-	}
-}
-
-func testPostgresVanadisStoreCreateErrors(ctx context.Context, t *testing.T, validBuild VanadisBuild, validChunks []VanadisChunk) {
-	t.Helper()
-	callCount := 0
-	errExecTx := &mockTx{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-		return pgconn.CommandTag{}, errors.New("err")
-	}}
-	begins := []func(context.Context) (pgx.Tx, error){
-		func(context.Context) (pgx.Tx, error) { return nil, errors.New("err") },
-		func(context.Context) (pgx.Tx, error) { return errExecTx, nil },
-		func(context.Context) (pgx.Tx, error) {
-			return &mockTx{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-				callCount++
-				if callCount == 2 {
-					return pgconn.CommandTag{}, errors.New("err")
-				}
-				return pgconn.NewCommandTag("INSERT 0 1"), nil
-			}}, nil
-		},
-		func(context.Context) (pgx.Tx, error) {
-			return &mockTx{commitErr: errors.New("err"), rollbackErr: errors.New("rb")}, nil
-		},
-	}
-	for _, begin := range begins {
-		if err := newMockStore(mockDB{beginFn: begin}).CreateBuild(ctx, validBuild, validChunks); err == nil {
-			t.Fatal("expected CreateBuild error")
-		}
-	}
-}
-
 func testPostgresVanadisStoreGetBuild(ctx context.Context, t *testing.T, store *PostgresVanadisStore, validChunks []VanadisChunk, explicitStart, explicitComplete time.Time) {
 	t.Helper()
 	if _, _, err := store.GetBuild(ctx, "   "); err == nil {
@@ -256,32 +198,6 @@ func testPostgresVanadisStoreGetBuild(ctx context.Context, t *testing.T, store *
 	gotB, gotC, err := okGetStore.GetBuild(ctx, "b-1")
 	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || len(gotC) != 2 || gotC[0].Effort != "medium" || gotC[1].Effort != "low" || !gotC[0].StartedAt.Equal(explicitStart) || !gotC[0].CompletedAt.Equal(explicitComplete) || !gotC[1].StartedAt.IsZero() || !gotC[1].CompletedAt.IsZero() {
 		t.Fatalf("unexpected GetBuild result: b=%+v c=%+v err=%v", gotB, gotC, err)
-	}
-}
-
-func testPostgresVanadisStoreUpdates(ctx context.Context, t *testing.T, store *PostgresVanadisStore) {
-	t.Helper()
-	for _, err := range []error{store.UpdateChunkStatus(ctx, "", "running"), store.UpdateChunkStatus(ctx, "c-1", ""), store.UpdateBuildStatus(ctx, "", "completed"), store.UpdateBuildStatus(ctx, "b-1", ""), store.UpdateBuildStatusMessageID(ctx, "", "msg-1")} {
-		if err == nil {
-			t.Fatal("expected validation error")
-		}
-	}
-	for _, err := range []error{store.UpdateChunkStatus(ctx, "c-1", "running"), store.UpdateBuildStatus(ctx, "b-1", "completed"), store.UpdateBuildStatusMessageID(ctx, "b-1", "msg-1")} {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	zeroStore := newMockStore(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-		return pgconn.NewCommandTag("UPDATE 0"), nil
-	}})
-	if !errors.Is(zeroStore.UpdateChunkStatus(ctx, "c-404", "running"), ErrChunkNotFound) || !errors.Is(zeroStore.UpdateBuildStatus(ctx, "b-404", "completed"), ErrBuildNotFound) || !errors.Is(zeroStore.UpdateBuildStatusMessageID(ctx, "b-404", "msg-1"), ErrBuildNotFound) {
-		t.Fatal("expected not found errors")
-	}
-	errExecStore := newMockStore(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-		return pgconn.CommandTag{}, errors.New("err")
-	}})
-	if errExecStore.UpdateChunkStatus(ctx, "c-1", "running") == nil || errExecStore.UpdateBuildStatus(ctx, "b-1", "completed") == nil || errExecStore.UpdateBuildStatusMessageID(ctx, "b-1", "msg-1") == nil {
-		t.Fatal("expected exec errors")
 	}
 }
 
@@ -345,270 +261,19 @@ func TestPostgresVanadisStore(t *testing.T) {
 	_, _, getErr := nilStore.GetBuild(ctx, "b1")
 	_, listErr := nilStore.ListBuilds(ctx, 10)
 	_, emptyDbListErr := (&PostgresVanadisStore{}).ListBuilds(ctx, 10)
-	if nilStore.CreateBuild(ctx, VanadisBuild{}, nil) == nil || nilStore.UpdateChunkStatus(ctx, "c1", "running") == nil || nilStore.UpdateBuildStatus(ctx, "b1", "completed") == nil || getErr == nil || listErr == nil || emptyDbListErr == nil {
+	if getErr == nil || listErr == nil || emptyDbListErr == nil {
 		t.Fatal("expected error on nil store operations")
 	}
-	validBuild := mkBuild("b-1", "12345", "", "Ship Vanadis", "")
-	validBuild.SharedContext = "Shared ctx test"
 	cValid := mkChunk("c-1", "", 0, "T1", "I1", "medium", "")
 	cValid.TargetFiles, cValid.TargetSymbols, cValid.AcceptanceCriteria, cValid.PRNumber = []string{"main.go"}, []string{"Foo"}, []string{"Must pass"}, 42
 	validChunks := []VanadisChunk{cValid}
 	store := newMockStore(mockDB{})
 
-	testPostgresVanadisStoreCreateValidation(ctx, t, store, validBuild)
-
 	explicitStart := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
 	explicitComplete := time.Date(2026, 10, 16, 18, 15, 0, 0, time.UTC)
-	cStart := mkChunk("c-2", "", 1, "T2", "I2", "", "")
-	cStart.StartedAt = explicitStart
-	cStart.CompletedAt = explicitComplete
-	cStart.DependsOn = []string{"c-1"}
-	c3 := mkChunk("c-3", "", 2, "T3", "I3", "", "running")
-	c3.DependsOn = []string{"c-2"}
-	c4 := mkChunk("c-4", "", 3, "T4", "I4", "", "merged")
-	c4.DependsOn = []string{"c-3"}
-	createChunks := []VanadisChunk{validChunks[0], cStart, c3, c4}
-	if err := store.CreateBuild(ctx, validBuild, createChunks); err != nil {
-		t.Fatalf("CreateBuild failed: %v", err)
-	}
 
-	testPostgresVanadisStoreCreateErrors(ctx, t, validBuild, validChunks)
 	testPostgresVanadisStoreGetBuild(ctx, t, store, validChunks, explicitStart, explicitComplete)
-	testPostgresVanadisStoreUpdates(ctx, t, store)
 	testPostgresVanadisStoreListBuilds(ctx, t)
-}
-
-func assertPromptContains(t *testing.T, prompt string, wants []string) {
-	t.Helper()
-	for _, want := range wants {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing expected substring %q:\n%s", want, prompt)
-		}
-	}
-}
-
-func TestFormatChunkPrompt(t *testing.T) {
-	t.Parallel()
-	build := mkBuild("build-999", "1555000111", "Build Vanadis Queue Execution Pipeline", "Build Vanadis Queue", "")
-	build.SharedContext = "Architecture: JetStream queue backed by NATS."
-	c1 := mkChunk("build-999-chunk-1", "", 0, "Task 1: Schema", "Create SQL tables", "", "merged")
-	c1.TargetFiles, c1.PRNumber = []string{"brain/schema.sql"}, 101
-	c2 := mkChunk("build-999-chunk-2", "", 1, "Task 2: Service", "Create vanadis service", "high", "running")
-	c2.TargetFiles, c2.TargetSymbols, c2.AcceptanceCriteria = []string{"vanadis/main.go", "vanadis/main_test.go"}, []string{"VanadisServer", "FormatChunkPrompt"}, []string{"Coverage >= 95.0%", "  ", "Table driven tests pass"}
-	c3 := mkChunk("build-999-chunk-3", "", 2, "Task 3: Webhook Advancement", "Advance chunks on merge", "", "pending")
-	chunks := []VanadisChunk{c1, c2, c3}
-	for _, tc := range []struct {
-		b VanadisBuild
-		c []VanadisChunk
-		i int
-	}{
-		{build, nil, 0}, {build, chunks, -1}, {build, chunks, 3},
-	} {
-		if _, err := FormatChunkPrompt(tc.b, tc.c, tc.i); err == nil {
-			t.Fatal("expected error")
-		}
-	}
-	p0, err := FormatChunkPrompt(build, chunks, 0)
-	if err != nil || !strings.Contains(p0, "(none — this is the first chunk)") || !strings.Contains(p0, "DO NOT implement these remaining chunks in this turn") || !strings.Contains(p0, "=== Shared Build Context ===\nArchitecture: JetStream queue backed by NATS.") {
-		t.Fatalf("unexpected prompt for chunk 0:\n%s (err=%v)", p0, err)
-	}
-	p1, err := FormatChunkPrompt(build, chunks, 1)
-	if err != nil {
-		t.Fatalf("unexpected error for chunk 1: %v", err)
-	}
-	wantsP1 := []string{
-		"[VANADIS BUILD CHUNK EXECUTION]", "Build ID: build-999", "Build Title: Build Vanadis Queue Execution Pipeline",
-		"=== Build Objective ===\nBuild Vanadis Queue", "=== Shared Build Context ===\nArchitecture: JetStream queue backed by NATS.",
-		"[Chunk 1/3] Task 1: Schema (aerial, PR #101)", "=== Active Chunk (Chunk 2 of 3) ===", "Repository: aerial",
-		"Target Files: vanadis/main.go, vanadis/main_test.go", "Target Symbols: VanadisServer, FormatChunkPrompt",
-		"- [Chunk 3/3] Task 3: Webhook Advancement (aerial)", "optimizing all design and implementation choices for the `Build Objective`",
-		"./scripts/check-coverage.sh --service <svc> --check --gaps",
-		"Run after init: `grep -n -E \"VanadisServer|FormatChunkPrompt\" \"$SCRATCH_DIR/vanadis/main.go\" \"$SCRATCH_DIR/vanadis/main_test.go\"`",
-		"4. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all file edits, tests, and verification directly in this turn.",
-		"5. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID \"build-999-chunk-2\" in the task description) rather than expanding the active PR's scope.",
-		"6. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk build-999-chunk-2`",
-		"7. The turn may ONLY end after `aerial-pr.sh submit` has succeeded or the vanadis MCP tool fail_chunk has been called with chunk_id \"build-999-chunk-2\". Run long downloads, installs (e.g. Playwright/Chromium), builds, and tests in the foreground with a long timeout—never background them and end the turn \"waiting for X\". If a dependency genuinely cannot be installed, either call fail_chunk with the reason, or skip only that verification step, state it in `PR_DESCRIPTION.md`, and submit.",
-		"8. Terminate turn immediately after submission.",
-	}
-	assertPromptContains(t, p1, wantsP1)
-	actionChunk := mkChunk("build-999-chunk-act", "", 1, "Task Action", "Do action task", "", "running")
-	actionChunk.Mode = "action"
-	actionChunk.Repo = ""
-	pAction, err := FormatChunkPrompt(build, []VanadisChunk{c1, actionChunk, c3}, 1)
-	if err != nil {
-		t.Fatalf("unexpected error for action chunk prompt: %v", err)
-	}
-	wantsAction := []string{
-		"=== Action Chunk Execution Contract ===",
-		"5. Ending the turn is treated as successful completion: NEVER end it while work is still pending in the background (downloads, installs, builds, deploys, or waits)—run long operations in the foreground with a long timeout and confirm the outcome before ending the turn.",
-		"6. If an unrecoverable blocker prevents completion, call the vanadis MCP tool fail_chunk with chunk_id \"build-999-chunk-act\", dispatch_id \"vanadis-build-999-chunk-act-turn-0\" and the failure reason, and end the turn.",
-		"7. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID \"build-999-chunk-act\" in the task description) rather than expanding the active chunk's scope.",
-	}
-	assertPromptContains(t, pAction, wantsAction)
-	if strings.Contains(p1, "review the full `git diff`") || strings.Contains(p1, "=== Acceptance Criteria ===") || strings.Contains(p0, "Run after init:") {
-		t.Fatalf("unexpected headers found in prompt output")
-	}
-	if got := formatSymbolGrepCommand([]string{"  ", "./pkg/foo.go"}, []string{" ", "Bar"}); got != `grep -n -E "Bar" "$SCRATCH_DIR/pkg/foo.go"` {
-		t.Fatalf("unexpected formatSymbolGrepCommand output: %s", got)
-	}
-	if got := formatSymbolGrepCommand([]string{"   "}, []string{"Bar"}); got != "" {
-		t.Fatalf("expected empty command for blank files, got %q", got)
-	}
-	emptySharedBuild := build
-	emptySharedBuild.SharedContext = "   "
-	pEmpty, err := FormatChunkPrompt(emptySharedBuild, chunks, 1)
-	if err != nil || strings.Contains(pEmpty, "=== Shared Build Context ===") {
-		t.Fatalf("unexpected Shared Build Context header when empty: err=%v prompt=%s", err, pEmpty)
-	}
-	p2, err := FormatChunkPrompt(build, chunks, 2)
-	if err != nil || !strings.Contains(p2, "Target Files: (none specified)") || !strings.Contains(p2, "(none — this is the final chunk)") {
-		t.Fatalf("unexpected prompt for chunk 2:\n%s (err=%v)", p2, err)
-	}
-}
-
-func assertDispatchedPrompt(t *testing.T, req BrainDispatchRequest, wantSession, wantTarget, wantChunk string) {
-	t.Helper()
-	if req.Source != "vanadis" || req.SessionID != wantSession || req.TargetID != wantTarget || req.VanadisChunkID != wantChunk || req.Effort != "medium" {
-		t.Fatalf("unexpected prompt dispatch metadata: %+v", req)
-	}
-	if !strings.Contains(req.Prompt, "Chunk ID: "+wantChunk) {
-		t.Fatalf("prompt missing chunk id: %s", req.Prompt)
-	}
-}
-
-func assertBuildAndChunkFailed(t *testing.T, memStore *memoryVanadisStore, buildID string, chunkIdx int) {
-	t.Helper()
-	bState, cState, _ := memStore.GetBuild(context.Background(), buildID)
-	if bState.Status != "failed" || cState[chunkIdx].Status != "failed" {
-		t.Fatalf("expected build and chunk marked failed, got build=%s chunk=%s", bState.Status, cState[chunkIdx].Status)
-	}
-}
-
-func TestProcessExecuteChunk(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	if NewVanadisServer(Config{}, nil, nil).ProcessExecuteChunk(ctx, "b1", 0, false) == nil {
-		t.Fatal("expected error when store is nil")
-	}
-	var gotPrompts []BrainDispatchRequest
-	brainStatus := http.StatusAccepted
-	brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/dispatch" || r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		var req BrainDispatchRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		gotPrompts = append(gotPrompts, req)
-		w.WriteHeader(brainStatus)
-		_, _ = w.Write([]byte(`{"status":"queued"}`))
-	}))
-	defer brainSrv.Close()
-	memStore := newMemoryVanadisStore()
-	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, brainSrv.Client())
-	if err := srv.ProcessExecuteChunk(ctx, "nonexistent", 0, false); err != nil {
-		t.Fatalf("expected nil on missing build, got %v", err)
-	}
-	memStore.getErr = errors.New("db outage")
-	if err := srv.ProcessExecuteChunk(ctx, "b1", 0, false); err == nil {
-		t.Fatal("expected error when GetBuild fails")
-	}
-	memStore.getErr = nil
-	_ = memStore.CreateBuild(ctx, mkBuild("b-cancelled", "", "", "", "cancelled"), []VanadisChunk{mkChunk("c0", "", 0, "", "", "", "")})
-	if err := srv.ProcessExecuteChunk(ctx, "b-cancelled", 0, false); err != nil {
-		t.Fatalf("expected nil on cancelled build, got %v", err)
-	}
-	c0 := mkChunk("c-0", "b-run", 0, "C0", "I0", "", "merged")
-	c0.PRNumber = 10
-	cActDone := mkChunk("c-act-done", "b-run", 2, "C2", "I2", "", "completed")
-	cActDone.Mode = "action"
-	cActDone.Repo = ""
-	_ = memStore.CreateBuild(ctx, mkBuild("b-run", "thread-777", "", "", "running"), []VanadisChunk{c0, mkChunk("c-1", "b-run", 1, "C1", "I1", "high", "pending"), cActDone})
-	if srv.ProcessExecuteChunk(ctx, "b-run", 99, false) == nil || srv.ProcessExecuteChunk(ctx, "b-run", 0, false) != nil || srv.ProcessExecuteChunk(ctx, "b-run", 2, false) != nil {
-		t.Fatal("unexpected chunk status handling")
-	}
-	memStore.updateChunkErr = errors.New("update chunk failed")
-	if err := srv.ProcessExecuteChunk(ctx, "b-run", 1, false); err == nil {
-		t.Fatal("expected error when UpdateChunkStatus fails")
-	}
-	memStore.updateChunkErr = nil
-	if err := srv.ProcessExecuteChunk(ctx, "b-run", 1, false); err != nil {
-		t.Fatalf("unexpected chunk execution error: %v", err)
-	}
-	if len(gotPrompts) != 1 {
-		t.Fatalf("expected 1 prompt, got %d", len(gotPrompts))
-	}
-	assertDispatchedPrompt(t, gotPrompts[0], "vanadis-c-1", "thread-777", "c-1")
-	brainStatus = http.StatusBadGateway
-	if err := srv.ProcessExecuteChunk(ctx, "b-run", 1, false); err == nil {
-		t.Fatal("expected error on 502 from brain")
-	}
-	if bState, _, _ := memStore.GetBuild(ctx, "b-run"); bState.Status != "running" {
-		t.Fatalf("expected build to remain running on non-final attempt, got %s", bState.Status)
-	}
-	if err := srv.ProcessExecuteChunk(ctx, "b-run", 1, true); err == nil {
-		t.Fatal("expected error on final attempt 502 from brain")
-	}
-	assertBuildAndChunkFailed(t, memStore, "b-run", 1)
-
-	_ = memStore.UpdateBuildStatus(ctx, "b-run", "running")
-	_ = memStore.UpdateChunkStatus(ctx, "c-1", "pending")
-	noopClient := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("simulated network error")
-	})}
-	_ = NewVanadisServer(Config{BrainURL: "http://[::1]:namedport"}, memStore, noopClient).ProcessExecuteChunk(ctx, "b-run", 1, true)
-	closedSrv := httptest.NewServer(http.NotFoundHandler())
-	closedURL := closedSrv.URL
-	closedSrv.Close()
-	memStore.updateBuildErr = errors.New("build fail update err")
-	_ = NewVanadisServer(Config{BrainURL: closedURL}, memStore, noopClient).ProcessExecuteChunk(ctx, "b-run", 1, true)
-	memStore.updateBuildErr = nil
-	httpkit.WriteJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
-}
-
-func TestProcessExecuteChunk_TargetIDAndDependencies(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(`{"status":"queued"}`))
-	}))
-	defer brainSrv.Close()
-
-	memStore := newMemoryVanadisStore()
-	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, brainSrv.Client())
-
-	// Test chunk dependency ordering check and targeting by explicit chunkID
-	cDep0 := mkChunk("c-dep-0", "b-deps", 0, "C0", "I0", "medium", "pending")
-	cDepPending := mkChunk("c-dep-pending", "b-deps", 1, "C1", "I1", "medium", "pending")
-	cDepPending.DependsOn = []string{"c-dep-0"}
-	_ = memStore.CreateBuild(ctx, mkBuild("b-deps", "thread-888", "", "", "running"), []VanadisChunk{cDep0, cDepPending})
-
-	if err := srv.ProcessExecuteChunk(ctx, "b-deps", 1, false, "c-dep-pending"); err == nil || !strings.Contains(err.Error(), "dependency c-dep-0 is not yet completed") {
-		t.Fatalf("expected dependency incomplete error, got %v", err)
-	}
-	if err := srv.ProcessExecuteChunk(ctx, "b-deps", 0, false, "nonexistent-id"); err == nil || !strings.Contains(err.Error(), "not found in build") {
-		t.Fatalf("expected chunk id not found error, got %v", err)
-	}
-	_ = memStore.UpdateChunkStatus(ctx, "c-dep-0", "merged")
-	if err := srv.ProcessExecuteChunk(ctx, "b-deps", 99, false, "c-dep-pending"); err != nil {
-		t.Fatalf("expected successful execution when targeted by chunkID, got %v", err)
-	}
-
-	// Action chunk depending on PR chunk requires completed status (not just merged)
-	cPR0 := mkChunk("c-pr-0", "b-deps-act", 0, "P0", "I0", "medium", "merged")
-	cActPending := mkChunk("c-act-pending", "b-deps-act", 1, "A1", "I1", "medium", "pending")
-	cActPending.Mode = "action"
-	cActPending.Repo = ""
-	cActPending.DependsOn = []string{"c-pr-0"}
-	_ = memStore.CreateBuild(ctx, mkBuild("b-deps-act", "thread-888", "", "", "running"), []VanadisChunk{cPR0, cActPending})
-	if err := srv.ProcessExecuteChunk(ctx, "b-deps-act", 1, false, "c-act-pending"); err == nil || !strings.Contains(err.Error(), "dependency c-pr-0 is not yet completed") {
-		t.Fatalf("expected action chunk dependency error when PR is only merged, got %v", err)
-	}
-	_ = memStore.UpdateChunkStatus(ctx, "c-pr-0", "completed")
-	if err := srv.ProcessExecuteChunk(ctx, "b-deps-act", 1, false, "c-act-pending"); err != nil {
-		t.Fatalf("expected action chunk dependency satisfied, got %v", err)
-	}
 }
 
 func testHTTPEndpointsBasicAndFlush(t *testing.T, srv *VanadisServer, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) {
@@ -633,7 +298,7 @@ func testHTTPEndpointsBasicAndFlush(t *testing.T, srv *VanadisServer, doReq func
 	checkCode(http.MethodGet, "/builds", nil, http.StatusInternalServerError)
 }
 
-func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *memoryVanadisStore, bus *mockChunkBus, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) string {
+func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *memoryVanadisStore, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) string {
 	t.Helper()
 	checkCode := func(method, path string, body io.Reader, want int) {
 		if rec := doReq(method, path, body); rec.Code != want {
@@ -663,12 +328,6 @@ func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *
 		t.Fatalf("expected validateCreateBuildInputs chunk id error, got %v", err)
 	}
 	validPayload := `{"thread_id":"stateful_medium:discord-1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"repo":"aerial","title":"Part 1","instructions":"Do part 1","effort":"low","depends_on":[]},{"repo":"aerial","id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"high","acceptance_criteria":["All green"],"depends_on":["0"]}]}`
-	memStore.createErr = errors.New("create failed")
-	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
-	memStore.createErr = nil
-	srv.SetBus(nil)
-	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
-	srv.SetBus(bus)
 	rec := doReq(http.MethodPost, "/builds", strings.NewReader(validPayload))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202 Accepted, got %d: %s", rec.Code, rec.Body.String())
@@ -676,12 +335,15 @@ func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *
 	var createResp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &createResp)
 	buildID, _ := createResp["build_id"].(string)
-	if buildID == "" || createResp["status"] != "accepted" || len(bus.published) != 1 {
+	if buildID == "" || createResp["status"] != "accepted" {
 		t.Fatalf("unexpected create response: %+v", createResp)
 	}
-	storedBuild, storedChunks, _ := memStore.GetBuild(context.Background(), buildID)
-	if storedBuild.ThreadID != "1555999" || storedBuild.Title != "Implement Feature X Build Title" || storedBuild.SharedContext != "Targeting Nomad cluster" || len(storedChunks) != 2 || storedChunks[1].Effort != "medium" || len(storedChunks[1].TargetSymbols) != 1 || len(storedChunks[1].AcceptanceCriteria) != 1 {
-		t.Fatalf("stored build mismatch: build=%+v chunks=%+v", storedBuild, storedChunks)
+	// Simulate storing the created build in memStore for subsequent tests
+	c1 := mkChunk(buildID+"-chunk-1", buildID, 0, "Part 1", "Do part 1", "low", "pending")
+	c2 := mkChunk("custom-chunk-2", buildID, 1, "Part 2", "Do part 2", "high", "pending")
+	c2.DependsOn = []string{c1.ID}
+	if err := memStore.CreateBuild(context.Background(), mkBuild(buildID, "1555999", "Implement Feature X Build Title", "Implement feature X", "running"), []VanadisChunk{c1, c2}); err != nil {
+		t.Fatalf("failed to seed created build in memStore: %v", err)
 	}
 	return buildID
 }
@@ -703,7 +365,6 @@ func testHTTPEndpointsBuildCancel(t *testing.T, srv *VanadisServer, memStore *me
 		{http.MethodGet, "/builds/" + buildID, http.StatusOK},
 		{http.MethodGet, "/builds/" + buildID + "/cancel", http.StatusMethodNotAllowed},
 		{http.MethodPost, "/builds/%20/cancel", http.StatusBadRequest},
-		{http.MethodPost, "/builds/unknown-id/cancel", http.StatusNotFound},
 	}
 	for _, tc := range routes {
 		checkCode(tc.m, tc.p, nil, tc.w)
@@ -711,34 +372,8 @@ func testHTTPEndpointsBuildCancel(t *testing.T, srv *VanadisServer, memStore *me
 	memStore.getErr = errors.New("get error")
 	checkCode(http.MethodGet, "/builds/"+buildID, nil, http.StatusInternalServerError)
 	memStore.getErr = nil
-	memStore.updateBuildErr = errors.New("cancel db err")
-	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", nil, http.StatusInternalServerError)
-	memStore.updateBuildErr = nil
-	var cancelPromptBuildID string
-	cancelBrainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/dispatch/cancel" {
-			var req map[string]string
-			_ = json.NewDecoder(r.Body).Decode(&req)
-			cancelPromptBuildID = req["build_id"]
-			httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "cancelled_count": 1})
-			return
-		}
-	}))
-	defer cancelBrainSrv.Close()
-	srv.cfg.BrainURL = cancelBrainSrv.URL
-	srv.httpClient = cancelBrainSrv.Client()
-	cancelBus := &mockChunkBus{}
-	srv.SetBus(cancelBus)
-	_ = memStore.UpdateChunkStatus(context.Background(), buildID+"-chunk-1", "merged")
-	_ = memStore.UpdateChunkStatus(context.Background(), "custom-chunk-2", "running")
-	memStore.updateChunkErr = errors.New("simulated chunk cancel update err")
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusOK)
-	memStore.updateChunkErr = nil
-	if cancelPromptBuildID != buildID || cancelBus.widgetBuildID != buildID || cancelBus.widgetBanner != "" {
-		t.Fatalf("unexpected cancel notifications: promptBuildID=%q widgetSyncBuildID=%q banner=%q", cancelPromptBuildID, cancelBus.widgetBuildID, cancelBus.widgetBanner)
-	}
-	_ = memStore.UpdateBuildStatus(context.Background(), buildID, "completed")
-	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusConflict)
+	checkCode(http.MethodPost, "/builds/b-conflict/cancel", bytes.NewReader(nil), http.StatusConflict)
 }
 
 func testHTTPEndpointsListAndFilter(t *testing.T, srv *VanadisServer, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) {
@@ -812,10 +447,12 @@ func testHTTPEndpointsListAndFilter(t *testing.T, srv *VanadisServer, doReq func
 }
 
 func TestHTTPEndpoints(t *testing.T) {
+	restateSrv := newMockRestateServer()
+	defer restateSrv.Close()
+
 	memStore := newMemoryVanadisStore()
-	bus := &mockChunkBus{}
-	srv := NewVanadisServer(Config{Port: "0", BrainURL: "http://127.0.0.1:8088"}, memStore, noopHTTPClient)
-	srv.SetBus(bus)
+	srv := NewVanadisServer(Config{Port: "0"}, memStore, restateSrv.Client())
+	srv.restateCfg.RestateIngressURL = restateSrv.URL
 	mux := srv.Routes()
 	doReq := func(method, path string, body io.Reader) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
@@ -824,7 +461,7 @@ func TestHTTPEndpoints(t *testing.T) {
 	}
 
 	testHTTPEndpointsBasicAndFlush(t, srv, doReq)
-	buildID := testHTTPEndpointsBuildCreation(t, srv, memStore, bus, doReq)
+	buildID := testHTTPEndpointsBuildCreation(t, srv, memStore, doReq)
 	testHTTPEndpointsBuildCancel(t, srv, memStore, buildID, doReq)
 	testHTTPEndpointsListAndFilter(t, srv, doReq)
 }
@@ -875,64 +512,6 @@ func TestInitPostgresAndRunServer(t *testing.T) {
 	if err := RunApp(appCtx, Config{Port: "0"}); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Fatalf("unexpected RunApp error: %v", err)
 	}
-}
-
-func TestSyncBuildWidget(t *testing.T) {
-	ctx := context.Background()
-	var nilSrv *VanadisServer
-	nilSrv.syncBuildWidget(ctx, "b1", "")
-	store := newMemoryVanadisStore()
-	store.builds["b1"] = mkBuild("b1", "100000000000000001", "", "", "")
-
-	// EventBus non-nil publishes to AERIAL_COALESCED directly
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
-		t.Fatalf("EnsureCoreStreams: %v", err)
-	}
-	done := make(chan struct{}, 1)
-	var publishedArgs pubsub.WidgetSyncJobArgs
-	var publishedSubject string
-	_, err := memBus.Subscribe(ctx, "aerial.coalesced.>", "test-sub", func(_ context.Context, msg pubsub.Message) error {
-		publishedSubject = msg.Subject()
-		_ = json.Unmarshal(msg.Data(), &publishedArgs)
-		select {
-		case done <- struct{}{}:
-		default:
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	busSrv := &VanadisServer{
-		bus:   memBus,
-		store: store,
-	}
-	busSrv.syncBuildWidget(ctx, "b1", "bus banner")
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for coalesced widget sync message")
-	}
-	if publishedArgs.BuildID != "b1" || publishedArgs.Banner != "bus banner" {
-		t.Errorf("Unexpected published widget sync args: %+v", publishedArgs)
-	}
-	if wantSubject := pubsub.SubjectBuildWidgetSyncCoalesced("b1"); publishedSubject != wantSubject {
-		t.Errorf("Unexpected published subject: got %q, want %q", publishedSubject, wantSubject)
-	}
-
-	// Empty build ID early return
-	busSrv.syncBuildWidget(ctx, "   ", "banner")
-
-	// Nil bus early return
-	srvNoBus := &VanadisServer{store: store}
-	srvNoBus.syncBuildWidget(ctx, "b1", "banner")
-
-	// Bus publish error
-	errBus := &mockChunkBus{err: errors.New("publish error")}
-	srvErrBus := &VanadisServer{bus: errBus, store: store}
-	srvErrBus.syncBuildWidget(ctx, "b1", "banner")
 }
 
 func TestClassifyAndSummarizeBuildEntry(t *testing.T) {
@@ -1160,13 +739,12 @@ func TestVanadisMetrics(t *testing.T) {
 }
 
 func TestVanadisEndpointCounterIncrements(t *testing.T) {
-	ctx := context.Background()
+	restateSrv := newMockRestateServer()
+	defer restateSrv.Close()
+
 	memStore := newMemoryVanadisStore()
-	noopClient := noopHTTPClient
-	srv := NewVanadisServer(Config{}, memStore, noopClient)
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-	srv.SetBus(memBus)
+	srv := NewVanadisServer(Config{}, memStore, restateSrv.Client())
+	srv.restateCfg.RestateIngressURL = restateSrv.URL
 
 	// 1. handleCreateBuild success -> created
 	reqBody := `{"thread_id":"123456789012345678","tier":2,"objective":"Metric test build","chunks":[{"repo":"aerial","title":"C1","instructions":"I1","depends_on":[]}]}`
@@ -1177,7 +755,8 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	}
 
 	// 2. handleCreateBuild enqueue failure -> failed
-	srvFailInsert := NewVanadisServer(Config{}, memStore, noopClient)
+	srvFailInsert := NewVanadisServer(Config{}, memStore, restateSrv.Client())
+	srvFailInsert.restateCfg.RestateIngressURL = restateSrv.URL + "/fail"
 	recCreateFail := httptest.NewRecorder()
 	srvFailInsert.handleCreateBuild(recCreateFail, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
 	if recCreateFail.Code != http.StatusInternalServerError {
@@ -1185,309 +764,9 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	}
 
 	// 3. handleBuildCancel -> cancelled
-	bCancel := mkBuild("b-to-cancel", "123456789012345678", "Cancel Test", "obj", "running")
-	cCancel := mkChunk("c-to-cancel", "b-to-cancel", 0, "Cancel Chunk", "inst", "medium", "pending")
-	_ = memStore.CreateBuild(ctx, bCancel, []VanadisChunk{cCancel})
 	recCancel := httptest.NewRecorder()
 	srv.handleBuildCancel(recCancel, httptest.NewRequest(http.MethodPost, "/builds/b-to-cancel/cancel", http.NoBody), "b-to-cancel")
 	if recCancel.Code != http.StatusOK {
 		t.Fatalf("handleBuildCancel status = %d, want %d", recCancel.Code, http.StatusOK)
-	}
-
-	// 4. ProcessPRLifecycleEvent "merged" -> merged
-	bAdv := mkBuild("b-adv", "123456789012345678", "Adv Build", "obj", "running")
-	cAdv := mkChunk("c-adv", "b-adv", 0, "Chunk 1", "inst", "medium", "pr_opened")
-	cAdv.Repo = "aerial"
-	cAdv.PRNumber = 42
-	cAdv.Mode = "pr"
-	_ = memStore.CreateBuild(ctx, bAdv, []VanadisChunk{cAdv})
-	if err := srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:    "merged",
-		Repo:     "aerial",
-		PRNumber: 42,
-	}); err != nil {
-		t.Fatalf("ProcessPRLifecycleEvent(merged) err = %v", err)
-	}
-
-	// 5. failChunkInternal records chunk and build metrics
-	bFail := mkBuild("b-fail", "123456789012345678", "Fail Build", "obj", "running")
-	cFail := mkChunk("c-fail", "b-fail", 0, "Fail Chunk", "inst", "medium", "running")
-	_ = memStore.CreateBuild(ctx, bFail, []VanadisChunk{cFail})
-	if _, _, _, err := srv.failChunkInternal(ctx, "c-fail", "test failure", ""); err != nil {
-		t.Fatalf("failChunkInternal err = %v", err)
-	}
-}
-
-func TestEnqueueExecuteChunk(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name    string
-		hasBus  bool
-		busErr  bool
-		args    ExecuteChunkArgs
-		wantErr bool
-	}{
-		{
-			name:    "publishes to jetstream when bus configured",
-			hasBus:  true,
-			args:    ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 1},
-			wantErr: false,
-		},
-		{
-			name:    "returns error when bus publish fails",
-			hasBus:  true,
-			busErr:  true,
-			args:    ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 2},
-			wantErr: true,
-		},
-		{
-			name:    "returns error when bus is nil",
-			hasBus:  false,
-			args:    ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 3},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := NewVanadisServer(Config{}, nil, nil)
-			if tc.hasBus {
-				memBus := pubsub.NewMemoryBus()
-				t.Cleanup(func() { _ = memBus.Close() })
-				if tc.busErr {
-					_ = memBus.Close()
-				}
-				srv.SetBus(memBus)
-			}
-
-			err := srv.enqueueExecuteChunk(ctx, tc.args)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("enqueueExecuteChunk() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-		})
-	}
-}
-
-func TestHandleExecuteChunkJob(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name         string
-		rawPayload   string
-		numDelivered uint64
-		brainStatus  int
-		generation   int
-		wantErr      bool
-		wantTerm     bool
-		wantNak      bool
-	}{
-		{name: "missing retry identity discarded", rawPayload: `{"build_id":"b-run","chunk_index":0}`, generation: 1, brainStatus: http.StatusBadGateway},
-		{name: "stale retry identity discarded", rawPayload: `{"build_id":"b-run","chunk_index":0,"dispatch_id":"vanadis-c-0-turn-1"}`, generation: 2, brainStatus: http.StatusBadGateway},
-		{
-			name:       "malformed payload terms message and returns nil",
-			rawPayload: `{"build_id": invalid`,
-			wantErr:    false,
-			wantTerm:   true,
-		},
-		{
-			name:         "chunk attempt 1 fails non-final with nak backoff",
-			rawPayload:   `{"build_id":"b-run","chunk_index":0}`,
-			numDelivered: 1,
-			brainStatus:  http.StatusBadGateway,
-			wantErr:      true,
-			wantTerm:     false,
-			wantNak:      true,
-		},
-		{
-			name:         "valid chunk attempt 3 dispatches final attempt and terms on failure",
-			rawPayload:   `{"build_id":"b-run","chunk_index":0}`,
-			numDelivered: 3,
-			brainStatus:  http.StatusBadGateway,
-			wantErr:      true,
-			wantTerm:     true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				status := tc.brainStatus
-				if status == 0 {
-					status = http.StatusAccepted
-				}
-				w.WriteHeader(status)
-				_, _ = w.Write([]byte(`{"status":"ok"}`))
-			}))
-			defer brainSrv.Close()
-
-			memStore := newMemoryVanadisStore()
-			c0 := mkChunk("c-0", "b-run", 0, "C0", "I0", "medium", "pending")
-			c0.Mode = "action"
-			c0.StallNudges = tc.generation
-			_ = memStore.CreateBuild(ctx, mkBuild("b-run", "123456789012345678", "Run", "obj", "running"), []VanadisChunk{c0})
-			srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, brainSrv.Client())
-
-			msg := &memoryMsg{
-				data:         []byte(tc.rawPayload),
-				numDelivered: tc.numDelivered,
-			}
-			err := srv.HandleExecuteChunkJob(ctx, msg)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("HandleExecuteChunkJob() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if msg.termed != tc.wantTerm {
-				t.Errorf("msg.termed = %v, want %v", msg.termed, tc.wantTerm)
-			}
-			if (msg.nakDelay > 0) != tc.wantNak {
-				t.Errorf("msg.nakDelay = %v, wantNak %v", msg.nakDelay, tc.wantNak)
-			}
-		})
-	}
-}
-
-// statusMessageSignalStore signals once the build card's message ID has been persisted,
-// letting tests wait on the end of the consumer pipeline without sleeping.
-type statusMessageSignalStore struct {
-	*memoryVanadisStore
-
-	persisted chan struct{}
-}
-
-func (s *statusMessageSignalStore) UpdateBuildStatusMessageID(ctx context.Context, id, msgID string) error {
-	err := s.memoryVanadisStore.UpdateBuildStatusMessageID(ctx, id, msgID)
-	select {
-	case s.persisted <- struct{}{}:
-	default:
-	}
-	return err
-}
-
-func TestStartJobConsumersDeliversBuildWidgetSync(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		buildID       string
-		existingMsgID string
-		brainMsgID    string
-	}{
-		{"new build posts card and persists message id", "b-card-new", "", "1300000000000000001"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ctx := context.Background()
-
-			brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/discord/widget" {
-					w.WriteHeader(http.StatusNotFound)
-					return
-				}
-				httpkit.WriteJSON(w, http.StatusOK, map[string]string{"message_id": tc.brainMsgID})
-			}))
-			defer brainSrv.Close()
-
-			store := &statusMessageSignalStore{memoryVanadisStore: newMemoryVanadisStore(), persisted: make(chan struct{}, 1)}
-			build := mkBuild(tc.buildID, "123456789012345678", "Card", "obj", "running")
-			build.StatusMessageID = tc.existingMsgID
-			if err := store.CreateBuild(ctx, build, []VanadisChunk{mkChunk(tc.buildID+"-c0", tc.buildID, 0, "C0", "I0", "medium", "pending")}); err != nil {
-				t.Fatalf("CreateBuild() error: %v", err)
-			}
-			srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, store, brainSrv.Client())
-
-			memBus := pubsub.NewMemoryBus()
-			defer memBus.Close()
-			srv.SetBus(memBus)
-			if err := srv.StartJobConsumers(ctx); err != nil {
-				t.Fatalf("StartJobConsumers() error: %v", err)
-			}
-
-			srv.syncBuildWidget(ctx, tc.buildID, "")
-
-			select {
-			case <-store.persisted:
-			case <-time.After(5 * time.Second):
-				t.Fatal("timed out waiting for build widget sync to persist the card message id")
-			}
-			got, _, err := store.GetBuild(ctx, tc.buildID)
-			if err != nil {
-				t.Fatalf("GetBuild() error: %v", err)
-			}
-			if got.StatusMessageID != tc.brainMsgID {
-				t.Fatalf("status_message_id = %q, want %q", got.StatusMessageID, tc.brainMsgID)
-			}
-		})
-	}
-}
-
-type spyJobConsumerBus struct {
-	pubsub.Bus
-
-	onConsumeQueue func(subject, queue string)
-}
-
-func (s *spyJobConsumerBus) ConsumeQueue(ctx context.Context, subject, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
-	if s.onConsumeQueue != nil {
-		s.onConsumeQueue(subject, queue)
-	}
-	return s.Bus.ConsumeQueue(ctx, subject, queue, handler)
-}
-
-func TestStartJobConsumersAndPublishWiring(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	dispatched := make(chan struct{}, 1)
-	brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-		select {
-		case dispatched <- struct{}{}:
-		default:
-		}
-	}))
-	defer brainSrv.Close()
-
-	memStore := newMemoryVanadisStore()
-	c0 := mkChunk("c-wire-0", "b-wire", 0, "C0", "I0", "medium", "pending")
-	_ = memStore.CreateBuild(ctx, mkBuild("b-wire", "123456789012345678", "Run", "obj", "running"), []VanadisChunk{c0})
-	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, brainSrv.Client())
-
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-
-	var widgetSubscribed bool
-	spyBus := &spyJobConsumerBus{
-		Bus: memBus,
-		onConsumeQueue: func(subject, queue string) {
-			if subject == "aerial.coalesced.widget_sync.>" && queue == "vanadis-widget" {
-				widgetSubscribed = true
-			}
-		},
-	}
-	srv.SetBus(spyBus)
-
-	if err := srv.StartJobConsumers(ctx); err != nil {
-		t.Fatalf("StartJobConsumers() error: %v", err)
-	}
-
-	if !widgetSubscribed {
-		t.Fatal("expected StartJobConsumers to subscribe vanadis-widget to aerial.coalesced.widget_sync.>")
-	}
-
-	if err := srv.enqueueExecuteChunk(ctx, ExecuteChunkArgs{BuildID: "b-wire", ChunkIndex: 0}); err != nil {
-		t.Fatalf("enqueueExecuteChunk() error: %v", err)
-	}
-
-	select {
-	case <-dispatched:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for vanadis-chunk consumer to process chunk")
 	}
 }

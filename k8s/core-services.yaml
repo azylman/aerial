@@ -427,23 +427,10 @@ spec:
     spec:
       containers:
         - env:
-            - name: CONFIG_PATH
-              value: /share/aerial-config/services/vanadis/vanadis.yaml
             - name: PORT
               value: "4025"
-            - name: ERI_URL
-              value: http://eri.aerial
-            - name: NATS_URL
-              value: nats://nats.aerial:4222
             - name: RESTATE_INGRESS_URL
               value: http://restate.restate.svc.cluster.local:8080
-            - name: GITHUB_API_URL
-              value: https://api.github.com
-            - name: GITHUB_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  key: GITHUB_PAT
-                  name: vanadis-secret
           envFrom:
             - secretRef:
                 name: postgres-secret
@@ -462,108 +449,95 @@ spec:
               cpu: 25m
               memory: 64Mi
           volumeMounts:
-            - mountPath: /share
-              name: share
-              readOnly: true
             - mountPath: /config/tracing
               name: tracing-config
               readOnly: true
-      initContainers:
-        - args:
-            - --repo=${AERIAL_REPO_URL:=https://github.com/azylman/aerial.git}
-            - --ref=main
-            - --root=/share/.sync/aerial
-            - --link=/share/aerial
-            - --period=15s
-          env:
-            - name: GIT_CONFIG_COUNT
-              value: "1"
-            - name: GIT_CONFIG_KEY_0
-              value: safe.directory
-            - name: GIT_CONFIG_VALUE_0
-              value: '*'
-            - name: GITSYNC_USERNAME
-              value: x-access-token
-            - name: GITSYNC_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: GITHUB_PAT
-                  name: git-sync-secret
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          name: git-sync-aerial
-          resources:
-            limits:
-              cpu: 200m
-              memory: 256Mi
-            requests:
-              cpu: 10m
-              memory: 32Mi
-          restartPolicy: Always
-          startupProbe:
-            exec:
-              command:
-                - git
-                - -C
-                - /share/aerial
-                - rev-parse
-                - HEAD
-            failureThreshold: 60
-            periodSeconds: 1
-          volumeMounts:
-            - mountPath: /share
-              name: share
-        - args:
-            - --repo=${AERIAL_CONFIG_REPO_URL:=https://github.com/azylman/aerial-config.git}
-            - --ref=main
-            - --root=/share/.sync/aerial-config
-            - --link=/share/aerial-config
-            - --period=15s
-          env:
-            - name: GIT_CONFIG_COUNT
-              value: "1"
-            - name: GIT_CONFIG_KEY_0
-              value: safe.directory
-            - name: GIT_CONFIG_VALUE_0
-              value: '*'
-            - name: GITSYNC_USERNAME
-              value: x-access-token
-            - name: GITSYNC_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: GITHUB_PAT
-                  name: git-sync-secret
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          name: git-sync-aerial-config
-          resources:
-            limits:
-              cpu: 200m
-              memory: 256Mi
-            requests:
-              cpu: 10m
-              memory: 32Mi
-          restartPolicy: Always
-          startupProbe:
-            exec:
-              command:
-                - git
-                - -C
-                - /share/aerial-config
-                - rev-parse
-                - HEAD
-            failureThreshold: 60
-            periodSeconds: 1
-          volumeMounts:
-            - mountPath: /share
-              name: share
-      securityContext:
-        fsGroup: 65533
       volumes:
-        - emptyDir: {}
-          name: share
         - configMap:
             name: tracing-config
             optional: true
           name: tracing-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
+  labels:
+    app.kubernetes.io/name: vanadis-nats
+  name: vanadis-nats
+  namespace: default
+spec:
+  minReadySeconds: 10
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vanadis-nats
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vanadis-nats
+    spec:
+      containers:
+        - env:
+            - name: PORT
+              value: "4027"
+            - name: NATS_URL
+              value: nats://nats.aerial:4222
+            - name: RESTATE_INGRESS_URL
+              value: http://restate.restate.svc.cluster.local:8080
+          image: ghcr.io/azylman/aerial-vanadis-nats:${TAG_AERIAL_VANADIS_NATS:=latest}
+          imagePullPolicy: Always
+          name: vanadis-nats
+          ports:
+            - containerPort: 4027
+              name: http
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 4027
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
+          volumeMounts:
+            - mountPath: /config/tracing
+              name: tracing-config
+              readOnly: true
+      volumes:
+        - configMap:
+            name: tracing-config
+            optional: true
+          name: tracing-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    prometheus.io/port: "4027"
+    prometheus.io/scrape: "true"
+  name: vanadis-nats
+  namespace: default
+spec:
+  ports:
+    - name: http
+      port: 4027
+      protocol: TCP
+      targetPort: 4027
+  selector:
+    app.kubernetes.io/name: vanadis-nats
+  type: ClusterIP
 ---
 apiVersion: batch/v1
 kind: Job

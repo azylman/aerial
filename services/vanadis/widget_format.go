@@ -1,11 +1,8 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"log"
 	"regexp"
 	"sort"
 	"strings"
@@ -265,79 +262,4 @@ func FormatChunkActiveStep(chunk VanadisChunk, deployUIURL ...string) string {
 	}
 
 	return ""
-}
-
-func (s *VanadisServer) resolveCoalescedWidgetBuildID(ctx context.Context, payload pubsub.WidgetSyncJobArgs) (string, error) {
-	buildID := strings.TrimSpace(payload.BuildID)
-	if buildID != "" {
-		return buildID, nil
-	}
-	if strings.TrimSpace(payload.Repo) == "" || payload.PRNumber <= 0 {
-		return "", nil
-	}
-	lookup, err := s.store.GetChunkByPR(ctx, strings.TrimSpace(payload.Repo), payload.PRNumber)
-	if err != nil {
-		return "", err
-	}
-	if lookup != nil && lookup.Matched {
-		return strings.TrimSpace(lookup.BuildID), nil
-	}
-	return "", nil
-}
-
-// HandleCoalescedWidgetMessage processes an aerial.coalesced.widget_sync.> message from JetStream,
-// as published by syncBuildWidget or PR widget sync events, and posts or edits the build's Discord status card.
-func (s *VanadisServer) HandleCoalescedWidgetMessage(ctx context.Context, msg pubsub.Message) error {
-	if s == nil || s.store == nil {
-		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[vanadis] warning: error terming coalesced widget message: %v", termErr)
-		}
-		return nil
-	}
-	var payload pubsub.WidgetSyncJobArgs
-	if err := json.Unmarshal(msg.Data(), &payload); err != nil {
-		log.Printf("[vanadis] failed to unmarshal coalesced widget message: %v", err)
-		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[vanadis] warning: error terming invalid widget message: %v", termErr)
-		}
-		return nil
-	}
-	buildID, err := s.resolveCoalescedWidgetBuildID(ctx, payload)
-	if err != nil {
-		return err
-	}
-	if buildID == "" {
-		if ackErr := msg.Ack(); ackErr != nil {
-			log.Printf("[vanadis] warning: failed acknowledging empty build widget message: %v", ackErr)
-		}
-		return nil
-	}
-	build, chunks, err := s.store.GetBuild(ctx, buildID)
-	if err != nil {
-		if errors.Is(err, ErrBuildNotFound) {
-			if ackErr := msg.Ack(); ackErr != nil {
-				log.Printf("[vanadis] warning: failed acknowledging not-found build widget message: %v", ackErr)
-			}
-			return nil
-		}
-		return err
-	}
-	syncReq := SyncChunkPRWidgetRequest{
-		BuildID:  buildID,
-		PRBanner: payload.Banner,
-	}
-	widgetReq := buildSyncWidgetRequest(*build, chunks, syncReq, s.deployUIURL())
-	if err := s.dispatchAndPersistWidget(ctx, build.ID, build.StatusMessageID, widgetReq); err != nil {
-		log.Printf("[vanadis] warning: dispatchAndPersistWidget failed for build %s: %v", buildID, err)
-		if msg.NumDelivered() >= 3 {
-			if termErr := msg.Term(); termErr != nil {
-				log.Printf("[vanadis] warning: error terming failed widget message: %v", termErr)
-			}
-		}
-		return err
-	}
-	if ackErr := msg.Ack(); ackErr != nil {
-		log.Printf("[vanadis] warning: failed acknowledging widget message: %v", ackErr)
-	}
-	return nil
 }

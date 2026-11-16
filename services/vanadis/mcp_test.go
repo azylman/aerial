@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -172,6 +173,73 @@ func newMCPToolsStore(listErr, getErr error) *memoryVanadisStore {
 	return store
 }
 
+func handleMCPMockFailChunk(w http.ResponseWriter, r *http.Request, actionGen *int) {
+	var failReq FailChunkRequest
+	_ = json.NewDecoder(r.Body).Decode(&failReq)
+	if failReq.ChunkID == "nonexistent-chunk" {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"chunk not found"}`))
+		return
+	}
+	failed := actionGen == nil || (failReq.DispatchID != "vanadis-chunk-1-turn-0" && failReq.DispatchID != "")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(FailChunkResponse{
+		Failed:      failed,
+		BuildID:     "build-mcp-1",
+		ChunkID:     failReq.ChunkID,
+		BuildStatus: "failed",
+		ChunkStatus: "failed",
+	})
+}
+
+func mockMCPRestateHandler(actionGen *int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		var bodyBytes []byte
+		if r.Body != nil {
+			bodyBytes, _ = io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+		bodyStr := string(bodyBytes)
+
+		if strings.Contains(path, "nonexistent") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"chunk not found"}`))
+			return
+		}
+		if strings.Contains(path, "build-mcp-2") || strings.Contains(bodyStr, `"chunk_ref":"0"`) {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"message":"vanadis build state conflict"}`))
+			return
+		}
+		if strings.Contains(bodyStr, `"chunks":[]`) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"message":"invalid vanadis build input: at least one chunk is required"}`))
+			return
+		}
+		if strings.Contains(path, "RouteFailChunk") {
+			handleMCPMockFailChunk(w, r, actionGen)
+			return
+		}
+		if strings.Contains(path, "UpdateBuild") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(VanadisBuild{ID: "build-mcp-1", Status: "running"})
+			return
+		}
+		if strings.Contains(path, "UpdateChunk") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(VanadisChunk{ID: "chunk-2", Status: "pending"})
+			return
+		}
+		if strings.Contains(path, "AppendChunks") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]VanadisChunk{{ID: "chunk-3", Status: "pending"}})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
 // callVanadisMCPTool sends one JSON-RPC tools/call request for toolName to a
 // fresh MCP handler backed by the seeded fixture store (or no store) and
 // returns the raw response body.
@@ -186,7 +254,15 @@ func callVanadisMCPTool(t *testing.T, tc vanadisMCPToolCase, toolName string) []
 	if tc.nilStore {
 		store = nil
 	}
-	handler := NewVanadisServer(Config{Port: "0"}, store, nil).newMCPHandler()
+
+	restateServer := httptest.NewServer(mockMCPRestateHandler(tc.actionGeneration))
+	defer restateServer.Close()
+
+	srv := NewVanadisServer(Config{Port: "0"}, store, restateServer.Client())
+	if !tc.nilStore {
+		srv.restateCfg.RestateIngressURL = restateServer.URL
+	}
+	handler := srv.newMCPHandler()
 
 	reqBody := `{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"` + toolName + `","arguments":` + tc.args + `}}`
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(reqBody))
