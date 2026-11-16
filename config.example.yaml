@@ -2,14 +2,24 @@
 # Aerial Configuration (config.yaml)
 # ==============================================================================
 
-# LLM Model Name used by Antigravity CLI (e.g. gemini-2.5-flash, gemini-2.5-pro)
-model: gemini-2.5-flash
+# LLM Model Name used by Antigravity CLI (e.g. gemini-3.8-flash-high)
+model: gemini-3.8-flash-high
+medium_effort_model: gemini-3.8-flash-medium
+low_effort_model: gemini-3.8-flash-low
 
 # Timezone for scheduled cron routines and timestamp rendering
 timezone: America/Los_Angeles
 
 # Discord system channel name or snowflake ID for startup and error alerts
 system_channel: aerial-dev
+
+# Cluster Service Endpoints & NATS JetStream URL
+synapse_url: http://synapse.aerial
+vanadis_url: http://vanadis.aerial
+haro_url: http://haro.aerial
+coven_url: http://coven.aerial
+docket_url: http://docket-mcp.aerial
+nats_url: nats://nats.aerial:4222
 
 # Optional Local/Edge Classifier Endpoint (pjev / System-1)
 # When specified, ambient triage calls route to this endpoint (e.g. pjev on calibarn).
