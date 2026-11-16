@@ -3,12 +3,15 @@ package metrics
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	_ "modernc.org/sqlite"
 )
 
@@ -137,8 +140,6 @@ func TestMetricsDefaultFallbackBranches(t *testing.T) {
 	RecordWebhookDispatch("", "", 10*time.Millisecond)
 	RecordSessionRotation("", "", "")
 	RecordYieldTrap("", "", "")
-	RecordVoiceTTFR("", "", 10*time.Millisecond)
-	RecordVoiceTTFR("", "", -5*time.Millisecond)
 }
 
 func TestRecordTokens_AutoCalculatesTotalWhenZero(t *testing.T) {
@@ -225,21 +226,54 @@ func TestRecordRunnerExecution_SourceLabelAndBuckets(t *testing.T) {
 }
 
 func TestRecordVoiceTTFR(t *testing.T) {
-	RecordVoiceTTFR("sse", "success", 250*time.Millisecond)
-
-	handler := Handler()
-	req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", rec.Code)
+	// Not parallel: rows read before/after deltas on shared global histogram series.
+	tests := []struct {
+		name       string
+		mode       string
+		status     string
+		duration   time.Duration
+		wantMode   string
+		wantStatus string
+		wantSum    float64
+	}{
+		{name: "sse success observed in seconds", mode: "sse", status: "success", duration: 250 * time.Millisecond, wantMode: "sse", wantStatus: "success", wantSum: 0.25},
+		{name: "json error observed in seconds", mode: "json", status: "error", duration: 1500 * time.Millisecond, wantMode: "json", wantStatus: "error", wantSum: 1.5},
+		{name: "empty labels fall back to unknown", mode: "", status: "", duration: 500 * time.Millisecond, wantMode: "unknown", wantStatus: "unknown", wantSum: 0.5},
+		{name: "negative duration clamps to zero", mode: "sse", status: "error", duration: -5 * time.Millisecond, wantMode: "sse", wantStatus: "error", wantSum: 0},
 	}
 
-	body := rec.Body.String()
-	if !strings.Contains(body, `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="success"`) {
-		t.Errorf("expected voice ttfr metric, got:\n%s", body)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			countBefore, sumBefore := voiceTTFRSnapshot(t, tc.wantMode, tc.wantStatus)
+			RecordVoiceTTFR(tc.mode, tc.status, tc.duration)
+			countAfter, sumAfter := voiceTTFRSnapshot(t, tc.wantMode, tc.wantStatus)
+
+			if got := countAfter - countBefore; got != 1 {
+				t.Errorf("sample count delta = %d, want 1", got)
+			}
+			if got := sumAfter - sumBefore; math.Abs(got-tc.wantSum) > 1e-9 {
+				t.Errorf("sample sum delta = %v, want %v", got, tc.wantSum)
+			}
+		})
 	}
+}
+
+// voiceTTFRSnapshot returns the sample count and sum of one voice TTFR histogram series.
+func voiceTTFRSnapshot(t *testing.T, mode, status string) (uint64, float64) {
+	t.Helper()
+	obs, err := VoiceTTFRDurationSeconds.GetMetricWithLabelValues(mode, status)
+	if err != nil {
+		t.Fatalf("voice TTFR series %s/%s: %v", mode, status, err)
+	}
+	hist, ok := obs.(prometheus.Metric)
+	if !ok {
+		t.Fatalf("voice TTFR observer is %T, want prometheus.Metric", obs)
+	}
+	m := &dto.Metric{}
+	if err := hist.Write(m); err != nil {
+		t.Fatalf("write voice TTFR series %s/%s: %v", mode, status, err)
+	}
+	return m.GetHistogram().GetSampleCount(), m.GetHistogram().GetSampleSum()
 }
 
 func TestRecordToolAndSkillExecution(t *testing.T) {
