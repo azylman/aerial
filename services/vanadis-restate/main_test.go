@@ -683,6 +683,12 @@ func TestLoadConfigFromEnv_Authoritative(t *testing.T) {
 	assert.Equal(t, "nats://localhost:4222", cfg.NATSURL)
 	assert.Equal(t, "token-xyz", cfg.GitHubToken)
 	assert.Equal(t, "/tmp/share", cfg.ShareRoot)
+
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("POSTGRES_URL", "")
+	t.Setenv("POSTGRES_PASSWORD", "secret-pass")
+	cfgDSN := LoadConfigFromEnv()
+	assert.Equal(t, "postgres://aerial:secret-pass@postgres:5432/aerial?sslmode=disable", cfgDSN.PostgresURL)
 }
 
 func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
@@ -971,7 +977,12 @@ func TestRestateObjectRuntime_SetLaunchedNil(t *testing.T) {
 func TestBuildObject_NilStoreBranches(t *testing.T) {
 	t.Parallel()
 	ctx := makeObjectMockContext(t, "b1")
-	bo := NewBuildObject("", nil)
+	var typedNilStore *PostgresVanadisStore
+	bo := NewBuildObject("", nil).WithAuthority(typedNilStore, nil)
+	router := NewBuildRouterService(typedNilStore)
+	// Strict interface-nil check to ensure typed-nil pointer was normalized to untyped nil interface;
+	// Testify assert.Nil uses reflection and would consider a non-normalized (*PostgresVanadisStore)(nil) interface value nil.
+	assert.True(t, router.store == nil)
 
 	// UpdateBuild nil store
 	b, err := bo.UpdateBuild(ctx, UpdateBuildRequest{Title: "Title"})

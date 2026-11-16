@@ -78,6 +78,9 @@ type BuildRouterService struct {
 
 // NewBuildRouterService constructs a BuildRouterService.
 func NewBuildRouterService(store VanadisStore, invokerFactory ...func(restate.Context) buildObjectInvoker) *BuildRouterService {
+	if pg, ok := store.(*PostgresVanadisStore); ok && pg == nil {
+		store = nil
+	}
 	var ifn func(restate.Context) buildObjectInvoker
 	if len(invokerFactory) > 0 {
 		ifn = invokerFactory[0]
