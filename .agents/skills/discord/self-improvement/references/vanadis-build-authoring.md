@@ -105,6 +105,7 @@ Whenever a change requires **≥ 2 PRs**—whether across multiple repositories 
 ```
 
 ## 3. Planner Owns Architecture & Contracts; Workers Own Implementation Code
+- **No Worker Subagents**: Vanadis PR and action workers must NEVER spawn or invoke subagents. Never put delegation or subagent review requirements in chunk instructions or shared context; workers perform their assigned edits, operational steps, tests, and verification directly. Any required subagent review must be arranged by the parent planner outside worker execution.
 - Never write vague outcome mandates (*"consolidate X, Y, and Z"* or *"refactor component A"*) that defer structural design discovery to a worker model.
 - **Contracts, Not Code (Zero Full Function Dumps, Import Lists, or Line Numbers)**:
   - Specify **concrete interfaces, struct definitions/tags, function signatures, behavioral/edge-case rules, and shared helper/mock contracts strictly by symbol name**.
