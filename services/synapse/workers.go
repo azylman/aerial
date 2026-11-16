@@ -399,8 +399,23 @@ func NewDefaultOutboundDispatcher(brainURL string, client *http.Client) *Default
 	}
 }
 
+func isFluxEventServerRootURL(rawURL string) bool {
+	_, rest, ok := strings.Cut(strings.ToLower(strings.TrimSpace(rawURL)), "://")
+	if !ok {
+		return false
+	}
+	hostPort, path, _ := strings.Cut(rest, "/")
+	host, _, _ := strings.Cut(hostPort, ":")
+	return (host == "notification-controller" || strings.HasPrefix(host, "notification-controller.")) && strings.Trim(path, "/") == ""
+}
+
 func (d *DefaultOutboundDispatcher) SetFluxReceiverURL(receiverURL string) {
-	d.fluxReceiverURL = strings.TrimRight(receiverURL, "/")
+	trimmed := strings.TrimRight(strings.TrimSpace(receiverURL), "/")
+	if isFluxEventServerRootURL(trimmed) {
+		d.fluxReceiverURL = ""
+		return
+	}
+	d.fluxReceiverURL = trimmed
 }
 
 func (d *DefaultOutboundDispatcher) SetKubeConfig(apiServer, token string) {

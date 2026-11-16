@@ -166,6 +166,29 @@ func TestUpdatedForCurrentMainHelpers(t *testing.T) {
 	if !srv.wasUpdatedForCurrentMain("azylman/other", 99) {
 		t.Errorf("expected true for remaining PR 99")
 	}
+
+	srv.markUpdatedForCurrentMain("azylman/aerial", 42)
+	srv.clearUpdatedPRsForMainCommit("azylman/aerial", "mainsha1")
+	if srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
+		t.Errorf("expected false after new main commit mainsha1")
+	}
+
+	srv.markUpdatedForCurrentMain("azylman/aerial", 42)
+	srv.clearUpdatedPRsForMainCommit("azylman/aerial", "mainsha1")
+	if !srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
+		t.Errorf("expected true on duplicate redelivery of same main commit mainsha1")
+	}
+
+	srv.clearUpdatedPRsForMainCommit("azylman/aerial", "mainsha2")
+	if srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
+		t.Errorf("expected false after advancing to mainsha2")
+	}
+
+	srv.markUpdatedForCurrentMain("azylman/aerial", 42)
+	srv.clearUpdatedPRsForMainCommit("azylman/aerial", "mainsha1")
+	if !srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
+		t.Errorf("expected true on stale redelivery of earlier main commit mainsha1 after mainsha2")
+	}
 }
 
 type failedCheckTrackerTestCase struct {
