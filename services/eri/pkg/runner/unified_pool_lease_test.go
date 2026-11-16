@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -713,5 +715,118 @@ func TestUnifiedProcessPool_ClaudeEngine_BuildDaemonConfig(t *testing.T) {
 	}
 	if spawnCfg.ResumeSession {
 		t.Errorf("expected ResumeSession false for non-existent session on disk")
+	}
+}
+
+func TestUnifiedProcessPool_CodexEngine_BuildDaemonConfig(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sm := session.New(tmpDir, tmpDir)
+
+	existingSessID := "th_existing_on_disk_123"
+	codexSessDir := filepath.Join(tmpDir, "codex", "sessions", "2026", "11", "15")
+	if err := os.MkdirAll(codexSessDir, 0o755); err != nil {
+		t.Fatalf("failed creating codex session dir: %v", err)
+	}
+	rolloutPath := filepath.Join(codexSessDir, fmt.Sprintf("rollout-20261115-%s.jsonl", existingSessID))
+	if err := os.WriteFile(rolloutPath, []byte(`{"type":"response_item","payload":{"type":"message","role":"user","content":"hello"}}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed writing dummy rollout: %v", err)
+	}
+
+	tests := []struct {
+		name              string
+		sessionID         string
+		wantResumeSession bool
+		wantCodexBin      string
+	}{
+		{
+			name:              "empty session id does not resume",
+			sessionID:         "",
+			wantResumeSession: false,
+			wantCodexBin:      "/custom/bin/codex",
+		},
+		{
+			name:              "non-existent session id does not resume",
+			sessionID:         "th_non_existent_999",
+			wantResumeSession: false,
+			wantCodexBin:      "/custom/bin/codex",
+		},
+		{
+			name:              "existing session id resumes",
+			sessionID:         existingSessID,
+			wantResumeSession: true,
+			wantCodexBin:      "/custom/bin/codex",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			var spawnCfg DaemonConfig
+			mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+				onSpawn: func(c DaemonConfig) {
+					mu.Lock()
+					spawnCfg = c
+					mu.Unlock()
+				},
+			})
+			pool := NewUnifiedProcessPool(PoolConfig{
+				Engine:         "codex",
+				CodexBin:       tc.wantCodexBin,
+				SessionManager: sm,
+			}, mock)
+			defer pool.Close()
+
+			ctx := context.Background()
+			daemon, err := pool.GetOrCreate(ctx, "target-"+tc.name, tc.sessionID)
+			if err != nil || daemon == nil {
+				t.Fatalf("unexpected GetOrCreate error: %v", err)
+			}
+
+			mu.Lock()
+			capturedCfg := spawnCfg
+			mu.Unlock()
+
+			if capturedCfg.CodexBin != tc.wantCodexBin {
+				t.Errorf("expected CodexBin %q, got %q", tc.wantCodexBin, capturedCfg.CodexBin)
+			}
+			if capturedCfg.ResumeSession != tc.wantResumeSession {
+				t.Errorf("expected ResumeSession %v, got %v", tc.wantResumeSession, capturedCfg.ResumeSession)
+			}
+		})
+	}
+}
+
+func TestUnifiedProcessPool_UpdateEngine_Codex(t *testing.T) {
+	t.Parallel()
+	var nilPool *UnifiedProcessPool
+	nilPool.UpdateEngine("codex", "/bin/claude")
+
+	pool := NewUnifiedProcessPool(PoolConfig{
+		Engine: "agy",
+	}, NewMockSpawner())
+	defer pool.Close()
+
+	pool.UpdateEngine("codex", "/bin/claude", "/bin/codex")
+	pool.mu.RLock()
+	gotEngine := pool.cfg.Engine
+	gotClaude := pool.cfg.ClaudeBin
+	gotCodex := pool.cfg.CodexBin
+	pool.mu.RUnlock()
+
+	if gotEngine != "codex" || gotClaude != "/bin/claude" || gotCodex != "/bin/codex" {
+		t.Errorf("unexpected pool config after UpdateEngine: engine=%q, claude=%q, codex=%q", gotEngine, gotClaude, gotCodex)
+	}
+
+	// UpdateEngine without codexBin parameter preserves existing CodexBin
+	pool.UpdateEngine("claude", "/usr/local/bin/claude")
+	pool.mu.RLock()
+	gotEngine = pool.cfg.Engine
+	gotCodex = pool.cfg.CodexBin
+	pool.mu.RUnlock()
+	if gotEngine != "claude" || gotCodex != "/bin/codex" {
+		t.Errorf("expected engine 'claude' and preserved codexBin '/bin/codex', got engine=%q codex=%q", gotEngine, gotCodex)
 	}
 }

@@ -132,10 +132,15 @@ func executeConfigReload(ctx context.Context, source string, cfg *config.Config,
 
 	cur := cfg.Current()
 	if options.ephemeralPool != nil {
-		if engineUpdater, ok := options.ephemeralPool.(interface {
+		switch u := options.ephemeralPool.(type) {
+		case interface {
+			UpdateEngine(engine, claudeBin string, codexBin ...string)
+		}:
+			u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin)
+		case interface {
 			UpdateEngine(engine, claudeBin string)
-		}); ok {
-			engineUpdater.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
+		}:
+			u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
 		}
 		lowModel, _ := resolveBrainModelDefaults(cur)
 		if modelUpdater, ok := options.ephemeralPool.(interface{ UpdateModel(model string) }); ok {
@@ -149,10 +154,15 @@ func executeConfigReload(ctx context.Context, source string, cfg *config.Config,
 	if options.workerPool != nil {
 		for _, k := range queue.AllValidPoolKeys() {
 			if p := options.workerPool.Pool(k); p != nil {
-				if engineUpdater, ok := p.(interface {
+				switch u := p.(type) {
+				case interface {
+					UpdateEngine(engine, claudeBin string, codexBin ...string)
+				}:
+					u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin)
+				case interface {
 					UpdateEngine(engine, claudeBin string)
-				}); ok {
-					engineUpdater.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
+				}:
+					u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
 				}
 			}
 		}
@@ -369,6 +379,7 @@ func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome
 	return runner.NewUnifiedProcessPool(runner.PoolConfig{
 		Engine:                  cur.GetEngine(),
 		ClaudeBin:               cur.ClaudeBin,
+		CodexBin:                cur.CodexBin,
 		GeminiHomeDir:           voiceHome,
 		Model:                   lowEffortModel,
 		AgyBin:                  cur.AgyBin,
@@ -610,6 +621,7 @@ func buildBrainProcessPools(
 		pcfg := runner.PoolConfig{
 			Engine:            cur.GetEngine(),
 			ClaudeBin:         cur.ClaudeBin,
+			CodexBin:          cur.CodexBin,
 			GeminiHomeDir:     home,
 			Model:             model,
 			AgyBin:            cur.AgyBin,

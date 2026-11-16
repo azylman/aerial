@@ -1,7 +1,9 @@
 package runner
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -61,7 +63,37 @@ func handlePipeMockUserLine(outW io.Writer, line string, attemptCount *atomic.In
 	}
 }
 
-func runPipeMockPump(inR io.Reader, outW io.WriteCloser, sessID string, idx int, attemptCount *atomic.Int32, opts pipeMockSpawnerOpts) {
+func runCodexPipeMockPump(inR io.Reader, outW io.WriteCloser, sessID string, idx int, opts pipeMockSpawnerOpts) {
+	defer outW.Close()
+	if opts.skipInitOnAttempt != 0 && idx == opts.skipInitOnAttempt {
+		return
+	}
+	scanner := bufio.NewScanner(inR)
+	for scanner.Scan() {
+		var req codexRPCRequest
+		if err := json.Unmarshal([]byte(scanner.Text()), &req); err != nil {
+			continue
+		}
+		switch req.Method {
+		case "initialize":
+			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{}}`+"\n", req.ID)
+		case "initialized":
+		case "thread/start", "thread/resume":
+			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{"thread":{"id":%q}}}`+"\n", req.ID, sessID)
+		case "turn/start":
+			if opts.echoRes != "" {
+				_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"item-1","type":"agentMessage","text":%q}}}`+"\n", opts.echoRes)
+			}
+			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}`+"\n")
+		}
+	}
+}
+
+func runPipeMockPump(inR io.Reader, outW io.WriteCloser, sessID string, idx int, attemptCount *atomic.Int32, opts pipeMockSpawnerOpts, cfg DaemonConfig) {
+	if cfg.IsCodex() {
+		runCodexPipeMockPump(inR, outW, sessID, idx, opts)
+		return
+	}
 	defer outW.Close()
 	if opts.skipInitOnAttempt == 0 || idx != opts.skipInitOnAttempt {
 		_, _ = fmt.Fprintf(outW, `{"event":"init","session_id":%q}`+"\n", sessID)
@@ -110,7 +142,7 @@ func newPipeMockSpawner(opts pipeMockSpawnerOpts) *MockDaemonSpawner {
 			}
 
 			sessID := resolvePipeMockSessionID(cfg, idx, opts.initSessID)
-			go runPipeMockPump(inR, outW, sessID, idx, &attemptCount, opts)
+			go runPipeMockPump(inR, outW, sessID, idx, &attemptCount, opts, cfg)
 
 			pid := opts.pid
 			if pid == 0 {
@@ -1128,5 +1160,33 @@ func TestUnifiedProcessPool_PrewarmedTargets_DynamicUpdate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			runPrewarmedTargetsUpdateCase(t, tc)
 		})
+	}
+}
+
+func TestUnifiedProcessPool_RegisterSpawnedDaemon_StateLifecycle(t *testing.T) {
+	t.Parallel()
+	pool := NewUnifiedProcessPool(PoolConfig{}, &MockDaemonSpawner{})
+	defer pool.Close()
+
+	d1 := &StreamingDaemon{state: StateReady}
+	d2 := &StreamingDaemon{state: StateReady}
+	if err := pool.registerSpawnedDaemon("target", d1); err != nil {
+		t.Fatalf("unexpected error registering d1: %v", err)
+	}
+
+	if err := pool.registerSpawnedDaemon("target", d2); err != nil {
+		t.Fatalf("unexpected error registering d2: %v", err)
+	}
+	pool.mu.RLock()
+	stored := pool.daemons["target"]
+	pool.mu.RUnlock()
+	if stored != d2 {
+		t.Errorf("expected d2 to be stored in pool.daemons, got %v", stored)
+	}
+
+	_ = pool.Close()
+	d3 := &StreamingDaemon{state: StateReady}
+	if err := pool.registerSpawnedDaemon("target", d3); err == nil {
+		t.Errorf("expected error registering daemon on closed pool")
 	}
 }

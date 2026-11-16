@@ -85,8 +85,10 @@ type TurnContext struct {
 	streamMessageByParent map[string]string
 	// sawModelReply records that a real (model-produced) assistant message arrived this turn, and
 	// syntheticReply holds the latest Claude CLI-authored one; guarded by inflightMu.
-	sawModelReply  bool
-	syntheticReply *claudeSyntheticReply
+	sawModelReply        bool
+	syntheticReply       *claudeSyntheticReply
+	seenReasoningItemIDs map[string]bool
+	codexResponseText    string
 }
 
 // ClaudeSyntheticModel is the message.model of assistant messages the Claude CLI writes itself.
@@ -225,12 +227,6 @@ func closeStreamQuietly(c io.Closer, name string) {
 	}
 }
 
-func (d *StreamingDaemon) closeOnStartupError(reason string) {
-	if err := d.Close(); err != nil {
-		log.Printf("[StreamingDaemon] Warning: failed to close daemon during startup failure (%s): %v", reason, err)
-	}
-}
-
 // DefaultHandshakeTimeout is the default maximum duration to wait for the daemon init event.
 const DefaultHandshakeTimeout = 30 * time.Second
 
@@ -254,27 +250,15 @@ func (d *StreamingDaemon) waitForAgyHandshake(ctx context.Context, reader *bufio
 		return fmt.Errorf("daemon startup cancelled: %w", ctx.Err())
 	case <-timer.C:
 		d.closeOnStartupError("timeout")
-		errMsg := "daemon startup timed out waiting for init event"
-		if tailText := strings.TrimSpace(d.stderrTail.String()); tailText != "" {
-			errMsg = fmt.Sprintf("%s: %s", errMsg, tailText)
-		}
-		return errors.New(errMsg)
+		return errors.New(d.appendStderrTail("daemon startup timed out waiting for init event"))
 	case readErr := <-errChan:
 		d.closeOnStartupError("read error")
-		errMsg := fmt.Sprintf("daemon stdout closed before init event: %v", readErr)
-		if tailText := strings.TrimSpace(d.stderrTail.String()); tailText != "" {
-			errMsg = fmt.Sprintf("%s: %s", errMsg, tailText)
-		}
-		return errors.New(errMsg)
+		return errors.New(d.appendStderrTail(fmt.Sprintf("daemon stdout closed before init event: %v", readErr)))
 	case line := <-lineChan:
 		initSessID, ok := ParseInitEvent(line)
 		if !ok || !IsValidUUID(initSessID) {
 			d.closeOnStartupError("malformed init")
-			errMsg := fmt.Sprintf("failed parsing init event (%q)", line)
-			if tailText := strings.TrimSpace(d.stderrTail.String()); tailText != "" {
-				errMsg = fmt.Sprintf("%s: %s", errMsg, tailText)
-			}
-			return errors.New(errMsg)
+			return errors.New(d.appendStderrTail(fmt.Sprintf("failed parsing init event (%q)", line)))
 		}
 		d.mu.Lock()
 		d.sessionID, d.state = initSessID, StateReady
@@ -315,21 +299,22 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 
 	reader := bufio.NewReader(stdout)
 
+	timeout := DefaultHandshakeTimeout
+	if cfg.Timeout > 0 {
+		timeout = cfg.Timeout
+	}
 	if cfg.IsClaude() {
 		sessID := cfg.SessionID
 		if sessID == "" {
 			sessID = uuid.New().String()
 		}
-		d.sessionID = sessID
-		d.state = StateReady
-	} else {
-		timeout := DefaultHandshakeTimeout
-		if cfg.Timeout > 0 {
-			timeout = cfg.Timeout
-		}
-		if err := d.waitForAgyHandshake(ctx, reader, timeout); err != nil {
+		d.sessionID, d.state = sessID, StateReady
+	} else if cfg.IsCodex() {
+		if err := d.waitForCodexHandshake(ctx, reader, timeout); err != nil {
 			return nil, err
 		}
+	} else if err := d.waitForAgyHandshake(ctx, reader, timeout); err != nil {
+		return nil, err
 	}
 
 	d.readerWg.Add(1)
@@ -478,7 +463,7 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	payloadPrompt = deduplicateRetrievedMemory(payloadPrompt, d.seenMemoryIDs)
 	d.mu.Unlock()
 
-	encoded, err := marshalPromptPayload(d.cfg.IsClaude(), payloadPrompt)
+	encoded, err := d.marshalTurnPrompt(turnCtx, payloadPrompt)
 	if err != nil {
 		return fmt.Errorf("failed to marshal turn prompt: %w", err)
 	}
@@ -656,7 +641,7 @@ func (f stepUpdateFields) toolCall(name string) ToolCall {
 }
 
 func isAgySubagentTool(toolName string) bool {
-	return strings.TrimPrefix(strings.TrimSpace(toolName), "mcp_") == "invoke_subagent"
+	return strings.TrimPrefix(strings.TrimSpace(toolName), "mcp_") == canonicalToolSubagent
 }
 
 // isClaudeSubagentTool reports whether a Claude tool_use spawns a subagent.
@@ -704,7 +689,7 @@ func ExtractToolDetail(toolName string, params map[string]any, fallbackCmd strin
 		if p := extractFirstString(params, "Path", "path", "filePath", "file_path", "target_file", "AbsolutePath", "Target", "target"); p != "" {
 			return filepath.Base(p)
 		}
-	case "run_command", "execute_command", "bash", "sh":
+	case "run_command", "execute_command", canonicalToolBash, "sh":
 		if ts := extractFirstString(params, "toolSummary", "tool_summary", "summary"); ts != "" {
 			return ts
 		}
@@ -722,7 +707,7 @@ func ExtractToolDetail(toolName string, params map[string]any, fallbackCmd strin
 		if q := extractFirstString(params, "Query", "query", "Pattern", "pattern"); q != "" {
 			return q
 		}
-	case "invoke_subagent", "define_subagent":
+	case canonicalToolSubagent, "define_subagent":
 		if r := extractFirstString(params, "Role", "role", "TypeName", "type_name", "Name", "name"); r != "" {
 			return r
 		}
@@ -761,9 +746,9 @@ func applyStepUpdateSubmap(f *stepUpdateFields, su map[string]any) {
 	f.toolName, f.toolParams = extractFirstToolCallEntry(su, f.toolName, f.toolParams)
 	f.cmdName = ExtractToolDetail(f.toolName, f.toolParams, f.cmdName)
 	switch state {
-	case "DONE":
+	case statusUpperDone:
 		f.toolEndStatus = "ok"
-	case "ERROR":
+	case statusUpperError:
 		f.toolEndStatus = statusError
 	}
 	f.isSubagent = typ == "subagent"
@@ -824,7 +809,7 @@ func extractActivatedSkill(toolName string, toolParams map[string]any, cmdName s
 	switch clean {
 	case "edit_file", "write_file", "replace_file_content", "multi_replace_file_content", "delete_file", "grep_search", "find_by_name", toolCallMCPTool:
 		return "", false
-	case "run_command", "execute_command", "bash", "sh":
+	case "run_command", "execute_command", canonicalToolBash, "sh":
 		cl := extractFirstString(toolParams, "CommandLine", "command_line", "command", "cmd")
 		if isShellReadCommand(ExtractCommandName(cl)) {
 			return ExtractSkillFromTarget(cl)
@@ -1065,7 +1050,7 @@ func extractResultStatusAndError(raw map[string]any) (status, errMsg string) {
 
 	isErr := isClaudeResultError(raw, resObj)
 	if isErr && status == "" {
-		status = "ERROR"
+		status = statusUpperError
 	}
 	if errMsg == "" {
 		errMsg = extractResultErrors(raw, resObj, isErr)
@@ -1092,7 +1077,7 @@ func (d *StreamingDaemon) tryRescueTurnOnResult(activeTurn *TurnContext, raw map
 }
 
 func (d *StreamingDaemon) handleResultError(activeTurn *TurnContext, respStr, status, errMsg, currentModel string) bool {
-	if !strings.EqualFold(status, "ERROR") {
+	if !strings.EqualFold(status, statusUpperError) {
 		return false
 	}
 	if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
@@ -1128,7 +1113,7 @@ func (d *StreamingDaemon) deliverResultToSink(activeTurn *TurnContext, raw map[s
 		return
 	}
 
-	if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") || strings.EqualFold(status, "ERROR") {
+	if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") || strings.EqualFold(status, statusUpperError) {
 		if d.tryRescueTurnOnResult(activeTurn, raw, errMsg, currentModel) {
 			return
 		}
@@ -1199,6 +1184,9 @@ func (d *StreamingDaemon) recordDaemonInit() {
 func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
+		return
+	} else if d.cfg.IsCodex() {
+		d.dispatchCodexJSONRPCLine(trimmed)
 		return
 	}
 	var raw map[string]any
@@ -1460,7 +1448,7 @@ func extractResponseString(raw map[string]any) string {
 		isErr = true
 	}
 
-	keys := []string{"response", fieldResult, fieldContent, fieldText}
+	keys := []string{fieldResponse, fieldResult, fieldContent, fieldText}
 	if resObj, ok := raw[fieldResult].(map[string]any); ok {
 		if b, ok := resObj["is_error"].(bool); ok && b {
 			isErr = true
@@ -1474,7 +1462,7 @@ func extractResponseString(raw map[string]any) string {
 			}
 		}
 	}
-	for _, k := range []string{"response", fieldResult, fieldContent, fieldText} {
+	for _, k := range []string{fieldResponse, fieldResult, fieldContent, fieldText} {
 		if k == fieldResult && isErr {
 			continue
 		}
