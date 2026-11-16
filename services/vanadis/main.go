@@ -271,6 +271,8 @@ type VanadisStore interface {
 	RemoveChunk(ctx context.Context, buildID, chunkRef string) (*VanadisChunk, []VanadisChunk, error)
 	RecordPRCheckStatus(ctx context.Context, chunkID, checkName, checkState string) error
 	RecordPRRolloutState(ctx context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error
+	CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
+	RecordPRDeploymentFailure(ctx context.Context, chunkID, banner string) error
 	ResetChunkForSynchronize(ctx context.Context, chunkID, buildID string) error
 	IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string) (int, error)
 	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
@@ -1448,3 +1450,6 @@ func main() {
 		log.Fatalf("[vanadis] Error: %v", err)
 	}
 }
+
+// errPRTransitionSkipped means the persisted row rejected a stale lifecycle transition.
+var errPRTransitionSkipped = errors.New("pr lifecycle transition not applied")

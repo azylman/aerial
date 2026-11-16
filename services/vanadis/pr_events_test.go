@@ -948,6 +948,7 @@ func TestHandlePRMergedAndDeploySuccess(t *testing.T) {
 			build := mkBuild(tc.buildID, "123456789012345678", "Build", "Obj", "running")
 			chunk := mkChunk(tc.chunkID, tc.buildID, 0, "Chunk", "Instr", "medium", tc.initStatus)
 			chunk.PRNumber = tc.prNum
+			chunk.Banner = "deployment failed"
 			chunk.Repo = "azylman/aerial"
 			require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
 
@@ -961,6 +962,9 @@ func TestHandlePRMergedAndDeploySuccess(t *testing.T) {
 			updatedChunk, _, err := store.GetChunk(ctx, tc.chunkID)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantStatus, updatedChunk.Status)
+			if tc.event == "deploy_success" {
+				assert.Empty(t, updatedChunk.Banner)
+			}
 
 			wantReconcilePath := fmt.Sprintf("/Build/%s/Reconcile/send", tc.buildID)
 			var foundReconcile, foundCancel bool
@@ -1173,14 +1177,12 @@ func TestHandlePRDeploySuccess_ActionChunkWithPR(t *testing.T) {
 	assert.Equal(t, "merged", cAfterMerge.Status)
 	assert.Equal(t, "running", bAfterMerge.Status, "build must remain running while action chunk awaits deployment")
 
-	// 3. Sync succeeds: progress only, must NOT reconcile on sync_success
 	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:    "sync_success",
 		Repo:     "azylman/aerial",
 		PRNumber: 905,
 	}))
 
-	// 4. PR deploy succeeds: Build Virtual Object is called and chunk becomes completed
 	require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:    "deploy_success",
 		Repo:     "azylman/aerial",
@@ -1238,7 +1240,6 @@ func TestHandlePRDeploySuccess_WithoutAwakeable(t *testing.T) {
 	}
 	assert.True(t, foundReconcileSend, "reconcile request must be sent on deploy_success when deploy awakeable is empty")
 
-	// Error returning when status update fails
 	store.updateChunkErr = errors.New("cannot update chunk")
 	chunk.Status = "merged"
 	require.Error(t, srv.handlePRDeploySuccess(ctx, &chunk, &build))
@@ -1274,5 +1275,225 @@ func TestProcessPRLifecycleEvent_SyncSuccess_PRChunk(t *testing.T) {
 	for _, r := range *reqs {
 		assert.NotEqual(t, "/restate/awakeables/awk-dep-907/resolve", r.Path, "must not resolve awakeable on sync_success")
 		assert.NotEqual(t, "/Build/b-sync-pr/Reconcile/send", r.Path, "must not send reconcile on sync_success")
+	}
+}
+
+func TestDeploymentSuccessEvidence(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, chunkStatus, buildStatus, wantStatus string
+		evidence                                   bool
+		fail                                       bool
+		late                                       bool
+		wantBanner                                 string
+	}{
+		{"failure to success", "deploy_failed", "running", "completed", true, false, false, ""},
+		{"completed metadata in failed build", "completed", "failed", "completed", true, false, false, ""},
+		{"nil preserves evidence", "deploying", "running", "completed", false, false, false, ""},
+		{"duplicate and late failure", "completed", "running", "completed", true, false, true, ""},
+		{"persistence failure", "deploying", "running", "deploying", true, true, false, "deployment failed"},
+		{"failed chunk", "failed", "running", "failed", true, false, false, "deployment failed"},
+		{"cancelled chunk", "cancelled", "running", "cancelled", true, false, false, "deployment failed"},
+		{"failed build blocks unfinished chunk", "deploying", "failed", "deploying", true, false, false, "deployment failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			srv, store, bus, requests := setupTestServer(t)
+			build := mkBuild("b-evidence", "123456789012345678", "Build", "Objective", tc.buildStatus)
+			chunk := mkChunk("c-evidence", build.ID, 0, "Chunk", "Instructions", "medium", tc.chunkStatus)
+			chunk.Mode = "pr"
+			chunk.Repo = "owner/repo"
+			chunk.PRNumber = 42
+			chunk.Banner = "deployment failed"
+			chunk.RolloutState = &pubsub.PRRolloutState{ExpectedJobs: []string{"existing"}}
+			require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{chunk}))
+			if tc.fail {
+				store.updateChunkErr = errors.New("persist failed")
+			}
+			ev := pubsub.PRLifecycleEvent{Event: "deploy_success", Repo: "owner/repo", PRNumber: 42}
+			if tc.evidence {
+				ev.RolloutState = &pubsub.PRRolloutState{ExpectedJobs: []string{"verified"}}
+			}
+			err := srv.ProcessPRLifecycleEvent(ctx, ev)
+			if tc.fail {
+				require.Error(t, err)
+				assert.Empty(t, *requests)
+				assert.Empty(t, bus.getEvents())
+			} else {
+				require.NoError(t, err)
+			}
+			if tc.late {
+				require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
+				ev.Event = "deploy_failed"
+				require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
+				ev.Event = "rollout_updated"
+				ev.RolloutState = &pubsub.PRRolloutState{ExpectedJobs: []string{"stale"}}
+				require.NoError(t, srv.ProcessPRLifecycleEvent(ctx, ev))
+			}
+			got, gotBuild, err := store.GetChunk(ctx, chunk.ID)
+			require.NoError(t, err)
+			if tc.wantBanner != "" && !tc.fail {
+				for _, request := range *requests {
+					assert.NotContains(t, request.Path, "/Reconcile/")
+				}
+				assert.Empty(t, bus.getEvents())
+			}
+			assert.Equal(t, tc.wantStatus, got.Status)
+			assert.Equal(t, tc.wantBanner, got.Banner)
+			assert.Equal(t, tc.buildStatus, gotBuild.Status)
+			wantJobs := []string{"existing"}
+			if tc.evidence && tc.wantBanner == "" {
+				wantJobs = []string{"verified"}
+			}
+			assert.Equal(t, wantJobs, got.RolloutState.ExpectedJobs)
+		})
+	}
+}
+
+func TestCompletePRDeployment(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, chunkID                string
+		nilDB, evidence, execFailure bool
+		wantErr                      bool
+		rejected                     bool
+	}{
+		{"nil database", "c1", true, false, false, true, false},
+		{"empty id", "", false, false, false, true, false},
+		{"rejected update", "c1", false, false, false, true, true},
+		{"nil evidence", "c1", false, false, false, false, false},
+		{"supplied evidence", "c1", false, true, false, false, false},
+		{"persistence failure", "c1", false, true, true, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var gotArgs []any
+			store := newMockStore(mockDB{execFn: func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+				gotArgs = args
+				if tc.execFailure {
+					return pgconn.CommandTag{}, errors.New("database unavailable")
+				}
+				if tc.rejected {
+					return pgconn.NewCommandTag("UPDATE 0"), nil
+				}
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			}})
+			if tc.nilDB {
+				store = &PostgresVanadisStore{}
+			}
+			var evidence *pubsub.PRRolloutState
+			if tc.evidence {
+				evidence = &pubsub.PRRolloutState{ExpectedJobs: []string{"service"}}
+			}
+			err := store.CompletePRDeployment(context.Background(), tc.chunkID, evidence)
+			assert.Equal(t, tc.wantErr, err != nil)
+			if tc.wantErr {
+				return
+			}
+
+			if tc.evidence {
+				data, ok := gotArgs[0].([]byte)
+				assert.True(t, ok)
+				assert.Contains(t, string(data), "service")
+			} else {
+				assert.Nil(t, gotArgs[0])
+			}
+		})
+	}
+}
+
+func TestDeploymentFailureAfterCompletion(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, event string }{
+		{"deployment failure loses to persisted success", "deploy_failed"},
+		{"sync failure loses to persisted success", "sync_failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			srv, store, bus, requests := setupTestServer(t)
+			build := mkBuild("b-race", "123456789012345678", "Build", "Objective", "running")
+			stale := mkChunk("c-race", build.ID, 0, "Chunk", "Instructions", "medium", "deploying")
+			stale.Mode = "pr"
+			require.NoError(t, store.CreateBuild(ctx, build, []VanadisChunk{stale}))
+			require.NoError(t, store.CompletePRDeployment(ctx, stale.ID, &pubsub.PRRolloutState{ExpectedJobs: []string{"service"}}))
+			ev := pubsub.PRLifecycleEvent{Event: tc.event}
+			var err error
+			if tc.event == "deploy_failed" {
+				err = srv.handlePRDeployFailed(ctx, ev, &stale, &build)
+			} else {
+				err = srv.handlePRSyncFailed(ctx, ev, &stale, &build)
+			}
+			require.NoError(t, err)
+			got, _, err := store.GetChunk(ctx, stale.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "completed", got.Status)
+			assert.Empty(t, got.Banner)
+			assert.Empty(t, *requests)
+			assert.Empty(t, bus.getEvents())
+		})
+	}
+}
+
+func TestDeploymentSuccessRejectedAfterRead(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, persistedBuildStatus string }{
+		{"cancellation after read", "cancelled"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			srv, store, bus, requests := setupTestServer(t)
+			staleBuild := mkBuild("b-stale", "123456789012345678", "Build", "Objective", "running")
+			staleChunk := mkChunk("c-stale", staleBuild.ID, 0, "Chunk", "Instructions", "medium", "deploying")
+			staleChunk.Mode = "pr"
+			require.NoError(t, store.CreateBuild(ctx, staleBuild, []VanadisChunk{staleChunk}))
+			require.NoError(t, store.UpdateBuildStatus(ctx, staleBuild.ID, tc.persistedBuildStatus))
+			require.NoError(t, srv.handlePRDeploySuccess(ctx, &staleChunk, &staleBuild, pubsub.PRLifecycleEvent{RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"service"}}}))
+			got, _, err := store.GetChunk(ctx, staleChunk.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "deploying", got.Status)
+			assert.Empty(t, *requests)
+			assert.Empty(t, bus.getEvents())
+		})
+	}
+}
+
+func TestRecordPRDeploymentFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, id, tag      string
+		nilDB, execFailure bool
+		wantErr            bool
+	}{
+		{"nil database", "c1", "UPDATE 1", true, false, true},
+		{"empty id", "", "UPDATE 1", false, false, true},
+		{"eligible failure", "c1", "UPDATE 1", false, false, false},
+		{"completion won", "c1", "UPDATE 0", false, false, true},
+		{"persistence failure", "c1", "", false, true, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := newMockStore(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+				if tc.execFailure {
+					return pgconn.CommandTag{}, errors.New("database unavailable")
+				}
+				return pgconn.NewCommandTag(tc.tag), nil
+			}})
+			if tc.nilDB {
+				store = &PostgresVanadisStore{}
+			}
+			err := store.RecordPRDeploymentFailure(context.Background(), tc.id, "deployment failed")
+			assert.Equal(t, tc.wantErr, err != nil)
+			if tc.tag == "UPDATE 0" {
+				assert.ErrorIs(t, err, errPRTransitionSkipped)
+			}
+		})
 	}
 }

@@ -70,7 +70,7 @@ func (s *PostgresVanadisStore) RecordPRRolloutState(ctx context.Context, chunkID
 		return errors.New("chunk_id cannot be empty")
 	}
 	rsJSON := marshalJSONBOrEmpty(rolloutState)
-	const q = `UPDATE vanadis_chunks SET rollout_state = $1::jsonb, status = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN status WHEN $2 != '' THEN $2 ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`
+	const q = `UPDATE vanadis_chunks SET rollout_state = CASE WHEN status = 'completed' THEN rollout_state ELSE $1::jsonb END, status = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN status WHEN $2 != '' THEN $2 ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`
 	tag, err := s.db.Exec(ctx, q, rsJSON, strings.TrimSpace(status), chunkID)
 	if err != nil {
 		return fmt.Errorf("record pr rollout state: %w", err)
@@ -298,7 +298,7 @@ func (s *VanadisServer) ProcessPRLifecycleEvent(ctx context.Context, ev pubsub.P
 	case statusMerged:
 		return s.handlePRMerged(ctx, chunk, build)
 	case "deploy_success":
-		return s.handlePRDeploySuccess(ctx, chunk, build)
+		return s.handlePRDeploySuccess(ctx, chunk, build, ev)
 	case "sync_success":
 		s.syncBuildWidget(ctx, build.ID, "")
 		return nil
@@ -392,6 +392,9 @@ func (s *VanadisServer) handlePRCheckUpdated(ctx context.Context, ev pubsub.PRLi
 }
 
 func (s *VanadisServer) handlePRRolloutUpdated(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
+	if chunk.Status == statusCompleted {
+		return nil
+	}
 	status := ""
 	if ev.Event == "deploy_started" && chunk.Status != statusCompleted && chunk.Status != statusFailed && chunk.Status != statusCancelled {
 		status = statusDeploying
@@ -507,10 +510,15 @@ func (s *VanadisServer) handlePRConflict(ctx context.Context, ev pubsub.PRLifecy
 }
 
 func (s *VanadisServer) handlePRDeployFailed(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
-	status := statusDeployFailed
+	if chunk.Status == statusCompleted {
+		return nil
+	}
 	banner := "Deployment failed for " + firstNonEmpty(ev.JobName, "service")
-	if err := s.store.UpdateChunkBannerAndStatus(ctx, chunk.ID, status, banner); err != nil {
-		log.Printf("[vanadis] warning updating banner for chunk %s on deploy failure: %v", chunk.ID, err)
+	if err := s.store.RecordPRDeploymentFailure(ctx, chunk.ID, banner); err != nil {
+		if errors.Is(err, errPRTransitionSkipped) {
+			return nil
+		}
+		return err
 	}
 	s.syncBuildWidget(ctx, build.ID, banner)
 	prompt := s.formatDeployFailedPrompt(ev)
@@ -518,10 +526,15 @@ func (s *VanadisServer) handlePRDeployFailed(ctx context.Context, ev pubsub.PRLi
 }
 
 func (s *VanadisServer) handlePRSyncFailed(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
-	status := statusDeployFailed
+	if chunk.Status == statusCompleted {
+		return nil
+	}
 	banner := "Git file sync failed"
-	if err := s.store.UpdateChunkBannerAndStatus(ctx, chunk.ID, status, banner); err != nil {
-		log.Printf("[vanadis] warning updating banner for chunk %s on sync failure: %v", chunk.ID, err)
+	if err := s.store.RecordPRDeploymentFailure(ctx, chunk.ID, banner); err != nil {
+		if errors.Is(err, errPRTransitionSkipped) {
+			return nil
+		}
+		return err
 	}
 	s.syncBuildWidget(ctx, build.ID, banner)
 	prompt := s.formatSyncFailedPrompt(ev)
@@ -544,20 +557,34 @@ func (s *VanadisServer) handlePRMerged(ctx context.Context, chunk *VanadisChunk,
 	return nil
 }
 
-func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) error {
+func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild, events ...pubsub.PRLifecycleEvent) error {
 	chunkStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
 	buildStatus := strings.ToLower(strings.TrimSpace(build.Status))
-	if chunkStatus == statusFailed || chunkStatus == statusCancelled || buildStatus == statusFailed || buildStatus == statusCancelled {
+	if chunkStatus == statusFailed || chunkStatus == statusCancelled || (buildStatus == statusFailed && chunkStatus != statusCompleted) || buildStatus == statusCancelled {
 		log.Printf("[vanadis] chunk %s or build %s is in %s/%s; skipping deploy completion", chunk.ID, build.ID, chunk.Status, build.Status)
 		s.syncBuildWidget(ctx, build.ID, "")
 		return nil
 	}
 
+	var evidence *pubsub.PRRolloutState
+	if len(events) != 0 {
+		evidence = events[0].RolloutState
+	}
+	if chunk.Mode != chunkModeAction || chunk.PRNumber > 0 {
+		if err := s.store.CompletePRDeployment(ctx, chunk.ID, evidence); err != nil {
+			if errors.Is(err, errPRTransitionSkipped) {
+				return nil
+			}
+			return err
+		}
+	}
 	s.cancelChunkDispatches(ctx, chunk.ID)
 
 	if !strings.EqualFold(chunk.Status, "completed") {
-		if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
-			return fmt.Errorf("update chunk %s to completed on deploy_success: %w", chunk.ID, err)
+		if chunk.Mode == chunkModeAction && chunk.PRNumber == 0 {
+			if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
+				return fmt.Errorf("update chunk %s to completed on deploy_success: %w", chunk.ID, err)
+			}
 		}
 		RecordChunkTotal("completed")
 		s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunk.ID}, "")
@@ -592,4 +619,50 @@ func conflictRemediationDispatchID(chunkID, headSHA string) string {
 		return fmt.Sprintf("vanadis-conflict-%s-%s", chunkID, shortSHA)
 	}
 	return "vanadis-conflict-" + chunkID
+}
+
+// CompletePRDeployment persists genuine deployment evidence before any advancement.
+// A failed build may retain completed PR metadata without reopening its failed action.
+func (s *PostgresVanadisStore) CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error {
+	if s == nil || s.db == nil {
+		return errors.New("database connection is nil")
+	}
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return errors.New("chunk_id cannot be empty")
+	}
+	var evidence any
+	if rolloutState != nil {
+		data, err := json.Marshal(rolloutState)
+		if err != nil {
+			return fmt.Errorf("marshal rollout state: %w", err)
+		}
+		evidence = data
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks AS c SET status = 'completed', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND (c.mode = 'pr' OR (c.mode = 'action' AND COALESCE(c.pr_number, 0) > 0)) AND c.status NOT IN ('failed', 'cancelled') AND b.status != 'cancelled' AND (b.status != 'failed' OR c.status = 'completed');`, evidence, chunkID)
+	if err != nil {
+		return fmt.Errorf("complete pr deployment: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return errPRTransitionSkipped
+	}
+	return nil
+}
+
+// RecordPRDeploymentFailure rejects failure events that lost a race to completion.
+func (s *PostgresVanadisStore) RecordPRDeploymentFailure(ctx context.Context, chunkID, banner string) error {
+	if s == nil || s.db == nil {
+		return errors.New("database connection is nil")
+	}
+	if strings.TrimSpace(chunkID) == "" {
+		return errors.New("chunk_id cannot be empty")
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET status = 'deploy_failed', banner = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled');`, strings.TrimSpace(banner), strings.TrimSpace(chunkID))
+	if err != nil {
+		return fmt.Errorf("record deployment failure: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return errPRTransitionSkipped
+	}
+	return nil
 }

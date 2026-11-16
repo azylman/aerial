@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 const maxParallelChunks = 4
@@ -77,9 +78,10 @@ type BuildObjectState struct {
 
 // BuildMutationRequest represents a typed mutation payload targeting BuildObject.
 type BuildMutationRequest struct {
-	Action  string `json:"action"`
-	ChunkID string `json:"chunk_id,omitempty"`
-	Reason  string `json:"reason,omitempty"`
+	RolloutState *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
+	Action       string                 `json:"action"`
+	ChunkID      string                 `json:"chunk_id,omitempty"`
+	Reason       string                 `json:"reason,omitempty"`
 }
 
 // RestateTransitionRequest represents the payload for the internal Restate transition endpoint.
@@ -105,7 +107,7 @@ func executeBuildMutation(ctx context.Context, srv *VanadisServer, buildID strin
 	case "chunk_merged":
 		return applyMutationChunkMerged(ctx, srv, buildID, req.ChunkID)
 	case "chunk_deploy_success":
-		return applyMutationChunkDeploySuccess(ctx, srv, req.ChunkID)
+		return applyMutationChunkDeploySuccess(ctx, srv, req.ChunkID, req.RolloutState)
 	case "action_completed":
 		return applyMutationActionCompleted(ctx, srv, req.ChunkID)
 	case "chunk_failed":
@@ -131,7 +133,11 @@ func applyMutationChunkMerged(ctx context.Context, srv *VanadisServer, buildID, 
 	return nil
 }
 
-func applyMutationChunkDeploySuccess(ctx context.Context, srv *VanadisServer, chunkID string) error {
+func applyMutationChunkDeploySuccess(ctx context.Context, srv *VanadisServer, chunkID string, states ...*pubsub.PRRolloutState) error {
+	var evidence *pubsub.PRRolloutState
+	if len(states) > 0 {
+		evidence = states[0]
+	}
 	chunkID = strings.TrimSpace(chunkID)
 	if chunkID == "" {
 		return fmt.Errorf("%w: chunk_id required for chunk_deploy_success", ErrInvalidBuildInput)
@@ -140,15 +146,23 @@ func applyMutationChunkDeploySuccess(ctx context.Context, srv *VanadisServer, ch
 	if err != nil {
 		return fmt.Errorf("get chunk %s: %w", chunkID, err)
 	}
-	if !strings.EqualFold(chunk.Status, "completed") {
+	if chunk.Status == statusFailed || chunk.Status == statusCancelled || build.Status == statusCancelled || (build.Status == statusFailed && chunk.Status != statusCompleted) {
+		return nil
+	}
+	if chunk.Mode == chunkModeAction && chunk.PRNumber == 0 {
 		if err := srv.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
-			return fmt.Errorf("update chunk %s to completed on deploy_success: %w", chunk.ID, err)
+			return err
 		}
+	} else if err := srv.store.CompletePRDeployment(ctx, chunk.ID, evidence); err != nil {
+		if errors.Is(err, errPRTransitionSkipped) {
+			return nil
+		}
+		return err
+	}
+	if chunk.Status != statusCompleted {
 		RecordChunkTotal("completed")
 		srv.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunk.ID}, "")
-		if build != nil {
-			srv.syncBuildWidget(ctx, build.ID, "")
-		}
+		srv.syncBuildWidget(ctx, build.ID, "")
 	}
 	return nil
 }

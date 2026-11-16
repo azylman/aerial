@@ -157,9 +157,10 @@ type BuildObjectState struct {
 
 // BuildMutationRequest represents a typed mutation payload targeting BuildObject.
 type BuildMutationRequest struct {
-	Action  string `json:"action"`
-	ChunkID string `json:"chunk_id,omitempty"`
-	Reason  string `json:"reason,omitempty"`
+	RolloutState *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
+	Action       string                 `json:"action"`
+	ChunkID      string                 `json:"chunk_id,omitempty"`
+	Reason       string                 `json:"reason,omitempty"`
 }
 
 // RestateTransitionRequest represents the payload sent to the internal Vanadis transition endpoint.
@@ -653,26 +654,26 @@ func (b *BuildObject) dispatchThreadWakePrompt(rc restate.RunContext, buildID, p
 	}
 }
 
-func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) {
+func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
 	switch event {
 	case "check_failed", "ci_failed":
+		if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "ci_failed"); err != nil {
+			return err
+		}
 		if b.executor != nil {
 			details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
 			b.dispatchThreadWakePrompt(rc, buildID, FormatCIFailurePrompt(ev, details))
 		}
-		if uErr := b.store.UpdateChunkStatus(rc, chunkID, "ci_failed"); uErr != nil {
-			log.Printf("[vanadis-restate] update chunk status warning: %v", uErr)
-		}
 	case "conflict":
+		if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "conflict"); err != nil {
+			return err
+		}
 		if b.executor != nil {
 			b.dispatchThreadWakePrompt(rc, buildID, FormatConflictPrompt(ev))
 		}
-		if uErr := b.store.UpdateChunkStatus(rc, chunkID, "conflict"); uErr != nil {
-			log.Printf("[vanadis-restate] update chunk status warning: %v", uErr)
-		}
 	case "merged":
-		if uErr := b.store.UpdateChunkStatus(rc, chunkID, "merged"); uErr != nil {
-			log.Printf("[vanadis-restate] update chunk status warning: %v", uErr)
+		if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "merged"); err != nil {
+			return err
 		}
 		if b.executor != nil {
 			if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "merged", []string{chunkID}, ""); pErr != nil {
@@ -686,6 +687,7 @@ func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID,
 			}
 		}
 	}
+	return nil
 }
 
 // OnPREvent receives PR lifecycle events for this build.
@@ -704,8 +706,21 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 		}
 		chunkID := lookup.ChunkID
 		event := strings.ToLower(strings.TrimSpace(ev.Event))
-		b.handlePREventType(rc, buildID, chunkID, event, ev)
-		if ev.RolloutState != nil {
+
+		var eventErr error
+		if event == "deploy_success" {
+			eventErr = b.applyMutation(rc, buildID, &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: chunkID, RolloutState: ev.RolloutState})
+		} else {
+			eventErr = b.handlePREventType(rc, buildID, chunkID, event, ev)
+		}
+		if errors.Is(eventErr, errPRTransitionSkipped) {
+			return false, nil
+		}
+		if eventErr != nil {
+			return false, eventErr
+		}
+
+		if event != "deploy_success" && ev.RolloutState != nil {
 			if rErr := b.store.RecordPRRolloutState(rc, chunkID, "", ev.RolloutState); rErr != nil {
 				log.Printf("[vanadis-restate] record rollout state warning: %v", rErr)
 			}
@@ -717,6 +732,9 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 	}
 	rt := b.getRuntime(ctx)
 	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-pr-event", nil); tErr != nil {
+		if strings.EqualFold(strings.TrimSpace(ev.Event), "deploy_success") {
+			return tErr
+		}
 		log.Printf("[vanadis-restate] pr event transition warning: %v", tErr)
 	}
 	return nil
@@ -829,15 +847,18 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 	}, nil
 }
 
-func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutation *BuildMutationRequest) {
+func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutation *BuildMutationRequest) error {
 	if mutation == nil {
-		return
+		return nil
 	}
 	action := strings.ToLower(strings.TrimSpace(mutation.Action))
 	switch action {
 	case "chunk_merged":
-		if err := b.store.UpdateChunkStatus(ctx, mutation.ChunkID, "merged"); err != nil {
-			log.Printf("[vanadis-restate] update chunk status warning: %v", err)
+		if err := b.store.UpdatePRLifecycleStatus(ctx, mutation.ChunkID, "merged"); err != nil {
+			if errors.Is(err, errPRTransitionSkipped) {
+				return nil
+			}
+			return err
 		}
 		if b.executor != nil {
 			if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "merged", []string{mutation.ChunkID}, ""); err != nil {
@@ -845,14 +866,7 @@ func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutatio
 			}
 		}
 	case "chunk_deploy_success":
-		if err := b.store.UpdateChunkStatus(ctx, mutation.ChunkID, "completed"); err != nil {
-			log.Printf("[vanadis-restate] update chunk status warning: %v", err)
-		}
-		if b.executor != nil {
-			if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{mutation.ChunkID}, ""); err != nil {
-				log.Printf("[vanadis-restate] publish event warning: %v", err)
-			}
-		}
+		return b.completePRDeploymentMutation(ctx, buildID, mutation)
 	case "action_completed":
 		if _, err := b.store.CompleteActionChunk(ctx, mutation.ChunkID); err != nil {
 			log.Printf("[vanadis-restate] complete action chunk warning: %v", err)
@@ -871,6 +885,7 @@ func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutatio
 			}
 		}
 	}
+	return nil
 }
 
 func (b *BuildObject) launchEligibleChunks(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, launchedMap map[string]bool) []string {
@@ -960,7 +975,9 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		return reconcileStepOutput{}, errors.New("store not configured")
 	}
 
-	b.applyMutation(ctx, buildID, mutation)
+	if err := b.applyMutation(ctx, buildID, mutation); err != nil {
+		return reconcileStepOutput{}, err
+	}
 
 	build, chunks, err := b.store.GetBuild(ctx, buildID)
 	if err != nil {
@@ -1154,4 +1171,91 @@ func main() {
 	if err := runAppFn(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		exitFn("[vanadis-restate] Error: %v", err)
 	}
+}
+
+func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID string, mutation *BuildMutationRequest) error {
+	build, chunks, err := b.store.GetBuild(ctx, buildID)
+	if err != nil {
+		return err
+	}
+	alreadyCompleted := false
+	actionChunk := false
+	for _, chunk := range chunks {
+		if chunk.ID != mutation.ChunkID {
+			continue
+		}
+		alreadyCompleted = chunk.Status == statusCompleted
+		actionChunk = chunk.Mode == "action" && chunk.PRNumber == 0
+		if chunk.Status == statusFailed || chunk.Status == statusCancelled || build.Status == statusCancelled || (build.Status == statusFailed && chunk.Status != statusCompleted) {
+			return nil
+		}
+	}
+	if build.Status == statusCancelled {
+		return nil
+	}
+	if actionChunk {
+		if err := b.store.UpdateChunkStatus(ctx, mutation.ChunkID, "completed"); err != nil {
+			return err
+		}
+	} else if err := b.store.CompletePRDeployment(ctx, mutation.ChunkID, mutation.RolloutState); err != nil {
+		if errors.Is(err, errPRTransitionSkipped) {
+			return nil
+		}
+		return err
+	}
+	if b.executor != nil && !alreadyCompleted {
+		if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{mutation.ChunkID}, ""); err != nil {
+			log.Printf("[vanadis-restate] publish event warning: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// errPRTransitionSkipped means the persisted row rejected a stale lifecycle transition.
+var errPRTransitionSkipped = errors.New("pr lifecycle transition not applied")
+
+func (s *PostgresVanadisStore) CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error {
+	if s == nil || s.db == nil {
+		return errors.New("database connection is nil")
+	}
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return errors.New("chunk_id cannot be empty")
+	}
+	var evidence any
+	if rolloutState != nil {
+		data, err := json.Marshal(rolloutState)
+		if err != nil {
+			return fmt.Errorf("marshal rollout state: %w", err)
+		}
+		evidence = data
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks AS c SET status = 'completed', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND (c.mode = 'pr' OR (c.mode = 'action' AND COALESCE(c.pr_number, 0) > 0)) AND c.status NOT IN ('failed', 'cancelled') AND b.status != 'cancelled' AND (b.status != 'failed' OR c.status = 'completed');`, evidence, chunkID)
+	if err != nil {
+		return fmt.Errorf("complete pr deployment: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return errPRTransitionSkipped
+	}
+	return nil
+}
+
+// UpdatePRLifecycleStatus prevents delayed pre-deployment events from reopening
+// a terminal chunk. Notifications follow only an applied write.
+func (s *PostgresVanadisStore) UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error {
+	if s == nil || s.db == nil {
+		return errors.New("database connection is nil")
+	}
+	if strings.TrimSpace(chunkID) == "" {
+		return errors.New("chunk_id cannot be empty")
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET status = $1, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled');`, status, strings.TrimSpace(chunkID))
+	if err != nil {
+		return fmt.Errorf("update pr lifecycle status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return errPRTransitionSkipped
+	}
+	return nil
 }
