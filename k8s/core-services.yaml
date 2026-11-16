@@ -1208,8 +1208,6 @@ spec:
               value: /share/aerial-config/services/synapse/synapse.yaml
             - name: ERI_URL
               value: http://eri.aerial
-            - name: FLUX_RECEIVER_URL
-              value: http://notification-controller.flux-system.svc.cluster.local/
             - name: DISCORD_TOKEN
               valueFrom:
                 secretKeyRef:

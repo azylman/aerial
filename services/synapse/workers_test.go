@@ -53,6 +53,10 @@ func defaultOutboundDispatcherFluxAndPromptCases() []defaultOutboundDispatcherCa
 			callType: "git_push",
 		},
 		{
+			name:     "DispatchGitPush ignores notification-controller root event-server URL",
+			callType: "git_push_flux_event_server_root",
+		},
+		{
 			name:         "PromoteImageTag forwards to flux receiver",
 			callType:     "image_ready_flux",
 			statusCode:   http.StatusOK,
@@ -389,6 +393,8 @@ func configureDispatcherURLs(disp *DefaultOutboundDispatcher, url string, callTy
 	switch callType {
 	case "git_push_flux", "image_ready_flux":
 		disp.SetFluxReceiverURL(url)
+	case "git_push_flux_event_server_root":
+		disp.SetFluxReceiverURL("http://notification-controller.flux-system.svc.cluster.local/")
 	case "image_ready_both_err", "image_ready_kube", "image_ready_none":
 		disp.SetKubeConfig(url, "test-token")
 		disp.SetFluxReceiverURL(url)
@@ -400,8 +406,12 @@ func configureDispatcherURLs(disp *DefaultOutboundDispatcher, url string, callTy
 
 func executeDispatcherCall(testCtx context.Context, disp *DefaultOutboundDispatcher, tc defaultOutboundDispatcherCase, attempts *atomic.Int32) (string, error) {
 	switch tc.callType {
-	case "git_push", "git_push_flux":
-		return "", disp.DispatchGitPush(testCtx, GitPushEventRequest{Ref: "refs/heads/main", Commit: "testcommit123"})
+	case "git_push", "git_push_flux", "git_push_flux_event_server_root":
+		err := disp.DispatchGitPush(testCtx, GitPushEventRequest{Ref: "refs/heads/main", Commit: "testcommit123"})
+		if tc.callType == "git_push_flux_event_server_root" && disp.fluxReceiverURL != "" {
+			return "", fmt.Errorf("expected empty fluxReceiverURL for notification-controller root URL, got %q", disp.fluxReceiverURL)
+		}
+		return "", err
 	case "image_ready", "image_ready_flux", "image_ready_kube", "image_ready_kube_err", "image_ready_kube_404_409", "image_ready_kube_404_post_ok", "image_ready_both_err", "image_ready_kube_404_post_err", "image_ready_kube_404_409_retry_err":
 		return disp.PromoteImageTag(testCtx, ImageReadyEventRequest{
 			Repo:      "azylman/aerial",

@@ -1326,12 +1326,12 @@ func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, 
 		return nil, err
 	}
 
-	if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
-		return nil, err
-	}
-	s.clearUpdatedPRsForRepo(res.Repo)
+	s.clearUpdatedPRsForMainCommit(res.Repo, res.HeadSHA)
 	if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
 		log.Printf("[synapse] [github] error checking open pr conflicts for %s: %v", res.Repo, err)
+	}
+	if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
+		return nil, err
 	}
 	return res, nil
 }
