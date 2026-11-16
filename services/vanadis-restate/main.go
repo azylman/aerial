@@ -584,7 +584,10 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest)
 	}
 
 	resp, err := restate.Run(ctx, func(rc restate.RunContext) (FailChunkResponse, error) {
-		bld, chk, failed, err := b.store.FailChunk(rc, chunkID, reason)
+		if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
+			return FailChunkResponse{}, err
+		}
+		bld, chk, failed, err := b.store.FailChunk(rc, chunkID, reason, req.DispatchID)
 		if err != nil {
 			return FailChunkResponse{}, err
 		}
@@ -603,7 +606,7 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest)
 	if err != nil {
 		return FailChunkResponse{}, toTerminalErr(err)
 	}
-	if resp.BuildStatus == statusFailed {
+	if resp.Failed && resp.BuildStatus == statusFailed {
 		rt := b.getRuntime(ctx)
 		rt.ClearState()
 	}
@@ -684,7 +687,7 @@ func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID,
 		}
 	case "closed":
 		if ev.Status != "merged" {
-			if _, _, _, fErr := b.store.FailChunk(rc, chunkID, "pr_closed_unmerged"); fErr != nil {
+			if _, _, _, fErr := b.store.FailChunk(rc, chunkID, "pr_closed_unmerged", ""); fErr != nil {
 				log.Printf("[vanadis-restate] fail chunk warning: %v", fErr)
 			}
 		}
@@ -765,9 +768,11 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 			return res != nil && res.CompletionAccepted, nil
 		case "failed", "timeout", "crashed":
 			reason := firstNonEmpty(ev.Error, "dispatch outcome failed")
-			if _, _, _, fErr := b.store.FailChunk(rc, chunkID, reason); fErr != nil {
-				log.Printf("[vanadis-restate] fail chunk warning: %v", fErr)
+			if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
+				return false, err
 			}
+			_, _, failed, err := b.store.FailChunk(rc, chunkID, reason, ev.DispatchID)
+			return failed, err
 		}
 		return true, nil
 	}, restate.WithName("handle-dispatch-outcome-postgres"))
@@ -900,9 +905,7 @@ func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutatio
 		}
 		return nil
 	case "chunk_failed":
-		if _, _, _, err := b.store.FailChunk(ctx, mutation.ChunkID, mutation.Reason); err != nil {
-			log.Printf("[vanadis-restate] fail chunk warning: %v", err)
-		}
+		return b.failMutation(ctx, buildID, mutation)
 	case "cancelled":
 		if err := b.store.UpdateBuildStatus(ctx, buildID, statusCancelled); err != nil {
 			log.Printf("[vanadis-restate] update build status warning: %v", err)
@@ -1384,4 +1387,35 @@ func normalizeCompletionMutation(mutation *BuildMutationRequest) *BuildMutationR
 	default:
 		return mutation
 	}
+}
+
+func (b *BuildObject) failMutation(ctx context.Context, buildID string, mutation *BuildMutationRequest) error {
+	chunkID := strings.TrimSpace(mutation.ChunkID)
+	if err := b.validateActionBuild(ctx, buildID, chunkID); err != nil {
+		return err
+	}
+	_, _, failed, err := b.store.FailChunk(ctx, chunkID, mutation.Reason, mutation.DispatchID)
+	if err != nil {
+		return err
+	}
+	if !failed {
+		return errActionCompletionSkipped
+	}
+	return nil
+}
+
+func failureSkipped(c VanadisChunk, buildStatus, dispatchID string) bool {
+	return (c.Mode == chunkModeAction && !actionFailureAllowed(c, buildStatus, dispatchID)) || c.Status == statusFailed || c.Status == statusCompleted || c.Status == statusCancelled
+}
+
+func actionFailureAllowed(c VanadisChunk, buildStatus, dispatchID string) bool {
+	if c.PRNumber == 0 {
+		return actionCompletionAllowed(c, buildStatus, dispatchID)
+	}
+	// PR attachment retains action mode. PR closure and remediation retain their
+	// identities, while old action-turn identities must still match the generation.
+	prIdentity := dispatchID == "" || strings.HasPrefix(dispatchID, "vanadis-"+c.ID+"-cifail-") ||
+		dispatchID == "vanadis-conflict-"+c.ID || strings.HasPrefix(dispatchID, "vanadis-conflict-"+c.ID+"-")
+	return buildStatus == statusRunning && c.Status != statusMerged && c.Status != statusDeploying &&
+		(prIdentity || dispatchID == actionDispatchID(c))
 }

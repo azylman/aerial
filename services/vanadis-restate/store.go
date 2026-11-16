@@ -167,7 +167,7 @@ type VanadisStore interface {
 	LookupChunkBuildID(ctx context.Context, chunkID string) (buildID string, err error)
 	AttachChunkPR(ctx context.Context, req AttachChunkPRRequest) (buildID, chunkID, threadID string, err error)
 	CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error)
-	FailChunk(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error)
+	FailChunk(ctx context.Context, chunkID, reason, dispatchID string) (*VanadisBuild, *VanadisChunk, bool, error)
 	UpdateBuild(ctx context.Context, buildID string, req UpdateBuildRequest) (*VanadisBuild, error)
 	UpdateChunk(ctx context.Context, buildID, chunkRef string, req UpdateChunkRequest) (*VanadisChunk, error)
 	AppendChunks(ctx context.Context, buildID string, inputs []CreateChunkInput) ([]VanadisChunk, error)
@@ -1146,7 +1146,6 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID,
 		}
 	}()
 
-	// Lock the parent before the selected chunk, matching cancellation.
 	var b VanadisBuild
 	const selectBuildSQL = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, status, COALESCE(status_message_id, '') FROM vanadis_builds WHERE id = (SELECT build_id FROM vanadis_chunks WHERE id = $1) FOR UPDATE;`
 	if err := tx.QueryRow(ctx, selectBuildSQL, chunkID).Scan(&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.Status, &b.StatusMessageID); err != nil {
@@ -1183,8 +1182,6 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID,
 	}
 
 	chunk := VanadisChunk{ID: cID, Mode: cMode, Status: cStatus, PRNumber: prNumber, StallNudges: stallNudges}
-	// A committed completion can be replayed after a crash before Restate journals
-	// the result. Acceptance permits continuation without advancing the row again.
 	res.CompletionAccepted = actionCompletionAccepted(chunk, b.Status, dispatchID)
 	if !actionCompletionAllowed(VanadisChunk{ID: cID, Mode: cMode, Status: cStatus, PRNumber: prNumber, StallNudges: stallNudges}, b.Status, dispatchID) {
 		if err := tx.Commit(ctx); err != nil {
@@ -1242,7 +1239,7 @@ func finishActionBuildIfAllCompleted(ctx context.Context, tx pgx.Tx, buildID str
 	return rows.Err()
 }
 
-func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
+func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason, dispatchID string) (*VanadisBuild, *VanadisChunk, bool, error) {
 	if s == nil || s.db == nil {
 		return nil, nil, false, errors.New("database connection is nil")
 	}
@@ -1260,13 +1257,18 @@ func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason st
 		}
 	}()
 
-	const selectChunkQuery = `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), c.started_at, c.completed_at, c.created_at, c.updated_at, b.id, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, COALESCE(b.shared_context, ''), b.status, COALESCE(b.status_message_id, ''), b.created_at, b.updated_at FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.id = $1 FOR UPDATE;`
+	parentID, lockErr := lockFailureParent(ctx, tx, chunkID)
+	if lockErr != nil {
+		return nil, nil, false, lockErr
+	}
+
+	const selectChunkQuery = `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), c.started_at, c.completed_at, c.created_at, c.updated_at, c.stall_nudges, b.id, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, COALESCE(b.shared_context, ''), b.status, COALESCE(b.status_message_id, ''), b.created_at, b.updated_at FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.id = $1 AND c.build_id = $2 FOR UPDATE OF c;`
 
 	var c VanadisChunk
 	var b VanadisBuild
 	var startedAt, completedAt sql.NullTime
-	err = tx.QueryRow(ctx, selectChunkQuery, chunkID).Scan(
-		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt,
+	err = tx.QueryRow(ctx, selectChunkQuery, chunkID, parentID).Scan(
+		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt, &c.StallNudges,
 		&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1282,7 +1284,7 @@ func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason st
 		c.CompletedAt = completedAt.Time
 	}
 
-	if c.Status == statusFailed || c.Status == statusCompleted || c.Status == statusCancelled {
+	if failureSkipped(c, b.Status, dispatchID) {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, nil, false, fmt.Errorf("commit fail chunk tx: %w", err)
 		}
@@ -1344,7 +1346,6 @@ func (s *PostgresVanadisStore) GetChunkByPR(ctx context.Context, repo string, pr
 	}, nil
 }
 
-// LookupPRChunk returns the buildID and chunkID corresponding to repo and prNumber.
 func (s *PostgresVanadisStore) LookupPRChunk(ctx context.Context, repo string, prNumber int) (string, string, error) {
 	lookup, err := s.GetChunkByPR(ctx, repo, prNumber)
 	if err != nil {
@@ -1356,7 +1357,6 @@ func (s *PostgresVanadisStore) LookupPRChunk(ctx context.Context, repo string, p
 	return lookup.BuildID, lookup.ChunkID, nil
 }
 
-// LookupChunkBuildID returns the build_id for the given chunkID.
 func (s *PostgresVanadisStore) LookupChunkBuildID(ctx context.Context, chunkID string) (string, error) {
 	if s == nil || s.db == nil {
 		return "", errors.New("database connection is nil")

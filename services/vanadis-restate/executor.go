@@ -843,6 +843,9 @@ func formatChunkPromptWithShareRoot(build VanadisBuild, chunks []VanadisChunk, a
 	if bTitle := strings.TrimSpace(build.Title); bTitle != "" {
 		fmt.Fprintf(&sb, "Build Title: %s\n", bTitle)
 	}
+	if isActionChunk {
+		fmt.Fprintf(&sb, "Dispatch ID: %s\nInclude this dispatch_id in action completion and failure calls.\n", actionDispatchID(active))
+	}
 	if !isActionChunk {
 		fmt.Fprintf(&sb, "Repository: %s\n", activeRepo)
 	}
@@ -863,6 +866,9 @@ func formatChunkPromptWithShareRoot(build VanadisBuild, chunks []VanadisChunk, a
 
 	targetFilesStr := firstNonEmpty(strings.Join(active.TargetFiles, ", "), "(none specified)")
 	fmt.Fprintf(&sb, "=== Active Chunk (Chunk %d of %d) ===\nChunk ID: %s\nTitle: %s\n", activeIdx+1, total, active.ID, active.Title)
+	if isActionChunk {
+		fmt.Fprintf(&sb, "Dispatch ID: %s\nInclude this dispatch_id in action completion and failure calls.\n", actionDispatchID(active))
+	}
 	if !isActionChunk {
 		fmt.Fprintf(&sb, "Repository: %s\nTarget Files: %s\n", activeRepo, targetFilesStr)
 		if len(active.TargetSymbols) > 0 {

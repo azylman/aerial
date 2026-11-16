@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -13,9 +14,10 @@ import (
 
 // FailChunkRequest carries the chunk and reason for failing a chunk.
 type FailChunkRequest struct {
-	BuildID string `json:"build_id,omitempty"`
-	ChunkID string `json:"chunk_id"`
-	Reason  string `json:"reason"`
+	DispatchID string `json:"dispatch_id,omitempty"`
+	BuildID    string `json:"build_id,omitempty"`
+	ChunkID    string `json:"chunk_id"`
+	Reason     string `json:"reason"`
 }
 
 // FailChunkResponse represents the result of failing a chunk.
@@ -230,6 +232,21 @@ func (s *BuildRouterService) RouteFailChunk(ctx restate.Context, req FailChunkRe
 		return FailChunkResponse{}, err
 	}
 
+	if req.BuildID != "" && req.BuildID != buildID {
+		return FailChunkResponse{}, toTerminalErr(ErrChunkNotFound)
+	}
 	inv := s.getInvoker(ctx)
 	return inv.RouteFailChunk(ctx, buildID, req)
+}
+
+func lockFailureParent(ctx context.Context, tx pgx.Tx, chunkID string) (string, error) {
+	var parentID string
+	err := tx.QueryRow(ctx, `SELECT id FROM vanadis_builds WHERE id = (SELECT build_id FROM vanadis_chunks WHERE id = $1) FOR UPDATE;`, chunkID).Scan(&parentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrChunkNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("lock failure build: %w", err)
+	}
+	return parentID, nil
 }

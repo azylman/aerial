@@ -209,11 +209,33 @@ func TestBuildRouterService_RouteFailChunk(t *testing.T) {
 	_, err = routerNotFound.RouteFailChunk(ctx, FailChunkRequest{ChunkID: "c-missing", Reason: "boom"})
 	assert.Error(t, err)
 
-	// Success
-	res, err := router.RouteFailChunk(ctx, FailChunkRequest{ChunkID: "c1", Reason: "boom"})
-	assert.NoError(t, err)
-	assert.Equal(t, "b-fail", res.BuildID)
-	assert.True(t, res.Failed)
+	tests := []struct {
+		name, buildID, dispatchID string
+		wantErr                   bool
+	}{
+		{"legacy", "", "", false},
+		{"current generation", "b-fail", "vanadis-c1-turn-1", false},
+		{"wrong owner", "other", "vanadis-c1-turn-1", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			inv := &mockInvoker{}
+			router := NewBuildRouterService(store, func(restate.Context) buildObjectInvoker { return inv })
+			inv.failChunkFn = func(_ context.Context, buildID string, req FailChunkRequest) (FailChunkResponse, error) {
+				assert.Equal(t, tc.dispatchID, req.DispatchID)
+				return FailChunkResponse{BuildID: buildID, Failed: true}, nil
+			}
+			res, err := router.RouteFailChunk(makeRouterMockContext(t), FailChunkRequest{BuildID: tc.buildID, ChunkID: "c1", Reason: "boom", DispatchID: tc.dispatchID})
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, "b-fail", res.BuildID)
+				assert.True(t, res.Failed)
+			}
+		})
+	}
 }
 
 func TestRestateBuildObjectInvoker(t *testing.T) {

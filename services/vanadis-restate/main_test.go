@@ -841,7 +841,7 @@ func TestBuildObject_Transitions_Extended(t *testing.T) {
 	b := VanadisBuild{ID: "b-ext", Title: "Build", Status: "running", ThreadID: "th-1"}
 	c1 := VanadisChunk{ID: "c1", BuildID: "b-ext", Status: "running", Repo: "aerial", Mode: "pr"}
 
-	store, _ := dbScript{row: &mockRow{b: &b}, chunks: []VanadisChunk{c1}, execTag: "UPDATE 1"}.open()
+	store, _ := dbScript{row: &mockRow{b: &b}, routes: []sqlRoute{{match: "SELECT c.id, c.build_id", row: failRow("running", "running")}}, chunks: []VanadisChunk{c1}, execTag: "UPDATE 1"}.open()
 	bo := NewBuildObject("", nil).WithAuthority(store, exec)
 	ctx := makeObjectMockContext(t, "b-ext")
 
