@@ -1021,7 +1021,7 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *Va
 		if s == statusFailed {
 			hasFailed = true
 		}
-		if s != statusCompleted && s != statusMerged {
+		if s != statusCompleted {
 			allDone = false
 		}
 	}
@@ -1031,12 +1031,14 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *Va
 		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusFailed); err != nil {
 			log.Printf("[vanadis-restate] update build status failed: %v", err)
 		}
+		build.Status = statusFailed
 		b.notifyBuildTerminal(ctx, build, chunks, statusFailed, "chunk failed", "VANADIS BUILD FAILED", "Build encountered failures.")
 		return statusFailed
 	case allDone && len(chunks) > 0:
 		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusCompleted); err != nil {
 			log.Printf("[vanadis-restate] update build status completed: %v", err)
 		}
+		build.Status = statusCompleted
 		b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully.")
 		return statusCompleted
 	default:
