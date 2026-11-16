@@ -243,7 +243,34 @@ type TranscriptsConfig struct {
 	Stack    string `yaml:"stack,omitempty"    json:"stack,omitempty"`
 }
 
+// CredentialSource selects an explicit credential file or disables provisioning.
+type CredentialSource struct {
+	Path     string `yaml:"path"     json:"path"`
+	Disabled bool   `yaml:"disabled" json:"disabled"`
+}
+
+// CredentialSources declares runtime credential inputs without implicit defaults.
+type CredentialSources struct {
+	OAuth CredentialSource `yaml:"oauth" json:"oauth"`
+	Codex CredentialSource `yaml:"codex" json:"codex"`
+}
+
+// Validate requires each source to select exactly one path or disabled state.
+// Loading does not enforce this contract until the runtime migration is ready.
+func (c CredentialSources) Validate() error {
+	for _, entry := range []struct {
+		name   string
+		source CredentialSource
+	}{{"oauth", c.OAuth}, {"codex", c.Codex}} {
+		if (strings.TrimSpace(entry.source.Path) != "") == entry.source.Disabled {
+			return fmt.Errorf("credential_sources.%s must specify exactly one nonblank path or disabled: true", entry.name)
+		}
+	}
+	return nil
+}
+
 type ConfigData struct {
+	CredentialSources         CredentialSources        `yaml:"credential_sources"                     json:"credential_sources"`
 	Model                     string                   `yaml:"model"                                  json:"model"`
 	Timezone                  string                   `yaml:"timezone"                               json:"timezone"`
 	SystemChannel             string                   `yaml:"system_channel"                         json:"system_channel"`
@@ -381,6 +408,7 @@ func populateTargetMcpServers(rawServers map[string]any) (TargetMcpConfig, error
 
 func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	type rawConfigHelper struct {
+		CredentialSources         CredentialSources        `yaml:"credential_sources"`
 		GeminiHomeDir             string                   `yaml:"gemini_home_dir"`
 		DataDir                   string                   `yaml:"data_dir"`
 		Model                     string                   `yaml:"model"`
@@ -427,6 +455,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
+	c.CredentialSources = raw.CredentialSources
 	c.Model = raw.Model
 	c.Timezone = raw.Timezone
 	c.SystemChannel = raw.SystemChannel
