@@ -296,3 +296,23 @@ func TestBuildRouterService_NilStoreAndErrorPaths(t *testing.T) {
 	_, err = rErr.RouteFailChunk(ctx, FailChunkRequest{ChunkID: "c1", Reason: "error"})
 	assert.Error(t, err)
 }
+
+func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
+	t.Parallel()
+
+	// Nil store
+	var sNil *PostgresVanadisStore
+	assert.Error(t, sNil.RecordPRCheckStatus(context.Background(), "c1", "test", "passed"))
+
+	// Empty arguments
+	store, _ := dbScript{execTag: "UPDATE 1"}.open()
+	assert.Error(t, store.RecordPRCheckStatus(context.Background(), "", "test", "passed"))
+	assert.Error(t, store.RecordPRCheckStatus(context.Background(), "c1", "", "passed"))
+
+	// Success
+	assert.NoError(t, store.RecordPRCheckStatus(context.Background(), "c1", "test", "passed"))
+
+	// DB Exec error
+	storeErr, _ := dbScript{execErr: errors.New("db error")}.open()
+	assert.Error(t, storeErr.RecordPRCheckStatus(context.Background(), "c1", "test", "passed"))
+}

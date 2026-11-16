@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +13,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
@@ -173,6 +170,7 @@ type VanadisStore interface {
 	AppendChunks(ctx context.Context, buildID string, inputs []CreateChunkInput) ([]VanadisChunk, error)
 	RemoveChunk(ctx context.Context, buildID, chunkRef string) (*VanadisChunk, []VanadisChunk, error)
 	RecordPRRolloutState(ctx context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error
+	RecordPRCheckStatus(ctx context.Context, chunkID, checkName, checkState string) error
 	CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
 	UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error
 	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
@@ -1408,7 +1406,7 @@ func (s *PostgresVanadisStore) RecordPRRolloutState(ctx context.Context, chunkID
 		rolloutBytes = []byte("{}")
 	}
 
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET rollout_state = CASE WHEN status = 'completed' THEN rollout_state ELSE $1::jsonb END, status = CASE WHEN $2 != '' THEN $2 ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`, rolloutBytes, strings.TrimSpace(status), chunkID)
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET rollout_state = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN rollout_state ELSE $1::jsonb END, status = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN status WHEN $2 != '' THEN $2 ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`, rolloutBytes, strings.TrimSpace(status), chunkID)
 	switch {
 	case err != nil:
 		return fmt.Errorf("record pr rollout state: %w", err)
@@ -1438,63 +1436,22 @@ func (s *PostgresVanadisStore) UpdateChunkBannerAndStatus(ctx context.Context, c
 	}
 }
 
-var newPgxPoolFn = pgxpool.NewWithConfig
-
-func initPostgres(ctx context.Context, pgURL string) (*PostgresVanadisStore, func(context.Context), error) {
-	poolConfig, err := pgxpool.ParseConfig(pgURL)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parse postgres url: %w", err)
+func (s *PostgresVanadisStore) RecordPRCheckStatus(ctx context.Context, chunkID, checkName, checkState string) error {
+	if s == nil || s.db == nil {
+		return errors.New("database connection is nil")
 	}
-	poolConfig.MaxConns, poolConfig.MinConns = 10, 2
-	pool, err := newPgxPoolFn(ctx, poolConfig)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create pgxpool: %w", err)
+	id := strings.TrimSpace(chunkID)
+	name := strings.TrimSpace(checkName)
+	if id == "" || name == "" {
+		return errors.New("chunk_id and check_name cannot be empty")
 	}
-	store := NewPostgresVanadisStore(pool)
-	return store, func(context.Context) {
-		pool.Close()
-	}, nil
-}
-
-func normalizeDiscordThreadID(s string) string {
-	clean := strings.TrimSpace(s)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET ci_checks = jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true), updated_at = CURRENT_TIMESTAMP WHERE id = $3;`, name, strings.TrimSpace(checkState), id)
+	switch {
+	case err != nil:
+		return fmt.Errorf("record pr check status: %w", err)
+	case tag.RowsAffected() == 0:
+		return ErrChunkNotFound
+	default:
+		return nil
 	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
-}
-
-func generateBuildID() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("build-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
-}
-
-func cleanRepoName(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
-		return repo[idx+1:]
-	}
-	return repo
-}
-
-func actionDispatchID(chunk VanadisChunk) string {
-	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
-}
-
-func actionCompletionAccepted(chunk VanadisChunk, buildStatus, dispatchID string) bool {
-	if chunk.Status == statusCompleted && (buildStatus == statusRunning || buildStatus == statusCompleted) {
-		chunk.Status = statusRunning
-		buildStatus = statusRunning
-	}
-	return actionCompletionAllowed(chunk, buildStatus, dispatchID)
-}
-
-// actionLaunchKey preserves legacy acknowledgement keys outside action retries.
-func actionLaunchKey(chunk VanadisChunk) string {
-	if chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
-		// A colon is forbidden in chunk IDs, keeping generation keys disjoint.
-		return "dispatch:" + actionDispatchID(chunk)
-	}
-	return chunk.ID
 }

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/assert"
@@ -502,11 +503,15 @@ func TestHealthEndpoints(t *testing.T) {
 
 func TestRunApp_Shutdown(t *testing.T) {
 	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
+	origPing, origBus := pingPgxPoolFn, newBusFn
 	t.Cleanup(func() {
 		httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = origMeta, origCounters
+		pingPgxPoolFn, newBusFn = origPing, origBus
 	})
 	httpkit.WriteMetaDirFn = func(string) error { return nil }
 	httpkit.WriteCountersDirFn = func(string) error { return nil }
+	pingPgxPoolFn = func(context.Context, *pgxpool.Pool) error { return nil }
+	newBusFn = func(context.Context, string) (pubsub.Bus, error) { return pubsub.NewMemoryBus(), nil }
 
 	// Find two free ports for health and restate
 	lHealth, err := net.Listen("tcp", "127.0.0.1:0")
@@ -559,17 +564,23 @@ func TestRunApp_Shutdown(t *testing.T) {
 
 func TestRunApp_ErrorCases(t *testing.T) {
 	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
+	origPing, origBus := pingPgxPoolFn, newBusFn
 	t.Cleanup(func() {
 		httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = origMeta, origCounters
+		pingPgxPoolFn, newBusFn = origPing, origBus
 	})
 	httpkit.WriteMetaDirFn = func(string) error { return nil }
 	httpkit.WriteCountersDirFn = func(string) error { return nil }
+	pingPgxPoolFn = func(context.Context, *pgxpool.Pool) error { return nil }
+	newBusFn = func(context.Context, string) (pubsub.Bus, error) { return pubsub.NewMemoryBus(), nil }
 
 	// 1. Invalid health port causes listen error
 	errHealth := RunApp(context.Background(), Config{
 		HealthPort:  "invalid-port",
 		RestatePort: "9080",
 		VanadisURL:  "http://vanadis.aerial:4025",
+		PostgresURL: "postgres://mock:mock@localhost:5432/mock",
+		NATSURL:     "nats://mock:4222",
 	})
 	assert.Error(t, errHealth)
 
@@ -583,6 +594,8 @@ func TestRunApp_ErrorCases(t *testing.T) {
 		HealthPort:  healthPort,
 		RestatePort: "invalid-port",
 		VanadisURL:  "http://vanadis.aerial:4025",
+		PostgresURL: "postgres://mock:mock@localhost:5432/mock",
+		NATSURL:     "nats://mock:4222",
 	})
 	assert.Error(t, errRestate)
 }
