@@ -3,504 +3,515 @@ package main
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
-func TestPRLifecycleEvents_Publish(t *testing.T) {
-	t.Parallel()
+const lifecycleTargetID = "123456789012345678"
 
-	t.Run("publishPRLifecycleEvent publishes to aerial.pr.<event> with correct fields", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		srv := &RouterServer{bus: bus}
-
-		ev := pubsub.PRLifecycleEvent{
-			Event:    "opened",
-			Repo:     "azylman/aerial",
-			PRNumber: 42,
-			Branch:   "feat/something",
-			HeadSHA:  "abcdef123456",
-			Status:   "open",
-		}
-		err := srv.publishPRLifecycleEvent(context.Background(), ev)
-		if err != nil {
-			t.Fatalf("publishPRLifecycleEvent() err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 {
-			t.Fatalf("publishedPREvents len = %d, want 1", len(bus.publishedPREvents))
-		}
-		got := bus.publishedPREvents[0]
-		if got.Event != "opened" || got.Repo != "azylman/aerial" || got.PRNumber != 42 {
-			t.Errorf("published event mismatch: %+v", got)
-		}
-		if got.OccurredAt.IsZero() {
-			t.Errorf("expected non-zero OccurredAt")
-		}
-	})
-	t.Run("transitionRegisteredConflict publishes conflict", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{conflictTargetID: "123456789012345678", conflictUpdated: true}
-		srv := &RouterServer{
-			bus:        bus,
-			dispatcher: disp,
-			registry:   reg,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-
-		err := srv.transitionRegisteredConflict(context.Background(), "azylman/aerial", 42, "feat/branch", "sha-conflict")
-		if err != nil {
-			t.Fatalf("transitionRegisteredConflict() err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 {
-			t.Fatalf("expected 1 published event, got %d", len(bus.publishedPREvents))
-		}
-		if bus.publishedPREvents[0].Event != "conflict" {
-			t.Errorf("expected event conflict, got %s", bus.publishedPREvents[0].Event)
-		}
-		if len(disp.DispatchCalls()) != 0 {
-			t.Errorf("expected 0 prompt dispatches from synapse on conflict, got %d", len(disp.DispatchCalls()))
-		}
-	})
+// wantPREvent is the declarative projection of a published PR lifecycle event.
+type wantPREvent struct {
+	Event      string
+	PRNumber   int
+	HeadSHA    string
+	MergeSHA   string
+	Status     string
+	Title      string
+	CheckName  string
+	CheckState string
 }
 
-func TestPRLifecycleEvents_GitHubEvents(t *testing.T) {
-	t.Parallel()
-
-	t.Run("opened event publishes to bus", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		srv := &RouterServer{
-			bus:    bus,
-			cfgSrc: fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-		res := &ResolvedGitHubEvent{}
-		body := []byte(`{"action":"opened","number":42,"pull_request":{"number":42,"title":"test pr","head":{"ref":"feat/test","sha":"head123"},"user":{"login":"tester"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"tester"}}`)
-		_, err := srv.processGitHubPullRequestEvent(context.Background(), "del-open", body, res)
-		if err != nil {
-			t.Fatalf("processGitHubPullRequestEvent() err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "opened" {
-			t.Fatalf("expected opened event, got %v", bus.publishedPREvents)
-		}
-		ev := bus.publishedPREvents[0]
-		if ev.PRNumber != 42 || ev.Title != "test pr" || ev.HeadSHA != "head123" {
-			t.Errorf("unexpected opened event fields: %+v", ev)
-		}
-	})
-
-	t.Run("synchronize event publishes to bus", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
-		srv := &RouterServer{
-			bus:      bus,
-			registry: reg,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-		res := &ResolvedGitHubEvent{
-			Repo:     "azylman/aerial",
-			PRNumber: 42,
-			Branch:   "feat/test",
-			HeadSHA:  "newhead456",
-			Action:   "synchronize",
-		}
-		pr := GitHubPullRequest{Title: "synced pr"}
-		err := srv.handlePullRequestRegistryAction(context.Background(), res, pr)
-		if err != nil {
-			t.Fatalf("handlePullRequestRegistryAction() err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "synchronize" {
-			t.Fatalf("expected synchronize event, got %v", bus.publishedPREvents)
-		}
-		if bus.publishedPREvents[0].HeadSHA != "newhead456" {
-			t.Errorf("unexpected HeadSHA: %q", bus.publishedPREvents[0].HeadSHA)
-		}
-	})
-
-	t.Run("merged event publishes to bus", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
-		srv := &RouterServer{
-			bus:      bus,
-			registry: reg,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-		res := &ResolvedGitHubEvent{
-			Repo:     "azylman/aerial",
-			PRNumber: 42,
-			Branch:   "feat/test",
-			HeadSHA:  "head123",
-			MergeSHA: "mergesha789",
-		}
-		err := srv.handlePRClosedAction(context.Background(), res, true)
-		if err != nil {
-			t.Fatalf("handlePRClosedAction(merged=true) err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "merged" {
-			t.Fatalf("expected merged event, got %v", bus.publishedPREvents)
-		}
-		if bus.publishedPREvents[0].MergeSHA != "mergesha789" {
-			t.Errorf("unexpected MergeSHA: %q", bus.publishedPREvents[0].MergeSHA)
-		}
-	})
-
-	t.Run("closed_unmerged event publishes to bus", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
-		srv := &RouterServer{
-			bus:      bus,
-			registry: reg,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-		res := &ResolvedGitHubEvent{
-			Repo:     "azylman/aerial",
-			PRNumber: 42,
-			Branch:   "feat/test",
-			HeadSHA:  "head123",
-		}
-		err := srv.handlePRClosedAction(context.Background(), res, false)
-		if err != nil {
-			t.Fatalf("handlePRClosedAction(merged=false) err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "closed_unmerged" {
-			t.Fatalf("expected closed_unmerged event, got %v", bus.publishedPREvents)
-		}
-		if bus.publishedPREvents[0].Status != "closed_unmerged" {
-			t.Errorf("unexpected status: %q", bus.publishedPREvents[0].Status)
-		}
-	})
-
-	t.Run("check_updated event publishes to bus", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		reg := &mockPRRegistry{recordCheckUpdated: true}
-		srv := &RouterServer{
-			bus:      bus,
-			registry: reg,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-		res := &ResolvedGitHubEvent{
-			Repo:       "azylman/aerial",
-			PRNumber:   42,
-			Branch:     "feat/test",
-			HeadSHA:    "head123",
-			CheckName:  "Unit Tests",
-			Status:     "completed",
-			Conclusion: "success",
-		}
-		srv.recordCheckRunStatus(context.Background(), res)
-		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "check_updated" {
-			t.Fatalf("expected check_updated event, got %v", bus.publishedPREvents)
-		}
-		ev := bus.publishedPREvents[0]
-		if ev.CheckName != "Unit Tests" || ev.CheckState != "passed" {
-			t.Errorf("unexpected check event fields: %+v", ev)
-		}
-	})
+// newLifecycleServer builds a router through the production constructor; nil
+// mocks stay unset so typed-nil pointers never reach the interface fields.
+func newLifecycleServer(cfg Config, bus *mockEventBus, reg *mockPRRegistry, disp *mockOutboundDispatcher) *RouterServer {
+	srv := newTestRouter(cfg, nil, nil, nil, bus)
+	if reg != nil {
+		srv.SetRegistry(reg)
+	}
+	if disp != nil {
+		srv.SetDispatcher(disp)
+	}
+	return srv
 }
 
-func TestPRLifecycleEvents_DeployAndKustomization(t *testing.T) {
+func lifecycleCfg() Config { return Config{SystemChannelID: lifecycleTargetID} }
+
+func assertPREvents(t *testing.T, bus *mockEventBus, want []wantPREvent) {
+	t.Helper()
+	bus.mu.Lock()
+	published := append([]pubsub.PRLifecycleEvent(nil), bus.publishedPREvents...)
+	bus.mu.Unlock()
+	got := make([]wantPREvent, 0, len(published))
+	for _, ev := range published {
+		if ev.OccurredAt.IsZero() {
+			t.Errorf("published %q event has zero OccurredAt", ev.Event)
+		}
+		got = append(got, wantPREvent{
+			Event: ev.Event, PRNumber: ev.PRNumber, HeadSHA: ev.HeadSHA, MergeSHA: ev.MergeSHA,
+			Status: ev.Status, Title: ev.Title, CheckName: ev.CheckName, CheckState: ev.CheckState,
+		})
+	}
+	if len(want) == 0 && len(got) == 0 {
+		return
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("published PR events = %+v, want %+v", got, want)
+	}
+}
+
+func TestPublishPRLifecycleEvent(t *testing.T) {
 	t.Parallel()
 
-	t.Run("Deploy failed publishes deploy_failed when bus is present", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{deployFailedTargetID: "123456789012345678", deployFailedUpdated: true}
-		srv := &RouterServer{
-			bus:        bus,
-			dispatcher: disp,
-			registry:   reg,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
+	tests := []struct {
+		name string
+		ev   pubsub.PRLifecycleEvent
+		want []wantPREvent
+	}{
+		{
+			name: "opened event published with fields and stamped OccurredAt",
+			ev:   pubsub.PRLifecycleEvent{Event: "opened", Repo: "azylman/aerial", PRNumber: 42, Branch: "feat/something", HeadSHA: "abcdef123456", Status: "open"},
+			want: []wantPREvent{{Event: "opened", PRNumber: 42, HeadSHA: "abcdef123456", Status: "open"}},
+		},
+	}
 
-		evt := DeployEvent{
-			Event:     "deploy_failed",
-			Repo:      "azylman/aerial",
-			PRNumber:  42,
-			JobName:   "eri",
-			CommitSHA: "sha-deploy-fail",
-			TargetID:  "123456789012345678",
-			Details:   "crashloopbackoff",
-			Timestamp: time.Now().UTC(),
-		}
-		err := srv.handleDeployFailedOrRollback(context.Background(), evt, "")
-		if err != nil {
-			t.Fatalf("handleDeployFailedOrRollback() err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 {
-			t.Fatalf("expected 1 published event, got %d", len(bus.publishedPREvents))
-		}
-		if bus.publishedPREvents[0].Event != "deploy_failed" {
-			t.Errorf("expected event deploy_failed, got %s", bus.publishedPREvents[0].Event)
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			srv := newLifecycleServer(Config{}, bus, &mockPRRegistry{}, &mockOutboundDispatcher{})
+			if err := srv.publishPRLifecycleEvent(context.Background(), tc.ev); err != nil {
+				t.Fatalf("publishPRLifecycleEvent() err = %v", err)
+			}
+			assertPREvents(t, bus, tc.want)
+		})
+	}
+}
 
-	t.Run("Deploy sync success publishes sync_success and deploy_success appropriately", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
-		srv := &RouterServer{
-			bus:        bus,
-			dispatcher: disp,
-			registry:   reg,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
+func TestTransitionRegisteredConflict(t *testing.T) {
+	t.Parallel()
 
-		// When syncHasExpected is true
-		evt := DeployEvent{
-			Event:     "sync_success",
-			Repo:      "azylman/aerial",
-			PRNumber:  42,
-			CommitSHA: "sha-sync",
-			TargetID:  "123456789012345678",
-			Timestamp: time.Now().UTC(),
-		}
-		srv.handleDeploySyncSuccess(context.Background(), evt, true)
-		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "sync_success" {
-			t.Errorf("expected sync_success, got %v", bus.publishedPREvents)
-		}
+	tests := []struct {
+		name    string
+		reg     *mockPRRegistry
+		prNum   int
+		branch  string
+		headSHA string
+		want    []wantPREvent
+	}{
+		{
+			name:    "registered conflict publishes conflict without dispatching a prompt",
+			reg:     &mockPRRegistry{conflictTargetID: lifecycleTargetID, conflictUpdated: true},
+			prNum:   42,
+			branch:  "feat/branch",
+			headSHA: "sha-conflict",
+			want:    []wantPREvent{{Event: "conflict", PRNumber: 42, HeadSHA: "sha-conflict", Status: "conflict"}},
+		},
+	}
 
-		// When syncHasExpected is false -> deploy_success
-		srv.handleDeploySyncSuccess(context.Background(), evt, false)
-		if len(bus.publishedPREvents) != 2 || bus.publishedPREvents[1].Event != "deploy_success" {
-			t.Errorf("expected deploy_success, got %v", bus.publishedPREvents)
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			disp := &mockOutboundDispatcher{}
+			srv := newLifecycleServer(lifecycleCfg(), bus, tc.reg, disp)
+			if err := srv.transitionRegisteredConflict(context.Background(), "azylman/aerial", tc.prNum, tc.branch, tc.headSHA); err != nil {
+				t.Fatalf("transitionRegisteredConflict() err = %v", err)
+			}
+			assertPREvents(t, bus, tc.want)
+			if n := len(disp.DispatchCalls()); n != 0 {
+				t.Errorf("dispatches = %d, want 0", n)
+			}
+		})
+	}
+}
 
-	t.Run("ProcessDeployEvent publishes deploy_started and deploy_success when bus is active", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
-		disp := &mockOutboundDispatcher{}
-		srv := &RouterServer{
-			bus:        bus,
-			registry:   reg,
-			dispatcher: disp,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
-		deployEvt := DeployEvent{
-			Event:     "deploy_started",
-			Repo:      "azylman/aerial",
-			PRNumber:  42,
-			CommitSHA: "sha-dep",
-			TargetID:  "123456789012345678",
-			JobName:   "eri",
-		}
-		_, err := srv.ProcessDeployEvent(context.Background(), deployEvt)
-		if err != nil {
-			t.Fatalf("ProcessDeployEvent(deploy_started) err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "deploy_started" {
-			t.Fatalf("expected deploy_started event, got %v", bus.publishedPREvents)
-		}
+func TestProcessGitHubPullRequestEvent(t *testing.T) {
+	t.Parallel()
 
-		deploySuccessEvt := DeployEvent{
-			Event:     "deploy_success",
-			Repo:      "azylman/aerial",
-			PRNumber:  42,
-			CommitSHA: "sha-dep",
-			TargetID:  "123456789012345678",
-			JobName:   "eri",
-		}
-		_, err = srv.ProcessDeployEvent(context.Background(), deploySuccessEvt)
-		if err != nil {
-			t.Fatalf("ProcessDeployEvent(deploy_success) err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 2 || bus.publishedPREvents[1].Event != "deploy_success" {
-			t.Fatalf("expected deploy_success event, got %v", bus.publishedPREvents)
-		}
-	})
+	tests := []struct {
+		name string
+		body string
+		want []wantPREvent
+	}{
+		{
+			name: "opened payload publishes opened event",
+			body: `{"action":"opened","number":42,"pull_request":{"number":42,"title":"test pr","head":{"ref":"feat/test","sha":"head123"},"user":{"login":"tester"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"tester"}}`,
+			want: []wantPREvent{{Event: "opened", PRNumber: 42, HeadSHA: "head123", Status: "open", Title: "test pr"}},
+		},
+	}
 
-	t.Run("Kustomization watch completes with deploy_success or rollout_updated", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
-		srv := &RouterServer{
-			bus:        bus,
-			dispatcher: disp,
-			registry:   reg,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			srv := newLifecycleServer(lifecycleCfg(), bus, nil, &mockOutboundDispatcher{})
+			if _, err := srv.processGitHubPullRequestEvent(context.Background(), "del-open", []byte(tc.body), &ResolvedGitHubEvent{}); err != nil {
+				t.Fatalf("processGitHubPullRequestEvent() err = %v", err)
+			}
+			assertPREvents(t, bus, tc.want)
+		})
+	}
+}
 
-		// Not yet transitioned -> rollout_updated
-		reg.markKustomizationsRes = false
-		pr := DeployingPR{Repo: "azylman/aerial", PRNumber: 42, TargetID: "123456789012345678", MergeSHA: "sha-merge"}
-		err := srv.completeKustomizationRequest(context.Background(), pr, "aerial-root")
-		if err != nil {
-			t.Fatalf("completeKustomizationRequest() err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "rollout_updated" {
-			t.Errorf("expected rollout_updated, got %v", bus.publishedPREvents)
-		}
+func TestHandlePRClosedAction(t *testing.T) {
+	t.Parallel()
 
-		// Transitioned -> deploy_success
-		reg.markKustomizationsRes = true
-		err = srv.completeKustomizationRequest(context.Background(), pr, "aerial-services")
-		if err != nil {
-			t.Fatalf("completeKustomizationRequest() err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 2 || bus.publishedPREvents[1].Event != "deploy_success" {
-			t.Errorf("expected deploy_success, got %v", bus.publishedPREvents)
-		}
-	})
+	tests := []struct {
+		name     string
+		mergeSHA string
+		merged   bool
+		want     []wantPREvent
+	}{
+		{
+			name:     "merged publishes merged event with merge sha",
+			mergeSHA: "mergesha789",
+			merged:   true,
+			want:     []wantPREvent{{Event: "merged", PRNumber: 42, HeadSHA: "head123", MergeSHA: "mergesha789", Status: "merged"}},
+		},
+		{
+			name:   "unmerged close publishes closed_unmerged event",
+			merged: false,
+			want:   []wantPREvent{{Event: "closed_unmerged", PRNumber: 42, HeadSHA: "head123", Status: "closed_unmerged"}},
+		},
+	}
 
-	t.Run("completeNoDeployWorkflowRun suppresses prompt when bus publish succeeds", func(t *testing.T) {
-		t.Parallel()
-		bus := &mockEventBus{}
-		disp := &mockOutboundDispatcher{}
-		reg := &mockPRRegistry{resolveTargetID: "123456789012345678"}
-		srv := &RouterServer{
-			bus:        bus,
-			dispatcher: disp,
-			registry:   reg,
-			cfgSrc:     fixedConfig(Config{SystemChannelID: "123456789012345678"}),
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			reg := &mockPRRegistry{resolveTargetID: lifecycleTargetID}
+			srv := newLifecycleServer(lifecycleCfg(), bus, reg, &mockOutboundDispatcher{})
+			res := &ResolvedGitHubEvent{Repo: "azylman/aerial", PRNumber: 42, Branch: "feat/test", HeadSHA: "head123", MergeSHA: tc.mergeSHA}
+			if err := srv.handlePRClosedAction(context.Background(), res, tc.merged); err != nil {
+				t.Fatalf("handlePRClosedAction(merged=%v) err = %v", tc.merged, err)
+			}
+			assertPREvents(t, bus, tc.want)
+		})
+	}
+}
 
-		err := srv.completeNoDeployWorkflowRun(context.Background(), "azylman/aerial", "head123", "123456789012345678", 42)
-		if err != nil {
-			t.Fatalf("completeNoDeployWorkflowRun() err = %v", err)
-		}
-		if len(bus.publishedPREvents) != 1 || bus.publishedPREvents[0].Event != "deploy_success" {
-			t.Fatalf("expected deploy_success published event, got %v", bus.publishedPREvents)
-		}
-		if len(disp.PromptCalls()) != 0 {
-			t.Errorf("expected prompt to be suppressed on deploy success, got %d calls", len(disp.PromptCalls()))
-		}
-	})
+func TestRecordCheckRunStatus(t *testing.T) {
+	t.Parallel()
 
-	t.Run("buildPRRolloutState extracts all fields from metadata", func(t *testing.T) {
-		t.Parallel()
-		meta := map[string]any{
-			"jobs":          []any{"eri", "coven"},
-			"started_jobs":  []any{"eri"},
-			"deployed_jobs": []any{"eri"},
-			"job_states": map[string]any{
-				"eri": "verifying_health",
+	tests := []struct {
+		name       string
+		checkName  string
+		status     string
+		conclusion string
+		want       []wantPREvent
+	}{
+		{
+			name:       "successful check run publishes passed check_updated",
+			checkName:  "Unit Tests",
+			status:     "completed",
+			conclusion: "success",
+			want:       []wantPREvent{{Event: "check_updated", PRNumber: 42, HeadSHA: "head123", Status: "open", CheckName: "Unit Tests", CheckState: "passed"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			reg := &mockPRRegistry{recordCheckUpdated: true}
+			srv := newLifecycleServer(lifecycleCfg(), bus, reg, &mockOutboundDispatcher{})
+			res := &ResolvedGitHubEvent{
+				Repo: "azylman/aerial", PRNumber: 42, Branch: "feat/test", HeadSHA: "head123",
+				CheckName: tc.checkName, Status: tc.status, Conclusion: tc.conclusion,
+			}
+			srv.recordCheckRunStatus(context.Background(), res)
+			assertPREvents(t, bus, tc.want)
+		})
+	}
+}
+
+func TestHandleDeployFailedOrRollback(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		evt  DeployEvent
+		want []wantPREvent
+	}{
+		{
+			name: "registered deploy failure publishes deploy_failed",
+			evt: DeployEvent{
+				Event: "deploy_failed", Repo: "azylman/aerial", PRNumber: 42, JobName: "eri", CommitSHA: "sha-deploy-fail",
+				TargetID: lifecycleTargetID, Details: "crashloopbackoff", Timestamp: time.Now().UTC(),
 			},
-			"kustomization_statuses": map[string]any{
-				"aerial-root": "Ready",
+			want: []wantPREvent{{Event: "deploy_failed", PRNumber: 42, MergeSHA: "sha-deploy-fail", Status: "deploy_failed"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			reg := &mockPRRegistry{deployFailedTargetID: lifecycleTargetID, deployFailedUpdated: true}
+			srv := newLifecycleServer(lifecycleCfg(), bus, reg, &mockOutboundDispatcher{})
+			if err := srv.handleDeployFailedOrRollback(context.Background(), tc.evt, ""); err != nil {
+				t.Fatalf("handleDeployFailedOrRollback() err = %v", err)
+			}
+			assertPREvents(t, bus, tc.want)
+		})
+	}
+}
+
+func TestHandleDeploySyncSuccess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		hasExpected bool
+		want        []wantPREvent
+	}{
+		{
+			name:        "sync with expected jobs publishes sync_success",
+			hasExpected: true,
+			want:        []wantPREvent{{Event: "sync_success", PRNumber: 42, MergeSHA: "sha-sync", Status: "synced"}},
+		},
+		{
+			name:        "sync without expected jobs publishes deploy_success",
+			hasExpected: false,
+			want:        []wantPREvent{{Event: "deploy_success", PRNumber: 42, MergeSHA: "sha-sync", Status: "deployed"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			reg := &mockPRRegistry{resolveTargetID: lifecycleTargetID}
+			srv := newLifecycleServer(lifecycleCfg(), bus, reg, &mockOutboundDispatcher{})
+			evt := DeployEvent{Event: "sync_success", Repo: "azylman/aerial", PRNumber: 42, CommitSHA: "sha-sync", TargetID: lifecycleTargetID, Timestamp: time.Now().UTC()}
+			srv.handleDeploySyncSuccess(context.Background(), evt, tc.hasExpected)
+			assertPREvents(t, bus, tc.want)
+		})
+	}
+}
+
+func TestCompleteKustomizationRequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		kustomization string
+		transitioned  bool
+		want          []wantPREvent
+	}{
+		{
+			name:          "kustomization ready before transition publishes rollout_updated",
+			kustomization: "aerial-root",
+			transitioned:  false,
+			want:          []wantPREvent{{Event: "rollout_updated", PRNumber: 42, Status: "deploying"}},
+		},
+		{
+			name:          "last kustomization ready publishes deploy_success",
+			kustomization: "aerial-services",
+			transitioned:  true,
+			want:          []wantPREvent{{Event: "deploy_success", PRNumber: 42, MergeSHA: "sha-merge", Status: "deployed"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			reg := &mockPRRegistry{resolveTargetID: lifecycleTargetID, markKustomizationsRes: tc.transitioned}
+			srv := newLifecycleServer(lifecycleCfg(), bus, reg, &mockOutboundDispatcher{})
+			pr := DeployingPR{Repo: "azylman/aerial", PRNumber: 42, TargetID: lifecycleTargetID, MergeSHA: "sha-merge"}
+			if err := srv.completeKustomizationRequest(context.Background(), pr, tc.kustomization); err != nil {
+				t.Fatalf("completeKustomizationRequest() err = %v", err)
+			}
+			assertPREvents(t, bus, tc.want)
+		})
+	}
+}
+
+func TestCompleteNoDeployWorkflowRun(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headSHA string
+		prNum   int
+		want    []wantPREvent
+	}{
+		{
+			name:    "published deploy_success suppresses the deployment prompt",
+			headSHA: "head123",
+			prNum:   42,
+			want:    []wantPREvent{{Event: "deploy_success", PRNumber: 42, HeadSHA: "head123", Status: "deployed"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			disp := &mockOutboundDispatcher{}
+			reg := &mockPRRegistry{resolveTargetID: lifecycleTargetID}
+			srv := newLifecycleServer(lifecycleCfg(), bus, reg, disp)
+			if err := srv.completeNoDeployWorkflowRun(context.Background(), "azylman/aerial", tc.headSHA, lifecycleTargetID, tc.prNum); err != nil {
+				t.Fatalf("completeNoDeployWorkflowRun() err = %v", err)
+			}
+			assertPREvents(t, bus, tc.want)
+			if n := len(disp.PromptCalls()); n != 0 {
+				t.Errorf("prompts = %d, want 0", n)
+			}
+		})
+	}
+}
+
+func TestBuildPRRolloutState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		meta map[string]any
+		want *pubsub.PRRolloutState
+	}{
+		{
+			name: "all rollout fields extracted from metadata",
+			meta: map[string]any{
+				"jobs":                   []any{"eri", "coven"},
+				"started_jobs":           []any{"eri"},
+				"deployed_jobs":          []any{"eri"},
+				"job_states":             map[string]any{"eri": "verifying_health"},
+				"kustomization_statuses": map[string]any{"aerial-root": "Ready"},
 			},
-		}
-		rs := buildPRRolloutState(meta)
-		if rs == nil {
-			t.Fatalf("expected non-nil rollout state")
-		}
-		if len(rs.ExpectedJobs) != 2 || rs.ExpectedJobs[0] != "eri" {
-			t.Errorf("unexpected ExpectedJobs: %v", rs.ExpectedJobs)
-		}
-		if len(rs.StartedJobs) != 1 || rs.StartedJobs[0] != "eri" {
-			t.Errorf("unexpected StartedJobs: %v", rs.StartedJobs)
-		}
-		if len(rs.DeployedJobs) != 1 || rs.DeployedJobs[0] != "eri" {
-			t.Errorf("unexpected DeployedJobs: %v", rs.DeployedJobs)
-		}
-		if rs.JobStates["eri"] != "verifying_health" {
-			t.Errorf("unexpected JobStates: %v", rs.JobStates)
-		}
-		if rs.KustomizationStatuses["aerial-root"] != "Ready" {
-			t.Errorf("unexpected KustomizationStatuses: %v", rs.KustomizationStatuses)
-		}
+			want: &pubsub.PRRolloutState{
+				ExpectedJobs:          []string{"eri", "coven"},
+				StartedJobs:           []string{"eri"},
+				DeployedJobs:          []string{"eri"},
+				JobStates:             map[string]string{"eri": "verifying_health"},
+				KustomizationStatuses: map[string]string{"aerial-root": "Ready"},
+			},
+		},
+		{name: "nil metadata yields nil", meta: nil, want: nil},
+		{name: "empty metadata yields nil", meta: map[string]any{}, want: nil},
+	}
 
-		if buildPRRolloutState(nil) != nil {
-			t.Errorf("expected nil for nil meta")
-		}
-		if buildPRRolloutState(map[string]any{}) != nil {
-			t.Errorf("expected nil for empty meta")
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := buildPRRolloutState(tc.meta); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("buildPRRolloutState() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
 
-	t.Run("healDependabotPR branches", func(t *testing.T) {
-		t.Parallel()
-		reg := &mockPRRegistry{
-			resolveTargetID: "123456789012345678",
-		}
-		srv := &RouterServer{
-			registry: reg,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678", DefaultOwner: true}),
-		}
-		resNonDep := &ResolvedGitHubEvent{
-			Repo:     "azylman/aerial",
-			PRNumber: 14,
-			Branch:   "feat/foo",
-			HeadSHA:  "sha123",
-		}
-		srv.healDependabotPR(context.Background(), resNonDep)
-		if len(reg.ensureCalls) != 0 {
-			t.Errorf("expected 0 ensureCalls for non-dependabot branch, got %d", len(reg.ensureCalls))
-		}
+func TestHealDependabotPR(t *testing.T) {
+	t.Parallel()
 
-		resDep := &ResolvedGitHubEvent{
-			Repo:     "azylman/aerial",
-			PRNumber: 15,
-			Branch:   "dependabot/pip/foo-1.0",
-			HeadSHA:  "sha123",
-		}
-		srv.healDependabotPR(context.Background(), resDep)
-		if len(reg.ensureCalls) != 1 {
-			t.Errorf("expected 1 ensureCall for dependabot branch, got %d", len(reg.ensureCalls))
-		}
+	tests := []struct {
+		name         string
+		sysChan      string
+		defaultOwner bool
+		ensureErr    error
+		prNum        int
+		branch       string
+		wantEnsured  []prCall
+	}{
+		{
+			name:         "non-dependabot branch is not registered",
+			sysChan:      lifecycleTargetID,
+			defaultOwner: true,
+			prNum:        14,
+			branch:       "feat/foo",
+		},
+		{
+			name:         "dependabot branch is registered",
+			sysChan:      lifecycleTargetID,
+			defaultOwner: true,
+			prNum:        15,
+			branch:       "dependabot/pip/foo-1.0",
+			wantEnsured:  []prCall{{repo: "azylman/aerial", prNumber: 15, headSHA: "sha123"}},
+		},
+		{
+			name:         "non-default-owner router does not register",
+			sysChan:      lifecycleTargetID,
+			defaultOwner: false,
+			prNum:        15,
+			branch:       "dependabot/pip/foo-1.0",
+		},
+		{
+			name:         "empty target id does not register",
+			sysChan:      "",
+			defaultOwner: true,
+			prNum:        15,
+			branch:       "dependabot/pip/foo-1.0",
+		},
+		{
+			name:         "registry error still attempts registration",
+			sysChan:      lifecycleTargetID,
+			defaultOwner: true,
+			ensureErr:    errors.New("db fail"),
+			prNum:        15,
+			branch:       "dependabot/pip/foo-1.0",
+			wantEnsured:  []prCall{{repo: "azylman/aerial", prNumber: 15, headSHA: "sha123"}},
+		},
+	}
 
-		// non-default-owner branch
-		regNonDefault := &mockPRRegistry{resolveTargetID: "123456789012345678"}
-		srvNonDefault := &RouterServer{
-			registry: regNonDefault,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678", DefaultOwner: false}),
-		}
-		srvNonDefault.healDependabotPR(context.Background(), resDep)
-		if len(regNonDefault.ensureCalls) != 0 {
-			t.Errorf("expected 0 ensureCalls for non-default-owner router, got %d", len(regNonDefault.ensureCalls))
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := &mockPRRegistry{resolveTargetID: tc.sysChan, ensureErr: tc.ensureErr}
+			srv := newLifecycleServer(Config{SystemChannelID: tc.sysChan, DefaultOwner: tc.defaultOwner}, &mockEventBus{}, reg, &mockOutboundDispatcher{})
+			srv.healDependabotPR(context.Background(), &ResolvedGitHubEvent{Repo: "azylman/aerial", PRNumber: tc.prNum, Branch: tc.branch, HeadSHA: "sha123"})
+			if (len(reg.ensureCalls) > 0 || len(tc.wantEnsured) > 0) && !reflect.DeepEqual(reg.ensureCalls, tc.wantEnsured) {
+				t.Errorf("registered PRs = %+v, want %+v", reg.ensureCalls, tc.wantEnsured)
+			}
+		})
+	}
+}
 
-		// empty targetID branch
-		regNoTarget := &mockPRRegistry{resolveTargetID: ""}
-		srvNoTarget := &RouterServer{
-			registry: regNoTarget,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: "", DefaultOwner: true}),
-		}
-		srvNoTarget.healDependabotPR(context.Background(), resDep)
-		if len(regNoTarget.ensureCalls) != 0 {
-			t.Errorf("expected 0 ensureCalls on empty targetID, got %d", len(regNoTarget.ensureCalls))
-		}
+func TestIsAutoUpdateAuthorAllowed(t *testing.T) {
+	t.Parallel()
 
-		// registry error branch
-		regErr := &mockPRRegistry{ensureErr: errors.New("db fail")}
-		srvErr := &RouterServer{
-			registry: regErr,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678", DefaultOwner: true}),
-		}
-		srvErr.healDependabotPR(context.Background(), resDep)
-		if len(regErr.ensureCalls) != 1 {
-			t.Errorf("expected 1 ensureCall on registry error, got %d", len(regErr.ensureCalls))
-		}
-	})
+	tests := []struct {
+		name   string
+		author string
+		want   bool
+	}{
+		{name: "configured app author allowed", author: "app/dependabot", want: true},
+		{name: "configured user author allowed", author: "trusted-dev", want: true},
+		{name: "unconfigured author rejected", author: "random-user", want: false},
+	}
 
-	t.Run("isAutoUpdateAuthorAllowed and sanitizeSubjectToken branches", func(t *testing.T) {
-		t.Parallel()
-		srv := &RouterServer{
-			cfgSrc: fixedConfig(Config{AutoUpdatePRAuthors: []string{"app/dependabot", "trusted-dev"}}),
-		}
-		if !srv.isAutoUpdateAuthorAllowed("app/dependabot") {
-			t.Errorf("expected app/dependabot to be allowed")
-		}
-		if srv.isAutoUpdateAuthorAllowed("random-user") {
-			t.Errorf("expected random-user to not be allowed")
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := newLifecycleServer(Config{AutoUpdatePRAuthors: []string{"app/dependabot", "trusted-dev"}}, &mockEventBus{}, nil, nil)
+			if got := srv.isAutoUpdateAuthorAllowed(tc.author); got != tc.want {
+				t.Errorf("isAutoUpdateAuthorAllowed(%q) = %v, want %v", tc.author, got, tc.want)
+			}
+		})
+	}
+}
 
-		if sanitizeSubjectToken("  ") != "unknown" {
-			t.Errorf("expected unknown for empty token")
-		}
-		if sanitizeSubjectToken("foo/bar:baz") != "foo_bar_baz" {
-			t.Errorf("expected foo_bar_baz")
-		}
-	})
+func TestSanitizeSubjectToken(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		token string
+		want  string
+	}{
+		{name: "blank token becomes unknown", token: "  ", want: "unknown"},
+		{name: "separators replaced with underscores", token: "foo/bar:baz", want: "foo_bar_baz"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sanitizeSubjectToken(tc.token); got != tc.want {
+				t.Errorf("sanitizeSubjectToken(%q) = %q, want %q", tc.token, got, tc.want)
+			}
+		})
+	}
 }

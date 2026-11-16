@@ -587,6 +587,7 @@ type processDeployEventCase struct {
 	reg                *mockPRRegistry
 	pgReg              *PostgresPRRegistry
 	disp               *mockOutboundDispatcher
+	bus                *mockEventBus
 	wantErr            bool
 	wantPR             int
 	wantTargetID       string
@@ -600,6 +601,7 @@ type processDeployEventCase struct {
 	wantPromptSubs     []string
 	wantRequested      []string
 	wantReconciles     []fluxKustomizationRef
+	wantPublished      []wantPREvent
 }
 
 func processDeployEventBasicCases() []processDeployEventCase {
@@ -669,6 +671,18 @@ func processDeployEventBasicCases() []processDeployEventCase {
 			wantPR:       528,
 			wantTargetID: "100000000000000001",
 			wantPrompts:  0,
+		},
+		{
+			name:          "deploy_started then deploy_success publish lifecycle events to the bus",
+			evt:           mkDeployEvt("deploy_started", "eri", "azylman/aerial", "sha-dep", 42, "123456789012345678", "", ""),
+			extraEvts:     []DeployEvent{mkDeployEvt("deploy_success", "eri", "azylman/aerial", "sha-dep", 42, "123456789012345678", "", "")},
+			sysChan:       "123456789012345678",
+			reg:           &mockPRRegistry{resolveTargetID: "123456789012345678"},
+			disp:          &mockOutboundDispatcher{},
+			bus:           &mockEventBus{},
+			wantPR:        42,
+			wantTargetID:  "123456789012345678",
+			wantPublished: []wantPREvent{{Event: "deploy_started", PRNumber: 42, MergeSHA: "sha-dep", Status: "deploying"}, {Event: "deploy_success", PRNumber: 42, MergeSHA: "sha-dep", Status: "deployed"}},
 		},
 		{
 			name:           "deploy_rollback valid snowflake",
@@ -1010,6 +1024,9 @@ func runProcessDeployEventCase(ctx context.Context, t *testing.T, tc processDepl
 	cfg := Config{SystemChannelID: tc.sysChan}
 	client := &http.Client{Transport: &zeroCallTransport{}}
 	srv := newTestRouter(cfg, client, reg, disp)
+	if tc.bus != nil {
+		srv.SetEventBus(tc.bus)
+	}
 	res, err := srv.ProcessDeployEvent(ctx, tc.evt)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ProcessDeployEvent() err = %v, wantErr %v", err, tc.wantErr)
@@ -1030,6 +1047,9 @@ func runProcessDeployEventCase(ctx context.Context, t *testing.T, tc processDepl
 	}
 	assertDeployEventRegResults(t, tc)
 	assertDeployEventDispResults(t, tc)
+	if tc.bus != nil {
+		assertPREvents(t, tc.bus, tc.wantPublished)
+	}
 }
 
 func assertDeployEventRegResults(t *testing.T, tc processDeployEventCase) {
