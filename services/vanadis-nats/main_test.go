@@ -235,6 +235,11 @@ func TestNATSBridge_StartConsumers(t *testing.T) {
 			wantErrMsg: "subscribe vanadis-pr-events queue",
 		},
 		{
+			name:       "consume queue widget-events error",
+			bus:        &testBus{consumeErrs: map[string]error{"aerial.coalesced.widget_sync.>": errors.New("widget queue err")}},
+			wantErrMsg: "subscribe vanadis-widget queue",
+		},
+		{
 			name:       "successful consumers registration",
 			bus:        &testBus{},
 			wantErrMsg: "",
@@ -253,6 +258,7 @@ func TestNATSBridge_StartConsumers(t *testing.T) {
 					tb.mu.Lock()
 					assert.True(t, tb.subscribed["aerial.dispatch.*:vanadis-dispatch"])
 					assert.True(t, tb.subscribed["aerial.pr.>:vanadis-pr-events"])
+					assert.True(t, tb.subscribed["aerial.coalesced.widget_sync.>:vanadis-widget"])
 					tb.mu.Unlock()
 				}
 			} else {
@@ -720,6 +726,226 @@ func TestHandleDispatchOutcomeEvent_Errors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runDispatchTestCase(t, tc)
+		})
+	}
+}
+
+type widgetSyncTestCase struct {
+	name          string
+	msgData       string
+	msgHeader     nats.Header
+	delivered     uint64
+	serverStatus  int
+	closeServer   bool
+	wantErr       bool
+	wantNaked     bool
+	wantTermed    bool
+	wantNakDelay  time.Duration
+	wantRequests  int
+	wantKey       string
+	wantPath      string
+	wantReconcile map[string]string
+	wantPREvent   pubsub.PRLifecycleEvent
+}
+
+func runWidgetSyncTestCase(t *testing.T, tc widgetSyncTestCase) {
+	t.Helper()
+	var reqCount int
+	var capturedKey string
+	var capturedPath string
+	var capturedBody []byte
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCount++
+		capturedKey = r.Header.Get("Idempotency-Key")
+		capturedPath = r.URL.Path
+		capturedBody, _ = io.ReadAll(r.Body)
+
+		if tc.serverStatus != 0 {
+			w.WriteHeader(tc.serverStatus)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer ts.Close()
+
+	serverURL := ts.URL
+	if tc.closeServer {
+		ts.Close()
+	}
+
+	bridge := NewNATSBridge(Config{RestateIngressURL: serverURL}, &testBus{}, ts.Client())
+
+	msg := &testMsg{
+		data:      []byte(tc.msgData),
+		subject:   "aerial.coalesced.widget_sync.build.b-1",
+		header:    tc.msgHeader,
+		delivered: tc.delivered,
+	}
+
+	err := bridge.HandleWidgetSyncEvent(context.Background(), msg)
+	if tc.wantErr {
+		require.Error(t, err)
+	} else {
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, tc.wantRequests, reqCount)
+	assert.Equal(t, tc.wantNaked, msg.naked.Load())
+	assert.Equal(t, tc.wantTermed, msg.termed.Load())
+	if tc.wantNakDelay > 0 {
+		assert.Equal(t, tc.wantNakDelay, msg.nakDelay)
+	}
+
+	if tc.wantRequests > 0 {
+		assert.Equal(t, tc.wantPath, capturedPath)
+		if tc.wantKey != "" {
+			assert.Equal(t, tc.wantKey, capturedKey)
+		}
+		if tc.wantReconcile != nil {
+			var m map[string]string
+			require.NoError(t, json.Unmarshal(capturedBody, &m))
+			assert.Equal(t, tc.wantReconcile, m)
+		}
+		if tc.wantPREvent.Repo != "" {
+			var pe pubsub.PRLifecycleEvent
+			require.NoError(t, json.Unmarshal(capturedBody, &pe))
+			assert.Equal(t, tc.wantPREvent.Event, pe.Event)
+			assert.Equal(t, tc.wantPREvent.Repo, pe.Repo)
+			assert.Equal(t, tc.wantPREvent.PRNumber, pe.PRNumber)
+		}
+	}
+}
+
+func TestHandleWidgetSyncEvent(t *testing.T) {
+	t.Parallel()
+
+	tests := []widgetSyncTestCase{
+		{
+			name:         "malformed json returns nil",
+			msgData:      "{not-valid-json",
+			wantRequests: 0,
+			wantErr:      false,
+		},
+		{
+			name:         "empty args returns nil",
+			msgData:      `{}`,
+			wantRequests: 0,
+			wantErr:      false,
+		},
+		{
+			name:         "build_id routing to Reconcile send with fallback key",
+			msgData:      `{"build_id":"build-987"}`,
+			serverStatus: http.StatusOK,
+			wantRequests: 1,
+			wantPath:     "/Build/build-987/Reconcile/send",
+			wantKey:      "widget:build:build-987",
+			wantReconcile: map[string]string{
+				"reason": "widget_sync",
+			},
+			wantErr: false,
+		},
+		{
+			name:         "build_id routing with HeaderMsgID precedence",
+			msgData:      `{"build_id":"build-987"}`,
+			msgHeader:    nats.Header{pubsub.HeaderMsgID: []string{"custom-build-msgid"}},
+			wantRequests: 1,
+			wantPath:     "/Build/build-987/Reconcile/send",
+			wantKey:      "custom-build-msgid",
+			wantReconcile: map[string]string{
+				"reason": "widget_sync",
+			},
+			wantErr: false,
+		},
+		{
+			name:         "build_id routing with Idempotency-Key header precedence",
+			msgData:      `{"build_id":"build-987"}`,
+			msgHeader:    nats.Header{"Idempotency-Key": []string{"custom-build-idem"}},
+			wantRequests: 1,
+			wantPath:     "/Build/build-987/Reconcile/send",
+			wantKey:      "custom-build-idem",
+			wantReconcile: map[string]string{
+				"reason": "widget_sync",
+			},
+			wantErr: false,
+		},
+		{
+			name:         "repo and pr_number routing to RoutePREvent send with fallback key",
+			msgData:      `{"repo":"azylman/aerial","pr_number":42}`,
+			serverStatus: http.StatusOK,
+			wantRequests: 1,
+			wantPath:     "/BuildRouter/RoutePREvent/send",
+			wantKey:      "widget:pr:azylman/aerial:42",
+			wantPREvent: pubsub.PRLifecycleEvent{
+				Event:    "widget_sync",
+				Repo:     "azylman/aerial",
+				PRNumber: 42,
+			},
+			wantErr: false,
+		},
+		{
+			name:         "repo and pr_number routing with HeaderMsgID precedence",
+			msgData:      `{"repo":"azylman/aerial","pr_number":42}`,
+			msgHeader:    nats.Header{pubsub.HeaderMsgID: []string{"custom-pr-msgid"}},
+			wantRequests: 1,
+			wantPath:     "/BuildRouter/RoutePREvent/send",
+			wantKey:      "custom-pr-msgid",
+			wantPREvent: pubsub.PRLifecycleEvent{
+				Event:    "widget_sync",
+				Repo:     "azylman/aerial",
+				PRNumber: 42,
+			},
+			wantErr: false,
+		},
+		{
+			name:         "repo without positive pr_number returns nil",
+			msgData:      `{"repo":"azylman/aerial","pr_number":0}`,
+			wantRequests: 0,
+			wantErr:      false,
+		},
+		{
+			name:         "pr_number without repo returns nil",
+			msgData:      `{"repo":"","pr_number":42}`,
+			wantRequests: 0,
+			wantErr:      false,
+		},
+		{
+			name:         "restate 500 attempt 1 naks with delay",
+			msgData:      `{"build_id":"build-err"}`,
+			delivered:    1,
+			serverStatus: http.StatusInternalServerError,
+			wantRequests: 1,
+			wantPath:     "/Build/build-err/Reconcile/send",
+			wantErr:      true,
+			wantNaked:    true,
+			wantNakDelay: 1 * time.Second,
+		},
+		{
+			name:         "restate 500 attempt 3 terms",
+			msgData:      `{"build_id":"build-err"}`,
+			delivered:    3,
+			serverStatus: http.StatusInternalServerError,
+			wantRequests: 1,
+			wantPath:     "/Build/build-err/Reconcile/send",
+			wantErr:      true,
+			wantTermed:   true,
+		},
+		{
+			name:         "transport error naks with delay",
+			msgData:      `{"build_id":"build-transport-err"}`,
+			delivered:    1,
+			closeServer:  true,
+			wantRequests: 0,
+			wantErr:      true,
+			wantNaked:    true,
+			wantNakDelay: 1 * time.Second,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runWidgetSyncTestCase(t, tc)
 		})
 	}
 }
