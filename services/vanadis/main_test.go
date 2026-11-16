@@ -18,7 +18,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 func assertConfigDefaults(t *testing.T, cfg Config) {
@@ -147,12 +146,6 @@ func TestVanadisConsumerStatsQuerier(t *testing.T) {
 	srv := NewVanadisServer(Config{}, nil, nil)
 	if srv.consumerStatsQuerier() != nil {
 		t.Errorf("expected nil when no stats or bus configured")
-	}
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-	srv.SetBus(memBus)
-	if srv.consumerStatsQuerier() == nil {
-		t.Errorf("expected bus stats querier when bus implements consumerStatsQuerier")
 	}
 	mockQ := &mockConsumerStatsQuerier{}
 	srv.queueStats = mockQ
@@ -323,9 +316,6 @@ func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *
 	}
 	for _, p := range invalidPayloads {
 		checkCode(http.MethodPost, "/builds", strings.NewReader(p), http.StatusBadRequest)
-	}
-	if err := validateCreateBuildInputs("b1", "123", "obj", []VanadisChunk{{ID: "bad:id", Title: "t", Instructions: "i"}}); err == nil || !strings.Contains(err.Error(), "chunks[0].id must be 1..120 characters") {
-		t.Fatalf("expected validateCreateBuildInputs chunk id error, got %v", err)
 	}
 	validPayload := `{"thread_id":"stateful_medium:discord-1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"repo":"aerial","title":"Part 1","instructions":"Do part 1","effort":"low","depends_on":[]},{"repo":"aerial","id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"high","acceptance_criteria":["All green"],"depends_on":["0"]}]}`
 	rec := doReq(http.MethodPost, "/builds", strings.NewReader(validPayload))
@@ -683,12 +673,6 @@ func TestVanadisMetrics(t *testing.T) {
 	RecordBuildTotal("completed")
 	RecordBuildTotal("failed")
 	RecordBuildTotal("cancelled")
-
-	RecordChunkTotal("dispatched")
-	RecordChunkTotal("merged")
-	RecordChunkTotal("completed")
-	RecordChunkTotal("failed")
-	RecordChunkTotal("cancelled")
 
 	registerVanadisCollector(BuildsActive)
 

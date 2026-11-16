@@ -33,6 +33,7 @@ import (
 const (
 	effortLow    = "low"
 	effortMedium = "medium"
+	jsonNull     = "null"
 )
 
 var (
@@ -316,24 +317,6 @@ func validateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, target
 	return nil
 }
 
-func isChunkDoneStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case statusMerged, statusCompleted:
-		return true
-	default:
-		return false
-	}
-}
-
-func isChunkMergedOrDoneStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case statusMerged, statusDeploying, statusCompleted:
-		return true
-	default:
-		return false
-	}
-}
-
 func isValidVanadisChunkID(id string) bool {
 	id = strings.TrimSpace(id)
 	if len(id) < 1 || len(id) > 120 {
@@ -473,42 +456,12 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]Van
 	return entries, nil
 }
 
-// StatusWidgetChunk represents a chunk in a Vanadis build or a PR task for widget rendering.
-type StatusWidgetChunk struct {
-	ID            string    `json:"id,omitempty"`
-	Index         int       `json:"index"`
-	Repo          string    `json:"repo"`
-	Title         string    `json:"title"`
-	Status        string    `json:"status"`
-	ActiveStep    string    `json:"active_step,omitempty"`
-	PRNumber      int       `json:"pr_number,omitempty"`
-	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
-	StartedAt     time.Time `json:"started_at,omitempty"`
-	CompletedAt   time.Time `json:"completed_at,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at,omitempty"`
-}
-
-// StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.
-type StatusWidgetRequest struct {
-	ChannelID string              `json:"channel_id"`
-	MessageID string              `json:"message_id,omitempty"`
-	ID        string              `json:"id"`
-	Tier      int                 `json:"tier,omitempty"`
-	Title     string              `json:"title"`
-	Status    string              `json:"status"`
-	Banner    string              `json:"banner,omitempty"`
-	SkipSink  bool                `json:"skip_sink,omitempty"`
-	Chunks    []StatusWidgetChunk `json:"chunks"`
-	StartedAt time.Time           `json:"started_at,omitempty"`
-}
-
 // VanadisServer manages HTTP endpoints and JetStream worker coordination for Vanadis builds.
 type VanadisServer struct {
 	cfg        Config
 	restateCfg RestateConfig
 	httpClient *http.Client
 	store      VanadisStore
-	bus        pubsub.Bus
 	queueStats consumerStatsQuerier
 }
 
@@ -524,20 +477,11 @@ func NewVanadisServer(cfg Config, store VanadisStore, httpClient *http.Client) *
 // SetStore updates the VanadisStore backing the server.
 func (s *VanadisServer) SetStore(store VanadisStore) { s.store = store }
 
-// SetBus sets the pubsub.Bus for event emission and consumption.
-func (s *VanadisServer) SetBus(bus pubsub.Bus) { s.bus = bus }
-
 func (s *VanadisServer) consumerStatsQuerier() consumerStatsQuerier {
 	if s == nil {
 		return nil
 	}
-	if s.queueStats != nil {
-		return s.queueStats
-	}
-	if csp, ok := s.bus.(consumerStatsQuerier); ok {
-		return csp
-	}
-	return nil
+	return s.queueStats
 }
 
 func normalizeDiscordThreadID(s string) string {

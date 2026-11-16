@@ -56,75 +56,34 @@ func TestVanadisServer_StoreHTTPEndpointErrors(t *testing.T) {
 	}
 }
 
-func TestChunkStatusAndIDValidation(t *testing.T) {
+func TestValidVanadisChunkID(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name        string
-		status      string
-		checkStatus bool
-		wantDone    bool
-		checkMerged bool
-		wantMerged  bool
-		id          string
-		checkID     bool
-		wantValid   bool
+		name      string
+		id        string
+		wantValid bool
 	}{
 		{
-			name:        "merged",
-			status:      "merged",
-			checkStatus: true,
-			wantDone:    true,
-			checkMerged: false,
-			id:          "valid-chunk_1",
-			checkID:     true,
-			wantValid:   true,
+			name:      "valid",
+			id:        "valid-chunk_1",
+			wantValid: true,
 		},
 		{
-			name:        "deploying",
-			status:      "deploying",
-			checkStatus: true,
-			wantDone:    false,
-			checkMerged: true,
-			wantMerged:  true,
-			id:          "",
-			checkID:     true,
-			wantValid:   false,
+			name:      "empty",
+			id:        "",
+			wantValid: false,
 		},
 		{
-			name:        "completed",
-			status:      "completed",
-			checkStatus: true,
-			wantDone:    true,
-			checkMerged: false,
-			checkID:     false,
-		},
-		{
-			name:        "running",
-			status:      "",
-			checkStatus: false,
-			checkMerged: false,
-			id:          strings.Repeat("a", 121),
-			checkID:     true,
-			wantValid:   false,
+			name:      "too_long",
+			id:        strings.Repeat("a", 121),
+			wantValid: false,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.checkStatus {
-				if got := isChunkDoneStatus(tc.status); got != tc.wantDone {
-					t.Fatalf("isChunkDoneStatus(%q) = %v, want %v", tc.status, got, tc.wantDone)
-				}
-			}
-			if tc.checkMerged {
-				if got := isChunkMergedOrDoneStatus(tc.status); got != tc.wantMerged {
-					t.Fatalf("isChunkMergedOrDoneStatus(%q) = %v, want %v", tc.status, got, tc.wantMerged)
-				}
-			}
-			if tc.checkID {
-				if got := isValidVanadisChunkID(tc.id); got != tc.wantValid {
-					t.Fatalf("isValidVanadisChunkID(%q) = %v, want %v", tc.id, got, tc.wantValid)
-				}
+			if got := isValidVanadisChunkID(tc.id); got != tc.wantValid {
+				t.Fatalf("isValidVanadisChunkID(%q) = %v, want %v", tc.id, got, tc.wantValid)
 			}
 		})
 	}
