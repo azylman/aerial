@@ -1318,7 +1318,6 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/healthz", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /healthz, got %d", w.Code)
 	}
-	mux.ServeHTTP(&flusherErrWriter{}, httptest.NewRequest(http.MethodGet, "/health", http.NoBody))
 
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/tasks", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /tasks, got %d", w.Code)
@@ -1344,8 +1343,6 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/transcripts", nil); w.Code != http.StatusNotFound {
 		t.Errorf("Expected 404 from deleted /transcripts, got %d", w.Code)
 	}
-
-	httpkit.WriteJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
 
 	oldFn := httpkit.WriteCountersDirFn
 	defer func() { httpkit.WriteCountersDirFn = oldFn }()

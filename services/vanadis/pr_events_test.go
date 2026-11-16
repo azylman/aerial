@@ -605,7 +605,6 @@ func TestHandlePRCIFailed_DispatchIDVariants(t *testing.T) {
 		require.Len(t, dispatchIDs, 2)
 		assert.Equal(t, "vanadis-c-ci-seq-cifail-sha001-1", dispatchIDs[0])
 		assert.Equal(t, "vanadis-c-ci-seq-cifail-sha002-1", dispatchIDs[1])
-		assert.NotEqual(t, dispatchIDs[0], dispatchIDs[1])
 		assert.Empty(t, recBus.getEvents())
 	})
 }

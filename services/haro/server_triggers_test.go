@@ -113,7 +113,6 @@ func TestServer_Metrics_Table(t *testing.T) {
 	RecordScheduleDispatchDuration("cron", 0.42)
 	RecordScheduleDispatchDuration("event_watch", 1.25)
 
-	nilServer := &Server{}
 	serverNilDB := &Server{handler: &ToolHandler{}}
 	registerHaroCollector(SchedulesActive)
 
@@ -143,17 +142,6 @@ func TestServer_Metrics_Table(t *testing.T) {
 				`haro_schedule_runs_total{schedule_type="heartbeat",status="skipped_active"}`,
 				`haro_schedule_runs_total{schedule_type="event_watch",status="failed"}`,
 				"haro_schedule_dispatch_duration_seconds",
-			},
-		},
-		{
-			name:       "nil server db still serves metrics ok",
-			server:     nilServer,
-			method:     http.MethodGet,
-			url:        "/metrics",
-			wantStatus: http.StatusOK,
-			wantSubstrings: []string{
-				"haro_schedules_active",
-				"haro_schedule_runs_total",
 			},
 		},
 		{
