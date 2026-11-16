@@ -200,7 +200,7 @@ func startTestStreamingDaemon(t *testing.T, cfg DaemonConfig, initLine string, d
 	if discardStdin {
 		go func() { _, _ = io.Copy(io.Discard, inR) }()
 	}
-	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	daemon, err := StartStreamingDaemon(context.Background(), context.Background(), cfg, mock)
 	if err != nil {
 		t.Fatalf("startTestStreamingDaemon failed: %v", err)
 	}
@@ -234,7 +234,7 @@ func tryStartWithPipes(ctx context.Context, t *testing.T, cfg DaemonConfig, clos
 			return inW, outR, errR, handle, nil
 		},
 	}
-	_, err := StartStreamingDaemon(ctx, cfg, mock)
+	_, err := StartStreamingDaemon(ctx, ctx, cfg, mock)
 	return handle, err
 }
 
@@ -277,11 +277,11 @@ func TestStreamingDaemon_HandshakeFailures(t *testing.T) {
 			return nil, nil, nil, nil, errors.New("spawn binary not found")
 		},
 	}
-	if _, err = StartStreamingDaemon(context.Background(), cfgForSession("00000000-0000-0000-0000-000000000001"), mock); err == nil || !strings.Contains(err.Error(), "failed spawning daemon") {
+	if _, err = StartStreamingDaemon(context.Background(), context.Background(), cfgForSession("00000000-0000-0000-0000-000000000001"), mock); err == nil || !strings.Contains(err.Error(), "failed spawning daemon") {
 		t.Fatalf("expected spawn error, got: %v", err)
 	}
 
-	if _, err = StartStreamingDaemon(context.Background(), DaemonConfig{AgyBin: "nonexistent-executable-binary-12345", SessionID: "00000000-0000-0000-0000-000000000001"}, nil); err == nil || !strings.Contains(err.Error(), "failed spawning daemon") {
+	if _, err = StartStreamingDaemon(context.Background(), context.Background(), DaemonConfig{AgyBin: "nonexistent-executable-binary-12345", SessionID: "00000000-0000-0000-0000-000000000001"}, nil); err == nil || !strings.Contains(err.Error(), "failed spawning daemon") {
 		t.Fatalf("expected spawn error with nil spawner, got: %v", err)
 	}
 
@@ -433,11 +433,11 @@ func TestStreamingDaemon_SetTranscriptRescuerAndStreamQuietly(t *testing.T) {
 	nilDaemon.SetTranscriptRescuer(nil)
 	dRescuer := &StreamingDaemon{}
 	var rescuerCalled bool
-	dRescuer.SetTranscriptRescuer(func(convID string, since time.Time) string {
+	dRescuer.SetTranscriptRescuer(func(ctx context.Context, convID string, since time.Time) string {
 		rescuerCalled = true
 		return "rescued"
 	})
-	if dRescuer.cfg.TranscriptRescuer == nil || dRescuer.cfg.TranscriptRescuer("conv", time.Now()) != "rescued" || !rescuerCalled {
+	if dRescuer.cfg.TranscriptRescuer == nil || dRescuer.cfg.TranscriptRescuer(context.Background(), "conv", time.Now()) != "rescued" || !rescuerCalled {
 		t.Fatalf("TranscriptRescuer was not properly configured or executed")
 	}
 }
@@ -572,7 +572,7 @@ func TestStreamingDaemon_ResultStatusAndErrorHandling(t *testing.T) {
 	for _, tc := range tests {
 		cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001", Model: "gemini-3.8-flash-high"}
 		if tc.rescuedText != "" {
-			cfg.TranscriptRescuer = func(convID string, since time.Time) string { return tc.rescuedText }
+			cfg.TranscriptRescuer = func(ctx context.Context, convID string, since time.Time) string { return tc.rescuedText }
 		}
 		daemon := &StreamingDaemon{cfg: cfg, sessionID: cfg.SessionID}
 		sink := newMockTurnSink()
@@ -591,7 +591,7 @@ func TestStreamingDaemon_TranscriptRescue_ResultEvents(t *testing.T) {
 	for _, tc := range tests {
 		cfg := DaemonConfig{
 			SessionID:         "00000000-0000-0000-0000-000000000101",
-			TranscriptRescuer: func(convID string, since time.Time) string { return tc.rescuedText },
+			TranscriptRescuer: func(ctx context.Context, convID string, since time.Time) string { return tc.rescuedText },
 		}
 		h := startTestStreamingDaemon(t, cfg, "", true)
 		sink := newMockTurnSink()
@@ -611,7 +611,7 @@ func TestStreamingDaemon_TranscriptRescue_UnexpectedEOF(t *testing.T) {
 	for _, tc := range tests {
 		cfg := DaemonConfig{
 			SessionID:         "00000000-0000-0000-0000-000000000103",
-			TranscriptRescuer: func(convID string, since time.Time) string { return tc.rescuedText },
+			TranscriptRescuer: func(ctx context.Context, convID string, since time.Time) string { return tc.rescuedText },
 		}
 		h := startTestStreamingDaemon(t, cfg, "", true)
 		sink := newMockTurnSink()
@@ -1370,7 +1370,7 @@ func TestStreamingDaemon_Claude_ErrorHandling(t *testing.T) {
 			return inW, outR, errR, &MockProcessHandle{pid: 9999}, nil
 		},
 	}
-	_, errStart := StartStreamingDaemon(context.Background(), DaemonConfig{Timeout: 50 * time.Millisecond}, mockErrSpawner)
+	_, errStart := StartStreamingDaemon(context.Background(), context.Background(), DaemonConfig{Timeout: 50 * time.Millisecond}, mockErrSpawner)
 	if errStart == nil || !strings.Contains(errStart.Error(), "fatal startup error from binary") {
 		t.Errorf("expected stderr diagnostics in timeout error, got %v", errStart)
 	}

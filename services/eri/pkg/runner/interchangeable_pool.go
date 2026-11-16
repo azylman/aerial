@@ -298,7 +298,7 @@ func (p *InterchangeablePool) Underlying() *UnifiedProcessPool {
 	return p.underlying
 }
 
-func (p *InterchangeablePool) SetTranscriptRescuer(r func(string, time.Time) string) {
+func (p *InterchangeablePool) SetTranscriptRescuer(r func(context.Context, string, time.Time) string) {
 	if p != nil && p.underlying != nil {
 		p.underlying.SetTranscriptRescuer(r)
 	}

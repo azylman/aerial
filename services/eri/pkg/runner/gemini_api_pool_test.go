@@ -1279,3 +1279,57 @@ func requireType[T any](t *testing.T, v any) T {
 	}
 	return got
 }
+
+func TestGeminiAPIPool_ReleaseUpkeepContext(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		closeDuring bool
+	}{{"request canceled", false}, {"pool closed", true}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			entered, proceed := make(chan struct{}), make(chan struct{})
+			cfg := GeminiAPIPoolConfig{MaxSessionTurns: 1, OnSessionRotated: func(ctx context.Context, _, _, _ string) error {
+				if ctx.Err() != nil {
+					t.Error("upkeep inherited request cancellation")
+				}
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) > 35*time.Second {
+					t.Error("missing bounded upkeep deadline")
+				}
+				close(entered)
+				if tc.closeDuring {
+					<-ctx.Done()
+				} else {
+					<-proceed
+				}
+				return ctx.Err()
+			}}
+			pool := NewGeminiAPIPool(cfg)
+			defer pool.Close()
+			request, cancel := context.WithCancel(context.Background())
+			lease, err := pool.AcquireLease(request, "target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireType[*geminiSessionLease](t, lease).turnCount = 2
+			cancel()
+			done := make(chan error, 1)
+			go func() { done <- lease.Release() }()
+			<-entered
+			if tc.closeDuring {
+				pool.Close()
+			} else {
+				close(proceed)
+			}
+			err = <-done
+			if tc.closeDuring && !errors.Is(err, context.Canceled) {
+				t.Fatalf("release error = %v", err)
+			}
+			if !tc.closeDuring && err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

@@ -10,10 +10,12 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`eri`**: Multi-protocol Antigravity execution engine (`:8080`) managing multi-turn memory, multiplexed HTTP ingress (`/discord/ingress` and `/discord/interaction` dispatched from `synapse`, real-time voice pipeline via `/voice/ask`, HTTP prompt injection via `/prompt`, and direct outbound delivery via `/discord/message` and `/discord/widget`), and System-1 ambient triage (`/v1/systemone` via `pjev`).
   - **`haro`**: Persistent scheduling, heartbeat, and event-watch orchestration service evaluating cron, one-shot, and event triggers and dispatching due turns to `eri`.
   - **`coven`**: Semantic fact extraction, ACT-R memory decay, and procedural skill synthesis service.
-  - **`vanadis`**: Autonomous multi-chunk build queue orchestrator with JIT symbol line-slice resolution.
+  - **`vanadis`**: Multi-chunk build queue orchestrator providing HTTP/MCP APIs (`:4025`), JIT symbol line-slice resolution, and NATS JetStream consumers paired with **`vanadis-restate`** (`RestateDeployment` on `:9080` Restate SDK and `:4026` health/metrics) executing durable Restate `Build` Virtual Object and `BuildRouter` DAG workflows.
+  - **`nats`**: NATS 2 JetStream broker (`StatefulSet` on `:4222`, HTTP monitoring `:8222`) backing durable cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`) reconciled programmatically on startup via `pkg/pubsub`.
+  - **`restate`**: Official Kubernetes Restate Operator (`restate-operator`) managing `RestateCluster` instances (`:8080` ingress / `:9070` admin with RocksDB state/journal storage across `restate`, `restate-marida`, and `restate-miorine` namespaces).
   - **`postgres`**: CloudNativePG 2-instance PostgreSQL 18 + `pgvector` cluster with native `:9187` Prometheus metrics for production persistence (messages, sessions, atomic CAS task queues, schedules, event triggers, vector embeddings, PR registry, and Grafana), also hosting the logical `docket` database for `docket-store` (Vikunja) and `docket-mcp`.
   - **`flux-system` / `git-sync`**: Flux CD (`flux-system`) reconciling `./k8s` Kustomizations and Kubernetes `git-sync` sidecar initContainers mounting `/share/aerial:ro` and `/share/aerial-config:ro` into `eri`.
-  - **`coredns`**: Kubernetes CoreDNS daemon rewriting internal DNS records (`*.aerial`, `*.lan` -> `*.default.svc.cluster.local`).
+  - **`coredns`**: Kubernetes CoreDNS daemon rewriting internal DNS records (`restate.aerial` -> `restate.restate.svc.cluster.local`, `restate-marida.aerial` -> `restate.restate-marida.svc.cluster.local`, `*.aerial`, `*.lan` -> `*.default.svc.cluster.local`).
   - **`infisical`**: Centralized secret management and automated rotation backed by Valkey 9, synced via External Secrets Operator into scoped per-service Kubernetes Secrets and the `shared-secrets` redaction bundle.
 
 - **Outbound Model Context Protocol (MCP) Microservices**:
@@ -33,7 +35,7 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`console`**: Web status HUD rendering live queue state, schedules, memory, and turn health.
   - **`docs`**: Living documentation portal serving architectural specifications and runbooks.
   - **`agentsview`**: Web observability dashboard rendering agent session transcripts and tool traces.
-  - **`synapse`**: Event-driven ingress router (`:4020`) owning the live Discord Gateway WebSocket connection, startup catch-up sweeps, and NATS JetStream-backed message/interaction ingestion to `eri`, plus routing GitHub push/CI webhooks to Flux CD (`FLUX_RECEIVER_URL`), updating `ConfigMap/aerial-image-tags` in `flux-system` and triggering Flux Kustomization reconciliation (`postBuild.substituteFrom`) on CI image promotions, `/webhooks/flux` deployment notifications, and Vanadis chunk progression.
+  - **`synapse`**: Pure edge ingestion, SHA correlation, and NATS JetStream fact publisher (`:4020` owning live Discord Gateway WebSocket connection, startup catch-up sweeps, publishing `aerial.pr.>` and `AERIAL_JOBS` facts with zero direct Vanadis coupling), routing GitHub push/CI webhooks to Flux CD (`FLUX_RECEIVER_URL`), updating `ConfigMap/aerial-image-tags` in `flux-system` on CI image promotions, and delivering `/webhooks/flux` deployment notifications.
   - **`edge-gateway`**: NGINX Gateway Fabric ingress gateway (`HTTPRoute`s on `:4021`) exposing secure external tunnel webhooks into the cluster mesh.
 
 - **Observability, AI Inference & Supporting Services**:
@@ -52,8 +54,8 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`prospera`**: Autonomous PSTN voice call and SMS interaction service.
 
 - **Heterogeneous 3-Node Cluster Topology**:
-  - **`quiet-zero`** (Storage & Standard Agent Node): NixOS 26.05 k3s agent (`compute-tier=standard`, `storage-tier=nvme`) hosting persistent storage workloads, CloudNativePG PostgreSQL 18 + pgvector, `docket-store` (Vikunja), and standard microservices.
-  - **`calibarn`** (k3s Control-Plane Server & AI / GPU Compute Node): NixOS 26.05 k3s server with NVIDIA GPU acceleration hosting `eri`, `vanadis`, `coven`, `haro`, `synapse`, `agentsview`, `senses`, `pjev`, `vision`, `prospera`, `kernel-browser`, and 8 scale-to-zero Actions Runner Controller (ARC) AutoscalingRunnerSet HelmReleases for GitHub Actions CI & RoboRev.
+  - **`quiet-zero`** (Storage & Standard Agent Node): NixOS 26.05 k3s agent (`compute-tier=standard`, `storage-tier=nvme`) hosting persistent storage workloads, CloudNativePG PostgreSQL 18 + pgvector, `docket-store` (Vikunja), `nats` (NATS 2 JetStream StatefulSet), `restate` (RestateCluster), and standard microservices.
+  - **`calibarn`** (k3s Control-Plane Server & AI / GPU Compute Node): NixOS 26.05 k3s server with NVIDIA GPU acceleration hosting `eri`, `vanadis`, `vanadis-restate` (RestateDeployment), `coven`, `haro`, `synapse`, `agentsview`, `senses`, `pjev`, `vision`, `prospera`, `kernel-browser`, and 8 scale-to-zero Actions Runner Controller (ARC) AutoscalingRunnerSet HelmReleases for GitHub Actions CI & RoboRev.
   - **`cockpit`** (Touch Kiosk Node): NixOS 26.05 k3s kiosk agent (`role=kiosk:NoSchedule`) hosting `kiosk-display` (Wayland cage + Chromium + PipeWire), microphone capture (`kiosk-ear`), wake-word detection, remote display control (`kiosk-remote`), Cast watcher (`kiosk-cast-watcher`), WebRTC media streaming (`kiosk-go2rtc`), and display power CronJobs.
 
 To inspect active cluster resources, pod status, or logs, query Kubernetes via `kubernetes-mcp` (`pods_list`, `pods_get`, `pods_log`, `events_list`) or inspect `k8s/*.yaml`.
@@ -64,7 +66,7 @@ Aerial operates on a strict **Multi-Repository Architecture & Separation of Conc
 
 ### 1. Core Engine Monorepo (`azylman/aerial` at `/share/aerial` — `scripts/aerial-pr.sh init aerial`)
 - **Purpose**: Generic, domain-agnostic open-source foundation.
-- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/synapse`, `services/console`, `services/homepage`, `services/docs-service`, `services/prospera`, `services/github-runner`), MCP servers (`mcp/discord-mcp`, `mcp/docket-mcp`, `mcp/github-mcp`, `mcp/infisical-mcp`, `mcp/kubernetes-mcp`, `mcp/kernel-mcp`), shared Go packages (`pkg/`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Kubernetes manifests (`k8s/*.yaml`), Dockerfiles, and CI/verification scripts (`scripts/`).
+- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/vanadis-restate`, `services/vanadis-nats`, `services/migrator`, `services/synapse`, `services/console`, `services/homepage`, `services/docs-service`, `services/prospera`, `services/github-runner`), MCP servers (`mcp/discord-mcp`, `mcp/docket-mcp`, `mcp/github-mcp`, `mcp/infisical-mcp`, `mcp/kubernetes-mcp`, `mcp/kernel-mcp`), shared Go packages (`pkg/` including `pkg/pubsub` and `pkg/tracing`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Kubernetes manifests (`k8s/*.yaml`), Dockerfiles, and CI/verification scripts (`scripts/`).
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
   - **Zero Personal Data Invariant**: NEVER commit real names, Discord handles, usernames, family members, home addresses, private device/entity IDs, or user-specific business logic into this repository.
