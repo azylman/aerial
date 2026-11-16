@@ -21,6 +21,7 @@ import (
 	"github.com/restatedev/sdk-go/server"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 const (
@@ -35,6 +36,11 @@ type Config struct {
 	RestatePort string
 	HealthPort  string
 	VanadisURL  string
+	PostgresURL string
+	EriURL      string
+	NATSURL     string
+	GitHubToken string
+	ShareRoot   string
 }
 
 // LoadConfigFromEnv loads configuration from environment variables with defaults.
@@ -57,10 +63,21 @@ func LoadConfigFromEnv() Config {
 		vanadisURL = "http://vanadis.aerial:4025"
 	}
 
+	pgURL := strings.TrimSpace(firstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL")))
+	eriURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("ERI_URL"), "http://eri.aerial")), "/")
+	natsURL := strings.TrimSpace(firstNonEmpty(os.Getenv("NATS_URL"), "nats://nats.aerial:4222"))
+	ghToken := strings.TrimSpace(firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT")))
+	shareRoot := strings.TrimSpace(firstNonEmpty(os.Getenv("SHARE_ROOT"), defaultShareRoot))
+
 	return Config{
 		RestatePort: restatePort,
 		HealthPort:  healthPort,
 		VanadisURL:  vanadisURL,
+		PostgresURL: pgURL,
+		EriURL:      eriURL,
+		NATSURL:     natsURL,
+		GitHubToken: ghToken,
+		ShareRoot:   shareRoot,
 	}
 }
 
@@ -75,6 +92,16 @@ type ReconcileBuildResult struct {
 	Status         string   `json:"status"`
 	LaunchedChunks []string `json:"launched_chunks,omitempty"`
 	Error          string   `json:"error,omitempty"`
+}
+
+// CancelBuildRequest represents a cancel request payload.
+type CancelBuildRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// RemoveChunkRequest represents a request to remove a chunk from a build.
+type RemoveChunkRequest struct {
+	ChunkRef string `json:"chunk_ref"`
 }
 
 // VanadisBuild represents a multi-chunk engineering build run.
@@ -94,30 +121,31 @@ type VanadisBuild struct {
 
 // VanadisChunk represents an individual ordered task chunk within a VanadisBuild.
 type VanadisChunk struct {
-	ID                 string            `json:"id"`
-	BuildID            string            `json:"build_id"`
-	ChunkIndex         int               `json:"chunk_index"`
-	Mode               string            `json:"mode"`
-	Repo               string            `json:"repo,omitempty"`
-	Title              string            `json:"title"`
-	Instructions       string            `json:"instructions"`
-	TargetFiles        []string          `json:"target_files"`
-	TargetSymbols      []string          `json:"target_symbols"`
-	Effort             string            `json:"effort"`
-	AcceptanceCriteria []string          `json:"acceptance_criteria"`
-	Status             string            `json:"status"`
-	PRNumber           int               `json:"pr_number,omitempty"`
-	StallNudges        int               `json:"stall_nudges,omitempty"`
-	DependsOn          []string          `json:"depends_on"`
-	CIFailCount        int               `json:"ci_fail_count"`
-	CIChecks           map[string]string `json:"ci_checks,omitempty"`
-	Banner             string            `json:"banner,omitempty"`
-	MergeAwakeableID   string            `json:"merge_awakeable_id,omitempty"`
-	DeployAwakeableID  string            `json:"deploy_awakeable_id,omitempty"`
-	StartedAt          time.Time         `json:"started_at,omitempty"`
-	CompletedAt        time.Time         `json:"completed_at,omitempty"`
-	CreatedAt          time.Time         `json:"created_at"`
-	UpdatedAt          time.Time         `json:"updated_at"`
+	ID                 string                 `json:"id"`
+	BuildID            string                 `json:"build_id"`
+	ChunkIndex         int                    `json:"chunk_index"`
+	Mode               string                 `json:"mode"`
+	Repo               string                 `json:"repo,omitempty"`
+	Title              string                 `json:"title"`
+	Instructions       string                 `json:"instructions"`
+	TargetFiles        []string               `json:"target_files"`
+	TargetSymbols      []string               `json:"target_symbols"`
+	Effort             string                 `json:"effort"`
+	AcceptanceCriteria []string               `json:"acceptance_criteria"`
+	Status             string                 `json:"status"`
+	PRNumber           int                    `json:"pr_number,omitempty"`
+	StallNudges        int                    `json:"stall_nudges,omitempty"`
+	DependsOn          []string               `json:"depends_on"`
+	CIFailCount        int                    `json:"ci_fail_count"`
+	CIChecks           map[string]string      `json:"ci_checks,omitempty"`
+	RolloutState       *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
+	Banner             string                 `json:"banner,omitempty"`
+	MergeAwakeableID   string                 `json:"merge_awakeable_id,omitempty"`
+	DeployAwakeableID  string                 `json:"deploy_awakeable_id,omitempty"`
+	StartedAt          time.Time              `json:"started_at,omitempty"`
+	CompletedAt        time.Time              `json:"completed_at,omitempty"`
+	CreatedAt          time.Time              `json:"created_at"`
+	UpdatedAt          time.Time              `json:"updated_at"`
 }
 
 // BuildObjectState represents the authoritative K/V state for a Vanadis build managed by BuildObject.
@@ -197,6 +225,8 @@ func (r restateObjectRuntime) RunReconcileStep(name string, fn func(ctx context.
 
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
 type BuildObject struct {
+	store          VanadisStore
+	executor       *Executor
 	vanadisURL     string
 	httpClient     *http.Client
 	runtimeFactory func(restate.ObjectContext) objectRuntime
@@ -218,6 +248,13 @@ func NewBuildObject(vanadisURL string, httpClient *http.Client, runtimeFactory .
 	}
 }
 
+// WithAuthority wires the PostgreSQL store and side-effect executor into BuildObject.
+func (b *BuildObject) WithAuthority(store VanadisStore, exec *Executor) *BuildObject {
+	b.store = store
+	b.executor = exec
+	return b
+}
+
 // ServiceName returns the Restate service name for this Virtual Object.
 func (*BuildObject) ServiceName() string {
 	return "Build"
@@ -230,11 +267,500 @@ func (b *BuildObject) getRuntime(ctx restate.ObjectContext) objectRuntime {
 	return restateObjectRuntime{ctx: ctx}
 }
 
+func toTerminalErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, ErrInvalidBuildInput):
+		return restate.ToTerminalError(err, restate.WithErrorCode(400))
+	case errors.Is(err, ErrBuildNotFound) || errors.Is(err, ErrChunkNotFound):
+		return restate.ToTerminalError(err, restate.WithErrorCode(404))
+	case errors.Is(err, ErrBuildConflict):
+		return restate.ToTerminalError(err, restate.WithErrorCode(409))
+	default:
+		return err
+	}
+}
+
+func planInputsToChunks(buildID string, inputs []CreateChunkInput) []VanadisChunk {
+	chunks := make([]VanadisChunk, len(inputs))
+	now := time.Now().UTC()
+	for i, in := range inputs {
+		cid := strings.TrimSpace(in.ID)
+		if cid == "" {
+			cid = fmt.Sprintf("%s-chunk-%d", buildID, i+1)
+		}
+		mode := strings.TrimSpace(in.Mode)
+		if mode == "" {
+			mode = "pr"
+		}
+		chunks[i] = VanadisChunk{
+			ID:                 cid,
+			BuildID:            buildID,
+			ChunkIndex:         i,
+			Mode:               mode,
+			Repo:               cleanRepoName(in.Repo),
+			Title:              strings.TrimSpace(in.Title),
+			Instructions:       strings.TrimSpace(in.Instructions),
+			TargetFiles:        in.TargetFiles,
+			TargetSymbols:      in.TargetSymbols,
+			Effort:             in.Effort,
+			AcceptanceCriteria: in.AcceptanceCriteria,
+			Status:             "pending",
+			DependsOn:          in.DependsOn,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}
+	}
+	return chunks
+}
+
+func (b *BuildObject) persistBuildCreation(rc restate.RunContext, build VanadisBuild, chunks []VanadisChunk) (bool, error) {
+	if err := b.store.CreateBuild(rc, build, chunks); err != nil {
+		return false, err
+	}
+	if b.executor != nil && !build.Quiet {
+		if _, sErr := b.executor.SyncBuildWidget(rc, b.store, build, chunks, ""); sErr != nil {
+			log.Printf("[vanadis-restate] sync widget warning: %v", sErr)
+		}
+	}
+	return true, nil
+}
+
+// Create handles initial build and DAG initialization.
+func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) (VanadisBuild, error) {
+	buildID := strings.TrimSpace(restate.Key(ctx))
+	if buildID == "" {
+		buildID = strings.TrimSpace(req.ID)
+	}
+	if buildID == "" {
+		return VanadisBuild{}, restate.ToTerminalError(fmt.Errorf("%w: build id cannot be empty", ErrInvalidBuildInput), restate.WithErrorCode(400))
+	}
+	threadID := strings.TrimSpace(req.ThreadID)
+	objective := strings.TrimSpace(req.Objective)
+	if threadID == "" || objective == "" {
+		return VanadisBuild{}, restate.ToTerminalError(fmt.Errorf("%w: thread_id and objective cannot be empty", ErrInvalidBuildInput), restate.WithErrorCode(400))
+	}
+
+	chunks := planInputsToChunks(buildID, req.Chunks)
+	if err := validateCreateBuildInputs(buildID, threadID, objective, chunks); err != nil {
+		return VanadisBuild{}, toTerminalErr(err)
+	}
+	validatedChunks, err := normalizeAndValidateBuildDAG(chunks)
+	if err != nil {
+		return VanadisBuild{}, toTerminalErr(err)
+	}
+
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = objective
+	}
+	now := time.Now().UTC()
+	build := VanadisBuild{
+		ID:            buildID,
+		ThreadID:      threadID,
+		Tier:          req.Tier,
+		Title:         title,
+		Objective:     objective,
+		SharedContext: req.SharedContext,
+		Status:        statusRunning,
+		Quiet:         req.Quiet,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+
+	if b.store != nil {
+		_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+			return b.persistBuildCreation(rc, build, validatedChunks)
+		}, restate.WithName("create-build-postgres"))
+		if err != nil {
+			return VanadisBuild{}, toTerminalErr(err)
+		}
+	}
+
+	rt := b.getRuntime(ctx)
+	rt.SetState(BuildObjectState{Build: build, Chunks: validatedChunks})
+	rt.SetLaunched(make(map[string]bool))
+	if _, tErr := b.executeObjectTransition(rt, "reconcile-initial", nil); tErr != nil {
+		log.Printf("[vanadis-restate] initial transition warning: %v", tErr)
+	}
+	return build, nil
+}
+
+// UpdateBuild mutates build metadata and updates state.
+func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequest) (VanadisBuild, error) {
+	buildID := restate.Key(ctx)
+	if b.store == nil {
+		return VanadisBuild{ID: buildID, Title: req.Title, Objective: req.Objective}, nil
+	}
+	res, err := restate.Run(ctx, func(rc restate.RunContext) (VanadisBuild, error) {
+		updated, err := b.store.UpdateBuild(rc, buildID, req)
+		if err != nil {
+			return VanadisBuild{}, err
+		}
+		if b.executor != nil {
+			_, chunks, gErr := b.store.GetBuild(rc, buildID)
+			if gErr == nil {
+				if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *updated, chunks, "Build updated: "+updated.Title); sErr != nil {
+					log.Printf("[vanadis-restate] sync widget warning: %v", sErr)
+				}
+			}
+		}
+		return *updated, nil
+	}, restate.WithName("update-build-postgres"))
+	if err != nil {
+		return VanadisBuild{}, toTerminalErr(err)
+	}
+	rt := b.getRuntime(ctx)
+	if st, gErr := rt.GetState(); gErr == nil && st != nil {
+		st.Build = res
+		rt.SetState(*st)
+	}
+	return res, nil
+}
+
+// Cancel cancels the active build and clears Restate state.
+func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) (VanadisBuild, error) {
+	buildID := restate.Key(ctx)
+	rt := b.getRuntime(ctx)
+	defer rt.ClearState()
+
+	if b.store == nil {
+		return VanadisBuild{ID: buildID, Status: statusCancelled}, nil
+	}
+
+	res, err := restate.Run(ctx, func(rc restate.RunContext) (VanadisBuild, error) {
+		bld, chunks, err := b.store.GetBuild(rc, buildID)
+		if err != nil {
+			return VanadisBuild{}, err
+		}
+		if bld.Status == statusCompleted || bld.Status == statusFailed {
+			return *bld, fmt.Errorf("%w: cannot cancel terminal build %s", ErrBuildConflict, bld.Status)
+		}
+		if err := b.store.UpdateBuildStatus(rc, buildID, statusCancelled); err != nil {
+			return VanadisBuild{}, err
+		}
+		bld.Status = statusCancelled
+		if b.executor != nil {
+			for _, c := range chunks {
+				if cErr := b.executor.CancelChunkDispatch(rc, c.ID); cErr != nil {
+					log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", c.ID, cErr)
+				}
+			}
+			if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *bld, chunks, "Build cancelled"); sErr != nil {
+				log.Printf("[vanadis-restate] sync widget warning: %v", sErr)
+			}
+			if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "cancelled", []string{buildID}, req.Reason); pErr != nil {
+				log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+			}
+		}
+		return *bld, nil
+	}, restate.WithName("cancel-build-postgres"))
+	if err != nil {
+		return VanadisBuild{}, toTerminalErr(err)
+	}
+	return res, nil
+}
+
+// AppendChunks appends chunks to a running build and advances the DAG.
+func (b *BuildObject) AppendChunks(ctx restate.ObjectContext, req AppendChunksRequest) ([]VanadisChunk, error) {
+	buildID := restate.Key(ctx)
+	if len(req.Chunks) == 0 {
+		return nil, restate.ToTerminalError(fmt.Errorf("%w: chunks cannot be empty", ErrInvalidBuildInput), restate.WithErrorCode(400))
+	}
+	if b.store == nil {
+		return nil, nil
+	}
+	appended, err := restate.Run(ctx, func(rc restate.RunContext) ([]VanadisChunk, error) {
+		return b.store.AppendChunks(rc, buildID, req.Chunks)
+	}, restate.WithName("append-chunks-postgres"))
+	if err != nil {
+		return nil, toTerminalErr(err)
+	}
+	rt := b.getRuntime(ctx)
+	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-append", nil); tErr != nil {
+		log.Printf("[vanadis-restate] append chunks transition warning: %v", tErr)
+	}
+	return appended, nil
+}
+
+// UpdateChunk modifies a pending chunk and revalidates dependencies.
+func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequest) (VanadisChunk, error) {
+	buildID := restate.Key(ctx)
+	chunkRef := strings.TrimSpace(req.ChunkRef)
+	if chunkRef == "" {
+		return VanadisChunk{}, restate.ToTerminalError(fmt.Errorf("%w: chunk_ref cannot be empty", ErrInvalidBuildInput), restate.WithErrorCode(400))
+	}
+	if b.store == nil {
+		return VanadisChunk{}, nil
+	}
+	updated, err := restate.Run(ctx, func(rc restate.RunContext) (VanadisChunk, error) {
+		c, err := b.store.UpdateChunk(rc, buildID, chunkRef, req)
+		if err != nil {
+			return VanadisChunk{}, err
+		}
+		return *c, nil
+	}, restate.WithName("update-chunk-postgres"))
+	if err != nil {
+		return VanadisChunk{}, toTerminalErr(err)
+	}
+	rt := b.getRuntime(ctx)
+	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-update-chunk", nil); tErr != nil {
+		log.Printf("[vanadis-restate] update chunk transition warning: %v", tErr)
+	}
+	return updated, nil
+}
+
+// RemoveChunk removes an unstarted chunk from the build DAG.
+func (b *BuildObject) RemoveChunk(ctx restate.ObjectContext, req RemoveChunkRequest) error {
+	buildID := restate.Key(ctx)
+	targetRef := strings.TrimSpace(req.ChunkRef)
+	if targetRef == "" {
+		return restate.ToTerminalError(fmt.Errorf("%w: chunk_ref cannot be empty", ErrInvalidBuildInput), restate.WithErrorCode(400))
+	}
+	if b.store == nil {
+		return nil
+	}
+	rt := b.getRuntime(ctx)
+	return b.executeChunkRemoval(ctx, rt, buildID, targetRef)
+}
+
+func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRuntime, buildID, targetRef string) error {
+	_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		removedChunk, _, rErr := b.store.RemoveChunk(rc, buildID, targetRef)
+		if rErr != nil {
+			return false, rErr
+		}
+		if b.executor != nil && removedChunk != nil {
+			if cErr := b.executor.CancelChunkDispatch(rc, removedChunk.ID); cErr != nil {
+				log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", removedChunk.ID, cErr)
+			}
+		}
+		return true, nil
+	}, restate.WithName("remove-chunk-postgres"))
+	if err != nil {
+		return toTerminalErr(err)
+	}
+	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-remove-chunk", nil); tErr != nil {
+		log.Printf("[vanadis-restate] remove chunk transition warning: %v", tErr)
+	}
+	return nil
+}
+
+func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld VanadisBuild, chunkID, reason string) {
+	if cErr := b.executor.CancelChunkDispatch(rc, chunkID); cErr != nil {
+		log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", chunkID, cErr)
+	}
+	prompt := fmt.Sprintf("[VANADIS BUILD FAILED]\nBuild ID: %s\nObjective: %s\n\nChunk failed: %s", bld.ID, bld.Objective, reason)
+	if dErr := b.executor.DispatchWakePrompt(rc, bld.ThreadID, prompt); dErr != nil {
+		log.Printf("[vanadis-restate] dispatch wake prompt warning: %v", dErr)
+	}
+	if chunks, _, gErr := b.store.GetBuild(rc, bld.ID); gErr == nil && chunks != nil {
+		if _, sErr := b.executor.SyncBuildWidget(rc, b.store, bld, nil, "Build failed: "+reason); sErr != nil {
+			log.Printf("[vanadis-restate] sync widget warning: %v", sErr)
+		}
+	}
+	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "failed", []string{chunkID}, reason); pErr != nil {
+		log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+	}
+	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "failed", []string{bld.ID}, reason); pErr != nil {
+		log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+	}
+}
+
+// FailChunk marks a chunk failed and cancels active work if the failure is terminal.
+func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest) (FailChunkResponse, error) {
+	chunkID := strings.TrimSpace(req.ChunkID)
+	reason := strings.TrimSpace(req.Reason)
+	if chunkID == "" || reason == "" {
+		return FailChunkResponse{}, restate.ToTerminalError(fmt.Errorf("%w: chunk_id and reason required", ErrInvalidBuildInput), restate.WithErrorCode(400))
+	}
+	if b.store == nil {
+		return FailChunkResponse{ChunkID: chunkID, Failed: true}, nil
+	}
+
+	resp, err := restate.Run(ctx, func(rc restate.RunContext) (FailChunkResponse, error) {
+		bld, chk, failed, err := b.store.FailChunk(rc, chunkID, reason)
+		if err != nil {
+			return FailChunkResponse{}, err
+		}
+		res := FailChunkResponse{
+			Failed:      failed,
+			BuildID:     chk.BuildID,
+			ChunkID:     chk.ID,
+			BuildStatus: bld.Status,
+			ChunkStatus: chk.Status,
+		}
+		if failed && bld.Status == statusFailed && b.executor != nil {
+			b.notifyChunkFailure(rc, *bld, chunkID, reason)
+		}
+		return res, nil
+	}, restate.WithName("fail-chunk-postgres"))
+	if err != nil {
+		return FailChunkResponse{}, toTerminalErr(err)
+	}
+	if resp.BuildStatus == statusFailed {
+		rt := b.getRuntime(ctx)
+		rt.ClearState()
+	}
+	return resp, nil
+}
+
+// AttachPR attaches a PR to a chunk or standalone build.
+func (b *BuildObject) AttachPR(ctx restate.ObjectContext, req AttachChunkPRRequest) (AttachChunkPRResponse, error) {
+	if b.store == nil {
+		return AttachChunkPRResponse{Status: "attached", BuildID: restate.Key(ctx), ChunkID: req.ChunkID}, nil
+	}
+
+	resp, err := restate.Run(ctx, func(rc restate.RunContext) (AttachChunkPRResponse, error) {
+		bID, cID, thID, err := b.store.AttachChunkPR(rc, req)
+		if err != nil {
+			return AttachChunkPRResponse{}, err
+		}
+		if b.executor != nil {
+			if bld, chunks, gErr := b.store.GetBuild(rc, bID); gErr == nil && bld != nil {
+				if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *bld, chunks, ""); sErr != nil {
+					log.Printf("[vanadis-restate] sync widget warning: %v", sErr)
+				}
+			}
+		}
+		return AttachChunkPRResponse{
+			Status:   "attached",
+			BuildID:  bID,
+			ChunkID:  cID,
+			ThreadID: thID,
+		}, nil
+	}, restate.WithName("attach-pr-postgres"))
+	if err != nil {
+		return AttachChunkPRResponse{}, toTerminalErr(err)
+	}
+	rt := b.getRuntime(ctx)
+	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-attach-pr", nil); tErr != nil {
+		log.Printf("[vanadis-restate] attach pr transition warning: %v", tErr)
+	}
+	return resp, nil
+}
+
+func (b *BuildObject) dispatchThreadWakePrompt(rc restate.RunContext, buildID, prompt string) {
+	if b.executor == nil {
+		return
+	}
+	if bld, _, gErr := b.store.GetBuild(rc, buildID); gErr == nil && bld != nil {
+		if dErr := b.executor.DispatchWakePrompt(rc, bld.ThreadID, prompt); dErr != nil {
+			log.Printf("[vanadis-restate] wake prompt warning: %v", dErr)
+		}
+	}
+}
+
+func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) {
+	switch event {
+	case "check_failed", "ci_failed":
+		if b.executor != nil {
+			details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
+			b.dispatchThreadWakePrompt(rc, buildID, FormatCIFailurePrompt(ev, details))
+		}
+		if uErr := b.store.UpdateChunkStatus(rc, chunkID, "ci_failed"); uErr != nil {
+			log.Printf("[vanadis-restate] update chunk status warning: %v", uErr)
+		}
+	case "conflict":
+		if b.executor != nil {
+			b.dispatchThreadWakePrompt(rc, buildID, FormatConflictPrompt(ev))
+		}
+		if uErr := b.store.UpdateChunkStatus(rc, chunkID, "conflict"); uErr != nil {
+			log.Printf("[vanadis-restate] update chunk status warning: %v", uErr)
+		}
+	case "merged":
+		if uErr := b.store.UpdateChunkStatus(rc, chunkID, "merged"); uErr != nil {
+			log.Printf("[vanadis-restate] update chunk status warning: %v", uErr)
+		}
+		if b.executor != nil {
+			if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "merged", []string{chunkID}, ""); pErr != nil {
+				log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+			}
+		}
+	case "closed":
+		if ev.Status != "merged" {
+			if _, _, _, fErr := b.store.FailChunk(rc, chunkID, "pr_closed_unmerged"); fErr != nil {
+				log.Printf("[vanadis-restate] fail chunk warning: %v", fErr)
+			}
+		}
+	}
+}
+
+// OnPREvent receives PR lifecycle events for this build.
+func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycleEvent) error {
+	if b.store == nil {
+		return nil
+	}
+	buildID := restate.Key(ctx)
+	_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		lookup, err := b.store.GetChunkByPR(rc, ev.Repo, ev.PRNumber)
+		if err != nil {
+			return false, err
+		}
+		if lookup == nil || !lookup.Matched {
+			return false, nil
+		}
+		chunkID := lookup.ChunkID
+		event := strings.ToLower(strings.TrimSpace(ev.Event))
+		b.handlePREventType(rc, buildID, chunkID, event, ev)
+		if ev.RolloutState != nil {
+			if rErr := b.store.RecordPRRolloutState(rc, chunkID, "", ev.RolloutState); rErr != nil {
+				log.Printf("[vanadis-restate] record rollout state warning: %v", rErr)
+			}
+		}
+		return true, nil
+	}, restate.WithName("handle-pr-event-postgres"))
+	if err != nil {
+		return err
+	}
+	rt := b.getRuntime(ctx)
+	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-pr-event", nil); tErr != nil {
+		log.Printf("[vanadis-restate] pr event transition warning: %v", tErr)
+	}
+	return nil
+}
+
+// OnDispatchOutcome receives task execution outcomes.
+func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) error {
+	if b.store == nil {
+		return nil
+	}
+	_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		chunkID := strings.TrimSpace(ev.VanadisChunkID)
+		if chunkID == "" {
+			return false, nil
+		}
+		status := strings.ToLower(strings.TrimSpace(ev.Status))
+		switch status {
+		case "completed", "success":
+			if _, cErr := b.store.CompleteActionChunk(rc, chunkID); cErr != nil {
+				log.Printf("[vanadis-restate] complete action chunk warning: %v", cErr)
+			}
+		case "failed", "timeout", "crashed":
+			reason := firstNonEmpty(ev.Error, "dispatch outcome failed")
+			if _, _, _, fErr := b.store.FailChunk(rc, chunkID, reason); fErr != nil {
+				log.Printf("[vanadis-restate] fail chunk warning: %v", fErr)
+			}
+		}
+		return true, nil
+	}, restate.WithName("handle-dispatch-outcome-postgres"))
+	if err != nil {
+		return err
+	}
+	rt := b.getRuntime(ctx)
+	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-dispatch-outcome", nil); tErr != nil {
+		log.Printf("[vanadis-restate] dispatch outcome transition warning: %v", tErr)
+	}
+	return nil
+}
+
 // Reconcile reconciles the build state on Restate.
 func (b *BuildObject) Reconcile(ctx restate.ObjectContext, req ReconcileBuildRequest) (ReconcileBuildResult, error) {
 	_ = req
-	if b == nil || strings.TrimSpace(b.vanadisURL) == "" {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("vanadis url not configured")
+	if b == nil || (b.store == nil && strings.TrimSpace(b.vanadisURL) == "") {
+		return ReconcileBuildResult{}, restate.TerminalErrorf("vanadis url and store not configured")
 	}
 	rt := b.getRuntime(ctx)
 	return b.executeObjectTransition(rt, "reconcile-build", nil)
@@ -242,8 +768,8 @@ func (b *BuildObject) Reconcile(ctx restate.ObjectContext, req ReconcileBuildReq
 
 // Mutate applies a mutation to the build and reconciles state.
 func (b *BuildObject) Mutate(ctx restate.ObjectContext, req BuildMutationRequest) (ReconcileBuildResult, error) {
-	if b == nil || strings.TrimSpace(b.vanadisURL) == "" {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("vanadis url not configured")
+	if b == nil || (b.store == nil && strings.TrimSpace(b.vanadisURL) == "") {
+		return ReconcileBuildResult{}, restate.TerminalErrorf("vanadis url and store not configured")
 	}
 	rt := b.getRuntime(ctx)
 	return b.executeObjectTransition(rt, "mutate-build", &req)
@@ -277,6 +803,9 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 	}
 
 	stepOut, err := rt.RunReconcileStep(stepName, func(ctx context.Context) (reconcileStepOutput, error) {
+		if b.store != nil {
+			return b.executeAuthoritativeTransition(ctx, buildID, mutation, priorLaunched)
+		}
 		return b.callVanadisTransition(ctx, buildID, mutation, priorLaunched)
 	})
 	if err != nil {
@@ -297,6 +826,173 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 		Status:         stepOut.BuildStatus,
 		LaunchedChunks: stepOut.LaunchedChunks,
 		Error:          stepOut.Error,
+	}, nil
+}
+
+func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutation *BuildMutationRequest) {
+	if mutation == nil {
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(mutation.Action))
+	switch action {
+	case "chunk_merged":
+		if err := b.store.UpdateChunkStatus(ctx, mutation.ChunkID, "merged"); err != nil {
+			log.Printf("[vanadis-restate] update chunk status warning: %v", err)
+		}
+		if b.executor != nil {
+			if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "merged", []string{mutation.ChunkID}, ""); err != nil {
+				log.Printf("[vanadis-restate] publish event warning: %v", err)
+			}
+		}
+	case "chunk_deploy_success":
+		if err := b.store.UpdateChunkStatus(ctx, mutation.ChunkID, "completed"); err != nil {
+			log.Printf("[vanadis-restate] update chunk status warning: %v", err)
+		}
+		if b.executor != nil {
+			if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{mutation.ChunkID}, ""); err != nil {
+				log.Printf("[vanadis-restate] publish event warning: %v", err)
+			}
+		}
+	case "action_completed":
+		if _, err := b.store.CompleteActionChunk(ctx, mutation.ChunkID); err != nil {
+			log.Printf("[vanadis-restate] complete action chunk warning: %v", err)
+		}
+	case "chunk_failed":
+		if _, _, _, err := b.store.FailChunk(ctx, mutation.ChunkID, mutation.Reason); err != nil {
+			log.Printf("[vanadis-restate] fail chunk warning: %v", err)
+		}
+	case "cancelled":
+		if err := b.store.UpdateBuildStatus(ctx, buildID, statusCancelled); err != nil {
+			log.Printf("[vanadis-restate] update build status warning: %v", err)
+		}
+		if b.executor != nil {
+			if err := b.executor.PublishExternalEvent(ctx, "vanadis_build", "cancelled", []string{buildID}, mutation.Reason); err != nil {
+				log.Printf("[vanadis-restate] publish event warning: %v", err)
+			}
+		}
+	}
+}
+
+func (b *BuildObject) launchEligibleChunks(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, launchedMap map[string]bool) []string {
+	var launchedChunks []string
+	activeCount := 0
+	for _, c := range chunks {
+		s := strings.ToLower(strings.TrimSpace(c.Status))
+		if s == statusRunning || s == "coding" || s == "open" || s == "pr_opened" || s == "deploying" {
+			activeCount++
+		}
+	}
+
+	for idx, chunk := range chunks {
+		s := strings.ToLower(strings.TrimSpace(chunk.Status))
+		if s != statusPending && s != "queued" {
+			continue
+		}
+		if checkChunkDependenciesReady(chunk, chunks) != nil {
+			continue
+		}
+		if activeCount >= 4 || launchedMap[chunk.ID] || b.executor == nil {
+			continue
+		}
+		if lErr := b.executor.ExecuteLaunchChunk(ctx, b.store, build, chunks, idx, ""); lErr == nil {
+			launchedMap[chunk.ID] = true
+			launchedChunks = append(launchedChunks, chunk.ID)
+			activeCount++
+		}
+	}
+	return launchedChunks
+}
+
+func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk, status, reason, promptHeader, promptMsg string) {
+	if b.executor == nil {
+		return
+	}
+	if err := b.executor.PublishExternalEvent(ctx, "vanadis_build", status, []string{build.ID}, reason); err != nil {
+		log.Printf("[vanadis-restate] publish event warning: %v", err)
+	}
+	prompt := fmt.Sprintf("[%s]\nBuild ID: %s\nObjective: %s\n\n%s", promptHeader, build.ID, build.Objective, promptMsg)
+	if err := b.executor.DispatchWakePrompt(ctx, build.ThreadID, prompt); err != nil {
+		log.Printf("[vanadis-restate] wake prompt warning: %v", err)
+	}
+	if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, "Build "+status); err != nil {
+		log.Printf("[vanadis-restate] sync widget warning: %v", err)
+	}
+}
+
+func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk) string {
+	allDone := true
+	hasFailed := false
+	for _, c := range chunks {
+		s := strings.ToLower(strings.TrimSpace(c.Status))
+		if s == statusFailed {
+			hasFailed = true
+		}
+		if s != statusCompleted && s != statusMerged {
+			allDone = false
+		}
+	}
+
+	switch {
+	case hasFailed:
+		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusFailed); err != nil {
+			log.Printf("[vanadis-restate] update build status failed: %v", err)
+		}
+		b.notifyBuildTerminal(ctx, build, chunks, statusFailed, "chunk failed", "VANADIS BUILD FAILED", "Build encountered failures.")
+		return statusFailed
+	case allDone && len(chunks) > 0:
+		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusCompleted); err != nil {
+			log.Printf("[vanadis-restate] update build status completed: %v", err)
+		}
+		b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully.")
+		return statusCompleted
+	default:
+		if b.executor != nil {
+			if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, ""); err != nil {
+				log.Printf("[vanadis-restate] sync widget warning: %v", err)
+			}
+		}
+		return statusRunning
+	}
+}
+
+func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildID string, mutation *BuildMutationRequest, priorLaunched map[string]bool) (reconcileStepOutput, error) {
+	if b.store == nil {
+		return reconcileStepOutput{}, errors.New("store not configured")
+	}
+
+	b.applyMutation(ctx, buildID, mutation)
+
+	build, chunks, err := b.store.GetBuild(ctx, buildID)
+	if err != nil {
+		if errors.Is(err, ErrBuildNotFound) {
+			return reconcileStepOutput{BuildStatus: statusNotFound}, nil
+		}
+		return reconcileStepOutput{}, err
+	}
+
+	if build.Status == statusCompleted || build.Status == statusFailed || build.Status == statusCancelled {
+		return reconcileStepOutput{
+			BuildStatus: build.Status,
+			State:       &BuildObjectState{Build: *build, Chunks: chunks},
+		}, nil
+	}
+
+	launchedMap := make(map[string]bool, len(priorLaunched))
+	for k, v := range priorLaunched {
+		if v {
+			launchedMap[k] = true
+		}
+	}
+
+	launchedChunks := b.launchEligibleChunks(ctx, *build, chunks, launchedMap)
+	finalStatus := b.evaluateBuildTerminalStatus(ctx, build, chunks)
+	build.Status = finalStatus
+
+	return reconcileStepOutput{
+		BuildStatus:    finalStatus,
+		LaunchedChunks: launchedChunks,
+		LaunchedMap:    launchedMap,
+		State:          &BuildObjectState{Build: *build, Chunks: chunks, Launched: launchedMap},
 	}, nil
 }
 
@@ -383,8 +1079,43 @@ func RunApp(ctx context.Context, cfg Config) error {
 		}
 	}()
 
-	restateObj := NewBuildObject(cfg.VanadisURL, nil)
-	restateServer := server.NewRestate().Bind(restate.Reflect(restateObj))
+	var store *PostgresVanadisStore
+	var closeStore func(context.Context)
+	var bus pubsub.Bus
+	var executor *Executor
+
+	if cfg.PostgresURL != "" {
+		var pErr error
+		store, closeStore, pErr = initPostgres(ctx, cfg.PostgresURL)
+		if pErr != nil {
+			log.Printf("[vanadis-restate] warning: failed connecting to postgres: %v", pErr)
+		} else {
+			defer closeStore(context.WithoutCancel(ctx))
+		}
+	}
+
+	if cfg.NATSURL != "" {
+		var bErr error
+		bus, bErr = pubsub.NewJetStreamBus(ctx, cfg.NATSURL)
+		if bErr != nil {
+			log.Printf("[vanadis-restate] warning: failed connecting to NATS: %v", bErr)
+		} else {
+			defer func() {
+				if cErr := bus.Close(); cErr != nil {
+					log.Printf("[vanadis-restate] warning closing nats: %v", cErr)
+				}
+			}()
+		}
+	}
+
+	eriClient := NewHTTPEriClient(cfg.EriURL, nil)
+	executor = NewExecutor(cfg.ShareRoot, eriClient, bus, cfg.GitHubToken, nil)
+
+	restateObj := NewBuildObject(cfg.VanadisURL, nil).WithAuthority(store, executor)
+	routerSvc := NewBuildRouterService(store)
+	restateServer := server.NewRestate().
+		Bind(restate.Reflect(restateObj)).
+		Bind(restate.Reflect(routerSvc))
 
 	go func() {
 		log.Printf("[vanadis-restate] Restate HTTP/2 server listening on :%s (VanadisURL: %s)", cfg.RestatePort, cfg.VanadisURL)

@@ -420,6 +420,7 @@ spec:
                 values:
                   - synapse
                   - vanadis
+                  - vanadis-restate
                   - haro
                   - coven
                   - console

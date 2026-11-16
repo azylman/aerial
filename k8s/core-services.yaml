@@ -1931,6 +1931,18 @@ spec:
               value: "4026"
             - name: VANADIS_URL
               value: http://vanadis.aerial:4025
+            - name: ERI_URL
+              value: http://eri.aerial
+            - name: NATS_URL
+              value: nats://nats.aerial:4222
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: vanadis-secret
+          envFrom:
+            - secretRef:
+                name: postgres-secret
           image: ghcr.io/azylman/aerial-vanadis-restate:${TAG_AERIAL_VANADIS_RESTATE:=latest}
           imagePullPolicy: Always
           name: vanadis-restate
@@ -1954,3 +1966,106 @@ spec:
             requests:
               cpu: 25m
               memory: 64Mi
+          volumeMounts:
+            - mountPath: /share
+              name: share
+              readOnly: true
+            - mountPath: /config/tracing
+              name: tracing-config
+              readOnly: true
+      initContainers:
+        - args:
+            - --repo=${AERIAL_REPO_URL:=https://github.com/azylman/aerial.git}
+            - --ref=main
+            - --root=/share/.sync/aerial
+            - --link=/share/aerial
+            - --period=15s
+          env:
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: '*'
+            - name: GITSYNC_USERNAME
+              value: x-access-token
+            - name: GITSYNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: git-sync-secret
+          image: registry.k8s.io/git-sync/git-sync:v4.8.0
+          name: git-sync-aerial
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          restartPolicy: Always
+          startupProbe:
+            exec:
+              command:
+                - git
+                - -C
+                - /share/aerial
+                - rev-parse
+                - HEAD
+            failureThreshold: 60
+            periodSeconds: 1
+          volumeMounts:
+            - mountPath: /share
+              name: share
+        - args:
+            - --repo=${AERIAL_CONFIG_REPO_URL:=https://github.com/azylman/aerial-config.git}
+            - --ref=main
+            - --root=/share/.sync/aerial-config
+            - --link=/share/aerial-config
+            - --period=15s
+          env:
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: '*'
+            - name: GITSYNC_USERNAME
+              value: x-access-token
+            - name: GITSYNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: git-sync-secret
+          image: registry.k8s.io/git-sync/git-sync:v4.8.0
+          name: git-sync-aerial-config
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          restartPolicy: Always
+          startupProbe:
+            exec:
+              command:
+                - git
+                - -C
+                - /share/aerial-config
+                - rev-parse
+                - HEAD
+            failureThreshold: 60
+            periodSeconds: 1
+          volumeMounts:
+            - mountPath: /share
+              name: share
+      securityContext:
+        fsGroup: 65533
+      volumes:
+        - emptyDir: {}
+          name: share
+        - configMap:
+            name: tracing-config
+            optional: true
+          name: tracing-config
