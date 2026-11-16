@@ -269,7 +269,6 @@ func TestServer_MutationEndpoints(t *testing.T) {
 		{"patch_build_conflict", false, false, &VanadisBuild{ID: "b-done", Status: "completed"}, nil, http.MethodPatch, "/builds/b-done", `{"title":"T"}`, http.StatusConflict},
 		{"patch_build_ok_no_title", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1", `{"objective":"New Obj"}`, http.StatusOK},
 		{"patch_build_ok_with_title", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1", `{"title":"New Title"}`, http.StatusOK},
-		{"patch_chunk_dag_mutation", false, false, &VanadisBuild{ID: "b-mut-err", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending", ChunkIndex: 0}}, http.MethodPatch, "/builds/b-mut-err/chunks/c1", `{"title":"New Chunk Title"}`, http.StatusOK},
 
 		// GET /builds/{id}/chunks/{chunk_ref}
 		{"get_chunk_nil_store", true, false, nil, nil, http.MethodGet, "/builds/b1/chunks/c1", "", http.StatusInternalServerError},

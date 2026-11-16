@@ -593,6 +593,12 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
 		return
 	}
+	removedID := chunkRef
+	if _, chs, err := s.store.GetBuild(r.Context(), buildID); err == nil {
+		if idx := resolveChunkRef(chs, chunkRef); idx >= 0 {
+			removedID = chs[idx].ID
+		}
+	}
 	req := RemoveChunkRequest{ChunkRef: chunkRef}
 	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/RemoveChunk", buildID), req, nil); err != nil {
 		writeStoreErr(w, err)
@@ -608,7 +614,7 @@ func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		fieldStatus:        "removed",
 		fieldBuildID:       buildID,
-		"removed_chunk_id": chunkRef,
+		"removed_chunk_id": removedID,
 		fieldChunks:        remaining,
 	})
 }

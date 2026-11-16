@@ -426,6 +426,13 @@ func (s *VanadisServer) handleMCPRemoveChunk(ctx context.Context, args MCPRemove
 		return MCPRemoveChunkOutput{}, err
 	}
 
+	removedID := chunkRef
+	if _, chs, err := s.store.GetBuild(ctx, buildID); err == nil {
+		if idx := resolveChunkRef(chs, chunkRef); idx >= 0 {
+			removedID = chs[idx].ID
+		}
+	}
+
 	req := RemoveChunkRequest{ChunkRef: chunkRef}
 	if err := s.callRestateIngress(ctx, fmt.Sprintf("/Build/%s/RemoveChunk", buildID), req, nil); err != nil {
 		return MCPRemoveChunkOutput{}, err
@@ -442,7 +449,7 @@ func (s *VanadisServer) handleMCPRemoveChunk(ctx context.Context, args MCPRemove
 	return MCPRemoveChunkOutput{
 		Status:         "removed",
 		BuildID:        buildID,
-		RemovedChunkID: chunkRef,
+		RemovedChunkID: removedID,
 		Chunks:         toMCPChunkBriefs(remaining),
 	}, nil
 }

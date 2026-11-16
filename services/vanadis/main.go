@@ -571,7 +571,7 @@ type CreateChunkInput struct {
 	TargetSymbols      []string `json:"target_symbols"`
 	Effort             string   `json:"effort,omitempty"`
 	AcceptanceCriteria []string `json:"acceptance_criteria"`
-	DependsOn          []string `json:"depends_on,omitempty"`
+	DependsOn          []string `json:"depends_on"`
 }
 
 // CreateBuildRequest defines the JSON request body for POST /builds.

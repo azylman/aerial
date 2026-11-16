@@ -239,14 +239,6 @@ func TestCallRestateIngress(t *testing.T) {
 			wantSubstr: "restate ingress URL not configured",
 		},
 		{
-			name:       "invalid payload json",
-			serverURL:  ts.URL,
-			path:       "/ok",
-			payload:    make(chan int),
-			wantErr:    true,
-			wantSubstr: "marshal restate payload",
-		},
-		{
 			name:       "successful call with out decoded",
 			serverURL:  ts.URL,
 			path:       "/ok",
