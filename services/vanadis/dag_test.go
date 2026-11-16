@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -47,6 +48,22 @@ func runDAGTestCases(t *testing.T, tests []dagTestCase) {
 func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 	t.Parallel()
 	tests := []dagTestCase{
+		{
+			name: "forward_id",
+			chunks: []VanadisChunk{
+				{ID: "pending", Mode: "action", Status: "pending", DependsOn: []string{"repair"}},
+				{ID: "repair", Mode: "action", DependsOn: []string{}},
+			},
+			wantDeps: [][]string{{"repair"}, {}},
+		},
+		{
+			name: "forward_index",
+			chunks: []VanadisChunk{
+				{ID: "pending", Mode: "action", Status: "pending", DependsOn: []string{"1"}},
+				{ID: "repair", Mode: "action", DependsOn: []string{}},
+			},
+			wantDeps: [][]string{{"repair"}, {}},
+		},
 		{
 			name:   "empty_chunks",
 			chunks: nil,
@@ -148,6 +165,23 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 	t.Parallel()
 	tests := []dagTestCase{
 		{
+			name: "forward_dependency_allows_overlap",
+			chunks: []VanadisChunk{
+				{ID: "pending", Mode: "pr", Repo: "aerial", DependsOn: []string{"repair"}, TargetFiles: []string{"a.go"}},
+				{ID: "repair", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+			},
+			wantDeps: [][]string{{"repair"}, {}},
+		},
+		{
+			name: "mixed_order_transitive_overlap",
+			chunks: []VanadisChunk{
+				{ID: "end", Mode: "pr", Repo: "aerial", DependsOn: []string{"middle"}, TargetFiles: []string{"a.go"}},
+				{ID: "start", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+				{ID: "middle", Mode: "action", DependsOn: []string{"start"}},
+			},
+			wantDeps: [][]string{{"middle"}, {}, {"start"}},
+		},
+		{
 			name: "concurrent_same_repo_pr_empty_target_files_rejected",
 			chunks: []VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
@@ -202,9 +236,80 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 	runDAGTestCases(t, tests)
 }
 
-func TestValidateUpdateAndAppendChunkDAG(t *testing.T) {
+func TestValidateUpdateChunkDAG_ForwardDependencies(t *testing.T) {
 	t.Parallel()
 
+	tests := []struct {
+		name       string
+		dependency string
+		wantDeps   []string
+		wantErr    string
+	}{
+		{"forward_id", "repair", []string{"repair"}, ""},
+		{"forward_index", "2", []string{"repair"}, ""},
+		{"self", "pending", nil, "cannot depend on itself"},
+		{"unknown", "missing", nil, "references unknown dependency"},
+	}
+	for _, tc := range tests {
+		t.Run("update_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			existing := []VanadisChunk{
+				{ID: "done", Mode: "action", Status: "completed", DependsOn: []string{}},
+				{ID: "pending", Mode: "action", Status: "pending", DependsOn: []string{"done"}},
+				{ID: "repair", Mode: "action", DependsOn: []string{"done"}},
+			}
+			before := append([]VanadisChunk(nil), existing...)
+			updated := existing[1]
+			updated.DependsOn = []string{tc.dependency}
+			got, err := validateUpdateChunkDAG(existing, 1, updated)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected %q, got %v", tc.wantErr, err)
+				}
+			} else if err != nil || !slices.Equal(got, tc.wantDeps) {
+				t.Fatalf("dependencies = %v, error = %v, want %v", got, err, tc.wantDeps)
+			}
+			if !reflect.DeepEqual(existing, before) {
+				t.Fatal("validation mutated existing chunks")
+			}
+		})
+	}
+}
+
+func TestValidateAppendChunksDAG_ForwardDependencies(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		dependency string
+	}{
+		{"forward_id", "repair"},
+		{"forward_index", "2"},
+	}
+	for _, tc := range tests {
+		t.Run("append_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			existing := []VanadisChunk{{ID: "done", Mode: "action", Status: "completed", DependsOn: []string{}}}
+			before := append([]VanadisChunk(nil), existing...)
+			appended := []VanadisChunk{
+				{ID: "pending", Mode: "action", Status: "pending", DependsOn: []string{tc.dependency}},
+				{ID: "repair", Mode: "action", DependsOn: []string{"done"}},
+			}
+			got, err := validateAppendChunksDAG(existing, appended)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 2 || !slices.Equal(got[0].DependsOn, []string{"repair"}) || !slices.Equal(got[1].DependsOn, []string{"done"}) {
+				t.Fatalf("unexpected appended chunks: %+v", got)
+			}
+			if !reflect.DeepEqual(existing, before) {
+				t.Fatal("validation mutated completed chunks")
+			}
+		})
+	}
+}
+
+func TestValidateUpdateAndAppendChunkDAG(t *testing.T) {
+	t.Parallel()
 	t.Run("update_chunk_cycle_rejected", func(t *testing.T) {
 		t.Parallel()
 		existing := []VanadisChunk{

@@ -139,6 +139,8 @@ func buildTransitiveClosure(out []VanadisChunk, idMap map[string]int) [][]bool {
 	reach := make([][]bool, N)
 	for i := range N {
 		reach[i] = make([]bool, N)
+	}
+	for i := range N {
 		for _, depID := range out[i].DependsOn {
 			u := idMap[depID]
 			reach[u][i] = true

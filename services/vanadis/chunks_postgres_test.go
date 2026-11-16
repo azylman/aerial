@@ -354,6 +354,7 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 		wantErrIs error
 		wantErr   bool
 		want      advanceOutcome
+		wantPRNum int
 	}{
 		{name: "nil receiver", chunkID: "c1", db: dbScript{bare: nilReceiver}, wantErr: true},
 		{name: "nil db", chunkID: "c1", db: dbScript{bare: nilDB}, wantErr: true},
@@ -370,6 +371,56 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 		{name: "update chunk error", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, failExec: "UPDATE vanadis_chunks", execErr: errors.New("update action chunk err")}, wantErr: true},
 		{name: "update chunk error logs rollback error", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, failExec: "UPDATE vanadis_chunks", execErr: errors.New("update action chunk err"), rollbackErr: errors.New("rb err")}, wantErr: true},
 		{name: "completes action chunk and marks build completed when no remaining chunks", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: valuesRow(0)}, want: advanceOutcome{Matched: true, Advanced: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed"}},
+		{
+			name:    "completes action chunk and populates chunk summaries when build completed",
+			chunkID: "c1",
+			db: dbScript{
+				row:      running,
+				buildRow: runningBuild,
+				countRow: valuesRow(0),
+				chunks: []VanadisChunk{
+					{ID: "c0", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "PR Chunk", Status: "completed", PRNumber: 101, StartedAt: time.Now(), CompletedAt: time.Now(), UpdatedAt: time.Now()},
+					{ID: "c1", ChunkIndex: 1, Mode: "action", Title: "Action Chunk", Status: "completed", StartedAt: time.Now(), CompletedAt: time.Now(), UpdatedAt: time.Now()},
+				},
+			},
+			want:      advanceOutcome{Matched: true, Advanced: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed", Chunks: 2},
+			wantPRNum: 101,
+		},
+		{
+			name:    "completes action chunk with summary query error falls back to nil chunks",
+			chunkID: "c1",
+			db: dbScript{
+				row:      running,
+				buildRow: runningBuild,
+				countRow: valuesRow(0),
+				queryErr: errors.New("chunks query fail"),
+			},
+			want: advanceOutcome{Matched: true, Advanced: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed", Chunks: 0},
+		},
+		{
+			name:    "completes action chunk with summary scan error falls back to nil chunks",
+			chunkID: "c1",
+			db: dbScript{
+				row:      running,
+				buildRow: runningBuild,
+				countRow: valuesRow(0),
+				chunks:   []VanadisChunk{{ID: "c1"}},
+				scanErr:  errors.New("scan fail"),
+			},
+			want: advanceOutcome{Matched: true, Advanced: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed", Chunks: 0},
+		},
+		{
+			name:    "completes action chunk with summary rows error falls back to nil chunks",
+			chunkID: "c1",
+			db: dbScript{
+				row:      running,
+				buildRow: runningBuild,
+				countRow: valuesRow(0),
+				chunks:   []VanadisChunk{{ID: "c1"}},
+				rowsErr:  errors.New("rows fail"),
+			},
+			want: advanceOutcome{Matched: true, Advanced: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed", Chunks: 0},
+		},
 		{name: "completes action chunk", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild}, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: -1, BuildStatus: "running"}},
 	}
 	for _, tc := range tests {
@@ -382,6 +433,9 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 			}
 			if got := outcomeOf(res); got != tc.want {
 				t.Errorf("CompleteActionChunk = %+v, want %+v", got, tc.want)
+			}
+			if tc.wantPRNum > 0 && (len(res.Chunks) == 0 || res.Chunks[0].PRNumber != tc.wantPRNum) {
+				t.Errorf("res.Chunks[0].PRNumber = %v, want %d", res.Chunks, tc.wantPRNum)
 			}
 		})
 	}

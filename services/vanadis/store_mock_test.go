@@ -688,6 +688,7 @@ func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID stri
 		m.builds[bID] = b
 		res.BuildCompleted = true
 		res.BuildStatus = "completed"
+		res.Chunks = chunksToSummaries(list)
 	}
 
 	res.Advanced = true

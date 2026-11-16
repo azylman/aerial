@@ -120,10 +120,19 @@ func TestWorkflowExecutionHelpers(t *testing.T) {
 	store := newMemoryVanadisStore()
 	b := VanadisBuild{ID: "b-wf", ThreadID: "th-1", Objective: "test wf"}
 	chunks := []VanadisChunk{
-		{ID: "c1", BuildID: "b-wf", ChunkIndex: 0, Mode: "pr", Title: "c1", Instructions: "do c1"},
+		{ID: "c1", BuildID: "b-wf", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "c1", Instructions: "do c1"},
 		{ID: "c2", BuildID: "b-wf", ChunkIndex: 1, Mode: "action", Title: "c2", Instructions: "do c2"},
 	}
 	require.NoError(t, store.CreateBuild(ctx, b, chunks))
+
+	testChunks := []VanadisChunk{
+		{ID: "tc1", BuildID: "b-wf", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "tc1", Instructions: "do c1", PRNumber: 42, UpdatedAt: time.Now().UTC()},
+		{ID: "tc2", BuildID: "b-wf", ChunkIndex: 1, Mode: "action", Title: "tc2", Instructions: "do c2", UpdatedAt: time.Now().UTC()},
+	}
+	summaries := chunksToSummaries(testChunks)
+	require.Len(t, summaries, 2)
+	assert.Equal(t, 42, summaries[0].PRNumber)
+	assert.False(t, summaries[0].UpdatedAt.IsZero())
 
 	memBus := pubsub.NewMemoryBus()
 	t.Cleanup(func() { _ = memBus.Close() })
@@ -157,8 +166,11 @@ func TestWorkflowExecutionHelpers(t *testing.T) {
 
 	srv.cfg = Config{BrainURL: tsWake.URL}
 	srv.httpClient = tsWake.Client()
+	_, _, _, errAttach := store.AttachChunkPR(ctx, AttachChunkPRRequest{ChunkID: "c1", PRNumber: 42, Repo: "azylman/aerial"})
+	require.NoError(t, errAttach)
 	require.NoError(t, executeCompleteWorkflowBuild(ctx, srv, "b-wf"))
 	assert.Contains(t, wakePromptSent, "2 chunks completed")
+	assert.Contains(t, wakePromptSent, "PR #42")
 }
 
 func TestRestateIngressClientHelpers(t *testing.T) {
@@ -218,6 +230,8 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		DispatchID:     "d-act-1",
 	}))
 	assert.NotEmpty(t, wakePromptSent)
+	assert.Contains(t, wakePromptSent, "Completed Chunks Ledger:")
+	assert.Contains(t, wakePromptSent, "- Chunk 1/1: act 1 (action, completed)")
 
 	// Test action chunk completes with Restate failure: error is returned and redelivery retries reconciliation
 	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -250,6 +264,20 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		DispatchID:     "d-act-retry-1",
 	}))
 
+	bMulti := VanadisBuild{ID: "b-act-multi", ThreadID: "123456789012345678", Objective: "test act multi wake", Status: "running"}
+	cMulti := []VanadisChunk{
+		{ID: "c-act-m0", BuildID: "b-act-multi", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "m0 pr", Status: "completed", PRNumber: 99},
+		{ID: "c-act-m1", BuildID: "b-act-multi", ChunkIndex: 1, Mode: "action", Title: "m1 act", Status: "running"},
+	}
+	require.NoError(t, store.CreateBuild(ctx, bMulti, cMulti))
+	require.NoError(t, srvWake.handleCompletedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
+		VanadisChunkID: "c-act-m1",
+		DispatchID:     "d-act-m1",
+	}))
+	assert.Contains(t, wakePromptSent, "2 chunks completed")
+	assert.Contains(t, wakePromptSent, "PR #99")
+	assert.Contains(t, wakePromptSent, "(action, completed)")
+
 	require.NoError(t, srv.mutateBuildOnRestate(ctx, "b-restate", BuildMutationRequest{
 		Action:  "chunk_merged",
 		ChunkID: "c1",
@@ -261,6 +289,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 		"/Build/b-act-single/Reconcile/send",
 		"/Build/b-act-retry/Reconcile/send",
 		"/Build/b-act-retry/Reconcile/send",
+		"/Build/b-act-multi/Reconcile/send",
 		"/Build/b-restate/Mutate/send",
 	}, paths)
 
