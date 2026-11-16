@@ -2,6 +2,7 @@ package guard
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -41,7 +42,9 @@ func isLiveStateRemovalTarget(p string) bool {
 func CheckLiveState(toolName string, args ToolArgs) *Decision {
 	switch normalizeToolName(toolName) {
 	case toolReplaceFileContent, toolWriteToFile, toolEditFile, toolWriteFile, toolEdit, toolMultiEdit, toolWrite:
-		if IsLiveStatePath(args.FilePath()) {
+		if slices.ContainsFunc(args.TargetPaths(), func(p string) bool {
+			return IsLiveStatePath(resolveArg(p, args.Cwd))
+		}) {
 			return &Decision{Decision: DecisionDeny, Reason: LiveStateDenyReason}
 		}
 

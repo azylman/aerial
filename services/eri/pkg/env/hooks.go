@@ -45,6 +45,37 @@ const defaultCanonicalClaudeSettingsJSON = `{
   }
 }`
 
+// Default canonical codex hooks.json hooks configuration.
+const defaultCanonicalCodexHooksJSON = `{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "/usr/local/bin/hook-guard pre-invocation",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/hook-guard pre-invocation"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "type": "command",
+        "command": "/usr/local/bin/hook-guard all",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/hook-guard all"
+          }
+        ]
+      }
+    ]
+  }
+}`
+
 // Default canonical hooks.json payload used when external file is absent.
 const defaultCanonicalHooksJSON = `{"share-guard":{"PreToolUse":[{"matcher":"replace_file_content|write_to_file|edit_file|write_file|run_command","hooks":[{"type":"command","command":"hook-guard share","timeout":5}]}]},"live-state-guard":{"PreToolUse":[{"matcher":"replace_file_content|write_to_file|edit_file|write_file|run_command","hooks":[{"type":"command","command":"hook-guard live-state","timeout":5}]}]},"schedule-guard":{"PreToolUse":[{"matcher":"schedule|run_command|manage_task|manage_subagents|view_file|read_file","hooks":[{"type":"command","command":"hook-guard schedule","timeout":5}]}]},"batch-guard":{"PreInvocation":[{"type":"command","command":"hook-guard pre-invocation","timeout":5}],"PreToolUse":[{"matcher":"view_file|read_file|replace_file_content|write_to_file|edit_file|write_file|run_command","hooks":[{"type":"command","command":"hook-guard batch","timeout":5}]}],"PostToolUse":[{"matcher":"replace_file_content|write_to_file|edit_file|write_file","hooks":[{"type":"command","command":"hook-guard post-batch","timeout":5}]}]},"search-guard":{"PreToolUse":[{"matcher":"run_command|call_mcp_tool","hooks":[{"type":"command","command":"hook-guard search","timeout":5}]}]},"commit-guard":{"PreToolUse":[{"matcher":"run_command|call_mcp_tool","hooks":[{"type":"command","command":"hook-guard commit","timeout":5}]}]},"trace-announce":{"PreToolUse":[{"matcher":"call_mcp_tool","hooks":[{"type":"command","command":"hook-guard trace","timeout":5}]}]}}`
 
@@ -114,6 +145,17 @@ func (p *Provisioner) provisionTargetClaudeSettings(claudeDir string) {
 	}
 }
 
+func (p *Provisioner) provisionTargetCodexHooks(codexDir string) {
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		log.Printf("[Env] Warning: failed to mkdir %s for codex hooks: %v", codexDir, err)
+		return
+	}
+	hooksPath := filepath.Join(codexDir, "hooks.json")
+	if err := p.writeAtomic(hooksPath, defaultCanonicalCodexHooksJSON); err != nil {
+		log.Printf("[Env] Warning: failed to write hooks.json to %s: %v", codexDir, err)
+	}
+}
+
 // SyncHooks provisions hooks.json and executable hook scripts into primary ~/.gemini and all runtime targets.
 func (p *Provisioner) SyncHooks() error {
 	if p == nil || p.homeDir == "" {
@@ -158,6 +200,14 @@ func (p *Provisioner) SyncHooks() error {
 	if p.dataDir != "" {
 		for _, target := range allRuntimeTargets {
 			p.provisionTargetClaudeSettings(filepath.Join(p.runtimeHomeDir(target), ".claude"))
+		}
+	}
+
+	// 5. Provision Codex hooks.json into primary ~/.codex and each runtime target ~/.codex
+	p.provisionTargetCodexHooks(filepath.Join(p.homeDir, ".codex"))
+	if p.dataDir != "" {
+		for _, target := range allRuntimeTargets {
+			p.provisionTargetCodexHooks(filepath.Join(p.runtimeHomeDir(target), ".codex"))
 		}
 	}
 

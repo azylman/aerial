@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -155,6 +156,14 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"claude bash git checkout in share cwd denied", "share", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "git checkout -b x"}, "cwd": "/share/aerial"}`, true, 0, "", ""},
 		{"agy args Cwd wins over top-level cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "rm -rf scripts", "Cwd": "/tmp/work"}}, "cwd": "/share/aerial"}`, false, 0, "", ""},
 		{"claude mcp tool name normalized", "batch", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__server__bash", "tool_input": {"command": "git status"}}`, false, 0, "git status -sb", ""},
+		{"codex exec_command denied in share", "share", `{"toolCall": {"name": "exec_command", "args": {"cmd": "touch evil.txt", "workdir": "/share/aerial"}}}`, true, 0, "", ""},
+		{"codex shell command denied in share", "share", `{"toolCall": {"name": "shell", "args": {"CommandLine": "touch evil.txt", "Cwd": "/share/aerial"}}}`, true, 0, "", ""},
+		{"codex apply_patch denied in share", "share", `{"toolCall": {"name": "apply_patch", "args": {"path": "/share/aerial/main.go"}}}`, true, 0, "", ""},
+		{"codex apply_patch patch text targeting protected path denied", "share", "{\"toolCall\": {\"name\": \"apply_patch\", \"args\": {\"patch\": \"*** Update File: /share/aerial/main.go\\n@@ -1 +1 @@\"}}}", true, 0, "", ""},
+		{"codex apply_patch patch text targeting workspace allowed", "share", "{\"toolCall\": {\"name\": \"apply_patch\", \"args\": {\"patch\": \"*** Update File: /data/scratch/main.go\\n@@ -1 +1 @@\"}}}", false, 0, "", ""},
+		{"codex apply_patch relative path targeting protected path denied", "share", `{"toolCall": {"name": "apply_patch", "args": {"patch": "*** Update File: main.go\n@@ -1 +1 @@", "workdir": "/share/aerial"}}}`, true, 0, "", ""},
+		{"codex apply_patch relative path in workspace allowed", "share", `{"toolCall": {"name": "apply_patch", "args": {"patch": "*** Update File: main.go\n@@ -1 +1 @@", "workdir": "/data/scratch"}}}`, false, 0, "", ""},
+		{"codex apply_patch patch text targeting live state denied", "live-state", "{\"toolCall\": {\"name\": \"apply_patch\", \"args\": {\"patch\": \"*** Update File: /data/ssh/config\\n@@ -1 +1 @@\"}}}", true, 0, "", ""},
 	}
 
 	for _, tc := range tests {
@@ -306,6 +315,13 @@ func TestClaudeHookResponseFormatting(t *testing.T) {
 			map[string]any{"command": "git status -sb", "timeout": float64(600000), "run_in_background": true, "description": "Show status"},
 		},
 		{
+			"bash command rewrites cmd when cmd key present without command key",
+			&Decision{Decision: DecisionAllow, Overwrite: map[string]any{"CommandLine": "git status -sb"}},
+			json.RawMessage(`{"cmd":"git status","timeout":600000}`),
+			"allow", "",
+			map[string]any{"cmd": "git status -sb", "timeout": float64(600000)},
+		},
+		{
 			"wait-only overwrite drops agy key",
 			&Decision{Decision: DecisionAllow, Overwrite: map[string]any{"WaitMsBeforeAsync": 10000}},
 			json.RawMessage(`{"command":"make build","timeout":120000}`),
@@ -415,6 +431,7 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 		{"json string encoded object", `"{\"CommandLine\": \"echo 1\", \"Cwd\": \"/data\"}"`, "", "echo 1", 0, 0},
 		{"direct map object", `{"path": "/tmp/test.go", "CommandLine": "cat test.go"}`, "/tmp/test.go", "cat test.go", 0, 0},
 		{"claude snake_case fields", `{"file_path": "/tmp/claude.go", "command": "echo claude", "offset": 10, "limit": 20}`, "/tmp/claude.go", "echo claude", 10, 29},
+		{"codex cmd and workdir fields", `{"cmd": "echo codex", "workdir": "/data/work"}`, "", "echo codex", 0, 0},
 		{"arguments only object", `{"Arguments": {"token": "secret"}}`, "", "", 0, 0},
 		{"arguments lowercase only object", `{"arguments": {"token": "secret"}}`, "", "", 0, 0},
 		{"target file only", `{"TargetFile": "/tmp/target.go"}`, "/tmp/target.go", "", 0, 0},
@@ -422,6 +439,7 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 		{"file only", `{"file": "/tmp/file.go"}`, "/tmp/file.go", "", 0, 0},
 		{"offset only", `{"offset": 15}`, "", "", 15, 0},
 		{"limit only", `{"limit": 25}`, "", "", 1, 25},
+		{"patch only", `{"patch": "*** Update File: /tmp/patch.go\n"}`, "/tmp/patch.go", "", 0, 0},
 	}
 	for _, tc := range parseTests {
 		t.Run("parse_"+tc.name, func(t *testing.T) {
@@ -438,20 +456,58 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 	}
 }
 
+type payloadArgsCase struct {
+	name        string
+	payload     *Payload
+	args        *ToolArgs
+	wantClaude  bool
+	wantAction  string
+	wantDaemon  bool
+	wantWaitMs  int
+	wantFile    string
+	wantHasAny  bool
+	wantCmd     string
+	wantCwd     string
+	wantTargets []string
+}
+
+func assertToolArgs(t *testing.T, tc payloadArgsCase) {
+	t.Helper()
+	if tc.payload.IsClaude() != tc.wantClaude {
+		t.Fatalf("IsClaude() = %v, want %v", tc.payload.IsClaude(), tc.wantClaude)
+	}
+	tc.payload.Normalize()
+	if tc.args.NormalizedAction() != tc.wantAction {
+		t.Fatalf("NormalizedAction() = %q, want %q", tc.args.NormalizedAction(), tc.wantAction)
+	}
+	if tc.args.IsDaemonBool() != tc.wantDaemon {
+		t.Fatalf("IsDaemonBool() = %v, want %v", tc.args.IsDaemonBool(), tc.wantDaemon)
+	}
+	if tc.args.WaitMs() != tc.wantWaitMs {
+		t.Fatalf("WaitMs() = %v, want %v", tc.args.WaitMs(), tc.wantWaitMs)
+	}
+	if tc.args.FilePath() != tc.wantFile {
+		t.Fatalf("FilePath() = %q, want %q", tc.args.FilePath(), tc.wantFile)
+	}
+	if tc.args.hasAnyField() != tc.wantHasAny {
+		t.Fatalf("hasAnyField() = %v, want %v", tc.args.hasAnyField(), tc.wantHasAny)
+	}
+	tc.args.Normalize()
+	if tc.wantCmd != "" && tc.args.CommandLine != tc.wantCmd {
+		t.Fatalf("CommandLine = %q, want %q", tc.args.CommandLine, tc.wantCmd)
+	}
+	if tc.wantCwd != "" && tc.args.Cwd != tc.wantCwd {
+		t.Fatalf("Cwd = %q, want %q", tc.args.Cwd, tc.wantCwd)
+	}
+	if tc.wantTargets != nil && !slices.Equal(tc.args.TargetPaths(), tc.wantTargets) {
+		t.Fatalf("TargetPaths() = %v, want %v", tc.args.TargetPaths(), tc.wantTargets)
+	}
+}
+
 func TestPayloadAndToolArgsAccessors(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		payload    *Payload
-		args       *ToolArgs
-		wantClaude bool
-		wantAction string
-		wantDaemon bool
-		wantWaitMs int
-		wantFile   string
-		wantHasAny bool
-	}{
+	tests := []payloadArgsCase{
 		{
 			name: "nil instances",
 		},
@@ -488,31 +544,65 @@ func TestPayloadAndToolArgsAccessors(t *testing.T) {
 			wantDaemon: true,
 			wantHasAny: true,
 		},
+		{
+			name: "tool args codex cmd and workdir",
+			args: &ToolArgs{
+				Cmd:     "echo codex",
+				Workdir: "/data/codex",
+			},
+			wantHasAny: true,
+			wantCmd:    "echo codex",
+			wantCwd:    "/data/codex",
+		},
+		{
+			name: "tool args patch text all diff headers",
+			args: &ToolArgs{
+				Patch: "*** Delete File: /data/del.go\n*** Move from: /data/src.go\n*** Move to: /data/dst.go\n--- a/data/old.go\n+++ b/data/new.go\n+++ /dev/null\n",
+			},
+			wantHasAny:  true,
+			wantFile:    "/data/del.go",
+			wantTargets: []string{"/data/del.go", "/data/src.go", "/data/dst.go", "data/old.go", "data/new.go"},
+		},
+		{
+			name: "tool args target file precedence",
+			args: &ToolArgs{
+				TargetFile:   "/data/target.go",
+				AbsolutePath: "/data/abs.go",
+			},
+			wantHasAny: true,
+			wantFile:   "/data/target.go",
+		},
+		{
+			name: "tool args absolute path precedence",
+			args: &ToolArgs{
+				AbsolutePath: "/data/abs.go",
+				File:         "/data/file.go",
+			},
+			wantHasAny: true,
+			wantFile:   "/data/abs.go",
+		},
+		{
+			name: "tool args file fallback",
+			args: &ToolArgs{
+				File: "/data/file.go",
+			},
+			wantHasAny: true,
+			wantFile:   "/data/file.go",
+		},
+		{
+			name: "tool args input patch text with protected priority",
+			args: &ToolArgs{
+				Input: "*** Add File: /data/safe.go\n*** Update File: /share/aerial/protected.go\n",
+			},
+			wantHasAny: true,
+			wantFile:   "/share/aerial/protected.go",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.payload.IsClaude() != tc.wantClaude {
-				t.Fatalf("IsClaude() = %v, want %v", tc.payload.IsClaude(), tc.wantClaude)
-			}
-			tc.payload.Normalize()
-			if tc.args.NormalizedAction() != tc.wantAction {
-				t.Fatalf("NormalizedAction() = %q, want %q", tc.args.NormalizedAction(), tc.wantAction)
-			}
-			if tc.args.IsDaemonBool() != tc.wantDaemon {
-				t.Fatalf("IsDaemonBool() = %v, want %v", tc.args.IsDaemonBool(), tc.wantDaemon)
-			}
-			if tc.args.WaitMs() != tc.wantWaitMs {
-				t.Fatalf("WaitMs() = %v, want %v", tc.args.WaitMs(), tc.wantWaitMs)
-			}
-			if tc.args.FilePath() != tc.wantFile {
-				t.Fatalf("FilePath() = %q, want %q", tc.args.FilePath(), tc.wantFile)
-			}
-			if tc.args.hasAnyField() != tc.wantHasAny {
-				t.Fatalf("hasAnyField() = %v, want %v", tc.args.hasAnyField(), tc.wantHasAny)
-			}
-			tc.args.Normalize()
+			assertToolArgs(t, tc)
 		})
 	}
 }

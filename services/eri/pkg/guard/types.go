@@ -18,7 +18,14 @@ func normalizeToolName(toolName string) string {
 	if idx := strings.LastIndex(n, ":"); idx != -1 {
 		n = n[idx+1:]
 	}
-	return n
+	switch n {
+	case "exec_command", "shell", "shell_command", "local_shell":
+		return toolBash
+	case "apply_patch":
+		return toolEdit
+	default:
+		return n
+	}
 }
 
 // DecisionType represents the hook authorization verdict.
@@ -102,7 +109,11 @@ type ToolArgs struct {
 	Path              string          `json:"path"`
 	File              string          `json:"file"`
 	FilePathSnake     string          `json:"file_path,omitempty"`
+	Patch             string          `json:"patch,omitempty"`
+	Input             string          `json:"input,omitempty"`
 	Command           string          `json:"command,omitempty"`
+	Cmd               string          `json:"cmd,omitempty"`
+	Workdir           string          `json:"workdir,omitempty"`
 	Pattern           string          `json:"pattern,omitempty"`
 	Offset            int             `json:"offset,omitempty"`
 	Limit             int             `json:"limit,omitempty"`
@@ -157,14 +168,81 @@ func (a *ToolArgs) hasAnyField() bool {
 	if a == nil {
 		return false
 	}
-	return a.FilePath() != "" || a.CommandLine != "" || a.Cwd != "" ||
+	return a.FilePath() != "" || a.CommandLine != "" || a.Command != "" || a.Cmd != "" ||
+		a.Patch != "" || a.Input != "" ||
+		a.Cwd != "" || a.Workdir != "" ||
 		a.ToolName != "" || a.ServerName != "" || a.ToolNameLower != "" || a.ServerNameLower != "" ||
 		a.Action != "" || len(a.Arguments) > 0 || len(a.ArgumentsLower) > 0 ||
 		len(a.WaitMsBeforeAsync) > 0 || len(a.IsDaemon) > 0
 }
 
-// FilePath returns the resolved file path from TargetFile, AbsolutePath, Path, FilePathSnake, or File.
-func (a *ToolArgs) FilePath() string {
+func (a *ToolArgs) patchText() string {
+	if a == nil {
+		return ""
+	}
+	if a.Patch != "" {
+		return a.Patch
+	}
+	if a.Input != "" {
+		return a.Input
+	}
+	if a.Command != "" {
+		return a.Command
+	}
+	if a.Cmd != "" {
+		return a.Cmd
+	}
+	if a.CommandLine != "" {
+		return a.CommandLine
+	}
+	return ""
+}
+
+func extractPatchPaths(text string) []string {
+	if text == "" {
+		return nil
+	}
+	var paths []string
+	seen := make(map[string]struct{})
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		p = strings.Trim(p, `"'`)
+		if p == "" || p == "/dev/null" {
+			return
+		}
+		if _, ok := seen[p]; !ok {
+			seen[p] = struct{}{}
+			paths = append(paths, p)
+		}
+	}
+
+	for line := range strings.SplitSeq(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "*** Update File:"):
+			add(strings.TrimPrefix(trimmed, "*** Update File:"))
+		case strings.HasPrefix(trimmed, "*** Add File:"):
+			add(strings.TrimPrefix(trimmed, "*** Add File:"))
+		case strings.HasPrefix(trimmed, "*** Delete File:"):
+			add(strings.TrimPrefix(trimmed, "*** Delete File:"))
+		case strings.HasPrefix(trimmed, "*** Move to:"):
+			add(strings.TrimPrefix(trimmed, "*** Move to:"))
+		case strings.HasPrefix(trimmed, "*** Move from:"):
+			add(strings.TrimPrefix(trimmed, "*** Move from:"))
+		case strings.HasPrefix(trimmed, "+++ "):
+			target := strings.TrimPrefix(trimmed, "+++ ")
+			target = strings.TrimPrefix(target, "b/")
+			add(target)
+		case strings.HasPrefix(trimmed, "--- "):
+			target := strings.TrimPrefix(trimmed, "--- ")
+			target = strings.TrimPrefix(target, "a/")
+			add(target)
+		}
+	}
+	return paths
+}
+
+func (a *ToolArgs) explicitFilePath() string {
 	if a == nil {
 		return ""
 	}
@@ -183,13 +261,70 @@ func (a *ToolArgs) FilePath() string {
 	return a.File
 }
 
-// Normalize normalizes Claude fields (Command -> CommandLine, Offset/Limit -> StartLine/EndLine).
+// TargetPaths returns all candidate file paths targeted by this tool call.
+// It includes the explicit file path (if any) and any paths extracted from patch text.
+func (a *ToolArgs) TargetPaths() []string {
+	if a == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var paths []string
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; !ok {
+			seen[p] = struct{}{}
+			paths = append(paths, p)
+		}
+	}
+	if exp := a.explicitFilePath(); exp != "" {
+		add(exp)
+	}
+	for _, p := range extractPatchPaths(a.patchText()) {
+		add(p)
+	}
+	return paths
+}
+
+// FilePath returns the resolved file path from TargetFile, AbsolutePath, Path, FilePathSnake, File,
+// or patch content headers. When multiple patch paths exist, protected or live-state paths are
+// prioritized to ensure safety guards detect violations.
+func (a *ToolArgs) FilePath() string {
+	if a == nil {
+		return ""
+	}
+	if exp := a.explicitFilePath(); exp != "" {
+		return exp
+	}
+	paths := extractPatchPaths(a.patchText())
+	if len(paths) == 0 {
+		return ""
+	}
+	for _, p := range paths {
+		resolved := resolveArg(p, a.Cwd)
+		if IsProtectedPath(resolved) || IsLiveStatePath(resolved) {
+			return p
+		}
+	}
+	return paths[0]
+}
+
+// Normalize normalizes Claude and Codex fields (Command/Cmd -> CommandLine, Workdir -> Cwd, Offset/Limit -> StartLine/EndLine).
 func (a *ToolArgs) Normalize() {
 	if a == nil {
 		return
 	}
-	if a.CommandLine == "" && a.Command != "" {
-		a.CommandLine = a.Command
+	if a.CommandLine == "" {
+		if a.Command != "" {
+			a.CommandLine = a.Command
+		} else if a.Cmd != "" {
+			a.CommandLine = a.Cmd
+		}
+	}
+	if a.Cwd == "" && a.Workdir != "" {
+		a.Cwd = a.Workdir
 	}
 	if a.StartLine <= 0 && a.EndLine <= 0 && (a.Offset > 0 || a.Limit > 0) {
 		a.StartLine = max(1, a.Offset)

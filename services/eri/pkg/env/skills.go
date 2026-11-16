@@ -44,6 +44,8 @@ func (p *Provisioner) SyncSkills() error {
 	p.LinkTargetSkills(primarySkillDir, TargetDiscord)
 	primaryClaudeSkills := filepath.Join(p.homeDir, ".claude", "skills")
 	p.LinkTargetSkills(primaryClaudeSkills, TargetDiscord)
+	primaryCodexSkills := filepath.Join(p.homeDir, ".codex", "skills")
+	p.LinkTargetSkills(primaryCodexSkills, TargetDiscord)
 
 	// 2. Isolated runtimes (if dataDir configured)
 	if p.dataDir != "" {
@@ -53,6 +55,8 @@ func (p *Provisioner) SyncSkills() error {
 			counts[target] = p.LinkTargetSkills(runtimeDir, target)
 			runtimeClaudeSkills := filepath.Join(p.runtimeHomeDir(target), ".claude", "skills")
 			p.LinkTargetSkills(runtimeClaudeSkills, target)
+			runtimeCodexSkills := filepath.Join(p.runtimeHomeDir(target), ".codex", "skills")
+			p.LinkTargetSkills(runtimeCodexSkills, target)
 		}
 		log.Printf("[Skills] Synchronized skills: %d discord skills, %d voice skills, %d ephemeral skills", counts[TargetDiscord], counts[TargetVoice], counts[TargetEphemeral])
 	}

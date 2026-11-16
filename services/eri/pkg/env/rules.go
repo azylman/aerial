@@ -330,6 +330,22 @@ func (p *Provisioner) syncClaudeMD(rules []ruleSourceFile, claudeDir string) err
 	return p.writeAtomic(targetPath, claudeMDContent)
 }
 
+func (p *Provisioner) syncCodexMD(rules []ruleSourceFile, codexDir string) error {
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		return err
+	}
+	var stripped []string
+	for _, r := range rules {
+		body := stripRuleFrontmatter(r.content)
+		if body != "" {
+			stripped = append(stripped, body)
+		}
+	}
+	codexMDContent := strings.Join(stripped, "\n\n")
+	targetPath := filepath.Join(codexDir, "AGENTS.md")
+	return p.writeAtomic(targetPath, codexMDContent)
+}
+
 func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 	runtimeGemini := filepath.Join(runtimeHome, ".gemini")
 	primaryGemini := filepath.Join(p.homeDir, ".gemini")
@@ -392,6 +408,21 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		if sErr := symlinkRuntimeAsset(canonicalClaudeProjects, runtimeProjects); sErr != nil {
 			log.Printf("[Env] Warning: failed to link shared claude projects %s -> %s: %v", runtimeProjects, canonicalClaudeProjects, sErr)
 		}
+
+		canonicalCodexSessions := filepath.Join(p.dataDir, "codex", "sessions")
+		ignore(os.MkdirAll(canonicalCodexSessions, 0o755))
+		runtimeCodex := filepath.Join(runtimeHome, ".codex")
+		ignore(os.MkdirAll(runtimeCodex, 0o755))
+		runtimeSessions := filepath.Join(runtimeCodex, "sessions")
+		prepareSharedTargetDir(runtimeSessions, filepath.Clean(canonicalCodexSessions))
+		if sErr := symlinkRuntimeAsset(canonicalCodexSessions, runtimeSessions); sErr != nil {
+			log.Printf("[Env] Warning: failed to link shared codex sessions %s -> %s: %v", runtimeSessions, canonicalCodexSessions, sErr)
+		}
+
+		canonicalCodexAuth := filepath.Join(p.dataDir, "codex", "auth.json")
+		if _, err := os.Stat(canonicalCodexAuth); err == nil {
+			p.linkOrCopyAsset(canonicalCodexAuth, filepath.Join(runtimeCodex, "auth.json"))
+		}
 	}
 }
 
@@ -402,6 +433,7 @@ func isolateEphemeralSessionStorage(runtimeHome, runtimeGemini string) {
 		filepath.Join(runtimeGemini, "antigravity-cli", "conversations"),
 		filepath.Join(runtimeGemini, "conversations"),
 		filepath.Join(runtimeHome, ".claude", "projects"),
+		filepath.Join(runtimeHome, ".codex", "sessions"),
 	} {
 		if fi, err := os.Lstat(dir); err == nil && (fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir()) {
 			ignore(os.Remove(dir))
@@ -475,6 +507,61 @@ func (*Provisioner) linkSharedSessionStorage(targetGemini, canonicalBrain, canon
 	}
 }
 
+func (p *Provisioner) linkPrimarySharedAssets(primaryClaude, primaryCodex string) {
+	primaryGemini := filepath.Join(p.homeDir, ".gemini")
+	canonicalBrain := filepath.Join(p.dataDir, "brain")
+	canonicalConversations := filepath.Join(p.dataDir, "conversations")
+	ignore(os.MkdirAll(canonicalBrain, 0o755))
+	ignore(os.MkdirAll(canonicalConversations, 0o755))
+	p.linkSharedSessionStorage(primaryGemini, canonicalBrain, canonicalConversations)
+
+	canonicalClaudeProjects := filepath.Join(p.dataDir, "claude", "projects")
+	ignore(os.MkdirAll(canonicalClaudeProjects, 0o755))
+	ignore(os.MkdirAll(primaryClaude, 0o755))
+	primaryProjects := filepath.Join(primaryClaude, "projects")
+	prepareSharedTargetDir(primaryProjects, filepath.Clean(canonicalClaudeProjects))
+	if sErr := symlinkRuntimeAsset(canonicalClaudeProjects, primaryProjects); sErr != nil {
+		log.Printf("[Env] Warning: failed to link shared claude projects %s -> %s: %v", primaryProjects, canonicalClaudeProjects, sErr)
+	}
+
+	canonicalCodexSessions := filepath.Join(p.dataDir, "codex", "sessions")
+	ignore(os.MkdirAll(canonicalCodexSessions, 0o755))
+	ignore(os.MkdirAll(primaryCodex, 0o755))
+	primaryCodexSessions := filepath.Join(primaryCodex, "sessions")
+	prepareSharedTargetDir(primaryCodexSessions, filepath.Clean(canonicalCodexSessions))
+	if sErr := symlinkRuntimeAsset(canonicalCodexSessions, primaryCodexSessions); sErr != nil {
+		log.Printf("[Env] Warning: failed to link shared codex sessions %s -> %s: %v", primaryCodexSessions, canonicalCodexSessions, sErr)
+	}
+}
+
+func (p *Provisioner) syncPrimaryRulesAssets(discordRules []ruleSourceFile) {
+	primaryClaude := filepath.Join(p.homeDir, ".claude")
+	if p.dataDir == "" {
+		if err := p.syncClaudeMD(discordRules, primaryClaude); err != nil {
+			log.Printf("[Env] Warning: failed to sync primary CLAUDE.md: %v", err)
+		}
+	} else {
+		// Runtime homes own CLAUDE.md. Claude pools run with Cwd=dataDir, so a
+		// primary CLAUDE.md under that cwd would load a second time as project memory.
+		if err := os.Remove(filepath.Join(primaryClaude, "CLAUDE.md")); err != nil && !os.IsNotExist(err) {
+			log.Printf("[Env] Warning: failed to remove stale primary CLAUDE.md: %v", err)
+		}
+	}
+	primaryCodex := filepath.Join(p.homeDir, ".codex")
+	if p.dataDir == "" {
+		if err := p.syncCodexMD(discordRules, primaryCodex); err != nil {
+			log.Printf("[Env] Warning: failed to sync primary AGENTS.md: %v", err)
+		}
+	} else {
+		if err := os.Remove(filepath.Join(primaryCodex, "AGENTS.md")); err != nil && !os.IsNotExist(err) {
+			log.Printf("[Env] Warning: failed to remove stale primary AGENTS.md: %v", err)
+		}
+	}
+	if p.dataDir != "" {
+		p.linkPrimarySharedAssets(primaryClaude, primaryCodex)
+	}
+}
+
 // SyncRules compiles the modular rules into target runtime directories and primary home.
 func (p *Provisioner) SyncRules(customPrompt string) error {
 	if p == nil || p.homeDir == "" {
@@ -510,34 +597,7 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 		return fmt.Errorf("failed to sync rules to primary home: %w", err)
 	}
 	log.Printf("[Env] Configured modular rules in %s (target: discord)", primaryGemini)
-	primaryClaude := filepath.Join(p.homeDir, ".claude")
-	if p.dataDir == "" {
-		if err := p.syncClaudeMD(discordRules, primaryClaude); err != nil {
-			log.Printf("[Env] Warning: failed to sync primary CLAUDE.md: %v", err)
-		}
-	} else {
-		// Runtime homes own CLAUDE.md. Claude pools run with Cwd=dataDir, so a
-		// primary CLAUDE.md under that cwd would load a second time as project memory.
-		if err := os.Remove(filepath.Join(primaryClaude, "CLAUDE.md")); err != nil && !os.IsNotExist(err) {
-			log.Printf("[Env] Warning: failed to remove stale primary CLAUDE.md: %v", err)
-		}
-	}
-	if p.dataDir != "" {
-		canonicalBrain := filepath.Join(p.dataDir, "brain")
-		canonicalConversations := filepath.Join(p.dataDir, "conversations")
-		ignore(os.MkdirAll(canonicalBrain, 0o755))
-		ignore(os.MkdirAll(canonicalConversations, 0o755))
-		p.linkSharedSessionStorage(primaryGemini, canonicalBrain, canonicalConversations)
-
-		canonicalClaudeProjects := filepath.Join(p.dataDir, "claude", "projects")
-		ignore(os.MkdirAll(canonicalClaudeProjects, 0o755))
-		ignore(os.MkdirAll(primaryClaude, 0o755))
-		primaryProjects := filepath.Join(primaryClaude, "projects")
-		prepareSharedTargetDir(primaryProjects, filepath.Clean(canonicalClaudeProjects))
-		if sErr := symlinkRuntimeAsset(canonicalClaudeProjects, primaryProjects); sErr != nil {
-			log.Printf("[Env] Warning: failed to link shared claude projects %s -> %s: %v", primaryProjects, canonicalClaudeProjects, sErr)
-		}
-	}
+	p.syncPrimaryRulesAssets(discordRules)
 
 	// 5. If dataDir is configured, provision isolated runtimes for discord, voice, and ephemeral
 	if p.dataDir != "" {
@@ -556,6 +616,10 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 			claudeDir := filepath.Join(home, ".claude")
 			if err := p.syncClaudeMD(compiled[target], claudeDir); err != nil {
 				log.Printf("[Env] Warning: failed to sync %s runtime CLAUDE.md: %v", target, err)
+			}
+			codexDir := filepath.Join(home, ".codex")
+			if err := p.syncCodexMD(compiled[target], codexDir); err != nil {
+				log.Printf("[Env] Warning: failed to sync %s runtime AGENTS.md: %v", target, err)
 			}
 		}
 	}
