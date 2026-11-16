@@ -209,6 +209,11 @@ func isWidgetChunkInProgress(status string) bool {
 	}
 }
 
+func isPreLaunchStatus(status string) bool {
+	norm := strings.ToLower(strings.TrimSpace(status))
+	return norm == "" || norm == "pending" || norm == "queued"
+}
+
 func isWidgetChunkWaitingOnCI(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case chunkStatusOpen, chunkStatusPROpened, "merged", "synced", "deploying":
@@ -262,8 +267,12 @@ func (p *WorkerPool) clearChunkStepStateLocked(chunkID string) {
 }
 
 func (p *WorkerPool) syncSingleWidgetChunkLocked(c *discord.StatusWidgetChunk, existing *discord.StatusWidgetRequest, idx int, buildID string, isSinglePR, isTerminalBuild bool) {
-	if c.ID == "" && existing != nil && idx < len(existing.Chunks) && existing.Chunks[idx].ID != "" {
-		c.ID = existing.Chunks[idx].ID
+	var existingChunk *discord.StatusWidgetChunk
+	if existing != nil && idx < len(existing.Chunks) {
+		existingChunk = &existing.Chunks[idx]
+	}
+	if c.ID == "" && existingChunk != nil && existingChunk.ID != "" {
+		c.ID = existingChunk.ID
 	}
 	if c.ID == "" && isSinglePR {
 		c.ID = buildID
@@ -279,10 +288,13 @@ func (p *WorkerPool) syncSingleWidgetChunkLocked(c *discord.StatusWidgetChunk, e
 	if isWidgetChunkWaitingOnCI(c.Status) {
 		p.clearChunkStepStateLocked(c.ID)
 		c.ActiveStep = strings.TrimSpace(c.ActiveStep)
-		if c.ActiveStep == "" && existing != nil && idx < len(existing.Chunks) && sameWidgetChunkPhase(existing.Chunks[idx].Status, c.Status) {
-			c.ActiveStep = existing.Chunks[idx].ActiveStep
+		if c.ActiveStep == "" && existingChunk != nil && sameWidgetChunkPhase(existingChunk.Status, c.Status) {
+			c.ActiveStep = existingChunk.ActiveStep
 		}
 		return
+	}
+	if c.ID != "" && p.activeChunkTurns[c.ID] != "" && isPreLaunchStatus(c.Status) {
+		c.Status = "running"
 	}
 	if !isWidgetChunkInProgress(c.Status) {
 		p.clearChunkStepStateLocked(c.ID)
@@ -290,7 +302,7 @@ func (p *WorkerPool) syncSingleWidgetChunkLocked(c *discord.StatusWidgetChunk, e
 		return
 	}
 	if c.ID != "" {
-		if step, ok := p.activeChunkSteps[c.ID]; ok && step != "" {
+		if step := p.activeChunkSteps[c.ID]; step != "" {
 			c.ActiveStep = step
 		}
 	}

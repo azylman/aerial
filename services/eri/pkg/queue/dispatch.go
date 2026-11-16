@@ -99,7 +99,10 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	te.executeWithRetries()
 }
 
-var standalonePRRemediationRegex = regexp.MustCompile(`PR #(\d+)\s+on\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:on|for repo)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+\((?:commit: [^,]+,\s*)?PR #(\d+)`)
+var (
+	standalonePRRemediationRegex = regexp.MustCompile(`PR #(\d+)\s+on\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:on|for repo)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+\((?:commit: [^,]+,\s*)?PR #(\d+)`)
+	vanadisPromptBuildIDRegex    = regexp.MustCompile(`(?m)^Build ID:\s*(build-[A-Za-z0-9_-]+)\s*$`)
+)
 
 func extractPRRemediationTarget(prompt string) (repo string, prNum int, ok bool) {
 	m := standalonePRRemediationRegex.FindStringSubmatch(prompt)
@@ -112,6 +115,31 @@ func extractPRRemediationTarget(prompt string) (repo string, prNum int, ok bool)
 	}
 	prNum, err := strconv.Atoi(prNumStr)
 	return repo, prNum, err == nil && prNum > 0
+}
+
+func extractVanadisBuildID(chunkID, sessionID, targetID, prompt string) string {
+	if strings.TrimSpace(prompt) != "" {
+		if m := vanadisPromptBuildIDRegex.FindStringSubmatch(prompt); len(m) >= 2 {
+			return strings.TrimSpace(m[1])
+		}
+	}
+	if strings.HasPrefix(chunkID, "build-") {
+		if idx := strings.LastIndex(chunkID, "-chunk-"); idx > 0 {
+			return chunkID[:idx]
+		}
+	}
+	if after, ok := strings.CutPrefix(sessionID, "vanadis-"); ok {
+		if idx := strings.LastIndex(after, "-chunk-"); idx > 0 {
+			return after[:idx]
+		}
+	}
+	if t := runner.NormalizeEnvTargetID(targetID); strings.HasPrefix(t, "build-") {
+		if idx := strings.LastIndex(t, "-chunk-"); idx > 0 {
+			return t[:idx]
+		}
+		return t
+	}
+	return ""
 }
 
 func extractVanadisDispatchInfo(d *db.Dispatch) (chunkID, buildID string, chunkIdx int) {
@@ -132,27 +160,7 @@ func extractVanadisDispatchInfo(d *db.Dispatch) (chunkID, buildID string, chunkI
 			chunkID = strings.TrimSpace(after)
 		}
 	}
-	if strings.HasPrefix(chunkID, "build-") {
-		if idx := strings.LastIndex(chunkID, "-chunk-"); idx > 0 {
-			buildID = chunkID[:idx]
-		}
-	}
-	if buildID == "" {
-		if after, ok := strings.CutPrefix(d.SessionID, "vanadis-"); ok {
-			if idx := strings.LastIndex(after, "-chunk-"); idx > 0 {
-				buildID = after[:idx]
-			}
-		}
-	}
-	if buildID == "" {
-		if t := runner.NormalizeEnvTargetID(d.TargetID); strings.HasPrefix(t, "build-") {
-			if idx := strings.LastIndex(t, "-chunk-"); idx > 0 {
-				buildID = t[:idx]
-			} else {
-				buildID = t
-			}
-		}
-	}
+	buildID = extractVanadisBuildID(chunkID, d.SessionID, d.TargetID, d.Prompt)
 	if chunkID == "" {
 		if repo, prNum, ok := extractPRRemediationTarget(d.Prompt); ok {
 			prID := fmt.Sprintf("pr-%s-%d", repo, prNum)

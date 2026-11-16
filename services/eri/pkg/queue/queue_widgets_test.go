@@ -38,6 +38,8 @@ type deliverStatusWidgetCase struct {
 	deliveryFuncErr                                   error
 	useAppConfigPolicy                                bool
 	expectDisownedChunkIDs                            []string
+	expectActiveChunkTurns                            map[string]string
+	expectActiveChunkSteps                            map[string]string
 	expectRetainedWidgetSteps                         map[string]string
 }
 
@@ -209,6 +211,42 @@ func assertChunksDisowned(t *testing.T, p *WorkerPool, chunkIDs []string) {
 	}
 }
 
+func assertActiveChunkTurns(t *testing.T, p *WorkerPool, want map[string]string) {
+	t.Helper()
+	if len(want) == 0 {
+		return
+	}
+	p.widgetMu.Lock()
+	defer p.widgetMu.Unlock()
+	for cID, wantTurn := range want {
+		gotTurn, ok := p.activeChunkTurns[cID]
+		if !ok {
+			t.Fatalf("expected activeChunkTurns to contain chunk %q, but was missing", cID)
+		}
+		if gotTurn != wantTurn {
+			t.Fatalf("activeChunkTurns[%q] = %q, want %q", cID, gotTurn, wantTurn)
+		}
+	}
+}
+
+func assertActiveChunkSteps(t *testing.T, p *WorkerPool, want map[string]string) {
+	t.Helper()
+	if len(want) == 0 {
+		return
+	}
+	p.widgetMu.Lock()
+	defer p.widgetMu.Unlock()
+	for cID, wantStep := range want {
+		gotStep, ok := p.activeChunkSteps[cID]
+		if !ok {
+			t.Fatalf("expected activeChunkSteps to contain chunk %q, but was missing", cID)
+		}
+		if gotStep != wantStep {
+			t.Fatalf("activeChunkSteps[%q] = %q, want %q", cID, gotStep, wantStep)
+		}
+	}
+}
+
 func runDeliverStatusWidgetCase(t *testing.T, tc deliverStatusWidgetCase, mockSess *discordgo.Session) {
 	t.Helper()
 	if tc.cachedChannel != nil {
@@ -258,10 +296,12 @@ func runDeliverStatusWidgetCase(t *testing.T, tc deliverStatusWidgetCase, mockSe
 	assertDeliveredChunks(t, deliveredReq.Chunks, tc.expectDeliveredChunks)
 	assertWidgetEvicted(t, p, tc.expectEvictedBuildID)
 	assertChunksDisowned(t, p, tc.expectDisownedChunkIDs)
+	assertActiveChunkTurns(t, p, tc.expectActiveChunkTurns)
+	assertActiveChunkSteps(t, p, tc.expectActiveChunkSteps)
 	assertRetainedWidgetSteps(t, p, tc.req.ID, tc.expectRetainedWidgetSteps)
 }
 
-func deliverStatusWidgetTestCases() []deliverStatusWidgetCase {
+func deliverStatusWidgetRoutingCases() []deliverStatusWidgetCase {
 	const (
 		sysChanSnowflake = "1564150557705248879"
 		targetChan       = "target-chan-1"
@@ -330,6 +370,20 @@ func deliverStatusWidgetTestCases() []deliverStatusWidgetCase {
 			expectDeliveredChunks: []discord.StatusWidgetChunk{{ID: "chunk-preserved", Status: "running"}},
 		},
 		{
+			name:                 "evicts oldest build from widgetsByID when exceeding 64 entries",
+			widgetMsgID:          "msg-final",
+			fifoFillCount:        65,
+			req:                  discord.StatusWidgetRequest{ID: "b-final", MessageID: "msg-final", ChannelID: targetChan},
+			expectMsgID:          "msg-final",
+			expectEvictedBuildID: "fifo-build-0",
+		},
+	}
+}
+
+func deliverStatusWidgetStepCases() []deliverStatusWidgetCase {
+	const targetChan = "target-chan-1"
+	return []deliverStatusWidgetCase{
+		{
 			name:                  "overlays active chunk step onto running chunk",
 			widgetMsgID:           "msg-overlay",
 			priorSteps:            map[string]string{"chunk-overlay": "⚡ Running `view_file`... (1.2s)"},
@@ -352,6 +406,44 @@ func deliverStatusWidgetTestCases() []deliverStatusWidgetCase {
 			req:                   discord.StatusWidgetRequest{ID: "b-done", MessageID: "msg-done", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-done", Status: "pr_opened"}}},
 			expectMsgID:           "msg-done",
 			expectDeliveredChunks: []discord.StatusWidgetChunk{{ID: "chunk-done", Status: "pr_opened", ActiveStep: ""}},
+		},
+		{
+			name:        "delivering pending chunk with active turn promotes status to running and overlays active step",
+			widgetMsgID: "msg-pending-active",
+			priorSteps:  map[string]string{"chunk-pending": "⚡ Running `view_file`... (1.0s)"},
+			req: discord.StatusWidgetRequest{
+				ID:        "b-pending",
+				MessageID: "msg-pending-active",
+				ChannelID: targetChan,
+				Chunks: []discord.StatusWidgetChunk{
+					{ID: "chunk-pending", Status: "pending"},
+				},
+			},
+			expectMsgID: "msg-pending-active",
+			expectDeliveredChunks: []discord.StatusWidgetChunk{
+				{ID: "chunk-pending", Status: "running", ActiveStep: "⚡ Running `view_file`... (1.0s)"},
+			},
+			expectActiveChunkTurns: map[string]string{"chunk-pending": "test-turn"},
+			expectActiveChunkSteps: map[string]string{"chunk-pending": "⚡ Running `view_file`... (1.0s)"},
+		},
+		{
+			name:        "delivering queued chunk with active turn promotes status to running and overlays active step",
+			widgetMsgID: "msg-queued-active",
+			priorSteps:  map[string]string{"chunk-queued": "⚡ Executing `git status`..."},
+			req: discord.StatusWidgetRequest{
+				ID:        "b-queued",
+				MessageID: "msg-queued-active",
+				ChannelID: targetChan,
+				Chunks: []discord.StatusWidgetChunk{
+					{ID: "chunk-queued", Status: "queued"},
+				},
+			},
+			expectMsgID: "msg-queued-active",
+			expectDeliveredChunks: []discord.StatusWidgetChunk{
+				{ID: "chunk-queued", Status: "running", ActiveStep: "⚡ Executing `git status`..."},
+			},
+			expectActiveChunkTurns: map[string]string{"chunk-queued": "test-turn"},
+			expectActiveChunkSteps: map[string]string{"chunk-queued": "⚡ Executing `git status`..."},
 		},
 		{
 			name:                  "clears active steps on completed build status",
@@ -388,15 +480,11 @@ func deliverStatusWidgetTestCases() []deliverStatusWidgetCase {
 		makeStatusStepCase("clears stale active step when chunk transitions from open to merged", "trans-open-merged", "chunk-trans-1", "open", "merged", "Waiting on CI (3/3 passed)", false),
 		makeStatusStepCase("clears stale active step when chunk transitions from merged to deploying", "trans-merged-deploying", "chunk-trans-2", "merged", "deploying", "Building container images (2/2 completed)", false),
 		makeStatusStepCase("clears stale active step when chunk transitions from deploying to deployed", "trans-deploying-deployed", "chunk-trans-3", "deploying", "deployed", "`eri`: 🔄 starting", false),
-		{
-			name:                 "evicts oldest build from widgetsByID when exceeding 64 entries",
-			widgetMsgID:          "msg-final",
-			fifoFillCount:        65,
-			req:                  discord.StatusWidgetRequest{ID: "b-final", MessageID: "msg-final", ChannelID: targetChan},
-			expectMsgID:          "msg-final",
-			expectEvictedBuildID: "fifo-build-0",
-		},
 	}
+}
+
+func deliverStatusWidgetTestCases() []deliverStatusWidgetCase {
+	return append(deliverStatusWidgetRoutingCases(), deliverStatusWidgetStepCases()...)
 }
 
 func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
@@ -881,6 +969,17 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantChunkID: "pr-azylman/aerial-1250",
 			wantBuildID: "pr-azylman/aerial-1250",
 			wantIdx:     0,
+		},
+		{
+			name: "custom vanadis chunk ID extracts build ID from prompt header",
+			dispatch: db.Dispatch{
+				SessionID:      "vanadis-vsplit-chunk-4-cutover",
+				VanadisChunkID: "vsplit-chunk-4-cutover",
+				Prompt:         "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-1794811575-775a7ec2\nChunk ID: vsplit-chunk-4-cutover\n",
+			},
+			wantChunkID: "vsplit-chunk-4-cutover",
+			wantBuildID: "build-1794811575-775a7ec2",
+			wantIdx:     -1,
 		},
 		{
 			name:        "unrelated dispatch returns empty",
