@@ -14,10 +14,11 @@ Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 
 - **Cluster Orchestration**: **Kubernetes (k3s)** — Heterogeneous 3-node bare-metal cluster running NixOS 26.05 provisioned via Colmena (`nixos/flake.nix`) with Spegel P2P OCI registry, managing distributed daemons, batch jobs, GPU workloads, and automated rolling deployments.
 - **GitOps & Continuous Delivery**: **Flux CD (`flux-system`)** — Declarative GitOps reconciling `./k8s` Kustomizations from `azylman/aerial` (`aerial-core`) and `azylman/aerial-config` (`aerial-config`), driven by `synapse` webhook dispatch.
-- **Service Discovery & Ingress**: **NGINX Gateway Fabric** (`lan-gateway` on `:80`/`:443` and `edge-gateway` on `:4021`) + **CoreDNS** rewriting `*.aerial` and `*.lan` internal DNS to `*.default.svc.cluster.local`.
+- **Service Discovery & Ingress**: **NGINX Gateway Fabric** (`lan-gateway` on `:80`/`:443` and `edge-gateway` on `:4021`) + **CoreDNS** rewriting `restate.aerial` -> `restate.restate.svc.cluster.local`, `restate-marida.aerial` -> `restate.restate-marida.svc.cluster.local`, and `*.aerial` / `*.lan` internal DNS to `*.default.svc.cluster.local`.
 - **Persistence & Vector Memory**: **CloudNativePG (PostgreSQL 18 + pgvector)** — 2-instance high-availability cluster for multi-turn conversation state, strict 1-to-1 single-service table ownership, native `:9187` Prometheus metrics, and hybrid RRF semantic memory (`coven`).
 - **Schema Migrations**: **Ariga Atlas** — Declarative schema migrations, automated diffing, and checksum validation via Kubernetes batch jobs.
-- **Idempotent, Guaranteed Event Handling**: **Webhooks + NATS JetStream Queue** — High-performance durable event bus and work-queue fabric powering strictly idempotent Discord ingress (`discord_ingress`, `discord_interaction`), webhook processing, event dispatch (`synapse`), and multi-chunk build orchestration (`vanadis`).
+- **Idempotent, Guaranteed Event Handling**: **NATS JetStream** — High-performance durable event bus and message broker (`nats` StatefulSet on `:4222` client and `:8222` HTTP monitoring) backing canonical cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`) reconciled programmatically on startup in `pkg/pubsub`, powering strictly idempotent Discord ingress, edge webhook processing, and build events (`synapse`).
+- **Durable Workflow Execution**: **Restate Durable Execution** — Kubernetes Restate Operator (`restate-operator`) managing `RestateCluster` instances on `:8080` ingress / `:9070` admin with RocksDB state persistence and `vanadis-restate` (`RestateDeployment` on `:9080` Restate SDK and `:4026` health/metrics) running the `Build` Virtual Object and `BuildRouter` DAG state machine.
 - **Secrets Management**: **Infisical + Valkey 9 + External Secrets Operator** — Centralized secret governance syncing scoped per-service Kubernetes Secrets and the `shared-secrets` redaction pool with zero plaintext disk persistence.
 - **Observability & Telemetry**:
   - **Metrics**: **VictoriaMetrics** (TSDB `:8428`) + **`vmalert`** (`:8880`) + **Grafana** (telemetry HUDs `:3000`) + Prometheus Exporters (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**)
@@ -31,7 +32,7 @@ Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 ## 1. System Architecture & Topology
 
 Aerial separates generic platform orchestration from private homelab state using a decoupled **Two-Repository Architecture**:
-- **Engine Repo (`azylman/aerial`)**: Autonomous agent execution core (`eri`), scheduling & event watch orchestrator (`haro`), semantic memory & skill synthesis (`coven`), multi-chunk build orchestrator (`vanadis`), Discord Gateway & webhook router (`synapse`), shared Go packages (`pkg/`), declarative Kubernetes manifests (`k8s/*.yaml`), turnkey telemetry stack (VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana), PostgreSQL 18 persistence, CoreDNS service discovery, and outbound MCP microservices.
+- **Engine Repo (`azylman/aerial`)**: Autonomous agent execution core (`eri`), scheduling & event watch orchestrator (`haro`), semantic memory & skill synthesis (`coven`), multi-chunk build orchestrator (`vanadis`), durable build DAG engine (`vanadis-restate`), NATS JetStream broker (`nats`), Restate cluster orchestrator (`restate`), Discord Gateway & edge fact publisher (`synapse`), shared Go packages (`pkg/` including `pkg/pubsub`), declarative Kubernetes manifests (`k8s/*.yaml`), turnkey telemetry stack (VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana), PostgreSQL 18 persistence, CoreDNS service discovery, and outbound MCP microservices.
 - **User Config Repo (e.g. `your-username/your-aerial-config`)**: Declarative user Kubernetes manifests (`k8s/*.yaml`), custom skills and automation runbooks (`custom-skills/`), modular telemetry scrapes (`victoriametrics/`), platform options (`config.yaml`), modular persona and runtime rules (`rules/`), and Discord channel policies (`channels/`). Starter template available at [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example).
 
 ```text
@@ -62,12 +63,13 @@ Aerial separates generic platform orchestration from private homelab state using
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
 │ GPU Control-Plane (calibarn) │ Storage Node (quiet-zero)    │ Touch Kiosk (cockpit)         │
 │ • eri, vanadis, coven, haro  │ • NixOS 26.05 k3s agent      │ • kiosk-display (Cage Wayland)│
-│ • synapse, console, docs     │ • NVMe persistent storage    │ • kiosk-ear (ALSA capture)    │
-│ • homepage, agentsview       │ • CloudNativePG standby      │ • kiosk-remote & go2rtc       │
-│ • CloudNativePG primary      │ • Compute & storage tier     │ • kiosk-cast-watcher          │
-│ • valkey, infisical          │ • Standard worker workloads  │ • Display power CronJobs      │
-│ • victoriametrics & vmalert  │ • docket-store (Vikunja)     │ • Local touch HUD & microphone│
-│ • senses & pjev (NVIDIA GPU) │                              │ • role=kiosk:NoSchedule       │
+│ • vanadis-restate (Restate)  │ • NVMe persistent storage    │ • kiosk-ear (ALSA capture)    │
+│ • synapse, console, docs     │ • CloudNativePG standby      │ • kiosk-remote & go2rtc       │
+│ • homepage, agentsview       │ • nats (NATS JetStream)      │ • kiosk-cast-watcher          │
+│ • CloudNativePG primary      │ • restate (RestateCluster)   │ • Display power CronJobs      │
+│ • valkey, infisical          │ • docket-store (Vikunja)     │ • Local touch HUD & microphone│
+│ • victoriametrics & vmalert  │ • Compute & storage tier     │ • role=kiosk:NoSchedule       │
+│ • senses & pjev (NVIDIA GPU) │ • Standard worker workloads  │                               │
 │ • prospera & CI runners      │                              │                               │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
                                                │
@@ -364,7 +366,7 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 
 Aerial uses an automated, event-driven GitOps continuous deployment pipeline:
 1. **GitHub Actions Matrix Builds**: Triggers dynamic matrix builds for modified microservices (including dependents when shared `pkg/` changes) and publishes them to GitHub Container Registry (`ghcr.io/azylman/aerial-*`).
-2. **Event-Driven Push GitOps Router (`synapse`)**: Receives authenticated GitHub push and CI webhooks through Cloudflare tunnels and `edge-gateway`, updates `ConfigMap/aerial-image-tags` in `flux-system` on image promotions, immediately triggers Flux CD reconciliation (`FLUX_RECEIVER_URL`), notifies `eri`, and advances `vanadis` build chunks.
+2. **Event-Driven Push GitOps Router (`synapse`)**: Receives authenticated GitHub push and CI webhooks through Cloudflare tunnels and `edge-gateway`, updates `ConfigMap/aerial-image-tags` in `flux-system` on image promotions, immediately triggers Flux CD reconciliation (`FLUX_RECEIVER_URL`), notifies `eri`, and publishes PR, CI, and deployment lifecycle events onto NATS JetStream (`aerial.pr.>`), which Vanadis and Restate (`BuildRouter` -> `Build` Virtual Object) consume to advance multi-chunk DAG builds.
 3. **Flux CD & Kubernetes git-sync**: Flux CD reconciles `./k8s` Kustomizations for core services and user configurations, substituting pinned image tags via `postBuild.substituteFrom` without git commit churn. Dedicated Kubernetes `git-sync` sidecar initContainers (`registry.k8s.io/git-sync/git-sync:v4.8.0`) continuously sync `/share/aerial:ro` and `/share/aerial-config:ro` for `eri`.
 4. **Physical Immutability & Asynchronous PR Workflow**: The `eri` execution pod mounts repositories strictly **read-only (`:ro`)**. When making code, configuration, persona, or peripheral adjustments across any repository, Aerial uses `scripts/aerial-pr.sh init [repo]` to initialize an ephemeral scratch directory, runs pre-flight syntax and verification checks (`./scripts/verify.sh --staged`), and submits asynchronously via `scripts/aerial-pr.sh submit` with native GitHub auto-merge (`SQUASH`) enabled and registered in PostgreSQL `pr_registry`.
 5. **Event-Driven Continuous Delivery & Proactive CI Self-Healing**: Once submitted, turns terminate immediately with zero foreground CI polling. When CI turns green, GitHub automatically merges the PR and Flux CD deploys the updated manifests, posting confirmation directly to the registered Discord thread. If CI checks or `roborev` fail, `synapse` wakes `eri` with a proactive remediation prompt to checkout the branch, resolve the failure locally, verify, and push directly to the PR branch.
@@ -380,7 +382,10 @@ Aerial uses an automated, event-driven GitOps continuous deployment pipeline:
 | **`synapse`** | `4020` | Ingress gateway and event-driven router owning Discord Gateway WebSocket, startup catch-up sweeps, NATS JetStream queues (`discord_ingress`, `discord_interaction`), and GitHub/Flux webhook dispatch. |
 | **`haro`** | `4005` | Persistent scheduling, heartbeat, and event-watch orchestration service (`http://haro.aerial/mcp`) evaluating cron, one-shot, and event triggers and dispatching due turns to `eri`. |
 | **`coven`** | `4008` | Semantic fact extraction, hybrid RRF memory search, ACT-R memory decay, and procedural skill synthesis MCP service (`http://coven.aerial/mcp`). |
-| **`vanadis`** | `4025` | Autonomous multi-chunk build queue orchestrator backed by PostgreSQL and NATS JetStream with JIT symbol line-slice resolution. |
+| **`vanadis`** | `4025` | Multi-chunk build queue orchestrator serving HTTP/MCP APIs (`:4025`), JIT symbol line-slice resolution, and NATS JetStream consumers. |
+| **`vanadis-restate`** | `9080` / `4026` | Restate durable execution SDK worker (`RestateDeployment`) hosting the `Build` Virtual Object and `BuildRouter` service with `:4026` health/metrics endpoints. |
+| **`nats`** | `4222` / `8222` | NATS 2 JetStream broker StatefulSet (`:4222` client, `:8222` HTTP monitoring) backing durable cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`). |
+| **`restate`** | `8080` / `9070` | Kubernetes Restate Operator managing `RestateCluster` instances (`:8080` ingress / `:9070` admin with RocksDB persistence). |
 | **`prospera`** | `8080` | Autonomous Twilio media-streaming voice and telephone call agent. |
 | **`coredns`** | `53` | Kubernetes CoreDNS daemon rewriting internal DNS queries (`*.aerial`, `*.lan` -> `*.default.svc.cluster.local`). |
 | **`infisical`** | `8080` | Centralized secret management and automated rotation backed by Valkey 9 (`:6379`), dynamically syncing secrets into Kubernetes Secrets (`shared-secrets`). |
@@ -435,7 +440,7 @@ sudo install -d -o 1000 -g 1000 /var/lib/aerial/brain-data
 ```
 
 ### Step 2: Install Cluster Operators
-Aerial relies on standard Kubernetes operators for persistence, secrets, and ingress (Reloader and runner controllers are managed declaratively via Flux CD):
+Aerial relies on standard Kubernetes operators for persistence, secrets, and ingress (note that `restate-operator`, `vm-operator`, `reloader`, and `arc-controller` are deployed declaratively via Flux CD `HelmRelease` manifests in `k8s/operators-and-storage.yaml`):
 
 ```bash
 # 1. CloudNativePG (PostgreSQL 18 + pgvector operator)
@@ -497,6 +502,10 @@ kubectl create secret generic eri-secret \
 kubectl create secret generic discord-mcp-secret \
   --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
   --from-literal=DISCORD_TOKEN="$DISCORD_BOT_TOKEN"
+
+kubectl create secret generic vanadis-secret \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  --from-literal=GITHUB_PAT="$GITHUB_PAT"
 
 # 3. Observability, runner, and MCP service secrets
 kubectl create secret generic victoriametrics-secret \
@@ -578,6 +587,8 @@ kubectl exec deployment/haro -- wget -qO- http://localhost:4005/health
 kubectl exec deployment/coven -- wget -qO- http://localhost:4008/health
 kubectl exec deployment/vanadis -- curl -sf http://localhost:4025/health
 kubectl exec deployment/synapse -- curl -sf http://localhost:4020/health
+kubectl exec deployment/vanadis-restate -- wget -qO- http://localhost:4026/healthz
+kubectl exec statefulset/nats -- wget -qO- http://localhost:8222/healthz?js-enabled-only=true
 kubectl exec deployment/console -- wget -qO- http://localhost:8084/health
 ```
 
@@ -622,6 +633,8 @@ While `azylman/aerial`'s base `k8s/*.yaml` manifests are completely single-node 
 | `haro` Healthcheck | `http://haro.aerial:4005/health` |
 | `coven` Healthcheck | `http://coven.aerial:4008/health` |
 | `vanadis` Healthcheck | `http://vanadis.aerial:4025/health` |
+| `vanadis-restate` Healthcheck | `http://vanadis-restate.aerial:4026/healthz` |
+| `nats` JetStream Healthcheck | `http://nats.aerial:8222/healthz?js-enabled-only=true` |
 | List all cluster pods | `kubectl get pods -o wide` |
 | View pod logs | `kubectl logs -f <pod-name>` |
 | Reconcile Flux CD Kustomization | `flux reconcile kustomization aerial-core` |
