@@ -295,6 +295,31 @@ func scanBuild(s rowScanner) (VanadisBuild, error) {
 	return b, err
 }
 
+func applyRawChunkCIChecks(c *VanadisChunk, rawCIChecks []byte) {
+	if len(rawCIChecks) == 0 || string(rawCIChecks) == jsonNull || string(rawCIChecks) == "{}" {
+		return
+	}
+	var checks map[string]string
+	if err := json.Unmarshal(rawCIChecks, &checks); err != nil {
+		return
+	}
+	c.HeadSHA = strings.TrimSpace(checks["_head_sha"])
+	c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
+	if headAtNano, parseErr := strconv.ParseInt(strings.TrimSpace(checks["_head_at"]), 10, 64); parseErr == nil && headAtNano > 0 {
+		c.HeadAt = time.Unix(0, headAtNano).UTC()
+	}
+	if rawSeen := strings.TrimSpace(checks["_seen_heads"]); rawSeen != "" {
+		c.SeenHeads = strings.Split(rawSeen, ",")
+	}
+	delete(checks, "_head_sha")
+	delete(checks, "_merge_sha")
+	delete(checks, "_seen_heads")
+	delete(checks, "_head_at")
+	if len(checks) > 0 {
+		c.CIChecks = checks
+	}
+}
+
 func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 	chunks := make([]VanadisChunk, 0)
 	for rows.Next() {
@@ -319,19 +344,7 @@ func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), nonNilSlice(c.AcceptanceCriteria)
 		c.DependsOn = nonNilSlice(c.DependsOn)
 		c.Effort = capChunkEffort(c.Effort)
-		if len(rawCIChecks) > 0 && string(rawCIChecks) != jsonNull && string(rawCIChecks) != "{}" {
-			var checks map[string]string
-			if err := json.Unmarshal(rawCIChecks, &checks); err == nil {
-				c.HeadSHA = strings.TrimSpace(checks["_head_sha"])
-				c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
-				delete(checks, "_head_sha")
-				delete(checks, "_merge_sha")
-				delete(checks, "_seen_heads")
-				if len(checks) > 0 {
-					c.CIChecks = checks
-				}
-			}
-		}
+		applyRawChunkCIChecks(&c, rawCIChecks)
 		if len(rawRolloutState) > 0 && string(rawRolloutState) != jsonNull && string(rawRolloutState) != "{}" {
 			var rs pubsub.PRRolloutState
 			if err := json.Unmarshal(rawRolloutState, &rs); err == nil {

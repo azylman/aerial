@@ -240,6 +240,8 @@ type VanadisChunk struct {
 	CIChecks           map[string]string      `json:"ci_checks,omitempty"`
 	HeadSHA            string                 `json:"head_sha,omitempty"`
 	MergeSHA           string                 `json:"merge_sha,omitempty"`
+	HeadAt             time.Time              `json:"-"`
+	SeenHeads          []string               `json:"-"`
 	RolloutState       *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
 	Banner             string                 `json:"banner,omitempty"`
 	MergeAwakeableID   string                 `json:"merge_awakeable_id,omitempty"`

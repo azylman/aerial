@@ -1120,6 +1120,37 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "passed"}))
 	assert.Equal(t, []string{"c1:sha-2:test:passed"}, spy.calls)
 
+	// legitimate newer force-push returning branch to previous head sha-1 (with newer OccurredAt) is accepted
+	spy.resets = nil
+	spy.calls = nil
+	t3 := t2.Add(time.Minute)
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", OccurredAt: t3}))
+	assert.Equal(t, []string{"c1:sha-1:"}, spy.resets)
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "passed"}))
+	assert.Equal(t, []string{"c1:sha-1:test:passed"}, spy.calls)
+
+	// advance back to sha-2 with newer timestamp t4
+	spy.resets = nil
+	t4 := t3.Add(time.Minute)
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", OccurredAt: t4}))
+	assert.Equal(t, []string{"c1:sha-2:"}, spy.resets)
+
+	// untimestamped synchronize on c2 clears headAt so delayed sha-a with older timestamp is rejected
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-a", OccurredAt: t2}))
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-b"}))
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-a", OccurredAt: t3}), errPRTransitionSkipped)
+	assert.True(t, prHeadAtFromContext(nil).IsZero())
+	assert.True(t, prHeadAtFromContext(context.Background()).IsZero())
+	assert.Nil(t, withPRHeadAt(nil, time.Time{}))
+	assert.Equal(t, t3.UTC(), prHeadAtFromContext(withPRHeadAt(nil, t3)))
+	var parsedChunk VanadisChunk
+	applyRawChunkCIChecks(&parsedChunk, []byte(`{"_head_sha":"sha-1","_merge_sha":"m-1","_head_at":"1700000000000000000","_seen_heads":"sha-0,sha-1","lint":"passed"}`))
+	assert.Equal(t, "sha-1", parsedChunk.HeadSHA)
+	assert.Equal(t, []string{"sha-0", "sha-1"}, parsedChunk.SeenHeads)
+	assert.False(t, parsedChunk.HeadAt.IsZero())
+	assert.Equal(t, map[string]string{"lint": "passed"}, parsedChunk.CIChecks)
+	spy.resets = nil
+
 	// failed or skipped ResetPRCheckState on synchronize does not overwrite cached revision
 	spy.resetErr = errPRTransitionSkipped
 	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-unapplied"}), errPRTransitionSkipped)

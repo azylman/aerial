@@ -595,8 +595,12 @@ func (b *BuildObject) getChunkRevision(ctx context.Context, buildID, chunkID str
 						headSHA:  strings.TrimSpace(c.HeadSHA),
 						mergeSHA: strings.TrimSpace(c.MergeSHA),
 						merged:   c.Status == statusMerged || c.Status == statusSynced,
+						headAt:   c.HeadAt,
 					}
 					recordSeenHead(&seeded, seeded.headSHA)
+					for _, sh := range c.SeenHeads {
+						recordSeenHead(&seeded, sh)
+					}
 					break
 				}
 			}
@@ -617,6 +621,28 @@ func (b *BuildObject) setChunkRevision(chunkID string, rev prRevisionState) {
 	b.revMu.Unlock()
 }
 
+type prHeadAtContextKey struct{}
+
+func withPRHeadAt(ctx context.Context, at time.Time) context.Context {
+	if at.IsZero() {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, prHeadAtContextKey{}, at.UTC())
+}
+
+func prHeadAtFromContext(ctx context.Context) time.Time {
+	if ctx == nil {
+		return time.Time{}
+	}
+	if at, ok := ctx.Value(prHeadAtContextKey{}).(time.Time); ok {
+		return at
+	}
+	return time.Time{}
+}
+
 func (b *BuildObject) recordPRHeadRevision(ctx context.Context, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
 	headSHA := strings.TrimSpace(ev.HeadSHA)
 	rev := b.getChunkRevision(ctx, buildID, chunkID)
@@ -626,21 +652,24 @@ func (b *BuildObject) recordPRHeadRevision(ctx context.Context, buildID, chunkID
 	if !ev.OccurredAt.IsZero() && !rev.headAt.IsZero() && ev.OccurredAt.Before(rev.headAt) {
 		return errPRTransitionSkipped
 	}
-	if headSHA != "" && rev.headSHA != "" && !strings.EqualFold(headSHA, rev.headSHA) && rev.seenHeads[strings.ToLower(headSHA)] {
+	hasNewerTimestamp := !ev.OccurredAt.IsZero() && !rev.headAt.IsZero() && ev.OccurredAt.After(rev.headAt)
+	if headSHA != "" && rev.headSHA != "" && !strings.EqualFold(headSHA, rev.headSHA) && rev.seenHeads[strings.ToLower(headSHA)] && !hasNewerTimestamp {
 		return errPRTransitionSkipped
 	}
 	nextHead := firstNonEmpty(headSHA, rev.headSHA)
-	if err := b.store.ResetPRCheckState(ctx, chunkID, nextHead, ""); err != nil {
+	if err := b.store.ResetPRCheckState(withPRHeadAt(ctx, ev.OccurredAt), chunkID, nextHead, ""); err != nil {
 		return err
 	}
 	recordSeenHead(&rev, rev.headSHA)
 	recordSeenHead(&rev, nextHead)
+	if !ev.OccurredAt.IsZero() {
+		rev.headAt = ev.OccurredAt.UTC()
+	} else if !strings.EqualFold(nextHead, rev.headSHA) {
+		rev.headAt = time.Time{}
+	}
 	rev.headSHA = nextHead
 	rev.mergeSHA = ""
 	rev.merged = false
-	if !ev.OccurredAt.IsZero() {
-		rev.headAt = ev.OccurredAt
-	}
 	b.setChunkRevision(chunkID, rev)
 	return nil
 }
@@ -960,12 +989,21 @@ WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled');`
 		}
 		return nil
 	}
+	var headAtNano int64
+	if headAt := prHeadAtFromContext(ctx); !headAt.IsZero() {
+		headAtNano = headAt.UTC().UnixNano()
+	}
 	const syncQ = `UPDATE vanadis_chunks AS c
 SET ci_fail_count = CASE WHEN COALESCE(c.ci_checks->>'_head_sha', '') IS DISTINCT FROM $2 THEN 0 ELSE c.ci_fail_count END,
     ci_checks = CASE
-        WHEN $2 != '' AND COALESCE(c.ci_checks->>'_head_sha', '') = $2 THEN c.ci_checks - '_merge_sha'
+        WHEN $2 != '' AND LOWER(COALESCE(c.ci_checks->>'_head_sha', '')) = LOWER($2) THEN
+            CASE
+                WHEN $3::bigint > 0 THEN jsonb_set(c.ci_checks - '_merge_sha', '{_head_at}', to_jsonb($3::text), true)
+                ELSE c.ci_checks - '_merge_sha'
+            END
         WHEN $2 != '' THEN jsonb_strip_nulls(jsonb_build_object(
             '_head_sha', $2::text,
+            '_head_at', CASE WHEN $3::bigint > 0 THEN $3::text ELSE NULL END,
             '_seen_heads', NULLIF(CONCAT_WS(',', NULLIF(c.ci_checks->>'_seen_heads', ''), NULLIF(c.ci_checks->>'_head_sha', ''), $2::text), '')
         ))
         ELSE '{}'::jsonb
@@ -979,13 +1017,23 @@ WHERE c.id = $1
   AND b.id = c.build_id
   AND c.status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'completed', 'failed', 'cancelled')
   AND b.status NOT IN ('completed', 'failed', 'cancelled')
+  AND NOT (
+      $3::bigint > 0
+      AND COALESCE(c.ci_checks->>'_head_at', '') ~ '^[0-9]+$'
+      AND $3::bigint < (c.ci_checks->>'_head_at')::bigint
+  )
   AND (
       $2 = ''
       OR COALESCE(c.ci_checks->>'_head_sha', '') = ''
       OR LOWER(c.ci_checks->>'_head_sha') = LOWER($2)
+      OR (
+          $3::bigint > 0
+          AND COALESCE(c.ci_checks->>'_head_at', '') ~ '^[0-9]+$'
+          AND $3::bigint > (c.ci_checks->>'_head_at')::bigint
+      )
       OR NOT (LOWER($2) = ANY(string_to_array(LOWER(COALESCE(c.ci_checks->>'_seen_heads', '')), ',')))
   );`
-	tag, err := s.db.Exec(ctx, syncQ, id, cleanHead)
+	tag, err := s.db.Exec(ctx, syncQ, id, cleanHead, headAtNano)
 	if err != nil {
 		return fmt.Errorf("reset pr check state: %w", err)
 	}
