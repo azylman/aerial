@@ -133,7 +133,7 @@ func TestStreamingDaemon_Codex_Handshake(t *testing.T) {
 				},
 			}
 
-			daemon, err := StartStreamingDaemon(context.Background(), tc.cfg, mock)
+			daemon, err := StartStreamingDaemon(context.Background(), context.Background(), tc.cfg, mock)
 			if tc.wantErrSub != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
 					t.Fatalf("expected error containing %q, got: %v", tc.wantErrSub, err)
@@ -183,7 +183,7 @@ func TestStreamingDaemon_Codex_FullLifecycle(t *testing.T) {
 		Effort:    "low",
 		SessionID: "th_codex_life_1",
 	}
-	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	daemon, err := StartStreamingDaemon(context.Background(), context.Background(), cfg, mock)
 	if err != nil {
 		t.Fatalf("StartStreamingDaemon failed: %v", err)
 	}

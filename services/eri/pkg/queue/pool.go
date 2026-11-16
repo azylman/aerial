@@ -264,9 +264,9 @@ func wirePoolSessionDependencies(pools map[PoolKey]runner.AgentPool, sessionMgr 
 		}
 		if sessionMgr != nil {
 			if tr, ok := pool.(interface {
-				SetTranscriptRescuer(fn func(string, time.Time) string)
+				SetTranscriptRescuer(fn func(context.Context, string, time.Time) string)
 			}); ok {
-				tr.SetTranscriptRescuer(sessionMgr.ExtractResponseSince)
+				tr.SetTranscriptRescuer(sessionMgr.ExtractResponseSinceContext)
 			}
 			if sm, ok := pool.(interface{ SetSessionManager(mgr *session.Manager) }); ok {
 				sm.SetSessionManager(sessionMgr)
@@ -322,7 +322,7 @@ func buildDefaultHighEffortPool(appCfg *config.Config, cfg WorkerPoolConfig, ses
 	}
 	poolCfg := runner.PoolConfig{AgyBin: daemonBin, Cwd: daemonDataDir, Env: os.Environ(), DefaultModel: defaultModel}
 	if sessMgr != nil {
-		poolCfg.TranscriptRescuer = sessMgr.ExtractResponseSince
+		poolCfg.TranscriptRescuer = sessMgr.ExtractResponseSinceContext
 		poolCfg.SessionManager = sessMgr
 	}
 	if store != nil {

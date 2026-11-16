@@ -370,6 +370,8 @@ type (
 )
 
 type GeminiAPIPool struct {
+	ctx         context.Context //nolint:containedctx // Constructor-owned pool lifetime cancels release upkeep and warmup on Close.
+	cancel      context.CancelFunc
 	cfg         GeminiAPIPoolConfig
 	sessions    map[string]*GeminiAPISession
 	mu          sync.RWMutex
@@ -402,6 +404,7 @@ func loadVoiceRulesSystemPrompt(dataDir string) string {
 //
 //nolint:contextcheck,nolintlint // contextcheck reads this doc directive; golangci sees no in-body issue.
 func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
+	ctx, cancel := context.WithCancel(context.Background())
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://generativelanguage.googleapis.com"
 	}
@@ -417,8 +420,8 @@ func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 	}
 	if disp, ok := cfg.MCPDispatcher.(*DefaultMCPDispatcher); ok && disp != nil {
 		go func() {
-			primeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
+			primeCtx, primeCancel := context.WithTimeout(ctx, 10*time.Second)
+			defer primeCancel()
 			if err := disp.Prime(primeCtx); err != nil {
 				log.Printf("[MCPDispatcher] Prime warning: %v", err)
 			}
@@ -430,6 +433,7 @@ func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 		}
 	}
 	return &GeminiAPIPool{
+		ctx: ctx, cancel: cancel,
 		cfg:         cfg,
 		sessions:    make(map[string]*GeminiAPISession),
 		targetLocks: make(map[string]*targetLock),
@@ -505,6 +509,9 @@ func (p *GeminiAPIPool) MarkDirty() {
 func (p *GeminiAPIPool) Close() error {
 	if p == nil {
 		return nil
+	}
+	if p.cancel != nil {
+		p.cancel()
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1123,9 +1130,11 @@ func (l *geminiSessionLease) Release() error {
 		if l.turnCount >= maxTurns {
 			reason := fmt.Sprintf("reached maximum turn threshold (%d)", maxTurns)
 			log.Printf("[GeminiAPIPool] Session rotation triggered for %s (reason: %s)", l.targetKey, reason)
+			rotCtx, cancel := context.WithTimeout(l.pool.ctx, 35*time.Second)
+			defer cancel()
 			newSessionID, oldSessionID := uuid.New().String(), l.sessionID
 			if l.pool.cfg.OnSessionRotated != nil {
-				if rotErr := l.pool.cfg.OnSessionRotated(context.Background(), l.targetKey, oldSessionID, newSessionID); rotErr != nil {
+				if rotErr := l.pool.cfg.OnSessionRotated(rotCtx, l.targetKey, oldSessionID, newSessionID); rotErr != nil {
 					log.Printf("[GeminiAPIPool] Persistence callback failed during rotation for %s: %v. Resetting session to maintain DB truth.", l.targetKey, rotErr)
 					l.pool.mu.Lock()
 					delete(l.pool.sessions, l.targetKey)
@@ -1134,7 +1143,7 @@ func (l *geminiSessionLease) Release() error {
 					return
 				}
 			}
-			if _, rotErr := l.pool.GetOrCreateSession(context.Background(), l.targetKey, newSessionID); rotErr != nil {
+			if _, rotErr := l.pool.GetOrCreateSession(rotCtx, l.targetKey, newSessionID); rotErr != nil {
 				log.Printf("[GeminiAPIPool] Warning rotating session for %s: %v", l.targetKey, rotErr)
 				l.pool.mu.Lock()
 				delete(l.pool.sessions, l.targetKey)

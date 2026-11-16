@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -582,17 +584,17 @@ func TestUnifiedProcessPool_EvictSessionAndTranscriptRescuer(t *testing.T) {
 		t.Fatalf("unexpected error in evict flow: sess=%v err=%v", sess, err)
 	}
 	var nilPool *UnifiedProcessPool
-	nilPool.SetTranscriptRescuer(func(convID string, since time.Time) string { return "" })
+	nilPool.SetTranscriptRescuer(func(ctx context.Context, convID string, since time.Time) string { return "" })
 
 	uPoolRescuer := NewUnifiedProcessPool(PoolConfig{Model: "gemini-2.5-flash"}, mock)
 	defer uPoolRescuer.Close()
 	_, _ = uPoolRescuer.GetOrCreate(context.Background(), "target-rescuer", "")
 	rescuerCalled := false
-	uPoolRescuer.SetTranscriptRescuer(func(convID string, since time.Time) string {
+	uPoolRescuer.SetTranscriptRescuer(func(ctx context.Context, convID string, since time.Time) string {
 		rescuerCalled = true
 		return "rescued"
 	})
-	if uPoolRescuer.cfg.TranscriptRescuer == nil || !rescuerCalled && uPoolRescuer.cfg.TranscriptRescuer("conv-1", time.Now()) != "rescued" || !rescuerCalled {
+	if uPoolRescuer.cfg.TranscriptRescuer == nil || !rescuerCalled && uPoolRescuer.cfg.TranscriptRescuer(context.Background(), "conv-1", time.Now()) != "rescued" || !rescuerCalled {
 		t.Errorf("expected rescuer callback to be set and invoked")
 	}
 }
@@ -828,5 +830,93 @@ func TestUnifiedProcessPool_UpdateEngine_Codex(t *testing.T) {
 	pool.mu.RUnlock()
 	if gotEngine != "claude" || gotCodex != "/bin/codex" {
 		t.Errorf("expected engine 'claude' and preserved codexBin '/bin/codex', got engine=%q codex=%q", gotEngine, gotCodex)
+	}
+}
+
+func TestUnifiedProcessPool_ReleaseUpkeepContext(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		closeDuring bool
+	}{{"request canceled", false}, {"pool closed", true}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			entered, proceed := make(chan struct{}), make(chan struct{})
+			cfg := PoolConfig{MaxSessionTurns: 1, OnSessionRotated: func(ctx context.Context, _, _, _ string) error {
+				if ctx.Err() != nil {
+					t.Error("upkeep inherited request cancellation")
+				}
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) > 35*time.Second {
+					t.Error("missing bounded upkeep deadline")
+				}
+				close(entered)
+				if tc.closeDuring {
+					<-ctx.Done()
+				} else {
+					<-proceed
+				}
+				return ctx.Err()
+			}}
+			pool := NewUnifiedProcessPool(cfg, &MockDaemonSpawner{})
+			defer pool.Close()
+			request, cancel := context.WithCancel(context.Background())
+			lease, err := pool.AcquireLease(request, "target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireType[*unifiedSessionLease](t, lease).turnCount = 2
+			cancel()
+			done := make(chan error, 1)
+			go func() { done <- lease.Release() }()
+			<-entered
+			if tc.closeDuring {
+				pool.Close()
+			} else {
+				close(proceed)
+			}
+			err = <-done
+			if tc.closeDuring && !errors.Is(err, context.Canceled) {
+				t.Fatalf("release error = %v", err)
+			}
+			if !tc.closeDuring && err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestUnifiedProcessPool_StartupCancellation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		preCancel bool
+		failure   error
+	}{{"before first attempt", true, syscall.ETXTBSY}, {"after transient failure", false, syscall.ETXTBSY}, {"after permanent failure", false, syscall.EINVAL}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.preCancel {
+				cancel()
+			}
+			processContexts := make(chan context.Context, 2)
+			spawner := &DefaultDaemonSpawner{RetryDelays: []time.Duration{time.Hour}, spawnOnceFn: func(lifetime context.Context, _ string, _ []string, _ DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				processContexts <- lifetime
+				cancel()
+				return nil, nil, nil, nil, tc.failure
+			}}
+			pool := NewUnifiedProcessPool(PoolConfig{}, spawner)
+			defer pool.Close()
+			_, err := pool.spawnStreamingDaemonWithRetry(ctx, "target", DaemonConfig{})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("startup error = %v, want canceled", err)
+			}
+			if !tc.preCancel && (<-processContexts).Err() != nil {
+				t.Fatal("process lifetime inherited startup cancellation")
+			}
+		})
 	}
 }

@@ -179,7 +179,25 @@ func hasActiveBinaryReplacement(bin string, cwd string) bool {
 	return false
 }
 
+// startupDaemonSpawner separates retry cancellation from subprocess ownership.
+type startupDaemonSpawner interface {
+	SpawnWithStartupContext(lifetime, startup context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)
+}
+
+func spawnDaemon(lifetime, startup context.Context, cfg DaemonConfig, spawner DaemonSpawner) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	if bounded, ok := spawner.(startupDaemonSpawner); ok {
+		return bounded.SpawnWithStartupContext(lifetime, startup, cfg)
+	}
+	return spawner.Spawn(lifetime, cfg)
+}
+
 func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	return s.SpawnWithStartupContext(ctx, ctx, cfg)
+}
+
+// SpawnWithStartupContext bounds replacement retries without attaching a
+// successfully started subprocess to the short startup budget.
+func (s *DefaultDaemonSpawner) SpawnWithStartupContext(lifetime, startup context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
 	var bin string
 	switch {
 	case cfg.IsCodex():
@@ -212,12 +230,18 @@ func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.
 
 	attempt := 0
 	for {
-		stdin, stdout, stderr, handle, err := spawnFn(ctx, bin, args, cfg)
+		if err := startup.Err(); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("failed spawning daemon: %w", err)
+		}
+		stdin, stdout, stderr, handle, err := spawnFn(lifetime, bin, args, cfg)
 		if err == nil {
 			return stdin, stdout, stderr, handle, nil
 		}
 
 		if attempt >= len(delays) || !isTransientBinarySpawnError(bin, cfg.Cwd, err) {
+			if startup.Err() != nil {
+				return nil, nil, nil, nil, fmt.Errorf("failed spawning daemon: %w", startup.Err())
+			}
 			return nil, nil, nil, nil, err
 		}
 
@@ -226,9 +250,9 @@ func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.
 
 		timer := time.NewTimer(delay)
 		select {
-		case <-ctx.Done():
+		case <-startup.Done():
 			timer.Stop()
-			return nil, nil, nil, nil, fmt.Errorf("failed spawning daemon: %w", ctx.Err())
+			return nil, nil, nil, nil, fmt.Errorf("failed spawning daemon: %w", startup.Err())
 		case <-timer.C:
 		}
 	}
