@@ -852,10 +852,6 @@ func ReloadWithSupplier(activeCfg *Config, supplier func() (*Config, error)) err
 	return nil
 }
 
-func Reload(activeCfg *Config) error {
-	return ReloadWithSupplier(activeCfg, New)
-}
-
 func loadSharedSecretsDir(dirPath string, dst map[string]string) {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
