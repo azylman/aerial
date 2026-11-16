@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +26,58 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
+
+const (
+	labelCreate                    = "Create"
+	labelUpdateBuild               = "UpdateBuild"
+	labelCancel                    = "Cancel"
+	labelAppendChunks              = "AppendChunks"
+	labelUpdateChunk               = "UpdateChunk"
+	labelRemoveChunk               = "RemoveChunk"
+	labelFailChunk                 = "FailChunk"
+	labelAttachPR                  = "AttachPR"
+	labelOnPREvent                 = "OnPREvent"
+	labelOnDispatchOutcome         = "OnDispatchOutcome"
+	labelReconcileBuild            = "reconcile-build"
+	labelMutateBuild               = "mutate-build"
+	labelReconcileInitial          = "reconcile-initial"
+	labelReconcileAfterAppend      = "reconcile-after-append"
+	labelReconcileAfterUpdateChunk = "reconcile-after-update-chunk"
+	labelReconcileAfterRemoveChunk = "reconcile-after-remove-chunk"
+	labelReconcileAfterAttachPR    = "reconcile-after-attach-pr"
+	labelReconcileAfterPREvent     = "reconcile-after-pr-event"
+	labelReconcileAfterDispatch    = "reconcile-after-dispatch-outcome"
+	labelRoutePREvent              = "RoutePREvent"
+	labelRouteDispatchOutcome      = "RouteDispatchOutcome"
+	labelRouteAttachPR             = "RouteAttachPR"
+	labelRouteFailChunk            = "RouteFailChunk"
+)
+
+var reconcileErrorHandlerLabels = []string{
+	labelCreate,
+	labelUpdateBuild,
+	labelCancel,
+	labelAppendChunks,
+	labelUpdateChunk,
+	labelRemoveChunk,
+	labelFailChunk,
+	labelAttachPR,
+	labelOnPREvent,
+	labelOnDispatchOutcome,
+	labelReconcileBuild,
+	labelMutateBuild,
+	labelReconcileInitial,
+	labelReconcileAfterAppend,
+	labelReconcileAfterUpdateChunk,
+	labelReconcileAfterRemoveChunk,
+	labelReconcileAfterAttachPR,
+	labelReconcileAfterPREvent,
+	labelReconcileAfterDispatch,
+	labelRoutePREvent,
+	labelRouteDispatchOutcome,
+	labelRouteAttachPR,
+	labelRouteFailChunk,
+}
 
 var reconcileErrorsTotal = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
@@ -40,7 +93,7 @@ func init() {
 			panic(fmt.Sprintf("failed to register vanadis_restate_reconcile_errors_total: %v", err))
 		}
 	}
-	for _, h := range []string{"reconcile-build", "mutate-build", "reconcile-initial", "RoutePREvent", "RouteDispatchOutcome"} {
+	for _, h := range reconcileErrorHandlerLabels {
 		reconcileErrorsTotal.WithLabelValues(h).Add(0)
 	}
 }
@@ -49,6 +102,22 @@ func recordReconcileError(handler string, err error) {
 	if err != nil {
 		reconcileErrorsTotal.WithLabelValues(handler).Inc()
 	}
+}
+
+func runJournaled[T any](ctx restate.Context, handlerLabel, stepName string, recorded *bool, fn func(restate.RunContext) (T, error)) (T, error) {
+	if recorded != nil {
+		*recorded = false
+	}
+	return restate.Run(ctx, func(rc restate.RunContext) (T, error) {
+		out, err := fn(rc)
+		if err != nil {
+			if recorded != nil {
+				*recorded = true
+			}
+			recordReconcileError(handlerLabel, err)
+		}
+		return out, err
+	}, restate.WithName(stepName))
 }
 
 var newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
@@ -169,6 +238,8 @@ type VanadisChunk struct {
 	DependsOn          []string               `json:"depends_on"`
 	CIFailCount        int                    `json:"ci_fail_count"`
 	CIChecks           map[string]string      `json:"ci_checks,omitempty"`
+	HeadSHA            string                 `json:"head_sha,omitempty"`
+	MergeSHA           string                 `json:"merge_sha,omitempty"`
 	RolloutState       *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
 	Banner             string                 `json:"banner,omitempty"`
 	MergeAwakeableID   string                 `json:"merge_awakeable_id,omitempty"`
@@ -264,6 +335,12 @@ func (r restateObjectRuntime) ScheduleReconcile() {
 	_ = restate.ObjectSend(r.ctx, "Build", restate.Key(r.ctx), "Reconcile").Send(ReconcileBuildRequest{Reason: "active dispatch recovery"}, restate.WithDelay(time.Second))
 }
 
+type prRevisionState struct {
+	headSHA  string
+	mergeSHA string
+	merged   bool
+}
+
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
 type BuildObject struct {
 	store          VanadisStore
@@ -271,6 +348,8 @@ type BuildObject struct {
 	vanadisURL     string
 	httpClient     *http.Client
 	runtimeFactory func(restate.ObjectContext) objectRuntime
+	revMu          sync.Mutex
+	prRevisions    map[string]prRevisionState
 }
 
 // NewBuildObject creates a new BuildObject bound to vanadisURL with an optional HTTP client.
@@ -305,7 +384,7 @@ func (*BuildObject) ServiceName() string {
 }
 
 func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepName string, priorState *BuildObjectState, transErr error) {
-	if b == nil || b.executor == nil || transErr == nil || strings.TrimSpace(buildID) == "" {
+	if b.executor == nil {
 		return
 	}
 	var build *VanadisBuild
@@ -398,9 +477,10 @@ func (b *BuildObject) persistBuildCreation(rc restate.RunContext, build VanadisB
 
 // Create handles initial build and DAG initialization.
 func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) (resp VanadisBuild, outErr error) {
+	var stepRecorded bool
 	defer func() {
-		if outErr != nil {
-			recordReconcileError("Create", outErr)
+		if outErr != nil && !stepRecorded {
+			recordReconcileError(labelCreate, outErr)
 		}
 	}()
 
@@ -445,9 +525,9 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 	}
 
 	if b.store != nil {
-		_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		_, err := runJournaled(ctx, labelCreate, "create-build-postgres", &stepRecorded, func(rc restate.RunContext) (bool, error) {
 			return b.persistBuildCreation(rc, build, validatedChunks)
-		}, restate.WithName("create-build-postgres"))
+		})
 		if err != nil {
 			return VanadisBuild{}, toTerminalErr(err)
 		}
@@ -456,7 +536,7 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 	rt := b.getRuntime(ctx)
 	rt.SetState(BuildObjectState{Build: build, Chunks: validatedChunks})
 	rt.SetLaunched(make(map[string]bool))
-	if _, tErr := b.executeObjectTransition(rt, "reconcile-initial", nil); tErr != nil {
+	if _, tErr := b.executeObjectTransition(rt, labelReconcileInitial, nil); tErr != nil {
 		log.Printf("[vanadis-restate] initial transition warning: %v", tErr)
 	}
 	return build, nil
@@ -464,9 +544,10 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 
 // UpdateBuild mutates build metadata and updates state.
 func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequest) (resp VanadisBuild, outErr error) {
+	var stepRecorded bool
 	defer func() {
-		if outErr != nil {
-			recordReconcileError("UpdateBuild", outErr)
+		if outErr != nil && !stepRecorded {
+			recordReconcileError(labelUpdateBuild, outErr)
 		}
 	}()
 
@@ -474,7 +555,7 @@ func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequ
 	if b.store == nil {
 		return VanadisBuild{ID: buildID, Title: req.Title, Objective: req.Objective}, nil
 	}
-	res, err := restate.Run(ctx, func(rc restate.RunContext) (VanadisBuild, error) {
+	res, err := runJournaled(ctx, labelUpdateBuild, "update-build-postgres", &stepRecorded, func(rc restate.RunContext) (VanadisBuild, error) {
 		updated, err := b.store.UpdateBuild(rc, buildID, req)
 		if err != nil {
 			return VanadisBuild{}, err
@@ -488,7 +569,7 @@ func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequ
 			}
 		}
 		return *updated, nil
-	}, restate.WithName("update-build-postgres"))
+	})
 	if err != nil {
 		return VanadisBuild{}, toTerminalErr(err)
 	}
@@ -502,9 +583,10 @@ func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequ
 
 // Cancel cancels the active build and clears Restate state.
 func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) (resp VanadisBuild, outErr error) {
+	var stepRecorded bool
 	defer func() {
-		if outErr != nil {
-			recordReconcileError("Cancel", outErr)
+		if outErr != nil && !stepRecorded {
+			recordReconcileError(labelCancel, outErr)
 		}
 	}()
 
@@ -516,7 +598,7 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 		return VanadisBuild{ID: buildID, Status: statusCancelled}, nil
 	}
 
-	res, err := restate.Run(ctx, func(rc restate.RunContext) (VanadisBuild, error) {
+	res, err := runJournaled(ctx, labelCancel, "cancel-build-postgres", &stepRecorded, func(rc restate.RunContext) (VanadisBuild, error) {
 		bld, chunks, err := b.store.GetBuild(rc, buildID)
 		if err != nil {
 			return VanadisBuild{}, err
@@ -542,7 +624,7 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 			}
 		}
 		return *bld, nil
-	}, restate.WithName("cancel-build-postgres"))
+	})
 	if err != nil {
 		return VanadisBuild{}, toTerminalErr(err)
 	}
@@ -551,9 +633,10 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 
 // AppendChunks appends chunks to a running build and advances the DAG.
 func (b *BuildObject) AppendChunks(ctx restate.ObjectContext, req AppendChunksRequest) (resp []VanadisChunk, outErr error) {
+	var stepRecorded bool
 	defer func() {
-		if outErr != nil {
-			recordReconcileError("AppendChunks", outErr)
+		if outErr != nil && !stepRecorded {
+			recordReconcileError(labelAppendChunks, outErr)
 		}
 	}()
 
@@ -563,17 +646,17 @@ func (b *BuildObject) AppendChunks(ctx restate.ObjectContext, req AppendChunksRe
 	if b.store == nil {
 		return nil, nil
 	}
-	return b.executeChunkAppend(ctx, restate.Key(ctx), req.Chunks)
+	return b.executeChunkAppend(ctx, restate.Key(ctx), req.Chunks, &stepRecorded)
 }
 
-func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID string, chunks []CreateChunkInput) ([]VanadisChunk, error) {
-	appended, err := restate.Run(ctx, func(rc restate.RunContext) ([]VanadisChunk, error) {
+func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID string, chunks []CreateChunkInput, stepRecorded *bool) ([]VanadisChunk, error) {
+	appended, err := runJournaled(ctx, labelAppendChunks, "append-chunks-postgres", stepRecorded, func(rc restate.RunContext) ([]VanadisChunk, error) {
 		return b.store.AppendChunks(rc, buildID, chunks)
-	}, restate.WithName("append-chunks-postgres"))
+	})
 	if err != nil {
 		return nil, toTerminalErr(err)
 	}
-	if _, tErr := b.executeObjectTransition(b.getRuntime(ctx), "reconcile-after-append", nil); tErr != nil {
+	if _, tErr := b.executeObjectTransition(b.getRuntime(ctx), labelReconcileAfterAppend, nil); tErr != nil {
 		log.Printf("[vanadis-restate] append chunks transition warning: %v", tErr)
 	}
 	return appended, nil
@@ -581,9 +664,10 @@ func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID stri
 
 // UpdateChunk modifies a pending chunk and revalidates dependencies.
 func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequest) (resp VanadisChunk, outErr error) {
+	var stepRecorded bool
 	defer func() {
-		if outErr != nil {
-			recordReconcileError("UpdateChunk", outErr)
+		if outErr != nil && !stepRecorded {
+			recordReconcileError(labelUpdateChunk, outErr)
 		}
 	}()
 
@@ -595,18 +679,18 @@ func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequ
 	if b.store == nil {
 		return VanadisChunk{}, nil
 	}
-	updated, err := restate.Run(ctx, func(rc restate.RunContext) (VanadisChunk, error) {
+	updated, err := runJournaled(ctx, labelUpdateChunk, "update-chunk-postgres", &stepRecorded, func(rc restate.RunContext) (VanadisChunk, error) {
 		c, err := b.store.UpdateChunk(rc, buildID, chunkRef, req)
 		if err != nil {
 			return VanadisChunk{}, err
 		}
 		return *c, nil
-	}, restate.WithName("update-chunk-postgres"))
+	})
 	if err != nil {
 		return VanadisChunk{}, toTerminalErr(err)
 	}
 	rt := b.getRuntime(ctx)
-	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-update-chunk", nil); tErr != nil {
+	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterUpdateChunk, nil); tErr != nil {
 		log.Printf("[vanadis-restate] update chunk transition warning: %v", tErr)
 	}
 	return updated, nil
@@ -614,9 +698,10 @@ func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequ
 
 // RemoveChunk removes an unstarted chunk from the build DAG.
 func (b *BuildObject) RemoveChunk(ctx restate.ObjectContext, req RemoveChunkRequest) (outErr error) {
+	var stepRecorded bool
 	defer func() {
-		if outErr != nil {
-			recordReconcileError("RemoveChunk", outErr)
+		if outErr != nil && !stepRecorded {
+			recordReconcileError(labelRemoveChunk, outErr)
 		}
 	}()
 
@@ -629,11 +714,11 @@ func (b *BuildObject) RemoveChunk(ctx restate.ObjectContext, req RemoveChunkRequ
 		return nil
 	}
 	rt := b.getRuntime(ctx)
-	return b.executeChunkRemoval(ctx, rt, buildID, targetRef)
+	return b.executeChunkRemoval(ctx, rt, buildID, targetRef, &stepRecorded)
 }
 
-func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRuntime, buildID, targetRef string) error {
-	_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRuntime, buildID, targetRef string, stepRecorded *bool) error {
+	_, err := runJournaled(ctx, labelRemoveChunk, "remove-chunk-postgres", stepRecorded, func(rc restate.RunContext) (bool, error) {
 		removedChunk, _, rErr := b.store.RemoveChunk(rc, buildID, targetRef)
 		if rErr != nil {
 			return false, rErr
@@ -644,11 +729,11 @@ func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRu
 			}
 		}
 		return true, nil
-	}, restate.WithName("remove-chunk-postgres"))
+	})
 	if err != nil {
 		return toTerminalErr(err)
 	}
-	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-remove-chunk", nil); tErr != nil {
+	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterRemoveChunk, nil); tErr != nil {
 		log.Printf("[vanadis-restate] remove chunk transition warning: %v", tErr)
 	}
 	return nil
@@ -677,9 +762,10 @@ func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld VanadisBuild
 
 // FailChunk marks a chunk failed and cancels active work if the failure is terminal.
 func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest) (resp FailChunkResponse, outErr error) {
+	var stepRecorded bool
 	defer func() {
-		if outErr != nil {
-			recordReconcileError("FailChunk", outErr)
+		if outErr != nil && !stepRecorded {
+			recordReconcileError(labelFailChunk, outErr)
 		}
 	}()
 
@@ -692,7 +778,7 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest)
 		return FailChunkResponse{ChunkID: chunkID, Failed: true}, nil
 	}
 
-	res, err := restate.Run(ctx, func(rc restate.RunContext) (FailChunkResponse, error) {
+	res, err := runJournaled(ctx, labelFailChunk, "fail-chunk-postgres", &stepRecorded, func(rc restate.RunContext) (FailChunkResponse, error) {
 		if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
 			return FailChunkResponse{}, err
 		}
@@ -711,7 +797,7 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest)
 			b.notifyChunkFailure(rc, *bld, chunkID, reason)
 		}
 		return r, nil
-	}, restate.WithName("fail-chunk-postgres"))
+	})
 	if err != nil {
 		return FailChunkResponse{}, toTerminalErr(err)
 	}
@@ -724,9 +810,10 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest)
 
 // AttachPR attaches a PR to a chunk or standalone build.
 func (b *BuildObject) AttachPR(ctx restate.ObjectContext, req AttachChunkPRRequest) (resp AttachChunkPRResponse, outErr error) {
+	var stepRecorded bool
 	defer func() {
-		if outErr != nil {
-			recordReconcileError("AttachPR", outErr)
+		if outErr != nil && !stepRecorded {
+			recordReconcileError(labelAttachPR, outErr)
 		}
 	}()
 
@@ -734,12 +821,12 @@ func (b *BuildObject) AttachPR(ctx restate.ObjectContext, req AttachChunkPRReque
 	if store == nil {
 		return AttachChunkPRResponse{Status: "attached", BuildID: restate.Key(ctx), ChunkID: req.ChunkID}, nil
 	}
-	return b.executePRAttachment(ctx, req)
+	return b.executePRAttachment(ctx, req, &stepRecorded)
 }
 
-func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req AttachChunkPRRequest) (AttachChunkPRResponse, error) {
+func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req AttachChunkPRRequest, stepRecorded *bool) (AttachChunkPRResponse, error) {
 	store := b.store
-	attached, attachErr := restate.Run(ctx, func(rc restate.RunContext) (AttachChunkPRResponse, error) {
+	attached, attachErr := runJournaled(ctx, labelAttachPR, "attach-pr-postgres", stepRecorded, func(rc restate.RunContext) (AttachChunkPRResponse, error) {
 		bID, cID, thID, err := store.AttachChunkPR(rc, req)
 		if err != nil {
 			return AttachChunkPRResponse{}, err
@@ -757,13 +844,13 @@ func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req AttachC
 			ChunkID:  cID,
 			ThreadID: thID,
 		}, nil
-	}, restate.WithName("attach-pr-postgres"))
+	})
 	if attachErr != nil {
 		return AttachChunkPRResponse{}, toTerminalErr(attachErr)
 	}
 
 	runtime := b.getRuntime(ctx)
-	if _, tErr := b.executeObjectTransition(runtime, "reconcile-after-attach-pr", nil); tErr != nil {
+	if _, tErr := b.executeObjectTransition(runtime, labelReconcileAfterAttachPR, nil); tErr != nil {
 		log.Printf("[vanadis-restate] attach pr transition warning: %v", tErr)
 	}
 	return attached, nil
@@ -780,202 +867,27 @@ func (b *BuildObject) dispatchThreadWakePrompt(rc restate.RunContext, buildID, p
 	}
 }
 
-func (b *BuildObject) handlePRCheckEvent(ctx context.Context, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
-	checkName := strings.TrimSpace(ev.CheckName)
-	if checkName == "" {
-		return nil
-	}
-	checkState := strings.TrimSpace(ev.CheckState)
-	if event == "check_failed" || event == "ci_failed" {
-		checkState = "failed"
-	}
-	if checkState == "" {
-		return nil
-	}
-	return b.store.RecordPRCheckStatus(ctx, chunkID, checkName, checkState)
-}
-
-func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
-	switch event {
-	case "check_updated":
-		return b.handlePRCheckEvent(rc, chunkID, event, ev)
-	case "check_failed", "ci_failed":
-		if err := b.handlePRCheckEvent(rc, chunkID, event, ev); err != nil {
-			log.Printf("[vanadis-restate] record check status warning: %v", err)
-		}
-		if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "ci_failed"); err != nil {
-			return err
-		}
-		if b.executor != nil {
-			details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
-			b.dispatchThreadWakePrompt(rc, buildID, FormatCIFailurePrompt(ev, details))
-		}
-	case "conflict":
-		if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "conflict"); err != nil {
-			return err
-		}
-		if b.executor != nil {
-			b.dispatchThreadWakePrompt(rc, buildID, FormatConflictPrompt(ev))
-		}
-	case "merged":
-		if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "merged"); err != nil {
-			return err
-		}
-		if b.executor != nil {
-			if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "merged", []string{chunkID}, ""); pErr != nil {
-				log.Printf("[vanadis-restate] publish event warning: %v", pErr)
-			}
-		}
-	case "closed":
-		if ev.Status != "merged" {
-			if _, _, _, fErr := b.store.FailChunk(rc, chunkID, "pr_closed_unmerged", ""); fErr != nil {
-				log.Printf("[vanadis-restate] fail chunk warning: %v", fErr)
-			}
-		}
-	}
-	return nil
-}
-
-// OnPREvent receives PR lifecycle events for this build.
-func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycleEvent) (outErr error) {
-	defer func() {
-		if outErr != nil {
-			recordReconcileError("OnPREvent", outErr)
-		}
-	}()
-
-	if b.store == nil {
-		return nil
-	}
-	buildID := restate.Key(ctx)
-	_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		lookup, err := b.store.GetChunkByPR(rc, ev.Repo, ev.PRNumber)
-		if err != nil {
-			return false, err
-		}
-		if lookup == nil || !lookup.Matched {
-			return false, nil
-		}
-		chunkID := lookup.ChunkID
-		event := strings.ToLower(strings.TrimSpace(ev.Event))
-
-		var eventErr error
-		if event == "deploy_success" {
-			eventErr = b.applyMutation(rc, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
-		} else {
-			eventErr = b.handlePREventType(rc, buildID, chunkID, event, ev)
-		}
-		if errors.Is(eventErr, errPRTransitionSkipped) {
-			return false, nil
-		}
-		if eventErr != nil {
-			return false, eventErr
-		}
-
-		if event != "deploy_success" && ev.RolloutState != nil {
-			rolloutStatus := ""
-			if event == "deploy_started" {
-				rolloutStatus = "deploying"
-			}
-			if rErr := b.store.RecordPRRolloutState(rc, chunkID, rolloutStatus, ev.RolloutState); rErr != nil {
-				log.Printf("[vanadis-restate] record rollout state warning: %v", rErr)
-			}
-		}
-		return true, nil
-	}, restate.WithName("handle-pr-event-postgres"))
-	if err != nil {
-		return err
-	}
-	rt := b.getRuntime(ctx)
-	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-pr-event", nil); tErr != nil {
-		if strings.EqualFold(strings.TrimSpace(ev.Event), "deploy_success") {
-			return tErr
-		}
-		log.Printf("[vanadis-restate] pr event transition warning: %v", tErr)
-	}
-	return nil
-}
-
-// OnDispatchOutcome receives task execution outcomes.
-func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) (outErr error) {
-	defer func() {
-		if outErr != nil {
-			recordReconcileError("OnDispatchOutcome", outErr)
-		}
-	}()
-	if b.store == nil {
-		return nil
-	}
-	applied, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		chunkID := strings.TrimSpace(ev.VanadisChunkID)
-		if chunkID == "" {
-			return false, nil
-		}
-		status := strings.ToLower(strings.TrimSpace(ev.Status))
-		switch status {
-		case "completed", dispatchStatusSuccess:
-			if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
-				return false, err
-			}
-			res, err := b.store.CompleteActionChunk(rc, chunkID, ev.DispatchID)
-			if err != nil {
-				return false, err
-			}
-			return res != nil && res.CompletionAccepted, nil
-		case "failed", "timeout", "crashed":
-			reason := firstNonEmpty(ev.Error, "dispatch outcome failed")
-			if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
-				return false, err
-			}
-			_, _, failed, err := b.store.FailChunk(rc, chunkID, reason, ev.DispatchID)
-			return failed, err
-		}
-		return true, nil
-	}, restate.WithName("handle-dispatch-outcome-postgres"))
-	if err != nil {
-		return err
-	}
-	if !applied {
-		return nil
-	}
-	rt := b.getRuntime(ctx)
-	mutation := dispatchCompletionMutation(ev)
-	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-dispatch-outcome", mutation); tErr != nil {
-		if mutation != nil {
-			return tErr
-		}
-		log.Printf("[vanadis-restate] dispatch outcome transition warning: %v", tErr)
-	}
-	return nil
-}
-
 // Reconcile reconciles the build state on Restate.
-func (b *BuildObject) Reconcile(ctx restate.ObjectContext, req ReconcileBuildRequest) (resp ReconcileBuildResult, outErr error) {
-	defer func() {
-		if outErr != nil {
-			recordReconcileError("reconcile-build", outErr)
-		}
-	}()
+func (b *BuildObject) Reconcile(ctx restate.ObjectContext, req ReconcileBuildRequest) (ReconcileBuildResult, error) {
 	_ = req
 	if b == nil || (b.store == nil && strings.TrimSpace(b.vanadisURL) == "") {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("vanadis url and store not configured")
+		err := restate.TerminalErrorf("vanadis url and store not configured")
+		recordReconcileError(labelReconcileBuild, err)
+		return ReconcileBuildResult{}, err
 	}
 	rt := b.getRuntime(ctx)
-	return b.executeObjectTransition(rt, "reconcile-build", nil)
+	return b.executeObjectTransition(rt, labelReconcileBuild, nil)
 }
 
 // Mutate applies a mutation to the build and reconciles state.
-func (b *BuildObject) Mutate(ctx restate.ObjectContext, req BuildMutationRequest) (resp ReconcileBuildResult, outErr error) {
-	defer func() {
-		if outErr != nil {
-			recordReconcileError("mutate-build", outErr)
-		}
-	}()
+func (b *BuildObject) Mutate(ctx restate.ObjectContext, req BuildMutationRequest) (ReconcileBuildResult, error) {
 	if b == nil || (b.store == nil && strings.TrimSpace(b.vanadisURL) == "") {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("vanadis url and store not configured")
+		err := restate.TerminalErrorf("vanadis url and store not configured")
+		recordReconcileError(labelMutateBuild, err)
+		return ReconcileBuildResult{}, err
 	}
 	rt := b.getRuntime(ctx)
-	return b.executeObjectTransition(rt, "mutate-build", &req)
+	return b.executeObjectTransition(rt, labelMutateBuild, &req)
 }
 
 func mergePriorLaunched(priorState *BuildObjectState, priorLaunched map[string]bool) map[string]bool {

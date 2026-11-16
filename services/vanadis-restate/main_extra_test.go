@@ -899,16 +899,6 @@ func (r *retryingObjectRuntime) RunReconcileStep(name string, fn func(ctx contex
 func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	t.Parallel()
 
-	// Nil receiver or empty buildID or nil error
-	var bNil *BuildObject
-	bNil.notifyTransitionError(context.Background(), "b1", "step", nil, errors.New("err"))
-
-	eriNilCheck := &mockEriClient{}
-	bo := NewBuildObject("", nil).WithAuthority(nil, NewExecutor(t.TempDir(), eriNilCheck, nil, "", nil))
-	bo.notifyTransitionError(context.Background(), "", "step", nil, errors.New("err"))
-	bo.notifyTransitionError(context.Background(), "b1", "step", nil, nil)
-	assert.Nil(t, eriNilCheck.lastWidget)
-
 	// Quiet build suppresses error notification
 	buildQuiet := VanadisBuild{ID: "b-quiet", Quiet: true}
 	storeQuiet, _ := dbScript{buildRow: &mockRow{b: &buildQuiet}}.open()
@@ -1044,6 +1034,13 @@ func TestRunApp_FailFast(t *testing.T) {
 
 func TestReconcileErrorsMetric(t *testing.T) {
 	t.Parallel()
+	rec := httptest.NewRecorder()
+	SetupHealthMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+	metricsBody := rec.Body.String()
+	for _, label := range reconcileErrorHandlerLabels {
+		assert.Contains(t, metricsBody, fmt.Sprintf(`vanadis_restate_reconcile_errors_total{handler=%q} `, label))
+	}
+
 	before := reconcileErrorsCount(t, "test-handler")
 	recordReconcileError("test-handler", nil)
 	assert.Equal(t, before, reconcileErrorsCount(t, "test-handler"))
@@ -1054,19 +1051,38 @@ func TestReconcileErrorsMetric(t *testing.T) {
 type checkStatusSpyStore struct {
 	VanadisStore
 
-	calls []string
-	err   error
+	calls     []string
+	resets    []string
+	chunks    []VanadisChunk
+	err       error
+	resetErr  error
+	statusErr error
 }
 
-func (s *checkStatusSpyStore) RecordPRCheckStatus(_ context.Context, chunkID, checkName, checkState string) error {
-	s.calls = append(s.calls, chunkID+":"+checkName+":"+checkState)
+func (s *checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
+	return &VanadisBuild{ID: buildID, Status: statusRunning}, s.chunks, nil
+}
+
+func (s *checkStatusSpyStore) RecordPRCheckStatus(_ context.Context, chunkID, headSHA, checkName, checkState string) error {
+	s.calls = append(s.calls, chunkID+":"+headSHA+":"+checkName+":"+checkState)
 	return s.err
+}
+
+func (s *checkStatusSpyStore) ResetPRCheckState(_ context.Context, chunkID, buildID, headSHA, mergeSHA string) error {
+	s.resets = append(s.resets, chunkID+":"+buildID+":"+headSHA+":"+mergeSHA)
+	return s.resetErr
+}
+
+func (s *checkStatusSpyStore) UpdatePRLifecycleStatus(_ context.Context, _, _ string) error {
+	return s.statusErr
 }
 
 func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	spy := &checkStatusSpyStore{}
+	spy := &checkStatusSpyStore{
+		chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", HeadSHA: "sha-1", Status: "pr_opened"}},
+	}
 	bo := NewBuildObject("", nil).WithAuthority(spy, nil)
 
 	// Empty check name is ignored
@@ -1077,20 +1093,45 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{CheckName: "test", CheckState: ""}))
 	assert.Empty(t, spy.calls)
 
-	// check_updated with state records exact state
-	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{CheckName: "test", CheckState: "running"}))
-	assert.Equal(t, []string{"c1:test:running"}, spy.calls)
+	// check_updated with state records exact state on initial head sha-1
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "running"}))
+	assert.Equal(t, []string{"c1:sha-1:test:running"}, spy.calls)
 
-	// check_failed defaults empty state to failed
+	// check_failed defaults empty state to failed on matching head sha-1
 	spy.calls = nil
-	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_failed", pubsub.PRLifecycleEvent{CheckName: "test"}))
-	assert.Equal(t, []string{"c1:test:failed"}, spy.calls)
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test"}))
+	assert.Equal(t, []string{"c1:sha-1:test:failed"}, spy.calls)
+
+	// synchronize advances tracked revision to sha-2 and resets check state
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-2"}))
+	assert.Equal(t, []string{"c1:b1:sha-2:"}, spy.resets)
+
+	// delayed check_updated and check_failed from old head sha-1 are rejected
+	spy.calls = nil
+	assert.ErrorIs(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "pending"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test"}), errPRTransitionSkipped)
+	assert.Empty(t, spy.calls)
+
+	// check_updated for new head sha-2 succeeds
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "passed"}))
+	assert.Equal(t, []string{"c1:sha-2:test:passed"}, spy.calls)
+
+	// merged resets check state for merge commit and rejects delayed pre-merge head sha-2 checks while accepting merge-sha-3 checks
+	spy.calls = nil
+	spy.resets = nil
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", MergeSHA: "merge-sha-3"}))
+	assert.Equal(t, []string{"c1:b1:sha-2:merge-sha-3"}, spy.resets)
+	assert.ErrorIs(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "pending"}), errPRTransitionSkipped)
+	assert.Empty(t, spy.calls)
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-sha-3", CheckName: "Build & Push Images (eri)", CheckState: "passed"}))
+	assert.Equal(t, []string{"c1:merge-sha-3:Build & Push Images (eri):passed"}, spy.calls)
 
 	// store error propagates
-	spyErr := &checkStatusSpyStore{err: errors.New("db error")}
+	spyErr := &checkStatusSpyStore{err: errors.New("db error"), resetErr: errors.New("reset err")}
 	boErr := NewBuildObject("", nil).WithAuthority(spyErr, nil)
-	assert.Error(t, boErr.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{CheckName: "test", CheckState: "passed"}))
-	assert.Equal(t, []string{"c1:test:passed"}, spyErr.calls)
+	boErr.recordPRMergeRevision(ctx, "b1", "c1", "sha-2", "merge-sha-3")
+	assert.Error(t, boErr.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-sha-3", CheckName: "test", CheckState: "passed"}))
+	assert.Equal(t, []string{"c1:merge-sha-3:test:passed"}, spyErr.calls)
 }
 
 type mockBusError struct {

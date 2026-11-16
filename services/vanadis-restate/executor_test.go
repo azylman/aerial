@@ -1170,11 +1170,7 @@ func TestFormatKustomizationAndJobRollout(t *testing.T) {
 	assert.Equal(t, "[`kust-1`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/kust-1)", formatDeployTargetLabel("kust-1", "kustomization", "https://flux.example.com/"))
 
 	// Kustomization rollout status
-	s, ok := formatKustomizationRolloutStatus("running", map[string]string{"kust": "healthy"})
-	assert.False(t, ok)
-	assert.Empty(t, s)
-
-	s, ok = formatKustomizationRolloutStatus(statusDeploying, nil)
+	s, ok := formatKustomizationRolloutStatus(statusMerged, map[string]string{"kust": "healthy"})
 	assert.False(t, ok)
 	assert.Empty(t, s)
 

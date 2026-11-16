@@ -170,7 +170,8 @@ type VanadisStore interface {
 	AppendChunks(ctx context.Context, buildID string, inputs []CreateChunkInput) ([]VanadisChunk, error)
 	RemoveChunk(ctx context.Context, buildID, chunkRef string) (*VanadisChunk, []VanadisChunk, error)
 	RecordPRRolloutState(ctx context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error
-	RecordPRCheckStatus(ctx context.Context, chunkID, checkName, checkState string) error
+	RecordPRCheckStatus(ctx context.Context, chunkID, headSHA, checkName, checkState string) error
+	ResetPRCheckState(ctx context.Context, chunkID, buildID, headSHA, mergeSHA string) error
 	CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
 	UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error
 	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
@@ -321,7 +322,13 @@ func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 		if len(rawCIChecks) > 0 && string(rawCIChecks) != jsonNull && string(rawCIChecks) != "{}" {
 			var checks map[string]string
 			if err := json.Unmarshal(rawCIChecks, &checks); err == nil {
-				c.CIChecks = checks
+				c.HeadSHA = strings.TrimSpace(checks["_head_sha"])
+				c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
+				delete(checks, "_head_sha")
+				delete(checks, "_merge_sha")
+				if len(checks) > 0 {
+					c.CIChecks = checks
+				}
 			}
 		}
 		if len(rawRolloutState) > 0 && string(rawRolloutState) != jsonNull && string(rawRolloutState) != "{}" {
@@ -1429,26 +1436,6 @@ func (s *PostgresVanadisStore) UpdateChunkBannerAndStatus(ctx context.Context, c
 	switch {
 	case err != nil:
 		return fmt.Errorf("update chunk banner and status: %w", err)
-	case tag.RowsAffected() == 0:
-		return ErrChunkNotFound
-	default:
-		return nil
-	}
-}
-
-func (s *PostgresVanadisStore) RecordPRCheckStatus(ctx context.Context, chunkID, checkName, checkState string) error {
-	if s == nil || s.db == nil {
-		return errors.New("database connection is nil")
-	}
-	id := strings.TrimSpace(chunkID)
-	name := strings.TrimSpace(checkName)
-	if id == "" || name == "" {
-		return errors.New("chunk_id and check_name cannot be empty")
-	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET ci_checks = jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true), updated_at = CURRENT_TIMESTAMP WHERE id = $3;`, name, strings.TrimSpace(checkState), id)
-	switch {
-	case err != nil:
-		return fmt.Errorf("record pr check status: %w", err)
 	case tag.RowsAffected() == 0:
 		return ErrChunkNotFound
 	default:

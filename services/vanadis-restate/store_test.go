@@ -818,7 +818,10 @@ func TestInitPostgres(t *testing.T) {
 			closed := false
 			origNew, origPing, origClose := newPgxPoolFn, pingPgxPoolFn, closePgxPoolFn
 			defer func() { newPgxPoolFn, pingPgxPoolFn, closePgxPoolFn = origNew, origPing, origClose }()
-			closePgxPoolFn = func(*pgxpool.Pool) { closed = true }
+			closePgxPoolFn = func(pool *pgxpool.Pool) {
+				closed = true
+				origClose(pool)
+			}
 			if tc.mockFail {
 				newPgxPoolFn = func(context.Context, *pgxpool.Config) (*pgxpool.Pool, error) {
 					return nil, errors.New("mock pool fail")

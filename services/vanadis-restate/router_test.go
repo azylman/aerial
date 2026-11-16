@@ -258,23 +258,26 @@ func TestRestateBuildObjectInvoker(t *testing.T) {
 }
 
 func TestBuildRouterService_NilStoreAndErrorPaths(t *testing.T) {
-	t.Parallel()
 	rNil := NewBuildRouterService(nil)
 	ctx := makeRouterMockContext(t)
 
 	// RoutePREvent nil store
 	assert.NoError(t, rNil.RoutePREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "opened"}))
 
-	// RoutePREvent query error
+	// RoutePREvent query error records metric inside journaled callback
 	storeErr, _ := dbScript{row: errRow(errors.New("db query error"))}.open()
 	rErr := NewBuildRouterService(storeErr)
+	beforePR := reconcileErrorsCount(t, labelRoutePREvent)
 	assert.Error(t, rErr.RoutePREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "synchronize"}))
+	assert.Equal(t, beforePR+1, reconcileErrorsCount(t, labelRoutePREvent))
 
 	// RouteDispatchOutcome nil store
 	assert.NoError(t, rNil.RouteDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1"}))
 
-	// RouteDispatchOutcome query error
+	// RouteDispatchOutcome query error records metric inside journaled callback
+	beforeDisp := reconcileErrorsCount(t, labelRouteDispatchOutcome)
 	assert.Error(t, rErr.RouteDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1"}))
+	assert.Equal(t, beforeDisp+1, reconcileErrorsCount(t, labelRouteDispatchOutcome))
 
 	// RouteAttachPR nil store generates build ID
 	_, err := rNil.RouteAttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"})
@@ -292,9 +295,11 @@ func TestBuildRouterService_NilStoreAndErrorPaths(t *testing.T) {
 	_, err = rNil.RouteFailChunk(ctx, FailChunkRequest{ChunkID: "c1", Reason: "error"})
 	assert.Error(t, err)
 
-	// RouteFailChunk query error
+	// RouteFailChunk query error records metric inside journaled callback
+	beforeFail := reconcileErrorsCount(t, labelRouteFailChunk)
 	_, err = rErr.RouteFailChunk(ctx, FailChunkRequest{ChunkID: "c1", Reason: "error"})
 	assert.Error(t, err)
+	assert.Equal(t, beforeFail+1, reconcileErrorsCount(t, labelRouteFailChunk))
 }
 
 func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
@@ -302,17 +307,28 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 
 	// Nil store
 	var sNil *PostgresVanadisStore
-	assert.Error(t, sNil.RecordPRCheckStatus(context.Background(), "c1", "test", "passed"))
+	assert.Error(t, sNil.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
+	assert.Error(t, sNil.ResetPRCheckState(context.Background(), "c1", "b1", "sha-1", ""))
 
 	// Empty arguments
 	store, _ := dbScript{execTag: "UPDATE 1"}.open()
-	assert.Error(t, store.RecordPRCheckStatus(context.Background(), "", "test", "passed"))
-	assert.Error(t, store.RecordPRCheckStatus(context.Background(), "c1", "", "passed"))
+	assert.Error(t, store.RecordPRCheckStatus(context.Background(), "", "sha-1", "test", "passed"))
+	assert.Error(t, store.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "", "passed"))
+	assert.Error(t, store.ResetPRCheckState(context.Background(), "", "b1", "sha-1", ""))
 
 	// Success
-	assert.NoError(t, store.RecordPRCheckStatus(context.Background(), "c1", "test", "passed"))
+	assert.NoError(t, store.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
+	assert.NoError(t, store.ResetPRCheckState(context.Background(), "c1", "b1", "sha-2", ""))
+	assert.NoError(t, store.ResetPRCheckState(context.Background(), "c1", "b1", "sha-2", "merge-sha-1"))
+
+	// Not found
+	storeZero, _ := dbScript{execTag: "UPDATE 0"}.open()
+	assert.ErrorIs(t, storeZero.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"), ErrChunkNotFound)
+	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "b1", "sha-2", ""), ErrChunkNotFound)
 
 	// DB Exec error
 	storeErr, _ := dbScript{execErr: errors.New("db error")}.open()
-	assert.Error(t, storeErr.RecordPRCheckStatus(context.Background(), "c1", "test", "passed"))
+	assert.Error(t, storeErr.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
+	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "b1", "sha-2", ""))
+	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "b1", "sha-2", "merge-sha-1"))
 }

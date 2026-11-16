@@ -847,7 +847,7 @@ func formatPerJobRolloutStatus(allJobs []string, cleanStatus string, startedJobs
 }
 
 func formatKustomizationRolloutStatus(cleanStatus string, kustomizationStatuses map[string]string, deployUIURL ...string) (string, bool) {
-	if cleanStatus != statusDeploying || len(kustomizationStatuses) == 0 {
+	if cleanStatus != statusDeploying {
 		return "", false
 	}
 	baseURL := firstNonEmpty(deployUIURL...)
