@@ -382,7 +382,7 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	}
 	te.logf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
 	isAlreadyRetry := te.isQuotaRetry()
-	jitterSec := 5 + rand.Intn(16)
+	jitterSec := 5 + rand.Intn(16) //nolint:gosec // G404: retry jitter only needs spread, not unpredictability
 	runAt := time.Now().UTC().Add(resetDur).Add(30 * time.Second).Add(time.Duration(jitterSec) * time.Second)
 	if te.pool != nil {
 		te.pool.quotaLockedUntil.Store(runAt.Unix())
@@ -493,7 +493,7 @@ func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink 
 func calculateCapacityBackoff(attempt int, resetDur time.Duration) time.Duration {
 	minFloor := time.Duration(attempt) * 30 * time.Second
 	delay := max(resetDur, minFloor)
-	delay += time.Duration(rand.Intn(3000)) * time.Millisecond
+	delay += time.Duration(rand.Intn(3000)) * time.Millisecond //nolint:gosec // G404: retry jitter only needs spread, not unpredictability
 	return delay
 }
 

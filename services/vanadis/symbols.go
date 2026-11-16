@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,12 +15,18 @@ var (
 	declKeywordPrefixes = []string{"func ", "type ", "var ", "const ", "export ", "function ", "class "}
 )
 
-func cleanRepoDirName(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
-		return repo[idx+1:]
+// repoCheckoutDir maps a bare or owner/repo name to its checkout under
+// shareRoot. The repo name comes from the plan, so names that would select
+// shareRoot itself or climb above it ("", ".", "..") are rejected.
+func repoCheckoutDir(shareRoot, repo string) (string, bool) {
+	name := strings.TrimSpace(repo)
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		name = name[idx+1:]
 	}
-	return repo
+	if name == "" || name == "." || name == ".." {
+		return "", false
+	}
+	return filepath.Join(strings.TrimSpace(shareRoot), name), true
 }
 
 func normalizeSymbolName(symbol string) string {
@@ -226,8 +233,23 @@ type targetSymSpan struct {
 	end   int
 }
 
+// loadTargetFiles reads targetFiles through an os.Root on the repo checkout, so
+// plan-supplied paths that climb out of it ("../", absolute after trimming, or
+// an in-repo symlink to elsewhere) are skipped instead of read.
 func loadTargetFiles(shareRoot, repo string, targetFiles []string) []targetFileInfo {
-	repoDir := filepath.Join(strings.TrimSpace(shareRoot), cleanRepoDirName(repo))
+	repoDir, ok := repoCheckoutDir(shareRoot, repo)
+	if !ok {
+		return nil
+	}
+	root, err := os.OpenRoot(repoDir)
+	if err != nil {
+		return nil
+	}
+	defer func() {
+		if cErr := root.Close(); cErr != nil {
+			log.Printf("[vanadis] warning: closing repo root for %s: %v", repo, cErr)
+		}
+	}()
 	var files []targetFileInfo
 	seen := make(map[string]bool)
 	for _, tf := range targetFiles {
@@ -235,8 +257,7 @@ func loadTargetFiles(shareRoot, repo string, targetFiles []string) []targetFileI
 		if rel == "" || seen[rel] {
 			continue
 		}
-		fullPath := filepath.Join(repoDir, rel)
-		data, err := os.ReadFile(fullPath)
+		data, err := root.ReadFile(rel)
 		if err != nil {
 			continue
 		}
@@ -267,7 +288,10 @@ func appendSiblingTestFiles(repoDir, rel string, seen map[string]bool, expanded 
 }
 
 func expandTargetFilesWithTests(shareRoot, repo string, targetFiles []string) []string {
-	repoDir := filepath.Join(strings.TrimSpace(shareRoot), cleanRepoDirName(repo))
+	repoDir, ok := repoCheckoutDir(shareRoot, repo)
+	if !ok {
+		return targetFiles
+	}
 	seen := make(map[string]bool, len(targetFiles))
 	dirHasExplicitTest := make(map[string]bool, len(targetFiles))
 	for _, tf := range targetFiles {

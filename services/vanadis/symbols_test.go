@@ -86,6 +86,12 @@ func resolveSymbolSpansTestCases() []resolveSymbolSpansCase {
 			wantLines:       []string{"- pkg/foo.go: SharedCall (L4-L4)", "- pkg/bar.go: SharedCall (L5-L5)"},
 			wantAllResolved: true,
 		},
+		{name: "target file escaping the repo dir is never read", repo: "azylman/aerial", targetFiles: []string{"../outside.go"}, targetSymbols: []string{"Outside"}},
+		{name: "symbol-less target file escaping the repo dir is never read", repo: "azylman/aerial", targetFiles: []string{"pkg/../../outside.go"}},
+		{name: "in-repo symlink pointing outside the repo dir is never read", repo: "azylman/aerial", targetFiles: []string{"pkg/escape.go"}, targetSymbols: []string{"Outside"}},
+		{name: "repo dot cannot select the share root itself", repo: ".", targetFiles: []string{"outside.go"}, targetSymbols: []string{"Outside"}},
+		{name: "owner/ repo with empty basename cannot select the share root itself", repo: "azylman/", targetFiles: []string{"outside.go"}},
+		{name: "owner/.. repo cannot select the share root parent", repo: "azylman/..", targetFiles: []string{"parent.go"}, targetSymbols: []string{"Parent"}},
 		{
 			name:            "repo without slash and duplicate whitespace files",
 			repo:            "aerial",
@@ -192,6 +198,17 @@ func TestResolveSymbolSpans(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(aerialDir, "pkg", "baz_test.go"), []byte(bazTestContent), 0o600); err != nil {
 		t.Fatalf("failed to write baz_test.go: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(shareRoot, "outside.go"), []byte("package outside\n\nfunc Outside() {\n\treturn\n}\n"), 0o600); err != nil {
+		t.Fatalf("failed to write outside.go: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(shareRoot, "outside.go"), filepath.Join(aerialDir, "pkg", "escape.go")); err != nil {
+		t.Fatalf("failed to symlink escape.go: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(filepath.Dir(shareRoot), "parent.go"), []byte("package parent\n\nfunc Parent() {\n\treturn\n}\n"), 0o600); err != nil {
+		t.Fatalf("failed to write parent.go: %v", err)
 	}
 
 	tests := resolveSymbolSpansTestCases()
