@@ -260,7 +260,7 @@ func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkI
 		if repo == "" {
 			return "", "", "", errors.New("repo is required to attach PR to action chunk")
 		}
-		const qAction = `UPDATE vanadis_chunks c SET repo = $1, pr_number = $2, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $3 AND c.status != 'cancelled' AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
+		const qAction = `UPDATE vanadis_chunks c SET repo = $1, pr_number = $2, status = CASE WHEN c.status IN ('merged', 'deploying', 'completed', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $3 AND c.status != 'cancelled' AND (c.status NOT IN ('merged', 'deploying', 'completed') OR (c.repo = $1 AND c.pr_number = $2)) AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
 		var buildID, returnChunkID, threadID string
 		err := s.db.QueryRow(ctx, qAction, repo, req.PRNumber, chunkID).Scan(&buildID, &returnChunkID, &threadID)
 		if err != nil {
@@ -276,10 +276,10 @@ func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkI
 	var buildID, returnChunkID, threadID string
 	var err error
 	if len(candidates) > 0 {
-		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = ANY($3) AND c.status != 'cancelled' AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
+		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'deploying', 'completed', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = ANY($3) AND c.status != 'cancelled' AND (c.status NOT IN ('merged', 'deploying', 'completed') OR c.pr_number = $1) AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
 		err = s.db.QueryRow(ctx, qWithRepo, req.PRNumber, chunkID, candidates).Scan(&buildID, &returnChunkID, &threadID)
 	} else {
-		const qNoRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.status != 'cancelled' AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
+		const qNoRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'deploying', 'completed', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.status != 'cancelled' AND (c.status NOT IN ('merged', 'deploying', 'completed') OR c.pr_number = $1) AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
 		err = s.db.QueryRow(ctx, qNoRepo, req.PRNumber, chunkID).Scan(&buildID, &returnChunkID, &threadID)
 	}
 	if err != nil {
@@ -374,7 +374,7 @@ func (s *PostgresVanadisStore) resolveAttachChunkPRError(ctx context.Context, ch
 		return fmt.Errorf("%w: chunk %s or parent build is cancelled", ErrBuildConflict, chunkID)
 	}
 	var isCancelled bool
-	cancErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.id = $1 AND (c.status = 'cancelled' OR b.status IN ('cancelled', 'completed')));`, chunkID).Scan(&isCancelled)
+	cancErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.id = $1 AND (c.status = 'cancelled' OR c.status IN ('merged', 'deploying', 'completed') OR b.status IN ('cancelled', 'completed')));`, chunkID).Scan(&isCancelled)
 	if cancErr == nil && isCancelled {
 		return fmt.Errorf("%w: chunk %s or parent build is cancelled", ErrBuildConflict, chunkID)
 	}

@@ -185,7 +185,7 @@ func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason st
 	c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), nonNilSlice(c.AcceptanceCriteria)
 	c.Effort = capChunkEffort(c.Effort)
 
-	if isChunkDoneStatus(c.Status) || c.Status == statusFailed || b.Status == statusCompleted || b.Status == statusCancelled {
+	if isChunkMergedOrDoneStatus(c.Status) || c.Status == statusFailed || b.Status == statusCompleted || b.Status == statusCancelled {
 		return &b, &c, false, nil
 	}
 

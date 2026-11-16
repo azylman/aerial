@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -82,6 +83,41 @@ func findTargetChunkIndex(chunks []VanadisChunk, chunkIndex int, desiredID, buil
 	return -1, fmt.Errorf("chunk index %d not found in build %s", chunkIndex, buildID)
 }
 
+func chunkRestartsEri(c VanadisChunk) bool {
+	repo := strings.TrimSpace(c.Repo)
+	if repo == "" || slices.Contains(repoMatchCandidates(repo), "azylman/aerial") {
+		for _, rawPath := range c.TargetFiles {
+			p := strings.TrimSpace(rawPath)
+			p = strings.TrimPrefix(p, "./")
+			p = strings.TrimPrefix(p, "/")
+			if strings.HasPrefix(p, "services/eri/") || strings.HasPrefix(p, "pkg/") || p == "k8s/core-services.yaml" {
+				return true
+			}
+		}
+	}
+	if c.RolloutState != nil {
+		for _, job := range c.RolloutState.ExpectedJobs {
+			if strings.EqualFold(strings.TrimSpace(job), "eri") {
+				return true
+			}
+		}
+		for _, job := range c.RolloutState.StartedJobs {
+			if strings.EqualFold(strings.TrimSpace(job), "eri") {
+				return true
+			}
+		}
+	}
+	if len(c.CIChecks) > 0 {
+		checkJobs, _, _, _, _ := analyzeChunkBuildChecks(c.CIChecks)
+		for _, job := range checkJobs {
+			if strings.EqualFold(strings.TrimSpace(job), "eri") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func isPRDependencyCodeReady(other VanadisChunk) bool {
 	status := strings.ToLower(strings.TrimSpace(other.Status))
 	if status == statusCompleted {
@@ -89,8 +125,8 @@ func isPRDependencyCodeReady(other VanadisChunk) bool {
 	}
 	if strings.ToLower(strings.TrimSpace(other.Mode)) == "pr" {
 		switch status {
-		case statusMerged, statusDeploying, statusDeployFailed:
-			return true
+		case statusMerged, statusDeploying:
+			return !chunkRestartsEri(other)
 		}
 	}
 	return false

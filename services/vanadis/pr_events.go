@@ -114,7 +114,7 @@ WHERE id = $1;`
 }
 
 // IncrementChunkCIFailCount increments ci_fail_count, marks chunk as ci_failed, and sets banner.
-// If the chunk is already terminal ('failed', 'completed', 'merged'), the counter is not incremented and status is preserved.
+// If the chunk is already terminal or deploying ('failed', 'completed', 'merged', 'deploying', 'cancelled'), the counter is not incremented and status is preserved.
 func (s *PostgresVanadisStore) IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string) (int, error) {
 	if s == nil || s.db == nil {
 		return 0, errors.New("database connection is nil")
@@ -124,9 +124,9 @@ func (s *PostgresVanadisStore) IncrementChunkCIFailCount(ctx context.Context, ch
 		return 0, errors.New("chunk_id cannot be empty")
 	}
 	const q = `UPDATE vanadis_chunks
-SET ci_fail_count = CASE WHEN status IN ('failed', 'completed', 'merged') THEN ci_fail_count ELSE ci_fail_count + 1 END,
-    status = CASE WHEN status IN ('failed', 'completed', 'merged') THEN status ELSE 'ci_failed' END,
-    banner = CASE WHEN status IN ('failed', 'completed', 'merged') THEN banner ELSE $1 END,
+SET ci_fail_count = CASE WHEN status IN ('failed', 'completed', 'merged', 'deploying', 'cancelled') THEN ci_fail_count ELSE ci_fail_count + 1 END,
+    status = CASE WHEN status IN ('failed', 'completed', 'merged', 'deploying', 'cancelled') THEN status ELSE 'ci_failed' END,
+    banner = CASE WHEN status IN ('failed', 'completed', 'merged', 'deploying', 'cancelled') THEN banner ELSE $1 END,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = $2
 RETURNING ci_fail_count;`
@@ -405,11 +405,22 @@ func (s *VanadisServer) handlePRRolloutUpdated(ctx context.Context, ev pubsub.PR
 	return nil
 }
 
-func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
-	if chunk.Status == statusFailed || chunk.Status == statusCompleted || chunk.Status == statusMerged {
-		return nil
+func (s *VanadisServer) cancelChunkDispatches(ctx context.Context, chunkID string) {
+	if s == nil || s.httpClient == nil {
+		return
 	}
-	if build.Status == statusFailed || build.Status == statusCompleted || build.Status == statusCancelled {
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return
+	}
+	payload := map[string]string{"chunk_id": chunkID}
+	if _, err := s.postBrainJSON(ctx, "/dispatch/cancel", payload, 4<<10); err != nil {
+		log.Printf("[vanadis] warning cancelling dispatches for chunk %s: %v", chunkID, err)
+	}
+}
+
+func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
+	if isChunkMergedOrDoneStatus(chunk.Status) || chunk.Status == statusFailed || chunk.Status == statusCancelled || build.Status == statusFailed || build.Status == statusCompleted || build.Status == statusCancelled {
 		return nil
 	}
 	if isGateAggregatorCheck(ev.CheckName) {
@@ -441,6 +452,7 @@ func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecy
 			VanadisChunkID: chunk.ID,
 			Prompt:         prompt,
 			Effort:         capChunkEffort(chunk.Effort),
+			SkipIfActive:   true,
 		}); err != nil {
 			log.Printf("[vanadis] warning dispatching ci remediation for %s: %v", chunk.ID, err)
 		}
@@ -472,6 +484,9 @@ func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecy
 }
 
 func (s *VanadisServer) handlePRConflict(ctx context.Context, ev pubsub.PRLifecycleEvent, chunk *VanadisChunk, build *VanadisBuild) error {
+	if isChunkMergedOrDoneStatus(chunk.Status) || chunk.Status == statusFailed || chunk.Status == statusCancelled || build.Status == statusFailed || build.Status == statusCompleted || build.Status == statusCancelled {
+		return nil
+	}
 	status := statusConflict
 	banner := "Merge conflict detected"
 	if err := s.store.UpdateChunkBannerAndStatus(ctx, chunk.ID, status, banner); err != nil {
@@ -487,6 +502,7 @@ func (s *VanadisServer) handlePRConflict(ctx context.Context, ev pubsub.PRLifecy
 		VanadisChunkID: chunk.ID,
 		Prompt:         prompt,
 		Effort:         capChunkEffort(chunk.Effort),
+		SkipIfActive:   true,
 	})
 }
 
@@ -513,6 +529,7 @@ func (s *VanadisServer) handlePRSyncFailed(ctx context.Context, ev pubsub.PRLife
 }
 
 func (s *VanadisServer) handlePRMerged(ctx context.Context, chunk *VanadisChunk, build *VanadisBuild) error {
+	s.cancelChunkDispatches(ctx, chunk.ID)
 	if !strings.EqualFold(chunk.Status, "merged") && !strings.EqualFold(chunk.Status, "completed") {
 		if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "merged"); err != nil {
 			log.Printf("[vanadis] warning updating chunk %s to merged: %v", chunk.ID, err)
@@ -535,6 +552,8 @@ func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *Vanadi
 		s.syncBuildWidget(ctx, build.ID, "")
 		return nil
 	}
+
+	s.cancelChunkDispatches(ctx, chunk.ID)
 
 	if !strings.EqualFold(chunk.Status, "completed") {
 		if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {

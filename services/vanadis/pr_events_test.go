@@ -488,7 +488,7 @@ func TestHandlePRCIFailed_Remediation(t *testing.T) {
 			assert.Equal(t, "vanadis-c-ci1-cifail-sha601-2", r.Body["id"])
 			assert.Equal(t, "vanadis-c-ci1", r.Body["session_id"])
 			assert.Equal(t, "123456789012345678", r.Body["target_id"])
-			assert.Empty(t, r.Body["skip_if_active"])
+			assert.Equal(t, true, r.Body["skip_if_active"])
 			assert.Contains(t, r.Body["prompt"], "Go Unit Tests")
 			assert.Contains(t, r.Body["prompt"], "--- FAIL: TestA")
 		}
@@ -720,6 +720,48 @@ func TestHandlePRCIFailed_SkipConditions(t *testing.T) {
 			checkName:   "Go Unit Tests",
 			startCount:  4,
 		},
+		{
+			name:        "skips when chunk is merged",
+			buildStatus: "running",
+			chunkStatus: "merged",
+			checkName:   "Go Unit Tests",
+			startCount:  0,
+		},
+		{
+			name:        "skips when chunk is deploying",
+			buildStatus: "running",
+			chunkStatus: "deploying",
+			checkName:   "Go Unit Tests",
+			startCount:  0,
+		},
+		{
+			name:        "skips when chunk is completed",
+			buildStatus: "running",
+			chunkStatus: "completed",
+			checkName:   "Go Unit Tests",
+			startCount:  0,
+		},
+		{
+			name:        "skips when chunk is cancelled",
+			buildStatus: "running",
+			chunkStatus: "cancelled",
+			checkName:   "Go Unit Tests",
+			startCount:  0,
+		},
+		{
+			name:        "skips when build is cancelled",
+			buildStatus: "cancelled",
+			chunkStatus: "pr_opened",
+			checkName:   "Go Unit Tests",
+			startCount:  0,
+		},
+		{
+			name:        "skips when build is completed",
+			buildStatus: "completed",
+			chunkStatus: "pr_opened",
+			checkName:   "Go Unit Tests",
+			startCount:  0,
+		},
 	}
 
 	for _, tc := range tests {
@@ -788,7 +830,7 @@ func TestHandlePRConflict_DeployFailed_SyncFailed(t *testing.T) {
 			assert.Equal(t, "vanadis-c-conf", r.Body["session_id"])
 			assert.Equal(t, "123456789012345678", r.Body["target_id"])
 			assert.Equal(t, "c-conf", r.Body["vanadis_chunk_id"])
-			assert.Empty(t, r.Body["skip_if_active"])
+			assert.Equal(t, true, r.Body["skip_if_active"])
 			assert.Equal(t, "medium", r.Body["effort"])
 			assert.Contains(t, r.Body["prompt"], "Merge conflict detected")
 		}
@@ -921,13 +963,17 @@ func TestHandlePRMergedAndDeploySuccess(t *testing.T) {
 			assert.Equal(t, tc.wantStatus, updatedChunk.Status)
 
 			wantReconcilePath := fmt.Sprintf("/Build/%s/Reconcile/send", tc.buildID)
-			var foundReconcile bool
+			var foundReconcile, foundCancel bool
 			for _, r := range *reqs {
 				if r.Path == wantReconcilePath {
 					foundReconcile = true
 				}
+				if r.Path == "/dispatch/cancel" && r.Body["chunk_id"] == tc.chunkID {
+					foundCancel = true
+				}
 			}
 			assert.True(t, foundReconcile, "must call Build Virtual Object")
+			assert.True(t, foundCancel, "must cancel chunk dispatches on merged/deploy_success")
 
 			var foundEvent bool
 			for _, published := range recBus.getEvents() {
