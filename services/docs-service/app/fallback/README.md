@@ -33,6 +33,8 @@ Persistent Scheduler & Event Watches"]
 Semantic Fact Extraction & Memory Decay"]
         Vanadis["vanadis (:4025)
 Multi-Chunk Build Queue Orchestrator"]
+        VanadisRestate["vanadis-restate (:9080 / :4026)
+Restate Build Workflow Worker"]
         Pjev["pjev (:8000)
 System-1 Ambient Triage (/v1/systemone)"]
         Senses["senses (:8880 / :10300)
@@ -44,6 +46,10 @@ STT, TTS, Embeddings & Wyoming"]
 • CloudNativePG PostgreSQL 18 + pgvector
 • CAS Task Queues & PR Registry
 • Vector RAG & State Persistence")]
+        Nats["nats (:4222 / :8222)
+NATS 2 JetStream Broker"]
+        Restate["restate (:8080 / :9070)
+Restate Durable Execution Cluster"]
         Flux["flux-system
 Flux CD k3s Reconciler (./k8s)"]
         GitSync["git-sync sidecars
@@ -103,6 +109,9 @@ Kubelet Container Metrics"]
     Haro --> Postgres
     Coven --> Postgres
     Vanadis --> Postgres
+    Vanadis --> Nats
+    VanadisRestate --> Restate
+    Synapse --> Nats
     Synapse --> Postgres
 
     %% GitOps & Persistence
