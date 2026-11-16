@@ -436,7 +436,7 @@ func TestFormatChunkPrompt(t *testing.T) {
 	wantsAction := []string{
 		"=== Action Chunk Execution Contract ===",
 		"5. Ending the turn is treated as successful completion: NEVER end it while work is still pending in the background (downloads, installs, builds, deploys, or waits)—run long operations in the foreground with a long timeout and confirm the outcome before ending the turn.",
-		"6. If an unrecoverable blocker prevents completion, call the vanadis MCP tool fail_chunk with chunk_id \"build-999-chunk-act\" and the failure reason, and end the turn.",
+		"6. If an unrecoverable blocker prevents completion, call the vanadis MCP tool fail_chunk with chunk_id \"build-999-chunk-act\", dispatch_id \"vanadis-build-999-chunk-act-turn-0\" and the failure reason, and end the turn.",
 		"7. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID \"build-999-chunk-act\" in the task description) rather than expanding the active chunk's scope.",
 	}
 	assertPromptContains(t, pAction, wantsAction)
@@ -1208,7 +1208,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	bFail := mkBuild("b-fail", "123456789012345678", "Fail Build", "obj", "running")
 	cFail := mkChunk("c-fail", "b-fail", 0, "Fail Chunk", "inst", "medium", "running")
 	_ = memStore.CreateBuild(ctx, bFail, []VanadisChunk{cFail})
-	if _, _, _, err := srv.failChunkInternal(ctx, "c-fail", "test failure"); err != nil {
+	if _, _, _, err := srv.failChunkInternal(ctx, "c-fail", "test failure", ""); err != nil {
 		t.Fatalf("failChunkInternal err = %v", err)
 	}
 }

@@ -139,8 +139,9 @@ type MCPRemoveChunkOutput struct {
 
 // MCPFailChunkArgs defines arguments for fail_chunk tool.
 type MCPFailChunkArgs struct {
-	ChunkID string `json:"chunk_id" jsonschema:"Chunk ID to mark as failed"`
-	Reason  string `json:"reason"   jsonschema:"Detailed explanation of the unrecoverable blocker"`
+	DispatchID string `json:"dispatch_id,omitempty" jsonschema:"Current action dispatch identity"`
+	ChunkID    string `json:"chunk_id"              jsonschema:"Chunk ID to mark as failed"`
+	Reason     string `json:"reason"                jsonschema:"Detailed explanation of the unrecoverable blocker"`
 }
 
 // MCPFailChunkOutput defines output for fail_chunk tool.
@@ -446,7 +447,7 @@ func (s *VanadisServer) mcpFailChunk(ctx context.Context, args MCPFailChunkArgs)
 }
 
 func (s *VanadisServer) handleMCPFailChunk(ctx context.Context, args MCPFailChunkArgs) (MCPFailChunkOutput, error) {
-	build, chunk, failed, err := s.failChunkInternal(ctx, args.ChunkID, args.Reason)
+	build, chunk, failed, err := s.failChunkInternal(ctx, args.ChunkID, args.Reason, args.DispatchID)
 	if err != nil {
 		return MCPFailChunkOutput{}, err
 	}

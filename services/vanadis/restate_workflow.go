@@ -118,7 +118,7 @@ func executeBuildMutation(ctx context.Context, srv *VanadisServer, buildID strin
 		}
 		return applyMutationActionCompleted(ctx, srv, req.ChunkID, req.DispatchID)
 	case "chunk_failed":
-		return applyMutationChunkFailed(ctx, srv, req.ChunkID, req.Reason)
+		return applyMutationChunkFailed(ctx, srv, req.ChunkID, req.Reason, req.DispatchID)
 	case statusCancelled:
 		return applyMutationCancelled(ctx, srv, buildID)
 	default:
@@ -208,7 +208,7 @@ func applyMutationActionCompleted(ctx context.Context, srv *VanadisServer, chunk
 	return nil
 }
 
-func applyMutationChunkFailed(ctx context.Context, srv *VanadisServer, chunkID, reason string) error {
+func applyMutationChunkFailed(ctx context.Context, srv *VanadisServer, chunkID, reason, dispatchID string) error {
 	chunkID = strings.TrimSpace(chunkID)
 	if chunkID == "" {
 		return fmt.Errorf("%w: chunk_id required for chunk_failed", ErrInvalidBuildInput)
@@ -217,7 +217,7 @@ func applyMutationChunkFailed(ctx context.Context, srv *VanadisServer, chunkID, 
 	if reason == "" {
 		reason = "chunk failed"
 	}
-	if _, _, _, err := srv.failChunkInternal(ctx, chunkID, reason); err != nil {
+	if _, _, _, err := srv.failChunkInternal(ctx, chunkID, reason, dispatchID); err != nil {
 		return fmt.Errorf("fail chunk %s: %w", chunkID, err)
 	}
 	return nil

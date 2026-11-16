@@ -463,7 +463,7 @@ func (s *VanadisServer) handlePRCIFailed(ctx context.Context, ev pubsub.PRLifecy
 	}
 
 	if failCount == maxCIRemediationAttempts+1 {
-		if _, _, _, err := s.store.FailChunk(ctx, chunk.ID, "ci_remediation_cap_reached"); err != nil {
+		if _, _, _, err := s.store.FailChunk(ctx, chunk.ID, "ci_remediation_cap_reached", ""); err != nil {
 			log.Printf("[vanadis] warning failing chunk %s on cap reached: %v", chunk.ID, err)
 		}
 		capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts)
@@ -597,7 +597,7 @@ func (s *VanadisServer) handlePRDeploySuccess(ctx context.Context, chunk *Vanadi
 }
 
 func (s *VanadisServer) handlePRClosedUnmerged(ctx context.Context, chunk *VanadisChunk) error {
-	_, _, _, err := s.failChunkInternal(ctx, chunk.ID, "pr_closed_unmerged")
+	_, _, _, err := s.failChunkInternal(ctx, chunk.ID, "pr_closed_unmerged", "")
 	return err
 }
 

@@ -130,13 +130,14 @@ func TestVanadisMCP_HTTPTransport(t *testing.T) {
 
 // vanadisMCPToolCase is one tools/call invocation against the seeded MCP fixture store.
 type vanadisMCPToolCase struct {
-	name        string
-	nilStore    bool
-	listErr     error
-	getErr      error
-	args        string
-	wantToolErr bool
-	wantSubstr  string
+	name             string
+	nilStore         bool
+	actionGeneration *int
+	listErr          error
+	getErr           error
+	args             string
+	wantToolErr      bool
+	wantSubstr       string
 }
 
 // newMCPToolsStore seeds two builds on thread 1234567890 (one running with a
@@ -175,7 +176,12 @@ func newMCPToolsStore(listErr, getErr error) *memoryVanadisStore {
 // returns the raw response body.
 func callVanadisMCPTool(t *testing.T, tc vanadisMCPToolCase, toolName string) []byte {
 	t.Helper()
-	var store VanadisStore = newMCPToolsStore(tc.listErr, tc.getErr)
+	mem := newMCPToolsStore(tc.listErr, tc.getErr)
+	var store VanadisStore = mem
+	if tc.actionGeneration != nil {
+		c := &mem.chunks["build-mcp-1"][0]
+		c.Mode, c.PRNumber, c.StallNudges = "action", 0, *tc.actionGeneration
+	}
 	if tc.nilStore {
 		store = nil
 	}
@@ -488,7 +494,12 @@ func TestVanadisMCP_RemoveChunk(t *testing.T) {
 
 func TestVanadisMCP_FailChunk(t *testing.T) {
 	t.Parallel()
+	retryGeneration := 1
 	tests := []vanadisMCPToolCase{
+		{name: "action retry current identity", actionGeneration: &retryGeneration, args: `{"chunk_id":"chunk-1","reason":"failure","dispatch_id":"vanadis-chunk-1-turn-1"}`, wantSubstr: `"failed":true`},
+		{name: "action retry missing identity", actionGeneration: &retryGeneration, args: `{"chunk_id":"chunk-1","reason":"failure"}`, wantSubstr: `"failed":false`},
+		{name: "action retry stale identity", actionGeneration: &retryGeneration, args: `{"chunk_id":"chunk-1","reason":"failure","dispatch_id":"vanadis-chunk-1-turn-0"}`, wantSubstr: `"failed":false`},
+
 		{
 			name:        "fail_chunk nil store",
 			nilStore:    true,

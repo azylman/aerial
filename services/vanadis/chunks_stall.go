@@ -49,13 +49,13 @@ func (s *VanadisServer) ProcessStalledChunkCheck(ctx context.Context, chunkID st
 		RecordChunkTotal("stalled")
 		if dErr := s.redispatchStalledChunk(ctx, build.ID, chunk.ID); dErr != nil {
 			log.Printf("[vanadis] stalled check: re-dispatch of chunk %s failed: %v", chunk.ID, dErr)
-			_, _, _, fErr := s.failChunkInternal(ctx, chunk.ID, fmt.Sprintf("chunk stalled (turn ended without submitting a PR or calling fail_chunk) and the stall re-dispatch failed: %v", dErr))
+			_, _, _, fErr := s.failChunkInternal(ctx, chunk.ID, fmt.Sprintf("chunk stalled (turn ended without submitting a PR or calling fail_chunk) and the stall re-dispatch failed: %v", dErr), "")
 			return fErr
 		}
 		log.Printf("[vanadis] stalled check: chunk %s re-dispatched with stall notice", chunk.ID)
 		return nil
 	case StalledChunkVerdictFail:
-		_, _, _, fErr := s.failChunkInternal(ctx, chunk.ID, stalledChunkFailReason)
+		_, _, _, fErr := s.failChunkInternal(ctx, chunk.ID, stalledChunkFailReason, "")
 		return fErr
 	default:
 		return nil
