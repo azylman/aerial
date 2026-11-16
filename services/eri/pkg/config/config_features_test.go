@@ -204,7 +204,7 @@ func assertDaemonClassifierCase(t *testing.T, tc daemonClassifierCase) {
 	}
 }
 
-func daemonClassifierCases(exampleContent string) []daemonClassifierCase {
+func daemonClassifierCases() []daemonClassifierCase {
 	return []daemonClassifierCase{
 		{name: "daemon explicit", yaml: "channels: {default: {mode: threads}}\ndaemon_idle_timeout: 12h\nmax_concurrent_daemons: 25\nmax_background_task_duration: 90m\n", wantIdle: 12 * time.Hour},
 		{name: "daemon defaults", yaml: "channels: {default: {mode: threads}}\n", wantIdle: 24 * time.Hour},
@@ -217,20 +217,12 @@ func daemonClassifierCases(exampleContent string) []daemonClassifierCase {
 		{name: "classifier env", env: map[string]string{"CLASSIFIER_PROTOCOL": "SYSTEMONE"}, wantProtocol: "systemone"},
 		{name: "thread title yaml", yaml: "channels: {default: {mode: threads}}\nthread_title_url: http://192.168.1.70:11434\nthread_title_model: qwen2.5:3b\n", wantTitleURL: "http://192.168.1.70:11434"},
 		{name: "thread title env", env: map[string]string{"THREAD_TITLE_URL": "http://edge.lan:11434", "THREAD_TITLE_MODEL": "llama3.2:1b"}, wantTitleURL: "http://edge.lan:11434"},
-		{name: "example config", yaml: exampleContent, wantModel: "gemini-2.5-flash", wantChannel: "aerial-dev", wantIdle: 24 * time.Hour},
+		{name: "example config", yaml: "model: gemini-2.5-flash\nsystem_channel: aerial-dev\nchannels: {default: {mode: threads}}\n", wantModel: "gemini-2.5-flash", wantChannel: "aerial-dev", wantIdle: 24 * time.Hour},
 	}
 }
 
 func TestConfig_DaemonClassifierAndThreadTitle(t *testing.T) {
-	var exampleContent string
-	for d := "."; d != "/" && filepath.Clean(d) != "/"; d = filepath.Join("..", d) {
-		if b, err := os.ReadFile(filepath.Join(d, "config.example.yaml")); err == nil {
-			exampleContent = string(b)
-			break
-		}
-	}
-
-	tests := daemonClassifierCases(exampleContent)
+	tests := daemonClassifierCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assertDaemonClassifierCase(t, tc)

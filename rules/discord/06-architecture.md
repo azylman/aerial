@@ -43,7 +43,7 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`kubelet-cadvisor`**: Node and container resource metrics collected via Kubelet cAdvisor (CPU, memory, network, disk).
   - **`node-exporter`**: Host telemetry collector gathering CPU, memory, storage, thermals, and OS metrics.
   - **`cnpg-metrics`**: CloudNativePG native Prometheus metrics (`:9187`) collecting PostgreSQL connection pools, transactions, and replication stats.
-  - **`victoriametrics`**: Single-node Prometheus-compatible TSDB (`:8428`) storing system metrics with modular scrape configs.
+  - **`victoriametrics`**: Single-node Prometheus-compatible TSDB (`:8428`) storing system metrics with declarative VMServiceScrape and VMStaticScrape discovery via vm-operator.
   - **`victorialogs`**: Log store (`:9428`, 60-day retention) for container and journald logs, queried with LogsQL. LAN-only (never on the edge gateway).
   - **`victoriatraces`**: OTLP trace store (`:10428`, 30-day retention) receiving gateway and service spans. LAN-only (never on the edge gateway).
   - **`vmalert`**: Alert rule evaluator (`:8880`) assessing recording and alerting anomaly rules against VictoriaMetrics.
@@ -79,7 +79,7 @@ Aerial operates on a strict **Multi-Repository Architecture & Separation of Conc
   - **`rules/`**: User persona overrides, personal preferences, communication style, and user identity/alias definitions structured into `common/`, `persona/`, `discord/`, and `voice/`.
   - **`channels/<channel-name>.md`**: Dedicated instructions and operating constraints for specific Discord channels (auto-discovered; inherited by threads).
   - **`custom-skills/`**: Private operational runbooks and domain-specific workflows (e.g., smart home).
-  - **`victoriametrics/`**: Custom Prometheus scrape configurations (e.g., Home Assistant metrics).
+  - **`services/`**: Per-service YAML configurations and custom Grafana dashboards.
   - **`docs/`**: Living Docsify documentation portal served dynamically at `/docs/`.
   - **`k8s/*.yaml`**: User-defined Kubernetes manifests and Kustomizations deployed across cluster nodes.
 
