@@ -1,7 +1,10 @@
 package guard
 
 import (
+	"bytes"
 	"encoding/json"
+	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -102,6 +105,65 @@ type ToolCall struct {
 	Args json.RawMessage `json:"args"`
 }
 
+// StringOrSlice unmarshals from either a JSON string or a JSON array of strings (such as an argv slice).
+// When an array is provided, if it is a shell wrapper like ["bash", "-c", script] or ["bash", "-lc", script],
+// it extracts the script payload; otherwise it joins elements with spaces.
+type StringOrSlice string
+
+func (s *StringOrSlice) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*s = ""
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var str string
+		if err := json.Unmarshal(trimmed, &str); err != nil {
+			return err
+		}
+		*s = StringOrSlice(str)
+		return nil
+	}
+	if trimmed[0] == '[' {
+		var slice []string
+		if err := json.Unmarshal(trimmed, &slice); err != nil {
+			return err
+		}
+		*s = StringOrSlice(joinShellArgv(slice))
+		return nil
+	}
+	*s = StringOrSlice(string(trimmed))
+	return nil
+}
+
+func joinShellArgv(argv []string) string {
+	if len(argv) == 0 {
+		return ""
+	}
+	if len(argv) >= 3 {
+		bin := strings.ToLower(filepath.Base(argv[0]))
+		if bin == binBash || bin == "sh" || bin == "zsh" {
+			for i := 1; i < len(argv)-1; i++ {
+				if argv[i] == "-c" || argv[i] == "-lc" || argv[i] == "-cl" {
+					return argv[len(argv)-1]
+				}
+			}
+		}
+	}
+	var b strings.Builder
+	for i, arg := range argv {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		if strings.ContainsAny(arg, " \t\n\"'") {
+			b.WriteString(strconv.Quote(arg))
+		} else {
+			b.WriteString(arg)
+		}
+	}
+	return b.String()
+}
+
 // ToolArgs represents commonly inspected tool parameters.
 type ToolArgs struct {
 	TargetFile        string          `json:"TargetFile"`
@@ -111,8 +173,8 @@ type ToolArgs struct {
 	FilePathSnake     string          `json:"file_path,omitempty"`
 	Patch             string          `json:"patch,omitempty"`
 	Input             string          `json:"input,omitempty"`
-	Command           string          `json:"command,omitempty"`
-	Cmd               string          `json:"cmd,omitempty"`
+	Command           StringOrSlice   `json:"command,omitempty"`
+	Cmd               StringOrSlice   `json:"cmd,omitempty"`
 	Workdir           string          `json:"workdir,omitempty"`
 	Pattern           string          `json:"pattern,omitempty"`
 	Offset            int             `json:"offset,omitempty"`
@@ -187,10 +249,10 @@ func (a *ToolArgs) patchText() string {
 		return a.Input
 	}
 	if a.Command != "" {
-		return a.Command
+		return string(a.Command)
 	}
 	if a.Cmd != "" {
-		return a.Cmd
+		return string(a.Cmd)
 	}
 	if a.CommandLine != "" {
 		return a.CommandLine
@@ -216,8 +278,18 @@ func extractPatchPaths(text string) []string {
 		}
 	}
 
+	isCodexPatch := strings.Contains(text, "*** Begin Patch")
+	inHunk := false
+
 	for line := range strings.SplitSeq(text, "\n") {
 		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "@@") {
+			inHunk = true
+			continue
+		}
+		if strings.HasPrefix(trimmed, "diff --git") {
+			inHunk = false
+		}
 		switch {
 		case strings.HasPrefix(trimmed, "*** Update File:"):
 			add(strings.TrimPrefix(trimmed, "*** Update File:"))
@@ -229,11 +301,11 @@ func extractPatchPaths(text string) []string {
 			add(strings.TrimPrefix(trimmed, "*** Move to:"))
 		case strings.HasPrefix(trimmed, "*** Move from:"):
 			add(strings.TrimPrefix(trimmed, "*** Move from:"))
-		case strings.HasPrefix(trimmed, "+++ "):
+		case !isCodexPatch && !inHunk && strings.HasPrefix(trimmed, "+++ "):
 			target := strings.TrimPrefix(trimmed, "+++ ")
 			target = strings.TrimPrefix(target, "b/")
 			add(target)
-		case strings.HasPrefix(trimmed, "--- "):
+		case !isCodexPatch && !inHunk && strings.HasPrefix(trimmed, "--- "):
 			target := strings.TrimPrefix(trimmed, "--- ")
 			target = strings.TrimPrefix(target, "a/")
 			add(target)
@@ -318,9 +390,9 @@ func (a *ToolArgs) Normalize() {
 	}
 	if a.CommandLine == "" {
 		if a.Command != "" {
-			a.CommandLine = a.Command
+			a.CommandLine = string(a.Command)
 		} else if a.Cmd != "" {
-			a.CommandLine = a.Cmd
+			a.CommandLine = string(a.Cmd)
 		}
 	}
 	if a.Cwd == "" && a.Workdir != "" {

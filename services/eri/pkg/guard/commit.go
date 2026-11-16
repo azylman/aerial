@@ -510,7 +510,7 @@ func unwrapShellScriptCommand(tokens []string) (string, bool) {
 		return "", false
 	}
 	for i, t := range tokens {
-		if t == "-c" && i+1 < len(tokens) {
+		if (t == "-c" || t == "-lc" || t == "-cl") && i+1 < len(tokens) {
 			return tokens[i+1], true
 		}
 	}

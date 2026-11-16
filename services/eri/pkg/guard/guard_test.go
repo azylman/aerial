@@ -164,6 +164,9 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"codex apply_patch relative path targeting protected path denied", "share", `{"toolCall": {"name": "apply_patch", "args": {"patch": "*** Update File: main.go\n@@ -1 +1 @@", "workdir": "/share/aerial"}}}`, true, 0, "", ""},
 		{"codex apply_patch relative path in workspace allowed", "share", `{"toolCall": {"name": "apply_patch", "args": {"patch": "*** Update File: main.go\n@@ -1 +1 @@", "workdir": "/data/scratch"}}}`, false, 0, "", ""},
 		{"codex apply_patch patch text targeting live state denied", "live-state", "{\"toolCall\": {\"name\": \"apply_patch\", \"args\": {\"patch\": \"*** Update File: /data/ssh/config\\n@@ -1 +1 @@\"}}}", true, 0, "", ""},
+		{"codex shell array command unwrap bash -lc denied in share", "share", `{"toolCall": {"name": "shell", "args": {"command": ["bash", "-lc", "touch evil.txt"], "workdir": "/share/aerial"}}}`, true, 0, "", ""},
+		{"codex shell array cmd targeting share denied", "share", `{"toolCall": {"name": "shell", "args": {"cmd": ["touch", "/share/aerial/evil.txt"], "cwd": "/data"}}}`, true, 0, "", ""},
+		{"codex shell array command safe allowed", "share", `{"toolCall": {"name": "shell", "args": {"command": ["echo", "safe"], "cwd": "/data"}}}`, false, 0, "", ""},
 	}
 
 	for _, tc := range tests {
@@ -432,6 +435,8 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 		{"direct map object", `{"path": "/tmp/test.go", "CommandLine": "cat test.go"}`, "/tmp/test.go", "cat test.go", 0, 0},
 		{"claude snake_case fields", `{"file_path": "/tmp/claude.go", "command": "echo claude", "offset": 10, "limit": 20}`, "/tmp/claude.go", "echo claude", 10, 29},
 		{"codex cmd and workdir fields", `{"cmd": "echo codex", "workdir": "/data/work"}`, "", "echo codex", 0, 0},
+		{"codex array command unwrapped", `{"command": ["bash", "-lc", "echo codex"], "workdir": "/data/work"}`, "", "echo codex", 0, 0},
+		{"codex array cmd joined", `{"cmd": ["echo", "hello", "world"], "workdir": "/data/work"}`, "", "echo hello world", 0, 0},
 		{"arguments only object", `{"Arguments": {"token": "secret"}}`, "", "", 0, 0},
 		{"arguments lowercase only object", `{"arguments": {"token": "secret"}}`, "", "", 0, 0},
 		{"target file only", `{"TargetFile": "/tmp/target.go"}`, "/tmp/target.go", "", 0, 0},
@@ -582,12 +587,21 @@ func TestPayloadAndToolArgsAccessors(t *testing.T) {
 			wantFile:   "/data/abs.go",
 		},
 		{
-			name: "tool args file fallback",
+			name: "tool args array command unwrap shell",
 			args: &ToolArgs{
-				File: "/data/file.go",
+				Command: StringOrSlice("touch /tmp/test"),
 			},
 			wantHasAny: true,
-			wantFile:   "/data/file.go",
+			wantCmd:    "touch /tmp/test",
+		},
+		{
+			name: "tool args patch text with sql comment ignores dashes",
+			args: &ToolArgs{
+				Patch: "*** Begin Patch\n*** Update File: /data/test.sql\n-- comment line\n",
+			},
+			wantHasAny:  true,
+			wantFile:    "/data/test.sql",
+			wantTargets: []string{"/data/test.sql"},
 		},
 		{
 			name: "tool args input patch text with protected priority",
@@ -603,6 +617,41 @@ func TestPayloadAndToolArgsAccessors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assertToolArgs(t, tc)
+		})
+	}
+}
+
+func TestStringOrSlice(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{"null", "null", "", false},
+		{"empty", "", "", false},
+		{"string", `"echo hello"`, "echo hello", false},
+		{"array simple", `["echo", "hello"]`, "echo hello", false},
+		{"array with spaces", `["echo", "hello world"]`, `echo "hello world"`, false},
+		{"array shell unwrap", `["bash", "-lc", "touch evil"]`, "touch evil", false},
+		{"array empty", `[]`, "", false},
+		{"fallback number", `123`, "123", false},
+		{"invalid string", `"unclosed`, "", true},
+		{"invalid array", `[1, 2]`, "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var s StringOrSlice
+			err := s.UnmarshalJSON([]byte(tc.input))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("UnmarshalJSON(%q) error = %v, wantErr %v", tc.input, err, tc.wantErr)
+			}
+			if string(s) != tc.want {
+				t.Fatalf("UnmarshalJSON(%q) = %q, want %q", tc.input, s, tc.want)
+			}
 		})
 	}
 }

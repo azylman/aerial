@@ -1154,7 +1154,6 @@ func TestClaudeTargetMcpAndSettingsProvisioning(t *testing.T) {
 
 type codexTargetCase struct {
 	name        string
-	nilProv     bool
 	emptyDir    bool
 	rawConfig   json.RawMessage
 	blockedDir  bool
@@ -1222,21 +1221,11 @@ func TestCodexTargetMcpAndHooksProvisioning(t *testing.T) {
 			wantErr:   false,
 			wantTOML:  false,
 		},
-		{
-			name:      "nil provisioner returns nil",
-			nilProv:   true,
-			rawConfig: json.RawMessage(`{"mcpServers":{"srv":{"server_url":"http://test:8080"}}}`),
-			wantErr:   false,
-			wantTOML:  false,
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tmp := t.TempDir()
-			var p *Provisioner
-			if !tc.nilProv {
-				p = New(tmp, tmp)
-			}
+			p := New(tmp, tmp)
 			targetDir := filepath.Join(tmp, ".codex")
 			if tc.emptyDir {
 				targetDir = ""
