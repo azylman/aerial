@@ -662,6 +662,15 @@ func TestTurnExecution_PrepareAttemptPrompt(t *testing.T) {
 			wantPrompt:    contPrompt,
 		},
 		{
+			name:          "attempt 2 with daemon turn completed with empty response and on-disk session returns continuation template",
+			attempt:       2,
+			promptToSend:  origPrompt,
+			lastErrDetail: "daemon turn completed with empty response",
+			hasSessionID:  true,
+			hasOnDiskSess: true,
+			wantPrompt:    contPrompt,
+		},
+		{
 			name:          "restarted dispatch attempt 1 with on-disk session returns continuation template",
 			attempt:       1,
 			promptToSend:  origPrompt,
