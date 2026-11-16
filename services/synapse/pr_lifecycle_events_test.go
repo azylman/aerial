@@ -426,7 +426,7 @@ func TestPRLifecycleEvents_DeployAndKustomization(t *testing.T) {
 		}
 		srv := &RouterServer{
 			registry: reg,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678", DefaultOwner: true}),
 		}
 		resNonDep := &ResolvedGitHubEvent{
 			Repo:     "azylman/aerial",
@@ -450,11 +450,22 @@ func TestPRLifecycleEvents_DeployAndKustomization(t *testing.T) {
 			t.Errorf("expected 1 ensureCall for dependabot branch, got %d", len(reg.ensureCalls))
 		}
 
+		// non-default-owner branch
+		regNonDefault := &mockPRRegistry{resolveTargetID: "123456789012345678"}
+		srvNonDefault := &RouterServer{
+			registry: regNonDefault,
+			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678", DefaultOwner: false}),
+		}
+		srvNonDefault.healDependabotPR(context.Background(), resDep)
+		if len(regNonDefault.ensureCalls) != 0 {
+			t.Errorf("expected 0 ensureCalls for non-default-owner router, got %d", len(regNonDefault.ensureCalls))
+		}
+
 		// empty targetID branch
 		regNoTarget := &mockPRRegistry{resolveTargetID: ""}
 		srvNoTarget := &RouterServer{
 			registry: regNoTarget,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: ""}),
+			cfgSrc:   fixedConfig(Config{SystemChannelID: "", DefaultOwner: true}),
 		}
 		srvNoTarget.healDependabotPR(context.Background(), resDep)
 		if len(regNoTarget.ensureCalls) != 0 {
@@ -465,7 +476,7 @@ func TestPRLifecycleEvents_DeployAndKustomization(t *testing.T) {
 		regErr := &mockPRRegistry{ensureErr: errors.New("db fail")}
 		srvErr := &RouterServer{
 			registry: regErr,
-			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678"}),
+			cfgSrc:   fixedConfig(Config{SystemChannelID: "123456789012345678", DefaultOwner: true}),
 		}
 		srvErr.healDependabotPR(context.Background(), resDep)
 		if len(regErr.ensureCalls) != 1 {
