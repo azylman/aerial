@@ -330,6 +330,9 @@ func runVoiceEngineTests(t *testing.T) {
 		{"claude", "claude"},
 		{"CLAUDE", "claude"},
 		{" Claude ", "claude"},
+		{"codex", "codex"},
+		{"CODEX", "codex"},
+		{"  codex  ", "codex"},
 		{"other", "agy"},
 	}
 	for _, tc := range processEngineTests {

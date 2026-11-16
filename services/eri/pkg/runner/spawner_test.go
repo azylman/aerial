@@ -199,6 +199,44 @@ func TestMockSpawnersAndProcessHandle(t *testing.T) {
 	}
 }
 
+func assertDefaultDaemonSpawnerCodex(t *testing.T) {
+	t.Helper()
+	var spawnedBin string
+	customSpawner := &DefaultDaemonSpawner{
+		spawnOnceFn: func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			spawnedBin = bin
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			closeQuietlyAll(inR, outW, errW)
+			return inW, outR, errR, NewMockProcessHandle(111), nil
+		},
+	}
+
+	inC, outC, errC, hC, errCSpawn := customSpawner.Spawn(context.Background(), DaemonConfig{
+		Engine:   "codex",
+		CodexBin: "/custom/bin/codex",
+	})
+	if errCSpawn != nil || spawnedBin != "/custom/bin/codex" {
+		t.Errorf("expected /custom/bin/codex, got %s (err: %v)", spawnedBin, errCSpawn)
+	}
+	closeQuietlyAll(inC, outC, errC)
+	if hC != nil {
+		_ = hC.Kill()
+	}
+
+	inCDef, outCDef, errCDef, hCDef, errCDefSpawn := customSpawner.Spawn(context.Background(), DaemonConfig{
+		Engine: "codex",
+	})
+	if errCDefSpawn != nil || spawnedBin != "codex" {
+		t.Errorf("expected default codex, got %s (err: %v)", spawnedBin, errCDefSpawn)
+	}
+	closeQuietlyAll(inCDef, outCDef, errCDef)
+	if hCDef != nil {
+		_ = hCDef.Kill()
+	}
+}
+
 func TestOSProcessHandle_And_DefaultDaemonSpawner(t *testing.T) {
 	closeQuietly(nil)
 	closeQuietly(errCloser{err: errors.New("simulated close error")})
@@ -247,6 +285,8 @@ func TestOSProcessHandle_And_DefaultDaemonSpawner(t *testing.T) {
 	if err == nil || stdin != nil || stdout != nil || stderr != nil || dHandle != nil {
 		t.Errorf("expected all nil on spawn error")
 	}
+
+	assertDefaultDaemonSpawnerCodex(t)
 }
 
 func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {

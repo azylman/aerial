@@ -89,6 +89,7 @@ func TestUnifiedProcessPool_StartupSpans(t *testing.T) {
 		{name: "turn lease records lock wait and agy spawn", inTurn: true, wantSpans: []string{spanDaemonSpawn, spanSessionLockWait}, wantEngine: "agy", wantAttempts: 1},
 		{name: "handshake timeout retry counts both attempts", opts: pipeMockSpawnerOpts{skipInitOnAttempt: 1}, inTurn: true, wantSpans: []string{spanDaemonSpawn, spanSessionLockWait}, wantEngine: "agy", wantAttempts: 2},
 		{name: "claude spawn covers the fork", engine: "claude", inTurn: true, wantSpans: []string{spanDaemonSpawn, spanSessionLockWait}, wantEngine: "claude", wantAttempts: 1},
+		{name: "codex spawn covers the fork", engine: "codex", inTurn: true, wantSpans: []string{spanDaemonSpawn, spanSessionLockWait}, wantEngine: "codex", wantAttempts: 1},
 		{name: "spawn failure marks the span", opts: pipeMockSpawnerOpts{spawnErrOn: 1}, inTurn: true, wantErr: true, wantSpans: []string{spanDaemonSpawn, spanSessionLockWait}, wantEngine: "agy", wantAttempts: 1, wantSpawnErr: true},
 		{name: "background lease without a turn records nothing"},
 	}

@@ -65,40 +65,39 @@ type loadConfigIngestionCase struct {
 	wantHaroURL    string
 	wantCovenURL   string
 	wantNATSURL    string
+	wantEngine     string
+	wantCodexBin   string
 	wantTx         TranscriptsConfig
 	wantErr        bool
 	errContains    string
 }
 
+func assertLoadConfigIngestionStrings(t *testing.T, cur *ConfigData, tc loadConfigIngestionCase) {
+	t.Helper()
+	for _, check := range []struct {
+		field, got, want string
+	}{
+		{"Model", cur.Model, tc.wantModel},
+		{"Timezone", cur.Timezone, tc.wantTZ},
+		{"SystemChannel", cur.SystemChannel, tc.wantSysChan},
+		{"BotID", cur.BotID, tc.wantBotID},
+		{"SynapseURL", cur.SynapseURL, tc.wantSynapseURL},
+		{"VanadisURL", cur.VanadisURL, tc.wantVanadisURL},
+		{"HaroURL", cur.HaroURL, tc.wantHaroURL},
+		{"CovenURL", cur.CovenURL, tc.wantCovenURL},
+		{"NATSURL", cur.NATSURL, tc.wantNATSURL},
+		{"Engine", cur.Engine, tc.wantEngine},
+		{"CodexBin", cur.CodexBin, tc.wantCodexBin},
+	} {
+		if check.want != "" && check.got != check.want {
+			t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
+		}
+	}
+}
+
 func assertLoadConfigIngestionValues(t *testing.T, cur *ConfigData, tc loadConfigIngestionCase) {
 	t.Helper()
-	if tc.wantModel != "" && cur.Model != tc.wantModel {
-		t.Errorf("Model = %q, want %q", cur.Model, tc.wantModel)
-	}
-	if tc.wantTZ != "" && cur.Timezone != tc.wantTZ {
-		t.Errorf("Timezone = %q, want %q", cur.Timezone, tc.wantTZ)
-	}
-	if tc.wantSysChan != "" && cur.SystemChannel != tc.wantSysChan {
-		t.Errorf("SystemChannel = %q, want %q", cur.SystemChannel, tc.wantSysChan)
-	}
-	if tc.wantBotID != "" && cur.BotID != tc.wantBotID {
-		t.Errorf("BotID = %q, want %q", cur.BotID, tc.wantBotID)
-	}
-	if tc.wantSynapseURL != "" && cur.SynapseURL != tc.wantSynapseURL {
-		t.Errorf("SynapseURL = %q, want %q", cur.SynapseURL, tc.wantSynapseURL)
-	}
-	if tc.wantVanadisURL != "" && cur.VanadisURL != tc.wantVanadisURL {
-		t.Errorf("VanadisURL = %q, want %q", cur.VanadisURL, tc.wantVanadisURL)
-	}
-	if tc.wantHaroURL != "" && cur.HaroURL != tc.wantHaroURL {
-		t.Errorf("HaroURL = %q, want %q", cur.HaroURL, tc.wantHaroURL)
-	}
-	if tc.wantCovenURL != "" && cur.CovenURL != tc.wantCovenURL {
-		t.Errorf("CovenURL = %q, want %q", cur.CovenURL, tc.wantCovenURL)
-	}
-	if tc.wantNATSURL != "" && cur.NATSURL != tc.wantNATSURL {
-		t.Errorf("NATSURL = %q, want %q", cur.NATSURL, tc.wantNATSURL)
-	}
+	assertLoadConfigIngestionStrings(t, cur, tc)
 	if cur.Transcripts != tc.wantTx {
 		t.Errorf("Transcripts = %+v, want %+v", cur.Transcripts, tc.wantTx)
 	}
@@ -293,6 +292,18 @@ nats_url: "nats://file-nats:4222"
 				"NATS_URL": "nats://env-nats:4222",
 			},
 			wantNATSURL: "nats://env-nats:4222",
+		},
+		{
+			name: "codex engine and codex_bin unmarshaling",
+			content: `
+engine: "codex"
+codex_bin: "/opt/codex/bin/codex"
+channels:
+  default:
+    mode: "threads"
+`,
+			wantEngine:   "codex",
+			wantCodexBin: "/opt/codex/bin/codex",
 		},
 	}
 }
@@ -881,6 +892,7 @@ type envOverrideCase struct {
 	wantBin          string
 	wantEngine       string
 	wantClaude       string
+	wantCodex        string
 	wantKey          string
 	wantModel        string
 	wantTZ           string
@@ -904,6 +916,9 @@ func assertEnvOverrideBasic(t *testing.T, data *ConfigData, tc envOverrideCase) 
 	}
 	if tc.wantClaude != "" && data.ClaudeBin != tc.wantClaude {
 		t.Errorf("ClaudeBin = %q, want %q", data.ClaudeBin, tc.wantClaude)
+	}
+	if tc.wantCodex != "" && data.CodexBin != tc.wantCodex {
+		t.Errorf("CodexBin = %q, want %q", data.CodexBin, tc.wantCodex)
 	}
 	if tc.wantKey != "" && data.APIKey != tc.wantKey {
 		t.Errorf("APIKey = %q, want %q", data.APIKey, tc.wantKey)
@@ -1024,6 +1039,7 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 				"SYSTEM_CHANNEL_ID":            "alerts",
 				"ENGINE":                       "claude",
 				"CLAUDE_BIN":                   "/usr/local/bin/claude",
+				"CODEX_BIN":                    "/usr/local/bin/codex",
 				"DAEMON_IDLE_TIMEOUT":          "15m",
 				"MAX_BACKGROUND_TASK_DURATION": "45m",
 				"OLLAMA_NUM_CTX":               "8192",
@@ -1032,6 +1048,7 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 			wantBin:    "/bin/agy",
 			wantEngine: "claude",
 			wantClaude: "/usr/local/bin/claude",
+			wantCodex:  "/usr/local/bin/codex",
 			wantKey:    "primary-key",
 			wantModel:  "gemini-custom",
 			wantTZ:     "UTC",

@@ -20,6 +20,7 @@ const (
 type DaemonConfig struct {
 	Engine                  string
 	ClaudeBin               string
+	CodexBin                string
 	ResumeSession           bool
 	SessionID               string
 	ThreadID                string
@@ -42,12 +43,22 @@ func (c DaemonConfig) IsClaude() bool {
 	return strings.EqualFold(strings.TrimSpace(c.Engine), "claude")
 }
 
-func parseClaudeModelAndEffort(model, explicitEffort string) (string, string) {
+// IsCodex returns true if the configured Engine is "codex" (case-insensitive).
+func (c DaemonConfig) IsCodex() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Engine), "codex")
+}
+
+func parseModelAndEffort(model, explicitEffort string, allowXHigh bool) (string, string) {
 	trimmedModel := strings.TrimSpace(model)
 	effort := strings.ToLower(strings.TrimSpace(explicitEffort))
 	lowerModel := strings.ToLower(trimmedModel)
 
-	for _, suffix := range []string{"-high", "-medium", "-low"} {
+	suffixes := []string{"-high", "-medium", "-low"}
+	if allowXHigh {
+		suffixes = []string{"-xhigh", "-high", "-medium", "-low"}
+	}
+
+	for _, suffix := range suffixes {
 		if strings.HasSuffix(lowerModel, suffix) && len(trimmedModel) > len(suffix) {
 			base := strings.TrimSpace(trimmedModel[:len(trimmedModel)-len(suffix)])
 			if base != "" {
@@ -56,6 +67,10 @@ func parseClaudeModelAndEffort(model, explicitEffort string) (string, string) {
 		}
 	}
 	return trimmedModel, effort
+}
+
+func parseClaudeModelAndEffort(model, explicitEffort string) (string, string) {
+	return parseModelAndEffort(model, explicitEffort, false)
 }
 
 // TurnError is a turn failure that still consumed tokens: Usage covers the model calls the
@@ -114,8 +129,11 @@ func buildClaudeDaemonArgs(cfg DaemonConfig) []string {
 	return args
 }
 
-// BuildDaemonArgs constructs the CLI arguments for launching an agy or claude streaming daemon process.
+// BuildDaemonArgs constructs the CLI arguments for launching an agy, claude, or codex streaming daemon process.
 func BuildDaemonArgs(cfg DaemonConfig) []string {
+	if cfg.IsCodex() {
+		return []string{"app-server", "--listen", "stdio://"}
+	}
 	if cfg.IsClaude() {
 		return buildClaudeDaemonArgs(cfg)
 	}

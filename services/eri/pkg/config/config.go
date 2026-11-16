@@ -50,6 +50,7 @@ const defaultChannelKey = "default"
 const (
 	EngineAgy            = "agy"
 	EngineClaude         = "claude"
+	EngineCodex          = "codex"
 	VoiceEngineGeminiAPI = "gemini_api"
 )
 
@@ -276,6 +277,7 @@ type ConfigData struct {
 	MaxBackgroundTaskDuration time.Duration            `yaml:"max_background_task_duration,omitempty" json:"max_background_task_duration,omitempty"`
 	Engine                    string                   `yaml:"engine,omitempty"                       json:"engine,omitempty"`
 	ClaudeBin                 string                   `yaml:"claude_bin,omitempty"                   json:"claude_bin,omitempty"`
+	CodexBin                  string                   `yaml:"codex_bin,omitempty"                    json:"codex_bin,omitempty"`
 	BotID                     string                   `yaml:"bot_id"                                 json:"bot_id"`
 	SynapseURL                string                   `yaml:"synapse_url"                            json:"synapse_url"`
 	VanadisURL                string                   `yaml:"vanadis_url"                            json:"vanadis_url"`
@@ -410,6 +412,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		MaxBackgroundTaskDuration time.Duration            `yaml:"max_background_task_duration"`
 		Engine                    string                   `yaml:"engine"`
 		ClaudeBin                 string                   `yaml:"claude_bin"`
+		CodexBin                  string                   `yaml:"codex_bin"`
 		BotID                     string                   `yaml:"bot_id"`
 		SynapseURL                string                   `yaml:"synapse_url"`
 		VanadisURL                string                   `yaml:"vanadis_url"`
@@ -437,6 +440,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.AgyBin = raw.AgyBin
 	c.Engine = raw.Engine
 	c.ClaudeBin = raw.ClaudeBin
+	c.CodexBin = raw.CodexBin
 	c.BotID = strings.TrimSpace(raw.BotID)
 	c.SynapseURL = strings.TrimRight(strings.TrimSpace(raw.SynapseURL), "/")
 	c.VanadisURL = strings.TrimRight(strings.TrimSpace(raw.VanadisURL), "/")
@@ -655,6 +659,7 @@ func DefaultConfigData() *ConfigData {
 		MaxBackgroundTaskDuration: 2 * time.Hour,
 		Engine:                    EngineAgy,
 		ClaudeBin:                 "claude",
+		CodexBin:                  "codex",
 		NATSURL:                   "",
 	}
 }
@@ -683,13 +688,16 @@ func (c *Config) Engine() string {
 	return c.Current().GetEngine()
 }
 
-// GetEngine returns the process-wide execution engine ("claude" or "agy"), defaulting to "agy".
+// GetEngine returns the process-wide execution engine ("claude", "codex", or "agy"), defaulting to "agy".
 func (c *ConfigData) GetEngine() string {
 	if c == nil {
 		return EngineAgy
 	}
 	if strings.EqualFold(strings.TrimSpace(c.Engine), EngineClaude) {
 		return EngineClaude
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Engine), EngineCodex) {
+		return EngineCodex
 	}
 	return EngineAgy
 }
@@ -946,6 +954,7 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	overrideEnvStr(&data.AgyBin, lookup, "AGY_BIN")
 	overrideEnvStr(&data.Engine, lookup, "ENGINE")
 	overrideEnvStr(&data.ClaudeBin, lookup, "CLAUDE_BIN")
+	overrideEnvStr(&data.CodexBin, lookup, "CODEX_BIN")
 	overrideEnvStr(&data.APIKey, lookup, "AGY_GEMINI_API_KEY")
 	overrideEnvStr(&data.HarnessAPIKey, lookup, "GEMINI_HARNESS_API_KEY")
 	overrideEnvStr(&data.SystemPrompt, lookup, "SYSTEM_PROMPT")

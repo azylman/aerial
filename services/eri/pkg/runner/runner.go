@@ -400,6 +400,9 @@ func IsQuotaPause(errDetail, stderr string) bool {
 		strings.Contains(combined, "exhausted your capacity on this model") ||
 		strings.Contains(combined, "brain bucket resets in") ||
 		strings.Contains(combined, "claude ai usage limit reached") ||
+		strings.Contains(combined, "usage_limit_reached") ||
+		strings.Contains(combined, "rate_limit_exceeded") ||
+		strings.Contains(combined, "you have hit your chatgpt usage limit") ||
 		((strings.Contains(combined, "you've hit your") || strings.Contains(combined, "you’ve hit your")) && strings.Contains(combined, "limit")) ||
 		strings.Contains(combined, "rate_limit") {
 		return true
@@ -413,10 +416,14 @@ func IsQuotaPause(errDetail, stderr string) bool {
 }
 
 func hasCapacityPhrases(combined string) bool {
-	if strings.Contains(combined, "individual quota reached") || strings.Contains(combined, "upgrade your subscription") || strings.Contains(combined, "exceeded your current quota") {
+	if strings.Contains(combined, "individual quota reached") ||
+		strings.Contains(combined, "upgrade your subscription") ||
+		strings.Contains(combined, "exceeded your current quota") ||
+		strings.Contains(combined, "usage_limit_reached") ||
+		strings.Contains(combined, "you have hit your chatgpt usage limit") {
 		return false
 	}
-	return strings.Contains(combined, "capacity on this model") || strings.Contains(combined, "exhausted your capacity") || strings.Contains(combined, "rate limit reached") || strings.Contains(combined, "rate limit exceeded")
+	return strings.Contains(combined, "capacity on this model") || strings.Contains(combined, "exhausted your capacity") || strings.Contains(combined, "rate limit reached") || strings.Contains(combined, "rate limit exceeded") || strings.Contains(combined, "rate_limit_exceeded")
 }
 
 func IsCapacityBlip(errDetail, stderr string) bool {
@@ -427,6 +434,8 @@ func IsCapacityBlip(errDetail, stderr string) bool {
 	if strings.Contains(combined, "individual quota reached") ||
 		strings.Contains(combined, "upgrade your subscription") ||
 		strings.Contains(combined, "exceeded your current quota") ||
+		strings.Contains(combined, "usage_limit_reached") ||
+		strings.Contains(combined, "you have hit your chatgpt usage limit") ||
 		strings.Contains(combined, "you've hit your") ||
 		strings.Contains(combined, "you’ve hit your") ||
 		strings.Contains(combined, "usage limit") ||

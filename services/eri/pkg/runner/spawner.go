@@ -180,14 +180,23 @@ func hasActiveBinaryReplacement(bin string, cwd string) bool {
 }
 
 func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-	bin := cfg.AgyBin
-	if cfg.IsClaude() {
+	var bin string
+	switch {
+	case cfg.IsCodex():
+		bin = cfg.CodexBin
+		if bin == "" {
+			bin = "codex"
+		}
+	case cfg.IsClaude():
 		bin = cfg.ClaudeBin
 		if bin == "" {
 			bin = "claude"
 		}
-	} else if bin == "" {
-		bin = "agy"
+	default:
+		bin = cfg.AgyBin
+		if bin == "" {
+			bin = "agy"
+		}
 	}
 	args := BuildDaemonArgs(cfg)
 
