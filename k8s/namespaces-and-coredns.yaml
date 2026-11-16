@@ -4,6 +4,16 @@ metadata:
   name: aerial
 ---
 apiVersion: v1
+kind: Namespace
+metadata:
+  name: restate
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: restate-marida
+---
+apiVersion: v1
 data:
   aerial.override: |
     rewrite stop {

@@ -1997,3 +1997,55 @@ spec:
     app.kubernetes.io/name: restate
   type: ClusterIP
 
+---
+apiVersion: restate.dev/v1beta1
+kind: RestateDeployment
+metadata:
+  labels:
+    app.kubernetes.io/name: vanadis-restate
+  name: vanadis-restate
+  namespace: default
+spec:
+  replicas: 1
+  restate:
+    register:
+      cluster: restate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vanadis-restate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vanadis-restate
+    spec:
+      containers:
+        - env:
+            - name: RESTATE_PORT
+              value: "9080"
+            - name: PORT
+              value: "4026"
+            - name: VANADIS_URL
+              value: http://vanadis.aerial:4025
+          image: ghcr.io/azylman/aerial-vanadis-restate:${TAG_AERIAL_VANADIS_RESTATE:=latest}
+          imagePullPolicy: Always
+          name: vanadis-restate
+          ports:
+            - containerPort: 9080
+              name: restate
+              protocol: TCP
+            - containerPort: 4026
+              name: http
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 4026
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
