@@ -107,7 +107,7 @@ type MCPCreateChunkItem struct {
 	TargetSymbols      []string `json:"target_symbols,omitempty"      jsonschema:"Target symbols for this chunk."`
 	Effort             string   `json:"effort,omitempty"              jsonschema:"Effort level ('low', 'medium', 'high')."`
 	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty" jsonschema:"Acceptance criteria checklist."`
-	DependsOn          []string `json:"depends_on,omitempty"          jsonschema:"Optional list of chunk IDs or 0-based indices this chunk depends on."`
+	DependsOn          []string `json:"depends_on"                    jsonschema:"Explicit list of chunk IDs or 0-based indices this chunk depends on ([] for root chunks)."`
 }
 
 // MCPAppendChunkArgs defines arguments for append_chunk tool.

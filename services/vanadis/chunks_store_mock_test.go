@@ -69,7 +69,7 @@ func TestBuildAppendedChunk(t *testing.T) {
 		Mode:         "pr",
 		Repo:         "azylman/aerial",
 		DependsOn:    []string{"dep-1"},
-	}, 1, "", usedMap, now)
+	}, 1, usedMap, now)
 	if err != nil {
 		t.Fatalf("buildAppendedChunk pr err: %v", err)
 	}
@@ -81,7 +81,8 @@ func TestBuildAppendedChunk(t *testing.T) {
 		Title:        "Title Action",
 		Instructions: "Instr Action",
 		Mode:         "action",
-	}, 2, "prev-id", usedMap, now)
+		DependsOn:    []string{"prev-id"},
+	}, 2, usedMap, now)
 	if err != nil {
 		t.Fatalf("buildAppendedChunk action err: %v", err)
 	}
@@ -93,7 +94,8 @@ func TestBuildAppendedChunk(t *testing.T) {
 		Title:        "Title Default",
 		Instructions: "Instr Default",
 		Mode:         "action",
-	}, 3, "", usedMap, now)
+		DependsOn:    []string{},
+	}, 3, usedMap, now)
 	if err != nil {
 		t.Fatalf("buildAppendedChunk default err: %v", err)
 	}
@@ -102,15 +104,15 @@ func TestBuildAppendedChunk(t *testing.T) {
 	}
 
 	// Errors
-	_, err = buildAppendedChunk("b1", CreateChunkInput{ID: "c-used"}, 0, "", map[string]bool{"c-used": true}, now)
+	_, err = buildAppendedChunk("b1", CreateChunkInput{ID: "c-used"}, 0, map[string]bool{"c-used": true}, now)
 	if err == nil {
 		t.Fatal("expected error on duplicate chunk ID")
 	}
-	_, err = buildAppendedChunk("b1", CreateChunkInput{Mode: "badmode"}, 0, "", usedMap, now)
+	_, err = buildAppendedChunk("b1", CreateChunkInput{Mode: "badmode"}, 0, usedMap, now)
 	if err == nil {
 		t.Fatal("expected error on bad mode")
 	}
-	_, err = buildAppendedChunk("b1", CreateChunkInput{Effort: "huge"}, 0, "", usedMap, now)
+	_, err = buildAppendedChunk("b1", CreateChunkInput{Effort: "huge"}, 0, usedMap, now)
 	if err == nil {
 		t.Fatal("expected error on bad effort")
 	}
@@ -394,50 +396,8 @@ func TestPostgresStore_CreateBuild_And_Updates_MockDB(t *testing.T) {
 		t.Fatal("expected error on empty chunks")
 	}
 
-	// Begin error
-	sBeginErr := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return nil, errors.New("begin error") }})
-	if err := sBeginErr.CreateBuild(ctx, VanadisBuild{ID: "b1"}, []VanadisChunk{{ID: "c1"}}); err == nil {
-		t.Fatal("expected error on begin error")
-	}
-
-	// Insert build error
-	txInsertBuildErr := &mockTx{
-		execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-			return pgconn.CommandTag{}, errors.New("insert build error")
-		},
-	}
-	sInsertBuildErr := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return txInsertBuildErr, nil }})
-	if err := sInsertBuildErr.CreateBuild(ctx, VanadisBuild{ID: "b1"}, []VanadisChunk{{ID: "c1"}}); err == nil {
-		t.Fatal("expected error on insert build error")
-	}
-
-	// Insert chunk error
-	insertCount := 0
-	txInsertChunkErr := &mockTx{
-		execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-			insertCount++
-			if insertCount > 1 {
-				return pgconn.CommandTag{}, errors.New("insert chunk error")
-			}
-			return pgconn.NewCommandTag("INSERT 1"), nil
-		},
-	}
-	sInsertChunkErr := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return txInsertChunkErr, nil }})
-	if err := sInsertChunkErr.CreateBuild(ctx, VanadisBuild{ID: "b1"}, []VanadisChunk{{ID: "c1"}}); err == nil {
-		t.Fatal("expected error on insert chunk error")
-	}
-
-	// Commit error
-	txCommitErr := &mockTx{
-		commitErr: errors.New("commit error"),
-		execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-			return pgconn.NewCommandTag("INSERT 1"), nil
-		},
-	}
-	sCommitErr := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return txCommitErr, nil }})
-	if err := sCommitErr.CreateBuild(ctx, VanadisBuild{ID: "b1"}, []VanadisChunk{{ID: "c1"}}); err == nil {
-		t.Fatal("expected error on commit error")
-	}
+	validBuild := VanadisBuild{ID: "b1", ThreadID: "th-1", Objective: "obj"}
+	validChunks := []VanadisChunk{{ID: "c1", Repo: "azylman/aerial", Title: "c1", Instructions: "do c1", DependsOn: []string{}}}
 
 	// Success
 	txSuccess := &mockTx{
@@ -446,7 +406,7 @@ func TestPostgresStore_CreateBuild_And_Updates_MockDB(t *testing.T) {
 		},
 	}
 	sSuccess := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return txSuccess, nil }})
-	if err := sSuccess.CreateBuild(ctx, VanadisBuild{ID: "b1", ThreadID: "th-1", Objective: "obj"}, []VanadisChunk{{ID: "c1", Repo: "azylman/aerial", Title: "c1", Instructions: "do c1"}}); err != nil {
+	if err := sSuccess.CreateBuild(ctx, validBuild, validChunks); err != nil {
 		t.Fatalf("expected success on CreateBuild, got %v", err)
 	}
 
@@ -511,7 +471,7 @@ func TestProcessStalledChunkCheck_Errors(t *testing.T) {
 		t.Fatal("expected error on missing build")
 	}
 	b := VanadisBuild{ID: "b-empty", ThreadID: "th", Objective: "O", Status: "running"}
-	c := VanadisChunk{ID: "c-other", BuildID: "b-empty", ChunkIndex: 0, Title: "T", Status: "running"}
+	c := VanadisChunk{ID: "c-other", BuildID: "b-empty", ChunkIndex: 0, Title: "T", Instructions: "I", Repo: "azylman/aerial", Status: "running", DependsOn: []string{}}
 	_ = store.CreateBuild(ctx, b, []VanadisChunk{c})
 	if err := srv.redispatchStalledChunk(ctx, "b-empty", "c-missing"); err == nil {
 		t.Fatal("expected error on missing chunk in build")

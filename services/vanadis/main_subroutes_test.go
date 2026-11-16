@@ -158,7 +158,7 @@ func TestVanadisServer_ExecuteAndDispatchPlumbing(t *testing.T) {
 		t.Fatalf("expected nil on missing build in ProcessExecuteChunk, got %v", err)
 	}
 	bProc := VanadisBuild{ID: "b-p", Status: "running"}
-	cDone := VanadisChunk{ID: "c-done", BuildID: "b-p", ChunkIndex: 0, Status: "completed"}
+	cDone := VanadisChunk{ID: "c-done", BuildID: "b-p", ChunkIndex: 0, Status: "completed", DependsOn: []string{}}
 	_ = memStore.CreateBuild(ctx, bProc, []VanadisChunk{cDone})
 	if err := srvProc.ProcessExecuteChunk(ctx, "b-p", 99, false); err == nil {
 		t.Fatal("expected error on out of range chunk index")

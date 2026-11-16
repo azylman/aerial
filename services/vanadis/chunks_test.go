@@ -180,6 +180,7 @@ func setupTestStoreWithBuild() (*memoryVanadisStore, string, []string) {
 		Title:      "Chunk 1",
 		Status:     "pending",
 		Effort:     "low",
+		DependsOn:  []string{},
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
@@ -192,6 +193,7 @@ func setupTestStoreWithBuild() (*memoryVanadisStore, string, []string) {
 		Title:      "Chunk 2",
 		Status:     "pending",
 		Effort:     "medium",
+		DependsOn:  []string{"chunk-1"},
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}

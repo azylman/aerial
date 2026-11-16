@@ -516,13 +516,13 @@ func TestVanadisServer_FailChunkInternal(t *testing.T) {
 		{
 			"shutdown interruption is not a failure", false,
 			&VanadisBuild{ID: "b-shut", ThreadID: "th-1", Objective: "shut"},
-			[]VanadisChunk{{ID: "c-shut", BuildID: "b-shut", Title: "c-shut"}},
+			[]VanadisChunk{{ID: "c-shut", BuildID: "b-shut", Title: "c-shut", DependsOn: []string{}}},
 			"c-shut", "interrupted by shutdown", false, false, true,
 		},
 		{
 			"running chunk fails", false,
 			&VanadisBuild{ID: "b-f", ThreadID: "th-fail", Objective: "fail obj"},
-			[]VanadisChunk{{ID: "c-f", BuildID: "b-f", Title: "c-f", Status: "running"}},
+			[]VanadisChunk{{ID: "c-f", BuildID: "b-f", Title: "c-f", Status: "running", DependsOn: []string{}}},
 			"c-f", "test fail reason", false, true, true,
 		},
 	}

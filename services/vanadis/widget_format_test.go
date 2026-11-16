@@ -260,7 +260,7 @@ func TestHandleCoalescedWidgetMessage(t *testing.T) {
 			srv: func() *VanadisServer {
 				store := newMemoryVanadisStore()
 				b := VanadisBuild{ID: "b-pr", ThreadID: "123", Objective: "test"}
-				c := []VanadisChunk{{ID: "c1", BuildID: "b-pr", Title: "c1", Instructions: "do c1", Repo: "aerial", PRNumber: 101}}
+				c := []VanadisChunk{{ID: "c1", BuildID: "b-pr", Title: "c1", Instructions: "do c1", Repo: "aerial", PRNumber: 101, DependsOn: []string{}}}
 				_ = store.CreateBuild(context.Background(), b, c)
 
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -308,7 +308,7 @@ func TestHandleCoalescedWidgetMessage(t *testing.T) {
 			srv: func() *VanadisServer {
 				store := newMemoryVanadisStore()
 				b := VanadisBuild{ID: "b-1", ThreadID: "123", Objective: "test"}
-				c := []VanadisChunk{{ID: "c1", BuildID: "b-1", Title: "c1", Instructions: "do c1"}}
+				c := []VanadisChunk{{ID: "c1", BuildID: "b-1", Title: "c1", Instructions: "do c1", DependsOn: []string{}}}
 				_ = store.CreateBuild(context.Background(), b, c)
 
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -330,7 +330,7 @@ func TestHandleCoalescedWidgetMessage(t *testing.T) {
 			srv: func() *VanadisServer {
 				store := newMemoryVanadisStore()
 				b := VanadisBuild{ID: "b-err", ThreadID: "123", Objective: "test"}
-				c := []VanadisChunk{{ID: "c1", BuildID: "b-err", Title: "c1", Instructions: "do c1"}}
+				c := []VanadisChunk{{ID: "c1", BuildID: "b-err", Title: "c1", Instructions: "do c1", DependsOn: []string{}}}
 				_ = store.CreateBuild(context.Background(), b, c)
 
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -556,7 +556,7 @@ func TestHandleCoalescedWidgetMessage_StoreError_And_AckErrors(t *testing.T) {
 
 	// Success with ackErr
 	bSuccess := VanadisBuild{ID: "b-ack", ThreadID: "123", Objective: "test"}
-	cSuccess := []VanadisChunk{{ID: "c1", BuildID: "b-ack", Title: "c1", Instructions: "do c1"}}
+	cSuccess := []VanadisChunk{{ID: "c1", BuildID: "b-ack", Title: "c1", Instructions: "do c1", DependsOn: []string{}}}
 	_ = storeMissing.CreateBuild(ctx, bSuccess, cSuccess)
 	tsSuccess := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -794,6 +794,7 @@ func TestHandleCoalescedWidgetMessage_WithDeployUIURL(t *testing.T) {
 			ChunkIndex: 0,
 			Title:      "Chunk with rollout",
 			Status:     "deploying",
+			DependsOn:  []string{},
 			RolloutState: &pubsub.PRRolloutState{
 				KustomizationStatuses: map[string]string{
 					"aerial-core": "deployed",

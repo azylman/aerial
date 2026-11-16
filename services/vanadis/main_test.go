@@ -177,11 +177,11 @@ func testPostgresVanadisStoreCreateValidation(ctx context.Context, t *testing.T,
 		{"empty chunk title", validBuild, []VanadisChunk{mkChunk("c", "", 0, "", "i", "", "")}},
 		{"empty chunk instructions", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "", "", "")}},
 		{"invalid chunk effort", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "i", "ultra", "")}},
-		{"invalid chunk mode", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "bad-mode", Repo: "aerial", Title: "t", Instructions: "i"}}},
-		{"pr mode empty repo", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "pr", Repo: "", Title: "t", Instructions: "i"}}},
-		{"action mode with repo", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "aerial", Title: "t", Instructions: "i"}}},
-		{"action mode with files", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "", Title: "t", Instructions: "i", TargetFiles: []string{"f.go"}}}},
-		{"action mode with symbols", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "", Title: "t", Instructions: "i", TargetSymbols: []string{"s"}}}},
+		{"invalid chunk mode", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "bad-mode", Repo: "aerial", Title: "t", Instructions: "i", DependsOn: []string{}}}},
+		{"pr mode empty repo", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "pr", Repo: "", Title: "t", Instructions: "i", DependsOn: []string{}}}},
+		{"action mode with repo", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "aerial", Title: "t", Instructions: "i", DependsOn: []string{}}}},
+		{"action mode with files", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "", Title: "t", Instructions: "i", TargetFiles: []string{"f.go"}, DependsOn: []string{}}}},
+		{"action mode with symbols", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "", Title: "t", Instructions: "i", TargetSymbols: []string{"s"}, DependsOn: []string{}}}},
 	}
 	for _, tc := range cases {
 		if err := store.CreateBuild(ctx, tc.build, tc.chunks); err == nil {
@@ -362,7 +362,12 @@ func TestPostgresVanadisStore(t *testing.T) {
 	cStart := mkChunk("c-2", "", 1, "T2", "I2", "", "")
 	cStart.StartedAt = explicitStart
 	cStart.CompletedAt = explicitComplete
-	createChunks := []VanadisChunk{validChunks[0], cStart, mkChunk("c-3", "", 2, "T3", "I3", "", "running"), mkChunk("c-4", "", 3, "T4", "I4", "", "merged")}
+	cStart.DependsOn = []string{"c-1"}
+	c3 := mkChunk("c-3", "", 2, "T3", "I3", "", "running")
+	c3.DependsOn = []string{"c-2"}
+	c4 := mkChunk("c-4", "", 3, "T4", "I4", "", "merged")
+	c4.DependsOn = []string{"c-3"}
+	createChunks := []VanadisChunk{validChunks[0], cStart, c3, c4}
 	if err := store.CreateBuild(ctx, validBuild, createChunks); err != nil {
 		t.Fatalf("CreateBuild failed: %v", err)
 	}
@@ -657,7 +662,7 @@ func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *
 	if err := validateCreateBuildInputs("b1", "123", "obj", []VanadisChunk{{ID: "bad:id", Title: "t", Instructions: "i"}}); err == nil || !strings.Contains(err.Error(), "chunks[0].id must be 1..120 characters") {
 		t.Fatalf("expected validateCreateBuildInputs chunk id error, got %v", err)
 	}
-	validPayload := `{"thread_id":"stateful_medium:discord-1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"repo":"aerial","title":"Part 1","instructions":"Do part 1","effort":"low"},{"repo":"aerial","id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"high","acceptance_criteria":["All green"]}]}`
+	validPayload := `{"thread_id":"stateful_medium:discord-1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"repo":"aerial","title":"Part 1","instructions":"Do part 1","effort":"low","depends_on":[]},{"repo":"aerial","id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"high","acceptance_criteria":["All green"],"depends_on":["0"]}]}`
 	memStore.createErr = errors.New("create failed")
 	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
 	memStore.createErr = nil
@@ -1164,7 +1169,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	srv.SetBus(memBus)
 
 	// 1. handleCreateBuild success -> created
-	reqBody := `{"thread_id":"123456789012345678","tier":2,"objective":"Metric test build","chunks":[{"repo":"aerial","title":"C1","instructions":"I1"}]}`
+	reqBody := `{"thread_id":"123456789012345678","tier":2,"objective":"Metric test build","chunks":[{"repo":"aerial","title":"C1","instructions":"I1","depends_on":[]}]}`
 	recCreate := httptest.NewRecorder()
 	srv.handleCreateBuild(recCreate, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
 	if recCreate.Code != http.StatusAccepted {
