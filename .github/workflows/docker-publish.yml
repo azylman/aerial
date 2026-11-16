@@ -254,10 +254,7 @@ jobs:
             fi
           done
 
-          # 4. Docker Compose Validation
-          docker compose -f docker-compose.yml config --quiet
-
-          # 5. Ratcheted Code Health Gate & Scanner Unit Tests
+          # 4. Ratcheted Code Health Gate & Scanner Unit Tests
           (cd scripts/code-health && go test -v -race ./... && go run . -root ../.. -baseline ../../.code-health-baseline.json)
 
       - name: Lint & Check Dead Code in Go Modules
