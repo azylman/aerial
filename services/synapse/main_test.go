@@ -154,6 +154,7 @@ type mockPRRegistry struct {
 	resolvePRNum            int
 	resolveBranch           string
 	resolveHeadSHA          string
+	resolveMergeSHA         string
 	resolveTargetID         string
 	resolveBySHATargetEmpty bool
 	resolveErr              error
@@ -383,7 +384,7 @@ func (m *mockPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prN
 	if err := m.checkErr(m.resolveErr); err != nil {
 		return "", "", "", "", err
 	}
-	return m.resolveTargetID, m.resolveBranch, m.resolveHeadSHA, "", nil
+	return m.resolveTargetID, m.resolveBranch, m.resolveHeadSHA, m.resolveMergeSHA, nil
 }
 
 func (m *mockPRRegistry) AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error {

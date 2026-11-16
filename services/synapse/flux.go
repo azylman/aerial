@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	jobGitSync        = "git-sync"
-	severityError     = "error"
-	kindKustomization = "Kustomization"
-	kindConfigMap     = "ConfigMap"
-	reasonProgressing = "Progressing"
+	jobGitSync         = "git-sync"
+	severityError      = "error"
+	kindKustomization  = "Kustomization"
+	kindConfigMap      = "ConfigMap"
+	kindRestateCluster = "RestateCluster"
+	reasonProgressing  = "Progressing"
 )
 
 // FluxInvolvedObject identifies the resource associated with a Flux notification event.
@@ -533,7 +534,7 @@ func (w workloadRollout) String() string {
 // workloadRolloutComplete reports whether the workload controller has observed its latest spec and
 // every desired pod runs the current template and is available, with no old pods left.
 func workloadRolloutComplete(w workloadRollout) (done, failed bool, reason string) {
-	if w.ObservedGeneration < w.Generation {
+	if w.Kind != kindRestateCluster && w.ObservedGeneration < w.Generation {
 		return false, false, fmt.Sprintf("generation %d not yet observed", w.Generation)
 	}
 	switch w.Kind {
@@ -552,7 +553,7 @@ func workloadRolloutComplete(w workloadRollout) (done, failed bool, reason strin
 	case "RestateDeployment":
 		done = w.ReadyConditionTrue && w.ReadyReplicas == w.Replicas && w.AvailableReplicas == w.Replicas && w.DeploymentID != ""
 		reason = fmt.Sprintf("%d/%d ready, %d/%d available, deploymentId=%s, ready=%t", w.ReadyReplicas, w.Replicas, w.AvailableReplicas, w.Replicas, w.DeploymentID, w.ReadyConditionTrue)
-	case "RestateCluster":
+	case kindRestateCluster:
 		done = w.ReadyConditionTrue
 		reason = fmt.Sprintf("ready=%t", w.ReadyConditionTrue)
 	default:

@@ -906,8 +906,8 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 		{name: "restatedeployment available replicas unavailable", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 1, "dp_12345", true), wantReason: "2/2 ready, 1/2 available, deploymentId=dp_12345, ready=true"},
 		{name: "restatedeployment missing deploymentId", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 2, "", true), wantReason: "2/2 ready, 2/2 available, deploymentId=, ready=true"},
 		{name: "restatedeployment ready condition false", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 2, "dp_12345", false), wantReason: "2/2 ready, 2/2 available, deploymentId=dp_12345, ready=false"},
-		{name: "restatecluster rolled out", workload: restateClusterRollout("restate", synapseImage, 2, 2, true), wantDone: true},
-		{name: "restatecluster ready condition false", workload: restateClusterRollout("restate", synapseImage, 2, 2, false), wantReason: "ready=false"},
+		{name: "restatecluster rolled out without observedGeneration", workload: restateClusterRollout("restate", synapseImage, 2, 0, true), wantDone: true},
+		{name: "restatecluster ready condition false", workload: restateClusterRollout("restate", synapseImage, 2, 0, false), wantReason: "ready=false"},
 		{name: "unsupported kind", workload: workloadRollout{Kind: "Job"}, wantReason: "unsupported workload kind"},
 	}
 	for _, tc := range tests {

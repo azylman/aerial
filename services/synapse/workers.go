@@ -691,7 +691,7 @@ var rolloutWorkloadKinds = []struct{ Kind, Path string }{
 	{Kind: "StatefulSet", Path: "/apis/apps/v1/statefulsets"},
 	{Kind: "DaemonSet", Path: "/apis/apps/v1/daemonsets"},
 	{Kind: "RestateDeployment", Path: "/apis/restate.dev/v1beta1/restatedeployments"},
-	{Kind: "RestateCluster", Path: "/apis/restate.dev/v1/restateclusters"},
+	{Kind: kindRestateCluster, Path: "/apis/restate.dev/v1/restateclusters"},
 }
 
 // fluxManagedSelector selects every object applied by any Flux Kustomization.
