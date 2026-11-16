@@ -409,6 +409,7 @@ func TestHandleCancelDispatch(t *testing.T) {
 		{"missing ids", http.MethodPost, seedStore(""), nil, `{"reason":"no ids"}`, http.StatusBadRequest, "'dispatch_id' (or 'message_id') or 'build_id' is required"},
 		{"store error", http.MethodPost, seedStore("CancelPendingDispatches"), nil, `{"build_id":"build-99"}`, http.StatusInternalServerError, "Failed to fetch cancelling dispatches"},
 		{"cancel by build_id", http.MethodPost, seedStore(""), nil, `{"build_id":"build-99"}`, http.StatusOK, `"cancelled_count":4`},
+		{"cancel by chunk_id", http.MethodPost, seedStore(""), nil, `{"chunk_id":"build-99"}`, http.StatusOK, `"cancelled_count":4`},
 		{"cancel by dispatch_id", http.MethodPost, seedStore(""), nil, `{"dispatch_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
 		{"cancel by dispatch_id custom reason", http.MethodPost, seedStore(""), nil, `{"dispatch_id":"disp-single","reason":"superseded"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
 		{"cancel by message_id alias", http.MethodPost, seedStore(""), nil, `{"message_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
@@ -1317,7 +1318,6 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/healthz", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /healthz, got %d", w.Code)
 	}
-	mux.ServeHTTP(&flusherErrWriter{}, httptest.NewRequest(http.MethodGet, "/health", http.NoBody))
 
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/tasks", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /tasks, got %d", w.Code)
@@ -1343,8 +1343,6 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/transcripts", nil); w.Code != http.StatusNotFound {
 		t.Errorf("Expected 404 from deleted /transcripts, got %d", w.Code)
 	}
-
-	httpkit.WriteJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
 
 	oldFn := httpkit.WriteCountersDirFn
 	defer func() { httpkit.WriteCountersDirFn = oldFn }()

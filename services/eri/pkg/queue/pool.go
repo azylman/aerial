@@ -160,6 +160,7 @@ type WorkerPool struct {
 	createThreadFn      func(channelID, title string) (string, error)
 	widgetDeliveryMu    sync.Mutex
 	widgetLockHolder    atomic.Pointer[widgetLockPath] // path holding widgetDeliveryMu; nil when free
+	widgetChannelLocks  sync.Map                       // channelID string -> *widgetChannelLock
 	widgetMu            sync.Mutex
 	widgetsByID         map[string]discord.StatusWidgetRequest
 	widgetOrder         []string
@@ -1019,19 +1020,17 @@ func matchesDispatchTarget(d *db.Dispatch, dispatchID, buildID string) bool {
 	if dispatchID != "" && d.ID == dispatchID {
 		return true
 	}
-	if buildID != "" {
-		if strings.TrimSpace(d.TargetID) == buildID {
-			return true
-		}
-		if strings.HasPrefix(strings.TrimSpace(d.VanadisChunkID), buildID+"-chunk-") {
-			return true
-		}
-		_, bID, _ := extractVanadisDispatchInfo(d)
-		if bID == buildID {
-			return true
-		}
+	if buildID == "" {
+		return false
 	}
-	return false
+	targetID := strings.TrimSpace(d.TargetID)
+	chunkID := strings.TrimSpace(d.VanadisChunkID)
+	sessionID := strings.TrimSpace(d.SessionID)
+	if targetID == buildID || strings.HasPrefix(chunkID, buildID+"-chunk-") || chunkID == buildID || sessionID == "vanadis-"+buildID {
+		return true
+	}
+	cID, bID, _ := extractVanadisDispatchInfo(d)
+	return bID == buildID || cID == buildID
 }
 
 type activeDispatchCancelTarget struct {

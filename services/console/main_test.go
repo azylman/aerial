@@ -978,66 +978,61 @@ func (r *roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) 
 	return r.fn(req)
 }
 
-type mockReadCloser struct {
-	io.Reader
-
+// trackedBody is a response body that records how much was left unread and whether it was closed.
+type trackedBody struct {
+	r        *strings.Reader
+	readErr  error
 	closeErr error
+	closed   bool
 }
 
-func (m *mockReadCloser) Close() error {
-	return m.closeErr
+func newTrackedBody(content string, readErr, closeErr error) *trackedBody {
+	return &trackedBody{r: strings.NewReader(content), readErr: readErr, closeErr: closeErr}
 }
 
-type mockErrReader struct {
-	err error
-}
-
-func (m *mockErrReader) Read(p []byte) (int, error) {
-	return 0, m.err
-}
-
-func (*mockErrReader) Close() error {
-	return nil
-}
-
-type mockErrWriter struct {
-	err         error
-	header      http.Header
-	statusCode  int
-	wroteHeader bool
-}
-
-func newMockErrWriter(err error) *mockErrWriter {
-	return &mockErrWriter{
-		err:    err,
-		header: make(http.Header),
+func (b *trackedBody) Read(p []byte) (int, error) {
+	if b.readErr != nil {
+		return 0, b.readErr
 	}
+	return b.r.Read(p)
 }
 
-func (m *mockErrWriter) Header() http.Header {
-	return m.header
+func (b *trackedBody) Close() error {
+	b.closed = true
+	return b.closeErr
 }
 
-func (m *mockErrWriter) Write(p []byte) (int, error) {
-	if m.err != nil {
-		return 0, m.err
+func TestDrainAndClose(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		body          *trackedBody
+		wantRemaining int
+	}{
+		{name: "small body fully drained and closed", body: newTrackedBody("clean body content", nil, nil), wantRemaining: 0},
+		{name: "drain stops at 32KiB limit", body: newTrackedBody(strings.Repeat("x", 40000), nil, nil), wantRemaining: 7232},
+		{name: "read error still closes body", body: newTrackedBody("unread", errors.New("simulated copy read error"), nil), wantRemaining: 6},
+		{name: "close error after full drain", body: newTrackedBody("hello", nil, errors.New("simulated close error")), wantRemaining: 0},
 	}
-	return len(p), nil
-}
 
-func (m *mockErrWriter) WriteHeader(statusCode int) {
-	m.statusCode = statusCode
-	m.wroteHeader = true
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			drainAndClose(tc.body, tc.name)
+			if got := tc.body.r.Len(); got != tc.wantRemaining {
+				t.Errorf("unread bytes after drainAndClose = %d, want %d", got, tc.wantRemaining)
+			}
+			if !tc.body.closed {
+				t.Error("drainAndClose did not close the body")
+			}
+		})
+	}
 }
 
 func TestConsole_CloseWarnAndDisconnect(t *testing.T) {
-	// 2. drainAndClose with nil, success, copy error, and close error
-	drainAndClose(nil, "nil body")
-	drainAndClose(&mockReadCloser{Reader: strings.NewReader("clean body content"), closeErr: nil}, "clean body")
-	drainAndClose(&mockErrReader{err: errors.New("simulated copy read error")}, "read err body")
-	drainAndClose(&mockReadCloser{Reader: strings.NewReader("hello"), closeErr: errors.New("simulated close error")}, "mock body")
-
-	// 3. isClientDisconnect
+	// isClientDisconnect
 	if httpkit.IsClientDisconnect(nil, nil) {
 		t.Error("expected false for nil error")
 	}
@@ -1051,7 +1046,7 @@ func TestConsole_CloseWarnAndDisconnect(t *testing.T) {
 		t.Error("expected true for net.ErrClosed")
 	}
 
-	// 4. writeJSON: success, marshal error, and write error
+	// writeJSON: success, marshal error, and gzip encoding
 	reqActive := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	rrJSON := httptest.NewRecorder()
 	writeJSON(rrJSON, reqActive, http.StatusCreated, map[string]string{"status": "ok"})
@@ -1067,9 +1062,6 @@ func TestConsole_CloseWarnAndDisconnect(t *testing.T) {
 	if rrMarshalErr.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500 InternalServerError on marshal failure, got %d", rrMarshalErr.Code)
 	}
-
-	mockWJSONErr := newMockErrWriter(errors.New("write failure"))
-	writeJSON(mockWJSONErr, reqActive, http.StatusOK, map[string]string{"status": "ok"})
 
 	reqGzip := httptest.NewRequest(http.MethodGet, "/api/builds", http.NoBody)
 	reqGzip.Header.Set("Accept-Encoding", "gzip, deflate")

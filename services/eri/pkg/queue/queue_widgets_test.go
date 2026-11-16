@@ -712,8 +712,8 @@ func runChunkStepStreamingCase(t *testing.T, tc chunkStepStreamingCase) {
 		t.Fatalf("expected at least 2 delivered requests (flush + finish), got %d", count)
 	}
 	for i, req := range reqs {
-		if req.SkipSink {
-			t.Errorf("delivered step request %d has SkipSink=true, want false so buried cards can sink", i)
+		if !req.SkipSink {
+			t.Errorf("delivered step request %d has SkipSink=false, want true so step edits do not sink cards", i)
 		}
 	}
 	if tc.wantFinishReqMsgID != "" {

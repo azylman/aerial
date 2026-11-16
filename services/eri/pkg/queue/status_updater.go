@@ -39,11 +39,13 @@ const verbExecuting = "Executing"
 const fallbackToolLabel = "tool"
 
 const (
-	DefaultStatusTickerInterval    = 1500 * time.Millisecond
-	DefaultStatusDebounceDelay     = 1500 * time.Millisecond
-	DefaultStatusToolLatchDuration = 2000 * time.Millisecond
-	DefaultStatusMinEditInterval   = 1000 * time.Millisecond
-	MaxStatusTextLength            = 100
+	DefaultStatusTickerInterval     = 1500 * time.Millisecond
+	DefaultStatusDebounceDelay      = 1500 * time.Millisecond
+	DefaultStatusToolLatchDuration  = 2000 * time.Millisecond
+	DefaultStatusMinEditInterval    = 1000 * time.Millisecond
+	DefaultChunkStepTickerInterval  = 5000 * time.Millisecond
+	DefaultChunkStepMinEditInterval = 2500 * time.Millisecond
+	MaxStatusTextLength             = 100
 )
 
 // resolveToolVerb returns the natural language action verb for a tool category.
@@ -181,8 +183,10 @@ func WithSyncDelete() StatusUpdaterOption {
 func NewChunkStepStatusUpdater(chunkID string, flushFn func(step string) error, opts ...StatusUpdaterOption) *StatusUpdater {
 	trimmedID := strings.TrimSpace(chunkID)
 	enabled := trimmedID != "" && flushFn != nil
-	allOpts := make([]StatusUpdaterOption, 0, len(opts)+2)
+	allOpts := make([]StatusUpdaterOption, 0, len(opts)+3)
 	allOpts = append(allOpts, WithSyncDelete(), func(u *StatusUpdater) {
+		u.tickerInterval = DefaultChunkStepTickerInterval
+		u.minEditInterval = DefaultChunkStepMinEditInterval
 		u.sendFunc = func(channelID, text string) (string, error) {
 			if flushFn == nil {
 				return trimmedID, nil

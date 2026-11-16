@@ -72,11 +72,10 @@ func resolvePromptEffort(model, effort string) string {
 	if effort != "" {
 		return effort
 	}
-	modelLower := strings.ToLower(model)
-	if strings.Contains(modelLower, "medium") {
+	if strings.Contains(strings.ToLower(model), "medium") {
 		return config.EffortMedium
 	}
-	if strings.Contains(modelLower, "flash") {
+	if strings.Contains(strings.ToLower(model), "flash") {
 		return config.EffortLow
 	}
 	return ""
@@ -90,8 +89,7 @@ func checkPromptActiveTurn(ctx context.Context, store db.Store, skipIfActive boo
 }
 
 func resolvePromptChannelID(channelID string, pool *queue.WorkerPool) string {
-	channelID = strings.TrimSpace(channelID)
-	if channelID != "" && !queue.IsNumericSnowflake(channelID) && pool != nil {
+	if channelID = strings.TrimSpace(channelID); channelID != "" && !queue.IsNumericSnowflake(channelID) && pool != nil {
 		if resolved, err := pool.ResolveChannelID(channelID); err == nil {
 			return resolved
 		}
@@ -288,10 +286,8 @@ func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store d
 	}
 	if exists {
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-			jsonKeyStatus:     "already_exists",
-			jsonKeyDispatchID: dispatchID,
-			jsonKeyMessageID:  dispatchID,
-			jsonKeySessionID:  sessionID,
+			jsonKeyStatus: "already_exists", jsonKeyDispatchID: dispatchID,
+			jsonKeyMessageID: dispatchID, jsonKeySessionID: sessionID,
 		})
 		return true
 	}
@@ -391,6 +387,7 @@ type CancelDispatchRequest struct {
 	DispatchID string `json:"dispatch_id,omitempty"`
 	MessageID  string `json:"message_id,omitempty"`
 	BuildID    string `json:"build_id,omitempty"`
+	ChunkID    string `json:"chunk_id,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 }
 
@@ -414,6 +411,10 @@ func handleCancelDispatch(store db.Store, pools ...*queue.WorkerPool) http.Handl
 			dispatchID = strings.TrimSpace(req.MessageID)
 		}
 		buildID := strings.TrimSpace(req.BuildID)
+		// Vanadis routes chunk cancellation via ChunkID; mapped to buildID to preserve the db.Store signature.
+		if buildID == "" {
+			buildID = strings.TrimSpace(req.ChunkID)
+		}
 		if dispatchID == "" && buildID == "" {
 			writeErr(w, http.StatusBadRequest, "Invalid payload: 'dispatch_id' (or 'message_id') or 'build_id' is required")
 			return
@@ -425,8 +426,7 @@ func handleCancelDispatch(store db.Store, pools ...*queue.WorkerPool) http.Handl
 			return
 		}
 		if len(pools) > 0 && pools[0] != nil {
-			poolIDs := pools[0].CancelDispatches(dispatchID, buildID, reason)
-			for _, pid := range poolIDs {
+			for _, pid := range pools[0].CancelDispatches(dispatchID, buildID, reason) {
 				if !slices.Contains(cancelledIDs, pid) {
 					cancelledIDs = append(cancelledIDs, pid)
 				}

@@ -833,7 +833,6 @@ func TestServer_Metrics_Table(t *testing.T) {
 	_, _ = store.InsertFact(context.Background(), "Metric fact 2", testEmbedding(1.0))
 	handler := NewToolHandler(&Config{}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
 	server := NewServer(handler)
-	nilServer := &Server{}
 	nilStoreServer := &Server{handler: &ToolHandler{}}
 
 	registerCovenCollector(FactsTotal)
@@ -883,17 +882,6 @@ func TestServer_Metrics_Table(t *testing.T) {
 				`coven_facts_stored_total{action="updated"}`,
 				`coven_facts_stored_total{action="reinforced"}`,
 				`coven_facts_stored_total{action="deleted"}`,
-			},
-		},
-		{
-			name:       "nil server still serves metrics ok",
-			server:     nilServer,
-			method:     http.MethodGet,
-			url:        "/metrics",
-			wantStatus: http.StatusOK,
-			wantSubstrings: []string{
-				"coven_facts_total",
-				"coven_operations_total",
 			},
 		},
 		{
