@@ -925,6 +925,21 @@ func assertFakeStoreDispatchPendingAndCancel(ctx context.Context, t *testing.T, 
 	if gotB.Status != db.StatusFailed || gotB.ErrorMessage != "cancelled build" {
 		t.Errorf("unexpected status for disp-f3b after cancel: %+v", gotB)
 	}
+
+	dChunk := db.Dispatch{
+		ID:             "disp-chunk-only",
+		Source:         "vanadis",
+		VanadisChunkID: "chunk-xyz",
+		SessionID:      "vanadis-chunk-xyz",
+		Prompt:         "remediation turn",
+		Status:         db.StatusPending,
+	}
+	mustInsertDispatch(ctx, t, s, dChunk, "InsertDispatch disp-chunk-only")
+	cancelledChunk, err := s.CancelPendingDispatches(ctx, "", "chunk-xyz", "cancelled chunk")
+	mustOK(t, err, "CancelPendingDispatches by chunk")
+	if len(cancelledChunk) != 1 || cancelledChunk[0] != "disp-chunk-only" {
+		t.Errorf("expected cancelled [disp-chunk-only], got %v", cancelledChunk)
+	}
 }
 
 func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {

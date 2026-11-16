@@ -233,6 +233,24 @@ func TestCancelDispatches(t *testing.T) {
 			wantSpanCode:     codes.Error,
 		},
 		{
+			name:    "interrupt active dispatch turn by chunk_id target",
+			buildID: "chunk-xyz",
+			fixture: cancelDispatchFixture{
+				activeDispatch: &db.Dispatch{
+					ID:             "disp-active-chunk",
+					VanadisChunkID: "chunk-xyz",
+					SessionID:      "vanadis-chunk-xyz",
+					Prompt:         "remediation chunk",
+				},
+			},
+			wantCancelledIDs: []string{"disp-active-chunk"},
+			wantInterrupted:  true,
+			wantCtxCancelled: true,
+			wantReason:       "dispatch cancelled by operator",
+			wantSpanStatus:   "cancelled",
+			wantSpanCode:     codes.Error,
+		},
+		{
 			name:       "interrupt active dispatch already failed by cancel API records cancelled span",
 			dispatchID: "disp-active-failed",
 			reason:     "cancelled by vanadis",
