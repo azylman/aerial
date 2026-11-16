@@ -49,6 +49,7 @@ updates:
       - "/services/prospera"
       - "/services/vanadis"
       - "/services/vanadis-restate"
+      - "/services/vanadis-nats"
       - "/services/synapse"
     schedule:
       interval: "weekly"
