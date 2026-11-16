@@ -210,8 +210,9 @@ const CodexUsageBaseURL = "https://chatgpt.com/backend-api"
 const codexUsageMaxBody = 1 << 20
 
 type codexUsageWindow struct {
-	UsedPercent *float64 `json:"used_percent"`
-	ResetAt     *int64   `json:"reset_at"`
+	LimitWindowSeconds int      `json:"limit_window_seconds"`
+	UsedPercent        *float64 `json:"used_percent"`
+	ResetAt            *int64   `json:"reset_at"`
 }
 
 type codexUsageResponse struct {
@@ -237,28 +238,30 @@ func CodexUsageToGroups(raw []byte) ([]QuotaGroup, error) {
 	if resp.RateLimit == nil {
 		return nil, errors.New("codex usage payload contains no rate_limit object")
 	}
-	windows := []struct {
-		id, window string
-		w          *codexUsageWindow
-	}{
-		{"codex-seven-day", "weekly", resp.RateLimit.SecondaryWindow},
-		{"codex-five-hour", "5h", resp.RateLimit.PrimaryWindow},
-	}
 	var buckets []QuotaBucket
-	for _, win := range windows {
-		if win.w == nil || win.w.UsedPercent == nil {
-			continue
+	for _, duration := range []int{604800, 18000} {
+		id, window := "codex-seven-day", "weekly"
+		if duration == 18000 {
+			id, window = "codex-five-hour", "5h"
 		}
-		reset := ""
-		if win.w.ResetAt != nil && *win.w.ResetAt > 0 {
-			reset = time.Unix(*win.w.ResetAt, 0).UTC().Format(time.RFC3339)
+		found := false
+		for _, win := range []*codexUsageWindow{resp.RateLimit.PrimaryWindow, resp.RateLimit.SecondaryWindow} {
+			if win == nil || win.UsedPercent == nil || win.LimitWindowSeconds != duration {
+				continue
+			}
+			if found {
+				return nil, errors.New("codex usage payload contains duplicate quota durations")
+			}
+			found = true
+			reset := ""
+			if win.ResetAt != nil && *win.ResetAt > 0 {
+				reset = time.Unix(*win.ResetAt, 0).UTC().Format(time.RFC3339)
+			}
+			buckets = append(buckets, QuotaBucket{
+				ID: id, Window: window, ResetTime: reset,
+				RemainingFraction: min(max((100-*win.UsedPercent)/100, 0), 1),
+			})
 		}
-		buckets = append(buckets, QuotaBucket{
-			ID:                win.id,
-			Window:            win.window,
-			ResetTime:         reset,
-			RemainingFraction: min(max((100-*win.w.UsedPercent)/100, 0), 1),
-		})
 	}
 	if len(buckets) == 0 {
 		return nil, errors.New("codex usage payload contains no quota windows")

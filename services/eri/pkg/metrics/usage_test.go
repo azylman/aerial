@@ -163,7 +163,7 @@ func TestDefaultClaudeUsageRunner(t *testing.T) {
 	}
 }
 
-const codexUsageFixture = `{"rate_limit":{"primary_window":{"used_percent":56.0,"reset_at":1794254399},"secondary_window":{"used_percent":19.0,"reset_at":1794625199}}}`
+const codexUsageFixture = `{"rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":56.0,"reset_at":1794254399},"secondary_window":{"limit_window_seconds":604800,"used_percent":19.0,"reset_at":1794625199}}}`
 
 func TestCodexUsageToGroups(t *testing.T) {
 	t.Parallel()
@@ -172,17 +172,31 @@ func TestCodexUsageToGroups(t *testing.T) {
 		want          []QuotaGroup
 		wantErr       bool
 	}{
+		{name: "primary weekly only", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":604800,"used_percent":2}}}`, want: []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{
+			{ID: "codex-seven-day", Window: "weekly", RemainingFraction: 0.98},
+		}}}},
 		{name: "fixture", payload: codexUsageFixture, want: []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{
 			{ID: "codex-seven-day", Window: "weekly", ResetTime: "2026-11-14T02:59:59Z", RemainingFraction: 0.81},
 			{ID: "codex-five-hour", Window: "5h", ResetTime: "2026-11-09T19:59:59Z", RemainingFraction: 0.44},
 		}}}},
-		{name: "clamping and zero reset", payload: `{"rate_limit":{"primary_window":{"used_percent":120.0,"reset_at":0},"secondary_window":{"used_percent":-5.0,"reset_at":null}}}`, want: []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{
+		{name: "clamping and zero reset", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":120.0,"reset_at":0},"secondary_window":{"limit_window_seconds":604800,"used_percent":-5.0,"reset_at":null}}}`, want: []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{
 			{ID: "codex-seven-day", Window: "weekly", ResetTime: "", RemainingFraction: 1},
 			{ID: "codex-five-hour", Window: "5h", ResetTime: "", RemainingFraction: 0},
 		}}}},
-		{name: "primary window only", payload: `{"rate_limit":{"primary_window":{"used_percent":25.0,"reset_at":1794254399}}}`, want: []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{
+		{name: "primary window only", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":25.0,"reset_at":1794254399}}}`, want: []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{
 			{ID: "codex-five-hour", Window: "5h", ResetTime: "2026-11-09T19:59:59Z", RemainingFraction: 0.75},
 		}}}},
+		{name: "secondary weekly", payload: `{"rate_limit":{"primary_window":null,"secondary_window":{"limit_window_seconds":604800,"used_percent":2}}}`, want: []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{{ID: "codex-seven-day", Window: "weekly", RemainingFraction: 0.98}}}}},
+		{name: "swapped pair", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":604800,"used_percent":2},"secondary_window":{"limit_window_seconds":18000,"used_percent":25}}}`, want: []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{{ID: "codex-seven-day", Window: "weekly", RemainingFraction: 0.98}, {ID: "codex-five-hour", Window: "5h", RemainingFraction: 0.75}}}}},
+		{name: "supported with unsupported", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":604800,"used_percent":2},"secondary_window":{"limit_window_seconds":60,"used_percent":25}}}`, want: []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{{ID: "codex-seven-day", Window: "weekly", RemainingFraction: 0.98}}}}},
+		{name: "missing percent duplicate skipped", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":604800,"used_percent":2},"secondary_window":{"limit_window_seconds":604800}}}`, want: []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{{ID: "codex-seven-day", Window: "weekly", RemainingFraction: 0.98}}}}},
+		{name: "missing duration", payload: `{"rate_limit":{"primary_window":{"used_percent":2},"secondary_window":null}}`, wantErr: true},
+		{name: "zero duration", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":0,"used_percent":2},"secondary_window":null}}`, wantErr: true},
+		{name: "negative duration", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":-1,"used_percent":2},"secondary_window":null}}`, wantErr: true},
+		{name: "unsupported duration", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":60,"used_percent":2},"secondary_window":null}}`, wantErr: true},
+		{name: "missing percent", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":18000},"secondary_window":null}}`, wantErr: true},
+		{name: "duplicate weekly", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":604800,"used_percent":2},"secondary_window":{"limit_window_seconds":604800,"used_percent":3}}}`, wantErr: true},
+		{name: "duplicate five hour", payload: `{"rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":2},"secondary_window":{"limit_window_seconds":18000,"used_percent":3}}}`, wantErr: true},
 		{name: "null windows", payload: `{"rate_limit":{"primary_window":null,"secondary_window":null}}`, wantErr: true},
 		{name: "missing rate_limit", payload: `{}`, wantErr: true},
 		{name: "malformed", payload: `{bad`, wantErr: true},
@@ -202,17 +216,53 @@ func TestCodexUsageToGroups(t *testing.T) {
 }
 
 func TestRecordCodexUsageJSON(t *testing.T) {
+	const weekly = `{"rate_limit":{"primary_window":{"limit_window_seconds":604800,"used_percent":2,"reset_at":1794625199}}}`
+	weeklyGroups := []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{{ID: "codex-seven-day", Window: "weekly", RemainingFraction: 0.98, ResetTime: "2026-11-14T02:59:59Z"}}}}
 	tests := []struct {
-		name, payload, wantCheck string
-		wantErr                  bool
+		name            string
+		payloads        []string
+		wantErr         bool
+		want            []QuotaGroup
+		present, absent []string
 	}{
-		{"fixture", codexUsageFixture, `aerial_brain_usage_quota_remaining_fraction{bucket_id="codex-five-hour",disabled="false",group="Codex",window="5h"} 0.44`, false},
-		{"reset gauge", codexUsageFixture, `aerial_brain_usage_quota_reset_timestamp_seconds{bucket_id="codex-five-hour",group="Codex",window="5h"} 1.794254399e+09`, false},
-		{"missing rate limit", `{}`, "", true},
+		{"both windows", []string{codexUsageFixture}, false, []QuotaGroup{{Name: "Codex", Buckets: []QuotaBucket{
+			{ID: "codex-seven-day", Window: "weekly", RemainingFraction: 0.81, ResetTime: "2026-11-14T02:59:59Z"},
+			{ID: "codex-five-hour", Window: "5h", RemainingFraction: 0.44, ResetTime: "2026-11-09T19:59:59Z"},
+		}}}, []string{`aerial_brain_usage_quota_remaining_fraction{bucket_id="codex-five-hour",disabled="false",group="Codex",window="5h"} 0.44`, `aerial_brain_usage_quota_reset_timestamp_seconds{bucket_id="codex-five-hour",group="Codex",window="5h"} 1.794254399e+09`}, nil},
+		{
+			"both to weekly",
+			[]string{codexUsageFixture, weekly},
+			false, weeklyGroups,
+			[]string{`aerial_brain_usage_quota_remaining_fraction{bucket_id="codex-seven-day",disabled="false",group="Codex",window="weekly"} 0.98`, `aerial_brain_usage_quota_reset_timestamp_seconds{bucket_id="codex-seven-day",group="Codex",window="weekly"} 1.794625199e+09`},
+			[]string{`aerial_brain_usage_quota_remaining_fraction{bucket_id="codex-five-hour"`, `aerial_brain_usage_quota_reset_timestamp_seconds{bucket_id="codex-five-hour"`},
+		},
+		{"missing rate limit retains telemetry", []string{weekly, `{}`}, true, weeklyGroups, []string{`window="weekly"} 0.98`}, nil},
+		{"duplicate retains telemetry", []string{weekly, `{"rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":5},"secondary_window":{"limit_window_seconds":18000,"used_percent":10}}}`}, true, weeklyGroups, []string{`window="weekly"} 0.98`}, []string{`bucket_id="codex-five-hour"`}},
+		{"unsupported retains telemetry", []string{weekly, `{"rate_limit":{"primary_window":{"limit_window_seconds":60,"used_percent":5}}}`}, true, weeklyGroups, []string{`window="weekly"} 0.98`}, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			testRecordUsageMetricEndpoint(t, RecordCodexUsageJSON, tc.payload, tc.wantCheck, tc.wantErr)
+			for i, payload := range tc.payloads {
+				wantErr := tc.wantErr && i == len(tc.payloads)-1
+				if err := RecordCodexUsageJSON([]byte(payload)); (err != nil) != wantErr {
+					t.Fatalf("record error = %v, wantErr %v", err, wantErr)
+				}
+			}
+			if got := LatestQuotaGroups(); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("latest = %+v, want %+v", got, tc.want)
+			}
+			rec := httptest.NewRecorder()
+			Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+			for _, want := range tc.present {
+				if !strings.Contains(rec.Body.String(), want) {
+					t.Errorf("missing %q", want)
+				}
+			}
+			for _, absent := range tc.absent {
+				if strings.Contains(rec.Body.String(), absent) {
+					t.Errorf("stale %q", absent)
+				}
+			}
 		})
 	}
 }
