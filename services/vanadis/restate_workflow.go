@@ -14,8 +14,6 @@ import (
 	"strings"
 	"time"
 
-	restate "github.com/restatedev/sdk-go"
-	"github.com/restatedev/sdk-go/server"
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/httpkit"
@@ -23,24 +21,10 @@ import (
 
 const maxParallelChunks = 4
 
-// ErrRestateDisabled is returned when the Restate server is intentionally disabled.
-var ErrRestateDisabled = errors.New("restate server is disabled")
-
 // RestateConfig holds Restate durable workflow runtime configuration for Vanadis.
 type RestateConfig struct {
-	Enabled             bool   `yaml:"enabled"`
-	RestatePort         string `yaml:"restate_port"`
-	RestateIngressURL   string `yaml:"restate_ingress_url"`
-	RestateAdminURL     string `yaml:"restate_admin_url"`
-	RestateAdvertiseURL string `yaml:"restate_advertise_url"`
-}
-
-func cleanRestatePortEnv(raw string) string {
-	v := strings.TrimSpace(raw)
-	if strings.Contains(v, "://") {
-		return ""
-	}
-	return v
+	Enabled           bool   `yaml:"enabled"`
+	RestateIngressURL string `yaml:"restate_ingress_url"`
 }
 
 // LoadRestateConfig loads Restate configuration from an optional YAML file with environment variable overrides.
@@ -66,11 +50,8 @@ func LoadRestateConfig(configPath string) RestateConfig {
 		enabled = true
 	}
 	return RestateConfig{
-		Enabled:             enabled,
-		RestatePort:         firstNonEmpty(cleanRestatePortEnv(os.Getenv("VANADIS_RESTATE_PORT")), cleanRestatePortEnv(os.Getenv("RESTATE_PORT")), fileCfg.RestatePort, "9080"),
-		RestateIngressURL:   ingressURL,
-		RestateAdminURL:     strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("RESTATE_ADMIN_URL"), fileCfg.RestateAdminURL)), "/"),
-		RestateAdvertiseURL: strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("VANADIS_RESTATE_ADVERTISE_URL"), fileCfg.RestateAdvertiseURL)), "/"),
+		Enabled:           enabled,
+		RestateIngressURL: ingressURL,
 	}
 }
 
@@ -113,157 +94,6 @@ type reconcileStepOutput struct {
 	LaunchedMap    map[string]bool   `json:"launched_map,omitempty"`
 	Error          string            `json:"error,omitempty"`
 	State          *BuildObjectState `json:"state,omitempty"`
-}
-
-type objectRuntime interface {
-	Key() string
-	GetLaunched() (map[string]bool, error)
-	SetLaunched(launched map[string]bool)
-	GetState() (*BuildObjectState, error)
-	SetState(state BuildObjectState)
-	ClearState()
-	RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error)
-}
-
-type restateObjectRuntime struct {
-	ctx restate.ObjectContext
-}
-
-func (r restateObjectRuntime) Key() string {
-	return restate.Key(r.ctx)
-}
-
-func (r restateObjectRuntime) GetLaunched() (map[string]bool, error) {
-	return restate.Get[map[string]bool](r.ctx, "launched")
-}
-
-func (r restateObjectRuntime) SetLaunched(launched map[string]bool) {
-	if launched == nil {
-		launched = make(map[string]bool)
-	}
-	restate.Set(r.ctx, "launched", launched)
-}
-
-func (r restateObjectRuntime) GetState() (*BuildObjectState, error) {
-	return restate.Get[*BuildObjectState](r.ctx, "state")
-}
-
-func (r restateObjectRuntime) SetState(state BuildObjectState) {
-	restate.Set(r.ctx, "state", &state)
-}
-
-func (r restateObjectRuntime) ClearState() {
-	restate.ClearAll(r.ctx)
-}
-
-func (r restateObjectRuntime) RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error) {
-	return restate.Run(r.ctx, func(rc restate.RunContext) (reconcileStepOutput, error) {
-		return fn(rc)
-	}, restate.WithName(name))
-}
-
-// BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
-type BuildObject struct {
-	srv *VanadisServer
-}
-
-// NewBuildObject creates a new BuildObject instance bound to a VanadisServer.
-func NewBuildObject(srv *VanadisServer) *BuildObject {
-	return &BuildObject{srv: srv}
-}
-
-// ServiceName returns the Restate service name for this Virtual Object.
-func (*BuildObject) ServiceName() string {
-	return "Build"
-}
-
-// Reconcile reconciles the build state on Restate.
-func (b *BuildObject) Reconcile(ctx restate.ObjectContext, req ReconcileBuildRequest) (ReconcileBuildResult, error) {
-	_ = req
-	if b == nil || b.srv == nil || b.srv.store == nil {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("vanadis store not configured")
-	}
-	rt := restateObjectRuntime{ctx: ctx}
-	if strings.TrimSpace(rt.Key()) == "" {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("build_id cannot be empty")
-	}
-	return b.reconcileWithRuntime(rt)
-}
-
-func (b *BuildObject) reconcileWithRuntime(rt objectRuntime) (ReconcileBuildResult, error) {
-	return b.executeObjectTransition(rt, "reconcile-build", nil)
-}
-
-// Mutate applies a mutation to the build and reconciles state.
-func (b *BuildObject) Mutate(ctx restate.ObjectContext, req BuildMutationRequest) (ReconcileBuildResult, error) {
-	if b == nil || b.srv == nil || b.srv.store == nil {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("vanadis store not configured")
-	}
-	rt := restateObjectRuntime{ctx: ctx}
-	if strings.TrimSpace(rt.Key()) == "" {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("build_id cannot be empty")
-	}
-	return b.mutateWithRuntime(rt, req)
-}
-
-func (b *BuildObject) mutateWithRuntime(rt objectRuntime, req BuildMutationRequest) (ReconcileBuildResult, error) {
-	return b.executeObjectTransition(rt, "mutate-build", &req)
-}
-
-func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string, mutation *BuildMutationRequest) (ReconcileBuildResult, error) {
-	buildID := strings.TrimSpace(rt.Key())
-	if buildID == "" {
-		return ReconcileBuildResult{}, restate.TerminalErrorf("build_id cannot be empty")
-	}
-
-	priorState, err := rt.GetState()
-	if err != nil {
-		return ReconcileBuildResult{BuildID: buildID, Status: statusFailed, Error: err.Error()}, err
-	}
-
-	priorLaunched, err := rt.GetLaunched()
-	if err != nil {
-		return ReconcileBuildResult{BuildID: buildID, Status: statusFailed, Error: err.Error()}, err
-	}
-
-	if priorState != nil && len(priorState.Launched) > 0 {
-		if priorLaunched == nil {
-			priorLaunched = make(map[string]bool, len(priorState.Launched))
-		}
-		for k, v := range priorState.Launched {
-			if v {
-				priorLaunched[k] = true
-			}
-		}
-	}
-
-	stepOut, err := rt.RunReconcileStep(stepName, func(ctx context.Context) (reconcileStepOutput, error) {
-		if mutation != nil {
-			if executeErr := executeBuildMutation(ctx, b.srv, buildID, *mutation); executeErr != nil {
-				return reconcileStepOutput{}, executeErr
-			}
-		}
-		return executeReconcileBuild(ctx, b.srv, buildID, priorLaunched)
-	})
-	if err != nil {
-		return ReconcileBuildResult{BuildID: buildID, Status: statusFailed, Error: err.Error()}, err
-	}
-
-	if stepOut.BuildStatus == statusCompleted || stepOut.BuildStatus == statusFailed || stepOut.BuildStatus == statusCancelled || stepOut.BuildStatus == statusNotFound {
-		rt.ClearState()
-	} else {
-		if stepOut.State != nil {
-			rt.SetState(*stepOut.State)
-		}
-		rt.SetLaunched(stepOut.LaunchedMap)
-	}
-
-	return ReconcileBuildResult{
-		BuildID:        buildID,
-		Status:         stepOut.BuildStatus,
-		LaunchedChunks: stepOut.LaunchedChunks,
-		Error:          stepOut.Error,
-	}, nil
 }
 
 func executeBuildMutation(ctx context.Context, srv *VanadisServer, buildID string, req BuildMutationRequest) error {
@@ -715,93 +545,6 @@ func chunksToSummaries(list []VanadisChunk) []VanadisChunkSummary {
 		}
 	}
 	return summaries
-}
-
-func startRestateServer(ctx context.Context, srv *VanadisServer) (*server.Restate, error) {
-	if srv == nil {
-		return nil, errors.New("vanadis server is nil")
-	}
-	port := strings.TrimSpace(srv.restateCfg.RestatePort)
-	if port == "disabled" || port == "-1" {
-		return nil, ErrRestateDisabled
-	}
-	if port == "" {
-		port = "9080"
-	}
-	if (srv.cfg.Port == "0" || srv.cfg.Port == "-1") && port == "9080" {
-		port = "0"
-	}
-	restateServer := server.NewRestate().
-		Bind(restate.Reflect(NewBuildObject(srv)))
-	go func() {
-		log.Printf("[vanadis] Restate HTTP/2 server listening on :%s", port)
-		if err := restateServer.Start(ctx, ":"+port); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("[vanadis] Restate server error: %v", err)
-		}
-	}()
-
-	if srv.restateCfg.RestateAdminURL != "" && srv.restateCfg.RestateAdvertiseURL != "" {
-		go autoRegisterRestateDeployment(ctx, srv.restateCfg.RestateAdminURL, srv.restateCfg.RestateAdvertiseURL)
-	}
-
-	return restateServer, nil
-}
-
-func autoRegisterRestateDeployment(ctx context.Context, adminURL, advertiseURL string) {
-	backoff := 500 * time.Millisecond
-	for range 10 {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		err := registerRestateDeployment(ctx, adminURL, advertiseURL)
-		if err == nil {
-			log.Printf("[vanadis] Successfully registered Restate deployment: %s with %s", advertiseURL, adminURL)
-			return
-		}
-		log.Printf("[vanadis] Restate deployment registration attempt failed: %v", err)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-			backoff = min(backoff*2, 5*time.Second)
-		}
-	}
-}
-
-func registerRestateDeployment(ctx context.Context, adminURL, advertiseURL string) error {
-	adminURL = strings.TrimRight(strings.TrimSpace(adminURL), "/")
-	advertiseURL = strings.TrimSpace(advertiseURL)
-	if adminURL == "" || advertiseURL == "" {
-		return nil
-	}
-	payload, err := json.Marshal(map[string]any{
-		"uri":   advertiseURL,
-		"force": true,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal restate deployment payload: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, adminURL+"/deployments", bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("create restate deployment request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("post restate deployment: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, rErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		if rErr != nil {
-			return fmt.Errorf("restate admin returned status %d (read error: %w)", resp.StatusCode, rErr)
-		}
-		return fmt.Errorf("restate admin returned status %d: %s", resp.StatusCode, string(body))
-	}
-	return nil
 }
 
 func (s *VanadisServer) postRestateIngressJSON(ctx context.Context, path string, payload any) error {
