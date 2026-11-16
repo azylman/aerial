@@ -736,8 +736,9 @@ func linkManagedWorkloads(workloads []workloadRollout) {
 		if workloads[i].Kind != kindRestateCluster {
 			continue
 		}
+		targetNS := cmp.Or(workloads[i].Namespace, workloads[i].Name)
 		for _, other := range workloads {
-			if other.Kind == kindStatefulSet && other.Namespace == workloads[i].Namespace && other.Name == workloads[i].Name {
+			if other.Kind == kindStatefulSet && other.Namespace == targetNS && (other.Name == workloads[i].Name || other.Name == "restate") {
 				workloads[i].ManagedWorkloads = append(workloads[i].ManagedWorkloads, other)
 			}
 		}
