@@ -125,6 +125,7 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 		if _, err := tx.Exec(ctx, updateBuildSQL, bID); err == nil {
 			res.BuildCompleted = true
 			res.BuildStatus = statusCompleted
+			res.Chunks = queryBuildChunkSummaries(ctx, tx, bID)
 		}
 	}
 
@@ -134,6 +135,34 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 
 	res.Advanced = true
 	return res, nil
+}
+
+func queryBuildChunkSummaries(ctx context.Context, tx pgx.Tx, buildID string) []VanadisChunkSummary {
+	const q = `SELECT id, chunk_index, mode, repo, title, status, COALESCE(pr_number, 0), started_at, completed_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
+	rows, err := tx.Query(ctx, q, buildID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var summaries []VanadisChunkSummary
+	for rows.Next() {
+		var s VanadisChunkSummary
+		var startedAt, completedAt sql.NullTime
+		if err := rows.Scan(&s.ID, &s.ChunkIndex, &s.Mode, &s.Repo, &s.Title, &s.Status, &s.PRNumber, &startedAt, &completedAt, &s.UpdatedAt); err != nil {
+			return nil
+		}
+		if startedAt.Valid {
+			s.StartedAt = startedAt.Time
+		}
+		if completedAt.Valid {
+			s.CompletedAt = completedAt.Time
+		}
+		summaries = append(summaries, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
+	return summaries
 }
 
 // FailChunk marks a non-terminal chunk and its parent build as failed.
