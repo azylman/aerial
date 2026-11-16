@@ -1047,6 +1047,7 @@ type mockChunkBus struct {
 	pubsub.Bus
 
 	published     []ExecuteChunkArgs
+	publishedIDs  []string
 	widgetCalls   int
 	widgetBuildID string
 	widgetBanner  string
@@ -1059,6 +1060,7 @@ func (m *mockChunkBus) Publish(ctx context.Context, subject, msgID string, data 
 	}
 	if a, ok := data.(ExecuteChunkArgs); ok {
 		m.published = append(m.published, a)
+		m.publishedIDs = append(m.publishedIDs, msgID)
 		return nil
 	}
 	if strings.HasPrefix(subject, "aerial.coalesced.widget_sync.build.") {

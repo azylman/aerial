@@ -1275,10 +1275,13 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 		rawPayload   string
 		numDelivered uint64
 		brainStatus  int
+		generation   int
 		wantErr      bool
 		wantTerm     bool
 		wantNak      bool
 	}{
+		{name: "missing retry identity discarded", rawPayload: `{"build_id":"b-run","chunk_index":0}`, generation: 1, brainStatus: http.StatusBadGateway},
+		{name: "stale retry identity discarded", rawPayload: `{"build_id":"b-run","chunk_index":0,"dispatch_id":"vanadis-c-0-turn-1"}`, generation: 2, brainStatus: http.StatusBadGateway},
 		{
 			name:       "malformed payload terms message and returns nil",
 			rawPayload: `{"build_id": invalid`,
@@ -1319,6 +1322,8 @@ func TestHandleExecuteChunkJob(t *testing.T) {
 
 			memStore := newMemoryVanadisStore()
 			c0 := mkChunk("c-0", "b-run", 0, "C0", "I0", "medium", "pending")
+			c0.Mode = "action"
+			c0.StallNudges = tc.generation
 			_ = memStore.CreateBuild(ctx, mkBuild("b-run", "123456789012345678", "Run", "obj", "running"), []VanadisChunk{c0})
 			srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, brainSrv.Client())
 
