@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+# Standalone Vanadis Restate Virtual Object worker image managed by RestateDeployment.
 FROM golang:1.27.3-alpine AS builder
 
 WORKDIR /src
