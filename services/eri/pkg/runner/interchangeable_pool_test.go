@@ -540,7 +540,7 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	}
 	pool.WaitBackground()
 
-	pool.SetTranscriptRescuer(func(string, time.Time) string { return "rescued" })
+	pool.SetTranscriptRescuer(func(context.Context, string, time.Time) string { return "rescued" })
 	pool.UpdateModel("claude-sonnet-5-5-low")
 	pool.UpdateEngine("claude", "/usr/bin/claude")
 	pool.MarkDirty()

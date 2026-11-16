@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -33,7 +34,7 @@ type DaemonConfig struct {
 	GeminiHomeDir           string
 	TurnEnvFile             string
 	Timeout                 time.Duration
-	TranscriptRescuer       func(convID string, since time.Time) string
+	TranscriptRescuer       func(ctx context.Context, convID string, since time.Time) string
 	MemoryRetriever         MemoryRetriever
 	AmbientContextRetriever AmbientContextRetriever
 }
@@ -155,4 +156,21 @@ func BuildDaemonArgs(cfg DaemonConfig) []string {
 		args = append(args, "--print-timeout", fmt.Sprintf("%ds", int(t.Seconds())))
 	}
 	return args
+}
+
+// rescueTranscript keeps recovery within the turn lifetime, including scans that
+// return text concurrently with cancellation. Nil contexts support legacy manual turns.
+func (d *StreamingDaemon) rescueTranscript(turn *TurnContext) string {
+	ctx := turn.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return ""
+	}
+	rescued := d.cfg.TranscriptRescuer(ctx, d.SessionID(), turn.CreatedAt)
+	if ctx.Err() != nil {
+		return ""
+	}
+	return rescued
 }

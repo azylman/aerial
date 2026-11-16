@@ -267,13 +267,13 @@ func (d *StreamingDaemon) waitForAgyHandshake(ctx context.Context, reader *bufio
 	}
 }
 
-// StartStreamingDaemon launches a streaming daemon, waits for the initial handshake NDJSON event,
-// latches the session ID, and spawns the background stdout reader loop.
-func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonSpawner) (*StreamingDaemon, error) {
+// StartStreamingDaemon starts a process on lifetime. The startup context bounds
+// retries and handshakes without shortening the successful process lifetime.
+func StartStreamingDaemon(lifetime, startup context.Context, cfg DaemonConfig, spawner DaemonSpawner) (*StreamingDaemon, error) {
 	if spawner == nil {
 		spawner = &DefaultDaemonSpawner{}
 	}
-	stdin, stdout, stderr, handle, err := spawner.Spawn(ctx, cfg)
+	stdin, stdout, stderr, handle, err := spawnDaemon(lifetime, startup, cfg, spawner)
 	if err != nil {
 		return nil, fmt.Errorf("failed spawning daemon: %w", err)
 	}
@@ -297,6 +297,10 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 		seenMemoryIDs: make(map[string]bool),
 	}
 
+	if err := startup.Err(); err != nil {
+		d.closeOnStartupError("cancelled")
+		return nil, fmt.Errorf("daemon startup cancelled: %w", err)
+	}
 	reader := bufio.NewReader(stdout)
 
 	timeout := DefaultHandshakeTimeout
@@ -310,15 +314,20 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 		}
 		d.sessionID, d.state = sessID, StateReady
 	} else if cfg.IsCodex() {
-		if err := d.waitForCodexHandshake(ctx, reader, timeout); err != nil {
+		if err := d.waitForCodexHandshake(startup, reader, timeout); err != nil {
 			return nil, err
 		}
-	} else if err := d.waitForAgyHandshake(ctx, reader, timeout); err != nil {
+	} else if err := d.waitForAgyHandshake(startup, reader, timeout); err != nil {
 		return nil, err
 	}
 
+	// A successful handshake can race with startup budget expiration.
+	if err := startup.Err(); err != nil {
+		d.closeOnStartupError("cancelled")
+		return nil, fmt.Errorf("daemon startup cancelled: %w", err)
+	}
 	d.readerWg.Add(1)
-	go d.readStdoutLoop(reader)
+	go d.readStdoutLoop(reader) //nolint:contextcheck // Recovery uses each queued TurnContext.Ctx, not the daemon lifetime.
 	return d, nil
 }
 
@@ -337,7 +346,7 @@ func (d *StreamingDaemon) SessionID() string {
 	return d.sessionID
 }
 
-func (d *StreamingDaemon) SetTranscriptRescuer(r func(string, time.Time) string) {
+func (d *StreamingDaemon) SetTranscriptRescuer(r func(context.Context, string, time.Time) string) {
 	if d == nil {
 		return
 	}
@@ -556,7 +565,7 @@ func (d *StreamingDaemon) tryRescueTurnOnEOF(turn *TurnContext) bool {
 	if d.cfg.TranscriptRescuer == nil || d.SessionID() == "" {
 		return false
 	}
-	rescued := d.cfg.TranscriptRescuer(d.SessionID(), turn.CreatedAt)
+	rescued := d.rescueTranscript(turn)
 	if !IsSubstantiveResponse(rescued) || strings.HasPrefix(rescued, "[Tool Call Requested]:") {
 		return false
 	}
@@ -1063,7 +1072,7 @@ func (d *StreamingDaemon) tryRescueTurnOnResult(activeTurn *TurnContext, raw map
 	if d.cfg.TranscriptRescuer == nil || d.SessionID() == "" {
 		return false
 	}
-	rescued := d.cfg.TranscriptRescuer(d.SessionID(), activeTurn.CreatedAt)
+	rescued := d.rescueTranscript(activeTurn)
 	if rescued == "" || !IsSubstantiveResponse(rescued) || strings.HasPrefix(rescued, "[Tool Call Requested]:") {
 		return false
 	}

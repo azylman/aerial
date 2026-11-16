@@ -633,7 +633,7 @@ func buildBrainProcessPools(
 			Cwd:               cur.DataDir,
 			Env:               poolEnv,
 			Timezone:          cur.Timezone,
-			TranscriptRescuer: sessionMgr.ExtractResponseSince,
+			TranscriptRescuer: sessionMgr.ExtractResponseSinceContext,
 			SessionManager:    sessionMgr,
 			PrewarmedTargets:  prewarmed,
 			MCPProxyPort:      mcpProxyPort,

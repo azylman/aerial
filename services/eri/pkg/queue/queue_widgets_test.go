@@ -1140,7 +1140,7 @@ func (s *spyPoolSessionDeps) SetSessionManager(sm *session.Manager) {
 	s.managerSet = true
 }
 
-func (*spyPoolSessionDeps) SetTranscriptRescuer(r func(string, time.Time) string) {}
+func (*spyPoolSessionDeps) SetTranscriptRescuer(r func(context.Context, string, time.Time) string) {}
 
 func TestWorkerPool_WirePoolSessionDependencies_TableDriven(t *testing.T) {
 	t.Parallel()

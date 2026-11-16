@@ -527,7 +527,7 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolTranscriptRecovery(t *testing.T)
 		resultResponse: "All systems operational and nominal.", writeTranscriptLogsDir: logsDir,
 	})
 	sessMgr := session.New(tempDir, tempDir)
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash", TranscriptRescuer: sessMgr.ExtractResponseSince}, spawner)
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash", TranscriptRescuer: sessMgr.ExtractResponseSinceContext}, spawner)
 	defer procPool.Close()
 
 	pool := New(nil, WorkerPoolConfig{SessionManager: sessMgr, ProcessPool: procPool})
