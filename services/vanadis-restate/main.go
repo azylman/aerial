@@ -63,7 +63,7 @@ func LoadConfigFromEnv() Config {
 		vanadisURL = "http://vanadis.aerial:4025"
 	}
 
-	pgURL := strings.TrimSpace(firstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL")))
+	pgURL := strings.TrimSpace(firstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(os.Getenv, "aerial")))
 	eriURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("ERI_URL"), "http://eri.aerial")), "/")
 	natsURL := strings.TrimSpace(firstNonEmpty(os.Getenv("NATS_URL"), "nats://nats.aerial:4222"))
 	ghToken := strings.TrimSpace(firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT")))
@@ -260,6 +260,9 @@ func NewBuildObject(vanadisURL string, httpClient *http.Client, runtimeFactory .
 
 // WithAuthority wires the PostgreSQL store and side-effect executor into BuildObject.
 func (b *BuildObject) WithAuthority(store VanadisStore, exec *Executor) *BuildObject {
+	if pg, ok := store.(*PostgresVanadisStore); ok && pg == nil {
+		store = nil
+	}
 	b.store = store
 	b.executor = exec
 	return b
@@ -1196,17 +1199,16 @@ func RunApp(ctx context.Context, cfg Config) error {
 		}
 	}()
 
-	var store *PostgresVanadisStore
-	var closeStore func(context.Context)
+	var store VanadisStore
 	var bus pubsub.Bus
 	var executor *Executor
 
 	if cfg.PostgresURL != "" {
-		var pErr error
-		store, closeStore, pErr = initPostgres(ctx, cfg.PostgresURL)
+		pgStore, closeStore, pErr := initPostgres(ctx, cfg.PostgresURL)
 		if pErr != nil {
 			log.Printf("[vanadis-restate] warning: failed connecting to postgres: %v", pErr)
 		} else {
+			store = pgStore
 			defer closeStore(context.WithoutCancel(ctx))
 		}
 	}
