@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"reflect"
 	"strings"
@@ -929,5 +930,109 @@ func TestExtractJobsFromMetadata_TableDriven(t *testing.T) {
 				t.Errorf("extractJobsFromMetadata() = %v, want %v", got, tt.expected)
 			}
 		})
+	}
+}
+
+// Supply a disposable local PostgreSQL fixture explicitly; ordinary unit tests need no server.
+// Each case uses a connection-local temporary table, never the fixture's persistent schema.
+var registryTestDSN = flag.String("registry-test-dsn", "", "disposable PostgreSQL fixture for registry SQL integration tests")
+
+func TestPostgresPRRegistry_Recovery(t *testing.T) {
+	t.Parallel()
+	if *registryTestDSN == "" {
+		t.Skip("requires disposable PostgreSQL fixture via -registry-test-dsn")
+	}
+	tests := []struct {
+		name            string
+		status          string
+		metadata        string
+		wantListed      bool
+		steps           [][]string
+		wantTransitions []bool
+		wantStatuses    []string
+		wantMarkers     []bool
+	}{
+		{name: "failed two-target recovery and duplicate success", status: "deploy_failed", metadata: `{"kustomization_requests":{"one":{},"two":{}},"banner":"failed","deploy_failed_published":true}`, wantListed: true, steps: [][]string{{"unknown"}, {"one"}, {"one"}, {"two"}, {"two"}}, wantTransitions: []bool{false, false, false, true, false}, wantStatuses: []string{"deploy_failed", "deploy_failed", "deploy_failed", "deployed", "deployed"}, wantMarkers: []bool{true, true, true, false, false}},
+		{name: "deploying completion", status: "deploying", metadata: `{"kustomization_requests":{"one":{},"two":{}}}`, wantListed: true, steps: [][]string{{"one"}, {"two"}}, wantTransitions: []bool{false, true}, wantStatuses: []string{"deploying", "deployed"}, wantMarkers: []bool{false, false}},
+		{name: "closed excluded", status: "closed", metadata: `{"kustomization_requests":{"one":{}}}`, steps: [][]string{{"one"}}, wantTransitions: []bool{false}, wantStatuses: []string{"closed"}, wantMarkers: []bool{false}},
+		{name: "deployed excluded", status: "deployed", metadata: `{"kustomization_requests":{"one":{}}}`, steps: [][]string{{"one"}}, wantTransitions: []bool{false}, wantStatuses: []string{"deployed"}, wantMarkers: []bool{false}},
+		{name: "untracked failure excluded", status: "deploy_failed", metadata: `{}`, steps: [][]string{{"one"}}, wantTransitions: []bool{false}, wantStatuses: []string{"deploy_failed"}, wantMarkers: []bool{false}},
+		{name: "empty tracked failure excluded", status: "deploy_failed", metadata: `{"kustomization_requests":{}}`, steps: [][]string{{"one"}}, wantTransitions: []bool{false}, wantStatuses: []string{"deploy_failed"}, wantMarkers: []bool{false}},
+		{name: "array tracking excluded", status: "deploy_failed", metadata: `{"kustomization_requests":[]}`, steps: [][]string{{"one"}}, wantTransitions: []bool{false}, wantStatuses: []string{"deploy_failed"}, wantMarkers: []bool{false}},
+		{name: "null tracking excluded", status: "deploy_failed", metadata: `{"kustomization_requests":null}`, steps: [][]string{{"one"}}, wantTransitions: []bool{false}, wantStatuses: []string{"deploy_failed"}, wantMarkers: []bool{false}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			conn := newRecoveryFixture(t, tc.status, tc.metadata)
+			reg := NewPostgresPRRegistry(conn)
+			prs, err := reg.ListDeployingPRs(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (len(prs) == 1) != tc.wantListed {
+				t.Fatalf("discovery = %v, want listed %v", prs, tc.wantListed)
+			}
+			if tc.wantListed && prs[0].PRNumber != 42 {
+				t.Fatalf("discovered PR = %d", prs[0].PRNumber)
+			}
+			for i, names := range tc.steps {
+				got, err := reg.MarkKustomizationsDeployed(ctx, "example/project", 42, names)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != tc.wantTransitions[i] {
+					t.Fatalf("step %d transition = %v", i, got)
+				}
+				assertRecoveryState(t, conn, tc.wantStatuses[i], tc.wantMarkers[i])
+			}
+		})
+	}
+}
+
+func newRecoveryFixture(t *testing.T, status, metadata string) *pgx.Conn {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, *registryTestDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close(ctx) })
+	_, err = conn.Exec(ctx, `CREATE TEMP TABLE pr_registry (id bigserial PRIMARY KEY, repo text, pr_number int, branch text NOT NULL DEFAULT '', head_sha text NOT NULL DEFAULT '', merge_sha text, target_id text NOT NULL DEFAULT '', status text, metadata jsonb, updated_at timestamptz)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = conn.Exec(ctx, `INSERT INTO pr_registry (repo,pr_number,status,metadata) VALUES ('example/project',42,$1,$2::jsonb)`, status, metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+func assertRecoveryState(t *testing.T, conn *pgx.Conn, wantStatus string, wantMarkers bool) {
+	t.Helper()
+	ctx := context.Background()
+	var status string
+	var meta map[string]any
+	if err := conn.QueryRow(ctx, `SELECT status,metadata FROM pr_registry WHERE pr_number=42`).Scan(&status, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if status != wantStatus {
+		t.Fatalf("status = %s, want %s", status, wantStatus)
+	}
+	_, banner := meta["banner"]
+	_, published := meta["deploy_failed_published"]
+	if banner != wantMarkers || published != wantMarkers {
+		t.Fatalf("failure markers = %v", meta)
+	}
+	if wantMarkers {
+		if meta["banner"] != "failed" || meta["deploy_failed_published"] != true {
+			t.Fatalf("failure metadata changed: %v", meta)
+		}
+		_, updated, err := NewPostgresPRRegistry(conn).AtomicTransitionDeployFailed(ctx, "example/project", 42)
+		if err != nil || updated {
+			t.Fatalf("duplicate failure updated=%v err=%v", updated, err)
+		}
 	}
 }
