@@ -3,7 +3,8 @@ set -euo pipefail
 
 # scripts/aerial-build.sh - CLI client for Vanadis Autonomous Build Queue Orchestrator
 #
-# Build plans define an array of sequential chunks. Each chunk has an explicit mode:
+# Build plans define a directed acyclic graph (DAG) of chunks with explicit depends_on arrays.
+# Each chunk has an explicit mode:
 # - 'pr' (default): requires a non-empty chunk-level 'repo' (e.g. "azylman/aerial")
 # - 'action': operational chunk running against live services; 'repo' must be omitted or empty ("")
 
@@ -52,6 +53,7 @@ Commands:
   cancel <build_id>                 Cancel an active Vanadis build run
 
 Build Plans:
+  Build plans define a DAG with mandatory explicit depends_on arrays (use [] for root chunks).
   Chunks support mode 'pr' (default, requires chunk-level repo) and 'action' (omitted/empty repo).
 
 Environment:
@@ -173,6 +175,11 @@ cmd_enqueue() {
 
     if ! jq empty "$plan_file" >/dev/null 2>&1; then
         echo "ERROR: Invalid JSON in plan file: $plan_file" >&2
+        exit 1
+    fi
+
+    if ! jq -e '(.chunks | type == "array" and length > 0) and all(.chunks[]; (.depends_on | type) == "array")' "$plan_file" >/dev/null 2>&1; then
+        echo "ERROR: Every chunk in plan file must explicitly specify a depends_on array (use [] for root chunks)" >&2
         exit 1
     fi
 
