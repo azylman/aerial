@@ -505,10 +505,12 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 		}
 		targetID = firstNonEmpty(tID, targetID)
 	}
-	_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_failed", "deploy_failed")
+	if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_failed", "deploy_failed"); err != nil {
+		return fmt.Errorf("publish deploy lifecycle event: %w", err)
+	}
 	if s.registry != nil && evt.PRNumber > 0 {
-		if updateErr := s.registry.UpdatePRStatus(ctx, evt.Repo, evt.PRNumber, "deploy_failed", map[string]any{"deploy_failed_published": true}); updateErr != nil {
-			log.Printf("[synapse] [registry] warning: failed updating deploy_failed_published for %s#%d: %v", evt.Repo, evt.PRNumber, updateErr)
+		if ackErr := s.registry.AcknowledgeDeployFailedPublished(ctx, evt.Repo, evt.PRNumber); ackErr != nil {
+			log.Printf("[synapse] [registry] warning: failed acknowledging deploy_failed_published for %s#%d: %v", evt.Repo, evt.PRNumber, ackErr)
 		}
 	}
 	if evt.PRNumber > 0 {

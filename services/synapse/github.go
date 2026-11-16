@@ -518,8 +518,8 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 	}); pErr != nil {
 		return fmt.Errorf("publish deploy failed event: %w", pErr)
 	}
-	if updateErr := s.registry.UpdatePRStatus(ctx, repo, prNum, "deploy_failed", map[string]any{"deploy_failed_published": true}); updateErr != nil {
-		log.Printf("[synapse] [dispatcher] warning: failed updating deploy_failed_published for %s#%d: %v", repo, prNum, updateErr)
+	if ackErr := s.registry.AcknowledgeDeployFailedPublished(ctx, repo, prNum); ackErr != nil {
+		log.Printf("[synapse] [dispatcher] warning: failed acknowledging deploy_failed_published for %s#%d: %v", repo, prNum, ackErr)
 	}
 	return nil
 }

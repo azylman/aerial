@@ -956,36 +956,36 @@ func TestHandleImagePromotionDeployFailed_RetryAndDeduplication(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name                 string
-		initialUpdated       bool
-		busErr               error
-		wantErr              bool
-		wantPublishedEvents  int
-		wantDeployCalls      int
-		wantUpdateStatusRuns int
+		name                string
+		initialUpdated      bool
+		busErr              error
+		wantErr             bool
+		wantPublishedEvents int
+		wantDeployCalls     int
+		wantAckCalls        int
 	}{
 		{
-			name:                 "first attempt succeeds and publishes event",
-			initialUpdated:       true,
-			wantPublishedEvents:  1,
-			wantDeployCalls:      1,
-			wantUpdateStatusRuns: 1,
+			name:                "first attempt succeeds and publishes event",
+			initialUpdated:      true,
+			wantPublishedEvents: 1,
+			wantDeployCalls:     1,
+			wantAckCalls:        1,
 		},
 		{
-			name:                 "transient bus failure propagates error and does not mark published",
-			initialUpdated:       true,
-			busErr:               errors.New("transient bus disconnect"),
-			wantErr:              true,
-			wantPublishedEvents:  0,
-			wantDeployCalls:      1,
-			wantUpdateStatusRuns: 0,
+			name:                "transient bus failure propagates error and does not mark published",
+			initialUpdated:      true,
+			busErr:              errors.New("transient bus disconnect"),
+			wantErr:             true,
+			wantPublishedEvents: 0,
+			wantDeployCalls:     1,
+			wantAckCalls:        0,
 		},
 		{
-			name:                 "deduplicated delivery returns nil without publishing duplicate event",
-			initialUpdated:       false,
-			wantPublishedEvents:  0,
-			wantDeployCalls:      1,
-			wantUpdateStatusRuns: 0,
+			name:                "deduplicated delivery returns nil without publishing duplicate event",
+			initialUpdated:      false,
+			wantPublishedEvents: 0,
+			wantDeployCalls:     1,
+			wantAckCalls:        0,
 		},
 	}
 
@@ -1016,8 +1016,8 @@ func TestHandleImagePromotionDeployFailed_RetryAndDeduplication(t *testing.T) {
 			if len(reg.deployFailedCalls) != tc.wantDeployCalls {
 				t.Errorf("got %d deployFailedCalls, want %d", len(reg.deployFailedCalls), tc.wantDeployCalls)
 			}
-			if len(reg.updatePRStatusCalls) != tc.wantUpdateStatusRuns {
-				t.Errorf("got %d updatePRStatusCalls, want %d", len(reg.updatePRStatusCalls), tc.wantUpdateStatusRuns)
+			if len(reg.ackDeployFailedPublishedCalls) != tc.wantAckCalls {
+				t.Errorf("got %d ackDeployFailedPublishedCalls, want %d", len(reg.ackDeployFailedPublishedCalls), tc.wantAckCalls)
 			}
 		})
 	}

@@ -66,6 +66,7 @@ type PRRegistryUpdater interface {
 	MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (transitioned bool, err error)
 	HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error)
 	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error
+	AcknowledgeDeployFailedPublished(ctx context.Context, repo string, prNumber int) error
 }
 
 type pgxQueryExecer interface {
@@ -759,6 +760,25 @@ func (r *PostgresPRRegistry) UpdatePRStatus(ctx context.Context, repo string, pr
 		WHERE repo = $1 AND pr_number = $2;`
 	if _, err := r.pool.Exec(qCtx, query, repo, prNumber, status, metaBytes); err != nil {
 		return fmt.Errorf("update pr status: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresPRRegistry) AcknowledgeDeployFailedPublished(ctx context.Context, repo string, prNumber int) error {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{deploy_failed_published}', 'true'::jsonb),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2 AND status = 'deploy_failed';`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber); err != nil {
+		return fmt.Errorf("acknowledge deploy failed published: %w", err)
 	}
 	return nil
 }

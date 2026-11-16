@@ -612,9 +612,6 @@ func managedWorkloadMatchesClusterSpec(w, m workloadRollout) (bool, string) {
 			return false, fmt.Sprintf("managed %s resource request %s=%q does not match cluster %q", m, k, m.Resources.Requests[k], v)
 		}
 	}
-	if !w.ChangedAt.IsZero() && !m.ChangedAt.IsZero() && m.ChangedAt.Before(w.ChangedAt) {
-		return false, fmt.Sprintf("managed %s not yet updated after cluster spec change", m)
-	}
 	return true, ""
 }
 

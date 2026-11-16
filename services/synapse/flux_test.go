@@ -865,6 +865,18 @@ func TestDecodeWorkloadRollouts(t *testing.T) {
 			body: `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":2},"spec":{"compute":{"image":"docker.io/restatedev/restate:1.6"}},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True"}]}}]}`,
 			want: []workloadRollout{{Kind: "RestateCluster", Namespace: "default", Name: "restate", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, ObservedGeneration: 2, Replicas: 1, ReadyConditionTrue: true}},
 		},
+		{
+			name: "restatecluster with compute env and resources",
+			kind: "RestateCluster",
+			body: `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":2},"spec":{"compute":{"image":"docker.io/restatedev/restate:1.6","replicas":2,"env":[{"name":"A","value":"1"}],"resources":{"limits":{"cpu":"1"},"requests":{"memory":"512Mi"}}}},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True"}]}}]}`,
+			want: []workloadRollout{{Kind: "RestateCluster", Namespace: "default", Name: "restate", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, ObservedGeneration: 2, Replicas: 2, ReadyConditionTrue: true, Env: map[string]string{"A": "1"}, Resources: kubeResourceRequirements{Limits: map[string]string{"cpu": "1"}, Requests: map[string]string{"memory": "512Mi"}}}},
+		},
+		{
+			name: "statefulset with container env and resources",
+			kind: "StatefulSet",
+			body: `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":2},"spec":{"replicas":2,"template":{"spec":{"containers":[{"image":"docker.io/restatedev/restate:1.6","env":[{"name":"A","value":"1"}],"resources":{"limits":{"cpu":"1"}}}]}}},"status":{"observedGeneration":2,"replicas":2,"availableReplicas":2,"currentRevision":"r-1","updateRevision":"r-1"}}]}`,
+			want: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, ObservedGeneration: 2, Replicas: 2, AvailableReplicas: 2, StatusReplicas: 2, CurrentRevision: "r-1", UpdateRevision: "r-1", Env: map[string]string{"A": "1"}, Resources: kubeResourceRequirements{Limits: map[string]string{"cpu": "1"}}}},
+		},
 		{name: "empty list", kind: "Deployment", body: `{"items":[]}`, want: []workloadRollout{}},
 		{name: "malformed list", kind: "Deployment", body: `{"items":`, wantErr: true},
 	}
@@ -942,7 +954,7 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 			wantReason: "managed StatefulSet default/restate resource limit cpu=\"\" does not match cluster \"1\"",
 		},
 		{
-			name: "restatecluster with managed statefulset changed before cluster update pending",
+			name: "restatecluster metadata-only change with managed statefulset matching spec is done",
 			workload: func() workloadRollout {
 				m := stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-1", "restate-1")
 				m.ChangedAt = rolloutClock(10, 0, 0)
@@ -950,7 +962,7 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 				w.ChangedAt = rolloutClock(10, 5, 0)
 				return w
 			}(),
-			wantReason: "managed StatefulSet default/restate not yet updated after cluster spec change",
+			wantDone: true,
 		},
 		{
 			name:       "restatecluster with managed statefulset rolling out pending",

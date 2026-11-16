@@ -236,6 +236,9 @@ type mockPRRegistry struct {
 	updatePRStatusCalls []prStatusCall
 	updatePRStatusErr   error
 
+	ackDeployFailedPublishedCalls []prCall
+	ackDeployFailedPublishedErr   error
+
 	kustomizationRequestCalls []map[string]kustomizationRequest
 	kustomizationRequestErr   error
 
@@ -423,6 +426,11 @@ func (m *mockPRRegistry) HasKustomizationRequests(ctx context.Context, repo stri
 func (m *mockPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error {
 	m.updatePRStatusCalls = append(m.updatePRStatusCalls, prStatusCall{repo: repo, prNumber: prNumber, status: status, metadata: metadata})
 	return m.checkErr(m.updatePRStatusErr)
+}
+
+func (m *mockPRRegistry) AcknowledgeDeployFailedPublished(ctx context.Context, repo string, prNumber int) error {
+	m.ackDeployFailedPublishedCalls = append(m.ackDeployFailedPublishedCalls, prCall{repo: repo, prNumber: prNumber})
+	return m.checkErr(m.ackDeployFailedPublishedErr)
 }
 
 type recordCheckStatusCall struct {
