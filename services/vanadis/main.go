@@ -1395,12 +1395,6 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	}
 	defer cleanupBus()
 
-	restateCtx, restateCancel := context.WithCancel(ctx)
-	defer restateCancel()
-	if _, err = startRestateServer(restateCtx, server); err != nil && !errors.Is(err, ErrRestateDisabled) {
-		log.Printf("[vanadis] warning: failed starting restate server: %v", err)
-	}
-
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)
 	if err != nil {
