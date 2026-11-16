@@ -116,6 +116,28 @@ func TestWorkerPool_LockWidgetDelivery(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("lockChannelWidgetDelivery per-channel isolation", func(t *testing.T) {
+		t.Parallel()
+		p, rec, ctx := newWidgetTracePool(t, true)
+		unlockChan1 := p.lockChannelWidgetDelivery(ctx, "chan-1", widgetLockStep)
+		defer unlockChan1()
+
+		chan2Acquired := make(chan struct{})
+		go func() {
+			unlock2 := p.lockChannelWidgetDelivery(ctx, "chan-2", widgetLockDeliver)
+			close(chan2Acquired)
+			unlock2()
+		}()
+
+		select {
+		case <-chan2Acquired:
+		case <-time.After(time.Second):
+			t.Fatal("chan-2 blocked on chan-1 lock")
+		}
+
+		_ = rec
+	})
 }
 
 func TestWorkerPool_DeliverStatusWidgetSpans(t *testing.T) {
@@ -376,6 +398,94 @@ func TestWorkerPool_EnsureChunkWidgetHydrated_JetStream(t *testing.T) {
 			}
 			if tc.wantPRNum != 0 && publishedArgs.PRNumber != tc.wantPRNum {
 				t.Errorf("args.PRNumber = %d, want %d", publishedArgs.PRNumber, tc.wantPRNum)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_StepFlushAndFinish_RevalidatesChannelLockOnHydration(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		isFinish bool
+	}{
+		{name: "flush revalidates channel lock on hydration", isFinish: false},
+		{name: "finish revalidates channel lock on hydration", isFinish: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p, rec, ctx := newWidgetTracePool(t, true)
+			var deliveredReq discord.StatusWidgetRequest
+			p.SetWidgetDeliveryFunc(func(req discord.StatusWidgetRequest) (string, error) {
+				deliveredReq = req
+				return "msg-hydrated", nil
+			})
+
+			p.lockWidgetDelivery(context.Background(), widgetLockDeliver)
+
+			p.StartChunkStepTurn(context.Background(), "c1", "b1", 0, "t1")
+			if tc.isFinish {
+				p.widgetMu.Lock()
+				p.activeChunkSteps["c1"] = "in progress"
+				p.widgetMu.Unlock()
+			}
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if tc.isFinish {
+					p.FinishChunkStepTurn(ctx, "c1", "t1")
+				} else {
+					_ = p.FlushChunkActiveStep(ctx, "c1", "t1", "executing tests")
+				}
+			}()
+
+			<-rec.started
+
+			// Hold the target channel lock so the retried step call must block waiting for it.
+			unlockChanTarget := p.lockChannelWidgetDelivery(context.Background(), "chan-target", widgetLockDeliver)
+
+			p.widgetMu.Lock()
+			p.widgetsByID["b1"] = discord.StatusWidgetRequest{
+				ID:        "b1",
+				ChannelID: "chan-target",
+				MessageID: "msg-1",
+				Chunks: []discord.StatusWidgetChunk{
+					{ID: "c1", Status: "running"},
+				},
+			}
+			p.widgetMu.Unlock()
+
+			// Release the fallback lock so the step call detects the channel change and retries under chan-target.
+			p.unlockWidgetDelivery()
+
+			// Verify the step call retried and is waiting specifically for chan-target.
+			select {
+			case <-rec.started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("expected step call to block waiting on chan-target lock")
+			}
+
+			// Ensure it remains blocked while chan-target is held.
+			select {
+			case <-done:
+				t.Fatal("step call finished prematurely while chan-target lock was held")
+			default:
+			}
+
+			// Release chan-target lock to allow the step delivery to complete.
+			unlockChanTarget()
+
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for step call to complete")
+			}
+
+			if deliveredReq.ChannelID != "chan-target" {
+				t.Errorf("delivered ChannelID = %q, want chan-target", deliveredReq.ChannelID)
 			}
 		})
 	}

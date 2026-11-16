@@ -303,12 +303,14 @@ func (s *SQLStore) CancelPendingDispatches(ctx context.Context, dispatchID, buil
 		($4 != '' AND (
 			prompt LIKE '%' || $4 || '%' OR
 			session_id LIKE $5 OR
-			prompt LIKE '%' || $6 || '%'
+			prompt LIKE '%' || $6 || '%' OR
+			COALESCE(vanadis_chunk_id, '') = $7 OR
+			session_id = $8
 		))
 	)
 	RETURNING id;`
 
-	rows, err := s.db.QueryContext(queryCtx, query, reason, time.Now().UTC(), dID, buildPattern, sessionPattern, chunkPattern)
+	rows, err := s.db.QueryContext(queryCtx, query, reason, time.Now().UTC(), dID, buildPattern, sessionPattern, chunkPattern, bID, "vanadis-"+bID)
 	if err != nil {
 		return nil, err
 	}
