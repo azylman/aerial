@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+# Standalone Vanadis HTTP API, NATS consumer, and PostgreSQL store image.
 FROM golang:1.27.3-alpine AS builder
 
 WORKDIR /src

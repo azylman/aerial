@@ -522,6 +522,8 @@ spec:
     autoProvision: true
   compute:
     env:
+      - name: RESTATE_AUTO_PROVISION
+        value: "false"
       - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
         value: 256 MiB
     image: docker.io/restatedev/restate:1.6
