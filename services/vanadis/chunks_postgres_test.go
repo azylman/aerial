@@ -23,9 +23,10 @@ type bareStore struct{ store *PostgresVanadisStore }
 type dbScript struct {
 	bare        *bareStore // when set, the test calls bare.store instead of a scripted store
 	beginErr    error
-	row         pgx.Row // answers QueryRow (all of them when buildRow is nil)
-	buildRow    pgx.Row // when set, answers QueryRow whose SQL does not select FROM vanadis_chunks
-	countRow    pgx.Row // when set, answers QueryRow whose SQL contains COUNT(*)
+	routes      []sqlRoute // checked in order before countRow/buildRow/row; the first matching route answers QueryRow
+	row         pgx.Row    // answers QueryRow (all of them when buildRow is nil)
+	buildRow    pgx.Row    // when set, answers QueryRow whose SQL does not select FROM vanadis_chunks
+	countRow    pgx.Row    // when set, answers QueryRow whose SQL contains COUNT(*)
 	chunks      []VanadisChunk
 	queryErr    error
 	scanErr     error
@@ -37,7 +38,13 @@ type dbScript struct {
 	rollbackErr error
 }
 
-// open builds the store under test and returns the repo candidates recorded from QueryRow's first argument.
+// sqlRoute answers every QueryRow whose SQL contains match with row.
+type sqlRoute struct {
+	match string
+	row   pgx.Row
+}
+
+// open builds the store under test and returns the repo candidates recorded from QueryRow's first []string argument.
 func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 	candidates := new([]string)
 	if s.bare != nil {
@@ -48,9 +55,15 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 		tag = "UPDATE 1"
 	}
 	queryRow := func(_ context.Context, query string, args ...any) pgx.Row {
-		if len(args) > 0 {
-			if cands, ok := args[0].([]string); ok {
+		for _, arg := range args {
+			if cands, ok := arg.([]string); ok {
 				*candidates = cands
+				break
+			}
+		}
+		for _, r := range s.routes {
+			if strings.Contains(query, r.match) {
+				return r.row
 			}
 		}
 		if s.countRow != nil && strings.Contains(query, "COUNT(*)") {
@@ -198,24 +211,99 @@ func TestPostgresVanadisStore_GetChunk(t *testing.T) {
 	}
 }
 
+// attachRoutes answers attachToExistingChunk's mode select and resolveAttachChunkPRError's
+// existence and cancelled/completed probes; the RETURNING update falls through to dbScript.row.
+func attachRoutes(mode string, exists, cancelled bool) []sqlRoute {
+	return []sqlRoute{
+		{match: "SELECT mode", row: valuesRow(mode)},
+		{match: "c.status = 'cancelled'", row: valuesRow(cancelled)},
+		{match: "SELECT EXISTS", row: valuesRow(exists)},
+	}
+}
+
+// attachResult is the observable (buildID, chunkID, threadID) triple AttachChunkPR returns.
+type attachResult struct{ BuildID, ChunkID, ThreadID string }
+
 func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 	t.Parallel()
+	var (
+		errModeQuery = errors.New("attach db err")
+		errLookup    = errors.New("lookup err")
+		errBegin     = errors.New("begin standalone tx err")
+		errLock      = errors.New("advisory lock boom")
+		errBuildIns  = errors.New("insert build err")
+		errChunkIns  = errors.New("insert chunk err")
+		errCommit    = errors.New("commit standalone err")
+	)
+	noRows := errRow(pgx.ErrNoRows)
+	attached := func(mode string) *genericMockRow { return valuesRow("b-"+mode, "c-"+mode, "thread-"+mode) }
+	existing := attachRequest("c1", "aerial")
+	standalone := attachRequest("", "aerial")
 	tests := []struct {
-		name string
-		db   dbScript
+		name            string
+		req             AttachChunkPRRequest
+		db              dbScript
+		wantErrIs       error
+		wantErr         bool
+		wantErrContains string
+		want            attachResult
+		wantNewBuild    bool // standalone build was minted: ChunkID is BuildID + "-chunk-1" and BuildID is a generated build-* id
+		wantCandidates  []string
 	}{
-		{name: "nil receiver", db: dbScript{bare: nilReceiver}},
-		{name: "nil db", db: dbScript{bare: nilDB}},
+		{name: "nil receiver", req: existing, db: dbScript{bare: nilReceiver}, wantErr: true},
+		{name: "nil db", req: existing, db: dbScript{bare: nilDB}, wantErr: true},
+		{name: "empty chunk id and zero pr number", req: AttachChunkPRRequest{Repo: "aerial"}, wantErr: true},
+		{name: "chunk not found", req: existing, db: dbScript{row: noRows}, wantErrIs: ErrChunkNotFound},
+		{name: "mode query error", req: existing, db: dbScript{row: errRow(errModeQuery)}, wantErrIs: errModeQuery},
+		{name: "action chunk requires repo", req: attachRequest("c1", ""), db: dbScript{routes: attachRoutes("action", true, false), row: noRows}, wantErrContains: "repo is required"},
+		{name: "mismatched repo", req: existing, db: dbScript{routes: attachRoutes("pr", true, false), row: noRows}, wantErrContains: "mismatched repo"},
+		{name: "cancelled chunk or build with repo conflicts", req: existing, db: dbScript{routes: attachRoutes("pr", true, true), row: noRows}, wantErrIs: ErrBuildConflict},
+		{name: "cancelled chunk or build without repo conflicts", req: attachRequest("c1", ""), db: dbScript{routes: attachRoutes("pr", true, true), row: noRows}, wantErrIs: ErrBuildConflict},
+		{name: "attaches pr chunk without repo", req: attachRequest("c-pr", ""), db: dbScript{routes: attachRoutes("pr", true, false), row: attached("pr")}, want: attachResult{"b-pr", "c-pr", "thread-pr"}},
+		{name: "attaches pr chunk matching repo candidates", req: attachRequest("c-pr", "aerial"), db: dbScript{routes: attachRoutes("pr", true, false), row: attached("pr")}, want: attachResult{"b-pr", "c-pr", "thread-pr"}, wantCandidates: aerialRepoSet},
+		{name: "attaches action chunk", req: attachRequest("c-act", "aerial"), db: dbScript{routes: attachRoutes("action", true, false), row: attached("action")}, want: attachResult{"b-action", "c-action", "thread-action"}},
+		{name: "standalone requires repo", req: attachRequest("", ""), wantErrContains: "repo is required"},
+		{name: "standalone begin error", req: standalone, db: dbScript{beginErr: errBegin}, wantErrIs: errBegin},
+		{name: "standalone advisory lock error", req: standalone, db: dbScript{row: noRows, failExec: "pg_advisory_xact_lock", execErr: errLock}, wantErrIs: errLock},
+		{name: "standalone existing pr lookup error", req: standalone, db: dbScript{row: errRow(errLookup)}, wantErrIs: errLookup},
+		{name: "standalone reuses existing pr chunk", req: standalone, db: dbScript{row: valuesRow("b-existing", "c-existing", "thread-existing")}, want: attachResult{"b-existing", "c-existing", "thread-existing"}, wantCandidates: aerialRepoSet},
+		{name: "standalone insert build error", req: standalone, db: dbScript{row: noRows, failExec: "INSERT INTO vanadis_builds", execErr: errBuildIns}, wantErrIs: errBuildIns},
+		{name: "standalone insert chunk error", req: standalone, db: dbScript{row: noRows, failExec: "INSERT INTO vanadis_chunks", execErr: errChunkIns}, wantErrIs: errChunkIns},
+		{name: "standalone commit error", req: standalone, db: dbScript{row: noRows, commitErr: errCommit}, wantErrIs: errCommit},
+		{name: "standalone creates build in target thread", req: AttachChunkPRRequest{PRNumber: 101, Repo: "aerial", TargetID: "123456789012345678", Branch: "dependabot/npm_and_yarn/foo", Title: "Bump foo"}, db: dbScript{row: noRows}, want: attachResult{ThreadID: "123456789012345678"}, wantNewBuild: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, _ := tc.db.open()
-			if _, _, _, err := store.AttachChunkPR(context.Background(), AttachChunkPRRequest{ChunkID: "c1", PRNumber: 1, Repo: "aerial"}); err == nil {
-				t.Error("expected error without a database")
+			store, candidates := tc.db.open()
+			bID, cID, threadID, err := store.AttachChunkPR(context.Background(), tc.req)
+			if tc.wantErrContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Fatalf("err = %v, want error containing %q", err, tc.wantErrContains)
+				}
+				return
 			}
+			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
+				return
+			}
+			got := attachResult{bID, cID, threadID}
+			if tc.wantNewBuild {
+				if !strings.HasPrefix(bID, "build-") || cID != bID+"-chunk-1" {
+					t.Errorf("AttachChunkPR minted build %q chunk %q, want build-* with chunk <build>-chunk-1", bID, cID)
+				}
+				got.BuildID, got.ChunkID = "", ""
+			}
+			if got != tc.want {
+				t.Errorf("AttachChunkPR = %+v, want %+v", got, tc.want)
+			}
+			assertCandidates(t, candidates, tc.wantCandidates)
 		})
 	}
+}
+
+// attachRequest builds an AttachChunkPR request for PR #101.
+func attachRequest(chunkID, repo string) AttachChunkPRRequest {
+	return AttachChunkPRRequest{ChunkID: chunkID, PRNumber: 101, Repo: repo}
 }
 
 func TestPostgresVanadisStore_FailChunkByPR(t *testing.T) {
@@ -273,6 +361,8 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 		{name: "begin error", chunkID: "c1", db: dbScript{beginErr: errors.New("begin tx err")}, wantErr: true},
 		{name: "chunk not found", chunkID: "c1", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
 		{name: "select chunk error", chunkID: "c1", db: dbScript{row: errRow(errors.New("select chunk err"))}, wantErr: true},
+		// The FK cascade plus the chunk FOR UPDATE lock make this unreachable against the real schema; the row pins
+		// the defensive ErrNoRows -> ErrBuildNotFound mapping so a schema or lock-order change surfaces as a typed error.
 		{name: "build not found", chunkID: "c1", db: dbScript{row: running, buildRow: errRow(pgx.ErrNoRows)}, wantErrIs: ErrBuildNotFound},
 		{name: "select build error", chunkID: "c1", db: dbScript{row: running, buildRow: errRow(errors.New("db build error"))}, wantErr: true},
 		{name: "pr mode chunk is a matched no-op", chunkID: "c1", db: dbScript{row: actionChunkRow("pr", "running"), buildRow: runningBuild}, want: advanceOutcome{Matched: true, NextChunkIndex: -1, BuildStatus: "running"}},
@@ -311,6 +401,7 @@ func TestPostgresVanadisStore_FailChunk(t *testing.T) {
 		{name: "nil receiver", chunkID: "c1", db: dbScript{bare: nilReceiver}, wantErr: true},
 		{name: "nil db", chunkID: "c1", db: dbScript{bare: nilDB}, wantErr: true},
 		{name: "empty chunk id", chunkID: "", wantErr: true},
+		{name: "whitespace chunk id", chunkID: "  ", wantErr: true},
 		{name: "begin error", chunkID: "c1", db: dbScript{beginErr: errors.New("begin tx err")}, wantErr: true},
 		{name: "chunk not found", chunkID: "c1", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
 		{name: "select chunk error", chunkID: "c1", db: dbScript{row: errRow(errors.New("select chunk fail err"))}, wantErr: true},
