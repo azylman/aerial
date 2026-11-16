@@ -105,8 +105,7 @@ func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes 
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusForbidden {
-		remaining := resp.Header.Get("X-Ratelimit-Remaining")
-		return fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
+		return fmt.Errorf("github api rate limit or forbidden (remaining: %s)", resp.Header.Get("X-Ratelimit-Remaining"))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("github api returned status %d", resp.StatusCode)
@@ -123,15 +122,9 @@ func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes 
 
 func (s *RouterServer) isAutoUpdateAuthorAllowed(author string) bool {
 	clean := strings.TrimSpace(author)
-	if clean == "" || s == nil {
-		return false
-	}
-	for _, allowed := range s.cfgSrc.Current().AutoUpdatePRAuthors {
-		if strings.EqualFold(clean, strings.TrimSpace(allowed)) {
-			return true
-		}
-	}
-	return false
+	return clean != "" && s != nil && slices.ContainsFunc(s.cfgSrc.Current().AutoUpdatePRAuthors, func(a string) bool {
+		return strings.EqualFold(clean, strings.TrimSpace(a))
+	})
 }
 
 func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo string, prNumber int, branch, headSHA string) error {
@@ -285,10 +278,7 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 }
 
 func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, targetID string, prNum int) error {
-	if s.dispatcher == nil || !strings.HasPrefix(ref, "refs/heads/main") || isZeroSHA(commit) {
-		return nil
-	}
-	if !s.cfgSrc.Current().DefaultOwner && targetID == "" {
+	if s.dispatcher == nil || !strings.HasPrefix(ref, "refs/heads/main") || isZeroSHA(commit) || (!s.cfgSrc.Current().DefaultOwner && targetID == "") {
 		return nil
 	}
 	if err := s.dispatcher.DispatchGitPush(ctx, GitPushEventRequest{
@@ -334,19 +324,24 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	return nil
 }
 
-func (s *RouterServer) shouldDispatchWorkflowRunImages(ctx context.Context, repo string, headBranch, conclusion string, prNum int) bool {
+func isMainBranch(branch string) bool {
+	clean := strings.TrimSpace(branch)
+	return clean == "main" || strings.HasPrefix(clean, "refs/heads/main")
+}
+
+func (s *RouterServer) ownsWorkflowRunEvent(ctx context.Context, repo string, prNum int) bool {
 	cfg := s.cfgSrc.Current()
-	if s.dispatcher == nil || conclusion != conclusionSuccess || (headBranch != "main" && !strings.HasPrefix(headBranch, "refs/heads/main")) {
-		return false
-	}
 	if prNum > 0 {
-		if !s.isPROwnedLocally(ctx, repo, prNum) && (!cfg.DefaultOwner || len(cfg.WebhookForwardURLs) > 0) {
-			return false
-		}
-	} else if !cfg.DefaultOwner && s.registry != nil {
+		return s.isPROwnedLocally(ctx, repo, prNum) || (cfg.DefaultOwner && len(cfg.WebhookForwardURLs) == 0)
+	}
+	return cfg.DefaultOwner || s.registry == nil
+}
+
+func (s *RouterServer) shouldDispatchWorkflowRunImages(ctx context.Context, repo string, headBranch, conclusion string, prNum int) bool {
+	if s.dispatcher == nil || conclusion != conclusionSuccess || !isMainBranch(headBranch) {
 		return false
 	}
-	return true
+	return s.ownsWorkflowRunEvent(ctx, repo, prNum)
 }
 
 func resolveImagesWorkloadsAndNames(repo string, images []string) ([]string, []string) {
@@ -607,6 +602,7 @@ type GitHubWorkflowRunPayload struct {
 		Name         string             `json:"name"`
 		HeadSHA      string             `json:"head_sha"`
 		HeadBranch   string             `json:"head_branch"`
+		RunAttempt   int                `json:"run_attempt"`
 		Status       string             `json:"status"`
 		Conclusion   string             `json:"conclusion"`
 		HTMLURL      string             `json:"html_url"`
@@ -655,10 +651,8 @@ func hasExecutedBuildStep(steps []GitHubWorkflowJobStep) bool {
 func hasSkippedImagePromotionJob(jobs []GitHubWorkflowJobItem) bool {
 	for _, job := range jobs {
 		nameLower := strings.ToLower(job.Name)
-		if strings.Contains(nameLower, "promote") && strings.Contains(nameLower, "latest") {
-			if job.Status == ghStatusCompleted && job.Conclusion != conclusionSuccess {
-				return true
-			}
+		if strings.Contains(nameLower, "promote") && strings.Contains(nameLower, "latest") && job.Status == ghStatusCompleted && job.Conclusion != conclusionSuccess {
+			return true
 		}
 	}
 	return false
@@ -772,7 +766,6 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to persist webhook"})
 		return
 	}
-
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		fieldStatus: statusAccepted,
 		fieldEvent:  event,
@@ -844,9 +837,6 @@ func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *Resol
 	if updated || (emitAdditional && res.TargetID != "") {
 		return s.completeCIFailureTransition(ctx, res, details, checkURL)
 	}
-	if s.isMergeSHAFailure(ctx, res) || (res.Event == ghEventWorkflowRun && (res.Branch == "main" || strings.HasPrefix(res.Branch, "refs/heads/main"))) {
-		return s.handleImagePromotionDeployFailed(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, res.TargetID, errors.New(details))
-	}
 	return nil
 }
 
@@ -876,8 +866,11 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	if s.isStaleOrIgnoredCIFailure(ctx, res) {
 		return nil
 	}
-	if s.isMergeSHAFailure(ctx, res) {
-		return s.handleImagePromotionDeployFailed(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, res.TargetID, errors.New(details))
+	if s.isMergeSHAFailure(ctx, res) || (res.Event == ghEventWorkflowRun && isMainBranch(res.Branch) && res.PRNumber > 0) {
+		if res.Event == ghEventWorkflowRun {
+			return s.handleImagePromotionDeployFailed(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, res.TargetID, errors.New(details))
+		}
+		return nil
 	}
 	emitAdditional := false
 	if res.Event == ghEventCheckRun && res.PRNumber > 0 && res.HeadSHA != "" && !isGateAggregatorCheck(res.CheckName) {
@@ -910,6 +903,43 @@ func (*RouterServer) processGitHubPingEvent(delivery string, body []byte, res *R
 	}
 	log.Printf("[synapse] [github] [ping] hook_id=%d repo=%s zen=%q delivery=%s", p.HookID, res.Repo, p.Zen, delivery)
 	return res, nil
+}
+
+func (s *RouterServer) rerunWorkflowRunFailedJobs(ctx context.Context, repo string, runID int64) error {
+	path := fmt.Sprintf("/repos/%s/actions/runs/%d/rerun-failed-jobs", normalizeRepo(repo), runID)
+	req, err := s.newGitHubRequest(ctx, http.MethodPost, path, strings.NewReader(`{}`))
+	if err != nil {
+		return fmt.Errorf("create rerun-failed-jobs request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("rerun-failed-jobs request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return fmt.Errorf("rerun-failed-jobs returned status %d", resp.StatusCode)
+	}
+	return fmt.Errorf("rerun-failed-jobs returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+}
+
+func (s *RouterServer) tryRerunFailedMainWorkflowRun(ctx context.Context, p GitHubWorkflowRunPayload, res *ResolvedGitHubEvent) bool {
+	if p.Action != ghStatusCompleted || p.WorkflowRun.ID <= 0 || p.WorkflowRun.RunAttempt != 1 ||
+		s.isStaleOrIgnoredCIFailure(ctx, res) ||
+		(!isMainBranch(p.WorkflowRun.HeadBranch) && !s.isMergeSHAFailure(ctx, res)) ||
+		!s.ownsWorkflowRunEvent(ctx, res.Repo, res.PRNumber) {
+		return false
+	}
+	if err := s.rerunWorkflowRunFailedJobs(ctx, res.Repo, p.WorkflowRun.ID); err != nil {
+		log.Printf("[synapse] [github] warning: failed auto-rerunning failed jobs for workflow run %d on %s: %v", p.WorkflowRun.ID, res.Repo, err)
+		return false
+	}
+	log.Printf("[synapse] [github] successfully triggered rerun-failed-jobs for workflow run %d on %s (attempt 1)", p.WorkflowRun.ID, res.Repo)
+	return true
 }
 
 func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGitHubEvent, merged bool) error {
@@ -1213,6 +1243,10 @@ func (s *RouterServer) processGitHubWorkflowRunEvent(ctx context.Context, delive
 	s.resolveEventPR(ctx, res, p.WorkflowRun.PullRequests, "workflow_run_payload")
 	log.Printf("[synapse] [github] [workflow_run] repo=%s workflow=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
 		res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
+
+	if s.tryRerunFailedMainWorkflowRun(ctx, p, res) {
+		return res, nil
+	}
 
 	details := fmt.Sprintf("Workflow %q concluded with %s", p.WorkflowRun.Name, p.WorkflowRun.Conclusion)
 	if err := s.handleCIFailureTransition(ctx, res, details, strings.TrimSpace(p.WorkflowRun.HTMLURL)); err != nil {
