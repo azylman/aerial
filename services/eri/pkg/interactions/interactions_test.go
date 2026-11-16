@@ -531,16 +531,18 @@ func TestRouter_HandleQuota(t *testing.T) {
 		},
 	}
 	tests := []struct {
-		name        string
-		groups      []metrics.QuotaGroup
-		updatedAt   time.Time
-		useProvider bool
-		httpStatus  int
-		wantSubstrs []string
+		name          string
+		groups        []metrics.QuotaGroup
+		updatedAt     time.Time
+		useProvider   bool
+		httpStatus    int
+		wantSubstrs   []string
+		absentSubstrs []string
 	}{
-		{"WithActiveQuotaBuckets", sampleGroups, refreshedAt, true, 0, []string{"**Gemini Models**", "**weekly**: `87%` remaining", "resets in 2h", "Last refreshed: 4m ago", `\u003ct:`}},
-		{"EmptyQuotaFallback", nil, time.Time{}, false, 0, []string{"No quota telemetry recorded yet"}},
-		{"ErrorLoggingHttp500", nil, time.Time{}, true, http.StatusInternalServerError, nil},
+		{"WithActiveQuotaBuckets", sampleGroups, refreshedAt, true, 0, []string{"**Gemini Models**", "**weekly**: `87%` remaining", "resets in 2h", "Last refreshed: 4m ago", `\u003ct:`}, nil},
+		{"CodexWeeklyOnly", []metrics.QuotaGroup{{Name: "Codex", Buckets: []metrics.QuotaBucket{{ID: "codex-seven-day", Window: "weekly", RemainingFraction: 0.98}}}}, refreshedAt, true, 0, []string{"**Codex**", "**weekly**: `98%` remaining"}, []string{"**5h**"}},
+		{"EmptyQuotaFallback", nil, time.Time{}, false, 0, []string{"No quota telemetry recorded yet"}, nil},
+		{"ErrorLoggingHttp500", nil, time.Time{}, true, http.StatusInternalServerError, nil, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -556,6 +558,11 @@ func TestRouter_HandleQuota(t *testing.T) {
 				t.Fatalf("expected 1 request, got %d", len(reqs))
 			}
 			body := string(reqs[0].Body)
+			for _, absent := range tc.absentSubstrs {
+				if strings.Contains(body, absent) {
+					t.Errorf("unexpected %q in %s", absent, body)
+				}
+			}
 			for _, want := range tc.wantSubstrs {
 				if !strings.Contains(body, want) {
 					t.Errorf("expected response to contain %q, got: %s", want, body)
