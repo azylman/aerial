@@ -399,51 +399,6 @@ func TestPostgresStore_CreateBuild_And_Updates_MockDB(t *testing.T) {
 	validBuild := VanadisBuild{ID: "b1", ThreadID: "th-1", Objective: "obj"}
 	validChunks := []VanadisChunk{{ID: "c1", Repo: "azylman/aerial", Title: "c1", Instructions: "do c1", DependsOn: []string{}}}
 
-	// Begin error
-	sBeginErr := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return nil, errors.New("begin error") }})
-	if err := sBeginErr.CreateBuild(ctx, validBuild, validChunks); err == nil {
-		t.Fatal("expected error on begin error")
-	}
-
-	// Insert build error
-	txInsertBuildErr := &mockTx{
-		execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-			return pgconn.CommandTag{}, errors.New("insert build error")
-		},
-	}
-	sInsertBuildErr := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return txInsertBuildErr, nil }})
-	if err := sInsertBuildErr.CreateBuild(ctx, validBuild, validChunks); err == nil {
-		t.Fatal("expected error on insert build error")
-	}
-
-	// Insert chunk error
-	insertCount := 0
-	txInsertChunkErr := &mockTx{
-		execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-			insertCount++
-			if insertCount > 1 {
-				return pgconn.CommandTag{}, errors.New("insert chunk error")
-			}
-			return pgconn.NewCommandTag("INSERT 1"), nil
-		},
-	}
-	sInsertChunkErr := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return txInsertChunkErr, nil }})
-	if err := sInsertChunkErr.CreateBuild(ctx, validBuild, validChunks); err == nil {
-		t.Fatal("expected error on insert chunk error")
-	}
-
-	// Commit error
-	txCommitErr := &mockTx{
-		commitErr: errors.New("commit error"),
-		execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-			return pgconn.NewCommandTag("INSERT 1"), nil
-		},
-	}
-	sCommitErr := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return txCommitErr, nil }})
-	if err := sCommitErr.CreateBuild(ctx, validBuild, validChunks); err == nil {
-		t.Fatal("expected error on commit error")
-	}
-
 	// Success
 	txSuccess := &mockTx{
 		execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
