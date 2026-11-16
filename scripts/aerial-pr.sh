@@ -233,22 +233,12 @@ recover_stale_git_locks() {
     local repo_dir="$1"
     [ -d "${repo_dir}/.git" ] || return 0
 
-    local lock_file removed_any=0 active_any=0
+    local lock_file
     while IFS= read -r -d '' lock_file; do
-        if is_git_lock_active "$repo_dir" "$lock_file"; then
-            active_any=1
-        else
+        if ! is_git_lock_active "$repo_dir" "$lock_file"; then
             rm -f "$lock_file" 2>/dev/null || true
-            removed_any=1
         fi
     done < <(find "${repo_dir}/.git" -name '*.lock' -type f -print0 2>/dev/null)
-
-    if [ "$removed_any" -eq 1 ] && [ "$active_any" -eq 0 ]; then
-        if ! git -C "$repo_dir" status --porcelain >/dev/null 2>&1; then
-            rm -f "${repo_dir}/.git/index" 2>/dev/null || true
-            git -C "$repo_dir" read-tree HEAD >/dev/null 2>&1 || true
-        fi
-    fi
 }
 
 recover_interrupted_publication() {

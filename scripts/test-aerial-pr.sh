@@ -1917,11 +1917,15 @@ INIT_CHUNK_REUSE_CHECK=$(bash -c "
         echo \"pub_recovery:fail:branch=\$pub_branch1\"
     fi
 
-    # Subtest 9: Stale .git/index.lock is recovered preserving staged index and edits while live locks are kept
+    # Subtest 9: Stale .git/index.lock is recovered preserving staged index snapshots (even when working tree diverges or status config is invalid) while live locks are kept
+    echo 'working tree overwrite' > \"\$dir1/staged.txt\"
+    git -C \"\$dir1\" config status.submoduleSummary invalid
     touch \"\$dir1/.git/index.lock\"
     lock_json1=\$(VANADIS_CHUNK_ID='chunk-6-aerial-pr-deterministic-scratch-reuse' init_scratch aerial)
+    git -C \"\$dir1\" config --unset status.submoduleSummary || true
     lock_reused1=\$(echo \"\$lock_json1\" | jq -r '.reused // false')
     stale_removed=\$( [ ! -f \"\$dir1/.git/index.lock\" ] && echo yes || echo no )
+    staged_blob=\$(git -C \"\$dir1\" show :staged.txt 2>/dev/null || echo '')
     echo 'post_lock_recovery' > \"\$dir1/after_lock.txt\"
     git -C \"\$dir1\" add after_lock.txt
     staged_after_lock=\$(git -C \"\$dir1\" diff --cached --name-only | tr '\n' ',')
@@ -1934,11 +1938,12 @@ INIT_CHUNK_REUSE_CHECK=$(bash -c "
     rm -f \"\$dir1/.git/index.lock\"
 
     if [ \"\$lock_reused1\" = 'true' ] && [ \"\$stale_removed\" = 'yes' ] && \
+       [ \"\$staged_blob\" = 'staged change' ] && \
        [[ \"\$staged_after_lock\" == *'staged.txt'* ]] && [[ \"\$staged_after_lock\" == *'after_lock.txt'* ]] && \
        [ \"\$live_kept\" = 'yes' ]; then
         echo 'git_lock_recovery:ok'
     else
-        echo \"git_lock_recovery:fail:reused=\$lock_reused1:stale=\$stale_removed:staged=\$staged_after_lock:live=\$live_kept\"
+        echo \"git_lock_recovery:fail:reused=\$lock_reused1:stale=\$stale_removed:blob=\$staged_blob:staged=\$staged_after_lock:live=\$live_kept\"
     fi
 ")
 assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'first_init:ok' && echo true || echo false)" "init_scratch initializes deterministic chunk-keyed directory with mode 700"
