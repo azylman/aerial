@@ -462,7 +462,7 @@ func (s *errVanadisStore) GetChunkByPR(ctx context.Context, repo string, prNumbe
 	return &VanadisChunkPRLookup{Matched: true, BuildID: "b-matched"}, nil
 }
 
-func (s *errVanadisStore) CompleteActionChunk(ctx context.Context, chunkID string) (*VanadisAdvancementResult, error) {
+func (s *errVanadisStore) CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error) {
 	if s.completeErr != nil {
 		return nil, s.completeErr
 	}

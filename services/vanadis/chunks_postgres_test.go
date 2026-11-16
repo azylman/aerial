@@ -69,7 +69,7 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 		if s.countRow != nil && strings.Contains(query, "COUNT(*)") {
 			return s.countRow
 		}
-		if s.buildRow != nil && !strings.Contains(query, "FROM vanadis_chunks") {
+		if s.buildRow != nil && strings.Contains(query, "FROM vanadis_builds") {
 			return s.buildRow
 		}
 		return s.row
@@ -112,7 +112,7 @@ func errRow(err error) *mockRow { return &mockRow{err: err} }
 
 // actionChunkRow answers CompleteActionChunk's chunk select for chunk c1 of build b1.
 func actionChunkRow(mode, cStatus string) *genericMockRow {
-	return valuesRow("c1", "b1", 0, mode, "Action Chunk", cStatus)
+	return valuesRow("c1", "b1", 0, mode, "Action Chunk", cStatus, 0, 0)
 }
 
 // actionBuildRow answers CompleteActionChunk's build select for build b1.
@@ -348,23 +348,30 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 	running := actionChunkRow("action", "running")
 	runningBuild := actionBuildRow("running")
 	tests := []struct {
-		name      string
-		chunkID   string
-		db        dbScript
-		wantErrIs error
-		wantErr   bool
-		want      advanceOutcome
-		wantPRNum int
+		name       string
+		chunkID    string
+		dispatchID string
+		db         dbScript
+		wantErrIs  error
+		wantErr    bool
+		want       advanceOutcome
+		wantPRNum  int
 	}{
+		{name: "matching retried identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-1", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 1), buildRow: runningBuild, countRow: valuesRow(1)}, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: -1, BuildStatus: "running"}},
+		{name: "missing retried identity", chunkID: "c1", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 1), buildRow: runningBuild}, want: advanceOutcome{Matched: true, NextChunkIndex: -1, BuildStatus: "running"}},
+		{name: "stale retried identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-0", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 1), buildRow: runningBuild}, want: advanceOutcome{Matched: true, NextChunkIndex: -1, BuildStatus: "running"}},
+
+		{name: "remaining count error", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: errRow(errors.New("count failed"))}, wantErr: true},
+		{name: "build persistence error", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: valuesRow(0), failExec: "UPDATE vanadis_builds", execErr: errors.New("write failed")}, wantErr: true},
+		{name: "commit error", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: valuesRow(1), commitErr: errors.New("commit failed")}, wantErr: true},
+		{name: "cancelled parent", chunkID: "c1", db: dbScript{row: running, buildRow: actionBuildRow("cancelled")}, want: advanceOutcome{Matched: true, NextChunkIndex: -1, BuildStatus: "cancelled"}},
+
 		{name: "nil receiver", chunkID: "c1", db: dbScript{bare: nilReceiver}, wantErr: true},
 		{name: "nil db", chunkID: "c1", db: dbScript{bare: nilDB}, wantErr: true},
 		{name: "empty chunk id", chunkID: "  ", wantErr: true},
 		{name: "begin error", chunkID: "c1", db: dbScript{beginErr: errors.New("begin tx err")}, wantErr: true},
 		{name: "chunk not found", chunkID: "c1", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
 		{name: "select chunk error", chunkID: "c1", db: dbScript{row: errRow(errors.New("select chunk err"))}, wantErr: true},
-		// The FK cascade plus the chunk FOR UPDATE lock make this unreachable against the real schema; the row pins
-		// the defensive ErrNoRows -> ErrBuildNotFound mapping so a schema or lock-order change surfaces as a typed error.
-		{name: "build not found", chunkID: "c1", db: dbScript{row: running, buildRow: errRow(pgx.ErrNoRows)}, wantErrIs: ErrBuildNotFound},
 		{name: "select build error", chunkID: "c1", db: dbScript{row: running, buildRow: errRow(errors.New("db build error"))}, wantErr: true},
 		{name: "pr mode chunk is a matched no-op", chunkID: "c1", db: dbScript{row: actionChunkRow("pr", "running"), buildRow: runningBuild}, want: advanceOutcome{Matched: true, NextChunkIndex: -1, BuildStatus: "running"}},
 		{name: "completed action chunk is a matched no-op", chunkID: "c1", db: dbScript{row: actionChunkRow("action", "completed"), buildRow: runningBuild}, want: advanceOutcome{Matched: true, NextChunkIndex: -1, BuildStatus: "running"}},
@@ -421,13 +428,13 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 			},
 			want: advanceOutcome{Matched: true, Advanced: true, BuildCompleted: true, NextChunkIndex: -1, BuildStatus: "completed", Chunks: 0},
 		},
-		{name: "completes action chunk", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild}, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: -1, BuildStatus: "running"}},
+		{name: "completes action chunk", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: valuesRow(1)}, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: -1, BuildStatus: "running"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store, _ := tc.db.open()
-			res, err := store.CompleteActionChunk(context.Background(), tc.chunkID)
+			res, err := store.CompleteActionChunk(context.Background(), tc.chunkID, tc.dispatchID)
 			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return
 			}

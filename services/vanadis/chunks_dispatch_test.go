@@ -79,6 +79,11 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 		wantWake      bool
 		wantStatus    string
 	}{
+		{name: "missing retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}}, event: outcomeEvent("", "c1", "completed", ""), wantStatus: "running", wantWidget: false, wantWake: false},
+		{name: "stale retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}}, event: outcomeEvent("vanadis-c1-turn-0", "c1", "completed", ""), wantStatus: "running", wantWidget: false, wantWake: false},
+		{name: "matching retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}}, event: outcomeEvent("vanadis-c1-turn-1", "c1", "completed", ""), wantStatus: "completed", wantWidget: true, wantWake: true},
+		{name: "duplicate retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed", StallNudges: 1}}, event: outcomeEvent("vanadis-c1-turn-1", "c1", "completed", ""), wantStatus: "completed", wantWidget: false, wantWake: false},
+		{name: "missing first run", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 0}}, event: outcomeEvent("", "c1", "completed", ""), wantStatus: "completed", wantWidget: true, wantWake: true},
 		{name: "nil store returns error", nilStore: true, rawPayload: `{"status":"completed","vanadis_chunk_id":"c1"}`, wantErr: true},
 		{name: "nil server returns error", nilServer: true, wantErr: true},
 		{name: "completed event surfaces store failure", getBuildErr: errors.New("db error"), event: outcomeEvent("d1", "c1", "completed", ""), wantErr: true},
@@ -105,14 +110,14 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 			seedChunks: []VanadisChunk{
 				actionChunk("c-act-1", "b-act", 0, "running", "Action Step 1"),
 			},
-			event:      outcomeEvent("disp-act-1", "c-act-1", "completed", ""),
+			event:      outcomeEvent("vanadis-c-act-1-turn-0", "c-act-1", "completed", ""),
 			wantWidget: true, wantWake: true, wantStatus: "completed",
 		},
 		{
 			name:       "completed final action chunk marks completed",
 			seedBuild:  outcomeBuild("b-final", "th-final", "Complete all chunks"),
 			seedChunks: []VanadisChunk{actionChunk("c-final-1", "b-final", 0, "running", "Final Step")},
-			event:      outcomeEvent("disp-final", "c-final-1", "completed", ""),
+			event:      outcomeEvent("vanadis-c-final-1-turn-0", "c-final-1", "completed", ""),
 			wantWidget: true, wantWake: true, wantStatus: "completed",
 		},
 		{
@@ -319,12 +324,12 @@ func TestVanadisServer_MemoryBusIntegration(t *testing.T) {
 	defer stopBus()
 
 	ev := pubsub.DispatchOutcomeEvent{
-		DispatchID:     "disp-bus-1",
+		DispatchID:     "vanadis-c-bus-1-turn-0",
 		VanadisChunkID: "c-bus-1",
 		Status:         "completed",
 		CompletedAt:    time.Now().UTC(),
 	}
-	if err = memBus.Publish(ctx, "aerial.dispatch.completed", "disp-bus-1", ev); err != nil {
+	if err = memBus.Publish(ctx, "aerial.dispatch.completed", "vanadis-c-bus-1-turn-0", ev); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 

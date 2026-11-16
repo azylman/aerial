@@ -637,7 +637,7 @@ func (m *memoryVanadisStore) findChunkByID(chunkID string) (string, int, bool) {
 	return "", -1, false
 }
 
-func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID string) (*VanadisAdvancementResult, error) {
+func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error) {
 	chunkID = strings.TrimSpace(chunkID)
 	if chunkID == "" {
 		return nil, errors.New("chunk id cannot be empty")
@@ -665,7 +665,7 @@ func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID stri
 		NextChunkIndex:   -1,
 		BuildCompleted:   b.Status == "completed",
 	}
-	if target.Mode != "action" || target.Status != "running" || b.Status != "running" || target.PRNumber > 0 {
+	if !actionCompletionAllowed(target, b.Status, dispatchID) {
 		return res, nil
 	}
 
