@@ -103,6 +103,7 @@ type SyncChunkPRWidgetRequest struct {
 // EriClient describes the outbound communication interface to Eri.
 type EriClient interface {
 	Dispatch(ctx context.Context, req BrainDispatchRequest) error
+	DispatchAccepted(ctx context.Context, req BrainDispatchRequest) error
 	CancelDispatch(ctx context.Context, chunkID string) error
 	Prompt(ctx context.Context, threadID, prompt string) error
 	Widget(ctx context.Context, req StatusWidgetRequest) (string, error)
@@ -161,6 +162,29 @@ func (c *HTTPEriClient) postEriJSON(ctx context.Context, path string, payload an
 func (c *HTTPEriClient) Dispatch(ctx context.Context, req BrainDispatchRequest) error {
 	_, err := c.postEriJSON(ctx, "/dispatch", req, 64<<10)
 	return err
+}
+
+// DispatchAccepted requires durable acceptance of the exact requested generation.
+// skipped_active is a retryable rejection, even though Eri returns HTTP 200.
+func (c *HTTPEriClient) DispatchAccepted(ctx context.Context, req BrainDispatchRequest) error {
+	body, err := c.postEriJSON(ctx, "/dispatch", req, 64<<10)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Status     string `json:"status"`
+		DispatchID string `json:"dispatch_id"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("decode eri dispatch acceptance: %w", err)
+	}
+	if result.Status == "skipped_active" {
+		return errDispatchActive
+	}
+	if req.ID == "" || result.DispatchID != req.ID || (result.Status != "accepted" && result.Status != "already_exists") {
+		return fmt.Errorf("eri did not accept dispatch %q (status %q, identity %q)", req.ID, result.Status, result.DispatchID)
+	}
+	return nil
 }
 
 func (c *HTTPEriClient) CancelDispatch(ctx context.Context, chunkID string) error {
@@ -267,10 +291,15 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, store VanadisStore, b
 	}
 	chunk := chunks[activeIdx]
 
+	var reserveErr error
 	if store != nil {
-		if err := store.ReserveChunkForLaunch(ctx, chunk.ID); err != nil && !errors.Is(err, ErrChunkNotFound) {
-			log.Printf("[vanadis-restate] warning: failed reserving chunk %s for launch: %v", chunk.ID, err)
-		}
+		reserveErr = store.ReserveChunkForLaunch(ctx, chunk.ID)
+	}
+	if reserveErr != nil && chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
+		return fmt.Errorf("reserve action generation: %w", reserveErr)
+	}
+	if reserveErr != nil && !errors.Is(reserveErr, ErrChunkNotFound) {
+		log.Printf("[vanadis-restate] warning: failed reserving chunk %s for launch: %v", chunk.ID, reserveErr)
 	}
 
 	prompt, err := e.FormatChunkPrompt(build, chunks, activeIdx)
@@ -279,7 +308,7 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, store VanadisStore, b
 	}
 
 	req := BrainDispatchRequest{
-		ID:             fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges),
+		ID:             actionDispatchID(chunk),
 		Source:         "vanadis-restate",
 		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
 		TargetID:       strings.TrimSpace(build.ThreadID),
@@ -289,6 +318,9 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, store VanadisStore, b
 		SkipIfActive:   true,
 	}
 
+	if chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
+		return e.eriClient.DispatchAccepted(ctx, req)
+	}
 	return e.eriClient.Dispatch(ctx, req)
 }
 
@@ -897,3 +929,5 @@ func formatChunkPromptWithShareRoot(build VanadisBuild, chunks []VanadisChunk, a
 
 	return sb.String(), nil
 }
+
+var errDispatchActive = errors.New("dispatch active; reconciliation deferred")

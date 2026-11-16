@@ -25,14 +25,15 @@ import (
 )
 
 type fakeObjectRuntime struct {
-	key            string
-	launched       map[string]bool
-	state          *BuildObjectState
-	getStateErr    error
-	getLaunchedErr error
-	runStepErr     error
-	stepsRun       []string
-	cleared        bool
+	key                string
+	launched           map[string]bool
+	state              *BuildObjectState
+	getStateErr        error
+	getLaunchedErr     error
+	runStepErr         error
+	stepsRun           []string
+	cleared            bool
+	reconcileScheduled bool
 }
 
 func newFakeObjectRuntime(key string) *fakeObjectRuntime {
@@ -1447,3 +1448,5 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	})
 	_ = boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}})
 }
+
+func (f *fakeObjectRuntime) ScheduleReconcile() { f.reconcileScheduled = true }
