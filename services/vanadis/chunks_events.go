@@ -11,7 +11,7 @@ import (
 )
 
 func (s *VanadisServer) handleCompletedDispatchOutcome(ctx context.Context, ev pubsub.DispatchOutcomeEvent) error {
-	res, err := s.store.CompleteActionChunk(ctx, ev.VanadisChunkID)
+	res, err := s.store.CompleteActionChunk(ctx, ev.VanadisChunkID, ev.DispatchID)
 	if err != nil {
 		if errors.Is(err, ErrChunkNotFound) {
 			log.Printf("[vanadis] chunk %s not found on dispatch outcome completed", ev.VanadisChunkID)
@@ -30,26 +30,36 @@ func (s *VanadisServer) handleCompletedDispatchOutcome(ctx context.Context, ev p
 	}
 	if !res.Advanced {
 		if res.ChunkMode == chunkModeAction && s.restateCfg.RestateIngressURL != "" {
-			if c, _, gErr := s.store.GetChunk(ctx, ev.VanadisChunkID); gErr == nil && c != nil && c.Status == statusCompleted {
+			if c, _, gErr := s.store.GetChunk(ctx, ev.VanadisChunkID); gErr == nil && c != nil && c.Status == statusCompleted && actionDispatchMatches(*c, ev.DispatchID) {
 				return s.reconcileBuildOnRestate(ctx, res.BuildID, "action_completed")
 			}
 		}
 		return nil
 	}
-	RecordChunkTotal("completed")
-	s.syncBuildWidget(ctx, res.BuildID, "")
-	s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{ev.VanadisChunkID}, "")
-	if res.BuildCompleted {
-		RecordBuildTotal("completed")
-		s.publishExternalEvent(ctx, "vanadis_build", "completed", []string{res.BuildID}, "")
-		s.dispatchCompletedBuildWake(ctx, res)
-	}
+	s.publishActionCompletion(ctx, ev.VanadisChunkID, res, false)
 	if s.restateCfg.RestateIngressURL != "" {
 		if err := s.reconcileBuildOnRestate(ctx, res.BuildID, "action_completed"); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// Only the transaction that advances the action owns its terminal notifications.
+func (s *VanadisServer) publishActionCompletion(ctx context.Context, chunkID string, res *VanadisAdvancementResult, quiet bool) {
+	if res == nil || !res.Advanced {
+		return
+	}
+	RecordChunkTotal("completed")
+	s.syncBuildWidget(ctx, res.BuildID, "")
+	s.publishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunkID}, "")
+	if res.BuildCompleted {
+		RecordBuildTotal("completed")
+		s.publishExternalEvent(ctx, "vanadis_build", "completed", []string{res.BuildID}, "")
+		if !quiet {
+			s.dispatchCompletedBuildWake(ctx, res)
+		}
+	}
 }
 
 func (s *VanadisServer) handleFailedDispatchOutcome(ctx context.Context, ev pubsub.DispatchOutcomeEvent) error {

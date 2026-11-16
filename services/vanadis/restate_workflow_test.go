@@ -227,7 +227,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	require.NoError(t, store.CreateBuild(ctx, bAct, cAct))
 	require.NoError(t, srvWake.handleCompletedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
 		VanadisChunkID: "c-act-single",
-		DispatchID:     "d-act-1",
+		DispatchID:     "vanadis-c-act-single-turn-0",
 	}))
 	assert.NotEmpty(t, wakePromptSent)
 	assert.Contains(t, wakePromptSent, "Completed Chunks Ledger:")
@@ -253,7 +253,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	}
 	require.Error(t, srv500Wake.handleCompletedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
 		VanadisChunkID: "c-act-retry-1",
-		DispatchID:     "d-act-retry-1",
+		DispatchID:     "vanadis-c-act-retry-1-turn-0",
 	}))
 	cLoaded, _, err := store.GetChunk(ctx, "c-act-retry-1")
 	require.NoError(t, err)
@@ -261,7 +261,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	// On redelivery with healthy Restate, reconciliation retries and succeeds for already-completed chunk
 	require.NoError(t, srvWake.handleCompletedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
 		VanadisChunkID: "c-act-retry-1",
-		DispatchID:     "d-act-retry-1",
+		DispatchID:     "vanadis-c-act-retry-1-turn-0",
 	}))
 
 	bMulti := VanadisBuild{ID: "b-act-multi", ThreadID: "123456789012345678", Objective: "test act multi wake", Status: "running"}
@@ -272,7 +272,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	require.NoError(t, store.CreateBuild(ctx, bMulti, cMulti))
 	require.NoError(t, srvWake.handleCompletedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
 		VanadisChunkID: "c-act-m1",
-		DispatchID:     "d-act-m1",
+		DispatchID:     "vanadis-c-act-m1-turn-0",
 	}))
 	assert.Contains(t, wakePromptSent, "2 chunks completed")
 	assert.Contains(t, wakePromptSent, "PR #99")
@@ -1034,4 +1034,50 @@ func TestRestateBuildTransitionHandler(t *testing.T) {
 		srv.handleRestateBuildTransition(w, r)
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
+}
+
+func TestActionCompletionMutationIdentity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, action, buildID, dispatchID, chunkStatus, buildStatus, wantStatus string
+		generation                                                              int
+		wantErr                                                                 bool
+		quiet, wantWake                                                         bool
+	}{
+		{"first run compatibility", "action_completed", "b1", "", "running", "running", "completed", 0, false, false, true},
+		{"first run supplied identity", "action_completed", "b1", "vanadis-c1-turn-0", "running", "running", "completed", 0, false, false, true},
+		{"first run stale identity", "action_completed", "b1", "stale", "running", "running", "running", 0, false, false, false},
+		{"matching retry", "action_completed", "b1", "vanadis-c1-turn-1", "running", "running", "completed", 1, false, false, true},
+		{"missing retry", "action_completed", "b1", "", "running", "running", "running", 1, false, false, false},
+		{"stale retry", "action_completed", "b1", "vanadis-c1-turn-0", "running", "running", "running", 1, false, false, false},
+		{"wrong build", "action_completed", "other", "", "running", "running", "running", 0, true, false, false},
+		{"duplicate", "action_completed", "b1", "vanadis-c1-turn-1", "completed", "completed", "completed", 1, false, false, false},
+		{"cancelled", "action_completed", "b1", "vanadis-c1-turn-1", "cancelled", "cancelled", "cancelled", 1, false, false, false},
+		{"deployment missing identity", "chunk_deploy_success", "b1", "", "running", "running", "running", 1, false, false, false},
+		{"deployment stale identity", "chunk_deploy_success", "b1", "vanadis-c1-turn-0", "running", "running", "running", 1, false, false, false},
+		{"deployment matching identity", "chunk_deploy_success", "b1", "vanadis-c1-turn-1", "running", "running", "completed", 1, false, false, true},
+		{"deployment wrong build", "chunk_deploy_success", "other", "vanadis-c1-turn-1", "running", "running", "running", 1, true, false, false},
+		{"quiet deployment", "chunk_deploy_success", "b1", "vanadis-c1-turn-1", "running", "running", "completed", 1, false, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			store := newMemoryVanadisStore()
+			require.NoError(t, store.CreateBuild(ctx, VanadisBuild{ID: "b1", ThreadID: "thread1", Status: tc.buildStatus, Quiet: tc.quiet}, []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: tc.chunkStatus, StallNudges: tc.generation}}))
+			brain := newDispatchBrainServer(t)
+			srv := &VanadisServer{store: store, cfg: Config{BrainURL: brain.URL}, httpClient: brain.Client()}
+			err := executeBuildMutation(ctx, srv, tc.buildID, BuildMutationRequest{Action: tc.action, ChunkID: "c1", DispatchID: tc.dispatchID})
+			assert.Equal(t, tc.wantErr, err != nil)
+			chunk, _, err := store.GetChunk(ctx, "c1")
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantStatus, chunk.Status)
+			_, wakes := brain.calls()
+			assert.Equal(t, tc.wantWake, wakes > 0)
+			// Redelivery must not emit another terminal wake.
+			_ = executeBuildMutation(ctx, srv, tc.buildID, BuildMutationRequest{Action: tc.action, ChunkID: "c1", DispatchID: tc.dispatchID})
+			_, redeliveredWakes := brain.calls()
+			assert.Equal(t, wakes, redeliveredWakes)
+		})
+	}
 }

@@ -78,6 +78,7 @@ type BuildObjectState struct {
 
 // BuildMutationRequest represents a typed mutation payload targeting BuildObject.
 type BuildMutationRequest struct {
+	DispatchID   string                 `json:"dispatch_id,omitempty"`
 	RolloutState *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
 	Action       string                 `json:"action"`
 	ChunkID      string                 `json:"chunk_id,omitempty"`
@@ -107,9 +108,15 @@ func executeBuildMutation(ctx context.Context, srv *VanadisServer, buildID strin
 	case "chunk_merged":
 		return applyMutationChunkMerged(ctx, srv, buildID, req.ChunkID)
 	case "chunk_deploy_success":
-		return applyMutationChunkDeploySuccess(ctx, srv, req.ChunkID, req.RolloutState)
+		if err := validateCompletionBuild(ctx, srv, buildID, req.ChunkID); err != nil {
+			return err
+		}
+		return applyMutationChunkDeploySuccess(ctx, srv, req.ChunkID, req.DispatchID, req.RolloutState)
 	case "action_completed":
-		return applyMutationActionCompleted(ctx, srv, req.ChunkID)
+		if err := validateCompletionBuild(ctx, srv, buildID, req.ChunkID); err != nil {
+			return err
+		}
+		return applyMutationActionCompleted(ctx, srv, req.ChunkID, req.DispatchID)
 	case "chunk_failed":
 		return applyMutationChunkFailed(ctx, srv, req.ChunkID, req.Reason)
 	case statusCancelled:
@@ -117,6 +124,20 @@ func executeBuildMutation(ctx context.Context, srv *VanadisServer, buildID strin
 	default:
 		return fmt.Errorf("%w: unsupported mutation action: %q", ErrInvalidBuildInput, req.Action)
 	}
+}
+
+func validateCompletionBuild(ctx context.Context, srv *VanadisServer, buildID, chunkID string) error {
+	if strings.TrimSpace(chunkID) == "" {
+		return fmt.Errorf("%w: chunk_id required", ErrInvalidBuildInput)
+	}
+	chunk, _, err := srv.store.GetChunk(ctx, strings.TrimSpace(chunkID))
+	if err != nil {
+		return err
+	}
+	if chunk == nil || chunk.BuildID != buildID {
+		return fmt.Errorf("%w: chunk does not belong to build", ErrInvalidBuildInput)
+	}
+	return nil
 }
 
 func applyMutationChunkMerged(ctx context.Context, srv *VanadisServer, buildID, chunkID string) error {
@@ -133,7 +154,7 @@ func applyMutationChunkMerged(ctx context.Context, srv *VanadisServer, buildID, 
 	return nil
 }
 
-func applyMutationChunkDeploySuccess(ctx context.Context, srv *VanadisServer, chunkID string, states ...*pubsub.PRRolloutState) error {
+func applyMutationChunkDeploySuccess(ctx context.Context, srv *VanadisServer, chunkID, dispatchID string, states ...*pubsub.PRRolloutState) error {
 	var evidence *pubsub.PRRolloutState
 	if len(states) > 0 {
 		evidence = states[0]
@@ -150,9 +171,12 @@ func applyMutationChunkDeploySuccess(ctx context.Context, srv *VanadisServer, ch
 		return nil
 	}
 	if chunk.Mode == chunkModeAction && chunk.PRNumber == 0 {
-		if err := srv.store.UpdateChunkStatus(ctx, chunk.ID, "completed"); err != nil {
+		res, err := srv.store.CompleteActionChunk(ctx, chunk.ID, dispatchID)
+		if err != nil {
 			return err
 		}
+		srv.publishActionCompletion(ctx, chunk.ID, res, build.Quiet)
+		return nil
 	} else if err := srv.store.CompletePRDeployment(ctx, chunk.ID, evidence); err != nil {
 		if errors.Is(err, errPRTransitionSkipped) {
 			return nil
@@ -167,14 +191,20 @@ func applyMutationChunkDeploySuccess(ctx context.Context, srv *VanadisServer, ch
 	return nil
 }
 
-func applyMutationActionCompleted(ctx context.Context, srv *VanadisServer, chunkID string) error {
+func applyMutationActionCompleted(ctx context.Context, srv *VanadisServer, chunkID, dispatchID string) error {
 	chunkID = strings.TrimSpace(chunkID)
 	if chunkID == "" {
 		return fmt.Errorf("%w: chunk_id required for action_completed", ErrInvalidBuildInput)
 	}
-	if _, err := srv.store.CompleteActionChunk(ctx, chunkID); err != nil {
+	_, build, err := srv.store.GetChunk(ctx, chunkID)
+	if err != nil {
+		return err
+	}
+	res, err := srv.store.CompleteActionChunk(ctx, chunkID, dispatchID)
+	if err != nil {
 		return fmt.Errorf("complete action chunk %s: %w", chunkID, err)
 	}
+	srv.publishActionCompletion(ctx, chunkID, res, build.Quiet)
 	return nil
 }
 

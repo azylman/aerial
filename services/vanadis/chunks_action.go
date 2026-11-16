@@ -52,8 +52,24 @@ func validateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, target
 	return nil
 }
 
+// actionDispatchID identifies the persisted action dispatch generation.
+func actionDispatchID(chunk VanadisChunk) string {
+	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
+}
+
+func actionDispatchMatches(chunk VanadisChunk, dispatchID string) bool {
+	if dispatchID == "" {
+		return chunk.StallNudges == 0
+	}
+	return dispatchID == actionDispatchID(chunk)
+}
+
+func actionCompletionAllowed(chunk VanadisChunk, buildStatus, dispatchID string) bool {
+	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildStatus == statusRunning && chunk.PRNumber == 0 && actionDispatchMatches(chunk, dispatchID)
+}
+
 // CompleteActionChunk transitions a running action chunk to completed and returns advancement info.
-func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID string) (*VanadisAdvancementResult, error) {
+func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("database connection is nil")
 	}
@@ -72,23 +88,23 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 		}
 	}()
 
+	// Lock the parent first, matching cancellation and retry lock order.
+	var b VanadisBuild
+	const selectBuildSQL = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, status, COALESCE(status_message_id, '') FROM vanadis_builds WHERE id = (SELECT build_id FROM vanadis_chunks WHERE id = $1) FOR UPDATE;`
+	if err := tx.QueryRow(ctx, selectBuildSQL, chunkID).Scan(&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.Status, &b.StatusMessageID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrChunkNotFound
+		}
+		return nil, fmt.Errorf("lock action build: %w", err)
+	}
 	var cID, bID, cTitle, cStatus, cMode string
-	var chunkIdx, prNumber int
-	const selectChunkSQL = `SELECT id, build_id, chunk_index, mode, title, status, COALESCE(pr_number, 0) FROM vanadis_chunks WHERE id = $1 FOR UPDATE;`
-	if err := tx.QueryRow(ctx, selectChunkSQL, chunkID).Scan(&cID, &bID, &chunkIdx, &cMode, &cTitle, &cStatus, &prNumber); err != nil {
+	var chunkIdx, prNumber, stallNudges int
+	const selectChunkSQL = `SELECT id, build_id, chunk_index, mode, title, status, COALESCE(pr_number, 0), stall_nudges FROM vanadis_chunks WHERE id = $1 AND build_id = $2 FOR UPDATE;`
+	if err := tx.QueryRow(ctx, selectChunkSQL, chunkID, b.ID).Scan(&cID, &bID, &chunkIdx, &cMode, &cTitle, &cStatus, &prNumber, &stallNudges); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrChunkNotFound
 		}
 		return nil, fmt.Errorf("lock action chunk %s: %w", chunkID, err)
-	}
-
-	var b VanadisBuild
-	const selectBuildSQL = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, status, COALESCE(status_message_id, '') FROM vanadis_builds WHERE id = $1 FOR UPDATE;`
-	if err := tx.QueryRow(ctx, selectBuildSQL, bID).Scan(&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.Status, &b.StatusMessageID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrBuildNotFound
-		}
-		return nil, fmt.Errorf("lock action build %s: %w", bID, err)
 	}
 
 	res := &VanadisAdvancementResult{
@@ -108,7 +124,7 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 		BuildCompleted:   b.Status == statusCompleted,
 	}
 
-	if cMode != chunkModeAction || cStatus != statusRunning || b.Status != statusRunning || prNumber > 0 {
+	if !actionCompletionAllowed(VanadisChunk{ID: cID, Mode: cMode, Status: cStatus, PRNumber: prNumber, StallNudges: stallNudges}, b.Status, dispatchID) {
 		return res, nil
 	}
 
@@ -120,13 +136,17 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 	// If this chunk completed the build (all chunks done), mark the build completed.
 	var remainingCount int
 	const checkRemainingSQL = `SELECT COUNT(*) FROM vanadis_chunks WHERE build_id = $1 AND id != $2 AND status != 'completed';`
-	if err := tx.QueryRow(ctx, checkRemainingSQL, bID, cID).Scan(&remainingCount); err == nil && remainingCount == 0 {
+	if err := tx.QueryRow(ctx, checkRemainingSQL, bID, cID).Scan(&remainingCount); err != nil {
+		return nil, fmt.Errorf("count remaining chunks: %w", err)
+	}
+	if remainingCount == 0 {
 		const updateBuildSQL = `UPDATE vanadis_builds SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
-		if _, err := tx.Exec(ctx, updateBuildSQL, bID); err == nil {
-			res.BuildCompleted = true
-			res.BuildStatus = statusCompleted
-			res.Chunks = queryBuildChunkSummaries(ctx, tx, bID)
+		if _, err := tx.Exec(ctx, updateBuildSQL, bID); err != nil {
+			return nil, fmt.Errorf("complete action build: %w", err)
 		}
+		res.BuildCompleted = true
+		res.BuildStatus = statusCompleted
+		res.Chunks = queryBuildChunkSummaries(ctx, tx, bID)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
