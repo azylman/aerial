@@ -71,13 +71,16 @@ func TestSyncBrainEnvironment(t *testing.T) {
 					d.SystemPrompt = "test prompt"
 				})
 			}
-			provisioner := env.NewFromConfig(cfg)
-			err := syncBrainEnvironment(context.Background(), provisioner, cfg)
+			provisioner, err := env.NewFromConfig(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = syncBrainEnvironment(context.Background(), provisioner, cfg)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("wantErr=%v, got err=%v", tc.wantErr, err)
 			}
 			if tc.name == "success fresh and idempotent" {
-				if err := syncBrainEnvironment(context.Background(), provisioner, cfg); err != nil {
+				if err = syncBrainEnvironment(context.Background(), provisioner, cfg); err != nil {
 					t.Fatalf("unexpected error on idempotent second call: %v", err)
 				}
 			}
@@ -124,6 +127,7 @@ func WithOnReload(fn func(source string)) BrainAppOption {
 
 func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
 	data := config.DefaultConfigData()
+	data.CredentialSources = config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}
 	for _, m := range mutators {
 		if m != nil {
 			m(data)
@@ -199,7 +203,9 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 	t.Run("supplier success updating model", func(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
 		CreateReloadConfigFunc(t.Context(), newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
-			active.Update(&config.ConfigData{Model: "gemini-2.5-flash"})
+			active.Update(&config.ConfigData{
+				CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, Model: "gemini-2.5-flash",
+			})
 			return nil
 		}), WithSkipEnvironmentSync())("TestReloadSuccess")
 	})
@@ -220,7 +226,7 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 		if err := os.WriteFile(blockerHome, []byte("file"), 0o644); err != nil {
 			t.Fatalf("failed to write blocker file: %v", err)
 		}
-		cfg.Update(&config.ConfigData{GeminiHomeDir: filepath.Join(blockerHome, "sub"), DataDir: tmpData})
+		cfg.Update(&config.ConfigData{CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, GeminiHomeDir: filepath.Join(blockerHome, "sub"), DataDir: tmpData})
 		reloadFn("TestErrorSource")
 	})
 
@@ -228,10 +234,10 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 		cfg := newTestConfig()
 		tmpFile := filepath.Join(t.TempDir(), "blocking_file")
 		_ = os.WriteFile(tmpFile, []byte("file"), 0o644)
-		cfg.Update(&config.ConfigData{GeminiHomeDir: tmpFile})
+		cfg.Update(&config.ConfigData{CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, GeminiHomeDir: tmpFile})
 		CreateReloadConfigFunc(t.Context(), cfg,
 			WithReloadSupplier(func(active *config.Config) error { return nil }),
-			WithProvisioner(env.NewFromConfig(cfg)),
+			WithProvisioner(testProvisioner(t, cfg)),
 		)("test-provisioner-error")
 	})
 
@@ -271,9 +277,10 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 			WithSkipEnvironmentSync(),
 			WithReloadSupplier(func(active *config.Config) error {
 				active.Update(&config.ConfigData{
-					Engine:         "claude",
-					ClaudeBin:      "/opt/anthropic/bin/claude",
-					LowEffortModel: "gpt-oss-120b-medium",
+					CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}},
+					Engine:            "claude",
+					ClaudeBin:         "/opt/anthropic/bin/claude",
+					LowEffortModel:    "gpt-oss-120b-medium",
 				})
 				return nil
 			}),
@@ -445,11 +452,11 @@ func TestDefaultPaths(t *testing.T) {
 	}
 
 	// 5. resolveBrainModelDefaults tests
-	lowD, medD := resolveBrainModelDefaults(&config.ConfigData{})
+	lowD, medD := resolveBrainModelDefaults(&config.ConfigData{CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}})
 	if lowD != "gemini-3.8-flash-low" || medD != "gemini-3.8-flash-medium" {
 		t.Errorf("expected default models, got %s, %s", lowD, medD)
 	}
-	lowC, medC := resolveBrainModelDefaults(&config.ConfigData{LowEffortModel: "custom-low", MediumEffortModel: "custom-med"})
+	lowC, medC := resolveBrainModelDefaults(&config.ConfigData{CredentialSources: config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, LowEffortModel: "custom-low", MediumEffortModel: "custom-med"})
 	if lowC != "custom-low" || medC != "custom-med" {
 		t.Errorf("expected custom models, got %s, %s", lowC, medC)
 	}
@@ -991,5 +998,117 @@ func TestBrainAppOptions_FunctionalOptionMutators(t *testing.T) {
 	opts.onReload("test")
 	if !called {
 		t.Errorf("expected onReload to be invoked")
+	}
+}
+
+func testProvisioner(t *testing.T, cfg *config.Config) *env.Provisioner {
+	t.Helper()
+	p, err := env.NewFromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestReloadCredentialCandidate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		missing   bool
+		wantModel string
+	}{
+		{"reject unreadable candidate", true, "old-model"},
+		{"publish readable candidate", false, "new-model"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "oauth")
+			if !tc.missing {
+				if err := os.WriteFile(path, []byte("fake-token"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := newTestConfig(func(d *config.ConfigData) { d.Model = "old-model" })
+			reload := CreateReloadConfigFunc(t.Context(), cfg, WithSkipEnvironmentSync(), WithReloadSupplier(func(candidate *config.Config) error {
+				cur := candidate.Current()
+				cur.Model = "new-model"
+				cur.CredentialSources.OAuth = config.CredentialSource{Path: path}
+				candidate.Update(cur)
+				return nil
+			}))
+			reload("test")
+			if got := cfg.Current().Model; got != tc.wantModel {
+				t.Fatalf("model=%q want %q", got, tc.wantModel)
+			}
+			if tc.missing && !cfg.Current().CredentialSources.OAuth.Disabled {
+				t.Fatal("rejected source published")
+			}
+			if !tc.missing && cfg.Current().CredentialSources.OAuth.Path != path {
+				t.Fatal("accepted source not published")
+			}
+		})
+	}
+}
+
+func TestInitializeEnvironment(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		invalid   bool
+		blockHome bool
+		wantErr   bool
+	}{
+		{"required sources rejected", true, false, true},
+		{"filesystem warning tolerated", false, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			if tc.blockHome {
+				home = filepath.Join(home, "blocker")
+				if err := os.WriteFile(home, []byte("blocker"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := newTestConfig(func(d *config.ConfigData) {
+				d.GeminiHomeDir = home
+				d.DataDir = t.TempDir()
+				if tc.invalid {
+					d.CredentialSources = config.CredentialSources{}
+				}
+			})
+			_, err := initializeEnvironment(t.Context(), cfg, nil)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error=%v wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// Global config and process environment require serial execution here.
+func TestDefaultReloadCredentialCandidate(t *testing.T) {
+	original := config.ActiveConfig().Current()
+	t.Cleanup(func() { config.ActiveConfig().Update(original) })
+	tests := []struct{ name, sources, wantModel string }{
+		{"omitted", "", "old-model"},
+		{"unreadable", "credential_sources:\n  oauth:\n    path: %s\n  codex:\n    disabled: true\n", "old-model"},
+		{"accepted", "credential_sources:\n  oauth:\n    disabled: true\n  codex:\n    disabled: true\n", "new-model"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("model: new-model\nchannels:\n  default: {mode: disabled}\n"+strings.ReplaceAll(tc.sources, "%s", filepath.Join(t.TempDir(), "missing"))), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CONFIG_PATH", path)
+			cfg := config.ActiveConfig()
+			cfg.Update(newTestConfig(func(d *config.ConfigData) { d.Model = "old-model" }).Current())
+			CreateReloadConfigFunc(t.Context(), cfg, WithSkipEnvironmentSync())("test")
+			if cfg.Current().Model != tc.wantModel || config.ActiveConfig().Current().Model != tc.wantModel {
+				t.Fatalf("cfg=%q global=%q want=%q", cfg.Current().Model, config.ActiveConfig().Current().Model, tc.wantModel)
+			}
+		})
 	}
 }

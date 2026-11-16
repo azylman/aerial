@@ -73,7 +73,7 @@ func runProvisionRuntimeSharedAssetsCase(t *testing.T, tc sharedAssetsCase) {
 	if !tc.emptyDataDir {
 		tmpData = t.TempDir()
 	}
-	p := New(tmpHome, tmpData)
+	p := newDisabledProvisioner(t, tmpHome, tmpData)
 
 	primaryGemini := filepath.Join(tmpHome, ".gemini")
 	primaryCli := filepath.Join(primaryGemini, "antigravity-cli")
@@ -355,7 +355,7 @@ func runMCPProvisioningCase(t *testing.T, tc mcpProvisioningCase) {
 	t.Helper()
 	tmpHome := t.TempDir()
 	tmpData := t.TempDir()
-	p := New(tmpHome, tmpData)
+	p := newDisabledProvisioner(t, tmpHome, tmpData)
 
 	cfg := buildTestMCPConfig(tc)
 
@@ -625,7 +625,7 @@ func runSkillsProvisioningCase(t *testing.T, tc skillsProvisioningCase) {
 
 	tmpHome := t.TempDir()
 	tmpData := t.TempDir()
-	p := New(tmpHome, tmpData)
+	p := newDisabledProvisioner(t, tmpHome, tmpData)
 
 	customDir := t.TempDir()
 	writeTestFile(t, filepath.Join(customDir, "README.txt"), "readme")
@@ -776,7 +776,7 @@ func runSyncHooksCase(t *testing.T, tc syncHooksCase) {
 		return
 	}
 	if tc.emptyHome {
-		pEmpty := New("", "")
+		pEmpty := newDisabledProvisioner(t, "", "")
 		if err := pEmpty.SyncHooks(); err != nil {
 			t.Fatalf("expected nil error on empty homeDir, got: %v", err)
 		}
@@ -789,7 +789,7 @@ func runSyncHooksCase(t *testing.T, tc syncHooksCase) {
 		tmpData = t.TempDir()
 	}
 
-	p := New(tmpHome, tmpData)
+	p := newDisabledProvisioner(t, tmpHome, tmpData)
 
 	if tc.blockConfig {
 		writeTestFile(t, filepath.Join(tmpHome, ".gemini", "config"), "file blocker")
@@ -899,7 +899,7 @@ func runCodexAuthCase(t *testing.T, tc codexAuthCase) {
 		return
 	}
 	if tc.emptyHome {
-		pEmpty := New("", "")
+		pEmpty := newDisabledProvisioner(t, "", "")
 		if err := pEmpty.provisionCodexAuthState(); err != nil {
 			t.Fatalf("expected nil error on empty home: %v", err)
 		}
@@ -911,7 +911,7 @@ func runCodexAuthCase(t *testing.T, tc codexAuthCase) {
 	if !tc.noDataDir {
 		tmpData = t.TempDir()
 	}
-	p := New(tmpHome, tmpData)
+	p := newDisabledProvisioner(t, tmpHome, tmpData)
 
 	var canonicalCodexDir string
 	if tmpData != "" {

@@ -61,7 +61,7 @@ func TestLoadTargetMCPConfig_MCPProxy(t *testing.T) {
 			if tc.proxyPort != "" {
 				routes = NewMCPProxyRoutes(tc.proxyPort)
 			}
-			p := New(t.TempDir(), "").WithMCPProxy(routes)
+			p := newDisabledProvisioner(t, t.TempDir(), "").WithMCPProxy(routes)
 			raw := p.LoadTargetMCPConfig(cfg, TargetVoice)
 			assertJSONEqual(t, "agy config", raw, tc.wantAgy)
 
@@ -126,7 +126,7 @@ func TestEnsureTargetCodexConfigTOML_MCPProxy(t *testing.T) {
 			if tc.proxyPort != "" {
 				routes = NewMCPProxyRoutes(tc.proxyPort)
 			}
-			p := New(t.TempDir(), "").WithMCPProxy(routes)
+			p := newDisabledProvisioner(t, t.TempDir(), "").WithMCPProxy(routes)
 			raw := p.LoadTargetMCPConfig(cfg, TargetVoice)
 
 			codexDir := t.TempDir()

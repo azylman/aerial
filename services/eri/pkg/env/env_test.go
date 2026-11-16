@@ -55,6 +55,7 @@ func (p *Provisioner) SetCodexAuthSourcePath(path string) {
 
 func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
 	data := config.DefaultConfigData()
+	data.CredentialSources = config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}
 	data.DatabaseURL, data.Port = ":memory:", "0"
 	data.DiscordToken, data.APIKey, data.HarnessAPIKey, data.GitHubPAT = "", "", "", ""
 	data.GeminiHomeDir = filepath.Join(os.TempDir(), "aerial-test-gemini")
@@ -88,7 +89,7 @@ func newTestProvisioner(t *testing.T, aerialFiles, configFiles map[string]string
 	for rel, c := range configFiles {
 		writeTestFile(t, filepath.Join(configDir, rel), c)
 	}
-	p := New(t.TempDir(), t.TempDir())
+	p := newDisabledProvisioner(t, t.TempDir(), t.TempDir())
 	p.SetAerialRulesDir(aerialDir)
 	p.SetConfigRulesDir(configDir)
 	return p, aerialDir, configDir
@@ -143,8 +144,8 @@ func assertNilReceiver(t *testing.T) {
 
 func assertProvisionerSetters(t *testing.T) {
 	t.Helper()
-	p := New("/h", "/d")
-	if p.oauthTokenSourcePath != "/local/antigravity-oauth-token" {
+	p := newDisabledProvisioner(t, "/h", "/d")
+	if p.oauthTokenSourcePath != "" {
 		t.Fatalf("unexpected default oauthTokenSourcePath: %q", p.oauthTokenSourcePath)
 	}
 	p.SetCustomSkillsDir("/custom/skills")
@@ -207,9 +208,9 @@ func runProvisionerInitCase(t *testing.T, tc provisionerInitCase) {
 	}
 
 	if tc.nilConfig {
-		p := NewFromConfig(nil)
-		if p.homeDir != "" || p.dataDir != "" {
-			t.Fatalf("expected empty dirs from nil config, got %q, %q", p.homeDir, p.dataDir)
+		_, err := NewFromConfig(nil)
+		if err == nil {
+			t.Fatal("expected nil configuration error")
 		}
 		return
 	}
@@ -219,14 +220,17 @@ func runProvisionerInitCase(t *testing.T, tc provisionerInitCase) {
 			c.GeminiHomeDir = "/custom/gemini"
 			c.DataDir = "/custom/data"
 		})
-		p := NewFromConfig(cfg)
+		p, err := NewFromConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if p.homeDir != "/custom/gemini" || p.dataDir != "/custom/data" {
 			t.Fatalf("unexpected paths from config: %q, %q", p.homeDir, p.dataDir)
 		}
 		return
 	}
 
-	p := New(tc.expectedHome, tc.expectedData)
+	p := newDisabledProvisioner(t, tc.expectedHome, tc.expectedData)
 	if p.homeDir != tc.expectedHome || p.dataDir != tc.expectedData {
 		t.Fatalf("unexpected paths: got home=%q, data=%q", p.homeDir, p.dataDir)
 	}
@@ -345,7 +349,7 @@ func injectSyncFailure(t *testing.T, tc syncCase, p *Provisioner) {
 func runSyncCase(t *testing.T, tc syncCase) {
 	t.Helper()
 	if tc.emptyHome {
-		p := New("", "")
+		p := newDisabledProvisioner(t, "", "")
 		if err := p.Sync(context.Background(), nil); err != nil {
 			t.Fatalf("expected nil error on empty home, got: %v", err)
 		}
@@ -474,7 +478,7 @@ type syncSettingsCase struct {
 func testAtomicDirReplacement(t *testing.T, tc syncSettingsCase) {
 	t.Helper()
 	tmpDir := t.TempDir()
-	p := New(tmpDir, tmpDir)
+	p := newDisabledProvisioner(t, tmpDir, tmpDir)
 	targetPath := filepath.Join(tmpDir, "replace_dir")
 	if tc.atomicNonEmptyDir {
 		writeTestFile(t, filepath.Join(targetPath, "child.txt"), "child")
@@ -557,7 +561,7 @@ func runSyncSettingsCase(t *testing.T, tc syncSettingsCase) {
 	t.Helper()
 	if tc.createTempFail {
 		tmpDir := t.TempDir()
-		p := New(tmpDir, tmpDir)
+		p := newDisabledProvisioner(t, tmpDir, tmpDir)
 		writeTestFile(t, filepath.Join(tmpDir, "blocker"), "file")
 		if err := p.writeAtomic(filepath.Join(tmpDir, "blocker", "sub", "test.txt"), "data"); err == nil {
 			t.Errorf("expected error when directory creation fails")
@@ -571,8 +575,8 @@ func runSyncSettingsCase(t *testing.T, tc syncSettingsCase) {
 	}
 
 	tmpHome := t.TempDir()
-	p := New(tmpHome, "")
-	p.SetOAuthTokenSourcePath(filepath.Join(tmpHome, "nonexistent-oauth-source"))
+	p := newDisabledProvisioner(t, tmpHome, "")
+	p.SetOAuthTokenSourcePath("")
 	configDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli")
 	settingsPath := filepath.Join(configDir, "settings.json")
 
@@ -866,7 +870,7 @@ func runAtomicSwapRulesCase(t *testing.T, tc atomicSwapRulesCase) {
 		}
 	}
 
-	p := New("", "")
+	p := newDisabledProvisioner(t, "", "")
 	err := p.atomicSwapRulesDir(rules, targetDir)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("atomicSwapRulesDir() error = %v, wantErr %v", err, tc.wantErr)
@@ -996,7 +1000,7 @@ func assertSyncRulesOutput(t *testing.T, tc syncRulesCase, p *Provisioner) {
 func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
 	t.Helper()
 	if tc.emptyHome {
-		p := New("", "")
+		p := newDisabledProvisioner(t, "", "")
 		if err := p.SyncRules(""); err != nil {
 			t.Fatalf("expected nil error on empty home: %v", err)
 		}
@@ -1009,7 +1013,7 @@ func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
 		"voice/01_rule.md":   "Voice content",
 	}, nil)
 	if tc.noDataDir {
-		np := New(t.TempDir(), "")
+		np := newDisabledProvisioner(t, t.TempDir(), "")
 		np.SetAerialRulesDir(p.aerialRulesDir)
 		np.SetConfigRulesDir(p.configRulesDir)
 		p = np
@@ -1116,7 +1120,7 @@ func TestClaudeTargetMcpAndSettingsProvisioning(t *testing.T) {
 			tmp := t.TempDir()
 			var p *Provisioner
 			if !tc.nilProv {
-				p = New(tmp, tmp)
+				p = newDisabledProvisioner(t, tmp, tmp)
 			}
 			targetDir := filepath.Join(tmp, ".claude")
 			if tc.emptyDir {
@@ -1235,7 +1239,7 @@ func TestCodexTargetMcpAndHooksProvisioning(t *testing.T) {
 			tmp := t.TempDir()
 			var p *Provisioner
 			if !tc.nilProv {
-				p = New(tmp, tmp)
+				p = newDisabledProvisioner(t, tmp, tmp)
 			}
 			targetDir := filepath.Join(tmp, ".codex")
 			if tc.emptyDir {
