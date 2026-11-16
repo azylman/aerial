@@ -593,7 +593,7 @@ func TestPostgresVanadisStore_ReserveChunkForLaunch(t *testing.T) {
 func TestPostgresVanadisStore_BuildCRUD(t *testing.T) {
 	t.Parallel()
 	b1 := VanadisBuild{ID: "b1", ThreadID: "th1", Title: "Build 1", Objective: "Obj 1"}
-	c1 := []VanadisChunk{{ID: "c1", BuildID: "b1", Repo: "aerial", Title: "Chunk 1", Instructions: "Inst 1"}}
+	c1 := []VanadisChunk{{ID: "c1", BuildID: "b1", Repo: "aerial", Title: "Chunk 1", Instructions: "Inst 1", DependsOn: []string{}}}
 
 	tests := []struct {
 		name      string
@@ -757,7 +757,7 @@ func TestPostgresVanadisStore_LookupsAndAppend(t *testing.T) {
 				if tc.name == "append chunks duplicate id" {
 					inputID = "c-dup"
 				}
-				_, err := store.AppendChunks(context.Background(), "b1", []CreateChunkInput{{ID: inputID, Mode: "action", Title: "New Chunk", Instructions: "Inst"}})
+				_, err := store.AppendChunks(context.Background(), "b1", []CreateChunkInput{{ID: inputID, Mode: "action", Title: "New Chunk", Instructions: "Inst", DependsOn: []string{}}})
 				assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
 			case "remove chunk success", "remove chunk only chunk", "remove chunk not found", "remove chunk build not running", "remove chunk not pending", "remove chunk begin error", "remove chunk commit error":
 				_, _, err := store.RemoveChunk(context.Background(), "b1", "c1")
