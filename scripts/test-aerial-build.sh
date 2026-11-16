@@ -131,6 +131,21 @@ echo "{not valid json" > "$BAD_JSON"
 INVALID_ERR="$("$AERIAL_BUILD" enqueue "$BAD_JSON" 2>&1 || true)"
 assert_contains "Invalid JSON in plan file" "$INVALID_ERR" "enqueue fails cleanly on invalid JSON"
 
+# Test 3b: Missing depends_on array error
+MISSING_DEPENDS_JSON="${TMP_DIR}/missing-depends.json"
+cat << 'EOF' > "$MISSING_DEPENDS_JSON"
+{
+  "repo": "aerial",
+  "tier": 2,
+  "objective": "Missing depends_on",
+  "chunks": [
+    {"title": "Chunk 1", "instructions": "Do chunk 1"}
+  ]
+}
+EOF
+MISSING_DEPENDS_ERR="$("$AERIAL_BUILD" enqueue "$MISSING_DEPENDS_JSON" 2>&1 || true)"
+assert_contains "must explicitly specify a depends_on array" "$MISSING_DEPENDS_ERR" "enqueue fails cleanly when chunk omits depends_on"
+
 # Test 4: Enqueue with automatic DISCORD_THREAD_ID injection and turn_action: end_turn
 PLAN_JSON="${TMP_DIR}/plan.json"
 cat << 'EOF' > "$PLAN_JSON"
@@ -139,7 +154,7 @@ cat << 'EOF' > "$PLAN_JSON"
   "tier": 2,
   "objective": "Implement Vanadis",
   "chunks": [
-    {"title": "Chunk 1", "instructions": "Do chunk 1"}
+    {"title": "Chunk 1", "instructions": "Do chunk 1", "depends_on": []}
   ]
 }
 EOF
