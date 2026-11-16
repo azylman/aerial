@@ -26,27 +26,6 @@ func (m *mockCloser) Close() error {
 	return m.err
 }
 
-type errResponseWriter struct {
-	header http.Header
-	status int
-	err    error
-}
-
-func (w *errResponseWriter) Header() http.Header {
-	if w.header == nil {
-		w.header = make(http.Header)
-	}
-	return w.header
-}
-
-func (w *errResponseWriter) WriteHeader(status int) {
-	w.status = status
-}
-
-func (w *errResponseWriter) Write([]byte) (int, error) {
-	return 0, w.err
-}
-
 func TestIsClientDisconnect_TableDriven(t *testing.T) {
 	t.Parallel()
 
@@ -116,27 +95,12 @@ func TestWriteResponse_TableDriven(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		errWriter  bool
-		errType    error
-		disconnect bool
+		name     string
+		payload  []byte
+		wantBody string
 	}{
-		{
-			name:      "normal successful write",
-			errWriter: false,
-		},
-		{
-			name:       "write error with client disconnect",
-			errWriter:  true,
-			errType:    syscall.EPIPE,
-			disconnect: true,
-		},
-		{
-			name:       "write error non-disconnect",
-			errWriter:  true,
-			errType:    errors.New("socket timeout"),
-			disconnect: false,
-		},
+		{name: "payload written verbatim", payload: []byte("payload"), wantBody: "payload"},
+		{name: "empty payload writes empty body", payload: []byte{}, wantBody: ""},
 	}
 
 	for _, tc := range tests {
@@ -144,22 +108,14 @@ func TestWriteResponse_TableDriven(t *testing.T) {
 			t.Parallel()
 
 			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-			var w http.ResponseWriter
-			if tc.errWriter {
-				w = &errResponseWriter{err: tc.errType}
-			} else {
-				w = httptest.NewRecorder()
-			}
+			rec := httptest.NewRecorder()
 
-			WriteResponse(w, req, "test-svc", []byte("payload"))
-			if !tc.errWriter {
-				rec, ok := w.(*httptest.ResponseRecorder)
-				if !ok {
-					t.Fatalf("writer is %T, want *httptest.ResponseRecorder", w)
-				}
-				if rec.Body.String() != "payload" {
-					t.Errorf("WriteResponse body = %q, want 'payload'", rec.Body.String())
-				}
+			WriteResponse(rec, req, "test-svc", tc.payload)
+			if rec.Code != http.StatusOK {
+				t.Errorf("WriteResponse code = %d, want %d", rec.Code, http.StatusOK)
+			}
+			if rec.Body.String() != tc.wantBody {
+				t.Errorf("WriteResponse body = %q, want %q", rec.Body.String(), tc.wantBody)
 			}
 		})
 	}

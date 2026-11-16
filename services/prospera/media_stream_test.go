@@ -349,20 +349,22 @@ func waitForHangupMark(t *testing.T, ws *websocket.Conn) bool {
 			t.Fatalf("reading from Twilio WS failed before hangup mark: %v", err)
 		}
 		var evt map[string]any
-		if err := json.Unmarshal(data, &evt); err == nil {
-			if evt["event"] == "media" {
-				receivedMedia = true
+		if err := json.Unmarshal(data, &evt); err != nil {
+			continue
+		}
+		if evt["event"] == "media" {
+			receivedMedia = true
+			if evt["streamSid"] != "MZ123" {
+				t.Errorf("outbound media frame streamSid = %v, want MZ123", evt["streamSid"])
 			}
-			if evt["event"] == "mark" {
-				if markObj, ok := evt["mark"].(map[string]any); ok && markObj["name"] == "hangup" {
-					_ = ws.WriteJSON(map[string]any{
-						"event":     "mark",
-						"streamSid": "MZ123",
-						"mark":      map[string]any{"name": "hangup"},
-					})
-					return receivedMedia
-				}
-			}
+		}
+		if markObj, ok := evt["mark"].(map[string]any); ok && evt["event"] == "mark" && markObj["name"] == "hangup" {
+			_ = ws.WriteJSON(map[string]any{
+				"event":     "mark",
+				"streamSid": "MZ123",
+				"mark":      map[string]any{"name": "hangup"},
+			})
+			return receivedMedia
 		}
 	}
 }
@@ -509,6 +511,9 @@ func TestCallSessionManager_SessionRegistryAndAccessors(t *testing.T) {
 	recNonWS := httptest.NewRecorder()
 	reqNonWS := httptest.NewRequest(http.MethodGet, "/twilio/media-stream?token="+validTok, http.NoBody)
 	sessionMgr.HandleMediaWebSocket(recNonWS, reqNonWS)
+	if recNonWS.Code != http.StatusBadRequest {
+		t.Errorf("HandleMediaWebSocket valid token without upgrade status = %d, want 400", recNonWS.Code)
+	}
 
 	sess := NewMediaStreamSession(MediaStreamSessionConfig{
 		CallID: "call-accessors",
@@ -516,12 +521,6 @@ func TestCallSessionManager_SessionRegistryAndAccessors(t *testing.T) {
 	sess.SetProviderCallSID("CA_test_sid")
 	if sess.ProviderCallSID() != "CA_test_sid" {
 		t.Errorf("ProviderCallSID = %q, want CA_test_sid", sess.ProviderCallSID())
-	}
-	sess.mu.Lock()
-	sess.streamSID = "MZ_test_sid"
-	sess.mu.Unlock()
-	if sess.StreamSID() != "MZ_test_sid" {
-		t.Errorf("StreamSID = %q, want MZ_test_sid", sess.StreamSID())
 	}
 
 	sessionMgr.registerSession("call-accessors", sess)
@@ -1193,12 +1192,6 @@ func (s *MediaStreamSession) SetProviderCallSID(sid string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.providerCallSID = sid
-}
-
-func (s *MediaStreamSession) StreamSID() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.streamSID
 }
 
 func TestMediaStreamSession_DisconnectedAMDActions(t *testing.T) {

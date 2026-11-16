@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -64,28 +66,6 @@ func (w *mockHTTPResponseWriter) Write(b []byte) (int, error) {
 func (w *mockHTTPResponseWriter) WriteHeader(statusCode int) {
 	w.code = statusCode
 }
-
-type flusherErrWriter struct {
-	header http.Header
-	code   int
-}
-
-func (e *flusherErrWriter) Header() http.Header {
-	if e.header == nil {
-		e.header = make(http.Header)
-	}
-	return e.header
-}
-
-func (*flusherErrWriter) Write(p []byte) (int, error) {
-	return 0, errors.New("simulated write error")
-}
-
-func (e *flusherErrWriter) WriteHeader(statusCode int) {
-	e.code = statusCode
-}
-
-func (*flusherErrWriter) Flush() {}
 
 func TestHandleVoiceAsk_Validation(t *testing.T) {
 	store := dbtest.NewFakeStore()
@@ -221,6 +201,8 @@ func runVoiceAskSSESentenceStreaming(t *testing.T) {
 
 func runVoiceAskSSEErrors(t *testing.T) {
 	t.Helper()
+	jsonErrBefore := voiceTTFRSampleCount(t, "json", "error")
+	sseErrBefore := voiceTTFRSampleCount(t, "sse", "error")
 	hErr, stop := newVoiceHandler(queue.WorkerPoolConfig{
 		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
 			return "", "", errors.New("deliberation timed out")
@@ -241,16 +223,30 @@ func runVoiceAskSSEErrors(t *testing.T) {
 		t.Errorf("expected 200 SSE error for nil pool, got %d: %s", w.Code, w.Body.String())
 	}
 
-	mRec := httptest.NewRecorder()
-	metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
-	for _, metric := range []string{
-		`aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="error"`,
-		`aerial_brain_voice_ttfr_duration_seconds_bucket{mode="json",status="error"`,
-	} {
-		if !strings.Contains(mRec.Body.String(), metric) {
-			t.Errorf("missing metric %q", metric)
-		}
+	if got := voiceTTFRSampleCount(t, "json", "error") - jsonErrBefore; got != 2 {
+		t.Errorf("json/error voice TTFR samples delta = %d, want 2", got)
 	}
+	if got := voiceTTFRSampleCount(t, "sse", "error") - sseErrBefore; got != 1 {
+		t.Errorf("sse/error voice TTFR samples delta = %d, want 1", got)
+	}
+}
+
+// voiceTTFRSampleCount reads the observation count of one voice TTFR histogram series.
+func voiceTTFRSampleCount(t *testing.T, mode, status string) uint64 {
+	t.Helper()
+	obs, err := metrics.VoiceTTFRDurationSeconds.GetMetricWithLabelValues(mode, status)
+	if err != nil {
+		t.Fatalf("voice TTFR series %s/%s: %v", mode, status, err)
+	}
+	hist, ok := obs.(prometheus.Metric)
+	if !ok {
+		t.Fatalf("voice TTFR observer is %T, want prometheus.Metric", obs)
+	}
+	m := &dto.Metric{}
+	if err := hist.Write(m); err != nil {
+		t.Fatalf("write voice TTFR series %s/%s: %v", mode, status, err)
+	}
+	return m.GetHistogram().GetSampleCount()
 }
 
 func TestHandleVoiceAsk_SSE(t *testing.T) {
@@ -277,7 +273,11 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`)).WithContext(ctx)
 		req.Header.Set("Accept", "text/event-stream")
-		handler(httptest.NewRecorder(), req)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if body := rec.Body.String(); body != "" {
+			t.Errorf("expected no SSE events after client cancel, got %q", body)
+		}
 	})
 
 	t.Run("VoiceRunnerError", func(t *testing.T) {
@@ -292,19 +292,6 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 		if !strings.Contains(w.Body.String(), "event: error") {
 			t.Errorf("expected SSE error event, got %q", w.Body.String())
 		}
-	})
-
-	t.Run("WriteError", func(t *testing.T) {
-		handler, stop := newVoiceHandler(queue.WorkerPoolConfig{
-			VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				return "done", "sess-1", nil
-			},
-		})
-		defer stop()
-
-		req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
-		req.Header.Set("Accept", "text/event-stream")
-		handler(&flusherErrWriter{}, req)
 	})
 
 	t.Run("JSON_Success", func(t *testing.T) {
@@ -537,6 +524,7 @@ type gitHubProxyCase struct {
 	wantAuth   string
 	wantPath   string
 	wantQuery  string
+	reqHeaders []string
 }
 
 func runGitHubProxyTests(t *testing.T, handlerMaker func(*config.Config) http.HandlerFunc, tests []gitHubProxyCase, capturedAuth, capturedPath, capturedQuery *string) {
@@ -545,7 +533,7 @@ func runGitHubProxyTests(t *testing.T, handlerMaker func(*config.Config) http.Ha
 		t.Run(tc.name, func(t *testing.T) {
 			*capturedAuth, *capturedPath, *capturedQuery = "", "", ""
 			h := handlerMaker(tc.cfg)
-			w := runHTTP(h, http.MethodGet, tc.path, nil)
+			w := runHTTP(h, http.MethodGet, tc.path, nil, tc.reqHeaders...)
 			if w.Code != tc.wantStatus {
 				t.Fatalf("got status=%d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
 			}
@@ -573,7 +561,7 @@ func TestHandleInternalGitHubAPIProxy(t *testing.T) {
 		capturedQuery = r.URL.RawQuery
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		_, _ = fmt.Fprintf(w, `{"status":"ok","api_version":%q}`, r.Header.Get("X-Github-Api-Version"))
 	}))
 	defer mockAPI.Close()
 
@@ -599,6 +587,16 @@ func TestHandleInternalGitHubAPIProxy(t *testing.T) {
 			wantAuth:   "token ghp_mockpat12345",
 			wantPath:   "/repos/org/repo/pulls",
 			wantQuery:  "state=open",
+		},
+		{
+			name:       "client auth replaced by PAT while other headers forward",
+			cfg:        cfgWithPAT,
+			path:       "/internal/github-api/user",
+			wantStatus: http.StatusOK,
+			wantSubstr: `"api_version":"2022-11-28"`,
+			wantAuth:   "token ghp_mockpat12345",
+			wantPath:   "/user",
+			reqHeaders: []string{"Authorization", "token client-supplied", "X-Github-Api-Version", "2022-11-28"},
 		},
 	}
 
