@@ -580,7 +580,9 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 	query := `
 		SELECT id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, COALESCE(metadata, '{}'::jsonb)
 		FROM pr_registry
-		WHERE status = 'deploying' OR (status IN ('merged', 'synced') AND CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN jsonb_array_length(metadata->'jobs') ELSE 0 END > 0)
+		WHERE status = 'deploying'
+		   OR (status = 'deploy_failed' AND CASE WHEN jsonb_typeof(metadata->'kustomization_requests') = 'object' THEN metadata->'kustomization_requests' <> '{}'::jsonb ELSE false END)
+		   OR (status IN ('merged', 'synced') AND CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN jsonb_array_length(metadata->'jobs') ELSE 0 END > 0)
 		ORDER BY id ASC;`
 	rows, err := r.pool.Query(qCtx, query)
 	if err != nil {
@@ -673,7 +675,7 @@ func (r *PostgresPRRegistry) RecordKustomizationRequests(ctx context.Context, re
 }
 
 // MarkKustomizationsDeployed unions names (those recorded in kustomization_requests) into
-// deployed_kustomizations of a deploying PR and flips it to deployed once every recorded Kustomization
+// deployed_kustomizations of a deploying or tracked failed PR and flips it to deployed once every recorded Kustomization
 // is present. The row lock taken by FOR UPDATE serializes concurrent callers on the latest row version,
 // so exactly one caller observes the transition and gets true.
 func (r *PostgresPRRegistry) MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (bool, error) {
@@ -686,7 +688,8 @@ func (r *PostgresPRRegistry) MarkKustomizationsDeployed(ctx context.Context, rep
 		WITH cur AS (
 			SELECT id, metadata AS meta
 			FROM pr_registry
-			WHERE repo = $1 AND pr_number = $2 AND status = 'deploying'
+			WHERE repo = $1 AND pr_number = $2 AND status IN ('deploying', 'deploy_failed')
+			  AND metadata->'kustomization_requests' <> '{}'::jsonb
 			  AND jsonb_typeof(metadata->'` + kustomizationRequestsKey + `') = 'object'
 			FOR UPDATE
 		), next AS (
@@ -698,15 +701,19 @@ func (r *PostgresPRRegistry) MarkKustomizationsDeployed(ctx context.Context, rep
 				) AS elem
 			) AS deployed
 			FROM cur
+		), completed AS (
+			SELECT id, meta, deployed,
+			    NOT EXISTS (SELECT 1 FROM jsonb_object_keys(meta->'` + kustomizationRequestsKey + `') AS k WHERE NOT deployed ? k) AS done
+			FROM next
 		)
 		UPDATE pr_registry p
-		SET metadata = jsonb_set(n.meta, '{` + deployedKustomizationsKey + `}', n.deployed, true),
+		SET metadata = jsonb_set(CASE WHEN n.done THEN n.meta - 'banner' - 'deploy_failed_published' ELSE n.meta END, '{` + deployedKustomizationsKey + `}', n.deployed, true),
 		    status = CASE
-		        WHEN NOT EXISTS (SELECT 1 FROM jsonb_object_keys(n.meta->'` + kustomizationRequestsKey + `') AS k WHERE NOT n.deployed ? k) THEN 'deployed'
+		        WHEN n.done THEN 'deployed'
 		        ELSE p.status
 		    END,
 		    updated_at = CURRENT_TIMESTAMP
-		FROM next n
+		FROM completed n
 		WHERE p.id = n.id
 		RETURNING p.status = 'deployed';`
 	var transitioned bool
