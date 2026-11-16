@@ -121,8 +121,8 @@ func TestWorkflowExecutionHelpers(t *testing.T) {
 	store := newMemoryVanadisStore()
 	b := VanadisBuild{ID: "b-wf", ThreadID: "th-1", Objective: "test wf"}
 	chunks := []VanadisChunk{
-		{ID: "c1", BuildID: "b-wf", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "c1", Instructions: "do c1"},
-		{ID: "c2", BuildID: "b-wf", ChunkIndex: 1, Mode: "action", Title: "c2", Instructions: "do c2"},
+		{ID: "c1", BuildID: "b-wf", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "c1", Instructions: "do c1", DependsOn: []string{}},
+		{ID: "c2", BuildID: "b-wf", ChunkIndex: 1, Mode: "action", Title: "c2", Instructions: "do c2", DependsOn: []string{"c1"}},
 	}
 	require.NoError(t, store.CreateBuild(ctx, b, chunks))
 
@@ -189,9 +189,9 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	store := newMemoryVanadisStore()
 	b := VanadisBuild{ID: "b-restate", ThreadID: "123456789012345678", Objective: "test ingress", Status: "running"}
 	chunks := []VanadisChunk{
-		{ID: "c1", BuildID: "b-restate", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "c1", Instructions: "do c1", Status: "pr_opened", PRNumber: 42},
-		{ID: "c2", BuildID: "b-restate", ChunkIndex: 1, Mode: "action", Title: "c2", Instructions: "do c2", Status: "completed"},
-		{ID: "c3", BuildID: "b-restate", ChunkIndex: 2, Mode: "action", Title: "c3", Instructions: "do c3", Status: "failed"},
+		{ID: "c1", BuildID: "b-restate", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "c1", Instructions: "do c1", Status: "pr_opened", PRNumber: 42, DependsOn: []string{}},
+		{ID: "c2", BuildID: "b-restate", ChunkIndex: 1, Mode: "action", Title: "c2", Instructions: "do c2", Status: "completed", DependsOn: []string{"c1"}},
+		{ID: "c3", BuildID: "b-restate", ChunkIndex: 2, Mode: "action", Title: "c3", Instructions: "do c3", Status: "failed", DependsOn: []string{"c2"}},
 	}
 	require.NoError(t, store.CreateBuild(ctx, b, chunks))
 
@@ -223,7 +223,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 	}
 	bAct := VanadisBuild{ID: "b-act-single", ThreadID: "123456789012345678", Objective: "test act wake", Status: "running"}
 	cAct := []VanadisChunk{
-		{ID: "c-act-single", BuildID: "b-act-single", ChunkIndex: 0, Mode: "action", Title: "act 1", Status: "running"},
+		{ID: "c-act-single", BuildID: "b-act-single", ChunkIndex: 0, Mode: "action", Title: "act 1", Status: "running", DependsOn: []string{}},
 	}
 	require.NoError(t, store.CreateBuild(ctx, bAct, cAct))
 	require.NoError(t, srvWake.handleCompletedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
@@ -244,7 +244,7 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 
 	bRetry := VanadisBuild{ID: "b-act-retry", ThreadID: "123456789012345678", Objective: "test act retry", Status: "running"}
 	cRetry := []VanadisChunk{
-		{ID: "c-act-retry-1", BuildID: "b-act-retry", ChunkIndex: 0, Mode: "action", Title: "act 1", Status: "running"},
+		{ID: "c-act-retry-1", BuildID: "b-act-retry", ChunkIndex: 0, Mode: "action", Title: "act 1", Status: "running", DependsOn: []string{}},
 	}
 	require.NoError(t, store.CreateBuild(ctx, bRetry, cRetry))
 	srv500Wake := &VanadisServer{
@@ -267,8 +267,8 @@ func TestRestateIngressClientHelpers(t *testing.T) {
 
 	bMulti := VanadisBuild{ID: "b-act-multi", ThreadID: "123456789012345678", Objective: "test act multi wake", Status: "running"}
 	cMulti := []VanadisChunk{
-		{ID: "c-act-m0", BuildID: "b-act-multi", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "m0 pr", Status: "completed", PRNumber: 99},
-		{ID: "c-act-m1", BuildID: "b-act-multi", ChunkIndex: 1, Mode: "action", Title: "m1 act", Status: "running"},
+		{ID: "c-act-m0", BuildID: "b-act-multi", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "m0 pr", Status: "completed", PRNumber: 99, DependsOn: []string{}},
+		{ID: "c-act-m1", BuildID: "b-act-multi", ChunkIndex: 1, Mode: "action", Title: "m1 act", Status: "running", DependsOn: []string{"c-act-m0"}},
 	}
 	require.NoError(t, store.CreateBuild(ctx, bMulti, cMulti))
 	require.NoError(t, srvWake.handleCompletedDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{
@@ -318,7 +318,7 @@ func TestRestateLaunchCreatedBuild_LocalAndActionPR(t *testing.T) {
 	t.Cleanup(func() { _ = memBus.Close() })
 	bLocalLaunch := VanadisBuild{ID: "b-local-launch", ThreadID: "123456789012345678", Objective: "test local launch", Status: "pending"}
 	cLocalLaunch := []VanadisChunk{
-		{ID: "c-ll-0", BuildID: "b-local-launch", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "PR 0", Instructions: "do", Status: "pending"},
+		{ID: "c-ll-0", BuildID: "b-local-launch", ChunkIndex: 0, Mode: "pr", Repo: "azylman/aerial", Title: "PR 0", Instructions: "do", Status: "pending", DependsOn: []string{}},
 	}
 	require.NoError(t, store.CreateBuild(ctx, bLocalLaunch, cLocalLaunch))
 	published := make(chan ExecuteChunkArgs, 1)
@@ -511,7 +511,7 @@ func TestExecuteReconcileBuild_Execution(t *testing.T) {
 	// 2. Initial creation launch on "created"
 	bCreate := VanadisBuild{ID: "b-create", ThreadID: "th-1", Objective: "test create", Status: "pending"}
 	cCreate := []VanadisChunk{
-		{ID: "c0", BuildID: "b-create", ChunkIndex: 0, Mode: "pr", Status: "running"},
+		{ID: "c0", BuildID: "b-create", ChunkIndex: 0, Mode: "pr", Status: "running", DependsOn: []string{}},
 		{ID: "c1", BuildID: "b-create", ChunkIndex: 1, Mode: "pr", Status: "pending", DependsOn: []string{"c0"}},
 	}
 	require.NoError(t, memStore.CreateBuild(ctx, bCreate, cCreate))
@@ -566,7 +566,7 @@ func TestExecuteReconcileBuild_EdgeCasesAndFailures(t *testing.T) {
 	// 5. Action chunk dependency: dependent chunk only unblocks on action chunk completed
 	bAction := VanadisBuild{ID: "b-action", ThreadID: "th-act", Objective: "test action", Status: "running"}
 	cAction := []VanadisChunk{
-		{ID: "ca0", BuildID: "b-action", ChunkIndex: 0, Mode: "action", Status: "merged"},
+		{ID: "ca0", BuildID: "b-action", ChunkIndex: 0, Mode: "action", Status: "merged", DependsOn: []string{}},
 		{ID: "ca1", BuildID: "b-action", ChunkIndex: 1, Mode: "pr", Status: "pending", DependsOn: []string{"ca0"}},
 	}
 	require.NoError(t, memStore.CreateBuild(ctx, bAction, cAction))
@@ -584,7 +584,7 @@ func TestExecuteReconcileBuild_EdgeCasesAndFailures(t *testing.T) {
 	// 6. Chunk failure terminates build with failed status, dispatches fail wake
 	bFail := VanadisBuild{ID: "b-fail-rec", ThreadID: "th-fail", Objective: "test fail", Status: "running"}
 	cFail := []VanadisChunk{
-		{ID: "cf0", BuildID: "b-fail-rec", ChunkIndex: 0, Mode: "pr", Status: "failed"},
+		{ID: "cf0", BuildID: "b-fail-rec", ChunkIndex: 0, Mode: "pr", Status: "failed", DependsOn: []string{}},
 	}
 	require.NoError(t, memStore.CreateBuild(ctx, bFail, cFail))
 	resFail, err := executeReconcileBuild(ctx, srv, "b-fail-rec", nil)
@@ -604,7 +604,7 @@ func TestExecuteReconcileBuild_EdgeCasesAndFailures(t *testing.T) {
 
 	// 7b. Pending build status update failure
 	bPendingErr := VanadisBuild{ID: "b-pending-err", Status: "pending"}
-	cPendingErr := []VanadisChunk{{ID: "c-pe0", BuildID: "b-pending-err", ChunkIndex: 0, Mode: "pr", Status: "pending"}}
+	cPendingErr := []VanadisChunk{{ID: "c-pe0", BuildID: "b-pending-err", ChunkIndex: 0, Mode: "pr", Status: "pending", DependsOn: []string{}}}
 	require.NoError(t, memStore.CreateBuild(ctx, bPendingErr, cPendingErr))
 	memStore.updateBuildErr = errors.New("cannot update build to running")
 	_, errPendingFail := executeReconcileBuild(ctx, srv, "b-pending-err", nil)
@@ -613,7 +613,7 @@ func TestExecuteReconcileBuild_EdgeCasesAndFailures(t *testing.T) {
 
 	// 7c. Complete build update failure
 	bCompErr := VanadisBuild{ID: "b-comp-err", Status: "running"}
-	cCompErr := []VanadisChunk{{ID: "cce0", BuildID: "b-comp-err", ChunkIndex: 0, Mode: "action", Status: "completed"}}
+	cCompErr := []VanadisChunk{{ID: "cce0", BuildID: "b-comp-err", ChunkIndex: 0, Mode: "action", Status: "completed", DependsOn: []string{}}}
 	require.NoError(t, memStore.CreateBuild(ctx, bCompErr, cCompErr))
 	memStore.updateBuildErr = errors.New("cannot complete build")
 	_, errCompFail := executeReconcileBuild(ctx, srv, "b-comp-err", nil)
@@ -623,7 +623,7 @@ func TestExecuteReconcileBuild_EdgeCasesAndFailures(t *testing.T) {
 	// 8. Launch chunk error branch in launchReconcileEligibleChunks
 	bLaunchErr := VanadisBuild{ID: "b-launch-err", ThreadID: "th-launch", Objective: "launch err", Status: "running"}
 	cLaunchErr := []VanadisChunk{
-		{ID: "cle0", BuildID: "b-launch-err", ChunkIndex: 0, Mode: "pr", Status: "pending"},
+		{ID: "cle0", BuildID: "b-launch-err", ChunkIndex: 0, Mode: "pr", Status: "pending", DependsOn: []string{}},
 	}
 	require.NoError(t, memStore.CreateBuild(ctx, bLaunchErr, cLaunchErr))
 	srvNoBus := &VanadisServer{store: memStore, bus: nil}
@@ -632,7 +632,7 @@ func TestExecuteReconcileBuild_EdgeCasesAndFailures(t *testing.T) {
 
 	// 9. Fail build dispatch error and update status error branches
 	bDispatchErr := VanadisBuild{ID: "b-disp-err", ThreadID: "th-disp-err", Objective: "obj", Status: "running"}
-	cDispatchErr := []VanadisChunk{{ID: "c-de0", BuildID: "b-disp-err", ChunkIndex: 0, Mode: "pr", Status: "failed"}}
+	cDispatchErr := []VanadisChunk{{ID: "c-de0", BuildID: "b-disp-err", ChunkIndex: 0, Mode: "pr", Status: "failed", DependsOn: []string{}}}
 	require.NoError(t, memStore.CreateBuild(ctx, bDispatchErr, cDispatchErr))
 	srvErrBrain := &VanadisServer{
 		cfg:   Config{BrainURL: "http://127.0.0.1:99999"}, // invalid brain port to trigger dErr != nil
@@ -647,7 +647,7 @@ func TestExecuteReconcileBuild_EdgeCasesAndFailures(t *testing.T) {
 
 	// 10. Chunk failure in executeReconcileBuild with executeFailBuild error
 	bFailReconcileErr := VanadisBuild{ID: "b-fail-rec-err", Status: "running"}
-	cFailReconcileErr := []VanadisChunk{{ID: "c-fre0", BuildID: "b-fail-rec-err", Mode: "pr", Status: "failed"}}
+	cFailReconcileErr := []VanadisChunk{{ID: "c-fre0", BuildID: "b-fail-rec-err", Mode: "pr", Status: "failed", DependsOn: []string{}}}
 	require.NoError(t, memStore.CreateBuild(ctx, bFailReconcileErr, cFailReconcileErr))
 	memStore.updateBuildErr = errors.New("cannot update build to failed")
 	_, errRecFailBuild := executeReconcileBuild(ctx, srv, "b-fail-rec-err", nil)
@@ -667,7 +667,7 @@ func TestExecuteBuildMutationAndReconcile(t *testing.T) {
 	// 1. Initial Reconcile without prior state
 	b1 := VanadisBuild{ID: "b-bo-1", ThreadID: "th-bo-1", Objective: "test bo", Status: "pending"}
 	c1 := []VanadisChunk{
-		{ID: "c-bo-0", BuildID: "b-bo-1", ChunkIndex: 0, Mode: "pr", Status: "running"},
+		{ID: "c-bo-0", BuildID: "b-bo-1", ChunkIndex: 0, Mode: "pr", Status: "running", DependsOn: []string{}},
 		{ID: "c-bo-1", BuildID: "b-bo-1", ChunkIndex: 1, Mode: "pr", Status: "pending", DependsOn: []string{"c-bo-0"}},
 	}
 	require.NoError(t, memStore.CreateBuild(ctx, b1, c1))
@@ -706,7 +706,7 @@ func TestExecuteBuildMutationAndReconcile(t *testing.T) {
 	// 4. Mutate: chunk_failed
 	bFail := VanadisBuild{ID: "b-bo-fail", Status: "running"}
 	cFail := []VanadisChunk{
-		{ID: "c-fail-0", BuildID: "b-bo-fail", ChunkIndex: 0, Mode: "pr", Status: "running"},
+		{ID: "c-fail-0", BuildID: "b-bo-fail", ChunkIndex: 0, Mode: "pr", Status: "running", DependsOn: []string{}},
 	}
 	require.NoError(t, memStore.CreateBuild(ctx, bFail, cFail))
 	errFail := executeBuildMutation(ctx, srv, "b-bo-fail", BuildMutationRequest{
@@ -723,7 +723,7 @@ func TestExecuteBuildMutationAndReconcile(t *testing.T) {
 	// 5. Mutate: cancelled
 	bCancel := VanadisBuild{ID: "b-bo-cancel", Status: "running"}
 	cCancel := []VanadisChunk{
-		{ID: "c-cancel-0", BuildID: "b-bo-cancel", ChunkIndex: 0, Mode: "pr", Status: "running"},
+		{ID: "c-cancel-0", BuildID: "b-bo-cancel", ChunkIndex: 0, Mode: "pr", Status: "running", DependsOn: []string{}},
 	}
 	require.NoError(t, memStore.CreateBuild(ctx, bCancel, cCancel))
 	errCancel := executeBuildMutation(ctx, srv, "b-bo-cancel", BuildMutationRequest{
@@ -867,7 +867,7 @@ func TestReconcileBuild(t *testing.T) {
 		restateCfg: RestateConfig{RestateIngressURL: ""},
 	}
 	bLocal := VanadisBuild{ID: "b-local", Status: "running"}
-	cLocal := []VanadisChunk{{ID: "cl0", BuildID: "b-local", ChunkIndex: 0, Mode: "action", Status: "completed"}}
+	cLocal := []VanadisChunk{{ID: "cl0", BuildID: "b-local", ChunkIndex: 0, Mode: "action", Status: "completed", DependsOn: []string{}}}
 	require.NoError(t, memStore.CreateBuild(ctx, bLocal, cLocal))
 	require.NoError(t, srvLocal.reconcileBuild(ctx, "b-local", "deploy_success"))
 	bFinished, _, err := memStore.GetBuild(ctx, "b-local")
@@ -935,7 +935,7 @@ func TestRestateBuildTransitionHandler(t *testing.T) {
 			setupStore: func(s *memoryVanadisStore) {
 				b := VanadisBuild{ID: "b-trans-1", Status: "running"}
 				chunks := []VanadisChunk{
-					{ID: "c-t1", BuildID: "b-trans-1", ChunkIndex: 0, Mode: "action", Status: "completed"},
+					{ID: "c-t1", BuildID: "b-trans-1", ChunkIndex: 0, Mode: "action", Status: "completed", DependsOn: []string{}},
 				}
 				_ = s.CreateBuild(ctx, b, chunks)
 			},
@@ -949,7 +949,7 @@ func TestRestateBuildTransitionHandler(t *testing.T) {
 			setupStore: func(s *memoryVanadisStore) {
 				b := VanadisBuild{ID: "b-trans-2", Status: "running"}
 				chunks := []VanadisChunk{
-					{ID: "c-t2", BuildID: "b-trans-2", ChunkIndex: 0, Mode: "action", Status: "running"},
+					{ID: "c-t2", BuildID: "b-trans-2", ChunkIndex: 0, Mode: "action", Status: "running", DependsOn: []string{}},
 				}
 				_ = s.CreateBuild(ctx, b, chunks)
 			},
@@ -1001,7 +1001,7 @@ func TestRestateBuildTransitionHandler(t *testing.T) {
 			path: "/internal/restate/builds/b-trans-8/transition",
 			setupStore: func(s *memoryVanadisStore) {
 				b := VanadisBuild{ID: "b-trans-8", Status: "running"}
-				chunks := []VanadisChunk{{ID: "c-t8", BuildID: "b-trans-8", ChunkIndex: 0, Mode: "pr", Status: "running"}}
+				chunks := []VanadisChunk{{ID: "c-t8", BuildID: "b-trans-8", ChunkIndex: 0, Mode: "pr", Status: "running", DependsOn: []string{}}}
 				_ = s.CreateBuild(ctx, b, chunks)
 				s.updateChunkErr = errors.New("db write failed")
 			},
@@ -1082,7 +1082,7 @@ func TestActionCompletionMutationIdentity(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			store := newMemoryVanadisStore()
-			require.NoError(t, store.CreateBuild(ctx, VanadisBuild{ID: "b1", ThreadID: "thread1", Status: tc.buildStatus, Quiet: tc.quiet}, []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: tc.chunkStatus, StallNudges: tc.generation}}))
+			require.NoError(t, store.CreateBuild(ctx, VanadisBuild{ID: "b1", ThreadID: "thread1", Status: tc.buildStatus, Quiet: tc.quiet}, []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: tc.chunkStatus, StallNudges: tc.generation, DependsOn: []string{}}}))
 			brain := newDispatchBrainServer(t)
 			srv := &VanadisServer{store: store, cfg: Config{BrainURL: brain.URL}, httpClient: brain.Client()}
 			err := executeBuildMutation(ctx, srv, tc.buildID, BuildMutationRequest{Action: tc.action, ChunkID: "c1", DispatchID: tc.dispatchID})
@@ -1102,7 +1102,7 @@ func TestActionCompletionMutationIdentity(t *testing.T) {
 
 func TestExecuteLaunchChunk_Errors(t *testing.T) {
 	t.Parallel()
-	retry := VanadisChunk{ID: "c", BuildID: "b", Mode: "action", Status: "running", StallNudges: 1, ChunkIndex: 1}
+	retry := VanadisChunk{ID: "c", BuildID: "b", Mode: "action", Status: "running", StallNudges: 1, ChunkIndex: 1, DependsOn: []string{}}
 	accepted := ExecuteChunkArgs{BuildID: "b", ChunkID: "c", ChunkIndex: 1, DispatchID: "vanadis-c-turn-1"}
 	tests := []struct {
 		name       string
@@ -1115,9 +1115,9 @@ func TestExecuteLaunchChunk_Errors(t *testing.T) {
 	}{
 		{name: "reserved retry recovers old map", chunks: []VanadisChunk{retry}, prior: map[string]bool{"c": true}, want: []ExecuteChunkArgs{accepted}},
 		{name: "running retry occupies one slot before pending siblings", chunks: []VanadisChunk{
-			{ID: "sibling", BuildID: "b", Mode: "action", Status: "pending"},
-			{ID: "a", BuildID: "b", Mode: "pr", Status: "running", PRNumber: 1},
-			{ID: "d", BuildID: "b", Mode: "pr", Status: "running", PRNumber: 2},
+			{ID: "sibling", BuildID: "b", Mode: "action", Status: "pending", DependsOn: []string{}},
+			{ID: "a", BuildID: "b", Mode: "pr", Repo: "aerial", TargetFiles: []string{"a.go"}, Status: "running", PRNumber: 1, DependsOn: []string{}},
+			{ID: "d", BuildID: "b", Mode: "pr", Repo: "mirrormere", TargetFiles: []string{"b.go"}, Status: "running", PRNumber: 2, DependsOn: []string{}},
 			retry,
 		}, want: []ExecuteChunkArgs{accepted, {BuildID: "b", ChunkID: "sibling"}}},
 		{name: "accepted generation not republished", chunks: []VanadisChunk{retry}, prior: map[string]bool{"dispatch:vanadis-c-turn-1": true}},
@@ -1170,7 +1170,7 @@ func TestReconcileRetryAcknowledgementCollision(t *testing.T) {
 			ctx := context.Background()
 			store := newMemoryVanadisStore()
 			chunks := []VanadisChunk{
-				{ID: "c", BuildID: "b", Mode: "action", Status: "running", StallNudges: 1},
+				{ID: "c", BuildID: "b", Mode: "action", Status: "running", StallNudges: 1, DependsOn: []string{}},
 				{ID: "vanadis-c-turn-1", BuildID: "b", ChunkIndex: 1, Mode: "action", Status: "pending", DependsOn: []string{"c"}},
 			}
 			require.True(t, isValidVanadisChunkID("vanadis-c-turn-1"))

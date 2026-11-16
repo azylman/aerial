@@ -621,7 +621,7 @@ func TestPostgresVanadisStore_UpdateBuild(t *testing.T) {
 func pendingChunks(statuses ...string) []VanadisChunk {
 	chunks := make([]VanadisChunk, 0, len(statuses))
 	for i, status := range statuses {
-		chunks = append(chunks, VanadisChunk{ID: "c" + string(rune('1'+i)), ChunkIndex: i, Status: status})
+		chunks = append(chunks, VanadisChunk{ID: "c" + string(rune('1'+i)), ChunkIndex: i, Status: status, DependsOn: []string{}})
 	}
 	return chunks
 }
@@ -638,7 +638,7 @@ func TestPostgresVanadisStore_UpdateChunk(t *testing.T) {
 	title := UpdateChunkRequest{Title: "T"}
 	running := buildRow("b1", "running")
 	pendingC1 := pendingChunks("pending")
-	actionC1 := []VanadisChunk{{ID: "c1", Mode: "action", Status: "pending"}}
+	actionC1 := []VanadisChunk{{ID: "c1", Mode: "action", Status: "pending", DependsOn: []string{}}}
 	tests := []struct {
 		name      string
 		buildID   string
@@ -668,12 +668,12 @@ func TestPostgresVanadisStore_UpdateChunk(t *testing.T) {
 		{name: "exec_error_with_rollback_err", buildID: "b1", chunkRef: "c1", req: title, db: dbScript{row: running, chunks: pendingC1, execErr: errors.New("exec err"), rollbackErr: errors.New("rb err")}, wantErr: true},
 		{name: "commit_error", buildID: "b1", chunkRef: "c1", req: title, db: dbScript{row: running, chunks: pendingC1, commitErr: errors.New("commit err")}, wantErr: true},
 		{name: "pr_mode_empty_repo", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Mode: &modePR}, db: dbScript{row: running, chunks: actionC1}, wantErrIs: ErrInvalidBuildInput},
-		{name: "action_mode_with_repo", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Mode: &modeAction, Repo: "aerial"}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Mode: "pr", Repo: "aerial", Status: "pending"}}}, wantErrIs: ErrInvalidBuildInput},
+		{name: "action_mode_with_repo", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Mode: &modeAction, Repo: "aerial"}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Mode: "pr", Repo: "aerial", Status: "pending", DependsOn: []string{}}}}, wantErrIs: ErrInvalidBuildInput},
 		{name: "action_mode_with_files", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{TargetFiles: []string{"a.go"}}, db: dbScript{row: running, chunks: actionC1}, wantErrIs: ErrInvalidBuildInput},
 		{name: "action_mode_with_symbols", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{TargetSymbols: []string{"A"}}, db: dbScript{row: running, chunks: actionC1}, wantErrIs: ErrInvalidBuildInput},
-		{name: "dag_cycle_error", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{DependsOn: &[]string{"c2"}}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Mode: "action", Status: "pending"}, {ID: "c2", Mode: "action", DependsOn: []string{"c1"}, Status: "pending"}}}, wantErr: true},
-		{name: "transition_pr_to_action_mode_clears_repo_files_symbols", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Mode: &modeAction}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Mode: "pr", Repo: "aerial", TargetFiles: []string{"a.go"}, TargetSymbols: []string{"A"}, Status: "pending"}}}, want: updatedChunkView{Mode: "action"}},
-		{name: "success", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Repo: "mirrormere", Title: "New Title", Instructions: "New Instr", Effort: "low", TargetFiles: []string{"a.go"}, TargetSymbols: []string{"A"}}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Mode: "pr", Repo: "aerial", Status: "pending"}}}, want: updatedChunkView{Mode: "pr", Repo: "mirrormere", Title: "New Title", Files: 1, Symbols: 1}},
+		{name: "dag_cycle_error", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{DependsOn: &[]string{"c2"}}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Mode: "action", Status: "pending", DependsOn: []string{}}, {ID: "c2", Mode: "action", DependsOn: []string{"c1"}, Status: "pending"}}}, wantErr: true},
+		{name: "transition_pr_to_action_mode_clears_repo_files_symbols", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Mode: &modeAction}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Mode: "pr", Repo: "aerial", TargetFiles: []string{"a.go"}, TargetSymbols: []string{"A"}, Status: "pending", DependsOn: []string{}}}}, want: updatedChunkView{Mode: "action"}},
+		{name: "success", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Repo: "mirrormere", Title: "New Title", Instructions: "New Instr", Effort: "low", TargetFiles: []string{"a.go"}, TargetSymbols: []string{"A"}}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Mode: "pr", Repo: "aerial", Status: "pending", DependsOn: []string{}}}}, want: updatedChunkView{Mode: "pr", Repo: "mirrormere", Title: "New Title", Files: 1, Symbols: 1}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -693,7 +693,7 @@ func TestPostgresVanadisStore_UpdateChunk(t *testing.T) {
 
 // chunkInput is a one-line CreateChunkInput fixture.
 func chunkInput(id, mode, repo, title, instructions string) CreateChunkInput {
-	return CreateChunkInput{ID: id, Mode: mode, Repo: repo, Title: title, Instructions: instructions}
+	return CreateChunkInput{ID: id, Mode: mode, Repo: repo, Title: title, Instructions: instructions, DependsOn: []string{}}
 }
 
 func TestPostgresVanadisStore_AppendChunks(t *testing.T) {
@@ -733,13 +733,13 @@ func TestPostgresVanadisStore_AppendChunks(t *testing.T) {
 		{name: "build_query_error", buildID: "b1", inputs: one, db: dbScript{row: errRow(errors.New("query err"))}, wantErr: true},
 		{name: "build_conflict_status", buildID: "b1", inputs: one, db: dbScript{row: buildRow("b1", "completed")}, wantErrIs: ErrBuildConflict},
 		{name: "chunks_query_error", buildID: "b1", inputs: one, db: dbScript{row: running, queryErr: errors.New("chunks err")}, wantErr: true},
-		{name: "chunks_scan_error", buildID: "b1", inputs: one, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1"}}, scanErr: errors.New("scan err")}, wantErr: true},
-		{name: "duplicate_id_conflict", buildID: "b1", inputs: []CreateChunkInput{chunkInput("c1", "", "aerial", "T", "I")}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1"}}}, wantErrIs: ErrBuildConflict},
+		{name: "chunks_scan_error", buildID: "b1", inputs: one, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", DependsOn: []string{}}}, scanErr: errors.New("scan err")}, wantErr: true},
+		{name: "duplicate_id_conflict", buildID: "b1", inputs: []CreateChunkInput{chunkInput("c1", "", "aerial", "T", "I")}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", DependsOn: []string{}}}}, wantErrIs: ErrBuildConflict},
 		{name: "exec_insert_error", buildID: "b1", inputs: one, db: dbScript{row: running, execErr: errors.New("insert err")}, wantErr: true},
 		{name: "exec_insert_error_with_rollback_err", buildID: "b1", inputs: one, db: dbScript{row: running, execErr: errors.New("insert err"), rollbackErr: errors.New("rb err")}, wantErr: true},
 		{name: "commit_error", buildID: "b1", inputs: one, db: dbScript{row: running, commitErr: errors.New("commit err")}, wantErr: true},
-		{name: "dag_validation_cycle_error", buildID: "b1", inputs: []CreateChunkInput{cycleA, cycleB}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Repo: "aerial"}}}, wantErr: true},
-		{name: "success_with_id_collision_resolution", buildID: "b1", inputs: one, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "b1-chunk-1", ChunkIndex: 0, Repo: "mirrormere"}}, execTag: "INSERT 0 1"}, wantCount: 1},
+		{name: "dag_validation_cycle_error", buildID: "b1", inputs: []CreateChunkInput{cycleA, cycleB}, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "c1", Repo: "aerial", DependsOn: []string{}}}}, wantErr: true},
+		{name: "success_with_id_collision_resolution", buildID: "b1", inputs: one, db: dbScript{row: running, chunks: []VanadisChunk{{ID: "b1-chunk-1", ChunkIndex: 0, Repo: "mirrormere", DependsOn: []string{}}}, execTag: "INSERT 0 1"}, wantCount: 1},
 		{name: "success_append_action_chunk", buildID: "b1", inputs: []CreateChunkInput{chunkInput("", "action", "", "Act", "Do Act")}, db: dbScript{row: running, execTag: "INSERT 0 1"}, wantCount: 1},
 	}
 	for _, tc := range tests {
@@ -913,7 +913,7 @@ func TestPostgresVanadisStore_RetryActionChunk(t *testing.T) {
 		{name: "safe graph", buildStatus: "failed", chunk: VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", DependsOn: []string{"c0"}}, siblings: []VanadisChunk{{ID: "c0", Status: "completed"}, {ID: "c2", Status: "pending", DependsOn: []string{"c1"}}}, expected: "vanadis-c1-turn-0"},
 		{name: "begin failure", db: dbScript{beginErr: injectedErr}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: injectedErr},
 		{name: "query failure", buildStatus: "failed", db: dbScript{queryErr: injectedErr}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: injectedErr},
-		{name: "scan failure", buildStatus: "failed", chunk: VanadisChunk{ID: "c1"}, db: dbScript{scanErr: injectedErr}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: injectedErr},
+		{name: "scan failure", buildStatus: "failed", chunk: VanadisChunk{ID: "c1", DependsOn: []string{}}, db: dbScript{scanErr: injectedErr}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: injectedErr},
 		{name: "rows failure", buildStatus: "failed", db: dbScript{rowsErr: injectedErr}, expected: "vanadis-c1-turn-0", wantErr: true, wantErrIs: injectedErr},
 		{name: "chunk write rollback", buildStatus: "failed", chunk: VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, expected: "vanadis-c1-turn-0", db: dbScript{failExec: "UPDATE vanadis_chunks", execErr: errors.New("write")}, wantErr: true},
 		{name: "commit failure", buildStatus: "failed", chunk: VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, expected: "vanadis-c1-turn-0", db: dbScript{commitErr: errors.New("commit")}, wantErr: true},

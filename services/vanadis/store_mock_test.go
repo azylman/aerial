@@ -852,21 +852,18 @@ func (m *memoryVanadisStore) AppendChunks(_ context.Context, buildID string, inp
 		usedIDs[c.ID] = true
 	}
 	nextIdx := 0
-	var prevChunkID string
 	if len(existing) > 0 {
 		last := existing[len(existing)-1]
 		nextIdx = last.ChunkIndex + 1
-		prevChunkID = last.ID
 	}
 	now := time.Now().UTC()
 	appended := make([]VanadisChunk, 0, len(inputs))
 	for _, in := range inputs {
-		newChunk, err := buildAppendedChunk(buildID, in, nextIdx, prevChunkID, usedIDs, now)
+		newChunk, err := buildAppendedChunk(buildID, in, nextIdx, usedIDs, now)
 		if err != nil {
 			return nil, err
 		}
 		appended = append(appended, newChunk)
-		prevChunkID = newChunk.ID
 		nextIdx++
 	}
 
@@ -1096,7 +1093,7 @@ func mkChunk(id, buildID string, idx int, title, instr, effort, status string) V
 	if effort == "" {
 		effort = "medium"
 	}
-	return VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "pr", Repo: normalizeRepo("aerial"), Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}}
+	return VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "pr", Repo: normalizeRepo("aerial"), Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}, DependsOn: []string{}}
 }
 
 func (m *memoryVanadisStore) CompletePRDeployment(ctx context.Context, chunkID string, evidence *pubsub.PRRolloutState) error {

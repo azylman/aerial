@@ -161,6 +161,7 @@ func newMCPToolsStore(listErr, getErr error) *memoryVanadisStore {
 
 	c1_1 := mkChunk("chunk-2", "build-mcp-1", 1, "Chunk 2", "Inst 2", "high", "pending")
 	c1_1.Repo = normalizeRepo("aerial")
+	c1_1.DependsOn = []string{"chunk-1"}
 
 	store := newMemoryVanadisStore()
 	_ = store.CreateBuild(context.Background(), b1, []VanadisChunk{c1_0, c1_1})
@@ -419,13 +420,13 @@ func TestVanadisMCP_AppendChunk(t *testing.T) {
 		{
 			name:        "append_chunk nil store",
 			nilStore:    true,
-			args:        `{"build_id":"build-mcp-1","chunks":[{"title":"C3","instructions":"I3"}]}`,
+			args:        `{"build_id":"build-mcp-1","chunks":[{"title":"C3","instructions":"I3","depends_on":["chunk-2"]}]}`,
 			wantToolErr: true,
 			wantSubstr:  "vanadis store not configured",
 		},
 		{
 			name:        "append_chunk missing build_id",
-			args:        `{"build_id":"","chunks":[{"title":"C3","instructions":"I3"}]}`,
+			args:        `{"build_id":"","chunks":[{"title":"C3","instructions":"I3","depends_on":["chunk-2"]}]}`,
 			wantToolErr: true,
 			wantSubstr:  "build_id is required",
 		},
@@ -437,12 +438,12 @@ func TestVanadisMCP_AppendChunk(t *testing.T) {
 		},
 		{
 			name:       "append_chunk success",
-			args:       `{"build_id":"build-mcp-1","chunks":[{"repo":"aerial","title":"Part 3","instructions":"Do part 3","effort":"medium"}]}`,
+			args:       `{"build_id":"build-mcp-1","chunks":[{"repo":"aerial","title":"Part 3","instructions":"Do part 3","effort":"medium","depends_on":["chunk-2"]}]}`,
 			wantSubstr: `"status":"appended"`,
 		},
 		{
 			name:       "append_chunk action mode success",
-			args:       `{"build_id":"build-mcp-1","chunks":[{"mode":"action","title":"Action Step","instructions":"Run migration","effort":"low"}]}`,
+			args:       `{"build_id":"build-mcp-1","chunks":[{"mode":"action","title":"Action Step","instructions":"Run migration","effort":"low","depends_on":["chunk-2"]}]}`,
 			wantSubstr: `"status":"appended"`,
 		},
 	}

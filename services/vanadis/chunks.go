@@ -684,7 +684,7 @@ func resolveAppendedChunkID(buildID string, rawID string, nextIdx int, usedIDs m
 	}
 }
 
-func buildAppendedChunk(buildID string, in CreateChunkInput, nextIdx int, prevChunkID string, usedIDs map[string]bool, now time.Time) (VanadisChunk, error) {
+func buildAppendedChunk(buildID string, in CreateChunkInput, nextIdx int, usedIDs map[string]bool, now time.Time) (VanadisChunk, error) {
 	resolvedID, err := resolveAppendedChunkID(buildID, in.ID, nextIdx, usedIDs)
 	if err != nil {
 		return VanadisChunk{}, err
@@ -702,15 +702,7 @@ func buildAppendedChunk(buildID string, in CreateChunkInput, nextIdx int, prevCh
 	if err != nil {
 		return VanadisChunk{}, err
 	}
-	var deps []string
-	switch {
-	case in.DependsOn != nil:
-		deps = nonNilSlice(in.DependsOn)
-	case prevChunkID != "":
-		deps = []string{prevChunkID}
-	default:
-		deps = []string{}
-	}
+	deps := in.DependsOn
 	return VanadisChunk{
 		ID:                 resolvedID,
 		BuildID:            buildID,
@@ -761,22 +753,19 @@ func (s *PostgresVanadisStore) AppendChunks(ctx context.Context, buildID string,
 	}
 
 	nextIdx := 0
-	var prevChunkID string
 	if len(existing) > 0 {
 		last := existing[len(existing)-1]
 		nextIdx = last.ChunkIndex + 1
-		prevChunkID = last.ID
 	}
 
 	now := time.Now().UTC()
 	appended := make([]VanadisChunk, 0, len(inputs))
 	for _, in := range inputs {
-		newChunk, buildErr := buildAppendedChunk(buildID, in, nextIdx, prevChunkID, usedIDs, now)
+		newChunk, buildErr := buildAppendedChunk(buildID, in, nextIdx, usedIDs, now)
 		if buildErr != nil {
 			return nil, buildErr
 		}
 		appended = append(appended, newChunk)
-		prevChunkID = newChunk.ID
 		nextIdx++
 	}
 
