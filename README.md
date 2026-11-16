@@ -33,7 +33,7 @@ Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 
 Aerial separates generic platform orchestration from private homelab state using a decoupled **Two-Repository Architecture**:
 - **Engine Repo (`azylman/aerial`)**: Autonomous agent execution core (`eri`), scheduling & event watch orchestrator (`haro`), semantic memory & skill synthesis (`coven`), multi-chunk build orchestrator (`vanadis`), durable build DAG engine (`vanadis-restate`), NATS JetStream broker (`nats`), Restate cluster orchestrator (`restate`), Discord Gateway & edge fact publisher (`synapse`), shared Go packages (`pkg/` including `pkg/pubsub`), declarative Kubernetes manifests (`k8s/*.yaml`), turnkey telemetry stack (VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana), PostgreSQL 18 persistence, CoreDNS service discovery, and outbound MCP microservices.
-- **User Config Repo (e.g. `your-username/your-aerial-config`)**: Declarative user Kubernetes manifests (`k8s/*.yaml`), custom skills and automation runbooks (`custom-skills/`), modular telemetry scrapes (`victoriametrics/`), platform options (`config.yaml`), modular persona and runtime rules (`rules/`), and Discord channel policies (`channels/`). Starter template available at [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example).
+- **User Config Repo (e.g. `your-username/your-aerial-config`)**: Declarative user Kubernetes manifests (`k8s/*.yaml`), custom skills and automation runbooks (`custom-skills/`), custom Grafana dashboards (`services/grafana/dashboards/`), platform options (`config.yaml`), modular persona and runtime rules (`rules/`), and Discord channel policies (`channels/`). Starter template available at [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example).
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -336,7 +336,7 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 
 ### 1. VictoriaMetrics TSDB & vmalert (`victoriametrics`, `vmalert`)
 - **Engine**: Single-node VictoriaMetrics running with 5-year retention (`-retentionPeriod=5y`) and 15s scrape interval, scraping cluster pods, Kubelet, and cAdvisor.
-- **Dynamic Modular Scrapes**: VictoriaMetrics automatically discovers and live-reloads scrape configurations mounted from `/share/aerial-config/victoriametrics/*.yml` every 15 seconds without container restarts (`-promscrape.configCheckInterval=15s`).
+- **Declarative Operator Scrapes (`vm-operator`)**: VictoriaMetrics Operator dynamically reconciles `VMServiceScrape` and `VMStaticScrape` CRDs across cluster namespaces (`k8s/observability-and-mcp.yaml`) without manual config file mounts or container restarts.
 - **Anomaly Detection & Recording Rules (`vmalert`)**: Evaluates Median Absolute Deviation (MAD) anomaly rules and alert definitions on port `:8880`.
 
 ### 2. Pre-Provisioned Grafana Dashboards (`services/grafana/dashboards/`)
@@ -411,7 +411,7 @@ Aerial uses an automated, event-driven GitOps continuous deployment pipeline:
 | **`edge-gateway`** | `4021` | Ingress gateway routing external Cloudflare tunnel webhooks into the local cluster mesh. |
 | **`fluent-bit`** | DaemonSet | High-performance log collector shipping container stdout/stderr and journald logs to VictoriaLogs. |
 | **`node-exporter`** | `9100` | Node Exporter host telemetry gathering host CPU loads, memory, storage, thermals, and network metrics. |
-| **`victoriametrics`** | `8428` | VictoriaMetrics single-node TSDB scraping Prometheus metrics from all pods and nodes with 5-year retention and dynamic `scrape.d/` config. |
+| **`victoriametrics`** | `8428` | VictoriaMetrics single-node TSDB scraping Prometheus metrics from all pods and nodes with 5-year retention and declarative VMServiceScrape / VMStaticScrape discovery via vm-operator. |
 | **`vmalert`** | `8880` | Prometheus-compatible alerting engine evaluating anomaly detection and metric threshold rules. |
 | **`grafana`** | `3000` | Grafana visual dashboards serving system HUD & container metrics with SQLite backend and pre-provisioned dashboards. |
 | **`github-runner`** | Replicas | Scale-to-zero Actions Runner Controller (ARC) `AutoscalingRunnerSet` HelmReleases executing CI matrices and automated RoboRev code reviews. |
