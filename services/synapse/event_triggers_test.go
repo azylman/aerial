@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
@@ -618,6 +621,267 @@ func TestHandleEventsWebhook_MissingAndInvalidPayloads(t *testing.T) {
 			if tc.name == "forward to peers" && peerCalls == 0 {
 				t.Errorf("expected peer forward call")
 			}
+		})
+	}
+}
+
+func TestFormatAndClassifyVMAlert(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fingerprint", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name   string
+			labels map[string]string
+			want   string
+		}{
+			{name: "nil labels", labels: nil, want: "unknown"},
+			{name: "empty labels", labels: map[string]string{}, want: "unknown"},
+			{name: "single pair", labels: map[string]string{"alertname": "PostgresDeadlocks"}, want: "9:alertname=17:PostgresDeadlocks;"},
+			{name: "multiple pairs sorted", labels: map[string]string{"severity": "critical", "alertname": "PostgresDeadlocks", "job": "postgres-cnpg"}, want: "9:alertname=17:PostgresDeadlocks;3:job=13:postgres-cnpg;8:severity=8:critical;"},
+			{name: "collision resistance", labels: map[string]string{"alertname": "A", "instance": "x,job=y", "severity": "critical"}, want: "9:alertname=1:A;8:instance=7:x,job=y;8:severity=8:critical;"},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				if got := vmAlertFingerprint(tc.labels); got != tc.want {
+					t.Fatalf("vmAlertFingerprint() = %q, want %q", got, tc.want)
+				}
+			})
+		}
+		if vmAlertFingerprint(map[string]string{"alertname": "A", "instance": "x,job=y", "severity": "critical"}) == vmAlertFingerprint(map[string]string{"alertname": "A", "instance": "x", "job": "y", "severity": "critical"}) {
+			t.Fatalf("expected distinct fingerprints for distinct label sets")
+		}
+	})
+
+	t.Run("isResolved", func(t *testing.T) {
+		t.Parallel()
+		now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+		tests := []struct {
+			name  string
+			alert VMAlertNotification
+			want  bool
+		}{
+			{name: "status resolved lowercase", alert: VMAlertNotification{Status: "resolved"}, want: true},
+			{name: "status RESOLVED uppercase", alert: VMAlertNotification{Status: "RESOLVED"}, want: true},
+			{name: "status firing is not resolved", alert: VMAlertNotification{Status: "firing"}, want: false},
+			{name: "empty status with zero endsAt is not resolved", alert: VMAlertNotification{StartsAt: now.Add(-10 * time.Minute)}, want: false},
+			{name: "empty status with endsAt in future is not resolved", alert: VMAlertNotification{StartsAt: now.Add(-10 * time.Minute), EndsAt: now.Add(10 * time.Minute)}, want: false},
+			{name: "empty status with endsAt before startsAt is resolved", alert: VMAlertNotification{StartsAt: now.Add(10 * time.Minute), EndsAt: now}, want: true},
+			{name: "empty status with endsAt equal to startsAt is resolved", alert: VMAlertNotification{StartsAt: now.Add(-5 * time.Minute), EndsAt: now.Add(-5 * time.Minute)}, want: true},
+			{name: "empty status with endsAt in past is resolved", alert: VMAlertNotification{StartsAt: now.Add(-10 * time.Minute), EndsAt: now.Add(-1 * time.Minute)}, want: true},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				if got := isVMAlertResolved(tc.alert, now); got != tc.want {
+					t.Fatalf("isVMAlertResolved() = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("formatMessage", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name  string
+			alert VMAlertNotification
+			want  string
+		}{
+			{name: "defaults with no labels or annotations", alert: VMAlertNotification{}, want: "🚨 **[ALERT: UnnamedAlert]** (warning)"},
+			{name: "custom alertname and severity with summary", alert: VMAlertNotification{Labels: map[string]string{"alertname": "PostgresDeadlocks", "severity": "critical"}, Annotations: map[string]string{"summary": "deadlocks detected"}}, want: "🚨 **[ALERT: PostgresDeadlocks]** (critical)\ndeadlocks detected"},
+			{name: "falls back to description if summary empty", alert: VMAlertNotification{Labels: map[string]string{"alertname": "PostgresDeadlocks", "severity": "critical"}, Annotations: map[string]string{"description": "postgres deadlock description"}}, want: "🚨 **[ALERT: PostgresDeadlocks]** (critical)\npostgres deadlock description"},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				if got := formatVMAlertMessage(tc.alert); got != tc.want {
+					t.Fatalf("formatVMAlertMessage() = %q, want %q", got, tc.want)
+				}
+			})
+		}
+	})
+}
+
+type alertWebhookStep struct {
+	payload        string
+	updateChannel  string
+	clearDispErr   bool
+	wantStatus     int
+	wantDispatched int
+}
+
+func sendAlertsRequest(t *testing.T, handler http.Handler, path, payload string) (int, int) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return rec.Code, -1
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	dispatchedVal, ok := resp["dispatched"].(float64)
+	if !ok {
+		return rec.Code, -1
+	}
+	return rec.Code, int(dispatchedVal)
+}
+
+type mutableConfigSource struct {
+	cfg Config
+}
+
+func (m *mutableConfigSource) Current() *Config { return &m.cfg }
+
+func assertAlertStep(t *testing.T, handler http.Handler, path string, step alertWebhookStep, cfgSrc *mutableConfigSource, disp *mockOutboundDispatcher) {
+	t.Helper()
+	if step.updateChannel != "" {
+		cfgSrc.cfg.SystemChannelID = step.updateChannel
+	}
+	if step.clearDispErr {
+		disp.mu.Lock()
+		disp.directMessageErr = nil
+		disp.mu.Unlock()
+	}
+	code, dispatched := sendAlertsRequest(t, handler, path, step.payload)
+	if code != step.wantStatus {
+		t.Fatalf("status = %d, want %d", code, step.wantStatus)
+	}
+	if step.wantStatus == http.StatusOK && dispatched != step.wantDispatched {
+		t.Fatalf("dispatched = %d, want %d", dispatched, step.wantDispatched)
+	}
+}
+
+func assertDirectMessages(t *testing.T, calls []DirectMessageRequest, wantCount int, wantSubstr string) {
+	t.Helper()
+	if len(calls) != wantCount {
+		t.Fatalf("DirectMessageCalls count = %d, want %d", len(calls), wantCount)
+	}
+	if wantSubstr == "" || len(calls) == 0 {
+		return
+	}
+	lastDM := calls[len(calls)-1]
+	if !strings.Contains(lastDM.Content, wantSubstr) {
+		t.Fatalf("DM content %q missing substr %q", lastDM.Content, wantSubstr)
+	}
+}
+
+func TestHandleAlertsWebhook(t *testing.T) {
+	t.Parallel()
+
+	const sysChannel = "123456789012345678"
+
+	tests := []struct {
+		name          string
+		path          string
+		cfgChannel    string
+		dispatcherErr error
+		steps         []alertWebhookStep
+		wantDMCount   int
+		wantDMSubstr  string
+	}{
+		{
+			name:       "invalid json returns 400",
+			path:       "/api/v2/alerts",
+			cfgChannel: sysChannel,
+			steps:      []alertWebhookStep{{payload: "invalid-json", wantStatus: http.StatusBadRequest}},
+		},
+		{
+			name:       "empty array returns 200 with 0 dispatched",
+			path:       "/api/webhooks/alerts",
+			cfgChannel: sysChannel,
+			steps:      []alertWebhookStep{{payload: "[]", wantStatus: http.StatusOK, wantDispatched: 0}},
+		},
+		{
+			name:         "firing alert dispatches to system channel",
+			path:         "/webhooks/alerts",
+			cfgChannel:   sysChannel,
+			wantDMCount:  1,
+			wantDMSubstr: "TestAlert",
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"},"annotations":{"summary":"disk full"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+		{
+			name:        "duplicate firing alert suppressed across consecutive requests",
+			path:        "/api/v2/alerts",
+			cfgChannel:  sysChannel,
+			wantDMCount: 1,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 0},
+			},
+		},
+		{
+			name:        "resolution clears firing alert so subsequent firing alert dispatches again",
+			path:        "/api/v2/alerts",
+			cfgChannel:  sysChannel,
+			wantDMCount: 2,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+				{payload: `[{"status":"resolved","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 0},
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+		{
+			name:        "expired endsAt resolution clears firing alert so subsequent firing dispatches",
+			path:        "/api/v2/alerts",
+			cfgChannel:  sysChannel,
+			wantDMCount: 2,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+				{payload: fmt.Sprintf(`[{"labels":{"alertname":"TestAlert","severity":"critical"},"startsAt":"%s","endsAt":"%s"}]`, time.Now().Add(-10*time.Minute).Format(time.RFC3339), time.Now().Add(-5*time.Minute).Format(time.RFC3339)), wantStatus: http.StatusOK, wantDispatched: 0},
+				{payload: `[{"status":"firing","labels":{"alertname":"TestAlert","severity":"critical"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+		{
+			name:          "dispatcher error rolls back firing state and retries successfully",
+			path:          "/api/v2/alerts",
+			cfgChannel:    sysChannel,
+			dispatcherErr: errors.New("discord rate limited"),
+			wantDMCount:   2,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"ErrorAlert","severity":"critical"}}]`, wantStatus: http.StatusInternalServerError},
+				{payload: `[{"status":"firing","labels":{"alertname":"ErrorAlert","severity":"critical"}}]`, clearDispErr: true, wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+		{
+			name:        "non-firing non-resolved alert is ignored",
+			path:        "/api/v2/alerts",
+			cfgChannel:  sysChannel,
+			wantDMCount: 0,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"pending","labels":{"alertname":"PendingAlert","severity":"warning"}}]`, wantStatus: http.StatusOK, wantDispatched: 0},
+			},
+		},
+		{
+			name:        "invalid system channel returns retryable 503 and recovers on channel config",
+			path:        "/api/v2/alerts",
+			cfgChannel:  "invalid-snowflake",
+			wantDMCount: 1,
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"RecoverAlert","severity":"warning"}}]`, wantStatus: http.StatusServiceUnavailable},
+				{payload: `[{"status":"firing","labels":{"alertname":"RecoverAlert","severity":"warning"}}]`, updateChannel: sysChannel, wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			disp := &mockOutboundDispatcher{directMessageErr: tc.dispatcherErr}
+			cfgSrc := &mutableConfigSource{cfg: Config{SystemChannelID: tc.cfgChannel}}
+			srv := NewRouterServer(cfgSrc, nil)
+			srv.SetDispatcher(disp)
+			handler := srv.Routes()
+
+			for _, step := range tc.steps {
+				assertAlertStep(t, handler, tc.path, step, cfgSrc, disp)
+			}
+			assertDirectMessages(t, disp.DirectMessageCalls(), tc.wantDMCount, tc.wantDMSubstr)
 		})
 	}
 }
