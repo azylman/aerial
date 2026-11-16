@@ -150,9 +150,9 @@ aerial-config/
 ├── custom-skills/            # Private operational runbooks & domain skills
 ├── homepage/                 # Service discovery cards & bookmarks
 ├── k8s/                      # User-defined Kubernetes manifests & Kustomizations
-├── services/                 # Dedicated service configuration files
-│   └── console/
-├── victoriametrics/          # Modular Prometheus scrape configs
+├── services/                 # Dedicated service configuration files & dashboards
+│   ├── services/{synapse,haro,coven,vanadis}/
+│   └── services/grafana/dashboards/
 └── docs/                     # Living Docsify documentation portal
     ├── README.md             # Docs homepage
     ├── _sidebar.md           # Sidebar navigation

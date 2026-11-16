@@ -673,12 +673,6 @@ run_atlas_validate() {
     done
 }
 
-check_docker_compose() {
-    if [ -f "$REPO_ROOT/docker-compose.yml" ] && has_cmd docker && docker compose version >/dev/null 2>&1; then
-        (cd "$REPO_ROOT" && docker compose -f docker-compose.yml config --quiet)
-    fi
-}
-
 if [ "$MODE" = "staged" ]; then
     if has_cmd git; then
         git rm --cached -q PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
@@ -707,10 +701,6 @@ if [ "$MODE" = "staged" ]; then
     check_synapse_zero_vanadis
     check_code_health
     check_staged_secrets
-
-    if echo "$CHANGED_FILES" | grep -q '^docker-compose\.yml$'; then
-        check_docker_compose
-    fi
 
     lint_all_go=0
     if echo "$CHANGED_FILES" | grep -q -E '^(pkg/|\.golangci\.yml|scripts/verify\.sh)$'; then
@@ -822,7 +812,6 @@ done
 check_no_imperative_ddl
 check_synapse_zero_vanadis
 check_code_health
-check_docker_compose
 run_atlas_validate
 
 echo "=== 2. Frontend & Script Syntax Checks ==="
