@@ -176,6 +176,10 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 	}
 }
 
+// transcriptWrittenAtToken in a transcript fixture is replaced with the wall-clock time the
+// fixture file is written.
+const transcriptWrittenAtToken = "{{transcript_written_at}}"
+
 type persistentDaemonTurnCase struct {
 	name, threadID, daemonUUID, presetSessionInDB string
 	turnResponses                                 []string
@@ -261,7 +265,10 @@ func runPersistentDaemonTurnCase(t *testing.T, tc persistentDaemonTurnCase) {
 	if tc.transcriptContent != "" {
 		sessDir := filepath.Join(tempData, "brain", tc.daemonUUID, ".system_generated", "logs")
 		_ = os.MkdirAll(sessDir, 0o755)
-		_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(tc.transcriptContent), 0o644)
+		// Stamp transcript steps when the file is written, not when the table literal is built:
+		// parallel subtests can wait well past the worker's 10s transcript cutoff for a slot.
+		content := strings.ReplaceAll(tc.transcriptContent, transcriptWrittenAtToken, time.Now().UTC().Format(time.RFC3339Nano))
+		_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(content), 0o644)
 	}
 	if tc.foreignDiskUUID != "" {
 		brainDir := filepath.Join(tempData, "brain", tc.foreignDiskUUID)
@@ -270,14 +277,17 @@ func runPersistentDaemonTurnCase(t *testing.T, tc persistentDaemonTurnCase) {
 		_ = os.Chtimes(brainDir, ft, ft)
 	}
 
+	var deliveryMu sync.Mutex
 	var deliveredText string
-	doneCh := make(chan struct{})
+	doneCh := make(chan struct{}, 1)
 	haroBus, getOneShots := newMockHaroOneShotBus(t)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool: procPool, SessionManager: session.New(tmpHome, tempData),
 		Store: store, TimeoutMinutes: 1, EventBus: haroBus,
 		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
+			deliveryMu.Lock()
 			deliveredText = content
+			deliveryMu.Unlock()
 			return nil
 		},
 		OnMessageCompleted: func(msg db.Message, status string) {
@@ -285,7 +295,6 @@ func runPersistentDaemonTurnCase(t *testing.T, tc persistentDaemonTurnCase) {
 				select {
 				case doneCh <- struct{}{}:
 				default:
-					close(doneCh)
 				}
 			}
 		},
@@ -303,7 +312,10 @@ func runPersistentDaemonTurnCase(t *testing.T, tc persistentDaemonTurnCase) {
 		t.Fatalf("timed out waiting for message completion")
 	}
 
-	assertPersistentDaemonTurnChecks(t, tc, pool, store, deliveredText, msgID, getOneShots)
+	deliveryMu.Lock()
+	delivered := deliveredText
+	deliveryMu.Unlock()
+	assertPersistentDaemonTurnChecks(t, tc, pool, store, delivered, msgID, getOneShots)
 }
 
 func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
@@ -335,7 +347,7 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 		{
 			name: "QuotaExhaustion_FromTranscript", threadID: "thread-quota-exhaustion-test", daemonUUID: "f2222222-3333-4444-5555-666666666666", presetSessionInDB: "f2222222-3333-4444-5555-666666666666",
 			turnResponses:       []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}` + "\n"},
-			transcriptContent:   fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 4h51m59s.","created_at":%q}`+"\n", time.Now().UTC().Format(time.RFC3339)),
+			transcriptContent:   `{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 4h51m59s.","created_at":"` + transcriptWrittenAtToken + `"}` + "\n",
 			expectedFinalStatus: db.StatusFailed, wantDeliveredSubstr: "resets in", checkQuotaSchedule: true, checkQuotaDbError: true,
 		},
 		{
@@ -347,8 +359,8 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 			name: "QuotaPause_RotatesBloatedSession", threadID: "thread-quota-bloat-rotation", daemonUUID: "b3333333-4444-5555-6666-777777777777", presetSessionInDB: "b3333333-4444-5555-6666-777777777777",
 			turnResponses: []string{`{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}` + "\n"},
 			transcriptContent: fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
-{"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2h30m.","created_at":%q}
-`, session.DefaultMaxSessionSteps, time.Now().UTC().Format(time.RFC3339)),
+{"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2h30m.","created_at":"%s"}
+`, session.DefaultMaxSessionSteps, transcriptWrittenAtToken),
 			expectedFinalStatus: db.StatusFailed, wantSavedSession: "b3333333-4444-5555-6666-777777777777",
 		},
 	}
@@ -682,16 +694,16 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 		t.Fatalf("timeout waiting for ephemeral turn 2")
 	}
 
-	assertEphemeralTurnPrompts(ctx, t, capturedPrompts, spawnSeq, store, threadID, primarySessUUID, prevSessUUID, &mu)
+	// Snapshot under mu: releasing turn 2's lease rotates the worker daemon asynchronously,
+	// so the spawner can still be writing spawnSeq and capturedPrompts here.
+	mu.Lock()
+	prompts, spawns := append([]string(nil), capturedPrompts...), spawnSeq
+	mu.Unlock()
+	assertEphemeralTurnPrompts(ctx, t, prompts, spawns, store, threadID, primarySessUUID, prevSessUUID)
 }
 
-func assertEphemeralTurnPrompts(ctx context.Context, t *testing.T, capturedPrompts []string, spawnSeq int, store db.Store, threadID, primarySessUUID, prevSessUUID string, mu *sync.Mutex) {
+func assertEphemeralTurnPrompts(ctx context.Context, t *testing.T, prompts []string, spawns int, store db.Store, threadID, primarySessUUID, prevSessUUID string) {
 	t.Helper()
-	mu.Lock()
-	prompts := append([]string(nil), capturedPrompts...)
-	spawns := spawnSeq
-	mu.Unlock()
-
 	if len(prompts) != 2 {
 		t.Fatalf("expected 2 captured prompts, got %d", len(prompts))
 	}
