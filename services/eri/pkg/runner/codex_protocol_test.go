@@ -403,6 +403,82 @@ func TestCodexProtocol_ExtractAgentMessageText(t *testing.T) {
 	}
 }
 
+func TestCodexProtocol_IsChildCodexThread(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		params       map[string]any
+		rootThreadID string
+		want         bool
+	}{
+		{
+			name:         "empty root thread id returns false",
+			params:       map[string]any{"threadId": "child_123"},
+			rootThreadID: "",
+			want:         false,
+		},
+		{
+			name:         "nil params returns false",
+			params:       nil,
+			rootThreadID: "root_123",
+			want:         false,
+		},
+		{
+			name:         "matching root thread id returns false",
+			params:       map[string]any{"threadId": "root_123"},
+			rootThreadID: "root_123",
+			want:         false,
+		},
+		{
+			name:         "top-level threadId mismatch returns true",
+			params:       map[string]any{"threadId": "child_456"},
+			rootThreadID: "root_123",
+			want:         true,
+		},
+		{
+			name:         "top-level snake_case thread_id mismatch returns true",
+			params:       map[string]any{"thread_id": "child_456"},
+			rootThreadID: "root_123",
+			want:         true,
+		},
+		{
+			name: "nested turn threadId mismatch returns true",
+			params: map[string]any{
+				"turn": map[string]any{"threadId": "child_turn_789"},
+			},
+			rootThreadID: "root_123",
+			want:         true,
+		},
+		{
+			name: "nested item thread_id mismatch returns true",
+			params: map[string]any{
+				"item": map[string]any{"thread_id": "child_item_999"},
+			},
+			rootThreadID: "root_123",
+			want:         true,
+		},
+		{
+			name: "no threadId in params returns false",
+			params: map[string]any{
+				"other": "value",
+			},
+			rootThreadID: "root_123",
+			want:         false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isChildCodexThread(tc.params, tc.rootThreadID)
+			if got != tc.want {
+				t.Errorf("isChildCodexThread(%v, %q) = %v, want %v", tc.params, tc.rootThreadID, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCodexProtocol_DispatchStreamEvents(t *testing.T) {
 	t.Parallel()
 
@@ -415,6 +491,7 @@ func TestCodexProtocol_DispatchStreamEvents(t *testing.T) {
 		claudeToolIDs: make(map[string]int),
 		stderrTail:    newTailBuffer(4096),
 	}
+	daemon.SetSessionID("root-thread-1")
 
 	daemon.dispatchCodexJSONRPCLine("")
 	daemon.dispatchCodexJSONRPCLine("not-json")
@@ -423,8 +500,25 @@ func TestCodexProtocol_DispatchStreamEvents(t *testing.T) {
 	sink := newMockTurnSink()
 	turn := enqueueInflightTurn(daemon, "turn-branches", sink)
 
-	// Map-form text delta
-	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":{"text":"streamed map text"}}}`)
+	// Child subagent events carrying a different threadId must be ignored and not pollute deltas or thinking
+	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"child-thread-2","delta":"child message delta"}}`)
+	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/reasoning/textDelta","params":{"threadId":"child-thread-2","itemId":"r-child"}}`)
+	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"child-thread-2","turn":{"status":"completed"}}}`)
+
+	sink.mu.Lock()
+	if len(sink.deltas) != 0 {
+		t.Errorf("expected 0 deltas after child event, got %v", sink.deltas)
+	}
+	if sink.thinking != 0 {
+		t.Errorf("expected 0 thinking after child reasoning delta, got %d", sink.thinking)
+	}
+	if sink.result != nil {
+		t.Errorf("expected nil result after child turn/completed, got %v", sink.result)
+	}
+	sink.mu.Unlock()
+
+	// Map-form text delta for root thread
+	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"root-thread-1","delta":{"text":"streamed map text"}}}`)
 	sink.mu.Lock()
 	deltas := append([]string{}, sink.deltas...)
 	sink.mu.Unlock()
@@ -460,8 +554,8 @@ func TestCodexProtocol_DispatchStreamEvents(t *testing.T) {
 		t.Errorf("expected fallback total tokens 70, got %d", usage.TotalTokens)
 	}
 
-	// Second model call in same turn: accumulated token usage with int types
-	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":10,"cachedInputTokens":2,"outputTokens":5,"reasoningOutputTokens":3,"totalTokens":15}}}}`)
+	// Subagent child thread token usage: MUST be accumulated into turn.streamUsage["codex-turn"]
+	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"child-thread-2","tokenUsage":{"last":{"inputTokens":10,"cachedInputTokens":2,"outputTokens":5,"reasoningOutputTokens":3,"totalTokens":15}}}}`)
 	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{}}}`)
 	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"thread/tokenUsage/updated"}`)
 
@@ -472,7 +566,39 @@ func TestCodexProtocol_DispatchStreamEvents(t *testing.T) {
 		t.Errorf("expected accumulated tokens total=85 thinking=3, got total=%d thinking=%d", usage.TotalTokens, usage.ThinkingTokens)
 	}
 
-	// Completed agent message and turn completion
+	// Commentary message: must NOT latch codexResponseText
+	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","phase":"commentary","text":"commentary preamble"}}}`)
+	daemon.inflightMu.Lock()
+	latchedText := turn.codexResponseText
+	daemon.inflightMu.Unlock()
+	if latchedText != "" {
+		t.Errorf("expected empty codexResponseText after commentary message, got %q", latchedText)
+	}
+
+	// Pre-tool message latch followed by tool item start: tool start MUST clear codexResponseText
+	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","text":"pre-tool message"}}}`)
+	daemon.inflightMu.Lock()
+	if turn.codexResponseText != "pre-tool message" {
+		t.Errorf("expected pre-tool message latched, got %q", turn.codexResponseText)
+	}
+	daemon.inflightMu.Unlock()
+
+	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"tool-pre-clear","type":"mcpToolCall","tool":"test_tool"}}}`)
+	daemon.inflightMu.Lock()
+	if turn.codexResponseText != "" {
+		t.Errorf("expected codexResponseText cleared on tool start, got %q", turn.codexResponseText)
+	}
+	daemon.inflightMu.Unlock()
+
+	// Child item/completed: must NOT latch codexResponseText
+	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"child-thread-2","item":{"type":"agentMessage","text":"child message text"}}}`)
+	daemon.inflightMu.Lock()
+	if turn.codexResponseText != "" {
+		t.Errorf("expected codexResponseText untouched by child item/completed, got %q", turn.codexResponseText)
+	}
+	daemon.inflightMu.Unlock()
+
+	// Completed root agent message and turn completion
 	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","text":"final answer text"}}}`)
 	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}`)
 	sink.mu.Lock()
@@ -480,6 +606,119 @@ func TestCodexProtocol_DispatchStreamEvents(t *testing.T) {
 	sink.mu.Unlock()
 	if res == nil || res.Response != "final answer text" {
 		t.Errorf("expected completed turn result with response 'final answer text', got %v", res)
+	}
+}
+
+func TestCodexProtocol_CommentaryBufferingTurnSink(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		wrapLease      bool
+		events         []string
+		wantResponse   string
+		wantHookDeltas int
+	}{
+		{
+			name:      "commentary-only deltas purged on commentary item completion through tracing and lease wrappers",
+			wrapLease: true,
+			events: []string{
+				`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"msg-c1","type":"agentMessage"}}}`,
+				`{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"msg-c1","delta":"Let me inspect the files first."}}`,
+				`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"msg-c1","type":"agentMessage","phase":"commentary","text":"Let me inspect the files first."}}}`,
+				`{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}`,
+			},
+			wantResponse:   "",
+			wantHookDeltas: 1,
+		},
+		{
+			name:      "commentary-only with phase on item started suppresses deltas and returns empty via lease wrapper",
+			wrapLease: true,
+			events: []string{
+				`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"msg-c2","type":"agentMessage","phase":"commentary"}}}`,
+				`{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"msg-c2","delta":"Spawning subagent now."}}`,
+				`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"msg-c2","type":"agentMessage","phase":"commentary","text":"Spawning subagent now."}}}`,
+				`{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}`,
+			},
+			wantResponse:   "",
+			wantHookDeltas: 0,
+		},
+		{
+			name:      "commentary deltas followed by final answer deltas preserves only final answer",
+			wrapLease: true,
+			events: []string{
+				`{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"msg-c3","delta":"Commentary preamble. "}}`,
+				`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"msg-c3","type":"agentMessage","phase":"commentary","text":"Commentary preamble. "}}}`,
+				`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"msg-f3","type":"agentMessage","phase":"final_answer"}}}`,
+				`{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"msg-f3","delta":"Clean final answer."}}`,
+				`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"msg-f3","type":"agentMessage","phase":"final_answer","text":"Clean final answer."}}}`,
+				`{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}`,
+			},
+			wantResponse:   "Clean final answer.",
+			wantHookDeltas: 2,
+		},
+		{
+			name:      "commentary and tool call followed by non-delta final item completion preserves final answer",
+			wrapLease: true,
+			events: []string{
+				`{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"Pre-tool delta"}}`,
+				`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"tool-c4","type":"commandExecution","command":"ls"}}}`,
+				`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"tool-c4","type":"commandExecution","status":"completed"}}}`,
+				`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"msg-f4","type":"agentMessage","text":"Completed final text."}}}`,
+				`{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}`,
+			},
+			wantResponse:   "Completed final text.",
+			wantHookDeltas: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			daemon := &StreamingDaemon{
+				cfg:           DaemonConfig{Engine: "codex"},
+				claudeToolIDs: make(map[string]int),
+				stderrTail:    newTailBuffer(4096),
+			}
+			daemon.SetSessionID("root-thread-1")
+
+			var hookDeltas int
+			innerBuf := NewBufferingTurnSink(BufferingTurnSinkConfig{
+				OnTextDelta: func(_ string) { hookDeltas++ },
+			})
+			var activeSink TurnSink = innerBuf
+			var leaseBuf *BufferingTurnSink
+			if tc.wrapLease {
+				leaseBuf = NewBufferingTurnSink(BufferingTurnSinkConfig{})
+				tracingSink := NewTracingTurnSink(context.Background(), innerBuf)
+				activeSink = &leaseTurnSinkWrapper{inner: tracingSink, buf: leaseBuf}
+			}
+
+			enqueueInflightTurn(daemon, "turn-"+tc.name, activeSink)
+			for _, ev := range tc.events {
+				daemon.dispatchCodexJSONRPCLine(ev)
+			}
+
+			res, err := innerBuf.Wait(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected inner sink error: %v", err)
+			}
+			if res == nil || res.Response != tc.wantResponse {
+				t.Errorf("innerBuf response = %q, want %q", res.Response, tc.wantResponse)
+			}
+			if leaseBuf != nil {
+				leaseRes, leaseErr := leaseBuf.Wait(context.Background())
+				if leaseErr != nil {
+					t.Fatalf("unexpected lease sink error: %v", leaseErr)
+				}
+				if leaseRes == nil || leaseRes.Response != tc.wantResponse {
+					t.Errorf("leaseBuf response = %q, want %q", leaseRes.Response, tc.wantResponse)
+				}
+			}
+			if hookDeltas != tc.wantHookDeltas {
+				t.Errorf("hookDeltas = %d, want %d", hookDeltas, tc.wantHookDeltas)
+			}
+		})
 	}
 }
 
@@ -492,9 +731,18 @@ func TestCodexProtocol_DispatchStreamToolEvents(t *testing.T) {
 		},
 		claudeToolIDs: make(map[string]int),
 	}
+	daemon.SetSessionID("root-thread-1")
 
 	sink := newMockTurnSink()
 	enqueueInflightTurn(daemon, "turn-tools", sink)
+
+	// Child thread tool event: must be ignored and not record tool start
+	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"child-thread-2","item":{"id":"child-tool-1","type":"mcpToolCall","server":"docket","tool":"mcp_tool"}}}`)
+	sink.mu.Lock()
+	if len(sink.calls) != 0 {
+		t.Errorf("expected 0 calls after child tool start, got %d", len(sink.calls))
+	}
+	sink.mu.Unlock()
 
 	// Tool call starts
 	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"tool-1","type":"mcpToolCall","server":"docket","tool":"mcp_tool"}}}`)
@@ -506,6 +754,15 @@ func TestCodexProtocol_DispatchStreamToolEvents(t *testing.T) {
 	sink.mu.Unlock()
 	if completedBefore != 0 {
 		t.Errorf("expected 0 completed tools after reasoning completion, got %d", completedBefore)
+	}
+
+	// Child thread item completed: must NOT complete tool-1
+	daemon.dispatchCodexJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"child-thread-2","item":{"id":"tool-1","type":"mcpToolCall","is_error":true}}}`)
+	sink.mu.Lock()
+	completedChild := len(sink.completedTools)
+	sink.mu.Unlock()
+	if completedChild != 0 {
+		t.Errorf("expected 0 completed tools after child tool complete, got %d", completedChild)
 	}
 
 	// Tool-1 completes with is_error: true
