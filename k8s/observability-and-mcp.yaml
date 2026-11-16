@@ -694,6 +694,17 @@ spec:
             severity: warning
           annotations:
             summary: VictoriaTraces has ingested no spans for 15 minutes
+    - name: vanadis_restate_health
+      interval: 30s
+      rules:
+        - alert: VanadisRestateReconcileErrors
+          expr: |
+            sum(increase(vanadis_restate_reconcile_errors_total[5m])) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: vanadis-restate reconcile or handler errors detected (Restate invocation backing off)
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -845,6 +856,20 @@ spec:
         role: database
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: vanadis-restate
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vanadis-restate
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMSingle
 metadata:
   name: victoriametrics
@@ -922,6 +947,8 @@ spec:
     url: "http://victoriametrics:8428"
   remoteWrite:
     url: "http://victoriametrics:8428"
+  notifier:
+    url: "http://synapse:4020"
   resources:
     limits:
       cpu: 200m
@@ -931,7 +958,6 @@ spec:
       memory: 64Mi
   extraArgs:
     loggerFormat: json
-    notifier.blackhole: "true"
 ---
 apiVersion: v1
 kind: Service
