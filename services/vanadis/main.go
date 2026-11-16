@@ -629,10 +629,6 @@ func parseCreateBuildChunks(buildID string, now time.Time, rawChunks []CreateChu
 		}
 		status := statusPending
 		var startedAt time.Time
-		if i == 0 {
-			status = statusRunning
-			startedAt = now
-		}
 		chunks[i] = VanadisChunk{
 			ID: chunkID, BuildID: buildID, ChunkIndex: i, Mode: mode,
 			Repo: repo, Title: title, Instructions: instructions,

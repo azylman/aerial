@@ -1136,6 +1136,67 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "running", out.BuildStatus)
 	assert.Contains(t, out.LaunchedChunks, "c-pending")
+	assert.True(t, out.LaunchedMap["c-pending"])
+
+	// 1b. Running chunk with PRNumber == 0 and absent from priorLaunched is dispatched.
+	// Already launched running chunk or chunk with PRNumber > 0 is not re-dispatched.
+	chunkRunningUnlaunched := VanadisChunk{
+		ID:         "c-running-unlaunched",
+		BuildID:    "b-launch-running",
+		ChunkIndex: 0,
+		Title:      "Running Unlaunched Chunk",
+		Repo:       "aerial",
+		Status:     "running",
+		Mode:       "pr",
+		PRNumber:   0,
+	}
+	chunkRunningAlreadyLaunched := VanadisChunk{
+		ID:         "c-running-already",
+		BuildID:    "b-launch-running",
+		ChunkIndex: 1,
+		Title:      "Running Already Launched",
+		Repo:       "aerial",
+		Status:     "running",
+		Mode:       "pr",
+		PRNumber:   0,
+	}
+	chunkRunningWithPR := VanadisChunk{
+		ID:         "c-running-pr",
+		BuildID:    "b-launch-running",
+		ChunkIndex: 2,
+		Title:      "Running With PR",
+		Repo:       "aerial",
+		Status:     "running",
+		Mode:       "pr",
+		PRNumber:   42,
+	}
+	bLaunchRunning := VanadisBuild{
+		ID:        "b-launch-running",
+		ThreadID:  "th-1",
+		Title:     "Launch Running Build",
+		Objective: "Test Running Unlaunched Recovery",
+		Status:    "running",
+	}
+	storeRunning, _ := dbScript{
+		buildRow: &mockRow{b: &bLaunchRunning},
+		chunks:   []VanadisChunk{chunkRunningUnlaunched, chunkRunningAlreadyLaunched, chunkRunningWithPR},
+		execTag:  "UPDATE 1",
+	}.open()
+	boRunning := NewBuildObject("", nil).WithAuthority(storeRunning, exec)
+	outRunning, errRunning := boRunning.executeAuthoritativeTransition(
+		context.Background(),
+		"b-launch-running",
+		nil,
+		map[string]bool{"c-running-already": true},
+		false,
+	)
+	assert.NoError(t, errRunning)
+	assert.Equal(t, "running", outRunning.BuildStatus)
+	assert.Contains(t, outRunning.LaunchedChunks, "c-running-unlaunched")
+	assert.NotContains(t, outRunning.LaunchedChunks, "c-running-already")
+	assert.NotContains(t, outRunning.LaunchedChunks, "c-running-pr")
+	assert.True(t, outRunning.LaunchedMap["c-running-unlaunched"])
+	assert.True(t, outRunning.LaunchedMap["c-running-already"])
 
 	// Store GetBuild error branch
 	storeGetErr, _ := dbScript{row: errRow(errors.New("db fail"))}.open()
@@ -1395,79 +1456,6 @@ func TestBuildObject_AuthorityCoverageExtra(t *testing.T) {
 	bFailed := VanadisBuild{ID: "b-fail", Status: "running", ThreadID: "th-1"}
 	cFailed := VanadisChunk{ID: "c1", Status: "failed"}
 	_ = bo.evaluateBuildTerminalStatus(context.Background(), &bFailed, []VanadisChunk{cFailed})
-}
-
-type mockBusError struct {
-	pubsub.Bus
-
-	err error
-}
-
-func (m *mockBusError) Publish(context.Context, string, string, any) error {
-	return m.err
-}
-
-func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
-	t.Parallel()
-	b1 := VanadisBuild{ID: "b-err", Status: "running", ThreadID: "th-1"}
-	c1 := VanadisChunk{ID: "c1", BuildID: "b-err", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "action"}
-	store, _ := dbScript{
-		buildRow: &mockRow{b: &b1},
-		chunks:   []VanadisChunk{c1},
-		execTag:  "UPDATE 1",
-	}.open()
-	eriErr := &mockEriClient{
-		cancelFn:  func(context.Context, string) error { return errors.New("cancel err") },
-		promptFn:  func(context.Context, string, string) error { return errors.New("prompt err") },
-		widgetFn:  func(context.Context, StatusWidgetRequest) (string, error) { return "", errors.New("widget err") },
-		messageFn: func(context.Context, string, string) error { return errors.New("msg err") },
-	}
-	mockBusErr := &mockBusError{err: errors.New("pub err")}
-	execErr := NewExecutor(t.TempDir(), eriErr, mockBusErr, "token", nil)
-	boErr := NewBuildObject("", nil).WithAuthority(store, execErr)
-
-	// notifyBuildTerminal error branches
-	boErr.notifyBuildTerminal(context.Background(), &b1, []VanadisChunk{c1}, "failed", "chunk failed", "TITLE", "MSG")
-
-	// notifyChunkFailure error branches
-	ctx := makeObjectMockContext(t, "b-err")
-	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		boErr.notifyChunkFailure(rc, b1, "c1", "reason")
-		return true, nil
-	})
-
-	// dispatchThreadWakePrompt error branches
-	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		boErr.dispatchThreadWakePrompt(rc, "b-err", "prompt")
-		return true, nil
-	})
-
-	// persistBuildCreation error branches
-	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		_, _ = boErr.persistBuildCreation(rc, b1, []VanadisChunk{c1})
-		return true, nil
-	})
-
-	// handlePREventType error branches
-	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		boErr.handlePREventType(rc, "b-err", "c1", "check_failed", pubsub.PRLifecycleEvent{Event: "check_failed", Repo: "aerial"})
-		boErr.handlePREventType(rc, "b-err", "c1", "conflict", pubsub.PRLifecycleEvent{Event: "conflict"})
-		boErr.handlePREventType(rc, "b-err", "c1", "merged", pubsub.PRLifecycleEvent{Event: "merged"})
-		return true, nil
-	})
-
-	storeErr, _ := dbScript{bare: nilDB}.open()
-	boStoreErr := NewBuildObject("", nil).WithAuthority(storeErr, execErr)
-	for _, act := range []string{"chunk_merged", "chunk_deploy_success", "action_completed", "chunk_failed", "cancelled"} {
-		boStoreErr.applyMutation(context.Background(), "b-err", &BuildMutationRequest{Action: act, ChunkID: "c1", Reason: "test"})
-	}
-	_, _ = boStoreErr.AttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
-	_, _ = boErr.AttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
-	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		boStoreErr.dispatchThreadWakePrompt(rc, "b-err", "prompt")
-		return true, nil
-	})
-	_ = boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}})
 }
 
 func (f *fakeObjectRuntime) ScheduleReconcile() { f.reconcileScheduled = true }

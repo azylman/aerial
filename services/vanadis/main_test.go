@@ -328,6 +328,20 @@ func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *
 	if buildID == "" || createResp["status"] != "accepted" {
 		t.Fatalf("unexpected create response: %+v", createResp)
 	}
+	// Verify that chunks returned by create build start with "pending" status and zero started_at.
+	rawCreatedChunks, _ := createResp["chunks"].([]any)
+	if len(rawCreatedChunks) != 2 {
+		t.Fatalf("expected 2 chunks in create response, got %d", len(rawCreatedChunks))
+	}
+	for i, rc := range rawCreatedChunks {
+		chunkMap, _ := rc.(map[string]any)
+		if chunkMap["status"] != "pending" {
+			t.Fatalf("expected chunk[%d].status to be pending, got %v", i, chunkMap["status"])
+		}
+		if startedAt, ok := chunkMap["started_at"].(string); ok && startedAt != "" && startedAt != "0001-01-01T00:00:00Z" {
+			t.Fatalf("expected chunk[%d].started_at to be zero, got %v", i, startedAt)
+		}
+	}
 	// Simulate storing the created build in memStore for subsequent tests
 	c1 := mkChunk(buildID+"-chunk-1", buildID, 0, "Part 1", "Do part 1", "low", "pending")
 	c2 := mkChunk("custom-chunk-2", buildID, 1, "Part 2", "Do part 2", "high", "pending")
@@ -752,5 +766,29 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	srv.handleBuildCancel(recCancel, httptest.NewRequest(http.MethodPost, "/builds/b-to-cancel/cancel", http.NoBody), "b-to-cancel")
 	if recCancel.Code != http.StatusOK {
 		t.Fatalf("handleBuildCancel status = %d, want %d", recCancel.Code, http.StatusOK)
+	}
+}
+
+func TestParseCreateBuildChunks_InitialStatus(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	raw := []CreateChunkInput{
+		{Title: "First Chunk", Instructions: "Do 1", Repo: "aerial", DependsOn: []string{}},
+		{Title: "Second Chunk", Instructions: "Do 2", Repo: "aerial", DependsOn: []string{"b-initial-chunk-1"}},
+	}
+	chunks, err := parseCreateBuildChunks("b-initial", now, raw)
+	if err != nil {
+		t.Fatalf("parseCreateBuildChunks failed: %v", err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(chunks))
+	}
+	for i, c := range chunks {
+		if c.Status != "pending" {
+			t.Errorf("chunk[%d].Status = %q, want %q", i, c.Status, "pending")
+		}
+		if !c.StartedAt.IsZero() {
+			t.Errorf("chunk[%d].StartedAt = %v, want zero time", i, c.StartedAt)
+		}
 	}
 }
