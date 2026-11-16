@@ -308,27 +308,28 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 	// Nil store
 	var sNil *PostgresVanadisStore
 	assert.Error(t, sNil.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
-	assert.Error(t, sNil.ResetPRCheckState(context.Background(), "c1", "b1", "sha-1", ""))
+	assert.Error(t, sNil.ResetPRCheckState(context.Background(), "c1", "sha-1", ""))
 
 	// Empty arguments
 	store, _ := dbScript{execTag: "UPDATE 1"}.open()
 	assert.Error(t, store.RecordPRCheckStatus(context.Background(), "", "sha-1", "test", "passed"))
 	assert.Error(t, store.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "", "passed"))
-	assert.Error(t, store.ResetPRCheckState(context.Background(), "", "b1", "sha-1", ""))
+	assert.Error(t, store.ResetPRCheckState(context.Background(), "", "sha-1", ""))
 
 	// Success
 	assert.NoError(t, store.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
-	assert.NoError(t, store.ResetPRCheckState(context.Background(), "c1", "b1", "sha-2", ""))
-	assert.NoError(t, store.ResetPRCheckState(context.Background(), "c1", "b1", "sha-2", "merge-sha-1"))
+	assert.NoError(t, store.ResetPRCheckState(context.Background(), "c1", "sha-2", ""))
+	assert.NoError(t, store.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
 
-	// Not found
+	// Skipped transition (0 rows affected)
 	storeZero, _ := dbScript{execTag: "UPDATE 0"}.open()
-	assert.ErrorIs(t, storeZero.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"), ErrChunkNotFound)
-	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "b1", "sha-2", ""), ErrChunkNotFound)
+	assert.ErrorIs(t, storeZero.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"), errPRTransitionSkipped)
+	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "sha-2", ""), errPRTransitionSkipped)
+	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"), errPRTransitionSkipped)
 
 	// DB Exec error
 	storeErr, _ := dbScript{execErr: errors.New("db error")}.open()
 	assert.Error(t, storeErr.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
-	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "b1", "sha-2", ""))
-	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "b1", "sha-2", "merge-sha-1"))
+	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "sha-2", ""))
+	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
 }

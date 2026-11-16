@@ -564,6 +564,17 @@ func (b *BuildObject) failMutation(ctx context.Context, buildID string, mutation
 	return nil
 }
 
+func recordSeenHead(rev *prRevisionState, sha string) {
+	clean := strings.ToLower(strings.TrimSpace(sha))
+	if clean == "" {
+		return
+	}
+	if rev.seenHeads == nil {
+		rev.seenHeads = make(map[string]bool)
+	}
+	rev.seenHeads[clean] = true
+}
+
 func (b *BuildObject) getChunkRevision(ctx context.Context, buildID, chunkID string) prRevisionState {
 	cleanID := strings.TrimSpace(chunkID)
 	b.revMu.Lock()
@@ -585,6 +596,7 @@ func (b *BuildObject) getChunkRevision(ctx context.Context, buildID, chunkID str
 						mergeSHA: strings.TrimSpace(c.MergeSHA),
 						merged:   c.Status == statusMerged || c.Status == statusSynced,
 					}
+					recordSeenHead(&seeded, seeded.headSHA)
 					break
 				}
 			}
@@ -605,29 +617,51 @@ func (b *BuildObject) setChunkRevision(chunkID string, rev prRevisionState) {
 	b.revMu.Unlock()
 }
 
-func (b *BuildObject) recordPRHeadRevision(ctx context.Context, buildID, chunkID, rawHeadSHA string) error {
-	headSHA := strings.TrimSpace(rawHeadSHA)
+func (b *BuildObject) recordPRHeadRevision(ctx context.Context, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
+	headSHA := strings.TrimSpace(ev.HeadSHA)
 	rev := b.getChunkRevision(ctx, buildID, chunkID)
-	rev.headSHA = firstNonEmpty(headSHA, rev.headSHA)
+	if rev.merged {
+		return errPRTransitionSkipped
+	}
+	if !ev.OccurredAt.IsZero() && !rev.headAt.IsZero() && ev.OccurredAt.Before(rev.headAt) {
+		return errPRTransitionSkipped
+	}
+	if headSHA != "" && rev.headSHA != "" && !strings.EqualFold(headSHA, rev.headSHA) && rev.seenHeads[strings.ToLower(headSHA)] {
+		return errPRTransitionSkipped
+	}
+	nextHead := firstNonEmpty(headSHA, rev.headSHA)
+	if err := b.store.ResetPRCheckState(ctx, chunkID, nextHead, ""); err != nil {
+		return err
+	}
+	recordSeenHead(&rev, rev.headSHA)
+	recordSeenHead(&rev, nextHead)
+	rev.headSHA = nextHead
 	rev.mergeSHA = ""
 	rev.merged = false
+	if !ev.OccurredAt.IsZero() {
+		rev.headAt = ev.OccurredAt
+	}
 	b.setChunkRevision(chunkID, rev)
-	return b.store.ResetPRCheckState(ctx, chunkID, buildID, rev.headSHA, "")
+	return nil
 }
 
 func (b *BuildObject) recordPRMergeRevision(ctx context.Context, buildID, chunkID, rawHeadSHA, rawMergeSHA string) {
 	headSHA := strings.TrimSpace(rawHeadSHA)
 	mergeSHA := strings.TrimSpace(rawMergeSHA)
 	rev := b.getChunkRevision(ctx, buildID, chunkID)
-	rev.headSHA = firstNonEmpty(headSHA, rev.headSHA)
-	rev.mergeSHA = firstNonEmpty(mergeSHA, rev.mergeSHA)
-	rev.merged = true
-	b.setChunkRevision(chunkID, rev)
-	if rev.headSHA != "" || rev.mergeSHA != "" {
-		if err := b.store.ResetPRCheckState(ctx, chunkID, buildID, rev.headSHA, rev.mergeSHA); err != nil {
+	nextHead := firstNonEmpty(headSHA, rev.headSHA)
+	nextMerge := firstNonEmpty(mergeSHA, rev.mergeSHA)
+	if nextHead != "" || nextMerge != "" {
+		if err := b.store.ResetPRCheckState(ctx, chunkID, nextHead, nextMerge); err != nil && !errors.Is(err, errPRTransitionSkipped) {
 			log.Printf("[vanadis-restate] reset merge check state warning: %v", err)
+			return
 		}
 	}
+	recordSeenHead(&rev, nextHead)
+	rev.headSHA = nextHead
+	rev.mergeSHA = nextMerge
+	rev.merged = true
+	b.setChunkRevision(chunkID, rev)
 }
 
 func (b *BuildObject) acceptPRCheckRevision(ctx context.Context, buildID, chunkID, rawSHA string) bool {
@@ -643,6 +677,7 @@ func (b *BuildObject) acceptPRCheckRevision(ctx context.Context, buildID, chunkI
 				rev.mergeSHA = sha
 			} else {
 				rev.headSHA = sha
+				recordSeenHead(&rev, sha)
 			}
 			b.setChunkRevision(chunkID, rev)
 		}
@@ -673,7 +708,7 @@ func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID,
 	_ = b.getChunkRevision(rc, buildID, chunkID)
 	switch event {
 	case "opened", "synchronize":
-		return b.recordPRHeadRevision(rc, buildID, chunkID, ev.HeadSHA)
+		return b.recordPRHeadRevision(rc, buildID, chunkID, ev)
 	case "check_updated":
 		return b.handlePRCheckEvent(rc, chunkID, event, ev)
 	case "check_failed", "ci_failed":
@@ -890,13 +925,13 @@ WHERE id = $3
 	case err != nil:
 		return fmt.Errorf("record pr check status: %w", err)
 	case tag.RowsAffected() == 0:
-		return ErrChunkNotFound
+		return errPRTransitionSkipped
 	default:
 		return nil
 	}
 }
 
-func (s *PostgresVanadisStore) ResetPRCheckState(ctx context.Context, chunkID, buildID, headSHA, mergeSHA string) error {
+func (s *PostgresVanadisStore) ResetPRCheckState(ctx context.Context, chunkID, headSHA, mergeSHA string) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
 	}
@@ -907,25 +942,55 @@ func (s *PostgresVanadisStore) ResetPRCheckState(ctx context.Context, chunkID, b
 	cleanHead := strings.TrimSpace(headSHA)
 	cleanMerge := strings.TrimSpace(mergeSHA)
 	if cleanMerge != "" {
-		const mergeQ = `UPDATE vanadis_chunks SET ci_checks = jsonb_strip_nulls(jsonb_build_object('_head_sha', NULLIF($2::text, ''), '_merge_sha', NULLIF($3::text, ''))), banner = '', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled');`
-		if _, err := s.db.Exec(ctx, mergeQ, id, cleanHead, cleanMerge); err != nil {
+		const mergeQ = `UPDATE vanadis_chunks
+SET ci_checks = CASE
+        WHEN COALESCE(ci_checks->>'_merge_sha', '') = $3
+            THEN jsonb_strip_nulls(COALESCE(ci_checks, '{}'::jsonb) || jsonb_build_object('_head_sha', NULLIF($2::text, ''), '_merge_sha', NULLIF($3::text, '')))
+        ELSE jsonb_strip_nulls(jsonb_build_object('_head_sha', NULLIF($2::text, ''), '_merge_sha', NULLIF($3::text, '')))
+    END,
+    banner = '',
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled');`
+		tag, err := s.db.Exec(ctx, mergeQ, id, cleanHead, cleanMerge)
+		if err != nil {
 			return fmt.Errorf("reset merge check state: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return errPRTransitionSkipped
 		}
 		return nil
 	}
-	const syncQ = `UPDATE vanadis_chunks SET ci_fail_count = CASE WHEN COALESCE(ci_checks->>'_head_sha', '') IS DISTINCT FROM $2 THEN 0 ELSE ci_fail_count END, ci_checks = CASE WHEN $2 != '' AND COALESCE(ci_checks->>'_head_sha', '') = $2 THEN ci_checks - '_merge_sha' WHEN $2 != '' THEN jsonb_build_object('_head_sha', $2::text) ELSE '{}'::jsonb END, banner = '', status = CASE WHEN status IN ('ci_failed', 'conflict', 'failed', 'deploy_failed') THEN 'pr_opened' ELSE status END, completed_at = CASE WHEN status IN ('failed', 'deploy_failed') THEN NULL ELSE completed_at END, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'completed', 'cancelled');`
+	const syncQ = `UPDATE vanadis_chunks AS c
+SET ci_fail_count = CASE WHEN COALESCE(c.ci_checks->>'_head_sha', '') IS DISTINCT FROM $2 THEN 0 ELSE c.ci_fail_count END,
+    ci_checks = CASE
+        WHEN $2 != '' AND COALESCE(c.ci_checks->>'_head_sha', '') = $2 THEN c.ci_checks - '_merge_sha'
+        WHEN $2 != '' THEN jsonb_strip_nulls(jsonb_build_object(
+            '_head_sha', $2::text,
+            '_seen_heads', NULLIF(CONCAT_WS(',', NULLIF(c.ci_checks->>'_seen_heads', ''), NULLIF(c.ci_checks->>'_head_sha', ''), $2::text), '')
+        ))
+        ELSE '{}'::jsonb
+    END,
+    banner = '',
+    status = CASE WHEN c.status IN ('ci_failed', 'conflict', 'deploy_failed') THEN 'pr_opened' ELSE c.status END,
+    completed_at = CASE WHEN c.status = 'deploy_failed' THEN NULL ELSE c.completed_at END,
+    updated_at = CURRENT_TIMESTAMP
+FROM vanadis_builds AS b
+WHERE c.id = $1
+  AND b.id = c.build_id
+  AND c.status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'completed', 'failed', 'cancelled')
+  AND b.status NOT IN ('completed', 'failed', 'cancelled')
+  AND (
+      $2 = ''
+      OR COALESCE(c.ci_checks->>'_head_sha', '') = ''
+      OR LOWER(c.ci_checks->>'_head_sha') = LOWER($2)
+      OR NOT (LOWER($2) = ANY(string_to_array(LOWER(COALESCE(c.ci_checks->>'_seen_heads', '')), ',')))
+  );`
 	tag, err := s.db.Exec(ctx, syncQ, id, cleanHead)
 	if err != nil {
 		return fmt.Errorf("reset pr check state: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrChunkNotFound
-	}
-	if bID := strings.TrimSpace(buildID); bID != "" {
-		const buildQ = `UPDATE vanadis_builds SET status = CASE WHEN status = 'failed' THEN 'running' ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
-		if _, err := s.db.Exec(ctx, buildQ, bID); err != nil {
-			return fmt.Errorf("reset build for synchronize: %w", err)
-		}
+		return errPRTransitionSkipped
 	}
 	return nil
 }

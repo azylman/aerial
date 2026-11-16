@@ -171,7 +171,7 @@ type VanadisStore interface {
 	RemoveChunk(ctx context.Context, buildID, chunkRef string) (*VanadisChunk, []VanadisChunk, error)
 	RecordPRRolloutState(ctx context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error
 	RecordPRCheckStatus(ctx context.Context, chunkID, headSHA, checkName, checkState string) error
-	ResetPRCheckState(ctx context.Context, chunkID, buildID, headSHA, mergeSHA string) error
+	ResetPRCheckState(ctx context.Context, chunkID, headSHA, mergeSHA string) error
 	CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
 	UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error
 	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
@@ -326,6 +326,7 @@ func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 				c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
 				delete(checks, "_head_sha")
 				delete(checks, "_merge_sha")
+				delete(checks, "_seen_heads")
 				if len(checks) > 0 {
 					c.CIChecks = checks
 				}

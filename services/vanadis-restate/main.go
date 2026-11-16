@@ -336,9 +336,11 @@ func (r restateObjectRuntime) ScheduleReconcile() {
 }
 
 type prRevisionState struct {
-	headSHA  string
-	mergeSHA string
-	merged   bool
+	headSHA   string
+	mergeSHA  string
+	merged    bool
+	headAt    time.Time
+	seenHeads map[string]bool
 }
 
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.

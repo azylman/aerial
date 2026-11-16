@@ -1053,14 +1053,13 @@ type checkStatusSpyStore struct {
 
 	calls     []string
 	resets    []string
-	chunks    []VanadisChunk
 	err       error
 	resetErr  error
 	statusErr error
 }
 
-func (s *checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
-	return &VanadisBuild{ID: buildID, Status: statusRunning}, s.chunks, nil
+func (*checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
+	return &VanadisBuild{ID: buildID, Status: statusRunning}, nil, nil
 }
 
 func (s *checkStatusSpyStore) RecordPRCheckStatus(_ context.Context, chunkID, headSHA, checkName, checkState string) error {
@@ -1068,8 +1067,8 @@ func (s *checkStatusSpyStore) RecordPRCheckStatus(_ context.Context, chunkID, he
 	return s.err
 }
 
-func (s *checkStatusSpyStore) ResetPRCheckState(_ context.Context, chunkID, buildID, headSHA, mergeSHA string) error {
-	s.resets = append(s.resets, chunkID+":"+buildID+":"+headSHA+":"+mergeSHA)
+func (s *checkStatusSpyStore) ResetPRCheckState(_ context.Context, chunkID, headSHA, mergeSHA string) error {
+	s.resets = append(s.resets, chunkID+":"+headSHA+":"+mergeSHA)
 	return s.resetErr
 }
 
@@ -1080,9 +1079,7 @@ func (s *checkStatusSpyStore) UpdatePRLifecycleStatus(_ context.Context, _, _ st
 func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	spy := &checkStatusSpyStore{
-		chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", HeadSHA: "sha-1", Status: "pr_opened"}},
-	}
+	spy := &checkStatusSpyStore{}
 	bo := NewBuildObject("", nil).WithAuthority(spy, nil)
 
 	// Empty check name is ignored
@@ -1103,8 +1100,15 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	assert.Equal(t, []string{"c1:sha-1:test:failed"}, spy.calls)
 
 	// synchronize advances tracked revision to sha-2 and resets check state
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-2"}))
-	assert.Equal(t, []string{"c1:b1:sha-2:"}, spy.resets)
+	t2 := time.Date(2026, 11, 16, 23, 0, 0, 0, time.UTC)
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", OccurredAt: t2}))
+	assert.Equal(t, []string{"c1:sha-2:"}, spy.resets)
+
+	// delayed synchronize for superseded sha-1 or older timestamp is rejected without mutating revision
+	spy.resets = nil
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-1"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-0", OccurredAt: t2.Add(-time.Minute)}), errPRTransitionSkipped)
+	assert.Empty(t, spy.resets)
 
 	// delayed check_updated and check_failed from old head sha-1 are rejected
 	spy.calls = nil
@@ -1116,17 +1120,26 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "passed"}))
 	assert.Equal(t, []string{"c1:sha-2:test:passed"}, spy.calls)
 
-	// merged resets check state for merge commit and rejects delayed pre-merge head sha-2 checks while accepting merge-sha-3 checks
+	// failed or skipped ResetPRCheckState on synchronize does not overwrite cached revision
+	spy.resetErr = errPRTransitionSkipped
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-unapplied"}), errPRTransitionSkipped)
+	spy.resetErr = nil
+	spy.calls = nil
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "passed"}))
+	assert.Equal(t, []string{"c1:sha-2:test:passed"}, spy.calls)
+
+	// merged resets check state for merge commit and rejects delayed pre-merge head sha-2 synchronize and checks while accepting merge-sha-3 checks
 	spy.calls = nil
 	spy.resets = nil
 	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", MergeSHA: "merge-sha-3"}))
-	assert.Equal(t, []string{"c1:b1:sha-2:merge-sha-3"}, spy.resets)
+	assert.Equal(t, []string{"c1:sha-2:merge-sha-3"}, spy.resets)
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-4"}), errPRTransitionSkipped)
 	assert.ErrorIs(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "pending"}), errPRTransitionSkipped)
 	assert.Empty(t, spy.calls)
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-sha-3", CheckName: "Build & Push Images (eri)", CheckState: "passed"}))
 	assert.Equal(t, []string{"c1:merge-sha-3:Build & Push Images (eri):passed"}, spy.calls)
 
-	// store error propagates
+	// store error on recordPRMergeRevision prevents cached revision overwrite; store error on check_updated propagates
 	spyErr := &checkStatusSpyStore{err: errors.New("db error"), resetErr: errors.New("reset err")}
 	boErr := NewBuildObject("", nil).WithAuthority(spyErr, nil)
 	boErr.recordPRMergeRevision(ctx, "b1", "c1", "sha-2", "merge-sha-3")
