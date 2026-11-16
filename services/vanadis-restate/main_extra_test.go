@@ -770,7 +770,7 @@ func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
 				{ID: "dependency", Mode: "action", Status: tc.dependencyStatus},
 			}
 			for i := range tc.siblings {
-				chunks = append(chunks, VanadisChunk{ID: fmt.Sprintf("sibling-%d", i), Mode: "pr", Status: "running"})
+				chunks = append(chunks, VanadisChunk{ID: fmt.Sprintf("sibling-%d", i), Mode: "pr", Status: "running", PRNumber: i + 1})
 			}
 			eri := &mockEriClient{}
 			bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, NewExecutor(t.TempDir(), eri, nil, "", nil))
@@ -864,4 +864,77 @@ func TestClassifyLaunchErrors(t *testing.T) {
 			assert.Equal(t, tc.wantDeferred, errors.Is(err, errDispatchActive))
 		})
 	}
+}
+
+type mockBusError struct {
+	pubsub.Bus
+
+	err error
+}
+
+func (m *mockBusError) Publish(context.Context, string, string, any) error {
+	return m.err
+}
+
+func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
+	t.Parallel()
+	b1 := VanadisBuild{ID: "b-err", Status: "running", ThreadID: "th-1"}
+	c1 := VanadisChunk{ID: "c1", BuildID: "b-err", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "action"}
+	store, _ := dbScript{
+		buildRow: &mockRow{b: &b1},
+		chunks:   []VanadisChunk{c1},
+		execTag:  "UPDATE 1",
+	}.open()
+	eriErr := &mockEriClient{
+		cancelFn:  func(context.Context, string) error { return errors.New("cancel err") },
+		promptFn:  func(context.Context, string, string) error { return errors.New("prompt err") },
+		widgetFn:  func(context.Context, StatusWidgetRequest) (string, error) { return "", errors.New("widget err") },
+		messageFn: func(context.Context, string, string) error { return errors.New("msg err") },
+	}
+	mockBusErr := &mockBusError{err: errors.New("pub err")}
+	execErr := NewExecutor(t.TempDir(), eriErr, mockBusErr, "token", nil)
+	boErr := NewBuildObject("", nil).WithAuthority(store, execErr)
+
+	// notifyBuildTerminal error branches
+	boErr.notifyBuildTerminal(context.Background(), &b1, []VanadisChunk{c1}, "failed", "chunk failed", "TITLE", "MSG")
+
+	// notifyChunkFailure error branches
+	ctx := makeObjectMockContext(t, "b-err")
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		boErr.notifyChunkFailure(rc, b1, "c1", "reason")
+		return true, nil
+	})
+
+	// dispatchThreadWakePrompt error branches
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		boErr.dispatchThreadWakePrompt(rc, "b-err", "prompt")
+		return true, nil
+	})
+
+	// persistBuildCreation error branches
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		_, _ = boErr.persistBuildCreation(rc, b1, []VanadisChunk{c1})
+		return true, nil
+	})
+
+	// handlePREventType error branches
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		boErr.handlePREventType(rc, "b-err", "c1", "check_failed", pubsub.PRLifecycleEvent{Event: "check_failed", Repo: "aerial"})
+		boErr.handlePREventType(rc, "b-err", "c1", "conflict", pubsub.PRLifecycleEvent{Event: "conflict"})
+		boErr.handlePREventType(rc, "b-err", "c1", "merged", pubsub.PRLifecycleEvent{Event: "merged"})
+		return true, nil
+	})
+
+	storeErr, _ := dbScript{bare: nilDB}.open()
+	boStoreErr := NewBuildObject("", nil).WithAuthority(storeErr, execErr)
+	for _, act := range []string{"chunk_merged", "chunk_deploy_success", "action_completed", "chunk_failed", "cancelled"} {
+		boStoreErr.applyMutation(context.Background(), "b-err", &BuildMutationRequest{Action: act, ChunkID: "c1", Reason: "test"})
+	}
+	_, _ = boStoreErr.AttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
+	_, _ = boErr.AttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		boStoreErr.dispatchThreadWakePrompt(rc, "b-err", "prompt")
+		return true, nil
+	})
+	_ = boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}})
 }

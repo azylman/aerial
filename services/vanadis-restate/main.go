@@ -932,9 +932,7 @@ func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutatio
 	return nil
 }
 
-func (b *BuildObject) launchEligibleChunks(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, launchedMap map[string]bool) ([]string, error) {
-	var launchedChunks []string
-	var launchErrors []error
+func countActiveChunks(chunks []VanadisChunk) int {
 	activeCount := 0
 	for _, c := range chunks {
 		s := strings.ToLower(strings.TrimSpace(c.Status))
@@ -942,17 +940,24 @@ func (b *BuildObject) launchEligibleChunks(ctx context.Context, build VanadisBui
 			activeCount++
 		}
 	}
+	return activeCount
+}
+
+func (b *BuildObject) launchEligibleChunks(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, launchedMap map[string]bool) ([]string, error) {
+	var launchedChunks []string
+	var launchErrors []error
+	activeCount := countActiveChunks(chunks)
 
 	for idx, chunk := range chunks {
 		s := strings.ToLower(strings.TrimSpace(chunk.Status))
-		resuming := s == statusRunning && chunk.Mode == chunkModeAction && chunk.StallNudges > 0
+		key := actionLaunchKey(chunk)
+		resuming := s == statusRunning && ((chunk.Mode == chunkModeAction && chunk.StallNudges > 0) || (chunk.Mode != chunkModeAction && chunk.PRNumber == 0 && !launchedMap[key]))
 		if s != statusPending && s != "queued" && !resuming {
 			continue
 		}
 		if checkChunkDependenciesReady(chunk, chunks) != nil {
 			continue
 		}
-		key := actionLaunchKey(chunk)
 		if (!resuming && activeCount >= 4) || launchedMap[key] || b.executor == nil {
 			continue
 		}
