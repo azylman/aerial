@@ -177,6 +177,10 @@ spec:
               name: oauth-token
               readOnly: true
               subPath: antigravity-oauth-token
+            - mountPath: /local/codex-auth.json
+              name: codex-auth
+              readOnly: true
+              subPath: codex-auth.json
             - mountPath: /secrets
               name: shared-secrets
               readOnly: true
@@ -342,6 +346,14 @@ spec:
             items:
               - key: ANTIGRAVITY_OAUTH_TOKEN
                 path: antigravity-oauth-token
+            optional: true
+            secretName: eri-secret
+        - name: codex-auth
+          secret:
+            defaultMode: 384
+            items:
+              - key: CODEX_AUTH_JSON
+                path: codex-auth.json
             optional: true
             secretName: eri-secret
         - name: shared-secrets

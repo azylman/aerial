@@ -22,6 +22,9 @@ const (
 	stepTypePlannerResponse = "PLANNER_RESPONSE"
 	stepSourceUserExplicit  = "USER_EXPLICIT"
 	stepStatusDone          = "DONE"
+	sourceModel             = "MODEL"
+	roleUser                = "user"
+	roleAssistant           = "assistant"
 )
 
 type rawTranscriptStep struct {
@@ -206,7 +209,7 @@ func SyncTranscripts(
 		return stats, fmt.Errorf("load session sync states: %w", err)
 	}
 
-	discovered := discoverSessions(targetBrainDir, entries, opts.ClaudeProjectsDir)
+	discovered := discoverSessions(targetBrainDir, entries, opts.ClaudeProjectsDir, opts.CodexSessionsDir)
 
 	// Deterministic ordering of sessions
 	sessionIDs := make([]string, 0, len(discovered))
@@ -258,9 +261,10 @@ func SyncTranscripts(
 	return stats, nil
 }
 
-// discoverSessions maps every session ID found under the brain dir (agy) and the Claude project
-// dirs (Claude Code) to its transcript path and engine. Brain-dir entries win on ID collisions.
-func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjectsDir string) map[string]discoveredSession {
+// discoverSessions maps every session ID found under the brain dir (agy), Claude project
+// dirs (Claude Code), and Codex sessions dirs (Codex) to its transcript path and engine.
+// Brain-dir entries win on ID collisions.
+func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjectsDir string, codexSessionsDir ...string) map[string]discoveredSession {
 	discovered := make(map[string]discoveredSession)
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -288,7 +292,137 @@ func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjec
 	)
 	discoverClaudeProjectSessions(claudeBases, discovered)
 
+	// Also discover Codex sessions from Codex sessions directories
+	var codexBases []string
+	if len(codexSessionsDir) > 0 && codexSessionsDir[0] != "" {
+		codexBases = append(codexBases, codexSessionsDir[0])
+	}
+	codexBases = append(codexBases,
+		filepath.Clean(filepath.Join(targetBrainDir, "..", "codex", "sessions")),
+		filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "codex", "sessions")),
+		filepath.Clean(filepath.Join(targetBrainDir, "..", ".codex", "sessions")),
+	)
+	discoverCodexSessions(codexBases, discovered)
+
 	return discovered
+}
+
+// discoverCodexSessions scans Codex session base directories for session files.
+func discoverCodexSessions(codexBases []string, discovered map[string]discoveredSession) {
+	seenCodexBase := make(map[string]bool)
+	for _, base := range codexBases {
+		if seenCodexBase[base] {
+			continue
+		}
+		seenCodexBase[base] = true
+		fi, err := os.Stat(base)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+		if err := filepath.WalkDir(base, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d == nil || d.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(d.Name(), ".jsonl") {
+				return nil
+			}
+			name := strings.TrimSuffix(d.Name(), ".jsonl")
+			if name == "" || strings.HasPrefix(name, ".") {
+				return nil
+			}
+			sessionID := extractCodexSessionID(path, name)
+			if sessionID == "" || strings.HasPrefix(sessionID, ".") {
+				return nil
+			}
+			if _, exists := discovered[sessionID]; !exists {
+				discovered[sessionID] = discoveredSession{path: path, engine: EngineCodex}
+			}
+			return nil
+		}); err != nil {
+			log.Printf("[Transcript] WalkDir %s: %v", base, err)
+		}
+	}
+}
+
+func scanCodexMetaSessionID(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("[Transcript] Error closing file %s: %v", path, closeErr)
+		}
+	}()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var meta struct {
+			Type    string `json:"type"`
+			Payload struct {
+				ID        string `json:"id"`
+				SessionID string `json:"session_id"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal([]byte(line), &meta); err == nil && meta.Type == "session_meta" {
+			if meta.Payload.ID != "" {
+				return meta.Payload.ID
+			}
+			if meta.Payload.SessionID != "" {
+				return meta.Payload.SessionID
+			}
+		}
+		break
+	}
+	return ""
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := range 36 {
+		c := s[i]
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+		} else if !isHexDigit(c) {
+			return false
+		}
+	}
+	return true
+}
+
+func extractCodexSessionID(path, name string) string {
+	if id := scanCodexMetaSessionID(path); id != "" {
+		return id
+	}
+	if rest, ok := strings.CutPrefix(name, "rollout-"); ok {
+		if testRest, ok := strings.CutPrefix(rest, "test-"); ok {
+			return testRest
+		}
+		if len(rest) >= 36 {
+			cand := rest[len(rest)-36:]
+			if isUUID(cand) && (len(rest) == 36 || rest[len(rest)-37] == '-') {
+				return cand
+			}
+		}
+		return rest
+	}
+	return name
 }
 
 // discoveredSession locates a session transcript on disk and the engine that wrote it.
@@ -297,10 +431,17 @@ type discoveredSession struct {
 	engine string
 }
 
-// engineForPath attributes transcripts inside the brain dir to agy and everything else
-// (Claude project dirs) to Claude Code.
+// engineForPath attributes transcripts to codex, agy, or claude.
 func engineForPath(brainDir, transcriptPath string) string {
-	if strings.HasPrefix(filepath.Clean(transcriptPath), filepath.Clean(brainDir)+string(filepath.Separator)) {
+	cleanPath := filepath.Clean(transcriptPath)
+	slashPath := filepath.ToSlash(cleanPath)
+	baseName := filepath.Base(cleanPath)
+	if strings.Contains(slashPath, "codex/sessions") ||
+		strings.Contains(slashPath, ".codex/sessions") ||
+		strings.HasPrefix(baseName, "rollout-") {
+		return EngineCodex
+	}
+	if strings.HasPrefix(cleanPath, filepath.Clean(brainDir)+string(filepath.Separator)) {
 		return EngineAgy
 	}
 	return EngineClaude
@@ -386,18 +527,7 @@ func discoverClaudeProjectSessions(claudeBases []string, discovered map[string]d
 	}
 }
 
-func findTranscriptFile(brainDir, sessionID string) string {
-	candidates := []string{
-		filepath.Join(brainDir, sessionID, ".system_generated", "logs", "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID, "system_generated", "logs", "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID, "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID+".jsonl"),
-	}
-	for _, c := range candidates {
-		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
-			return c
-		}
-	}
+func findClaudeTranscriptFile(brainDir, sessionID string) string {
 	for _, claudeBase := range []string{
 		filepath.Clean(filepath.Join(brainDir, "..", "claude", "projects")),
 		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "claude", "projects")),
@@ -415,6 +545,57 @@ func findTranscriptFile(brainDir, sessionID string) string {
 		}
 	}
 	return ""
+}
+
+func findCodexTranscriptFile(brainDir, sessionID string) string {
+	for _, codexBase := range []string{
+		filepath.Clean(filepath.Join(brainDir, "..", "codex", "sessions")),
+		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "codex", "sessions")),
+		filepath.Clean(filepath.Join(brainDir, "..", ".codex", "sessions")),
+	} {
+		if fi, err := os.Stat(codexBase); err != nil || !fi.IsDir() {
+			continue
+		}
+		for _, cand := range []string{
+			filepath.Join(codexBase, sessionID+".jsonl"),
+			filepath.Join(codexBase, "rollout-"+sessionID+".jsonl"),
+		} {
+			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+				return cand
+			}
+		}
+		if matches, err := filepath.Glob(filepath.Join(codexBase, "rollout-*-"+sessionID+".jsonl")); err == nil && len(matches) > 0 {
+			return matches[0]
+		}
+		for _, pat := range []string{
+			filepath.Join(codexBase, "*", "*", "*", sessionID+".jsonl"),
+			filepath.Join(codexBase, "*", "*", "*", "rollout-"+sessionID+".jsonl"),
+			filepath.Join(codexBase, "*", "*", "*", "rollout-*-"+sessionID+".jsonl"),
+		} {
+			if matches, err := filepath.Glob(pat); err == nil && len(matches) > 0 {
+				return matches[0]
+			}
+		}
+	}
+	return ""
+}
+
+func findTranscriptFile(brainDir, sessionID string) string {
+	candidates := []string{
+		filepath.Join(brainDir, sessionID, ".system_generated", "logs", "transcript.jsonl"),
+		filepath.Join(brainDir, sessionID, "system_generated", "logs", "transcript.jsonl"),
+		filepath.Join(brainDir, sessionID, "transcript.jsonl"),
+		filepath.Join(brainDir, sessionID+".jsonl"),
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	if cand := findClaudeTranscriptFile(brainDir, sessionID); cand != "" {
+		return cand
+	}
+	return findCodexTranscriptFile(brainDir, sessionID)
 }
 
 type transcriptScanState struct {
@@ -644,7 +825,7 @@ func (st *transcriptScanState) parseClaudeAssistantEntry(claude claudeEntry) boo
 
 		raw := rawTranscriptStep{
 			StepIndex: st.maxStepIndex + 1,
-			Source:    "MODEL",
+			Source:    sourceModel,
 			Type:      stepTypePlannerResponse,
 			Status:    stepStatusDone,
 			CreatedAt: claude.Timestamp,
@@ -660,7 +841,7 @@ func (st *transcriptScanState) parseClaudeAssistantEntry(claude claudeEntry) boo
 	if err := json.Unmarshal(claude.Message.Content, &text); err == nil {
 		raw := rawTranscriptStep{
 			StepIndex: st.maxStepIndex + 1,
-			Source:    "MODEL",
+			Source:    sourceModel,
 			Type:      stepTypePlannerResponse,
 			Status:    stepStatusDone,
 			CreatedAt: claude.Timestamp,
@@ -674,13 +855,261 @@ func (st *transcriptScanState) parseClaudeAssistantEntry(claude claudeEntry) boo
 
 func (st *transcriptScanState) parseClaudeEntry(claude claudeEntry) bool {
 	switch claude.Type {
-	case "user":
+	case roleUser:
 		return st.parseClaudeUserEntry(claude)
-	case "assistant":
+	case roleAssistant:
 		return st.parseClaudeAssistantEntry(claude)
 	default:
 		return false
 	}
+}
+
+type codexLineEnvelope struct {
+	Type      string          `json:"type"`
+	Timestamp string          `json:"timestamp"`
+	CreatedAt string          `json:"created_at"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+type codexPayload struct {
+	Type      string          `json:"type"`
+	Role      string          `json:"role"`
+	Content   json.RawMessage `json:"content"`
+	Text      string          `json:"text"`
+	Summary   string          `json:"summary"`
+	Name      string          `json:"name"`
+	CallID    string          `json:"call_id"`
+	ID        string          `json:"id"`
+	Arguments json.RawMessage `json:"arguments"`
+	Input     json.RawMessage `json:"input"`
+	Command   string          `json:"command"`
+	Cmd       string          `json:"cmd"`
+	Query     string          `json:"query"`
+	Output    json.RawMessage `json:"output"`
+	Status    string          `json:"status"`
+	IsError   bool            `json:"is_error"`
+}
+
+func extractCodexText(content json.RawMessage, textFallback string) string {
+	if textFallback != "" {
+		return textFallback
+	}
+	if len(content) == 0 {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(content, &text); err == nil {
+		return text
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &blocks); err == nil {
+		var parts []string
+		for _, b := range blocks {
+			switch b.Type {
+			case "text", "input_text", "output_text":
+				if strings.TrimSpace(b.Text) != "" {
+					parts = append(parts, b.Text)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return string(content)
+}
+
+func extractOutputText(raw json.RawMessage, textFallback string) string {
+	if textFallback != "" {
+		return textFallback
+	}
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
+}
+
+func (st *transcriptScanState) parseCodexEntry(env codexLineEnvelope) bool {
+	switch env.Type {
+	case "session_meta", "turn_context", "event_msg":
+		return true
+	case "response_item":
+	default:
+		return false
+	}
+
+	if len(env.Payload) == 0 {
+		return false
+	}
+	var payload codexPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return false
+	}
+
+	ts := env.Timestamp
+	if ts == "" {
+		ts = env.CreatedAt
+	}
+
+	switch payload.Type {
+	case "message":
+		text := extractCodexText(payload.Content, payload.Text)
+		switch payload.Role {
+		case roleUser:
+			raw := rawTranscriptStep{
+				StepIndex: st.maxStepIndex + 1,
+				Source:    stepSourceUserExplicit,
+				Type:      stepTypeUserInput,
+				Status:    stepStatusDone,
+				CreatedAt: ts,
+				Content:   text,
+			}
+			st.recordStep(raw)
+			return true
+		case roleAssistant:
+			raw := rawTranscriptStep{
+				StepIndex: st.maxStepIndex + 1,
+				Source:    sourceModel,
+				Type:      stepTypePlannerResponse,
+				Status:    stepStatusDone,
+				CreatedAt: ts,
+				Content:   text,
+			}
+			st.recordStep(raw)
+			return true
+		default:
+			return true
+		}
+
+	case "reasoning":
+		text := extractCodexText(payload.Content, payload.Text)
+		if text == "" && payload.Summary != "" {
+			text = payload.Summary
+		}
+		raw := rawTranscriptStep{
+			StepIndex: st.maxStepIndex + 1,
+			Source:    sourceModel,
+			Type:      stepTypePlannerResponse,
+			Status:    stepStatusDone,
+			CreatedAt: ts,
+			Thinking:  text,
+		}
+		st.recordStep(raw)
+		return true
+
+	case "function_call", "custom_tool_call", "local_shell_call", "web_search_call":
+		return parseCodexToolCall(payload, ts, st)
+
+	case "function_call_output", "custom_tool_call_output":
+		return parseCodexToolOutput(payload, ts, st)
+
+	default:
+		return false
+	}
+}
+
+func parseCodexToolCall(payload codexPayload, ts string, st *transcriptScanState) bool {
+	var toolName, callID string
+	var args json.RawMessage
+
+	switch payload.Type {
+	case "function_call", "custom_tool_call":
+		toolName = payload.Name
+		callID = payload.CallID
+		if callID == "" {
+			callID = payload.ID
+		}
+		args = payload.Arguments
+		if len(args) == 0 {
+			args = payload.Input
+		}
+	case "local_shell_call":
+		toolName = "local_shell"
+		callID = payload.CallID
+		if callID == "" {
+			callID = payload.ID
+		}
+		cmd := payload.Command
+		if cmd == "" {
+			cmd = payload.Cmd
+		}
+		switch {
+		case len(payload.Arguments) > 0:
+			args = payload.Arguments
+		case len(payload.Input) > 0:
+			args = payload.Input
+		case cmd != "":
+			args = json.RawMessage(fmt.Sprintf(`{"command":%q}`, cmd))
+		}
+	case "web_search_call":
+		toolName = "web_search"
+		callID = payload.CallID
+		if callID == "" {
+			callID = payload.ID
+		}
+		switch {
+		case len(payload.Arguments) > 0:
+			args = payload.Arguments
+		case len(payload.Input) > 0:
+			args = payload.Input
+		case payload.Query != "":
+			args = json.RawMessage(fmt.Sprintf(`{"query":%q}`, payload.Query))
+		}
+	default:
+		return false
+	}
+
+	var strArgs string
+	if json.Unmarshal(args, &strArgs) == nil {
+		args = json.RawMessage(strArgs)
+	}
+	raw := rawTranscriptStep{
+		StepIndex: st.maxStepIndex + 1,
+		Source:    sourceModel,
+		Type:      stepTypePlannerResponse,
+		Status:    stepStatusDone,
+		CreatedAt: ts,
+		ToolName:  toolName,
+		ToolCalls: []rawToolCall{{Name: toolName, Args: args, ID: callID}},
+	}
+	if callID != "" {
+		st.registerClaudeToolUse(claudeContentBlock{ID: callID, Name: toolName})
+	}
+	st.recordStep(raw)
+	return true
+}
+
+func parseCodexToolOutput(payload codexPayload, ts string, st *transcriptScanState) bool {
+	callID := payload.CallID
+	if callID == "" {
+		callID = payload.ID
+	}
+	status := stepStatusDone
+	if payload.IsError || strings.EqualFold(payload.Status, "error") || strings.EqualFold(payload.Status, "failed") {
+		status = "ERROR"
+	}
+	outputStr := extractOutputText(payload.Output, payload.Text)
+	toolName := ""
+	if callID != "" && st.claudeToolNames != nil {
+		toolName = st.claudeToolNames[callID]
+	}
+	raw := rawTranscriptStep{
+		StepIndex:  st.maxStepIndex + 1,
+		Source:     stepTypeTool,
+		Type:       stepTypeTool,
+		Status:     status,
+		CreatedAt:  ts,
+		Content:    outputStr,
+		ToolName:   toolName,
+		ToolCallID: callID,
+	}
+	st.recordStep(raw)
+	return true
 }
 
 func (st *transcriptScanState) parseLine(line string, isLast bool, stats *SyncStats) {
@@ -692,6 +1121,13 @@ func (st *transcriptScanState) parseLine(line string, isLast bool, stats *SyncSt
 	var claude claudeEntry
 	if err := json.Unmarshal([]byte(trimmed), &claude); err == nil && claude.Message != nil && (claude.Type == "user" || claude.Type == "assistant") {
 		if st.parseClaudeEntry(claude) {
+			return
+		}
+	}
+
+	var codex codexLineEnvelope
+	if err := json.Unmarshal([]byte(trimmed), &codex); err == nil && codex.Type != "" {
+		if st.parseCodexEntry(codex) {
 			return
 		}
 	}

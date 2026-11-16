@@ -151,6 +151,7 @@ func TestComputeVoiceConfigFingerprint_TableDriven(t *testing.T) {
 		apiKey          string
 		cfgEngine       string
 		claudeBin       string
+		codexBin        string
 		wantMatchEngine string
 	}{
 		{
@@ -173,6 +174,30 @@ func TestComputeVoiceConfigFingerprint_TableDriven(t *testing.T) {
 			effectiveModel: "model-a",
 			cfgEngine:      "claude",
 			claudeBin:      "/custom/bin/claude",
+		},
+		{
+			name:           "codex_engine_default_bin",
+			voiceEngine:    "agy",
+			effectiveModel: "model-a",
+			cfgEngine:      "codex",
+			claudeBin:      "claude",
+			codexBin:       "codex",
+		},
+		{
+			name:           "codex_engine_custom_bin",
+			voiceEngine:    "agy",
+			effectiveModel: "model-a",
+			cfgEngine:      "codex",
+			claudeBin:      "claude",
+			codexBin:       "/opt/codex/bin/codex",
+		},
+		{
+			name:           "agy_engine_custom_codex_bin",
+			voiceEngine:    "agy",
+			effectiveModel: "model-a",
+			cfgEngine:      "agy",
+			claudeBin:      "claude",
+			codexBin:       "/custom/codex",
 		},
 		{
 			name:           "gemini_api_agy",
@@ -199,6 +224,7 @@ func TestComputeVoiceConfigFingerprint_TableDriven(t *testing.T) {
 			cur := &config.ConfigData{
 				Engine:    tt.cfgEngine,
 				ClaudeBin: tt.claudeBin,
+				CodexBin:  tt.codexBin,
 			}
 			fp := computeVoiceConfigFingerprint(tt.voiceEngine, tt.effectiveModel, tt.apiKey, cur, nil, nil)
 			if fp == "" {
@@ -215,6 +241,15 @@ func TestComputeVoiceConfigFingerprint_TableDriven(t *testing.T) {
 
 	if fingerprints["baseline_agy"] == fingerprints["claude_engine"] {
 		t.Errorf("expected fingerprints for different process engines to differ")
+	}
+	if fingerprints["baseline_agy"] == fingerprints["codex_engine_default_bin"] {
+		t.Errorf("expected fingerprints for agy vs codex to differ")
+	}
+	if fingerprints["codex_engine_default_bin"] == fingerprints["codex_engine_custom_bin"] {
+		t.Errorf("expected fingerprints for custom codex bin to differ")
+	}
+	if fingerprints["baseline_agy"] == fingerprints["agy_engine_custom_codex_bin"] {
+		t.Errorf("expected fingerprints with custom codex bin under agy to differ")
 	}
 	if fingerprints["baseline_agy"] == fingerprints["different_model"] {
 		t.Errorf("expected fingerprints for different models to differ")

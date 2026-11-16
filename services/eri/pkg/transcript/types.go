@@ -21,6 +21,7 @@ type SyncOptions struct {
 	HeadLimit         int           `json:"head_limit"`
 	TailLimit         int           `json:"tail_limit"`
 	ClaudeProjectsDir string        `json:"claude_projects_dir,omitempty"`
+	CodexSessionsDir  string        `json:"codex_sessions_dir,omitempty"`
 	// MCPServers lists configured MCP server names used to normalize agy mcp_<server>_<tool> names.
 	MCPServers []string      `json:"mcp_servers,omitempty"`
 	Embedder   EmbedderFunc  `json:"-"`

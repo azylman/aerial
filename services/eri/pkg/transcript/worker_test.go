@@ -848,6 +848,10 @@ func TestFindTranscriptFile_PathResolution(t *testing.T) {
 		{name: "claude relative 1", relPath: "../claude/projects/p1/s-claude1.jsonl", sessionID: "s-claude1", wantFound: true},
 		{name: "claude relative 2", relPath: "../../../claude/projects/p2/s-claude2.jsonl", sessionID: "s-claude2", wantFound: true},
 		{name: "claude relative dot claude", relPath: "../.claude/projects/p3/s-claude3.jsonl", sessionID: "s-claude3", wantFound: true},
+		{name: "codex relative direct", relPath: "../codex/sessions/s-codex1.jsonl", sessionID: "s-codex1", wantFound: true},
+		{name: "codex relative rollout", relPath: "../codex/sessions/rollout-s-codex2.jsonl", sessionID: "s-codex2", wantFound: true},
+		{name: "codex relative nested", relPath: "../../../codex/sessions/2026/11/15/rollout-t-s-codex3.jsonl", sessionID: "s-codex3", wantFound: true},
+		{name: "codex relative dot codex", relPath: "../.codex/sessions/rollout-s-codex4.jsonl", sessionID: "s-codex4", wantFound: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1121,6 +1125,7 @@ type syncTranscriptsEngineCase struct {
 	name         string
 	brainFiles   []sessionFileFixture
 	claudeFiles  []sessionFileFixture
+	codexFiles   []sessionFileFixture
 	priorSummary *db.SessionSummary
 	priorSteps   []db.TranscriptStep
 	mcpServers   []string
@@ -1141,6 +1146,20 @@ func syncTranscriptsEngineCases() []syncTranscriptsEngineCase {
 		`{"type":"assistant","timestamp":"2026-10-01T10:00:02Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_disk","name":"Bash","input":{"command":"df -h"}}]}}`,
 		`{"type":"user","timestamp":"2026-10-01T10:00:05Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_disk","is_error":false,"content":"/dev/sda1 50G 20G 30G"}]}}`,
 	}, "\n") + "\n"
+	codexRollout := strings.Join([]string{
+		`{"type":"session_meta","payload":{"id":"sess-codex-kinds"}}`,
+		`{"type":"turn_context","payload":{"model":"o3-mini"}}`,
+		`{"type":"event_msg","payload":{"type":"status"}}`,
+		`{"type":"response_item","timestamp":"2026-10-01T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"Inspect files"}]}}`,
+		`{"type":"response_item","timestamp":"2026-10-01T10:00:01Z","payload":{"type":"reasoning","text":"Thinking about inspection"}}`,
+		`{"type":"response_item","timestamp":"2026-10-01T10:00:02Z","payload":{"type":"local_shell_call","call_id":"call_1","command":"ls -la"}}`,
+		`{"type":"response_item","timestamp":"2026-10-01T10:00:04Z","payload":{"type":"function_call_output","call_id":"call_1","output":"total 0"}}`,
+		`{"type":"response_item","timestamp":"2026-10-01T10:00:05Z","payload":{"type":"web_search_call","call_id":"call_2","query":"golang docs"}}`,
+		`{"type":"response_item","timestamp":"2026-10-01T10:00:06Z","payload":{"type":"custom_tool_call_output","call_id":"call_2","output":"golang.org"}}`,
+		`{"type":"response_item","timestamp":"2026-10-01T10:00:07Z","payload":{"type":"function_call","name":"apply_patch","call_id":"call_3","arguments":"{}"}}`,
+		`{"type":"response_item","timestamp":"2026-10-01T10:00:08Z","payload":{"type":"function_call_output","call_id":"call_3","output":"ok"}}`,
+		`{"type":"response_item","timestamp":"2026-10-01T10:00:09Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"All done."}]}}`,
+	}, "\n") + "\n"
 	future := time.Now().Add(time.Hour).UTC()
 
 	return []syncTranscriptsEngineCase{
@@ -1158,6 +1177,20 @@ func syncTranscriptsEngineCases() []syncTranscriptsEngineCase {
 			session:     "sess-claude-kinds",
 			wantEngine:  "claude",
 			wantKinds:   []string{"Bash=shell|", "Bash=shell|toolu_disk"},
+		},
+		{
+			name:       "codex session records engine, kind and tool call id",
+			codexFiles: []sessionFileFixture{{sessionID: "sess-codex-kinds", content: codexRollout, age: time.Hour}},
+			session:    "sess-codex-kinds",
+			wantEngine: "codex",
+			wantKinds: []string{
+				"local_shell=shell|",
+				"local_shell=shell|call_1",
+				"web_search=web|",
+				"web_search=web|call_2",
+				"apply_patch=edit|",
+				"apply_patch=edit|call_3",
+			},
 		},
 		{
 			name:         "unchanged legacy session gets its engine stamped and kinds backfilled",
@@ -1188,6 +1221,17 @@ func syncTranscriptsEngineCases() []syncTranscriptsEngineCase {
 			session:    "sess-orphan",
 			wantEngine: "claude",
 			wantKinds:  []string{"Bash=shell|", "mcp__github__get_me=mcp:github|"},
+		},
+		{
+			name:         "session without a raw log gets its engine inferred as codex from tool steps",
+			priorSummary: &db.SessionSummary{SessionID: "sess-orphan-codex", LastIndexedStep: 1, LastMtime: future, SummaryStepWatermark: 1, IsSettled: true},
+			priorSteps: []db.TranscriptStep{
+				{SessionID: "sess-orphan-codex", StepIndex: 0, StepType: "assistant", ToolName: "local_shell", Content: "ls"},
+				{SessionID: "sess-orphan-codex", StepIndex: 1, StepType: "assistant", ToolName: "apply_patch", Content: "{}"},
+			},
+			session:    "sess-orphan-codex",
+			wantEngine: "codex",
+			wantKinds:  []string{"local_shell=shell|", "apply_patch=edit|"},
 		},
 		{
 			name:         "engine backfill failure is logged and leaves the engine empty",
@@ -1240,19 +1284,7 @@ func runSyncTranscriptsEngineAndKindsCase(t *testing.T, tc syncTranscriptsEngine
 			t.Fatalf("seed steps: %v", err)
 		}
 	}
-	for _, f := range tc.brainFiles {
-		writeTranscriptFile(t, brainDir, f.sessionID, f.content, time.Now().Add(-f.age))
-	}
-	for _, f := range tc.claudeFiles {
-		p := filepath.Join(projDir, f.sessionID+".jsonl")
-		if err := os.WriteFile(p, []byte(f.content), 0o644); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		mtime := time.Now().Add(-f.age).Truncate(time.Second)
-		if err := os.Chtimes(p, mtime, mtime); err != nil {
-			t.Fatalf("chtimes: %v", err)
-		}
-	}
+	populateSyncTranscriptsEngineFixtures(t, tmp, brainDir, projDir, tc)
 
 	if tc.failMethod != "" {
 		store.FailNext(tc.failMethod, errors.New("simulated "+tc.failMethod+" failure"))
@@ -1304,6 +1336,9 @@ func TestEngineForPath(t *testing.T) {
 		{name: "brain dir with trailing slash", brainDir: "/data/brain/", path: "/data/brain/sess-1.jsonl", want: "agy"},
 		{name: "claude project transcript resolved for a brain entry", brainDir: "/data/brain", path: "/data/claude/projects/-proj/sess-1.jsonl", want: "claude"},
 		{name: "sibling dir sharing the brain prefix", brainDir: "/data/brain", path: "/data/brain-old/sess-1.jsonl", want: "claude"},
+		{name: "codex sessions dir", brainDir: "/data/brain", path: "/data/codex/sessions/2026/11/15/rollout-sess-1.jsonl", want: "codex"},
+		{name: "dot codex sessions dir", brainDir: "/data/brain", path: "/data/runtimes/discord/.codex/sessions/sess-1.jsonl", want: "codex"},
+		{name: "rollout prefix anywhere", brainDir: "/data/brain", path: "/some/path/rollout-2026-sess-1.jsonl", want: "codex"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
