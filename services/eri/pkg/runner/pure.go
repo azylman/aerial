@@ -72,6 +72,7 @@ var exactSecretKeys = map[string]struct{}{
 	"DISCORD_TOKEN":                   {},
 	"DISCORD_BOT_TOKEN":               {},
 	"MARIDA_DISCORD_BOT_TOKEN":        {},
+	"MIORINE_DISCORD_BOT_TOKEN":       {},
 	"DATABASE_URL":                    {},
 	"POSTGRES_PASSWORD":               {},
 	"HA_TOKEN":                        {},
