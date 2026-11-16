@@ -273,14 +273,6 @@ linters:
         path: _test\.go
         text: "SA1012:"
       - linters:
-          - cyclop
-          - funlen
-          - gocognit
-          - gocyclo
-          - maintidx
-          - nestif
-        path: services/synapse/pr_lifecycle_events_test\.go
-      - linters:
           - containedctx
         path: services/eri/pkg/(queue/(pool|worker)|runner/(interchangeable_pool|streaming_daemon|unified_pool))\.go
       - linters:

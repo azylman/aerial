@@ -1059,6 +1059,7 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 		merged         bool
 		wantRegistered bool
 		wantClosed     bool
+		wantEvents     []wantPREvent
 	}{
 		{
 			name:           "matching bot_id registered",
@@ -1104,6 +1105,15 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 			merged:         false,
 			wantRegistered: false,
 			wantClosed:     true,
+			wantEvents:     []wantPREvent{{Event: "closed_unmerged", PRNumber: 101, HeadSHA: "sha101", Status: "closed_unmerged"}},
+		},
+		{
+			name:           "untagged synchronize skips registration and publishes synchronize",
+			botID:          "aerial",
+			defaultOwner:   false,
+			action:         "synchronize",
+			wantRegistered: false,
+			wantEvents:     []wantPREvent{{Event: "synchronize", PRNumber: 101, HeadSHA: "sha101", Status: "open", Title: "Test PR"}},
 		},
 	}
 
@@ -1115,7 +1125,8 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 				BotID:        tc.botID,
 				DefaultOwner: tc.defaultOwner,
 			}
-			srv := newTestRouter(cfg, nil, reg, nil)
+			bus := &mockEventBus{}
+			srv := newTestRouter(cfg, nil, reg, nil, bus)
 			action := tc.action
 			if action == "" {
 				action = "opened"
@@ -1150,6 +1161,7 @@ func TestHandlePullRequestRegistryAction_TrailerScoping(t *testing.T) {
 			if !tc.wantClosed && len(reg.closedUnmergedCalls) > 0 {
 				t.Fatalf("expected PR NOT to be marked closed unmerged, but UpdatePRClosedUnmerged was called %d times", len(reg.closedUnmergedCalls))
 			}
+			assertPREvents(t, bus, tc.wantEvents)
 		})
 	}
 }
