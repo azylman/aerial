@@ -183,8 +183,8 @@ func TestBuildAgyEnv(t *testing.T) {
 		"github_pat=s7",
 		"DISCORD_TOKEN=s8",
 		"discord_bot_token=s9",
-		"MARIDA_DISCORD_BOT_TOKEN=s24",
-		"MIORINE_DISCORD_BOT_TOKEN=s32",
+		"EXAMPLE_AGENT_DISCORD_BOT_TOKEN=s24",
+		"OTHER_AGENT_DISCORD_BOT_TOKEN=s32",
 		"DATABASE_URL=s10",
 		"POSTGRES_PASSWORD=s11",
 		"ha_token=s12",
@@ -218,9 +218,9 @@ func TestBuildAgyEnv(t *testing.T) {
 		notContains []string
 	}{
 		{
-			AgyEnvInput{BaseEnv: []string{"MIORINE_DISCORD_BOT_TOKEN=miorine-secret", "MARIDA_DISCORD_BOT_TOKEN=marida-secret", "OTHER_ENV=kept"}},
-			[]string{"OTHER_ENV=kept"},
-			[]string{"MIORINE_DISCORD_BOT_TOKEN=", "MARIDA_DISCORD_BOT_TOKEN=", "miorine-secret", "marida-secret"},
+			AgyEnvInput{BaseEnv: []string{"OTHER_AGENT_DISCORD_BOT_TOKEN=other-agent-secret", "EXAMPLE_AGENT_DISCORD_BOT_TOKEN=example-agent-secret", "arbitrary_prefix_token=arbitrary-secret", "CLAUDE_CODE_OAUTH_TOKEN=oauth-kept", "OTHER_ENV=kept"}},
+			[]string{"OTHER_ENV=kept", "CLAUDE_CODE_OAUTH_TOKEN=oauth-kept"},
+			[]string{"OTHER_AGENT_DISCORD_BOT_TOKEN=", "EXAMPLE_AGENT_DISCORD_BOT_TOKEN=", "other-agent-secret", "example-agent-secret", "arbitrary_prefix_token=", "arbitrary-secret"},
 		},
 		{AgyEnvInput{}, []string{"GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug"}, nil},
 		{
