@@ -28,7 +28,7 @@ type PoolConfig struct {
 	TargetModels                                                  map[string]string // Deprecated: pools are now model-bound. Ignored.
 	Env, PrewarmedTargets                                         []string
 	MaxIdle, TargetLockTimeout, HandshakeTimeout                  time.Duration
-	TranscriptRescuer                                             func(convID string, since time.Time) string
+	TranscriptRescuer                                             func(ctx context.Context, convID string, since time.Time) string
 	MemoryRetriever                                               MemoryRetriever
 	AmbientContextRetriever                                       AmbientContextRetriever
 	SessionManager                                                *session.Manager
@@ -114,7 +114,7 @@ func (p *UnifiedProcessPool) isClosed() bool {
 	return p.closed
 }
 
-func (p *UnifiedProcessPool) SetTranscriptRescuer(rescuer func(convID string, since time.Time) string) {
+func (p *UnifiedProcessPool) SetTranscriptRescuer(rescuer func(ctx context.Context, convID string, since time.Time) string) {
 	if p == nil {
 		return
 	}
@@ -325,19 +325,24 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 	}, nil
 }
 
-// spawnStreamingDaemonWithRetry starts a daemon, retrying once on a handshake timeout. ctx only
-// parents the daemon.spawn span and gates the retry; the daemon itself runs on the pool's
+// spawnStreamingDaemonWithRetry starts a daemon, retrying once on a handshake timeout. ctx bounds
+// startup handshakes and retries; the daemon itself runs on the pool's
 // long-lived ctx so it outlives the turn that spawned it. For agy the span ends after the init
 // handshake; for claude it covers the fork, and the init arrival is a daemon.init turn event.
 func (p *UnifiedProcessPool) spawnStreamingDaemonWithRetry(ctx context.Context, targetKey string, daemonCfg DaemonConfig) (*StreamingDaemon, error) {
+	// Startup ends on either budget expiration or pool shutdown.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(p.ctx, cancel) //nolint:contextcheck // Pool shutdown must also interrupt a caller-bounded handshake.
+	defer stop()
 	_, span := startChildOf(ctx, spanDaemonSpawn, trace.WithAttributes(attrAgentEngine.String(daemonCfg.engineName())))
 	defer span.End()
 	attempts := 1
-	daemon, spawnErr := StartStreamingDaemon(p.ctx, daemonCfg, p.spawner) //nolint:contextcheck // daemon outlives the turn and dies with the pool (see doc)
+	daemon, spawnErr := StartStreamingDaemon(p.ctx, ctx, daemonCfg, p.spawner)
 	if spawnErr != nil && strings.Contains(spawnErr.Error(), "daemon startup timed out waiting for init event") && p.ctx.Err() == nil && ctx.Err() == nil {
 		log.Printf("[UnifiedProcessPool] Warning: cold-start handshake timed out for target %q; retrying once...", targetKey)
 		attempts++
-		daemon, spawnErr = StartStreamingDaemon(p.ctx, daemonCfg, p.spawner) //nolint:contextcheck // daemon outlives the turn and dies with the pool (see doc)
+		daemon, spawnErr = StartStreamingDaemon(p.ctx, ctx, daemonCfg, p.spawner)
 	}
 	span.SetAttributes(attrDaemonAttempts.Int(attempts))
 	if spawnErr != nil {
@@ -1185,7 +1190,9 @@ func (l *unifiedSessionLease) Release() error {
 		log.Printf("[UnifiedProcessPool] Session rotation triggered for %s (reason: %s)", targetKey, reason)
 		metrics.RecordSessionRotation("turn_end", "pool", reason)
 
-		newDaemon, rotErr := l.pool.RotateDaemon(context.Background(), targetKey, "")
+		rotCtx, cancel := context.WithTimeout(l.pool.ctx, 35*time.Second)
+		defer cancel()
+		newDaemon, rotErr := l.pool.RotateDaemon(rotCtx, targetKey, "")
 		if rotErr != nil {
 			log.Printf("[UnifiedProcessPool] Warning rotating daemon for %s: %v", targetKey, rotErr)
 			if evictErr := l.pool.EvictSession(targetKey); evictErr != nil {
@@ -1196,7 +1203,7 @@ func (l *unifiedSessionLease) Release() error {
 		}
 
 		if newSessionID := newDaemon.SessionID(); l.pool.cfg.OnSessionRotated != nil && newSessionID != "" {
-			if rotErr := l.pool.cfg.OnSessionRotated(context.Background(), targetKey, oldSessionID, newSessionID); rotErr != nil {
+			if rotErr := l.pool.cfg.OnSessionRotated(rotCtx, targetKey, oldSessionID, newSessionID); rotErr != nil {
 				log.Printf("[UnifiedProcessPool] Persistence callback failed during rotation for %s: %v. Evicting daemon to maintain DB truth.", targetKey, rotErr)
 				if evictErr := l.pool.EvictSession(targetKey); evictErr != nil {
 					log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", targetKey, evictErr)
