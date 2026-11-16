@@ -164,16 +164,13 @@ type ghEventCase struct {
 	wantRecordCheckCalls    int
 	wantRecordCheckState    string
 	wantUpdatedBranchHit    string
+	wantRerunHit            string
 	wantReconciles          []fluxKustomizationRef
 	wantCIFailedChecks      []string
 }
 
-func TestProcessGitHubEvent(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	var ghPaths sync.Map
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func newProcessGitHubEventMockServer(ghPaths *sync.Map) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ghPaths.Store(r.URL.Path, true)
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -201,12 +198,24 @@ func TestProcessGitHubEvent(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"id": 0, "body": "Non-roborev comment"}, {"id": 1, "body": "## roborev: Review Complete (` + "`old0000`" + `)\nOld bug"}, {"id": 2, "body": "## roborev: Combined Review (` + "`robo525`" + `)\nFound SQL injection in query"}]`))
 		case strings.Contains(r.URL.Path, "/actions/runs/800/jobs"):
 			_, _ = w.Write([]byte(`{"total_count":1,"jobs":[{"id":1,"name":"Verify Codebase","status":"completed","conclusion":"success"}]}`))
+		case strings.Contains(r.URL.Path, "/actions/runs/801/rerun-failed-jobs"):
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+		case strings.Contains(r.URL.Path, "/actions/runs/802/rerun-failed-jobs"):
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"message":"failed to rerun"}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
-	t.Cleanup(mockServer.Close)
+}
 
+func TestProcessGitHubEvent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var ghPaths sync.Map
+	mockServer := newProcessGitHubEventMockServer(&ghPaths)
+	t.Cleanup(mockServer.Close)
 	cases := processGitHubEventTestCases()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -337,9 +346,11 @@ func assertEventResult(t *testing.T, tc ghEventCase, res *ResolvedGitHubEvent, g
 			t.Fatalf("expected 0 GitHub API hits for localsha123, but endpoint was called")
 		}
 	}
-	if tc.wantUpdatedBranchHit != "" {
-		if _, hit := ghPaths.Load(tc.wantUpdatedBranchHit); !hit {
-			t.Errorf("expected branch update hit for %q, but was not called", tc.wantUpdatedBranchHit)
+	for _, hitPath := range []string{tc.wantUpdatedBranchHit, tc.wantRerunHit} {
+		if hitPath != "" {
+			if _, hit := ghPaths.Load(hitPath); !hit {
+				t.Errorf("expected hit for %q, but was not called", hitPath)
+			}
 		}
 	}
 	assertEventBasicFields(t, tc, res)
@@ -393,7 +404,6 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 	}
 	srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: !tc.nonDefaultOwner}, mockServer.Client(), reg, disp, inserters...)
 	srv.onProcessed = func(string, string) {}
-
 	if tc.priorEvent != nil {
 		if _, err := srv.ProcessGitHubEvent(ctx, tc.priorEvent.event, tc.priorEvent.delivery, []byte(tc.priorEvent.payload)); err != nil {
 			t.Fatalf("priorEvent failed: %v", err)
@@ -404,7 +414,6 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 			t.Fatalf("priorEvents[%d] failed: %v", i, err)
 		}
 	}
-
 	res, err := srv.ProcessGitHubEvent(ctx, tc.event, tc.delivery, []byte(tc.payload))
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ProcessGitHubEvent() err = %v, wantErr %v", err, tc.wantErr)
@@ -463,24 +472,15 @@ func assertEventBusCalls(t *testing.T, tc ghEventCase, bus *mockEventBus) {
 }
 
 func processGitHubEventTestCases() []ghEventCase {
-	p1 := processGitHubEventCasesPart1()
-	p2 := processGitHubEventCasesPart2()
-	p3 := processGitHubEventCasesPart3()
-	p4 := processGitHubEventCasesPart4()
-	p5 := processGitHubEventCasesPart5()
-	p6 := processGitHubEventCasesPart6()
-	p7 := processGitHubEventCasesPart7()
-	p8 := processGitHubEventCasesPart8()
-	total := len(p1) + len(p2) + len(p3) + len(p4) + len(p5) + len(p6) + len(p7) + len(p8)
-	all := make([]ghEventCase, 0, total)
-	all = append(all, p1...)
-	all = append(all, p2...)
-	all = append(all, p3...)
-	all = append(all, p4...)
-	all = append(all, p5...)
-	all = append(all, p6...)
-	all = append(all, p7...)
-	all = append(all, p8...)
+	var all []ghEventCase
+	for _, p := range [][]ghEventCase{
+		processGitHubEventCasesPart1(), processGitHubEventCasesPart2(),
+		processGitHubEventCasesPart3(), processGitHubEventCasesPart4(),
+		processGitHubEventCasesPart5(), processGitHubEventCasesPart6(),
+		processGitHubEventCasesPart7(), processGitHubEventCasesPart8(),
+	} {
+		all = append(all, p...)
+	}
 	return all
 }
 
@@ -1151,22 +1151,36 @@ func processGitHubEventCasesPart6() []ghEventCase {
 			wantErr: true,
 		},
 		{
+			name: "workflow_run failure on main run_attempt 1 reruns failed jobs and suppresses deploy_failed", event: "workflow_run", delivery: "del-wf-main-merge-sha-rerun",
+			payload: `{"action":"completed","workflow_run":{"id":801,"run_attempt":1,"name":"Continuous Delivery","head_sha":"merge224","head_branch":"main","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 224, resolveBranch: "feat/restate", resolveHeadSHA: "premerge224", resolveMergeSHA: "merge224", resolveTargetID: "100000000000000002"},
+			disp:    &mockOutboundDispatcher{}, bus: &mockEventBus{}, wantPR: 224, wantHeadSHA: "merge224", wantTargetID: "100000000000000002",
+			wantRerunHit: "/repos/azylman/aerial/actions/runs/801/rerun-failed-jobs",
+		},
+		{
 			name: "workflow_run failure on main matching merge_sha transitions merged PR to deploy_failed", event: "workflow_run", delivery: "del-wf-main-merge-sha-fail",
-			payload: `{"action":"completed","workflow_run":{"id":801,"name":"Continuous Delivery","head_sha":"merge224","head_branch":"main","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			payload: `{"action":"completed","workflow_run":{"id":801,"run_attempt":2,"name":"Continuous Delivery","head_sha":"merge224","head_branch":"main","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 224, resolveBranch: "feat/restate", resolveHeadSHA: "premerge224", resolveMergeSHA: "merge224", resolveTargetID: "100000000000000002", deployFailedTargetID: "100000000000000002", deployFailedUpdated: true},
-			disp:    &mockOutboundDispatcher{}, bus: &mockEventBus{}, wantPR: 224, wantHeadSHA: "merge224", wantTargetID: "100000000000000002", wantCIFailedCalls: 0, wantDeployFailedCalls: 1, wantDeployFailedEvents: 1, wantDeployEventMergeSHA: "merge224",
+			disp:    &mockOutboundDispatcher{}, bus: &mockEventBus{}, wantPR: 224, wantHeadSHA: "merge224", wantTargetID: "100000000000000002", wantDeployFailedCalls: 1, wantDeployFailedEvents: 1, wantDeployEventMergeSHA: "merge224",
 		},
 		{
 			name: "workflow_run failure on main matching merge_sha deploy_failed transition error propagates", event: "workflow_run", delivery: "del-wf-main-merge-sha-deploy-err",
-			payload: `{"action":"completed","workflow_run":{"id":801,"name":"Continuous Delivery","head_sha":"merge224","head_branch":"main","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			payload: `{"action":"completed","workflow_run":{"id":801,"run_attempt":2,"name":"Continuous Delivery","head_sha":"merge224","head_branch":"main","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 224, resolveBranch: "feat/restate", resolveHeadSHA: "premerge224", resolveMergeSHA: "merge224", resolveTargetID: "100000000000000002", deployFailedErr: errors.New("deploy failed db error")},
 			disp:    &mockOutboundDispatcher{}, wantErr: true,
 		},
 		{
-			name: "check_run failure on merge_sha routes to deploy_failed without ci_failed transition", event: "check_run", delivery: "del-cr-main-merge-sha-fail",
-			payload: `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Integration Tests","head_sha":"merge224","status":"completed","conclusion":"failure","pull_requests":[]}}`,
+			name: "workflow_run failure on main run_attempt 1 rerun error falls back to deploy_failed", event: "workflow_run", delivery: "del-wf-main-merge-sha-rerun-err",
+			payload: `{"action":"completed","workflow_run":{"id":802,"run_attempt":1,"name":"Continuous Delivery","head_sha":"merge224","head_branch":"main","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 224, resolveBranch: "feat/restate", resolveHeadSHA: "premerge224", resolveMergeSHA: "merge224", resolveTargetID: "100000000000000002", deployFailedTargetID: "100000000000000002", deployFailedUpdated: true},
-			disp:    &mockOutboundDispatcher{}, bus: &mockEventBus{}, wantPR: 224, wantHeadSHA: "merge224", wantTargetID: "100000000000000002", wantCIFailedCalls: 0, wantDeployFailedCalls: 1, wantDeployFailedEvents: 1, wantDeployEventMergeSHA: "merge224",
+			disp:    &mockOutboundDispatcher{}, bus: &mockEventBus{}, wantPR: 224, wantHeadSHA: "merge224", wantTargetID: "100000000000000002", wantDeployFailedCalls: 1, wantDeployFailedEvents: 1, wantDeployEventMergeSHA: "merge224",
+			wantRerunHit: "/repos/azylman/aerial/actions/runs/802/rerun-failed-jobs",
+		},
+		{
+			name: "check_run failure on merge_sha is ignored", event: "check_run", delivery: "del-cr-main-merge-sha-fail",
+			payload: `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Integration Tests","head_sha":"merge224","status":"completed","conclusion":"failure","pull_requests":[]}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 224, resolveBranch: "feat/restate", resolveHeadSHA: "premerge224", resolveMergeSHA: "merge224", resolveTargetID: "100000000000000002"},
+			disp:    &mockOutboundDispatcher{}, wantPR: 224, wantHeadSHA: "merge224",
 		},
 	}
 }

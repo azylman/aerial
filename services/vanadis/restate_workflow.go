@@ -540,8 +540,10 @@ func chunksToSummaries(list []VanadisChunk) []VanadisChunkSummary {
 			Repo:        c.Repo,
 			Title:       c.Title,
 			Status:      c.Status,
+			PRNumber:    c.PRNumber,
 			StartedAt:   c.StartedAt,
 			CompletedAt: c.CompletedAt,
+			UpdatedAt:   c.UpdatedAt,
 		}
 	}
 	return summaries
