@@ -121,10 +121,17 @@ func actionBuildRow(bStatus string) *genericMockRow {
 }
 
 // failRow answers FailChunk's joined chunk+build select for action chunk c1 of build b1.
-func failRow(cStatus, bStatus string) *genericMockRow {
+func failRow(cStatus, bStatus string, generation ...int) *genericMockRow {
+	nudges, prNumber := 0, 0
+	if len(generation) > 0 {
+		nudges = generation[0]
+	}
+	if len(generation) > 1 {
+		prNumber = generation[1]
+	}
 	return &genericMockRow{scanFn: func(dest ...any) error {
 		now := time.Now()
-		return scanValues(dest, "c1", "b1", 0, "action", "", "Fail Chunk Title", "Instructions", []string{}, []string{}, "medium", []string{}, cStatus, 0, sql.NullTime{Time: now, Valid: true}, sql.NullTime{Time: now, Valid: true}, now, now, "b1", "thread-1", 2, "Build 1", "Objective 1", "Context", bStatus, "msg-1", now, now)
+		return scanValues(dest, "c1", "b1", 0, "action", "", "Fail Chunk Title", "Instructions", []string{}, []string{}, "medium", []string{}, cStatus, prNumber, sql.NullTime{Time: now, Valid: true}, sql.NullTime{Time: now, Valid: true}, now, now, nudges, "b1", "thread-1", 2, "Build 1", "Objective 1", "Context", bStatus, "msg-1", now, now)
 	}}
 }
 
@@ -454,11 +461,24 @@ func TestPostgresVanadisStore_FailChunk(t *testing.T) {
 	tests := []struct {
 		name       string
 		chunkID    string
+		dispatchID string
 		db         dbScript
 		wantErrIs  error
 		wantErr    bool
 		wantFailed bool
 	}{
+		{name: "attached PR CI remediation failure", chunkID: "c1", dispatchID: "vanadis-c1-cifail-head-1", db: dbScript{row: failRow("ci_failed", "running", 0, 101)}, wantFailed: true},
+		{name: "attached PR conflict failure", chunkID: "c1", dispatchID: "vanadis-conflict-c1-head", db: dbScript{row: failRow("conflict", "running", 1, 101)}, wantFailed: true},
+		{name: "attached PR direct failure compatibility", chunkID: "c1", db: dbScript{row: failRow("ci_failed", "running", 1, 101)}, wantFailed: true},
+		{name: "attached PR stale action turn", chunkID: "c1", dispatchID: "vanadis-c1-turn-0", db: dbScript{row: failRow("ci_failed", "running", 1, 101)}},
+		{name: "unattached PR rejects remediation", chunkID: "c1", dispatchID: "vanadis-c1-cifail-head-1", db: dbScript{row: failRow("running", "running")}},
+		{name: "retry missing identity", chunkID: "c1", db: dbScript{row: failRow("running", "running", 1)}},
+		{name: "retry old identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-0", db: dbScript{row: failRow("running", "running", 1)}},
+		{name: "retry current identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-1", db: dbScript{row: failRow("running", "running", 1)}, wantFailed: true},
+		{name: "cancelled parent", chunkID: "c1", dispatchID: "vanadis-c1-turn-1", db: dbScript{row: failRow("running", "cancelled", 1)}},
+		{name: "parent lock error", chunkID: "c1", db: dbScript{routes: []sqlRoute{{match: "SELECT id FROM vanadis_builds", row: errRow(errors.New("lock error"))}}}, wantErr: true},
+		{name: "stale identity", chunkID: "c1", dispatchID: "old", db: dbScript{row: running}},
+		{name: "matching identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-0", db: dbScript{row: running}, wantFailed: true},
 		{name: "nil receiver", chunkID: "c1", db: dbScript{bare: nilReceiver}, wantErr: true},
 		{name: "nil db", chunkID: "c1", db: dbScript{bare: nilDB}, wantErr: true},
 		{name: "empty chunk id", chunkID: "", wantErr: true},
@@ -478,8 +498,9 @@ func TestPostgresVanadisStore_FailChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			tc.db.routes = append(tc.db.routes, sqlRoute{match: "SELECT id FROM vanadis_builds", row: valuesRow("b1")})
 			store, _ := tc.db.open()
-			b, c, failed, err := store.FailChunk(context.Background(), tc.chunkID, "unrecoverable failure")
+			b, c, failed, err := store.FailChunk(context.Background(), tc.chunkID, "unrecoverable failure", tc.dispatchID)
 			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return
 			}

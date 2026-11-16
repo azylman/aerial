@@ -729,7 +729,7 @@ func (m *memoryVanadisStore) ClaimStalledChunk(_ context.Context, chunkID string
 	return "", nil, nil, ErrChunkNotFound
 }
 
-func (m *memoryVanadisStore) FailChunk(_ context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
+func (m *memoryVanadisStore) FailChunk(_ context.Context, chunkID, reason, dispatchID string) (*VanadisBuild, *VanadisChunk, bool, error) {
 	chunkID = strings.TrimSpace(chunkID)
 	if chunkID == "" {
 		return nil, nil, false, errors.New("chunk id cannot be empty")
@@ -740,6 +740,9 @@ func (m *memoryVanadisStore) FailChunk(_ context.Context, chunkID, reason string
 				continue
 			}
 			b := m.builds[bID]
+			if !failureDispatchMatches(list[i], dispatchID) {
+				return &b, &list[i], false, nil
+			}
 			if isChunkMergedOrDoneStatus(list[i].Status) || list[i].Status == "failed" || b.Status == "completed" || b.Status == "cancelled" {
 				return &b, &list[i], false, nil
 			}

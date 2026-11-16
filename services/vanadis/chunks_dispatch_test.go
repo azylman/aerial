@@ -79,11 +79,19 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 		wantWake      bool
 		wantStatus    string
 	}{
+		{name: "attached action PR remediation failure", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", PRNumber: 101, Status: "ci_failed"}}, event: outcomeEvent("vanadis-c1-cifail-head-1", "c1", "failed", ""), wantStatus: "failed", wantWidget: true, wantWake: true},
+		{name: "attached action PR conflict timeout", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", PRNumber: 101, Status: "conflict", StallNudges: 1}}, event: outcomeEvent("vanadis-conflict-c1-head", "c1", "timeout", ""), wantStatus: "failed", wantWidget: true, wantWake: true},
+		{name: "attached action PR stale action failure", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", PRNumber: 101, Status: "ci_failed", StallNudges: 1}}, event: outcomeEvent("vanadis-c1-turn-0", "c1", "failed", ""), wantStatus: "ci_failed"},
 		{name: "missing retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}}, event: outcomeEvent("", "c1", "completed", ""), wantStatus: "running", wantWidget: false, wantWake: false},
 		{name: "stale retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}}, event: outcomeEvent("vanadis-c1-turn-0", "c1", "completed", ""), wantStatus: "running", wantWidget: false, wantWake: false},
 		{name: "matching retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}}, event: outcomeEvent("vanadis-c1-turn-1", "c1", "completed", ""), wantStatus: "completed", wantWidget: true, wantWake: true},
 		{name: "duplicate retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed", StallNudges: 1}}, event: outcomeEvent("vanadis-c1-turn-1", "c1", "completed", ""), wantStatus: "completed", wantWidget: false, wantWake: false},
 		{name: "missing first run", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 0}}, event: outcomeEvent("", "c1", "completed", ""), wantStatus: "completed", wantWidget: true, wantWake: true},
+		{name: "missing failure retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}}, event: outcomeEvent("", "c1", "failed", ""), wantStatus: "running", wantWidget: false, wantWake: false},
+		{name: "stale failure retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}}, event: outcomeEvent("vanadis-c1-turn-0", "c1", "failed", ""), wantStatus: "running", wantWidget: false, wantWake: false},
+		{name: "matching failure retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}}, event: outcomeEvent("vanadis-c1-turn-1", "c1", "failed", ""), wantStatus: "failed", wantWidget: true, wantWake: true},
+		{name: "duplicate failure retry", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", StallNudges: 1}}, event: outcomeEvent("vanadis-c1-turn-1", "c1", "failed", ""), wantStatus: "failed", wantWidget: false, wantWake: false},
+		{name: "missing failure first run", seedBuild: outcomeBuild("b1", "th1", ""), seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 0}}, event: outcomeEvent("", "c1", "failed", ""), wantStatus: "failed", wantWidget: true, wantWake: true},
 		{name: "nil store returns error", nilStore: true, rawPayload: `{"status":"completed","vanadis_chunk_id":"c1"}`, wantErr: true},
 		{name: "nil server returns error", nilServer: true, wantErr: true},
 		{name: "completed event surfaces store failure", getBuildErr: errors.New("db error"), event: outcomeEvent("d1", "c1", "completed", ""), wantErr: true},
@@ -124,23 +132,30 @@ func TestVanadisServer_HandleDispatchOutcomeEvent(t *testing.T) {
 			name:       "failed chunk transitions to failed and wakes thread",
 			seedBuild:  outcomeBuild("b-fail", "th-fail", "Try chunk"),
 			seedChunks: []VanadisChunk{actionChunk("c-fail-1", "b-fail", 0, "running", "Failing Step")},
-			event:      outcomeEvent("disp-fail", "c-fail-1", "failed", "command timed out"),
+			event:      outcomeEvent("vanadis-c-fail-1-turn-0", "c-fail-1", "failed", "command timed out"),
 			wantWidget: true, wantWake: true, wantStatus: "failed",
 		},
 		{
 			name:       "timeout chunk treated as failed",
 			seedBuild:  outcomeBuild("b-to", "th-to", "Timeout test"),
 			seedChunks: []VanadisChunk{actionChunk("c-to-1", "b-to", 0, "running", "Timeout Step")},
-			event:      outcomeEvent("disp-to", "c-to-1", "timeout", ""),
+			event:      outcomeEvent("vanadis-c-to-1-turn-0", "c-to-1", "timeout", ""),
+			wantWidget: true, wantWake: true, wantStatus: "failed",
+		},
+		{
+			name:       "crashed chunk treated as failed",
+			seedBuild:  outcomeBuild("b-to", "th-to", "Timeout test"),
+			seedChunks: []VanadisChunk{actionChunk("c-to-1", "b-to", 0, "running", "Timeout Step")},
+			event:      outcomeEvent("vanadis-c-to-1-turn-0", "c-to-1", "crashed", ""),
 			wantWidget: true, wantWake: true, wantStatus: "failed",
 		},
 		{name: "non-existent chunk returns nil without error", seedBuild: &VanadisBuild{ID: "b-empty", Status: "running"}, event: outcomeEvent("disp-missing", "c-nonexistent", "completed", "")},
-		{name: "failed non-existent chunk returns nil without error", seedBuild: &VanadisBuild{ID: "b-empty-fail", Status: "running"}, event: outcomeEvent("disp-missing-fail", "c-missing-fail", "failed", "")},
+		{name: "failed non-existent chunk returns nil without error", seedBuild: &VanadisBuild{ID: "b-empty-fail", Status: "running"}, event: outcomeEvent("vanadis-c-missing-fail-turn-0", "c-missing-fail", "failed", "")},
 		{
 			name:       "failed chunk with empty error uses status fallback",
 			seedBuild:  outcomeBuild("b-fail-noerr", "th-fail-noerr", "Try fallback error"),
 			seedChunks: []VanadisChunk{actionChunk("c-fail-noerr-1", "b-fail-noerr", 0, "running", "Failing Step Without Error")},
-			event:      outcomeEvent("disp-fail-noerr", "c-fail-noerr-1", "failed", ""),
+			event:      outcomeEvent("vanadis-c-fail-noerr-1-turn-0", "c-fail-noerr-1", "failed", ""),
 			wantWidget: true, wantWake: true, wantStatus: "failed",
 		},
 	}
@@ -518,7 +533,7 @@ func TestVanadisServer_FailChunkInternal(t *testing.T) {
 			if !tc.nilServer {
 				srv = &VanadisServer{store: createdBuildStore(t, tc.seedBuild, tc.seedChunks)}
 			}
-			build, chunk, failed, err := srv.failChunkInternal(context.Background(), tc.chunkID, tc.reason)
+			build, chunk, failed, err := srv.failChunkInternal(context.Background(), tc.chunkID, tc.reason, "")
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("failChunkInternal() error = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -527,6 +542,27 @@ func TestVanadisServer_FailChunkInternal(t *testing.T) {
 			}
 			if gotFound := build != nil && chunk != nil; gotFound != tc.wantFound {
 				t.Errorf("build and chunk returned = %v, want %v", gotFound, tc.wantFound)
+			}
+		})
+	}
+}
+
+func TestFailureDispatchMatches(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, mode, identity string
+		generation           int
+		want                 bool
+	}{
+		{"PR compatibility", "pr", "", 0, true},
+		{"PR ignores identity", "pr", "old", 1, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := failureDispatchMatches(VanadisChunk{ID: "c1", Mode: tc.mode, StallNudges: tc.generation}, tc.identity)
+			if got != tc.want {
+				t.Fatalf("matches = %v, want %v", got, tc.want)
 			}
 		})
 	}

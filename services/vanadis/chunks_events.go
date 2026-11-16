@@ -67,7 +67,7 @@ func (s *VanadisServer) handleFailedDispatchOutcome(ctx context.Context, ev pubs
 	if reason == "" {
 		reason = "dispatch status " + ev.Status
 	}
-	if _, _, _, err := s.failChunkInternal(ctx, ev.VanadisChunkID, reason); err != nil {
+	if _, _, _, err := s.failChunkInternal(ctx, ev.VanadisChunkID, reason, ev.DispatchID); err != nil {
 		if errors.Is(err, ErrChunkNotFound) {
 			log.Printf("[vanadis] chunk %s not found on dispatch outcome failure", ev.VanadisChunkID)
 			return nil
@@ -97,7 +97,7 @@ func (s *VanadisServer) HandleDispatchOutcomeEvent(ctx context.Context, msg pubs
 	switch strings.ToLower(strings.TrimSpace(ev.Status)) {
 	case statusCompleted:
 		return s.handleCompletedDispatchOutcome(ctx, ev)
-	case statusFailed, "timeout":
+	case statusFailed, "timeout", "crashed":
 		return s.handleFailedDispatchOutcome(ctx, ev)
 	default:
 		return nil

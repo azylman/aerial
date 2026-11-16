@@ -472,7 +472,7 @@ func (s *errVanadisStore) CompleteActionChunk(ctx context.Context, chunkID, disp
 	return nil, errors.New("simulated complete action chunk error")
 }
 
-func (*errVanadisStore) FailChunk(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
+func (*errVanadisStore) FailChunk(ctx context.Context, chunkID, reason, dispatchID string) (*VanadisBuild, *VanadisChunk, bool, error) {
 	return nil, nil, false, errors.New("simulated fail chunk error")
 }
 

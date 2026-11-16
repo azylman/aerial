@@ -185,8 +185,41 @@ func queryBuildChunkSummaries(ctx context.Context, tx pgx.Tx, buildID string) []
 	return summaries
 }
 
+// Non-action failures retain their existing identity-free contract.
+func failureDispatchMatches(chunk VanadisChunk, dispatchID string) bool {
+	if chunk.Mode != chunkModeAction {
+		return true
+	}
+	// Attaching a PR retains action mode, but PR remediation uses CI/conflict
+	// dispatch IDs. Preserve that lifecycle's failure contract without allowing
+	// an older action-turn ID to bypass the generation fence.
+	if chunk.PRNumber > 0 && prFailureDispatchMatches(chunk.ID, dispatchID) {
+		return true
+	}
+	return actionDispatchMatches(chunk, dispatchID)
+}
+
+func prFailureDispatchMatches(chunkID, dispatchID string) bool {
+	conflictID := conflictRemediationDispatchID(chunkID, "")
+	return dispatchID == "" ||
+		strings.HasPrefix(dispatchID, "vanadis-"+chunkID+"-cifail-") ||
+		dispatchID == conflictID || strings.HasPrefix(dispatchID, conflictID+"-")
+}
+
+func lockFailureBuild(ctx context.Context, tx pgx.Tx, chunkID string) (string, error) {
+	var buildID string
+	err := tx.QueryRow(ctx, `SELECT id FROM vanadis_builds WHERE id = (SELECT build_id FROM vanadis_chunks WHERE id = $1) FOR UPDATE`, chunkID).Scan(&buildID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrChunkNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("lock failure build: %w", err)
+	}
+	return buildID, nil
+}
+
 // FailChunk marks a non-terminal chunk and its parent build as failed.
-func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
+func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason, dispatchID string) (*VanadisBuild, *VanadisChunk, bool, error) {
 	if s == nil || s.db == nil {
 		return nil, nil, false, errors.New("database connection is nil")
 	}
@@ -204,19 +237,25 @@ func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason st
 		}
 	}()
 
+	// Lock the parent before the chunk, matching completion and cancellation.
+	lockedBuildID, err := lockFailureBuild(ctx, tx, chunkID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
 	const selectChunkQuery = `
-		SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), c.started_at, c.completed_at, c.created_at, c.updated_at,
+		SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), c.started_at, c.completed_at, c.created_at, c.updated_at, c.stall_nudges,
 		       b.id, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, COALESCE(b.shared_context, ''), b.status, COALESCE(b.status_message_id, ''), b.created_at, b.updated_at
 		FROM vanadis_chunks c
 		JOIN vanadis_builds b ON c.build_id = b.id
-		WHERE c.id = $1
-		FOR UPDATE`
+		WHERE c.id = $1 AND c.build_id = $2
+		FOR UPDATE OF c`
 
 	var c VanadisChunk
 	var b VanadisBuild
 	var startedAt, completedAt sql.NullTime
-	err = tx.QueryRow(ctx, selectChunkQuery, chunkID).Scan(
-		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt,
+	err = tx.QueryRow(ctx, selectChunkQuery, chunkID, lockedBuildID).Scan(
+		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt, &c.StallNudges,
 		&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.CreatedAt, &b.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -233,6 +272,10 @@ func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason st
 	}
 	c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), nonNilSlice(c.AcceptanceCriteria)
 	c.Effort = capChunkEffort(c.Effort)
+
+	if !failureDispatchMatches(c, dispatchID) {
+		return &b, &c, false, nil
+	}
 
 	if isChunkMergedOrDoneStatus(c.Status) || c.Status == statusFailed || b.Status == statusCompleted || b.Status == statusCancelled {
 		return &b, &c, false, nil
@@ -327,7 +370,7 @@ func (s *VanadisServer) handleChunkFailureTransition(ctx context.Context, build 
 	}
 }
 
-func (s *VanadisServer) failChunkInternal(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
+func (s *VanadisServer) failChunkInternal(ctx context.Context, chunkID, reason, dispatchID string) (*VanadisBuild, *VanadisChunk, bool, error) {
 	if s == nil || s.store == nil {
 		return nil, nil, false, errors.New("vanadis store not configured")
 	}
@@ -342,7 +385,7 @@ func (s *VanadisServer) failChunkInternal(ctx context.Context, chunkID, reason s
 		return build, chunk, false, err
 	}
 
-	build, chunk, transitioned, err := s.store.FailChunk(ctx, chunkID, reason)
+	build, chunk, transitioned, err := s.store.FailChunk(ctx, chunkID, reason, dispatchID)
 	if err != nil {
 		return nil, nil, false, err
 	}
