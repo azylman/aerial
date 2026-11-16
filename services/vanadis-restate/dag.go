@@ -14,7 +14,7 @@ const (
 	jsonNull = "null"
 )
 
-// normalizeAndValidateBuildDAG validates the build DAG: sequential default, Kahn's cycle detection, and concurrent same-repo disjoint target_files.
+// normalizeAndValidateBuildDAG validates the build DAG: explicit depends_on arrays, Kahn's cycle detection, and concurrent same-repo disjoint target_files.
 func normalizeAndValidateBuildDAG(chunks []VanadisChunk) ([]VanadisChunk, error) {
 	if len(chunks) == 0 {
 		return chunks, nil
@@ -34,8 +34,6 @@ func normalizeAndValidateBuildDAG(chunks []VanadisChunk) ([]VanadisChunk, error)
 		idMap[cid] = i
 	}
 
-	applySequentialDefaults(out)
-
 	if err := resolveChunkDependencies(out, idMap); err != nil {
 		return nil, err
 	}
@@ -52,23 +50,11 @@ func normalizeAndValidateBuildDAG(chunks []VanadisChunk) ([]VanadisChunk, error)
 	return out, nil
 }
 
-func applySequentialDefaults(out []VanadisChunk) {
-	for _, c := range out {
-		if c.DependsOn != nil {
-			return
-		}
-	}
-	for i := range out {
-		if i > 0 {
-			out[i].DependsOn = []string{out[i-1].ID}
-		} else {
-			out[i].DependsOn = []string{}
-		}
-	}
-}
-
 func resolveChunkDependencies(out []VanadisChunk, idMap map[string]int) error {
 	for i := range out {
+		if out[i].DependsOn == nil {
+			return fmt.Errorf("%w: chunk %q must explicitly specify depends_on", ErrInvalidBuildInput, out[i].ID)
+		}
 		normalizedDeps := make([]string, 0, len(out[i].DependsOn))
 		seenDeps := make(map[string]bool, len(out[i].DependsOn))
 		for _, rawDep := range out[i].DependsOn {
