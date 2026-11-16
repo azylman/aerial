@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -623,4 +625,79 @@ func TestMixedBuildCompletionRedelivery(t *testing.T) {
 			assert.Len(t, queuedPrompts, tc.wantPrompts)
 		})
 	}
+}
+
+func TestBuildObject_FailureMutations(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, chunkID, dispatchID string
+		db                        dbScript
+		wantErr                   error
+	}{
+		{"missing generation", "c1", "", dbScript{row: failRow("running", "running", 1)}, errActionCompletionSkipped},
+		{"stale generation", "c1", "vanadis-c1-turn-0", dbScript{row: failRow("running", "running", 1)}, errActionCompletionSkipped},
+		{"current generation", " c1 ", "vanadis-c1-turn-1", dbScript{row: failRow("running", "running", 1)}, nil},
+		{"persistence cancellation", "c1", "", dbScript{row: failRow("running", "running"), failExec: "UPDATE vanadis_chunks", execErr: context.Canceled}, context.Canceled},
+		{"wrong owner", "other", "", dbScript{}, ErrChunkNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			script := tc.db
+			script.buildRow = &mockRow{b: &VanadisBuild{ID: "b1", Status: "running"}}
+			script.chunks = []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running"}}
+			store, _ := script.open()
+			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			err := bo.applyMutation(context.Background(), "b1", &BuildMutationRequest{Action: "chunk_failed", ChunkID: tc.chunkID, DispatchID: tc.dispatchID, Reason: "failure"})
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestActionPRFailureFence(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, identity string
+		wantFailed     bool
+	}{
+		{"closed without merging", "", true},
+		{"current action", "vanadis-c1-turn-1", true},
+		{"stale action", "vanadis-c1-turn-0", false},
+		{"ci remediation", "vanadis-c1-cifail-1-abcdef0", true},
+		{"conflict remediation", "vanadis-conflict-c1", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, _ := dbScript{row: failRow("pr_opened", "running", 1, 42)}.open()
+			build, chunk, failed, err := store.FailChunk(context.Background(), "c1", "pr_closed_unmerged", tc.identity)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantFailed, failed)
+			if tc.wantFailed {
+				assert.Equal(t, "failed", build.Status)
+				assert.Equal(t, "failed", chunk.Status)
+			}
+		})
+	}
+}
+
+func failRow(cStatus, bStatus string, generation ...int) *genericMockRow {
+	return &genericMockRow{scanFn: func(dest ...any) error {
+		now := time.Now()
+		nudges, prNumber := 0, 0
+		if len(generation) > 0 {
+			nudges = generation[0]
+		}
+		if len(generation) > 1 {
+			prNumber = generation[1]
+		}
+		return scanValues(dest,
+			"c1", "b1", 0, "action", "", "Fail Chunk Title", "Instructions", []string{}, []string{}, "medium", []string{}, cStatus, prNumber, sql.NullTime{Time: now, Valid: true}, sql.NullTime{Time: now, Valid: true}, now, now, nudges,
+			"b1", "thread-1", 2, "Build 1", "Objective 1", "Context", bStatus, "msg-1", now, now,
+		)
+	}}
 }
