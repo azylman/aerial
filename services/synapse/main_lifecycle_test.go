@@ -950,3 +950,75 @@ func TestDispatchAlertWithPrompt(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleImagePromotionDeployFailed_RetryAndDeduplication(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name                string
+		initialUpdated      bool
+		busErr              error
+		wantErr             bool
+		wantPublishedEvents int
+		wantDeployCalls     int
+		wantAckCalls        int
+	}{
+		{
+			name:                "first attempt succeeds and publishes event",
+			initialUpdated:      true,
+			wantPublishedEvents: 1,
+			wantDeployCalls:     1,
+			wantAckCalls:        1,
+		},
+		{
+			name:                "transient bus failure propagates error and does not mark published",
+			initialUpdated:      true,
+			busErr:              errors.New("transient bus disconnect"),
+			wantErr:             true,
+			wantPublishedEvents: 0,
+			wantDeployCalls:     1,
+			wantAckCalls:        0,
+		},
+		{
+			name:                "deduplicated delivery returns nil without publishing duplicate event",
+			initialUpdated:      false,
+			wantPublishedEvents: 0,
+			wantDeployCalls:     1,
+			wantAckCalls:        0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{err: tc.busErr}
+			reg := &mockPRRegistry{
+				deployFailedTargetID: "100000000000000001",
+				deployFailedUpdated:  tc.initialUpdated,
+				resolveTargetID:      "100000000000000001",
+				resolveBranch:        "feat/test",
+				resolveHeadSHA:       "head123",
+				resolveMergeSHA:      "merge123",
+			}
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
+			srv.bus = bus
+			srv.registry = reg
+
+			err := srv.handleImagePromotionDeployFailed(ctx, "azylman/aerial", 42, "feat/test", "head123", "100000000000000001", errors.New("simulated error"))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("handleImagePromotionDeployFailed() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+
+			if len(bus.publishedPREvents) != tc.wantPublishedEvents {
+				t.Errorf("got %d published events, want %d", len(bus.publishedPREvents), tc.wantPublishedEvents)
+			}
+			if len(reg.deployFailedCalls) != tc.wantDeployCalls {
+				t.Errorf("got %d deployFailedCalls, want %d", len(reg.deployFailedCalls), tc.wantDeployCalls)
+			}
+			if len(reg.ackDeployFailedPublishedCalls) != tc.wantAckCalls {
+				t.Errorf("got %d ackDeployFailedPublishedCalls, want %d", len(reg.ackDeployFailedPublishedCalls), tc.wantAckCalls)
+			}
+		})
+	}
+}

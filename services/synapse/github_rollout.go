@@ -481,13 +481,67 @@ func (s *RouterServer) isStaleOrIgnoredCIFailure(ctx context.Context, res *Resol
 	if res.PRNumber <= 0 || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
 		return false
 	}
-	regTargetID, _, regHeadSHA, _, err := s.registry.ResolvePRByNumber(ctx, res.Repo, res.PRNumber)
+	regTargetID, _, regHeadSHA, regMergeSHA, err := s.registry.ResolvePRByNumber(ctx, res.Repo, res.PRNumber)
 	if err == nil && regTargetID != "" {
 		res.TargetID = firstNonEmpty(res.TargetID, regTargetID)
 	}
-	if err == nil && regHeadSHA != "" && !strings.EqualFold(regHeadSHA, strings.TrimSpace(res.HeadSHA)) {
+	if err == nil && regMergeSHA != "" {
+		res.MergeSHA = regMergeSHA
+	}
+	trimmedSHA := strings.TrimSpace(res.HeadSHA)
+	if err == nil && regHeadSHA != "" && !strings.EqualFold(regHeadSHA, trimmedSHA) && (regMergeSHA == "" || !strings.EqualFold(regMergeSHA, trimmedSHA)) {
 		log.Printf("[synapse] [github] ignoring stale CI failure on %s#%d for superseded commit %s (current head_sha=%s)", res.Repo, res.PRNumber, res.HeadSHA, regHeadSHA)
 		return true
 	}
 	return false
+}
+
+func (s *RouterServer) isMergeSHAFailure(ctx context.Context, res *ResolvedGitHubEvent) bool {
+	if res == nil || res.PRNumber <= 0 || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
+		return false
+	}
+	trimmedSHA := strings.TrimSpace(res.HeadSHA)
+	if res.MergeSHA != "" && strings.EqualFold(trimmedSHA, strings.TrimSpace(res.MergeSHA)) {
+		return true
+	}
+	if s != nil && s.registry != nil {
+		if _, _, _, regMergeSHA, err := s.registry.ResolvePRByNumber(ctx, normalizeRepo(res.Repo), res.PRNumber); err == nil && regMergeSHA != "" {
+			res.MergeSHA = regMergeSHA
+			return strings.EqualFold(trimmedSHA, strings.TrimSpace(regMergeSHA))
+		}
+	}
+	return false
+}
+
+func (s *RouterServer) populateMissingBranch(ctx context.Context, res *ResolvedGitHubEvent) {
+	if res == nil || s.registry == nil || res.PRNumber <= 0 || strings.TrimSpace(res.Branch) != "" {
+		return
+	}
+	_, branch, _, _, err := s.registry.ResolvePRByNumber(ctx, normalizeRepo(res.Repo), res.PRNumber)
+	if err == nil && branch != "" {
+		res.Branch = branch
+	}
+}
+
+func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
+	if res == nil {
+		return nil
+	}
+	s.populateMissingBranch(ctx, res)
+	return s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		Event:        prCIFailed,
+		Repo:         res.Repo,
+		PRNumber:     res.PRNumber,
+		Branch:       res.Branch,
+		HeadSHA:      res.HeadSHA,
+		TargetID:     res.TargetID,
+		Status:       prCIFailed,
+		CheckName:    res.CheckName,
+		CheckState:   statusFailed,
+		CheckURL:     checkURL,
+		Details:      details,
+		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
+		Quiet:        isDependabotBranch(res.Branch),
+		OccurredAt:   time.Now().UTC(),
+	})
 }

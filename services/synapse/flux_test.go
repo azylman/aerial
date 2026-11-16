@@ -785,6 +785,10 @@ func restateClusterRollout(name, image string, gen, observed int64, readyCond bo
 	return workloadRollout{Kind: "RestateCluster", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: 1, ReadyConditionTrue: readyCond}
 }
 
+func restateClusterRolloutWithManaged(name, image string, gen, observed int64, readyCond bool, managed ...workloadRollout) workloadRollout {
+	return workloadRollout{Kind: "RestateCluster", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: 1, ReadyConditionTrue: readyCond, ManagedWorkloads: managed}
+}
+
 func TestImageTag(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -861,6 +865,18 @@ func TestDecodeWorkloadRollouts(t *testing.T) {
 			body: `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":2},"spec":{"compute":{"image":"docker.io/restatedev/restate:1.6"}},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True"}]}}]}`,
 			want: []workloadRollout{{Kind: "RestateCluster", Namespace: "default", Name: "restate", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, ObservedGeneration: 2, Replicas: 1, ReadyConditionTrue: true}},
 		},
+		{
+			name: "restatecluster with compute env and resources",
+			kind: "RestateCluster",
+			body: `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":2},"spec":{"compute":{"image":"docker.io/restatedev/restate:1.6","replicas":2,"env":[{"name":"A","value":"1"}],"resources":{"limits":{"cpu":"1"},"requests":{"memory":"512Mi"}}}},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True"}]}}]}`,
+			want: []workloadRollout{{Kind: "RestateCluster", Namespace: "default", Name: "restate", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, ObservedGeneration: 2, Replicas: 2, ReadyConditionTrue: true, Env: map[string]string{"A": "1"}, Resources: kubeResourceRequirements{Limits: map[string]string{"cpu": "1"}, Requests: map[string]string{"memory": "512Mi"}}}},
+		},
+		{
+			name: "statefulset with container env and resources",
+			kind: "StatefulSet",
+			body: `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":2},"spec":{"replicas":2,"template":{"spec":{"containers":[{"image":"docker.io/restatedev/restate:1.6","env":[{"name":"A","value":"1"}],"resources":{"limits":{"cpu":"1"}}}]}}},"status":{"observedGeneration":2,"replicas":2,"availableReplicas":2,"currentRevision":"r-1","updateRevision":"r-1"}}]}`,
+			want: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, ObservedGeneration: 2, Replicas: 2, AvailableReplicas: 2, StatusReplicas: 2, CurrentRevision: "r-1", UpdateRevision: "r-1", Env: map[string]string{"A": "1"}, Resources: kubeResourceRequirements{Limits: map[string]string{"cpu": "1"}}}},
+		},
 		{name: "empty list", kind: "Deployment", body: `{"items":[]}`, want: []workloadRollout{}},
 		{name: "malformed list", kind: "Deployment", body: `{"items":`, wantErr: true},
 	}
@@ -906,8 +922,58 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 		{name: "restatedeployment available replicas unavailable", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 1, "dp_12345", true), wantReason: "2/2 ready, 1/2 available, deploymentId=dp_12345, ready=true"},
 		{name: "restatedeployment missing deploymentId", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 2, "", true), wantReason: "2/2 ready, 2/2 available, deploymentId=, ready=true"},
 		{name: "restatedeployment ready condition false", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 2, "dp_12345", false), wantReason: "2/2 ready, 2/2 available, deploymentId=dp_12345, ready=false"},
-		{name: "restatecluster rolled out", workload: restateClusterRollout("restate", synapseImage, 2, 2, true), wantDone: true},
-		{name: "restatecluster ready condition false", workload: restateClusterRollout("restate", synapseImage, 2, 2, false), wantReason: "ready=false"},
+		{name: "restatecluster ready condition false", workload: restateClusterRollout("restate", synapseImage, 2, 0, false), wantReason: "ready=false"},
+		{name: "restatecluster without managed statefulset pending", workload: restateClusterRollout("restate", synapseImage, 2, 0, true), wantReason: "waiting for managed statefulset"},
+		{
+			name:       "restatecluster with managed statefulset matching spec rolled out",
+			workload:   restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-1", "restate-1")),
+			wantDone:   true,
+			wantReason: "",
+		},
+		{
+			name:       "restatecluster with managed statefulset image mismatch pending",
+			workload:   restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, stsRollout("restate", "docker.io/restatedev/restate:1.5", 2, 2, 1, 1, "restate-1", "restate-1")),
+			wantReason: "managed StatefulSet default/restate images [docker.io/restatedev/restate:1.5] do not match cluster image docker.io/restatedev/restate:1.6",
+		},
+		{
+			name: "restatecluster with managed statefulset env mismatch pending",
+			workload: func() workloadRollout {
+				w := restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-1", "restate-1"))
+				w.Env = map[string]string{"RESTATE_AUTO_PROVISION": "false"}
+				return w
+			}(),
+			wantReason: "managed StatefulSet default/restate env RESTATE_AUTO_PROVISION=\"\" does not match cluster \"false\"",
+		},
+		{
+			name: "restatecluster with managed statefulset resource mismatch pending",
+			workload: func() workloadRollout {
+				w := restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-1", "restate-1"))
+				w.Resources = kubeResourceRequirements{Limits: map[string]string{"cpu": "1"}}
+				return w
+			}(),
+			wantReason: "managed StatefulSet default/restate resource limit cpu=\"\" does not match cluster \"1\"",
+		},
+		{
+			name: "restatecluster metadata-only change with managed statefulset matching spec is done",
+			workload: func() workloadRollout {
+				m := stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-1", "restate-1")
+				m.ChangedAt = rolloutClock(10, 0, 0)
+				w := restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, m)
+				w.ChangedAt = rolloutClock(10, 5, 0)
+				return w
+			}(),
+			wantDone: true,
+		},
+		{
+			name:       "restatecluster with managed statefulset rolling out pending",
+			workload:   restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 0, "restate-1", "restate-1")),
+			wantReason: "managed StatefulSet default/restate: revision restate-1 of restate-1, 0/1 available",
+		},
+		{
+			name:       "restatecluster with managed statefulset unobserved generation pending",
+			workload:   restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, stsRollout("restate", "docker.io/restatedev/restate:1.6", 3, 2, 1, 1, "restate-1", "restate-1")),
+			wantReason: "managed StatefulSet default/restate: generation 3 not yet observed",
+		},
 		{name: "unsupported kind", workload: workloadRollout{Kind: "Job"}, wantReason: "unsupported workload kind"},
 	}
 	for _, tc := range tests {
@@ -974,6 +1040,24 @@ func TestPRRolloutStatus(t *testing.T) {
 		{name: "consumer without reloader ignored", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), nil, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 30, 0), wantDone: true},
 		{name: "configmap in another namespace ignored", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-config")}, configMaps: []configMapChange{{Namespace: "apps", Name: "eri-config", ChangedAt: rolloutClock(10, 1, 0)}}, commitSHA: rolloutSHA, now: rolloutClock(10, 30, 0), wantDone: true},
 		{name: "configmap changed before the merge ignored", workloads: []workloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-config")}, configMaps: []configMapChange{{Namespace: "default", Name: "eri-config", ChangedAt: rolloutClock(9, 30, 0)}}, commitSHA: rolloutSHA, now: rolloutClock(10, 30, 0), wantDone: true},
+		{
+			name: "restatecluster manifest change with managed statefulset pending operator rollout",
+			workloads: []workloadRollout{
+				withChange(restateClusterRollout("restate", "docker.io/restatedev/restate:1.6", 2, 0, true), rolloutClock(10, 1, 0), nil),
+				stsRollout("restate", "docker.io/restatedev/restate:1.5", 1, 1, 1, 1, "restate-1", "restate-1"),
+			},
+			commitSHA:  rolloutSHA,
+			wantReason: "RestateCluster default/restate (managed StatefulSet default/restate images [docker.io/restatedev/restate:1.5] do not match cluster image docker.io/restatedev/restate:1.6)",
+		},
+		{
+			name: "restatecluster manifest change with managed statefulset rolled out is done",
+			workloads: []workloadRollout{
+				withChange(restateClusterRollout("restate", "docker.io/restatedev/restate:1.6", 2, 0, true), rolloutClock(10, 1, 0), nil),
+				withChange(stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-2", "restate-2"), rolloutClock(10, 1, 5), nil),
+			},
+			commitSHA: rolloutSHA,
+			wantDone:  true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

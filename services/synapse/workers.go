@@ -688,10 +688,10 @@ var workloadListPaths = []string{
 // rolloutWorkloadKinds are the workload kinds whose rollout gates a deploy.
 var rolloutWorkloadKinds = []struct{ Kind, Path string }{
 	{Kind: "Deployment", Path: "/apis/apps/v1/deployments"},
-	{Kind: "StatefulSet", Path: "/apis/apps/v1/statefulsets"},
+	{Kind: kindStatefulSet, Path: "/apis/apps/v1/statefulsets"},
 	{Kind: "DaemonSet", Path: "/apis/apps/v1/daemonsets"},
 	{Kind: "RestateDeployment", Path: "/apis/restate.dev/v1beta1/restatedeployments"},
-	{Kind: "RestateCluster", Path: "/apis/restate.dev/v1/restateclusters"},
+	{Kind: kindRestateCluster, Path: "/apis/restate.dev/v1/restateclusters"},
 }
 
 // fluxManagedSelector selects every object applied by any Flux Kustomization.

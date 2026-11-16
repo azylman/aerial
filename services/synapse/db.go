@@ -66,6 +66,7 @@ type PRRegistryUpdater interface {
 	MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (transitioned bool, err error)
 	HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error)
 	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error
+	AcknowledgeDeployFailedPublished(ctx context.Context, repo string, prNumber int) error
 }
 
 type pgxQueryExecer interface {
@@ -167,7 +168,20 @@ func (r *PostgresPRRegistry) AtomicTransitionConflict(ctx context.Context, repo 
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
-	query := `UPDATE pr_registry SET status = 'deploy_failed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND status IN ('deploying', 'merged', 'synced') RETURNING target_id;`
+	query := `
+		UPDATE pr_registry
+		SET status = 'deploy_failed',
+		    metadata = CASE
+		        WHEN status <> 'deploy_failed' THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{deploy_failed_published}', 'false'::jsonb)
+		        ELSE metadata
+		    END,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2
+		  AND (
+		    status IN ('deploying', 'merged', 'synced')
+		    OR (status = 'deploy_failed' AND COALESCE((metadata->>'deploy_failed_published')::boolean, false) = false)
+		  )
+		RETURNING target_id;`
 	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition deploy_failed", query)
 }
 
@@ -334,7 +348,7 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 		UPDATE pr_registry
 		SET status = 'deploying',
 			metadata = jsonb_set(
-				jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(elem)))),
+				jsonb_set((COALESCE(metadata, '{}'::jsonb) - 'banner') - 'deploy_failed_published', '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(elem)))),
 				'{started_jobs}',
 				(SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'started_jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem)
 			),
@@ -746,6 +760,25 @@ func (r *PostgresPRRegistry) UpdatePRStatus(ctx context.Context, repo string, pr
 		WHERE repo = $1 AND pr_number = $2;`
 	if _, err := r.pool.Exec(qCtx, query, repo, prNumber, status, metaBytes); err != nil {
 		return fmt.Errorf("update pr status: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresPRRegistry) AcknowledgeDeployFailedPublished(ctx context.Context, repo string, prNumber int) error {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{deploy_failed_published}', 'true'::jsonb),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2 AND status = 'deploy_failed';`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber); err != nil {
+		return fmt.Errorf("acknowledge deploy failed published: %w", err)
 	}
 	return nil
 }

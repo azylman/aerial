@@ -415,7 +415,7 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	// Phase c: write every image tag before any reconcile so one reconcile renders all of them.
 	if err := s.promoteWorkflowRunImages(ctx, images, ImageReadyEventRequest{Repo: repo, CommitSHA: headSHA, PRNumber: prNum, TargetID: targetID}); err != nil {
 		if finalAttempt && trackPR {
-			s.handleImagePromotionDeployFailed(ctx, repo, prNum, headBranch, headSHA, targetID, err)
+			s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, err)
 		}
 		return err
 	}
@@ -429,32 +429,40 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	return s.recordAndReconcileKustomizations(ctx, repo, prNum, headBranch, headSHA, targetID, refs, trackPR, finalAttempt)
 }
 
+func (s *RouterServer) hasUnrecordedKustomizationRequests(ctx context.Context, repo string, prNum int) bool {
+	hasReqs, err := s.registry.HasKustomizationRequests(ctx, repo, prNum)
+	return err == nil && !hasReqs
+}
+
+func (s *RouterServer) handleFinalAttemptDeployFailure(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, causeErr error) {
+	if fErr := s.handleImagePromotionDeployFailed(ctx, repo, prNum, headBranch, headSHA, targetID, causeErr); fErr != nil {
+		log.Printf("[synapse] [dispatcher] error handling deploy failure for %s#%d: %v", repo, prNum, fErr)
+	}
+}
+
 func (s *RouterServer) recordAndReconcileKustomizations(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, refs []fluxKustomizationRef, trackPR, finalAttempt bool) error {
 	requests := newKustomizationRequests(refs, time.Now().UTC())
 	if trackPR {
 		if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
 			log.Printf("[synapse] [dispatcher] error recording kustomization requests for %s#%d: %v", repo, prNum, err)
 			if finalAttempt {
-				s.handleImagePromotionDeployFailed(ctx, repo, prNum, headBranch, headSHA, targetID, err)
+				s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, err)
 			}
 			return fmt.Errorf("record kustomization requests: %w", err)
 		}
 	}
 	if err := s.reconcileImageKustomizations(ctx, refs, requests); err != nil {
-		if finalAttempt && trackPR {
-			hasReqs, checkErr := s.registry.HasKustomizationRequests(ctx, repo, prNum)
-			if checkErr == nil && !hasReqs {
-				s.handleImagePromotionDeployFailed(ctx, repo, prNum, headBranch, headSHA, targetID, err)
-			}
+		if finalAttempt && trackPR && s.hasUnrecordedKustomizationRequests(ctx, repo, prNum) {
+			s.handleFinalAttemptDeployFailure(ctx, repo, prNum, headBranch, headSHA, targetID, err)
 		}
 		return err
 	}
 	return nil
 }
 
-func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, causeErr error) {
+func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, repo string, prNum int, headBranch, headSHA, targetID string, causeErr error) error {
 	if s == nil || s.registry == nil || prNum <= 0 {
-		return
+		return nil
 	}
 	tID, branch, hSHA, mSHA, err := s.registry.ResolvePRByNumber(ctx, repo, prNum)
 	if err != nil {
@@ -477,10 +485,10 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 	newTID, updated, fErr := s.registry.AtomicTransitionDeployFailed(ctx, repo, prNum)
 	if fErr != nil {
 		log.Printf("[synapse] [dispatcher] error transitioning pr %s#%d to deploy_failed: %v", repo, prNum, fErr)
-		return
+		return fmt.Errorf("transition deploy failed: %w", fErr)
 	}
 	if !updated {
-		return
+		return nil
 	}
 	if newTID != "" {
 		targetID = newTID
@@ -494,7 +502,7 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 		errMsg = causeErr.Error()
 	}
 
-	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+	if pErr := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 		Event:        eventDeployFailed,
 		Repo:         repo,
 		PRNumber:     prNum,
@@ -507,7 +515,13 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 		RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
 		Quiet:        isDependabotBranch(branch) || s.isDependabotPRNumber(ctx, repo, prNum),
 		OccurredAt:   time.Now().UTC(),
-	})
+	}); pErr != nil {
+		return fmt.Errorf("publish deploy failed event: %w", pErr)
+	}
+	if ackErr := s.registry.AcknowledgeDeployFailedPublished(ctx, repo, prNum); ackErr != nil {
+		log.Printf("[synapse] [dispatcher] warning: failed acknowledging deploy_failed_published for %s#%d: %v", repo, prNum, ackErr)
+	}
+	return nil
 }
 
 // promoteWorkflowRunImages promotes every image concurrently and waits for all of them.
@@ -820,42 +834,6 @@ func (s *RouterServer) healDependabotPR(ctx context.Context, res *ResolvedGitHub
 	}
 }
 
-func (s *RouterServer) populateMissingBranch(ctx context.Context, res *ResolvedGitHubEvent) {
-	if res == nil || s.registry == nil {
-		return
-	}
-	if res.PRNumber <= 0 || strings.TrimSpace(res.Branch) != "" {
-		return
-	}
-	_, branch, _, _, err := s.registry.ResolvePRByNumber(ctx, normalizeRepo(res.Repo), res.PRNumber)
-	if err == nil && branch != "" {
-		res.Branch = branch
-	}
-}
-
-func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
-	if res == nil {
-		return nil
-	}
-	s.populateMissingBranch(ctx, res)
-	return s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        prCIFailed,
-		Repo:         res.Repo,
-		PRNumber:     res.PRNumber,
-		Branch:       res.Branch,
-		HeadSHA:      res.HeadSHA,
-		TargetID:     res.TargetID,
-		Status:       prCIFailed,
-		CheckName:    res.CheckName,
-		CheckState:   statusFailed,
-		CheckURL:     checkURL,
-		Details:      details,
-		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
-		Quiet:        isDependabotBranch(res.Branch),
-		OccurredAt:   time.Now().UTC(),
-	})
-}
-
 func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string, emitAdditional bool) error {
 	s.healDependabotPR(ctx, res)
 	targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
@@ -865,6 +843,9 @@ func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *Resol
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
 	if updated || (emitAdditional && res.TargetID != "") {
 		return s.completeCIFailureTransition(ctx, res, details, checkURL)
+	}
+	if s.isMergeSHAFailure(ctx, res) || (res.Event == ghEventWorkflowRun && (res.Branch == "main" || strings.HasPrefix(res.Branch, "refs/heads/main"))) {
+		return s.handleImagePromotionDeployFailed(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, res.TargetID, errors.New(details))
 	}
 	return nil
 }
@@ -894,6 +875,9 @@ func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *Resolv
 func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
 	if s.isStaleOrIgnoredCIFailure(ctx, res) {
 		return nil
+	}
+	if s.isMergeSHAFailure(ctx, res) {
+		return s.handleImagePromotionDeployFailed(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, res.TargetID, errors.New(details))
 	}
 	emitAdditional := false
 	if res.Event == ghEventCheckRun && res.PRNumber > 0 && res.HeadSHA != "" && !isGateAggregatorCheck(res.CheckName) {

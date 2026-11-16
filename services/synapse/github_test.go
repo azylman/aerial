@@ -119,50 +119,53 @@ type ghPriorEvent struct {
 }
 
 type ghEventCase struct {
-	name                 string
-	event                string
-	delivery             string
-	payload              string
-	priorEvent           *ghPriorEvent
-	priorEvents          []ghPriorEvent
-	reg                  *mockPRRegistry
-	disp                 *mockOutboundDispatcher
-	bus                  *mockEventBus
-	spyNoGitHubHit       bool
-	systemChannelID      string
-	autoUpdateAuthors    []string
-	nonDefaultOwner      bool
-	wantErr              bool
-	wantRepo             string
-	wantAction           string
-	wantPR               int
-	wantBranch           string
-	wantHeadSHA          string
-	wantMergeSHA         string
-	wantTargetID         string
-	wantSource           string
-	wantConclusion       string
-	wantSender           string
-	wantMergedCalls      int
-	wantClosedCalls      int
-	wantSyncCalls        int
-	wantCIFailedCalls    int
-	wantCIFailedSHAs     int
-	wantBackfillCalls    int
-	wantConflictCalls    int
-	wantAdvanceCalls     int
-	wantEnsureCalls      int
-	wantGitPushes        int
-	wantPrompts          int
-	wantDispatches       int
-	wantDMs              int
-	wantPromptSubstr     string
-	wantDMSubstr         string
-	wantRecordCheckCalls int
-	wantRecordCheckState string
-	wantUpdatedBranchHit string
-	wantReconciles       []fluxKustomizationRef
-	wantCIFailedChecks   []string
+	name                    string
+	event                   string
+	delivery                string
+	payload                 string
+	priorEvent              *ghPriorEvent
+	priorEvents             []ghPriorEvent
+	reg                     *mockPRRegistry
+	disp                    *mockOutboundDispatcher
+	bus                     *mockEventBus
+	spyNoGitHubHit          bool
+	systemChannelID         string
+	autoUpdateAuthors       []string
+	nonDefaultOwner         bool
+	wantErr                 bool
+	wantRepo                string
+	wantAction              string
+	wantPR                  int
+	wantBranch              string
+	wantHeadSHA             string
+	wantMergeSHA            string
+	wantTargetID            string
+	wantSource              string
+	wantConclusion          string
+	wantSender              string
+	wantMergedCalls         int
+	wantClosedCalls         int
+	wantSyncCalls           int
+	wantCIFailedCalls       int
+	wantCIFailedSHAs        int
+	wantDeployFailedCalls   int
+	wantDeployFailedEvents  int
+	wantDeployEventMergeSHA string
+	wantBackfillCalls       int
+	wantConflictCalls       int
+	wantAdvanceCalls        int
+	wantEnsureCalls         int
+	wantGitPushes           int
+	wantPrompts             int
+	wantDispatches          int
+	wantDMs                 int
+	wantPromptSubstr        string
+	wantDMSubstr            string
+	wantRecordCheckCalls    int
+	wantRecordCheckState    string
+	wantUpdatedBranchHit    string
+	wantReconciles          []fluxKustomizationRef
+	wantCIFailedChecks      []string
 }
 
 func TestProcessGitHubEvent(t *testing.T) {
@@ -243,6 +246,12 @@ func assertEventRegistryTransitionCalls(t *testing.T, tc ghEventCase) {
 	}
 	if tc.wantHeadSHA != "" && len(tc.reg.ciFailedBySHACalls) > 0 && tc.reg.ciFailedBySHACalls[0].headSHA != tc.wantHeadSHA {
 		t.Errorf("ciFailedBySHACalls headSHA = %q, want %q", tc.reg.ciFailedBySHACalls[0].headSHA, tc.wantHeadSHA)
+	}
+	if len(tc.reg.deployFailedCalls) != tc.wantDeployFailedCalls {
+		t.Errorf("deployFailedCalls = %d, want %d", len(tc.reg.deployFailedCalls), tc.wantDeployFailedCalls)
+	}
+	if tc.wantPR != 0 && tc.wantDeployFailedCalls > 0 && len(tc.reg.deployFailedCalls) > 0 && tc.reg.deployFailedCalls[0].prNumber != tc.wantPR {
+		t.Errorf("deployFailedCalls prNumber = %d, want %d", tc.reg.deployFailedCalls[0].prNumber, tc.wantPR)
 	}
 }
 
@@ -368,7 +377,7 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 	t.Parallel()
 	var inserters []pubsub.Bus
 	activeBus := tc.bus
-	if activeBus == nil && len(tc.wantCIFailedChecks) > 0 {
+	if activeBus == nil && (len(tc.wantCIFailedChecks) > 0 || tc.wantDeployFailedEvents > 0) {
 		activeBus = &mockEventBus{}
 	}
 	if activeBus != nil {
@@ -404,12 +413,42 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 		return
 	}
 	assertEventResult(t, tc, res, ghPaths)
+	assertEventBusCalls(t, tc, activeBus)
+}
+
+func assertDeployFailedEvents(t *testing.T, tc ghEventCase, bus *mockEventBus) {
+	t.Helper()
+	if bus == nil {
+		t.Fatalf("wantDeployFailedEvents specified but no bus available")
+	}
+	deployEventsCount := 0
+	for _, evt := range bus.publishedPREvents {
+		if evt.Event == eventDeployFailed {
+			deployEventsCount++
+			if tc.wantPR != 0 && evt.PRNumber != tc.wantPR {
+				t.Errorf("deploy_failed PRNumber = %d, want %d", evt.PRNumber, tc.wantPR)
+			}
+			if tc.wantDeployEventMergeSHA != "" && evt.MergeSHA != tc.wantDeployEventMergeSHA {
+				t.Errorf("deploy_failed MergeSHA = %q, want %q", evt.MergeSHA, tc.wantDeployEventMergeSHA)
+			}
+			if tc.wantTargetID != "" && evt.TargetID != tc.wantTargetID {
+				t.Errorf("deploy_failed TargetID = %q, want %q", evt.TargetID, tc.wantTargetID)
+			}
+		}
+	}
+	if deployEventsCount != tc.wantDeployFailedEvents {
+		t.Errorf("deploy_failed events count = %d, want %d", deployEventsCount, tc.wantDeployFailedEvents)
+	}
+}
+
+func assertEventBusCalls(t *testing.T, tc ghEventCase, bus *mockEventBus) {
+	t.Helper()
 	if len(tc.wantCIFailedChecks) > 0 {
-		if activeBus == nil {
+		if bus == nil {
 			t.Fatalf("wantCIFailedChecks specified but no bus available")
 		}
 		var gotChecks []string
-		for _, evt := range activeBus.publishedPREvents {
+		for _, evt := range bus.publishedPREvents {
 			if evt.Event == "ci_failed" {
 				gotChecks = append(gotChecks, firstNonEmpty(evt.CheckName, evt.JobName))
 			}
@@ -417,6 +456,9 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 		if !slices.Equal(gotChecks, tc.wantCIFailedChecks) {
 			t.Errorf("ci_failed event checks = %v, want %v", gotChecks, tc.wantCIFailedChecks)
 		}
+	}
+	if tc.wantDeployFailedEvents > 0 {
+		assertDeployFailedEvents(t, tc, bus)
 	}
 }
 
@@ -1108,138 +1150,80 @@ func processGitHubEventCasesPart6() []ghEventCase {
 			disp:    &mockOutboundDispatcher{},
 			wantErr: true,
 		},
+		{
+			name: "workflow_run failure on main matching merge_sha transitions merged PR to deploy_failed", event: "workflow_run", delivery: "del-wf-main-merge-sha-fail",
+			payload: `{"action":"completed","workflow_run":{"id":801,"name":"Continuous Delivery","head_sha":"merge224","head_branch":"main","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 224, resolveBranch: "feat/restate", resolveHeadSHA: "premerge224", resolveMergeSHA: "merge224", resolveTargetID: "100000000000000002", deployFailedTargetID: "100000000000000002", deployFailedUpdated: true},
+			disp:    &mockOutboundDispatcher{}, bus: &mockEventBus{}, wantPR: 224, wantHeadSHA: "merge224", wantTargetID: "100000000000000002", wantCIFailedCalls: 0, wantDeployFailedCalls: 1, wantDeployFailedEvents: 1, wantDeployEventMergeSHA: "merge224",
+		},
+		{
+			name: "workflow_run failure on main matching merge_sha deploy_failed transition error propagates", event: "workflow_run", delivery: "del-wf-main-merge-sha-deploy-err",
+			payload: `{"action":"completed","workflow_run":{"id":801,"name":"Continuous Delivery","head_sha":"merge224","head_branch":"main","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 224, resolveBranch: "feat/restate", resolveHeadSHA: "premerge224", resolveMergeSHA: "merge224", resolveTargetID: "100000000000000002", deployFailedErr: errors.New("deploy failed db error")},
+			disp:    &mockOutboundDispatcher{}, wantErr: true,
+		},
+		{
+			name: "check_run failure on merge_sha routes to deploy_failed without ci_failed transition", event: "check_run", delivery: "del-cr-main-merge-sha-fail",
+			payload: `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Integration Tests","head_sha":"merge224","status":"completed","conclusion":"failure","pull_requests":[]}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 224, resolveBranch: "feat/restate", resolveHeadSHA: "premerge224", resolveMergeSHA: "merge224", resolveTargetID: "100000000000000002", deployFailedTargetID: "100000000000000002", deployFailedUpdated: true},
+			disp:    &mockOutboundDispatcher{}, bus: &mockEventBus{}, wantPR: 224, wantHeadSHA: "merge224", wantTargetID: "100000000000000002", wantCIFailedCalls: 0, wantDeployFailedCalls: 1, wantDeployFailedEvents: 1, wantDeployEventMergeSHA: "merge224",
+		},
 	}
 }
 
 func processGitHubEventCasesPart8() []ghEventCase {
 	return []ghEventCase{
 		{
-			name:            "dependabot PR opened registers in pr_registry with system channel snowflake",
-			event:           "pull_request",
-			delivery:        "del-pr-dependabot-reg-1",
+			name: "dependabot PR opened registers in pr_registry with system channel snowflake", event: "pull_request", delivery: "del-pr-dependabot-reg-1",
 			payload:         `{"action":"opened","number":605,"pull_request":{"node_id":"node-ok","number":605,"title":"build(deps): bump bar","head":{"ref":"dependabot/go_modules/bar-1.0.2","sha":"depsha605"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
-			systemChannelID: "100000000000000004",
-			reg:             &mockPRRegistry{},
-			wantRepo:        "azylman/aerial",
-			wantAction:      "opened",
-			wantPR:          605,
-			wantBranch:      "dependabot/go_modules/bar-1.0.2",
-			wantHeadSHA:     "depsha605",
-			wantSender:      "dependabot[bot]",
-			wantSource:      "pull_request_payload",
-			wantEnsureCalls: 1,
-			wantTargetID:    "100000000000000004",
+			systemChannelID: "100000000000000004", reg: &mockPRRegistry{},
+			wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 605, wantBranch: "dependabot/go_modules/bar-1.0.2", wantHeadSHA: "depsha605", wantSender: "dependabot[bot]", wantSource: "pull_request_payload", wantEnsureCalls: 1, wantTargetID: "100000000000000004",
 		},
 		{
-			name:            "dependabot PR opened registry error logs warning without failing event",
-			event:           "pull_request",
-			delivery:        "del-pr-dependabot-reg-err",
+			name: "dependabot PR opened registry error logs warning without failing event", event: "pull_request", delivery: "del-pr-dependabot-reg-err",
 			payload:         `{"action":"opened","number":606,"pull_request":{"node_id":"node-ok","number":606,"title":"build(deps): bump baz","head":{"ref":"dependabot/go_modules/baz-1.0.2","sha":"depsha606"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
-			systemChannelID: "100000000000000004",
-			reg:             &mockPRRegistry{ensureErr: errors.New("db err")},
-			wantErr:         false,
-			wantRepo:        "azylman/aerial",
-			wantAction:      "opened",
-			wantPR:          606,
-			wantBranch:      "dependabot/go_modules/baz-1.0.2",
-			wantHeadSHA:     "depsha606",
-			wantSender:      "dependabot[bot]",
-			wantSource:      "pull_request_payload",
-			wantEnsureCalls: 1,
+			systemChannelID: "100000000000000004", reg: &mockPRRegistry{ensureErr: errors.New("db err")},
+			wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 606, wantBranch: "dependabot/go_modules/baz-1.0.2", wantHeadSHA: "depsha606", wantSender: "dependabot[bot]", wantSource: "pull_request_payload", wantEnsureCalls: 1,
 		},
 		{
-			name:            "dependabot PR opened on non-default owner skips registration and leaves targetID empty",
-			event:           "pull_request",
-			delivery:        "del-pr-dependabot-non-default-owner",
+			name: "dependabot PR opened on non-default owner skips registration and leaves targetID empty", event: "pull_request", delivery: "del-pr-dependabot-non-default-owner",
 			payload:         `{"action":"opened","number":609,"pull_request":{"node_id":"node-ok","number":609,"title":"build(deps): bump qux","head":{"ref":"dependabot/go_modules/qux-1.0.0","sha":"depsha609"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
-			systemChannelID: "100000000000000004",
-			nonDefaultOwner: true,
-			reg:             &mockPRRegistry{},
-			wantRepo:        "azylman/aerial",
-			wantAction:      "opened",
-			wantPR:          609,
-			wantBranch:      "dependabot/go_modules/qux-1.0.0",
-			wantHeadSHA:     "depsha609",
-			wantSender:      "dependabot[bot]",
-			wantSource:      "pull_request_payload",
-			wantEnsureCalls: 0,
-			wantTargetID:    "",
+			systemChannelID: "100000000000000004", nonDefaultOwner: true, reg: &mockPRRegistry{},
+			wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 609, wantBranch: "dependabot/go_modules/qux-1.0.0", wantHeadSHA: "depsha609", wantSender: "dependabot[bot]", wantSource: "pull_request_payload",
 		},
 		{
-			name:              "check_run failure on dependabot branch on non-default owner skips self-heal registration",
-			event:             "check_run",
-			delivery:          "del-cr-dependabot-fail-non-default-owner",
-			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"depfailsha2","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/1000","output":{"title":"Tests Failed","summary":"Error in qux.go"},"pull_requests":[{"number":610,"head":{"ref":"dependabot/pip/qux-1.0","sha":"depfailsha2"}}]}}`,
-			systemChannelID:   "100000000000000004",
-			nonDefaultOwner:   true,
-			reg:               &mockPRRegistry{ciFailedTargetID: "100000000000000004", ciFailedUpdated: true},
-			disp:              &mockOutboundDispatcher{},
-			wantPR:            610,
-			wantBranch:        "dependabot/pip/qux-1.0",
-			wantHeadSHA:       "depfailsha2",
-			wantEnsureCalls:   0,
-			wantCIFailedCalls: 1,
-			wantTargetID:      "100000000000000004",
+			name: "check_run failure on dependabot branch on non-default owner skips self-heal registration", event: "check_run", delivery: "del-cr-dependabot-fail-non-default-owner",
+			payload:         `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"depfailsha2","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/1000","output":{"title":"Tests Failed","summary":"Error in qux.go"},"pull_requests":[{"number":610,"head":{"ref":"dependabot/pip/qux-1.0","sha":"depfailsha2"}}]}}`,
+			systemChannelID: "100000000000000004", nonDefaultOwner: true, reg: &mockPRRegistry{ciFailedTargetID: "100000000000000004", ciFailedUpdated: true}, disp: &mockOutboundDispatcher{},
+			wantPR: 610, wantBranch: "dependabot/pip/qux-1.0", wantHeadSHA: "depfailsha2", wantEnsureCalls: 0, wantCIFailedCalls: 1, wantTargetID: "100000000000000004",
 		},
 		{
-			name:              "check_run failure on dependabot branch self-heals registration and transitions CI failed",
-			event:             "check_run",
-			delivery:          "del-cr-dependabot-fail",
-			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"depfailsha","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/999","output":{"title":"Tests Failed","summary":"Error in bar.go"},"pull_requests":[{"number":607,"head":{"ref":"dependabot/pip/foo-1.0","sha":"depfailsha"}}]}}`,
-			systemChannelID:   "100000000000000004",
-			reg:               &mockPRRegistry{ciFailedTargetID: "100000000000000004", ciFailedUpdated: true},
-			disp:              &mockOutboundDispatcher{},
-			wantPR:            607,
-			wantBranch:        "dependabot/pip/foo-1.0",
-			wantHeadSHA:       "depfailsha",
-			wantEnsureCalls:   1,
-			wantCIFailedCalls: 1,
-			wantTargetID:      "100000000000000004",
+			name: "check_run failure on dependabot branch self-heals registration and transitions CI failed", event: "check_run", delivery: "del-cr-dependabot-fail",
+			payload:         `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"depfailsha","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/999","output":{"title":"Tests Failed","summary":"Error in bar.go"},"pull_requests":[{"number":607,"head":{"ref":"dependabot/pip/foo-1.0","sha":"depfailsha"}}]}}`,
+			systemChannelID: "100000000000000004", reg: &mockPRRegistry{ciFailedTargetID: "100000000000000004", ciFailedUpdated: true}, disp: &mockOutboundDispatcher{},
+			wantPR: 607, wantBranch: "dependabot/pip/foo-1.0", wantHeadSHA: "depfailsha", wantEnsureCalls: 1, wantCIFailedCalls: 1, wantTargetID: "100000000000000004",
 		},
 		{
-			name:                 "check_run success on dependabot branch skips recording check status and widget sync",
-			event:                "check_run",
-			delivery:             "del-cr-dependabot-pass",
-			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"deppasssha","status":"completed","conclusion":"success","pull_requests":[{"number":608,"head":{"ref":"dependabot/pip/bar-1.0","sha":"deppasssha"}}]}}`,
-			reg:                  &mockPRRegistry{recordCheckUpdated: true},
-			disp:                 &mockOutboundDispatcher{},
-			wantPR:               608,
-			wantBranch:           "dependabot/pip/bar-1.0",
-			wantHeadSHA:          "deppasssha",
-			wantRecordCheckCalls: 0,
+			name: "check_run success on dependabot branch skips recording check status and widget sync", event: "check_run", delivery: "del-cr-dependabot-pass",
+			payload: `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"deppasssha","status":"completed","conclusion":"success","pull_requests":[{"number":608,"head":{"ref":"dependabot/pip/bar-1.0","sha":"deppasssha"}}]}}`,
+			reg:     &mockPRRegistry{recordCheckUpdated: true}, disp: &mockOutboundDispatcher{},
+			wantPR: 608, wantBranch: "dependabot/pip/bar-1.0", wantHeadSHA: "deppasssha", wantRecordCheckCalls: 0,
 		},
 		{
-			name:                 "check_run failure cascades open pr conflicts and updates next clean pr",
-			event:                "check_run",
-			delivery:             "del-cr-cascade-update",
-			payload:              `{"action":"completed","repository":{"full_name":"azylman/mirrormere"},"check_run":{"name":"Service Unit Tests","head_sha":"failhead891","status":"completed","conclusion":"failure","pull_requests":[{"number":891,"head":{"ref":"feat/fail-pr","sha":"failhead891"}}]}}`,
-			autoUpdateAuthors:    []string{"trusted-author"},
-			reg:                  &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedUpdated: true},
-			disp:                 &mockOutboundDispatcher{},
-			wantPR:               891,
-			wantHeadSHA:          "failhead891",
-			wantCIFailedCalls:    1,
-			wantUpdatedBranchHit: "/repos/azylman/mirrormere/pulls/894/update-branch",
+			name: "check_run failure cascades open pr conflicts and updates next clean pr", event: "check_run", delivery: "del-cr-cascade-update",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/mirrormere"},"check_run":{"name":"Service Unit Tests","head_sha":"failhead891","status":"completed","conclusion":"failure","pull_requests":[{"number":891,"head":{"ref":"feat/fail-pr","sha":"failhead891"}}]}}`,
+			autoUpdateAuthors: []string{"trusted-author"}, reg: &mockPRRegistry{ciFailedTargetID: "100000000000000001", ciFailedUpdated: true}, disp: &mockOutboundDispatcher{},
+			wantPR: 891, wantHeadSHA: "failhead891", wantCIFailedCalls: 1, wantUpdatedBranchHit: "/repos/azylman/mirrormere/pulls/894/update-branch",
 		},
 		{
-			name:                 "check_run gate aggregator success triggers open pr conflicts check and branch update",
-			event:                "check_run",
-			delivery:             "del-cr-gate-success-update",
-			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"CI Gate","head_sha":"head543","status":"completed","conclusion":"success","pull_requests":[{"number":543,"head":{"ref":"feat/conflict-check","sha":"head543"}}]}}`,
-			autoUpdateAuthors:    []string{"trusted-author"},
-			wantPR:               543,
-			wantHeadSHA:          "head543",
-			wantUpdatedBranchHit: "/repos/azylman/aerial/pulls/543/update-branch",
+			name: "check_run gate aggregator success triggers open pr conflicts check and branch update", event: "check_run", delivery: "del-cr-gate-success-update",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"CI Gate","head_sha":"head543","status":"completed","conclusion":"success","pull_requests":[{"number":543,"head":{"ref":"feat/conflict-check","sha":"head543"}}]}}`,
+			autoUpdateAuthors: []string{"trusted-author"}, wantPR: 543, wantHeadSHA: "head543", wantUpdatedBranchHit: "/repos/azylman/aerial/pulls/543/update-branch",
 		},
 		{
-			name:              "check_run gate aggregator success handles conflict check error cleanly",
-			event:             "check_run",
-			delivery:          "del-cr-gate-success-err",
+			name: "check_run gate aggregator success handles conflict check error cleanly", event: "check_run", delivery: "del-cr-gate-success-err",
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/unknown-repo"},"check_run":{"name":"CI Gate","head_sha":"head999","status":"completed","conclusion":"success","pull_requests":[{"number":999,"head":{"ref":"feat/unknown","sha":"head999"}}]}}`,
-			autoUpdateAuthors: []string{"trusted-author"},
-			wantPR:            999,
-			wantHeadSHA:       "head999",
-			wantErr:           false,
+			autoUpdateAuthors: []string{"trusted-author"}, wantPR: 999, wantHeadSHA: "head999", wantErr: false,
 		},
 		{
 			name:     "check_run on fork PR resolves PR and branch from cached pull_request synchronize event",

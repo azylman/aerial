@@ -380,6 +380,13 @@ func postgresPRRegistryJobKustCases() []postgresPRRegistryUnitCase {
 		{name: "UpdatePRStatus success without meta", op: "UpdatePRStatus", repo: "azylman/aerial", prNumber: 42, targetID: "deploying", wantSQLSubstr: "UPDATE pr_registry"},
 		{name: "UpdatePRStatus success with meta", op: "UpdatePRStatus", repo: "azylman/aerial", prNumber: 42, targetID: "deploying", metaJSON: `{"banner":"reverting"}`, wantSQLSubstr: "UPDATE pr_registry"},
 		{name: "UpdatePRStatus exec error", op: "UpdatePRStatus", repo: "azylman/aerial", prNumber: 42, targetID: "deploying", mockExecErr: errors.New("exec error"), wantErr: true},
+
+		// AcknowledgeDeployFailedPublished
+		{name: "AcknowledgeDeployFailedPublished empty repo guard", op: "AcknowledgeDeployFailedPublished", repo: "", prNumber: 42},
+		{name: "AcknowledgeDeployFailedPublished zero pr guard", op: "AcknowledgeDeployFailedPublished", repo: "azylman/aerial", prNumber: 0},
+		{name: "AcknowledgeDeployFailedPublished nil pool guard", op: "AcknowledgeDeployFailedPublished", nilPool: true, repo: "azylman/aerial", prNumber: 42},
+		{name: "AcknowledgeDeployFailedPublished success", op: "AcknowledgeDeployFailedPublished", repo: "azylman/aerial", prNumber: 42, wantSQLSubstr: "status = 'deploy_failed'"},
+		{name: "AcknowledgeDeployFailedPublished exec error", op: "AcknowledgeDeployFailedPublished", repo: "azylman/aerial", prNumber: 42, mockExecErr: errors.New("exec error"), wantErr: true},
 	}
 }
 
@@ -593,6 +600,11 @@ func executePRRegistryStatusUpdateOps(ctx context.Context, t *testing.T, reg *Po
 		err := reg.UpdatePRStatus(ctx, tc.repo, tc.prNumber, tc.targetID, meta)
 		if (err != nil) != tc.wantErr {
 			t.Fatalf("UpdatePRStatus err = %v, wantErr = %v", err, tc.wantErr)
+		}
+	case "AcknowledgeDeployFailedPublished":
+		err := reg.AcknowledgeDeployFailedPublished(ctx, tc.repo, tc.prNumber)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("AcknowledgeDeployFailedPublished err = %v, wantErr = %v", err, tc.wantErr)
 		}
 	default:
 		return false
