@@ -674,7 +674,14 @@ func kustomizationWatcherRunTestCases() []kustomizationWatcherRunTestCase {
 
 func TestStartKustomizationWatcher(t *testing.T) {
 	t.Parallel()
-	allSources := []string{"/apis/apps/v1/daemonsets", "/apis/apps/v1/deployments", "/apis/apps/v1/statefulsets", "/apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations"}
+	allSources := []string{
+		"/apis/apps/v1/daemonsets",
+		"/apis/apps/v1/deployments",
+		"/apis/apps/v1/statefulsets",
+		"/apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations",
+		"/apis/restate.dev/v1/restateclusters",
+		"/apis/restate.dev/v1beta1/restatedeployments",
+	}
 	tests := []struct {
 		name         string
 		withRegistry bool
@@ -757,6 +764,8 @@ func TestDefaultOutboundDispatcher_ListKustomizationWorkloads(t *testing.T) {
 	ctx := context.Background()
 	deploymentList := `{"items":[{"metadata":{"name":"synapse","namespace":"default","generation":2},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:abc"}]}}},"status":{"observedGeneration":2,"replicas":1,"updatedReplicas":1,"availableReplicas":1}}]}`
 	daemonSetList := `{"items":[{"metadata":{"name":"agent","namespace":"kube-system","generation":1},"spec":{"template":{"spec":{"containers":[{"image":"agent:abc"}]}}},"status":{"observedGeneration":1,"desiredNumberScheduled":2,"updatedNumberScheduled":1,"numberAvailable":2}}]}`
+	restateDeploymentList := `{"items":[{"metadata":{"name":"restate-worker","namespace":"default","generation":1},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-restate-worker:abc"}]}}},"status":{"observedGeneration":1,"replicas":1,"readyReplicas":1,"availableReplicas":1,"deploymentId":"dp_123","conditions":[{"type":"Ready","status":"True"}]}}]}`
+	restateClusterList := `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":1},"spec":{"compute":{"image":"docker.io/restatedev/restate:1.6"}},"status":{"observedGeneration":1,"conditions":[{"type":"Ready","status":"True"}]}}]}`
 
 	tests := []struct {
 		name         string
@@ -767,10 +776,16 @@ func TestDefaultOutboundDispatcher_ListKustomizationWorkloads(t *testing.T) {
 		wantRequests int
 	}{
 		{
-			name:         "lists deployments statefulsets and daemonsets of the kustomization",
-			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: deploymentList}, kubeDaemonSetsPath: {body: daemonSetList}}),
-			want:         []string{"Deployment default/synapse", "DaemonSet kube-system/agent"},
-			wantRequests: 3,
+			name:         "lists deployments statefulsets daemonsets and restate resources of the kustomization",
+			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: deploymentList}, kubeDaemonSetsPath: {body: daemonSetList}, kubeRestateDeploymentsPath: {body: restateDeploymentList}, kubeRestateClustersPath: {body: restateClusterList}}),
+			want:         []string{"Deployment default/synapse", "DaemonSet kube-system/agent", "RestateDeployment default/restate-worker", "RestateCluster default/restate"},
+			wantRequests: 5,
+		},
+		{
+			name:         "missing crd 404 is treated as empty workload list during rollout listing",
+			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: deploymentList}, kubeRestateDeploymentsPath: {status: http.StatusNotFound, body: `{"reason":"NotFound"}`}, kubeRestateClustersPath: {status: http.StatusNotFound, body: `{"reason":"NotFound"}`}}),
+			want:         []string{"Deployment default/synapse"},
+			wantRequests: 5,
 		},
 		{
 			name:         "list failure returns error",

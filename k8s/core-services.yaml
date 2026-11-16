@@ -1176,6 +1176,15 @@ rules:
       - cronjobs
     verbs:
       - list
+  - apiGroups:
+      - restate.dev
+    resources:
+      - restatedeployments
+      - restateclusters
+    verbs:
+      - get
+      - list
+      - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

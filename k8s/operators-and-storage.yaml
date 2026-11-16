@@ -481,6 +481,38 @@ spec:
     reloader:
       watchGlobally: true
 ---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: restate-operator
+  namespace: flux-system
+spec:
+  interval: 1h
+  type: oci
+  url: oci://ghcr.io/restatedev
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: restate-operator
+  namespace: default
+spec:
+  chart:
+    spec:
+      chart: restate-operator-helm
+      sourceRef:
+        kind: HelmRepository
+        name: restate-operator
+        namespace: flux-system
+      version: 2.8.2
+  install:
+    crds: CreateReplace
+  interval: 30m
+  upgrade:
+    crds: CreateReplace
+  values:
+    installCrds: true
+---
 apiVersion: external-secrets.io/v1
 kind: SecretStore
 metadata:
