@@ -703,6 +703,7 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 		routes: []sqlRoute{
 			{match: "SELECT status FROM vanadis_builds", row: valuesRow("running")},
 			{match: "SELECT mode FROM vanadis_chunks", row: valuesRow("pr")},
+			{match: "SELECT build_id FROM vanadis_chunks", row: valuesRow("b1")},
 			{match: "RETURNING b.id, c.id, b.thread_id", row: valuesRow("b1", "c1", "th-1")},
 			{match: "WHERE c.id = $1", row: failRow("running", "running")},
 			{match: "c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b1", 0, "medium", true)},
