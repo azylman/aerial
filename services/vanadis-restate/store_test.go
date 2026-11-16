@@ -66,10 +66,14 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 				return r.row
 			}
 		}
+		if strings.Contains(query, "COALESCE(pr_number, 0), stall_nudges FROM vanadis_chunks") && len(s.chunks) > 0 && !isActionRow(s.row) {
+			c := s.chunks[0]
+			return valuesRow(c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Title, c.Status, c.PRNumber, c.StallNudges)
+		}
 		if s.countRow != nil && strings.Contains(query, "COUNT(*)") {
 			return s.countRow
 		}
-		if s.buildRow != nil && !strings.Contains(query, "FROM vanadis_chunks") {
+		if s.buildRow != nil && strings.Contains(query, "FROM vanadis_builds") {
 			return s.buildRow
 		}
 		return s.row
@@ -190,6 +194,9 @@ type mockRow struct {
 }
 
 func fillBuildDest(b VanadisBuild, dest []any) error {
+	if len(dest) == 7 {
+		return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.Status, b.StatusMessageID)
+	}
 	if len(dest) != 11 {
 		return fmt.Errorf("scan build: %d destinations, want 11", len(dest))
 	}
@@ -464,12 +471,13 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 	running := actionChunkRow("action", "running")
 	runningBuild := actionBuildRow("running")
 	tests := []struct {
-		name      string
-		chunkID   string
-		db        dbScript
-		wantErrIs error
-		wantErr   bool
-		want      advanceOutcome
+		name       string
+		chunkID    string
+		dispatchID string
+		db         dbScript
+		wantErrIs  error
+		wantErr    bool
+		want       advanceOutcome
 	}{
 		{name: "nil receiver", chunkID: "c1", db: dbScript{bare: nilReceiver}, wantErr: true},
 		{name: "nil db", chunkID: "c1", db: dbScript{bare: nilDB}, wantErr: true},
@@ -477,11 +485,20 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 		{name: "begin error", chunkID: "c1", db: dbScript{beginErr: errors.New("begin tx err")}, wantErr: true},
 		{name: "chunk not found", chunkID: "c1", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
 		{name: "select chunk error", chunkID: "c1", db: dbScript{row: errRow(errors.New("select chunk err"))}, wantErr: true},
-		{name: "build not found", chunkID: "c1", db: dbScript{row: running, buildRow: errRow(pgx.ErrNoRows)}, wantErrIs: ErrBuildNotFound},
+		{name: "build not found", chunkID: "c1", db: dbScript{row: running, buildRow: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
 		{name: "select build error", chunkID: "c1", db: dbScript{row: running, buildRow: errRow(errors.New("db build error"))}, wantErr: true},
 		{name: "pr mode chunk is a matched no-op", chunkID: "c1", db: dbScript{row: actionChunkRow("pr", "running"), buildRow: runningBuild}, want: advanceOutcome{Matched: true, NextChunkIndex: 1, BuildStatus: "running"}},
 		{name: "completed action chunk is a matched no-op", chunkID: "c1", db: dbScript{row: actionChunkRow("action", "completed"), buildRow: runningBuild}, want: advanceOutcome{Matched: true, NextChunkIndex: 1, BuildStatus: "running"}},
 		{name: "failed action chunk is a matched no-op", chunkID: "c1", db: dbScript{row: actionChunkRow("action", "failed"), buildRow: runningBuild}, want: advanceOutcome{Matched: true, NextChunkIndex: 1, BuildStatus: "running"}},
+		{name: "cancelled parent rejects success", chunkID: "c1", db: dbScript{row: running, buildRow: actionBuildRow("cancelled")}, want: advanceOutcome{Matched: true, NextChunkIndex: 1, BuildStatus: "cancelled"}},
+		{name: "missing retry identity", chunkID: "c1", dispatchID: "", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 1), buildRow: runningBuild, countRow: valuesRow(1)}, want: advanceOutcome{Matched: true, Advanced: false, NextChunkIndex: 1, BuildStatus: "running"}},
+		{name: "stale retry identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-0", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 1), buildRow: runningBuild, countRow: valuesRow(1)}, want: advanceOutcome{Matched: true, Advanced: false, NextChunkIndex: 1, BuildStatus: "running"}},
+		{name: "matching retry identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-1", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 1), buildRow: runningBuild, countRow: valuesRow(1)}, want: advanceOutcome{Matched: true, Advanced: true, NextChunkIndex: 1, BuildStatus: "running"}},
+		{name: "mismatched first identity", chunkID: "c1", dispatchID: "wrong", db: dbScript{row: valuesRow("c1", "b1", 0, "action", "Action Chunk", "running", 0, 0), buildRow: runningBuild, countRow: valuesRow(1)}, want: advanceOutcome{Matched: true, Advanced: false, NextChunkIndex: 1, BuildStatus: "running"}},
+		{name: "remaining count failure", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: errRow(errors.New("count unavailable"))}, wantErr: true},
+		{name: "completion commit failure", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: valuesRow(1), commitErr: errors.New("commit unavailable")}, wantErr: true},
+		{name: "rejected completion commit failure", chunkID: "c1", db: dbScript{row: actionChunkRow("action", "completed"), buildRow: runningBuild, commitErr: errors.New("commit unavailable")}, wantErr: true},
+
 		{name: "update chunk error", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, failExec: "UPDATE vanadis_chunks", execErr: errors.New("update action chunk err")}, wantErr: true},
 		{name: "completes action chunk and marks build completed when no remaining chunks", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: valuesRow(0), chunks: []VanadisChunk{{ID: "c1", ChunkIndex: 0, Mode: "action", Repo: "aerial", Title: "T", Status: "completed"}}}, want: advanceOutcome{Matched: true, Advanced: true, BuildCompleted: true, NextChunkIndex: 1, BuildStatus: "completed", Chunks: 1}},
 		{name: "complete build error in finishActionBuild", chunkID: "c1", db: dbScript{row: running, buildRow: runningBuild, countRow: valuesRow(0), failExec: "UPDATE vanadis_builds", execErr: errors.New("upd build err")}, wantErr: true},
@@ -491,8 +508,11 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			if tc.db.buildRow == nil {
+				tc.db.buildRow = runningBuild
+			}
 			store, _ := tc.db.open()
-			res, err := store.CompleteActionChunk(context.Background(), tc.chunkID)
+			res, err := store.CompleteActionChunk(context.Background(), tc.chunkID, tc.dispatchID)
 			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return
 			}
@@ -1474,3 +1494,5 @@ func TestUpdatePRLifecycleStatus(t *testing.T) {
 		})
 	}
 }
+
+func isActionRow(row pgx.Row) bool { _, ok := row.(*genericMockRow); return ok }

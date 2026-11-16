@@ -74,21 +74,22 @@ type VanadisChunkSummary struct {
 }
 
 type VanadisAdvancementResult struct {
-	Matched          bool                  `json:"matched"`
-	Advanced         bool                  `json:"advanced"`
-	BuildID          string                `json:"build_id"`
-	ThreadID         string                `json:"thread_id"`
-	Tier             int                   `json:"tier"`
-	Title            string                `json:"title"`
-	Objective        string                `json:"objective"`
-	BuildStatus      string                `json:"build_status"`
-	StatusMessageID  string                `json:"status_message_id,omitempty"`
-	MergedChunkIndex int                   `json:"merged_chunk_index"`
-	MergedChunkTitle string                `json:"merged_chunk_title"`
-	ChunkMode        string                `json:"chunk_mode,omitempty"`
-	NextChunkIndex   int                   `json:"next_chunk_index"`
-	BuildCompleted   bool                  `json:"build_completed"`
-	Chunks           []VanadisChunkSummary `json:"chunks,omitempty"`
+	CompletionAccepted bool                  `json:"completion_accepted,omitempty"`
+	Matched            bool                  `json:"matched"`
+	Advanced           bool                  `json:"advanced"`
+	BuildID            string                `json:"build_id"`
+	ThreadID           string                `json:"thread_id"`
+	Tier               int                   `json:"tier"`
+	Title              string                `json:"title"`
+	Objective          string                `json:"objective"`
+	BuildStatus        string                `json:"build_status"`
+	StatusMessageID    string                `json:"status_message_id,omitempty"`
+	MergedChunkIndex   int                   `json:"merged_chunk_index"`
+	MergedChunkTitle   string                `json:"merged_chunk_title"`
+	ChunkMode          string                `json:"chunk_mode,omitempty"`
+	NextChunkIndex     int                   `json:"next_chunk_index"`
+	BuildCompleted     bool                  `json:"build_completed"`
+	Chunks             []VanadisChunkSummary `json:"chunks,omitempty"`
 }
 
 type VanadisChunkPRLookup struct {
@@ -165,7 +166,7 @@ type VanadisStore interface {
 	LookupPRChunk(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, err error)
 	LookupChunkBuildID(ctx context.Context, chunkID string) (buildID string, err error)
 	AttachChunkPR(ctx context.Context, req AttachChunkPRRequest) (buildID, chunkID, threadID string, err error)
-	CompleteActionChunk(ctx context.Context, chunkID string) (*VanadisAdvancementResult, error)
+	CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error)
 	FailChunk(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error)
 	UpdateBuild(ctx context.Context, buildID string, req UpdateBuildRequest) (*VanadisBuild, error)
 	UpdateChunk(ctx context.Context, buildID, chunkRef string, req UpdateChunkRequest) (*VanadisChunk, error)
@@ -1121,16 +1122,12 @@ func reindexRemainingChunks(ctx context.Context, tx pgx.Tx, buildID string, chun
 	return nil
 }
 
-func isTerminalActionStatus(status string) bool {
-	switch status {
-	case statusCompleted, statusFailed, statusCancelled:
-		return true
-	default:
-		return false
-	}
+func actionCompletionAllowed(chunk VanadisChunk, buildStatus, dispatchID string) bool {
+	identityMatches := dispatchID == actionDispatchID(chunk) || (dispatchID == "" && chunk.StallNudges == 0)
+	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildStatus == statusRunning && chunk.PRNumber == 0 && identityMatches
 }
 
-func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID string) (*VanadisAdvancementResult, error) {
+func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("database connection is nil")
 	}
@@ -1149,23 +1146,23 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 		}
 	}()
 
+	// Lock the parent before the selected chunk, matching cancellation.
+	var b VanadisBuild
+	const selectBuildSQL = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, status, COALESCE(status_message_id, '') FROM vanadis_builds WHERE id = (SELECT build_id FROM vanadis_chunks WHERE id = $1) FOR UPDATE;`
+	if err := tx.QueryRow(ctx, selectBuildSQL, chunkID).Scan(&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.Status, &b.StatusMessageID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrChunkNotFound
+		}
+		return nil, fmt.Errorf("lock action build: %w", err)
+	}
 	var cID, bID, cTitle, cStatus, cMode string
-	var chunkIdx, prNumber int
-	const selectChunkSQL = `SELECT id, build_id, chunk_index, mode, title, status, COALESCE(pr_number, 0) FROM vanadis_chunks WHERE id = $1 FOR UPDATE;`
-	if err := tx.QueryRow(ctx, selectChunkSQL, chunkID).Scan(&cID, &bID, &chunkIdx, &cMode, &cTitle, &cStatus, &prNumber); err != nil {
+	var chunkIdx, prNumber, stallNudges int
+	const selectChunkSQL = `SELECT id, build_id, chunk_index, mode, title, status, COALESCE(pr_number, 0), stall_nudges FROM vanadis_chunks WHERE id = $1 AND build_id = $2 FOR UPDATE;`
+	if err := tx.QueryRow(ctx, selectChunkSQL, chunkID, b.ID).Scan(&cID, &bID, &chunkIdx, &cMode, &cTitle, &cStatus, &prNumber, &stallNudges); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrChunkNotFound
 		}
 		return nil, fmt.Errorf("lock action chunk %s: %w", chunkID, err)
-	}
-
-	var b VanadisBuild
-	const selectBuildSQL = `SELECT id, thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, status, COALESCE(status_message_id, '') FROM vanadis_builds WHERE id = $1 FOR UPDATE;`
-	if err := tx.QueryRow(ctx, selectBuildSQL, bID).Scan(&b.ID, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.Status, &b.StatusMessageID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrBuildNotFound
-		}
-		return nil, fmt.Errorf("lock action build %s: %w", bID, err)
 	}
 
 	res := &VanadisAdvancementResult{
@@ -1185,7 +1182,11 @@ func (s *PostgresVanadisStore) CompleteActionChunk(ctx context.Context, chunkID 
 		BuildCompleted:   false,
 	}
 
-	if cMode != chunkModeAction || isTerminalActionStatus(cStatus) {
+	chunk := VanadisChunk{ID: cID, Mode: cMode, Status: cStatus, PRNumber: prNumber, StallNudges: stallNudges}
+	// A committed completion can be replayed after a crash before Restate journals
+	// the result. Acceptance permits continuation without advancing the row again.
+	res.CompletionAccepted = actionCompletionAccepted(chunk, b.Status, dispatchID)
+	if !actionCompletionAllowed(VanadisChunk{ID: cID, Mode: cMode, Status: cStatus, PRNumber: prNumber, StallNudges: stallNudges}, b.Status, dispatchID) {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit complete action chunk tx: %w", err)
 		}
@@ -1475,4 +1476,16 @@ func cleanRepoName(repo string) string {
 		return repo[idx+1:]
 	}
 	return repo
+}
+
+func actionDispatchID(chunk VanadisChunk) string {
+	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
+}
+
+func actionCompletionAccepted(chunk VanadisChunk, buildStatus, dispatchID string) bool {
+	if chunk.Status == statusCompleted && (buildStatus == statusRunning || buildStatus == statusCompleted) {
+		chunk.Status = statusRunning
+		buildStatus = statusRunning
+	}
+	return actionCompletionAllowed(chunk, buildStatus, dispatchID)
 }
