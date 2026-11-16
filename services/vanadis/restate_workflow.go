@@ -242,6 +242,16 @@ func applyMutationCancelled(ctx context.Context, srv *VanadisServer, buildID str
 	return nil
 }
 
+// actionLaunchKey preserves legacy launch records while separating action retries.
+func actionLaunchKey(chunk VanadisChunk) string {
+	if chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
+		// Colons are forbidden in chunk IDs, keeping retry acknowledgements
+		// disjoint from the legacy raw chunk-ID keys in the same map.
+		return "dispatch:" + actionDispatchID(chunk)
+	}
+	return chunk.ID
+}
+
 func deriveReconcileChunkStates(chunks []VanadisChunk, priorLaunched map[string]bool) ([]string, map[string]*workflowChunkRuntimeState) {
 	chunkStates := make(map[string]*workflowChunkRuntimeState, len(chunks))
 	chunkOrder := make([]string, 0, len(chunks))
@@ -262,11 +272,11 @@ func deriveReconcileChunkStates(chunks []VanadisChunk, priorLaunched map[string]
 			cs.codeReady = false
 			cs.runtimeReady = false
 		case statusRunning:
-			cs.launched = (priorLaunched != nil && priorLaunched[c.ID]) || c.PRNumber > 0
+			cs.launched = (priorLaunched != nil && priorLaunched[actionLaunchKey(c)]) || c.PRNumber > 0
 			cs.codeReady = false
 			cs.runtimeReady = false
 		default: // "pending" or other initial states
-			cs.launched = priorLaunched != nil && priorLaunched[c.ID]
+			cs.launched = priorLaunched != nil && priorLaunched[actionLaunchKey(c)]
 			cs.codeReady = false
 			cs.runtimeReady = false
 		}
@@ -304,8 +314,24 @@ func launchReconcileEligibleChunks(ctx context.Context, srv *VanadisServer, buil
 		}
 	}
 
+	// Reserved running retries already occupy a slot. Republish them before siblings.
+	var resumed []string
+	for _, id := range chunkOrder {
+		st := states[id]
+		if st != nil && !st.launched && st.chunk.Status == statusRunning && actionLaunchKey(st.chunk) != id {
+			ok, err := executeLaunchChunk(ctx, srv, buildID, st.chunk)
+			if err != nil {
+				return nil, nil, fmt.Errorf("resume chunk %s: %w", id, err)
+			}
+			if ok {
+				st.launched = true
+				launchedMap[actionLaunchKey(st.chunk)] = true
+				resumed = append(resumed, id)
+			}
+		}
+	}
 	ready := computeEligibleChunksToLaunch(chunkOrder, states, maxParallelChunks)
-	var launchedChunks []string
+	launchedChunks := resumed
 	for _, cID := range ready {
 		st := states[cID]
 		if st == nil {
@@ -316,7 +342,7 @@ func launchReconcileEligibleChunks(ctx context.Context, srv *VanadisServer, buil
 			return nil, nil, fmt.Errorf("launch chunk %s: %w", cID, err)
 		}
 		st.launched = true
-		launchedMap[cID] = true
+		launchedMap[actionLaunchKey(st.chunk)] = true
 		if launched {
 			launchedChunks = append(launchedChunks, cID)
 		}
@@ -496,15 +522,25 @@ func executeLaunchChunk(ctx context.Context, srv *VanadisServer, buildID string,
 	if chunk.PRNumber > 0 || strings.EqualFold(chunk.Status, "pr_opened") {
 		return false, nil
 	}
+	var dispatchID string
+	if actionLaunchKey(chunk) != chunk.ID {
+		dispatchID = actionDispatchID(chunk)
+		if err := srv.store.ReserveChunkForLaunch(ctx, chunk.ID); err != nil {
+			return false, err
+		}
+	}
 	if err := srv.enqueueExecuteChunk(ctx, ExecuteChunkArgs{
 		BuildID:    buildID,
 		ChunkIndex: chunk.ChunkIndex,
 		ChunkID:    chunk.ID,
+		DispatchID: dispatchID,
 	}); err != nil {
 		return false, err
 	}
-	if err := srv.store.ReserveChunkForLaunch(ctx, chunk.ID); err != nil {
-		return false, err
+	if dispatchID == "" {
+		if err := srv.store.ReserveChunkForLaunch(ctx, chunk.ID); err != nil {
+			return false, err
+		}
 	}
 	return true, nil
 }
@@ -675,6 +711,9 @@ func reconstructLaunchedChunks(chunks []VanadisChunk) map[string]bool {
 		if c.PRNumber > 0 {
 			launched[c.ID] = true
 			continue
+		}
+		if actionLaunchKey(c) != c.ID && strings.EqualFold(c.Status, statusRunning) {
+			continue // A reserved retry is not proof of durable queue acceptance.
 		}
 		statusLower := strings.ToLower(strings.TrimSpace(c.Status))
 		switch statusLower {

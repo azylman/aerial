@@ -127,6 +127,7 @@ func LoadConfigFromEnv() Config { return LoadConfig(os.Getenv("CONFIG_PATH")) }
 
 // ExecuteChunkArgs defines the job payload for executing a single Vanadis build chunk.
 type ExecuteChunkArgs struct {
+	DispatchID string `json:"dispatch_id,omitempty"`
 	BuildID    string `json:"build_id"`
 	ChunkIndex int    `json:"chunk_index"`
 	ChunkID    string `json:"chunk_id,omitempty"`
@@ -775,6 +776,9 @@ func (s *VanadisServer) enqueueExecuteChunk(ctx context.Context, args ExecuteChu
 	if strings.TrimSpace(args.ChunkID) != "" {
 		msgID = fmt.Sprintf("vanadis:chunk:%s:%s", args.BuildID, strings.TrimSpace(args.ChunkID))
 	}
+	if args.DispatchID != "" {
+		msgID += ":" + args.DispatchID
+	}
 	return s.bus.Publish(ctx, "aerial.jobs.vanadis.chunk", msgID, args)
 }
 
@@ -802,7 +806,7 @@ func (s *VanadisServer) HandleExecuteChunkJob(ctx context.Context, msg pubsub.Me
 		return nil
 	}
 	isFinalAttempt := msg.NumDelivered() >= 3
-	err := s.ProcessExecuteChunk(ctx, args.BuildID, args.ChunkIndex, isFinalAttempt, args.ChunkID)
+	err := s.ProcessExecuteChunk(ctx, args.BuildID, args.ChunkIndex, isFinalAttempt, args.ChunkID, args.DispatchID)
 	if err != nil {
 		settleFailedChunk(msg, isFinalAttempt)
 	}
@@ -864,6 +868,13 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 		return err
 	}
 	chunk := chunks[activeIdx]
+	var dispatchID string
+	if len(targetChunkID) > 1 {
+		dispatchID = targetChunkID[1]
+	}
+	if chunk.Mode == chunkModeAction && !actionDispatchMatches(chunk, dispatchID) {
+		return nil // Discard a queued job from an earlier generation.
+	}
 	if chunk.Status == statusPROpened || isChunkMergedOrDoneStatus(chunk.Status) {
 		log.Printf("[vanadis] chunk %s (index %d) already in status %q, skipping", chunk.ID, chunkIndex, chunk.Status)
 		return nil

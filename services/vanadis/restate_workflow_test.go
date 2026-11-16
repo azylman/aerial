@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -362,6 +363,15 @@ func TestLocalLaunchedCache(t *testing.T) {
 
 func TestReconstructLaunchedChunks(t *testing.T) {
 	t.Parallel()
+	for _, index := range []int{0, 1} {
+		c := VanadisChunk{ID: "retry", Mode: "action", Status: "running", StallNudges: 1, ChunkIndex: index}
+		assert.Empty(t, reconstructLaunchedChunks([]VanadisChunk{c}))
+		_, states := deriveReconcileChunkStates([]VanadisChunk{c}, map[string]bool{"retry": true})
+		assert.False(t, states["retry"].launched)
+		_, states = deriveReconcileChunkStates([]VanadisChunk{c}, map[string]bool{"dispatch:vanadis-retry-turn-1": true})
+		assert.True(t, states["retry"].launched)
+	}
+
 	now := time.Now().UTC()
 	chunks := []VanadisChunk{
 		{ID: "c0", ChunkIndex: 0, Status: "running", CreatedAt: now, UpdatedAt: now.Add(time.Second)},
@@ -1086,6 +1096,96 @@ func TestActionCompletionMutationIdentity(t *testing.T) {
 			_ = executeBuildMutation(ctx, srv, tc.buildID, BuildMutationRequest{Action: tc.action, ChunkID: "c1", DispatchID: tc.dispatchID})
 			_, redeliveredWakes := brain.calls()
 			assert.Equal(t, wakes, redeliveredWakes)
+		})
+	}
+}
+
+func TestExecuteLaunchChunk_Errors(t *testing.T) {
+	t.Parallel()
+	retry := VanadisChunk{ID: "c", BuildID: "b", Mode: "action", Status: "running", StallNudges: 1, ChunkIndex: 1}
+	accepted := ExecuteChunkArgs{BuildID: "b", ChunkID: "c", ChunkIndex: 1, DispatchID: "vanadis-c-turn-1"}
+	tests := []struct {
+		name       string
+		chunks     []VanadisChunk
+		prior      map[string]bool
+		publishErr bool
+		reserveErr bool
+		wantErr    bool
+		want       []ExecuteChunkArgs
+	}{
+		{name: "reserved retry recovers old map", chunks: []VanadisChunk{retry}, prior: map[string]bool{"c": true}, want: []ExecuteChunkArgs{accepted}},
+		{name: "running retry occupies one slot before pending siblings", chunks: []VanadisChunk{
+			{ID: "sibling", BuildID: "b", Mode: "action", Status: "pending"},
+			{ID: "a", BuildID: "b", Mode: "pr", Status: "running", PRNumber: 1},
+			{ID: "d", BuildID: "b", Mode: "pr", Status: "running", PRNumber: 2},
+			retry,
+		}, want: []ExecuteChunkArgs{accepted, {BuildID: "b", ChunkID: "sibling"}}},
+		{name: "accepted generation not republished", chunks: []VanadisChunk{retry}, prior: map[string]bool{"dispatch:vanadis-c-turn-1": true}},
+		{name: "publish failure retains reservation", chunks: []VanadisChunk{retry}, publishErr: true, wantErr: true},
+		{name: "reserve failure prevents publication", chunks: []VanadisChunk{retry}, reserveErr: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			store := newMemoryVanadisStore()
+			require.NoError(t, store.CreateBuild(ctx, VanadisBuild{ID: "b", Status: "running"}, tc.chunks))
+			bus := &mockChunkBus{}
+			if tc.publishErr {
+				bus.err = fmt.Errorf("publish unavailable")
+			}
+			if tc.reserveErr {
+				store.updateChunkErr = fmt.Errorf("reservation unavailable")
+			}
+			srv := &VanadisServer{store: store, bus: bus}
+			out, err := executeReconcileBuild(ctx, srv, "b", tc.prior)
+			assert.Equal(t, tc.wantErr, err != nil)
+			assert.Equal(t, tc.want, bus.published)
+			if len(tc.want) > 0 {
+				require.NotEmpty(t, bus.publishedIDs)
+				assert.Equal(t, "vanadis:chunk:b:c:vanadis-c-turn-1", bus.publishedIDs[0])
+			}
+			if !tc.wantErr {
+				again, err := executeReconcileBuild(ctx, srv, "b", out.LaunchedMap)
+				require.NoError(t, err)
+				assert.Empty(t, again.LaunchedChunks)
+			}
+		})
+	}
+}
+
+func TestReconcileRetryAcknowledgementCollision(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		prior       map[string]bool
+		wantSibling []ExecuteChunkArgs
+	}{
+		{name: "retry acknowledgement does not suppress dependent sibling", wantSibling: []ExecuteChunkArgs{{BuildID: "b", ChunkID: "vanadis-c-turn-1", ChunkIndex: 1}}},
+		{name: "sibling acknowledgement does not suppress retry", prior: map[string]bool{"vanadis-c-turn-1": true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			store := newMemoryVanadisStore()
+			chunks := []VanadisChunk{
+				{ID: "c", BuildID: "b", Mode: "action", Status: "running", StallNudges: 1},
+				{ID: "vanadis-c-turn-1", BuildID: "b", ChunkIndex: 1, Mode: "action", Status: "pending", DependsOn: []string{"c"}},
+			}
+			require.True(t, isValidVanadisChunkID("vanadis-c-turn-1"))
+			require.NoError(t, store.CreateBuild(ctx, VanadisBuild{ID: "b", Status: "running"}, chunks))
+			bus := &mockChunkBus{}
+			srv := &VanadisServer{store: store, bus: bus}
+			out, err := executeReconcileBuild(ctx, srv, "b", tc.prior)
+			require.NoError(t, err)
+			assert.Equal(t, []ExecuteChunkArgs{{BuildID: "b", ChunkID: "c", DispatchID: "vanadis-c-turn-1"}}, bus.published)
+
+			require.NoError(t, store.UpdateChunkStatus(ctx, "c", "completed"))
+			bus.published = nil
+			_, err = executeReconcileBuild(ctx, srv, "b", out.LaunchedMap)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantSibling, bus.published)
 		})
 	}
 }
