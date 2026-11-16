@@ -910,8 +910,8 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 		{name: "restatedeployment available replicas unavailable", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 1, "dp_12345", true), wantReason: "2/2 ready, 1/2 available, deploymentId=dp_12345, ready=true"},
 		{name: "restatedeployment missing deploymentId", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 2, "", true), wantReason: "2/2 ready, 2/2 available, deploymentId=, ready=true"},
 		{name: "restatedeployment ready condition false", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 2, "dp_12345", false), wantReason: "2/2 ready, 2/2 available, deploymentId=dp_12345, ready=false"},
-		{name: "restatecluster rolled out without observedGeneration", workload: restateClusterRollout("restate", synapseImage, 2, 0, true), wantDone: true},
 		{name: "restatecluster ready condition false", workload: restateClusterRollout("restate", synapseImage, 2, 0, false), wantReason: "ready=false"},
+		{name: "restatecluster without managed statefulset pending", workload: restateClusterRollout("restate", synapseImage, 2, 0, true), wantReason: "waiting for managed statefulset"},
 		{
 			name:       "restatecluster with managed statefulset matching spec rolled out",
 			workload:   restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-1", "restate-1")),
@@ -922,6 +922,35 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 			name:       "restatecluster with managed statefulset image mismatch pending",
 			workload:   restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, stsRollout("restate", "docker.io/restatedev/restate:1.5", 2, 2, 1, 1, "restate-1", "restate-1")),
 			wantReason: "managed StatefulSet default/restate images [docker.io/restatedev/restate:1.5] do not match cluster image docker.io/restatedev/restate:1.6",
+		},
+		{
+			name: "restatecluster with managed statefulset env mismatch pending",
+			workload: func() workloadRollout {
+				w := restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-1", "restate-1"))
+				w.Env = map[string]string{"RESTATE_AUTO_PROVISION": "false"}
+				return w
+			}(),
+			wantReason: "managed StatefulSet default/restate env RESTATE_AUTO_PROVISION=\"\" does not match cluster \"false\"",
+		},
+		{
+			name: "restatecluster with managed statefulset resource mismatch pending",
+			workload: func() workloadRollout {
+				w := restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-1", "restate-1"))
+				w.Resources = kubeResourceRequirements{Limits: map[string]string{"cpu": "1"}}
+				return w
+			}(),
+			wantReason: "managed StatefulSet default/restate resource limit cpu=\"\" does not match cluster \"1\"",
+		},
+		{
+			name: "restatecluster with managed statefulset changed before cluster update pending",
+			workload: func() workloadRollout {
+				m := stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-1", "restate-1")
+				m.ChangedAt = rolloutClock(10, 0, 0)
+				w := restateClusterRolloutWithManaged("restate", "docker.io/restatedev/restate:1.6", 2, 0, true, m)
+				w.ChangedAt = rolloutClock(10, 5, 0)
+				return w
+			}(),
+			wantReason: "managed StatefulSet default/restate not yet updated after cluster spec change",
 		},
 		{
 			name:       "restatecluster with managed statefulset rolling out pending",
@@ -1012,7 +1041,7 @@ func TestPRRolloutStatus(t *testing.T) {
 			name: "restatecluster manifest change with managed statefulset rolled out is done",
 			workloads: []workloadRollout{
 				withChange(restateClusterRollout("restate", "docker.io/restatedev/restate:1.6", 2, 0, true), rolloutClock(10, 1, 0), nil),
-				stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-2", "restate-2"),
+				withChange(stsRollout("restate", "docker.io/restatedev/restate:1.6", 2, 2, 1, 1, "restate-2", "restate-2"), rolloutClock(10, 1, 5), nil),
 			},
 			commitSHA: rolloutSHA,
 			wantDone:  true,

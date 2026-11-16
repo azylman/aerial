@@ -506,6 +506,11 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 		targetID = firstNonEmpty(tID, targetID)
 	}
 	_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_failed", "deploy_failed")
+	if s.registry != nil && evt.PRNumber > 0 {
+		if updateErr := s.registry.UpdatePRStatus(ctx, evt.Repo, evt.PRNumber, "deploy_failed", map[string]any{"deploy_failed_published": true}); updateErr != nil {
+			log.Printf("[synapse] [registry] warning: failed updating deploy_failed_published for %s#%d: %v", evt.Repo, evt.PRNumber, updateErr)
+		}
+	}
 	if evt.PRNumber > 0 {
 		return nil
 	}

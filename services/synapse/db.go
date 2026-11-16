@@ -170,6 +170,10 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, r
 	query := `
 		UPDATE pr_registry
 		SET status = 'deploy_failed',
+		    metadata = CASE
+		        WHEN status <> 'deploy_failed' THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{deploy_failed_published}', 'false'::jsonb)
+		        ELSE metadata
+		    END,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE repo = $1 AND pr_number = $2
 		  AND (
@@ -343,7 +347,7 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 		UPDATE pr_registry
 		SET status = 'deploying',
 			metadata = jsonb_set(
-				jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(elem)))),
+				jsonb_set((COALESCE(metadata, '{}'::jsonb) - 'banner') - 'deploy_failed_published', '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(elem)))),
 				'{started_jobs}',
 				(SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'started_jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem)
 			),

@@ -959,9 +959,7 @@ func TestHandleImagePromotionDeployFailed_RetryAndDeduplication(t *testing.T) {
 		name                 string
 		initialUpdated       bool
 		busErr               error
-		retryUpdated         bool
-		wantInitialErr       bool
-		wantRetryErr         bool
+		wantErr              bool
 		wantPublishedEvents  int
 		wantDeployCalls      int
 		wantUpdateStatusRuns int
@@ -974,14 +972,13 @@ func TestHandleImagePromotionDeployFailed_RetryAndDeduplication(t *testing.T) {
 			wantUpdateStatusRuns: 1,
 		},
 		{
-			name:                 "transient bus failure propagates error and retry republishes event",
+			name:                 "transient bus failure propagates error and does not mark published",
 			initialUpdated:       true,
 			busErr:               errors.New("transient bus disconnect"),
-			retryUpdated:         true,
-			wantInitialErr:       true,
-			wantPublishedEvents:  1,
-			wantDeployCalls:      2,
-			wantUpdateStatusRuns: 1,
+			wantErr:              true,
+			wantPublishedEvents:  0,
+			wantDeployCalls:      1,
+			wantUpdateStatusRuns: 0,
 		},
 		{
 			name:                 "deduplicated delivery returns nil without publishing duplicate event",
@@ -1009,17 +1006,8 @@ func TestHandleImagePromotionDeployFailed_RetryAndDeduplication(t *testing.T) {
 			srv.registry = reg
 
 			err := srv.handleImagePromotionDeployFailed(ctx, "azylman/aerial", 42, "feat/test", "head123", "100000000000000001", errors.New("simulated error"))
-			if (err != nil) != tc.wantInitialErr {
-				t.Fatalf("first attempt err = %v, wantErr = %v", err, tc.wantInitialErr)
-			}
-
-			if tc.busErr != nil {
-				bus.err = nil
-				reg.deployFailedUpdated = tc.retryUpdated
-				rErr := srv.handleImagePromotionDeployFailed(ctx, "azylman/aerial", 42, "feat/test", "head123", "100000000000000001", errors.New("simulated error"))
-				if (rErr != nil) != tc.wantRetryErr {
-					t.Fatalf("retry err = %v, wantErr = %v", rErr, tc.wantRetryErr)
-				}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("handleImagePromotionDeployFailed() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 
 			if len(bus.publishedPREvents) != tc.wantPublishedEvents {

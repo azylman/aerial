@@ -291,16 +291,26 @@ type kubeNameRef struct {
 	Name string `json:"name"`
 }
 
+type kubeEnvVar struct {
+	Name      string `json:"name"`
+	Value     string `json:"value"`
+	ValueFrom *struct {
+		ConfigMapKeyRef *kubeNameRef `json:"configMapKeyRef"`
+	} `json:"valueFrom"`
+}
+
+type kubeResourceRequirements struct {
+	Limits   map[string]string `json:"limits,omitempty"`
+	Requests map[string]string `json:"requests,omitempty"`
+}
+
 type kubeContainer struct {
-	Image string `json:"image"`
-	Env   []struct {
-		ValueFrom struct {
-			ConfigMapKeyRef *kubeNameRef `json:"configMapKeyRef"`
-		} `json:"valueFrom"`
-	} `json:"env"`
+	Image   string       `json:"image"`
+	Env     []kubeEnvVar `json:"env"`
 	EnvFrom []struct {
 		ConfigMapRef *kubeNameRef `json:"configMapRef"`
 	} `json:"envFrom"`
+	Resources kubeResourceRequirements `json:"resources"`
 }
 
 type kubeVolume struct {
@@ -324,7 +334,9 @@ func (p kubePodSpec) configMapRefs() []string {
 	var refs []*kubeNameRef
 	for _, c := range slices.Concat(p.Containers, p.InitContainers) {
 		for _, e := range c.Env {
-			refs = append(refs, e.ValueFrom.ConfigMapKeyRef)
+			if e.ValueFrom != nil {
+				refs = append(refs, e.ValueFrom.ConfigMapKeyRef)
+			}
 		}
 		for _, e := range c.EnvFrom {
 			refs = append(refs, e.ConfigMapRef)
@@ -444,6 +456,8 @@ type workloadRollout struct {
 	DeploymentID                                                    string
 	ReadyConditionTrue                                              bool
 	ManagedWorkloads                                                []workloadRollout
+	Env                                                             map[string]string
+	Resources                                                       kubeResourceRequirements
 }
 
 // kubeRolloutList decodes an apps/v1, restate.dev/v1beta1 or restate.dev/v1 workload list with rollout status.
@@ -456,8 +470,10 @@ type kubeRolloutList struct {
 				Spec kubePodSpec `json:"spec"`
 			} `json:"template"`
 			Compute struct {
-				Image    string `json:"image"`
-				Replicas *int32 `json:"replicas"`
+				Image     string                   `json:"image"`
+				Replicas  *int32                   `json:"replicas"`
+				Env       []kubeEnvVar             `json:"env"`
+				Resources kubeResourceRequirements `json:"resources"`
 			} `json:"compute"`
 		} `json:"spec"`
 		Status struct {
@@ -477,6 +493,39 @@ type kubeRolloutList struct {
 	} `json:"items"`
 }
 
+func decodeWorkloadEnvAndResources(kind string, computeEnv []kubeEnvVar, computeRes kubeResourceRequirements, containers []kubeContainer) (map[string]string, kubeResourceRequirements) {
+	if kind != kindRestateCluster && kind != kindStatefulSet {
+		return nil, kubeResourceRequirements{}
+	}
+	var env map[string]string
+	for _, e := range computeEnv {
+		if e.Name != "" {
+			if env == nil {
+				env = make(map[string]string)
+			}
+			env[e.Name] = e.Value
+		}
+	}
+	var res kubeResourceRequirements
+	if len(computeRes.Limits) > 0 || len(computeRes.Requests) > 0 {
+		res = computeRes
+	}
+	for _, c := range containers {
+		for _, e := range c.Env {
+			if e.Name != "" {
+				if env == nil {
+					env = make(map[string]string)
+				}
+				env[e.Name] = e.Value
+			}
+		}
+		if len(c.Resources.Limits) > 0 || len(c.Resources.Requests) > 0 {
+			res = c.Resources
+		}
+	}
+	return env, res
+}
+
 // decodeWorkloadRollouts decodes a workload list of kind (list items carry no kind of their own).
 func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error) {
 	var list kubeRolloutList
@@ -487,6 +536,7 @@ func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error)
 	for _, item := range list.Items {
 		st := item.Status
 		images := item.Spec.Template.Spec.images()
+		env, resources := decodeWorkloadEnvAndResources(kind, item.Spec.Compute.Env, item.Spec.Compute.Resources, item.Spec.Template.Spec.Containers)
 		if item.Spec.Compute.Image != "" {
 			images = append(images, item.Spec.Compute.Image)
 		}
@@ -521,6 +571,8 @@ func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error)
 			ReadyConditionTrue: slices.ContainsFunc(st.Conditions, func(c fluxCondition) bool {
 				return c.Type == "Ready" && c.Status == "True"
 			}),
+			Env:       env,
+			Resources: resources,
 		})
 	}
 	return workloads, nil
@@ -538,17 +590,45 @@ func (w workloadRollout) String() string {
 	return w.Kind + " " + w.Namespace + "/" + w.Name
 }
 
+func managedWorkloadMatchesClusterSpec(w, m workloadRollout) (bool, string) {
+	if len(w.Images) > 0 && !slices.Contains(m.Images, w.Images[0]) {
+		return false, fmt.Sprintf("managed %s images %v do not match cluster image %s", m, m.Images, w.Images[0])
+	}
+	if w.Replicas > 0 && m.Replicas != w.Replicas {
+		return false, fmt.Sprintf("managed %s replicas %d do not match cluster replicas %d", m, m.Replicas, w.Replicas)
+	}
+	for k, v := range w.Env {
+		if m.Env[k] != v {
+			return false, fmt.Sprintf("managed %s env %s=%q does not match cluster %q", m, k, m.Env[k], v)
+		}
+	}
+	for k, v := range w.Resources.Limits {
+		if m.Resources.Limits[k] != v {
+			return false, fmt.Sprintf("managed %s resource limit %s=%q does not match cluster %q", m, k, m.Resources.Limits[k], v)
+		}
+	}
+	for k, v := range w.Resources.Requests {
+		if m.Resources.Requests[k] != v {
+			return false, fmt.Sprintf("managed %s resource request %s=%q does not match cluster %q", m, k, m.Resources.Requests[k], v)
+		}
+	}
+	if !w.ChangedAt.IsZero() && !m.ChangedAt.IsZero() && m.ChangedAt.Before(w.ChangedAt) {
+		return false, fmt.Sprintf("managed %s not yet updated after cluster spec change", m)
+	}
+	return true, ""
+}
+
 // restateClusterRolloutComplete reports whether a RestateCluster and its managed workloads are rolled out.
 func restateClusterRolloutComplete(w workloadRollout) (done, failed bool, reason string) {
 	if !w.ReadyConditionTrue {
 		return false, false, "ready=false"
 	}
+	if len(w.ManagedWorkloads) == 0 {
+		return false, false, "waiting for managed statefulset"
+	}
 	for _, m := range w.ManagedWorkloads {
-		if len(w.Images) > 0 && !slices.Contains(m.Images, w.Images[0]) {
-			return false, false, fmt.Sprintf("managed %s images %v do not match cluster image %s", m, m.Images, w.Images[0])
-		}
-		if w.Replicas > 0 && m.Replicas != w.Replicas {
-			return false, false, fmt.Sprintf("managed %s replicas %d do not match cluster replicas %d", m, m.Replicas, w.Replicas)
+		if ok, mismatchReason := managedWorkloadMatchesClusterSpec(w, m); !ok {
+			return false, false, mismatchReason
 		}
 		mDone, mFailed, mReason := workloadRolloutComplete(m)
 		if mFailed {
