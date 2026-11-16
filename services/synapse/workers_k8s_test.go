@@ -99,6 +99,7 @@ func TestDefaultOutboundDispatcher_DiscoverImageKustomizations(t *testing.T) {
 		{"metadata":{"labels":{"app":"unmanaged"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:abc"}]}}}}
 	]}`
 	cronJobList := `{"items":[{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"marida-core"}},"spec":{"jobTemplate":{"spec":{"template":{"spec":{"initContainers":[{"image":"ghcr.io/azylman/aerial-synapse@sha256:beef"}],"containers":[{"image":"busybox"}]}}}}}}]}`
+	restateClusterList := `{"items":[{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"restate-system","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"compute":{"image":"docker.io/restatedev/restate:1.6"}}}]}`
 	kustomizationList := `{"items":[
 		{"metadata":{"name":"zeta","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"ConfigMap","name":"aerial-image-tags"}]}}},
 		{"metadata":{"name":"flux-system","namespace":"flux-system"},"spec":{}},
@@ -120,14 +121,28 @@ func TestDefaultOutboundDispatcher_DiscoverImageKustomizations(t *testing.T) {
 			imageNames:   []string{"aerial-synapse"},
 			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: deploymentList}, kubeCronJobsPath: {body: cronJobList}}),
 			want:         []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}, {Namespace: "flux-system", Name: "marida-core"}},
-			wantRequests: 5,
+			wantRequests: 7,
+		},
+		{
+			name:         "restate cluster compute image owner is discovered",
+			imageNames:   []string{"restate"},
+			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeRestateClustersPath: {body: restateClusterList}}),
+			want:         []fluxKustomizationRef{{Namespace: "flux-system", Name: "restate-system"}},
+			wantRequests: 7,
+		},
+		{
+			name:         "missing crd 404 is treated as empty workload list during discovery",
+			imageNames:   []string{"aerial-synapse"},
+			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: deploymentList}, kubeRestateDeploymentsPath: {status: http.StatusNotFound, body: `{"reason":"NotFound"}`}, kubeRestateClustersPath: {status: http.StatusNotFound, body: `{"reason":"NotFound"}`}}),
+			want:         []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}},
+			wantRequests: 7,
 		},
 		{
 			name:         "no owner falls back to kustomizations substituting the image tag configmap",
 			imageNames:   []string{"aerial-haro"},
 			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: deploymentList}, kubeKustomizations: {body: kustomizationList}}),
 			want:         []fluxKustomizationRef{{Namespace: "flux-system", Name: "alpha"}, {Namespace: "flux-system", Name: "zeta"}},
-			wantRequests: 6,
+			wantRequests: 8,
 		},
 		{
 			name:         "workload list failure returns error",
@@ -148,14 +163,14 @@ func TestDefaultOutboundDispatcher_DiscoverImageKustomizations(t *testing.T) {
 			imageNames:   []string{"aerial-haro"},
 			routes:       kubeWorkloadRoutes(nil),
 			wantErr:      "list kustomizations",
-			wantRequests: 6,
+			wantRequests: 8,
 		},
 		{
 			name:         "malformed fallback list returns error",
 			imageNames:   []string{"aerial-haro"},
 			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeKustomizations: {body: `[`}}),
 			wantErr:      "decode kustomizations",
-			wantRequests: 6,
+			wantRequests: 8,
 		},
 		{
 			name:       "no image names skips the kube API",

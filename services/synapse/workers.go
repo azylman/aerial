@@ -669,6 +669,11 @@ func truncateKubeBody(body []byte) string {
 	return string(body)
 }
 
+// isKubeNotFound reports whether err represents a 404 Not Found HTTP response from the Kubernetes API.
+func isKubeNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "returned status 404:")
+}
+
 // workloadListPaths are the cluster-wide list endpoints for every workload kind that can run an image.
 var workloadListPaths = []string{
 	"/apis/apps/v1/deployments",
@@ -676,6 +681,8 @@ var workloadListPaths = []string{
 	"/apis/apps/v1/daemonsets",
 	"/apis/batch/v1/jobs",
 	"/apis/batch/v1/cronjobs",
+	"/apis/restate.dev/v1beta1/restatedeployments",
+	"/apis/restate.dev/v1/restateclusters",
 }
 
 // rolloutWorkloadKinds are the workload kinds whose rollout gates a deploy.
@@ -683,6 +690,8 @@ var rolloutWorkloadKinds = []struct{ Kind, Path string }{
 	{Kind: "Deployment", Path: "/apis/apps/v1/deployments"},
 	{Kind: "StatefulSet", Path: "/apis/apps/v1/statefulsets"},
 	{Kind: "DaemonSet", Path: "/apis/apps/v1/daemonsets"},
+	{Kind: "RestateDeployment", Path: "/apis/restate.dev/v1beta1/restatedeployments"},
+	{Kind: "RestateCluster", Path: "/apis/restate.dev/v1/restateclusters"},
 }
 
 // fluxManagedSelector selects every object applied by any Flux Kustomization.
@@ -713,6 +722,9 @@ func (d *DefaultOutboundDispatcher) ListKustomizationWorkloads(ctx context.Conte
 	for _, k := range rolloutWorkloadKinds {
 		body, err := d.kubeJSON(ctx, http.MethodGet, k.Path+"?"+query.Encode(), "", nil)
 		if err != nil {
+			if isKubeNotFound(err) {
+				continue
+			}
 			return nil, fmt.Errorf("list %s workloads: %w", ref.Name, err)
 		}
 		decoded, err := decodeWorkloadRollouts(k.Kind, body)
@@ -751,6 +763,9 @@ func (d *DefaultOutboundDispatcher) listWorkloadImages(ctx context.Context) ([]w
 	for _, path := range workloadListPaths {
 		body, err := d.kubeJSON(ctx, http.MethodGet, path, "", nil)
 		if err != nil {
+			if isKubeNotFound(err) {
+				continue
+			}
 			return nil, fmt.Errorf("list workloads: %w", err)
 		}
 		refs, err := decodeWorkloadImageRefs(body)

@@ -352,8 +352,8 @@ func (p kubePodSpec) images() []string {
 	return images
 }
 
-// kubeWorkloadList decodes any apps/v1 or batch/v1 workload list; cronjobs carry their pod spec under
-// spec.jobTemplate.spec.template.spec, every other kind under spec.template.spec.
+// kubeWorkloadList decodes any apps/v1, batch/v1, or restate.dev/v1 workload list; cronjobs carry their pod spec under
+// spec.jobTemplate.spec.template.spec, restate clusters under spec.compute.image, every other kind under spec.template.spec.
 type kubeWorkloadList struct {
 	Items []struct {
 		Metadata struct {
@@ -370,6 +370,9 @@ type kubeWorkloadList struct {
 					} `json:"template"`
 				} `json:"spec"`
 			} `json:"jobTemplate"`
+			Compute struct {
+				Image string `json:"image"`
+			} `json:"compute"`
 		} `json:"spec"`
 	} `json:"items"`
 }
@@ -381,9 +384,13 @@ func decodeWorkloadImageRefs(body []byte) ([]workloadImageRef, error) {
 	}
 	refs := make([]workloadImageRef, 0, len(list.Items))
 	for _, item := range list.Items {
+		images := slices.Concat(item.Spec.Template.Spec.images(), item.Spec.JobTemplate.Spec.Template.Spec.images())
+		if item.Spec.Compute.Image != "" {
+			images = append(images, item.Spec.Compute.Image)
+		}
 		refs = append(refs, workloadImageRef{
 			Labels: item.Metadata.Labels,
-			Images: slices.Concat(item.Spec.Template.Spec.images(), item.Spec.JobTemplate.Spec.Template.Spec.images()),
+			Images: images,
 		})
 	}
 	return refs, nil
@@ -416,8 +423,8 @@ func (m kubeObjectMeta) changedAt() time.Time {
 	return latest
 }
 
-// workloadRollout is the rollout state of one Deployment, StatefulSet or DaemonSet. Replicas is
-// spec.replicas (1 when unset) and StatusReplicas is status.replicas, which still counts old pods.
+// workloadRollout is the rollout state of one Deployment, StatefulSet, DaemonSet, RestateDeployment or RestateCluster.
+// Replicas is spec.replicas (1 when unset) and StatusReplicas is status.replicas, which still counts old pods.
 // ChangedAt is the last non-status write (see kubeObjectMeta.changedAt) and ConfigMapRefs the ConfigMaps
 // its pod template consumes.
 type workloadRollout struct {
@@ -431,9 +438,12 @@ type workloadRollout struct {
 	UpdateRevision, CurrentRevision                                 string
 	DesiredNumberScheduled, UpdatedNumberScheduled, NumberAvailable int32
 	ProgressDeadlineExceeded                                        bool
+	ReadyReplicas                                                   int32
+	DeploymentID                                                    string
+	ReadyConditionTrue                                              bool
 }
 
-// kubeRolloutList decodes an apps/v1 Deployment, StatefulSet or DaemonSet list with rollout status.
+// kubeRolloutList decodes an apps/v1, restate.dev/v1beta1 or restate.dev/v1 workload list with rollout status.
 type kubeRolloutList struct {
 	Items []struct {
 		Metadata kubeObjectMeta `json:"metadata"`
@@ -442,12 +452,17 @@ type kubeRolloutList struct {
 			Template struct {
 				Spec kubePodSpec `json:"spec"`
 			} `json:"template"`
+			Compute struct {
+				Image string `json:"image"`
+			} `json:"compute"`
 		} `json:"spec"`
 		Status struct {
 			ObservedGeneration     int64           `json:"observedGeneration"`
 			Replicas               int32           `json:"replicas"`
 			UpdatedReplicas        int32           `json:"updatedReplicas"`
 			AvailableReplicas      int32           `json:"availableReplicas"`
+			ReadyReplicas          int32           `json:"readyReplicas"`
+			DeploymentID           string          `json:"deploymentId"`
 			UpdateRevision         string          `json:"updateRevision"`
 			CurrentRevision        string          `json:"currentRevision"`
 			DesiredNumberScheduled int32           `json:"desiredNumberScheduled"`
@@ -467,11 +482,15 @@ func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error)
 	workloads := make([]workloadRollout, 0, len(list.Items))
 	for _, item := range list.Items {
 		st := item.Status
+		images := item.Spec.Template.Spec.images()
+		if item.Spec.Compute.Image != "" {
+			images = append(images, item.Spec.Compute.Image)
+		}
 		workloads = append(workloads, workloadRollout{
 			Kind:                   kind,
 			Namespace:              item.Metadata.Namespace,
 			Name:                   item.Metadata.Name,
-			Images:                 item.Spec.Template.Spec.images(),
+			Images:                 images,
 			ChangedAt:              item.Metadata.changedAt(),
 			Annotations:            item.Metadata.Annotations,
 			ConfigMapRefs:          item.Spec.Template.Spec.configMapRefs(),
@@ -481,6 +500,8 @@ func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error)
 			UpdatedReplicas:        st.UpdatedReplicas,
 			AvailableReplicas:      st.AvailableReplicas,
 			StatusReplicas:         st.Replicas,
+			ReadyReplicas:          st.ReadyReplicas,
+			DeploymentID:           st.DeploymentID,
 			UpdateRevision:         st.UpdateRevision,
 			CurrentRevision:        st.CurrentRevision,
 			DesiredNumberScheduled: st.DesiredNumberScheduled,
@@ -488,6 +509,9 @@ func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error)
 			NumberAvailable:        st.NumberAvailable,
 			ProgressDeadlineExceeded: slices.ContainsFunc(st.Conditions, func(c fluxCondition) bool {
 				return c.Type == reasonProgressing && c.Status == "False" && c.Reason == "ProgressDeadlineExceeded"
+			}),
+			ReadyConditionTrue: slices.ContainsFunc(st.Conditions, func(c fluxCondition) bool {
+				return c.Type == "Ready" && c.Status == "True"
 			}),
 		})
 	}
@@ -525,6 +549,12 @@ func workloadRolloutComplete(w workloadRollout) (done, failed bool, reason strin
 	case "DaemonSet":
 		done = w.UpdatedNumberScheduled == w.DesiredNumberScheduled && w.NumberAvailable == w.DesiredNumberScheduled
 		reason = fmt.Sprintf("%d/%d updated, %d/%d available", w.UpdatedNumberScheduled, w.DesiredNumberScheduled, w.NumberAvailable, w.DesiredNumberScheduled)
+	case "RestateDeployment":
+		done = w.ReadyConditionTrue && w.ReadyReplicas == w.Replicas && w.AvailableReplicas == w.Replicas && w.DeploymentID != ""
+		reason = fmt.Sprintf("%d/%d ready, %d/%d available, deploymentId=%s, ready=%t", w.ReadyReplicas, w.Replicas, w.AvailableReplicas, w.Replicas, w.DeploymentID, w.ReadyConditionTrue)
+	case "RestateCluster":
+		done = w.ReadyConditionTrue
+		reason = fmt.Sprintf("ready=%t", w.ReadyConditionTrue)
 	default:
 		return false, false, "unsupported workload kind"
 	}

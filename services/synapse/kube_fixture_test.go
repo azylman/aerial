@@ -68,23 +68,27 @@ func (f *kubeFixture) Body(key string) string {
 }
 
 const (
-	kubeDeploymentsPath  = "GET /apis/apps/v1/deployments"
-	kubeStatefulSetsPath = "GET /apis/apps/v1/statefulsets"
-	kubeDaemonSetsPath   = "GET /apis/apps/v1/daemonsets"
-	kubeJobsPath         = "GET /apis/batch/v1/jobs"
-	kubeCronJobsPath     = "GET /apis/batch/v1/cronjobs"
-	kubeKustomizations   = "GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations"
-	emptyKubeList        = `{"items":[]}`
+	kubeDeploymentsPath        = "GET /apis/apps/v1/deployments"
+	kubeStatefulSetsPath       = "GET /apis/apps/v1/statefulsets"
+	kubeDaemonSetsPath         = "GET /apis/apps/v1/daemonsets"
+	kubeJobsPath               = "GET /apis/batch/v1/jobs"
+	kubeCronJobsPath           = "GET /apis/batch/v1/cronjobs"
+	kubeRestateDeploymentsPath = "GET /apis/restate.dev/v1beta1/restatedeployments"
+	kubeRestateClustersPath    = "GET /apis/restate.dev/v1/restateclusters"
+	kubeKustomizations         = "GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations"
+	emptyKubeList              = `{"items":[]}`
 )
 
 // kubeWorkloadRoutes returns every workload list route empty, overlaid with overrides.
 func kubeWorkloadRoutes(overrides map[string]kubeRoute) map[string]kubeRoute {
 	routes := map[string]kubeRoute{
-		kubeDeploymentsPath:  {body: emptyKubeList},
-		kubeStatefulSetsPath: {body: emptyKubeList},
-		kubeDaemonSetsPath:   {body: emptyKubeList},
-		kubeJobsPath:         {body: emptyKubeList},
-		kubeCronJobsPath:     {body: emptyKubeList},
+		kubeDeploymentsPath:        {body: emptyKubeList},
+		kubeStatefulSetsPath:       {body: emptyKubeList},
+		kubeDaemonSetsPath:         {body: emptyKubeList},
+		kubeJobsPath:               {body: emptyKubeList},
+		kubeCronJobsPath:           {body: emptyKubeList},
+		kubeRestateDeploymentsPath: {body: emptyKubeList},
+		kubeRestateClustersPath:    {body: emptyKubeList},
 	}
 	maps.Copy(routes, overrides)
 	return routes

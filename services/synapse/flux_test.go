@@ -775,6 +775,16 @@ func dsRollout(name, image string, gen, observed int64, desired, updated, availa
 	return workloadRollout{Kind: "DaemonSet", Namespace: "kube-system", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, DesiredNumberScheduled: desired, UpdatedNumberScheduled: updated, NumberAvailable: available}
 }
 
+// restateDeployRollout builds a RestateDeployment rollout state.
+func restateDeployRollout(name, image string, gen, observed int64, replicas, ready, available int32, deployID string, readyCond bool) workloadRollout {
+	return workloadRollout{Kind: "RestateDeployment", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: replicas, ReadyReplicas: ready, AvailableReplicas: available, DeploymentID: deployID, ReadyConditionTrue: readyCond}
+}
+
+// restateClusterRollout builds a RestateCluster rollout state.
+func restateClusterRollout(name, image string, gen, observed int64, readyCond bool) workloadRollout {
+	return workloadRollout{Kind: "RestateCluster", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: 1, ReadyConditionTrue: readyCond}
+}
+
 func TestImageTag(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -839,6 +849,18 @@ func TestDecodeWorkloadRollouts(t *testing.T) {
 			body: `{"items":[{"metadata":{"name":"eri","namespace":"default","generation":5,"annotations":{"reloader.stakater.com/auto":"true"},"managedFields":[{"manager":"kustomize-controller","operation":"Apply","time":"2026-11-08T10:01:00Z"},{"manager":"kube-controller-manager","operation":"Update","subresource":"status","time":"2026-11-08T10:09:00Z"},{"manager":"reloader","operation":"Update","time":"2026-11-08T10:02:00Z"},{"manager":"kubectl","operation":"Update"}]},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-eri:0123abcd","env":[{"name":"A","valueFrom":{"configMapKeyRef":{"name":"eri-flags","key":"a"}}},{"name":"B","value":"b"},{"name":"C","valueFrom":{"secretKeyRef":{"name":"eri-secret","key":"c"}}}],"envFrom":[{"configMapRef":{"name":"eri-env"}},{"secretRef":{"name":"eri-secret"}}]}],"initContainers":[{"image":"busybox","envFrom":[{"configMapRef":{"name":"eri-env"}}]}],"volumes":[{"name":"cfg","configMap":{"name":"eri-config"}},{"name":"data","emptyDir":{}},{"name":"bundle","projected":{"sources":[{"configMap":{"name":"ca-bundle"}},{"secret":{"name":"eri-secret"}}]}}]}}},"status":{"observedGeneration":5,"replicas":1,"updatedReplicas":1,"availableReplicas":1}}]}`,
 			want: []workloadRollout{{Kind: "Deployment", Namespace: "default", Name: "eri", Images: []string{"ghcr.io/azylman/aerial-eri:0123abcd", "busybox"}, ChangedAt: rolloutClock(10, 2, 0), Annotations: map[string]string{"reloader.stakater.com/auto": "true"}, ConfigMapRefs: []string{"ca-bundle", "eri-config", "eri-env", "eri-flags"}, Generation: 5, ObservedGeneration: 5, Replicas: 1, UpdatedReplicas: 1, AvailableReplicas: 1, StatusReplicas: 1}},
 		},
+		{
+			name: "restatedeployment replicas and ready condition",
+			kind: "RestateDeployment",
+			body: `{"items":[{"metadata":{"name":"restate-worker","namespace":"default","generation":3},"spec":{"replicas":2,"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-restate-worker:0123abcd"}]}}},"status":{"observedGeneration":3,"replicas":2,"readyReplicas":2,"availableReplicas":2,"deploymentId":"dp_12345","conditions":[{"type":"Ready","status":"True"}]}}]}`,
+			want: []workloadRollout{{Kind: "RestateDeployment", Namespace: "default", Name: "restate-worker", Images: []string{"ghcr.io/azylman/aerial-restate-worker:0123abcd"}, Generation: 3, ObservedGeneration: 3, Replicas: 2, ReadyReplicas: 2, AvailableReplicas: 2, StatusReplicas: 2, DeploymentID: "dp_12345", ReadyConditionTrue: true}},
+		},
+		{
+			name: "restatecluster compute image and ready condition",
+			kind: "RestateCluster",
+			body: `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":2},"spec":{"compute":{"image":"docker.io/restatedev/restate:1.6"}},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True"}]}}]}`,
+			want: []workloadRollout{{Kind: "RestateCluster", Namespace: "default", Name: "restate", Images: []string{"docker.io/restatedev/restate:1.6"}, Generation: 2, ObservedGeneration: 2, Replicas: 1, ReadyConditionTrue: true}},
+		},
 		{name: "empty list", kind: "Deployment", body: `{"items":[]}`, want: []workloadRollout{}},
 		{name: "malformed list", kind: "Deployment", body: `{"items":`, wantErr: true},
 	}
@@ -879,6 +901,13 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 		{name: "daemonset with old pods scheduled", workload: dsRollout("agent", synapseImage, 5, 5, 3, 2, 3), wantReason: "2/3 updated, 3/3 available"},
 		{name: "daemonset unavailable", workload: dsRollout("agent", synapseImage, 5, 5, 3, 3, 2), wantReason: "3/3 updated, 2/3 available"},
 		{name: "daemonset with stale observed generation", workload: dsRollout("agent", synapseImage, 6, 5, 3, 3, 3), wantReason: "generation 6 not yet observed"},
+		{name: "restatedeployment rolled out", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 2, "dp_12345", true), wantDone: true},
+		{name: "restatedeployment ready replicas unavailable", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 1, 2, "dp_12345", true), wantReason: "1/2 ready, 2/2 available, deploymentId=dp_12345, ready=true"},
+		{name: "restatedeployment available replicas unavailable", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 1, "dp_12345", true), wantReason: "2/2 ready, 1/2 available, deploymentId=dp_12345, ready=true"},
+		{name: "restatedeployment missing deploymentId", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 2, "", true), wantReason: "2/2 ready, 2/2 available, deploymentId=, ready=true"},
+		{name: "restatedeployment ready condition false", workload: restateDeployRollout("restate-worker", synapseImage, 3, 3, 2, 2, 2, "dp_12345", false), wantReason: "2/2 ready, 2/2 available, deploymentId=dp_12345, ready=false"},
+		{name: "restatecluster rolled out", workload: restateClusterRollout("restate", synapseImage, 2, 2, true), wantDone: true},
+		{name: "restatecluster ready condition false", workload: restateClusterRollout("restate", synapseImage, 2, 2, false), wantReason: "ready=false"},
 		{name: "unsupported kind", workload: workloadRollout{Kind: "Job"}, wantReason: "unsupported workload kind"},
 	}
 	for _, tc := range tests {
