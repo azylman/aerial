@@ -808,7 +808,7 @@ func (s *RouterServer) resolveEventPR(ctx context.Context, res *ResolvedGitHubEv
 }
 
 func (s *RouterServer) healDependabotPR(ctx context.Context, res *ResolvedGitHubEvent) {
-	if !strings.HasPrefix(strings.TrimSpace(res.Branch), "dependabot/") {
+	if s == nil || !s.cfgSrc.Current().DefaultOwner || !strings.HasPrefix(strings.TrimSpace(res.Branch), "dependabot/") {
 		return
 	}
 	targetID := s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
@@ -1059,7 +1059,7 @@ func isDependabotPR(p GitHubPullRequestPayload) bool {
 }
 
 func (s *RouterServer) handleDependabotPROpen(ctx context.Context, res *ResolvedGitHubEvent, p GitHubPullRequestPayload) {
-	if !isDependabotPR(p) || (res.Action != ghActionOpened && res.Action != "reopened" && res.Action != ghActionSynchronize) {
+	if s == nil || !s.cfgSrc.Current().DefaultOwner || !isDependabotPR(p) || (res.Action != ghActionOpened && res.Action != "reopened" && res.Action != ghActionSynchronize) {
 		return
 	}
 	if s.registry == nil || res.PRNumber <= 0 {

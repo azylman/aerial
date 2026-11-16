@@ -131,6 +131,7 @@ type ghEventCase struct {
 	spyNoGitHubHit       bool
 	systemChannelID      string
 	autoUpdateAuthors    []string
+	nonDefaultOwner      bool
 	wantErr              bool
 	wantRepo             string
 	wantAction           string
@@ -381,7 +382,7 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 	if tc.disp != nil {
 		disp = tc.disp
 	}
-	srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: true}, mockServer.Client(), reg, disp, inserters...)
+	srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: !tc.nonDefaultOwner}, mockServer.Client(), reg, disp, inserters...)
 	srv.onProcessed = func(string, string) {}
 
 	if tc.priorEvent != nil {
@@ -1145,6 +1146,40 @@ func processGitHubEventCasesPart8() []ghEventCase {
 			wantSender:      "dependabot[bot]",
 			wantSource:      "pull_request_payload",
 			wantEnsureCalls: 1,
+		},
+		{
+			name:            "dependabot PR opened on non-default owner skips registration and leaves targetID empty",
+			event:           "pull_request",
+			delivery:        "del-pr-dependabot-non-default-owner",
+			payload:         `{"action":"opened","number":609,"pull_request":{"node_id":"node-ok","number":609,"title":"build(deps): bump qux","head":{"ref":"dependabot/go_modules/qux-1.0.0","sha":"depsha609"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
+			systemChannelID: "100000000000000004",
+			nonDefaultOwner: true,
+			reg:             &mockPRRegistry{},
+			wantRepo:        "azylman/aerial",
+			wantAction:      "opened",
+			wantPR:          609,
+			wantBranch:      "dependabot/go_modules/qux-1.0.0",
+			wantHeadSHA:     "depsha609",
+			wantSender:      "dependabot[bot]",
+			wantSource:      "pull_request_payload",
+			wantEnsureCalls: 0,
+			wantTargetID:    "",
+		},
+		{
+			name:              "check_run failure on dependabot branch on non-default owner skips self-heal registration",
+			event:             "check_run",
+			delivery:          "del-cr-dependabot-fail-non-default-owner",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"depfailsha2","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/1000","output":{"title":"Tests Failed","summary":"Error in qux.go"},"pull_requests":[{"number":610,"head":{"ref":"dependabot/pip/qux-1.0","sha":"depfailsha2"}}]}}`,
+			systemChannelID:   "100000000000000004",
+			nonDefaultOwner:   true,
+			reg:               &mockPRRegistry{ciFailedTargetID: "100000000000000004", ciFailedUpdated: true},
+			disp:              &mockOutboundDispatcher{},
+			wantPR:            610,
+			wantBranch:        "dependabot/pip/qux-1.0",
+			wantHeadSHA:       "depfailsha2",
+			wantEnsureCalls:   0,
+			wantCIFailedCalls: 1,
+			wantTargetID:      "100000000000000004",
 		},
 		{
 			name:              "check_run failure on dependabot branch self-heals registration and transitions CI failed",
