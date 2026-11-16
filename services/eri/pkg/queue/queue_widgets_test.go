@@ -982,6 +982,17 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantIdx:     -1,
 		},
 		{
+			name: "custom vanadis build and chunk ID extracts build ID from prompt header",
+			dispatch: db.Dispatch{
+				SessionID:      "vanadis-vsplit-chunk-4-cutover",
+				VanadisChunkID: "vsplit-chunk-4-cutover",
+				Prompt:         "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: release-42\nChunk ID: vsplit-chunk-4-cutover\n",
+			},
+			wantChunkID: "vsplit-chunk-4-cutover",
+			wantBuildID: "release-42",
+			wantIdx:     -1,
+		},
+		{
 			name:        "unrelated dispatch returns empty",
 			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "Run daily summary"},
 			wantChunkID: "",

@@ -101,7 +101,7 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 
 var (
 	standalonePRRemediationRegex = regexp.MustCompile(`PR #(\d+)\s+on\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:on|for repo)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+\((?:commit: [^,]+,\s*)?PR #(\d+)`)
-	vanadisPromptBuildIDRegex    = regexp.MustCompile(`(?m)^Build ID:\s*(build-[A-Za-z0-9_-]+)\s*$`)
+	vanadisPromptBuildIDRegex    = regexp.MustCompile(`(?m)^Build ID:\s*([A-Za-z0-9_.-]+)\s*$`)
 )
 
 func extractPRRemediationTarget(prompt string) (repo string, prNum int, ok bool) {
