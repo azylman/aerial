@@ -296,6 +296,7 @@ func TestCodexInternal_ExtractCodexText(t *testing.T) {
 }
 
 func TestCodexInternal_ResponseEdgeCases(t *testing.T) {
+	t.Parallel()
 	responseEdgeTests := []struct {
 		name     string
 		lines    []string
@@ -305,9 +306,44 @@ func TestCodexInternal_ResponseEdgeCases(t *testing.T) {
 		{name: "tool call requested prefix", lines: []string{`{"type":"response_item","payload":{"type":"message","role":"assistant","text":"[Tool Call Requested]: foo"}}`}, wantResp: ""},
 		{name: "invalid json", lines: []string{"not-json"}, wantResp: ""},
 		{name: "invalid payload", lines: []string{`{"type":"response_item","payload":"bad"}`}, wantResp: ""},
+		{name: "assistant commentary skipped", lines: []string{`{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","text":"commentary text"}}`}, wantResp: ""},
+		{name: "assistant commentary skipped and earlier final answer rescued", lines: []string{
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","text":"final answer text"}}`,
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","text":"commentary text"}}`,
+		}, wantResp: "final answer text"},
+		{name: "assistant final_answer rescued", lines: []string{`{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","text":"final answer text"}}`}, wantResp: "final answer text"},
+		{name: "pre-tool assistant message followed by function_call returns empty", lines: []string{
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","text":"I will run a tool"}}`,
+			`{"type":"response_item","payload":{"type":"function_call","name":"bash"}}`,
+		}, wantResp: ""},
+		{name: "pre-tool assistant message followed by local_shell_call returns empty", lines: []string{
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","text":"I will run shell"}}`,
+			`{"type":"response_item","payload":{"type":"local_shell_call","command":"ls"}}`,
+		}, wantResp: ""},
+		{name: "local_shell_call followed by final answer rescues final answer", lines: []string{
+			`{"type":"response_item","payload":{"type":"local_shell_call","command":"ls"}}`,
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","text":"done running shell"}}`,
+		}, wantResp: "done running shell"},
+		{name: "pre-tool assistant message followed by function_call_output returns empty", lines: []string{
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","text":"I will run a tool"}}`,
+			`{"type":"response_item","payload":{"type":"function_call_output","output":"success"}}`,
+		}, wantResp: ""},
+		{name: "pre-tool assistant message followed by custom_tool_call returns empty", lines: []string{
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","text":"I will run a tool"}}`,
+			`{"type":"response_item","payload":{"type":"custom_tool_call","name":"tool"}}`,
+		}, wantResp: ""},
+		{name: "prior-turn assistant message followed by non-ambient user message returns empty", lines: []string{
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","text":"prior turn answer"}}`,
+			`{"type":"response_item","payload":{"type":"message","role":"user","text":"new user turn"}}`,
+		}, wantResp: ""},
+		{name: "assistant message followed by ambient user message is still rescued", lines: []string{
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","text":"prior answer"}}`,
+			`{"type":"response_item","payload":{"type":"message","role":"user","text":"[Chat ambient message] ping"}}`,
+		}, wantResp: "prior answer"},
 	}
 	for _, tc := range responseEdgeTests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := scanCodexLinesForResponse(context.Background(), tc.lines, time.Time{})
 			if got != tc.wantResp {
 				t.Fatalf("scanCodexLinesForResponse = %q, want %q", got, tc.wantResp)

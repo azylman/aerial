@@ -27,6 +27,8 @@ const (
 	statusSuccess        = "success"
 	statusGreen          = "green"
 	statusFailed         = "failed"
+	statusCIFailed       = "ci_failed"
+	statusDeployFailed   = "deploy_failed"
 	statusConflict       = "conflict"
 	statusClosed         = "closed"
 	statusError          = "error"
@@ -117,7 +119,7 @@ func AccentColor(status string) int {
 	switch norm {
 	case statusCompleted, statusDeployed, statusSuccess, statusGreen:
 		return 0x10B981 // emerald
-	case statusFailed, statusConflict, statusClosed, statusError, statusCancelledError:
+	case statusFailed, statusCIFailed, statusDeployFailed, statusConflict, statusClosed, statusError, statusCancelledError:
 		return 0xEF4444 // crimson
 	case statusPaused, statusStalled, statusCancelled:
 		return 0xF59E0B // amber
@@ -141,7 +143,7 @@ func statusBadge(status string) string {
 		return "🚀"
 	case statusDeployed, statusCompleted, statusSuccess:
 		return "✅"
-	case statusFailed, statusConflict, statusError:
+	case statusFailed, statusCIFailed, statusDeployFailed, statusConflict, statusError:
 		return "❌"
 	default:
 		return "⏳"
@@ -194,7 +196,7 @@ func formatChunkRuntimeSuffix(c StatusWidgetChunk) string {
 	switch norm {
 	case statusRunning, statusCoding, statusPROpened, statusOpen, statusMerged, statusSynced, statusDeploying:
 		return fmt.Sprintf(" *(started <t:%d:R>)*", c.StartedAt.Unix())
-	case statusDeployed, statusCompleted, statusSuccess, statusFailed, statusConflict, statusClosed, statusError, statusCancelled:
+	case statusDeployed, statusCompleted, statusSuccess, statusFailed, statusCIFailed, statusDeployFailed, statusConflict, statusClosed, statusError, statusCancelled:
 		end := c.CompletedAt
 		if end.IsZero() {
 			end = c.UpdatedAt
