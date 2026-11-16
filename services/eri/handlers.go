@@ -1072,7 +1072,7 @@ func newHTTPMemoryRetriever(baseURL string) runner.MemoryRetriever {
 		if q == "" {
 			return "", nil
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/context?q="+url.QueryEscape(q)+"&limit=5", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/context?q="+url.QueryEscape(q)+"&limit=5", http.NoBody)
 		if err != nil {
 			return "", err
 		}

@@ -211,7 +211,7 @@ func TestSetup(t *testing.T) {
 			h := Middleware("test", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				seen = trace.SpanContextFromContext(r.Context()).TraceID().String()
 			}))
-			req := httptest.NewRequest(http.MethodGet, "/x", nil)
+			req := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
 			// Unsampled parent: ParentBased drops the span, so nothing is ever exported.
 			req.Header.Set("Traceparent", "00-"+parentTraceID+"-"+parentSpanID+"-00")
 			h.ServeHTTP(httptest.NewRecorder(), req)
@@ -398,7 +398,7 @@ func runMiddlewareCase(t *testing.T, tc middlewareTestCase) {
 		}
 		w.WriteHeader(tc.status)
 	})
-	req := httptest.NewRequest(http.MethodPost, tc.target, nil)
+	req := httptest.NewRequest(http.MethodPost, tc.target, http.NoBody)
 	req.Pattern = tc.preRouted
 	if tc.traceparent != "" {
 		req.Header.Set("Traceparent", tc.traceparent)
@@ -511,7 +511,7 @@ func runTransportCase(t *testing.T, tc transportTestCase) {
 		return &http.Response{StatusCode: tc.respStatus, Body: http.NoBody, Request: r}, nil
 	})
 	ctx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": parentTraceparent})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tc.url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tc.url, http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +620,7 @@ func TestExternalTransport(t *testing.T) {
 			if tc.parent {
 				ctx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": parentTraceparent})
 			}
-			req, err := http.NewRequestWithContext(ctx, http.MethodPatch, srv.URL+tc.path, nil)
+			req, err := http.NewRequestWithContext(ctx, http.MethodPatch, srv.URL+tc.path, http.NoBody)
 			if err != nil {
 				t.Fatal(err)
 			}

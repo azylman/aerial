@@ -517,12 +517,12 @@ func runResolveEffectiveChannelCase(t *testing.T, tc resolveEffectiveChannelCase
 	t.Helper()
 	for _, ch := range tc.cached {
 		CacheDiscordChannel(ch)
-		defer InvalidateChannelCache(ch.ID)
+		t.Cleanup(func() { InvalidateChannelCache(ch.ID) })
 	}
 	for _, id := range tc.inputIDs {
 		if len(tc.cached) == 0 && id != "" {
 			InvalidateChannelCache(id)
-			defer InvalidateChannelCache(id)
+			t.Cleanup(func() { InvalidateChannelCache(id) })
 		}
 	}
 	var s *discordgo.Session

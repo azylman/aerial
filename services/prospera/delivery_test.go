@@ -215,7 +215,7 @@ func (m *mockStoreForDelivery) TransitionReportStatus(ctx context.Context, callI
 	return true, nil
 }
 
-func (m *mockStoreForDelivery) ReconcileOrphanedCalls(ctx context.Context, checkActive func(ctx context.Context, providerSID string) (bool, error)) (int, error) {
+func (*mockStoreForDelivery) ReconcileOrphanedCalls(ctx context.Context, checkActive func(ctx context.Context, providerSID string) (bool, error)) (int, error) {
 	return 0, nil
 }
 
@@ -248,7 +248,7 @@ func (m *mockStoreForDelivery) ListVoiceMessages(ctx context.Context, limit int)
 	return list, nil
 }
 
-func (m *mockStoreForDelivery) Close() error {
+func (*mockStoreForDelivery) Close() error {
 	return nil
 }
 
@@ -281,7 +281,7 @@ func (m *mockTwilioForDelivery) HangupCall(ctx context.Context, providerCallSID 
 	return nil
 }
 
-func (m *mockTwilioForDelivery) IsCallActive(ctx context.Context, providerCallSID string) (bool, error) {
+func (*mockTwilioForDelivery) IsCallActive(ctx context.Context, providerCallSID string) (bool, error) {
 	return true, nil
 }
 

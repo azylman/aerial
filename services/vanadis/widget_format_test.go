@@ -451,7 +451,7 @@ func (s *errVanadisStore) GetBuild(ctx context.Context, buildID string) (*Vanadi
 	return nil, nil, errors.New("generic store error")
 }
 
-func (s *errVanadisStore) GetChunk(ctx context.Context, chunkID string) (*VanadisChunk, *VanadisBuild, error) {
+func (*errVanadisStore) GetChunk(ctx context.Context, chunkID string) (*VanadisChunk, *VanadisBuild, error) {
 	return nil, nil, errors.New("generic get chunk error")
 }
 
@@ -472,19 +472,19 @@ func (s *errVanadisStore) CompleteActionChunk(ctx context.Context, chunkID strin
 	return nil, errors.New("simulated complete action chunk error")
 }
 
-func (s *errVanadisStore) FailChunk(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
+func (*errVanadisStore) FailChunk(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
 	return nil, nil, false, errors.New("simulated fail chunk error")
 }
 
-func (s *errVanadisStore) ClaimStalledChunk(ctx context.Context, chunkID string, dispatches ...string) (StalledChunkVerdict, *VanadisBuild, *VanadisChunk, error) {
+func (*errVanadisStore) ClaimStalledChunk(ctx context.Context, chunkID string, dispatches ...string) (StalledChunkVerdict, *VanadisBuild, *VanadisChunk, error) {
 	return StalledChunkVerdict(""), nil, nil, errors.New("simulated claim stalled chunk error")
 }
 
-func (s *errVanadisStore) UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error {
+func (*errVanadisStore) UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error {
 	return errors.New("simulated update status message id err")
 }
 
-func (s *errVanadisStore) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {
+func (*errVanadisStore) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {
 	return errors.New("simulated reserve chunk for launch err")
 }
 
@@ -495,21 +495,21 @@ type widgetMockMsgWithErrors struct {
 	delivered uint64
 }
 
-func (m *widgetMockMsgWithErrors) Data() []byte        { return m.payload }
-func (m *widgetMockMsgWithErrors) Subject() string     { return "aerial.coalesced.widget_sync.build.test" }
-func (m *widgetMockMsgWithErrors) Header() nats.Header { return nil }
+func (m *widgetMockMsgWithErrors) Data() []byte      { return m.payload }
+func (*widgetMockMsgWithErrors) Subject() string     { return "aerial.coalesced.widget_sync.build.test" }
+func (*widgetMockMsgWithErrors) Header() nats.Header { return nil }
 func (m *widgetMockMsgWithErrors) NumDelivered() uint64 {
 	if m.delivered > 0 {
 		return m.delivered
 	}
 	return 1
 }
-func (m *widgetMockMsgWithErrors) Ack() error                       { return m.ackErr }
-func (m *widgetMockMsgWithErrors) Nak() error                       { return nil }
-func (m *widgetMockMsgWithErrors) NakWithDelay(time.Duration) error { return nil }
-func (m *widgetMockMsgWithErrors) Term() error                      { return m.termErr }
-func (m *widgetMockMsgWithErrors) Snooze(time.Duration) error       { return nil }
-func (m *widgetMockMsgWithErrors) InProgress() error                { return nil }
+func (m *widgetMockMsgWithErrors) Ack() error                     { return m.ackErr }
+func (*widgetMockMsgWithErrors) Nak() error                       { return nil }
+func (*widgetMockMsgWithErrors) NakWithDelay(time.Duration) error { return nil }
+func (m *widgetMockMsgWithErrors) Term() error                    { return m.termErr }
+func (*widgetMockMsgWithErrors) Snooze(time.Duration) error       { return nil }
+func (*widgetMockMsgWithErrors) InProgress() error                { return nil }
 
 func TestHandleCoalescedWidgetMessage_StoreError_And_AckErrors(t *testing.T) {
 	t.Parallel()

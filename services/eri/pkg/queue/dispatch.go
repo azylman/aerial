@@ -89,7 +89,8 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 		return
 	}
 	defer te.releaseActivePoolLease()
-	defer te.markTurnActive()()
+	markTurnInactive := te.markTurnActive()
+	defer markTurnInactive()
 
 	te.turnAttempted = true
 	promptCtx, promptSpan := te.startSetupChildSpan(te.turnCtxValue(), spanPrompt)

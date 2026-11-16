@@ -164,7 +164,7 @@ func TestBrainHandler_SkipsServerSpansForMCPProxy(t *testing.T) {
 			mux := http.NewServeMux()
 			mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 			w := httptest.NewRecorder()
-			brainHandler(mux).ServeHTTP(w, httptest.NewRequest(http.MethodPost, tc.path, nil))
+			brainHandler(mux).ServeHTTP(w, httptest.NewRequest(http.MethodPost, tc.path, http.NoBody))
 			if w.Code != http.StatusNoContent {
 				t.Errorf("status = %d, want 204", w.Code)
 			}

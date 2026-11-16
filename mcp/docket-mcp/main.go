@@ -65,7 +65,7 @@ func NewServer(cfg *Config, vikunja *VikunjaClient, store TaskStore, ollamaClien
 }
 
 // HandleHealth handles GET and HEAD readiness requests.
-func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
+func (*Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)

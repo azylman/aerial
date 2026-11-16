@@ -481,15 +481,16 @@ func TestHandlePRCIFailed_Remediation(t *testing.T) {
 
 		var foundDispatch bool
 		for _, r := range *reqs {
-			if r.Path == "/dispatch" {
-				foundDispatch = true
-				assert.Equal(t, "vanadis-c-ci1-cifail-sha601-2", r.Body["id"])
-				assert.Equal(t, "vanadis-c-ci1", r.Body["session_id"])
-				assert.Equal(t, "123456789012345678", r.Body["target_id"])
-				assert.Empty(t, r.Body["skip_if_active"])
-				assert.Contains(t, r.Body["prompt"], "Go Unit Tests")
-				assert.Contains(t, r.Body["prompt"], "--- FAIL: TestA")
+			if r.Path != "/dispatch" {
+				continue
 			}
+			foundDispatch = true
+			assert.Equal(t, "vanadis-c-ci1-cifail-sha601-2", r.Body["id"])
+			assert.Equal(t, "vanadis-c-ci1", r.Body["session_id"])
+			assert.Equal(t, "123456789012345678", r.Body["target_id"])
+			assert.Empty(t, r.Body["skip_if_active"])
+			assert.Contains(t, r.Body["prompt"], "Go Unit Tests")
+			assert.Contains(t, r.Body["prompt"], "--- FAIL: TestA")
 		}
 		assert.True(t, foundDispatch, "expected POST /dispatch to be called")
 		assert.Empty(t, recBus.getEvents(), "no external events expected on non-terminal remediation")
@@ -538,10 +539,11 @@ func TestHandlePRCIFailed_DispatchIDVariants(t *testing.T) {
 
 		var foundDispatch bool
 		for _, r := range *reqs {
-			if r.Path == "/dispatch" {
-				foundDispatch = true
-				assert.Equal(t, "vanadis-c-ci-empty-cifail-1", r.Body["id"])
+			if r.Path != "/dispatch" {
+				continue
 			}
+			foundDispatch = true
+			assert.Equal(t, "vanadis-c-ci-empty-cifail-1", r.Body["id"])
 		}
 		assert.True(t, foundDispatch, "expected POST /dispatch to be called")
 		assert.Empty(t, recBus.getEvents())
@@ -593,11 +595,12 @@ func TestHandlePRCIFailed_DispatchIDVariants(t *testing.T) {
 
 		var dispatchIDs []string
 		for _, r := range *reqs {
-			if r.Path == "/dispatch" {
-				id, ok := r.Body["id"].(string)
-				require.Truef(t, ok, "dispatch id is %T, want string", r.Body["id"])
-				dispatchIDs = append(dispatchIDs, id)
+			if r.Path != "/dispatch" {
+				continue
 			}
+			id, ok := r.Body["id"].(string)
+			require.Truef(t, ok, "dispatch id is %T, want string", r.Body["id"])
+			dispatchIDs = append(dispatchIDs, id)
 		}
 		require.Len(t, dispatchIDs, 2)
 		assert.Equal(t, "vanadis-c-ci-seq-cifail-sha001-1", dispatchIDs[0])
@@ -778,16 +781,17 @@ func TestHandlePRConflict_DeployFailed_SyncFailed(t *testing.T) {
 
 		var foundDispatch bool
 		for _, r := range *reqs {
-			if r.Path == "/dispatch" {
-				foundDispatch = true
-				assert.Equal(t, "vanadis-conflict-c-conf-sha701", r.Body["id"])
-				assert.Equal(t, "vanadis-c-conf", r.Body["session_id"])
-				assert.Equal(t, "123456789012345678", r.Body["target_id"])
-				assert.Equal(t, "c-conf", r.Body["vanadis_chunk_id"])
-				assert.Empty(t, r.Body["skip_if_active"])
-				assert.Equal(t, "medium", r.Body["effort"])
-				assert.Contains(t, r.Body["prompt"], "Merge conflict detected")
+			if r.Path != "/dispatch" {
+				continue
 			}
+			foundDispatch = true
+			assert.Equal(t, "vanadis-conflict-c-conf-sha701", r.Body["id"])
+			assert.Equal(t, "vanadis-c-conf", r.Body["session_id"])
+			assert.Equal(t, "123456789012345678", r.Body["target_id"])
+			assert.Equal(t, "c-conf", r.Body["vanadis_chunk_id"])
+			assert.Empty(t, r.Body["skip_if_active"])
+			assert.Equal(t, "medium", r.Body["effort"])
+			assert.Contains(t, r.Body["prompt"], "Merge conflict detected")
 		}
 		assert.True(t, foundDispatch, "expected POST /dispatch to be called")
 	})

@@ -139,18 +139,32 @@ func TestResolveAndValidateLocalImage_SecuritySandboxing(t *testing.T) {
 		t.Errorf("Expected error for non-image file, got nil")
 	}
 
-	// 2. Disallowed root path escape
-	disallowedFile := "/etc/hosts"
-	_, err = ResolveAndValidateLocalImage(disallowedFile, tempDir)
-	if err == nil {
-		t.Errorf("Expected access denied error for /etc/hosts, got nil")
-	}
+	// 2-3. Sandbox enforcement against a real, valid PNG outside the allowed
+	// roots. Both fixtures live under t.TempDir() (portable across OSes), and
+	// the roots are narrowed to allowedDir so deniedDir is outside the sandbox.
+	// Safe to swap the package var: this test is not parallel, and parallel
+	// tests only resume after sequential ones finish.
+	allowedDir, deniedDir := t.TempDir(), t.TempDir()
+	deniedPNG := createTestPNG(t, deniedDir, "denied.png")
+	savedRoots := AllowedAttachmentRoots
+	AllowedAttachmentRoots = []string{allowedDir}
 
-	// 3. Traversal attempt escaping allowed root
-	traversal := filepath.Join(tempDir, "../../etc/passwd")
-	_, err = ResolveAndValidateLocalImage(traversal, tempDir)
-	if err == nil {
-		t.Errorf("Expected error for directory traversal attempt, got nil")
+	_, absErr := ResolveAndValidateLocalImage(deniedPNG, allowedDir)
+	traversal, relErr := filepath.Rel(allowedDir, deniedPNG)
+	var travErr error
+	if relErr == nil {
+		_, travErr = ResolveAndValidateLocalImage(traversal, allowedDir)
+	}
+	AllowedAttachmentRoots = savedRoots
+
+	if absErr == nil || !strings.Contains(absErr.Error(), "access denied") {
+		t.Errorf("Expected access denied for absolute path outside roots, got %v", absErr)
+	}
+	if relErr != nil {
+		t.Fatalf("filepath.Rel: %v", relErr)
+	}
+	if travErr == nil || !strings.Contains(travErr.Error(), "access denied") {
+		t.Errorf("Expected access denied for traversal %q, got %v", traversal, travErr)
 	}
 
 	// 4. Zero byte file

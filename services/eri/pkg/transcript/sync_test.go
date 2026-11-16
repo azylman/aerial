@@ -244,21 +244,21 @@ type fakePubSubMessage struct {
 	subject string
 }
 
-func (m *fakePubSubMessage) Data() []byte                     { return m.data }
-func (m *fakePubSubMessage) Subject() string                  { return m.subject }
-func (m *fakePubSubMessage) Header() nats.Header              { return nil }
-func (m *fakePubSubMessage) NumDelivered() uint64             { return 1 }
-func (m *fakePubSubMessage) Ack() error                       { return nil }
-func (m *fakePubSubMessage) NakWithDelay(time.Duration) error { return nil }
-func (m *fakePubSubMessage) Term() error                      { return nil }
-func (m *fakePubSubMessage) Snooze(time.Duration) error       { return nil }
-func (m *fakePubSubMessage) InProgress() error                { return nil }
+func (m *fakePubSubMessage) Data() []byte                   { return m.data }
+func (m *fakePubSubMessage) Subject() string                { return m.subject }
+func (*fakePubSubMessage) Header() nats.Header              { return nil }
+func (*fakePubSubMessage) NumDelivered() uint64             { return 1 }
+func (*fakePubSubMessage) Ack() error                       { return nil }
+func (*fakePubSubMessage) NakWithDelay(time.Duration) error { return nil }
+func (*fakePubSubMessage) Term() error                      { return nil }
+func (*fakePubSubMessage) Snooze(time.Duration) error       { return nil }
+func (*fakePubSubMessage) InProgress() error                { return nil }
 
 type failPublishBus struct {
 	pubsub.Bus
 }
 
-func (b *failPublishBus) Publish(ctx context.Context, subject, msgID string, data any) error {
+func (*failPublishBus) Publish(ctx context.Context, subject, msgID string, data any) error {
 	return errors.New("simulated bus publish failure")
 }
 

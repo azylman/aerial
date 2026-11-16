@@ -52,9 +52,9 @@ type PRRegistryUpdater interface {
 	ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (targetID string, branch, headSHA, mergeSHA string, err error)
 	AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
 	TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (targetID string, err error)
-	AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (targetID string, prNumber int, mergeSHA, repo string, updated bool, err error)
+	AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (JobTransition, error)
 	AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
-	AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (targetID string, prNumber int, mergeSHA, repo string, updated bool, err error)
+	AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (JobTransition, error)
 	ListDeployingPRs(ctx context.Context) ([]DeployingPR, error)
 	RecordPRCheckStatus(ctx context.Context, repo string, prNumber int, headSHA, checkName, checkState string) (bool, error)
 	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID string) (string, error)
@@ -431,17 +431,27 @@ func (r *PostgresPRRegistry) RecordPRJobState(ctx context.Context, jobName, jobS
 	return repoOut, prNum, true, nil
 }
 
-func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
+// JobTransition is the outcome of a per-job deploy status transition: the PR it
+// matched and whether the registry row changed.
+type JobTransition struct {
+	TargetID string
+	PRNumber int
+	MergeSHA string
+	Repo     string
+	Updated  bool
+}
+
+func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (JobTransition, error) {
 	jobName = strings.TrimSpace(jobName)
 	if jobName == "" {
-		return "", 0, "", "", false, nil
+		return JobTransition{}, nil
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	tx, err := r.pool.Begin(qCtx)
 	if err != nil {
-		return "", 0, "", "", false, fmt.Errorf("begin tx: %w", err)
+		return JobTransition{}, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() {
 		if rbErr := tx.Rollback(qCtx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
@@ -461,10 +471,10 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	var metaBytes []byte
 	err = tx.QueryRow(qCtx, selectQuery, jobName).Scan(&id, &targetID, &prNum, &mergeSHA, &repoOut, &metaBytes)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", 0, "", "", false, nil
+		return JobTransition{}, nil
 	}
 	if err != nil {
-		return "", 0, "", "", false, fmt.Errorf("select deploying pr: %w", err)
+		return JobTransition{}, fmt.Errorf("select deploying pr: %w", err)
 	}
 
 	var meta map[string]any
@@ -485,32 +495,32 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	if len(remaining) > 0 {
 		updateQuery := `UPDATE pr_registry SET status = 'deploying', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', to_jsonb($1::text[])), '{deployed_jobs}', to_jsonb($2::text[])), updated_at = CURRENT_TIMESTAMP WHERE id = $3 AND status IN ('deploying', 'merged', 'synced')`
 		if _, err = tx.Exec(qCtx, updateQuery, remaining, deployedJobs, id); err != nil {
-			return "", 0, "", "", false, fmt.Errorf("update remaining jobs: %w", err)
+			return JobTransition{}, fmt.Errorf("update remaining jobs: %w", err)
 		}
 		if err = tx.Commit(qCtx); err != nil {
-			return "", 0, "", "", false, fmt.Errorf("commit remaining jobs tx: %w", err)
+			return JobTransition{}, fmt.Errorf("commit remaining jobs tx: %w", err)
 		}
-		return targetID, prNum, mergeSHA, repoOut, false, nil
+		return JobTransition{TargetID: targetID, PRNumber: prNum, MergeSHA: mergeSHA, Repo: repoOut}, nil
 	}
 
 	updateQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', '[]'::jsonb), '{deployed_jobs}', to_jsonb($1::text[])), updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status IN ('deploying', 'merged', 'synced')`
 	tag, err := tx.Exec(qCtx, updateQuery, deployedJobs, id)
 	if err != nil {
-		return "", 0, "", "", false, fmt.Errorf("update pr deployed: %w", err)
+		return JobTransition{}, fmt.Errorf("update pr deployed: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return "", 0, "", "", false, nil
+		return JobTransition{}, nil
 	}
 	if err := tx.Commit(qCtx); err != nil {
-		return "", 0, "", "", false, fmt.Errorf("commit pr deployed tx: %w", err)
+		return JobTransition{}, fmt.Errorf("commit pr deployed tx: %w", err)
 	}
-	return targetID, prNum, mergeSHA, repoOut, true, nil
+	return JobTransition{TargetID: targetID, PRNumber: prNum, MergeSHA: mergeSHA, Repo: repoOut, Updated: true}, nil
 }
 
-func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
+func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (JobTransition, error) {
 	jobName = strings.TrimSpace(jobName)
 	if jobName == "" {
-		return "", 0, "", "", false, nil
+		return JobTransition{}, nil
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -532,21 +542,21 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 	var prNum int
 	err := r.pool.QueryRow(qCtx, selectQuery, jobName).Scan(&id, &targetID, &prNum, &mergeSHA, &repoOut)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", 0, "", "", false, nil
+		return JobTransition{}, nil
 	}
 	if err != nil {
-		return "", 0, "", "", false, fmt.Errorf("select deploying pr for failure: %w", err)
+		return JobTransition{}, fmt.Errorf("select deploying pr for failure: %w", err)
 	}
 
 	updateQuery := `UPDATE pr_registry SET status = 'deploy_failed', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status IN ('deploying', 'merged', 'synced');`
 	tag, err := r.pool.Exec(qCtx, updateQuery, id)
 	if err != nil {
-		return "", 0, "", "", false, fmt.Errorf("update pr deploy_failed: %w", err)
+		return JobTransition{}, fmt.Errorf("update pr deploy_failed: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return targetID, prNum, mergeSHA, repoOut, false, nil
+		return JobTransition{TargetID: targetID, PRNumber: prNum, MergeSHA: mergeSHA, Repo: repoOut}, nil
 	}
-	return targetID, prNum, mergeSHA, repoOut, true, nil
+	return JobTransition{TargetID: targetID, PRNumber: prNum, MergeSHA: mergeSHA, Repo: repoOut, Updated: true}, nil
 }
 
 func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingPR, error) {

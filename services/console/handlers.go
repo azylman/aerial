@@ -184,7 +184,7 @@ func fetchUpstreamJSON(ctx context.Context, client *http.Client, targetURL strin
 	reqCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, http.NoBody)
 	if err != nil {
 		return 0, "", err
 	}

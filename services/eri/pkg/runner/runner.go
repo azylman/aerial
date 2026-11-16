@@ -12,7 +12,7 @@ import (
 var (
 	reStrictUUID                 = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	reUUIDInText                 = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
-	reUpdateStream               = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
+	reUpdateStream               = regexp.MustCompile(`Starting conversation update stream for (\S+)`)
 	reGeneralSession             = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
 	reQuotaResetClock            = regexp.MustCompile(`(?i)\bresets(?:\s+at)?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))\b(?:\s*\(([^)]+)\))?`)
 	reQuotaResetIn               = regexp.MustCompile(`(?i)(?:resets in|reset after|resets)\s+([-0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
@@ -212,7 +212,7 @@ func consumeEnvCommandFlags(tokens []string, i int) (nextIdx int, isBareEnv bool
 }
 
 func isValidCommandCandidate(candidate string) bool {
-	return candidate != "." && candidate != ".." && len(candidate) > 0 && len(candidate) <= 24 && safeCmdRegex.MatchString(candidate)
+	return candidate != "." && candidate != ".." && candidate != "" && len(candidate) <= 24 && safeCmdRegex.MatchString(candidate)
 }
 
 func ExtractCommandName(cmdLine string) string {
@@ -262,14 +262,14 @@ func consumeEscapedRune(runes []rune, i int, inDouble bool, cur *strings.Builder
 			cur.WriteRune(next)
 			return i + 1, true
 		}
-		cur.WriteRune('\\')
+		cur.WriteByte('\\')
 		return i, true
 	}
 	if strings.ContainsRune(" \t\n\r\"'\\", next) {
 		cur.WriteRune(next)
 		return i + 1, true
 	}
-	cur.WriteRune('\\')
+	cur.WriteByte('\\')
 	return i, true
 }
 
@@ -332,7 +332,7 @@ func tokenizeCommandLine(s string) ([]string, bool) {
 }
 
 func isPOSIXIdentifier(s string) bool {
-	if len(s) == 0 {
+	if s == "" {
 		return false
 	}
 	for i, r := range s {

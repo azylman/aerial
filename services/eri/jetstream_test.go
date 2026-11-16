@@ -87,7 +87,7 @@ type failEnsureBus struct {
 	pubsub.Bus
 }
 
-func (f *failEnsureBus) EnsureCoreStreams(_ context.Context) error {
+func (*failEnsureBus) EnsureCoreStreams(_ context.Context) error {
 	return errors.New("simulated ensure error")
 }
 
@@ -156,15 +156,15 @@ type mockJobMessage struct {
 	subject string
 }
 
-func (m *mockJobMessage) Data() []byte                       { return m.data }
-func (m *mockJobMessage) Subject() string                    { return m.subject }
-func (m *mockJobMessage) Header() nats.Header                { return nil }
-func (m *mockJobMessage) NumDelivered() uint64               { return 1 }
-func (m *mockJobMessage) Ack() error                         { return nil }
-func (m *mockJobMessage) NakWithDelay(_ time.Duration) error { return nil }
-func (m *mockJobMessage) Term() error                        { return nil }
-func (m *mockJobMessage) Snooze(_ time.Duration) error       { return nil }
-func (m *mockJobMessage) InProgress() error                  { return nil }
+func (m *mockJobMessage) Data() []byte                     { return m.data }
+func (m *mockJobMessage) Subject() string                  { return m.subject }
+func (*mockJobMessage) Header() nats.Header                { return nil }
+func (*mockJobMessage) NumDelivered() uint64               { return 1 }
+func (*mockJobMessage) Ack() error                         { return nil }
+func (*mockJobMessage) NakWithDelay(_ time.Duration) error { return nil }
+func (*mockJobMessage) Term() error                        { return nil }
+func (*mockJobMessage) Snooze(_ time.Duration) error       { return nil }
+func (*mockJobMessage) InProgress() error                  { return nil }
 
 type notifyingStore struct {
 	*dbtest.FakeStore
@@ -444,7 +444,7 @@ type uninsertedStore struct {
 	*dbtest.FakeStore
 }
 
-func (u *uninsertedStore) InsertDispatch(_ context.Context, _ db.Dispatch) (bool, error) {
+func (*uninsertedStore) InsertDispatch(_ context.Context, _ db.Dispatch) (bool, error) {
 	return false, nil
 }
 

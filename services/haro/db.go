@@ -720,7 +720,7 @@ func validateVanadisTarget(ctx context.Context, baseURL, source, target string) 
 		entityName = "vanadis chunk"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/%s/%s", baseURL, pathPrefix, url.PathEscape(target)), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/%s/%s", baseURL, pathPrefix, url.PathEscape(target)), http.NoBody)
 	if err != nil {
 		return fmt.Errorf("create %s request: %w", entityName, err)
 	}

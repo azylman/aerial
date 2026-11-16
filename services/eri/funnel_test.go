@@ -122,7 +122,7 @@ type errExistsStore struct {
 	db.Store
 }
 
-func (e *errExistsStore) MessageExists(ctx context.Context, id string) (bool, error) {
+func (*errExistsStore) MessageExists(ctx context.Context, id string) (bool, error) {
 	return false, errors.New("simulated message exists error")
 }
 

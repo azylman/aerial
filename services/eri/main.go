@@ -567,6 +567,17 @@ func resolveBrainModelDefaults(cur *config.ConfigData) (lowEffortModel, mediumEf
 	return lowEffortModel, mediumEffortModel
 }
 
+// brainPools is the full set of agent process pools built at startup, plus the
+// spawn environment and ephemeral runtime home they share.
+type brainPools struct {
+	discord       map[queue.PoolKey]runner.AgentPool
+	ephemeral     *runner.InterchangeablePool
+	voice         runner.AgentPool
+	all           []runner.AgentPool
+	env           []string
+	ephemeralHome string
+}
+
 func buildBrainProcessPools(
 	ctx context.Context,
 	cfg *config.Config,
@@ -575,7 +586,7 @@ func buildBrainProcessPools(
 	spawner runner.DaemonSpawner,
 	mcpProxyPort string,
 	traceContent bool,
-) (map[queue.PoolKey]runner.AgentPool, *runner.InterchangeablePool, runner.AgentPool, []runner.AgentPool, []string, string) {
+) brainPools {
 	lowEffortModel, mediumEffortModel := resolveBrainModelDefaults(cur)
 	runtimeBase := cur.DataDir
 
@@ -621,7 +632,14 @@ func buildBrainProcessPools(
 	voicePool := createVoiceProcessPool(ctx, cfg, voiceHome, lowEffortModel, mcpProxyPort, spawner, memoryRetriever)
 	allPools := append(append([]runner.AgentPool{}, discordPoolList...), ephemeralPool, voicePool)
 
-	return discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome
+	return brainPools{
+		discord:       discordPools,
+		ephemeral:     ephemeralPool,
+		voice:         voicePool,
+		all:           allPools,
+		env:           poolEnv,
+		ephemeralHome: ephemeralHome,
+	}
 }
 
 func closeAllBrainPools(pools []runner.AgentPool) {
@@ -1017,17 +1035,17 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(ctx, cfg, cur, sessionMgr, appOpts.processSpawner, mcpProxyPort, appOpts.traceContent)
-	defer closeAllBrainPools(allPools)
+	pools := buildBrainProcessPools(ctx, cfg, cur, sessionMgr, appOpts.processSpawner, mcpProxyPort, appOpts.traceContent)
+	defer closeAllBrainPools(pools.all)
 
 	switch cur.GetEngine() {
 	case config.EngineAgy:
-		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()), metrics.RecordUsageJSON)
+		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, pools.ephemeralHome, pools.env, testing.Testing()), metrics.RecordUsageJSON)
 	case config.EngineClaude:
 		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultClaudeUsageRunner(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), testing.Testing()), metrics.RecordClaudeUsageJSON)
 	}
 
-	cls := classifier.New(cfg, classifier.WithProcessPool(ephemeralPool))
+	cls := classifier.New(cfg, classifier.WithProcessPool(pools.ephemeral))
 	ambientResolver := newAmbientContextResolver(cfg)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
@@ -1035,16 +1053,17 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		Store:            store,
 		Classifier:       cls,
 		SessionManager:   sessionMgr,
-		Pools:            discordPools,
-		VoiceProcessPool: voicePool,
-		LLMFunc:          ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"),
+		Pools:            pools.discord,
+		VoiceProcessPool: pools.voice,
+		LLMFunc:          pools.ephemeral.EphemeralLLMFunc("ephemeral:summarizer"),
 		AmbientResolver:  ambientResolver,
 		NATSURL:          cur.NATSURL,
 		AgentName:        appOpts.agentName,
 		TraceContent:     appOpts.traceContent,
 		ActiveTurns:      activeTurns,
 	})
-	defer attachEriEventBus(ctx, pool)()
+	detachEventBus := attachEriEventBus(ctx, pool)
+	defer detachEventBus()
 	pool.HoldUntilLeader()
 	pool.Start()
 
@@ -1052,7 +1071,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	defer cleanupFunnel()
 
 	var reloadOpts []ReloadOption
-	reloadOpts = append(reloadOpts, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool), WithEphemeralPool(ephemeralPool))
+	reloadOpts = append(reloadOpts, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool), WithEphemeralPool(pools.ephemeral))
 	if appOpts.onReload != nil {
 		reloadOpts = append(reloadOpts, func(o *reloadConfigOptions) { o.onReload = appOpts.onReload })
 	}
@@ -1091,7 +1110,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	leaderErrCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, txStore, pool, allPools, ephemeralPool, cfg, cur)
+	leaderErrCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, txStore, pool, pools.all, pools.ephemeral, cfg, cur)
 	releaseLeaderLock = releaseLock
 	defer stopHandoff()
 

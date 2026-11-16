@@ -165,7 +165,7 @@ func NewBuildObject(srv *VanadisServer) *BuildObject {
 }
 
 // ServiceName returns the Restate service name for this Virtual Object.
-func (b *BuildObject) ServiceName() string {
+func (*BuildObject) ServiceName() string {
 	return "Build"
 }
 
@@ -373,7 +373,7 @@ func deriveReconcileChunkStates(chunks []VanadisChunk, priorLaunched map[string]
 			cs.runtimeReady = true
 		case statusMerged, statusDeploying, statusDeployFailed:
 			cs.launched = true
-			cs.codeReady = strings.ToLower(c.Mode) == "pr"
+			cs.codeReady = strings.EqualFold(c.Mode, "pr")
 			cs.runtimeReady = false
 		case statusPROpened, statusCIFailed, statusConflict, statusFailed, statusCancelled, statusCoding:
 			cs.launched = true
@@ -747,17 +747,17 @@ func autoRegisterRestateDeployment(ctx context.Context, adminURL, advertiseURL s
 			return
 		default:
 		}
-		if err := registerRestateDeployment(ctx, adminURL, advertiseURL); err != nil {
-			log.Printf("[vanadis] Restate deployment registration attempt failed: %v", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-				backoff = min(backoff*2, 5*time.Second)
-			}
-		} else {
+		err := registerRestateDeployment(ctx, adminURL, advertiseURL)
+		if err == nil {
 			log.Printf("[vanadis] Successfully registered Restate deployment: %s with %s", advertiseURL, adminURL)
 			return
+		}
+		log.Printf("[vanadis] Restate deployment registration attempt failed: %v", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+			backoff = min(backoff*2, 5*time.Second)
 		}
 	}
 }

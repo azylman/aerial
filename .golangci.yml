@@ -128,6 +128,32 @@ linters:
       ignore-comments: true
     gocognit:
       min-complexity: 30
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+      disabled-checks:
+        - hugeParam
+        - paramTypeCombine
+        # ptrToRefParam: both findings are deliberate pointer-to-reference params
+        # (deferred *error metrics hook, lazily initialised *map lock table).
+        - ptrToRefParam
+        # rangeValCopy: 215 findings (166 production), each a >128-byte struct copy
+        # in a range loop with no measured hot path; over the 150-finding budget.
+        - rangeValCopy
+        # sloppyReassign: contradicts govet shadow; every `if err = f()` it flags
+        # reuses an outer err, and the suggested `err :=` is a shadow finding.
+        - sloppyReassign
+        # sprintfQuotedString: 29 findings, all deliberate wire formats (Discord
+        # markdown code spans, ETag quoting, TwiML attributes) where %q/%#q would
+        # Go-escape the payload or fall back to double quotes and change output.
+        - sprintfQuotedString
+        # stringConcatSimplify: pure taste; its 22 findings all collapse readable
+        # one-line-per-record strings.Join test fixtures into single long lines.
+        - stringConcatSimplify
+        - unnamedResult
+        - whyNoLint
     goconst:
       min-len: 3
       min-occurrences: 3
@@ -188,11 +214,14 @@ linters:
         - name: blank-imports
         - name: context-as-argument
         - name: context-keys-type
+        - name: defer
         - name: dot-imports
+        - name: early-return
         - name: empty-block
         - name: error-naming
         - name: error-return
         - name: errorf
+        - name: import-shadowing
         - name: increment-decrement
         - name: indent-error-flow
         - name: range
@@ -202,8 +231,10 @@ linters:
         - name: time-naming
         - name: unexported-return
         - name: unreachable-code
+        - name: unused-receiver
         - name: var-declaration
         - name: var-naming
+        - name: waitgroup-by-value
     thelper:
       tb:
         name: false

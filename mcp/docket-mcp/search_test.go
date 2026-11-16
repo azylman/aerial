@@ -18,13 +18,13 @@ func (c *testConnector) Connect(context.Context) (driver.Conn, error) {
 	return c.conn, nil
 }
 
-func (c *testConnector) Driver() driver.Driver {
+func (*testConnector) Driver() driver.Driver {
 	return &testDriver{}
 }
 
 type testDriver struct{}
 
-func (d *testDriver) Open(name string) (driver.Conn, error) {
+func (*testDriver) Open(name string) (driver.Conn, error) {
 	return nil, errors.New("open not supported")
 }
 
@@ -33,11 +33,11 @@ type testConn struct {
 	execFn  func(query string, args []driver.NamedValue) (driver.Result, error)
 }
 
-func (c *testConn) Prepare(query string) (driver.Stmt, error) { return nil, nil }
-func (c *testConn) Close() error                              { return nil }
-func (c *testConn) Begin() (driver.Tx, error)                 { return nil, nil }
+func (*testConn) Prepare(query string) (driver.Stmt, error) { return nil, nil }
+func (*testConn) Close() error                              { return nil }
+func (*testConn) Begin() (driver.Tx, error)                 { return nil, nil }
 
-func (c *testConn) CheckNamedValue(nv *driver.NamedValue) error {
+func (*testConn) CheckNamedValue(nv *driver.NamedValue) error {
 	return nil
 }
 
@@ -62,7 +62,7 @@ type testRows struct {
 }
 
 func (r *testRows) Columns() []string { return r.columns }
-func (r *testRows) Close() error      { return nil }
+func (*testRows) Close() error        { return nil }
 func (r *testRows) Next(dest []driver.Value) error {
 	if r.idx >= len(r.values) {
 		return io.EOF

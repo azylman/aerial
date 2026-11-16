@@ -77,7 +77,7 @@ func (e *flusherErrWriter) Header() http.Header {
 	return e.header
 }
 
-func (e *flusherErrWriter) Write(p []byte) (int, error) {
+func (*flusherErrWriter) Write(p []byte) (int, error) {
 	return 0, errors.New("simulated write error")
 }
 
@@ -85,7 +85,7 @@ func (e *flusherErrWriter) WriteHeader(statusCode int) {
 	e.code = statusCode
 }
 
-func (e *flusherErrWriter) Flush() {}
+func (*flusherErrWriter) Flush() {}
 
 func TestHandleVoiceAsk_Validation(t *testing.T) {
 	store := dbtest.NewFakeStore()
@@ -242,7 +242,7 @@ func runVoiceAskSSEErrors(t *testing.T) {
 	}
 
 	mRec := httptest.NewRecorder()
-	metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 	for _, metric := range []string{
 		`aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="error"`,
 		`aerial_brain_voice_ttfr_duration_seconds_bucket{mode="json",status="error"`,

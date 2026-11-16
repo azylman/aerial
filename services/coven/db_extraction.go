@@ -65,7 +65,7 @@ func (s *SQLStore) fetchBrainJSON(ctx context.Context, endpointURL, label string
 	if s.getBrainURL() == "" {
 		return fmt.Errorf("brain API URL not configured")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("failed to create %s request: %w", label, err)
 	}

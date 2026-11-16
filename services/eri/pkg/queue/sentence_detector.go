@@ -192,7 +192,8 @@ func isAbbrev(runes []rune, dotIdx int) bool {
 	for start >= 0 && (unicode.IsLetter(runes[start]) || runes[start] == '.') {
 		start--
 	}
-	if start++; start >= dotIdx {
+	start++
+	if start >= dotIdx {
 		return false
 	}
 	wordRunes := runes[start:dotIdx]
@@ -208,7 +209,7 @@ func isAbbrev(runes []rune, dotIdx int) bool {
 		return false
 	}
 	for _, p := range parts {
-		if len(p) == 0 || len(p) > 2 {
+		if p == "" || len(p) > 2 {
 			return false
 		}
 	}

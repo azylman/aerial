@@ -269,17 +269,17 @@ func buildBaseline(absRoot string, targets, _ []string) (Baseline, error) {
 		Functions: make(map[string]FuncMetrics),
 	}
 	for _, rel := range targets {
-		fm, fns, _, _, skipped, _, err := analyzeFile(filepath.Join(absRoot, rel), rel)
+		fa, err := analyzeFile(filepath.Join(absRoot, rel), rel)
 		if err != nil {
 			return b, err
 		}
-		if skipped {
+		if fa.skipped {
 			continue
 		}
-		if fm.Lines > maxFileLines {
-			b.Files[rel] = fm
+		if fa.metrics.Lines > maxFileLines {
+			b.Files[rel] = fa.metrics
 		}
-		for fnName, m := range fns {
+		for fnName, m := range fa.funcs {
 			if entry, ok := outlierFuncMetrics(m); ok {
 				b.Functions[rel+"::"+fnName] = entry
 			}
@@ -301,23 +301,23 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline) 
 	var allFuncSigs []funcCloneSig
 	var allStructSigs []structCloneSig
 	for _, rel := range targets {
-		fm, fns, sigs, structSigs, skipped, nolintViolations, err := analyzeFile(filepath.Join(absRoot, rel), rel)
+		fa, err := analyzeFile(filepath.Join(absRoot, rel), rel)
 		if err != nil {
 			return nil, err
 		}
-		if skipped {
+		if fa.skipped {
 			continue
 		}
-		for _, nv := range nolintViolations {
+		for _, nv := range fa.nolintViolations {
 			violations = append(violations, fmt.Sprintf("%s: %s", rel, nv))
 		}
 		fileLimit := max(maxFileLines, base.Files[rel].Lines)
-		if fm.Lines > fileLimit {
-			violations = append(violations, fmt.Sprintf("%s: file length %d exceeds limit %d (ceiling %d)", rel, fm.Lines, fileLimit, maxFileLines))
+		if fa.metrics.Lines > fileLimit {
+			violations = append(violations, fmt.Sprintf("%s: file length %d exceeds limit %d (ceiling %d)", rel, fa.metrics.Lines, fileLimit, maxFileLines))
 		}
-		violations = append(violations, checkFuncMetrics(rel, fns, base.Functions)...)
-		allFuncSigs = append(allFuncSigs, sigs...)
-		allStructSigs = append(allStructSigs, structSigs...)
+		violations = append(violations, checkFuncMetrics(rel, fa.funcs, base.Functions)...)
+		allFuncSigs = append(allFuncSigs, fa.funcSigs...)
+		allStructSigs = append(allStructSigs, fa.structSigs...)
 	}
 
 	violations = append(violations, checkCloneViolations(allFuncSigs)...)
@@ -473,20 +473,31 @@ func countLines(src []byte) int {
 	return lines
 }
 
-func analyzeFile(fullPath, rel string) (FileMetrics, map[string]FuncMetrics, []funcCloneSig, []structCloneSig, bool, []string, error) {
+// fileAnalysis is everything analyzeFile extracts from one Go source file.
+// Skipped files (generated code) carry only Skipped=true.
+type fileAnalysis struct {
+	metrics          FileMetrics
+	funcs            map[string]FuncMetrics
+	funcSigs         []funcCloneSig
+	structSigs       []structCloneSig
+	skipped          bool
+	nolintViolations []string
+}
+
+func analyzeFile(fullPath, rel string) (fileAnalysis, error) {
 	src, err := os.ReadFile(fullPath)
 	if err != nil {
-		return FileMetrics{}, nil, nil, nil, false, nil, err
+		return fileAnalysis{}, err
 	}
 	if isGeneratedSource(src) {
-		return FileMetrics{}, nil, nil, nil, true, nil, nil
+		return fileAnalysis{skipped: true}, nil
 	}
 	lines := countLines(src)
 
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, fullPath, src, parser.ParseComments)
 	if err != nil {
-		return FileMetrics{}, nil, nil, nil, false, nil, err
+		return fileAnalysis{}, err
 	}
 
 	nolintViolations := findBannedNolints(f, fset)
@@ -530,7 +541,13 @@ func analyzeFile(fullPath, rel string) (FileMetrics, map[string]FuncMetrics, []f
 	if !strings.HasSuffix(rel, "_test.go") {
 		structSigs = collectStructCloneSigs(f, rel, pkgKey)
 	}
-	return FileMetrics{Lines: lines}, fns, sigs, structSigs, false, nolintViolations, nil
+	return fileAnalysis{
+		metrics:          FileMetrics{Lines: lines},
+		funcs:            fns,
+		funcSigs:         sigs,
+		structSigs:       structSigs,
+		nolintViolations: nolintViolations,
+	}, nil
 }
 
 func appendNodeCloneTokens(tokens []string, n ast.Node) []string {
@@ -895,11 +912,11 @@ func checkReservedPortCall(call *ast.CallExpr) string {
 	}
 	u, err := url.Parse(val)
 	if err != nil || u.Host == "" {
-		if u2, err2 := url.Parse("http://" + val); err2 == nil {
-			u = u2
-		} else {
+		u2, err2 := url.Parse("http://" + val)
+		if err2 != nil {
 			return ""
 		}
+		u = u2
 	}
 	host := u.Hostname()
 	port := u.Port()

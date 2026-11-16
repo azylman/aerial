@@ -35,7 +35,7 @@ const DefaultConfigRepoOwner = "azylman"
 // DefaultConfigRepoName is the default repository name of the configuration repository.
 const DefaultConfigRepoName = "aerial-config"
 
-var systemChannelIDRegex = regexp.MustCompile(`^[0-9]{17,20}$`)
+var systemChannelIDRegex = regexp.MustCompile(`^\d{17,20}$`)
 
 var localConfigPath = "/local/config.yaml"
 

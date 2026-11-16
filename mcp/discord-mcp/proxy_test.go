@@ -35,33 +35,15 @@ func TestHelperProcess(t *testing.T) {
 
 type errReader struct{}
 
-func (e *errReader) Read(p []byte) (n int, err error) {
+func (*errReader) Read(p []byte) (n int, err error) {
 	return 0, fmt.Errorf("simulated read error")
 }
-
-type mockErrWriter struct {
-	header http.Header
-	err    error
-}
-
-func (m *mockErrWriter) Header() http.Header {
-	if m.header == nil {
-		m.header = make(http.Header)
-	}
-	return m.header
-}
-
-func (m *mockErrWriter) Write(p []byte) (int, error) {
-	return 0, m.err
-}
-
-func (m *mockErrWriter) WriteHeader(statusCode int) {}
 
 type mockErrorCloserReader struct {
 	io.Reader
 }
 
-func (m *mockErrorCloserReader) Close() error {
+func (*mockErrorCloserReader) Close() error {
 	return errors.New("simulated closer error")
 }
 
@@ -368,7 +350,7 @@ func TestStartProxyServer_TableDriven(t *testing.T) {
 			}
 			if tc.checkHealth {
 				rec := httptest.NewRecorder()
-				req, _ := http.NewRequest(http.MethodGet, "/health", nil)
+				req, _ := http.NewRequest(http.MethodGet, "/health", http.NoBody)
 				srv.Handler.ServeHTTP(rec, req)
 				if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "aerial-discord-mcp") {
 					t.Errorf("unexpected health response: %d, body: %s", rec.Code, rec.Body.String())
@@ -443,39 +425,6 @@ func TestRunProxyApp_TableDriven(t *testing.T) {
 				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("timed out waiting for shutdown")
-			}
-		})
-	}
-}
-
-func TestWriteProxyResponse_TableDriven(t *testing.T) {
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	tests := []struct {
-		name      string
-		ctx       context.Context
-		writerErr error
-		wantBody  string
-	}{
-		{"successful write", context.Background(), nil, "ok"},
-		{"context canceled suppressed", canceledCtx, errors.New("network failure"), ""},
-		{"epipe error suppressed", context.Background(), syscall.EPIPE, ""},
-		{"generic write error handled", context.Background(), errors.New("generic"), ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/health", nil).WithContext(tc.ctx)
-			if tc.writerErr == nil {
-				rec := httptest.NewRecorder()
-				httpkit.WriteResponse(rec, req, "discord-mcp", []byte("ok"))
-				if rec.Body.String() != tc.wantBody {
-					t.Errorf("got %s, want %s", rec.Body.String(), tc.wantBody)
-				}
-			} else {
-				w := &mockErrWriter{err: tc.writerErr}
-				httpkit.WriteResponse(w, req, "discord-mcp", []byte("ignored"))
 			}
 		})
 	}

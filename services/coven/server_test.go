@@ -912,7 +912,7 @@ func TestServer_Metrics_Table(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(tc.method, tc.url, nil)
+			req := httptest.NewRequest(tc.method, tc.url, http.NoBody)
 			tc.server.handleMetrics(rec, req)
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("handleMetrics() status = %d, want %d", rec.Code, tc.wantStatus)

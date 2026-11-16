@@ -123,11 +123,11 @@ func handlePgConn(conn net.Conn) {
 
 type dummyDBTX struct{ d driver.Driver }
 
-func (d dummyDBTX) Driver() driver.Driver                                           { return d.d }
-func (d dummyDBTX) ExecContext(context.Context, string, ...any) (sql.Result, error) { return nil, nil }
+func (d dummyDBTX) Driver() driver.Driver                                         { return d.d }
+func (dummyDBTX) ExecContext(context.Context, string, ...any) (sql.Result, error) { return nil, nil }
 
-func (d dummyDBTX) QueryContext(context.Context, string, ...any) (*sql.Rows, error) { return nil, nil }
-func (d dummyDBTX) QueryRowContext(context.Context, string, ...any) *sql.Row        { return nil }
+func (dummyDBTX) QueryContext(context.Context, string, ...any) (*sql.Rows, error) { return nil, nil }
+func (dummyDBTX) QueryRowContext(context.Context, string, ...any) *sql.Row        { return nil }
 
 func TestPostgresWireMockAndOpen(t *testing.T) {
 	addr := startMockPostgres(t)

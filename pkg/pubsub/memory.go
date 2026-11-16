@@ -247,7 +247,7 @@ func (b *MemoryBus) Close() error {
 }
 
 // ConsumerStats returns the number of pending and in-flight messages for a consumer in MemoryBus.
-func (b *MemoryBus) ConsumerStats(ctx context.Context, stream, consumer string) (int64, int64, error) {
+func (*MemoryBus) ConsumerStats(ctx context.Context, stream, consumer string) (int64, int64, error) {
 	return 0, 0, nil
 }
 

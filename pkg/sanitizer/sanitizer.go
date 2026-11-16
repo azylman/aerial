@@ -39,7 +39,7 @@ var (
 	reSecretKeyValue = regexp.MustCompile(`(?i)\b([A-Za-z0-9_-]*(?:KEY|SECRET|TOKEN|PAT|PASSWORD|DATABASE_URL))\s*([:=]\s*)([^\s,;]+)`)
 
 	// Discord Mentions (user, role, channel, broadcast)
-	reDiscordMention = regexp.MustCompile(`<@[!&]?[0-9]+>|<#[0-9]+>|@everyone|@here`)
+	reDiscordMention = regexp.MustCompile(`<@[!&]?\d+>|<#\d+>|@everyone|@here`)
 
 	// Prompt Delimiter Tags (case-insensitive opening, closing, and self-closing system prompt tags)
 	rePromptTag = regexp.MustCompile(`(?i)<\s*(/)?\s*(channel_history|user_request|channel_instructions|raw_thread_transcript|thread_summary|previous_session|previous_turn_actions|target_message|target_burst|coordination_context|retrieved_memory|heartbeat_instructions)\s*(/)?\s*>`)

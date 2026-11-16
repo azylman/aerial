@@ -108,7 +108,7 @@ func (r *Router) fetchMemoryFactStatus(ctx context.Context) (int, string) {
 	if memURL == "" {
 		return factCount, latestFactStr
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, memURL+"/facts?limit=1", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, memURL+"/facts?limit=1", http.NoBody)
 	if err != nil {
 		return factCount, latestFactStr
 	}
@@ -189,7 +189,7 @@ func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) stri
 	reqCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, haroURL+"/schedules", nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, haroURL+"/schedules", http.NoBody)
 	if err != nil {
 		return noScheduleAction
 	}

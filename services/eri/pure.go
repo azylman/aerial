@@ -19,7 +19,7 @@ import (
 
 const discordErrCodeThreadAlreadyCreated = 160004
 
-var mentionAndEmojiRegex = regexp.MustCompile(`(?i)<(@!?|@&|#|a?:[a-z0-9_]+:)[0-9]+>`)
+var mentionAndEmojiRegex = regexp.MustCompile(`(?i)<(@!?|@&|#|a?:[a-z0-9_]+:)\d+>`)
 
 // DeriveThreadTitle extracts a clean, readable thread title from a message content string.
 func DeriveThreadTitle(content string) string {

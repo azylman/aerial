@@ -85,7 +85,7 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 			}
 
 			rec := httptest.NewRecorder()
-			metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 			if body := rec.Body.String(); tc.wantExcludes != "" && strings.Contains(body, tc.wantExcludes) {
 				t.Errorf("metrics body should not contain %q:\n%s", tc.wantExcludes, body)
 			}
@@ -396,7 +396,15 @@ func (m *mockWebhookDispatcher) CallPostTurnHook(ctx context.Context, endpoint *
 	return nil, nil
 }
 
-func runWakeHookEval(t *testing.T, hookResp *WakeResponse, hookErr error, timeoutAction, classifierResp string, inputMsgs []db.Message, emptyEffID bool, schedRunID string) (bool, bool, bool, *turnExecution, db.Store, *WakeRequest) {
+// wakeHookEval captures what one evaluateAmbientWake run observed.
+type wakeHookEval struct {
+	shouldExit, hookCalled, classifierCalled bool
+	te                                       *turnExecution
+	store                                    db.Store
+	capturedReq                              *WakeRequest
+}
+
+func runWakeHookEval(t *testing.T, hookResp *WakeResponse, hookErr error, timeoutAction, classifierResp string, inputMsgs []db.Message, emptyEffID bool, schedRunID string) wakeHookEval {
 	t.Helper()
 	store, now := setupTestStore(t), time.Now().UTC()
 	var classifierCalled, hookCalled bool
@@ -430,7 +438,7 @@ func runWakeHookEval(t *testing.T, hookResp *WakeResponse, hookErr error, timeou
 		policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: new(0.80), Hooks: config.ChannelHooksConfig{OnWake: &config.WebhookEndpoint{URL: "http://sidecar.local/wake", TimeoutMs: 1000, OnTimeoutAction: timeoutAction}}},
 	}
 	shouldExit := te.evaluateAmbientWake()
-	return shouldExit, hookCalled, classifierCalled, te, store, capturedReq
+	return wakeHookEval{shouldExit: shouldExit, hookCalled: hookCalled, classifierCalled: classifierCalled, te: te, store: store, capturedReq: capturedReq}
 }
 
 type onWakeHookCase struct {
@@ -475,13 +483,13 @@ func assertWakeHookExecution(t *testing.T, tc onWakeHookCase, te *turnExecution,
 
 func runOnWakeHookCase(t *testing.T, tc onWakeHookCase) {
 	t.Helper()
-	shouldExit, hookCalled, classifierCalled, te, store, capturedReq := runWakeHookEval(t, tc.hookResp, tc.hookErr, tc.timeoutAction, tc.classifierResp, tc.msgs, tc.isSched, tc.schedRunID)
-	if shouldExit != tc.wantExit || !hookCalled || classifierCalled != tc.wantClassifier {
-		t.Fatalf("%s: got exit=%v hook=%v classifier=%v (want exit=%v classifier=%v)", tc.name, shouldExit, hookCalled, classifierCalled, tc.wantExit, tc.wantClassifier)
+	got := runWakeHookEval(t, tc.hookResp, tc.hookErr, tc.timeoutAction, tc.classifierResp, tc.msgs, tc.isSched, tc.schedRunID)
+	if got.shouldExit != tc.wantExit || !got.hookCalled || got.classifierCalled != tc.wantClassifier {
+		t.Fatalf("%s: got exit=%v hook=%v classifier=%v (want exit=%v classifier=%v)", tc.name, got.shouldExit, got.hookCalled, got.classifierCalled, tc.wantExit, tc.wantClassifier)
 	}
-	assertWakeHookExecution(t, tc, te, store)
-	if capturedReq == nil || capturedReq.ChannelID == "" || capturedReq.Timestamp.IsZero() {
-		t.Errorf("capturedReq invalid: %+v", capturedReq)
+	assertWakeHookExecution(t, tc, got.te, got.store)
+	if got.capturedReq == nil || got.capturedReq.ChannelID == "" || got.capturedReq.Timestamp.IsZero() {
+		t.Errorf("capturedReq invalid: %+v", got.capturedReq)
 	}
 }
 
@@ -577,7 +585,7 @@ func TestOnWakeHook_AccessorsAndFallbacks(t *testing.T) {
 	teNil.markAmbientBurst()
 }
 
-func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr error, timeoutAction string, initialRetry int, schedRunID string, waitAsync bool) (int, int, string, *PreTurnRequest, *db.Message, db.Store) {
+func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr error, timeoutAction string, initialRetry int, schedRunID string, waitAsync bool) (int, int, string, *PreTurnRequest, *db.Message) {
 	t.Helper()
 	store, doneCh := setupTestStore(t), make(chan struct{})
 	var mu sync.Mutex
@@ -634,7 +642,7 @@ func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr err
 	mu.Lock()
 	defer mu.Unlock()
 	saved, _ := getMessage(store, "msg-preturn-test")
-	return hookCalls, runnerCalls, capturedPrompt, capturedReq, saved, store
+	return hookCalls, runnerCalls, capturedPrompt, capturedReq, saved
 }
 
 func TestPreTurnHook_Lifecycle(t *testing.T) {
@@ -657,7 +665,7 @@ func TestPreTurnHook_Lifecycle(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			hc, rc, cp, cr, saved, _ := runPreTurnHookBurst(t, tc.hookResps, tc.hookErr, tc.timeoutAction, tc.initialRetry, tc.schedRunID, tc.waitAsync)
+			hc, rc, cp, cr, saved := runPreTurnHookBurst(t, tc.hookResps, tc.hookErr, tc.timeoutAction, tc.initialRetry, tc.schedRunID, tc.waitAsync)
 			if hc != tc.wantHookCalls || rc != tc.wantRunner {
 				t.Fatalf("%s: hookCalls=%d runnerCalls=%d", tc.name, hc, rc)
 			}

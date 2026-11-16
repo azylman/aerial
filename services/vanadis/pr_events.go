@@ -197,7 +197,7 @@ func (s *VanadisServer) dispatchDirectMessage(ctx context.Context, channelID, co
 	return err
 }
 
-func (s *VanadisServer) formatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
+func (*VanadisServer) formatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
 	var extraParts []string
 	cleanBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
 	if cleanBranch != "" {
@@ -223,19 +223,19 @@ func (s *VanadisServer) formatCIFailurePrompt(ev pubsub.PRLifecycleEvent, detail
 	)
 }
 
-func (s *VanadisServer) formatConflictPrompt(ev pubsub.PRLifecycleEvent) string {
+func (*VanadisServer) formatConflictPrompt(ev pubsub.PRLifecycleEvent) string {
 	shortRepo := firstNonEmpty(cleanRepoName(ev.Repo), "aerial")
 	cleanBranch := firstNonEmpty(strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/"), "<branch>")
 	return fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', merge origin/main to resolve conflicts, verify locally, and push to update the PR via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", ev.PRNumber, ev.Repo, cleanBranch, ev.HeadSHA, shortRepo, cleanBranch)
 }
 
-func (s *VanadisServer) formatDeployFailedPrompt(ev pubsub.PRLifecycleEvent) string {
+func (*VanadisServer) formatDeployFailedPrompt(ev pubsub.PRLifecycleEvent) string {
 	jobName := firstNonEmpty(ev.JobName, "service")
 	header := fmt.Sprintf("Deployment failed for job %s on %s (PR #%d, commit: %s).", jobName, ev.Repo, ev.PRNumber, ev.HeadSHA)
 	return formatErrorDetailsBlock(header, ev.Details, "", "Please investigate and fix the deployment failure.")
 }
 
-func (s *VanadisServer) formatSyncFailedPrompt(ev pubsub.PRLifecycleEvent) string {
+func (*VanadisServer) formatSyncFailedPrompt(ev pubsub.PRLifecycleEvent) string {
 	header := fmt.Sprintf("Git sync failed for repo %s (commit: %s, PR #%d).", ev.Repo, ev.HeadSHA, ev.PRNumber)
 	return formatErrorDetailsBlock(header, ev.Details, "", "Please investigate and fix the git sync failure.")
 }

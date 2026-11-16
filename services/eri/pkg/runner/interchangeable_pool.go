@@ -412,9 +412,9 @@ func (l *interchangeableSessionLease) SessionID() string {
 // IsOverflow reports whether the lease runs on an on-demand worker because every fixed worker was busy.
 func (l *interchangeableSessionLease) IsOverflow() bool { return l != nil && l.isOverflow }
 
-func (l *interchangeableSessionLease) PreviousSessionID() string { return "" }
-func (l *interchangeableSessionLease) IsCold() bool              { return false }
-func (l *interchangeableSessionLease) IsEphemeral() bool         { return true }
+func (*interchangeableSessionLease) PreviousSessionID() string { return "" }
+func (*interchangeableSessionLease) IsCold() bool              { return false }
+func (*interchangeableSessionLease) IsEphemeral() bool         { return true }
 func (l *interchangeableSessionLease) TurnCount() int {
 	if l == nil || l.inner == nil {
 		return 0

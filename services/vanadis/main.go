@@ -277,9 +277,9 @@ type VanadisStore interface {
 }
 
 type pgxQueryExecer interface {
-	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, query string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, query string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
@@ -1001,7 +1001,7 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 // Routes returns the HTTP handler for the server.
 func (s *VanadisServer) Routes() http.Handler { return SetupMux(s) }
 
-func (s *VanadisServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (*VanadisServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{fieldStatus: "ok"})
 }
 

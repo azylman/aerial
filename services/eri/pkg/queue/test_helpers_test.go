@@ -970,23 +970,23 @@ func newScriptedDaemonSpawner(conversationID string, turnResponses ...string) *m
 
 type errQueueStore struct{ db.Store }
 
-func (e *errQueueStore) UpdateMessageStatus(context.Context, string, string, string, ...db.TurnTelemetry) error {
+func (*errQueueStore) UpdateMessageStatus(context.Context, string, string, string, ...db.TurnTelemetry) error {
 	return errors.New("errQueueStore: update message status error")
 }
 
-func (e *errQueueStore) UpdateMessageCompleted(context.Context, string, string, string, ...db.TurnTelemetry) error {
+func (*errQueueStore) UpdateMessageCompleted(context.Context, string, string, string, ...db.TurnTelemetry) error {
 	return errors.New("errQueueStore: update message completed error")
 }
 
-func (e *errQueueStore) IncrementMessageRetry(context.Context, string, string) error {
+func (*errQueueStore) IncrementMessageRetry(context.Context, string, string) error {
 	return errors.New("errQueueStore: increment message retry error")
 }
 
-func (e *errQueueStore) SaveSessionID(context.Context, string, string) error {
+func (*errQueueStore) SaveSessionID(context.Context, string, string) error {
 	return errors.New("errQueueStore: save session id error")
 }
 
-func (e *errQueueStore) RotateSessionID(context.Context, string, string) error {
+func (*errQueueStore) RotateSessionID(context.Context, string, string) error {
 	return errors.New("errQueueStore: rotate session id error")
 }
 
@@ -1003,7 +1003,7 @@ func (m *mockDrainErrStore) GetPendingOrProcessingMessages(context.Context, int)
 	return []db.Message{{ID: "msg-proc-1", Status: db.StatusProcessing}}, nil
 }
 
-func (m *mockDrainErrStore) UpdateMessageStatus(context.Context, string, string, string, ...db.TurnTelemetry) error {
+func (*mockDrainErrStore) UpdateMessageStatus(context.Context, string, string, string, ...db.TurnTelemetry) error {
 	return errors.New("mock drain update error")
 }
 
@@ -1075,7 +1075,7 @@ func (m *mockProcessHandle) Kill() error {
 	return m.killErr
 }
 
-func (m *mockProcessHandle) Wait() error { return nil }
+func (*mockProcessHandle) Wait() error { return nil }
 
 func spawnDefaultQueueMockPipes(cfg runner.DaemonConfig, closeOutW bool) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 	inR, inW := io.Pipe()

@@ -270,13 +270,14 @@ func newCheckOpenPROwnershipMockServer(updateCalls *[]int, mu *sync.Mutex) *http
 		if strings.Contains(r.URL.Path, "/update-branch") && r.Method == http.MethodPut {
 			parts := strings.Split(r.URL.Path, "/")
 			for i, p := range parts {
-				if p == "pulls" && i+1 < len(parts) {
-					var num int
-					_, _ = fmt.Sscanf(parts[i+1], "%d", &num)
-					mu.Lock()
-					*updateCalls = append(*updateCalls, num)
-					mu.Unlock()
+				if p != "pulls" || i+1 >= len(parts) {
+					continue
 				}
+				var num int
+				_, _ = fmt.Sscanf(parts[i+1], "%d", &num)
+				mu.Lock()
+				*updateCalls = append(*updateCalls, num)
+				mu.Unlock()
 			}
 			w.WriteHeader(http.StatusOK)
 			return

@@ -173,7 +173,7 @@ type factsHandlerTestCase struct {
 func runFactsHandlerCase(t *testing.T, tt factsHandlerTestCase, capturedQuery *url.Values) {
 	t.Helper()
 	h := factsHandler(tt.brainURL)
-	req := httptest.NewRequest(tt.method, tt.target, nil)
+	req := httptest.NewRequest(tt.method, tt.target, http.NoBody)
 	rr := httptest.NewRecorder()
 	h(rr, req)
 	if rr.Code != tt.wantStatus {
@@ -504,7 +504,7 @@ func runSchedulesAndRunsCase(t *testing.T, tt schedulesAndRunsTestCase) {
 	default:
 		h = schedulesHandler(tt.brainURL)
 	}
-	req := httptest.NewRequest(tt.method, tt.target, nil)
+	req := httptest.NewRequest(tt.method, tt.target, http.NoBody)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != tt.wantStatus {
@@ -829,7 +829,7 @@ func runVanadisBuildsCase(t *testing.T, tt vanadisBuildTestCase) {
 	default:
 		h = buildsHandler(tt.vanadisURL)
 	}
-	req := httptest.NewRequest(tt.method, tt.target, nil)
+	req := httptest.NewRequest(tt.method, tt.target, http.NoBody)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != tt.wantStatus {
@@ -947,7 +947,7 @@ func runDocketHandlerCase(t *testing.T, tc docketHandlerTestCase) {
 	t.Helper()
 	h := SetupConsoleMux(ConsoleConfig{DocketURL: tc.docketURL}, nil)
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.target, nil))
+	h.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.target, http.NoBody))
 	if rr.Code != tc.wantStatus {
 		t.Fatalf("status = %d, want %d (body: %s)", rr.Code, tc.wantStatus, rr.Body.String())
 	}

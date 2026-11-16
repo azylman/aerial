@@ -53,8 +53,8 @@ func TestIsClientDisconnect_TableDriven(t *testing.T) {
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	reqWithCanceledCtx := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(canceledCtx)
-	reqNormal := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqWithCanceledCtx := httptest.NewRequest(http.MethodGet, "/", http.NoBody).WithContext(canceledCtx)
+	reqNormal := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 
 	tests := []struct {
 		name     string
@@ -143,7 +143,7 @@ func TestWriteResponse_TableDriven(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 			var w http.ResponseWriter
 			if tc.errWriter {
 				w = &errResponseWriter{err: tc.errType}
@@ -685,7 +685,7 @@ func TestHandleCoverageFlush_TableDriven(t *testing.T) {
 			}
 
 			handler := HandleCoverageFlush("test-svc")
-			req := httptest.NewRequest(http.MethodPost, "/debug/coverage/flush", nil)
+			req := httptest.NewRequest(http.MethodPost, "/debug/coverage/flush", http.NoBody)
 			rec := httptest.NewRecorder()
 
 			handler.ServeHTTP(rec, req)

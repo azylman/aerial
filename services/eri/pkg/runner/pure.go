@@ -322,7 +322,7 @@ func isReservedSkillDir(name string) bool {
 }
 
 func isValidSkillName(name string) bool {
-	if len(name) == 0 || len(name) > 64 || isReservedSkillDir(name) || name[0] == '-' || name[0] == '_' || name[len(name)-1] == '-' || name[len(name)-1] == '_' {
+	if name == "" || len(name) > 64 || isReservedSkillDir(name) || name[0] == '-' || name[0] == '_' || name[len(name)-1] == '-' || name[len(name)-1] == '_' {
 		return false
 	}
 	for i := range len(name) {

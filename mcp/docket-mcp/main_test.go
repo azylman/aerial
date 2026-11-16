@@ -503,7 +503,7 @@ func TestServer_RESTUpstreamErrorsTable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.path, http.NoBody))
 			if w.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d (body %q)", w.Code, tc.wantStatus, w.Body.String())
 			}

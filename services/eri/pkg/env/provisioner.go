@@ -91,7 +91,7 @@ func (p *Provisioner) runtimeHomeDir(t RuleTarget) string {
 
 func fileMissingOrEmpty(path string) bool {
 	data, err := os.ReadFile(path)
-	return err != nil || len(strings.TrimSpace(string(data))) == 0
+	return err != nil || strings.TrimSpace(string(data)) == ""
 }
 
 func formatJetskiState(installID string) string {
@@ -124,7 +124,7 @@ func (p *Provisioner) provisionOAuthState(configDir string) error {
 
 	tokenDest := filepath.Join(configDir, "antigravity-oauth-token")
 	if srcPath != "" && fileMissingOrEmpty(tokenDest) {
-		if srcData, err := os.ReadFile(srcPath); err == nil && len(strings.TrimSpace(string(srcData))) > 0 {
+		if srcData, err := os.ReadFile(srcPath); err == nil && strings.TrimSpace(string(srcData)) != "" {
 			if err := os.WriteFile(tokenDest, srcData, 0o600); err != nil {
 				return fmt.Errorf("failed to seed antigravity-oauth-token: %w", err)
 			}
@@ -133,7 +133,7 @@ func (p *Provisioner) provisionOAuthState(configDir string) error {
 
 	installIDPath := filepath.Join(configDir, "installation_id")
 	var installID string
-	if existingID, err := os.ReadFile(installIDPath); err == nil && len(strings.TrimSpace(string(existingID))) > 0 {
+	if existingID, err := os.ReadFile(installIDPath); err == nil && strings.TrimSpace(string(existingID)) != "" {
 		installID = strings.TrimSpace(string(existingID))
 	} else {
 		installID = uuid.New().String()
@@ -302,7 +302,7 @@ func (p *Provisioner) chownProvisionedPaths() {
 	}
 }
 
-func (p *Provisioner) writeAtomic(targetPath, content string) error {
+func (*Provisioner) writeAtomic(targetPath, content string) error {
 	dir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err

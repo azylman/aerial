@@ -47,16 +47,16 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 	if tag == "" {
 		tag = "UPDATE 1"
 	}
-	queryRow := func(_ context.Context, sql string, args ...any) pgx.Row {
+	queryRow := func(_ context.Context, query string, args ...any) pgx.Row {
 		if len(args) > 0 {
 			if cands, ok := args[0].([]string); ok {
 				*candidates = cands
 			}
 		}
-		if s.countRow != nil && strings.Contains(sql, "COUNT(*)") {
+		if s.countRow != nil && strings.Contains(query, "COUNT(*)") {
 			return s.countRow
 		}
-		if s.buildRow != nil && !strings.Contains(sql, "FROM vanadis_chunks") {
+		if s.buildRow != nil && !strings.Contains(query, "FROM vanadis_chunks") {
 			return s.buildRow
 		}
 		return s.row
@@ -67,8 +67,8 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 		}
 		return &mockRows{items: s.chunks, scanErr: s.scanErr, rowsErr: s.rowsErr}, nil
 	}
-	exec := func(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
-		if s.execErr != nil && strings.Contains(sql, s.failExec) {
+	exec := func(_ context.Context, query string, _ ...any) (pgconn.CommandTag, error) {
+		if s.execErr != nil && strings.Contains(query, s.failExec) {
 			return pgconn.CommandTag{}, s.execErr
 		}
 		return pgconn.NewCommandTag(tag), nil

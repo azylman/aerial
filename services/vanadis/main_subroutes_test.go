@@ -123,7 +123,7 @@ func TestVanadisServer_StoreHTTPEndpointErrors(t *testing.T) {
 		if body != "" {
 			r = httptest.NewRequest(method, path, strings.NewReader(body))
 		} else {
-			r = httptest.NewRequest(method, path, nil)
+			r = httptest.NewRequest(method, path, http.NoBody)
 		}
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, r)

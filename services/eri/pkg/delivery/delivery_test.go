@@ -29,7 +29,7 @@ func runSplitMessageCase(t *testing.T, tc splitMessageTestCase) {
 	if effLimit <= 0 {
 		effLimit = 2000
 	}
-	if len(tc.text) == 0 {
+	if tc.text == "" {
 		if len(res) != 0 {
 			t.Fatalf("expected 0 chunks for empty input, got %d", len(res))
 		}

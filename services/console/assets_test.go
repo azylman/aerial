@@ -93,7 +93,7 @@ func TestAssetRegistry_ServeHTTP(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
 			if tc.ifNoneMatch != "" {
 				req.Header.Set("If-None-Match", tc.ifNoneMatch)
 			}
@@ -162,7 +162,7 @@ func TestAssetRegistry_Reload(t *testing.T) {
 				t.Fatalf("Reload() error = %v, wantErr %v", err, tc.wantErr)
 			}
 
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 			rec := httptest.NewRecorder()
 			reg.ServeHTTP(rec, req)
 

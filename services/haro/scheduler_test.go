@@ -375,7 +375,7 @@ type mockErrBus struct {
 	pubsub.Bus
 }
 
-func (m *mockErrBus) Publish(ctx context.Context, subject, msgID string, data any) error {
+func (*mockErrBus) Publish(ctx context.Context, subject, msgID string, data any) error {
 	return errors.New("simulated bus error")
 }
 

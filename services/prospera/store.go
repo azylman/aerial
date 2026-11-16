@@ -216,7 +216,7 @@ func scanCall(scanner interface{ Scan(dest ...any) error }) (*VoiceCall, error) 
 	return &c, nil
 }
 
-func (s *PGStore) insertCallTx(ctx context.Context, tx *sql.Tx, call VoiceCall) error {
+func (*PGStore) insertCallTx(ctx context.Context, tx *sql.Tx, call VoiceCall) error {
 	now := time.Now().UTC()
 	startedAt := call.StartedAt
 	if startedAt.IsZero() {

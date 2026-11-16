@@ -301,7 +301,7 @@ type testCustomResult struct {
 	err  error
 }
 
-func (r testCustomResult) LastInsertId() (int64, error) { return 0, nil }
+func (testCustomResult) LastInsertId() (int64, error)   { return 0, nil }
 func (r testCustomResult) RowsAffected() (int64, error) { return r.rows, r.err }
 
 type testMockDBTX struct {

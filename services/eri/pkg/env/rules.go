@@ -205,7 +205,7 @@ func (p *Provisioner) compileTargetRules(target RuleTarget, customPrompt string)
 	return allRules, nil
 }
 
-func (p *Provisioner) atomicSwapRulesDir(rules []ruleSourceFile, targetDir string) error {
+func (*Provisioner) atomicSwapRulesDir(rules []ruleSourceFile, targetDir string) error {
 	parentDir := filepath.Dir(targetDir)
 	if err := os.MkdirAll(parentDir, 0o755); err != nil {
 		return err
@@ -443,7 +443,7 @@ func prepareSharedTargetDir(targetDir, cleanCanonical string) bool {
 	return false
 }
 
-func (p *Provisioner) linkSharedSessionStorage(targetGemini, canonicalBrain, canonicalConversations string) {
+func (*Provisioner) linkSharedSessionStorage(targetGemini, canonicalBrain, canonicalConversations string) {
 	shared := []struct {
 		targetRel string
 		canonical string

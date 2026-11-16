@@ -65,7 +65,7 @@ func (m *mockTwilioClient) HangupCall(ctx context.Context, providerCallSID strin
 	return m.hangupErr
 }
 
-func (m *mockTwilioClient) IsCallActive(ctx context.Context, providerCallSID string) (bool, error) {
+func (*mockTwilioClient) IsCallActive(ctx context.Context, providerCallSID string) (bool, error) {
 	return true, nil
 }
 
@@ -76,11 +76,11 @@ func (m *mockTwilioClient) SendSMS(ctx context.Context, to, from, body string) (
 	return "SM_mock_123", nil
 }
 
-func (m *mockTwilioClient) EnsurePhoneNumber(ctx context.Context, areaCode, webhookBaseURL string) (string, error) {
+func (*mockTwilioClient) EnsurePhoneNumber(ctx context.Context, areaCode, webhookBaseURL string) (string, error) {
 	return "+15105550100", nil
 }
 
-func (m *mockTwilioClient) DownloadRecording(ctx context.Context, recordingURL string) ([]byte, string, error) {
+func (*mockTwilioClient) DownloadRecording(ctx context.Context, recordingURL string) ([]byte, string, error) {
 	return []byte("test"), "audio/wav", nil
 }
 
@@ -499,7 +499,7 @@ func TestCallSessionManager_SessionRegistryAndAccessors(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/twilio/media-stream?token=invalid", nil)
+	req := httptest.NewRequest(http.MethodGet, "/twilio/media-stream?token=invalid", http.NoBody)
 	sessionMgr.HandleMediaWebSocket(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("HandleMediaWebSocket with bad token status = %d, want 401", rec.Code)
@@ -507,7 +507,7 @@ func TestCallSessionManager_SessionRegistryAndAccessors(t *testing.T) {
 
 	validTok, _ := tokenMgr.Issue("call-non-ws", 10*time.Second)
 	recNonWS := httptest.NewRecorder()
-	reqNonWS := httptest.NewRequest(http.MethodGet, "/twilio/media-stream?token="+validTok, nil)
+	reqNonWS := httptest.NewRequest(http.MethodGet, "/twilio/media-stream?token="+validTok, http.NoBody)
 	sessionMgr.HandleMediaWebSocket(recNonWS, reqNonWS)
 
 	sess := NewMediaStreamSession(MediaStreamSessionConfig{

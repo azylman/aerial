@@ -24,20 +24,20 @@ type synapseMemoryMsg struct {
 	termed       bool
 }
 
-func (m *synapseMemoryMsg) Data() []byte        { return m.data }
-func (m *synapseMemoryMsg) Subject() string     { return m.subject }
-func (m *synapseMemoryMsg) Header() nats.Header { return nil }
+func (m *synapseMemoryMsg) Data() []byte      { return m.data }
+func (m *synapseMemoryMsg) Subject() string   { return m.subject }
+func (*synapseMemoryMsg) Header() nats.Header { return nil }
 func (m *synapseMemoryMsg) NumDelivered() uint64 {
 	if m.numDelivered > 0 {
 		return m.numDelivered
 	}
 	return 1
 }
-func (m *synapseMemoryMsg) Ack() error                         { return nil }
-func (m *synapseMemoryMsg) NakWithDelay(_ time.Duration) error { return nil }
-func (m *synapseMemoryMsg) Term() error                        { m.termed = true; return nil }
-func (m *synapseMemoryMsg) Snooze(_ time.Duration) error       { return nil }
-func (m *synapseMemoryMsg) InProgress() error                  { return nil }
+func (*synapseMemoryMsg) Ack() error                         { return nil }
+func (*synapseMemoryMsg) NakWithDelay(_ time.Duration) error { return nil }
+func (m *synapseMemoryMsg) Term() error                      { m.termed = true; return nil }
+func (*synapseMemoryMsg) Snooze(_ time.Duration) error       { return nil }
+func (*synapseMemoryMsg) InProgress() error                  { return nil }
 
 func TestResolveJetStreamJobCoords(t *testing.T) {
 	t.Parallel()

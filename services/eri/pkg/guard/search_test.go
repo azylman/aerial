@@ -57,7 +57,7 @@ func (f *fakeSQLCatalogConn) QueryCatalog(_ context.Context, sqlStr string, args
 	return nil, nil
 }
 
-func (f *fakeSQLCatalogConn) Close(_ context.Context) {}
+func (*fakeSQLCatalogConn) Close(_ context.Context) {}
 
 type searchTestCase struct {
 	name             string

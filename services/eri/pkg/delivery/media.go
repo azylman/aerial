@@ -343,7 +343,7 @@ var intermediateStatusRegexes = []*regexp.Regexp{
 
 func isSubstantiveContent(s string) bool {
 	clean := strings.Trim(strings.TrimSpace(s), " \t\r\n.!?*-_~`")
-	return len(clean) > 0
+	return clean != ""
 }
 
 func stripLeadingStatusPhrases(s string) string {
@@ -460,11 +460,10 @@ func parseCodeFence(line string) (marker string, length int, isSingleLineSpan bo
 	char := rune(marker[0])
 	count := 0
 	for _, r := range trimmed {
-		if r == char {
-			count++
-		} else {
+		if r != char {
 			break
 		}
+		count++
 	}
 
 	// Check if this line is a single-line code block: e.g. ```bash echo 1``` or ~~~python code~~~
@@ -623,7 +622,7 @@ func ResolveAndFetchInternalAttachment(ctx context.Context, rawURL, filename str
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create http request: %w", err)
 	}

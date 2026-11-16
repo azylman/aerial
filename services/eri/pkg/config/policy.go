@@ -350,7 +350,7 @@ func readScopeInstructionsFile(cleanDir, cand, normName string) (string, bool) {
 		return "", false
 	}
 	trimmed := strings.TrimSpace(string(data))
-	if len(trimmed) > 0 {
+	if trimmed != "" {
 		// Defensively escape any closing delimiter tags to prevent breakout
 		sanitized := reChannelInstructionsTag.ReplaceAllString(trimmed, "<\\/CHANNEL_INSTRUCTIONS>")
 		sanitized = reScopeInstructionsTag.ReplaceAllString(sanitized, "<\\/SCOPE_INSTRUCTIONS>")

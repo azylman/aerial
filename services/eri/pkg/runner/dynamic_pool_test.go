@@ -117,15 +117,15 @@ func (m *mockVoicePool) UpdatePrewarmedTargets(t []string) {
 
 type fakeSessionLease struct{ sessID string }
 
-func (f *fakeSessionLease) SessionID() string         { return f.sessID }
-func (f *fakeSessionLease) PreviousSessionID() string { return "" }
-func (f *fakeSessionLease) IsCold() bool              { return false }
-func (f *fakeSessionLease) IsEphemeral() bool         { return false }
-func (f *fakeSessionLease) TurnCount() int            { return 1 }
-func (f *fakeSessionLease) MarkDirty()                {}
-func (f *fakeSessionLease) CancelRotation()           {}
-func (f *fakeSessionLease) Release() error            { return nil }
-func (f *fakeSessionLease) Execute(context.Context, *TurnContext) (*TurnResult, error) {
+func (f *fakeSessionLease) SessionID() string       { return f.sessID }
+func (*fakeSessionLease) PreviousSessionID() string { return "" }
+func (*fakeSessionLease) IsCold() bool              { return false }
+func (*fakeSessionLease) IsEphemeral() bool         { return false }
+func (*fakeSessionLease) TurnCount() int            { return 1 }
+func (*fakeSessionLease) MarkDirty()                {}
+func (*fakeSessionLease) CancelRotation()           {}
+func (*fakeSessionLease) Release() error            { return nil }
+func (*fakeSessionLease) Execute(context.Context, *TurnContext) (*TurnResult, error) {
 	return &TurnResult{Response: "fake lease ok"}, nil
 }
 

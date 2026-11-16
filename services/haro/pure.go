@@ -132,7 +132,7 @@ func IsNumericSnowflake(id string) bool {
 var (
 	reVanadisBuild    = regexp.MustCompile(`^build-[a-z0-9-]+$`)
 	reVanadisChunk    = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,120}$`)
-	reAllDigits       = regexp.MustCompile(`^[0-9]+$`)
+	reAllDigits       = regexp.MustCompile(`^\d+$`)
 	reHexSHA          = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 	managedEventRepos = map[string]bool{
 		"azylman/aerial":          true,

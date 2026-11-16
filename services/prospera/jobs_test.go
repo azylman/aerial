@@ -26,10 +26,10 @@ type mockJobMsg struct {
 }
 
 func (m *mockJobMsg) Data() []byte         { return m.data }
-func (m *mockJobMsg) Subject() string      { return "" }
-func (m *mockJobMsg) Header() nats.Header  { return nil }
+func (*mockJobMsg) Subject() string        { return "" }
+func (*mockJobMsg) Header() nats.Header    { return nil }
 func (m *mockJobMsg) NumDelivered() uint64 { return m.delivered }
-func (m *mockJobMsg) Ack() error           { return nil }
+func (*mockJobMsg) Ack() error             { return nil }
 func (m *mockJobMsg) NakWithDelay(d time.Duration) error {
 	m.naked = true
 	m.nakDelay = d
@@ -40,8 +40,8 @@ func (m *mockJobMsg) Term() error {
 	m.termed = true
 	return nil
 }
-func (m *mockJobMsg) Snooze(_ time.Duration) error { return nil }
-func (m *mockJobMsg) InProgress() error            { return nil }
+func (*mockJobMsg) Snooze(_ time.Duration) error { return nil }
+func (*mockJobMsg) InProgress() error            { return nil }
 
 type failConsumeQueueBus struct {
 	pubsub.Bus
@@ -505,7 +505,7 @@ type failPublishBus struct {
 	pubsub.Bus
 }
 
-func (f *failPublishBus) Publish(ctx context.Context, subject string, msgID string, data any) error {
+func (*failPublishBus) Publish(ctx context.Context, subject string, msgID string, data any) error {
 	return errors.New("simulated publish failure")
 }
 

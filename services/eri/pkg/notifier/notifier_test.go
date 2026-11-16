@@ -106,7 +106,7 @@ func TestFormatQuotaPauseMessage(t *testing.T) {
 	runAt := time.Unix(1725678900, 0)
 	dur := 16*time.Minute + 58*time.Second
 
-	// Scheduled = true
+	// Scheduled pause message.
 	msgScheduled := FormatQuotaPauseMessage(dur, runAt, true, false)
 	if !strings.Contains(msgScheduled, "**16m 58s**") {
 		t.Errorf("Expected **16m 58s** in scheduled message, got: %s", msgScheduled)

@@ -138,6 +138,9 @@ func isTransientBinarySpawnError(bin string, cwd string, err error) bool {
 	return false
 }
 
+// usrLocalBinDir is checked first for bare binary names, ahead of $PATH.
+const usrLocalBinDir = "/usr/local/bin"
+
 func hasActiveBinaryReplacement(bin string, cwd string) bool {
 	if bin == "" {
 		return false
@@ -154,7 +157,7 @@ func hasActiveBinaryReplacement(bin string, cwd string) bool {
 			candidates = []string{filepath.Clean(bin)}
 		}
 	default:
-		candidates = append(candidates, filepath.Join("/usr/local/bin", bin))
+		candidates = append(candidates, filepath.Join(usrLocalBinDir, bin))
 		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 			if dir != "" {
 				candidates = append(candidates, filepath.Join(dir, bin))

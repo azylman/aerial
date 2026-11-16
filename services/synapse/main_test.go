@@ -264,20 +264,20 @@ func (m *mockPRRegistry) TransitionDeploying(ctx context.Context, repo string, p
 	return firstNonEmpty(m.deployingTargetID, m.resolveTargetID, "100000000000000001"), nil
 }
 
-func (m *mockPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
+func (m *mockPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (JobTransition, error) {
 	m.deployedJobCalls = append(m.deployedJobCalls, jobName)
 	if len(m.deployedResults) > 0 {
 		res := m.deployedResults[0]
 		m.deployedResults = m.deployedResults[1:]
 		if res.err != nil {
-			return "", 0, "", "", false, res.err
+			return JobTransition{}, res.err
 		}
-		return res.targetID, res.prNumber, res.mergeSHA, res.repo, res.updated, nil
+		return JobTransition{TargetID: res.targetID, PRNumber: res.prNumber, MergeSHA: res.mergeSHA, Repo: res.repo, Updated: res.updated}, nil
 	}
 	if err := m.checkErr(m.deployedErr); err != nil {
-		return "", 0, "", "", false, err
+		return JobTransition{}, err
 	}
-	return m.deployedTargetID, m.deployedPRNum, m.deployedMergeSHA, m.deployedRepo, m.deployedUpdated, nil
+	return JobTransition{TargetID: m.deployedTargetID, PRNumber: m.deployedPRNum, MergeSHA: m.deployedMergeSHA, Repo: m.deployedRepo, Updated: m.deployedUpdated}, nil
 }
 
 func (m *mockPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
@@ -288,12 +288,12 @@ func (m *mockPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo 
 	return m.deployFailedTargetID, m.deployFailedUpdated, nil
 }
 
-func (m *mockPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
+func (m *mockPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (JobTransition, error) {
 	if err := m.checkErr(m.deployFailedJobErr); err != nil {
-		return "", 0, "", "", false, err
+		return JobTransition{}, err
 	}
 	m.deployFailedJobCalls = append(m.deployFailedJobCalls, jobName)
-	return m.deployFailedJobTargetID, m.deployFailedJobPRNum, m.deployFailedJobMergeSHA, m.deployFailedJobRepo, m.deployFailedJobUpdated, nil
+	return JobTransition{TargetID: m.deployFailedJobTargetID, PRNumber: m.deployFailedJobPRNum, MergeSHA: m.deployFailedJobMergeSHA, Repo: m.deployFailedJobRepo, Updated: m.deployFailedJobUpdated}, nil
 }
 
 func (m *mockPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingPR, error) {
@@ -971,11 +971,11 @@ func processDeployEventFluxCases() []processDeployEventCase {
 
 func processDeployEventCases() []processDeployEventCase {
 	basic := processDeployEventBasicCases()
-	sync := processDeployEventSyncCases()
+	syncCases := processDeployEventSyncCases()
 	flux := processDeployEventFluxCases()
-	all := make([]processDeployEventCase, 0, len(basic)+len(sync)+len(flux))
+	all := make([]processDeployEventCase, 0, len(basic)+len(syncCases)+len(flux))
 	all = append(all, basic...)
-	all = append(all, sync...)
+	all = append(all, syncCases...)
 	all = append(all, flux...)
 	return all
 }

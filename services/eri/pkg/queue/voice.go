@@ -178,7 +178,8 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	}()
 	// Registered after the release defer so the daemon's entry is cleared before the lease
 	// (and the daemon) can be handed to the next turn.
-	defer p.markVoiceTurnActive(lease, span.SpanContext(), traceSink)()
+	markVoiceTurnInactive := p.markVoiceTurnActive(lease, span.SpanContext(), traceSink)
+	defer markVoiceTurnInactive()
 	activeSession := lease.SessionID()
 	if activeSession == "" {
 		activeSession = deviceKey

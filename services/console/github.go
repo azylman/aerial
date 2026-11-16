@@ -312,7 +312,7 @@ func (p *GitHubPoller) processPolledWorkflowRuns(ctx context.Context, repo, newE
 
 func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allActiveRunIDs map[int64]bool) bool {
 	reqURL := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=10", baseURL, repo)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
 	if err != nil {
 		return false
 	}
@@ -396,7 +396,7 @@ func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64, optiona
 	}
 
 	reqURL := fmt.Sprintf("%s/repos/%s/actions/runs/%d/jobs", baseURL, repo, runID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
 	if err != nil {
 		return
 	}

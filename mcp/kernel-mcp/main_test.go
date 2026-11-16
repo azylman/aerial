@@ -426,7 +426,7 @@ func TestServer_HTTPRoutesTable(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
 			w := httptest.NewRecorder()
 			mux.ServeHTTP(w, req)
 

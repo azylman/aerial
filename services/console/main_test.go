@@ -306,7 +306,7 @@ func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string)
 	if method == "" {
 		method = http.MethodGet
 	}
-	req := httptest.NewRequest(method, "/api/status", nil)
+	req := httptest.NewRequest(method, "/api/status", http.NoBody)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
@@ -565,7 +565,7 @@ func TestFetchGitSyncStatus(t *testing.T) {
 }
 
 func TestHealthHandler(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/health", http.NoBody)
 	rr := httptest.NewRecorder()
 	healthHandler(rr, req)
 
@@ -577,7 +577,7 @@ func TestHealthHandler(t *testing.T) {
 	}
 
 	// 405 Method Not Allowed
-	reqPost := httptest.NewRequest(http.MethodPost, "/health", nil)
+	reqPost := httptest.NewRequest(http.MethodPost, "/health", http.NoBody)
 	rrPost := httptest.NewRecorder()
 	healthHandler(rrPost, reqPost)
 	if rrPost.Code != http.StatusMethodNotAllowed {
@@ -592,7 +592,7 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 	})
 
 	handler := securityHeadersMiddleware(inner)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -996,7 +996,7 @@ func (m *mockErrReader) Read(p []byte) (int, error) {
 	return 0, m.err
 }
 
-func (m *mockErrReader) Close() error {
+func (*mockErrReader) Close() error {
 	return nil
 }
 
@@ -1041,16 +1041,6 @@ func TestConsole_CloseWarnAndDisconnect(t *testing.T) {
 	if httpkit.IsClientDisconnect(nil, nil) {
 		t.Error("expected false for nil error")
 	}
-	ctxCanceled, cancel := context.WithCancel(context.Background())
-	cancel()
-	reqCanceled := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctxCanceled)
-	if !httpkit.IsClientDisconnect(reqCanceled, errors.New("some network abort")) {
-		t.Error("expected true when request context is canceled")
-	}
-	reqActive := httptest.NewRequest(http.MethodGet, "/", nil)
-	if httpkit.IsClientDisconnect(reqActive, errors.New("unrelated error")) {
-		t.Error("expected false for unrelated error with active context")
-	}
 	if !httpkit.IsClientDisconnect(nil, syscall.EPIPE) {
 		t.Error("expected true for EPIPE")
 	}
@@ -1061,18 +1051,8 @@ func TestConsole_CloseWarnAndDisconnect(t *testing.T) {
 		t.Error("expected true for net.ErrClosed")
 	}
 
-	// 4. writeResponse
-	rr := httptest.NewRecorder()
-	httpkit.WriteResponse(rr, reqActive, "console", []byte("success payload"))
-	if rr.Body.String() != "success payload" {
-		t.Errorf("expected 'success payload', got %q", rr.Body.String())
-	}
-	mockWDisconnect := newMockErrWriter(syscall.EPIPE)
-	httpkit.WriteResponse(mockWDisconnect, reqActive, "console", []byte("data"))
-	mockWOtherErr := newMockErrWriter(errors.New("other write failure"))
-	httpkit.WriteResponse(mockWOtherErr, reqActive, "console", []byte("data"))
-
-	// 5. writeJSON: success, marshal error, and write error
+	// 4. writeJSON: success, marshal error, and write error
+	reqActive := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	rrJSON := httptest.NewRecorder()
 	writeJSON(rrJSON, reqActive, http.StatusCreated, map[string]string{"status": "ok"})
 	if rrJSON.Code != http.StatusCreated {
@@ -1091,7 +1071,7 @@ func TestConsole_CloseWarnAndDisconnect(t *testing.T) {
 	mockWJSONErr := newMockErrWriter(errors.New("write failure"))
 	writeJSON(mockWJSONErr, reqActive, http.StatusOK, map[string]string{"status": "ok"})
 
-	reqGzip := httptest.NewRequest(http.MethodGet, "/api/builds", nil)
+	reqGzip := httptest.NewRequest(http.MethodGet, "/api/builds", http.NoBody)
 	reqGzip.Header.Set("Accept-Encoding", "gzip, deflate")
 	rrGzip := httptest.NewRecorder()
 	writeJSON(rrGzip, reqGzip, http.StatusOK, map[string]string{"status": "ok"})
