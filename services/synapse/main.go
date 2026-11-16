@@ -55,6 +55,7 @@ type RouterServer struct {
 	failedCheckSHAs          sync.Map
 	failedCheckRuns          sync.Map
 	updatedForCurrentMain    sync.Map
+	lastMainPushSHA          sync.Map
 	deploySuccessDispatched  sync.Map
 	queueStats               consumerStatsQuerier
 	gatewayLatencyFn         func() time.Duration

@@ -380,6 +380,17 @@ func (s *RouterServer) clearUpdatedPRsForRepo(repo string) {
 	})
 }
 
+func (s *RouterServer) clearUpdatedPRsForMainCommit(repo, headSHA string) {
+	normRepo := strings.ToLower(normalizeRepo(repo))
+	cleanSHA := strings.ToLower(strings.TrimSpace(headSHA))
+	if normRepo != "" && cleanSHA != "" && !isZeroSHA(cleanSHA) {
+		if _, loaded := s.lastMainPushSHA.LoadOrStore(normRepo+"@"+cleanSHA, true); loaded {
+			return
+		}
+	}
+	s.clearUpdatedPRsForRepo(repo)
+}
+
 func (s *RouterServer) isCachedFailedCISHA(repo string, prNumber int, headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
 	normRepo := normalizeRepo(repo)
