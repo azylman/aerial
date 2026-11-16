@@ -20,6 +20,7 @@ type codexTranscriptEntry struct {
 type codexPayloadRecord struct {
 	Type    string          `json:"type"`
 	Role    string          `json:"role"`
+	Phase   string          `json:"phase"`
 	Content json.RawMessage `json:"content"`
 	Text    string          `json:"text"`
 	Message string          `json:"message"`
@@ -308,31 +309,62 @@ func scanCodexLinesForTurnError(ctx context.Context, lines []string, since time.
 	return scanTranscriptLinesForTurnError(ctx, lines, since, findLastCodexUserInputIdx, extractCodexErrorFromLine)
 }
 
+func isCodexToolPayloadType(payloadType string) bool {
+	switch payloadType {
+	case "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "local_shell_call", "web_search_call", "mcp_call":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseCodexResponseEntry(raw string, since time.Time) (codexPayloadRecord, bool, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !strings.Contains(raw, `"`+entryTypeResponseItem+`"`) {
+		return codexPayloadRecord{}, false, false
+	}
+	var entry codexTranscriptEntry
+	if json.Unmarshal([]byte(raw), &entry) != nil || entry.Type != entryTypeResponseItem {
+		return codexPayloadRecord{}, false, false
+	}
+	ts := entry.Timestamp
+	if ts == "" {
+		ts = entry.CreatedAt
+	}
+	if isStepBefore(ts, since) {
+		return codexPayloadRecord{}, false, true
+	}
+	var payload codexPayloadRecord
+	if json.Unmarshal(entry.Payload, &payload) != nil {
+		return codexPayloadRecord{}, false, false
+	}
+	return payload, true, false
+}
+
 func scanCodexLinesForResponse(ctx context.Context, lines []string, since time.Time) string {
 	if ctx != nil && ctx.Err() != nil {
 		return ""
 	}
 	for _, raw := range slices.Backward(lines) {
-		raw = strings.TrimSpace(raw)
-		if raw == "" || !strings.Contains(raw, `"`+entryTypeResponseItem+`"`) {
-			continue
-		}
-		var entry codexTranscriptEntry
-		if json.Unmarshal([]byte(raw), &entry) != nil || entry.Type != entryTypeResponseItem {
-			continue
-		}
-		ts := entry.Timestamp
-		if ts == "" {
-			ts = entry.CreatedAt
-		}
-		if isStepBefore(ts, since) {
+		payload, ok, expired := parseCodexResponseEntry(raw, since)
+		if expired {
 			return ""
 		}
-		var payload codexPayloadRecord
-		if json.Unmarshal(entry.Payload, &payload) != nil {
+		if !ok {
 			continue
 		}
+		if payload.Type == entryTypeMessage && payload.Role == roleUser {
+			if !isAmbientInput("", extractCodexText(payload.Content, payload.Text)) {
+				return ""
+			}
+		}
+		if isCodexToolPayloadType(payload.Type) {
+			return ""
+		}
 		if payload.Type != entryTypeMessage || payload.Role != roleAssistant {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(payload.Phase), "commentary") {
 			continue
 		}
 		text := extractCodexText(payload.Content, payload.Text)
