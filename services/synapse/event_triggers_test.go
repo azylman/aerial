@@ -858,13 +858,23 @@ func TestHandleAlertsWebhook(t *testing.T) {
 			},
 		},
 		{
+			name:         "firing alert dispatches to configured channel name",
+			path:         "/api/v2/alerts",
+			cfgChannel:   "aerial-dev",
+			wantDMCount:  1,
+			wantDMSubstr: "ChannelNameAlert",
+			steps: []alertWebhookStep{
+				{payload: `[{"status":"firing","labels":{"alertname":"ChannelNameAlert","severity":"warning"}}]`, wantStatus: http.StatusOK, wantDispatched: 1},
+			},
+		},
+		{
 			name:        "invalid system channel returns retryable 503 and recovers on channel config",
 			path:        "/api/v2/alerts",
-			cfgChannel:  "invalid-snowflake",
+			cfgChannel:  "invalid channel with spaces!",
 			wantDMCount: 1,
 			steps: []alertWebhookStep{
 				{payload: `[{"status":"firing","labels":{"alertname":"RecoverAlert","severity":"warning"}}]`, wantStatus: http.StatusServiceUnavailable},
-				{payload: `[{"status":"firing","labels":{"alertname":"RecoverAlert","severity":"warning"}}]`, updateChannel: sysChannel, wantStatus: http.StatusOK, wantDispatched: 1},
+				{payload: `[{"status":"firing","labels":{"alertname":"RecoverAlert","severity":"warning"}}]`, updateChannel: "aerial-dev", wantStatus: http.StatusOK, wantDispatched: 1},
 			},
 		},
 	}

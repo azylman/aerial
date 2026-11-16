@@ -306,8 +306,8 @@ func (s *RouterServer) handleAlertsWebhook(w http.ResponseWriter, r *http.Reques
 			httpkit.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{fieldError: "dispatcher or config not available"})
 			return
 		}
-		channelID := NormalizeDiscordTargetID(s.cfgSrc.Current().SystemChannelID)
-		if !IsValidDiscordSnowflake(channelID) {
+		channelID := strings.TrimSpace(s.cfgSrc.Current().SystemChannelID)
+		if !s.isValidAlertTarget(channelID) {
 			httpkit.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{fieldError: "system channel not configured or invalid"})
 			return
 		}
