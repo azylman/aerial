@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
@@ -197,7 +198,77 @@ func TestCheckChunkDependenciesReady(t *testing.T) {
 			name:      "pr mode dependency deploy_failed",
 			chunk:     VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
 			allChunks: []VanadisChunk{{ID: "c1", Mode: "pr", Status: "deploy_failed"}},
-			wantErr:   false,
+			wantErr:   true,
+		},
+		{
+			name:  "pr mode dependency merged restarting eri via target files is gated",
+			chunk: VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{
+				ID:          "c1",
+				Mode:        "pr",
+				Repo:        "azylman/aerial",
+				Status:      "merged",
+				TargetFiles: []string{"services/eri/handlers.go"},
+			}},
+			wantErr: true,
+		},
+		{
+			name:  "pr mode dependency deploying restarting eri via rollout state is gated",
+			chunk: VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{
+				ID:     "c1",
+				Mode:   "pr",
+				Status: "deploying",
+				RolloutState: &pubsub.PRRolloutState{
+					ExpectedJobs: []string{"eri"},
+				},
+			}},
+			wantErr: true,
+		},
+		{
+			name:  "pr mode dependency merged restarting eri via k8s core services is gated",
+			chunk: VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{
+				ID:          "c1",
+				Mode:        "pr",
+				Repo:        "aerial",
+				Status:      "merged",
+				TargetFiles: []string{"./k8s/core-services.yaml"},
+			}},
+			wantErr: true,
+		},
+		{
+			name:  "pr mode dependency merged restarting eri via pkg is gated",
+			chunk: VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{
+				ID:          "c1",
+				Mode:        "pr",
+				Status:      "merged",
+				TargetFiles: []string{"pkg/db/dispatches.go"},
+			}},
+			wantErr: true,
+		},
+		{
+			name:  "pr mode dependency merged restarting eri via ci checks is gated",
+			chunk: VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{
+				ID:       "c1",
+				Mode:     "pr",
+				Status:   "merged",
+				CIChecks: map[string]string{"Build and Push Container Image to GHCR (eri)": "passed"},
+			}},
+			wantErr: true,
+		},
+		{
+			name:  "pr mode dependency completed restarting eri is code ready",
+			chunk: VanadisChunk{ID: "c2", Mode: "pr", DependsOn: []string{"c1"}},
+			allChunks: []VanadisChunk{{
+				ID:          "c1",
+				Mode:        "pr",
+				Status:      "completed",
+				TargetFiles: []string{"services/eri/handlers.go"},
+			}},
+			wantErr: false,
 		},
 		{
 			name:      "pr mode dependency not ready",

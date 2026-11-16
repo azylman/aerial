@@ -386,7 +386,7 @@ verify_vanadis_chunk_active() {
     fi
     local resp=""
     if resp=$(curl -sS --connect-timeout 2 --max-time 4 "${vanadis_base}/chunks/${chunk_id}" 2>/dev/null); then
-        if [ -n "$resp" ] && echo "$resp" | jq -e '.chunk.status == "cancelled" or .build.status == "cancelled"' >/dev/null 2>&1; then
+        if [ -n "$resp" ] && echo "$resp" | jq -e '(.chunk.status == "cancelled" or .chunk.status == "merged" or .chunk.status == "deploying" or .chunk.status == "completed" or .build.status == "cancelled" or .build.status == "completed")' >/dev/null 2>&1; then
             echo "ERROR: Vanadis chunk ${chunk_id} (or parent build) is cancelled; aborting PR submission." >&2
             exit 1
         fi
@@ -1029,6 +1029,8 @@ submit_scratch() {
     if ! run_preflight_verification "."; then
         exit 1
     fi
+
+    verify_vanadis_chunk_active "${vanadis_chunk_id}"
 
     # 5. Commit (preserves complete multi-line commit message in git history)
     local full_commit_msg="$commit_msg"

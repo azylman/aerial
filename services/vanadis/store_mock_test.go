@@ -493,6 +493,20 @@ func (m *memoryVanadisStore) AttachChunkPR(_ context.Context, req AttachChunkPRR
 	return m.attachStandalonePR(req)
 }
 
+func isTerminalAttachChunkStatus(status string) bool {
+	return status == "merged" || status == "deploying" || status == "completed"
+}
+
+func (*memoryVanadisStore) validateAttachChunkConflict(c VanadisChunk, b VanadisBuild, repo string, prNumber int) error {
+	if c.Status == "cancelled" || b.Status == "cancelled" || b.Status == "completed" {
+		return ErrBuildConflict
+	}
+	if isTerminalAttachChunkStatus(c.Status) && (!reposMatch(c.Repo, repo) || c.PRNumber != prNumber) {
+		return ErrBuildConflict
+	}
+	return nil
+}
+
 func (m *memoryVanadisStore) attachToExistingChunk(chunkID string, req AttachChunkPRRequest) (string, string, string, error) {
 	repo := normalizeRepo(req.Repo)
 	for bID, list := range m.chunks {
@@ -500,8 +514,8 @@ func (m *memoryVanadisStore) attachToExistingChunk(chunkID string, req AttachChu
 			if list[i].ID != chunkID {
 				continue
 			}
-			if list[i].Status == "cancelled" || m.builds[bID].Status == "cancelled" || m.builds[bID].Status == "completed" {
-				return "", "", "", ErrBuildConflict
+			if err := m.validateAttachChunkConflict(list[i], m.builds[bID], repo, req.PRNumber); err != nil {
+				return "", "", "", err
 			}
 			if list[i].Mode == "action" {
 				if repo == "" {
@@ -512,7 +526,7 @@ func (m *memoryVanadisStore) attachToExistingChunk(chunkID string, req AttachChu
 				return "", "", "", fmt.Errorf("chunk %s repo %q does not match %q", chunkID, list[i].Repo, repo)
 			}
 			list[i].PRNumber = req.PRNumber
-			if list[i].Status != "merged" && list[i].Status != "failed" {
+			if !isTerminalAttachChunkStatus(list[i].Status) && list[i].Status != "failed" {
 				list[i].Status = "pr_opened"
 			}
 			if list[i].StartedAt.IsZero() {
@@ -725,7 +739,7 @@ func (m *memoryVanadisStore) FailChunk(_ context.Context, chunkID, reason string
 				continue
 			}
 			b := m.builds[bID]
-			if isChunkDoneStatus(list[i].Status) || list[i].Status == "failed" || b.Status == "completed" || b.Status == "cancelled" {
+			if isChunkMergedOrDoneStatus(list[i].Status) || list[i].Status == "failed" || b.Status == "completed" || b.Status == "cancelled" {
 				return &b, &list[i], false, nil
 			}
 			now := time.Now().UTC()
@@ -992,7 +1006,7 @@ func (m *memoryVanadisStore) IncrementChunkCIFailCount(_ context.Context, chunkI
 			if list[i].ID != chunkID {
 				continue
 			}
-			if list[i].Status == "failed" || list[i].Status == "completed" || list[i].Status == "merged" {
+			if list[i].Status == "failed" || list[i].Status == "completed" || list[i].Status == "merged" || list[i].Status == "deploying" || list[i].Status == "cancelled" {
 				return list[i].CIFailCount, nil
 			}
 			list[i].CIFailCount++

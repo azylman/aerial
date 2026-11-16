@@ -636,6 +636,8 @@ func TestBuildObject_DeriveReconcileChunkStates(t *testing.T) {
 		{ID: "c-cifail", Status: "ci_failed"},
 		{ID: "c-conf", Status: "conflict"},
 		{ID: "c-depfail", Mode: "pr", Status: "deploy_failed"},
+		{ID: "c-m-eri", Mode: "pr", Status: "merged", TargetFiles: []string{"services/eri/handlers.go"}},
+		{ID: "c-dep-eri", Mode: "pr", Status: "deploying", RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"eri"}}},
 		{ID: "c-code", Status: "coding"},
 		{ID: "c-run-created-new", Status: "running"},
 		{ID: "c-run-created-prior", Status: "running"},
@@ -673,8 +675,17 @@ func TestBuildObject_DeriveReconcileChunkStates(t *testing.T) {
 	assert.True(t, states["c-cifail"].launched)
 	assert.True(t, states["c-conf"].launched)
 	assert.True(t, states["c-depfail"].launched)
-	assert.True(t, states["c-depfail"].codeReady)
+	assert.False(t, states["c-depfail"].codeReady)
 	assert.False(t, states["c-depfail"].runtimeReady)
+
+	assert.True(t, states["c-m-eri"].launched)
+	assert.False(t, states["c-m-eri"].codeReady, "merged chunk restarting eri must not be code ready")
+	assert.False(t, states["c-m-eri"].runtimeReady)
+
+	assert.True(t, states["c-dep-eri"].launched)
+	assert.False(t, states["c-dep-eri"].codeReady, "deploying chunk restarting eri must not be code ready")
+	assert.False(t, states["c-dep-eri"].runtimeReady)
+
 	assert.True(t, states["c-code"].launched)
 
 	// on "created", unlaunched running chunk without PRNumber is NOT launched yet

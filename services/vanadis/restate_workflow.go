@@ -379,11 +379,11 @@ func deriveReconcileChunkStates(chunks []VanadisChunk, priorLaunched map[string]
 			cs.launched = true
 			cs.codeReady = true
 			cs.runtimeReady = true
-		case statusMerged, statusDeploying, statusDeployFailed:
+		case statusMerged, statusDeploying:
 			cs.launched = true
-			cs.codeReady = strings.EqualFold(c.Mode, "pr")
+			cs.codeReady = strings.EqualFold(c.Mode, "pr") && !chunkRestartsEri(c)
 			cs.runtimeReady = false
-		case statusPROpened, statusCIFailed, statusConflict, statusFailed, statusCancelled, statusCoding:
+		case statusDeployFailed, statusPROpened, statusCIFailed, statusConflict, statusFailed, statusCancelled, statusCoding:
 			cs.launched = true
 			cs.codeReady = false
 			cs.runtimeReady = false
