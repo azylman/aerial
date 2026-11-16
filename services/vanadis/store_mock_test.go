@@ -1093,3 +1093,34 @@ func mkChunk(id, buildID string, idx int, title, instr, effort, status string) V
 	}
 	return VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "pr", Repo: normalizeRepo("aerial"), Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}}
 }
+
+func (m *memoryVanadisStore) CompletePRDeployment(ctx context.Context, chunkID string, evidence *pubsub.PRRolloutState) error {
+	if m.updateChunkErr != nil {
+		return m.updateChunkErr
+	}
+	chunk, build, err := m.GetChunk(ctx, chunkID)
+	if err != nil {
+		return err
+	}
+	if (chunk.Mode == chunkModeAction && chunk.PRNumber == 0) || chunk.Status == "failed" || chunk.Status == "cancelled" || build.Status == "cancelled" || (build.Status == "failed" && chunk.Status != "completed") {
+		return errPRTransitionSkipped
+	}
+	if evidence == nil {
+		evidence = chunk.RolloutState
+	}
+	if err := m.RecordPRRolloutState(ctx, chunkID, "completed", evidence); err != nil {
+		return err
+	}
+	return m.UpdateChunkBannerAndStatus(ctx, chunkID, "completed", "")
+}
+
+func (m *memoryVanadisStore) RecordPRDeploymentFailure(ctx context.Context, chunkID, banner string) error {
+	chunk, _, err := m.GetChunk(ctx, chunkID)
+	if err != nil {
+		return err
+	}
+	if chunk.Status == "completed" || chunk.Status == "failed" || chunk.Status == "cancelled" {
+		return errPRTransitionSkipped
+	}
+	return m.UpdateChunkBannerAndStatus(ctx, chunkID, "deploy_failed", banner)
+}

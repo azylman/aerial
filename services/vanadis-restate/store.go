@@ -21,26 +21,23 @@ import (
 )
 
 const (
-	statusPending      = "pending"
-	statusRunning      = "running"
-	statusCoding       = "coding"
-	statusOpen         = "open"
-	statusPROpened     = "pr_opened"
-	statusMerged       = "merged"
-	statusSynced       = "synced"
-	statusDeploying    = "deploying"
-	statusDeployed     = "deployed"
-	statusConflict     = "conflict"
-	statusDeployFailed = "deploy_failed"
-	statusCIFailed     = "ci_failed"
-
-	chunkModeAction  = "action"
-	defaultRepoOwner = "azylman"
-
-	effortLow    = "low"
-	effortMedium = "medium"
-	effortHigh   = "high"
-
+	statusPending            = "pending"
+	statusRunning            = "running"
+	statusCoding             = "coding"
+	statusOpen               = "open"
+	statusPROpened           = "pr_opened"
+	statusMerged             = "merged"
+	statusSynced             = "synced"
+	statusDeploying          = "deploying"
+	statusDeployed           = "deployed"
+	statusConflict           = "conflict"
+	statusDeployFailed       = "deploy_failed"
+	statusCIFailed           = "ci_failed"
+	chunkModeAction          = "action"
+	defaultRepoOwner         = "azylman"
+	effortLow                = "low"
+	effortMedium             = "medium"
+	effortHigh               = "high"
 	insertChunkSQL           = `INSERT INTO vanadis_chunks (id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
 	selectChunksForUpdateSQL = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE;`
 )
@@ -175,6 +172,8 @@ type VanadisStore interface {
 	AppendChunks(ctx context.Context, buildID string, inputs []CreateChunkInput) ([]VanadisChunk, error)
 	RemoveChunk(ctx context.Context, buildID, chunkRef string) (*VanadisChunk, []VanadisChunk, error)
 	RecordPRRolloutState(ctx context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error
+	CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
+	UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error
 	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
 }
 
@@ -464,14 +463,12 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 			log.Printf("[vanadis] tx rollback error: %v", rbErr)
 		}
 	}()
-
 	bQ := `INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);`
 	now := time.Now().UTC()
 	bTitle := firstNonEmpty(strings.TrimSpace(build.Title), objective)
 	if _, err = tx.Exec(ctx, bQ, buildID, threadID, build.Tier, bTitle, objective, strings.TrimSpace(build.SharedContext), firstNonEmpty(build.Status, statusPending), strings.TrimSpace(build.StatusMessageID), build.Quiet, now, now); err != nil {
 		return fmt.Errorf("failed to insert vanadis build: %w", err)
 	}
-
 	for _, c := range normChunks {
 		if err := insertBuildChunk(ctx, tx, buildID, c, insertChunkSQL); err != nil {
 			return err
@@ -497,14 +494,12 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 		}
 		return nil, nil, fmt.Errorf("query build %s: %w", buildID, err)
 	}
-
 	cQ := `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
 	rows, err := s.db.Query(ctx, cQ, buildID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query chunks for build %s: %w", buildID, err)
 	}
 	defer rows.Close()
-
 	chunks, err := scanChunks(rows)
 	if err != nil {
 		return nil, nil, err
@@ -551,7 +546,6 @@ func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkI
 		}
 		return buildID, returnChunkID, threadID, nil
 	}
-
 	repoCandidates := repoMatchCandidates(req.Repo)
 	const qPR = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'deploying', 'completed', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND (cardinality($3::text[]) = 0 OR c.repo = ANY($3)) AND c.status != 'cancelled' AND (c.status NOT IN ('merged', 'deploying', 'completed') OR c.pr_number = $1) AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
 	var buildID, returnChunkID, threadID string
@@ -570,7 +564,6 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req Attac
 	if repo == "" {
 		return "", "", "", errors.New("repo is required for standalone attach")
 	}
-
 	tx, txErr := s.db.Begin(ctx)
 	if txErr != nil {
 		return "", "", "", fmt.Errorf("begin standalone build tx: %w", txErr)
@@ -580,7 +573,6 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req Attac
 			log.Printf("[vanadis] standalone attach tx rollback error: %v", rbErr)
 		}
 	}()
-
 	candidates := repoMatchCandidates(repo)
 	const findExisting = `SELECT c.build_id, c.id, b.thread_id FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.repo = ANY($1) AND c.pr_number = $2 AND c.status != 'cancelled' LIMIT 1;`
 	var existingBuildID, existingChunkID, existingThreadID string
@@ -594,13 +586,11 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req Attac
 	if !errors.Is(fErr, pgx.ErrNoRows) {
 		return "", "", "", fmt.Errorf("find existing pr attach %s#%d: %w", repo, req.PRNumber, fErr)
 	}
-
 	buildID := generateBuildID()
 	chunkID := buildID + "-chunk-1"
 	title := firstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d: %s", req.PRNumber, cleanRepoName(repo)))
 	threadID := normalizeDiscordThreadID(req.TargetID)
 	now := time.Now().UTC()
-
 	build := VanadisBuild{
 		ID:        buildID,
 		ThreadID:  threadID,
@@ -628,16 +618,13 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req Attac
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-
 	bQ := `INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);`
 	if _, err := tx.Exec(ctx, bQ, build.ID, build.ThreadID, build.Tier, build.Title, build.Objective, "", build.Status, "", build.Quiet, now, now); err != nil {
 		return "", "", "", fmt.Errorf("insert standalone build %s: %w", buildID, err)
 	}
-
 	if err := insertBuildChunk(ctx, tx, buildID, chunk, insertChunkSQL); err != nil {
 		return "", "", "", fmt.Errorf("insert standalone chunk %s: %w", chunkID, err)
 	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return "", "", "", fmt.Errorf("commit standalone pr build: %w", err)
 	}
@@ -678,7 +665,6 @@ func (s *PostgresVanadisStore) UpdateBuild(ctx context.Context, buildID string, 
 	if buildID == "" || (title == "" && obj == "" && sharedCtx == "") {
 		return nil, fmt.Errorf("%w: build id and at least one non-empty field (title, objective, shared_context) are required", ErrInvalidBuildInput)
 	}
-
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin update build tx: %w", err)
@@ -1421,7 +1407,7 @@ func (s *PostgresVanadisStore) RecordPRRolloutState(ctx context.Context, chunkID
 		rolloutBytes = []byte("{}")
 	}
 
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET rollout_state = $1::jsonb, status = CASE WHEN $2 != '' THEN $2 ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`, rolloutBytes, strings.TrimSpace(status), chunkID)
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET rollout_state = CASE WHEN status = 'completed' THEN rollout_state ELSE $1::jsonb END, status = CASE WHEN $2 != '' THEN $2 ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`, rolloutBytes, strings.TrimSpace(status), chunkID)
 	switch {
 	case err != nil:
 		return fmt.Errorf("record pr rollout state: %w", err)
