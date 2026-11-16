@@ -52,11 +52,12 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 			chunks: nil,
 		},
 		{
-			name: "single_chunk_default",
+			name: "single_chunk_missing_depends_on_rejected",
 			chunks: []VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial"},
 			},
-			wantDeps: [][]string{nil},
+			wantErr:    true,
+			wantSubstr: "must explicitly specify depends_on",
 		},
 		{
 			name: "empty_chunk_id_rejected",
@@ -86,23 +87,24 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 		{
 			name: "duplicate_dependency_deduplicated",
 			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial"},
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1", "c1"}},
 			},
 			wantDeps: [][]string{nil, {"c1"}},
 		},
 		{
-			name: "sequential_default_applied",
+			name: "multi_chunk_missing_depends_on_rejected",
 			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial"},
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
 				{ID: "c2", Mode: "pr", Repo: "aerial"},
 			},
-			wantDeps: [][]string{nil, {"c1"}},
+			wantErr:    true,
+			wantSubstr: "must explicitly specify depends_on",
 		},
 		{
 			name: "index_string_normalization",
 			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial"},
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{"0"}},
 			},
 			wantDeps: [][]string{nil, {"c1"}},
@@ -176,7 +178,7 @@ func TestNormalizeAndValidateBuildDAG_DisjointFiles(t *testing.T) {
 		{
 			name: "dependent_same_repo_pr_can_overlap_files",
 			chunks: []VanadisChunk{
-				{ID: "c1", Mode: "pr", Repo: "aerial", TargetFiles: []string{"pkg/a.go"}},
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go"}},
 				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/a.go"}},
 			},
 			wantDeps: [][]string{nil, {"c1"}},
@@ -483,6 +485,7 @@ func TestValidateCreateBuildInputs(t *testing.T) {
 		Mode:         "pr",
 		Repo:         "aerial",
 		Effort:       "medium",
+		DependsOn:    []string{},
 	}
 
 	tests := []struct {
@@ -601,8 +604,8 @@ func TestNormalizeAndValidateBuildDAG_TerminalSkip(t *testing.T) {
 
 	// Concurrent chunks on same repo where one is terminal (merged/completed) -> disjoint check skipped
 	chunks := []VanadisChunk{
-		{ID: "c1", Mode: "pr", Repo: "aerial", Status: "completed", TargetFiles: []string{"a.go"}},
-		{ID: "c2", Mode: "pr", Repo: "aerial", Status: "pending", TargetFiles: []string{"a.go"}},
+		{ID: "c1", Mode: "pr", Repo: "aerial", Status: "completed", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+		{ID: "c2", Mode: "pr", Repo: "aerial", Status: "pending", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
 	}
 	_, err := normalizeAndValidateBuildDAG(chunks)
 	if err != nil {
