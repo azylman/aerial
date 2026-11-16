@@ -52,6 +52,12 @@ const (
 	runtimeDiscord         = "discord"
 	runtimeVoice           = "voice"
 	runtimeEphemeral       = "ephemeral"
+	roleUser               = "user"
+	roleAssistant          = "assistant"
+	entryTypeError         = "error"
+	entryTypeMessage       = "message"
+	entryTypeResponseItem  = "response_item"
+	entryTypeEventMsg      = "event_msg"
 )
 
 // Manager manages session directories, transcripts, and activity tracking
@@ -97,7 +103,7 @@ func (m *Manager) Roots() []string {
 
 func cleanSessionID(sessionID string) (string, bool) {
 	cleanID := strings.TrimSpace(sessionID)
-	if cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+	if cleanID == "" || strings.ContainsAny(cleanID, `/\\:*?[]`) || strings.Contains(cleanID, "..") {
 		return "", false
 	}
 	return cleanID, true
@@ -272,6 +278,7 @@ func LastActivityFromRoots(sessionID string, roots []string) (time.Time, error) 
 		directPath := filepath.Join(root, cleanID+".jsonl")
 		latestTime = checkFileMtime(directPath, latestTime)
 		latestTime = checkClaudeSubdirsActivity(root, cleanID, latestTime)
+		latestTime = checkCodexSubdirsActivity(root, cleanID, latestTime)
 	}
 
 	return latestTime, nil
@@ -293,33 +300,44 @@ func (m *Manager) GetSessionLastActivity(sessionID string, customRoots ...string
 	for _, p := range m.claudeTranscriptPaths(sessionID) {
 		latestTime = checkFileMtime(p, latestTime)
 	}
+	for _, p := range m.codexTranscriptPaths(sessionID) {
+		latestTime = checkFileMtime(p, latestTime)
+	}
 	return latestTime, nil
 }
 
-func (m *Manager) claudeProjectBaseDirs() []string {
+func (m *Manager) runtimeSubdirBaseDirs(topDir, leafDir, hiddenTopDir string) []string {
 	if m == nil {
 		return nil
 	}
 	var baseDirs []string
 	if m.dataDir != "" {
-		baseDirs = append(baseDirs, filepath.Join(m.dataDir, "claude", "projects"))
+		baseDirs = append(baseDirs, filepath.Join(m.dataDir, topDir, leafDir))
 		runtimesDir := filepath.Join(m.dataDir, "runtimes")
 		if entries, err := os.ReadDir(runtimesDir); err == nil {
 			for _, entry := range entries {
 				if entry.IsDir() {
-					baseDirs = append(baseDirs, filepath.Join(runtimesDir, entry.Name(), ".claude", "projects"))
+					baseDirs = append(baseDirs, filepath.Join(runtimesDir, entry.Name(), hiddenTopDir, leafDir))
 				}
 			}
 		} else {
 			for _, runtime := range []string{runtimeDiscord, runtimeVoice, runtimeEphemeral} {
-				baseDirs = append(baseDirs, filepath.Join(runtimesDir, runtime, ".claude", "projects"))
+				baseDirs = append(baseDirs, filepath.Join(runtimesDir, runtime, hiddenTopDir, leafDir))
 			}
 		}
 	}
 	if m.homeDir != "" {
-		baseDirs = append(baseDirs, filepath.Join(m.homeDir, ".claude", "projects"))
+		baseDirs = append(baseDirs, filepath.Join(m.homeDir, hiddenTopDir, leafDir))
 	}
 	return baseDirs
+}
+
+func (m *Manager) claudeProjectBaseDirs() []string {
+	return m.runtimeSubdirBaseDirs("claude", "projects", ".claude")
+}
+
+func (m *Manager) codexSessionBaseDirs() []string {
+	return m.runtimeSubdirBaseDirs("codex", "sessions", ".codex")
 }
 
 func scanClaudeBaseForSession(base, cleanID string, seen map[string]bool) []string {
@@ -509,7 +527,7 @@ func readTranscriptTailLines(tPath string) ([]string, bool) {
 		lines = lines[1:]
 	}
 
-	if findLastUserInputIdx(lines) == -1 && findLastClaudeUserInputIdx(lines) == -1 && offset > 0 {
+	if findLastUserInputIdx(lines) == -1 && findLastClaudeUserInputIdx(lines) == -1 && findLastCodexUserInputIdx(lines) == -1 && offset > 0 {
 		fullData, readErr := os.ReadFile(tPath)
 		if readErr == nil {
 			lines = strings.Split(string(fullData), "\n")
@@ -527,7 +545,7 @@ func isNonAmbientClaudeUserLine(rawLine string) bool {
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
-	if err := json.Unmarshal([]byte(rawLine), &entry); err != nil || entry.Type != "user" {
+	if err := json.Unmarshal([]byte(rawLine), &entry); err != nil || entry.Type != roleUser {
 		return false
 	}
 	var contentStr string
@@ -672,7 +690,7 @@ func extractClaudeErrorFromLine(line string, cutoff time.Time) (errMsg string, b
 	}
 
 	// 2. Type == "error"
-	if entry.Type == "error" && len(entry.Message.Content) > 0 {
+	if entry.Type == entryTypeError && len(entry.Message.Content) > 0 {
 		var msgStr string
 		if json.Unmarshal(entry.Message.Content, &msgStr) == nil && msgStr != "" {
 			return msgStr, false
@@ -694,8 +712,8 @@ func extractClaudeErrorFromLine(line string, cutoff time.Time) (errMsg string, b
 	return "", false
 }
 
-func scanClaudeLinesForTurnError(ctx context.Context, lines []string, since time.Time) (string, error) {
-	lastUserInputIdx := findLastClaudeUserInputIdx(lines)
+func scanTranscriptLinesForTurnError(ctx context.Context, lines []string, since time.Time, lastInputIdx func([]string) int, extractErr func(string, time.Time) (string, bool)) (string, error) {
+	lastUserInputIdx := lastInputIdx(lines)
 	startIdx := 0
 	if lastUserInputIdx >= 0 {
 		startIdx = lastUserInputIdx + 1
@@ -714,7 +732,7 @@ func scanClaudeLinesForTurnError(ctx context.Context, lines []string, since time
 		if line == "" {
 			continue
 		}
-		errMsg, beforeCutoff := extractClaudeErrorFromLine(line, cutoff)
+		errMsg, beforeCutoff := extractErr(line, cutoff)
 		if beforeCutoff {
 			break
 		}
@@ -726,33 +744,12 @@ func scanClaudeLinesForTurnError(ctx context.Context, lines []string, since time
 	return "", nil
 }
 
-// scanLinesForTurnError scans lines backwards from the last user input turn to find any turn error.
 func scanLinesForTurnError(ctx context.Context, lines []string, since time.Time) (string, error) {
-	lastUserInputIdx := findLastUserInputIdx(lines)
-	startIdx := 0
-	if lastUserInputIdx >= 0 {
-		startIdx = lastUserInputIdx + 1
-	}
+	return scanTranscriptLinesForTurnError(ctx, lines, since, findLastUserInputIdx, extractErrorFromStepLine)
+}
 
-	cutoff := since.Add(-10 * time.Second)
-	for i := len(lines) - 1; i >= startIdx; i-- {
-		if ctx != nil && ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
-		}
-		errMsg, beforeCutoff := extractErrorFromStepLine(line, cutoff)
-		if beforeCutoff {
-			break
-		}
-		if errMsg != "" {
-			return errMsg, nil
-		}
-	}
-
-	return "", nil
+func scanClaudeLinesForTurnError(ctx context.Context, lines []string, since time.Time) (string, error) {
+	return scanTranscriptLinesForTurnError(ctx, lines, since, findLastClaudeUserInputIdx, extractClaudeErrorFromLine)
 }
 
 // ExtractLastTurnError parses transcript files to extract any error step specifically occurring
@@ -792,6 +789,20 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 			continue
 		}
 		errMsg, err := scanClaudeLinesForTurnError(ctx, lines, since)
+		if err != nil {
+			return "", err
+		}
+		if errMsg != "" {
+			return errMsg, nil
+		}
+	}
+
+	for _, p := range m.codexTranscriptPaths(cleanID) {
+		lines, ok := readTranscriptTailLines(p)
+		if !ok {
+			continue
+		}
+		errMsg, err := scanCodexLinesForTurnError(ctx, lines, since)
 		if err != nil {
 			return "", err
 		}
@@ -909,7 +920,7 @@ func scanClaudeLinesForResponse(ctx context.Context, lines []string, since time.
 		if isStepBefore(payload.Timestamp, since) {
 			return ""
 		}
-		if payload.Type != "assistant" {
+		if payload.Type != roleAssistant {
 			continue
 		}
 		if payload.Message.Model == ClaudeSyntheticModel {
@@ -965,6 +976,12 @@ func (m *Manager) ExtractResponseSinceContext(ctx context.Context, convID string
 
 	for _, p := range m.claudeTranscriptPaths(cleanID) {
 		if resp := extractResponseFromClaudeTranscriptFile(ctx, p, since); resp != "" {
+			return resp
+		}
+	}
+
+	for _, p := range m.codexTranscriptPaths(cleanID) {
+		if resp := extractResponseFromCodexTranscriptFile(ctx, p, since); resp != "" {
 			return resp
 		}
 	}
@@ -1099,11 +1116,16 @@ func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
 	}
 
 	// 3. Check Claude Code JSONL transcripts
-	return m.ClaudeSessionExistsOnDisk(cleanID)
+	if m.ClaudeSessionExistsOnDisk(cleanID) {
+		return true
+	}
+
+	// 4. Check Codex rollout JSONL transcripts
+	return m.CodexSessionExistsOnDisk(cleanID)
 }
 
 // GetTranscriptSize returns the maximum file size across transcript.jsonl, transcript_full.jsonl,
-// and Claude project JSONL files for the given session ID across configured session roots.
+// Claude project JSONL files, and Codex rollout files for the given session ID across configured session roots.
 // Returns 0 if manager is nil, sessionID is empty/invalid, or files do not exist.
 func (m *Manager) GetTranscriptSize(sessionID string) int64 {
 	cleanID, ok := m.validSessionID(sessionID)
@@ -1124,6 +1146,13 @@ func (m *Manager) GetTranscriptSize(sessionID string) int64 {
 		}
 	}
 	for _, p := range m.claudeTranscriptPaths(cleanID) {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			if fi.Size() > maxSize {
+				maxSize = fi.Size()
+			}
+		}
+	}
+	for _, p := range m.codexTranscriptPaths(cleanID) {
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
 			if fi.Size() > maxSize {
 				maxSize = fi.Size()
@@ -1178,47 +1207,54 @@ func isClaudeToolResultContent(content json.RawMessage) bool {
 	return false
 }
 
-func countStepsInClaudeTranscript(filePath string) int {
+func countMatchingLinesInFile(filePath, opName string, matchFn func(string) bool) int {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return 0
 	}
 	defer func() {
 		if closeErr := f.Close(); closeErr != nil {
-			log.Printf("[Session] Warning closing Claude transcript file %s on countSteps: %v", filePath, closeErr)
+			log.Printf("[Session] Warning closing transcript file %s on %s: %v", filePath, opName, closeErr)
 		}
 	}()
 
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
-	var steps int
+	var count int
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var entry struct {
-			Type    string `json:"type"`
-			Message struct {
-				Role    string          `json:"role"`
-				Content json.RawMessage `json:"content"`
-			} `json:"message"`
-		}
-		if err := json.Unmarshal([]byte(line), &entry); err == nil {
-			if entry.Type == "assistant" || entry.Type == blockTypeToolResult {
-				steps++
-			} else if entry.Type == "user" && isClaudeToolResultContent(entry.Message.Content) {
-				steps++
-			}
+		if line != "" && matchFn(line) {
+			count++
 		}
 	}
-	return steps
+	return count
+}
+
+func isClaudeStepLine(line string) bool {
+	var entry struct {
+		Type    string `json:"type"`
+		Message struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		return false
+	}
+	if entry.Type == "assistant" || entry.Type == blockTypeToolResult {
+		return true
+	}
+	return entry.Type == "user" && isClaudeToolResultContent(entry.Message.Content)
+}
+
+func countStepsInClaudeTranscript(filePath string) int {
+	return countMatchingLinesInFile(filePath, "countSteps", isClaudeStepLine)
 }
 
 // CountTranscriptSteps returns the total internal steps for the session by inspecting
 // the monotonic step_index at the tail of the transcript file, or counting assistant and tool_result
-// lines in Claude transcripts. Returns 0 if empty, invalid, or not found.
+// lines in Claude transcripts, or response_item assistant and tool items in Codex transcripts. Returns 0 if empty, invalid, or not found.
 func (m *Manager) CountTranscriptSteps(sessionID string) int {
 	cleanID, ok := m.validSessionID(sessionID)
 	if !ok {
@@ -1244,6 +1280,11 @@ func (m *Manager) CountTranscriptSteps(sessionID string) int {
 	}
 	for _, p := range m.claudeTranscriptPaths(cleanID) {
 		if steps := countStepsInClaudeTranscript(p); steps > maxSteps {
+			maxSteps = steps
+		}
+	}
+	for _, p := range m.codexTranscriptPaths(cleanID) {
+		if steps := countStepsInCodexTranscript(p); steps > maxSteps {
 			maxSteps = steps
 		}
 	}
@@ -1285,31 +1326,12 @@ func countTurnsInTranscript(filePath string) int {
 }
 
 func countTurnsInClaudeTranscript(filePath string) int {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return 0
-	}
-	defer func() {
-		if closeErr := f.Close(); closeErr != nil {
-			log.Printf("[Session] Warning closing Claude transcript file %s on countTurns: %v", filePath, closeErr)
-		}
-	}()
-
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-	var turns int
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && isNonAmbientClaudeUserLine(line) {
-			turns++
-		}
-	}
-	return turns
+	return countMatchingLinesInFile(filePath, "countTurns", isNonAmbientClaudeUserLine)
 }
 
 // CountTranscriptTurns returns the total number of non-ambient user turns for the session
-// by counting non-ambient USER_INPUT entries in transcript.jsonl or non-ambient user prompts in Claude transcripts.
+// by counting non-ambient USER_INPUT entries in transcript.jsonl, non-ambient user prompts in Claude transcripts,
+// or non-ambient user messages in Codex transcripts.
 // Returns 0 if empty, invalid, or not found.
 func (m *Manager) CountTranscriptTurns(sessionID string) int {
 	cleanID, ok := m.validSessionID(sessionID)
@@ -1329,6 +1351,11 @@ func (m *Manager) CountTranscriptTurns(sessionID string) int {
 	}
 	for _, p := range m.claudeTranscriptPaths(cleanID) {
 		if turns := countTurnsInClaudeTranscript(p); turns > maxTurns {
+			maxTurns = turns
+		}
+	}
+	for _, p := range m.codexTranscriptPaths(cleanID) {
+		if turns := countTurnsInCodexTranscript(p); turns > maxTurns {
 			maxTurns = turns
 		}
 	}
