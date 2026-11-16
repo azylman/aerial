@@ -192,8 +192,8 @@ func TestDeploymentMutationPersistence(t *testing.T) {
 		{"cancelled chunk guarded", "running", "cancelled", true, false, "pr", false, 0, false},
 		{"failed chunk guarded", "running", "failed", true, false, "pr", false, 0, false},
 		{"read error prevents reconciliation", "running", "deploying", false, true, "pr", true, 0, false},
-		{"action compatibility", "running", "deploying", false, false, "action", false, 0, false},
-		{"action persistence failure", "running", "deploying", true, true, "action", false, 0, false},
+		{"action compatibility", "running", "running", false, false, "action", false, 0, false},
+		{"action persistence failure", "running", "running", true, true, "action", false, 0, false},
 		{"attached action evidence", "running", "deploying", false, false, "action", false, 42, false},
 		{"attached action nil evidence", "running", "deploying", false, false, "action", false, 42, true},
 	}
@@ -202,7 +202,7 @@ func TestDeploymentMutationPersistence(t *testing.T) {
 			t.Parallel()
 			build := VanadisBuild{ID: "b1", Status: tc.buildStatus}
 			chunk := VanadisChunk{ID: "c1", BuildID: "b1", Mode: tc.mode, Repo: "owner/repo", Status: tc.chunkStatus, PRNumber: tc.prNumber, RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"existing"}}}
-			script := dbScript{row: &mockRow{b: &build}, chunks: []VanadisChunk{chunk, {ID: "sibling", BuildID: "b1", Mode: "pr", Status: "completed"}}, execTag: "UPDATE 1"}
+			script := dbScript{row: &mockRow{b: &build}, countRow: valuesRow(1), chunks: []VanadisChunk{chunk, {ID: "sibling", BuildID: "b1", Mode: "pr", Status: "completed"}}, execTag: "UPDATE 1"}
 			if tc.readFailure {
 				script.row = errRow(errors.New("read unavailable"))
 			}
@@ -218,7 +218,7 @@ func TestDeploymentMutationPersistence(t *testing.T) {
 			if tc.nilEvidence {
 				evidence = nil
 			}
-			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c1", RolloutState: evidence}, nil)
+			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c1", RolloutState: evidence}, nil, false)
 
 			if tc.wantErr {
 				assert.Error(t, err)
@@ -336,8 +336,13 @@ func (db *deploymentEvidenceDB) Exec(ctx context.Context, query string, args ...
 			chunk.RolloutState = &evidence
 		}
 		chunk.Status = "completed"
-	} else if status, ok := args[0].(string); ok {
-		chunk.Status = status
+	}
+	if strings.Contains(query, "SET status = 'completed'") {
+		chunk.Status = "completed"
+	} else if !strings.Contains(query, "rollout_state = COALESCE") {
+		if status, ok := args[0].(string); ok {
+			chunk.Status = status
+		}
 	}
 	return tag, nil
 }
@@ -426,9 +431,196 @@ func TestDeploymentSuccessBeforeDelayedLifecycle(t *testing.T) {
 			assert.Equal(t, "completed", chunks[0].Status)
 			assert.Equal(t, evidence, chunks[0].RolloutState)
 			assert.Equal(t, events, bus.events)
-			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c2"}, nil)
+			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c2"}, nil, false)
 			assert.NoError(t, err)
 			assert.Contains(t, out.LaunchedChunks, "action")
+		})
+	}
+}
+
+type deploymentEvidenceTx struct {
+	pgx.Tx
+
+	db *deploymentEvidenceDB
+}
+
+func (db *deploymentEvidenceDB) Begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := db.pgxQueryExecer.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &deploymentEvidenceTx{Tx: tx, db: db}, nil
+}
+
+func (tx *deploymentEvidenceTx) Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	return tx.db.Exec(ctx, query, args...)
+}
+
+func TestActionCompletionMutationIdentity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, action, buildID, dispatchID, status string
+		wantErr                                   error
+	}{
+		{"deployment missing identity", "chunk_deploy_success", "b1", "", "running", errActionCompletionSkipped},
+		{"deployment stale identity", "chunk_deploy_success", "b1", "vanadis-c1-turn-0", "running", errActionCompletionSkipped},
+		{"completion missing identity", "action_completed", "b1", "", "running", errActionCompletionSkipped},
+		{"completion stale identity", "action_completed", "b1", "vanadis-c1-turn-0", "running", errActionCompletionSkipped},
+		{"wrong keyed build", "action_completed", "other", "vanadis-c1-turn-1", "running", ErrChunkNotFound},
+		{"deployment wrong keyed build", "chunk_deploy_success", "other", "vanadis-c1-turn-1", "running", ErrChunkNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			build := VanadisBuild{ID: tc.buildID, Status: "running"}
+			chunk := VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: tc.status, StallNudges: 1}
+			chunks := []VanadisChunk{chunk}
+			if tc.buildID != "b1" {
+				chunks = nil
+			}
+			store, _ := (dbScript{row: &mockRow{b: &build}, chunks: chunks, countRow: valuesRow(1)}).open()
+			bus := &deploymentEventRecorder{}
+			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor("", &mockEriClient{}, bus, "token", nil))
+			err := bo.applyMutation(context.Background(), tc.buildID, &BuildMutationRequest{Action: tc.action, ChunkID: " c1 ", DispatchID: tc.dispatchID})
+			assert.ErrorIs(t, err, tc.wantErr)
+			assert.Empty(t, bus.events)
+		})
+	}
+}
+
+func TestActionCompletionContinuation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, action, buildStatus, identity, chunkID string
+		wantEvents                                   int
+		quiet                                        bool
+		identities                                   []string
+	}{
+		{"mutation resumes after committed completion", "action_completed", "running", "vanadis-c1-turn-1", "c1", 0, false, nil},
+		{"final deployment delivers terminal event", "chunk_deploy_success", "completed", "vanadis-c1-turn-1", "c1", 1, false, []string{"vanadis-c1-turn-1", "vanadis-c1-turn-0", "vanadis-c1-turn-1"}},
+		{"final mutation delivers terminal event", "action_completed", "completed", "vanadis-c1-turn-1", "c1", 1, false, []string{"vanadis-c1-turn-1", "vanadis-c1-turn-1"}},
+		{"stale completed generation suppressed", "chunk_deploy_success", "completed", "vanadis-c1-turn-0", "c1", 0, false, nil},
+		{"quiet final deployment preserves event and widget", "chunk_deploy_success", "completed", "vanadis-c1-turn-1", "c1", 1, true, nil},
+		{"padded final action completion", "action_completed", "completed", "vanadis-c1-turn-1", " c1 ", 1, false, nil},
+		{"padded final deployment completion", "chunk_deploy_success", "completed", "vanadis-c1-turn-1", " c1 ", 1, false, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			build := VanadisBuild{ID: "b1", Status: tc.buildStatus, ThreadID: "thread", Quiet: tc.quiet}
+			chunks := []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed", StallNudges: 1}}
+			if tc.buildStatus == "running" {
+				chunks = append(chunks, VanadisChunk{ID: "next", BuildID: "b1", Mode: "pr", Status: "pending", Repo: "owner/repo", TargetFiles: []string{"main.go"}, DependsOn: []string{"c1"}})
+			}
+			store, _ := (dbScript{row: &mockRow{b: &build}, chunks: chunks}).open()
+			bus := &deploymentEventRecorder{}
+			var queuedPrompts []string
+			eri := &mockEriClient{promptFn: func(_ context.Context, _, prompt string) error {
+				queuedPrompts = append(queuedPrompts, prompt)
+				return nil
+			}}
+			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor("", eri, bus, "token", nil))
+			rt := newFakeObjectRuntime("b1")
+			identities := tc.identities
+			if len(identities) == 0 {
+				identities = []string{tc.identity}
+			}
+			for _, identity := range identities {
+				_, err := bo.executeObjectTransition(rt, "mutate-build", &BuildMutationRequest{Action: tc.action, ChunkID: tc.chunkID, DispatchID: identity})
+				assert.NoError(t, err)
+			}
+			assert.Len(t, bus.events, tc.wantEvents)
+			if tc.wantEvents > 0 && !tc.quiet {
+				assert.Equal(t, []string{"[VANADIS BUILD COMPLETED]\nBuild ID: b1\nObjective: \n\nAll chunks completed successfully."}, queuedPrompts)
+			} else {
+				assert.Empty(t, queuedPrompts)
+			}
+			if tc.buildStatus == "running" {
+				assert.NotNil(t, eri.lastDispatch)
+				if eri.lastDispatch != nil {
+					assert.Equal(t, "next", eri.lastDispatch.VanadisChunkID)
+				}
+			} else if tc.wantEvents > 0 {
+				assert.NotNil(t, eri.lastWidget)
+			}
+		})
+	}
+}
+
+func TestDispatchCompletionContinuation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, identity, chunkID string
+		transitionFailure       bool
+		wantErr                 bool
+		wantEvents              int
+	}{
+		{"current completed generation resumes", "vanadis-c1-turn-1", "c1", false, false, 1},
+		{"stale completed generation suppressed", "vanadis-c1-turn-0", "c1", false, false, 0},
+		{"continuation error remains retryable", "vanadis-c1-turn-1", "c1", true, true, 0},
+		{"whitespace identity resumes", "vanadis-c1-turn-1", " c1 ", false, false, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			build := VanadisBuild{ID: "b1", Status: "completed", ThreadID: "thread"}
+			chunks := []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed", StallNudges: 1}}
+			store, _ := (dbScript{row: &mockRow{b: &build}, chunks: chunks}).open()
+			bus := &deploymentEventRecorder{}
+			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor("", &mockEriClient{}, bus, "token", nil))
+			bo.runtimeFactory = func(restate.ObjectContext) objectRuntime {
+				rt := newFakeObjectRuntime("b1")
+				if tc.transitionFailure {
+					rt.runStepErr = errors.New("continuation unavailable")
+				}
+				return rt
+			}
+			err := bo.OnDispatchOutcome(makeObjectMockContext(t, "b1"), pubsub.DispatchOutcomeEvent{VanadisChunkID: tc.chunkID, DispatchID: tc.identity, Status: "completed"})
+			if tc.wantErr {
+				assert.ErrorContains(t, err, "continuation unavailable")
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Len(t, bus.events, tc.wantEvents)
+		})
+	}
+}
+
+func TestMixedBuildCompletionRedelivery(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		quiet       bool
+		wantPrompts int
+	}{
+		{"mixed build completion", false, 1},
+		{"quiet mixed build completion", true, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			build := VanadisBuild{ID: "b1", Status: "running", ThreadID: "thread", Quiet: tc.quiet}
+			chunks := []VanadisChunk{
+				{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed"},
+				{ID: "c2", BuildID: "b1", Mode: "pr", Status: "completed"},
+			}
+			store, _ := (dbScript{row: &mockRow{b: &build}, chunks: chunks}).open()
+			bus := &deploymentEventRecorder{}
+			var queuedPrompts []string
+			eri := &mockEriClient{promptFn: func(_ context.Context, _, prompt string) error {
+				queuedPrompts = append(queuedPrompts, prompt)
+				return nil
+			}}
+			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor("", eri, bus, "token", nil))
+			rt := newFakeObjectRuntime("b1")
+			_, err := bo.executeObjectTransition(rt, "reconcile-build", nil)
+			assert.NoError(t, err)
+			// The next database snapshot reflects the completion written by reconciliation.
+			build.Status = "completed"
+			_, err = bo.executeObjectTransition(rt, "mutate-build", &BuildMutationRequest{Action: "action_completed", ChunkID: "c1"})
+			assert.NoError(t, err)
+			assert.Len(t, bus.events, 1)
+			assert.Len(t, queuedPrompts, tc.wantPrompts)
 		})
 	}
 }

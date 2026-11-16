@@ -150,13 +150,15 @@ type VanadisChunk struct {
 
 // BuildObjectState represents the authoritative K/V state for a Vanadis build managed by BuildObject.
 type BuildObjectState struct {
-	Build    VanadisBuild    `json:"build"`
-	Chunks   []VanadisChunk  `json:"chunks"`
-	Launched map[string]bool `json:"launched,omitempty"`
+	TerminalNotified bool            `json:"terminal_notified,omitempty"`
+	Build            VanadisBuild    `json:"build"`
+	Chunks           []VanadisChunk  `json:"chunks"`
+	Launched         map[string]bool `json:"launched,omitempty"`
 }
 
 // BuildMutationRequest represents a typed mutation payload targeting BuildObject.
 type BuildMutationRequest struct {
+	DispatchID   string                 `json:"dispatch_id,omitempty"`
 	RolloutState *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
 	Action       string                 `json:"action"`
 	ChunkID      string                 `json:"chunk_id,omitempty"`
@@ -709,7 +711,7 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 
 		var eventErr error
 		if event == "deploy_success" {
-			eventErr = b.applyMutation(rc, buildID, &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: chunkID, RolloutState: ev.RolloutState})
+			eventErr = b.applyMutation(rc, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
 		} else {
 			eventErr = b.handlePREventType(rc, buildID, chunkID, event, ev)
 		}
@@ -745,17 +747,22 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 	if b.store == nil {
 		return nil
 	}
-	_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+	applied, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
 		chunkID := strings.TrimSpace(ev.VanadisChunkID)
 		if chunkID == "" {
 			return false, nil
 		}
 		status := strings.ToLower(strings.TrimSpace(ev.Status))
 		switch status {
-		case "completed", "success":
-			if _, cErr := b.store.CompleteActionChunk(rc, chunkID); cErr != nil {
-				log.Printf("[vanadis-restate] complete action chunk warning: %v", cErr)
+		case "completed", dispatchStatusSuccess:
+			if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
+				return false, err
 			}
+			res, err := b.store.CompleteActionChunk(rc, chunkID, ev.DispatchID)
+			if err != nil {
+				return false, err
+			}
+			return res != nil && res.CompletionAccepted, nil
 		case "failed", "timeout", "crashed":
 			reason := firstNonEmpty(ev.Error, "dispatch outcome failed")
 			if _, _, _, fErr := b.store.FailChunk(rc, chunkID, reason); fErr != nil {
@@ -767,8 +774,15 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 	if err != nil {
 		return err
 	}
+	if !applied {
+		return nil
+	}
 	rt := b.getRuntime(ctx)
-	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-dispatch-outcome", nil); tErr != nil {
+	mutation := dispatchCompletionMutation(ev)
+	if _, tErr := b.executeObjectTransition(rt, "reconcile-after-dispatch-outcome", mutation); tErr != nil {
+		if mutation != nil {
+			return tErr
+		}
 		log.Printf("[vanadis-restate] dispatch outcome transition warning: %v", tErr)
 	}
 	return nil
@@ -822,7 +836,7 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 
 	stepOut, err := rt.RunReconcileStep(stepName, func(ctx context.Context) (reconcileStepOutput, error) {
 		if b.store != nil {
-			return b.executeAuthoritativeTransition(ctx, buildID, mutation, priorLaunched)
+			return b.executeAuthoritativeTransition(ctx, buildID, mutation, priorLaunched, terminalNotificationRecorded(priorState))
 		}
 		return b.callVanadisTransition(ctx, buildID, mutation, priorLaunched)
 	})
@@ -832,6 +846,11 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 
 	if stepOut.BuildStatus == statusCompleted || stepOut.BuildStatus == statusFailed || stepOut.BuildStatus == statusCancelled || stepOut.BuildStatus == statusNotFound {
 		rt.ClearState()
+		// Keep only the delivery marker across terminal invocations. The journaled
+		// step result restores it on replay after a crash before SetState.
+		if terminalNotificationRecorded(priorState) || terminalNotificationRecorded(stepOut.State) {
+			rt.SetState(BuildObjectState{TerminalNotified: true})
+		}
 	} else {
 		if stepOut.State != nil {
 			rt.SetState(*stepOut.State)
@@ -851,6 +870,7 @@ func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutatio
 	if mutation == nil {
 		return nil
 	}
+	mutation = normalizeCompletionMutation(mutation)
 	action := strings.ToLower(strings.TrimSpace(mutation.Action))
 	switch action {
 	case "chunk_merged":
@@ -865,12 +885,20 @@ func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutatio
 				log.Printf("[vanadis-restate] publish event warning: %v", err)
 			}
 		}
-	case "chunk_deploy_success":
+	case mutationChunkDeploySuccess:
 		return b.completePRDeploymentMutation(ctx, buildID, mutation)
-	case "action_completed":
-		if _, err := b.store.CompleteActionChunk(ctx, mutation.ChunkID); err != nil {
-			log.Printf("[vanadis-restate] complete action chunk warning: %v", err)
+	case mutationActionCompleted:
+		if err := b.validateActionBuild(ctx, buildID, mutation.ChunkID); err != nil {
+			return err
 		}
+		res, err := b.store.CompleteActionChunk(ctx, mutation.ChunkID, mutation.DispatchID)
+		if err != nil {
+			return err
+		}
+		if res == nil || !res.CompletionAccepted {
+			return errActionCompletionSkipped
+		}
+		return nil
 	case "chunk_failed":
 		if _, _, _, err := b.store.FailChunk(ctx, mutation.ChunkID, mutation.Reason); err != nil {
 			log.Printf("[vanadis-restate] fail chunk warning: %v", err)
@@ -925,9 +953,11 @@ func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *VanadisBui
 	if err := b.executor.PublishExternalEvent(ctx, "vanadis_build", status, []string{build.ID}, reason); err != nil {
 		log.Printf("[vanadis-restate] publish event warning: %v", err)
 	}
-	prompt := fmt.Sprintf("[%s]\nBuild ID: %s\nObjective: %s\n\n%s", promptHeader, build.ID, build.Objective, promptMsg)
-	if err := b.executor.DispatchWakePrompt(ctx, build.ThreadID, prompt); err != nil {
-		log.Printf("[vanadis-restate] wake prompt warning: %v", err)
+	if !build.Quiet {
+		prompt := fmt.Sprintf("[%s]\nBuild ID: %s\nObjective: %s\n\n%s", promptHeader, build.ID, build.Objective, promptMsg)
+		if err := b.executor.DispatchWakePrompt(ctx, build.ThreadID, prompt); err != nil {
+			log.Printf("[vanadis-restate] wake prompt warning: %v", err)
+		}
 	}
 	if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, "Build "+status); err != nil {
 		log.Printf("[vanadis-restate] sync widget warning: %v", err)
@@ -970,12 +1000,21 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *Va
 	}
 }
 
-func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildID string, mutation *BuildMutationRequest, priorLaunched map[string]bool) (reconcileStepOutput, error) {
+func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildID string, mutation *BuildMutationRequest, priorLaunched map[string]bool, terminalNotified bool) (reconcileStepOutput, error) {
 	if b.store == nil {
 		return reconcileStepOutput{}, errors.New("store not configured")
 	}
 
+	mutation = normalizeCompletionMutation(mutation)
+
 	if err := b.applyMutation(ctx, buildID, mutation); err != nil {
+		if errors.Is(err, errActionCompletionSkipped) {
+			build, chunks, readErr := b.store.GetBuild(ctx, buildID)
+			if readErr != nil {
+				return reconcileStepOutput{}, readErr
+			}
+			return reconcileStepOutput{BuildStatus: build.Status, State: &BuildObjectState{Build: *build, Chunks: chunks, Launched: priorLaunched}}, nil
+		}
 		return reconcileStepOutput{}, err
 	}
 
@@ -987,10 +1026,16 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		return reconcileStepOutput{}, err
 	}
 
+	if !terminalNotified && build.Status == statusCompleted && isActionCompletionMutation(mutation, chunks) {
+		// The completion transaction may have persisted terminal status before this
+		// journaled continuation ran. Replay its terminal effects as well.
+		b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully.")
+		terminalNotified = true
+	}
 	if build.Status == statusCompleted || build.Status == statusFailed || build.Status == statusCancelled {
 		return reconcileStepOutput{
 			BuildStatus: build.Status,
-			State:       &BuildObjectState{Build: *build, Chunks: chunks},
+			State:       &BuildObjectState{Build: *build, Chunks: chunks, TerminalNotified: terminalNotified},
 		}, nil
 	}
 
@@ -1009,7 +1054,7 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		BuildStatus:    finalStatus,
 		LaunchedChunks: launchedChunks,
 		LaunchedMap:    launchedMap,
-		State:          &BuildObjectState{Build: *build, Chunks: chunks, Launched: launchedMap},
+		State:          &BuildObjectState{Build: *build, Chunks: chunks, Launched: launchedMap, TerminalNotified: finalStatus == statusCompleted},
 	}, nil
 }
 
@@ -1179,25 +1224,27 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 		return err
 	}
 	alreadyCompleted := false
-	actionChunk := false
+	found := false
 	for _, chunk := range chunks {
 		if chunk.ID != mutation.ChunkID {
 			continue
 		}
+		found = true
 		alreadyCompleted = chunk.Status == statusCompleted
-		actionChunk = chunk.Mode == "action" && chunk.PRNumber == 0
+		if chunk.Mode == "action" && chunk.PRNumber == 0 {
+			return b.completeActionDeploymentMutation(ctx, mutation)
+		}
 		if chunk.Status == statusFailed || chunk.Status == statusCancelled || build.Status == statusCancelled || (build.Status == statusFailed && chunk.Status != statusCompleted) {
 			return nil
 		}
 	}
+	if !found {
+		return ErrChunkNotFound
+	}
 	if build.Status == statusCancelled {
 		return nil
 	}
-	if actionChunk {
-		if err := b.store.UpdateChunkStatus(ctx, mutation.ChunkID, "completed"); err != nil {
-			return err
-		}
-	} else if err := b.store.CompletePRDeployment(ctx, mutation.ChunkID, mutation.RolloutState); err != nil {
+	if err := b.store.CompletePRDeployment(ctx, mutation.ChunkID, mutation.RolloutState); err != nil {
 		if errors.Is(err, errPRTransitionSkipped) {
 			return nil
 		}
@@ -1258,4 +1305,83 @@ func (s *PostgresVanadisStore) UpdatePRLifecycleStatus(ctx context.Context, chun
 		return errPRTransitionSkipped
 	}
 	return nil
+}
+
+func (b *BuildObject) validateActionBuild(ctx context.Context, buildID, chunkID string) error {
+	_, chunks, err := b.store.GetBuild(ctx, buildID)
+	if err != nil {
+		return err
+	}
+	for _, c := range chunks {
+		if c.ID == chunkID && c.BuildID == buildID {
+			return nil
+		}
+	}
+	return ErrChunkNotFound
+}
+
+var errActionCompletionSkipped = errors.New("action completion not applied")
+
+func (b *BuildObject) completeActionDeploymentMutation(ctx context.Context, mutation *BuildMutationRequest) error {
+	res, err := b.store.CompleteActionChunk(ctx, mutation.ChunkID, mutation.DispatchID)
+	if err != nil {
+		return err
+	}
+	if res == nil || !res.CompletionAccepted {
+		return errActionCompletionSkipped
+	}
+	if b.executor != nil && res.Advanced {
+		if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{mutation.ChunkID}, ""); err != nil {
+			log.Printf("[vanadis-restate] publish event warning: %v", err)
+		}
+	}
+	return nil
+}
+
+func dispatchCompletionMutation(ev pubsub.DispatchOutcomeEvent) *BuildMutationRequest {
+	switch strings.ToLower(strings.TrimSpace(ev.Status)) {
+	case "completed", dispatchStatusSuccess:
+		return &BuildMutationRequest{Action: mutationActionCompleted, ChunkID: strings.TrimSpace(ev.VanadisChunkID), DispatchID: ev.DispatchID}
+	default:
+		return nil
+	}
+}
+
+func isActionCompletionMutation(mutation *BuildMutationRequest, chunks []VanadisChunk) bool {
+	if mutation == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(mutation.Action)) {
+	case mutationActionCompleted, mutationChunkDeploySuccess:
+		for _, chunk := range chunks {
+			if chunk.ID == mutation.ChunkID && chunk.Mode == "action" && chunk.PRNumber == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+const dispatchStatusSuccess = "success"
+
+const mutationActionCompleted = "action_completed"
+
+const mutationChunkDeploySuccess = "chunk_deploy_success"
+
+func terminalNotificationRecorded(state *BuildObjectState) bool {
+	return state != nil && state.TerminalNotified
+}
+
+func normalizeCompletionMutation(mutation *BuildMutationRequest) *BuildMutationRequest {
+	if mutation == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(mutation.Action)) {
+	case mutationActionCompleted, mutationChunkDeploySuccess:
+		normalized := *mutation
+		normalized.ChunkID = strings.TrimSpace(normalized.ChunkID)
+		return &normalized
+	default:
+		return mutation
+	}
 }

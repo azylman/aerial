@@ -879,7 +879,7 @@ func TestBuildObject_Transitions_Extended(t *testing.T) {
 
 	// nil store
 	boNil := NewBuildObject("", nil)
-	_, err = boNil.executeAuthoritativeTransition(context.Background(), "b1", nil, nil)
+	_, err = boNil.executeAuthoritativeTransition(context.Background(), "b1", nil, nil, false)
 	assert.Error(t, err)
 }
 
@@ -1110,7 +1110,7 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 	}.open()
 
 	bo := NewBuildObject("", nil).WithAuthority(storeLaunch, exec)
-	out, err := bo.executeAuthoritativeTransition(context.Background(), "b-launch", nil, map[string]bool{"prior-chk": true})
+	out, err := bo.executeAuthoritativeTransition(context.Background(), "b-launch", nil, map[string]bool{"prior-chk": true}, false)
 	assert.NoError(t, err)
 	assert.Equal(t, "running", out.BuildStatus)
 	assert.Contains(t, out.LaunchedChunks, "c-pending")
@@ -1118,7 +1118,7 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 	// Store GetBuild error branch
 	storeGetErr, _ := dbScript{row: errRow(errors.New("db fail"))}.open()
 	boGetErr := NewBuildObject("", nil).WithAuthority(storeGetErr, nil)
-	_, errGetErr := boGetErr.executeAuthoritativeTransition(context.Background(), "b-fail", nil, nil)
+	_, errGetErr := boGetErr.executeAuthoritativeTransition(context.Background(), "b-fail", nil, nil, false)
 	assert.Error(t, errGetErr)
 
 	// 2. All chunks completed -> build completes
@@ -1138,7 +1138,7 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 		execTag:  "UPDATE 1",
 	}.open()
 	boDone := NewBuildObject("", nil).WithAuthority(storeCompleted, exec)
-	outDone, err := boDone.executeAuthoritativeTransition(context.Background(), "b-done", nil, nil)
+	outDone, err := boDone.executeAuthoritativeTransition(context.Background(), "b-done", nil, nil, false)
 	assert.NoError(t, err)
 	assert.Equal(t, "completed", outDone.BuildStatus)
 
@@ -1159,7 +1159,7 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 		execTag:  "UPDATE 1",
 	}.open()
 	boFailed := NewBuildObject("", nil).WithAuthority(storeFailed, exec)
-	outFailed, err := boFailed.executeAuthoritativeTransition(context.Background(), "b-fail", nil, nil)
+	outFailed, err := boFailed.executeAuthoritativeTransition(context.Background(), "b-fail", nil, nil, false)
 	assert.NoError(t, err)
 	assert.Equal(t, "failed", outFailed.BuildStatus)
 }
@@ -1191,7 +1191,7 @@ func TestBuildObject_ReconcileTerminalStatuses(t *testing.T) {
 			chunks:   []VanadisChunk{{ID: "c1", Status: status}},
 		}.open()
 		bo := NewBuildObject("", nil).WithAuthority(storeTerm, nil)
-		out, err := bo.executeAuthoritativeTransition(context.Background(), "b-term", nil, nil)
+		out, err := bo.executeAuthoritativeTransition(context.Background(), "b-term", nil, nil, false)
 		assert.NoError(t, err)
 		assert.Equal(t, status, out.BuildStatus)
 	}
@@ -1199,7 +1199,7 @@ func TestBuildObject_ReconcileTerminalStatuses(t *testing.T) {
 	// Build not found returns not_found
 	storeNF, _ := dbScript{row: errRow(ErrBuildNotFound)}.open()
 	boNF := NewBuildObject("", nil).WithAuthority(storeNF, nil)
-	outNF, err := boNF.executeAuthoritativeTransition(context.Background(), "b-nf", nil, nil)
+	outNF, err := boNF.executeAuthoritativeTransition(context.Background(), "b-nf", nil, nil, false)
 	assert.NoError(t, err)
 	assert.Equal(t, "not_found", outNF.BuildStatus)
 }
