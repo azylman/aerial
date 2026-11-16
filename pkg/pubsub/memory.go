@@ -111,7 +111,7 @@ func (b *MemoryBus) PublishWithHeader(ctx context.Context, subject string, msgID
 		b.mu.Unlock()
 		targetSub := group[idx]
 		subHeader := cloneHeader(mergedHeader)
-		go b.dispatchToSub(targetSub, subject, payload, subHeader, currentSeq, 1) //nolint:contextcheck // like JetStream, a delivery never inherits the publisher's context; its trace travels in headers
+		go b.dispatchToSub(targetSub, subject, payload, subHeader, currentSeq, 1) //nolint:contextcheck,gosec // like JetStream, a delivery never inherits the publisher's context; its trace travels in headers
 	}
 
 	// 7. Competing consumer queue workers (grouped by queue)
@@ -129,7 +129,7 @@ func (b *MemoryBus) PublishWithHeader(ctx context.Context, subject string, msgID
 		b.mu.Unlock()
 		targetSub := group[idx]
 		subHeader := cloneHeader(mergedHeader)
-		go b.dispatchToSub(targetSub, subject, payload, subHeader, currentSeq, 1) //nolint:contextcheck // like JetStream, a delivery never inherits the publisher's context; its trace travels in headers
+		go b.dispatchToSub(targetSub, subject, payload, subHeader, currentSeq, 1) //nolint:contextcheck,gosec // like JetStream, a delivery never inherits the publisher's context; its trace travels in headers
 	}
 
 	return nil

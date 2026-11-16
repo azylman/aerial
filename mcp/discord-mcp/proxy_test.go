@@ -216,6 +216,7 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 		{"GET /health reverse proxies to upstream", handler, http.MethodGet, "/health", nil, nil, false, http.StatusOK, "ok", "", 0},
 		{"upstream returns invalid JSON for initialize", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`), map[string]string{"X-Mock-Invalid-Json": "1"}, false, http.StatusOK, "{invalid-tools-list", "", 0},
 		{"upstream returns invalid JSON for tools/list", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), map[string]string{"X-Mock-Invalid-Json": "1"}, false, http.StatusOK, "{invalid-tools-list", "", 0},
+		{"absolute-form request URI stays pinned to the upstream host", handler, http.MethodPost, "http://127.0.0.1:59995/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`), nil, false, http.StatusOK, `"result":"ok"`, "", 0},
 		{"offline upstream returns BadGateway", offlineHandler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`), nil, false, http.StatusBadGateway, "", "", 0},
 		{"request body read error returns BadRequest", handler, http.MethodPost, "/mcp", &errReader{}, nil, false, http.StatusBadRequest, "", "", 0},
 		{"upstream body read error returns BadGateway", handler, http.MethodPost, "/mcp", strings.NewReader(`{}`), map[string]string{"X-Mock-Hijack": "1"}, false, http.StatusBadGateway, "", "", 0},

@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // G505: Twilio signs X-Twilio-Signature with HMAC-SHA1; the protocol fixes the hash
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
