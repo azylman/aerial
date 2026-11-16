@@ -167,7 +167,16 @@ func (r *PostgresPRRegistry) AtomicTransitionConflict(ctx context.Context, repo 
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
-	query := `UPDATE pr_registry SET status = 'deploy_failed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND status IN ('deploying', 'merged', 'synced') RETURNING target_id;`
+	query := `
+		UPDATE pr_registry
+		SET status = 'deploy_failed',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2
+		  AND (
+		    status IN ('deploying', 'merged', 'synced')
+		    OR (status = 'deploy_failed' AND COALESCE((metadata->>'deploy_failed_published')::boolean, false) = false)
+		  )
+		RETURNING target_id;`
 	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition deploy_failed", query)
 }
 

@@ -21,6 +21,7 @@ const (
 	kindKustomization  = "Kustomization"
 	kindConfigMap      = "ConfigMap"
 	kindRestateCluster = "RestateCluster"
+	kindStatefulSet    = "StatefulSet"
 	reasonProgressing  = "Progressing"
 )
 
@@ -442,6 +443,7 @@ type workloadRollout struct {
 	ReadyReplicas                                                   int32
 	DeploymentID                                                    string
 	ReadyConditionTrue                                              bool
+	ManagedWorkloads                                                []workloadRollout
 }
 
 // kubeRolloutList decodes an apps/v1, restate.dev/v1beta1 or restate.dev/v1 workload list with rollout status.
@@ -454,7 +456,8 @@ type kubeRolloutList struct {
 				Spec kubePodSpec `json:"spec"`
 			} `json:"template"`
 			Compute struct {
-				Image string `json:"image"`
+				Image    string `json:"image"`
+				Replicas *int32 `json:"replicas"`
 			} `json:"compute"`
 		} `json:"spec"`
 		Status struct {
@@ -487,6 +490,10 @@ func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error)
 		if item.Spec.Compute.Image != "" {
 			images = append(images, item.Spec.Compute.Image)
 		}
+		replicas := item.Spec.Replicas
+		if replicas == nil && item.Spec.Compute.Replicas != nil {
+			replicas = item.Spec.Compute.Replicas
+		}
 		workloads = append(workloads, workloadRollout{
 			Kind:                   kind,
 			Namespace:              item.Metadata.Namespace,
@@ -497,7 +504,7 @@ func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error)
 			ConfigMapRefs:          item.Spec.Template.Spec.configMapRefs(),
 			Generation:             item.Metadata.Generation,
 			ObservedGeneration:     st.ObservedGeneration,
-			Replicas:               *cmp.Or(item.Spec.Replicas, new(int32(1))),
+			Replicas:               *cmp.Or(replicas, new(int32(1))),
 			UpdatedReplicas:        st.UpdatedReplicas,
 			AvailableReplicas:      st.AvailableReplicas,
 			StatusReplicas:         st.Replicas,
@@ -531,6 +538,29 @@ func (w workloadRollout) String() string {
 	return w.Kind + " " + w.Namespace + "/" + w.Name
 }
 
+// restateClusterRolloutComplete reports whether a RestateCluster and its managed workloads are rolled out.
+func restateClusterRolloutComplete(w workloadRollout) (done, failed bool, reason string) {
+	if !w.ReadyConditionTrue {
+		return false, false, "ready=false"
+	}
+	for _, m := range w.ManagedWorkloads {
+		if len(w.Images) > 0 && !slices.Contains(m.Images, w.Images[0]) {
+			return false, false, fmt.Sprintf("managed %s images %v do not match cluster image %s", m, m.Images, w.Images[0])
+		}
+		if w.Replicas > 0 && m.Replicas != w.Replicas {
+			return false, false, fmt.Sprintf("managed %s replicas %d do not match cluster replicas %d", m, m.Replicas, w.Replicas)
+		}
+		mDone, mFailed, mReason := workloadRolloutComplete(m)
+		if mFailed {
+			return false, true, fmt.Sprintf("managed %s: %s", m, mReason)
+		}
+		if !mDone {
+			return false, false, fmt.Sprintf("managed %s: %s", m, mReason)
+		}
+	}
+	return true, false, ""
+}
+
 // workloadRolloutComplete reports whether the workload controller has observed its latest spec and
 // every desired pod runs the current template and is available, with no old pods left.
 func workloadRolloutComplete(w workloadRollout) (done, failed bool, reason string) {
@@ -544,7 +574,7 @@ func workloadRolloutComplete(w workloadRollout) (done, failed bool, reason strin
 		}
 		done = w.UpdatedReplicas == w.Replicas && w.AvailableReplicas == w.Replicas && w.StatusReplicas == w.Replicas
 		reason = fmt.Sprintf("%d/%d updated, %d/%d available, %d total", w.UpdatedReplicas, w.Replicas, w.AvailableReplicas, w.Replicas, w.StatusReplicas)
-	case "StatefulSet":
+	case kindStatefulSet:
 		done = w.UpdateRevision == w.CurrentRevision && w.AvailableReplicas == w.Replicas
 		reason = fmt.Sprintf("revision %s of %s, %d/%d available", w.CurrentRevision, w.UpdateRevision, w.AvailableReplicas, w.Replicas)
 	case "DaemonSet":
@@ -554,8 +584,7 @@ func workloadRolloutComplete(w workloadRollout) (done, failed bool, reason strin
 		done = w.ReadyConditionTrue && w.ReadyReplicas == w.Replicas && w.AvailableReplicas == w.Replicas && w.DeploymentID != ""
 		reason = fmt.Sprintf("%d/%d ready, %d/%d available, deploymentId=%s, ready=%t", w.ReadyReplicas, w.Replicas, w.AvailableReplicas, w.Replicas, w.DeploymentID, w.ReadyConditionTrue)
 	case kindRestateCluster:
-		done = w.ReadyConditionTrue
-		reason = fmt.Sprintf("ready=%t", w.ReadyConditionTrue)
+		return restateClusterRolloutComplete(w)
 	default:
 		return false, false, "unsupported workload kind"
 	}
@@ -625,6 +654,19 @@ func (w workloadRollout) reloadsOn(name string) bool {
 	return false
 }
 
+func linkManagedWorkloads(workloads []workloadRollout) {
+	for i := range workloads {
+		if workloads[i].Kind != kindRestateCluster {
+			continue
+		}
+		for _, other := range workloads {
+			if other.Kind == kindStatefulSet && other.Namespace == workloads[i].Namespace && other.Name == workloads[i].Name {
+				workloads[i].ManagedWorkloads = append(workloads[i].ManagedWorkloads, other)
+			}
+		}
+	}
+}
+
 // prRolloutStatus gates a PR deploy on every workload its change reached: workloads running the
 // commit's image, workloads written since the merge (manifest edits), and Reloader-enabled workloads
 // consuming a ConfigMap written since the merge, which must restart after that ConfigMap changed. Done
@@ -632,6 +674,7 @@ func (w workloadRollout) reloadsOn(name string) bool {
 // reloaderRestartTimeout; otherwise pending with the reason naming each workload still rolling out.
 // Workloads nothing changed never affect the result.
 func prRolloutStatus(in prRolloutInput) (done, failed bool, reason string) {
+	linkManagedWorkloads(in.Workloads)
 	cutoff := in.Since.Add(-rolloutChangeSkew)
 	changed := func(at time.Time) bool { return !at.IsZero() && !at.Before(cutoff) }
 	var pending []string

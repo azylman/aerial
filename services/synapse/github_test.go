@@ -1154,13 +1154,19 @@ func processGitHubEventCasesPart6() []ghEventCase {
 			name: "workflow_run failure on main matching merge_sha transitions merged PR to deploy_failed", event: "workflow_run", delivery: "del-wf-main-merge-sha-fail",
 			payload: `{"action":"completed","workflow_run":{"id":801,"name":"Continuous Delivery","head_sha":"merge224","head_branch":"main","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 224, resolveBranch: "feat/restate", resolveHeadSHA: "premerge224", resolveMergeSHA: "merge224", resolveTargetID: "100000000000000002", deployFailedTargetID: "100000000000000002", deployFailedUpdated: true},
-			disp:    &mockOutboundDispatcher{}, bus: &mockEventBus{}, wantPR: 224, wantHeadSHA: "merge224", wantTargetID: "100000000000000002", wantCIFailedCalls: 1, wantDeployFailedCalls: 1, wantDeployFailedEvents: 1, wantDeployEventMergeSHA: "merge224",
+			disp:    &mockOutboundDispatcher{}, bus: &mockEventBus{}, wantPR: 224, wantHeadSHA: "merge224", wantTargetID: "100000000000000002", wantCIFailedCalls: 0, wantDeployFailedCalls: 1, wantDeployFailedEvents: 1, wantDeployEventMergeSHA: "merge224",
 		},
 		{
 			name: "workflow_run failure on main matching merge_sha deploy_failed transition error propagates", event: "workflow_run", delivery: "del-wf-main-merge-sha-deploy-err",
 			payload: `{"action":"completed","workflow_run":{"id":801,"name":"Continuous Delivery","head_sha":"merge224","head_branch":"main","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 224, resolveBranch: "feat/restate", resolveHeadSHA: "premerge224", resolveMergeSHA: "merge224", resolveTargetID: "100000000000000002", deployFailedErr: errors.New("deploy failed db error")},
 			disp:    &mockOutboundDispatcher{}, wantErr: true,
+		},
+		{
+			name: "check_run failure on merge_sha routes to deploy_failed without ci_failed transition", event: "check_run", delivery: "del-cr-main-merge-sha-fail",
+			payload: `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Integration Tests","head_sha":"merge224","status":"completed","conclusion":"failure","pull_requests":[]}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 224, resolveBranch: "feat/restate", resolveHeadSHA: "premerge224", resolveMergeSHA: "merge224", resolveTargetID: "100000000000000002", deployFailedTargetID: "100000000000000002", deployFailedUpdated: true},
+			disp:    &mockOutboundDispatcher{}, bus: &mockEventBus{}, wantPR: 224, wantHeadSHA: "merge224", wantTargetID: "100000000000000002", wantCIFailedCalls: 0, wantDeployFailedCalls: 1, wantDeployFailedEvents: 1, wantDeployEventMergeSHA: "merge224",
 		},
 	}
 }

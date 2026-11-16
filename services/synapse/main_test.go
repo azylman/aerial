@@ -192,6 +192,7 @@ type mockPRRegistry struct {
 	deployFailedCalls    []prCall
 	deployFailedTargetID string
 	deployFailedUpdated  bool
+	deployFailedResults  []bool
 	deployFailedErr      error
 
 	deployFailedJobCalls    []string
@@ -281,12 +282,21 @@ func (m *mockPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobN
 	return JobTransition{TargetID: m.deployedTargetID, PRNumber: m.deployedPRNum, MergeSHA: m.deployedMergeSHA, Repo: m.deployedRepo, Updated: m.deployedUpdated}, nil
 }
 
+func popBoolResult(results *[]bool, fallback bool) bool {
+	if len(*results) > 0 {
+		res := (*results)[0]
+		*results = (*results)[1:]
+		return res
+	}
+	return fallback
+}
+
 func (m *mockPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
 	if err := m.checkErr(m.deployFailedErr); err != nil {
 		return "", false, err
 	}
 	m.deployFailedCalls = append(m.deployFailedCalls, prCall{repo: repo, prNumber: prNumber})
-	return m.deployFailedTargetID, m.deployFailedUpdated, nil
+	return m.deployFailedTargetID, popBoolResult(&m.deployFailedResults, m.deployFailedUpdated), nil
 }
 
 func (m *mockPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (JobTransition, error) {
@@ -341,12 +351,7 @@ func (m *mockPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo stri
 		return "", false, err
 	}
 	m.ciFailedCalls = append(m.ciFailedCalls, prCall{repo: repo, prNumber: prNumber})
-	if len(m.ciFailedResults) > 0 {
-		res := m.ciFailedResults[0]
-		m.ciFailedResults = m.ciFailedResults[1:]
-		return m.ciFailedTargetID, res, nil
-	}
-	return m.ciFailedTargetID, m.ciFailedUpdated, nil
+	return m.ciFailedTargetID, popBoolResult(&m.ciFailedResults, m.ciFailedUpdated), nil
 }
 
 func (m *mockPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (string, int, bool, error) {

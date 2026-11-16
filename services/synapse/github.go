@@ -518,6 +518,9 @@ func (s *RouterServer) handleImagePromotionDeployFailed(ctx context.Context, rep
 	}); pErr != nil {
 		return fmt.Errorf("publish deploy failed event: %w", pErr)
 	}
+	if updateErr := s.registry.UpdatePRStatus(ctx, repo, prNum, "deploy_failed", map[string]any{"deploy_failed_published": true}); updateErr != nil {
+		log.Printf("[synapse] [dispatcher] warning: failed updating deploy_failed_published for %s#%d: %v", repo, prNum, updateErr)
+	}
 	return nil
 }
 
@@ -831,44 +834,11 @@ func (s *RouterServer) healDependabotPR(ctx context.Context, res *ResolvedGitHub
 	}
 }
 
-func (s *RouterServer) populateMissingBranch(ctx context.Context, res *ResolvedGitHubEvent) {
-	if res == nil || s.registry == nil {
-		return
-	}
-	if res.PRNumber <= 0 || strings.TrimSpace(res.Branch) != "" {
-		return
-	}
-	_, branch, _, _, err := s.registry.ResolvePRByNumber(ctx, normalizeRepo(res.Repo), res.PRNumber)
-	if err == nil && branch != "" {
-		res.Branch = branch
-	}
-}
-
-func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
-	if res == nil {
-		return nil
-	}
-	s.populateMissingBranch(ctx, res)
-	return s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        prCIFailed,
-		Repo:         res.Repo,
-		PRNumber:     res.PRNumber,
-		Branch:       res.Branch,
-		HeadSHA:      res.HeadSHA,
-		TargetID:     res.TargetID,
-		Status:       prCIFailed,
-		CheckName:    res.CheckName,
-		CheckState:   statusFailed,
-		CheckURL:     checkURL,
-		Details:      details,
-		RolloutState: s.loadPRRolloutState(ctx, res.Repo, res.PRNumber),
-		Quiet:        isDependabotBranch(res.Branch),
-		OccurredAt:   time.Now().UTC(),
-	})
-}
-
 func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string, emitAdditional bool) error {
 	s.healDependabotPR(ctx, res)
+	if s.isMergeSHAFailure(ctx, res) || (res.Event == ghEventWorkflowRun && (res.Branch == "main" || strings.HasPrefix(res.Branch, "refs/heads/main"))) {
+		return s.handleImagePromotionDeployFailed(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, res.TargetID, errors.New(details))
+	}
 	targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
 	if err != nil {
 		return err
@@ -876,9 +846,6 @@ func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *Resol
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
 	if updated || (emitAdditional && res.TargetID != "") {
 		return s.completeCIFailureTransition(ctx, res, details, checkURL)
-	}
-	if res.Event == ghEventWorkflowRun && (res.Branch == "main" || strings.HasPrefix(res.Branch, "refs/heads/main")) {
-		return s.handleImagePromotionDeployFailed(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, res.TargetID, errors.New(details))
 	}
 	return nil
 }
@@ -908,6 +875,9 @@ func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *Resolv
 func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
 	if s.isStaleOrIgnoredCIFailure(ctx, res) {
 		return nil
+	}
+	if s.isMergeSHAFailure(ctx, res) {
+		return s.handleImagePromotionDeployFailed(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, res.TargetID, errors.New(details))
 	}
 	emitAdditional := false
 	if res.Event == ghEventCheckRun && res.PRNumber > 0 && res.HeadSHA != "" && !isGateAggregatorCheck(res.CheckName) {
