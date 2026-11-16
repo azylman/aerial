@@ -183,29 +183,45 @@ linters:
     dogsled:
       max-blank-identifiers: 3
     gosec:
+      # Re-audited per rule (build-1794767772 chunk 6). Every rule not listed is
+      # enforced; each exclusion below is noise for this codebase, not a backlog.
       excludes:
+        # G101: name heuristic; all 4 hits were file paths or empty strings
+        # (kubeTokenPath, oauthTokenSourcePath, apiKey := ""). Secret leaks are
+        # caught by eri's commit guard scanner instead.
         - G101
+        # G104: duplicates errcheck, which owns the unchecked-error policy
+        # (including its deliberate Close exclusions); all 3 hits were Body.Close.
         - G104
+        # G115: all 14 hits are deliberate width conversions: two's-complement
+        # PCM reinterpretation and bounded mu-law math in prospera/ulaw.go,
+        # protocol counters (NATS NumPending, Postgres attnum) and modulo indices.
         - G115
-        - G117
-        - G118
-        - G122
+        # G201/G202/G701: dynamic SQL here only splices fixed identifiers and
+        # generated $N placeholder lists; every value is bound (11 hits, 0 real).
         - G201
         - G202
-        - G203
+        - G701
+        # G204: subprocess launches are the product (git, agent CLIs); args are
+        # passed as argv, never through a shell.
         - G204
+        # G301/G302/G306: eri stages homes, rules, hooks and attachments for agent
+        # turns that run as a different uid (1000), so 0755/0644 are required.
         - G301
         - G302
-        - G304
         - G306
-        - G402
-        - G404
-        - G505
-        - G701
-        - G702
+        # G304/G703: 62 hits, all operator-configured paths (config files,
+        # mounted rule/skill trees, transcripts eri itself writes). The one
+        # plan-supplied path (vanadis target files) now reads through os.Root.
+        - G304
         - G703
+        # G704: proxies and clients target configured upstream base URLs by
+        # design (16 hits); the one real escape (discord-mcp absolute-form
+        # request URIs) is fixed by pinning the upstream host.
         - G704
-        - G705
+        # G706: 17 hits, all log lines carrying internal IDs, config paths or
+        # upstream URLs; the one attacker-supplied value (httpkit reload path) is
+        # now logged with %q.
         - G706
     gosmopolitan:
       allow-time-local: true

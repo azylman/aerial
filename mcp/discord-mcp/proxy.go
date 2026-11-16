@@ -66,8 +66,10 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Forward request to upstream
-	targetURL := p.upstreamURL.ResolveReference(r.URL)
+	// Forward request to upstream. Only the path and query are taken from the
+	// request: an absolute-form request URI must not redirect the proxy to
+	// another host.
+	targetURL := p.upstreamURL.ResolveReference(&url.URL{Path: r.URL.Path, RawPath: r.URL.RawPath, RawQuery: r.URL.RawQuery})
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bytes.NewReader(bodyBytes))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to construct upstream request: %v", err), http.StatusInternalServerError)

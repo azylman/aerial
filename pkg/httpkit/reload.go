@@ -138,7 +138,7 @@ func (r *Reloadable[T]) Handler(service string) http.Handler {
 func LoopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if !isLoopbackRemote(req.RemoteAddr) {
-			log.Printf("httpkit: rejected non-loopback request to %s from %q", req.URL.Path, req.RemoteAddr)
+			log.Printf("httpkit: rejected non-loopback request to %q from %q", req.URL.Path, req.RemoteAddr)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
