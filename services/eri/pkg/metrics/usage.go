@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -200,6 +201,126 @@ func NewClaudeUsageRunner(client *http.Client, baseURL, token string) UsageRunne
 			return nil, fmt.Errorf("claude usage endpoint returned HTTP %d", resp.StatusCode)
 		}
 		return io.ReadAll(io.LimitReader(resp.Body, claudeUsageMaxBody))
+	}
+}
+
+// CodexUsageBaseURL is the OpenAI ChatGPT backend origin serving the subscription usage endpoint.
+const CodexUsageBaseURL = "https://chatgpt.com/backend-api"
+
+const codexUsageMaxBody = 1 << 20
+
+type codexUsageWindow struct {
+	UsedPercent *float64 `json:"used_percent"`
+	ResetAt     *int64   `json:"reset_at"`
+}
+
+type codexUsageResponse struct {
+	RateLimit *struct {
+		PrimaryWindow   *codexUsageWindow `json:"primary_window"`
+		SecondaryWindow *codexUsageWindow `json:"secondary_window"`
+	} `json:"rate_limit"`
+}
+
+type codexAuthFile struct {
+	Tokens struct {
+		AccessToken string `json:"access_token"`
+		AccountID   string `json:"account_id"`
+	} `json:"tokens"`
+}
+
+// CodexUsageToGroups maps a ChatGPT OAuth /wham/usage payload onto the shared QuotaGroup contract.
+func CodexUsageToGroups(raw []byte) ([]QuotaGroup, error) {
+	var resp codexUsageResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, err
+	}
+	if resp.RateLimit == nil {
+		return nil, errors.New("codex usage payload contains no rate_limit object")
+	}
+	windows := []struct {
+		id, window string
+		w          *codexUsageWindow
+	}{
+		{"codex-seven-day", "weekly", resp.RateLimit.SecondaryWindow},
+		{"codex-five-hour", "5h", resp.RateLimit.PrimaryWindow},
+	}
+	var buckets []QuotaBucket
+	for _, win := range windows {
+		if win.w == nil || win.w.UsedPercent == nil {
+			continue
+		}
+		reset := ""
+		if win.w.ResetAt != nil && *win.w.ResetAt > 0 {
+			reset = time.Unix(*win.w.ResetAt, 0).UTC().Format(time.RFC3339)
+		}
+		buckets = append(buckets, QuotaBucket{
+			ID:                win.id,
+			Window:            win.window,
+			ResetTime:         reset,
+			RemainingFraction: min(max((100-*win.w.UsedPercent)/100, 0), 1),
+		})
+	}
+	if len(buckets) == 0 {
+		return nil, errors.New("codex usage payload contains no quota windows")
+	}
+	return []QuotaGroup{{Name: "Codex", Buckets: buckets}}, nil
+}
+
+// RecordCodexUsageJSON parses a ChatGPT usage payload and publishes it as quota telemetry.
+func RecordCodexUsageJSON(raw []byte) error {
+	groups, err := CodexUsageToGroups(raw)
+	if err != nil {
+		return err
+	}
+	recordQuotaGroups(groups)
+	return nil
+}
+
+// DefaultCodexUsageRunner returns nil (polling disabled) under tests or without an auth file path.
+func DefaultCodexUsageRunner(authFilePath string, isTest bool) UsageRunnerFunc {
+	if isTest || strings.TrimSpace(authFilePath) == "" {
+		return nil
+	}
+	return NewCodexUsageRunner(http.DefaultClient, CodexUsageBaseURL, authFilePath)
+}
+
+// NewCodexUsageRunner fetches the ChatGPT backend subscription usage endpoint.
+func NewCodexUsageRunner(client *http.Client, baseURL, authFilePath string) UsageRunnerFunc {
+	endpoint := strings.TrimRight(baseURL, "/") + "/wham/usage"
+	return func(ctx context.Context) ([]byte, error) {
+		data, err := os.ReadFile(authFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("read codex auth file: %w", err)
+		}
+		var auth codexAuthFile
+		if uErr := json.Unmarshal(data, &auth); uErr != nil {
+			return nil, fmt.Errorf("unmarshal codex auth: %w", uErr)
+		}
+		accessToken := strings.TrimSpace(auth.Tokens.AccessToken)
+		if accessToken == "" {
+			return nil, fmt.Errorf("codex auth file %s has no access token", authFilePath)
+		}
+		accountID := strings.TrimSpace(auth.Tokens.AccountID)
+
+		runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(runCtx, http.MethodGet, endpoint, http.NoBody)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		if accountID != "" {
+			req.Header.Set("Chatgpt-Account-Id", accountID)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			return nil, fmt.Errorf("codex usage endpoint returned HTTP %d", resp.StatusCode)
+		}
+		return io.ReadAll(io.LimitReader(resp.Body, codexUsageMaxBody))
 	}
 }
 

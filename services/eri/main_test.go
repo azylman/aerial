@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -151,12 +152,37 @@ func (m *mockMainDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConf
 	outR, outW := io.Pipe()
 	errR, errW := io.Pipe()
 	go func() {
+		defer outW.Close()
+		defer errW.Close()
+		if cfg.IsCodex() {
+			sessID := cfg.SessionID
+			if sessID == "" {
+				sessID = "th_mock_12345"
+			}
+			scanner := bufio.NewScanner(inR)
+			for scanner.Scan() {
+				line := scanner.Text()
+				var req struct {
+					ID     int64  `json:"id"`
+					Method string `json:"method"`
+				}
+				if err := json.Unmarshal([]byte(line), &req); err != nil {
+					continue
+				}
+				switch req.Method {
+				case "initialize":
+					_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{}}\n", req.ID)
+				case "thread/start", "thread/resume":
+					_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"thread\":{\"id\":%q}}}\n", req.ID, sessID)
+				}
+			}
+			return
+		}
 		sessID := cfg.SessionID
 		if sessID == "" || !runner.IsValidUUID(sessID) {
 			sessID = "550e8400-e29b-41d4-a716-446655440000"
 		}
 		_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID)
-		_ = errW.Close()
 		_, _ = io.Copy(io.Discard, inR)
 	}()
 	return inW, outR, errR, &mockMainProcessHandle{pid: 12345}, nil

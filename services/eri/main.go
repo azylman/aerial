@@ -415,6 +415,11 @@ func computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey 
 			b.WriteString(cur.ClaudeBin)
 		}
 		b.WriteString("\n")
+		if cur != nil && ((cur.CodexBin != "" && cur.CodexBin != "codex") || cur.GetEngine() == config.EngineCodex) {
+			b.WriteString("codexBin:")
+			b.WriteString(cur.CodexBin)
+			b.WriteString("\n")
+		}
 	}
 	if ambCfg := cur.VoiceAmbientContext(); ambCfg != nil {
 		b.WriteString("ambient_context_tools:")
@@ -982,6 +987,17 @@ func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, mode
 	}
 }
 
+func startBrainEngineUsagePoller(ctx context.Context, cur *config.ConfigData, pools brainPools) {
+	switch cur.GetEngine() {
+	case config.EngineAgy:
+		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, pools.ephemeralHome, pools.env, testing.Testing()), metrics.RecordUsageJSON)
+	case config.EngineClaude:
+		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultClaudeUsageRunner(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), testing.Testing()), metrics.RecordClaudeUsageJSON)
+	case config.EngineCodex:
+		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultCodexUsageRunner(filepath.Join(cur.DataDir, "codex", "auth.json"), testing.Testing()), metrics.RecordCodexUsageJSON)
+	}
+}
+
 func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
 	if cfg == nil {
 		return fmt.Errorf("brain: config cannot be nil")
@@ -1050,12 +1066,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	pools := buildBrainProcessPools(ctx, cfg, cur, sessionMgr, appOpts.processSpawner, mcpProxyPort, appOpts.traceContent)
 	defer closeAllBrainPools(pools.all)
 
-	switch cur.GetEngine() {
-	case config.EngineAgy:
-		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, pools.ephemeralHome, pools.env, testing.Testing()), metrics.RecordUsageJSON)
-	case config.EngineClaude:
-		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultClaudeUsageRunner(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), testing.Testing()), metrics.RecordClaudeUsageJSON)
-	}
+	startBrainEngineUsagePoller(ctx, cur, pools)
 
 	cls := classifier.New(cfg, classifier.WithProcessPool(pools.ephemeral))
 	ambientResolver := newAmbientContextResolver(cfg)

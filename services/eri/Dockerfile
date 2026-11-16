@@ -84,6 +84,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     wget \
     bash \
+    bubblewrap \
     git \
     make \
     jq \
@@ -153,7 +154,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack && \
     node --version && \
     npm --version && \
-    npm install -g @anthropic-ai/claude-code && \
+    npm install -g @anthropic-ai/claude-code @openai/codex && \
     claude --version
 COPY --link --from=arigaio/atlas:1.3.4 /atlas /usr/local/bin/atlas
 COPY --link --from=1password/op:2 /usr/local/bin/op /usr/local/bin/op

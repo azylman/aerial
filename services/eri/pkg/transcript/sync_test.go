@@ -239,6 +239,51 @@ func TestConfiguredMCPServerNames(t *testing.T) {
 	}
 }
 
+func TestBuildSyncOptions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                 string
+		cfg                  *config.Config
+		brainDir             string
+		wantClaudeDir        string
+		wantCodexSessionsDir string
+	}{
+		{
+			name:                 "nil config",
+			cfg:                  nil,
+			brainDir:             "/tmp/brain",
+			wantClaudeDir:        "",
+			wantCodexSessionsDir: "",
+		},
+		{
+			name:                 "config with data dir",
+			cfg:                  config.NewFromData(&config.ConfigData{DataDir: "/data/aerial"}),
+			brainDir:             "/data/aerial/brain",
+			wantClaudeDir:        "/data/aerial/claude/projects",
+			wantCodexSessionsDir: "/data/aerial/codex/sessions",
+		},
+		{
+			name:                 "config with home dir",
+			cfg:                  config.NewFromData(&config.ConfigData{GeminiHomeDir: "/home/user"}),
+			brainDir:             "/home/user/.gemini/antigravity-cli/brain",
+			wantClaudeDir:        "/home/user/.claude/projects",
+			wantCodexSessionsDir: "/home/user/.codex/sessions",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			opts := buildSyncOptions(tc.cfg, tc.brainDir, nil)
+			if opts.ClaudeProjectsDir != tc.wantClaudeDir {
+				t.Errorf("ClaudeProjectsDir = %q, want %q", opts.ClaudeProjectsDir, tc.wantClaudeDir)
+			}
+			if opts.CodexSessionsDir != tc.wantCodexSessionsDir {
+				t.Errorf("CodexSessionsDir = %q, want %q", opts.CodexSessionsDir, tc.wantCodexSessionsDir)
+			}
+		})
+	}
+}
+
 type fakePubSubMessage struct {
 	data    []byte
 	subject string

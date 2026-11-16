@@ -100,13 +100,14 @@ func runVoicePoolHotReload(t *testing.T, voiceHome string) {
 	cfg := config.NewFromData(data)
 
 	var mu sync.Mutex
-	var lastSpawnedModel, lastSpawnedEngine, lastSpawnedClaudeBin, lastSpawnedHookEndpoint string
+	var lastSpawnedModel, lastSpawnedEngine, lastSpawnedClaudeBin, lastSpawnedCodexBin, lastSpawnedHookEndpoint string
 	trackingSpawner := &mockMainDaemonSpawner{
 		SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			mu.Lock()
 			lastSpawnedModel = dCfg.Model
 			lastSpawnedEngine = dCfg.Engine
 			lastSpawnedClaudeBin = dCfg.ClaudeBin
+			lastSpawnedCodexBin = dCfg.CodexBin
 			for _, kv := range dCfg.Env {
 				if v, ok := strings.CutPrefix(kv, "ERI_HOOK_ENDPOINT="); ok {
 					lastSpawnedHookEndpoint = v
@@ -210,27 +211,44 @@ func runVoicePoolHotReload(t *testing.T, voiceHome string) {
 		}
 	}
 
-	// Update config to claude engine and verify voice pool hot-reloads to claude
-	cfg.Update(&config.ConfigData{
-		Engine:    "claude",
-		ClaudeBin: "/custom/bin/claude",
-		Voice: config.VoiceConfig{
-			Engine: "agy",
-			Model:  "claude-voice-model",
-		},
-	})
-	dynPool.MarkDirty()
-	if lease, err := dynPool.AcquireLease(context.Background(), "k"); err != nil {
-		t.Fatalf("AcquireLease failed after claude engine reload: %v", err)
-	} else {
-		_ = lease.Release()
+	getSpawned := func() (string, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return lastSpawnedEngine, lastSpawnedClaudeBin
 	}
-	mu.Lock()
-	reloadedEngine := lastSpawnedEngine
-	reloadedClaudeBin := lastSpawnedClaudeBin
-	mu.Unlock()
-	if reloadedEngine != "claude" || reloadedClaudeBin != "/custom/bin/claude" {
-		t.Fatalf("expected voice pool to spawn claude with /custom/bin/claude, got engine=%q bin=%q", reloadedEngine, reloadedClaudeBin)
+	verifyVoicePoolEngineReload(t, cfg, dynPool, "claude", "/custom/bin/claude", "claude-voice-model", getSpawned)
+
+	getCodexSpawned := func() (string, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return lastSpawnedEngine, lastSpawnedCodexBin
+	}
+	verifyVoicePoolEngineReload(t, cfg, dynPool, "codex", "/custom/bin/codex", "codex-voice-model", getCodexSpawned)
+}
+
+func verifyVoicePoolEngineReload(t *testing.T, cfg *config.Config, dynPool *runner.DynamicVoicePool, targetEngine, bin, model string, getSpawned func() (string, string)) {
+	t.Helper()
+	var cd config.ConfigData
+	cd.Voice.Engine = "agy"
+	cd.Voice.Model = model
+	switch targetEngine {
+	case "claude":
+		cd.Engine = "claude"
+		cd.ClaudeBin = bin
+	case "codex":
+		cd.Engine = "codex"
+		cd.CodexBin = bin
+	}
+	cfg.Update(&cd)
+	dynPool.MarkDirty()
+	lease, err := dynPool.AcquireLease(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("AcquireLease failed after %s engine reload: %v", targetEngine, err)
+	}
+	_ = lease.Release()
+	spawnedEng, spawnedBin := getSpawned()
+	if spawnedEng != targetEngine || spawnedBin != bin {
+		t.Fatalf("expected voice pool to spawn %s with %s, got engine=%q bin=%q", targetEngine, bin, spawnedEng, spawnedBin)
 	}
 }
 
