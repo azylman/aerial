@@ -812,7 +812,7 @@ func applyChunkUpdates(chunk *VanadisChunk, req UpdateChunkRequest, normEffort s
 		chunk.Effort = normEffort
 	}
 	if req.DependsOn != nil {
-		chunk.DependsOn = *req.DependsOn
+		chunk.DependsOn = nonNilSlice(*req.DependsOn)
 	}
 	return nil
 }

@@ -728,7 +728,7 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 		ThreadID:  "th-1",
 		Objective: "Test build",
 		Chunks: []CreateChunkInput{
-			{ID: "c1", Title: "Chunk 1", Repo: "aerial", Instructions: "Do 1"},
+			{ID: "c1", Title: "Chunk 1", Repo: "aerial", Instructions: "Do 1", DependsOn: []string{}},
 		},
 	}
 	bld, err := bo.Create(ctx, createReq)
@@ -1054,7 +1054,7 @@ func TestBuildObject_CreateAndCancelErrors(t *testing.T) {
 		ThreadID:  "th1",
 		Objective: "Test Auto Chunk ID",
 		Chunks: []CreateChunkInput{
-			{Title: "C1", Instructions: "I", Repo: "aerial"},
+			{Title: "C1", Instructions: "I", Repo: "aerial", DependsOn: []string{}},
 		},
 	}
 	bAuto, err := boCreate.Create(ctxAuto, validNoChunkIDReq)
