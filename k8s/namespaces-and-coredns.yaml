@@ -14,6 +14,11 @@ metadata:
   name: restate-marida
 ---
 apiVersion: v1
+kind: Namespace
+metadata:
+  name: restate-miorine
+---
+apiVersion: v1
 data:
   aerial.override: |
     rewrite stop {
