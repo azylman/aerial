@@ -1,8 +1,11 @@
 package env
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -29,6 +32,7 @@ type Provisioner struct {
 	configRulesDir       string
 	hooksDir             string
 	oauthTokenSourcePath string
+	codexAuthSourcePath  string
 	mcpProxy             *MCPProxyRoutes
 
 	mu sync.Mutex
@@ -65,6 +69,7 @@ func New(homeDir, dataDir string) *Provisioner {
 		configRulesDir:       "/share/aerial-config/rules",
 		hooksDir:             "/share/aerial/scripts/hooks",
 		oauthTokenSourcePath: "/local/antigravity-oauth-token",
+		codexAuthSourcePath:  "/local/codex-auth.json",
 	}
 }
 
@@ -152,6 +157,88 @@ func (p *Provisioner) provisionOAuthState(configDir string) error {
 	return nil
 }
 
+func seedCodexAuth(srcPath, canonicalCodexDir, destAuthPath, seedSHAPath string) error {
+	if srcPath == "" {
+		return nil
+	}
+	srcData, err := os.ReadFile(srcPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read codex auth source %s: %w", srcPath, err)
+	}
+	if len(bytes.TrimSpace(srcData)) == 0 {
+		return nil
+	}
+	srcSHA := fmt.Sprintf("%x", sha256.Sum256(srcData))
+	destMissingOrEmpty := fileMissingOrEmpty(destAuthPath)
+
+	var seedSHADiffers bool
+	if seedData, sErr := os.ReadFile(seedSHAPath); sErr != nil || strings.TrimSpace(string(seedData)) != srcSHA {
+		seedSHADiffers = true
+	}
+
+	if !destMissingOrEmpty && !seedSHADiffers {
+		return nil
+	}
+	if err := os.MkdirAll(canonicalCodexDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create codex dir %s: %w", canonicalCodexDir, err)
+	}
+	if err := os.WriteFile(destAuthPath, srcData, 0o600); err != nil {
+		return fmt.Errorf("failed to write %s: %w", destAuthPath, err)
+	}
+	if err := os.WriteFile(seedSHAPath, []byte(srcSHA+"\n"), 0o600); err != nil {
+		return fmt.Errorf("failed to write %s: %w", seedSHAPath, err)
+	}
+	return nil
+}
+
+func (p *Provisioner) symlinkCodexAuthToRuntimes(destAuthPath string) {
+	if p.dataDir == "" {
+		return
+	}
+	if _, err := os.Stat(destAuthPath); err != nil {
+		return
+	}
+	primaryCodexDir := filepath.Join(p.homeDir, ".codex")
+	ignore(os.MkdirAll(primaryCodexDir, 0o755))
+	p.linkOrCopyAsset(destAuthPath, filepath.Join(primaryCodexDir, "auth.json"))
+
+	for _, target := range allRuntimeTargets {
+		rtCodexDir := filepath.Join(p.runtimeHomeDir(target), ".codex")
+		ignore(os.MkdirAll(rtCodexDir, 0o755))
+		p.linkOrCopyAsset(destAuthPath, filepath.Join(rtCodexDir, "auth.json"))
+	}
+}
+
+func (p *Provisioner) provisionCodexAuthState() error {
+	if p == nil || p.homeDir == "" {
+		return nil
+	}
+
+	p.mu.Lock()
+	srcPath := p.codexAuthSourcePath
+	p.mu.Unlock()
+
+	var canonicalCodexDir string
+	if p.dataDir != "" {
+		canonicalCodexDir = filepath.Join(p.dataDir, "codex")
+	} else {
+		canonicalCodexDir = filepath.Join(p.homeDir, ".codex")
+	}
+
+	destAuthPath := filepath.Join(canonicalCodexDir, "auth.json")
+	seedSHAPath := filepath.Join(canonicalCodexDir, ".auth.seed-sha256")
+
+	if err := seedCodexAuth(srcPath, canonicalCodexDir, destAuthPath, seedSHAPath); err != nil {
+		return err
+	}
+
+	p.symlinkCodexAuthToRuntimes(destAuthPath)
+	return nil
+}
+
 func (p *Provisioner) applyOAuthSettings(settings map[string]any, configDir, settingsPath string) error {
 	// OAuth / ADC mode: modelProvider must NOT be set to "gemini"
 	if mp, exists := settings["modelProvider"]; exists {
@@ -227,6 +314,10 @@ func (p *Provisioner) Sync(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("failed to sync settings: %w", err)
 	}
 
+	if err := p.provisionCodexAuthState(); err != nil {
+		return fmt.Errorf("failed to provision codex auth state: %w", err)
+	}
+
 	if err := p.SyncRules(cur.SystemPrompt); err != nil {
 		return fmt.Errorf("failed to sync rules: %w", err)
 	}
@@ -266,6 +357,7 @@ func (p *Provisioner) chownProvisionedPaths() {
 	}
 	chownTree(filepath.Join(p.homeDir, ".gemini"))
 	chownTree(filepath.Join(p.homeDir, ".claude"))
+	chownTree(filepath.Join(p.homeDir, ".codex"))
 
 	for _, target := range allRuntimeTargets {
 		rtHome := p.runtimeHomeDir(target)
@@ -287,6 +379,9 @@ func (p *Provisioner) chownProvisionedPaths() {
 		rtClaude := filepath.Join(rtHome, ".claude")
 		ignore(chownPath(rtClaude, 1000, 1000))
 		chownTree(rtClaude)
+		rtCodex := filepath.Join(rtHome, ".codex")
+		ignore(chownPath(rtCodex, 1000, 1000))
+		chownTree(rtCodex)
 	}
 	if p.dataDir != "" {
 		ignore(chownPath(p.dataDir, 1000, 1000))
@@ -296,6 +391,7 @@ func (p *Provisioner) chownProvisionedPaths() {
 			filepath.Join(p.dataDir, "conversations"),
 			filepath.Join(p.dataDir, "cache"),
 			filepath.Join(p.dataDir, "claude"),
+			filepath.Join(p.dataDir, "codex"),
 		} {
 			chownTree(dir)
 		}

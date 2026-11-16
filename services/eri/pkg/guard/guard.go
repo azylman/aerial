@@ -96,19 +96,26 @@ func FormatClaudeResponse(decision *Decision, toolInput json.RawMessage) ClaudeH
 }
 
 // mergeClaudeOverwrite applies canonical agy overwrite keys onto a copy of the
-// original Claude tool_input, translating key names to Claude's schema.
+// original Claude/Codex tool_input, translating key names to the target schema.
 func mergeClaudeOverwrite(toolInput json.RawMessage, overwrite map[string]any) map[string]any {
 	merged := map[string]any{}
+	var hasCmdKey, hasCommandKey bool
 	if len(toolInput) > 0 {
 		var original map[string]any
 		if err := json.Unmarshal(toolInput, &original); err == nil && original != nil {
 			merged = original
+			_, hasCmdKey = original["cmd"]
+			_, hasCommandKey = original["command"]
 		}
 	}
 	for k, v := range overwrite {
 		switch k {
 		case argCommandLine:
-			merged["command"] = v
+			if hasCmdKey && !hasCommandKey {
+				merged["cmd"] = v
+			} else {
+				merged["command"] = v
+			}
 		case "StartLine":
 			merged["offset"] = v
 		case "EndLine":

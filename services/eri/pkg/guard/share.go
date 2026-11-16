@@ -3,6 +3,7 @@ package guard
 import (
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -133,7 +134,9 @@ func CheckShare(toolName string, args ToolArgs) *Decision {
 
 	switch normalizedName {
 	case toolReplaceFileContent, toolWriteToFile, toolEditFile, toolWriteFile, toolEdit, toolMultiEdit, toolWrite:
-		if IsProtectedPath(args.FilePath()) {
+		if slices.ContainsFunc(args.TargetPaths(), func(p string) bool {
+			return IsProtectedPath(resolveArg(p, args.Cwd))
+		}) {
 			return &Decision{
 				Decision: DecisionDeny,
 				Reason:   ShareDenyReason,

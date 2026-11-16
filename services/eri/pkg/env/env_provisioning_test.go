@@ -2,8 +2,10 @@ package env
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -43,9 +45,15 @@ func assertIsolatedEphemeralStorage(t *testing.T, p *Provisioner, tmpData string
 	ephCliBrain := filepath.Join(ephHome, ".gemini", "antigravity-cli", "brain")
 	_ = os.MkdirAll(filepath.Dir(ephCliBrain), 0o755)
 	_ = os.Symlink(filepath.Join(tmpData, "brain"), ephCliBrain)
+	ephCodexSessions := filepath.Join(ephHome, ".codex", "sessions")
+	_ = os.MkdirAll(filepath.Dir(ephCodexSessions), 0o755)
+	_ = os.Symlink(filepath.Join(tmpData, "codex", "sessions"), ephCodexSessions)
 	p.provisionRuntimeSharedAssets(ephHome)
 	if fi, err := os.Lstat(ephCliBrain); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
 		t.Fatalf("expected ephemeral brain to be isolated directory, got fi=%v err=%v", fi, err)
+	}
+	if fi, err := os.Lstat(ephCodexSessions); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		t.Fatalf("expected ephemeral codex sessions to be isolated directory, got fi=%v err=%v", fi, err)
 	}
 }
 
@@ -702,39 +710,59 @@ type syncHooksCase struct {
 	hooksDirIsFile   bool
 	blockConfig      bool
 	blockHooksDir    bool
+	blockCodexDir    bool
+}
+
+func assertRuntimeHooksOutputs(t *testing.T, tc syncHooksCase, tmpHome, tmpData string) {
+	t.Helper()
+	for _, target := range allRuntimeTargets {
+		rtHooksJSON := filepath.Join(tmpData, "runtimes", string(target), ".gemini", "config", "hooks.json")
+		if _, err := os.Stat(rtHooksJSON); err != nil {
+			t.Errorf("expected hooks.json in runtime %s: %v", target, err)
+		}
+		rtClaudeSettings := filepath.Join(tmpData, "runtimes", string(target), ".claude", "settings.json")
+		if _, err := os.Stat(rtClaudeSettings); err != nil {
+			t.Errorf("expected settings.json in claude runtime %s: %v", target, err)
+		}
+		rtCodexHooks := filepath.Join(tmpData, "runtimes", string(target), ".codex", "hooks.json")
+		if _, err := os.Stat(rtCodexHooks); err != nil {
+			t.Errorf("expected hooks.json in codex runtime %s: %v", target, err)
+		}
+	}
+	primaryClaudeSettings := filepath.Join(tmpHome, ".claude", "settings.json")
+	if _, err := os.Stat(primaryClaudeSettings); err != nil {
+		t.Errorf("expected settings.json in primary claude home: %v", err)
+	}
+	if !tc.blockCodexDir {
+		primaryCodexHooks := filepath.Join(tmpHome, ".codex", "hooks.json")
+		if _, err := os.Stat(primaryCodexHooks); err != nil {
+			t.Errorf("expected hooks.json in primary codex home: %v", err)
+		}
+	}
+}
+
+func assertCustomHooksOutputs(t *testing.T, p *Provisioner, tmpHome string) {
+	t.Helper()
+	scriptPath := filepath.Join(tmpHome, ".gemini", "config", "hooks", "custom_guard.py")
+	fi, err := os.Stat(scriptPath)
+	if err != nil {
+		t.Fatalf("expected copied script at %s: %v", scriptPath, err)
+	}
+	if fi.Mode().Perm()&0o111 == 0 {
+		t.Errorf("expected executable script permissions, got %v", fi.Mode().Perm())
+	}
+	if err := p.SyncHooks(); err != nil {
+		t.Errorf("second SyncHooks call failed: %v", err)
+	}
 }
 
 func assertSyncHooksOutputs(t *testing.T, tc syncHooksCase, p *Provisioner, tmpHome, tmpData string) {
 	t.Helper()
 	if tc.withDataDir {
-		for _, target := range allRuntimeTargets {
-			rtHooksJSON := filepath.Join(tmpData, "runtimes", string(target), ".gemini", "config", "hooks.json")
-			if _, err := os.Stat(rtHooksJSON); err != nil {
-				t.Errorf("expected hooks.json in runtime %s: %v", target, err)
-			}
-			rtClaudeSettings := filepath.Join(tmpData, "runtimes", string(target), ".claude", "settings.json")
-			if _, err := os.Stat(rtClaudeSettings); err != nil {
-				t.Errorf("expected settings.json in claude runtime %s: %v", target, err)
-			}
-		}
-		primaryClaudeSettings := filepath.Join(tmpHome, ".claude", "settings.json")
-		if _, err := os.Stat(primaryClaudeSettings); err != nil {
-			t.Errorf("expected settings.json in primary claude home: %v", err)
-		}
+		assertRuntimeHooksOutputs(t, tc, tmpHome, tmpData)
 	}
-
 	if tc.withCustomAssets && !tc.blockHooksDir && !tc.blockConfig {
-		scriptPath := filepath.Join(tmpHome, ".gemini", "config", "hooks", "custom_guard.py")
-		fi, err := os.Stat(scriptPath)
-		if err != nil {
-			t.Fatalf("expected copied script at %s: %v", scriptPath, err)
-		}
-		if fi.Mode().Perm()&0o111 == 0 {
-			t.Errorf("expected executable script permissions, got %v", fi.Mode().Perm())
-		}
-		if err := p.SyncHooks(); err != nil {
-			t.Errorf("second SyncHooks call failed: %v", err)
-		}
+		assertCustomHooksOutputs(t, p, tmpHome)
 	}
 }
 
@@ -768,6 +796,9 @@ func runSyncHooksCase(t *testing.T, tc syncHooksCase) {
 	}
 	if tc.blockHooksDir {
 		writeTestFile(t, filepath.Join(tmpHome, ".gemini", "config", "hooks"), "file blocker")
+	}
+	if tc.blockCodexDir {
+		writeTestFile(t, filepath.Join(tmpHome, ".codex"), "file blocker")
 	}
 	if tc.withCustomAssets {
 		sourceDir := t.TempDir()
@@ -805,11 +836,134 @@ func TestSyncHooks(t *testing.T) {
 		{name: "hooksDir points to plain file", hooksDirIsFile: true},
 		{name: "config directory blocked by file", blockConfig: true},
 		{name: "hooks scripts directory blocked by file", withCustomAssets: true, blockHooksDir: true},
+		{name: "codex directory blocked by file", blockCodexDir: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runSyncHooksCase(t, tc)
+		})
+	}
+}
+
+type codexAuthCase struct {
+	name          string
+	nilProv       bool
+	emptyHome     bool
+	noDataDir     bool
+	sourceContent string
+	existingAuth  string
+	existingSHA   string
+	blockDir      bool
+	wantErr       bool
+	wantAuth      string
+	wantSHA       string
+}
+
+func assertCodexAuthOutput(t *testing.T, tc codexAuthCase, canonicalCodexDir, tmpHome, tmpData string, p *Provisioner) {
+	t.Helper()
+	data, rErr := os.ReadFile(filepath.Join(canonicalCodexDir, "auth.json"))
+	if rErr != nil || string(data) != tc.wantAuth {
+		t.Fatalf("auth.json = %q, %v; want %q", string(data), rErr, tc.wantAuth)
+	}
+	expectedSHA := tc.wantSHA
+	if expectedSHA == "match_source" {
+		expectedSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(tc.sourceContent)))
+	}
+	shaData, sErr := os.ReadFile(filepath.Join(canonicalCodexDir, ".auth.seed-sha256"))
+	if sErr != nil || strings.TrimSpace(string(shaData)) != expectedSHA {
+		t.Fatalf(".auth.seed-sha256 = %q, %v; want %q", string(shaData), sErr, expectedSHA)
+	}
+	if tmpData == "" {
+		return
+	}
+	primaryLink := filepath.Join(tmpHome, ".codex", "auth.json")
+	if fi, lErr := os.Lstat(primaryLink); lErr != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected symlink at primary codex auth: %v", lErr)
+	}
+	for _, target := range allRuntimeTargets {
+		rtLink := filepath.Join(p.runtimeHomeDir(target), ".codex", "auth.json")
+		if fi, lErr := os.Lstat(rtLink); lErr != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("expected symlink at %s runtime codex auth: %v", target, lErr)
+		}
+	}
+}
+
+func runCodexAuthCase(t *testing.T, tc codexAuthCase) {
+	t.Helper()
+	if tc.nilProv {
+		var pNil *Provisioner
+		if err := pNil.provisionCodexAuthState(); err != nil {
+			t.Fatalf("expected nil error on nil provisioner: %v", err)
+		}
+		return
+	}
+	if tc.emptyHome {
+		pEmpty := New("", "")
+		if err := pEmpty.provisionCodexAuthState(); err != nil {
+			t.Fatalf("expected nil error on empty home: %v", err)
+		}
+		return
+	}
+
+	tmpHome := t.TempDir()
+	var tmpData string
+	if !tc.noDataDir {
+		tmpData = t.TempDir()
+	}
+	p := New(tmpHome, tmpData)
+
+	var canonicalCodexDir string
+	if tmpData != "" {
+		canonicalCodexDir = filepath.Join(tmpData, "codex")
+	} else {
+		canonicalCodexDir = filepath.Join(tmpHome, ".codex")
+	}
+
+	if tc.blockDir {
+		writeTestFile(t, canonicalCodexDir, "blocker")
+	}
+	if tc.existingAuth != "" {
+		writeTestFile(t, filepath.Join(canonicalCodexDir, "auth.json"), tc.existingAuth)
+	}
+	if tc.existingSHA != "" {
+		existingSHA := tc.existingSHA
+		if existingSHA == "match_source" {
+			existingSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(tc.sourceContent)))
+		}
+		writeTestFile(t, filepath.Join(canonicalCodexDir, ".auth.seed-sha256"), existingSHA)
+	}
+	if tc.sourceContent != "" {
+		src := writeTestFile(t, filepath.Join(tmpHome, "source-auth.json"), tc.sourceContent)
+		p.SetCodexAuthSourcePath(src)
+	} else {
+		p.SetCodexAuthSourcePath("")
+	}
+
+	err := p.provisionCodexAuthState()
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("provisionCodexAuthState() error = %v, wantErr %v", err, tc.wantErr)
+	}
+	if !tc.wantErr && tc.wantAuth != "" {
+		assertCodexAuthOutput(t, tc, canonicalCodexDir, tmpHome, tmpData, p)
+	}
+}
+
+func TestProvisionCodexAuthState(t *testing.T) {
+	tests := []codexAuthCase{
+		{name: "nil provisioner", nilProv: true},
+		{name: "empty home", emptyHome: true},
+		{name: "missing auth seeds from source", sourceContent: `{"tokens":"seed1"}`, wantAuth: `{"tokens":"seed1"}`, wantSHA: "match_source"},
+		{name: "preserves live rotated refresh tokens when seed sha matches", sourceContent: `{"tokens":"seed1"}`, existingAuth: `{"tokens":"refreshed"}`, existingSHA: "match_source", wantAuth: `{"tokens":"refreshed"}`, wantSHA: "match_source"},
+		{name: "overwrites auth when source seed sha differs", sourceContent: `{"tokens":"seed2"}`, existingAuth: `{"tokens":"old"}`, existingSHA: "old-sha", wantAuth: `{"tokens":"seed2"}`, wantSHA: "match_source"},
+		{name: "seeds into home .codex when dataDir is empty", noDataDir: true, sourceContent: `{"tokens":"home-seed"}`, wantAuth: `{"tokens":"home-seed"}`, wantSHA: "match_source"},
+		{name: "empty source content is skipped", sourceContent: "   "},
+		{name: "mkdir failure returns error when codex dir is file blocker", sourceContent: `{"tokens":"seed"}`, blockDir: true, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runCodexAuthCase(t, tc)
 		})
 	}
 }

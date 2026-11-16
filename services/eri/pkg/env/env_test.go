@@ -44,6 +44,15 @@ func (p *Provisioner) SetOAuthTokenSourcePath(path string) {
 	p.oauthTokenSourcePath = path
 }
 
+func (p *Provisioner) SetCodexAuthSourcePath(path string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.codexAuthSourcePath = path
+}
+
 func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
 	data := config.DefaultConfigData()
 	data.DatabaseURL, data.Port = ":memory:", "0"
@@ -107,6 +116,7 @@ func assertNilReceiver(t *testing.T) {
 	t.Helper()
 	var pNil *Provisioner
 	pNil.SetOAuthTokenSourcePath("/ignored")
+	pNil.SetCodexAuthSourcePath("/ignored")
 
 	if err := pNil.Sync(context.Background(), nil); err != nil {
 		t.Errorf("expected nil error on Sync with nil receiver")
@@ -125,6 +135,9 @@ func assertNilReceiver(t *testing.T) {
 	}
 	if pNil.LinkTargetSkills("/tmp", TargetDiscord) != 0 {
 		t.Errorf("expected 0 skills linked on nil receiver")
+	}
+	if err := pNil.EnsureTargetCodexConfigTOML("/tmp", nil); err != nil {
+		t.Errorf("expected nil error on EnsureTargetCodexConfigTOML with nil receiver")
 	}
 }
 
@@ -245,6 +258,7 @@ type syncCase struct {
 	emptyHome     bool
 	withActiveCfg bool
 	failSettings  bool
+	failCodexAuth bool
 	failRules     bool
 	failMCP       bool
 	mockRoot      bool
@@ -257,7 +271,7 @@ func assertChownPaths(t *testing.T, chowned []string) {
 	if len(chowned) == 0 {
 		t.Errorf("expected chownPath to be called when getEuid returns 0")
 	}
-	var foundRtHome, foundBrain bool
+	var foundRtHome, foundBrain, foundCodex bool
 	for _, cp := range chowned {
 		if strings.Contains(cp, filepath.Join("runtimes", "discord")) {
 			foundRtHome = true
@@ -265,12 +279,18 @@ func assertChownPaths(t *testing.T, chowned []string) {
 		if strings.Contains(cp, "brain") {
 			foundBrain = true
 		}
+		if strings.Contains(cp, ".codex") || strings.Contains(cp, "codex") {
+			foundCodex = true
+		}
 	}
 	if !foundRtHome {
 		t.Errorf("expected runtime home directory to be chowned")
 	}
 	if !foundBrain {
 		t.Errorf("expected brain storage to be chowned")
+	}
+	if !foundCodex {
+		t.Errorf("expected codex directory to be chowned")
 	}
 	for _, cp := range chowned {
 		if strings.Contains(cp, "target-skill") || strings.Contains(cp, "symlink-test") {
@@ -289,12 +309,36 @@ func assertRuntimeIsolation(t *testing.T, p *Provisioner) {
 		if _, err := os.Stat(filepath.Join(targetGemini, "config", "mcp_config.json")); err != nil {
 			t.Errorf("expected mcp config in %s runtime: %v", target, err)
 		}
+		targetCodex := filepath.Join(p.dataDir, "runtimes", string(target), ".codex")
+		if _, err := os.Stat(filepath.Join(targetCodex, "AGENTS.md")); err != nil {
+			t.Errorf("expected AGENTS.md in %s runtime: %v", target, err)
+		}
+		if _, err := os.Stat(filepath.Join(targetCodex, "config.toml")); err != nil {
+			t.Errorf("expected config.toml in %s runtime: %v", target, err)
+		}
 	}
 
 	ephemeralMCP := filepath.Join(p.dataDir, "runtimes", "ephemeral", ".gemini", "config", "mcp_config.json")
 	data, _ := os.ReadFile(ephemeralMCP)
 	if strings.Contains(string(data), "scheduler") {
 		t.Errorf("ephemeral runtime should not include scheduler: %s", string(data))
+	}
+}
+
+func injectSyncFailure(t *testing.T, tc syncCase, p *Provisioner) {
+	t.Helper()
+	if tc.failSettings {
+		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "antigravity-cli"), "file-blocking-dir")
+	}
+	if tc.failCodexAuth {
+		writeTestFile(t, filepath.Join(p.dataDir, "codex"), "file-blocking-dir")
+		p.SetCodexAuthSourcePath(writeTestFile(t, filepath.Join(t.TempDir(), "auth.json"), `{"seed":1}`))
+	}
+	if tc.failRules {
+		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "rules"), "file-blocking-dir")
+	}
+	if tc.failMCP {
+		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "config", "mcp_config.json", "blocker"), "b")
 	}
 }
 
@@ -361,15 +405,7 @@ func runSyncCase(t *testing.T, tc syncCase) {
 		_ = os.Symlink(symlinkTarget, symlinkPath)
 	}
 
-	if tc.failSettings {
-		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "antigravity-cli"), "file-blocking-dir")
-	}
-	if tc.failRules {
-		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "rules"), "file-blocking-dir")
-	}
-	if tc.failMCP {
-		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "config", "mcp_config.json", "blocker"), "b")
-	}
+	injectSyncFailure(t, tc, p)
 
 	var cfg *config.Config
 	if tc.withActiveCfg {
@@ -383,6 +419,9 @@ func runSyncCase(t *testing.T, tc syncCase) {
 	err := p.Sync(context.Background(), cfg)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("Sync() error = %v, wantErr %v", err, tc.wantErr)
+	}
+	if tc.failCodexAuth && (err == nil || !strings.Contains(err.Error(), "codex auth")) {
+		t.Fatalf("expected error to mention 'codex auth', got: %v", err)
 	}
 
 	if tc.mockRoot && !tc.wantErr && tc.withActiveCfg {
@@ -400,6 +439,7 @@ func TestSync_EndToEndAndIsolation(t *testing.T) {
 		{name: "successful default sync with default config data", withActiveCfg: false, wantErr: false},
 		{name: "successful sync with active config and partitioned runtimes", withActiveCfg: true, wantErr: false},
 		{name: "sync failure propagated from settings error", failSettings: true, wantErr: true},
+		{name: "sync failure propagated from codex auth error", failCodexAuth: true, wantErr: true},
 		{name: "sync failure propagated from rules error", failRules: true, wantErr: true},
 		{name: "sync failure propagated from mcp error", failMCP: true, wantErr: true},
 		{name: "sync with mock root triggers chown", withActiveCfg: true, mockRoot: true, wantErr: false},
@@ -881,32 +921,45 @@ type syncRulesCase struct {
 	wantPrimaryMD bool
 }
 
-func assertSyncRulesOutput(t *testing.T, tc syncRulesCase, p *Provisioner) {
+func assertPrimaryRulesMD(t *testing.T, p *Provisioner, wantPrimaryMD bool) {
 	t.Helper()
-	rulesDir := filepath.Join(p.homeDir, ".gemini", "rules")
-	entries, rErr := os.ReadDir(rulesDir)
-	if rErr != nil || len(entries) == 0 {
-		t.Fatalf("expected rules in %s: %v", rulesDir, rErr)
-	}
 	claudeMD := filepath.Join(p.homeDir, ".claude", "CLAUDE.md")
 	claudeData, cErr := os.ReadFile(claudeMD)
-	if tc.wantPrimaryMD {
+	codexMD := filepath.Join(p.homeDir, ".codex", "AGENTS.md")
+	codexData, cdErr := os.ReadFile(codexMD)
+	if wantPrimaryMD {
 		if cErr != nil || len(claudeData) == 0 {
 			t.Fatalf("expected CLAUDE.md in %s: %v", claudeMD, cErr)
 		}
 		if strings.Contains(string(claudeData), "---") {
 			t.Errorf("CLAUDE.md should not contain YAML frontmatter: %s", string(claudeData))
 		}
-	} else if !os.IsNotExist(cErr) {
-		t.Errorf("expected no primary CLAUDE.md in %s, got err=%v", claudeMD, cErr)
-	}
-	if tc.noDataDir {
+		if cdErr != nil || len(codexData) == 0 {
+			t.Fatalf("expected AGENTS.md in %s: %v", codexMD, cdErr)
+		}
+		if strings.Contains(string(codexData), "---") {
+			t.Errorf("AGENTS.md should not contain YAML frontmatter: %s", string(codexData))
+		}
 		return
 	}
+	if !os.IsNotExist(cErr) {
+		t.Errorf("expected no primary CLAUDE.md in %s, got err=%v", claudeMD, cErr)
+	}
+	if !os.IsNotExist(cdErr) {
+		t.Errorf("expected no primary AGENTS.md in %s, got err=%v", codexMD, cdErr)
+	}
+}
+
+func assertRuntimeRulesMD(t *testing.T, p *Provisioner) {
+	t.Helper()
 	for _, target := range allRuntimeTargets {
 		rtClaudeMD := filepath.Join(p.runtimeHomeDir(target), ".claude", "CLAUDE.md")
 		if _, err := os.Stat(rtClaudeMD); err != nil {
 			t.Errorf("expected CLAUDE.md in %s runtime: %v", target, err)
+		}
+		rtCodexMD := filepath.Join(p.runtimeHomeDir(target), ".codex", "AGENTS.md")
+		if _, err := os.Stat(rtCodexMD); err != nil {
+			t.Errorf("expected AGENTS.md in %s runtime: %v", target, err)
 		}
 		rtClaudeProjects := filepath.Join(p.runtimeHomeDir(target), ".claude", "projects")
 		if target == TargetEphemeral {
@@ -916,6 +969,27 @@ func assertSyncRulesOutput(t *testing.T, tc syncRulesCase, p *Provisioner) {
 		} else if fi, err := os.Lstat(rtClaudeProjects); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 			t.Errorf("expected projects symlink in %s runtime: %v", target, err)
 		}
+		rtCodexSessions := filepath.Join(p.runtimeHomeDir(target), ".codex", "sessions")
+		if target == TargetEphemeral {
+			if fi, err := os.Lstat(rtCodexSessions); err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+				t.Errorf("expected isolated codex sessions dir in %s runtime: %v", target, err)
+			}
+		} else if fi, err := os.Lstat(rtCodexSessions); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("expected codex sessions symlink in %s runtime: %v", target, err)
+		}
+	}
+}
+
+func assertSyncRulesOutput(t *testing.T, tc syncRulesCase, p *Provisioner) {
+	t.Helper()
+	rulesDir := filepath.Join(p.homeDir, ".gemini", "rules")
+	entries, rErr := os.ReadDir(rulesDir)
+	if rErr != nil || len(entries) == 0 {
+		t.Fatalf("expected rules in %s: %v", rulesDir, rErr)
+	}
+	assertPrimaryRulesMD(t, p, tc.wantPrimaryMD)
+	if !tc.noDataDir {
+		assertRuntimeRulesMD(t, p)
 	}
 }
 
@@ -942,6 +1016,7 @@ func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
 	}
 	if tc.staleClaudeMD {
 		writeTestFile(t, filepath.Join(p.homeDir, ".claude", "CLAUDE.md"), "stale")
+		writeTestFile(t, filepath.Join(p.homeDir, ".codex", "AGENTS.md"), "stale")
 	}
 
 	if tc.zeroRules {
@@ -1073,6 +1148,110 @@ func TestClaudeTargetMcpAndSettingsProvisioning(t *testing.T) {
 				_ = p.EnsureTargetClaudeMcpConfig(targetDir, raw)
 				p.provisionTargetClaudeSettings(targetDir)
 			}
+		})
+	}
+}
+
+type codexTargetCase struct {
+	name        string
+	nilProv     bool
+	emptyDir    bool
+	rawConfig   json.RawMessage
+	blockedDir  bool
+	wantErr     bool
+	wantTOML    bool
+	wantContent string
+}
+
+func assertCodexTargetTOML(t *testing.T, targetDir string, tc codexTargetCase) {
+	t.Helper()
+	if targetDir == "" {
+		return
+	}
+	tomlPath := filepath.Join(targetDir, "config.toml")
+	data, readErr := os.ReadFile(tomlPath)
+	if tc.wantTOML && readErr != nil {
+		t.Fatalf("expected config.toml at %s, but read failed: %v", tomlPath, readErr)
+	}
+	if !tc.wantTOML && readErr == nil {
+		t.Fatalf("did not expect config.toml at %s, but file exists", tomlPath)
+	}
+	if tc.wantContent != "" && !strings.Contains(string(data), tc.wantContent) {
+		t.Fatalf("config.toml missing expected substring %q: %s", tc.wantContent, string(data))
+	}
+}
+
+func TestCodexTargetMcpAndHooksProvisioning(t *testing.T) {
+	tests := []codexTargetCase{
+		{
+			name:        "valid target config written",
+			rawConfig:   json.RawMessage(`{"mcpServers":{"srv":{"server_url":"http://test:8080"}}}`),
+			wantErr:     false,
+			wantTOML:    true,
+			wantContent: `url = "http://test:8080"`,
+		},
+		{
+			name:       "blocked codex dir returns error",
+			rawConfig:  json.RawMessage(`{"mcpServers":{"srv":{"server_url":"http://test:8080"}}}`),
+			blockedDir: true,
+			wantErr:    true,
+			wantTOML:   false,
+		},
+		{
+			name:      "empty raw config does not write toml",
+			rawConfig: json.RawMessage(""),
+			wantErr:   false,
+			wantTOML:  false,
+		},
+		{
+			name:      "null raw config does not write toml",
+			rawConfig: json.RawMessage("null"),
+			wantErr:   false,
+			wantTOML:  false,
+		},
+		{
+			name:      "quoted empty raw config does not write toml",
+			rawConfig: json.RawMessage(`""`),
+			wantErr:   false,
+			wantTOML:  false,
+		},
+		{
+			name:      "empty dir returns nil without writing",
+			emptyDir:  true,
+			rawConfig: json.RawMessage(`{"mcpServers":{"srv":{"server_url":"http://test:8080"}}}`),
+			wantErr:   false,
+			wantTOML:  false,
+		},
+		{
+			name:      "nil provisioner returns nil",
+			nilProv:   true,
+			rawConfig: json.RawMessage(`{"mcpServers":{"srv":{"server_url":"http://test:8080"}}}`),
+			wantErr:   false,
+			wantTOML:  false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			var p *Provisioner
+			if !tc.nilProv {
+				p = New(tmp, tmp)
+			}
+			targetDir := filepath.Join(tmp, ".codex")
+			if tc.emptyDir {
+				targetDir = ""
+			}
+			if tc.blockedDir {
+				targetDir = filepath.Join(tmp, "blocked_codex")
+				writeTestFile(t, targetDir, "blocking file")
+			}
+
+			err := p.EnsureTargetCodexConfigTOML(targetDir, tc.rawConfig)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("EnsureTargetCodexConfigTOML() error = %v, wantErr %v", err, tc.wantErr)
+			}
+
+			assertCodexTargetTOML(t, targetDir, tc)
 		})
 	}
 }

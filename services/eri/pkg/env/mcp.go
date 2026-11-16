@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -182,6 +183,10 @@ func ConvertMCPConfigForClaude(rawConfig json.RawMessage) json.RawMessage {
 	return json.RawMessage(outBytes)
 }
 
+const (
+	nullLiteral = "null"
+)
+
 // EnsureTargetClaudeMcpConfig writes raw JSON configuration into <claudeDir>/mcp_config.json,
 // converting HTTP servers to Claude format.
 func (p *Provisioner) EnsureTargetClaudeMcpConfig(claudeDir string, rawConfig json.RawMessage) error {
@@ -189,7 +194,7 @@ func (p *Provisioner) EnsureTargetClaudeMcpConfig(claudeDir string, rawConfig js
 		return nil
 	}
 	trimmed := strings.TrimSpace(string(rawConfig))
-	if trimmed == "" || trimmed == `""` || trimmed == "null" {
+	if trimmed == "" || trimmed == `""` || trimmed == nullLiteral {
 		return nil
 	}
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
@@ -198,6 +203,166 @@ func (p *Provisioner) EnsureTargetClaudeMcpConfig(claudeDir string, rawConfig js
 	claudeConfig := p.mcpProxy.withDaemonHeader(ConvertMCPConfigForClaude(rawConfig))
 	targetPath := filepath.Join(claudeDir, "mcp_config.json")
 	return p.writeAtomic(targetPath, string(claudeConfig))
+}
+
+func formatCodexServerURL(b *strings.Builder, serverURL string, srvMap map[string]any, proxyBase string) {
+	fmt.Fprintf(b, "url = %q\n", serverURL)
+
+	var headers map[string]any
+	if h, ok := srvMap["http_headers"].(map[string]any); ok {
+		headers = h
+	} else if h, ok := srvMap["headers"].(map[string]any); ok {
+		headers = h
+	}
+
+	if len(headers) > 0 {
+		hKeys := make([]string, 0, len(headers))
+		for k := range headers {
+			hKeys = append(hKeys, k)
+		}
+		sort.Strings(hKeys)
+		pairs := make([]string, 0, len(hKeys))
+		for _, k := range hKeys {
+			pairs = append(pairs, fmt.Sprintf("%q = %q", k, fmt.Sprint(headers[k])))
+		}
+		fmt.Fprintf(b, "http_headers = { %s }\n", strings.Join(pairs, ", "))
+	}
+
+	if proxyBase != "" && strings.HasPrefix(serverURL, proxyBase) {
+		b.WriteString("env_http_headers = { \"X-Eri-Daemon\" = \"ERI_DAEMON_ID\" }\n")
+	}
+}
+
+func isBareTOMLKey(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func formatTOMLKey(key string) string {
+	if isBareTOMLKey(key) {
+		return key
+	}
+	return fmt.Sprintf("%q", key)
+}
+
+func formatCodexServerCommand(b *strings.Builder, name string, srvMap map[string]any) {
+	cmd := fmt.Sprint(srvMap["command"])
+	if srvMap["command"] == nil {
+		cmd = ""
+	}
+	fmt.Fprintf(b, "command = %q\n", cmd)
+
+	var argsList []string
+	if argsSlice, ok := srvMap["args"].([]any); ok {
+		for _, a := range argsSlice {
+			argsList = append(argsList, fmt.Sprintf("%q", fmt.Sprint(a)))
+		}
+	}
+	fmt.Fprintf(b, "args = [%s]\n", strings.Join(argsList, ", "))
+
+	envMap, ok := srvMap["env"].(map[string]any)
+	if !ok || len(envMap) == 0 {
+		return
+	}
+	eKeys := make([]string, 0, len(envMap))
+	for k := range envMap {
+		eKeys = append(eKeys, k)
+	}
+	sort.Strings(eKeys)
+
+	fmt.Fprintf(b, "\n[mcp_servers.%s.env]\n", formatTOMLKey(name))
+	for _, k := range eKeys {
+		fmt.Fprintf(b, "%s = %q\n", formatTOMLKey(k), fmt.Sprint(envMap[k]))
+	}
+}
+
+// FormatCodexConfigTOML transforms an agy/claude MCP config JSON message into Codex config.toml format.
+func FormatCodexConfigTOML(rawConfig json.RawMessage, proxyBase string) string {
+	var b strings.Builder
+	b.WriteString("[features]\nhooks = true\n")
+
+	if len(rawConfig) == 0 {
+		return b.String()
+	}
+	trimmed := strings.TrimSpace(string(rawConfig))
+	if trimmed == "" || trimmed == `""` || trimmed == nullLiteral {
+		return b.String()
+	}
+
+	configBytes := rawConfig
+	var strVal string
+	if err := json.Unmarshal(rawConfig, &strVal); err == nil && strVal != "" {
+		configBytes = []byte(strVal)
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(configBytes, &root); err != nil {
+		return b.String()
+	}
+
+	servers, ok := root["mcpServers"].(map[string]any)
+	if !ok || len(servers) == 0 {
+		return b.String()
+	}
+
+	names := make([]string, 0, len(servers))
+	for name := range servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		srvMap, ok := servers[name].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		var serverURL string
+		for _, k := range mcpURLKeys {
+			if u, ok := srvMap[k].(string); ok && strings.TrimSpace(u) != "" {
+				serverURL = strings.TrimSpace(u)
+				break
+			}
+		}
+
+		fmt.Fprintf(&b, "\n[mcp_servers.%s]\n", formatTOMLKey(name))
+		if serverURL != "" {
+			formatCodexServerURL(&b, serverURL, srvMap, proxyBase)
+		} else {
+			formatCodexServerCommand(&b, name, srvMap)
+		}
+	}
+
+	return b.String()
+}
+
+// EnsureTargetCodexConfigTOML writes TOML configuration into <codexDir>/config.toml.
+func (p *Provisioner) EnsureTargetCodexConfigTOML(codexDir string, rawConfig json.RawMessage) error {
+	if p == nil || codexDir == "" || len(rawConfig) == 0 {
+		return nil
+	}
+	trimmed := strings.TrimSpace(string(rawConfig))
+	if trimmed == "" || trimmed == `""` || trimmed == nullLiteral {
+		return nil
+	}
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create codex directory %s: %w", codexDir, err)
+	}
+	var proxyBase string
+	if p.mcpProxy != nil {
+		proxyBase = p.mcpProxy.proxyBase()
+	}
+	tomlContent := FormatCodexConfigTOML(rawConfig, proxyBase)
+	targetPath := filepath.Join(codexDir, "config.toml")
+	return p.writeAtomic(targetPath, tomlContent)
 }
 
 // SyncMCP writes target-partitioned agy and Claude Code mcp_config.json files, carrying each
@@ -222,6 +387,9 @@ func (p *Provisioner) SyncMCP(ctx context.Context, cfg *config.Config) error {
 		if err := p.EnsureTargetClaudeMcpConfig(filepath.Join(p.homeDir, ".claude"), discordConfig); err != nil {
 			return fmt.Errorf("failed to sync primary claude mcp config: %w", err)
 		}
+		if err := p.EnsureTargetCodexConfigTOML(filepath.Join(p.homeDir, ".codex"), discordConfig); err != nil {
+			return fmt.Errorf("failed to sync primary codex config: %w", err)
+		}
 	}
 
 	if p.dataDir != "" {
@@ -238,6 +406,10 @@ func (p *Provisioner) SyncMCP(ctx context.Context, cfg *config.Config) error {
 			claudeDir := filepath.Join(p.runtimeHomeDir(target), ".claude")
 			if err := p.EnsureTargetClaudeMcpConfig(claudeDir, configs[target]); err != nil {
 				return fmt.Errorf("failed to sync %s runtime claude mcp config: %w", target, err)
+			}
+			codexDir := filepath.Join(p.runtimeHomeDir(target), ".codex")
+			if err := p.EnsureTargetCodexConfigTOML(codexDir, configs[target]); err != nil {
+				return fmt.Errorf("failed to sync %s runtime codex config: %w", target, err)
 			}
 		}
 	}
