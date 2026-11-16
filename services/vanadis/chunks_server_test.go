@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,8 +98,110 @@ func TestVanadisServer_HandleChunkByID(t *testing.T) {
 	}
 }
 
+func mockRestateCheckErrors(w http.ResponseWriter, path, bodyStr string) bool {
+	if strings.Contains(path, "fail") {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"internal error"}`))
+		return true
+	}
+	if strings.Contains(path, "missing") || strings.Contains(path, "c999") || strings.Contains(path, "unknown-id") || strings.Contains(bodyStr, "missing") {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"not found"}`))
+		return true
+	}
+	if strings.Contains(path, "b-done") || strings.Contains(path, "conflict") || strings.Contains(bodyStr, "conflict") {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"build state conflict"}`))
+		return true
+	}
+	return false
+}
+
+func mockRestateRouteSuccess(w http.ResponseWriter, path string, bodyBytes []byte) {
+	if strings.Contains(path, "RouteAttachPR") {
+		var req AttachChunkPRRequest
+		_ = json.Unmarshal(bodyBytes, &req)
+		if req.ChunkID == "missing-chunk" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"chunk not found"}`))
+			return
+		}
+		chunkID := firstNonEmpty(req.ChunkID, "chunk-standalone")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AttachChunkPRResponse{
+			Status:   "attached",
+			BuildID:  "build-1",
+			ChunkID:  chunkID,
+			ThreadID: "thread-1",
+		})
+		return
+	}
+	if strings.Contains(path, "UpdateBuild") {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(VanadisBuild{ID: "b1", Status: "running"})
+		return
+	}
+	if strings.Contains(path, "UpdateChunk") {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(VanadisChunk{ID: "c1", Status: "pending"})
+		return
+	}
+	if strings.Contains(path, "AppendChunks") {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]VanadisChunk{{ID: "c2", Status: "pending"}})
+		return
+	}
+	if strings.Contains(path, "RemoveChunk") {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if strings.Contains(path, "Cancel") {
+		parts := strings.Split(path, "/")
+		buildID := "b1"
+		if len(parts) >= 3 {
+			buildID = parts[2]
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(VanadisBuild{ID: buildID, Status: statusCancelled})
+		return
+	}
+	if strings.Contains(path, "Create") {
+		var createReq CreateBuildRequest
+		_ = json.Unmarshal(bodyBytes, &createReq)
+		buildID := firstNonEmpty(createReq.ID, "b1")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(VanadisBuild{
+			ID:              buildID,
+			ThreadID:        createReq.ThreadID,
+			Tier:            createReq.Tier,
+			Title:           createReq.Title,
+			Objective:       createReq.Objective,
+			Status:          "running",
+			StatusMessageID: "msg-1",
+		})
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func newMockRestateServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		var bodyBytes []byte
+		if r.Body != nil {
+			bodyBytes, _ = io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+		if mockRestateCheckErrors(w, path, string(bodyBytes)) {
+			return
+		}
+		mockRestateRouteSuccess(w, path, bodyBytes)
+	}))
+}
+
 func TestVanadisServer_HandleAttachChunkPR(t *testing.T) {
 	t.Parallel()
+
 	tests := []struct {
 		name        string
 		nilStore    bool
@@ -107,41 +211,44 @@ func TestVanadisServer_HandleAttachChunkPR(t *testing.T) {
 		wantCode    int
 		wantStatus  string
 		wantPresent []string
-		wantWidget  bool
 	}{
-		{"attach_existing_chunk", false, false, http.MethodPost, `{"chunk_id":"chunk-1","pr_number":103,"repo":"aerial"}`, http.StatusOK, "attached", []string{"thread_id", "build_id", "chunk_id"}, true},
-		{"attach_standalone", false, false, http.MethodPost, `{"chunk_id":"","repo":"aerial","pr_number":401,"branch":"feature-1","title":"Feature 1"}`, http.StatusOK, "attached", []string{"build_id", "chunk_id"}, true},
-		{"missing_chunk", false, false, http.MethodPost, `{"chunk_id":"missing-chunk","pr_number":101,"repo":"aerial"}`, http.StatusNotFound, "", nil, false},
-		{"body_read_error", false, true, http.MethodPost, "", http.StatusBadRequest, "", nil, false},
-		{"invalid_json", false, false, http.MethodPost, `{invalid-json`, http.StatusBadRequest, "", nil, false},
-		{"missing_chunk_id_and_repo", false, false, http.MethodPost, `{"chunk_id":"","repo":"","pr_number":101}`, http.StatusBadRequest, "", nil, false},
-		{"zero_pr_number", false, false, http.MethodPost, `{"chunk_id":"chunk-1","pr_number":0}`, http.StatusBadRequest, "", nil, false},
-		{"method_not_allowed", false, false, http.MethodGet, "", http.StatusMethodNotAllowed, "", nil, false},
-		{"nil_store", true, false, http.MethodPost, `{}`, http.StatusInternalServerError, "", nil, false},
+		{"attach_existing_chunk", false, false, http.MethodPost, `{"chunk_id":"chunk-1","pr_number":103,"repo":"aerial"}`, http.StatusOK, "attached", []string{"thread_id", "build_id", "chunk_id"}},
+		{"attach_standalone", false, false, http.MethodPost, `{"chunk_id":"","repo":"aerial","pr_number":401,"branch":"feature-1","title":"Feature 1"}`, http.StatusOK, "attached", []string{"build_id", "chunk_id"}},
+		{"missing_chunk", false, false, http.MethodPost, `{"chunk_id":"missing-chunk","pr_number":101,"repo":"aerial"}`, http.StatusNotFound, "", nil},
+		{"body_read_error", false, true, http.MethodPost, "", http.StatusBadRequest, "", nil},
+		{"invalid_json", false, false, http.MethodPost, `{invalid-json`, http.StatusBadRequest, "", nil},
+		{"missing_chunk_id_and_repo", false, false, http.MethodPost, `{"chunk_id":"","repo":"","pr_number":101}`, http.StatusBadRequest, "", nil},
+		{"zero_pr_number", false, false, http.MethodPost, `{"chunk_id":"chunk-1","pr_number":0}`, http.StatusBadRequest, "", nil},
+		{"method_not_allowed", false, false, http.MethodGet, "", http.StatusMethodNotAllowed, "", nil},
+		{"nil_store", true, false, http.MethodPost, `{}`, http.StatusInternalServerError, "", nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			restateSrv := newMockRestateServer()
+			defer restateSrv.Close()
+
 			var store VanadisStore
 			if !tc.nilStore {
 				store, _, _ = setupTestStoreWithBuild()
 			}
-			bus := &mockChunkBus{}
-			srv := NewVanadisServer(Config{}, store, nil)
-			srv.SetBus(bus)
+			srv := NewVanadisServer(Config{}, store, restateSrv.Client())
+			if !tc.nilStore {
+				srv.restateCfg.RestateIngressURL = restateSrv.URL
+			}
 			rec := serveChunkRequest(srv, tc.method, "/chunks/attach-pr", tc.body, tc.errBody)
 			if rec.Code != tc.wantCode {
 				t.Fatalf("got status %d, want %d: %s", rec.Code, tc.wantCode, rec.Body.String())
 			}
 			assertJSONFields(t, rec.Body.Bytes(), tc.wantStatus, tc.wantPresent)
-			if gotWidget := bus.widgetCalls > 0; gotWidget != tc.wantWidget {
-				t.Errorf("widget sync published = %v, want %v", gotWidget, tc.wantWidget)
-			}
 		})
 	}
 }
 
 func TestServer_MutationEndpoints(t *testing.T) {
+	restateSrv := newMockRestateServer()
+	defer restateSrv.Close()
+
 	tests := []struct {
 		name       string
 		nilStore   bool
@@ -152,79 +259,72 @@ func TestServer_MutationEndpoints(t *testing.T) {
 		path       string
 		body       string
 		wantCode   int
-		wantWidget bool
 	}{
 		// PATCH /builds/{id}
-		{"patch_build_nil_store", true, false, nil, nil, http.MethodPatch, "/builds/b1", `{"title":"T"}`, http.StatusInternalServerError, false},
-		{"patch_build_err_reader", false, true, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1", "", http.StatusBadRequest, false},
-		{"patch_build_invalid_json", false, false, nil, nil, http.MethodPatch, "/builds/b1", `{invalid-json`, http.StatusBadRequest, false},
-		{"patch_build_empty_fields", false, false, nil, nil, http.MethodPatch, "/builds/b1", `{"title":""}`, http.StatusBadRequest, false},
-		{"patch_build_not_found", false, false, nil, nil, http.MethodPatch, "/builds/b-missing", `{"title":"T"}`, http.StatusNotFound, false},
-		{"patch_build_conflict", false, false, &VanadisBuild{ID: "b-done", Status: "completed"}, nil, http.MethodPatch, "/builds/b-done", `{"title":"T"}`, http.StatusConflict, false},
-		{"patch_build_ok_no_title", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1", `{"objective":"New Obj"}`, http.StatusOK, false},
-		{"patch_build_ok_with_title_syncs_widget", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1", `{"title":"New Title"}`, http.StatusOK, true},
-		{"patch_chunk_dag_mutation_notify_error", false, false, &VanadisBuild{ID: "b-mut-err", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending", ChunkIndex: 0, DependsOn: []string{}}}, http.MethodPatch, "/builds/b-mut-err/chunks/c1", `{"title":"New Chunk Title"}`, http.StatusOK, true},
+		{"patch_build_nil_store", true, false, nil, nil, http.MethodPatch, "/builds/b1", `{"title":"T"}`, http.StatusInternalServerError},
+		{"patch_build_err_reader", false, true, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1", "", http.StatusBadRequest},
+		{"patch_build_invalid_json", false, false, nil, nil, http.MethodPatch, "/builds/b1", `{invalid-json`, http.StatusBadRequest},
+		{"patch_build_empty_fields", false, false, nil, nil, http.MethodPatch, "/builds/b1", `{"title":""}`, http.StatusBadRequest},
+		{"patch_build_not_found", false, false, nil, nil, http.MethodPatch, "/builds/b-missing", `{"title":"T"}`, http.StatusNotFound},
+		{"patch_build_conflict", false, false, &VanadisBuild{ID: "b-done", Status: "completed"}, nil, http.MethodPatch, "/builds/b-done", `{"title":"T"}`, http.StatusConflict},
+		{"patch_build_ok_no_title", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1", `{"objective":"New Obj"}`, http.StatusOK},
+		{"patch_build_ok_with_title", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1", `{"title":"New Title"}`, http.StatusOK},
 
 		// GET /builds/{id}/chunks/{chunk_ref}
-		{"get_chunk_nil_store", true, false, nil, nil, http.MethodGet, "/builds/b1/chunks/c1", "", http.StatusInternalServerError, false},
-		{"get_chunk_build_not_found", false, false, nil, nil, http.MethodGet, "/builds/b-missing/chunks/c1", "", http.StatusNotFound, false},
-		{"get_chunk_not_found", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1"}}, http.MethodGet, "/builds/b1/chunks/c999", "", http.StatusNotFound, false},
-		{"get_chunk_ok_by_id", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Title: "C1"}}, http.MethodGet, "/builds/b1/chunks/c1", "", http.StatusOK, false},
-		{"get_chunk_ok_by_index", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Title: "C1"}}, http.MethodGet, "/builds/b1/chunks/0", "", http.StatusOK, false},
+		{"get_chunk_nil_store", true, false, nil, nil, http.MethodGet, "/builds/b1/chunks/c1", "", http.StatusInternalServerError},
+		{"get_chunk_build_not_found", false, false, nil, nil, http.MethodGet, "/builds/b-missing/chunks/c1", "", http.StatusNotFound},
+		{"get_chunk_not_found", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1"}}, http.MethodGet, "/builds/b1/chunks/c999", "", http.StatusNotFound},
+		{"get_chunk_ok_by_id", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Title: "C1"}}, http.MethodGet, "/builds/b1/chunks/c1", "", http.StatusOK},
+		{"get_chunk_ok_by_index", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Title: "C1"}}, http.MethodGet, "/builds/b1/chunks/0", "", http.StatusOK},
 
 		// PATCH /builds/{id}/chunks/{chunk_ref}
-		{"patch_chunk_nil_store", true, false, nil, nil, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":"T"}`, http.StatusInternalServerError, false},
-		{"patch_chunk_err_reader", false, true, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending"}}, http.MethodPatch, "/builds/b1/chunks/c1", "", http.StatusBadRequest, false},
-		{"patch_chunk_invalid_json", false, false, nil, nil, http.MethodPatch, "/builds/b1/chunks/c1", `{invalid-json`, http.StatusBadRequest, false},
-		{"patch_chunk_empty_update", false, false, nil, nil, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":""}`, http.StatusBadRequest, false},
-		{"patch_chunk_not_found", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":"T"}`, http.StatusNotFound, false},
-		{"patch_chunk_conflict", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "running"}}, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":"T"}`, http.StatusConflict, false},
-		{"patch_chunk_ok_syncs_widget", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending", ChunkIndex: 0, DependsOn: []string{}}}, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":"New Chunk Title"}`, http.StatusOK, true},
+		{"patch_chunk_nil_store", true, false, nil, nil, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":"T"}`, http.StatusInternalServerError},
+		{"patch_chunk_err_reader", false, true, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending"}}, http.MethodPatch, "/builds/b1/chunks/c1", "", http.StatusBadRequest},
+		{"patch_chunk_invalid_json", false, false, nil, nil, http.MethodPatch, "/builds/b1/chunks/c1", `{invalid-json`, http.StatusBadRequest},
+		{"patch_chunk_empty_update", false, false, nil, nil, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":""}`, http.StatusBadRequest},
+		{"patch_chunk_not_found", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1/chunks/c-missing", `{"title":"T"}`, http.StatusNotFound},
+		{"patch_chunk_conflict", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "running"}}, http.MethodPatch, "/builds/b1/chunks/c-conflict", `{"title":"T"}`, http.StatusConflict},
+		{"patch_chunk_ok", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending", ChunkIndex: 0}}, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":"New Chunk Title"}`, http.StatusOK},
 
 		// POST /builds/{id}/chunks
-		{"append_chunks_nil_store", true, false, nil, nil, http.MethodPost, "/builds/b1/chunks", `{"chunks":[{"title":"T","instructions":"I","depends_on":[]}]}`, http.StatusInternalServerError, false},
-		{"append_chunks_err_reader", false, true, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPost, "/builds/b1/chunks", "", http.StatusBadRequest, false},
-		{"append_chunks_invalid_json", false, false, nil, nil, http.MethodPost, "/builds/b1/chunks", `{invalid-json`, http.StatusBadRequest, false},
-		{"append_chunks_empty_list", false, false, nil, nil, http.MethodPost, "/builds/b1/chunks", `{"chunks":[]}`, http.StatusBadRequest, false},
-		{"append_chunks_build_not_found", false, false, nil, nil, http.MethodPost, "/builds/b-missing/chunks", `{"chunks":[{"repo":"aerial","title":"T","instructions":"I","depends_on":[]}]}`, http.StatusNotFound, false},
-		{"append_chunks_conflict", false, false, &VanadisBuild{ID: "b-done", Status: "completed"}, nil, http.MethodPost, "/builds/b-done/chunks", `{"chunks":[{"repo":"aerial","title":"T","instructions":"I","depends_on":[]}]}`, http.StatusConflict, false},
-		{"append_chunks_ok_syncs_widget", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPost, "/builds/b1/chunks", `{"chunks":[{"repo":"aerial","title":"T","instructions":"I","depends_on":[]}]}`, http.StatusOK, true},
+		{"append_chunks_nil_store", true, false, nil, nil, http.MethodPost, "/builds/b1/chunks", `{"chunks":[{"title":"T","instructions":"I"}]}`, http.StatusInternalServerError},
+		{"append_chunks_err_reader", false, true, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPost, "/builds/b1/chunks", "", http.StatusBadRequest},
+		{"append_chunks_invalid_json", false, false, nil, nil, http.MethodPost, "/builds/b1/chunks", `{invalid-json`, http.StatusBadRequest},
+		{"append_chunks_empty_list", false, false, nil, nil, http.MethodPost, "/builds/b1/chunks", `{"chunks":[]}`, http.StatusBadRequest},
+		{"append_chunks_build_not_found", false, false, nil, nil, http.MethodPost, "/builds/b-missing/chunks", `{"chunks":[{"repo":"aerial","title":"T","instructions":"I"}]}`, http.StatusNotFound},
+		{"append_chunks_conflict", false, false, &VanadisBuild{ID: "b-done", Status: "completed"}, nil, http.MethodPost, "/builds/b-done/chunks", `{"chunks":[{"repo":"aerial","title":"T","instructions":"I"}]}`, http.StatusConflict},
+		{"append_chunks_ok", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPost, "/builds/b1/chunks", `{"chunks":[{"repo":"aerial","title":"T","instructions":"I"}]}`, http.StatusOK},
 
 		// DELETE /builds/{id}/chunks/{chunk_ref}
-		{"delete_chunk_nil_store", true, false, nil, nil, http.MethodDelete, "/builds/b1/chunks/c1", "", http.StatusInternalServerError, false},
-		{"delete_chunk_not_found", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodDelete, "/builds/b1/chunks/c1", "", http.StatusNotFound, false},
-		{"delete_chunk_conflict_only_chunk", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending"}}, http.MethodDelete, "/builds/b1/chunks/c1", "", http.StatusConflict, false},
-		{"delete_chunk_ok_syncs_widget", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{
+		{"delete_chunk_nil_store", true, false, nil, nil, http.MethodDelete, "/builds/b1/chunks/c1", "", http.StatusInternalServerError},
+		{"delete_chunk_not_found", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodDelete, "/builds/b1/chunks/c-missing", "", http.StatusNotFound},
+		{"delete_chunk_conflict_only_chunk", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending"}}, http.MethodDelete, "/builds/b1/chunks/c-conflict", "", http.StatusConflict},
+		{"delete_chunk_ok", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{
 			{ID: "c1", Status: "running", ChunkIndex: 0},
 			{ID: "c2", Status: "pending", ChunkIndex: 1},
-		}, http.MethodDelete, "/builds/b1/chunks/c2", "", http.StatusOK, true},
+		}, http.MethodDelete, "/builds/b1/chunks/c2", "", http.StatusOK},
 
 		// Method and path errors
-		{"method_not_allowed_put_build", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPut, "/builds/b1", "", http.StatusMethodNotAllowed, false},
-		{"method_not_allowed_get_chunks_subpath", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks", "", http.StatusMethodNotAllowed, false},
-		{"method_not_allowed_post_chunk_ref", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1"}}, http.MethodPost, "/builds/b1/chunks/c1", "", http.StatusMethodNotAllowed, false},
-		{"bad_request_empty_chunk_ref_with_slash_get", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks/", "", http.StatusBadRequest, false},
-		{"bad_request_empty_chunk_ref_space", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks/%20", "", http.StatusBadRequest, false},
-		{"bad_request_empty_build_id_chunks", false, false, nil, nil, http.MethodPost, "/builds/%20/chunks", `{"chunks":[{"title":"T","instructions":"I","depends_on":[]}]}`, http.StatusBadRequest, false},
-		{"not_found_unknown_subpath", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/unknown", "", http.StatusNotFound, false},
-		{"not_found_deep_unknown_subpath", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks/c1/deep", "", http.StatusNotFound, false},
+		{"method_not_allowed_put_build", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPut, "/builds/b1", "", http.StatusMethodNotAllowed},
+		{"method_not_allowed_get_chunks_subpath", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks", "", http.StatusMethodNotAllowed},
+		{"method_not_allowed_post_chunk_ref", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1"}}, http.MethodPost, "/builds/b1/chunks/c1", "", http.StatusMethodNotAllowed},
+		{"bad_request_empty_chunk_ref_with_slash_get", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks/", "", http.StatusBadRequest},
+		{"bad_request_empty_chunk_ref_space", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks/%20", "", http.StatusBadRequest},
+		{"bad_request_empty_build_id_chunks", false, false, nil, nil, http.MethodPost, "/builds/%20/chunks", `{"chunks":[{"title":"T","instructions":"I"}]}`, http.StatusBadRequest},
+		{"not_found_unknown_subpath", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/unknown", "", http.StatusNotFound},
+		{"not_found_deep_unknown_subpath", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks/c1/deep", "", http.StatusNotFound},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			store, _ := seedMemoryStore(tc.nilStore, tc.seedBuild, tc.seedChunks)
 
-			bus := &mockChunkBus{}
-			srv := NewVanadisServer(Config{}, store, nil)
-			srv.SetBus(bus)
+			srv := NewVanadisServer(Config{}, store, restateSrv.Client())
+			if !tc.nilStore {
+				srv.restateCfg.RestateIngressURL = restateSrv.URL
+			}
 			rec := serveChunkRequest(srv, tc.method, tc.path, tc.body, tc.useErrBody)
 			if rec.Code != tc.wantCode {
 				t.Fatalf("got status %d, want %d: %s", rec.Code, tc.wantCode, rec.Body.String())
-			}
-			if tc.wantWidget && bus.widgetCalls == 0 {
-				t.Errorf("expected widget sync call, got 0")
-			}
-			if !tc.wantWidget && bus.widgetCalls > 0 {
-				t.Errorf("unexpected widget sync call, got %d", bus.widgetCalls)
 			}
 		})
 	}

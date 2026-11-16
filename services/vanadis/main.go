@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -17,7 +16,6 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +33,7 @@ import (
 const (
 	effortLow    = "low"
 	effortMedium = "medium"
+	jsonNull     = "null"
 )
 
 var (
@@ -252,31 +251,10 @@ func SummarizeBuildEntry(build VanadisBuild, chunks []VanadisChunk) VanadisBuild
 
 // VanadisStore defines the persistence contract for Vanadis builds and chunks.
 type VanadisStore interface {
-	CreateBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error
 	GetBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error)
 	ListBuilds(ctx context.Context, limit int) ([]VanadisBuildEntry, error)
-	UpdateChunkStatus(ctx context.Context, chunkID, status string) error
-	ReserveChunkForLaunch(ctx context.Context, chunkID string) error
-	UpdateBuildStatus(ctx context.Context, buildID, status string) error
-	UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
 	GetChunk(ctx context.Context, chunkID string) (*VanadisChunk, *VanadisBuild, error)
 	GetChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error)
-	AttachChunkPR(ctx context.Context, req AttachChunkPRRequest) (buildID, chunkID, threadID string, err error)
-	CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error)
-	ClaimStalledChunk(ctx context.Context, chunkID string, dispatchID ...string) (StalledChunkVerdict, *VanadisBuild, *VanadisChunk, error)
-	FailChunk(ctx context.Context, chunkID, reason, dispatchID string) (*VanadisBuild, *VanadisChunk, bool, error)
-	FailChunkByPR(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, failed bool, err error)
-	UpdateBuild(ctx context.Context, buildID string, req UpdateBuildRequest) (*VanadisBuild, error)
-	UpdateChunk(ctx context.Context, buildID, chunkRef string, req UpdateChunkRequest) (*VanadisChunk, error)
-	AppendChunks(ctx context.Context, buildID string, inputs []CreateChunkInput) ([]VanadisChunk, error)
-	RemoveChunk(ctx context.Context, buildID, chunkRef string) (*VanadisChunk, []VanadisChunk, error)
-	RecordPRCheckStatus(ctx context.Context, chunkID, checkName, checkState string) error
-	RecordPRRolloutState(ctx context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error
-	CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
-	RecordPRDeploymentFailure(ctx context.Context, chunkID, banner string) error
-	ResetChunkForSynchronize(ctx context.Context, chunkID, buildID string) error
-	IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string) (int, error)
-	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
 }
 
 type pgxQueryExecer interface {
@@ -300,6 +278,10 @@ func normalizeRepo(repo string) string {
 	return strings.TrimSpace(repo)
 }
 
+const (
+	serviceName = "vanadis"
+)
+
 func normalizeChunkMode(raw string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", "pr":
@@ -311,22 +293,28 @@ func normalizeChunkMode(raw string) (string, error) {
 	}
 }
 
-func isChunkDoneStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case statusMerged, statusCompleted:
-		return true
-	default:
-		return false
+func validateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, targetSymbols []string) error {
+	mode, err := normalizeChunkMode(modeStr)
+	if err != nil {
+		return fmt.Errorf("chunk[%d] %w", idx, err)
 	}
-}
-
-func isChunkMergedOrDoneStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case statusMerged, statusDeploying, statusCompleted:
-		return true
-	default:
-		return false
+	switch mode {
+	case "pr":
+		if normalizeRepo(repo) == "" {
+			return fmt.Errorf("chunk[%d] repo is required for pr mode", idx)
+		}
+	case chunkModeAction:
+		if strings.TrimSpace(repo) != "" {
+			return fmt.Errorf("chunk[%d] action chunk must have empty repo", idx)
+		}
+		if len(targetFiles) > 0 {
+			return fmt.Errorf("chunk[%d] action chunk must not specify target_files", idx)
+		}
+		if len(targetSymbols) > 0 {
+			return fmt.Errorf("chunk[%d] action chunk must not specify target_symbols", idx)
+		}
 	}
+	return nil
 }
 
 func isValidVanadisChunkID(id string) bool {
@@ -341,112 +329,6 @@ func isValidVanadisChunkID(id string) bool {
 		}
 	}
 	return true
-}
-
-func execInsertVanadisChunk(ctx context.Context, tx pgx.Tx, buildID string, c VanadisChunk) error {
-	const cQ = `INSERT INTO vanadis_chunks (
-		id, build_id, chunk_index, mode, repo, title, instructions,
-		target_files, target_symbols, effort, acceptance_criteria, status,
-		pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks,
-		rollout_state, banner, merge_awakeable_id, deploy_awakeable_id,
-		started_at, completed_at, created_at, updated_at
-	) VALUES (
-		$1, $2, $3, $4, $5, $6, $7,
-		$8, $9, $10, $11, $12,
-		$13, $14, $15, $16, $17,
-		$18, $19, $20, $21,
-		$22, $23, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-	);`
-	cMode, err := normalizeChunkMode(c.Mode)
-	if err != nil {
-		return fmt.Errorf("chunk %s: %w", c.ID, err)
-	}
-	cRepo := ""
-	if cMode == "pr" {
-		cRepo = normalizeRepo(c.Repo)
-		if cRepo == "" {
-			return fmt.Errorf("chunk %s: repo is required for pr mode", c.ID)
-		}
-	} else {
-		if strings.TrimSpace(c.Repo) != "" {
-			return fmt.Errorf("chunk %s: action chunk must have empty repo", c.ID)
-		}
-		if len(c.TargetFiles) > 0 || len(c.TargetSymbols) > 0 {
-			return fmt.Errorf("chunk %s: action chunk must not specify target files or symbols", c.ID)
-		}
-	}
-	cStatus := firstNonEmpty(strings.TrimSpace(c.Status), "pending")
-	cEffort, err := normalizeChunkEffort(c.Effort)
-	if err != nil {
-		return fmt.Errorf("chunk %s: %w", c.ID, err)
-	}
-	var prNum, startedAt, completedAt any
-	if c.PRNumber > 0 {
-		prNum = c.PRNumber
-	}
-	if !c.StartedAt.IsZero() {
-		startedAt = c.StartedAt
-	} else if cStatus == statusRunning || cStatus == statusCoding {
-		startedAt = time.Now().UTC()
-	}
-	if !c.CompletedAt.IsZero() {
-		completedAt = c.CompletedAt
-	} else if isTerminalChunkStatus(cStatus) {
-		completedAt = time.Now().UTC()
-	}
-	ciChecksJSON := marshalJSONBOrEmpty(c.CIChecks)
-	rolloutStateJSON := marshalJSONBOrEmpty(c.RolloutState)
-	if _, err := tx.Exec(ctx, cQ,
-		strings.TrimSpace(c.ID), buildID, c.ChunkIndex, cMode, cRepo,
-		strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions),
-		nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), cEffort,
-		nonNilSlice(c.AcceptanceCriteria), cStatus, prNum, c.StallNudges,
-		nonNilSlice(c.DependsOn), c.CIFailCount, ciChecksJSON, rolloutStateJSON,
-		strings.TrimSpace(c.Banner), strings.TrimSpace(c.MergeAwakeableID),
-		strings.TrimSpace(c.DeployAwakeableID), startedAt, completedAt,
-	); err != nil {
-		return fmt.Errorf("failed to insert vanadis chunk %s: %w", c.ID, err)
-	}
-	return nil
-}
-
-// CreateBuild inserts a VanadisBuild and all of its ordered VanadisChunks in a single transaction.
-func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error {
-	if s == nil || s.db == nil {
-		return errors.New("database connection is nil")
-	}
-	buildID, threadID, objective := strings.TrimSpace(build.ID), strings.TrimSpace(build.ThreadID), strings.TrimSpace(build.Objective)
-	if err := validateCreateBuildInputs(buildID, threadID, objective, chunks); err != nil {
-		return err
-	}
-	normChunks, err := normalizeAndValidateBuildDAG(chunks)
-	if err != nil {
-		return err
-	}
-	chunks = normChunks
-	tier := build.Tier
-	if tier <= 0 {
-		tier = 2
-	}
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() {
-		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			log.Printf("[vanadis] tx rollback error: %v", rbErr)
-		}
-	}()
-	const bQ = `INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
-	if _, err := tx.Exec(ctx, bQ, buildID, threadID, tier, firstNonEmpty(strings.TrimSpace(build.Title), objective), objective, strings.TrimSpace(build.SharedContext), firstNonEmpty(strings.TrimSpace(build.Status), "running"), strings.TrimSpace(build.StatusMessageID), build.Quiet); err != nil {
-		return fmt.Errorf("failed to insert vanadis build: %w", err)
-	}
-	for _, c := range chunks {
-		if err := execInsertVanadisChunk(ctx, tx, buildID, c); err != nil {
-			return err
-		}
-	}
-	return tx.Commit(ctx)
 }
 
 // GetBuild retrieves a VanadisBuild and its ordered VanadisChunks by buildID.
@@ -574,95 +456,13 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]Van
 	return entries, nil
 }
 
-func (s *PostgresVanadisStore) execUpdateByID(ctx context.Context, idLabel, id, valLabel, val string, allowEmptyVal bool, query, opLabel string, notFoundErr error) error {
-	if s == nil || s.db == nil {
-		return errors.New("database connection is nil")
-	}
-	id, val = strings.TrimSpace(id), strings.TrimSpace(val)
-	if id == "" || (!allowEmptyVal && val == "") {
-		lbl := idLabel
-		if id != "" {
-			lbl = valLabel
-		}
-		return fmt.Errorf("%s cannot be empty", lbl)
-	}
-	tag, err := s.db.Exec(ctx, query, val, id)
-	if err != nil {
-		return fmt.Errorf("%s: %w", opLabel, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return notFoundErr
-	}
-	return nil
-}
-
-// UpdateChunkStatus updates the lifecycle status of a VanadisChunk.
-func (s *PostgresVanadisStore) UpdateChunkStatus(ctx context.Context, chunkID, status string) error {
-	return s.execUpdateByID(ctx, "chunk id", chunkID, "status", status, false, `UPDATE vanadis_chunks SET status = $1, started_at = CASE WHEN $1 IN ('running', 'coding') THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END, completed_at = CASE WHEN $1 IN ('merged', 'completed', 'failed', 'cancelled') THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis chunk status", ErrChunkNotFound)
-}
-
-// UpdateBuildStatus updates the lifecycle status of a VanadisBuild.
-func (s *PostgresVanadisStore) UpdateBuildStatus(ctx context.Context, buildID, status string) error {
-	return s.execUpdateByID(ctx, "build id", buildID, "status", status, false, `UPDATE vanadis_builds SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status", ErrBuildNotFound)
-}
-
-// UpdateBuildStatusMessageID updates the status_message_id of a VanadisBuild.
-func (s *PostgresVanadisStore) UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error {
-	return s.execUpdateByID(ctx, "build id", buildID, "message_id", messageID, true, `UPDATE vanadis_builds SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status_message_id", ErrBuildNotFound)
-}
-
-// BrainDispatchRequest represents the JSON payload dispatched to Brain's POST /dispatch endpoint.
-type BrainDispatchRequest struct {
-	ID             string `json:"id,omitempty"`
-	Source         string `json:"source"`
-	SessionID      string `json:"session_id,omitempty"`
-	TargetID       string `json:"target_id,omitempty"`
-	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
-	Prompt         string `json:"prompt"`
-	Effort         string `json:"effort,omitempty"`
-	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
-}
-
-// StatusWidgetChunk represents a chunk in a Vanadis build or a PR task for widget rendering.
-type StatusWidgetChunk struct {
-	ID            string    `json:"id,omitempty"`
-	Index         int       `json:"index"`
-	Repo          string    `json:"repo"`
-	Title         string    `json:"title"`
-	Status        string    `json:"status"`
-	ActiveStep    string    `json:"active_step,omitempty"`
-	PRNumber      int       `json:"pr_number,omitempty"`
-	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
-	StartedAt     time.Time `json:"started_at,omitempty"`
-	CompletedAt   time.Time `json:"completed_at,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at,omitempty"`
-}
-
-// StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.
-type StatusWidgetRequest struct {
-	ChannelID string              `json:"channel_id"`
-	MessageID string              `json:"message_id,omitempty"`
-	ID        string              `json:"id"`
-	Tier      int                 `json:"tier,omitempty"`
-	Title     string              `json:"title"`
-	Status    string              `json:"status"`
-	Banner    string              `json:"banner,omitempty"`
-	SkipSink  bool                `json:"skip_sink,omitempty"`
-	Chunks    []StatusWidgetChunk `json:"chunks"`
-	StartedAt time.Time           `json:"started_at,omitempty"`
-}
-
 // VanadisServer manages HTTP endpoints and JetStream worker coordination for Vanadis builds.
 type VanadisServer struct {
 	cfg        Config
 	restateCfg RestateConfig
 	httpClient *http.Client
 	store      VanadisStore
-	bus        pubsub.Bus
 	queueStats consumerStatsQuerier
-
-	launchMu      sync.Mutex
-	localLaunched map[string]map[string]bool
 }
 
 // NewVanadisServer constructs a new VanadisServer instance.
@@ -677,228 +477,11 @@ func NewVanadisServer(cfg Config, store VanadisStore, httpClient *http.Client) *
 // SetStore updates the VanadisStore backing the server.
 func (s *VanadisServer) SetStore(store VanadisStore) { s.store = store }
 
-// SetBus sets the pubsub.Bus for event emission and consumption.
-func (s *VanadisServer) SetBus(bus pubsub.Bus) { s.bus = bus }
-
 func (s *VanadisServer) consumerStatsQuerier() consumerStatsQuerier {
 	if s == nil {
 		return nil
 	}
-	if s.queueStats != nil {
-		return s.queueStats
-	}
-	if csp, ok := s.bus.(consumerStatsQuerier); ok {
-		return csp
-	}
-	return nil
-}
-
-func (s *VanadisServer) postBrainJSON(ctx context.Context, path string, payload any, errReadLimit int64) ([]byte, error) {
-	if s == nil || s.httpClient == nil {
-		return nil, errors.New("http client is nil")
-	}
-	brainURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(s.cfg.BrainURL, s.cfg.EriURL)), "/")
-	if brainURL == "" {
-		return nil, errors.New("brain URL is not configured")
-	}
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal payload: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, brainURL+path, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("post %s failed: %w", path, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if errReadLimit <= 0 {
-			errReadLimit = 4 << 10
-		}
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, errReadLimit))
-		if readErr != nil {
-			return nil, fmt.Errorf("%s returned status %d (read body error: %w)", path, resp.StatusCode, readErr)
-		}
-		return nil, fmt.Errorf("%s returned status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	return io.ReadAll(resp.Body)
-}
-
-func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner string) {
-	if s == nil || s.bus == nil {
-		return
-	}
-	cleanBuildID := strings.TrimSpace(buildID)
-	if cleanBuildID == "" {
-		return
-	}
-	cleanBanner := strings.TrimSpace(banner)
-	args := pubsub.WidgetSyncJobArgs{
-		BuildID: cleanBuildID,
-		Banner:  cleanBanner,
-	}
-	msgID := fmt.Sprintf("widget:build:%s:%d", cleanBuildID, time.Now().UnixNano())
-	if err := s.bus.Publish(ctx, pubsub.SubjectBuildWidgetSyncCoalesced(cleanBuildID), msgID, args); err != nil {
-		log.Printf("[vanadis] warning: publish coalesced widget sync failed for build %s: %v", cleanBuildID, err)
-	}
-}
-
-func (s *VanadisServer) dispatchWakePrompt(ctx context.Context, threadID, prompt string) error {
-	if s == nil || s.httpClient == nil {
-		return nil
-	}
-	cleanThreadID := strings.TrimSpace(threadID)
-	cleanPrompt := strings.TrimSpace(prompt)
-	if cleanThreadID == "" || cleanPrompt == "" {
-		return nil
-	}
-	payload := map[string]string{
-		"channel_id": cleanThreadID,
-		"prompt":     cleanPrompt,
-	}
-	_, err := s.postBrainJSON(ctx, "/prompt", payload, 4<<10)
-	if err != nil {
-		log.Printf("[vanadis] warning: failed to dispatch wake prompt to thread %s: %v", cleanThreadID, err)
-		return err
-	}
-	return nil
-}
-
-func (s *VanadisServer) enqueueExecuteChunk(ctx context.Context, args ExecuteChunkArgs) error {
-	if s.bus == nil {
-		return errors.New("event bus not configured")
-	}
-	msgID := fmt.Sprintf("vanadis:chunk:%s:%d", args.BuildID, args.ChunkIndex)
-	if strings.TrimSpace(args.ChunkID) != "" {
-		msgID = fmt.Sprintf("vanadis:chunk:%s:%s", args.BuildID, strings.TrimSpace(args.ChunkID))
-	}
-	if args.DispatchID != "" {
-		msgID += ":" + args.DispatchID
-	}
-	return s.bus.Publish(ctx, "aerial.jobs.vanadis.chunk", msgID, args)
-}
-
-func settleFailedChunk(msg pubsub.Message, isFinalAttempt bool) {
-	if isFinalAttempt {
-		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[vanadis] warning: error terming chunk job: %v", termErr)
-		}
-		return
-	}
-	delay := time.Duration(min(max(msg.NumDelivered(), 1), 3)) * 5 * time.Second
-	if nakErr := msg.NakWithDelay(delay); nakErr != nil {
-		log.Printf("[vanadis] warning: error naking chunk job: %v", nakErr)
-	}
-}
-
-// HandleExecuteChunkJob processes an aerial.jobs.vanadis.chunk execution message from JetStream.
-func (s *VanadisServer) HandleExecuteChunkJob(ctx context.Context, msg pubsub.Message) error {
-	var args ExecuteChunkArgs
-	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		log.Printf("[vanadis] failed to unmarshal chunk job payload: %v", err)
-		if termErr := msg.Term(); termErr != nil {
-			log.Printf("[vanadis] warning: error terming chunk job: %v", termErr)
-		}
-		return nil
-	}
-	isFinalAttempt := msg.NumDelivered() >= 3
-	err := s.ProcessExecuteChunk(ctx, args.BuildID, args.ChunkIndex, isFinalAttempt, args.ChunkID, args.DispatchID)
-	if err != nil {
-		settleFailedChunk(msg, isFinalAttempt)
-	}
-	return err
-}
-
-// StartJobConsumers subscribes the vanadis durable queue consumers to the configured bus.
-func (s *VanadisServer) StartJobConsumers(ctx context.Context) error {
-	if s.bus == nil {
-		return nil
-	}
-	if _, err := s.bus.ConsumeQueue(ctx, "aerial.jobs.vanadis.chunk", "vanadis-chunk", s.HandleExecuteChunkJob); err != nil {
-		return err
-	}
-	log.Println("[vanadis] Subscribed vanadis-chunk queue consumer to aerial.jobs.vanadis.chunk")
-	if _, err := s.bus.ConsumeQueue(ctx, "aerial.coalesced.widget_sync.>", "vanadis-widget", s.HandleCoalescedWidgetMessage); err != nil {
-		return err
-	}
-	log.Printf("[vanadis] Subscribed vanadis-widget queue consumer to %s", "aerial.coalesced.widget_sync.>")
-	return nil
-}
-
-func (s *VanadisServer) handleFinalDispatchFailure(ctx context.Context, build *VanadisBuild, chunk VanadisChunk, totalChunks int, dispatchErr error) {
-	if cErr := s.store.UpdateChunkStatus(ctx, chunk.ID, "failed"); cErr != nil {
-		log.Printf("[vanadis] failed marking chunk %s failed on final attempt: %v", chunk.ID, cErr)
-	}
-	if bErr := s.store.UpdateBuildStatus(ctx, build.ID, "failed"); bErr != nil {
-		log.Printf("[vanadis] failed marking build %s failed on final attempt: %v", build.ID, bErr)
-	}
-	RecordChunkTotal("failed")
-	RecordBuildTotal("failed")
-	attempt := 1
-	s.syncBuildWidget(ctx, build.ID, fmt.Sprintf("Chunk %d/%d (%s) failed to dispatch to Brain after %d attempts: %v", chunk.ChunkIndex+1, totalChunks, chunk.Title, attempt, dispatchErr))
-}
-
-// ProcessExecuteChunk loads build state, formats the chunk prompt, and dispatches it to Brain.
-func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string, chunkIndex int, isFinalAttempt bool, targetChunkID ...string) error {
-	if s == nil || s.store == nil {
-		return errors.New("vanadis store not configured")
-	}
-	build, chunks, err := s.store.GetBuild(ctx, buildID)
-	if errors.Is(err, ErrBuildNotFound) {
-		log.Printf("[vanadis] build %s not found, skipping chunk %d", buildID, chunkIndex)
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("get build %s: %w", buildID, err)
-	}
-	if build.Status != statusRunning {
-		log.Printf("[vanadis] build %s has status %q (not running), skipping chunk %d", buildID, build.Status, chunkIndex)
-		return nil
-	}
-	var desiredID string
-	if len(targetChunkID) > 0 {
-		desiredID = strings.TrimSpace(targetChunkID[0])
-	}
-	activeIdx, err := findTargetChunkIndex(chunks, chunkIndex, desiredID, buildID)
-	if err != nil {
-		return err
-	}
-	chunk := chunks[activeIdx]
-	var dispatchID string
-	if len(targetChunkID) > 1 {
-		dispatchID = targetChunkID[1]
-	}
-	if chunk.Mode == chunkModeAction && !actionDispatchMatches(chunk, dispatchID) {
-		return nil // Discard a queued job from an earlier generation.
-	}
-	if chunk.Status == statusPROpened || isChunkMergedOrDoneStatus(chunk.Status) {
-		log.Printf("[vanadis] chunk %s (index %d) already in status %q, skipping", chunk.ID, chunkIndex, chunk.Status)
-		return nil
-	}
-	if err := checkChunkDependenciesReady(chunk, chunks); err != nil {
-		return err
-	}
-	if err := s.store.UpdateChunkStatus(ctx, chunk.ID, "running"); err != nil {
-		return fmt.Errorf("update chunk %s status to running: %w", chunk.ID, err)
-	}
-	now := time.Now().UTC()
-	chunks[activeIdx].Status = statusRunning
-	if chunks[activeIdx].StartedAt.IsZero() {
-		chunks[activeIdx].StartedAt = now
-	}
-	chunks[activeIdx].UpdatedAt = now
-	if err := s.dispatchChunkTurn(ctx, *build, chunks, activeIdx, ""); err != nil {
-		if isFinalAttempt {
-			s.handleFinalDispatchFailure(ctx, build, chunk, len(chunks), err)
-		}
-		return err
-	}
-	RecordChunkTotal("dispatched")
-	return nil
+	return s.queueStats
 }
 
 func normalizeDiscordThreadID(s string) string {
@@ -932,7 +515,7 @@ type CreateChunkInput struct {
 	TargetSymbols      []string `json:"target_symbols"`
 	Effort             string   `json:"effort,omitempty"`
 	AcceptanceCriteria []string `json:"acceptance_criteria"`
-	DependsOn          []string `json:"depends_on,omitempty"`
+	DependsOn          []string `json:"depends_on"`
 }
 
 // CreateBuildRequest defines the JSON request body for POST /builds.
@@ -1000,9 +583,8 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,
 		"POST /builds": server.handleCreateBuild, "POST /runs": server.handleCreateBuild,
 		"/builds/": server.handleBuildByID, "/runs/": server.handleBuildByID,
-		"/chunks/attach-pr": server.handleAttachChunkPR,
-		"/chunks/":          server.handleChunkByID,
-		"POST /internal/restate/builds/{id}/transition": server.handleRestateBuildTransition,
+		"/chunks/attach-pr":          server.handleAttachChunkPR,
+		"/chunks/":                   server.handleChunkByID,
 		"/mcp":                       mcpHandler,
 		"/sse":                       mcpHandler,
 		"POST /debug/coverage/flush": coverageFlush, "GET /debug/coverage/flush": coverageFlush,
@@ -1034,23 +616,12 @@ func parseCreateBuildChunks(buildID string, now time.Time, rawChunks []CreateChu
 		if err != nil {
 			return nil, fmt.Errorf("chunk[%d] %w", i, err)
 		}
+		if valErr := validateChunkModeAndRepo(i, c.Mode, c.Repo, c.TargetFiles, c.TargetSymbols); valErr != nil {
+			return nil, valErr
+		}
 		repo := ""
-		switch mode {
-		case "pr":
+		if mode == "pr" {
 			repo = normalizeRepo(c.Repo)
-			if repo == "" {
-				return nil, fmt.Errorf("chunk[%d] repo is required for pr mode", i)
-			}
-		case chunkModeAction:
-			if strings.TrimSpace(c.Repo) != "" {
-				return nil, fmt.Errorf("chunk[%d] action chunk must have empty repo", i)
-			}
-			if len(c.TargetFiles) > 0 {
-				return nil, fmt.Errorf("chunk[%d] action chunk must not specify target_files", i)
-			}
-			if len(c.TargetSymbols) > 0 {
-				return nil, fmt.Errorf("chunk[%d] action chunk must not specify target_symbols", i)
-			}
 		}
 		effort, err := normalizeChunkEffort(c.Effort)
 		if err != nil {
@@ -1105,67 +676,31 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		tier = 2
 	}
 	now := time.Now().UTC()
-	build := VanadisBuild{
-		ID: buildID, ThreadID: threadID, Tier: tier, Title: firstNonEmpty(strings.TrimSpace(req.Title), objective),
-		Objective: objective, SharedContext: strings.TrimSpace(req.SharedContext), Status: statusRunning, Quiet: req.Quiet, CreatedAt: now, UpdatedAt: now,
+	req.ID = buildID
+	req.ThreadID = threadID
+	req.Tier = tier
+	req.Objective = objective
+	if strings.TrimSpace(req.Title) == "" {
+		req.Title = objective
 	}
+
 	chunks, err := parseCreateBuildChunks(buildID, now, req.Chunks)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.store.CreateBuild(r.Context(), build, chunks); err != nil {
-		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("failed to create build: %v", err))
+
+	var created VanadisBuild
+	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/Create", buildID), req, &created); err != nil {
+		writeStoreErr(w, err)
 		return
 	}
-	s.syncBuildWidget(r.Context(), build.ID, "")
-	if err := s.launchCreatedBuild(r.Context(), buildID); err != nil {
-		if statusErr := s.store.UpdateBuildStatus(r.Context(), buildID, "failed"); statusErr != nil {
-			log.Printf("[vanadis] warning marking build %s failed after enqueue error: %v", buildID, statusErr)
-		}
-		RecordBuildTotal("failed")
-		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue chunk 0: %v", err))
-		return
-	}
+
 	RecordBuildTotal("created")
 	httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
-		fieldStatus: "accepted", fieldBuildID: build.ID, "thread_id": build.ThreadID, "tier": build.Tier,
-		"status_message_id": build.StatusMessageID, "chunk_count": len(chunks), "first_chunk_id": chunks[0].ID, fieldChunks: chunks,
+		fieldStatus: "accepted", fieldBuildID: created.ID, "thread_id": created.ThreadID, "tier": created.Tier,
+		"status_message_id": created.StatusMessageID, "chunk_count": len(chunks), "first_chunk_id": chunks[0].ID, fieldChunks: chunks,
 	})
-}
-
-func isCancellableChunkStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case statusPending, statusRunning, statusCoding:
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *VanadisServer) cancelBuildChunksAndPrompts(ctx context.Context, buildID string, existing *VanadisBuild, existingChunks []VanadisChunk) {
-	now := time.Now().UTC()
-	for i := range existingChunks {
-		if !isCancellableChunkStatus(existingChunks[i].Status) {
-			continue
-		}
-		if s.store != nil {
-			if err := s.store.UpdateChunkStatus(ctx, existingChunks[i].ID, "cancelled"); err != nil {
-				log.Printf("[vanadis] warning: failed marking chunk %s cancelled: %v", existingChunks[i].ID, err)
-			}
-		}
-		RecordChunkTotal("cancelled")
-		existingChunks[i].Status = statusCancelled
-		existingChunks[i].CompletedAt = now
-		existingChunks[i].UpdatedAt = now
-	}
-	if _, err := s.postBrainJSON(ctx, "/dispatch/cancel", map[string]string{fieldBuildID: buildID}, 4<<10); err != nil {
-		log.Printf("[vanadis] warning: failed cancelling pending brain dispatches for build %s: %v", buildID, err)
-	}
-	if existing != nil {
-		existing.Status = statusCancelled
-		s.syncBuildWidget(ctx, buildID, "")
-	}
 }
 
 func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request, id string) {
@@ -1173,18 +708,10 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	existing, existingChunks, gErr := s.store.GetBuild(r.Context(), id)
-	if gErr == nil && existing != nil && (existing.Status == statusCompleted || existing.Status == statusFailed) {
-		writeErr(w, http.StatusConflict, fmt.Sprintf("cannot cancel build in terminal status %q", existing.Status))
-		return
-	}
-	if err := s.store.UpdateBuildStatus(r.Context(), id, "cancelled"); err != nil {
+	var cancelled VanadisBuild
+	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/Cancel", id), CancelBuildRequest{}, &cancelled); err != nil {
 		writeStoreErr(w, err)
 		return
-	}
-	s.cancelBuildChunksAndPrompts(r.Context(), id, existing, existingChunks)
-	if err := s.reconcileBuildOnRestate(r.Context(), id, "cancelled"); err != nil {
-		log.Printf("[vanadis] warning: failed signaling restate cancel for build %s: %v", id, err)
 	}
 	RecordBuildTotal("cancelled")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{fieldStatus: statusCancelled, fieldBuildID: id})
@@ -1331,62 +858,6 @@ func initPostgres(ctx context.Context, server *VanadisServer, pgURL string) (fun
 	}, nil
 }
 
-var newVanadisBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
-	return pubsub.NewJetStreamBus(ctx, url)
-}
-
-func initVanadisJetStream(ctx context.Context, server *VanadisServer, natsURL string) (func(), error) {
-	return initVanadisJetStreamWithFactory(ctx, server, natsURL, newVanadisBusFn)
-}
-
-func initVanadisJetStreamWithFactory(ctx context.Context, server *VanadisServer, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) (func(), error) {
-	natsURL = strings.TrimSpace(natsURL)
-	if natsURL == "" {
-		log.Println("[vanadis] warning: nats_url is not configured; event bus disabled")
-		return func() {}, nil
-	}
-	b, err := factory(ctx, natsURL)
-	if err != nil {
-		return nil, fmt.Errorf("connect to nats at %s: %w", natsURL, err)
-	}
-	server.SetBus(b)
-	if err := pubsub.EnsureCoreStreams(ctx, b); err != nil {
-		if closeErr := b.Close(); closeErr != nil {
-			log.Printf("[vanadis] warning: failed closing bus: %v", closeErr)
-		}
-		server.SetBus(nil)
-		return nil, fmt.Errorf("ensure core streams: %w", err)
-	}
-	if _, err := b.ConsumeQueue(ctx, "aerial.dispatch.*", "vanadis-dispatch", server.HandleDispatchOutcomeEvent); err != nil {
-		if closeErr := b.Close(); closeErr != nil {
-			log.Printf("[vanadis] warning: failed closing bus: %v", closeErr)
-		}
-		server.SetBus(nil)
-		return nil, fmt.Errorf("subscribe vanadis-dispatch: %w", err)
-	}
-	log.Println("[vanadis] Subscribed vanadis-dispatch queue consumer to aerial.dispatch.*")
-	if _, err := b.ConsumeQueue(ctx, "aerial.pr.>", "vanadis-pr-events", server.HandlePRLifecycleEvent); err != nil {
-		if closeErr := b.Close(); closeErr != nil {
-			log.Printf("[vanadis] warning: failed closing bus: %v", closeErr)
-		}
-		server.SetBus(nil)
-		return nil, fmt.Errorf("subscribe vanadis-pr-events: %w", err)
-	}
-	log.Println("[vanadis] Subscribed vanadis-pr-events queue consumer to aerial.pr.>")
-	if err := server.StartJobConsumers(ctx); err != nil {
-		if closeErr := b.Close(); closeErr != nil {
-			log.Printf("[vanadis] warning: failed closing bus: %v", closeErr)
-		}
-		server.SetBus(nil)
-		return nil, fmt.Errorf("start vanadis job consumers: %w", err)
-	}
-	return func() {
-		if closeErr := b.Close(); closeErr != nil {
-			log.Printf("[vanadis] bus close error: %v", closeErr)
-		}
-	}, nil
-}
-
 func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error {
 	server := NewVanadisServer(cfg, nil, nil)
 	var cleanupDB func(context.Context)
@@ -1398,15 +869,6 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		cleanupDB = cleanup
 		log.Println("[vanadis] PostgreSQL store initialized")
 	}
-
-	cleanupBus, err := initVanadisJetStream(ctx, server, cfg.NATSURL)
-	if err != nil {
-		if cleanupDB != nil {
-			cleanupDB(context.WithoutCancel(ctx))
-		}
-		return err
-	}
-	defer cleanupBus()
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)
@@ -1461,6 +923,3 @@ func main() {
 		log.Fatalf("[vanadis] Error: %v", err)
 	}
 }
-
-// errPRTransitionSkipped means the persisted row rejected a stale lifecycle transition.
-var errPRTransitionSkipped = errors.New("pr lifecycle transition not applied")

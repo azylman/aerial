@@ -1,17 +1,10 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
-)
-
-const (
-	jsonNull = "null"
 )
 
 // normalizeAndValidateBuildDAG validates the build DAG: explicit depends_on, Kahn's cycle detection, and concurrent same-repo disjoint target_files.
@@ -203,33 +196,6 @@ func checkDisjointFiles(a, b VanadisChunk, repo string) error {
 	return nil
 }
 
-func validateCreateBuildInputs(buildID, threadID, objective string, chunks []VanadisChunk) error {
-	if buildID == "" || threadID == "" || objective == "" {
-		return errors.New("build id, thread_id, and objective cannot be empty")
-	}
-	for i, c := range chunks {
-		if strings.TrimSpace(c.ID) == "" || strings.TrimSpace(c.Title) == "" || strings.TrimSpace(c.Instructions) == "" {
-			return fmt.Errorf("chunk[%d] id, title, and instructions cannot be empty", i)
-		}
-		if !isValidVanadisChunkID(strings.TrimSpace(c.ID)) {
-			return fmt.Errorf("chunks[%d].id must be 1..120 characters of [a-zA-Z0-9_-]", i)
-		}
-		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
-			return fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
-		}
-		if err := validateChunkModeAndRepo(i, c.Mode, c.Repo, c.TargetFiles, c.TargetSymbols); err != nil {
-			return err
-		}
-		if _, err := normalizeChunkEffort(c.Effort); err != nil {
-			return fmt.Errorf("chunk[%d] %w", i, err)
-		}
-	}
-	if _, err := normalizeAndValidateBuildDAG(chunks); err != nil {
-		return err
-	}
-	return nil
-}
-
 func isTerminalChunkStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case statusMerged, statusCompleted, statusFailed, statusCancelled:
@@ -237,73 +203,4 @@ func isTerminalChunkStatus(status string) bool {
 	default:
 		return false
 	}
-}
-
-func marshalJSONBOrEmpty(v any) []byte {
-	if v == nil {
-		return []byte("{}")
-	}
-	b, err := json.Marshal(v)
-	if err != nil || len(b) == 0 || string(b) == jsonNull {
-		return []byte("{}")
-	}
-	return b
-}
-
-// relinkDependenciesAfterRemoval rewrites dependencies in remaining after removedID is deleted,
-// removing removedID and replacing it with removedDeps.
-func relinkDependenciesAfterRemoval(remaining []VanadisChunk, removedID string, removedDeps []string) {
-	for i := range remaining {
-		c := &remaining[i]
-		if !slices.Contains(c.DependsOn, removedID) {
-			continue
-		}
-		newDeps := make([]string, 0, len(c.DependsOn)+len(removedDeps))
-		seen := make(map[string]bool)
-		for _, dep := range c.DependsOn {
-			if dep == removedID {
-				for _, rd := range removedDeps {
-					if rd != c.ID && !seen[rd] {
-						seen[rd] = true
-						newDeps = append(newDeps, rd)
-					}
-				}
-			} else if !seen[dep] {
-				seen[dep] = true
-				newDeps = append(newDeps, dep)
-			}
-		}
-		c.DependsOn = newDeps
-	}
-}
-
-// validateUpdateChunkDAG substitutes updated into existing, validates the entire DAG, and returns the normalized depends_on.
-func validateUpdateChunkDAG(existing []VanadisChunk, updatedIdx int, updated VanadisChunk) ([]string, error) {
-	candidateChunks := make([]VanadisChunk, len(existing))
-	copy(candidateChunks, existing)
-	candidateChunks[updatedIdx] = updated
-
-	validated, err := normalizeAndValidateBuildDAG(candidateChunks)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
-	}
-	return validated[updatedIdx].DependsOn, nil
-}
-
-// validateAppendChunksDAG combines existing chunks with appended chunks, validates the DAG, and returns the appended chunks with normalized depends_on.
-func validateAppendChunksDAG(existing []VanadisChunk, appended []VanadisChunk) ([]VanadisChunk, error) {
-	allChunks := make([]VanadisChunk, 0, len(existing)+len(appended))
-	allChunks = append(allChunks, existing...)
-	allChunks = append(allChunks, appended...)
-
-	validatedAll, err := normalizeAndValidateBuildDAG(allChunks)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
-	}
-	out := make([]VanadisChunk, len(appended))
-	copy(out, appended)
-	for i := range out {
-		out[i].DependsOn = validatedAll[len(existing)+i].DependsOn
-	}
-	return out, nil
 }
