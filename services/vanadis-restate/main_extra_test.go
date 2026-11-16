@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -14,7 +15,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	restate "github.com/restatedev/sdk-go"
+	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
@@ -700,4 +703,165 @@ func failRow(cStatus, bStatus string, generation ...int) *genericMockRow {
 			"b1", "thread-1", 2, "Build 1", "Objective 1", "Context", bStatus, "msg-1", now, now,
 		)
 	}}
+}
+
+func TestBuildObject_AuthoritativeGenerationRecovery(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, status            string
+		generation              int
+		prior                   map[string]bool
+		dispatchError           bool
+		wantDispatch, wantError bool
+		wantKey                 string
+	}{
+		{"legacy sibling key", "pending", 1, map[string]bool{"vanadis-c-turn-1": true}, false, true, false, "dispatch:vanadis-c-turn-1"},
+		{"before reservation", "pending", 1, map[string]bool{"c": true}, false, true, false, "dispatch:vanadis-c-turn-1"},
+		{"after reservation", "running", 1, map[string]bool{"c": true, "dispatch:vanadis-c-turn-0": true}, false, true, false, "dispatch:vanadis-c-turn-1"},
+		{"acknowledged", "running", 1, map[string]bool{"dispatch:vanadis-c-turn-1": true}, false, false, false, "dispatch:vanadis-c-turn-1"},
+		{"pending acknowledged", "pending", 1, map[string]bool{"dispatch:vanadis-c-turn-1": true}, false, false, false, "dispatch:vanadis-c-turn-1"},
+		{"eri rejection", "running", 1, nil, true, true, true, ""},
+		{"first run", "pending", 0, nil, false, true, false, "c"},
+		{"legacy running", "running", 0, nil, false, false, false, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			build := VanadisBuild{ID: "b", Status: "running", ThreadID: "thread"}
+			chunks := []VanadisChunk{{ID: "c", BuildID: "b", Mode: "action", Status: tc.status, StallNudges: tc.generation, Title: "action"}}
+			store, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: chunks, execTag: "UPDATE 1"}.open()
+			eri := &mockEriClient{}
+			if tc.dispatchError {
+				eri.dispatchFn = func(context.Context, BrainDispatchRequest) error { return errors.New("rejected") }
+			}
+			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor(t.TempDir(), eri, nil, "", nil))
+			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, tc.prior, false)
+			assert.Equal(t, tc.wantError, err != nil)
+			assert.Equal(t, tc.wantDispatch, eri.lastDispatch != nil)
+			if tc.wantKey != "" {
+				assert.True(t, out.LaunchedMap[tc.wantKey])
+			}
+			if eri.lastDispatch != nil {
+				assert.Equal(t, fmt.Sprintf("vanadis-c-turn-%d", tc.generation), eri.lastDispatch.ID)
+			}
+		})
+	}
+}
+
+func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		status           string
+		siblings         int
+		dependencyStatus string
+		wantDispatch     bool
+	}{
+		{"resume at capacity", "running", 3, "completed", true},
+		{"pending at capacity", "pending", 4, "completed", false},
+		{"dependency unfinished", "running", 0, "running", false},
+		{"dependency ready", "pending", 0, "completed", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			chunks := []VanadisChunk{
+				{ID: "retry", Mode: "action", Status: tc.status, StallNudges: 2, DependsOn: []string{"dependency"}},
+				{ID: "dependency", Mode: "action", Status: tc.dependencyStatus},
+			}
+			for i := range tc.siblings {
+				chunks = append(chunks, VanadisChunk{ID: fmt.Sprintf("sibling-%d", i), Mode: "pr", Status: "running"})
+			}
+			eri := &mockEriClient{}
+			bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, NewExecutor(t.TempDir(), eri, nil, "", nil))
+			launched := map[string]bool{"retry": true, "dispatch:vanadis-retry-turn-1": true}
+			_, err := bo.launchEligibleChunks(context.Background(), VanadisBuild{ID: "b"}, chunks, launched)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantDispatch, eri.lastDispatch != nil)
+			if tc.wantDispatch {
+				assert.Equal(t, "vanadis-retry-turn-2", eri.lastDispatch.ID)
+				// Repeated reconciliation after acceptance must leave the generation acknowledged.
+				eri.lastDispatch = nil
+				_, err = bo.launchEligibleChunks(context.Background(), VanadisBuild{ID: "b"}, chunks, launched)
+				assert.NoError(t, err)
+				assert.Nil(t, eri.lastDispatch)
+			}
+		})
+	}
+}
+
+func TestBuildObject_DeferredLaunchReleasesInvocation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		dispatchErr  error
+		wantDeferred bool
+	}{
+		{"active generation", errDispatchActive, true},
+		{"transport failure", errors.New("unavailable"), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			build := VanadisBuild{ID: "b", Status: "running"}
+			store, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: []VanadisChunk{{ID: "retry", Mode: "action", Status: "running", StallNudges: 1}, {ID: "sibling", Mode: "action", Status: "pending"}}, execTag: "UPDATE 1"}.open()
+			eri := &mockEriClient{dispatchFn: func(_ context.Context, req BrainDispatchRequest) error {
+				if req.ID == "vanadis-retry-turn-1" {
+					return tc.dispatchErr
+				}
+				return nil
+			}}
+			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor(t.TempDir(), eri, nil, "", nil))
+			rt := newFakeObjectRuntime("b")
+			_, err := bo.executeObjectTransition(rt, "reconcile-build", nil)
+			assert.Equal(t, !tc.wantDeferred, err != nil)
+			assert.Equal(t, tc.wantDeferred, rt.reconcileScheduled)
+			if tc.wantDeferred {
+				assert.True(t, rt.launched["sibling"])
+				assert.False(t, rt.launched["dispatch:vanadis-retry-turn-1"])
+				// Observe a sibling completion on the next invocation: its slot is
+				// available to another independent chunk while retry remains active.
+				nextStore, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: []VanadisChunk{
+					{ID: "retry", Mode: "action", Status: "running", StallNudges: 1},
+					{ID: "sibling", Mode: "action", Status: "completed"},
+					{ID: "next", Mode: "action", Status: "pending"},
+				}, execTag: "UPDATE 1"}.open()
+				bo.store = nextStore
+				_, err = bo.executeObjectTransition(rt, "reconcile-build", nil)
+				assert.NoError(t, err)
+				assert.True(t, rt.launched["next"])
+				// Cancel uses a separate exclusive invocation after deferral.
+				mc := mocks.NewMockContext(t)
+				mc.EXPECT().Key().Return("b")
+				mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext)
+				bo.runtimeFactory = func(restate.ObjectContext) objectRuntime { return rt }
+				cancelled, err := bo.Cancel(restate.WithMockContext(mc), CancelBuildRequest{})
+				assert.NoError(t, err)
+				assert.Equal(t, "cancelled", cancelled.Status)
+			}
+		})
+	}
+}
+
+func TestClassifyLaunchErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                    string
+		failures                []error
+		wantError, wantDeferred bool
+	}{
+		{"no failures", nil, false, false},
+		{"active dispatch", []error{errDispatchActive}, true, true},
+		{"several active dispatches", []error{errDispatchActive, errDispatchActive}, true, true},
+		{"transport failure", []error{errors.New("unavailable")}, true, false},
+		{"mixed failures", []error{errDispatchActive, errors.New("unavailable")}, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := classifyLaunchErrors(tc.failures)
+			assert.Equal(t, tc.wantError, err != nil)
+			assert.Equal(t, tc.wantDeferred, errors.Is(err, errDispatchActive))
+		})
+	}
 }

@@ -186,6 +186,7 @@ type objectRuntime interface {
 	GetState() (*BuildObjectState, error)
 	SetState(state BuildObjectState)
 	ClearState()
+	ScheduleReconcile()
 	RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error)
 }
 
@@ -224,6 +225,12 @@ func (r restateObjectRuntime) RunReconcileStep(name string, fn func(ctx context.
 	return restate.Run(r.ctx, func(rc restate.RunContext) (reconcileStepOutput, error) {
 		return fn(rc)
 	}, restate.WithName(name))
+}
+
+// A delayed self-send releases the exclusive invocation between active-dispatch
+// probes, allowing completion and cancellation handlers to acquire the object.
+func (r restateObjectRuntime) ScheduleReconcile() {
+	_ = restate.ObjectSend(r.ctx, "Build", restate.Key(r.ctx), "Reconcile").Send(ReconcileBuildRequest{Reason: "active dispatch recovery"}, restate.WithDelay(time.Second))
 }
 
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
@@ -863,6 +870,9 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 		rt.SetLaunched(stepOut.LaunchedMap)
 	}
 
+	if b.shouldScheduleReconcile(stepOut) {
+		rt.ScheduleReconcile()
+	}
 	return ReconcileBuildResult{
 		BuildID:        buildID,
 		Status:         stepOut.BuildStatus,
@@ -919,8 +929,9 @@ func (b *BuildObject) applyMutation(ctx context.Context, buildID string, mutatio
 	return nil
 }
 
-func (b *BuildObject) launchEligibleChunks(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, launchedMap map[string]bool) []string {
+func (b *BuildObject) launchEligibleChunks(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, launchedMap map[string]bool) ([]string, error) {
 	var launchedChunks []string
+	var launchErrors []error
 	activeCount := 0
 	for _, c := range chunks {
 		s := strings.ToLower(strings.TrimSpace(c.Status))
@@ -931,22 +942,54 @@ func (b *BuildObject) launchEligibleChunks(ctx context.Context, build VanadisBui
 
 	for idx, chunk := range chunks {
 		s := strings.ToLower(strings.TrimSpace(chunk.Status))
-		if s != statusPending && s != "queued" {
+		resuming := s == statusRunning && chunk.Mode == chunkModeAction && chunk.StallNudges > 0
+		if s != statusPending && s != "queued" && !resuming {
 			continue
 		}
 		if checkChunkDependenciesReady(chunk, chunks) != nil {
 			continue
 		}
-		if activeCount >= 4 || launchedMap[chunk.ID] || b.executor == nil {
+		key := actionLaunchKey(chunk)
+		if (!resuming && activeCount >= 4) || launchedMap[key] || b.executor == nil {
 			continue
 		}
-		if lErr := b.executor.ExecuteLaunchChunk(ctx, b.store, build, chunks, idx, ""); lErr == nil {
-			launchedMap[chunk.ID] = true
-			launchedChunks = append(launchedChunks, chunk.ID)
+		// Reserve a slot conservatively: dispatch can fail after DB reservation.
+		if !resuming {
 			activeCount++
 		}
+		if err := b.executor.ExecuteLaunchChunk(ctx, b.store, build, chunks, idx, ""); err != nil {
+			// An accepted dispatch can return skipped_active on recovery. Keep
+			// its acknowledgement unset, but do not starve independent siblings.
+			launchErrors = append(launchErrors, err)
+			continue
+		}
+		// The durable launched marker records Eri acceptance, not reservation.
+		launchedMap[key] = true
+		launchedChunks = append(launchedChunks, chunk.ID)
 	}
-	return launchedChunks
+	return launchedChunks, classifyLaunchErrors(launchErrors)
+}
+
+// Only active-session deferrals may complete the journaled step successfully.
+// Any real failure still triggers durable invocation retry, including mixed failures.
+func classifyLaunchErrors(errs []error) error {
+	var failures []error
+	for _, err := range errs {
+		if !errors.Is(err, errDispatchActive) {
+			failures = append(failures, err)
+		}
+	}
+	if len(failures) > 0 {
+		return errors.Join(failures...)
+	}
+	if len(errs) > 0 {
+		return errDispatchActive
+	}
+	return nil
+}
+
+func (b *BuildObject) shouldScheduleReconcile(out reconcileStepOutput) bool {
+	return b.store != nil && out.Error == errDispatchActive.Error() && out.BuildStatus == statusRunning
 }
 
 func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk, status, reason, promptHeader, promptMsg string) {
@@ -1049,12 +1092,21 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		}
 	}
 
-	launchedChunks := b.launchEligibleChunks(ctx, *build, chunks, launchedMap)
+	launchedChunks, err := b.launchEligibleChunks(ctx, *build, chunks, launchedMap)
+	deferred := errors.Is(err, errDispatchActive)
+	if err != nil && !deferred {
+		return reconcileStepOutput{}, err
+	}
+	recoveryReason := ""
+	if deferred {
+		recoveryReason = errDispatchActive.Error()
+	}
 	finalStatus := b.evaluateBuildTerminalStatus(ctx, build, chunks)
 	build.Status = finalStatus
 
 	return reconcileStepOutput{
 		BuildStatus:    finalStatus,
+		Error:          recoveryReason,
 		LaunchedChunks: launchedChunks,
 		LaunchedMap:    launchedMap,
 		State:          &BuildObjectState{Build: *build, Chunks: chunks, Launched: launchedMap, TerminalNotified: finalStatus == statusCompleted},

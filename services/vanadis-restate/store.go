@@ -1489,3 +1489,12 @@ func actionCompletionAccepted(chunk VanadisChunk, buildStatus, dispatchID string
 	}
 	return actionCompletionAllowed(chunk, buildStatus, dispatchID)
 }
+
+// actionLaunchKey preserves legacy acknowledgement keys outside action retries.
+func actionLaunchKey(chunk VanadisChunk) string {
+	if chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
+		// A colon is forbidden in chunk IDs, keeping generation keys disjoint.
+		return "dispatch:" + actionDispatchID(chunk)
+	}
+	return chunk.ID
+}
