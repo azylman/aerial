@@ -112,11 +112,6 @@ func RecordBuildTotal(status string) {
 	BuildsTotal.WithLabelValues(status).Inc()
 }
 
-// RecordChunkTotal increments the vanadis_chunks_total counter for a given status.
-func RecordChunkTotal(status string) {
-	ChunksTotal.WithLabelValues(status).Inc()
-}
-
 func (s *VanadisServer) collectBuildMetrics(ctx context.Context) {
 	if s == nil || s.store == nil {
 		return

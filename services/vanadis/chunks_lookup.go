@@ -4,9 +4,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
+
+const defaultRepoOwner = "azylman"
+
+func repoMatchCandidates(repo string) []string {
+	repo = normalizeRepo(repo)
+	if repo == "" {
+		return nil
+	}
+	if !strings.Contains(repo, "/") {
+		return []string{repo, defaultRepoOwner + "/" + repo}
+	}
+	if bare, ok := strings.CutPrefix(repo, defaultRepoOwner+"/"); ok && bare != "" && !strings.Contains(bare, "/") {
+		return []string{repo, bare}
+	}
+	return []string{repo}
+}
 
 // chunkPRMatch is the newest non-cancelled chunk tied to a repo and PR number.
 type chunkPRMatch struct {

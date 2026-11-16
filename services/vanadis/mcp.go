@@ -315,33 +315,35 @@ func (s *VanadisServer) handleMCPGetChunk(ctx context.Context, args MCPGetChunkA
 	}, nil
 }
 
-func (s *VanadisServer) handleMCPUpdateBuild(ctx context.Context, args MCPUpdateBuildArgs) (MCPUpdateBuildOutput, error) {
+func (s *VanadisServer) requireStoreAndBuildID(buildID string) (string, error) {
 	if s.store == nil {
-		return MCPUpdateBuildOutput{}, errors.New("vanadis store not configured")
+		return "", errors.New("vanadis store not configured")
 	}
-	buildID := strings.TrimSpace(args.BuildID)
-	if buildID == "" {
-		return MCPUpdateBuildOutput{}, fmt.Errorf("%w: build_id is required", ErrInvalidBuildInput)
+	trimmed := strings.TrimSpace(buildID)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: build_id is required", ErrInvalidBuildInput)
 	}
+	return trimmed, nil
+}
 
-	req := UpdateBuildRequest{
-		Title:         args.Title,
-		Objective:     args.Objective,
-		SharedContext: args.SharedContext,
-	}
-
-	updated, err := s.store.UpdateBuild(ctx, buildID, req)
+func (s *VanadisServer) handleMCPUpdateBuild(ctx context.Context, args MCPUpdateBuildArgs) (MCPUpdateBuildOutput, error) {
+	buildID, err := s.requireStoreAndBuildID(args.BuildID)
 	if err != nil {
 		return MCPUpdateBuildOutput{}, err
 	}
 
-	if strings.TrimSpace(args.Title) != "" {
-		s.syncBuildWidget(ctx, buildID, "")
+	var updated VanadisBuild
+	if err := s.callRestateIngress(ctx, fmt.Sprintf("/Build/%s/UpdateBuild", buildID), UpdateBuildRequest{
+		Title:         args.Title,
+		Objective:     args.Objective,
+		SharedContext: args.SharedContext,
+	}, &updated); err != nil {
+		return MCPUpdateBuildOutput{}, err
 	}
 
 	return MCPUpdateBuildOutput{
 		Status: statusUpdated,
-		Build:  updated,
+		Build:  &updated,
 	}, nil
 }
 
@@ -370,6 +372,7 @@ func (s *VanadisServer) handleMCPUpdateChunk(ctx context.Context, args MCPUpdate
 	}
 
 	req := UpdateChunkRequest{
+		ChunkRef:      chunkRef,
 		Mode:          modePtr,
 		Repo:          args.Repo,
 		Title:         args.Title,
@@ -380,26 +383,24 @@ func (s *VanadisServer) handleMCPUpdateChunk(ctx context.Context, args MCPUpdate
 		DependsOn:     args.DependsOn,
 	}
 
-	updated, err := s.store.UpdateChunk(ctx, buildID, chunkRef, req)
-	if err != nil {
+	var updated VanadisChunk
+	if err := s.callRestateIngress(ctx, fmt.Sprintf("/Build/%s/UpdateChunk", buildID), req, &updated); err != nil {
 		return MCPUpdateChunkOutput{}, err
 	}
 
-	s.syncBuildWidget(ctx, buildID, "")
-
 	return MCPUpdateChunkOutput{
 		Status: statusUpdated,
-		Chunk:  updated,
+		Chunk:  &updated,
 	}, nil
 }
 
 func (s *VanadisServer) handleMCPAppendChunk(ctx context.Context, args MCPAppendChunkArgs) (MCPAppendChunkOutput, error) {
-	if s.store == nil {
-		return MCPAppendChunkOutput{}, errors.New("vanadis store not configured")
+	buildID, err := s.requireStoreAndBuildID(args.BuildID)
+	if err != nil {
+		return MCPAppendChunkOutput{}, err
 	}
-	buildID := strings.TrimSpace(args.BuildID)
-	if buildID == "" {
-		return MCPAppendChunkOutput{}, fmt.Errorf("%w: build_id is required", ErrInvalidBuildInput)
+	if len(args.Chunks) == 0 {
+		return MCPAppendChunkOutput{}, fmt.Errorf("%w: at least one chunk is required", ErrInvalidBuildInput)
 	}
 
 	inputs := make([]CreateChunkInput, len(args.Chunks))
@@ -407,12 +408,10 @@ func (s *VanadisServer) handleMCPAppendChunk(ctx context.Context, args MCPAppend
 		inputs[i] = CreateChunkInput(c)
 	}
 
-	appended, err := s.store.AppendChunks(ctx, buildID, inputs)
-	if err != nil {
+	var appended []VanadisChunk
+	if err := s.callRestateIngress(ctx, fmt.Sprintf("/Build/%s/AppendChunks", buildID), AppendChunksRequest{Chunks: inputs}, &appended); err != nil {
 		return MCPAppendChunkOutput{}, err
 	}
-
-	s.syncBuildWidget(ctx, buildID, "")
 
 	return MCPAppendChunkOutput{
 		Status:  "appended",
@@ -427,17 +426,30 @@ func (s *VanadisServer) handleMCPRemoveChunk(ctx context.Context, args MCPRemove
 		return MCPRemoveChunkOutput{}, err
 	}
 
-	removed, remaining, err := s.store.RemoveChunk(ctx, buildID, chunkRef)
-	if err != nil {
+	removedID := chunkRef
+	if _, chs, err := s.store.GetBuild(ctx, buildID); err == nil {
+		if idx := resolveChunkRef(chs, chunkRef); idx >= 0 {
+			removedID = chs[idx].ID
+		}
+	}
+
+	req := RemoveChunkRequest{ChunkRef: chunkRef}
+	if err := s.callRestateIngress(ctx, fmt.Sprintf("/Build/%s/RemoveChunk", buildID), req, nil); err != nil {
 		return MCPRemoveChunkOutput{}, err
 	}
 
-	s.syncBuildWidget(ctx, buildID, "")
+	var remaining []VanadisChunk
+	if s.store != nil {
+		_, chs, err := s.store.GetBuild(ctx, buildID)
+		if err == nil {
+			remaining = chs
+		}
+	}
 
 	return MCPRemoveChunkOutput{
 		Status:         "removed",
 		BuildID:        buildID,
-		RemovedChunkID: removed.ID,
+		RemovedChunkID: removedID,
 		Chunks:         toMCPChunkBriefs(remaining),
 	}, nil
 }
@@ -447,25 +459,29 @@ func (s *VanadisServer) mcpFailChunk(ctx context.Context, args MCPFailChunkArgs)
 }
 
 func (s *VanadisServer) handleMCPFailChunk(ctx context.Context, args MCPFailChunkArgs) (MCPFailChunkOutput, error) {
-	build, chunk, failed, err := s.failChunkInternal(ctx, args.ChunkID, args.Reason, args.DispatchID)
-	if err != nil {
+	if s.store == nil {
+		return MCPFailChunkOutput{}, errors.New("vanadis store not configured")
+	}
+	chunkID := strings.TrimSpace(args.ChunkID)
+	reason := strings.TrimSpace(args.Reason)
+	if chunkID == "" || reason == "" {
+		return MCPFailChunkOutput{}, fmt.Errorf("%w: chunk_id and reason are required", ErrInvalidBuildInput)
+	}
+	req := FailChunkRequest{
+		DispatchID: args.DispatchID,
+		ChunkID:    chunkID,
+		Reason:     reason,
+	}
+	var resp FailChunkResponse
+	if err := s.callRestateIngress(ctx, "/BuildRouter/RouteFailChunk", req, &resp); err != nil {
 		return MCPFailChunkOutput{}, err
-	}
-
-	buildID := ""
-	if build != nil {
-		buildID = build.ID
-	}
-	resChunkID := strings.TrimSpace(args.ChunkID)
-	if chunk != nil {
-		resChunkID = chunk.ID
 	}
 
 	return MCPFailChunkOutput{
 		Status:  statusFailed,
-		BuildID: buildID,
-		ChunkID: resChunkID,
-		Failed:  failed,
+		BuildID: resp.BuildID,
+		ChunkID: resp.ChunkID,
+		Failed:  resp.Failed,
 	}, nil
 }
 
