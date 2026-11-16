@@ -55,6 +55,18 @@ extract_remote_repo() {
     fi
 }
 
+preserve_scratch_workspace() {
+    if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+        if [ -d "${SCRATCH_DIR_CLEANUP}/.git" ]; then
+            touch "${SCRATCH_DIR_CLEANUP}/.git/.aerial-preserved" 2>/dev/null || true
+        elif [ -d "${SCRATCH_DIR_CLEANUP}" ]; then
+            touch "${SCRATCH_DIR_CLEANUP}.preserved" 2>/dev/null || true
+        fi
+        echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+        SCRATCH_DIR_CLEANUP=""
+    fi
+}
+
 run_preflight_verification() {
     local target_dir="${1:-.}"
     local max_rule_bytes=23040 # 22.5 KB (leaves 512B buffer for SyncRules frontmatter wrapper)
@@ -65,10 +77,7 @@ run_preflight_verification() {
             if [ -n "$size" ] && [ "$size" -gt "$max_rule_bytes" ]; then
                 echo "ERROR: Rule file '$(basename "$rf")' in scratch workspace ($size bytes) exceeds 22.5 KB ceiling ($max_rule_bytes bytes)." >&2
                 echo "       Antigravity truncates prompt context when compiled rules exceed 23 KB." >&2
-                if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                    echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                    SCRATCH_DIR_CLEANUP=""
-                fi
+                preserve_scratch_workspace
                 return 1
             fi
         fi
@@ -91,10 +100,7 @@ run_preflight_verification() {
         chmod +x "${target_dir}/scripts/verify.sh" 2>/dev/null || true
         if ! (cd "${target_dir}" && ./scripts/verify.sh --staged) >&2; then
             echo "ERROR: Pre-flight verification failed in scratch workspace. Aborting submit." >&2
-            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                SCRATCH_DIR_CLEANUP=""
-            fi
+            preserve_scratch_workspace
             return 1
         fi
     fi
@@ -165,6 +171,147 @@ build_auth_header() {
     printf "x-access-token:%s" "$pat" | base64 | tr -d '\r\n'
 }
 
+is_scratch_dir_abandoned() {
+    local d="$1"
+    [ -d "$d" ] || return 1
+    [ ! -f "${d}/.git/.aerial-preserved" ] && [ ! -f "${d}.preserved" ] && [ ! -f "${d}/.aerial-preserved" ] || return 1
+    if [ -n "$(find "$d" -mmin -1440 -print -quit 2>/dev/null)" ]; then
+        return 1
+    fi
+    if [ -d "${d}/.git" ]; then
+        if [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ]; then
+            return 1
+        fi
+        if ! git -C "$d" rev-parse --verify HEAD >/dev/null 2>&1; then
+            return 0
+        fi
+        local head_sha base_sha
+        head_sha="$(git -C "$d" rev-parse HEAD 2>/dev/null || echo "")"
+        base_sha="$(git -C "$d" rev-parse "origin/${DEFAULT_BRANCH}" 2>/dev/null || echo "")"
+        if [ -n "$head_sha" ] && [ -n "$base_sha" ] && [ "$head_sha" != "$base_sha" ]; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+is_git_lock_active() {
+    local repo_dir="$1"
+    local lock_file="$2"
+    local real_dir real_lock
+    real_dir="$(readlink -f "$repo_dir" 2>/dev/null || printf '%s' "$repo_dir")"
+    real_lock="$(readlink -f "$lock_file" 2>/dev/null || printf '%s' "$lock_file")"
+
+    if [ -n "$(find /proc/[0-9]*/fd -maxdepth 1 \( -lname "$real_lock" -o -lname "$lock_file" \) -print -quit 2>/dev/null)" ]; then
+        return 0
+    fi
+
+    local first_line=""
+    first_line="$(head -n 1 "$lock_file" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$first_line" =~ ^[0-9]+$ ]] && kill -0 "$first_line" 2>/dev/null; then
+        return 0
+    fi
+
+    local pid proc_cwd cmdline
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        [ "$pid" = "$$" ] || [ "$pid" = "${BASHPID:-}" ] && continue
+        proc_cwd="$(readlink -f "/proc/${pid}/cwd" 2>/dev/null || true)"
+        if [ "$proc_cwd" = "$real_dir" ] || [[ "$proc_cwd" == "${real_dir}/"* ]]; then
+            return 0
+        fi
+        cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+        if [[ "$cmdline" == *"$real_dir"* ]] || [[ "$cmdline" == *"$repo_dir"* ]]; then
+            return 0
+        fi
+    done < <(pgrep -f '^git([-[:space:]]|$)|/git([-[:space:]]|$)' 2>/dev/null || true)
+
+    return 1
+}
+
+recover_stale_git_locks() {
+    local repo_dir="$1"
+    [ -d "${repo_dir}/.git" ] || return 0
+
+    local lock_file
+    while IFS= read -r -d '' lock_file; do
+        if ! is_git_lock_active "$repo_dir" "$lock_file"; then
+            rm -f "$lock_file" 2>/dev/null || true
+        fi
+    done < <(find "${repo_dir}/.git" -name '*.lock' -type f -print0 2>/dev/null)
+}
+
+recover_interrupted_publication() {
+    local target_dir="$1"
+    local backup_dir="${target_dir}.bak"
+    local publish_marker="${target_dir}.publish"
+    local pending_stage=""
+
+    if [ -f "$publish_marker" ]; then
+        pending_stage="$(cat "$publish_marker" 2>/dev/null || echo "")"
+    fi
+
+    if [ ! -d "$target_dir" ]; then
+        local active_backup=""
+        if [ -d "$backup_dir" ]; then
+            active_backup="$backup_dir"
+        else
+            local b
+            for b in "${target_dir}.bak."*; do
+                if [ -d "$b" ]; then
+                    active_backup="$b"
+                    break
+                fi
+            done
+        fi
+
+        if [ -n "$pending_stage" ] && [ -d "${pending_stage}/.git" ] && git -C "$pending_stage" rev-parse --verify HEAD >/dev/null 2>&1; then
+            local copy_ok=1
+            if [ -n "$active_backup" ]; then
+                local item
+                while IFS= read -r -d '' item; do
+                    if ! cp -a "$item" "$pending_stage/" 2>/dev/null; then
+                        copy_ok=0
+                        break
+                    fi
+                done < <(find "$active_backup" -mindepth 1 -maxdepth 1 ! -name '.git' -print0)
+            fi
+            if [ "$copy_ok" -eq 1 ] && mv "$pending_stage" "$target_dir" 2>/dev/null; then
+                rm -rf "$backup_dir" "${target_dir}.bak."* "$publish_marker" 2>/dev/null || true
+                return 0
+            fi
+        fi
+
+        if [ -n "$active_backup" ]; then
+            mv "$active_backup" "$target_dir" 2>/dev/null || true
+        fi
+    fi
+
+    if [ -d "$target_dir" ]; then
+        rm -rf "$backup_dir" "${target_dir}.bak."* "$publish_marker" 2>/dev/null || true
+        if [ -n "$pending_stage" ] && [ "$pending_stage" != "$target_dir" ] && [ -d "$pending_stage" ]; then
+            rm -rf "$pending_stage" 2>/dev/null || true
+        fi
+    fi
+}
+
+prune_stale_scratch_dirs() {
+    local base_dir="$1"
+    local d
+    for d in "${base_dir}"/*-scratch.*; do
+        [[ "$d" == *.lock || "$d" == *.preserved ]] && continue
+        [ -d "$d" ] || continue
+        (
+            exec 8>"${d}.lock"
+            if flock -n 8; then
+                if is_scratch_dir_abandoned "$d"; then
+                    rm -rf "$d" "${d}.lock" "${d}.preserved" 2>/dev/null || true
+                fi
+            fi
+        ) 2>/dev/null || true
+    done
+}
+
 init_scratch() {
     local init_branch=""
     local positional_repo_set=0
@@ -201,6 +348,20 @@ init_scratch() {
                 fi
                 shift 1
                 ;;
+            --vanadis-chunk)
+                if [ $# -lt 2 ]; then
+                    echo "ERROR: $1 requires a chunk ID argument." >&2
+                    exit 1
+                fi
+                VANADIS_CHUNK_ID="$2"
+                VANADIS_CHUNK_ID_EXPLICIT="$2"
+                shift 2
+                ;;
+            --vanadis-chunk=*)
+                VANADIS_CHUNK_ID="${1#*=}"
+                VANADIS_CHUNK_ID_EXPLICIT="${1#*=}"
+                shift 1
+                ;;
             -*)
                 echo "ERROR: Unexpected argument to init: $1" >&2
                 exit 1
@@ -228,23 +389,20 @@ init_scratch() {
     local auth_header
     auth_header=$(build_auth_header)
 
-    local base_dir="/data/scratch"
-    if [ ! -d "/data" ] || [ ! -w "/data" ]; then
-        base_dir="/dev/shm"
-        if [ ! -d "$base_dir" ] || [ ! -w "$base_dir" ]; then
-            base_dir="${TMPDIR:-/tmp}"
+    local base_dir="${AERIAL_SCRATCH_BASE_DIR:-/data/scratch}"
+    if [ -z "${AERIAL_SCRATCH_BASE_DIR:-}" ]; then
+        if [ ! -d "/data" ] || [ ! -w "/data" ]; then
+            base_dir="/dev/shm"
+            if [ ! -d "$base_dir" ] || [ ! -w "$base_dir" ]; then
+                base_dir="${TMPDIR:-/tmp}"
+            fi
         fi
-    else
-        mkdir -p "$base_dir"
     fi
+    mkdir -p "$base_dir"
 
-    local scratch_prefix="${REPO_NAME}-scratch"
+    prune_stale_scratch_dirs "$base_dir"
+
     local branch_prefix="feat/${REPO_NAME}-pr"
-
-    local scratch_dir
-    scratch_dir=$(mktemp -d "${base_dir}/${scratch_prefix}.XXXXXX")
-    chmod 700 "$scratch_dir"
-
     local rand_suffix
     rand_suffix=$(head -c 16 /dev/urandom | md5sum | head -c 6)
     local branch_name="${branch_prefix}-$(date +%Y%m%d%H%M%S)-${rand_suffix}"
@@ -252,6 +410,59 @@ init_scratch() {
     if [ -n "$init_branch" ]; then
         clone_branch="$init_branch"
         branch_name="$init_branch"
+    fi
+
+    local vanadis_chunk_id="$(resolve_vanadis_chunk_id "${VANADIS_CHUNK_ID_EXPLICIT:-}")"
+    local deterministic_dir=""
+    local safe_chunk_id=""
+    if [ -n "$vanadis_chunk_id" ] && [ -z "$init_branch" ]; then
+        safe_chunk_id="$(printf '%s' "$vanadis_chunk_id" | sed 's/[^a-zA-Z0-9_-]/_/g')"
+        deterministic_dir="${base_dir}/vanadis-${safe_chunk_id}-${REPO_NAME}"
+    fi
+
+    local scratch_dir
+    local clone_target=""
+    if [ -n "$deterministic_dir" ]; then
+        scratch_dir="$deterministic_dir"
+        exec 9>"${scratch_dir}.lock"
+        flock 9
+        recover_interrupted_publication "$scratch_dir"
+        if [ -d "${scratch_dir}/.git" ]; then
+            recover_stale_git_locks "$scratch_dir"
+        fi
+        if [ -d "${scratch_dir}/.git" ] && git -C "$scratch_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+            cd "$scratch_dir"
+            local existing_branch=""
+            existing_branch="$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+            if [ -f "${scratch_dir}/.git/.aerial-init-complete" ] && [ -n "$existing_branch" ] && [ "$existing_branch" != "HEAD" ] && [ "$existing_branch" != "$DEFAULT_BRANCH" ]; then
+                git config user.name "Aerial"
+                git config user.email "aerial@noreply.github.com"
+                chmod 700 "$scratch_dir"
+                exec 9>&- 2>/dev/null || true
+                echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${existing_branch}\",\"repo\":\"${REPO_NAME}\",\"reused\":true}"
+                return 0
+            fi
+            if [ -n "$existing_branch" ] && [ "$existing_branch" != "HEAD" ] && [ "$existing_branch" != "$DEFAULT_BRANCH" ]; then
+                branch_name="$existing_branch"
+            else
+                git checkout -b "$branch_name" >/dev/null 2>&1
+            fi
+            git config user.name "Aerial"
+            git config user.email "aerial@noreply.github.com"
+            printf '%s\n' "$branch_name" > "${scratch_dir}/.git/.aerial-init-complete"
+            chmod 700 "$scratch_dir"
+            exec 9>&- 2>/dev/null || true
+            echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${branch_name}\",\"repo\":\"${REPO_NAME}\"}"
+            return 0
+        fi
+        rm -rf "${base_dir}/.init-${safe_chunk_id}-${REPO_NAME}."* 2>/dev/null || true
+        clone_target=$(mktemp -d "${base_dir}/.init-${safe_chunk_id}-${REPO_NAME}.XXXXXX")
+        chmod 700 "$clone_target"
+    else
+        local scratch_prefix="${REPO_NAME}-scratch"
+        scratch_dir=$(mktemp -d "${base_dir}/${scratch_prefix}.XXXXXX")
+        chmod 700 "$scratch_dir"
+        clone_target="$scratch_dir"
     fi
 
     export GIT_TERMINAL_PROMPT=0
@@ -262,13 +473,14 @@ init_scratch() {
     export GIT_CONFIG_VALUE_1="HTTP/1.1"
 
     local clone_out=""
-    if ! clone_out=$(git clone --depth 20 --single-branch -b "$clone_branch" "$REPO_URL" "$scratch_dir" 2>&1); then
+    if ! clone_out=$(git clone --depth 20 --single-branch -b "$clone_branch" "$REPO_URL" "$clone_target" 2>&1); then
         echo "ERROR: Failed to clone ${REPO_URL} into scratch directory: ${clone_out}" >&2
-        rm -rf "$scratch_dir"
+        rm -rf "$clone_target"
+        exec 9>&- 2>/dev/null || true
         exit 1
     fi
 
-    cd "$scratch_dir"
+    cd "$clone_target"
     if [ -z "$init_branch" ]; then
         git checkout -b "$branch_name" >/dev/null 2>&1
     elif [ "$init_branch" != "$DEFAULT_BRANCH" ]; then
@@ -277,6 +489,43 @@ init_scratch() {
     fi
     git config user.name "Aerial"
     git config user.email "aerial@noreply.github.com"
+
+    if [ "$clone_target" != "$scratch_dir" ]; then
+        local backup_dir="${scratch_dir}.bak"
+        local publish_marker="${scratch_dir}.publish"
+        rm -rf "$backup_dir" "$publish_marker" 2>/dev/null || true
+        if [ -d "$scratch_dir" ]; then
+            while IFS= read -r -d '' item; do
+                if ! cp -a "$item" "$clone_target/"; then
+                    echo "ERROR: Failed to copy existing workspace contents from ${scratch_dir} into initialized checkout." >&2
+                    rm -rf "$clone_target"
+                    exec 9>&- 2>/dev/null || true
+                    exit 1
+                fi
+            done < <(find "$scratch_dir" -mindepth 1 -maxdepth 1 ! -name '.git' -print0)
+            printf '%s\n' "$clone_target" > "$publish_marker"
+            if ! mv "$scratch_dir" "$backup_dir"; then
+                echo "ERROR: Failed to stage existing directory ${scratch_dir} for replacement." >&2
+                rm -rf "$clone_target" "$publish_marker"
+                exec 9>&- 2>/dev/null || true
+                exit 1
+            fi
+        else
+            printf '%s\n' "$clone_target" > "$publish_marker"
+        fi
+        if ! mv "$clone_target" "$scratch_dir"; then
+            [ -d "$backup_dir" ] && mv "$backup_dir" "$scratch_dir" 2>/dev/null || true
+            echo "ERROR: Failed to publish initialized checkout to ${scratch_dir}." >&2
+            rm -rf "$clone_target" "$publish_marker"
+            exec 9>&- 2>/dev/null || true
+            exit 1
+        fi
+        rm -rf "$backup_dir" "$publish_marker"
+        chmod 700 "$scratch_dir"
+        cd "$scratch_dir"
+    fi
+    printf '%s\n' "$branch_name" > "${scratch_dir}/.git/.aerial-init-complete"
+    exec 9>&- 2>/dev/null || true
 
     echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${branch_name}\",\"repo\":\"${REPO_NAME}\"}"
 }
@@ -643,10 +892,7 @@ rebase_staged_changes() {
             git merge --abort >/dev/null 2>&1 || true
             [ -n "$temp_sha" ] && git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$remote_branch_sha" >/dev/null 2>&1
             echo "ERROR: Failed to merge origin/${target_branch} into ${current_branch} due to merge conflicts. Aborting submit." >&2
-            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                SCRATCH_DIR_CLEANUP=""
-            fi
+            preserve_scratch_workspace
             return 1
         else
             local fork_point=""
@@ -665,10 +911,7 @@ rebase_staged_changes() {
                     git merge --abort >/dev/null 2>&1 || true
                     [ -n "$temp_sha" ] && git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$head_sha" >/dev/null 2>&1
                     echo "ERROR: Failed to merge origin/${target_branch} into ${current_branch} due to merge conflicts. Aborting submit." >&2
-                    if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                        echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                        SCRATCH_DIR_CLEANUP=""
-                    fi
+                    preserve_scratch_workspace
                     return 1
                 fi
                 echo "🔄 [aerial-pr] Merged latest origin/${target_branch} (${upstream_sha:0:7}) into ${current_branch}." >&2
@@ -678,10 +921,7 @@ rebase_staged_changes() {
                     git cherry-pick --abort >/dev/null 2>&1 || true
                     git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$head_sha" >/dev/null 2>&1
                     echo "ERROR: Failed to apply staged changes onto updated remote branch ${current_branch} due to merge conflicts. Aborting submit." >&2
-                    if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                        echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                        SCRATCH_DIR_CLEANUP=""
-                    fi
+                    preserve_scratch_workspace
                     return 1
                 fi
             fi
@@ -700,10 +940,7 @@ rebase_staged_changes() {
             git reset --soft HEAD~1 >/dev/null 2>&1 || true
         fi
         echo "ERROR: Failed to rebase scratch branch onto origin/${target_branch} due to merge conflicts. Aborting submit." >&2
-        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-            SCRATCH_DIR_CLEANUP=""
-        fi
+        preserve_scratch_workspace
         return 1
     fi
     git reset --soft "origin/${target_branch}" >/dev/null 2>&1
@@ -889,12 +1126,9 @@ submit_scratch() {
             if [ -n "${SAVED_PR_DESC_FILE:-}" ] && [ -d "${scratch_dir}" ] && [ ! -f "${SAVED_PR_DESC_FILE}" ]; then
                 printf "%s\n" "${SAVED_PR_DESC_CONTENT}" > "${SAVED_PR_DESC_FILE}" 2>/dev/null || true
             fi
-            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                SCRATCH_DIR_CLEANUP=""
-            fi
+            preserve_scratch_workspace
         elif [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-            rm -rf "${SCRATCH_DIR_CLEANUP}"
+            rm -rf "${SCRATCH_DIR_CLEANUP}" "${SCRATCH_DIR_CLEANUP}.lock" "${SCRATCH_DIR_CLEANUP}.preserved"
         fi
     ' EXIT INT TERM
 
@@ -920,6 +1154,10 @@ submit_scratch() {
 
     # CRITICAL WORKSPACE HYGIENE: Always remove convention files from scratch workspace before staging
     # so they are NEVER staged by git add -A or permanently committed into git history on main!
+    if [ -f "${scratch_dir}/.aerial-preserved" ]; then
+        [ -d "${scratch_dir}/.git" ] && touch "${scratch_dir}/.git/.aerial-preserved" 2>/dev/null || true
+        rm -f "${scratch_dir}/.aerial-preserved"
+    fi
     rm -f "${scratch_dir}/PR_DESCRIPTION.md" "${scratch_dir}/.pr_description.md"
 
     # If submitting on an existing PR branch without a local description, inherit metadata from the open PR
@@ -973,7 +1211,7 @@ submit_scratch() {
 
     # 1. Stage all modifications (defensively unstage any convention files if previously cached)
     git add -A
-    git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
+    git rm --cached -f PR_DESCRIPTION.md .pr_description.md .aerial-preserved 2>/dev/null || true
 
     local has_committed_changes=0
     if git rev-parse --verify "origin/${DEFAULT_BRANCH}" >/dev/null 2>&1; then
@@ -1056,10 +1294,7 @@ submit_scratch() {
     echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin (${REPO_OWNER}/${REPO_NAME})..." >&2
     if ! push_scratch_branch "$branch"; then
         echo "ERROR: Failed to push branch ${branch} to GitHub." >&2
-        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-            SCRATCH_DIR_CLEANUP=""
-        fi
+        preserve_scratch_workspace
         exit 1
     fi
 
@@ -1116,10 +1351,7 @@ submit_scratch() {
                 "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
         fi
         # Prevent trap from nuking the local workspace so code can be recovered
-        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-            SCRATCH_DIR_CLEANUP=""
-        fi
+        preserve_scratch_workspace
         exit 1
     fi
 
@@ -1152,18 +1384,12 @@ submit_scratch() {
             fi
         else
             echo "ERROR: Failed to attach PR #${pr_num} to Vanadis (chunk: '${vanadis_chunk_id:-standalone}')." >&2
-            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                SCRATCH_DIR_CLEANUP=""
-            fi
+            preserve_scratch_workspace
             exit 1
         fi
     elif [ -n "$vanadis_chunk_id" ]; then
         echo "ERROR: Cannot attach PR #${pr_num} to Vanadis chunk '${vanadis_chunk_id}': Vanadis URL could not be resolved." >&2
-        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-            SCRATCH_DIR_CLEANUP=""
-        fi
+        preserve_scratch_workspace
         exit 1
     fi
 
@@ -1184,18 +1410,12 @@ submit_scratch() {
     if [ -n "$brain_reg_url" ]; then
         if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then
             echo "ERROR: Failed to register PR #${pr_num} in PostgreSQL pr_registry (${brain_reg_url})." >&2
-            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-                SCRATCH_DIR_CLEANUP=""
-            fi
+            preserve_scratch_workspace
             exit 1
         fi
     else
         echo "ERROR: No PR registration endpoint available (AERIAL_PR_REGISTER_URL, SYNAPSE_URL, or synapse_url in config.yaml must be set)." >&2
-        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
-            SCRATCH_DIR_CLEANUP=""
-        fi
+        preserve_scratch_workspace
         exit 1
     fi
 
@@ -1204,7 +1424,7 @@ submit_scratch() {
 
     # Asynchronous Submission: Disarm cleanup trap and remove scratch workspace immediately
     if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-        rm -rf "${SCRATCH_DIR_CLEANUP}"
+        rm -rf "${SCRATCH_DIR_CLEANUP}" "${SCRATCH_DIR_CLEANUP}.lock" "${SCRATCH_DIR_CLEANUP}.preserved"
         SCRATCH_DIR_CLEANUP=""
     fi
 
