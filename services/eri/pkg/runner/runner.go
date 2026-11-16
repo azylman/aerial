@@ -417,7 +417,7 @@ func IsQuotaPause(errDetail, stderr string) bool {
 
 func hasCapacityPhrases(combined string) bool {
 	if strings.Contains(combined, "individual quota reached") ||
-		strings.Contains(combined, "please upgrade your subscription") ||
+		strings.Contains(combined, "upgrade your subscription") ||
 		strings.Contains(combined, "exceeded your current quota") ||
 		strings.Contains(combined, "usage_limit_reached") ||
 		strings.Contains(combined, "you have hit your chatgpt usage limit") {
@@ -432,7 +432,7 @@ func IsCapacityBlip(errDetail, stderr string) bool {
 		return true
 	}
 	if strings.Contains(combined, "individual quota reached") ||
-		strings.Contains(combined, "please upgrade your subscription") ||
+		strings.Contains(combined, "upgrade your subscription") ||
 		strings.Contains(combined, "exceeded your current quota") ||
 		strings.Contains(combined, "usage_limit_reached") ||
 		strings.Contains(combined, "you have hit your chatgpt usage limit") ||

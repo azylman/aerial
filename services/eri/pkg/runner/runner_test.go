@@ -219,6 +219,7 @@ func TestIsCapacityBlip(t *testing.T) {
 		{name: "Codex rate limit exceeded is blip", stderr: "error: rate_limit_exceeded", want: true},
 		{name: "Codex usage_limit_reached is not blip", errDetail: "error: usage_limit_reached"},
 		{name: "Codex chatgpt usage limit is not blip", errDetail: "You have hit your ChatGPT usage limit."},
+		{name: "Rate limit with subscription upgrade prompt without please is not blip", errDetail: "RESOURCE_EXHAUSTED: rate limit exceeded; upgrade your subscription"},
 		{name: "Short reset duration <= 5s without subscription phrases", errDetail: "RESOURCE_EXHAUSTED (code 429). Resets in 3s.", want: true},
 		{name: "Claude hit your limit straight apostrophe is not blip", errDetail: "You've hit your limit. Resets in 2s."},
 		{name: "Claude hit your 5-hour limit curly apostrophe is not blip", stderr: "You’ve hit your 5-hour limit. Resets in 2s."},

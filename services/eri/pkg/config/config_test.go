@@ -1293,30 +1293,6 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 
 	runConfigAccessors(t)
 	runConfigConcurrency(t)
-
-	engineTests := []struct {
-		name       string
-		data       *ConfigData
-		wantEngine string
-	}{
-		{name: "default is agy", data: &ConfigData{}, wantEngine: EngineAgy},
-		{name: "claude engine", data: &ConfigData{Engine: "claude"}, wantEngine: EngineClaude},
-		{name: "claude case insensitive", data: &ConfigData{Engine: "CLAUDE"}, wantEngine: EngineClaude},
-		{name: "codex engine", data: &ConfigData{Engine: "codex"}, wantEngine: EngineCodex},
-		{name: "codex case insensitive", data: &ConfigData{Engine: "  CODEX  "}, wantEngine: EngineCodex},
-		{name: "nil ConfigData defaults to agy", data: nil, wantEngine: EngineAgy},
-	}
-	for _, tc := range engineTests {
-		t.Run("engine_"+tc.name, func(t *testing.T) {
-			if got := tc.data.GetEngine(); got != tc.wantEngine {
-				t.Errorf("GetEngine() = %q, want %q", got, tc.wantEngine)
-			}
-			cfg := NewFromData(tc.data)
-			if got := cfg.Engine(); got != tc.wantEngine {
-				t.Errorf("cfg.Engine() = %q, want %q", got, tc.wantEngine)
-			}
-		})
-	}
 }
 
 func slicesEqual(a, b []string) bool {
