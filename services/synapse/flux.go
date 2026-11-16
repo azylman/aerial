@@ -594,7 +594,7 @@ func managedWorkloadMatchesClusterSpec(w, m workloadRollout) (bool, string) {
 	if len(w.Images) > 0 && !slices.Contains(m.Images, w.Images[0]) {
 		return false, fmt.Sprintf("managed %s images %v do not match cluster image %s", m, m.Images, w.Images[0])
 	}
-	if w.Replicas > 0 && m.Replicas != w.Replicas {
+	if m.Replicas != w.Replicas {
 		return false, fmt.Sprintf("managed %s replicas %d do not match cluster replicas %d", m, m.Replicas, w.Replicas)
 	}
 	for k, v := range w.Env {
@@ -617,13 +617,16 @@ func managedWorkloadMatchesClusterSpec(w, m workloadRollout) (bool, string) {
 
 // restateClusterRolloutComplete reports whether a RestateCluster and its managed workloads are rolled out.
 func restateClusterRolloutComplete(w workloadRollout) (done, failed bool, reason string) {
-	if !w.ReadyConditionTrue {
+	if w.Replicas != 0 && !w.ReadyConditionTrue {
 		return false, false, "ready=false"
 	}
 	if len(w.ManagedWorkloads) == 0 {
 		return false, false, "waiting for managed statefulset"
 	}
 	for _, m := range w.ManagedWorkloads {
+		if w.Replicas == 0 && m.Kind != kindStatefulSet {
+			return false, false, "waiting for managed statefulset"
+		}
 		if ok, mismatchReason := managedWorkloadMatchesClusterSpec(w, m); !ok {
 			return false, false, mismatchReason
 		}
@@ -636,6 +639,15 @@ func restateClusterRolloutComplete(w workloadRollout) (done, failed bool, reason
 		}
 	}
 	return true, false, ""
+}
+
+// stoppedWorkloadRolloutComplete is called only after the generation guard.
+// Inactive controllers need no readiness, registration, or matching revisions.
+func stoppedWorkloadRolloutComplete(w workloadRollout) (done, failed bool, reason string) {
+	if w.StatusReplicas == 0 && w.ReadyReplicas == 0 && w.AvailableReplicas == 0 && w.UpdatedReplicas == 0 {
+		return true, false, ""
+	}
+	return false, false, "waiting for all replicas to stop"
 }
 
 // workloadRolloutComplete reports whether the workload controller has observed its latest spec and
@@ -652,12 +664,18 @@ func workloadRolloutComplete(w workloadRollout) (done, failed bool, reason strin
 		done = w.UpdatedReplicas == w.Replicas && w.AvailableReplicas == w.Replicas && w.StatusReplicas == w.Replicas
 		reason = fmt.Sprintf("%d/%d updated, %d/%d available, %d total", w.UpdatedReplicas, w.Replicas, w.AvailableReplicas, w.Replicas, w.StatusReplicas)
 	case kindStatefulSet:
+		if w.Replicas == 0 {
+			return stoppedWorkloadRolloutComplete(w)
+		}
 		done = w.UpdateRevision == w.CurrentRevision && w.AvailableReplicas == w.Replicas
 		reason = fmt.Sprintf("revision %s of %s, %d/%d available", w.CurrentRevision, w.UpdateRevision, w.AvailableReplicas, w.Replicas)
 	case "DaemonSet":
 		done = w.UpdatedNumberScheduled == w.DesiredNumberScheduled && w.NumberAvailable == w.DesiredNumberScheduled
 		reason = fmt.Sprintf("%d/%d updated, %d/%d available", w.UpdatedNumberScheduled, w.DesiredNumberScheduled, w.NumberAvailable, w.DesiredNumberScheduled)
 	case "RestateDeployment":
+		if w.Replicas == 0 {
+			return stoppedWorkloadRolloutComplete(w)
+		}
 		done = w.ReadyConditionTrue && w.ReadyReplicas == w.Replicas && w.AvailableReplicas == w.Replicas && w.DeploymentID != ""
 		reason = fmt.Sprintf("%d/%d ready, %d/%d available, deploymentId=%s, ready=%t", w.ReadyReplicas, w.Replicas, w.AvailableReplicas, w.Replicas, w.DeploymentID, w.ReadyConditionTrue)
 	case kindRestateCluster:

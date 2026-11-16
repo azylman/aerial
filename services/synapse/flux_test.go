@@ -823,6 +823,12 @@ func TestDecodeWorkloadRollouts(t *testing.T) {
 		want    []workloadRollout
 		wantErr bool
 	}{
+		{name: "RestateDeployment explicit zero", kind: "RestateDeployment", body: `{"items":[{"metadata":{"generation":2},"spec":{"replicas":0},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "RestateDeployment", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 0}}},
+		{name: "RestateDeployment omitted defaults one", kind: "RestateDeployment", body: `{"items":[{"metadata":{"generation":2},"spec":{},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "RestateDeployment", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 1}}},
+		{name: "StatefulSet explicit zero", kind: "StatefulSet", body: `{"items":[{"metadata":{"generation":2},"spec":{"replicas":0},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "StatefulSet", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 0}}},
+		{name: "StatefulSet omitted defaults one", kind: "StatefulSet", body: `{"items":[{"metadata":{"generation":2},"spec":{},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "StatefulSet", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 1}}},
+		{name: "RestateCluster explicit zero", kind: "RestateCluster", body: `{"items":[{"metadata":{"generation":2},"spec":{"compute":{"replicas":0}},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "RestateCluster", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 0}}},
+		{name: "RestateCluster omitted defaults one", kind: "RestateCluster", body: `{"items":[{"metadata":{"generation":2},"spec":{},"status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"False"}]}}]}`, want: []workloadRollout{{Kind: "RestateCluster", Images: []string{}, Generation: 2, ObservedGeneration: 2, Replicas: 1}}},
 		{
 			name: "deployment defaults replicas to one and detects the progress deadline",
 			kind: "Deployment",
@@ -903,6 +909,31 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 		wantFailed bool
 		wantReason string
 	}{
+		{name: "zero cluster child residual StatusReplicas", workload: workloadRollout{Kind: "RestateCluster", ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, StatusReplicas: 1}}}, wantReason: "managed StatefulSet default/restate: waiting for all replicas to stop"},
+		{name: "zero cluster child residual ReadyReplicas", workload: workloadRollout{Kind: "RestateCluster", ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, ReadyReplicas: 1}}}, wantReason: "managed StatefulSet default/restate: waiting for all replicas to stop"},
+		{name: "zero cluster child residual AvailableReplicas", workload: workloadRollout{Kind: "RestateCluster", ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, AvailableReplicas: 1}}}, wantReason: "managed StatefulSet default/restate: waiting for all replicas to stop"},
+		{name: "zero cluster child residual UpdatedReplicas", workload: workloadRollout{Kind: "RestateCluster", ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, UpdatedReplicas: 1}}}, wantReason: "managed StatefulSet default/restate: waiting for all replicas to stop"},
+		{name: "zero cluster stale child", workload: workloadRollout{Kind: "RestateCluster", ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 1}}}, wantReason: "managed StatefulSet default/restate: generation 2 not yet observed"},
+		{name: "RestateDeployment stopped with inactive status", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2}, wantDone: true},
+		{name: "RestateDeployment stopped stale generation", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 1}, wantReason: "generation 2 not yet observed"},
+		{name: "RestateDeployment stopped residual StatusReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, StatusReplicas: 1}, wantReason: "waiting for all replicas to stop"},
+		{name: "RestateDeployment stopped residual ReadyReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, ReadyReplicas: 1}, wantReason: "waiting for all replicas to stop"},
+		{name: "RestateDeployment stopped residual AvailableReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, AvailableReplicas: 1}, wantReason: "waiting for all replicas to stop"},
+		// The portable stopped-rollout contract checks every decoded counter, even
+		// when an operator version currently omits updatedReplicas.
+		{name: "RestateDeployment stopped residual UpdatedReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, UpdatedReplicas: 1}, wantReason: "waiting for all replicas to stop"},
+		{name: "StatefulSet stopped with inactive status", workload: workloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}, wantDone: true},
+		{name: "StatefulSet stopped stale generation", workload: workloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 1}, wantReason: "generation 2 not yet observed"},
+		{name: "StatefulSet stopped residual StatusReplicas", workload: workloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 2, StatusReplicas: 1}, wantReason: "waiting for all replicas to stop"},
+		{name: "StatefulSet stopped residual ReadyReplicas", workload: workloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 2, ReadyReplicas: 1}, wantReason: "waiting for all replicas to stop"},
+		{name: "StatefulSet stopped residual AvailableReplicas", workload: workloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 2, AvailableReplicas: 1}, wantReason: "waiting for all replicas to stop"},
+		{name: "StatefulSet stopped residual UpdatedReplicas", workload: workloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 2, UpdatedReplicas: 1}, wantReason: "waiting for all replicas to stop"},
+		{name: "zero cluster verifies stopped child without Ready", workload: workloadRollout{Kind: "RestateCluster", ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}}}, wantDone: true},
+		{name: "zero cluster missing child", workload: workloadRollout{Kind: "RestateCluster"}, wantReason: "waiting for managed statefulset"},
+		{name: "zero cluster child desired replicas mismatch", workload: workloadRollout{Kind: "RestateCluster", ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Replicas: 1}}}, wantReason: "managed StatefulSet default/restate replicas 1 do not match cluster replicas 0"},
+		{name: "zero cluster Images mismatch", workload: workloadRollout{Kind: "RestateCluster", Images: []string{"new"}, ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}}}, wantReason: "managed StatefulSet default/restate images [] do not match cluster image new"},
+		{name: "zero cluster Env mismatch", workload: workloadRollout{Kind: "RestateCluster", Env: map[string]string{"A": "1"}, ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}}}, wantReason: "managed StatefulSet default/restate env A=\"\" does not match cluster \"1\""},
+		{name: "zero cluster Resources mismatch", workload: workloadRollout{Kind: "RestateCluster", Resources: kubeResourceRequirements{Limits: map[string]string{"cpu": "1"}}, ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}}}, wantReason: "managed StatefulSet default/restate resource limit cpu=\"\" does not match cluster \"1\""},
 		{name: "deployment rolled out", workload: deployRollout("synapse", synapseImage, 3, 3, 2, 2, 2, 2, false), wantDone: true},
 		{name: "deployment with old replicas still present", workload: deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 2, false), wantReason: "1/1 updated, 1/1 available, 2 total"},
 		{name: "deployment new replica unavailable", workload: deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 1, false), wantReason: "1/1 updated, 0/1 available, 1 total"},
@@ -1016,6 +1047,12 @@ func TestPRRolloutStatus(t *testing.T) {
 		wantFailed bool
 		wantReason string
 	}{
+		{name: "changed stopped deployment completes without registration", workloads: []workloadRollout{withChange(restateDeployRollout("worker", otherImage, 2, 2, 0, 0, 0, "", false), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "changed stopped statefulset ignores revisions", workloads: []workloadRollout{withChange(stsRollout("restate", otherImage, 2, 2, 0, 0, "new", "old"), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "changed zero cluster links stopped child", workloads: []workloadRollout{withChange(workloadRollout{Kind: "RestateCluster", Name: "restate", Images: []string{otherImage}}, rolloutClock(10, 1, 0), nil), {Kind: "StatefulSet", Namespace: "restate", Name: "restate", Images: []string{otherImage}, Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}}, commitSHA: rolloutSHA, wantDone: true},
+
+		{name: "changed zero cluster missing child pending", workloads: []workloadRollout{withChange(workloadRollout{Kind: "RestateCluster", Name: "restate"}, rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantReason: "RestateCluster /restate (waiting for managed statefulset)"},
+
 		{name: "no workloads is done", commitSHA: rolloutSHA, wantDone: true},
 		{name: "image match pending", workloads: []workloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, false), dsRollout("agent", synapseImage, 5, 5, 3, 2, 3)}, commitSHA: rolloutSHA, wantReason: "Deployment default/synapse (1/1 updated, 0/1 available, 2 total); DaemonSet kube-system/agent (2/3 updated, 3/3 available)"},
 		{name: "image match done", workloads: []workloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), stsRollout("db", "ghcr.io/azylman/aerial-db:"+rolloutSHA+"@sha256:beef", 2, 2, 1, 1, "db-2", "db-2")}, commitSHA: rolloutSHA, wantDone: true},
