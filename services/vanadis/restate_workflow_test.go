@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1161,4 +1162,170 @@ func TestReconcileBuild(t *testing.T) {
 	assert.Error(t, srvLocal.reconcileBuild(ctx, "", "deploy_success"))
 	var nilSrv *VanadisServer
 	assert.Error(t, nilSrv.reconcileBuild(ctx, "b-local", "deploy_success"))
+}
+
+type restateBuildTransitionTestCase struct {
+	name       string
+	path       string
+	setupStore func(store *memoryVanadisStore)
+	srv        *VanadisServer
+	body       string
+	useErrBody bool
+	wantCode   int
+	wantStatus string
+}
+
+func runRestateBuildTransitionTestCase(t *testing.T, tc restateBuildTransitionTestCase) {
+	t.Helper()
+	store := newMemoryVanadisStore()
+	if tc.setupStore != nil {
+		tc.setupStore(store)
+	}
+	bus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = bus.Close() })
+	srv := tc.srv
+	if srv == nil {
+		srv = &VanadisServer{store: store, bus: bus}
+	}
+
+	mux := SetupMux(srv)
+	var r *http.Request
+	if tc.useErrBody {
+		r = httptest.NewRequest(http.MethodPost, tc.path, errorReader{})
+	} else {
+		r = httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+	}
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	assert.Equal(t, tc.wantCode, w.Code)
+	if tc.wantStatus != "" {
+		var out reconcileStepOutput
+		err := json.Unmarshal(w.Body.Bytes(), &out)
+		require.NoError(t, err)
+		assert.Equal(t, tc.wantStatus, out.BuildStatus)
+	}
+}
+
+func TestRestateBuildTransitionHandler(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []restateBuildTransitionTestCase{
+		{
+			name: "valid_reconcile",
+			path: "/internal/restate/builds/b-trans-1/transition",
+			setupStore: func(s *memoryVanadisStore) {
+				b := VanadisBuild{ID: "b-trans-1", Status: "running"}
+				chunks := []VanadisChunk{
+					{ID: "c-t1", BuildID: "b-trans-1", ChunkIndex: 0, Mode: "action", Status: "completed"},
+				}
+				_ = s.CreateBuild(ctx, b, chunks)
+			},
+			body:       `{"prior_launched":{"c-t1":true}}`,
+			wantCode:   http.StatusOK,
+			wantStatus: "completed",
+		},
+		{
+			name: "valid_mutation",
+			path: "/internal/restate/builds/b-trans-2/transition",
+			setupStore: func(s *memoryVanadisStore) {
+				b := VanadisBuild{ID: "b-trans-2", Status: "running"}
+				chunks := []VanadisChunk{
+					{ID: "c-t2", BuildID: "b-trans-2", ChunkIndex: 0, Mode: "action", Status: "running"},
+				}
+				_ = s.CreateBuild(ctx, b, chunks)
+			},
+			body:       `{"mutation":{"action":"action_completed","chunk_id":"c-t2"}}`,
+			wantCode:   http.StatusOK,
+			wantStatus: "completed",
+		},
+		{
+			name:       "invalid_json",
+			path:       "/internal/restate/builds/b-trans-3/transition",
+			body:       `{not-valid-json`,
+			wantCode:   http.StatusBadRequest,
+			wantStatus: "",
+		},
+		{
+			name:       "invalid_mutation_action",
+			path:       "/internal/restate/builds/b-trans-4/transition",
+			body:       `{"mutation":{"action":"unknown_action"}}`,
+			wantCode:   http.StatusBadRequest,
+			wantStatus: "",
+		},
+		{
+			name:       "invalid_mutation_missing_chunk_id",
+			path:       "/internal/restate/builds/b-trans-5/transition",
+			body:       `{"mutation":{"action":"chunk_merged"}}`,
+			wantCode:   http.StatusBadRequest,
+			wantStatus: "",
+		},
+		{
+			name:       "nil_store",
+			path:       "/internal/restate/builds/b-trans-6/transition",
+			srv:        &VanadisServer{store: nil},
+			body:       `{}`,
+			wantCode:   http.StatusInternalServerError,
+			wantStatus: "",
+		},
+		{
+			name: "store_reconcile_error",
+			path: "/internal/restate/builds/b-trans-7/transition",
+			setupStore: func(s *memoryVanadisStore) {
+				s.getErr = errors.New("db query error")
+			},
+			body:       `{}`,
+			wantCode:   http.StatusInternalServerError,
+			wantStatus: "",
+		},
+		{
+			name: "store_mutation_internal_error",
+			path: "/internal/restate/builds/b-trans-8/transition",
+			setupStore: func(s *memoryVanadisStore) {
+				b := VanadisBuild{ID: "b-trans-8", Status: "running"}
+				chunks := []VanadisChunk{{ID: "c-t8", BuildID: "b-trans-8", ChunkIndex: 0, Mode: "pr", Status: "running"}}
+				_ = s.CreateBuild(ctx, b, chunks)
+				s.updateChunkErr = errors.New("db write failed")
+			},
+			body:       `{"mutation":{"action":"chunk_merged","chunk_id":"c-t8"}}`,
+			wantCode:   http.StatusInternalServerError,
+			wantStatus: "",
+		},
+		{
+			name:       "read_body_error",
+			path:       "/internal/restate/builds/b-trans-9/transition",
+			useErrBody: true,
+			wantCode:   http.StatusBadRequest,
+			wantStatus: "",
+		},
+		{
+			name: "missing_chunk_mutation_returns_404",
+			path: "/internal/restate/builds/b-trans-10/transition",
+			setupStore: func(s *memoryVanadisStore) {
+				b := VanadisBuild{ID: "b-trans-10", Status: "running"}
+				_ = s.CreateBuild(ctx, b, nil)
+			},
+			body:     `{"mutation":{"action":"chunk_merged","chunk_id":"missing-chunk"}}`,
+			wantCode: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runRestateBuildTransitionTestCase(t, tc)
+		})
+	}
+
+	// Direct test for empty buildID in handler
+	t.Run("empty_build_id_direct", func(t *testing.T) {
+		t.Parallel()
+		srv := &VanadisServer{store: newMemoryVanadisStore()}
+		r := httptest.NewRequest(http.MethodPost, "/transition", strings.NewReader(`{}`))
+		w := httptest.NewRecorder()
+		srv.handleRestateBuildTransition(w, r)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
 }

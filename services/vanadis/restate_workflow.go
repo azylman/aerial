@@ -17,6 +17,8 @@ import (
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
 	"gopkg.in/yaml.v3"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 const maxParallelChunks = 4
@@ -97,6 +99,12 @@ type BuildMutationRequest struct {
 	Action  string `json:"action"`
 	ChunkID string `json:"chunk_id,omitempty"`
 	Reason  string `json:"reason,omitempty"`
+}
+
+// RestateTransitionRequest represents the payload for the internal Restate transition endpoint.
+type RestateTransitionRequest struct {
+	Mutation      *BuildMutationRequest `json:"mutation,omitempty"`
+	PriorLaunched map[string]bool       `json:"prior_launched,omitempty"`
 }
 
 type reconcileStepOutput struct {
@@ -275,7 +283,7 @@ func executeBuildMutation(ctx context.Context, srv *VanadisServer, buildID strin
 	case statusCancelled:
 		return applyMutationCancelled(ctx, srv, buildID)
 	default:
-		return fmt.Errorf("unsupported mutation action: %q", req.Action)
+		return fmt.Errorf("%w: unsupported mutation action: %q", ErrInvalidBuildInput, req.Action)
 	}
 }
 
@@ -515,7 +523,7 @@ func executeReconcileBuild(ctx context.Context, srv *VanadisServer, buildID stri
 		b.Status = statusRunning
 	}
 
-	if priorLaunched == nil {
+	if len(priorLaunched) == 0 {
 		priorLaunched = reconstructLaunchedChunks(chunks)
 	}
 
@@ -944,4 +952,43 @@ func (s *VanadisServer) mutateBuildOnRestate(ctx context.Context, buildID string
 		return errors.New("build_id cannot be empty")
 	}
 	return s.postRestateIngressJSON(ctx, fmt.Sprintf("/Build/%s/Mutate/send", buildID), req)
+}
+
+func (s *VanadisServer) handleRestateBuildTransition(w http.ResponseWriter, r *http.Request) {
+	buildID := strings.TrimSpace(r.PathValue("id"))
+	if buildID == "" {
+		writeErr(w, http.StatusBadRequest, "build id is required")
+		return
+	}
+	if s == nil || s.store == nil {
+		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
+		return
+	}
+
+	body, rErr := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if rErr != nil {
+		writeErr(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	var req RestateTransitionRequest
+	if uErr := json.Unmarshal(body, &req); uErr != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json payload")
+		return
+	}
+
+	if req.Mutation != nil {
+		if mErr := executeBuildMutation(r.Context(), s, buildID, *req.Mutation); mErr != nil {
+			writeStoreErr(w, mErr)
+			return
+		}
+	}
+
+	stepOut, recErr := executeReconcileBuild(r.Context(), s, buildID, req.PriorLaunched)
+	if recErr != nil {
+		writeStoreErr(w, recErr)
+		return
+	}
+
+	httpkit.WriteJSON(w, http.StatusOK, stepOut)
 }

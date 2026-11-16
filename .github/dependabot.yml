@@ -48,6 +48,7 @@ updates:
       - "/services/haro"
       - "/services/prospera"
       - "/services/vanadis"
+      - "/services/vanadis-restate"
       - "/services/synapse"
     schedule:
       interval: "weekly"
