@@ -83,6 +83,8 @@ var exactSecretKeys = map[string]struct{}{
 	"INFISICAL_CLIENT_SECRET":         {},
 	"CLOUDFLARE_MCP_TOKEN":            {},
 	"UBEREATS_MCP_TOKEN":              {},
+	"OPENAI_API_KEY":                  {},
+	"CODEX_API_KEY":                   {},
 }
 
 var secretSuffixes = []string{
@@ -128,7 +130,7 @@ func FilterAgyBaseEnv(env []string) []string {
 }
 
 func filterHomeEnv(env []string) []string {
-	return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME", "CLAUDE_CONFIG_DIR")
+	return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME")
 }
 
 func filterVanadisChunkEnv(env []string) []string {
@@ -158,7 +160,7 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 
 	cmdEnv = append(cmdEnv, "GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug")
 	if h := strings.TrimSpace(input.HomeDir); h != "" {
-		cmdEnv = append(cmdEnv, "HOME="+h, "USERPROFILE="+h, "GEMINI_CLI_HOME="+h, "CLAUDE_CONFIG_DIR="+filepath.Join(h, ".claude"))
+		cmdEnv = append(cmdEnv, "HOME="+h, "USERPROFILE="+h, "GEMINI_CLI_HOME="+h, "CLAUDE_CONFIG_DIR="+filepath.Join(h, ".claude"), "CODEX_HOME="+filepath.Join(h, ".codex"))
 	}
 	if k := strings.TrimSpace(input.APIKey); k != "" {
 		cmdEnv = append(cmdEnv, "GEMINI_API_KEY="+k, "ANTIGRAVITY_API_KEY="+k, "GOOGLE_GENAI_API_KEY="+k)

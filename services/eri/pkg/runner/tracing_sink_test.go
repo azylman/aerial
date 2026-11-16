@@ -276,7 +276,12 @@ func TestProviderForModel(t *testing.T) {
 		{name: "sonnet alias with context suffix", model: "sonnet[1m]", want: "anthropic"},
 		{name: "gemini model", model: "gemini-3.8-flash-low", want: "gcp.gemini"},
 		{name: "empty model", model: "", want: ""},
-		{name: "unknown model", model: "gpt-5", want: ""},
+		{name: "unknown model", model: "unknown-model", want: ""},
+		{name: "openai gpt model", model: "gpt-5", want: "openai"},
+		{name: "openai o1 model", model: "o1-mini", want: "openai"},
+		{name: "openai o3 model", model: "o3-mini", want: "openai"},
+		{name: "openai o4 model", model: "o4-preview", want: "openai"},
+		{name: "codex model", model: "codex-test", want: "openai"},
 		{name: "alias prefix without boundary", model: "opusx", want: ""},
 		{name: "alias not at start", model: "mysonnet", want: ""},
 	}

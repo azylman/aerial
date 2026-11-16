@@ -89,8 +89,48 @@ func TestBuildDaemonArgs(t *testing.T) {
 			[]string{"-p", "--verbose", "--dangerously-skip-permissions", "--session-id sess-claude-explicit-effort", "--model opus", "--effort high"},
 			[]string{"--resume", "--conversation", "--print-timeout"},
 		},
+		{
+			DaemonConfig{
+				Engine:    "codex",
+				SessionID: "sess-codex-123",
+				Model:     "gpt-5",
+			},
+			[]string{"app-server", "--listen", "stdio://"},
+			[]string{"--dangerously-skip-permissions", "--conversation", "--model", "--print-timeout", "-p", "--verbose"},
+		},
 	} {
 		assertContainsAndOmits(t, strings.Join(BuildDaemonArgs(tc.cfg), " "), tc.contains, tc.omits, tc.cfg)
+	}
+}
+
+func TestParseModelAndEffort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		model      string
+		effort     string
+		allowXHigh bool
+		wantModel  string
+		wantEffort string
+	}{
+		{name: "xhigh allowed suffix", model: "codex-5-xhigh", effort: "", allowXHigh: true, wantModel: "codex-5", wantEffort: "xhigh"},
+		{name: "xhigh disallowed keeps suffix", model: "codex-5-xhigh", effort: "", allowXHigh: false, wantModel: "codex-5-xhigh", wantEffort: ""},
+		{name: "high suffix with xhigh allowed", model: "codex-5-high", effort: "", allowXHigh: true, wantModel: "codex-5", wantEffort: "high"},
+		{name: "medium suffix", model: "model-medium", effort: "", allowXHigh: true, wantModel: "model", wantEffort: "medium"},
+		{name: "low suffix", model: "model-low", effort: "", allowXHigh: true, wantModel: "model", wantEffort: "low"},
+		{name: "explicit effort fallback", model: "model-base", effort: "high", allowXHigh: true, wantModel: "model-base", wantEffort: "high"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotModel, gotEffort := parseModelAndEffort(tc.model, tc.effort, tc.allowXHigh)
+			if gotModel != tc.wantModel {
+				t.Errorf("parseModelAndEffort(%q, %q, %v) gotModel = %q, want %q", tc.model, tc.effort, tc.allowXHigh, gotModel, tc.wantModel)
+			}
+			if gotEffort != tc.wantEffort {
+				t.Errorf("parseModelAndEffort(%q, %q, %v) gotEffort = %q, want %q", tc.model, tc.effort, tc.allowXHigh, gotEffort, tc.wantEffort)
+			}
+		})
 	}
 }
 
@@ -155,6 +195,8 @@ func TestBuildAgyEnv(t *testing.T) {
 		"infisical_client_secret=s21",
 		"CLOUDFLARE_MCP_TOKEN=s22",
 		"ubereats_mcp_token=s23",
+		"OPENAI_API_KEY=s23a",
+		"codex_api_key=s23b",
 		"CUSTOM_APP_SECRET=s25",
 		"MY_AUTH_TOKEN=s26",
 		"REDIS_PASSWORD=s27",
@@ -177,20 +219,20 @@ func TestBuildAgyEnv(t *testing.T) {
 		{AgyEnvInput{}, []string{"GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug"}, nil},
 		{
 			AgyEnvInput{
-				BaseEnv:  []string{"CUSTOM_BASE=1", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "PATH=/bin", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini", "CLAUDE_CONFIG_DIR=/stale/claude"},
+				BaseEnv:  []string{"CUSTOM_BASE=1", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "PATH=/bin", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini", "CLAUDE_CONFIG_DIR=/stale/claude", "CODEX_HOME=/stale/codex"},
 				HomeDir:  "/custom/home",
 				APIKey:   "secret-token-123",
 				TargetID: "target-agent",
 				Timezone: "America/Los_Angeles",
 				ExtraEnv: []string{"EXTRA_KEY=foo"},
 			},
-			[]string{"CUSTOM_BASE=1", "GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug", "HOME=/custom/home", "USERPROFILE=/custom/home", "GEMINI_CLI_HOME=/custom/home", "CLAUDE_CONFIG_DIR=/custom/home/.claude", "GEMINI_API_KEY=secret-token-123", "ANTIGRAVITY_API_KEY=secret-token-123", "GOOGLE_GENAI_API_KEY=secret-token-123", "AERIAL_TARGET_ID=target-agent", "TZ=America/Los_Angeles", "EXTRA_KEY=foo"},
-			[]string{"AERIAL_VANADIS_CHUNK_ID=stale-chunk", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini", "CLAUDE_CONFIG_DIR=/stale/claude"},
+			[]string{"CUSTOM_BASE=1", "GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug", "HOME=/custom/home", "USERPROFILE=/custom/home", "GEMINI_CLI_HOME=/custom/home", "CLAUDE_CONFIG_DIR=/custom/home/.claude", "CODEX_HOME=/custom/home/.codex", "GEMINI_API_KEY=secret-token-123", "ANTIGRAVITY_API_KEY=secret-token-123", "GOOGLE_GENAI_API_KEY=secret-token-123", "AERIAL_TARGET_ID=target-agent", "TZ=America/Los_Angeles", "EXTRA_KEY=foo"},
+			[]string{"AERIAL_VANADIS_CHUNK_ID=stale-chunk", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini", "CLAUDE_CONFIG_DIR=/stale/claude", "CODEX_HOME=/stale/codex"},
 		},
 		{
-			AgyEnvInput{BaseEnv: []string{"CUSTOM_BASE=1", "GEMINI_API_KEY=ambient-key", "ANTIGRAVITY_API_KEY=ambient-key", "GOOGLE_GENAI_API_KEY=ambient-key", "gemini_api_key=ambient2", "GITHUB_PAT=secret-pat", "DISCORD_TOKEN=secret-discord", "DATABASE_URL=postgres://leak", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk", "MALFORMED_NO_EQUALS", "OTHER_ENV=kept"}},
+			AgyEnvInput{BaseEnv: []string{"CUSTOM_BASE=1", "GEMINI_API_KEY=ambient-key", "ANTIGRAVITY_API_KEY=ambient-key", "GOOGLE_GENAI_API_KEY=ambient-key", "gemini_api_key=ambient2", "OPENAI_API_KEY=ambient-openai", "CODEX_API_KEY=ambient-codex", "GITHUB_PAT=secret-pat", "DISCORD_TOKEN=secret-discord", "DATABASE_URL=postgres://leak", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk", "MALFORMED_NO_EQUALS", "OTHER_ENV=kept"}},
 			[]string{"CUSTOM_BASE=1", "OTHER_ENV=kept", "MALFORMED_NO_EQUALS"},
-			[]string{"ambient-key", "ambient2", "secret-pat", "secret-discord", "postgres://leak", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk"},
+			[]string{"ambient-key", "ambient2", "ambient-openai", "ambient-codex", "secret-pat", "secret-discord", "postgres://leak", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk"},
 		},
 		{
 			AgyEnvInput{TargetID: "discord-1564872824148205579"},
