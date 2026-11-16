@@ -7,6 +7,8 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -44,6 +46,11 @@ const (
 	widgetLockFinish  widgetLockPath = "finish"
 )
 
+type widgetChannelLock struct {
+	mu     sync.Mutex
+	holder atomic.Pointer[widgetLockPath]
+}
+
 // startWidgetSpan opens a child of the turn or request span carried by ctx. Without one it records
 // nothing, so widget calls made outside a trace never open orphan root spans.
 func (p *WorkerPool) startWidgetSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
@@ -69,6 +76,48 @@ func (p *WorkerPool) lockWidgetDelivery(ctx context.Context, path widgetLockPath
 func (p *WorkerPool) unlockWidgetDelivery() {
 	p.widgetLockHolder.Store(nil)
 	p.widgetDeliveryMu.Unlock()
+}
+
+func (p *WorkerPool) lockChannelWidgetDelivery(ctx context.Context, channelID string, path widgetLockPath) func() {
+	if strings.TrimSpace(channelID) == "" {
+		p.lockWidgetDelivery(ctx, path)
+		return func() { p.unlockWidgetDelivery() }
+	}
+
+	actual, _ := p.widgetChannelLocks.LoadOrStore(channelID, &widgetChannelLock{})
+	chanLock, ok := actual.(*widgetChannelLock)
+	if !ok {
+		chanLock = &widgetChannelLock{}
+		p.widgetChannelLocks.Store(channelID, chanLock)
+	}
+
+	var attrs []attribute.KeyValue
+	if holder := chanLock.holder.Load(); holder != nil {
+		attrs = append(attrs, attrWidgetLockHolder.String(string(*holder)))
+	}
+	_, span := p.startWidgetSpan(ctx, spanWidgetLockWait, attrs...)
+	chanLock.mu.Lock()
+	span.End()
+	chanLock.holder.Store(&path)
+
+	return func() {
+		chanLock.holder.Store(nil)
+		chanLock.mu.Unlock()
+	}
+}
+
+func (p *WorkerPool) chunkWidgetChannelIDLocked(chunkID string) string {
+	buildID := p.chunkToBuildID[chunkID]
+	if buildID == "" {
+		return ""
+	}
+	return p.widgetsByID[buildID].ChannelID
+}
+
+func (p *WorkerPool) chunkWidgetChannelID(chunkID string) string {
+	p.widgetMu.Lock()
+	defer p.widgetMu.Unlock()
+	return p.chunkWidgetChannelIDLocked(chunkID)
 }
 
 // widgetDeliverAttrs describes a widget edit without any of its content.
@@ -350,17 +399,17 @@ func (p *WorkerPool) DeliverStatusWidgetWithContext(ctx context.Context, req dis
 		return "", errors.New("discord session is not connected")
 	}
 
+	p.applyChannelPolicyRedirect(sess, &req)
+
 	ctx, span := p.startWidgetSpan(ctx, spanWidgetDeliver)
 	defer span.End()
 
-	p.lockWidgetDelivery(ctx, widgetLockDeliver)
-	defer p.unlockWidgetDelivery()
+	unlock := p.lockChannelWidgetDelivery(ctx, req.ChannelID, widgetLockDeliver)
+	defer unlock()
 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-
-	p.applyChannelPolicyRedirect(sess, &req)
 
 	p.widgetMu.Lock()
 	p.ensureWidgetMapsLocked()
@@ -387,9 +436,6 @@ func (p *WorkerPool) StartChunkStepTurn(ctx context.Context, chunkID, buildID st
 	if chunkID == "" || turnID == "" {
 		return
 	}
-
-	p.lockWidgetDelivery(ctx, widgetLockStart)
-	defer p.unlockWidgetDelivery()
 
 	p.widgetMu.Lock()
 	p.ensureWidgetMapsLocked()
@@ -429,6 +475,7 @@ func (p *WorkerPool) buildChunkStepDeliveryRequestLocked(chunkID, activeStep str
 	}
 
 	deliveryReq := cloneStatusWidgetRequest(req, false)
+	deliveryReq.SkipSink = true
 	deliveryReq.Chunks[chunkIdx].ActiveStep = activeStep
 	for i := range deliveryReq.Chunks {
 		if i != chunkIdx && isWidgetChunkInProgress(deliveryReq.Chunks[i].Status) {
@@ -465,17 +512,33 @@ func (p *WorkerPool) FlushChunkActiveStep(ctx context.Context, chunkID, turnID, 
 	ctx, span := p.startWidgetSpan(ctx, spanWidgetDeliver)
 	defer span.End()
 
-	p.lockWidgetDelivery(ctx, widgetLockStep)
-	defer p.unlockWidgetDelivery()
+	var unlock func()
+	var deliveryReq *discord.StatusWidgetRequest
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		channelID := p.chunkWidgetChannelID(chunkID)
+		unlock = p.lockChannelWidgetDelivery(ctx, channelID, widgetLockStep)
 
-	p.widgetMu.Lock()
-	p.ensureWidgetMapsLocked()
-	deliveryReq, ok := p.prepareChunkStepDeliveryLocked(chunkID, turnID, stepText)
-	p.widgetMu.Unlock()
+		p.widgetMu.Lock()
+		p.ensureWidgetMapsLocked()
+		if actualChan := p.chunkWidgetChannelIDLocked(chunkID); actualChan != channelID {
+			p.widgetMu.Unlock()
+			unlock()
+			continue
+		}
 
-	if !ok {
-		return nil
+		req, ok := p.prepareChunkStepDeliveryLocked(chunkID, turnID, stepText)
+		p.widgetMu.Unlock()
+		if !ok {
+			unlock()
+			return nil
+		}
+		deliveryReq = req
+		break
 	}
+	defer unlock()
 
 	span.SetAttributes(widgetDeliverAttrs(*deliveryReq)...)
 	return p.deliverChunkStepWidget(ctx, *deliveryReq)
@@ -526,17 +589,33 @@ func (p *WorkerPool) FinishChunkStepTurn(ctx context.Context, chunkID, turnID st
 	ctx, span := p.startWidgetSpan(ctx, spanWidgetDeliver)
 	defer span.End()
 
-	p.lockWidgetDelivery(ctx, widgetLockFinish)
-	defer p.unlockWidgetDelivery()
+	var unlock func()
+	var deliveryReq *discord.StatusWidgetRequest
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		channelID := p.chunkWidgetChannelID(chunkID)
+		unlock = p.lockChannelWidgetDelivery(ctx, channelID, widgetLockFinish)
 
-	p.widgetMu.Lock()
-	p.ensureWidgetMapsLocked()
-	deliveryReq, ok := p.finishChunkStepTurnLocked(chunkID, turnID)
-	p.widgetMu.Unlock()
+		p.widgetMu.Lock()
+		p.ensureWidgetMapsLocked()
+		if actualChan := p.chunkWidgetChannelIDLocked(chunkID); actualChan != channelID {
+			p.widgetMu.Unlock()
+			unlock()
+			continue
+		}
 
-	if !ok {
-		return
+		req, ok := p.finishChunkStepTurnLocked(chunkID, turnID)
+		p.widgetMu.Unlock()
+		if !ok {
+			unlock()
+			return
+		}
+		deliveryReq = req
+		break
 	}
+	defer unlock()
 
 	span.SetAttributes(widgetDeliverAttrs(*deliveryReq)...)
 

@@ -856,7 +856,7 @@ func (f *FakeStore) CancelPendingDispatches(ctx context.Context, dispatchID, bui
 			if d == nil || (d.Status != db.StatusPending && d.Status != db.StatusProcessing) {
 				continue
 			}
-			match := (dID != "" && d.ID == dID) || (bID != "" && (strings.Contains(d.Prompt, "Build ID: "+bID+"\n") || strings.HasPrefix(d.SessionID, "vanadis-"+bID+"-chunk-") || strings.Contains(d.Prompt, "Chunk ID: "+bID+"-chunk-")))
+			match := (dID != "" && d.ID == dID) || (bID != "" && (strings.Contains(d.Prompt, "Build ID: "+bID+"\n") || strings.HasPrefix(d.SessionID, "vanadis-"+bID+"-chunk-") || strings.Contains(d.Prompt, "Chunk ID: "+bID+"-chunk-") || strings.TrimSpace(d.VanadisChunkID) == bID || d.SessionID == "vanadis-"+bID))
 			if match {
 				d.Status = db.StatusFailed
 				d.ErrorMessage = reason

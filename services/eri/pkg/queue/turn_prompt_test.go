@@ -441,7 +441,7 @@ func newBuildTurnPromptFixture(t *testing.T, tc buildTurnPromptCase, threadID st
 	return &turnExecution{
 		pool: pool, effectiveName: "kitchen", threadID: threadID, currentSessionID: "sess-amb-1", isCold: tc.isCold,
 		policy: config.ChannelPolicy{AmbientContext: tc.ambCfg, Mode: tc.mode},
-		burst:  []db.Message{{ID: "m1", ThreadID: threadID, Content: "turn off kitchen lights"}},
+		burst:  []db.Message{{ID: "m1", ThreadID: threadID, Content: "turn off kitchen lights", CreatedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}},
 	}
 }
 
