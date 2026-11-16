@@ -821,14 +821,24 @@ func TestBuildObject_AuthoritativeTransitions(t *testing.T) {
 	assert.Equal(t, "running", resMut.Status)
 	assert.Contains(t, resMut.LaunchedChunks, "c2")
 
-	// All completed -> status completed
+	// Merged + completed -> still running until all chunks reach completed (deploy_success)
 	c2Done := VanadisChunk{ID: "c2", BuildID: "b-trans", Status: "completed", Repo: "aerial", Mode: "pr"}
-	storeDone, _ := dbScript{row: &mockRow{b: &b}, chunks: []VanadisChunk{c1Merged, c2Done}, execTag: "UPDATE 1"}.open()
+	storeStillDeploying, _ := dbScript{row: &mockRow{b: &b}, chunks: []VanadisChunk{c1Merged, c2Done}, execTag: "UPDATE 1"}.open()
+	boStillDeploying := NewBuildObject("", nil).WithAuthority(storeStillDeploying, exec)
+
+	resDeploying, err := boStillDeploying.Reconcile(ctx, ReconcileBuildRequest{})
+	assert.NoError(t, err)
+	assert.Equal(t, statusRunning, resDeploying.Status)
+
+	// All completed -> status completed
+	c1Done := VanadisChunk{ID: "c1", BuildID: "b-trans", Status: "completed", Repo: "aerial", Mode: "pr"}
+	storeDone, _ := dbScript{row: &mockRow{b: &b}, chunks: []VanadisChunk{c1Done, c2Done}, execTag: "UPDATE 1"}.open()
 	boDone := NewBuildObject("", nil).WithAuthority(storeDone, exec)
 
 	resDone, err := boDone.Reconcile(ctx, ReconcileBuildRequest{})
 	assert.NoError(t, err)
 	assert.Equal(t, statusCompleted, resDone.Status)
+	assert.Equal(t, statusCompleted, eri.lastWidget.Status)
 
 	// Chunk failed -> status failed
 	cFailed := VanadisChunk{ID: "c1", BuildID: "b-trans", Status: "failed", Repo: "aerial", Mode: "pr"}
