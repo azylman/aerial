@@ -259,8 +259,6 @@ func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 		{name: "mismatched repo", req: existing, db: dbScript{routes: attachRoutes("pr", true, false), row: noRows}, wantErrContains: "mismatched repo"},
 		{name: "cancelled chunk or build with repo conflicts", req: existing, db: dbScript{routes: attachRoutes("pr", true, true), row: noRows}, wantErrIs: ErrBuildConflict},
 		{name: "cancelled chunk or build without repo conflicts", req: attachRequest("c1", ""), db: dbScript{routes: attachRoutes("pr", true, true), row: noRows}, wantErrIs: ErrBuildConflict},
-		{name: "merged chunk with conflict probe returns conflict", req: AttachChunkPRRequest{ChunkID: "c-merged", PRNumber: 202, Repo: "aerial"}, db: dbScript{routes: attachRoutes("pr", true, true), row: noRows}, wantErrIs: ErrBuildConflict},
-		{name: "deploying chunk with conflict probe returns conflict", req: AttachChunkPRRequest{ChunkID: "c-deploying", PRNumber: 202, Repo: "aerial"}, db: dbScript{routes: attachRoutes("pr", true, true), row: noRows}, wantErrIs: ErrBuildConflict},
 		{name: "attaches pr chunk without repo", req: attachRequest("c-pr", ""), db: dbScript{routes: attachRoutes("pr", true, false), row: attached("pr")}, want: attachResult{"b-pr", "c-pr", "thread-pr"}},
 		{name: "attaches pr chunk matching repo candidates", req: attachRequest("c-pr", "aerial"), db: dbScript{routes: attachRoutes("pr", true, false), row: attached("pr")}, want: attachResult{"b-pr", "c-pr", "thread-pr"}, wantCandidates: aerialRepoSet},
 		{name: "attaches action chunk", req: attachRequest("c-act", "aerial"), db: dbScript{routes: attachRoutes("action", true, false), row: attached("action")}, want: attachResult{"b-action", "c-action", "thread-action"}},

@@ -497,11 +497,11 @@ func isTerminalAttachChunkStatus(status string) bool {
 	return status == "merged" || status == "deploying" || status == "completed"
 }
 
-func (*memoryVanadisStore) validateAttachChunkConflict(c VanadisChunk, b VanadisBuild, prNumber int) error {
+func (*memoryVanadisStore) validateAttachChunkConflict(c VanadisChunk, b VanadisBuild, repo string, prNumber int) error {
 	if c.Status == "cancelled" || b.Status == "cancelled" || b.Status == "completed" {
 		return ErrBuildConflict
 	}
-	if isTerminalAttachChunkStatus(c.Status) && c.PRNumber != prNumber {
+	if isTerminalAttachChunkStatus(c.Status) && (!reposMatch(c.Repo, repo) || c.PRNumber != prNumber) {
 		return ErrBuildConflict
 	}
 	return nil
@@ -514,7 +514,7 @@ func (m *memoryVanadisStore) attachToExistingChunk(chunkID string, req AttachChu
 			if list[i].ID != chunkID {
 				continue
 			}
-			if err := m.validateAttachChunkConflict(list[i], m.builds[bID], req.PRNumber); err != nil {
+			if err := m.validateAttachChunkConflict(list[i], m.builds[bID], repo, req.PRNumber); err != nil {
 				return "", "", "", err
 			}
 			if list[i].Mode == "action" {

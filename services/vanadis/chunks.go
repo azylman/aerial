@@ -260,7 +260,7 @@ func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkI
 		if repo == "" {
 			return "", "", "", errors.New("repo is required to attach PR to action chunk")
 		}
-		const qAction = `UPDATE vanadis_chunks c SET repo = $1, pr_number = $2, status = CASE WHEN c.status IN ('merged', 'deploying', 'completed', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $3 AND c.status != 'cancelled' AND (c.status NOT IN ('merged', 'deploying', 'completed') OR c.pr_number = $2) AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
+		const qAction = `UPDATE vanadis_chunks c SET repo = $1, pr_number = $2, status = CASE WHEN c.status IN ('merged', 'deploying', 'completed', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $3 AND c.status != 'cancelled' AND (c.status NOT IN ('merged', 'deploying', 'completed') OR (c.repo = $1 AND c.pr_number = $2)) AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
 		var buildID, returnChunkID, threadID string
 		err := s.db.QueryRow(ctx, qAction, repo, req.PRNumber, chunkID).Scan(&buildID, &returnChunkID, &threadID)
 		if err != nil {
