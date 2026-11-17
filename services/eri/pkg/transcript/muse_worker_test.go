@@ -24,7 +24,7 @@ type parseMuseEntryTestCase struct {
 	wantArgs    string
 }
 
-func parseMuseEntryEventCasesPart1() []parseMuseEntryTestCase {
+func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 	return []parseMuseEntryTestCase{
 		{
 			name:        "unknown envelope type rejected",
@@ -32,16 +32,22 @@ func parseMuseEntryEventCasesPart1() []parseMuseEntryTestCase {
 			wantHandled: false,
 		},
 		{
-			name:        "empty payload rejected",
-			env:         museLineEnvelope{PayloadType: "runtime.session"},
-			wantHandled: false,
+			name: "non-run kind ignored",
+			env: museLineEnvelope{
+				PayloadType: "runtime.session",
+				Payload:     musePayload{Kind: "init"},
+			},
+			wantHandled: true,
 		},
 		{
 			name: "started user input event",
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510000000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"started","prompt":"Please refactor this service"}}`),
+				RecordedAt:  1762510000000000,
+				Payload: musePayload{
+					Kind:  "run",
+					Event: museEvent{Kind: "started", Prompt: "Please refactor this service"},
+				},
 			},
 			wantHandled: true,
 			wantType:    stepTypeUserInput,
@@ -49,45 +55,38 @@ func parseMuseEntryEventCasesPart1() []parseMuseEntryTestCase {
 			wantContent: "Please refactor this service",
 		},
 		{
-			name: "record payload user input",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510000000000),
-				Payload:     json.RawMessage(`{"record":{"kind":"started","prompt":"Prompt from record"}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypeUserInput,
-			wantStatus:  stepStatusDone,
-			wantContent: "Prompt from record",
-		},
-		{
-			name: "flat payload user input",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510000000000),
-				Payload:     json.RawMessage(`{"kind":"started","prompt":"Prompt from flat"}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypeUserInput,
-			wantStatus:  stepStatusDone,
-			wantContent: "Prompt from flat",
-		},
-		{
 			name: "started ambient input ignored",
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510000000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"started","prompt":"[Chat Alex]: hello"}}`),
+				RecordedAt:  1762510000000000,
+				Payload: musePayload{
+					Kind:  "run",
+					Event: museEvent{Kind: "started", Prompt: "[Chat Alex]: hello"},
+				},
 			},
 			wantHandled: true,
-			wantType:    "",
+		},
+		{
+			name: "started empty prompt ignored",
+			env: museLineEnvelope{
+				PayloadType: "runtime.session",
+				RecordedAt:  1762510000000000,
+				Payload: musePayload{
+					Kind:  "run",
+					Event: museEvent{Kind: "started", Prompt: ""},
+				},
+			},
+			wantHandled: true,
 		},
 		{
 			name: "assistant_message_committed event",
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
-				RecordedAt:  "2026-11-07T10:00:01Z",
-				Payload:     json.RawMessage(`{"event":{"kind":"assistant_message_committed","text":"I will look into that."}}`),
+				RecordedAt:  1762510001000000,
+				Payload: musePayload{
+					Kind:  "run",
+					Event: museEvent{Kind: "assistant_message_committed", Text: "I will look into that."},
+				},
 			},
 			wantHandled: true,
 			wantType:    stepTypePlannerResponse,
@@ -98,31 +97,136 @@ func parseMuseEntryEventCasesPart1() []parseMuseEntryTestCase {
 			name: "assistant_message_committed empty text ignored",
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
-				RecordedAt:  "2026-11-07T10:00:01Z",
-				Payload:     json.RawMessage(`{"event":{"kind":"assistant_message_committed","text":""}}`),
+				RecordedAt:  1762510001000000,
+				Payload: musePayload{
+					Kind:  "run",
+					Event: museEvent{Kind: "assistant_message_committed", Text: ""},
+				},
 			},
 			wantHandled: true,
-			wantType:    "",
 		},
 		{
-			name: "tool_call event",
+			name: "terminal failed event with reason",
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510002000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"tool_call","name":"bash","id":"call_123","arguments":{"command":"ls -la"}}}`),
+				RecordedAt:  1762510006000000,
+				Payload: musePayload{
+					Kind:  "run",
+					Event: museEvent{Kind: "terminal", Terminal: "failed", Reason: "Out of memory"},
+				},
+			},
+			wantHandled: true,
+			wantType:    stepTypePlannerResponse,
+			wantStatus:  stepStatusError,
+			wantContent: "Out of memory",
+		},
+		{
+			name: "terminal failed default reason",
+			env: museLineEnvelope{
+				PayloadType: "runtime.session",
+				RecordedAt:  1762510006000000,
+				Payload: musePayload{
+					Kind:  "run",
+					Event: museEvent{Kind: "terminal", Terminal: "failed"},
+				},
+			},
+			wantHandled: true,
+			wantType:    stepTypePlannerResponse,
+			wantStatus:  stepStatusError,
+			wantContent: "terminal failed",
+		},
+		{
+			name: "terminal succeeded ignored",
+			env: museLineEnvelope{
+				PayloadType: "runtime.session",
+				RecordedAt:  1762510006000000,
+				Payload: musePayload{
+					Kind:  "run",
+					Event: museEvent{Kind: "terminal", Terminal: "succeeded"},
+				},
+			},
+			wantHandled: true,
+		},
+	}
+}
+
+func parseMuseEntryToolCallCases() []parseMuseEntryTestCase {
+	return []parseMuseEntryTestCase{
+		{
+			name: "assistant_tool_calls_committed event",
+			env: museLineEnvelope{
+				PayloadType: "runtime.session",
+				RecordedAt:  1762510002000000,
+				Payload: musePayload{
+					Kind: "run",
+					Event: museEvent{
+						Kind: "assistant_tool_calls_committed",
+						ToolCalls: []museToolCall{
+							{Name: "bash", CallID: "call_123", Args: json.RawMessage(`{"command":"ls -la"}`)},
+						},
+					},
+				},
 			},
 			wantHandled: true,
 			wantType:    stepTypePlannerResponse,
 			wantStatus:  stepStatusDone,
 			wantTool:    "bash",
 			wantCallID:  "call_123",
+			wantArgs:    "ls -la",
 		},
 		{
-			name: "tool_completed event success",
+			name: "assistant_tool_calls_committed empty tool_calls ignored",
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510003000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"tool_completed","id":"call_123","output":"total 0"}}`),
+				RecordedAt:  1762510002000000,
+				Payload: musePayload{
+					Kind:  "run",
+					Event: museEvent{Kind: "assistant_tool_calls_committed"},
+				},
+			},
+			wantHandled: true,
+		},
+		{
+			name: "assistant_tool_calls_committed with ID fallback",
+			env: museLineEnvelope{
+				PayloadType: "runtime.session",
+				RecordedAt:  1762510002000000,
+				Payload: musePayload{
+					Kind: "run",
+					Event: museEvent{
+						Kind: "assistant_tool_calls_committed",
+						ToolCalls: []museToolCall{
+							{Name: "glob", ID: "call_id_only", Args: json.RawMessage(`{"pattern":"*.go"}`)},
+						},
+					},
+				},
+			},
+			wantHandled: true,
+			wantType:    stepTypePlannerResponse,
+			wantStatus:  stepStatusDone,
+			wantTool:    "glob",
+			wantCallID:  "call_id_only",
+			wantArgs:    "*.go",
+		},
+	}
+}
+
+func parseMuseEntryToolResultCases() []parseMuseEntryTestCase {
+	return []parseMuseEntryTestCase{
+		{
+			name: "tool_result_batch_committed event success",
+			env: museLineEnvelope{
+				PayloadType: "runtime.session",
+				RecordedAt:  1762510003000000,
+				Payload: musePayload{
+					Kind: "run",
+					Event: museEvent{
+						Kind: "tool_result_batch_committed",
+						Results: []museToolResult{
+							{CallID: "call_123", Output: "total 0"},
+						},
+					},
+				},
 			},
 			wantHandled: true,
 			wantType:    stepTypeTool,
@@ -131,11 +235,19 @@ func parseMuseEntryEventCasesPart1() []parseMuseEntryTestCase {
 			wantContent: "total 0",
 		},
 		{
-			name: "tool_completed event error",
+			name: "tool_result_batch_committed event error",
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510004000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"tool_completed","id":"call_123","status":"failed","output":"exit code 1"}}`),
+				RecordedAt:  1762510004000000,
+				Payload: musePayload{
+					Kind: "run",
+					Event: museEvent{
+						Kind: "tool_result_batch_committed",
+						Results: []museToolResult{
+							{CallID: "call_123", Output: "exit code 1", IsError: true},
+						},
+					},
+				},
 			},
 			wantHandled: true,
 			wantType:    stepTypeTool,
@@ -144,373 +256,108 @@ func parseMuseEntryEventCasesPart1() []parseMuseEntryTestCase {
 			wantContent: "exit code 1",
 		},
 		{
-			name: "model_completed event",
+			name: "tool_result_batch_committed fallback text",
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510005000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"model_completed","text":"Finished task successfully."}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypePlannerResponse,
-			wantStatus:  stepStatusDone,
-			wantContent: "Finished task successfully.",
-		},
-	}
-}
-
-func parseMuseEntryEventCasesPart2() []parseMuseEntryTestCase {
-	return []parseMuseEntryTestCase{
-		{
-			name: "terminal failed event",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510006000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"terminal","terminal":"failed","reason":"Out of memory"}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypePlannerResponse,
-			wantStatus:  stepStatusError,
-			wantContent: "Out of memory",
-		},
-		{
-			name: "terminal failed with error bytes",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510006000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"terminal","terminal":"failed","error":{"message":"quota exceeded"}}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypePlannerResponse,
-			wantStatus:  stepStatusError,
-			wantContent: "quota exceeded",
-		},
-		{
-			name: "terminal failed with text",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510006000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"terminal","terminal":"failed","text":"Process killed"}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypePlannerResponse,
-			wantStatus:  stepStatusError,
-			wantContent: "Process killed",
-		},
-		{
-			name: "terminal failed default text",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510006000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"terminal","terminal":"failed"}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypePlannerResponse,
-			wantStatus:  stepStatusError,
-			wantContent: "terminal failed",
-		},
-		{
-			name: "terminal non-failed ignored",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510006000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"terminal","terminal":"succeeded"}}`),
-			},
-			wantHandled: true,
-			wantType:    "",
-		},
-		{
-			name: "terminal completed with null error ignored",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510006000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"terminal","terminal":"completed","error":null}}`),
-			},
-			wantHandled: true,
-			wantType:    "",
-		},
-	}
-}
-
-func parseMuseEntryEventCases() []parseMuseEntryTestCase {
-	return append(parseMuseEntryEventCasesPart1(), parseMuseEntryEventCasesPart2()...)
-}
-
-func parseMuseEntryMessageCases() []parseMuseEntryTestCase {
-	return []parseMuseEntryTestCase{
-		{
-			name: "message role user event",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510007000000),
-				Payload:     json.RawMessage(`{"type":"message","role":"user","content":"User follow up"}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypeUserInput,
-			wantStatus:  stepStatusDone,
-			wantContent: "User follow up",
-		},
-		{
-			name: "message role user with null error",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510007000000),
-				Payload:     json.RawMessage(`{"type":"message","role":"user","content":"User follow up","error":null}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypeUserInput,
-			wantStatus:  stepStatusDone,
-			wantContent: "User follow up",
-		},
-		{
-			name: "message role user ambient ignored",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510007000000),
-				Payload:     json.RawMessage(`{"type":"message","role":"user","content":"[Chat Alex]: hello"}`),
-			},
-			wantHandled: true,
-			wantType:    "",
-		},
-		{
-			name: "message role assistant event",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510007000000),
-				Payload:     json.RawMessage(`{"type":"message","role":"assistant","content":"Direct message text"}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypePlannerResponse,
-			wantStatus:  stepStatusDone,
-			wantContent: "Direct message text",
-		},
-		{
-			name: "message role assistant with null error",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510007000000),
-				Payload:     json.RawMessage(`{"type":"message","role":"assistant","content":"Direct message text","error":null}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypePlannerResponse,
-			wantStatus:  stepStatusDone,
-			wantContent: "Direct message text",
-		},
-		{
-			name: "message role assistant empty ignored",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510007000000),
-				Payload:     json.RawMessage(`{"type":"message","role":"assistant","content":""}`),
-			},
-			wantHandled: true,
-			wantType:    "",
-		},
-		{
-			name: "payload without event or message ignored",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510007000000),
-				Payload:     json.RawMessage(`{"type":"other"}`),
-			},
-			wantHandled: true,
-			wantType:    "",
-		},
-	}
-}
-
-func parseMuseEntryToolCallCases() []parseMuseEntryTestCase {
-	return []parseMuseEntryTestCase{
-		{
-			name: "tool_call event with tool and call_id",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510002000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"tool_call","tool":"read_file","call_id":"call_456","args":"{\"path\":\"foo.txt\"}"}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypePlannerResponse,
-			wantStatus:  stepStatusDone,
-			wantTool:    "read_file",
-			wantCallID:  "call_456",
-		},
-		{
-			name: "tool_call event with input",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510002000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"tool_call","name":"glob","id":"call_input","input":{"pattern":"*.go"}}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypePlannerResponse,
-			wantStatus:  stepStatusDone,
-			wantTool:    "glob",
-			wantCallID:  "call_input",
-			wantArgs:    "*.go",
-		},
-		{
-			name: "tool_completed event with content",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510003000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"tool_completed","id":"call_content","content":"file content output"}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypeTool,
-			wantStatus:  stepStatusDone,
-			wantCallID:  "call_content",
-			wantContent: "file content output",
-		},
-		{
-			name: "tool_completed event with result and error status",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510004000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"tool_completed","call_id":"call_456","status":"error","result":"file not found"}}`),
+				RecordedAt:  1762510004000000,
+				Payload: musePayload{
+					Kind: "run",
+					Event: museEvent{
+						Kind: "tool_result_batch_committed",
+						Results: []museToolResult{
+							{CallID: "call_123", Text: "stderr output", IsError: true},
+						},
+					},
+				},
 			},
 			wantHandled: true,
 			wantType:    stepTypeTool,
 			wantStatus:  stepStatusError,
-			wantCallID:  "call_456",
-			wantContent: "file not found",
+			wantCallID:  "call_123",
+			wantContent: "stderr output",
 		},
 		{
-			name: "tool_completed event failed with reason",
+			name: "tool_result_batch_committed default error fallback",
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510004000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"tool_completed","call_id":"call_reason","status":"failed","reason":"permission denied"}}`),
+				RecordedAt:  1762510004000000,
+				Payload: musePayload{
+					Kind: "run",
+					Event: museEvent{
+						Kind: "tool_result_batch_committed",
+						Results: []museToolResult{
+							{CallID: "call_123", IsError: true},
+						},
+					},
+				},
 			},
 			wantHandled: true,
 			wantType:    stepTypeTool,
 			wantStatus:  stepStatusError,
-			wantCallID:  "call_reason",
-			wantContent: "permission denied",
-		},
-		{
-			name: "tool_completed event failed with error object",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510004000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"tool_completed","call_id":"call_err_obj","status":"failed","error":{"message":"command timed out"}}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypeTool,
-			wantStatus:  stepStatusError,
-			wantCallID:  "call_err_obj",
-			wantContent: "command timed out",
-		},
-		{
-			name: "tool_completed event failed default fallback",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510004000000),
-				Payload:     json.RawMessage(`{"event":{"kind":"tool_completed","call_id":"call_fallback","status":"failed"}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypeTool,
-			wantStatus:  stepStatusError,
-			wantCallID:  "call_fallback",
+			wantCallID:  "call_123",
 			wantContent: "tool failed",
 		},
-	}
-}
-
-func parseMuseEntryFlatCases() []parseMuseEntryTestCase {
-	return []parseMuseEntryTestCase{
 		{
-			name: "flat payload tool_call event",
+			name: "tool_result_batch_committed with ToolCallID fallback",
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510002000000),
-				Payload:     json.RawMessage(`{"kind":"tool_call","name":"bash","id":"call_flat_1","arguments":{"command":"ls"}}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypePlannerResponse,
-			wantStatus:  stepStatusDone,
-			wantTool:    "bash",
-			wantCallID:  "call_flat_1",
-		},
-		{
-			name: "flat payload tool_completed event",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510003000000),
-				Payload:     json.RawMessage(`{"kind":"tool_completed","id":"call_flat_1","name":"bash","output":"file.txt"}`),
+				RecordedAt:  1762510003000000,
+				Payload: musePayload{
+					Kind: "run",
+					Event: museEvent{
+						Kind: "tool_result_batch_committed",
+						Results: []museToolResult{
+							{ToolCallID: "call_fallback", Output: "content output"},
+						},
+					},
+				},
 			},
 			wantHandled: true,
 			wantType:    stepTypeTool,
 			wantStatus:  stepStatusDone,
-			wantTool:    "bash",
-			wantCallID:  "call_flat_1",
-			wantContent: "file.txt",
-		},
-		{
-			name: "flat payload tool_completed error event",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510004000000),
-				Payload:     json.RawMessage(`{"kind":"tool_completed","id":"call_flat_1","name":"bash","output":"failed","is_error":true}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypeTool,
-			wantStatus:  stepStatusError,
-			wantTool:    "bash",
-			wantCallID:  "call_flat_1",
-			wantContent: "failed",
-		},
-		{
-			name: "flat payload terminal failed event",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				RecordedAt:  int64(1762510006000000),
-				Payload:     json.RawMessage(`{"kind":"terminal","terminal":"failed","reason":"flat fatal error"}`),
-			},
-			wantHandled: true,
-			wantType:    stepTypePlannerResponse,
-			wantStatus:  stepStatusError,
-			wantContent: "flat fatal error",
+			wantCallID:  "call_fallback",
+			wantContent: "content output",
 		},
 	}
 }
 
 func parseMuseEntryTestCases() []parseMuseEntryTestCase {
 	cases := append(parseMuseEntryEventCases(), parseMuseEntryToolCallCases()...)
-	cases = append(cases, parseMuseEntryMessageCases()...)
-	return append(cases, parseMuseEntryFlatCases()...)
+	return append(cases, parseMuseEntryToolResultCases()...)
 }
 
 func assertParsedMuseStep(t *testing.T, st *transcriptScanState, tc parseMuseEntryTestCase) {
 	t.Helper()
 	if tc.wantType == "" {
 		if len(st.parsedSteps) != 0 {
-			t.Fatalf("expected 0 recorded steps, got %d", len(st.parsedSteps))
+			t.Fatalf("[%s] expected 0 recorded steps, got %d", tc.name, len(st.parsedSteps))
 		}
 		return
 	}
 	if len(st.parsedSteps) != 1 {
-		t.Fatalf("expected 1 recorded step, got %d", len(st.parsedSteps))
+		t.Fatalf("[%s] expected 1 recorded step, got %d", tc.name, len(st.parsedSteps))
 	}
 	step := st.parsedSteps[0]
 	if step.Type != tc.wantType {
-		t.Errorf("step.Type = %q, want %q", step.Type, tc.wantType)
+		t.Errorf("[%s] step.Type = %q, want %q", tc.name, step.Type, tc.wantType)
 	}
 	if step.Status != tc.wantStatus {
-		t.Errorf("step.Status = %q, want %q", step.Status, tc.wantStatus)
+		t.Errorf("[%s] step.Status = %q, want %q", tc.name, step.Status, tc.wantStatus)
 	}
 	if tc.wantTool != "" && step.ToolName != tc.wantTool {
-		t.Errorf("step.ToolName = %q, want %q", step.ToolName, tc.wantTool)
+		t.Errorf("[%s] step.ToolName = %q, want %q", tc.name, step.ToolName, tc.wantTool)
 	}
 	if tc.wantCallID != "" && step.ToolCallID != tc.wantCallID {
 		if len(step.ToolCalls) == 0 || step.ToolCalls[0].ID != tc.wantCallID {
-			t.Errorf("step.ToolCallID = %q, want %q", step.ToolCallID, tc.wantCallID)
+			t.Errorf("[%s] step.ToolCallID = %q, want %q", tc.name, step.ToolCallID, tc.wantCallID)
 		}
 	}
 	if tc.wantContent != "" && step.Content != tc.wantContent {
-		t.Errorf("step.Content = %q, want %q", step.Content, tc.wantContent)
+		t.Errorf("[%s] step.Content = %q, want %q", tc.name, step.Content, tc.wantContent)
 	}
 	if tc.wantArgs != "" {
 		if len(step.ToolCalls) == 0 || !strings.Contains(string(step.ToolCalls[0].Args), tc.wantArgs) {
-			t.Errorf("step.ToolCalls[0].Args = %s, want to contain %q", string(step.ToolCalls[0].Args), tc.wantArgs)
+			t.Errorf("[%s] step.ToolCalls[0].Args = %s, want to contain %q", tc.name, string(step.ToolCalls[0].Args), tc.wantArgs)
 		}
 	}
 }
@@ -572,10 +419,10 @@ func TestSyncSessionTranscript_Muse(t *testing.T) {
 	_ = os.MkdirAll(sessDir, 0o755)
 
 	content := strings.Join([]string{
-		`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Create a new Go test"}}}`,
-		`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"tool_call","name":"bash","id":"call_1","arguments":{"command":"go test ./..."}}}}`,
-		`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"event":{"kind":"tool_completed","id":"call_1","name":"bash","output":"PASS"}}}`,
-		`{"payload_type":"runtime.session","recorded_at":1762510003000000,"payload":{"event":{"kind":"assistant_message_committed","text":"Tests pass cleanly."}}}`,
+		`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Create a new Go test"}}}`,
+		`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed","tool_calls":[{"name":"bash","call_id":"call_1","args":{"command":"go test ./..."}}]}}}`,
+		`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"tool_result_batch_committed","results":[{"call_id":"call_1","output":"PASS"}]}}}`,
+		`{"payload_type":"runtime.session","recorded_at":1762510003000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Tests pass cleanly."}}}`,
 	}, "\n") + "\n"
 
 	transcriptFile := filepath.Join(sessDir, "session.jsonl")
@@ -636,8 +483,8 @@ func TestSyncSessionTranscript_Muse_ConfiguredDir(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(customDir, sessionSingle), 0o755)
 	_ = os.MkdirAll(filepath.Join(customDir, sessionBulk), 0o755)
 
-	contentSingle := `{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Single prompt"}}}` + "\n"
-	contentBulk := `{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Bulk prompt"}}}` + "\n"
+	contentSingle := `{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Single prompt"}}}` + "\n"
+	contentBulk := `{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Bulk prompt"}}}` + "\n"
 
 	_ = os.WriteFile(filepath.Join(customDir, sessionSingle, "session.jsonl"), []byte(contentSingle), 0o644)
 	_ = os.WriteFile(filepath.Join(customDir, sessionBulk, "session.jsonl"), []byte(contentBulk), 0o644)
@@ -679,89 +526,6 @@ func TestSyncSessionTranscript_Muse_ConfiguredDir(t *testing.T) {
 	}
 	if state, ok := states[sessionBulk]; !ok || state.Engine != EngineMuse {
 		t.Errorf("sessionBulk state = %+v, want engine %q", state, EngineMuse)
-	}
-}
-
-func TestParseMuseTimestamp_Worker(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		raw       any
-		wantZero  bool
-		wantEpoch int64
-	}{
-		{name: "nil", raw: nil, wantZero: true},
-		{name: "empty", raw: "", wantZero: true},
-		{name: "invalid", raw: "invalid", wantZero: true},
-		{name: "rfc3339nano", raw: "2026-11-07T10:00:00.123456789Z", wantEpoch: 1794045600},
-		{name: "rfc3339", raw: "2026-11-07T10:00:00Z", wantEpoch: 1794045600},
-		{name: "string micro", raw: "1762510000000000", wantEpoch: 1762510000},
-		{name: "string nano", raw: "1762510000000000000", wantEpoch: 1762510000},
-		{name: "string seconds", raw: "1762510000", wantEpoch: 1762510000},
-		{name: "string negative", raw: "-10", wantZero: true},
-		{name: "string float", raw: "1762510000.5", wantEpoch: 1762510000},
-		{name: "float64 nano", raw: float64(1762510000000000000), wantEpoch: 1762510000},
-		{name: "float64 micro", raw: float64(1762510000000000), wantEpoch: 1762510000},
-		{name: "float64 micro round up", raw: 1762510000999999.99, wantEpoch: 1762510001},
-		{name: "float64 subsecond fraction", raw: float64(1762510000.75), wantEpoch: 1762510000},
-		{name: "float64 seconds round up", raw: 1762510000.999999999, wantEpoch: 1762510001},
-		{name: "float64 zero", raw: float64(0), wantZero: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := parseMuseTimestamp(tc.raw)
-			if tc.wantZero && !got.IsZero() {
-				t.Fatalf("parseMuseTimestamp(%v) = %v, want zero", tc.raw, got)
-			}
-			if !tc.wantZero && got.Unix() != tc.wantEpoch {
-				t.Fatalf("parseMuseTimestamp(%v) = %v (unix %d), want %d", tc.raw, got, got.Unix(), tc.wantEpoch)
-			}
-		})
-	}
-
-	t.Run("extractMuseTimestamp", func(t *testing.T) {
-		t.Parallel()
-		if extractMuseTimestamp(museLineEnvelope{RecordedAt: "2026-11-07T10:00:00Z"}).IsZero() {
-			t.Errorf("RecordedAt was zero")
-		}
-		if extractMuseTimestamp(museLineEnvelope{Timestamp: "2026-11-07T10:00:00Z"}).IsZero() {
-			t.Errorf("Timestamp was zero")
-		}
-		if extractMuseTimestamp(museLineEnvelope{CreatedAt: "2026-11-07T10:00:00Z"}).IsZero() {
-			t.Errorf("CreatedAt was zero")
-		}
-		if !extractMuseTimestamp(museLineEnvelope{}).IsZero() {
-			t.Errorf("empty envelope gave non-zero timestamp")
-		}
-	})
-}
-
-func TestExtractMuseErrorBytes(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		raw  json.RawMessage
-		want string
-	}{
-		{name: "empty", raw: nil, want: ""},
-		{name: "null error", raw: json.RawMessage("null"), want: ""},
-		{name: "string json", raw: json.RawMessage(`"permission denied"`), want: "permission denied"},
-		{name: "object with message", raw: json.RawMessage(`{"message":"rate limit exceeded"}`), want: "rate limit exceeded"},
-		{name: "raw fallback", raw: json.RawMessage(`{"code":500}`), want: `{"code":500}`},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := extractMuseErrorBytes(tc.raw)
-			if got != tc.want {
-				t.Fatalf("extractMuseErrorBytes() = %q, want %q", got, tc.want)
-			}
-		})
 	}
 }
 

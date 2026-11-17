@@ -1,13 +1,10 @@
 package transcript
 
 import (
-	"bytes"
 	"encoding/json"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -114,157 +111,40 @@ func isMuseTranscriptPath(cleanPath, slashPath string, extraDirs []string) bool 
 }
 
 type museLineEnvelope struct {
-	PayloadType string          `json:"payload_type"`
-	RecordedAt  any             `json:"recorded_at"`
-	Timestamp   string          `json:"timestamp,omitempty"`
-	CreatedAt   string          `json:"created_at,omitempty"`
-	Payload     json.RawMessage `json:"payload"`
+	PayloadType string      `json:"payload_type"`
+	RecordedAt  int64       `json:"recorded_at"`
+	Payload     musePayload `json:"payload"`
 }
 
 type musePayload struct {
-	museEvent
-
-	Event   *museEvent `json:"event,omitempty"`
-	Record  *museEvent `json:"record,omitempty"`
-	Type    string     `json:"type,omitempty"`
-	Role    string     `json:"role,omitempty"`
-	Message string     `json:"message,omitempty"`
-}
-
-func (p *musePayload) event() *museEvent {
-	if p.Event != nil {
-		return p.Event
-	}
-	if p.Record != nil {
-		return p.Record
-	}
-	if p.Kind != "" || p.Prompt != "" || p.Terminal != "" || p.Reason != "" || extractMuseErrorBytes(p.Error) != "" {
-		return &p.museEvent
-	}
-	return nil
+	Kind  string    `json:"kind"`
+	RunID string    `json:"run_id"`
+	Event museEvent `json:"event"`
 }
 
 type museEvent struct {
-	Kind      string          `json:"kind,omitempty"`
-	Prompt    string          `json:"prompt,omitempty"`
-	Text      string          `json:"text,omitempty"`
-	Content   json.RawMessage `json:"content,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Tool      string          `json:"tool,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
-	Args      json.RawMessage `json:"args,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	Output    json.RawMessage `json:"output,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	Status    string          `json:"status,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
-	Terminal  string          `json:"terminal,omitempty"`
-	Reason    string          `json:"reason,omitempty"`
-	Error     json.RawMessage `json:"error,omitempty"`
+	Kind      string           `json:"kind"`
+	Prompt    string           `json:"prompt,omitempty"`
+	Text      string           `json:"text,omitempty"`
+	Terminal  string           `json:"terminal,omitempty"`
+	Reason    string           `json:"reason,omitempty"`
+	ToolCalls []museToolCall   `json:"tool_calls,omitempty"`
+	Results   []museToolResult `json:"results,omitempty"`
 }
 
-func parseMuseTimestamp(raw any) time.Time {
-	if raw == nil {
-		return time.Time{}
-	}
-	switch v := raw.(type) {
-	case string:
-		if v == "" {
-			return time.Time{}
-		}
-		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-			return t.UTC()
-		}
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			return t.UTC()
-		}
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return parseMuseNumericTimestamp(n)
-		}
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return parseMuseFloatTimestamp(f)
-		}
-	case float64:
-		return parseMuseFloatTimestamp(v)
-	}
-	return time.Time{}
+type museToolCall struct {
+	ID     string          `json:"id,omitempty"`
+	CallID string          `json:"call_id,omitempty"`
+	Name   string          `json:"name"`
+	Args   json.RawMessage `json:"args,omitempty"`
 }
 
-func parseMuseFloatTimestamp(f float64) time.Time {
-	if f <= 0 {
-		return time.Time{}
-	}
-	if f > 1e17 {
-		return time.Unix(0, int64(f)).UTC()
-	}
-	divisor := 1.0
-	if f > 1e12 {
-		divisor = 1e6
-	}
-	scaled := f / divisor
-	sec := int64(scaled)
-	nsec := int64(math.Round((scaled - float64(sec)) * 1e9))
-	if nsec >= 1e9 {
-		sec++
-		nsec -= 1e9
-	}
-	return time.Unix(sec, nsec).UTC()
-}
-
-func parseMuseNumericTimestamp(n int64) time.Time {
-	if n <= 0 {
-		return time.Time{}
-	}
-	if n > 1e17 {
-		return time.Unix(0, n).UTC()
-	}
-	if n > 1e12 {
-		return time.UnixMicro(n).UTC()
-	}
-	return time.Unix(n, 0).UTC()
-}
-
-func extractMuseTimestamp(env museLineEnvelope) time.Time {
-	if env.RecordedAt != nil {
-		if t := parseMuseTimestamp(env.RecordedAt); !t.IsZero() {
-			return t
-		}
-	}
-	if env.Timestamp != "" {
-		if t := parseMuseTimestamp(env.Timestamp); !t.IsZero() {
-			return t
-		}
-	}
-	if env.CreatedAt != "" {
-		if t := parseMuseTimestamp(env.CreatedAt); !t.IsZero() {
-			return t
-		}
-	}
-	return time.Time{}
-}
-
-func extractMuseText(content json.RawMessage, textFallback string) string {
-	return extractCodexText(content, textFallback)
-}
-
-func extractMuseErrorBytes(raw json.RawMessage) string {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return ""
-	}
-	var errStr string
-	if json.Unmarshal(raw, &errStr) == nil && errStr != "" {
-		return errStr
-	}
-	var errObj struct {
-		Message string `json:"message"`
-	}
-	if json.Unmarshal(raw, &errObj) == nil && errObj.Message != "" {
-		return errObj.Message
-	}
-	return string(raw)
+type museToolResult struct {
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	CallID     string `json:"call_id,omitempty"`
+	Text       string `json:"text,omitempty"`
+	Output     string `json:"output,omitempty"`
+	IsError    bool   `json:"is_error,omitempty"`
 }
 
 func (st *transcriptScanState) handleMuseStartedEvent(ev *museEvent, ts string) {
@@ -283,7 +163,7 @@ func (st *transcriptScanState) handleMuseStartedEvent(ev *museEvent, ts string) 
 }
 
 func (st *transcriptScanState) handleMuseAssistantCommitted(ev *museEvent, ts string) {
-	text := extractMuseText(ev.Content, ev.Text)
+	text := strings.TrimSpace(ev.Text)
 	if text == "" {
 		return
 	}
@@ -297,25 +177,29 @@ func (st *transcriptScanState) handleMuseAssistantCommitted(ev *museEvent, ts st
 	})
 }
 
-func (st *transcriptScanState) handleMuseToolCall(ev *museEvent, ts string) {
-	toolName := ev.Name
-	if toolName == "" {
-		toolName = ev.Tool
+func (st *transcriptScanState) handleMuseToolCallsCommitted(ev *museEvent, ts string) {
+	if len(ev.ToolCalls) == 0 {
+		return
 	}
-	callID := ev.CallID
-	if callID == "" {
-		callID = ev.ID
-	}
-	args := ev.Arguments
-	if len(args) == 0 {
-		args = ev.Args
-	}
-	if len(args) == 0 {
-		args = ev.Input
-	}
-	var strArgs string
-	if json.Unmarshal(args, &strArgs) == nil {
-		args = json.RawMessage(strArgs)
+	var toolCalls []rawToolCall
+	var primaryToolName string
+	for _, tc := range ev.ToolCalls {
+		callID := tc.CallID
+		if callID == "" {
+			callID = tc.ID
+		}
+		toolName := tc.Name
+		if primaryToolName == "" {
+			primaryToolName = toolName
+		}
+		toolCalls = append(toolCalls, rawToolCall{
+			Name: toolName,
+			Args: tc.Args,
+			ID:   callID,
+		})
+		if callID != "" {
+			st.registerClaudeToolUse(claudeContentBlock{ID: callID, Name: toolName})
+		}
 	}
 	st.recordStep(rawTranscriptStep{
 		StepIndex: st.maxStepIndex + 1,
@@ -323,70 +207,47 @@ func (st *transcriptScanState) handleMuseToolCall(ev *museEvent, ts string) {
 		Type:      stepTypePlannerResponse,
 		Status:    stepStatusDone,
 		CreatedAt: ts,
-		ToolName:  toolName,
-		ToolCalls: []rawToolCall{{Name: toolName, Args: args, ID: callID}},
+		ToolName:  primaryToolName,
+		ToolCalls: toolCalls,
 	})
-	if callID != "" {
-		st.registerClaudeToolUse(claudeContentBlock{ID: callID, Name: toolName})
-	}
 }
 
-func (st *transcriptScanState) handleMuseToolCompleted(ev *museEvent, ts string) {
-	callID := ev.CallID
-	if callID == "" {
-		callID = ev.ID
-	}
-	status := stepStatusDone
-	if ev.IsError || strings.EqualFold(ev.Status, "error") || strings.EqualFold(ev.Status, "failed") {
-		status = stepStatusError
-	}
-	toolName := ev.Name
-	if toolName == "" {
-		toolName = ev.Tool
-	}
-	if toolName == "" && callID != "" && st.claudeToolNames != nil {
-		toolName = st.claudeToolNames[callID]
-	}
-	outputStr := extractOutputText(ev.Output, ev.Text)
-	if outputStr == "" && len(ev.Result) > 0 {
-		outputStr = extractOutputText(ev.Result, "")
-	}
-	if outputStr == "" && len(ev.Content) > 0 {
-		outputStr = extractOutputText(ev.Content, "")
-	}
-	if status == stepStatusError && outputStr == "" {
-		outputStr = ev.Reason
-		if outputStr == "" {
-			outputStr = extractMuseErrorBytes(ev.Error)
+func (st *transcriptScanState) handleMuseToolResultBatch(ev *museEvent, ts string) {
+	for _, res := range ev.Results {
+		callID := res.CallID
+		if callID == "" {
+			callID = res.ToolCallID
 		}
+		status := stepStatusDone
+		if res.IsError {
+			status = stepStatusError
+		}
+		var toolName string
+		if callID != "" && st.claudeToolNames != nil {
+			toolName = st.claudeToolNames[callID]
+		}
+		outputStr := res.Output
 		if outputStr == "" {
+			outputStr = res.Text
+		}
+		if status == stepStatusError && outputStr == "" {
 			outputStr = "tool failed"
 		}
+		st.recordStep(rawTranscriptStep{
+			StepIndex:  st.maxStepIndex + 1,
+			Source:     stepTypeTool,
+			Type:       stepTypeTool,
+			Status:     status,
+			CreatedAt:  ts,
+			Content:    outputStr,
+			ToolName:   toolName,
+			ToolCallID: callID,
+		})
 	}
-	st.recordStep(rawTranscriptStep{
-		StepIndex:  st.maxStepIndex + 1,
-		Source:     stepTypeTool,
-		Type:       stepTypeTool,
-		Status:     status,
-		CreatedAt:  ts,
-		Content:    outputStr,
-		ToolName:   toolName,
-		ToolCallID: callID,
-	})
 }
 
 func (st *transcriptScanState) handleMuseTerminal(ev *museEvent, ts string) {
-	errStr := extractMuseErrorBytes(ev.Error)
-	if ev.Terminal != "failed" && ev.Reason == "" && errStr == "" {
-		return
-	}
 	errMsg := ev.Reason
-	if errMsg == "" {
-		errMsg = errStr
-	}
-	if errMsg == "" {
-		errMsg = ev.Text
-	}
 	if errMsg == "" {
 		errMsg = "terminal failed"
 	}
@@ -400,74 +261,31 @@ func (st *transcriptScanState) handleMuseTerminal(ev *museEvent, ts string) {
 	})
 }
 
-func (st *transcriptScanState) handleMuseEvent(ev *museEvent, ts string) bool {
+func (st *transcriptScanState) parseMuseEntry(env museLineEnvelope) bool {
+	if env.PayloadType != "runtime.session" {
+		return false
+	}
+	if env.Payload.Kind != "run" {
+		return true
+	}
+	var ts string
+	if env.RecordedAt > 0 {
+		ts = time.UnixMicro(env.RecordedAt).UTC().Format(time.RFC3339Nano)
+	}
+	ev := env.Payload.Event
 	switch ev.Kind {
 	case "started":
-		st.handleMuseStartedEvent(ev, ts)
-	case "assistant_message_committed", "model_completed":
-		st.handleMuseAssistantCommitted(ev, ts)
-	case "tool_call":
-		st.handleMuseToolCall(ev, ts)
-	case "tool_completed":
-		st.handleMuseToolCompleted(ev, ts)
+		st.handleMuseStartedEvent(&ev, ts)
+	case "assistant_message_committed":
+		st.handleMuseAssistantCommitted(&ev, ts)
+	case "assistant_tool_calls_committed":
+		st.handleMuseToolCallsCommitted(&ev, ts)
+	case "tool_result_batch_committed":
+		st.handleMuseToolResultBatch(&ev, ts)
 	case "terminal":
-		st.handleMuseTerminal(ev, ts)
-	}
-	return true
-}
-
-func (st *transcriptScanState) handleMuseMessage(payload musePayload, ts string) bool {
-	text := extractMuseText(payload.Content, payload.Text)
-	switch payload.Role {
-	case roleUser:
-		if text != "" && !strings.HasPrefix(strings.TrimSpace(text), "[Chat ") {
-			st.recordStep(rawTranscriptStep{
-				StepIndex: st.maxStepIndex + 1,
-				Source:    stepSourceUserExplicit,
-				Type:      stepTypeUserInput,
-				Status:    stepStatusDone,
-				CreatedAt: ts,
-				Content:   text,
-			})
+		if ev.Terminal == "failed" {
+			st.handleMuseTerminal(&ev, ts)
 		}
-	case roleAssistant:
-		if text != "" {
-			st.recordStep(rawTranscriptStep{
-				StepIndex: st.maxStepIndex + 1,
-				Source:    sourceModel,
-				Type:      stepTypePlannerResponse,
-				Status:    stepStatusDone,
-				CreatedAt: ts,
-				Content:   text,
-			})
-		}
-	}
-	return true
-}
-
-func (st *transcriptScanState) parseMuseEntry(env museLineEnvelope) bool {
-	if env.PayloadType != "runtime.session" && !strings.HasPrefix(env.PayloadType, "runtime.") {
-		return false
-	}
-	if len(env.Payload) == 0 {
-		return false
-	}
-	var payload musePayload
-	if err := json.Unmarshal(env.Payload, &payload); err != nil {
-		return false
-	}
-
-	t := extractMuseTimestamp(env)
-	ts := ""
-	if !t.IsZero() {
-		ts = t.UTC().Format(time.RFC3339Nano)
-	}
-
-	if ev := payload.event(); ev != nil {
-		return st.handleMuseEvent(ev, ts)
-	}
-	if payload.Type == "message" {
-		return st.handleMuseMessage(payload, ts)
 	}
 	return true
 }
