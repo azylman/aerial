@@ -705,7 +705,7 @@ var rolloutWorkloadKinds = []struct{ Kind, Path string }{
 	{Kind: "Deployment", Path: "/apis/apps/v1/deployments"},
 	{Kind: kindStatefulSet, Path: "/apis/apps/v1/statefulsets"},
 	{Kind: "DaemonSet", Path: "/apis/apps/v1/daemonsets"},
-	{Kind: "RestateDeployment", Path: "/apis/restate.dev/v1beta1/restatedeployments"},
+	{Kind: kindRestateDeployment, Path: "/apis/restate.dev/v1beta1/restatedeployments"},
 	{Kind: kindRestateCluster, Path: "/apis/restate.dev/v1/restateclusters"},
 }
 
@@ -745,6 +745,15 @@ func (d *DefaultOutboundDispatcher) ListKustomizationWorkloads(ctx context.Conte
 		decoded, err := decodeWorkloadRollouts(k.Kind, body)
 		if err != nil {
 			return nil, fmt.Errorf("decode %s: %w", k.Path, err)
+		}
+		for i := range decoded {
+			if decoded[i].Kind == kindRestateDeployment && decoded[i].Replicas == 0 {
+				observation, err := d.collectStoppedChildren(ctx, decoded[i])
+				if err != nil {
+					return nil, err
+				}
+				decoded[i].StoppedChildren = observation
+			}
 		}
 		workloads = append(workloads, decoded...)
 	}
