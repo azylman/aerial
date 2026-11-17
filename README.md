@@ -42,20 +42,20 @@ Aerial separates generic platform, software factory, and agent orchestration fro
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
 │ Voice & Telephony Ingress    │ HTTP REST & Event Webhooks   │ Discord Gateway Funnel        │
 │ • /voice/ask Voice Pipeline  │ • /prompt (Prompt Injection) │ • synapse Gateway WebSocket   │
-│ • Prospera PSTN Agent (:8080)│ • /discord/message Outbound  │ • Catch-up Sweeps & JetStream │
+│ • Prospera PSTN Agent        │ • /discord/message Outbound  │ • Catch-up Sweeps & JetStream │
 │ • Optional STT/TTS Sidecars  │ • /discord/widget Components │ • POST /discord/ingress       │
-│ • Low-Latency Audio Routing  │ • Edge Gateway Webhooks:4021 │ • Ambient Wake Classification │
+│ • Low-Latency Audio Routing  │ • Edge Gateway Webhooks      │ • Ambient Wake Classification │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
                                                │
                                                ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                  eri (Execution Core) :8080                                 │
+│                                    eri (Execution Core)                                     │
 │  • Autonomous Subagent Orchestrator & SDD Planning Engine                                   │
 │  • Self-Healing GitOps Worker (Proactive CI/CD & RoboRev Remediation)                       │
 │  • Configurable Multi-Engine Execution Core: agy, Claude Code, Codex                        │
 │  • Two-Tier Ambient Wake Classifier (Built-in LLM & Optional Local Sidecar Hook)            │
 │  • PostgreSQL 18 Multi-Turn Thread Memory & Atomic CAS Task State                           │
-│  • Deep Prometheus Telemetry Instrumentation (:8080/metrics)                                │
+│  • Deep Prometheus Telemetry Instrumentation (/metrics)                                     │
 └─────────────────────────────────────────────────────────────────────────────────────────────┘
                                                │
                                                ▼
@@ -63,7 +63,7 @@ Aerial separates generic platform, software factory, and agent orchestration fro
 │               SELF-HOSTED APPLICATION PLATFORM & SOFTWARE FACTORY (k3s)                     │
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
 │ Platform Runtime & Primitives│ Autonomous Software Factory  │ Agent Core & Web HUDs         │
-│ • k3s (1 to N nodes)         │ • vanadis Build API (:4025)  │ • eri, haro, coven, prospera  │
+│ • k3s (1 to N nodes)         │ • vanadis Build API          │ • eri, haro, coven, prospera  │
 │ • lan-gateway & edge-gateway │ • vanadis-restate DAG Worker │ • homepage, console, docs     │
 │ • restate (RestateCluster)   │ • docket-mcp & docket-store  │ • agentsview Session HUD      │
 │ • nats (NATS JetStream)      │ • synapse GitOps Fact Router │ • Optional GPU / Kiosk Nodes  │
@@ -75,12 +75,12 @@ Aerial separates generic platform, software factory, and agent orchestration fro
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
 │                          AUTONOMOUS TOOL RUNTIME (MCP) & TELEMETRY                          │
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
-│ Haro Scheduler MCP (:4005)   │ Coven Memory MCP (:4008)     │ VictoriaMetrics TSDB (:8428)  │
-│ Kubernetes MCP (:8080)       │ Infisical Secrets (:8080)    │ vmalert Recording/Alerts:8880 │
-│ GitHub Operations MCP (:8080)│ Discord REST MCP (:8080)     │ VictoriaLogs (:9428)          │
-│ Kernel Browser MCP (:8080)   │ VictoriaMetrics MCP (:8080)  │ VictoriaTraces OTLP (:10428)  │
-│ Prospera Phone Agent (:8080) │ Vanadis Build Queue (:4025)  │ Grafana Cyberpunk HUD (:3000) │
-│ Docket Issue Tracker (:8080) │ VictoriaLogs/Traces MCP:8080 │ Fluent Bit Log DaemonSet      │
+│ Haro Scheduler MCP           │ Coven Memory MCP             │ VictoriaMetrics TSDB          │
+│ Kubernetes MCP               │ Infisical Secrets            │ vmalert Recording/Alerts      │
+│ GitHub Operations MCP        │ Discord REST MCP             │ VictoriaLogs                  │
+│ Kernel Browser MCP           │ VictoriaMetrics MCP          │ VictoriaTraces OTLP           │
+│ Prospera Phone Agent         │ Vanadis Build Queue          │ Grafana Cyberpunk HUD         │
+│ Docket Issue Tracker         │ VictoriaLogs/Traces MCP      │ Fluent Bit Log DaemonSet      │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
 ```
 
@@ -292,22 +292,6 @@ spec:
       containers:
         - name: worker
           image: ghcr.io/your-username/custom-worker:latest
-          ports:
-            - containerPort: 8080
-              name: http
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: custom-worker
-  namespace: default
-spec:
-  selector:
-    app: custom-worker
-  ports:
-    - name: http
-      port: 8080
-      targetPort: http
 ```
 
 ---
@@ -321,21 +305,21 @@ Aerial includes a batteries-included, out-of-the-box observability matrix with s
 │                                 TELEMETRY PIPELINE                                    │
 ├────────────────────────────┬─────────────────────────────┬────────────────────────────┤
 │ METRIC EXPORTERS           │ TIME-SERIES TSDB & ALERTS   │ VISUALIZATION & HUD        │
-│ • eri (:8080)              │                             │                            │
-│ • synapse (:4020)          │ victoriametrics (:8428)     │ grafana (:3000)            │
-│ • haro (:4005)             │ • 5-Year Retention          │ • Anonymous Admin HUD      │
-│ • coven (:4008)            │ • Dynamic 15s Scrape Engine │ • Cyberpunk Permet Theme   │
-│ • vanadis (:4025)          │ • Pod & cAdvisor Scrapes    │ • Core Telemetry Dashboard │
-│ • CloudNativePG (:9187)    │ vmalert (:8880)             │ • SQLite Storage Backend   │
-│ • Kubelet / cAdvisor       │ • MAD Anomaly Detection     │ • victorialogs (:9428)     │
-│ • node-exporter (:9100)    │ • Alert Rules Evaluation    │   LogsQL Logs (LAN-only)   │
+│ • eri                      │                             │                            │
+│ • synapse                  │ victoriametrics             │ grafana                    │
+│ • haro                     │ • 5-Year Retention          │ • Anonymous Admin HUD      │
+│ • coven                    │ • Dynamic 15s Scrape Engine │ • Cyberpunk Permet Theme   │
+│ • vanadis                  │ • Pod & cAdvisor Scrapes    │ • Core Telemetry Dashboard │
+│ • CloudNativePG            │ vmalert                     │ • SQLite Storage Backend   │
+│ • Kubelet / cAdvisor       │ • MAD Anomaly Detection     │ • victorialogs             │
+│ • node-exporter            │ • Alert Rules Evaluation    │   LogsQL Logs (LAN-only)   │
 └────────────────────────────┴─────────────────────────────┴────────────────────────────┘
 ```
 
 ### 1. VictoriaMetrics TSDB & vmalert (`victoriametrics`, `vmalert`)
 - **Engine**: Single-node VictoriaMetrics running with 5-year retention (`-retentionPeriod=5y`) and 15s scrape interval, scraping cluster pods, Kubelet, and cAdvisor.
 - **Declarative Operator Scrapes (`vm-operator`)**: VictoriaMetrics Operator dynamically reconciles `VMServiceScrape` and `VMStaticScrape` CRDs across cluster namespaces (`k8s/observability-and-mcp.yaml`) without manual config file mounts or container restarts.
-- **Anomaly Detection & Recording Rules (`vmalert`)**: Evaluates Median Absolute Deviation (MAD) anomaly rules and alert definitions on port `:8880`.
+- **Anomaly Detection & Recording Rules (`vmalert`)**: Evaluates Median Absolute Deviation (MAD) anomaly rules and alert definitions.
 
 ### 2. Pre-Provisioned Grafana Dashboards (`services/grafana/dashboards/`)
 - **Single-Click Anonymous Admin Access**: Instant dashboard access without login friction.
@@ -348,13 +332,13 @@ Aerial includes a batteries-included, out-of-the-box observability matrix with s
   - **`🪙 Token Telemetry & Channel Breakdown` (`token-usage.json`)**: Real-time and cumulative token consumption partitioned by Discord channel, 24-hour and 7-day velocity, burn rates, and channel share leaderboards.
 
 ### 3. Deep Go Prometheus Metrics Instrumentation
-- **`eri`** (Exposed on `:8080/metrics`):
+- **`eri`** (Exposed on `/metrics`):
   - Queue & Workers: `aerial_brain_active_workers`, `aerial_brain_queue_depth`, `aerial_brain_interrupted_turns_recovered_total`, `aerial_brain_daemons_active`, `aerial_brain_daemon_spawns_total`, `aerial_brain_daemon_prunes_total`.
   - Turns & Runner: `aerial_brain_turns_total`, `aerial_brain_turn_duration_seconds`, `aerial_brain_runner_executions_total`, `aerial_brain_runner_duration_seconds`, `aerial_brain_runner_errors_total`, `aerial_brain_yield_trap_total`.
   - Classifier & Funnel: `aerial_brain_classifier_duration_seconds`, `aerial_brain_classifier_decisions_total`, `aerial_brain_classifier_confidence_score`, `aerial_brain_discord_events_total`.
   - Memory & Embeddings: `aerial_brain_memory_operations_total`, `aerial_brain_memory_search_duration_seconds`, `aerial_brain_embeddings_generated_total`, `aerial_brain_embedding_duration_seconds`.
   - Database Connection Pool: `aerial_brain_db_query_duration_seconds`, `aerial_brain_db_open_connections`, `aerial_brain_db_in_use_connections`, `aerial_brain_db_idle_connections`, `aerial_brain_db_wait_count_total`.
-- **`synapse`** (Exposed on `:4020/metrics`):
+- **`synapse`** (Exposed on `/metrics`):
   - Discord Gateway: `synapse_discord_gateway_latency_seconds`, `synapse_discord_events_received_total`.
   - JetStream Queue: `synapse_queue_depth`, `synapse_jobs_processed_total`, `synapse_job_retries_total`.
 
@@ -373,44 +357,44 @@ Aerial includes a complete, self-hosted software factory built on top of its pla
 
 ## 5. Component Modules
 
-| Service | Port | Description |
-| :--- | :--- | :--- |
-| **`postgres`** | `5432` | CloudNativePG PostgreSQL 18 + `pgvector` cluster with native `:9187` Prometheus metrics for production state, CAS task queues, semantic memory, PR registry, schedules, and Vanadis build queues. |
-| **`eri`** | `8080` | Multi-protocol Go execution daemon running `agy`, PostgreSQL session memory, multiplexed Discord ingress from `synapse`, Voice (`/voice/ask`), HTTP (`/prompt`) ingress, two-tier ambient triage, Prometheus metrics (`:8080/metrics`), and `SIGHUP` configuration hot-reloading. Mounted `:ro`. |
-| **`synapse`** | `4020` | Ingress gateway and event-driven router owning Discord Gateway WebSocket, startup catch-up sweeps, NATS JetStream queues (`discord_ingress`, `discord_interaction`), and GitHub/Flux webhook dispatch. |
-| **`haro`** | `4005` | Persistent scheduling, heartbeat, and event-watch orchestration service (`http://haro.aerial/mcp`) evaluating cron, one-shot, and event triggers and dispatching due turns to `eri`. |
-| **`coven`** | `4008` | Semantic fact extraction, hybrid RRF memory search, ACT-R memory decay, and procedural skill synthesis MCP service (`http://coven.aerial/mcp`). |
-| **`vanadis`** | `4025` | Multi-chunk build queue orchestrator serving HTTP/MCP APIs (`:4025`), JIT symbol line-slice resolution, and NATS JetStream consumers. |
-| **`vanadis-restate`** | `9080` / `4026` | Restate durable execution SDK worker (`RestateDeployment`) hosting the `Build` Virtual Object and `BuildRouter` service with `:4026` health/metrics endpoints. |
-| **`nats`** | `4222` / `8222` | NATS 2 JetStream broker StatefulSet (`:4222` client, `:8222` HTTP monitoring) backing durable cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`). |
-| **`restate`** | `8080` / `9070` | Kubernetes Restate Operator managing `RestateCluster` instances (`:8080` ingress / `:9070` admin with RocksDB persistence). |
-| **`prospera`** | `8080` | Autonomous Twilio media-streaming voice and telephone call agent. |
-| **`coredns`** | `53` | Kubernetes CoreDNS daemon rewriting internal DNS queries (`*.aerial`, `*.lan` -> `*.default.svc.cluster.local`). |
-| **`infisical`** | `8080` | Centralized secret management and automated rotation backed by Valkey 9 (`:6379`), dynamically syncing secrets into Kubernetes Secrets (`shared-secrets`). |
-| **`valkey`** | `6379` | In-memory key-value cache backing Infisical session governance. |
-| **`kubernetes-mcp`** | `8080` | Native Streamable HTTP MCP server for Kubernetes cluster orchestration, resource lifecycles, and pod diagnostics. |
-| **`infisical-mcp`** | `8080` | Native Streamable HTTP MCP server for Infisical secret management and rotation. |
-| **`discord-mcp`** | `8080` | Outbound Streamable HTTP MCP server providing Discord messaging, thread creation, and channel tools. |
-| **`github-mcp`** | `8080` | Native Streamable HTTP GitHub MCP server with PAT authentication for PR, issue, and code operations. |
-| **`victoriametrics-mcp`**| `8080` | VictoriaMetrics MCP server exposing metrics querying and alert inspection over Streamable HTTP. |
-| **`kernel-mcp`** | `8080` | Headless browser automation and web interaction microservice. |
-| **`docket-mcp`** | `8080` | Native Streamable HTTP MCP server (`http://docket-mcp.aerial/mcp`) for issue tracking, DAG triage, and hybrid RRF task search backed by Vikunja and PostgreSQL 18. |
-| **`docket-store`** | `3456` | Vikunja issue tracking API service backed by PostgreSQL 18 (`postgres:5432/docket`). |
-| **`victorialogs`** | `9428` | VictoriaLogs log store (60-day retention) ingesting Fluent Bit container and journald logs, queried with LogsQL. LAN-only; never exposed on the edge gateway. |
-| **`victoriatraces`** | `10428` | VictoriaTraces OTLP trace store (30-day retention) receiving gateway and service spans. LAN-only; never exposed on the edge gateway. |
-| **`victorialogs-mcp`** / **`victoriatraces-mcp`** | `8080` | Streamable HTTP MCP servers for LogsQL log search and trace lookup. |
-| **`homepage`** | `3000` | Root landing portal and service discovery HUD. |
-| **`console`** | `8080` | Web status HUD rendering live queue state, schedules, memory, and turn health. |
-| **`agentsview`** | `8080` | Web UI for visualizing agent transcripts, session history, and execution timelines. |
-| **`docs`** | `8080` | Living documentation portal rendering Markdown and Mermaid diagrams via Docsify. |
-| **`lan-gateway`** | `80` / `443` | NGINX Gateway Fabric ingress controller routing dynamic internal services and web dashboards. |
-| **`edge-gateway`** | `4021` | Ingress gateway routing external Cloudflare tunnel webhooks into the local cluster mesh. |
-| **`fluent-bit`** | DaemonSet | High-performance log collector shipping container stdout/stderr and journald logs to VictoriaLogs. |
-| **`node-exporter`** | `9100` | Node Exporter host telemetry gathering host CPU loads, memory, storage, thermals, and network metrics. |
-| **`victoriametrics`** | `8428` | VictoriaMetrics single-node TSDB scraping Prometheus metrics from all pods and nodes with 5-year retention and declarative VMServiceScrape / VMStaticScrape discovery via vm-operator. |
-| **`vmalert`** | `8880` | Prometheus-compatible alerting engine evaluating anomaly detection and metric threshold rules. |
-| **`grafana`** | `3000` | Grafana visual dashboards serving system HUD & container metrics with SQLite backend and pre-provisioned dashboards. |
-| **`github-runner`** | Replicas | Scale-to-zero Actions Runner Controller (ARC) `AutoscalingRunnerSet` HelmReleases executing CI matrices and automated RoboRev code reviews. |
+| Service | Description |
+| :--- | :--- |
+| **`postgres`** | CloudNativePG PostgreSQL 18 + `pgvector` cluster with native Prometheus metrics for production state, CAS task queues, semantic memory, PR registry, schedules, and Vanadis build queues. |
+| **`eri`** | Multi-protocol Go execution daemon running `agy`, PostgreSQL session memory, multiplexed Discord ingress from `synapse`, Voice (`/voice/ask`), HTTP (`/prompt`) ingress, two-tier ambient triage, Prometheus metrics (`/metrics`), and `SIGHUP` configuration hot-reloading. Mounted `:ro`. |
+| **`synapse`** | Ingress gateway and event-driven router owning Discord Gateway WebSocket, startup catch-up sweeps, NATS JetStream queues (`discord_ingress`, `discord_interaction`), and GitHub/Flux webhook dispatch. |
+| **`haro`** | Persistent scheduling, heartbeat, and event-watch orchestration service (`http://haro.aerial/mcp`) evaluating cron, one-shot, and event triggers and dispatching due turns to `eri`. |
+| **`coven`** | Semantic fact extraction, hybrid RRF memory search, ACT-R memory decay, and procedural skill synthesis MCP service (`http://coven.aerial/mcp`). |
+| **`vanadis`** | Multi-chunk build queue orchestrator serving HTTP/MCP APIs, JIT symbol line-slice resolution, and NATS JetStream consumers. |
+| **`vanadis-restate`** | Restate durable execution SDK worker (`RestateDeployment`) hosting the `Build` Virtual Object and `BuildRouter` service with health/metrics endpoints. |
+| **`nats`** | NATS 2 JetStream broker StatefulSet backing durable cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`). |
+| **`restate`** | Kubernetes Restate Operator managing `RestateCluster` instances with RocksDB persistence. |
+| **`prospera`** | Autonomous Twilio media-streaming voice and telephone call agent. |
+| **`coredns`** | Kubernetes CoreDNS daemon rewriting internal DNS queries (`*.aerial`, `*.lan` -> `*.default.svc.cluster.local`). |
+| **`infisical`** | Centralized secret management and automated rotation backed by Valkey 9, dynamically syncing secrets into Kubernetes Secrets (`shared-secrets`). |
+| **`valkey`** | In-memory key-value cache backing Infisical session governance. |
+| **`kubernetes-mcp`** | Native Streamable HTTP MCP server for Kubernetes cluster orchestration, resource lifecycles, and pod diagnostics. |
+| **`infisical-mcp`** | Native Streamable HTTP MCP server for Infisical secret management and rotation. |
+| **`discord-mcp`** | Outbound Streamable HTTP MCP server providing Discord messaging, thread creation, and channel tools. |
+| **`github-mcp`** | Native Streamable HTTP GitHub MCP server with PAT authentication for PR, issue, and code operations. |
+| **`victoriametrics-mcp`**| VictoriaMetrics MCP server exposing metrics querying and alert inspection over Streamable HTTP. |
+| **`kernel-mcp`** | Headless browser automation and web interaction microservice. |
+| **`docket-mcp`** | Native Streamable HTTP MCP server (`http://docket-mcp.aerial/mcp`) for issue tracking, DAG triage, and hybrid RRF task search backed by Vikunja and PostgreSQL 18. |
+| **`docket-store`** | Vikunja issue tracking API service backed by PostgreSQL 18 (`postgres/docket`). |
+| **`victorialogs`** | VictoriaLogs log store (60-day retention) ingesting Fluent Bit container and journald logs, queried with LogsQL. LAN-only; never exposed on the edge gateway. |
+| **`victoriatraces`** | VictoriaTraces OTLP trace store (30-day retention) receiving gateway and service spans. LAN-only; never exposed on the edge gateway. |
+| **`victorialogs-mcp`** / **`victoriatraces-mcp`** | Streamable HTTP MCP servers for LogsQL log search and trace lookup. |
+| **`homepage`** | Root landing portal and service discovery HUD. |
+| **`console`** | Web status HUD rendering live queue state, schedules, memory, and turn health. |
+| **`agentsview`** | Web UI for visualizing agent transcripts, session history, and execution timelines. |
+| **`docs`** | Living documentation portal rendering Markdown and Mermaid diagrams via Docsify. |
+| **`lan-gateway`** | NGINX Gateway Fabric ingress controller routing dynamic internal services and web dashboards. |
+| **`edge-gateway`** | Ingress gateway routing external Cloudflare tunnel webhooks into the local cluster mesh. |
+| **`fluent-bit`** | High-performance log collector shipping container stdout/stderr and journald logs to VictoriaLogs. |
+| **`node-exporter`** | Node Exporter host telemetry gathering host CPU loads, memory, storage, thermals, and network metrics. |
+| **`victoriametrics`** | VictoriaMetrics single-node TSDB scraping Prometheus metrics from all pods and nodes with 5-year retention and declarative VMServiceScrape / VMStaticScrape discovery via vm-operator. |
+| **`vmalert`** | Prometheus-compatible alerting engine evaluating anomaly detection and metric threshold rules. |
+| **`grafana`** | Grafana visual dashboards serving system HUD & container metrics with SQLite backend and pre-provisioned dashboards. |
+| **`github-runner`** | Scale-to-zero Actions Runner Controller (ARC) `AutoscalingRunnerSet` HelmReleases executing CI matrices and automated RoboRev code reviews. |
 
 ---
 
@@ -578,17 +562,17 @@ Verify all core services are running and passing readiness healthchecks:
 kubectl get pods -o wide
 
 # Check core microservice health endpoints
-kubectl exec deployment/eri -c eri -- curl -sf http://localhost:8080/health
-kubectl exec deployment/haro -- wget -qO- http://localhost:4005/health
-kubectl exec deployment/coven -- wget -qO- http://localhost:4008/health
-kubectl exec deployment/vanadis -- curl -sf http://localhost:4025/health
-kubectl exec deployment/synapse -- curl -sf http://localhost:4020/health
-kubectl exec deployment/vanadis-restate -- wget -qO- http://localhost:4026/healthz
-kubectl exec statefulset/nats -- wget -qO- http://localhost:8222/healthz?js-enabled-only=true
-kubectl exec deployment/console -- wget -qO- http://localhost:8084/health
+kubectl exec deployment/eri -c eri -- curl -sf http://localhost/health
+kubectl exec deployment/haro -- wget -qO- http://localhost/health
+kubectl exec deployment/coven -- wget -qO- http://localhost/health
+kubectl exec deployment/vanadis -- curl -sf http://localhost/health
+kubectl exec deployment/synapse -- curl -sf http://localhost/health
+kubectl exec deployment/vanadis-restate -- wget -qO- http://localhost/healthz
+kubectl exec statefulset/nats -- wget -qO- http://localhost/healthz?js-enabled-only=true
+kubectl exec deployment/console -- wget -qO- http://localhost/health
 ```
 
-Once running, access the web dashboards directly via port 80 on your node's IP or hostname:
+Once running, access the web dashboards directly via your node's IP or hostname:
 - Root Landing Portal: `http://<node-ip>/`
 - Operator Console: `http://<node-ip>/console/`
 - System Telemetry (Grafana): `http://<node-ip>/grafana/`
@@ -623,14 +607,14 @@ While `azylman/aerial`'s base `k8s/*.yaml` manifests are completely single-node 
 | Agent Transcripts (`agentsview`) | `http://<node-ip>/agentsview/` or `http://agentsview.aerial/` |
 | System Telemetry (`grafana`) | `http://<node-ip>/grafana/` or `http://grafana.aerial/` |
 | Logs and Traces (`victorialogs`, `victoriatraces`) | Grafana Explore, or LAN-only vmui at `http://victorialogs.aerial/select/vmui/` and `http://victoriatraces.aerial/select/vmui/` |
-| `eri` Prometheus Metrics | `http://eri.aerial:8080/metrics` |
-| `eri` Healthcheck | `http://eri.aerial:8080/health` |
-| `synapse` Healthcheck | `http://synapse.aerial:4020/health` |
-| `haro` Healthcheck | `http://haro.aerial:4005/health` |
-| `coven` Healthcheck | `http://coven.aerial:4008/health` |
-| `vanadis` Healthcheck | `http://vanadis.aerial:4025/health` |
-| `vanadis-restate` Healthcheck | `http://vanadis-restate.aerial:4026/healthz` |
-| `nats` JetStream Healthcheck | `http://nats.aerial:8222/healthz?js-enabled-only=true` |
+| `eri` Prometheus Metrics | `http://eri.aerial/metrics` |
+| `eri` Healthcheck | `http://eri.aerial/health` |
+| `synapse` Healthcheck | `http://synapse.aerial/health` |
+| `haro` Healthcheck | `http://haro.aerial/health` |
+| `coven` Healthcheck | `http://coven.aerial/health` |
+| `vanadis` Healthcheck | `http://vanadis.aerial/health` |
+| `vanadis-restate` Healthcheck | `http://vanadis-restate.aerial/healthz` |
+| `nats` JetStream Healthcheck | `http://nats.aerial/healthz?js-enabled-only=true` |
 | List all cluster pods | `kubectl get pods -o wide` |
 | View pod logs | `kubectl logs -f <pod-name>` |
 | Reconcile Flux CD Kustomization | `flux reconcile kustomization aerial-core` |
