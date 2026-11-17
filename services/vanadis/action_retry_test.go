@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -41,6 +42,13 @@ func TestRetryActionIntake(t *testing.T) {
 		noIngress                 bool
 		disabled                  bool
 	}{
+		{name: "missing replacement", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry","expected_instructions":"old"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 400},
+		{name: "missing expected", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry","replacement_instructions":"new"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 400},
+		{name: "blank expected", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry","expected_instructions":" ","replacement_instructions":"new"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 400},
+		{name: "blank replacement", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry","expected_instructions":"old","replacement_instructions":" "}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 400},
+		{name: "instruction mismatch", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry","expected_instructions":"old","replacement_instructions":"new"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 409},
+		{name: "changed correction replay", generation: 1, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry","expected_instructions":"different","replacement_instructions":"ignored"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
+		{name: "correction", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry","expected_instructions":"verify","replacement_instructions":"new"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
 		{name: "accepted", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
 		{name: "completed replay", buildStatus: "completed", generation: 1, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
 		{name: "failed replay", buildStatus: "failed", generation: 1, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
@@ -77,14 +85,23 @@ func TestRetryActionIntake(t *testing.T) {
 			if w.Code != tc.wantStatus {
 				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 			}
-			if tc.wantStatus == 200 {
-				if f.path != "/Build/b1/RetryActionChunk" || f.key == "" {
-					t.Fatalf("durable path=%s key=%s", f.path, f.key)
-				}
-				var result RetryActionChunkResult
-				if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || !result.Accepted || result.DispatchID != "vanadis-c1-turn-1" {
-					t.Fatalf("result=%+v err=%v", result, err)
-				}
+			if (tc.wantStatus == 400 || tc.name == "instruction mismatch") && f.key != "" {
+				t.Fatal("rejected request consumed durable key")
+			}
+			if tc.wantStatus != 200 {
+				return
+			}
+			if f.path != "/Build/b1/RetryActionChunk" || f.key == "" {
+				t.Fatalf("durable path=%s key=%s", f.path, f.key)
+			}
+			var sent RetryActionChunkRequest
+			_ = json.Unmarshal([]byte(tc.body), &sent)
+			if !reflect.DeepEqual(f.request, sent) {
+				t.Fatal("correction not forwarded")
+			}
+			var result RetryActionChunkResult
+			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || !result.Accepted || result.DispatchID != "vanadis-c1-turn-1" {
+				t.Fatalf("result=%+v err=%v", result, err)
 			}
 		})
 	}
@@ -97,6 +114,7 @@ func TestRetryActionIdempotencyKey(t *testing.T) {
 		req   RetryActionChunkRequest
 		equal bool
 	}{
+		{"different correction", RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", ExpectedInstructions: new("before"), ReplacementInstructions: new("after")}, true},
 		{"different reason", RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "different"}, true},
 		{"different build", RetryActionChunkRequest{BuildID: "b2", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0"}, false},
 		{"different chunk", RetryActionChunkRequest{BuildID: "b1", ChunkID: "c2", ExpectedDispatchID: "vanadis-c1-turn-0"}, false},
@@ -148,7 +166,7 @@ type retryReadFixture struct {
 }
 
 func (f *retryReadFixture) GetBuild(context.Context, string) (*VanadisBuild, []VanadisChunk, error) {
-	return &VanadisBuild{ID: "b1", Status: f.status}, []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: f.status, StallNudges: f.generation, PRNumber: f.prNumber}}, nil
+	return &VanadisBuild{ID: "b1", Status: f.status}, []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: f.status, StallNudges: f.generation, PRNumber: f.prNumber, Instructions: "verify"}}, nil
 }
 
 func TestRetryPrematureRequest(t *testing.T) {
