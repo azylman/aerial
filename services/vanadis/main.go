@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -555,7 +556,9 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	httpkit.WriteJSON(w, status, map[string]string{"error": msg})
 }
 
-func writeStoreErr(w http.ResponseWriter, err error) {
+// writeStoreErr maps a store or Restate error onto its HTTP status and writes it. Server-side
+// failures (5xx) are logged with ctx so the line carries the request's trace_id and span_id.
+func writeStoreErr(ctx context.Context, w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, ErrRestateTimeout):
@@ -566,6 +569,9 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, ErrBuildConflict):
 		status = http.StatusConflict
+	}
+	if status >= http.StatusInternalServerError {
+		slog.ErrorContext(ctx, "[vanadis] store request failed", "status", status, "error", err)
 	}
 	writeErr(w, status, err.Error())
 }
@@ -690,9 +696,10 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 
 	var created VanadisBuild
 	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/Create", buildID), req, &created); err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
+	slog.InfoContext(r.Context(), "[vanadis] build created", "build_id", created.ID, "thread_id", created.ThreadID, "tier", created.Tier, "chunk_count", len(chunks))
 
 	RecordBuildTotal("created")
 	httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
@@ -708,7 +715,7 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 	}
 	var cancelled VanadisBuild
 	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/Cancel", id), CancelBuildRequest{}, &cancelled); err != nil {
-		writeStoreErr(w, err)
+		writeStoreErr(r.Context(), w, err)
 		return
 	}
 	RecordBuildTotal("cancelled")
@@ -720,7 +727,7 @@ func (s *VanadisServer) handleBuildRoot(w http.ResponseWriter, r *http.Request, 
 	case http.MethodGet:
 		build, chunks, err := s.store.GetBuild(r.Context(), id)
 		if err != nil {
-			writeStoreErr(w, err)
+			writeStoreErr(r.Context(), w, err)
 			return
 		}
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldBuild: build, fieldChunks: chunks, "entry": SummarizeBuildEntry(*build, chunks)})
@@ -913,6 +920,7 @@ func main() {
 	cfg := LoadConfigFromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	_, flushTracing := tracing.Init(ctx, "vanadis", tracing.DefaultConfigPath)
+	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, nil))))
 
 	err := RunApp(ctx, cfg)
 	cancel()

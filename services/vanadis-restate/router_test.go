@@ -87,6 +87,7 @@ func runRouterMockRunContext(fn func(restate.RunContext) (any, error), output an
 func makeRouterMockContext(t *testing.T) restate.Context {
 	t.Helper()
 	mc := mocks.NewMockContext(t)
+	mc.EXPECT().Value(mock.Anything).Return(nil).Maybe() // slog handlers look up the span context.
 	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runRouterMockRunContext).Maybe()
 	mClient := mocks.NewMockClient(t)
 	mInv := mocks.NewMockInvocation(t)

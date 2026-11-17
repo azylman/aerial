@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
@@ -200,8 +200,7 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 	}
 	deployEvt, ok := TranslateFluxAlertToDeployEvent(alert)
 	if !ok {
-		log.Printf("[synapse] [flux] ignoring unhandled flux alert: kind=%s name=%s reason=%s severity=%s",
-			alert.InvolvedObject.Kind, alert.InvolvedObject.Name, alert.Reason, alert.Severity)
+		slog.InfoContext(r.Context(), "[synapse] [flux] ignoring unhandled flux alert", "kind", alert.InvolvedObject.Kind, "name", alert.InvolvedObject.Name, "reason", alert.Reason, "severity", alert.Severity)
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 			fieldStatus: "ignored",
 			"message":   "unhandled flux alert event",
@@ -220,7 +219,7 @@ func (s *RouterServer) resolveFluxAlertSourceRepo(ctx context.Context, alert Flu
 	}
 	repo, err := s.dispatcher.ResolveFluxSourceRepo(ctx, alert.InvolvedObject)
 	if err != nil {
-		log.Printf("[synapse] [flux] warning resolving source repo for %s %s/%s: %v", alert.InvolvedObject.Kind, alert.InvolvedObject.Namespace, alert.InvolvedObject.Name, err)
+		slog.WarnContext(ctx, "[synapse] [flux] error resolving source repo", "kind", alert.InvolvedObject.Kind, "namespace", alert.InvolvedObject.Namespace, "name", alert.InvolvedObject.Name, "error", err)
 		return ""
 	}
 	return repo

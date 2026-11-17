@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"iter"
@@ -82,9 +83,10 @@ type requestRunContext struct {
 	context.Context
 
 	req *restate.Request
+	log *slog.Logger
 }
 
-func (requestRunContext) Log() *slog.Logger           { return slog.Default() }
+func (r requestRunContext) Log() *slog.Logger         { return r.log }
 func (r requestRunContext) Request() *restate.Request { return r.req }
 
 func TestRunInSpan_EriClientPropagatesTrace(t *testing.T) {
@@ -93,10 +95,11 @@ func TestRunInSpan_EriClientPropagatesTrace(t *testing.T) {
 		name        string
 		req         *restate.Request
 		wantTraceID string
+		wantLog     map[string]any
 	}{
-		{"attempt header", &restate.Request{AttemptHeaders: map[string][]string{"Traceparent": {attemptTP}}, Headers: fakeHeaders{"traceparent": ingressTP}}, "4bf92f3577b34da6a3ce929d0e0e4736"},
-		{"ingress header", &restate.Request{Headers: fakeHeaders{"traceparent": ingressTP}}, "0af7651916cd43dd8448eb211c80319c"},
-		{"no request", nil, ""},
+		{"attempt header", &restate.Request{AttemptHeaders: map[string][]string{"Traceparent": {attemptTP}}, Headers: fakeHeaders{"traceparent": ingressTP}}, "4bf92f3577b34da6a3ce929d0e0e4736", map[string]any{"level": "WARN", "msg": "step warning", "step": "s1", "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "span_id": "00f067aa0ba902b7"}},
+		{"ingress header", &restate.Request{Headers: fakeHeaders{"traceparent": ingressTP}}, "0af7651916cd43dd8448eb211c80319c", map[string]any{"level": "WARN", "msg": "step warning", "step": "s1", "trace_id": "0af7651916cd43dd8448eb211c80319c", "span_id": "b7ad6b7169203331"}},
+		{"no request", nil, "", map[string]any{"level": "WARN", "msg": "step warning", "step": "s1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,13 +112,26 @@ func TestRunInSpan_EriClientPropagatesTrace(t *testing.T) {
 			defer srv.Close()
 
 			client := NewHTTPEriClient(srv.URL, tracing.Client(srv.Client()))
-			rc := requestRunContext{Context: context.Background(), req: tc.req}
+			var logBuf bytes.Buffer
+			logger := slog.New(tracing.SlogHandler(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
+				ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+					if a.Key == slog.TimeKey {
+						return slog.Attr{}
+					}
+					return a
+				},
+			})))
+			rc := requestRunContext{Context: context.Background(), req: tc.req, log: logger}
 			_, err := runInSpan(rc, spanPrefix+"test/step", func(trc restate.RunContext) (bool, error) {
 				assert.Equal(t, tc.req, trc.Request())
-				assert.NotNil(t, trc.Log())
+				trc.Log().With("step", "s1").Warn("step warning")
 				return true, client.Prompt(trc, "th1", "wake")
 			})
 			require.NoError(t, err)
+
+			var gotLog map[string]any
+			require.NoError(t, json.Unmarshal(logBuf.Bytes(), &gotLog))
+			assert.Equal(t, tc.wantLog, gotLog)
 
 			tp := <-got
 			traceID := ""

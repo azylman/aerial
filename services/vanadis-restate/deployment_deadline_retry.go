@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"strings"
 
 	restate "github.com/restatedev/sdk-go"
@@ -90,7 +90,7 @@ func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID str
 			if event == prEventDeployStarted {
 				return false, rErr
 			}
-			log.Printf("[vanadis-restate] record rollout state warning: %v", rErr)
+			slog.WarnContext(rc, "[vanadis-restate] record rollout state warning", "error", rErr)
 		}
 	}
 	return true, nil

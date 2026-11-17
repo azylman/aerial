@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -268,11 +269,11 @@ func enqueueDiscordMessage(ctx context.Context, server *RouterServer, s *discord
 
 	if server.bus != nil {
 		if err := server.publishJetStreamJob(enqueueCtx, args); err != nil {
-			log.Printf("[synapse] [discord] failed to publish message %s to jetstream: %v", m.ID, err)
+			slog.ErrorContext(ctx, "[synapse] [discord] failed to publish message to jetstream", "message_id", m.ID, "error", err)
 		}
 	} else {
 		if err := server.ProcessDiscordIngress(enqueueCtx, args); err != nil {
-			log.Printf("[synapse] [discord] failed to process message %s directly: %v", m.ID, err)
+			slog.ErrorContext(ctx, "[synapse] [discord] failed to process message directly", "message_id", m.ID, "error", err)
 		}
 	}
 }
@@ -410,7 +411,7 @@ func catchUpChannelMessages(ctx context.Context, dg *discordgo.Session, server *
 
 	fetched, err := dg.ChannelMessages(ch.ID, 50, "", afterID, "")
 	if err != nil {
-		log.Printf("[synapse] [discord] failed to fetch channel messages for channel %s: %v", ch.ID, err)
+		slog.WarnContext(ctx, "[synapse] [discord] failed to fetch channel messages", "channel_id", ch.ID, "error", err)
 		return
 	}
 
@@ -493,11 +494,11 @@ func handleGatewayInteractionCreate(ctx context.Context, server *RouterServer, i
 
 	if server.bus != nil {
 		if err := server.publishJetStreamJob(enqueueCtx, args); err != nil {
-			log.Printf("[synapse] [discord] failed to publish interaction %s to jetstream: %v", i.ID, err)
+			slog.ErrorContext(ctx, "[synapse] [discord] failed to publish interaction to jetstream", "interaction_id", i.ID, "error", err)
 		}
 	} else {
 		if err := server.ProcessDiscordInteraction(enqueueCtx, args); err != nil {
-			log.Printf("[synapse] [discord] failed to process interaction %s directly: %v", i.ID, err)
+			slog.ErrorContext(ctx, "[synapse] [discord] failed to process interaction directly", "interaction_id", i.ID, "error", err)
 		}
 	}
 }

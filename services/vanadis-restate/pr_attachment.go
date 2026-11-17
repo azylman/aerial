@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -62,7 +62,7 @@ func (s *PostgresVanadisStore) attachPRTransaction(ctx context.Context, chunkID 
 	}
 	defer func() {
 		if e := tx.Rollback(ctx); e != nil && !errors.Is(e, pgx.ErrTxClosed) {
-			log.Printf("[vanadis] attachment rollback: %v", e)
+			slog.ErrorContext(ctx, "[vanadis] attachment rollback failed", "error", e)
 		}
 	}()
 	var buildID string
@@ -123,7 +123,7 @@ func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req Attac
 	}
 	defer func() {
 		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			log.Printf("[vanadis] standalone attach tx rollback error: %v", rbErr)
+			slog.ErrorContext(ctx, "[vanadis] standalone attach tx rollback error", "error", rbErr)
 		}
 	}()
 	candidates := repoMatchCandidates(repo)

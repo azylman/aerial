@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -134,7 +134,7 @@ func (s *RouterServer) forwardRawWebhook(ctx context.Context, targetBaseURL, req
 	targetURL := strings.TrimRight(targetBaseURL, "/") + reqPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("[synapse] [forward] error creating request to %s: %v", targetURL, err)
+		slog.ErrorContext(ctx, "[synapse] [forward] error creating forward request", "target_url", targetURL, "error", err)
 		return
 	}
 	for k, vv := range headers {
@@ -147,12 +147,12 @@ func (s *RouterServer) forwardRawWebhook(ctx context.Context, targetBaseURL, req
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		log.Printf("[synapse] [forward] error forwarding webhook to %s: %v", targetURL, err)
+		slog.ErrorContext(ctx, "[synapse] [forward] error forwarding webhook", "target_url", targetURL, "error", err)
 		return
 	}
 	defer resp.Body.Close()
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-		log.Printf("[synapse] [forward] warning draining response: %v", err)
+		slog.WarnContext(ctx, "[synapse] [forward] error draining response", "error", err)
 	}
 }
 
