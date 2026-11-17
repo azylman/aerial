@@ -10,6 +10,10 @@ import (
 	"testing"
 
 	restate "github.com/restatedev/sdk-go"
+	"github.com/restatedev/sdk-go/x/mocks"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
@@ -156,5 +160,47 @@ func TestRecoveredChunkRemediationWake(t *testing.T) {
 		}
 	default:
 		t.Fatal("no remediation wake")
+	}
+}
+
+// Inspect the callback error before the SDK can retry the journaled operation.
+func TestExecutePRAttachment(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		req         AttachChunkPRRequest
+		db          dbScript
+		wantCode    restate.Code
+		wantMessage string
+	}{
+		{"missing action repo", attachRequest("c1", ""), dbScript{routes: attachRoutes("action", true, false)}, 400, "repo is required"},
+		{"blank action repo", attachRequest("c1", "  "), dbScript{routes: attachRoutes("action", true, false)}, 400, "repo is required"},
+		{"standalone repo", attachRequest("", ""), dbScript{}, 400, "repo is required"},
+		{"invalid number", AttachChunkPRRequest{PRNumber: -1}, dbScript{}, 400, "valid pr number"},
+		{"transient database error", attachRequest("c1", "aerial"), dbScript{row: errRow(errors.New("connection interrupted"))}, 0, "connection interrupted"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, _ := tc.db.open()
+			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			mc := mocks.NewMockContext(t)
+			mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), _ any, _ ...restate.RunOption) restate.TerminalError {
+				_, err := fn(mockRunContext{Context: context.Background()})
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantMessage)
+				var terminal restate.TerminalError
+				if tc.wantCode > 0 {
+					require.True(t, errors.As(err, &terminal), "journal callback must stop retries: %v", err)
+					assert.Equal(t, tc.wantCode, terminal.Code())
+				} else {
+					assert.False(t, errors.As(err, &terminal), "transient failures must remain retryable")
+				}
+				return restate.ToTerminalError(err)
+			})
+			recorded := false
+			_, err := bo.executePRAttachment(restate.WithMockContext(mc), tc.req, &recorded)
+			require.Error(t, err)
+		})
 	}
 }

@@ -16,7 +16,7 @@ func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, req AttachChun
 		return "", "", "", errors.New("database connection is nil")
 	}
 	if req.PRNumber <= 0 {
-		return "", "", "", errors.New("chunk id or repo, and valid pr number are required")
+		return "", "", "", fmt.Errorf("%w: chunk id or repo, and valid pr number are required", ErrInvalidBuildInput)
 	}
 	chunkID := strings.TrimSpace(req.ChunkID)
 	if chunkID != "" {
@@ -37,7 +37,7 @@ func (s *PostgresVanadisStore) attachToExistingChunk(ctx context.Context, chunkI
 	if mode == chunkModeAction {
 		repo := normalizeRepo(req.Repo)
 		if repo == "" {
-			return "", "", "", errors.New("repo is required to attach PR to action chunk")
+			return "", "", "", fmt.Errorf("%w: repo is required to attach PR to action chunk", ErrInvalidBuildInput)
 		}
 		const qAction = `UPDATE vanadis_chunks c SET repo = $1, pr_number = $2, status = CASE WHEN c.status IN ('merged', 'deploying', 'completed', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $3 AND c.status != 'cancelled' AND (c.status NOT IN ('merged', 'deploying', 'completed') OR (c.repo = $1 AND c.pr_number = $2)) AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
 		var buildID, returnChunkID, threadID string
@@ -114,7 +114,7 @@ func (s *PostgresVanadisStore) attachPRTransaction(ctx context.Context, chunkID 
 func (s *PostgresVanadisStore) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest) (string, string, string, error) {
 	repo := normalizeRepo(req.Repo)
 	if repo == "" {
-		return "", "", "", errors.New("repo is required for standalone attach")
+		return "", "", "", fmt.Errorf("%w: repo is required for standalone attach", ErrInvalidBuildInput)
 	}
 	tx, txErr := s.db.Begin(ctx)
 	if txErr != nil {
