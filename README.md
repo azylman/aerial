@@ -6,7 +6,7 @@ Where standard GitOps homelabs stop at cluster infrastructure, standalone coding
 
 1. **Self-Hosted Application Platform**: Goes beyond basic container hosting to give your homelab a declarative Kubernetes compute fabric and edge routing (**k3s**, **NGINX Gateway Fabric**, **CoreDNS**, **Infisical** secret governance), stateful distributed primitives (**Restate** durable execution, **NATS JetStream** event streaming, and **CloudNativePG PostgreSQL 18 + `pgvector`**), and batteries-included observability (**VictoriaMetrics**, **`vmalert`**, **VictoriaLogs**, **VictoriaTraces**, and **Grafana**).
 2. **Autonomous Software Factory**: Runs a lights-out, spec-to-production delivery loop (*DAG Backlog → Multi-Agent Plan & Review → Durable Multi-PR Rollout → In-Cluster CI & LLM Review → Self-Healing Flux GitOps*) built directly on the platform's primitives—combining dependency-aware DAG issue tracking backed by **Vikunja**, multi-agent architecture and review panels, durable multi-PR build pipelines on **Restate** and **NATS JetStream**, scale-to-zero in-cluster **GitHub Actions Runner Controller (ARC)** runners with **RoboRev** automated code review, and event-driven **Flux CD** push GitOps with proactive CI self-healing.
-3. **Multimodal AI Agent**: Connects your self-improving assistant directly to your homelab and software factory in the channels you already use—running a configurable multi-protocol agent execution core (`agy-cli`, Gemini CLI, and custom harnesses), real-time Discord, voice, and **Twilio** PSTN telephony pipelines, persistent cron/heartbeat/event-watch scheduling, procedural skill synthesis and hybrid RRF semantic memory, and modular Streamable HTTP **Model Context Protocol (MCP)** tools.
+3. **Multimodal AI Agent**: Connects your self-improving assistant directly to your homelab and software factory in the channels you already use—running a configurable multi-engine agent execution core (`agy`, Claude Code, and Codex), real-time Discord, voice, and **Twilio** PSTN telephony pipelines, persistent cron/heartbeat/event-watch scheduling, procedural skill synthesis and hybrid RRF semantic memory, and modular Streamable HTTP **Model Context Protocol (MCP)** tools.
 
 ---
 
@@ -52,7 +52,7 @@ Aerial separates generic platform, software factory, and agent orchestration fro
 │                                  eri (Execution Core) :8080                                 │
 │  • Autonomous Subagent Orchestrator & SDD Planning Engine                                   │
 │  • Self-Healing GitOps Worker (Proactive CI/CD & RoboRev Remediation)                       │
-│  • Configurable Multi-Protocol Execution Core: agy-cli, Gemini CLI, etc.                    │
+│  • Configurable Multi-Engine Execution Core: agy, Claude Code, Codex                        │
 │  • Two-Tier Ambient Wake Classifier (Built-in LLM & Optional Local Sidecar Hook)            │
 │  • PostgreSQL 18 Multi-Turn Thread Memory & Atomic CAS Task State                           │
 │  • Deep Prometheus Telemetry Instrumentation (:8080/metrics)                                │
