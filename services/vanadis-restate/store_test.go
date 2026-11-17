@@ -22,20 +22,16 @@ import (
 type (
 	bareStore struct{ store *PostgresVanadisStore }
 	dbScript  struct {
-		bare                    *bareStore
-		beginErr                error
-		routes                  []sqlRoute
-		row, buildRow, countRow pgx.Row
-		chunks                  []VanadisChunk
-		builds                  []VanadisBuild
-		queryErr                error
-		scanErr                 error
-		rowsErr                 error
-		failExec                string
-		execErr                 error
-		execTag                 string
-		commitErr               error
-		rollbackErr             error
+		bare                        *bareStore
+		routes                      []sqlRoute
+		row, buildRow, countRow     pgx.Row
+		chunks                      []VanadisChunk
+		builds                      []VanadisBuild
+		beginErr, queryErr, scanErr error
+		rowsErr, execErr, commitErr error
+		rollbackErr                 error
+		failExec, execTag           string
+		applyAttachUpdates          bool
 	}
 )
 
@@ -44,41 +40,47 @@ type sqlRoute struct {
 	row   pgx.Row
 }
 
+func (s dbScript) resolveQueryRow(query string, args []any, candidates *[]string) pgx.Row {
+	for _, arg := range args {
+		if cands, ok := arg.([]string); ok {
+			*candidates = cands
+			break
+		}
+	}
+	for _, r := range s.routes {
+		if strings.Contains(query, r.match) {
+			return r.row
+		}
+	}
+	if strings.Contains(query, "COALESCE(pr_number, 0), stall_nudges FROM vanadis_chunks") && len(s.chunks) > 0 && !isActionRow(s.row) {
+		c := s.chunks[0]
+		return valuesRow(c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Title, c.Status, c.PRNumber, c.StallNudges)
+	}
+	if strings.HasPrefix(query, "SELECT id FROM vanadis_builds WHERE id = (SELECT build_id") {
+		return valuesRow("b1")
+	}
+	if s.countRow != nil && strings.Contains(query, "COUNT(*)") {
+		return s.countRow
+	}
+	if s.applyAttachUpdates && s.row == nil && len(s.chunks) > 0 {
+		if row := s.evalAttachQueryRow(query, args); row != nil {
+			return row
+		}
+	}
+	if s.buildRow != nil && strings.Contains(query, "FROM vanadis_builds") {
+		return s.buildRow
+	}
+	return s.row
+}
+
 func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 	candidates := new([]string)
 	if s.bare != nil {
 		return s.bare.store, candidates
 	}
-	tag := s.execTag
-	if tag == "" {
-		tag = "UPDATE 1"
-	}
+	tag := firstNonEmpty(s.execTag, "UPDATE 1")
 	queryRow := func(_ context.Context, query string, args ...any) pgx.Row {
-		for _, arg := range args {
-			if cands, ok := arg.([]string); ok {
-				*candidates = cands
-				break
-			}
-		}
-		for _, r := range s.routes {
-			if strings.Contains(query, r.match) {
-				return r.row
-			}
-		}
-		if strings.Contains(query, "COALESCE(pr_number, 0), stall_nudges FROM vanadis_chunks") && len(s.chunks) > 0 && !isActionRow(s.row) {
-			c := s.chunks[0]
-			return valuesRow(c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Title, c.Status, c.PRNumber, c.StallNudges)
-		}
-		if strings.HasPrefix(query, "SELECT id FROM vanadis_builds WHERE id = (SELECT build_id") {
-			return valuesRow("b1")
-		}
-		if s.countRow != nil && strings.Contains(query, "COUNT(*)") {
-			return s.countRow
-		}
-		if s.buildRow != nil && strings.Contains(query, "FROM vanadis_builds") {
-			return s.buildRow
-		}
-		return s.row
+		return s.resolveQueryRow(query, args, candidates)
 	}
 	query := func(context.Context, string, ...any) (pgx.Rows, error) {
 		if s.queryErr != nil {
@@ -86,9 +88,12 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 		}
 		return &mockRows{items: s.chunks, builds: s.builds, scanErr: s.scanErr, rowsErr: s.rowsErr}, nil
 	}
-	exec := func(_ context.Context, query string, _ ...any) (pgconn.CommandTag, error) {
+	exec := func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 		if s.execErr != nil && strings.Contains(query, s.failExec) {
 			return pgconn.CommandTag{}, s.execErr
+		}
+		if s.applyAttachUpdates {
+			s.evalAttachExec(query, args)
 		}
 		return pgconn.NewCommandTag(tag), nil
 	}
@@ -273,11 +278,6 @@ func (r *mockRows) Scan(dest ...any) error {
 		return r.scanErr
 	}
 	switch len(dest) {
-	case 2:
-		if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
-			return scanValues(dest, r.items[r.idx-1].BuildID, r.items[r.idx-1].ID)
-		}
-		return nil
 	case 11:
 		return r.scan11(dest)
 	case 10:
