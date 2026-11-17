@@ -322,9 +322,9 @@ func (p *InterchangeablePool) UpdateModel(model string) {
 	}
 }
 
-func (p *InterchangeablePool) UpdateEngine(engine, claudeBin string, codexBin ...string) {
+func (p *InterchangeablePool) UpdateEngine(engine, claudeBin string, extraBins ...string) {
 	if p != nil && p.underlying != nil {
-		p.underlying.UpdateEngine(engine, claudeBin, codexBin...)
+		p.underlying.UpdateEngine(engine, claudeBin, extraBins...)
 	}
 }
 

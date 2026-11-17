@@ -111,47 +111,52 @@ func TestStreamingDaemon_Codex_Handshake(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, errW := io.Pipe()
-			defer closeAll(inR, inW, outR, outW, errR, errW)
-
-			switch {
-			case len(tc.mockReplies) > 0 && tc.mockReplies[0] == "CLOSE":
-				go func() { _, _ = io.Copy(io.Discard, inR) }()
-				closeQuietly(outW)
-			case tc.mockReplies != nil:
-				go runMockCodexHandshakeServer(inR, outW, tc.mockReplies, nil)
-			default:
-				go func() { _, _ = io.Copy(io.Discard, inR) }()
-			}
-
-			handle := &MockProcessHandle{pid: 888}
-			mock := &MockDaemonSpawner{
-				SpawnFn: func(ctx context.Context, c DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
-					return inW, outR, errR, handle, nil
-				},
-			}
-
-			daemon, err := StartStreamingDaemon(context.Background(), context.Background(), tc.cfg, mock)
-			if tc.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-					t.Fatalf("expected error containing %q, got: %v", tc.wantErrSub, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected StartStreamingDaemon error: %v", err)
-			}
-			defer daemon.Close()
-
-			if daemon.State() != StateReady {
-				t.Errorf("expected StateReady, got %s", daemon.State())
-			}
-			if daemon.SessionID() != tc.wantSessionID {
-				t.Errorf("expected SessionID %q, got %q", tc.wantSessionID, daemon.SessionID())
-			}
+			assertHandshakeReplySession(t, tc.cfg, tc.mockReplies, tc.wantErrSub, tc.wantSessionID)
 		})
+	}
+}
+
+func assertHandshakeReplySession(t *testing.T, cfg DaemonConfig, mockReplies []string, wantErrSub, wantSessionID string) {
+	t.Helper()
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeAll(inR, inW, outR, outW, errR, errW)
+
+	switch {
+	case len(mockReplies) > 0 && mockReplies[0] == "CLOSE":
+		go func() { _, _ = io.Copy(io.Discard, inR) }()
+		closeQuietly(outW)
+	case mockReplies != nil:
+		go runMockCodexHandshakeServer(inR, outW, mockReplies, nil)
+	default:
+		go func() { _, _ = io.Copy(io.Discard, inR) }()
+	}
+
+	handle := &MockProcessHandle{pid: 888}
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, c DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, handle, nil
+		},
+	}
+
+	daemon, err := StartStreamingDaemon(context.Background(), context.Background(), cfg, mock)
+	if wantErrSub != "" {
+		if err == nil || !strings.Contains(err.Error(), wantErrSub) {
+			t.Fatalf("expected error containing %q, got: %v", wantErrSub, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected StartStreamingDaemon error: %v", err)
+	}
+	defer daemon.Close()
+
+	if daemon.State() != StateReady {
+		t.Errorf("expected StateReady, got %s", daemon.State())
+	}
+	if daemon.SessionID() != wantSessionID {
+		t.Errorf("expected SessionID %q, got %q", wantSessionID, daemon.SessionID())
 	}
 }
 
@@ -275,14 +280,26 @@ func verifyCodexLifecycleSink(t *testing.T, sink *mockTurnSink) {
 	}
 }
 
+type daemonErrorTestCase struct {
+	name       string
+	ndjsonLine string
+	wantErrSub string
+}
+
+func runDaemonErrorTests(t *testing.T, engine string, tests []daemonErrorTestCase) {
+	t.Helper()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertDaemonErrorResponse(t, engine, tc.name, tc.ndjsonLine, tc.wantErrSub)
+		})
+	}
+}
+
 func TestStreamingDaemon_Codex_ErrorHandling(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		ndjsonLine string
-		wantErrSub string
-	}{
+	runDaemonErrorTests(t, "codex", []daemonErrorTestCase{
 		{
 			name:       "turn failed with error message",
 			ndjsonLine: `{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"failed","error":{"message":"rate limit reached"}}}}`,
@@ -303,23 +320,19 @@ func TestStreamingDaemon_Codex_ErrorHandling(t *testing.T) {
 			ndjsonLine: `{"jsonrpc":"2.0","id":4,"error":{"message":"internal error in codex engine"}}`,
 			wantErrSub: "internal error in codex engine",
 		},
-	}
+	})
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			daemon := &StreamingDaemon{
-				cfg: DaemonConfig{
-					Engine: "codex",
-				},
-				claudeToolIDs: make(map[string]int),
-			}
-			sink := newMockTurnSink()
-			enqueueInflightTurn(daemon, "turn-"+tc.name, sink)
-			daemon.dispatchNDJSONLine(tc.ndjsonLine)
-			waitAndAssertSinkResult(t, tc.name, sink, "", "", tc.wantErrSub)
-		})
+func assertDaemonErrorResponse(t *testing.T, engine, name, line, wantErrSub string) {
+	t.Helper()
+	daemon := &StreamingDaemon{
+		cfg:           DaemonConfig{Engine: engine},
+		claudeToolIDs: make(map[string]int),
 	}
+	sink := newMockTurnSink()
+	enqueueInflightTurn(daemon, "turn-"+name, sink)
+	daemon.dispatchNDJSONLine(line)
+	waitAndAssertSinkResult(t, name, sink, "", "", wantErrSub)
 }
 
 func TestCodexProtocol_Helpers(t *testing.T) {
