@@ -604,7 +604,6 @@ func TestRunEnvFailures(t *testing.T) {
 		wantStderr string
 	}{
 		{name: "invalid postgres env", envKey: "PGPORT", envVal: "not-a-port", wantCode: 1, wantStderr: "postgres config"},
-		{name: "unusable temp dir", envKey: "TMPDIR", envVal: filepath.Join(dir, "missing"), wantCode: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -616,6 +615,27 @@ func TestRunEnvFailures(t *testing.T) {
 			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
 				t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), tc.wantStderr)
 			}
+		})
+	}
+}
+
+// TestIngestEnvFailures cannot run in parallel because it rewrites process environment.
+func TestIngestEnvFailures(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	tests := []struct {
+		name    string
+		envKey  string
+		envVal  string
+		wantErr string
+	}{
+		{name: "unusable temp dir", envKey: "TMPDIR", envVal: missing, wantErr: "create work dir"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(tc.envKey, tc.envVal)
+			cfg := Config{Targets: []Target{{Service: "eri", URL: "http://127.0.0.1:1/debug/coverage/flush"}}}
+			err := Ingest(context.Background(), cfg, nil, &fakeRunner{}, &fakeStore{})
+			assertErrContains(t, err, tc.wantErr)
 		})
 	}
 }
