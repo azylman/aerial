@@ -26,8 +26,12 @@ var (
 	reJWT = regexp.MustCompile(`\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}`)
 
 	// HTTP Basic & Bearer Auth Headers and x-access-token
-	reHTTPAuth = regexp.MustCompile(`(?i)\b(?:basic\s+[a-zA-Z0-9+/]{8,}={1,2}|basic\s+[a-zA-Z0-9+/]{10,}|bearer\s+[a-zA-Z0-9_\-\.]{12,})`)
-	reXAccess  = regexp.MustCompile(`(?i)x-access-token:[^@\s]+`)
+	reHTTPAuthArray  = regexp.MustCompile(`(?i)(\\?["']?\b(?:proxy[-_])?authorization\\?["']?\s*[:=]\s*\[)((?:\\?["'](?:[^"'\\]|\\.)*\\?["']|\[REDACTED(?:_TOKEN)?\]|[^\]])*)(\])`)
+	reHTTPAuthHeader = regexp.MustCompile(`(?i)(\\?["']?\b(?:proxy[-_])?authorization\\?["']?\s*[:=]\s*(?:\[\s*)?\\?["']?)(?:basic\s+[a-zA-Z0-9+/]{8,}={0,2}|bearer\s+[a-zA-Z0-9_\-\.~+/]{8,})`)
+	reHTTPAuthToken  = regexp.MustCompile(`(?i)\b(?:basic\s+[a-zA-Z0-9+/]{8,}={0,2}|bearer\s+[a-zA-Z0-9_\-\.~+/]{8,})`)
+	reHTTPAuth       = regexp.MustCompile(`(?i)\b(?:basic\s+[a-zA-Z0-9+/]{8,}={1,2}|basic\s+[a-zA-Z0-9+/]{10,}|bearer\s+[a-zA-Z0-9_\-\.]{12,})`)
+	rePlainAuthWord  = regexp.MustCompile(`^(?i:basic|bearer)\s+(?:[a-zA-Z][a-z\-]+|[A-Z\-]+)\.?$`)
+	reXAccess        = regexp.MustCompile(`(?i)x-access-token:[^@\s]+`)
 
 	// Universal Database & Network URIs with embedded credentials (non-greedy password capture)
 	reURIWithPassword = regexp.MustCompile(`(?i)([a-zA-Z][a-zA-Z0-9+.-]+://[^:\s/@]*:)([^@\s]+)(@[a-zA-Z0-9_.-]+(?::[0-9]+)?(?:/[^\s]*)?)`)
@@ -180,12 +184,26 @@ func sanitizeInternal(input string, placeholder string) string {
 	out = reKeyValue.ReplaceAllString(out, "${1}${2}"+placeholder)
 
 	// 6. Redact specialized token patterns
+	out = reHTTPAuthArray.ReplaceAllStringFunc(out, func(m string) string {
+		parts := reHTTPAuthArray.FindStringSubmatch(m)
+		if len(parts) != 4 {
+			return m
+		}
+		inner := reHTTPAuthToken.ReplaceAllString(parts[2], placeholder)
+		return parts[1] + inner + parts[3]
+	})
+	out = reHTTPAuthHeader.ReplaceAllString(out, "${1}"+placeholder)
 	out = reGitHub.ReplaceAllString(out, placeholder)
 	out = reGoogleAndAgy.ReplaceAllString(out, placeholder)
 	out = reOpenAIAndAnthropic.ReplaceAllString(out, placeholder)
 	out = reDiscord.ReplaceAllString(out, placeholder)
 	out = reJWT.ReplaceAllString(out, placeholder)
-	out = reHTTPAuth.ReplaceAllString(out, placeholder)
+	out = reHTTPAuth.ReplaceAllStringFunc(out, func(m string) string {
+		if rePlainAuthWord.MatchString(m) {
+			return m
+		}
+		return placeholder
+	})
 
 	return out
 }
