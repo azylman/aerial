@@ -273,6 +273,11 @@ func (r *mockRows) Scan(dest ...any) error {
 		return r.scanErr
 	}
 	switch len(dest) {
+	case 2:
+		if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
+			return scanValues(dest, r.items[r.idx-1].BuildID, r.items[r.idx-1].ID)
+		}
+		return nil
 	case 11:
 		return r.scan11(dest)
 	case 10:
@@ -416,7 +421,7 @@ func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 		{name: "cancelled chunk or build without repo conflicts", req: attachRequest("c1", ""), db: attachmentScript("c1", "b1", "", "cancelled", "aerial"), wantErrIs: ErrBuildConflict},
 		{name: "attaches pr chunk without repo", req: attachRequest("c-pr", ""), db: attachmentScript("c-pr", "b-pr", "thread-pr", "running", "aerial"), want: attachResult{"b-pr", "c-pr", "thread-pr"}},
 		{name: "attaches pr chunk matching repo candidates", req: attachRequest("c-pr", "aerial"), db: attachmentScript("c-pr", "b-pr", "thread-pr", "running", "aerial"), want: attachResult{"b-pr", "c-pr", "thread-pr"}},
-		{name: "attaches action chunk", req: attachRequest("c-act", "aerial"), db: dbScript{routes: attachRoutes("action", true, false), row: attached("action")}, want: attachResult{"b-action", "c-action", "thread-action"}},
+		{name: "attaches action chunk", req: attachRequest("c-act", "aerial"), db: dbScript{routes: attachRoutes("action", true, false), row: attached("action")}, want: attachResult{"b-action", "c-action", "thread-action"}, wantCandidates: aerialRepoSet},
 		{name: "action attachment removed chunk", req: existing, db: dbScript{routes: attachRoutes("action", false, false), row: noRows}, wantErrIs: ErrChunkNotFound},
 		{name: "action attachment terminal parent", req: existing, db: dbScript{routes: attachRoutes("action", true, true), row: noRows}, wantErrIs: ErrBuildConflict},
 		{name: "action attachment mismatching repository", req: existing, db: dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("action")}, {match: "c.status = 'cancelled'", row: valuesRow(false)}, {match: "repo != ''", row: valuesRow(true)}, {match: "SELECT EXISTS", row: valuesRow(true)}}, row: noRows}, wantErrIs: ErrBuildConflict},
@@ -974,10 +979,7 @@ func TestPostgresVanadisStore_BannerAndLookups(t *testing.T) {
 	if err := storeActive.UpdateChunkBannerAndStatus(ctx, "", "status", "banner"); err == nil {
 		t.Error("expected error with empty chunkID")
 	}
-
-	storeNil, _ := dbScript{bare: nilDB}.open()
-
-	if _, err := storeNil.GetChunkByPR(ctx, "aerial", 101); err == nil {
+	if _, err := store.GetChunkByPR(ctx, "aerial", 101); err == nil {
 		t.Error("expected error with nil db")
 	}
 	if lookup, err := storeActive.GetChunkByPR(ctx, "", 101); err != nil || lookup.Matched {
@@ -991,8 +993,7 @@ func TestPostgresVanadisStore_BannerAndLookups(t *testing.T) {
 		t.Error("expected error when findChunkPRMatch fails")
 	}
 
-	cancelledBuild := failRow("running", "cancelled")
-	storeFailCancelledBuild, _ := dbScript{row: cancelledBuild, execTag: "UPDATE 1"}.open()
+	storeFailCancelledBuild, _ := dbScript{row: failRow("running", "cancelled"), execTag: "UPDATE 1"}.open()
 	if _, _, failed, err := storeFailCancelledBuild.FailChunk(ctx, "c1", "reason", ""); err != nil || failed {
 		t.Errorf("FailChunk on cancelled build: failed=%v, err=%v", failed, err)
 	}

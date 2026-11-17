@@ -162,6 +162,7 @@ type VanadisStore interface {
 	GetChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error)
 	LookupPRChunk(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, err error)
 	LookupChunkBuildID(ctx context.Context, chunkID string) (buildID string, err error)
+	LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (buildID, chunkID string, err error)
 	AttachChunkPR(ctx context.Context, req AttachChunkPRRequest) (buildID, chunkID, threadID string, err error)
 	CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error)
 	FailChunk(ctx context.Context, chunkID, reason, dispatchID string) (*VanadisBuild, *VanadisChunk, bool, error)
@@ -1246,6 +1247,43 @@ func (s *PostgresVanadisStore) LookupChunkBuildID(ctx context.Context, chunkID s
 		return "", fmt.Errorf("lookup chunk build id: %w", err)
 	}
 	return buildID, nil
+}
+
+func (s *PostgresVanadisStore) LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (string, string, error) {
+	if s == nil || s.db == nil {
+		return "", "", errors.New("database connection is nil")
+	}
+	threadID = normalizeDiscordThreadID(threadID)
+	candidates := repoMatchCandidates(repo)
+	if threadID == "" || len(candidates) == 0 {
+		return "", "", ErrChunkNotFound
+	}
+	const query = `SELECT c.build_id, c.id FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE b.thread_id = $1 AND b.status = 'running' AND c.mode = 'pr' AND c.repo = ANY($2) AND COALESCE(c.pr_number, 0) = 0 AND c.status IN ('running', 'coding') ORDER BY c.chunk_index ASC LIMIT 2;`
+	rows, err := s.db.Query(ctx, query, threadID, candidates)
+	if err != nil {
+		return "", "", fmt.Errorf("lookup unattached chunk by thread %s and repo %s: %w", threadID, repo, err)
+	}
+	defer rows.Close()
+
+	type chunkMatch struct {
+		buildID string
+		chunkID string
+	}
+	var matches []chunkMatch
+	for rows.Next() {
+		var m chunkMatch
+		if err := rows.Scan(&m.buildID, &m.chunkID); err != nil {
+			return "", "", fmt.Errorf("scan unattached chunk: %w", err)
+		}
+		matches = append(matches, m)
+	}
+	if err := rows.Err(); err != nil {
+		return "", "", fmt.Errorf("iterate unattached chunks: %w", err)
+	}
+	if len(matches) == 1 {
+		return matches[0].buildID, matches[0].chunkID, nil
+	}
+	return "", "", ErrChunkNotFound
 }
 
 func (s *PostgresVanadisStore) findChunkPRMatch(ctx context.Context, candidates []string, prNumber int) (chunkPRMatch, bool, error) {

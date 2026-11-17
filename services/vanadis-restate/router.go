@@ -111,6 +111,45 @@ func (s *BuildRouterService) getInvoker(ctx restate.Context) buildObjectInvoker 
 	return restateBuildObjectInvoker{ctx: ctx}
 }
 
+func isLookupNotFound(err error) bool {
+	return errors.Is(err, ErrChunkNotFound) || errors.Is(err, ErrBuildNotFound)
+}
+
+func (s *BuildRouterService) resolvePRBuildID(rc restate.RunContext, repo string, ev pubsub.PRLifecycleEvent) (string, error) {
+	if s.store == nil {
+		return "", nil
+	}
+	bID, _, err := s.store.LookupPRChunk(rc, repo, ev.PRNumber)
+	if err == nil && bID != "" {
+		return bID, nil
+	}
+	if err != nil && !isLookupNotFound(err) {
+		return "", err
+	}
+
+	if chunkID := extractChunkIDFromBranch(repo, ev.Branch); chunkID != "" {
+		bID, err := s.store.LookupChunkBuildID(rc, chunkID)
+		if err == nil && bID != "" {
+			return bID, nil
+		}
+		if err != nil && !isLookupNotFound(err) {
+			return "", err
+		}
+	}
+
+	if canFallbackThreadRepoLookup(ev) {
+		bID, _, err := s.store.LookupUnattachedChunkByThreadAndRepo(rc, ev.TargetID, repo)
+		if err == nil && bID != "" {
+			return bID, nil
+		}
+		if err != nil && !isLookupNotFound(err) {
+			return "", err
+		}
+	}
+
+	return "", nil
+}
+
 // RoutePREvent routes inbound PR lifecycle events to the owning Build Virtual Object.
 func (s *BuildRouterService) RoutePREvent(ctx restate.Context, ev pubsub.PRLifecycleEvent) (outErr error) {
 	var stepRecorded bool
@@ -126,33 +165,10 @@ func (s *BuildRouterService) RoutePREvent(ctx restate.Context, ev pubsub.PRLifec
 	}
 
 	buildID, err := runJournaled(ctx, labelRoutePREvent, "lookup-pr-chunk", &stepRecorded, func(rc restate.RunContext) (string, error) {
-		if s.store == nil {
-			return "", nil
-		}
-		bID, _, err := s.store.LookupPRChunk(rc, repo, ev.PRNumber)
-		if err != nil {
-			if errors.Is(err, ErrChunkNotFound) || errors.Is(err, ErrBuildNotFound) {
-				return "", nil
-			}
-			return "", err
-		}
-		return bID, nil
+		return s.resolvePRBuildID(rc, repo, ev)
 	})
 	if err != nil {
 		return err
-	}
-
-	if buildID == "" {
-		event := strings.ToLower(strings.TrimSpace(ev.Event))
-		if event == prEventOpened {
-			genID, err := runJournaled(ctx, labelRoutePREvent, "generate-standalone-build-id", &stepRecorded, func(rc restate.RunContext) (string, error) {
-				return generateBuildID(), nil
-			})
-			if err != nil {
-				return err
-			}
-			buildID = genID
-		}
 	}
 
 	if buildID == "" {
@@ -330,6 +346,41 @@ func normalizeDiscordThreadID(s string) string {
 		clean = strings.TrimSpace(clean[idx+1:])
 	}
 	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func extractChunkIDFromBranch(repo, branch string) string {
+	repoName := strings.TrimSuffix(cleanRepoName(repo), ".git")
+	if repoName == "" {
+		return ""
+	}
+	branch = strings.TrimSpace(branch)
+	branch = strings.TrimPrefix(branch, "refs/heads/")
+	after, ok := strings.CutPrefix(branch, "feat/"+repoName+"-pr-vanadis-")
+	if !ok {
+		return ""
+	}
+	chunkID, suffix, hasSuffix := strings.CutLast(after, "-")
+	if !hasSuffix || len(suffix) != 6 {
+		return ""
+	}
+	for i := range suffix {
+		if !isHexDigit(suffix[i]) {
+			return ""
+		}
+	}
+	if !isValidVanadisChunkID(chunkID) {
+		return ""
+	}
+	return chunkID
+}
+
+func canFallbackThreadRepoLookup(ev pubsub.PRLifecycleEvent) bool {
+	branch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
+	return strings.TrimSpace(ev.TargetID) != "" && !ev.Quiet && !strings.HasPrefix(branch, "dependabot/")
 }
 
 func generateBuildID() string {
@@ -847,6 +898,24 @@ func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID,
 	return nil
 }
 
+func (b *BuildObject) locateOrAttachPRChunk(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (string, error) {
+	lookup, err := b.store.GetChunkByPR(rc, ev.Repo, ev.PRNumber)
+	if err != nil {
+		return "", err
+	}
+	if lookup != nil && lookup.Matched {
+		return lookup.ChunkID, nil
+	}
+	return b.resolveOrAttachPRChunk(rc, buildID, ev)
+}
+
+func (b *BuildObject) dispatchPREvent(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
+	if event == "deploy_success" {
+		return b.applyMutation(rc, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
+	}
+	return b.handlePREventType(rc, buildID, chunkID, event, ev)
+}
+
 // OnPREvent receives PR lifecycle events for this build.
 func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycleEvent) (outErr error) {
 	var stepRecorded bool
@@ -861,31 +930,18 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 	}
 	buildID := restate.Key(ctx)
 	_, err := runJournaled(ctx, labelOnPREvent, "handle-pr-event-postgres", &stepRecorded, func(rc restate.RunContext) (bool, error) {
-		lookup, err := b.store.GetChunkByPR(rc, ev.Repo, ev.PRNumber)
-		if err != nil {
-			return false, err
+		chunkID, cErr := b.locateOrAttachPRChunk(rc, buildID, ev)
+		if cErr != nil || chunkID == "" {
+			return false, cErr
 		}
-		if lookup == nil || !lookup.Matched {
-			return false, nil
-		}
-		chunkID := lookup.ChunkID
 		event := strings.ToLower(strings.TrimSpace(ev.Event))
-
-		var eventErr error
-		if event == "deploy_success" {
-			eventErr = b.applyMutation(rc, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
-		} else {
-			eventErr = b.handlePREventType(rc, buildID, chunkID, event, ev)
-		}
-		if errors.Is(eventErr, errPRTransitionSkipped) {
-			return false, nil
-		}
-		if eventErr != nil {
+		if eventErr := b.dispatchPREvent(rc, buildID, chunkID, event, ev); eventErr != nil {
+			if errors.Is(eventErr, errPRTransitionSkipped) {
+				return false, nil
+			}
 			return false, eventErr
 		}
-
 		b.refreshFailedPRWidget(rc, buildID, event)
-
 		if event != "deploy_success" && ev.RolloutState != nil {
 			rolloutStatus := ""
 			if event == "deploy_started" {
@@ -909,6 +965,90 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 		log.Printf("[vanadis-restate] pr event transition warning: %v", tErr)
 	}
 	return nil
+}
+
+func (b *BuildObject) resolveCandidateChunkID(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (string, error) {
+	if chunkID := extractChunkIDFromBranch(ev.Repo, ev.Branch); chunkID != "" {
+		return chunkID, nil
+	}
+	if !canFallbackThreadRepoLookup(ev) {
+		return "", nil
+	}
+	bID, cID, uErr := b.store.LookupUnattachedChunkByThreadAndRepo(rc, ev.TargetID, ev.Repo)
+	if uErr != nil && !isLookupNotFound(uErr) {
+		return "", uErr
+	}
+	if bID == buildID {
+		return cID, nil
+	}
+	return "", nil
+}
+
+func isEligibleUnattachedChunk(c *VanadisChunk, evPRNumber int) bool {
+	if c == nil {
+		return false
+	}
+	if c.PRNumber != 0 && c.PRNumber != evPRNumber {
+		return false
+	}
+	return c.Status == statusRunning || c.Status == statusCoding || c.Status == statusPROpened
+}
+
+func (b *BuildObject) syncAttachedPRWidget(rc restate.RunContext, buildID string) {
+	if b.executor == nil {
+		return
+	}
+	refreshedBuild, refreshedChunks, rErr := b.store.GetBuild(rc, buildID)
+	if rErr == nil && refreshedBuild != nil {
+		if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *refreshedBuild, refreshedChunks, ""); sErr != nil {
+			log.Printf("[vanadis-restate] sync build widget warning: %v", sErr)
+		}
+	}
+}
+
+func (b *BuildObject) resolveOrAttachPRChunk(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (string, error) {
+	chunkID, err := b.resolveCandidateChunkID(rc, buildID, ev)
+	if err != nil || chunkID == "" {
+		return "", err
+	}
+
+	_, chunks, gErr := b.store.GetBuild(rc, buildID)
+	if gErr != nil {
+		if errors.Is(gErr, ErrBuildNotFound) {
+			return "", nil
+		}
+		return "", gErr
+	}
+
+	var targetChunk *VanadisChunk
+	for i := range chunks {
+		if chunks[i].ID == chunkID && chunks[i].BuildID == buildID {
+			targetChunk = &chunks[i]
+			break
+		}
+	}
+	if !isEligibleUnattachedChunk(targetChunk, ev.PRNumber) {
+		return "", nil
+	}
+
+	_, attachedChunkID, _, aErr := b.store.AttachChunkPR(rc, AttachChunkPRRequest{
+		ChunkID:  chunkID,
+		PRNumber: ev.PRNumber,
+		Repo:     strings.TrimSpace(ev.Repo),
+		Branch:   ev.Branch,
+		Title:    ev.Title,
+		TargetID: ev.TargetID,
+		Quiet:    ev.Quiet,
+	})
+	if aErr != nil {
+		if errors.Is(aErr, ErrBuildConflict) || errors.Is(aErr, ErrChunkNotFound) {
+			return "", nil
+		}
+		return "", aErr
+	}
+
+	b.syncAttachedPRWidget(rc, buildID)
+	return attachedChunkID, nil
 }
 
 // OnDispatchOutcome receives task execution outcomes.

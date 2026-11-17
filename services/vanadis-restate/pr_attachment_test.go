@@ -204,3 +204,122 @@ func TestExecutePRAttachment(t *testing.T) {
 		})
 	}
 }
+
+func TestAttachmentMatches_TerminalAndAdvancedStatuses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		chunk     VanadisChunk
+		build     VanadisBuild
+		req       AttachChunkPRRequest
+		wantMatch bool
+	}{
+		{
+			name:      "merged chunk matching PR",
+			chunk:     VanadisChunk{Status: statusMerged, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 101},
+			wantMatch: true,
+		},
+		{
+			name:      "merged chunk mismatched PR",
+			chunk:     VanadisChunk{Status: statusMerged, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 102},
+			wantMatch: false,
+		},
+		{
+			name:      "synced chunk matching PR",
+			chunk:     VanadisChunk{Status: statusSynced, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 101},
+			wantMatch: true,
+		},
+		{
+			name:      "synced chunk mismatched PR",
+			chunk:     VanadisChunk{Status: statusSynced, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 102},
+			wantMatch: false,
+		},
+		{
+			name:      "deploying chunk matching PR",
+			chunk:     VanadisChunk{Status: statusDeploying, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 101},
+			wantMatch: true,
+		},
+		{
+			name:      "deploying chunk mismatched PR",
+			chunk:     VanadisChunk{Status: statusDeploying, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 102},
+			wantMatch: false,
+		},
+		{
+			name:      "deployed chunk matching PR",
+			chunk:     VanadisChunk{Status: statusDeployed, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 101},
+			wantMatch: true,
+		},
+		{
+			name:      "deployed chunk mismatched PR",
+			chunk:     VanadisChunk{Status: statusDeployed, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 102},
+			wantMatch: false,
+		},
+		{
+			name:      "deploy_failed chunk matching PR",
+			chunk:     VanadisChunk{Status: statusDeployFailed, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 101},
+			wantMatch: true,
+		},
+		{
+			name:      "deploy_failed chunk mismatched PR",
+			chunk:     VanadisChunk{Status: statusDeployFailed, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 102},
+			wantMatch: false,
+		},
+		{
+			name:      "completed chunk matching PR",
+			chunk:     VanadisChunk{Status: statusCompleted, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 101},
+			wantMatch: true,
+		},
+		{
+			name:      "cancelled chunk always rejected",
+			chunk:     VanadisChunk{Status: statusCancelled, Repo: "aerial", PRNumber: 101},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 101},
+			wantMatch: false,
+		},
+		{
+			name:      "completed build always rejected",
+			chunk:     VanadisChunk{Status: statusRunning, Repo: "aerial", PRNumber: 0},
+			build:     VanadisBuild{Status: statusCompleted},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 101},
+			wantMatch: false,
+		},
+		{
+			name:      "advanced ci_failed allows replacement",
+			chunk:     VanadisChunk{Status: statusCIFailed, Repo: "aerial", PRNumber: 100},
+			build:     VanadisBuild{Status: statusRunning},
+			req:       AttachChunkPRRequest{Repo: "aerial", PRNumber: 101},
+			wantMatch: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := attachmentMatches(tc.chunk, tc.build, tc.req)
+			assert.Equal(t, tc.wantMatch, got)
+		})
+	}
+}
