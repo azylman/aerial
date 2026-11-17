@@ -423,7 +423,7 @@ run_go_pkg_coverage() {
             pkg_cov=$(echo "$counts" | awk '{print $2}')
             if [ "$pkg_tot" -gt 0 ]; then
                 pct_val=$(awk "BEGIN { printf \"%.1f\", ($pkg_cov / $pkg_tot) * 100.0 }")
-                is_violation=$(awk "BEGIN { print ($pct_val < 95.0) ? 1 : 0 }")
+                is_violation=$(awk "BEGIN { print ($pkg_cov * 100 < $pkg_tot * 95.0) ? 1 : 0 }")
                 if [ "$is_violation" -eq 1 ]; then
                     echo "🚨 [Aerial Verify] Package $svc ($targetPkg) coverage ($pct_val% — $pkg_cov/$pkg_tot stmts) is below required 95.0% floor." >&2
                     (cd "$svc" && go tool cover -func="$prof_file" 2>/dev/null | awk '$1 !~ /^total:/ && $NF != "100.0%"' | sort -k3 -n | head -n 5 | sed 's/^/   • /') >&2 || true

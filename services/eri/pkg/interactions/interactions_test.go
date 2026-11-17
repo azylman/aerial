@@ -313,6 +313,29 @@ func TestApplicationCommandsAndHelpers(t *testing.T) {
 	}
 }
 
+func TestGetChannelOption(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		options []*discordgo.ApplicationCommandInteractionDataOption
+		want    string
+	}{
+		{"missing", nil, "fallback"},
+		{"nil option", []*discordgo.ApplicationCommandInteractionDataOption{nil}, "fallback"},
+		{"different option", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("other", discordgo.ApplicationCommandOptionChannel, "channel-123")}, "fallback"},
+		{"selected channel", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("channel", discordgo.ApplicationCommandOptionChannel, "channel-123")}, "channel-123"},
+		{"empty selection", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("channel", discordgo.ApplicationCommandOptionChannel, "")}, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := getChannelOption(tc.options, "channel", "fallback"); got != tc.want {
+				t.Errorf("getChannelOption() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRouter_AuthAndDispatch(t *testing.T) {
 	mockPool := queue.New(nil, queue.WorkerPoolConfig{})
 
