@@ -57,7 +57,8 @@ atlas_dev_create() {
     atlas_dev_psql -v name="$DEV_DB_NAME" -v template="$ATLAS_DB_TEMPLATE" <<'SQL' || return
 CREATE DATABASE :"name" TEMPLATE :"template";
 SQL
-    DEV_URL="postgres://${ATLAS_DB_USER}@${ATLAS_DB_HOST}:${ATLAS_DB_PORT}/${DEV_DB_NAME}"
+    # Scope Atlas to public so its reset preserves the template's vector extension.
+    DEV_URL="postgres://${ATLAS_DB_USER}@${ATLAS_DB_HOST}:${ATLAS_DB_PORT}/${DEV_DB_NAME}?search_path=public"
 }
 
 atlas_dev_drop() {

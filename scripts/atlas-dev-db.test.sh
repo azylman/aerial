@@ -79,6 +79,8 @@ for age in -1 0; do
   if bash "$ROOT/scripts/atlas-diff.sh" --config "$TMP/invalid.yaml" test "$TMP/target" > "$TMP/out" 2>&1; then exit 1; fi
   [[ ! -s $TEST_SQL ]]
 done
+# Keep the template's extension outside Atlas's database reset scope.
+bash -c 'set -euo pipefail; source "$1/scripts/atlas-dev-db.sh"; atlas_dev_config_load "$2"; atlas_dev_create; [[ $DEV_URL == "postgres://atlas_runner@localhost:5432/$DEV_DB_NAME?search_path=public" ]]' _ "$ROOT" "$TMP/config.yaml"
 # Concurrent creation must not reuse a name (psql is an external-boundary fixture).
 for n in 1 2 3 4; do
   bash -c 'set -euo pipefail; source "$1/scripts/atlas-dev-db.sh"; atlas_dev_config_load "$2"; atlas_dev_create; echo "$DEV_DB_NAME"' _ "$ROOT" "$TMP/config.yaml" > "$TMP/name$n" &
