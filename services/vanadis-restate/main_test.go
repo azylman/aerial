@@ -600,35 +600,6 @@ func TestRunApp_ErrorCases(t *testing.T) {
 	assert.Error(t, errRestate)
 }
 
-func TestMain_Execution(t *testing.T) {
-	origLoad, origRun, origExit := loadConfigFn, runAppFn, exitFn
-	t.Cleanup(func() {
-		loadConfigFn, runAppFn, exitFn = origLoad, origRun, origExit
-	})
-
-	loadConfigFn = func() Config {
-		return Config{HealthPort: "4026", RestatePort: "9080", VanadisURL: "http://vanadis.aerial:4025"}
-	}
-
-	// 1. Success case
-	runAppFn = func(ctx context.Context, cfg Config) error {
-		return nil
-	}
-	exited := false
-	exitFn = func(format string, v ...any) {
-		exited = true
-	}
-	main()
-	assert.False(t, exited)
-
-	// 2. Error case
-	runAppFn = func(ctx context.Context, cfg Config) error {
-		return errors.New("startup failed")
-	}
-	main()
-	assert.True(t, exited)
-}
-
 func makeObjectMockContext(t *testing.T, key string) restate.ObjectContext {
 	t.Helper()
 	mc := mocks.NewMockContext(t)

@@ -526,6 +526,10 @@ spec:
         value: "false"
       - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
         value: 256 MiB
+      - name: RESTATE_TRACING_ENDPOINT
+        value: http://victoriatraces.default.svc.cluster.local:4317
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: aerial.stack=aerial
     image: docker.io/restatedev/restate:1.6
     replicas: 1
     resources:
