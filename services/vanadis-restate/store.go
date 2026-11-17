@@ -1299,12 +1299,12 @@ func (s *PostgresVanadisStore) UpdateChunkBannerAndStatus(ctx context.Context, c
 	if id == "" {
 		return errors.New("chunk_id cannot be empty")
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET status = CASE WHEN $1 != '' THEN $1 ELSE status END, banner = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`, strings.TrimSpace(status), strings.TrimSpace(banner), id)
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks AS c SET status = CASE WHEN $1 != '' THEN $1 ELSE c.status END, banner = $2, updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $3 AND b.id = c.build_id AND c.status NOT IN ('completed', 'failed', 'cancelled') AND b.status NOT IN ('completed', 'failed', 'cancelled');`, strings.TrimSpace(status), strings.TrimSpace(banner), id)
 	switch {
 	case err != nil:
 		return fmt.Errorf("update chunk banner and status: %w", err)
 	case tag.RowsAffected() == 0:
-		return ErrChunkNotFound
+		return errPRTransitionSkipped
 	default:
 		return nil
 	}

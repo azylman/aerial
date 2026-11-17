@@ -675,7 +675,7 @@ func TestPostgresVanadisStore_UpdatesAndStatus(t *testing.T) {
 		{name: "update chunk status success", db: dbScript{execTag: "UPDATE 1"}},
 		{name: "update chunk status not found", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrChunkNotFound},
 		{name: "update chunk banner and status success", db: dbScript{execTag: "UPDATE 1"}},
-		{name: "update chunk banner and status not found", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrChunkNotFound},
+		{name: "update chunk banner and status not found", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: errPRTransitionSkipped},
 		{name: "record rollout state success", db: dbScript{execTag: "UPDATE 1"}},
 		{name: "record rollout state not found", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrChunkNotFound},
 	}
@@ -973,9 +973,6 @@ func TestPostgresVanadisStore_BannerAndLookups(t *testing.T) {
 	storeActive, _ := dbScript{execTag: "UPDATE 0"}.open()
 	if err := storeActive.UpdateChunkBannerAndStatus(ctx, "", "status", "banner"); err == nil {
 		t.Error("expected error with empty chunkID")
-	}
-	if err := storeActive.UpdateChunkBannerAndStatus(ctx, "c1", "status", "banner"); !errors.Is(err, ErrChunkNotFound) {
-		t.Errorf("expected ErrChunkNotFound, got %v", err)
 	}
 
 	storeNil, _ := dbScript{bare: nilDB}.open()

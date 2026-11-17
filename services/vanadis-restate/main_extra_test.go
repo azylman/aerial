@@ -667,19 +667,20 @@ func TestBuildObject_FailureMutations(t *testing.T) {
 func TestActionPRFailureFence(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, identity string
-		wantFailed     bool
+		name, status, identity string
+		wantFailed             bool
 	}{
-		{"closed without merging", "", true},
-		{"current action", "vanadis-c1-turn-1", true},
-		{"stale action", "vanadis-c1-turn-0", false},
-		{"ci remediation", "vanadis-c1-cifail-1-abcdef0", true},
-		{"conflict remediation", "vanadis-conflict-c1", true},
+		{"closed without merging", "pr_opened", "", true},
+		{"current action", "pr_opened", "vanadis-c1-turn-1", true},
+		{"stale action", "pr_opened", "vanadis-c1-turn-0", false},
+		{"ci remediation", "pr_opened", "vanadis-c1-cifail-1-abcdef0", true},
+		{"conflict remediation", "pr_opened", "vanadis-conflict-c1", true},
+		{"deploy failed fences delayed action", "deploy_failed", "vanadis-c1-turn-1", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, _ := dbScript{row: failRow("pr_opened", "running", 1, 42)}.open()
+			store, _ := dbScript{row: failRow(tc.status, "running", 1, 42)}.open()
 			build, chunk, failed, err := store.FailChunk(context.Background(), "c1", "pr_closed_unmerged", tc.identity)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.wantFailed, failed)
@@ -1051,15 +1052,21 @@ func TestReconcileErrorsMetric(t *testing.T) {
 type checkStatusSpyStore struct {
 	VanadisStore
 
-	calls     []string
-	resets    []string
-	err       error
-	resetErr  error
-	statusErr error
+	chunks        []VanadisChunk
+	calls         []string
+	resets        []string
+	failed        []string
+	banners       []string
+	err           error
+	resetErr      error
+	statusErr     error
+	bannerErr     error
+	failErr       error
+	skipFailApply bool
 }
 
-func (*checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
-	return &VanadisBuild{ID: buildID, Status: statusRunning}, nil, nil
+func (s *checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
+	return &VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, s.chunks, nil
 }
 
 func (s *checkStatusSpyStore) RecordPRCheckStatus(_ context.Context, chunkID, headSHA, checkName, checkState string) error {
@@ -1074,6 +1081,23 @@ func (s *checkStatusSpyStore) ResetPRCheckState(_ context.Context, chunkID, head
 
 func (s *checkStatusSpyStore) UpdatePRLifecycleStatus(_ context.Context, _, _ string) error {
 	return s.statusErr
+}
+
+func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*VanadisBuild, *VanadisChunk, bool, error) {
+	s.failed = append(s.failed, chunkID+":"+reason)
+	if s.failErr != nil {
+		return nil, nil, false, s.failErr
+	}
+	return &VanadisBuild{ID: "b1", Status: statusFailed, Objective: "Obj", ThreadID: "th-1"}, &VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed}, !s.skipFailApply, nil
+}
+
+func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chunkID, status, banner string) error {
+	s.banners = append(s.banners, chunkID+":"+status+":"+banner)
+	return s.bannerErr
+}
+
+func (*checkStatusSpyStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
+	return nil
 }
 
 func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
@@ -1176,6 +1200,19 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	boErr.recordPRMergeRevision(ctx, "b1", "c1", "sha-2", "merge-sha-3")
 	assert.Error(t, boErr.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-sha-3", CheckName: "test", CheckState: "passed"}))
 	assert.Equal(t, []string{"c1:merge-sha-3:test:passed"}, spyErr.calls)
+
+	// restart after deploy_failed reconstructs merged revision state and rejects delayed pre-merge checks
+	spyRestart := &checkStatusSpyStore{
+		chunks: []VanadisChunk{
+			{ID: "c-df-1", BuildID: "b1", Status: statusDeployFailed, HeadSHA: "sha-pre", MergeSHA: "sha-merge"},
+			{ID: "c-df-2", BuildID: "b1", Status: statusDeployFailed, HeadSHA: "sha-pre"},
+		},
+	}
+	boRestart := NewBuildObject("", nil).WithAuthority(spyRestart, nil)
+	assert.ErrorIs(t, boRestart.handlePREventType(nil, "b1", "c-df-1", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-pre", CheckName: "test"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, boRestart.handlePREventType(nil, "b1", "c-df-2", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-pre", CheckName: "test"}), errPRTransitionSkipped)
+	assert.NoError(t, boRestart.handlePREventType(nil, "b1", "c-df-2", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-post-merge", CheckName: "test", CheckState: "passed"}))
+	assert.Equal(t, []string{"c-df-2:sha-post-merge:test:passed"}, spyRestart.calls)
 }
 
 type mockBusError struct {
@@ -1249,4 +1286,112 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 		return true, nil
 	})
 	_ = boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}})
+}
+
+func TestBuildObject_HandlePREventType_Parity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		event         string
+		prEvent       pubsub.PRLifecycleEvent
+		bannerErr     error
+		failErr       error
+		skipFailApply bool
+		wantErr       bool
+		wantFailed    []string
+		wantBanners   []string
+		wantPromptIn  string
+	}{
+		{
+			name:         "closed unmerged fails chunk and dispatches failure prompt",
+			event:        "closed",
+			prEvent:      pubsub.PRLifecycleEvent{Event: "closed", Status: "closed"},
+			wantFailed:   []string{"c1:pr_closed_unmerged"},
+			wantPromptIn: "[VANADIS BUILD FAILED]",
+		},
+		{
+			name:       "closed with status merged skips fail chunk",
+			event:      "closed",
+			prEvent:    pubsub.PRLifecycleEvent{Event: "closed", Status: "merged"},
+			wantFailed: nil,
+		},
+		{
+			name:         "closed_unmerged event fails chunk and dispatches failure prompt",
+			event:        "closed_unmerged",
+			prEvent:      pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
+			wantFailed:   []string{"c1:pr_closed_unmerged"},
+			wantPromptIn: "[VANADIS BUILD FAILED]",
+		},
+		{
+			name:          "closed_unmerged already terminal skips notifications",
+			event:         "closed_unmerged",
+			prEvent:       pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
+			skipFailApply: true,
+			wantFailed:    []string{"c1:pr_closed_unmerged"},
+		},
+		{
+			name:       "closed_unmerged fail chunk error propagates",
+			event:      "closed_unmerged",
+			prEvent:    pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
+			failErr:    errors.New("db fail error"),
+			wantErr:    true,
+			wantFailed: []string{"c1:pr_closed_unmerged"},
+		},
+		{
+			name:         "deploy_failed sets status banner and dispatches wake prompt",
+			event:        "deploy_failed",
+			prEvent:      pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "eri", Details: "crashloop", PRNumber: 101, Repo: "aerial"},
+			wantBanners:  []string{"c1:deploy_failed:Deployment failed for eri: crashloop"},
+			wantPromptIn: "Deployment failed for job eri on aerial (PR #101",
+		},
+		{
+			name:         "sync_failed sets status banner and dispatches wake prompt",
+			event:        "sync_failed",
+			prEvent:      pubsub.PRLifecycleEvent{Event: "sync_failed", Details: "git pull conflict", PRNumber: 102, Repo: "aerial"},
+			wantBanners:  []string{"c1:deploy_failed:Git sync failed: git pull conflict"},
+			wantPromptIn: "Git sync failed for PR #102 on aerial",
+		},
+		{
+			name:        "deploy_failed banner update error propagates",
+			event:       "deploy_failed",
+			prEvent:     pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "synapse"},
+			bannerErr:   errors.New("db banner error"),
+			wantErr:     true,
+			wantBanners: []string{"c1:deploy_failed:Deployment failed for synapse"},
+		},
+		{
+			name:        "deploy_failed on completed chunk skips wake prompt",
+			event:       "deploy_failed",
+			prEvent:     pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "synapse"},
+			bannerErr:   errPRTransitionSkipped,
+			wantErr:     true,
+			wantBanners: []string{"c1:deploy_failed:Deployment failed for synapse"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spy := &checkStatusSpyStore{bannerErr: tc.bannerErr, failErr: tc.failErr, skipFailApply: tc.skipFailApply}
+			eri := &mockEriClient{}
+			exec := NewExecutor(t.TempDir(), eri, nil, "token", nil)
+			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
+
+			err := bo.handlePREventType(nil, "b1", "c1", tc.event, tc.prEvent)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantFailed, spy.failed)
+			assert.Equal(t, tc.wantBanners, spy.banners)
+			if tc.wantPromptIn != "" {
+				assert.Contains(t, eri.lastPrompt, tc.wantPromptIn)
+				assert.Equal(t, "th-1", eri.lastThreadID)
+			} else {
+				assert.Empty(t, eri.lastPrompt)
+			}
+		})
+	}
 }
