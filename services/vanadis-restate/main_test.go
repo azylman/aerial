@@ -999,9 +999,17 @@ func TestBuildObject_HandlerErrors(t *testing.T) {
 
 func TestRestateObjectRuntime_SetLaunchedNil(t *testing.T) {
 	t.Parallel()
-	ctx := makeObjectMockContext(t, "b1")
+	mc := mocks.NewMockContext(t)
+	mc.EXPECT().Set("launched", map[string]bool{}, mock.Anything).Return().Once()
+	mc.EXPECT().Key().Return("b1").Once()
+	mClient := mocks.NewMockClient(t)
+	mInv := mocks.NewMockInvocation(t)
+	mc.EXPECT().Object("Build", "b1", "Reconcile").Return(mClient).Once()
+	mClient.EXPECT().Send(ReconcileBuildRequest{Reason: "active dispatch recovery"}, restate.WithDelay(time.Second)).Return(mInv).Once()
+	ctx := restate.WithMockContext(mc)
 	rt := restateObjectRuntime{ctx: ctx}
 	rt.SetLaunched(nil)
+	rt.ScheduleReconcile()
 }
 
 func TestBuildObject_NilStoreBranches(t *testing.T) {

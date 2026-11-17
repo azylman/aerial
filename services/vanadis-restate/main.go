@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -104,16 +103,10 @@ func recordReconcileError(handler string, err error) {
 	}
 }
 
-func runJournaled[T any](ctx restate.Context, handlerLabel, stepName string, recorded *bool, fn func(restate.RunContext) (T, error)) (T, error) {
-	if recorded != nil {
-		*recorded = false
-	}
+func runJournaled[T any](ctx restate.Context, handlerLabel, stepName string, fn func(restate.RunContext) (T, error)) (T, error) {
 	return restate.Run(ctx, func(rc restate.RunContext) (T, error) {
 		out, err := fn(rc)
 		if err != nil {
-			if recorded != nil {
-				*recorded = true
-			}
 			recordReconcileError(handlerLabel, err)
 		}
 		return out, err
@@ -240,9 +233,6 @@ type VanadisChunk struct {
 	CIChecks           map[string]string      `json:"ci_checks,omitempty"`
 	HeadSHA            string                 `json:"head_sha,omitempty"`
 	MergeSHA           string                 `json:"merge_sha,omitempty"`
-	RemediatedSHA      string                 `json:"-"`
-	HeadAt             time.Time              `json:"-"`
-	SeenHeads          []string               `json:"-"`
 	RolloutState       *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
 	Banner             string                 `json:"banner,omitempty"`
 	MergeAwakeableID   string                 `json:"merge_awakeable_id,omitempty"`
@@ -339,16 +329,6 @@ func (r restateObjectRuntime) ScheduleReconcile() {
 	_ = restate.ObjectSend(r.ctx, "Build", restate.Key(r.ctx), "Reconcile").Send(ReconcileBuildRequest{Reason: "active dispatch recovery"}, restate.WithDelay(time.Second))
 }
 
-type prRevisionState struct {
-	headSHA       string
-	mergeSHA      string
-	remediatedSHA string
-	merged        bool
-	headAt        time.Time
-	seenHeads     map[string]bool
-	failedChecks  map[string]bool
-}
-
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
 type BuildObject struct {
 	store          VanadisStore
@@ -356,8 +336,6 @@ type BuildObject struct {
 	vanadisURL     string
 	httpClient     *http.Client
 	runtimeFactory func(restate.ObjectContext) objectRuntime
-	revMu          sync.Mutex
-	prRevisions    map[string]prRevisionState
 }
 
 // NewBuildObject creates a new BuildObject bound to vanadisURL with an optional HTTP client.
@@ -484,33 +462,32 @@ func (b *BuildObject) persistBuildCreation(rc restate.RunContext, build VanadisB
 }
 
 // Create handles initial build and DAG initialization.
-func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) (resp VanadisBuild, outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelCreate, outErr)
-		}
-	}()
-
+func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) (VanadisBuild, error) {
 	buildID := strings.TrimSpace(restate.Key(ctx))
 	if buildID == "" {
 		buildID = strings.TrimSpace(req.ID)
 	}
 	if buildID == "" {
-		return VanadisBuild{}, restate.ToTerminalError(fmt.Errorf("%w: build id cannot be empty", ErrInvalidBuildInput), restate.WithErrorCode(400))
+		err := fmt.Errorf("%w: build id cannot be empty", ErrInvalidBuildInput)
+		recordReconcileError(labelCreate, err)
+		return VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 	threadID := strings.TrimSpace(req.ThreadID)
 	objective := strings.TrimSpace(req.Objective)
 	if threadID == "" || objective == "" {
-		return VanadisBuild{}, restate.ToTerminalError(fmt.Errorf("%w: thread_id and objective cannot be empty", ErrInvalidBuildInput), restate.WithErrorCode(400))
+		err := fmt.Errorf("%w: thread_id and objective cannot be empty", ErrInvalidBuildInput)
+		recordReconcileError(labelCreate, err)
+		return VanadisBuild{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
 	chunks := planInputsToChunks(buildID, req.Chunks)
 	if err := validateCreateBuildInputs(buildID, threadID, objective, chunks); err != nil {
+		recordReconcileError(labelCreate, err)
 		return VanadisBuild{}, toTerminalErr(err)
 	}
 	validatedChunks, err := normalizeAndValidateBuildDAG(chunks)
 	if err != nil {
+		recordReconcileError(labelCreate, err)
 		return VanadisBuild{}, toTerminalErr(err)
 	}
 
@@ -533,7 +510,7 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 	}
 
 	if b.store != nil {
-		_, err := runJournaled(ctx, labelCreate, "create-build-postgres", &stepRecorded, func(rc restate.RunContext) (bool, error) {
+		_, err := runJournaled(ctx, labelCreate, "create-build-postgres", func(rc restate.RunContext) (bool, error) {
 			return b.persistBuildCreation(rc, build, validatedChunks)
 		})
 		if err != nil {
@@ -551,19 +528,12 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 }
 
 // UpdateBuild mutates build metadata and updates state.
-func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequest) (resp VanadisBuild, outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelUpdateBuild, outErr)
-		}
-	}()
-
+func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequest) (VanadisBuild, error) {
 	buildID := restate.Key(ctx)
 	if b.store == nil {
 		return VanadisBuild{ID: buildID, Title: req.Title, Objective: req.Objective}, nil
 	}
-	res, err := runJournaled(ctx, labelUpdateBuild, "update-build-postgres", &stepRecorded, func(rc restate.RunContext) (VanadisBuild, error) {
+	res, err := runJournaled(ctx, labelUpdateBuild, "update-build-postgres", func(rc restate.RunContext) (VanadisBuild, error) {
 		updated, err := b.store.UpdateBuild(rc, buildID, req)
 		if err != nil {
 			return VanadisBuild{}, err
@@ -590,14 +560,7 @@ func (b *BuildObject) UpdateBuild(ctx restate.ObjectContext, req UpdateBuildRequ
 }
 
 // Cancel cancels the active build and clears Restate state.
-func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) (resp VanadisBuild, outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelCancel, outErr)
-		}
-	}()
-
+func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) (VanadisBuild, error) {
 	buildID := restate.Key(ctx)
 	rt := b.getRuntime(ctx)
 	defer rt.ClearState()
@@ -606,7 +569,7 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 		return VanadisBuild{ID: buildID, Status: statusCancelled}, nil
 	}
 
-	res, err := runJournaled(ctx, labelCancel, "cancel-build-postgres", &stepRecorded, func(rc restate.RunContext) (VanadisBuild, error) {
+	res, err := runJournaled(ctx, labelCancel, "cancel-build-postgres", func(rc restate.RunContext) (VanadisBuild, error) {
 		bld, chunks, err := b.store.GetBuild(rc, buildID)
 		if err != nil {
 			return VanadisBuild{}, err
@@ -640,25 +603,20 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 }
 
 // AppendChunks appends chunks to a running build and advances the DAG.
-func (b *BuildObject) AppendChunks(ctx restate.ObjectContext, req AppendChunksRequest) (resp []VanadisChunk, outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelAppendChunks, outErr)
-		}
-	}()
-
+func (b *BuildObject) AppendChunks(ctx restate.ObjectContext, req AppendChunksRequest) ([]VanadisChunk, error) {
 	if len(req.Chunks) == 0 {
-		return nil, restate.ToTerminalError(fmt.Errorf("%w: chunks cannot be empty", ErrInvalidBuildInput), restate.WithErrorCode(http.StatusBadRequest))
+		err := fmt.Errorf("%w: chunks cannot be empty", ErrInvalidBuildInput)
+		recordReconcileError(labelAppendChunks, err)
+		return nil, restate.ToTerminalError(err, restate.WithErrorCode(http.StatusBadRequest))
 	}
 	if b.store == nil {
 		return nil, nil
 	}
-	return b.executeChunkAppend(ctx, restate.Key(ctx), req.Chunks, &stepRecorded)
+	return b.executeChunkAppend(ctx, restate.Key(ctx), req.Chunks)
 }
 
-func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID string, chunks []CreateChunkInput, stepRecorded *bool) ([]VanadisChunk, error) {
-	appended, err := runJournaled(ctx, labelAppendChunks, "append-chunks-postgres", stepRecorded, func(rc restate.RunContext) ([]VanadisChunk, error) {
+func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID string, chunks []CreateChunkInput) ([]VanadisChunk, error) {
+	appended, err := runJournaled(ctx, labelAppendChunks, "append-chunks-postgres", func(rc restate.RunContext) ([]VanadisChunk, error) {
 		return b.store.AppendChunks(rc, buildID, chunks)
 	})
 	if err != nil {
@@ -671,23 +629,18 @@ func (b *BuildObject) executeChunkAppend(ctx restate.ObjectContext, buildID stri
 }
 
 // UpdateChunk modifies a pending chunk and revalidates dependencies.
-func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequest) (resp VanadisChunk, outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelUpdateChunk, outErr)
-		}
-	}()
-
+func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequest) (VanadisChunk, error) {
 	buildID := restate.Key(ctx)
 	chunkRef := strings.TrimSpace(req.ChunkRef)
 	if chunkRef == "" {
-		return VanadisChunk{}, restate.ToTerminalError(fmt.Errorf("%w: chunk_ref cannot be empty", ErrInvalidBuildInput), restate.WithErrorCode(400))
+		err := fmt.Errorf("%w: chunk_ref cannot be empty", ErrInvalidBuildInput)
+		recordReconcileError(labelUpdateChunk, err)
+		return VanadisChunk{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 	if b.store == nil {
 		return VanadisChunk{}, nil
 	}
-	updated, err := runJournaled(ctx, labelUpdateChunk, "update-chunk-postgres", &stepRecorded, func(rc restate.RunContext) (VanadisChunk, error) {
+	updated, err := runJournaled(ctx, labelUpdateChunk, "update-chunk-postgres", func(rc restate.RunContext) (VanadisChunk, error) {
 		c, err := b.store.UpdateChunk(rc, buildID, chunkRef, req)
 		if err != nil {
 			return VanadisChunk{}, err
@@ -705,28 +658,23 @@ func (b *BuildObject) UpdateChunk(ctx restate.ObjectContext, req UpdateChunkRequ
 }
 
 // RemoveChunk removes an unstarted chunk from the build DAG.
-func (b *BuildObject) RemoveChunk(ctx restate.ObjectContext, req RemoveChunkRequest) (outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelRemoveChunk, outErr)
-		}
-	}()
-
+func (b *BuildObject) RemoveChunk(ctx restate.ObjectContext, req RemoveChunkRequest) error {
 	buildID := restate.Key(ctx)
 	targetRef := strings.TrimSpace(req.ChunkRef)
 	if targetRef == "" {
-		return restate.ToTerminalError(fmt.Errorf("%w: chunk_ref cannot be empty", ErrInvalidBuildInput), restate.WithErrorCode(400))
+		err := fmt.Errorf("%w: chunk_ref cannot be empty", ErrInvalidBuildInput)
+		recordReconcileError(labelRemoveChunk, err)
+		return restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 	if b.store == nil {
 		return nil
 	}
 	rt := b.getRuntime(ctx)
-	return b.executeChunkRemoval(ctx, rt, buildID, targetRef, &stepRecorded)
+	return b.executeChunkRemoval(ctx, rt, buildID, targetRef)
 }
 
-func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRuntime, buildID, targetRef string, stepRecorded *bool) error {
-	_, err := runJournaled(ctx, labelRemoveChunk, "remove-chunk-postgres", stepRecorded, func(rc restate.RunContext) (bool, error) {
+func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRuntime, buildID, targetRef string) error {
+	_, err := runJournaled(ctx, labelRemoveChunk, "remove-chunk-postgres", func(rc restate.RunContext) (bool, error) {
 		removedChunk, _, rErr := b.store.RemoveChunk(rc, buildID, targetRef)
 		if rErr != nil {
 			return false, rErr
@@ -769,24 +717,19 @@ func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld VanadisBuild
 }
 
 // FailChunk marks a chunk failed and cancels active work if the failure is terminal.
-func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest) (resp FailChunkResponse, outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelFailChunk, outErr)
-		}
-	}()
-
+func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest) (FailChunkResponse, error) {
 	chunkID := strings.TrimSpace(req.ChunkID)
 	reason := strings.TrimSpace(req.Reason)
 	if chunkID == "" || reason == "" {
-		return FailChunkResponse{}, restate.ToTerminalError(fmt.Errorf("%w: chunk_id and reason required", ErrInvalidBuildInput), restate.WithErrorCode(400))
+		err := fmt.Errorf("%w: chunk_id and reason required", ErrInvalidBuildInput)
+		recordReconcileError(labelFailChunk, err)
+		return FailChunkResponse{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 	if b.store == nil {
 		return FailChunkResponse{ChunkID: chunkID, Failed: true}, nil
 	}
 
-	res, err := runJournaled(ctx, labelFailChunk, "fail-chunk-postgres", &stepRecorded, func(rc restate.RunContext) (FailChunkResponse, error) {
+	res, err := runJournaled(ctx, labelFailChunk, "fail-chunk-postgres", func(rc restate.RunContext) (FailChunkResponse, error) {
 		if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
 			return FailChunkResponse{}, err
 		}
@@ -817,24 +760,17 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req FailChunkRequest)
 }
 
 // AttachPR attaches a PR to a chunk or standalone build.
-func (b *BuildObject) AttachPR(ctx restate.ObjectContext, req AttachChunkPRRequest) (resp AttachChunkPRResponse, outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelAttachPR, outErr)
-		}
-	}()
-
+func (b *BuildObject) AttachPR(ctx restate.ObjectContext, req AttachChunkPRRequest) (AttachChunkPRResponse, error) {
 	store := b.store
 	if store == nil {
 		return AttachChunkPRResponse{Status: "attached", BuildID: restate.Key(ctx), ChunkID: req.ChunkID}, nil
 	}
-	return b.executePRAttachment(ctx, req, &stepRecorded)
+	return b.executePRAttachment(ctx, req)
 }
 
-func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req AttachChunkPRRequest, stepRecorded *bool) (AttachChunkPRResponse, error) {
+func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req AttachChunkPRRequest) (AttachChunkPRResponse, error) {
 	store := b.store
-	attached, attachErr := runJournaled(ctx, labelAttachPR, "attach-pr-postgres", stepRecorded, func(rc restate.RunContext) (AttachChunkPRResponse, error) {
+	attached, attachErr := runJournaled(ctx, labelAttachPR, "attach-pr-postgres", func(rc restate.RunContext) (AttachChunkPRResponse, error) {
 		bID, cID, thID, err := store.AttachChunkPR(rc, req)
 		if err != nil {
 			return AttachChunkPRResponse{}, toTerminalErr(err)

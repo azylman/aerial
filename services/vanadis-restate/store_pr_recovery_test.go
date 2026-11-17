@@ -6,11 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -45,11 +43,11 @@ func TestPostgresVanadisStore_RecoverFailedPR(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store, _ := dbScript{row: valuesRow("b1"), buildRow: buildRow("b1", tc.parent), chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, HeadSHA: "old", MergeSHA: tc.mergeSHA}, {ID: "c2", Status: tc.sibling}}}.open()
-			err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, !tc.unverified), "c1", tc.head, 0)
+			err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, !tc.unverified), "c1", tc.head)
 			if tc.skip && !tc.legacySeed {
 				forbidden := errors.New("excluded legacy chunk attempted write or commit")
 				legacy, _ := dbScript{execErr: forbidden, commitErr: forbidden, row: valuesRow("b1"), buildRow: buildRow("b1", tc.parent), chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, MergeSHA: tc.mergeSHA}}}.open()
-				if legacyErr := legacy.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, !tc.unverified), "c1", tc.head, 0); !errors.Is(legacyErr, errPRTransitionSkipped) {
+				if legacyErr := legacy.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, !tc.unverified), "c1", tc.head); !errors.Is(legacyErr, errPRTransitionSkipped) {
 					t.Fatalf("legacy error=%v", legacyErr)
 				}
 			}
@@ -66,9 +64,6 @@ func TestPostgresVanadisStore_RecoverFailedPRFailures(t *testing.T) {
 	tests := []struct {
 		name     string
 		db       dbScript
-		at       int64
-		seen     []string
-		headAt   time.Time
 		baseline bool
 		want     error
 	}{
@@ -81,8 +76,6 @@ func TestPostgresVanadisStore_RecoverFailedPRFailures(t *testing.T) {
 		{name: "baseline write", baseline: true, db: dbScript{failExec: "UPDATE vanadis_chunks", execErr: injected}, want: injected},
 		{name: "baseline commit", baseline: true, db: dbScript{commitErr: injected}, want: injected},
 		{name: "commit", db: dbScript{commitErr: injected}, want: injected},
-		{name: "verified old processing timestamp", seen: []string{"NEW"}, at: 10, headAt: time.Unix(0, 20)},
-		{name: "seen head newer timestamp", seen: []string{"NEW"}, at: 30, headAt: time.Unix(0, 20)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,13 +87,13 @@ func TestPostgresVanadisStore_RecoverFailedPRFailures(t *testing.T) {
 			if db.buildRow == nil {
 				db.buildRow = buildRow("b1", "failed")
 			}
-			db.chunks = []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old", HeadAt: tc.headAt, SeenHeads: tc.seen}}
+			db.chunks = []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}}
 			if tc.baseline {
 				db.chunks[0].HeadSHA = ""
 			}
 			store, _ := db.open()
 			ctx := context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true)
-			if err := store.recoverFailedPR(ctx, "c1", "new", tc.at); !errors.Is(err, tc.want) {
+			if err := store.recoverFailedPR(ctx, "c1", "new"); !errors.Is(err, tc.want) {
 				t.Fatalf("err=%v want=%v", err, tc.want)
 			}
 		})
@@ -126,10 +119,10 @@ func TestPostgresVanadisStore_PRRecoveryTransactions(t *testing.T) {
 			chunks := []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "old"}}
 			store := recoveryFixtureStore(&mu, &parent, &chunks, tc.failParent)
 			ctx := context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true)
-			if err := store.recoverFailedPR(ctx, "c1", "new", 0); err != nil {
+			if err := store.recoverFailedPR(ctx, "c1", "new"); err != nil {
 				t.Fatal(err)
 			}
-			if err := store.recoverFailedPR(ctx, "c2", "new", 0); err == nil {
+			if err := store.recoverFailedPR(ctx, "c2", "new"); err == nil {
 				t.Fatal("expected parent write failure")
 			}
 			failed := 0
@@ -167,11 +160,11 @@ func TestPostgresVanadisStore_PRRecoveryHeadUpdates(t *testing.T) {
 			store := recoveryFixtureStore(&mu, &parent, &chunks, false)
 			chunks[0].HeadSHA = ""
 			assertLegacyBaseline(t, store, &parent, &chunks)
-			if err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true), "c1", "h2", 0); err != nil {
+			if err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true), "c1", "h2"); err != nil {
 				t.Fatal(err)
 			}
 			chunks[0].Status = tc.nextStatus
-			err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true), "c1", "h3", 0)
+			err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true), "c1", "h3")
 			if errors.Is(err, errPRTransitionSkipped) != tc.skip || (err != nil && !tc.skip) {
 				t.Fatalf("head update: %v", err)
 			}
@@ -182,7 +175,7 @@ func TestPostgresVanadisStore_PRRecoveryHeadUpdates(t *testing.T) {
 			if parent != "failed" || chunks[0].HeadSHA != wantHead {
 				t.Fatalf("parent=%s head=%s", parent, chunks[0].HeadSHA)
 			}
-			if err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true), "c2", "h2", 0); err != nil {
+			if err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true), "c2", "h2"); err != nil {
 				t.Fatal(err)
 			}
 			wantParent := "running"
@@ -385,10 +378,7 @@ func recoveryFixtureChecks(c VanadisChunk) []byte {
 	if c.HeadSHA == "" && c.MergeSHA == "" {
 		return []byte(`{"lint":"passed"}`)
 	}
-	checks := map[string]string{"_head_sha": c.HeadSHA, "_merge_sha": c.MergeSHA, "_seen_heads": strings.Join(c.SeenHeads, ",")}
-	if !c.HeadAt.IsZero() {
-		checks["_head_at"] = strconv.FormatInt(c.HeadAt.UnixNano(), 10)
-	}
+	checks := map[string]string{"_head_sha": c.HeadSHA, "_merge_sha": c.MergeSHA}
 	raw, _ := json.Marshal(checks)
 	return raw
 }
@@ -407,7 +397,7 @@ func applyRecoveryFixtureHead(chunks []VanadisChunk, args []any, baseline bool) 
 func assertLegacyBaseline(t *testing.T, store *PostgresVanadisStore, parent *string, stored *[]VanadisChunk) {
 	t.Helper()
 	for _, head := range []string{"h1", "h1"} {
-		err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true), "c1", head, 0)
+		err := store.recoverFailedPR(context.WithValue(context.Background(), prHeadVerifiedContextKey{}, true), "c1", head)
 		chunks := *stored
 		if !errors.Is(err, errPRTransitionSkipped) || chunks[0].HeadSHA != "h1" || chunks[0].Status != "failed" || *parent != "failed" || chunks[1].HeadSHA != "h1" {
 			t.Fatalf("baseline error=%v parent=%s chunks=%+v", err, *parent, chunks)

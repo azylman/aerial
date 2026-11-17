@@ -209,8 +209,7 @@ func TestExecutePRAttachment(t *testing.T) {
 				}
 				return restate.ToTerminalError(err)
 			})
-			recorded := false
-			_, err := bo.executePRAttachment(restate.WithMockContext(mc), tc.req, &recorded)
+			_, err := bo.executePRAttachment(restate.WithMockContext(mc), tc.req)
 			require.Error(t, err)
 		})
 	}

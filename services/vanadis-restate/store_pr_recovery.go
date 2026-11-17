@@ -12,7 +12,7 @@ import (
 
 // recoverFailedPR rechecks recovery and subsequent head updates under the same parent-first locks
 // as cancellation and action retry. A sibling failure keeps the parent failed.
-func (s *PostgresVanadisStore) recoverFailedPR(ctx context.Context, id, head string, at int64) error {
+func (s *PostgresVanadisStore) recoverFailedPR(ctx context.Context, id, head string) error {
 	if strings.TrimSpace(head) == "" {
 		return errPRTransitionSkipped
 	}
@@ -56,7 +56,7 @@ func (s *PostgresVanadisStore) recoverFailedPR(ctx context.Context, id, head str
 	// A legacy failed PR needs a durable baseline before a genuine head change
 	// can recover it. This observation must preserve all failure state.
 	if missingFailedPRBaseline(c, prHeadVerifiedFromContext(ctx)) {
-		return seedFailedPRBaseline(ctx, tx, id, head, at)
+		return seedFailedPRBaseline(ctx, tx, id, head)
 	}
 	if !failedPRHeadAccepted(c, head, prHeadVerifiedFromContext(ctx)) {
 		return errPRTransitionSkipped
@@ -64,11 +64,9 @@ func (s *PostgresVanadisStore) recoverFailedPR(ctx context.Context, id, head str
 
 	const reset = `UPDATE vanadis_chunks SET status = 'pr_opened',
  ci_fail_count = CASE WHEN status = 'failed' THEN 0 ELSE ci_fail_count END,
- ci_checks = jsonb_strip_nulls(jsonb_build_object('_head_sha', $2::text,
- '_head_at', CASE WHEN $3::bigint > 0 THEN $3::text ELSE NULL END,
- '_seen_heads', CONCAT_WS(',', NULLIF(ci_checks->>'_seen_heads', ''), NULLIF(ci_checks->>'_head_sha', ''), $2::text))),
+ ci_checks = jsonb_build_object('_head_sha', $2::text),
  banner = '', completed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
-	if _, err = tx.Exec(ctx, reset, id, head, at); err != nil {
+	if _, err = tx.Exec(ctx, reset, id, head); err != nil {
 		return err
 	}
 	// Builds have no terminal timestamp/banner columns; those belong to chunks.
@@ -99,12 +97,10 @@ func missingFailedPRBaseline(c VanadisChunk, verified bool) bool {
 	return c.Status == statusFailed && c.HeadSHA == "" && c.Mode == "pr" && c.PRNumber > 0 && strings.TrimSpace(c.MergeSHA) == "" && verified
 }
 
-func seedFailedPRBaseline(ctx context.Context, tx pgx.Tx, id, head string, at int64) error {
+func seedFailedPRBaseline(ctx context.Context, tx pgx.Tx, id, head string) error {
 	const baseline = `UPDATE vanadis_chunks SET ci_checks = COALESCE(ci_checks, '{}'::jsonb) ||
- jsonb_strip_nulls(jsonb_build_object('_head_sha', $2::text,
- '_head_at', CASE WHEN $3::bigint > 0 THEN $3::text ELSE NULL END,
- '_seen_heads', CONCAT_WS(',', NULLIF(ci_checks->>'_seen_heads', ''), $2::text))) WHERE id = $1;`
-	if _, err := tx.Exec(ctx, baseline, id, head, at); err != nil {
+ jsonb_build_object('_head_sha', $2::text) WHERE id = $1;`
+	if _, err := tx.Exec(ctx, baseline, id, head); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {

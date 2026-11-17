@@ -55,8 +55,7 @@ type restateBuildObjectInvoker struct {
 }
 
 const (
-	prEventOpened   = "opened"
-	prEventDeferred = "deferred"
+	prEventOpened = "opened"
 )
 
 func (r restateBuildObjectInvoker) RoutePREvent(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error {
@@ -163,20 +162,15 @@ func (s *BuildRouterService) resolvePRBuildID(rc restate.RunContext, repo string
 }
 
 // RoutePREvent routes inbound PR lifecycle events to the owning Build Virtual Object.
-func (s *BuildRouterService) RoutePREvent(ctx restate.Context, ev pubsub.PRLifecycleEvent) (outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelRoutePREvent, outErr)
-		}
-	}()
-
+func (s *BuildRouterService) RoutePREvent(ctx restate.Context, ev pubsub.PRLifecycleEvent) error {
 	repo := strings.TrimSpace(ev.Repo)
 	if repo == "" || ev.PRNumber <= 0 {
-		return restate.ToTerminalError(fmt.Errorf("%w: repo and pr_number required", ErrInvalidBuildInput), restate.WithErrorCode(400))
+		err := fmt.Errorf("%w: repo and pr_number required", ErrInvalidBuildInput)
+		recordReconcileError(labelRoutePREvent, err)
+		return restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
-	buildID, err := runJournaled(ctx, labelRoutePREvent, "lookup-pr-chunk", &stepRecorded, func(rc restate.RunContext) (string, error) {
+	buildID, err := runJournaled(ctx, labelRoutePREvent, "lookup-pr-chunk", func(rc restate.RunContext) (string, error) {
 		return s.resolvePRBuildID(rc, repo, ev)
 	})
 	if err != nil {
@@ -192,20 +186,13 @@ func (s *BuildRouterService) RoutePREvent(ctx restate.Context, ev pubsub.PRLifec
 }
 
 // RouteDispatchOutcome routes dispatch outcomes to the target Build Virtual Object.
-func (s *BuildRouterService) RouteDispatchOutcome(ctx restate.Context, ev pubsub.DispatchOutcomeEvent) (outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelRouteDispatchOutcome, outErr)
-		}
-	}()
-
+func (s *BuildRouterService) RouteDispatchOutcome(ctx restate.Context, ev pubsub.DispatchOutcomeEvent) error {
 	chunkID := strings.TrimSpace(ev.VanadisChunkID)
 	if chunkID == "" {
 		return nil
 	}
 
-	buildID, err := runJournaled(ctx, labelRouteDispatchOutcome, "lookup-dispatch-chunk", &stepRecorded, func(rc restate.RunContext) (string, error) {
+	buildID, err := runJournaled(ctx, labelRouteDispatchOutcome, "lookup-dispatch-chunk", func(rc restate.RunContext) (string, error) {
 		if s.store == nil {
 			return "", nil
 		}
@@ -231,21 +218,16 @@ func (s *BuildRouterService) RouteDispatchOutcome(ctx restate.Context, ev pubsub
 }
 
 // RouteAttachPR resolves the build and delegates PR attachment to the target Build.
-func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req AttachChunkPRRequest) (resp AttachChunkPRResponse, outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelRouteAttachPR, outErr)
-		}
-	}()
-
+func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req AttachChunkPRRequest) (AttachChunkPRResponse, error) {
 	req.ChunkID = strings.TrimSpace(req.ChunkID)
 	req.Repo = strings.TrimSpace(req.Repo)
 	if req.PRNumber <= 0 || (req.ChunkID == "" && req.Repo == "") {
-		return AttachChunkPRResponse{}, restate.ToTerminalError(fmt.Errorf("%w: chunk_id or repo, and pr_number required", ErrInvalidBuildInput), restate.WithErrorCode(400))
+		err := fmt.Errorf("%w: chunk_id or repo, and pr_number required", ErrInvalidBuildInput)
+		recordReconcileError(labelRouteAttachPR, err)
+		return AttachChunkPRResponse{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
-	buildID, err := runJournaled(ctx, labelRouteAttachPR, "resolve-attach-build-id", &stepRecorded, func(rc restate.RunContext) (string, error) {
+	buildID, err := runJournaled(ctx, labelRouteAttachPR, "resolve-attach-build-id", func(rc restate.RunContext) (string, error) {
 		if s.store == nil {
 			return generateBuildID(), nil
 		}
@@ -272,21 +254,16 @@ func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req AttachChunkP
 }
 
 // RouteFailChunk resolves the build for a chunk and delegates failure to the Build object.
-func (s *BuildRouterService) RouteFailChunk(ctx restate.Context, req FailChunkRequest) (resp FailChunkResponse, outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelRouteFailChunk, outErr)
-		}
-	}()
-
+func (s *BuildRouterService) RouteFailChunk(ctx restate.Context, req FailChunkRequest) (FailChunkResponse, error) {
 	chunkID := strings.TrimSpace(req.ChunkID)
 	reason := strings.TrimSpace(req.Reason)
 	if chunkID == "" || reason == "" {
-		return FailChunkResponse{}, restate.ToTerminalError(fmt.Errorf("%w: chunk_id and reason required", ErrInvalidBuildInput), restate.WithErrorCode(400))
+		err := fmt.Errorf("%w: chunk_id and reason required", ErrInvalidBuildInput)
+		recordReconcileError(labelRouteFailChunk, err)
+		return FailChunkResponse{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
-	buildID, err := runJournaled(ctx, labelRouteFailChunk, "lookup-fail-chunk-build", &stepRecorded, func(rc restate.RunContext) (string, error) {
+	buildID, err := runJournaled(ctx, labelRouteFailChunk, "lookup-fail-chunk-build", func(rc restate.RunContext) (string, error) {
 		if s.store == nil {
 			return "", ErrChunkNotFound
 		}
@@ -627,98 +604,6 @@ func (b *BuildObject) failMutation(ctx context.Context, buildID string, mutation
 	return nil
 }
 
-func recordSeenHead(rev *prRevisionState, sha string) {
-	clean := strings.ToLower(strings.TrimSpace(sha))
-	if clean == "" {
-		return
-	}
-	if rev.seenHeads == nil {
-		rev.seenHeads = make(map[string]bool)
-	}
-	rev.seenHeads[clean] = true
-}
-
-func recordFailedCheck(rev *prRevisionState, checkName string, failed bool) {
-	clean := strings.TrimSpace(checkName)
-	if clean == "" {
-		return
-	}
-	if failed {
-		if rev.failedChecks == nil {
-			rev.failedChecks = make(map[string]bool)
-		}
-		rev.failedChecks[clean] = true
-		return
-	}
-	if len(rev.failedChecks) > 0 {
-		delete(rev.failedChecks, clean)
-		if len(rev.failedChecks) == 0 {
-			rev.remediatedSHA = ""
-		}
-	}
-}
-
-func seedChunkRevision(c VanadisChunk) prRevisionState {
-	seeded := prRevisionState{
-		headSHA:  strings.TrimSpace(c.HeadSHA),
-		mergeSHA: strings.TrimSpace(c.MergeSHA),
-		merged:   c.Status == statusMerged || c.Status == statusSynced || c.Status == statusDeployFailed || strings.TrimSpace(c.MergeSHA) != "",
-		headAt:   c.HeadAt,
-	}
-	recordSeenHead(&seeded, seeded.headSHA)
-	for _, sh := range c.SeenHeads {
-		recordSeenHead(&seeded, sh)
-	}
-	for checkName, state := range c.CIChecks {
-		if state == statusFailed {
-			recordFailedCheck(&seeded, checkName, true)
-		}
-	}
-	if len(seeded.failedChecks) > 0 {
-		seeded.remediatedSHA = strings.TrimSpace(c.RemediatedSHA)
-	}
-	return seeded
-}
-
-func (b *BuildObject) getChunkRevision(ctx context.Context, buildID, chunkID string) prRevisionState {
-	cleanID := strings.TrimSpace(chunkID)
-	b.revMu.Lock()
-	if b.prRevisions != nil {
-		if rev, ok := b.prRevisions[cleanID]; ok {
-			b.revMu.Unlock()
-			return rev
-		}
-	}
-	b.revMu.Unlock()
-
-	var seeded prRevisionState
-	if b.store != nil && strings.TrimSpace(buildID) != "" {
-		if _, chunks, err := b.store.GetBuild(ctx, buildID); err == nil {
-			for _, c := range chunks {
-				if c.ID == cleanID {
-					seeded = seedChunkRevision(c)
-					break
-				}
-			}
-		}
-	}
-	if seeded.headSHA != "" || seeded.mergeSHA != "" || seeded.remediatedSHA != "" || seeded.merged {
-		b.setChunkRevision(cleanID, seeded)
-	}
-	return seeded
-}
-
-func (b *BuildObject) setChunkRevision(chunkID string, rev prRevisionState) {
-	b.revMu.Lock()
-	if b.prRevisions == nil {
-		b.prRevisions = make(map[string]prRevisionState)
-	}
-	b.prRevisions[strings.TrimSpace(chunkID)] = rev
-	b.revMu.Unlock()
-}
-
-type prHeadAtContextKey struct{}
-
 type prHeadVerifiedContextKey struct{}
 
 func prHeadVerifiedFromContext(ctx context.Context) bool {
@@ -729,108 +614,30 @@ func prHeadVerifiedFromContext(ctx context.Context) bool {
 	return ok && verified
 }
 
-func withPRHeadAt(ctx context.Context, at time.Time) context.Context {
-	if at.IsZero() {
-		return ctx
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, prHeadAtContextKey{}, at.UTC())
-}
-
-func prHeadAtFromContext(ctx context.Context) time.Time {
-	if ctx == nil {
-		return time.Time{}
-	}
-	if at, ok := ctx.Value(prHeadAtContextKey{}).(time.Time); ok {
-		return at
-	}
-	return time.Time{}
-}
-
-func (b *BuildObject) recordPRHeadRevision(ctx context.Context, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
+func (b *BuildObject) recordPRHeadRevision(ctx context.Context, chunkID string, ev pubsub.PRLifecycleEvent) error {
 	headSHA := strings.TrimSpace(ev.HeadSHA)
-	rev := b.getChunkRevision(ctx, buildID, chunkID)
-	if rev.merged {
-		return errPRTransitionSkipped
-	}
-	// Webhook OccurredAt is processing time, not revision order. A delayed
-	// delivery must not revive work on a superseded head, including seen SHAs.
-	if headSHA != "" && !strings.EqualFold(headSHA, rev.headSHA) {
+	if headSHA != "" && b.executor != nil {
 		if err := b.executor.validatePRHead(ctx, ev.Repo, ev.PRNumber, headSHA); err != nil {
 			return err
 		}
 		ctx = context.WithValue(ctx, prHeadVerifiedContextKey{}, true)
 	}
-	nextHead := firstNonEmpty(headSHA, rev.headSHA)
-	if err := b.store.ResetPRCheckState(withPRHeadAt(ctx, ev.OccurredAt), chunkID, nextHead, ""); err != nil {
-		if errors.Is(err, errPRTransitionSkipped) {
-			// A skipped recovery may have committed a legacy revision baseline.
-			b.revMu.Lock()
-			delete(b.prRevisions, strings.TrimSpace(chunkID))
-			b.revMu.Unlock()
-		}
-		return err
+	if b.store == nil {
+		return nil
 	}
-	recordSeenHead(&rev, rev.headSHA)
-	recordSeenHead(&rev, nextHead)
-	if !strings.EqualFold(nextHead, rev.headSHA) {
-		rev.remediatedSHA = ""
-		rev.failedChecks = nil
-	}
-	if !ev.OccurredAt.IsZero() {
-		rev.headAt = ev.OccurredAt.UTC()
-	} else if !strings.EqualFold(nextHead, rev.headSHA) {
-		rev.headAt = time.Time{}
-	}
-	rev.headSHA = nextHead
-	rev.mergeSHA = ""
-	rev.merged = false
-	b.setChunkRevision(chunkID, rev)
-	return nil
+	return b.store.ResetPRCheckState(ctx, chunkID, headSHA, "")
 }
 
 // recordPRMergeRevision follows an accepted merged lifecycle transition.
-func (b *BuildObject) recordPRMergeRevision(ctx context.Context, buildID, chunkID, rawHeadSHA, rawMergeSHA string) error {
-	headSHA := strings.TrimSpace(rawHeadSHA)
+func (b *BuildObject) recordPRMergeRevision(ctx context.Context, chunkID, rawHeadSHA, rawMergeSHA string) error {
 	mergeSHA := strings.TrimSpace(rawMergeSHA)
-	rev := b.getChunkRevision(ctx, buildID, chunkID)
-	nextHead := firstNonEmpty(headSHA, rev.headSHA)
-	nextMerge := firstNonEmpty(mergeSHA, rev.mergeSHA)
-	// An absent merge SHA must not enter the pre-merge head-reset path.
-	if nextMerge != "" {
-		if err := b.store.ResetPRCheckState(ctx, chunkID, nextHead, nextMerge); err != nil {
-			// Reload the accepted lifecycle from storage on the next event;
-			// the cached pre-merge head is no longer authoritative.
-			b.revMu.Lock()
-			delete(b.prRevisions, strings.TrimSpace(chunkID))
-			b.revMu.Unlock()
-			return err
-		}
+	if mergeSHA == "" {
+		return nil
 	}
-	recordSeenHead(&rev, nextHead)
-	rev.headSHA = nextHead
-	rev.mergeSHA = nextMerge
-	rev.merged = true
-	b.setChunkRevision(chunkID, rev)
-	return nil
-}
-
-func (b *BuildObject) acceptPRCheckRevision(ctx context.Context, buildID, chunkID, rawSHA string) bool {
-	sha := strings.TrimSpace(rawSHA)
-	rev := b.getChunkRevision(ctx, buildID, chunkID)
-	tracked := rev.headSHA
-	if rev.merged {
-		if rev.mergeSHA == "" && rev.headSHA != "" {
-			if sha == "" || strings.EqualFold(sha, rev.headSHA) {
-				return false
-			}
-			return true
-		}
-		tracked = firstNonEmpty(rev.mergeSHA, rev.headSHA)
+	if b.store == nil {
+		return nil
 	}
-	return tracked == "" || (sha != "" && strings.EqualFold(sha, tracked))
+	return b.store.ResetPRCheckState(ctx, chunkID, strings.TrimSpace(rawHeadSHA), mergeSHA)
 }
 
 func (b *BuildObject) handlePRCheckEvent(ctx context.Context, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
@@ -845,28 +652,10 @@ func (b *BuildObject) handlePRCheckEvent(ctx context.Context, chunkID, event str
 	if checkState == "" {
 		return nil
 	}
-	if !b.acceptPRCheckRevision(ctx, "", chunkID, ev.HeadSHA) {
-		return errPRTransitionSkipped
+	if b.store == nil {
+		return nil
 	}
-	if err := b.store.RecordPRCheckStatus(ctx, chunkID, strings.TrimSpace(ev.HeadSHA), checkName, checkState); err != nil {
-		return err
-	}
-	// Only accepted database writes establish an otherwise unknown revision.
-	rev := b.getChunkRevision(ctx, "", chunkID)
-	sha := strings.TrimSpace(ev.HeadSHA)
-	if sha != "" && ((rev.merged && rev.mergeSHA == "") || (!rev.merged && rev.headSHA == "")) {
-		if rev.merged {
-			rev.mergeSHA = sha
-		} else {
-			rev.headSHA = sha
-			recordSeenHead(&rev, sha)
-		}
-	}
-	if !rev.merged {
-		recordFailedCheck(&rev, checkName, checkState == statusFailed)
-	}
-	b.setChunkRevision(chunkID, rev)
-	return nil
+	return b.store.RecordPRCheckStatus(ctx, chunkID, strings.TrimSpace(ev.HeadSHA), checkName, checkState)
 }
 
 func (b *BuildObject) lookupBuildChunk(rc restate.RunContext, buildID, chunkID string) (*VanadisBuild, VanadisChunk, error) {
@@ -885,14 +674,6 @@ func (b *BuildObject) lookupBuildChunk(rc restate.RunContext, buildID, chunkID s
 	return bld, chunk, nil
 }
 
-func (b *BuildObject) dispatchChunkRemediation(rc restate.RunContext, buildID, chunkID, dispatchID, prompt string) error {
-	bld, chunk, err := b.lookupBuildChunk(rc, buildID, chunkID)
-	if err != nil {
-		return err
-	}
-	return b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, prompt)
-}
-
 func (b *BuildObject) dispatchChunkRemediationForChunk(rc restate.RunContext, bld *VanadisBuild, chunk VanadisChunk, dispatchID, prompt string) error {
 	return b.executor.DispatchChunkRemediation(rc, BrainDispatchRequest{
 		ID:             dispatchID,
@@ -904,25 +685,6 @@ func (b *BuildObject) dispatchChunkRemediationForChunk(rc restate.RunContext, bl
 		Effort:         capChunkEffort(chunk.Effort),
 		SkipIfActive:   true,
 	})
-}
-
-func (b *BuildObject) shouldCoalesceCIFailure(rc restate.RunContext, buildID, chunkID, rawSHA string) bool {
-	sha := strings.TrimSpace(rawSHA)
-	if sha == "" {
-		return false
-	}
-	rev := b.getChunkRevision(rc, buildID, chunkID)
-	return rev.remediatedSHA != "" && strings.EqualFold(sha, rev.remediatedSHA)
-}
-
-func (b *BuildObject) markHeadRemediated(rc restate.RunContext, buildID, chunkID, rawSHA string) {
-	sha := strings.TrimSpace(rawSHA)
-	if sha == "" {
-		return
-	}
-	rev := b.getChunkRevision(rc, buildID, chunkID)
-	rev.remediatedSHA = sha
-	b.setChunkRevision(chunkID, rev)
 }
 
 func (b *BuildObject) handleCIRemediationCapReached(rc restate.RunContext, chunkID string, failCount int, ev pubsub.PRLifecycleEvent) error {
@@ -961,40 +723,44 @@ func (b *BuildObject) handleCIRemediationCapReached(rc restate.RunContext, chunk
 }
 
 func (b *BuildObject) handleConflictEvent(rc restate.RunContext, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
-	if rev := b.getChunkRevision(rc, buildID, chunkID); rev.merged || !b.acceptPRCheckRevision(rc, buildID, chunkID, ev.HeadSHA) {
-		return errPRTransitionSkipped
+	if b.store == nil {
+		return nil
 	}
-	if err := b.store.UpdateChunkBannerAndStatus(rc, chunkID, statusConflict, "Merge conflict detected"); err != nil {
+	bld, chunk, err := b.lookupBuildChunk(rc, buildID, chunkID)
+	if err != nil {
 		return err
 	}
-	if b.executor != nil {
-		dispatchID := conflictRemediationDispatchID(chunkID, ev.HeadSHA)
-		if err := b.dispatchChunkRemediation(rc, buildID, chunkID, dispatchID, FormatConflictPrompt(ev)); err != nil {
-			return err
-		}
+	if head := strings.TrimSpace(ev.HeadSHA); head != "" && chunk.HeadSHA != "" && !strings.EqualFold(chunk.HeadSHA, head) {
+		return errPRTransitionSkipped
 	}
-	return nil
+	if err = b.store.UpdateChunkBannerAndStatus(rc, chunkID, statusConflict, "Merge conflict detected"); err != nil {
+		return err
+	}
+	if b.executor == nil {
+		return nil
+	}
+	dispatchID := conflictRemediationDispatchID(chunkID, ev.HeadSHA)
+	err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatConflictPrompt(ev))
+	if errors.Is(err, errDispatchActive) {
+		return nil
+	}
+	return err
 }
 
 func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
 	if isGateAggregatorCheck(ev.CheckName) {
 		return nil
 	}
-	if !b.acceptPRCheckRevision(rc, buildID, chunkID, ev.HeadSHA) {
-		return errPRTransitionSkipped
-	}
-	if ev.Status == prEventDeferred {
-		if len(b.getChunkRevision(rc, buildID, chunkID).failedChecks) == 0 {
-			return nil
-		}
-	} else if err := b.handlePRCheckEvent(rc, chunkID, event, ev); err != nil {
+	if err := b.handlePRCheckEvent(rc, chunkID, event, ev); err != nil {
 		return err
 	}
 	banner := fmt.Sprintf("CI check %q failed", ev.CheckName)
-	if err := b.store.UpdateChunkBannerAndStatus(rc, chunkID, statusCIFailed, banner); err != nil {
-		return err
+	if b.store != nil {
+		if err := b.store.UpdateChunkBannerAndStatus(rc, chunkID, statusCIFailed, banner); err != nil {
+			return err
+		}
 	}
-	if b.shouldCoalesceCIFailure(rc, buildID, chunkID, ev.HeadSHA) || b.executor == nil {
+	if b.executor == nil {
 		return nil
 	}
 	bld, chunk, err := b.lookupBuildChunk(rc, buildID, chunkID)
@@ -1002,21 +768,28 @@ func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunk
 		return err
 	}
 	if chunk.CIFailCount >= maxCIRemediationAttempts {
-		failCount, err := b.store.IncrementChunkCIFailCount(rc, chunkID, banner)
-		if err != nil {
-			return err
+		var failCount int
+		if b.store != nil {
+			failCount, err = b.store.IncrementChunkCIFailCount(rc, chunkID, banner)
+			if err != nil {
+				return err
+			}
 		}
 		return b.handleCIRemediationCapReached(rc, chunkID, failCount, ev)
 	}
 	details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
 	dispatchID := ciRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
-	if err := b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatCIFailurePrompt(ev, details)); err != nil {
+	if err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatCIFailurePrompt(ev, details)); err != nil {
+		if errors.Is(err, errDispatchActive) {
+			return nil
+		}
 		return err
 	}
-	if _, err := b.store.IncrementChunkCIFailCount(rc, chunkID, banner); err != nil {
-		return err
+	if b.store != nil {
+		if _, err := b.store.IncrementChunkCIFailCount(rc, chunkID, banner); err != nil {
+			return err
+		}
 	}
-	b.markHeadRemediated(rc, buildID, chunkID, ev.HeadSHA)
 	return nil
 }
 
@@ -1041,11 +814,6 @@ func (b *BuildObject) handleDeployFailureEvent(rc restate.RunContext, buildID, c
 			return err
 		}
 	}
-	rev := b.getChunkRevision(rc, buildID, chunkID)
-	rev.headSHA = firstNonEmpty(strings.TrimSpace(ev.HeadSHA), rev.headSHA)
-	rev.mergeSHA = firstNonEmpty(strings.TrimSpace(ev.MergeSHA), rev.mergeSHA)
-	rev.merged = true
-	b.setChunkRevision(chunkID, rev)
 	if b.executor != nil {
 		b.dispatchThreadWakePrompt(rc, buildID, FormatDeployFailurePrompt(ev))
 	}
@@ -1053,10 +821,9 @@ func (b *BuildObject) handleDeployFailureEvent(rc restate.RunContext, buildID, c
 }
 
 func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
-	_ = b.getChunkRevision(rc, buildID, chunkID)
 	switch event {
 	case prEventOpened, "synchronize":
-		return b.recordPRHeadRevision(rc, buildID, chunkID, ev)
+		return b.recordPRHeadRevision(rc, chunkID, ev)
 	case "check_updated":
 		return b.handlePRCheckEvent(rc, chunkID, event, ev)
 	case "check_failed", "ci_failed":
@@ -1064,10 +831,12 @@ func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID,
 	case "conflict":
 		return b.handleConflictEvent(rc, buildID, chunkID, ev)
 	case "merged":
-		if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "merged"); err != nil {
-			return err
+		if b.store != nil {
+			if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "merged"); err != nil {
+				return err
+			}
 		}
-		if err := b.recordPRMergeRevision(rc, buildID, chunkID, ev.HeadSHA, ev.MergeSHA); err != nil {
+		if err := b.recordPRMergeRevision(rc, chunkID, ev.HeadSHA, ev.MergeSHA); err != nil {
 			return err
 		}
 		if b.executor != nil {
@@ -1105,27 +874,19 @@ func (b *BuildObject) dispatchPREvent(rc restate.RunContext, buildID, chunkID, e
 }
 
 // OnPREvent receives PR lifecycle events for this build.
-func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycleEvent) (outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelOnPREvent, outErr)
-		}
-	}()
-
+func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycleEvent) error {
 	if b.store == nil {
 		return nil
 	}
 	buildID := restate.Key(ctx)
-	deferred, err := runJournaled(ctx, labelOnPREvent, "handle-pr-event-postgres", &stepRecorded, func(rc restate.RunContext) (bool, error) {
+	_, err := runJournaled(ctx, labelOnPREvent, "handle-pr-event-postgres", func(rc restate.RunContext) (bool, error) {
 		chunkID, cErr := b.locateOrAttachPRChunk(rc, buildID, ev)
 		if cErr != nil || chunkID == "" {
 			return false, cErr
 		}
 		event := strings.ToLower(strings.TrimSpace(ev.Event))
 		eventErr := b.dispatchPREvent(rc, buildID, chunkID, event, ev)
-		deferred := errors.Is(eventErr, errDispatchActive)
-		if eventErr != nil && !deferred {
+		if eventErr != nil {
 			if errors.Is(eventErr, errPRTransitionSkipped) {
 				return false, nil
 			}
@@ -1141,20 +902,14 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 				log.Printf("[vanadis-restate] record rollout state warning: %v", rErr)
 			}
 		}
-		return deferred, nil
+		return true, nil
 	})
 	if err != nil {
 		return err
 	}
-	if deferred {
-		deferredEv := ev
-		deferredEv.Status = prEventDeferred
-		_ = restate.ObjectSend(ctx, "Build", buildID, "OnPREvent").Send(deferredEv, restate.WithDelay(time.Second))
-	}
 	rt := b.getRuntime(ctx)
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterPREvent, nil); tErr != nil {
 		if strings.EqualFold(strings.TrimSpace(ev.Event), "deploy_success") {
-			stepRecorded = true
 			return tErr
 		}
 		log.Printf("[vanadis-restate] pr event transition warning: %v", tErr)
@@ -1267,17 +1022,11 @@ func (b *BuildObject) resolveOrAttachPRChunk(rc restate.RunContext, buildID stri
 }
 
 // OnDispatchOutcome receives task execution outcomes.
-func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) (outErr error) {
-	var stepRecorded bool
-	defer func() {
-		if outErr != nil && !stepRecorded {
-			recordReconcileError(labelOnDispatchOutcome, outErr)
-		}
-	}()
+func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) error {
 	if b.store == nil {
 		return nil
 	}
-	applied, err := runJournaled(ctx, labelOnDispatchOutcome, "handle-dispatch-outcome-postgres", &stepRecorded, func(rc restate.RunContext) (bool, error) {
+	applied, err := runJournaled(ctx, labelOnDispatchOutcome, "handle-dispatch-outcome-postgres", func(rc restate.RunContext) (bool, error) {
 		chunkID := strings.TrimSpace(ev.VanadisChunkID)
 		if chunkID == "" {
 			return false, nil
@@ -1313,7 +1062,6 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 	mutation := dispatchCompletionMutation(ev)
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterDispatch, mutation); tErr != nil {
 		if mutation != nil {
-			stepRecorded = true
 			return tErr
 		}
 		log.Printf("[vanadis-restate] dispatch outcome transition warning: %v", tErr)
@@ -1335,14 +1083,9 @@ func (s *PostgresVanadisStore) RecordPRCheckStatus(ctx context.Context, chunkID,
 SET ci_checks = jsonb_set(
         CASE
             WHEN (status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '') AND $4 != '' AND COALESCE(ci_checks->>'_merge_sha', '') = ''
-                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb) - '_head_sha' - '_remediated_sha', '{_merge_sha}', to_jsonb($4::text), true)
+                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb) - '_head_sha', '{_merge_sha}', to_jsonb($4::text), true)
             WHEN status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(ci_checks->>'_merge_sha', '') = '' AND $4 != '' AND COALESCE(ci_checks->>'_head_sha', '') = ''
-                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb) - '_remediated_sha', '{_head_sha}', to_jsonb($4::text), true)
-            WHEN $2 != 'failed' AND NOT EXISTS (
-                SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
-                WHERE key NOT LIKE '\_%' AND value = 'failed'
-            )
-                THEN COALESCE(ci_checks, '{}'::jsonb) - '_remediated_sha'
+                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb), '{_head_sha}', to_jsonb($4::text), true)
             ELSE COALESCE(ci_checks, '{}'::jsonb)
         END,
         ARRAY[$1],
@@ -1402,8 +1145,8 @@ func (s *PostgresVanadisStore) ResetPRCheckState(ctx context.Context, chunkID, h
 		const mergeQ = `UPDATE vanadis_chunks
 SET ci_checks = CASE
         WHEN COALESCE(ci_checks->>'_merge_sha', '') = $3
-            THEN jsonb_strip_nulls(COALESCE(ci_checks, '{}'::jsonb) || jsonb_build_object('_head_sha', NULLIF($2::text, ''), '_merge_sha', NULLIF($3::text, '')))
-        ELSE jsonb_strip_nulls(jsonb_build_object('_head_sha', NULLIF($2::text, ''), '_merge_sha', NULLIF($3::text, '')))
+            THEN jsonb_strip_nulls(COALESCE(ci_checks, '{}'::jsonb) || jsonb_build_object('_head_sha', COALESCE(NULLIF($2::text, ''), NULLIF(ci_checks->>'_head_sha', '')), '_merge_sha', NULLIF($3::text, '')))
+        ELSE jsonb_strip_nulls(jsonb_build_object('_head_sha', COALESCE(NULLIF($2::text, ''), NULLIF(ci_checks->>'_head_sha', '')), '_merge_sha', NULLIF($3::text, '')))
     END,
     banner = '',
     updated_at = CURRENT_TIMESTAMP
@@ -1417,22 +1160,10 @@ WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled');`
 		}
 		return nil
 	}
-	var headAtNano int64
-	if headAt := prHeadAtFromContext(ctx); !headAt.IsZero() {
-		headAtNano = headAt.UTC().UnixNano()
-	}
 	const syncQ = `UPDATE vanadis_chunks AS c
 SET ci_checks = CASE
-        WHEN $2 != '' AND LOWER(COALESCE(c.ci_checks->>'_head_sha', '')) = LOWER($2) THEN
-            CASE
-                WHEN $3::bigint > 0 THEN jsonb_set(c.ci_checks - '_merge_sha', '{_head_at}', to_jsonb($3::text), true)
-                ELSE c.ci_checks - '_merge_sha'
-            END
-        WHEN $2 != '' THEN jsonb_strip_nulls(jsonb_build_object(
-            '_head_sha', $2::text,
-            '_head_at', CASE WHEN $3::bigint > 0 THEN $3::text ELSE NULL END,
-            '_seen_heads', NULLIF(CONCAT_WS(',', NULLIF(c.ci_checks->>'_seen_heads', ''), NULLIF(c.ci_checks->>'_head_sha', ''), $2::text), '')
-        ))
+        WHEN $2 != '' AND LOWER(COALESCE(c.ci_checks->>'_head_sha', '')) = LOWER($2) THEN c.ci_checks - '_merge_sha'
+        WHEN $2 != '' THEN jsonb_build_object('_head_sha', $2::text)
         ELSE '{}'::jsonb
     END,
     banner = '',
@@ -1444,28 +1175,13 @@ WHERE c.id = $1
   AND c.status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed', 'failed', 'cancelled')
   AND COALESCE(c.ci_checks->>'_merge_sha', '') = ''
   AND b.status NOT IN ('completed', 'failed', 'cancelled')
-  AND ($4::boolean OR (NOT (
-      $3::bigint > 0
-      AND COALESCE(c.ci_checks->>'_head_at', '') ~ '^[0-9]+$'
-      AND $3::bigint < (c.ci_checks->>'_head_at')::bigint
-  )
-  AND (
-      $2 = ''
-      OR COALESCE(c.ci_checks->>'_head_sha', '') = ''
-      OR LOWER(c.ci_checks->>'_head_sha') = LOWER($2)
-      OR (
-          $3::bigint > 0
-          AND COALESCE(c.ci_checks->>'_head_at', '') ~ '^[0-9]+$'
-          AND $3::bigint > (c.ci_checks->>'_head_at')::bigint
-      )
-      OR NOT (LOWER($2) = ANY(string_to_array(LOWER(COALESCE(c.ci_checks->>'_seen_heads', '')), ',')))
-  )));`
-	tag, err := s.db.Exec(ctx, syncQ, id, cleanHead, headAtNano, prHeadVerifiedFromContext(ctx))
+  AND ($3::boolean OR $2 = '' OR COALESCE(c.ci_checks->>'_head_sha', '') = '' OR LOWER(c.ci_checks->>'_head_sha') = LOWER($2));`
+	tag, err := s.db.Exec(ctx, syncQ, id, cleanHead, prHeadVerifiedFromContext(ctx))
 	if err != nil {
 		return fmt.Errorf("reset pr check state: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return s.recoverFailedPR(ctx, id, cleanHead, headAtNano)
+		return s.recoverFailedPR(ctx, id, cleanHead)
 	}
 	return nil
 }
