@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -119,6 +121,16 @@ func (s *VanadisServer) restateIngressURL() string {
 	return url
 }
 
+var ErrRestateTimeout = errors.New("upstream response timed out; acceptance unknown; check build status before resubmitting")
+
+func restateCallError(parent context.Context, err error) error {
+	var timeout net.Error
+	if parent.Err() == nil && (errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout())) {
+		return ErrRestateTimeout
+	}
+	return err
+}
+
 // callRestateIngress proxies a synchronous command to Restate ingress.
 func (s *VanadisServer) callRestateIngress(ctx context.Context, path string, payload any, out any) error {
 	ingressURL := s.restateIngressURL()
@@ -136,6 +148,10 @@ func (s *VanadisServer) callRestateIngress(ctx context.Context, path string, pay
 		reqBody = http.NoBody
 	}
 
+	// Leave five seconds within the server write budget to return an actionable response.
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	url := ingressURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, reqBody)
 	if err != nil {
@@ -150,13 +166,13 @@ func (s *VanadisServer) callRestateIngress(ctx context.Context, path string, pay
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("call restate ingress %s: %w", path, err)
+		return fmt.Errorf("call restate ingress %s: %w", path, restateCallError(parent, err))
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return fmt.Errorf("read restate response: %w", err)
+		return fmt.Errorf("read restate response: %w", restateCallError(parent, err))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
