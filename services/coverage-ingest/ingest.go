@@ -1,0 +1,350 @@
+package main
+
+import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"gopkg.in/yaml.v3"
+)
+
+// defaultFlushTimeout bounds a single flush request when the config omits flush_timeout.
+const defaultFlushTimeout = 60 * time.Second
+
+// maxArchiveEntryBytes caps a single extracted coverage file so a misbehaving target
+// cannot fill the collector's scratch disk.
+const maxArchiveEntryBytes = 256 << 20
+
+// Target is one coverage flush endpoint. Several targets may share a Service name;
+// their counters are merged before ingest.
+type Target struct {
+	Service string `yaml:"service"`
+	URL     string `yaml:"url"`
+}
+
+// Config is the collector's YAML configuration.
+type Config struct {
+	Targets      []Target      `yaml:"targets"`
+	FlushTimeout time.Duration `yaml:"flush_timeout"`
+}
+
+// CoverageRow is one function's coverage within a service.
+type CoverageRow struct {
+	File     string
+	Function string
+	Percent  float64
+}
+
+// ParseConfig decodes and validates collector YAML, applying the default flush timeout.
+func ParseConfig(data []byte) (Config, error) {
+	var cfg Config
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	if len(cfg.Targets) == 0 {
+		return Config{}, errors.New("config: no targets")
+	}
+	for i, t := range cfg.Targets {
+		if strings.TrimSpace(t.Service) == "" || strings.TrimSpace(t.URL) == "" {
+			return Config{}, fmt.Errorf("config: target %d needs service and url", i)
+		}
+	}
+	if cfg.FlushTimeout < 0 {
+		return Config{}, errors.New("config: flush_timeout must not be negative")
+	}
+	if cfg.FlushTimeout == 0 {
+		cfg.FlushTimeout = defaultFlushTimeout
+	}
+	return cfg, nil
+}
+
+// ParseFuncReport converts `go tool covdata func` output into rows keyed by
+// (file, function). Receiver prefixes are stripped and duplicate keys keep the max percent.
+func ParseFuncReport(out []byte) []CoverageRow {
+	var rows []CoverageRow
+	index := map[[2]string]int{}
+	for line := range strings.SplitSeq(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[0] == "total" || strings.HasPrefix(fields[0], "total:") {
+			continue
+		}
+		file := stripLineSuffix(fields[0])
+		fn := fields[1]
+		if i := strings.LastIndex(fn, "."); i >= 0 {
+			fn = fn[i+1:]
+		}
+		pct, err := strconv.ParseFloat(strings.TrimSuffix(fields[2], "%"), 64)
+		if err != nil || file == "" || fn == "" {
+			continue
+		}
+		key := [2]string{file, fn}
+		if i, ok := index[key]; ok {
+			rows[i].Percent = max(rows[i].Percent, pct)
+			continue
+		}
+		index[key] = len(rows)
+		rows = append(rows, CoverageRow{File: file, Function: fn, Percent: pct})
+	}
+	return rows
+}
+
+// stripLineSuffix removes a trailing ":<line>:" (or ":<line>") from a covdata location.
+func stripLineSuffix(loc string) string {
+	loc = strings.TrimSuffix(loc, ":")
+	if i := strings.LastIndex(loc, ":"); i >= 0 {
+		if _, err := strconv.Atoi(loc[i+1:]); err == nil {
+			return loc[:i]
+		}
+	}
+	return loc
+}
+
+// ExtractFlushArchive writes the regular files of a coverage flush tar into dir and
+// returns how many covcounters files it contained. Entry names with path separators or
+// ".." are rejected.
+func ExtractFlushArchive(r io.Reader, dir string) (int, error) {
+	tr := tar.NewReader(r)
+	counters := 0
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return counters, nil
+		}
+		if err != nil {
+			return counters, fmt.Errorf("read archive: %w", err)
+		}
+		if strings.ContainsAny(hdr.Name, `/\`) || strings.Contains(hdr.Name, "..") || hdr.Name == "" {
+			return counters, fmt.Errorf("unsafe archive entry %q", hdr.Name)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			return counters, fmt.Errorf("archive entry %q is not a regular file", hdr.Name)
+		}
+		if hdr.Size > maxArchiveEntryBytes {
+			return counters, fmt.Errorf("archive entry %q exceeds %d bytes", hdr.Name, maxArchiveEntryBytes)
+		}
+		if err := writeEntry(dir, hdr.Name, tr); err != nil {
+			return counters, err
+		}
+		if strings.HasPrefix(hdr.Name, "covcounters.") {
+			counters++
+		}
+	}
+}
+
+// writeEntry creates a new file name in dir. Callers must pass a name already validated
+// to contain no path separators or "..", so the joined path cannot leave dir.
+func writeEntry(dir, name string, r io.Reader) error {
+	path := filepath.Join(dir, name)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", name, err)
+	}
+	_, cErr := io.Copy(f, io.LimitReader(r, maxArchiveEntryBytes))
+	return errors.Join(cErr, f.Close())
+}
+
+// CovdataRunner produces a `go tool covdata func` report over merged coverage dirs.
+type CovdataRunner interface {
+	Func(ctx context.Context, dirs []string) ([]byte, error)
+}
+
+// ExecCovdata runs `go tool covdata func` using the Go binary at GoBin.
+type ExecCovdata struct {
+	GoBin string
+}
+
+// covdataArgs returns the argv (after the go binary) for a merged func report.
+func covdataArgs(dirs []string) []string {
+	return []string{"tool", "covdata", "func", "-i=" + strings.Join(dirs, ",")}
+}
+
+// Func implements CovdataRunner.
+func (e ExecCovdata) Func(ctx context.Context, dirs []string) ([]byte, error) {
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, e.GoBin, covdataArgs(dirs)...)
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("covdata func: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return out, nil
+}
+
+// CoverageStore persists per-service coverage rows.
+type CoverageStore interface {
+	UpsertService(ctx context.Context, service string, rows []CoverageRow) error
+}
+
+// TxBeginner is the subset of a pgx pool the store needs.
+type TxBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// PostgresStore writes production_code_coverage.
+type PostgresStore struct {
+	DB TxBeginner
+}
+
+// upsertCoverageSQL matches the retired collector: a 0% sample never lowers a recorded
+// percent nor clears an older last_executed_at.
+const upsertCoverageSQL = `INSERT INTO production_code_coverage
+    (service, file, function_name, coverage_percent, last_executed_at, first_seen_at, updated_at)
+SELECT $1, t.file, t.function_name, t.pct,
+       CASE WHEN t.pct > 0 THEN now() ELSE NULL END, now(), now()
+FROM unnest($2::text[], $3::text[], $4::real[]) AS t(file, function_name, pct)
+ON CONFLICT (service, file, function_name) DO UPDATE SET
+    coverage_percent = CASE WHEN excluded.coverage_percent > 0
+        THEN excluded.coverage_percent ELSE production_code_coverage.coverage_percent END,
+    last_executed_at = CASE WHEN excluded.coverage_percent > 0
+        THEN now() ELSE production_code_coverage.last_executed_at END,
+    updated_at = now()`
+
+// deleteAbsentSQL removes a service's rows for functions no longer present in its binaries.
+const deleteAbsentSQL = `DELETE FROM production_code_coverage p
+WHERE p.service = $1
+  AND NOT EXISTS (
+    SELECT 1 FROM unnest($2::text[], $3::text[]) AS k(file, function_name)
+    WHERE k.file = p.file AND k.function_name = p.function_name)`
+
+// UpsertService applies rows for service in one transaction and prunes functions absent
+// from rows. An empty rows slice is a no-op so a broken report never wipes a service.
+func (s PostgresStore) UpsertService(ctx context.Context, service string, rows []CoverageRow) (err error) {
+	if len(rows) == 0 {
+		return nil
+	}
+	files := make([]string, len(rows))
+	funcs := make([]string, len(rows))
+	pcts := make([]float32, len(rows))
+	for i, r := range rows {
+		files[i], funcs[i], pcts[i] = r.File, r.Function, float32(r.Percent)
+	}
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin %s: %w", service, err)
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, tx.Rollback(ctx))
+		}
+	}()
+	if _, err = tx.Exec(ctx, upsertCoverageSQL, service, files, funcs, pcts); err != nil {
+		return fmt.Errorf("upsert %s: %w", service, err)
+	}
+	if _, err = tx.Exec(ctx, deleteAbsentSQL, service, files, funcs); err != nil {
+		return fmt.Errorf("prune %s: %w", service, err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit %s: %w", service, err)
+	}
+	return nil
+}
+
+// groupTargets returns service names in first-seen order and each service's targets.
+func groupTargets(targets []Target) ([]string, map[string][]Target) {
+	var order []string
+	groups := map[string][]Target{}
+	for _, t := range targets {
+		if _, ok := groups[t.Service]; !ok {
+			order = append(order, t.Service)
+		}
+		groups[t.Service] = append(groups[t.Service], t)
+	}
+	return order, groups
+}
+
+// fetchTarget creates dir, POSTs a flush request, and extracts the archive into it.
+func fetchTarget(ctx context.Context, client *http.Client, timeout time.Duration, t Target, dir string) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return fmt.Errorf("create target dir: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.URL, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("flush: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, rErr := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return errors.Join(fmt.Errorf("flush: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), rErr)
+	}
+	n, err := ExtractFlushArchive(resp.Body, dir)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("flush archive has no covcounters files")
+	}
+	return nil
+}
+
+// Ingest flushes every target, merges counters per service, and upserts each service.
+// Failing targets are logged and skipped; the returned error names every failure.
+func Ingest(ctx context.Context, cfg Config, client *http.Client, runner CovdataRunner, store CoverageStore) error {
+	workDir, err := os.MkdirTemp("", "coverage-ingest-*")
+	if err != nil {
+		return fmt.Errorf("create work dir: %w", err)
+	}
+	defer func() {
+		if err := os.RemoveAll(workDir); err != nil {
+			log.Printf("[coverage-ingest] cleanup %s: %v", workDir, err)
+		}
+	}()
+
+	order, groups := groupTargets(cfg.Targets)
+	var errs []error
+	for si, service := range order {
+		var dirs []string
+		for ti, t := range groups[service] {
+			dir := filepath.Join(workDir, fmt.Sprintf("%d-%d", si, ti))
+			if err := fetchTarget(ctx, client, cfg.FlushTimeout, t, dir); err != nil {
+				log.Printf("[coverage-ingest] skipping target %s (%s): %v", t.Service, t.URL, err)
+				errs = append(errs, fmt.Errorf("target %s (%s): %w", t.Service, t.URL, err))
+				continue
+			}
+			dirs = append(dirs, dir)
+		}
+		if len(dirs) == 0 {
+			continue
+		}
+		if err := ingestService(ctx, service, dirs, runner, store); err != nil {
+			log.Printf("[coverage-ingest] service %s failed: %v", service, err)
+			errs = append(errs, fmt.Errorf("service %s: %w", service, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func ingestService(ctx context.Context, service string, dirs []string, runner CovdataRunner, store CoverageStore) error {
+	out, err := runner.Func(ctx, dirs)
+	if err != nil {
+		return err
+	}
+	rows := ParseFuncReport(out)
+	if len(rows) == 0 {
+		return errors.New("covdata report has no functions")
+	}
+	if err := store.UpsertService(ctx, service, rows); err != nil {
+		return err
+	}
+	log.Printf("[coverage-ingest] %s: upserted %d functions from %d sources", service, len(rows), len(dirs))
+	return nil
+}
