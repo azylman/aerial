@@ -432,6 +432,13 @@ spec:
                   - scratch-service
                   - mirrormere-core
                   - eri
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: coverage-ingest
+      ports:
+        - port: 8080
+          protocol: TCP
   podSelector:
     matchLabels:
       app.kubernetes.io/name: eri
