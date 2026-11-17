@@ -486,6 +486,7 @@ func (s *VanadisServer) handleMCPFailChunk(ctx context.Context, args MCPFailChun
 }
 
 func (s *VanadisServer) registerMCPTools(mcpServer *mcp.Server) {
+	s.registerRetryActionTool(mcpServer)
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "get_build",
 		Description: "Get concise build metadata, queue status, and chunk summaries by build ID or Discord thread ID.",
