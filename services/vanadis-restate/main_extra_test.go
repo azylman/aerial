@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1052,21 +1053,23 @@ func TestReconcileErrorsMetric(t *testing.T) {
 type checkStatusSpyStore struct {
 	VanadisStore
 
-	chunks        []VanadisChunk
-	calls         []string
-	resets        []string
-	failed        []string
-	banners       []string
-	err           error
-	resetErr      error
-	statusErr     error
-	bannerErr     error
-	failErr       error
-	skipFailApply bool
+	lifecycleStatus string
+	getBuildErr     error
+	chunks          []VanadisChunk
+	calls           []string
+	resets          []string
+	failed          []string
+	banners         []string
+	err             error
+	resetErr        error
+	statusErr       error
+	bannerErr       error
+	failErr         error
+	skipFailApply   bool
 }
 
 func (s *checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
-	return &VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, s.chunks, nil
+	return &VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, s.chunks, s.getBuildErr
 }
 
 func (s *checkStatusSpyStore) RecordPRCheckStatus(_ context.Context, chunkID, headSHA, checkName, checkState string) error {
@@ -1079,8 +1082,60 @@ func (s *checkStatusSpyStore) ResetPRCheckState(_ context.Context, chunkID, head
 	return s.resetErr
 }
 
-func (s *checkStatusSpyStore) UpdatePRLifecycleStatus(_ context.Context, _, _ string) error {
+func (s *checkStatusSpyStore) UpdatePRLifecycleStatus(_ context.Context, _ string, status string) error {
+	s.lifecycleStatus = status
 	return s.statusErr
+}
+
+func TestBuildObject_MergeRevisionAfterLifecycle(t *testing.T) {
+	t.Parallel()
+	unavailable := errors.New("reset unavailable")
+	tests := []struct {
+		name, mergeSHA    string
+		resetErr, wantErr error
+	}{
+		{"missing optional merge SHA", "", errPRTransitionSkipped, nil},
+		{"rejected merge reset reloads lifecycle", "merge-event", errPRTransitionSkipped, errPRTransitionSkipped},
+		{"failed merge reset retries", "merge-event", unavailable, unavailable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := &checkStatusSpyStore{resetErr: tc.resetErr, chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Status: "merged", HeadSHA: "head"}}}
+			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			bo.setChunkRevision("c1", prRevisionState{headSHA: "head"})
+			ctx := mockRunContext{Context: context.Background()}
+			err := bo.handlePREventType(ctx, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "head", MergeSHA: tc.mergeSHA})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("merge error=%v want=%v", err, tc.wantErr)
+			}
+			if err := bo.handlePREventType(ctx, "b1", "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-actual", CheckName: "build", CheckState: "passed"}); err != nil {
+				t.Fatalf("merge check rejected: %v", err)
+			}
+			if err := bo.handlePREventType(ctx, "b1", "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "head", CheckName: "lint", CheckState: "passed"}); !errors.Is(err, errPRTransitionSkipped) {
+				t.Fatalf("head check error=%v", err)
+			}
+		})
+	}
+}
+
+func TestBuildObject_RejectedCheckFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+	}{{"skipped write", errPRTransitionSkipped}, {"failed write", errors.New("database unavailable")}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := &checkStatusSpyStore{err: tc.err, getBuildErr: errors.New("read unavailable")}
+			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			err := bo.handlePREventType(mockRunContext{Context: context.Background()}, "b1", "c1", "check_failed", pubsub.PRLifecycleEvent{HeadSHA: "new", CheckName: "lint"})
+			if !errors.Is(err, tc.err) || store.lifecycleStatus != "" {
+				t.Fatalf("error=%v lifecycle=%s", err, store.lifecycleStatus)
+			}
+		})
+	}
 }
 
 func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*VanadisBuild, *VanadisChunk, bool, error) {
@@ -1104,7 +1159,15 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	spy := &checkStatusSpyStore{}
-	bo := NewBuildObject("", nil).WithAuthority(spy, nil)
+	var currentHead atomic.Value
+	currentHead.Store("sha-2")
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"state":"open","merged":false,"head":{"sha":%q}}`, currentHead.Load())
+	}))
+	defer api.Close()
+	executor := NewExecutor("", nil, nil, "", api.Client())
+	executor.gitHubAPIURL = api.URL
+	bo := NewBuildObject("", nil).WithAuthority(spy, executor)
 
 	// Empty check name is ignored
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{CheckName: ""}))
@@ -1125,19 +1188,19 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 
 	// synchronize advances tracked revision to sha-2 and resets check state
 	t2 := time.Date(2026, 11, 16, 23, 0, 0, 0, time.UTC)
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", OccurredAt: t2}))
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-2", OccurredAt: t2}))
 	assert.Equal(t, []string{"c1:sha-2:"}, spy.resets)
 
 	// delayed synchronize for superseded sha-1 or older timestamp is rejected without mutating revision
 	spy.resets = nil
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-1"}), errPRTransitionSkipped)
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-0", OccurredAt: t2.Add(-time.Minute)}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-1"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-0", OccurredAt: t2.Add(-time.Minute)}), errPRTransitionSkipped)
 	assert.Empty(t, spy.resets)
 
 	// delayed check_updated and check_failed from old head sha-1 are rejected
 	spy.calls = nil
 	assert.ErrorIs(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "pending"}), errPRTransitionSkipped)
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test"}), errPRTransitionSkipped)
 	assert.Empty(t, spy.calls)
 
 	// check_updated for new head sha-2 succeeds
@@ -1148,7 +1211,8 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	spy.resets = nil
 	spy.calls = nil
 	t3 := t2.Add(time.Minute)
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", OccurredAt: t3}))
+	currentHead.Store("sha-1")
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-1", OccurredAt: t3}))
 	assert.Equal(t, []string{"c1:sha-1:"}, spy.resets)
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "passed"}))
 	assert.Equal(t, []string{"c1:sha-1:test:passed"}, spy.calls)
@@ -1156,13 +1220,16 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	// advance back to sha-2 with newer timestamp t4
 	spy.resets = nil
 	t4 := t3.Add(time.Minute)
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", OccurredAt: t4}))
+	currentHead.Store("sha-2")
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-2", OccurredAt: t4}))
 	assert.Equal(t, []string{"c1:sha-2:"}, spy.resets)
 
 	// untimestamped synchronize on c2 clears headAt so delayed sha-a with older timestamp is rejected
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-a", OccurredAt: t2}))
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-b"}))
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-a", OccurredAt: t3}), errPRTransitionSkipped)
+	currentHead.Store("sha-a")
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-a", OccurredAt: t2}))
+	currentHead.Store("sha-b")
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-b"}))
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-a", OccurredAt: t3}), errPRTransitionSkipped)
 	assert.True(t, prHeadAtFromContext(nil).IsZero())
 	assert.True(t, prHeadAtFromContext(context.Background()).IsZero())
 	assert.Nil(t, withPRHeadAt(nil, time.Time{}))
@@ -1176,8 +1243,9 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	spy.resets = nil
 
 	// failed or skipped ResetPRCheckState on synchronize does not overwrite cached revision
+	currentHead.Store("sha-unapplied")
 	spy.resetErr = errPRTransitionSkipped
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-unapplied"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-unapplied"}), errPRTransitionSkipped)
 	spy.resetErr = nil
 	spy.calls = nil
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "passed"}))
@@ -1186,9 +1254,9 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	// merged resets check state for merge commit and rejects delayed pre-merge head sha-2 synchronize and checks while accepting merge-sha-3 checks
 	spy.calls = nil
 	spy.resets = nil
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", MergeSHA: "merge-sha-3"}))
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", MergeSHA: "merge-sha-3"}))
 	assert.Equal(t, []string{"c1:sha-2:merge-sha-3"}, spy.resets)
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-4"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-4"}), errPRTransitionSkipped)
 	assert.ErrorIs(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "pending"}), errPRTransitionSkipped)
 	assert.Empty(t, spy.calls)
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-sha-3", CheckName: "Build & Push Images (eri)", CheckState: "passed"}))
@@ -1197,7 +1265,7 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	// store error on recordPRMergeRevision prevents cached revision overwrite; store error on check_updated propagates
 	spyErr := &checkStatusSpyStore{err: errors.New("db error"), resetErr: errors.New("reset err")}
 	boErr := NewBuildObject("", nil).WithAuthority(spyErr, nil)
-	boErr.recordPRMergeRevision(ctx, "b1", "c1", "sha-2", "merge-sha-3")
+	assert.Error(t, boErr.recordPRMergeRevision(ctx, "b1", "c1", "sha-2", "merge-sha-3"))
 	assert.Error(t, boErr.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-sha-3", CheckName: "test", CheckState: "passed"}))
 	assert.Equal(t, []string{"c1:merge-sha-3:test:passed"}, spyErr.calls)
 
@@ -1213,6 +1281,13 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	assert.ErrorIs(t, boRestart.handlePREventType(nil, "b1", "c-df-2", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-pre", CheckName: "test"}), errPRTransitionSkipped)
 	assert.NoError(t, boRestart.handlePREventType(nil, "b1", "c-df-2", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-post-merge", CheckName: "test", CheckState: "passed"}))
 	assert.Equal(t, []string{"c-df-2:sha-post-merge:test:passed"}, spyRestart.calls)
+	// Rejected post-merge check writes must not pin an unaccepted merge SHA.
+	mergedStore := &checkStatusSpyStore{err: errPRTransitionSkipped}
+	mergedObject := NewBuildObject("", nil).WithAuthority(mergedStore, nil)
+	mergedObject.setChunkRevision("c1", prRevisionState{headSHA: "head", merged: true})
+	assert.ErrorIs(t, mergedObject.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "rejected-merge", CheckName: "build", CheckState: "passed"}), errPRTransitionSkipped)
+	mergedStore.err = nil
+	assert.NoError(t, mergedObject.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "accepted-merge", CheckName: "build", CheckState: "passed"}))
 }
 
 type mockBusError struct {

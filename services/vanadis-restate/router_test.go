@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/assert"
@@ -322,7 +323,7 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 	assert.NoError(t, store.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
 
 	// Skipped transition (0 rows affected)
-	storeZero, _ := dbScript{execTag: "UPDATE 0"}.open()
+	storeZero, _ := dbScript{execTag: "UPDATE 0", row: errRow(pgx.ErrNoRows)}.open()
 	assert.ErrorIs(t, storeZero.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"), errPRTransitionSkipped)
 	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "sha-2", ""), errPRTransitionSkipped)
 	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"), errPRTransitionSkipped)
