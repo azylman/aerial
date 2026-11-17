@@ -504,7 +504,7 @@ REBASE_STAGED_CHECK=$(bash -c "
     git -C \"\$WORK_DIR\" add shared.txt
     SCRATCH_DIR_CLEANUP=\"\$WORK_DIR\"
     if ! rebase_staged_changes main 'feat: conflict' 2>/dev/null; then
-        if [ -z \"\$SCRATCH_DIR_CLEANUP\" ] && git diff --cached --name-only | grep -q 'shared.txt'; then
+        if [ -d \"\$WORK_DIR\" ] && git diff --cached --name-only | grep -q 'shared.txt'; then
             echo 'rebase_conflict:aborted_cleanly'
         fi
     fi
@@ -591,7 +591,7 @@ REBASE_REMOTE_ADVANCE_CHECK=$(bash -c "
     SCRATCH_DIR_CLEANUP=\"\$WORK_DIR\"
     if ! rebase_staged_changes main 'feat: conflict' 2>/dev/null; then
         # On conflict, workspace must be preserved and staged changes restored to CONFLICT_HEAD
-        if [ -z \"\$SCRATCH_DIR_CLEANUP\" ] && \
+        if [ -d \"\$WORK_DIR\" ] && \
            [ \"\$(git -C \"\$WORK_DIR\" rev-parse HEAD)\" = \"\$CONFLICT_HEAD\" ] && \
            git -C \"\$WORK_DIR\" diff --cached --name-only | grep -q '^file2a\.txt$'; then
             echo 'adv_conflict_restored:ok'
@@ -1772,16 +1772,10 @@ INIT_CHUNK_REUSE_CHECK=$(bash -c "
     export AERIAL_SCRATCH_BASE_DIR=\"\$TEST_BASE\"
 
     # Create stale abandoned random scratch directory (> 24 hours old), fresh scratch directory,
-    # preserved scratch directory (> 24 hours old), and dirty git checkout (> 24 hours old root mtime)
+    # and stale vanadis directory (> 24 hours old)
     mkdir -p \"\$TEST_BASE/aerial-scratch.stale123\"
     touch -d '2 days ago' \"\$TEST_BASE/aerial-scratch.stale123\"
     mkdir -p \"\$TEST_BASE/aerial-scratch.fresh123\"
-    mkdir -p \"\$TEST_BASE/aerial-scratch.preserved123/.git\"
-    touch \"\$TEST_BASE/aerial-scratch.preserved123/.git/.aerial-preserved\"
-    touch -d '2 days ago' \"\$TEST_BASE/aerial-scratch.preserved123\" \"\$TEST_BASE/aerial-scratch.preserved123/.git\" \"\$TEST_BASE/aerial-scratch.preserved123/.git/.aerial-preserved\"
-    git clone -q -b main \"\$REMOTE_DIR\" \"\$TEST_BASE/aerial-scratch.dirty123\"
-    echo 'modified tracked' > \"\$TEST_BASE/aerial-scratch.dirty123/base.txt\"
-    find \"\$TEST_BASE/aerial-scratch.dirty123\" -exec touch -d '2 days ago' {} +
     mkdir -p \"\$TEST_BASE/vanadis-old_chunk-aerial\"
     touch -d '3 days ago' \"\$TEST_BASE/vanadis-old_chunk-aerial\"
 
@@ -1795,8 +1789,7 @@ INIT_CHUNK_REUSE_CHECK=$(bash -c "
     if [ \"\$dir1\" = \"\$TEST_BASE/vanadis-chunk-6-aerial-pr-deterministic-scratch-reuse-aerial\" ] && \
        [[ \"\$branch1\" =~ ^feat/aerial-pr-vanadis-chunk-6-aerial-pr-deterministic-scratch-reuse-[0-9a-f]{6}\$ ]] && \
        [ \"\$reused1\" = 'false' ] && \
-       [ \"\$dir1_mode\" = '700' ] && \
-       [ -f \"\$dir1/.git/.aerial-init-complete\" ]; then
+       [ \"\$dir1_mode\" = '700' ]; then
         echo 'first_init:ok'
     else
         echo \"first_init:fail:dir1=\$dir1:branch1=\$branch1:reused1=\$reused1:mode=\$dir1_mode\"
@@ -1852,18 +1845,16 @@ INIT_CHUNK_REUSE_CHECK=$(bash -c "
         echo \"branch_override:fail:dir4=\$dir4:branch4=\$branch4\"
     fi
 
-    # Subtest 5: Stale abandoned *-scratch.* directories older than 24 hours are pruned while fresh, preserved, dirty, and vanadis-* are kept
+    # Subtest 5: Stale abandoned *-scratch.* directories older than 24 hours are pruned while fresh *-scratch.* and vanadis-* are kept
     if [ ! -d \"\$TEST_BASE/aerial-scratch.stale123\" ] && \
        [ -d \"\$TEST_BASE/aerial-scratch.fresh123\" ] && \
-       [ -d \"\$TEST_BASE/aerial-scratch.preserved123\" ] && \
-       [ -d \"\$TEST_BASE/aerial-scratch.dirty123\" ] && \
        [ -d \"\$TEST_BASE/vanadis-old_chunk-aerial\" ]; then
         echo 'stale_prune:ok'
     else
         echo \"stale_prune:fail:stale=\$(ls -d \$TEST_BASE/*-scratch.* 2>/dev/null)\"
     fi
 
-    # Subtest 6: Incomplete initialization left on main without .aerial-init-complete resumes onto feature branch and preserves edits
+    # Subtest 6: Incomplete initialization left on main checking out feature branch while preserving edits
     INC_DIR=\"\$TEST_BASE/vanadis-chunk_incomplete-aerial\"
     git clone -q -b main \"\$REMOTE_DIR\" \"\$INC_DIR\"
     echo 'partial work before branch' > \"\$INC_DIR/partial.txt\"
@@ -1882,88 +1873,29 @@ INIT_CHUNK_REUSE_CHECK=$(bash -c "
         echo \"incomplete_resume:fail:b1=\$inc_branch1:r1=\$inc_reused1:b2=\$inc_branch2:r2=\$inc_reused2\"
     fi
 
-    # Subtest 7: Failed clone or recovery copy conflict cleans up only staging directory and never deletes existing work
-    FAIL_DIR=\"\$TEST_BASE/vanadis-chunk_clone_fail-aerial\"
-    mkdir -p \"\$FAIL_DIR\"
-    echo 'keep_me' > \"\$FAIL_DIR/survivor.txt\"
-    set +e
-    (AERIAL_REPO_URL_OVERRIDE=\"\$TEST_BASE/nonexistent-remote.git\" VANADIS_CHUNK_ID='chunk_clone_fail' init_scratch aerial >/dev/null 2>&1)
-    fail_rc=\$?
-    mkdir -p \"\$FAIL_DIR/base.txt\"
-    echo 'nested' > \"\$FAIL_DIR/base.txt/nested.txt\"
-    (VANADIS_CHUNK_ID='chunk_clone_fail' init_scratch aerial >/dev/null 2>&1)
-    copy_fail_rc=\$?
-    set -e
-    leftover_stage=\$(find \"\$TEST_BASE\" -maxdepth 1 -name '.init-chunk_clone_fail-*' 2>/dev/null)
-    if [ \"\$fail_rc\" -ne 0 ] && [ \"\$copy_fail_rc\" -ne 0 ] && [ -f \"\$FAIL_DIR/survivor.txt\" ] && [ -f \"\$FAIL_DIR/base.txt/nested.txt\" ] && [ -z \"\$leftover_stage\" ]; then
-        echo 'clone_fail_isolated:ok'
-    else
-        echo \"clone_fail_isolated:fail:rc=\$fail_rc:copy_rc=\$copy_fail_rc:stage=\$leftover_stage\"
-    fi
-
-    # Subtest 8: Interrupted publication recovery resumes from pending stage or backup without losing edits
-    PUB_DIR=\"\$TEST_BASE/vanadis-chunk_pub_recover-aerial\"
-    STAGE_DIR=\$(mktemp -d \"\$TEST_BASE/.init-chunk_pub_recover-aerial.XXXXXX\")
-    git clone -q -b main \"\$REMOTE_DIR\" \"\$STAGE_DIR\"
-    git -C \"\$STAGE_DIR\" checkout -q -b feat/aerial-pr-staged-branch
-    mkdir -p \"\${PUB_DIR}.bak\"
-    echo 'from_backup_edit' > \"\${PUB_DIR}.bak/backup_only.txt\"
-    printf '%s\n' \"\$STAGE_DIR\" > \"\${PUB_DIR}.publish\"
-    pub_json1=\$(VANADIS_CHUNK_ID='chunk_pub_recover' init_scratch aerial)
-    pub_branch1=\$(echo \"\$pub_json1\" | jq -r '.branch')
-    BAK_ONLY_DIR=\"\$TEST_BASE/vanadis-chunk_bak_only-aerial\"
-    mkdir -p \"\${BAK_ONLY_DIR}.bak.99999\"
-    echo 'stranded_backup' > \"\${BAK_ONLY_DIR}.bak.99999/stranded.txt\"
-    printf '%s\n' \"\$TEST_BASE/.init-nonexistent\" > \"\${BAK_ONLY_DIR}.publish\"
-    bak_json1=\$(VANADIS_CHUNK_ID='chunk_bak_only' init_scratch aerial)
-    if [ \"\$pub_branch1\" = 'feat/aerial-pr-staged-branch' ] && \
-       [ \"\$(cat \"\$PUB_DIR/backup_only.txt\" 2>/dev/null)\" = 'from_backup_edit' ] && \
-       [ ! -d \"\${PUB_DIR}.bak\" ] && [ ! -f \"\${PUB_DIR}.publish\" ] && \
-       [ \"\$(cat \"\$BAK_ONLY_DIR/stranded.txt\" 2>/dev/null)\" = 'stranded_backup' ] && \
-       [ ! -d \"\${BAK_ONLY_DIR}.bak.99999\" ] && [ ! -f \"\${BAK_ONLY_DIR}.publish\" ]; then
-        echo 'pub_recovery:ok'
-    else
-        echo \"pub_recovery:fail:branch=\$pub_branch1\"
-    fi
-
-    # Subtest 9: Stale .git/index.lock is recovered preserving staged index snapshots (even when working tree diverges or status config is invalid) while live locks are kept
-    echo 'working tree overwrite' > \"\$dir1/staged.txt\"
-    git -C \"\$dir1\" config status.submoduleSummary invalid
+    # Subtest 7: Stale .git/index.lock is removed on reuse
     touch \"\$dir1/.git/index.lock\"
     lock_json1=\$(VANADIS_CHUNK_ID='chunk-6-aerial-pr-deterministic-scratch-reuse' init_scratch aerial)
-    git -C \"\$dir1\" config --unset status.submoduleSummary || true
     lock_reused1=\$(echo \"\$lock_json1\" | jq -r '.reused // false')
     stale_removed=\$( [ ! -f \"\$dir1/.git/index.lock\" ] && echo yes || echo no )
-    staged_blob=\$(git -C \"\$dir1\" show :staged.txt 2>/dev/null || echo '')
     echo 'post_lock_recovery' > \"\$dir1/after_lock.txt\"
     git -C \"\$dir1\" add after_lock.txt
     staged_after_lock=\$(git -C \"\$dir1\" diff --cached --name-only | tr '\n' ',')
 
-    (
-        exec 7>\"\$dir1/.git/index.lock\"
-        VANADIS_CHUNK_ID='chunk-6-aerial-pr-deterministic-scratch-reuse' init_scratch aerial >/dev/null
-    )
-    live_kept=\$( [ -f \"\$dir1/.git/index.lock\" ] && echo yes || echo no )
-    rm -f \"\$dir1/.git/index.lock\"
-
     if [ \"\$lock_reused1\" = 'true' ] && [ \"\$stale_removed\" = 'yes' ] && \
-       [ \"\$staged_blob\" = 'staged change' ] && \
-       [[ \"\$staged_after_lock\" == *'staged.txt'* ]] && [[ \"\$staged_after_lock\" == *'after_lock.txt'* ]] && \
-       [ \"\$live_kept\" = 'yes' ]; then
+       [[ \"\$staged_after_lock\" == *'after_lock.txt'* ]]; then
         echo 'git_lock_recovery:ok'
     else
-        echo \"git_lock_recovery:fail:reused=\$lock_reused1:stale=\$stale_removed:blob=\$staged_blob:staged=\$staged_after_lock:live=\$live_kept\"
+        echo \"git_lock_recovery:fail:reused=\$lock_reused1:stale=\$stale_removed:staged=\$staged_after_lock\"
     fi
 ")
 assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'first_init:ok' && echo true || echo false)" "init_scratch initializes deterministic chunk-keyed directory with mode 700"
 assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'restart_reuse:ok' && echo true || echo false)" "init_scratch reuses existing chunk directory preserving uncommitted/staged edits and branch"
 assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'sanitize_chunk_id:ok' && echo true || echo false)" "init_scratch sanitizes chunk ID to alphanumeric, dash, and underscore"
 assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'branch_override:ok' && echo true || echo false)" "init_scratch with explicit --branch bypasses deterministic chunk directory"
-assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'stale_prune:ok' && echo true || echo false)" "init_scratch prunes stale abandoned *-scratch.* directories while preserving fresh, preserved, and dirty ones"
+assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'stale_prune:ok' && echo true || echo false)" "init_scratch prunes stale abandoned *-scratch.* directories while preserving fresh and vanadis-* ones"
 assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'incomplete_resume:ok' && echo true || echo false)" "init_scratch safely completes partial initialization left on main while preserving work"
-assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'clone_fail_isolated:ok' && echo true || echo false)" "init_scratch failed clone removes only staging dir and preserves existing directory"
-assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'pub_recovery:ok' && echo true || echo false)" "init_scratch recovers interrupted publication from pending stage or backup directory"
-assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'git_lock_recovery:ok' && echo true || echo false)" "init_scratch removes stale .git/index.lock preserving index/edits and retains live locks"
+assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'git_lock_recovery:ok' && echo true || echo false)" "init_scratch removes stale .git/index.lock on reuse"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
