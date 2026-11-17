@@ -184,7 +184,7 @@ default_agent = "claude-code"
 review_agent = "claude-code"
 default_model = "sonnet"
 default_backup_agent = "gemini"
-review_reasoning = "thorough"
+review_reasoning = "low"
 review_min_severity = "medium"
 agent_quota_cooldown = "2m"
 review_context_count = 5
@@ -227,11 +227,13 @@ default_panel = "ci"
 [review.subagents.default]
 agent = "claude-code"
 model = "sonnet"
+reasoning = "low"
 review_type = "default"
 
 [review.subagents.test-value]
 agent = "claude-code"
 model = "sonnet"
+reasoning = "low"
 review_type = "test-value"
 instructions = """
 Scope: review only test code on lines this diff adds or changes. Do not raise findings on pre-existing test cases, assertions, or helpers on unchanged lines, even inside a file the diff touches, unless a changed line alters that test's behavior. Mechanical edits (renames, dropped receiver names, formatting, lint autofixes such as http.NoBody) do not bring the surrounding test into scope.
@@ -241,13 +243,14 @@ Scope: review only test code on lines this diff adds or changes. Do not raise fi
 members = ["default", "test-value"]
 synthesis_agent = "claude-code"
 synthesis_model = "sonnet"
+synthesis_reasoning = "low"
 synthesis_backup_agent = "gemini"
 EOF
 else
   cat > /root/.roborev/config.toml <<'EOF'
 default_agent = "gemini"
 review_agent = "gemini"
-review_reasoning = "thorough"
+review_reasoning = "low"
 review_min_severity = "medium"
 agent_quota_cooldown = "2m"
 review_context_count = 5
@@ -289,10 +292,12 @@ default_panel = "ci"
 
 [review.subagents.default]
 agent = "gemini"
+reasoning = "low"
 review_type = "default"
 
 [review.subagents.test-value]
 agent = "gemini"
+reasoning = "low"
 review_type = "test-value"
 instructions = """
 Scope: review only test code on lines this diff adds or changes. Do not raise findings on pre-existing test cases, assertions, or helpers on unchanged lines, even inside a file the diff touches, unless a changed line alters that test's behavior. Mechanical edits (renames, dropped receiver names, formatting, lint autofixes such as http.NoBody) do not bring the surrounding test into scope.
@@ -301,6 +306,7 @@ Scope: review only test code on lines this diff adds or changes. Do not raise fi
 [review.panels.ci]
 members = ["default", "test-value"]
 synthesis_agent = "gemini"
+synthesis_reasoning = "low"
 EOF
 fi
 
@@ -648,22 +654,32 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
     if [[ -z "${agent}" || "${agent}" == "gemini" || "${agent}" == "codex" ]]; then
       agent="claude-code"
     fi
+    reasoning="low"
     for i in "${!orig_args[@]}"; do
       if [[ "${orig_args[i]}" == "--agent=gemini" || "${orig_args[i]}" == "--agent=codex" ]]; then
         orig_args[i]="--agent=claude-code"
       elif [[ "${orig_args[i]}" == "--agent" && ( "${orig_args[i+1]:-}" == "gemini" || "${orig_args[i+1]:-}" == "codex" ) ]]; then
         orig_args[i+1]="claude-code"
+      elif [[ "${orig_args[i]}" == --reasoning=* ]]; then
+        orig_args[i]="--reasoning=low"
+      elif [[ "${orig_args[i]}" == "--reasoning" && $((i+1)) -lt ${#orig_args[@]} ]]; then
+        orig_args[i+1]="low"
       fi
     done
   else
     if [[ "${agent}" == "codex" || "${agent}" == "claude-code" || "${agent}" == "claude" ]]; then
       agent="gemini"
     fi
+    reasoning="low"
     for i in "${!orig_args[@]}"; do
       if [[ "${orig_args[i]}" == "--agent=codex" || "${orig_args[i]}" == "--agent=claude-code" || "${orig_args[i]}" == "--agent=claude" ]]; then
         orig_args[i]="--agent=gemini"
       elif [[ "${orig_args[i]}" == "--agent" && ( "${orig_args[i+1]:-}" == "codex" || "${orig_args[i+1]:-}" == "claude-code" || "${orig_args[i+1]:-}" == "claude" ) ]]; then
         orig_args[i+1]="gemini"
+      elif [[ "${orig_args[i]}" == --reasoning=* ]]; then
+        orig_args[i]="--reasoning=low"
+      elif [[ "${orig_args[i]}" == "--reasoning" && $((i+1)) -lt ${#orig_args[@]} ]]; then
+        orig_args[i+1]="low"
       fi
     done
   fi
