@@ -51,6 +51,7 @@ const (
 	EngineAgy            = "agy"
 	EngineClaude         = "claude"
 	EngineCodex          = "codex"
+	EngineMuse           = "muse"
 	VoiceEngineGeminiAPI = "gemini_api"
 )
 
@@ -251,8 +252,9 @@ type CredentialSource struct {
 
 // CredentialSources declares runtime credential inputs without implicit defaults.
 type CredentialSources struct {
-	OAuth CredentialSource `yaml:"oauth" json:"oauth"`
-	Codex CredentialSource `yaml:"codex" json:"codex"`
+	OAuth CredentialSource `yaml:"oauth"          json:"oauth"`
+	Codex CredentialSource `yaml:"codex"          json:"codex"`
+	Muse  CredentialSource `yaml:"muse,omitempty" json:"muse,omitempty"`
 }
 
 // Validate requires each source to select exactly one path or disabled state.
@@ -265,6 +267,9 @@ func (c CredentialSources) Validate() error {
 		if (strings.TrimSpace(entry.source.Path) != "") == entry.source.Disabled {
 			return fmt.Errorf("credential_sources.%s must specify exactly one nonblank path or disabled: true", entry.name)
 		}
+	}
+	if strings.TrimSpace(c.Muse.Path) != "" && c.Muse.Disabled {
+		return fmt.Errorf("credential_sources.muse must specify exactly one nonblank path or disabled: true")
 	}
 	return nil
 }
@@ -305,6 +310,7 @@ type ConfigData struct {
 	Engine                    string                   `yaml:"engine,omitempty"                       json:"engine,omitempty"`
 	ClaudeBin                 string                   `yaml:"claude_bin,omitempty"                   json:"claude_bin,omitempty"`
 	CodexBin                  string                   `yaml:"codex_bin,omitempty"                    json:"codex_bin,omitempty"`
+	MuseBin                   string                   `yaml:"muse_bin,omitempty"                     json:"muse_bin,omitempty"`
 	BotID                     string                   `yaml:"bot_id"                                 json:"bot_id"`
 	SynapseURL                string                   `yaml:"synapse_url"                            json:"synapse_url"`
 	VanadisURL                string                   `yaml:"vanadis_url"                            json:"vanadis_url"`
@@ -441,6 +447,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		Engine                    string                   `yaml:"engine"`
 		ClaudeBin                 string                   `yaml:"claude_bin"`
 		CodexBin                  string                   `yaml:"codex_bin"`
+		MuseBin                   string                   `yaml:"muse_bin"`
 		BotID                     string                   `yaml:"bot_id"`
 		SynapseURL                string                   `yaml:"synapse_url"`
 		VanadisURL                string                   `yaml:"vanadis_url"`
@@ -470,6 +477,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.Engine = raw.Engine
 	c.ClaudeBin = raw.ClaudeBin
 	c.CodexBin = raw.CodexBin
+	c.MuseBin = raw.MuseBin
 	c.BotID = strings.TrimSpace(raw.BotID)
 	c.SynapseURL = strings.TrimRight(strings.TrimSpace(raw.SynapseURL), "/")
 	c.VanadisURL = strings.TrimRight(strings.TrimSpace(raw.VanadisURL), "/")
@@ -689,6 +697,7 @@ func DefaultConfigData() *ConfigData {
 		Engine:                    EngineAgy,
 		ClaudeBin:                 "claude",
 		CodexBin:                  "codex",
+		MuseBin:                   "muse",
 		NATSURL:                   "",
 	}
 }
@@ -717,7 +726,7 @@ func (c *Config) Engine() string {
 	return c.Current().GetEngine()
 }
 
-// GetEngine returns the process-wide execution engine ("claude", "codex", or "agy"), defaulting to "agy".
+// GetEngine returns the process-wide execution engine ("claude", "codex", "muse", or "agy"), defaulting to "agy".
 func (c *ConfigData) GetEngine() string {
 	if c == nil {
 		return EngineAgy
@@ -727,6 +736,9 @@ func (c *ConfigData) GetEngine() string {
 	}
 	if strings.EqualFold(strings.TrimSpace(c.Engine), EngineCodex) {
 		return EngineCodex
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Engine), EngineMuse) {
+		return EngineMuse
 	}
 	return EngineAgy
 }
@@ -917,6 +929,7 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	overrideEnvStr(&data.Engine, lookup, "ENGINE")
 	overrideEnvStr(&data.ClaudeBin, lookup, "CLAUDE_BIN")
 	overrideEnvStr(&data.CodexBin, lookup, "CODEX_BIN")
+	overrideEnvStr(&data.MuseBin, lookup, "MUSE_BIN")
 	overrideEnvStr(&data.APIKey, lookup, "AGY_GEMINI_API_KEY")
 	overrideEnvStr(&data.HarnessAPIKey, lookup, "GEMINI_HARNESS_API_KEY")
 	overrideEnvStr(&data.SystemPrompt, lookup, "SYSTEM_PROMPT")

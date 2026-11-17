@@ -1,6 +1,7 @@
 package env
 
 import (
+	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
@@ -156,6 +157,82 @@ func (p *Provisioner) provisionTargetCodexHooks(codexDir string) {
 	}
 }
 
+func defaultMuseHooks() map[string]any {
+	return map[string]any{
+		"UserPromptSubmit": []any{
+			map[string]any{
+				mcpKeyType:    mcpKeyCommand,
+				mcpKeyCommand: "/usr/local/bin/hook-guard pre-invocation",
+				mcpKeyHooks: []any{
+					map[string]any{
+						mcpKeyType:    mcpKeyCommand,
+						mcpKeyCommand: "/usr/local/bin/hook-guard pre-invocation",
+					},
+				},
+			},
+		},
+		"PreToolUse": []any{
+			map[string]any{
+				"matcher":     ".*",
+				mcpKeyType:    mcpKeyCommand,
+				mcpKeyCommand: "/usr/local/bin/hook-guard all",
+				mcpKeyHooks: []any{
+					map[string]any{
+						mcpKeyType:    mcpKeyCommand,
+						mcpKeyCommand: "/usr/local/bin/hook-guard all",
+					},
+				},
+			},
+		},
+		"PostToolUse": []any{
+			map[string]any{
+				"matcher":     "edit_file|write_file|Edit|MultiEdit|Write",
+				mcpKeyType:    mcpKeyCommand,
+				mcpKeyCommand: "/usr/local/bin/hook-guard post-batch",
+				mcpKeyHooks: []any{
+					map[string]any{
+						mcpKeyType:    mcpKeyCommand,
+						mcpKeyCommand: "/usr/local/bin/hook-guard post-batch",
+					},
+				},
+			},
+		},
+	}
+}
+
+func (p *Provisioner) provisionTargetMuseHooks(museConfigDir string) {
+	if err := os.MkdirAll(museConfigDir, 0o755); err != nil {
+		log.Printf("[Env] Warning: failed to mkdir %s for muse hooks: %v", museConfigDir, err)
+		return
+	}
+	settingsPath := filepath.Join(museConfigDir, "settings.json")
+	mcpServers := make(map[string]any)
+	if data, err := os.ReadFile(settingsPath); err == nil && len(data) > 0 {
+		var existing map[string]any
+		if uErr := json.Unmarshal(data, &existing); uErr == nil && existing != nil {
+			if servers, ok := existing[mcpKeyMCPServers].(map[string]any); ok && servers != nil {
+				mcpServers = servers
+			}
+		}
+	}
+
+	settings := map[string]any{
+		"schema_version": 1,
+		mcpKeyMCPServers: mcpServers,
+		mcpKeyHooks:      defaultMuseHooks(),
+	}
+
+	payload, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		log.Printf("[Env] Warning: failed to marshal muse settings.json for %s: %v", museConfigDir, err)
+		return
+	}
+
+	if err := p.writeAtomic(settingsPath, string(payload)); err != nil {
+		log.Printf("[Env] Warning: failed to write settings.json to %s: %v", museConfigDir, err)
+	}
+}
+
 // SyncHooks provisions hooks.json and executable hook scripts into primary ~/.gemini and all runtime targets.
 func (p *Provisioner) SyncHooks() error {
 	if p == nil || p.homeDir == "" {
@@ -208,6 +285,14 @@ func (p *Provisioner) SyncHooks() error {
 	if p.dataDir != "" {
 		for _, target := range allRuntimeTargets {
 			p.provisionTargetCodexHooks(filepath.Join(p.runtimeHomeDir(target), ".codex"))
+		}
+	}
+
+	// 6. Provision Muse settings.json hooks into primary ~/.config/muse and each runtime target ~/.config/muse
+	p.provisionTargetMuseHooks(filepath.Join(p.homeDir, ".config", "muse"))
+	if p.dataDir != "" {
+		for _, target := range allRuntimeTargets {
+			p.provisionTargetMuseHooks(filepath.Join(p.runtimeHomeDir(target), ".config", "muse"))
 		}
 	}
 

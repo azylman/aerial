@@ -893,6 +893,7 @@ type envOverrideCase struct {
 	wantEngine       string
 	wantClaude       string
 	wantCodex        string
+	wantMuse         string
 	wantKey          string
 	wantModel        string
 	wantTZ           string
@@ -919,6 +920,9 @@ func assertEnvOverrideBasic(t *testing.T, data *ConfigData, tc envOverrideCase) 
 	}
 	if tc.wantCodex != "" && data.CodexBin != tc.wantCodex {
 		t.Errorf("CodexBin = %q, want %q", data.CodexBin, tc.wantCodex)
+	}
+	if tc.wantMuse != "" && data.MuseBin != tc.wantMuse {
+		t.Errorf("MuseBin = %q, want %q", data.MuseBin, tc.wantMuse)
 	}
 	if tc.wantKey != "" && data.APIKey != tc.wantKey {
 		t.Errorf("APIKey = %q, want %q", data.APIKey, tc.wantKey)
@@ -1040,6 +1044,7 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 				"ENGINE":                       "claude",
 				"CLAUDE_BIN":                   "/usr/local/bin/claude",
 				"CODEX_BIN":                    "/usr/local/bin/codex",
+				"MUSE_BIN":                     "/usr/local/bin/muse",
 				"DAEMON_IDLE_TIMEOUT":          "15m",
 				"MAX_BACKGROUND_TASK_DURATION": "45m",
 				"OLLAMA_NUM_CTX":               "8192",
@@ -1049,6 +1054,7 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 			wantEngine: "claude",
 			wantClaude: "/usr/local/bin/claude",
 			wantCodex:  "/usr/local/bin/codex",
+			wantMuse:   "/usr/local/bin/muse",
 			wantKey:    "primary-key",
 			wantModel:  "gemini-custom",
 			wantTZ:     "UTC",

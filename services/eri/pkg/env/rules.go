@@ -423,6 +423,15 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		if _, err := os.Stat(canonicalCodexAuth); err == nil {
 			p.linkOrCopyAsset(canonicalCodexAuth, filepath.Join(runtimeCodex, "auth.json"))
 		}
+
+		canonicalMuseSessions := filepath.Join(p.dataDir, "muse", "sessions")
+		ignore(os.MkdirAll(canonicalMuseSessions, 0o755))
+		runtimeMuseSessions := filepath.Join(runtimeHome, ".local", "share", "muse", "sessions")
+		ignore(os.MkdirAll(filepath.Dir(runtimeMuseSessions), 0o755))
+		prepareSharedTargetDir(runtimeMuseSessions, filepath.Clean(canonicalMuseSessions))
+		if sErr := symlinkRuntimeAsset(canonicalMuseSessions, runtimeMuseSessions); sErr != nil {
+			log.Printf("[Env] Warning: failed to link shared muse sessions %s -> %s: %v", runtimeMuseSessions, canonicalMuseSessions, sErr)
+		}
 	}
 }
 
@@ -434,6 +443,7 @@ func isolateEphemeralSessionStorage(runtimeHome, runtimeGemini string) {
 		filepath.Join(runtimeGemini, "conversations"),
 		filepath.Join(runtimeHome, ".claude", "projects"),
 		filepath.Join(runtimeHome, ".codex", "sessions"),
+		filepath.Join(runtimeHome, ".local", "share", "muse", "sessions"),
 	} {
 		if fi, err := os.Lstat(dir); err == nil && (fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir()) {
 			ignore(os.Remove(dir))
@@ -532,6 +542,15 @@ func (p *Provisioner) linkPrimarySharedAssets(primaryClaude, primaryCodex string
 	if sErr := symlinkRuntimeAsset(canonicalCodexSessions, primaryCodexSessions); sErr != nil {
 		log.Printf("[Env] Warning: failed to link shared codex sessions %s -> %s: %v", primaryCodexSessions, canonicalCodexSessions, sErr)
 	}
+
+	canonicalMuseSessions := filepath.Join(p.dataDir, "muse", "sessions")
+	ignore(os.MkdirAll(canonicalMuseSessions, 0o755))
+	primaryMuseSessions := filepath.Join(p.homeDir, ".local", "share", "muse", "sessions")
+	ignore(os.MkdirAll(filepath.Dir(primaryMuseSessions), 0o755))
+	prepareSharedTargetDir(primaryMuseSessions, filepath.Clean(canonicalMuseSessions))
+	if sErr := symlinkRuntimeAsset(canonicalMuseSessions, primaryMuseSessions); sErr != nil {
+		log.Printf("[Env] Warning: failed to link shared muse sessions %s -> %s: %v", primaryMuseSessions, canonicalMuseSessions, sErr)
+	}
 }
 
 func (p *Provisioner) syncPrimaryRulesAssets(discordRules []ruleSourceFile) {
@@ -555,6 +574,16 @@ func (p *Provisioner) syncPrimaryRulesAssets(discordRules []ruleSourceFile) {
 	} else {
 		if err := os.Remove(filepath.Join(primaryCodex, "AGENTS.md")); err != nil && !os.IsNotExist(err) {
 			log.Printf("[Env] Warning: failed to remove stale primary AGENTS.md: %v", err)
+		}
+	}
+	primaryMuse := filepath.Join(p.homeDir, ".config", "muse")
+	if p.dataDir == "" {
+		if err := p.syncCodexMD(discordRules, primaryMuse); err != nil {
+			log.Printf("[Env] Warning: failed to sync primary muse AGENTS.md: %v", err)
+		}
+	} else {
+		if err := os.Remove(filepath.Join(primaryMuse, "AGENTS.md")); err != nil && !os.IsNotExist(err) {
+			log.Printf("[Env] Warning: failed to remove stale primary muse AGENTS.md: %v", err)
 		}
 	}
 	if p.dataDir != "" {
@@ -620,6 +649,10 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 			codexDir := filepath.Join(home, ".codex")
 			if err := p.syncCodexMD(compiled[target], codexDir); err != nil {
 				log.Printf("[Env] Warning: failed to sync %s runtime AGENTS.md: %v", target, err)
+			}
+			museDir := filepath.Join(home, ".config", "muse")
+			if err := p.syncCodexMD(compiled[target], museDir); err != nil {
+				log.Printf("[Env] Warning: failed to sync %s runtime muse AGENTS.md: %v", target, err)
 			}
 		}
 	}

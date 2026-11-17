@@ -728,10 +728,18 @@ func assertRuntimeHooksOutputs(t *testing.T, tc syncHooksCase, tmpHome, tmpData 
 		if _, err := os.Stat(rtCodexHooks); err != nil {
 			t.Errorf("expected hooks.json in codex runtime %s: %v", target, err)
 		}
+		rtMuseSettings := filepath.Join(tmpData, "runtimes", string(target), ".config", "muse", "settings.json")
+		if _, err := os.Stat(rtMuseSettings); err != nil {
+			t.Errorf("expected settings.json in muse runtime %s: %v", target, err)
+		}
 	}
 	primaryClaudeSettings := filepath.Join(tmpHome, ".claude", "settings.json")
 	if _, err := os.Stat(primaryClaudeSettings); err != nil {
 		t.Errorf("expected settings.json in primary claude home: %v", err)
+	}
+	primaryMuseSettings := filepath.Join(tmpHome, ".config", "muse", "settings.json")
+	if _, err := os.Stat(primaryMuseSettings); err != nil {
+		t.Errorf("expected settings.json in primary muse home: %v", err)
 	}
 	if !tc.blockCodexDir {
 		primaryCodexHooks := filepath.Join(tmpHome, ".codex", "hooks.json")
@@ -964,6 +972,126 @@ func TestProvisionCodexAuthState(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runCodexAuthCase(t, tc)
+		})
+	}
+}
+
+type museProvisionAuthCase struct {
+	desc            string
+	unallocatedProv bool
+	blankHome       bool
+	standalone      bool
+	payload         string
+	preexistingAuth string
+	preexistingSHA  string
+	blockedFS       bool
+	shouldErr       bool
+	expectedAuth    string
+	expectedSHA     string
+}
+
+func assertMuseAuthOutput(t *testing.T, tc museProvisionAuthCase, canonicalMuseDir, tmpHome, tmpData string, p *Provisioner) {
+	t.Helper()
+	data, rErr := os.ReadFile(filepath.Join(canonicalMuseDir, "auth.json"))
+	if rErr != nil || string(data) != tc.expectedAuth {
+		t.Fatalf("auth.json = %q, %v; want %q", string(data), rErr, tc.expectedAuth)
+	}
+	expectedSHA := tc.expectedSHA
+	if expectedSHA == "match_source" {
+		expectedSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(tc.payload)))
+	}
+	shaData, sErr := os.ReadFile(filepath.Join(canonicalMuseDir, ".auth.seed-sha256"))
+	if sErr != nil || strings.TrimSpace(string(shaData)) != expectedSHA {
+		t.Fatalf(".auth.seed-sha256 = %q, %v; want %q", string(shaData), sErr, expectedSHA)
+	}
+	if tmpData == "" {
+		return
+	}
+	primaryLink := filepath.Join(tmpHome, ".config", "muse", "auth.json")
+	if fi, lErr := os.Lstat(primaryLink); lErr != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected symlink at primary muse auth: %v", lErr)
+	}
+	for _, target := range allRuntimeTargets {
+		rtLink := filepath.Join(p.runtimeHomeDir(target), ".config", "muse", "auth.json")
+		if fi, lErr := os.Lstat(rtLink); lErr != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("expected symlink at %s runtime muse auth: %v", target, lErr)
+		}
+	}
+}
+
+func runMuseAuthCase(t *testing.T, tc museProvisionAuthCase) {
+	t.Helper()
+	if tc.unallocatedProv {
+		var pNil *Provisioner
+		if err := pNil.provisionMuseAuthState(); err != nil {
+			t.Fatalf("expected nil error on nil provisioner: %v", err)
+		}
+		return
+	}
+	if tc.blankHome {
+		pEmpty := newDisabledProvisioner(t, "", "")
+		if err := pEmpty.provisionMuseAuthState(); err != nil {
+			t.Fatalf("expected nil error on empty home: %v", err)
+		}
+		return
+	}
+
+	tmpHome := t.TempDir()
+	var tmpData string
+	if !tc.standalone {
+		tmpData = t.TempDir()
+	}
+	p := newDisabledProvisioner(t, tmpHome, tmpData)
+
+	var canonicalMuseDir string
+	if tmpData != "" {
+		canonicalMuseDir = filepath.Join(tmpData, "muse")
+	} else {
+		canonicalMuseDir = filepath.Join(tmpHome, ".config", "muse")
+	}
+
+	if tc.blockedFS {
+		writeTestFile(t, canonicalMuseDir, "blocker")
+	}
+	if tc.preexistingAuth != "" {
+		writeTestFile(t, filepath.Join(canonicalMuseDir, "auth.json"), tc.preexistingAuth)
+	}
+	if tc.preexistingSHA != "" {
+		shaVal := tc.preexistingSHA
+		if shaVal == "match_source" {
+			shaVal = fmt.Sprintf("%x", sha256.Sum256([]byte(tc.payload)))
+		}
+		writeTestFile(t, filepath.Join(canonicalMuseDir, ".auth.seed-sha256"), shaVal)
+	}
+	if tc.payload != "" {
+		src := writeTestFile(t, filepath.Join(tmpHome, "source-auth.json"), tc.payload)
+		p.SetMuseAuthSourcePath(src)
+	} else {
+		p.SetMuseAuthSourcePath("")
+	}
+
+	err := p.provisionMuseAuthState()
+	if (err != nil) != tc.shouldErr {
+		t.Fatalf("provisionMuseAuthState() error = %v, shouldErr %v", err, tc.shouldErr)
+	}
+	if !tc.shouldErr && tc.expectedAuth != "" {
+		assertMuseAuthOutput(t, tc, canonicalMuseDir, tmpHome, tmpData, p)
+	}
+}
+
+func TestProvisionMuseAuthState(t *testing.T) {
+	tests := []museProvisionAuthCase{
+		{desc: "unallocated provisioner returns nil", unallocatedProv: true},
+		{desc: "blank home returns nil", blankHome: true},
+		{desc: "seed new credentials from file", payload: `{"jwt":"muse1"}`, expectedAuth: `{"jwt":"muse1"}`, expectedSHA: "match_source"},
+		{desc: "overwrite on source digest change", payload: `{"jwt":"muse2"}`, preexistingAuth: `{"jwt":"stale"}`, preexistingSHA: "stale-digest", expectedAuth: `{"jwt":"muse2"}`, expectedSHA: "match_source"},
+		{desc: "seed into home config when standalone", standalone: true, payload: `{"jwt":"home-token"}`, expectedAuth: `{"jwt":"home-token"}`, expectedSHA: "match_source"},
+		{desc: "blocked muse filesystem path causes error", payload: `{"jwt":"token"}`, blockedFS: true, shouldErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			runMuseAuthCase(t, tc)
 		})
 	}
 }

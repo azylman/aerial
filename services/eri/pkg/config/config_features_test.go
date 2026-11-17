@@ -327,6 +327,9 @@ func runVoiceEngineTests(t *testing.T) {
 		{"codex", "codex"},
 		{"CODEX", "codex"},
 		{"  codex  ", "codex"},
+		{"muse", "muse"},
+		{"MUSE", "muse"},
+		{"  muse  ", "muse"},
 		{"other", "agy"},
 	}
 	for _, tc := range processEngineTests {
@@ -946,6 +949,9 @@ func TestCredentialSourcesValidate(t *testing.T) {
 		{"codex both", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Path: "/fake/codex", Disabled: true}}, true},
 		{"oauth whitespace", CredentialSources{OAuth: CredentialSource{Path: " \t\n"}, Codex: CredentialSource{Disabled: true}}, true},
 		{"codex whitespace", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Path: " \t"}}, true},
+		{"muse path valid", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}, Muse: CredentialSource{Path: "/fake/muse"}}, false},
+		{"muse disabled", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}, Muse: CredentialSource{Disabled: true}}, false},
+		{"muse both", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}, Muse: CredentialSource{Path: "/fake/muse", Disabled: true}}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -965,8 +971,8 @@ func TestConfigCredentialSources(t *testing.T) {
 		want  CredentialSources
 	}{
 		{"omitted", "model: fake", CredentialSources{}},
-		{"paths", "credential_sources:\n  oauth:\n    path: /fake/oauth\n  codex:\n    path: /fake/codex\n", CredentialSources{OAuth: CredentialSource{Path: "/fake/oauth"}, Codex: CredentialSource{Path: "/fake/codex"}}},
-		{"disabled", "credential_sources:\n  oauth:\n    disabled: true\n  codex:\n    disabled: true\n", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}}},
+		{"paths", "credential_sources:\n  oauth:\n    path: /fake/oauth\n  codex:\n    path: /fake/codex\n  muse:\n    path: /fake/muse\n", CredentialSources{OAuth: CredentialSource{Path: "/fake/oauth"}, Codex: CredentialSource{Path: "/fake/codex"}, Muse: CredentialSource{Path: "/fake/muse"}}},
+		{"disabled", "credential_sources:\n  oauth:\n    disabled: true\n  codex:\n    disabled: true\n  muse:\n    disabled: true\n", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}, Muse: CredentialSource{Disabled: true}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

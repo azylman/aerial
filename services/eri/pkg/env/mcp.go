@@ -125,7 +125,7 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 	}
 
 	finalConfig := map[string]any{
-		"mcpServers": mergedServers,
+		mcpKeyMCPServers: mergedServers,
 	}
 
 	outBytes, err := json.Marshal(finalConfig)
@@ -344,25 +344,153 @@ func FormatCodexConfigTOML(rawConfig json.RawMessage, proxyBase string) string {
 	return b.String()
 }
 
-// EnsureTargetCodexConfigTOML writes TOML configuration into <codexDir>/config.toml.
-func (p *Provisioner) EnsureTargetCodexConfigTOML(codexDir string, rawConfig json.RawMessage) error {
-	if p == nil || codexDir == "" || len(rawConfig) == 0 {
+const (
+	mcpKeyType       = "type"
+	mcpKeyCommand    = "command"
+	mcpKeyHooks      = "hooks"
+	mcpKeyMCPServers = "mcpServers"
+)
+
+func (p *Provisioner) writeTargetConfigFile(targetDir, fileName string, rawConfig json.RawMessage, formatFn func(raw json.RawMessage, proxyBase string) string) error {
+	if p == nil || targetDir == "" || len(rawConfig) == 0 {
 		return nil
 	}
 	trimmed := strings.TrimSpace(string(rawConfig))
 	if trimmed == "" || trimmed == `""` || trimmed == nullLiteral {
 		return nil
 	}
-	if err := os.MkdirAll(codexDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create codex directory %s: %w", codexDir, err)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", targetDir, err)
 	}
 	var proxyBase string
 	if p.mcpProxy != nil {
 		proxyBase = p.mcpProxy.proxyBase()
 	}
-	tomlContent := FormatCodexConfigTOML(rawConfig, proxyBase)
-	targetPath := filepath.Join(codexDir, "config.toml")
-	return p.writeAtomic(targetPath, tomlContent)
+	content := formatFn(rawConfig, proxyBase)
+	return p.writeAtomic(filepath.Join(targetDir, fileName), content)
+}
+
+// EnsureTargetCodexConfigTOML writes TOML configuration into <codexDir>/config.toml.
+func (p *Provisioner) EnsureTargetCodexConfigTOML(codexDir string, rawConfig json.RawMessage) error {
+	return p.writeTargetConfigFile(codexDir, "config.toml", rawConfig, FormatCodexConfigTOML)
+}
+
+func extractMCPHeaders(srvMap map[string]any, serverURL, proxyBase string) map[string]string {
+	headers := make(map[string]string)
+	if h, ok := srvMap["http_headers"].(map[string]any); ok {
+		for k, v := range h {
+			headers[k] = fmt.Sprint(v)
+		}
+	} else if h, ok := srvMap["headers"].(map[string]any); ok {
+		for k, v := range h {
+			headers[k] = fmt.Sprint(v)
+		}
+	}
+	if proxyBase != "" && strings.HasPrefix(serverURL, proxyBase) {
+		headers["X-Eri-Daemon"] = "${ERI_DAEMON_ID:-}"
+	}
+	return headers
+}
+
+func extractMCPStdio(srvMap map[string]any) (string, []string, map[string]string) {
+	var cmd string
+	if srvMap[mcpKeyCommand] != nil {
+		cmd = fmt.Sprint(srvMap[mcpKeyCommand])
+	}
+	args := make([]string, 0)
+	if argsSlice, ok := srvMap["args"].([]any); ok {
+		for _, a := range argsSlice {
+			args = append(args, fmt.Sprint(a))
+		}
+	}
+	env := make(map[string]string)
+	if envMap, ok := srvMap["env"].(map[string]any); ok {
+		for k, v := range envMap {
+			env[k] = fmt.Sprint(v)
+		}
+	}
+	return cmd, args, env
+}
+
+func formatMuseServerEntry(srvMap map[string]any, proxyBase string) map[string]any {
+	var serverURL string
+	for _, k := range mcpURLKeys {
+		if u, ok := srvMap[k].(string); ok && strings.TrimSpace(u) != "" {
+			serverURL = strings.TrimSpace(u)
+			break
+		}
+	}
+	if serverURL != "" {
+		return map[string]any{
+			mcpKeyType: "streamable-http",
+			"url":      serverURL,
+			"headers":  extractMCPHeaders(srvMap, serverURL, proxyBase),
+		}
+	}
+	cmd, args, env := extractMCPStdio(srvMap)
+	return map[string]any{
+		mcpKeyType:    "stdio",
+		mcpKeyCommand: cmd,
+		"args":        args,
+		"env":         env,
+	}
+}
+
+func parseRawMCPServers(rawConfig json.RawMessage) map[string]any {
+	if len(rawConfig) == 0 {
+		return nil
+	}
+	configBytes := rawConfig
+	var strVal string
+	if err := json.Unmarshal(rawConfig, &strVal); err == nil && strVal != "" {
+		configBytes = []byte(strVal)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(configBytes, &root); err != nil || root == nil {
+		return nil
+	}
+	rawServers, ok := root[mcpKeyMCPServers].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return rawServers
+}
+
+// FormatMuseSettingsJSON transforms an agy/claude MCP config JSON message into Muse settings.json format.
+func FormatMuseSettingsJSON(rawConfig json.RawMessage, proxyBase string) string {
+	rawServers := parseRawMCPServers(rawConfig)
+	serversMap := make(map[string]any)
+
+	names := make([]string, 0, len(rawServers))
+	for name := range rawServers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		srvMap, ok := rawServers[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		serversMap[name] = formatMuseServerEntry(srvMap, proxyBase)
+	}
+
+	settings := map[string]any{
+		"schema_version": 1,
+		mcpKeyMCPServers: serversMap,
+		mcpKeyHooks:      defaultMuseHooks(),
+	}
+
+	outBytes, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return "{}"
+	}
+	return string(outBytes)
+}
+
+// EnsureTargetMuseSettingsJSON writes JSON configuration into <museConfigDir>/settings.json.
+func (p *Provisioner) EnsureTargetMuseSettingsJSON(museConfigDir string, rawConfig json.RawMessage) error {
+	return p.writeTargetConfigFile(museConfigDir, "settings.json", rawConfig, FormatMuseSettingsJSON)
 }
 
 // SyncMCP writes target-partitioned agy and Claude Code mcp_config.json files, carrying each
@@ -390,6 +518,9 @@ func (p *Provisioner) SyncMCP(ctx context.Context, cfg *config.Config) error {
 		if err := p.EnsureTargetCodexConfigTOML(filepath.Join(p.homeDir, ".codex"), discordConfig); err != nil {
 			return fmt.Errorf("failed to sync primary codex config: %w", err)
 		}
+		if err := p.EnsureTargetMuseSettingsJSON(filepath.Join(p.homeDir, ".config", "muse"), discordConfig); err != nil {
+			return fmt.Errorf("failed to sync primary muse config: %w", err)
+		}
 	}
 
 	if p.dataDir != "" {
@@ -410,6 +541,10 @@ func (p *Provisioner) SyncMCP(ctx context.Context, cfg *config.Config) error {
 			codexDir := filepath.Join(p.runtimeHomeDir(target), ".codex")
 			if err := p.EnsureTargetCodexConfigTOML(codexDir, configs[target]); err != nil {
 				return fmt.Errorf("failed to sync %s runtime codex config: %w", target, err)
+			}
+			museDir := filepath.Join(p.runtimeHomeDir(target), ".config", "muse")
+			if err := p.EnsureTargetMuseSettingsJSON(museDir, configs[target]); err != nil {
+				return fmt.Errorf("failed to sync %s runtime muse config: %w", target, err)
 			}
 		}
 	}
