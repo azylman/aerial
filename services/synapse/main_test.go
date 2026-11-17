@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // --- Shared Test Mocks & Helpers ---
@@ -29,7 +30,10 @@ type mockEventBus struct {
 	insertedDiscordJobs  []DiscordIngressArgs
 	insertedInteractJobs []DiscordInteractionArgs
 	publishedPREvents    []pubsub.PRLifecycleEvent
-	err                  error
+	// publishedTraceparents records the W3C traceparent the real bus injects into
+	// each published message's NATS headers.
+	publishedTraceparents []string
+	err                   error
 }
 
 func (m *mockEventBus) Publish(ctx context.Context, subject, msgID string, data any) error {
@@ -38,6 +42,7 @@ func (m *mockEventBus) Publish(ctx context.Context, subject, msgID string, data 
 	if m.err != nil {
 		return m.err
 	}
+	m.publishedTraceparents = append(m.publishedTraceparents, tracing.Traceparent(ctx))
 	m.recordPublishedEvents(data)
 	m.recordPublishedJobs(data)
 	return nil

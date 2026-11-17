@@ -106,6 +106,8 @@ func (s *RouterServer) HandleDeployJob(ctx context.Context, msg pubsub.Message) 
 }
 
 // HandleDiscordIngressJob processes an aerial.jobs.synapse.discord_ingress job message from JetStream.
+// ctx carries the trace context extracted from the NATS message headers; a legacy
+// traceparent key left in older job bodies is an unknown JSON field and is ignored.
 func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.Message) (err error) {
 	var args DiscordIngressArgs
 	if uErr := json.Unmarshal(msg.Data(), &args); uErr != nil {
@@ -116,7 +118,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 		return nil
 	}
 
-	ctx, span := tracing.Tracer().Start(tracing.ContextWithTraceparent(ctx, args.Traceparent), "process "+QueueDiscordIngress, discordJobSpanOptions(QueueDiscordIngress)...)
+	ctx, span := tracing.Tracer().Start(ctx, "process "+QueueDiscordIngress, discordJobSpanOptions(QueueDiscordIngress)...)
 	defer span.End()
 	defer func() { markDiscordJobSpan(span, err) }()
 
@@ -173,6 +175,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 }
 
 // HandleDiscordInteractionJob processes an aerial.jobs.synapse.discord_interaction job message from JetStream.
+// ctx carries the trace context extracted from the NATS message headers.
 func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubsub.Message) error {
 	var args DiscordInteractionArgs
 	if uErr := json.Unmarshal(msg.Data(), &args); uErr != nil {
@@ -182,7 +185,7 @@ func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubs
 		}
 		return nil
 	}
-	ctx, span := tracing.Tracer().Start(tracing.ContextWithTraceparent(ctx, args.Traceparent), "process "+QueueDiscordInteraction, discordJobSpanOptions(QueueDiscordInteraction)...)
+	ctx, span := tracing.Tracer().Start(ctx, "process "+QueueDiscordInteraction, discordJobSpanOptions(QueueDiscordInteraction)...)
 	defer span.End()
 
 	var procErr error

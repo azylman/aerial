@@ -300,18 +300,16 @@ type DiscordMessageIngressRequest struct {
 
 // DiscordIngressArgs contains payload data for JetStream queueing of Discord message ingress events.
 type DiscordIngressArgs struct {
-	MessageID   string             `json:"message_id"`
-	BotUserID   string             `json:"bot_user_id,omitempty"`
-	RoleNames   map[string]string  `json:"role_names,omitempty"`
-	Message     *discordgo.Message `json:"message"`
-	Traceparent string             `json:"traceparent,omitempty"`
+	MessageID string             `json:"message_id"`
+	BotUserID string             `json:"bot_user_id,omitempty"`
+	RoleNames map[string]string  `json:"role_names,omitempty"`
+	Message   *discordgo.Message `json:"message"`
 }
 
 // DiscordInteractionArgs contains payload data for JetStream queueing of Discord interaction events.
 type DiscordInteractionArgs struct {
 	InteractionID string                 `json:"interaction_id"`
 	Interaction   *discordgo.Interaction `json:"interaction"`
-	Traceparent   string                 `json:"traceparent,omitempty"`
 }
 
 type GitPushEventRequest struct {
