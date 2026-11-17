@@ -22,20 +22,15 @@ import (
 type (
 	bareStore struct{ store *PostgresVanadisStore }
 	dbScript  struct {
-		bare                    *bareStore
-		beginErr                error
-		routes                  []sqlRoute
-		row, buildRow, countRow pgx.Row
-		chunks                  []VanadisChunk
-		builds                  []VanadisBuild
-		queryErr                error
-		scanErr                 error
-		rowsErr                 error
-		failExec                string
-		execErr                 error
-		execTag                 string
-		commitErr               error
-		rollbackErr             error
+		bare                        *bareStore
+		routes                      []sqlRoute
+		row, buildRow, countRow     pgx.Row
+		chunks                      []VanadisChunk
+		builds                      []VanadisBuild
+		beginErr, queryErr, scanErr error
+		rowsErr, execErr, commitErr error
+		rollbackErr                 error
+		failExec, execTag           string
 	}
 )
 
@@ -44,41 +39,42 @@ type sqlRoute struct {
 	row   pgx.Row
 }
 
+func (s dbScript) resolveQueryRow(query string, args []any, candidates *[]string) pgx.Row {
+	for _, arg := range args {
+		if cands, ok := arg.([]string); ok {
+			*candidates = cands
+			break
+		}
+	}
+	for _, r := range s.routes {
+		if strings.Contains(query, r.match) {
+			return r.row
+		}
+	}
+	if strings.Contains(query, "COALESCE(pr_number, 0), stall_nudges FROM vanadis_chunks") && len(s.chunks) > 0 && !isActionRow(s.row) {
+		c := s.chunks[0]
+		return valuesRow(c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Title, c.Status, c.PRNumber, c.StallNudges)
+	}
+	if strings.HasPrefix(query, "SELECT id FROM vanadis_builds WHERE id = (SELECT build_id") {
+		return valuesRow("b1")
+	}
+	if s.countRow != nil && strings.Contains(query, "COUNT(*)") {
+		return s.countRow
+	}
+	if s.buildRow != nil && strings.Contains(query, "FROM vanadis_builds") {
+		return s.buildRow
+	}
+	return s.row
+}
+
 func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 	candidates := new([]string)
 	if s.bare != nil {
 		return s.bare.store, candidates
 	}
-	tag := s.execTag
-	if tag == "" {
-		tag = "UPDATE 1"
-	}
+	tag := firstNonEmpty(s.execTag, "UPDATE 1")
 	queryRow := func(_ context.Context, query string, args ...any) pgx.Row {
-		for _, arg := range args {
-			if cands, ok := arg.([]string); ok {
-				*candidates = cands
-				break
-			}
-		}
-		for _, r := range s.routes {
-			if strings.Contains(query, r.match) {
-				return r.row
-			}
-		}
-		if strings.Contains(query, "COALESCE(pr_number, 0), stall_nudges FROM vanadis_chunks") && len(s.chunks) > 0 && !isActionRow(s.row) {
-			c := s.chunks[0]
-			return valuesRow(c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Title, c.Status, c.PRNumber, c.StallNudges)
-		}
-		if strings.HasPrefix(query, "SELECT id FROM vanadis_builds WHERE id = (SELECT build_id") {
-			return valuesRow("b1")
-		}
-		if s.countRow != nil && strings.Contains(query, "COUNT(*)") {
-			return s.countRow
-		}
-		if s.buildRow != nil && strings.Contains(query, "FROM vanadis_builds") {
-			return s.buildRow
-		}
-		return s.row
+		return s.resolveQueryRow(query, args, candidates)
 	}
 	query := func(context.Context, string, ...any) (pgx.Rows, error) {
 		if s.queryErr != nil {
@@ -273,6 +269,11 @@ func (r *mockRows) Scan(dest ...any) error {
 		return r.scanErr
 	}
 	switch len(dest) {
+	case 2:
+		if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
+			return scanValues(dest, r.items[r.idx-1].BuildID, r.items[r.idx-1].ID)
+		}
+		return nil
 	case 11:
 		return r.scan11(dest)
 	case 10:
@@ -416,7 +417,7 @@ func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 		{name: "cancelled chunk or build without repo conflicts", req: attachRequest("c1", ""), db: attachmentScript("c1", "b1", "", "cancelled", "aerial"), wantErrIs: ErrBuildConflict},
 		{name: "attaches pr chunk without repo", req: attachRequest("c-pr", ""), db: attachmentScript("c-pr", "b-pr", "thread-pr", "running", "aerial"), want: attachResult{"b-pr", "c-pr", "thread-pr"}},
 		{name: "attaches pr chunk matching repo candidates", req: attachRequest("c-pr", "aerial"), db: attachmentScript("c-pr", "b-pr", "thread-pr", "running", "aerial"), want: attachResult{"b-pr", "c-pr", "thread-pr"}},
-		{name: "attaches action chunk", req: attachRequest("c-act", "aerial"), db: dbScript{routes: attachRoutes("action", true, false), row: attached("action")}, want: attachResult{"b-action", "c-action", "thread-action"}},
+		{name: "attaches action chunk", req: attachRequest("c-act", "aerial"), db: dbScript{routes: attachRoutes("action", true, false), row: attached("action")}, want: attachResult{"b-action", "c-action", "thread-action"}, wantCandidates: aerialRepoSet},
 		{name: "action attachment removed chunk", req: existing, db: dbScript{routes: attachRoutes("action", false, false), row: noRows}, wantErrIs: ErrChunkNotFound},
 		{name: "action attachment terminal parent", req: existing, db: dbScript{routes: attachRoutes("action", true, true), row: noRows}, wantErrIs: ErrBuildConflict},
 		{name: "action attachment mismatching repository", req: existing, db: dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("action")}, {match: "c.status = 'cancelled'", row: valuesRow(false)}, {match: "repo != ''", row: valuesRow(true)}, {match: "SELECT EXISTS", row: valuesRow(true)}}, row: noRows}, wantErrIs: ErrBuildConflict},
@@ -974,10 +975,7 @@ func TestPostgresVanadisStore_BannerAndLookups(t *testing.T) {
 	if err := storeActive.UpdateChunkBannerAndStatus(ctx, "", "status", "banner"); err == nil {
 		t.Error("expected error with empty chunkID")
 	}
-
-	storeNil, _ := dbScript{bare: nilDB}.open()
-
-	if _, err := storeNil.GetChunkByPR(ctx, "aerial", 101); err == nil {
+	if _, err := store.GetChunkByPR(ctx, "aerial", 101); err == nil {
 		t.Error("expected error with nil db")
 	}
 	if lookup, err := storeActive.GetChunkByPR(ctx, "", 101); err != nil || lookup.Matched {
@@ -991,8 +989,7 @@ func TestPostgresVanadisStore_BannerAndLookups(t *testing.T) {
 		t.Error("expected error when findChunkPRMatch fails")
 	}
 
-	cancelledBuild := failRow("running", "cancelled")
-	storeFailCancelledBuild, _ := dbScript{row: cancelledBuild, execTag: "UPDATE 1"}.open()
+	storeFailCancelledBuild, _ := dbScript{row: failRow("running", "cancelled"), execTag: "UPDATE 1"}.open()
 	if _, _, failed, err := storeFailCancelledBuild.FailChunk(ctx, "c1", "reason", ""); err != nil || failed {
 		t.Errorf("FailChunk on cancelled build: failed=%v, err=%v", failed, err)
 	}
