@@ -880,34 +880,18 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 	}
 	buildID := restate.Key(ctx)
 	_, err := runJournaled(ctx, labelOnPREvent, "handle-pr-event-postgres", func(rc restate.RunContext) (bool, error) {
-		chunkID, cErr := b.locateOrAttachPRChunk(rc, buildID, ev)
-		if cErr != nil || chunkID == "" {
-			return false, cErr
-		}
-		event := strings.ToLower(strings.TrimSpace(ev.Event))
-		eventErr := b.dispatchPREvent(rc, buildID, chunkID, event, ev)
-		if eventErr != nil {
-			if errors.Is(eventErr, errPRTransitionSkipped) {
-				return false, nil
-			}
-			return false, eventErr
-		}
-		b.refreshFailedPRWidget(rc, buildID, event)
-		if event != "deploy_success" && ev.RolloutState != nil {
-			rolloutStatus := ""
-			if event == "deploy_started" {
-				rolloutStatus = "deploying"
-			}
-			if rErr := b.store.RecordPRRolloutState(rc, chunkID, rolloutStatus, ev.RolloutState); rErr != nil {
-				log.Printf("[vanadis-restate] record rollout state warning: %v", rErr)
-			}
-		}
-		return true, nil
+		return b.recordDeploymentPREvent(rc, buildID, ev)
 	})
 	if err != nil {
 		return err
 	}
 	rt := b.getRuntime(ctx)
+	if strings.EqualFold(strings.TrimSpace(ev.Event), prEventDeployStarted) {
+		if err := b.armDeploymentStart(rt, buildID, ev); err != nil {
+			return err
+		}
+	}
+
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterPREvent, nil); tErr != nil {
 		if strings.EqualFold(strings.TrimSpace(ev.Event), "deploy_success") {
 			return tErr

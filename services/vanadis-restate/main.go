@@ -253,6 +253,8 @@ type BuildObjectState struct {
 
 // BuildMutationRequest represents a typed mutation payload targeting BuildObject.
 type BuildMutationRequest struct {
+	Revision     string                 `json:"revision,omitempty"`
+	Generation   int                    `json:"generation,omitempty"`
 	DispatchID   string                 `json:"dispatch_id,omitempty"`
 	RolloutState *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
 	Action       string                 `json:"action"`
@@ -831,6 +833,9 @@ func (b *BuildObject) Mutate(ctx restate.ObjectContext, req BuildMutationRequest
 		return ReconcileBuildResult{}, err
 	}
 	rt := b.getRuntime(ctx)
+	if req.Action == "retry_deployment" {
+		return b.retryDeployment(rt, req)
+	}
 	return b.executeObjectTransition(rt, labelMutateBuild, &req)
 }
 
@@ -911,6 +916,9 @@ func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string,
 			rt.SetState(*stepOut.State)
 		}
 		rt.SetLaunched(stepOut.LaunchedMap)
+		if err := b.syncDeploymentDeadlines(rt, stepOut.State, nil, nil); err != nil {
+			return ReconcileBuildResult{}, err
+		}
 	}
 
 	if b.shouldScheduleReconcile(stepOut) {
