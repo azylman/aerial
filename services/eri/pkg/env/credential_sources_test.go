@@ -1,6 +1,7 @@
 package env
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,14 +12,15 @@ import (
 func TestRequiredCredentialSources(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		sources config.CredentialSources
-		wantErr bool
+		name      string
+		sources   config.CredentialSources
+		wantErr   bool
+		wantCause error
 	}{
-		{"omitted", config.CredentialSources{}, true},
-		{"disabled", config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, false},
-		{"missing", config.CredentialSources{OAuth: config.CredentialSource{Path: t.TempDir() + "/missing"}, Codex: config.CredentialSource{Disabled: true}}, true},
-		{"directory", config.CredentialSources{OAuth: config.CredentialSource{Path: t.TempDir()}, Codex: config.CredentialSource{Disabled: true}}, true},
+		{"omitted", config.CredentialSources{}, true, nil},
+		{"disabled", config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, false, nil},
+		{"missing", config.CredentialSources{OAuth: config.CredentialSource{Path: t.TempDir() + "/missing"}, Codex: config.CredentialSource{Disabled: true}}, true, os.ErrNotExist},
+		{"directory", config.CredentialSources{OAuth: config.CredentialSource{Path: t.TempDir()}, Codex: config.CredentialSource{Disabled: true}}, true, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -26,6 +28,9 @@ func TestRequiredCredentialSources(t *testing.T) {
 			_, err := New(t.TempDir(), t.TempDir(), tc.sources)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tc.wantErr)
+			}
+			if tc.wantCause != nil && !errors.Is(err, tc.wantCause) {
+				t.Errorf("error=%v does not preserve cause %v", err, tc.wantCause)
 			}
 		})
 	}

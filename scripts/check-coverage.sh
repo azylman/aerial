@@ -286,7 +286,7 @@ while IFS='|' read -r svc pkg; do
         COVERED_GO_STMTS=$((COVERED_GO_STMTS + pkg_cov))
 
         # Check threshold violation if a floor is defined
-        is_violation=$(awk "BEGIN { print ($pct_val < $thresh) ? 1 : 0 }")
+        is_violation=$(awk "BEGIN { print ($pkg_cov * 100 < $pkg_tot * $thresh) ? 1 : 0 }")
         if [ "$is_violation" -eq 1 ]; then
             status="FAIL"
             record_violation "Package $pkg coverage ($pct_val%) is below required floor (${thresh}%)"
@@ -372,7 +372,7 @@ GLOBAL_GO_PCT="0.0"
 GLOBAL_GO_STATUS="FAIL"
 if [ "$TOTAL_GO_STMTS" -gt 0 ]; then
     GLOBAL_GO_PCT=$(awk "BEGIN { printf \"%.2f\", ($COVERED_GO_STMTS / $TOTAL_GO_STMTS) * 100.0 }")
-    is_global_violation=$(awk "BEGIN { print ($GLOBAL_GO_PCT < $COVERAGE_THRESHOLD) ? 1 : 0 }")
+    is_global_violation=$(awk "BEGIN { print ($COVERED_GO_STMTS * 100 < $TOTAL_GO_STMTS * $COVERAGE_THRESHOLD) ? 1 : 0 }")
     if [ "$is_global_violation" -eq 0 ]; then
         GLOBAL_GO_STATUS="PASS"
     else
