@@ -20,10 +20,12 @@ import (
 )
 
 type RetryActionChunkRequest struct {
-	BuildID            string `json:"build_id"`
-	ChunkID            string `json:"chunk_id"`
-	ExpectedDispatchID string `json:"expected_dispatch_id"`
-	Reason             string `json:"reason"`
+	BuildID                 string  `json:"build_id"`
+	ChunkID                 string  `json:"chunk_id"`
+	ExpectedDispatchID      string  `json:"expected_dispatch_id"`
+	Reason                  string  `json:"reason"`
+	ExpectedInstructions    *string `json:"expected_instructions,omitempty"    jsonschema:"Exact stored instructions required for correction; supply with replacement_instructions"`
+	ReplacementInstructions *string `json:"replacement_instructions,omitempty" jsonschema:"Corrected nonblank worker instructions atomically saved before retry; supply with expected_instructions"`
 }
 type RetryActionChunkResult struct {
 	BuildID    string `json:"build_id"`
@@ -37,6 +39,9 @@ var errRetryIngressUnavailable = errors.New("durable Restate ingress is required
 func validateRetryActionRequest(req RetryActionChunkRequest) error {
 	if strings.TrimSpace(req.BuildID) == "" || strings.TrimSpace(req.ChunkID) == "" || strings.TrimSpace(req.ExpectedDispatchID) == "" || strings.TrimSpace(req.Reason) == "" {
 		return fmt.Errorf("%w: build_id, chunk_id, expected_dispatch_id and reason are required", ErrInvalidBuildInput)
+	}
+	if (req.ExpectedInstructions == nil) != (req.ReplacementInstructions == nil) || (req.ExpectedInstructions != nil && (strings.TrimSpace(*req.ExpectedInstructions) == "" || strings.TrimSpace(*req.ReplacementInstructions) == "")) {
+		return fmt.Errorf("%w: expected_instructions and replacement_instructions must be paired and nonblank", ErrInvalidBuildInput)
 	}
 	return nil
 }
@@ -129,7 +134,7 @@ func (s *VanadisServer) handleRetryActionChunk(w http.ResponseWriter, r *http.Re
 }
 
 func (s *VanadisServer) registerRetryActionTool(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{Name: "retry_action_chunk", Description: "Durably retry one failed action after reading its build and current dispatch identity. Requires build_id, chunk_id, expected_dispatch_id and reason; preserves other chunks. Repeat the same identity to recover an uncertain response."}, func(ctx context.Context, _ *mcp.CallToolRequest, args RetryActionChunkRequest) (*mcp.CallToolResult, *RetryActionChunkResult, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "retry_action_chunk", Description: "Durably retry one failed action after reading its build and current dispatch identity. Requires build_id, chunk_id, expected_dispatch_id and reason; preserves other chunks. Optionally pair expected_instructions (exact stored text) and replacement_instructions (nonblank corrected worker instructions) to atomically correct before dispatch. Repeat the same identity to recover an uncertain response."}, func(ctx context.Context, _ *mcp.CallToolRequest, args RetryActionChunkRequest) (*mcp.CallToolResult, *RetryActionChunkResult, error) {
 		result, err := s.retryActionChunk(ctx, args)
 		return nil, result, err
 	})
@@ -171,6 +176,9 @@ func (s *VanadisServer) validateRetryEligibility(ctx context.Context, req RetryA
 		return nil
 	}
 	if c.PRNumber != 0 || b.Status != statusFailed || c.Status != statusFailed || c.StallNudges >= 2147483647 || req.ExpectedDispatchID != fmt.Sprintf("vanadis-%s-turn-%d", c.ID, c.StallNudges) {
+		return ErrBuildConflict
+	}
+	if !retryInstructionsMatch(req, c) {
 		return ErrBuildConflict
 	}
 	return validateRetrySiblings(c, chunks)
@@ -220,4 +228,8 @@ func retryDescendants(id string, chunks []VanadisChunk) map[string]bool {
 		}
 	}
 	return descendants
+}
+
+func retryInstructionsMatch(req RetryActionChunkRequest, c VanadisChunk) bool {
+	return req.ExpectedInstructions == nil || c.Instructions == *req.ExpectedInstructions
 }

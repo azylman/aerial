@@ -67,5 +67,5 @@ func (r retryReconcileRuntime) RunReconcileStep(name string, fn func(context.Con
 }
 
 func retryActionRequestMatches(req RetryActionChunkRequest, key string) bool {
-	return strings.TrimSpace(req.BuildID) != "" && req.BuildID == key && strings.TrimSpace(req.ChunkID) != "" && strings.TrimSpace(req.ExpectedDispatchID) != "" && strings.TrimSpace(req.Reason) != ""
+	return validRetryInstructionPair(req) && strings.TrimSpace(req.BuildID) != "" && req.BuildID == key && strings.TrimSpace(req.ChunkID) != "" && strings.TrimSpace(req.ExpectedDispatchID) != "" && strings.TrimSpace(req.Reason) != ""
 }

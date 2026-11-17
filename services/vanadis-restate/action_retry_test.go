@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -71,13 +72,23 @@ func (f *retryAuthorityFixture) GetBuild(context.Context, string) (*VanadisBuild
 func TestBuildRetryAction(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name                    string
-		lostCommit, lostJournal bool
-		reconcileErr            error
-		reqBuild, identity      string
-		wantErr                 bool
+		name                                          string
+		lostCommit, lostJournal                       bool
+		reconcileErr                                  error
+		reqBuild, identity                            string
+		wantErr                                       bool
+		expectedInstructions, replacementInstructions *string
 	}{
-		{name: "accepted"}, {name: "commit response lost", lostCommit: true}, {name: "reset journal lost", lostJournal: true}, {name: "reconcile crash", reconcileErr: errors.New("worker interrupted")}, {name: "wrong build", reqBuild: "other", wantErr: true}, {name: "stale", identity: "vanadis-c1-turn-8", wantErr: true},
+		{name: "missing expected", replacementInstructions: new("corrected"), wantErr: true},
+		{name: "missing replacement", expectedInstructions: new("verify"), wantErr: true},
+		{name: "blank expected", expectedInstructions: new(" "), replacementInstructions: new("corrected"), wantErr: true},
+		{name: "blank replacement", expectedInstructions: new("verify"), replacementInstructions: new(" "), wantErr: true},
+		{name: "accepted"},
+		{name: "commit response lost", lostCommit: true},
+		{name: "reset journal lost", lostJournal: true},
+		{name: "reconcile crash", reconcileErr: errors.New("worker interrupted")},
+		{name: "wrong build", reqBuild: "other", wantErr: true},
+		{name: "stale", identity: "vanadis-c1-turn-8", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,7 +101,7 @@ func TestBuildRetryAction(t *testing.T) {
 			authority := &retryAuthorityFixture{VanadisStore: store, current: &current, buildStatus: &status}
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReset: tc.lostJournal, reconcileErr: tc.reconcileErr}
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, nil)
-			req := RetryActionChunkRequest{BuildID: cmp.Or(tc.reqBuild, "b1"), ChunkID: "c1", ExpectedDispatchID: cmp.Or(tc.identity, "vanadis-c1-turn-0"), Reason: "retry"}
+			req := RetryActionChunkRequest{BuildID: cmp.Or(tc.reqBuild, "b1"), ChunkID: "c1", ExpectedDispatchID: cmp.Or(tc.identity, "vanadis-c1-turn-0"), Reason: "retry", ExpectedInstructions: tc.expectedInstructions, ReplacementInstructions: tc.replacementInstructions}
 			got, err := bo.RetryActionChunk(nil, req)
 			if tc.lostCommit || tc.lostJournal || tc.reconcileErr != nil {
 				if err == nil || restate.IsTerminalError(err) {
@@ -156,9 +167,11 @@ func (f *retryDispatchFixture) ServeHTTP(w http.ResponseWriter, r *http.Request)
 func TestRetryActionDispatchRecovery(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name        string
-		loseJournal bool
-	}{{"accepted", false}, {"dispatch accepted before journal lost", true}}
+		name                  string
+		loseJournal           bool
+		expected, replacement *string
+		wantInstructions      string
+	}{{"accepted", false, nil, nil, "verify"}, {"dispatch accepted before journal lost", true, nil, nil, "verify"}, {"corrected dispatch", false, new("verify"), new("corrected verification"), "corrected verification"}, {"corrected dispatch recovery", true, new("verify"), new("corrected verification"), "corrected verification"}}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -173,12 +186,13 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 			defer ts.Close()
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReconcile: tc.loseJournal}
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, NewExecutor(t.TempDir(), NewHTTPEriClient(ts.URL, ts.Client()), nil, "", nil))
-			req := RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"}
+			req := RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expected, ReplacementInstructions: tc.replacement}
 			got, err := bo.RetryActionChunk(nil, req)
 			if tc.loseJournal {
 				if err == nil {
 					t.Fatal("expected interrupted journal")
 				}
+				req.ExpectedInstructions, req.ReplacementInstructions = new("changed"), new("must not apply")
 				got, err = bo.RetryActionChunk(nil, req)
 			}
 			if err != nil || !got.Accepted || current.Status != "running" || current.StallNudges != 1 {
@@ -192,6 +206,9 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 			dispatch, ok := f.accepted["vanadis-c1-turn-1"]
 			if !ok || dispatch.SessionID != "vanadis-c1" || dispatch.VanadisChunkID != "c1" {
 				t.Fatalf("dispatch=%+v", dispatch)
+			}
+			if current.Instructions != tc.wantInstructions || !strings.Contains(dispatch.Prompt, "Instructions:\n"+tc.wantInstructions+"\n") {
+				t.Fatalf("instructions=%q prompt=%s", current.Instructions, dispatch.Prompt)
 			}
 			if !rt.launched["dispatch:vanadis-c1-turn-1"] {
 				t.Fatal("accepted generation not persisted")

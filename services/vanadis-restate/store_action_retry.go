@@ -12,10 +12,12 @@ import (
 
 // RetryActionChunkRequest fences a single operator-requested action retry.
 type RetryActionChunkRequest struct {
-	BuildID            string `json:"build_id"`
-	ChunkID            string `json:"chunk_id"`
-	ExpectedDispatchID string `json:"expected_dispatch_id"`
-	Reason             string `json:"reason"`
+	BuildID                 string  `json:"build_id"`
+	ChunkID                 string  `json:"chunk_id"`
+	ExpectedDispatchID      string  `json:"expected_dispatch_id"`
+	Reason                  string  `json:"reason"`
+	ExpectedInstructions    *string `json:"expected_instructions,omitempty"    jsonschema:"Exact stored instructions required for correction; supply with replacement_instructions"`
+	ReplacementInstructions *string `json:"replacement_instructions,omitempty" jsonschema:"Corrected nonblank worker instructions atomically saved before retry; supply with expected_instructions"`
 }
 
 type RetryActionChunkResult struct {
@@ -32,6 +34,9 @@ func (s *PostgresVanadisStore) RetryActionChunk(ctx context.Context, req RetryAc
 	}
 	if strings.TrimSpace(req.BuildID) == "" || strings.TrimSpace(req.ChunkID) == "" || strings.TrimSpace(req.ExpectedDispatchID) == "" || strings.TrimSpace(req.Reason) == "" {
 		return nil, fmt.Errorf("%w: build, chunk, expected dispatch and reason are required", ErrInvalidBuildInput)
+	}
+	if !validRetryInstructionPair(req) {
+		return nil, fmt.Errorf("%w: expected_instructions and replacement_instructions must be paired and nonblank", ErrInvalidBuildInput)
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -55,8 +60,8 @@ func (s *PostgresVanadisStore) RetryActionChunk(ctx context.Context, req RetryAc
 		if c.StallNudges >= 2147483647 {
 			return nil, fmt.Errorf("%w: generation exhausted", ErrBuildConflict)
 		}
-		const reset = `UPDATE vanadis_chunks SET status = 'pending', stall_nudges = stall_nudges + 1, started_at = NULL, completed_at = NULL, ci_fail_count = 0, ci_checks = '{}'::jsonb, rollout_state = '{}'::jsonb, banner = '', merge_awakeable_id = '', deploy_awakeable_id = '', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
-		if _, err := tx.Exec(ctx, reset, c.ID); err != nil {
+		const reset = `UPDATE vanadis_chunks SET instructions = COALESCE($2, instructions), status = 'pending', stall_nudges = stall_nudges + 1, started_at = NULL, completed_at = NULL, ci_fail_count = 0, ci_checks = '{}'::jsonb, rollout_state = '{}'::jsonb, banner = '', merge_awakeable_id = '', deploy_awakeable_id = '', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
+		if _, err := tx.Exec(ctx, reset, c.ID, req.ReplacementInstructions); err != nil {
 			return nil, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE vanadis_builds SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`, req.BuildID); err != nil {
@@ -146,9 +151,23 @@ func retryActionCandidate(b VanadisBuild, chunks []VanadisChunk, req RetryAction
 	if !replay && (b.Status != statusFailed || c.Status != statusFailed || req.ExpectedDispatchID != actionDispatchID(c)) {
 		return conflict()
 	}
+	if !replay && !retryInstructionsMatch(req, c) {
+		return conflict()
+	}
 	// Replay acknowledges the committed generation; scheduler progress is not a new retry.
 	if !replay && !retryActionGraphReady(c, chunks) {
 		return conflict()
 	}
 	return c, replay, nil
+}
+
+func validRetryInstructionPair(req RetryActionChunkRequest) bool {
+	if req.ExpectedInstructions == nil && req.ReplacementInstructions == nil {
+		return true
+	}
+	return req.ExpectedInstructions != nil && req.ReplacementInstructions != nil && strings.TrimSpace(*req.ExpectedInstructions) != "" && strings.TrimSpace(*req.ReplacementInstructions) != ""
+}
+
+func retryInstructionsMatch(req RetryActionChunkRequest, c VanadisChunk) bool {
+	return req.ExpectedInstructions == nil || c.Instructions == *req.ExpectedInstructions
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -103,14 +104,26 @@ func (tx *retryTransaction) Rollback(context.Context) error { return tx.finish(f
 func TestPostgresVanadisStore_RetryActionChunkTransactions(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name           string
-		concurrent     int
-		failBuild      bool
-		lostCommit     bool
-		wantErr        bool
-		wantStatus     string
-		wantGeneration int
+		name                                          string
+		concurrent                                    int
+		failBuild                                     bool
+		lostCommit                                    bool
+		wantErr                                       bool
+		wantStatus                                    string
+		wantGeneration                                int
+		expectedInstructions, replacementInstructions *string
+		wantInstructions                              string
+		replayChanged                                 bool
 	}{
+		{name: "correction rolls back", concurrent: 1, failBuild: true, wantErr: true, expectedInstructions: new("verify"), replacementInstructions: new("corrected"), wantInstructions: "verify", wantStatus: "failed"},
+		{name: "corrected", concurrent: 8, expectedInstructions: new("verify"), replacementInstructions: new("corrected"), wantInstructions: "corrected", wantStatus: "pending", wantGeneration: 1},
+		{name: "instruction mismatch", concurrent: 1, wantErr: true, expectedInstructions: new("other"), replacementInstructions: new("corrected"), wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
+		{name: "exact mismatch", concurrent: 1, wantErr: true, expectedInstructions: new("verify "), replacementInstructions: new("corrected"), wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
+		{name: "changed replay payload", concurrent: 1, replayChanged: true, expectedInstructions: new("verify"), replacementInstructions: new("corrected"), wantInstructions: "corrected", wantStatus: "pending", wantGeneration: 1},
+		{name: "missing replacement", concurrent: 1, wantErr: true, expectedInstructions: new("verify"), replacementInstructions: nil, wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
+		{name: "missing expected", concurrent: 1, wantErr: true, expectedInstructions: nil, replacementInstructions: new("corrected"), wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
+		{name: "blank expected", concurrent: 1, wantErr: true, expectedInstructions: new(" "), replacementInstructions: new("corrected"), wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
+		{name: "blank replacement", concurrent: 1, wantErr: true, expectedInstructions: new("verify"), replacementInstructions: new(" "), wantInstructions: "verify", wantStatus: "failed", wantGeneration: 0},
 		{name: "duplicate concurrent requests", concurrent: 8, wantStatus: "pending", wantGeneration: 1},
 		{name: "build write rolls back reset", concurrent: 1, failBuild: true, wantErr: true, wantStatus: "failed"},
 		{name: "committed before journal replay", concurrent: 1, lostCommit: true, wantErr: true, wantStatus: "pending", wantGeneration: 1},
@@ -120,18 +133,19 @@ func TestPostgresVanadisStore_RetryActionChunkTransactions(t *testing.T) {
 			t.Parallel()
 			var mu sync.Mutex
 			buildStatus := "failed"
-			original := VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", DependsOn: []string{"c0"}, StallNudges: 0}
+			original := VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", DependsOn: []string{"c0"}, StallNudges: 0, Instructions: "verify"}
 			current := original
 			sibling := VanadisChunk{ID: "c0", BuildID: "b1", Status: "completed"}
 			lost := tc.lostCommit
 			store := retryFixtureStore(&mu, &current, &buildStatus, sibling, tc.failBuild, &lost)
-			req := RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"}
+			req := RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expectedInstructions, ReplacementInstructions: tc.replacementInstructions}
 			for err := range retryConcurrentRequests(store, req, tc.concurrent) {
 				if (err != nil) != tc.wantErr {
 					t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
 				}
 			}
-			if tc.lostCommit {
+			if tc.lostCommit || tc.replayChanged {
+				req.ExpectedInstructions, req.ReplacementInstructions = new("different"), new("ignored")
 				result, err := store.RetryActionChunk(context.Background(), req)
 				if err != nil || !validRetryResult(result) {
 					t.Fatalf("replay=%+v err=%v", result, err)
@@ -140,10 +154,10 @@ func TestPostgresVanadisStore_RetryActionChunkTransactions(t *testing.T) {
 			if current.Status != tc.wantStatus || current.StallNudges != tc.wantGeneration {
 				t.Fatalf("status=%s generation=%d", current.Status, current.StallNudges)
 			}
-			wantParent := "running"
-			if tc.failBuild {
-				wantParent = "failed"
+			if current.Instructions != cmp.Or(tc.wantInstructions, "verify") {
+				t.Fatalf("instructions=%q", current.Instructions)
 			}
+			wantParent := map[string]string{"pending": "running", "failed": "failed"}[tc.wantStatus]
 			if buildStatus != wantParent {
 				t.Fatalf("parent=%s", buildStatus)
 			}
@@ -174,8 +188,8 @@ func retryFixtureStore(mu *sync.Mutex, current *VanadisChunk, buildStatus *strin
 				}
 				return &mockRows{items: []VanadisChunk{sibling, local}}, nil
 			},
-			execFn: func(_ context.Context, query string, _ ...any) (pgconn.CommandTag, error) {
-				return retryFixtureExec(query, &local, &parent, failBuild)
+			execFn: func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+				return retryFixtureExec(query, &local, &parent, failBuild, args...)
 			},
 		}
 		return &retryTransaction{mockTx: base, finish: func(commit bool) error {
@@ -204,12 +218,17 @@ func validRetryResult(result *RetryActionChunkResult) bool {
 	return result != nil && result.DispatchID == "vanadis-c1-turn-1" && result.Accepted
 }
 
-func retryFixtureExec(query string, local *VanadisChunk, parent *string, failBuild bool) (pgconn.CommandTag, error) {
+func retryFixtureExec(query string, local *VanadisChunk, parent *string, failBuild bool, args ...any) (pgconn.CommandTag, error) {
 	switch {
 	case strings.Contains(query, "UPDATE vanadis_chunks"):
 		for _, fragment := range []string{"status = 'pending'", "stall_nudges = stall_nudges + 1", "started_at = NULL", "completed_at = NULL", "ci_fail_count = 0", "ci_checks = '{}'::jsonb", "rollout_state = '{}'::jsonb", "banner = ''", "merge_awakeable_id = ''", "deploy_awakeable_id = ''"} {
 			if !strings.Contains(query, fragment) {
 				return pgconn.CommandTag{}, fmt.Errorf("missing reset %s", fragment)
+			}
+		}
+		if strings.Contains(query, "instructions = COALESCE($2, instructions)") && len(args) == 2 {
+			if replacement, ok := args[1].(*string); ok && replacement != nil {
+				local.Instructions = *replacement
 			}
 		}
 		local.Status = "pending"
