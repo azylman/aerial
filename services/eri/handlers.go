@@ -335,16 +335,16 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			dispatchID = uuid.New().String()
 		}
 
-		if handleSkipActiveDispatch(r.Context(), w, store, &req, sessionID, dispatchID) {
-			return
-		}
-
 		if store == nil {
 			writeErr(w, http.StatusInternalServerError, "Database store not configured")
 			return
 		}
 
 		if handleDuplicateDispatch(r.Context(), w, store, req.ID, dispatchID, sessionID) {
+			return
+		}
+
+		if handleSkipActiveDispatch(r.Context(), w, store, &req, sessionID, dispatchID) {
 			return
 		}
 

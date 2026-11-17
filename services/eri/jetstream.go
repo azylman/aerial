@@ -245,6 +245,14 @@ func handleEriDispatchJob(ctx context.Context, store db.Store, pool *queue.Worke
 		return errors.New("database store not configured")
 	}
 
+	isDup, duplicateErr := checkDuplicateDispatch(ctx, store, dispatchID)
+	if duplicateErr != nil {
+		return fmt.Errorf("failed checking duplicate dispatch: %w", duplicateErr)
+	}
+	if isDup {
+		return nil
+	}
+
 	if req.SkipIfActive {
 		active, err := store.HasActiveDispatchTurn(ctx, sessionID, dispatchID)
 		if err != nil {
@@ -254,14 +262,6 @@ func handleEriDispatchJob(ctx context.Context, store db.Store, pool *queue.Worke
 			publishDispatchDropOutcome(ctx, bus, dispatchID, req.Source, sessionID, req.TargetID, "skipped_active", "")
 			return nil
 		}
-	}
-
-	isDup, err := checkDuplicateDispatch(ctx, store, dispatchID)
-	if err != nil {
-		return fmt.Errorf("failed checking duplicate dispatch: %w", err)
-	}
-	if isDup {
-		return nil
 	}
 
 	d := buildDispatchRecord(req, dispatchID, sessionID, tracing.Traceparent(ctx))
