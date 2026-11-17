@@ -9,13 +9,6 @@ metadata:
   name: restate
 ---
 apiVersion: v1
-kind: Namespace
-metadata:
-  name: restate-miorine
-  annotations:
-    kustomize.toolkit.fluxcd.io/prune: disabled
----
-apiVersion: v1
 data:
   aerial.override: |
     rewrite stop {
