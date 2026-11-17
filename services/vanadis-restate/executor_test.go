@@ -1473,3 +1473,26 @@ func launchRecoveryServer(t *testing.T, id, first string, ready *atomic.Bool) (*
 	}))
 	return srv, ids
 }
+
+func TestBuildStatusWidgetChunk(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		chunk    VanadisChunk
+		wantMode string
+		wantRepo string
+	}{
+		{"PRChunkKeepsRepo", VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial-config", Status: "pending"}, "pr", "aerial-config"},
+		{"PRChunkWithoutRepoDefaultsToAerial", VanadisChunk{ID: "c2", Mode: "pr", Status: "pending"}, "pr", "aerial"},
+		{"ActionChunkHasNoRepo", VanadisChunk{ID: "c3", Mode: "action", Status: "pending"}, "action", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := buildStatusWidgetChunk(tc.chunk)
+			if got.Mode != tc.wantMode || got.Repo != tc.wantRepo {
+				t.Errorf("buildStatusWidgetChunk() mode=%q repo=%q, want mode=%q repo=%q", got.Mode, got.Repo, tc.wantMode, tc.wantRepo)
+			}
+		})
+	}
+}

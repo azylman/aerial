@@ -1121,3 +1121,25 @@ func requireComponent[T discordgo.MessageComponent](t *testing.T, c discordgo.Me
 	}
 	return got
 }
+
+func TestBuildWidgetChunkComponent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		chunk    StatusWidgetChunk
+		wantText string
+	}{
+		{"PRChunkShowsRepo", StatusWidgetChunk{Mode: "pr", Repo: "aerial-config", Title: "Mount stacks", Status: "pending"}, "⏳ **`aerial-config`**: Mount stacks"},
+		{"LegacyChunkWithoutRepoShowsAerial", StatusWidgetChunk{Title: "Old chunk", Status: "pending"}, "⏳ **`aerial`**: Old chunk"},
+		{"ActionChunkShowsAction", StatusWidgetChunk{Mode: "action", Title: "Verify stacks", Status: "pending"}, "⏳ **`action`**: Verify stacks"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			text := requireComponent[*discordgo.TextDisplay](t, buildWidgetChunkComponent(tc.chunk))
+			if text.Content != tc.wantText {
+				t.Errorf("buildWidgetChunkComponent() content = %q, want %q", text.Content, tc.wantText)
+			}
+		})
+	}
+}
