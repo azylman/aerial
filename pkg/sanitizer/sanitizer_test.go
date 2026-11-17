@@ -14,16 +14,8 @@ func TestSanitizeString_Tokens_TableDriven(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{
-			name:     "empty string",
-			input:    "",
-			expected: "",
-		},
-		{
-			name:     "clean text without secrets",
-			input:    "Hello world, normal text about setup.",
-			expected: "Hello world, normal text about setup.",
-		},
+		{name: "empty string", input: "", expected: ""},
+		{name: "clean text without secrets", input: "Hello world, normal text about setup.", expected: "Hello world, normal text about setup."},
 		{
 			name:     "classic github pat",
 			input:    "Error using token " + "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzAB to access repo",
@@ -39,76 +31,34 @@ func TestSanitizeString_Tokens_TableDriven(t *testing.T) {
 			input:    "Tokens " + "gho_" + "1234567890abcdefghijklmnopqrstuvwxyzAB and " + "ghu_" + "1234567890abcdefghijklmnopqrstuvwxyzAB",
 			expected: "Tokens [REDACTED] and [REDACTED]",
 		},
+		{name: "google api key", input: "API key " + "AIza" + "SyD1234567890abcdefghijklmnopqrstuvw configured", expected: "API key [REDACTED] configured"},
+		{name: "antigravity and gemini tokens", input: "Using " + "antigravity_" + "secret_token_12345 and " + "gemini_" + "api_key_6789012345", expected: "Using [REDACTED] and [REDACTED]"},
+		{name: "openai and anthropic keys", input: "Keys " + "sk-proj-" + "1234567890abcdefghijklmnop and " + "sk-ant-api03-" + "1234567890abcdefghijklmnop", expected: "Keys [REDACTED] and [REDACTED]"},
+		{name: "discord bot token", input: "Bot token " + "MTIzNDU2Nzg5MDEyMzQ1Njc4OQ" + "." + "ABCDEF" + "." + "abcdefghijklmnopqrstuvwxyz12345" + " connected", expected: "Bot token [REDACTED] connected"},
+		{name: "discord mfa token", input: "Auth with " + "mfa." + "1234567890abcdefghijklmnopqrstuvwxyz", expected: "Auth with [REDACTED]"},
+		{name: "discord webhook url", input: "Delivering notification to " + "https://discord.com/api/webhooks/" + "123456789012345678/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_- for alert", expected: "Delivering notification to [REDACTED] for alert"},
+		{name: "jwt token", input: "Token " + "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ" + "." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", expected: "Token [REDACTED]"},
+		{name: "http basic auth header", input: "-c http.extraHeader=AUTHORIZATION: " + "basic " + "eC1hY2Nlc3MtdG9rZW46Z2hwXzEyMzQ1Njc4OTA=", expected: "-c http.extraHeader=AUTHORIZATION: [REDACTED]"},
+		{name: "http basic auth unpadded token", input: "header " + "basic " + "dXNlcjpwYXNzd29yZA logged", expected: "header [REDACTED] logged"},
+		{name: "http bearer auth header", input: "Authorization: " + "Bearer " + "1234567890abcdefghijklmnopqrstuvwxyz", expected: "Authorization: [REDACTED]"},
+		{name: "http bearer auth header lowercase letters only", input: "Authorization: " + "Bearer " + "abcdefghijklmnopqrstuvwxyz", expected: "Authorization: [REDACTED]"},
+		{name: "json authorization header with alphabetic bearer credential", input: `{"Authorization":"Bearer abcdefghijklmnopqrstuvwxyz"}`, expected: `{"Authorization":"[REDACTED]"}`},
+		{name: "json authorization header with spaced bearer credential", input: `{"Authorization": "Bearer abcdefghijklmnopqrstuvwxyz"}`, expected: `{"Authorization": "[REDACTED]"}`},
+		{name: "json authorization header with uppercase bearer credential", input: `{"Authorization":"Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ"}`, expected: `{"Authorization":"[REDACTED]"}`},
+		{name: "json authorization header array with alphabetic bearer credential", input: `{"Authorization":["Bearer abcdefghijklmnopqrstuvwxyz"]}`, expected: `{"Authorization":["[REDACTED]"]}`},
+		{name: "json authorization header array with multiple credentials", input: `{"Authorization":["Bearer abcdefghijklmnopqrstuvwxyz", "Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ"]}`, expected: `{"Authorization":["[REDACTED]", "[REDACTED]"]}`},
+		{name: "json authorization header array with github token and alphabetic bearer credential", input: `{"Authorization":["token ` + "ghp_" + `1234567890abcdefghijklmnopqrstuvwxyzAB", "Bearer abcdefghijklmnopqrstuvwxyz"]}`, expected: `{"Authorization":["token [REDACTED]", "[REDACTED]"]}`},
+		{name: "json non-authorization array preserving prose", input: `{"roles": ["basic configuration"], "tags": ["bearer instruments"]}`, expected: `{"roles": ["basic configuration"], "tags": ["bearer instruments"]}`},
 		{
-			name:     "google api key",
-			input:    "API key " + "AIza" + "SyD1234567890abcdefghijklmnopqrstuvw configured",
-			expected: "API key [REDACTED] configured",
+			name:     "plain english words after basic or bearer not redacted",
+			input:    "Where they stop at basic containers, basic configuration, Basic Architecture, BASIC CONTAINERS, and bearer instruments.",
+			expected: "Where they stop at basic containers, basic configuration, Basic Architecture, BASIC CONTAINERS, and bearer instruments.",
 		},
-		{
-			name:     "antigravity and gemini tokens",
-			input:    "Using " + "antigravity_" + "secret_token_12345 and " + "gemini_" + "api_key_6789012345",
-			expected: "Using [REDACTED] and [REDACTED]",
-		},
-		{
-			name:     "openai and anthropic keys",
-			input:    "Keys " + "sk-proj-" + "1234567890abcdefghijklmnop and " + "sk-ant-api03-" + "1234567890abcdefghijklmnop",
-			expected: "Keys [REDACTED] and [REDACTED]",
-		},
-		{
-			name:     "discord bot token",
-			input:    "Bot token " + "MTIzNDU2Nzg5MDEyMzQ1Njc4OQ" + "." + "ABCDEF" + "." + "abcdefghijklmnopqrstuvwxyz12345" + " connected",
-			expected: "Bot token [REDACTED] connected",
-		},
-		{
-			name:     "discord mfa token",
-			input:    "Auth with " + "mfa." + "1234567890abcdefghijklmnopqrstuvwxyz",
-			expected: "Auth with [REDACTED]",
-		},
-		{
-			name:     "discord webhook url",
-			input:    "Delivering notification to " + "https://discord.com/api/webhooks/" + "123456789012345678/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_- for alert",
-			expected: "Delivering notification to [REDACTED] for alert",
-		},
-		{
-			name:     "jwt token",
-			input:    "Token " + "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ" + "." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
-			expected: "Token [REDACTED]",
-		},
-		{
-			name:     "http basic auth header",
-			input:    "-c http.extraHeader=AUTHORIZATION: " + "basic " + "eC1hY2Nlc3MtdG9rZW46Z2hwXzEyMzQ1Njc4OTA=",
-			expected: "-c http.extraHeader=AUTHORIZATION: [REDACTED]",
-		},
-		{
-			name:     "http bearer auth header",
-			input:    "Authorization: " + "Bearer " + "1234567890abcdefghijklmnopqrstuvwxyz",
-			expected: "Authorization: [REDACTED]",
-		},
-		{
-			name:     "x-access-token header in URL",
-			input:    "Connecting to https://" + "x-access-token:" + "secret1234567890@github.com/org/repo.git",
-			expected: "Connecting to https://[REDACTED]@github.com/org/repo.git",
-		},
-		{
-			name:     "postgresql uri with embedded password",
-			input:    "Connecting to postgresql://aerial_user:" + "super_secret_p%40ss%23word" + "@db.internal.net:5432/aerial_db?sslmode=disable",
-			expected: "Connecting to postgresql://aerial_user:[REDACTED]@db.internal.net:5432/aerial_db?sslmode=disable",
-		},
-		{
-			name:     "redis uri with password",
-			input:    "Cache at redis://default:" + "my_redis_password_123" + "@10.0.0.5:6379/0",
-			expected: "Cache at redis://default:[REDACTED]@10.0.0.5:6379/0",
-		},
-		{
-			name:     "key-value assignment preserving label",
-			input:    "GEMINI_API_KEY=" + "AIza" + "SyD1234567890abcdefghijklmnopqrstuvw and HA_TOKEN: " + "custom_long_token_value_123",
-			expected: "GEMINI_API_KEY=[REDACTED] and HA_TOKEN: [REDACTED]",
-		},
-		{
-			name:     "extended secret key-value assignment",
-			input:    "SERVICE_SECRET=super_secret_val and DB_PASSWORD: pass_val_123",
-			expected: "SERVICE_SECRET=[REDACTED] and DB_PASSWORD: [REDACTED]",
-		},
+		{name: "x-access-token header in URL", input: "Connecting to https://" + "x-access-token:" + "secret1234567890@github.com/org/repo.git", expected: "Connecting to https://[REDACTED]@github.com/org/repo.git"},
+		{name: "postgresql uri with embedded password", input: "Connecting to postgresql://aerial_user:" + "super_secret_p%40ss%23word" + "@db.internal.net:5432/aerial_db?sslmode=disable", expected: "Connecting to postgresql://aerial_user:[REDACTED]@db.internal.net:5432/aerial_db?sslmode=disable"},
+		{name: "redis uri with password", input: "Cache at redis://default:" + "my_redis_password_123" + "@10.0.0.5:6379/0", expected: "Cache at redis://default:[REDACTED]@10.0.0.5:6379/0"},
+		{name: "key-value assignment preserving label", input: "GEMINI_API_KEY=" + "AIza" + "SyD1234567890abcdefghijklmnopqrstuvw and HA_TOKEN: " + "custom_long_token_value_123", expected: "GEMINI_API_KEY=[REDACTED] and HA_TOKEN: [REDACTED]"},
+		{name: "extended secret key-value assignment", input: "SERVICE_SECRET=super_secret_val and DB_PASSWORD: pass_val_123", expected: "SERVICE_SECRET=[REDACTED] and DB_PASSWORD: [REDACTED]"},
 	}
 
 	for _, tc := range tests {
@@ -145,6 +95,21 @@ func TestSanitizeLog_TableDriven(t *testing.T) {
 			name:     "secret key-value in log",
 			input:    "failed command with PAT: my_special_pat_token",
 			expected: "failed command with PAT: [REDACTED_TOKEN]",
+		},
+		{
+			name:     "json authorization header in log",
+			input:    `request headers: {"Authorization":"Bearer abcdefghijklmnopqrstuvwxyz"}`,
+			expected: `request headers: {"Authorization":"[REDACTED_TOKEN]"}`,
+		},
+		{
+			name:     "json authorization header array in log",
+			input:    `request headers: {"Authorization":["Bearer abcdefghijklmnopqrstuvwxyz"]}`,
+			expected: `request headers: {"Authorization":["[REDACTED_TOKEN]"]}`,
+		},
+		{
+			name:     "json authorization header array with github token and alphabetic bearer credential in log",
+			input:    `request headers: {"Authorization":["token ` + "ghp_" + `1234567890abcdefghijklmnopqrstuvwxyzAB", "Bearer abcdefghijklmnopqrstuvwxyz"]}`,
+			expected: `request headers: {"Authorization":["token [REDACTED_TOKEN]", "[REDACTED_TOKEN]"]}`,
 		},
 	}
 
@@ -445,6 +410,12 @@ func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
 			input:        "values: secret_token_longer_value and secret_token_long",
 			shouldRedact: []string{"secret_token_longer_value", "secret_token_long"},
 		},
+		{
+			name:         "authorization array with registered secret followed by alphabetic bearer",
+			tokens:       []string{"my_registered_secret_token_123"},
+			input:        `{"Authorization":["token my_registered_secret_token_123", "Bearer abcdefghijklmnopqrstuvwxyz"]}`,
+			shouldRedact: []string{"my_registered_secret_token_123", "abcdefghijklmnopqrstuvwxyz"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -458,6 +429,12 @@ func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
 			for _, redacted := range tc.shouldRedact {
 				if strings.Contains(got, redacted) {
 					t.Errorf("expected %q to be redacted from %q", redacted, got)
+				}
+			}
+			gotLog := SanitizeLog(tc.input)
+			for _, redacted := range tc.shouldRedact {
+				if strings.Contains(gotLog, redacted) {
+					t.Errorf("expected %q to be redacted from log %q", redacted, gotLog)
 				}
 			}
 		})
@@ -514,6 +491,12 @@ func TestReplaceSensitiveTokens_TableDriven(t *testing.T) {
 			for _, redacted := range tc.shouldRedact {
 				if strings.Contains(got, redacted) {
 					t.Errorf("expected %q to be redacted from %q", redacted, got)
+				}
+			}
+			gotLog := SanitizeLog(tc.input)
+			for _, redacted := range tc.shouldRedact {
+				if strings.Contains(gotLog, redacted) {
+					t.Errorf("expected %q to be redacted from log %q", redacted, gotLog)
 				}
 			}
 			for _, notRedacted := range tc.shouldNotRedact {
