@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -12,7 +13,7 @@ import (
 // recoverFailedPR rechecks recovery and subsequent head updates under the same parent-first locks
 // as cancellation and action retry. A sibling failure keeps the parent failed.
 func (s *PostgresVanadisStore) recoverFailedPR(ctx context.Context, id, head string, at int64) error {
-	if head == "" {
+	if strings.TrimSpace(head) == "" {
 		return errPRTransitionSkipped
 	}
 	tx, err := s.db.Begin(ctx)
@@ -35,7 +36,7 @@ func (s *PostgresVanadisStore) recoverFailedPR(ctx context.Context, id, head str
 	if err != nil {
 		return err
 	}
-	if b.Status != statusRunning && b.Status != statusFailed {
+	if !slices.Contains([]string{statusRunning, statusFailed}, b.Status) {
 		return errPRTransitionSkipped
 	}
 	var selected *VanadisChunk
@@ -52,6 +53,11 @@ func (s *PostgresVanadisStore) recoverFailedPR(ctx context.Context, id, head str
 		return errPRTransitionSkipped
 	}
 	c := *selected
+	// A legacy failed PR needs a durable baseline before a genuine head change
+	// can recover it. This observation must preserve all failure state.
+	if missingFailedPRBaseline(c, prHeadVerifiedFromContext(ctx)) {
+		return seedFailedPRBaseline(ctx, tx, id, head, at)
+	}
 	if !failedPRHeadAccepted(c, head, prHeadVerifiedFromContext(ctx)) {
 		return errPRTransitionSkipped
 	}
@@ -86,4 +92,22 @@ func failedPRHeadAccepted(c VanadisChunk, head string, verified bool) bool {
 		return false
 	}
 	return true
+}
+
+func missingFailedPRBaseline(c VanadisChunk, verified bool) bool {
+	return c.Status == statusFailed && c.HeadSHA == "" && c.Mode == "pr" && c.PRNumber > 0 && strings.TrimSpace(c.MergeSHA) == "" && verified
+}
+
+func seedFailedPRBaseline(ctx context.Context, tx pgx.Tx, id, head string, at int64) error {
+	const baseline = `UPDATE vanadis_chunks SET ci_checks = COALESCE(ci_checks, '{}'::jsonb) ||
+ jsonb_strip_nulls(jsonb_build_object('_head_sha', $2::text,
+ '_head_at', CASE WHEN $3::bigint > 0 THEN $3::text ELSE NULL END,
+ '_seen_heads', CONCAT_WS(',', NULLIF(ci_checks->>'_seen_heads', ''), $2::text))) WHERE id = $1;`
+	if _, err := tx.Exec(ctx, baseline, id, head, at); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return errPRTransitionSkipped
 }
