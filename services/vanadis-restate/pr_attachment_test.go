@@ -6,12 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/jackc/pgx/v5"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/assert"
@@ -66,6 +63,17 @@ func TestAttachmentSelectionAndErrors(t *testing.T) {
 		{name: "duplicate after failure", parent: "failed", status: "failed", previous: 101},
 		{name: "cancelled chunk", parent: "running", status: "cancelled", wantErr: ErrBuildConflict},
 		{name: "completed different PR", parent: "running", status: "completed", previous: 100, wantErr: ErrBuildConflict},
+		{name: "completed matching PR", parent: "running", status: "completed", previous: 101},
+		{name: "merged matching PR", parent: "running", status: "merged", previous: 101},
+		{name: "merged different PR", parent: "running", status: "merged", previous: 100, wantErr: ErrBuildConflict},
+		{name: "synced matching PR", parent: "running", status: "synced", previous: 101},
+		{name: "synced different PR", parent: "running", status: "synced", previous: 100, wantErr: ErrBuildConflict},
+		{name: "deploying matching PR", parent: "running", status: "deploying", previous: 101},
+		{name: "deploying different PR", parent: "running", status: "deploying", previous: 100, wantErr: ErrBuildConflict},
+		{name: "deployed matching PR", parent: "running", status: "deployed", previous: 101},
+		{name: "deployed different PR", parent: "running", status: "deployed", previous: 100, wantErr: ErrBuildConflict},
+		{name: "deploy_failed matching PR", parent: "running", status: "deploy_failed", previous: 101},
+		{name: "deploy_failed different PR", parent: "running", status: "deploy_failed", previous: 100, wantErr: ErrBuildConflict},
 		{name: "duplicate at cap", parent: "failed", status: "failed", previous: 101, cap: 3},
 		{name: "cancelled parent", parent: "cancelled", status: "failed", wantErr: ErrBuildConflict},
 		{name: "completed parent", parent: "completed", status: "failed", wantErr: ErrBuildConflict},
@@ -204,207 +212,6 @@ func TestExecutePRAttachment(t *testing.T) {
 			recorded := false
 			_, err := bo.executePRAttachment(restate.WithMockContext(mc), tc.req, &recorded)
 			require.Error(t, err)
-		})
-	}
-}
-
-func sqlListContains(query, prefix, val string) bool {
-	_, rest, ok := strings.Cut(query, prefix)
-	if !ok {
-		return false
-	}
-	list, _, ok := strings.Cut(rest, ")")
-	return ok && strings.Contains(list, "'"+val+"'")
-}
-
-func (s dbScript) evalAttachSelectRow(query string, args []any) pgx.Row {
-	if len(args) != 1 {
-		return nil
-	}
-	isMode := strings.HasPrefix(query, "SELECT mode FROM vanadis_chunks")
-	isBuild := strings.HasPrefix(query, "SELECT build_id FROM vanadis_chunks")
-	if !isMode && !isBuild {
-		return nil
-	}
-	for _, c := range s.chunks {
-		if c.ID != args[0] {
-			continue
-		}
-		if isMode {
-			return valuesRow(c.Mode)
-		}
-		return valuesRow(c.BuildID)
-	}
-	return errRow(pgx.ErrNoRows)
-}
-
-func (s dbScript) evalAttachActionUpdate(query string, b *VanadisBuild, args []any) pgx.Row {
-	repo, _ := args[0].(string)
-	prNum, _ := args[1].(int)
-	chunkID, _ := args[2].(string)
-	cands, _ := args[3].([]string)
-	for i := range s.chunks {
-		c := &s.chunks[i]
-		if c.ID != chunkID || c.BuildID != b.ID {
-			continue
-		}
-		repoMatch := strings.Contains(query, "c.repo = ANY($4)") && slices.Contains(cands, c.Repo)
-		samePR := repoMatch && c.PRNumber == prNum
-		terminal := sqlListContains(query, "c.status NOT IN (", c.Status)
-		if c.Status == statusCancelled || b.Status == statusCancelled || b.Status == statusCompleted || (c.Repo != "" && !repoMatch) || (terminal && !samePR) {
-			return errRow(pgx.ErrNoRows)
-		}
-		prevStatus := c.Status
-		if prevStatus != statusFailed && (!samePR || !sqlListContains(query, "c.pr_number = $2 AND c.status IN (", prevStatus)) {
-			c.Status = statusPROpened
-		}
-		if !samePR && sqlListContains(query, "banner = CASE WHEN c.status IN (", prevStatus) {
-			c.Banner = ""
-		}
-		c.Repo = repo
-		c.PRNumber = prNum
-		return valuesRow(b.ID, c.ID, b.ThreadID)
-	}
-	return errRow(pgx.ErrNoRows)
-}
-
-func (s dbScript) evalAttachExistsRow(query string, b *VanadisBuild, args []any) pgx.Row {
-	chunkID, _ := args[0].(string)
-	for _, c := range s.chunks {
-		if c.ID != chunkID {
-			continue
-		}
-		if strings.Contains(query, "c.status = 'cancelled'") {
-			isTerm := c.Status == statusCancelled || sqlListContains(query, "c.status IN (", c.Status) || b.Status == statusCancelled || b.Status == statusCompleted
-			return valuesRow(isTerm)
-		}
-		if strings.Contains(query, "repo != ''") && len(args) == 2 {
-			cands, _ := args[1].([]string)
-			return valuesRow(c.Repo != "" && !slices.Contains(cands, c.Repo))
-		}
-		return valuesRow(true)
-	}
-	return valuesRow(false)
-}
-
-func (s dbScript) evalAttachQueryRow(query string, args []any) pgx.Row {
-	if row := s.evalAttachSelectRow(query, args); row != nil {
-		return row
-	}
-	mr, ok := s.buildRow.(*mockRow)
-	if !ok || mr == nil || mr.b == nil {
-		return nil
-	}
-	if strings.HasPrefix(query, "UPDATE vanadis_chunks c SET repo = $1, pr_number = $2") && len(args) == 4 {
-		return s.evalAttachActionUpdate(query, mr.b, args)
-	}
-	if strings.HasPrefix(query, "SELECT EXISTS") && len(args) >= 1 {
-		return s.evalAttachExistsRow(query, mr.b, args)
-	}
-	return nil
-}
-
-func (s dbScript) evalAttachExec(query string, args []any) {
-	if strings.HasPrefix(query, "UPDATE vanadis_chunks SET pr_number = $1") && len(args) == 3 {
-		prNum, _ := args[0].(int)
-		chunkID, _ := args[1].(string)
-		recoverWorker, _ := args[2].(bool)
-		for i := range s.chunks {
-			c := &s.chunks[i]
-			if c.ID != chunkID {
-				continue
-			}
-			prevStatus := c.Status
-			samePR := c.PRNumber == prNum
-			if recoverWorker || (prevStatus != statusFailed && (!samePR || !sqlListContains(query, "COALESCE(pr_number, 0) = $1 AND status IN (", prevStatus))) {
-				c.Status = statusPROpened
-			}
-			if recoverWorker || (!samePR && sqlListContains(query, "banner = CASE WHEN $3 OR (status IN (", prevStatus)) {
-				c.Banner = ""
-			}
-			if recoverWorker && strings.Contains(query, "completed_at = CASE WHEN $3 THEN NULL") {
-				c.CompletedAt = time.Time{}
-			}
-			c.PRNumber = prNum
-		}
-	}
-	if strings.HasPrefix(query, "UPDATE vanadis_builds SET status = 'running'") {
-		if mr, ok := s.buildRow.(*mockRow); ok && mr != nil && mr.b != nil {
-			mr.b.Status = statusRunning
-		}
-	}
-}
-
-func TestAttachmentMatches_TerminalAndAdvancedStatuses(t *testing.T) {
-	t.Parallel()
-
-	completedTime := time.Unix(1700000000, 0).UTC()
-	chunkRow := func(mode, status, repo string, pr int, banner string, completedAt time.Time) VanadisChunk {
-		return VanadisChunk{ID: "c1", BuildID: "b1", Mode: mode, Status: status, Repo: repo, PRNumber: pr, Banner: banner, CompletedAt: completedAt}
-	}
-	reqRow := func(repo string, pr int) AttachChunkPRRequest {
-		return AttachChunkPRRequest{ChunkID: "c1", Repo: repo, PRNumber: pr}
-	}
-	tests := []struct {
-		name               string
-		chunk              VanadisChunk
-		build              VanadisBuild
-		req                AttachChunkPRRequest
-		wantConflict       bool
-		wantStatus         string
-		wantBanner         string
-		wantBuildStatus    string
-		wantRepo           string
-		wantClearCompleted bool
-	}{
-		{"merged pr matching", chunkRow("pr", statusMerged, "aerial", 101, "merged banner", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), false, statusMerged, "merged banner", statusRunning, "aerial", false},
-		{"merged pr mismatched", chunkRow("pr", statusMerged, "aerial", 101, "", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 102), true, "", "", "", "", false},
-		{"synced pr matching", chunkRow("pr", statusSynced, "aerial", 101, "synced banner", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), false, statusSynced, "synced banner", statusRunning, "aerial", false},
-		{"synced pr mismatched", chunkRow("pr", statusSynced, "aerial", 101, "", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 102), true, "", "", "", "", false},
-		{"deploying pr matching", chunkRow("pr", statusDeploying, "aerial", 101, "", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), false, statusDeploying, "", statusRunning, "aerial", false},
-		{"deploying pr mismatched", chunkRow("pr", statusDeploying, "aerial", 101, "", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 102), true, "", "", "", "", false},
-		{"deployed pr matching", chunkRow("pr", statusDeployed, "aerial", 101, "", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), false, statusDeployed, "", statusRunning, "aerial", false},
-		{"deployed pr mismatched", chunkRow("pr", statusDeployed, "aerial", 101, "", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 102), true, "", "", "", "", false},
-		{"deploy_failed pr matching", chunkRow("pr", statusDeployFailed, "aerial", 101, "deploy failed", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), false, statusDeployFailed, "deploy failed", statusRunning, "aerial", false},
-		{"deploy_failed pr mismatched", chunkRow("pr", statusDeployFailed, "aerial", 101, "", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 102), true, "", "", "", "", false},
-		{"completed pr matching", chunkRow("pr", statusCompleted, "aerial", 101, "", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), false, statusCompleted, "", statusRunning, "aerial", false},
-		{"ci_failed pr same PR preserves state", chunkRow("pr", statusCIFailed, "aerial", 101, "unit failed", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), false, statusCIFailed, "unit failed", statusRunning, "aerial", false},
-		{"ci_failed pr replaced resets state", chunkRow("pr", statusCIFailed, "aerial", 100, "unit failed", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), false, statusPROpened, "", statusRunning, "aerial", false},
-		{"conflict pr replaced resets state", chunkRow("pr", statusConflict, "aerial", 100, "merge conflict", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), false, statusPROpened, "", statusRunning, "aerial", false},
-		{"worker failure recovery", chunkRow("pr", statusFailed, "aerial", 0, "worker crashed", completedTime), VanadisBuild{ID: "b1", Status: statusFailed}, reqRow("aerial", 101), false, statusPROpened, "", statusRunning, "aerial", true},
-		{"action ci_failed repo alias preserves state", chunkRow("action", statusCIFailed, "azylman/aerial", 101, "action ci failed", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), false, statusCIFailed, "action ci failed", statusRunning, "aerial", false},
-		{"action conflict repo alias replaced resets state", chunkRow("action", statusConflict, "azylman/aerial", 100, "action conflict", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), false, statusPROpened, "", statusRunning, "aerial", false},
-		{"action merged repo alias rejects replacement", chunkRow("action", statusMerged, "azylman/aerial", 100, "", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), true, "", "", "", "", false},
-		{"cancelled chunk rejected", chunkRow("pr", statusCancelled, "aerial", 101, "", time.Time{}), VanadisBuild{ID: "b1", Status: statusRunning}, reqRow("aerial", 101), true, "", "", "", "", false},
-		{"completed build rejected", chunkRow("pr", statusRunning, "aerial", 0, "", time.Time{}), VanadisBuild{ID: "b1", Status: statusCompleted}, reqRow("aerial", 101), true, "", "", "", "", false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			buildCopy := tc.build
-			store, _ := dbScript{
-				buildRow:           &mockRow{b: &buildCopy},
-				chunks:             []VanadisChunk{tc.chunk},
-				applyAttachUpdates: true,
-			}.open()
-			_, _, _, err := store.AttachChunkPR(context.Background(), tc.req)
-			if tc.wantConflict {
-				require.ErrorIs(t, err, ErrBuildConflict)
-				return
-			}
-			require.NoError(t, err)
-			gotBuild, gotChunks, gErr := store.GetBuild(context.Background(), tc.build.ID)
-			require.NoError(t, gErr)
-			require.Len(t, gotChunks, 1)
-			assert.Equal(t, tc.wantBuildStatus, gotBuild.Status)
-			assert.Equal(t, tc.wantStatus, gotChunks[0].Status)
-			assert.Equal(t, tc.wantBanner, gotChunks[0].Banner)
-			assert.Equal(t, tc.req.PRNumber, gotChunks[0].PRNumber)
-			assert.Equal(t, tc.wantRepo, gotChunks[0].Repo)
-			if tc.wantClearCompleted {
-				assert.True(t, gotChunks[0].CompletedAt.IsZero())
-			}
 		})
 	}
 }

@@ -115,6 +115,14 @@ func isLookupNotFound(err error) bool {
 	return errors.Is(err, ErrChunkNotFound) || errors.Is(err, ErrBuildNotFound)
 }
 
+func canFallbackThreadRepoLookup(ev pubsub.PRLifecycleEvent) bool {
+	if strings.TrimSpace(ev.TargetID) == "" || ev.Quiet {
+		return false
+	}
+	branch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
+	return !strings.HasPrefix(branch, "dependabot/")
+}
+
 func (s *BuildRouterService) resolvePRBuildID(rc restate.RunContext, repo string, ev pubsub.PRLifecycleEvent) (string, error) {
 	if s.store == nil {
 		return "", nil
@@ -129,6 +137,17 @@ func (s *BuildRouterService) resolvePRBuildID(rc restate.RunContext, repo string
 
 	if chunkID := extractChunkIDFromBranch(repo, ev.Branch); chunkID != "" {
 		bID, err := s.store.LookupChunkBuildID(rc, chunkID)
+		if err == nil && bID != "" {
+			return bID, nil
+		}
+		if err != nil && !isLookupNotFound(err) {
+			return "", err
+		}
+		return "", nil
+	}
+
+	if canFallbackThreadRepoLookup(ev) {
+		bID, _, err := s.store.LookupUnattachedChunkByThreadAndRepo(rc, ev.TargetID, repo)
 		if err == nil && bID != "" {
 			return bID, nil
 		}
@@ -980,9 +999,40 @@ func (b *BuildObject) syncAttachedPRWidget(rc restate.RunContext, buildID string
 	}
 }
 
+func selectUnattachedTargetChunk(build *VanadisBuild, chunks []VanadisChunk, ev pubsub.PRLifecycleEvent) *VanadisChunk {
+	if build == nil {
+		return nil
+	}
+	if chunkID := extractChunkIDFromBranch(ev.Repo, ev.Branch); chunkID != "" {
+		for i := range chunks {
+			if chunks[i].ID == chunkID && chunks[i].BuildID == build.ID {
+				if isEligibleUnattachedChunk(build, &chunks[i], ev) {
+					return &chunks[i]
+				}
+				return nil
+			}
+		}
+		return nil
+	}
+	evThread := normalizeDiscordThreadID(ev.TargetID)
+	buildThread := normalizeDiscordThreadID(build.ThreadID)
+	if !canFallbackThreadRepoLookup(ev) || evThread == "" || buildThread == "" || evThread != buildThread {
+		return nil
+	}
+	var matched *VanadisChunk
+	for i := range chunks {
+		if chunks[i].BuildID == build.ID && isEligibleUnattachedChunk(build, &chunks[i], ev) {
+			if matched != nil {
+				return nil
+			}
+			matched = &chunks[i]
+		}
+	}
+	return matched
+}
+
 func (b *BuildObject) resolveOrAttachPRChunk(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (string, error) {
-	chunkID := extractChunkIDFromBranch(ev.Repo, ev.Branch)
-	if chunkID == "" || b.executor == nil {
+	if b.executor == nil || (extractChunkIDFromBranch(ev.Repo, ev.Branch) == "" && !canFallbackThreadRepoLookup(ev)) {
 		return "", nil
 	}
 
@@ -994,14 +1044,8 @@ func (b *BuildObject) resolveOrAttachPRChunk(rc restate.RunContext, buildID stri
 		return "", gErr
 	}
 
-	var targetChunk *VanadisChunk
-	for i := range chunks {
-		if chunks[i].ID == chunkID && chunks[i].BuildID == buildID {
-			targetChunk = &chunks[i]
-			break
-		}
-	}
-	if !isEligibleUnattachedChunk(build, targetChunk, ev) {
+	targetChunk := selectUnattachedTargetChunk(build, chunks, ev)
+	if targetChunk == nil {
 		return "", nil
 	}
 	if vErr := b.executor.validateChunkPRAttachment(rc, *build, *targetChunk, ev); vErr != nil {
@@ -1012,7 +1056,7 @@ func (b *BuildObject) resolveOrAttachPRChunk(rc restate.RunContext, buildID stri
 	}
 
 	_, attachedChunkID, _, aErr := b.store.AttachChunkPR(rc, AttachChunkPRRequest{
-		ChunkID:  chunkID,
+		ChunkID:  targetChunk.ID,
 		PRNumber: ev.PRNumber,
 		Repo:     strings.TrimSpace(ev.Repo),
 		Branch:   ev.Branch,

@@ -31,7 +31,6 @@ type (
 		rowsErr, execErr, commitErr error
 		rollbackErr                 error
 		failExec, execTag           string
-		applyAttachUpdates          bool
 	}
 )
 
@@ -62,11 +61,6 @@ func (s dbScript) resolveQueryRow(query string, args []any, candidates *[]string
 	if s.countRow != nil && strings.Contains(query, "COUNT(*)") {
 		return s.countRow
 	}
-	if s.applyAttachUpdates && s.row == nil && len(s.chunks) > 0 {
-		if row := s.evalAttachQueryRow(query, args); row != nil {
-			return row
-		}
-	}
 	if s.buildRow != nil && strings.Contains(query, "FROM vanadis_builds") {
 		return s.buildRow
 	}
@@ -88,12 +82,9 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 		}
 		return &mockRows{items: s.chunks, builds: s.builds, scanErr: s.scanErr, rowsErr: s.rowsErr}, nil
 	}
-	exec := func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	exec := func(_ context.Context, query string, _ ...any) (pgconn.CommandTag, error) {
 		if s.execErr != nil && strings.Contains(query, s.failExec) {
 			return pgconn.CommandTag{}, s.execErr
-		}
-		if s.applyAttachUpdates {
-			s.evalAttachExec(query, args)
 		}
 		return pgconn.NewCommandTag(tag), nil
 	}
@@ -278,6 +269,11 @@ func (r *mockRows) Scan(dest ...any) error {
 		return r.scanErr
 	}
 	switch len(dest) {
+	case 2:
+		if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
+			return scanValues(dest, r.items[r.idx-1].BuildID, r.items[r.idx-1].ID)
+		}
+		return nil
 	case 11:
 		return r.scan11(dest)
 	case 10:

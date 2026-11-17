@@ -32,6 +32,7 @@ func TestBuildObject_RecordPRHeadRevision(t *testing.T) {
 		{"missing head", `{"state":"open","merged":false}`, 200, "head-b", true, 30, true, false, "owner/repo"},
 		{"unknown stale head", `{"state":"open","merged":false,"head":{"sha":"head-b"}}`, 200, "", true, 30, false, true, "owner/repo"},
 		{"bare repository", `{"state":"open","merged":false,"head":{"sha":"head-a"}}`, 200, "head-a", false, 30, false, false, "aerial"},
+		{"attached fork PR head update", `{"state":"open","merged":false,"head":{"sha":"head-a","repo":{"fork":true,"full_name":"forker/repo"}},"base":{"repo":{"full_name":"owner/repo"}}}`, 200, "head-a", false, 30, false, false, "owner/repo"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

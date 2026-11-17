@@ -65,12 +65,6 @@ func (e *Executor) fetchGitHubPullRequest(ctx context.Context, repo string, numb
 	if err = json.NewDecoder(resp.Body).Decode(&pr); err != nil {
 		return nil, "", "", fmt.Errorf("decode PR head: %w", err)
 	}
-	if pr.Head.Repo != nil && pr.Head.Repo.Fork {
-		return nil, "", "", errPRTransitionSkipped
-	}
-	if pr.Head.Repo != nil && pr.Base.Repo != nil && pr.Head.Repo.FullName != "" && pr.Base.Repo.FullName != "" && !strings.EqualFold(pr.Head.Repo.FullName, pr.Base.Repo.FullName) {
-		return nil, "", "", errPRTransitionSkipped
-	}
 	return &pr, parts[0], parts[0] + "/" + parts[1], nil
 }
 
@@ -137,7 +131,7 @@ func (e *Executor) validateChunkPRAttachment(ctx context.Context, build VanadisB
 	if err != nil {
 		return err
 	}
-	if pr.Head.Repo == nil || pr.Base.Repo == nil || !strings.EqualFold(strings.TrimSpace(pr.Head.Repo.FullName), fullRepo) || !strings.EqualFold(strings.TrimSpace(pr.Base.Repo.FullName), fullRepo) {
+	if pr.Head.Repo == nil || pr.Base.Repo == nil || pr.Head.Repo.Fork || !strings.EqualFold(strings.TrimSpace(pr.Head.Repo.FullName), fullRepo) || !strings.EqualFold(strings.TrimSpace(pr.Base.Repo.FullName), fullRepo) {
 		return errPRTransitionSkipped
 	}
 	if !isTrustedPRAuthor(pr.User.Login, pr.AuthorAssociation, owner) {
@@ -145,7 +139,8 @@ func (e *Executor) validateChunkPRAttachment(ctx context.Context, build VanadisB
 	}
 	headRef := strings.TrimPrefix(strings.TrimSpace(pr.Head.Ref), "refs/heads/")
 	evBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
-	if headRef == "" || (evBranch != "" && headRef != evBranch) || extractChunkIDFromBranch(fullRepo, headRef) != chunk.ID {
+	branchChunkID := extractChunkIDFromBranch(fullRepo, headRef)
+	if headRef == "" || (evBranch != "" && headRef != evBranch) || (branchChunkID != "" && branchChunkID != chunk.ID) {
 		return errPRTransitionSkipped
 	}
 	if evHead := strings.TrimSpace(ev.HeadSHA); evHead != "" && (strings.TrimSpace(pr.Head.SHA) == "" || !strings.EqualFold(pr.Head.SHA, evHead)) {

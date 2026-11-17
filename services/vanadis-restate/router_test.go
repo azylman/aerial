@@ -147,13 +147,44 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			wantBuildID: "b-branch",
 		},
 		{
-			name: "thread metadata alone rejected without vanadis branch encoding",
+			name: "thread and repo fallback resolution",
 			ev: pubsub.PRLifecycleEvent{
 				Repo:     "aerial",
 				PRNumber: 103,
 				Event:    "opened",
 				Branch:   "feat/aerial-pr-20261116-123456",
 				TargetID: "thread-123",
+			},
+			db: dbScript{
+				row:    errRow(pgx.ErrNoRows),
+				chunks: []VanadisChunk{{BuildID: "b-thread", ID: "c1"}},
+			},
+			wantBuildID: "b-thread",
+		},
+		{
+			name: "dependabot guard exclusion",
+			ev: pubsub.PRLifecycleEvent{
+				Repo:     "aerial",
+				PRNumber: 104,
+				Event:    "opened",
+				Branch:   "refs/heads/dependabot/npm_and_yarn/foo",
+				TargetID: "thread-123",
+			},
+			db: dbScript{
+				row:    errRow(pgx.ErrNoRows),
+				chunks: []VanadisChunk{{BuildID: "b-thread", ID: "c1"}},
+			},
+			wantBuildID: "",
+		},
+		{
+			name: "quiet guard exclusion",
+			ev: pubsub.PRLifecycleEvent{
+				Repo:     "aerial",
+				PRNumber: 105,
+				Event:    "opened",
+				Branch:   "feat/something",
+				TargetID: "thread-123",
+				Quiet:    true,
 			},
 			db: dbScript{
 				row:    errRow(pgx.ErrNoRows),
@@ -421,6 +452,49 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
 }
 
+func TestPostgresVanadisStore_LookupUnattachedChunkByThreadAndRepo(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		threadID  string
+		repo      string
+		db        dbScript
+		wantBuild string
+		wantChunk string
+		wantErrIs error
+		wantErr   bool
+	}{
+		{name: "nil db", threadID: "123", repo: "aerial", db: dbScript{bare: nilDB}, wantErr: true},
+		{name: "empty thread id", threadID: "", repo: "aerial", db: dbScript{}, wantErrIs: ErrChunkNotFound},
+		{name: "empty repo", threadID: "123", repo: "", db: dbScript{}, wantErrIs: ErrChunkNotFound},
+		{name: "query error", threadID: "123", repo: "aerial", db: dbScript{queryErr: errors.New("query failed")}, wantErr: true},
+		{name: "scan error", threadID: "123", repo: "aerial", db: dbScript{chunks: []VanadisChunk{{BuildID: "b1", ID: "c1"}}, scanErr: errors.New("scan failed")}, wantErr: true},
+		{name: "rows error", threadID: "123", repo: "aerial", db: dbScript{chunks: []VanadisChunk{{BuildID: "b1", ID: "c1"}}, rowsErr: errors.New("rows failed")}, wantErr: true},
+		{name: "0 rows not found", threadID: "123", repo: "aerial", db: dbScript{chunks: []VanadisChunk{}}, wantErrIs: ErrChunkNotFound},
+		{name: "1 row unambiguous match", threadID: "123", repo: "aerial", db: dbScript{
+			chunks: []VanadisChunk{{BuildID: "b1", ID: "c1"}},
+		}, wantBuild: "b1", wantChunk: "c1"},
+		{name: "2 rows ambiguous rejection", threadID: "123", repo: "aerial", db: dbScript{
+			chunks: []VanadisChunk{{BuildID: "b1", ID: "c1"}, {BuildID: "b1", ID: "c2"}},
+		}, wantErrIs: ErrChunkNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, _ := tc.db.open()
+			bID, cID, err := store.LookupUnattachedChunkByThreadAndRepo(ctx, tc.threadID, tc.repo)
+			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
+				return
+			}
+			if bID != tc.wantBuild || cID != tc.wantChunk {
+				t.Fatalf("LookupUnattachedChunkByThreadAndRepo = (%q, %q), want (%q, %q)", bID, cID, tc.wantBuild, tc.wantChunk)
+			}
+		})
+	}
+}
+
 type unattachedPREventSpyStore struct {
 	VanadisStore
 
@@ -532,6 +606,10 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Matches(t *testing.T) {
 		{"unmatched pr event without branch encoding", prEv("opened", "main", "", "", 101), ch("chunk-1", statusRunning, 0, startedAt), validGitHubPR, false, "", 0, false, ""},
 		{"target chunk absent in chunks list", prEv("opened", "feat/aerial-pr-vanadis-chunk-99-abcdef", "", "", 101), ch("chunk-1", statusRunning, 0, startedAt), validGitHubPR, false, "", 0, false, ""},
 		{"collaborator author accepted with matching sha", prEv("check_updated", "feat/aerial-pr-vanadis-chunk-1-abcdef", "sha-1", "th-1", 101), ch("chunk-1", statusCoding, 0, startedAt), `{"state":"open","merged":false,"author_association":"COLLABORATOR","user":{"login":"aerial-bot"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-1-abcdef","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "chunk-1", 101, true, ""},
+		{"nonencoded branch resolved via unambiguous thread and verified trailer", prEv("ci_failed", "feat/custom-branch", "sha-1", "th-1", 101), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "chunk-1", 101, true, ""},
+		{"absent event branch resolved via unambiguous thread and verified trailer", prEv("conflict", "", "sha-1", "th-1", 101), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "chunk-1", 101, true, ""},
+		{"nonencoded branch rejected without trailer", prEv("opened", "feat/custom-branch", "sha-1", "th-1", 101), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"manual PR","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, ""},
+		{"nonencoded branch rejected when parallel chunks ambiguous", prEv("opened", "feat/custom-branch", "sha-1", "th-1", 101), []VanadisChunk{{ID: "chunk-1", BuildID: "b1", Mode: "pr", Status: statusRunning, Repo: "external/aerial", StartedAt: startedAt}, {ID: "chunk-2", BuildID: "b1", Mode: "pr", Status: statusCoding, Repo: "external/aerial", StartedAt: startedAt}}, `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/custom-branch","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, ""},
 		{"mismatched head repository rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 102), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-1-abcdef","repo":{"fork":false,"full_name":"other/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, ""},
 		{"mismatched head branch ref rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "", "", 102), ch("chunk-1", statusRunning, 0, startedAt), `{"state":"open","merged":false,"author_association":"OWNER","user":{"login":"external"},"body":"<!-- aerial-pr: {\"target_id\":\"th-1\",\"vanadis_chunk_id\":\"chunk-1\"} -->","head":{"sha":"sha-1","ref":"feat/aerial-pr-vanadis-chunk-2-abcdef","repo":{"fork":false,"full_name":"external/aerial"}},"base":{"repo":{"full_name":"external/aerial"}}}`, false, "", 0, false, ""},
 		{"mismatched head sha rejected", prEv("opened", "feat/aerial-pr-vanadis-chunk-1-abcdef", "sha-other", "", 102), ch("chunk-1", statusRunning, 0, startedAt), validGitHubPR, false, "", 0, false, ""},
