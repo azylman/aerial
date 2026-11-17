@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
@@ -722,7 +725,7 @@ func TestBuildObject_AuthoritativeGenerationRecovery(t *testing.T) {
 		{"pending acknowledged", "pending", 1, map[string]bool{"dispatch:vanadis-c-turn-1": true}, false, false, false, "dispatch:vanadis-c-turn-1"},
 		{"eri rejection", "running", 1, nil, true, true, true, ""},
 		{"first run", "pending", 0, nil, false, true, false, "c"},
-		{"legacy running", "running", 0, nil, false, false, false, ""},
+		{"legacy running", "running", 0, nil, false, true, false, "c"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -751,40 +754,54 @@ func TestBuildObject_AuthoritativeGenerationRecovery(t *testing.T) {
 func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name             string
-		status           string
-		siblings         int
-		dependencyStatus string
-		wantDispatch     bool
+		name               string
+		mode               string
+		status             string
+		nudges             int
+		siblings           int
+		dependencyStatus   string
+		withPendingSibling bool
+		wantDispatched     []string
 	}{
-		{"resume at capacity", "running", 3, "completed", true},
-		{"pending at capacity", "pending", 4, "completed", false},
-		{"dependency unfinished", "running", 0, "running", false},
-		{"dependency ready", "pending", 0, "completed", true},
+		{"resume at capacity", "action", "running", 2, 3, "completed", true, []string{"vanadis-retry-turn-2"}},
+		{"unlaunched running reserves slot", "pr", "running", 0, 3, "completed", true, []string{"vanadis-retry-turn-0"}},
+		{"pending at capacity", "action", "pending", 2, 4, "completed", false, nil},
+		{"dependency unfinished", "action", "running", 2, 0, "running", false, nil},
+		{"dependency ready", "action", "pending", 2, 0, "completed", false, []string{"vanadis-retry-turn-2"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			chunks := []VanadisChunk{
-				{ID: "retry", Mode: "action", Status: tc.status, StallNudges: 2, DependsOn: []string{"dependency"}},
+				{ID: "retry", Mode: tc.mode, Repo: "aerial", Status: tc.status, StallNudges: tc.nudges, DependsOn: []string{"dependency"}},
 				{ID: "dependency", Mode: "action", Status: tc.dependencyStatus},
 			}
 			for i := range tc.siblings {
-				chunks = append(chunks, VanadisChunk{ID: fmt.Sprintf("sibling-%d", i), Mode: "pr", Status: "running"})
+				chunks = append(chunks, VanadisChunk{ID: fmt.Sprintf("sibling-%d", i), Mode: "pr", Repo: "aerial", Status: "running", PRNumber: i + 1})
 			}
-			eri := &mockEriClient{}
+			if tc.withPendingSibling {
+				chunks = append(chunks, VanadisChunk{ID: "pending-sibling", Mode: "pr", Repo: "aerial", Status: "pending"})
+			}
+			var dispatched []string
+			eri := &mockEriClient{dispatchFn: func(_ context.Context, req BrainDispatchRequest) error {
+				dispatched = append(dispatched, req.ID)
+				return nil
+			}}
 			bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, NewExecutor(t.TempDir(), eri, nil, "", nil))
-			launched := map[string]bool{"retry": true, "dispatch:vanadis-retry-turn-1": true}
+			launched := map[string]bool{"dispatch:vanadis-retry-turn-1": true, "dependency": true}
+			if tc.nudges > 0 {
+				launched["retry"] = true
+			}
 			_, err := bo.launchEligibleChunks(context.Background(), VanadisBuild{ID: "b"}, chunks, launched)
 			assert.NoError(t, err)
-			assert.Equal(t, tc.wantDispatch, eri.lastDispatch != nil)
-			if tc.wantDispatch {
-				assert.Equal(t, "vanadis-retry-turn-2", eri.lastDispatch.ID)
-				// Repeated reconciliation after acceptance must leave the generation acknowledged.
-				eri.lastDispatch = nil
+			assert.Equal(t, tc.wantDispatched, dispatched)
+			if len(tc.wantDispatched) > 0 {
+				// Repeated reconciliation after acceptance must leave the generation acknowledged
+				// and keep the 4-chunk cap intact against pending siblings.
+				dispatched = nil
 				_, err = bo.launchEligibleChunks(context.Background(), VanadisBuild{ID: "b"}, chunks, launched)
 				assert.NoError(t, err)
-				assert.Nil(t, eri.lastDispatch)
+				assert.Empty(t, dispatched)
 			}
 		})
 	}
@@ -864,4 +881,372 @@ func TestClassifyLaunchErrors(t *testing.T) {
 			assert.Equal(t, tc.wantDeferred, errors.Is(err, errDispatchActive))
 		})
 	}
+}
+
+type retryingObjectRuntime struct {
+	*fakeObjectRuntime
+}
+
+func (r *retryingObjectRuntime) RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error) {
+	r.stepsRun = append(r.stepsRun, name)
+	out, err := fn(context.Background())
+	if err != nil {
+		return fn(context.Background())
+	}
+	return out, nil
+}
+
+func TestBuildObject_NotifyTransitionError(t *testing.T) {
+	t.Parallel()
+
+	// Quiet build suppresses error notification
+	buildQuiet := VanadisBuild{ID: "b-quiet", Quiet: true}
+	storeQuiet, _ := dbScript{buildRow: &mockRow{b: &buildQuiet}}.open()
+	eriQuiet := &mockEriClient{}
+	boQuiet := NewBuildObject("", nil).WithAuthority(storeQuiet, NewExecutor(t.TempDir(), eriQuiet, nil, "", nil))
+	boQuiet.notifyTransitionError(context.Background(), "b-quiet", "step", nil, errors.New("trans err"))
+	assert.Nil(t, eriQuiet.lastWidget)
+
+	// Non-quiet build resolves from store and emits banner
+	buildActive := VanadisBuild{ID: "b-active", Title: "Active Build", Status: "running"}
+	storeActive, _ := dbScript{buildRow: &mockRow{b: &buildActive}, chunks: []VanadisChunk{{ID: "c1", Title: "Chunk 1"}}}.open()
+	eriActive := &mockEriClient{}
+	boActive := NewBuildObject("", nil).WithAuthority(storeActive, NewExecutor(t.TempDir(), eriActive, nil, "", nil))
+	boActive.notifyTransitionError(context.Background(), "b-active", "step", nil, errors.New("trans err"))
+	require.NotNil(t, eriActive.lastWidget)
+	assert.Equal(t, "b-active", eriActive.lastWidget.ID)
+	assert.Equal(t, "⚠️ Reconcile backing off (step): trans err", eriActive.lastWidget.Banner)
+	require.Len(t, eriActive.lastWidget.Chunks, 1)
+	assert.Equal(t, "c1", eriActive.lastWidget.Chunks[0].ID)
+
+	// Fallback to priorState when store is nil
+	eriPrior := &mockEriClient{}
+	boNoStore := NewBuildObject("", nil).WithAuthority(nil, NewExecutor(t.TempDir(), eriPrior, nil, "", nil))
+	prior := &BuildObjectState{Build: VanadisBuild{ID: "b-prior", Title: "Prior Build"}, Chunks: []VanadisChunk{{ID: "c-prior", Title: "Prior Chunk"}}}
+	boNoStore.notifyTransitionError(context.Background(), "b-prior", "step", prior, errors.New("trans err"))
+	require.NotNil(t, eriPrior.lastWidget)
+	assert.Equal(t, "b-prior", eriPrior.lastWidget.ID)
+	assert.Equal(t, "⚠️ Reconcile backing off (step): trans err", eriPrior.lastWidget.Banner)
+	require.Len(t, eriPrior.lastWidget.Chunks, 1)
+	assert.Equal(t, "c-prior", eriPrior.lastWidget.Chunks[0].ID)
+
+	// Retry inside RunReconcileStep records counter and emits banner before succeeding on retry
+	attempts := 0
+	var retryBanners []string
+	eriRetry := &mockEriClient{
+		dispatchFn: func(context.Context, BrainDispatchRequest) error {
+			attempts++
+			if attempts == 1 {
+				return errors.New("transient dispatch failure")
+			}
+			return nil
+		},
+		widgetFn: func(_ context.Context, req StatusWidgetRequest) (string, error) {
+			retryBanners = append(retryBanners, req.Banner)
+			return "msg-retry", nil
+		},
+	}
+	storeRetry, _ := dbScript{
+		buildRow: &mockRow{b: &buildActive},
+		chunks:   []VanadisChunk{{ID: "c1", BuildID: "b-active", Mode: "action", Status: "pending", Title: "Chunk 1"}},
+		execTag:  "UPDATE 1",
+	}.open()
+	boRetry := NewBuildObject("", nil).WithAuthority(storeRetry, NewExecutor(t.TempDir(), eriRetry, nil, "", nil))
+	rtRetry := &retryingObjectRuntime{fakeObjectRuntime: newFakeObjectRuntime("b-active")}
+	beforeCount := reconcileErrorsCount(t, "reconcile-retry-test")
+	res, err := boRetry.executeObjectTransition(rtRetry, "reconcile-retry-test", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "running", res.Status)
+	assert.Equal(t, beforeCount+1, reconcileErrorsCount(t, "reconcile-retry-test"))
+	assert.Contains(t, retryBanners, "⚠️ Reconcile backing off (reconcile-retry-test): transient dispatch failure")
+}
+
+func reconcileErrorsCount(t *testing.T, handler string) float64 {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	SetupHealthMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+	prefix := fmt.Sprintf(`vanadis_restate_reconcile_errors_total{handler=%q} `, handler)
+	for line := range strings.SplitSeq(rec.Body.String(), "\n") {
+		if valStr, ok := strings.CutPrefix(strings.TrimSpace(line), prefix); ok {
+			val, err := strconv.ParseFloat(strings.TrimSpace(valStr), 64)
+			require.NoError(t, err)
+			return val
+		}
+	}
+	return 0
+}
+
+type mockStartupBus struct {
+	pubsub.Bus
+
+	ensureErr error
+	closed    bool
+}
+
+func (m *mockStartupBus) EnsureCoreStreams(context.Context) error { return m.ensureErr }
+func (m *mockStartupBus) Close() error {
+	m.closed = true
+	return nil
+}
+
+func TestRunApp_FailFast(t *testing.T) {
+	// Missing Postgres URL
+	err := RunApp(context.Background(), Config{PostgresURL: "", NATSURL: "nats://localhost:4222"})
+	assert.ErrorContains(t, err, "postgres_url is required")
+
+	// Invalid Postgres URL
+	err = RunApp(context.Background(), Config{PostgresURL: "invalid://url", NATSURL: "nats://localhost:4222"})
+	assert.ErrorContains(t, err, "connect to postgres")
+
+	// Unreachable NATS via default newBusFn fails fast (RetryOnFailedConnect(false))
+	_, natsDialErr := newBusFn(context.Background(), "nats://127.0.0.1:1")
+	assert.Error(t, natsDialErr)
+
+	// Missing NATS URL
+	oldInitPg := initPostgres
+	initPostgres = func(context.Context, string) (*PostgresVanadisStore, func(context.Context), error) {
+		return &PostgresVanadisStore{}, func(context.Context) {}, nil
+	}
+	defer func() { initPostgres = oldInitPg }()
+
+	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", NATSURL: ""})
+	assert.ErrorContains(t, err, "nats_url is required")
+
+	// NATS connect failure
+	oldNewBus := newBusFn
+	newBusFn = func(context.Context, string) (pubsub.Bus, error) {
+		return nil, errors.New("nats down")
+	}
+	defer func() { newBusFn = oldNewBus }()
+
+	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", NATSURL: "nats://mock"})
+	assert.ErrorContains(t, err, "connect to nats")
+
+	// NATS JetStream verification failure closes bus and fails fast
+	startupBus := &mockStartupBus{ensureErr: errors.New("jetstream unavailable")}
+	newBusFn = func(context.Context, string) (pubsub.Bus, error) {
+		return startupBus, nil
+	}
+	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", NATSURL: "nats://mock"})
+	assert.ErrorContains(t, err, "verify nats jetstream")
+	assert.True(t, startupBus.closed)
+}
+
+func TestReconcileErrorsMetric(t *testing.T) {
+	t.Parallel()
+	rec := httptest.NewRecorder()
+	SetupHealthMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+	metricsBody := rec.Body.String()
+	for _, label := range reconcileErrorHandlerLabels {
+		assert.Contains(t, metricsBody, fmt.Sprintf(`vanadis_restate_reconcile_errors_total{handler=%q} `, label))
+	}
+
+	before := reconcileErrorsCount(t, "test-handler")
+	recordReconcileError("test-handler", nil)
+	assert.Equal(t, before, reconcileErrorsCount(t, "test-handler"))
+	recordReconcileError("test-handler", errors.New("err"))
+	assert.Equal(t, before+1, reconcileErrorsCount(t, "test-handler"))
+}
+
+type checkStatusSpyStore struct {
+	VanadisStore
+
+	calls     []string
+	resets    []string
+	err       error
+	resetErr  error
+	statusErr error
+}
+
+func (*checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
+	return &VanadisBuild{ID: buildID, Status: statusRunning}, nil, nil
+}
+
+func (s *checkStatusSpyStore) RecordPRCheckStatus(_ context.Context, chunkID, headSHA, checkName, checkState string) error {
+	s.calls = append(s.calls, chunkID+":"+headSHA+":"+checkName+":"+checkState)
+	return s.err
+}
+
+func (s *checkStatusSpyStore) ResetPRCheckState(_ context.Context, chunkID, headSHA, mergeSHA string) error {
+	s.resets = append(s.resets, chunkID+":"+headSHA+":"+mergeSHA)
+	return s.resetErr
+}
+
+func (s *checkStatusSpyStore) UpdatePRLifecycleStatus(_ context.Context, _, _ string) error {
+	return s.statusErr
+}
+
+func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	spy := &checkStatusSpyStore{}
+	bo := NewBuildObject("", nil).WithAuthority(spy, nil)
+
+	// Empty check name is ignored
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{CheckName: ""}))
+	assert.Empty(t, spy.calls)
+
+	// Empty check state on check_updated is ignored
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{CheckName: "test", CheckState: ""}))
+	assert.Empty(t, spy.calls)
+
+	// check_updated with state records exact state on initial head sha-1
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "running"}))
+	assert.Equal(t, []string{"c1:sha-1:test:running"}, spy.calls)
+
+	// check_failed defaults empty state to failed on matching head sha-1
+	spy.calls = nil
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test"}))
+	assert.Equal(t, []string{"c1:sha-1:test:failed"}, spy.calls)
+
+	// synchronize advances tracked revision to sha-2 and resets check state
+	t2 := time.Date(2026, 11, 16, 23, 0, 0, 0, time.UTC)
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", OccurredAt: t2}))
+	assert.Equal(t, []string{"c1:sha-2:"}, spy.resets)
+
+	// delayed synchronize for superseded sha-1 or older timestamp is rejected without mutating revision
+	spy.resets = nil
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-1"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-0", OccurredAt: t2.Add(-time.Minute)}), errPRTransitionSkipped)
+	assert.Empty(t, spy.resets)
+
+	// delayed check_updated and check_failed from old head sha-1 are rejected
+	spy.calls = nil
+	assert.ErrorIs(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "pending"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test"}), errPRTransitionSkipped)
+	assert.Empty(t, spy.calls)
+
+	// check_updated for new head sha-2 succeeds
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "passed"}))
+	assert.Equal(t, []string{"c1:sha-2:test:passed"}, spy.calls)
+
+	// legitimate newer force-push returning branch to previous head sha-1 (with newer OccurredAt) is accepted
+	spy.resets = nil
+	spy.calls = nil
+	t3 := t2.Add(time.Minute)
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", OccurredAt: t3}))
+	assert.Equal(t, []string{"c1:sha-1:"}, spy.resets)
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "passed"}))
+	assert.Equal(t, []string{"c1:sha-1:test:passed"}, spy.calls)
+
+	// advance back to sha-2 with newer timestamp t4
+	spy.resets = nil
+	t4 := t3.Add(time.Minute)
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", OccurredAt: t4}))
+	assert.Equal(t, []string{"c1:sha-2:"}, spy.resets)
+
+	// untimestamped synchronize on c2 clears headAt so delayed sha-a with older timestamp is rejected
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-a", OccurredAt: t2}))
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-b"}))
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-a", OccurredAt: t3}), errPRTransitionSkipped)
+	assert.True(t, prHeadAtFromContext(nil).IsZero())
+	assert.True(t, prHeadAtFromContext(context.Background()).IsZero())
+	assert.Nil(t, withPRHeadAt(nil, time.Time{}))
+	assert.Equal(t, t3.UTC(), prHeadAtFromContext(withPRHeadAt(nil, t3)))
+	var parsedChunk VanadisChunk
+	applyRawChunkCIChecks(&parsedChunk, []byte(`{"_head_sha":"sha-1","_merge_sha":"m-1","_head_at":"1700000000000000000","_seen_heads":"sha-0,sha-1","lint":"passed"}`))
+	assert.Equal(t, "sha-1", parsedChunk.HeadSHA)
+	assert.Equal(t, []string{"sha-0", "sha-1"}, parsedChunk.SeenHeads)
+	assert.False(t, parsedChunk.HeadAt.IsZero())
+	assert.Equal(t, map[string]string{"lint": "passed"}, parsedChunk.CIChecks)
+	spy.resets = nil
+
+	// failed or skipped ResetPRCheckState on synchronize does not overwrite cached revision
+	spy.resetErr = errPRTransitionSkipped
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-unapplied"}), errPRTransitionSkipped)
+	spy.resetErr = nil
+	spy.calls = nil
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "passed"}))
+	assert.Equal(t, []string{"c1:sha-2:test:passed"}, spy.calls)
+
+	// merged resets check state for merge commit and rejects delayed pre-merge head sha-2 synchronize and checks while accepting merge-sha-3 checks
+	spy.calls = nil
+	spy.resets = nil
+	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", MergeSHA: "merge-sha-3"}))
+	assert.Equal(t, []string{"c1:sha-2:merge-sha-3"}, spy.resets)
+	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-4"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "pending"}), errPRTransitionSkipped)
+	assert.Empty(t, spy.calls)
+	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-sha-3", CheckName: "Build & Push Images (eri)", CheckState: "passed"}))
+	assert.Equal(t, []string{"c1:merge-sha-3:Build & Push Images (eri):passed"}, spy.calls)
+
+	// store error on recordPRMergeRevision prevents cached revision overwrite; store error on check_updated propagates
+	spyErr := &checkStatusSpyStore{err: errors.New("db error"), resetErr: errors.New("reset err")}
+	boErr := NewBuildObject("", nil).WithAuthority(spyErr, nil)
+	boErr.recordPRMergeRevision(ctx, "b1", "c1", "sha-2", "merge-sha-3")
+	assert.Error(t, boErr.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-sha-3", CheckName: "test", CheckState: "passed"}))
+	assert.Equal(t, []string{"c1:merge-sha-3:test:passed"}, spyErr.calls)
+}
+
+type mockBusError struct {
+	pubsub.Bus
+
+	err error
+}
+
+func (m *mockBusError) Publish(context.Context, string, string, any) error {
+	return m.err
+}
+
+func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
+	t.Parallel()
+	b1 := VanadisBuild{ID: "b-err", Status: "running", ThreadID: "th-1"}
+	c1 := VanadisChunk{ID: "c1", BuildID: "b-err", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "action"}
+	store, _ := dbScript{
+		buildRow: &mockRow{b: &b1},
+		chunks:   []VanadisChunk{c1},
+		execTag:  "UPDATE 1",
+	}.open()
+	eriErr := &mockEriClient{
+		cancelFn:  func(context.Context, string) error { return errors.New("cancel err") },
+		promptFn:  func(context.Context, string, string) error { return errors.New("prompt err") },
+		widgetFn:  func(context.Context, StatusWidgetRequest) (string, error) { return "", errors.New("widget err") },
+		messageFn: func(context.Context, string, string) error { return errors.New("msg err") },
+	}
+	mockBusErr := &mockBusError{err: errors.New("pub err")}
+	execErr := NewExecutor(t.TempDir(), eriErr, mockBusErr, "token", nil)
+	boErr := NewBuildObject("", nil).WithAuthority(store, execErr)
+
+	// notifyBuildTerminal error branches
+	boErr.notifyBuildTerminal(context.Background(), &b1, []VanadisChunk{c1}, "failed", "chunk failed", "TITLE", "MSG")
+
+	// notifyChunkFailure error branches
+	ctx := makeObjectMockContext(t, "b-err")
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		boErr.notifyChunkFailure(rc, b1, "c1", "reason")
+		return true, nil
+	})
+
+	// dispatchThreadWakePrompt error branches
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		boErr.dispatchThreadWakePrompt(rc, "b-err", "prompt")
+		return true, nil
+	})
+
+	// persistBuildCreation error branches
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		_, _ = boErr.persistBuildCreation(rc, b1, []VanadisChunk{c1})
+		return true, nil
+	})
+
+	// handlePREventType error branches
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		boErr.handlePREventType(rc, "b-err", "c1", "check_failed", pubsub.PRLifecycleEvent{Event: "check_failed", Repo: "aerial"})
+		boErr.handlePREventType(rc, "b-err", "c1", "conflict", pubsub.PRLifecycleEvent{Event: "conflict"})
+		boErr.handlePREventType(rc, "b-err", "c1", "merged", pubsub.PRLifecycleEvent{Event: "merged"})
+		return true, nil
+	})
+
+	storeErr, _ := dbScript{bare: nilDB}.open()
+	boStoreErr := NewBuildObject("", nil).WithAuthority(storeErr, execErr)
+	for _, act := range []string{"chunk_merged", "chunk_deploy_success", "action_completed", "chunk_failed", "cancelled"} {
+		boStoreErr.applyMutation(context.Background(), "b-err", &BuildMutationRequest{Action: act, ChunkID: "c1", Reason: "test"})
+	}
+	_, _ = boStoreErr.AttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
+	_, _ = boErr.AttachPR(ctx, AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		boStoreErr.dispatchThreadWakePrompt(rc, "b-err", "prompt")
+		return true, nil
+	})
+	_ = boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}})
 }

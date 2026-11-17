@@ -301,6 +301,41 @@ func marshalCodexTurnStart(threadID, payloadPrompt, model, effort string) ([]byt
 	return json.Marshal(req)
 }
 
+func isChildCodexThread(params map[string]any, rootThreadID string) bool {
+	root := strings.TrimSpace(rootThreadID)
+	if root == "" || params == nil {
+		return false
+	}
+	notifThreadID := strings.TrimSpace(extractFirstString(params, "threadId", "thread_id"))
+	if notifThreadID == "" {
+		if turn, ok := params["turn"].(map[string]any); ok && turn != nil {
+			notifThreadID = strings.TrimSpace(extractFirstString(turn, "threadId", "thread_id"))
+		}
+	}
+	if notifThreadID == "" {
+		if item, ok := params["item"].(map[string]any); ok && item != nil {
+			notifThreadID = strings.TrimSpace(extractFirstString(item, "threadId", "thread_id"))
+		}
+	}
+	return notifThreadID != "" && notifThreadID != root
+}
+
+func (d *StreamingDaemon) handleCodexRPCError(raw map[string]any) {
+	errObj, ok := raw[fieldError].(map[string]any)
+	if !ok || errObj == nil {
+		return
+	}
+	errMsg := extractFirstString(errObj, "message")
+	if errMsg == "" {
+		errMsg = "codex rpc error"
+	}
+	d.handleResultEvent(map[string]any{
+		"event":  eventResult,
+		"status": statusUpperError,
+		"error":  errMsg,
+	})
+}
+
 func (d *StreamingDaemon) dispatchCodexJSONRPCLine(trimmed string) {
 	if trimmed == "" {
 		return
@@ -313,19 +348,7 @@ func (d *StreamingDaemon) dispatchCodexJSONRPCLine(trimmed string) {
 
 	method, ok := raw["method"].(string)
 	if !ok {
-		// Check if it's a response with error
-		if errObj, ok := raw[fieldError].(map[string]any); ok && errObj != nil {
-			errMsg := extractFirstString(errObj, "message")
-			if errMsg == "" {
-				errMsg = "codex rpc error"
-			}
-			rawResult := map[string]any{
-				"event":  eventResult,
-				"status": statusUpperError,
-				"error":  errMsg,
-			}
-			d.handleResultEvent(rawResult)
-		}
+		d.handleCodexRPCError(raw)
 		return
 	}
 
@@ -345,7 +368,13 @@ func (d *StreamingDaemon) dispatchCodexJSONRPCLine(trimmed string) {
 		params = p
 	}
 
+	if method != "thread/tokenUsage/updated" && isChildCodexThread(params, d.SessionID()) {
+		return
+	}
+
 	switch method {
+	case "thread/tokenUsage/updated":
+		d.handleCodexTokenUsageUpdated(activeTurn, params)
 	case "item/started":
 		d.handleCodexItemStarted(activeTurn, params)
 	case "item/agentMessage/delta":
@@ -354,11 +383,93 @@ func (d *StreamingDaemon) dispatchCodexJSONRPCLine(trimmed string) {
 		d.handleCodexReasoningDelta(activeTurn, params)
 	case "item/completed":
 		d.handleCodexItemCompleted(activeTurn, params)
-	case "thread/tokenUsage/updated":
-		d.handleCodexTokenUsageUpdated(activeTurn, params)
 	case "turn/completed":
 		d.handleCodexTurnCompleted(activeTurn, params)
 	}
+}
+
+const (
+	codexCommentaryPhase      = "commentary"
+	codexCommentaryActiveKey  = "__codex_commentary_active__"
+	codexCommentaryItemPrefix = "__codex_commentary_item__:"
+)
+
+func isCodexCommentaryPhase(item map[string]any) bool {
+	return item != nil && strings.EqualFold(strings.TrimSpace(extractFirstString(item, "phase")), codexCommentaryPhase)
+}
+
+func purgeCodexSinkBuffer(sink TurnSink) {
+	switch s := sink.(type) {
+	case *BufferingTurnSink:
+		s.mu.Lock()
+		s.builder.Reset()
+		s.emittedAny = false
+		s.purgedIntermediate = false
+		s.mu.Unlock()
+	case *TracingTurnSink:
+		purgeCodexSinkBuffer(s.inner)
+	case *leaseTurnSinkWrapper:
+		purgeCodexSinkBuffer(s.inner)
+		if s.buf != nil {
+			purgeCodexSinkBuffer(s.buf)
+		}
+	}
+}
+
+func clearCodexSinkPurgedFlag(sink TurnSink) {
+	switch s := sink.(type) {
+	case *BufferingTurnSink:
+		s.mu.Lock()
+		s.purgedIntermediate = false
+		s.mu.Unlock()
+	case *TracingTurnSink:
+		clearCodexSinkPurgedFlag(s.inner)
+	case *leaseTurnSinkWrapper:
+		clearCodexSinkPurgedFlag(s.inner)
+		if s.buf != nil {
+			clearCodexSinkPurgedFlag(s.buf)
+		}
+	}
+}
+
+func (d *StreamingDaemon) handleCodexAgentMessageStarted(activeTurn *TurnContext, item map[string]any, itemID string) {
+	isCommentary := isCodexCommentaryPhase(item)
+	d.inflightMu.Lock()
+	activeTurn.codexResponseText = ""
+	if d.claudeToolIDs == nil {
+		d.claudeToolIDs = make(map[string]int)
+	}
+	if isCommentary {
+		d.claudeToolIDs[codexCommentaryActiveKey] = 1
+		if itemID != "" {
+			d.claudeToolIDs[codexCommentaryItemPrefix+itemID] = 1
+		}
+	} else {
+		delete(d.claudeToolIDs, codexCommentaryActiveKey)
+	}
+	d.inflightMu.Unlock()
+	if isCommentary {
+		purgeCodexSinkBuffer(activeTurn.Sink)
+	}
+}
+
+func (d *StreamingDaemon) handleCodexAgentMessageCompleted(activeTurn *TurnContext, item map[string]any, itemID string) {
+	isCommentary := isCodexCommentaryPhase(item)
+	text := extractCodexAgentMessageText(item)
+	d.inflightMu.Lock()
+	delete(d.claudeToolIDs, codexCommentaryActiveKey)
+	delete(d.claudeToolIDs, codexCommentaryItemPrefix+itemID)
+	if isCommentary {
+		activeTurn.codexResponseText = ""
+	} else if text != "" {
+		activeTurn.codexResponseText = text
+	}
+	d.inflightMu.Unlock()
+	if isCommentary {
+		purgeCodexSinkBuffer(activeTurn.Sink)
+		return
+	}
+	clearCodexSinkPurgedFlag(activeTurn.Sink)
 }
 
 func (d *StreamingDaemon) handleCodexItemStarted(activeTurn *TurnContext, params map[string]any) {
@@ -381,6 +492,8 @@ func (d *StreamingDaemon) handleCodexItemStarted(activeTurn *TurnContext, params
 	itemID := extractFirstString(item, "id")
 
 	switch itemType {
+	case "agentMessage":
+		d.handleCodexAgentMessageStarted(activeTurn, item, itemID)
 	case codexToolMCP, codexToolCommandExecution, codexToolFileChange, codexToolWebSearch, codexToolCollabAgent:
 		var (
 			canonicalTool string
@@ -427,9 +540,11 @@ func (d *StreamingDaemon) handleCodexItemStarted(activeTurn *TurnContext, params
 		}
 
 		d.inflightMu.Lock()
+		activeTurn.codexResponseText = ""
 		if d.claudeToolIDs == nil {
 			d.claudeToolIDs = make(map[string]int)
 		}
+		delete(d.claudeToolIDs, codexCommentaryActiveKey)
 		if itemID != "" {
 			d.claudeToolIDs[itemID] = stepIdx
 		}
@@ -460,16 +575,23 @@ func (d *StreamingDaemon) handleCodexItemStarted(activeTurn *TurnContext, params
 	}
 }
 
-func (*StreamingDaemon) handleCodexAgentMessageDelta(activeTurn *TurnContext, params map[string]any) {
+func (d *StreamingDaemon) handleCodexAgentMessageDelta(activeTurn *TurnContext, params map[string]any) {
 	if params == nil || activeTurn.Sink == nil {
 		return
 	}
+	itemID := extractFirstString(params, "itemId", "item_id", "id")
+	d.inflightMu.Lock()
+	inCommentary := d.claudeToolIDs != nil && (d.claudeToolIDs[codexCommentaryActiveKey] != 0 || (itemID != "" && d.claudeToolIDs[codexCommentaryItemPrefix+itemID] != 0))
+	d.inflightMu.Unlock()
+	if inCommentary {
+		return
+	}
 	var deltaStr string
-	switch d := params["delta"].(type) {
+	switch delta := params["delta"].(type) {
 	case string:
-		deltaStr = d
+		deltaStr = delta
 	case map[string]any:
-		deltaStr = extractFirstString(d, "text", "content")
+		deltaStr = extractFirstString(delta, "text", "content")
 	}
 	if deltaStr != "" {
 		activeTurn.Sink.OnTextDelta(deltaStr)
@@ -539,11 +661,7 @@ func (d *StreamingDaemon) handleCodexItemCompleted(activeTurn *TurnContext, para
 	itemID := extractFirstString(item, "id")
 
 	if itemType == "agentMessage" {
-		if text := extractCodexAgentMessageText(item); text != "" {
-			d.inflightMu.Lock()
-			activeTurn.codexResponseText = text
-			d.inflightMu.Unlock()
-		}
+		d.handleCodexAgentMessageCompleted(activeTurn, item, itemID)
 		return
 	}
 

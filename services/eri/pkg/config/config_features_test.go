@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
@@ -922,6 +924,62 @@ func TestRegisterConfigTokens_SharedSecrets_TableDriven(t *testing.T) {
 			got := sanitizer.SanitizeString(tc.input)
 			if got != tc.wantResult {
 				t.Errorf("SanitizeString() = %q, want %q", got, tc.wantResult)
+			}
+		})
+	}
+}
+
+func TestCredentialSourcesValidate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		sources CredentialSources
+		wantErr bool
+	}{
+		{"omitted", CredentialSources{}, true},
+		{"paths", CredentialSources{OAuth: CredentialSource{Path: "/fake/oauth"}, Codex: CredentialSource{Path: "/fake/codex"}}, false},
+		{"disabled", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}}, false},
+		{"mixed", CredentialSources{OAuth: CredentialSource{Path: "/fake/oauth"}, Codex: CredentialSource{Disabled: true}}, false},
+		{"oauth missing", CredentialSources{Codex: CredentialSource{Disabled: true}}, true},
+		{"codex missing", CredentialSources{OAuth: CredentialSource{Disabled: true}}, true},
+		{"oauth both", CredentialSources{OAuth: CredentialSource{Path: "/fake/oauth", Disabled: true}, Codex: CredentialSource{Disabled: true}}, true},
+		{"codex both", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Path: "/fake/codex", Disabled: true}}, true},
+		{"oauth whitespace", CredentialSources{OAuth: CredentialSource{Path: " \t\n"}, Codex: CredentialSource{Disabled: true}}, true},
+		{"codex whitespace", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Path: " \t"}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := tc.sources.Validate(); (err != nil) != tc.wantErr {
+				t.Fatalf("Validate error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestConfigCredentialSources(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  CredentialSources
+	}{
+		{"omitted", "model: fake", CredentialSources{}},
+		{"paths", "credential_sources:\n  oauth:\n    path: /fake/oauth\n  codex:\n    path: /fake/codex\n", CredentialSources{OAuth: CredentialSource{Path: "/fake/oauth"}, Codex: CredentialSource{Path: "/fake/codex"}}},
+		{"disabled", "credential_sources:\n  oauth:\n    disabled: true\n  codex:\n    disabled: true\n", CredentialSources{OAuth: CredentialSource{Disabled: true}, Codex: CredentialSource{Disabled: true}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := DefaultConfigData()
+			if cfg.CredentialSources != (CredentialSources{}) {
+				t.Fatal("credential sources must have no defaults")
+			}
+			if err := yaml.Unmarshal([]byte(tc.input), cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CredentialSources != tc.want {
+				t.Fatalf("sources = %+v, want %+v", cfg.CredentialSources, tc.want)
 			}
 		})
 	}

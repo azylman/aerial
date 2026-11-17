@@ -55,6 +55,7 @@ type RouterServer struct {
 	failedCheckSHAs          sync.Map
 	failedCheckRuns          sync.Map
 	updatedForCurrentMain    sync.Map
+	lastMainPushSHA          sync.Map
 	deploySuccessDispatched  sync.Map
 	queueStats               consumerStatsQuerier
 	gatewayLatencyFn         func() time.Duration
@@ -62,6 +63,7 @@ type RouterServer struct {
 	gitHistory               gitHistoryCache
 	discordIngressRetryDelay time.Duration
 	discordIngressMaxAge     time.Duration
+	firingAlerts             sync.Map
 }
 
 // NewRouterServer constructs a new RouterServer instance.
@@ -116,6 +118,9 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.Handle("POST /webhooks/flux", tracedIngress(s.handleFluxWebhook))
 	mux.Handle("POST /api/webhooks/events", tracedIngress(s.handleEventsWebhook))
 	mux.Handle("POST /webhooks/events", tracedIngress(s.handleEventsWebhook))
+	mux.Handle("POST /api/v2/alerts", tracedIngress(s.handleAlertsWebhook))
+	mux.Handle("POST /api/webhooks/alerts", tracedIngress(s.handleAlertsWebhook))
+	mux.Handle("POST /webhooks/alerts", tracedIngress(s.handleAlertsWebhook))
 	coverageFlush := httpkit.HandleCoverageFlush("synapse")
 	mux.HandleFunc("POST /debug/coverage/flush", coverageFlush)
 	mux.HandleFunc("GET /debug/coverage/flush", coverageFlush)

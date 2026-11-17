@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -217,4 +218,115 @@ func (s *RouterServer) evaluateGitHubEventTriggers(ctx context.Context, res *Res
 		contextHeader = fmt.Sprintf("GitHub %s on %s:%s", eventType, repo, branch)
 	}
 	s.fireEventTriggers(ctx, "github", targets, eventType, contextHeader)
+}
+
+// VMAlertNotification represents an Alertmanager v2-compatible alert notification payload.
+type VMAlertNotification struct {
+	Status       string            `json:"status,omitempty"`
+	Labels       map[string]string `json:"labels"`
+	Annotations  map[string]string `json:"annotations"`
+	StartsAt     time.Time         `json:"startsAt"`
+	EndsAt       time.Time         `json:"endsAt"`
+	GeneratorURL string            `json:"generatorURL,omitempty"`
+}
+
+func vmAlertFingerprint(labels map[string]string) string {
+	if len(labels) == 0 {
+		return "unknown"
+	}
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&sb, "%d:%s=%d:%s;", len(k), k, len(labels[k]), labels[k])
+	}
+	return sb.String()
+}
+
+func isVMAlertResolved(a VMAlertNotification, now time.Time) bool {
+	status := strings.TrimSpace(a.Status)
+	if strings.EqualFold(status, "resolved") {
+		return true
+	}
+	if status == "" && !a.EndsAt.IsZero() && (!a.EndsAt.After(a.StartsAt) || !a.EndsAt.After(now)) {
+		return true
+	}
+	return false
+}
+
+func formatVMAlertMessage(a VMAlertNotification) string {
+	alertname := "UnnamedAlert"
+	if a.Labels != nil {
+		if name := strings.TrimSpace(a.Labels["alertname"]); name != "" {
+			alertname = name
+		}
+	}
+	severity := "warning"
+	if a.Labels != nil {
+		if sev := strings.TrimSpace(a.Labels["severity"]); sev != "" {
+			severity = sev
+		}
+	}
+	var details string
+	if a.Annotations != nil {
+		if summ := strings.TrimSpace(a.Annotations["summary"]); summ != "" {
+			details = summ
+		} else if desc := strings.TrimSpace(a.Annotations["description"]); desc != "" {
+			details = desc
+		}
+	}
+	if details == "" {
+		return fmt.Sprintf("🚨 **[ALERT: %s]** (%s)", alertname, severity)
+	}
+	return fmt.Sprintf("🚨 **[ALERT: %s]** (%s)\n%s", alertname, severity, details)
+}
+
+func (s *RouterServer) handleAlertsWebhook(w http.ResponseWriter, r *http.Request) {
+	var alerts []VMAlertNotification
+	if !readWebhookJSON(w, r, 1<<20, &alerts) {
+		return
+	}
+
+	dispatchedCount := 0
+	now := time.Now().UTC()
+	for _, alert := range alerts {
+		fp := vmAlertFingerprint(alert.Labels)
+		if isVMAlertResolved(alert, now) {
+			s.firingAlerts.Delete(fp)
+			continue
+		}
+		if status := strings.TrimSpace(alert.Status); status != "" && !strings.EqualFold(status, "firing") {
+			continue
+		}
+
+		if s.dispatcher == nil || s.cfgSrc == nil {
+			httpkit.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{fieldError: "dispatcher or config not available"})
+			return
+		}
+		channelID := strings.TrimSpace(s.cfgSrc.Current().SystemChannelID)
+		if !s.isValidAlertTarget(channelID) {
+			httpkit.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{fieldError: "system channel not configured or invalid"})
+			return
+		}
+
+		if _, loaded := s.firingAlerts.LoadOrStore(fp, true); loaded {
+			continue
+		}
+		msg := formatVMAlertMessage(alert)
+		if err := s.dispatcher.DispatchDirectMessage(r.Context(), DirectMessageRequest{ChannelID: channelID, Content: msg}); err != nil {
+			s.firingAlerts.Delete(fp)
+			log.Printf("[synapse] [alerts] error dispatching alert %s: %v", fp, err)
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to dispatch alert message"})
+			return
+		}
+		dispatchedCount++
+	}
+
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
+		fieldStatus:  statusAccepted,
+		"dispatched": dispatchedCount,
+	})
 }

@@ -213,13 +213,10 @@ func newProcessGitHubEventMockServer(ghPaths *sync.Map) *httptest.Server {
 func TestProcessGitHubEvent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	var ghPaths sync.Map
-	mockServer := newProcessGitHubEventMockServer(&ghPaths)
-	t.Cleanup(mockServer.Close)
 	cases := processGitHubEventTestCases()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			runProcessGitHubEventCase(ctx, t, tc, mockServer, &ghPaths)
+			runProcessGitHubEventCase(ctx, t, tc)
 		})
 	}
 }
@@ -383,9 +380,12 @@ func assertEventBasicFields(t *testing.T, tc ghEventCase, res *ResolvedGitHubEve
 	}
 }
 
-func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase, mockServer *httptest.Server, ghPaths *sync.Map) {
+func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase) {
 	t.Helper()
 	t.Parallel()
+	var ghPaths sync.Map
+	mockServer := newProcessGitHubEventMockServer(&ghPaths)
+	defer mockServer.Close()
 	var inserters []pubsub.Bus
 	activeBus := tc.bus
 	if activeBus == nil && (len(tc.wantCIFailedChecks) > 0 || tc.wantDeployFailedEvents > 0) {
@@ -419,9 +419,14 @@ func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase
 		t.Fatalf("ProcessGitHubEvent() err = %v, wantErr %v", err, tc.wantErr)
 	}
 	if tc.wantErr {
+		if tc.wantUpdatedBranchHit != "" {
+			if _, hit := ghPaths.Load(tc.wantUpdatedBranchHit); !hit {
+				t.Errorf("expected hit for %q, but was not called", tc.wantUpdatedBranchHit)
+			}
+		}
 		return
 	}
-	assertEventResult(t, tc, res, ghPaths)
+	assertEventResult(t, tc, res, &ghPaths)
 	assertEventBusCalls(t, tc, activeBus)
 }
 
@@ -614,6 +619,14 @@ func processGitHubEventCasesPart2() []ghEventCase {
 			payload: `{"ref":"refs/heads/main","before":"prev111","after":"pushsha999","head_commit":{"id":"pushsha999","message":"feat: push"},"repository":{"full_name":"azylman/aerial"}}`,
 			disp:    &mockOutboundDispatcher{gitPushErr: errors.New("hangar down")},
 			wantErr: true,
+		},
+		{
+			name: "push git push dispatcher error still runs open pr conflict check and branch update", event: "push", delivery: "del-push-disp-err-update",
+			payload:              `{"ref":"refs/heads/main","before":"prev111","after":"pushsha894","head_commit":{"id":"pushsha894","message":"feat: push"},"repository":{"full_name":"azylman/mirrormere"}}`,
+			autoUpdateAuthors:    []string{"trusted-author"},
+			disp:                 &mockOutboundDispatcher{gitPushErr: errors.New("flux 429 rate limit")},
+			wantErr:              true,
+			wantUpdatedBranchHit: "/repos/azylman/mirrormere/pulls/894/update-branch",
 		},
 		{
 			name: "push malformed", event: "push", delivery: "del-push-4",
@@ -1387,105 +1400,48 @@ func TestDispatchWorkflowRunImages_ImagePromotionDeployFailed(t *testing.T) {
 			wantDeployEvents: 0,
 		},
 		{
-			name:             "terminal promote error transitions to deploy_failed",
-			isFinalAttempt:   true,
-			targetID:         "100000000000000001",
-			promoteErr:       errors.New("terminal error"),
-			prNum:            42,
-			wantErr:          true,
-			wantDeployFailed: 1,
-			wantDeployEvents: 1,
-			wantTargetID:     "100000000000000001",
+			name:           "terminal promote error transitions to deploy_failed",
+			isFinalAttempt: true, targetID: "100000000000000001", promoteErr: errors.New("terminal error"), prNum: 42,
+			wantErr: true, wantDeployFailed: 1, wantDeployEvents: 1, wantTargetID: "100000000000000001",
 		},
 		{
-			name:             "terminal promote error with empty targetID adopts transition targetID",
-			isFinalAttempt:   true,
-			targetID:         "",
-			deployFailedTID:  "100000000000000002",
-			promoteErr:       errors.New("terminal error"),
-			prNum:            42,
-			wantErr:          true,
-			wantDeployFailed: 1,
-			wantDeployEvents: 1,
-			wantTargetID:     "100000000000000002",
+			name:           "terminal promote error with empty targetID adopts transition targetID",
+			isFinalAttempt: true, deployFailedTID: "100000000000000002", promoteErr: errors.New("terminal error"), prNum: 42,
+			wantErr: true, wantDeployFailed: 1, wantDeployEvents: 1, wantTargetID: "100000000000000002",
 		},
 		{
-			name:             "terminal promote error with resolve error falls back to system channel",
-			isFinalAttempt:   true,
-			targetID:         "",
-			resolveErr:       errors.New("db resolve error"),
-			promoteErr:       errors.New("terminal error"),
-			prNum:            42,
-			wantErr:          true,
-			wantDeployFailed: 1,
-			wantDeployEvents: 1,
-			wantTargetID:     "100000000000000001",
+			name:           "terminal promote error with resolve error falls back to system channel",
+			isFinalAttempt: true, resolveErr: errors.New("db resolve error"), promoteErr: errors.New("terminal error"), prNum: 42,
+			wantErr: true, wantDeployFailed: 1, wantDeployEvents: 1, wantTargetID: "100000000000000001",
 		},
 		{
-			name:             "terminal promote error with atomic transition error logs warning and skips publish",
-			isFinalAttempt:   true,
-			targetID:         "100000000000000001",
-			deployFailedErr:  errors.New("db error"),
-			promoteErr:       errors.New("terminal error"),
-			prNum:            42,
-			wantErr:          true,
-			wantDeployFailed: 0,
-			wantDeployEvents: 0,
+			name:           "terminal promote error with atomic transition error logs warning and skips publish",
+			isFinalAttempt: true, targetID: "100000000000000001", deployFailedErr: errors.New("db error"), promoteErr: errors.New("terminal error"), prNum: 42,
+			wantErr: true,
 		},
 		{
-			name:                   "terminal promote error with atomic transition not updated skips publish",
-			isFinalAttempt:         true,
-			targetID:               "100000000000000001",
-			deployFailedNotUpdated: true,
-			promoteErr:             errors.New("terminal error"),
-			prNum:                  42,
-			wantErr:                true,
-			wantDeployFailed:       1,
-			wantDeployEvents:       0,
+			name:           "terminal promote error with atomic transition not updated skips publish",
+			isFinalAttempt: true, targetID: "100000000000000001", deployFailedNotUpdated: true, promoteErr: errors.New("terminal error"), prNum: 42,
+			wantErr: true, wantDeployFailed: 1,
 		},
 		{
-			name:             "terminal record kustomizations error transitions to deploy_failed",
-			isFinalAttempt:   true,
-			targetID:         "100000000000000001",
-			recordErr:        errors.New("db record error"),
-			prNum:            42,
-			wantErr:          true,
-			wantDeployFailed: 1,
-			wantDeployEvents: 1,
-			wantTargetID:     "100000000000000001",
+			name:           "terminal record kustomizations error transitions to deploy_failed",
+			isFinalAttempt: true, targetID: "100000000000000001", recordErr: errors.New("db record error"), prNum: 42,
+			wantErr: true, wantDeployFailed: 1, wantDeployEvents: 1, wantTargetID: "100000000000000001",
 		},
 		{
-			name:             "terminal reconcile error with requests recorded relies on watcher repair without deploy_failed",
-			isFinalAttempt:   true,
-			targetID:         "100000000000000001",
-			reconcileErr:     errors.New("flux api error"),
-			hasKustReqs:      true,
-			prNum:            42,
-			wantErr:          true,
-			wantDeployFailed: 0,
-			wantDeployEvents: 0,
+			name:           "terminal reconcile error with requests recorded relies on watcher repair without deploy_failed",
+			isFinalAttempt: true, targetID: "100000000000000001", reconcileErr: errors.New("flux api error"), hasKustReqs: true, prNum: 42,
+			wantErr: true,
 		},
 		{
-			name:             "terminal promote error with nil registry skips deploy_failed",
-			isFinalAttempt:   true,
-			targetID:         "100000000000000001",
-			nilReg:           true,
-			promoteErr:       errors.New("terminal error"),
-			prNum:            42,
-			wantErr:          true,
-			wantDeployFailed: 0,
-			wantDeployEvents: 0,
+			name:           "terminal promote error with nil registry skips deploy_failed",
+			isFinalAttempt: true, targetID: "100000000000000001", nilReg: true, promoteErr: errors.New("terminal error"), prNum: 42,
+			wantErr: true,
 		},
 		{
-			name:             "success completes without deploy_failed",
-			isFinalAttempt:   true,
-			targetID:         "100000000000000001",
-			promoteErr:       nil,
-			hasKustReqs:      true,
-			prNum:            42,
-			wantErr:          false,
-			wantDeployFailed: 0,
-			wantDeployEvents: 0,
+			name:           "success completes without deploy_failed",
+			isFinalAttempt: true, targetID: "100000000000000001", hasKustReqs: true, prNum: 42,
 		},
 	}
 
