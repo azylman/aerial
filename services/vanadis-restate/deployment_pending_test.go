@@ -97,11 +97,16 @@ func TestPendingDeploymentPromotionRechecksAuthority(t *testing.T) {
 		{"completed race", statusSynced, "merge"},
 		{"cancelled race", statusCancelled, "merge"},
 		{"superseded race", statusMerged, "other"},
+		{"missing chunk", statusMerged, "missing"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := &deploymentStartStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: tc.revision, Status: tc.status}}}}
+			chunkID := "c"
+			if tc.name == "missing chunk" {
+				chunkID = "other-chunk"
+			}
+			store := &deploymentStartStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []VanadisChunk{{ID: chunkID, Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: tc.revision, Status: tc.status}}}}
 			out, err := (&BuildObject{store: store}).promotePendingDeploymentStart(context.Background(), "b", pendingDeploymentStart{ChunkID: "c", HeadSHA: "head", Event: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "merge"}})
 			require.NoError(t, err)
 			require.NotNil(t, out.State)
@@ -192,11 +197,13 @@ func TestPendingDeploymentCapture(t *testing.T) {
 		name, event, head, revision string
 		occurred                    time.Time
 		wantPending                 bool
+		wantDeadline                time.Time
 	}{
-		{"missing merge identity", prEventDeployStarted, "head", "", now, false},
-		{"stale head", prEventDeployStarted, "other", "merge", now, false},
-		{"future timestamp", prEventDeployStarted, "head", "merge", now.Add(time.Hour), true},
-		{"missing timestamp", " DEPLOY_STARTED ", "head", "merge", time.Time{}, true},
+		{"missing merge identity", prEventDeployStarted, "head", "", now, false, time.Time{}},
+		{"stale head", prEventDeployStarted, "other", "merge", now, false, time.Time{}},
+		{"past occurred timestamp", prEventDeployStarted, "head", "merge", now.Add(-5 * time.Minute), true, now.Add(10 * time.Minute)},
+		{"future timestamp", prEventDeployStarted, "head", "merge", now.Add(time.Hour), true, now.Add(15 * time.Minute)},
+		{"missing timestamp", " DEPLOY_STARTED ", "head", "merge", time.Time{}, true, now.Add(15 * time.Minute)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -207,7 +214,7 @@ func TestPendingDeploymentCapture(t *testing.T) {
 			require.Equal(t, tc.wantPending, len(rt.pending) > 0)
 			require.Empty(t, rt.attempts)
 			if tc.wantPending {
-				require.Equal(t, now.Add(15*time.Minute), rt.pending["c:merge"].Deadline)
+				require.Equal(t, tc.wantDeadline, rt.pending["c:merge"].Deadline)
 			}
 		})
 	}

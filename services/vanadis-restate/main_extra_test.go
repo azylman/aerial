@@ -961,11 +961,11 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	assert.Contains(t, retryBanners, "⚠️ Reconcile backing off (reconcile-retry-test): transient dispatch failure")
 }
 
-func reconcileErrorsCount(t *testing.T, handler string) float64 {
+func errorMetricValue(t *testing.T, metric, handler string) float64 {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	SetupHealthMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
-	prefix := fmt.Sprintf(`vanadis_restate_reconcile_errors_total{handler=%q} `, handler)
+	prefix := fmt.Sprintf(`%s{handler=%q} `, metric, handler)
 	for line := range strings.SplitSeq(rec.Body.String(), "\n") {
 		if valStr, ok := strings.CutPrefix(strings.TrimSpace(line), prefix); ok {
 			val, err := strconv.ParseFloat(strings.TrimSpace(valStr), 64)
@@ -974,6 +974,16 @@ func reconcileErrorsCount(t *testing.T, handler string) float64 {
 		}
 	}
 	return 0
+}
+
+func reconcileErrorsCount(t *testing.T, handler string) float64 {
+	t.Helper()
+	return errorMetricValue(t, "vanadis_restate_reconcile_errors_total", handler)
+}
+
+func clientErrorsCount(t *testing.T, handler string) float64 {
+	t.Helper()
+	return errorMetricValue(t, "vanadis_restate_client_errors_total", handler)
 }
 
 type mockStartupBus struct {
@@ -1039,11 +1049,119 @@ func TestReconcileErrorsMetric(t *testing.T) {
 	metricsBody := rec.Body.String()
 	for _, label := range reconcileErrorHandlerLabels {
 		assert.Contains(t, metricsBody, fmt.Sprintf(`vanadis_restate_reconcile_errors_total{handler=%q} `, label))
+		assert.Contains(t, metricsBody, fmt.Sprintf(`vanadis_restate_client_errors_total{handler=%q} `, label))
 	}
 
-	before := reconcileErrorsCount(t, "test-handler")
-	recordReconcileError("test-handler", nil)
-	assert.Equal(t, before, reconcileErrorsCount(t, "test-handler"))
-	recordReconcileError("test-handler", errors.New("err"))
-	assert.Equal(t, before+1, reconcileErrorsCount(t, "test-handler"))
+	tests := []struct {
+		name          string
+		handler       string
+		err           error
+		wantClientInc float64
+		wantServerInc float64
+	}{
+		{
+			name:          "nil error increments neither",
+			handler:       "test-handler-nil",
+			err:           nil,
+			wantClientInc: 0,
+			wantServerInc: 0,
+		},
+		{
+			name:          "ErrInvalidBuildInput routes to client errors",
+			handler:       "test-handler-invalid",
+			err:           ErrInvalidBuildInput,
+			wantClientInc: 1,
+			wantServerInc: 0,
+		},
+		{
+			name:          "wrapped ErrInvalidBuildInput routes to client errors",
+			handler:       "test-handler-wrapped-invalid",
+			err:           fmt.Errorf("validation error: %w", ErrInvalidBuildInput),
+			wantClientInc: 1,
+			wantServerInc: 0,
+		},
+		{
+			name:          "ErrBuildNotFound routes to client errors",
+			handler:       "test-handler-build-not-found",
+			err:           ErrBuildNotFound,
+			wantClientInc: 1,
+			wantServerInc: 0,
+		},
+		{
+			name:          "ErrChunkNotFound routes to client errors",
+			handler:       "test-handler-chunk-not-found",
+			err:           ErrChunkNotFound,
+			wantClientInc: 1,
+			wantServerInc: 0,
+		},
+		{
+			name:          "ErrBuildConflict routes to client errors",
+			handler:       "test-handler-conflict",
+			err:           ErrBuildConflict,
+			wantClientInc: 1,
+			wantServerInc: 0,
+		},
+		{
+			name:          "4xx restate.TerminalError routes to client errors",
+			handler:       "test-handler-terminal-400",
+			err:           restate.ToTerminalError(errors.New("bad input"), restate.WithErrorCode(400)),
+			wantClientInc: 1,
+			wantServerInc: 0,
+		},
+		{
+			name:          "404 restate.TerminalError routes to client errors",
+			handler:       "test-handler-terminal-404",
+			err:           restate.ToTerminalError(errors.New("resource missing"), restate.WithErrorCode(404)),
+			wantClientInc: 1,
+			wantServerInc: 0,
+		},
+		{
+			name:          "409 restate.TerminalError routes to client errors",
+			handler:       "test-handler-terminal-409",
+			err:           restate.ToTerminalError(errors.New("state conflict"), restate.WithErrorCode(409)),
+			wantClientInc: 1,
+			wantServerInc: 0,
+		},
+		{
+			name:          "499 restate.TerminalError routes to client errors",
+			handler:       "test-handler-terminal-499",
+			err:           restate.ToTerminalError(errors.New("custom client error"), restate.WithErrorCode(499)),
+			wantClientInc: 1,
+			wantServerInc: 0,
+		},
+		{
+			name:          "5xx restate.TerminalError routes to server errors",
+			handler:       "test-handler-terminal-500",
+			err:           restate.ToTerminalError(errors.New("internal error"), restate.WithErrorCode(500)),
+			wantClientInc: 0,
+			wantServerInc: 1,
+		},
+		{
+			name:          "uncoded restate.TerminalErrorf routes to server errors",
+			handler:       "test-handler-terminal-uncoded",
+			err:           restate.TerminalErrorf("generic terminal error: %s", "boom"),
+			wantClientInc: 0,
+			wantServerInc: 1,
+		},
+		{
+			name:          "transient error routes to server errors",
+			handler:       "test-handler-transient",
+			err:           errors.New("transient database connection timeout"),
+			wantClientInc: 0,
+			wantServerInc: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			beforeClient := clientErrorsCount(t, tc.handler)
+			beforeServer := reconcileErrorsCount(t, tc.handler)
+
+			recordReconcileError(tc.handler, tc.err)
+
+			assert.Equal(t, beforeClient+tc.wantClientInc, clientErrorsCount(t, tc.handler))
+			assert.Equal(t, beforeServer+tc.wantServerInc, reconcileErrorsCount(t, tc.handler))
+		})
+	}
 }

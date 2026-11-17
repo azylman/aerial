@@ -955,6 +955,9 @@ func TestBuildObject_CallVanadisTransition(t *testing.T) {
 	bo400 := NewBuildObject(srv.URL, srv.Client())
 	_, err = bo400.callVanadisTransition(ctx, "transition-400", nil, nil)
 	assert.Error(t, err)
+	var termErr restate.TerminalError
+	assert.True(t, errors.As(err, &termErr))
+	assert.Equal(t, restate.Code(400), termErr.Code())
 
 	// 500 Server Error
 	bo500 := NewBuildObject(srv.URL, srv.Client())

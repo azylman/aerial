@@ -86,21 +86,57 @@ var reconcileErrorsTotal = prometheus.NewCounterVec(
 	[]string{"handler"},
 )
 
+var clientErrorsTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "vanadis_restate_client_errors_total",
+		Help: "Total number of Vanadis Restate terminal 4xx client and validation errors.",
+	},
+	[]string{"handler"},
+)
+
 func init() {
 	if err := prometheus.Register(reconcileErrorsTotal); err != nil {
 		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
 			panic(fmt.Sprintf("failed to register vanadis_restate_reconcile_errors_total: %v", err))
 		}
 	}
+	if err := prometheus.Register(clientErrorsTotal); err != nil {
+		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
+			panic(fmt.Sprintf("failed to register vanadis_restate_client_errors_total: %v", err))
+		}
+	}
 	for _, h := range reconcileErrorHandlerLabels {
 		reconcileErrorsTotal.WithLabelValues(h).Add(0)
+		clientErrorsTotal.WithLabelValues(h).Add(0)
 	}
 }
 
-func recordReconcileError(handler string, err error) {
-	if err != nil {
-		reconcileErrorsTotal.WithLabelValues(handler).Inc()
+func isClientReconcileError(err error) bool {
+	if err == nil {
+		return false
 	}
+	if errors.Is(err, ErrInvalidBuildInput) ||
+		errors.Is(err, ErrBuildNotFound) ||
+		errors.Is(err, ErrChunkNotFound) ||
+		errors.Is(err, ErrBuildConflict) {
+		return true
+	}
+	if termErr, ok := errors.AsType[restate.TerminalError](err); ok {
+		code := int(termErr.Code())
+		return code >= http.StatusBadRequest && code < http.StatusInternalServerError
+	}
+	return false
+}
+
+func recordReconcileError(handler string, err error) {
+	if err == nil {
+		return
+	}
+	if isClientReconcileError(err) {
+		clientErrorsTotal.WithLabelValues(handler).Inc()
+		return
+	}
+	reconcileErrorsTotal.WithLabelValues(handler).Inc()
 }
 
 func runJournaled[T any](ctx restate.Context, handlerLabel, stepName string, fn func(restate.RunContext) (T, error)) (T, error) {
@@ -1209,7 +1245,7 @@ func (b *BuildObject) callVanadisTransition(ctx context.Context, buildID string,
 	}
 
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-		return reconcileStepOutput{}, restate.TerminalErrorf("vanadis transition rejected (status %d): %s", resp.StatusCode, string(respBody))
+		return reconcileStepOutput{}, restate.ToTerminalError(fmt.Errorf("vanadis transition rejected (status %d): %s", resp.StatusCode, string(respBody)), restate.WithErrorCode(restate.Code(resp.StatusCode)))
 	}
 	if resp.StatusCode >= 500 || resp.StatusCode < 200 {
 		return reconcileStepOutput{}, fmt.Errorf("vanadis transition server error (status %d): %s", resp.StatusCode, string(respBody))
