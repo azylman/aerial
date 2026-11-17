@@ -261,7 +261,7 @@ func (r *mockRows) scan18(dest []any) error {
 func (r *mockRows) scan25(dest []any) error {
 	if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
 		c := r.items[r.idx-1]
-		rawCIChecks := []byte(`{"lint":"passed"}`)
+		rawCIChecks := recoveryFixtureChecks(c)
 		rawRolloutState := []byte(`{"expected_jobs":["eri"]}`)
 		return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
 	}
