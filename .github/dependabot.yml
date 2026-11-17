@@ -50,6 +50,7 @@ updates:
       - "/services/vanadis"
       - "/services/vanadis-restate"
       - "/services/vanadis-nats"
+      - "/services/coverage-ingest"
       - "/services/synapse"
     schedule:
       interval: "weekly"
