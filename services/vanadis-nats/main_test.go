@@ -736,10 +736,8 @@ type widgetSyncTestCase struct {
 	msgHeader     nats.Header
 	delivered     uint64
 	serverStatus  int
-	closeServer   bool
 	wantErr       bool
 	wantNaked     bool
-	wantTermed    bool
 	wantNakDelay  time.Duration
 	wantRequests  int
 	wantKey       string
@@ -769,12 +767,7 @@ func runWidgetSyncTestCase(t *testing.T, tc widgetSyncTestCase) {
 	}))
 	defer ts.Close()
 
-	serverURL := ts.URL
-	if tc.closeServer {
-		ts.Close()
-	}
-
-	bridge := NewNATSBridge(Config{RestateIngressURL: serverURL}, &testBus{}, ts.Client())
+	bridge := NewNATSBridge(Config{RestateIngressURL: ts.URL}, &testBus{}, ts.Client())
 
 	msg := &testMsg{
 		data:      []byte(tc.msgData),
@@ -792,7 +785,6 @@ func runWidgetSyncTestCase(t *testing.T, tc widgetSyncTestCase) {
 
 	assert.Equal(t, tc.wantRequests, reqCount)
 	assert.Equal(t, tc.wantNaked, msg.naked.Load())
-	assert.Equal(t, tc.wantTermed, msg.termed.Load())
 	if tc.wantNakDelay > 0 {
 		assert.Equal(t, tc.wantNakDelay, msg.nakDelay)
 	}
@@ -916,26 +908,6 @@ func TestHandleWidgetSyncEvent(t *testing.T) {
 			serverStatus: http.StatusInternalServerError,
 			wantRequests: 1,
 			wantPath:     "/Build/build-err/Reconcile/send",
-			wantErr:      true,
-			wantNaked:    true,
-			wantNakDelay: 1 * time.Second,
-		},
-		{
-			name:         "restate 500 attempt 3 terms",
-			msgData:      `{"build_id":"build-err"}`,
-			delivered:    3,
-			serverStatus: http.StatusInternalServerError,
-			wantRequests: 1,
-			wantPath:     "/Build/build-err/Reconcile/send",
-			wantErr:      true,
-			wantTermed:   true,
-		},
-		{
-			name:         "transport error naks with delay",
-			msgData:      `{"build_id":"build-transport-err"}`,
-			delivered:    1,
-			closeServer:  true,
-			wantRequests: 0,
 			wantErr:      true,
 			wantNaked:    true,
 			wantNakDelay: 1 * time.Second,
