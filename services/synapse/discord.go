@@ -260,11 +260,10 @@ func enqueueDiscordMessage(ctx context.Context, server *RouterServer, s *discord
 	defer span.End()
 
 	args := DiscordIngressArgs{
-		MessageID:   m.ID,
-		BotUserID:   botUserID,
-		RoleNames:   roleNames,
-		Message:     m,
-		Traceparent: tracing.Traceparent(enqueueCtx),
+		MessageID: m.ID,
+		BotUserID: botUserID,
+		RoleNames: roleNames,
+		Message:   m,
 	}
 
 	if server.bus != nil {
@@ -490,7 +489,6 @@ func handleGatewayInteractionCreate(ctx context.Context, server *RouterServer, i
 	args := DiscordInteractionArgs{
 		InteractionID: i.ID,
 		Interaction:   i.Interaction,
-		Traceparent:   tracing.Traceparent(enqueueCtx),
 	}
 
 	if server.bus != nil {

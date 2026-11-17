@@ -44,8 +44,12 @@ const (
 
 // RouterServer handles webhook requests and orchestrates secret synchronization.
 type RouterServer struct {
-	cfgSrc                   ConfigSource
+	cfgSrc ConfigSource
+	// httpClient serves internal peer calls (webhook forwarding): client spans plus
+	// traceparent injection. githubClient serves the third-party GitHub API: client
+	// spans only, so trace context never leaves the cluster.
 	httpClient               *http.Client
+	githubClient             *http.Client
 	bus                      pubsub.Bus
 	registry                 PRRegistryUpdater
 	dispatcher               OutboundDispatcher
@@ -72,8 +76,9 @@ func NewRouterServer(cfgSrc ConfigSource, client *http.Client) *RouterServer {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &RouterServer{
-		cfgSrc:     cfgSrc,
-		httpClient: client,
+		cfgSrc:       cfgSrc,
+		httpClient:   tracing.Client(client),
+		githubClient: tracing.ExternalClient(client),
 	}
 }
 
