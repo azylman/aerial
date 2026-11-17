@@ -308,18 +308,11 @@ func applyRawChunkCIChecks(c *VanadisChunk, rawCIChecks []byte) {
 	}
 	c.HeadSHA = strings.TrimSpace(checks["_head_sha"])
 	c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
-	c.RemediatedSHA = strings.TrimSpace(checks["_remediated_sha"])
-	if headAtNano, parseErr := strconv.ParseInt(strings.TrimSpace(checks["_head_at"]), 10, 64); parseErr == nil && headAtNano > 0 {
-		c.HeadAt = time.Unix(0, headAtNano).UTC()
+	for k := range checks {
+		if strings.HasPrefix(k, "_") {
+			delete(checks, k)
+		}
 	}
-	if rawSeen := strings.TrimSpace(checks["_seen_heads"]); rawSeen != "" {
-		c.SeenHeads = strings.Split(rawSeen, ",")
-	}
-	delete(checks, "_head_sha")
-	delete(checks, "_merge_sha")
-	delete(checks, "_remediated_sha")
-	delete(checks, "_seen_heads")
-	delete(checks, "_head_at")
 	if len(checks) > 0 {
 		c.CIChecks = checks
 	}
@@ -1345,11 +1338,6 @@ func (s *PostgresVanadisStore) IncrementChunkCIFailCount(ctx context.Context, ch
 SET ci_fail_count = ci_fail_count + 1,
     status = 'ci_failed',
     banner = $1,
-    ci_checks = CASE
-        WHEN COALESCE(ci_checks->>'_head_sha', '') != ''
-            THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb), '{_remediated_sha}', to_jsonb(ci_checks->>'_head_sha'), true)
-        ELSE COALESCE(ci_checks, '{}'::jsonb)
-    END,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = $2
   AND status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed', 'failed', 'cancelled')

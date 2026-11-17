@@ -203,6 +203,35 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			db:          dbScript{row: errRow(pgx.ErrNoRows)},
 			wantBuildID: "",
 		},
+		{
+			name: "branch-based lookup error propagates",
+			ev: pubsub.PRLifecycleEvent{
+				Repo:     "aerial",
+				PRNumber: 107,
+				Event:    "opened",
+				Branch:   "feat/aerial-pr-vanadis-chunk-1-router-a1b2c3",
+			},
+			db: dbScript{
+				row:    errRow(pgx.ErrNoRows),
+				routes: []sqlRoute{{match: "SELECT build_id FROM vanadis_chunks WHERE id = $1", row: errRow(errors.New("lookup err"))}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "thread-based lookup error propagates",
+			ev: pubsub.PRLifecycleEvent{
+				Repo:     "aerial",
+				PRNumber: 108,
+				Event:    "opened",
+				Branch:   "feat/aerial-pr-20261116-123456",
+				TargetID: "thread-123",
+			},
+			db: dbScript{
+				row:      errRow(pgx.ErrNoRows),
+				queryErr: errors.New("lookup err"),
+			},
+			wantErr: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
