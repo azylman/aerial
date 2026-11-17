@@ -458,8 +458,8 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 	_ = isContainerColdBoot(filepath.Join(tmpDir, "absent"))
 	_ = isContainerColdBoot(validBoot)
 
-	if err := Reload(nil); err == nil {
-		t.Errorf("expected error for Reload(nil)")
+	if err := ReloadWithSupplier(nil, New); err == nil {
+		t.Errorf("expected error for ReloadWithSupplier(nil, New)")
 	}
 	if err := ReloadWithSupplier(nil, nil); err == nil {
 		t.Errorf("expected error for ReloadWithSupplier(nil)")
@@ -475,7 +475,7 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 		t.Errorf("expected ReloadWithSupplier success, got err=%v model=%q", err, ActiveConfig().Current().Model)
 	}
 	_ = ReloadWithSupplier(ActiveConfig(), nil)
-	_ = Reload(ActiveConfig())
+	_ = ReloadWithSupplier(ActiveConfig(), New)
 
 	defaultPaths := []string{"/default/a.yaml", "/default/b.yaml"}
 	if got := ResolveConfigSearchPaths(nil, defaultPaths...); len(got) != len(defaultPaths) || got[0] != defaultPaths[0] {
