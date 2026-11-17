@@ -1356,12 +1356,13 @@ exit 0
 CODEX_BIN_EOF
 chmod +x "$TEST_ROOT/bin/codex"
 
-# Subtest 3d: Codex auth exists + codex exists -> normalizes gemini and claude-code to codex
+# Subtest 3d: Codex auth exists + codex exists -> normalizes gemini and claude-code to codex with low reasoning
 printf '{"auth_mode":"chatgpt"}\n' > "$STATE_DIR/codex-auth.json"
 printf 'test-claude-token-123\n' > "$STATE_DIR/claude-oauth-token"
 : > "$CALL_LOG"
 (cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough >/dev/null 2>&1)
-if grep -q -- "--agent codex" "$CALL_LOG"; then
+if grep -q -- "--agent codex" "$CALL_LOG" &&
+   grep -q -- "--reasoning low" "$CALL_LOG"; then
   echo 'codex_remap_gemini:ok'
 fi
 
