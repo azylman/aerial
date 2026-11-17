@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -272,7 +272,10 @@ func (p *UnifiedProcessPool) checkExistingDaemonForCreateLocked(targetKey, trimm
 	return nil, trimmedSess, false
 }
 
-func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, initialTurns []int) (DaemonConfig, error) {
+// buildDaemonConfig resolves the daemon's config. traceEnv is the daemon.spawn span's
+// env-carrier propagation state (TraceCarrierEnv); inherited TRACEPARENT/TRACESTATE/BAGGAGE
+// are always replaced by it so a daemon never starts under a stale context.
+func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, initialTurns []int, traceEnv map[string]string) (DaemonConfig, error) {
 	p.mu.RLock()
 	cfg := p.cfg
 	p.mu.RUnlock()
@@ -288,6 +291,11 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 	}
 
 	daemonEnv := filterVanadisChunkEnv(cfg.Env)
+	if len(daemonEnv) > 0 {
+		// An empty env falls back to spawnOnce's minimal BuildAgyEnv, so only a real base
+		// env carries the spawn context here.
+		daemonEnv = appendTraceEnv(filterTraceEnv(daemonEnv), traceEnv)
+	}
 	var turnEnvFile string
 	if home := strings.TrimSpace(cfg.GeminiHomeDir); home != "" {
 		geminiDir := filepath.Join(home, ".gemini")
@@ -307,6 +315,7 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 			Timezone:     cfg.Timezone,
 			DaemonID:     p.daemonID(targetKey),
 			MCPProxyPort: cfg.MCPProxyPort,
+			TraceEnv:     traceEnv,
 		})
 	}
 
@@ -325,18 +334,26 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 	}, nil
 }
 
-// spawnStreamingDaemonWithRetry starts a daemon, retrying once on a handshake timeout. ctx bounds
+// spawnStreamingDaemonWithRetry builds the daemon config under the daemon.spawn span, so the
+// daemon's env carries that span as TRACEPARENT (plus TRACESTATE and BAGGAGE) for every engine,
+// then starts it, retrying once on a handshake timeout. ctx bounds
 // startup handshakes and retries; the daemon itself runs on the pool's
 // long-lived ctx so it outlives the turn that spawned it. For agy the span ends after the init
 // handshake; for claude it covers the fork, and the init arrival is a daemon.init turn event.
-func (p *UnifiedProcessPool) spawnStreamingDaemonWithRetry(ctx context.Context, targetKey string, daemonCfg DaemonConfig) (*StreamingDaemon, error) {
+func (p *UnifiedProcessPool) spawnStreamingDaemonWithRetry(ctx context.Context, targetKey, trimmedSess string, initialTurns []int) (*StreamingDaemon, error) {
 	// Startup ends on either budget expiration or pool shutdown.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(p.ctx, cancel) //nolint:contextcheck // Pool shutdown must also interrupt a caller-bounded handshake.
 	defer stop()
-	_, span := startChildOf(ctx, spanDaemonSpawn, trace.WithAttributes(attrAgentEngine.String(daemonCfg.engineName())))
+	spanCtx, span := startChildOf(ctx, spanDaemonSpawn)
 	defer span.End()
+	daemonCfg, err := p.buildDaemonConfig(targetKey, trimmedSess, initialTurns, TraceCarrierEnv(spanCtx, otel.GetTextMapPropagator()))
+	if err != nil {
+		span.SetStatus(codes.Error, "daemon config failed")
+		return nil, err
+	}
+	span.SetAttributes(attrAgentEngine.String(daemonCfg.engineName()))
 	attempts := 1
 	daemon, spawnErr := StartStreamingDaemon(p.ctx, ctx, daemonCfg, p.spawner)
 	if spawnErr != nil && strings.Contains(spawnErr.Error(), "daemon startup timed out waiting for init event") && p.ctx.Err() == nil && ctx.Err() == nil {
@@ -398,12 +415,7 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			return reusable, nil
 		}
 
-		daemonCfg, err := p.buildDaemonConfig(targetKey, trimmedSess, initialTurns)
-		if err != nil {
-			return nil, err
-		}
-
-		daemon, err := p.spawnStreamingDaemonWithRetry(ctx, targetKey, daemonCfg)
+		daemon, err := p.spawnStreamingDaemonWithRetry(ctx, targetKey, trimmedSess, initialTurns)
 		if err != nil {
 			return nil, err
 		}

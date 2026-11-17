@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"log"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/tracing"
@@ -42,7 +44,11 @@ type AgyEnvInput struct {
 	// MCPProxyPort is eri's HTTP port when MCP tracing is enabled ("" disables it). It adds
 	// ERI_DAEMON_ID and the loopback ERI_HOOK_ENDPOINT used by `hook-guard trace`.
 	MCPProxyPort string
-	ExtraEnv     []string
+	// TraceEnv is the W3C propagation state for the child process (TRACEPARENT, TRACESTATE,
+	// BAGGAGE), per the OpenTelemetry environment-variable carrier spec. Keys are uppercased;
+	// entries with empty values are skipped. Inherited copies are always stripped first.
+	TraceEnv map[string]string
+	ExtraEnv []string
 }
 
 func filterEnvKeys(env []string, excluded ...string) []string {
@@ -132,6 +138,44 @@ func filterHomeEnv(env []string) []string {
 	return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME")
 }
 
+// traceCarrierEnvKeys are the OpenTelemetry env-carrier keys a child process reads its parent
+// context from; inherited copies are stale (eri's own process context), never the spawn's.
+var traceCarrierEnvKeys = []string{"TRACEPARENT", "TRACESTATE", "BAGGAGE"}
+
+func filterTraceEnv(env []string) []string {
+	return filterEnvKeys(env, traceCarrierEnvKeys...)
+}
+
+// TraceCarrierEnv injects ctx's propagation state with prop into env-carrier form: the
+// propagator's header keys uppercased per the OpenTelemetry environment-variable carrier spec
+// (traceparent becomes TRACEPARENT). It is empty when ctx carries no valid span context.
+func TraceCarrierEnv(ctx context.Context, prop propagation.TextMapPropagator) map[string]string {
+	carrier := propagation.MapCarrier{}
+	if prop != nil {
+		prop.Inject(ctx, carrier)
+	}
+	out := make(map[string]string, len(carrier))
+	for k, v := range carrier {
+		out[strings.ToUpper(k)] = v
+	}
+	return out
+}
+
+// appendTraceEnv appends traceEnv's non-empty entries as KEY=value in sorted key order.
+func appendTraceEnv(env []string, traceEnv map[string]string) []string {
+	keys := make([]string, 0, len(traceEnv))
+	for k, v := range traceEnv {
+		if strings.TrimSpace(k) != "" && v != "" {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		env = append(env, strings.ToUpper(strings.TrimSpace(k))+"="+traceEnv[k])
+	}
+	return env
+}
+
 func filterVanadisChunkEnv(env []string) []string {
 	return filterEnvKeys(env, "AERIAL_VANADIS_CHUNK_ID", "VANADIS_CHUNK_ID", "AERIAL_TARGET_ID")
 }
@@ -149,7 +193,7 @@ func NormalizeEnvTargetID(id string) string {
 func BuildAgyEnv(input AgyEnvInput) []string {
 	var cmdEnv []string
 	if len(input.BaseEnv) > 0 {
-		base := filterVanadisChunkEnv(input.BaseEnv)
+		base := filterTraceEnv(filterVanadisChunkEnv(input.BaseEnv))
 		base = FilterAgyBaseEnv(base)
 		if strings.TrimSpace(input.HomeDir) != "" {
 			base = filterHomeEnv(base)
@@ -177,6 +221,7 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 		cmdEnv = append(cmdEnv, "TZ="+tz)
 	}
 	cmdEnv = append(cmdEnv, mcpTraceEnv(input.MCPProxyPort, input.DaemonID)...)
+	cmdEnv = appendTraceEnv(cmdEnv, input.TraceEnv)
 	return append(cmdEnv, input.ExtraEnv...)
 }
 

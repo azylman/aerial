@@ -910,7 +910,7 @@ func TestUnifiedProcessPool_StartupCancellation(t *testing.T) {
 			}}
 			pool := NewUnifiedProcessPool(PoolConfig{}, spawner)
 			defer pool.Close()
-			_, err := pool.spawnStreamingDaemonWithRetry(ctx, "target", DaemonConfig{})
+			_, err := pool.spawnStreamingDaemonWithRetry(ctx, "target", "", nil)
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("startup error = %v, want canceled", err)
 			}

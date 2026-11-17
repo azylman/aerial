@@ -3,9 +3,14 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func assertContainsAndOmits(t *testing.T, target string, contains, omits []string, label any) {
@@ -290,6 +295,24 @@ func TestBuildAgyEnv(t *testing.T) {
 			[]string{"GIT_TERMINAL_PROMPT=0"},
 			[]string{"ERI_DAEMON_ID=", "ERI_HOOK_ENDPOINT="},
 		},
+		{
+			AgyEnvInput{
+				BaseEnv:  []string{"TRACEPARENT=00-11111111111111111111111111111111-1111111111111111-01", "tracestate=stale=1", "Baggage=stale=1", "KEEP=1"},
+				TraceEnv: map[string]string{"TRACEPARENT": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "BAGGAGE": "tenant=a"},
+			},
+			[]string{"KEEP=1", "TRACEPARENT=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "BAGGAGE=tenant=a"},
+			[]string{"11111111111111111111111111111111", "stale=1"},
+		},
+		{
+			AgyEnvInput{TraceEnv: map[string]string{"tracestate": "vendor=v1", "BAGGAGE": "", " ": "blank-key"}},
+			[]string{"TRACESTATE=vendor=v1"},
+			[]string{"tracestate=", "BAGGAGE=", "blank-key"},
+		},
+		{
+			AgyEnvInput{BaseEnv: []string{"TRACEPARENT=00-11111111111111111111111111111111-1111111111111111-01", "KEEP=1"}},
+			[]string{"KEEP=1"},
+			[]string{"TRACEPARENT="},
+		},
 	} {
 		assertContainsAndOmits(t, strings.Join(BuildAgyEnv(tc.input), "\n"), tc.contains, tc.notContains, tc.input)
 	}
@@ -312,6 +335,36 @@ func TestSanitizeDaemonTargetKey(t *testing.T) {
 		if got := SanitizeDaemonTargetKey(tc.in); got != tc.want {
 			t.Errorf("SanitizeDaemonTargetKey(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestTraceCarrierEnv(t *testing.T) {
+	t.Parallel()
+	traceID, _ := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	spanID, _ := trace.SpanIDFromHex("00f067aa0ba902b7")
+	ts, _ := trace.ParseTraceState("vendor=v1")
+	sc := trace.NewSpanContext(trace.SpanContextConfig{TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled, TraceState: ts, Remote: true})
+	bag, _ := baggage.Parse("tenant=a")
+	full := baggage.ContextWithBaggage(trace.ContextWithSpanContext(context.Background(), sc), bag)
+	composite := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+	tests := []struct {
+		name string
+		ctx  context.Context
+		prop propagation.TextMapPropagator
+		want map[string]string
+	}{
+		{name: "span and baggage become uppercase env keys", ctx: full, prop: composite, want: map[string]string{"TRACEPARENT": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "TRACESTATE": "vendor=v1", "BAGGAGE": "tenant=a"}},
+		{name: "trace context only propagator omits baggage", ctx: full, prop: propagation.TraceContext{}, want: map[string]string{"TRACEPARENT": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "TRACESTATE": "vendor=v1"}},
+		{name: "no span context injects nothing", ctx: context.Background(), prop: composite, want: map[string]string{}},
+		{name: "nil propagator injects nothing", ctx: full, want: map[string]string{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := TraceCarrierEnv(tc.ctx, tc.prop); fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Errorf("TraceCarrierEnv() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
