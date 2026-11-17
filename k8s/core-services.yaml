@@ -1886,6 +1886,23 @@ spec:
     app.kubernetes.io/name: nats
   type: ClusterIP
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: vanadis-restate
+  name: vanadis-restate-health
+  namespace: default
+spec:
+  ports:
+    - name: health
+      port: 4026
+      protocol: TCP
+      targetPort: 4026
+  selector:
+    app.kubernetes.io/name: vanadis-restate
+  type: ClusterIP
+---
 apiVersion: restate.dev/v1beta1
 kind: RestateDeployment
 metadata:
