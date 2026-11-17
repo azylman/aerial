@@ -2,14 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -179,32 +178,29 @@ func TestPostDiscordInternalJSON_Traceparent(t *testing.T) {
 func TestDiscordInteractionWorker_ResumesGatewayTrace(t *testing.T) {
 	t.Parallel()
 	const persistedTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const persistedTraceparent = "00-" + persistedTraceID + "-00f067aa0ba902b7-01"
 	tests := []struct {
-		name            string
-		traceparent     string
-		continuesParent bool
+		name              string
+		headerTraceparent string
+		bodyTraceparent   string
+		continuesParent   bool
 	}{
-		{name: "eri request continues the persisted gateway trace", traceparent: "00-" + persistedTraceID + "-00f067aa0ba902b7-01", continuesParent: true},
-		{name: "jobs enqueued before tracing start a fresh trace", traceparent: ""},
+		{name: "eri request continues the header gateway trace", headerTraceparent: persistedTraceparent, continuesParent: true},
+		{name: "legacy body traceparent decodes and is ignored", bodyTraceparent: persistedTraceparent},
+		{name: "jobs without header context start a fresh trace"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			srv := newTraceparentServer(t, 0, `{"status":"ok"}`)
 			router := newTestRouter(Config{}, nil, nil, NewDefaultOutboundDispatcher(srv.URL, srv.Client()))
-			argsBytes, err := json.Marshal(DiscordInteractionArgs{
-				InteractionID: "inter-traced",
-				Interaction:   &discordgo.Interaction{ID: "inter-traced", Type: discordgo.InteractionApplicationCommand},
-				Traceparent:   tc.traceparent,
-			})
-			if err != nil {
-				t.Fatalf("Marshal: %v", err)
-			}
+			body := fmt.Sprintf(`{"interaction_id":"inter-traced","interaction":{"id":"inter-traced","type":2,"data":{"id":"cmd-1","name":"ask"}},"traceparent":%q}`, tc.bodyTraceparent)
 			msg := &synapseMemoryMsg{
-				data:    argsBytes,
+				data:    []byte(body),
 				subject: "aerial.jobs.synapse.discord_interaction",
 			}
-			if err := router.HandleDiscordInteractionJob(context.Background(), msg); err != nil {
+			ctx := tracing.ContextWithTraceparent(context.Background(), tc.headerTraceparent)
+			if err := router.HandleDiscordInteractionJob(ctx, msg); err != nil {
 				t.Fatalf("HandleDiscordInteractionJob: %v", err)
 			}
 			assertTraceIDs(t, srv.traceIDs(), 1, persistedTraceID, tc.continuesParent)
