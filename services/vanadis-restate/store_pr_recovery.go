@@ -62,7 +62,8 @@ func (s *PostgresVanadisStore) recoverFailedPR(ctx context.Context, id, head str
 		return errPRTransitionSkipped
 	}
 
-	const reset = `UPDATE vanadis_chunks SET status = 'pr_opened', ci_fail_count = 0,
+	const reset = `UPDATE vanadis_chunks SET status = 'pr_opened',
+ ci_fail_count = CASE WHEN status = 'failed' THEN 0 ELSE ci_fail_count END,
  ci_checks = jsonb_strip_nulls(jsonb_build_object('_head_sha', $2::text,
  '_head_at', CASE WHEN $3::bigint > 0 THEN $3::text ELSE NULL END,
  '_seen_heads', CONCAT_WS(',', NULLIF(ci_checks->>'_seen_heads', ''), NULLIF(ci_checks->>'_head_sha', ''), $2::text))),

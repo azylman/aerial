@@ -143,16 +143,16 @@ func TestFirstWorkerFailure(t *testing.T) {
 func TestRecoveredChunkRemediationWake(t *testing.T) {
 	t.Parallel()
 	store, _ := dbScript{buildRow: &mockRow{b: &VanadisBuild{ID: "b1", ThreadID: "thread-1", Status: "running"}}, chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 101}}}.open()
-	payloads := make(chan map[string]string, 1)
+	payloads := make(chan BrainDispatchRequest, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload map[string]string
-		if r.URL.Path != "/prompt" || r.Method != http.MethodPost {
+		var req BrainDispatchRequest
+		if r.URL.Path != "/dispatch" || r.Method != http.MethodPost {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Error(err)
 		}
-		payloads <- payload
+		payloads <- req
 		w.Write([]byte(`{}`))
 	}))
 	defer server.Close()
@@ -165,9 +165,9 @@ func TestRecoveredChunkRemediationWake(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case payload := <-payloads:
-		if payload["channel_id"] != "thread-1" || !strings.Contains(payload["prompt"], "unit test failed") || !strings.Contains(payload["prompt"], "101") {
-			t.Fatalf("payload = %+v", payload)
+	case req := <-payloads:
+		if req.TargetID != "thread-1" || req.SessionID != "vanadis-c1" || req.VanadisChunkID != "c1" || !strings.Contains(req.Prompt, "unit test failed") || !strings.Contains(req.Prompt, "101") {
+			t.Fatalf("request = %+v", req)
 		}
 	default:
 		t.Fatal("no remediation wake")

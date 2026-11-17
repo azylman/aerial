@@ -569,6 +569,9 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 		return err
 	}
 	if b.executor != nil && !alreadyCompleted {
+		if cErr := b.executor.CancelChunkDispatch(ctx, mutation.ChunkID); cErr != nil {
+			log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", mutation.ChunkID, cErr)
+		}
 		if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{mutation.ChunkID}, ""); err != nil {
 			log.Printf("[vanadis-restate] publish event warning: %v", err)
 		}
@@ -632,6 +635,48 @@ func recordSeenHead(rev *prRevisionState, sha string) {
 	rev.seenHeads[clean] = true
 }
 
+func recordFailedCheck(rev *prRevisionState, checkName string, failed bool) {
+	clean := strings.TrimSpace(checkName)
+	if clean == "" {
+		return
+	}
+	if failed {
+		if rev.failedChecks == nil {
+			rev.failedChecks = make(map[string]bool)
+		}
+		rev.failedChecks[clean] = true
+		return
+	}
+	if len(rev.failedChecks) > 0 {
+		delete(rev.failedChecks, clean)
+		if len(rev.failedChecks) == 0 {
+			rev.remediatedSHA = ""
+		}
+	}
+}
+
+func seedChunkRevision(c VanadisChunk) prRevisionState {
+	seeded := prRevisionState{
+		headSHA:  strings.TrimSpace(c.HeadSHA),
+		mergeSHA: strings.TrimSpace(c.MergeSHA),
+		merged:   c.Status == statusMerged || c.Status == statusSynced || c.Status == statusDeployFailed || strings.TrimSpace(c.MergeSHA) != "",
+		headAt:   c.HeadAt,
+	}
+	recordSeenHead(&seeded, seeded.headSHA)
+	for _, sh := range c.SeenHeads {
+		recordSeenHead(&seeded, sh)
+	}
+	for checkName, state := range c.CIChecks {
+		if state == statusFailed {
+			recordFailedCheck(&seeded, checkName, true)
+		}
+	}
+	if len(seeded.failedChecks) > 0 {
+		seeded.remediatedSHA = strings.TrimSpace(c.RemediatedSHA)
+	}
+	return seeded
+}
+
 func (b *BuildObject) getChunkRevision(ctx context.Context, buildID, chunkID string) prRevisionState {
 	cleanID := strings.TrimSpace(chunkID)
 	b.revMu.Lock()
@@ -648,22 +693,13 @@ func (b *BuildObject) getChunkRevision(ctx context.Context, buildID, chunkID str
 		if _, chunks, err := b.store.GetBuild(ctx, buildID); err == nil {
 			for _, c := range chunks {
 				if c.ID == cleanID {
-					seeded = prRevisionState{
-						headSHA:  strings.TrimSpace(c.HeadSHA),
-						mergeSHA: strings.TrimSpace(c.MergeSHA),
-						merged:   c.Status == statusMerged || c.Status == statusSynced || c.Status == statusDeployFailed || strings.TrimSpace(c.MergeSHA) != "",
-						headAt:   c.HeadAt,
-					}
-					recordSeenHead(&seeded, seeded.headSHA)
-					for _, sh := range c.SeenHeads {
-						recordSeenHead(&seeded, sh)
-					}
+					seeded = seedChunkRevision(c)
 					break
 				}
 			}
 		}
 	}
-	if seeded.headSHA != "" || seeded.mergeSHA != "" || seeded.merged {
+	if seeded.headSHA != "" || seeded.mergeSHA != "" || seeded.remediatedSHA != "" || seeded.merged {
 		b.setChunkRevision(cleanID, seeded)
 	}
 	return seeded
@@ -736,6 +772,10 @@ func (b *BuildObject) recordPRHeadRevision(ctx context.Context, buildID, chunkID
 	}
 	recordSeenHead(&rev, rev.headSHA)
 	recordSeenHead(&rev, nextHead)
+	if !strings.EqualFold(nextHead, rev.headSHA) {
+		rev.remediatedSHA = ""
+		rev.failedChecks = nil
+	}
 	if !ev.OccurredAt.IsZero() {
 		rev.headAt = ev.OccurredAt.UTC()
 	} else if !strings.EqualFold(nextHead, rev.headSHA) {
@@ -818,25 +858,161 @@ func (b *BuildObject) handlePRCheckEvent(ctx context.Context, chunkID, event str
 			rev.headSHA = sha
 			recordSeenHead(&rev, sha)
 		}
-		b.setChunkRevision(chunkID, rev)
+	}
+	if !rev.merged {
+		recordFailedCheck(&rev, checkName, checkState == statusFailed)
+	}
+	b.setChunkRevision(chunkID, rev)
+	return nil
+}
+
+func (b *BuildObject) lookupBuildChunk(rc restate.RunContext, buildID, chunkID string) (*VanadisBuild, VanadisChunk, error) {
+	bld, chunks, err := b.store.GetBuild(rc, buildID)
+	if err != nil {
+		return nil, VanadisChunk{}, err
+	}
+	chunk := VanadisChunk{ID: chunkID, BuildID: buildID, Effort: effortMedium}
+	for _, c := range chunks {
+		if c.ID == chunkID {
+			chunk = c
+			chunk.Effort = capChunkEffort(c.Effort)
+			break
+		}
+	}
+	return bld, chunk, nil
+}
+
+func (b *BuildObject) dispatchChunkRemediation(rc restate.RunContext, buildID, chunkID, dispatchID, prompt string) error {
+	bld, chunk, err := b.lookupBuildChunk(rc, buildID, chunkID)
+	if err != nil {
+		return err
+	}
+	return b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, prompt)
+}
+
+func (b *BuildObject) dispatchChunkRemediationForChunk(rc restate.RunContext, bld *VanadisBuild, chunk VanadisChunk, dispatchID, prompt string) error {
+	return b.executor.DispatchChunkRemediation(rc, BrainDispatchRequest{
+		ID:             dispatchID,
+		Source:         "vanadis-restate",
+		SessionID:      "vanadis-" + strings.TrimSpace(chunk.ID),
+		TargetID:       strings.TrimSpace(bld.ThreadID),
+		VanadisChunkID: strings.TrimSpace(chunk.ID),
+		Prompt:         prompt,
+		Effort:         capChunkEffort(chunk.Effort),
+		SkipIfActive:   true,
+	})
+}
+
+func (b *BuildObject) shouldCoalesceCIFailure(rc restate.RunContext, buildID, chunkID, rawSHA string) bool {
+	sha := strings.TrimSpace(rawSHA)
+	if sha == "" {
+		return false
+	}
+	rev := b.getChunkRevision(rc, buildID, chunkID)
+	return rev.remediatedSHA != "" && strings.EqualFold(sha, rev.remediatedSHA)
+}
+
+func (b *BuildObject) markHeadRemediated(rc restate.RunContext, buildID, chunkID, rawSHA string) {
+	sha := strings.TrimSpace(rawSHA)
+	if sha == "" {
+		return
+	}
+	rev := b.getChunkRevision(rc, buildID, chunkID)
+	rev.remediatedSHA = sha
+	b.setChunkRevision(chunkID, rev)
+}
+
+func (b *BuildObject) handleCIRemediationCapReached(rc restate.RunContext, chunkID string, failCount int, ev pubsub.PRLifecycleEvent) error {
+	bld, chk, failed, err := b.store.FailChunk(rc, chunkID, "ci_remediation_cap_reached", "")
+	if err != nil {
+		return err
+	}
+	if !failed || bld == nil || b.executor == nil {
+		return nil
+	}
+	if cErr := b.executor.CancelChunkDispatch(rc, chunkID); cErr != nil {
+		log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", chunkID, cErr)
+	}
+	if !bld.Quiet {
+		targetID := strings.TrimSpace(bld.ThreadID)
+		content := fmt.Sprintf("🛑 [%s#%d] CI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", ev.Repo, ev.PRNumber, ev.CheckName, failCount, maxCIRemediationAttempts, maxCIRemediationAttempts)
+		if mErr := b.executor.DispatchDirectMessage(rc, targetID, content); mErr != nil {
+			log.Printf("[vanadis-restate] direct alert message warning: %v", mErr)
+		}
+	}
+	capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts)
+	chunks := []VanadisChunk{}
+	if chk != nil {
+		chunks = append(chunks, *chk)
+	}
+	if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *bld, chunks, capBanner); sErr != nil {
+		log.Printf("[vanadis-restate] sync build widget warning: %v", sErr)
+	}
+	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "failed", []string{chunkID}, "ci_remediation_cap_reached"); pErr != nil {
+		log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+	}
+	if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "failed", []string{bld.ID}, "ci_remediation_cap_reached"); pErr != nil {
+		log.Printf("[vanadis-restate] publish event warning: %v", pErr)
+	}
+	return nil
+}
+
+func (b *BuildObject) handleConflictEvent(rc restate.RunContext, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
+	if rev := b.getChunkRevision(rc, buildID, chunkID); rev.merged {
+		return errPRTransitionSkipped
+	}
+	if err := b.store.UpdateChunkBannerAndStatus(rc, chunkID, statusConflict, "Merge conflict detected"); err != nil {
+		return err
+	}
+	if b.executor != nil {
+		dispatchID := conflictRemediationDispatchID(chunkID, ev.HeadSHA)
+		if err := b.dispatchChunkRemediation(rc, buildID, chunkID, dispatchID, FormatConflictPrompt(ev)); err != nil && !errors.Is(err, errDispatchActive) {
+			log.Printf("[vanadis-restate] dispatch conflict remediation warning: %v", err)
+		}
 	}
 	return nil
 }
 
 func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
+	if isGateAggregatorCheck(ev.CheckName) {
+		return nil
+	}
 	if !b.acceptPRCheckRevision(rc, buildID, chunkID, ev.HeadSHA) {
 		return errPRTransitionSkipped
 	}
 	if err := b.handlePRCheckEvent(rc, chunkID, event, ev); err != nil {
 		return err
 	}
-	if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "ci_failed"); err != nil {
+	banner := fmt.Sprintf("CI check %q failed", ev.CheckName)
+	if err := b.store.UpdateChunkBannerAndStatus(rc, chunkID, statusCIFailed, banner); err != nil {
 		return err
 	}
-	if b.executor != nil {
-		details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
-		b.dispatchThreadWakePrompt(rc, buildID, FormatCIFailurePrompt(ev, details))
+	if b.shouldCoalesceCIFailure(rc, buildID, chunkID, ev.HeadSHA) || b.executor == nil {
+		return nil
 	}
+	bld, chunk, err := b.lookupBuildChunk(rc, buildID, chunkID)
+	if err != nil {
+		return err
+	}
+	if chunk.CIFailCount >= maxCIRemediationAttempts {
+		failCount, err := b.store.IncrementChunkCIFailCount(rc, chunkID, banner)
+		if err != nil {
+			return err
+		}
+		return b.handleCIRemediationCapReached(rc, chunkID, failCount, ev)
+	}
+	details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
+	dispatchID := ciRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
+	if err := b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatCIFailurePrompt(ev, details)); err != nil {
+		if !errors.Is(err, errDispatchActive) {
+			log.Printf("[vanadis-restate] dispatch ci remediation warning: %v", err)
+		}
+		return nil
+	}
+	if _, err := b.store.IncrementChunkCIFailCount(rc, chunkID, banner); err != nil {
+		return err
+	}
+	b.markHeadRemediated(rc, buildID, chunkID, ev.HeadSHA)
 	return nil
 }
 
@@ -882,12 +1058,7 @@ func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID,
 	case "check_failed", "ci_failed":
 		return b.handleCIFailureEvent(rc, buildID, chunkID, event, ev)
 	case "conflict":
-		if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "conflict"); err != nil {
-			return err
-		}
-		if b.executor != nil {
-			b.dispatchThreadWakePrompt(rc, buildID, FormatConflictPrompt(ev))
-		}
+		return b.handleConflictEvent(rc, buildID, chunkID, ev)
 	case "merged":
 		if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "merged"); err != nil {
 			return err
@@ -896,6 +1067,9 @@ func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID,
 			return err
 		}
 		if b.executor != nil {
+			if cErr := b.executor.CancelChunkDispatch(rc, chunkID); cErr != nil {
+				log.Printf("[vanadis-restate] cancel chunk dispatch %s: %v", chunkID, cErr)
+			}
 			if pErr := b.executor.PublishExternalEvent(rc, "vanadis_chunk", "merged", []string{chunkID}, ""); pErr != nil {
 				log.Printf("[vanadis-restate] publish event warning: %v", pErr)
 			}
@@ -1150,9 +1324,14 @@ func (s *PostgresVanadisStore) RecordPRCheckStatus(ctx context.Context, chunkID,
 SET ci_checks = jsonb_set(
         CASE
             WHEN (status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '') AND $4 != '' AND COALESCE(ci_checks->>'_merge_sha', '') = ''
-                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb) - '_head_sha', '{_merge_sha}', to_jsonb($4::text), true)
+                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb) - '_head_sha' - '_remediated_sha', '{_merge_sha}', to_jsonb($4::text), true)
             WHEN status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(ci_checks->>'_merge_sha', '') = '' AND $4 != '' AND COALESCE(ci_checks->>'_head_sha', '') = ''
-                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb), '{_head_sha}', to_jsonb($4::text), true)
+                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb) - '_remediated_sha', '{_head_sha}', to_jsonb($4::text), true)
+            WHEN $2 != 'failed' AND NOT EXISTS (
+                SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
+                WHERE key NOT LIKE '\_%' AND value = 'failed'
+            )
+                THEN COALESCE(ci_checks, '{}'::jsonb) - '_remediated_sha'
             ELSE COALESCE(ci_checks, '{}'::jsonb)
         END,
         ARRAY[$1],
@@ -1232,8 +1411,7 @@ WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled');`
 		headAtNano = headAt.UTC().UnixNano()
 	}
 	const syncQ = `UPDATE vanadis_chunks AS c
-SET ci_fail_count = CASE WHEN LOWER(COALESCE(c.ci_checks->>'_head_sha', '')) IS DISTINCT FROM LOWER($2) THEN 0 ELSE c.ci_fail_count END,
-    ci_checks = CASE
+SET ci_checks = CASE
         WHEN $2 != '' AND LOWER(COALESCE(c.ci_checks->>'_head_sha', '')) = LOWER($2) THEN
             CASE
                 WHEN $3::bigint > 0 THEN jsonb_set(c.ci_checks - '_merge_sha', '{_head_at}', to_jsonb($3::text), true)

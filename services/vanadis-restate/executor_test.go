@@ -579,6 +579,9 @@ func TestExecutor_NilEriAndDirectHelpers(t *testing.T) {
 	if err := execNil.DispatchDirectMessage(ctx, "ch1", "msg"); err != nil {
 		t.Fatal(err)
 	}
+	if err := execNil.DispatchChunkRemediation(ctx, BrainDispatchRequest{}); err == nil {
+		t.Error("expected error from nil eri client on DispatchChunkRemediation")
+	}
 
 	eri := &mockEriClient{}
 	exec := NewExecutor("", eri, nil, "", nil)
@@ -716,6 +719,27 @@ func TestHTTPEriClient_Extended(t *testing.T) {
 	badURLClient := NewHTTPEriClient("http://[::1]:namedport", srv500.Client())
 	if _, err := badURLClient.postEriJSON(ctx, "/path", "test", 1024); err == nil {
 		t.Error("expected create request error")
+	}
+
+	var dispatchResp string
+	srvDispatch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(dispatchResp))
+	}))
+	defer srvDispatch.Close()
+	cDispatch := NewHTTPEriClient(srvDispatch.URL, srvDispatch.Client())
+
+	dispatchResp = `{"status":"skipped_active"}`
+	if err := cDispatch.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); !errors.Is(err, errDispatchActive) {
+		t.Errorf("expected errDispatchActive on skipped_active, got %v", err)
+	}
+	dispatchResp = `{"status":"rejected"}`
+	if err := cDispatch.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
+		t.Error("expected error on rejected dispatch status")
+	}
+	dispatchResp = `{invalid-json`
+	if err := cDispatch.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
+		t.Error("expected error on malformed dispatch JSON")
 	}
 }
 

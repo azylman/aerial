@@ -174,6 +174,7 @@ type VanadisStore interface {
 	RecordPRRolloutState(ctx context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error
 	RecordPRCheckStatus(ctx context.Context, chunkID, headSHA, checkName, checkState string) error
 	ResetPRCheckState(ctx context.Context, chunkID, headSHA, mergeSHA string) error
+	IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string) (int, error)
 	CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
 	UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error
 	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
@@ -307,6 +308,7 @@ func applyRawChunkCIChecks(c *VanadisChunk, rawCIChecks []byte) {
 	}
 	c.HeadSHA = strings.TrimSpace(checks["_head_sha"])
 	c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
+	c.RemediatedSHA = strings.TrimSpace(checks["_remediated_sha"])
 	if headAtNano, parseErr := strconv.ParseInt(strings.TrimSpace(checks["_head_at"]), 10, 64); parseErr == nil && headAtNano > 0 {
 		c.HeadAt = time.Unix(0, headAtNano).UTC()
 	}
@@ -315,6 +317,7 @@ func applyRawChunkCIChecks(c *VanadisChunk, rawCIChecks []byte) {
 	}
 	delete(checks, "_head_sha")
 	delete(checks, "_merge_sha")
+	delete(checks, "_remediated_sha")
 	delete(checks, "_seen_heads")
 	delete(checks, "_head_at")
 	if len(checks) > 0 {
@@ -1330,6 +1333,38 @@ func (s *PostgresVanadisStore) RecordPRRolloutState(ctx context.Context, chunkID
 	}
 }
 
+func (s *PostgresVanadisStore) IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, errors.New("database connection is nil")
+	}
+	id := strings.TrimSpace(chunkID)
+	if id == "" {
+		return 0, errors.New("chunk_id cannot be empty")
+	}
+	const q = `UPDATE vanadis_chunks
+SET ci_fail_count = ci_fail_count + 1,
+    status = 'ci_failed',
+    banner = $1,
+    ci_checks = CASE
+        WHEN COALESCE(ci_checks->>'_head_sha', '') != ''
+            THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb), '{_remediated_sha}', to_jsonb(ci_checks->>'_head_sha'), true)
+        ELSE COALESCE(ci_checks, '{}'::jsonb)
+    END,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = $2
+  AND status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed', 'failed', 'cancelled')
+RETURNING ci_fail_count;`
+	var failCount int
+	err := s.db.QueryRow(ctx, q, strings.TrimSpace(banner), id).Scan(&failCount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, errPRTransitionSkipped
+	}
+	if err != nil {
+		return 0, fmt.Errorf("increment chunk ci fail count: %w", err)
+	}
+	return failCount, nil
+}
+
 func (s *PostgresVanadisStore) UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
@@ -1338,7 +1373,7 @@ func (s *PostgresVanadisStore) UpdateChunkBannerAndStatus(ctx context.Context, c
 	if id == "" {
 		return errors.New("chunk_id cannot be empty")
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks AS c SET status = CASE WHEN $1 != '' THEN $1 ELSE c.status END, banner = $2, updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $3 AND b.id = c.build_id AND c.status NOT IN ('completed', 'failed', 'cancelled') AND b.status NOT IN ('completed', 'failed', 'cancelled');`, strings.TrimSpace(status), strings.TrimSpace(banner), id)
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks AS c SET status = CASE WHEN $1 != '' THEN $1 ELSE c.status END, banner = $2, updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $3 AND b.id = c.build_id AND c.status NOT IN ('completed', 'failed', 'cancelled') AND b.status NOT IN ('completed', 'failed', 'cancelled') AND ($1 NOT IN ('conflict', 'ci_failed') OR c.status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed'));`, strings.TrimSpace(status), strings.TrimSpace(banner), id)
 	switch {
 	case err != nil:
 		return fmt.Errorf("update chunk banner and status: %w", err)

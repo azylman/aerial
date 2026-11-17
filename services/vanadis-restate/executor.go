@@ -22,9 +22,10 @@ import (
 )
 
 const (
-	defaultShareRoot       = "/share"
-	maxRoboRevCommentRunes = 4000
-	maxPromptRunes         = 6000
+	defaultShareRoot         = "/share"
+	maxRoboRevCommentRunes   = 4000
+	maxPromptRunes           = 6000
+	maxCIRemediationAttempts = 5
 )
 
 var (
@@ -161,8 +162,26 @@ func (c *HTTPEriClient) postEriJSON(ctx context.Context, path string, payload an
 }
 
 func (c *HTTPEriClient) Dispatch(ctx context.Context, req BrainDispatchRequest) error {
-	_, err := c.postEriJSON(ctx, "/dispatch", req, 64<<10)
-	return err
+	body, err := c.postEriJSON(ctx, "/dispatch", req, 64<<10)
+	if err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	var result struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("decode eri dispatch response: %w", err)
+	}
+	if result.Status == "skipped_active" {
+		return errDispatchActive
+	}
+	if result.Status != "" && result.Status != "ok" && result.Status != "accepted" && result.Status != "already_exists" {
+		return fmt.Errorf("eri rejected dispatch %q (status %q)", req.ID, result.Status)
+	}
+	return nil
 }
 
 // DispatchAccepted requires durable acceptance of the exact requested generation.
@@ -320,6 +339,41 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, store VanadisStore, b
 	}
 
 	return e.eriClient.DispatchAccepted(ctx, req)
+}
+
+func isGateAggregatorCheck(checkName string) bool {
+	lower := strings.ToLower(strings.TrimSpace(checkName))
+	return lower == "ci gate" || strings.HasSuffix(lower, " gate")
+}
+
+func ciRemediationDispatchID(chunkID, headSHA string, failCount int) string {
+	cleanChunk := strings.TrimSpace(chunkID)
+	cleanSHA := strings.ToLower(strings.TrimSpace(headSHA))
+	if cleanSHA != "" {
+		return fmt.Sprintf("vanadis-%s-cifail-%s-%d", cleanChunk, cleanSHA, failCount)
+	}
+	return fmt.Sprintf("vanadis-%s-cifail-%d", cleanChunk, failCount)
+}
+
+func conflictRemediationDispatchID(chunkID, headSHA string) string {
+	cleanChunk := strings.TrimSpace(chunkID)
+	cleanSHA := strings.ToLower(strings.TrimSpace(headSHA))
+	if cleanSHA != "" {
+		shortSHA := cleanSHA
+		if len(shortSHA) > 7 {
+			shortSHA = shortSHA[:7]
+		}
+		return fmt.Sprintf("vanadis-conflict-%s-%s", cleanChunk, shortSHA)
+	}
+	return "vanadis-conflict-" + cleanChunk
+}
+
+// DispatchChunkRemediation delegates to Eri's POST /dispatch endpoint for PR failure remediation.
+func (e *Executor) DispatchChunkRemediation(ctx context.Context, req BrainDispatchRequest) error {
+	if e == nil || e.eriClient == nil {
+		return errors.New("executor or eri client is nil")
+	}
+	return e.eriClient.Dispatch(ctx, req)
 }
 
 // CancelChunkDispatch calls Eri's POST /dispatch/cancel for a chunk.

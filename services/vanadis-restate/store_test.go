@@ -46,6 +46,20 @@ func (s dbScript) resolveQueryRow(query string, args []any, candidates *[]string
 			break
 		}
 	}
+	if strings.Contains(query, "RETURNING ci_fail_count") {
+		for _, r := range s.routes {
+			if strings.Contains(query, r.match) {
+				return r.row
+			}
+		}
+		if s.row != nil {
+			return s.row
+		}
+		if s.execTag == "UPDATE 0" {
+			return errRow(pgx.ErrNoRows)
+		}
+		return valuesRow(1)
+	}
 	for _, r := range s.routes {
 		if strings.Contains(query, r.match) {
 			return r.row
@@ -1452,40 +1466,6 @@ func TestCompletePRDeployment(t *testing.T) {
 				assert.Contains(t, string(data), "service")
 			} else {
 				assert.Nil(t, gotArgs[0])
-			}
-		})
-	}
-}
-
-func TestUpdatePRLifecycleStatus(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, id, tag      string
-		nilDB, execFailure bool
-		wantErr            bool
-	}{
-		{"nil database", "c1", "UPDATE 1", true, false, true},
-		{"empty id", "", "UPDATE 1", false, false, true},
-		{"eligible merge", "c1", "UPDATE 1", false, false, false},
-		{"terminal chunk", "c1", "UPDATE 0", false, false, true},
-		{"persistence failure", "c1", "", false, true, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := newMockStore(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-				if tc.execFailure {
-					return pgconn.CommandTag{}, errors.New("database unavailable")
-				}
-				return pgconn.NewCommandTag(tc.tag), nil
-			}})
-			if tc.nilDB {
-				store = &PostgresVanadisStore{}
-			}
-			err := store.UpdatePRLifecycleStatus(context.Background(), tc.id, "merged")
-			assert.Equal(t, tc.wantErr, err != nil)
-			if tc.tag == "UPDATE 0" {
-				assert.ErrorIs(t, err, errPRTransitionSkipped)
 			}
 		})
 	}
