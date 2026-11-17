@@ -45,10 +45,18 @@ type processThreadFactsContextCase struct {
 	ollamaErr           error
 	wantWatermark       bool
 	wantErr             bool
+	parentTraceID       string
+	parentSpanID        string
 }
 
 func processThreadFactsContextCases() []processThreadFactsContextCase {
 	return []processThreadFactsContextCase{
+		{
+			name:          "LinksToTriggerWhenIncomingContextValid",
+			parentTraceID: "0af7651916cd43dd8448eb211c80319c",
+			parentSpanID:  "b7ad6b7169203331",
+			wantWatermark: true,
+		},
 		{
 			name:     "NilStoreError",
 			nilStore: true,
@@ -203,11 +211,30 @@ func assertProcessThreadFactsPrompt(t *testing.T, tc processThreadFactsContextCa
 	if capturedPrompt == "" {
 		return
 	}
+	assertExtractLinks(t, tc, llmSpanID)
 	name, root, attrs := endedSpanSummary(llmSpanID)
 	if name != "coven.extract" || !root || attrs["aerial.coven.batch_size"] == "" {
 		t.Errorf("LLM call span = %q root=%v attrs=%v, want root coven.extract with aerial.coven.batch_size", name, root, attrs)
 	}
 	assertPromptContent(t, tc, capturedPrompt)
+}
+
+func assertExtractLinks(t *testing.T, tc processThreadFactsContextCase, id trace.SpanID) {
+	t.Helper()
+	s := endedSpan(id)
+	if s == nil {
+		return
+	}
+	links := s.Links()
+	if tc.parentTraceID == "" {
+		if len(links) != 0 {
+			t.Errorf("links = %v, want none", links)
+		}
+		return
+	}
+	if len(links) != 1 || links[0].SpanContext.TraceID().String() != tc.parentTraceID || links[0].SpanContext.SpanID().String() != tc.parentSpanID {
+		t.Errorf("links = %v, want one to %s/%s", links, tc.parentTraceID, tc.parentSpanID)
+	}
 }
 
 func assertPromptContent(t *testing.T, tc processThreadFactsContextCase, prompt string) {
@@ -269,7 +296,13 @@ func runProcessThreadFactsContextCase(t *testing.T, tc processThreadFactsContext
 	var llmSpanID trace.SpanID
 	llm := buildProcessThreadFactsLLM(tc, &capturedPrompt, &llmSpanID)
 
-	err := processThreadFacts(context.Background(), store, client, llm, "th-test")
+	ctx := context.Background()
+	if tc.parentTraceID != "" {
+		tid, _ := trace.TraceIDFromHex(tc.parentTraceID)
+		sid, _ := trace.SpanIDFromHex(tc.parentSpanID)
+		ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled}))
+	}
+	err := processThreadFacts(ctx, store, client, llm, "th-test")
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("processThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
 	}
