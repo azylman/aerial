@@ -41,6 +41,8 @@ type PRRegisterRequest struct {
 
 // PRRegistryUpdater defines the interface for updating PR lifecycle state in PostgreSQL pr_registry.
 type PRRegistryUpdater interface {
+	RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata BuildMetadata) (bool, error)
+	LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (BuildMetadata, bool, error)
 	RegisterPR(ctx context.Context, req PRRegisterRequest) (string, error)
 	UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
 	UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (targetID string, err error)
@@ -145,7 +147,7 @@ func (r *PostgresPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo st
 }
 
 func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
-	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', metadata = CASE WHEN head_sha IS DISTINCT FROM $3 THEN CASE WHEN COALESCE((metadata->>'ci_fail_count')::int, 0) > 3 THEN ((COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks') - 'ci_fail_count' ELSE (COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks' END ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed') AND (head_sha IS DISTINCT FROM $3 OR status IN ('ci_failed', 'conflict') OR COALESCE(metadata, '{}'::jsonb) ? 'banner') RETURNING target_id;`
+	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', metadata = CASE WHEN head_sha IS DISTINCT FROM $3 THEN CASE WHEN COALESCE((metadata->>'ci_fail_count')::int, 0) > 3 THEN ((COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks' - 'build_metadata') - 'ci_fail_count' ELSE (COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks' - 'build_metadata' END ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed') AND (head_sha IS DISTINCT FROM $3 OR status IN ('ci_failed', 'conflict') OR COALESCE(metadata, '{}'::jsonb) ? 'banner') RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr sync", query, strings.TrimSpace(headSHA))
 }
 
@@ -252,7 +254,7 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterReque
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = EXCLUDED.branch, head_sha = EXCLUDED.head_sha, target_id = EXCLUDED.target_id, title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END, status = CASE WHEN pr_registry.status IN ('merged', 'synced', 'deploying', 'deployed') THEN pr_registry.status ELSE 'open' END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb THEN (CASE WHEN pr_registry.status NOT IN ('merged', 'synced', 'deploying', 'deployed') THEN CASE WHEN pr_registry.head_sha IS DISTINCT FROM EXCLUDED.head_sha THEN CASE WHEN COALESCE((pr_registry.metadata->>'ci_fail_count')::int, 0) > 3 THEN ((COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks') - 'ci_fail_count' ELSE (COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) END) || EXCLUDED.metadata ELSE CASE WHEN pr_registry.status NOT IN ('merged', 'synced', 'deploying', 'deployed') THEN CASE WHEN pr_registry.head_sha IS DISTINCT FROM EXCLUDED.head_sha THEN CASE WHEN COALESCE((pr_registry.metadata->>'ci_fail_count')::int, 0) > 3 THEN ((COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks') - 'ci_fail_count' ELSE (COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner' END ELSE pr_registry.metadata END END, updated_at = CURRENT_TIMESTAMP;`
+	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = EXCLUDED.branch, head_sha = EXCLUDED.head_sha, target_id = EXCLUDED.target_id, title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END, status = CASE WHEN pr_registry.status IN ('merged', 'synced', 'deploying', 'deployed') THEN pr_registry.status ELSE 'open' END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb THEN (CASE WHEN pr_registry.status NOT IN ('merged', 'synced', 'deploying', 'deployed') THEN CASE WHEN pr_registry.head_sha IS DISTINCT FROM EXCLUDED.head_sha THEN CASE WHEN COALESCE((pr_registry.metadata->>'ci_fail_count')::int, 0) > 3 THEN ((COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks' - 'build_metadata') - 'ci_fail_count' ELSE (COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks' - 'build_metadata' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) END) || EXCLUDED.metadata ELSE CASE WHEN pr_registry.status NOT IN ('merged', 'synced', 'deploying', 'deployed') THEN CASE WHEN pr_registry.head_sha IS DISTINCT FROM EXCLUDED.head_sha THEN CASE WHEN COALESCE((pr_registry.metadata->>'ci_fail_count')::int, 0) > 3 THEN ((COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks' - 'build_metadata') - 'ci_fail_count' ELSE (COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner') - 'ci_checks' - 'build_metadata' END ELSE COALESCE(pr_registry.metadata, '{}'::jsonb) - 'banner' END ELSE pr_registry.metadata END END, updated_at = CURRENT_TIMESTAMP;`
 	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, req.PRNumber, branch, headSHA, targetID, title, meta); err != nil {
 		return "", fmt.Errorf("register pr: %w", err)
 	}
@@ -683,4 +685,67 @@ func extractStringSliceFromMetadata(meta map[string]any, key string) []string {
 // extractJobsFromMetadata extracts candidate job names stored in the PR registry metadata JSONB.
 func extractJobsFromMetadata(meta map[string]any) []string {
 	return extractStringSliceFromMetadata(meta, "jobs")
+}
+
+// RecordPRBuildMetadata atomically fences snapshots by PR revision and workflow
+// order. This additive API deliberately does not update PR lifecycle status.
+func (r *PostgresPRRegistry) RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata BuildMetadata) (bool, error) {
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return false, err
+	}
+	if _, err = ParseBuildMetadata(raw); err != nil {
+		return false, err
+	}
+	repo = normalizeRepo(repo)
+	if repo != metadata.Repository || prNumber <= 0 || (metadata.PRNumber != nil && *metadata.PRNumber != prNumber) {
+		return false, fmt.Errorf("metadata registry identity mismatch")
+	}
+	if r == nil || r.pool == nil {
+		return false, nil
+	}
+	phase := 1
+	if metadata.Kind == buildMetadataFinal {
+		phase = 2
+	}
+	if metadata.Kind == buildMetadataResult {
+		return false, fmt.Errorf("result is not a registry snapshot")
+	}
+	query := `UPDATE pr_registry SET metadata=jsonb_set(COALESCE(metadata,'{}'::jsonb),'{build_metadata}',$4::jsonb), updated_at=CURRENT_TIMESTAMP
+ WHERE repo=$1 AND pr_number=$2
+ AND ((status IN ('open','ci_failed','conflict') AND head_sha=$3) OR (status IN ('merged','synced') AND merge_sha=$3))
+ AND (metadata->'build_metadata' IS NULL OR
+ (COALESCE((metadata->'build_metadata'->>'run_number')::bigint,0),COALESCE((metadata->'build_metadata'->>'run_attempt')::int,0)) < ($5::bigint,$6::int) OR
+ ((metadata->'build_metadata'->>'run_id')::bigint=$7 AND (metadata->'build_metadata'->>'run_attempt')::int=$6
+ AND metadata->'build_metadata'->>'workflow_path'=$8
+ AND metadata->'build_metadata'->>'execution_sha'=$9
+ AND metadata->'build_metadata'->'selected'=$4::jsonb->'selected'
+ AND COALESCE((metadata->'build_metadata'->>'version')::int,0)<=$10
+ AND CASE WHEN metadata->'build_metadata'->>'kind'='final' THEN 2 ELSE 1 END <= $11))
+ AND metadata->'build_metadata' IS DISTINCT FROM $4::jsonb RETURNING TRUE;`
+	var updated bool
+	found, err := r.queryRowScan(ctx, "record build metadata", query, []any{&updated}, repo, prNumber, metadata.SourceSHA, raw, metadata.RunNumber, metadata.RunAttempt, metadata.RunID, metadata.WorkflowPath, metadata.ExecutionSHA, metadata.Version, phase)
+	return found && updated, err
+}
+
+// LoadPRBuildMetadata revalidates identity even after head-change invalidation.
+func (r *PostgresPRRegistry) LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (BuildMetadata, bool, error) {
+	var m BuildMetadata
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return m, false, nil
+	}
+	var raw []byte
+	found, err := r.queryRowScan(ctx, "load build metadata", `SELECT metadata->'build_metadata' FROM pr_registry WHERE repo=$1 AND pr_number=$2 AND ((status IN ('open','ci_failed','conflict') AND head_sha=metadata->'build_metadata'->>'source_sha') OR (status IN ('merged','synced') AND merge_sha=metadata->'build_metadata'->>'source_sha'));`, []any{&raw}, repo, prNumber)
+	if err != nil || !found || len(raw) == 0 {
+		return m, false, err
+	}
+	m, err = ParseBuildMetadata(raw)
+	if err != nil {
+		return m, false, err
+	}
+	if m.Repository != repo || (m.PRNumber != nil && *m.PRNumber != prNumber) {
+		return m, false, fmt.Errorf("stored metadata identity mismatch")
+	}
+	return m, true, nil
 }
