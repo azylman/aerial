@@ -145,8 +145,8 @@ func TestMuseSessionLifecycle(t *testing.T) {
 			sessionID: "sess-muse-data",
 			location:  "data_muse_nested",
 			content: strings.Join([]string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Initial prompt"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"event":{"kind":"assistant_message_committed","text":"Done"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Initial prompt"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Done"}}}`,
 			}, "\n") + "\n",
 			age:             10 * time.Minute,
 			wantExists:      true,
@@ -160,10 +160,10 @@ func TestMuseSessionLifecycle(t *testing.T) {
 			sessionID: "sess-muse-runtime",
 			location:  "data_runtime_muse",
 			content: strings.Join([]string{
-				`{"payload_type":"runtime.session","recorded_at":"2026-11-07T10:00:00Z","payload":{"type":"message","role":"user","content":"User msg"}}`,
-				`{"payload_type":"runtime.session","recorded_at":"2026-11-07T10:00:01Z","payload":{"type":"message","role":"assistant","content":"Assistant msg"}}`,
-				`{"payload_type":"runtime.session","recorded_at":"2026-11-07T10:00:02Z","payload":{"event":{"kind":"tool_call","name":"bash","id":"call_1"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":"2026-11-07T10:00:03Z","payload":{"event":{"kind":"tool_completed","id":"call_1","text":"ok"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"User msg"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Assistant msg"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed","tool_calls":[{"name":"bash","call_id":"call_1"}]}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510003000000,"payload":{"kind":"run","event":{"kind":"tool_result_batch_committed","results":[{"call_id":"call_1","output":"ok"}]}}}`,
 			}, "\n") + "\n",
 			wantExists:      true,
 			wantPaths:       1,
@@ -176,8 +176,8 @@ func TestMuseSessionLifecycle(t *testing.T) {
 			sessionID: "sess-muse-home",
 			location:  "home_muse",
 			content: strings.Join([]string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"[Chat Alex]: ambient message"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"model_completed","text":"model output"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alex]: ambient message"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"model output"}}}`,
 			}, "\n") + "\n",
 			wantExists:      true,
 			wantPaths:       1,
@@ -198,7 +198,7 @@ func TestMuseSessionLifecycle(t *testing.T) {
 			sessionID: "sess-muse-custom-root",
 			location:  "direct_muse",
 			content: strings.Join([]string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Custom root test"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Custom root test"}}}`,
 			}, "\n") + "\n",
 			wantExists:      true,
 			wantPaths:       1,
@@ -224,162 +224,59 @@ type museTurnErrorTestCase struct {
 	wantErr bool
 }
 
-func museTurnErrorTerminalCases() []museTurnErrorTestCase {
+func museTurnErrorCases() []museTurnErrorTestCase {
 	return []museTurnErrorTestCase{
 		{
 			name: "terminal failed with reason",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Run tool"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"terminal","terminal":"failed","reason":"Connection refused"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Run tool"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"terminal","terminal":"failed","reason":"Connection refused"}}}`,
 			},
 			since: time.Unix(1762509999, 0),
 			want:  "Connection refused",
 		},
 		{
-			name: "terminal failed with error bytes",
+			name: "terminal failed with default fallback",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Run tool"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"terminal","terminal":"failed","error":{"message":"quota exceeded"}}}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "quota exceeded",
-		},
-		{
-			name: "error before cutoff ignored",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"terminal","terminal":"failed","reason":"Old error"}}}`,
-			},
-			since: time.Unix(1762510050, 0),
-			want:  "",
-		},
-		{
-			name: "terminal failed with fallback text",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"terminal","terminal":"failed"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Task"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"terminal","terminal":"failed"}}}`,
 			},
 			since: time.Unix(1762509999, 0),
 			want:  "terminal failed",
 		},
 		{
-			name: "payload reason error",
+			name: "error before cutoff ignored",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"reason":"disk quota exceeded"}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"terminal","terminal":"failed","reason":"Old error"}}}`,
 			},
-			since: time.Unix(1762509999, 0),
-			want:  "disk quota exceeded",
+			since: time.Unix(1762510050, 0),
+			want:  "",
 		},
 		{
-			name: "payload error bytes",
+			name: "terminal completed ignored",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"error":{"message":"network timeout"}}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "network timeout",
-		},
-		{
-			name: "event reason without terminal",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"reason":"fatal error"}}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "fatal error",
-		},
-		{
-			name: "record field payload error",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"record":{"kind":"terminal","reason":"record failure"}}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "record failure",
-		},
-		{
-			name: "flat payload kind error",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"terminal","reason":"flat failure"}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "flat failure",
-		},
-		{
-			name: "terminal failed with ev.Text",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"terminal","terminal":"failed","text":"text failure"}}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "text failure",
-		},
-		{
-			name: "terminal completed with null error not reported as turn error",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"terminal","terminal":"completed","error":null}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Task"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"terminal","terminal":"completed","reason":"all good"}}}`,
 			},
 			since: time.Unix(1762509999, 0),
 			want:  "",
 		},
 		{
-			name: "terminal completed with text and null error not reported as turn error",
+			name: "non-run kind ignored",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"terminal","terminal":"completed","text":"Task completed","error":null}}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "",
-		},
-	}
-}
-
-func museTurnErrorToolCompletedCases() []museTurnErrorTestCase {
-	return []museTurnErrorTestCase{
-		{
-			name: "tool completed failed with output",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"tool_completed","status":"failed","output":"exit code 1"}}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "exit code 1",
-		},
-		{
-			name: "tool completed is_error with result",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"tool_completed","is_error":true,"result":"command not found"}}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "command not found",
-		},
-		{
-			name: "tool completed status error with content",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"tool_completed","status":"error","content":"permission denied"}}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "permission denied",
-		},
-		{
-			name: "tool completed success ignored",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"tool_completed","status":"success","output":"OK"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"init","event":{"kind":"terminal","terminal":"failed","reason":"ignored"}}}`,
 			},
 			since: time.Unix(1762509999, 0),
 			want:  "",
 		},
 		{
-			name: "invalid json and non-error lines ignored in error scan",
+			name: "invalid json and non-session lines ignored in error scan",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Task"}}}`,
 				`{not-valid-json`,
-				`{"payload_type":"other.event","payload":{}}`,
+				`{"payload_type":"other.event","payload":{"kind":"run"}}`,
 				`{"payload_type":"runtime.session","payload":"not-an-object"}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"assistant_message_committed","text":"Normal output"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Normal output"}}}`,
 			},
 			since: time.Unix(1762509999, 0),
 			want:  "",
@@ -390,9 +287,7 @@ func museTurnErrorToolCompletedCases() []museTurnErrorTestCase {
 func TestExtractMuseLinesForTurnError(t *testing.T) {
 	t.Parallel()
 
-	tests := append(museTurnErrorTerminalCases(), museTurnErrorToolCompletedCases()...)
-
-	for _, tc := range tests {
+	for _, tc := range museTurnErrorCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := scanMuseLinesForTurnError(context.Background(), tc.lines, tc.since)
@@ -418,43 +313,34 @@ func TestExtractMuseLinesForResponse(t *testing.T) {
 		{
 			name: "assistant message committed extracted",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"What is 2+2?"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"assistant_message_committed","text":"4"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"What is 2+2?"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"4"}}}`,
 			},
 			since: time.Unix(1762509999, 0),
 			want:  "4",
 		},
 		{
-			name: "tool call requested placeholder ignored",
+			name: "empty assistant message text ignored",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"assistant_message_committed","text":"[Tool Call Requested]: bash"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":""}}}`,
 			},
 			since: time.Unix(1762509999, 0),
 			want:  "",
 		},
 		{
-			name: "message role assistant extracted",
+			name: "assistant tool calls committed cancels response",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"type":"message","role":"user","content":"Hi"}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"Hello there"}]}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"I will check"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed","tool_calls":[{"name":"bash"}]}}}`,
 			},
 			since: time.Unix(1762509999, 0),
-			want:  "Hello there",
+			want:  "",
 		},
 		{
-			name: "message role assistant with null error extracted",
+			name: "tool result batch committed cancels response",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"type":"message","role":"user","content":"Hi","error":null}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"type":"message","role":"assistant","content":"Done","error":null}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "Done",
-		},
-		{
-			name: "tool call after assistant message cancels response",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"assistant_message_committed","text":"I will check"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"event":{"kind":"tool_call","name":"bash"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"I will check"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"tool_result_batch_committed","results":[{"call_id":"call_1"}]}}}`,
 			},
 			since: time.Unix(1762509999, 0),
 			want:  "",
@@ -462,7 +348,7 @@ func TestExtractMuseLinesForResponse(t *testing.T) {
 		{
 			name: "response before cutoff returns empty",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"assistant_message_committed","text":"Old reply"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Old reply"}}}`,
 			},
 			since: time.Unix(1762510050, 0),
 			want:  "",
@@ -470,46 +356,55 @@ func TestExtractMuseLinesForResponse(t *testing.T) {
 		{
 			name: "started user prompt stops backward scan",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"assistant_message_committed","text":"Old reply"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"event":{"kind":"started","prompt":"New non-ambient question"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Old reply"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"New non-ambient question"}}}`,
 			},
 			since: time.Unix(1762509999, 0),
 			want:  "",
 		},
 		{
-			name: "user message stops backward scan",
+			name: "started ambient prompt does not stop backward scan",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"assistant_message_committed","text":"Old reply"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"type":"message","role":"user","content":"New question"}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Valid reply"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alex]: ambient ping"}}}`,
 			},
 			since: time.Unix(1762509999, 0),
-			want:  "",
+			want:  "Valid reply",
 		},
 		{
-			name: "model completed extracted as response",
+			name: "subsecond fractional microsecond after cutoff extracted",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Generate code"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"model_completed","text":"Final model output"}}}`,
-			},
-			since: time.Unix(1762509999, 0),
-			want:  "Final model output",
-		},
-		{
-			name: "subsecond fractional timestamp after cutoff extracted",
-			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000.9,"payload":{"event":{"kind":"started","prompt":"Quick task"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510000.9,"payload":{"event":{"kind":"assistant_message_committed","text":"Subsecond result"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000900000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Quick task"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000900000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Subsecond result"}}}`,
 			},
 			since: time.Unix(1762510000, 500000000),
 			want:  "Subsecond result",
 		},
 		{
-			name: "subsecond fractional timestamp before cutoff ignored",
+			name: "subsecond microsecond before cutoff ignored",
 			lines: []string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000.4,"payload":{"event":{"kind":"assistant_message_committed","text":"Old subsecond result"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510000400000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Old subsecond result"}}}`,
 			},
 			since: time.Unix(1762510000, 500000000),
 			want:  "",
+		},
+		{
+			name: "non-run kind ignored in response scan",
+			lines: []string{
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"meta","event":{"kind":"assistant_message_committed","text":"Ignored"}}}`,
+			},
+			since: time.Unix(1762509999, 0),
+			want:  "",
+		},
+		{
+			name: "invalid json and non-session entries ignored in response scan",
+			lines: []string{
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Good reply"}}}`,
+				`{"payload_type":"other.type","payload":{"kind":"run"}}`,
+				`{invalid`,
+			},
+			since: time.Unix(1762509999, 0),
+			want:  "Good reply",
 		},
 	}
 
@@ -524,115 +419,73 @@ func TestExtractMuseLinesForResponse(t *testing.T) {
 	}
 }
 
-func TestParseMuseTimestampAndHelpers(t *testing.T) {
+func TestMuseSession_CanceledContext(t *testing.T) {
 	t.Parallel()
-
-	tests := []struct {
-		name      string
-		raw       any
-		wantZero  bool
-		wantEpoch int64
-	}{
-		{name: "nil input", raw: nil, wantZero: true},
-		{name: "empty string", raw: "", wantZero: true},
-		{name: "invalid string", raw: "not-a-time", wantZero: true},
-		{name: "rfc3339nano string", raw: "2026-11-07T10:00:00.123456789Z", wantEpoch: 1794045600},
-		{name: "rfc3339 string", raw: "2026-11-07T10:00:00Z", wantEpoch: 1794045600},
-		{name: "string number micro", raw: "1762510000000000", wantEpoch: 1762510000},
-		{name: "string number nano", raw: "1762510000000000000", wantEpoch: 1762510000},
-		{name: "string number seconds", raw: "1762510000", wantEpoch: 1762510000},
-		{name: "string number non-positive", raw: "-10", wantZero: true},
-		{name: "string number float", raw: "1762510000.5", wantEpoch: 1762510000},
-		{name: "float64 nano", raw: float64(1762510000000000000), wantEpoch: 1762510000},
-		{name: "float64 micro", raw: float64(1762510000000000), wantEpoch: 1762510000},
-		{name: "float64 micro round up", raw: 1762510000999999.99, wantEpoch: 1762510001},
-		{name: "float64 seconds with fraction", raw: float64(1762510000.9), wantEpoch: 1762510000},
-		{name: "float64 seconds round up", raw: 1762510000.999999999, wantEpoch: 1762510001},
-		{name: "float64 non-positive", raw: float64(0), wantZero: true},
+	line := `{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Valid answer"}}}`
+	if got := scanMuseLinesForResponse(context.Background(), []string{line}, time.Unix(1762509999, 0)); got != "Valid answer" {
+		t.Fatalf("expected valid answer without cancellation, got %q", got)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := scanMuseLinesForResponse(ctx, []string{line}, time.Unix(1762509999, 0)); got != "" {
+		t.Fatalf("expected empty for canceled context, got %q", got)
+	}
+}
 
+func TestMuseSessionLinePredicates(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		raw            string
+		wantStep       bool
+		wantNonAmbient bool
+	}{
+		{name: "invalid json", raw: "invalid-json"},
+		{name: "other payload type", raw: `{"payload_type":"other"}`},
+		{name: "non-run kind", raw: `{"payload_type":"runtime.session","payload":{"kind":"init"}}`},
+		{name: "unknown event kind", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"unknown"}}}`},
+		{name: "empty prompt", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":""}}}`},
+		{name: "ambient prompt", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alex]: ambient"}}}`},
+		{name: "regular prompt", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":"Regular user question"}}}`, wantNonAmbient: true},
+		{name: "assistant message committed", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"assistant_message_committed"}}}`, wantStep: true},
+		{name: "assistant tool calls committed", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed"}}}`, wantStep: true},
+		{name: "tool result batch committed", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"tool_result_batch_committed"}}}`, wantStep: true},
+	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ts := parseMuseTimestamp(tc.raw)
-			if tc.wantZero && !ts.IsZero() {
-				t.Fatalf("parseMuseTimestamp(%v) = %v, want zero time", tc.raw, ts)
+			if got := isMuseStepLine(tc.raw); got != tc.wantStep {
+				t.Errorf("isMuseStepLine(%s) = %v, want %v", tc.name, got, tc.wantStep)
 			}
-			if !tc.wantZero && ts.Unix() != tc.wantEpoch {
-				t.Fatalf("parseMuseTimestamp(%v) = %v (unix %d), want %d", tc.raw, ts, ts.Unix(), tc.wantEpoch)
+			if got := isNonAmbientMuseUserLine(tc.raw); got != tc.wantNonAmbient {
+				t.Errorf("isNonAmbientMuseUserLine(%s) = %v, want %v", tc.name, got, tc.wantNonAmbient)
 			}
 		})
 	}
 }
 
-func TestExtractMuseTimestampAndEntryHelpers(t *testing.T) {
+func TestMuseSession_IsMuseStepBeforeEntry(t *testing.T) {
 	t.Parallel()
-
-	t.Run("extractMuseTimestamp fields", func(t *testing.T) {
-		t.Parallel()
-		e1 := museTranscriptEntry{RecordedAt: "2026-11-07T10:00:00Z"}
-		if extractMuseTimestamp(e1).IsZero() {
-			t.Fatalf("expected non-zero for RecordedAt")
-		}
-		e2 := museTranscriptEntry{Timestamp: "2026-11-07T10:00:00Z"}
-		if extractMuseTimestamp(e2).IsZero() {
-			t.Fatalf("expected non-zero for Timestamp")
-		}
-		e3 := museTranscriptEntry{CreatedAt: "2026-11-07T10:00:00Z"}
-		if extractMuseTimestamp(e3).IsZero() {
-			t.Fatalf("expected non-zero for CreatedAt")
-		}
-		e4 := museTranscriptEntry{}
-		if !extractMuseTimestamp(e4).IsZero() {
-			t.Fatalf("expected zero for empty entry")
-		}
-	})
-
-	t.Run("canceled context in scanMuseLinesForResponse", func(t *testing.T) {
-		t.Parallel()
-		line := `{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"assistant_message_committed","text":"Valid answer"}}}`
-		if got := scanMuseLinesForResponse(context.Background(), []string{line}, time.Unix(1762509999, 0)); got != "Valid answer" {
-			t.Fatalf("expected valid answer without cancellation, got %q", got)
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		if got := scanMuseLinesForResponse(ctx, []string{line}, time.Unix(1762509999, 0)); got != "" {
-			t.Fatalf("expected empty for canceled context, got %q", got)
-		}
-	})
-
-	t.Run("isMuseStepLine invalid lines", func(t *testing.T) {
-		t.Parallel()
-		if isMuseStepLine("invalid-json") {
-			t.Fatalf("expected false")
-		}
-		if isMuseStepLine(`{"payload_type":"other"}`) {
-			t.Fatalf("expected false")
-		}
-		if isMuseStepLine(`{"payload_type":"runtime.session","payload":{}}`) {
-			t.Fatalf("expected false for empty payload")
-		}
-	})
-
-	t.Run("isMuseStepBeforeEntry variants", func(t *testing.T) {
-		t.Parallel()
-		now := time.Now()
-		if isMuseStepBeforeEntry(museTranscriptEntry{}, time.Time{}) {
-			t.Fatalf("expected false for zero since")
-		}
-		past := museTranscriptEntry{Timestamp: now.Add(-time.Hour).Format(time.RFC3339Nano)}
-		if !isMuseStepBeforeEntry(past, now) {
-			t.Fatalf("expected true for past entry")
-		}
-		future := museTranscriptEntry{Timestamp: now.Add(time.Hour).Format(time.RFC3339Nano)}
-		if isMuseStepBeforeEntry(future, now) {
-			t.Fatalf("expected false for future entry")
-		}
-		invalid := museTranscriptEntry{Timestamp: "not-a-timestamp"}
-		if isMuseStepBeforeEntry(invalid, now) {
-			t.Fatalf("expected false for invalid timestamp")
-		}
-	})
+	now := time.Now()
+	tests := []struct {
+		name  string
+		entry museTranscriptEntry
+		since time.Time
+		want  bool
+	}{
+		{name: "zero since", entry: museTranscriptEntry{}, since: time.Time{}, want: false},
+		{name: "past entry", entry: museTranscriptEntry{RecordedAt: now.Add(-time.Hour).UnixMicro()}, since: now, want: true},
+		{name: "future entry", entry: museTranscriptEntry{RecordedAt: now.Add(time.Hour).UnixMicro()}, since: now, want: false},
+		{name: "zero recorded_at", entry: museTranscriptEntry{RecordedAt: 0}, since: now, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isMuseStepBeforeEntry(tc.entry, tc.since); got != tc.want {
+				t.Fatalf("isMuseStepBeforeEntry(%+v, %v) = %v, want %v", tc.entry, tc.since, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestExtractResponseFromMuseTranscriptFile(t *testing.T) {
@@ -644,10 +497,16 @@ func TestExtractResponseFromMuseTranscriptFile(t *testing.T) {
 		t.Fatalf("expected empty for non-existent file, got %q", res)
 	}
 
+	pEmpty := filepath.Join(tmp, "empty.jsonl")
+	_ = os.WriteFile(pEmpty, []byte(""), 0o644)
+	if res := extractResponseFromMuseTranscriptFile(context.Background(), pEmpty, time.Time{}); res != "" {
+		t.Fatalf("expected empty for empty file, got %q", res)
+	}
+
 	pValid := filepath.Join(tmp, "valid.jsonl")
 	content := strings.Join([]string{
-		`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"event":{"kind":"started","prompt":"Task"}}}`,
-		`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"event":{"kind":"assistant_message_committed","text":"Here is the result."}}}`,
+		`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Task"}}}`,
+		`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Here is the result."}}}`,
 	}, "\n") + "\n"
 	_ = os.WriteFile(pValid, []byte(content), 0o644)
 
