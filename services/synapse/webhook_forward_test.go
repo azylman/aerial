@@ -113,6 +113,25 @@ func TestForwardRawWebhook_TransportErrors(t *testing.T) {
 			},
 			wantNoHeaders: []string{"Host", "Connection", "Content-Length"},
 		},
+		{
+			name:    "drops inbound trace context and keeps signature headers verbatim",
+			baseURL: "http://127.0.0.1:4020",
+			headers: http.Header{
+				"Traceparent":         {"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
+				"Tracestate":          {"vendor=inbound"},
+				"Baggage":             {"tenant=inbound"},
+				"X-Hub-Signature-256": {"sha256=abc123"},
+				"X-Github-Event":      {"push"},
+				"X-Github-Delivery":   {"delivery-1"},
+			},
+			wantSent: true,
+			wantHeaders: map[string]string{
+				"X-Hub-Signature-256": "sha256=abc123",
+				"X-GitHub-Event":      "push",
+				"X-GitHub-Delivery":   "delivery-1",
+			},
+			wantNoHeaders: []string{"Traceparent", "Tracestate", "Baggage"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -180,6 +199,10 @@ func TestForwardRawWebhookToBot_Routing(t *testing.T) {
 func TestForwardRawWebhookToPeers(t *testing.T) {
 	t.Parallel()
 
+	// inboundTraceparent is the caller's context on the received webhook; peers must see
+	// synapse's own trace instead.
+	const inboundTraceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
 	tests := []struct {
 		name        string
 		nilServer   bool
@@ -188,40 +211,36 @@ func TestForwardRawWebhookToPeers(t *testing.T) {
 	}{
 		{name: "nil server", nilServer: true, wantCalls: 0},
 		{name: "empty forward URLs", forwardURLs: nil, wantCalls: 0},
-		{name: "forwards to peers skipping self", forwardURLs: map[string]string{"aerial": "self", "peer": "target"}, wantCalls: 1},
+		{name: "forwards to peers skipping self with synapse trace", forwardURLs: map[string]string{"aerial": "self", "peer": "target"}, wantCalls: 1},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var calls atomic.Int32
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls.Add(1)
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer ts.Close()
+			peer := newTraceparentServer(t, 0, "")
 
 			urls := tc.forwardURLs
 			if tc.wantCalls > 0 {
-				urls = map[string]string{"aerial": "self", "peer": ts.URL}
+				urls = map[string]string{"aerial": "self", "peer": peer.URL}
 			}
 
 			var srv *RouterServer
 			if !tc.nilServer {
-				srv = &RouterServer{
-					httpClient: ts.Client(),
-					cfgSrc: fixedConfig(Config{
-						BotID:              "aerial",
-						WebhookForwardURLs: urls,
-					}),
-				}
+				srv = NewRouterServer(fixedConfig(Config{
+					BotID:              "aerial",
+					WebhookForwardURLs: urls,
+				}), peer.Client())
 			}
 
-			srv.forwardRawWebhookToPeers(context.Background(), "/hook", nil, []byte(`{}`))
-
-			if int(calls.Load()) != tc.wantCalls {
-				t.Fatalf("calls = %d, want %d", calls.Load(), tc.wantCalls)
+			ctx, parentTraceID := recordedParent(t)
+			headers := http.Header{
+				"Traceparent": {inboundTraceparent},
+				"Tracestate":  {"vendor=inbound"},
+				"Baggage":     {"tenant=inbound"},
 			}
+			srv.forwardRawWebhookToPeers(ctx, "/hook", headers, []byte(`{}`))
+
+			assertTraceIDs(t, peer.traceIDs(), tc.wantCalls, parentTraceID, true)
 		})
 	}
 }
