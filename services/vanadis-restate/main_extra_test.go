@@ -812,52 +812,50 @@ func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
 func TestBuildObject_DeferredLaunchReleasesInvocation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name         string
-		dispatchErr  error
-		wantDeferred bool
+		name, mode, id, key, first string
+		nudges                     int
+		deferred                   bool
 	}{
-		{"active generation", errDispatchActive, true},
-		{"transport failure", errors.New("unavailable"), false},
+		{"retry active", "action", "vanadis-retry-turn-1", "dispatch:vanadis-retry-turn-1", "active", 1, true},
+		{"initial active", "action", "vanadis-retry-turn-0", "retry", "active", 0, true},
+		{"pr active", "pr", "vanadis-retry-turn-0", "retry", "active", 0, true},
+		{"lost acceptance", "action", "vanadis-retry-turn-0", "retry", "lost", 0, false},
+		{"server failure", "action", "vanadis-retry-turn-1", "dispatch:vanadis-retry-turn-1", "failure", 1, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			var ready atomic.Bool
+			srv, ids := launchRecoveryServer(t, tc.id, tc.first, &ready)
+			defer srv.Close()
 			build := VanadisBuild{ID: "b", Status: "running"}
-			store, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: []VanadisChunk{{ID: "retry", Mode: "action", Status: "running", StallNudges: 1}, {ID: "sibling", Mode: "action", Status: "pending"}}, execTag: "UPDATE 1"}.open()
-			eri := &mockEriClient{dispatchFn: func(_ context.Context, req BrainDispatchRequest) error {
-				if req.ID == "vanadis-retry-turn-1" {
-					return tc.dispatchErr
-				}
-				return nil
-			}}
-			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor(t.TempDir(), eri, nil, "", nil))
+			chunks := []VanadisChunk{{ID: "retry", Mode: tc.mode, Status: "running", StallNudges: tc.nudges}, {ID: "dependent", Mode: "action", Status: "pending", DependsOn: []string{"retry"}}}
+			store, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: chunks, execTag: "UPDATE 1"}.open()
+			bo := NewBuildObject("", nil).WithAuthority(store, NewExecutor(t.TempDir(), NewHTTPEriClient(srv.URL, srv.Client()), nil, "", nil))
 			rt := newFakeObjectRuntime("b")
 			_, err := bo.executeObjectTransition(rt, "reconcile-build", nil)
-			assert.Equal(t, !tc.wantDeferred, err != nil)
-			assert.Equal(t, tc.wantDeferred, rt.reconcileScheduled)
-			if tc.wantDeferred {
-				assert.True(t, rt.launched["sibling"])
-				assert.False(t, rt.launched["dispatch:vanadis-retry-turn-1"])
-				// Observe a sibling completion on the next invocation: its slot is
-				// available to another independent chunk while retry remains active.
-				nextStore, _ := dbScript{buildRow: &mockRow{b: &build}, chunks: []VanadisChunk{
-					{ID: "retry", Mode: "action", Status: "running", StallNudges: 1},
-					{ID: "sibling", Mode: "action", Status: "completed"},
-					{ID: "next", Mode: "action", Status: "pending"},
-				}, execTag: "UPDATE 1"}.open()
-				bo.store = nextStore
-				_, err = bo.executeObjectTransition(rt, "reconcile-build", nil)
-				assert.NoError(t, err)
-				assert.True(t, rt.launched["next"])
-				// Cancel uses a separate exclusive invocation after deferral.
-				mc := mocks.NewMockContext(t)
-				mc.EXPECT().Key().Return("b")
-				mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext)
-				bo.runtimeFactory = func(restate.ObjectContext) objectRuntime { return rt }
-				cancelled, err := bo.Cancel(restate.WithMockContext(mc), CancelBuildRequest{})
-				assert.NoError(t, err)
-				assert.Equal(t, "cancelled", cancelled.Status)
+			assert.Equal(t, !tc.deferred, err != nil)
+			assert.Equal(t, tc.deferred, rt.reconcileScheduled)
+			assert.False(t, rt.launched[tc.key])
+			ready.Store(true)
+			_, err = bo.executeObjectTransition(rt, "reconcile-build", nil)
+			assert.NoError(t, err)
+			assert.True(t, rt.launched[tc.key])
+			_, err = bo.executeObjectTransition(rt, "reconcile-build", nil)
+			assert.NoError(t, err)
+			assert.False(t, rt.launched["dependent"])
+			var got []string
+			for len(ids) > 0 {
+				got = append(got, <-ids)
 			}
+			assert.Equal(t, []string{tc.id, tc.id}, got)
+			mc := mocks.NewMockContext(t)
+			mc.EXPECT().Key().Return("b")
+			mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext)
+			bo.runtimeFactory = func(restate.ObjectContext) objectRuntime { return rt }
+			cancelled, err := bo.Cancel(restate.WithMockContext(mc), CancelBuildRequest{})
+			assert.NoError(t, err)
+			assert.Equal(t, "cancelled", cancelled.Status)
 		})
 	}
 }
