@@ -138,7 +138,7 @@ func (s *RouterServer) forwardRawWebhook(ctx context.Context, targetBaseURL, req
 		return
 	}
 	for k, vv := range headers {
-		if strings.EqualFold(k, "Host") || strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Connection") {
+		if skipForwardedHeader(k) {
 			continue
 		}
 		for _, v := range vv {
@@ -154,6 +154,17 @@ func (s *RouterServer) forwardRawWebhook(ctx context.Context, targetBaseURL, req
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 		log.Printf("[synapse] [forward] warning draining response: %v", err)
 	}
+}
+
+// skipForwardedHeader reports whether a copied inbound header must not be forwarded to a
+// peer: hop-by-hop transport headers, and the inbound W3C trace context (traceparent,
+// tracestate, baggage) so the traced transport injects synapse's own span instead.
+func skipForwardedHeader(name string) bool {
+	switch strings.ToLower(name) {
+	case "host", "content-length", "connection", "traceparent", "tracestate", "baggage":
+		return true
+	}
+	return false
 }
 
 func (s *RouterServer) forwardRawWebhookToPeers(ctx context.Context, reqPath string, headers http.Header, body []byte) {
