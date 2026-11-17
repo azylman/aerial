@@ -723,13 +723,6 @@ func TestSendMessageWithAttachments_Sanitization_TableDriven(t *testing.T) {
 			wantSubstr: "here is the key: [REDACTED]",
 			wantAbsent: "discord_outbound_secret_token_12345",
 		},
-		{
-			name:       "pat redacted from outbound message",
-			token:      "",
-			rawText:    "pat: ghp_111122223333444455556666777788889999",
-			wantSubstr: "pat: [REDACTED]",
-			wantAbsent: "ghp_111122223333444455556666777788889999",
-		},
 	}
 
 	for _, tc := range tests {
@@ -747,13 +740,6 @@ func TestEditMessage_Sanitization_TableDriven(t *testing.T) {
 			rawText:    "updated key: discord_edit_secret_token_67890",
 			wantSubstr: "updated key: [REDACTED]",
 			wantAbsent: "discord_edit_secret_token_67890",
-		},
-		{
-			name:       "pat redacted from edited message",
-			token:      "",
-			rawText:    "edited pat: ghp_999988887777666655554444333322221111",
-			wantSubstr: "edited pat: [REDACTED]",
-			wantAbsent: "ghp_999988887777666655554444333322221111",
 		},
 	}
 

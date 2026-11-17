@@ -102,6 +102,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("app: config cannot be nil")
 	}
+	RegisterConfigTokens(cfg)
 	port := strings.TrimSpace(cfg.Port)
 	if port == "" {
 		return fmt.Errorf("app: port cannot be empty")
