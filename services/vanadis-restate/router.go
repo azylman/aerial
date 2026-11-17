@@ -277,6 +277,7 @@ func (s *BuildRouterService) RouteFailChunk(ctx restate.Context, req FailChunkRe
 	}
 
 	if req.BuildID != "" && req.BuildID != buildID {
+		recordReconcileError(labelRouteFailChunk, ErrChunkNotFound)
 		return FailChunkResponse{}, toTerminalErr(ErrChunkNotFound)
 	}
 	inv := s.getInvoker(ctx)
