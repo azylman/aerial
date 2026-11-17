@@ -418,11 +418,14 @@ type kubeManagedField struct {
 
 // kubeObjectMeta is the object metadata the rollout gate reads from workloads and ConfigMaps.
 type kubeObjectMeta struct {
-	Name          string             `json:"name"`
-	Namespace     string             `json:"namespace"`
-	Generation    int64              `json:"generation"`
-	Annotations   map[string]string  `json:"annotations"`
-	ManagedFields []kubeManagedField `json:"managedFields"`
+	UID             string               `json:"uid"`
+	Labels          map[string]string    `json:"labels"`
+	OwnerReferences []kubeOwnerReference `json:"ownerReferences"`
+	Name            string               `json:"name"`
+	Namespace       string               `json:"namespace"`
+	Generation      int64                `json:"generation"`
+	Annotations     map[string]string    `json:"annotations"`
+	ManagedFields   []kubeManagedField   `json:"managedFields"`
 }
 
 // changedAt is the latest time any manager wrote the object itself (not a subresource), so controller
@@ -441,7 +444,12 @@ func (m kubeObjectMeta) changedAt() time.Time {
 // Replicas is spec.replicas (1 when unset) and StatusReplicas is status.replicas, which still counts old pods.
 // ChangedAt is the last non-status write (see kubeObjectMeta.changedAt) and ConfigMapRefs the ConfigMaps
 // its pod template consumes.
+const kindRestateDeployment = "RestateDeployment"
+
 type workloadRollout struct {
+	UID                                                             string
+	Selector                                                        *kubeLabelSelector
+	StoppedChildren                                                 *stoppedChildObservation
 	Kind, Namespace, Name                                           string
 	Images                                                          []string
 	ChangedAt                                                       time.Time
@@ -465,7 +473,8 @@ type kubeRolloutList struct {
 	Items []struct {
 		Metadata kubeObjectMeta `json:"metadata"`
 		Spec     struct {
-			Replicas *int32 `json:"replicas"`
+			Replicas *int32             `json:"replicas"`
+			Selector *kubeLabelSelector `json:"selector"`
 			Template struct {
 				Spec kubePodSpec `json:"spec"`
 			} `json:"template"`
@@ -546,6 +555,8 @@ func decodeWorkloadRollouts(kind string, body []byte) ([]workloadRollout, error)
 		}
 		workloads = append(workloads, workloadRollout{
 			Kind:                   kind,
+			UID:                    item.Metadata.UID,
+			Selector:               item.Spec.Selector,
 			Namespace:              item.Metadata.Namespace,
 			Name:                   item.Metadata.Name,
 			Images:                 images,
@@ -672,9 +683,9 @@ func workloadRolloutComplete(w workloadRollout) (done, failed bool, reason strin
 	case "DaemonSet":
 		done = w.UpdatedNumberScheduled == w.DesiredNumberScheduled && w.NumberAvailable == w.DesiredNumberScheduled
 		reason = fmt.Sprintf("%d/%d updated, %d/%d available", w.UpdatedNumberScheduled, w.DesiredNumberScheduled, w.NumberAvailable, w.DesiredNumberScheduled)
-	case "RestateDeployment":
+	case kindRestateDeployment:
 		if w.Replicas == 0 {
-			return stoppedWorkloadRolloutComplete(w)
+			return stoppedRestateDeploymentComplete(w)
 		}
 		done = w.ReadyConditionTrue && w.ReadyReplicas == w.Replicas && w.AvailableReplicas == w.Replicas && w.DeploymentID != ""
 		reason = fmt.Sprintf("%d/%d ready, %d/%d available, deploymentId=%s, ready=%t", w.ReadyReplicas, w.Replicas, w.AvailableReplicas, w.Replicas, w.DeploymentID, w.ReadyConditionTrue)

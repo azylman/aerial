@@ -914,14 +914,13 @@ func TestWorkloadRolloutComplete(t *testing.T) {
 		{name: "zero cluster child residual AvailableReplicas", workload: workloadRollout{Kind: "RestateCluster", ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, AvailableReplicas: 1}}}, wantReason: "managed StatefulSet default/restate: waiting for all replicas to stop"},
 		{name: "zero cluster child residual UpdatedReplicas", workload: workloadRollout{Kind: "RestateCluster", ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 2, UpdatedReplicas: 1}}}, wantReason: "managed StatefulSet default/restate: waiting for all replicas to stop"},
 		{name: "zero cluster stale child", workload: workloadRollout{Kind: "RestateCluster", ManagedWorkloads: []workloadRollout{{Kind: "StatefulSet", Namespace: "default", Name: "restate", Generation: 2, ObservedGeneration: 1}}}, wantReason: "managed StatefulSet default/restate: generation 2 not yet observed"},
-		{name: "RestateDeployment stopped with inactive status", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2}, wantDone: true},
+		{name: "RestateDeployment stopped without child evidence", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2}, wantReason: "waiting for stopped child evidence"},
 		{name: "RestateDeployment stopped stale generation", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 1}, wantReason: "generation 2 not yet observed"},
-		{name: "RestateDeployment stopped residual StatusReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, StatusReplicas: 1}, wantReason: "waiting for all replicas to stop"},
-		{name: "RestateDeployment stopped residual ReadyReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, ReadyReplicas: 1}, wantReason: "waiting for all replicas to stop"},
-		{name: "RestateDeployment stopped residual AvailableReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, AvailableReplicas: 1}, wantReason: "waiting for all replicas to stop"},
-		// The portable stopped-rollout contract checks every decoded counter, even
-		// when an operator version currently omits updatedReplicas.
-		{name: "RestateDeployment stopped residual UpdatedReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, UpdatedReplicas: 1}, wantReason: "waiting for all replicas to stop"},
+		{name: "RestateDeployment stopped residual StatusReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, StatusReplicas: 1}, wantReason: "waiting for stopped child evidence"},
+		{name: "RestateDeployment stopped residual ReadyReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, ReadyReplicas: 1}, wantReason: "waiting for stopped child evidence"},
+		{name: "RestateDeployment stopped residual AvailableReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, AvailableReplicas: 1}, wantReason: "waiting for stopped child evidence"},
+		// Parent counters alone cannot establish that a RestateDeployment stopped.
+		{name: "RestateDeployment stopped residual UpdatedReplicas", workload: workloadRollout{Kind: "RestateDeployment", Generation: 2, ObservedGeneration: 2, UpdatedReplicas: 1}, wantReason: "waiting for stopped child evidence"},
 		{name: "StatefulSet stopped with inactive status", workload: workloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}, wantDone: true},
 		{name: "StatefulSet stopped stale generation", workload: workloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 1}, wantReason: "generation 2 not yet observed"},
 		{name: "StatefulSet stopped residual StatusReplicas", workload: workloadRollout{Kind: "StatefulSet", Generation: 2, ObservedGeneration: 2, StatusReplicas: 1}, wantReason: "waiting for all replicas to stop"},
@@ -1047,7 +1046,7 @@ func TestPRRolloutStatus(t *testing.T) {
 		wantFailed bool
 		wantReason string
 	}{
-		{name: "changed stopped deployment completes without registration", workloads: []workloadRollout{withChange(restateDeployRollout("worker", otherImage, 2, 2, 0, 0, 0, "", false), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "changed stopped deployment waits for child evidence", workloads: []workloadRollout{withChange(restateDeployRollout("worker", otherImage, 2, 2, 0, 0, 0, "", false), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantReason: "RestateDeployment default/worker (waiting for stopped child evidence)"},
 		{name: "changed stopped statefulset ignores revisions", workloads: []workloadRollout{withChange(stsRollout("restate", otherImage, 2, 2, 0, 0, "new", "old"), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantDone: true},
 		{name: "changed zero cluster links stopped child", workloads: []workloadRollout{withChange(workloadRollout{Kind: "RestateCluster", Name: "restate", Images: []string{otherImage}}, rolloutClock(10, 1, 0), nil), {Kind: "StatefulSet", Namespace: "restate", Name: "restate", Images: []string{otherImage}, Generation: 2, ObservedGeneration: 2, UpdateRevision: "new", CurrentRevision: "old"}}, commitSHA: rolloutSHA, wantDone: true},
 

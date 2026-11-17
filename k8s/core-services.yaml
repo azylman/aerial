@@ -1133,6 +1133,7 @@ rules:
       - ""
     resources:
       - configmaps
+      - pods
     verbs:
       - list
   - apiGroups:
@@ -1144,6 +1145,12 @@ rules:
     verbs:
       - list
       - watch
+  - apiGroups:
+      - apps
+    resources:
+      - replicasets
+    verbs:
+      - list
   - apiGroups:
       - batch
     resources:
