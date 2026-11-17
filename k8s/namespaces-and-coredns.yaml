@@ -11,11 +11,6 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: restate-marida
----
-apiVersion: v1
-kind: Namespace
-metadata:
   name: restate-miorine
 ---
 apiVersion: v1
@@ -24,10 +19,6 @@ data:
     rewrite stop {
         name regex restate\.aerial\.?$ restate.restate.svc.cluster.local.
         answer name (.*)\.restate\.svc\.cluster\.local\.?$ restate.aerial.
-    }
-    rewrite stop {
-        name regex restate-marida\.aerial\.?$ restate.restate-marida.svc.cluster.local.
-        answer name (.*)\.restate-marida\.svc\.cluster\.local\.?$ restate-marida.aerial.
     }
     rewrite stop {
         name regex (.*)\.aerial\.?$ {1}.default.svc.cluster.local.
