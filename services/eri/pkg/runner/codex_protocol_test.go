@@ -912,3 +912,27 @@ func TestCodexProtocol_HandshakeAndResume(t *testing.T) {
 		t.Errorf("expected stderr tail in read error: %v", readErr)
 	}
 }
+
+func TestCodexProtocol_ToolItemTypes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		itemType string
+		want     bool
+	}{
+		{codexToolCollabAgent, true},
+		{codexToolCommandExecution, true},
+		{codexToolFileChange, true},
+		{codexToolWebSearch, true},
+		{codexToolMCP, true},
+		{"unrelated", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.itemType, func(t *testing.T) {
+			t.Parallel()
+			if got := isCodexToolItemType(tc.itemType); got != tc.want {
+				t.Errorf("isCodexToolItemType(%q) = %v, want %v", tc.itemType, got, tc.want)
+			}
+		})
+	}
+}

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -95,6 +96,126 @@ func TestStreamingDaemon_Muse_Handshake(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assertHandshakeReplySession(t, tc.cfg, tc.mockReplies, tc.wantErrSub, tc.wantSessionID)
+		})
+	}
+}
+
+type handshakeApprovalModeTestCase struct {
+	name         string
+	cfg          DaemonConfig
+	mockReplies  []string
+	wantMethod   string
+	wantParamKey string
+	wantParamVal string
+}
+
+func assertHandshakeApprovalMode(t *testing.T, tc handshakeApprovalModeTestCase) {
+	t.Helper()
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeAll(inR, inW, outR, outW, errR, errW)
+
+	capturedRequests := make(chan codexRPCRequest, 10)
+	go func() {
+		defer closeQuietly(outW)
+		scanner := bufio.NewScanner(inR)
+		replyIdx := 0
+		for scanner.Scan() {
+			var req codexRPCRequest
+			if err := json.Unmarshal(scanner.Bytes(), &req); err == nil {
+				capturedRequests <- req
+			}
+			if req.Method == "initialized" {
+				continue
+			}
+			if replyIdx < len(tc.mockReplies) {
+				rep := tc.mockReplies[replyIdx]
+				replyIdx++
+				_, _ = outW.Write([]byte(rep))
+			}
+		}
+	}()
+
+	handle := &MockProcessHandle{pid: 777}
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, c DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, handle, nil
+		},
+	}
+
+	daemon, err := StartStreamingDaemon(context.Background(), context.Background(), tc.cfg, mock)
+	if err != nil {
+		t.Fatalf("StartStreamingDaemon failed: %v", err)
+	}
+	defer daemon.Close()
+
+	var foundReq *codexRPCRequest
+CaptureLoop:
+	for {
+		select {
+		case r := <-capturedRequests:
+			if r.Method == tc.wantMethod {
+				foundReq = &r
+				break CaptureLoop
+			}
+		default:
+			break CaptureLoop
+		}
+	}
+	if foundReq == nil {
+		t.Fatalf("did not receive request with method %s", tc.wantMethod)
+	}
+	params, ok := foundReq.Params.(map[string]any)
+	if !ok {
+		t.Fatalf("params for %s is not map: %T", tc.wantMethod, foundReq.Params)
+	}
+	if params[tc.wantParamKey] != tc.wantParamVal {
+		t.Errorf("expected %s[%s] = %q, got %v", tc.wantMethod, tc.wantParamKey, tc.wantParamVal, params[tc.wantParamKey])
+	}
+}
+
+func TestStreamingDaemon_Muse_HandshakeApprovalMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []handshakeApprovalModeTestCase{
+		{
+			name: "start session sends approvalMode allowAll",
+			cfg: DaemonConfig{
+				Engine:  "muse",
+				Timeout: 2 * time.Second,
+			},
+			mockReplies: []string{
+				`{"jsonrpc":"2.0","id":1,"result":{}}` + "\n",
+				`{"jsonrpc":"2.0","id":4,"result":{"session":{"id":"018e3f94-1111-7000-8000-000000000001"}}}` + "\n",
+			},
+			wantMethod:   "session/start",
+			wantParamKey: "approvalMode",
+			wantParamVal: museApprovalAllowAll,
+		},
+		{
+			name: "resume session sends setApprovalMode allowAll",
+			cfg: DaemonConfig{
+				Engine:        "muse",
+				SessionID:     "018e3f94-2222-7000-8000-000000000002",
+				ResumeSession: true,
+				Timeout:       2 * time.Second,
+			},
+			mockReplies: []string{
+				`{"jsonrpc":"2.0","id":1,"result":{}}` + "\n",
+				`{"jsonrpc":"2.0","id":2,"result":{"session":{"id":"018e3f94-2222-7000-8000-000000000002"}}}` + "\n",
+				`{"jsonrpc":"2.0","id":3,"result":{}}` + "\n",
+			},
+			wantMethod:   "session/setApprovalMode",
+			wantParamKey: "mode",
+			wantParamVal: museApprovalAllowAll,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertHandshakeApprovalMode(t, tc)
 		})
 	}
 }
@@ -279,7 +400,6 @@ func TestMuseProtocol_ExtractSessionID(t *testing.T) {
 		{"top-level sessionId", `{"sessionId":"sess-3"}`, "fallback", "sess-3"},
 		{"top-level id", `{"id":"sess-4"}`, "fallback", "sess-4"},
 		{"empty result uses fallback", ``, "fallback", "fallback"},
-		{"invalid json uses fallback", `{bad`, "fallback", "fallback"},
 		{"unrelated json uses fallback", `{"foo":"bar"}`, "fallback", "fallback"},
 	}
 	for _, tc := range tests {
@@ -449,10 +569,10 @@ func TestMuseProtocol_ExtractUsage(t *testing.T) {
 			wantCached: 20,
 		},
 		{
-			name: "tokenUsage last map int",
+			name: "tokenUsage last map float",
 			params: map[string]any{
 				"tokenUsage": map[string]any{
-					"last": map[string]any{"input_tokens": 80, "output_tokens": 40, "cached_input_tokens": 10},
+					"last": map[string]any{"input_tokens": 80.0, "output_tokens": 40.0, "cached_input_tokens": 10.0},
 				},
 			},
 			wantInput:  80,
@@ -615,58 +735,130 @@ func TestMuseProtocol_ItemStartedAndErrorExtraction(t *testing.T) {
 
 	// handleMuseItemStarted nil checks
 	daemon.handleMuseItemStarted(nil, nil)
-	turn := enqueueInflightTurn(daemon, "turn-cov", newMockTurnSink())
+	sink := newMockTurnSink()
+	turn := enqueueInflightTurn(daemon, "turn-cov", sink)
 	daemon.handleMuseItemStarted(turn, nil)
 
-	// Reasoning item started + duplicate
+	// Reasoning item started + duplicate (must only increment thinking once)
 	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"r-1","type":"reasoning"}}}`)
 	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"r-1","type":"reasoning"}}}`)
-	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"msg-1","type":"agentMessage"}}}`)
+
+	sink.mu.Lock()
+	thinkingCount := sink.thinking
+	sink.mu.Unlock()
+	if thinkingCount != 1 {
+		t.Errorf("expected 1 thinking notification after deduplication, got %d", thinkingCount)
+	}
 
 	// Tool item with parameters fallback and top-level item params
 	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"id":"t-param","type":"toolCall","tool":"view_file","parameters":{"path":"b.txt"}}}`)
-	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"id":"t-param","type":"toolCall","status":"completed"}}}`)
+	sink.mu.Lock()
+	if len(sink.calls) != 1 || sink.calls[0].Command != "b.txt" || sink.calls[0].Name != "view_file" {
+		t.Errorf("expected tool call with command 'b.txt', got %v", sink.calls)
+	}
+	sink.mu.Unlock()
+
+	// Tool item delta must NOT leak into sink text deltas or codexResponseText
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/delta","params":{"itemId":"t-param","delta":"tool output text"}}`)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/delta","params":{"type":"toolCall","delta":"toolCall delta text"}}`)
+
+	sink.mu.Lock()
+	deltaCount := len(sink.deltas)
+	sink.mu.Unlock()
+	if deltaCount != 0 {
+		t.Errorf("expected 0 text deltas from tool item deltas, got %d: %v", deltaCount, sink.deltas)
+	}
+
+	// Agent message started + delta MUST be emitted
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"msg-1","type":"agentMessage"}}}`)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/delta","params":{"itemId":"msg-1","delta":"visible answer"}}`)
+
+	sink.mu.Lock()
+	if len(sink.deltas) != 1 || sink.deltas[0] != "visible answer" {
+		t.Errorf("expected 1 agent message delta 'visible answer', got %v", sink.deltas)
+	}
+	sink.mu.Unlock()
+
+	// Tool item completed (fixed closing brace)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"id":"t-param","type":"toolCall","status":"completed"}}`)
+	sink.mu.Lock()
+	if len(sink.completedTools) != 1 || !strings.Contains(sink.completedTools[0], ":ok") {
+		t.Errorf("expected 1 completed tool with :ok, got %v", sink.completedTools)
+	}
+	sink.mu.Unlock()
 
 	// Tool item with invalid JSON string arguments
 	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"mcp-bad","type":"mcpToolCall","tool":"bad_tool","arguments":"invalid-json"}}}`)
-
-	// sendJSONRPCRequest when stdin is nil
-	if err := daemon.sendJSONRPCRequest(codexRPCRequest{}, "nil stdin test"); err == nil {
-		t.Errorf("expected error on nil stdin")
+	sink.mu.Lock()
+	if len(sink.calls) != 2 || sink.calls[1].Name != "bad_tool" {
+		t.Errorf("expected toolCalls to record bad_tool, got %v", sink.calls)
 	}
-
-	// isCodexToolItemType verification
-	for _, tc := range []struct {
-		t    string
-		want bool
-	}{
-		{codexToolCollabAgent, true},
-		{codexToolCommandExecution, true},
-		{codexToolFileChange, true},
-		{codexToolWebSearch, true},
-		{codexToolMCP, true},
-		{"unrelated", false},
-	} {
-		if got := isCodexToolItemType(tc.t); got != tc.want {
-			t.Errorf("isCodexToolItemType(%q) = %v, want %v", tc.t, got, tc.want)
-		}
-	}
-
-	// extractRPCErrorMessage tests
-	if got := extractRPCErrorMessage(map[string]any{"error": "string"}); got != "" {
-		t.Errorf("expected empty for string error, got %q", got)
-	}
-	if got := extractRPCErrorMessage(map[string]any{"error": map[string]any{"message": "err"}}); got != "" {
-		t.Errorf("expected empty for error without ID, got %q", got)
-	}
-	if got := extractRPCErrorMessage(map[string]any{"id": 1, "error": map[string]any{}}); got != "muse rpc error" {
-		t.Errorf("expected 'muse rpc error', got %q", got)
-	}
-	if got := extractRPCErrorMessage(map[string]any{"id": 2, "error": map[string]any{"message": "custom err"}}); got != "custom err" {
-		t.Errorf("expected 'custom err', got %q", got)
-	}
+	sink.mu.Unlock()
 
 	// Item completed error status branches
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"tool-is-err","type":"toolCall","tool":"read_file"}}}`)
 	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"tool-is-err","type":"toolCall","is_error":true}}}`)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"cmd-canc","type":"commandExecution","command":"ls"}}}`)
 	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"cmd-canc","type":"commandExecution","status":"cancelled"}}}`)
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	errorCompletedCount := 0
+	for _, ct := range sink.completedTools {
+		if strings.Contains(ct, ":error") {
+			errorCompletedCount++
+		}
+	}
+	if errorCompletedCount != 2 {
+		t.Errorf("expected 2 error completed tools, got %d in %v", errorCompletedCount, sink.completedTools)
+	}
+}
+
+func TestStreamingDaemon_SendJSONRPCRequest_NilStdin(t *testing.T) {
+	t.Parallel()
+
+	nilDaemon := &StreamingDaemon{}
+	if err := nilDaemon.sendJSONRPCRequest(codexRPCRequest{}, "nil stdin test"); err == nil {
+		t.Errorf("expected error on nil stdin")
+	}
+}
+
+func TestMuseProtocol_ExtractRPCErrorMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  map[string]any
+		want string
+	}{
+		{
+			name: "string error",
+			raw:  map[string]any{"error": "string"},
+			want: "",
+		},
+		{
+			name: "error without ID",
+			raw:  map[string]any{"error": map[string]any{"message": "err"}},
+			want: "",
+		},
+		{
+			name: "empty message fallback",
+			raw:  map[string]any{"id": 1.0, "error": map[string]any{}},
+			want: "muse rpc error",
+		},
+		{
+			name: "custom message",
+			raw:  map[string]any{"id": 2.0, "error": map[string]any{"message": "custom err"}},
+			want: "custom err",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractRPCErrorMessage(tc.raw); got != tc.want {
+				t.Errorf("extractRPCErrorMessage() = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }

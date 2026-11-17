@@ -89,6 +89,7 @@ type TurnContext struct {
 	syntheticReply       *claudeSyntheticReply
 	seenReasoningItemIDs map[string]bool
 	codexResponseText    string
+	itemTypes            map[string]string
 }
 
 // ClaudeSyntheticModel is the message.model of assistant messages the Claude CLI writes itself.

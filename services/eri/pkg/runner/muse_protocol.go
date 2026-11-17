@@ -13,6 +13,8 @@ import (
 
 type museRPCRequest = codexRPCRequest
 
+const museApprovalAllowAll = "allowAll"
+
 func isUUIDv7(s string) bool {
 	u, err := uuid.Parse(strings.TrimSpace(s))
 	return err == nil && u.Version() == 7
@@ -79,7 +81,7 @@ func (d *StreamingDaemon) tryResumeMuseSession(ctx context.Context, reader *bufi
 	approvalParams := map[string]any{
 		fieldCommandID: uuidV7(),
 		fieldSessionID: sessID,
-		"mode":         codexApprovalNever,
+		"mode":         museApprovalAllowAll,
 	}
 	approvalReq := codexRPCRequest{
 		JSONRPC: codexRPCVersion,
@@ -132,7 +134,7 @@ func (d *StreamingDaemon) waitForMuseHandshake(ctx context.Context, reader *bufi
 	if !resumeSucceeded {
 		startParams := map[string]any{
 			fieldCommandID:  commandID,
-			"approvalMode":  codexApprovalNever,
+			"approvalMode":  museApprovalAllowAll,
 			"workspaceRoot": d.cfg.Cwd,
 		}
 		if baseModel != "" {
@@ -270,9 +272,6 @@ func extractMuseUsage(params map[string]any) (inputTokens, outputTokens, cachedT
 		for _, k := range keys {
 			if v, ok := uMap[k].(float64); ok {
 				return int(v)
-			}
-			if v, ok := uMap[k].(int); ok {
-				return v
 			}
 		}
 		return 0
@@ -469,6 +468,15 @@ func (d *StreamingDaemon) handleMuseItemStarted(activeTurn *TurnContext, params 
 	itemType := extractFirstString(item, fieldType, "kind")
 	itemID := extractFirstString(item, "id", "itemId", "item_id")
 
+	d.inflightMu.Lock()
+	if activeTurn.itemTypes == nil {
+		activeTurn.itemTypes = make(map[string]string)
+	}
+	if itemID != "" && itemType != "" {
+		activeTurn.itemTypes[itemID] = itemType
+	}
+	d.inflightMu.Unlock()
+
 	switch itemType {
 	case itemTypeAgentMessage:
 		d.inflightMu.Lock()
@@ -496,6 +504,7 @@ func (d *StreamingDaemon) handleMuseItemDelta(activeTurn *TurnContext, params ma
 	if params == nil || activeTurn.Sink == nil {
 		return
 	}
+	itemID := extractFirstString(params, "itemId", "item_id", "id")
 	itemType := extractMuseItemType(params, "")
 	if itemType == "" {
 		switch method {
@@ -503,11 +512,16 @@ func (d *StreamingDaemon) handleMuseItemDelta(activeTurn *TurnContext, params ma
 			itemType = itemTypeReasoning
 		case methodAgentMessageDelta:
 			itemType = itemTypeAgentMessage
+		default:
+			if itemID != "" {
+				d.inflightMu.Lock()
+				itemType = activeTurn.itemTypes[itemID]
+				d.inflightMu.Unlock()
+			}
 		}
 	}
 
 	if itemType == itemTypeReasoning || itemType == itemTypeThinking {
-		itemID := extractFirstString(params, "itemId", "item_id", "id")
 		d.inflightMu.Lock()
 		if activeTurn.seenReasoningItemIDs == nil {
 			activeTurn.seenReasoningItemIDs = make(map[string]bool)
@@ -520,6 +534,10 @@ func (d *StreamingDaemon) handleMuseItemDelta(activeTurn *TurnContext, params ma
 		if isNew {
 			activeTurn.Sink.OnThinking()
 		}
+		return
+	}
+
+	if itemType != "" && itemType != itemTypeAgentMessage {
 		return
 	}
 
@@ -625,8 +643,6 @@ func extractRPCErrorMessage(raw map[string]any) string {
 	}
 	var hasID bool
 	if idNum, ok := raw["id"].(float64); ok && int(idNum) != 0 {
-		hasID = true
-	} else if idInt, ok := raw["id"].(int); ok && idInt != 0 {
 		hasID = true
 	}
 	if !hasID {
