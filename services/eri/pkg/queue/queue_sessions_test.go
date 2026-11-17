@@ -554,7 +554,7 @@ type headlessSyncedPayload struct {
 	PRNumber int    `json:"pr_number"`
 }
 
-func seedHeadlessWidget(pool *WorkerPool, seedOutdated bool, widgetDeliveredCh chan struct{}) {
+func seedHeadlessWidget(pool *WorkerPool, seedOutdated bool) {
 	seedStatus := "running"
 	seedChunkID := "chunk-step-live"
 	if seedOutdated {
@@ -569,11 +569,6 @@ func seedHeadlessWidget(pool *WorkerPool, seedOutdated bool, widgetDeliveredCh c
 			{ID: seedChunkID, Index: 0, Title: "Step Streaming", Status: seedStatus},
 		},
 	})
-	// Drain the notification from the seed delivery so that RunnerWithOptionsFunc waits for the active step update.
-	select {
-	case <-widgetDeliveredCh:
-	default:
-	}
 }
 
 func assertDeliveredWidgetsStep(t *testing.T, deliveredWidgets []discord.StatusWidgetRequest) {
@@ -604,7 +599,7 @@ func assertDeliveredWidgetsStep(t *testing.T, deliveredWidgets []discord.StatusW
 	}
 }
 
-func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, store db.Store, deliveredWidgetsMu *sync.Mutex, deliveredWidgets *[]discord.StatusWidgetRequest, widgetDeliveredCh chan struct{}, doneCh chan struct{}, bus pubsub.Bus) *WorkerPool {
+func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, store db.Store, deliveredWidgetsMu *sync.Mutex, deliveredWidgets *[]discord.StatusWidgetRequest, activeStepDeliveredCh chan struct{}, doneCh chan struct{}, bus pubsub.Bus) *WorkerPool {
 	t.Helper()
 	return NewWorkerPool(WorkerPoolConfig{
 		Store:          store,
@@ -622,9 +617,9 @@ func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, sto
 			deliveredWidgetsMu.Lock()
 			*deliveredWidgets = append(*deliveredWidgets, req)
 			deliveredWidgetsMu.Unlock()
-			if len(req.Chunks) > 0 && strings.Contains(req.Chunks[0].ActiveStep, "Executing") {
+			if len(req.Chunks) > 0 && strings.Contains(req.Chunks[0].ActiveStep, "Executing `git`") {
 				select {
-				case widgetDeliveredCh <- struct{}{}:
+				case activeStepDeliveredCh <- struct{}{}:
 				default:
 				}
 			}
@@ -643,8 +638,9 @@ func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, sto
 					},
 				})
 				select {
-				case <-widgetDeliveredCh:
+				case <-activeStepDeliveredCh:
 				case <-time.After(5 * time.Second):
+					t.Errorf("timeout waiting for Executing `git` active-step widget delivery")
 				}
 			}
 			defer close(doneCh)
@@ -677,7 +673,7 @@ func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadless
 	doneCh := make(chan struct{})
 	var deliveredWidgetsMu sync.Mutex
 	var deliveredWidgets []discord.StatusWidgetRequest
-	widgetDeliveredCh := make(chan struct{}, 8)
+	activeStepDeliveredCh := make(chan struct{}, 8)
 	var syncedPayload headlessSyncedPayload
 
 	memBus := pubsub.NewMemoryBus()
@@ -704,10 +700,6 @@ func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadless
 					},
 				})
 			}
-			select {
-			case widgetDeliveredCh <- struct{}{}:
-			default:
-			}
 			return nil
 		})
 		if err != nil {
@@ -715,11 +707,11 @@ func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadless
 		}
 	}
 
-	pool = setupHeadlessWorkerPool(t, tc, store, &deliveredWidgetsMu, &deliveredWidgets, widgetDeliveredCh, doneCh, memBus)
+	pool = setupHeadlessWorkerPool(t, tc, store, &deliveredWidgetsMu, &deliveredWidgets, activeStepDeliveredCh, doneCh, memBus)
 	defer pool.Stop()
 
 	if tc.seedWidget || tc.seedOutdatedWidget {
-		seedHeadlessWidget(pool, tc.seedOutdatedWidget, widgetDeliveredCh)
+		seedHeadlessWidget(pool, tc.seedOutdatedWidget)
 	}
 
 	disp := db.Dispatch{
