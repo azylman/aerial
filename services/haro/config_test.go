@@ -3,7 +3,10 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 func TestResolveConfigPath(t *testing.T) {
@@ -234,6 +237,79 @@ func TestLoadConfig_VanadisURLResolution(t *testing.T) {
 			}
 			if !tc.wantErr && cfg.VanadisURL != tc.wantVanadisURL {
 				t.Errorf("cfg.VanadisURL = %q, want %q", cfg.VanadisURL, tc.wantVanadisURL)
+			}
+		})
+	}
+}
+
+func TestRegisterConfigTokens_TableDriven(t *testing.T) {
+	tempDir := t.TempDir()
+	secretsDir := filepath.Join(tempDir, "shared_secrets")
+	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(secretsDir, "DISCORD_TOKEN"), []byte("shared_bot_token_secret"), 0o600)
+
+	oldPath := sanitizer.DefaultSharedSecretsPath
+	sanitizer.DefaultSharedSecretsPath = secretsDir
+	t.Cleanup(func() { sanitizer.DefaultSharedSecretsPath = oldPath })
+
+	tests := []struct {
+		name         string
+		cfg          *Config
+		envVars      map[string]string
+		input        string
+		shouldRedact []string
+	}{
+		{
+			name: "database and nats passwords registered from config and env",
+			cfg: &Config{
+				DatabaseURL: "postgres://user:db_cfg_pass@host:5432/db",
+				NATSURL:     "nats://natsuser:nats_cfg_pass@nats:4222",
+			},
+			envVars: map[string]string{
+				"POSTGRES_PASSWORD": "env_pg_password_99",
+				"GITHUB_PAT":        "ghp_test_token_from_env_123",
+			},
+			input: "Connecting with db_cfg_pass and nats_cfg_pass and env_pg_password_99 and ghp_test_token_from_env_123 and shared_bot_token_secret",
+			shouldRedact: []string{
+				"db_cfg_pass",
+				"nats_cfg_pass",
+				"env_pg_password_99",
+				"ghp_test_token_from_env_123",
+				"shared_bot_token_secret",
+			},
+		},
+		{
+			name: "nil config registers env and shared secrets safely",
+			cfg:  nil,
+			envVars: map[string]string{
+				"POSTGRES_PASSWORD": "standalone_pg_pass",
+			},
+			input: "Leak standalone_pg_pass and shared_bot_token_secret",
+			shouldRedact: []string{
+				"standalone_pg_pass",
+				"shared_bot_token_secret",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sanitizer.ResetSensitiveTokensForTest()
+			defer sanitizer.ResetSensitiveTokensForTest()
+
+			for k, v := range tc.envVars {
+				t.Setenv(k, v)
+			}
+
+			RegisterConfigTokens(tc.cfg)
+			got := sanitizer.SanitizeString(tc.input)
+
+			for _, redacted := range tc.shouldRedact {
+				if strings.Contains(got, redacted) {
+					t.Errorf("expected %q to be redacted from %q", redacted, got)
+				}
 			}
 		})
 	}

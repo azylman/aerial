@@ -985,6 +985,9 @@ spec:
             - mountPath: /share
               name: share
               readOnly: true
+            - mountPath: /secrets
+              name: shared-secrets
+              readOnly: true
             - mountPath: /config/tracing
               name: tracing-config
               readOnly: true
@@ -1037,6 +1040,9 @@ spec:
       volumes:
         - emptyDir: {}
           name: share
+        - name: shared-secrets
+          secret:
+            secretName: shared-secrets
         - configMap:
             name: tracing-config
             optional: true

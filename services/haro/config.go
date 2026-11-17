@@ -8,6 +8,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
@@ -127,7 +128,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		natsURL = "nats://nats.aerial:4222"
 	}
 
-	return &Config{
+	cfg := &Config{
 		DatabaseURL:       cleanDB,
 		Timezone:          tz,
 		Port:              port,
@@ -135,5 +136,30 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		VanadisURL:        vanadisURL,
 		NATSURL:           natsURL,
 		ExtraEventSources: extraSources,
-	}, nil
+	}
+	RegisterConfigTokens(cfg)
+	return cfg, nil
+}
+
+// RegisterConfigTokens registers sensitive tokens from Haro's configuration,
+// database credentials, environment variables, and shared secrets into the global redaction pool.
+func RegisterConfigTokens(cfg *Config) {
+	var tokens []string
+	if cfg != nil {
+		if dsn := strings.TrimSpace(cfg.DatabaseURL); dsn != "" && dsn != ":memory:" {
+			tokens = append(tokens, dsn)
+		}
+		if natsURL := strings.TrimSpace(cfg.NATSURL); natsURL != "" {
+			tokens = append(tokens, natsURL)
+		}
+	}
+	for _, envKey := range []string{"POSTGRES_PASSWORD", "DATABASE_URL", "GITHUB_PAT", "NATS_URL"} {
+		if val := strings.TrimSpace(os.Getenv(envKey)); val != "" {
+			tokens = append(tokens, val)
+		}
+	}
+	sanitizer.RegisterSharedSecrets(sanitizer.DefaultSharedSecretsPath)
+	if len(tokens) > 0 {
+		sanitizer.RegisterSensitiveTokens(tokens...)
+	}
 }

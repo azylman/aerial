@@ -1,69 +1,126 @@
 package sanitizer
 
 import (
+	"encoding/base64"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
 
 func TestSanitizeString_Tokens_TableDriven(t *testing.T) {
-	t.Parallel()
+	rawPAT := "ghp_" + "1234567890"
+	rawSecret := "super_secret_val_12345"
+	rawSpecialPass := "super_secret_p@ss#word"
+	rawDBURI := "postgresql://aerial_user:uri_embedded_pass_9876@db.internal.net:5432/aerial_db"
+	b64Std := base64.StdEncoding.EncodeToString([]byte(rawSecret))
+	b64Raw := base64.RawStdEncoding.EncodeToString([]byte(rawSecret))
+	b64GitBasic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + rawPAT))
 
 	tests := []struct {
 		name     string
+		tokens   []string
 		input    string
 		expected string
 	}{
-		{name: "empty string", input: "", expected: ""},
-		{name: "clean text without secrets", input: "Hello world, normal text about setup.", expected: "Hello world, normal text about setup."},
 		{
-			name:     "classic github pat",
-			input:    "Error using token " + "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzAB to access repo",
-			expected: "Error using token [REDACTED] to access repo",
+			name:     "empty string",
+			tokens:   []string{rawSecret},
+			input:    "",
+			expected: "",
 		},
 		{
-			name:     "fine-grained github pat",
-			input:    "Pushing with " + "github_pat_" + "11AABCDEF0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 to origin",
-			expected: "Pushing with [REDACTED] to origin",
+			name:     "clean text and technical prose without registered secrets",
+			tokens:   []string{rawSecret},
+			input:    "Where they stop at basic containers, foreign_key: user_id, and Bearer concepts.",
+			expected: "Where they stop at basic containers, foreign_key: user_id, and Bearer concepts.",
 		},
 		{
-			name:     "github oauth tokens",
-			input:    "Tokens " + "gho_" + "1234567890abcdefghijklmnopqrstuvwxyzAB and " + "ghu_" + "1234567890abcdefghijklmnopqrstuvwxyzAB",
-			expected: "Tokens [REDACTED] and [REDACTED]",
+			name:     "exact registered secret redacted",
+			tokens:   []string{rawPAT, rawSecret},
+			input:    "Error using token " + rawPAT + " and " + rawSecret + " to access repo",
+			expected: "Error using token [REDACTED] and [REDACTED] to access repo",
 		},
-		{name: "google api key", input: "API key " + "AIza" + "SyD1234567890abcdefghijklmnopqrstuvw configured", expected: "API key [REDACTED] configured"},
-		{name: "antigravity and gemini tokens", input: "Using " + "antigravity_" + "secret_token_12345 and " + "gemini_" + "api_key_6789012345", expected: "Using [REDACTED] and [REDACTED]"},
-		{name: "openai and anthropic keys", input: "Keys " + "sk-proj-" + "1234567890abcdefghijklmnop and " + "sk-ant-api03-" + "1234567890abcdefghijklmnop", expected: "Keys [REDACTED] and [REDACTED]"},
-		{name: "discord bot token", input: "Bot token " + "MTIzNDU2Nzg5MDEyMzQ1Njc4OQ" + "." + "ABCDEF" + "." + "abcdefghijklmnopqrstuvwxyz12345" + " connected", expected: "Bot token [REDACTED] connected"},
-		{name: "discord mfa token", input: "Auth with " + "mfa." + "1234567890abcdefghijklmnopqrstuvwxyz", expected: "Auth with [REDACTED]"},
-		{name: "discord webhook url", input: "Delivering notification to " + "https://discord.com/api/webhooks/" + "123456789012345678/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_- for alert", expected: "Delivering notification to [REDACTED] for alert"},
-		{name: "jwt token", input: "Token " + "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ" + "." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", expected: "Token [REDACTED]"},
-		{name: "http basic auth header", input: "-c http.extraHeader=AUTHORIZATION: " + "basic " + "eC1hY2Nlc3MtdG9rZW46Z2hwXzEyMzQ1Njc4OTA=", expected: "-c http.extraHeader=AUTHORIZATION: [REDACTED]"},
-		{name: "http basic auth unpadded token", input: "header " + "basic " + "dXNlcjpwYXNzd29yZA logged", expected: "header [REDACTED] logged"},
-		{name: "http bearer auth header", input: "Authorization: " + "Bearer " + "1234567890abcdefghijklmnopqrstuvwxyz", expected: "Authorization: [REDACTED]"},
-		{name: "http bearer auth header lowercase letters only", input: "Authorization: " + "Bearer " + "abcdefghijklmnopqrstuvwxyz", expected: "Authorization: [REDACTED]"},
-		{name: "json authorization header with alphabetic bearer credential", input: `{"Authorization":"Bearer abcdefghijklmnopqrstuvwxyz"}`, expected: `{"Authorization":"[REDACTED]"}`},
-		{name: "json authorization header with spaced bearer credential", input: `{"Authorization": "Bearer abcdefghijklmnopqrstuvwxyz"}`, expected: `{"Authorization": "[REDACTED]"}`},
-		{name: "json authorization header with uppercase bearer credential", input: `{"Authorization":"Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ"}`, expected: `{"Authorization":"[REDACTED]"}`},
-		{name: "json authorization header array with alphabetic bearer credential", input: `{"Authorization":["Bearer abcdefghijklmnopqrstuvwxyz"]}`, expected: `{"Authorization":["[REDACTED]"]}`},
-		{name: "json authorization header array with multiple credentials", input: `{"Authorization":["Bearer abcdefghijklmnopqrstuvwxyz", "Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ"]}`, expected: `{"Authorization":["[REDACTED]", "[REDACTED]"]}`},
-		{name: "json authorization header array with github token and alphabetic bearer credential", input: `{"Authorization":["token ` + "ghp_" + `1234567890abcdefghijklmnopqrstuvwxyzAB", "Bearer abcdefghijklmnopqrstuvwxyz"]}`, expected: `{"Authorization":["token [REDACTED]", "[REDACTED]"]}`},
-		{name: "json non-authorization array preserving prose", input: `{"roles": ["basic configuration"], "tags": ["bearer instruments"]}`, expected: `{"roles": ["basic configuration"], "tags": ["bearer instruments"]}`},
 		{
-			name:     "plain english words after basic or bearer not redacted",
-			input:    "Where they stop at basic containers, basic configuration, Basic Architecture, BASIC CONTAINERS, and bearer instruments.",
-			expected: "Where they stop at basic containers, basic configuration, Basic Architecture, BASIC CONTAINERS, and bearer instruments.",
+			name:     "base64 std and raw encoded secret redacted",
+			tokens:   []string{rawSecret},
+			input:    "Encoded std=" + b64Std + " and raw=" + b64Raw + " in payload",
+			expected: "Encoded std=[REDACTED] and raw=[REDACTED] in payload",
 		},
-		{name: "x-access-token header in URL", input: "Connecting to https://" + "x-access-token:" + "secret1234567890@github.com/org/repo.git", expected: "Connecting to https://[REDACTED]@github.com/org/repo.git"},
-		{name: "postgresql uri with embedded password", input: "Connecting to postgresql://aerial_user:" + "super_secret_p%40ss%23word" + "@db.internal.net:5432/aerial_db?sslmode=disable", expected: "Connecting to postgresql://aerial_user:[REDACTED]@db.internal.net:5432/aerial_db?sslmode=disable"},
-		{name: "redis uri with password", input: "Cache at redis://default:" + "my_redis_password_123" + "@10.0.0.5:6379/0", expected: "Cache at redis://default:[REDACTED]@10.0.0.5:6379/0"},
-		{name: "key-value assignment preserving label", input: "GEMINI_API_KEY=" + "AIza" + "SyD1234567890abcdefghijklmnopqrstuvw and HA_TOKEN: " + "custom_long_token_value_123", expected: "GEMINI_API_KEY=[REDACTED] and HA_TOKEN: [REDACTED]"},
-		{name: "extended secret key-value assignment", input: "SERVICE_SECRET=super_secret_val and DB_PASSWORD: pass_val_123", expected: "SERVICE_SECRET=[REDACTED] and DB_PASSWORD: [REDACTED]"},
+		{
+			name:     "git http basic auth x-access-token base64 redacted",
+			tokens:   []string{rawPAT},
+			input:    "-c http.extraHeader=AUTHORIZATION: basic " + b64GitBasic,
+			expected: "-c http.extraHeader=AUTHORIZATION: basic [REDACTED]",
+		},
+		{
+			name:     "url-escaped secret password redacted",
+			tokens:   []string{rawSpecialPass},
+			input:    "Connecting to postgresql://aerial_user:super_secret_p%40ss%23word@db.internal.net:5432/aerial_db?sslmode=disable",
+			expected: "Connecting to postgresql://aerial_user:[REDACTED]@db.internal.net:5432/aerial_db?sslmode=disable",
+		},
+		{
+			name:     "password extracted from registered database uri",
+			tokens:   []string{rawDBURI, "https://example.com/no-user", "postgresql://user_only@db.internal.net:5432/db", "://invalid-uri"},
+			input:    "Password leaked: uri_embedded_pass_9876 in trace",
+			expected: "Password leaked: [REDACTED] in trace",
+		},
+		{
+			name:     "password with space in database uri redacted using userinfo encoding",
+			tokens:   []string{"secret pass"},
+			input:    "Connecting to postgresql://aerial_user:secret%20pass@db.internal.net:5432/aerial_db?sslmode=disable",
+			expected: "Connecting to postgresql://aerial_user:[REDACTED]@db.internal.net:5432/aerial_db?sslmode=disable",
+		},
+		{
+			name:     "unregistered github token redacted via pattern",
+			tokens:   nil,
+			input:    "Found leak: ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+			expected: "Found leak: [REDACTED]",
+		},
+		{
+			name:     "unregistered x-access-token auth redacted via pattern",
+			tokens:   nil,
+			input:    "push failed: https://x-access-token:my_secret_token@github.com/repo",
+			expected: "push failed: https://[REDACTED]@github.com/repo",
+		},
+		{
+			name:     "unregistered discord webhook url redacted via pattern",
+			tokens:   nil,
+			input:    "Webhook: https://discord.com/api/webhooks/123456789/abcdefghij-klmn alert",
+			expected: "Webhook: [REDACTED] alert",
+		},
+		{
+			name:     "unregistered openai and anthropic key redacted via pattern",
+			tokens:   nil,
+			input:    "API key: sk-proj-abcdefghijklmnopqrstuvwxyz in environment",
+			expected: "API key: [REDACTED] in environment",
+		},
+		{
+			name:     "unregistered google api key redacted via pattern",
+			tokens:   nil,
+			input:    "Google key: AIzaSyD-1234567890abcdefghijklmnopqrstuv used",
+			expected: "Google key: [REDACTED] used",
+		},
+		{
+			name:     "unregistered discord mfa token redacted via pattern",
+			tokens:   nil,
+			input:    "Session token: mfa.abcdefghijklmnopqrstuvwxyz0123456789 active",
+			expected: "Session token: [REDACTED] active",
+		},
+		{
+			name:     "unregistered jwt token redacted via pattern",
+			tokens:   nil,
+			input:    "Auth token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnopqrstuvwxyz0123456789",
+			expected: "Auth token: [REDACTED]",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+			ResetSensitiveTokensForTest()
+			defer ResetSensitiveTokensForTest()
+			RegisterSensitiveTokens(tc.tokens...)
 
 			got := SanitizeString(tc.input)
 			if got != tc.expected {
@@ -74,48 +131,41 @@ func TestSanitizeString_Tokens_TableDriven(t *testing.T) {
 }
 
 func TestSanitizeLog_TableDriven(t *testing.T) {
-	t.Parallel()
+	rawPAT := "ghp_" + "abcdefghijklmnopqrstuvwxyz123456"
+	rawSecret := "my_special_pat_token"
+	b64Secret := base64.StdEncoding.EncodeToString([]byte(rawSecret))
 
 	tests := []struct {
 		name     string
+		tokens   []string
 		input    string
 		expected string
 	}{
 		{
 			name:     "empty log",
+			tokens:   []string{rawPAT},
 			input:    "",
 			expected: "",
 		},
 		{
-			name:     "github pat in log",
-			input:    "fatal: could not read from remote repo " + "ghp_" + "abcdefghijklmnopqrstuvwxyz123456",
+			name:     "registered pat in log",
+			tokens:   []string{rawPAT},
+			input:    "fatal: could not read from remote repo " + rawPAT,
 			expected: "fatal: could not read from remote repo [REDACTED_TOKEN]",
 		},
 		{
-			name:     "secret key-value in log",
-			input:    "failed command with PAT: my_special_pat_token",
-			expected: "failed command with PAT: [REDACTED_TOKEN]",
-		},
-		{
-			name:     "json authorization header in log",
-			input:    `request headers: {"Authorization":"Bearer abcdefghijklmnopqrstuvwxyz"}`,
-			expected: `request headers: {"Authorization":"[REDACTED_TOKEN]"}`,
-		},
-		{
-			name:     "json authorization header array in log",
-			input:    `request headers: {"Authorization":["Bearer abcdefghijklmnopqrstuvwxyz"]}`,
-			expected: `request headers: {"Authorization":["[REDACTED_TOKEN]"]}`,
-		},
-		{
-			name:     "json authorization header array with github token and alphabetic bearer credential in log",
-			input:    `request headers: {"Authorization":["token ` + "ghp_" + `1234567890abcdefghijklmnopqrstuvwxyzAB", "Bearer abcdefghijklmnopqrstuvwxyz"]}`,
-			expected: `request headers: {"Authorization":["token [REDACTED_TOKEN]", "[REDACTED_TOKEN]"]}`,
+			name:     "base64 encoded secret in log",
+			tokens:   []string{rawSecret},
+			input:    "failed command with encoded PAT: " + b64Secret,
+			expected: "failed command with encoded PAT: [REDACTED_TOKEN]",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+			ResetSensitiveTokensForTest()
+			defer ResetSensitiveTokensForTest()
+			RegisterSensitiveTokens(tc.tokens...)
 
 			got := SanitizeLog(tc.input)
 			if got != tc.expected {
@@ -302,6 +352,7 @@ func TestMaskTokenSample_TableDriven(t *testing.T) {
 }
 
 func TestMatchSensitiveTokens_TableDriven(t *testing.T) {
+	b64Sample := base64.StdEncoding.EncodeToString([]byte("secret_token_123"))
 	tests := []struct {
 		name     string
 		tokens   []string
@@ -331,6 +382,12 @@ func TestMatchSensitiveTokens_TableDriven(t *testing.T) {
 			tokens:   []string{"secret_token_123"},
 			input:    "error: secret_token_123 failed",
 			expected: []string{"se***23"},
+		},
+		{
+			name:     "base64 encoded match deduplicated against raw unpadded prefix",
+			tokens:   []string{"secret_token_123"},
+			input:    "error: " + b64Sample + " failed",
+			expected: []string{MaskTokenSample(b64Sample)},
 		},
 		{
 			name:     "multiple matches deduplicated and longest first",
@@ -410,12 +467,6 @@ func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
 			input:        "values: secret_token_longer_value and secret_token_long",
 			shouldRedact: []string{"secret_token_longer_value", "secret_token_long"},
 		},
-		{
-			name:         "authorization array with registered secret followed by alphabetic bearer",
-			tokens:       []string{"my_registered_secret_token_123"},
-			input:        `{"Authorization":["token my_registered_secret_token_123", "Bearer abcdefghijklmnopqrstuvwxyz"]}`,
-			shouldRedact: []string{"my_registered_secret_token_123", "abcdefghijklmnopqrstuvwxyz"},
-		},
 	}
 
 	for _, tc := range tests {
@@ -429,12 +480,6 @@ func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
 			for _, redacted := range tc.shouldRedact {
 				if strings.Contains(got, redacted) {
 					t.Errorf("expected %q to be redacted from %q", redacted, got)
-				}
-			}
-			gotLog := SanitizeLog(tc.input)
-			for _, redacted := range tc.shouldRedact {
-				if strings.Contains(gotLog, redacted) {
-					t.Errorf("expected %q to be redacted from log %q", redacted, gotLog)
 				}
 			}
 		})
@@ -493,15 +538,87 @@ func TestReplaceSensitiveTokens_TableDriven(t *testing.T) {
 					t.Errorf("expected %q to be redacted from %q", redacted, got)
 				}
 			}
-			gotLog := SanitizeLog(tc.input)
-			for _, redacted := range tc.shouldRedact {
-				if strings.Contains(gotLog, redacted) {
-					t.Errorf("expected %q to be redacted from log %q", redacted, gotLog)
-				}
-			}
 			for _, notRedacted := range tc.shouldNotRedact {
 				if !strings.Contains(got, notRedacted) {
 					t.Errorf("expected %q to be preserved in %q", notRedacted, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRegisterSharedSecrets_TableDriven(t *testing.T) {
+	tempDir := t.TempDir()
+	secretsDir := filepath.Join(tempDir, "shared_secrets")
+	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(secretsDir, "SECRET_KEY"), []byte("shared_secret_key_val_7890"), 0o600)
+	_ = os.WriteFile(filepath.Join(secretsDir, "EMPTY_KEY"), []byte("   "), 0o600)
+	_ = os.WriteFile(filepath.Join(secretsDir, ".hidden"), []byte("ignore_me"), 0o600)
+	_ = os.MkdirAll(filepath.Join(secretsDir, "subdir"), 0o755)
+
+	jsonFilePath := filepath.Join(tempDir, "shared_secrets.json")
+	_ = os.WriteFile(jsonFilePath, []byte(`{"JSON_SECRET":"json_secret_key_val_1234"}`), 0o600)
+	invalidJSON := filepath.Join(tempDir, "invalid.json")
+	_ = os.WriteFile(invalidJSON, []byte(`{invalid`), 0o600)
+
+	tests := []struct {
+		name         string
+		path         string
+		input        string
+		shouldRedact string
+		preserved    string
+	}{
+		{
+			name:         "directory mount registers secrets and redacts them",
+			path:         secretsDir,
+			input:        "found shared_secret_key_val_7890 and ignore_me in text",
+			shouldRedact: "shared_secret_key_val_7890",
+			preserved:    "ignore_me",
+		},
+		{
+			name:         "json file registers secrets and redacts them",
+			path:         jsonFilePath,
+			input:        "found json_secret_key_val_1234 in text",
+			shouldRedact: "json_secret_key_val_1234",
+		},
+		{
+			name:      "empty path leaves safe text unchanged",
+			path:      "",
+			input:     "safe text",
+			preserved: "safe text",
+		},
+		{
+			name:      "missing path leaves safe text unchanged",
+			path:      filepath.Join(tempDir, "missing"),
+			input:     "safe text",
+			preserved: "safe text",
+		},
+		{
+			name:      "invalid json leaves safe text unchanged",
+			path:      invalidJSON,
+			input:     "safe text",
+			preserved: "safe text",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSensitiveTokens()
+			defer resetSensitiveTokens()
+
+			RegisterSharedSecrets(tc.path)
+			got := SanitizeString(tc.input)
+
+			if tc.shouldRedact != "" {
+				if !strings.Contains(got, "[REDACTED]") || strings.Contains(got, tc.shouldRedact) {
+					t.Errorf("expected %q to be redacted from %q", tc.shouldRedact, got)
+				}
+			}
+			if tc.preserved != "" {
+				if !strings.Contains(got, tc.preserved) {
+					t.Errorf("expected %q to be preserved in %q", tc.preserved, got)
 				}
 			}
 		})

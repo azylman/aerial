@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 type JSONRPCResponse struct {
@@ -668,6 +669,14 @@ func TestFormatCronDescription(t *testing.T) {
 }
 
 func TestSanitizeScheduleTextAndFormatters(t *testing.T) {
+	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
+	sanitizer.RegisterSensitiveTokens(
+		"ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+		"github_pat_11AAAAAAA_bbbbbbbbbbbbbb",
+		"Bearer mysecrettoken123456789",
+		"supersecretpassword",
+		"my_top_secret_token",
+	)
 	tests := []struct {
 		name     string
 		input    string
@@ -784,6 +793,8 @@ func runFormatScheduleCase(t *testing.T, tc formatScheduleTestCase) {
 }
 
 func TestFormatScheduleHelpers(t *testing.T) {
+	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
+	sanitizer.RegisterSensitiveTokens("ghp_1234567890abcdef", "ghp_secret", "secrettoken123456")
 	tests := []formatScheduleTestCase{
 		{"empty slices", 0, 0, 0, ""},
 		{"populated slices", 1, 1, 1, "chan-123"},
@@ -840,13 +851,33 @@ func runHandleSchedulesCase(t *testing.T, tc handleSchedulesTestCase) {
 }
 
 func TestHandleSchedules_Table(t *testing.T) {
-	server, ts := setupTestServer(t)
+	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
+	t.Setenv("GITHUB_PAT", "ghp_12345678901234567890")
+	t.Setenv("POSTGRES_PASSWORD", "secretpass")
+	secretsDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(secretsDir, "PAT_SECRET"), []byte("github_pat_11AAA_bbb"), 0o600)
+	oldSecretsPath := sanitizer.DefaultSharedSecretsPath
+	sanitizer.DefaultSharedSecretsPath = secretsDir
+	t.Cleanup(func() { sanitizer.DefaultSharedSecretsPath = oldSecretsPath })
+
+	cfg := &Config{
+		DatabaseURL: "postgres://aerial:supersecret@127.0.0.1:5432/aerial",
+		NATSURL:     "nats://user:secrettoken123456@127.0.0.1:4222",
+		Timezone:    DefaultTimezone,
+		Port:        "8080",
+	}
+	db, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	setupTestPostgresTables(t, db)
+	server := NewServer(NewToolHandler(cfg, db))
+	ts := httptest.NewServer(server.Routes())
 	defer ts.Close()
 
 	ctx := context.Background()
-	db := server.handler.db
-
-	err := InsertCronSchedule(ctx, db, CronSchedule{
+	err = InsertCronSchedule(ctx, db, CronSchedule{
 		ID:          "cron-1",
 		TargetID:    "123456789012345678",
 		TitlePrefix: "Cron Token: ghp_12345678901234567890",
@@ -1020,11 +1051,26 @@ func runHandleScheduleRunsCase(t *testing.T, tc handleScheduleRunsTestCase) {
 }
 
 func TestHandleScheduleRuns_Table(t *testing.T) {
-	server, ts := setupTestServer(t)
+	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
+	t.Setenv("GITHUB_PAT", "ghp_12345678901234567890")
+	t.Setenv("POSTGRES_PASSWORD", "supersecret")
+	cfg := &Config{
+		DatabaseURL: "postgres://aerial:supersecret@127.0.0.1:5432/aerial",
+		NATSURL:     "nats://user:mysecrettoken123@127.0.0.1:4222",
+		Timezone:    DefaultTimezone,
+		Port:        "8080",
+	}
+	db, err := OpenDB(t.Context(), &Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	setupTestPostgresTables(t, db)
+	server := NewServer(NewToolHandler(cfg, db))
+	ts := httptest.NewServer(server.Routes())
 	defer ts.Close()
 
 	ctx := context.Background()
-	db := server.handler.db
 
 	for i := 1; i <= 5; i++ {
 		status := "completed"

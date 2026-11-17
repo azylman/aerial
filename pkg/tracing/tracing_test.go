@@ -21,9 +21,12 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/goleak"
+
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 func TestMain(m *testing.M) {
+	sanitizer.RegisterSensitiveTokens(fakePAT, "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", "Bearer abcdefghijklmnopqrstuvwxyz")
 	goleak.VerifyTestMain(m)
 }
 

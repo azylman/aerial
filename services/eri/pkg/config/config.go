@@ -7,7 +7,6 @@ import (
 	"log"
 	"maps"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -16,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 // Channel effort tiers returned by ChannelPolicy.GetEffort.
@@ -852,75 +852,12 @@ func ReloadWithSupplier(activeCfg *Config, supplier func() (*Config, error)) err
 	return nil
 }
 
-func loadSharedSecretsDir(dirPath string, dst map[string]string) {
-	entries, err := os.ReadDir(dirPath)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if strings.HasPrefix(name, ".") || entry.IsDir() {
-			continue
-		}
-		filePath := filepath.Join(dirPath, name)
-		info, err := os.Stat(filePath)
-		if err != nil || info.IsDir() {
-			continue
-		}
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			continue
-		}
-		trimmed := strings.TrimSpace(string(data))
-		if trimmed != "" {
-			dst[name] = trimmed
-		}
-	}
-}
-
 // LoadSharedSecrets reads shared secrets from path, which can be either a Kubernetes
 // secret directory mount (e.g. /secrets) or a JSON file (e.g. /secrets/shared-secrets.json).
 // If path is empty, missing, or invalid, an empty map is returned.
 // Values are trimmed, and alias fallbacks are populated when the primary key is empty.
 func LoadSharedSecrets(path string) map[string]string {
-	result := make(map[string]string)
-	cleanPath := strings.TrimSpace(path)
-	if cleanPath == "" {
-		return result
-	}
-	fi, err := os.Stat(cleanPath)
-	if err != nil {
-		return result
-	}
-
-	if fi.IsDir() {
-		loadSharedSecretsDir(cleanPath, result)
-	} else {
-		data, err := os.ReadFile(cleanPath)
-		if err != nil {
-			return result
-		}
-		var raw map[string]string
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return result
-		}
-		for k, v := range raw {
-			result[k] = strings.TrimSpace(v)
-		}
-	}
-
-	aliases := [][2]string{
-		{"DISCORD_TOKEN", "DISCORD_BOT_TOKEN"},
-		{"OP_SERVICE_ACCOUNT_TOKEN", "1PASSWORD_SERVICE_ACCOUNT_TOKEN"},
-		{"UNIFI_PASSWORD", "UNIFI_PASS"},
-	}
-	for _, pair := range aliases {
-		primary, fallback := pair[0], pair[1]
-		if result[primary] == "" && result[fallback] != "" {
-			result[primary] = result[fallback]
-		}
-	}
-	return result
+	return sanitizer.LoadSharedSecrets(path)
 }
 
 // WithSharedSecretsLookup wraps a primary lookup function (e.g. os.Getenv) with shared secrets file fallbacks.

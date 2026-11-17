@@ -59,6 +59,9 @@ func NewServer(handler *ToolHandler, dispatcher ...PromptDispatcher) *Server {
 	if handler == nil {
 		panic("server: handler cannot be nil")
 	}
+	if handler.cfg != nil {
+		RegisterConfigTokens(handler.cfg)
+	}
 
 	var disp PromptDispatcher
 	if len(dispatcher) > 0 && dispatcher[0] != nil {
