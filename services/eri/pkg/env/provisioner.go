@@ -33,6 +33,7 @@ type Provisioner struct {
 	hooksDir             string
 	oauthTokenSourcePath string
 	codexAuthSourcePath  string
+	museAuthSourcePath   string
 	mcpProxy             *MCPProxyRoutes
 
 	mu sync.Mutex
@@ -73,6 +74,7 @@ func New(homeDir, dataDir string, sources config.CredentialSources) (*Provisione
 		hooksDir:             "/share/aerial/scripts/hooks",
 		oauthTokenSourcePath: strings.TrimSpace(sources.OAuth.Path),
 		codexAuthSourcePath:  strings.TrimSpace(sources.Codex.Path),
+		museAuthSourcePath:   strings.TrimSpace(sources.Muse.Path),
 	}, nil
 }
 
@@ -104,6 +106,11 @@ func ValidateCredentialSources(sources config.CredentialSources) error {
 		}
 		if _, err := os.ReadFile(strings.TrimSpace(entry.source.Path)); err != nil {
 			return &CredentialError{Err: fmt.Errorf("credential_sources.%s: %w", entry.name, err)}
+		}
+	}
+	if !sources.Muse.Disabled && strings.TrimSpace(sources.Muse.Path) != "" {
+		if _, err := os.ReadFile(strings.TrimSpace(sources.Muse.Path)); err != nil {
+			return &CredentialError{Err: fmt.Errorf("credential_sources.muse: %w", err)}
 		}
 	}
 	return nil
@@ -241,6 +248,23 @@ func (p *Provisioner) symlinkCodexAuthToRuntimes(destAuthPath string) {
 	}
 }
 
+func (p *Provisioner) resolveCanonicalDir(relDataDir, relHomeDir string) string {
+	if p.dataDir != "" {
+		return filepath.Join(p.dataDir, relDataDir)
+	}
+	return filepath.Join(p.homeDir, relHomeDir)
+}
+
+func (*Provisioner) seedAndLinkAuth(srcPath, canonicalDir string, symlinkFn func(string)) error {
+	destAuthPath := filepath.Join(canonicalDir, "auth.json")
+	seedSHAPath := filepath.Join(canonicalDir, ".auth.seed-sha256")
+	if err := seedCodexAuth(srcPath, canonicalDir, destAuthPath, seedSHAPath); err != nil {
+		return err
+	}
+	symlinkFn(destAuthPath)
+	return nil
+}
+
 func (p *Provisioner) provisionCodexAuthState() error {
 	if p == nil || p.homeDir == "" {
 		return nil
@@ -250,22 +274,37 @@ func (p *Provisioner) provisionCodexAuthState() error {
 	srcPath := p.codexAuthSourcePath
 	p.mu.Unlock()
 
-	var canonicalCodexDir string
-	if p.dataDir != "" {
-		canonicalCodexDir = filepath.Join(p.dataDir, "codex")
-	} else {
-		canonicalCodexDir = filepath.Join(p.homeDir, ".codex")
+	return p.seedAndLinkAuth(srcPath, p.resolveCanonicalDir("codex", ".codex"), p.symlinkCodexAuthToRuntimes)
+}
+
+func (p *Provisioner) symlinkMuseAuthToRuntimes(destAuthPath string) {
+	if p.dataDir == "" {
+		return
+	}
+	if _, err := os.Stat(destAuthPath); err != nil {
+		return
+	}
+	primaryMuseDir := filepath.Join(p.homeDir, ".config", "muse")
+	ignore(os.MkdirAll(primaryMuseDir, 0o755))
+	p.linkOrCopyAsset(destAuthPath, filepath.Join(primaryMuseDir, "auth.json"))
+
+	for _, target := range allRuntimeTargets {
+		rtMuseDir := filepath.Join(p.runtimeHomeDir(target), ".config", "muse")
+		ignore(os.MkdirAll(rtMuseDir, 0o755))
+		p.linkOrCopyAsset(destAuthPath, filepath.Join(rtMuseDir, "auth.json"))
+	}
+}
+
+func (p *Provisioner) provisionMuseAuthState() error {
+	if p == nil || p.homeDir == "" {
+		return nil
 	}
 
-	destAuthPath := filepath.Join(canonicalCodexDir, "auth.json")
-	seedSHAPath := filepath.Join(canonicalCodexDir, ".auth.seed-sha256")
+	p.mu.Lock()
+	srcPath := p.museAuthSourcePath
+	p.mu.Unlock()
 
-	if err := seedCodexAuth(srcPath, canonicalCodexDir, destAuthPath, seedSHAPath); err != nil {
-		return err
-	}
-
-	p.symlinkCodexAuthToRuntimes(destAuthPath)
-	return nil
+	return p.seedAndLinkAuth(srcPath, p.resolveCanonicalDir("muse", filepath.Join(".config", "muse")), p.symlinkMuseAuthToRuntimes)
 }
 
 func (p *Provisioner) applyOAuthSettings(settings map[string]any, configDir, settingsPath string) error {
@@ -346,6 +385,7 @@ func (p *Provisioner) Sync(ctx context.Context, cfg *config.Config) error {
 		p.mu.Lock()
 		p.oauthTokenSourcePath = strings.TrimSpace(cur.CredentialSources.OAuth.Path)
 		p.codexAuthSourcePath = strings.TrimSpace(cur.CredentialSources.Codex.Path)
+		p.museAuthSourcePath = strings.TrimSpace(cur.CredentialSources.Muse.Path)
 		p.mu.Unlock()
 	}
 	if err := p.SyncSettings(cur.APIKey, cur.Model); err != nil {
@@ -354,6 +394,10 @@ func (p *Provisioner) Sync(ctx context.Context, cfg *config.Config) error {
 
 	if err := p.provisionCodexAuthState(); err != nil {
 		return fmt.Errorf("failed to provision codex auth state: %w", err)
+	}
+
+	if err := p.provisionMuseAuthState(); err != nil {
+		return fmt.Errorf("failed to provision muse auth state: %w", err)
 	}
 
 	if err := p.SyncRules(cur.SystemPrompt); err != nil {
@@ -396,6 +440,8 @@ func (p *Provisioner) chownProvisionedPaths() {
 	chownTree(filepath.Join(p.homeDir, ".gemini"))
 	chownTree(filepath.Join(p.homeDir, ".claude"))
 	chownTree(filepath.Join(p.homeDir, ".codex"))
+	chownTree(filepath.Join(p.homeDir, ".config", "muse"))
+	chownTree(filepath.Join(p.homeDir, ".local", "share", "muse"))
 
 	for _, target := range allRuntimeTargets {
 		rtHome := p.runtimeHomeDir(target)
@@ -420,6 +466,12 @@ func (p *Provisioner) chownProvisionedPaths() {
 		rtCodex := filepath.Join(rtHome, ".codex")
 		ignore(chownPath(rtCodex, 1000, 1000))
 		chownTree(rtCodex)
+		rtMuseConfig := filepath.Join(rtHome, ".config", "muse")
+		ignore(chownPath(rtMuseConfig, 1000, 1000))
+		chownTree(rtMuseConfig)
+		rtMuseShare := filepath.Join(rtHome, ".local", "share", "muse")
+		ignore(chownPath(rtMuseShare, 1000, 1000))
+		chownTree(rtMuseShare)
 	}
 	if p.dataDir != "" {
 		ignore(chownPath(p.dataDir, 1000, 1000))
@@ -430,6 +482,7 @@ func (p *Provisioner) chownProvisionedPaths() {
 			filepath.Join(p.dataDir, "cache"),
 			filepath.Join(p.dataDir, "claude"),
 			filepath.Join(p.dataDir, "codex"),
+			filepath.Join(p.dataDir, "muse"),
 		} {
 			chownTree(dir)
 		}

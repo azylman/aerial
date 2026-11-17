@@ -190,6 +190,10 @@ RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/
 # Disable agy background self-updater (https://www.antigravity.google/docs/cli/troubleshooting); agy versions must only change on image rebuild.
 ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
 
+ARG MUSE_VERSION=1.4.23-R8977.1
+ARG MUSE_SHA256=7ca9e16659f759eab3ae6c4b61c6f1e70f5f3fea1ca961ebd49044a1146956f4
+RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=${MUSE_VERSION}&file=muse-x86-linux" -o /usr/local/bin/muse && echo "${MUSE_SHA256}  /usr/local/bin/muse" | sha256sum -c - && chmod 0755 /usr/local/bin/muse && /usr/local/bin/muse --version
+
 # Install Stripe Link CLI (@stripe/link-cli v0.29.0) standalone binary
 RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%401.0.0/link-cli-linux-x64 -o /usr/local/bin/link-cli && \
     echo "40fa5fbade72cc9fde4014312fa5b7a3eeb6b7b151e0a97539991100f3e9943f  /usr/local/bin/link-cli" | sha256sum -c - && \

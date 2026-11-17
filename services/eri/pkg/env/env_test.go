@@ -53,6 +53,15 @@ func (p *Provisioner) SetCodexAuthSourcePath(path string) {
 	p.codexAuthSourcePath = path
 }
 
+func (p *Provisioner) SetMuseAuthSourcePath(path string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.museAuthSourcePath = path
+}
+
 func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
 	data := config.DefaultConfigData()
 	data.CredentialSources = config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}
@@ -118,6 +127,7 @@ func assertNilReceiver(t *testing.T) {
 	var pNil *Provisioner
 	pNil.SetOAuthTokenSourcePath("/ignored")
 	pNil.SetCodexAuthSourcePath("/ignored")
+	pNil.SetMuseAuthSourcePath("/ignored")
 
 	if err := pNil.Sync(context.Background(), nil); err != nil {
 		t.Errorf("expected nil error on Sync with nil receiver")
@@ -139,6 +149,9 @@ func assertNilReceiver(t *testing.T) {
 	}
 	if err := pNil.EnsureTargetCodexConfigTOML("/tmp", nil); err != nil {
 		t.Errorf("expected nil error on EnsureTargetCodexConfigTOML with nil receiver")
+	}
+	if err := pNil.EnsureTargetMuseSettingsJSON("/tmp", nil); err != nil {
+		t.Errorf("expected nil error on EnsureTargetMuseSettingsJSON with nil receiver")
 	}
 }
 
@@ -263,6 +276,7 @@ type syncCase struct {
 	withActiveCfg bool
 	failSettings  bool
 	failCodexAuth bool
+	failMuseAuth  bool
 	failRules     bool
 	failMCP       bool
 	mockRoot      bool
@@ -338,11 +352,39 @@ func injectSyncFailure(t *testing.T, tc syncCase, p *Provisioner) {
 		writeTestFile(t, filepath.Join(p.dataDir, "codex"), "file-blocking-dir")
 		p.SetCodexAuthSourcePath(writeTestFile(t, filepath.Join(t.TempDir(), "auth.json"), `{"seed":1}`))
 	}
+	if tc.failMuseAuth {
+		writeTestFile(t, filepath.Join(p.dataDir, "muse"), "file-blocking-dir")
+		p.SetMuseAuthSourcePath(writeTestFile(t, filepath.Join(p.homeDir, "source-auth.json"), `{"seed":1}`))
+	}
 	if tc.failRules {
 		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "rules"), "file-blocking-dir")
 	}
 	if tc.failMCP {
 		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "config", "mcp_config.json", "blocker"), "b")
+	}
+}
+
+func setupMockRootHome(t *testing.T, p *Provisioner, chmodded *[]string) {
+	t.Helper()
+	mockRootDir := filepath.Join(t.TempDir(), "mock-root")
+	_ = os.MkdirAll(filepath.Join(mockRootDir, ".gemini"), 0o755)
+	rootHomeDir = mockRootDir
+	origHome := p.homeDir
+	p.homeDir = mockRootDir
+	p.chownProvisionedPaths()
+	p.homeDir = origHome
+	if len(*chmodded) == 0 || (*chmodded)[0] != mockRootDir {
+		t.Errorf("expected chmodPath to be called for %s, got %v", mockRootDir, *chmodded)
+	}
+}
+
+func assertSyncAuthFailure(t *testing.T, tc syncCase, err error) {
+	t.Helper()
+	if tc.failCodexAuth && (err == nil || !strings.Contains(err.Error(), "codex auth")) {
+		t.Fatalf("expected error to mention 'codex auth', got: %v", err)
+	}
+	if tc.failMuseAuth && (err == nil || !strings.Contains(err.Error(), "muse auth")) {
+		t.Fatalf("expected error to mention 'muse auth', got: %v", err)
 	}
 }
 
@@ -390,16 +432,7 @@ func runSyncCase(t *testing.T, tc syncCase) {
 	}, nil)
 
 	if tc.homeIsRoot {
-		mockRootDir := filepath.Join(t.TempDir(), "mock-root")
-		_ = os.MkdirAll(filepath.Join(mockRootDir, ".gemini"), 0o755)
-		rootHomeDir = mockRootDir
-		origHome := p.homeDir
-		p.homeDir = mockRootDir
-		p.chownProvisionedPaths()
-		p.homeDir = origHome
-		if len(chmodded) == 0 || chmodded[0] != mockRootDir {
-			t.Errorf("expected chmodPath to be called for %s, got %v", mockRootDir, chmodded)
-		}
+		setupMockRootHome(t, p, &chmodded)
 	}
 
 	if tc.mockRoot && tc.withActiveCfg {
@@ -417,6 +450,9 @@ func runSyncCase(t *testing.T, tc syncCase) {
 			c.APIKey = "test-key"
 			c.Model = "gemini-2.5-pro"
 			c.SystemPrompt = "Custom instructions"
+			if tc.failMuseAuth {
+				c.CredentialSources.Muse = config.CredentialSource{Path: filepath.Join(p.homeDir, "source-auth.json")}
+			}
 		})
 	}
 
@@ -424,9 +460,7 @@ func runSyncCase(t *testing.T, tc syncCase) {
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("Sync() error = %v, wantErr %v", err, tc.wantErr)
 	}
-	if tc.failCodexAuth && (err == nil || !strings.Contains(err.Error(), "codex auth")) {
-		t.Fatalf("expected error to mention 'codex auth', got: %v", err)
-	}
+	assertSyncAuthFailure(t, tc, err)
 
 	if tc.mockRoot && !tc.wantErr && tc.withActiveCfg {
 		assertChownPaths(t, chowned)
@@ -444,6 +478,7 @@ func TestSync_EndToEndAndIsolation(t *testing.T) {
 		{name: "successful sync with active config and partitioned runtimes", withActiveCfg: true, wantErr: false},
 		{name: "sync failure propagated from settings error", failSettings: true, wantErr: true},
 		{name: "sync failure propagated from codex auth error", failCodexAuth: true, wantErr: true},
+		{name: "sync failure propagated from muse auth error", withActiveCfg: true, failMuseAuth: true, wantErr: true},
 		{name: "sync failure propagated from rules error", failRules: true, wantErr: true},
 		{name: "sync failure propagated from mcp error", failMCP: true, wantErr: true},
 		{name: "sync with mock root triggers chown", withActiveCfg: true, mockRoot: true, wantErr: false},
@@ -925,62 +960,71 @@ type syncRulesCase struct {
 	wantPrimaryMD bool
 }
 
-func assertPrimaryRulesMD(t *testing.T, p *Provisioner, wantPrimaryMD bool) {
+func assertNonEmptyWithoutFrontmatter(t *testing.T, path, label string) {
 	t.Helper()
-	claudeMD := filepath.Join(p.homeDir, ".claude", "CLAUDE.md")
-	claudeData, cErr := os.ReadFile(claudeMD)
-	codexMD := filepath.Join(p.homeDir, ".codex", "AGENTS.md")
-	codexData, cdErr := os.ReadFile(codexMD)
-	if wantPrimaryMD {
-		if cErr != nil || len(claudeData) == 0 {
-			t.Fatalf("expected CLAUDE.md in %s: %v", claudeMD, cErr)
-		}
-		if strings.Contains(string(claudeData), "---") {
-			t.Errorf("CLAUDE.md should not contain YAML frontmatter: %s", string(claudeData))
-		}
-		if cdErr != nil || len(codexData) == 0 {
-			t.Fatalf("expected AGENTS.md in %s: %v", codexMD, cdErr)
-		}
-		if strings.Contains(string(codexData), "---") {
-			t.Errorf("AGENTS.md should not contain YAML frontmatter: %s", string(codexData))
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		t.Fatalf("expected %s in %s: %v", label, path, err)
+	}
+	if strings.Contains(string(data), "---") {
+		t.Errorf("%s should not contain YAML frontmatter: %s", label, string(data))
+	}
+}
+
+func assertFileNotExist(t *testing.T, path, label string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected no %s in %s, got err=%v", label, path, err)
+	}
+}
+
+func assertTargetDirectoryOrSymlink(t *testing.T, path, label string, isEphemeral bool) {
+	t.Helper()
+	fi, err := os.Lstat(path)
+	if isEphemeral {
+		if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+			t.Errorf("expected isolated %s dir: %v", label, err)
 		}
 		return
 	}
-	if !os.IsNotExist(cErr) {
-		t.Errorf("expected no primary CLAUDE.md in %s, got err=%v", claudeMD, cErr)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("expected %s symlink: %v", label, err)
 	}
-	if !os.IsNotExist(cdErr) {
-		t.Errorf("expected no primary AGENTS.md in %s, got err=%v", codexMD, cdErr)
+}
+
+func assertPrimaryRulesMD(t *testing.T, p *Provisioner, wantPrimaryMD bool) {
+	t.Helper()
+	claudeMD := filepath.Join(p.homeDir, ".claude", "CLAUDE.md")
+	codexMD := filepath.Join(p.homeDir, ".codex", "AGENTS.md")
+	museMD := filepath.Join(p.homeDir, ".config", "muse", "AGENTS.md")
+	if !wantPrimaryMD {
+		assertFileNotExist(t, claudeMD, "CLAUDE.md")
+		assertFileNotExist(t, codexMD, "AGENTS.md")
+		assertFileNotExist(t, museMD, "muse AGENTS.md")
+		return
 	}
+	assertNonEmptyWithoutFrontmatter(t, claudeMD, "CLAUDE.md")
+	assertNonEmptyWithoutFrontmatter(t, codexMD, "AGENTS.md")
+	assertNonEmptyWithoutFrontmatter(t, museMD, "muse AGENTS.md")
 }
 
 func assertRuntimeRulesMD(t *testing.T, p *Provisioner) {
 	t.Helper()
 	for _, target := range allRuntimeTargets {
-		rtClaudeMD := filepath.Join(p.runtimeHomeDir(target), ".claude", "CLAUDE.md")
-		if _, err := os.Stat(rtClaudeMD); err != nil {
-			t.Errorf("expected CLAUDE.md in %s runtime: %v", target, err)
-		}
-		rtCodexMD := filepath.Join(p.runtimeHomeDir(target), ".codex", "AGENTS.md")
-		if _, err := os.Stat(rtCodexMD); err != nil {
-			t.Errorf("expected AGENTS.md in %s runtime: %v", target, err)
-		}
-		rtClaudeProjects := filepath.Join(p.runtimeHomeDir(target), ".claude", "projects")
-		if target == TargetEphemeral {
-			if fi, err := os.Lstat(rtClaudeProjects); err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-				t.Errorf("expected isolated projects dir in %s runtime: %v", target, err)
+		rtHome := p.runtimeHomeDir(target)
+		isEph := target == TargetEphemeral
+		for _, mdRel := range []string{
+			filepath.Join(".claude", "CLAUDE.md"),
+			filepath.Join(".codex", "AGENTS.md"),
+			filepath.Join(".config", "muse", "AGENTS.md"),
+		} {
+			if _, err := os.Stat(filepath.Join(rtHome, mdRel)); err != nil {
+				t.Errorf("expected %s in %s runtime: %v", mdRel, target, err)
 			}
-		} else if fi, err := os.Lstat(rtClaudeProjects); err != nil || fi.Mode()&os.ModeSymlink == 0 {
-			t.Errorf("expected projects symlink in %s runtime: %v", target, err)
 		}
-		rtCodexSessions := filepath.Join(p.runtimeHomeDir(target), ".codex", "sessions")
-		if target == TargetEphemeral {
-			if fi, err := os.Lstat(rtCodexSessions); err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-				t.Errorf("expected isolated codex sessions dir in %s runtime: %v", target, err)
-			}
-		} else if fi, err := os.Lstat(rtCodexSessions); err != nil || fi.Mode()&os.ModeSymlink == 0 {
-			t.Errorf("expected codex sessions symlink in %s runtime: %v", target, err)
-		}
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".claude", "projects"), "claude projects", isEph)
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".codex", "sessions"), "codex sessions", isEph)
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".local", "share", "muse", "sessions"), "muse sessions", isEph)
 	}
 }
 
@@ -1021,6 +1065,7 @@ func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
 	if tc.staleClaudeMD {
 		writeTestFile(t, filepath.Join(p.homeDir, ".claude", "CLAUDE.md"), "stale")
 		writeTestFile(t, filepath.Join(p.homeDir, ".codex", "AGENTS.md"), "stale")
+		writeTestFile(t, filepath.Join(p.homeDir, ".config", "muse", "AGENTS.md"), "stale")
 	}
 
 	if tc.zeroRules {
@@ -1167,22 +1212,27 @@ type codexTargetCase struct {
 	wantContent string
 }
 
-func assertCodexTargetTOML(t *testing.T, targetDir string, tc codexTargetCase) {
+func assertTargetConfigFileExists(t *testing.T, targetDir, filename string, expectFile bool, wantContent string) {
 	t.Helper()
 	if targetDir == "" {
 		return
 	}
-	tomlPath := filepath.Join(targetDir, "config.toml")
-	data, readErr := os.ReadFile(tomlPath)
-	if tc.wantTOML && readErr != nil {
-		t.Fatalf("expected config.toml at %s, but read failed: %v", tomlPath, readErr)
+	filePath := filepath.Join(targetDir, filename)
+	data, readErr := os.ReadFile(filePath)
+	if expectFile && readErr != nil {
+		t.Fatalf("expected %s at %s, but read failed: %v", filename, filePath, readErr)
 	}
-	if !tc.wantTOML && readErr == nil {
-		t.Fatalf("did not expect config.toml at %s, but file exists", tomlPath)
+	if !expectFile && readErr == nil {
+		t.Fatalf("did not expect %s at %s, but file exists", filename, filePath)
 	}
-	if tc.wantContent != "" && !strings.Contains(string(data), tc.wantContent) {
-		t.Fatalf("config.toml missing expected substring %q: %s", tc.wantContent, string(data))
+	if wantContent != "" && !strings.Contains(string(data), wantContent) {
+		t.Fatalf("%s missing expected substring %q: %s", filename, wantContent, string(data))
 	}
+}
+
+func assertCodexTargetTOML(t *testing.T, targetDir string, tc codexTargetCase) {
+	t.Helper()
+	assertTargetConfigFileExists(t, targetDir, "config.toml", tc.wantTOML, tc.wantContent)
 }
 
 func TestCodexTargetMcpAndHooksProvisioning(t *testing.T) {
@@ -1256,6 +1306,165 @@ func TestCodexTargetMcpAndHooksProvisioning(t *testing.T) {
 			}
 
 			assertCodexTargetTOML(t, targetDir, tc)
+		})
+	}
+}
+
+type museSettingsWriteCase struct {
+	label       string
+	skippedDir  string
+	jsonInput   json.RawMessage
+	isBlocked   bool
+	isNil       bool
+	expectError bool
+	expectFile  bool
+	matchSubstr string
+}
+
+func assertMuseSettingsFile(t *testing.T, targetDir string, tc museSettingsWriteCase) {
+	t.Helper()
+	assertTargetConfigFileExists(t, targetDir, "settings.json", tc.expectFile, tc.matchSubstr)
+}
+
+func TestMuseTargetMcpAndHooksProvisioning(t *testing.T) {
+	tests := []museSettingsWriteCase{
+		{
+			label:       "write valid settings.json with streamable http server",
+			jsonInput:   json.RawMessage(`{"mcpServers":{"primary":{"serverUrl":"http://127.0.0.1:4040/mcp"}}}`),
+			expectFile:  true,
+			matchSubstr: `"type": "streamable-http"`,
+		},
+		{
+			label:       "error when target config directory is obstructed by file",
+			jsonInput:   json.RawMessage(`{"mcpServers":{"srv":{"url":"http://localhost:8080"}}}`),
+			isBlocked:   true,
+			expectError: true,
+		},
+		{
+			label:     "do not write on empty raw json config payload",
+			jsonInput: json.RawMessage(""),
+		},
+		{
+			label:     "do not write on null json string literal",
+			jsonInput: json.RawMessage(nullLiteral),
+		},
+		{
+			label:     "do not write on empty json string literal",
+			jsonInput: json.RawMessage(`""`),
+		},
+		{
+			label:      "skip write when target directory argument is blank",
+			skippedDir: "blank",
+			jsonInput:  json.RawMessage(`{"mcpServers":{"srv":{"url":"http://test"}}}`),
+		},
+		{
+			label:     "nil provisioner receiver gracefully succeeds without writing",
+			isNil:     true,
+			jsonInput: json.RawMessage(`{"mcpServers":{"srv":{"url":"http://test"}}}`),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.label, func(t *testing.T) {
+			tmp := t.TempDir()
+			var p *Provisioner
+			if !tc.isNil {
+				p = newDisabledProvisioner(t, tmp, tmp)
+			}
+			targetDir := filepath.Join(tmp, ".config", "muse")
+			if tc.skippedDir != "" {
+				targetDir = ""
+			}
+			if tc.isBlocked {
+				targetDir = filepath.Join(tmp, "blocked_path")
+				writeTestFile(t, targetDir, "conflict")
+			}
+
+			err := p.EnsureTargetMuseSettingsJSON(targetDir, tc.jsonInput)
+			if (err != nil) != tc.expectError {
+				t.Fatalf("EnsureTargetMuseSettingsJSON() error = %v, expectError %v", err, tc.expectError)
+			}
+			assertMuseSettingsFile(t, targetDir, tc)
+		})
+	}
+}
+
+func TestStripRuleFrontmatter(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "with frontmatter", input: "---\nkey: val\n---\nbody text", want: "body text"},
+		{name: "without frontmatter", input: "plain rule content", want: "plain rule content"},
+		{name: "unterminated frontmatter", input: "---\nkey: val without closing", want: "---\nkey: val without closing"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := stripRuleFrontmatter(tc.input)
+			if got != tc.want {
+				t.Fatalf("stripRuleFrontmatter(%q) = %q; want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSelectTargetServers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		cur     *config.ConfigData
+		target  RuleTarget
+		wantNil bool
+	}{
+		{
+			name:    "ephemeral target with nil servers returns nil",
+			cur:     &config.ConfigData{},
+			target:  TargetEphemeral,
+			wantNil: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			res := selectTargetServers(tc.cur, tc.target)
+			if (res == nil) != tc.wantNil {
+				t.Fatalf("selectTargetServers nil = %v; want %v", res == nil, tc.wantNil)
+			}
+		})
+	}
+}
+
+func TestOverlayConfigMCPServers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		nilCfg  bool
+		raw     string
+		wantKey string
+	}{
+		{name: "nil config returns immediately", nilCfg: true},
+		{name: "invalid json preserved verbatim", raw: "invalid-json", wantKey: "raw_server"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cfg *config.Config
+			if !tc.nilCfg {
+				cfg = newTestConfig(func(c *config.ConfigData) {
+					c.McpServers.Discord = map[string]json.RawMessage{
+						tc.wantKey: json.RawMessage(tc.raw),
+					}
+				})
+			}
+			merged := make(map[string]any)
+			overlayConfigMCPServers(cfg, TargetDiscord, merged)
+			if tc.wantKey != "" {
+				if _, ok := merged[tc.wantKey]; !ok {
+					t.Fatalf("expected key %q in merged", tc.wantKey)
+				}
+			}
 		})
 	}
 }

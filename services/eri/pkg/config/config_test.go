@@ -67,6 +67,7 @@ type loadConfigIngestionCase struct {
 	wantNATSURL    string
 	wantEngine     string
 	wantCodexBin   string
+	wantMuseBin    string
 	wantTx         TranscriptsConfig
 	wantErr        bool
 	errContains    string
@@ -88,6 +89,7 @@ func assertLoadConfigIngestionStrings(t *testing.T, cur *ConfigData, tc loadConf
 		{"NATSURL", cur.NATSURL, tc.wantNATSURL},
 		{"Engine", cur.Engine, tc.wantEngine},
 		{"CodexBin", cur.CodexBin, tc.wantCodexBin},
+		{"MuseBin", cur.MuseBin, tc.wantMuseBin},
 	} {
 		if check.want != "" && check.got != check.want {
 			t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
@@ -893,6 +895,7 @@ type envOverrideCase struct {
 	wantEngine       string
 	wantClaude       string
 	wantCodex        string
+	wantMuse         string
 	wantKey          string
 	wantModel        string
 	wantTZ           string
@@ -919,6 +922,9 @@ func assertEnvOverrideBasic(t *testing.T, data *ConfigData, tc envOverrideCase) 
 	}
 	if tc.wantCodex != "" && data.CodexBin != tc.wantCodex {
 		t.Errorf("CodexBin = %q, want %q", data.CodexBin, tc.wantCodex)
+	}
+	if tc.wantMuse != "" && data.MuseBin != tc.wantMuse {
+		t.Errorf("MuseBin = %q, want %q", data.MuseBin, tc.wantMuse)
 	}
 	if tc.wantKey != "" && data.APIKey != tc.wantKey {
 		t.Errorf("APIKey = %q, want %q", data.APIKey, tc.wantKey)
@@ -1040,6 +1046,7 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 				"ENGINE":                       "claude",
 				"CLAUDE_BIN":                   "/usr/local/bin/claude",
 				"CODEX_BIN":                    "/usr/local/bin/codex",
+				"MUSE_BIN":                     "/usr/local/bin/muse",
 				"DAEMON_IDLE_TIMEOUT":          "15m",
 				"MAX_BACKGROUND_TASK_DURATION": "45m",
 				"OLLAMA_NUM_CTX":               "8192",
@@ -1049,6 +1056,7 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 			wantEngine: "claude",
 			wantClaude: "/usr/local/bin/claude",
 			wantCodex:  "/usr/local/bin/codex",
+			wantMuse:   "/usr/local/bin/muse",
 			wantKey:    "primary-key",
 			wantModel:  "gemini-custom",
 			wantTZ:     "UTC",

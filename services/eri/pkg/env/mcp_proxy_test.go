@@ -143,6 +143,19 @@ func TestEnsureTargetCodexConfigTOML_MCPProxy(t *testing.T) {
 					t.Errorf("codex config missing substring %q, got:\n%s", sub, codexStr)
 				}
 			}
+
+			museDir := t.TempDir()
+			if mErr := p.EnsureTargetMuseSettingsJSON(museDir, raw); mErr != nil {
+				t.Fatalf("EnsureTargetMuseSettingsJSON: %v", mErr)
+			}
+			museBytes, mErr := os.ReadFile(filepath.Join(museDir, "settings.json"))
+			if mErr != nil {
+				t.Fatalf("read muse config: %v", mErr)
+			}
+			museStr := string(museBytes)
+			if tc.proxyPort != "" && !strings.Contains(museStr, `"${ERI_DAEMON_ID:-}"`) {
+				t.Errorf("muse config missing X-Eri-Daemon header: %s", museStr)
+			}
 		})
 	}
 }
@@ -258,6 +271,101 @@ func TestFormatCodexConfigTOML(t *testing.T) {
 			for _, dontWant := range tc.excludes {
 				if strings.Contains(out, dontWant) {
 					t.Errorf("FormatCodexConfigTOML() unexpectedly contained %q, got:\n%s", dontWant, out)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatMuseSettingsJSON(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		raw       json.RawMessage
+		proxyBase string
+		contains  []string
+		excludes  []string
+	}{
+		{
+			name:     "empty or null raw config",
+			raw:      json.RawMessage(`null`),
+			contains: []string{`"schema_version": 1`, `"mcpServers": {}`, `"/usr/local/bin/hook-guard pre-invocation"`},
+		},
+		{
+			name:     "nil raw config",
+			raw:      nil,
+			contains: []string{`"schema_version": 1`, `"mcpServers": {}`, `"/usr/local/bin/hook-guard all"`},
+		},
+		{
+			name:     "string encoded json",
+			raw:      json.RawMessage(`"{\"mcpServers\":{\"srv\":{\"url\":\"http://test\"}}}"`),
+			contains: []string{`"type": "streamable-http"`, `"url": "http://test"`},
+		},
+		{
+			name: "server with http_headers and headers",
+			raw: json.RawMessage(`{"mcpServers":{
+				"h1":{"url":"http://h1","http_headers":{"H1":"V1"}},
+				"h2":{"url":"http://h2","headers":{"H2":"V2"}}
+			}}`),
+			contains: []string{
+				`"h1"`,
+				`"type": "streamable-http"`,
+				`"url": "http://h1"`,
+				`"H1": "V1"`,
+				`"h2"`,
+				`"url": "http://h2"`,
+				`"H2": "V2"`,
+			},
+		},
+		{
+			name:      "proxyBase matching url sets X-Eri-Daemon",
+			raw:       json.RawMessage(`{"mcpServers":{"proxied":{"url":"http://127.0.0.1:8080/mcp"}}}`),
+			proxyBase: "http://127.0.0.1:8080",
+			contains: []string{
+				`"proxied"`,
+				`"type": "streamable-http"`,
+				`"X-Eri-Daemon": "${ERI_DAEMON_ID:-}"`,
+			},
+		},
+		{
+			name: "command with args and env",
+			raw:  json.RawMessage(`{"mcpServers":{"local":{"command":"cli","args":["--flag","val"],"env":{"KEY":"VAL"}}}}`),
+			contains: []string{
+				`"local"`,
+				`"type": "stdio"`,
+				`"command": "cli"`,
+				`"--flag"`,
+				`"val"`,
+				`"KEY": "VAL"`,
+			},
+		},
+		{
+			name: "hooks canonical structure verified",
+			raw:  json.RawMessage(`null`),
+			contains: []string{
+				`"UserPromptSubmit"`,
+				`"/usr/local/bin/hook-guard pre-invocation"`,
+				`"PreToolUse"`,
+				`".*"`,
+				`"/usr/local/bin/hook-guard all"`,
+				`"PostToolUse"`,
+				`"edit_file|write_file|Edit|MultiEdit|Write"`,
+				`"/usr/local/bin/hook-guard post-batch"`,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out := FormatMuseSettingsJSON(tc.raw, tc.proxyBase)
+			for _, want := range tc.contains {
+				if !strings.Contains(out, want) {
+					t.Errorf("FormatMuseSettingsJSON() missing %q, got:\n%s", want, out)
+				}
+			}
+			for _, dontWant := range tc.excludes {
+				if strings.Contains(out, dontWant) {
+					t.Errorf("FormatMuseSettingsJSON() unexpectedly contained %q, got:\n%s", dontWant, out)
 				}
 			}
 		})

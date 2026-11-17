@@ -12,22 +12,40 @@ import (
 func TestRequiredCredentialSources(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		sources   config.CredentialSources
-		wantErr   bool
-		wantCause error
+		name       string
+		sources    config.CredentialSources
+		createFile bool
+		wantErr    bool
+		wantCause  error
 	}{
-		{"omitted", config.CredentialSources{}, true, nil},
-		{"disabled", config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, false, nil},
-		{"missing", config.CredentialSources{OAuth: config.CredentialSource{Path: t.TempDir() + "/missing"}, Codex: config.CredentialSource{Disabled: true}}, true, os.ErrNotExist},
-		{"directory", config.CredentialSources{OAuth: config.CredentialSource{Path: t.TempDir()}, Codex: config.CredentialSource{Disabled: true}}, true, nil},
+		{"omitted", config.CredentialSources{}, false, true, nil},
+		{"disabled", config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}}, false, false, nil},
+		{"missing", config.CredentialSources{OAuth: config.CredentialSource{Path: t.TempDir() + "/missing"}, Codex: config.CredentialSource{Disabled: true}}, false, true, os.ErrNotExist},
+		{"directory", config.CredentialSources{OAuth: config.CredentialSource{Path: t.TempDir()}, Codex: config.CredentialSource{Disabled: true}}, false, true, nil},
+		{"muse path valid", config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}, Muse: config.CredentialSource{Path: "valid-muse-auth"}}, true, false, nil},
+		{"muse path missing", config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}, Muse: config.CredentialSource{Path: t.TempDir() + "/missing-muse"}}, false, true, os.ErrNotExist},
+		{"muse disabled", config.CredentialSources{OAuth: config.CredentialSource{Disabled: true}, Codex: config.CredentialSource{Disabled: true}, Muse: config.CredentialSource{Disabled: true}}, false, false, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := New(t.TempDir(), t.TempDir(), tc.sources)
+			sources := tc.sources
+			if tc.createFile && sources.Muse.Path != "" {
+				sources.Muse.Path = writeTestFile(t, filepath.Join(t.TempDir(), sources.Muse.Path), "test-token")
+			}
+			_, err := New(t.TempDir(), t.TempDir(), sources)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tc.wantErr)
+			}
+			if tc.wantErr && err != nil {
+				if err.Error() == "" {
+					t.Errorf("expected non-empty error message")
+				}
+				if credErr, ok := errors.AsType[*CredentialError](err); ok {
+					if credErr.Unwrap() == nil {
+						t.Errorf("expected non-nil unwrapped error")
+					}
+				}
 			}
 			if tc.wantCause != nil && !errors.Is(err, tc.wantCause) {
 				t.Errorf("error=%v does not preserve cause %v", err, tc.wantCause)
