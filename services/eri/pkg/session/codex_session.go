@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -210,7 +211,8 @@ func findLastCodexUserInputIdx(lines []string) int {
 }
 
 func extractErrorBytes(raw json.RawMessage) string {
-	if len(raw) == 0 {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return ""
 	}
 	var errStr string

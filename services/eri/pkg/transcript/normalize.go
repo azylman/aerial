@@ -22,7 +22,19 @@ const (
 	EngineAgy    = "agy"
 	EngineClaude = "claude"
 	EngineCodex  = "codex"
+	EngineMuse   = "muse"
 )
+
+// museToolKinds maps Muse tool names to normalized kinds.
+var museToolKinds = map[string]string{
+	"bash":       ToolKindShell,
+	"read_file":  ToolKindRead,
+	"write_file": ToolKindWrite,
+	"glob":       ToolKindSearch,
+	"grep":       ToolKindSearch,
+	"subagent":   ToolKindSubagent,
+	"workflow":   ToolKindSubagent,
+}
 
 // codexToolKinds maps Codex tool names to normalized kinds.
 var codexToolKinds = map[string]string{
@@ -100,6 +112,9 @@ func NormalizeToolKind(toolName string, mcpServers []string) string {
 	if kind, ok := codexToolKinds[toolName]; ok {
 		return kind
 	}
+	if kind, ok := museToolKinds[toolName]; ok {
+		return kind
+	}
 	if kind, ok := agyToolKinds[toolName]; ok {
 		return kind
 	}
@@ -140,32 +155,48 @@ func agyMCPServer(rest string, mcpServers []string) string {
 	return server
 }
 
+const (
+	engineMaskClaude = 1 << iota
+	engineMaskCodex
+	engineMaskMuse
+	engineMaskAgy
+)
+
+func toolEngineMask(name string) int {
+	if _, ok := claudeToolKinds[name]; ok || strings.HasPrefix(name, "mcp__") {
+		return engineMaskClaude
+	}
+	if _, ok := codexToolKinds[name]; ok {
+		return engineMaskCodex
+	}
+	if _, ok := museToolKinds[name]; ok {
+		return engineMaskMuse
+	}
+	if _, ok := agyToolKinds[name]; ok || strings.HasPrefix(name, "mcp_") {
+		return engineMaskAgy
+	}
+	return 0
+}
+
 // InferEngine guesses which engine produced a session from its stored tool names, for sessions
 // whose raw log is gone. Claude Code tools and mcp__ names count as claude; agy tools and mcp_
 // (single underscore) names count as agy; codex tools count as codex. It returns "" unless
 // exactly one engine matched.
 func InferEngine(toolNames []string) string {
-	var claude, agy, codex bool
+	var combined int
 	for _, name := range toolNames {
-		_, isClaude := claudeToolKinds[name]
-		_, isAgy := agyToolKinds[name]
-		_, isCodex := codexToolKinds[name]
-		switch {
-		case isClaude || strings.HasPrefix(name, "mcp__"):
-			claude = true
-		case isCodex:
-			codex = true
-		case isAgy || strings.HasPrefix(name, "mcp_"):
-			agy = true
-		}
+		combined |= toolEngineMask(name)
 	}
-	switch {
-	case claude && !agy && !codex:
+	switch combined {
+	case engineMaskClaude:
 		return EngineClaude
-	case agy && !claude && !codex:
+	case engineMaskAgy:
 		return EngineAgy
-	case codex && !claude && !agy:
+	case engineMaskCodex:
 		return EngineCodex
+	case engineMaskMuse:
+		return EngineMuse
+	default:
+		return ""
 	}
-	return ""
 }

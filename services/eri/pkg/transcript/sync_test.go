@@ -247,6 +247,7 @@ func TestBuildSyncOptions(t *testing.T) {
 		brainDir             string
 		wantClaudeDir        string
 		wantCodexSessionsDir string
+		wantMuseSessionsDir  string
 	}{
 		{
 			name:                 "nil config",
@@ -254,6 +255,7 @@ func TestBuildSyncOptions(t *testing.T) {
 			brainDir:             "/tmp/brain",
 			wantClaudeDir:        "",
 			wantCodexSessionsDir: "",
+			wantMuseSessionsDir:  "",
 		},
 		{
 			name:                 "config with data dir",
@@ -261,6 +263,7 @@ func TestBuildSyncOptions(t *testing.T) {
 			brainDir:             "/data/aerial/brain",
 			wantClaudeDir:        "/data/aerial/claude/projects",
 			wantCodexSessionsDir: "/data/aerial/codex/sessions",
+			wantMuseSessionsDir:  "/data/aerial/muse/sessions",
 		},
 		{
 			name:                 "config with home dir",
@@ -268,6 +271,7 @@ func TestBuildSyncOptions(t *testing.T) {
 			brainDir:             "/home/user/.gemini/antigravity-cli/brain",
 			wantClaudeDir:        "/home/user/.claude/projects",
 			wantCodexSessionsDir: "/home/user/.codex/sessions",
+			wantMuseSessionsDir:  "/home/user/.local/share/muse/sessions",
 		},
 	}
 	for _, tc := range tests {
@@ -279,6 +283,9 @@ func TestBuildSyncOptions(t *testing.T) {
 			}
 			if opts.CodexSessionsDir != tc.wantCodexSessionsDir {
 				t.Errorf("CodexSessionsDir = %q, want %q", opts.CodexSessionsDir, tc.wantCodexSessionsDir)
+			}
+			if opts.MuseSessionsDir != tc.wantMuseSessionsDir {
+				t.Errorf("MuseSessionsDir = %q, want %q", opts.MuseSessionsDir, tc.wantMuseSessionsDir)
 			}
 		})
 	}
