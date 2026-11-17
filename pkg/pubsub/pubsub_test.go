@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
+	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,9 +16,154 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
+
+const (
+	testTraceID     = "4bf92f3577b34da6a3ce929d0e0e4736"
+	testRemoteSpan  = "00f067aa0ba902b7"
+	testTraceparent = "00-" + testTraceID + "-" + testRemoteSpan + "-01"
+	// parentRemote marks a span whose parent is the remote testTraceparent span.
+	parentRemote = "remote"
+)
+
+// testSpans records every span ended in this package's tests; tests keep their spans apart by
+// publishing to subjects no other test uses.
+var testSpans = newSpanSink()
+
+func TestMain(m *testing.M) {
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(testSpans)))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	os.Exit(m.Run())
+}
+
+// spanSink is a span processor that lets tests block until spans for a subject have ended.
+type spanSink struct {
+	mu    sync.Mutex
+	cond  *sync.Cond
+	ended []sdktrace.ReadOnlySpan
+}
+
+func newSpanSink() *spanSink {
+	s := &spanSink{}
+	s.cond = sync.NewCond(&s.mu)
+	return s
+}
+
+func (*spanSink) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+func (*spanSink) Shutdown(context.Context) error                  { return nil }
+func (*spanSink) ForceFlush(context.Context) error                { return nil }
+
+func (s *spanSink) OnEnd(span sdktrace.ReadOnlySpan) {
+	s.mu.Lock()
+	s.ended = append(s.ended, span)
+	s.mu.Unlock()
+	s.cond.Broadcast()
+}
+
+// await blocks until at least n spans whose messaging.destination.name is subject have ended.
+func (s *spanSink) await(subject string, n int) []sdktrace.ReadOnlySpan {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for {
+		var got []sdktrace.ReadOnlySpan
+		for _, span := range s.ended {
+			for _, kv := range span.Attributes() {
+				if kv.Key == "messaging.destination.name" && kv.Value.AsString() == subject {
+					got = append(got, span)
+				}
+			}
+		}
+		if len(got) >= n {
+			return got
+		}
+		s.cond.Wait()
+	}
+}
+
+// spanShape is the expected shape of one recorded span. parent is the key of another
+// spanShape, parentRemote, or empty for a root span.
+type spanShape struct {
+	key    string
+	name   string
+	kind   trace.SpanKind
+	parent string
+	status codes.Code
+	attrs  map[string]string
+}
+
+// assertSpanShapes matches got against want by name and exact attribute set, checks kinds,
+// statuses and parent links, that every span shares one trace, and returns the matches by key.
+func assertSpanShapes(t *testing.T, got []sdktrace.ReadOnlySpan, want []spanShape) map[string]sdktrace.ReadOnlySpan {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("recorded %d spans, want %d", len(got), len(want))
+	}
+	matched := map[string]sdktrace.ReadOnlySpan{}
+	used := map[int]bool{}
+	for _, w := range want {
+		for i, span := range got {
+			if used[i] || span.Name() != w.name || !maps.Equal(spanAttrs(span), w.attrs) {
+				continue
+			}
+			used[i] = true
+			matched[w.key] = span
+			break
+		}
+		if matched[w.key] == nil {
+			t.Errorf("no recorded span matches %q (%s %v)", w.key, w.name, w.attrs)
+		}
+	}
+	for _, w := range want {
+		span := matched[w.key]
+		if span == nil {
+			continue
+		}
+		if span.SpanKind() != w.kind {
+			t.Errorf("span %q kind = %v, want %v", w.key, span.SpanKind(), w.kind)
+		}
+		if span.Status().Code != w.status {
+			t.Errorf("span %q status = %v, want %v", w.key, span.Status().Code, w.status)
+		}
+		assertSpanParent(t, w, span.Parent(), matched)
+		if first := matched[want[0].key]; first != nil && span.SpanContext().TraceID() != first.SpanContext().TraceID() {
+			t.Errorf("span %q trace = %s, want %s", w.key, span.SpanContext().TraceID(), first.SpanContext().TraceID())
+		}
+	}
+	return matched
+}
+
+// assertSpanParent checks that parent is the span w.parent names.
+func assertSpanParent(t *testing.T, w spanShape, parent trace.SpanContext, matched map[string]sdktrace.ReadOnlySpan) {
+	t.Helper()
+	switch {
+	case w.parent == "":
+		if parent.IsValid() {
+			t.Errorf("span %q has parent %s, want a root span", w.key, parent.SpanID())
+		}
+	case w.parent == parentRemote:
+		if parent.TraceID().String() != testTraceID || parent.SpanID().String() != testRemoteSpan {
+			t.Errorf("span %q parent = %s/%s, want remote %s/%s", w.key, parent.TraceID(), parent.SpanID(), testTraceID, testRemoteSpan)
+		}
+	case matched[w.parent] != nil:
+		if parent.SpanID() != matched[w.parent].SpanContext().SpanID() {
+			t.Errorf("span %q parent = %s, want span %q (%s)", w.key, parent.SpanID(), w.parent, matched[w.parent].SpanContext().SpanID())
+		}
+	}
+}
+
+// spanAttrs renders span attributes as strings so expectations can be hand-written literals.
+func spanAttrs(span sdktrace.ReadOnlySpan) map[string]string {
+	attrs := map[string]string{}
+	for _, kv := range span.Attributes() {
+		attrs[string(kv.Key)] = kv.Value.String()
+	}
+	return attrs
+}
 
 type publishStep struct {
 	subject string
@@ -272,44 +420,140 @@ func TestSnooze_RotatesMsgIDAndResetsAttempts(t *testing.T) {
 func TestTracePropagation_InjectAndExtract(t *testing.T) {
 	t.Parallel()
 
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	traceIDHex := "4bf92f3577b34da6a3ce929d0e0e4736"
-	spanIDHex := "00f067aa0ba902b7"
-	traceparentVal := fmt.Sprintf("00-%s-%s-01", traceIDHex, spanIDHex)
-
-	carrier := propagation.MapCarrier{"traceparent": traceparentVal}
-	ctxWithTrace := propagation.TraceContext{}.Extract(context.Background(), carrier)
-
-	var extractedTraceID string
-	var extractedSpanID string
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	_, err := bus.Subscribe(context.Background(), "aerial.events.tracing", "tracer", func(ctx context.Context, msg Message) error {
-		spanCtx := trace.SpanContextFromContext(ctx)
-		if spanCtx.IsValid() {
-			extractedTraceID = spanCtx.TraceID().String()
-			extractedSpanID = spanCtx.SpanID().String()
-		}
-		wg.Done()
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Subscribe failed: %v", err)
+	tests := []struct {
+		name             string
+		subject          string
+		durable          string
+		queue            string
+		msgID            string
+		traceparent      string
+		failDeliveries   int
+		snoozeDeliveries int
+		want             []spanShape
+	}{
+		{
+			name:    "durable subscriber process span is a child of the publish span",
+			subject: "aerial.events.tracing.durable", durable: "tracer", msgID: "trace-msg-1",
+			traceparent: testTraceparent,
+			want: []spanShape{
+				{key: "pub", name: "aerial.events.tracing.durable publish", kind: trace.SpanKindProducer, parent: parentRemote, attrs: map[string]string{
+					"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
+					"messaging.destination.name": "aerial.events.tracing.durable", "messaging.message.id": "trace-msg-1",
+				}},
+				{key: "proc", name: "aerial.events.tracing.durable process", kind: trace.SpanKindConsumer, parent: "pub", attrs: map[string]string{
+					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.tracing.durable",
+					"messaging.consumer.group.name": "tracer", "messaging.nats.message.delivery_count": "1", "messaging.message.id": "trace-msg-1",
+				}},
+			},
+		},
+		{
+			name:    "queue redelivery after a handler error is a second process span",
+			subject: "aerial.jobs.tracing.retry", queue: "retry-workers", msgID: "trace-msg-2",
+			traceparent: testTraceparent, failDeliveries: 1,
+			want: []spanShape{
+				{key: "pub", name: "aerial.jobs.tracing.retry publish", kind: trace.SpanKindProducer, parent: parentRemote, attrs: map[string]string{
+					"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
+					"messaging.destination.name": "aerial.jobs.tracing.retry", "messaging.message.id": "trace-msg-2",
+				}},
+				{key: "proc1", name: "aerial.jobs.tracing.retry process", kind: trace.SpanKindConsumer, parent: "pub", status: codes.Error, attrs: map[string]string{
+					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.jobs.tracing.retry",
+					"messaging.consumer.group.name": "retry-workers", "messaging.nats.message.delivery_count": "1", "messaging.message.id": "trace-msg-2",
+				}},
+				{key: "proc2", name: "aerial.jobs.tracing.retry process", kind: trace.SpanKindConsumer, parent: "pub", attrs: map[string]string{
+					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.jobs.tracing.retry",
+					"messaging.consumer.group.name": "retry-workers", "messaging.nats.message.delivery_count": "2", "messaging.message.id": "trace-msg-2",
+				}},
+			},
+		},
+		{
+			name:    "snooze republishes under the process span in the same trace",
+			subject: "aerial.jobs.tracing.snooze", queue: "snooze-workers", msgID: "trace-msg-3",
+			traceparent: testTraceparent, snoozeDeliveries: 1,
+			want: []spanShape{
+				{key: "pub", name: "aerial.jobs.tracing.snooze publish", kind: trace.SpanKindProducer, parent: parentRemote, attrs: map[string]string{
+					"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
+					"messaging.destination.name": "aerial.jobs.tracing.snooze", "messaging.message.id": "trace-msg-3",
+				}},
+				{key: "proc1", name: "aerial.jobs.tracing.snooze process", kind: trace.SpanKindConsumer, parent: "pub", attrs: map[string]string{
+					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.jobs.tracing.snooze",
+					"messaging.consumer.group.name": "snooze-workers", "messaging.nats.message.delivery_count": "1", "messaging.message.id": "trace-msg-3",
+				}},
+				{key: "pub2", name: "aerial.jobs.tracing.snooze publish", kind: trace.SpanKindProducer, parent: "proc1", attrs: map[string]string{
+					"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
+					"messaging.destination.name": "aerial.jobs.tracing.snooze", "messaging.message.id": "trace-msg-3:snooze:1",
+				}},
+				{key: "proc2", name: "aerial.jobs.tracing.snooze process", kind: trace.SpanKindConsumer, parent: "pub2", attrs: map[string]string{
+					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.jobs.tracing.snooze",
+					"messaging.consumer.group.name": "snooze-workers", "messaging.nats.message.delivery_count": "1", "messaging.message.id": "trace-msg-3:snooze:1",
+				}},
+			},
+		},
+		{
+			name:    "untraced publish without msg id to an ephemeral subscriber starts a root",
+			subject: "aerial.events.tracing.root",
+			want: []spanShape{
+				{key: "pub", name: "aerial.events.tracing.root publish", kind: trace.SpanKindProducer, attrs: map[string]string{
+					"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
+					"messaging.destination.name": "aerial.events.tracing.root",
+				}},
+				{key: "proc", name: "aerial.events.tracing.root process", kind: trace.SpanKindConsumer, parent: "pub", attrs: map[string]string{
+					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.tracing.root",
+					"messaging.nats.message.delivery_count": "1",
+				}},
+			},
+		},
 	}
 
-	if err := bus.Publish(ctxWithTrace, "aerial.events.tracing", "trace-msg-1", []byte("traced")); err != nil {
-		t.Fatalf("Publish failed: %v", err)
-	}
-	wg.Wait()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := NewMemoryBus()
+			defer bus.Close()
 
-	if extractedTraceID != traceIDHex {
-		t.Errorf("extracted trace ID = %q, want %q", extractedTraceID, traceIDHex)
-	}
-	if extractedSpanID != spanIDHex {
-		t.Errorf("extracted span ID = %q, want %q", extractedSpanID, spanIDHex)
+			var mu sync.Mutex
+			calls := 0
+			var handlerSpans []trace.SpanID
+			handler := func(ctx context.Context, msg Message) error {
+				mu.Lock()
+				calls++
+				call := calls
+				handlerSpans = append(handlerSpans, trace.SpanContextFromContext(ctx).SpanID())
+				mu.Unlock()
+				switch {
+				case call <= tc.failDeliveries:
+					return errors.New("transient failure")
+				case call <= tc.failDeliveries+tc.snoozeDeliveries:
+					return msg.Snooze(0)
+				}
+				return nil
+			}
+			var err error
+			if tc.queue != "" {
+				_, err = bus.ConsumeQueue(context.Background(), tc.subject, tc.queue, handler)
+			} else {
+				_, err = bus.Subscribe(context.Background(), tc.subject, tc.durable, handler)
+			}
+			if err != nil {
+				t.Fatalf("subscribe failed: %v", err)
+			}
+
+			ctx := context.Background()
+			if tc.traceparent != "" {
+				ctx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": tc.traceparent})
+			}
+			if err := bus.Publish(ctx, tc.subject, tc.msgID, []byte("traced")); err != nil {
+				t.Fatalf("Publish failed: %v", err)
+			}
+
+			got := assertSpanShapes(t, testSpans.await(tc.subject, len(tc.want)), tc.want)
+			mu.Lock()
+			defer mu.Unlock()
+			for _, w := range tc.want {
+				if w.kind == trace.SpanKindConsumer && got[w.key] != nil && !slices.Contains(handlerSpans, got[w.key].SpanContext().SpanID()) {
+					t.Errorf("handler never ran under process span %q; handler spans %v", w.key, handlerSpans)
+				}
+			}
+		})
 	}
 }
 

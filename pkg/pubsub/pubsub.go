@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,7 +14,13 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 const (
@@ -352,7 +359,14 @@ func (b *JetStreamBus) Publish(ctx context.Context, subject string, msgID string
 }
 
 // PublishWithHeader publishes a message with additional custom headers and trace context.
-func (b *JetStreamBus) PublishWithHeader(ctx context.Context, subject string, msgID string, data any, header nats.Header) error {
+// The send is wrapped in a messaging producer span whose context travels in the headers.
+func (b *JetStreamBus) PublishWithHeader(ctx context.Context, subject string, msgID string, data any, header nats.Header) (err error) {
+	ctx, span := tracing.Tracer().Start(ctx, subject+" publish", publishSpanOptions(subject, msgID)...)
+	defer func() {
+		failSpan(span, err)
+		span.End()
+	}()
+
 	payload, err := serializePayload(data)
 	if err != nil {
 		return err
@@ -368,8 +382,7 @@ func (b *JetStreamBus) PublishWithHeader(ctx context.Context, subject string, ms
 		mergedHeader.Set(HeaderMsgID, msgID)
 	}
 
-	carrier := propagation.HeaderCarrier(http.Header(mergedHeader))
-	propagation.TraceContext{}.Inject(ctx, carrier)
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(http.Header(mergedHeader)))
 
 	msg := &nats.Msg{
 		Subject: subject,
@@ -400,7 +413,7 @@ func (b *JetStreamBus) Subscribe(ctx context.Context, subject string, durable st
 		return b.bindDurable(ctx, subject, durable, handler)
 	}
 	sub, err := b.js.Subscribe(subject, func(m *nats.Msg) {
-		b.dispatch(ctx, m, handler)
+		b.dispatch(ctx, m, "", handler)
 	}, nats.ManualAck(), nats.AckWait(durableAckWait))
 	if err != nil {
 		return nil, fmt.Errorf("subscribe to %s: %w", subject, err)
@@ -425,7 +438,7 @@ func (b *JetStreamBus) bindDurable(ctx context.Context, subject, durable string,
 		return nil, err
 	}
 	sub, err := b.js.QueueSubscribe(subject, durable, func(m *nats.Msg) {
-		b.dispatch(ctx, m, handler)
+		b.dispatch(ctx, m, durable, handler)
 	}, nats.Bind(stream, durable), nats.ManualAck())
 	if err != nil {
 		return nil, fmt.Errorf("queue subscribe to %s: %w", subject, err)
@@ -616,12 +629,13 @@ func jsContextOpts(ctx context.Context) []nats.JSOpt {
 
 // dispatch runs handler for m. Deliveries keep the subscriber's context values but not its
 // cancellation (a delivery is settled by ack/nak, not by the subscribe call's lifetime); the
-// publisher's trace arrives through m's headers.
-func (b *JetStreamBus) dispatch(subCtx context.Context, m *nats.Msg, handler Handler) {
+// publisher's trace arrives through m's headers and parents a messaging process span that
+// covers the handler and the settlement decision. group is the durable or queue name, empty
+// for ephemeral subscriptions.
+func (b *JetStreamBus) dispatch(subCtx context.Context, m *nats.Msg, group string, handler Handler) {
 	ctx := context.WithoutCancel(subCtx)
 	if m.Header != nil {
-		carrier := propagation.HeaderCarrier(http.Header(m.Header))
-		ctx = propagation.TraceContext{}.Extract(ctx, carrier)
+		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(http.Header(m.Header)))
 	}
 
 	meta, err := m.Metadata()
@@ -632,6 +646,14 @@ func (b *JetStreamBus) dispatch(subCtx context.Context, m *nats.Msg, handler Han
 	if err == nil {
 		wrapped.meta = meta
 	}
+
+	ctx, span := tracing.Tracer().Start(ctx, m.Subject+" process", processSpanOptions(m.Subject, group, wrapped.NumDelivered(), m.Header.Get(HeaderMsgID))...)
+	wrapped.spanCtx = span.SpanContext()
+	var handlerErr error
+	defer func() {
+		failSpan(span, handlerErr)
+		span.End()
+	}()
 
 	stopTicker := make(chan struct{})
 	doneTicker := make(chan struct{})
@@ -656,6 +678,7 @@ func (b *JetStreamBus) dispatch(subCtx context.Context, m *nats.Msg, handler Han
 	}()
 
 	err = handler(ctx, wrapped)
+	handlerErr = err
 	close(stopTicker)
 	<-doneTicker
 
@@ -691,6 +714,7 @@ func (s *jsSubscription) Unsubscribe() error {
 type jsMessage struct {
 	raw     *nats.Msg
 	bus     Bus
+	spanCtx trace.SpanContext // process span; Snooze republishes as its child
 	mu      sync.Mutex
 	settled bool
 	meta    *nats.MsgMetadata
@@ -821,7 +845,7 @@ func (m *jsMessage) Snooze(delay time.Duration) error {
 	newHeader.Set(HeaderSnoozeSeq, strconv.Itoa(nextSeq))
 
 	publishContinuation := func() error {
-		ctx := context.Background()
+		ctx := trace.ContextWithSpanContext(context.Background(), m.spanCtx)
 		if hp, ok := m.bus.(HeaderPublisher); ok {
 			return hp.PublishWithHeader(ctx, m.Subject(), rotatedMsgID, m.Data(), newHeader)
 		}
@@ -852,6 +876,58 @@ func (m *jsMessage) Snooze(delay time.Duration) error {
 		return nil
 	}
 	return err
+}
+
+// Messaging semantic-convention attribute keys and values for NATS spans.
+const (
+	attrMessagingSystem        = attribute.Key("messaging.system")
+	attrMessagingOpType        = attribute.Key("messaging.operation.type")
+	attrMessagingOpName        = attribute.Key("messaging.operation.name")
+	attrMessagingDestination   = attribute.Key("messaging.destination.name")
+	attrMessagingMessageID     = attribute.Key("messaging.message.id")
+	attrMessagingConsumerGroup = attribute.Key("messaging.consumer.group.name")
+	attrNatsDeliveryCount      = attribute.Key("messaging.nats.message.delivery_count")
+	messagingSystemNats        = "nats"
+)
+
+// publishSpanOptions describes the producer span for one publish of subject.
+func publishSpanOptions(subject, msgID string) []trace.SpanStartOption {
+	attrs := []attribute.KeyValue{
+		attrMessagingSystem.String(messagingSystemNats),
+		attrMessagingOpType.String("send"),
+		attrMessagingOpName.String("publish"),
+		attrMessagingDestination.String(subject),
+	}
+	if msgID != "" {
+		attrs = append(attrs, attrMessagingMessageID.String(msgID))
+	}
+	return []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindProducer), trace.WithAttributes(attrs...)}
+}
+
+// processSpanOptions describes the consumer span for one delivery of subject; it is started
+// as a child of the context extracted from the message headers.
+func processSpanOptions(subject, group string, delivered uint64, msgID string) []trace.SpanStartOption {
+	attrs := []attribute.KeyValue{
+		attrMessagingSystem.String(messagingSystemNats),
+		attrMessagingOpType.String("process"),
+		attrMessagingDestination.String(subject),
+		attrNatsDeliveryCount.Int64(int64(min(delivered, uint64(math.MaxInt64)))),
+	}
+	if group != "" {
+		attrs = append(attrs, attrMessagingConsumerGroup.String(group))
+	}
+	if msgID != "" {
+		attrs = append(attrs, attrMessagingMessageID.String(msgID))
+	}
+	return []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindConsumer), trace.WithAttributes(attrs...)}
+}
+
+// failSpan records err on span and sets status Error when err is non-nil.
+func failSpan(span trace.Span, err error) {
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 }
 
 func serializePayload(data any) ([]byte, error) {

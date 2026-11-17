@@ -12,7 +12,11 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // MemoryBus provides a hermetic, in-memory implementation of Bus for zero-socket unit tests.
@@ -43,7 +47,14 @@ func (b *MemoryBus) Publish(ctx context.Context, subject string, msgID string, d
 }
 
 // PublishWithHeader publishes a message with custom headers and trace context.
-func (b *MemoryBus) PublishWithHeader(ctx context.Context, subject string, msgID string, data any, header nats.Header) error {
+// Like JetStreamBus, the send is wrapped in a messaging producer span.
+func (b *MemoryBus) PublishWithHeader(ctx context.Context, subject string, msgID string, data any, header nats.Header) (err error) {
+	ctx, span := tracing.Tracer().Start(ctx, subject+" publish", publishSpanOptions(subject, msgID)...)
+	defer func() {
+		failSpan(span, err)
+		span.End()
+	}()
+
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -84,8 +95,7 @@ func (b *MemoryBus) PublishWithHeader(ctx context.Context, subject string, msgID
 		mergedHeader.Set(HeaderMsgID, msgID)
 	}
 
-	carrier := propagation.HeaderCarrier(http.Header(mergedHeader))
-	propagation.TraceContext{}.Inject(ctx, carrier)
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(http.Header(mergedHeader)))
 
 	// 5. Snapshot subscribers under read lock
 	subs := make([]*memSubscription, len(b.subscribers))
@@ -149,11 +159,20 @@ func cloneHeader(h nats.Header) nats.Header {
 }
 
 func (b *MemoryBus) dispatchToSub(sub *memSubscription, subject string, data []byte, header nats.Header, coalescedSeq uint64, delivered uint64) {
-	ctx := context.Background()
-	carrier := propagation.HeaderCarrier(http.Header(header))
-	ctx = propagation.TraceContext{}.Extract(ctx, carrier)
+	ctx := otel.GetTextMapPropagator().Extract(context.Background(), propagation.HeaderCarrier(http.Header(header)))
+	group := sub.durable
+	if sub.queue != "" {
+		group = sub.queue
+	}
+	ctx, span := tracing.Tracer().Start(ctx, subject+" process", processSpanOptions(subject, group, delivered, header.Get(HeaderMsgID))...)
+	var err error
+	defer func() {
+		failSpan(span, err)
+		span.End()
+	}()
 
 	msg := &memMessage{
+		spanCtx:      span.SpanContext(),
 		bus:          b,
 		sub:          sub,
 		data:         data,
@@ -167,7 +186,7 @@ func (b *MemoryBus) dispatchToSub(sub *memSubscription, subject string, data []b
 		log.Printf("[pubsub/memory] warning: initial in-progress failed: %v", progErr)
 	}
 
-	err := sub.handler(ctx, msg)
+	err = sub.handler(ctx, msg)
 
 	msg.mu.Lock()
 	settled := msg.settled
@@ -281,6 +300,7 @@ func (s *memSubscription) Unsubscribe() error {
 }
 
 type memMessage struct {
+	spanCtx      trace.SpanContext // process span; Snooze republishes as its child
 	bus          *MemoryBus
 	sub          *memSubscription
 	data         []byte
@@ -411,7 +431,7 @@ func (m *memMessage) Snooze(delay time.Duration) error {
 	newHeader.Set(HeaderSnoozeSeq, strconv.Itoa(nextSeq))
 
 	publishContinuation := func() error {
-		ctx := context.Background()
+		ctx := trace.ContextWithSpanContext(context.Background(), m.spanCtx)
 		return m.bus.PublishWithHeader(ctx, m.Subject(), rotatedMsgID, m.Data(), newHeader)
 	}
 
