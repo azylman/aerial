@@ -319,10 +319,7 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, store VanadisStore, b
 		SkipIfActive:   true,
 	}
 
-	if chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
-		return e.eriClient.DispatchAccepted(ctx, req)
-	}
-	return e.eriClient.Dispatch(ctx, req)
+	return e.eriClient.DispatchAccepted(ctx, req)
 }
 
 // CancelChunkDispatch calls Eri's POST /dispatch/cancel for a chunk.
