@@ -279,6 +279,7 @@ func LastActivityFromRoots(sessionID string, roots []string) (time.Time, error) 
 		latestTime = checkFileMtime(directPath, latestTime)
 		latestTime = checkClaudeSubdirsActivity(root, cleanID, latestTime)
 		latestTime = checkCodexSubdirsActivity(root, cleanID, latestTime)
+		latestTime = checkMuseSubdirsActivity(root, cleanID, latestTime)
 	}
 
 	return latestTime, nil
@@ -301,6 +302,9 @@ func (m *Manager) GetSessionLastActivity(sessionID string, customRoots ...string
 		latestTime = checkFileMtime(p, latestTime)
 	}
 	for _, p := range m.codexTranscriptPaths(sessionID) {
+		latestTime = checkFileMtime(p, latestTime)
+	}
+	for _, p := range m.museTranscriptPaths(sessionID) {
 		latestTime = checkFileMtime(p, latestTime)
 	}
 	return latestTime, nil
@@ -338,6 +342,10 @@ func (m *Manager) claudeProjectBaseDirs() []string {
 
 func (m *Manager) codexSessionBaseDirs() []string {
 	return m.runtimeSubdirBaseDirs("codex", "sessions", ".codex")
+}
+
+func (m *Manager) museSessionBaseDirs() []string {
+	return m.runtimeSubdirBaseDirs("muse", "sessions", filepath.Join(".local", "share", "muse"))
 }
 
 func scanClaudeBaseForSession(base, cleanID string, seen map[string]bool) []string {
@@ -527,7 +535,7 @@ func readTranscriptTailLines(tPath string) ([]string, bool) {
 		lines = lines[1:]
 	}
 
-	if findLastUserInputIdx(lines) == -1 && findLastClaudeUserInputIdx(lines) == -1 && findLastCodexUserInputIdx(lines) == -1 && offset > 0 {
+	if findLastUserInputIdx(lines) == -1 && findLastClaudeUserInputIdx(lines) == -1 && findLastCodexUserInputIdx(lines) == -1 && findLastMuseUserInputIdx(lines) == -1 && offset > 0 {
 		fullData, readErr := os.ReadFile(tPath)
 		if readErr == nil {
 			lines = strings.Split(string(fullData), "\n")
@@ -752,6 +760,28 @@ func scanClaudeLinesForTurnError(ctx context.Context, lines []string, since time
 	return scanTranscriptLinesForTurnError(ctx, lines, since, findLastClaudeUserInputIdx, extractClaudeErrorFromLine)
 }
 
+func scanPathsForTurnError(
+	ctx context.Context,
+	paths []string,
+	since time.Time,
+	scanner func(context.Context, []string, time.Time) (string, error),
+) (string, error) {
+	for _, p := range paths {
+		lines, ok := readTranscriptTailLines(p)
+		if !ok {
+			continue
+		}
+		errMsg, err := scanner(ctx, lines, since)
+		if err != nil {
+			return "", err
+		}
+		if errMsg != "" {
+			return errMsg, nil
+		}
+	}
+	return "", nil
+}
+
 // ExtractLastTurnError parses transcript files to extract any error step specifically occurring
 // during the active turn (strictly after 'since' or after the latest non-ambient USER_INPUT).
 func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since time.Time) (string, error) {
@@ -763,51 +793,25 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 		return "", ctx.Err()
 	}
 
-	targetDirs := m.getTargetDirs(cleanID)
-
-	for _, dir := range targetDirs {
+	for _, dir := range m.getTargetDirs(cleanID) {
 		for _, name := range []string{transcriptFullFileName, transcriptFileName} {
 			tPath := filepath.Join(dir, ".system_generated", "logs", name)
-			lines, ok := readTranscriptTailLines(tPath)
-			if !ok {
-				continue
-			}
-
-			errMsg, err := scanLinesForTurnError(ctx, lines, since)
-			if err != nil {
-				return "", err
-			}
-			if errMsg != "" {
-				return errMsg, nil
+			if errMsg, err := scanPathsForTurnError(ctx, []string{tPath}, since, scanLinesForTurnError); err != nil || errMsg != "" {
+				return errMsg, err
 			}
 		}
 	}
 
-	for _, p := range m.claudeTranscriptPaths(cleanID) {
-		lines, ok := readTranscriptTailLines(p)
-		if !ok {
-			continue
-		}
-		errMsg, err := scanClaudeLinesForTurnError(ctx, lines, since)
-		if err != nil {
-			return "", err
-		}
-		if errMsg != "" {
-			return errMsg, nil
-		}
-	}
-
-	for _, p := range m.codexTranscriptPaths(cleanID) {
-		lines, ok := readTranscriptTailLines(p)
-		if !ok {
-			continue
-		}
-		errMsg, err := scanCodexLinesForTurnError(ctx, lines, since)
-		if err != nil {
-			return "", err
-		}
-		if errMsg != "" {
-			return errMsg, nil
+	for _, group := range []struct {
+		paths   []string
+		scanner func(context.Context, []string, time.Time) (string, error)
+	}{
+		{m.claudeTranscriptPaths(cleanID), scanClaudeLinesForTurnError},
+		{m.codexTranscriptPaths(cleanID), scanCodexLinesForTurnError},
+		{m.museTranscriptPaths(cleanID), scanMuseLinesForTurnError},
+	} {
+		if errMsg, err := scanPathsForTurnError(ctx, group.paths, since, group.scanner); err != nil || errMsg != "" {
+			return errMsg, err
 		}
 	}
 
@@ -986,6 +990,12 @@ func (m *Manager) ExtractResponseSinceContext(ctx context.Context, convID string
 		}
 	}
 
+	for _, p := range m.museTranscriptPaths(cleanID) {
+		if resp := extractResponseFromMuseTranscriptFile(ctx, p, since); resp != "" {
+			return resp
+		}
+	}
+
 	return ""
 }
 
@@ -1121,7 +1131,22 @@ func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
 	}
 
 	// 4. Check Codex rollout JSONL transcripts
-	return m.CodexSessionExistsOnDisk(cleanID)
+	if m.CodexSessionExistsOnDisk(cleanID) {
+		return true
+	}
+
+	// 5. Check Muse JSONL transcripts
+	return m.MuseSessionExistsOnDisk(cleanID)
+}
+
+func maxFileOrPathsSize(initialMax int64, paths []string) int64 {
+	maxSize := initialMax
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > maxSize {
+			maxSize = fi.Size()
+		}
+	}
+	return maxSize
 }
 
 // GetTranscriptSize returns the maximum file size across transcript.jsonl, transcript_full.jsonl,
@@ -1137,28 +1162,12 @@ func (m *Manager) GetTranscriptSize(sessionID string) int64 {
 	for _, sessDir := range m.getTargetDirs(cleanID) {
 		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
 		for _, name := range []string{transcriptFileName, transcriptFullFileName} {
-			filePath := filepath.Join(logsDir, name)
-			if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
-				if fi.Size() > maxSize {
-					maxSize = fi.Size()
-				}
-			}
+			maxSize = maxFileOrPathsSize(maxSize, []string{filepath.Join(logsDir, name)})
 		}
 	}
-	for _, p := range m.claudeTranscriptPaths(cleanID) {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			if fi.Size() > maxSize {
-				maxSize = fi.Size()
-			}
-		}
-	}
-	for _, p := range m.codexTranscriptPaths(cleanID) {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			if fi.Size() > maxSize {
-				maxSize = fi.Size()
-			}
-		}
-	}
+	maxSize = maxFileOrPathsSize(maxSize, m.claudeTranscriptPaths(cleanID))
+	maxSize = maxFileOrPathsSize(maxSize, m.codexTranscriptPaths(cleanID))
+	maxSize = maxFileOrPathsSize(maxSize, m.museTranscriptPaths(cleanID))
 	return maxSize
 }
 
@@ -1288,6 +1297,11 @@ func (m *Manager) CountTranscriptSteps(sessionID string) int {
 			maxSteps = steps
 		}
 	}
+	for _, p := range m.museTranscriptPaths(cleanID) {
+		if steps := countStepsInMuseTranscript(p); steps > maxSteps {
+			maxSteps = steps
+		}
+	}
 	return maxSteps
 }
 
@@ -1356,6 +1370,11 @@ func (m *Manager) CountTranscriptTurns(sessionID string) int {
 	}
 	for _, p := range m.codexTranscriptPaths(cleanID) {
 		if turns := countTurnsInCodexTranscript(p); turns > maxTurns {
+			maxTurns = turns
+		}
+	}
+	for _, p := range m.museTranscriptPaths(cleanID) {
+		if turns := countTurnsInMuseTranscript(p); turns > maxTurns {
 			maxTurns = turns
 		}
 	}

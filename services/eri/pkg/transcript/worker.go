@@ -23,6 +23,7 @@ const (
 	stepTypePlannerResponse = "PLANNER_RESPONSE"
 	stepSourceUserExplicit  = "USER_EXPLICIT"
 	stepStatusDone          = "DONE"
+	stepStatusError         = "ERROR"
 	sourceModel             = "MODEL"
 	roleUser                = "user"
 	roleAssistant           = "assistant"
@@ -123,7 +124,7 @@ func SyncSessionTranscript(
 		return stats, err
 	}
 
-	transcriptPath := findTranscriptFile(targetBrainDir, sessionID)
+	transcriptPath := findTranscriptFile(targetBrainDir, sessionID, opt.MuseSessionsDir)
 	if transcriptPath == "" {
 		stats.Duration = time.Since(start)
 		return stats, nil
@@ -147,7 +148,7 @@ func SyncSessionTranscript(
 		return stats, fmt.Errorf("load session sync states: %w", err)
 	}
 
-	engine := engineForPath(targetBrainDir, transcriptPath)
+	engine := engineForPath(targetBrainDir, transcriptPath, opt.MuseSessionsDir)
 	state, exists := syncStates[sessionID]
 	if isSessionUnchanged(ctx, store, sessionID, engine, mtime, state, exists, opt.IdleThreshold) {
 		stats.SkippedUnchanged++
@@ -227,7 +228,7 @@ func SyncTranscripts(
 		return stats, fmt.Errorf("load session sync states: %w", err)
 	}
 
-	discovered := discoverSessions(targetBrainDir, entries, opts.ClaudeProjectsDir, opts.CodexSessionsDir)
+	discovered := discoverSessions(targetBrainDir, entries, opts.ClaudeProjectsDir, opts.CodexSessionsDir, opts.MuseSessionsDir)
 
 	// Deterministic ordering of sessions
 	sessionIDs := make([]string, 0, len(discovered))
@@ -280,21 +281,24 @@ func SyncTranscripts(
 }
 
 // discoverSessions maps every session ID found under the brain dir (agy), Claude project
-// dirs (Claude Code), and Codex sessions dirs (Codex) to its transcript path and engine.
+// dirs (Claude Code), Codex sessions dirs (Codex), and Muse sessions dirs (Muse) to its transcript path and engine.
 // Brain-dir entries win on ID collisions.
-func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjectsDir string, codexSessionsDir ...string) map[string]discoveredSession {
+func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjectsDir string, dirs ...string) map[string]discoveredSession {
+	var codexSessionsDir, museSessionsDir string
+	if len(dirs) > 0 {
+		codexSessionsDir = dirs[0]
+	}
+	if len(dirs) > 1 {
+		museSessionsDir = dirs[1]
+	}
 	discovered := make(map[string]discoveredSession)
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		sessionID := entry.Name()
-		if strings.HasPrefix(sessionID, ".") {
-			continue
-		}
-
-		if transcriptPath := findTranscriptFile(targetBrainDir, sessionID); transcriptPath != "" {
-			discovered[sessionID] = discoveredSession{path: transcriptPath, engine: engineForPath(targetBrainDir, transcriptPath)}
+		if transcriptPath := findTranscriptFile(targetBrainDir, sessionID, museSessionsDir); transcriptPath != "" {
+			discovered[sessionID] = discoveredSession{path: transcriptPath, engine: engineForPath(targetBrainDir, transcriptPath, museSessionsDir)}
 		}
 	}
 
@@ -312,8 +316,8 @@ func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjec
 
 	// Also discover Codex sessions from Codex sessions directories
 	var codexBases []string
-	if len(codexSessionsDir) > 0 && codexSessionsDir[0] != "" {
-		codexBases = append(codexBases, codexSessionsDir[0])
+	if codexSessionsDir != "" {
+		codexBases = append(codexBases, codexSessionsDir)
 	}
 	codexBases = append(codexBases,
 		filepath.Clean(filepath.Join(targetBrainDir, "..", "codex", "sessions")),
@@ -321,6 +325,27 @@ func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjec
 		filepath.Clean(filepath.Join(targetBrainDir, "..", ".codex", "sessions")),
 	)
 	discoverCodexSessions(codexBases, discovered)
+
+	// Also discover Muse sessions from Muse sessions directories
+	var museBases []string
+	if museSessionsDir != "" {
+		museBases = append(museBases, museSessionsDir)
+	}
+	museBases = append(museBases,
+		filepath.Clean(filepath.Join(targetBrainDir, "..", "muse", "sessions")),
+		filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "muse", "sessions")),
+		filepath.Clean(filepath.Join(targetBrainDir, "..", ".local", "share", "muse", "sessions")),
+		filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", ".local", "share", "muse", "sessions")),
+	)
+	runtimesBase := filepath.Clean(filepath.Join(targetBrainDir, "..", "runtimes"))
+	if rEntries, err := os.ReadDir(runtimesBase); err == nil {
+		for _, e := range rEntries {
+			if e.IsDir() {
+				museBases = append(museBases, filepath.Join(runtimesBase, e.Name(), ".local", "share", "muse", "sessions"))
+			}
+		}
+	}
+	discoverMuseSessions(museBases, discovered)
 
 	return discovered
 }
@@ -449,11 +474,14 @@ type discoveredSession struct {
 	engine string
 }
 
-// engineForPath attributes transcripts to codex, agy, or claude.
-func engineForPath(brainDir, transcriptPath string) string {
+// engineForPath attributes transcripts to muse, codex, agy, or claude.
+func engineForPath(brainDir, transcriptPath string, extraDirs ...string) string {
 	cleanPath := filepath.Clean(transcriptPath)
 	slashPath := filepath.ToSlash(cleanPath)
 	baseName := filepath.Base(cleanPath)
+	if isMuseTranscriptPath(cleanPath, slashPath, extraDirs) {
+		return EngineMuse
+	}
 	if strings.Contains(slashPath, "codex/sessions") ||
 		strings.Contains(slashPath, ".codex/sessions") ||
 		strings.HasPrefix(baseName, "rollout-") {
@@ -598,7 +626,7 @@ func findCodexTranscriptFile(brainDir, sessionID string) string {
 	return ""
 }
 
-func findTranscriptFile(brainDir, sessionID string) string {
+func findTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
 	candidates := []string{
 		filepath.Join(brainDir, sessionID, ".system_generated", "logs", "transcript.jsonl"),
 		filepath.Join(brainDir, sessionID, "system_generated", "logs", "transcript.jsonl"),
@@ -613,7 +641,10 @@ func findTranscriptFile(brainDir, sessionID string) string {
 	if cand := findClaudeTranscriptFile(brainDir, sessionID); cand != "" {
 		return cand
 	}
-	return findCodexTranscriptFile(brainDir, sessionID)
+	if cand := findCodexTranscriptFile(brainDir, sessionID); cand != "" {
+		return cand
+	}
+	return findMuseTranscriptFile(brainDir, sessionID, extraDirs...)
 }
 
 type transcriptScanState struct {
@@ -787,7 +818,7 @@ func (st *transcriptScanState) parseClaudeToolResultBlocks(blocks []claudeConten
 		isToolResult = true
 		status := stepStatusDone
 		if b.IsError {
-			status = "ERROR"
+			status = stepStatusError
 		}
 		st.recordStep(rawTranscriptStep{
 			StepIndex:  st.maxStepIndex + 1,
@@ -1146,6 +1177,13 @@ func (st *transcriptScanState) parseLine(line string, isLast bool, stats *SyncSt
 	var codex codexLineEnvelope
 	if err := json.Unmarshal([]byte(trimmed), &codex); err == nil && codex.Type != "" {
 		if st.parseCodexEntry(codex) {
+			return
+		}
+	}
+
+	var muse museLineEnvelope
+	if err := json.Unmarshal([]byte(trimmed), &muse); err == nil && (muse.PayloadType == "runtime.session" || strings.HasPrefix(muse.PayloadType, "runtime.")) {
+		if st.parseMuseEntry(muse) {
 			return
 		}
 	}

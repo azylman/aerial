@@ -47,9 +47,11 @@ func buildSyncOptions(cfg *config.Config, targetBrainDir string, llmFunc LLMClie
 		if dataDir := strings.TrimSpace(cfg.DataDir()); dataDir != "" {
 			opts.ClaudeProjectsDir = filepath.Join(dataDir, "claude", "projects")
 			opts.CodexSessionsDir = filepath.Join(dataDir, "codex", "sessions")
+			opts.MuseSessionsDir = filepath.Join(dataDir, "muse", "sessions")
 		} else if homeDir := strings.TrimSpace(cfg.GeminiHomeDir()); homeDir != "" {
 			opts.ClaudeProjectsDir = filepath.Join(homeDir, ".claude", "projects")
 			opts.CodexSessionsDir = filepath.Join(homeDir, ".codex", "sessions")
+			opts.MuseSessionsDir = filepath.Join(homeDir, ".local", "share", "muse", "sessions")
 		}
 		opts.MCPServers = configuredMCPServerNames(cfg.Current())
 		var roots []string

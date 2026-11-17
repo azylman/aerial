@@ -52,7 +52,11 @@ func runStartupSpansCase(t *testing.T, tc startupSpanTestCase, idx int) {
 	if tc.inTurn {
 		ctx, turn = tp.Tracer("test").Start(ctx, "turn")
 	}
-	pool := NewUnifiedProcessPool(PoolConfig{Engine: tc.engine, HandshakeTimeout: 50 * time.Millisecond}, newPipeMockSpawner(tc.opts))
+	handshakeTimeout := time.Second
+	if tc.opts.skipInitOnAttempt > 0 {
+		handshakeTimeout = 50 * time.Millisecond
+	}
+	pool := NewUnifiedProcessPool(PoolConfig{Engine: tc.engine, HandshakeTimeout: handshakeTimeout}, newPipeMockSpawner(tc.opts))
 	defer pool.Close()
 
 	lease, err := pool.AcquireLease(ctx, fmt.Sprintf("startup-%d", idx))
