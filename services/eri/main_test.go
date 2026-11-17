@@ -148,6 +148,54 @@ type mockMainDaemonSpawner struct {
 
 func newMockMainDaemonSpawner() *mockMainDaemonSpawner { return &mockMainDaemonSpawner{} }
 
+func serveMockCodexMain(inR io.Reader, outW io.Writer, sessID string) {
+	if sessID == "" {
+		sessID = "th_mock_12345"
+	}
+	scanner := bufio.NewScanner(inR)
+	for scanner.Scan() {
+		line := scanner.Text()
+		var req struct {
+			ID     int64  `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal([]byte(line), &req); err != nil {
+			continue
+		}
+		switch req.Method {
+		case "initialize":
+			_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{}}\n", req.ID)
+		case "thread/start", "thread/resume":
+			_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"thread\":{\"id\":%q}}}\n", req.ID, sessID)
+		}
+	}
+}
+
+func serveMockMuseMain(inR io.Reader, outW io.Writer, sessID string) {
+	if sessID == "" {
+		sessID = "018f0000-0000-7000-8000-000000000001"
+	}
+	scanner := bufio.NewScanner(inR)
+	for scanner.Scan() {
+		line := scanner.Text()
+		var req struct {
+			ID     int64  `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal([]byte(line), &req); err != nil {
+			continue
+		}
+		switch req.Method {
+		case "initialize":
+			_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{}}\n", req.ID)
+		case "session/start", "session/resume":
+			_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"session\":{\"sessionId\":%q}}}\n", req.ID, sessID)
+		case "session/setApprovalMode":
+			_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{}}\n", req.ID)
+		}
+	}
+}
+
 func (m *mockMainDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 	if m != nil && m.SpawnFn != nil {
 		return m.SpawnFn(ctx, cfg)
@@ -159,27 +207,11 @@ func (m *mockMainDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConf
 		defer outW.Close()
 		defer errW.Close()
 		if cfg.IsCodex() {
-			sessID := cfg.SessionID
-			if sessID == "" {
-				sessID = "th_mock_12345"
-			}
-			scanner := bufio.NewScanner(inR)
-			for scanner.Scan() {
-				line := scanner.Text()
-				var req struct {
-					ID     int64  `json:"id"`
-					Method string `json:"method"`
-				}
-				if err := json.Unmarshal([]byte(line), &req); err != nil {
-					continue
-				}
-				switch req.Method {
-				case "initialize":
-					_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{}}\n", req.ID)
-				case "thread/start", "thread/resume":
-					_, _ = fmt.Fprintf(outW, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"thread\":{\"id\":%q}}}\n", req.ID, sessID)
-				}
-			}
+			serveMockCodexMain(inR, outW, cfg.SessionID)
+			return
+		}
+		if cfg.IsMuse() {
+			serveMockMuseMain(inR, outW, cfg.SessionID)
 			return
 		}
 		sessID := cfg.SessionID

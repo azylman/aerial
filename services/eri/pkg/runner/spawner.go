@@ -203,12 +203,17 @@ func (s *DefaultDaemonSpawner) SpawnWithStartupContext(lifetime, startup context
 	case cfg.IsCodex():
 		bin = cfg.CodexBin
 		if bin == "" {
-			bin = "codex"
+			bin = engineCodex
+		}
+	case cfg.IsMuse():
+		bin = cfg.MuseBin
+		if bin == "" {
+			bin = engineMuse
 		}
 	case cfg.IsClaude():
 		bin = cfg.ClaudeBin
 		if bin == "" {
-			bin = "claude"
+			bin = engineClaude
 		}
 	default:
 		bin = cfg.AgyBin

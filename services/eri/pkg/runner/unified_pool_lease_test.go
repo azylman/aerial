@@ -720,6 +720,30 @@ func TestUnifiedProcessPool_ClaudeEngine_BuildDaemonConfig(t *testing.T) {
 	}
 }
 
+func verifyDaemonSpawnForSession(t *testing.T, poolCfg PoolConfig, target, sessionID string) DaemonConfig {
+	t.Helper()
+	var mu sync.Mutex
+	var spawnCfg DaemonConfig
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		onSpawn: func(c DaemonConfig) {
+			mu.Lock()
+			spawnCfg = c
+			mu.Unlock()
+		},
+	})
+	pool := NewUnifiedProcessPool(poolCfg, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	daemon, err := pool.GetOrCreate(ctx, target, sessionID)
+	if err != nil || daemon == nil {
+		t.Fatalf("unexpected GetOrCreate error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return spawnCfg
+}
+
 func TestUnifiedProcessPool_CodexEngine_BuildDaemonConfig(t *testing.T) {
 	t.Parallel()
 
@@ -765,31 +789,11 @@ func TestUnifiedProcessPool_CodexEngine_BuildDaemonConfig(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mu sync.Mutex
-			var spawnCfg DaemonConfig
-			mock := newPipeMockSpawner(pipeMockSpawnerOpts{
-				onSpawn: func(c DaemonConfig) {
-					mu.Lock()
-					spawnCfg = c
-					mu.Unlock()
-				},
-			})
-			pool := NewUnifiedProcessPool(PoolConfig{
+			capturedCfg := verifyDaemonSpawnForSession(t, PoolConfig{
 				Engine:         "codex",
 				CodexBin:       tc.wantCodexBin,
 				SessionManager: sm,
-			}, mock)
-			defer pool.Close()
-
-			ctx := context.Background()
-			daemon, err := pool.GetOrCreate(ctx, "target-"+tc.name, tc.sessionID)
-			if err != nil || daemon == nil {
-				t.Fatalf("unexpected GetOrCreate error: %v", err)
-			}
-
-			mu.Lock()
-			capturedCfg := spawnCfg
-			mu.Unlock()
+			}, "target-"+tc.name, tc.sessionID)
 
 			if capturedCfg.CodexBin != tc.wantCodexBin {
 				t.Errorf("expected CodexBin %q, got %q", tc.wantCodexBin, capturedCfg.CodexBin)
@@ -830,6 +834,98 @@ func TestUnifiedProcessPool_UpdateEngine_Codex(t *testing.T) {
 	pool.mu.RUnlock()
 	if gotEngine != "claude" || gotCodex != "/bin/codex" {
 		t.Errorf("expected engine 'claude' and preserved codexBin '/bin/codex', got engine=%q codex=%q", gotEngine, gotCodex)
+	}
+}
+
+func TestUnifiedProcessPool_MuseEngine_BuildDaemonConfig(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sm := session.New(tmpDir, tmpDir)
+
+	existingSessID := "018e3f94-9b56-7890-a123-456789abcdef"
+	museSessDir := filepath.Join(tmpDir, "muse", "sessions")
+	if err := os.MkdirAll(museSessDir, 0o755); err != nil {
+		t.Fatalf("failed creating muse session dir: %v", err)
+	}
+	sessionPath := filepath.Join(museSessDir, existingSessID+".jsonl")
+	if err := os.WriteFile(sessionPath, []byte(`{"version":1,"payload_type":"runtime.session","payload":{"type":"event","event":{"kind":"assistant_message_committed"}}}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed writing dummy muse session: %v", err)
+	}
+
+	tests := []struct {
+		name              string
+		sessionID         string
+		wantResumeSession bool
+		wantMuseBin       string
+	}{
+		{
+			name:              "empty session id does not resume",
+			sessionID:         "",
+			wantResumeSession: false,
+			wantMuseBin:       "/custom/bin/muse",
+		},
+		{
+			name:              "non-existent session id does not resume",
+			sessionID:         "018e3f94-0000-0000-0000-000000000000",
+			wantResumeSession: false,
+			wantMuseBin:       "/custom/bin/muse",
+		},
+		{
+			name:              "existing session id resumes",
+			sessionID:         existingSessID,
+			wantResumeSession: true,
+			wantMuseBin:       "/custom/bin/muse",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			capturedCfg := verifyDaemonSpawnForSession(t, PoolConfig{
+				Engine:         "muse",
+				MuseBin:        tc.wantMuseBin,
+				SessionManager: sm,
+			}, "target-"+tc.name, tc.sessionID)
+
+			if capturedCfg.MuseBin != tc.wantMuseBin {
+				t.Errorf("expected MuseBin %q, got %q", tc.wantMuseBin, capturedCfg.MuseBin)
+			}
+			if capturedCfg.ResumeSession != tc.wantResumeSession {
+				t.Errorf("expected ResumeSession %v, got %v", tc.wantResumeSession, capturedCfg.ResumeSession)
+			}
+		})
+	}
+}
+
+func TestUnifiedProcessPool_UpdateEngine_Muse(t *testing.T) {
+	t.Parallel()
+
+	pool := NewUnifiedProcessPool(PoolConfig{
+		Engine: "agy",
+	}, NewMockSpawner())
+	defer pool.Close()
+
+	pool.UpdateEngine("muse", "/bin/claude", "/bin/codex", "/bin/muse")
+	pool.mu.RLock()
+	gotEngine := pool.cfg.Engine
+	gotClaude := pool.cfg.ClaudeBin
+	gotCodex := pool.cfg.CodexBin
+	gotMuse := pool.cfg.MuseBin
+	pool.mu.RUnlock()
+
+	if gotEngine != "muse" || gotClaude != "/bin/claude" || gotCodex != "/bin/codex" || gotMuse != "/bin/muse" {
+		t.Errorf("unexpected pool config after UpdateEngine: engine=%q, claude=%q, codex=%q, muse=%q", gotEngine, gotClaude, gotCodex, gotMuse)
+	}
+
+	// UpdateEngine without museBin parameter preserves existing MuseBin
+	pool.UpdateEngine("claude", "/usr/local/bin/claude")
+	pool.mu.RLock()
+	gotEngine = pool.cfg.Engine
+	gotMuse = pool.cfg.MuseBin
+	pool.mu.RUnlock()
+	if gotEngine != "claude" || gotMuse != "/bin/muse" {
+		t.Errorf("expected engine 'claude' and preserved museBin '/bin/muse', got engine=%q muse=%q", gotEngine, gotMuse)
 	}
 }
 

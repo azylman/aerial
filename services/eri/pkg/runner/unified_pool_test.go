@@ -89,9 +89,41 @@ func runCodexPipeMockPump(inR io.Reader, outW io.WriteCloser, sessID string, idx
 	}
 }
 
+func runMusePipeMockPump(inR io.Reader, outW io.WriteCloser, sessID string, idx int, opts pipeMockSpawnerOpts) {
+	defer outW.Close()
+	if opts.skipInitOnAttempt != 0 && idx == opts.skipInitOnAttempt {
+		return
+	}
+	scanner := bufio.NewScanner(inR)
+	for scanner.Scan() {
+		var req museRPCRequest
+		if err := json.Unmarshal([]byte(scanner.Text()), &req); err != nil {
+			continue
+		}
+		switch req.Method {
+		case "initialize":
+			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{}}`+"\n", req.ID)
+		case "initialized":
+		case "session/start", "session/resume":
+			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{"session":{"id":%q}}}`+"\n", req.ID, sessID)
+		case "session/setApprovalMode":
+			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{}}`+"\n", req.ID)
+		case "turn/start":
+			if opts.echoRes != "" {
+				_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"item-1","type":"agentMessage","text":%q}}}`+"\n", opts.echoRes)
+			}
+			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}`+"\n")
+		}
+	}
+}
+
 func runPipeMockPump(inR io.Reader, outW io.WriteCloser, sessID string, idx int, attemptCount *atomic.Int32, opts pipeMockSpawnerOpts, cfg DaemonConfig) {
 	if cfg.IsCodex() {
 		runCodexPipeMockPump(inR, outW, sessID, idx, opts)
+		return
+	}
+	if cfg.IsMuse() {
+		runMusePipeMockPump(inR, outW, sessID, idx, opts)
 		return
 	}
 	defer outW.Close()

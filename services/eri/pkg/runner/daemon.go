@@ -22,6 +22,7 @@ type DaemonConfig struct {
 	Engine                  string
 	ClaudeBin               string
 	CodexBin                string
+	MuseBin                 string
 	ResumeSession           bool
 	SessionID               string
 	ThreadID                string
@@ -47,6 +48,11 @@ func (c DaemonConfig) IsClaude() bool {
 // IsCodex returns true if the configured Engine is "codex" (case-insensitive).
 func (c DaemonConfig) IsCodex() bool {
 	return strings.EqualFold(strings.TrimSpace(c.Engine), "codex")
+}
+
+// IsMuse returns true if the configured Engine is "muse" (case-insensitive).
+func (c DaemonConfig) IsMuse() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Engine), "muse")
 }
 
 func parseModelAndEffort(model, explicitEffort string, allowXHigh bool) (string, string) {
@@ -130,10 +136,17 @@ func buildClaudeDaemonArgs(cfg DaemonConfig) []string {
 	return args
 }
 
-// BuildDaemonArgs constructs the CLI arguments for launching an agy, claude, or codex streaming daemon process.
+// BuildDaemonArgs constructs the CLI arguments for launching an agy, claude, codex, or muse streaming daemon process.
 func BuildDaemonArgs(cfg DaemonConfig) []string {
 	if cfg.IsCodex() {
 		return []string{"app-server", "--listen", "stdio://"}
+	}
+	if cfg.IsMuse() {
+		args := []string{"serve", "--provider", "meta", "--disable-sandbox", "--trust-workspace", "--disable-request-user-input"}
+		if baseModel, _ := parseModelAndEffort(cfg.Model, cfg.Effort, true); baseModel != "" {
+			args = append(args, "--model", baseModel)
+		}
+		return args
 	}
 	if cfg.IsClaude() {
 		return buildClaudeDaemonArgs(cfg)
