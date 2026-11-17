@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -448,14 +447,31 @@ func (*uninsertedStore) InsertDispatch(_ context.Context, _ db.Dispatch) (bool, 
 	return false, nil
 }
 
+// dispatchOutcomeBus captures published outcomes synchronously for negative assertions.
+type dispatchOutcomeBus struct {
+	pubsub.Bus
+
+	outcomes chan pubsub.DispatchOutcomeEvent
+}
+
+func (b *dispatchOutcomeBus) Publish(ctx context.Context, subject, id string, data any) error {
+	if ev, ok := data.(pubsub.DispatchOutcomeEvent); ok {
+		b.outcomes <- ev
+		return nil
+	}
+	return b.Bus.Publish(ctx, subject, id, data)
+}
+
 type dispatchJobTestCase struct {
 	name                string
+	storeError          string
 	isNilMsg            bool
 	payload             string
 	hasStore            bool
 	useUninsertedStore  bool
 	preInsertDispActive bool
 	preInsertDispDup    bool
+	duplicateStatus     string
 	passNilStore        bool
 	wantErr             bool
 	wantInsert          bool
@@ -489,6 +505,12 @@ func setupDispatchTestStore(ctx context.Context, tc dispatchJobTestCase) db.Stor
 			CreatedAt: time.Now().UTC(),
 			UpdatedAt: time.Now().UTC(),
 		})
+	}
+	if tc.duplicateStatus != "" {
+		_, _ = fake.InsertDispatch(ctx, db.Dispatch{ID: "disp-dup-1", SessionID: "sess-active-1", Status: tc.duplicateStatus, Prompt: "original"})
+	}
+	if tc.storeError != "" {
+		fake.FailNext(tc.storeError, errors.New("store unavailable"))
 	}
 	if tc.useUninsertedStore {
 		return &uninsertedStore{FakeStore: fake}
@@ -529,6 +551,12 @@ func verifyDispatchJobOutcome(ctx context.Context, t *testing.T, store db.Store,
 		disps, _ := s.GetPendingOrProcessingDispatches(ctx, 10)
 		if len(disps) != 1 || disps[0].ID != "disp-active-existing" {
 			t.Errorf("expected only disp-active-existing in pending, got %+v", disps)
+		}
+	}
+	if tc.duplicateStatus != "" {
+		d, err := s.GetDispatch(ctx, "disp-dup-1")
+		if err != nil || d == nil || d.Status != tc.duplicateStatus || d.Prompt != "original" {
+			t.Fatalf("duplicate changed: %+v, %v", d, err)
 		}
 	}
 	if tc.checkDupUnchanged {
@@ -587,6 +615,13 @@ func TestHandleEriDispatchJob_Table(t *testing.T) {
 	t.Parallel()
 
 	tests := []dispatchJobTestCase{
+		{name: "duplicate lookup error", hasStore: true, storeError: "GetDispatch", wantErr: true, payload: `{"id":"lookup-error","source":"vanadis","prompt":"test","skip_if_active":true}`},
+		{name: "active lookup error", hasStore: true, storeError: "HasActiveDispatchTurn", wantErr: true, payload: `{"id":"active-error","source":"vanadis","prompt":"test","skip_if_active":true}`},
+
+		{name: "pending replay before active gate", hasStore: true, duplicateStatus: db.StatusPending, payload: `{"id":"disp-dup-1","session_id":"sess-active-1","source":"vanadis","prompt":"replacement","skip_if_active":true}`},
+		{name: "processing replay before active gate", hasStore: true, duplicateStatus: db.StatusProcessing, payload: `{"id":"disp-dup-1","session_id":"sess-active-1","source":"vanadis","prompt":"replacement","skip_if_active":true}`},
+		{name: "terminal replay before competing active session", hasStore: true, duplicateStatus: db.StatusCompleted, preInsertDispActive: true, payload: `{"id":"disp-dup-1","session_id":"sess-active-1","source":"vanadis","prompt":"replacement","skip_if_active":true}`},
+
 		{
 			name:     "nil message returns error",
 			isNilMsg: true,
@@ -611,8 +646,9 @@ func TestHandleEriDispatchJob_Table(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:     "nil store returns error",
-			payload:  `{"source":"vanadis","prompt":"hello"}`,
+			name:              "nil store returns error",
+			payload:           `{"id":"nil-store","source":"vanadis","prompt":"hello"}`,
+			wantOutcomeStatus: "failed", wantOutcomeID: "nil-store",
 			hasStore: false,
 			wantErr:  true,
 		},
@@ -682,18 +718,9 @@ func TestHandleEriDispatchJob_Table(t *testing.T) {
 			_ = pubsub.EnsureCoreStreams(ctx, memBus)
 
 			outcomeChan := make(chan pubsub.DispatchOutcomeEvent, 1)
-			_, _ = memBus.Subscribe(ctx, pubsub.SubjectAerialDispatchPrefix+">", "test-outcome", func(_ context.Context, outcomeMsg pubsub.Message) error {
-				var ev pubsub.DispatchOutcomeEvent
-				_ = json.Unmarshal(outcomeMsg.Data(), &ev)
-				select {
-				case outcomeChan <- ev:
-				default:
-				}
-				return nil
-			})
 
 			pool := queue.New(nil, queue.WorkerPoolConfig{Store: store})
-			pool.SetEventBus(memBus)
+			pool.SetEventBus(&dispatchOutcomeBus{Bus: memBus, outcomes: outcomeChan})
 
 			callStore := store
 			if tc.passNilStore {
