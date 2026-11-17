@@ -628,6 +628,18 @@ func TestPostgresVanadisStore_BuildCRUD(t *testing.T) {
 		wantErrIs error
 	}{
 		{name: "create build success", db: dbScript{}},
+		{name: "replay build read failure", db: dbScript{execTag: "INSERT 0 0", buildRow: errRow(errors.New("read failed"))}, wantErr: true},
+		{name: "replay chunks read failure", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, queryErr: errors.New("read failed")}, wantErr: true},
+		{name: "replay chunks scan failure", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: c1, scanErr: errors.New("scan failed")}, wantErr: true},
+		{name: "identical committed replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: c1}},
+		{name: "evolved committed replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &VanadisBuild{ID: "b1", ThreadID: "th1", Title: "Build 1", Objective: "Obj 1", Status: "running", StatusMessageID: "widget"}}, chunks: c1}},
+		{name: "different objective replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &VanadisBuild{ID: "b1", ThreadID: "th1", Title: "Build 1", Objective: "different"}}, chunks: c1}, wantErrIs: ErrBuildConflict},
+		{name: "partial replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: nil}, wantErrIs: ErrBuildConflict},
+		{name: "different chunk replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Repo: "aerial", Title: "changed", DependsOn: []string{}}}}, wantErrIs: ErrBuildConflict},
+		{name: "chunk id conflict", db: dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "23505", ConstraintName: "vanadis_chunks_pkey", Detail: "private"})}, wantErrIs: ErrBuildConflict},
+		{name: "chunk index conflict", db: dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "23505", ConstraintName: "uq_vanadis_chunks_build_index", Detail: "private"})}, wantErrIs: ErrBuildConflict},
+		{name: "unknown unique", db: dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "23505", ConstraintName: "foreign_constraint", Detail: "private"})}, wantErr: true},
+		{name: "deadlock", db: dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "40P01", ConstraintName: "vanadis_chunks_pkey", Detail: "private"})}, wantErr: true},
 		{name: "create build begin error", db: dbScript{beginErr: errors.New("begin error")}, wantErr: true},
 		{name: "create build exec build error", db: dbScript{failExec: "INSERT INTO vanadis_builds", execErr: errors.New("exec build error")}, wantErr: true},
 		{name: "create build exec chunk error", db: dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: errors.New("exec chunk error")}, wantErr: true},

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -455,9 +457,74 @@ func insertBuildChunk(ctx context.Context, tx pgx.Tx, buildID string, c VanadisC
 		strings.TrimSpace(c.Banner), strings.TrimSpace(c.MergeAwakeableID),
 		strings.TrimSpace(c.DeployAwakeableID), startedAt, completedAt,
 	); err != nil {
+		if knownCreationConflict(err, "vanadis_chunks_pkey", "uq_vanadis_chunks_build_index") {
+			return fmt.Errorf("%w: chunk %q in build %q already exists", ErrBuildConflict, c.ID, buildID)
+		}
 		return fmt.Errorf("failed to insert vanadis chunk %s: %w", c.ID, err)
 	}
 	return nil
+}
+
+// Only constraints owned by build creation are deterministic conflicts.
+// Unrecognized database failures retain their original retryable error chain.
+func knownCreationConflict(err error, constraints ...string) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		return false
+	}
+	return slices.Contains(constraints, pgErr.ConstraintName)
+}
+
+// Compare immutable request fields only: execution may already have advanced
+// after a successful commit whose acknowledgement was lost.
+func sameBuildCreation(a VanadisBuild, ac []VanadisChunk, b VanadisBuild, bc []VanadisChunk) bool {
+	buildKey := func(v VanadisBuild) VanadisBuild {
+		return VanadisBuild{
+			ID: strings.TrimSpace(v.ID), ThreadID: strings.TrimSpace(v.ThreadID), Tier: v.Tier,
+			Title:     firstNonEmpty(strings.TrimSpace(v.Title), strings.TrimSpace(v.Objective)),
+			Objective: strings.TrimSpace(v.Objective), SharedContext: strings.TrimSpace(v.SharedContext), Quiet: v.Quiet,
+		}
+	}
+	if buildKey(a) != buildKey(b) || len(ac) != len(bc) {
+		return false
+	}
+	chunkKey := func(c VanadisChunk) (VanadisChunk, error) {
+		mode, err := normalizeChunkMode(c.Mode)
+		if err != nil {
+			return VanadisChunk{}, err
+		}
+		effort, err := normalizeChunkEffort(c.Effort)
+		if err != nil {
+			return VanadisChunk{}, err
+		}
+		repo := ""
+		if mode == "pr" {
+			repo = normalizeRepo(c.Repo)
+		}
+		return VanadisChunk{
+			ID: strings.TrimSpace(c.ID), ChunkIndex: c.ChunkIndex, Mode: mode, Repo: repo,
+			Title: strings.TrimSpace(c.Title), Instructions: strings.TrimSpace(c.Instructions),
+			TargetFiles: nonNilSlice(c.TargetFiles), TargetSymbols: nonNilSlice(c.TargetSymbols),
+			Effort: effort, AcceptanceCriteria: nonNilSlice(c.AcceptanceCriteria), DependsOn: nonNilSlice(c.DependsOn),
+		}, nil
+	}
+	byID := make(map[string]VanadisChunk, len(ac))
+	for _, c := range ac {
+		key, err := chunkKey(c)
+		if err != nil {
+			return false
+		}
+		byID[c.ID] = key
+	}
+	for _, c := range bc {
+		old, ok := byID[strings.TrimSpace(c.ID)]
+		key, err := chunkKey(c)
+		if err != nil || !ok || !reflect.DeepEqual(old, key) {
+			return false
+		}
+		delete(byID, strings.TrimSpace(c.ID))
+	}
+	return len(byID) == 0
 }
 
 func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error {
@@ -481,11 +548,33 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 			log.Printf("[vanadis] tx rollback error: %v", rbErr)
 		}
 	}()
-	bQ := `INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);`
+	bQ := `INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING;`
 	now := time.Now().UTC()
 	bTitle := firstNonEmpty(strings.TrimSpace(build.Title), objective)
-	if _, err = tx.Exec(ctx, bQ, buildID, threadID, build.Tier, bTitle, objective, strings.TrimSpace(build.SharedContext), firstNonEmpty(build.Status, statusPending), strings.TrimSpace(build.StatusMessageID), build.Quiet, now, now); err != nil {
+	tag, err := tx.Exec(ctx, bQ, buildID, threadID, build.Tier, bTitle, objective, strings.TrimSpace(build.SharedContext), firstNonEmpty(build.Status, statusPending), strings.TrimSpace(build.StatusMessageID), build.Quiet, now, now)
+	if err != nil {
 		return fmt.Errorf("failed to insert vanadis build: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// ON CONFLICT waits for an ambiguous prior commit without aborting this
+		// transaction. Lock the build before comparing its complete chunk set.
+		existing, err := scanBuild(tx.QueryRow(ctx, "SELECT "+buildColumns+" FROM vanadis_builds WHERE id = $1 FOR UPDATE;", buildID))
+		if err != nil {
+			return fmt.Errorf("read existing build: %w", err)
+		}
+		rows, err := tx.Query(ctx, selectChunksForUpdateSQL, buildID)
+		if err != nil {
+			return fmt.Errorf("read existing chunks: %w", err)
+		}
+		persisted, err := scanChunks(rows)
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if !sameBuildCreation(existing, persisted, build, normChunks) {
+			return fmt.Errorf("%w: build %q already exists with different creation data", ErrBuildConflict, buildID)
+		}
+		return tx.Commit(ctx)
 	}
 	for _, c := range normChunks {
 		if err := insertBuildChunk(ctx, tx, buildID, c, insertChunkSQL); err != nil {
