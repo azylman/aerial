@@ -41,6 +41,7 @@ jobs:
       vanadis: ${{ steps.filter.outputs.vanadis }}
       vanadis-restate: ${{ steps.filter.outputs.vanadis-restate }}
       vanadis-nats: ${{ steps.filter.outputs.vanadis-nats }}
+      coverage-ingest: ${{ steps.filter.outputs.coverage-ingest }}
       prospera: ${{ steps.filter.outputs.prospera }}
       github-runner: ${{ steps.filter.outputs.github-runner }}
       migrator: ${{ steps.filter.outputs.migrator }}
@@ -93,6 +94,8 @@ jobs:
             vanadis-nats:
               - 'services/vanadis-nats/**'
               - 'pkg/**'
+            coverage-ingest:
+              - 'services/coverage-ingest/**'
             prospera:
               - 'services/prospera/**'
               - 'pkg/**'
@@ -122,6 +125,7 @@ jobs:
               vanadis: "${{ steps.filter.outputs.vanadis }}",
               "vanadis-restate": "${{ steps.filter.outputs.vanadis-restate }}",
               "vanadis-nats": "${{ steps.filter.outputs.vanadis-nats }}",
+              "coverage-ingest": "${{ steps.filter.outputs.coverage-ingest }}",
               prospera: "${{ steps.filter.outputs.prospera }}",
               "github-runner": "${{ steps.filter.outputs.github-runner }}",
               migrator: "${{ steps.filter.outputs.migrator }}"
@@ -142,6 +146,7 @@ jobs:
               { service: "vanadis", context: ".", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
               { service: "vanadis-restate", context: ".", file: "./services/vanadis-restate/Dockerfile", image_name: "aerial-vanadis-restate" },
               { service: "vanadis-nats", context: ".", file: "./services/vanadis-nats/Dockerfile", image_name: "aerial-vanadis-nats" },
+              { service: "coverage-ingest", context: ".", file: "./services/coverage-ingest/Dockerfile", image_name: "aerial-coverage-ingest" },
               { service: "prospera", context: ".", file: "./services/prospera/Dockerfile", image_name: "aerial-prospera" },
               { service: "github-runner", context: ".", file: "./services/github-runner/Dockerfile", image_name: "aerial-github-runner" },
               { service: "migrator", context: ".", file: "./services/migrator/Dockerfile", image_name: "aerial-migrator" }
