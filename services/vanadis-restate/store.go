@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +13,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
@@ -173,6 +170,8 @@ type VanadisStore interface {
 	AppendChunks(ctx context.Context, buildID string, inputs []CreateChunkInput) ([]VanadisChunk, error)
 	RemoveChunk(ctx context.Context, buildID, chunkRef string) (*VanadisChunk, []VanadisChunk, error)
 	RecordPRRolloutState(ctx context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error
+	RecordPRCheckStatus(ctx context.Context, chunkID, headSHA, checkName, checkState string) error
+	ResetPRCheckState(ctx context.Context, chunkID, headSHA, mergeSHA string) error
 	CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
 	UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error
 	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
@@ -296,6 +295,31 @@ func scanBuild(s rowScanner) (VanadisBuild, error) {
 	return b, err
 }
 
+func applyRawChunkCIChecks(c *VanadisChunk, rawCIChecks []byte) {
+	if len(rawCIChecks) == 0 || string(rawCIChecks) == jsonNull || string(rawCIChecks) == "{}" {
+		return
+	}
+	var checks map[string]string
+	if err := json.Unmarshal(rawCIChecks, &checks); err != nil {
+		return
+	}
+	c.HeadSHA = strings.TrimSpace(checks["_head_sha"])
+	c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
+	if headAtNano, parseErr := strconv.ParseInt(strings.TrimSpace(checks["_head_at"]), 10, 64); parseErr == nil && headAtNano > 0 {
+		c.HeadAt = time.Unix(0, headAtNano).UTC()
+	}
+	if rawSeen := strings.TrimSpace(checks["_seen_heads"]); rawSeen != "" {
+		c.SeenHeads = strings.Split(rawSeen, ",")
+	}
+	delete(checks, "_head_sha")
+	delete(checks, "_merge_sha")
+	delete(checks, "_seen_heads")
+	delete(checks, "_head_at")
+	if len(checks) > 0 {
+		c.CIChecks = checks
+	}
+}
+
 func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 	chunks := make([]VanadisChunk, 0)
 	for rows.Next() {
@@ -320,12 +344,7 @@ func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), nonNilSlice(c.AcceptanceCriteria)
 		c.DependsOn = nonNilSlice(c.DependsOn)
 		c.Effort = capChunkEffort(c.Effort)
-		if len(rawCIChecks) > 0 && string(rawCIChecks) != jsonNull && string(rawCIChecks) != "{}" {
-			var checks map[string]string
-			if err := json.Unmarshal(rawCIChecks, &checks); err == nil {
-				c.CIChecks = checks
-			}
-		}
+		applyRawChunkCIChecks(&c, rawCIChecks)
 		if len(rawRolloutState) > 0 && string(rawRolloutState) != jsonNull && string(rawRolloutState) != "{}" {
 			var rs pubsub.PRRolloutState
 			if err := json.Unmarshal(rawRolloutState, &rs); err == nil {
@@ -1261,7 +1280,7 @@ func (s *PostgresVanadisStore) RecordPRRolloutState(ctx context.Context, chunkID
 		rolloutBytes = []byte("{}")
 	}
 
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET rollout_state = CASE WHEN status = 'completed' THEN rollout_state ELSE $1::jsonb END, status = CASE WHEN $2 != '' THEN $2 ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`, rolloutBytes, strings.TrimSpace(status), chunkID)
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET rollout_state = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN rollout_state ELSE $1::jsonb END, status = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN status WHEN $2 != '' THEN $2 ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`, rolloutBytes, strings.TrimSpace(status), chunkID)
 	switch {
 	case err != nil:
 		return fmt.Errorf("record pr rollout state: %w", err)
@@ -1289,65 +1308,4 @@ func (s *PostgresVanadisStore) UpdateChunkBannerAndStatus(ctx context.Context, c
 	default:
 		return nil
 	}
-}
-
-var newPgxPoolFn = pgxpool.NewWithConfig
-
-func initPostgres(ctx context.Context, pgURL string) (*PostgresVanadisStore, func(context.Context), error) {
-	poolConfig, err := pgxpool.ParseConfig(pgURL)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parse postgres url: %w", err)
-	}
-	poolConfig.MaxConns, poolConfig.MinConns = 10, 2
-	pool, err := newPgxPoolFn(ctx, poolConfig)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create pgxpool: %w", err)
-	}
-	store := NewPostgresVanadisStore(pool)
-	return store, func(context.Context) {
-		pool.Close()
-	}, nil
-}
-
-func normalizeDiscordThreadID(s string) string {
-	clean := strings.TrimSpace(s)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
-}
-
-func generateBuildID() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("build-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
-}
-
-func cleanRepoName(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
-		return repo[idx+1:]
-	}
-	return repo
-}
-
-func actionDispatchID(chunk VanadisChunk) string {
-	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
-}
-
-func actionCompletionAccepted(chunk VanadisChunk, buildStatus, dispatchID string) bool {
-	if chunk.Status == statusCompleted && (buildStatus == statusRunning || buildStatus == statusCompleted) {
-		chunk.Status = statusRunning
-		buildStatus = statusRunning
-	}
-	return actionCompletionAllowed(chunk, buildStatus, dispatchID)
-}
-
-// actionLaunchKey preserves legacy acknowledgement keys outside action retries.
-func actionLaunchKey(chunk VanadisChunk) string {
-	if chunk.Mode == chunkModeAction && chunk.StallNudges > 0 {
-		// A colon is forbidden in chunk IDs, keeping generation keys disjoint.
-		return "dispatch:" + actionDispatchID(chunk)
-	}
-	return chunk.ID
 }

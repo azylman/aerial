@@ -815,30 +815,31 @@ func TestInitPostgres(t *testing.T) {
 		name       string
 		url        string
 		mockFail   bool
+		pingFail   bool
 		wantErr    bool
 		wantSubstr string
 	}{
-		{
-			name:       "invalid url",
-			url:        "://invalid-url",
-			wantErr:    true,
-			wantSubstr: "parse postgres url",
-		},
-		{
-			name:       "pool creation error",
-			url:        "postgres://user:pass@localhost:5432/db",
-			mockFail:   true,
-			wantErr:    true,
-			wantSubstr: "create pgxpool",
-		},
+		{name: "invalid url", url: "://invalid-url", wantErr: true, wantSubstr: "parse postgres url"},
+		{name: "pool creation error", url: "postgres://user:pass@localhost:5432/db", mockFail: true, wantErr: true, wantSubstr: "create pgxpool"},
+		{name: "ping error closes pool", url: "postgres://user:pass@localhost:5432/db", pingFail: true, wantErr: true, wantSubstr: "ping postgres"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			closed := false
+			origNew, origPing, origClose := newPgxPoolFn, pingPgxPoolFn, closePgxPoolFn
+			defer func() { newPgxPoolFn, pingPgxPoolFn, closePgxPoolFn = origNew, origPing, origClose }()
+			closePgxPoolFn = func(pool *pgxpool.Pool) {
+				closed = true
+				origClose(pool)
+			}
 			if tc.mockFail {
-				orig := newPgxPoolFn
-				defer func() { newPgxPoolFn = orig }()
 				newPgxPoolFn = func(context.Context, *pgxpool.Config) (*pgxpool.Pool, error) {
 					return nil, errors.New("mock pool fail")
+				}
+			}
+			if tc.pingFail {
+				pingPgxPoolFn = func(context.Context, *pgxpool.Pool) error {
+					return errors.New("ping refused")
 				}
 			}
 			_, _, err := initPostgres(ctx, tc.url)
@@ -847,6 +848,9 @@ func TestInitPostgres(t *testing.T) {
 			}
 			if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+			}
+			if tc.pingFail && !closed {
+				t.Fatal("expected pool to be closed on ping failure")
 			}
 		})
 	}
