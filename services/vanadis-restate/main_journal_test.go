@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/assert"
@@ -156,6 +159,121 @@ func TestRouterJournalLookupErrors(t *testing.T) {
 				assert.Error(t, prErr)
 				assert.Error(t, dispatchErr)
 			}
+		})
+	}
+}
+
+// Exercise the database classification through the actual persistence callback,
+// before the SDK adapter can turn retryable errors into terminal mock results.
+func TestCreateBuildJournalCallback(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		code       string
+		constraint string
+		terminal   restate.Code
+	}{
+		{"chunk ID", "23505", "vanadis_chunks_pkey", 409},
+		{"chunk index", "23505", "uq_vanadis_chunks_build_index", 409},
+		{"unknown unique", "23505", "unknown", 0},
+		{"serialization", "40001", "vanadis_chunks_pkey", 0},
+		{"deadlock", "40P01", "", 0},
+		{"connection", "08006", "", 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dbErr := fmt.Errorf("database: %w", &pgconn.PgError{Code: tc.code, ConstraintName: tc.constraint, Detail: "private database details"})
+			store, _ := (dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: dbErr}).open()
+			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			mc := mocks.NewMockContext(t)
+			want := dbErr
+			if tc.terminal != 0 {
+				want = fmt.Errorf("%w: chunk %q in build %q already exists", ErrBuildConflict, "c1", "b1")
+			}
+			observeJournalCallback(t, mc, want, tc.terminal)
+			_, _ = runJournaled(restate.WithMockContext(mc), labelCreate, "create-build-postgres", func(rc restate.RunContext) (bool, error) {
+				return bo.persistBuildCreation(rc, VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Do work", Repo: "aerial", DependsOn: []string{}}})
+			})
+		})
+	}
+}
+
+func TestCreateBuildCommitAcknowledgementReplay(t *testing.T) {
+	t.Parallel()
+	lostAck := errors.New("connection lost after commit")
+	build := VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}
+	chunks := []VanadisChunk{{ID: "c1", BuildID: "b1", Title: "Chunk", Instructions: "Do work", Repo: "aerial", DependsOn: []string{}}}
+	tests := []struct {
+		name string
+		db   dbScript
+		want error
+	}{
+		{"acknowledgement lost", dbScript{commitErr: lostAck}, lostAck},
+		{"committed request replay", dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &build}, chunks: chunks}, nil},
+	}
+	// The second database fixture represents the durable state after the first
+	// commit succeeded at PostgreSQL but its response failed at the connection.
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, _ := tc.db.open()
+			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			accepted, err := bo.persistBuildCreation(mockRunContext{Context: context.Background()}, build, chunks)
+			assert.ErrorIs(t, err, tc.want)
+			assert.Equal(t, tc.want == nil, accepted)
+		})
+	}
+}
+
+// creationTransaction models atomic visibility at the database boundary:
+// inserts remain private until Commit and disappear on Rollback.
+type creationTransaction struct {
+	mockTx
+
+	pending []string
+	durable []string
+	failure error
+}
+
+func (tx *creationTransaction) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(query, "INSERT INTO vanadis_chunks") {
+		return pgconn.CommandTag{}, tx.failure
+	}
+	id, ok := args[0].(string)
+	if !ok {
+		return pgconn.CommandTag{}, errors.New("expected build ID")
+	}
+	tx.pending = append(tx.pending, id)
+	return pgconn.NewCommandTag("INSERT 0 1"), nil
+}
+
+func (tx *creationTransaction) Commit(context.Context) error {
+	tx.durable = append(tx.durable, tx.pending...)
+	tx.pending = nil
+	return nil
+}
+
+func (tx *creationTransaction) Rollback(context.Context) error {
+	tx.pending = nil
+	return nil
+}
+
+func TestCreateBuildConflictAtomicity(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, constraint string }{
+		{"chunk ID", "vanadis_chunks_pkey"},
+		{"chunk index", "uq_vanadis_chunks_build_index"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tx := &creationTransaction{failure: &pgconn.PgError{Code: "23505", ConstraintName: tc.constraint}}
+			store := newMockStore(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }})
+			err := store.CreateBuild(context.Background(), VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Work", Repo: "aerial", DependsOn: []string{}}})
+			require.ErrorIs(t, err, ErrBuildConflict)
+			assert.Empty(t, tx.durable)
+			assert.Empty(t, tx.pending)
 		})
 	}
 }
