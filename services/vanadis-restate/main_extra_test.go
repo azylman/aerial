@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
@@ -1164,4 +1165,41 @@ func TestReconcileErrorsMetric(t *testing.T) {
 			assert.Equal(t, beforeServer+tc.wantServerInc, reconcileErrorsCount(t, tc.handler))
 		})
 	}
+}
+
+func TestMain_Execution(t *testing.T) {
+	origLoad, origRun, origExit, origTracing := loadConfigFn, runAppFn, exitFn, initTracingFn
+	t.Cleanup(func() {
+		loadConfigFn, runAppFn, exitFn, initTracingFn = origLoad, origRun, origExit, origTracing
+	})
+	var tracedService string
+	flushes := 0
+	initTracingFn = func(_ context.Context, service, _ string) (tracing.Config, func()) {
+		tracedService = service
+		return tracing.Config{}, func() { flushes++ }
+	}
+
+	loadConfigFn = func() Config {
+		return Config{HealthPort: "4026", RestatePort: "9080", VanadisURL: "http://vanadis.aerial:4025"}
+	}
+
+	// 1. Success case
+	runAppFn = func(ctx context.Context, cfg Config) error {
+		return nil
+	}
+	exited := false
+	exitFn = func(format string, v ...any) {
+		exited = true
+	}
+	main()
+	assert.False(t, exited)
+	assert.Equal(t, "vanadis-restate", tracedService)
+	assert.Equal(t, 1, flushes)
+
+	// 2. Error case
+	runAppFn = func(ctx context.Context, cfg Config) error {
+		return errors.New("startup failed")
+	}
+	main()
+	assert.True(t, exited)
 }

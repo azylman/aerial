@@ -24,6 +24,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 const (
@@ -141,7 +142,7 @@ func recordReconcileError(handler string, err error) {
 
 func runJournaled[T any](ctx restate.Context, handlerLabel, stepName string, fn func(restate.RunContext) (T, error)) (T, error) {
 	return restate.Run(ctx, func(rc restate.RunContext) (T, error) {
-		out, err := fn(rc)
+		out, err := runInSpan(rc, spanPrefix+handlerLabel+"/"+stepName, fn)
 		if err != nil {
 			recordReconcileError(handlerLabel, err)
 		}
@@ -357,7 +358,9 @@ func (r restateObjectRuntime) ClearState() {
 
 func (r restateObjectRuntime) RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error) {
 	return restate.Run(r.ctx, func(rc restate.RunContext) (reconcileStepOutput, error) {
-		return fn(rc)
+		return runInSpan(rc, spanPrefix+"reconcile/"+name, func(trc restate.RunContext) (reconcileStepOutput, error) {
+			return fn(trc)
+		})
 	}, restate.WithName(name))
 }
 
@@ -1326,10 +1329,11 @@ func RunApp(ctx context.Context, cfg Config) error {
 		}
 	}()
 
-	eriClient := NewHTTPEriClient(cfg.EriURL, nil)
-	executor := NewExecutor(cfg.ShareRoot, eriClient, bus, cfg.GitHubToken, nil)
+	// Internal clients propagate traceparent; GitHub calls record spans without leaking headers.
+	eriClient := NewHTTPEriClient(cfg.EriURL, tracing.Client(&http.Client{Timeout: 30 * time.Second}))
+	executor := NewExecutor(cfg.ShareRoot, eriClient, bus, cfg.GitHubToken, tracing.ExternalClient(&http.Client{Timeout: 30 * time.Second}))
 
-	restateObj := NewBuildObject(cfg.VanadisURL, nil).WithAuthority(pgStore, executor)
+	restateObj := NewBuildObject(cfg.VanadisURL, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, executor)
 	routerSvc := NewBuildRouterService(pgStore)
 	restateServer := server.NewRestate().
 		Bind(restate.Reflect(restateObj)).
@@ -1359,15 +1363,19 @@ func RunApp(ctx context.Context, cfg Config) error {
 }
 
 var (
-	loadConfigFn = LoadConfigFromEnv
-	runAppFn     = RunApp
-	exitFn       = log.Fatalf
+	loadConfigFn  = LoadConfigFromEnv
+	runAppFn      = RunApp
+	exitFn        = log.Fatalf
+	initTracingFn = tracing.Init
 )
 
 func main() {
 	cfg := loadConfigFn()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	_, flushTracing := initTracingFn(ctx, "vanadis-restate", tracing.DefaultConfigPath)
+	defer flushTracing()
 
 	if err := runAppFn(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		exitFn("[vanadis-restate] Error: %v", err)
