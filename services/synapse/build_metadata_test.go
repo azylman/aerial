@@ -30,20 +30,23 @@ func TestMetadataTransportTotals(t *testing.T) {
 
 func TestParseBuildMetadata(t *testing.T) {
 	t.Parallel()
+	fixture, err := os.ReadFile("testdata/build-metadata-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name, raw string
 		valid     bool
 	}{
-		{"trailing", `{} {}`, false},
+		{"trailing", string(fixture) + ` {}`, false},
 		{"malformed", `{"version":`, false},
 		{"scalar", `1`, false},
 		{"incomplete final selection", `{"version":1,"kind":"final","repository":"owner/repo","workflow_path":".github/workflows/ci.yml","run_id":1,"run_number":1,"run_attempt":1,"event":"push","source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","execution_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pr_number":null,"selected":[{"service":"engine","image_name":"engine"}]}`, false},
 		{"empty selection", `{"version":1,"kind":"manifest","repository":"owner/repo","workflow_path":".github/workflows/ci.yml","run_id":1,"run_number":1,"run_attempt":1,"event":"push","source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","execution_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pr_number":null,"selected":[]}`, true},
-		{"missing selection", `{"version":1,"kind":"manifest"}`, false},
-		{"oversize", strings.Repeat("x", 65537), false},
+		{"oversize", string(fixture) + strings.Repeat(" ", 65537), false},
 		{"empty", "", false},
 		{"fenced", "```json\n{}\n```", false},
-		{"unknown version", `{"version":2}`, false},
+		{"unknown version", strings.Replace(string(fixture), `"version":1`, `"version":2`, 1), false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,6 +87,9 @@ func TestBuildMetadataValidationCases(t *testing.T) {
 		name, replace, with string
 		valid               bool
 	}{
+		{"version alias", `"version":1`, `"version":2,"Version":1`, false},
+		{"identity alias", `"repository":"owner/repo"`, `"repository":"other/repo","Repository":"owner/repo"`, false},
+		{"nested alias", `"selected":[]`, `"selected":[{"service":"engine","Service":"other","image_name":"engine"}]`, false},
 		{"duplicate key", `"version":1`, `"version":1,"version":1`, false},
 		{"null selection", `"selected":[]`, `"selected":null`, false},
 		{"missing selection", `,"selected":[]`, ``, false},
@@ -98,7 +104,6 @@ func TestBuildMetadataValidationCases(t *testing.T) {
 		{"running result", `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"running","source_attempt":1}]`, true},
 		{"cancelled result", `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"cancelled","source_attempt":1}]`, true},
 		{"invalid state", `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"unknown","source_attempt":1}]`, false},
-		{"invalid final count", `"kind":"manifest"`, `"kind":"final","selected":[{"service":"engine","image_name":"engine"}]`, false},
 		{"empty final", `"kind":"manifest"`, `"kind":"final"`, true},
 	}
 	for _, tc := range tests {
@@ -108,7 +113,7 @@ func TestBuildMetadataValidationCases(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(tc.with, `"results"`) && tc.valid {
+			if tc.replace == `"selected":[]` && strings.Contains(tc.with, `"results"`) {
 				raw = []byte(strings.Replace(string(raw), `"kind":"manifest"`, `"kind":"final"`, 1))
 			}
 			_, err = ParseBuildMetadata([]byte(strings.Replace(string(raw), tc.replace, tc.with, 1)))

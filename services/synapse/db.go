@@ -722,6 +722,14 @@ func (r *PostgresPRRegistry) RecordPRBuildMetadata(ctx context.Context, repo str
  AND metadata->'build_metadata'->'selected'=$4::jsonb->'selected'
  AND COALESCE((metadata->'build_metadata'->>'version')::int,0)<=$10
  AND CASE WHEN metadata->'build_metadata'->>'kind'='final' THEN 2 ELSE 1 END <= $11))
+ AND (metadata->'build_metadata' IS NULL OR (metadata->'build_metadata'->>'run_id')::bigint <> $7 OR (
+ (metadata->'build_metadata'->>'run_number')::bigint=$5
+ AND metadata->'build_metadata'->>'source_sha'=$3
+ AND metadata->'build_metadata'->>'execution_sha'=$9
+ AND metadata->'build_metadata'->>'workflow_path'=$8
+ AND metadata->'build_metadata'->'event'=$4::jsonb->'event'
+ AND metadata->'build_metadata'->'pr_number'=$4::jsonb->'pr_number'
+ AND metadata->'build_metadata'->'selected'=$4::jsonb->'selected'))
  AND metadata->'build_metadata' IS DISTINCT FROM $4::jsonb RETURNING TRUE;`
 	var updated bool
 	found, err := r.queryRowScan(ctx, "record build metadata", query, []any{&updated}, repo, prNumber, metadata.SourceSHA, raw, metadata.RunNumber, metadata.RunAttempt, metadata.RunID, metadata.WorkflowPath, metadata.ExecutionSHA, metadata.Version, phase)

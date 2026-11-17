@@ -161,7 +161,7 @@ func rejectDuplicateMetadataKeys(dec *json.Decoder) error {
 				return err
 			}
 			name, ok := key.(string)
-			if !ok || seen[name] {
+			if !ok || name != strings.ToLower(name) || seen[name] {
 				return fmt.Errorf("duplicate metadata key")
 			}
 			seen[name] = true
