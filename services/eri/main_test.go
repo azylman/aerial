@@ -1010,6 +1010,16 @@ func testProvisioner(t *testing.T, cfg *config.Config) *env.Provisioner {
 	return p
 }
 
+type legacyReloadPool struct {
+	runner.AgentPool
+
+	engine, claudeBin string
+}
+
+func (p *legacyReloadPool) UpdateEngine(engine, claudeBin string) {
+	p.engine, p.claudeBin = engine, claudeBin
+}
+
 func TestReloadCredentialCandidate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1030,14 +1040,28 @@ func TestReloadCredentialCandidate(t *testing.T) {
 				}
 			}
 			cfg := newTestConfig(func(d *config.ConfigData) { d.Model = "old-model" })
-			reload := CreateReloadConfigFunc(t.Context(), cfg, WithSkipEnvironmentSync(), WithReloadSupplier(func(candidate *config.Config) error {
+			ephemeral, worker := &legacyReloadPool{}, &legacyReloadPool{}
+			pool := queue.New(cfg, queue.WorkerPoolConfig{Pools: map[queue.PoolKey]runner.AgentPool{
+				{Ephemeral: false, Effort: "high"}: worker,
+			}})
+			reload := CreateReloadConfigFunc(t.Context(), cfg, WithSkipEnvironmentSync(), WithEphemeralPool(ephemeral), WithWorkerPool(pool), WithReloadSupplier(func(candidate *config.Config) error {
 				cur := candidate.Current()
 				cur.Model = "new-model"
+				cur.Engine, cur.ClaudeBin = "claude", "/test/claude"
 				cur.CredentialSources.OAuth = config.CredentialSource{Path: path}
 				candidate.Update(cur)
 				return nil
 			}))
 			reload("test")
+			wantEngine, wantBin := "claude", "/test/claude"
+			if tc.missing {
+				wantEngine, wantBin = "", ""
+			}
+			for _, p := range []*legacyReloadPool{ephemeral, worker} {
+				if p.engine != wantEngine || p.claudeBin != wantBin {
+					t.Fatalf("pool engine=%q bin=%q, want %q %q", p.engine, p.claudeBin, wantEngine, wantBin)
+				}
+			}
 			if got := cfg.Current().Model; got != tc.wantModel {
 				t.Fatalf("model=%q want %q", got, tc.wantModel)
 			}
