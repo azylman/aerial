@@ -344,6 +344,7 @@ type extractLastTurnErrorCase struct {
 	convID           string
 	transcript       string
 	claudeTranscript string
+	museTranscript   string
 	writeFilename    string
 	since            time.Time
 	cancelCtx        bool
@@ -505,6 +506,11 @@ func claudeExtractTurnCases(t0, t1 time.Time) []extractLastTurnErrorCase {
 			since:     t0,
 			wantError: "message content error",
 		},
+	}
+}
+
+func claudeExtractTurnCasesExtra(t0, t1 time.Time) []extractLastTurnErrorCase {
+	return []extractLastTurnErrorCase{
 		{
 			name:   "claude tool result with text block content",
 			convID: "s-claude-tool-text-blocks",
@@ -579,8 +585,25 @@ func claudeExtractTurnCases(t0, t1 time.Time) []extractLastTurnErrorCase {
 	}
 }
 
+func museExtractTurnCases(t0, t1 time.Time) []extractLastTurnErrorCase {
+	return []extractLastTurnErrorCase{
+		{
+			name:   "muse transcript extracts terminal error",
+			convID: "s-muse-err",
+			museTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"event":{"kind":"started","prompt":"Run tool"}}}`, t0.UnixMicro()),
+				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"event":{"kind":"terminal","terminal":"failed","reason":"Connection refused"}}}`, t1.UnixMicro()),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "Connection refused",
+		},
+	}
+}
+
 func extractLastTurnErrorCases(t0, t1 time.Time) []extractLastTurnErrorCase {
-	return append(standardExtractTurnCases(t0, t1), claudeExtractTurnCases(t0, t1)...)
+	cases := append(standardExtractTurnCases(t0, t1), claudeExtractTurnCases(t0, t1)...)
+	cases = append(cases, claudeExtractTurnCasesExtra(t0, t1)...)
+	return append(cases, museExtractTurnCases(t0, t1)...)
 }
 
 func buildLargeTranscriptFile(t0, t1 time.Time) string {
@@ -594,24 +617,34 @@ func buildLargeTranscriptFile(t0, t1 time.Time) string {
 	return sb.String()
 }
 
+func setupExtractErrorFixtures(t *testing.T, mgr *Manager, tc extractLastTurnErrorCase, tmp string) {
+	t.Helper()
+	if tc.transcript != "" {
+		fn := "transcript_full.jsonl"
+		if tc.writeFilename != "" {
+			fn = tc.writeFilename
+		}
+		writeTranscript(t, mgr, tc.convID, fn, tc.transcript)
+	}
+	if tc.claudeTranscript != "" {
+		projDir := filepath.Join(tmp, "data", "claude", "projects", "-test-proj")
+		_ = os.MkdirAll(projDir, 0o755)
+		_ = os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644)
+	}
+	if tc.museTranscript != "" {
+		museDir := filepath.Join(tmp, "data", "muse", "sessions")
+		_ = os.MkdirAll(museDir, 0o755)
+		_ = os.WriteFile(filepath.Join(museDir, tc.convID+".jsonl"), []byte(tc.museTranscript), 0o644)
+	}
+}
+
 func runExtractLastTurnErrorCase(t *testing.T, tc extractLastTurnErrorCase) {
 	t.Helper()
 	tmp := t.TempDir()
 	var mgr *Manager
 	if !tc.isNilMgr {
 		mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
-		if tc.transcript != "" {
-			fn := "transcript_full.jsonl"
-			if tc.writeFilename != "" {
-				fn = tc.writeFilename
-			}
-			writeTranscript(t, mgr, tc.convID, fn, tc.transcript)
-		}
-		if tc.claudeTranscript != "" {
-			projDir := filepath.Join(tmp, "data", "claude", "projects", "-test-proj")
-			_ = os.MkdirAll(projDir, 0o755)
-			_ = os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644)
-		}
+		setupExtractErrorFixtures(t, mgr, tc, tmp)
 	}
 	ctx := context.Background()
 	if tc.cancelCtx {
@@ -639,37 +672,89 @@ func TestExtractLastTurnError(t *testing.T) {
 	}
 }
 
+type extractResponseSinceCase struct {
+	name             string
+	isNilMgr         bool
+	convID           string
+	transcript       string
+	claudeTranscript string
+	museTranscript   string
+	codexTranscript  string
+	since            time.Time
+	cancelCtx        bool
+	useCtx           bool
+	wantResp         string
+}
+
+func setupExtractResponseFixtures(t *testing.T, mgr *Manager, tc extractResponseSinceCase, tmp string) {
+	t.Helper()
+	if tc.transcript != "" {
+		writeTranscript(t, mgr, tc.convID, "transcript_full.jsonl", tc.transcript)
+	}
+	if tc.claudeTranscript != "" {
+		projDir := filepath.Join(tmp, "data", "claude", "projects", "-test-proj")
+		_ = os.MkdirAll(projDir, 0o755)
+		_ = os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644)
+	}
+	if tc.museTranscript != "" {
+		museDir := filepath.Join(tmp, "data", "muse", "sessions")
+		_ = os.MkdirAll(museDir, 0o755)
+		_ = os.WriteFile(filepath.Join(museDir, tc.convID+".jsonl"), []byte(tc.museTranscript), 0o644)
+	}
+	if tc.codexTranscript != "" {
+		codexDir := filepath.Join(tmp, "data", "codex", "sessions", "2026", "10", "19")
+		_ = os.MkdirAll(codexDir, 0o755)
+		_ = os.WriteFile(filepath.Join(codexDir, "rollout-"+tc.convID+".jsonl"), []byte(tc.codexTranscript), 0o644)
+	}
+}
+
+func runExtractResponseSinceCase(t *testing.T, tc extractResponseSinceCase) {
+	t.Helper()
+	tmp := t.TempDir()
+	var mgr *Manager
+	if !tc.isNilMgr {
+		mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
+		setupExtractResponseFixtures(t, mgr, tc, tmp)
+	}
+	ctx := context.Background()
+	if tc.cancelCtx {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		cancel()
+	}
+	var got string
+	if tc.useCtx {
+		got = mgr.ExtractResponseSinceContext(ctx, tc.convID, tc.since)
+	} else {
+		got = mgr.ExtractResponseSince(tc.convID, tc.since)
+	}
+	if got != tc.wantResp {
+		t.Fatalf("ExtractResponseSince=%q, want %q", got, tc.wantResp)
+	}
+}
+
+func TestIsStepBefore(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	if isStepBefore("", now) {
+		t.Fatalf("expected false for empty createdAt")
+	}
+	if isStepBefore("2026-10-19T12:00:00Z", time.Time{}) {
+		t.Fatalf("expected false for zero since")
+	}
+	if !isStepBefore("2026-10-19T12:00:00.123456789Z", now) {
+		t.Fatalf("expected true for RFC3339Nano")
+	}
+	if isStepBefore("not-a-valid-ts", now) {
+		t.Fatalf("expected false for invalid timestamp")
+	}
+}
+
 func TestExtractResponseSince(t *testing.T) {
 	t0 := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 	t1 := t0.Add(time.Minute)
 
-	t.Run("IsStepBefore variants", func(t *testing.T) {
-		now := time.Now()
-		if isStepBefore("", now) {
-			t.Fatalf("expected false for empty createdAt")
-		}
-		if isStepBefore("2026-10-19T12:00:00Z", time.Time{}) {
-			t.Fatalf("expected false for zero since")
-		}
-		if !isStepBefore("2026-10-19T12:00:00.123456789Z", now) {
-			t.Fatalf("expected true for RFC3339Nano")
-		}
-		if isStepBefore("not-a-valid-ts", now) {
-			t.Fatalf("expected false for invalid timestamp")
-		}
-	})
-
-	tests := []struct {
-		name             string
-		isNilMgr         bool
-		convID           string
-		transcript       string
-		claudeTranscript string
-		since            time.Time
-		cancelCtx        bool
-		useCtx           bool
-		wantResp         string
-	}{
+	tests := []extractResponseSinceCase{
 		{name: "nil manager", isNilMgr: true, convID: "s1", since: t0},
 		{name: "empty convID", convID: "", since: t0},
 		{name: "path traversal", convID: "../bad", since: t0},
@@ -757,37 +842,39 @@ func TestExtractResponseSince(t *testing.T) {
 			since:    t0,
 			wantResp: "",
 		},
+		{
+			name:   "muse transcript extracts latest assistant response",
+			convID: "s-muse-resp",
+			museTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"event":{"kind":"started","prompt":"Run build"}}}`, t0.UnixMicro()),
+				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"event":{"kind":"assistant_message_committed","text":"Build finished successfully"}}}`, t1.UnixMicro()),
+			}, "\n") + "\n",
+			since:    t0,
+			wantResp: "Build finished successfully",
+		},
+		{
+			name:   "muse transcript stale response before since returns empty",
+			convID: "s-muse-stale",
+			museTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"event":{"kind":"assistant_message_committed","text":"Stale"}}}`, t0.UnixMicro()),
+			}, "\n") + "\n",
+			since:    t1,
+			wantResp: "",
+		},
+		{
+			name:   "codex transcript extracts latest assistant response",
+			convID: "s-codex-resp",
+			codexTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"session_meta","timestamp":%q,"payload":{"id":"s-codex-resp"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"response_item","timestamp":%q,"payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Codex finished"}]}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:    t0,
+			wantResp: "Codex finished",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tmp := t.TempDir()
-			var mgr *Manager
-			if !tc.isNilMgr {
-				mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
-				if tc.transcript != "" {
-					writeTranscript(t, mgr, tc.convID, "transcript_full.jsonl", tc.transcript)
-				}
-				if tc.claudeTranscript != "" {
-					projDir := filepath.Join(tmp, "data", "claude", "projects", "-test-proj")
-					_ = os.MkdirAll(projDir, 0o755)
-					_ = os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644)
-				}
-			}
-			ctx := context.Background()
-			if tc.cancelCtx {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
-			}
-			var got string
-			if tc.useCtx {
-				got = mgr.ExtractResponseSinceContext(ctx, tc.convID, tc.since)
-			} else {
-				got = mgr.ExtractResponseSince(tc.convID, tc.since)
-			}
-			if got != tc.wantResp {
-				t.Fatalf("ExtractResponseSince=%q, want %q", got, tc.wantResp)
-			}
+			runExtractResponseSinceCase(t, tc)
 		})
 	}
 }
