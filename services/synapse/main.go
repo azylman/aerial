@@ -112,6 +112,7 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealthz)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.Handle("POST /internal/pr/register", tracedIngress(s.handlePRRegister))
+	mux.Handle("POST /internal/pr/retry-readiness", tracedIngress(s.handleRetryPRReadiness))
 	mux.Handle("POST /api/webhooks/github", tracedIngress(s.handleGitHubWebhook))
 	mux.Handle("POST /webhooks/github", tracedIngress(s.handleGitHubWebhook))
 	mux.Handle("POST /api/webhooks/flux", tracedIngress(s.handleFluxWebhook))
