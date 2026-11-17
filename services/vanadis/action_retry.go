@@ -159,7 +159,7 @@ func (s *VanadisServer) validateRetryEligibility(ctx context.Context, req RetryA
 		return ErrChunkNotFound
 	}
 	c := *selected
-	if c.BuildID != req.BuildID || c.Mode != "action" || c.PRNumber != 0 || c.StallNudges < 0 {
+	if c.BuildID != req.BuildID || c.Mode != "action" || c.StallNudges < 0 {
 		return ErrBuildConflict
 	}
 	// Older canonical identities only recover their retained durable result. If
@@ -170,7 +170,7 @@ func (s *VanadisServer) validateRetryEligibility(ctx context.Context, req RetryA
 	if parseErr == nil && generation >= 0 && generation < c.StallNudges && req.ExpectedDispatchID == fmt.Sprintf("vanadis-%s-turn-%d", c.ID, generation) {
 		return nil
 	}
-	if b.Status != statusFailed || c.Status != statusFailed || c.StallNudges >= 2147483647 || req.ExpectedDispatchID != fmt.Sprintf("vanadis-%s-turn-%d", c.ID, c.StallNudges) {
+	if c.PRNumber != 0 || b.Status != statusFailed || c.Status != statusFailed || c.StallNudges >= 2147483647 || req.ExpectedDispatchID != fmt.Sprintf("vanadis-%s-turn-%d", c.ID, c.StallNudges) {
 		return ErrBuildConflict
 	}
 	return validateRetrySiblings(c, chunks)
