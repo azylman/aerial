@@ -305,8 +305,12 @@ sudo install -d -o 1000 -g 1000 /var/lib/aerial/brain-data
 Install the cluster operators for PostgreSQL, external secrets, and Gateway API routing (`restate-operator`, `vm-operator`, `reloader`, and `arc-controller` are deployed automatically via Flux CD `HelmRelease` manifests in `k8s/operators-and-storage.yaml`):
 
 ```bash
-# 1. CloudNativePG (PostgreSQL 18 + pgvector operator)
-kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.28/releases/cnpg-1.28.4.yaml
+# 1. CloudNativePG (PostgreSQL 18 + pgvector operator). Install it before Flux so its
+#    CRDs exist on first reconcile; the `cnpg` HelmRelease in k8s/operators-and-storage.yaml
+#    then adopts this release and owns its values.
+helm repo add cnpg https://cloudnative-pg.github.io/charts
+helm upgrade --install cnpg cnpg/cloudnative-pg --version 0.29.1 \
+  --namespace cnpg-system --create-namespace
 
 # 2. External Secrets Operator (Infisical secret synchronization)
 helm repo add external-secrets https://charts.external-secrets.io
