@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,11 +57,14 @@ type syncTranscriptsScenarioCase struct {
 	wantSynced            int
 	wantStepsInserted     int
 	wantSummaries         int
+	wantSummariesZero     bool
 	wantSkippedUnchanged  int
 	wantErrors            int
 	wantSettled           *bool
 	wantLastIndexed       int
 	wantSummaryText       string
+	wantSessionSummaries  map[string]string
+	wantMaxLLMCalls       int
 	secondPassSteps       int
 	secondPassLastIndexed int
 }
@@ -164,6 +168,10 @@ func standardScenarioCases() []syncTranscriptsScenarioCase {
 }
 
 func advancedScenarioCases() []syncTranscriptsScenarioCase {
+	return append(advancedBasicScenarioCases(), advancedExtendedScenarioCases()...)
+}
+
+func advancedBasicScenarioCases() []syncTranscriptsScenarioCase {
 	return []syncTranscriptsScenarioCase{
 		{
 			name: "historical session without LLM falls back to step 0 prompt",
@@ -189,10 +197,84 @@ func advancedScenarioCases() []syncTranscriptsScenarioCase {
 					age: 1 * time.Hour,
 				},
 			},
-			llmMode:         "error",
-			idleThreshold:   5 * time.Minute,
-			wantSummaries:   1,
-			wantSummaryText: "Initial prompt before LLM error",
+			llmMode:           "error",
+			idleThreshold:     5 * time.Minute,
+			wantSummaries:     0,
+			wantSummariesZero: true,
+			wantSettled:       new(false),
+			wantSummaryText:   "Initial prompt before LLM error",
+		},
+		{
+			name: "ephemeral prompts filtered: thread summary, thread title, and fact extraction",
+			files: []sessionFileFixture{
+				{
+					sessionID: "sess-valid-real-task",
+					content:   `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Normal user task that should be indexed"}` + "\n",
+					age:       1 * time.Hour,
+				},
+				{
+					sessionID: "sess-ephemeral-thread-summary",
+					content:   `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Synthesize the following Discord thread transcript into a concise memory block. Focus on context."}` + "\n",
+					age:       1 * time.Hour,
+				},
+				{
+					sessionID: "sess-ephemeral-thread-title",
+					content:   `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Summarize the following message into a concise 3 to 5 word phrase for a Discord thread topic title."}` + "\n",
+					age:       1 * time.Hour,
+				},
+				{
+					sessionID: "sess-ephemeral-coven-facts",
+					content:   `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Analyze the following conversation transcript and extract any key durable atomic facts from this session."}` + "\n",
+					age:       1 * time.Hour,
+				},
+			},
+			wantScanned:       4,
+			wantSynced:        1,
+			wantStepsInserted: 1,
+			wantSummaries:     1,
+			wantSummaryText:   "Normal user task that should be indexed",
+		},
+		{
+			name: "multi-session LLM error short-circuits to step 0 prompt and unsettled",
+			files: []sessionFileFixture{
+				{
+					sessionID: "sess-err-multi-001",
+					content: strings.Join([]string{
+						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Alpha task prompt"}`,
+						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Alpha reply"}`,
+					}, "\n") + "\n",
+					age: 1 * time.Hour,
+				},
+				{
+					sessionID: "sess-err-multi-002",
+					content: strings.Join([]string{
+						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Beta task prompt"}`,
+						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Beta reply"}`,
+					}, "\n") + "\n",
+					age: 1 * time.Hour,
+				},
+				{
+					sessionID: "sess-err-multi-003",
+					content: strings.Join([]string{
+						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Gamma task prompt"}`,
+						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Gamma reply"}`,
+					}, "\n") + "\n",
+					age: 1 * time.Hour,
+				},
+			},
+			llmMode:           "error",
+			idleThreshold:     5 * time.Minute,
+			wantMaxLLMCalls:   1,
+			wantScanned:       3,
+			wantSynced:        3,
+			wantSummaries:     0,
+			wantSummariesZero: true,
+			wantSettled:       new(false),
+			wantSessionSummaries: map[string]string{
+				"sess-err-multi-001": "Alpha task prompt",
+				"sess-err-multi-002": "Beta task prompt",
+				"sess-err-multi-003": "Gamma task prompt",
+			},
 		},
 		{
 			name: "active session not settled",
@@ -207,6 +289,11 @@ func advancedScenarioCases() []syncTranscriptsScenarioCase {
 			wantStepsInserted: 1,
 			wantSettled:       new(false),
 		},
+	}
+}
+
+func advancedExtendedScenarioCases() []syncTranscriptsScenarioCase {
+	return []syncTranscriptsScenarioCase{
 		{
 			name: "batch limit caps synced sessions and skips summarizer transcripts",
 			files: []sessionFileFixture{
@@ -301,14 +388,22 @@ func advancedScenarioCases() []syncTranscriptsScenarioCase {
 	}
 }
 
-func setupScenarioLLM(tc syncTranscriptsScenarioCase) func(context.Context, string) (string, error) {
+func setupScenarioLLM(tc syncTranscriptsScenarioCase, callCounter ...*atomic.Int32) func(context.Context, string) (string, error) {
+	var counter *atomic.Int32
+	if len(callCounter) > 0 && callCounter[0] != nil {
+		counter = callCounter[0]
+	} else {
+		counter = new(atomic.Int32)
+	}
 	switch tc.llmMode {
 	case "success":
 		return func(ctx context.Context, prompt string) (string, error) {
+			counter.Add(1)
 			return "Checked system health and free memory: 24GB available.", nil
 		}
 	case "error":
 		return func(ctx context.Context, prompt string) (string, error) {
+			counter.Add(1)
 			return "", errors.New("rate limit exceeded")
 		}
 	default:
@@ -338,7 +433,7 @@ func assertScenarioSyncStats(t *testing.T, stats SyncStats, tc syncTranscriptsSc
 	if tc.wantStepsInserted != 0 && stats.StepsInserted != tc.wantStepsInserted {
 		t.Errorf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantStepsInserted)
 	}
-	if tc.wantSummaries != 0 && stats.SummariesGenerated != tc.wantSummaries {
+	if (tc.wantSummaries != 0 || tc.wantSummariesZero) && stats.SummariesGenerated != tc.wantSummaries {
 		t.Errorf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
 	}
 	if stats.Errors != tc.wantErrors {
@@ -375,27 +470,40 @@ func assertScenarioSessionState(ctx context.Context, t *testing.T, store db.Tran
 	if len(tc.files) == 0 {
 		return
 	}
-	primarySession := tc.files[0].sessionID
 	states, err := store.GetSessionSyncStates(ctx)
 	if err != nil {
 		t.Fatalf("GetSessionSyncStates: %v", err)
 	}
+	assertScenarioSyncStateValues(t, states, tc)
+	assertScenarioSearchSummaries(ctx, t, store, embedder, tc)
+}
+
+func assertScenarioSyncStateValues(t *testing.T, states map[string]db.SessionSyncState, tc syncTranscriptsScenarioCase) {
+	t.Helper()
 	expectedLastIndexed := tc.wantLastIndexed
 	if tc.secondPassLastIndexed != 0 {
 		expectedLastIndexed = tc.secondPassLastIndexed
 	}
-	if tc.wantSettled != nil || expectedLastIndexed != 0 {
-		st, ok := states[primarySession]
+	if tc.wantSettled == nil && expectedLastIndexed == 0 {
+		return
+	}
+	for _, f := range tc.files {
+		st, ok := states[f.sessionID]
 		if !ok {
-			t.Fatalf("session %q missing from sync states", primarySession)
+			t.Fatalf("session %q missing from sync states", f.sessionID)
 		}
 		if tc.wantSettled != nil && st.IsSettled != *tc.wantSettled {
-			t.Errorf("IsSettled = %v, want %v", st.IsSettled, *tc.wantSettled)
-		}
-		if expectedLastIndexed != 0 && st.LastIndexedStep != expectedLastIndexed {
-			t.Errorf("LastIndexedStep = %d, want %d", st.LastIndexedStep, expectedLastIndexed)
+			t.Errorf("session %q IsSettled = %v, want %v", f.sessionID, st.IsSettled, *tc.wantSettled)
 		}
 	}
+	primarySession := tc.files[0].sessionID
+	if expectedLastIndexed != 0 && states[primarySession].LastIndexedStep != expectedLastIndexed {
+		t.Errorf("LastIndexedStep = %d, want %d", states[primarySession].LastIndexedStep, expectedLastIndexed)
+	}
+}
+
+func assertScenarioSearchSummaries(ctx context.Context, t *testing.T, store db.TranscriptStore, embedder func(context.Context, string) ([]float32, error), tc syncTranscriptsScenarioCase) {
+	t.Helper()
 	if tc.wantSummaryText != "" {
 		res, err := ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{Query: tc.wantSummaryText, Mode: "sessions", Limit: 10})
 		if err != nil || len(res.Sessions) == 0 {
@@ -405,6 +513,26 @@ func assertScenarioSessionState(ctx context.Context, t *testing.T, store db.Tran
 			t.Errorf("summary = %q, want %q", res.Sessions[0].Summary, tc.wantSummaryText)
 		}
 	}
+	for sessID, wantText := range tc.wantSessionSummaries {
+		assertSingleSessionSummary(ctx, t, store, embedder, sessID, wantText)
+	}
+}
+
+func assertSingleSessionSummary(ctx context.Context, t *testing.T, store db.TranscriptStore, embedder func(context.Context, string) ([]float32, error), sessID, wantText string) {
+	t.Helper()
+	res, err := ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{Query: wantText, Mode: "sessions", Limit: 10})
+	if err != nil || len(res.Sessions) == 0 {
+		t.Fatalf("ExecuteTranscriptSearch(%q) err=%v, sessions=%d", wantText, err, len(res.Sessions))
+	}
+	for _, s := range res.Sessions {
+		if s.SessionID == sessID {
+			if s.Summary != wantText {
+				t.Errorf("session %q summary = %q, want %q", sessID, s.Summary, wantText)
+			}
+			return
+		}
+	}
+	t.Errorf("session %q with summary %q not found in search results", sessID, wantText)
 }
 
 func runSyncTranscriptsScenarioCase(t *testing.T, tc syncTranscriptsScenarioCase) {
@@ -423,7 +551,8 @@ func runSyncTranscriptsScenarioCase(t *testing.T, tc syncTranscriptsScenarioCase
 		writeTranscriptFile(t, tempDir, f.sessionID, f.content, time.Now().Add(-f.age))
 	}
 
-	llm := setupScenarioLLM(tc)
+	var llmCalls atomic.Int32
+	llm := setupScenarioLLM(tc, &llmCalls)
 	embedder := setupScenarioEmbedder(tc)
 
 	batchLimit := tc.batchLimit
@@ -446,6 +575,10 @@ func runSyncTranscriptsScenarioCase(t *testing.T, tc syncTranscriptsScenarioCase
 	stats, err := SyncTranscripts(ctx, store, tempDir, embedder, llm, opts)
 	if err != nil {
 		t.Fatalf("SyncTranscripts failed: %v", err)
+	}
+
+	if tc.wantMaxLLMCalls > 0 && int(llmCalls.Load()) > tc.wantMaxLLMCalls {
+		t.Errorf("llmFunc called %d times, want at most %d", llmCalls.Load(), tc.wantMaxLLMCalls)
 	}
 
 	assertScenarioSyncStats(t, stats, tc)
@@ -531,76 +664,17 @@ type syncTranscriptsErrorCase struct {
 
 func syncTranscriptsErrorCases() []syncTranscriptsErrorCase {
 	return []syncTranscriptsErrorCase{
-		{
-			name:       "nil store returns error",
-			nilStore:   true,
-			wantErr:    true,
-			wantSubstr: "transcript store cannot be nil",
-		},
-		{
-			name:          "empty brain dir returns error",
-			emptyBrainDir: true,
-			wantErr:       true,
-			wantSubstr:    "brain directory cannot be empty",
-		},
-		{
-			name:                "non-existent brain dir returns error",
-			nonExistentBrainDir: true,
-			wantErr:             true,
-		},
-		{
-			name:              "context cancelled returns context canceled error",
-			hasSession:        true,
-			cancelCtx:         true,
-			zeroOpts:          true,
-			wantErr:           true,
-			isContextCanceled: true,
-		},
-		{
-			name:              "error loading session sync states propagated",
-			hasSession:        true,
-			failGetSyncStates: true,
-			wantErr:           true,
-			wantSubstr:        "load session sync states",
-		},
-		{
-			name:            "unopenable socket file recorded as error in sweep",
-			socketFile:      true,
-			wantSweepErrors: 1,
-		},
-		{
-			name:              "batch insert error increments errors and inserts 0 steps",
-			hasSession:        true,
-			failBatchInsert:   true,
-			wantSweepErrors:   1,
-			wantStepsInserted: 0,
-		},
-		{
-			name:              "upsert settled session error increments errors and generates 0 summaries",
-			hasSession:        true,
-			failUpsertSummary: true,
-			wantSweepErrors:   1,
-			wantSummaries:     0,
-		},
-		{
-			name:            "empty transcript file generates summary with watermark -2",
-			emptyFile:       true,
-			wantSummaries:   1,
-			wantLastIndexed: -2,
-		},
-		{
-			name:              "empty transcript file upsert error increments errors",
-			emptyFile:         true,
-			failUpsertSummary: true,
-			wantSweepErrors:   1,
-		},
-		{
-			name:              "upsert active session progress error increments errors",
-			prePopActive:      true,
-			activeFile:        true,
-			failUpsertSummary: true,
-			wantSweepErrors:   1,
-		},
+		{name: "nil store returns error", nilStore: true, wantErr: true, wantSubstr: "transcript store cannot be nil"},
+		{name: "empty brain dir returns error", emptyBrainDir: true, wantErr: true, wantSubstr: "brain directory cannot be empty"},
+		{name: "non-existent brain dir returns error", nonExistentBrainDir: true, wantErr: true},
+		{name: "context cancelled returns context canceled error", hasSession: true, cancelCtx: true, zeroOpts: true, wantErr: true, isContextCanceled: true},
+		{name: "error loading session sync states propagated", hasSession: true, failGetSyncStates: true, wantErr: true, wantSubstr: "load session sync states"},
+		{name: "unopenable socket file recorded as error in sweep", socketFile: true, wantSweepErrors: 1},
+		{name: "batch insert error increments errors and inserts 0 steps", hasSession: true, failBatchInsert: true, wantSweepErrors: 1, wantStepsInserted: 0},
+		{name: "upsert settled session error increments errors and generates 0 summaries", hasSession: true, failUpsertSummary: true, wantSweepErrors: 1, wantSummaries: 0},
+		{name: "empty transcript file generates summary with watermark -2", emptyFile: true, wantSummaries: 1, wantLastIndexed: -2},
+		{name: "empty transcript file upsert error increments errors", emptyFile: true, failUpsertSummary: true, wantSweepErrors: 1},
+		{name: "upsert active session progress error increments errors", prePopActive: true, activeFile: true, failUpsertSummary: true, wantSweepErrors: 1},
 	}
 }
 
@@ -790,6 +864,66 @@ func TestFindTranscriptFile_AlternativeLocations(t *testing.T) {
 	}
 }
 
+func TestIsEphemeralSummarizerPrompt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		prompt string
+		want   bool
+	}{
+		{
+			name:   "empty prompt",
+			prompt: "",
+			want:   false,
+		},
+		{
+			name:   "ordinary prompt",
+			prompt: "How do I deploy Aerial to k3s?",
+			want:   false,
+		},
+		{
+			name:   "settled summary canonical",
+			prompt: "Summarize the following agent conversation transcript in 2-3 concise sentences. Focus on technical entities.",
+			want:   true,
+		},
+		{
+			name:   "settled summary with leading whitespace",
+			prompt: "  \n  Summarize the following agent conversation transcript in 2-3 concise sentences.",
+			want:   true,
+		},
+		{
+			name:   "discord thread summary canonical",
+			prompt: "Synthesize the following Discord thread transcript into a concise memory block. Focus on context.",
+			want:   true,
+		},
+		{
+			name:   "discord thread title canonical",
+			prompt: "Summarize the following message into a concise 3 to 5 word phrase for a Discord thread topic title.",
+			want:   true,
+		},
+		{
+			name:   "coven fact extraction canonical",
+			prompt: "Analyze the following conversation transcript and extract any key durable atomic facts",
+			want:   true,
+		},
+		{
+			name:   "coven fact extraction with extra text",
+			prompt: "Analyze the following conversation transcript and extract any key durable atomic facts from the session.",
+			want:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isEphemeralSummarizerPrompt(tc.prompt)
+			if got != tc.want {
+				t.Fatalf("isEphemeralSummarizerPrompt(%q) = %v, want %v", tc.prompt, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseTranscriptTimestamp(t *testing.T) {
 	fallback := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -814,9 +948,7 @@ func TestParseTranscriptTimestamp(t *testing.T) {
 
 func TestExtractClaudeBlockText(t *testing.T) {
 	tests := []struct {
-		name    string
-		raw     string
-		wantStr string
+		name, raw, wantStr string
 	}{
 		{name: "empty raw message", raw: "", wantStr: ""},
 		{name: "quoted string", raw: `"simple text output"`, wantStr: "simple text output"},
@@ -835,10 +967,8 @@ func TestExtractClaudeBlockText(t *testing.T) {
 
 func TestFindTranscriptFile_PathResolution(t *testing.T) {
 	tests := []struct {
-		name      string
-		relPath   string
-		sessionID string
-		wantFound bool
+		name, relPath, sessionID string
+		wantFound                bool
 	}{
 		{name: "not found", sessionID: "s-missing", wantFound: false},
 		{name: "dot system generated logs", relPath: "s-dot/.system_generated/logs/transcript.jsonl", sessionID: "s-dot", wantFound: true},
@@ -903,13 +1033,7 @@ func syncTranscriptsClaudeCases() []syncTranscriptsClaudeCase {
 				`{"type":"user","timestamp":"2026-10-01T10:00:05Z","message":{"role":"user","content":[{"type":"tool_result","is_error":false,"content":"/dev/sda1 50G 20G 30G"}]}}`,
 				`{"type":"assistant","timestamp":"2026-10-01T10:00:08Z","message":{"role":"assistant","content":[{"type":"text","text":"Disk usage is at 40%."}]}}`,
 			}, "\n") + "\n",
-			withLLM:              true,
-			withEmbedder:         true,
-			wantSteps:            4,
-			wantSummaries:        1,
-			wantSettled:          true,
-			secondPassContent:    "",
-			wantSkippedUnchanged: 1,
+			withLLM: true, withEmbedder: true, wantSteps: 4, wantSummaries: 1, wantSettled: true, wantSkippedUnchanged: 1,
 		},
 		{
 			name:      "claude transcript with tool error and raw assistant string and custom claude dir",
@@ -919,10 +1043,7 @@ func syncTranscriptsClaudeCases() []syncTranscriptsClaudeCase {
 				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"command failed with code 1"}]}]}}`,
 				`{"type":"assistant","timestamp":"2026-10-01T10:00:04Z","message":{"role":"assistant","content":"Recovering from error"}}`,
 			}, "\n") + "\n",
-			customClaudeDir: true,
-			wantSteps:       3,
-			wantSummaries:   1,
-			wantSettled:     true,
+			customClaudeDir: true, wantSteps: 3, wantSummaries: 1, wantSettled: true,
 			secondPassContent: strings.Join([]string{
 				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Test failing command"}}`,
 				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"command failed with code 1"}]}]}}`,
@@ -946,11 +1067,7 @@ func syncTranscriptsClaudeCases() []syncTranscriptsClaudeCase {
 			wantSummaries:   1,
 			wantSettled:     true,
 			wantStoredTools: []string{"", "Bash", "Read", "Grep", "Grep", "Bash", "Read", ""},
-			wantToolResults: []string{
-				"toolu_c|Grep|DONE|main.go:12: TODO",
-				"toolu_a|Bash|DONE|go.mod main.go",
-				"toolu_b|Read|ERROR|permission denied",
-			},
+			wantToolResults: []string{"toolu_c|Grep|DONE|main.go:12: TODO", "toolu_a|Bash|DONE|go.mod main.go", "toolu_b|Read|ERROR|permission denied"},
 		},
 		{
 			name:      "claude tool result with unknown tool use id keeps empty name",
@@ -959,11 +1076,7 @@ func syncTranscriptsClaudeCases() []syncTranscriptsClaudeCase {
 				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Resume work"}}`,
 				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_gone","content":"stale output"}]}}`,
 			}, "\n") + "\n",
-			wantSteps:       2,
-			wantSummaries:   1,
-			wantSettled:     true,
-			wantStoredTools: []string{"", ""},
-			wantToolResults: []string{"toolu_gone||DONE|stale output"},
+			wantSteps: 2, wantSummaries: 1, wantSettled: true, wantStoredTools: []string{"", ""}, wantToolResults: []string{"toolu_gone||DONE|stale output"},
 		},
 		{
 			name:      "claude transcript with unparseable or ambient messages skipped",
@@ -974,9 +1087,7 @@ func syncTranscriptsClaudeCases() []syncTranscriptsClaudeCase {
 				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":"Valid prompt"}}`,
 				`{"type":"assistant","timestamp":"2026-10-01T10:00:04Z","message":{"role":"assistant","content":12345}}`,
 			}, "\n") + "\n",
-			wantSteps:     1,
-			wantSummaries: 1,
-			wantSettled:   true,
+			wantSteps: 1, wantSummaries: 1, wantSettled: true,
 		},
 	}
 }
@@ -1163,104 +1274,16 @@ func syncTranscriptsEngineCases() []syncTranscriptsEngineCase {
 	future := time.Now().Add(time.Hour).UTC()
 
 	return []syncTranscriptsEngineCase{
-		{
-			name:       "agy session records engine and longest-prefix mcp kind",
-			brainFiles: []sessionFileFixture{{sessionID: "sess-agy-kinds", content: agyMCP, age: time.Hour}},
-			mcpServers: []string{"home", "home_assistant"},
-			session:    "sess-agy-kinds",
-			wantEngine: "agy",
-			wantKinds:  []string{"mcp_home_assistant_turn_on=mcp:home_assistant|", "view_file=read|"},
-		},
-		{
-			name:        "claude session records engine, kind and tool call id",
-			claudeFiles: []sessionFileFixture{{sessionID: "sess-claude-kinds", content: claudeBash, age: time.Hour}},
-			session:     "sess-claude-kinds",
-			wantEngine:  "claude",
-			wantKinds:   []string{"Bash=shell|", "Bash=shell|toolu_disk"},
-		},
-		{
-			name:       "codex session records engine, kind and tool call id",
-			codexFiles: []sessionFileFixture{{sessionID: "sess-codex-kinds", content: codexRollout, age: time.Hour}},
-			session:    "sess-codex-kinds",
-			wantEngine: "codex",
-			wantKinds: []string{
-				"local_shell=shell|",
-				"local_shell=shell|call_1",
-				"web_search=web|",
-				"web_search=web|call_2",
-				"apply_patch=edit|",
-				"apply_patch=edit|call_3",
-			},
-		},
-		{
-			name:         "unchanged legacy session gets its engine stamped and kinds backfilled",
-			brainFiles:   []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}},
-			priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true},
-			priorSteps:   []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}},
-			session:      "sess-legacy",
-			wantEngine:   "agy",
-			wantKinds:    []string{"run_command=shell|"},
-		},
-		{
-			name:         "engine stamp failure is logged and the sweep completes",
-			brainFiles:   []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}},
-			priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true},
-			priorSteps:   []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}},
-			failMethod:   "SetSessionEngine",
-			session:      "sess-legacy",
-			wantEngine:   "agy", // the engine backfill still labels it from its stored tool names
-			wantKinds:    []string{"run_command=shell|"},
-		},
-		{
-			name:         "session without a raw log gets its engine inferred from tool steps",
-			priorSummary: &db.SessionSummary{SessionID: "sess-orphan", LastIndexedStep: 1, LastMtime: future, SummaryStepWatermark: 1, IsSettled: true},
-			priorSteps: []db.TranscriptStep{
-				{SessionID: "sess-orphan", StepIndex: 0, StepType: "assistant", ToolName: "Bash", Content: "ls"},
-				{SessionID: "sess-orphan", StepIndex: 1, StepType: "assistant", ToolName: "mcp__github__get_me", Content: "{}"},
-			},
-			session:    "sess-orphan",
-			wantEngine: "claude",
-			wantKinds:  []string{"Bash=shell|", "mcp__github__get_me=mcp:github|"},
-		},
-		{
-			name:         "session without a raw log gets its engine inferred as codex from tool steps",
-			priorSummary: &db.SessionSummary{SessionID: "sess-orphan-codex", LastIndexedStep: 1, LastMtime: future, SummaryStepWatermark: 1, IsSettled: true},
-			priorSteps: []db.TranscriptStep{
-				{SessionID: "sess-orphan-codex", StepIndex: 0, StepType: "assistant", ToolName: "local_shell", Content: "ls"},
-				{SessionID: "sess-orphan-codex", StepIndex: 1, StepType: "assistant", ToolName: "apply_patch", Content: "{}"},
-			},
-			session:    "sess-orphan-codex",
-			wantEngine: "codex",
-			wantKinds:  []string{"local_shell=shell|", "apply_patch=edit|"},
-		},
-		{
-			name:         "engine backfill failure is logged and leaves the engine empty",
-			priorSummary: &db.SessionSummary{SessionID: "sess-orphan", LastIndexedStep: 0, LastMtime: future, SummaryStepWatermark: 0, IsSettled: true},
-			priorSteps:   []db.TranscriptStep{{SessionID: "sess-orphan", StepIndex: 0, StepType: "assistant", ToolName: "Bash", Content: "ls"}},
-			failMethod:   "BackfillSessionEngines",
-			session:      "sess-orphan",
-			wantKinds:    []string{"Bash=shell|"},
-		},
-		{
-			name:         "backfill failure is logged and leaves kinds empty",
-			brainFiles:   []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}},
-			priorSummary: &db.SessionSummary{SessionID: "sess-legacy", Engine: "agy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true},
-			priorSteps:   []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}},
-			failMethod:   "BackfillToolKinds",
-			session:      "sess-legacy",
-			wantEngine:   "agy",
-			wantKinds:    []string{"run_command=|"},
-		},
-		{
-			name:         "migrated purge failure is logged and the sweep completes",
-			brainFiles:   []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}},
-			priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true},
-			priorSteps:   []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}},
-			failMethod:   "PurgeMigratedLocalTranscripts",
-			session:      "sess-legacy",
-			wantEngine:   "agy",
-			wantKinds:    []string{"run_command=shell|"},
-		},
+		{name: "agy session records engine and longest-prefix mcp kind", brainFiles: []sessionFileFixture{{sessionID: "sess-agy-kinds", content: agyMCP, age: time.Hour}}, mcpServers: []string{"home", "home_assistant"}, session: "sess-agy-kinds", wantEngine: "agy", wantKinds: []string{"mcp_home_assistant_turn_on=mcp:home_assistant|", "view_file=read|"}},
+		{name: "claude session records engine, kind and tool call id", claudeFiles: []sessionFileFixture{{sessionID: "sess-claude-kinds", content: claudeBash, age: time.Hour}}, session: "sess-claude-kinds", wantEngine: "claude", wantKinds: []string{"Bash=shell|", "Bash=shell|toolu_disk"}},
+		{name: "codex session records engine, kind and tool call id", codexFiles: []sessionFileFixture{{sessionID: "sess-codex-kinds", content: codexRollout, age: time.Hour}}, session: "sess-codex-kinds", wantEngine: "codex", wantKinds: []string{"local_shell=shell|", "local_shell=shell|call_1", "web_search=web|", "web_search=web|call_2", "apply_patch=edit|", "apply_patch=edit|call_3"}},
+		{name: "unchanged legacy session gets its engine stamped and kinds backfilled", brainFiles: []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}}, priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}}, session: "sess-legacy", wantEngine: "agy", wantKinds: []string{"run_command=shell|"}},
+		{name: "engine stamp failure is logged and the sweep completes", brainFiles: []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}}, priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}}, failMethod: "SetSessionEngine", session: "sess-legacy", wantEngine: "agy", wantKinds: []string{"run_command=shell|"}},
+		{name: "session without a raw log gets its engine inferred from tool steps", priorSummary: &db.SessionSummary{SessionID: "sess-orphan", LastIndexedStep: 1, LastMtime: future, SummaryStepWatermark: 1, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-orphan", StepIndex: 0, StepType: "assistant", ToolName: "Bash", Content: "ls"}, {SessionID: "sess-orphan", StepIndex: 1, StepType: "assistant", ToolName: "mcp__github__get_me", Content: "{}"}}, session: "sess-orphan", wantEngine: "claude", wantKinds: []string{"Bash=shell|", "mcp__github__get_me=mcp:github|"}},
+		{name: "session without a raw log gets its engine inferred as codex from tool steps", priorSummary: &db.SessionSummary{SessionID: "sess-orphan-codex", LastIndexedStep: 1, LastMtime: future, SummaryStepWatermark: 1, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-orphan-codex", StepIndex: 0, StepType: "assistant", ToolName: "local_shell", Content: "ls"}, {SessionID: "sess-orphan-codex", StepIndex: 1, StepType: "assistant", ToolName: "apply_patch", Content: "{}"}}, session: "sess-orphan-codex", wantEngine: "codex", wantKinds: []string{"local_shell=shell|", "apply_patch=edit|"}},
+		{name: "engine backfill failure is logged and leaves the engine empty", priorSummary: &db.SessionSummary{SessionID: "sess-orphan", LastIndexedStep: 0, LastMtime: future, SummaryStepWatermark: 0, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-orphan", StepIndex: 0, StepType: "assistant", ToolName: "Bash", Content: "ls"}}, failMethod: "BackfillSessionEngines", session: "sess-orphan", wantKinds: []string{"Bash=shell|"}},
+		{name: "backfill failure is logged and leaves kinds empty", brainFiles: []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}}, priorSummary: &db.SessionSummary{SessionID: "sess-legacy", Engine: "agy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}}, failMethod: "BackfillToolKinds", session: "sess-legacy", wantEngine: "agy", wantKinds: []string{"run_command=|"}},
+		{name: "migrated purge failure is logged and the sweep completes", brainFiles: []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}}, priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}}, failMethod: "PurgeMigratedLocalTranscripts", session: "sess-legacy", wantEngine: "agy", wantKinds: []string{"run_command=shell|"}},
 	}
 }
 
