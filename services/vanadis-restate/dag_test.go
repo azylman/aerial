@@ -134,6 +134,32 @@ func TestNormalizeAndValidateBuildDAG_Dependencies(t *testing.T) {
 			wantSubstr: "references unknown dependency",
 		},
 		{
+			name: "forward_edge",
+			chunks: []VanadisChunk{
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"1"}},
+				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
+			},
+			wantDeps: [][]string{{"c2"}, {}},
+		},
+		{
+			name: "forward_transitive_chain",
+			chunks: []VanadisChunk{
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c3"}},
+				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}},
+				{ID: "c3", Mode: "pr", Repo: "aerial", DependsOn: []string{"c2"}},
+			},
+			wantDeps: [][]string{{"c3"}, {}, {"c2"}},
+		},
+		{
+			name: "disconnected_nodes_with_forward_edge",
+			chunks: []VanadisChunk{
+				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c3"}, TargetFiles: []string{"a.go"}},
+				{ID: "c2", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"b.go"}},
+				{ID: "c3", Mode: "pr", Repo: "aerial", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
+			},
+			wantDeps: [][]string{{"c3"}, {}, {}},
+		},
+		{
 			name: "cycle_detected",
 			chunks: []VanadisChunk{
 				{ID: "c1", Mode: "pr", Repo: "aerial", DependsOn: []string{"c2"}},
