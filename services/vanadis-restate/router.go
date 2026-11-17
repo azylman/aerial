@@ -54,7 +54,10 @@ type restateBuildObjectInvoker struct {
 	ctx restate.Context
 }
 
-const prEventOpened = "opened"
+const (
+	prEventOpened   = "opened"
+	prEventDeferred = "deferred"
+)
 
 func (r restateBuildObjectInvoker) RoutePREvent(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error {
 	_ = ctx
@@ -958,7 +961,7 @@ func (b *BuildObject) handleCIRemediationCapReached(rc restate.RunContext, chunk
 }
 
 func (b *BuildObject) handleConflictEvent(rc restate.RunContext, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
-	if rev := b.getChunkRevision(rc, buildID, chunkID); rev.merged {
+	if rev := b.getChunkRevision(rc, buildID, chunkID); rev.merged || !b.acceptPRCheckRevision(rc, buildID, chunkID, ev.HeadSHA) {
 		return errPRTransitionSkipped
 	}
 	if err := b.store.UpdateChunkBannerAndStatus(rc, chunkID, statusConflict, "Merge conflict detected"); err != nil {
@@ -966,8 +969,8 @@ func (b *BuildObject) handleConflictEvent(rc restate.RunContext, buildID, chunkI
 	}
 	if b.executor != nil {
 		dispatchID := conflictRemediationDispatchID(chunkID, ev.HeadSHA)
-		if err := b.dispatchChunkRemediation(rc, buildID, chunkID, dispatchID, FormatConflictPrompt(ev)); err != nil && !errors.Is(err, errDispatchActive) {
-			log.Printf("[vanadis-restate] dispatch conflict remediation warning: %v", err)
+		if err := b.dispatchChunkRemediation(rc, buildID, chunkID, dispatchID, FormatConflictPrompt(ev)); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -980,7 +983,11 @@ func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunk
 	if !b.acceptPRCheckRevision(rc, buildID, chunkID, ev.HeadSHA) {
 		return errPRTransitionSkipped
 	}
-	if err := b.handlePRCheckEvent(rc, chunkID, event, ev); err != nil {
+	if ev.Status == prEventDeferred {
+		if len(b.getChunkRevision(rc, buildID, chunkID).failedChecks) == 0 {
+			return nil
+		}
+	} else if err := b.handlePRCheckEvent(rc, chunkID, event, ev); err != nil {
 		return err
 	}
 	banner := fmt.Sprintf("CI check %q failed", ev.CheckName)
@@ -1004,10 +1011,7 @@ func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunk
 	details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
 	dispatchID := ciRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
 	if err := b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatCIFailurePrompt(ev, details)); err != nil {
-		if !errors.Is(err, errDispatchActive) {
-			log.Printf("[vanadis-restate] dispatch ci remediation warning: %v", err)
-		}
-		return nil
+		return err
 	}
 	if _, err := b.store.IncrementChunkCIFailCount(rc, chunkID, banner); err != nil {
 		return err
@@ -1113,13 +1117,15 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 		return nil
 	}
 	buildID := restate.Key(ctx)
-	_, err := runJournaled(ctx, labelOnPREvent, "handle-pr-event-postgres", &stepRecorded, func(rc restate.RunContext) (bool, error) {
+	deferred, err := runJournaled(ctx, labelOnPREvent, "handle-pr-event-postgres", &stepRecorded, func(rc restate.RunContext) (bool, error) {
 		chunkID, cErr := b.locateOrAttachPRChunk(rc, buildID, ev)
 		if cErr != nil || chunkID == "" {
 			return false, cErr
 		}
 		event := strings.ToLower(strings.TrimSpace(ev.Event))
-		if eventErr := b.dispatchPREvent(rc, buildID, chunkID, event, ev); eventErr != nil {
+		eventErr := b.dispatchPREvent(rc, buildID, chunkID, event, ev)
+		deferred := errors.Is(eventErr, errDispatchActive)
+		if eventErr != nil && !deferred {
 			if errors.Is(eventErr, errPRTransitionSkipped) {
 				return false, nil
 			}
@@ -1135,10 +1141,15 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 				log.Printf("[vanadis-restate] record rollout state warning: %v", rErr)
 			}
 		}
-		return true, nil
+		return deferred, nil
 	})
 	if err != nil {
 		return err
+	}
+	if deferred {
+		deferredEv := ev
+		deferredEv.Status = prEventDeferred
+		_ = restate.ObjectSend(ctx, "Build", buildID, "OnPREvent").Send(deferredEv, restate.WithDelay(time.Second))
 	}
 	rt := b.getRuntime(ctx)
 	if _, tErr := b.executeObjectTransition(rt, labelReconcileAfterPREvent, nil); tErr != nil {

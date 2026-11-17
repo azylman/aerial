@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/restatedev/sdk-go"
+	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 )
@@ -165,6 +167,10 @@ func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chun
 
 func (*checkStatusSpyStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
 	return nil
+}
+
+func (*checkStatusSpyStore) GetChunkByPR(_ context.Context, _ string, _ int) (*VanadisChunkPRLookup, error) {
+	return &VanadisChunkPRLookup{ChunkID: "c1", BuildID: "b1", Matched: true}, nil
 }
 
 func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
@@ -566,8 +572,9 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		{name: "failing check after restart coalesces when prior failed check remains active on same head", event: "ci_failed", prEvent: ciFailEv("roborev", "sha-1"), extraEvents: []pubsub.PRLifecycleEvent{ciFailEv("lint", "sha-1"), {Event: "check_updated", CheckName: "roborev", CheckState: "passed", HeadSHA: "sha-1"}, {Event: "restart"}, ciFailEv("unit-tests", "sha-1")}, wantBanners: []string{`c1:ci_failed:CI check "roborev" failed`, `c1:ci_failed:CI check "lint" failed`, `c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-sha-1-1"},
 		{name: "overlapping check failure on fifth attempt head coalesces without cancelling active worker", event: "ci_failed", prEvent: ciFailEv("unit-tests", "sha-5"), extraEvents: []pubsub.PRLifecycleEvent{ciFailEv("lint", "sha-5")}, failCount: 4, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`, `c1:ci_failed:CI check "lint" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-sha-5-5"},
 		{name: "check passing after override clears head coalescing for subsequent check failure", event: "ci_failed", prEvent: ciFailEv("roborev", "sha-1"), extraEvents: []pubsub.PRLifecycleEvent{{Event: "check_updated", CheckName: "roborev", CheckState: "passed", HeadSHA: "sha-1"}, ciFailEv("unit-tests", "sha-1")}, wantBanners: []string{`c1:ci_failed:CI check "roborev" failed`, `c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 2, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-sha-1-2"},
-		{name: "ci_failed skipped_active dispatch does not consume remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), dispatchErr: errDispatchActive, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1"},
-		{name: "ci_failed dispatch transport error does not consume remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), dispatchErr: dbErr, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1"},
+		{name: "deferred ci_failed after check passes is ignored without dispatching", event: "ci_failed", prEvent: ciFailEv("roborev", "sha-1"), extraEvents: []pubsub.PRLifecycleEvent{{Event: "check_updated", CheckName: "roborev", CheckState: "passed", HeadSHA: "sha-1"}, {Event: "ci_failed", Status: prEventDeferred, CheckName: "roborev", HeadSHA: "sha-1", Repo: "aerial", PRNumber: 42}}, wantBanners: []string{`c1:ci_failed:CI check "roborev" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-sha-1-1"},
+		{name: "ci_failed skipped_active dispatch returns errDispatchActive without consuming remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), dispatchErr: errDispatchActive, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1"},
+		{name: "ci_failed dispatch transport error propagates without consuming remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), dispatchErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1"},
 		{name: "ci_failed banner update error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), bannerErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}},
 		{name: "ci_failed get build error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), getBuildErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}},
 		{name: "ci_failed increment count error after accepted dispatch propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCountErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true},
@@ -576,7 +583,9 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		{name: "ci_failed exceeding cap preserves chunk failure despite notification errors", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, notifyErr: dbErr, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
 		{name: "ci_failed exceeding cap fail chunk error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failErr: dbErr, wantErr: true, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1},
 		{name: "conflict updates chunk banner and dispatches background remediation", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true},
-		{name: "conflict get build error preserves banner and logs warning", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, getBuildErr: dbErr, wantBanners: []string{"c1:conflict:Merge conflict detected"}},
+		{name: "conflict get build error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, getBuildErr: dbErr, wantErr: true, wantBanners: []string{"c1:conflict:Merge conflict detected"}},
+		{name: "conflict skipped_active dispatch returns errDispatchActive", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, dispatchErr: errDispatchActive, wantErr: true, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantDispatchID: "vanadis-conflict-c1-abcdef1"},
+		{name: "conflict dispatch transport error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, dispatchErr: dbErr, wantErr: true, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantDispatchID: "vanadis-conflict-c1-abcdef1"},
 		{name: "conflict on merged chunk skipped", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234"}, isMerged: true, wantErr: true},
 		{name: "conflict update banner error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234"}, bannerErr: dbErr, wantErr: true, wantBanners: []string{"c1:conflict:Merge conflict detected"}},
 		{name: "merged cancels chunk dispatch and resets check state", event: "merged", prEvent: pubsub.PRLifecycleEvent{Event: "merged", HeadSHA: "head-sha", MergeSHA: "merge-sha"}, wantCancel: "c1"},
@@ -614,6 +623,90 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 			assertRemediationDispatch(t, eri, tc.wantDispatch, tc.wantDispatchID)
 			assert.Equal(t, tc.wantCancel, eri.lastCancel)
 			assert.Equal(t, tc.wantMsgChan, eri.lastMsgChan)
+		})
+	}
+}
+
+func TestBuildObject_OnPREvent_RemediationDeferralAndRetry(t *testing.T) {
+	t.Parallel()
+	transportErr := errors.New("eri unavailable")
+
+	tests := []struct {
+		name               string
+		ev                 pubsub.PRLifecycleEvent
+		firstDispatchErr   error
+		wantFirstErr       bool
+		wantDeferred       bool
+		wantFailCountCalls int
+		wantDispatchID     string
+	}{
+		{
+			name:               "ci_failed skipped_active defers OnPREvent and dispatches after active worker finishes",
+			ev:                 ciFailEv("unit-tests", "abcdef1234"),
+			firstDispatchErr:   errDispatchActive,
+			wantDeferred:       true,
+			wantFailCountCalls: 1,
+			wantDispatchID:     "vanadis-c1-cifail-abcdef1234-1",
+		},
+		{
+			name:             "conflict skipped_active defers OnPREvent and dispatches after active worker finishes",
+			ev:               pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42},
+			firstDispatchErr: errDispatchActive,
+			wantDeferred:     true,
+			wantDispatchID:   "vanadis-conflict-c1-abcdef1",
+		},
+		{
+			name:             "ci_failed transport error fails OnPREvent without deferring or consuming budget",
+			ev:               ciFailEv("unit-tests", "abcdef1234"),
+			firstDispatchErr: transportErr,
+			wantFirstErr:     true,
+		},
+		{
+			name:             "conflict transport error fails OnPREvent without deferring",
+			ev:               pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42},
+			firstDispatchErr: transportErr,
+			wantFirstErr:     true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spy := &checkStatusSpyStore{chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Status: statusRunning, PRNumber: 42, Effort: effortMedium}}}
+			bo, eri := newRemediationTestHarness(t, spy, tc.firstDispatchErr, nil, false)
+
+			var deferred []pubsub.PRLifecycleEvent
+			mc := mocks.NewMockContext(t)
+			mc.EXPECT().Key().Return("b1").Maybe()
+			mc.EXPECT().Get("state", mock.Anything).Return(false, nil).Maybe()
+			mc.EXPECT().Get("launched", mock.Anything).Return(false, nil).Maybe()
+			mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext).Maybe()
+			mc.EXPECT().Set("state", mock.Anything, mock.Anything).Return().Maybe()
+			mc.EXPECT().Set("launched", mock.Anything, mock.Anything).Return().Maybe()
+			mc.EXPECT().ClearAll().Return().Maybe()
+			mClient := mocks.NewMockClient(t)
+			mInv := mocks.NewMockInvocation(t)
+			mc.EXPECT().Object("Build", "b1", "OnPREvent").Return(mClient).Maybe()
+			mClient.EXPECT().Send(mock.Anything, mock.Anything).Run(func(input any, _ ...restate.SendOption) {
+				if ev, ok := input.(pubsub.PRLifecycleEvent); ok {
+					deferred = append(deferred, ev)
+				}
+			}).Return(mInv).Maybe()
+			ctx := restate.WithMockContext(mc)
+
+			err := bo.OnPREvent(ctx, tc.ev)
+			assert.Equal(t, tc.wantFirstErr, err != nil)
+			assert.Empty(t, spy.failCountCalls)
+			assert.Equal(t, tc.wantDeferred, len(deferred) == 1)
+			if !tc.wantDeferred {
+				return
+			}
+
+			eri.dispatchFn = nil
+			eri.lastDispatch = nil
+			assert.NoError(t, bo.OnPREvent(ctx, deferred[0]))
+			assert.Len(t, spy.failCountCalls, tc.wantFailCountCalls)
+			assertRemediationDispatch(t, eri, true, tc.wantDispatchID)
 		})
 	}
 }

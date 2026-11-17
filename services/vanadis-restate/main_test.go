@@ -639,6 +639,11 @@ func makeObjectMockContext(t *testing.T, key string) restate.ObjectContext {
 	mc.EXPECT().Set("state", mock.Anything, mock.Anything).Return().Maybe()
 	mc.EXPECT().Set("launched", mock.Anything, mock.Anything).Return().Maybe()
 	mc.EXPECT().ClearAll().Return().Maybe()
+	mClient := mocks.NewMockClient(t)
+	mInv := mocks.NewMockInvocation(t)
+	mc.EXPECT().Object(mock.Anything, mock.Anything, mock.Anything).Return(mClient).Maybe()
+	mClient.EXPECT().Send(mock.Anything).Return(mInv).Maybe()
+	mClient.EXPECT().Send(mock.Anything, mock.Anything).Return(mInv).Maybe()
 	return restate.WithMockContext(mc)
 }
 
