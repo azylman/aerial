@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -168,8 +169,14 @@ func TestBrainHandler_SkipsServerSpansForMCPProxy(t *testing.T) {
 			if w.Code != http.StatusNoContent {
 				t.Errorf("status = %d, want 204", w.Code)
 			}
-			if got := len(rec.Ended()); got != tc.wantSpans {
-				t.Errorf("server spans = %d, want %d", got, tc.wantSpans)
+			var serverSpans int
+			for _, s := range rec.Ended() {
+				if s.SpanKind() == trace.SpanKindServer {
+					serverSpans++
+				}
+			}
+			if serverSpans != tc.wantSpans {
+				t.Errorf("server spans = %d, want %d", serverSpans, tc.wantSpans)
 			}
 		})
 	}

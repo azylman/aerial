@@ -591,8 +591,8 @@ func museExtractTurnCases(t0, t1 time.Time) []extractLastTurnErrorCase {
 			name:   "muse transcript extracts terminal error",
 			convID: "s-muse-err",
 			museTranscript: strings.Join([]string{
-				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"event":{"kind":"started","prompt":"Run tool"}}}`, t0.UnixMicro()),
-				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"event":{"kind":"terminal","terminal":"failed","reason":"Connection refused"}}}`, t1.UnixMicro()),
+				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"kind":"run","event":{"kind":"started","prompt":"Run tool"}}}`, t0.UnixMicro()),
+				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"kind":"run","event":{"kind":"terminal","terminal":"failed","reason":"Connection refused"}}}`, t1.UnixMicro()),
 			}, "\n") + "\n",
 			since:     t0,
 			wantError: "Connection refused",
@@ -846,8 +846,8 @@ func TestExtractResponseSince(t *testing.T) {
 			name:   "muse transcript extracts latest assistant response",
 			convID: "s-muse-resp",
 			museTranscript: strings.Join([]string{
-				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"event":{"kind":"started","prompt":"Run build"}}}`, t0.UnixMicro()),
-				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"event":{"kind":"assistant_message_committed","text":"Build finished successfully"}}}`, t1.UnixMicro()),
+				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"kind":"run","event":{"kind":"started","prompt":"Run build"}}}`, t0.UnixMicro()),
+				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Build finished successfully"}}}`, t1.UnixMicro()),
 			}, "\n") + "\n",
 			since:    t0,
 			wantResp: "Build finished successfully",
@@ -856,7 +856,7 @@ func TestExtractResponseSince(t *testing.T) {
 			name:   "muse transcript stale response before since returns empty",
 			convID: "s-muse-stale",
 			museTranscript: strings.Join([]string{
-				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"event":{"kind":"assistant_message_committed","text":"Stale"}}}`, t0.UnixMicro()),
+				fmt.Sprintf(`{"payload_type":"runtime.session","recorded_at":%d,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Stale"}}}`, t0.UnixMicro()),
 			}, "\n") + "\n",
 			since:    t1,
 			wantResp: "",

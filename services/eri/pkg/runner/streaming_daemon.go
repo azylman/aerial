@@ -89,6 +89,7 @@ type TurnContext struct {
 	syntheticReply       *claudeSyntheticReply
 	seenReasoningItemIDs map[string]bool
 	codexResponseText    string
+	itemTypes            map[string]string
 }
 
 // ClaudeSyntheticModel is the message.model of assistant messages the Claude CLI writes itself.
@@ -168,57 +169,6 @@ type StreamingDaemon struct {
 	closed         atomic.Bool
 }
 
-func extractMemoryLineID(line string) string {
-	trimmed := strings.TrimSpace(line)
-	if !strings.HasPrefix(trimmed, "- [id:") {
-		return ""
-	}
-	rest := trimmed[len("- [id:"):]
-	if end := strings.IndexByte(rest, ']'); end > 0 {
-		return rest[:end]
-	}
-	return ""
-}
-
-func deduplicateRetrievedMemory(prompt string, seen map[string]bool) string {
-	const openTag, closeTag = "<retrieved_memory>", "</retrieved_memory>"
-	startIdx := strings.Index(prompt, openTag)
-	if startIdx < 0 || seen == nil {
-		return prompt
-	}
-	endRel := strings.Index(prompt[startIdx:], closeTag)
-	if endRel < 0 {
-		return prompt
-	}
-	blockStart := startIdx + len(openTag)
-	blockEnd := startIdx + endRel
-	inner := strings.Trim(prompt[blockStart:blockEnd], "\r\n")
-	if inner == "" {
-		return prompt
-	}
-	lines := strings.Split(inner, "\n")
-	kept := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if id := extractMemoryLineID(line); id != "" {
-			if seen[id] {
-				continue
-			}
-			seen[id] = true
-		}
-		kept = append(kept, line)
-	}
-	if len(kept) == len(lines) {
-		return prompt
-	}
-	if len(kept) == 0 {
-		after := strings.TrimPrefix(strings.TrimPrefix(prompt[blockEnd+len(closeTag):], "\r\n"), "\n")
-		after = strings.TrimPrefix(strings.TrimPrefix(after, "\r\n"), "\n")
-		return strings.TrimSpace(prompt[:startIdx] + after)
-	}
-	replacement := openTag + "\n" + strings.Join(kept, "\n") + "\n" + closeTag
-	return prompt[:startIdx] + replacement + prompt[blockEnd+len(closeTag):]
-}
-
 func closeStreamQuietly(c io.Closer, name string) {
 	if c != nil {
 		if err := c.Close(); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, os.ErrClosed) {
@@ -267,6 +217,24 @@ func (d *StreamingDaemon) waitForAgyHandshake(ctx context.Context, reader *bufio
 	}
 }
 
+func (d *StreamingDaemon) performHandshake(startup context.Context, reader *bufio.Reader, timeout time.Duration) error {
+	switch {
+	case d.cfg.IsClaude():
+		sessID := d.cfg.SessionID
+		if sessID == "" {
+			sessID = uuid.New().String()
+		}
+		d.sessionID, d.state = sessID, StateReady
+		return nil
+	case d.cfg.IsCodex():
+		return d.waitForCodexHandshake(startup, reader, timeout)
+	case d.cfg.IsMuse():
+		return d.waitForMuseHandshake(startup, reader, timeout)
+	default:
+		return d.waitForAgyHandshake(startup, reader, timeout)
+	}
+}
+
 // StartStreamingDaemon starts a process on lifetime. The startup context bounds
 // retries and handshakes without shortening the successful process lifetime.
 func StartStreamingDaemon(lifetime, startup context.Context, cfg DaemonConfig, spawner DaemonSpawner) (*StreamingDaemon, error) {
@@ -307,17 +275,7 @@ func StartStreamingDaemon(lifetime, startup context.Context, cfg DaemonConfig, s
 	if cfg.Timeout > 0 {
 		timeout = cfg.Timeout
 	}
-	if cfg.IsClaude() {
-		sessID := cfg.SessionID
-		if sessID == "" {
-			sessID = uuid.New().String()
-		}
-		d.sessionID, d.state = sessID, StateReady
-	} else if cfg.IsCodex() {
-		if err := d.waitForCodexHandshake(startup, reader, timeout); err != nil {
-			return nil, err
-		}
-	} else if err := d.waitForAgyHandshake(startup, reader, timeout); err != nil {
+	if err := d.performHandshake(startup, reader, timeout); err != nil {
 		return nil, err
 	}
 
@@ -1192,10 +1150,14 @@ func (d *StreamingDaemon) recordDaemonInit() {
 
 func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
+	switch {
+	case trimmed == "":
 		return
-	} else if d.cfg.IsCodex() {
+	case d.cfg.IsCodex():
 		d.dispatchCodexJSONRPCLine(trimmed)
+		return
+	case d.cfg.IsMuse():
+		d.dispatchMuseJSONRPCLine(trimmed)
 		return
 	}
 	var raw map[string]any
