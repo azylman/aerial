@@ -115,7 +115,7 @@ default_model = "gpt-6.1-sol"
 review_model = "gpt-6.1-sol"
 disable_codex_sandbox = true
 ${BACKUP_AGENT_SETTINGS}
-review_reasoning = "thorough"
+review_reasoning = "low"
 review_min_severity = "medium"
 agent_quota_cooldown = "2m"
 review_context_count = 5
@@ -159,11 +159,13 @@ default_panel = "ci"
 [review.subagents.default]
 agent = "codex"
 model = "gpt-6.1-sol"
+reasoning = "low"
 review_type = "default"
 
 [review.subagents.test-value]
 agent = "codex"
 model = "gpt-6.1-sol"
+reasoning = "low"
 review_type = "test-value"
 instructions = """
 Scope: review only test code on lines this diff adds or changes. Do not raise findings on pre-existing test cases, assertions, or helpers on unchanged lines, even inside a file the diff touches, unless a changed line alters that test's behavior. Mechanical edits (renames, dropped receiver names, formatting, lint autofixes such as http.NoBody) do not bring the surrounding test into scope.
@@ -173,6 +175,7 @@ Scope: review only test code on lines this diff adds or changes. Do not raise fi
 members = ["default", "test-value"]
 synthesis_agent = "codex"
 synthesis_model = "gpt-6.1-sol"
+synthesis_reasoning = "low"
 ${PANEL_SYNTHESIS_BACKUP}
 EOF
 elif [ -s "/root/.roborev/claude-oauth-token" ] && command -v claude >/dev/null 2>&1; then
@@ -622,6 +625,7 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
 
   if [ -s "/root/.codex/auth.json" ] && command -v codex >/dev/null 2>&1; then
     agent="codex"
+    reasoning="low"
     for i in "${!orig_args[@]}"; do
       case "${orig_args[i]}" in
         --agent=*|--agent)
@@ -629,6 +633,13 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
             orig_args[i]="--agent=codex"
           elif [[ "${orig_args[i]}" == "--agent" && $((i+1)) -lt ${#orig_args[@]} ]]; then
             orig_args[i+1]="codex"
+          fi
+          ;;
+        --reasoning=*|--reasoning)
+          if [[ "${orig_args[i]}" == --reasoning=* ]]; then
+            orig_args[i]="--reasoning=low"
+          elif [[ "${orig_args[i]}" == "--reasoning" && $((i+1)) -lt ${#orig_args[@]} ]]; then
+            orig_args[i+1]="low"
           fi
           ;;
       esac
