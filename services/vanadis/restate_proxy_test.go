@@ -119,9 +119,9 @@ func TestMapRestateError(t *testing.T) {
 		{
 			name:       "400 with custom message",
 			statusCode: http.StatusBadRequest,
-			msg:        "invalid input parameter",
+			msg:        "repo is required to attach PR to action chunk",
 			wantErrIs:  ErrInvalidBuildInput,
-			wantSubstr: "invalid input parameter",
+			wantSubstr: "repo is required to attach PR to action chunk",
 		},
 		{
 			name:       "400 empty message defaults to status text",
@@ -190,7 +190,7 @@ func mockRestateProxyServerHandler(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{invalid-json`))
 	case "/error-json-message":
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"message":"bad request message"}`))
+		_, _ = w.Write([]byte(`{"message":"repo is required to attach PR to action chunk"}`))
 	case "/error-json-error":
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"error":"conflict error text"}`))
@@ -269,7 +269,7 @@ func TestCallRestateIngress(t *testing.T) {
 			path:       "/error-json-message",
 			wantErr:    true,
 			wantErrIs:  ErrInvalidBuildInput,
-			wantSubstr: "bad request message",
+			wantSubstr: "repo is required to attach PR to action chunk",
 		},
 		{
 			name:       "error status with error field",

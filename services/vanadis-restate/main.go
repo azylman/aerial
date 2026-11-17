@@ -833,7 +833,7 @@ func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req AttachC
 	attached, attachErr := runJournaled(ctx, labelAttachPR, "attach-pr-postgres", stepRecorded, func(rc restate.RunContext) (AttachChunkPRResponse, error) {
 		bID, cID, thID, err := store.AttachChunkPR(rc, req)
 		if err != nil {
-			return AttachChunkPRResponse{}, err
+			return AttachChunkPRResponse{}, toTerminalErr(err)
 		}
 		if exec := b.executor; exec != nil {
 			if bld, chunks, gErr := store.GetBuild(rc, bID); gErr == nil && bld != nil {
