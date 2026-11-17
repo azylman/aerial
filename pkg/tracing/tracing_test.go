@@ -196,7 +196,6 @@ func TestSetup(t *testing.T) {
 		name            string
 		cfg             Config
 		env             map[string]string
-		wantErr         bool
 		wantForwards    bool // inbound traceparent survives on the extracted context
 		wantRootSampled bool // a new root span is recorded and sampled
 		// envEndpointCollector points OTEL_EXPORTER_OTLP_TRACES_ENDPOINT at a local collector;
@@ -233,8 +232,8 @@ func TestSetup(t *testing.T) {
 				hits = startEnvCollector(t)
 			}
 			shutdown, err := Setup(context.Background(), "eri", tc.cfg)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Setup err = %v, wantErr %v", err, tc.wantErr)
+			if err != nil {
+				t.Fatalf("Setup err = %v, want nil", err)
 			}
 			seen, seenBaggage := serveThroughGlobalMiddleware()
 			if (seen == parentTraceID) != tc.wantForwards {
