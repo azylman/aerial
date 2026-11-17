@@ -1323,12 +1323,13 @@ PATH="$TEST_ROOT/bin:$PATH"
 printf '[]\n' > "$STATE_DIR/comments.json"
 printf '[]\n' > "$STATE_DIR/jobs.json"
 
-# Subtest 3a: Token exists + claude exists -> exports token and normalizes gemini -> claude-code
+# Subtest 3a: Token exists + claude exists -> exports token and normalizes gemini -> claude-code with low reasoning
 printf 'test-claude-token-123\n' > "$STATE_DIR/claude-oauth-token"
 : > "$CALL_LOG"
 (cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough >/dev/null 2>&1)
 if grep -q "\[token=test-claude-token-123\]" "$CALL_LOG" &&
-   grep -q -- "--agent claude-code" "$CALL_LOG"; then
+   grep -q -- "--agent claude-code" "$CALL_LOG" &&
+   grep -q -- "--reasoning low" "$CALL_LOG"; then
   echo 'claude_remap_gemini:ok'
 fi
 
@@ -1336,16 +1337,18 @@ fi
 : > "$CALL_LOG"
 (cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent=gemini --min-severity medium --reasoning thorough >/dev/null 2>&1)
 if grep -q "\[token=test-claude-token-123\]" "$CALL_LOG" &&
-   grep -q -- "--agent claude-code" "$CALL_LOG"; then
+   grep -q -- "--agent claude-code" "$CALL_LOG" &&
+   grep -q -- "--reasoning low" "$CALL_LOG"; then
   echo 'claude_remap_gemini_eq:ok'
 fi
 
-# Subtest 3c: Token removed -> unsets token and normalizes claude-code -> gemini
+# Subtest 3c: Token removed -> unsets token and normalizes claude-code -> gemini with low reasoning
 rm -f "$STATE_DIR/claude-oauth-token"
 : > "$CALL_LOG"
 (cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent claude-code --min-severity medium --reasoning thorough >/dev/null 2>&1)
 if grep -q "\[token=\]" "$CALL_LOG" &&
-   grep -q -- "--agent gemini" "$CALL_LOG"; then
+   grep -q -- "--agent gemini" "$CALL_LOG" &&
+   grep -q -- "--reasoning low" "$CALL_LOG"; then
   echo 'claude_fallback_gemini:ok'
 fi
 
@@ -1366,19 +1369,21 @@ if grep -q -- "--agent codex" "$CALL_LOG" &&
   echo 'codex_remap_gemini:ok'
 fi
 
-# Subtest 3e: Codex removed -> falls back to claude-code when claude token exists
+# Subtest 3e: Codex removed -> falls back to claude-code with low reasoning when claude token exists
 rm -f "$STATE_DIR/codex-auth.json"
 : > "$CALL_LOG"
 (cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning thorough >/dev/null 2>&1)
-if grep -q -- "--agent claude-code" "$CALL_LOG"; then
+if grep -q -- "--agent claude-code" "$CALL_LOG" &&
+   grep -q -- "--reasoning low" "$CALL_LOG"; then
   echo 'codex_fallback_claude:ok'
 fi
 
-# Subtest 3f: Both codex and claude removed -> falls back to gemini
+# Subtest 3f: Both codex and claude removed -> falls back to gemini with low reasoning
 rm -f "$STATE_DIR/claude-oauth-token"
 : > "$CALL_LOG"
 (cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning thorough >/dev/null 2>&1)
-if grep -q -- "--agent gemini" "$CALL_LOG"; then
+if grep -q -- "--agent gemini" "$CALL_LOG" &&
+   grep -q -- "--reasoning low" "$CALL_LOG"; then
   echo 'codex_fallback_gemini:ok'
 fi
 
