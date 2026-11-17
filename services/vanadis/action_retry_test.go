@@ -35,10 +35,16 @@ func TestRetryActionIntake(t *testing.T) {
 		name, body                string
 		ingressStatus, wantStatus int
 		ingressBody               string
+		buildStatus               string
+		generation                int
 		noIngress                 bool
 		disabled                  bool
 	}{
 		{name: "accepted", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
+		{name: "completed replay", buildStatus: "completed", generation: 1, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
+		{name: "failed replay", buildStatus: "failed", generation: 1, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
+		{name: "cancelled replay", buildStatus: "cancelled", generation: 1, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
+		{name: "older replay", buildStatus: "failed", generation: 2, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, ingressStatus: 200, ingressBody: `{"build_id":"b1","chunk_id":"c1","dispatch_id":"vanadis-c1-turn-1","accepted":true}`, wantStatus: 200},
 		{name: "missing ingress", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, noIngress: true, wantStatus: 503},
 		{name: "disabled ingress", disabled: true, body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, noIngress: false, wantStatus: 503},
 		{name: "missing identity", body: `{"build_id":"b1","chunk_id":"c1","reason":"retry"}`, wantStatus: 400},
@@ -53,7 +59,11 @@ func TestRetryActionIntake(t *testing.T) {
 			f := &retryIngressFixture{status: tc.ingressStatus, body: tc.ingressBody}
 			ts := httptest.NewServer(f)
 			defer ts.Close()
-			s := &VanadisServer{store: &retryReadFixture{status: "failed"}, httpClient: ts.Client(), restateCfg: RestateConfig{Enabled: !tc.disabled}}
+			status := tc.buildStatus
+			if status == "" {
+				status = "failed"
+			}
+			s := &VanadisServer{store: &retryReadFixture{status: status, generation: tc.generation}, httpClient: ts.Client(), restateCfg: RestateConfig{Enabled: !tc.disabled}}
 			if !tc.noIngress {
 				s.restateCfg.RestateIngressURL = ts.URL
 			}
@@ -129,11 +139,12 @@ func TestRetryActionHTTPAndMCP(t *testing.T) {
 type retryReadFixture struct {
 	VanadisStore
 
-	status string
+	status     string
+	generation int
 }
 
 func (f *retryReadFixture) GetBuild(context.Context, string) (*VanadisBuild, []VanadisChunk, error) {
-	return &VanadisBuild{ID: "b1", Status: f.status}, []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: f.status}}, nil
+	return &VanadisBuild{ID: "b1", Status: f.status}, []VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: f.status, StallNudges: f.generation}}, nil
 }
 
 func TestRetryPrematureRequest(t *testing.T) {
@@ -182,8 +193,10 @@ func TestRetryEligibility(t *testing.T) {
 		sibling                                  *VanadisChunk
 		wantErr                                  bool
 	}{
-		{name: "failed", buildStatus: "failed", chunkStatus: "failed", identity: "vanadis-c1-turn-0"},
 		{name: "uncertain accepted replay", buildStatus: "running", chunkStatus: "running", identity: "vanadis-c1-turn-0", generation: 1},
+		{name: "negative identity", buildStatus: "completed", chunkStatus: "completed", identity: "vanadis-c1-turn--1", generation: 1, wantErr: true},
+		{name: "noncanonical identity", buildStatus: "completed", chunkStatus: "completed", identity: "vanadis-c1-turn-00", generation: 1, wantErr: true},
+		{name: "foreign identity", buildStatus: "completed", chunkStatus: "completed", identity: "vanadis-c2-turn-0", generation: 1, wantErr: true},
 		{name: "future identity", buildStatus: "failed", chunkStatus: "failed", identity: "vanadis-c1-turn-1", wantErr: true},
 		{name: "cancelled", buildStatus: "cancelled", chunkStatus: "failed", identity: "vanadis-c1-turn-0", wantErr: true},
 		{name: "other failure", buildStatus: "failed", chunkStatus: "failed", identity: "vanadis-c1-turn-0", sibling: &VanadisChunk{ID: "c2", Status: "failed"}, wantErr: true},

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -161,7 +162,12 @@ func (s *VanadisServer) validateRetryEligibility(ctx context.Context, req RetryA
 	if c.BuildID != req.BuildID || c.Mode != "action" || c.PRNumber != 0 || c.StallNudges < 0 {
 		return ErrBuildConflict
 	}
-	if c.StallNudges > 0 && b.Status == statusRunning && (c.Status == statusPending || c.Status == statusRunning) && req.ExpectedDispatchID == fmt.Sprintf("vanadis-%s-turn-%d", c.ID, c.StallNudges-1) {
+	// Older canonical identities only recover their retained durable result. If
+	// retention has expired, the authoritative generation fence still prevents
+	// another reset. Current-generation requests still require
+	// eligibility below so a premature request cannot consume its retry key.
+	generation, parseErr := strconv.Atoi(strings.TrimPrefix(req.ExpectedDispatchID, "vanadis-"+c.ID+"-turn-"))
+	if parseErr == nil && generation >= 0 && generation < c.StallNudges && req.ExpectedDispatchID == fmt.Sprintf("vanadis-%s-turn-%d", c.ID, generation) {
 		return nil
 	}
 	if b.Status != statusFailed || c.Status != statusFailed || c.StallNudges >= 2147483647 || req.ExpectedDispatchID != fmt.Sprintf("vanadis-%s-turn-%d", c.ID, c.StallNudges) {
