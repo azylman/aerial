@@ -7,7 +7,7 @@ set -euo pipefail
 
 usage() {
     cat <<EOF
-Usage: $0 <migration_name> [target_dir]
+Usage: $0 [--config PATH] <migration_name> [target_dir]
 
 Arguments:
   migration_name   Name of the migration to generate (e.g. add_user_settings, create_banana_orders)
@@ -15,7 +15,7 @@ Arguments:
 
 Environment Variables:
   ATLAS_DEV_URL    Optional external Postgres dev URL (skips ephemeral container if provided)
-  ATLAS_IMAGE      Docker image for dev DB (default: pgvector/pg16:latest)
+  ATLAS_IMAGE      Docker image for dev DB (default: pgvector/pgvector:pg18)
 
 Examples:
   $0 add_facts_metadata
@@ -23,6 +23,12 @@ Examples:
 EOF
     exit 1
 }
+
+CONFIG=/local/atlas-dev.yaml
+if [ "${1:-}" = "--config" ]; then
+    CONFIG=${2:?missing config path}
+    shift 2
+fi
 
 if [ $# -lt 1 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     usage
@@ -70,12 +76,12 @@ echo "🧭 [atlas-diff] Target configuration: ${TARGET_DIR}/atlas.hcl" >&2
 # 3. Dev Database Setup
 DEV_CONTAINER=""
 DEV_DB_NAME=""
-DEV_ADMIN_URL=""
+source "$(dirname "${BASH_SOURCE[0]}")/atlas-dev-db.sh"
 cleanup() {
     local exit_code=$?
-    if [ -n "$DEV_DB_NAME" ] && [ -n "$DEV_ADMIN_URL" ]; then
-        echo "🧹 [atlas-diff] Dropping ephemeral dev database: ${DEV_DB_NAME}..." >&2
-        psql "$DEV_ADMIN_URL" -v ON_ERROR_STOP=0 -q -c "DROP DATABASE IF EXISTS \"${DEV_DB_NAME}\" WITH (FORCE);" >/dev/null 2>&1 || true
+    if [ -n "$DEV_DB_NAME" ]; then
+        atlas_dev_drop "$DEV_DB_NAME" >/dev/null 2>&1 ||
+            echo "WARNING: disposable database cleanup failed; scheduled sweep will retry" >&2
     fi
     if [ -n "$DEV_CONTAINER" ]; then
         echo "🧹 [atlas-diff] Cleaning up ephemeral dev container: ${DEV_CONTAINER}..." >&2
@@ -83,24 +89,14 @@ cleanup() {
     fi
     exit $exit_code
 }
-trap cleanup EXIT INT TERM ERR
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 DEV_URL="${ATLAS_DEV_URL:-}"
-BASE_PG_URL="${DATABASE_URL:-${POSTGRES_URL:-}}"
-
-if [ -z "$DEV_URL" ] && [ -n "$BASE_PG_URL" ] && command -v psql >/dev/null 2>&1; then
-    DEV_DB_NAME="atlas_dev_$$_$(date +%s)"
-    DEV_ADMIN_URL=$(printf '%s' "$BASE_PG_URL" | sed -E 's|^([^?]+/)[^/?]+(\?.*)?$|\1postgres\2|')
-    CANDIDATE_DEV_URL=$(printf '%s' "$BASE_PG_URL" | sed -E "s|^([^?]+/)[^/?]+(\?.*)?$|\1${DEV_DB_NAME}\2|")
-    echo "🚀 [atlas-diff] Creating ephemeral dev database: ${DEV_DB_NAME}..." >&2
-    if psql "$DEV_ADMIN_URL" -v ON_ERROR_STOP=1 -q -c "CREATE DATABASE \"${DEV_DB_NAME}\";" >/dev/null 2>&1 && \
-       psql "$CANDIDATE_DEV_URL" -v ON_ERROR_STOP=1 -q -c "CREATE EXTENSION IF NOT EXISTS vector;" >/dev/null 2>&1; then
-        DEV_URL="$CANDIDATE_DEV_URL"
-    else
-        echo "⚠️ [atlas-diff] Could not create ephemeral database on DATABASE_URL; falling back to Docker..." >&2
-        DEV_DB_NAME=""
-        DEV_ADMIN_URL=""
-    fi
+if [ -z "$DEV_URL" ] && [ -e "$CONFIG" ]; then
+    atlas_dev_config_load "$CONFIG"
+    atlas_dev_create
 fi
 
 if [ -z "$DEV_URL" ]; then
