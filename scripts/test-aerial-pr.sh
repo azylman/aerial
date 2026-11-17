@@ -1787,12 +1787,13 @@ INIT_CHUNK_REUSE_CHECK=$(bash -c "
     dir1_mode=\$(stat -c %a \"\$dir1\" 2>/dev/null || echo '')
 
     if [ \"\$dir1\" = \"\$TEST_BASE/vanadis-chunk-6-aerial-pr-deterministic-scratch-reuse-aerial\" ] && \
+       [[ \"\$branch1\" =~ ^feat/aerial-pr-vanadis-chunk-6-aerial-pr-deterministic-scratch-reuse-[0-9a-f]{6}\$ ]] && \
        [ \"\$reused1\" = 'false' ] && \
        [ \"\$dir1_mode\" = '700' ] && \
        [ -f \"\$dir1/.git/.aerial-init-complete\" ]; then
         echo 'first_init:ok'
     else
-        echo \"first_init:fail:dir1=\$dir1:reused1=\$reused1:mode=\$dir1_mode\"
+        echo \"first_init:fail:dir1=\$dir1:branch1=\$branch1:reused1=\$reused1:mode=\$dir1_mode\"
     fi
 
     # Subtest 2: Post-restart reuse preserves uncommitted edits, staged edits, .aerial-verified-tree, and branch
@@ -1827,10 +1828,12 @@ INIT_CHUNK_REUSE_CHECK=$(bash -c "
     # Subtest 3: Special character sanitization in chunk ID
     init_json3=\$(VANADIS_CHUNK_ID='chunk/6.1:feat@test#1' init_scratch aerial)
     dir3=\$(echo \"\$init_json3\" | jq -r '.scratch_dir')
-    if [ \"\$dir3\" = \"\$TEST_BASE/vanadis-chunk_6_1_feat_test_1-aerial\" ]; then
+    branch3=\$(echo \"\$init_json3\" | jq -r '.branch')
+    if [ \"\$dir3\" = \"\$TEST_BASE/vanadis-chunk_6_1_feat_test_1-aerial\" ] && \
+       [[ \"\$branch3\" =~ ^feat/aerial-pr-vanadis-chunk_6_1_feat_test_1-[0-9a-f]{6}\$ ]]; then
         echo 'sanitize_chunk_id:ok'
     else
-        echo \"sanitize_chunk_id:fail:\$dir3\"
+        echo \"sanitize_chunk_id:fail:\$dir3:\$branch3\"
     fi
 
     # Subtest 4: Non-empty --branch overrides deterministic chunk directory

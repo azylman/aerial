@@ -420,18 +420,29 @@ func (e *Executor) newGitHubRequest(ctx context.Context, method, path string, bo
 	return req, nil
 }
 
+func resolveGitHubRepoPath(repo string) string {
+	clean := strings.Trim(strings.TrimSpace(repo), "/")
+	if clean == "" {
+		return ""
+	}
+	if strings.Contains(clean, "/") {
+		return clean
+	}
+	return defaultRepoOwner + "/" + clean
+}
+
 func (e *Executor) fetchCheckJobFailureLogs(ctx context.Context, repo string, jobID int64) string {
 	if e == nil || e.httpClient == nil {
 		return ""
 	}
-	cleanRepo := cleanRepoName(repo)
-	if cleanRepo == "" || jobID <= 0 {
+	repoPath := resolveGitHubRepoPath(repo)
+	if repoPath == "" || jobID <= 0 {
 		return ""
 	}
 	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	req, err := e.newGitHubRequest(timeoutCtx, http.MethodGet, fmt.Sprintf("/repos/%s/actions/jobs/%d/logs", cleanRepo, jobID), nil)
+	req, err := e.newGitHubRequest(timeoutCtx, http.MethodGet, fmt.Sprintf("/repos/%s/actions/jobs/%d/logs", repoPath, jobID), nil)
 	if err != nil {
 		return ""
 	}
@@ -460,12 +471,12 @@ type gitHubIssueComment struct {
 }
 
 func (e *Executor) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
-	repo = cleanRepoName(repo)
-	if e == nil || repo == "" || prNumber <= 0 || e.httpClient == nil {
+	repoPath := resolveGitHubRepoPath(repo)
+	if e == nil || repoPath == "" || prNumber <= 0 || e.httpClient == nil {
 		return ""
 	}
 	var comments []gitHubIssueComment
-	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repo, prNumber)
+	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repoPath, prNumber)
 	req, err := e.newGitHubRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return ""
@@ -535,6 +546,46 @@ func FormatConflictPrompt(ev pubsub.PRLifecycleEvent) string {
 	shortRepo := firstNonEmpty(cleanRepoName(ev.Repo), "aerial")
 	cleanBranch := firstNonEmpty(strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/"), "<branch>")
 	return fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', merge origin/main to resolve conflicts, verify locally, and push to update the PR via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", ev.PRNumber, ev.Repo, cleanBranch, ev.HeadSHA, shortRepo, cleanBranch)
+}
+
+// FormatDeployFailureBanner formats the chunk banner when deployment or git sync fails.
+func FormatDeployFailureBanner(ev pubsub.PRLifecycleEvent) string {
+	var banner string
+	if strings.EqualFold(strings.TrimSpace(ev.Event), "sync_failed") {
+		banner = "Git sync failed"
+	} else if cleanJob := strings.TrimSpace(ev.JobName); cleanJob != "" {
+		banner = "Deployment failed for " + cleanJob
+	} else {
+		banner = "Deployment failed"
+	}
+	if cleanDetails := strings.TrimSpace(ev.Details); cleanDetails != "" {
+		banner = fmt.Sprintf("%s: %s", banner, cleanDetails)
+	}
+	return banner
+}
+
+func formatDeployFailureHeader(repo, commit, jobName string, prNumber int) string {
+	if cleanJob := strings.TrimSpace(jobName); cleanJob != "" {
+		return fmt.Sprintf("Deployment failed for job %s on %s (PR #%d, commit: %s).", cleanJob, repo, prNumber, commit)
+	}
+	return fmt.Sprintf("Deployment failed for PR #%d on %s (commit: %s).", prNumber, repo, commit)
+}
+
+// FormatDeployFailurePrompt formats the failure prompt when deployment or git sync fails.
+func FormatDeployFailurePrompt(ev pubsub.PRLifecycleEvent) string {
+	commit := firstNonEmpty(ev.MergeSHA, ev.HeadSHA)
+	cleanEvent := strings.ToLower(strings.TrimSpace(ev.Event))
+	var extraLine string
+	cleanBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
+	if cleanBranch != "" {
+		extraLine = "Branch: " + cleanBranch
+	}
+	if cleanEvent == "sync_failed" {
+		header := fmt.Sprintf("Git sync failed for PR #%d on %s (commit: %s).", ev.PRNumber, ev.Repo, commit)
+		return formatErrorDetailsBlock(header, ev.Details, extraLine, "Please investigate and fix the git sync failure.")
+	}
+	header := formatDeployFailureHeader(ev.Repo, commit, ev.JobName, ev.PRNumber)
+	return formatErrorDetailsBlock(header, ev.Details, extraLine, "Please investigate and fix the deployment failure.")
 }
 
 func formatErrorDetailsBlock(header, details, extraLine, footer string) string {

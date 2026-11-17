@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -667,19 +668,20 @@ func TestBuildObject_FailureMutations(t *testing.T) {
 func TestActionPRFailureFence(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, identity string
-		wantFailed     bool
+		name, status, identity string
+		wantFailed             bool
 	}{
-		{"closed without merging", "", true},
-		{"current action", "vanadis-c1-turn-1", true},
-		{"stale action", "vanadis-c1-turn-0", false},
-		{"ci remediation", "vanadis-c1-cifail-1-abcdef0", true},
-		{"conflict remediation", "vanadis-conflict-c1", true},
+		{"closed without merging", "pr_opened", "", true},
+		{"current action", "pr_opened", "vanadis-c1-turn-1", true},
+		{"stale action", "pr_opened", "vanadis-c1-turn-0", false},
+		{"ci remediation", "pr_opened", "vanadis-c1-cifail-1-abcdef0", true},
+		{"conflict remediation", "pr_opened", "vanadis-conflict-c1", true},
+		{"deploy failed fences delayed action", "deploy_failed", "vanadis-c1-turn-1", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, _ := dbScript{row: failRow("pr_opened", "running", 1, 42)}.open()
+			store, _ := dbScript{row: failRow(tc.status, "running", 1, 42)}.open()
 			build, chunk, failed, err := store.FailChunk(context.Background(), "c1", "pr_closed_unmerged", tc.identity)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.wantFailed, failed)
@@ -1051,15 +1053,23 @@ func TestReconcileErrorsMetric(t *testing.T) {
 type checkStatusSpyStore struct {
 	VanadisStore
 
-	calls     []string
-	resets    []string
-	err       error
-	resetErr  error
-	statusErr error
+	lifecycleStatus string
+	getBuildErr     error
+	chunks          []VanadisChunk
+	calls           []string
+	resets          []string
+	failed          []string
+	banners         []string
+	err             error
+	resetErr        error
+	statusErr       error
+	bannerErr       error
+	failErr         error
+	skipFailApply   bool
 }
 
-func (*checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
-	return &VanadisBuild{ID: buildID, Status: statusRunning}, nil, nil
+func (s *checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
+	return &VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, s.chunks, s.getBuildErr
 }
 
 func (s *checkStatusSpyStore) RecordPRCheckStatus(_ context.Context, chunkID, headSHA, checkName, checkState string) error {
@@ -1072,15 +1082,92 @@ func (s *checkStatusSpyStore) ResetPRCheckState(_ context.Context, chunkID, head
 	return s.resetErr
 }
 
-func (s *checkStatusSpyStore) UpdatePRLifecycleStatus(_ context.Context, _, _ string) error {
+func (s *checkStatusSpyStore) UpdatePRLifecycleStatus(_ context.Context, _ string, status string) error {
+	s.lifecycleStatus = status
 	return s.statusErr
+}
+
+func TestBuildObject_MergeRevisionAfterLifecycle(t *testing.T) {
+	t.Parallel()
+	unavailable := errors.New("reset unavailable")
+	tests := []struct {
+		name, mergeSHA    string
+		resetErr, wantErr error
+	}{
+		{"missing optional merge SHA", "", errPRTransitionSkipped, nil},
+		{"rejected merge reset reloads lifecycle", "merge-event", errPRTransitionSkipped, errPRTransitionSkipped},
+		{"failed merge reset retries", "merge-event", unavailable, unavailable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := &checkStatusSpyStore{resetErr: tc.resetErr, chunks: []VanadisChunk{{ID: "c1", BuildID: "b1", Status: "merged", HeadSHA: "head"}}}
+			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			bo.setChunkRevision("c1", prRevisionState{headSHA: "head"})
+			ctx := mockRunContext{Context: context.Background()}
+			err := bo.handlePREventType(ctx, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "head", MergeSHA: tc.mergeSHA})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("merge error=%v want=%v", err, tc.wantErr)
+			}
+			if err := bo.handlePREventType(ctx, "b1", "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-actual", CheckName: "build", CheckState: "passed"}); err != nil {
+				t.Fatalf("merge check rejected: %v", err)
+			}
+			if err := bo.handlePREventType(ctx, "b1", "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "head", CheckName: "lint", CheckState: "passed"}); !errors.Is(err, errPRTransitionSkipped) {
+				t.Fatalf("head check error=%v", err)
+			}
+		})
+	}
+}
+
+func TestBuildObject_RejectedCheckFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+	}{{"skipped write", errPRTransitionSkipped}, {"failed write", errors.New("database unavailable")}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := &checkStatusSpyStore{err: tc.err, getBuildErr: errors.New("read unavailable")}
+			bo := NewBuildObject("", nil).WithAuthority(store, nil)
+			err := bo.handlePREventType(mockRunContext{Context: context.Background()}, "b1", "c1", "check_failed", pubsub.PRLifecycleEvent{HeadSHA: "new", CheckName: "lint"})
+			if !errors.Is(err, tc.err) || store.lifecycleStatus != "" {
+				t.Fatalf("error=%v lifecycle=%s", err, store.lifecycleStatus)
+			}
+		})
+	}
+}
+
+func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*VanadisBuild, *VanadisChunk, bool, error) {
+	s.failed = append(s.failed, chunkID+":"+reason)
+	if s.failErr != nil {
+		return nil, nil, false, s.failErr
+	}
+	return &VanadisBuild{ID: "b1", Status: statusFailed, Objective: "Obj", ThreadID: "th-1"}, &VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed}, !s.skipFailApply, nil
+}
+
+func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chunkID, status, banner string) error {
+	s.banners = append(s.banners, chunkID+":"+status+":"+banner)
+	return s.bannerErr
+}
+
+func (*checkStatusSpyStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
+	return nil
 }
 
 func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	spy := &checkStatusSpyStore{}
-	bo := NewBuildObject("", nil).WithAuthority(spy, nil)
+	var currentHead atomic.Value
+	currentHead.Store("sha-2")
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"state":"open","merged":false,"head":{"sha":%q}}`, currentHead.Load())
+	}))
+	defer api.Close()
+	executor := NewExecutor("", nil, nil, "", api.Client())
+	executor.gitHubAPIURL = api.URL
+	bo := NewBuildObject("", nil).WithAuthority(spy, executor)
 
 	// Empty check name is ignored
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{CheckName: ""}))
@@ -1101,19 +1188,19 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 
 	// synchronize advances tracked revision to sha-2 and resets check state
 	t2 := time.Date(2026, 11, 16, 23, 0, 0, 0, time.UTC)
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", OccurredAt: t2}))
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-2", OccurredAt: t2}))
 	assert.Equal(t, []string{"c1:sha-2:"}, spy.resets)
 
 	// delayed synchronize for superseded sha-1 or older timestamp is rejected without mutating revision
 	spy.resets = nil
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-1"}), errPRTransitionSkipped)
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-0", OccurredAt: t2.Add(-time.Minute)}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-1"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-0", OccurredAt: t2.Add(-time.Minute)}), errPRTransitionSkipped)
 	assert.Empty(t, spy.resets)
 
 	// delayed check_updated and check_failed from old head sha-1 are rejected
 	spy.calls = nil
 	assert.ErrorIs(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "pending"}), errPRTransitionSkipped)
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test"}), errPRTransitionSkipped)
 	assert.Empty(t, spy.calls)
 
 	// check_updated for new head sha-2 succeeds
@@ -1124,7 +1211,8 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	spy.resets = nil
 	spy.calls = nil
 	t3 := t2.Add(time.Minute)
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", OccurredAt: t3}))
+	currentHead.Store("sha-1")
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-1", OccurredAt: t3}))
 	assert.Equal(t, []string{"c1:sha-1:"}, spy.resets)
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "passed"}))
 	assert.Equal(t, []string{"c1:sha-1:test:passed"}, spy.calls)
@@ -1132,13 +1220,16 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	// advance back to sha-2 with newer timestamp t4
 	spy.resets = nil
 	t4 := t3.Add(time.Minute)
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", OccurredAt: t4}))
+	currentHead.Store("sha-2")
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-2", OccurredAt: t4}))
 	assert.Equal(t, []string{"c1:sha-2:"}, spy.resets)
 
 	// untimestamped synchronize on c2 clears headAt so delayed sha-a with older timestamp is rejected
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-a", OccurredAt: t2}))
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-b"}))
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-a", OccurredAt: t3}), errPRTransitionSkipped)
+	currentHead.Store("sha-a")
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-a", OccurredAt: t2}))
+	currentHead.Store("sha-b")
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-b"}))
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-a", OccurredAt: t3}), errPRTransitionSkipped)
 	assert.True(t, prHeadAtFromContext(nil).IsZero())
 	assert.True(t, prHeadAtFromContext(context.Background()).IsZero())
 	assert.Nil(t, withPRHeadAt(nil, time.Time{}))
@@ -1152,8 +1243,9 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	spy.resets = nil
 
 	// failed or skipped ResetPRCheckState on synchronize does not overwrite cached revision
+	currentHead.Store("sha-unapplied")
 	spy.resetErr = errPRTransitionSkipped
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-unapplied"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-unapplied"}), errPRTransitionSkipped)
 	spy.resetErr = nil
 	spy.calls = nil
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "passed"}))
@@ -1162,9 +1254,9 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	// merged resets check state for merge commit and rejects delayed pre-merge head sha-2 synchronize and checks while accepting merge-sha-3 checks
 	spy.calls = nil
 	spy.resets = nil
-	assert.NoError(t, bo.handlePREventType(nil, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", MergeSHA: "merge-sha-3"}))
+	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", MergeSHA: "merge-sha-3"}))
 	assert.Equal(t, []string{"c1:sha-2:merge-sha-3"}, spy.resets)
-	assert.ErrorIs(t, bo.handlePREventType(nil, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{HeadSHA: "sha-4"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-4"}), errPRTransitionSkipped)
 	assert.ErrorIs(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "pending"}), errPRTransitionSkipped)
 	assert.Empty(t, spy.calls)
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-sha-3", CheckName: "Build & Push Images (eri)", CheckState: "passed"}))
@@ -1173,9 +1265,29 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	// store error on recordPRMergeRevision prevents cached revision overwrite; store error on check_updated propagates
 	spyErr := &checkStatusSpyStore{err: errors.New("db error"), resetErr: errors.New("reset err")}
 	boErr := NewBuildObject("", nil).WithAuthority(spyErr, nil)
-	boErr.recordPRMergeRevision(ctx, "b1", "c1", "sha-2", "merge-sha-3")
+	assert.Error(t, boErr.recordPRMergeRevision(ctx, "b1", "c1", "sha-2", "merge-sha-3"))
 	assert.Error(t, boErr.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-sha-3", CheckName: "test", CheckState: "passed"}))
 	assert.Equal(t, []string{"c1:merge-sha-3:test:passed"}, spyErr.calls)
+
+	// restart after deploy_failed reconstructs merged revision state and rejects delayed pre-merge checks
+	spyRestart := &checkStatusSpyStore{
+		chunks: []VanadisChunk{
+			{ID: "c-df-1", BuildID: "b1", Status: statusDeployFailed, HeadSHA: "sha-pre", MergeSHA: "sha-merge"},
+			{ID: "c-df-2", BuildID: "b1", Status: statusDeployFailed, HeadSHA: "sha-pre"},
+		},
+	}
+	boRestart := NewBuildObject("", nil).WithAuthority(spyRestart, nil)
+	assert.ErrorIs(t, boRestart.handlePREventType(nil, "b1", "c-df-1", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-pre", CheckName: "test"}), errPRTransitionSkipped)
+	assert.ErrorIs(t, boRestart.handlePREventType(nil, "b1", "c-df-2", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-pre", CheckName: "test"}), errPRTransitionSkipped)
+	assert.NoError(t, boRestart.handlePREventType(nil, "b1", "c-df-2", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-post-merge", CheckName: "test", CheckState: "passed"}))
+	assert.Equal(t, []string{"c-df-2:sha-post-merge:test:passed"}, spyRestart.calls)
+	// Rejected post-merge check writes must not pin an unaccepted merge SHA.
+	mergedStore := &checkStatusSpyStore{err: errPRTransitionSkipped}
+	mergedObject := NewBuildObject("", nil).WithAuthority(mergedStore, nil)
+	mergedObject.setChunkRevision("c1", prRevisionState{headSHA: "head", merged: true})
+	assert.ErrorIs(t, mergedObject.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "rejected-merge", CheckName: "build", CheckState: "passed"}), errPRTransitionSkipped)
+	mergedStore.err = nil
+	assert.NoError(t, mergedObject.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "accepted-merge", CheckName: "build", CheckState: "passed"}))
 }
 
 type mockBusError struct {
@@ -1249,4 +1361,112 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 		return true, nil
 	})
 	_ = boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}})
+}
+
+func TestBuildObject_HandlePREventType_Parity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		event         string
+		prEvent       pubsub.PRLifecycleEvent
+		bannerErr     error
+		failErr       error
+		skipFailApply bool
+		wantErr       bool
+		wantFailed    []string
+		wantBanners   []string
+		wantPromptIn  string
+	}{
+		{
+			name:         "closed unmerged fails chunk and dispatches failure prompt",
+			event:        "closed",
+			prEvent:      pubsub.PRLifecycleEvent{Event: "closed", Status: "closed"},
+			wantFailed:   []string{"c1:pr_closed_unmerged"},
+			wantPromptIn: "[VANADIS BUILD FAILED]",
+		},
+		{
+			name:       "closed with status merged skips fail chunk",
+			event:      "closed",
+			prEvent:    pubsub.PRLifecycleEvent{Event: "closed", Status: "merged"},
+			wantFailed: nil,
+		},
+		{
+			name:         "closed_unmerged event fails chunk and dispatches failure prompt",
+			event:        "closed_unmerged",
+			prEvent:      pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
+			wantFailed:   []string{"c1:pr_closed_unmerged"},
+			wantPromptIn: "[VANADIS BUILD FAILED]",
+		},
+		{
+			name:          "closed_unmerged already terminal skips notifications",
+			event:         "closed_unmerged",
+			prEvent:       pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
+			skipFailApply: true,
+			wantFailed:    []string{"c1:pr_closed_unmerged"},
+		},
+		{
+			name:       "closed_unmerged fail chunk error propagates",
+			event:      "closed_unmerged",
+			prEvent:    pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
+			failErr:    errors.New("db fail error"),
+			wantErr:    true,
+			wantFailed: []string{"c1:pr_closed_unmerged"},
+		},
+		{
+			name:         "deploy_failed sets status banner and dispatches wake prompt",
+			event:        "deploy_failed",
+			prEvent:      pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "eri", Details: "crashloop", PRNumber: 101, Repo: "aerial"},
+			wantBanners:  []string{"c1:deploy_failed:Deployment failed for eri: crashloop"},
+			wantPromptIn: "Deployment failed for job eri on aerial (PR #101",
+		},
+		{
+			name:         "sync_failed sets status banner and dispatches wake prompt",
+			event:        "sync_failed",
+			prEvent:      pubsub.PRLifecycleEvent{Event: "sync_failed", Details: "git pull conflict", PRNumber: 102, Repo: "aerial"},
+			wantBanners:  []string{"c1:deploy_failed:Git sync failed: git pull conflict"},
+			wantPromptIn: "Git sync failed for PR #102 on aerial",
+		},
+		{
+			name:        "deploy_failed banner update error propagates",
+			event:       "deploy_failed",
+			prEvent:     pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "synapse"},
+			bannerErr:   errors.New("db banner error"),
+			wantErr:     true,
+			wantBanners: []string{"c1:deploy_failed:Deployment failed for synapse"},
+		},
+		{
+			name:        "deploy_failed on completed chunk skips wake prompt",
+			event:       "deploy_failed",
+			prEvent:     pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "synapse"},
+			bannerErr:   errPRTransitionSkipped,
+			wantErr:     true,
+			wantBanners: []string{"c1:deploy_failed:Deployment failed for synapse"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spy := &checkStatusSpyStore{bannerErr: tc.bannerErr, failErr: tc.failErr, skipFailApply: tc.skipFailApply}
+			eri := &mockEriClient{}
+			exec := NewExecutor(t.TempDir(), eri, nil, "token", nil)
+			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
+
+			err := bo.handlePREventType(nil, "b1", "c1", tc.event, tc.prEvent)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantFailed, spy.failed)
+			assert.Equal(t, tc.wantBanners, spy.banners)
+			if tc.wantPromptIn != "" {
+				assert.Contains(t, eri.lastPrompt, tc.wantPromptIn)
+				assert.Equal(t, "th-1", eri.lastThreadID)
+			} else {
+				assert.Empty(t, eri.lastPrompt)
+			}
+		})
+	}
 }

@@ -752,8 +752,8 @@ func (b *BuildObject) notifyChunkFailure(rc restate.RunContext, bld VanadisBuild
 	if dErr := b.executor.DispatchWakePrompt(rc, bld.ThreadID, prompt); dErr != nil {
 		log.Printf("[vanadis-restate] dispatch wake prompt warning: %v", dErr)
 	}
-	if chunks, _, gErr := b.store.GetBuild(rc, bld.ID); gErr == nil && chunks != nil {
-		if _, sErr := b.executor.SyncBuildWidget(rc, b.store, bld, nil, "Build failed: "+reason); sErr != nil {
+	if build, chunks, gErr := b.store.GetBuild(rc, bld.ID); gErr == nil && build != nil {
+		if _, sErr := b.executor.SyncBuildWidget(rc, b.store, bld, chunks, "Build failed: "+reason); sErr != nil {
 			log.Printf("[vanadis-restate] sync widget warning: %v", sErr)
 		}
 	}

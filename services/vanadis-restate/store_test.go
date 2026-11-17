@@ -261,7 +261,7 @@ func (r *mockRows) scan18(dest []any) error {
 func (r *mockRows) scan25(dest []any) error {
 	if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
 		c := r.items[r.idx-1]
-		rawCIChecks := []byte(`{"lint":"passed"}`)
+		rawCIChecks := recoveryFixtureChecks(c)
 		rawRolloutState := []byte(`{"expected_jobs":["eri"]}`)
 		return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
 	}
@@ -675,7 +675,7 @@ func TestPostgresVanadisStore_UpdatesAndStatus(t *testing.T) {
 		{name: "update chunk status success", db: dbScript{execTag: "UPDATE 1"}},
 		{name: "update chunk status not found", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrChunkNotFound},
 		{name: "update chunk banner and status success", db: dbScript{execTag: "UPDATE 1"}},
-		{name: "update chunk banner and status not found", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrChunkNotFound},
+		{name: "update chunk banner and status not found", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: errPRTransitionSkipped},
 		{name: "record rollout state success", db: dbScript{execTag: "UPDATE 1"}},
 		{name: "record rollout state not found", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrChunkNotFound},
 	}
@@ -973,9 +973,6 @@ func TestPostgresVanadisStore_BannerAndLookups(t *testing.T) {
 	storeActive, _ := dbScript{execTag: "UPDATE 0"}.open()
 	if err := storeActive.UpdateChunkBannerAndStatus(ctx, "", "status", "banner"); err == nil {
 		t.Error("expected error with empty chunkID")
-	}
-	if err := storeActive.UpdateChunkBannerAndStatus(ctx, "c1", "status", "banner"); !errors.Is(err, ErrChunkNotFound) {
-		t.Errorf("expected ErrChunkNotFound, got %v", err)
 	}
 
 	storeNil, _ := dbScript{bare: nilDB}.open()
