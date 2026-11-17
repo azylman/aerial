@@ -109,7 +109,7 @@ func runJournaled[T any](ctx restate.Context, handlerLabel, stepName string, fn 
 		if err != nil {
 			recordReconcileError(handlerLabel, err)
 		}
-		return out, err
+		return out, toTerminalErr(err)
 	}, restate.WithName(stepName))
 }
 
