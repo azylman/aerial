@@ -570,8 +570,8 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 	writeErr(w, status, err.Error())
 }
 
-// SetupMux configures and returns the HTTP ServeMux for a VanadisServer.
-func SetupMux(server *VanadisServer) *http.ServeMux {
+// SetupMux configures the HTTP routes for a VanadisServer, wrapped once in a server span.
+func SetupMux(server *VanadisServer) http.Handler {
 	mux := http.NewServeMux()
 	if server != nil {
 		mux.HandleFunc("GET /metrics", server.handleMetrics)
@@ -579,7 +579,7 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 		mux.Handle("GET /metrics", promhttp.Handler())
 	}
 	coverageFlush := httpkit.HandleCoverageFlush("vanadis")
-	mcpHandler := tracing.Middleware("vanadis", server.newMCPHandler()).ServeHTTP
+	mcpHandler := server.newMCPHandler().ServeHTTP
 	for p, h := range map[string]http.HandlerFunc{
 		"GET /health": server.handleHealth, "GET /healthz": server.handleHealth,
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,
@@ -593,7 +593,7 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 	} {
 		mux.HandleFunc(p, h)
 	}
-	return mux
+	return tracing.Middleware("vanadis", mux)
 }
 
 // Routes returns the HTTP handler for the server.
