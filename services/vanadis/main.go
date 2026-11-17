@@ -583,10 +583,10 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,
 		"POST /builds": server.handleCreateBuild, "POST /runs": server.handleCreateBuild,
 		"/builds/": server.handleBuildByID, "/runs/": server.handleBuildByID,
-		"/chunks/attach-pr":          server.handleAttachChunkPR,
-		"/chunks/":                   server.handleChunkByID,
-		"/mcp":                       mcpHandler,
-		"/sse":                       mcpHandler,
+		"/chunks/attach-pr":              server.handleAttachChunkPR,
+		"/chunks/":                       server.handleChunkByID,
+		"POST /builds/{id}/retry-action": server.handleRetryActionChunk,
+		"/mcp":                           mcpHandler, "/sse": mcpHandler,
 		"POST /debug/coverage/flush": coverageFlush, "GET /debug/coverage/flush": coverageFlush,
 	} {
 		mux.HandleFunc(p, h)

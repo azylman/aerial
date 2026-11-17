@@ -153,6 +153,7 @@ type UpdateBuildRequest struct {
 }
 
 type VanadisStore interface {
+	RetryActionChunk(ctx context.Context, req RetryActionChunkRequest) (*RetryActionChunkResult, error)
 	CreateBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error
 	GetBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error)
 	UpdateChunkStatus(ctx context.Context, chunkID, status string) error
