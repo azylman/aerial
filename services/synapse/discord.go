@@ -269,11 +269,11 @@ func enqueueDiscordMessage(ctx context.Context, server *RouterServer, s *discord
 
 	if server.bus != nil {
 		if err := server.publishJetStreamJob(enqueueCtx, args); err != nil {
-			slog.ErrorContext(ctx, "[synapse] [discord] failed to publish message to jetstream", "message_id", m.ID, "error", err)
+			slog.ErrorContext(enqueueCtx, "[synapse] [discord] failed to publish message to jetstream", "message_id", m.ID, "error", err)
 		}
 	} else {
 		if err := server.ProcessDiscordIngress(enqueueCtx, args); err != nil {
-			slog.ErrorContext(ctx, "[synapse] [discord] failed to process message directly", "message_id", m.ID, "error", err)
+			slog.ErrorContext(enqueueCtx, "[synapse] [discord] failed to process message directly", "message_id", m.ID, "error", err)
 		}
 	}
 }
@@ -494,11 +494,11 @@ func handleGatewayInteractionCreate(ctx context.Context, server *RouterServer, i
 
 	if server.bus != nil {
 		if err := server.publishJetStreamJob(enqueueCtx, args); err != nil {
-			slog.ErrorContext(ctx, "[synapse] [discord] failed to publish interaction to jetstream", "interaction_id", i.ID, "error", err)
+			slog.ErrorContext(enqueueCtx, "[synapse] [discord] failed to publish interaction to jetstream", "interaction_id", i.ID, "error", err)
 		}
 	} else {
 		if err := server.ProcessDiscordInteraction(enqueueCtx, args); err != nil {
-			slog.ErrorContext(ctx, "[synapse] [discord] failed to process interaction directly", "interaction_id", i.ID, "error", err)
+			slog.ErrorContext(enqueueCtx, "[synapse] [discord] failed to process interaction directly", "interaction_id", i.ID, "error", err)
 		}
 	}
 }
