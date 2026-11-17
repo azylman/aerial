@@ -726,6 +726,12 @@ func (b *BuildObject) recordPRHeadRevision(ctx context.Context, buildID, chunkID
 	}
 	nextHead := firstNonEmpty(headSHA, rev.headSHA)
 	if err := b.store.ResetPRCheckState(withPRHeadAt(ctx, ev.OccurredAt), chunkID, nextHead, ""); err != nil {
+		if errors.Is(err, errPRTransitionSkipped) {
+			// A skipped recovery may have committed a legacy revision baseline.
+			b.revMu.Lock()
+			delete(b.prRevisions, strings.TrimSpace(chunkID))
+			b.revMu.Unlock()
+		}
 		return err
 	}
 	recordSeenHead(&rev, rev.headSHA)
