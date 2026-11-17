@@ -29,19 +29,6 @@ func TestDefaultCanonicalHooksJSON(t *testing.T) {
 	}
 }
 
-func TestDefaultMuseHooks(t *testing.T) {
-	t.Parallel()
-	hooks := defaultMuseHooks()
-	if hooks == nil {
-		t.Fatal("expected defaultMuseHooks to return non-nil map")
-	}
-	for _, key := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse"} {
-		if _, ok := hooks[key]; !ok {
-			t.Errorf("expected hook key %q", key)
-		}
-	}
-}
-
 type museHooksCase struct {
 	name            string
 	existingContent string

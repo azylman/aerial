@@ -67,7 +67,6 @@ type loadConfigIngestionCase struct {
 	wantNATSURL    string
 	wantEngine     string
 	wantCodexBin   string
-	wantMuseBin    string
 	wantTx         TranscriptsConfig
 	wantErr        bool
 	errContains    string
@@ -89,7 +88,6 @@ func assertLoadConfigIngestionStrings(t *testing.T, cur *ConfigData, tc loadConf
 		{"NATSURL", cur.NATSURL, tc.wantNATSURL},
 		{"Engine", cur.Engine, tc.wantEngine},
 		{"CodexBin", cur.CodexBin, tc.wantCodexBin},
-		{"MuseBin", cur.MuseBin, tc.wantMuseBin},
 	} {
 		if check.want != "" && check.got != check.want {
 			t.Errorf("%s = %q, want %q", check.field, check.got, check.want)

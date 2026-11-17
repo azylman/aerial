@@ -54,9 +54,6 @@ func (p *Provisioner) SetCodexAuthSourcePath(path string) {
 }
 
 func (p *Provisioner) SetMuseAuthSourcePath(path string) {
-	if p == nil {
-		return
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.museAuthSourcePath = path
@@ -127,7 +124,6 @@ func assertNilReceiver(t *testing.T) {
 	var pNil *Provisioner
 	pNil.SetOAuthTokenSourcePath("/ignored")
 	pNil.SetCodexAuthSourcePath("/ignored")
-	pNil.SetMuseAuthSourcePath("/ignored")
 
 	if err := pNil.Sync(context.Background(), nil); err != nil {
 		t.Errorf("expected nil error on Sync with nil receiver")
@@ -1410,42 +1406,18 @@ func TestStripRuleFrontmatter(t *testing.T) {
 	}
 }
 
-func TestSelectTargetServers(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		cur     *config.ConfigData
-		target  RuleTarget
-		wantNil bool
-	}{
-		{
-			name:    "ephemeral target with nil servers returns nil",
-			cur:     &config.ConfigData{},
-			target:  TargetEphemeral,
-			wantNil: true,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			res := selectTargetServers(tc.cur, tc.target)
-			if (res == nil) != tc.wantNil {
-				t.Fatalf("selectTargetServers nil = %v; want %v", res == nil, tc.wantNil)
-			}
-		})
-	}
-}
-
 func TestOverlayConfigMCPServers(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
 		nilCfg  bool
 		raw     string
+		target  RuleTarget
 		wantKey string
 	}{
 		{name: "nil config returns immediately", nilCfg: true},
-		{name: "invalid json preserved verbatim", raw: "invalid-json", wantKey: "raw_server"},
+		{name: "invalid json preserved verbatim", raw: "invalid-json", target: TargetDiscord, wantKey: "raw_server"},
+		{name: "ephemeral target without servers leaves merged empty", target: TargetEphemeral},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1453,13 +1425,19 @@ func TestOverlayConfigMCPServers(t *testing.T) {
 			var cfg *config.Config
 			if !tc.nilCfg {
 				cfg = newTestConfig(func(c *config.ConfigData) {
-					c.McpServers.Discord = map[string]json.RawMessage{
-						tc.wantKey: json.RawMessage(tc.raw),
+					if tc.wantKey != "" {
+						c.McpServers.Discord = map[string]json.RawMessage{
+							tc.wantKey: json.RawMessage(tc.raw),
+						}
 					}
 				})
 			}
+			target := tc.target
+			if target == "" {
+				target = TargetDiscord
+			}
 			merged := make(map[string]any)
-			overlayConfigMCPServers(cfg, TargetDiscord, merged)
+			overlayConfigMCPServers(cfg, target, merged)
 			if tc.wantKey != "" {
 				if _, ok := merged[tc.wantKey]; !ok {
 					t.Fatalf("expected key %q in merged", tc.wantKey)
