@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -194,6 +195,23 @@ func SyncTranscripts(
 		llmFunc = opts.LLMFunc
 	}
 
+	var llmFailed bool
+	var activeLLMFunc LLMClientFunc
+	if llmFunc != nil {
+		activeLLMFunc = func(callCtx context.Context, prompt string) (string, error) {
+			if llmFailed {
+				return "", errors.New("llm disabled for sweep due to prior error")
+			}
+			res, err := llmFunc(callCtx, prompt)
+			if err != nil {
+				llmFailed = true
+				return "", err
+			}
+			return res, nil
+		}
+	}
+	opts.LLMFunc = activeLLMFunc
+
 	targetBrainDir, opts, err := normalizeSyncOptions(brainDir, opts)
 	if err != nil {
 		return stats, err
@@ -245,7 +263,7 @@ func SyncTranscripts(
 			break
 		}
 
-		synced, err := syncSingleSession(ctx, store, sessionID, found.engine, transcriptPath, mtime, state, exists, embedder, llmFunc, opts, &stats)
+		synced, err := syncSingleSession(ctx, store, sessionID, found.engine, transcriptPath, mtime, state, exists, embedder, activeLLMFunc, opts, &stats)
 		if err != nil {
 			stats.Errors++
 			log.Printf("[Transcript] Error syncing session %s: %v", sessionID, err)
@@ -1236,8 +1254,21 @@ func buildTranscriptStepsToInsert(
 
 const settledSummaryPromptPrefix = "Summarize the following agent conversation transcript in 2-3 concise sentences."
 
+var ephemeralPromptPrefixes = []string{
+	settledSummaryPromptPrefix,
+	"Synthesize the following Discord thread transcript into a concise memory block.",
+	"Summarize the following message into a concise 3 to 5 word phrase for a Discord thread topic title.",
+	"Analyze the following conversation transcript and extract any key durable atomic facts",
+}
+
 func isEphemeralSummarizerPrompt(prompt string) bool {
-	return strings.HasPrefix(strings.TrimSpace(prompt), settledSummaryPromptPrefix)
+	trimmed := strings.TrimSpace(prompt)
+	for _, prefix := range ephemeralPromptPrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func generateSettledSummaryText(
@@ -1247,12 +1278,17 @@ func generateSettledSummaryText(
 	dialogueLines []string,
 	step0Prompt string,
 	llmFunc LLMClientFunc,
-) string {
+) (string, bool) {
 	summaryText := ""
+	llmSucceeded := true
 	if isSettled && llmFunc != nil && len(dialogueLines) > 0 {
 		prompt := settledSummaryPromptPrefix + " Focus on technical entities, tools executed, and outcomes.\n\nTranscript:\n" + strings.Join(dialogueLines, "\n")
-		if res, err := llmFunc(ctx, prompt); err == nil && strings.TrimSpace(res) != "" {
+		res, err := llmFunc(ctx, prompt)
+		if err == nil && strings.TrimSpace(res) != "" {
 			summaryText = strings.TrimSpace(res)
+			llmSucceeded = true
+		} else {
+			llmSucceeded = false
 		}
 	}
 
@@ -1263,7 +1299,7 @@ func generateSettledSummaryText(
 		summaryText = "Session " + sessionID
 	}
 
-	return summaryText
+	return summaryText, llmSucceeded
 }
 
 func buildSettledSummaryRecord(
@@ -1275,8 +1311,13 @@ func buildSettledSummaryRecord(
 	watermark int,
 	embedder EmbedderFunc,
 	llmFunc LLMClientFunc,
-) db.SessionSummary {
-	summaryText := generateSettledSummaryText(ctx, sessionID, isSettled, st.dialogueLines, st.step0Prompt, llmFunc)
+) (db.SessionSummary, bool) {
+	summaryText, llmSucceeded := generateSettledSummaryText(ctx, sessionID, isSettled, st.dialogueLines, st.step0Prompt, llmFunc)
+
+	effectiveSettled := isSettled
+	if isSettled && llmFunc != nil && len(st.dialogueLines) > 0 && !llmSucceeded {
+		effectiveSettled = false
+	}
 
 	var emb []float32
 	if embedder != nil {
@@ -1302,10 +1343,10 @@ func buildSettledSummaryRecord(
 		LastIndexedStep:      lastIndexedStepToSave,
 		LastMtime:            mtime,
 		SummaryStepWatermark: st.maxStepIndex,
-		IsSettled:            isSettled,
+		IsSettled:            effectiveSettled,
 		CreatedAt:            firstStepTime,
 		UpdatedAt:            time.Now().UTC(),
-	}
+	}, llmSucceeded
 }
 
 func buildSessionSummaryRecord(
@@ -1324,8 +1365,8 @@ func buildSessionSummaryRecord(
 	shouldSummarize := !exists || (isSettled && (!state.IsSettled || (st.maxStepIndex >= 0 && st.maxStepIndex-state.LastIndexedStep > 10)))
 
 	if shouldSummarize {
-		summaryRecord := buildSettledSummaryRecord(ctx, sessionID, mtime, isSettled, st, watermark, embedder, llmFunc)
-		return summaryRecord, true, true
+		summaryRecord, llmSucceeded := buildSettledSummaryRecord(ctx, sessionID, mtime, isSettled, st, watermark, embedder, llmFunc)
+		return summaryRecord, true, summaryRecord.IsSettled || llmSucceeded
 	}
 
 	if exists {
