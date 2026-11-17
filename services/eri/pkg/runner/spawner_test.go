@@ -199,7 +199,7 @@ func TestMockSpawnersAndProcessHandle(t *testing.T) {
 	}
 }
 
-func assertDefaultDaemonSpawnerCodex(t *testing.T) {
+func assertDefaultDaemonSpawnerEngine(t *testing.T, engine, customBin, defaultBin string) {
 	t.Helper()
 	var spawnedBin string
 	customSpawner := &DefaultDaemonSpawner{
@@ -213,12 +213,17 @@ func assertDefaultDaemonSpawnerCodex(t *testing.T) {
 		},
 	}
 
-	inC, outC, errC, hC, errCSpawn := customSpawner.Spawn(context.Background(), DaemonConfig{
-		Engine:   "codex",
-		CodexBin: "/custom/bin/codex",
-	})
-	if errCSpawn != nil || spawnedBin != "/custom/bin/codex" {
-		t.Errorf("expected /custom/bin/codex, got %s (err: %v)", spawnedBin, errCSpawn)
+	cfgCustom := DaemonConfig{Engine: engine}
+	switch engine {
+	case engineCodex:
+		cfgCustom.CodexBin = customBin
+	case engineMuse:
+		cfgCustom.MuseBin = customBin
+	}
+
+	inC, outC, errC, hC, errCSpawn := customSpawner.Spawn(context.Background(), cfgCustom)
+	if errCSpawn != nil || spawnedBin != customBin {
+		t.Errorf("expected %s, got %s (err: %v)", customBin, spawnedBin, errCSpawn)
 	}
 	closeQuietlyAll(inC, outC, errC)
 	if hC != nil {
@@ -226,10 +231,10 @@ func assertDefaultDaemonSpawnerCodex(t *testing.T) {
 	}
 
 	inCDef, outCDef, errCDef, hCDef, errCDefSpawn := customSpawner.Spawn(context.Background(), DaemonConfig{
-		Engine: "codex",
+		Engine: engine,
 	})
-	if errCDefSpawn != nil || spawnedBin != "codex" {
-		t.Errorf("expected default codex, got %s (err: %v)", spawnedBin, errCDefSpawn)
+	if errCDefSpawn != nil || spawnedBin != defaultBin {
+		t.Errorf("expected default %s, got %s (err: %v)", defaultBin, spawnedBin, errCDefSpawn)
 	}
 	closeQuietlyAll(inCDef, outCDef, errCDef)
 	if hCDef != nil {
@@ -286,7 +291,8 @@ func TestOSProcessHandle_And_DefaultDaemonSpawner(t *testing.T) {
 		t.Errorf("expected all nil on spawn error")
 	}
 
-	assertDefaultDaemonSpawnerCodex(t)
+	assertDefaultDaemonSpawnerEngine(t, engineCodex, "/custom/bin/codex", "codex")
+	assertDefaultDaemonSpawnerEngine(t, engineMuse, "/custom/bin/muse", "muse")
 }
 
 func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
