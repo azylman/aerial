@@ -276,11 +276,12 @@ type RestateTransitionRequest struct {
 }
 
 type reconcileStepOutput struct {
-	BuildStatus    string            `json:"build_status"`
-	LaunchedChunks []string          `json:"launched_chunks,omitempty"`
-	LaunchedMap    map[string]bool   `json:"launched_map,omitempty"`
-	Error          string            `json:"error,omitempty"`
-	State          *BuildObjectState `json:"state,omitempty"`
+	RetryResult    *RetryActionChunkResult `json:"retry_result,omitempty"`
+	BuildStatus    string                  `json:"build_status"`
+	LaunchedChunks []string                `json:"launched_chunks,omitempty"`
+	LaunchedMap    map[string]bool         `json:"launched_map,omitempty"`
+	Error          string                  `json:"error,omitempty"`
+	State          *BuildObjectState       `json:"state,omitempty"`
 }
 
 type objectRuntime interface {
