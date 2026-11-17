@@ -418,6 +418,7 @@ init_scratch() {
     if [ -n "$vanadis_chunk_id" ] && [ -z "$init_branch" ]; then
         safe_chunk_id="$(printf '%s' "$vanadis_chunk_id" | sed 's/[^a-zA-Z0-9_-]/_/g')"
         deterministic_dir="${base_dir}/vanadis-${safe_chunk_id}-${REPO_NAME}"
+        branch_name="${branch_prefix}-vanadis-${safe_chunk_id}-${rand_suffix}"
     fi
 
     local scratch_dir
