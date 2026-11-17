@@ -508,9 +508,13 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 		return fmt.Errorf("database is nil")
 	}
 
-	// Scheduled extraction has no inbound request, so each thread gets a deliberate root span
-	// that the outbound LLM call attaches to.
-	ctx, span := tracing.Tracer().Start(ctx, "coven.extract", trace.WithNewRoot())
+	// Coalesced extraction can cover many turns, so each thread gets a deliberate root span
+	// that the outbound LLM call attaches to. A valid incoming context is kept as a span link.
+	startOpts := []trace.SpanStartOption{trace.WithNewRoot()}
+	if trigger := trace.LinkFromContext(ctx); trigger.SpanContext.IsValid() {
+		startOpts = append(startOpts, trace.WithLinks(trigger))
+	}
+	ctx, span := tracing.Tracer().Start(ctx, "coven.extract", startOpts...)
 	defer span.End()
 
 	turns, err := store.GetUnextractedAdminTurns(ctx, threadID)

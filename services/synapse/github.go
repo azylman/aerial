@@ -98,7 +98,7 @@ func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes 
 	if err != nil {
 		return fmt.Errorf("create github api request: %w", err)
 	}
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.githubClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("github api request failed: %w", err)
 	}
@@ -169,7 +169,7 @@ func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber
 		return false, fmt.Errorf("create update-branch request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.githubClient.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("update-branch request failed: %w", err)
 	}
@@ -912,7 +912,7 @@ func (s *RouterServer) rerunWorkflowRunFailedJobs(ctx context.Context, repo stri
 		return fmt.Errorf("create rerun-failed-jobs request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.githubClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("rerun-failed-jobs request failed: %w", err)
 	}
