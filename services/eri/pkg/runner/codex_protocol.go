@@ -34,6 +34,14 @@ func (d *StreamingDaemon) marshalTurnPrompt(turnCtx *TurnContext, prompt string)
 		baseModel, effort := parseModelAndEffort(effectiveModel, d.cfg.Effort, true)
 		return marshalCodexTurnStart(d.SessionID(), prompt, baseModel, effort)
 	}
+	if d.cfg.IsMuse() {
+		effectiveModel := d.cfg.Model
+		if turnCtx != nil && strings.TrimSpace(turnCtx.Model) != "" {
+			effectiveModel = strings.TrimSpace(turnCtx.Model)
+		}
+		_, effort := parseModelAndEffort(effectiveModel, d.cfg.Effort, true)
+		return marshalMuseTurnStart(d.SessionID(), prompt, effort)
+	}
 	return marshalPromptPayload(d.cfg.IsClaude(), prompt)
 }
 
@@ -109,18 +117,26 @@ func (*StreamingDaemon) readHandshakeLine(ctx context.Context, reader *bufio.Rea
 	}
 }
 
-func (d *StreamingDaemon) sendCodexRPCRequest(req codexRPCRequest, stage string) error {
+func (d *StreamingDaemon) sendJSONRPCRequest(req codexRPCRequest, stage string) error {
 	data, err := json.Marshal(req)
 	if err != nil {
 		d.closeOnStartupError("marshal " + stage)
 		return fmt.Errorf("failed marshaling %s request: %w", stage, err)
 	}
 	data = append(data, '\n')
+	if d.stdin == nil {
+		d.closeOnStartupError("stdin closed")
+		return fmt.Errorf("failed writing %s request: daemon stdin closed", stage)
+	}
 	if _, err := d.stdin.Write(data); err != nil {
 		d.closeOnStartupError("write " + stage)
 		return fmt.Errorf("failed writing %s request: %w", stage, err)
 	}
 	return nil
+}
+
+func (d *StreamingDaemon) sendCodexRPCRequest(req codexRPCRequest, stage string) error {
+	return d.sendJSONRPCRequest(req, stage)
 }
 
 func (d *StreamingDaemon) awaitCodexRPCResponse(ctx context.Context, reader *bufio.Reader, deadline time.Time, expectedID int) (*codexRPCResponse, error) {
@@ -143,8 +159,8 @@ func (d *StreamingDaemon) awaitCodexRPCResponse(ctx context.Context, reader *buf
 	}
 }
 
-func (d *StreamingDaemon) sendAndAwaitCodexRPC(ctx context.Context, reader *bufio.Reader, deadline time.Time, req codexRPCRequest, stage string) (*codexRPCResponse, error) {
-	if err := d.sendCodexRPCRequest(req, stage); err != nil {
+func (d *StreamingDaemon) sendAndAwaitJSONRPC(ctx context.Context, reader *bufio.Reader, deadline time.Time, req codexRPCRequest, protoName, stage string) (*codexRPCResponse, error) {
+	if err := d.sendJSONRPCRequest(req, stage); err != nil {
 		return nil, err
 	}
 	resp, err := d.awaitCodexRPCResponse(ctx, reader, deadline, req.ID)
@@ -153,9 +169,13 @@ func (d *StreamingDaemon) sendAndAwaitCodexRPC(ctx context.Context, reader *bufi
 	}
 	if resp.Error != nil {
 		d.closeOnStartupError(stage + " error")
-		return nil, fmt.Errorf("codex %s error: %s", stage, resp.Error.Message)
+		return nil, fmt.Errorf("%s %s error: %s", protoName, stage, resp.Error.Message)
 	}
 	return resp, nil
+}
+
+func (d *StreamingDaemon) sendAndAwaitCodexRPC(ctx context.Context, reader *bufio.Reader, deadline time.Time, req codexRPCRequest, stage string) (*codexRPCResponse, error) {
+	return d.sendAndAwaitJSONRPC(ctx, reader, deadline, req, "codex", stage)
 }
 
 func (d *StreamingDaemon) executeCodexInit(ctx context.Context, reader *bufio.Reader, deadline time.Time) error {
@@ -330,9 +350,9 @@ func (d *StreamingDaemon) handleCodexRPCError(raw map[string]any) {
 		errMsg = "codex rpc error"
 	}
 	d.handleResultEvent(map[string]any{
-		"event":  eventResult,
-		"status": statusUpperError,
-		"error":  errMsg,
+		fieldEvent:  eventResult,
+		fieldStatus: statusUpperError,
+		fieldError:  errMsg,
 	})
 }
 
@@ -375,15 +395,15 @@ func (d *StreamingDaemon) dispatchCodexJSONRPCLine(trimmed string) {
 	switch method {
 	case "thread/tokenUsage/updated":
 		d.handleCodexTokenUsageUpdated(activeTurn, params)
-	case "item/started":
+	case methodItemStarted:
 		d.handleCodexItemStarted(activeTurn, params)
-	case "item/agentMessage/delta":
+	case methodAgentMessageDelta:
 		d.handleCodexAgentMessageDelta(activeTurn, params)
-	case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
+	case methodReasoningSummary, methodReasoningTextDelta:
 		d.handleCodexReasoningDelta(activeTurn, params)
-	case "item/completed":
+	case methodItemCompleted:
 		d.handleCodexItemCompleted(activeTurn, params)
-	case "turn/completed":
+	case methodTurnCompleted:
 		d.handleCodexTurnCompleted(activeTurn, params)
 	}
 }
@@ -492,7 +512,7 @@ func (d *StreamingDaemon) handleCodexItemStarted(activeTurn *TurnContext, params
 	itemID := extractFirstString(item, "id")
 
 	switch itemType {
-	case "agentMessage":
+	case itemTypeAgentMessage:
 		d.handleCodexAgentMessageStarted(activeTurn, item, itemID)
 	case codexToolMCP, codexToolCommandExecution, codexToolFileChange, codexToolWebSearch, codexToolCollabAgent:
 		var (
@@ -513,7 +533,7 @@ func (d *StreamingDaemon) handleCodexItemStarted(activeTurn *TurnContext, params
 				paramsMap = args
 			case string:
 				if err := json.Unmarshal([]byte(args), &paramsMap); err != nil {
-					paramsMap = map[string]any{"raw": args}
+					paramsMap = map[string]any{fieldRaw: args}
 				}
 			}
 			detail = ExtractToolDetail(tool, paramsMap, "")
@@ -660,7 +680,7 @@ func (d *StreamingDaemon) handleCodexItemCompleted(activeTurn *TurnContext, para
 	itemType := extractFirstString(item, "type")
 	itemID := extractFirstString(item, "id")
 
-	if itemType == "agentMessage" {
+	if itemType == itemTypeAgentMessage {
 		d.handleCodexAgentMessageCompleted(activeTurn, item, itemID)
 		return
 	}
@@ -677,7 +697,7 @@ func (d *StreamingDaemon) handleCodexItemCompleted(activeTurn *TurnContext, para
 	}
 
 	status := "ok"
-	if itemStatus := extractFirstString(item, "status"); itemStatus == "failed" || itemStatus == "error" {
+	if itemStatus := extractFirstString(item, fieldStatus); itemStatus == statusFailed || itemStatus == "error" {
 		status = statusError
 	}
 	if isError, ok := item["is_error"].(bool); ok && isError {

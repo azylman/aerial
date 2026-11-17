@@ -52,6 +52,8 @@ func UsageAttributes(u AgyUsage) []attribute.KeyValue {
 func ProviderForModel(model string) string {
 	m := strings.ToLower(strings.TrimSpace(model))
 	switch {
+	case strings.Contains(m, "muse") || strings.Contains(m, "llama"):
+		return "meta"
 	case strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "o1") || strings.HasPrefix(m, "o3") || strings.HasPrefix(m, "o4") || strings.Contains(m, "codex"):
 		return "openai"
 	case strings.Contains(m, "claude"), isClaudeAlias(m):

@@ -139,7 +139,7 @@ func executeConfigReload(ctx context.Context, source string, cfg *config.Config,
 		case interface {
 			UpdateEngine(engine, claudeBin string, codexBin ...string)
 		}:
-			u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin)
+			u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin, cur.MuseBin)
 		case interface {
 			UpdateEngine(engine, claudeBin string)
 		}:
@@ -161,7 +161,7 @@ func executeConfigReload(ctx context.Context, source string, cfg *config.Config,
 				case interface {
 					UpdateEngine(engine, claudeBin string, codexBin ...string)
 				}:
-					u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin)
+					u.UpdateEngine(cur.GetEngine(), cur.ClaudeBin, cur.CodexBin, cur.MuseBin)
 				case interface {
 					UpdateEngine(engine, claudeBin string)
 				}:
@@ -386,6 +386,7 @@ func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome
 		Engine:                  cur.GetEngine(),
 		ClaudeBin:               cur.ClaudeBin,
 		CodexBin:                cur.CodexBin,
+		MuseBin:                 cur.MuseBin,
 		GeminiHomeDir:           voiceHome,
 		Model:                   lowEffortModel,
 		AgyBin:                  cur.AgyBin,
@@ -424,6 +425,11 @@ func computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey 
 		if cur != nil && ((cur.CodexBin != "" && cur.CodexBin != "codex") || cur.GetEngine() == config.EngineCodex) {
 			b.WriteString("codexBin:")
 			b.WriteString(cur.CodexBin)
+			b.WriteString("\n")
+		}
+		if cur != nil && ((cur.MuseBin != "" && cur.MuseBin != "muse") || cur.GetEngine() == config.EngineMuse) {
+			b.WriteString("museBin:")
+			b.WriteString(cur.MuseBin)
 			b.WriteString("\n")
 		}
 	}
@@ -633,6 +639,7 @@ func buildBrainProcessPools(
 			Engine:            cur.GetEngine(),
 			ClaudeBin:         cur.ClaudeBin,
 			CodexBin:          cur.CodexBin,
+			MuseBin:           cur.MuseBin,
 			GeminiHomeDir:     home,
 			Model:             model,
 			AgyBin:            cur.AgyBin,
