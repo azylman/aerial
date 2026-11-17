@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -128,15 +127,6 @@ type prStatusCall struct {
 	metadata map[string]any
 }
 
-type deployedResult struct {
-	targetID string
-	prNumber int
-	mergeSHA string
-	repo     string
-	updated  bool
-	err      error
-}
-
 type mockPRRegistry struct {
 	mergedCalls         []prCall
 	syncCalls           []prCall
@@ -180,28 +170,11 @@ type mockPRRegistry struct {
 	deployingErr            error
 	skipDeployingTransition bool
 
-	deployedJobCalls []string
-	deployedTargetID string
-	deployedPRNum    int
-	deployedMergeSHA string
-	deployedRepo     string
-	deployedUpdated  bool
-	deployedErr      error
-	deployedResults  []deployedResult
-
 	deployFailedCalls    []prCall
 	deployFailedTargetID string
 	deployFailedUpdated  bool
 	deployFailedResults  []bool
 	deployFailedErr      error
-
-	deployFailedJobCalls    []string
-	deployFailedJobTargetID string
-	deployFailedJobPRNum    int
-	deployFailedJobMergeSHA string
-	deployFailedJobRepo     string
-	deployFailedJobUpdated  bool
-	deployFailedJobErr      error
 
 	listDeployingPRs []DeployingPR
 	listDeployingErr error
@@ -269,22 +242,6 @@ func (m *mockPRRegistry) TransitionDeploying(ctx context.Context, repo string, p
 	return firstNonEmpty(m.deployingTargetID, m.resolveTargetID, "100000000000000001"), nil
 }
 
-func (m *mockPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (JobTransition, error) {
-	m.deployedJobCalls = append(m.deployedJobCalls, jobName)
-	if len(m.deployedResults) > 0 {
-		res := m.deployedResults[0]
-		m.deployedResults = m.deployedResults[1:]
-		if res.err != nil {
-			return JobTransition{}, res.err
-		}
-		return JobTransition{TargetID: res.targetID, PRNumber: res.prNumber, MergeSHA: res.mergeSHA, Repo: res.repo, Updated: res.updated}, nil
-	}
-	if err := m.checkErr(m.deployedErr); err != nil {
-		return JobTransition{}, err
-	}
-	return JobTransition{TargetID: m.deployedTargetID, PRNumber: m.deployedPRNum, MergeSHA: m.deployedMergeSHA, Repo: m.deployedRepo, Updated: m.deployedUpdated}, nil
-}
-
 func popBoolResult(results *[]bool, fallback bool) bool {
 	if len(*results) > 0 {
 		res := (*results)[0]
@@ -300,14 +257,6 @@ func (m *mockPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo 
 	}
 	m.deployFailedCalls = append(m.deployFailedCalls, prCall{repo: repo, prNumber: prNumber})
 	return m.deployFailedTargetID, popBoolResult(&m.deployFailedResults, m.deployFailedUpdated), nil
-}
-
-func (m *mockPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (JobTransition, error) {
-	if err := m.checkErr(m.deployFailedJobErr); err != nil {
-		return JobTransition{}, err
-	}
-	m.deployFailedJobCalls = append(m.deployFailedJobCalls, jobName)
-	return JobTransition{TargetID: m.deployFailedJobTargetID, PRNumber: m.deployFailedJobPRNum, MergeSHA: m.deployFailedJobMergeSHA, Repo: m.deployFailedJobRepo, Updated: m.deployFailedJobUpdated}, nil
 }
 
 func (m *mockPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingPR, error) {
@@ -606,7 +555,6 @@ type processDeployEventCase struct {
 	wantPR             int
 	wantTargetID       string
 	wantDeployingCalls int
-	wantDeployedJobs   []string
 	wantAdvanceCalls   int
 	wantPrompts        int
 	wantDispatches     int
@@ -1073,9 +1021,6 @@ func assertDeployEventRegResults(t *testing.T, tc processDeployEventCase) {
 	}
 	if tc.wantDeployingCalls > 0 && len(tc.reg.deployingCalls) != tc.wantDeployingCalls {
 		t.Errorf("deployingCalls = %d, want %d", len(tc.reg.deployingCalls), tc.wantDeployingCalls)
-	}
-	if len(tc.wantDeployedJobs) > 0 && !reflect.DeepEqual(tc.reg.deployedJobCalls, tc.wantDeployedJobs) {
-		t.Errorf("deployedJobCalls = %v, want %v", tc.reg.deployedJobCalls, tc.wantDeployedJobs)
 	}
 	var requested []string
 	for _, call := range tc.reg.kustomizationRequestCalls {
