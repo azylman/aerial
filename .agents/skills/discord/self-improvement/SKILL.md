@@ -70,14 +70,19 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
 
 ### Stage 2–3: Plan Audit & Tier 3 Checkpoint
 - Run the Tier 2/3 Girl Gang plan review subagent and fold valid objections into the plan.
-- For **Tier 3**, **STOP** and present the plan and review synthesis to the user for explicit approval before writing code or enqueueing the Vanadis build. (Tiers 0–2 proceed immediately to Stage 4.)
+- **User-visible plan contract**: Substantial builds require a concise user-facing explanation of intended behavior, affected components, chunk order and dependencies, material risks, validation criteria, and review findings that changed the design (when applicable). Explain consequential choices as **problem -> decision -> observable effect**. Worker instructions and build JSON do not substitute for this deliverable.
+- Judge substance by behavior, dependencies, and risk, not only LOC or tier: consequential Tier 1 changes need this explanation; routine tweaks stay brief. An already-presented approved plan suffices unless materially changed.
+- **Delivery**: Present the explanation before enqueue where the transport supports it. On final-only transports, prepare it before enqueue and include it in the same final handoff; do not claim pre-execution visibility or introduce an extra checkpoint. This delivery branch does not apply to Tier 3 approval.
+- For **Tier 3**, **STOP** and actually present the plan and review synthesis to the user and receive explicit approval before writing code or enqueueing the Vanadis build. A final handoff cannot substitute for prior presentation and approval. (Tiers 0–2 proceed immediately to Stage 4.)
 
 ### Stage 4: Enqueue Vanadis Build (≥ 2 PRs) or Autonomous Implementation (Single PR)
+- Apply the Stage 2–3 user-visible plan contract and delivery branch before enqueue or implementation; preserve all applicable approval gates.
 - **If ≥ 2 PRs / Multi-Chunk**: Enqueue the build directly via `/share/aerial/scripts/aerial-build.sh enqueue <plan.json>` and terminate the turn immediately (`"turn_action": "end_turn"`).
 - **If Single PR**: Follow strict TDD (write failing test -> confirm RED -> write minimal code -> verify GREEN with `go test -race` -> refactor), dispatching scoped subagents per ~15-minute task if needed.
 
 ### Stage 5: Dynamic Scope Reconciliation & Post-Implementation Re-Tiering Gate
 *MANDATORY: Never submit a PR based solely on upfront tier estimates.*
+- **Material replanning**: When scope or design materially changes, revise the user-facing explanation with why it changed, the resulting behavior and affected components, revised chunk order/dependencies, new risks or gates, validation criteria, and review findings that changed the design. Use the Stage 2–3 delivery branch. Prior authorization permits continued work within its scope but never waives an applicable Tier 3 escalation or approval gate; routine adjustments remain brief.
 1. Run `git diff --stat` (or `git diff HEAD~1..HEAD --stat`) immediately after implementation.
 2. Reconcile actual diff metrics against the initial tier:
    - **Tier 0 -> Tier 1/2**: Diff > 5 LOC escalates to Tier 1 (> 50 LOC to Tier 2).
