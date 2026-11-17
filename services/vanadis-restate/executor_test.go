@@ -1233,3 +1233,159 @@ func TestFormatKustomizationAndJobRollout(t *testing.T) {
 	stepService := FormatChunkActiveStep(chunkService)
 	assert.Contains(t, stepService, "`eri`: 🔄 starting")
 }
+
+func TestResolveGitHubRepoPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		repo     string
+		wantPath string
+	}{
+		{name: "empty string", repo: "", wantPath: ""},
+		{name: "whitespace only", repo: "   ", wantPath: ""},
+		{name: "bare repo with slashes prepends default owner", repo: "/aerial/", wantPath: "azylman/aerial"},
+		{name: "qualified repo with leading slash retains owner", repo: "/azylman/mirrormere", wantPath: "azylman/mirrormere"},
+		{name: "external owner retains owner", repo: "other-org/other-repo", wantPath: "other-org/other-repo"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolveGitHubRepoPath(tc.repo)
+			assert.Equal(t, tc.wantPath, got)
+		})
+	}
+}
+
+func TestFetchCheckJobFailureLogs_RepoPathResolution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		repo        string
+		wantSubpath string
+	}{
+		{name: "bare repo prepends azylman", repo: "aerial", wantSubpath: "/repos/azylman/aerial/actions/jobs/123/logs"},
+		{name: "qualified repo retains owner", repo: "azylman/aerial", wantSubpath: "/repos/azylman/aerial/actions/jobs/123/logs"},
+		{name: "external repo retains owner", repo: "external/repo", wantSubpath: "/repos/external/repo/actions/jobs/123/logs"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var receivedPath string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				receivedPath = r.URL.Path
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("--- FAIL: TestFail (0.01s)\n"))
+			}))
+			defer server.Close()
+
+			exec := NewExecutor("", nil, nil, "token", server.Client())
+			exec.gitHubAPIURL = server.URL
+			res := exec.fetchCheckJobFailureLogs(context.Background(), tc.repo, 123)
+			assert.NotEmpty(t, res)
+			assert.Equal(t, tc.wantSubpath, receivedPath)
+		})
+	}
+}
+
+func TestFetchLatestRoboRevComment_RepoPathResolution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		repo        string
+		wantSubpath string
+	}{
+		{name: "bare repo prepends azylman", repo: "aerial", wantSubpath: "/repos/azylman/aerial/issues/42/comments"},
+		{name: "qualified repo retains owner", repo: "azylman/aerial", wantSubpath: "/repos/azylman/aerial/issues/42/comments"},
+		{name: "external repo retains owner", repo: "external/repo", wantSubpath: "/repos/external/repo/issues/42/comments"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var receivedPath string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				receivedPath = r.URL.Path
+				w.WriteHeader(http.StatusOK)
+				comments := []gitHubIssueComment{{ID: 1, Body: "## roborev: findings for `sha1234`\nFinding 1"}}
+				_ = json.NewEncoder(w).Encode(comments)
+			}))
+			defer server.Close()
+
+			exec := NewExecutor("", nil, nil, "token", server.Client())
+			exec.gitHubAPIURL = server.URL
+			res := exec.fetchLatestRoboRevComment(context.Background(), tc.repo, 42, "sha1234")
+			assert.NotEmpty(t, res)
+			assert.Equal(t, tc.wantSubpath, receivedPath)
+		})
+	}
+}
+
+func TestFormatDeployFailureBanner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		event      pubsub.PRLifecycleEvent
+		wantBanner string
+	}{
+		{
+			name:       "sync failed without details",
+			event:      pubsub.PRLifecycleEvent{Event: "sync_failed"},
+			wantBanner: "Git sync failed",
+		},
+		{
+			name:       "deploy failed with job name",
+			event:      pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "eri"},
+			wantBanner: "Deployment failed for eri",
+		},
+		{
+			name:       "deploy failed with job name and details",
+			event:      pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "eri", Details: "crash loop"},
+			wantBanner: "Deployment failed for eri: crash loop",
+		},
+		{
+			name:       "deploy failed without job name",
+			event:      pubsub.PRLifecycleEvent{Event: "deploy_failed"},
+			wantBanner: "Deployment failed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatDeployFailureBanner(tc.event)
+			assert.Equal(t, tc.wantBanner, got)
+		})
+	}
+}
+
+func TestFormatDeployFailurePrompt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		event        pubsub.PRLifecycleEvent
+		wantContains []string
+	}{
+		{
+			name:         "sync failed on pr",
+			event:        pubsub.PRLifecycleEvent{Event: "sync_failed", Repo: "aerial", PRNumber: 101, MergeSHA: "msha1", Branch: "feat/foo", Details: "failed to sync"},
+			wantContains: []string{"Git sync failed for PR #101 on aerial (commit: msha1)", "Error details:\n```\nfailed to sync\n```", "Branch: feat/foo", "Please investigate and fix the git sync failure."},
+		},
+		{
+			name:         "deploy failed with job on pr",
+			event:        pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "synapse", Repo: "aerial", PRNumber: 202, MergeSHA: "msha2", Details: "pod failed"},
+			wantContains: []string{"Deployment failed for job synapse on aerial (PR #202, commit: msha2)", "Error details:\n```\npod failed\n```", "Please investigate and fix the deployment failure."},
+		},
+		{
+			name:         "deploy failed without job on pr",
+			event:        pubsub.PRLifecycleEvent{Event: "deploy_failed", Repo: "aerial", PRNumber: 303, HeadSHA: "hsha3"},
+			wantContains: []string{"Deployment failed for PR #303 on aerial (commit: hsha3)", "Please investigate and fix the deployment failure."},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatDeployFailurePrompt(tc.event)
+			for _, exp := range tc.wantContains {
+				assert.Contains(t, got, exp)
+			}
+		})
+	}
+}

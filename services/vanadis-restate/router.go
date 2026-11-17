@@ -467,7 +467,7 @@ func actionFailureAllowed(c VanadisChunk, buildStatus, dispatchID string) bool {
 	// identities, while old action-turn identities must still match the generation.
 	prIdentity := dispatchID == "" || strings.HasPrefix(dispatchID, "vanadis-"+c.ID+"-cifail-") ||
 		dispatchID == "vanadis-conflict-"+c.ID || strings.HasPrefix(dispatchID, "vanadis-conflict-"+c.ID+"-")
-	return buildStatus == statusRunning && c.Status != statusMerged && c.Status != statusDeploying &&
+	return buildStatus == statusRunning && c.Status != statusMerged && c.Status != statusDeploying && c.Status != statusDeployFailed &&
 		(prIdentity || dispatchID == actionDispatchID(c))
 }
 
@@ -594,7 +594,7 @@ func (b *BuildObject) getChunkRevision(ctx context.Context, buildID, chunkID str
 					seeded = prRevisionState{
 						headSHA:  strings.TrimSpace(c.HeadSHA),
 						mergeSHA: strings.TrimSpace(c.MergeSHA),
-						merged:   c.Status == statusMerged || c.Status == statusSynced,
+						merged:   c.Status == statusMerged || c.Status == statusSynced || c.Status == statusDeployFailed || strings.TrimSpace(c.MergeSHA) != "",
 						headAt:   c.HeadAt,
 					}
 					recordSeenHead(&seeded, seeded.headSHA)
@@ -698,6 +698,14 @@ func (b *BuildObject) acceptPRCheckRevision(ctx context.Context, buildID, chunkI
 	rev := b.getChunkRevision(ctx, buildID, chunkID)
 	tracked := rev.headSHA
 	if rev.merged {
+		if rev.mergeSHA == "" && rev.headSHA != "" {
+			if sha == "" || strings.EqualFold(sha, rev.headSHA) {
+				return false
+			}
+			rev.mergeSHA = sha
+			b.setChunkRevision(chunkID, rev)
+			return true
+		}
 		tracked = firstNonEmpty(rev.mergeSHA, rev.headSHA)
 	}
 	if tracked == "" {
@@ -733,6 +741,55 @@ func (b *BuildObject) handlePRCheckEvent(ctx context.Context, chunkID, event str
 	return b.store.RecordPRCheckStatus(ctx, chunkID, strings.TrimSpace(ev.HeadSHA), checkName, checkState)
 }
 
+func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
+	if !b.acceptPRCheckRevision(rc, buildID, chunkID, ev.HeadSHA) {
+		return errPRTransitionSkipped
+	}
+	if err := b.handlePRCheckEvent(rc, chunkID, event, ev); err != nil {
+		log.Printf("[vanadis-restate] record check status warning: %v", err)
+	}
+	if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "ci_failed"); err != nil {
+		return err
+	}
+	if b.executor != nil {
+		details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
+		b.dispatchThreadWakePrompt(rc, buildID, FormatCIFailurePrompt(ev, details))
+	}
+	return nil
+}
+
+func (b *BuildObject) handleClosedPREvent(rc restate.RunContext, chunkID string, ev pubsub.PRLifecycleEvent) error {
+	if ev.Status == "merged" || b.store == nil {
+		return nil
+	}
+	bld, _, failed, fErr := b.store.FailChunk(rc, chunkID, "pr_closed_unmerged", "")
+	if fErr != nil {
+		return fErr
+	}
+	if failed && bld != nil && bld.Status == statusFailed && b.executor != nil {
+		b.notifyChunkFailure(rc, *bld, chunkID, "pr_closed_unmerged")
+	}
+	return nil
+}
+
+func (b *BuildObject) handleDeployFailureEvent(rc restate.RunContext, buildID, chunkID string, ev pubsub.PRLifecycleEvent) error {
+	banner := FormatDeployFailureBanner(ev)
+	if b.store != nil {
+		if err := b.store.UpdateChunkBannerAndStatus(rc, chunkID, "deploy_failed", banner); err != nil {
+			return err
+		}
+	}
+	rev := b.getChunkRevision(rc, buildID, chunkID)
+	rev.headSHA = firstNonEmpty(strings.TrimSpace(ev.HeadSHA), rev.headSHA)
+	rev.mergeSHA = firstNonEmpty(strings.TrimSpace(ev.MergeSHA), rev.mergeSHA)
+	rev.merged = true
+	b.setChunkRevision(chunkID, rev)
+	if b.executor != nil {
+		b.dispatchThreadWakePrompt(rc, buildID, FormatDeployFailurePrompt(ev))
+	}
+	return nil
+}
+
 func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
 	_ = b.getChunkRevision(rc, buildID, chunkID)
 	switch event {
@@ -741,19 +798,7 @@ func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID,
 	case "check_updated":
 		return b.handlePRCheckEvent(rc, chunkID, event, ev)
 	case "check_failed", "ci_failed":
-		if !b.acceptPRCheckRevision(rc, buildID, chunkID, ev.HeadSHA) {
-			return errPRTransitionSkipped
-		}
-		if err := b.handlePRCheckEvent(rc, chunkID, event, ev); err != nil {
-			log.Printf("[vanadis-restate] record check status warning: %v", err)
-		}
-		if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "ci_failed"); err != nil {
-			return err
-		}
-		if b.executor != nil {
-			details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
-			b.dispatchThreadWakePrompt(rc, buildID, FormatCIFailurePrompt(ev, details))
-		}
+		return b.handleCIFailureEvent(rc, buildID, chunkID, event, ev)
 	case "conflict":
 		if err := b.store.UpdatePRLifecycleStatus(rc, chunkID, "conflict"); err != nil {
 			return err
@@ -771,12 +816,10 @@ func (b *BuildObject) handlePREventType(rc restate.RunContext, buildID, chunkID,
 				log.Printf("[vanadis-restate] publish event warning: %v", pErr)
 			}
 		}
-	case "closed":
-		if ev.Status != "merged" {
-			if _, _, _, fErr := b.store.FailChunk(rc, chunkID, "pr_closed_unmerged", ""); fErr != nil {
-				log.Printf("[vanadis-restate] fail chunk warning: %v", fErr)
-			}
-		}
+	case "closed", "closed_unmerged":
+		return b.handleClosedPREvent(rc, chunkID, ev)
+	case "deploy_failed", "sync_failed":
+		return b.handleDeployFailureEvent(rc, buildID, chunkID, ev)
 	}
 	return nil
 }
@@ -911,9 +954,9 @@ func (s *PostgresVanadisStore) RecordPRCheckStatus(ctx context.Context, chunkID,
 	const q = `UPDATE vanadis_chunks
 SET ci_checks = jsonb_set(
         CASE
-            WHEN status IN ('merged', 'synced') AND $4 != '' AND COALESCE(ci_checks->>'_merge_sha', '') = ''
+            WHEN (status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '') AND $4 != '' AND COALESCE(ci_checks->>'_merge_sha', '') = ''
                 THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb) - '_head_sha', '{_merge_sha}', to_jsonb($4::text), true)
-            WHEN status NOT IN ('merged', 'synced') AND $4 != '' AND COALESCE(ci_checks->>'_head_sha', '') = ''
+            WHEN status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(ci_checks->>'_merge_sha', '') = '' AND $4 != '' AND COALESCE(ci_checks->>'_head_sha', '') = ''
                 THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb), '{_head_sha}', to_jsonb($4::text), true)
             ELSE COALESCE(ci_checks, '{}'::jsonb)
         END,
@@ -940,11 +983,11 @@ WHERE id = $3
   AND status NOT IN ('deploying', 'deployed', 'completed', 'failed', 'cancelled')
   AND (
       $4 = ''
-      OR (status IN ('merged', 'synced') AND (
+      OR ((status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '') AND (
           COALESCE(ci_checks->>'_merge_sha', '') = $4
           OR (COALESCE(ci_checks->>'_merge_sha', '') = '' AND COALESCE(ci_checks->>'_head_sha', '') IS DISTINCT FROM $4)
       ))
-      OR (status NOT IN ('merged', 'synced') AND (
+      OR (status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(ci_checks->>'_merge_sha', '') = '' AND (
           COALESCE(ci_checks->>'_head_sha', '') = ''
           OR ci_checks->>'_head_sha' = $4
       ))
