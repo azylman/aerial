@@ -109,7 +109,9 @@ func executeConfigReload(ctx context.Context, source string, cfg *config.Config,
 	if cfg == nil {
 		return
 	}
-	if err := options.reloadSupplier(cfg); err != nil {
+	candidate := config.NewFromData(cfg.Current())
+	reloadErr := prepareReloadCandidate(candidate, options)
+	if err := reloadErr; err != nil {
 		metrics.ConfigReloadsTotal.WithLabelValues(source, "failure").Inc()
 		log.Printf("[%s] Warning: Failed to reload config: %v", source, err)
 		if options.dgSession != nil {
@@ -120,8 +122,9 @@ func executeConfigReload(ctx context.Context, source string, cfg *config.Config,
 		}
 		return
 	}
+	ensureConfigDefaults(candidate)
+	cfg.Update(candidate.Current())
 	metrics.ConfigReloadsTotal.WithLabelValues(source, "success").Inc()
-	ensureConfigDefaults(cfg)
 	config.RegisterConfigTokens(cfg)
 
 	if !options.skipEnvironmentSync && options.provisioner != nil {
@@ -172,15 +175,18 @@ func executeConfigReload(ctx context.Context, source string, cfg *config.Config,
 
 func CreateReloadConfigFunc(ctx context.Context, cfg *config.Config, opts ...ReloadOption) func(source string) {
 	options := &reloadConfigOptions{
-		reloadSupplier: config.Reload,
+		reloadSupplier: func(candidate *config.Config) error {
+			// Loading a reload candidate must not publish to ActiveConfig before validation.
+			return config.ReloadWithSupplier(candidate, func() (*config.Config, error) {
+				return config.LoadConfigFromLookup(config.WithSharedSecretsLookup(os.Getenv, config.SharedSecretsPath),
+					config.ResolveConfigSearchPaths(os.Getenv, config.ConfigSearchPaths...)...)
+			})
+		},
 	}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(options)
 		}
-	}
-	if options.provisioner == nil && cfg != nil {
-		options.provisioner = env.NewFromConfig(cfg)
 	}
 
 	var reloadMu sync.Mutex
@@ -1023,9 +1029,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	mcpRoutes, mcpProxyPort := mcpTraceRoutes(appOpts.tracingEnabled, cur.Port)
 	activeTurns := runner.NewActiveTurnRegistry()
 
-	provisioner := env.NewFromConfig(cfg).WithMCPProxy(mcpRoutes)
-	if err := syncBrainEnvironment(ctx, provisioner, cfg); err != nil {
-		log.Printf("Warning initializing brain environment: %v", err)
+	provisioner, provisionErr := initializeEnvironment(ctx, cfg, mcpRoutes)
+	if provisionErr != nil {
+		return provisionErr
 	}
 
 	var store db.Store
@@ -1192,4 +1198,37 @@ func main() {
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+func initializeEnvironment(ctx context.Context, cfg *config.Config, routes *env.MCPProxyRoutes) (*env.Provisioner, error) {
+	provisioner, err := env.NewFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	provisioner.WithMCPProxy(routes)
+	if err := syncBrainEnvironment(ctx, provisioner, cfg); err != nil {
+		if _, ok := errors.AsType[*env.CredentialError](err); ok {
+			return nil, err
+		}
+		log.Printf("Warning initializing brain environment: %v", err)
+	}
+	return provisioner, nil
+}
+
+// prepareReloadCandidate keeps supplier mutations isolated until credentials are ready.
+func prepareReloadCandidate(candidate *config.Config, options *reloadConfigOptions) error {
+	if err := options.reloadSupplier(candidate); err != nil {
+		return err
+	}
+	if err := env.ValidateCredentialSources(candidate.Current().CredentialSources); err != nil {
+		return err
+	}
+	if options.provisioner == nil && !options.skipEnvironmentSync {
+		provisioner, err := env.NewFromConfig(candidate)
+		if err != nil {
+			return err
+		}
+		options.provisioner = provisioner
+	}
+	return nil
 }

@@ -48,7 +48,10 @@ var (
 )
 
 // New creates a Provisioner targeting the given homeDir and dataDir.
-func New(homeDir, dataDir string) *Provisioner {
+func New(homeDir, dataDir string, sources config.CredentialSources) (*Provisioner, error) {
+	if err := ValidateCredentialSources(sources); err != nil {
+		return nil, err
+	}
 	skillsDir := "/opt/skills"
 	if _, err := statOptSkills(skillsDir); err != nil {
 		if _, errLegacy := statOptSkills("/opt/superpowers/skills"); errLegacy == nil {
@@ -68,17 +71,42 @@ func New(homeDir, dataDir string) *Provisioner {
 		aerialRulesDir:       "/share/aerial/rules",
 		configRulesDir:       "/share/aerial-config/rules",
 		hooksDir:             "/share/aerial/scripts/hooks",
-		oauthTokenSourcePath: "/local/antigravity-oauth-token",
-		codexAuthSourcePath:  "/local/codex-auth.json",
-	}
+		oauthTokenSourcePath: strings.TrimSpace(sources.OAuth.Path),
+		codexAuthSourcePath:  strings.TrimSpace(sources.Codex.Path),
+	}, nil
 }
 
 // NewFromConfig creates a Provisioner using the directories configured in cfg.
-func NewFromConfig(cfg *config.Config) *Provisioner {
+func NewFromConfig(cfg *config.Config) (*Provisioner, error) {
 	if cfg == nil {
-		return New("", "")
+		return nil, &CredentialError{Err: errors.New("credential configuration is required")}
 	}
-	return New(cfg.GeminiHomeDir(), cfg.DataDir())
+	cur := cfg.Current()
+	return New(cur.GeminiHomeDir, cur.DataDir, cur.CredentialSources)
+}
+
+type CredentialError struct{ Err error }
+
+func (e *CredentialError) Error() string { return e.Err.Error() }
+func (e *CredentialError) Unwrap() error { return e.Err }
+func ValidateCredentialSources(sources config.CredentialSources) error {
+	if err := sources.Validate(); err != nil {
+		return &CredentialError{Err: err}
+	}
+	for _, entry := range []struct {
+		name   string
+		source config.CredentialSource
+	}{
+		{"oauth", sources.OAuth}, {"codex", sources.Codex},
+	} {
+		if entry.source.Disabled {
+			continue
+		}
+		if _, err := os.ReadFile(strings.TrimSpace(entry.source.Path)); err != nil {
+			return &CredentialError{Err: fmt.Errorf("credential_sources.%s: %w", entry.name, err)}
+		}
+	}
+	return nil
 }
 
 // WithMCPProxy routes the agents' HTTP MCP servers through eri's tracing proxy; nil (tracing
@@ -129,7 +157,11 @@ func (p *Provisioner) provisionOAuthState(configDir string) error {
 
 	tokenDest := filepath.Join(configDir, "antigravity-oauth-token")
 	if srcPath != "" && fileMissingOrEmpty(tokenDest) {
-		if srcData, err := os.ReadFile(srcPath); err == nil && strings.TrimSpace(string(srcData)) != "" {
+		srcData, err := os.ReadFile(srcPath)
+		if err != nil {
+			return &CredentialError{Err: fmt.Errorf("failed to read oauth source: %w", err)}
+		}
+		if strings.TrimSpace(string(srcData)) != "" {
 			if err := os.WriteFile(tokenDest, srcData, 0o600); err != nil {
 				return fmt.Errorf("failed to seed antigravity-oauth-token: %w", err)
 			}
@@ -162,11 +194,8 @@ func seedCodexAuth(srcPath, canonicalCodexDir, destAuthPath, seedSHAPath string)
 		return nil
 	}
 	srcData, err := os.ReadFile(srcPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
 	if err != nil {
-		return fmt.Errorf("failed to read codex auth source %s: %w", srcPath, err)
+		return &CredentialError{Err: fmt.Errorf("failed to read codex auth source: %w", err)}
 	}
 	if len(bytes.TrimSpace(srcData)) == 0 {
 		return nil
@@ -310,6 +339,15 @@ func (p *Provisioner) Sync(ctx context.Context, cfg *config.Config) error {
 		cur = config.DefaultConfigData()
 	}
 
+	if cfg != nil {
+		if err := ValidateCredentialSources(cur.CredentialSources); err != nil {
+			return err
+		}
+		p.mu.Lock()
+		p.oauthTokenSourcePath = strings.TrimSpace(cur.CredentialSources.OAuth.Path)
+		p.codexAuthSourcePath = strings.TrimSpace(cur.CredentialSources.Codex.Path)
+		p.mu.Unlock()
+	}
 	if err := p.SyncSettings(cur.APIKey, cur.Model); err != nil {
 		return fmt.Errorf("failed to sync settings: %w", err)
 	}
