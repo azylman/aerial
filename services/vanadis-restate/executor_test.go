@@ -314,12 +314,24 @@ func TestWidgetFormatting(t *testing.T) {
 		Status: "open",
 		CIChecks: map[string]string{
 			"lint": "passed",
-			"test": "failed",
+			"test": "pending",
 		},
 	}
 	step := FormatChunkActiveStep(c)
 	if !strings.Contains(step, "1/2 passed") {
 		t.Errorf("FormatChunkActiveStep = %q, want '1/2 passed'", step)
+	}
+
+	cFailed := VanadisChunk{
+		ID:     "c1-fail",
+		Status: "open",
+		CIChecks: map[string]string{
+			"lint": "passed",
+			"test": "failed",
+		},
+	}
+	if stepFailed := FormatChunkActiveStep(cFailed); stepFailed != "" {
+		t.Errorf("FormatChunkActiveStep failed = %q, want empty", stepFailed)
 	}
 
 	cDeploying := VanadisChunk{ID: "c2", Status: "deploying"}
@@ -1145,4 +1157,79 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 		t.Error("independent sibling was not accepted")
 	}
 	assert.False(t, launched["dependent"])
+}
+
+func TestFormatKustomizationAndJobRollout(t *testing.T) {
+	t.Parallel()
+
+	// Deploy target label tests
+	assert.Equal(t, "`default-svc`", formatDeployTargetLabel("default-svc", "job", ""))
+	assert.Equal(t, "[`git-sync`](https://flux.example.com/c/main/flux/sources)", formatDeployTargetLabel("git-sync", "job", "https://flux.example.com/"))
+	assert.Equal(t, "[`github-runner`](https://flux.example.com/c/main/flux/helmreleases)", formatDeployTargetLabel("github-runner", "job", "https://flux.example.com/"))
+	assert.Equal(t, "[`my-app`](https://flux.example.com/c/main/deployments/default/my-app)", formatDeployTargetLabel("my-app", "job", "https://flux.example.com/"))
+	assert.Equal(t, "[`kust-1`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/kust-1)", formatDeployTargetLabel("kust-1", "kustomization", "https://flux.example.com/"))
+
+	// Kustomization rollout status
+	s, ok := formatKustomizationRolloutStatus(statusMerged, map[string]string{"kust": "healthy"})
+	assert.False(t, ok)
+	assert.Empty(t, s)
+
+	s, ok = formatKustomizationRolloutStatus(statusDeploying, map[string]string{
+		"k1": statusDeployed,
+		"k2": "progressing",
+	}, "https://flux.example.com")
+	assert.True(t, ok)
+	assert.Contains(t, s, "[`k1`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/k1): ✅ rolled out")
+	assert.Contains(t, s, "[`k2`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/k2): 🔄 rolling out")
+
+	// FormatChunkActiveStep with kustomizations
+	chunkKust := VanadisChunk{
+		ID:     "c-kust",
+		Status: statusDeploying,
+		RolloutState: &pubsub.PRRolloutState{
+			KustomizationStatuses: map[string]string{"k1": statusDeployed},
+		},
+	}
+	stepKust := FormatChunkActiveStep(chunkKust, "https://flux.example.com")
+	assert.Contains(t, stepKust, "✅ rolled out")
+
+	// FormatChunkActiveStep with jobs
+	chunkJobs := VanadisChunk{
+		ID:     "c-jobs",
+		Status: statusDeploying,
+		RolloutState: &pubsub.PRRolloutState{
+			ExpectedJobs: []string{"svc-a", "svc-b", "svc-c", "svc-d"},
+			StartedJobs:  []string{"svc-b", "svc-c"},
+			DeployedJobs: []string{"svc-a"},
+			JobStates:    map[string]string{"svc-c": "verifying_health"},
+		},
+	}
+	stepJobs := FormatChunkActiveStep(chunkJobs)
+	assert.Contains(t, stepJobs, "`svc-a`: ✅ healthy")
+	assert.Contains(t, stepJobs, "`svc-b`: 🔄 starting")
+	assert.Contains(t, stepJobs, "`svc-c`: 🔄 verifying health")
+	assert.Contains(t, stepJobs, "`svc-d`: ⏳ building image")
+
+	// FormatChunkActiveStep with container image builds on merged
+	chunkImages := VanadisChunk{
+		ID:     "c-images",
+		Status: statusMerged,
+		CIChecks: map[string]string{
+			"build-check-1": "passed",
+			"build-check-2": "passed",
+		},
+	}
+	stepImages := FormatChunkActiveStep(chunkImages)
+	assert.Contains(t, stepImages, "Building container images (2/2 completed)")
+
+	// FormatChunkActiveStep with matched build job service on merged
+	chunkService := VanadisChunk{
+		ID:     "c-svc",
+		Status: statusMerged,
+		CIChecks: map[string]string{
+			"Build & Push Images (eri)": "passed",
+		},
+	}
+	stepService := FormatChunkActiveStep(chunkService)
+	assert.Contains(t, stepService, "`eri`: 🔄 starting")
 }
