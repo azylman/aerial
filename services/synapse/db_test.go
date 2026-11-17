@@ -81,57 +81,10 @@ func scanValues(dest []any, vals ...any) error {
 	return nil
 }
 
-type mockSynapsePgxTx struct {
-	pgx.Tx
-
-	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
-	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	queryFn    func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	commitErr  error
-	rbErr      error
-}
-
-func (t *mockSynapsePgxTx) Commit(ctx context.Context) error { return t.commitErr }
-func (t *mockSynapsePgxTx) Rollback(ctx context.Context) error {
-	if t.rbErr != nil {
-		return t.rbErr
-	}
-	return pgx.ErrTxClosed
-}
-
-func (t *mockSynapsePgxTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	if t.queryRowFn != nil {
-		return t.queryRowFn(ctx, sql, args...)
-	}
-	return mockSynapsePgxRow{}
-}
-
-func (t *mockSynapsePgxTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	if t.execFn != nil {
-		return t.execFn(ctx, sql, args...)
-	}
-	return pgconn.NewCommandTag("UPDATE 1"), nil
-}
-
-func (t *mockSynapsePgxTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	if t.queryFn != nil {
-		return t.queryFn(ctx, sql, args...)
-	}
-	return &mockSynapsePgxRows{}, nil
-}
-
 type mockSynapsePgxPool struct {
-	beginFn    func(ctx context.Context) (pgx.Tx, error)
 	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
 	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	queryFn    func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
-
-func (p *mockSynapsePgxPool) Begin(ctx context.Context) (pgx.Tx, error) {
-	if p.beginFn != nil {
-		return p.beginFn(ctx)
-	}
-	return &mockSynapsePgxTx{}, nil
 }
 
 func (p *mockSynapsePgxPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
@@ -169,8 +122,6 @@ type postgresPRRegistryUnitCase struct {
 	mockSelectErr  error
 	mockScanErr    error
 	mockExecErr    error
-	mockBeginErr   error
-	mockCommitErr  error
 	mockRowsErr    error
 	rowsAffected   int64
 	targetIDReturn string
@@ -280,19 +231,6 @@ func postgresPRRegistryTransitionCases() []postgresPRRegistryUnitCase {
 
 func postgresPRRegistryJobKustCases() []postgresPRRegistryUnitCase {
 	return []postgresPRRegistryUnitCase{
-		// AtomicTransitionDeployedByJob
-		{name: "AtomicTransitionDeployedByJob empty job guard", op: "AtomicTransitionDeployedByJob", jobName: "", wantUpdated: false},
-		{name: "AtomicTransitionDeployedByJob begin tx error", op: "AtomicTransitionDeployedByJob", jobName: "brain", mockBeginErr: errors.New("begin err"), wantErr: true},
-		{name: "AtomicTransitionDeployedByJob select ErrNoRows", op: "AtomicTransitionDeployedByJob", jobName: "brain", mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
-		{name: "AtomicTransitionDeployedByJob select error", op: "AtomicTransitionDeployedByJob", jobName: "brain", mockSelectErr: errors.New("select err"), wantErr: true},
-		{name: "AtomicTransitionDeployedByJob remaining jobs update success", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", repo: "azylman/aerial", targetIDReturn: "100000000000000001", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, wantUpdated: false, wantTarget: "100000000000000001", wantPRNum: 42},
-		{name: "AtomicTransitionDeployedByJob remaining jobs update exec error", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, mockExecErr: errors.New("exec err"), wantErr: true},
-		{name: "AtomicTransitionDeployedByJob remaining jobs update commit error", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, mockCommitErr: errors.New("commit err"), wantErr: true},
-		{name: "AtomicTransitionDeployedByJob final job deployed RowsAffected 1", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", repo: "azylman/aerial", metaJSON: `{"jobs":["node-exporter"],"started_jobs":["node-exporter"]}`, targetIDReturn: "100000000000000001", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "100000000000000001", wantSQLSubstr: "metadata->'jobs' ? $1 AND metadata->'started_jobs' ? $1"},
-		{name: "AtomicTransitionDeployedByJob final job deployed RowsAffected 0", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, rowsAffected: 0, wantUpdated: false},
-		{name: "AtomicTransitionDeployedByJob final job exec error", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, mockExecErr: errors.New("exec err"), wantErr: true},
-		{name: "AtomicTransitionDeployedByJob final job commit error", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, rowsAffected: 1, mockCommitErr: errors.New("commit err"), wantErr: true},
-
 		// RecordPRJobState
 		{name: "RecordPRJobState success", op: "RecordPRJobState", jobName: "cadvisor", targetID: "verifying_health", targetIDReturn: "azylman/aerial", wantPRNum: 42, wantUpdated: true, wantSQLSubstr: "metadata->'job_states'"},
 		{name: "RecordPRJobState unchanged or not found", op: "RecordPRJobState", jobName: "cadvisor", targetID: "verifying_health", mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
@@ -300,14 +238,6 @@ func postgresPRRegistryJobKustCases() []postgresPRRegistryUnitCase {
 		{name: "RecordPRJobState nil pool guard", op: "RecordPRJobState", nilPool: true, jobName: "cadvisor", targetID: "verifying_health", wantUpdated: false},
 		{name: "RecordPRJobState empty jobName guard", op: "RecordPRJobState", jobName: "", targetID: "verifying_health", wantUpdated: false},
 		{name: "RecordPRJobState empty jobState guard", op: "RecordPRJobState", jobName: "cadvisor", targetID: "", wantUpdated: false},
-
-		// AtomicTransitionDeployFailedByJob
-		{name: "AtomicTransitionDeployFailedByJob empty job guard", op: "AtomicTransitionDeployFailedByJob", jobName: "", wantUpdated: false},
-		{name: "AtomicTransitionDeployFailedByJob select ErrNoRows", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", mockSelectErr: pgx.ErrNoRows, wantUpdated: false, wantSQLSubstr: "deployed_jobs"},
-		{name: "AtomicTransitionDeployFailedByJob select error", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", mockSelectErr: errors.New("select err"), wantErr: true},
-		{name: "AtomicTransitionDeployFailedByJob exec error", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", mockExecErr: errors.New("exec err"), wantErr: true},
-		{name: "AtomicTransitionDeployFailedByJob RowsAffected 0", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", repo: "azylman/aerial", targetIDReturn: "100000000000000001", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 0, wantUpdated: false, wantTarget: "100000000000000001"},
-		{name: "AtomicTransitionDeployFailedByJob success", op: "AtomicTransitionDeployFailedByJob", jobName: "brain", repo: "azylman/aerial", targetIDReturn: "100000000000000001", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "100000000000000001"},
 
 		// EnsurePRRegistered
 		{name: "EnsurePRRegistered empty repo guard", op: "EnsurePRRegistered", repo: "", prNumber: 692, wantTarget: ""},
@@ -462,20 +392,6 @@ func scanMockPRRegistryRow(dest []any, tc postgresPRRegistryUnitCase) error {
 	return scanMockPRRegistryDestPos(dest, tc)
 }
 
-func scanMockPRRegistryTxRow(dest []any, tc postgresPRRegistryUnitCase) error {
-	if tc.mockSelectErr != nil {
-		return tc.mockSelectErr
-	}
-	if len(dest) == 6 {
-		meta := []byte("{}")
-		if tc.metaJSON != "" {
-			meta = []byte(tc.metaJSON)
-		}
-		return scanValues(dest, int64(101), tc.targetIDReturn, tc.wantPRNum, tc.mergeSHAReturn, tc.repo, meta)
-	}
-	return nil
-}
-
 func scanMockPRRegistryRows(idx int, dest []any, tc postgresPRRegistryUnitCase) error {
 	if tc.mockScanErr != nil {
 		return tc.mockScanErr
@@ -514,31 +430,6 @@ func buildMockPRRegistryPool(tc postgresPRRegistryUnitCase, gotSQL, gotExecSQL *
 				rowsAff = 1
 			}
 			return pgconn.NewCommandTag(fmt.Sprintf("UPDATE %d", rowsAff)), nil
-		},
-		beginFn: func(qCtx context.Context) (pgx.Tx, error) {
-			if tc.mockBeginErr != nil {
-				return nil, tc.mockBeginErr
-			}
-			return &mockSynapsePgxTx{
-				commitErr: tc.mockCommitErr,
-				execFn: func(txCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-					*gotExecSQL = sql
-					if tc.mockExecErr != nil {
-						return pgconn.CommandTag{}, tc.mockExecErr
-					}
-					rowsAff := tc.rowsAffected
-					if rowsAff == 0 && tc.wantUpdated {
-						rowsAff = 1
-					}
-					return pgconn.NewCommandTag(fmt.Sprintf("UPDATE %d", rowsAff)), nil
-				},
-				queryRowFn: func(txCtx context.Context, sql string, args ...any) pgx.Row {
-					*gotSQL = sql
-					return mockSynapsePgxRow{scanFn: func(dest ...any) error {
-						return scanMockPRRegistryTxRow(dest, tc)
-					}}
-				},
-			}, nil
 		},
 		queryFn: func(qCtx context.Context, sql string, args ...any) (pgx.Rows, error) {
 			*gotSQL = sql
@@ -770,46 +661,6 @@ func executePRRegistryResolutionOps(ctx context.Context, t *testing.T, reg *Post
 	return true
 }
 
-func executePRRegistryJobTransitionOps(ctx context.Context, t *testing.T, reg *PostgresPRRegistry, tc postgresPRRegistryUnitCase) bool {
-	t.Helper()
-	switch tc.op {
-	case "AtomicTransitionDeployedByJob":
-		got, err := reg.AtomicTransitionDeployedByJob(ctx, tc.jobName)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("AtomicTransitionDeployedByJob err = %v, wantErr = %v", err, tc.wantErr)
-		}
-		if got.Updated != tc.wantUpdated {
-			t.Errorf("updated = %v, want %v", got.Updated, tc.wantUpdated)
-		}
-		if got.TargetID != tc.wantTarget {
-			t.Errorf("gotTarget = %q, want %q", got.TargetID, tc.wantTarget)
-		}
-		if got.PRNumber != tc.wantPRNum {
-			t.Errorf("gotPR = %d, want %d", got.PRNumber, tc.wantPRNum)
-		}
-		if tc.repo != "" && got.Repo != tc.repo {
-			t.Errorf("gotRepo = %q, want %q", got.Repo, tc.repo)
-		}
-	case "AtomicTransitionDeployFailedByJob":
-		got, err := reg.AtomicTransitionDeployFailedByJob(ctx, tc.jobName)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("AtomicTransitionDeployFailedByJob err = %v, wantErr = %v", err, tc.wantErr)
-		}
-		if got.Updated != tc.wantUpdated {
-			t.Errorf("updated = %v, want %v", got.Updated, tc.wantUpdated)
-		}
-		if got.TargetID != tc.wantTarget {
-			t.Errorf("gotTarget = %q, want %q", got.TargetID, tc.wantTarget)
-		}
-		if got.PRNumber != tc.wantPRNum {
-			t.Errorf("gotPR = %d, want %d", got.PRNumber, tc.wantPRNum)
-		}
-	default:
-		return false
-	}
-	return true
-}
-
 func executePRRegistryJobMetadataOps(ctx context.Context, t *testing.T, reg *PostgresPRRegistry, tc postgresPRRegistryUnitCase) bool {
 	t.Helper()
 	switch tc.op {
@@ -896,7 +747,6 @@ func runPostgresPRRegistryUnitCase(ctx context.Context, t *testing.T, tc postgre
 		!executePRRegistryCheckOps(ctx, t, reg, tc) &&
 		!executePRRegistryAtomicTransitionOps(ctx, t, reg, tc) &&
 		!executePRRegistryResolutionOps(ctx, t, reg, tc) &&
-		!executePRRegistryJobTransitionOps(ctx, t, reg, tc) &&
 		!executePRRegistryJobMetadataOps(ctx, t, reg, tc) {
 		executePRRegistryKustOps(ctx, t, reg, tc)
 	}
