@@ -52,7 +52,6 @@ func TestDeploymentStartBeforeMerge(t *testing.T) {
 			if tc.wantArmed {
 				require.Equal(t, now.Add(15*time.Minute), rt.attempts["c"].Deadline)
 				require.Equal(t, tc.wantDelay, rt.delays[len(rt.delays)-1])
-				require.Equal(t, tc.wantDelay, rt.delays[len(rt.delays)-1])
 				require.Equal(t, statusDeploying, store.chunks[0].Status)
 				require.Equal(t, []string{"web", "worker"}, store.chunks[0].RolloutState.StartedJobs)
 			}

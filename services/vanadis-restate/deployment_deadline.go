@@ -268,7 +268,9 @@ func (b *BuildObject) deliverDeploymentDeadline(ctx context.Context, buildID str
 		if c.ID != a.ChunkID {
 			continue
 		}
-		if c.PRNumber != a.PRNumber || deploymentRevision(c) != a.Revision || (c.Status != statusDeploying && c.Status != statusDeployFailed) {
+		// A repeated merge notification can restore merged after deployment began.
+		// The matching durable attempt still proves the original deployment budget.
+		if c.PRNumber != a.PRNumber || deploymentRevision(c) != a.Revision || (c.Status != statusDeploying && c.Status != statusDeployFailed && c.Status != statusMerged) {
 			return result, nil
 		}
 		evidence, marshalErr := json.Marshal(c.RolloutState)
