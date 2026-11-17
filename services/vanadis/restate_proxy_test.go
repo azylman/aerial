@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadRestateConfig(t *testing.T) {
@@ -329,6 +330,44 @@ func TestCallRestateIngress(t *testing.T) {
 			}
 			if tc.useOut && (out.Status != "success" || out.BuildID != "b100") {
 				t.Errorf("unexpected decoded output: %+v", out)
+			}
+		})
+	}
+}
+
+type deadlineTransport struct {
+	t   *testing.T
+	err error
+}
+
+func (d deadlineTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	deadline, ok := r.Context().Deadline()
+	if !ok || time.Until(deadline) > 10*time.Second {
+		d.t.Error("upstream request must have at most ten seconds to respond")
+	}
+	return nil, d.err
+}
+
+func TestRestateDeadlineResponse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		cause   error
+		want    int
+		message string
+	}{
+		{"deadline", context.DeadlineExceeded, 504, "acceptance unknown"},
+		{"parent cancellation", context.Canceled, 500, "context canceled"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := &VanadisServer{httpClient: &http.Client{Transport: deadlineTransport{t, tc.cause}}, restateCfg: RestateConfig{RestateIngressURL: "http://restate.invalid"}}
+			err := s.callRestateIngress(context.Background(), "/Build/example/Create", nil, nil)
+			rec := httptest.NewRecorder()
+			writeStoreErr(rec, err)
+			if rec.Code != tc.want || !strings.Contains(rec.Body.String(), tc.message) {
+				t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
 			}
 		})
 	}

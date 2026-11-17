@@ -53,6 +53,12 @@ cat << 'EOF' > "${MOCK_BIN}/curl"
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -n "${MOCK_CURL_EXIT:-}" ]; then
+    echo 'curl: transport failure https://user:secret@private.invalid' >&2
+    printf '\n000\n'
+    exit "$MOCK_CURL_EXIT"
+fi
+
 METHOD="GET"
 URL=""
 BODY=""
@@ -67,7 +73,7 @@ while [ $# -gt 0 ]; do
             BODY="$2"
             shift 2
             ;;
-        -H|-w|--connect-timeout)
+        -H|-w|--connect-timeout|--max-time)
             shift 2
             ;;
         -s|-S|-sS)
@@ -186,6 +192,19 @@ assert_eq "POST http://127.0.0.1:4025/builds/build-test-101/cancel" "$(cat "$CAP
 # Test 8: HTTP failure handling (500 Internal Server Error)
 HTTP_ERR="$(VANADIS_URL="http://127.0.0.1:4025" MOCK_HTTP_STATUS=500 "$AERIAL_BUILD" status build-test-101 2>&1 || true)"
 assert_contains "failed with HTTP 500" "$HTTP_ERR" "HTTP 500 error is reported and exits non-zero"
+
+for scenario in "52:Empty reply" "28:timed out" "6:resolve host"; do
+    code="${scenario%%:*}"
+    expected="${scenario#*:}"
+    set +e
+    RESULT="$(VANADIS_URL="http://primary.invalid" VANADIS_FALLBACK_URL="http://fallback.invalid" MOCK_CURL_EXIT="$code" DISCORD_THREAD_ID="1555888999" "$AERIAL_BUILD" enqueue "$PLAN_JSON" 2>&1)"
+    rc=$?
+    set -e
+    assert_eq "1" "$rc" "transport failure exits nonzero"
+    assert_contains "$expected" "$RESULT" "transport diagnosis retained"
+    assert_contains "acceptance unknown" "$RESULT" "unknown acceptance explained"
+    assert_eq "false" "$( [[ "$RESULT" == *secret* ]] && echo true || echo false)" "credentials withheld"
+done
 
 # Test 9: Missing VANADIS_URL error when unset in env and config.yaml
 NO_URL_ERR="$(CONFIG_PATH="/dev/null" VANADIS_URL="" "$AERIAL_BUILD" status build-test-101 2>&1 || true)"

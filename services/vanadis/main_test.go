@@ -792,3 +792,34 @@ func TestParseCreateBuildChunks_InitialStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateBuildTerminalResponses(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"invalid", 400, `{"message":"invalid dependency"}`, "invalid dependency"},
+		{"missing", 404, `{"message":"build not found"}`, "build not found"},
+		{"conflict", 409, `{"message":"chunk ID already exists"}`, "chunk ID already exists"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer upstream.Close()
+			s := NewVanadisServer(Config{}, newMemoryVanadisStore(), upstream.Client())
+			s.restateCfg.RestateIngressURL = upstream.URL
+			rec := httptest.NewRecorder()
+			s.handleCreateBuild(rec, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(`{"id":"example","thread_id":"123456789012345678","objective":"test","chunks":[{"repo":"aerial","title":"test","instructions":"test","depends_on":[]}]}`)))
+			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.want) {
+				t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}

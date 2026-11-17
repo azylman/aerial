@@ -558,6 +558,8 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 func writeStoreErr(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	switch {
+	case errors.Is(err, ErrRestateTimeout):
+		status = http.StatusGatewayTimeout
 	case errors.Is(err, ErrInvalidBuildInput):
 		status = http.StatusBadRequest
 	case errors.Is(err, ErrBuildNotFound) || errors.Is(err, ErrChunkNotFound):

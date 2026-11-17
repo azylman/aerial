@@ -81,12 +81,12 @@ do_curl_request() {
     local body="${3:-}"
 
     if [ -n "$body" ]; then
-        curl -sS --connect-timeout 5 -w "\n%{http_code}" -X "$method" \
+        curl -sS --connect-timeout 5 --max-time 20 -w "\n%{http_code}" -X "$method" \
             -H "Content-Type: application/json" \
             -d "$body" \
             "$url"
     else
-        curl -sS --connect-timeout 5 -w "\n%{http_code}" -X "$method" \
+        curl -sS --connect-timeout 5 --max-time 20 -w "\n%{http_code}" -X "$method" \
             "$url"
     fi
 }
@@ -101,17 +101,29 @@ vanadis_request() {
         return 1
     fi
 
-    local raw_resp=""
-    if ! raw_resp="$(do_curl_request "$method" "${VANADIS_URL}${path}" "$body" 2>/dev/null)"; then
-        if [ -n "$VANADIS_FALLBACK_URL" ] && [ "$VANADIS_URL" != "$VANADIS_FALLBACK_URL" ]; then
-            if ! raw_resp="$(do_curl_request "$method" "${VANADIS_FALLBACK_URL}${path}" "$body" 2>&1)"; then
-                echo "ERROR: Failed to connect to Vanadis at ${VANADIS_URL}${path} and fallback ${VANADIS_FALLBACK_URL}${path}: ${raw_resp}" >&2
-                return 1
-            fi
-        else
-            echo "ERROR: Failed to connect to Vanadis at ${VANADIS_URL}${path}" >&2
-            return 1
-        fi
+    local raw_resp="" curl_status=0 curl_stderr
+    curl_stderr="$(mktemp)"
+    raw_resp="$(do_curl_request "$method" "${VANADIS_URL}${path}" "$body" 2>"$curl_stderr")" || curl_status=$?
+    # DNS/connect failures occur before acceptance. Never replay an ambiguous POST.
+    if [ "$curl_status" -ne 0 ] && { [ "$method" = GET ] || [ "$curl_status" -eq 6 ] || [ "$curl_status" -eq 7 ]; } &&
+        [ -n "$VANADIS_FALLBACK_URL" ] && [ "$VANADIS_URL" != "$VANADIS_FALLBACK_URL" ]; then
+        curl_status=0
+        raw_resp="$(do_curl_request "$method" "${VANADIS_FALLBACK_URL}${path}" "$body" 2>"$curl_stderr")" || curl_status=$?
+    fi
+    # Curl stderr may contain URL credentials; use its exit code for a safe diagnosis.
+    rm -f "$curl_stderr"
+    if [ "$curl_status" -ne 0 ]; then
+        local diagnosis
+        case "$curl_status" in
+            6) diagnosis="Could not resolve host" ;;
+            7) diagnosis="Failed to connect" ;;
+            28) diagnosis="Request timed out" ;;
+            52) diagnosis="Empty reply from server" ;;
+            35|60) diagnosis="TLS connection failed" ;;
+            *) diagnosis="Transport failure (curl exit $curl_status)" ;;
+        esac
+        echo "ERROR: ${diagnosis}; acceptance unknown; check build status before resubmitting" >&2
+        return 1
     fi
 
     local http_code
@@ -119,7 +131,11 @@ vanadis_request() {
     local resp_body
     resp_body="$(printf '%s\n' "$raw_resp" | sed '$d')"
 
-    if [[ ! "$http_code" =~ ^[0-9]{3}$ ]] || [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+    if [[ ! "$http_code" =~ ^[0-9]{3}$ ]] || [ "$http_code" = 000 ]; then
+        echo "ERROR: No valid HTTP response; acceptance unknown; check build status before resubmitting" >&2
+        return 1
+    fi
+    if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
         echo "ERROR: Vanadis request ${method} ${path} failed with HTTP ${http_code}: ${resp_body}" >&2
         return 1
     fi
