@@ -1825,8 +1825,6 @@ spec:
       labels:
         app.kubernetes.io/name: nats
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: quiet-zero
       containers:
         - name: nats
           image: nats:2-alpine
