@@ -767,14 +767,6 @@ func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunk
 	if err != nil {
 		return err
 	}
-	details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
-	dispatchID := ciRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
-	if err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatCIFailurePrompt(ev, details)); err != nil {
-		if errors.Is(err, errDispatchActive) {
-			return nil
-		}
-		return err
-	}
 	if chunk.CIFailCount >= maxCIRemediationAttempts {
 		var failCount int
 		if b.store != nil {
@@ -784,6 +776,14 @@ func (b *BuildObject) handleCIFailureEvent(rc restate.RunContext, buildID, chunk
 			}
 		}
 		return b.handleCIRemediationCapReached(rc, chunkID, failCount, ev)
+	}
+	details := b.executor.ResolveCIFailureDetails(rc, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
+	dispatchID := ciRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
+	if err = b.dispatchChunkRemediationForChunk(rc, bld, chunk, dispatchID, FormatCIFailurePrompt(ev, details)); err != nil {
+		if errors.Is(err, errDispatchActive) {
+			return nil
+		}
+		return err
 	}
 	if b.store != nil {
 		if _, err := b.store.IncrementChunkCIFailCount(rc, chunkID, banner); err != nil {

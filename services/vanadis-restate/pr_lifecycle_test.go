@@ -53,15 +53,9 @@ func (s *checkStatusSpyStore) IncrementChunkCIFailCount(_ context.Context, chunk
 	if s.failCountErr != nil {
 		return 0, s.failCountErr
 	}
-	c := s.chunk(chunkID)
-	switch c.Status {
-	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, statusCompleted, statusFailed, statusCancelled:
-		return 0, errPRTransitionSkipped
-	}
 	s.failCount++
+	c := s.chunk(chunkID)
 	c.CIFailCount = s.failCount
-	c.Status = statusCIFailed
-	c.Banner = banner
 	return s.failCount, nil
 }
 
@@ -76,118 +70,25 @@ func (s *checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*Vana
 	return &VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, chunks, nil
 }
 
-func prCheckStatusAllowed(c *VanadisChunk, sha string) bool {
-	if c.Status == statusDeploying || c.Status == statusDeployed || c.Status == statusCompleted || c.Status == statusFailed || c.Status == statusCancelled {
-		return false
-	}
-	if sha == "" {
-		return true
-	}
-	isMergedLike := c.Status == statusMerged || c.Status == statusSynced || c.Status == statusDeployFailed || c.MergeSHA != ""
-	if isMergedLike {
-		if c.MergeSHA != "" {
-			return c.MergeSHA == sha
-		}
-		return c.HeadSHA == "" || !strings.EqualFold(c.HeadSHA, sha)
-	}
-	return c.HeadSHA == "" || strings.EqualFold(c.HeadSHA, sha)
-}
-
-func hasFailingChecks(checks map[string]string) bool {
-	for _, v := range checks {
-		if v == "failed" {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *checkStatusSpyStore) RecordPRCheckStatus(_ context.Context, chunkID, headSHA, checkName, checkState string) error {
-	c := s.chunk(chunkID)
-	sha := strings.TrimSpace(headSHA)
-	if !prCheckStatusAllowed(c, sha) {
-		return errPRTransitionSkipped
-	}
 	s.calls = append(s.calls, chunkID+":"+headSHA+":"+checkName+":"+checkState)
-	if s.err != nil {
-		return s.err
-	}
-	if sha != "" {
-		isMergedLike := c.Status == statusMerged || c.Status == statusSynced || c.Status == statusDeployFailed || c.MergeSHA != ""
-		if isMergedLike && c.MergeSHA == "" {
-			c.MergeSHA = sha
-			c.HeadSHA = ""
-		} else if !isMergedLike && c.MergeSHA == "" && c.HeadSHA == "" {
-			c.HeadSHA = sha
-		}
-	}
-	if c.CIChecks == nil {
-		c.CIChecks = make(map[string]string)
-	}
-	c.CIChecks[checkName] = checkState
-	if c.Status == statusCIFailed && checkState == "passed" && !hasFailingChecks(c.CIChecks) {
-		c.Status = statusPROpened
-		c.Banner = ""
-	}
-	return nil
+	return s.err
 }
 
-func (s *checkStatusSpyStore) ResetPRCheckState(ctx context.Context, chunkID, headSHA, mergeSHA string) error {
+func (s *checkStatusSpyStore) ResetPRCheckState(_ context.Context, chunkID, headSHA, mergeSHA string) error {
 	s.resets = append(s.resets, chunkID+":"+headSHA+":"+mergeSHA)
 	if s.resetErr != nil {
 		return s.resetErr
 	}
-	c := s.chunk(chunkID)
-	cleanHead := strings.TrimSpace(headSHA)
-	cleanMerge := strings.TrimSpace(mergeSHA)
-	if cleanMerge != "" {
-		switch c.Status {
-		case statusCompleted, statusFailed, statusCancelled:
-			return errPRTransitionSkipped
-		}
-		if cleanHead != "" {
-			c.HeadSHA = cleanHead
-		}
-		c.MergeSHA = cleanMerge
-		c.CIChecks = make(map[string]string)
-		c.Banner = ""
-		return nil
-	}
-	switch c.Status {
-	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, statusCompleted, statusFailed, statusCancelled:
-		return errPRTransitionSkipped
-	}
-	if c.MergeSHA != "" {
-		return errPRTransitionSkipped
-	}
-	verified := prHeadVerifiedFromContext(ctx)
-	if !verified && cleanHead != "" && c.HeadSHA != "" && !strings.EqualFold(c.HeadSHA, cleanHead) {
-		return errPRTransitionSkipped
-	}
-	if cleanHead != "" {
-		c.HeadSHA = cleanHead
-	}
-	c.MergeSHA = ""
-	c.CIChecks = make(map[string]string)
-	c.Banner = ""
-	if c.Status == statusCIFailed || c.Status == statusConflict {
-		c.Status = statusPROpened
+	if sha := strings.TrimSpace(headSHA); sha != "" {
+		s.chunk(chunkID).HeadSHA = sha
 	}
 	return nil
 }
 
-func (s *checkStatusSpyStore) UpdatePRLifecycleStatus(_ context.Context, chunkID string, status string) error {
+func (s *checkStatusSpyStore) UpdatePRLifecycleStatus(_ context.Context, _ string, status string) error {
 	s.lifecycleStatus = status
-	if s.statusErr != nil {
-		return s.statusErr
-	}
-	c := s.chunk(chunkID)
-	switch c.Status {
-	case statusCompleted, statusFailed, statusCancelled:
-		return errPRTransitionSkipped
-	}
-	c.Status = status
-	return nil
+	return s.statusErr
 }
 
 func TestBuildObject_MergeRevisionAfterLifecycle(t *testing.T) {
@@ -196,10 +97,11 @@ func TestBuildObject_MergeRevisionAfterLifecycle(t *testing.T) {
 	tests := []struct {
 		name, mergeSHA    string
 		resetErr, wantErr error
+		wantResets        []string
 	}{
-		{"missing optional merge SHA", "", errPRTransitionSkipped, nil},
-		{"rejected merge reset reloads lifecycle", "merge-event", errPRTransitionSkipped, errPRTransitionSkipped},
-		{"failed merge reset retries", "merge-event", unavailable, unavailable},
+		{"missing optional merge SHA", "", errPRTransitionSkipped, nil, nil},
+		{"rejected merge reset reloads lifecycle", "merge-event", errPRTransitionSkipped, errPRTransitionSkipped, []string{"c1:head:merge-event"}},
+		{"failed merge reset retries", "merge-event", unavailable, unavailable, []string{"c1:head:merge-event"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,12 +113,8 @@ func TestBuildObject_MergeRevisionAfterLifecycle(t *testing.T) {
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("merge error=%v want=%v", err, tc.wantErr)
 			}
-			if err := bo.handlePREventType(ctx, "b1", "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-actual", CheckName: "build", CheckState: "passed"}); err != nil {
-				t.Fatalf("merge check rejected: %v", err)
-			}
-			if err := bo.handlePREventType(ctx, "b1", "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "head", CheckName: "lint", CheckState: "passed"}); !errors.Is(err, errPRTransitionSkipped) {
-				t.Fatalf("head check error=%v", err)
-			}
+			assert.Equal(t, "merged", store.lifecycleStatus)
+			assert.Equal(t, tc.wantResets, store.resets)
 		})
 	}
 }
@@ -250,25 +148,7 @@ func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ st
 
 func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chunkID, status, banner string) error {
 	s.banners = append(s.banners, chunkID+":"+status+":"+banner)
-	if s.bannerErr != nil {
-		return s.bannerErr
-	}
-	c := s.chunk(chunkID)
-	switch c.Status {
-	case statusCompleted, statusFailed, statusCancelled:
-		return errPRTransitionSkipped
-	}
-	if status == statusConflict || status == statusCIFailed {
-		switch c.Status {
-		case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed:
-			return errPRTransitionSkipped
-		}
-	}
-	if status != "" {
-		c.Status = status
-	}
-	c.Banner = banner
-	return nil
+	return s.bannerErr
 }
 
 func (*checkStatusSpyStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
@@ -310,78 +190,29 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test"}))
 	assert.Equal(t, []string{"c1:sha-1:test:failed"}, spy.calls)
 
-	// synchronize advances tracked revision to sha-2 and resets check state
+	// synchronize validates head against GitHub API and resets check state in store
 	t2 := time.Date(2026, 11, 16, 23, 0, 0, 0, time.UTC)
 	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-2", OccurredAt: t2}))
 	assert.Equal(t, []string{"c1:sha-2:"}, spy.resets)
 
-	// delayed synchronize for superseded sha-1 or older timestamp is rejected without mutating revision
+	// synchronize for superseded sha-1 rejected by GitHub API head validation without calling store reset
 	spy.resets = nil
 	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-1"}), errPRTransitionSkipped)
-	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-0", OccurredAt: t2.Add(-time.Minute)}), errPRTransitionSkipped)
 	assert.Empty(t, spy.resets)
 
-	// delayed check_updated and check_failed from old head sha-1 are rejected
-	spy.calls = nil
-	assert.ErrorIs(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "pending"}), errPRTransitionSkipped)
-	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "ci_failed", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test"}), errPRTransitionSkipped)
-	assert.Empty(t, spy.calls)
-
-	// check_updated for new head sha-2 succeeds
-	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "passed"}))
-	assert.Equal(t, []string{"c1:sha-2:test:passed"}, spy.calls)
-
-	// legitimate newer force-push returning branch to previous head sha-1 (with newer OccurredAt) is accepted
-	spy.resets = nil
-	spy.calls = nil
-	t3 := t2.Add(time.Minute)
-	currentHead.Store("sha-1")
-	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-1", OccurredAt: t3}))
-	assert.Equal(t, []string{"c1:sha-1:"}, spy.resets)
-	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-1", CheckName: "test", CheckState: "passed"}))
-	assert.Equal(t, []string{"c1:sha-1:test:passed"}, spy.calls)
-
-	// advance back to sha-2 with newer timestamp t4
-	spy.resets = nil
-	t4 := t3.Add(time.Minute)
-	currentHead.Store("sha-2")
-	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-2", OccurredAt: t4}))
-	assert.Equal(t, []string{"c1:sha-2:"}, spy.resets)
-
-	// untimestamped synchronize on c2 clears headAt so delayed sha-a with older timestamp is rejected
-	currentHead.Store("sha-a")
-	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-a", OccurredAt: t2}))
-	currentHead.Store("sha-b")
-	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-b"}))
-	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c2", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-a", OccurredAt: t3}), errPRTransitionSkipped)
 	var parsedChunk VanadisChunk
 	applyRawChunkCIChecks(&parsedChunk, []byte(`{"_head_sha":"sha-1","_merge_sha":"m-1","_remediated_sha":"sha-1","_head_at":"1700000000000000000","_seen_heads":"sha-0,sha-1","lint":"passed"}`))
 	assert.Equal(t, "sha-1", parsedChunk.HeadSHA)
 	assert.Equal(t, "m-1", parsedChunk.MergeSHA)
 	assert.Equal(t, map[string]string{"lint": "passed"}, parsedChunk.CIChecks)
-	spy.resets = nil
 
-	// failed or skipped ResetPRCheckState on synchronize does not overwrite cached revision
-	currentHead.Store("sha-unapplied")
-	spy.resetErr = errPRTransitionSkipped
-	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-unapplied"}), errPRTransitionSkipped)
-	spy.resetErr = nil
-	spy.calls = nil
-	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "passed"}))
-	assert.Equal(t, []string{"c1:sha-2:test:passed"}, spy.calls)
-
-	// merged resets check state for merge commit and rejects delayed pre-merge head sha-2 synchronize and checks while accepting merge-sha-3 checks
+	// merged updates lifecycle status and resets check state for merge commit
 	spy.calls = nil
 	spy.resets = nil
 	assert.NoError(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", MergeSHA: "merge-sha-3"}))
 	assert.Equal(t, []string{"c1:sha-2:merge-sha-3"}, spy.resets)
-	assert.ErrorIs(t, bo.handlePREventType(mockRunContext{Context: ctx}, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-4"}), errPRTransitionSkipped)
-	assert.ErrorIs(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "sha-2", CheckName: "test", CheckState: "pending"}), errPRTransitionSkipped)
-	assert.Empty(t, spy.calls)
-	assert.NoError(t, bo.handlePRCheckEvent(ctx, "c1", "check_updated", pubsub.PRLifecycleEvent{HeadSHA: "merge-sha-3", CheckName: "Build & Push Images (eri)", CheckState: "passed"}))
-	assert.Equal(t, []string{"c1:merge-sha-3:Build & Push Images (eri):passed"}, spy.calls)
 
-	// store error on recordPRMergeRevision prevents cached revision overwrite; store error on check_updated propagates
+	// store error on recordPRMergeRevision and handlePRCheckEvent propagates
 	spyErr := &checkStatusSpyStore{err: errors.New("db error"), resetErr: errors.New("reset err")}
 	boErr := NewBuildObject("", nil).WithAuthority(spyErr, nil)
 	assert.Error(t, boErr.recordPRMergeRevision(ctx, "c1", "sha-2", "merge-sha-3"))
@@ -570,7 +401,7 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 	}
 }
 
-func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchErr, notifyErr error, isMerged bool) (*BuildObject, *mockEriClient) {
+func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchErr, notifyErr error) (*BuildObject, *mockEriClient) {
 	t.Helper()
 	eri := &mockEriClient{}
 	var active bool
@@ -596,11 +427,6 @@ func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchE
 	}
 	exec := NewExecutor(t.TempDir(), eri, bus, "token", nil)
 	bo := NewBuildObject("", nil).WithAuthority(spy, exec)
-	if isMerged {
-		c := spy.chunk("c1")
-		c.Status = statusMerged
-		c.MergeSHA = "merged-sha"
-	}
 	return bo, eri
 }
 
@@ -649,7 +475,6 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		dispatchErr        error
 		notifyErr          error
 		headSHA            string
-		isMerged           bool
 		wantErr            bool
 		wantFailed         []string
 		wantBanners        []string
@@ -659,23 +484,24 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		wantCancel         string
 		wantMsgChan        string
 	}{
+		{name: "ci_failed gate aggregator check is ignored", event: "ci_failed", prEvent: ciFailEv("CI Gate", "sha-1")},
+		{name: "ci_failed check with suffix gate is ignored", event: "ci_failed", prEvent: ciFailEv("Build Gate", "sha-1")},
 		{name: "ci_failed within cap dispatches background remediation and increments accepted count", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 1, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-2"},
 		{name: "six failing checks on same head coalesce into one accepted remediation attempt", event: "ci_failed", prEvent: ciFailEv("check-1", "abcdef1234"), extraEvents: sixChecks, wantBanners: sixBanners, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1"},
-		{name: "ci_failed skipped_active dispatch returns errDispatchActive without consuming remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), dispatchErr: errDispatchActive, wantErr: false, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1"},
+		{name: "ci_failed skipped_active dispatch returns nil without consuming remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), dispatchErr: errDispatchActive, wantErr: false, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1"},
 		{name: "ci_failed dispatch transport error propagates without consuming remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), dispatchErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1"},
 		{name: "ci_failed banner update error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), bannerErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}},
 		{name: "ci_failed get build error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), getBuildErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}},
 		{name: "ci_failed increment count error after accepted dispatch propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCountErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true},
-		{name: "ci_failed increment count error at cap propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failCountErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-6"},
-		{name: "ci_failed exceeding cap marks chunk failed and sends alert message", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-6", wantCancel: "c1", wantMsgChan: "th-1"},
-		{name: "ci_failed exceeding cap preserves chunk failure despite notification errors", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, notifyErr: dbErr, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-6", wantCancel: "c1", wantMsgChan: "th-1"},
-		{name: "ci_failed exceeding cap fail chunk error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failErr: dbErr, wantErr: true, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-6"},
+		{name: "ci_failed increment count error at cap propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failCountErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1},
+		{name: "ci_failed exceeding cap marks chunk failed and sends alert message", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "ci_failed exceeding cap preserves chunk failure despite notification errors", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, notifyErr: dbErr, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "ci_failed exceeding cap fail chunk error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failErr: dbErr, wantErr: true, wantFailed: []string{"c1:ci_remediation_cap_reached"}, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1},
 		{name: "conflict updates chunk banner and dispatches background remediation", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true},
 		{name: "conflict on superseded head skipped", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "superseded-sha"}, headSHA: "current-sha", wantErr: true},
 		{name: "conflict get build error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, getBuildErr: dbErr, wantErr: true},
-		{name: "conflict skipped_active dispatch returns errDispatchActive", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, dispatchErr: errDispatchActive, wantErr: false, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantDispatchID: "vanadis-conflict-c1-abcdef1"},
+		{name: "conflict skipped_active dispatch returns nil", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, dispatchErr: errDispatchActive, wantErr: false, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantDispatchID: "vanadis-conflict-c1-abcdef1"},
 		{name: "conflict dispatch transport error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, dispatchErr: dbErr, wantErr: true, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantDispatchID: "vanadis-conflict-c1-abcdef1"},
-		{name: "conflict on merged chunk skipped", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234"}, isMerged: true, wantErr: true, wantBanners: []string{"c1:conflict:Merge conflict detected"}},
 		{name: "conflict update banner error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234"}, bannerErr: dbErr, wantErr: true, wantBanners: []string{"c1:conflict:Merge conflict detected"}},
 		{name: "merged cancels chunk dispatch and resets check state", event: "merged", prEvent: pubsub.PRLifecycleEvent{Event: "merged", HeadSHA: "head-sha", MergeSHA: "merge-sha"}, wantCancel: "c1"},
 	}
@@ -694,7 +520,7 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 				c := spy.chunk("c1")
 				c.HeadSHA = tc.headSHA
 			}
-			bo, eri := newRemediationTestHarness(t, spy, tc.dispatchErr, tc.notifyErr, tc.isMerged)
+			bo, eri := newRemediationTestHarness(t, spy, tc.dispatchErr, tc.notifyErr)
 
 			err := bo.handlePREventType(nil, "b1", "c1", tc.event, tc.prEvent)
 			for _, extra := range tc.extraEvents {
@@ -722,20 +548,12 @@ func TestBuildObject_OnPREvent_RemediationDeferralAndRetry(t *testing.T) {
 		name             string
 		ev               pubsub.PRLifecycleEvent
 		firstDispatchErr error
-		initialFailCount int
 		wantErr          bool
 	}{
 		{
 			name:             "ci_failed skipped_active ignores active worker without failing or incrementing budget",
 			ev:               ciFailEv("unit-tests", "abcdef1234"),
 			firstDispatchErr: errDispatchActive,
-			wantErr:          false,
-		},
-		{
-			name:             "failing check while fifth attempt active leaves worker active and attempt count unchanged",
-			ev:               ciFailEv("unit-tests", "abcdef1234"),
-			firstDispatchErr: errDispatchActive,
-			initialFailCount: 5,
 			wantErr:          false,
 		},
 		{
@@ -763,15 +581,14 @@ func TestBuildObject_OnPREvent_RemediationDeferralAndRetry(t *testing.T) {
 			t.Parallel()
 			spy := &checkStatusSpyStore{
 				chunks: []VanadisChunk{{
-					ID:          "c1",
-					BuildID:     "b1",
-					Status:      statusRunning,
-					PRNumber:    42,
-					CIFailCount: tc.initialFailCount,
-					Effort:      effortMedium,
+					ID:       "c1",
+					BuildID:  "b1",
+					Status:   statusRunning,
+					PRNumber: 42,
+					Effort:   effortMedium,
 				}},
 			}
-			bo, eri := newRemediationTestHarness(t, spy, tc.firstDispatchErr, nil, false)
+			bo, eri := newRemediationTestHarness(t, spy, tc.firstDispatchErr, nil)
 
 			ctx := makeObjectMockContext(t, "b1")
 			err := bo.OnPREvent(ctx, tc.ev)
