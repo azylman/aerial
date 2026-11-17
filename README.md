@@ -16,16 +16,16 @@ Built in **Go (1.27)** and orchestrated as a resilient Kubernetes platform that 
 
 - **Cluster Orchestration**: **Kubernetes (`k3s`)** — Runs out-of-the-box on a single node or scales across multi-node clusters (with optional NixOS Colmena provisioning in `nixos/flake.nix` and Spegel P2P OCI registry), managing distributed daemons, batch jobs, specialized hardware nodes (such as GPU inference or kiosks), and rolling deployments.
 - **GitOps & Continuous Delivery**: **Flux CD (`flux-system`)** — Declarative GitOps reconciling `./k8s` Kustomizations from `azylman/aerial` (`aerial-core`) and `azylman/aerial-config` (`aerial-config`), driven by `synapse` webhook dispatch.
-- **Service Discovery & Ingress**: **NGINX Gateway Fabric** (`lan-gateway` on `:80`/`:443` and `edge-gateway` on `:4021`) + **CoreDNS** rewriting `restate.aerial` -> `restate.restate.svc.cluster.local` and `*.aerial` / `*.lan` internal DNS to `*.default.svc.cluster.local`.
-- **Persistence & Vector Memory**: **CloudNativePG (PostgreSQL 18 + `pgvector`)** — High-availability PostgreSQL cluster for multi-turn conversation state, strict 1-to-1 single-service table ownership, native `:9187` Prometheus metrics, and hybrid RRF semantic memory (`coven`).
+- **Service Discovery & Ingress**: **NGINX Gateway Fabric** (`lan-gateway` and `edge-gateway`) + **CoreDNS** rewriting `restate.aerial` -> `restate.restate.svc.cluster.local` and `*.aerial` / `*.lan` internal DNS to `*.default.svc.cluster.local`.
+- **Persistence & Vector Memory**: **CloudNativePG (PostgreSQL 18 + `pgvector`)** — High-availability PostgreSQL cluster for multi-turn conversation state, strict 1-to-1 single-service table ownership, native Prometheus metrics, and hybrid RRF semantic memory (`coven`).
 - **Schema Migrations**: **Ariga Atlas** — Declarative schema migrations, automated diffing, and checksum validation via Kubernetes batch jobs.
-- **Idempotent, Guaranteed Event Handling**: **NATS JetStream** — High-performance durable event bus and message broker (`nats` StatefulSet on `:4222` client and `:8222` HTTP monitoring) backing canonical cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`) reconciled programmatically on startup in `pkg/pubsub`, powering strictly idempotent Discord ingress, edge webhook processing, and build events (`synapse`).
-- **Durable Workflow Execution**: **Restate Durable Execution** — Kubernetes Restate Operator (`restate-operator`) managing `RestateCluster` instances on `:8080` ingress / `:9070` admin with RocksDB state persistence, providing durable execution for platform services and the `vanadis-restate` (`RestateDeployment` on `:9080` Restate SDK and `:4026` health/metrics) multi-PR `Build` Virtual Object and `BuildRouter` DAG state machine.
+- **Idempotent, Guaranteed Event Handling**: **NATS JetStream** — High-performance durable event bus and message broker (`nats` StatefulSet) backing canonical cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`) reconciled programmatically on startup in `pkg/pubsub`, powering strictly idempotent Discord ingress, edge webhook processing, and build events (`synapse`).
+- **Durable Workflow Execution**: **Restate Durable Execution** — Kubernetes Restate Operator (`restate-operator`) managing `RestateCluster` instances with RocksDB state persistence, providing durable execution for platform services and the `vanadis-restate` (`RestateDeployment`) multi-PR `Build` Virtual Object and `BuildRouter` DAG state machine.
 - **Secrets Management**: **Infisical + Valkey 9 + External Secrets Operator** — Centralized secret governance syncing scoped per-service Kubernetes Secrets and the `shared-secrets` redaction pool with zero plaintext disk persistence.
 - **Observability & Telemetry**:
-  - **Metrics**: **VictoriaMetrics** (TSDB `:8428`) + **`vmalert`** (`:8880`) + **Grafana** (telemetry HUDs `:3000`) + Prometheus Exporters (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**)
-  - **Logs**: **Fluent Bit** (DaemonSet collection & transforms) + **VictoriaLogs** (LogsQL log analytics `:9428`, 60-day retention)
-  - **Traces**: **VictoriaTraces** (OTLP trace store `:10428`, 30-day retention)
+  - **Metrics**: **VictoriaMetrics** (TSDB) + **`vmalert`** + **Grafana** (telemetry HUDs) + Prometheus Exporters (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**)
+  - **Logs**: **Fluent Bit** (DaemonSet collection & transforms) + **VictoriaLogs** (LogsQL log analytics, 60-day retention)
+  - **Traces**: **VictoriaTraces** (OTLP trace store, 30-day retention)
 - **Agent Protocols & Extensibility**: **Model Context Protocol (MCP)** — Streamable HTTP microservices providing modular tool boundaries across the platform.
 
 ---
