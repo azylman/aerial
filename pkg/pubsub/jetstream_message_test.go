@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -26,9 +27,9 @@ type dispatchObservation struct {
 	traceID      string
 }
 
-// traceparentHeader returns NATS headers carrying the given W3C traceparent.
-func traceparentHeader(traceparent string) nats.Header {
-	h := nats.Header{}
+// traceparentHeader returns NATS headers carrying the given W3C traceparent and msg ID.
+func traceparentHeader(traceparent, msgID string) nats.Header {
+	h := nats.Header{HeaderMsgID: []string{msgID}}
 	ctx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": traceparent})
 	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(http.Header(h)))
 	return h
@@ -109,32 +110,46 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 		subject       string
 		reply         string
 		data          string
+		group         string
 		header        nats.Header
 		handlerErr    error
 		termInHandler bool
 		want          dispatchObservation
 		wantAcks      []string
+		wantSpan      spanShape
 	}{
 		{
 			// $JS.ACK.<stream>.<consumer>.<numDelivered>.<streamSeq>.<consumerSeq>.<timestamp>.<numPending>
 			name:    "ack reply metadata exposes delivery count",
-			subject: "aerial.events.meta", reply: "$JS.ACK.AERIAL_EVENTS.durable.4.1.1.1600000000.0", data: "with-meta",
+			subject: "aerial.events.meta", reply: "$JS.ACK.AERIAL_EVENTS.durable.4.1.1.1600000000.0", data: "with-meta", group: "durable",
 			want:     dispatchObservation{invoked: true, subject: "aerial.events.meta", data: "with-meta", numDelivered: 4},
 			wantAcks: []string{"+ACK"},
+			wantSpan: spanShape{key: "proc", name: "aerial.events.meta process", kind: trace.SpanKindConsumer, attrs: map[string]string{
+				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.meta",
+				"messaging.consumer.group.name": "durable", "messaging.nats.message.delivery_count": "4",
+			}},
 		},
 		{
-			name:    "traceparent header is extracted into the handler context",
-			subject: "aerial.events.head", reply: "_INBOX.head", data: "h",
-			header:   traceparentHeader("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
-			want:     dispatchObservation{invoked: true, subject: "aerial.events.head", data: "h", numDelivered: 1, traceID: "4bf92f3577b34da6a3ce929d0e0e4736"},
+			name:    "traceparent header parents the process span seen by the handler",
+			subject: "aerial.events.head", reply: "_INBOX.head", data: "h", group: "workers",
+			header:   traceparentHeader(testTraceparent, "evt-head"),
+			want:     dispatchObservation{invoked: true, subject: "aerial.events.head", data: "h", numDelivered: 1, traceID: testTraceID},
 			wantAcks: []string{"+ACK"},
+			wantSpan: spanShape{key: "proc", name: "aerial.events.head process", kind: trace.SpanKindConsumer, parent: parentRemote, attrs: map[string]string{
+				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.head",
+				"messaging.consumer.group.name": "workers", "messaging.nats.message.delivery_count": "1", "messaging.message.id": "evt-head",
+			}},
 		},
 		{
-			name:    "handler error is auto-naked",
+			name:    "handler error is auto-naked and fails the process span",
 			subject: "aerial.events.err", reply: "_INBOX.err", data: "err",
 			handlerErr: errors.New("handler failed"),
 			want:       dispatchObservation{invoked: true, subject: "aerial.events.err", data: "err", numDelivered: 1},
 			wantAcks:   []string{"-NAK"},
+			wantSpan: spanShape{key: "proc", name: "aerial.events.err process", kind: trace.SpanKindConsumer, status: codes.Error, attrs: map[string]string{
+				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.err",
+				"messaging.nats.message.delivery_count": "1",
+			}},
 		},
 		{
 			name:    "handler settling via InProgress and Term skips auto-settlement",
@@ -142,6 +157,10 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 			termInHandler: true,
 			want:          dispatchObservation{invoked: true, subject: "aerial.events.term", data: "term", numDelivered: 1},
 			wantAcks:      []string{"+WPI", "+TERM"},
+			wantSpan: spanShape{key: "proc", name: "aerial.events.term process", kind: trace.SpanKindConsumer, attrs: map[string]string{
+				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.term",
+				"messaging.nats.message.delivery_count": "1",
+			}},
 		},
 	}
 
@@ -154,10 +173,13 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 			bus.heartbeatInterval = time.Hour
 
 			var got dispatchObservation
+			var handlerSpan trace.SpanID
 			msg := &nats.Msg{Subject: tc.subject, Reply: tc.reply, Sub: sub, Data: []byte(tc.data), Header: tc.header}
-			bus.dispatch(t.Context(), msg, func(ctx context.Context, msg Message) error {
+			bus.dispatch(t.Context(), msg, tc.group, func(ctx context.Context, msg Message) error {
 				got = dispatchObservation{invoked: true, subject: msg.Subject(), data: string(msg.Data()), numDelivered: msg.NumDelivered()}
-				if spanCtx := trace.SpanContextFromContext(ctx); spanCtx.IsValid() {
+				spanCtx := trace.SpanContextFromContext(ctx)
+				handlerSpan = spanCtx.SpanID()
+				if tc.header != nil {
 					got.traceID = spanCtx.TraceID().String()
 				}
 				if tc.termInHandler {
@@ -174,6 +196,83 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 			}
 			if acks := dialer.ackTokens(tc.reply); !slices.Equal(acks, tc.wantAcks) {
 				t.Errorf("ack frames = %v, want %v", acks, tc.wantAcks)
+			}
+			spans := assertSpanShapes(t, testSpans.await(tc.subject, 1), []spanShape{tc.wantSpan})
+			if proc := spans["proc"]; proc != nil && proc.SpanContext().SpanID() != handlerSpan {
+				t.Errorf("handler span = %s, want process span %s", handlerSpan, proc.SpanContext().SpanID())
+			}
+		})
+	}
+}
+
+func TestJetStreamBus_PublishWithHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		subject     string
+		msgID       string
+		traceparent string
+		data        any
+		publishErr  error
+		wantErr     bool
+		wantHeader  string
+		wantSpan    spanShape
+	}{
+		{
+			name:    "traced publish injects the producer span and keeps custom headers",
+			subject: "aerial.jobs.pubspan.ok", msgID: "job-7", traceparent: testTraceparent, data: "payload",
+			wantHeader: "Custom-Val",
+			wantSpan: spanShape{key: "pub", name: "aerial.jobs.pubspan.ok publish", kind: trace.SpanKindProducer, parent: parentRemote, attrs: map[string]string{
+				"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
+				"messaging.destination.name": "aerial.jobs.pubspan.ok", "messaging.message.id": "job-7",
+			}},
+		},
+		{
+			name:    "server publish failure fails the producer span",
+			subject: "aerial.jobs.pubspan.err", data: "payload", publishErr: errors.New("pub failed"), wantErr: true,
+			wantSpan: spanShape{key: "pub", name: "aerial.jobs.pubspan.err publish", kind: trace.SpanKindProducer, status: codes.Error, attrs: map[string]string{
+				"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
+				"messaging.destination.name": "aerial.jobs.pubspan.err",
+			}},
+		},
+		{
+			name:    "unmarshalable payload fails the producer span",
+			subject: "aerial.jobs.pubspan.marshal", msgID: "job-8", data: make(chan int), wantErr: true,
+			wantSpan: spanShape{key: "pub", name: "aerial.jobs.pubspan.marshal publish", kind: trace.SpanKindProducer, status: codes.Error, attrs: map[string]string{
+				"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
+				"messaging.destination.name": "aerial.jobs.pubspan.marshal", "messaging.message.id": "job-8",
+			}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mjs := &mockJetStream{publishErr: tc.publishErr}
+			bus := newJetStreamBusWithContext(nil, mjs)
+			ctx := context.Background()
+			if tc.traceparent != "" {
+				ctx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": tc.traceparent})
+			}
+			err := bus.PublishWithHeader(ctx, tc.subject, tc.msgID, tc.data, nats.Header{"Custom-Key": []string{"Custom-Val"}})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("PublishWithHeader error = %v, wantErr %v", err, tc.wantErr)
+			}
+			spans := assertSpanShapes(t, testSpans.await(tc.subject, 1), []spanShape{tc.wantSpan})
+			if tc.wantErr {
+				return
+			}
+			if mjs.publishedCount() != 1 {
+				t.Fatalf("published %d msgs, want 1", mjs.publishedCount())
+			}
+			h := mjs.publishedMsgs[0].Header
+			if got := h.Get("Custom-Key"); got != tc.wantHeader {
+				t.Errorf("Custom-Key = %q, want %q", got, tc.wantHeader)
+			}
+			injected := trace.SpanContextFromContext(propagation.TraceContext{}.Extract(context.Background(), propagation.HeaderCarrier(http.Header(h))))
+			if pub := spans["pub"]; pub != nil && injected.SpanID() != pub.SpanContext().SpanID() {
+				t.Errorf("injected traceparent span = %s, want producer span %s", injected.SpanID(), pub.SpanContext().SpanID())
 			}
 		})
 	}
