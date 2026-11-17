@@ -68,6 +68,7 @@ type BrainDispatchRequest struct {
 type StatusWidgetChunk struct {
 	ID            string    `json:"id,omitempty"`
 	Index         int       `json:"index"`
+	Mode          string    `json:"mode,omitempty"`
 	Repo          string    `json:"repo"`
 	Title         string    `json:"title"`
 	Status        string    `json:"status"`
@@ -764,12 +765,17 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, deployUIU
 
 func buildStatusWidgetChunk(c VanadisChunk, deployUIURL ...string) StatusWidgetChunk {
 	baseURL := firstNonEmpty(deployUIURL...)
-	chunkRepo := firstNonEmpty(c.Repo, "aerial")
+	// Action chunks have no repository; only PR chunks fall back to the default repo.
+	chunkRepo := ""
+	if c.Mode != chunkModeAction {
+		chunkRepo = firstNonEmpty(c.Repo, "aerial")
+	}
 	chunkStatus := normalizeWidgetStatus(c.Status)
 	activeStep := FormatChunkActiveStep(c, baseURL)
 	return StatusWidgetChunk{
 		ID:          c.ID,
 		Index:       c.ChunkIndex,
+		Mode:        c.Mode,
 		Repo:        chunkRepo,
 		Title:       c.Title,
 		Status:      chunkStatus,

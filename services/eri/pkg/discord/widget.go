@@ -38,10 +38,14 @@ const (
 	statusStalled        = "stalled"
 )
 
+// chunkModeAction marks a Vanadis chunk that runs an agent task and has no repository.
+const chunkModeAction = "action"
+
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
 type StatusWidgetChunk struct {
 	ID            string    `json:"id,omitempty"`
 	Index         int       `json:"index"`
+	Mode          string    `json:"mode,omitempty"`
 	Repo          string    `json:"repo"`
 	Title         string    `json:"title"`
 	Status        string    `json:"status"`
@@ -293,7 +297,10 @@ func buildWidgetChunkComponent(c StatusWidgetChunk) discordgo.MessageComponent {
 	badge := statusBadge(c.Status)
 	fullRepo, shortRepo := NormalizeRepo(c.Repo)
 	repoTag := shortRepo
-	if repoTag == "" {
+	switch {
+	case c.Mode == chunkModeAction:
+		repoTag = chunkModeAction
+	case repoTag == "":
 		repoTag = "aerial"
 	}
 
