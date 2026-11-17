@@ -635,6 +635,7 @@ func makeObjectMockContext(t *testing.T, key string) restate.ObjectContext {
 	mc.EXPECT().Key().Return(key).Maybe()
 	mc.EXPECT().Get("state", mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Get("launched", mock.Anything).Return(false, nil).Maybe()
+	mc.EXPECT().Get(pendingDeploymentKey, mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext).Maybe()
 	mc.EXPECT().Set("state", mock.Anything, mock.Anything).Return().Maybe()
 	mc.EXPECT().Set("launched", mock.Anything, mock.Anything).Return().Maybe()
