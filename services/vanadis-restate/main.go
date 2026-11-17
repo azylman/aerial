@@ -240,6 +240,7 @@ type VanadisChunk struct {
 	CIChecks           map[string]string      `json:"ci_checks,omitempty"`
 	HeadSHA            string                 `json:"head_sha,omitempty"`
 	MergeSHA           string                 `json:"merge_sha,omitempty"`
+	RemediatedSHA      string                 `json:"-"`
 	HeadAt             time.Time              `json:"-"`
 	SeenHeads          []string               `json:"-"`
 	RolloutState       *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
@@ -339,11 +340,13 @@ func (r restateObjectRuntime) ScheduleReconcile() {
 }
 
 type prRevisionState struct {
-	headSHA   string
-	mergeSHA  string
-	merged    bool
-	headAt    time.Time
-	seenHeads map[string]bool
+	headSHA       string
+	mergeSHA      string
+	remediatedSHA string
+	merged        bool
+	headAt        time.Time
+	seenHeads     map[string]bool
+	failedChecks  map[string]bool
 }
 
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.

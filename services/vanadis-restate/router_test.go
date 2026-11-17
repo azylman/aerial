@@ -568,6 +568,12 @@ func (*unattachedPREventSpyStore) ReserveChunkForLaunch(_ context.Context, _ str
 	return nil
 }
 
+func (s *unattachedPREventSpyStore) IncrementChunkCIFailCount(_ context.Context, chunkID, banner string) (int, error) {
+	s.cStatus = chunkID + ":ci_failed"
+	s.banner = banner
+	return 1, nil
+}
+
 func (s *unattachedPREventSpyStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*VanadisBuild, *VanadisChunk, bool, error) {
 	s.failedChunkID = chunkID + ":" + reason
 	return &VanadisBuild{ID: "b1", Status: statusFailed, ThreadID: "th-1"}, &VanadisChunk{ID: chunkID, Status: statusFailed}, true, nil

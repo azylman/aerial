@@ -639,6 +639,11 @@ func makeObjectMockContext(t *testing.T, key string) restate.ObjectContext {
 	mc.EXPECT().Set("state", mock.Anything, mock.Anything).Return().Maybe()
 	mc.EXPECT().Set("launched", mock.Anything, mock.Anything).Return().Maybe()
 	mc.EXPECT().ClearAll().Return().Maybe()
+	mClient := mocks.NewMockClient(t)
+	mInv := mocks.NewMockInvocation(t)
+	mc.EXPECT().Object(mock.Anything, mock.Anything, mock.Anything).Return(mClient).Maybe()
+	mClient.EXPECT().Send(mock.Anything).Return(mInv).Maybe()
+	mClient.EXPECT().Send(mock.Anything, mock.Anything).Return(mInv).Maybe()
 	return restate.WithMockContext(mc)
 }
 
@@ -718,6 +723,7 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 			{match: "SELECT mode FROM vanadis_chunks", row: valuesRow("pr")},
 			{match: "SELECT build_id FROM vanadis_chunks", row: valuesRow("b1")},
 			{match: "RETURNING b.id, c.id, b.thread_id", row: valuesRow("b1", "c1", "th-1")},
+			{match: "RETURNING ci_fail_count", row: valuesRow(1)},
 			{match: "WHERE c.id = $1", row: failRow("running", "running")},
 			{match: "c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b1", 0, "medium", true)},
 			{match: "MAX(chunk_index)", row: valuesRow(1)},
