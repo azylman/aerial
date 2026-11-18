@@ -228,6 +228,7 @@ func (s *RouterServer) clearFailedCISHA(repo string, prNumber int) {
 	s.failedCheckRuns.Delete(key)
 	s.collaboratorAlertedSHAs.Delete(key)
 	s.collaboratorConflictSHAs.Delete(key)
+	s.conflictPublishedSHAs.Delete(key)
 }
 
 func canonicalFailedCheckKey(checkName string) string {
@@ -245,11 +246,11 @@ type failedCheckState struct {
 	roboRevActiveFailed bool
 }
 
-func (s *RouterServer) recordFailedCheckRun(repo string, prNumber int, headSHA, checkName string) bool {
+func (s *RouterServer) recordFailedCheckRunDetailed(repo string, prNumber int, headSHA, checkName string) (emitAdditional bool, wasActive bool, hadPriorEverFailed bool) {
 	normHeadSHA := strings.TrimSpace(headSHA)
 	normCheck := canonicalFailedCheckKey(checkName)
 	if s == nil || prNumber <= 0 || normHeadSHA == "" || isZeroSHA(normHeadSHA) || normCheck == "" {
-		return false
+		return false, false, false
 	}
 	key := prCheckKey(repo, prNumber)
 	val, _ := s.failedCheckRuns.LoadOrStore(key, &failedCheckState{
@@ -258,7 +259,7 @@ func (s *RouterServer) recordFailedCheckRun(repo string, prNumber int, headSHA, 
 	})
 	entry, ok := val.(*failedCheckState)
 	if !ok || entry == nil {
-		return false
+		return false, false, false
 	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
@@ -271,15 +272,47 @@ func (s *RouterServer) recordFailedCheckRun(repo string, prNumber int, headSHA, 
 	}
 	hadPriorFailure := len(entry.everFailed) > 0 || entry.roboRevActiveFailed
 	if isRoboRevCheck(checkName) {
-		wasActive := entry.roboRevActiveFailed
+		wasActive = entry.roboRevActiveFailed
+		hadPriorEverFailed = entry.everFailed["roborev"]
 		entry.everFailed["roborev"] = true
 		entry.roboRevActiveFailed = true
-		return hadPriorFailure && !wasActive
+		return hadPriorFailure && !wasActive, wasActive, hadPriorEverFailed
 	}
-	wasActive := entry.activeFailed[normCheck]
+	wasActive = entry.activeFailed[normCheck]
+	hadPriorEverFailed = entry.everFailed[normCheck]
 	entry.everFailed[normCheck] = true
 	entry.activeFailed[normCheck] = true
-	return hadPriorFailure && !wasActive
+	return hadPriorFailure && !wasActive, wasActive, hadPriorEverFailed
+}
+
+func (s *RouterServer) rollbackFailedCheckRun(repo string, prNumber int, headSHA, checkName string, wasActive, hadPriorEverFailed bool) {
+	normCheck := canonicalFailedCheckKey(checkName)
+	if s == nil || prNumber <= 0 || normCheck == "" || wasActive {
+		return
+	}
+	entry := s.loadMatchingFailedCheckState(repo, prNumber, headSHA)
+	if entry == nil {
+		return
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !strings.EqualFold(entry.headSHA, strings.TrimSpace(headSHA)) {
+		return
+	}
+	if isRoboRevCheck(checkName) {
+		entry.roboRevActiveFailed = false
+		if !hadPriorEverFailed {
+			delete(entry.everFailed, "roborev")
+		}
+		return
+	}
+	delete(entry.activeFailed, normCheck)
+	if !hadPriorEverFailed {
+		delete(entry.everFailed, normCheck)
+	}
+	if len(entry.activeFailed) == 0 {
+		s.nonRoboRevFailedSHAs.Delete(prCheckKey(repo, prNumber))
+	}
 }
 
 func (s *RouterServer) loadMatchingFailedCheckState(repo string, prNumber int, headSHA string) *failedCheckState {
@@ -430,7 +463,7 @@ func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNum
 	var checkRuns GitHubCheckRunsResponse
 	path := fmt.Sprintf("/repos/%s/commits/%s/check-runs?per_page=100", normRepo, url.PathEscape(headSHA))
 	if err := s.getGitHubJSON(ctx, path, 2<<20, &checkRuns); err != nil {
-		return false
+		return !isGitHubNotFound(err)
 	}
 	hasPending := false
 	for _, cr := range checkRuns.CheckRuns {
@@ -799,14 +832,87 @@ func (s *RouterServer) handleMergeOrPromotionFailure(ctx context.Context, res *R
 	return false, nil
 }
 
-func (s *RouterServer) recordNonGateCheckFailure(res *ResolvedGitHubEvent) bool {
+func (s *RouterServer) recordNonGateCheckFailureDetailed(res *ResolvedGitHubEvent) (emitAdditional, wasActive, hadPriorEverFailed bool) {
 	if res == nil || res.Event != ghEventCheckRun || res.PRNumber <= 0 || res.HeadSHA == "" || isGateAggregatorCheck(res.CheckName) || isBuildMetadataCheck(res.CheckName) {
-		return false
+		return false, false, false
 	}
 	if !isRoboRevCheck(res.CheckName) {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 	}
-	return s.recordFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
+	return s.recordFailedCheckRunDetailed(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
+}
+
+func (s *RouterServer) isPRRegistryCIFailed(ctx context.Context, repo string, prNumber int) bool {
+	if s == nil || s.registry == nil || prNumber <= 0 || normalizeRepo(repo) == "" {
+		return false
+	}
+	lifecycle, err := s.registry.LoadPRBuildLifecycle(ctx, repo, prNumber)
+	return err == nil && strings.EqualFold(strings.TrimSpace(lifecycle.Status), prCIFailed)
+}
+
+func (s *RouterServer) shouldRetryCIFailureCompletion(ctx context.Context, res *ResolvedGitHubEvent) bool {
+	if res.PRNumber <= 0 || !s.isPRRegistryCIFailed(ctx, res.Repo, res.PRNumber) {
+		return false
+	}
+	if res.TargetID == "" && s.registry != nil {
+		if rTID, _, _, _, rErr := s.registry.ResolvePRByNumber(ctx, res.Repo, res.PRNumber); rErr == nil && rTID != "" {
+			res.TargetID = rTID
+		}
+	}
+	if res.TargetID == "" {
+		res.TargetID = s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
+	}
+	return res.TargetID != ""
+}
+
+func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string, emitAdditional, wasActive bool) (bool, error) {
+	s.healDependabotPR(ctx, res)
+	targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
+	if err != nil {
+		return false, err
+	}
+	res.TargetID = firstNonEmpty(res.TargetID, targetID)
+	shouldComplete := updated || (emitAdditional && res.TargetID != "")
+	if !shouldComplete && !wasActive && s.shouldRetryCIFailureCompletion(ctx, res) {
+		shouldComplete = true
+	}
+	if shouldComplete {
+		return true, s.completeCIFailureTransition(ctx, res, details, checkURL)
+	}
+	return shouldComplete, nil
+}
+
+func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) (bool, error) {
+	targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
+	if err != nil {
+		return false, err
+	}
+	res.TargetID = firstNonEmpty(res.TargetID, targetID)
+	emitAdditional := false
+	wasActive := false
+	hadPriorEverFailed := false
+	if prNum > 0 && res.PRNumber == 0 {
+		res.PRNumber = prNum
+		if res.Event == ghEventCheckRun && !isGateAggregatorCheck(res.CheckName) && !isBuildMetadataCheck(res.CheckName) {
+			if !isRoboRevCheck(res.CheckName) {
+				s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+			}
+			emitAdditional, wasActive, hadPriorEverFailed = s.recordFailedCheckRunDetailed(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
+		}
+	}
+	shouldComplete := updated || (emitAdditional && res.TargetID != "")
+	if !shouldComplete && !wasActive && s.shouldRetryCIFailureCompletion(ctx, res) {
+		shouldComplete = true
+	}
+	if !shouldComplete {
+		return false, nil
+	}
+	cErr := s.completeCIFailureTransition(ctx, res, details, checkURL)
+	if cErr != nil {
+		s.rollbackFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, wasActive, hadPriorEverFailed)
+		return false, cErr
+	}
+	return true, nil
 }
 
 func syncPRFallbackFields(res *ResolvedGitHubEvent, pr GitHubPullRequest) GitHubPullRequest {
@@ -841,4 +947,74 @@ func (s *RouterServer) resolveAutoMergeDisabledPR(ctx context.Context, res *Reso
 		return pr, false, nil
 	}
 	return syncPRFallbackFields(res, fetched), true, nil
+}
+
+func (s *RouterServer) recordCommitSHAPR(repo, sha string, prNumber int, branch string) {
+	normRepo := strings.ToLower(normalizeRepo(repo))
+	normSHA := strings.ToLower(strings.TrimSpace(sha))
+	if s == nil || normRepo == "" || normSHA == "" || isZeroSHA(normSHA) || prNumber <= 0 {
+		return
+	}
+	s.commitSHAPRs.Store(normRepo+"@"+normSHA, GitHubCheckRunPR{
+		Number: prNumber,
+		Head: GitHubPRRef{
+			Ref: strings.TrimSpace(branch),
+			SHA: normSHA,
+		},
+	})
+}
+
+func (s *RouterServer) lookupCommitSHAPR(repo, sha string) (int, string, bool) {
+	if s == nil {
+		return 0, "", false
+	}
+	normRepo := strings.ToLower(normalizeRepo(repo))
+	normSHA := strings.ToLower(strings.TrimSpace(sha))
+	if normRepo == "" || normSHA == "" || isZeroSHA(normSHA) {
+		return 0, "", false
+	}
+	v, ok := s.commitSHAPRs.Load(normRepo + "@" + normSHA)
+	if !ok {
+		return 0, "", false
+	}
+	item, ok := v.(GitHubCheckRunPR)
+	if !ok || item.Number <= 0 {
+		return 0, "", false
+	}
+	return item.Number, item.Head.Ref, true
+}
+
+func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha string) (int, string, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" || sha == "" || isZeroSHA(sha) {
+		return 0, "", fmt.Errorf("invalid repo or sha for pr resolution")
+	}
+	if prNum, branch, ok := s.lookupCommitSHAPR(repo, sha); ok {
+		return prNum, branch, nil
+	}
+	var prs []GitHubCommitPRItem
+	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/commits/%s/pulls", repo, url.PathEscape(sha)), 1<<20, &prs); err != nil {
+		return 0, "", err
+	}
+	if len(prs) == 0 {
+		var openPRs []GitHubCommitPRItem
+		if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/pulls?state=open&per_page=100", repo), 2<<20, &openPRs); err == nil {
+			for _, item := range openPRs {
+				if strings.EqualFold(strings.TrimSpace(item.Head.SHA), strings.TrimSpace(sha)) {
+					prs = append(prs, item)
+				}
+			}
+		}
+	}
+	if len(prs) == 0 {
+		return 0, "", fmt.Errorf("no pull requests associated with commit %s", sha)
+	}
+	selected := prs[0]
+	for _, item := range prs[1:] {
+		if (selected.State != ghActionClosed && item.State == ghActionClosed) || (selected.State == item.State && item.Number > selected.Number) {
+			selected = item
+		}
+	}
+	s.recordCommitSHAPR(repo, sha, selected.Number, selected.Head.Ref)
+	return selected.Number, selected.Head.Ref, nil
 }

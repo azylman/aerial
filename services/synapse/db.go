@@ -454,6 +454,7 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 		FROM pr_registry
 		WHERE status = 'deploying'
 		   OR (status = 'deploy_failed' AND CASE WHEN jsonb_typeof(metadata->'kustomization_requests') = 'object' THEN metadata->'kustomization_requests' <> '{}'::jsonb ELSE false END)
+		   OR (status = 'deployed' AND COALESCE((metadata->>'deploy_success_pending')::boolean, false) = true)
 		   OR (status IN ('merged', 'synced') AND CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN jsonb_array_length(metadata->'jobs') ELSE 0 END > 0)
 		ORDER BY id ASC;`
 	rows, err := r.pool.Query(qCtx, query)
@@ -579,7 +580,15 @@ func (r *PostgresPRRegistry) MarkKustomizationsDeployed(ctx context.Context, rep
 			FROM next
 		)
 		UPDATE pr_registry p
-		SET metadata = jsonb_set(CASE WHEN n.done THEN n.meta - 'banner' - 'deploy_failed_published' ELSE n.meta END, '{` + deployedKustomizationsKey + `}', n.deployed, true),
+		SET metadata = jsonb_set(
+				CASE
+					WHEN n.done THEN jsonb_set(n.meta - 'banner' - 'deploy_failed_published', '{deploy_success_pending}', 'true'::jsonb, true)
+					ELSE n.meta
+				END,
+				'{` + deployedKustomizationsKey + `}',
+				n.deployed,
+				true
+			),
 		    status = CASE
 		        WHEN n.done THEN 'deployed'
 		        ELSE p.status

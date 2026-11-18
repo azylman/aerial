@@ -64,6 +64,7 @@ type RouterServer struct {
 	updatedForCurrentMain    sync.Map
 	lastMainPushSHA          sync.Map
 	deploySuccessDispatched  sync.Map
+	conflictPublishedSHAs    sync.Map
 	queueStats               consumerStatsQuerier
 	gatewayLatencyFn         func() time.Duration
 	commitSHAPRs             sync.Map
@@ -551,7 +552,9 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 }
 
 func (s *RouterServer) handleDeploySyncFailed(ctx context.Context, evt DeployEvent, prefix string) error {
-	_ = s.publishDeployLifecycleEvent(ctx, evt, "sync_failed", "deploy_failed")
+	if err := s.publishDeployLifecycleEvent(ctx, evt, "sync_failed", "deploy_failed"); err != nil {
+		return fmt.Errorf("publish deploy lifecycle event: %w", err)
+	}
 	if evt.PRNumber > 0 {
 		return nil
 	}
@@ -651,11 +654,15 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 	prefix := formatDirectMessagePrefix(evt.PRNumber, evt.Repo)
 	switch evt.Event {
 	case eventDeployStarted:
-		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_started", "deploying")
+		if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_started", "deploying"); err != nil {
+			return &evt, err
+		}
 		return &evt, nil
 	case eventDeploySuccess:
 		if s.shouldTreatDeploySuccessAsSync(ctx, evt) {
-			s.handleDeploySyncSuccess(ctx, evt, true)
+			if err := s.handleDeploySyncSuccess(ctx, evt, true); err != nil {
+				return &evt, err
+			}
 			return &evt, nil
 		}
 
@@ -663,16 +670,24 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 			slog.InfoContext(ctx, "[synapse] [deploy] suppressing duplicate deploy_success", "repo", evt.Repo, "job", evt.JobName, "pr", evt.PRNumber, "commit", evt.CommitSHA)
 			return &evt, nil
 		}
-		_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
-		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
+		if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed"); err != nil {
+			return &evt, err
+		}
 		if evt.PRNumber > 0 {
+			s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
 			return &evt, nil
 		}
-		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
+		if err := s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID); err != nil {
+			return &evt, err
+		}
+		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
+		return &evt, nil
 	case eventDeployRollback, eventDeployFailed:
 		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
 	case eventSyncSuccess:
-		s.handleDeploySyncSuccess(ctx, evt, syncHasExpected)
+		if err := s.handleDeploySyncSuccess(ctx, evt, syncHasExpected); err != nil {
+			return &evt, err
+		}
 		return &evt, nil
 	case eventSyncFailed:
 		return &evt, s.handleDeploySyncFailed(ctx, evt, prefix)
@@ -692,7 +707,7 @@ func (s *RouterServer) recordDeploySuccessDispatched(repo, jobName, commitSHA st
 	}
 }
 
-func (s *RouterServer) shouldSuppressDuplicateDeploySuccess(ctx context.Context, repo, jobName, commitSHA string, prNum int) bool {
+func (s *RouterServer) wasDeploySuccessDispatched(repo, jobName, commitSHA string, prNum int) bool {
 	normRepo := normalizeRepo(repo)
 	cleanJob := strings.TrimSpace(jobName)
 	cleanSHA := strings.TrimSpace(commitSHA)
@@ -707,6 +722,14 @@ func (s *RouterServer) shouldSuppressDuplicateDeploySuccess(ctx context.Context,
 			return true
 		}
 	}
+	return false
+}
+
+func (s *RouterServer) shouldSuppressDuplicateDeploySuccess(ctx context.Context, repo, jobName, commitSHA string, prNum int) bool {
+	if s.wasDeploySuccessDispatched(repo, jobName, commitSHA, prNum) {
+		return true
+	}
+	normRepo := normalizeRepo(repo)
 
 	if prNum > 0 && s.registry != nil {
 		if pgReg, ok := s.registry.(*PostgresPRRegistry); ok && pgReg != nil && pgReg.pool != nil {
@@ -724,16 +747,18 @@ func (s *RouterServer) shouldSuppressDuplicateDeploySuccess(ctx context.Context,
 	return false
 }
 
-func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEvent, syncHasExpected bool) {
+func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEvent, syncHasExpected bool) error {
 	if evt.PRNumber <= 0 {
-		return
+		return nil
 	}
 	if syncHasExpected {
-		_ = s.publishDeployLifecycleEvent(ctx, evt, "sync_success", "synced")
-		return
+		return s.publishDeployLifecycleEvent(ctx, evt, "sync_success", "synced")
+	}
+	if err := s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed"); err != nil {
+		return err
 	}
 	s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
-	_ = s.publishDeployLifecycleEvent(ctx, evt, "deploy_success", "deployed")
+	return nil
 }
 
 func (s *RouterServer) isDependabotPRNumber(ctx context.Context, repo string, prNum int) bool {

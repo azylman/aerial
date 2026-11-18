@@ -395,10 +395,31 @@ func recordedKustomizationRequests(meta map[string]any) map[string]kustomization
 	return requests
 }
 
+func isDeploySuccessPending(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	v, ok := meta["deploy_success_pending"]
+	if !ok {
+		return false
+	}
+	switch b := v.(type) {
+	case bool:
+		return b
+	case string:
+		return strings.EqualFold(b, "true")
+	default:
+		return false
+	}
+}
+
 // pendingRequest returns the PR's recorded request for ref while it has not been deployed.
 func (t trackedRollout) pendingRequest(ref fluxKustomizationRef) (kustomizationRequest, bool) {
 	req, ok := t.Requests[ref.Name]
-	if !ok || req.RequestedAt == "" || cmp.Or(req.Namespace, fluxSystemNamespace) != ref.Namespace || slices.Contains(t.Deployed, ref.Name) {
+	if !ok || req.RequestedAt == "" || cmp.Or(req.Namespace, fluxSystemNamespace) != ref.Namespace {
+		return kustomizationRequest{}, false
+	}
+	if slices.Contains(t.Deployed, ref.Name) && !isDeploySuccessPending(t.PR.Metadata) {
 		return kustomizationRequest{}, false
 	}
 	return req, true
@@ -690,12 +711,20 @@ func (s *RouterServer) revisionIncludes(ctx context.Context, repo, revision, com
 // deployed dispatches the success wake. Only a failed registry update is returned: once the PR is
 // deployed it leaves the deploying set, so a re-list could not retry a failed wake anyway.
 func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr DeployingPR, name string) error {
-	transitioned, err := s.registry.MarkKustomizationsDeployed(ctx, pr.Repo, pr.PRNumber, []string{name})
-	if err != nil {
-		return fmt.Errorf("mark %s deployed for %s#%d: %w", name, pr.Repo, pr.PRNumber, err)
+	var (
+		transitioned bool
+		err          error
+	)
+	if isDeploySuccessPending(pr.Metadata) {
+		transitioned = true
+	} else {
+		transitioned, err = s.registry.MarkKustomizationsDeployed(ctx, pr.Repo, pr.PRNumber, []string{name})
+		if err != nil {
+			return fmt.Errorf("mark %s deployed for %s#%d: %w", name, pr.Repo, pr.PRNumber, err)
+		}
 	}
 	if !transitioned {
-		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        "rollout_updated",
 			Repo:         pr.Repo,
 			PRNumber:     pr.PRNumber,
@@ -704,32 +733,45 @@ func (s *RouterServer) completeKustomizationRequest(ctx context.Context, pr Depl
 			RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
 			Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
 			OccurredAt:   time.Now().UTC(),
-		})
+		}); err != nil {
+			return err
+		}
 		return nil
 	}
 	commitSHA := firstNonEmpty(pr.MergeSHA, pr.HeadSHA)
-	s.recordDeploySuccessDispatched(pr.Repo, name, commitSHA, pr.PRNumber)
 	targetID := pr.TargetID
 	if targetID == "" {
 		if resolved, rErr := s.ResolveThreadForPR(ctx, pr.Repo, pr.PRNumber); rErr == nil {
 			targetID = resolved
 		}
 	}
-	_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
-		Event:        eventDeploySuccess,
-		Repo:         pr.Repo,
-		PRNumber:     pr.PRNumber,
-		HeadSHA:      pr.HeadSHA,
-		MergeSHA:     pr.MergeSHA,
-		TargetID:     targetID,
-		Status:       "deployed",
-		JobName:      name,
-		RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
-		Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
-		OccurredAt:   time.Now().UTC(),
-	})
-	if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
-		slog.ErrorContext(ctx, "[synapse] [flux-watch] error dispatching deploy_success", "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
+	if !s.wasDeploySuccessDispatched(pr.Repo, name, commitSHA, pr.PRNumber) {
+		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+			Event:        eventDeploySuccess,
+			Repo:         pr.Repo,
+			PRNumber:     pr.PRNumber,
+			HeadSHA:      pr.HeadSHA,
+			MergeSHA:     pr.MergeSHA,
+			TargetID:     targetID,
+			Status:       "deployed",
+			JobName:      name,
+			RolloutState: s.loadPRRolloutState(ctx, pr.Repo, pr.PRNumber),
+			Quiet:        s.isDependabotPRNumber(ctx, pr.Repo, pr.PRNumber),
+			OccurredAt:   time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+		if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, name, pr.Repo, commitSHA, pr.PRNumber, ""); err != nil {
+			slog.ErrorContext(ctx, "[synapse] [flux-watch] error dispatching deploy_success", "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
+			return err
+		}
+		s.recordDeploySuccessDispatched(pr.Repo, name, commitSHA, pr.PRNumber)
+	}
+	if s.registry != nil {
+		if err := s.registry.UpdatePRStatus(ctx, pr.Repo, pr.PRNumber, "deployed", map[string]any{"deploy_success_pending": false}); err != nil {
+			slog.WarnContext(ctx, "[synapse] [flux-watch] error clearing deploy_success_pending", "repo", pr.Repo, "pr", pr.PRNumber, "error", err)
+			return fmt.Errorf("clear deploy_success_pending for %s#%d: %w", pr.Repo, pr.PRNumber, err)
+		}
 	}
 	return nil
 }
@@ -792,7 +834,7 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 		return false, fmt.Errorf("transition pr %s#%d deploying: %w", repo, prNum, err)
 	}
 	if tID != "" {
-		_ = s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
+		if err := s.publishPRLifecycleEvent(ctx, pubsub.PRLifecycleEvent{
 			Event:        eventDeployStarted,
 			Repo:         repo,
 			PRNumber:     prNum,
@@ -801,7 +843,9 @@ func (s *RouterServer) deferPRToWatcher(ctx context.Context, repo string, prNum 
 			RolloutState: s.loadPRRolloutState(ctx, repo, prNum),
 			Quiet:        s.isDependabotPRNumber(ctx, repo, prNum),
 			OccurredAt:   time.Now().UTC(),
-		})
+		}); err != nil {
+			return false, err
+		}
 	}
 	requests := newKustomizationRequests(refs, time.Now().UTC())
 	if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {

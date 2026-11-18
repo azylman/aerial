@@ -742,6 +742,7 @@ func TestHasPendingRollouts(t *testing.T) {
 	}{
 		{name: "PR with an undeployed request is pending", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1, "marida-core": reqT1}, "aerial-core")}, want: true},
 		{name: "PR with every request deployed is not pending", prs: []DeployingPR{trackedPR(42, map[string]string{"aerial-core": reqT1}, "aerial-core")}},
+		{name: "PR with all requests deployed but deploy_success_pending is pending", prs: []DeployingPR{{Repo: "azylman/aerial", PRNumber: 42, Metadata: map[string]any{kustomizationRequestsKey: map[string]any{"aerial-core": map[string]any{"namespace": fluxSystemNamespace, "requested_at": reqT1}}, deployedKustomizationsKey: []any{"aerial-core"}, "deploy_success_pending": true}}}, want: true},
 		{name: "legacy PR without requests is not pending", prs: []DeployingPR{{Repo: "azylman/aerial", PRNumber: 40, Metadata: map[string]any{"jobs": []any{"aerial-core"}}}}},
 		{name: "no deploying PRs", want: false},
 		{name: "deploying list error is returned", listErr: errors.New("db down"), wantErr: true},
@@ -1060,6 +1061,196 @@ func TestDefaultOutboundDispatcher_ListKustomizationConfigMaps(t *testing.T) {
 				if q := fixture.Query(configMapsPath); q != "labelSelector=kustomize.toolkit.fluxcd.io%2Fname%3Daerial-core%2Ckustomize.toolkit.fluxcd.io%2Fnamespace%3Dflux-system" {
 					t.Errorf("configmaps query = %q", q)
 				}
+			}
+		})
+	}
+}
+
+func assertExpectedErrorSubstring(t *testing.T, err error, wantErrSub string) {
+	t.Helper()
+	if wantErrSub != "" {
+		if err == nil || !strings.Contains(err.Error(), wantErrSub) {
+			t.Fatalf("err = %v, want substring %q", err, wantErrSub)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+}
+
+func assertKustomizationPendingCleared(t *testing.T, calls []prStatusCall) {
+	t.Helper()
+	if len(calls) != 1 {
+		t.Fatalf("updatePRStatusCalls = %d, want 1", len(calls))
+	}
+	call := calls[0]
+	if call.status != "deployed" {
+		t.Errorf("updatePRStatusCalls status = %q, want deployed", call.status)
+	}
+	if pending, ok := call.metadata["deploy_success_pending"].(bool); !ok || pending {
+		t.Errorf("updatePRStatusCalls metadata deploy_success_pending = %v, want false", call.metadata["deploy_success_pending"])
+	}
+}
+
+func assertNoPublishedOrPromptCalls(t *testing.T, bus *mockEventBus, disp *mockOutboundDispatcher) {
+	t.Helper()
+	if len(bus.publishedPREvents) != 0 {
+		t.Errorf("publishedPREvents count = %d, want 0", len(bus.publishedPREvents))
+	}
+	if len(disp.promptCalls) != 0 {
+		t.Errorf("promptCalls count = %d, want 0", len(disp.promptCalls))
+	}
+}
+
+func TestCompleteKustomizationRequest_LifecycleErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		meta           map[string]any
+		prNumber       int
+		targetID       string
+		transitioned   bool
+		preDispatched  bool
+		busErr         error
+		promptErr      error
+		updateErr      error
+		wantErrSub     string
+		wantDispatched bool
+		wantNoEvents   bool
+		wantMarkCalls  int
+		wantClearCalls int
+	}{
+		{
+			name:         "rollout_updated publish error propagates",
+			prNumber:     42,
+			transitioned: false,
+			busErr:       errors.New("bus rollout_updated fail"),
+			wantErrSub:   "bus rollout_updated fail",
+		},
+		{
+			name:         "deploy_success publish error propagates and does not record dispatch",
+			prNumber:     42,
+			transitioned: true,
+			busErr:       errors.New("bus deploy_success fail"),
+			wantErrSub:   "bus deploy_success fail",
+		},
+		{
+			name:         "prompt dispatch error propagates and does not record dispatch",
+			prNumber:     0,
+			targetID:     "100000000000000001",
+			transitioned: true,
+			promptErr:    errors.New("prompt failed"),
+			wantErrSub:   "prompt failed",
+		},
+		{
+			name:           "deploy_success_pending skips mark call and clears pending on success",
+			meta:           map[string]any{"deploy_success_pending": true},
+			prNumber:       42,
+			transitioned:   false,
+			wantDispatched: true,
+			wantMarkCalls:  0,
+			wantClearCalls: 1,
+		},
+		{
+			name:           "already dispatched deploy_success skips publish and prompt but clears pending",
+			meta:           map[string]any{"deploy_success_pending": true},
+			prNumber:       42,
+			preDispatched:  true,
+			transitioned:   false,
+			wantNoEvents:   true,
+			wantMarkCalls:  0,
+			wantClearCalls: 1,
+		},
+		{
+			name:         "clearing deploy_success_pending failure propagates error",
+			meta:         map[string]any{"deploy_success_pending": true},
+			prNumber:     42,
+			transitioned: false,
+			updateErr:    errors.New("db clear error"),
+			wantErrSub:   "clear deploy_success_pending",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{err: tc.busErr}
+			reg := &mockPRRegistry{
+				resolveTargetID:       "100000000000000001",
+				markKustomizationsRes: tc.transitioned,
+				updatePRStatusErr:     tc.updateErr,
+			}
+			disp := &mockOutboundDispatcher{promptErr: tc.promptErr}
+			srv := newTestRouter(Config{}, nil, reg, disp, bus)
+
+			pr := DeployingPR{
+				Repo:     "azylman/aerial",
+				PRNumber: tc.prNumber,
+				HeadSHA:  "sha123",
+				TargetID: tc.targetID,
+				Metadata: tc.meta,
+			}
+			if tc.preDispatched {
+				srv.recordDeploySuccessDispatched(pr.Repo, "aerial-core", pr.HeadSHA, pr.PRNumber)
+			}
+			err := srv.completeKustomizationRequest(context.Background(), pr, "aerial-core")
+			assertExpectedErrorSubstring(t, err, tc.wantErrSub)
+			if tc.wantMarkCalls != 0 || strings.Contains(tc.name, "skips mark call") {
+				if got := len(reg.markKustomizationsCalls); got != tc.wantMarkCalls {
+					t.Errorf("markKustomizationsCalls = %d, want %d", got, tc.wantMarkCalls)
+				}
+			}
+			if tc.wantClearCalls != 0 {
+				assertKustomizationPendingCleared(t, reg.updatePRStatusCalls)
+			}
+			if tc.wantNoEvents {
+				assertNoPublishedOrPromptCalls(t, bus, disp)
+			}
+			if tc.wantDispatched {
+				if _, ok := srv.deploySuccessDispatched.Load("pr:azylman/aerial:42"); !ok {
+					t.Errorf("expected deploy success recorded in dispatch map")
+				}
+			}
+		})
+	}
+}
+
+func TestDeferPRToWatcher_LifecycleErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		busErr     error
+		wantErrSub string
+	}{
+		{
+			name:       "deploy_started publish error propagates",
+			busErr:     errors.New("bus deploy_started fail"),
+			wantErrSub: "bus deploy_started fail",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{err: tc.busErr}
+			reg := &mockPRRegistry{deployingTargetID: "100000000000000001"}
+			disp := &mockOutboundDispatcher{
+				repoKustomizations: map[string][]fluxKustomizationRef{
+					"azylman/aerial": {{Name: "aerial-core", Namespace: "flux-system"}},
+				},
+			}
+			srv := newTestRouter(Config{}, nil, reg, disp, bus)
+
+			deferred, err := srv.deferPRToWatcher(context.Background(), "azylman/aerial", 42)
+			if tc.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErrSub)
+				}
+			} else if err != nil || !deferred {
+				t.Fatalf("deferPRToWatcher() = (%v, %v)", deferred, err)
 			}
 		})
 	}
