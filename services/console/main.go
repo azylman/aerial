@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 func resolveStaticDir(candidates ...string) string {
@@ -154,7 +155,7 @@ type ClusterResponse struct {
 }
 
 // Singleton tuned HTTP client for upstream brain communication
-var brainHTTPClient = &http.Client{
+var brainHTTPClient = tracing.Client(&http.Client{
 	Timeout: 5 * time.Second,
 	Transport: &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
@@ -168,7 +169,7 @@ var brainHTTPClient = &http.Client{
 		ResponseHeaderTimeout: 4 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	},
-}
+})
 
 // Unix socket client for Docker daemon status inspection
 var dockerSocketClient = &http.Client{
@@ -346,7 +347,7 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 		return fallback
 	}
 
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := tracing.Client(&http.Client{Timeout: 2 * time.Second})
 	resp, err := client.Do(req)
 	if err != nil {
 		fallback.Error = err.Error()
@@ -561,7 +562,7 @@ func SetupConsoleMux(cfg ConsoleConfig, assetReg *AssetRegistry) http.Handler {
 		}
 	}
 
-	return securityHeadersMiddleware(mux)
+	return securityHeadersMiddleware(tracing.Middleware("console", mux))
 }
 
 // redirectLegacyNext permanently redirects bookmarks from the retired side-by-side React mount
@@ -671,7 +672,10 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := runConsoleFn(ctx, cfg); err != nil {
+	_, flushTracing := tracing.Init(ctx, "console", tracing.DefaultConfigPath)
+	err = runConsoleFn(ctx, cfg)
+	flushTracing()
+	if err != nil {
 		exitFn("console failed: %v", err)
 	}
 }

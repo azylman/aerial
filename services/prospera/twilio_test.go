@@ -954,3 +954,32 @@ func TestStreamTokenManager_EntropyError(t *testing.T) {
 		t.Fatal("expected error on entropy failure")
 	}
 }
+
+func TestNewHTTPTwilioClient_TraceHeaders(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		withParent bool
+	}{
+		{name: "traced caller sends no trace headers to twilio", withParent: true},
+		{name: "untraced caller sends no trace headers to twilio"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := "unreached"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("Traceparent")
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(srv.Close)
+			ctx, _ := traceCaller(tc.withParent)
+			if err := NewHTTPTwilioClient("AC1", "tok", WithTwilioBaseURL(srv.URL)).HangupCall(ctx, "CA1"); err != nil {
+				t.Fatalf("HangupCall: %v", err)
+			}
+			if got != "" {
+				t.Errorf("twilio request traceparent = %q, want none", got)
+			}
+		})
+	}
+}

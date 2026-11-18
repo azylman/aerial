@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 var twilioHostRegex = regexp.MustCompile(`^(?:api\.twilio\.com|.*\.twiliocdn\.com)$`)
@@ -192,7 +194,7 @@ func NewHTTPTwilioClient(accountSID, authToken string, opts ...TwilioOption) *HT
 		accountSID: accountSID,
 		authToken:  authToken,
 		baseURL:    "https://api.twilio.com",
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: tracing.ExternalClient(&http.Client{Timeout: 30 * time.Second}),
 	}
 	for _, opt := range opts {
 		opt(c)

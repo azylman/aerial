@@ -14,10 +14,10 @@ import (
 	"time"
 )
 
-// WithReporterHTTPClient overrides the HTTP client for Reporter in unit tests.
+// WithReporterHTTPClient overrides both Reporter HTTP clients in unit tests.
 func WithReporterHTTPClient(client *http.Client) ReporterOption {
 	return func(r *Reporter) {
-		r.httpClient = client
+		r.internalClient, r.externalClient = client, client
 	}
 }
 
@@ -1145,6 +1145,55 @@ func TestResolveDiscordChannel(t *testing.T) {
 			t.Parallel()
 			if got := resolveDiscordChannel(tc.cfg, tc.channelID); got != tc.want {
 				t.Fatalf("resolveDiscordChannel() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewReporter_TraceHeaders(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		withParent bool
+	}{
+		{name: "eri call continues the caller trace; third parties get no headers", withParent: true},
+		{name: "eri call roots a trace without a caller; third parties get no headers"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			got := map[string]string{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				if got[r.URL.Path] == "" { // keep any leaked header across repeat calls to one path
+					got[r.URL.Path] = r.Header.Get("Traceparent")
+				}
+				mu.Unlock()
+				_, _ = w.Write([]byte(`{"text":"ok","candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`))
+			}))
+			t.Cleanup(srv.Close)
+			cfg := &Config{BrainURL: srv.URL, GeminiAPIKey: "k", WhisperURL: srv.URL, GeminiFallbackModel: "gemini-test"}
+			r := NewReporter(staticConfig{cfg: cfg}, newMockStoreForDelivery(), nil, WithReporterGeminiBaseURL(srv.URL))
+			ctx, parentTraceID := traceCaller(tc.withParent)
+
+			if err := r.postDiscordMessage(ctx, cfg, "chan", "", "hi", nil); err != nil {
+				t.Fatalf("postDiscordMessage: %v", err)
+			}
+			_, _ = r.generateGeminiSummary(ctx, cfg, "summarize")
+			_, _ = r.transcribeViaWhisper(ctx, cfg, []byte("wav"))
+			_, _ = r.transcribeViaGeminiFlash(ctx, cfg, []byte("wav"), "audio/wav")
+
+			mu.Lock()
+			defer mu.Unlock()
+			eriTrace := headerTraceID(http.Header{"Traceparent": {got["/discord/message"]}})
+			if eriTrace == "" || (eriTrace == parentTraceID) != tc.withParent {
+				t.Errorf("eri traceparent %q, caller trace %q, want continues=%v", got["/discord/message"], parentTraceID, tc.withParent)
+			}
+			for _, path := range []string{"/v1beta/models/gemini-test:generateContent", "/v1/audio/transcriptions"} {
+				if v, ok := got[path]; !ok || v != "" {
+					t.Errorf("%s reached=%v traceparent=%q, want reached with no traceparent", path, ok, v)
+				}
 			}
 		})
 	}

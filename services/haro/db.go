@@ -17,6 +17,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 var sqliteTestInitHook func(string) (*sql.DB, error)
@@ -659,7 +660,7 @@ func PruneScheduleRuns(ctx context.Context, database *sql.DB, maxCount int, maxA
 var (
 	vanadisMu     sync.RWMutex
 	vanadisURL    string
-	vanadisClient = &http.Client{Timeout: 5 * time.Second}
+	vanadisClient = tracing.Client(&http.Client{Timeout: 5 * time.Second})
 )
 
 // SetVanadisURL sets the base URL for Vanadis HTTP API calls.

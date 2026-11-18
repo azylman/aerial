@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 )
 
@@ -1147,6 +1149,50 @@ func TestServer_ReloadEndpointSwapsLiveConfig(t *testing.T) {
 				if tc.wantRestarts {
 					t.Error("restart not requested")
 				}
+			}
+		})
+	}
+}
+
+func TestServer_RoutesMediaStreamUpgrade(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		validToken bool
+		wantStatus int
+	}{
+		{name: "traced mux still upgrades the media stream", validToken: true, wantStatus: http.StatusSwitchingProtocols},
+		{name: "bad token is rejected before upgrade", wantStatus: http.StatusUnauthorized},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &Config{GeminiLiveModel: "gemini-3.8-live"}
+			store := newMockStoreForDelivery()
+			tokenMgr := NewStreamTokenManager(time.Now)
+			sessionMgr := NewCallSessionManager(staticConfig{cfg: cfg}, store, nil, nil, tokenMgr,
+				WithGeminiDialer(func(context.Context, string) (*websocket.Conn, error) {
+					return nil, errors.New("gemini unavailable")
+				}),
+			)
+			server := NewServer(newTestConfigSource(cfg), store, nil, tokenMgr, sessionMgr, NewReporter(staticConfig{cfg: cfg}, store, nil))
+			srv := httptest.NewServer(server.Routes())
+			t.Cleanup(srv.Close)
+
+			token := "bad-token"
+			if tc.validToken {
+				token, _ = tokenMgr.Issue("call-upgrade", 30*time.Second)
+			}
+			conn, resp, _ := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/api/webhooks/twilio/stream/"+token, nil)
+			if conn != nil {
+				_ = conn.Close()
+			}
+			if resp == nil {
+				t.Fatal("no handshake response")
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("handshake status = %d, want %d", resp.StatusCode, tc.wantStatus)
 			}
 		})
 	}

@@ -332,3 +332,33 @@ func assertConsultOutcome(t *testing.T, res string, err error, wantErr bool, wan
 		t.Fatalf("result %q does not contain %q", res, wantSubstr)
 	}
 }
+
+func TestNewHTTPContextConsultClient_TraceHeaders(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		withParent bool
+	}{
+		{name: "coven consult continues the caller trace", withParent: true},
+		{name: "coven consult roots a trace without a caller"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got http.Header
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Clone()
+				_, _ = w.Write([]byte("remembered"))
+			}))
+			t.Cleanup(srv.Close)
+			ctx, parentTraceID := traceCaller(tc.withParent)
+			if _, err := NewHTTPContextConsultClient("", srv.URL).ConsultMemory(ctx, "dentist"); err != nil {
+				t.Fatalf("ConsultMemory: %v", err)
+			}
+			id := headerTraceID(got)
+			if id == "" || (id == parentTraceID) != tc.withParent {
+				t.Errorf("traceparent %q, caller trace %q, want continues=%v", got.Get("Traceparent"), parentTraceID, tc.withParent)
+			}
+		})
+	}
+}

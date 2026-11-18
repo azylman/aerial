@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 var (
@@ -55,10 +57,11 @@ func buildK8sHTTPClient() *http.Client {
 			RootCAs: rootCAs,
 		}
 	}
-	return &http.Client{
+	// The Kubernetes API server is not an Aerial service: client spans only, no trace headers.
+	return tracing.ExternalClient(&http.Client{
 		Timeout:   3 * time.Second,
 		Transport: transport,
-	}
+	})
 }
 
 type k8sDeploymentList struct {

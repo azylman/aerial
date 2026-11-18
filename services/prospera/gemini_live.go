@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 const (
@@ -51,7 +53,7 @@ func NewHTTPContextConsultClient(googleMCPURL, covenURL string, opts ...ConsultO
 	c := &HTTPContextConsultClient{
 		googleMCPURL: strings.TrimRight(googleMCPURL, "/"),
 		covenURL:     strings.TrimRight(covenURL, "/"),
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		httpClient:   tracing.Client(&http.Client{Timeout: 10 * time.Second}),
 	}
 	for _, opt := range opts {
 		opt(c)

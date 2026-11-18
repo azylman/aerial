@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 const (
@@ -51,11 +53,14 @@ func BuildPostCallSummaryPrompt(call *VoiceCall) string {
 }
 
 // Reporter coordinates live transcript batching, post-call reports, voicemail transcription, and SMS delivery.
+// internalClient calls Aerial services (eri) and propagates trace context; externalClient calls
+// third-party APIs (Gemini, Whisper) with client spans only, never trace headers.
 type Reporter struct {
 	cfgSrc            ConfigSource
 	store             Store
 	twilio            TwilioClient
-	httpClient        *http.Client
+	internalClient    *http.Client
+	externalClient    *http.Client
 	geminiBaseURL     string
 	recordingProvider func(callID string) []byte
 }
@@ -73,10 +78,11 @@ func WithReporterRecordingProvider(fn func(callID string) []byte) ReporterOption
 // NewReporter creates a new Reporter.
 func NewReporter(cfgSrc ConfigSource, store Store, twilio TwilioClient, opts ...ReporterOption) *Reporter {
 	r := &Reporter{
-		cfgSrc:     cfgSrc,
-		store:      store,
-		twilio:     twilio,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		cfgSrc:         cfgSrc,
+		store:          store,
+		twilio:         twilio,
+		internalClient: tracing.Client(&http.Client{Timeout: 30 * time.Second}),
+		externalClient: tracing.ExternalClient(&http.Client{Timeout: 30 * time.Second}),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -132,7 +138,7 @@ func (r *Reporter) postDiscordMessage(ctx context.Context, cfg *Config, channelI
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := r.httpClient.Do(httpReq)
+	resp, err := r.internalClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("reporter: post discord message: %w", err)
 	}
@@ -316,7 +322,7 @@ func (r *Reporter) generateGeminiSummary(ctx context.Context, cfg *Config, promp
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := r.httpClient.Do(httpReq)
+	resp, err := r.externalClient.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("reporter: do gemini request: %w", err)
 	}
@@ -463,7 +469,7 @@ func (r *Reporter) transcribeViaWhisper(ctx context.Context, cfg *Config, audioB
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.externalClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -521,7 +527,7 @@ func (r *Reporter) transcribeViaGeminiFlash(ctx context.Context, cfg *Config, au
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.externalClient.Do(req)
 	if err != nil {
 		return "", err
 	}
