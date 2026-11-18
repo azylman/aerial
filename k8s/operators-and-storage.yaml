@@ -678,3 +678,45 @@ spec:
     name: infisical
   target:
     creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: nats-server-config
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: NATS_AERIAL_PASSWORD
+      secretKey: aerial_password
+    - remoteRef:
+        key: NATS_MIORINE_PASSWORD
+      secretKey: miorine_password
+    - remoteRef:
+        key: NATS_SULETTA_PASSWORD
+      secretKey: suletta_password
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+    name: nats-server-config
+    template:
+      data:
+        nats.conf: |
+          accounts: {
+            aerial: {
+              jetstream: enabled
+              users: [{ user: "aerial", password: "{{ .aerial_password }}" }]
+            }
+            miorine: {
+              jetstream: enabled
+              users: [{ user: "miorine", password: "{{ .miorine_password }}" }]
+            }
+            suletta: {
+              jetstream: enabled
+              users: [{ user: "suletta", password: "{{ .suletta_password }}" }]
+            }
+          }
+          no_auth_user: aerial

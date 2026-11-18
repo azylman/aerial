@@ -1967,6 +1967,8 @@ spec:
         - name: nats
           image: nats:2-alpine
           args:
+            - "-c"
+            - "/etc/nats/nats.conf"
             - "-js"
             - "-sd"
             - "/data/jetstream"
@@ -1994,10 +1996,19 @@ spec:
           volumeMounts:
             - mountPath: /data/jetstream
               name: jetstream-data
+            - mountPath: /etc/nats
+              name: nats-config
+              readOnly: true
       volumes:
         - name: jetstream-data
           persistentVolumeClaim:
             claimName: nats-jetstream-data
+        - name: nats-config
+          secret:
+            items:
+              - key: nats.conf
+                path: nats.conf
+            secretName: nats-server-config
 ---
 apiVersion: v1
 kind: Service
