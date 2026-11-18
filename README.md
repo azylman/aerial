@@ -26,7 +26,7 @@ Where standard GitOps homelabs stop at cluster infrastructure, standalone coding
 
 ---
 
-## 1. Turnkey Single-Node k3s Quickstart & Multi-Node Scaling
+## Single-Node k3s Quickstart
 
 Aerial boots out-of-the-box on a single vanilla `k3s` node with no custom node labels or hardware affinity required, and scales cleanly to multi-node clusters via declarative Flux patches.
 
