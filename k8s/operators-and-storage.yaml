@@ -291,6 +291,10 @@ spec:
   interval: 30m
   values:
     fullnameOverride: arc-controller
+    metrics:
+      controllerManagerAddr: :8080
+      listenerAddr: :8080
+      listenerEndpoint: /metrics
 ---
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease

@@ -870,6 +870,27 @@ spec:
       interval: 15s
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: arc-metrics
+  namespace: default
+spec:
+  namespaceSelector:
+    matchNames:
+      - arc-systems
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - controller-manager
+          - runner-scale-set-listener
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+---
+apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMSingle
 metadata:
   name: victoriametrics
