@@ -6,11 +6,6 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: restate
----
-apiVersion: v1
-kind: Namespace
-metadata:
   name: restate-green
 ---
 apiVersion: v1

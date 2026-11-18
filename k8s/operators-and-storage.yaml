@@ -403,37 +403,7 @@ spec:
       targetPath: githubConfigSecret.github_token
       valuesKey: GITHUB_PAT
 ---
-apiVersion: restate.dev/v1
-kind: RestateCluster
-metadata:
-  name: restate
-spec:
-  cluster:
-    autoProvision: true
-  compute:
-    env:
-      - name: RESTATE_AUTO_PROVISION
-        value: "false"
-      - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
-        value: 256 MiB
-      - name: RESTATE_TRACING_ENDPOINT
-        value: http://victoriatraces.default.svc.cluster.local:4317
-    image: docker.io/restatedev/restate:1.7.14@sha256:c947270d4fb0ab41b61d228029e19676c46848e1147a037e598ee7f9e0695c2d
-    replicas: 1
-    resources:
-      limits:
-        cpu: "1"
-        memory: 1Gi
-      requests:
-        cpu: 50m
-        memory: 128Mi
-  security:
-    disableNetworkPolicies: true
-  storage:
-    storageClassName: local-path
-    storageRequestBytes: 10737418240
----
-# Blue/green standby for side-by-side Restate upgrades; clients reach the live cluster via the restate.aerial CoreDNS alias.
+# Live Restate cluster; clients reach it via the restate.aerial CoreDNS alias.
 apiVersion: restate.dev/v1
 kind: RestateCluster
 metadata:
