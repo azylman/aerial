@@ -171,22 +171,23 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 }
 
 type loadConfigCase struct {
-	name             string
-	localYAML        string
-	fallbackYAML     string
-	aerialYAML       string
-	useEmptyPath     bool
-	missingFallback  bool
-	env              map[string]string
-	wantPort         string
-	wantFluxURL      string
-	wantBrainURL     string
-	wantSysChan      string
-	wantAuthors      []string
-	wantBotID        string
-	wantDefaultOwner bool
-	wantForwardURLs  map[string]string
-	wantStrictErr    bool
+	name                   string
+	localYAML              string
+	fallbackYAML           string
+	aerialYAML             string
+	useEmptyPath           bool
+	missingFallback        bool
+	env                    map[string]string
+	wantPort               string
+	wantFluxURL            string
+	wantBrainURL           string
+	wantSysChan            string
+	wantAuthors            []string
+	wantBotID              string
+	wantDefaultOwner       bool
+	wantForwardURLs        map[string]string
+	wantCollaboratorAlerts []CollaboratorCIAlertRule
+	wantStrictErr          bool
 }
 
 func setupSynapseTestConfigFiles(t *testing.T, tc loadConfigCase) string {
@@ -276,6 +277,11 @@ func assertLoadedConfigFields(t *testing.T, tc loadConfigCase, cfg Config) {
 			}
 		}
 	}
+	if tc.wantCollaboratorAlerts != nil {
+		if !reflect.DeepEqual(cfg.CollaboratorCIAlerts, tc.wantCollaboratorAlerts) {
+			t.Errorf("CollaboratorCIAlerts = %+v, want %+v", cfg.CollaboratorCIAlerts, tc.wantCollaboratorAlerts)
+		}
+	}
 }
 
 func runLoadConfigCase(t *testing.T, tc loadConfigCase) {
@@ -293,6 +299,10 @@ func runLoadConfigCase(t *testing.T, tc loadConfigCase) {
 }
 
 func loadConfigYAMLTestCases() []loadConfigCase {
+	return append(loadConfigYAMLBaseTestCases(), loadConfigYAMLExtraTestCases()...)
+}
+
+func loadConfigYAMLBaseTestCases() []loadConfigCase {
 	return []loadConfigCase{
 		{
 			name: "yaml config without overrides",
@@ -375,6 +385,11 @@ eri_url: "http://brain.custom:8088"
 			aerialYAML:  "system_channel_id: \"998877665544332211\"\n",
 			wantSysChan: "998877665544332211",
 		},
+	}
+}
+
+func loadConfigYAMLExtraTestCases() []loadConfigCase {
+	return []loadConfigCase{
 		{
 			name:        "auto_update_pr_authors loaded from yaml",
 			localYAML:   "auto_update_pr_authors:\n  - \"trusted-author\"\n  - \"peer-author\"\n",
@@ -436,6 +451,33 @@ eri_url: "http://brain.custom:8088"
 			name:      "default bot_id is aerial when unset",
 			localYAML: "port: \"4020\"\n",
 			wantBotID: "aerial",
+		},
+		{
+			name:      "collaborator_ci_alerts loaded from local yaml",
+			localYAML: "collaborator_ci_alerts:\n  - repo: \"mirrormere\"\n    channel_id: \"123456789012345678\"\n    authors:\n      Collaborator-User: \"<@111222>\"\n",
+			wantCollaboratorAlerts: []CollaboratorCIAlertRule{
+				{
+					Repo:      "azylman/mirrormere",
+					ChannelID: "123456789012345678",
+					Authors: map[string]string{
+						"collaborator-user": "<@111222>",
+					},
+				},
+			},
+		},
+		{
+			name:       "collaborator_ci_alerts loaded from aerial config fallback",
+			localYAML:  "port: \"4020\"\n",
+			aerialYAML: "collaborator_ci_alerts:\n  - repo: \"azylman/aerial\"\n    channel_id: \"987654321098765432\"\n    authors:\n      Collaborator: \"<@333444>\"\n",
+			wantCollaboratorAlerts: []CollaboratorCIAlertRule{
+				{
+					Repo:      "azylman/aerial",
+					ChannelID: "987654321098765432",
+					Authors: map[string]string{
+						"collaborator": "<@333444>",
+					},
+				},
+			},
 		},
 	}
 }
@@ -730,6 +772,7 @@ func TestSynapseRestartRequired(t *testing.T) {
 		{name: "auto-update authors change live", next: withField(base, Config{AutoUpdatePRAuthors: []string{"b"}}), want: false},
 		{name: "webhook forward urls change live", next: withField(base, Config{WebhookForwardURLs: map[string]string{"x": "http://x"}}), want: false},
 		{name: "default owner changes live", next: withField(base, Config{DefaultOwner: true}), want: false},
+		{name: "collaborator alerts change live", next: withField(base, Config{CollaboratorCIAlerts: []CollaboratorCIAlertRule{{Repo: "azylman/aerial", ChannelID: "111", Authors: map[string]string{"dev": "<@1>"}}}}), want: false},
 		{name: "port requires restart", next: withField(base, Config{Port: "4021"}), want: true},
 		{name: "postgres url requires restart", next: withField(base, Config{PostgresURL: "postgres://b@db/aerial"}), want: true},
 		{name: "discord token requires restart", next: withField(base, Config{DiscordToken: "tok2"}), want: true},
@@ -817,5 +860,172 @@ func TestIsHeadlessSessionKey(t *testing.T) {
 				t.Errorf("IsHeadlessSessionKey(%q) = %v, want %v", tc.id, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeCollaboratorCIAlerts(t *testing.T) {
+	t.Parallel()
+
+	paddedAuthor := " Collaborator-User "
+
+	tests := []struct {
+		name  string
+		rules []CollaboratorCIAlertRule
+		want  []CollaboratorCIAlertRule
+	}{
+		{
+			name:  "nil input returns nil",
+			rules: nil,
+			want:  nil,
+		},
+		{
+			name:  "empty input returns nil",
+			rules: []CollaboratorCIAlertRule{},
+			want:  nil,
+		},
+		{
+			name: "drops rules with invalid channel id or empty repo",
+			rules: []CollaboratorCIAlertRule{
+				{Repo: "", ChannelID: "123456789012345678", Authors: map[string]string{"user": "<@1>"}},
+				{Repo: "aerial", ChannelID: "invalid-id", Authors: map[string]string{"user": "<@1>"}},
+				{Repo: "aerial", ChannelID: "123456789012345678", Authors: map[string]string{"": "<@1>", "user": "  "}},
+			},
+			want: nil,
+		},
+		{
+			name: "normalizes valid rules and lowercases author logins",
+			rules: []CollaboratorCIAlertRule{
+				{
+					Repo:      " mirrormere ",
+					ChannelID: "123456789012345678",
+					Authors: map[string]string{
+						paddedAuthor: " <@111222> ",
+						"":           "<@222333>",
+					},
+				},
+			},
+			want: []CollaboratorCIAlertRule{
+				{
+					Repo:      "azylman/mirrormere",
+					ChannelID: "123456789012345678",
+					Authors: map[string]string{
+						"collaborator-user": "<@111222>",
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeCollaboratorCIAlerts(tc.rules)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("normalizeCollaboratorCIAlerts() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLookupCollaboratorCIAlert(t *testing.T) {
+	t.Parallel()
+
+	rules := []CollaboratorCIAlertRule{
+		{
+			Repo:      "azylman/mirrormere",
+			ChannelID: "123456789012345678",
+			Authors: map[string]string{
+				"collaborator-user": "<@111222>",
+			},
+		},
+	}
+	cfg := Config{CollaboratorCIAlerts: rules}
+	srv := newTestRouter(cfg, nil, nil, nil)
+
+	tests := []struct {
+		name          string
+		srv           *RouterServer
+		repo          string
+		author        string
+		wantChannelID string
+		wantMention   string
+		wantOk        bool
+	}{
+		{
+			name:          "matching repo and case-insensitive author returns alert info",
+			srv:           srv,
+			repo:          "mirrormere",
+			author:        "Collaborator-User",
+			wantChannelID: "123456789012345678",
+			wantMention:   "<@111222>",
+			wantOk:        true,
+		},
+		{
+			name:   "unconfigured author returns false",
+			srv:    srv,
+			repo:   "mirrormere",
+			author: "someone-else",
+			wantOk: false,
+		},
+		{
+			name:   "unconfigured repo returns false",
+			srv:    srv,
+			repo:   "aerial",
+			author: "collaborator-user",
+			wantOk: false,
+		},
+		{
+			name:   "nil router returns false",
+			srv:    nil,
+			repo:   "mirrormere",
+			author: "collaborator-user",
+			wantOk: false,
+		},
+		{
+			name:   "empty repo returns false",
+			srv:    srv,
+			repo:   "",
+			author: "collaborator-user",
+			wantOk: false,
+		},
+		{
+			name:   "empty author returns false",
+			srv:    srv,
+			repo:   "mirrormere",
+			author: "",
+			wantOk: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			channelID, mention, ok := tc.srv.lookupCollaboratorCIAlert(tc.repo, tc.author)
+			if ok != tc.wantOk || channelID != tc.wantChannelID || mention != tc.wantMention {
+				t.Errorf("lookupCollaboratorCIAlert(%q, %q) = (%q, %q, %v), want (%q, %q, %v)",
+					tc.repo, tc.author, channelID, mention, ok, tc.wantChannelID, tc.wantMention, tc.wantOk)
+			}
+		})
+	}
+
+	if !srv.hasCollaboratorCIAlertsForRepo("mirrormere") {
+		t.Errorf("expected hasCollaboratorCIAlertsForRepo(mirrormere) to be true")
+	}
+	if srv.hasCollaboratorCIAlertsForRepo("aerial") {
+		t.Errorf("expected hasCollaboratorCIAlertsForRepo(aerial) to be false")
+	}
+	if srv.hasCollaboratorCIAlertsForRepo("") {
+		t.Errorf("expected hasCollaboratorCIAlertsForRepo with empty repo to be false")
+	}
+	srvNoAlerts := newTestRouter(Config{}, nil, nil, nil)
+	if srvNoAlerts.hasCollaboratorCIAlertsForRepo("mirrormere") {
+		t.Errorf("expected false for srvNoAlerts hasCollaboratorCIAlertsForRepo")
+	}
+	if _, _, ok := srvNoAlerts.lookupCollaboratorCIAlert("mirrormere", "collaborator-user"); ok {
+		t.Errorf("expected false for srvNoAlerts lookupCollaboratorCIAlert")
+	}
+	var nilSrv *RouterServer
+	if nilSrv.hasCollaboratorCIAlertsForRepo("mirrormere") {
+		t.Errorf("expected hasCollaboratorCIAlertsForRepo on nil server to be false")
 	}
 }
