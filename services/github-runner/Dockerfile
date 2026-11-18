@@ -6,6 +6,7 @@ RUN mkdir -p /out/bin && \
     GOBIN=/out/bin CGO_ENABLED=0 go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1 && \
     git clone https://github.com/azylman/roborev.git /tmp/roborev && \
     (cd /tmp/roborev && git checkout 1c927ea53e3b5988323538cab5255143658b2e9f && GOBIN=/out/bin CGO_ENABLED=0 go install ./cmd/roborev) && \
+    mv /out/bin/roborev /out/bin/roborev.real && \
     rm -rf /tmp/roborev && \
     rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 
@@ -30,7 +31,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    GIT_TERMINAL_PROMPT=0
+    GIT_TERMINAL_PROMPT=0 \
+    AGY_CLI_DISABLE_AUTO_UPDATE=true
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -80,11 +82,20 @@ RUN mkdir -p -m 755 /etc/apt/keyrings && \
     google-chrome --version
 
 # Install official Antigravity CLI (agy)
-RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
+# The real binary is renamed to agy.real in this same layer (renaming at pod start
+# copied ~340 MB into every runner pod's overlayfs upper layer); the wrapper is
+# COPYed over /usr/local/bin/agy below.
+RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin && \
+    agy_bin=$(readlink -f /usr/local/bin/agy) && \
+    mv "${agy_bin}" /usr/local/bin/agy.real && \
+    rm -f /usr/local/bin/agy && \
+    /usr/local/bin/agy.real --version
 
 # Pre-baked toolchain: Go 1.27.3, Rust stable, deadcode, oapi-codegen, roborev, golangci-lint, Node 22, Docker CLI + plugins
 COPY --from=go-builder /usr/local/go /usr/local/go
 COPY --from=go-builder /out/bin/* /usr/local/bin/
+COPY --chmod=0755 services/github-runner/agy-wrapper.sh /usr/local/bin/agy
+COPY --chmod=0755 services/github-runner/roborev-wrapper.sh /usr/local/bin/roborev
 COPY --from=rust-builder /usr/local/rustup /usr/local/rustup
 COPY --from=rust-builder /usr/local/cargo /usr/local/cargo
 COPY --from=golangci/golangci-lint:v2.15.0 /usr/bin/golangci-lint /usr/local/bin/golangci-lint

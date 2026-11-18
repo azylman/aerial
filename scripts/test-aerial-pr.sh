@@ -1244,6 +1244,8 @@ unset CLAUDE_CODE_OAUTH_TOKEN
 TEST_ROOT=$(mktemp -d /tmp/roborev-wrapper-test.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 ENTRYPOINT_FILE="${SCRIPT_DIR}/../services/github-runner/entrypoint.sh"
+ROBOREV_WRAPPER_FILE="${SCRIPT_DIR}/../services/github-runner/roborev-wrapper.sh"
+AGY_WRAPPER_FILE="${SCRIPT_DIR}/../services/github-runner/agy-wrapper.sh"
 WRAPPER_SCRIPT="$TEST_ROOT/roborev-wrapper.sh"
 MOCK_REAL="$TEST_ROOT/roborev.real"
 MOCK_SYNC_SETTINGS="$TEST_ROOT/sync-gemini-settings"
@@ -1252,7 +1254,7 @@ STATE_DIR="$TEST_ROOT/state"
 REPO_DIR="$TEST_ROOT/aerial"
 mkdir -p "$STATE_DIR" "$REPO_DIR"
 
-awk '/^  cat > \/usr\/local\/bin\/roborev <<'\''EOF'\''$/ { flag=1; next } flag && /^EOF$/ { flag=0; exit } flag { print }' "$ENTRYPOINT_FILE" \
+cat "$ROBOREV_WRAPPER_FILE" \
   | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/usr/local/bin/sync-gemini-settings|$MOCK_SYNC_SETTINGS|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g; s|/root/.roborev/claude-oauth-token|$STATE_DIR/claude-oauth-token|g; s|/root/.codex/auth.json|$STATE_DIR/codex-auth.json|g" > "$WRAPPER_SCRIPT"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$MOCK_SYNC_SETTINGS"
 printf 'secret-pw\n' > "$STATE_DIR/postgres-password"
@@ -1390,7 +1392,7 @@ fi
 AGY_WRAPPER="$TEST_ROOT/agy-wrapper.sh"
 MOCK_AGY_REAL="$TEST_ROOT/agy.real"
 AGY_LOG="$TEST_ROOT/agy.log"
-awk '/^  cat > \/usr\/local\/bin\/agy <<'\''EOF'\''$/ { flag=1; next } flag && /^EOF$/ { flag=0; exit } flag { print }' "$ENTRYPOINT_FILE" \
+cat "$AGY_WRAPPER_FILE" \
   | sed "s|/usr/local/bin/agy.real|$MOCK_AGY_REAL|g" > "$AGY_WRAPPER"
 printf '#!/usr/bin/env bash\necho "$*" >> "%s"\n' "$AGY_LOG" > "$MOCK_AGY_REAL"
 chmod +x "$AGY_WRAPPER" "$MOCK_AGY_REAL"
