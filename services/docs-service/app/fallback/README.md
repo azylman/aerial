@@ -169,4 +169,4 @@ aerial-config/
 - **Zero-Build Hot Reloading**: Any commit or sync to `aerial-config` is immediately live in your browser.
 - **Mermaid.js Engine**: Sequence diagrams, flowcharts, and architecture maps rendered in real time.
 - **Offline / Local First**: 100% vendored assets with zero external CDN dependencies.
-- **Permet Dark Theme**: Seamlessly integrated with the Cyberpunk status HUD.
+- **Standard Docsify Theme**: Uses the upstream Docsify dark theme.

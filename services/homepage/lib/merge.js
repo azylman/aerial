@@ -203,26 +203,12 @@ function mergeDocker(core, user) {
   };
 }
 
-/**
- * Concatenates custom CSS strings.
- */
-function mergeCustomCss(coreContent, userContent) {
-  const coreStr = (typeof coreContent === 'string' ? coreContent.trim() : '');
-  const userStr = (typeof userContent === 'string' ? userContent.trim() : '');
-
-  if (coreStr && userStr) {
-    return `${coreStr}\n\n${userStr}`;
-  }
-  return coreStr || userStr || '';
-}
-
 module.exports = {
   mergeServices,
   mergeBookmarks,
   mergeWidgets,
   mergeSettings,
   mergeDocker,
-  mergeCustomCss,
   normalizeList,
   normalizeObject
 };

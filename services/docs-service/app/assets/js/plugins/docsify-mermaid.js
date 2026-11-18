@@ -1,36 +1,15 @@
 /**
- * Aerial Docsify Mermaid Plugin (Permet Cyberpunk Theme)
- * Custom async renderer with error boundaries and responsive SVG formatting.
+ * Docsify Mermaid Plugin
+ * Async renderer with error boundaries and responsive SVG formatting.
  */
 (function () {
   let diagramCount = 0;
 
-  // Initialize Mermaid with Aerial Permet HUD Theme
   if (typeof window !== 'undefined' && window.mermaid) {
     window.mermaid.initialize({
       startOnLoad: false,
       securityLevel: 'loose',
-      theme: 'base',
-      themeVariables: {
-        darkMode: true,
-        background: 'rgba(26, 14, 46, 0.95)',
-        mainBkg: 'rgba(48, 26, 82, 0.9)',
-        primaryColor: 'rgba(48, 26, 82, 0.9)',
-        primaryTextColor: '#ffffff',
-        primaryBorderColor: '#c084fc',
-        lineColor: '#00f0ff',
-        secondaryColor: 'rgba(26, 14, 46, 0.95)',
-        secondaryTextColor: '#00f0ff',
-        secondaryBorderColor: '#00f0ff',
-        tertiaryColor: '#06050a',
-        tertiaryTextColor: '#d8b4fe',
-        tertiaryBorderColor: 'rgba(168, 85, 247, 0.4)',
-        noteBkgColor: 'rgba(30, 15, 55, 0.9)',
-        noteTextColor: '#ffb703',
-        noteBorderColor: '#ffb703',
-        fontFamily: "'JetBrains Mono', monospace",
-        fontSize: '13px'
-      }
+      theme: 'dark'
     });
   }
 
@@ -44,7 +23,7 @@
       if (lang === "mermaid") {
         const id = 'mermaid-diagram-' + (++diagramCount);
         return '<div class="mermaid-diagram" id="' + id + '" data-mermaid-code="' + encodeURIComponent(code) + '">' +
-               '  <div class="mermaid-loading">RENDERING MERMAID DIAGRAM...</div>' +
+               '  <div class="mermaid-loading">Rendering diagram...</div>' +
                '</div>';
       }
       return (originalRenderer.code || this.origin.code).apply(this, arguments);
@@ -86,13 +65,13 @@
   }, window.$docsify.plugins || []);
 
   function renderMermaidError(container, rawCode, error) {
-    console.warn('[Aerial Docs] Mermaid Syntax Error:', error);
+    console.warn('[Docs] Mermaid Syntax Error:', error);
     const errorMsg = (error && error.message) ? error.message : 'Invalid Mermaid syntax';
-    container.innerHTML = 
+    container.innerHTML =
       '<div class="mermaid-error-card">' +
       '  <div class="error-header">' +
       '    <span class="error-icon">⚠️</span>' +
-      '    <span class="error-title">DIAGRAM RENDER FAILURE</span>' +
+      '    <span class="error-title">Diagram render failure</span>' +
       '  </div>' +
       '  <div class="error-msg">' + escapeHtml(errorMsg) + '</div>' +
       '  <details class="error-raw">' +
