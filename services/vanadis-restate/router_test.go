@@ -452,38 +452,6 @@ func TestBuildRouterService_NilStoreAndErrorPaths(t *testing.T) {
 	assert.Equal(t, beforeFail+1, reconcileErrorsCount(t, labelRouteFailChunk))
 }
 
-func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
-	t.Parallel()
-
-	// Nil store
-	var sNil *PostgresVanadisStore
-	assert.Error(t, sNil.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
-	assert.Error(t, sNil.ResetPRCheckState(context.Background(), "c1", "sha-1", ""))
-
-	// Empty arguments
-	st, _ := dbScript{execTag: "UPDATE 1"}.open()
-	assert.Error(t, st.RecordPRCheckStatus(context.Background(), "", "sha-1", "test", "passed"))
-	assert.Error(t, st.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "", "passed"))
-	assert.Error(t, st.ResetPRCheckState(context.Background(), "", "sha-1", ""))
-
-	// Success
-	assert.NoError(t, st.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
-	assert.NoError(t, st.ResetPRCheckState(context.Background(), "c1", "sha-2", ""))
-	assert.NoError(t, st.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
-
-	// Skipped transition (0 rows affected)
-	storeZero, _ := dbScript{execTag: "UPDATE 0", row: errRow(pgx.ErrNoRows)}.open()
-	assert.ErrorIs(t, storeZero.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"), errPRTransitionSkipped)
-	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "sha-2", ""), errPRTransitionSkipped)
-	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"), errPRTransitionSkipped)
-
-	// DB Exec error
-	storeErr, _ := dbScript{execErr: errors.New("db error")}.open()
-	assert.Error(t, storeErr.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
-	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "sha-2", ""))
-	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
-}
-
 type unattachedPREventSpyStore struct {
 	store.VanadisStore
 

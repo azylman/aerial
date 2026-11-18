@@ -729,6 +729,13 @@ func TestActionFailureAcceptedAndCompletionMutation(t *testing.T) {
 	cRunning := model.VanadisChunk{ID: "c1", Status: statusRunning, Mode: chunkModeAction, StallNudges: 1}
 	assert.True(t, actionFailureAccepted(cRunning, statusRunning, "vanadis-c1-turn-1"))
 
+	// actionFailureAllowed PR-attached branches (CI remediation identities)
+	cPR := model.VanadisChunk{ID: "c1", Status: statusPROpened, Mode: chunkModeAction, PRNumber: 12, StallNudges: 1}
+	assert.True(t, actionFailureAccepted(cPR, statusRunning, ""))
+	assert.True(t, actionFailureAccepted(cPR, statusRunning, "vanadis-c1-cifail-abc"))
+	assert.True(t, actionFailureAccepted(cPR, statusRunning, "vanadis-conflict-c1"))
+	assert.False(t, actionFailureAccepted(cPR, statusRunning, "stale-dispatch"))
+
 	// isFailureCompletionMutation branches
 	assert.False(t, isFailureCompletionMutation(nil, nil))
 	assert.False(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "other", ChunkID: "c1"}, []model.VanadisChunk{cRunning}))
