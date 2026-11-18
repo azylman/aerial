@@ -16,17 +16,23 @@ func TestLoadTargetMCPConfig_MCPProxy(t *testing.T) {
 	servers := map[string]json.RawMessage{
 		"docket":  json.RawMessage(`{"serverUrl":"http://docket.aerial/mcp?team=1","headers":{"Authorization":"Bearer tok"}}`),
 		"kernel":  json.RawMessage(`{"url":"http://kernel.aerial/mcp","type":"http"}`),
+		"github":  json.RawMessage(`{"url":"http://github.aerial/mcp","type":"http","instructions":"Use github sparingly","enabled_tools":["issue_read","search_code"],"disabled_tools":["delete_repo"],"response_filters":{"search_code":".items[] | {name: .name, path: .path}","bad_filter":"[invalid jq"}}`),
+		"discord": json.RawMessage(`{"url":"http://discord.aerial/mcp","type":"http","instructions":"Use discord carefully","enabledTools":["send_message"],"disabledTools":["kick_member"],"responseFilters":{"send_message":"."}}`),
 		"legacy":  json.RawMessage(`{"url":"http://legacy.aerial/sse","type":"sse"}`),
 		"browser": json.RawMessage(`{"command":"npx","args":["browser-mcp"]}`),
 	}
 	verbatimAgy := `{"mcpServers":{
 		"docket":{"serverUrl":"http://docket.aerial/mcp?team=1","headers":{"Authorization":"Bearer tok"}},
 		"kernel":{"url":"http://kernel.aerial/mcp","type":"http"},
+		"github":{"url":"http://github.aerial/mcp","type":"http"},
+		"discord":{"url":"http://discord.aerial/mcp","type":"http"},
 		"legacy":{"url":"http://legacy.aerial/sse","type":"sse"},
 		"browser":{"command":"npx","args":["browser-mcp"]}}}`
 	verbatimClaude := `{"mcpServers":{
 		"docket":{"type":"http","url":"http://docket.aerial/mcp?team=1","headers":{"Authorization":"Bearer tok"}},
 		"kernel":{"url":"http://kernel.aerial/mcp","type":"http"},
+		"github":{"type":"http","url":"http://github.aerial/mcp"},
+		"discord":{"type":"http","url":"http://discord.aerial/mcp"},
 		"legacy":{"url":"http://legacy.aerial/sse","type":"sse"},
 		"browser":{"command":"npx","args":["browser-mcp"]}}}`
 	tests := []struct {
@@ -36,21 +42,30 @@ func TestLoadTargetMCPConfig_MCPProxy(t *testing.T) {
 		wantClaude    string
 		wantUpstreams map[string]string
 	}{
-		{name: "tracing disabled writes configs verbatim", wantAgy: verbatimAgy, wantClaude: verbatimClaude},
+		{name: "tracing disabled writes configs verbatim and strips policy fields", wantAgy: verbatimAgy, wantClaude: verbatimClaude},
 		{
 			name:      "tracing enabled routes http servers through the proxy",
 			proxyPort: "8080",
 			wantAgy: `{"mcpServers":{
 				"docket":{"serverUrl":"http://127.0.0.1:8080/internal/mcp-proxy/voice/docket","headers":{"Authorization":"Bearer tok"}},
 				"kernel":{"url":"http://127.0.0.1:8080/internal/mcp-proxy/voice/kernel","type":"http"},
+				"github":{"url":"http://127.0.0.1:8080/internal/mcp-proxy/voice/github","type":"http"},
+				"discord":{"url":"http://127.0.0.1:8080/internal/mcp-proxy/voice/discord","type":"http"},
 				"legacy":{"url":"http://legacy.aerial/sse","type":"sse"},
 				"browser":{"command":"npx","args":["browser-mcp"]}}}`,
 			wantClaude: `{"mcpServers":{
 				"docket":{"type":"http","url":"http://127.0.0.1:8080/internal/mcp-proxy/voice/docket","headers":{"Authorization":"Bearer tok","X-Eri-Daemon":"${ERI_DAEMON_ID:-}"}},
 				"kernel":{"url":"http://127.0.0.1:8080/internal/mcp-proxy/voice/kernel","type":"http","headers":{"X-Eri-Daemon":"${ERI_DAEMON_ID:-}"}},
+				"github":{"type":"http","url":"http://127.0.0.1:8080/internal/mcp-proxy/voice/github","headers":{"X-Eri-Daemon":"${ERI_DAEMON_ID:-}"}},
+				"discord":{"type":"http","url":"http://127.0.0.1:8080/internal/mcp-proxy/voice/discord","headers":{"X-Eri-Daemon":"${ERI_DAEMON_ID:-}"}},
 				"legacy":{"url":"http://legacy.aerial/sse","type":"sse"},
 				"browser":{"command":"npx","args":["browser-mcp"]}}}`,
-			wantUpstreams: map[string]string{"docket": "http://docket.aerial/mcp?team=1", "kernel": "http://kernel.aerial/mcp"},
+			wantUpstreams: map[string]string{
+				"docket":  "http://docket.aerial/mcp?team=1",
+				"kernel":  "http://kernel.aerial/mcp",
+				"github":  "http://github.aerial/mcp",
+				"discord": "http://discord.aerial/mcp",
+			},
 		},
 	}
 	for _, tc := range tests {
@@ -75,13 +90,85 @@ func TestLoadTargetMCPConfig_MCPProxy(t *testing.T) {
 			}
 			assertJSONEqual(t, "claude config", claude, tc.wantClaude)
 
-			for _, name := range []string{"docket", "kernel", "legacy", "browser"} {
+			for _, name := range []string{"docket", "kernel", "github", "discord", "legacy", "browser"} {
 				got, ok := routes.Upstream(string(TargetVoice), name)
 				if want, wantOK := tc.wantUpstreams[name]; got != want || ok != wantOK {
 					t.Errorf("Upstream(voice, %s) = %q, %v; want %q, %v", name, got, ok, want, wantOK)
 				}
 			}
+
+			if tc.proxyPort != "" {
+				assertPolicyExpectations(t, routes)
+			}
 		})
+	}
+}
+
+func assertPolicyExpectations(t *testing.T, routes *MCPProxyRoutes) {
+	t.Helper()
+	var nilRoutes *MCPProxyRoutes
+	if _, ok := nilRoutes.Policy(string(TargetVoice), "github"); ok {
+		t.Errorf("nil routes Policy should return false")
+	}
+	if _, ok := routes.Policy("unknown_target", "github"); ok {
+		t.Errorf("unknown target Policy should return false")
+	}
+
+	ghPolicy, ok := routes.Policy(string(TargetVoice), "github")
+	if !ok {
+		t.Fatalf("Policy(voice, github) not found")
+	}
+	if ghPolicy.Instructions != "Use github sparingly" {
+		t.Errorf("github instructions = %q, want %q", ghPolicy.Instructions, "Use github sparingly")
+	}
+	if !ghPolicy.EnabledTools["issue_read"] || !ghPolicy.EnabledTools["search_code"] {
+		t.Errorf("github enabled tools = %+v, want issue_read and search_code", ghPolicy.EnabledTools)
+	}
+	if !ghPolicy.DisabledTools["delete_repo"] {
+		t.Errorf("github disabled tools = %+v, want delete_repo", ghPolicy.DisabledTools)
+	}
+	if !ghPolicy.DisabledTools["bad_filter"] {
+		t.Errorf("github disabled tools = %+v, want bad_filter disabled due to invalid filter", ghPolicy.DisabledTools)
+	}
+	if ghPolicy.ResponseFilters["search_code"] == nil {
+		t.Errorf("github search_code filter missing")
+	}
+	if ghPolicy.ResponseFilters["bad_filter"] != nil {
+		t.Errorf("github bad_filter unexpectedly compiled")
+	}
+
+	dcPolicy, ok := routes.Policy(string(TargetVoice), "discord")
+	if !ok {
+		t.Fatalf("Policy(voice, discord) not found")
+	}
+	if dcPolicy.Instructions != "Use discord carefully" {
+		t.Errorf("discord instructions = %q, want %q", dcPolicy.Instructions, "Use discord carefully")
+	}
+	if !dcPolicy.EnabledTools["send_message"] {
+		t.Errorf("discord enabled tools = %+v, want send_message", dcPolicy.EnabledTools)
+	}
+	if !dcPolicy.DisabledTools["kick_member"] {
+		t.Errorf("discord disabled tools = %+v, want kick_member", dcPolicy.DisabledTools)
+	}
+	if dcPolicy.ResponseFilters["send_message"] == nil {
+		t.Errorf("discord send_message filter missing")
+	}
+
+	rawMap := map[string]any{
+		"slice_server": map[string]any{
+			"url":              "http://slice.aerial/mcp",
+			"enabled_tools":    []string{"slice_tool", " "},
+			"disabled_tools":   []string{"bad_slice"},
+			"response_filters": map[string]string{"slice_tool": "."},
+		},
+		"invalid_entry": "not_map",
+		"empty_url":     map[string]any{"name": "no_url"},
+	}
+	routes.rewrite(TargetVoice, rawMap)
+	StripProxyPolicyFields(rawMap)
+	slicePolicy, ok := routes.Policy(string(TargetVoice), "slice_server")
+	if !ok || !slicePolicy.EnabledTools["slice_tool"] || !slicePolicy.DisabledTools["bad_slice"] || slicePolicy.ResponseFilters["slice_tool"] == nil {
+		t.Errorf("slice_server policy not extracted properly: %+v", slicePolicy)
 	}
 }
 
