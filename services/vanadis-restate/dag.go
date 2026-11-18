@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -235,64 +234,6 @@ func isTerminalChunkStatus(status string) bool {
 	default:
 		return false
 	}
-}
-
-// relinkDependenciesAfterRemoval rewrites dependencies in remaining after removedID is deleted,
-// removing removedID and replacing it with removedDeps.
-func relinkDependenciesAfterRemoval(remaining []model.VanadisChunk, removedID string, removedDeps []string) {
-	for i := range remaining {
-		c := &remaining[i]
-		if !slices.Contains(c.DependsOn, removedID) {
-			continue
-		}
-		newDeps := make([]string, 0, len(c.DependsOn)+len(removedDeps))
-		seen := make(map[string]bool)
-		for _, dep := range c.DependsOn {
-			if dep == removedID {
-				for _, rd := range removedDeps {
-					if rd != c.ID && !seen[rd] {
-						seen[rd] = true
-						newDeps = append(newDeps, rd)
-					}
-				}
-			} else if !seen[dep] {
-				seen[dep] = true
-				newDeps = append(newDeps, dep)
-			}
-		}
-		c.DependsOn = newDeps
-	}
-}
-
-// validateUpdateChunkDAG substitutes updated into existing, validates the entire DAG, and returns the normalized depends_on.
-func validateUpdateChunkDAG(existing []model.VanadisChunk, updatedIdx int, updated model.VanadisChunk) ([]string, error) {
-	candidateChunks := make([]model.VanadisChunk, len(existing))
-	copy(candidateChunks, existing)
-	candidateChunks[updatedIdx] = updated
-
-	validated, err := normalizeAndValidateBuildDAG(candidateChunks)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", store.ErrInvalidBuildInput, err)
-	}
-	return validated[updatedIdx].DependsOn, nil
-}
-
-// validateAppendChunksDAG combines existing chunks with appended chunks, validates the DAG, and returns the appended chunks with normalized depends_on.
-func validateAppendChunksDAG(existing []model.VanadisChunk, appended []model.VanadisChunk) ([]model.VanadisChunk, error) {
-	allChunks := make([]model.VanadisChunk, 0, len(existing)+len(appended))
-	allChunks = append(allChunks, existing...)
-	allChunks = append(allChunks, appended...)
-
-	validatedAll, err := normalizeAndValidateBuildDAG(allChunks)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", store.ErrInvalidBuildInput, err)
-	}
-	out := make([]model.VanadisChunk, len(appended))
-	copy(out, appended)
-	for i := range out {
-		out[i].DependsOn = validatedAll[len(existing)+i].DependsOn
-	}
-	return out, nil
 }
 
 func isPRDependencyCodeReady(other model.VanadisChunk) bool {
