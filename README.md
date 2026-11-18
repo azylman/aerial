@@ -158,38 +158,7 @@ All user customization lives in your private config repository (start from [**`a
 
 ---
 
-## 5. Observability & Telemetry Stack
-
-Aerial ships with a unified metrics, logs, and distributed tracing pipeline backed by **VictoriaMetrics**, **VictoriaLogs**, **VictoriaTraces**, and **Grafana**:
-
-```text
-┌───────────────────────────────────────────────────────────────────────────────────────┐
-│                                 TELEMETRY PIPELINE                                    │
-├────────────────────────────┬─────────────────────────────┬────────────────────────────┤
-│ METRIC, LOG & SPAN SOURCES │ STORAGE & ANOMALY ENGINE    │ VISUALIZATION & EXPLORERS  │
-│ • Go Services (/metrics &  │ victoriametrics             │ grafana                    │
-│   OTLP gRPC Spans)         │ • 5-Year Retention          │ • Anonymous Admin HUD      │
-│ • NGINX Gateways (OTLP)    │ • Dynamic 15s VMScrape CRDs │ • Cyberpunk Permet Theme   │
-│ • Restate (OTLP Spans)     │ vmalert                     │ • PostgreSQL Backend       │
-│ • CloudNativePG Exporter   │ • MAD Anomaly & Alert Rules │ victorialogs & traces      │
-│ • Kubelet / cAdvisor       │ victorialogs (60d LogsQL)   │ • Grafana Explore +        │
-│ • node-exporter & fluent-bit│ victoriatraces (30d OTLP)  │   LAN-only vmui Consoles   │
-└────────────────────────────┴─────────────────────────────┴────────────────────────────┘
-```
-
-- **Declarative Metrics & Anomaly Detection (`victoriametrics` + `vmalert`)**: Single-node VictoriaMetrics (5-year retention, 15s scrape interval) orchestrated by `vm-operator` (`VMServiceScrape`, `VMStaticScrape`, and `VMPodScrape` CRDs), paired with `vmalert` evaluating Median Absolute Deviation (MAD) anomaly scores and ingestion health alerts.
-- **Secret-Scrubbed Log Analytics (`fluent-bit` + `victorialogs`)**: Fluent Bit DaemonSets collect container stdout/stderr and host `journald` logs, scrub exact and JSON-escaped Infisical secret values in-flight via Lua filters, and ship structured streams into VictoriaLogs (60-day retention, queried via LogsQL and `victorialogs-mcp`).
-- **End-to-End Distributed Tracing (`victoriatraces`)**: NGINX gateways, Restate, and Go microservices export OpenTelemetry (OTLP) spans into VictoriaTraces (30-day retention), linked directly to VictoriaLogs by `trace_id` inside Grafana and queryable by the agent via `victoriatraces-mcp`.
-- **Pre-Provisioned Grafana Dashboards (`services/grafana/dashboards/`)**:
-  - **`⚡ Aerial Core & Operations` (`core-telemetry.json`)**: Turn latency percentiles (p50–p99), token velocity, active worker pools, CAS task states, Discord gateway latency, JetStream queues, and ambient classifier decisions.
-  - **`🐘 PostgreSQL Overview` (`postgres-overview.json`)**: CloudNativePG active connections, buffer cache hit ratios, transaction velocity, and lock contention.
-  - **`🐳 Cluster Pods & Containers Overview` (`docker-overview.json`)**: Per-container CPU, working set memory, network RX/TX, and CPU throttling via cAdvisor.
-  - **`🖥️ Host System & Hardware Overview` (`host-system-overview.json`)**: Node CPU load, core thermals, memory, and disk utilization from Node Exporter.
-  - **`🪙 Token Telemetry & Channel Breakdown` (`token-usage.json`)**: Real-time and cumulative token consumption partitioned by Discord channel.
-
----
-
-## 6. Turnkey Single-Node k3s Quickstart & Multi-Node Scaling
+## 5. Turnkey Single-Node k3s Quickstart & Multi-Node Scaling
 
 Aerial boots out-of-the-box on a single vanilla `k3s` node with no custom node labels or hardware affinity required, and scales cleanly to multi-node clusters via declarative Flux patches.
 
