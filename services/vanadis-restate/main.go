@@ -175,6 +175,7 @@ type Config struct {
 	NATSURL     string
 	GitHubToken string
 	ShareRoot   string
+	AgentName   string
 }
 
 // LoadConfigFromEnv loads configuration from environment variables with defaults.
@@ -202,6 +203,7 @@ func LoadConfigFromEnv() Config {
 	natsURL := strings.TrimSpace(firstNonEmpty(os.Getenv("NATS_URL"), "nats://nats.aerial:4222"))
 	ghToken := strings.TrimSpace(firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT")))
 	shareRoot := strings.TrimSpace(firstNonEmpty(os.Getenv("SHARE_ROOT"), defaultShareRoot))
+	agentName := strings.TrimSpace(firstNonEmpty(os.Getenv("AGENT_NAME"), "aerial"))
 
 	return Config{
 		RestatePort: restatePort,
@@ -212,6 +214,7 @@ func LoadConfigFromEnv() Config {
 		NATSURL:     natsURL,
 		GitHubToken: ghToken,
 		ShareRoot:   shareRoot,
+		AgentName:   agentName,
 	}
 }
 
@@ -331,7 +334,15 @@ type objectRuntime interface {
 }
 
 type restateObjectRuntime struct {
-	ctx restate.ObjectContext
+	ctx          restate.ObjectContext
+	buildService string
+}
+
+func (r restateObjectRuntime) serviceName() string {
+	if strings.TrimSpace(r.buildService) == "" {
+		return legacyBuildServiceName
+	}
+	return r.buildService
 }
 
 func (r restateObjectRuntime) Key() string {
@@ -372,7 +383,7 @@ func (r restateObjectRuntime) RunReconcileStep(name string, fn func(ctx context.
 // A delayed self-send releases the exclusive invocation between active-dispatch
 // probes, allowing completion and cancellation handlers to acquire the object.
 func (r restateObjectRuntime) ScheduleReconcile() {
-	_ = restate.ObjectSend(r.ctx, "Build", restate.Key(r.ctx), "Reconcile").Send(ReconcileBuildRequest{Reason: "active dispatch recovery"}, restate.WithDelay(time.Second))
+	_ = restate.ObjectSend(r.ctx, r.serviceName(), restate.Key(r.ctx), "Reconcile").Send(ReconcileBuildRequest{Reason: "active dispatch recovery"}, restate.WithDelay(time.Second))
 }
 
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
@@ -382,6 +393,7 @@ type BuildObject struct {
 	vanadisURL     string
 	httpClient     *http.Client
 	runtimeFactory func(restate.ObjectContext) objectRuntime
+	agentName      string
 }
 
 // NewBuildObject creates a new BuildObject bound to vanadisURL with an optional HTTP client.
@@ -400,6 +412,13 @@ func NewBuildObject(vanadisURL string, httpClient *http.Client, runtimeFactory .
 	}
 }
 
+// NewBuildObjectWithAgent creates a BuildObject with an agent-scoped Restate service name.
+func NewBuildObjectWithAgent(vanadisURL, agentName string, httpClient *http.Client, runtimeFactory ...func(restate.ObjectContext) objectRuntime) *BuildObject {
+	b := NewBuildObject(vanadisURL, httpClient, runtimeFactory...)
+	b.agentName = strings.TrimSpace(agentName)
+	return b
+}
+
 // WithAuthority wires the PostgreSQL store and side-effect executor into BuildObject.
 func (b *BuildObject) WithAuthority(store VanadisStore, exec *Executor) *BuildObject {
 	if pg, ok := store.(*PostgresVanadisStore); ok && pg == nil {
@@ -411,8 +430,11 @@ func (b *BuildObject) WithAuthority(store VanadisStore, exec *Executor) *BuildOb
 }
 
 // ServiceName returns the Restate service name for this Virtual Object.
-func (*BuildObject) ServiceName() string {
-	return "Build"
+func (b *BuildObject) ServiceName() string {
+	if b == nil {
+		return legacyBuildServiceName
+	}
+	return BuildServiceName(b.agentName)
 }
 
 func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepName string, priorState *BuildObjectState, transErr error) {
@@ -443,7 +465,11 @@ func (b *BuildObject) getRuntime(ctx restate.ObjectContext) objectRuntime {
 	if b != nil && b.runtimeFactory != nil {
 		return b.runtimeFactory(ctx)
 	}
-	return restateObjectRuntime{ctx: ctx}
+	agent := ""
+	if b != nil {
+		agent = b.agentName
+	}
+	return restateObjectRuntime{ctx: ctx, buildService: BuildServiceName(agent)}
 }
 
 func toTerminalErr(err error) error {
@@ -1408,8 +1434,8 @@ func RunApp(ctx context.Context, cfg Config) error {
 	eriClient := NewHTTPEriClient(cfg.EriURL, tracing.Client(&http.Client{Timeout: 30 * time.Second}))
 	executor := NewExecutor(cfg.ShareRoot, eriClient, bus, cfg.GitHubToken, tracing.ExternalClient(&http.Client{Timeout: 30 * time.Second}))
 
-	restateObj := NewBuildObject(cfg.VanadisURL, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, executor)
-	routerSvc := NewBuildRouterService(pgStore)
+	restateObj := NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, executor)
+	routerSvc := NewBuildRouterServiceWithAgent(pgStore, cfg.AgentName)
 	restateServer := server.NewRestate().
 		Bind(restate.Reflect(restateObj)).
 		Bind(restate.Reflect(routerSvc))

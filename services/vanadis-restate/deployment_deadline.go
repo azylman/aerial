@@ -63,7 +63,7 @@ func (r restateObjectRuntime) ScheduleDeploymentDeadline(req DeploymentDeadlineR
 	if delay < 0 {
 		delay = 0
 	}
-	_ = restate.ObjectSend(r.ctx, "Build", r.Key(), "DeploymentDeadline").Send(req, restate.WithDelay(delay))
+	_ = restate.ObjectSend(r.ctx, r.serviceName(), r.Key(), "DeploymentDeadline").Send(req, restate.WithDelay(delay))
 }
 
 func deploymentRevision(c VanadisChunk) string {

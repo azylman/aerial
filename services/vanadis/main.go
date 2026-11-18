@@ -695,7 +695,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	}
 
 	var created VanadisBuild
-	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/Create", buildID), req, &created); err != nil {
+	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "Create"), req, &created); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
@@ -714,7 +714,7 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var cancelled VanadisBuild
-	if err := s.callRestateIngress(r.Context(), fmt.Sprintf("/Build/%s/Cancel", id), CancelBuildRequest{}, &cancelled); err != nil {
+	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(id, "Cancel"), CancelBuildRequest{}, &cancelled); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}

@@ -796,3 +796,28 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Errors(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildRouterService_InvokerWiring(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		agent     string
+		wantBuild string
+	}{
+		{name: "empty wires legacy invoker", agent: "", wantBuild: "Build"},
+		{name: "aerial wires legacy invoker", agent: "aerial", wantBuild: "Build"},
+		{name: "suletta wires scoped invoker", agent: "suletta", wantBuild: "Build-suletta"},
+		{name: "miorine wires scoped invoker", agent: "miorine", wantBuild: "Build-miorine"},
+		{name: "mixed case wires normalized invoker", agent: "Suletta", wantBuild: "Build-suletta"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := NewBuildRouterServiceWithAgent(nil, tc.agent)
+			assert.Equal(t, tc.wantBuild, r.buildServiceName())
+			inv, ok := r.getInvoker(makeRouterMockContext(t)).(restateBuildObjectInvoker)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantBuild, inv.serviceName())
+		})
+	}
+}

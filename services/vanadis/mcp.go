@@ -333,7 +333,7 @@ func (s *VanadisServer) handleMCPUpdateBuild(ctx context.Context, args MCPUpdate
 	}
 
 	var updated VanadisBuild
-	if err := s.callRestateIngress(ctx, fmt.Sprintf("/Build/%s/UpdateBuild", buildID), UpdateBuildRequest{
+	if err := s.callRestateIngress(ctx, s.restateObjectPath(buildID, "UpdateBuild"), UpdateBuildRequest{
 		Title:         args.Title,
 		Objective:     args.Objective,
 		SharedContext: args.SharedContext,
@@ -384,7 +384,7 @@ func (s *VanadisServer) handleMCPUpdateChunk(ctx context.Context, args MCPUpdate
 	}
 
 	var updated VanadisChunk
-	if err := s.callRestateIngress(ctx, fmt.Sprintf("/Build/%s/UpdateChunk", buildID), req, &updated); err != nil {
+	if err := s.callRestateIngress(ctx, s.restateObjectPath(buildID, "UpdateChunk"), req, &updated); err != nil {
 		return MCPUpdateChunkOutput{}, err
 	}
 
@@ -409,7 +409,7 @@ func (s *VanadisServer) handleMCPAppendChunk(ctx context.Context, args MCPAppend
 	}
 
 	var appended []VanadisChunk
-	if err := s.callRestateIngress(ctx, fmt.Sprintf("/Build/%s/AppendChunks", buildID), AppendChunksRequest{Chunks: inputs}, &appended); err != nil {
+	if err := s.callRestateIngress(ctx, s.restateObjectPath(buildID, "AppendChunks"), AppendChunksRequest{Chunks: inputs}, &appended); err != nil {
 		return MCPAppendChunkOutput{}, err
 	}
 
@@ -434,7 +434,7 @@ func (s *VanadisServer) handleMCPRemoveChunk(ctx context.Context, args MCPRemove
 	}
 
 	req := RemoveChunkRequest{ChunkRef: chunkRef}
-	if err := s.callRestateIngress(ctx, fmt.Sprintf("/Build/%s/RemoveChunk", buildID), req, nil); err != nil {
+	if err := s.callRestateIngress(ctx, s.restateObjectPath(buildID, "RemoveChunk"), req, nil); err != nil {
 		return MCPRemoveChunkOutput{}, err
 	}
 
@@ -473,7 +473,7 @@ func (s *VanadisServer) handleMCPFailChunk(ctx context.Context, args MCPFailChun
 		Reason:     reason,
 	}
 	var resp FailChunkResponse
-	if err := s.callRestateIngress(ctx, "/BuildRouter/RouteFailChunk", req, &resp); err != nil {
+	if err := s.callRestateIngress(ctx, s.restateRouterPath("RouteFailChunk"), req, &resp); err != nil {
 		return MCPFailChunkOutput{}, err
 	}
 

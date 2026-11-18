@@ -30,6 +30,7 @@ type Config struct {
 	NATSURL           string
 	RestateIngressURL string
 	ConfigPath        string
+	AgentName         string
 }
 
 // NATSBridgeYAMLConfig defines the declarative file schema for vanadis-nats configuration.
@@ -37,6 +38,32 @@ type NATSBridgeYAMLConfig struct {
 	Port              string `yaml:"port"`
 	NATSURL           string `yaml:"nats_url"`
 	RestateIngressURL string `yaml:"restate_ingress_url"`
+	AgentName         string `yaml:"agent_name"`
+}
+
+// NormalizeAgentName trims whitespace for per-agent scoped Restate names.
+func NormalizeAgentName(agent string) string {
+	return strings.ToLower(strings.TrimSpace(agent))
+}
+
+// BuildServiceName derives the Restate Build Virtual Object name for an agent.
+// Empty and aerial resolve to the legacy Build name so Phase 1 stays dark.
+func BuildServiceName(agent string) string {
+	name := NormalizeAgentName(agent)
+	if name == "" || name == "aerial" {
+		return "Build"
+	}
+	return "Build-" + name
+}
+
+// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
+// Empty and aerial resolve to the legacy BuildRouter name so Phase 1 stays dark.
+func BuildRouterServiceName(agent string) string {
+	name := NormalizeAgentName(agent)
+	if name == "" || name == "aerial" {
+		return "BuildRouter"
+	}
+	return "BuildRouter-" + name
 }
 
 var fallbackConfigPaths = []string{
@@ -78,6 +105,7 @@ func LoadConfig(configPath string) Config {
 		NATSURL:           firstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL),
 		RestateIngressURL: strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("RESTATE_INGRESS_URL"), fileCfg.RestateIngressURL, "http://restate.restate.svc.cluster.local:8080")), "/"),
 		ConfigPath:        strings.TrimSpace(configPath),
+		AgentName:         strings.TrimSpace(firstNonEmpty(os.Getenv("AGENT_NAME"), fileCfg.AgentName, "aerial")),
 	}
 }
 
@@ -107,6 +135,22 @@ func NewNATSBridge(cfg Config, bus pubsub.Bus, httpClient *http.Client) *NATSBri
 		bus:        bus,
 		httpClient: tracing.Client(httpClient),
 	}
+}
+
+func (b *NATSBridge) buildServiceName() string {
+	return BuildServiceName(b.cfg.AgentName)
+}
+
+func (b *NATSBridge) buildRouterServiceName() string {
+	return BuildRouterServiceName(b.cfg.AgentName)
+}
+
+func (b *NATSBridge) restateObjectSendPath(buildID, handler string) string {
+	return "/" + b.buildServiceName() + "/" + buildID + "/" + handler + "/send"
+}
+
+func (b *NATSBridge) restateRouterSendPath(handler string) string {
+	return "/" + b.buildRouterServiceName() + "/" + handler + "/send"
 }
 
 // StartConsumers verifies JetStream streams and binds durable queue consumers for dispatch and PR events.
@@ -249,7 +293,7 @@ func (b *NATSBridge) HandlePRLifecycleEvent(ctx context.Context, msg pubsub.Mess
 		return fmt.Errorf("marshal pr lifecycle event: %w", err)
 	}
 	key := prIdempotencyKey(msg, ev)
-	return b.postRestateIngress(ctx, "/BuildRouter/RoutePREvent/send", key, body, msg)
+	return b.postRestateIngress(ctx, b.restateRouterSendPath("RoutePREvent"), key, body, msg)
 }
 
 // HandleDispatchOutcomeEvent processes an incoming DispatchOutcomeEvent on aerial.dispatch.*.
@@ -276,7 +320,7 @@ func (b *NATSBridge) HandleDispatchOutcomeEvent(ctx context.Context, msg pubsub.
 		return fmt.Errorf("marshal dispatch outcome event: %w", err)
 	}
 	key := dispatchIdempotencyKey(msg, ev)
-	return b.postRestateIngress(ctx, "/BuildRouter/RouteDispatchOutcome/send", key, body, msg)
+	return b.postRestateIngress(ctx, b.restateRouterSendPath("RouteDispatchOutcome"), key, body, msg)
 }
 
 // HandleWidgetSyncEvent processes an incoming WidgetSyncJobArgs on aerial.coalesced.widget_sync.>.
@@ -292,7 +336,7 @@ func (b *NATSBridge) HandleWidgetSyncEvent(ctx context.Context, msg pubsub.Messa
 		if err != nil {
 			return fmt.Errorf("marshal build widget sync body: %w", err)
 		}
-		return b.postRestateIngress(ctx, "/Build/"+buildID+"/Reconcile/send", widgetSyncIdempotencyKey(msg, args), body, msg)
+		return b.postRestateIngress(ctx, b.restateObjectSendPath(buildID, "Reconcile"), widgetSyncIdempotencyKey(msg, args), body, msg)
 	}
 
 	if repo := strings.TrimSpace(args.Repo); repo != "" && args.PRNumber > 0 {
@@ -304,7 +348,7 @@ func (b *NATSBridge) HandleWidgetSyncEvent(ctx context.Context, msg pubsub.Messa
 		if err != nil {
 			return fmt.Errorf("marshal pr widget sync body: %w", err)
 		}
-		return b.postRestateIngress(ctx, "/BuildRouter/RoutePREvent/send", widgetSyncIdempotencyKey(msg, args), body, msg)
+		return b.postRestateIngress(ctx, b.restateRouterSendPath("RoutePREvent"), widgetSyncIdempotencyKey(msg, args), body, msg)
 	}
 
 	return nil

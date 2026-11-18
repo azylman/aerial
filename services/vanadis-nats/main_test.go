@@ -1398,3 +1398,33 @@ func TestMain_Execution(t *testing.T) {
 	main()
 	assert.True(t, exitCalled)
 }
+
+func TestBuildServiceName_Derivation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		agent          string
+		wantBuild      string
+		wantRouter     string
+		wantObjectPath string
+		wantRouterPath string
+	}{
+		{name: "empty defaults to legacy", agent: "", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Reconcile/send", wantRouterPath: "/BuildRouter/RoutePREvent/send"},
+		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Reconcile/send", wantRouterPath: "/BuildRouter/RoutePREvent/send"},
+		{name: "suletta scoped", agent: "suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Reconcile/send", wantRouterPath: "/BuildRouter-suletta/RoutePREvent/send"},
+		{name: "miorine scoped", agent: "miorine", wantBuild: "Build-miorine", wantRouter: "BuildRouter-miorine", wantObjectPath: "/Build-miorine/b1/Reconcile/send", wantRouterPath: "/BuildRouter-miorine/RoutePREvent/send"},
+		{name: "mixed case scoped normalized", agent: "Suletta", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Reconcile/send", wantRouterPath: "/BuildRouter-suletta/RoutePREvent/send"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.wantBuild, BuildServiceName(tc.agent))
+			assert.Equal(t, tc.wantRouter, BuildRouterServiceName(tc.agent))
+			bridge := NewNATSBridge(Config{AgentName: tc.agent}, nil, nil)
+			assert.Equal(t, tc.wantBuild, bridge.buildServiceName())
+			assert.Equal(t, tc.wantRouter, bridge.buildRouterServiceName())
+			assert.Equal(t, tc.wantObjectPath, bridge.restateObjectSendPath("b1", "Reconcile"))
+			assert.Equal(t, tc.wantRouterPath, bridge.restateRouterSendPath("RoutePREvent"))
+		})
+	}
+}
