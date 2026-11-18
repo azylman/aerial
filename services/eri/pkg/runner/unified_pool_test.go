@@ -542,6 +542,55 @@ func TestUnifiedProcessPool_SetSessionManager(t *testing.T) {
 	nilPool.SetSessionManager(sm)
 }
 
+func TestUnifiedProcessPool_SetTerminalTurnRescuer(t *testing.T) {
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{pid: 260})
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	daemon, err := pool.GetOrCreate(ctx, "target:setter", "")
+	if err != nil || daemon == nil {
+		t.Fatalf("GetOrCreate failed: %v", err)
+	}
+
+	var updatedCalled bool
+	updatedRescuer := func(ctx context.Context, convID string, since time.Time) string {
+		updatedCalled = true
+		return "propagated rescue"
+	}
+
+	pool.SetTerminalTurnRescuer(updatedRescuer)
+
+	turn := &TurnContext{Ctx: ctx}
+	got := daemon.rescueTerminalTurn(turn)
+	if got != "propagated rescue" || !updatedCalled {
+		t.Fatalf("expected rescuer to propagate to daemon, got %q (called=%v)", got, updatedCalled)
+	}
+
+	var nilPool *UnifiedProcessPool
+	nilPool.SetTerminalTurnRescuer(updatedRescuer)
+}
+
+func TestUnifiedProcessPool_WatchdogRescue(t *testing.T) {
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{pid: 250})
+	pool := NewUnifiedProcessPool(PoolConfig{
+		WatchdogInterval:    5 * time.Millisecond,
+		WatchdogIdleTimeout: 15 * time.Millisecond,
+		TerminalTurnRescuer: func(ctx context.Context, convID string, since time.Time) string {
+			return "Rescued turn from pool watchdog"
+		},
+	}, mock)
+	defer pool.Close()
+
+	res, err := pool.ExecuteEphemeral(context.Background(), "target:watchdog", "stalled prompt")
+	if err != nil {
+		t.Fatalf("ExecuteEphemeral failed: %v", err)
+	}
+	if want := "Rescued turn from pool watchdog"; res != want {
+		t.Fatalf("got %q, want %q", res, want)
+	}
+}
+
 func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testing.T) {
 	var lastSpawnedSessionID atomic.Pointer[string]
 	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
