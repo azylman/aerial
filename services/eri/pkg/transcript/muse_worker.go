@@ -50,7 +50,11 @@ func discoverMuseSessions(museBases []string, discovered map[string]discoveredSe
 	}
 }
 
-func findMuseTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
+func isSkippedRuntimeDir(name string) bool {
+	return name == "" || name == "ephemeral" || strings.HasPrefix(name, ".")
+}
+
+func museSessionBases(brainDir string, extraDirs ...string) []string {
 	var bases []string
 	for _, d := range extraDirs {
 		if trimmed := strings.TrimSpace(d); trimmed != "" {
@@ -66,12 +70,16 @@ func findMuseTranscriptFile(brainDir, sessionID string, extraDirs ...string) str
 	runtimesBase := filepath.Clean(filepath.Join(brainDir, "..", "runtimes"))
 	if entries, err := os.ReadDir(runtimesBase); err == nil {
 		for _, e := range entries {
-			if e.IsDir() {
+			if e.IsDir() && !isSkippedRuntimeDir(e.Name()) {
 				bases = append(bases, filepath.Join(runtimesBase, e.Name(), ".local", "share", "muse", "sessions"))
 			}
 		}
 	}
+	return bases
+}
 
+func findMuseTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
+	bases := museSessionBases(brainDir, extraDirs...)
 	for _, base := range bases {
 		if fi, err := os.Stat(base); err != nil || !fi.IsDir() {
 			continue
@@ -111,9 +119,17 @@ func isMuseTranscriptPath(cleanPath, slashPath string, extraDirs []string) bool 
 }
 
 type museLineEnvelope struct {
-	PayloadType string      `json:"payload_type"`
-	RecordedAt  int64       `json:"recorded_at"`
-	Payload     musePayload `json:"payload"`
+	RetainedFrame string      `json:"retained_frame,omitempty"`
+	PayloadType   string      `json:"payload_type"`
+	RecordedAt    int64       `json:"recorded_at"`
+	Payload       musePayload `json:"payload"`
+}
+
+func isMuseEnvelope(env museLineEnvelope) bool {
+	return env.RetainedFrame != "" ||
+		strings.HasPrefix(env.PayloadType, "runtime.") ||
+		strings.HasPrefix(env.PayloadType, "session.") ||
+		strings.HasPrefix(env.PayloadType, "run.")
 }
 
 type musePayload struct {
@@ -262,10 +278,10 @@ func (st *transcriptScanState) handleMuseTerminal(ev *museEvent, ts string) {
 }
 
 func (st *transcriptScanState) parseMuseEntry(env museLineEnvelope) bool {
-	if env.PayloadType != "runtime.session" {
+	if !isMuseEnvelope(env) {
 		return false
 	}
-	if env.Payload.Kind != "run" {
+	if env.PayloadType != "runtime.session" || env.Payload.Kind != "run" {
 		return true
 	}
 	var ts string

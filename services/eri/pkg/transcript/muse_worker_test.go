@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 )
 
@@ -32,11 +33,28 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			wantHandled: false,
 		},
 		{
-			name: "non-run kind ignored",
-			env: museLineEnvelope{
-				PayloadType: "runtime.session",
-				Payload:     musePayload{Kind: "init"},
-			},
+			name:        "non-run kind ignored",
+			env:         museLineEnvelope{PayloadType: "runtime.session", Payload: musePayload{Kind: "init"}},
+			wantHandled: true,
+		},
+		{
+			name:        "retained frame session_permission_transaction ignored",
+			env:         museLineEnvelope{RetainedFrame: "session_permission_transaction"},
+			wantHandled: true,
+		},
+		{
+			name:        "runtime.session.metadata payload type ignored",
+			env:         museLineEnvelope{PayloadType: "runtime.session.metadata"},
+			wantHandled: true,
+		},
+		{
+			name:        "session.started payload type ignored",
+			env:         museLineEnvelope{PayloadType: "session.started"},
+			wantHandled: true,
+		},
+		{
+			name:        "run.model.configured payload type ignored",
+			env:         museLineEnvelope{PayloadType: "run.model.configured"},
 			wantHandled: true,
 		},
 		{
@@ -408,65 +426,136 @@ func TestDiscoverMuseSessions(t *testing.T) {
 	}
 }
 
-func TestSyncSessionTranscript_Muse(t *testing.T) {
+func TestIsSkippedRuntimeDir(t *testing.T) {
 	t.Parallel()
-	tmp := t.TempDir()
-	store := dbtest.NewFakeStore()
-
-	museDir := filepath.Join(tmp, "muse", "sessions")
-	sessionID := "sess-muse-sync-test"
-	sessDir := filepath.Join(museDir, sessionID)
-	_ = os.MkdirAll(sessDir, 0o755)
-
-	content := strings.Join([]string{
-		`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Create a new Go test"}}}`,
-		`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed","tool_calls":[{"name":"bash","call_id":"call_1","args":{"command":"go test ./..."}}]}}}`,
-		`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"tool_result_batch_committed","results":[{"call_id":"call_1","output":"PASS"}]}}}`,
-		`{"payload_type":"runtime.session","recorded_at":1762510003000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Tests pass cleanly."}}}`,
-	}, "\n") + "\n"
-
-	transcriptFile := filepath.Join(sessDir, "session.jsonl")
-	_ = os.WriteFile(transcriptFile, []byte(content), 0o644)
-
-	opts := SyncOptions{
-		BrainDir:        filepath.Join(tmp, "brain"),
-		MuseSessionsDir: museDir,
-		BatchLimit:      10,
-		IdleThreshold:   10 * time.Minute,
-		HeadLimit:       1000,
-		TailLimit:       1000,
+	tests := []struct {
+		name string
+		dir  string
+		want bool
+	}{
+		{name: "empty string", dir: "", want: true},
+		{name: "ephemeral runtime", dir: "ephemeral", want: true},
+		{name: "dot prefixed hidden runtime", dir: ".hidden", want: true},
+		{name: "discord runtime", dir: "discord", want: false},
+		{name: "cli runtime", dir: "cli", want: false},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isSkippedRuntimeDir(tc.dir); got != tc.want {
+				t.Errorf("isSkippedRuntimeDir(%q) = %v, want %v", tc.dir, got, tc.want)
+			}
+		})
+	}
+}
 
-	stats, err := SyncSessionTranscript(context.Background(), store, filepath.Join(tmp, "brain"), sessionID, opts)
-	if err != nil {
-		t.Fatalf("SyncSessionTranscript error: %v", err)
-	}
-	if stats.Synced != 1 {
-		t.Fatalf("stats.Synced = %d, want 1", stats.Synced)
-	}
-	if stats.StepsInserted != 4 {
-		t.Fatalf("stats.StepsInserted = %d, want 4", stats.StepsInserted)
-	}
-
+func assertSyncSessionTranscriptMuseState(t *testing.T, store db.TranscriptStore, sessionID, wantEngine string, wantSteps, wantSynced int) {
+	t.Helper()
 	states, err := store.GetSessionSyncStates(context.Background())
 	if err != nil {
 		t.Fatalf("GetSessionSyncStates error: %v", err)
 	}
-	if state, ok := states[sessionID]; !ok || state.Engine != EngineMuse {
-		t.Errorf("session state = %+v, want engine %q", state, EngineMuse)
+
+	if wantSynced == 0 {
+		if state, exists := states[sessionID]; exists {
+			t.Fatalf("session should not have sync state, got: %+v", state)
+		}
+		return
+	}
+
+	if state, ok := states[sessionID]; !ok || state.Engine != wantEngine {
+		t.Errorf("session state = %+v, want engine %q", state, wantEngine)
 	}
 
 	steps, err := store.GetTranscriptStepRange(context.Background(), "", sessionID, 0, 100)
 	if err != nil {
 		t.Fatalf("GetTranscriptStepRange error: %v", err)
 	}
-	if len(steps) != 4 {
-		t.Fatalf("found %d steps, want 4", len(steps))
+	if len(steps) != wantSteps {
+		t.Fatalf("found %d steps, want %d", len(steps), wantSteps)
 	}
-	// Check tool step normalized kind
-	toolStep := steps[1]
-	if toolStep.ToolName != "bash" || toolStep.ToolKind != ToolKindShell {
-		t.Errorf("toolStep tool=%q, kind=%q, want bash/shell", toolStep.ToolName, toolStep.ToolKind)
+	if len(steps) > 1 {
+		toolStep := steps[1]
+		if toolStep.ToolName != "bash" || toolStep.ToolKind != ToolKindShell {
+			t.Errorf("toolStep tool=%q, kind=%q, want bash/shell", toolStep.ToolName, toolStep.ToolKind)
+		}
+	}
+}
+
+func TestSyncSessionTranscript_Muse(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		sessionID         string
+		content           string
+		wantSynced        int
+		wantStepsInserted int
+		wantEngine        string
+	}{
+		{
+			name:      "full transcript with tool calls and output",
+			sessionID: "sess-muse-sync-test",
+			content: strings.Join([]string{
+				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Create a new Go test"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed","tool_calls":[{"name":"bash","call_id":"call_1","args":{"command":"go test ./..."}}]}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"tool_result_batch_committed","results":[{"call_id":"call_1","output":"PASS"}]}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510003000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Tests pass cleanly."}}}`,
+			}, "\n") + "\n",
+			wantSynced:        1,
+			wantStepsInserted: 4,
+			wantEngine:        EngineMuse,
+		},
+		{
+			name:      "metadata and frame lines only",
+			sessionID: "sess-muse-metadata-only",
+			content: strings.Join([]string{
+				`{"retained_frame":"session_permission_transaction"}`,
+				`{"payload_type":"session.started","recorded_at":1762510000000000}`,
+				`{"payload_type":"runtime.session.metadata","recorded_at":1762510000500000}`,
+				`{"payload_type":"run.model.configured","recorded_at":1762510001000000}`,
+				`{"payload_type":"session.end","recorded_at":1762510002000000}`,
+			}, "\n") + "\n",
+			wantSynced:        0,
+			wantStepsInserted: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmp := t.TempDir()
+			store := dbtest.NewFakeStore()
+
+			museDir := filepath.Join(tmp, "muse", "sessions")
+			sessDir := filepath.Join(museDir, tc.sessionID)
+			_ = os.MkdirAll(sessDir, 0o755)
+
+			transcriptFile := filepath.Join(sessDir, "session.jsonl")
+			_ = os.WriteFile(transcriptFile, []byte(tc.content), 0o644)
+
+			opts := SyncOptions{
+				BrainDir:        filepath.Join(tmp, "brain"),
+				MuseSessionsDir: museDir,
+				BatchLimit:      10,
+				IdleThreshold:   10 * time.Minute,
+				HeadLimit:       1000,
+				TailLimit:       1000,
+			}
+
+			stats, err := SyncSessionTranscript(context.Background(), store, filepath.Join(tmp, "brain"), tc.sessionID, opts)
+			if err != nil {
+				t.Fatalf("SyncSessionTranscript error: %v", err)
+			}
+			if stats.Synced != tc.wantSynced {
+				t.Fatalf("stats.Synced = %d, want %d", stats.Synced, tc.wantSynced)
+			}
+			if stats.StepsInserted != tc.wantStepsInserted {
+				t.Fatalf("stats.StepsInserted = %d, want %d", stats.StepsInserted, tc.wantStepsInserted)
+			}
+
+			assertSyncSessionTranscriptMuseState(t, store, tc.sessionID, tc.wantEngine, tc.wantStepsInserted, tc.wantSynced)
+		})
 	}
 }
 
@@ -537,13 +626,16 @@ func TestFindTranscriptFile_Muse(t *testing.T) {
 		name      string
 		relPath   string
 		sessionID string
+		wantFound bool
 	}{
-		{name: "muse direct", relPath: filepath.Join("muse", "sessions", "s-muse1.jsonl"), sessionID: "s-muse1"},
-		{name: "muse session.jsonl", relPath: filepath.Join("muse", "sessions", "s-muse2", "session.jsonl"), sessionID: "s-muse2"},
-		{name: "muse nested session.jsonl", relPath: filepath.Join("muse", "sessions", "2026", "11", "15", "s-muse3", "session.jsonl"), sessionID: "s-muse3"},
-		{name: "muse nested direct jsonl", relPath: filepath.Join("muse", "sessions", "2026", "11", "15", "s-muse3b.jsonl"), sessionID: "s-muse3b"},
-		{name: "muse dot local share", relPath: filepath.Join(".local", "share", "muse", "sessions", "s-muse4.jsonl"), sessionID: "s-muse4"},
-		{name: "muse runtime discord share", relPath: filepath.Join("runtimes", "discord", ".local", "share", "muse", "sessions", "s-muse5.jsonl"), sessionID: "s-muse5"},
+		{name: "muse direct", relPath: filepath.Join("muse", "sessions", "s-muse1.jsonl"), sessionID: "s-muse1", wantFound: true},
+		{name: "muse session.jsonl", relPath: filepath.Join("muse", "sessions", "s-muse2", "session.jsonl"), sessionID: "s-muse2", wantFound: true},
+		{name: "muse nested session.jsonl", relPath: filepath.Join("muse", "sessions", "2026", "11", "15", "s-muse3", "session.jsonl"), sessionID: "s-muse3", wantFound: true},
+		{name: "muse nested direct jsonl", relPath: filepath.Join("muse", "sessions", "2026", "11", "15", "s-muse3b.jsonl"), sessionID: "s-muse3b", wantFound: true},
+		{name: "muse dot local share", relPath: filepath.Join(".local", "share", "muse", "sessions", "s-muse4.jsonl"), sessionID: "s-muse4", wantFound: true},
+		{name: "muse runtime discord share", relPath: filepath.Join("runtimes", "discord", ".local", "share", "muse", "sessions", "s-muse5.jsonl"), sessionID: "s-muse5", wantFound: true},
+		{name: "muse runtime ephemeral share ignored", relPath: filepath.Join("runtimes", "ephemeral", ".local", "share", "muse", "sessions", "s-muse-ephem.jsonl"), sessionID: "s-muse-ephem", wantFound: false},
+		{name: "muse runtime dot-prefixed share ignored", relPath: filepath.Join("runtimes", ".hidden", ".local", "share", "muse", "sessions", "s-muse-hidden.jsonl"), sessionID: "s-muse-hidden", wantFound: false},
 	}
 
 	brainDir := filepath.Join(tmp, "brain")
@@ -557,8 +649,14 @@ func TestFindTranscriptFile_Muse(t *testing.T) {
 			_ = os.WriteFile(fullPath, []byte(`{"payload_type":"runtime.session"}`+"\n"), 0o644)
 
 			gotPath := findTranscriptFile(brainDir, tc.sessionID)
-			if gotPath != fullPath {
-				t.Fatalf("findTranscriptFile(%q) = %q, want %q", tc.sessionID, gotPath, fullPath)
+			if tc.wantFound {
+				if gotPath != fullPath {
+					t.Fatalf("findTranscriptFile(%q) = %q, want %q", tc.sessionID, gotPath, fullPath)
+				}
+			} else {
+				if gotPath != "" {
+					t.Fatalf("findTranscriptFile(%q) = %q, want empty", tc.sessionID, gotPath)
+				}
 			}
 		})
 	}

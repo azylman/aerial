@@ -327,25 +327,7 @@ func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjec
 	discoverCodexSessions(codexBases, discovered)
 
 	// Also discover Muse sessions from Muse sessions directories
-	var museBases []string
-	if museSessionsDir != "" {
-		museBases = append(museBases, museSessionsDir)
-	}
-	museBases = append(museBases,
-		filepath.Clean(filepath.Join(targetBrainDir, "..", "muse", "sessions")),
-		filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "muse", "sessions")),
-		filepath.Clean(filepath.Join(targetBrainDir, "..", ".local", "share", "muse", "sessions")),
-		filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", ".local", "share", "muse", "sessions")),
-	)
-	runtimesBase := filepath.Clean(filepath.Join(targetBrainDir, "..", "runtimes"))
-	if rEntries, err := os.ReadDir(runtimesBase); err == nil {
-		for _, e := range rEntries {
-			if e.IsDir() {
-				museBases = append(museBases, filepath.Join(runtimesBase, e.Name(), ".local", "share", "muse", "sessions"))
-			}
-		}
-	}
-	discoverMuseSessions(museBases, discovered)
+	discoverMuseSessions(museSessionBases(targetBrainDir, museSessionsDir), discovered)
 
 	return discovered
 }
@@ -1182,10 +1164,8 @@ func (st *transcriptScanState) parseLine(line string, isLast bool, stats *SyncSt
 	}
 
 	var muse museLineEnvelope
-	if err := json.Unmarshal([]byte(trimmed), &muse); err == nil && (muse.PayloadType == "runtime.session" || strings.HasPrefix(muse.PayloadType, "runtime.")) {
-		if st.parseMuseEntry(muse) {
-			return
-		}
+	if err := json.Unmarshal([]byte(trimmed), &muse); err == nil && st.parseMuseEntry(muse) {
+		return
 	}
 
 	var raw rawTranscriptStep
@@ -1346,7 +1326,6 @@ func buildSettledSummaryRecord(
 	mtime time.Time,
 	isSettled bool,
 	st transcriptScanState,
-	watermark int,
 	embedder EmbedderFunc,
 	llmFunc LLMClientFunc,
 ) (db.SessionSummary, bool) {
@@ -1369,16 +1348,11 @@ func buildSettledSummaryRecord(
 		firstStepTime = mtime
 	}
 
-	lastIndexedStepToSave := st.maxStepIndex
-	if watermark == -1 && st.maxStepIndex == -1 {
-		lastIndexedStepToSave = -2
-	}
-
 	return db.SessionSummary{
 		SessionID:            sessionID,
 		Summary:              summaryText,
 		Embedding:            emb,
-		LastIndexedStep:      lastIndexedStepToSave,
+		LastIndexedStep:      st.maxStepIndex,
 		LastMtime:            mtime,
 		SummaryStepWatermark: st.maxStepIndex,
 		IsSettled:            effectiveSettled,
@@ -1394,7 +1368,6 @@ func buildSessionSummaryRecord(
 	state db.SessionSyncState,
 	exists bool,
 	st transcriptScanState,
-	watermark int,
 	embedder EmbedderFunc,
 	llmFunc LLMClientFunc,
 	opts SyncOptions,
@@ -1403,7 +1376,7 @@ func buildSessionSummaryRecord(
 	shouldSummarize := !exists || (isSettled && (!state.IsSettled || (st.maxStepIndex >= 0 && st.maxStepIndex-state.LastIndexedStep > 10)))
 
 	if shouldSummarize {
-		summaryRecord, llmSucceeded := buildSettledSummaryRecord(ctx, sessionID, mtime, isSettled, st, watermark, embedder, llmFunc)
+		summaryRecord, llmSucceeded := buildSettledSummaryRecord(ctx, sessionID, mtime, isSettled, st, embedder, llmFunc)
 		return summaryRecord, true, summaryRecord.IsSettled || llmSucceeded
 	}
 
@@ -1464,14 +1437,17 @@ func syncSingleSession(
 	if err != nil {
 		return false, err
 	}
-	if isEphemeralSummarizerPrompt(st.step0Prompt) {
+	if st.maxStepIndex < 0 || isEphemeralSummarizerPrompt(st.step0Prompt) {
 		return false, nil
 	}
 
 	watermark := computeSessionWatermark(exists, st.firstParsedStep, state)
 	stepsToInsert := buildTranscriptStepsToInsert(sessionID, st.parsedSteps, watermark, mtime, opts)
+	if !exists && len(stepsToInsert) == 0 {
+		return false, nil
+	}
 	summaryRecord, hasSummaryRecord, shouldSummarize := buildSessionSummaryRecord(
-		ctx, sessionID, mtime, state, exists, st, watermark, embedder, llmFunc, opts,
+		ctx, sessionID, mtime, state, exists, st, embedder, llmFunc, opts,
 	)
 	summaryRecord.Engine = engine
 
