@@ -50,6 +50,19 @@ async function listChecks(api,repo,sha) {
     if (data.check_runs.length < 100) return all;
   }
 }
+// Compatibility is limited to this v1 transport: only absent text may use
+// the historical summary payload. Canonical text never falls back on errors.
+function transportPayload(output) {
+  const raw = output?.text === undefined || output.text === null ? output?.summary : output.text;
+  requireValid(typeof raw === 'string' && Buffer.byteLength(raw) <= 65536, 'Invalid metadata payload');
+  const metadata = JSON.parse(raw);
+  if (output?.text !== undefined && output.text !== null && output.summary) {
+    let summary;
+    try { summary = JSON.parse(output.summary); } catch { /* Human summary is normal. */ }
+    requireValid(summary === undefined || output.summary === raw, 'Conflicting metadata payloads');
+  }
+  return {raw,metadata};
+}
 async function main(env=process.env) {
   const event = JSON.parse(fs.readFileSync(env.GITHUB_EVENT_PATH,'utf8'));
   const base = {version:1,kind:'manifest',repository:env.GITHUB_REPOSITORY,workflow_path:env.GITHUB_WORKFLOW_REF.split('@')[0].split('/').slice(2).join('/'),run_id:Number(env.GITHUB_RUN_ID),run_number:Number(env.GITHUB_RUN_NUMBER),run_attempt:Number(env.GITHUB_RUN_ATTEMPT),event:env.GITHUB_EVENT_NAME,source_sha:event.pull_request?.head.sha || env.GITHUB_SHA,execution_sha:env.GITHUB_SHA,pr_number:event.pull_request?.number || null,selected:selection(env.MATRIX_JSON,env.HAS_BUILDS)};
@@ -77,12 +90,22 @@ async function main(env=process.env) {
     const suite = await api(`/repos/${base.repository}/check-suites/${run.check_suite_id}`);
     const checks = await listChecks(api,base.repository,base.source_sha);
     const records = [];
+    const replicas = new Map();
     for (const check of checks) {
       if (check.name !== 'build-metadata-result' || check.app?.id !== suite.app?.id || check.head_sha !== base.source_sha) continue;
       // Other runs on this commit are unrelated. Our external ID is immutable.
       if (!check.external_id?.startsWith(`build-metadata:v1:${base.repository}:${base.run_id}:`)) continue;
-      const r = JSON.parse(check.output.summary);
+      const {raw,metadata:r} = transportPayload(check.output);
       requireValid(check.external_id === externalID(r) && check.status === 'completed' && check.conclusion === 'neutral','Invalid transport');
+      // Validate every replica before collapsing it. IDs and creation times may
+      // change when GitHub clones retained jobs after the aggregate completed.
+      aggregate(base,[r],env.MATRIX_RESULT);
+      const identity = JSON.stringify([check.external_id,check.name,check.app.id,check.head_sha,check.status,check.conclusion]);
+      if (replicas.has(identity)) {
+        requireValid(replicas.get(identity) === raw, 'Conflicting result replicas');
+        continue;
+      }
+      replicas.set(identity,raw);
       records.push(r);
     }
     metadata = aggregate(base,records,env.MATRIX_RESULT);
@@ -92,7 +115,7 @@ async function main(env=process.env) {
   } else requireValid(mode === 'manifest','Invalid publisher mode');
   const summary = JSON.stringify(metadata);
   requireValid(Buffer.byteLength(summary) <= 65536,'Metadata too large');
-  const body = {name:metadata.kind === 'result' ? 'build-metadata-result' : 'build-metadata',head_sha:base.source_sha,external_id:externalID(metadata),status:'completed',conclusion:'neutral',output:{title:'Build metadata v1',summary}};
+  const body = {name:metadata.kind === 'result' ? 'build-metadata-result' : 'build-metadata',head_sha:base.source_sha,external_id:externalID(metadata),status:'completed',conclusion:'neutral',output:{title:'Build metadata v1',summary:`Build metadata v1: ${metadata.kind}`,text:summary}};
   const id = mode === 'result' ? Number(env.RESULT_CHECK_ID) : 0;
   requireValid(mode !== 'result' || id > 0,'Missing running check');
   const check = await api(`/repos/${base.repository}/check-runs${id ? '/'+id : ''}`,id ? 'PATCH' : 'POST',body);
