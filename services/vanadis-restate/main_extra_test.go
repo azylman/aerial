@@ -308,7 +308,8 @@ func TestDeploymentMutationPersistence(t *testing.T) {
 			}
 			st, _ := script.open()
 			observed := &deploymentEvidenceDB{PgxQueryExecer: st.db, chunks: script.chunks}
-			st.db = observed
+			// Rebuild around the observer so the embedded store handle sees it too.
+			st = NewPostgresVanadisStore(observed)
 			bo := NewBuildObject("", nil).WithAuthority(st, NewExecutor("", &mockEriClient{}, pubsub.NewMemoryBus(), "token", nil))
 			evidence := &pubsub.PRRolloutState{ExpectedJobs: []string{"service"}}
 			if tc.nilEvidence {

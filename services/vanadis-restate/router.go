@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	restate "github.com/restatedev/sdk-go"
 
@@ -346,18 +345,6 @@ func (s *BuildRouterService) RouteFailChunk(ctx restate.Context, req FailChunkRe
 	return inv.RouteFailChunk(ctx, buildID, req)
 }
 
-func lockFailureParent(ctx context.Context, tx pgx.Tx, chunkID string) (string, error) {
-	var parentID string
-	err := tx.QueryRow(ctx, `SELECT id FROM vanadis_builds WHERE id = (SELECT build_id FROM vanadis_chunks WHERE id = $1) FOR UPDATE;`, chunkID).Scan(&parentID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrChunkNotFound
-	}
-	if err != nil {
-		return "", fmt.Errorf("lock failure build: %w", err)
-	}
-	return parentID, nil
-}
-
 var (
 	newPgxPoolFn  = pgxpool.NewWithConfig
 	pingPgxPoolFn = func(ctx context.Context, pool *pgxpool.Pool) error {
@@ -448,12 +435,11 @@ func actionDispatchID(chunk model.VanadisChunk) string {
 	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
 }
 
-func actionCompletionAccepted(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
-	if chunk.Status == statusCompleted && (buildStatus == statusRunning || buildStatus == statusCompleted) {
-		chunk.Status = statusRunning
-		buildStatus = statusRunning
-	}
-	return actionCompletionAllowed(chunk, buildStatus, dispatchID)
+// actionCompletionAllowed mirrors the frozen internal/store copy byte-for-byte;
+// router.go stays frozen until the facade-removal chunk unifies both copies.
+func actionCompletionAllowed(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
+	identityMatches := dispatchID == actionDispatchID(chunk) || (dispatchID == "" && chunk.StallNudges == 0)
+	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildStatus == statusRunning && chunk.PRNumber == 0 && identityMatches
 }
 
 // actionLaunchKey preserves legacy acknowledgement keys outside action retries.
@@ -583,10 +569,6 @@ func actionFailureAccepted(c model.VanadisChunk, buildStatus, dispatchID string)
 		buildStatus = statusRunning
 	}
 	return actionFailureAllowed(c, buildStatus, dispatchID)
-}
-
-func failureSkipped(c model.VanadisChunk, buildStatus, dispatchID string) bool {
-	return (c.Mode == chunkModeAction && !actionFailureAllowed(c, buildStatus, dispatchID)) || c.Status == statusFailed || c.Status == statusCompleted || c.Status == statusCancelled
 }
 
 func actionFailureAllowed(c model.VanadisChunk, buildStatus, dispatchID string) bool {
