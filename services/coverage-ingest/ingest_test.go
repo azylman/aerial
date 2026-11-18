@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -39,17 +42,29 @@ func TestParseConfig(t *testing.T) {
 			want: Config{Targets: []Target{
 				{Service: "eri", URL: "http://eri.aerial/debug/coverage/flush"},
 				{Service: "eri", URL: "http://eri-miorine.aerial/debug/coverage/flush"},
-			}, FlushTimeout: 90 * time.Second},
+			}, FlushTimeout: 90 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second},
+		},
+		{
+			name: "explicit connect retry",
+			yaml: "targets:\n  - service: eri\n    url: http://x\nconnect_retry_window: 10s\nconnect_retry_interval: 250ms\n",
+			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 10 * time.Second, ConnectRetryInterval: 250 * time.Millisecond},
 		},
 		{
 			name: "default timeout",
 			yaml: "targets:\n  - service: haro\n    url: http://haro.aerial/debug/coverage/flush\n",
-			want: Config{Targets: []Target{{Service: "haro", URL: "http://haro.aerial/debug/coverage/flush"}}, FlushTimeout: 60 * time.Second},
+			want: Config{Targets: []Target{{Service: "haro", URL: "http://haro.aerial/debug/coverage/flush"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second},
+		},
+		{
+			name: "explicit zero retry durations take the defaults",
+			yaml: "targets:\n  - service: eri\n    url: http://x\nconnect_retry_window: 0s\nconnect_retry_interval: 0s\n",
+			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second},
 		},
 		{name: "no targets", yaml: "flush_timeout: 10s\n", wantErr: "no targets"},
 		{name: "missing url", yaml: "targets:\n  - service: eri\n", wantErr: "target 0 needs service and url"},
 		{name: "blank service", yaml: "targets:\n  - service: ' '\n    url: http://x\n", wantErr: "target 0 needs service and url"},
-		{name: "negative timeout", yaml: "targets:\n  - service: eri\n    url: http://x\nflush_timeout: -1s\n", wantErr: "must not be negative"},
+		{name: "negative timeout", yaml: "targets:\n  - service: eri\n    url: http://x\nflush_timeout: -1s\n", wantErr: "flush_timeout must not be negative"},
+		{name: "negative retry window", yaml: "targets:\n  - service: eri\n    url: http://x\nconnect_retry_window: -1s\n", wantErr: "connect_retry_window must not be negative"},
+		{name: "negative retry interval", yaml: "targets:\n  - service: eri\n    url: http://x\nconnect_retry_interval: -1ms\n", wantErr: "connect_retry_interval must not be negative"},
 		{name: "unknown field", yaml: "targetz: []\n", wantErr: "parse config"},
 		{name: "invalid yaml", yaml: "targets: [\n", wantErr: "parse config"},
 	}
@@ -497,6 +512,16 @@ func TestIngest(t *testing.T) {
 			wantUpserts:   map[string][]CoverageRow{"haro": sampleRows},
 		},
 		{
+			name:          "refused target gives up after its window and later services still ingest",
+			paths:         []Target{{Service: "eri", URL: refusedPath}, {Service: "haro", URL: "/haro"}},
+			responses:     map[string]flushResponse{"/haro": good("h1")},
+			runnerOut:     sampleReport,
+			wantErrs:      []string{"target eri (", "connection refused"},
+			wantDirCounts: []int{1},
+			wantFileSets:  [][]string{{"covcounters.h1.1.1", "covmeta.h1"}},
+			wantUpserts:   map[string][]CoverageRow{"haro": sampleRows},
+		},
+		{
 			name:     "malformed url fails the target",
 			paths:    []Target{{Service: "eri", URL: "\x7f"}},
 			wantErrs: []string{"build request"},
@@ -506,9 +531,13 @@ func TestIngest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			srv := newFlushServer(t, tc.responses)
-			cfg := Config{FlushTimeout: 5 * time.Second}
+			cfg := Config{FlushTimeout: 5 * time.Second, ConnectRetryWindow: 20 * time.Millisecond, ConnectRetryInterval: time.Millisecond}
 			for _, p := range tc.paths {
-				cfg.Targets = append(cfg.Targets, Target{Service: p.Service, URL: srv.URL + p.URL})
+				url := srv.URL + p.URL
+				if p.URL == refusedPath {
+					url = closedURL(t)
+				}
+				cfg.Targets = append(cfg.Targets, Target{Service: p.Service, URL: url})
 			}
 			runner := &fakeRunner{out: []byte(tc.runnerOut), err: tc.runnerErr}
 			store := &fakeStore{errs: tc.storeErrs}
@@ -534,27 +563,90 @@ func TestIngest(t *testing.T) {
 	}
 }
 
-// failingTransport is a RoundTripper that always returns err.
-type failingTransport struct{ err error }
+// refusedPath marks a TestIngest target that must point at a closed listener.
+const refusedPath = "<refused>"
 
-func (f failingTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, f.err }
+// closedURL returns a flush URL on a loopback port nothing listens on, so dials fail
+// with ECONNREFUSED.
+func closedURL(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+	return "http://" + addr + "/debug/coverage/flush"
+}
+
+// errRefused mirrors the error chain a dial rejected by the peer produces.
+var errRefused = &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+
+// scriptedTransport fails successive round trips with errs, then serves body with 200.
+type scriptedTransport struct {
+	mu   sync.Mutex
+	errs []error
+	body []byte
+}
+
+func scripted(body []byte, errs ...error) *scriptedTransport {
+	return &scriptedTransport{errs: errs, body: body}
+}
+
+func (s *scriptedTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.errs) > 0 {
+		err := s.errs[0]
+		s.errs = s.errs[1:]
+		return nil, err
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(s.body))}, nil
+}
 
 func TestFetchTargetErrors(t *testing.T) {
 	t.Parallel()
-	client := &http.Client{Transport: failingTransport{err: errors.New("connection refused")}}
-	target := Target{Service: "eri", URL: "http://eri.aerial/debug/coverage/flush"}
+	archive := buildTar(t, reg("covmeta.e1", "m"), reg("covcounters.e1.1.1", "c"))
+	const eriURL = "http://eri.aerial/debug/coverage/flush"
 	tests := []struct {
-		name    string
-		dir     string
-		wantErr string
+		name        string
+		transport   http.RoundTripper // nil dials for real
+		url         string            // empty means a closed loopback port
+		timeout     time.Duration
+		window      time.Duration
+		interval    time.Duration
+		dir         string
+		wantErr     string
+		wantRefused bool
+		wantFiles   []string
 	}{
-		{name: "transport error", dir: "fresh", wantErr: "flush: Post \"http://eri.aerial/debug/coverage/flush\": connection refused"},
+		{name: "non-refused transport error fails without retry", transport: scripted(archive, errors.New("tls handshake failure")), url: eriURL, timeout: time.Second, window: time.Second, interval: time.Millisecond, dir: "fresh", wantErr: "flush: Post \"http://eri.aerial/debug/coverage/flush\": tls handshake failure"},
+		{name: "refused dials recover within the window", transport: scripted(archive, errRefused, errRefused), url: eriURL, timeout: time.Second, window: time.Second, interval: time.Millisecond, dir: "fresh", wantFiles: []string{"covcounters.e1.1.1", "covmeta.e1"}},
+		{name: "refused without a retry window fails at once", transport: scripted(archive, errRefused), url: eriURL, timeout: time.Second, dir: "fresh", wantErr: "connection refused", wantRefused: true},
+		{name: "closed port gives up after the window", timeout: 5 * time.Second, window: 20 * time.Millisecond, interval: time.Millisecond, dir: "fresh", wantErr: "connection refused", wantRefused: true},
+		{name: "flush timeout ends the retry wait", timeout: 20 * time.Millisecond, window: time.Minute, interval: 10 * time.Second, dir: "fresh", wantErr: "connection refused", wantRefused: true},
+		{name: "existing target dir", transport: scripted(archive), url: eriURL, timeout: time.Second, dir: "", wantErr: "create target dir"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := fetchTarget(context.Background(), client, time.Second, target, filepath.Join(t.TempDir(), tc.dir))
+			client := &http.Client{Transport: tc.transport}
+			url := tc.url
+			if url == "" {
+				url = closedURL(t)
+			}
+			cfg := Config{FlushTimeout: tc.timeout, ConnectRetryWindow: tc.window, ConnectRetryInterval: tc.interval}
+			dir := filepath.Join(t.TempDir(), tc.dir)
+			err := fetchTarget(context.Background(), client, cfg, Target{Service: "eri", URL: url}, dir)
 			assertErrContains(t, err, tc.wantErr)
+			if got := errors.Is(err, syscall.ECONNREFUSED); got != tc.wantRefused {
+				t.Fatalf("errors.Is(%v, ECONNREFUSED) = %v, want %v", err, got, tc.wantRefused)
+			}
+			if tc.wantFiles != nil && !slices.Equal(listDir(t, dir), tc.wantFiles) {
+				t.Fatalf("extracted = %v, want %v", listDir(t, dir), tc.wantFiles)
+			}
 		})
 	}
 }
